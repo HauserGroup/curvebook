@@ -186,6 +186,9 @@ fn r1_x2_01_failed_recompute_clears_stale_outputs_and_consumers_reject_failed() 
         result_sheet_id: SheetId::new("fake_lin"),
         tab_id: None,
         bounds_pt: RectPt::new(10.0, 10.0, 140.0, 80.0),
+        selected_rows: None,
+        selected_cols: None,
+        style: curvebook_doc::EmbeddedTableStyle::default(),
     });
     let scene = compile_graph(&gsheet, &check_doc).unwrap();
     assert!(

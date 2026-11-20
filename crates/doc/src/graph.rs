@@ -9,6 +9,7 @@ use curvebook_palette::{ColorRamp, LineDashStyle, MarkerFillMode, MarkerShape, M
 use crate::archetypes::{ColumnDesignHint, LevelOrderSpec, TableArchetype, VariableRole};
 use crate::error::{DocError, validate_title};
 use crate::ids::{FloatingNote, HookSource, RectPt, SheetId, SizePt, extract_template_hooks};
+use crate::image::{CropInsetsPt, ImageBorderSpec};
 use crate::links::DataSheet;
 
 /// Specialized diagnostic plot subtypes (`docs/implementation/graphing-and-layouts.md` §2.5).
@@ -108,8 +109,227 @@ pub enum TickLabelFormat {
     Antilog,
     /// SI metric prefix scaling (`p`, `n`, `µ`, `m`, `k`, `M`, `G`).
     EngineeringSi,
+    /// Unsigned decimal magnitude (`|x|`) for symmetric diverging axes such as population pyramids.
+    AbsoluteDecimal,
     /// Discrete text category labels sourced via [`CategoricalTickSource`].
     Categorical(CategoricalTickSource),
+}
+
+/// Direction in which major and minor axis tick marks protrude from the axis spine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum TickDirection {
+    /// Ticks protrude outward from the plot frame (default).
+    #[default]
+    Outside,
+    /// Ticks protrude inward into the plot frame.
+    Inside,
+    /// Ticks straddle the axis spine on both inside and outside edges.
+    Both,
+    /// Suppress major and minor tick marks completely.
+    None,
+}
+
+/// Orientation of a cartesian column or grouped graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum CartesianOrientation {
+    /// Vertical bars/plots: categories along horizontal *X* and values along vertical *Y* (default).
+    #[default]
+    Vertical,
+    /// Horizontal bars/plots: categories along vertical *Y* and values along horizontal *X* (for example population pyramids).
+    Horizontal,
+}
+
+/// Source for row labels rendered along the left edge of a heatmap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum HeatmapRowLabelMode {
+    /// Display row titles from the source table or clustering labels (default).
+    #[default]
+    RowTitles,
+    /// Display 1-based row indices (`"1"`, `"2"`, ...).
+    RowNumbers,
+    /// Omit row labels.
+    None,
+}
+
+/// Source for column labels rendered along the bottom edge of a heatmap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum HeatmapColumnLabelMode {
+    /// Display data-set / variable titles from the source table (default).
+    #[default]
+    ColumnTitles,
+    /// Display spreadsheet column letters (`"A"`, `"B"`, ...).
+    ColumnLetters,
+    /// Omit column labels.
+    None,
+}
+
+/// Rotation angle preset for heatmap column header labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum HeatmapColumnLabelAngle {
+    /// Horizontal (`0°`) labels below columns (default).
+    #[default]
+    Horizontal0,
+    /// Angled (`45°`) diagonal labels below columns.
+    Angled45,
+    /// Vertical (`90°`) rotated labels below columns with dynamic margin reservation.
+    Vertical90,
+}
+
+/// Row/column label display and rotation configuration for diagnostic heatmaps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub struct HeatmapLabelSpec {
+    /// Row label text mode along the vertical axis.
+    #[serde(default)]
+    pub row_labels: HeatmapRowLabelMode,
+    /// Column label text mode along the horizontal axis.
+    #[serde(default)]
+    pub column_labels: HeatmapColumnLabelMode,
+    /// Column label rotation preset.
+    #[serde(default)]
+    pub column_angle: HeatmapColumnLabelAngle,
+}
+
+/// Display metric plotted by [`GraphicalDataObject::KaplanMeierStep`] curves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum SurvivalDisplayMetric {
+    /// Descending survival percentage (`100%` down toward `0%`; default).
+    #[default]
+    PercentSurvival,
+    /// Ascending cumulative failure/event percentage (`0%` up toward `100%`, equal to `100 - %Survival`).
+    PercentCumulativeEvent,
+    /// Descending survival proportion (`1.0` down toward `0.0`).
+    FractionSurvival,
+}
+
+/// Connecting-line behavior for multi-replicate XY series.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum ReplicateLineMode {
+    /// Connect row summary centers (`Mean` or `Median`) with one polyline per series (default).
+    #[default]
+    SummaryCenter,
+    /// Trace an independent longitudinal polyline for each replicate subcolumn across rows (spaghetti plot).
+    IndividualReplicateTrajectories,
+}
+
+/// Per-series coordinate nudge applied in data units and/or post-projection typographic points.
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct SeriesOffsetSpec {
+    /// Additive horizontal shift in *X* data-axis units before axis mapping (for example `+0.5`).
+    #[serde(default)]
+    pub x_data: f64,
+    /// Additive horizontal shift in typographic points (`pt`) after axis mapping.
+    #[serde(default)]
+    pub x_pt: f64,
+    /// Additive vertical shift in typographic points (`pt`, positive shifts upward) after axis mapping.
+    #[serde(default)]
+    pub y_pt: f64,
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+const fn default_embedded_table_font_pt() -> f64 {
+    7.5
+}
+
+const fn default_embedded_table_border_pt() -> f64 {
+    0.75
+}
+
+const fn default_embedded_table_grid_pt() -> f64 {
+    0.5
+}
+
+const fn default_embedded_table_border_color() -> Rgba8 {
+    Rgba8::BLACK
+}
+
+const fn default_embedded_table_fill_color() -> Option<Rgba8> {
+    Some(Rgba8::WHITE)
+}
+
+/// Visual formatting options for embedded live result/data tables on graphs and layouts.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct EmbeddedTableStyle {
+    /// When `true`, renders the column header row (default `true`).
+    #[serde(default = "default_true")]
+    pub show_column_titles: bool,
+    /// When `true`, renders row title labels in the leading column (default `true`).
+    #[serde(default = "default_true")]
+    pub show_row_titles: bool,
+    /// When `true`, transposes rows and columns when rendering (default `false`).
+    #[serde(default)]
+    pub transpose: bool,
+    /// When `true`, styles column and row headers in bold weight (default `true`).
+    #[serde(default = "default_true")]
+    pub bold_headers: bool,
+    /// Cell text font size in typographic points (`> 0.0`, finite; default `7.5`).
+    #[serde(default = "default_embedded_table_font_pt")]
+    pub font_size_pt: f64,
+    /// Outer border stroke width in typographic points (`>= 0.0`, `0.0` hides border; default `0.75`).
+    #[serde(default = "default_embedded_table_border_pt")]
+    pub outer_border_width_pt: f64,
+    /// Interior gridline stroke width in typographic points (`>= 0.0`, `0.0` hides gridlines; default `0.5`).
+    #[serde(default = "default_embedded_table_grid_pt")]
+    pub gridline_width_pt: f64,
+    /// Stroke color for outer border and interior gridlines (default black).
+    #[serde(default = "default_embedded_table_border_color")]
+    pub border_color: Rgba8,
+    /// Optional solid cell-table background fill color (`None` = transparent; default opaque white).
+    #[serde(default = "default_embedded_table_fill_color")]
+    pub fill_color: Option<Rgba8>,
+}
+
+impl Default for EmbeddedTableStyle {
+    fn default() -> Self {
+        Self {
+            show_column_titles: true,
+            show_row_titles: true,
+            transpose: false,
+            bold_headers: true,
+            font_size_pt: default_embedded_table_font_pt(),
+            outer_border_width_pt: default_embedded_table_border_pt(),
+            gridline_width_pt: default_embedded_table_grid_pt(),
+            border_color: default_embedded_table_border_color(),
+            fill_color: default_embedded_table_fill_color(),
+        }
+    }
+}
+
+impl EmbeddedTableStyle {
+    /// Return the first non-finite field path inside this embedded table style, if any.
+    #[must_use]
+    pub fn first_non_finite_float(&self, prefix: &'static str) -> Option<&'static str> {
+        if !self.font_size_pt.is_finite() || !self.outer_border_width_pt.is_finite() || !self.gridline_width_pt.is_finite() {
+            return Some(prefix);
+        }
+        None
+    }
+
+    /// Validate positive font size and non-negative border/gridline widths.
+    pub fn validate(&self, archetype: crate::TableKind) -> Result<(), DocError> {
+        if !self.font_size_pt.is_finite() || self.font_size_pt <= 0.0 {
+            return Err(DocError::InvalidCellValue { archetype, row: 0, col: 0, reason: "embedded_table style.font_size_pt must be finite and > 0" });
+        }
+        if !self.outer_border_width_pt.is_finite() || self.outer_border_width_pt < 0.0 {
+            return Err(DocError::InvalidCellValue {
+                archetype,
+                row: 0,
+                col: 0,
+                reason: "embedded_table style.outer_border_width_pt must be finite and >= 0",
+            });
+        }
+        if !self.gridline_width_pt.is_finite() || self.gridline_width_pt < 0.0 {
+            return Err(DocError::InvalidCellValue {
+                archetype,
+                row: 0,
+                col: 0,
+                reason: "embedded_table style.gridline_width_pt must be finite and >= 0",
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Reference threshold rule or shaded band drawn across a plot area (e.g. Volcano alpha/fold-change cutoffs).
@@ -187,6 +407,12 @@ pub struct AxisSpec {
     /// Extra user-pinned tick marks and optional gridlines.
     #[serde(default)]
     pub additional_ticks: Vec<AdditionalTick>,
+    /// Direction in which major and minor tick marks protrude from the axis spine.
+    #[serde(default)]
+    pub tick_direction: TickDirection,
+    /// When `true`, renders numeric or categorical tick labels alongside tick marks (default `true`).
+    #[serde(default = "default_true")]
+    pub show_tick_labels: bool,
 }
 
 impl AxisSpec {
@@ -203,6 +429,8 @@ impl AxisSpec {
             stroke_width_pt: 1.0,
             thresholds: Vec::new(),
             additional_ticks: Vec::new(),
+            tick_direction: TickDirection::Outside,
+            show_tick_labels: true,
         }
     }
 
@@ -371,6 +599,9 @@ pub enum GraphicalDataObject {
         line: Option<ConnectingLineStyle>,
         /// Optional polygon shading to a horizontal baseline; `None` disables area fill.
         area_fill: Option<AreaFillSpec>,
+        /// Summary-center connecting polyline vs per-replicate longitudinal spaghetti trajectories.
+        #[serde(default)]
+        replicate_lines: ReplicateLineMode,
     },
     /// Summary column/grouped bar anchored at zero (or axis baseline) with optional overlaid individual replicate points.
     BarWithReplicates {
@@ -452,6 +683,15 @@ pub enum GraphicalDataObject {
         show_greenwood_ci: bool,
         /// When `true`, strokes confidence band bounds with dashed lines rather than solid lines.
         ci_dashed: bool,
+        /// Survival vs cumulative failure event display orientation.
+        #[serde(default)]
+        display_metric: SurvivalDisplayMetric,
+        /// When `true`, draws right-continuous staircase steps; when `false`, connects points directly.
+        #[serde(default = "default_true")]
+        staircase: bool,
+        /// Optional Greenwood error display (`Sem` or `ConfidenceInterval95`).
+        #[serde(default)]
+        error_display: Option<ErrorBarMetric>,
     },
     /// Proportional categorical composition plot (`Pie`, `Donut`, `StackedFractionBar`, or `Waffle10x10`).
     PartsOfWhole {
@@ -556,6 +796,15 @@ pub struct SeriesSpec {
     pub x_error_bars: Option<ErrorBarSpec>,
     /// Optional live fitted regression curve and band overlay; `None` renders no regression overlay.
     pub regression_overlay: Option<RegressionOverlaySpec>,
+    /// Per-series horizontal/vertical coordinate nudge (`offset.x_data`, `offset.x_pt`, `offset.y_pt`).
+    #[serde(default)]
+    pub offset: SeriesOffsetSpec,
+    /// Explicit bar width override in typographic points (`> 0.0`) for XY and category bars.
+    #[serde(default)]
+    pub bar_width_override_pt: Option<f64>,
+    /// When `true`, renders raw data points/bars/lines/error bars; when `false`, renders only fitted regression overlays.
+    #[serde(default = "default_true")]
+    pub show_raw_data: bool,
 }
 
 /// Horizontal cluster arrangement for `Grouped` and `Contingency` graphs (`docs/implementation/graphing-and-layouts.md` §2.2).
@@ -811,6 +1060,15 @@ pub enum GraphAnnotation {
         tab_id: Option<String>,
         /// Canvas bounding box in typographic points (`width >= 0`, `height >= 0`).
         bounds_pt: RectPt,
+        /// Optional zero-based row subset to display; `None` includes all rows.
+        #[serde(default)]
+        selected_rows: Option<Vec<usize>>,
+        /// Optional zero-based column subset to display; `None` includes all columns.
+        #[serde(default)]
+        selected_cols: Option<Vec<usize>>,
+        /// Table formatting, header visibility, transposition, and border styling.
+        #[serde(default)]
+        style: EmbeddedTableStyle,
     },
     /// Live TeX-formatted regression equation box bound to an upstream regression [`crate::ResultSheet`].
     ModelEquation {
@@ -830,6 +1088,25 @@ pub enum GraphAnnotation {
         /// When `true`, draws a rectangular frame around the equation callout.
         #[serde(default)]
         bordered: bool,
+    },
+    /// Embedded PNG/JPEG/TIFF raster image referencing [`crate::ProjectImageAsset::asset_id`].
+    EmbeddedImage {
+        /// Content-addressed [`crate::ProjectImageAsset::asset_id`] stored on [`crate::ProjectDocument::image_assets`].
+        asset_id: String,
+        /// Placement bounding rectangle in canvas typographic points (`width > 0`, `height > 0`).
+        bounds_pt: RectPt,
+        /// Clockwise rotation angle in degrees around the center of `bounds_pt`.
+        #[serde(default)]
+        rotation_deg: f64,
+        /// When `true`, interactive corner handles preserve the intrinsic aspect ratio.
+        #[serde(default = "default_true")]
+        lock_aspect_ratio: bool,
+        /// Four-edge inward crop insets measured in typographic points.
+        #[serde(default)]
+        crop: CropInsetsPt,
+        /// Optional outline stroke framing the cropped image region.
+        #[serde(default)]
+        border: Option<ImageBorderSpec>,
     },
 }
 
@@ -975,6 +1252,15 @@ pub struct GraphSpec {
     pub point_overrides: Vec<PointStyleOverride>,
     /// Legend visibility, position, and border configuration.
     pub legend: LegendSpec,
+    /// Horizontal vs vertical bar/plot orientation (`Column` and `Grouped` plots).
+    #[serde(default)]
+    pub orientation: CartesianOrientation,
+    /// When `true`, renders a fixed-effect pooled summary diamond on [`DiagnosticPlotKind::ForestPlot`].
+    #[serde(default)]
+    pub forest_show_pooled_diamond: bool,
+    /// Row/column header display and rotation settings on [`DiagnosticPlotKind::Heatmap`].
+    #[serde(default)]
+    pub heatmap_labels: HeatmapLabelSpec,
 }
 
 impl GraphSpec {
@@ -1014,6 +1300,9 @@ impl GraphSpec {
                 y_error_bars,
                 x_error_bars: None,
                 regression_overlay: None,
+                offset: SeriesOffsetSpec::default(),
+                bar_width_override_pt: None,
+                show_raw_data: true,
             });
         }
 
@@ -1096,6 +1385,9 @@ impl GraphSpec {
             annotations: Vec::new(),
             point_overrides: Vec::new(),
             legend: LegendSpec::default(),
+            orientation: CartesianOrientation::Vertical,
+            forest_show_pooled_diamond: matches!(sheet.archetype, TableArchetype::MultipleVariables(_)),
+            heatmap_labels: HeatmapLabelSpec::default(),
         }
     }
 
@@ -1139,8 +1431,12 @@ impl GraphSpec {
             self.frame_preset = donor.frame_preset;
             self.x_axis.stroke_width_pt = donor.x_axis.stroke_width_pt;
             self.x_axis.break_ornament = donor.x_axis.break_ornament;
+            self.x_axis.tick_direction = donor.x_axis.tick_direction;
+            self.x_axis.show_tick_labels = donor.x_axis.show_tick_labels;
             self.y_axis.stroke_width_pt = donor.y_axis.stroke_width_pt;
             self.y_axis.break_ornament = donor.y_axis.break_ornament;
+            self.y_axis.tick_direction = donor.y_axis.tick_direction;
+            self.y_axis.show_tick_labels = donor.y_axis.show_tick_labels;
         }
         if clone_error_bars_and_legend {
             self.legend.bordered = donor.legend.bordered;
@@ -1213,6 +1509,12 @@ impl GraphSpec {
             if let Some(field) = gdo_non_finite(&series.gdo) {
                 return Some(field);
             }
+            if !series.offset.x_data.is_finite() || !series.offset.x_pt.is_finite() || !series.offset.y_pt.is_finite() {
+                return Some("spec.series.offset");
+            }
+            if series.bar_width_override_pt.is_some_and(|w| !w.is_finite()) {
+                return Some("spec.series.bar_width_override_pt");
+            }
             if let Some(field) = series.y_error_bars.as_ref().and_then(error_bars_non_finite) {
                 return Some(field);
             }
@@ -1273,6 +1575,16 @@ impl GraphSpec {
                 reason: "spec.canvas_size_pt width and height must be > 0",
             });
         }
+        for series in &self.series {
+            if series.bar_width_override_pt.is_some_and(|w| w <= 0.0) {
+                return Err(DocError::InvalidCellValue {
+                    archetype: crate::TableKind::Xy,
+                    row: 0,
+                    col: 0,
+                    reason: "spec.series.bar_width_override_pt must be finite and > 0",
+                });
+            }
+        }
         for ann in &self.annotations {
             match ann {
                 GraphAnnotation::ModelEquation { bounds_pt, font_size_pt, .. } => {
@@ -1293,7 +1605,7 @@ impl GraphSpec {
                         });
                     }
                 }
-                GraphAnnotation::TextBox { bounds_pt, .. } | GraphAnnotation::EmbeddedResultTable { bounds_pt, .. } => {
+                GraphAnnotation::TextBox { bounds_pt, .. } => {
                     if bounds_pt.width < 0.0 || bounds_pt.height < 0.0 {
                         return Err(DocError::InvalidCellValue {
                             archetype: crate::TableKind::Xy,
@@ -1302,6 +1614,17 @@ impl GraphSpec {
                             reason: "spec.annotations.bounds_pt dimensions must be >= 0",
                         });
                     }
+                }
+                GraphAnnotation::EmbeddedResultTable { bounds_pt, style, .. } => {
+                    if bounds_pt.width < 0.0 || bounds_pt.height < 0.0 {
+                        return Err(DocError::InvalidCellValue {
+                            archetype: crate::TableKind::Xy,
+                            row: 0,
+                            col: 0,
+                            reason: "spec.annotations.bounds_pt dimensions must be >= 0",
+                        });
+                    }
+                    style.validate(crate::TableKind::Xy)?;
                 }
                 GraphAnnotation::Shape { bounds_pt, stroke_width_pt, .. } => {
                     if bounds_pt.width < 0.0 || bounds_pt.height < 0.0 {
@@ -1322,6 +1645,20 @@ impl GraphSpec {
                     }
                 }
                 GraphAnnotation::LineOrArrow { .. } => {}
+                GraphAnnotation::EmbeddedImage { bounds_pt, crop, border, .. } => {
+                    if bounds_pt.width <= 0.0 || bounds_pt.height <= 0.0 {
+                        return Err(DocError::InvalidCellValue {
+                            archetype: crate::TableKind::Xy,
+                            row: 0,
+                            col: 0,
+                            reason: "spec.annotations.embedded_image bounds_pt width and height must be > 0",
+                        });
+                    }
+                    crop.validate(crate::TableKind::Xy)?;
+                    if let Some(b) = border {
+                        b.validate(crate::TableKind::Xy)?;
+                    }
+                }
             }
         }
         for ov in &self.point_overrides {
@@ -1418,9 +1755,12 @@ fn default_marker_shape(index: usize) -> MarkerShape {
 
 fn default_gdo_for_archetype(archetype: &TableArchetype, color: Rgba8, marker: MarkerStyle) -> GraphicalDataObject {
     match archetype {
-        TableArchetype::Xy(_) | TableArchetype::MultipleVariables(_) => {
-            GraphicalDataObject::ScatterAndLine { marker: Some(marker), line: None, area_fill: None }
-        }
+        TableArchetype::Xy(_) | TableArchetype::MultipleVariables(_) => GraphicalDataObject::ScatterAndLine {
+            marker: Some(marker),
+            line: None,
+            area_fill: None,
+            replicate_lines: ReplicateLineMode::SummaryCenter,
+        },
         TableArchetype::Column(col) if col.design_hint == ColumnDesignHint::PairedRepeatedMeasures => {
             GraphicalDataObject::BeforeAfterLines { marker: Some(marker), line_color: color, stroke_width_pt: 1.2 }
         }
@@ -1439,6 +1779,9 @@ fn default_gdo_for_archetype(archetype: &TableArchetype, color: Rgba8, marker: M
             show_censored_ticks: true,
             show_greenwood_ci: false,
             ci_dashed: true,
+            display_metric: SurvivalDisplayMetric::PercentSurvival,
+            staircase: true,
+            error_display: None,
         },
         TableArchetype::PartsOfWhole(_) => GraphicalDataObject::PartsOfWhole { layout: PartsOfWholeLayout::Donut, show_center_total: true },
     }
@@ -1502,7 +1845,7 @@ fn error_bars_non_finite(bars: &ErrorBarSpec) -> Option<&'static str> {
 
 fn gdo_non_finite(gdo: &GraphicalDataObject) -> Option<&'static str> {
     match gdo {
-        GraphicalDataObject::ScatterAndLine { marker, line, area_fill } => {
+        GraphicalDataObject::ScatterAndLine { marker, line, area_fill, .. } => {
             if let Some(m) = marker
                 && let Some(field) = marker_non_finite(m)
             {
@@ -1570,8 +1913,12 @@ fn multivariate_non_finite(mv: &MultivariateGraphEncoding) -> Option<&'static st
 
 fn annotation_non_finite(ann: &GraphAnnotation) -> Option<&'static str> {
     match ann {
-        GraphAnnotation::TextBox { bounds_pt, .. } | GraphAnnotation::EmbeddedResultTable { bounds_pt, .. } => {
-            (!rect_is_finite(*bounds_pt)).then_some("spec.annotations.bounds_pt")
+        GraphAnnotation::TextBox { bounds_pt, .. } => (!rect_is_finite(*bounds_pt)).then_some("spec.annotations.bounds_pt"),
+        GraphAnnotation::EmbeddedResultTable { bounds_pt, style, .. } => {
+            if !rect_is_finite(*bounds_pt) {
+                return Some("spec.annotations.bounds_pt");
+            }
+            style.first_non_finite_float("spec.annotations.embedded_table.style")
         }
         GraphAnnotation::LineOrArrow { start_pt, end_pt, .. } => {
             (!start_pt.0.is_finite() || !start_pt.1.is_finite() || !end_pt.0.is_finite() || !end_pt.1.is_finite())
@@ -1586,6 +1933,18 @@ fn annotation_non_finite(ann: &GraphAnnotation) -> Option<&'static str> {
         GraphAnnotation::ModelEquation { bounds_pt, font_size_pt, .. } => {
             if !rect_is_finite(*bounds_pt) || !font_size_pt.is_finite() {
                 return Some("spec.annotations.model_equation");
+            }
+            None
+        }
+        GraphAnnotation::EmbeddedImage { bounds_pt, rotation_deg, crop, border, .. } => {
+            if !rect_is_finite(*bounds_pt) || !rotation_deg.is_finite() {
+                return Some("spec.annotations.embedded_image");
+            }
+            if let Some(field) = crop.first_non_finite_float("spec.annotations.embedded_image.crop") {
+                return Some(field);
+            }
+            if border.is_some_and(|b| !b.width_pt.is_finite()) {
+                return Some("spec.annotations.embedded_image.border.width_pt");
             }
             None
         }

@@ -689,6 +689,9 @@ fn thresholds_shaded_zones_legends_and_all_graph_annotations_compile() {
             result_sheet_id: SheetId::new("fit-1"),
             tab_id: Some(String::from("main")),
             bounds_pt: DocRectPt::new(180.0, 155.0, 145.0, 55.0),
+            selected_rows: None,
+            selected_cols: None,
+            style: curvebook_doc::EmbeddedTableStyle::default(),
         },
     ];
 
@@ -733,6 +736,9 @@ fn thresholds_shaded_zones_legends_and_all_graph_annotations_compile() {
                 result_sheet_id: SheetId::new("missing-fit"),
                 tab_id: None,
                 bounds_pt: DocRectPt::new(10.0, 10.0, 80.0, 40.0),
+                selected_rows: None,
+                selected_cols: None,
+                style: curvebook_doc::EmbeddedTableStyle::default(),
             },
         ],
         &doc,

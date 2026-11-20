@@ -231,21 +231,32 @@ fn handle_select_col_action(state: &mut ResultsViewState, rest: &str) -> UiEvent
 }
 
 fn handle_copy_action(app: &mut UiApp, state: &mut ResultsViewState, sheet_id: &str, force_full: bool) -> UiEventOutcome {
-    let Some(rs) = app.document().result_sheets.iter().find(|r| r.id.as_str() == sheet_id) else {
-        return UiEventOutcome::default();
+    let (source_sheet_id, tab_id, tsv) = {
+        let Some(rs) = app.document().result_sheets.iter().find(|r| r.id.as_str() == sheet_id) else {
+            return UiEventOutcome::default();
+        };
+        let active_idx = app.canvas_dialogs.result_view.active_tab_index;
+        let fallback_tab =
+            rs.tabs.is_empty().then(|| rs.analyzable_data.as_ref().map(|ds| datasheet_to_preview_tab(ds, &app.locale_preset))).flatten();
+        let tab_ref = rs.tabs.get(active_idx).or_else(|| rs.tabs.first()).or(fallback_tab.as_ref());
+        let Some(tab) = tab_ref else {
+            return UiEventOutcome::default();
+        };
+        let sel = if force_full { None } else { state.selection_bounds(sheet_id, active_idx) };
+        let tsv = format_tab_selection_tsv(tab, rs.analysis.p_value_format, sel);
+        (rs.id.clone(), tab.id.clone(), (tsv, sel))
     };
-    let active_idx = app.canvas_dialogs.result_view.active_tab_index;
-    let fallback_tab = rs.tabs.is_empty().then(|| rs.analyzable_data.as_ref().map(|ds| datasheet_to_preview_tab(ds, &app.locale_preset))).flatten();
-    let tab_ref = rs.tabs.get(active_idx).or_else(|| rs.tabs.first()).or(fallback_tab.as_ref());
-    let Some(tab) = tab_ref else {
-        return UiEventOutcome::default();
-    };
-
-    let sel = if force_full { None } else { state.selection_bounds(sheet_id, active_idx) };
-    let tsv = format_tab_selection_tsv(tab, rs.analysis.p_value_format, sel);
+    let (tsv, sel) = tsv;
     state.last_copied_tsv = Some(tsv.clone());
     app.interaction.last_clipboard_bundle = None;
+    app.interaction.last_clipboard_image_png = None;
     app.interaction.last_clipboard_text = Some(tsv.clone());
+    app.interaction.last_copied_result_table = Some(crate::interaction::ResultTableClipboard {
+        source_sheet_id,
+        tab_id: Some(tab_id),
+        selected_rows: sel.map(|(r0, r1, _, _)| (r0..=r1).collect()),
+        selected_cols: sel.map(|(_, _, c0, c1)| (c0..=c1).collect()),
+    });
     let _ = app.write_clipboard_text(&tsv);
 
     UiEventOutcome {

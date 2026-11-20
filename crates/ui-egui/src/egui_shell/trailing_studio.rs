@@ -14,9 +14,9 @@ use std::collections::BTreeSet;
 
 use curvebook_doc::{
     AnalysisKind, AxisSpec, ChecklistStatus, ConstantValue, DataSheet, ErrorBarDirection, ErrorBarMetric, ErrorBarSpec, FramePreset, GraphAnnotation,
-    GraphSheet, GraphicalDataObject, GroupedArrangement, HookSource, InfoSheet, LayoutSheet, LevelOrderKind, MultipleVariablesTable, PageOrientation,
-    PairwiseDisplayMode, PanelBadgeStyle, ParameterScope, ProjectDocument, ResultSheet, ResultStatus, SeriesSpec, SheetId, TableArchetype,
-    VariableColumn, VariableRole, VariableSource,
+    GraphSheet, GraphicalDataObject, GroupedArrangement, HookSource, InfoSheet, LayoutItem, LayoutSheet, LevelOrderKind, MultipleVariablesTable,
+    PageOrientation, PairwiseDisplayMode, PanelBadgeStyle, ParameterScope, ProjectDocument, ResultSheet, ResultStatus, SeriesSpec, SheetId,
+    TableArchetype, VariableColumn, VariableRole, VariableSource,
 };
 use curvebook_engine::methods_report::{ReportFormat, generate_methods_report};
 use curvebook_math::AxisScale;
@@ -24,7 +24,7 @@ use curvebook_palette::{CanvasPreviewFilter, MarkerShape, MarkerStyle, PaletteId
 use curvebook_tools::GridCellCoord;
 use curvebook_transform::{DependencyTarget, extract_dependencies, parse_formula, validate_no_formula_cycle};
 use egui::{Color32, Pos2, Sense, Stroke, StrokeKind, Vec2};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::UiApp;
 use crate::dialogs_r9::sanitize_diagnostics_only_text;
@@ -1868,6 +1868,29 @@ fn set_series_marker_shape(series: &mut SeriesSpec, shape: MarkerShape) -> bool 
     }
 }
 
+const fn extract_series_alpha_byte(gdo: &GraphicalDataObject) -> u8 {
+    match gdo {
+        GraphicalDataObject::ScatterAndLine { marker, line, area_fill, .. } => {
+            if let Some(m) = marker {
+                m.fill_color.a
+            } else if let Some(l) = line {
+                l.color.a
+            } else if let Some(af) = area_fill {
+                af.fill_color.a
+            } else {
+                255
+            }
+        }
+        GraphicalDataObject::BarWithReplicates { fill_color, .. }
+        | GraphicalDataObject::BoxAndWhisker { fill_color, .. }
+        | GraphicalDataObject::Violin { fill_color, .. }
+        | GraphicalDataObject::FloatingBar { fill_color, .. } => fill_color.a,
+        GraphicalDataObject::AlignedDotPlot { marker, .. } => marker.fill_color.a,
+        GraphicalDataObject::BeforeAfterLines { line_color, .. } | GraphicalDataObject::KaplanMeierStep { line_color, .. } => line_color.a,
+        GraphicalDataObject::PartsOfWhole { .. } => 255,
+    }
+}
+
 fn render_graph_inspector_studio(
     ui: &mut egui::Ui,
     app: &UiApp,
@@ -1993,6 +2016,77 @@ fn render_graph_inspector_studio(
                         }
                     }
                 });
+
+                ui.add_space(4.0);
+                widgets::subheader(ui, "Opacity & Overlay Visibility");
+                let cur_alpha = extract_series_alpha_byte(&series.gdo);
+                let cur_pct = ((f64::from(cur_alpha) / 255.0) * 100.0).round() as u8;
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+                    for pct in [25u8, 50, 75, 100] {
+                        let lbl = format!("{pct}%");
+                        let wid = format!("inspector.graph.alpha.{pct}");
+                        let alpha_u8 = ((f64::from(pct) / 100.0) * 255.0).round().clamp(0.0, 255.0) as u8;
+                        if studio_chip(
+                            ui,
+                            tokens,
+                            &lbl,
+                            "Set series opacity percentage",
+                            46.0,
+                            cur_pct.abs_diff(pct) <= 4,
+                            ctx_in.enabled,
+                            None,
+                            meta,
+                            &wid,
+                            "button",
+                            Some("graph.setSeries"),
+                            None,
+                        ) {
+                            intents.push_engine("graph.setSeries", json!({ "sheet_id": gs.id.as_str(), "series_index": sel_idx, "alpha": alpha_u8 }));
+                        }
+                    }
+                });
+
+                ui.add_space(4.0);
+                if studio_full_button(
+                    ui,
+                    tokens,
+                    if series.show_raw_data { "Show Data Points: On" } else { "Show Data Points: Off" },
+                    "Toggle raw data marks while preserving fitted regression overlays",
+                    series.show_raw_data,
+                    ctx_in.enabled,
+                    false,
+                    meta,
+                    "inspector.graph.show_raw_data",
+                    Some("graph.setSeries"),
+                    None,
+                ) {
+                    intents.push_engine(
+                        "graph.setSeries",
+                        json!({ "sheet_id": gs.id.as_str(), "series_index": sel_idx, "show_raw_data": !series.show_raw_data }),
+                    );
+                }
+
+                if series.regression_overlay.is_some()
+                    && studio_full_button(
+                        ui,
+                        tokens,
+                        "Hide Fitted Curve Overlay",
+                        "Remove fitted regression curve overlay from this series",
+                        false,
+                        ctx_in.enabled,
+                        false,
+                        meta,
+                        "inspector.graph.hide_fitted_curve",
+                        Some("graph.setSeries"),
+                        None,
+                    )
+                {
+                    intents.push_engine(
+                        "graph.setSeries",
+                        json!({ "sheet_id": gs.id.as_str(), "series_index": sel_idx, "regression_overlay": Value::Null }),
+                    );
+                }
 
                 ui.add_space(4.0);
                 widgets::subheader(ui, "Y Error Bars");
@@ -2343,6 +2437,7 @@ fn render_graph_inspector_studio(
                         GraphAnnotation::Shape { kind, .. } => format!("Shape: {kind:?}"),
                         GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. } => format!("Table: {}", result_sheet_id.as_str()),
                         GraphAnnotation::ModelEquation { result_sheet_id, .. } => format!("Equation: {}", result_sheet_id.as_str()),
+                        GraphAnnotation::EmbeddedImage { asset_id, .. } => format!("Image: {asset_id}"),
                     };
                     let wid = format!("inspector.graph.annot.remove.{idx}");
                     if studio_full_button(
@@ -2386,23 +2481,37 @@ fn render_graph_inspector_studio(
             widgets::dim_label(ui, &format!("{:.1} × {:.1} pt", gs.spec.canvas_size_pt.width, gs.spec.canvas_size_pt.height));
 
             ui.add_space(4.0);
-            let paper_on = gs.spec.paper_fill.is_some();
-            if studio_full_button(
-                ui,
-                tokens,
-                if paper_on { "Background: White Paper" } else { "Background: Transparent" },
-                "Toggle solid white paper fill vs transparent background",
-                paper_on,
-                ctx_in.enabled,
-                false,
-                meta,
-                "inspector.graph.canvas_bg",
-                Some("graph.setSpec"),
-                None,
-            ) {
-                let next_fill = if paper_on { serde_json::Value::Null } else { json!(Rgba8::WHITE) };
-                intents.push_engine("graph.setSpec", json!({ "sheet_id": gs.id.as_str(), "spec": { "paper_fill": next_fill } }));
-            }
+            widgets::dim_label(ui, "Paper Background");
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+                for (slug, lbl, fill_val) in [
+                    ("white", "White", Some(Rgba8::WHITE)),
+                    ("cream", "Cream", Some(Rgba8::rgb(255, 251, 235))),
+                    ("slate", "Slate", Some(Rgba8::rgb(241, 245, 249))),
+                    ("transparent", "None", None),
+                ] {
+                    let wid = format!("inspector.graph.paper_fill.{slug}");
+                    let selected = gs.spec.paper_fill == fill_val;
+                    if studio_chip(
+                        ui,
+                        tokens,
+                        lbl,
+                        "Set graph outer paper background fill",
+                        54.0,
+                        selected,
+                        ctx_in.enabled,
+                        None,
+                        meta,
+                        &wid,
+                        "button",
+                        Some("graph.setSpec"),
+                        None,
+                    ) {
+                        let next_fill = fill_val.map_or(Value::Null, |c| json!(c));
+                        intents.push_engine("graph.setSpec", json!({ "sheet_id": gs.id.as_str(), "paper_fill": next_fill }));
+                    }
+                }
+            });
 
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
@@ -2448,6 +2557,8 @@ fn render_graph_inspector_studio(
             ) {
                 intents.push_set_preview_filter(if is_gray { CanvasPreviewFilter::Normal } else { CanvasPreviewFilter::GrayscalePrint });
             }
+
+            render_graph_canvas_media_controls(ui, app, gs, ctx_in, meta, intents);
 
             ui.add_space(6.0);
             widgets::divider(ui);
@@ -2642,6 +2753,7 @@ fn render_data_point_drill_back_studio(
 
 fn render_page_layout_composer_studio(
     ui: &mut egui::Ui,
+    app: &UiApp,
     ls: &LayoutSheet,
     state: &mut TrailingStudioEguiState,
     ctx_in: TrailingStudioContext<'_>,
@@ -2949,6 +3061,61 @@ fn render_page_layout_composer_studio(
         }
     });
 
+    let has_live_graphs = spec.items.iter().any(|it| matches!(it, curvebook_doc::LayoutItem::LiveGraph { .. }));
+    let can_reorder = ctx_in.enabled && spec.items.len() >= 2;
+    let target_panel_idx = app.egui_views.canvas_view.selected_panel_index.unwrap_or(0).min(spec.items.len().saturating_sub(1));
+
+    ui.add_space(6.0);
+    widgets::subheader(ui, "Panel Z-Order & Scaling");
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+        for (slug, lbl, action_str) in [
+            ("front", "Front", "bring_to_front"),
+            ("forward", "Forward", "bring_forward"),
+            ("backward", "Backward", "send_backward"),
+            ("back", "Back", "send_to_back"),
+        ] {
+            let wid = format!("inspector.layout.zorder.{slug}");
+            if studio_chip(
+                ui,
+                tokens,
+                lbl,
+                "Reorder panel paint z-order depth",
+                56.0,
+                false,
+                can_reorder,
+                None,
+                meta,
+                &wid,
+                "button",
+                Some("layout.reorderPanel"),
+                (!can_reorder).then_some("Place at least 2 panels to reorder z-order"),
+            ) {
+                intents
+                    .push_engine("layout.reorderPanel", json!({ "sheet_id": ls.id.as_str(), "panel_index": target_panel_idx, "action": action_str }));
+            }
+        }
+    });
+
+    ui.add_space(4.0);
+    if studio_full_button(
+        ui,
+        tokens,
+        "Equalize Scaling…",
+        "Match plot scaling across live graph panels",
+        false,
+        ctx_in.enabled && has_live_graphs,
+        false,
+        meta,
+        "inspector.layout.equalize_scaling",
+        Some("ui.layout.equalizeScaling.open"),
+        (!has_live_graphs).then_some("Place at least 1 LiveGraph panel first"),
+    ) {
+        intents.push_ui("ui.layout.equalizeScaling.open", json!({ "sheet_id": ls.id.as_str() }));
+    }
+
+    render_layout_media_controls(ui, app, ls, ctx_in, meta, intents);
+
     ui.add_space(6.0);
     widgets::divider(ui);
     ui.add_space(4.0);
@@ -3142,7 +3309,7 @@ pub fn render_trailing_studio(
                         }
                         StudioContextSurface::PageLayoutComposer => {
                             if let Some(ls) = active_id.and_then(|id| doc.layout_sheet(id)) {
-                                render_page_layout_composer_studio(ui, ls, state, ctx_in, meta, intents);
+                                render_page_layout_composer_studio(ui, app, ls, state, ctx_in, meta, intents);
                             }
                         }
                     }
@@ -3154,4 +3321,168 @@ pub fn render_trailing_studio(
 
     report.dock_rect_pt = Some(resp);
     report
+}
+
+struct MediaControlsSpec<'a> {
+    prefix: &'a str,
+    sheet_id: &'a SheetId,
+    insert_cmd: &'a str,
+    idx_key: &'a str,
+    img_idx: Option<usize>,
+    table_idx: Option<usize>,
+}
+
+fn render_canvas_media_buttons(
+    ui: &mut egui::Ui,
+    app: &UiApp,
+    spec: MediaControlsSpec<'_>,
+    ctx_in: TrailingStudioContext<'_>,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let tokens = ctx_in.tokens;
+    let locale = tokens.locale;
+    ui.add_space(4.0);
+    if studio_full_button(
+        ui,
+        tokens,
+        tr(locale, "r13.canvas.grid_overlay"),
+        "Toggle non-exported visual alignment grid",
+        app.canvas_dialogs.grid_overlay_visible,
+        ctx_in.enabled,
+        false,
+        meta,
+        &format!("inspector.{}.grid_overlay", spec.prefix),
+        Some("ui.gridOverlay.toggle"),
+        None,
+    ) {
+        intents.push_ui("ui.gridOverlay.toggle", json!({}));
+    }
+
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+        if studio_chip(
+            ui,
+            tokens,
+            tr(locale, "r13.canvas.insert_image"),
+            "Insert PNG, JPEG, or TIFF image from file",
+            116.0,
+            false,
+            ctx_in.enabled,
+            None,
+            meta,
+            &format!("inspector.{}.insert_image", spec.prefix),
+            "button",
+            Some(spec.insert_cmd),
+            None,
+        ) {
+            intents.push_engine(spec.insert_cmd, json!({}));
+        }
+        if studio_chip(
+            ui,
+            tokens,
+            tr(locale, "r13.canvas.paste_image"),
+            "Paste image bytes from clipboard",
+            110.0,
+            false,
+            ctx_in.enabled,
+            None,
+            meta,
+            &format!("inspector.{}.paste_image", spec.prefix),
+            "button",
+            Some("edit.pasteImage"),
+            None,
+        ) {
+            intents.push_paste_image_from_clipboard(spec.sheet_id.clone(), None);
+        }
+    });
+
+    if let Some(idx) = spec.img_idx {
+        ui.add_space(4.0);
+        if studio_full_button(
+            ui,
+            tokens,
+            tr(locale, "r13.canvas.format_image"),
+            "Edit image placement, rotation, 4-edge crop, and border",
+            false,
+            ctx_in.enabled,
+            false,
+            meta,
+            &format!("inspector.{}.format_image", spec.prefix),
+            Some("ui.image.format.open"),
+            None,
+        ) {
+            intents.push_ui("ui.image.format.open", json!({ "sheet_id": spec.sheet_id.as_str(), spec.idx_key: idx }));
+        }
+    }
+
+    if let Some(idx) = spec.table_idx {
+        ui.add_space(4.0);
+        if studio_full_button(
+            ui,
+            tokens,
+            tr(locale, "r13.canvas.format_embedded_table"),
+            "Format embedded result table borders, gridlines, font, and fill",
+            false,
+            ctx_in.enabled,
+            false,
+            meta,
+            &format!("inspector.{}.format_embedded_table", spec.prefix),
+            Some("ui.embeddedTable.format.open"),
+            None,
+        ) {
+            intents.push_ui("ui.embeddedTable.format.open", json!({ "sheet_id": spec.sheet_id.as_str(), spec.idx_key: idx }));
+        }
+    }
+}
+
+fn render_graph_canvas_media_controls(
+    ui: &mut egui::Ui,
+    app: &UiApp,
+    gs: &GraphSheet,
+    ctx_in: TrailingStudioContext<'_>,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let sel = app.egui_views.canvas_view.selected_graph_annotation;
+    let img_idx = sel
+        .filter(|&i| matches!(gs.spec.annotations.get(i), Some(GraphAnnotation::EmbeddedImage { .. })))
+        .or_else(|| gs.spec.annotations.iter().position(|a| matches!(a, GraphAnnotation::EmbeddedImage { .. })));
+    let table_idx = sel
+        .filter(|&i| matches!(gs.spec.annotations.get(i), Some(GraphAnnotation::EmbeddedResultTable { .. })))
+        .or_else(|| gs.spec.annotations.iter().position(|a| matches!(a, GraphAnnotation::EmbeddedResultTable { .. })));
+    render_canvas_media_buttons(
+        ui,
+        app,
+        MediaControlsSpec { prefix: "canvas", sheet_id: &gs.id, insert_cmd: "graph.insertImage", idx_key: "annotation_index", img_idx, table_idx },
+        ctx_in,
+        meta,
+        intents,
+    );
+}
+
+fn render_layout_media_controls(
+    ui: &mut egui::Ui,
+    app: &UiApp,
+    ls: &LayoutSheet,
+    ctx_in: TrailingStudioContext<'_>,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let sel = app.egui_views.canvas_view.selected_panel_index;
+    let img_idx = sel
+        .filter(|&i| matches!(ls.spec.items.get(i), Some(LayoutItem::EmbeddedImage { .. })))
+        .or_else(|| ls.spec.items.iter().position(|it| matches!(it, LayoutItem::EmbeddedImage { .. })));
+    let table_idx = sel
+        .filter(|&i| matches!(ls.spec.items.get(i), Some(LayoutItem::LiveTable { .. })))
+        .or_else(|| ls.spec.items.iter().position(|it| matches!(it, LayoutItem::LiveTable { .. })));
+    render_canvas_media_buttons(
+        ui,
+        app,
+        MediaControlsSpec { prefix: "layout", sheet_id: &ls.id, insert_cmd: "layout.insertImage", idx_key: "panel_index", img_idx, table_idx },
+        ctx_in,
+        meta,
+        intents,
+    );
 }

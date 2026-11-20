@@ -220,6 +220,9 @@ fn x1_01_layout_item_cap_and_primitive_budget_prevent_amplification() {
                 source_sheet_id: SheetId::new("d-tbl"),
                 tab_id: None,
                 bounds_pt: RectPt::new(10.0, 10.0, 300.0, 350.0),
+                selected_rows: None,
+                selected_cols: None,
+                style: curvebook_doc::EmbeddedTableStyle::default(),
             })
             .expect("live table item");
     }

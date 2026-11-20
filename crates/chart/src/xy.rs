@@ -2,22 +2,22 @@
 //! plus shared multi-segment axis, tick, frame, marker, error-bar, annotation, and legend kernels.
 
 use curvebook_doc::{
-    AxisSpec, AxisThreshold, BreakOrnament, CurveSamplePoint, DataSheet, ErrorBarDirection, ErrorBarMetric, ErrorBarSpec, FittedCurveOverlay,
-    FramePreset, GraphAnnotation, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, LineConnectionKind, ProjectDocument,
-    RegressionOverlaySpec, ResultCell, ResultStatus, SeriesSpec, SheetId, SubcolumnMode, SummarizedPoint, SummaryMeasure, TableArchetype,
-    TickLabelFormat, XColumnMode, XyTable,
+    AxisSpec, AxisThreshold, BreakOrnament, CurveSamplePoint, DataSheet, EmbeddedTableStyle, ErrorBarDirection, ErrorBarMetric, ErrorBarSpec,
+    FittedCurveOverlay, FramePreset, GraphAnnotation, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, LineConnectionKind,
+    ProjectDocument, RegressionOverlaySpec, ReplicateLineMode, ResultStatus, SeriesSpec, SheetId, SubcolumnMode, SummarizedPoint, SummaryMeasure,
+    TableArchetype, TickDirection, TickLabelFormat, XColumnMode, XyTable,
 };
 use curvebook_math::AxisScale;
 use curvebook_math::dist::student_t_two_sided_isf;
 use curvebook_math::sum::SummaryMoments;
 use curvebook_palette::{LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, Rgba8};
 use curvebook_stats::common::{quantile_sorted, quartiles_hinge, sorted_finite};
-use curvebook_text::{LocaleNumberPolicy, RichText, expand_template_hooks, format_axis_tick, measure_text_pt, parse_markup};
+use curvebook_text::{LocaleNumberPolicy, RichText, SpanWeight, expand_template_hooks, format_axis_tick, measure_text_pt, parse_markup};
 
 use crate::scales::{
-    AxisOrientation, AxisRenderOptions, ResolvedAdditionalTick, ResolvedAxis, ResolvedSegment, compute_additional_ticks_for_segments,
-    compute_segment_tick_values, emit_additional_tick_gridline_segments, emit_additional_x_tick_primitives, emit_additional_y_tick_primitives,
-    format_tick_rich, scale_inverse, scale_transform,
+    AdditionalYTickLayout, AxisOrientation, AxisRenderOptions, ResolvedAdditionalTick, ResolvedAxis, ResolvedSegment,
+    compute_additional_ticks_for_segments, compute_segment_tick_values, emit_additional_tick_gridline_segments, emit_additional_x_tick_primitives,
+    emit_additional_y_tick_primitives, format_tick_rich, scale_inverse, scale_transform, tick_span_offsets,
 };
 use crate::scene::{
     ChartError, ChartScene, ChartWarning, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PlottedPointMeta, PointPt, PositionedText, RectPt,
@@ -33,6 +33,8 @@ pub(crate) struct SegmentedAxis {
     pub break_ornament: BreakOrnament,
     pub tick_format: TickLabelFormat,
     pub tick_angle_deg: f64,
+    pub tick_direction: TickDirection,
+    pub show_tick_labels: bool,
     pub stroke_width_pt: f64,
     pub warnings: Vec<ChartWarning>,
 }
@@ -62,6 +64,8 @@ impl SegmentedAxis {
             break_ornament: spec.break_ornament,
             tick_format: spec.tick_format,
             tick_angle_deg: spec.tick_angle_deg,
+            tick_direction: spec.tick_direction,
+            show_tick_labels: spec.show_tick_labels,
             stroke_width_pt: if spec.stroke_width_pt > 0.0 { spec.stroke_width_pt } else { 1.0 },
             warnings,
         }
@@ -593,6 +597,15 @@ pub(crate) fn build_ellipse_path(c: PointPt, rx: f64, ry: f64) -> Path2D {
     }
 }
 
+/// Axis bundle with optional categorical X or Y tick lists for shared cartesian chrome emission.
+pub(crate) struct ChromeAxes<'a> {
+    pub x: &'a SegmentedAxis,
+    pub y: &'a SegmentedAxis,
+    pub y2: Option<&'a SegmentedAxis>,
+    pub cat_x: Option<&'a [(f64, String)]>,
+    pub cat_y: Option<&'a [(f64, String)]>,
+}
+
 /// Emit axes, frames, ticks, break marks, thresholds, and axis titles shared across cartesian figures.
 pub(crate) fn render_cartesian_chrome(
     scene: &mut ChartScene,
@@ -603,6 +616,14 @@ pub(crate) fn render_cartesian_chrome(
     y2_axis: Option<&SegmentedAxis>,
     categorical_x_ticks: Option<&[(f64, String)]>,
 ) {
+    render_cartesian_chrome_full(scene, graph, doc, &ChromeAxes { x: x_axis, y: y_axis, y2: y2_axis, cat_x: categorical_x_ticks, cat_y: None });
+}
+
+/// Emit axes, frames, ticks (with optional X or Y categorical labels), break marks, thresholds, and titles.
+pub(crate) fn render_cartesian_chrome_full(scene: &mut ChartScene, graph: &GraphSheet, doc: &ProjectDocument, axes: &ChromeAxes<'_>) {
+    let x_axis = axes.x;
+    let y_axis = axes.y;
+    let y2_axis = axes.y2;
     let r = scene.plot_rect_pt;
     let info_id = primary_info_sheet_id(doc, &graph.spec.primary_source_sheet_id);
     let primary_opt = Some(&graph.spec.primary_source_sheet_id);
@@ -635,21 +656,45 @@ pub(crate) fn render_cartesian_chrome(
 
     emit_frame_spines(&mut scene.primitives, r, graph.spec.frame_preset, x_axis, y_axis, y2_axis);
 
-    emit_x_ticks(&mut scene.primitives, &mut scene.warnings, r, x_axis, categorical_x_ticks, &policy);
+    emit_x_ticks(&mut scene.primitives, &mut scene.warnings, r, x_axis, axes.cat_x, &policy);
     if !x_add.is_empty() {
         let tick_stroke = StrokePaint::solid(Rgba8::BLACK, x_axis.stroke_width_pt.max(0.75));
-        emit_additional_x_tick_primitives(&x_add, r.bottom(), x_axis.tick_angle_deg, tick_stroke, &mut scene.primitives);
+        emit_additional_x_tick_primitives(&x_add, r.bottom(), x_axis.tick_angle_deg, x_axis.tick_direction, tick_stroke, &mut scene.primitives);
     }
-    emit_y_ticks(&mut scene.primitives, &mut scene.warnings, r.x, true, y_axis, &policy);
+    let left_y_ctx = YTickAxisCtx { spine_x: r.x, is_left: true, axis: y_axis, categorical_ticks: axes.cat_y, policy: &policy };
+    emit_y_ticks(&mut scene.primitives, &mut scene.warnings, &left_y_ctx);
     if !y_add.is_empty() {
         let tick_stroke = StrokePaint::solid(Rgba8::BLACK, y_axis.stroke_width_pt.max(0.75));
-        emit_additional_y_tick_primitives(&y_add, r.x, true, y_axis.tick_angle_deg, 6.5, tick_stroke, &mut scene.primitives);
+        emit_additional_y_tick_primitives(
+            &y_add,
+            AdditionalYTickLayout {
+                spine_x: r.x,
+                is_left: true,
+                tick_angle_deg: y_axis.tick_angle_deg,
+                label_offset_pt: 6.5,
+                tick_direction: y_axis.tick_direction,
+            },
+            tick_stroke,
+            &mut scene.primitives,
+        );
     }
     if let Some(y2) = y2_axis {
-        emit_y_ticks(&mut scene.primitives, &mut scene.warnings, r.right(), false, y2, &policy);
+        let right_y_ctx = YTickAxisCtx { spine_x: r.right(), is_left: false, axis: y2, categorical_ticks: None, policy: &policy };
+        emit_y_ticks(&mut scene.primitives, &mut scene.warnings, &right_y_ctx);
         if !y2_add.is_empty() {
             let tick_stroke = StrokePaint::solid(Rgba8::BLACK, y2.stroke_width_pt.max(0.75));
-            emit_additional_y_tick_primitives(&y2_add, r.right(), false, y2.tick_angle_deg, 6.5, tick_stroke, &mut scene.primitives);
+            emit_additional_y_tick_primitives(
+                &y2_add,
+                AdditionalYTickLayout {
+                    spine_x: r.right(),
+                    is_left: false,
+                    tick_angle_deg: y2.tick_angle_deg,
+                    label_offset_pt: 6.5,
+                    tick_direction: y2.tick_direction,
+                },
+                tick_stroke,
+                &mut scene.primitives,
+            );
         }
     }
 
@@ -668,9 +713,10 @@ pub(crate) fn render_cartesian_chrome(
     }
     if !graph.spec.y_axis.title.trim().is_empty() {
         let rich = expand_doc_text(&graph.spec.y_axis.title, doc, info_id);
+        let y_title_x = if axes.cat_y.is_some() { 11.0_f64.min(r.x * 0.25) } else { 14.0_f64.min(r.x * 0.35) };
         scene.primitives.push(ScenePrimitive::Text(PositionedText {
             rich,
-            anchor_pt: PointPt::new(14.0_f64.min(r.x * 0.35), r.y + 0.5 * r.height),
+            anchor_pt: PointPt::new(y_title_x, r.y + 0.5 * r.height),
             anchor: TextAnchor::Middle,
             font_size_pt: 10.0,
             rotation_deg: -90.0,
@@ -858,24 +904,30 @@ fn emit_x_ticks(
     policy: &LocaleNumberPolicy,
 ) {
     let tick_stroke = StrokePaint::solid(Rgba8::BLACK, axis.stroke_width_pt.max(0.75));
+    let major_span = tick_span_offsets(axis.tick_direction, 4.0, 1.0);
+    let minor_span = tick_span_offsets(axis.tick_direction, 2.2, 1.0);
     if let Some(ticks) = categorical_ticks {
         for (pos_val, label) in ticks {
             if let Some((_, x_pt)) = axis.map_value(*pos_val) {
-                primitives.push(ScenePrimitive::Path {
-                    path: Path2D::line(PointPt::new(x_pt, r.bottom()), PointPt::new(x_pt, r.bottom() + 4.0)),
-                    fill: None,
-                    stroke: Some(tick_stroke),
-                    clip: None,
-                });
-                let anchor = if axis.tick_angle_deg.abs() > 15.0 { TextAnchor::End } else { TextAnchor::Middle };
-                primitives.push(ScenePrimitive::Text(PositionedText {
-                    rich: parse_markup(label),
-                    anchor_pt: PointPt::new(x_pt, r.bottom() + 13.0),
-                    anchor,
-                    font_size_pt: 8.5,
-                    rotation_deg: axis.tick_angle_deg,
-                    color: Rgba8::BLACK,
-                }));
+                if let Some((o0, o1)) = major_span {
+                    primitives.push(ScenePrimitive::Path {
+                        path: Path2D::line(PointPt::new(x_pt, r.bottom() + o0), PointPt::new(x_pt, r.bottom() + o1)),
+                        fill: None,
+                        stroke: Some(tick_stroke),
+                        clip: None,
+                    });
+                }
+                if axis.show_tick_labels {
+                    let anchor = if axis.tick_angle_deg.abs() > 15.0 { TextAnchor::End } else { TextAnchor::Middle };
+                    primitives.push(ScenePrimitive::Text(PositionedText {
+                        rich: parse_markup(label),
+                        anchor_pt: PointPt::new(x_pt, r.bottom() + 13.0),
+                        anchor,
+                        font_size_pt: 8.5,
+                        rotation_deg: axis.tick_angle_deg,
+                        color: Rgba8::BLACK,
+                    }));
+                }
             }
         }
         return;
@@ -883,80 +935,124 @@ fn emit_x_ticks(
 
     for seg in &axis.segments {
         let (majors, minors) = compute_segment_tick_values(seg, None, true, warnings);
-        for m in minors {
-            if let Some(x_pt) = seg.map_strict(m) {
-                primitives.push(ScenePrimitive::Path {
-                    path: Path2D::line(PointPt::new(x_pt, r.bottom()), PointPt::new(x_pt, r.bottom() + 2.2)),
-                    fill: None,
-                    stroke: Some(tick_stroke),
-                    clip: None,
-                });
+        if let Some((o0, o1)) = minor_span {
+            for m in minors {
+                if let Some(x_pt) = seg.map_strict(m) {
+                    primitives.push(ScenePrimitive::Path {
+                        path: Path2D::line(PointPt::new(x_pt, r.bottom() + o0), PointPt::new(x_pt, r.bottom() + o1)),
+                        fill: None,
+                        stroke: Some(tick_stroke),
+                        clip: None,
+                    });
+                }
             }
         }
         for val in majors {
             if let Some(x_pt) = seg.map_strict(val) {
-                primitives.push(ScenePrimitive::Path {
-                    path: Path2D::line(PointPt::new(x_pt, r.bottom()), PointPt::new(x_pt, r.bottom() + 4.0)),
-                    fill: None,
-                    stroke: Some(tick_stroke),
-                    clip: None,
-                });
-                let rich = format_tick_rich(val, seg.scale, axis.tick_format, policy);
-                let anchor = if axis.tick_angle_deg.abs() > 15.0 { TextAnchor::End } else { TextAnchor::Middle };
-                primitives.push(ScenePrimitive::Text(PositionedText {
-                    rich,
-                    anchor_pt: PointPt::new(x_pt, r.bottom() + 13.0),
-                    anchor,
-                    font_size_pt: 8.5,
-                    rotation_deg: axis.tick_angle_deg,
-                    color: Rgba8::BLACK,
-                }));
+                if let Some((o0, o1)) = major_span {
+                    primitives.push(ScenePrimitive::Path {
+                        path: Path2D::line(PointPt::new(x_pt, r.bottom() + o0), PointPt::new(x_pt, r.bottom() + o1)),
+                        fill: None,
+                        stroke: Some(tick_stroke),
+                        clip: None,
+                    });
+                }
+                if axis.show_tick_labels {
+                    let rich = format_tick_rich(val, seg.scale, axis.tick_format, policy);
+                    let anchor = if axis.tick_angle_deg.abs() > 15.0 { TextAnchor::End } else { TextAnchor::Middle };
+                    primitives.push(ScenePrimitive::Text(PositionedText {
+                        rich,
+                        anchor_pt: PointPt::new(x_pt, r.bottom() + 13.0),
+                        anchor,
+                        font_size_pt: 8.5,
+                        rotation_deg: axis.tick_angle_deg,
+                        color: Rgba8::BLACK,
+                    }));
+                }
             }
         }
     }
 }
 
-fn emit_y_ticks(
-    primitives: &mut Vec<ScenePrimitive>,
-    warnings: &mut Vec<ChartWarning>,
+struct YTickAxisCtx<'a> {
     spine_x: f64,
     is_left: bool,
-    axis: &SegmentedAxis,
-    policy: &LocaleNumberPolicy,
-) {
+    axis: &'a SegmentedAxis,
+    categorical_ticks: Option<&'a [(f64, String)]>,
+    policy: &'a LocaleNumberPolicy,
+}
+
+fn emit_y_ticks(primitives: &mut Vec<ScenePrimitive>, warnings: &mut Vec<ChartWarning>, ctx: &YTickAxisCtx<'_>) {
+    let spine_x = ctx.spine_x;
+    let is_left = ctx.is_left;
+    let axis = ctx.axis;
     let tick_stroke = StrokePaint::solid(Rgba8::BLACK, axis.stroke_width_pt.max(0.75));
     let dir = if is_left { -1.0 } else { 1.0 };
     let anchor = if is_left { TextAnchor::End } else { TextAnchor::Start };
+    let major_span = tick_span_offsets(axis.tick_direction, 4.0, dir);
+    let minor_span = tick_span_offsets(axis.tick_direction, 2.2, dir);
+
+    if let Some(ticks) = ctx.categorical_ticks {
+        for (pos_val, label) in ticks {
+            if let Some((_, y_pt)) = axis.map_value(*pos_val) {
+                if let Some((o0, o1)) = major_span {
+                    primitives.push(ScenePrimitive::Path {
+                        path: Path2D::line(PointPt::new(spine_x + o0, y_pt), PointPt::new(spine_x + o1, y_pt)),
+                        fill: None,
+                        stroke: Some(tick_stroke),
+                        clip: None,
+                    });
+                }
+                if axis.show_tick_labels {
+                    primitives.push(ScenePrimitive::Text(PositionedText {
+                        rich: parse_markup(label),
+                        anchor_pt: PointPt::new(spine_x + dir * 6.5, y_pt + 3.0),
+                        anchor,
+                        font_size_pt: 8.5,
+                        rotation_deg: axis.tick_angle_deg,
+                        color: Rgba8::BLACK,
+                    }));
+                }
+            }
+        }
+        return;
+    }
 
     for seg in &axis.segments {
         let (majors, minors) = compute_segment_tick_values(seg, None, true, warnings);
-        for m in minors {
-            if let Some(y_pt) = seg.map_strict(m) {
-                primitives.push(ScenePrimitive::Path {
-                    path: Path2D::line(PointPt::new(spine_x, y_pt), PointPt::new(spine_x + dir * 2.2, y_pt)),
-                    fill: None,
-                    stroke: Some(tick_stroke),
-                    clip: None,
-                });
+        if let Some((o0, o1)) = minor_span {
+            for m in minors {
+                if let Some(y_pt) = seg.map_strict(m) {
+                    primitives.push(ScenePrimitive::Path {
+                        path: Path2D::line(PointPt::new(spine_x + o0, y_pt), PointPt::new(spine_x + o1, y_pt)),
+                        fill: None,
+                        stroke: Some(tick_stroke),
+                        clip: None,
+                    });
+                }
             }
         }
         for val in majors {
             if let Some(y_pt) = seg.map_strict(val) {
-                primitives.push(ScenePrimitive::Path {
-                    path: Path2D::line(PointPt::new(spine_x, y_pt), PointPt::new(spine_x + dir * 4.0, y_pt)),
-                    fill: None,
-                    stroke: Some(tick_stroke),
-                    clip: None,
-                });
-                let rich = format_tick_rich(val, seg.scale, axis.tick_format, policy);
-                primitives.push(ScenePrimitive::Text(PositionedText {
-                    rich,
-                    anchor_pt: PointPt::new(spine_x + dir * 6.5, y_pt + 3.0),
-                    anchor,
-                    font_size_pt: 8.5,
-                    rotation_deg: axis.tick_angle_deg,
-                    color: Rgba8::BLACK,
-                }));
+                if let Some((o0, o1)) = major_span {
+                    primitives.push(ScenePrimitive::Path {
+                        path: Path2D::line(PointPt::new(spine_x + o0, y_pt), PointPt::new(spine_x + o1, y_pt)),
+                        fill: None,
+                        stroke: Some(tick_stroke),
+                        clip: None,
+                    });
+                }
+                if axis.show_tick_labels {
+                    let rich = format_tick_rich(val, seg.scale, axis.tick_format, ctx.policy);
+                    primitives.push(ScenePrimitive::Text(PositionedText {
+                        rich,
+                        anchor_pt: PointPt::new(spine_x + dir * 6.5, y_pt + 3.0),
+                        anchor,
+                        font_size_pt: 8.5,
+                        rotation_deg: axis.tick_angle_deg,
+                        color: Rgba8::BLACK,
+                    }));
+                }
             }
         }
     }
@@ -1037,8 +1133,21 @@ fn render_annotation(scene: &mut ChartScene, doc: &ProjectDocument, info_id: Opt
                 color: Rgba8::BLACK,
             }));
         }
-        GraphAnnotation::EmbeddedResultTable { result_sheet_id, tab_id, bounds_pt } => {
-            render_embedded_result_table(scene, doc, result_sheet_id, tab_id.as_deref(), RectPt::from(*bounds_pt));
+        GraphAnnotation::EmbeddedResultTable { result_sheet_id, tab_id, bounds_pt, selected_rows, selected_cols, style } => {
+            let _ = render_styled_embedded_table(
+                scene,
+                doc,
+                &EmbeddedTableDrawSpec {
+                    sheet_id: result_sheet_id,
+                    tab_id: tab_id.as_deref(),
+                    bounds: RectPt::from(*bounds_pt),
+                    selected_rows: selected_rows.as_deref(),
+                    selected_cols: selected_cols.as_deref(),
+                    style,
+                    missing_warning_code: "missing_embedded_result_table",
+                },
+                None,
+            );
         }
         GraphAnnotation::ModelEquation { result_sheet_id, data_set_index, mode, bounds_pt, font_size_pt, bordered } => {
             crate::equation_box::render_model_equation_annotation(
@@ -1052,6 +1161,22 @@ fn render_annotation(scene: &mut ChartScene, doc: &ProjectDocument, info_id: Opt
                     font_size_pt: *font_size_pt,
                     bordered: *bordered,
                 },
+            );
+        }
+        GraphAnnotation::EmbeddedImage { asset_id, bounds_pt, rotation_deg, crop, border, .. } => {
+            crate::image_decode::emit_embedded_image_primitive(
+                scene,
+                doc,
+                &crate::image_decode::EmbeddedImageDrawSpec {
+                    asset_id,
+                    bounds_pt: *bounds_pt,
+                    rotation_deg: *rotation_deg,
+                    crop: *crop,
+                    border: *border,
+                    clip: None,
+                    badge_override: None,
+                },
+                None,
             );
         }
     }
@@ -1094,62 +1219,331 @@ fn emit_arrowhead(primitives: &mut Vec<ScenePrimitive>, from: PointPt, to: Point
     primitives.push(ScenePrimitive::Path { path: polygon_path(&[to, left, right]), fill: Some(FillPaint::solid(color)), stroke: None, clip: None });
 }
 
-fn render_embedded_result_table(scene: &mut ChartScene, doc: &ProjectDocument, sheet_id: &SheetId, tab_id: Option<&str>, r: RectPt) {
-    scene.primitives.push(ScenePrimitive::Path {
-        path: Path2D::rect(r),
-        fill: Some(FillPaint::solid(Rgba8::WHITE)),
-        stroke: Some(StrokePaint::solid(Rgba8::BLACK, 0.75)),
-        clip: None,
-    });
-    let Some(res) = doc.result_sheet(sheet_id) else {
-        return;
-    };
-    if matches!(res.status, ResultStatus::Failed { .. }) {
-        return;
-    }
-    let Some(tab) = tab_id.and_then(|tid| res.tabs.iter().find(|t| t.id == tid)).or_else(|| res.tabs.first()) else {
-        return;
-    };
-    let mut y = r.y + 10.0;
-    scene.primitives.push(ScenePrimitive::Text(PositionedText {
-        rich: parse_markup(&format!("<b>{}</b>", tab.title)),
-        anchor_pt: PointPt::new(r.x + 4.0, y),
-        anchor: TextAnchor::Start,
-        font_size_pt: 7.5,
-        rotation_deg: 0.0,
-        color: Rgba8::BLACK,
-    }));
-    y += 10.0;
-    let max_rows = ((r.height - 20.0) / 9.5).floor().max(0.0) as usize;
-    for (row_idx, row_cells) in tab.rows.iter().take(max_rows).enumerate() {
-        let label = tab.row_labels.get(row_idx).map_or("", String::as_str);
-        let first_val = row_cells.first().map_or_else(String::new, format_result_cell);
-        let line = if label.is_empty() { first_val } else { format!("{label}: {first_val}") };
-        scene.primitives.push(ScenePrimitive::Text(PositionedText {
-            rich: RichText::plain(line),
-            anchor_pt: PointPt::new(r.x + 4.0, y),
-            anchor: TextAnchor::Start,
-            font_size_pt: 7.0,
-            rotation_deg: 0.0,
-            color: Rgba8::BLACK,
-        }));
-        y += 9.5;
-    }
+/// Parameters for rendering an embedded live result or data table onto a graph or layout scene.
+pub(crate) struct EmbeddedTableDrawSpec<'a> {
+    pub sheet_id: &'a SheetId,
+    pub tab_id: Option<&'a str>,
+    pub bounds: RectPt,
+    pub selected_rows: Option<&'a [usize]>,
+    pub selected_cols: Option<&'a [usize]>,
+    pub style: &'a EmbeddedTableStyle,
+    pub missing_warning_code: &'static str,
 }
 
-fn format_result_cell(cell: &ResultCell) -> String {
-    let policy = LocaleNumberPolicy::default();
-    match cell {
-        ResultCell::Empty => String::new(),
-        ResultCell::Number { value, prefix, .. } => {
-            let num = format_axis_tick(*value, AxisScale::Linear, &policy);
-            prefix.as_ref().map_or(num.clone(), |p| format!("{p}{num}"))
+fn embedded_table_rich(text: &str, bold: bool) -> RichText {
+    let mut rich = if text.contains('<')
+        && !text.contains("</")
+        && !text.contains("<sub>")
+        && !text.contains("<sup>")
+        && !text.contains("<b>")
+        && !text.contains("<i>")
+    {
+        RichText::plain(text)
+    } else {
+        parse_markup(text)
+    };
+    if bold {
+        for span in &mut rich.spans {
+            span.weight = SpanWeight::Bold;
         }
-        ResultCell::ConfidenceInterval { lower, upper } => format!("{lower:?}..{upper:?}"),
-        ResultCell::PValue { formatted, .. } => formatted.clone(),
-        ResultCell::Text(s) => s.clone(),
-        ResultCell::Boolean(b) => b.to_string(),
     }
+    rich
+}
+
+fn resolve_embedded_grid(scene: &mut ChartScene, doc: &ProjectDocument, spec: &EmbeddedTableDrawSpec<'_>) -> Option<crate::survival_cat::SheetGrid> {
+    if let Some(res) = doc.result_sheet(spec.sheet_id) {
+        if matches!(res.status, ResultStatus::Failed { .. }) {
+            return None;
+        }
+        if res.tabs.is_empty() && res.scalars.is_empty() {
+            scene.warnings.push(ChartWarning::new("empty_embedded_result_table", format!("result sheet '{}' has no tabs", spec.sheet_id)));
+            return None;
+        }
+        let tab = if let Some(tid) = spec.tab_id {
+            if let Some(found) = res.tabs.iter().find(|t| t.id == tid || t.title.eq_ignore_ascii_case(tid)) {
+                Some(found)
+            } else {
+                scene.warnings.push(ChartWarning::new(
+                    "missing_result_tab",
+                    format!("tab '{tid}' not found on result sheet '{}'; fell back to first tab", spec.sheet_id),
+                ));
+                res.tabs.first()
+            }
+        } else {
+            res.tabs.first()
+        };
+        if let Some(t) = tab {
+            let rows = t.rows.iter().map(|r| r.iter().map(crate::survival_cat::format_result_cell).collect()).collect();
+            return Some(crate::survival_cat::SheetGrid { headers: t.column_headers.clone(), row_labels: t.row_labels.clone(), rows });
+        }
+        if !res.scalars.is_empty() {
+            return crate::survival_cat::extract_sheet_grid(doc, spec.sheet_id, spec.tab_id);
+        }
+    }
+    if let Some(grid) = crate::survival_cat::extract_sheet_grid(doc, spec.sheet_id, spec.tab_id) {
+        return Some(grid);
+    }
+    scene.warnings.push(ChartWarning::new(spec.missing_warning_code, format!("referenced table sheet '{}' not found", spec.sheet_id)));
+    None
+}
+
+struct PreparedEmbeddedGrid {
+    headers: Vec<String>,
+    row_labels: Vec<String>,
+    rows: Vec<Vec<String>>,
+    data_col_count: usize,
+    show_hdr_row: bool,
+    show_row_col: bool,
+    total_vis_cols: usize,
+}
+
+fn prepare_embedded_table_grid(grid: &crate::survival_cat::SheetGrid, spec: &EmbeddedTableDrawSpec<'_>) -> PreparedEmbeddedGrid {
+    let row_indices: Vec<usize> = match spec.selected_rows {
+        Some(rs) => rs.iter().copied().filter(|&r| r < grid.rows.len()).collect(),
+        None => (0..grid.rows.len()).collect(),
+    };
+    let max_raw_cols = grid.headers.len().max(grid.rows.iter().map(Vec::len).max().unwrap_or(0));
+    let col_indices: Vec<usize> = match spec.selected_cols {
+        Some(cs) => cs.iter().copied().filter(|&c| c < max_raw_cols).collect(),
+        None => (0..max_raw_cols).collect(),
+    };
+
+    let mut headers: Vec<String> = col_indices.iter().map(|&c| grid.headers.get(c).cloned().unwrap_or_default()).collect();
+    let mut row_labels: Vec<String> = row_indices.iter().map(|&r| grid.row_labels.get(r).cloned().unwrap_or_default()).collect();
+    let mut rows: Vec<Vec<String>> = row_indices
+        .iter()
+        .map(|&r| col_indices.iter().map(|&c| grid.rows.get(r).and_then(|row| row.get(c)).cloned().unwrap_or_default()).collect())
+        .collect();
+
+    if spec.style.transpose {
+        let old_hdrs = std::mem::take(&mut headers);
+        let old_rlbls = std::mem::take(&mut row_labels);
+        let old_rows = std::mem::take(&mut rows);
+        let n_old_rows = old_rows.len();
+        let n_old_cols = old_hdrs.len().max(old_rows.iter().map(Vec::len).max().unwrap_or(0));
+        headers = (0..n_old_rows).map(|r| old_rlbls.get(r).cloned().unwrap_or_default()).collect();
+        row_labels = (0..n_old_cols).map(|c| old_hdrs.get(c).cloned().unwrap_or_default()).collect();
+        rows = (0..n_old_cols)
+            .map(|c| (0..n_old_rows).map(|r| old_rows.get(r).and_then(|row| row.get(c)).cloned().unwrap_or_default()).collect())
+            .collect();
+    }
+
+    let data_col_count = headers.len().max(rows.iter().map(Vec::len).max().unwrap_or(0));
+    let show_hdr_row = spec.style.show_column_titles && headers.iter().any(|h| !h.trim().is_empty());
+    let show_row_col = spec.style.show_row_titles && row_labels.iter().any(|l| !l.trim().is_empty());
+    let total_vis_cols = (usize::from(show_row_col) + data_col_count).max(1);
+    PreparedEmbeddedGrid { headers, row_labels, rows, data_col_count, show_hdr_row, show_row_col, total_vis_cols }
+}
+
+fn compute_embedded_col_xs(
+    bounds: RectPt,
+    prepared: &PreparedEmbeddedGrid,
+    bold_headers: bool,
+    max_data_rows: usize,
+    font_pt: f64,
+) -> (Vec<f64>, Vec<f64>) {
+    let mut desired_widths = vec![24.0_f64; prepared.total_vis_cols];
+    if prepared.show_row_col {
+        let w = prepared
+            .row_labels
+            .iter()
+            .take(max_data_rows)
+            .map(|l| measure_text_pt(&embedded_table_rich(l, bold_headers), font_pt).width_pt + 10.0)
+            .fold(24.0_f64, f64::max);
+        desired_widths[0] = w;
+    }
+    let dc_offset = usize::from(prepared.show_row_col);
+    for c in 0..prepared.data_col_count {
+        let mut w = if prepared.show_hdr_row {
+            prepared.headers.get(c).map_or(24.0, |h| measure_text_pt(&embedded_table_rich(h, bold_headers), font_pt).width_pt + 10.0)
+        } else {
+            24.0
+        };
+        for r in 0..max_data_rows {
+            if let Some(cell) = prepared.rows.get(r).and_then(|row| row.get(c)) {
+                w = w.max(measure_text_pt(&embedded_table_rich(cell, false), font_pt).width_pt + 10.0);
+            }
+        }
+        if let Some(slot) = desired_widths.get_mut(dc_offset + c) {
+            *slot = w;
+        }
+    }
+    let total_desired: f64 = desired_widths.iter().sum::<f64>().max(1.0);
+    let col_widths: Vec<f64> = desired_widths.into_iter().map(|w| w * bounds.width / total_desired).collect();
+    let mut col_xs = Vec::with_capacity(col_widths.len() + 1);
+    let mut cur_x = bounds.x;
+    col_xs.push(cur_x);
+    for &cw in &col_widths {
+        cur_x += cw;
+        col_xs.push(cur_x);
+    }
+    (col_widths, col_xs)
+}
+
+/// Shared multi-column embedded table renderer used by all graph annotations and layout live tables.
+pub(crate) fn render_styled_embedded_table(
+    scene: &mut ChartScene,
+    doc: &ProjectDocument,
+    spec: &EmbeddedTableDrawSpec<'_>,
+    extra_table_work: Option<&mut usize>,
+) -> Result<(), ChartError> {
+    let bounds = spec.bounds;
+    let Some(grid) = resolve_embedded_grid(scene, doc, spec) else {
+        if let Some(extra_work) = extra_table_work.as_deref()
+            && doc.result_sheet(spec.sheet_id).is_none()
+        {
+            crate::multivariate_layout::check_layout_primitive_budget(
+                scene.primitives.len().saturating_add(*extra_work),
+                1,
+                "layout missing table placeholder",
+            )?;
+            scene.primitives.push(ScenePrimitive::Path {
+                path: Path2D::rect(bounds),
+                fill: None,
+                stroke: Some(StrokePaint::solid(Rgba8::rgb(160, 160, 160), 0.75)),
+                clip: None,
+            });
+        }
+        return Ok(());
+    };
+
+    let prepared = prepare_embedded_table_grid(&grid, spec);
+    let PreparedEmbeddedGrid { headers, row_labels, rows, data_col_count, show_hdr_row, show_row_col, total_vis_cols } = &prepared;
+    let (data_col_count, show_hdr_row, show_row_col, total_vis_cols) = (*data_col_count, *show_hdr_row, *show_row_col, *total_vis_cols);
+    let style = spec.style;
+
+    let prims_before = scene.primitives.len();
+    let est_cells = (rows.len().saturating_add(usize::from(show_hdr_row))).saturating_mul(total_vis_cols);
+    if let Some(extra_work) = extra_table_work.as_deref() {
+        crate::multivariate_layout::check_layout_primitive_budget(scene.primitives.len().saturating_add(*extra_work), est_cells, "layout table")?;
+    }
+
+    if bounds.width <= 4.0 || bounds.height <= 4.0 {
+        if let Some(extra_work) = extra_table_work {
+            *extra_work = extra_work.saturating_add(est_cells);
+        }
+        return Ok(());
+    }
+
+    let font_pt = if style.font_size_pt.is_finite() && style.font_size_pt > 0.0 { style.font_size_pt } else { 7.5 };
+    let row_h = (font_pt * 1.65).max(10.5);
+    let max_data_rows = ((bounds.height / row_h).floor() as usize).saturating_sub(usize::from(show_hdr_row)).min(rows.len());
+    let dc_offset = usize::from(show_row_col);
+    let (col_widths, col_xs) = compute_embedded_col_xs(bounds, &prepared, style.bold_headers, max_data_rows, font_pt);
+
+    scene.primitives.push(ScenePrimitive::PushClip { rect: bounds });
+    if let Some(bg) = style.fill_color {
+        scene.primitives.push(ScenePrimitive::Path { path: Path2D::rect(bounds), fill: Some(FillPaint::solid(bg)), stroke: None, clip: None });
+        if show_hdr_row {
+            scene.primitives.push(ScenePrimitive::Path {
+                path: Path2D::rect(RectPt::new(bounds.x, bounds.y, bounds.width, row_h)),
+                fill: Some(FillPaint::solid(Rgba8::rgb(238, 241, 246))),
+                stroke: None,
+                clip: None,
+            });
+        }
+    }
+
+    let draw_grid = style.gridline_width_pt.is_finite() && style.gridline_width_pt > 0.0;
+    let grid_stroke = if draw_grid {
+        let ga = ((u16::from(style.border_color.a) * 140) / 255).max(40) as u8;
+        Some(StrokePaint::solid(style.border_color.with_alpha(ga), style.gridline_width_pt))
+    } else {
+        None
+    };
+
+    if show_hdr_row {
+        for c in 0..data_col_count {
+            let x = col_xs[dc_offset + c] + 4.0;
+            let hdr = headers.get(c).map(String::as_str).unwrap_or("");
+            if hdr.trim().is_empty() {
+                continue;
+            }
+            scene.primitives.push(ScenePrimitive::Text(PositionedText {
+                rich: embedded_table_rich(hdr, style.bold_headers),
+                anchor_pt: PointPt::new(x, bounds.y + font_pt + 2.5),
+                anchor: TextAnchor::Start,
+                font_size_pt: font_pt,
+                rotation_deg: 0.0,
+                color: Rgba8::BLACK,
+            }));
+        }
+    }
+
+    for r in 0..max_data_rows {
+        let row_idx_visual = r + usize::from(show_hdr_row);
+        let y_top = bounds.y + (row_idx_visual as f64) * row_h;
+        if let Some(gs) = grid_stroke
+            && row_idx_visual > 0
+        {
+            scene.primitives.push(ScenePrimitive::Path {
+                path: Path2D::line(PointPt::new(bounds.x, y_top), PointPt::new(bounds.right(), y_top)),
+                fill: None,
+                stroke: Some(gs),
+                clip: None,
+            });
+        }
+        let baseline_y = y_top + font_pt + 2.0;
+        if show_row_col {
+            let lbl = row_labels.get(r).map(String::as_str).unwrap_or("");
+            if !lbl.trim().is_empty() {
+                scene.primitives.push(ScenePrimitive::Text(PositionedText {
+                    rich: embedded_table_rich(lbl, style.bold_headers),
+                    anchor_pt: PointPt::new(col_xs[0] + 4.0, baseline_y),
+                    anchor: TextAnchor::Start,
+                    font_size_pt: font_pt,
+                    rotation_deg: 0.0,
+                    color: Rgba8::BLACK,
+                }));
+            }
+        }
+        if let Some(row_cells) = rows.get(r) {
+            for c in 0..data_col_count {
+                let cell_txt = row_cells.get(c).map(String::as_str).unwrap_or("");
+                if cell_txt.is_empty() {
+                    continue;
+                }
+                scene.primitives.push(ScenePrimitive::Text(PositionedText {
+                    rich: embedded_table_rich(cell_txt, false),
+                    anchor_pt: PointPt::new(col_xs[dc_offset + c] + 4.0, baseline_y),
+                    anchor: TextAnchor::Start,
+                    font_size_pt: font_pt,
+                    rotation_deg: 0.0,
+                    color: Rgba8::rgb(25, 25, 25),
+                }));
+            }
+        }
+    }
+
+    if let Some(gs) = grid_stroke {
+        let vis_rows_total = max_data_rows + usize::from(show_hdr_row);
+        let table_h = ((vis_rows_total as f64) * row_h).min(bounds.height);
+        for &vx in col_xs.iter().skip(1).take(col_widths.len().saturating_sub(1)) {
+            scene.primitives.push(ScenePrimitive::Path {
+                path: Path2D::line(PointPt::new(vx, bounds.y), PointPt::new(vx, bounds.y + table_h)),
+                fill: None,
+                stroke: Some(gs),
+                clip: None,
+            });
+        }
+    }
+    scene.primitives.push(ScenePrimitive::PopClip);
+
+    if style.outer_border_width_pt.is_finite() && style.outer_border_width_pt > 0.0 {
+        scene.primitives.push(ScenePrimitive::Path {
+            path: Path2D::rect(bounds),
+            fill: None,
+            stroke: Some(StrokePaint::solid(style.border_color, style.outer_border_width_pt)),
+            clip: None,
+        });
+    }
+
+    if let Some(extra_work) = extra_table_work {
+        let pushed = scene.primitives.len().saturating_sub(prims_before);
+        *extra_work = extra_work.saturating_add(est_cells.saturating_sub(pushed));
+        crate::multivariate_layout::check_layout_primitive_budget(scene.primitives.len().saturating_add(*extra_work), 0, "layout table")?;
+    }
+    Ok(())
 }
 
 fn render_legend(scene: &mut ChartScene, spec: &GraphSpec, items: &[LegendItem]) {
@@ -1226,6 +1620,7 @@ struct XyDatum {
 struct ExtractedXySeries {
     sheet_id: SheetId,
     col_index: usize,
+    active_x_rows: Vec<(usize, f64)>,
     points: Vec<XyDatum>,
     replicates: Vec<(f64, f64, usize, usize)>,
     has_x_err: bool,
@@ -1263,14 +1658,18 @@ pub fn compile_xy_graph(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut C
 
     let extracted = extract_all_xy_series(graph, doc, &mut scene.warnings);
     let (x_vals, y_vals, y2_vals) = collect_xy_domain_values(&graph.spec, &extracted);
+    let has_bar_y =
+        graph.spec.series.iter().any(|s| !s.bind_to_right_y2 && s.show_raw_data && matches!(s.gdo, GraphicalDataObject::BarWithReplicates { .. }));
+    let has_bar_y2 =
+        graph.spec.series.iter().any(|s| s.bind_to_right_y2 && s.show_raw_data && matches!(s.gdo, GraphicalDataObject::BarWithReplicates { .. }));
 
     let r = scene.plot_rect_pt;
     let x_axis = SegmentedAxis::build(&graph.spec.x_axis, r.x, r.right(), &x_vals, false, 0.0);
-    let y_axis = SegmentedAxis::build(&graph.spec.y_axis, r.bottom(), r.y, &y_vals, false, 0.05);
+    let y_axis = SegmentedAxis::build(&graph.spec.y_axis, r.bottom(), r.y, &y_vals, has_bar_y, 0.05);
     let y2_axis = if has_y2 {
         let y2_spec = graph.spec.y2_axis.clone().unwrap_or_else(|| AxisSpec::linear("Y2"));
         let source = if y2_vals.is_empty() { &y_vals } else { &y2_vals };
-        Some(SegmentedAxis::build(&y2_spec, r.bottom(), r.y, source, false, 0.05))
+        Some(SegmentedAxis::build(&y2_spec, r.bottom(), r.y, source, has_bar_y2, 0.05))
     } else {
         None
     };
@@ -1312,9 +1711,13 @@ pub fn compile_xy_graph(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut C
             },
             swatch_fill: match &series_spec.gdo {
                 GraphicalDataObject::ScatterAndLine { area_fill: Some(af), .. } => Some(af.fill_color),
+                GraphicalDataObject::BarWithReplicates { fill_color, .. } => Some(*fill_color),
                 _ => None,
             },
-            swatch_border: None,
+            swatch_border: match &series_spec.gdo {
+                GraphicalDataObject::BarWithReplicates { border_color, .. } => Some(*border_color),
+                _ => None,
+            },
         });
     }
 
@@ -1332,6 +1735,7 @@ fn extract_all_xy_series(graph: &GraphSheet, doc: &ProjectDocument, warnings: &m
             warnings.push(ChartWarning::new("missing_source_sheet", format!("series source sheet '{}' not found", series_spec.source_sheet_id)));
         }
 
+        let mut active_x_rows = Vec::new();
         let mut points = Vec::new();
         let mut replicates = Vec::new();
         let mut fallback_label = format!("Series {}", idx + 1);
@@ -1344,7 +1748,7 @@ fn extract_all_xy_series(graph: &GraphSheet, doc: &ProjectDocument, warnings: &m
         {
             if let Some(ds) = xy.data_sets.get(series_spec.data_set_index) {
                 fallback_label = ds.title.clone();
-                extract_xy_table_series(xy, series_spec, &mut points, &mut replicates, warnings);
+                extract_xy_table_series(xy, series_spec, &mut active_x_rows, &mut points, &mut replicates, warnings);
             } else {
                 warnings.push(ChartWarning::new(
                     "missing_data_set",
@@ -1363,6 +1767,7 @@ fn extract_all_xy_series(graph: &GraphSheet, doc: &ProjectDocument, warnings: &m
         out.push(ExtractedXySeries {
             sheet_id,
             col_index: series_spec.data_set_index,
+            active_x_rows,
             points,
             replicates,
             has_x_err,
@@ -1379,6 +1784,7 @@ fn extract_all_xy_series(graph: &GraphSheet, doc: &ProjectDocument, warnings: &m
 fn extract_xy_table_series(
     xy: &XyTable,
     series_spec: &SeriesSpec,
+    active_x_rows: &mut Vec<(usize, f64)>,
     points: &mut Vec<XyDatum>,
     replicates: &mut Vec<(f64, f64, usize, usize)>,
     warnings: &mut Vec<ChartWarning>,
@@ -1397,15 +1803,23 @@ fn extract_xy_table_series(
         XColumnMode::Numbers { subcolumn_mode } => subcolumn_mode,
         XColumnMode::DateOrElapsedTime { .. } | XColumnMode::GeneratedSequence { .. } => SubcolumnMode::Single,
     };
+    let keep_replicates = !xy.y_subcolumn_mode.is_pre_summarized()
+        && (series_spec.y_error_bars.is_none()
+            || matches!(
+                series_spec.gdo,
+                GraphicalDataObject::ScatterAndLine { replicate_lines: ReplicateLineMode::IndividualReplicateTrajectories, .. }
+                    | GraphicalDataObject::BarWithReplicates { replicate_overlay: Some(_), .. }
+            ));
 
     for row in 0..xy.row_count() {
         let Some((xc, xlo, xhi)) = extract_xy_x_row(xy, row, x_submode, series_spec.x_error_bars.as_ref(), warnings) else {
             continue;
         };
+        active_x_rows.push((row, xc));
         let Some(subcells) = ds.cells.get(row) else {
             continue;
         };
-        if !xy.y_subcolumn_mode.is_pre_summarized() && series_spec.y_error_bars.is_none() {
+        if keep_replicates {
             for (subcol, cell) in subcells.iter().enumerate() {
                 if let Some(yv) = cell.active_number() {
                     replicates.push((xc, yv, row, subcol));
@@ -1503,31 +1917,45 @@ fn resolve_rout_outliers(sheet: &DataSheet, col: usize, outliers: &[SourceCellId
         .collect()
 }
 
+fn series_data_x_offset(spec: &SeriesSpec) -> f64 {
+    if spec.offset.x_data.is_finite() { spec.offset.x_data } else { 0.0 }
+}
+
+fn series_pt_offset(spec: &SeriesSpec) -> (f64, f64) {
+    let dx = if spec.offset.x_pt.is_finite() { spec.offset.x_pt } else { 0.0 };
+    // Page-space Y grows downward, so positive `offset.y_pt` nudges visually upward (`-y`).
+    let dy = if spec.offset.y_pt.is_finite() { -spec.offset.y_pt } else { 0.0 };
+    (dx, dy)
+}
+
 fn collect_xy_domain_values(spec: &GraphSpec, extracted: &[ExtractedXySeries]) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let mut x_vals = Vec::new();
     let mut y_vals = Vec::new();
     let mut y2_vals = Vec::new();
     for (s_spec, item) in spec.series.iter().zip(extracted.iter()) {
         let target_y = if s_spec.bind_to_right_y2 { &mut y2_vals } else { &mut y_vals };
-        for pt in &item.points {
-            x_vals.push(pt.x_center);
-            if item.has_x_err {
-                x_vals.push(pt.x_lo);
-                x_vals.push(pt.x_hi);
+        if s_spec.show_raw_data {
+            let dx = series_data_x_offset(s_spec);
+            for pt in &item.points {
+                x_vals.push(pt.x_center + dx);
+                if item.has_x_err {
+                    x_vals.push(pt.x_lo + dx);
+                    x_vals.push(pt.x_hi + dx);
+                }
+                target_y.push(pt.y_center);
+                if item.has_y_err {
+                    target_y.push(pt.y_lo);
+                    target_y.push(pt.y_hi);
+                }
             }
-            target_y.push(pt.y_center);
-            if item.has_y_err {
-                target_y.push(pt.y_lo);
-                target_y.push(pt.y_hi);
+            for &(rx, ry, _, _) in &item.replicates {
+                x_vals.push(rx + dx);
+                target_y.push(ry);
             }
-        }
-        for &(rx, ry, _, _) in &item.replicates {
-            x_vals.push(rx);
-            target_y.push(ry);
-        }
-        for point in &item.rout_outliers {
-            x_vals.push(point.x);
-            target_y.push(point.y);
+            for point in &item.rout_outliers {
+                x_vals.push(point.x + dx);
+                target_y.push(point.y);
+            }
         }
         if let Some(ov) = &item.fitted_overlay {
             for cp in &ov.curve.points {
@@ -1564,17 +1992,28 @@ fn render_xy_series(
     y_axis: &SegmentedAxis,
 ) {
     let clip = scene.plot_rect_pt;
-    let (marker_opt, line_opt, area_opt) = match &spec.gdo {
-        GraphicalDataObject::ScatterAndLine { marker, line, area_fill } => (*marker, *line, *area_fill),
-        GraphicalDataObject::AlignedDotPlot { marker, .. } => (Some(*marker), None, None),
-        _ => (Some(MarkerStyle { fill_color: data.default_color, stroke_color: data.default_color, ..MarkerStyle::default() }), None, None),
+    let is_bar = matches!(spec.gdo, GraphicalDataObject::BarWithReplicates { .. });
+    let (marker_opt, line_opt, area_opt, is_spaghetti) = match &spec.gdo {
+        GraphicalDataObject::ScatterAndLine { marker, line, area_fill, replicate_lines } => {
+            (*marker, *line, *area_fill, *replicate_lines == ReplicateLineMode::IndividualReplicateTrajectories)
+        }
+        GraphicalDataObject::AlignedDotPlot { marker, .. } => (Some(*marker), None, None, false),
+        GraphicalDataObject::BarWithReplicates { .. } => (None, None, None, false),
+        _ => (Some(MarkerStyle { fill_color: data.default_color, stroke_color: data.default_color, ..MarkerStyle::default() }), None, None, false),
     };
 
-    // 1. Fitted regression curve overlay & bands (under points)
+    // 1. Fitted regression curve overlay & bands (always rendered even when `show_raw_data == false`)
     if let Some(ov) = &data.fitted_overlay {
         let curve_color = line_opt.map_or_else(|| marker_opt.map_or(data.default_color, |m| m.stroke_color), |l| l.color);
         render_fitted_curve_overlay(&mut scene.primitives, &mut scene.warnings, ov, x_axis, y_axis, curve_color, clip);
     }
+
+    if !spec.show_raw_data {
+        return;
+    }
+
+    let dx_data = series_data_x_offset(spec);
+    let (dx_pt, dy_pt) = series_pt_offset(spec);
 
     // 2. Map summary points & emit warnings for off-domain coordinates
     let mut mapped_runs: Vec<Vec<PointPt>> = Vec::new();
@@ -1585,10 +2024,11 @@ fn render_xy_series(
     let mut warned_y_domain = false;
 
     for pt in &data.points {
-        let Some((sx, px)) = x_axis.map_value(pt.x_center) else {
-            if !warned_x_domain && is_out_of_axis_domain(x_axis, pt.x_center) {
+        let shifted_x = pt.x_center + dx_data;
+        let Some((sx, px)) = x_axis.map_value(shifted_x) else {
+            if !warned_x_domain && is_out_of_axis_domain(x_axis, shifted_x) {
                 warned_x_domain = true;
-                push_domain_omission_warning(&mut scene.warnings, x_axis, "X", pt.x_center);
+                push_domain_omission_warning(&mut scene.warnings, x_axis, "X", shifted_x);
             }
             flush_run(&mut current_run, &mut mapped_runs);
             prev_seg_pair = None;
@@ -1610,11 +2050,17 @@ fn render_xy_series(
             flush_run(&mut current_run, &mut mapped_runs);
         }
         prev_seg_pair = Some((sx, sy));
-        let mapped_pt = PointPt::new(px, py);
+        let mapped_pt = PointPt::new(px + dx_pt, py + dy_pt);
         current_run.push(mapped_pt);
         summary_markers.push((mapped_pt, pt.row, pt.x_center, pt.y_center));
     }
     flush_run(&mut current_run, &mut mapped_runs);
+
+    // 2b. Vertical bars when series GDO is `BarWithReplicates`
+    let mut bars_emitted_points = false;
+    if is_bar {
+        bars_emitted_points = render_xy_bars(scene, graph_spec, spec, data, y_axis, &summary_markers, dy_pt, clip);
+    }
 
     // 3. Area fill under connecting lines (clipped per discontinuous segment)
     if let Some(af) = area_opt {
@@ -1626,7 +2072,7 @@ fn render_xy_series(
         }
         let kind = line_opt.map_or(LineConnectionKind::PointToPoint, |l| l.kind);
         for run in &mapped_runs {
-            if let Some(poly) = build_area_polygon(run, kind, base_py) {
+            if let Some(poly) = build_area_polygon(run, kind, base_py + dy_pt) {
                 scene.primitives.push(ScenePrimitive::Path {
                     path: poly,
                     fill: Some(FillPaint::solid(af.fill_color)),
@@ -1637,8 +2083,18 @@ fn render_xy_series(
         }
     }
 
-    // 4. Connecting lines (PointToPoint / Staircase / MonotonicCubicSpline / AkimaSpline)
-    if let Some(line_style) = line_opt {
+    let markers_emit_replicates = marker_opt.is_some() && !data.replicates.is_empty() && spec.y_error_bars.is_none();
+
+    // 4. Connecting lines (either per-replicate longitudinal trajectories or summary-center polyline)
+    if is_spaghetti && !data.replicates.is_empty() {
+        let line_style = line_opt.unwrap_or(curvebook_doc::ConnectingLineStyle {
+            kind: LineConnectionKind::PointToPoint,
+            dash_style: LineDashStyle::Solid,
+            stroke_width_pt: 1.25,
+            color: data.default_color,
+        });
+        render_replicate_trajectories(scene, data, x_axis, y_axis, &line_style, (dx_data, dx_pt, dy_pt), !markers_emit_replicates, clip);
+    } else if let Some(line_style) = line_opt {
         let stroke = stroke_with_dash(line_style.color, line_style.stroke_width_pt, line_style.dash_style);
         for run in &mapped_runs {
             if let Some(path) = build_connecting_path(run, line_style.kind) {
@@ -1648,27 +2104,35 @@ fn render_xy_series(
     }
 
     // 5. Error bars (Y vertical, X horizontal)
-    let err_default = marker_opt.map_or(data.default_color, |m| m.stroke_color);
+    let err_default = match &spec.gdo {
+        GraphicalDataObject::BarWithReplicates { border_color, .. } => *border_color,
+        _ => marker_opt.map_or(data.default_color, |m| m.stroke_color),
+    };
     for pt in &data.points {
-        if let (Some(eb), Some((_, px))) = (&spec.y_error_bars, x_axis.map_value(pt.x_center)) {
+        let shifted_x = pt.x_center + dx_data;
+        if let (Some(eb), Some((_, px))) = (&spec.y_error_bars, x_axis.map_value(shifted_x)) {
+            let start_idx = scene.primitives.len();
             emit_directional_error_bar(
                 scene,
-                px,
+                px + dx_pt,
                 pt.y_center,
                 pt.y_lo,
                 pt.y_hi,
                 AxisErrorTarget { axis: y_axis, is_vertical: true, spec: eb, default_color: err_default, clip },
             );
+            translate_primitives(&mut scene.primitives[start_idx..], 0.0, dy_pt);
         }
         if let (Some(eb), Some((_, py))) = (&spec.x_error_bars, y_axis.map_value(pt.y_center)) {
+            let start_idx = scene.primitives.len();
             emit_directional_error_bar(
                 scene,
-                py,
-                pt.x_center,
-                pt.x_lo,
-                pt.x_hi,
+                py + dy_pt,
+                shifted_x,
+                pt.x_lo + dx_data,
+                pt.x_hi + dx_data,
                 AxisErrorTarget { axis: x_axis, is_vertical: false, spec: eb, default_color: err_default, clip },
             );
+            translate_primitives(&mut scene.primitives[start_idx..], dx_pt, 0.0);
         }
     }
 
@@ -1682,28 +2146,228 @@ fn render_xy_series(
             marker,
             clip,
             use_replicates: !data.replicates.is_empty() && spec.y_error_bars.is_none(),
+            dx_data,
+            dx_pt,
+            dy_pt,
             warned_x_domain,
             warned_y_domain,
         };
         emit_xy_markers(scene, data, &summary_markers, &ctx);
+    } else if line_opt.is_some() && !is_spaghetti && !bars_emitted_points {
+        for &(pt, row, vx, vy) in &summary_markers {
+            push_xy_point_meta(scene, data, pt, 6.0, (row, 0, vx, vy));
+        }
     }
-    emit_rout_outlier_markers(scene, data, x_axis, y_axis, first_series_point);
+    emit_rout_outlier_markers(scene, data, x_axis, y_axis, first_series_point, dx_data, dx_pt, dy_pt);
 }
 
+#[allow(clippy::too_many_arguments)]
+fn render_xy_bars(
+    scene: &mut ChartScene,
+    graph_spec: &GraphSpec,
+    spec: &SeriesSpec,
+    data: &ExtractedXySeries,
+    y_axis: &SegmentedAxis,
+    summary_markers: &[(PointPt, usize, f64, f64)],
+    dy_pt: f64,
+    clip: RectPt,
+) -> bool {
+    let GraphicalDataObject::BarWithReplicates { fill_color, border_color, border_width_pt, replicate_overlay, .. } = spec.gdo else {
+        return false;
+    };
+    let bar_w_pt = if let Some(w) = spec.bar_width_override_pt.filter(|v| v.is_finite() && *v > 0.0) {
+        w
+    } else {
+        let mut xs: Vec<f64> = summary_markers.iter().map(|m| m.0.x).collect();
+        xs.sort_by(f64::total_cmp);
+        let min_dx = xs.windows(2).map(|w| (w[1] - w[0]).abs()).filter(|d| *d > 1e-3).fold(f64::INFINITY, f64::min);
+        if min_dx.is_finite() { crate::clamp_f64_safe(min_dx * 0.65, 4.0, 28.0) } else { 14.0 }
+    };
+
+    let base_data = y_axis.segments.first().map_or(0.0, |seg| {
+        if is_log_like(seg.scale) {
+            seg.domain_min
+        } else if seg.domain_min <= 0.0 && seg.domain_max >= 0.0 {
+            0.0
+        } else {
+            seg.domain_min
+        }
+    });
+    let (_, raw_base_py, _) = y_axis.map_clamped_to_nearest(base_data);
+    let base_py = raw_base_py + dy_pt;
+    let border = (border_width_pt.is_finite() && border_width_pt > 0.0).then(|| StrokePaint::solid(border_color, border_width_pt));
+
+    for &(pt, row, vx, vy) in summary_markers {
+        let y0 = base_py.min(pt.y);
+        let y1 = base_py.max(pt.y);
+        let bar_rect = RectPt::new(pt.x - 0.5 * bar_w_pt, y0, bar_w_pt, (y1 - y0).max(0.5));
+        scene.primitives.push(ScenePrimitive::Path {
+            path: Path2D::rect(bar_rect),
+            fill: Some(FillPaint::solid(fill_color)),
+            stroke: border,
+            clip: Some(clip),
+        });
+        push_xy_point_meta(scene, data, pt, bar_w_pt.min(8.0), (row, 0, vx, vy));
+    }
+
+    if replicate_overlay.is_some() && !data.replicates.is_empty() {
+        let dot_style = MarkerStyle {
+            shape: MarkerShape::Circle,
+            fill_mode: MarkerFillMode::Filled,
+            size_pt: 3.4,
+            fill_color: border_color,
+            stroke_color: Rgba8::WHITE,
+            stroke_width_pt: 0.4,
+        };
+        let x_ax_pt = |rx: f64, ry: f64| -> Option<PointPt> {
+            let (_, py) = y_axis.map_value(ry)?;
+            let mapped = summary_markers.iter().find(|m| (m.2 - rx).abs() <= 1e-12).map(|m| m.0.x);
+            mapped.map(|px| PointPt::new(px, py + dy_pt))
+        };
+        for &(rx, ry, row, subcol) in &data.replicates {
+            let Some(marker) = crate::resolve_overridden_marker_for_cell(graph_spec, data.col_index, row, Some(subcol), dot_style) else {
+                continue;
+            };
+            let pt = if let Some(p) = x_ax_pt(rx, ry) {
+                p
+            } else {
+                continue;
+            };
+            emit_marker(&mut scene.primitives, pt, &marker, Some(clip));
+            push_xy_point_meta(scene, data, pt, marker.size_pt, (row, subcol, rx, ry));
+        }
+    }
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_replicate_trajectories(
+    scene: &mut ChartScene,
+    data: &ExtractedXySeries,
+    x_axis: &SegmentedAxis,
+    y_axis: &SegmentedAxis,
+    line_style: &curvebook_doc::ConnectingLineStyle,
+    offsets: (f64, f64, f64),
+    emit_meta: bool,
+    clip: RectPt,
+) {
+    let (dx_data, dx_pt, dy_pt) = offsets;
+    let mut subcols: Vec<usize> = data.replicates.iter().map(|&(_, _, _, sc)| sc).collect();
+    subcols.sort_unstable();
+    subcols.dedup();
+    if subcols.is_empty() {
+        return;
+    }
+
+    let mut cell_lookup: std::collections::BTreeMap<(usize, usize), (f64, f64)> = std::collections::BTreeMap::new();
+    for &(rx, ry, row, subcol) in &data.replicates {
+        cell_lookup.insert((row, subcol), (rx, ry));
+    }
+
+    let mut ordered_rows = data.active_x_rows.clone();
+    ordered_rows.sort_by(|a, b| (a.1 + dx_data).total_cmp(&(b.1 + dx_data)).then_with(|| a.0.cmp(&b.0)));
+
+    let stroke = stroke_with_dash(line_style.color, line_style.stroke_width_pt.max(0.75), line_style.dash_style);
+    for sc in subcols {
+        let mut runs: Vec<Vec<PointPt>> = Vec::new();
+        let mut current: Vec<PointPt> = Vec::new();
+        let mut prev_seg_pair: Option<(usize, usize)> = None;
+        for &(row, _) in &ordered_rows {
+            let Some(&(rx, ry)) = cell_lookup.get(&(row, sc)) else {
+                flush_run(&mut current, &mut runs);
+                prev_seg_pair = None;
+                continue;
+            };
+            let shifted_x = rx + dx_data;
+            let (Some((sx, px)), Some((sy, py))) = (x_axis.map_value(shifted_x), y_axis.map_value(ry)) else {
+                flush_run(&mut current, &mut runs);
+                prev_seg_pair = None;
+                continue;
+            };
+            if let Some(prev) = prev_seg_pair
+                && prev != (sx, sy)
+            {
+                flush_run(&mut current, &mut runs);
+            }
+            prev_seg_pair = Some((sx, sy));
+            let pt = PointPt::new(px + dx_pt, py + dy_pt);
+            current.push(pt);
+            if emit_meta {
+                push_xy_point_meta(scene, data, pt, 6.0, (row, sc, rx, ry));
+            }
+        }
+        flush_run(&mut current, &mut runs);
+        for run in &runs {
+            if let Some(path) = build_connecting_path(run, line_style.kind) {
+                scene.primitives.push(ScenePrimitive::Path { path, fill: None, stroke: Some(stroke), clip: Some(clip) });
+            }
+        }
+    }
+}
+
+fn translate_primitives(prims: &mut [ScenePrimitive], dx: f64, dy: f64) {
+    if dx == 0.0 && dy == 0.0 {
+        return;
+    }
+    let shift = |p: &mut PointPt| {
+        p.x += dx;
+        p.y += dy;
+    };
+    for prim in prims {
+        match prim {
+            ScenePrimitive::Path { path, .. } => {
+                for cmd in &mut path.commands {
+                    match cmd {
+                        PathCmd::MoveTo(p) | PathCmd::LineTo(p) => shift(p),
+                        PathCmd::QuadTo { control, to } => {
+                            shift(control);
+                            shift(to);
+                        }
+                        PathCmd::CubicTo { c1, c2, to } => {
+                            shift(c1);
+                            shift(c2);
+                            shift(to);
+                        }
+                        PathCmd::Close => {}
+                    }
+                }
+            }
+            ScenePrimitive::Text(t) => shift(&mut t.anchor_pt),
+            ScenePrimitive::RasterImage(img) => {
+                img.bounds_pt.x += dx;
+                img.bounds_pt.y += dy;
+                if let Some(c) = &mut img.clip {
+                    c.x += dx;
+                    c.y += dy;
+                }
+            }
+            ScenePrimitive::PushClip { rect } => {
+                rect.x += dx;
+                rect.y += dy;
+            }
+            ScenePrimitive::PopClip => {}
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn emit_rout_outlier_markers(
     scene: &mut ChartScene,
     data: &ExtractedXySeries,
     x_axis: &SegmentedAxis,
     y_axis: &SegmentedAxis,
     first_series_point: usize,
+    dx_data: f64,
+    dx_pt: f64,
+    dy_pt: f64,
 ) {
     let marker = MarkerStyle { shape: MarkerShape::Cross, size_pt: 10.0, stroke_color: Rgba8::BLACK, stroke_width_pt: 1.5, ..MarkerStyle::default() };
     let first_outlier = scene.plotted_points.len();
     for point in &data.rout_outliers {
-        let (Some((_, px)), Some((_, py))) = (x_axis.map_value(point.x), y_axis.map_value(point.y)) else {
+        let (Some((_, px)), Some((_, py))) = (x_axis.map_value(point.x + dx_data), y_axis.map_value(point.y)) else {
             continue;
         };
-        let center_pt = PointPt::new(px, py);
+        let center_pt = PointPt::new(px + dx_pt, py + dy_pt);
         emit_marker(&mut scene.primitives, center_pt, &marker, Some(scene.plot_rect_pt));
         scene.plotted_points.push(PlottedPointMeta {
             center_pt,
@@ -1737,6 +2401,9 @@ struct XyMarkerCtx<'a> {
     marker: MarkerStyle,
     clip: RectPt,
     use_replicates: bool,
+    dx_data: f64,
+    dx_pt: f64,
+    dy_pt: f64,
     warned_x_domain: bool,
     warned_y_domain: bool,
 }
@@ -1766,10 +2433,11 @@ fn emit_xy_markers(scene: &mut ChartScene, data: &ExtractedXySeries, summary_mar
             let Some(marker) = crate::resolve_overridden_marker_for_cell(ctx.spec, data.col_index, row, Some(subcol), ctx.marker) else {
                 continue;
             };
-            let Some((_, px)) = ctx.x_axis.map_value(rx) else {
-                if !warned_x && is_out_of_axis_domain(ctx.x_axis, rx) {
+            let shifted_x = rx + ctx.dx_data;
+            let Some((_, px)) = ctx.x_axis.map_value(shifted_x) else {
+                if !warned_x && is_out_of_axis_domain(ctx.x_axis, shifted_x) {
                     warned_x = true;
-                    push_domain_omission_warning(&mut scene.warnings, ctx.x_axis, "X", rx);
+                    push_domain_omission_warning(&mut scene.warnings, ctx.x_axis, "X", shifted_x);
                 }
                 continue;
             };
@@ -1780,7 +2448,7 @@ fn emit_xy_markers(scene: &mut ChartScene, data: &ExtractedXySeries, summary_mar
                 }
                 continue;
             };
-            let pt = PointPt::new(px, py);
+            let pt = PointPt::new(px + ctx.dx_pt, py + ctx.dy_pt);
             emit_marker(&mut scene.primitives, pt, &marker, Some(ctx.clip));
             push_xy_point_meta(scene, data, pt, marker.size_pt, (row, subcol, rx, ry));
         }
@@ -2269,6 +2937,7 @@ mod tests {
             }),
             line: None,
             area_fill: None,
+            replicate_lines: curvebook_doc::ReplicateLineMode::default(),
         };
         gs.spec.series[1].gdo = GraphicalDataObject::ScatterAndLine {
             marker: Some(MarkerStyle {
@@ -2281,6 +2950,7 @@ mod tests {
             }),
             line: None,
             area_fill: None,
+            replicate_lines: curvebook_doc::ReplicateLineMode::default(),
         };
 
         let highlight = Rgba8::rgb(0, 158, 115);
@@ -2377,6 +3047,7 @@ mod tests {
                 marker: None,
                 line: Some(ConnectingLineStyle { kind, color: Rgba8::BLACK, stroke_width_pt: 1.5, dash_style: LineDashStyle::Solid }),
                 area_fill: None,
+                replicate_lines: curvebook_doc::ReplicateLineMode::default(),
             };
             let mut doc = ProjectDocument::default();
             doc.add_data_sheet(ds).expect("add data");

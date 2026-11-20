@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 use crate::UiApp;
 use crate::control_io::dispatch_ui_command_as_ui;
 use crate::dialogs_canvas::{
-    ActiveDialog, ActiveInspector, AnalyzeDuplicateChoice, BubblePlotInspectorState, ChangeGraphTypeState, ExportFigureState, FormatAxesState,
-    FormatGraphState, PageLayoutComposerState, PairwiseComparisonsState, PrintDialogState,
+    ActiveDialog, ActiveInspector, AnalyzeDuplicateChoice, ApplyStyleFromState, BubblePlotInspectorState, ChangeGraphTypeState,
+    CreateGraphDialogState, EqualizeScalingDialogState, ExportFigureState, FormatAxesState, FormatEmbeddedTableDialogState, FormatGraphState,
+    FormatImageDialogState, PageLayoutComposerState, PairwiseComparisonsState, PrintDialogState,
 };
 use crate::grid_view::{ImportOriginKind, ImportPasteWizardState};
 use crate::i18n;
@@ -1081,6 +1082,9 @@ pub enum UiIntent {
     GridCutSelection,
     GridPasteFromClipboard { start_coord: Option<curvebook_tools::GridCellCoord> },
     WorkspaceCopy { dpi: u16 },
+    SyncResultSelection { sheet_id: SheetId, tab_index: usize, anchor: (usize, usize), focus: (usize, usize) },
+    CanvasPaste { target_sheet_id: SheetId, anchor_pt: Option<[f64; 2]> },
+    PasteImageFromClipboard { target_sheet_id: SheetId, anchor_pt: Option<[f64; 2]> },
     SetAnalyzeQuery { query: String },
     SelectAnalyzeEntry { entry_id: String, clear_duplicate_prompt: bool },
     ToggleAnalyzeDataset { col_index: usize },
@@ -1104,6 +1108,12 @@ pub enum UiIntent {
     UpdatePageLayoutState(Box<PageLayoutComposerState>),
     UpdateExportFigureState(Box<ExportFigureState>),
     UpdatePrintDialogState(Box<PrintDialogState>),
+    UpdateCreateGraphState(Box<CreateGraphDialogState>),
+    UpdateEqualizeScalingState(Box<EqualizeScalingDialogState>),
+    UpdateFormatEmbeddedTableState(Box<FormatEmbeddedTableDialogState>),
+    UpdateFormatImageState(Box<FormatImageDialogState>),
+    UpdateApplyStyleState(Box<ApplyStyleFromState>),
+    SetGallerySelection { sheet_ids: Vec<SheetId> },
     OpenPreferences { category: Option<app_modals::PreferencesCategory> },
     ClosePreferences { save: bool },
     SetShortcutBinding { command_id: String, combo: String },
@@ -1425,6 +1435,21 @@ impl PendingUiIntents {
         self.queue.push(UiIntent::WorkspaceCopy { dpi });
     }
 
+    /// Synchronize active `ResultSheet` rectangular cell-range selection onto `app.view_shards.results`.
+    pub fn push_sync_result_selection(&mut self, sheet_id: SheetId, tab_index: usize, anchor: (usize, usize), focus: (usize, usize)) {
+        self.queue.push(UiIntent::SyncResultSelection { sheet_id, tab_index, anchor, focus });
+    }
+
+    /// Paste clipboard image or copied `ResultSheet` table onto `target_sheet_id`.
+    pub fn push_canvas_paste(&mut self, target_sheet_id: SheetId, anchor_pt: Option<[f64; 2]>) {
+        self.queue.push(UiIntent::CanvasPaste { target_sheet_id, anchor_pt });
+    }
+
+    /// Paste clipboard image bytes onto `target_sheet_id` via `edit.pasteImage`.
+    pub fn push_paste_image_from_clipboard(&mut self, target_sheet_id: SheetId, anchor_pt: Option<[f64; 2]>) {
+        self.queue.push(UiIntent::PasteImageFromClipboard { target_sheet_id, anchor_pt });
+    }
+
     /// Update the live `Analyze...` instant search query.
     pub fn push_set_analyze_query(&mut self, query: impl Into<String>) {
         self.queue.push(UiIntent::SetAnalyzeQuery { query: query.into() });
@@ -1538,6 +1563,36 @@ impl PendingUiIntents {
     /// Persist updated `PrintDialogState` draft cleanly on settlement.
     pub fn push_update_print_dialog_state(&mut self, state: PrintDialogState) {
         self.queue.push(UiIntent::UpdatePrintDialogState(Box::new(state)));
+    }
+
+    /// Persist updated `CreateGraphDialogState` draft cleanly on settlement.
+    pub fn push_update_create_graph_state(&mut self, state: CreateGraphDialogState) {
+        self.queue.push(UiIntent::UpdateCreateGraphState(Box::new(state)));
+    }
+
+    /// Persist updated `EqualizeScalingDialogState` draft cleanly on settlement.
+    pub fn push_update_equalize_scaling_state(&mut self, state: EqualizeScalingDialogState) {
+        self.queue.push(UiIntent::UpdateEqualizeScalingState(Box::new(state)));
+    }
+
+    /// Persist updated `FormatEmbeddedTableDialogState` draft cleanly on settlement.
+    pub fn push_update_format_embedded_table_state(&mut self, state: FormatEmbeddedTableDialogState) {
+        self.queue.push(UiIntent::UpdateFormatEmbeddedTableState(Box::new(state)));
+    }
+
+    /// Persist updated `FormatImageDialogState` draft cleanly on settlement.
+    pub fn push_update_format_image_state(&mut self, state: FormatImageDialogState) {
+        self.queue.push(UiIntent::UpdateFormatImageState(Box::new(state)));
+    }
+
+    /// Persist updated `ApplyStyleFromState` draft cleanly on settlement.
+    pub fn push_update_apply_style_state(&mut self, state: ApplyStyleFromState) {
+        self.queue.push(UiIntent::UpdateApplyStyleState(Box::new(state)));
+    }
+
+    /// Replace Portfolio Gallery multi-selection set cleanly on settlement.
+    pub fn push_set_gallery_selection(&mut self, sheet_ids: Vec<SheetId>) {
+        self.queue.push(UiIntent::SetGallerySelection { sheet_ids });
     }
 
     /// Open `Preferences` modal on optional category.
@@ -1721,6 +1776,7 @@ fn apply_single_ui_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentO
         UiIntent::SetRowTitlesCollapsed { collapsed } => {
             app.grid.row_titles_collapsed_override = Some(collapsed);
             app.view_shards.grid_core.row_titles_collapsed = collapsed;
+            app.egui_views.column_grid.row_titles_collapsed = collapsed;
             Ok(UiIntentOutcome::ShellUpdated)
         }
         UiIntent::DialogWidgetClick { widget_id } => {
@@ -1900,7 +1956,9 @@ fn apply_wave4_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutco
         | UiIntent::GridCopySelection
         | UiIntent::GridCutSelection
         | UiIntent::GridPasteFromClipboard { .. }
-        | UiIntent::WorkspaceCopy { .. } => apply_wave4_grid_wizard_intent(app, intent),
+        | UiIntent::WorkspaceCopy { .. }
+        | UiIntent::CanvasPaste { .. }
+        | UiIntent::PasteImageFromClipboard { .. } => apply_wave4_grid_wizard_intent(app, intent),
         UiIntent::SetAnalyzeQuery { .. }
         | UiIntent::SelectAnalyzeEntry { .. }
         | UiIntent::ToggleAnalyzeDataset { .. }
@@ -1923,7 +1981,14 @@ fn apply_wave4_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutco
         | UiIntent::UpdatePairwiseState(_)
         | UiIntent::UpdatePageLayoutState(_)
         | UiIntent::UpdateExportFigureState(_)
-        | UiIntent::UpdatePrintDialogState(_) => apply_wave4_modal_state_intent(app, intent),
+        | UiIntent::UpdatePrintDialogState(_)
+        | UiIntent::UpdateCreateGraphState(_)
+        | UiIntent::UpdateEqualizeScalingState(_)
+        | UiIntent::UpdateFormatEmbeddedTableState(_)
+        | UiIntent::UpdateFormatImageState(_)
+        | UiIntent::UpdateApplyStyleState(_)
+        | UiIntent::SyncResultSelection { .. }
+        | UiIntent::SetGallerySelection { .. } => apply_wave4_modal_state_intent(app, intent),
         UiIntent::OpenPreferences { .. }
         | UiIntent::ClosePreferences { .. }
         | UiIntent::SetShortcutBinding { .. }
@@ -2047,8 +2112,85 @@ fn apply_wave4_grid_wizard_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
         UiIntent::GridCutSelection => execute_grid_clipboard_copy(app, true),
         UiIntent::GridPasteFromClipboard { start_coord } => execute_grid_clipboard_paste(app, start_coord),
         UiIntent::WorkspaceCopy { dpi } => execute_workspace_copy(app, dpi),
+        UiIntent::CanvasPaste { target_sheet_id, anchor_pt } => execute_canvas_paste(app, &target_sheet_id, anchor_pt),
+        UiIntent::PasteImageFromClipboard { target_sheet_id, anchor_pt } => execute_paste_image_from_clipboard(app, &target_sheet_id, anchor_pt),
         _ => Ok(UiIntentOutcome::ShellUpdated),
     }
+}
+
+fn encode_base64_bytes(data: &[u8]) -> String {
+    const LUT: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+        let n = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
+        out.push(LUT[((n >> 18) & 0x3F) as usize] as char);
+        out.push(LUT[((n >> 12) & 0x3F) as usize] as char);
+        out.push(if chunk.len() > 1 { LUT[((n >> 6) & 0x3F) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 2 { LUT[(n & 0x3F) as usize] as char } else { '=' });
+    }
+    out
+}
+
+fn build_canvas_paste_bounds(anchor_pt: Option<[f64; 2]>, w: f64, h: f64) -> Option<Vec<f64>> {
+    anchor_pt.map(|[x, y]| vec![x.max(4.0), y.max(4.0), w, h])
+}
+
+fn execute_paste_image_from_clipboard(
+    app: &mut UiApp,
+    target_sheet_id: &SheetId,
+    anchor_pt: Option<[f64; 2]>,
+) -> Result<UiIntentOutcome, EngineError> {
+    let img_bytes = app
+        .read_clipboard_image()
+        .map_err(|msg| EngineError::with_code(ErrorCode::Conflict, msg))?
+        .or_else(|| app.interaction.last_clipboard_image_png.clone());
+    let Some(bytes) = img_bytes else {
+        return Err(EngineError::with_code(ErrorCode::Conflict, "No PNG, JPEG, or TIFF image found on clipboard"));
+    };
+    let mut params = serde_json::Map::new();
+    params.insert(String::from("target_sheet_id"), serde_json::json!(target_sheet_id.as_str()));
+    params.insert(String::from("bytes_base64"), serde_json::json!(encode_base64_bytes(&bytes)));
+    if let Some(bounds) = build_canvas_paste_bounds(anchor_pt, 160.0, 120.0) {
+        params.insert(String::from("bounds_pt"), serde_json::json!(bounds));
+    }
+    let outcome = app.execute_command("edit.pasteImage", serde_json::Value::Object(params))?;
+    app.interaction.last_clipboard_image_png = Some(bytes);
+    app.sync_views();
+    Ok(UiIntentOutcome::Engine { command_id: String::from("edit.pasteImage"), outcome })
+}
+
+fn execute_canvas_paste(app: &mut UiApp, target_sheet_id: &SheetId, anchor_pt: Option<[f64; 2]>) -> Result<UiIntentOutcome, EngineError> {
+    if let Ok(Some(bytes)) = app.read_clipboard_image() {
+        app.interaction.last_clipboard_image_png = Some(bytes);
+        return execute_paste_image_from_clipboard(app, target_sheet_id, anchor_pt);
+    }
+    if let Some(copied) = app.interaction.last_copied_result_table.clone() {
+        let mut params = serde_json::Map::new();
+        params.insert(String::from("source_sheet_id"), serde_json::json!(copied.source_sheet_id.as_str()));
+        params.insert(String::from("target_sheet_id"), serde_json::json!(target_sheet_id.as_str()));
+        if let Some(tab_id) = copied.tab_id {
+            params.insert(String::from("tab_id"), serde_json::json!(tab_id));
+        }
+        if let Some(rows) = copied.selected_rows {
+            params.insert(String::from("selected_rows"), serde_json::json!(rows));
+        }
+        if let Some(cols) = copied.selected_cols {
+            params.insert(String::from("selected_cols"), serde_json::json!(cols));
+        }
+        if let Some(bounds) = build_canvas_paste_bounds(anchor_pt, 180.0, 90.0) {
+            params.insert(String::from("bounds_pt"), serde_json::json!(bounds));
+        }
+        let outcome = app.execute_command("edit.pasteResultTable", serde_json::Value::Object(params))?;
+        app.sync_views();
+        return Ok(UiIntentOutcome::Engine { command_id: String::from("edit.pasteResultTable"), outcome });
+    }
+    if app.interaction.last_clipboard_image_png.is_some() {
+        return execute_paste_image_from_clipboard(app, target_sheet_id, anchor_pt);
+    }
+    Ok(UiIntentOutcome::ShellUpdated)
 }
 
 fn execute_workspace_copy(app: &mut UiApp, dpi: u16) -> Result<UiIntentOutcome, EngineError> {
@@ -2231,6 +2373,23 @@ fn apply_wave4_modal_state_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
         UiIntent::UpdatePageLayoutState(state) => app.canvas_dialogs.page_layout = *state,
         UiIntent::UpdateExportFigureState(state) => app.canvas_dialogs.export_figure = *state,
         UiIntent::UpdatePrintDialogState(state) => app.canvas_dialogs.print = *state,
+        UiIntent::UpdateCreateGraphState(state) => app.canvas_dialogs.create_graph = *state,
+        UiIntent::UpdateEqualizeScalingState(state) => app.canvas_dialogs.equalize_scaling = *state,
+        UiIntent::UpdateFormatEmbeddedTableState(state) => app.canvas_dialogs.format_embedded_table = *state,
+        UiIntent::UpdateFormatImageState(state) => app.canvas_dialogs.format_image = *state,
+        UiIntent::UpdateApplyStyleState(state) => app.canvas_dialogs.apply_style = *state,
+        UiIntent::SyncResultSelection { sheet_id, tab_index, anchor, focus } => {
+            app.view_shards.results.bound_sheet_id = Some(sheet_id.as_str().to_owned());
+            app.view_shards.results.bound_tab_idx = Some(tab_index);
+            app.view_shards.results.selected_anchor = Some(anchor);
+            app.view_shards.results.selected_focus = Some(focus);
+        }
+        UiIntent::SetGallerySelection { sheet_ids } => {
+            app.nav.gallery.selected_ids = sheet_ids.into_iter().collect();
+            for card in &mut app.nav.gallery.cards {
+                card.selected = app.nav.gallery.selected_ids.contains(&card.sheet_id);
+            }
+        }
         _ => {}
     }
     Ok(UiIntentOutcome::ShellUpdated)

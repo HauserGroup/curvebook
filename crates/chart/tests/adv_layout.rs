@@ -526,6 +526,9 @@ fn multipanel_layout_aligns_plot_origins_and_renders_badges_tables_callouts() ->
             source_sheet_id: d2.id,
             tab_id: None,
             bounds_pt: DocRectPt::new(260.0, 18.0, 210.0, 90.0),
+            selected_rows: None,
+            selected_cols: None,
+            style: curvebook_doc::EmbeddedTableStyle::default(),
         },
         LayoutItem::TextCallout {
             id: String::from("note-1"),

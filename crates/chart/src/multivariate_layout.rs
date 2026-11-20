@@ -5,9 +5,9 @@ use std::collections::BTreeMap;
 
 use curvebook_doc::{
     AnalysisKind, ClusterDistance, ClusterLinkage, ColorChannelMapping, DataSheet, DiagnosticPlotKind, GraphKind, GraphSheet, GraphSpec,
-    GraphicalDataObject, LayoutItem, LayoutSheet, LevelOrderSpec, MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec, ProjectDocument,
-    ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SheetId, SizeChannelMapping, SubcolumnMode, TableArchetype, VariableColumn,
-    VariableRole, WhiskerMethod,
+    GraphicalDataObject, HeatmapColumnLabelAngle, HeatmapColumnLabelMode, HeatmapRowLabelMode, LayoutItem, LayoutSheet, LevelOrderSpec,
+    MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec, ProjectDocument, ResultCell, ResultSheet, ResultStatus, ResultTab,
+    ResultTabKind, SheetId, SizeChannelMapping, SubcolumnMode, TableArchetype, VariableColumn, VariableRole, WhiskerMethod,
 };
 use curvebook_math::dist::{chi2_isf, norm_ppf};
 use curvebook_math::sum::{covariance, sample_sd};
@@ -26,10 +26,10 @@ use crate::scene::{
 };
 use crate::survival_cat::{
     CartesianFrame, LegendEntry, PlotMarginConfig, alpha_fill, draw_cartesian_frame, draw_categorical_x_ticks, draw_colorbar, draw_empty_open_frame,
-    draw_graph_annotations, draw_legend_entries, emit_marker, extract_sheet_grid, nice_axis_ticks, path_close, path_line, path_move, polygon_path,
-    render_data_grid_table, resolve_axis_domain, resolve_graph_text, sanitize_range, solid_stroke, text_metrics, update_plot_rect_for_labels,
+    draw_graph_annotations, draw_legend_entries, emit_marker, nice_axis_ticks, path_close, path_line, path_move, polygon_path, resolve_axis_domain,
+    resolve_graph_text, sanitize_range, solid_stroke, text_metrics, update_plot_rect_for_labels,
 };
-use crate::xy::format_point_value;
+use crate::xy::{EmbeddedTableDrawSpec, format_point_value, render_styled_embedded_table};
 
 const GROUP_SHAPES: [MarkerShape; 9] = [
     MarkerShape::Circle,
@@ -1403,13 +1403,35 @@ fn compile_heatmap(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
         _ => (ColorRamp::Named { id: ColormapId::Viridis, reversed: false }, min_v, max_v),
     };
 
-    let max_row_lbl_w = hm.row_labels.iter().map(|l| text_metrics(l, 8.0).width_pt).fold(0.0_f64, f64::max);
+    let lbl_spec = graph.spec.heatmap_labels;
+    let max_row_lbl_w = match lbl_spec.row_labels {
+        HeatmapRowLabelMode::RowTitles => hm.row_labels.iter().map(|l| text_metrics(l, 7.5).width_pt).fold(0.0_f64, f64::max),
+        HeatmapRowLabelMode::RowNumbers => text_metrics(&format!("{n_rows}"), 7.5).width_pt,
+        HeatmapRowLabelMode::None => 0.0,
+    };
+    let resolved_col_labels: Vec<String> = match lbl_spec.column_labels {
+        HeatmapColumnLabelMode::ColumnTitles => hm.col_labels.clone(),
+        HeatmapColumnLabelMode::ColumnLetters => (0..n_cols).map(spreadsheet_column_letters).collect(),
+        HeatmapColumnLabelMode::None => Vec::new(),
+    };
+    let max_col_lbl_w = resolved_col_labels.iter().map(|l| text_metrics(l, 7.5).width_pt).fold(0.0_f64, f64::max);
+    let col_lbl_proj_h = if lbl_spec.column_labels == HeatmapColumnLabelMode::None || resolved_col_labels.is_empty() {
+        0.0
+    } else {
+        match lbl_spec.column_angle {
+            HeatmapColumnLabelAngle::Horizontal0 => 14.0,
+            HeatmapColumnLabelAngle::Angled45 => (max_col_lbl_w * std::f64::consts::FRAC_1_SQRT_2 + 10.0).max(16.0),
+            HeatmapColumnLabelAngle::Vertical90 => (max_col_lbl_w + 10.0).max(16.0),
+        }
+    };
+    let cue_extra = if has_dendro && hm.clustering_cue.is_some() { 13.0 } else { 0.0 };
+    let desired_bottom_extra = (col_lbl_proj_h + cue_extra - 10.0).max(if has_dendro && hm.clustering_cue.is_some() { 26.0 } else { 18.0 });
     let _ = update_plot_rect_for_labels(
         scene,
         &graph.spec,
         &[],
         PlotMarginConfig {
-            extra_bottom_pt: if has_dendro && hm.clustering_cue.is_some() { 26.0 } else { 18.0 },
+            extra_bottom_pt: desired_bottom_extra.min(scene.height_pt * 0.35),
             extra_left_pt: crate::clamp_f64_safe(max_row_lbl_w + if has_dendro { 34.0 } else { 8.0 }, 12.0, 90.0),
             has_colorbar: true,
             suppress_y_axis_labels: true,
@@ -1453,25 +1475,45 @@ fn compile_heatmap(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
                 scene.primitives.push(ScenePrimitive::Path { path: slash, fill: None, stroke: Some(missing_hatch), clip: None });
             }
         }
-        let lbl = hm.row_labels.get(orig_row).map(String::as_str).unwrap_or("");
-        scene.primitives.push(ScenePrimitive::Text(PositionedText {
-            rich: parse_markup(lbl),
-            anchor_pt: PointPt::new(r.x - 5.0, y + cell_h * 0.5 + 3.0),
-            anchor: TextAnchor::End,
-            font_size_pt: 7.5,
-            rotation_deg: 0.0,
-            color: Rgba8::BLACK,
-        }));
+        match lbl_spec.row_labels {
+            HeatmapRowLabelMode::RowTitles => {
+                let lbl = hm.row_labels.get(orig_row).map(String::as_str).unwrap_or("");
+                scene.primitives.push(ScenePrimitive::Text(PositionedText {
+                    rich: parse_markup(lbl),
+                    anchor_pt: PointPt::new(r.x - 5.0, y + cell_h * 0.5 + 3.0),
+                    anchor: TextAnchor::End,
+                    font_size_pt: 7.5,
+                    rotation_deg: 0.0,
+                    color: Rgba8::BLACK,
+                }));
+            }
+            HeatmapRowLabelMode::RowNumbers => {
+                scene.primitives.push(ScenePrimitive::Text(PositionedText {
+                    rich: RichText::plain(format!("{}", orig_row + 1)),
+                    anchor_pt: PointPt::new(r.x - 5.0, y + cell_h * 0.5 + 3.0),
+                    anchor: TextAnchor::End,
+                    font_size_pt: 7.5,
+                    rotation_deg: 0.0,
+                    color: Rgba8::BLACK,
+                }));
+            }
+            HeatmapRowLabelMode::None => {}
+        }
     }
 
-    for (c, lbl) in hm.col_labels.iter().enumerate() {
+    for (c, lbl) in resolved_col_labels.iter().enumerate() {
         let cx = grid.x + ((c as f64) + 0.5) * cell_w;
+        let (anchor_pt, anchor, rotation_deg) = match lbl_spec.column_angle {
+            HeatmapColumnLabelAngle::Horizontal0 => (PointPt::new(cx, grid.bottom() + 11.0), TextAnchor::Middle, 0.0),
+            HeatmapColumnLabelAngle::Angled45 => (PointPt::new(cx + 2.0, grid.bottom() + 6.0), TextAnchor::End, -45.0),
+            HeatmapColumnLabelAngle::Vertical90 => (PointPt::new(cx + 2.5, grid.bottom() + 6.0), TextAnchor::End, -90.0),
+        };
         scene.primitives.push(ScenePrimitive::Text(PositionedText {
             rich: parse_markup(lbl),
-            anchor_pt: PointPt::new(cx, grid.bottom() + 11.0),
-            anchor: TextAnchor::Middle,
+            anchor_pt,
+            anchor,
             font_size_pt: 7.5,
-            rotation_deg: 0.0,
+            rotation_deg,
             color: Rgba8::BLACK,
         }));
     }
@@ -1479,9 +1521,10 @@ fn compile_heatmap(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
     if has_dendro {
         draw_left_dendrogram(scene, RectPt::new(r.x, r.y, dendro_w - 3.0, grid.height), &hm.merges, &row_order, cell_h);
         if let Some(cue) = &hm.clustering_cue {
+            let cue_y = (grid.bottom() + col_lbl_proj_h.max(14.0) + 7.5).min(scene.height_pt - 4.0);
             scene.primitives.push(ScenePrimitive::Text(PositionedText {
                 rich: RichText::plain(cue.clone()),
-                anchor_pt: PointPt::new(grid.x + grid.width * 0.5, grid.bottom() + 21.5),
+                anchor_pt: PointPt::new(grid.x + grid.width * 0.5, cue_y),
                 anchor: TextAnchor::Middle,
                 font_size_pt: 7.0,
                 rotation_deg: 0.0,
@@ -1498,6 +1541,18 @@ fn compile_heatmap(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
     });
     draw_colorbar(scene, &ramp, dom_lo, dom_hi, "", RectPt::new(grid.right() + 10.0, grid.y + 4.0, 12.0, (grid.height - 8.0).max(24.0)));
     Ok(())
+}
+
+fn spreadsheet_column_letters(mut index: usize) -> String {
+    let mut chars = Vec::new();
+    loop {
+        chars.push((b'A' + (index % 26) as u8) as char);
+        if index < 26 {
+            break;
+        }
+        index = index / 26 - 1;
+    }
+    chars.into_iter().rev().collect()
 }
 
 fn correlation_heatmap_data(res: &ResultSheet, tab: &ResultTab) -> HeatmapData {
@@ -2853,7 +2908,7 @@ struct ForestEntry {
 }
 
 fn compile_forest_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartScene) -> Result<(), ChartError> {
-    let mut entries = extract_forest_entries(graph, doc);
+    let mut entries = extract_forest_entries(graph, doc, &mut scene.warnings);
     if entries.is_empty() {
         scene.warnings.push(ChartWarning::new("empty_forest", "no effect estimates & confidence intervals for forest plot"));
         draw_empty_open_frame(scene);
@@ -2872,15 +2927,35 @@ fn compile_forest_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Ch
         0.0
     };
 
-    if entries.len() >= 2
+    if graph.spec.forest_show_pooled_diamond
+        && entries.len() >= 2
         && !entries.iter().any(|e| e.is_pooled)
         && let Some(pooled) = compute_pooled_forest_entry(&entries, is_log || ref_x == 1.0)
     {
         entries.push(pooled);
     }
 
-    let x_min = entries.iter().map(|e| e.lower).fold(f64::INFINITY, f64::min).min(ref_x);
-    let x_max = entries.iter().map(|e| e.upper).fold(f64::NEG_INFINITY, f64::max).max(ref_x);
+    let mut x_min = entries.iter().map(|e| e.lower).fold(f64::INFINITY, f64::min).min(ref_x);
+    let mut x_max = entries.iter().map(|e| e.upper).fold(f64::NEG_INFINITY, f64::max).max(ref_x);
+    for tick in &graph.spec.x_axis.additional_ticks {
+        if tick.value.is_finite() && (!is_log || tick.value > 0.0) {
+            x_min = x_min.min(tick.value);
+            x_max = x_max.max(tick.value);
+        }
+    }
+    for thr in &graph.spec.x_axis.thresholds {
+        if thr.value.is_finite() && (!is_log || thr.value > 0.0) {
+            x_min = x_min.min(thr.value);
+            x_max = x_max.max(thr.value);
+        }
+        if let Some(end_v) = thr.shade_to
+            && end_v.is_finite()
+            && (!is_log || end_v > 0.0)
+        {
+            x_min = x_min.min(end_v);
+            x_max = x_max.max(end_v);
+        }
+    }
     let (x_lo, x_hi) = if is_log {
         resolve_axis_domain(&graph.spec.x_axis, x_min * 0.8, x_max * 1.25)
     } else {
@@ -2908,7 +2983,10 @@ fn compile_forest_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Ch
     let frame = CartesianFrame { spec: &graph.spec, x_ticks: &x_ticks, y_ticks: &[], x_map, y_map, max_y_label_w: 0.0, doc };
     draw_cartesian_frame(scene, &frame);
 
-    if let Some(x_ref_pt) = x_map.map_value(ref_x, r.x, r.right())
+    let user_has_ref_line = graph.spec.x_axis.additional_ticks.iter().any(|t| t.draw_gridline && (t.value - ref_x).abs() <= 1e-9)
+        || graph.spec.x_axis.thresholds.iter().any(|t| (t.value - ref_x).abs() <= 1e-9);
+    if !user_has_ref_line
+        && let Some(x_ref_pt) = x_map.map_value(ref_x, r.x, r.right())
         && x_ref_pt >= r.x
         && x_ref_pt <= r.right()
     {
@@ -2985,7 +3063,54 @@ fn compile_forest_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Ch
     Ok(())
 }
 
-fn extract_forest_entries(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<ForestEntry> {
+fn push_validated_forest_entry(entries: &mut Vec<ForestEntry>, warnings: &mut Vec<ChartWarning>, label: String, est: f64, s1: f64, s2: f64) {
+    let lo = s1.min(s2);
+    let hi = s1.max(s2);
+    if !est.is_finite() || !lo.is_finite() || !hi.is_finite() || est < lo - 1e-12 || est > hi + 1e-12 {
+        warnings
+            .push(ChartWarning::new("invalid_forest_interval", format!("omitted forest row '{label}': estimate {est} lies outside [{lo}, {hi}]")));
+        return;
+    }
+    entries.push(ForestEntry {
+        is_pooled: label.to_ascii_lowercase().contains("pooled"),
+        label,
+        estimate: est,
+        lower: lo.min(est),
+        upper: hi.max(est),
+    });
+}
+
+fn extract_subcolumn_forest_entries(
+    mode: SubcolumnMode,
+    rows: &[Vec<curvebook_doc::Cell>],
+    row_titles: &[String],
+    warnings: &mut Vec<ChartWarning>,
+) -> Vec<ForestEntry> {
+    let mut entries = Vec::new();
+    for (r, subs) in rows.iter().enumerate() {
+        if let (Some(est), Some(s1), Some(s2)) =
+            (subs.first().and_then(|c| c.active_number()), subs.get(1).and_then(|c| c.active_number()), subs.get(2).and_then(|c| c.active_number()))
+        {
+            let label = row_titles.get(r).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("Study {}", r + 1));
+            let (lo, hi) = if mode == SubcolumnMode::MeanLowHigh {
+                if !est.is_finite() || !s1.is_finite() || !s2.is_finite() || s1 < 0.0 || s2 < 0.0 {
+                    warnings.push(ChartWarning::new(
+                        "invalid_forest_interval",
+                        format!("omitted forest row '{label}': negative or non-finite error delta ({s1}, {s2})"),
+                    ));
+                    continue;
+                }
+                (est - s1, est + s2)
+            } else {
+                (s1, s2)
+            };
+            push_validated_forest_entry(&mut entries, warnings, label, est, lo, hi);
+        }
+    }
+    entries
+}
+
+fn extract_forest_entries(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut Vec<ChartWarning>) -> Vec<ForestEntry> {
     if let Some(res) = find_matching_result(graph, doc)
         && let Some(tab) = res.tabs.iter().find(|t| t.kind == ResultTabKind::ParametersAndConfidenceIntervals || t.kind == ResultTabKind::MainSummary)
     {
@@ -3010,8 +3135,7 @@ fn extract_forest_entries(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<Fore
                     _ => 0.5 * (lo + hi),
                 };
                 let label = tab.row_labels.get(r).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("Study {}", r + 1));
-                let is_pooled = label.to_ascii_lowercase().contains("pooled");
-                entries.push(ForestEntry { label, estimate: est, lower: lo, upper: hi, is_pooled });
+                push_validated_forest_entry(&mut entries, warnings, label, est, lo, hi);
             }
         }
         if !entries.is_empty() {
@@ -3040,7 +3164,7 @@ fn extract_forest_entries(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<Fore
             };
             let mut entries = Vec::new();
             for r in 0..mv.row_count() {
-                if let (Some(est), Some(lo), Some(hi)) = (
+                if let (Some(est), Some(s1), Some(s2)) = (
                     mv.variables.get(c_est).and_then(|v| v.cells.get(r)).and_then(|c| c.active_number()),
                     mv.variables.get(c_lo).and_then(|v| v.cells.get(r)).and_then(|c| c.active_number()),
                     mv.variables.get(c_hi).and_then(|v| v.cells.get(r)).and_then(|c| c.active_number()),
@@ -3050,41 +3174,36 @@ fn extract_forest_entries(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<Fore
                         .and_then(|v| cell_token(v, r))
                         .or_else(|| mv.row_titles.get(r).filter(|s| !s.is_empty()).cloned())
                         .unwrap_or_else(|| format!("Study {}", r + 1));
-                    let is_pooled = label.to_ascii_lowercase().contains("pooled");
-                    entries.push(ForestEntry { label, estimate: est, lower: lo.min(est), upper: hi.max(est), is_pooled });
+                    push_validated_forest_entry(&mut entries, warnings, label, est, s1, s2);
                 }
             }
             entries
         }
-        TableArchetype::Column(col) if col.data_sets.len() >= 3 => (0..col.row_count())
-            .filter_map(|r| {
-                let est = col.data_sets.first()?.cells.get(r)?.first()?.active_number()?;
-                let lo = col.data_sets.get(1)?.cells.get(r)?.first()?.active_number()?;
-                let hi = col.data_sets.get(2)?.cells.get(r)?.first()?.active_number()?;
-                let label = col.row_titles.get(r).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("Study {}", r + 1));
-                Some(ForestEntry { is_pooled: label.to_ascii_lowercase().contains("pooled"), label, estimate: est, lower: lo, upper: hi })
-            })
-            .collect(),
-        TableArchetype::Xy(xy) if matches!(xy.y_subcolumn_mode, SubcolumnMode::MeanLowHigh | SubcolumnMode::UpperLowerLimits) => {
+        TableArchetype::Grouped(grouped) if matches!(grouped.subcolumn_mode, SubcolumnMode::MeanLowHigh | SubcolumnMode::UpperLowerLimits) => {
+            let Some(ds_col) = grouped.data_sets.first() else { return Vec::new() };
+            extract_subcolumn_forest_entries(grouped.subcolumn_mode, &ds_col.cells, &grouped.row_titles, warnings)
+        }
+        TableArchetype::Column(col) if matches!(col.subcolumn_mode, SubcolumnMode::MeanLowHigh | SubcolumnMode::UpperLowerLimits) => {
+            let Some(ds_col) = col.data_sets.first() else { return Vec::new() };
+            extract_subcolumn_forest_entries(col.subcolumn_mode, &ds_col.cells, &col.row_titles, warnings)
+        }
+        TableArchetype::Column(col) if col.data_sets.len() >= 3 => {
             let mut entries = Vec::new();
-            let Some(ds_col) = xy.data_sets.first() else { return entries };
-            for (r, subs) in ds_col.cells.iter().enumerate() {
-                if let (Some(est), Some(lo), Some(hi)) = (
-                    subs.first().and_then(|c| c.active_number()),
-                    subs.get(1).and_then(|c| c.active_number()),
-                    subs.get(2).and_then(|c| c.active_number()),
+            for r in 0..col.row_count() {
+                if let (Some(est), Some(s1), Some(s2)) = (
+                    col.data_sets.first().and_then(|d| d.cells.get(r)).and_then(|c| c.first()).and_then(|c| c.active_number()),
+                    col.data_sets.get(1).and_then(|d| d.cells.get(r)).and_then(|c| c.first()).and_then(|c| c.active_number()),
+                    col.data_sets.get(2).and_then(|d| d.cells.get(r)).and_then(|c| c.first()).and_then(|c| c.active_number()),
                 ) {
-                    let label = xy.row_titles.get(r).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("Study {}", r + 1));
-                    entries.push(ForestEntry {
-                        is_pooled: label.to_ascii_lowercase().contains("pooled"),
-                        label,
-                        estimate: est,
-                        lower: lo,
-                        upper: hi,
-                    });
+                    let label = col.row_titles.get(r).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("Study {}", r + 1));
+                    push_validated_forest_entry(&mut entries, warnings, label, est, s1, s2);
                 }
             }
             entries
+        }
+        TableArchetype::Xy(xy) if matches!(xy.y_subcolumn_mode, SubcolumnMode::MeanLowHigh | SubcolumnMode::UpperLowerLimits) => {
+            let Some(ds_col) = xy.data_sets.first() else { return Vec::new() };
+            extract_subcolumn_forest_entries(xy.y_subcolumn_mode, &ds_col.cells, &xy.row_titles, warnings)
         }
         _ => Vec::new(),
     }
@@ -3581,12 +3700,17 @@ struct PlacedPanel {
     ty: f64,
 }
 
-fn check_layout_primitive_budget(current: usize, added: usize, context: &str) -> Result<(), ChartError> {
+pub(crate) fn check_layout_primitive_budget(current: usize, added: usize, context: &str) -> Result<(), ChartError> {
     let next = current.saturating_add(added);
     if next > MAX_LAYOUT_PRIMITIVES {
         return Err(ChartError::ResourceLimit { message: format!("{context} primitive count {next} exceeds layout budget {MAX_LAYOUT_PRIMITIVES}") });
     }
     Ok(())
+}
+
+enum LayoutPaintOrder<'a> {
+    Panel(usize),
+    Other(&'a LayoutItem),
 }
 
 /// Compile a multi-panel [`LayoutSheet`] into a unified physical-page [`ChartScene`].
@@ -3599,7 +3723,7 @@ pub fn compile_layout_scene(layout: &LayoutSheet, doc: &ProjectDocument) -> Resu
     let mut compiled_graphs: Vec<CompiledGraphEntry> = Vec::new();
     let mut graph_cache: BTreeMap<&SheetId, usize> = BTreeMap::new();
     let mut panels: Vec<PlacedPanel> = Vec::new();
-    let mut other_items: Vec<&LayoutItem> = Vec::new();
+    let mut paint_order: Vec<LayoutPaintOrder<'_>> = Vec::with_capacity(layout.spec.items.len());
     let mut panel_counter = 0_usize;
 
     for item in &layout.spec.items {
@@ -3635,11 +3759,13 @@ pub fn compile_layout_scene(layout: &LayoutSheet, doc: &ProjectDocument) -> Resu
                     let fit = (bounds.width / sub.width_pt.max(1.0)).min(bounds.height / sub.height_pt.max(1.0));
                     (fit * pct).max(0.05)
                 });
+                let p_vec_idx = panels.len();
                 panels.push(PlacedPanel { panel_idx: panel_counter, bounds, badge, cache_idx: Some(cache_idx), scale, tx: bounds.x, ty: bounds.y });
+                paint_order.push(LayoutPaintOrder::Panel(p_vec_idx));
                 panel_counter += 1;
             }
-            LayoutItem::LiveTable { .. } | LayoutItem::TextCallout { .. } => {
-                other_items.push(item);
+            LayoutItem::LiveTable { .. } | LayoutItem::TextCallout { .. } | LayoutItem::EmbeddedImage { .. } => {
+                paint_order.push(LayoutPaintOrder::Other(item));
             }
         }
     }
@@ -3648,38 +3774,42 @@ pub fn compile_layout_scene(layout: &LayoutSheet, doc: &ProjectDocument) -> Resu
         align_placed_panel_origins(&mut panels, &compiled_graphs);
     }
 
-    for panel in &panels {
-        let sub = panel.cache_idx.and_then(|idx| compiled_graphs.get(idx)).and_then(|entry| entry.scene.as_ref());
-        emit_placed_panel(&mut scene, panel, sub)?;
-    }
-
-    for item in other_items {
-        match item {
-            LayoutItem::LiveTable { source_sheet_id, tab_id, bounds_pt, .. } => {
-                let bounds = RectPt::from(*bounds_pt);
-                if let Some(grid) = extract_sheet_grid(doc, source_sheet_id, tab_id.as_deref()) {
-                    let est_cells = grid.rows.len().saturating_mul(grid.headers.len().saturating_add(1));
-                    check_layout_primitive_budget(scene.primitives.len(), est_cells, "layout table")?;
-                    render_data_grid_table(&mut scene, bounds, &grid.headers, &grid.row_labels, &grid.rows, Rgba8::rgb(130, 136, 145));
-                    check_layout_primitive_budget(scene.primitives.len(), 0, "layout table")?;
-                } else {
-                    check_layout_primitive_budget(scene.primitives.len(), 1, "layout missing table placeholder")?;
-                    scene.warnings.push(ChartWarning::new("missing_layout_table", format!("referenced table sheet '{source_sheet_id}' not found")));
-                    scene.primitives.push(ScenePrimitive::Path {
-                        path: Path2D::rect(bounds),
-                        fill: None,
-                        stroke: Some(solid_stroke(Rgba8::rgb(160, 160, 160), 0.75, LineDashStyle::Solid)),
-                        clip: None,
-                    });
-                }
+    let mut extra_table_work: usize = 0;
+    let mut layout_image_pixels: u64 = 0;
+    for entry in paint_order {
+        match entry {
+            LayoutPaintOrder::Panel(p_idx) => {
+                let panel = &panels[p_idx];
+                let sub = panel.cache_idx.and_then(|idx| compiled_graphs.get(idx)).and_then(|entry| entry.scene.as_ref());
+                emit_placed_panel(&mut scene, panel, sub)?;
             }
-            LayoutItem::TextCallout { markdown, bounds_pt, font_size_pt, .. } => {
+            LayoutPaintOrder::Other(LayoutItem::LiveTable { source_sheet_id, tab_id, bounds_pt, selected_rows, selected_cols, style, .. }) => {
+                render_styled_embedded_table(
+                    &mut scene,
+                    doc,
+                    &EmbeddedTableDrawSpec {
+                        sheet_id: source_sheet_id,
+                        tab_id: tab_id.as_deref(),
+                        bounds: RectPt::from(*bounds_pt),
+                        selected_rows: selected_rows.as_deref(),
+                        selected_cols: selected_cols.as_deref(),
+                        style,
+                        missing_warning_code: "missing_layout_table",
+                    },
+                    Some(&mut extra_table_work),
+                )?;
+            }
+            LayoutPaintOrder::Other(LayoutItem::TextCallout { markdown, bounds_pt, font_size_pt, .. }) => {
                 let expanded = resolve_graph_text(markdown, doc, None);
                 let bounds = RectPt::from(*bounds_pt);
                 let fs = if font_size_pt.is_finite() && *font_size_pt > 0.0 { *font_size_pt } else { 10.0 };
                 let line_h = fs * 1.3;
                 let line_count = expanded.lines().count();
-                check_layout_primitive_budget(scene.primitives.len(), line_count.saturating_add(2), "layout text callout")?;
+                check_layout_primitive_budget(
+                    scene.primitives.len().saturating_add(extra_table_work),
+                    line_count.saturating_add(2),
+                    "layout text callout",
+                )?;
                 scene.primitives.push(ScenePrimitive::PushClip { rect: bounds });
                 for (line_idx, line) in expanded.lines().enumerate() {
                     scene.primitives.push(ScenePrimitive::Text(PositionedText {
@@ -3693,7 +3823,24 @@ pub fn compile_layout_scene(layout: &LayoutSheet, doc: &ProjectDocument) -> Resu
                 }
                 scene.primitives.push(ScenePrimitive::PopClip);
             }
-            LayoutItem::LiveGraph { .. } => {}
+            LayoutPaintOrder::Other(LayoutItem::EmbeddedImage { asset_id, bounds_pt, rotation_deg, crop, border, badge_override, .. }) => {
+                check_layout_primitive_budget(scene.primitives.len().saturating_add(extra_table_work), 3, "layout embedded image")?;
+                crate::image_decode::emit_embedded_image_primitive(
+                    &mut scene,
+                    doc,
+                    &crate::image_decode::EmbeddedImageDrawSpec {
+                        asset_id,
+                        bounds_pt: *bounds_pt,
+                        rotation_deg: *rotation_deg,
+                        crop: *crop,
+                        border: *border,
+                        clip: None,
+                        badge_override: badge_override.as_deref(),
+                    },
+                    Some(&mut layout_image_pixels),
+                );
+            }
+            LayoutPaintOrder::Other(LayoutItem::LiveGraph { .. }) => {}
         }
     }
 
@@ -3864,6 +4011,21 @@ fn transform_primitive(prim: &ScenePrimitive, tx: f64, ty: f64, s: f64) -> Scene
             font_size_pt: (t.font_size_pt * s).max(4.0),
             rotation_deg: t.rotation_deg,
             color: t.color,
+        }),
+        ScenePrimitive::RasterImage(img) => ScenePrimitive::RasterImage(crate::scene::SceneRasterImage {
+            asset_id: img.asset_id.clone(),
+            media_type: img.media_type,
+            pixel_size: img.pixel_size,
+            rgba: img.rgba.clone(),
+            bounds_pt: transform_rect(img.bounds_pt, tx, ty, s),
+            crop: curvebook_doc::CropInsetsPt {
+                left_pt: img.crop.left_pt * s,
+                right_pt: img.crop.right_pt * s,
+                top_pt: img.crop.top_pt * s,
+                bottom_pt: img.crop.bottom_pt * s,
+            },
+            rotation_deg: img.rotation_deg,
+            clip: img.clip.map(|c| transform_rect(c, tx, ty, s)),
         }),
         ScenePrimitive::PushClip { rect } => ScenePrimitive::PushClip { rect: transform_rect(*rect, tx, ty, s) },
         ScenePrimitive::PopClip => ScenePrimitive::PopClip,

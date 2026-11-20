@@ -6,16 +6,17 @@ use curvebook_chart::{ChartScene, PreflightIssue};
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, AxisSegment, AxisSpec, AxisThreshold, BaselineOperation, BlandAltmanSpec, BracketLabelMode, BracketStyle,
     CanvasResizeMode, ChecklistItem, ChecklistStatus, CiBound, CldOrdering, ClusterDistance, ClusterLinkage, ColorChannelMapping, ColumnDesignHint,
-    CompactLetterDisplaySpec, ConnectingLineStyle, ContingencyMethod, ContingencySpec, CoxTieMethod, DataSheet, DescriptiveSpec, DiagnosticPlotKind,
-    EquationDisplayMode, ErrorBarMetric, ErrorBarSpec, ErrorPropagationMode, FactorialAnovaSpec, FigureCanvasPreset, FitMethod, FramePreset,
-    GlmFamily, GlmSpec, GraphAnnotation, GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, HookSource,
-    JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, LegendSpec, LevelOrderKind, LevelOrderSpec, LineConnectionKind, LinearRegressionSpec,
-    MathTransformPreset, MixedModelDfMethod, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateGraphEncoding,
-    MultivariatePlotMode, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec,
-    PValueFormat, PValueStackMethod, PValueStackSpec, PageOrientation, PairwiseBracketSpec, PairwiseDisplayMode, PanelBadgeStyle, ParameterRule,
-    ParameterScope, PartsOfWholeLayout, PassingBablokSpec, ProjectDocument, RectPt, RepeatedMeasuresDesign, ReplicateOverlayStyle,
-    ResidualCovariance, ResultCell, ResultSheet, ResultTab, ResultTabKind, RocSpec, SheetId, SizeChannelMapping, SubcolumnAggregation,
-    SumOfSquaresType, SummaryMeasure, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec,
+    CompactLetterDisplaySpec, ConnectingLineStyle, ContingencyMethod, ContingencySpec, CoxTieMethod, CropInsetsPt, DataSheet, DescriptiveSpec,
+    DiagnosticPlotKind, EmbeddedTableStyle, EquationDisplayMode, ErrorBarMetric, ErrorBarSpec, ErrorPropagationMode, FactorialAnovaSpec,
+    FigureCanvasPreset, FitMethod, FramePreset, GlmFamily, GlmSpec, GraphAnnotation, GraphAxisScale, GraphKind, GraphSheet, GraphSpec,
+    GraphicalDataObject, GroupedArrangement, HeatmapLabelSpec, HookSource, ImageBorderSpec, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec,
+    LegendSpec, LevelOrderKind, LevelOrderSpec, LineConnectionKind, LinearRegressionSpec, MathTransformPreset, MixedModelDfMethod,
+    MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec,
+    NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat, PValueStackMethod,
+    PValueStackSpec, PageOrientation, PairwiseBracketSpec, PairwiseDisplayMode, PanelBadgeStyle, ParameterRule, ParameterScope, PartsOfWholeLayout,
+    PassingBablokSpec, ProjectDocument, RectPt, RegressionOverlaySpec, RepeatedMeasuresDesign, ReplicateOverlayStyle, ResidualCovariance, ResultCell,
+    ResultSheet, ResultTab, ResultTabKind, RocSpec, SheetId, SizeChannelMapping, SubcolumnAggregation, SumOfSquaresType, SummaryMeasure,
+    SurvivalAnalysisSpec, SurvivalDisplayMetric, TableArchetype, TableKind, TickDirection, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec,
     VariableRole, WeightingScheme, WhiskerMethod,
 };
 use curvebook_engine::{EngineError, Session, cmd};
@@ -108,6 +109,22 @@ pub enum ActiveDialog {
     SimulateDistributions,
     InsertModelEquation {
         graph_sheet_id: SheetId,
+    },
+    CreateGraph {
+        source_sheet_id: Option<SheetId>,
+    },
+    EqualizeScaling {
+        layout_sheet_id: SheetId,
+    },
+    FormatEmbeddedTable {
+        sheet_id: SheetId,
+        target_index: usize,
+        is_layout: bool,
+    },
+    FormatImage {
+        sheet_id: SheetId,
+        target_index: usize,
+        is_layout: bool,
     },
     CommandPalette,
     About,
@@ -4431,6 +4448,12 @@ pub struct ChangeGraphTypeState {
     pub selected_option_id: String,
     pub summary_measure: SummaryMeasure,
     pub error_bar_metric: ErrorBarMetric,
+    #[serde(default)]
+    pub survival_metric: SurvivalDisplayMetric,
+    #[serde(default = "default_true_flag")]
+    pub survival_staircase: bool,
+    #[serde(default)]
+    pub survival_error_display: Option<ErrorBarMetric>,
 }
 
 impl Default for ChangeGraphTypeState {
@@ -4442,6 +4465,9 @@ impl Default for ChangeGraphTypeState {
             selected_option_id: String::from("xy.scatter"),
             summary_measure: SummaryMeasure::Mean,
             error_bar_metric: ErrorBarMetric::Sd,
+            survival_metric: SurvivalDisplayMetric::PercentSurvival,
+            survival_staircase: true,
+            survival_error_display: None,
         }
     }
 }
@@ -4474,6 +4500,21 @@ impl ChangeGraphTypeState {
         let recommended = self.recommended_options();
         if let Some(first) = recommended.first() {
             self.selected_option_id = String::from(first.id);
+        }
+        if let Some((metric, staircase, err_disp)) = graph.spec.series.iter().find_map(|s| match s.gdo {
+            GraphicalDataObject::KaplanMeierStep { display_metric, staircase, error_display, show_greenwood_ci, .. } => {
+                let effective_err = error_display.or_else(|| show_greenwood_ci.then_some(ErrorBarMetric::ConfidenceInterval95));
+                Some((display_metric, staircase, effective_err))
+            }
+            _ => None,
+        }) {
+            self.survival_metric = metric;
+            self.survival_staircase = staircase;
+            self.survival_error_display = err_disp;
+        } else {
+            self.survival_metric = SurvivalDisplayMetric::PercentSurvival;
+            self.survival_staircase = true;
+            self.survival_error_display = None;
         }
     }
 
@@ -4515,6 +4556,12 @@ impl ChangeGraphTypeState {
                 stroke_width_pt: 1.0,
             };
             series.gdo = build_gdo_for_option(opt.id, color, marker, self.summary_measure);
+            if let GraphicalDataObject::KaplanMeierStep { show_greenwood_ci, display_metric, staircase, error_display, .. } = &mut series.gdo {
+                *display_metric = self.survival_metric;
+                *staircase = self.survival_staircase;
+                *error_display = self.survival_error_display;
+                *show_greenwood_ci = self.survival_error_display.is_some();
+            }
             if opt.id == "grouped.stacked" {
                 series.y_error_bars = None;
             } else if matches!(series.gdo, GraphicalDataObject::BarWithReplicates { .. } | GraphicalDataObject::ScatterAndLine { .. }) {
@@ -4606,6 +4653,7 @@ fn build_gdo_for_option(option_id: &str, color: Rgba8, marker: MarkerStyle, summ
             marker: Some(marker),
             line: Some(ConnectingLineStyle { kind: LineConnectionKind::PointToPoint, dash_style: LineDashStyle::Solid, stroke_width_pt: 1.5, color }),
             area_fill: None,
+            replicate_lines: curvebook_doc::ReplicateLineMode::default(),
         },
         "col.before_after" => GraphicalDataObject::BeforeAfterLines { marker: Some(marker), line_color: color, stroke_width_pt: 1.2 },
         "col.box_whisker" => GraphicalDataObject::BoxAndWhisker {
@@ -4643,10 +4691,26 @@ fn build_gdo_for_option(option_id: &str, color: Rgba8, marker: MarkerStyle, summ
             show_censored_ticks: true,
             show_greenwood_ci: false,
             ci_dashed: true,
+            display_metric: curvebook_doc::SurvivalDisplayMetric::default(),
+            staircase: true,
+            error_display: None,
         },
         "parts.donut" => GraphicalDataObject::PartsOfWhole { layout: PartsOfWholeLayout::Donut, show_center_total: true },
-        _ => GraphicalDataObject::ScatterAndLine { marker: Some(marker), line: None, area_fill: None },
+        _ => GraphicalDataObject::ScatterAndLine {
+            marker: Some(marker),
+            line: None,
+            area_fill: None,
+            replicate_lines: curvebook_doc::ReplicateLineMode::default(),
+        },
     }
+}
+
+const fn default_alpha_pct_100() -> u8 {
+    100
+}
+
+const fn default_white_paper_opt() -> Option<Rgba8> {
+    Some(Rgba8::WHITE)
 }
 
 /// Non-modal `Format Graph` inspector state (`palette`, `CVD` preview, frame, error bars, markers).
@@ -4687,6 +4751,26 @@ pub struct FormatGraphState {
     pub mv_selected_level: Option<String>,
     #[serde(default)]
     pub mv_levels_dirty: bool,
+    #[serde(default = "default_alpha_pct_100")]
+    pub series_alpha_pct: u8,
+    #[serde(default)]
+    pub alpha_dirty: bool,
+    #[serde(default = "default_true_flag")]
+    pub show_raw_data: bool,
+    #[serde(default)]
+    pub show_fitted_curve: bool,
+    #[serde(default)]
+    pub cached_regression_overlay: Option<RegressionOverlaySpec>,
+    #[serde(default)]
+    pub apply_all_data_sets: bool,
+    #[serde(default = "default_white_paper_opt")]
+    pub paper_fill: Option<Rgba8>,
+    #[serde(default)]
+    pub paper_fill_dirty: bool,
+    #[serde(default)]
+    pub heatmap_labels: HeatmapLabelSpec,
+    #[serde(default)]
+    pub heatmap_labels_dirty: bool,
 }
 
 impl Default for FormatGraphState {
@@ -4716,6 +4800,16 @@ impl Default for FormatGraphState {
             mv_level_is_x: true,
             mv_selected_level: None,
             mv_levels_dirty: false,
+            series_alpha_pct: 100,
+            alpha_dirty: false,
+            show_raw_data: true,
+            show_fitted_curve: false,
+            cached_regression_overlay: None,
+            apply_all_data_sets: false,
+            paper_fill: Some(Rgba8::WHITE),
+            paper_fill_dirty: false,
+            heatmap_labels: HeatmapLabelSpec::default(),
+            heatmap_labels_dirty: false,
         }
     }
 }
@@ -4742,7 +4836,20 @@ impl FormatGraphState {
         self.mv_levels_dirty = false;
         let series_idx = self.selected_series_index.min(graph.spec.series.len().saturating_sub(1));
         self.selected_series_index = series_idx;
-        if let Some(series) = graph.spec.series.get(series_idx) {
+        self.apply_all_data_sets = false;
+        self.alpha_dirty = false;
+        self.paper_fill = graph.spec.paper_fill;
+        self.paper_fill_dirty = false;
+        self.heatmap_labels = graph.spec.heatmap_labels;
+        self.heatmap_labels_dirty = false;
+        self.sync_selected_series_from_spec(&graph.spec);
+    }
+
+    /// Refresh series-scoped formatting controls from `spec.series[self.selected_series_index]`.
+    pub fn sync_selected_series_from_spec(&mut self, spec: &GraphSpec) {
+        let series_idx = self.selected_series_index.min(spec.series.len().saturating_sub(1));
+        self.selected_series_index = series_idx;
+        if let Some(series) = spec.series.get(series_idx) {
             self.error_bar_enabled = series.y_error_bars.is_some();
             self.error_bar_spec = series.y_error_bars.unwrap_or_default();
             if let GraphicalDataObject::Violin { clip_to_observed_range, show_median_and_quartiles, half_violin_with_points, .. } = series.gdo {
@@ -4752,6 +4859,11 @@ impl FormatGraphState {
                 self.half_violin_with_points = false;
                 self.initial_violin_options = None;
             }
+            self.show_raw_data = series.show_raw_data;
+            self.cached_regression_overlay.clone_from(&series.regression_overlay);
+            self.show_fitted_curve = series.regression_overlay.is_some();
+            let alpha_u8 = extract_gdo_alpha_byte(&series.gdo);
+            self.series_alpha_pct = ((f64::from(alpha_u8) / 255.0) * 100.0).round().clamp(0.0, 100.0) as u8;
             self.extract_series_marker_and_dash(&series.gdo);
         }
     }
@@ -4978,8 +5090,39 @@ impl FormatGraphState {
                 "move_to_end" | "format_graph.move_to_end" => {
                     let _ = self.reorder_mv_level("end")?;
                 }
-                other => return Err(format!("unknown Format Graph field `{other}`")),
+                _ => self.apply_extended_format_graph_field(key, val, preset)?,
             }
+        }
+        Ok(())
+    }
+
+    fn apply_extended_format_graph_field(&mut self, key: &str, val: &Value, preset: &LocalePreset) -> Result<(), String> {
+        match key {
+            "series_alpha_pct" | "alpha_pct" | "alpha" | "format_graph.alpha" => {
+                let raw = parse_dialog_num_with_locale(val, key, preset)?;
+                let pct = if raw <= 1.0 && !matches!(key, "series_alpha_pct" | "alpha_pct") { raw * 100.0 } else { raw };
+                self.series_alpha_pct = pct.round().clamp(0.0, 100.0) as u8;
+                self.alpha_dirty = true;
+            }
+            "show_raw_data" | "format_graph.show_raw_data" => {
+                self.show_raw_data = val.as_bool().ok_or_else(|| String::from("`show_raw_data` must be boolean"))?;
+            }
+            "show_fitted_curve" | "format_graph.show_fitted_curve" => {
+                self.show_fitted_curve = val.as_bool().ok_or_else(|| String::from("`show_fitted_curve` must be boolean"))?;
+            }
+            "apply_all_data_sets" | "apply_all" | "format_graph.apply_all_data_sets" | "format_graph.apply_globally" => {
+                self.apply_all_data_sets = val.as_bool().ok_or_else(|| String::from("`apply_all_data_sets` must be boolean"))?;
+            }
+            "paper_fill" | "format_graph.paper_fill" => {
+                self.paper_fill = parse_paper_fill_patch(val)?;
+                self.paper_fill_dirty = true;
+            }
+            "heatmap_labels" | "format_graph.heatmap_labels" => {
+                self.heatmap_labels =
+                    serde_json::from_value::<HeatmapLabelSpec>(val.clone()).map_err(|err| format!("invalid `heatmap_labels`: {err}"))?;
+                self.heatmap_labels_dirty = true;
+            }
+            other => return Err(format!("unknown Format Graph field `{other}`")),
         }
         Ok(())
     }
@@ -5018,25 +5161,47 @@ impl FormatGraphState {
         {
             spec_patch.insert(String::from("multivariate"), json!(enc));
         }
+        if self.paper_fill_dirty {
+            spec_patch.insert(String::from("paper_fill"), json!(self.paper_fill));
+        }
+        if self.heatmap_labels_dirty {
+            spec_patch.insert(String::from("heatmap_labels"), json!(self.heatmap_labels));
+        }
         spec_patch.insert(String::from("legend"), json!({ "visible": self.show_legend, "bordered": self.legend_bordered }));
-        let mut series_obj = json!({
-            "sheet_id": id.as_str(),
-            "series_index": self.selected_series_index,
-            "y_error_bars": error_bars,
-            "marker": {
+        let mut series_patch = serde_json::Map::new();
+        series_patch.insert(String::from("sheet_id"), json!(id.as_str()));
+        if self.apply_all_data_sets {
+            series_patch.insert(String::from("all_series"), json!(true));
+        } else {
+            series_patch.insert(String::from("series_index"), json!(self.selected_series_index));
+        }
+        series_patch.insert(String::from("y_error_bars"), json!(error_bars));
+        series_patch.insert(String::from("show_raw_data"), json!(self.show_raw_data));
+        series_patch.insert(
+            String::from("marker"),
+            json!({
                 "size_pt": self.marker_size_pt,
                 "fill_mode": self.marker_fill_mode,
-            },
-            "connecting_line": {
+            }),
+        );
+        series_patch.insert(
+            String::from("connecting_line"),
+            json!({
                 "dash_style": self.line_dash,
-            },
-        });
-        if (self.half_violin_with_points || self.initial_violin_options.is_some_and(|(_, _, was_half)| was_half))
-            && let Some(obj) = series_obj.as_object_mut()
-        {
+            }),
+        );
+        if self.alpha_dirty {
+            let alpha_u8 = ((f64::from(self.series_alpha_pct) / 100.0) * 255.0).round().clamp(0.0, 255.0) as u8;
+            series_patch.insert(String::from("alpha"), json!(alpha_u8));
+        }
+        if self.cached_regression_overlay.is_some() {
+            series_patch
+                .insert(String::from("regression_overlay"), if self.show_fitted_curve { json!(self.cached_regression_overlay) } else { Value::Null });
+        }
+        if self.half_violin_with_points || self.initial_violin_options.is_some_and(|(_, _, was_half)| was_half) {
             let swatch = self.palette.color_at(self.selected_series_index);
             let (clip_to_observed_range, show_median_and_quartiles, _) = self.initial_violin_options.unwrap_or((true, true, false));
-            obj.insert(
+            series_patch.insert(
                 String::from("gdo"),
                 json!(GraphicalDataObject::Violin {
                     fill_color: swatch.with_alpha(190),
@@ -5047,6 +5212,7 @@ impl FormatGraphState {
                 }),
             );
         }
+        let series_obj = Value::Object(series_patch);
         let mut intents = vec![ToolCommandIntent::new("graph.setSpec", Value::Object(spec_patch))];
         if !matches!(self.graph_kind, Some(GraphKind::MultipleVariables)) {
             intents.push(ToolCommandIntent::new("graph.setSeries", series_obj));
@@ -5083,6 +5249,45 @@ fn apply_marker_and_dash(gdo: &mut GraphicalDataObject, swatch: Rgba8, size_pt: 
         }
         _ => {}
     }
+}
+
+const fn extract_gdo_alpha_byte(gdo: &GraphicalDataObject) -> u8 {
+    match gdo {
+        GraphicalDataObject::ScatterAndLine { marker, line, area_fill, .. } => {
+            if let Some(m) = marker {
+                m.fill_color.a
+            } else if let Some(l) = line {
+                l.color.a
+            } else if let Some(af) = area_fill {
+                af.fill_color.a
+            } else {
+                255
+            }
+        }
+        GraphicalDataObject::BarWithReplicates { fill_color, .. }
+        | GraphicalDataObject::BoxAndWhisker { fill_color, .. }
+        | GraphicalDataObject::Violin { fill_color, .. }
+        | GraphicalDataObject::FloatingBar { fill_color, .. } => fill_color.a,
+        GraphicalDataObject::AlignedDotPlot { marker, .. } => marker.fill_color.a,
+        GraphicalDataObject::BeforeAfterLines { line_color, .. } | GraphicalDataObject::KaplanMeierStep { line_color, .. } => line_color.a,
+        GraphicalDataObject::PartsOfWhole { .. } => 255,
+    }
+}
+
+fn parse_paper_fill_patch(val: &Value) -> Result<Option<Rgba8>, String> {
+    if val.is_null() {
+        return Ok(None);
+    }
+    if let Some(s) = val.as_str() {
+        return match s.trim().to_ascii_lowercase().as_str() {
+            "none" | "transparent" => Ok(None),
+            "white" => Ok(Some(Rgba8::WHITE)),
+            "cream" => Ok(Some(Rgba8::rgb(255, 251, 235))),
+            "slate" => Ok(Some(Rgba8::rgb(241, 245, 249))),
+            other => Rgba8::from_hex(other).map(Some).ok_or_else(|| format!("invalid paper fill `{other}`")),
+        };
+    }
+    serde_json::from_value::<Rgba8>(val.clone()).map(Some).map_err(|err| format!("invalid `paper_fill`: {err}"))
 }
 
 /// Which axis (`X`, `Y`, or optional right `Y2`) is being edited in `Format Axes`.
@@ -5395,6 +5600,19 @@ impl FormatAxesState {
                 }
                 "stroke_width_pt" | "axes.stroke_width_pt" => {
                     self.axis_draft.stroke_width_pt = parse_finite_f64_with_locale(val, key, preset)?.clamp(0.2, 8.0);
+                }
+                "tick_direction" | "axes.tick_direction" => {
+                    let raw = val.as_str().ok_or_else(|| String::from("`tick_direction` must be a string"))?;
+                    self.axis_draft.tick_direction = match norm_key(raw).as_str() {
+                        "outside" => TickDirection::Outside,
+                        "inside" => TickDirection::Inside,
+                        "both" => TickDirection::Both,
+                        "none" | "off" => TickDirection::None,
+                        other => return Err(format!("unknown `tick_direction` `{other}`")),
+                    };
+                }
+                "show_tick_labels" | "axes.show_tick_labels" => {
+                    self.axis_draft.show_tick_labels = val.as_bool().ok_or_else(|| String::from("`show_tick_labels` must be boolean"))?;
                 }
                 "add_segment" | "axes.add_segment" if val.as_bool() == Some(true) => {
                     let _ = self.add_segment();
@@ -6150,6 +6368,10 @@ impl BubblePlotInspectorState {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ApplyStyleFromState {
     pub target_graph_id: Option<SheetId>,
+    #[serde(default)]
+    pub target_graph_ids: Vec<SheetId>,
+    #[serde(default)]
+    pub target_candidates: Vec<(SheetId, String)>,
     pub donor_graph_id: Option<SheetId>,
     pub donor_candidates: Vec<(SheetId, String)>,
     pub clone_palette: bool,
@@ -6158,13 +6380,47 @@ pub struct ApplyStyleFromState {
 }
 
 impl ApplyStyleFromState {
-    /// Discover candidate donor graph sheets in `doc` distinct from `target_graph_id`.
+    /// Discover candidate donor & target graph sheets in `doc` for single target `target_graph_id`.
     pub fn open_for_graph(&mut self, target_graph_id: &SheetId, doc: &ProjectDocument) {
-        self.target_graph_id = Some(target_graph_id.clone());
+        self.open_for_graphs(std::slice::from_ref(target_graph_id), doc);
+    }
+
+    /// Discover candidate donor & target graph sheets in `doc` for one or more targets.
+    pub fn open_for_graphs(&mut self, targets: &[SheetId], doc: &ProjectDocument) {
+        self.target_candidates = doc.graph_sheets.iter().map(|g| (g.id.clone(), g.title.clone())).collect();
+        let mut selected: Vec<SheetId> = Vec::new();
+        for tid in targets {
+            if doc.graph_sheet(tid).is_some() && !selected.contains(tid) {
+                selected.push(tid.clone());
+            }
+        }
+        if selected.is_empty()
+            && let Some(first) = doc.graph_sheets.first()
+        {
+            selected.push(first.id.clone());
+        }
+        self.target_graph_id = selected.first().cloned();
+        self.target_graph_ids = selected;
         self.clone_palette = true;
         self.clone_frame_and_axes = true;
         self.clone_error_bars_and_legend = true;
-        self.donor_candidates = doc.graph_sheets.iter().filter(|g| &g.id != target_graph_id).map(|g| (g.id.clone(), g.title.clone())).collect();
+
+        let primary_single = (self.target_graph_ids.len() == 1).then(|| self.target_graph_ids[0].clone());
+        let non_target_donors: Vec<(SheetId, String)> =
+            doc.graph_sheets.iter().filter(|g| !self.target_graph_ids.contains(&g.id)).map(|g| (g.id.clone(), g.title.clone())).collect();
+        self.donor_candidates = if let Some(ref single) = primary_single {
+            doc.graph_sheets.iter().filter(|g| &g.id != single).map(|g| (g.id.clone(), g.title.clone())).collect()
+        } else if !non_target_donors.is_empty() {
+            let mut list = non_target_donors;
+            for g in &doc.graph_sheets {
+                if !list.iter().any(|(id, _)| id == &g.id) {
+                    list.push((g.id.clone(), g.title.clone()));
+                }
+            }
+            list
+        } else {
+            doc.graph_sheets.iter().map(|g| (g.id.clone(), g.title.clone())).collect()
+        };
         self.donor_graph_id = self.donor_candidates.first().map(|(id, _)| id.clone());
     }
 
@@ -6194,8 +6450,21 @@ impl ApplyStyleFromState {
     /// Emit `graph.applyStyleFrom` command intent.
     #[must_use]
     pub fn commit_intent(&self) -> Option<ToolCommandIntent> {
-        let target = self.target_graph_id.as_ref()?;
         let donor = self.donor_graph_id.as_ref()?;
+        if self.target_graph_ids.len() > 1 {
+            let target_ids: Vec<&str> = self.target_graph_ids.iter().map(SheetId::as_str).collect();
+            return Some(ToolCommandIntent::new(
+                "graph.applyStyleFrom",
+                json!({
+                    "target_sheet_ids": target_ids,
+                    "donor_sheet_id": donor.as_str(),
+                    "clone_palette": self.clone_palette,
+                    "clone_frame_and_axes": self.clone_frame_and_axes,
+                    "clone_error_bars_and_legend": self.clone_error_bars_and_legend,
+                }),
+            ));
+        }
+        let target = self.target_graph_ids.first().or(self.target_graph_id.as_ref())?;
         Some(ToolCommandIntent::new(
             "graph.applyStyleFrom",
             json!({
@@ -6217,6 +6486,19 @@ impl ApplyStyleFromState {
                     if !s.is_empty() {
                         self.donor_graph_id = Some(SheetId::from(s));
                     }
+                }
+                "target_sheet_ids" | "target_graph_ids" | "apply_style.target_sheet_ids" => {
+                    let arr = val.as_array().ok_or_else(|| String::from("`target_sheet_ids` must be an array"))?;
+                    let mut ids = Vec::with_capacity(arr.len());
+                    for entry in arr {
+                        let s = entry.as_str().ok_or_else(|| String::from("target sheet ID must be a string"))?;
+                        let sid = SheetId::from(s);
+                        if !ids.contains(&sid) {
+                            ids.push(sid);
+                        }
+                    }
+                    self.target_graph_id = ids.first().cloned();
+                    self.target_graph_ids = ids;
                 }
                 "clone_palette" | "style.clone_palette" | "apply_style.clone_palette" => {
                     self.clone_palette = val.as_bool().ok_or_else(|| String::from("`clone_palette` must be boolean"))?;
@@ -6316,7 +6598,15 @@ impl PageLayoutComposerState {
     /// Append a live embedded table item.
     pub fn add_live_table(&mut self, source_sheet_id: SheetId, tab_id: Option<String>, bounds_pt: RectPt) {
         let next = self.items.len() + 1;
-        self.items.push(LayoutItem::LiveTable { id: format!("table-{next}"), source_sheet_id, tab_id, bounds_pt });
+        self.items.push(LayoutItem::LiveTable {
+            id: format!("table-{next}"),
+            source_sheet_id,
+            tab_id,
+            bounds_pt,
+            selected_rows: None,
+            selected_cols: None,
+            style: curvebook_doc::EmbeddedTableStyle::default(),
+        });
     }
 
     /// Append a Markdown / hook-interpolated callout item.
@@ -7446,8 +7736,583 @@ fn row_title_at(arch: &TableArchetype, row: usize) -> Option<String> {
     }
 }
 
+/// State for the `Create New Graph...` modal dialog (`WF-56` / `R13.3`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateGraphDialogState {
+    pub source_sheet_id: Option<SheetId>,
+    pub source_candidates: Vec<(SheetId, String)>,
+    pub kind_slug: String,
+    pub one_per_data_set: bool,
+    pub y_axis_title: String,
+    pub graph_title: String,
+}
+
+impl Default for CreateGraphDialogState {
+    fn default() -> Self {
+        Self {
+            source_sheet_id: None,
+            source_candidates: Vec::new(),
+            kind_slug: String::from("auto"),
+            one_per_data_set: false,
+            y_axis_title: String::new(),
+            graph_title: String::new(),
+        }
+    }
+}
+
+impl CreateGraphDialogState {
+    /// Populate candidate upstream tables/analyzable results and select `preferred_source` or the first valid source.
+    pub fn open_for_document(&mut self, doc: &ProjectDocument, preferred_source: Option<&SheetId>) {
+        self.source_candidates.clear();
+        for ds in &doc.data_sheets {
+            self.source_candidates.push((ds.id.clone(), ds.title.clone()));
+        }
+        for rs in &doc.result_sheets {
+            if rs.analyzable_data.is_some() {
+                self.source_candidates.push((rs.id.clone(), rs.title().to_owned()));
+            }
+        }
+        let chosen = preferred_source
+            .filter(|id| self.source_candidates.iter().any(|(cid, _)| cid == *id))
+            .cloned()
+            .or_else(|| doc.active_sheet_id.as_ref().filter(|id| self.source_candidates.iter().any(|(cid, _)| cid == *id)).cloned())
+            .or_else(|| self.source_candidates.first().map(|(id, _)| id.clone()));
+        self.source_sheet_id = chosen;
+        self.kind_slug = String::from("auto");
+        self.one_per_data_set = false;
+        self.y_axis_title.clear();
+        self.graph_title.clear();
+    }
+
+    /// Apply modal field patch entries for interactive/headless GUI actions.
+    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
+        for (key, val) in fields {
+            match key.as_str() {
+                "data_sheet_id" | "source_sheet_id" | "create_graph.source_sheet_id" => {
+                    let s = val.as_str().ok_or_else(|| String::from("`source_sheet_id` must be a string"))?;
+                    self.source_sheet_id = Some(SheetId::new(s));
+                }
+                "kind" | "kind_slug" | "create_graph.kind" => {
+                    let s = val.as_str().ok_or_else(|| String::from("`kind` must be a string"))?;
+                    self.kind_slug = s.trim().to_ascii_lowercase();
+                }
+                "one_per_data_set" | "create_graph.one_per_data_set" => {
+                    self.one_per_data_set = val.as_bool().ok_or_else(|| String::from("`one_per_data_set` must be a boolean"))?;
+                }
+                "y_axis_title" | "create_graph.y_axis_title" => {
+                    self.y_axis_title = val.as_str().ok_or_else(|| String::from("`y_axis_title` must be a string"))?.to_owned();
+                }
+                "title" | "graph_title" | "create_graph.title" => {
+                    self.graph_title = val.as_str().ok_or_else(|| String::from("`title` must be a string"))?.to_owned();
+                }
+                other => return Err(format!("unknown CreateGraph field `{other}`")),
+            }
+        }
+        Ok(())
+    }
+
+    /// Build the `graph.create` engine command intent on confirmation.
+    #[must_use]
+    pub fn commit_intent(&self) -> Option<ToolCommandIntent> {
+        let src = self.source_sheet_id.as_ref()?;
+        let mut obj = serde_json::Map::new();
+        obj.insert(String::from("data_sheet_id"), json!(src.as_str()));
+        if !self.kind_slug.is_empty() && self.kind_slug != "auto" {
+            obj.insert(String::from("kind"), json!(self.kind_slug));
+        }
+        if self.one_per_data_set {
+            obj.insert(String::from("one_per_data_set"), json!(true));
+        }
+        if !self.y_axis_title.trim().is_empty() {
+            obj.insert(String::from("y_axis_title"), json!(self.y_axis_title.trim()));
+        }
+        if !self.graph_title.trim().is_empty() {
+            obj.insert(String::from("title"), json!(self.graph_title.trim()));
+        }
+        Some(ToolCommandIntent::new("graph.create", Value::Object(obj)))
+    }
+}
+
+/// State for the `Equalize Scaling...` modal dialog (`WF-63` / `R13.5`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EqualizeScalingDialogState {
+    pub layout_sheet_id: Option<SheetId>,
+    pub mode: String,
+    pub explicit_percent: f64,
+    pub selected_panel_ids: Vec<String>,
+    pub available_panels: Vec<(String, String)>,
+}
+
+impl Default for EqualizeScalingDialogState {
+    fn default() -> Self {
+        Self {
+            layout_sheet_id: None,
+            mode: String::from("match_smallest"),
+            explicit_percent: 100.0,
+            selected_panel_ids: Vec::new(),
+            available_panels: Vec::new(),
+        }
+    }
+}
+
+impl EqualizeScalingDialogState {
+    /// Populate available live graph panels on `layout` and reset mode defaults.
+    pub fn open_for_layout(&mut self, doc: &ProjectDocument, layout: &LayoutSheet) {
+        self.layout_sheet_id = Some(layout.id.clone());
+        self.mode = String::from("match_smallest");
+        self.explicit_percent = 100.0;
+        self.selected_panel_ids.clear();
+        self.available_panels.clear();
+        for (lg_idx, item) in layout.spec.items.iter().filter(|it| matches!(it, LayoutItem::LiveGraph { .. })).enumerate() {
+            if let LayoutItem::LiveGraph { id, graph_sheet_id, badge_override, .. } = item {
+                let title = doc.graph_sheet(graph_sheet_id).map_or_else(|| graph_sheet_id.as_str().to_owned(), |g| g.title.clone());
+                let effective_badge = badge_override.clone().or_else(|| layout.spec.panel_badges.badge_for(lg_idx));
+                let display = match effective_badge {
+                    Some(b) if !b.is_empty() => format!("{b}: {title}"),
+                    _ => title,
+                };
+                self.available_panels.push((id.clone(), display));
+            }
+        }
+    }
+
+    /// Apply modal field patch entries for interactive/headless GUI actions.
+    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
+        for (key, val) in fields {
+            match key.as_str() {
+                "mode" | "equalize_scaling.mode" => {
+                    let s = val.as_str().ok_or_else(|| String::from("`mode` must be a string"))?;
+                    self.mode = match s.trim().to_ascii_lowercase().as_str() {
+                        "match_smallest" | "smallest" => String::from("match_smallest"),
+                        "match_largest" | "largest" => String::from("match_largest"),
+                        "explicit_percent" | "explicit" => String::from("explicit_percent"),
+                        other => return Err(format!("unknown EqualizeScaling mode `{other}`")),
+                    };
+                }
+                "percent" | "explicit_percent" | "equalize_scaling.percent" => {
+                    let p = val.as_f64().ok_or_else(|| String::from("`percent` must be a finite number"))?;
+                    if !p.is_finite() || !(5.0..=500.0).contains(&p) {
+                        return Err(String::from("`percent` must be finite in [5.0, 500.0]"));
+                    }
+                    self.explicit_percent = p;
+                }
+                "panel_ids" | "selected_panel_ids" | "equalize_scaling.panel_ids" => {
+                    let arr = val.as_array().ok_or_else(|| String::from("`panel_ids` must be an array"))?;
+                    let mut next = Vec::with_capacity(arr.len());
+                    for entry in arr {
+                        let s = entry.as_str().ok_or_else(|| String::from("panel ID must be a string"))?;
+                        next.push(s.to_owned());
+                    }
+                    self.selected_panel_ids = next;
+                }
+                other => return Err(format!("unknown EqualizeScaling field `{other}`")),
+            }
+        }
+        Ok(())
+    }
+
+    /// Build the `layout.equalizeScaling` engine command intent on confirmation.
+    #[must_use]
+    pub fn commit_intent(&self) -> Option<ToolCommandIntent> {
+        let lid = self.layout_sheet_id.as_ref()?;
+        if self.available_panels.is_empty() {
+            return None;
+        }
+        let mut obj = serde_json::Map::new();
+        obj.insert(String::from("sheet_id"), json!(lid.as_str()));
+        obj.insert(String::from("mode"), json!(self.mode));
+        if self.mode == "explicit_percent" {
+            obj.insert(String::from("percent"), json!(self.explicit_percent));
+        }
+        if !self.selected_panel_ids.is_empty() {
+            obj.insert(String::from("panel_ids"), json!(self.selected_panel_ids));
+        }
+        Some(ToolCommandIntent::new("layout.equalizeScaling", Value::Object(obj)))
+    }
+}
+
+/// Modal state for `Format Embedded Table...` (`WF-58` / `R13.4`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FormatEmbeddedTableDialogState {
+    pub sheet_id: Option<SheetId>,
+    pub target_index: usize,
+    pub is_layout: bool,
+    pub source_label: String,
+    pub bounds_pt: RectPt,
+    pub style: EmbeddedTableStyle,
+}
+
+impl Default for FormatEmbeddedTableDialogState {
+    fn default() -> Self {
+        Self {
+            sheet_id: None,
+            target_index: 0,
+            is_layout: false,
+            source_label: String::new(),
+            bounds_pt: RectPt::new(180.0, 40.0, 180.0, 90.0),
+            style: EmbeddedTableStyle::default(),
+        }
+    }
+}
+
+impl FormatEmbeddedTableDialogState {
+    /// Populate draft state from `gs.spec.annotations[ann_idx]`.
+    pub fn open_for_graph(&mut self, doc: &ProjectDocument, gs: &GraphSheet, ann_idx: usize) -> bool {
+        let Some(GraphAnnotation::EmbeddedResultTable { result_sheet_id, tab_id, bounds_pt, style, .. }) = gs.spec.annotations.get(ann_idx) else {
+            return false;
+        };
+        let rs_title = doc.result_sheet(result_sheet_id).map_or_else(|| result_sheet_id.as_str().to_owned(), |r| r.title().to_owned());
+        self.sheet_id = Some(gs.id.clone());
+        self.target_index = ann_idx;
+        self.is_layout = false;
+        self.source_label = tab_id.as_ref().map_or(rs_title.clone(), |t| format!("{rs_title} · {t}"));
+        self.bounds_pt = *bounds_pt;
+        self.style = *style;
+        true
+    }
+
+    /// Populate draft state from `ls.spec.items[item_idx]`.
+    pub fn open_for_layout(&mut self, doc: &ProjectDocument, ls: &LayoutSheet, item_idx: usize) -> bool {
+        let Some(LayoutItem::LiveTable { source_sheet_id, tab_id, bounds_pt, style, .. }) = ls.spec.items.get(item_idx) else {
+            return false;
+        };
+        let src_title = doc
+            .result_sheet(source_sheet_id)
+            .map(|r| r.title().to_owned())
+            .or_else(|| doc.data_sheet(source_sheet_id).map(|d| d.title.clone()))
+            .or_else(|| doc.info_sheet(source_sheet_id).map(|i| i.title.clone()))
+            .unwrap_or_else(|| source_sheet_id.as_str().to_owned());
+        self.sheet_id = Some(ls.id.clone());
+        self.target_index = item_idx;
+        self.is_layout = true;
+        self.source_label = tab_id.as_ref().map_or(src_title.clone(), |t| format!("{src_title} · {t}"));
+        self.bounds_pt = *bounds_pt;
+        self.style = *style;
+        true
+    }
+
+    /// Apply localized/headless field patch entries to this embedded table style draft.
+    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
+        for (key, val) in fields {
+            match key.as_str() {
+                "show_column_titles" | "embedded_table.show_column_titles" => {
+                    self.style.show_column_titles = val.as_bool().ok_or_else(|| format!("`{key}` must be bool"))?;
+                }
+                "show_row_titles" | "embedded_table.show_row_titles" => {
+                    self.style.show_row_titles = val.as_bool().ok_or_else(|| format!("`{key}` must be bool"))?;
+                }
+                "transpose" | "embedded_table.transpose" => {
+                    self.style.transpose = val.as_bool().ok_or_else(|| format!("`{key}` must be bool"))?;
+                }
+                "bold_headers" | "embedded_table.bold_headers" => {
+                    self.style.bold_headers = val.as_bool().ok_or_else(|| format!("`{key}` must be bool"))?;
+                }
+                "font_size_pt" | "embedded_table.font_size" => {
+                    let f = val.as_f64().ok_or_else(|| format!("`{key}` must be finite"))?;
+                    if !f.is_finite() || f <= 0.0 || f > 72.0 {
+                        return Err(format!("`{key}` must be in (0, 72]"));
+                    }
+                    self.style.font_size_pt = f;
+                }
+                "outer_border_width_pt" | "embedded_table.outer_border_width_pt" => {
+                    let f = val.as_f64().ok_or_else(|| format!("`{key}` must be finite"))?;
+                    if !f.is_finite() || !(0.0..=12.0).contains(&f) {
+                        return Err(format!("`{key}` must be in [0, 12]"));
+                    }
+                    self.style.outer_border_width_pt = f;
+                }
+                "gridline_width_pt" | "embedded_table.gridline_width_pt" => {
+                    let f = val.as_f64().ok_or_else(|| format!("`{key}` must be finite"))?;
+                    if !f.is_finite() || !(0.0..=12.0).contains(&f) {
+                        return Err(format!("`{key}` must be in [0, 12]"));
+                    }
+                    self.style.gridline_width_pt = f;
+                }
+                "border_color" | "embedded_table.border_color" => {
+                    self.style.border_color = parse_threshold_color(val, key)?;
+                }
+                "fill_color" | "embedded_table.fill_color" => {
+                    self.style.fill_color = if val.is_null() { None } else { Some(parse_threshold_color(val, key)?) };
+                }
+                other => return Err(format!("unknown FormatEmbeddedTable field `{other}`")),
+            }
+        }
+        Ok(())
+    }
+
+    /// Build single atomic `graph.setSpec` or `layout.setSpec` intent updating the target table item.
+    #[must_use]
+    pub fn commit_intent(&self, doc: &ProjectDocument) -> Option<ToolCommandIntent> {
+        let sid = self.sheet_id.as_ref()?;
+        if self.is_layout {
+            let ls = doc.layout_sheet(sid)?;
+            let mut items = ls.spec.items.clone();
+            let item = items.get_mut(self.target_index)?;
+            let LayoutItem::LiveTable { bounds_pt, style, .. } = item else {
+                return None;
+            };
+            *bounds_pt = self.bounds_pt;
+            *style = self.style;
+            Some(ToolCommandIntent::new("layout.setSpec", json!({ "sheet_id": sid.as_str(), "spec": { "items": items } })))
+        } else {
+            let gs = doc.graph_sheet(sid)?;
+            let mut annotations = gs.spec.annotations.clone();
+            let ann = annotations.get_mut(self.target_index)?;
+            let GraphAnnotation::EmbeddedResultTable { bounds_pt, style, .. } = ann else {
+                return None;
+            };
+            *bounds_pt = self.bounds_pt;
+            *style = self.style;
+            Some(ToolCommandIntent::new("graph.setSpec", json!({ "sheet_id": sid.as_str(), "spec": { "annotations": annotations } })))
+        }
+    }
+}
+
+/// Modal state for `Format Image...` (`WF-57` / `R13.7`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FormatImageDialogState {
+    pub sheet_id: Option<SheetId>,
+    pub target_index: usize,
+    pub is_layout: bool,
+    pub asset_id: String,
+    pub pixel_size: Option<(u32, u32)>,
+    pub bounds_pt: RectPt,
+    pub rotation_deg: f64,
+    pub lock_aspect_ratio: bool,
+    pub crop: CropInsetsPt,
+    pub border_enabled: bool,
+    pub border_width_pt: f64,
+    pub border_color: Rgba8,
+    pub border_dash: LineDashStyle,
+}
+
+impl Default for FormatImageDialogState {
+    fn default() -> Self {
+        Self {
+            sheet_id: None,
+            target_index: 0,
+            is_layout: false,
+            asset_id: String::new(),
+            pixel_size: None,
+            bounds_pt: RectPt::new(24.0, 24.0, 120.0, 90.0),
+            rotation_deg: 0.0,
+            lock_aspect_ratio: true,
+            crop: CropInsetsPt::default(),
+            border_enabled: false,
+            border_width_pt: 0.75,
+            border_color: Rgba8::BLACK,
+            border_dash: LineDashStyle::Solid,
+        }
+    }
+}
+
+struct FormatImageSeed<'a> {
+    doc: &'a ProjectDocument,
+    sheet_id: SheetId,
+    target_index: usize,
+    is_layout: bool,
+    asset_id: &'a str,
+    bounds_pt: RectPt,
+    rotation_deg: f64,
+    lock_aspect_ratio: bool,
+    crop: CropInsetsPt,
+    border: Option<ImageBorderSpec>,
+}
+
+impl FormatImageDialogState {
+    fn populate_common(&mut self, seed: FormatImageSeed<'_>) {
+        self.sheet_id = Some(seed.sheet_id);
+        self.target_index = seed.target_index;
+        self.is_layout = seed.is_layout;
+        self.asset_id = seed.asset_id.to_owned();
+        self.pixel_size = seed.doc.image_asset(seed.asset_id).map(|a| a.pixel_size);
+        self.bounds_pt = seed.bounds_pt;
+        self.rotation_deg = seed.rotation_deg;
+        self.lock_aspect_ratio = seed.lock_aspect_ratio;
+        self.crop = seed.crop;
+        if let Some(b) = seed.border {
+            self.border_enabled = true;
+            self.border_width_pt = b.width_pt;
+            self.border_color = b.color;
+            self.border_dash = b.dash;
+        } else {
+            self.border_enabled = false;
+            self.border_width_pt = 0.75;
+            self.border_color = Rgba8::BLACK;
+            self.border_dash = LineDashStyle::Solid;
+        }
+    }
+
+    /// Populate draft state from `gs.spec.annotations[ann_idx]`.
+    pub fn open_for_graph(&mut self, doc: &ProjectDocument, gs: &GraphSheet, ann_idx: usize) -> bool {
+        let Some(GraphAnnotation::EmbeddedImage { asset_id, bounds_pt, rotation_deg, lock_aspect_ratio, crop, border }) =
+            gs.spec.annotations.get(ann_idx)
+        else {
+            return false;
+        };
+        self.populate_common(FormatImageSeed {
+            doc,
+            sheet_id: gs.id.clone(),
+            target_index: ann_idx,
+            is_layout: false,
+            asset_id,
+            bounds_pt: *bounds_pt,
+            rotation_deg: *rotation_deg,
+            lock_aspect_ratio: *lock_aspect_ratio,
+            crop: *crop,
+            border: *border,
+        });
+        true
+    }
+
+    /// Populate draft state from `ls.spec.items[item_idx]`.
+    pub fn open_for_layout(&mut self, doc: &ProjectDocument, ls: &LayoutSheet, item_idx: usize) -> bool {
+        let Some(LayoutItem::EmbeddedImage { asset_id, bounds_pt, rotation_deg, lock_aspect_ratio, crop, border, .. }) = ls.spec.items.get(item_idx)
+        else {
+            return false;
+        };
+        self.populate_common(FormatImageSeed {
+            doc,
+            sheet_id: ls.id.clone(),
+            target_index: item_idx,
+            is_layout: true,
+            asset_id,
+            bounds_pt: *bounds_pt,
+            rotation_deg: *rotation_deg,
+            lock_aspect_ratio: *lock_aspect_ratio,
+            crop: *crop,
+            border: *border,
+        });
+        true
+    }
+
+    /// Intrinsic height/width aspect ratio falling back to current bounds aspect ratio.
+    #[must_use]
+    pub fn aspect_h_over_w(&self) -> f64 {
+        self.pixel_size
+            .filter(|&(w, h)| w > 0 && h > 0)
+            .map(|(w, h)| f64::from(h) / f64::from(w))
+            .unwrap_or_else(|| if self.bounds_pt.width > 0.0 { self.bounds_pt.height / self.bounds_pt.width } else { 1.0 })
+    }
+
+    /// Apply localized/headless field patch entries to this embedded image draft.
+    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
+        for (key, val) in fields {
+            match key.as_str() {
+                "width_pt" | "format_image.width_pt" => {
+                    let w = val.as_f64().ok_or_else(|| format!("`{key}` must be finite"))?;
+                    if !w.is_finite() || w <= 0.0 {
+                        return Err(format!("`{key}` must be finite and > 0"));
+                    }
+                    self.bounds_pt.width = w;
+                    if self.lock_aspect_ratio {
+                        self.bounds_pt.height = (w * self.aspect_h_over_w()).max(1.0);
+                    }
+                }
+                "height_pt" | "format_image.height_pt" => {
+                    let h = val.as_f64().ok_or_else(|| format!("`{key}` must be finite"))?;
+                    if !h.is_finite() || h <= 0.0 {
+                        return Err(format!("`{key}` must be finite and > 0"));
+                    }
+                    self.bounds_pt.height = h;
+                    if self.lock_aspect_ratio {
+                        self.bounds_pt.width = (h / self.aspect_h_over_w().max(1e-9)).max(1.0);
+                    }
+                }
+                "lock_aspect_ratio" | "format_image.lock_aspect_ratio" => {
+                    self.lock_aspect_ratio = val.as_bool().ok_or_else(|| format!("`{key}` must be bool"))?;
+                }
+                "rotation_deg" | "format_image.rotation_deg" => {
+                    let deg = val.as_f64().ok_or_else(|| format!("`{key}` must be finite"))?;
+                    if !deg.is_finite() {
+                        return Err(format!("`{key}` must be finite"));
+                    }
+                    self.rotation_deg = deg;
+                }
+                "crop_left_pt" | "format_image.crop.left" => self.crop.left_pt = parse_nonneg_crop(val, key)?,
+                "crop_right_pt" | "format_image.crop.right" => self.crop.right_pt = parse_nonneg_crop(val, key)?,
+                "crop_top_pt" | "format_image.crop.top" => self.crop.top_pt = parse_nonneg_crop(val, key)?,
+                "crop_bottom_pt" | "format_image.crop.bottom" => self.crop.bottom_pt = parse_nonneg_crop(val, key)?,
+                "border_enabled" | "format_image.border.enabled" => {
+                    self.border_enabled = val.as_bool().ok_or_else(|| format!("`{key}` must be bool"))?;
+                }
+                "border_width_pt" | "format_image.border.width" => {
+                    let w = parse_nonneg_crop(val, key)?;
+                    self.border_enabled = true;
+                    self.border_width_pt = w;
+                }
+                "border_color" | "format_image.border.color" => {
+                    self.border_enabled = true;
+                    self.border_color = parse_threshold_color(val, key)?;
+                }
+                "border_dash" | "format_image.border.dash" => {
+                    self.border_enabled = true;
+                    self.border_dash = parse_threshold_dash_style(val, key)?;
+                }
+                other => return Err(format!("unknown FormatImage field `{other}`")),
+            }
+        }
+        Ok(())
+    }
+
+    /// Build `graph.updateImage` or `layout.updateImage` engine intent cleanly.
+    #[must_use]
+    pub fn commit_intent(&self) -> Option<ToolCommandIntent> {
+        let sid = self.sheet_id.as_ref()?;
+        let dash_slug = match self.border_dash {
+            LineDashStyle::Solid => "solid",
+            LineDashStyle::Dashed => "dashed",
+            LineDashStyle::Dotted => "dotted",
+            LineDashStyle::DashDot => "dash_dot",
+            LineDashStyle::DashDotDot => "dash_dot_dot",
+            LineDashStyle::LongDash => "long_dash",
+        };
+        let border_val = if self.border_enabled {
+            let c = self.border_color;
+            json!({
+                "width_pt": self.border_width_pt,
+                "color": format!("#{:02X}{:02X}{:02X}{:02X}", c.r, c.g, c.b, c.a),
+                "dash": dash_slug,
+            })
+        } else {
+            Value::Null
+        };
+        let idx_key = if self.is_layout { "item_index" } else { "annotation_index" };
+        let cmd_id = if self.is_layout { "layout.updateImage" } else { "graph.updateImage" };
+        let mut obj = serde_json::Map::new();
+        obj.insert(String::from("sheet_id"), json!(sid.as_str()));
+        obj.insert(String::from(idx_key), json!(self.target_index));
+        obj.insert(String::from("bounds_pt"), json!([self.bounds_pt.x, self.bounds_pt.y, self.bounds_pt.width, self.bounds_pt.height]));
+        obj.insert(String::from("rotation_deg"), json!(self.rotation_deg));
+        obj.insert(String::from("lock_aspect_ratio"), json!(self.lock_aspect_ratio));
+        obj.insert(
+            String::from("crop"),
+            json!({
+                "left_pt": self.crop.left_pt,
+                "right_pt": self.crop.right_pt,
+                "top_pt": self.crop.top_pt,
+                "bottom_pt": self.crop.bottom_pt,
+            }),
+        );
+        obj.insert(String::from("border"), border_val);
+        Some(ToolCommandIntent::new(cmd_id, Value::Object(obj)))
+    }
+}
+
+fn parse_nonneg_crop(val: &Value, key: &str) -> Result<f64, String> {
+    let f = val.as_f64().ok_or_else(|| format!("`{key}` must be finite"))?;
+    if !f.is_finite() || f < 0.0 {
+        return Err(format!("`{key}` must be finite and >= 0"));
+    }
+    Ok(f)
+}
+
+const fn default_grid_overlay_spacing_pt() -> f64 {
+    18.0
+}
+
 /// Interactive state for the graph/layout canvas, non-modal inspectors, and parameter dialogs.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CanvasDialogState {
     pub canvas: CanvasToolState,
     pub active_dialog: ActiveDialog,
@@ -7482,6 +8347,10 @@ pub struct CanvasDialogState {
     #[serde(default)]
     pub ruler_unit: PhysicalUnit,
     #[serde(default)]
+    pub grid_overlay_visible: bool,
+    #[serde(default = "default_grid_overlay_spacing_pt")]
+    pub grid_overlay_spacing_pt: f64,
+    #[serde(default)]
     pub journal_preset: Option<curvebook_tools::JournalWidthPreset>,
     #[serde(default)]
     pub pan_zoom: PanZoomInertiaState,
@@ -7501,6 +8370,62 @@ pub struct CanvasDialogState {
     pub insert_model_equation: InsertModelEquationDialogState,
     #[serde(default)]
     pub feedback: crate::feedback::FeedbackDraft,
+    #[serde(default)]
+    pub create_graph: CreateGraphDialogState,
+    #[serde(default)]
+    pub equalize_scaling: EqualizeScalingDialogState,
+    #[serde(default)]
+    pub format_embedded_table: FormatEmbeddedTableDialogState,
+    #[serde(default)]
+    pub format_image: FormatImageDialogState,
+}
+
+impl Default for CanvasDialogState {
+    fn default() -> Self {
+        Self {
+            canvas: CanvasToolState::default(),
+            active_dialog: ActiveDialog::default(),
+            status_banner: None,
+            active_inspector: ActiveInspector::default(),
+            analyze: AnalyzeDialogState::default(),
+            edit_params: EditAnalysisParametersState::default(),
+            change_data: ChangeDataAnalyzedState::default(),
+            result_view: ResultSheetViewState::default(),
+            hook_picker: ConstantHookPickerState::default(),
+            change_graph_type: ChangeGraphTypeState::default(),
+            format_graph: FormatGraphState::default(),
+            format_axes: FormatAxesState::default(),
+            pairwise: PairwiseComparisonsState::default(),
+            bubble_plot: BubblePlotInspectorState::default(),
+            apply_style: ApplyStyleFromState::default(),
+            page_layout: PageLayoutComposerState::default(),
+            export_figure: ExportFigureState::default(),
+            command_palette: CommandPaletteState::default(),
+            convert_archetype: ConvertArchetypeDialogState::default(),
+            exclude_with_reason: ExcludeWithReasonDialogState::default(),
+            active_canvas_preset: None,
+            canvas_resize_mode: CanvasResizeMode::default(),
+            preflight_issues: Vec::new(),
+            rulers_visible: false,
+            ruler_unit: PhysicalUnit::default(),
+            grid_overlay_visible: false,
+            grid_overlay_spacing_pt: default_grid_overlay_spacing_pt(),
+            journal_preset: None,
+            pan_zoom: PanZoomInertiaState::default(),
+            print: PrintDialogState::default(),
+            power_wizard: PowerWizardState::default(),
+            format_points: FormatSelectedPointsState::default(),
+            randomize_groups: RandomizeGroupsDialogState::default(),
+            random_sample_rows: RandomSampleRowsDialogState::default(),
+            simulate_distributions: SimulateDistributionsDialogState::default(),
+            insert_model_equation: InsertModelEquationDialogState::default(),
+            feedback: crate::feedback::FeedbackDraft::default(),
+            create_graph: CreateGraphDialogState::default(),
+            equalize_scaling: EqualizeScalingDialogState::default(),
+            format_embedded_table: FormatEmbeddedTableDialogState::default(),
+            format_image: FormatImageDialogState::default(),
+        }
+    }
 }
 
 /// Interactive state for the `Print...` setup and OS print-spool dialog (`R5.4`).
@@ -7922,6 +8847,71 @@ impl CanvasDialogState {
         self.apply_style.open_for_graph(target_graph_id, doc);
         self.active_dialog = ActiveDialog::ApplyStyleFrom { target_graph_id: target_graph_id.clone() };
         true
+    }
+
+    /// Open `Apply Style From...` targeting multiple selected graphs (`WF-56` / `R13.3`).
+    pub fn open_apply_style_from_targets(&mut self, doc: &ProjectDocument, targets: &[SheetId]) -> bool {
+        let valid: Vec<SheetId> = targets.iter().filter(|id| doc.graph_sheet(id).is_some()).cloned().collect();
+        let Some(first) = valid.first().cloned() else {
+            return false;
+        };
+        self.apply_style.open_for_graphs(&valid, doc);
+        self.active_dialog = ActiveDialog::ApplyStyleFrom { target_graph_id: first };
+        true
+    }
+
+    /// Open `Create New Graph...` dialog (`WF-56` / `R13.3`).
+    pub fn open_create_graph(&mut self, doc: &ProjectDocument, preferred_source: Option<&SheetId>) -> bool {
+        self.create_graph.open_for_document(doc, preferred_source);
+        let Some(src) = self.create_graph.source_sheet_id.clone() else {
+            return false;
+        };
+        self.active_dialog = ActiveDialog::CreateGraph { source_sheet_id: Some(src) };
+        true
+    }
+
+    /// Open `Equalize Scaling...` dialog targeting `layout_id` (`WF-63` / `R13.5`).
+    pub fn open_equalize_scaling(&mut self, doc: &ProjectDocument, layout_id: &SheetId) -> bool {
+        let Some(ls) = doc.layout_sheet(layout_id) else {
+            return false;
+        };
+        self.equalize_scaling.open_for_layout(doc, ls);
+        self.active_dialog = ActiveDialog::EqualizeScaling { layout_sheet_id: ls.id.clone() };
+        true
+    }
+
+    /// Open `Format Embedded Table...` targeting annotation/panel `target_index` on `sheet_id` (`WF-58` / `R13.4`).
+    pub fn open_format_embedded_table(&mut self, doc: &ProjectDocument, sheet_id: &SheetId, target_index: usize) -> bool {
+        if let Some(gs) = doc.graph_sheet(sheet_id)
+            && self.format_embedded_table.open_for_graph(doc, gs, target_index)
+        {
+            self.active_dialog = ActiveDialog::FormatEmbeddedTable { sheet_id: gs.id.clone(), target_index, is_layout: false };
+            return true;
+        }
+        if let Some(ls) = doc.layout_sheet(sheet_id)
+            && self.format_embedded_table.open_for_layout(doc, ls, target_index)
+        {
+            self.active_dialog = ActiveDialog::FormatEmbeddedTable { sheet_id: ls.id.clone(), target_index, is_layout: true };
+            return true;
+        }
+        false
+    }
+
+    /// Open `Format Image...` targeting embedded image `target_index` on `sheet_id` (`WF-57` / `R13.7`).
+    pub fn open_format_image(&mut self, doc: &ProjectDocument, sheet_id: &SheetId, target_index: usize) -> bool {
+        if let Some(gs) = doc.graph_sheet(sheet_id)
+            && self.format_image.open_for_graph(doc, gs, target_index)
+        {
+            self.active_dialog = ActiveDialog::FormatImage { sheet_id: gs.id.clone(), target_index, is_layout: false };
+            return true;
+        }
+        if let Some(ls) = doc.layout_sheet(sheet_id)
+            && self.format_image.open_for_layout(doc, ls, target_index)
+        {
+            self.active_dialog = ActiveDialog::FormatImage { sheet_id: ls.id.clone(), target_index, is_layout: true };
+            return true;
+        }
+        false
     }
 
     /// Open `Cmd+K` Command Palette.

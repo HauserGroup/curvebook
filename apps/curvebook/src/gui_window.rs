@@ -555,6 +555,14 @@ impl CurveBookNativeApp {
                 UiIntent::UiCommand { command_id, .. } | UiIntent::EngineCommand { command_id, .. } if is_host_routed_intent_command(command_id) => {
                     host_commands.push(command_id.clone());
                 }
+                UiIntent::EngineCommand { command_id, params }
+                    if (command_id == "graph.insertImage" || command_id == "layout.insertImage")
+                        && params.get("path").is_none()
+                        && params.get("bytes_base64").is_none()
+                        && params.get("asset_id").is_none() =>
+                {
+                    host_commands.push(command_id.clone());
+                }
                 UiIntent::CustomViewAction { domain, payload } if domain == "welcome" && payload == "action:open_file" => {
                     host_commands.push(String::from("project.open"));
                 }

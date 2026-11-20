@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hash, Hasher};
 
-use curvebook_chart::{ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor};
+use curvebook_chart::{
+    ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PositionedText, RectPt, ScenePrimitive, SceneRasterImage, StrokePaint, TextAnchor,
+};
 use curvebook_palette::{CanvasPreviewFilter, LineDashStyle, Rgba8, simulate_preview_filter};
 use curvebook_text::metrics::split_rich_text_lines;
 use curvebook_text::{GlyphOutlineCmd, outline_rich_text};
@@ -279,6 +281,16 @@ pub fn render_scene(scene: &ChartScene, target: RenderTargetSpec) -> Result<Rast
                     render_text(&mut img, text, sx, sy, active_clip, &mut scratch);
                 }
             }
+            ScenePrimitive::RasterImage(raster) => {
+                let effective_clip = match raster.clip.and_then(|r| ClipRectPx::from_rect_pt(r, sx, sy)) {
+                    Some(local) => active_clip.intersect(local),
+                    None if raster.clip.is_some() => ClipRectPx::empty(),
+                    None => active_clip,
+                };
+                if !effective_clip.is_empty() {
+                    render_raster_image(&mut img, raster, sx, sy, effective_clip);
+                }
+            }
             ScenePrimitive::PushClip { rect } => {
                 let next = match ClipRectPx::from_rect_pt(*rect, sx, sy) {
                     Some(local) => active_clip.intersect(local),
@@ -295,6 +307,125 @@ pub fn render_scene(scene: &ChartScene, target: RenderTargetSpec) -> Result<Rast
     }
 
     Ok(img)
+}
+
+pub(crate) fn render_raster_image(img: &mut RasterImage, prim: &SceneRasterImage, sx: f64, sy: f64, clip: ClipRectPx) {
+    let (src_w, src_h) = prim.pixel_size;
+    let Some(expected_len) = (src_w as usize).checked_mul(src_h as usize).and_then(|p| p.checked_mul(4)) else {
+        return;
+    };
+    if src_w == 0
+        || src_h == 0
+        || prim.rgba.len() != expected_len
+        || clip.is_empty()
+        || !sx.is_finite()
+        || !sy.is_finite()
+        || sx <= 0.0
+        || sy <= 0.0
+        || !prim.rotation_deg.is_finite()
+    {
+        return;
+    }
+    let Some(vis_doc) = prim.crop.visible_rect(curvebook_doc::RectPt::from(prim.bounds_pt)) else {
+        return;
+    };
+    let bounds = prim.bounds_pt;
+    if !bounds.width.is_finite() || !bounds.height.is_finite() || bounds.width <= 0.0 || bounds.height <= 0.0 {
+        return;
+    }
+
+    let vis = RectPt::from(vis_doc);
+    let cx = bounds.x + 0.5 * bounds.width;
+    let cy = bounds.y + 0.5 * bounds.height;
+    let (sin_t, cos_t) = prim.rotation_deg.to_radians().sin_cos();
+
+    let mut min_px = f64::INFINITY;
+    let mut min_py = f64::INFINITY;
+    let mut max_px = f64::NEG_INFINITY;
+    let mut max_py = f64::NEG_INFINITY;
+    for vx in [vis.x, vis.right()] {
+        for vy in [vis.y, vis.bottom()] {
+            let dx = vx - cx;
+            let dy = vy - cy;
+            let wx = cx + dx * cos_t - dy * sin_t;
+            let wy = cy + dx * sin_t + dy * cos_t;
+            min_px = min_px.min(wx * sx);
+            max_px = max_px.max(wx * sx);
+            min_py = min_py.min(wy * sy);
+            max_py = max_py.max(wy * sy);
+        }
+    }
+
+    let x_lo = (min_px.max(clip.min_x).floor() as i64).clamp(0, i64::from(img.width_px)) as u32;
+    let x_hi = (max_px.min(clip.max_x).ceil() as i64).clamp(0, i64::from(img.width_px)) as u32;
+    let y_lo = (min_py.max(clip.min_y).floor() as i64).clamp(0, i64::from(img.height_px)) as u32;
+    let y_hi = (max_py.min(clip.max_y).ceil() as i64).clamp(0, i64::from(img.height_px)) as u32;
+    if x_lo >= x_hi || y_lo >= y_hi {
+        return;
+    }
+
+    let inv_w = f64::from(src_w) / bounds.width;
+    let inv_h = f64::from(src_h) / bounds.height;
+    let dst_w = img.width_px as usize;
+
+    for py in y_lo..y_hi {
+        let sy_pt = (f64::from(py) + 0.5) / sy;
+        for px in x_lo..x_hi {
+            let sx_pt = (f64::from(px) + 0.5) / sx;
+            let dx = sx_pt - cx;
+            let dy = sy_pt - cy;
+            let ux = cx + dx * cos_t + dy * sin_t;
+            let uy = cy - dx * sin_t + dy * cos_t;
+            if ux < vis.x || ux > vis.right() || uy < vis.y || uy > vis.bottom() {
+                continue;
+            }
+            let u = ((ux - bounds.x) * inv_w - 0.5).clamp(0.0, f64::from(src_w - 1));
+            let v = ((uy - bounds.y) * inv_h - 0.5).clamp(0.0, f64::from(src_h - 1));
+            let sampled = sample_bilinear_rgba(&prim.rgba, src_w, src_h, u, v);
+            let dst_idx = ((py as usize) * dst_w + (px as usize)) * 4;
+            if let Some(dst_px) = img.rgba.get_mut(dst_idx..dst_idx + 4) {
+                blend_pixel_slice(dst_px, sampled, 1.0);
+            }
+        }
+    }
+}
+
+#[inline]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn sample_bilinear_rgba(rgba: &[u8], w: u32, h: u32, u: f64, v: f64) -> Rgba8 {
+    let x0 = (u.floor() as u32).min(w - 1);
+    let y0 = (v.floor() as u32).min(h - 1);
+    let x1 = (x0 + 1).min(w - 1);
+    let y1 = (y0 + 1).min(h - 1);
+    let fx = (u - f64::from(x0)).clamp(0.0, 1.0);
+    let fy = (v - f64::from(y0)).clamp(0.0, 1.0);
+
+    let w00 = (1.0 - fx) * (1.0 - fy);
+    let w10 = fx * (1.0 - fy);
+    let w01 = (1.0 - fx) * fy;
+    let w11 = fx * fy;
+
+    let load = |x: u32, y: u32| -> (f64, f64, f64, f64) {
+        let idx = ((y as usize) * (w as usize) + (x as usize)) * 4;
+        let Some(px) = rgba.get(idx..idx + 4) else {
+            return (0.0, 0.0, 0.0, 0.0);
+        };
+        let a = f64::from(px[3]);
+        (f64::from(px[0]) * a, f64::from(px[1]) * a, f64::from(px[2]) * a, a)
+    };
+    let (r00, g00, b00, a00) = load(x0, y0);
+    let (r10, g10, b10, a10) = load(x1, y0);
+    let (r01, g01, b01, a01) = load(x0, y1);
+    let (r11, g11, b11, a11) = load(x1, y1);
+
+    let a = a00 * w00 + a10 * w10 + a01 * w01 + a11 * w11;
+    if a <= 1e-9 {
+        return Rgba8::TRANSPARENT;
+    }
+    let r = (r00 * w00 + r10 * w10 + r01 * w01 + r11 * w11) / a;
+    let g = (g00 * w00 + g10 * w10 + g01 * w01 + g11 * w11) / a;
+    let b = (b00 * w00 + b10 * w10 + b01 * w01 + b11 * w11) / a;
+    Rgba8::rgba(clamp_u8(r), clamp_u8(g), clamp_u8(b), clamp_u8(a))
 }
 
 fn is_matching_full_bg_rect(scene: &ChartScene, bg: Rgba8) -> bool {
@@ -352,7 +483,7 @@ impl PointPx {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct ClipRectPx {
+pub(crate) struct ClipRectPx {
     min_x: f64,
     min_y: f64,
     max_x: f64,
@@ -364,7 +495,7 @@ impl ClipRectPx {
         Self { min_x: 0.0, min_y: 0.0, max_x: 0.0, max_y: 0.0 }
     }
 
-    fn from_canvas(width_px: u32, height_px: u32) -> Self {
+    pub(crate) fn from_canvas(width_px: u32, height_px: u32) -> Self {
         Self { min_x: 0.0, min_y: 0.0, max_x: f64::from(width_px), max_y: f64::from(height_px) }
     }
 

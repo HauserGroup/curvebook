@@ -1,6 +1,6 @@
 # CurveBook Command Reference
 
-Registered commands: 97
+Registered commands: 105
 
 ## Project & Files (`project`)
 
@@ -104,6 +104,22 @@ Registered commands: 97
 - **Parameters:** `path` (any), `return_bytes` (any)
 
 ## Edit & History (`edit`)
+
+### `edit.pasteImage` — Paste Image
+
+- **Effects:** `MUTATES_DOCUMENT | READS_FILESYSTEM`
+- **Menu:** `Edit/Paste Image`
+- **Summary:** Paste or insert a PNG, JPEG, or TIFF raster image onto a graph annotation or multi-panel layout.
+- **Beginner note:** Pastes an image from bytes, local file path, or existing project asset onto a graph or layout page.
+- **Parameters:** `asset_id` (any), `badge_override` (any), `border` (any), `bounds_pt` (any), `bytes_base64` (any), `crop` (any), `lock_aspect_ratio` (any), `panel_id` (any), `path` (any), `rotation_deg` (any), `target_sheet_id*` (string)
+
+### `edit.pasteResultTable` — Paste Result Table
+
+- **Effects:** `MUTATES_DOCUMENT`
+- **Menu:** `Edit/Paste Result Table`
+- **Summary:** Paste a live result or data table onto a graph annotation or multi-panel layout.
+- **Beginner note:** Places a formatted, auto-updating result table onto the selected graph or layout page.
+- **Parameters:** `bounds_pt` (any), `panel_id` (any), `selected_cols` (any), `selected_rows` (any), `source_sheet_id*` (string), `style` (any), `tab_id` (any), `target_sheet_id*` (string), `transpose` (any)
 
 ### `edit.redo` — Redo
 
@@ -565,7 +581,7 @@ Registered commands: 97
 - **Menu:** `Analyze/Transform...`
 - **Summary:** Create and execute a mathematical, normalization, baseline, transpose, prune, select, or simulation transformation sheet.
 - **Beginner note:** Runs a reproducible data transformation pipeline on a data sheet and writes the output to a linked result sheet.
-- **Parameters:** `confidence_percent` (any), `kind` (any), `overwrite` (any), `p_value_format` (any), `selected_data_sets` (any), `sheet_id` (any), `source_sheet_id` (any), `spec` (any), `title` (any)
+- **Parameters:** `confidence_percent` (any), `create_graph` (any), `graph_sheet_id` (any), `kind` (any), `overwrite` (any), `p_value_format` (any), `selected_data_sets` (any), `sheet_id` (any), `source_sheet_id` (any), `spec` (any), `title` (any)
 
 ## Graphs & Styling (`graph`)
 
@@ -599,7 +615,7 @@ Registered commands: 97
 - **Menu:** `Format/Apply Style From...`
 - **Summary:** Copy visual styling (palette, frame, axis styling, legend, and series appearances) from a donor graph.
 - **Beginner note:** Copies the visual style of another graph sheet onto this graph without changing its data.
-- **Parameters:** `clone_error_bars_and_legend` (any), `clone_frame_and_axes` (any), `clone_palette` (any), `donor_sheet_id*` (string), `sheet_id*` (string)
+- **Parameters:** `clone_error_bars_and_legend` (any), `clone_frame_and_axes` (any), `clone_palette` (any), `donor_sheet_id*` (string), `sheet_id` (any), `target_sheet_ids` (any)
 
 ### `graph.create` — New Graph
 
@@ -607,7 +623,7 @@ Registered commands: 97
 - **Menu:** `Insert/New Graph...`
 - **Summary:** Create a new graph sheet bound to an input data sheet with optional kind, title, and initialization state.
 - **Beginner note:** Creates a new graph linked to one of your data tables.
-- **Parameters:** `data_sheet_id*` (string), `initialized` (any), `kind` (any), `sheet_id` (any), `title` (any)
+- **Parameters:** `data_sheet_id*` (string), `initialized` (any), `kind` (any), `one_per_data_set` (any), `sheet_id` (any), `title` (any), `y_axis_title` (any)
 
 ### `graph.formatSelectedPoints` — Format Selected Points
 
@@ -624,6 +640,14 @@ Registered commands: 97
 - **Summary:** Initialize an uninitialized graph sheet, applying its graph kind and default series styling.
 - **Beginner note:** Chooses an initial plot type for a newly created graph sheet.
 - **Parameters:** `kind` (any), `sheet_id*` (string), `title` (any)
+
+### `graph.insertImage` — Insert Image on Graph
+
+- **Effects:** `MUTATES_DOCUMENT | READS_FILESYSTEM`
+- **Menu:** `Insert/Image on Graph...`
+- **Summary:** Embed a PNG, JPEG, or TIFF raster image annotation onto a graph sheet.
+- **Beginner note:** Inserts a microscopy micrograph, Western blot, or schematic photo onto a graph.
+- **Parameters:** `asset_id` (any), `border` (any), `bounds_pt` (any), `bytes_base64` (any), `crop` (any), `lock_aspect_ratio` (any), `path` (any), `rotation_deg` (any), `sheet_id*` (string)
 
 ### `graph.preflightCheck` — Preflight Check Figure
 
@@ -687,7 +711,15 @@ Registered commands: 97
 - **Menu:** `Format/Graph...`
 - **Summary:** Patch a graph's full GraphSpec, palette, frame, legend, title, survival options, or multivariate encoding.
 - **Beginner note:** Updates visual graph settings such as palette, frame style, legend, or multivariate channels.
-- **Parameters:** `initialized` (any), `multivariate` (any), `sheet_id*` (string), `spec` (any), `survival_number_at_risk` (any), `title` (any)
+- **Parameters:** `forest_show_pooled_diamond` (any), `heatmap_labels` (any), `initialized` (any), `multivariate` (any), `orientation` (any), `paper_fill` (any), `sheet_id*` (string), `spec` (any), `survival_number_at_risk` (any), `title` (any)
+
+### `graph.updateImage` — Format Embedded Graph Image
+
+- **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
+- **Menu:** `Format/Embedded Image...`
+- **Summary:** Update placement bounds, aspect-ratio lock, rotation, crop insets, or border on an embedded graph image.
+- **Beginner note:** Crops, rotates, resizes, or frames an embedded image on a graph.
+- **Parameters:** `annotation_index*` (integer), `border` (any), `bounds_pt` (any), `crop` (any), `height_pt` (any), `lock_aspect_ratio` (any), `rotation_deg` (any), `sheet_id*` (string), `width_pt` (any)
 
 ## Page Layouts (`layout`)
 
@@ -723,6 +755,30 @@ Registered commands: 97
 - **Beginner note:** Creates a multi-panel figure page where you can arrange graphs, tables, and text callouts.
 - **Parameters:** `align_plot_origins` (any), `background_fill` (any), `grid_template` (any), `height` (any), `orientation` (any), `panel_badges` (any), `preset` (any), `sheet_id` (any), `title` (any), `unit` (any), `width` (any)
 
+### `layout.equalizeScaling` — Equalize Scaling
+
+- **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
+- **Menu:** `Arrange/Equalize Scaling`
+- **Summary:** Equalize rendered inner plot scaling across live graph panels on a layout sheet.
+- **Beginner note:** Resizes selected or all graph panels on a layout to match the smallest, largest, or an explicit scale percentage.
+- **Parameters:** `mode` (any), `panel_ids` (any), `panel_indices` (any), `percent` (any), `sheet_id*` (string)
+
+### `layout.insertImage` — Insert Image on Layout
+
+- **Effects:** `MUTATES_DOCUMENT | READS_FILESYSTEM`
+- **Menu:** `Insert/Image on Layout...`
+- **Summary:** Embed a PNG, JPEG, or TIFF raster image item onto a publication layout sheet.
+- **Beginner note:** Places a microscopy image, gel photo, or schematic panel onto a layout page.
+- **Parameters:** `asset_id` (any), `badge_override` (any), `border` (any), `bounds_pt` (any), `bytes_base64` (any), `crop` (any), `lock_aspect_ratio` (any), `panel_id` (any), `path` (any), `rotation_deg` (any), `sheet_id*` (string)
+
+### `layout.reorderPanel` — Reorder Panel
+
+- **Effects:** `MUTATES_DOCUMENT`
+- **Menu:** `Arrange/Reorder Panel`
+- **Summary:** Change the z-order stacking depth of a panel on a layout sheet.
+- **Beginner note:** Moves a graph, table, or text panel forward or backward in the layout paint order.
+- **Parameters:** `action*` (string), `panel_id` (any), `panel_index` (any), `sheet_id*` (string)
+
 ### `layout.setSpec` — Format Layout
 
 - **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
@@ -730,6 +786,14 @@ Registered commands: 97
 - **Summary:** Update a layout sheet's page dimensions, journal preset, grid template, origin alignment, badge style, or background.
 - **Beginner note:** Changes the page setup, grid arrangement, or panel lettering of an existing figure layout.
 - **Parameters:** `align_plot_origins` (any), `background_fill` (any), `grid_template` (any), `height` (any), `orientation` (any), `panel_badges` (any), `preset` (any), `sheet_id*` (string), `spec` (any), `title` (any), `unit` (any), `width` (any)
+
+### `layout.updateImage` — Format Embedded Layout Image
+
+- **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
+- **Menu:** `Format/Layout Image...`
+- **Summary:** Update placement bounds, aspect-ratio lock, rotation, crop insets, border, or badge override on a layout image.
+- **Beginner note:** Crops, rotates, resizes, frames, or labels an embedded image panel on a layout sheet.
+- **Parameters:** `badge_override` (any), `border` (any), `bounds_pt` (any), `crop` (any), `height_pt` (any), `item_index` (any), `lock_aspect_ratio` (any), `panel_id` (any), `rotation_deg` (any), `sheet_id*` (string), `width_pt` (any)
 
 ## Vector & Raster Export (`export`)
 

@@ -475,3 +475,72 @@ fn r1_s12_09_live_attach_forwards_tools_and_resources() -> Result<(), Box<dyn st
     let _ = std::fs::remove_dir_all(&workdir);
     Ok(())
 }
+
+#[test]
+fn mcp_gui_only_r13_ui_commands_and_strict_block_parity() -> Result<(), Box<dyn std::error::Error>> {
+    let mut mcp = McpChild::spawn(&["mcp", "--gui-only"])?;
+
+    let init = mcp.request(
+        1,
+        "initialize",
+        json!({
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": { "name": "mcp-r13-gui-only", "version": "0.1.0" }
+        }),
+    )?;
+    assert_eq!(init["result"]["instructions"], json!(GUI_ONLY_SERVER_INSTRUCTIONS));
+    mcp.notify("notifications/initialized", json!({}))?;
+
+    // Strict --gui-only blocks direct R13 engine commands through `command_run`.
+    for (idx, (cmd, params)) in [
+        ("edit.pasteResultTable", json!({ "source_sheet_id": "res-1", "target_sheet_id": "g-1" })),
+        ("layout.equalizeScaling", json!({ "sheet_id": "lay-1", "mode": "match_smallest" })),
+        ("graph.insertImage", json!({ "sheet_id": "g-1", "bytes_base64": "" })),
+        ("layout.reorderPanel", json!({ "sheet_id": "lay-1", "panel_index": 0, "action": "bring_to_front" })),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let blocked = mcp.call_tool(10 + idx as u64, "command_run", json!({ "command": cmd, "params": params }))?;
+        assert_eq!(blocked["result"]["isError"], json!(true), "expected isError for `{cmd}`: {blocked}");
+        let serialized = serde_json::to_string(&blocked["result"])?;
+        assert!(serialized.contains("gui_only_violation"), "expected gui_only_violation for `{cmd}`, got {serialized}");
+    }
+
+    // Drive R13 UI commands strictly through ui_invoke_menu -> ui_inspect -> ui_answer_dialog -> ui_screenshot.
+    let grid_on = mcp.call_tool(20, "ui_invoke_menu", json!({ "command_id": "ui.gridOverlay.toggle", "params": { "visible": true } }))?;
+    assert_ne!(grid_on["result"]["isError"], json!(true), "ui.gridOverlay.toggle failed: {grid_on}");
+
+    let row_titles = mcp.call_tool(21, "ui_invoke_menu", json!({ "command_id": "ui.view.rowTitles.toggle", "params": { "collapsed": false } }))?;
+    assert_ne!(row_titles["result"]["isError"], json!(true), "ui.view.rowTitles.toggle failed: {row_titles}");
+
+    let create_xy = mcp.call_tool(
+        22,
+        "ui_invoke_menu",
+        json!({ "command_id": "sheet.createData", "params": { "sheet_id": "xy-mcp-r13", "kind": "xy", "cols": 1, "rows": 4 } }),
+    )?;
+    assert_ne!(create_xy["result"]["isError"], json!(true), "sheet.createData via ui_invoke_menu failed: {create_xy}");
+
+    let open_cg =
+        mcp.call_tool(23, "ui_invoke_menu", json!({ "command_id": "ui.graph.create.open", "params": { "source_sheet_id": "xy-mcp-r13" } }))?;
+    assert_ne!(open_cg["result"]["isError"], json!(true), "ui.graph.create.open failed: {open_cg}");
+
+    let cg_inspect = mcp.call_tool(24, "ui_inspect", json!({ "scope": "dialog" }))?;
+    assert_ne!(cg_inspect["result"]["isError"], json!(true), "ui_inspect dialog failed: {cg_inspect}");
+    let cg_text = cg_inspect["result"]["content"][0]["text"].as_str().ok_or("missing dialog inspect text")?;
+    let cg_snap: Value = serde_json::from_str(cg_text)?;
+    assert_eq!(cg_snap["active_dialog"], json!("create_graph"), "expected CreateGraph dialog active: {cg_snap}");
+
+    let confirm_cg = mcp.call_tool(25, "ui_answer_dialog", json!({ "action": "ok" }))?;
+    assert_ne!(confirm_cg["result"]["isError"], json!(true), "ui_answer_dialog for CreateGraph failed: {confirm_cg}");
+
+    let shot = mcp.call_tool(26, "ui_screenshot", json!({ "target": "canvas", "width_px": 640, "height_px": 400 }))?;
+    assert_ne!(shot["result"]["isError"], json!(true), "ui_screenshot failed: {shot}");
+    let blocks = shot["result"]["content"].as_array().ok_or("missing screenshot content blocks")?;
+    let img_block = blocks.iter().find(|b| b.get("type").and_then(Value::as_str) == Some("image")).ok_or("missing inline image content block")?;
+    assert_eq!(img_block["mimeType"], json!("image/png"));
+    assert!(img_block["data"].as_str().is_some_and(|b64| b64.starts_with("iVBORw0KGgo")), "expected PNG base64 payload in screenshot response");
+
+    mcp.finish()
+}

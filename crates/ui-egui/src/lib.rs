@@ -798,6 +798,13 @@ impl UiApp {
         self.clipboard_adapter.adapter.read_text()
     }
 
+    pub(crate) fn read_clipboard_image(&self) -> Result<Option<Vec<u8>>, String> {
+        if !self.clipboard_adapter.is_custom && (self.is_gui_only() || self.is_human_path_only()) {
+            return Ok(None);
+        }
+        self.clipboard_adapter.adapter.read_image_bytes()
+    }
+
     pub(crate) fn toggle_navigator_pane(&mut self) -> bool {
         self.nav.navigator_open = !self.nav.navigator_open;
         if !self.nav.navigator_open {
@@ -1636,7 +1643,7 @@ mod tests {
 
     #[test]
     fn ui_commands_table_covers_parity_surface() {
-        assert_eq!(UI_COMMANDS.len(), 48);
+        assert_eq!(UI_COMMANDS.len(), 54);
         for required in [
             "ui.navigator.toggle",
             "ui.inspector.toggle",
@@ -1647,6 +1654,12 @@ mod tests {
             "ui.changeGraphType.open",
             "ui.clonePipeline.open",
             "ui.applyStyleFrom.open",
+            "ui.graph.create.open",
+            "ui.layout.equalizeScaling.open",
+            "ui.view.rowTitles.toggle",
+            "ui.gridOverlay.toggle",
+            "ui.embeddedTable.format.open",
+            "ui.image.format.open",
             "ui.zoom.fitSheet",
             "ui.gallery.toggle",
             "ui.rulers.toggle",

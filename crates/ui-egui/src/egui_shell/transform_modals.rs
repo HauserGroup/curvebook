@@ -487,7 +487,7 @@ fn render_normalize_body(
     _app: &UiApp,
     ds: Option<&DataSheet>,
     state: &mut TransformModalsEguiState,
-    _from_edit: bool,
+    from_edit: bool,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     _intents: &mut PendingUiIntents,
@@ -513,9 +513,22 @@ fn render_normalize_body(
             }
         }
     });
-    ui.horizontal(|row| {
+    ui.horizontal_wrapped(|row| {
         let _ = row.checkbox(&mut state.norm_percent, "Scale output to 0-100% (unchecked = 0-1 fraction)");
         let _ = row.checkbox(&mut state.norm_per_dataset, "Normalize each data set independently");
+        if !from_edit {
+            let cr = row.checkbox(&mut state.create_new_graph, "Create new graph of normalized results");
+            record_tr_node(
+                row,
+                meta,
+                "edit.transform.normalize.create_graph",
+                "checkbox",
+                "Create New Graph",
+                Some(state.create_new_graph.to_string()),
+                true,
+                &cr,
+            );
+        }
     });
 }
 
@@ -1029,16 +1042,29 @@ fn build_standalone_transform_params(app: &UiApp, ds: &DataSheet, kind: Transfor
                 };
                 m.insert(String::from("x_transform"), x_val);
             }
+            if state.create_new_graph
+                && let Some(m) = obj.as_object_mut()
+            {
+                m.insert(String::from("create_graph"), serde_json::Value::Bool(true));
+            }
             obj
         }
-        TransformModalKind::Normalize => json!({
-            "source_sheet_id": ds.id.as_str(),
-            "kind": "normalize",
-            "zero_anchor": match state.norm_zero_idx { 1 => json!("first_row"), 2 => json!({ "FixedValue": 0.0 }), _ => json!("smallest") },
-            "hundred_anchor": match state.norm_hundred_idx { 1 => "column_sum", 2 => "last_row", _ => "largest" },
-            "as_fraction": !state.norm_percent,
-            "per_data_set": state.norm_per_dataset,
-        }),
+        TransformModalKind::Normalize => {
+            let mut obj = json!({
+                "source_sheet_id": ds.id.as_str(),
+                "kind": "normalize",
+                "zero_anchor": match state.norm_zero_idx { 1 => json!("first_row"), 2 => json!({ "FixedValue": 0.0 }), _ => json!("smallest") },
+                "hundred_anchor": match state.norm_hundred_idx { 1 => "column_sum", 2 => "last_row", _ => "largest" },
+                "as_fraction": !state.norm_percent,
+                "per_data_set": state.norm_per_dataset,
+            });
+            if state.create_new_graph
+                && let Some(m) = obj.as_object_mut()
+            {
+                m.insert(String::from("create_graph"), serde_json::Value::Bool(true));
+            }
+            obj
+        }
         TransformModalKind::RemoveBaseline => json!({
             "source_sheet_id": ds.id.as_str(),
             "kind": "remove_baseline",

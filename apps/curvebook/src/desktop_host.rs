@@ -1516,6 +1516,9 @@ fn native_export_spec_for_command(command_id: &str) -> Option<NativeExportSpec> 
     Some(spec)
 }
 
+/// File extensions accepted when opening an embedded image via the native OS picker (`WF-57`).
+pub const NATIVE_IMAGE_FILE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "tif", "tiff"];
+
 /// Returns `true` when clicking `command_id` in the native desktop window opens an OS file dialog.
 #[must_use]
 pub fn menu_action_triggers_native_file_dialog(command_id: &str) -> bool {
@@ -1533,6 +1536,8 @@ pub fn menu_action_triggers_native_file_dialog(command_id: &str) -> bool {
             | "table.importCsv"
             | "table.importPrism"
             | "table.importPzfx"
+            | "graph.insertImage"
+            | "layout.insertImage"
     ) || native_export_spec_for_command(command_id).is_some()
 }
 
@@ -1796,6 +1801,30 @@ impl DesktopHostRuntime {
                     Some(path) => {
                         let win = self.window_mut(window_id)?;
                         execute_native_import_at_path(win, command_id, &path)?;
+                        Self::completed_file_dialog_outcome(window_id, command_id, &path)
+                    }
+                    None => Self::cancelled_file_dialog_outcome(window_id, command_id),
+                }
+            }
+            "graph.insertImage" | "layout.insertImage" => {
+                let target_kind = if command_id == "graph.insertImage" { NativeExportTargetKind::Graph } else { NativeExportTargetKind::Layout };
+                let target_sheet_id = {
+                    let win = self.window(window_id)?;
+                    resolve_native_export_sheet_id(win.app().document(), target_kind)
+                        .ok_or_else(|| format!("no matching target sheet available for `{command_id}`"))?
+                };
+                let req = NativeFileDialogRequest {
+                    command_id: command_id.to_owned(),
+                    kind: NativeFileDialogKind::OpenFile,
+                    filter_label: String::from("Images (PNG, JPEG, TIFF)"),
+                    extensions: NATIVE_IMAGE_FILE_EXTENSIONS.iter().map(|s| (*s).to_owned()).collect(),
+                    default_file_name: None,
+                };
+                match adapter.pick(&req)? {
+                    Some(path) => {
+                        let path_str = path.to_string_lossy().into_owned();
+                        let win = self.window_mut(window_id)?;
+                        win.execute_and_journal(command_id, json!({ "sheet_id": target_sheet_id.as_str(), "path": path_str }))?;
                         Self::completed_file_dialog_outcome(window_id, command_id, &path)
                     }
                     None => Self::cancelled_file_dialog_outcome(window_id, command_id),
@@ -3891,6 +3920,52 @@ fn resolve_graph_layout_info_only_route(doc: &ProjectDocument, base_cmd: &str, v
                 obj.insert(String::from("resize_mode"), Value::String(String::from("KeepTypographyPt")));
             }
             Ok(Some(DesktopCommandRoute::UiCommand { ui_command_id: String::from("ui.canvas.applyPreset"), params }))
+        }
+        "edit.pasteResultTable" => {
+            let src = resolve_result_sheet_id(doc).ok_or_else(|| String::from("no result sheet available for `edit.pasteResultTable`"))?;
+            let target =
+                resolve_renderable_sheet_id(doc).ok_or_else(|| String::from("no graph or layout sheet available for `edit.pasteResultTable`"))?;
+            Ok(Some(DesktopCommandRoute::EngineCommand {
+                engine_command_id: String::from("edit.pasteResultTable"),
+                params: json!({ "source_sheet_id": src.as_str(), "target_sheet_id": target.as_str() }),
+            }))
+        }
+        "edit.pasteImage" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
+            kind: DesktopDialogOpener::CommandPalette,
+            target_sheet_id: resolve_renderable_sheet_id(doc).map(|id| id.as_str().to_owned()),
+            query: Some(String::from("edit.pasteImage")),
+        })),
+        "graph.insertImage" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
+            kind: DesktopDialogOpener::CommandPalette,
+            target_sheet_id: resolve_graph_sheet_id(doc).map(|id| id.as_str().to_owned()),
+            query: Some(String::from("graph.insertImage")),
+        })),
+        "graph.updateImage" => Ok(Some(DesktopCommandRoute::UiCommand {
+            ui_command_id: String::from("ui.image.format.open"),
+            params: sheet_id_obj_or_empty(resolve_graph_sheet_id(doc)),
+        })),
+        "layout.insertImage" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
+            kind: DesktopDialogOpener::CommandPalette,
+            target_sheet_id: resolve_layout_sheet_id(doc).map(|id| id.as_str().to_owned()),
+            query: Some(String::from("layout.insertImage")),
+        })),
+        "layout.updateImage" => Ok(Some(DesktopCommandRoute::UiCommand {
+            ui_command_id: String::from("ui.image.format.open"),
+            params: sheet_id_obj_or_empty(resolve_layout_sheet_id(doc)),
+        })),
+        "layout.equalizeScaling" => {
+            let id = resolve_layout_sheet_id(doc).ok_or_else(|| String::from("no layout sheet available for `layout.equalizeScaling`"))?;
+            Ok(Some(DesktopCommandRoute::EngineCommand {
+                engine_command_id: String::from("layout.equalizeScaling"),
+                params: json!({ "sheet_id": id.as_str(), "mode": "match_smallest" }),
+            }))
+        }
+        "layout.reorderPanel" => {
+            let id = resolve_layout_sheet_id(doc).ok_or_else(|| String::from("no layout sheet available for `layout.reorderPanel`"))?;
+            Ok(Some(DesktopCommandRoute::EngineCommand {
+                engine_command_id: String::from("layout.reorderPanel"),
+                params: json!({ "sheet_id": id.as_str(), "panel_index": 0, "action": "bring_to_front" }),
+            }))
         }
         "info.setNote" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
             kind: DesktopDialogOpener::InfoNotesEditor,

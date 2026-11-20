@@ -100,6 +100,7 @@ fn build_rich_valid_project() -> Result<ProjectDocument, FormatError> {
                 color: Rgba8::BLACK,
             }),
             area_fill: Some(curvebook_doc::AreaFillSpec { baseline_y: 0.0, fill_color: Rgba8::BLACK }),
+            replicate_lines: curvebook_doc::ReplicateLineMode::default(),
         },
         y_error_bars: Some(ErrorBarSpec {
             metric: ErrorBarMetric::Sd,
@@ -111,6 +112,9 @@ fn build_rich_valid_project() -> Result<ProjectDocument, FormatError> {
         }),
         x_error_bars: None,
         regression_overlay: None,
+        offset: curvebook_doc::SeriesOffsetSpec::default(),
+        bar_width_override_pt: None,
+        show_raw_data: true,
     });
     gsheet.spec.comparisons.push(PairwiseBracketSpec {
         result_sheet_id: SheetId::new("res-1"),

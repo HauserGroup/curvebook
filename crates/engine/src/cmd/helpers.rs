@@ -583,7 +583,7 @@ pub(super) fn remap_graph_spec_references(spec: &mut GraphSpec, id_map: &HashMap
                 remap_sheet_id(result_sheet_id, id_map);
             }
             GraphAnnotation::TextBox { markdown, .. } => remap_inline_hook_tokens(markdown, id_map),
-            GraphAnnotation::LineOrArrow { .. } | GraphAnnotation::Shape { .. } => {}
+            GraphAnnotation::LineOrArrow { .. } | GraphAnnotation::Shape { .. } | GraphAnnotation::EmbeddedImage { .. } => {}
         }
     }
     remap_inline_hook_tokens(&mut spec.title, id_map);
@@ -683,6 +683,7 @@ pub(super) fn remap_layout_spec_references(spec: &mut LayoutSpec, id_map: &HashM
             LayoutItem::LiveGraph { graph_sheet_id, .. } => remap_sheet_id(graph_sheet_id, id_map),
             LayoutItem::LiveTable { source_sheet_id, .. } => remap_sheet_id(source_sheet_id, id_map),
             LayoutItem::TextCallout { markdown, .. } => remap_inline_hook_tokens(markdown, id_map),
+            LayoutItem::EmbeddedImage { .. } => {}
         }
     }
 }

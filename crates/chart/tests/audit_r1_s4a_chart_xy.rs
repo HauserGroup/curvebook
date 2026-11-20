@@ -20,6 +20,9 @@ fn all_points_finite(scene: &ChartScene) -> bool {
             PathCmd::Close => true,
         }),
         ScenePrimitive::Text(t) => t.anchor_pt.x.is_finite() && t.anchor_pt.y.is_finite(),
+        ScenePrimitive::RasterImage(img) => {
+            img.bounds_pt.x.is_finite() && img.bounds_pt.y.is_finite() && img.bounds_pt.width.is_finite() && img.bounds_pt.height.is_finite()
+        }
         ScenePrimitive::PushClip { rect } => rect.x.is_finite() && rect.y.is_finite() && rect.width.is_finite() && rect.height.is_finite(),
         ScenePrimitive::PopClip => true,
     })

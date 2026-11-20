@@ -150,6 +150,9 @@ fn r1_s06_06_axis_graph_and_layout_validate_reject_nonfinite_floats() -> Result<
         y_error_bars: Some(sample_error_bars()),
         x_error_bars: None,
         regression_overlay: None,
+        offset: curvebook_doc::SeriesOffsetSpec::default(),
+        bar_width_override_pt: None,
+        show_raw_data: true,
     });
     assert!(g.spec.validate().is_err());
 

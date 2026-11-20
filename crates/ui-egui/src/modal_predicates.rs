@@ -667,6 +667,34 @@ pub fn evaluate_dialog_button(dialogs: &CanvasDialogState, doc: &ProjectDocument
         | ActiveDialog::CommandPalette
         | ActiveDialog::About
         | ActiveDialog::Feedback => ControlEnablement::enabled(),
+        ActiveDialog::CreateGraph { .. } => {
+            if matches!(norm.as_str(), "ok" | "apply") && dialogs.create_graph.commit_intent().is_none() {
+                ControlEnablement::disabled("Select a source data table first.")
+            } else {
+                ControlEnablement::enabled()
+            }
+        }
+        ActiveDialog::EqualizeScaling { .. } => {
+            if matches!(norm.as_str(), "ok" | "apply") && dialogs.equalize_scaling.commit_intent().is_none() {
+                ControlEnablement::disabled("This layout has no live graph panels to equalize.")
+            } else {
+                ControlEnablement::enabled()
+            }
+        }
+        ActiveDialog::FormatEmbeddedTable { .. } => {
+            if matches!(norm.as_str(), "ok" | "apply") && dialogs.format_embedded_table.commit_intent(doc).is_none() {
+                ControlEnablement::disabled("Target embedded table annotation or panel no longer exists.")
+            } else {
+                ControlEnablement::enabled()
+            }
+        }
+        ActiveDialog::FormatImage { .. } => {
+            if matches!(norm.as_str(), "ok" | "apply") && dialogs.format_image.commit_intent().is_none() {
+                ControlEnablement::disabled("Target embedded image no longer exists.")
+            } else {
+                ControlEnablement::enabled()
+            }
+        }
     })
 }
 

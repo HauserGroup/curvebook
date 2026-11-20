@@ -151,6 +151,9 @@ fn r1_s07_10_duplicate_family_terminates_on_layout_and_mixed_cycles_while_allowi
             source_sheet_id: SheetId::new("l3"),
             tab_id: None,
             bounds_pt: RectPt::new(0.0, 0.0, 50.0, 50.0),
+            selected_rows: None,
+            selected_cols: None,
+            style: curvebook_doc::EmbeddedTableStyle::default(),
         });
         let l3 = LayoutSheet::new(
             "l3",
@@ -161,6 +164,9 @@ fn r1_s07_10_duplicate_family_terminates_on_layout_and_mixed_cycles_while_allowi
                     source_sheet_id: SheetId::new("l2"),
                     tab_id: None,
                     bounds_pt: RectPt::new(0.0, 0.0, 50.0, 50.0),
+                    selected_rows: None,
+                    selected_cols: None,
+                    style: curvebook_doc::EmbeddedTableStyle::default(),
                 }],
                 ..LayoutSpec::default()
             },
@@ -210,12 +216,18 @@ fn r1_s07_10_duplicate_family_terminates_on_layout_and_mixed_cycles_while_allowi
                         source_sheet_id: SheetId::new("info_orphan"),
                         tab_id: None,
                         bounds_pt: RectPt::new(0.0, 0.0, 50.0, 50.0),
+                        selected_rows: None,
+                        selected_cols: None,
+                        style: curvebook_doc::EmbeddedTableStyle::default(),
                     },
                     LayoutItem::LiveTable {
                         id: String::from("good"),
                         source_sheet_id: SheetId::new("d1"),
                         tab_id: None,
                         bounds_pt: RectPt::new(0.0, 0.0, 50.0, 50.0),
+                        selected_rows: None,
+                        selected_cols: None,
+                        style: curvebook_doc::EmbeddedTableStyle::default(),
                     },
                 ],
                 ..LayoutSpec::default()

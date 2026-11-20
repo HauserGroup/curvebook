@@ -25,6 +25,7 @@ pub mod cell;
 pub mod error;
 pub mod graph;
 pub mod ids;
+pub mod image;
 pub mod info;
 pub mod layout;
 pub mod links;
@@ -60,13 +61,19 @@ pub use error::{
 };
 pub use graph::{
     AdditionalTick, AnnotationShapeKind, AreaFillSpec, AxisScale, AxisSegment, AxisSpec, AxisThreshold, BracketLabelMode, BracketStyle,
-    BreakOrnament, CategoricalTickSource, CldOrdering, ColorChannelMapping, CompactLetterDisplaySpec, ConnectingLineStyle, DiagnosticPlotKind,
-    EquationDisplayMode, ErrorBarDirection, ErrorBarMetric, ErrorBarSpec, FramePreset, GraphAnnotation, GraphAxisScale, GraphKind, GraphSheet,
-    GraphSpec, GraphicalDataObject, GroupedArrangement, LegendSpec, LineConnectionKind, LogitDomain, MultivariateGraphEncoding, MultivariatePlotMode,
-    PairwiseBracketSpec, PairwiseDisplayMode, PartsOfWholeLayout, PointStyleOverride, RegressionOverlaySpec, ReplicateOverlayStyle, SeriesSpec,
-    SizeChannelMapping, SummaryMeasure, TickLabelFormat, WhiskerMethod,
+    BreakOrnament, CartesianOrientation, CategoricalTickSource, CldOrdering, ColorChannelMapping, CompactLetterDisplaySpec, ConnectingLineStyle,
+    DiagnosticPlotKind, EmbeddedTableStyle, EquationDisplayMode, ErrorBarDirection, ErrorBarMetric, ErrorBarSpec, FramePreset, GraphAnnotation,
+    GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, HeatmapColumnLabelAngle, HeatmapColumnLabelMode,
+    HeatmapLabelSpec, HeatmapRowLabelMode, LegendSpec, LineConnectionKind, LogitDomain, MultivariateGraphEncoding, MultivariatePlotMode,
+    PairwiseBracketSpec, PairwiseDisplayMode, PartsOfWholeLayout, PointStyleOverride, RegressionOverlaySpec, ReplicateLineMode,
+    ReplicateOverlayStyle, SeriesOffsetSpec, SeriesSpec, SizeChannelMapping, SummaryMeasure, SurvivalDisplayMetric, TickDirection, TickLabelFormat,
+    WhiskerMethod,
 };
 pub use ids::{FloatingNote, HookSource, NoteId, RectPt, SheetId, SizePt, SourceCellId, extract_template_hooks};
+pub use image::{
+    CropInsetsPt, ImageBorderSpec, ImageMimeKind, MAX_IMAGE_ASSET_BYTES, MAX_IMAGE_DIM_PX, MAX_IMAGE_PIXELS, MAX_PROJECT_IMAGE_ASSETS,
+    ProjectImageAsset, content_addressed_asset_id, is_valid_asset_id, sha256_bytes,
+};
 pub use info::{ConstantValue, InfoConstant, InfoSheet, STANDARD_INFO_KEYS};
 pub use layout::{
     CanvasResizeMode, FigureCanvasPreset, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, MAX_LAYOUT_ITEMS, PageOrientation,

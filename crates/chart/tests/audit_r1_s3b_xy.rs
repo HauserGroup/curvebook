@@ -80,6 +80,15 @@ fn assert_all_primitives_finite(scene: &ChartScene) {
             ScenePrimitive::Text(t) => {
                 assert!(t.anchor_pt.x.is_finite() && t.anchor_pt.y.is_finite() && t.font_size_pt.is_finite());
             }
+            ScenePrimitive::RasterImage(img) => {
+                assert!(
+                    img.bounds_pt.x.is_finite()
+                        && img.bounds_pt.y.is_finite()
+                        && img.bounds_pt.width.is_finite()
+                        && img.bounds_pt.height.is_finite()
+                        && img.rotation_deg.is_finite()
+                );
+            }
             ScenePrimitive::PushClip { rect } => {
                 assert!(rect.x.is_finite() && rect.y.is_finite() && rect.width.is_finite() && rect.height.is_finite());
             }

@@ -4,7 +4,7 @@ use curvebook_doc::schema::{
     DRAFT_2020_12_SCHEMA_URI, JsonSchema, SchemaNode, SchemaType, SchemaTypeSpec, array_schema, bool_schema, const_string_schema, enum_schema,
     integer_schema, map_schema, nullable_schema, object_schema, one_of_schema, project_document_schema, ref_schema, string_schema,
 };
-use curvebook_doc::{CURRENT_SCHEMA_VERSION, MAX_TITLE_BYTES, SheetId};
+use curvebook_doc::{CURRENT_SCHEMA_VERSION, MAX_IMAGE_ASSET_BYTES, MAX_TITLE_BYTES, SheetId};
 
 use crate::recovery::{CURRENT_JOURNAL_VERSION, CURRENT_LOCK_VERSION};
 use crate::versioned::{BATCH_SCHEMA_V1, CURRENT_PREFERENCES_VERSION};
@@ -33,6 +33,19 @@ pub fn archive_manifest_schema() -> serde_json::Value {
     )
     .with_title("SheetManifestEntry");
 
+    let asset_entry = object_schema(
+        vec![
+            ("asset_id", string_schema().with_pattern("^img-[0-9a-f]{16}$")),
+            ("media_type", ref_schema("ImageMimeKind")),
+            ("path", string_schema()),
+            ("byte_len", integer_schema().with_minimum_i64(0).with_maximum_i64(MAX_IMAGE_ASSET_BYTES as i64)),
+            ("crc32", integer_schema().with_minimum_i64(0).with_maximum_i64(i64::from(u32::MAX))),
+        ],
+        &["asset_id", "media_type", "path", "byte_len", "crc32"],
+        false,
+    )
+    .with_title("AssetManifestEntry");
+
     let node = object_schema(
         vec![
             ("format", const_string_schema("curvebook-archive")),
@@ -41,6 +54,7 @@ pub fn archive_manifest_schema() -> serde_json::Value {
             ("title", string_schema().with_max_length(MAX_TITLE_BYTES as u64)),
             ("document_crc32", integer_schema().with_minimum_i64(0).with_maximum_i64(i64::from(u32::MAX))),
             ("sheets", array_schema(ref_schema("SheetManifestEntry"))),
+            ("assets", array_schema(ref_schema("AssetManifestEntry"))),
         ],
         &["format", "schema_version", "kind", "title", "document_crc32", "sheets"],
         false,
@@ -51,7 +65,9 @@ pub fn archive_manifest_schema() -> serde_json::Value {
     .with_description("Draft 2020-12 schema for CurveBook .curvebook / .cbtemplate archive manifest.json files.")
     .with_def(SheetId::schema_name(), SheetId::json_schema())
     .with_def("SheetSection", enum_schema(&["Data", "Info", "Analyses", "Graphs", "Layouts"]))
-    .with_def("SheetManifestEntry", sheet_entry);
+    .with_def("SheetManifestEntry", sheet_entry)
+    .with_def("ImageMimeKind", enum_schema(&["Png", "Jpeg", "Tiff"]))
+    .with_def("AssetManifestEntry", asset_entry);
 
     to_json_value(&node)
 }

@@ -5,7 +5,13 @@
 use curvebook_palette::Rgba8;
 
 use crate::error::{DocError, validate_title};
+use crate::graph::EmbeddedTableStyle;
 use crate::ids::{FloatingNote, HookSource, RectPt, SheetId, SizePt, extract_template_hooks};
+use crate::image::{CropInsetsPt, ImageBorderSpec};
+
+const fn default_true() -> bool {
+    true
+}
 
 /// Physical measurement unit for figure and page dimensions (`docs/implementation/graphing-and-layouts.md` §6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
@@ -241,6 +247,15 @@ pub enum LayoutItem {
         tab_id: Option<String>,
         /// Bounding box on the layout page in typographic points (`width > 0`, `height > 0`).
         bounds_pt: RectPt,
+        /// Optional zero-based row subset to display; `None` includes all rows.
+        #[serde(default)]
+        selected_rows: Option<Vec<usize>>,
+        /// Optional zero-based column subset to display; `None` includes all columns.
+        #[serde(default)]
+        selected_cols: Option<Vec<usize>>,
+        /// Table formatting, header visibility, transposition, and border styling.
+        #[serde(default)]
+        style: EmbeddedTableStyle,
     },
     /// Free-placed Markdown caption or callout box supporting inline `{{info:...}}` and `{{result:...}}` hooks.
     TextCallout {
@@ -253,6 +268,40 @@ pub enum LayoutItem {
         /// Base font size in typographic points (`> 0.0`).
         font_size_pt: f64,
     },
+    /// Embedded PNG/JPEG/TIFF raster image referencing [`crate::ProjectImageAsset::asset_id`].
+    EmbeddedImage {
+        /// Stable item identifier within `LayoutSpec::items`.
+        id: String,
+        /// Content-addressed [`crate::ProjectImageAsset::asset_id`] stored on [`crate::ProjectDocument::image_assets`].
+        asset_id: String,
+        /// Placement bounding rectangle on the layout page in typographic points (`width > 0`, `height > 0`).
+        bounds_pt: RectPt,
+        /// Clockwise rotation angle in degrees around the center of `bounds_pt`.
+        #[serde(default)]
+        rotation_deg: f64,
+        /// When `true`, interactive corner handles preserve the intrinsic aspect ratio.
+        #[serde(default = "default_true")]
+        lock_aspect_ratio: bool,
+        /// Four-edge inward crop insets measured in typographic points.
+        #[serde(default)]
+        crop: CropInsetsPt,
+        /// Optional outline stroke framing the cropped image region.
+        #[serde(default)]
+        border: Option<ImageBorderSpec>,
+        /// Custom panel badge text overriding [`LayoutSpec::panel_badges`]; `None` omits badge text.
+        #[serde(default)]
+        badge_override: Option<String>,
+    },
+}
+
+impl LayoutItem {
+    /// Return the stable item identifier within `LayoutSpec::items`.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        match self {
+            Self::LiveGraph { id, .. } | Self::LiveTable { id, .. } | Self::TextCallout { id, .. } | Self::EmbeddedImage { id, .. } => id.as_str(),
+        }
+    }
 }
 
 /// Maximum number of items allowed in a single [`LayoutSpec`] page layout.
@@ -350,9 +399,12 @@ impl LayoutSpec {
                         return Some("spec.items.live_graph.scale_percent");
                     }
                 }
-                LayoutItem::LiveTable { bounds_pt, .. } => {
+                LayoutItem::LiveTable { bounds_pt, style, .. } => {
                     if !rect_is_finite(*bounds_pt) {
                         return Some("spec.items.live_table.bounds_pt");
+                    }
+                    if let Some(field) = style.first_non_finite_float("spec.items.live_table.style") {
+                        return Some(field);
                     }
                 }
                 LayoutItem::TextCallout { bounds_pt, font_size_pt, .. } => {
@@ -361,6 +413,20 @@ impl LayoutSpec {
                     }
                     if !font_size_pt.is_finite() {
                         return Some("spec.items.text_callout.font_size_pt");
+                    }
+                }
+                LayoutItem::EmbeddedImage { bounds_pt, rotation_deg, crop, border, .. } => {
+                    if !rect_is_finite(*bounds_pt) {
+                        return Some("spec.items.embedded_image.bounds_pt");
+                    }
+                    if !rotation_deg.is_finite() {
+                        return Some("spec.items.embedded_image.rotation_deg");
+                    }
+                    if let Some(field) = crop.first_non_finite_float("spec.items.embedded_image.crop") {
+                        return Some(field);
+                    }
+                    if border.is_some_and(|b| !b.width_pt.is_finite()) {
+                        return Some("spec.items.embedded_image.border.width_pt");
                     }
                 }
             }
@@ -393,10 +459,11 @@ impl LayoutSpec {
                         return Err(geom_err("layout live_graph scale_percent must be finite and > 0"));
                     }
                 }
-                LayoutItem::LiveTable { bounds_pt, .. } => {
+                LayoutItem::LiveTable { bounds_pt, style, .. } => {
                     if bounds_pt.width <= 0.0 || bounds_pt.height <= 0.0 {
                         return Err(geom_err("layout item bounds width and height must be finite and > 0"));
                     }
+                    style.validate(crate::TableKind::Column)?;
                 }
                 LayoutItem::TextCallout { bounds_pt, font_size_pt, .. } => {
                     if bounds_pt.width <= 0.0 || bounds_pt.height <= 0.0 {
@@ -404,6 +471,15 @@ impl LayoutSpec {
                     }
                     if *font_size_pt <= 0.0 {
                         return Err(geom_err("layout text_callout font_size_pt must be finite and > 0"));
+                    }
+                }
+                LayoutItem::EmbeddedImage { bounds_pt, crop, border, .. } => {
+                    if bounds_pt.width <= 0.0 || bounds_pt.height <= 0.0 {
+                        return Err(geom_err("layout item bounds width and height must be finite and > 0"));
+                    }
+                    crop.validate(crate::TableKind::Column)?;
+                    if let Some(b) = border {
+                        b.validate(crate::TableKind::Column)?;
                     }
                 }
             }

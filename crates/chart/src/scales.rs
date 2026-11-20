@@ -4,8 +4,8 @@
 use std::fmt::Write as FmtWrite;
 
 use curvebook_doc::{
-    AdditionalTick, AnnotationShapeKind, AxisSegment, AxisSpec, AxisThreshold, BreakOrnament, CiBound, FramePreset, GraphAnnotation, GraphSpec,
-    LegendSpec, ProjectDocument, ResultCell, ResultTab, SheetId, SizePt, TableArchetype, TickLabelFormat,
+    AdditionalTick, AnnotationShapeKind, AxisSegment, AxisSpec, AxisThreshold, BreakOrnament, FramePreset, GraphAnnotation, GraphSpec, LegendSpec,
+    ProjectDocument, SheetId, SizePt, TableArchetype, TickDirection, TickLabelFormat,
 };
 use curvebook_math::dist::{norm_cdf, norm_ppf};
 use curvebook_math::{AxisScale, LogitDomain};
@@ -1803,22 +1803,40 @@ pub(crate) fn emit_additional_tick_gridline_segments(
     }
 }
 
+/// Compute `(offset_start, offset_end)` perpendicular to a cartesian axis spine for `dir`.
+#[must_use]
+pub(crate) fn tick_span_offsets(dir: TickDirection, len: f64, outward_sign: f64) -> Option<(f64, f64)> {
+    if !len.is_finite() || len <= 0.0 {
+        return None;
+    }
+    match dir {
+        TickDirection::Outside => Some((0.0, outward_sign * len)),
+        TickDirection::Inside => Some((-outward_sign * len, 0.0)),
+        TickDirection::Both => Some((-outward_sign * len, outward_sign * len)),
+        TickDirection::None => None,
+    }
+}
+
 pub(crate) fn emit_additional_x_tick_primitives(
     ticks: &[ResolvedAdditionalTick],
     spine_y: f64,
     tick_angle_deg: f64,
+    tick_direction: TickDirection,
     tick_stroke: StrokePaint,
     primitives: &mut Vec<ScenePrimitive>,
 ) {
     let rot = if tick_angle_deg.is_finite() { tick_angle_deg } else { 0.0 };
     let anchor = if rot.abs() > 10.0 { TextAnchor::End } else { TextAnchor::Middle };
+    let span = tick_span_offsets(tick_direction, 4.0, 1.0);
     for tick in ticks {
-        primitives.push(ScenePrimitive::Path {
-            path: Path2D::line(PointPt::new(tick.coord_pt, spine_y), PointPt::new(tick.coord_pt, spine_y + 4.0)),
-            fill: None,
-            stroke: Some(tick_stroke),
-            clip: None,
-        });
+        if let Some((o0, o1)) = span {
+            primitives.push(ScenePrimitive::Path {
+                path: Path2D::line(PointPt::new(tick.coord_pt, spine_y + o0), PointPt::new(tick.coord_pt, spine_y + o1)),
+                fill: None,
+                stroke: Some(tick_stroke),
+                clip: None,
+            });
+        }
         if let Some(rich) = &tick.label {
             primitives.push(ScenePrimitive::Text(PositionedText {
                 rich: rich.clone(),
@@ -1832,29 +1850,38 @@ pub(crate) fn emit_additional_x_tick_primitives(
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AdditionalYTickLayout {
+    pub spine_x: f64,
+    pub is_left: bool,
+    pub tick_angle_deg: f64,
+    pub label_offset_pt: f64,
+    pub tick_direction: TickDirection,
+}
+
 pub(crate) fn emit_additional_y_tick_primitives(
     ticks: &[ResolvedAdditionalTick],
-    spine_x: f64,
-    is_left: bool,
-    tick_angle_deg: f64,
-    label_offset_pt: f64,
+    layout: AdditionalYTickLayout,
     tick_stroke: StrokePaint,
     primitives: &mut Vec<ScenePrimitive>,
 ) {
-    let dir = if is_left { -1.0 } else { 1.0 };
-    let anchor = if is_left { TextAnchor::End } else { TextAnchor::Start };
-    let rot = if tick_angle_deg.is_finite() { tick_angle_deg } else { 0.0 };
+    let dir = if layout.is_left { -1.0 } else { 1.0 };
+    let anchor = if layout.is_left { TextAnchor::End } else { TextAnchor::Start };
+    let rot = if layout.tick_angle_deg.is_finite() { layout.tick_angle_deg } else { 0.0 };
+    let span = tick_span_offsets(layout.tick_direction, 4.0, dir);
     for tick in ticks {
-        primitives.push(ScenePrimitive::Path {
-            path: Path2D::line(PointPt::new(spine_x, tick.coord_pt), PointPt::new(spine_x + dir * 4.0, tick.coord_pt)),
-            fill: None,
-            stroke: Some(tick_stroke),
-            clip: None,
-        });
+        if let Some((o0, o1)) = span {
+            primitives.push(ScenePrimitive::Path {
+                path: Path2D::line(PointPt::new(layout.spine_x + o0, tick.coord_pt), PointPt::new(layout.spine_x + o1, tick.coord_pt)),
+                fill: None,
+                stroke: Some(tick_stroke),
+                clip: None,
+            });
+        }
         if let Some(rich) = &tick.label {
             primitives.push(ScenePrimitive::Text(PositionedText {
                 rich: rich.clone(),
-                anchor_pt: PointPt::new(spine_x + dir * label_offset_pt, tick.coord_pt + 3.0),
+                anchor_pt: PointPt::new(layout.spine_x + dir * layout.label_offset_pt, tick.coord_pt + 3.0),
                 anchor,
                 font_size_pt: 8.5,
                 rotation_deg: rot,
@@ -2283,6 +2310,7 @@ pub(crate) fn format_tick_markup(value: f64, scale: AxisScale, format: TickLabel
             curvebook_text::format_axis_tick(antilog_val, AxisScale::Log10, policy)
         }
         TickLabelFormat::EngineeringSi => format_engineering_si(clean, policy),
+        TickLabelFormat::AbsoluteDecimal => curvebook_text::format_axis_tick(clean.abs(), scale, policy),
     }
 }
 
@@ -2414,7 +2442,7 @@ fn resolve_single_hook(token: &str, doc: &ProjectDocument, paired_info: Option<&
     }
 }
 
-fn format_scalar_clean(v: f64) -> String {
+pub(crate) fn format_scalar_clean(v: f64) -> String {
     if !v.is_finite() {
         return String::from("NaN");
     }
@@ -2886,8 +2914,8 @@ fn emit_frame_geometry(axes: &CompiledAxes, graph: &GraphSpec, doc: &ProjectDocu
         emit_ticks_only_vertical(&y_ticks, r.right(), false, y_stroke, options, scene);
     }
 
-    emit_x_ticks_and_labels(&x_ticks, x_spine_y, graph.x_axis.tick_angle_deg, x_stroke, options, scene);
-    emit_y_ticks_and_labels(&y_ticks, y_spine_x, false, y_stroke, options, scene);
+    emit_x_ticks_and_labels(&x_ticks, x_spine_y, &graph.x_axis, x_stroke, options, scene);
+    emit_y_ticks_and_labels(&y_ticks, y_spine_x, false, &graph.y_axis, y_stroke, options, scene);
 
     emit_axis_titles(graph, doc, primary_id, x_spine_y, y_spine_x, options, scene);
 
@@ -2896,7 +2924,7 @@ fn emit_frame_geometry(axes: &CompiledAxes, graph: &GraphSpec, doc: &ProjectDocu
         let y2_stroke = axis_stroke(y2_spec, options.axis_color);
         let y2_ticks = ticks_with_expanded_additional(&axes.y2_ticks, y2_ax, y2_spec, doc, primary_id, options);
         emit_vertical_spine(y2_ax, &y2_ticks, r.right(), false, y2_stroke, scene);
-        emit_y_ticks_and_labels(&y2_ticks, r.right(), true, y2_stroke, options, scene);
+        emit_y_ticks_and_labels(&y2_ticks, r.right(), true, y2_spec, y2_stroke, options, scene);
         emit_y2_title(y2_spec, doc, primary_id, r, options, scene);
     }
 }
@@ -3084,15 +3112,20 @@ fn emit_ticks_only_vertical(
     }
 }
 
+fn should_emit_tick_label(spec: &AxisSpec, value: f64) -> bool {
+    spec.show_tick_labels
+        || spec.additional_ticks.iter().any(|t| (t.value - value).abs() <= 1e-12 && t.label.as_ref().is_some_and(|s| !s.trim().is_empty()))
+}
+
 fn emit_x_ticks_and_labels(
     ticks: &[AxisTick],
     spine_y: f64,
-    angle_deg: f64,
+    spec: &AxisSpec,
     stroke: StrokePaint,
     options: &AxisRenderOptions,
     scene: &mut ChartScene,
 ) {
-    let rot = if angle_deg.is_finite() { angle_deg } else { 0.0 };
+    let rot = if spec.tick_angle_deg.is_finite() { spec.tick_angle_deg } else { 0.0 };
     let anchor = if rot > 5.0 {
         TextAnchor::Start
     } else if rot < -5.0 {
@@ -3106,14 +3139,18 @@ fn emit_x_ticks_and_labels(
             TickKind::Major => options.major_tick_len_pt,
             TickKind::Minor => options.minor_tick_len_pt,
         };
-        scene.primitives.push(ScenePrimitive::Path {
-            path: Path2D::line(PointPt::new(tick.coord_pt, spine_y), PointPt::new(tick.coord_pt, spine_y + len)),
-            fill: None,
-            stroke: Some(stroke),
-            clip: None,
-        });
+        if let Some((o0, o1)) = tick_span_offsets(spec.tick_direction, len, 1.0) {
+            scene.primitives.push(ScenePrimitive::Path {
+                path: Path2D::line(PointPt::new(tick.coord_pt, spine_y + o0), PointPt::new(tick.coord_pt, spine_y + o1)),
+                fill: None,
+                stroke: Some(stroke),
+                clip: None,
+            });
+        }
 
-        if let Some(rich) = &tick.label {
+        if let Some(rich) = &tick.label
+            && should_emit_tick_label(spec, tick.value)
+        {
             let y_offset = len + options.tick_font_size_pt * 1.05;
             scene.primitives.push(ScenePrimitive::Text(PositionedText {
                 rich: rich.clone(),
@@ -3131,6 +3168,7 @@ fn emit_y_ticks_and_labels(
     ticks: &[AxisTick],
     spine_x: f64,
     is_right_axis: bool,
+    spec: &AxisSpec,
     stroke: StrokePaint,
     options: &AxisRenderOptions,
     scene: &mut ChartScene,
@@ -3143,14 +3181,18 @@ fn emit_y_ticks_and_labels(
             TickKind::Major => options.major_tick_len_pt,
             TickKind::Minor => options.minor_tick_len_pt,
         };
-        scene.primitives.push(ScenePrimitive::Path {
-            path: Path2D::line(PointPt::new(spine_x, tick.coord_pt), PointPt::new(spine_x + dir * len, tick.coord_pt)),
-            fill: None,
-            stroke: Some(stroke),
-            clip: None,
-        });
+        if let Some((o0, o1)) = tick_span_offsets(spec.tick_direction, len, dir) {
+            scene.primitives.push(ScenePrimitive::Path {
+                path: Path2D::line(PointPt::new(spine_x + o0, tick.coord_pt), PointPt::new(spine_x + o1, tick.coord_pt)),
+                fill: None,
+                stroke: Some(stroke),
+                clip: None,
+            });
+        }
 
-        if let Some(rich) = &tick.label {
+        if let Some(rich) = &tick.label
+            && should_emit_tick_label(spec, tick.value)
+        {
             let x_pos = spine_x + dir * (len + 3.0);
             let y_pos = tick.coord_pt + options.tick_font_size_pt * 0.32;
             scene.primitives.push(ScenePrimitive::Text(PositionedText {
@@ -3480,8 +3522,21 @@ pub fn render_annotations(annotations: &[GraphAnnotation], doc: &ProjectDocument
             GraphAnnotation::Shape { kind, bounds_pt, stroke_color, stroke_width_pt, dash, fill_color } => {
                 render_shape_annotation(*kind, RectPt::from(*bounds_pt), *stroke_color, *stroke_width_pt, *dash, *fill_color, scene);
             }
-            GraphAnnotation::EmbeddedResultTable { result_sheet_id, tab_id, bounds_pt } => {
-                render_embedded_result_table(result_sheet_id, tab_id.as_deref(), RectPt::from(*bounds_pt), doc, scene);
+            GraphAnnotation::EmbeddedResultTable { result_sheet_id, tab_id, bounds_pt, selected_rows, selected_cols, style } => {
+                let _ = crate::xy::render_styled_embedded_table(
+                    scene,
+                    doc,
+                    &crate::xy::EmbeddedTableDrawSpec {
+                        sheet_id: result_sheet_id,
+                        tab_id: tab_id.as_deref(),
+                        bounds: RectPt::from(*bounds_pt),
+                        selected_rows: selected_rows.as_deref(),
+                        selected_cols: selected_cols.as_deref(),
+                        style,
+                        missing_warning_code: "missing_embedded_result_table",
+                    },
+                    None,
+                );
             }
             GraphAnnotation::ModelEquation { result_sheet_id, data_set_index, mode, bounds_pt, font_size_pt, bordered } => {
                 crate::equation_box::render_model_equation_annotation(
@@ -3495,6 +3550,22 @@ pub fn render_annotations(annotations: &[GraphAnnotation], doc: &ProjectDocument
                         font_size_pt: *font_size_pt,
                         bordered: *bordered,
                     },
+                );
+            }
+            GraphAnnotation::EmbeddedImage { asset_id, bounds_pt, rotation_deg, crop, border, .. } => {
+                crate::image_decode::emit_embedded_image_primitive(
+                    scene,
+                    doc,
+                    &crate::image_decode::EmbeddedImageDrawSpec {
+                        asset_id,
+                        bounds_pt: *bounds_pt,
+                        rotation_deg: *rotation_deg,
+                        crop: *crop,
+                        border: *border,
+                        clip: None,
+                        badge_override: None,
+                    },
+                    None,
                 );
             }
         }
@@ -3649,140 +3720,6 @@ fn rounded_rect_path(r: RectPt) -> Path2D {
             PathCmd::QuadTo { control: PointPt::new(x0, y0), to: PointPt::new(x0 + rad, y0) },
             PathCmd::Close,
         ],
-    }
-}
-
-fn render_embedded_result_table(result_sheet_id: &SheetId, tab_id: Option<&str>, rect: RectPt, doc: &ProjectDocument, scene: &mut ChartScene) {
-    let Some(result) = doc.result_sheet(result_sheet_id) else {
-        scene.warnings.push(ChartWarning::new("missing_embedded_result_table", format!("embedded result sheet '{result_sheet_id}' not found")));
-        return;
-    };
-    let tab = select_result_tab(&result.tabs, tab_id, result_sheet_id, &mut scene.warnings);
-    let Some(tab) = tab else {
-        scene.warnings.push(ChartWarning::new("empty_embedded_result_table", format!("result sheet '{result_sheet_id}' has no tabs")));
-        return;
-    };
-
-    scene.primitives.push(ScenePrimitive::Path {
-        path: Path2D::rect(rect),
-        fill: Some(FillPaint::solid(Rgba8::rgba(255, 255, 255, 245))),
-        stroke: Some(StrokePaint::solid(Rgba8::BLACK, 0.8)),
-        clip: None,
-    });
-    scene.primitives.push(ScenePrimitive::PushClip { rect });
-    draw_result_tab_cells(tab, rect, scene);
-    scene.primitives.push(ScenePrimitive::PopClip);
-}
-
-fn select_result_tab<'a>(tabs: &'a [ResultTab], tab_id: Option<&str>, sheet_id: &SheetId, warnings: &mut Vec<ChartWarning>) -> Option<&'a ResultTab> {
-    if let Some(target_id) = tab_id {
-        if let Some(found) = tabs.iter().find(|t| t.id == target_id) {
-            return Some(found);
-        }
-        warnings.push(ChartWarning::new(
-            "missing_result_tab",
-            format!("tab '{target_id}' not found on result sheet '{sheet_id}'; fell back to first tab"),
-        ));
-    }
-    tabs.first()
-}
-
-fn draw_result_tab_cells(tab: &ResultTab, rect: RectPt, scene: &mut ChartScene) {
-    let font_size = 7.5_f64;
-    let row_h = 11.5_f64;
-    let col_count = tab.column_headers.len().max(1) + usize::from(!tab.row_labels.is_empty());
-    let col_w = (rect.width - 8.0).max(16.0) / (col_count as f64);
-
-    let mut y = rect.y + 3.0 + font_size;
-    let start_col = usize::from(!tab.row_labels.is_empty());
-    for (offset, hdr) in tab.column_headers.iter().enumerate() {
-        let x = rect.x + 4.0 + ((start_col + offset) as f64) * col_w;
-        scene.primitives.push(ScenePrimitive::Text(PositionedText {
-            rich: parse_markup(&format!("<b>{hdr}</b>")),
-            anchor_pt: PointPt::new(x, y),
-            anchor: TextAnchor::Start,
-            font_size_pt: font_size,
-            rotation_deg: 0.0,
-            color: Rgba8::BLACK,
-        }));
-    }
-
-    let rule_y = rect.y + row_h + 2.0;
-    scene.primitives.push(ScenePrimitive::Path {
-        path: Path2D::line(PointPt::new(rect.x + 2.0, rule_y), PointPt::new(rect.right() - 2.0, rule_y)),
-        fill: None,
-        stroke: Some(StrokePaint::solid(Rgba8::rgb(120, 120, 120), 0.6)),
-        clip: None,
-    });
-
-    for (r_idx, row) in tab.rows.iter().enumerate() {
-        y = rect.y + 4.0 + font_size + ((r_idx + 1) as f64) * row_h;
-        if y > rect.bottom() + row_h {
-            break;
-        }
-        let mut cx = rect.x + 4.0;
-        if let Some(row_lbl) = tab.row_labels.get(r_idx) {
-            scene.primitives.push(ScenePrimitive::Text(PositionedText {
-                rich: parse_markup(row_lbl),
-                anchor_pt: PointPt::new(cx, y),
-                anchor: TextAnchor::Start,
-                font_size_pt: font_size,
-                rotation_deg: 0.0,
-                color: Rgba8::BLACK,
-            }));
-            cx += col_w;
-        }
-        for (c_idx, cell) in row.iter().enumerate() {
-            let cell_text = format_result_cell_text(cell);
-            scene.primitives.push(ScenePrimitive::Text(PositionedText {
-                rich: parse_markup(&cell_text),
-                anchor_pt: PointPt::new(cx + (c_idx as f64) * col_w, y),
-                anchor: TextAnchor::Start,
-                font_size_pt: font_size,
-                rotation_deg: 0.0,
-                color: Rgba8::BLACK,
-            }));
-        }
-    }
-}
-
-fn format_result_cell_text(cell: &ResultCell) -> String {
-    match cell {
-        ResultCell::Empty => String::new(),
-        ResultCell::Number { value, prefix, units } => {
-            let mut out = String::new();
-            if let Some(p) = prefix {
-                out.push_str(p);
-            }
-            out.push_str(&format_scalar_clean(*value));
-            if let Some(u) = units
-                && !u.is_empty()
-            {
-                out.push(' ');
-                out.push_str(u);
-            }
-            out
-        }
-        ResultCell::ConfidenceInterval { lower, upper } => {
-            let lo = match lower {
-                CiBound::Finite(v) => format_scalar_clean(*v),
-                CiBound::Open => String::from("open"),
-            };
-            let hi = match upper {
-                CiBound::Finite(v) => format_scalar_clean(*v),
-                CiBound::Open => String::from("open"),
-            };
-            format!("[{lo}, {hi}]")
-        }
-        ResultCell::PValue { formatted, stars, .. } => {
-            if stars.is_empty() {
-                formatted.clone()
-            } else {
-                format!("{formatted} {stars}")
-            }
-        }
-        ResultCell::Text(s) => s.clone(),
-        ResultCell::Boolean(b) => String::from(if *b { "Yes" } else { "No" }),
     }
 }
 

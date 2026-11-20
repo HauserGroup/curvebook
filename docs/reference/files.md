@@ -14,9 +14,10 @@ A `.curvebook` file (`ArchiveKind::Project`) is a standard ZIP container compres
 
 | Entry Path | Contents | Integrity / Limits |
 |---|---|---|
-| `manifest.json` | `ArchiveManifest`: `format: "curvebook-archive"`, `schema_version`, `kind`, `title`, `document_crc32`, and per-sheet descriptors (`id`, `section`, `title`, `csv_path`, `crc32`). | Validated against `archive-manifest.schema.json` and checked against `document_crc32`. |
-| `document.json` | Canonical 2-space-indented `ProjectDocument` JSON (`schema_version = CURRENT_SCHEMA_VERSION`). | Validated against `document.schema.json`, finite floats, dimensions, and acyclic DAGs. |
+| `manifest.json` | `ArchiveManifest`: `format: "curvebook-archive"`, `schema_version`, `kind`, `title`, `document_crc32`, per-sheet descriptors (`id`, `section`, `title`, `csv_path`, `crc32`), and `assets` descriptors (`asset_id`, `media_type`, `pixel_size`, `asset_path`, `crc32`). | Validated against `archive-manifest.schema.json` and checked against `document_crc32`. |
+| `document.json` | Canonical 2-space-indented `ProjectDocument` JSON (`schema_version = CURRENT_SCHEMA_VERSION`; `image_assets[].bytes` omitted inline). | Validated against `document.schema.json`, finite floats, dimensions, and acyclic DAGs. |
 | `sheets/<id>.csv` | RFC-4180 CSV snapshots for every `DataSheet` (`*` marks excluded cells). | Per-sheet CRC-32 recorded in `manifest.json`. |
+| `assets/<asset_id>.<ext>` | Content-addressed binary PNG/JPEG/TIFF payloads referenced by `GraphAnnotation::EmbeddedImage` and `LayoutItem::EmbeddedImage`. | `MAX_IMAGE_ASSET_BYTES = 32 MiB`, `MAX_RASTER_PIXELS = 67_108_864`, CRC-32 + SHA-256 verified against `asset_id` and image header. |
 
 **Archive Safety Limits (`ZipLimits::default()` & `archive.rs`):** `MAX_ARCHIVE_FILE_BYTES = 128 MiB`, `MAX_ZIP_ENTRIES = 4,096`, `MAX_ZIP_UNCOMPRESSED_BYTES = 128 MiB`, `MAX_ZIP_ENTRY_BYTES = 64 MiB`, strict path sanitization rejecting `..` traversal, absolute paths, and symlink escapes. All disk writes go through atomic temp-file write + rename (`platform_write_atomic`).
 
@@ -24,8 +25,8 @@ A `.curvebook` file (`ArchiveKind::Project`) is a standard ZIP container compres
 
 CurveBook also supports reading and writing unpacked, Git-friendly project directories (`.curvebook.d/`, via `open_project_unpacked_dir` / `save_project_unpacked_dir` / `is_unpacked_project_dir`):
 
-- Mirrors the exact `.curvebook` internal layout (`manifest.json`, 2-space-indented `document.json`, `sheets/<id>.csv`) directly on disk for clean line-by-line version-control diffs.
-- Preserves non-archive repository files (such as `.git/`, READMEs, or notes) while pruning only stale sheet CSVs tracked by previous manifests.
+- Mirrors the exact `.curvebook` internal layout (`manifest.json`, 2-space-indented `document.json`, `sheets/<id>.csv`, `assets/<asset_id>.<ext>`) directly on disk for clean line-by-line version-control diffs.
+- Preserves non-archive repository files (such as `.git/`, READMEs, or notes) while pruning stale sheet CSVs and image assets tracked by previous manifests.
 - Enforces strict root canonicalization, symlink boundary checks, `ZipLimits`, and CRC-32 verification on load.
 
 ### `.cbtemplate` Reusable Templates {#cbtemplate}
@@ -34,7 +35,7 @@ Saving a template (`project.saveTemplate` -> `.cbtemplate`, `ArchiveKind::Templa
 
 - Table archetypes, column headers, subcolumn layouts, and `=` Calculated Variable formulas
 - `InfoSheet` constants (`HookSource` targets)
-- Complete `AnalysisSpec` pipelines, parameter rules/sharing, `GraphSpec` styling/axes/equations, and `LayoutSpec` panel geometry
+- Complete `AnalysisSpec` pipelines, parameter rules/sharing, `GraphSpec` styling/axes/equations, `LayoutSpec` panel geometry, and referenced embedded image assets (unreferenced assets dropped)
 
 Instantiating (`project.instantiateTemplate`) creates a fresh independent project ready for incoming data.
 
@@ -48,7 +49,7 @@ A `.curvebook` archive embeds all `DataSheet` values, exclusion notes, `InfoShee
 
 | Format / Record | Current Version Constant | Migration & Safety Rule |
 |---|---:|---|
-| Project / Template (`document.json`, `manifest.json`) | `CURRENT_SCHEMA_VERSION = 6` | Migrations (`migrate_document_json`, `VersionStep`) automatically upgrade schemas `0 -> 1 -> 2 -> 3 -> 4 -> 5 -> 6`. Files with `schema_version > CURRENT_SCHEMA_VERSION` fail on open with `UnsupportedSchemaVersion` (`unsupported_version`). |
+| Project / Template (`document.json`, `manifest.json`) | `CURRENT_SCHEMA_VERSION = 7` | Migrations (`migrate_document_json`, `VersionStep`) automatically upgrade schemas `0 -> 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7`. Files with `schema_version > CURRENT_SCHEMA_VERSION` fail on open with `UnsupportedSchemaVersion` (`unsupported_version`). |
 | User Preferences (`preferences.json`) | `CURRENT_PREFERENCES_VERSION = 1` | Unknown extension fields preserved via `additionalProperties`; `version > 1` triggers warning/refusal without silent overwrite. |
 | Recovery WAL (`ops.journal` & `curvebook.lock`) | `CURRENT_JOURNAL_VERSION = 1`<br>`CURRENT_LOCK_VERSION = 1` | Strict NDJSON line validation and per-record CRC-32 checking. |
 

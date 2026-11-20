@@ -3,11 +3,13 @@
 use curvebook_chart::preflight_check_scene;
 use curvebook_doc::{
     AdditionalTick, AnnotationShapeKind, AxisSegment, AxisSpec, AxisThreshold, BracketLabelMode, BracketStyle, BreakOrnament, CanvasResizeMode,
-    CategoricalTickSource, CldOrdering, ColorChannelMapping, CompactLetterDisplaySpec, ConnectingLineStyle, DiagnosticPlotKind, EquationDisplayMode,
-    ErrorBarDirection, ErrorBarMetric, ErrorBarSpec, ErrorCode, FigureCanvasPreset, FramePreset, GraphAnnotation, GraphAxisScale, GraphKind,
-    GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, LineConnectionKind, MultivariateGraphEncoding, MultivariatePlotMode,
+    CartesianOrientation, CategoricalTickSource, CldOrdering, ColorChannelMapping, CompactLetterDisplaySpec, ConnectingLineStyle, DiagnosticPlotKind,
+    DocError, EquationDisplayMode, ErrorBarDirection, ErrorBarMetric, ErrorBarSpec, ErrorCode, FigureCanvasPreset, FramePreset, GraphAnnotation,
+    GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, HeatmapColumnLabelAngle, HeatmapColumnLabelMode,
+    HeatmapLabelSpec, HeatmapRowLabelMode, LineConnectionKind, MAX_SHEETS_PER_PROJECT, MultivariateGraphEncoding, MultivariatePlotMode,
     PairwiseBracketSpec, PairwiseComparisonRecord, PairwiseDisplayMode, PartsOfWholeLayout, PointStyleOverride, ProjectDocument, RectPt,
-    RegressionOverlaySpec, ReplicateOverlayStyle, SeriesSpec, SizeChannelMapping, SizePt, SummaryMeasure, TickLabelFormat, WhiskerMethod,
+    RegressionOverlaySpec, ReplicateLineMode, ReplicateOverlayStyle, SeriesOffsetSpec, SeriesSpec, SizeChannelMapping, SizePt, SummaryMeasure,
+    SurvivalDisplayMetric, TickDirection, TickLabelFormat, WhiskerMethod,
 };
 use curvebook_math::LogitDomain;
 use curvebook_palette::{ColorRamp, ColormapId, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8};
@@ -17,10 +19,11 @@ use serde_json::{Map, Value, json};
 use super::analysis::{de_present_opt, merge_json_struct, strip_keys};
 use super::export::{compile_scene_for_sheet, de_opt_u16, de_opt_usize};
 use super::helpers::{
-    next_unique_sheet_id, parse_sheet_id, require_graph_sheet, require_graph_sheet_mut, require_result_sheet, validate_point_override_in_bounds,
+    next_unique_sheet_id, next_unique_sheet_id_excluding, parse_sheet_id, require_graph_sheet, require_graph_sheet_mut, require_result_sheet,
+    sheet_id_exists, validate_point_override_in_bounds,
 };
 use super::params::{
-    any_json_schema, array_schema, bool_schema, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema,
+    any_json_schema, array_schema, bool_schema, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema,
     obj_schema_with_aliases, parse_params, str_schema,
 };
 use super::spellings::{self, first_present};
@@ -232,6 +235,32 @@ static SPECS: &[CommandSpec] = &[
         enabled: has_graph_sheet,
         run: run_graph_set_compact_letter_display,
     },
+    CommandSpec {
+        id: "graph.insertImage",
+        label: "Insert Image on Graph",
+        menu_path: "Insert/Image on Graph...",
+        shortcut: "",
+        summary: "Embed a PNG, JPEG, or TIFF raster image annotation onto a graph sheet.",
+        beginner: "Inserts a microscopy micrograph, Western blot, or schematic photo onto a graph.",
+        group: CommandGroup::Graph,
+        effects: Effects::MUTATES_DOCUMENT.with(Effects::READS_FILESYSTEM),
+        input_schema: schema_graph_insert_image,
+        enabled: has_graph_sheet,
+        run: run_graph_insert_image,
+    },
+    CommandSpec {
+        id: "graph.updateImage",
+        label: "Format Embedded Graph Image",
+        menu_path: "Format/Embedded Image...",
+        shortcut: "",
+        summary: "Update placement bounds, aspect-ratio lock, rotation, crop insets, or border on an embedded graph image.",
+        beginner: "Crops, rotates, resizes, or frames an embedded image on a graph.",
+        group: CommandGroup::Graph,
+        effects: MUTATE_IDEMPOTENT,
+        input_schema: schema_graph_update_image,
+        enabled: has_graph_sheet,
+        run: run_graph_update_image,
+    },
 ];
 
 fn has_data_sheet(session: &Session) -> bool {
@@ -242,7 +271,7 @@ fn has_graph_sheet(session: &Session) -> bool {
     !session.document().graph_sheets.is_empty()
 }
 
-fn has_graph_or_layout(session: &Session) -> bool {
+pub(super) fn has_graph_or_layout(session: &Session) -> bool {
     !session.document().graph_sheets.is_empty() || !session.document().layout_sheets.is_empty()
 }
 
@@ -412,16 +441,22 @@ struct GraphCreateParams {
     title: Option<String>,
     kind: Option<Value>,
     initialized: Option<bool>,
+    #[serde(default)]
+    one_per_data_set: Option<bool>,
+    #[serde(default)]
+    y_axis_title: Option<String>,
 }
 
 fn schema_graph_create() -> Value {
     obj_schema_with_aliases(
         vec![
             ("data_sheet_id", non_empty_str_schema("Source data sheet ID to plot")),
-            ("sheet_id", nullable_schema(non_empty_str_schema("Optional explicit graph sheet ID"))),
+            ("sheet_id", nullable_schema(non_empty_str_schema("Optional explicit graph sheet ID (prefix when creating multiple graphs)"))),
             ("title", nullable_schema(str_schema("Optional graph title"))),
             ("kind", nullable_schema(any_json_schema("Optional initial graph kind string or GraphKind object"))),
             ("initialized", nullable_schema(bool_schema("Whether the graph starts marked as initialized"))),
+            ("one_per_data_set", nullable_schema(bool_schema("When true, create one single-series graph sheet per data set in one undo step"))),
+            ("y_axis_title", nullable_schema(str_schema("Optional initial Y-axis title"))),
         ],
         &["data_sheet_id"],
         vec![("data_sheet_id", &["source_sheet_id", "source_sheet"]), ("sheet_id", &["id"])],
@@ -495,6 +530,10 @@ fn schema_graph_set_spec() -> Value {
             ("title", nullable_schema(str_schema("Optional updated graph title"))),
             ("initialized", nullable_schema(bool_schema("Optional initialized state"))),
             ("survival_number_at_risk", nullable_schema(bool_schema("Show number-at-risk table under survival plots"))),
+            ("paper_fill", nullable_schema(any_json_schema("Outer canvas paper background color or null for transparent"))),
+            ("orientation", nullable_schema(enum_str_schema("Cartesian plot orientation", &["vertical", "horizontal"]))),
+            ("forest_show_pooled_diamond", nullable_schema(bool_schema("Show pooled summary diamond row on diagnostic forest plots"))),
+            ("heatmap_labels", nullable_schema(json!({ "type": "object", "description": "Heatmap row/column label mode and rotation spec" }))),
             ("multivariate", nullable_schema(json!({ "type": "object", "description": "5-channel multivariate encoding specification" }))),
         ],
         &["sheet_id"],
@@ -768,8 +807,10 @@ fn schema_graph_add_annotation() -> Value {
 
 #[derive(Debug, Deserialize)]
 struct GraphApplyStyleFromParams {
-    #[serde(alias = "target_sheet_id", alias = "id")]
-    sheet_id: String,
+    #[serde(default, alias = "target_sheet_id", alias = "id")]
+    sheet_id: Option<String>,
+    #[serde(default)]
+    target_sheet_ids: Option<Vec<String>>,
     #[serde(alias = "from_sheet_id", alias = "source_graph_id")]
     donor_sheet_id: String,
     #[serde(default)]
@@ -783,13 +824,22 @@ struct GraphApplyStyleFromParams {
 fn schema_graph_apply_style_from() -> Value {
     obj_schema_with_aliases(
         vec![
-            ("sheet_id", non_empty_str_schema("Target graph sheet ID")),
+            ("sheet_id", nullable_schema(non_empty_str_schema("Target graph sheet ID"))),
+            (
+                "target_sheet_ids",
+                nullable_schema(array_schema(
+                    "Optional batch list of target graph sheet IDs (any entry matching `donor_sheet_id` is skipped cleanly)",
+                    non_empty_str_schema("Target graph sheet ID"),
+                    None,
+                    None,
+                )),
+            ),
             ("donor_sheet_id", non_empty_str_schema("Donor graph sheet ID to copy styling from")),
             ("clone_palette", nullable_schema(bool_schema("Copy color palette and series colors"))),
             ("clone_frame_and_axes", nullable_schema(bool_schema("Copy frame and axis styling"))),
             ("clone_error_bars_and_legend", nullable_schema(bool_schema("Copy error bar and legend settings"))),
         ],
-        &["sheet_id", "donor_sheet_id"],
+        &["donor_sheet_id"],
         vec![("sheet_id", &["target_sheet_id", "id"]), ("donor_sheet_id", &["from_sheet_id", "source_graph_id"])],
         false,
     )
@@ -934,7 +984,7 @@ fn schema_graph_set_compact_letter_display() -> Value {
 // Command Runners
 // ---------------------------------------------------------------------------
 
-fn resolve_graph_create_source_sheet(
+pub(super) fn resolve_graph_create_source_sheet(
     doc: &ProjectDocument,
     source_id: &curvebook_doc::SheetId,
 ) -> Result<(curvebook_doc::DataSheet, Option<String>), EngineError> {
@@ -970,6 +1020,21 @@ fn resolve_graph_create_source_sheet(
     Err(EngineError::with_code(ErrorCode::CycleDetected, format!("cyclic dependency detected while resolving upstream data sheet for `{source_id}`")))
 }
 
+fn dataset_display_title(ds: &curvebook_doc::DataSheet, idx: usize) -> Option<&str> {
+    match &ds.archetype {
+        curvebook_doc::TableArchetype::Xy(t) => t.data_sets.get(idx).map(|c| c.title.as_str()),
+        curvebook_doc::TableArchetype::Column(t) => t.data_sets.get(idx).map(|c| c.title.as_str()),
+        curvebook_doc::TableArchetype::Grouped(t) => t.data_sets.get(idx).map(|c| c.title.as_str()),
+        curvebook_doc::TableArchetype::Contingency(t) => t.data_sets.get(idx).map(|c| c.title.as_str()),
+        curvebook_doc::TableArchetype::Survival(t) => t.cohorts.get(idx).map(|c| c.title.as_str()),
+        curvebook_doc::TableArchetype::PartsOfWhole(t) => t.data_sets.get(idx).map(|c| c.title.as_str()),
+        curvebook_doc::TableArchetype::MultipleVariables(t) => t.variables.get(idx).map(|v| v.title.as_str()),
+        curvebook_doc::TableArchetype::Nested(t) => t.groups.get(idx).map(|g| g.title.as_str()),
+    }
+    .map(str::trim)
+    .filter(|s| !s.is_empty())
+}
+
 fn run_graph_create(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let schema = schema_graph_create();
     let params: GraphCreateParams = parse_params(&schema, raw)?;
@@ -977,6 +1042,102 @@ fn run_graph_create(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Eng
 
     let data_id = parse_sheet_id(&params.data_sheet_id)?;
     let (ds, res_title_opt) = resolve_graph_create_source_sheet(doc, &data_id)?;
+    let parsed_kind = params.kind.as_ref().map(parse_graph_kind).transpose()?;
+    if let Some(ref y_title) = params.y_axis_title {
+        curvebook_doc::validate_title(y_title)?;
+    }
+
+    if params.one_per_data_set.unwrap_or(false) {
+        if let Some(ref title) = params.title {
+            curvebook_doc::validate_title(title)?;
+        }
+        let seed_id = next_unique_sheet_id(doc, "graph")?;
+        let mut proto = GraphSheet::new_uninitialized_for_data(seed_id, &ds)?;
+        if let Some(kind) = parsed_kind {
+            apply_graph_kind(&mut proto.spec, kind, true);
+        }
+        let n = proto.spec.series.len();
+        if n == 0 {
+            return Err(EngineError::with_code(
+                ErrorCode::BadInput,
+                format!("source sheet `{data_id}` has no plottable data sets for `one_per_data_set`"),
+            ));
+        }
+        let next_total = doc.total_sheet_count().saturating_add(n);
+        if next_total > MAX_SHEETS_PER_PROJECT {
+            return Err(DocError::TooManySheets { count: next_total, max: MAX_SHEETS_PER_PROJECT }.into());
+        }
+
+        let mut reserved_ids: Vec<curvebook_doc::SheetId> = Vec::with_capacity(n);
+        let mut candidates: Vec<GraphSheet> = Vec::with_capacity(n);
+        for (idx, proto_series) in proto.spec.series.iter().enumerate() {
+            let gid = match params.sheet_id.as_deref() {
+                Some(raw_base) => {
+                    let s = if n == 1 { raw_base.to_owned() } else { format!("{raw_base}_{}", idx + 1) };
+                    let parsed = parse_sheet_id(&s)?;
+                    if sheet_id_exists(doc, &parsed) || reserved_ids.contains(&parsed) {
+                        return Err(DocError::DuplicateSheetId { sheet_id: parsed }.into());
+                    }
+                    parsed
+                }
+                None => {
+                    let exclude_refs: Vec<&curvebook_doc::SheetId> = reserved_ids.iter().collect();
+                    next_unique_sheet_id_excluding(doc, &format!("graph_{}", idx + 1), &exclude_refs)?
+                }
+            };
+            reserved_ids.push(gid.clone());
+
+            let series_title = dataset_display_title(&ds, proto_series.data_set_index)
+                .map(str::to_owned)
+                .or_else(|| proto_series.legend_label.clone())
+                .unwrap_or_else(|| format!("Set {}", idx + 1));
+            let title = match params.title.as_deref() {
+                Some(t) if n == 1 => t.to_owned(),
+                Some(t) => format!("{t} - {series_title}"),
+                None => series_title,
+            };
+            curvebook_doc::validate_title(&title)?;
+
+            let mut graph = proto.clone();
+            graph.id = gid;
+            graph.title = title.clone();
+            graph.spec.title = title;
+            graph.spec.primary_source_sheet_id = data_id.clone();
+            let mut single_series = proto_series.clone();
+            single_series.source_sheet_id = data_id.clone();
+            graph.spec.series = vec![single_series];
+            if let Some(ref y_title) = params.y_axis_title {
+                graph.spec.y_axis.title = y_title.clone();
+            }
+            graph.initialized =
+                if parsed_kind.is_some() { params.initialized.unwrap_or(true) } else { params.initialized.unwrap_or(proto.initialized) };
+            validate_graph_spec_in_doc(doc, &graph.id, &graph.spec)?;
+            candidates.push(graph);
+        }
+
+        let created_ids: Vec<String> = candidates.iter().map(|g| g.id.as_str().to_owned()).collect();
+        let first_title = candidates[0].title.clone();
+        let first_init = candidates[0].initialized;
+        let first_kind = candidates[0].spec.kind;
+        for graph in candidates {
+            doc.add_graph_sheet(graph)?;
+        }
+
+        return Ok(CommandOutcome::mutated(
+            "graph.create",
+            format!("created {} graph(s) from `{data_id}`", created_ids.len()),
+            json!({
+                "sheet_id": created_ids[0],
+                "sheet_ids": created_ids,
+                "created_count": n,
+                "data_sheet_id": data_id.as_str(),
+                "title": first_title,
+                "initialized": first_init,
+                "kind": first_kind,
+            }),
+        ));
+    }
+
     let id = match params.sheet_id.as_deref() {
         Some(raw_id) => parse_sheet_id(raw_id)?,
         None => next_unique_sheet_id(doc, "graph")?,
@@ -997,12 +1158,14 @@ fn run_graph_create(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Eng
         curvebook_doc::validate_title(title)?;
         graph.title = title.clone();
     }
-    if let Some(ref kind_val) = params.kind {
-        let kind = parse_graph_kind(kind_val)?;
+    if let Some(kind) = parsed_kind {
         apply_graph_kind(&mut graph.spec, kind, true);
         graph.initialized = params.initialized.unwrap_or(true);
     } else if let Some(init) = params.initialized {
         graph.initialized = init;
+    }
+    if let Some(ref y_title) = params.y_axis_title {
+        graph.spec.y_axis.title = y_title.clone();
     }
     curvebook_doc::validate_title(&graph.title)?;
     validate_graph_spec_in_doc(doc, &graph.id, &graph.spec)?;
@@ -1329,7 +1492,11 @@ fn validate_result_sheet_ref(
     Ok(())
 }
 
-fn validate_graph_spec_in_doc(doc: &curvebook_doc::ProjectDocument, graph_id: &curvebook_doc::SheetId, spec: &GraphSpec) -> Result<(), EngineError> {
+pub(super) fn validate_graph_spec_in_doc(
+    doc: &curvebook_doc::ProjectDocument,
+    graph_id: &curvebook_doc::SheetId,
+    spec: &GraphSpec,
+) -> Result<(), EngineError> {
     spec.validate()?;
     validate_source_sheet_ref(doc, graph_id, &spec.primary_source_sheet_id, "primary_source_sheet_id")?;
     for (idx, series) in spec.series.iter().enumerate() {
@@ -1345,8 +1512,14 @@ fn validate_graph_spec_in_doc(doc: &curvebook_doc::ProjectDocument, graph_id: &c
         validate_result_sheet_ref(doc, graph_id, &cld.result_sheet_id, "compact_letter_display.result_sheet_id")?;
     }
     for (idx, ann) in spec.annotations.iter().enumerate() {
-        if let GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. } | GraphAnnotation::ModelEquation { result_sheet_id, .. } = ann {
-            validate_result_sheet_ref(doc, graph_id, result_sheet_id, &format!("annotations[{idx}].result_sheet_id"))?;
+        match ann {
+            GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. } | GraphAnnotation::ModelEquation { result_sheet_id, .. } => {
+                validate_result_sheet_ref(doc, graph_id, result_sheet_id, &format!("annotations[{idx}].result_sheet_id"))?;
+            }
+            GraphAnnotation::EmbeddedImage { asset_id, .. } if doc.image_asset(asset_id).is_none() => {
+                return Err(EngineError::with_code(ErrorCode::NotFound, format!("annotations[{idx}] image asset `{asset_id}` not found in project")));
+            }
+            _ => {}
         }
     }
     crate::dag::validate_inline_hook_refs(doc, graph_id, &spec.inline_hooks())?;
@@ -1388,13 +1561,26 @@ fn run_graph_set_spec(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, E
 
     let patch =
         params.spec.clone().unwrap_or_else(|| strip_keys(&Value::Object(params.patch_fields.clone()), &["sheet_id", "id", "title", "initialized"]));
-    let patch_clean = strip_keys(&patch, &["multivariate"]);
+    let patch_clean = strip_keys(&patch, &["multivariate", "paper_fill", "orientation", "forest_show_pooled_diamond", "heatmap_labels"]);
     let merged = merge_json_struct(&current_spec, &patch_clean)?;
     let mut new_spec: GraphSpec =
         serde_json::from_value(merged).map_err(|err| EngineError::with_code(ErrorCode::BadInput, format!("invalid graph spec on `{id}`: {err}")))?;
 
     if let Some(mv_val) = patch.get("multivariate").or(params.multivariate.as_ref()) {
         new_spec.multivariate = Some(parse_multivariate_encoding(mv_val, current_spec.multivariate.as_ref())?);
+    }
+    if let Some(pf_val) = patch.get("paper_fill").or_else(|| params.patch_fields.get("paper_fill")) {
+        new_spec.paper_fill = if pf_val.is_null() { None } else { Some(parse_rgba8(pf_val)?) };
+    }
+    if let Some(or_val) = patch.get("orientation").or_else(|| params.patch_fields.get("orientation")) {
+        new_spec.orientation = parse_cartesian_orientation(or_val)?;
+    }
+    if let Some(f_val) = patch.get("forest_show_pooled_diamond").or_else(|| params.patch_fields.get("forest_show_pooled_diamond")) {
+        new_spec.forest_show_pooled_diamond =
+            f_val.as_bool().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`forest_show_pooled_diamond` must be a boolean"))?;
+    }
+    if let Some(hm_val) = patch.get("heatmap_labels").or_else(|| params.patch_fields.get("heatmap_labels")) {
+        new_spec.heatmap_labels = parse_heatmap_label_spec(hm_val, current_spec.heatmap_labels)?;
     }
     if let Some(nar) = params.survival_number_at_risk {
         new_spec.survival_number_at_risk = nar;
@@ -1904,29 +2090,78 @@ fn run_graph_apply_style_from(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
     let clone_palette = params.clone_palette.unwrap_or(true);
     let clone_frame_and_axes = params.clone_frame_and_axes.unwrap_or(true);
     let clone_error_bars_and_legend = params.clone_error_bars_and_legend.unwrap_or(true);
-    let target_id = parse_sheet_id(&params.sheet_id)?;
     let donor_id = parse_sheet_id(&params.donor_sheet_id)?;
     let donor_spec = require_graph_sheet(ctx.session.document(), &donor_id)?.spec.clone();
 
-    let mut updated = require_graph_sheet(ctx.session.document(), &target_id)?.spec.clone();
-    updated.apply_style_from_selective(&donor_spec, clone_palette, clone_frame_and_axes, clone_error_bars_and_legend);
-    validate_graph_spec_in_doc(ctx.session.document(), &target_id, &updated)?;
-    let target = require_graph_sheet_mut(&mut ctx.session.doc, &target_id)?;
-    target.spec = updated;
-    target.initialized = true;
+    let has_batch = params.target_sheet_ids.is_some();
+    let mut raw_targets = Vec::new();
+    if let Some(ref single) = params.sheet_id {
+        raw_targets.push(parse_sheet_id(single)?);
+    }
+    if let Some(ref list) = params.target_sheet_ids {
+        for raw_id in list {
+            raw_targets.push(parse_sheet_id(raw_id)?);
+        }
+    }
+    if raw_targets.is_empty() {
+        return Err(
+            EngineError::with_code(ErrorCode::BadInput, "provide `sheet_id` or `target_sheet_ids`").with_details(json!({ "pointer": "/sheet_id" }))
+        );
+    }
 
-    Ok(CommandOutcome::mutated(
-        "graph.applyStyleFrom",
-        format!("applied style from `{donor_id}` to `{target_id}`"),
-        json!({
-            "sheet_id": target_id.as_str(),
+    let mut deduped: Vec<curvebook_doc::SheetId> = Vec::with_capacity(raw_targets.len());
+    for tid in raw_targets {
+        if !deduped.contains(&tid) {
+            deduped.push(tid);
+        }
+    }
+
+    let mut skipped_ids: Vec<String> = Vec::new();
+    let mut validated_updates: Vec<(curvebook_doc::SheetId, GraphSpec)> = Vec::new();
+    for tid in deduped {
+        if has_batch && tid == donor_id {
+            skipped_ids.push(tid.as_str().to_owned());
+            continue;
+        }
+        let mut updated = require_graph_sheet(ctx.session.document(), &tid)?.spec.clone();
+        updated.apply_style_from_selective(&donor_spec, clone_palette, clone_frame_and_axes, clone_error_bars_and_legend);
+        validate_graph_spec_in_doc(ctx.session.document(), &tid, &updated)?;
+        validated_updates.push((tid, updated));
+    }
+
+    let first_target = validated_updates.first().map(|(id, spec)| (id.as_str().to_owned(), spec.primary_source_sheet_id.as_str().to_owned()));
+    let mut applied_ids: Vec<String> = Vec::with_capacity(validated_updates.len());
+    for (tid, updated) in validated_updates {
+        let target = require_graph_sheet_mut(&mut ctx.session.doc, &tid)?;
+        target.spec = updated;
+        target.initialized = true;
+        applied_ids.push(tid.as_str().to_owned());
+    }
+
+    let (primary_target_id, primary_source_sheet_id) =
+        first_target.unwrap_or_else(|| (donor_id.as_str().to_owned(), donor_spec.primary_source_sheet_id.as_str().to_owned()));
+    let mutated = !applied_ids.is_empty();
+    let msg = if applied_ids.len() == 1 {
+        format!("applied style from `{donor_id}` to `{}`", applied_ids[0])
+    } else {
+        format!("applied style from `{donor_id}` to {} graph(s)", applied_ids.len())
+    };
+    Ok(CommandOutcome {
+        command_id: String::from("graph.applyStyleFrom"),
+        mutated,
+        message: msg,
+        payload: json!({
+            "sheet_id": primary_target_id,
+            "applied_sheet_ids": applied_ids,
+            "skipped_sheet_ids": skipped_ids,
             "donor_sheet_id": donor_id.as_str(),
-            "primary_source_sheet_id": target.spec.primary_source_sheet_id.as_str(),
+            "primary_source_sheet_id": primary_source_sheet_id,
             "clone_palette": clone_palette,
             "clone_frame_and_axes": clone_frame_and_axes,
             "clone_error_bars_and_legend": clone_error_bars_and_legend,
         }),
-    ))
+        warnings: Vec::new(),
+    })
 }
 
 fn run_graph_apply_canvas_preset(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
@@ -2084,6 +2319,16 @@ fn resize_graph_annotation(ann: &mut GraphAnnotation, mode: CanvasResizeMode, sx
             *bounds_pt = scale_rect_pt(*bounds_pt, sx, sy)?;
             scale_stroke_or_clamp(stroke_width_pt, mode, scale_1d, "annotations.shape.stroke_width_pt")?;
         }
+        GraphAnnotation::EmbeddedImage { bounds_pt, crop, border, .. } => {
+            *bounds_pt = scale_rect_pt(*bounds_pt, sx, sy)?;
+            crop.left_pt = scale_finite(crop.left_pt, sx, "annotations.image.crop.left_pt")?;
+            crop.right_pt = scale_finite(crop.right_pt, sx, "annotations.image.crop.right_pt")?;
+            crop.top_pt = scale_finite(crop.top_pt, sy, "annotations.image.crop.top_pt")?;
+            crop.bottom_pt = scale_finite(crop.bottom_pt, sy, "annotations.image.crop.bottom_pt")?;
+            if let Some(b) = border {
+                scale_stroke_or_clamp(&mut b.width_pt, mode, scale_1d, "annotations.image.border.width_pt")?;
+            }
+        }
     }
     Ok(())
 }
@@ -2208,11 +2453,17 @@ fn resolve_graph_option(option_id: &str, requested_kind: Option<GraphKind>) -> O
 fn default_gdo_for_option(preset: &str, color: Rgba8) -> GraphicalDataObject {
     let marker = MarkerStyle { fill_color: color, stroke_color: color, ..MarkerStyle::default() };
     match preset {
-        "xy.scatter" | "mv.bubble" => GraphicalDataObject::ScatterAndLine { marker: Some(marker), line: None, area_fill: None },
+        "xy.scatter" | "mv.bubble" => GraphicalDataObject::ScatterAndLine {
+            marker: Some(marker),
+            line: None,
+            area_fill: None,
+            replicate_lines: curvebook_doc::ReplicateLineMode::SummaryCenter,
+        },
         "xy.scatter_line" => GraphicalDataObject::ScatterAndLine {
             marker: Some(marker),
             line: Some(ConnectingLineStyle { kind: LineConnectionKind::PointToPoint, dash_style: LineDashStyle::Solid, stroke_width_pt: 1.5, color }),
             area_fill: None,
+            replicate_lines: curvebook_doc::ReplicateLineMode::SummaryCenter,
         },
         "col.before_after" => GraphicalDataObject::BeforeAfterLines { marker: Some(marker), line_color: color, stroke_width_pt: 1.2 },
         "col.box_whisker" => GraphicalDataObject::BoxAndWhisker {
@@ -2286,6 +2537,7 @@ fn default_gdo_for_kind(kind: GraphKind, color: Rgba8) -> GraphicalDataObject {
             marker: Some(MarkerStyle { fill_color: color, stroke_color: color, ..MarkerStyle::default() }),
             line: Some(ConnectingLineStyle { kind: LineConnectionKind::PointToPoint, dash_style: LineDashStyle::Solid, stroke_width_pt: 1.5, color }),
             area_fill: None,
+            replicate_lines: curvebook_doc::ReplicateLineMode::SummaryCenter,
         },
         GraphKind::Column | GraphKind::Grouped | GraphKind::Contingency => GraphicalDataObject::BarWithReplicates {
             summary: SummaryMeasure::Mean,
@@ -2300,6 +2552,9 @@ fn default_gdo_for_kind(kind: GraphKind, color: Rgba8) -> GraphicalDataObject {
             show_censored_ticks: true,
             show_greenwood_ci: false,
             ci_dashed: true,
+            display_metric: curvebook_doc::SurvivalDisplayMetric::PercentSurvival,
+            staircase: true,
+            error_display: None,
         },
         GraphKind::PartsOfWhole => GraphicalDataObject::PartsOfWhole { layout: PartsOfWholeLayout::Donut, show_center_total: true },
     }
@@ -2323,6 +2578,13 @@ fn apply_axis_updates(axis: &mut AxisSpec, val: &Value) -> Result<(), EngineErro
     }
     if let Some(tf_val) = val.get("tick_format") {
         axis.tick_format = parse_tick_format(tf_val)?;
+    }
+    if let Some(td_val) = val.get("tick_direction") {
+        axis.tick_direction = parse_tick_direction(td_val)?;
+    }
+    if let Some(stl_val) = val.get("show_tick_labels") {
+        axis.show_tick_labels =
+            stl_val.as_bool().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`show_tick_labels` must be a boolean"))?;
     }
     if let Some(segs_val) = val.get("segments").and_then(Value::as_array) {
         if !(1..=3).contains(&segs_val.len()) {
@@ -2432,6 +2694,99 @@ fn apply_single_series_patch(series: &mut SeriesSpec, val: &Value) -> Result<(),
     }
     if let Some(xeb_val) = val.get("x_error_bars") {
         series.x_error_bars = patch_error_bars(series.x_error_bars, xeb_val)?;
+    }
+    apply_extended_series_fields(series, val)?;
+    Ok(())
+}
+
+fn apply_extended_series_fields(series: &mut SeriesSpec, val: &Value) -> Result<(), EngineError> {
+    if let Some(off_val) = val.get("offset") {
+        if let Some(obj) = off_val.as_object() {
+            if let Some(v) = obj.get("x_data") {
+                series.offset.x_data = parse_finite_f64(v, "`offset.x_data`")?;
+            }
+            if let Some(v) = obj.get("x_pt") {
+                series.offset.x_pt = parse_finite_f64(v, "`offset.x_pt`")?;
+            }
+            if let Some(v) = obj.get("y_pt") {
+                series.offset.y_pt = parse_finite_f64(v, "`offset.y_pt`")?;
+            }
+        } else if let Ok(parsed) = serde_json::from_value::<SeriesOffsetSpec>(off_val.clone()) {
+            series.offset = parsed;
+        } else {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "`offset` must be an object `{ x_data, x_pt, y_pt }`"));
+        }
+    }
+    if let Some(v) = val.get("offset_x_data") {
+        series.offset.x_data = parse_finite_f64(v, "`offset_x_data`")?;
+    }
+    if let Some(v) = val.get("offset_x_pt") {
+        series.offset.x_pt = parse_finite_f64(v, "`offset_x_pt`")?;
+    }
+    if let Some(v) = val.get("offset_y_pt") {
+        series.offset.y_pt = parse_finite_f64(v, "`offset_y_pt`")?;
+    }
+    if let Some(bw_val) = val.get("bar_width_pt").or_else(|| val.get("bar_width_override_pt")) {
+        series.bar_width_override_pt = if bw_val.is_null() {
+            None
+        } else {
+            let w = parse_finite_f64(bw_val, "`bar_width_pt`")?;
+            if w <= 0.0 {
+                return Err(EngineError::with_code(ErrorCode::BadInput, "`bar_width_pt` must be > 0.0"));
+            }
+            Some(w)
+        };
+    }
+    if let Some(raw_val) = val.get("show_raw_data") {
+        series.show_raw_data = raw_val.as_bool().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`show_raw_data` must be boolean"))?;
+    }
+    if let Some(bw_pt) = val.get("border_width_pt") {
+        let w = parse_finite_f64(bw_pt, "`border_width_pt`")?;
+        if w < 0.0 {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "`border_width_pt` must be >= 0.0"));
+        }
+        if let GraphicalDataObject::BarWithReplicates { border_width_pt, .. } | GraphicalDataObject::FloatingBar { border_width_pt, .. } =
+            &mut series.gdo
+        {
+            *border_width_pt = w;
+        }
+    }
+    if let Some(rl_val) = val.get("replicate_lines") {
+        let mode = parse_replicate_line_mode(rl_val)?;
+        if let GraphicalDataObject::ScatterAndLine { replicate_lines, .. } = &mut series.gdo {
+            *replicate_lines = mode;
+        }
+    }
+    if let GraphicalDataObject::KaplanMeierStep {
+        show_censored_ticks, show_greenwood_ci, ci_dashed, display_metric, staircase, error_display, ..
+    } = &mut series.gdo
+    {
+        if let Some(v) = val.get("display_metric") {
+            *display_metric = parse_survival_display_metric(v)?;
+        }
+        if let Some(v) = val.get("staircase") {
+            *staircase = v.as_bool().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`staircase` must be boolean"))?;
+        }
+        if let Some(v) = val.get("error_display") {
+            *error_display = if v.is_null() || v.as_str().is_some_and(|s| s.trim().eq_ignore_ascii_case("none")) {
+                None
+            } else {
+                Some(parse_error_bar_metric(v)?)
+            };
+        }
+        if let Some(v) = val.get("show_greenwood_ci") {
+            *show_greenwood_ci = v.as_bool().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`show_greenwood_ci` must be boolean"))?;
+        }
+        if let Some(v) = val.get("show_censored_ticks") {
+            *show_censored_ticks = v.as_bool().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`show_censored_ticks` must be boolean"))?;
+        }
+        if let Some(v) = val.get("ci_dashed") {
+            *ci_dashed = v.as_bool().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`ci_dashed` must be boolean"))?;
+        }
+    }
+    if let Some(alpha_val) = val.get("alpha") {
+        let a = parse_alpha_byte(alpha_val)?;
+        apply_alpha_to_gdo(&mut series.gdo, a);
     }
     Ok(())
 }
@@ -2586,6 +2941,9 @@ fn default_series_like(spec: &GraphSpec, data_set_index: usize) -> SeriesSpec {
         y_error_bars: None,
         x_error_bars: None,
         regression_overlay: None,
+        offset: curvebook_doc::SeriesOffsetSpec::default(),
+        bar_width_override_pt: None,
+        show_raw_data: true,
     }
 }
 
@@ -2630,6 +2988,22 @@ fn has_series_patch_keys(map: &Map<String, Value>) -> bool {
         "x_error_bars",
         "gdo",
         "graphical_object",
+        "offset",
+        "offset_x_data",
+        "offset_x_pt",
+        "offset_y_pt",
+        "bar_width_pt",
+        "bar_width_override_pt",
+        "show_raw_data",
+        "border_width_pt",
+        "replicate_lines",
+        "display_metric",
+        "staircase",
+        "error_display",
+        "show_greenwood_ci",
+        "show_censored_ticks",
+        "ci_dashed",
+        "alpha",
     ];
     KEYS.iter().any(|k| map.contains_key(*k))
 }
@@ -2760,7 +3134,14 @@ fn parse_annotation_shorthand(doc: &ProjectDocument, params: &Value) -> Result<G
             let _ = require_result_sheet(doc, &res_id)?;
             let bounds_pt = parse_rect_pt(params.get("bounds_pt"), RectPt::new(180.0, 40.0, 180.0, 90.0))?;
             let tab_id = opt_str(params, &["tab_id"]).map(str::to_owned);
-            Ok(GraphAnnotation::EmbeddedResultTable { result_sheet_id: res_id, tab_id, bounds_pt })
+            Ok(GraphAnnotation::EmbeddedResultTable {
+                result_sheet_id: res_id,
+                tab_id,
+                bounds_pt,
+                selected_rows: None,
+                selected_cols: None,
+                style: curvebook_doc::EmbeddedTableStyle::default(),
+            })
         }
         "equation" | "model_equation" => {
             let raw_res = opt_str(params, &["result_sheet_id", "result_sheet"])
@@ -2911,6 +3292,7 @@ fn parse_tick_format(val: &Value) -> Result<TickLabelFormat, EngineError> {
     }
     match val.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
         Some("decimal") => Ok(TickLabelFormat::Decimal),
+        Some("absolute_decimal" | "absolute" | "abs_decimal") => Ok(TickLabelFormat::AbsoluteDecimal),
         Some("power_of_ten" | "power_of_10" | "powers_of_10" | "superscript") => Ok(TickLabelFormat::PowerOfTenSuperscript),
         Some("scientific" | "scientific_e") => Ok(TickLabelFormat::ScientificE),
         Some("antilog") => Ok(TickLabelFormat::Antilog),
@@ -2919,6 +3301,148 @@ fn parse_tick_format(val: &Value) -> Result<TickLabelFormat, EngineError> {
         Some("column_titles") => Ok(TickLabelFormat::Categorical(CategoricalTickSource::ColumnTitles)),
         Some("row_numbers") => Ok(TickLabelFormat::Categorical(CategoricalTickSource::RowNumbers)),
         _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid `tick_format`: {val}"))),
+    }
+}
+
+fn parse_finite_f64(val: &Value, label: &str) -> Result<f64, EngineError> {
+    let f = val.as_f64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("{label} must be numeric")))?;
+    if !f.is_finite() {
+        return Err(EngineError::with_code(ErrorCode::BadInput, format!("{label} must be finite")));
+    }
+    Ok(f)
+}
+
+fn parse_cartesian_orientation(val: &Value) -> Result<CartesianOrientation, EngineError> {
+    if let Ok(o) = serde_json::from_value::<CartesianOrientation>(val.clone()) {
+        return Ok(o);
+    }
+    match val.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("vertical") => Ok(CartesianOrientation::Vertical),
+        Some("horizontal") => Ok(CartesianOrientation::Horizontal),
+        _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid `orientation`: {val}"))),
+    }
+}
+
+fn parse_heatmap_label_spec(val: &Value, current: HeatmapLabelSpec) -> Result<HeatmapLabelSpec, EngineError> {
+    if let Ok(full) = serde_json::from_value::<HeatmapLabelSpec>(val.clone()) {
+        return Ok(full);
+    }
+    let Some(obj) = val.as_object() else {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "`heatmap_labels` must be an object"));
+    };
+    let mut out = current;
+    if let Some(rv) = obj.get("row_labels").or_else(|| obj.get("row_mode")) {
+        if let Ok(m) = serde_json::from_value::<HeatmapRowLabelMode>(rv.clone()) {
+            out.row_labels = m;
+        } else {
+            out.row_labels = match rv.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+                Some("row_titles" | "titles") => HeatmapRowLabelMode::RowTitles,
+                Some("row_numbers" | "numbers") => HeatmapRowLabelMode::RowNumbers,
+                Some("none") => HeatmapRowLabelMode::None,
+                _ => return Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid heatmap `row_labels`: {rv}"))),
+            };
+        }
+    }
+    if let Some(cv) = obj.get("column_labels").or_else(|| obj.get("column_mode")) {
+        if let Ok(m) = serde_json::from_value::<HeatmapColumnLabelMode>(cv.clone()) {
+            out.column_labels = m;
+        } else {
+            out.column_labels = match cv.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+                Some("column_titles" | "titles") => HeatmapColumnLabelMode::ColumnTitles,
+                Some("column_letters" | "letters") => HeatmapColumnLabelMode::ColumnLetters,
+                Some("none") => HeatmapColumnLabelMode::None,
+                _ => return Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid heatmap `column_labels`: {cv}"))),
+            };
+        }
+    }
+    if let Some(av) = obj.get("column_angle") {
+        if let Ok(a) = serde_json::from_value::<HeatmapColumnLabelAngle>(av.clone()) {
+            out.column_angle = a;
+        } else {
+            out.column_angle = match av.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+                Some("horizontal_0" | "horizontal" | "0") => HeatmapColumnLabelAngle::Horizontal0,
+                Some("angled_45" | "angled" | "45") => HeatmapColumnLabelAngle::Angled45,
+                Some("vertical_90" | "vertical" | "90") => HeatmapColumnLabelAngle::Vertical90,
+                _ => return Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid heatmap `column_angle`: {av}"))),
+            };
+        }
+    }
+    Ok(out)
+}
+
+fn parse_tick_direction(val: &Value) -> Result<TickDirection, EngineError> {
+    if let Ok(d) = serde_json::from_value::<TickDirection>(val.clone()) {
+        return Ok(d);
+    }
+    match val.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("outside") => Ok(TickDirection::Outside),
+        Some("inside") => Ok(TickDirection::Inside),
+        Some("both") => Ok(TickDirection::Both),
+        Some("none") => Ok(TickDirection::None),
+        _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid `tick_direction`: {val}"))),
+    }
+}
+
+fn parse_replicate_line_mode(val: &Value) -> Result<ReplicateLineMode, EngineError> {
+    if let Ok(m) = serde_json::from_value::<ReplicateLineMode>(val.clone()) {
+        return Ok(m);
+    }
+    match val.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("summary_center" | "summary") => Ok(ReplicateLineMode::SummaryCenter),
+        Some("individual_replicate_trajectories" | "individual" | "spaghetti") => Ok(ReplicateLineMode::IndividualReplicateTrajectories),
+        _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid `replicate_lines`: {val}"))),
+    }
+}
+
+fn parse_survival_display_metric(val: &Value) -> Result<SurvivalDisplayMetric, EngineError> {
+    if let Ok(m) = serde_json::from_value::<SurvivalDisplayMetric>(val.clone()) {
+        return Ok(m);
+    }
+    match val.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("percent_survival" | "survival") => Ok(SurvivalDisplayMetric::PercentSurvival),
+        Some("percent_cumulative_event" | "cumulative_event" | "event") => Ok(SurvivalDisplayMetric::PercentCumulativeEvent),
+        Some("fraction_survival" | "fraction") => Ok(SurvivalDisplayMetric::FractionSurvival),
+        _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid KM `display_metric`: {val}"))),
+    }
+}
+
+fn parse_alpha_byte(val: &Value) -> Result<u8, EngineError> {
+    if let Some(u) = val.as_u64() {
+        if u <= 1 {
+            return Ok(if u == 1 { 255 } else { 0 });
+        }
+        return u8::try_from(u).map_err(|_| EngineError::with_code(ErrorCode::BadInput, "`alpha` integer must be in 0..=255"));
+    }
+    let f = parse_finite_f64(val, "`alpha`")?;
+    if !(0.0..=1.0).contains(&f) {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "`alpha` float must be in 0.0..=1.0"));
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Ok((f * 255.0).round() as u8)
+}
+
+fn apply_alpha_to_gdo(gdo: &mut GraphicalDataObject, alpha: u8) {
+    match gdo {
+        GraphicalDataObject::ScatterAndLine { marker, line, area_fill, .. } => {
+            if let Some(m) = marker {
+                m.fill_color = m.fill_color.with_alpha(alpha);
+            }
+            if let Some(l) = line {
+                l.color = l.color.with_alpha(alpha);
+            }
+            if let Some(af) = area_fill {
+                af.fill_color = af.fill_color.with_alpha(alpha);
+            }
+        }
+        GraphicalDataObject::BarWithReplicates { fill_color, .. }
+        | GraphicalDataObject::BoxAndWhisker { fill_color, .. }
+        | GraphicalDataObject::Violin { fill_color, .. }
+        | GraphicalDataObject::FloatingBar { fill_color, .. } => *fill_color = fill_color.with_alpha(alpha),
+        GraphicalDataObject::AlignedDotPlot { marker, .. } => marker.fill_color = marker.fill_color.with_alpha(alpha),
+        GraphicalDataObject::BeforeAfterLines { line_color, .. } | GraphicalDataObject::KaplanMeierStep { line_color, .. } => {
+            *line_color = line_color.with_alpha(alpha);
+        }
+        GraphicalDataObject::PartsOfWhole { .. } => {}
     }
 }
 
@@ -3018,7 +3542,7 @@ fn parse_line_connection_kind(val: &Value) -> Result<LineConnectionKind, EngineE
     }
 }
 
-fn parse_line_dash_style(val: &Value) -> Result<LineDashStyle, EngineError> {
+pub(super) fn parse_line_dash_style(val: &Value) -> Result<LineDashStyle, EngineError> {
     if let Ok(d) = serde_json::from_value::<LineDashStyle>(val.clone()) {
         return Ok(d);
     }
@@ -3205,6 +3729,206 @@ fn parse_bracket_style(raw: Option<&str>) -> Result<BracketStyle, EngineError> {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GraphInsertImageParams {
+    sheet_id: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    bytes_base64: Option<String>,
+    #[serde(default)]
+    asset_id: Option<String>,
+    #[serde(default)]
+    bounds_pt: Option<Value>,
+    #[serde(default)]
+    rotation_deg: Option<f64>,
+    #[serde(default)]
+    lock_aspect_ratio: Option<bool>,
+    #[serde(default)]
+    crop: Option<Value>,
+    #[serde(default, deserialize_with = "de_present_opt")]
+    border: Option<Option<Value>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GraphUpdateImageParams {
+    sheet_id: String,
+    annotation_index: usize,
+    #[serde(default)]
+    bounds_pt: Option<Value>,
+    #[serde(default)]
+    width_pt: Option<f64>,
+    #[serde(default)]
+    height_pt: Option<f64>,
+    #[serde(default)]
+    rotation_deg: Option<f64>,
+    #[serde(default)]
+    lock_aspect_ratio: Option<bool>,
+    #[serde(default)]
+    crop: Option<Value>,
+    #[serde(default, deserialize_with = "de_present_opt")]
+    border: Option<Option<Value>>,
+}
+
+pub(super) struct GraphImageInsertArgs<'a> {
+    pub command_id: &'static str,
+    pub path: Option<&'a str>,
+    pub bytes_base64: Option<&'a str>,
+    pub asset_id: Option<&'a str>,
+    pub bounds_pt: Option<&'a Value>,
+    pub rotation_deg: Option<f64>,
+    pub lock_aspect_ratio: Option<bool>,
+    pub crop: Option<&'a Value>,
+    pub border: Option<&'a Option<Value>>,
+}
+
+fn schema_graph_insert_image() -> Value {
+    let mut props = vec![("sheet_id", non_empty_str_schema("Target GraphSheet ID"))];
+    props.extend(super::image::insert_image_common_props());
+    obj_schema(props, &["sheet_id"], false)
+}
+
+fn schema_graph_update_image() -> Value {
+    obj_schema(
+        vec![
+            ("sheet_id", non_empty_str_schema("Target GraphSheet ID")),
+            ("annotation_index", int_schema("Zero-based index of the EmbeddedImage annotation", Some(0), None)),
+            ("bounds_pt", nullable_schema(any_json_schema("Updated placement `[x, y, width, height]` or `RectPt` in points"))),
+            (
+                "width_pt",
+                nullable_schema(num_schema("Updated width in points (> 0); adjusts `height_pt` when aspect ratio is locked", Some(0.001), None)),
+            ),
+            (
+                "height_pt",
+                nullable_schema(num_schema("Updated height in points (> 0); adjusts `width_pt` when aspect ratio is locked", Some(0.001), None)),
+            ),
+            ("rotation_deg", nullable_schema(num_schema("Updated clockwise rotation in degrees", Some(-3600.0), Some(3600.0)))),
+            ("lock_aspect_ratio", nullable_schema(bool_schema("Lock or unlock intrinsic aspect ratio during single-axis resize"))),
+            ("crop", nullable_schema(super::image::crop_schema())),
+            ("border", nullable_schema(super::image::border_schema())),
+        ],
+        &["sheet_id", "annotation_index"],
+        false,
+    )
+}
+
+pub(super) fn insert_image_on_graph(
+    doc: &mut ProjectDocument,
+    graph_id: &curvebook_doc::SheetId,
+    args: GraphImageInsertArgs<'_>,
+) -> Result<CommandOutcome, EngineError> {
+    let canvas_size = require_graph_sheet(doc, graph_id)?.spec.canvas_size_pt;
+    let resolved = super::image::resolve_image_source(doc, args.path, args.bytes_base64, args.asset_id)?;
+    let bounds_pt = super::image::parse_image_insert_bounds(args.bounds_pt, resolved.pixel_size, canvas_size.width, canvas_size.height)?;
+    let rotation_deg = super::image::parse_rotation_deg(args.rotation_deg, 0.0)?;
+    let lock_aspect_ratio = args.lock_aspect_ratio.unwrap_or(true);
+    let crop = super::image::apply_crop_patch(args.crop, bounds_pt, curvebook_doc::CropInsetsPt::default())?;
+    let border = super::image::apply_border_patch(args.border, None)?;
+
+    let mut spec = require_graph_sheet(doc, graph_id)?.spec.clone();
+    spec.annotations.push(GraphAnnotation::EmbeddedImage {
+        asset_id: resolved.asset_id.clone(),
+        bounds_pt,
+        rotation_deg,
+        lock_aspect_ratio,
+        crop,
+        border,
+    });
+    validate_graph_spec_in_doc(doc, graph_id, &spec)?;
+    let ann_idx = spec.annotations.len() - 1;
+    let graph = require_graph_sheet_mut(doc, graph_id)?;
+    graph.spec = spec;
+    graph.initialized = true;
+
+    Ok(CommandOutcome::mutated(
+        args.command_id,
+        format!("embedded {} image `{}` onto graph `{graph_id}`", resolved.media_type.mime_type(), resolved.asset_id),
+        json!({
+            "sheet_id": graph_id.as_str(),
+            "annotation_index": ann_idx,
+            "asset_id": resolved.asset_id,
+            "media_type": resolved.media_type.mime_type(),
+            "pixel_size": [resolved.pixel_size.0, resolved.pixel_size.1],
+            "bounds_pt": bounds_pt,
+        }),
+    ))
+}
+
+fn run_graph_insert_image(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
+    let schema = schema_graph_insert_image();
+    let params: GraphInsertImageParams = parse_params(&schema, raw)?;
+    let graph_id = parse_sheet_id(&params.sheet_id)?;
+    insert_image_on_graph(
+        &mut ctx.session.doc,
+        &graph_id,
+        GraphImageInsertArgs {
+            command_id: "graph.insertImage",
+            path: params.path.as_deref(),
+            bytes_base64: params.bytes_base64.as_deref(),
+            asset_id: params.asset_id.as_deref(),
+            bounds_pt: params.bounds_pt.as_ref(),
+            rotation_deg: params.rotation_deg,
+            lock_aspect_ratio: params.lock_aspect_ratio,
+            crop: params.crop.as_ref(),
+            border: params.border.as_ref(),
+        },
+    )
+}
+
+fn run_graph_update_image(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
+    let schema = schema_graph_update_image();
+    let params: GraphUpdateImageParams = parse_params(&schema, raw)?;
+    let graph_id = parse_sheet_id(&params.sheet_id)?;
+    let doc = &ctx.session.doc;
+    let mut spec = require_graph_sheet(doc, &graph_id)?.spec.clone();
+    let ann_len = spec.annotations.len();
+    let Some(ann) = spec.annotations.get_mut(params.annotation_index) else {
+        return Err(EngineError::with_code(
+            ErrorCode::NotFound,
+            format!("annotation_index {} out of bounds ({ann_len} annotations) on `{graph_id}`", params.annotation_index),
+        )
+        .with_details(json!({ "pointer": "/annotation_index" })));
+    };
+    let GraphAnnotation::EmbeddedImage { asset_id, bounds_pt, rotation_deg, lock_aspect_ratio, crop, border } = ann else {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!("annotation {} on `{graph_id}` is not an embedded image", params.annotation_index),
+        )
+        .with_details(json!({ "pointer": "/annotation_index" })));
+    };
+    let asset_id_str = asset_id.clone();
+    let intrinsic_px = doc.image_asset(&asset_id_str).map(|a| a.pixel_size);
+    if let Some(lock) = params.lock_aspect_ratio {
+        *lock_aspect_ratio = lock;
+    }
+    super::image::apply_image_bounds_update(
+        bounds_pt,
+        params.bounds_pt.as_ref(),
+        params.width_pt,
+        params.height_pt,
+        *lock_aspect_ratio,
+        intrinsic_px,
+    )?;
+    *rotation_deg = super::image::parse_rotation_deg(params.rotation_deg, *rotation_deg)?;
+    *crop = super::image::apply_crop_patch(params.crop.as_ref(), *bounds_pt, *crop)?;
+    *border = super::image::apply_border_patch(params.border.as_ref(), *border)?;
+    let updated_summary = json!({
+        "sheet_id": graph_id.as_str(),
+        "annotation_index": params.annotation_index,
+        "asset_id": asset_id_str,
+        "bounds_pt": *bounds_pt,
+        "rotation_deg": *rotation_deg,
+        "lock_aspect_ratio": *lock_aspect_ratio,
+        "crop": *crop,
+        "border": *border,
+    });
+    validate_graph_spec_in_doc(doc, &graph_id, &spec)?;
+    require_graph_sheet_mut(&mut ctx.session.doc, &graph_id)?.spec = spec;
+    Ok(CommandOutcome::mutated("graph.updateImage", format!("updated embedded image on graph `{graph_id}`"), updated_summary))
+}
+
 fn parse_bracket_label_mode(val: Option<&Value>) -> Result<BracketLabelMode, EngineError> {
     let Some(v) = val else {
         return Ok(BracketLabelMode::SummaryStars);
@@ -3239,8 +3963,8 @@ mod tests {
     }
 
     #[test]
-    fn registry_contains_all_fifteen_graph_commands() {
-        assert_eq!(specs().len(), 15);
+    fn registry_contains_all_seventeen_graph_commands() {
+        assert_eq!(specs().len(), 17);
         for spec in specs() {
             assert_eq!(spec.group, CommandGroup::Graph);
             assert!(!spec.summary.is_empty());

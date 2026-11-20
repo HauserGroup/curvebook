@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use curvebook_doc::{AnalysisKind, CiBound, PValueFormat, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SheetId};
-use egui::{CornerRadius, FontId, Key, Modifiers, Rect, RichText, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
+use egui::{Color32, CornerRadius, FontId, Id, Key, Modifiers, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
 use serde_json::json;
 
 use crate::UiApp;
@@ -53,14 +53,34 @@ impl ResultTabCategory {
     }
 }
 
-/// Persistent `egui_shell` state for the multi-tab `ResultSheet` viewer (`R15.3`).
+/// Persistent `egui_shell` state for the multi-tab `ResultSheet` viewer (`R15.3`, `R13.4`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResultsViewEguiState {
     pub scroll_offset_y: f32,
     pub hovered_row: Option<usize>,
+    pub selection_anchor: Option<(SheetId, usize, usize, usize)>,
     pub selected_cell: Option<(SheetId, usize, usize, usize)>,
+    pub dragging_selection: bool,
+    pub context_menu: Option<(SheetId, usize, Pos2)>,
     pub collapsed_sections: BTreeSet<String>,
     pub tab_strip_scroll_x: f32,
+}
+
+impl ResultsViewEguiState {
+    /// Active rectangular selection `(min_row, max_row, min_col, max_col)` when bound to `(sheet_id, tab_idx)`.
+    #[must_use]
+    pub fn selected_range(&self, sheet_id: &SheetId, tab_idx: usize) -> Option<(usize, usize, usize, usize)> {
+        let (sid_f, t_f, rf, cf) = self.selected_cell.as_ref()?;
+        if sid_f != sheet_id || *t_f != tab_idx {
+            return None;
+        }
+        let (ra, ca) = self
+            .selection_anchor
+            .as_ref()
+            .filter(|(sid_a, t_a, _, _)| sid_a == sheet_id && *t_a == tab_idx)
+            .map_or((*rf, *cf), |(_, _, ra, ca)| (*ra, *ca));
+        Some((ra.min(*rf), ra.max(*rf), ca.min(*cf), ca.max(*cf)))
+    }
 }
 
 /// Per-frame region & active-tab report returned by [`render_results_view`].
@@ -254,6 +274,31 @@ pub fn render_results_view_for_sheet(
             );
             if edit_resp.clicked() && enabled {
                 intents.push_ui("ui.editParams.open", json!({ "sheet_id": rs.id.as_str() }));
+            }
+
+            if hdr_rect.width() >= 420.0 {
+                let copy_lbl = res_tr(&app.locale, "btn.copy", "Copy");
+                let has_tabs = !rs.tabs.is_empty();
+                let copy_resp = ui.add_enabled(enabled && has_tabs, egui::Button::new(RichText::new(copy_lbl).small()));
+                meta.record_response(
+                    ui,
+                    &copy_resp,
+                    FrameInspectEntryInput {
+                        widget_id: "result.copy_selection",
+                        role: "button",
+                        label: copy_lbl,
+                        command_id: None,
+                        value: None,
+                        enabled: enabled && has_tabs,
+                        disabled_reason: (!enabled || !has_tabs).then_some("No active result tab to copy"),
+                        z_layer: ZLayer::Workspace,
+                        ellipsized: false,
+                        full_label: None,
+                    },
+                );
+                if copy_resp.clicked() && enabled && has_tabs {
+                    intents.push_workspace_copy(144);
+                }
             }
 
             ui.separator();
@@ -481,7 +526,7 @@ pub fn render_results_view_for_sheet(
 
         let scroll_out =
             egui::ScrollArea::both().id_salt(("egui_shell.results.body", rs.id.as_str(), &tab.id)).auto_shrink([false, false]).show(ui, |ui| {
-                render_result_tab_table(ui, rs, tab, active_idx, is_survival_summary, state, tokens, enabled, meta);
+                render_result_tab_table(ui, rs, tab, active_idx, is_survival_summary, state, tokens, enabled, meta, intents);
                 if !tab.footnotes.is_empty() {
                     ui.add_space(6.0);
                     let fn_max_w = (body_rect.width() - 24.0).max(80.0);
@@ -633,6 +678,310 @@ fn render_ambiguity_callout(
     });
 }
 
+#[derive(Clone, Copy)]
+struct ResultPointerInput {
+    ptr_down: bool,
+    ptr_pressed: bool,
+    ptr_pos: Option<egui::Pos2>,
+    mod_shift_now: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ResultTableLayout {
+    num_cols: usize,
+    row_stub_w: f32,
+    col_w: f32,
+    row_h: f32,
+    total_w: f32,
+    visible_clip: Rect,
+}
+
+fn render_result_table_header(ui: &mut egui::Ui, tab: &ResultTab, tokens: &Tokens, layout: ResultTableLayout) {
+    let hdr_rect = ui.allocate_space(vec2(layout.total_w, layout.row_h)).1;
+    let hdr_vis = hdr_rect.intersect(layout.visible_clip);
+    if hdr_vis.width() < 4.0 || hdr_vis.height() < 4.0 {
+        return;
+    }
+    let hdr_painter = ui.painter().with_clip_rect(hdr_vis);
+    hdr_painter.rect_filled(hdr_vis, CornerRadius::ZERO, tokens.header_bg);
+    hdr_painter.rect_stroke(hdr_rect, CornerRadius::ZERO, Stroke::new(1.0, tokens.divider), StrokeKind::Inside);
+
+    let corner_rect = Rect::from_min_size(hdr_rect.min, vec2(layout.row_stub_w, layout.row_h));
+    let corner_vis = corner_rect.intersect(hdr_vis);
+    if corner_vis.width() >= 4.0 && corner_vis.height() >= 4.0 {
+        let corner_lbl = res_tr(tokens.locale, "results.row_metric", "Row / Metric");
+        let _ = paint_table_cell_text(
+            ui,
+            corner_rect,
+            corner_lbl,
+            tokens.text_strong,
+            FontId::proportional(tokens.metrics.font_ui_small_pt),
+            egui::Align::LEFT,
+            layout.visible_clip,
+        );
+    }
+
+    for c_idx in 0..layout.num_cols {
+        let cell_rect = Rect::from_min_size(
+            pos2(hdr_rect.left() + layout.row_stub_w + (c_idx as f32) * layout.col_w, hdr_rect.top()),
+            vec2(layout.col_w, layout.row_h),
+        );
+        let cell_vis = cell_rect.intersect(hdr_vis);
+        if cell_vis.width() < 4.0 || cell_vis.height() < 4.0 {
+            continue;
+        }
+        hdr_painter.line_segment([cell_rect.left_top(), cell_rect.left_bottom()], Stroke::new(1.0, tokens.divider));
+        let h_txt = tab.column_headers.get(c_idx).map_or("", String::as_str);
+        let fallback_col = format!("Col {}", c_idx + 1);
+        let display_h = if h_txt.is_empty() { fallback_col.as_str() } else { h_txt };
+        let _ = paint_table_cell_text(
+            ui,
+            cell_rect,
+            display_h,
+            tokens.text_strong,
+            FontId::proportional(tokens.metrics.font_ui_small_pt),
+            egui::Align::RIGHT,
+            layout.visible_clip,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_result_section_row(
+    ui: &mut egui::Ui,
+    rs: &ResultSheet,
+    tab: &ResultTab,
+    r_idx: usize,
+    row_lbl: &str,
+    state: &mut ResultsViewEguiState,
+    tokens: &Tokens,
+    enabled: bool,
+    layout: ResultTableLayout,
+    meta: &mut FrameInspectMeta,
+) -> String {
+    let sec_key = format!("{}:{}:{r_idx}", rs.id.as_str(), tab.id);
+    let is_collapsed = state.collapsed_sections.contains(&sec_key);
+    let out_key = sec_key.clone();
+
+    let sec_rect = ui.allocate_space(vec2(layout.total_w, layout.row_h)).1;
+    let sec_vis = sec_rect.intersect(layout.visible_clip);
+    if sec_vis.width() < 12.0 || sec_vis.height() < 4.0 {
+        return out_key;
+    }
+    let sec_painter = ui.painter().with_clip_rect(sec_vis);
+    sec_painter.rect_filled(sec_vis, CornerRadius::ZERO, tokens.panel_bg);
+    sec_painter.rect_stroke(sec_rect, CornerRadius::ZERO, Stroke::new(1.0, tokens.divider), StrokeKind::Inside);
+
+    let chevron = if is_collapsed { "▸" } else { "▾" };
+    let sec_text = format!("{chevron} {row_lbl}");
+    let sec_elided = paint_table_cell_text(
+        ui,
+        sec_rect,
+        &sec_text,
+        tokens.text_strong,
+        FontId::proportional(tokens.metrics.font_ui_small_pt),
+        egui::Align::LEFT,
+        layout.visible_clip,
+    );
+    let sec_resp = ui.interact(sec_vis, egui::Id::unique(("res_sec", &sec_key)), if enabled { Sense::click() } else { Sense::hover() });
+    let sec_ak = sec_text.clone();
+    sec_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, enabled, sec_ak.clone()));
+    let sec_wid = format!("result.section.{r_idx}");
+    meta.record_response(
+        ui,
+        &sec_resp,
+        FrameInspectEntryInput {
+            widget_id: &sec_wid,
+            role: "button",
+            label: &sec_text,
+            command_id: None,
+            value: Some(json!({ "collapsed": is_collapsed })),
+            enabled,
+            disabled_reason: (!enabled).then_some("modal dialog is active"),
+            z_layer: ZLayer::Workspace,
+            ellipsized: sec_elided,
+            full_label: sec_elided.then_some(sec_text.as_str()),
+        },
+    );
+    if sec_resp.clicked() && enabled {
+        if is_collapsed {
+            state.collapsed_sections.remove(&sec_key);
+        } else {
+            state.collapsed_sections.insert(sec_key);
+        }
+    }
+    out_key
+}
+
+#[derive(Clone, Copy)]
+struct ResultCellAddr<'a> {
+    rs_id: &'a SheetId,
+    tab_idx: usize,
+    r_idx: usize,
+    c_idx: usize,
+}
+
+fn update_result_cell_selection_from_pointer(
+    ui: &egui::Ui,
+    cell: ResultCellAddr<'_>,
+    cell_vis: Rect,
+    cell_resp: &egui::Response,
+    ptr: ResultPointerInput,
+    state: &mut ResultsViewEguiState,
+) {
+    let rs_id = cell.rs_id;
+    let active_tab_idx = cell.tab_idx;
+    let r_idx = cell.r_idx;
+    let c_idx = cell.c_idx;
+    if ptr.ptr_pressed && ptr.ptr_pos.is_some_and(|p| cell_vis.contains(p)) {
+        if !ptr.mod_shift_now {
+            state.selection_anchor = Some((rs_id.clone(), active_tab_idx, r_idx, c_idx));
+        } else if state.selection_anchor.as_ref().is_none_or(|(sid, t, _, _)| sid != rs_id || *t != active_tab_idx) {
+            state.selection_anchor = state.selected_cell.clone().or_else(|| Some((rs_id.clone(), active_tab_idx, r_idx, c_idx)));
+        }
+        state.selected_cell = Some((rs_id.clone(), active_tab_idx, r_idx, c_idx));
+        state.hovered_row = Some(r_idx);
+        state.dragging_selection = true;
+    } else if state.dragging_selection && ptr.ptr_down && ptr.ptr_pos.is_some_and(|p| cell_vis.contains(p)) {
+        state.selected_cell = Some((rs_id.clone(), active_tab_idx, r_idx, c_idx));
+        state.hovered_row = Some(r_idx);
+    } else if cell_resp.clicked() {
+        if ptr.mod_shift_now {
+            if state.selection_anchor.as_ref().is_none_or(|(sid, t, _, _)| sid != rs_id || *t != active_tab_idx) {
+                state.selection_anchor = state.selected_cell.clone().or_else(|| Some((rs_id.clone(), active_tab_idx, r_idx, c_idx)));
+            }
+        } else {
+            state.selection_anchor = Some((rs_id.clone(), active_tab_idx, r_idx, c_idx));
+        }
+        state.selected_cell = Some((rs_id.clone(), active_tab_idx, r_idx, c_idx));
+        state.hovered_row = Some(r_idx);
+    }
+    if cell_resp.secondary_clicked() {
+        if state.selected_range(rs_id, active_tab_idx).is_none() {
+            state.selection_anchor = Some((rs_id.clone(), active_tab_idx, r_idx, c_idx));
+            state.selected_cell = Some((rs_id.clone(), active_tab_idx, r_idx, c_idx));
+        }
+        let anchor = ui.input(|i| i.pointer.interact_pos()).unwrap_or(cell_vis.center());
+        state.context_menu = Some((rs_id.clone(), active_tab_idx, anchor));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_result_data_row(
+    ui: &mut egui::Ui,
+    rs: &ResultSheet,
+    active_tab_idx: usize,
+    r_idx: usize,
+    row_lbl: &str,
+    row: &[ResultCell],
+    is_survival_summary: bool,
+    ptr: ResultPointerInput,
+    layout: ResultTableLayout,
+    state: &mut ResultsViewEguiState,
+    tokens: &Tokens,
+    enabled: bool,
+    meta: &mut FrameInspectMeta,
+) {
+    let row_rect = ui.allocate_space(vec2(layout.total_w, layout.row_h)).1;
+    let row_vis = row_rect.intersect(layout.visible_clip);
+    if row_vis.width() < 4.0 || row_vis.height() < 4.0 {
+        return;
+    }
+    let bg = if r_idx % 2 == 1 { tokens.panel_bg } else { tokens.surface_bg };
+    let row_painter = ui.painter().with_clip_rect(row_vis);
+    row_painter.rect_filled(row_vis, CornerRadius::ZERO, bg);
+    row_painter.line_segment([row_rect.left_bottom(), row_rect.right_bottom()], Stroke::new(1.0, tokens.divider));
+
+    let stub_rect = Rect::from_min_size(row_rect.min, vec2(layout.row_stub_w, layout.row_h));
+    if stub_rect.intersect(row_vis).width() >= 4.0 {
+        let _ = paint_table_cell_text(
+            ui,
+            stub_rect,
+            row_lbl,
+            tokens.text_primary,
+            FontId::proportional(tokens.metrics.font_ui_small_pt),
+            egui::Align::LEFT,
+            layout.visible_clip,
+        );
+    }
+
+    for c_idx in 0..layout.num_cols {
+        let cell_rect = Rect::from_min_size(
+            pos2(row_rect.left() + layout.row_stub_w + (c_idx as f32) * layout.col_w, row_rect.top()),
+            vec2(layout.col_w, layout.row_h),
+        );
+        let cell_vis = cell_rect.intersect(row_vis);
+        if cell_vis.width() < 4.0 || cell_vis.height() < 4.0 {
+            continue;
+        }
+        row_painter.line_segment([cell_rect.left_top(), cell_rect.left_bottom()], Stroke::new(1.0, tokens.divider));
+        let cell = row.get(c_idx).unwrap_or(&ResultCell::Empty);
+        let fmt = format_result_cell_semantic(cell, rs.analysis.p_value_format, is_survival_summary);
+
+        let cell_resp = ui.interact(
+            cell_vis,
+            egui::Id::unique(("res_cell", rs.id.as_str(), active_tab_idx, r_idx, c_idx)),
+            if enabled { Sense::click() } else { Sense::hover() },
+        );
+        let cell_wid = format!("result.cell.{r_idx}.{c_idx}");
+        meta.record_response(
+            ui,
+            &cell_resp,
+            FrameInspectEntryInput {
+                widget_id: &cell_wid,
+                role: "gridcell",
+                label: if fmt.text.is_empty() { "Cell" } else { &fmt.text },
+                command_id: None,
+                value: None,
+                enabled,
+                disabled_reason: (!enabled).then_some("modal dialog is active"),
+                z_layer: ZLayer::Workspace,
+                ellipsized: false,
+                full_label: None,
+            },
+        );
+
+        if enabled && state.context_menu.is_none() {
+            update_result_cell_selection_from_pointer(
+                ui,
+                ResultCellAddr { rs_id: &rs.id, tab_idx: active_tab_idx, r_idx, c_idx },
+                cell_vis,
+                &cell_resp,
+                ptr,
+                state,
+            );
+        }
+
+        let selected =
+            state.selected_range(&rs.id, active_tab_idx).is_some_and(|(r0, r1, c0, c1)| r_idx >= r0 && r_idx <= r1 && c_idx >= c0 && c_idx <= c1);
+        if selected {
+            let cell_painter = ui.painter().with_clip_rect(cell_vis);
+            cell_painter.rect_filled(cell_vis, CornerRadius::ZERO, tokens.active_bg);
+            cell_painter.rect_stroke(cell_rect, CornerRadius::ZERO, Stroke::new(1.5, tokens.accent), StrokeKind::Inside);
+        }
+
+        if !fmt.text.is_empty() {
+            let col = if fmt.is_ambiguous {
+                tokens.role_cat
+            } else if fmt.is_significant {
+                tokens.accent
+            } else {
+                tokens.text_primary
+            };
+            let font = FontId::monospace(tokens.metrics.font_grid_numeral_pt - 1.0);
+            let elided = paint_table_cell_text(ui, cell_rect, &fmt.text, col, font, egui::Align::RIGHT, layout.visible_clip);
+            if elided || fmt.is_ambiguous {
+                let tip = if fmt.is_ambiguous {
+                    format!("{} — Profile-likelihood bounds did not close (ambiguous / wide estimate)", fmt.text)
+                } else {
+                    fmt.text.clone()
+                };
+                cell_resp.on_hover_text(tip);
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_result_tab_table(
     ui: &mut egui::Ui,
@@ -644,199 +993,156 @@ fn render_result_tab_table(
     tokens: &Tokens,
     enabled: bool,
     meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
 ) {
+    let prev_range = state.selected_range(&rs.id, active_tab_idx);
+    let ptr_down = ui.input(|i| i.pointer.primary_down());
+    let ptr_released = ui.input(|i| i.pointer.primary_released());
+    let ptr = ResultPointerInput {
+        ptr_down,
+        ptr_pressed: ui.input(|i| i.pointer.primary_pressed()),
+        ptr_pos: ui.input(|i| i.pointer.interact_pos().or_else(|| i.pointer.latest_pos())),
+        mod_shift_now: ui.input(|i| {
+            i.events
+                .iter()
+                .rev()
+                .find_map(|ev| match ev {
+                    egui::Event::PointerButton { modifiers, .. } => Some(modifiers.shift),
+                    _ => None,
+                })
+                .unwrap_or(i.modifiers.shift)
+        }),
+    };
     let num_cols = tab.column_headers.len().max(tab.rows.iter().map(Vec::len).max().unwrap_or(0));
     let row_stub_w = 190.0_f32;
     let col_w = 128.0_f32;
     let row_h = 24.0_f32;
-    let total_w = (row_stub_w + (num_cols as f32) * col_w).max(ui.available_width());
+    let layout = ResultTableLayout {
+        num_cols,
+        row_stub_w,
+        col_w,
+        row_h,
+        total_w: (row_stub_w + (num_cols as f32) * col_w).max(ui.available_width()),
+        visible_clip: ui.clip_rect().intersect(meta.viewport_rect),
+    };
 
-    let visible_clip = ui.clip_rect().intersect(meta.viewport_rect);
+    render_result_table_header(ui, tab, tokens, layout);
 
-    // Header Row
-    let hdr_rect = ui.allocate_space(vec2(total_w, row_h)).1;
-    let hdr_vis = hdr_rect.intersect(visible_clip);
-    if hdr_vis.width() >= 4.0 && hdr_vis.height() >= 4.0 {
-        let hdr_painter = ui.painter().with_clip_rect(hdr_vis);
-        hdr_painter.rect_filled(hdr_vis, CornerRadius::ZERO, tokens.header_bg);
-        hdr_painter.rect_stroke(hdr_rect, CornerRadius::ZERO, Stroke::new(1.0, tokens.divider), StrokeKind::Inside);
-
-        let corner_rect = Rect::from_min_size(hdr_rect.min, vec2(row_stub_w, row_h));
-        let corner_vis = corner_rect.intersect(hdr_vis);
-        if corner_vis.width() >= 4.0 && corner_vis.height() >= 4.0 {
-            let corner_lbl = res_tr(tokens.locale, "results.row_metric", "Row / Metric");
-            let _ = paint_table_cell_text(
-                ui,
-                corner_rect,
-                corner_lbl,
-                tokens.text_strong,
-                FontId::proportional(tokens.metrics.font_ui_small_pt),
-                egui::Align::LEFT,
-                visible_clip,
-            );
-        }
-
-        for c_idx in 0..num_cols {
-            let cell_rect = Rect::from_min_size(pos2(hdr_rect.left() + row_stub_w + (c_idx as f32) * col_w, hdr_rect.top()), vec2(col_w, row_h));
-            let cell_vis = cell_rect.intersect(hdr_vis);
-            if cell_vis.width() < 4.0 || cell_vis.height() < 4.0 {
-                continue;
-            }
-            hdr_painter.line_segment([cell_rect.left_top(), cell_rect.left_bottom()], Stroke::new(1.0, tokens.divider));
-            let h_txt = tab.column_headers.get(c_idx).map_or("", String::as_str);
-            let fallback_col = format!("Col {}", c_idx + 1);
-            let display_h = if h_txt.is_empty() { fallback_col.as_str() } else { h_txt };
-            let _ = paint_table_cell_text(
-                ui,
-                cell_rect,
-                display_h,
-                tokens.text_strong,
-                FontId::proportional(tokens.metrics.font_ui_small_pt),
-                egui::Align::RIGHT,
-                visible_clip,
-            );
-        }
-    }
-
-    // Data & Section Header Rows
     let mut current_section: Option<String> = None;
     for (r_idx, row) in tab.rows.iter().enumerate() {
         let row_lbl = tab.row_labels.get(r_idx).map_or("", String::as_str);
-        let is_section_row = !row_lbl.is_empty() && row.iter().all(|c| matches!(c, ResultCell::Empty));
-        if is_section_row {
-            let sec_key = format!("{}:{}:{r_idx}", rs.id.as_str(), tab.id);
-            let is_collapsed = state.collapsed_sections.contains(&sec_key);
-            current_section = Some(sec_key.clone());
-
-            let sec_rect = ui.allocate_space(vec2(total_w, row_h)).1;
-            let sec_vis = sec_rect.intersect(visible_clip);
-            if sec_vis.width() < 12.0 || sec_vis.height() < 4.0 {
-                continue;
-            }
-            let sec_painter = ui.painter().with_clip_rect(sec_vis);
-            sec_painter.rect_filled(sec_vis, CornerRadius::ZERO, tokens.panel_bg);
-            sec_painter.rect_stroke(sec_rect, CornerRadius::ZERO, Stroke::new(1.0, tokens.divider), StrokeKind::Inside);
-
-            let chevron = if is_collapsed { "▸" } else { "▾" };
-            let sec_text = format!("{chevron} {row_lbl}");
-            let sec_elided = paint_table_cell_text(
-                ui,
-                sec_rect,
-                &sec_text,
-                tokens.text_strong,
-                FontId::proportional(tokens.metrics.font_ui_small_pt),
-                egui::Align::LEFT,
-                visible_clip,
-            );
-            let sec_resp = ui.interact(sec_vis, egui::Id::unique(("res_sec", &sec_key)), if enabled { Sense::click() } else { Sense::hover() });
-            let sec_ak = sec_text.clone();
-            sec_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, enabled, sec_ak.clone()));
-            let sec_wid = format!("result.section.{r_idx}");
-            meta.record_response(
-                ui,
-                &sec_resp,
-                FrameInspectEntryInput {
-                    widget_id: &sec_wid,
-                    role: "button",
-                    label: &sec_text,
-                    command_id: None,
-                    value: Some(json!({ "collapsed": is_collapsed })),
-                    enabled,
-                    disabled_reason: (!enabled).then_some("modal dialog is active"),
-                    z_layer: ZLayer::Workspace,
-                    ellipsized: sec_elided,
-                    full_label: sec_elided.then_some(sec_text.as_str()),
-                },
-            );
-            if sec_resp.clicked() && enabled {
-                if is_collapsed {
-                    state.collapsed_sections.remove(&sec_key);
-                } else {
-                    state.collapsed_sections.insert(sec_key);
-                }
-            }
+        if !row_lbl.is_empty() && row.iter().all(|c| matches!(c, ResultCell::Empty)) {
+            current_section = Some(render_result_section_row(ui, rs, tab, r_idx, row_lbl, state, tokens, enabled, layout, meta));
             continue;
         }
-
         if let Some(sec_key) = &current_section
             && state.collapsed_sections.contains(sec_key)
         {
             continue;
         }
-
-        let row_rect = ui.allocate_space(vec2(total_w, row_h)).1;
-        let row_vis = row_rect.intersect(visible_clip);
-        if row_vis.width() < 4.0 || row_vis.height() < 4.0 {
-            continue;
-        }
-        let bg = if r_idx % 2 == 1 { tokens.panel_bg } else { tokens.surface_bg };
-        let row_painter = ui.painter().with_clip_rect(row_vis);
-        row_painter.rect_filled(row_vis, CornerRadius::ZERO, bg);
-        row_painter.line_segment([row_rect.left_bottom(), row_rect.right_bottom()], Stroke::new(1.0, tokens.divider));
-
-        let stub_rect = Rect::from_min_size(row_rect.min, vec2(row_stub_w, row_h));
-        if stub_rect.intersect(row_vis).width() >= 4.0 {
-            let _ = paint_table_cell_text(
-                ui,
-                stub_rect,
-                row_lbl,
-                tokens.text_primary,
-                FontId::proportional(tokens.metrics.font_ui_small_pt),
-                egui::Align::LEFT,
-                visible_clip,
-            );
-        }
-
-        for c_idx in 0..num_cols {
-            let cell_rect = Rect::from_min_size(pos2(row_rect.left() + row_stub_w + (c_idx as f32) * col_w, row_rect.top()), vec2(col_w, row_h));
-            let cell_vis = cell_rect.intersect(row_vis);
-            if cell_vis.width() < 4.0 || cell_vis.height() < 4.0 {
-                continue;
-            }
-            row_painter.line_segment([cell_rect.left_top(), cell_rect.left_bottom()], Stroke::new(1.0, tokens.divider));
-            let cell = row.get(c_idx).unwrap_or(&ResultCell::Empty);
-            let fmt = format_result_cell_semantic(cell, rs.analysis.p_value_format, is_survival_summary);
-
-            let selected =
-                state.selected_cell.as_ref().is_some_and(|(sid, t, r, c)| sid == &rs.id && *t == active_tab_idx && *r == r_idx && *c == c_idx);
-            let cell_resp = ui.interact(
-                cell_vis,
-                egui::Id::unique(("res_cell", rs.id.as_str(), active_tab_idx, r_idx, c_idx)),
-                if enabled { Sense::click() } else { Sense::hover() },
-            );
-            if selected {
-                let cell_painter = ui.painter().with_clip_rect(cell_vis);
-                cell_painter.rect_filled(cell_vis, CornerRadius::ZERO, tokens.active_bg);
-                cell_painter.rect_stroke(cell_rect, CornerRadius::ZERO, Stroke::new(1.5, tokens.accent), StrokeKind::Inside);
-            }
-            if cell_resp.clicked() && enabled {
-                state.selected_cell = Some((rs.id.clone(), active_tab_idx, r_idx, c_idx));
-                state.hovered_row = Some(r_idx);
-            }
-
-            if !fmt.text.is_empty() {
-                let col = if fmt.is_ambiguous {
-                    tokens.role_cat
-                } else if fmt.is_significant {
-                    tokens.accent
-                } else {
-                    tokens.text_primary
-                };
-                let font = FontId::monospace(tokens.metrics.font_grid_numeral_pt - 1.0);
-                let elided = paint_table_cell_text(ui, cell_rect, &fmt.text, col, font, egui::Align::RIGHT, visible_clip);
-                if elided || fmt.is_ambiguous {
-                    let tip = if fmt.is_ambiguous {
-                        format!("{} — Profile-likelihood bounds did not close (ambiguous / wide estimate)", fmt.text)
-                    } else {
-                        fmt.text.clone()
-                    };
-                    cell_resp.on_hover_text(tip);
-                }
-            }
-        }
+        render_result_data_row(ui, rs, active_tab_idx, r_idx, row_lbl, row, is_survival_summary, ptr, layout, state, tokens, enabled, meta);
     }
 
-    let _ = meta;
+    if ptr_released || !ptr_down {
+        state.dragging_selection = false;
+    }
+
+    let next_range = state.selected_range(&rs.id, active_tab_idx);
+    if next_range != prev_range
+        && let (Some((_, _, ra, ca)), Some((_, _, rf, cf))) = (&state.selection_anchor, &state.selected_cell)
+    {
+        intents.push_sync_result_selection(rs.id.clone(), active_tab_idx, (*ra, *ca), (*rf, *cf));
+    }
+
+    render_result_context_menu(ui, rs, active_tab_idx, state, tokens, enabled, meta, intents);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_result_context_menu(
+    ui: &mut egui::Ui,
+    rs: &ResultSheet,
+    active_tab_idx: usize,
+    state: &mut ResultsViewEguiState,
+    tokens: &Tokens,
+    enabled: bool,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    if !enabled {
+        state.context_menu = None;
+        return;
+    }
+    let Some((ref menu_sheet, menu_tab, anchor)) = state.context_menu.clone() else {
+        return;
+    };
+    if menu_sheet != &rs.id || menu_tab != active_tab_idx {
+        state.context_menu = None;
+        return;
+    }
+    let screen = ui.ctx().content_rect();
+    let pos = pos2(
+        anchor.x.clamp(screen.left() + 4.0, (screen.right() - 176.0).max(screen.left() + 4.0)),
+        anchor.y.clamp(screen.top() + 4.0, (screen.bottom() - 88.0).max(screen.top() + 4.0)),
+    );
+    let mut close_menu = false;
+    let area_resp =
+        egui::Area::new(Id::unique(("result_ctx_menu", rs.id.as_str()))).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |menu_ui| {
+            egui::Frame::popup(menu_ui.style())
+                .fill(tokens.surface_bg)
+                .stroke(Stroke::new(1.0, tokens.border))
+                .corner_radius(CornerRadius::same(4))
+                .show(menu_ui, |ui| {
+                    ui.set_min_width(156.0);
+                    let copy_sel_lbl = tr(tokens.locale, "r13.result.copy_selection");
+                    let btn_sel = ui.add_sized([152.0, 26.0], egui::Button::new(copy_sel_lbl).fill(Color32::TRANSPARENT));
+                    meta.record_response(
+                        ui,
+                        &btn_sel,
+                        FrameInspectEntryInput {
+                            widget_id: "result.ctx.copy_selection",
+                            role: "menuitem",
+                            label: copy_sel_lbl,
+                            command_id: None,
+                            value: None,
+                            enabled: true,
+                            disabled_reason: None,
+                            z_layer: ZLayer::ContextMenu,
+                            ellipsized: false,
+                            full_label: None,
+                        },
+                    );
+                    if btn_sel.clicked() {
+                        intents.push_workspace_copy(144);
+                        close_menu = true;
+                    }
+                    let copy_all_lbl = tr(tokens.locale, "r13.result.copy_table");
+                    let btn_all = ui.add_sized([152.0, 26.0], egui::Button::new(copy_all_lbl).fill(Color32::TRANSPARENT));
+                    meta.record_response(
+                        ui,
+                        &btn_all,
+                        FrameInspectEntryInput {
+                            widget_id: "result.ctx.copy_table",
+                            role: "menuitem",
+                            label: copy_all_lbl,
+                            command_id: Some("results.copy_table"),
+                            value: None,
+                            enabled: true,
+                            disabled_reason: None,
+                            z_layer: ZLayer::ContextMenu,
+                            ellipsized: false,
+                            full_label: None,
+                        },
+                    );
+                    if btn_all.clicked() {
+                        intents.push_custom_view_action("results", format!("copy_table:{}", rs.id.as_str()));
+                        close_menu = true;
+                    }
+                });
+        });
+    let clicked_outside = ui.input(|i| i.pointer.primary_clicked() && i.pointer.interact_pos().is_some_and(|p| !area_resp.response.rect.contains(p)));
+    if close_menu || clicked_outside || ui.input(|i| i.key_pressed(Key::Escape)) {
+        state.context_menu = None;
+    }
 }
 
 fn render_empty_or_failed_result_body(

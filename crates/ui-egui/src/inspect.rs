@@ -740,6 +740,10 @@ pub(crate) fn dialog_widget_descriptors(app: &UiApp) -> Option<DialogBuildParts>
         ActiveDialog::RandomSampleRows { .. } => build_random_sample_rows_nodes(app, 0.0, 0.0, false),
         ActiveDialog::SimulateDistributions => build_simulate_distributions_nodes(app, 0.0, 0.0, false),
         ActiveDialog::InsertModelEquation { graph_sheet_id } => build_insert_model_equation_nodes(app, graph_sheet_id, 0.0, 0.0, false),
+        ActiveDialog::CreateGraph { source_sheet_id } => build_create_graph_nodes(app, source_sheet_id.as_ref(), 0.0, 0.0, false),
+        ActiveDialog::EqualizeScaling { layout_sheet_id } => build_equalize_scaling_nodes(app, layout_sheet_id, 0.0, 0.0, false),
+        ActiveDialog::FormatEmbeddedTable { sheet_id, .. } => build_format_embedded_table_nodes(app, sheet_id, 0.0, 0.0, false),
+        ActiveDialog::FormatImage { sheet_id, .. } => build_format_image_nodes(app, sheet_id, 0.0, 0.0, false),
         ActiveDialog::Print { sheet_id } => build_print_dialog_nodes(app, sheet_id.as_ref(), 0.0, 0.0, false),
         other => build_generic_dialog_nodes(app, other, 0.0, 0.0, false),
     })
@@ -2051,6 +2055,104 @@ fn build_page_layout_nodes(app: &UiApp, layout_sheet_id: &SheetId, bx: f64, by: 
     )
 }
 
+fn build_create_graph_nodes(app: &UiApp, source_sheet_id: Option<&SheetId>, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
+    let st = &app.canvas_dialogs.create_graph;
+    let pos = |row: usize| dialog_ctrl_bounds(bx, by, row, include_bounds);
+    let src_val = st.source_sheet_id.as_ref().or(source_sheet_id).map(SheetId::as_str);
+    let controls = vec![
+        node("create_graph.source_sheet_id", "combobox", "Source data sheet", json!(src_val), ControlEnablement::enabled(), pos(0)),
+        node("create_graph.kind", "combobox", "Graph kind", json!(st.kind_slug), ControlEnablement::enabled(), pos(1)),
+        node(
+            "create_graph.one_per_data_set",
+            "checkbox",
+            "Create one graph per data set",
+            json!(st.one_per_data_set),
+            ControlEnablement::enabled(),
+            pos(2),
+        ),
+        node("create_graph.y_axis_title", "textbox", "Y-axis title", json!(st.y_axis_title), ControlEnablement::enabled(), pos(3)),
+        node("create_graph.title", "textbox", "Graph title", json!(st.graph_title), ControlEnablement::enabled(), pos(4)),
+    ];
+    (
+        insp_tr(app, "cmd.ui.graph.create.open", "New Graph..."),
+        src_val.map(str::to_owned),
+        None,
+        Vec::new(),
+        controls,
+        vec![("ok", insp_tr(app, "btn.ok", "OK")), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))],
+    )
+}
+
+fn build_equalize_scaling_nodes(app: &UiApp, layout_sheet_id: &SheetId, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
+    let st = &app.canvas_dialogs.equalize_scaling;
+    let pos = |row: usize| dialog_ctrl_bounds(bx, by, row, include_bounds);
+    let pct_gate = if st.mode == "explicit_percent" {
+        ControlEnablement::enabled()
+    } else {
+        ControlEnablement::disabled("Select Explicit Scale (%) mode to customize percentage.")
+    };
+    let controls = vec![
+        node("equalize_scaling.mode", "combobox", "Scaling mode", json!(st.mode), ControlEnablement::enabled(), pos(0)),
+        node("equalize_scaling.percent", "spinbutton", "Explicit scale (%)", json!(st.explicit_percent), pct_gate, pos(1)),
+        node("equalize_scaling.panel_ids", "listbox", "Target graph panels", json!(st.selected_panel_ids), ControlEnablement::enabled(), pos(2)),
+    ];
+    (
+        insp_tr(app, "cmd.ui.layout.equalizeScaling.open", "Equalize Scaling..."),
+        Some(layout_sheet_id.as_str().to_owned()),
+        None,
+        Vec::new(),
+        controls,
+        vec![("ok", insp_tr(app, "btn.ok", "OK")), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))],
+    )
+}
+
+fn build_format_embedded_table_nodes(app: &UiApp, sheet_id: &SheetId, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
+    let st = &app.canvas_dialogs.format_embedded_table;
+    let pos = |row: usize| dialog_ctrl_bounds(bx, by, row, include_bounds);
+    let controls = vec![
+        node(
+            "embedded_table.show_column_titles",
+            "checkbox",
+            "Show column titles",
+            json!(st.style.show_column_titles),
+            ControlEnablement::enabled(),
+            pos(0),
+        ),
+        node("embedded_table.show_row_titles", "checkbox", "Show row titles", json!(st.style.show_row_titles), ControlEnablement::enabled(), pos(1)),
+        node("embedded_table.transpose", "checkbox", "Transpose", json!(st.style.transpose), ControlEnablement::enabled(), pos(2)),
+        node("embedded_table.bold_headers", "checkbox", "Bold headers", json!(st.style.bold_headers), ControlEnablement::enabled(), pos(3)),
+        node("embedded_table.font_size", "spinbutton", "Font size (pt)", json!(st.style.font_size_pt), ControlEnablement::enabled(), pos(4)),
+    ];
+    (
+        insp_tr(app, "cmd.ui.embeddedTable.format.open", "Format Embedded Table..."),
+        Some(sheet_id.as_str().to_owned()),
+        None,
+        Vec::new(),
+        controls,
+        vec![("apply", insp_tr(app, "modal.apply", "Apply")), ("ok", insp_tr(app, "btn.ok", "OK")), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))],
+    )
+}
+
+fn build_format_image_nodes(app: &UiApp, sheet_id: &SheetId, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
+    let st = &app.canvas_dialogs.format_image;
+    let pos = |row: usize| dialog_ctrl_bounds(bx, by, row, include_bounds);
+    let controls = vec![
+        node("format_image.width_pt", "spinbutton", "Width (pt)", json!(st.bounds_pt.width), ControlEnablement::enabled(), pos(0)),
+        node("format_image.height_pt", "spinbutton", "Height (pt)", json!(st.bounds_pt.height), ControlEnablement::enabled(), pos(1)),
+        node("format_image.lock_aspect_ratio", "checkbox", "Lock aspect ratio", json!(st.lock_aspect_ratio), ControlEnablement::enabled(), pos(2)),
+        node("format_image.rotation_deg", "spinbutton", "Rotation (deg)", json!(st.rotation_deg), ControlEnablement::enabled(), pos(3)),
+        node("format_image.border.enabled", "checkbox", "Border", json!(st.border_enabled), ControlEnablement::enabled(), pos(4)),
+    ];
+    (
+        insp_tr(app, "cmd.ui.image.format.open", "Format Image..."),
+        Some(sheet_id.as_str().to_owned()),
+        None,
+        Vec::new(),
+        controls,
+        vec![("apply", insp_tr(app, "modal.apply", "Apply")), ("ok", insp_tr(app, "btn.ok", "OK")), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))],
+    )
+}
+
 fn build_export_figure_nodes(app: &UiApp, sheet_id: &SheetId, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
     let st = &app.canvas_dialogs.export_figure;
     let pos = |row: usize| dialog_ctrl_bounds(bx, by, row, include_bounds);
@@ -2379,6 +2481,10 @@ pub(crate) fn active_dialog_slug(dialog: &ActiveDialog) -> String {
         ActiveDialog::RandomSampleRows { .. } => String::from("random_sample_rows"),
         ActiveDialog::SimulateDistributions => String::from("simulate_distributions"),
         ActiveDialog::InsertModelEquation { .. } => String::from("insert_model_equation"),
+        ActiveDialog::CreateGraph { .. } => String::from("create_graph"),
+        ActiveDialog::EqualizeScaling { .. } => String::from("equalize_scaling"),
+        ActiveDialog::FormatEmbeddedTable { .. } => String::from("format_embedded_table"),
+        ActiveDialog::FormatImage { .. } => String::from("format_image"),
         ActiveDialog::Print { .. } => String::from("print"),
         ActiveDialog::CommandPalette => String::from("command_palette"),
         ActiveDialog::About => String::from("about"),

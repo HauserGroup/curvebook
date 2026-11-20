@@ -305,6 +305,7 @@ pub struct ShellAboutFrameReport {
     pub footer_rect_pt: Option<egui::Rect>,
     pub menu_popup_open: bool,
     pub center_stage_handled_natively: bool,
+    pub grid_overlay_shown: bool,
 }
 
 /// Convert a logical coordinate `[x_pt, y_pt]` to physical pixels using `pixels_per_point`.
@@ -1087,6 +1088,7 @@ pub fn render_egui_shell_frame_with_host(
         }
         report.scrollbar_rect_pt = stage_rep.scrollbar_rect_pt;
         report.center_stage_handled_natively = stage_rep.handled_natively;
+        report.grid_overlay_shown = stage_rep.grid_overlay_shown;
     });
 
     if app.presentation_mode && meta.find_by_widget_id("toolbar.presentation.exit").is_none() {
@@ -1269,6 +1271,32 @@ fn handle_shell_global_shortcuts(
     if copy_triggered {
         let dpi = ViewportMetrics::new(1.0, 1.0, f64::from(ctx.pixels_per_point())).dpi_for_base(144);
         intents.push_workspace_copy(dpi);
+    }
+    let active_canvas_target = if !app.egui_views.launcher_open && !app.nav.welcome.open && !app.nav.gallery.open {
+        let doc = app.document();
+        doc.active_sheet_id.as_ref().filter(|id| doc.graph_sheet(id).is_some() || doc.layout_sheet(id).is_some()).cloned()
+    } else {
+        None
+    };
+    if let Some(target_id) = active_canvas_target {
+        let paste_triggered = ctx.input_mut(|i| {
+            let mut hit = false;
+            i.events.retain(|ev| {
+                if matches!(ev, egui::Event::Paste(_)) {
+                    hit = true;
+                    false
+                } else {
+                    true
+                }
+            });
+            if i.consume_key(Modifiers::COMMAND, Key::V) || i.consume_key(Modifiers::CTRL, Key::V) || i.consume_key(Modifiers::MAC_CMD, Key::V) {
+                hit = true;
+            }
+            hit
+        });
+        if paste_triggered {
+            intents.push_canvas_paste(target_id, None);
+        }
     }
     if ctx.input_mut(|i| {
         i.consume_key(Modifiers::COMMAND, Key::Backslash)

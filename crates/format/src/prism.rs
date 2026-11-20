@@ -244,12 +244,20 @@ fn try_load_embedded_project_json(archive: &ZipArchive, warnings: &mut Vec<Impor
     };
     let migrated = migrate_document_json(val, version)?;
     let mut doc: ProjectDocument = serde_json::from_value(migrated)?;
+    for asset in &mut doc.image_assets {
+        if asset.bytes.is_empty() {
+            let expected_path = format!("assets/{}.{}", asset.asset_id, asset.media_type.extension());
+            if let Some(bytes) = archive.get(&expected_path) {
+                asset.bytes = bytes.to_vec();
+            }
+        }
+    }
     doc.data_sheets.iter().try_fold(0_usize, accumulate_project_cells)?;
     sanitize_invalid_document_sheet_ids(&mut doc, warnings);
     validate_project_document(&doc)?;
 
     for (path, _) in archive.iter() {
-        if path != "document.json" && path != "manifest.json" && !path.starts_with("sheets/") {
+        if path != "document.json" && path != "manifest.json" && !path.starts_with("sheets/") && !path.starts_with("assets/") {
             warnings.push(ImportWarning::new(
                 ImportWarningKind::UnsupportedChunk,
                 path,
@@ -636,7 +644,7 @@ fn remap_document_sheet_references(doc: &mut ProjectDocument, remap: &BTreeMap<S
             match item {
                 LayoutItem::LiveGraph { graph_sheet_id, .. } => apply_sheet_remap(graph_sheet_id, remap),
                 LayoutItem::LiveTable { source_sheet_id, .. } => apply_sheet_remap(source_sheet_id, remap),
-                LayoutItem::TextCallout { .. } => {}
+                LayoutItem::TextCallout { .. } | LayoutItem::EmbeddedImage { .. } => {}
             }
         }
     }

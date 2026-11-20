@@ -392,7 +392,9 @@ fn disabled_reason_for_row(app: &UiApp, row: &CommandPaletteRow) -> String {
         | "ui.result.applyRemediation" => String::from("Open a ResultSheet first"),
         "ui.result.appendClusterColumn" => String::from("Requires a Clustering ResultSheet"),
         "ui.table.openFormulaBar" => String::from("Requires a Multiple Variables table"),
-        "ui.layout.composer.open" => String::from("Open a LayoutSheet first"),
+        "ui.layout.composer.open" | "ui.layout.equalizeScaling.open" => String::from("Open a LayoutSheet first"),
+        "ui.embeddedTable.format.open" => String::from("Paste a ResultSheet table onto a graph or layout first"),
+        "ui.image.format.open" => String::from("Insert or paste an image onto a graph or layout first"),
         "ui.graph.axes.open" | "ui.graph.format.open" | "ui.changeGraphType.open" | "ui.formatPoints.open" => {
             String::from("Requires at least one GraphSheet")
         }
