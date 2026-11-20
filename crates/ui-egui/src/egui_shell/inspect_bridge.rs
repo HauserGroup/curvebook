@@ -902,6 +902,8 @@ pub fn render_minimal_shell_and_about(
     ctx.enable_accesskit();
     let tokens = Tokens::from_theme_spec(&app.theme, &app.locale);
     tokens.apply_to_ctx(&ctx);
+    // Synchronize the active pass's `Ui` style immediately so pass-0 widgets do not inherit stale context visuals.
+    tokens.apply_to_ui(ui);
     meta.begin_pass(&ctx);
 
     let mut report = ShellAboutFrameReport::default();
@@ -984,6 +986,8 @@ pub fn render_egui_shell_frame_with_host(
     ctx.enable_accesskit();
     let tokens = Tokens::from_theme_spec(&app.theme, &app.locale);
     tokens.apply_to_ctx(&ctx);
+    // Synchronize the active pass's `Ui` style immediately so pass-0 widgets do not inherit stale context visuals.
+    tokens.apply_to_ui(ui);
     meta.begin_pass(&ctx);
 
     let decision = HybridCoexistenceArbiter::evaluate_with_views(app, views, host_close_dialog_open);

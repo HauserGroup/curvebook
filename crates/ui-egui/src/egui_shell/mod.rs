@@ -933,21 +933,47 @@ impl Tokens {
         visuals.selection.bg_fill = self.active_bg;
         visuals.selection.stroke = Stroke::new(2.0, self.focus_ring);
         visuals.widgets.noninteractive.bg_fill = self.panel_bg;
+        visuals.widgets.noninteractive.weak_bg_fill = self.panel_bg;
         visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, self.border);
         visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, self.text_primary);
         visuals.widgets.inactive.bg_fill = self.button_bg;
+        visuals.widgets.inactive.weak_bg_fill = self.button_bg;
         visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, self.button_border);
         visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, self.text_primary);
         visuals.widgets.hovered.bg_fill = self.hover_bg;
+        visuals.widgets.hovered.weak_bg_fill = self.hover_bg;
         visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, self.focus_ring);
         visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, self.text_strong);
         visuals.widgets.active.bg_fill = self.active_bg;
+        visuals.widgets.active.weak_bg_fill = self.active_bg;
         visuals.widgets.active.bg_stroke = Stroke::new(2.0, self.focus_ring);
         visuals.widgets.active.fg_stroke = Stroke::new(1.0, self.text_strong);
         visuals.widgets.open.bg_fill = self.hover_bg;
+        visuals.widgets.open.weak_bg_fill = self.hover_bg;
         visuals.widgets.open.bg_stroke = Stroke::new(1.0, self.border);
         visuals.widgets.open.fg_stroke = Stroke::new(1.0, self.text_strong);
         visuals
+    }
+
+    /// Apply theme visuals, canonical typography sizes, and non-overlapping scrollbar metrics to `style`.
+    pub fn configure_style(&self, style: &mut egui::Style) {
+        style.visuals = self.to_visuals();
+        style.text_styles.insert(TextStyle::Body, FontId::proportional(self.metrics.font_ui_body_pt));
+        style.text_styles.insert(TextStyle::Button, FontId::proportional(self.metrics.font_ui_body_pt));
+        style.text_styles.insert(TextStyle::Small, FontId::proportional(self.metrics.font_ui_small_pt));
+        style.text_styles.insert(TextStyle::Monospace, FontId::monospace(self.metrics.font_grid_numeral_pt));
+        style.text_styles.insert(TextStyle::Heading, FontId::proportional(15.0));
+
+        style.spacing.scroll.floating = false;
+        style.spacing.scroll.bar_width = self.metrics.scroll_bar_thickness;
+        style.spacing.scroll.bar_inner_margin = 2.0;
+        style.spacing.scroll.bar_outer_margin = 2.0;
+        style.spacing.interact_size.y = self.metrics.min_hit_target_pt;
+    }
+
+    /// Synchronize the currently executing [`egui::Ui`] style immediately (including pass-0 frames).
+    pub fn apply_to_ui(&self, ui: &mut egui::Ui) {
+        self.configure_style(ui.style_mut());
     }
 
     /// Install these tokens, visuals, canonical typography sizes, non-overlapping scrollbar gutter,
@@ -959,17 +985,7 @@ impl Tokens {
         ctx.set_zoom_factor(self.ui_scale.clamp(0.75, 3.0));
         ctx.set_visuals(self.to_visuals());
         ctx.all_styles_mut(|style| {
-            style.text_styles.insert(TextStyle::Body, FontId::proportional(self.metrics.font_ui_body_pt));
-            style.text_styles.insert(TextStyle::Button, FontId::proportional(self.metrics.font_ui_body_pt));
-            style.text_styles.insert(TextStyle::Small, FontId::proportional(self.metrics.font_ui_small_pt));
-            style.text_styles.insert(TextStyle::Monospace, FontId::monospace(self.metrics.font_grid_numeral_pt));
-            style.text_styles.insert(TextStyle::Heading, FontId::proportional(15.0));
-
-            style.spacing.scroll.floating = false;
-            style.spacing.scroll.bar_width = self.metrics.scroll_bar_thickness;
-            style.spacing.scroll.bar_inner_margin = 2.0;
-            style.spacing.scroll.bar_outer_margin = 2.0;
-            style.spacing.interact_size.y = self.metrics.min_hit_target_pt;
+            self.configure_style(style);
         });
     }
 
@@ -2571,6 +2587,11 @@ mod tests {
         for mode in UiThemeMode::ALL {
             let tokens = Tokens::for_mode(mode);
             assert!(tokens.meets_wcag_aa(), "WCAG 2.1 AA failed for {mode:?}");
+            let visuals = tokens.to_visuals();
+            assert_eq!(visuals.widgets.inactive.weak_bg_fill, tokens.button_bg, "weak_bg_fill must match button_bg for {mode:?}");
+            assert_eq!(visuals.widgets.hovered.weak_bg_fill, tokens.hover_bg);
+            assert_eq!(visuals.widgets.active.weak_bg_fill, tokens.active_bg);
+            assert_eq!(visuals.widgets.open.weak_bg_fill, tokens.hover_bg);
         }
         assert_eq!(LayoutMetrics::CANONICAL.top_chrome_height(false), 70.0);
         assert_eq!(LayoutMetrics::CANONICAL.top_chrome_height(true), 0.0);

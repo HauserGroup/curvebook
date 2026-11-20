@@ -1470,9 +1470,11 @@ fn run_settled_egui_on_ctx(
     let ppp = if pixels_per_point.is_finite() && pixels_per_point > 0.0 { pixels_per_point } else { 1.0 };
     let zoom = app.ui_scale();
     // `Tokens::apply_to_ctx` sets `zoom_factor = self.ui_scale` while `egui` computes
-    // `pixels_per_point = zoom_factor * native_pixels_per_point`. Pre-seed `zoom_factor` and
-    // pass `native_ppp = ppp / zoom` so callers' requested `pixels_per_point` does not double-scale.
+    // `pixels_per_point = zoom_factor * native_pixels_per_point`. Apply theme tokens BEFORE
+    // entering `ctx.run_ui` so pass-0 `ui.style().visuals` reflects the target light/dark
+    // theme (not fresh `Theme::Dark` defaults), and pass `native_ppp = ppp / zoom`.
     let native_ppp = (ppp / zoom).max(0.05);
+    egui_shell::Tokens::from_theme_spec(&app.theme, &app.locale).apply_to_ctx(ctx);
     ctx.options_mut(|o| {
         o.zoom_with_keyboard = false;
         o.zoom_factor = zoom;

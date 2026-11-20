@@ -664,6 +664,7 @@ impl CurveBookNativeApp {
         if let Ok(win) = self.runtime.window(initial_window_id) {
             let tokens = Tokens::from_theme_spec(&win.app().theme, &win.app().locale);
             tokens.apply_to_ctx(&ctx);
+            tokens.apply_to_ui(ui);
         }
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
 
