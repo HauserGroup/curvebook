@@ -182,6 +182,72 @@ struct Tier1PopupsInput<'a> {
     workspace_preset: WorkspacePreset,
 }
 
+#[derive(Clone, Copy)]
+struct Tier1BarInput<'a> {
+    app: &'a UiApp,
+    ctx_in: TopChromeContext<'a>,
+    enabled: bool,
+}
+
+#[derive(Default)]
+struct Tier1Anchors {
+    split: Option<Rect>,
+    preset: Option<Rect>,
+}
+
+#[derive(Default)]
+struct Tier2OverflowState {
+    items: Vec<Tier2ActionSpec>,
+    anchor: Option<Rect>,
+}
+
+#[derive(Clone, Copy)]
+struct TopMenuButtonSpec<'a> {
+    tokens: &'a Tokens,
+    sec: &'a InWindowMenuSectionParity,
+    sec_w: f32,
+    enabled: bool,
+}
+
+struct Tier2ActionInput<'a> {
+    widget_id: &'a str,
+    label: &'a str,
+    command_id: &'a str,
+    params: Value,
+    enabled: bool,
+    disabled_reason: Option<&'a str>,
+    primary: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ChromeButtonSpec<'a> {
+    widget_id: &'a str,
+    label: &'a str,
+    command_id: Option<&'a str>,
+    selected: bool,
+    enabled: bool,
+    disabled_reason: Option<&'a str>,
+    max_w: f32,
+}
+
+#[derive(Clone, Copy)]
+struct PopupActionButtonSpec<'a> {
+    widget_id: &'a str,
+    label: &'a str,
+    selected: bool,
+    enabled: bool,
+    disabled_reason: Option<&'a str>,
+}
+
+#[derive(Clone, Copy)]
+struct ChromeTabSpec<'a> {
+    widget_id: &'a str,
+    label: &'a str,
+    selected: bool,
+    enabled: bool,
+    max_w: f32,
+}
+
 /// Render Tier 1 (`32 pt`) Application Bar and Tier 2 (`38 pt`) Contextual Action Strip cleanly.
 ///
 /// Preserves exact widget IDs (`toolbar.home`, `toolbar.help.about`, `toolbar.command_palette`,
@@ -210,10 +276,9 @@ pub fn render_top_chrome(
 
     let tier1_h = ctx_in.layout.tier1_app_bar_h_pt.max(24.0);
     let tier2_h = ctx_in.layout.tier2_action_strip_h_pt.max(26.0);
-    let mut overflow_items = Vec::new();
-    let mut split_anchor = None;
-    let mut preset_anchor = None;
-    let mut overflow_anchor = None;
+    let bar_input = Tier1BarInput { app, ctx_in, enabled };
+    let mut tier1_anchors = Tier1Anchors::default();
+    let mut tier2_overflow = Tier2OverflowState::default();
 
     let panel_resp = egui::Panel::top("egui_shell.top_chrome")
         .exact_size(tier1_h + tier2_h)
@@ -221,7 +286,7 @@ pub fn render_top_chrome(
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             let tier1_resp = ui.allocate_ui(Vec2::new(ui.available_width(), tier1_h), |ui| {
-                render_tier1_bar(ui, app, state, &ctx_in, enabled, meta, intents, &mut split_anchor, &mut preset_anchor);
+                render_tier1_bar(ui, bar_input, state, &mut tier1_anchors, meta, intents);
             });
             report.tier1_rect_pt = Some(tier1_resp.response.rect);
 
@@ -233,7 +298,7 @@ pub fn render_top_chrome(
             );
 
             let tier2_resp = ui.allocate_ui(Vec2::new(ui.available_width(), tier2_h), |ui| {
-                render_tier2_strip(ui, app, state, tokens, enabled, meta, intents, &mut overflow_items, &mut overflow_anchor);
+                render_tier2_strip(ui, bar_input, state, &mut tier2_overflow, meta, intents);
             });
             report.tier2_rect_pt = Some(tier2_resp.response.rect);
 
@@ -245,27 +310,27 @@ pub fn render_top_chrome(
         });
 
     report.total_height_pt = panel_resp.response.rect.height();
-    report.overflow_item_count = overflow_items.len();
-    if overflow_items.is_empty() {
+    report.overflow_item_count = tier2_overflow.items.len();
+    if tier2_overflow.items.is_empty() {
         state.overflow_menu_open = false;
     }
 
     let popup_ctx = Tier1PopupsInput { app, tokens, enabled, workspace_preset: ctx_in.workspace_preset };
     if state.split_menu_open
-        && let Some(anchor) = split_anchor
+        && let Some(anchor) = tier1_anchors.split
     {
         render_split_preset_popup(ui.ctx(), &popup_ctx, state, anchor, meta, intents);
     }
     if state.preset_menu_open
-        && let Some(anchor) = preset_anchor
+        && let Some(anchor) = tier1_anchors.preset
     {
         render_workspace_preset_popup(ui.ctx(), &popup_ctx, state, anchor, meta, intents);
     }
     if state.overflow_menu_open
-        && let Some(anchor) = overflow_anchor
-        && !overflow_items.is_empty()
+        && let Some(anchor) = tier2_overflow.anchor
+        && !tier2_overflow.items.is_empty()
     {
-        render_tier2_overflow_popup(ui.ctx(), &popup_ctx, state, &overflow_items, anchor, meta, intents);
+        render_tier2_overflow_popup(ui.ctx(), &popup_ctx, state, &tier2_overflow.items, anchor, meta, intents);
     }
 
     report.menu_popup_open = state.active_in_window_menu.is_some() || state.split_menu_open || state.preset_menu_open || state.overflow_menu_open;
@@ -332,18 +397,15 @@ pub fn render_presentation_exit_chip(
     Some(area.inner)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_tier1_bar(
     ui: &mut egui::Ui,
-    app: &UiApp,
+    input: Tier1BarInput<'_>,
     state: &mut TopChromeEguiState,
-    ctx_in: &TopChromeContext<'_>,
-    enabled: bool,
+    anchors: &mut Tier1Anchors,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
-    split_anchor: &mut Option<Rect>,
-    preset_anchor: &mut Option<Rect>,
 ) {
+    let Tier1BarInput { app, ctx_in, enabled } = input;
     let tokens = ctx_in.tokens;
     let about_label = tr(&app.locale, "menu.help.about");
     let home_label = localized_home_label(&app.locale);
@@ -354,8 +416,20 @@ fn render_tier1_bar(
         let (brand_rect, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
         crate::egui_shell::brand::paint_mark(ui, brand_rect);
 
-        let home_resp =
-            chrome_button_fitted(ui, tokens, meta, "toolbar.home", home_label, None, ctx_in.launcher_open, enabled, modal_reason(enabled), 84.0);
+        let home_resp = chrome_button_fitted(
+            ui,
+            tokens,
+            meta,
+            ChromeButtonSpec {
+                widget_id: "toolbar.home",
+                label: home_label,
+                command_id: None,
+                selected: ctx_in.launcher_open,
+                enabled,
+                disabled_reason: modal_reason(enabled),
+                max_w: 84.0,
+            },
+        );
         if home_resp.clicked() && enabled {
             state.close_all_popups();
             intents.push_set_launcher_open(!ctx_in.launcher_open);
@@ -365,13 +439,15 @@ fn render_tier1_bar(
             ui,
             tokens,
             meta,
-            "toolbar.help.about",
-            about_label,
-            Some("app.about"),
-            false,
-            enabled,
-            modal_reason(enabled),
-            104.0,
+            ChromeButtonSpec {
+                widget_id: "toolbar.help.about",
+                label: about_label,
+                command_id: Some("app.about"),
+                selected: false,
+                enabled,
+                disabled_reason: modal_reason(enabled),
+                max_w: 104.0,
+            },
         );
         if about_resp.clicked() && enabled {
             state.close_all_popups();
@@ -385,7 +461,7 @@ fn render_tier1_bar(
 
         state.active_in_window_menu = None;
         if !ctx_in.host_draws_menu_bar && middle_budget >= 54.0 {
-            render_inline_menu_bar(ui, app, state, tokens, enabled, middle_budget, meta, intents);
+            render_inline_menu_bar(ui, input, middle_budget, state, meta, intents);
         }
 
         let remaining_after_menus = (ui.available_width() - 6.0).max(0.0);
@@ -409,7 +485,7 @@ fn render_tier1_bar(
         if filler > 0.0 {
             ui.add_space(filler);
         }
-        render_tier1_right_group(ui, app, state, ctx_in, &fitted, enabled, meta, intents, split_anchor, preset_anchor);
+        render_tier1_right_group(ui, input, &fitted, state, anchors, meta, intents);
     });
 }
 
@@ -436,17 +512,16 @@ fn estimate_tier1_right_width(fitted: &crate::egui_shell::top_bar_fit::RightGrou
     parts.into_iter().sum::<f32>() + gaps
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_inline_menu_bar(
     ui: &mut egui::Ui,
-    app: &UiApp,
-    state: &mut TopChromeEguiState,
-    tokens: &Tokens,
-    enabled: bool,
+    input: Tier1BarInput<'_>,
     budget_w: f32,
+    state: &mut TopChromeEguiState,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let Tier1BarInput { app, ctx_in, enabled } = input;
+    let tokens = ctx_in.tokens;
     let sections = collect_in_window_menu_sections(app);
     if sections.is_empty() {
         return;
@@ -477,7 +552,7 @@ fn render_inline_menu_bar(
         egui::MenuBar::new().ui(ui, |ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             for (sec, &sec_w) in sections.iter().take(visible_count).zip(measured_widths.iter()) {
-                render_top_menu_button(ui, state, tokens, sec, sec_w, enabled, meta, intents);
+                render_top_menu_button(ui, TopMenuButtonSpec { tokens, sec, sec_w, enabled }, state, meta, intents);
             }
             if visible_count < sections.len() {
                 let ov_resp = ui.add_enabled(enabled, egui::Button::new(overflow_lbl).min_size(Vec2::new(28.0, 22.0)));
@@ -514,17 +589,14 @@ fn render_inline_menu_bar(
     });
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_top_menu_button(
     ui: &mut egui::Ui,
+    spec: TopMenuButtonSpec<'_>,
     state: &mut TopChromeEguiState,
-    tokens: &Tokens,
-    sec: &InWindowMenuSectionParity,
-    sec_w: f32,
-    enabled: bool,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let TopMenuButtonSpec { tokens, sec, sec_w, enabled } = spec;
     let (galley, ellipsized) = layout_single_line_job(ui.painter(), &sec.title, (sec_w - 10.0).max(16.0), tokens.text_primary, 12.0);
     let resp = ui.add_enabled_ui(enabled, |ui| ui.allocate_response(Vec2::new(sec_w, 22.0), Sense::click())).inner;
     let is_open = enabled && egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
@@ -810,19 +882,16 @@ fn push_menu_command_intent(command_id: &str, variant: Option<&str>, intents: &m
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_tier1_right_group(
     ui: &mut egui::Ui,
-    app: &UiApp,
-    state: &mut TopChromeEguiState,
-    ctx_in: &TopChromeContext<'_>,
+    input: Tier1BarInput<'_>,
     fitted: &crate::egui_shell::top_bar_fit::RightGroup,
-    enabled: bool,
+    state: &mut TopChromeEguiState,
+    anchors: &mut Tier1Anchors,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
-    split_anchor: &mut Option<Rect>,
-    preset_anchor: &mut Option<Rect>,
 ) {
+    let Tier1BarInput { app, ctx_in, enabled } = input;
     let tokens = ctx_in.tokens;
     if !matches!(fitted.search, SearchVisibility::Hidden) {
         let search_lbl = match fitted.search {
@@ -834,13 +903,15 @@ fn render_tier1_right_group(
             ui,
             tokens,
             meta,
-            "toolbar.command_palette",
-            &search_lbl,
-            Some("ui.palette.open"),
-            matches!(app.canvas_dialogs.active_dialog, ActiveDialog::CommandPalette),
-            enabled,
-            modal_reason(enabled),
-            max_w,
+            ChromeButtonSpec {
+                widget_id: "toolbar.command_palette",
+                label: &search_lbl,
+                command_id: Some("ui.palette.open"),
+                selected: matches!(app.canvas_dialogs.active_dialog, ActiveDialog::CommandPalette),
+                enabled,
+                disabled_reason: modal_reason(enabled),
+                max_w,
+            },
         );
         if pal_resp.clicked() && enabled {
             state.close_all_popups();
@@ -854,15 +925,17 @@ fn render_tier1_right_group(
             ui,
             tokens,
             meta,
-            "toolbar.split",
-            split_lbl,
-            Some("ui.split.toggle"),
-            app.split.enabled || state.split_menu_open,
-            enabled,
-            modal_reason(enabled),
-            68.0,
+            ChromeButtonSpec {
+                widget_id: "toolbar.split",
+                label: split_lbl,
+                command_id: Some("ui.split.toggle"),
+                selected: app.split.enabled || state.split_menu_open,
+                enabled,
+                disabled_reason: modal_reason(enabled),
+                max_w: 68.0,
+            },
         );
-        *split_anchor = Some(split_resp.rect);
+        anchors.split = Some(split_resp.rect);
         if split_resp.clicked() && enabled {
             let next = !state.split_menu_open;
             state.close_all_popups();
@@ -875,15 +948,17 @@ fn render_tier1_right_group(
             ui,
             tokens,
             meta,
-            "toolbar.preset",
-            ctx_in.workspace_preset.label(),
-            None,
-            state.preset_menu_open,
-            enabled,
-            modal_reason(enabled),
-            fitted.switcher_w.max(MIN_SWITCHER_PT),
+            ChromeButtonSpec {
+                widget_id: "toolbar.preset",
+                label: ctx_in.workspace_preset.label(),
+                command_id: None,
+                selected: state.preset_menu_open,
+                enabled,
+                disabled_reason: modal_reason(enabled),
+                max_w: fitted.switcher_w.max(MIN_SWITCHER_PT),
+            },
         );
-        *preset_anchor = Some(preset_resp.rect);
+        anchors.preset = Some(preset_resp.rect);
         if preset_resp.clicked() && enabled {
             let next = !state.preset_menu_open;
             state.close_all_popups();
@@ -897,13 +972,15 @@ fn render_tier1_right_group(
             ui,
             tokens,
             meta,
-            "toolbar.presentation",
-            pres_lbl,
-            Some("ui.presentation.toggle"),
-            app.presentation_mode,
-            enabled,
-            modal_reason(enabled),
-            76.0,
+            ChromeButtonSpec {
+                widget_id: "toolbar.presentation",
+                label: pres_lbl,
+                command_id: Some("ui.presentation.toggle"),
+                selected: app.presentation_mode,
+                enabled,
+                disabled_reason: modal_reason(enabled),
+                max_w: 76.0,
+            },
         );
         if pres_resp.clicked() && enabled {
             state.close_all_popups();
@@ -938,8 +1015,18 @@ fn render_split_preset_popup(
             .show(ui, |ui| {
                 ui.set_min_width(184.0);
                 ui.spacing_mut().item_spacing.y = 4.0;
-                let single =
-                    popup_action_button(ui, tokens, meta, "toolbar.split.preset.single", "Single Pane (Off)", !input.app.split.enabled, true, None);
+                let single = popup_action_button(
+                    ui,
+                    tokens,
+                    meta,
+                    PopupActionButtonSpec {
+                        widget_id: "toolbar.split.preset.single",
+                        label: "Single Pane (Off)",
+                        selected: !input.app.split.enabled,
+                        enabled: true,
+                        disabled_reason: None,
+                    },
+                );
                 if single.clicked() {
                     intents.push_ui("ui.split.toggle", json!({ "enabled": false }));
                     state.split_menu_open = false;
@@ -950,11 +1037,13 @@ fn render_split_preset_popup(
                     ui,
                     tokens,
                     meta,
-                    "toolbar.split.preset.data_graph",
-                    "Data + Graph",
-                    false,
-                    dg_enabled,
-                    (!dg_enabled).then_some("Requires a DataSheet and a GraphSheet"),
+                    PopupActionButtonSpec {
+                        widget_id: "toolbar.split.preset.data_graph",
+                        label: "Data + Graph",
+                        selected: false,
+                        enabled: dg_enabled,
+                        disabled_reason: (!dg_enabled).then_some("Requires a DataSheet and a GraphSheet"),
+                    },
                 );
                 if dg.clicked()
                     && let (Some(ds), Some(gs)) = (first_ds.as_ref(), first_gs.as_ref())
@@ -968,11 +1057,13 @@ fn render_split_preset_popup(
                     ui,
                     tokens,
                     meta,
-                    "toolbar.split.preset.data_results",
-                    "Data + Results",
-                    false,
-                    dr_enabled,
-                    (!dr_enabled).then_some("Requires a DataSheet and a ResultSheet"),
+                    PopupActionButtonSpec {
+                        widget_id: "toolbar.split.preset.data_results",
+                        label: "Data + Results",
+                        selected: false,
+                        enabled: dr_enabled,
+                        disabled_reason: (!dr_enabled).then_some("Requires a DataSheet and a ResultSheet"),
+                    },
                 );
                 if dr.clicked()
                     && let (Some(ds), Some(rs)) = (first_ds.as_ref(), first_rs.as_ref())
@@ -986,11 +1077,13 @@ fn render_split_preset_popup(
                     ui,
                     tokens,
                     meta,
-                    "toolbar.split.preset.two_up",
-                    "2-Up (50 / 50)",
-                    input.app.split.enabled,
-                    two_enabled,
-                    (!two_enabled).then_some("Open at least two sheets for 2-Up view"),
+                    PopupActionButtonSpec {
+                        widget_id: "toolbar.split.preset.two_up",
+                        label: "2-Up (50 / 50)",
+                        selected: input.app.split.enabled,
+                        enabled: two_enabled,
+                        disabled_reason: (!two_enabled).then_some("Open at least two sheets for 2-Up view"),
+                    },
                 );
                 if two.clicked()
                     && let Some((p, s)) = two_up_pair.as_ref()
@@ -1004,11 +1097,13 @@ fn render_split_preset_popup(
                     ui,
                     tokens,
                     meta,
-                    "toolbar.split.preset.swap",
-                    "Swap Panes",
-                    false,
-                    swap_enabled,
-                    (!swap_enabled).then_some("Enable split view with two sheets to swap"),
+                    PopupActionButtonSpec {
+                        widget_id: "toolbar.split.preset.swap",
+                        label: "Swap Panes",
+                        selected: false,
+                        enabled: swap_enabled,
+                        disabled_reason: (!swap_enabled).then_some("Enable split view with two sheets to swap"),
+                    },
                 );
                 if swap.clicked()
                     && let (Some(p), Some(s)) = (cur_primary.as_ref(), cur_secondary.as_ref())
@@ -1047,7 +1142,12 @@ fn render_workspace_preset_popup(
                     let selected = preset == input.workspace_preset;
                     let label = if selected { format!("✓ {}", preset.label()) } else { preset.label().to_owned() };
                     let wid = preset_widget_id(preset);
-                    let resp = popup_action_button(ui, tokens, meta, wid, &label, selected, true, None);
+                    let resp = popup_action_button(
+                        ui,
+                        tokens,
+                        meta,
+                        PopupActionButtonSpec { widget_id: wid, label: &label, selected, enabled: true, disabled_reason: None },
+                    );
                     if resp.clicked() {
                         intents.push_apply_workspace_preset(preset);
                         state.preset_menu_open = false;
@@ -1084,7 +1184,18 @@ fn render_tier2_overflow_popup(
                 ui.spacing_mut().item_spacing.y = 4.0;
                 for (idx, act) in items.iter().enumerate() {
                     let wid = format!("toolbar.overflow.item.{idx}");
-                    let resp = popup_action_button(ui, tokens, meta, &wid, &act.label, false, act.enabled, act.disabled_reason.as_deref());
+                    let resp = popup_action_button(
+                        ui,
+                        tokens,
+                        meta,
+                        PopupActionButtonSpec {
+                            widget_id: &wid,
+                            label: &act.label,
+                            selected: false,
+                            enabled: act.enabled,
+                            disabled_reason: act.disabled_reason.as_deref(),
+                        },
+                    );
                     if resp.clicked() && act.enabled {
                         emit_tier2_action_intent(act, intents);
                         state.overflow_menu_open = false;
@@ -1098,18 +1209,16 @@ fn render_tier2_overflow_popup(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_tier2_strip(
     ui: &mut egui::Ui,
-    app: &UiApp,
+    input: Tier1BarInput<'_>,
     state: &mut TopChromeEguiState,
-    tokens: &Tokens,
-    enabled: bool,
+    overflow: &mut Tier2OverflowState,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
-    overflow_out: &mut Vec<Tier2ActionSpec>,
-    overflow_anchor: &mut Option<Rect>,
 ) {
+    let Tier1BarInput { app, ctx_in, enabled } = input;
+    let tokens = ctx_in.tokens;
     let actions = collect_tier2_actions(app, enabled);
     let tab_entries = collect_all_sheet_tabs(app);
     let strip_w = ui.available_width().max(40.0);
@@ -1145,13 +1254,15 @@ fn render_tier2_strip(
                 ui,
                 tokens,
                 meta,
-                &act.widget_id,
-                &act.label,
-                Some(&act.command_id),
-                act.primary,
-                act.enabled,
-                act.disabled_reason.as_deref(),
-                168.0,
+                ChromeButtonSpec {
+                    widget_id: &act.widget_id,
+                    label: &act.label,
+                    command_id: Some(&act.command_id),
+                    selected: act.primary,
+                    enabled: act.enabled,
+                    disabled_reason: act.disabled_reason.as_deref(),
+                    max_w: 168.0,
+                },
             )
             .on_hover_text(&act.tooltip);
             if resp.clicked() && act.enabled {
@@ -1161,21 +1272,23 @@ fn render_tier2_strip(
         }
 
         if fit_count < actions.len() {
-            *overflow_out = actions[fit_count..].to_vec();
+            overflow.items = actions[fit_count..].to_vec();
             let ov_resp = chrome_button_fitted(
                 ui,
                 tokens,
                 meta,
-                "toolbar.overflow",
-                "⋯",
-                None,
-                state.overflow_menu_open,
-                enabled,
-                modal_reason(enabled),
-                overflow_btn_w,
+                ChromeButtonSpec {
+                    widget_id: "toolbar.overflow",
+                    label: "⋯",
+                    command_id: None,
+                    selected: state.overflow_menu_open,
+                    enabled,
+                    disabled_reason: modal_reason(enabled),
+                    max_w: overflow_btn_w,
+                },
             )
             .on_hover_text(tr(&app.locale, "toolbar.overflow"));
-            *overflow_anchor = Some(ov_resp.rect);
+            overflow.anchor = Some(ov_resp.rect);
             if ov_resp.clicked() && enabled {
                 let next = !state.overflow_menu_open;
                 state.close_all_popups();
@@ -1205,7 +1318,7 @@ fn render_tier2_sheet_tabs(
     let max_tab_w = ((switcher_w - gap) / max_vis_tabs as f32).clamp(32.0, 148.0);
     for (sheet_id, title, is_active) in tabs.iter().take(max_vis_tabs) {
         let wid = format!("sheet.tab.{sheet_id}");
-        let resp = chrome_tab(ui, tokens, meta, &wid, title, *is_active, enabled, max_tab_w);
+        let resp = chrome_tab(ui, tokens, meta, ChromeTabSpec { widget_id: &wid, label: title, selected: *is_active, enabled, max_w: max_tab_w });
         if resp.clicked() && enabled && !*is_active {
             intents.push_engine("sheet.select", json!({ "sheet_id": sheet_id }));
         }
@@ -1272,42 +1385,48 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
     // Fixed universal left anchors (`+ New`, `Undo`, `Redo`).
     actions.push(make_engine_action(
         app,
-        modal_enabled,
-        "toolbar.new",
-        tr(&app.locale, "toolbar.new"),
-        "sheet.createData",
-        json!({ "kind": "column", "cols": 3, "rows": 8 }),
+        Tier2ActionInput {
+            widget_id: "toolbar.new",
+            label: tr(&app.locale, "toolbar.new"),
+            command_id: "sheet.createData",
+            params: json!({ "kind": "column", "cols": 3, "rows": 8 }),
+            enabled: modal_enabled,
+            disabled_reason: None,
+            primary: matches!(context, Tier2SheetContext::EmptyWorkspace),
+        },
         true,
-        None,
-        matches!(context, Tier2SheetContext::EmptyWorkspace),
     ));
 
     let can_undo = app.session().undo_depth() > 0;
     let undo_ok = modal_enabled && can_undo;
     actions.push(make_engine_action(
         app,
-        undo_ok,
-        "toolbar.undo",
-        tr(&app.locale, "toolbar.undo"),
-        "edit.undo",
-        json!({}),
+        Tier2ActionInput {
+            widget_id: "toolbar.undo",
+            label: tr(&app.locale, "toolbar.undo"),
+            command_id: "edit.undo",
+            params: json!({}),
+            enabled: undo_ok,
+            disabled_reason: Some(if modal_enabled { "Nothing to undo" } else { "modal dialog is active" }),
+            primary: false,
+        },
         can_undo,
-        Some(if modal_enabled { "Nothing to undo" } else { "modal dialog is active" }),
-        false,
     ));
 
     let can_redo = app.session().redo_depth() > 0;
     let redo_ok = modal_enabled && can_redo;
     actions.push(make_engine_action(
         app,
-        redo_ok,
-        "toolbar.redo",
-        tr(&app.locale, "toolbar.redo"),
-        "edit.redo",
-        json!({}),
+        Tier2ActionInput {
+            widget_id: "toolbar.redo",
+            label: tr(&app.locale, "toolbar.redo"),
+            command_id: "edit.redo",
+            params: json!({}),
+            enabled: redo_ok,
+            disabled_reason: Some(if modal_enabled { "Nothing to redo" } else { "modal dialog is active" }),
+            primary: false,
+        },
         can_redo,
-        Some(if modal_enabled { "Nothing to redo" } else { "modal dialog is active" }),
-        false,
     ));
 
     let active_ds_id = doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()).map(|id| id.as_str().to_owned());
@@ -1331,158 +1450,197 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
 
     match context {
         Tier2SheetContext::EmptyWorkspace => {
-            actions.push(make_ui_action(app, modal_enabled, "toolbar.open", tr(&app.locale, "toolbar.open"), "project.open", json!({}), None, false));
             actions.push(make_ui_action(
                 app,
-                modal_enabled,
-                "toolbar.empty.import",
-                tr(&app.locale, "menu.file.import"),
-                "ui.import.reshape.open",
-                json!({}),
-                None,
-                false,
+                Tier2ActionInput {
+                    widget_id: "toolbar.open",
+                    label: tr(&app.locale, "toolbar.open"),
+                    command_id: "project.open",
+                    params: json!({}),
+                    enabled: modal_enabled,
+                    disabled_reason: None,
+                    primary: false,
+                },
             ));
             actions.push(make_ui_action(
                 app,
-                analyze_ready,
-                "toolbar.analyze",
-                tr(&app.locale, "menu.analyze.analyze"),
-                "ui.analyze.open",
-                json!({}),
-                analyze_reason,
-                false,
+                Tier2ActionInput {
+                    widget_id: "toolbar.empty.import",
+                    label: tr(&app.locale, "menu.file.import"),
+                    command_id: "ui.import.reshape.open",
+                    params: json!({}),
+                    enabled: modal_enabled,
+                    disabled_reason: None,
+                    primary: false,
+                },
+            ));
+            actions.push(make_ui_action(
+                app,
+                Tier2ActionInput {
+                    widget_id: "toolbar.analyze",
+                    label: tr(&app.locale, "menu.analyze.analyze"),
+                    command_id: "ui.analyze.open",
+                    params: json!({}),
+                    enabled: analyze_ready,
+                    disabled_reason: analyze_reason,
+                    primary: false,
+                },
             ));
         }
         Tier2SheetContext::DataStructured => {
             actions.push(make_ui_action(
                 app,
-                analyze_ready,
-                "toolbar.analyze",
-                tr(&app.locale, "menu.analyze.analyze"),
-                "ui.analyze.open",
-                json!({}),
-                analyze_reason,
-                true,
+                Tier2ActionInput {
+                    widget_id: "toolbar.analyze",
+                    label: tr(&app.locale, "menu.analyze.analyze"),
+                    command_id: "ui.analyze.open",
+                    params: json!({}),
+                    enabled: analyze_ready,
+                    disabled_reason: analyze_reason,
+                    primary: true,
+                },
             ));
             if let Some(ds_id) = active_ds_id {
                 actions.push(make_engine_action(
                     app,
-                    modal_enabled,
-                    "toolbar.new_graph",
-                    tr(&app.locale, "menu.insert.new_graph"),
-                    "graph.create",
-                    json!({ "data_sheet_id": ds_id }),
+                    Tier2ActionInput {
+                        widget_id: "toolbar.new_graph",
+                        label: tr(&app.locale, "menu.insert.new_graph"),
+                        command_id: "graph.create",
+                        params: json!({ "data_sheet_id": ds_id }),
+                        enabled: modal_enabled,
+                        disabled_reason: None,
+                        primary: false,
+                    },
                     true,
-                    None,
-                    false,
                 ));
             }
             actions.push(make_ui_action(
                 app,
-                modal_enabled,
-                "toolbar.convert_archetype",
-                tr(&app.locale, "cmd.ui.table.convertArchetype.open"),
-                "ui.table.convertArchetype.open",
-                json!({}),
-                None,
-                false,
+                Tier2ActionInput {
+                    widget_id: "toolbar.convert_archetype",
+                    label: tr(&app.locale, "cmd.ui.table.convertArchetype.open"),
+                    command_id: "ui.table.convertArchetype.open",
+                    params: json!({}),
+                    enabled: modal_enabled,
+                    disabled_reason: None,
+                    primary: false,
+                },
             ));
             actions.push(make_ui_action(
                 app,
-                modal_enabled && on_result_sheet,
-                "toolbar.edit_params",
-                tr(&app.locale, "toolbar.parameters"),
-                "ui.editParams.open",
-                json!({}),
-                edit_reason,
-                false,
+                Tier2ActionInput {
+                    widget_id: "toolbar.edit_params",
+                    label: tr(&app.locale, "toolbar.parameters"),
+                    command_id: "ui.editParams.open",
+                    params: json!({}),
+                    enabled: modal_enabled && on_result_sheet,
+                    disabled_reason: edit_reason,
+                    primary: false,
+                },
             ));
         }
         Tier2SheetContext::DataMultipleVariables => {
             actions.push(make_ui_action(
                 app,
-                analyze_ready,
-                "toolbar.analyze",
-                tr(&app.locale, "menu.analyze.analyze"),
-                "ui.analyze.open",
-                json!({}),
-                analyze_reason,
-                true,
+                Tier2ActionInput {
+                    widget_id: "toolbar.analyze",
+                    label: tr(&app.locale, "menu.analyze.analyze"),
+                    command_id: "ui.analyze.open",
+                    params: json!({}),
+                    enabled: analyze_ready,
+                    disabled_reason: analyze_reason,
+                    primary: true,
+                },
             ));
             actions.push(make_ui_action(
                 app,
-                modal_enabled,
-                "toolbar.formula_bar",
-                tr(&app.locale, "cmd.ui.table.openFormulaBar"),
-                "ui.table.openFormulaBar",
-                json!({}),
-                None,
-                false,
+                Tier2ActionInput {
+                    widget_id: "toolbar.formula_bar",
+                    label: tr(&app.locale, "cmd.ui.table.openFormulaBar"),
+                    command_id: "ui.table.openFormulaBar",
+                    params: json!({}),
+                    enabled: modal_enabled,
+                    disabled_reason: None,
+                    primary: false,
+                },
             ));
             actions.push(make_ui_action(
                 app,
-                modal_enabled,
-                "toolbar.randomize_groups",
-                "Randomize Groups",
-                "ui.table.randomizeGroups",
-                json!({}),
-                None,
-                false,
+                Tier2ActionInput {
+                    widget_id: "toolbar.randomize_groups",
+                    label: "Randomize Groups",
+                    command_id: "ui.table.randomizeGroups",
+                    params: json!({}),
+                    enabled: modal_enabled,
+                    disabled_reason: None,
+                    primary: false,
+                },
             ));
             actions.push(make_ui_action(
                 app,
-                modal_enabled,
-                "toolbar.sample_rows",
-                "Sample Rows",
-                "ui.table.randomSampleRows",
-                json!({}),
-                None,
-                false,
+                Tier2ActionInput {
+                    widget_id: "toolbar.sample_rows",
+                    label: "Sample Rows",
+                    command_id: "ui.table.randomSampleRows",
+                    params: json!({}),
+                    enabled: modal_enabled,
+                    disabled_reason: None,
+                    primary: false,
+                },
             ));
         }
         Tier2SheetContext::ResultSheet => {
             actions.push(make_ui_action(
                 app,
-                modal_enabled && on_result_sheet,
-                "toolbar.edit_params",
-                tr(&app.locale, "toolbar.parameters"),
-                "ui.editParams.open",
-                json!({}),
-                edit_reason,
-                true,
+                Tier2ActionInput {
+                    widget_id: "toolbar.edit_params",
+                    label: tr(&app.locale, "toolbar.parameters"),
+                    command_id: "ui.editParams.open",
+                    params: json!({}),
+                    enabled: modal_enabled && on_result_sheet,
+                    disabled_reason: edit_reason,
+                    primary: true,
+                },
             ));
             let rs_id = resolve_result_sheet_for_shortcut(app, true);
             let mut change_data = make_ui_action(
                 app,
-                modal_enabled && rs_id.is_some(),
-                "toolbar.change_data",
-                tr(&app.locale, "toolbar.data_analyzed"),
-                "ui.analyze.open",
-                json!({}),
-                edit_reason,
-                false,
+                Tier2ActionInput {
+                    widget_id: "toolbar.change_data",
+                    label: tr(&app.locale, "toolbar.data_analyzed"),
+                    command_id: "ui.analyze.open",
+                    params: json!({}),
+                    enabled: modal_enabled && rs_id.is_some(),
+                    disabled_reason: edit_reason,
+                    primary: false,
+                },
             );
             change_data.retarget_sheet_id = rs_id.clone();
             actions.push(change_data);
             actions.push(make_ui_action(
                 app,
-                modal_enabled && on_result_sheet,
-                "toolbar.methods_report",
-                tr(&app.locale, "cmd.ui.result.copyMethodsReport"),
-                "ui.result.copyMethodsReport",
-                json!({}),
-                edit_reason,
-                false,
+                Tier2ActionInput {
+                    widget_id: "toolbar.methods_report",
+                    label: tr(&app.locale, "cmd.ui.result.copyMethodsReport"),
+                    command_id: "ui.result.copyMethodsReport",
+                    params: json!({}),
+                    enabled: modal_enabled && on_result_sheet,
+                    disabled_reason: edit_reason,
+                    primary: false,
+                },
             ));
             actions.push(make_ui_action(
                 app,
-                modal_enabled && on_result_sheet,
-                "toolbar.diagnostics",
-                tr(&app.locale, "cmd.ui.result.inspectDiagnostics"),
-                "ui.result.inspectDiagnostics",
-                json!({}),
-                edit_reason,
-                false,
+                Tier2ActionInput {
+                    widget_id: "toolbar.diagnostics",
+                    label: tr(&app.locale, "cmd.ui.result.inspectDiagnostics"),
+                    command_id: "ui.result.inspectDiagnostics",
+                    params: json!({}),
+                    enabled: modal_enabled && on_result_sheet,
+                    disabled_reason: edit_reason,
+                    primary: false,
+                },
             ));
             let is_clustering = rs_id
                 .as_ref()
@@ -1491,155 +1649,183 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
             if is_clustering {
                 actions.push(make_ui_action(
                     app,
-                    modal_enabled,
-                    "toolbar.append_cluster",
-                    tr(&app.locale, "cmd.ui.result.appendClusterColumn"),
-                    "ui.result.appendClusterColumn",
-                    json!({}),
-                    None,
-                    false,
+                    Tier2ActionInput {
+                        widget_id: "toolbar.append_cluster",
+                        label: tr(&app.locale, "cmd.ui.result.appendClusterColumn"),
+                        command_id: "ui.result.appendClusterColumn",
+                        params: json!({}),
+                        enabled: modal_enabled,
+                        disabled_reason: None,
+                        primary: false,
+                    },
                 ));
             }
             actions.push(make_ui_action(
                 app,
-                analyze_ready,
-                "toolbar.analyze",
-                tr(&app.locale, "menu.analyze.analyze"),
-                "ui.analyze.open",
-                json!({}),
-                analyze_reason,
-                false,
+                Tier2ActionInput {
+                    widget_id: "toolbar.analyze",
+                    label: tr(&app.locale, "menu.analyze.analyze"),
+                    command_id: "ui.analyze.open",
+                    params: json!({}),
+                    enabled: analyze_ready,
+                    disabled_reason: analyze_reason,
+                    primary: false,
+                },
             ));
         }
         Tier2SheetContext::GraphSheet => {
             actions.push(make_ui_action(
                 app,
-                modal_enabled,
-                "toolbar.graph_type",
-                tr(&app.locale, "toolbar.graph_type"),
-                "ui.changeGraphType.open",
-                json!({}),
-                None,
-                true,
+                Tier2ActionInput {
+                    widget_id: "toolbar.graph_type",
+                    label: tr(&app.locale, "toolbar.graph_type"),
+                    command_id: "ui.changeGraphType.open",
+                    params: json!({}),
+                    enabled: modal_enabled,
+                    disabled_reason: None,
+                    primary: true,
+                },
             ));
             actions.push(make_ui_action(
                 app,
-                modal_enabled,
-                "toolbar.axes",
-                tr(&app.locale, "toolbar.axes"),
-                "ui.graph.axes.open",
-                json!({}),
-                None,
-                false,
+                Tier2ActionInput {
+                    widget_id: "toolbar.axes",
+                    label: tr(&app.locale, "toolbar.axes"),
+                    command_id: "ui.graph.axes.open",
+                    params: json!({}),
+                    enabled: modal_enabled,
+                    disabled_reason: None,
+                    primary: false,
+                },
             ));
             actions.push(make_ui_action(
                 app,
-                modal_enabled,
-                "toolbar.format_graph",
-                tr(&app.locale, "menu.graph.format_graph"),
-                "ui.graph.format.open",
-                json!({}),
-                None,
-                false,
+                Tier2ActionInput {
+                    widget_id: "toolbar.format_graph",
+                    label: tr(&app.locale, "menu.graph.format_graph"),
+                    command_id: "ui.graph.format.open",
+                    params: json!({}),
+                    enabled: modal_enabled,
+                    disabled_reason: None,
+                    primary: false,
+                },
             ));
             actions.push(make_ui_action(
                 app,
-                modal_enabled,
-                "toolbar.export_svg",
-                tr(&app.locale, "toolbar.export_svg"),
-                "ui.export.figure.open",
-                json!({}),
-                None,
-                false,
+                Tier2ActionInput {
+                    widget_id: "toolbar.export_svg",
+                    label: tr(&app.locale, "toolbar.export_svg"),
+                    command_id: "ui.export.figure.open",
+                    params: json!({}),
+                    enabled: modal_enabled,
+                    disabled_reason: None,
+                    primary: false,
+                },
             ));
             actions.push(make_ui_action(
                 app,
-                analyze_ready,
-                "toolbar.analyze",
-                tr(&app.locale, "menu.analyze.analyze"),
-                "ui.analyze.open",
-                json!({}),
-                analyze_reason,
-                false,
+                Tier2ActionInput {
+                    widget_id: "toolbar.analyze",
+                    label: tr(&app.locale, "menu.analyze.analyze"),
+                    command_id: "ui.analyze.open",
+                    params: json!({}),
+                    enabled: analyze_ready,
+                    disabled_reason: analyze_reason,
+                    primary: false,
+                },
             ));
         }
         Tier2SheetContext::LayoutSheet => {
             actions.push(make_ui_action(
                 app,
-                modal_enabled,
-                "toolbar.layout_composer",
-                tr(&app.locale, "cmd.ui.layout.composer.open"),
-                "ui.layout.composer.open",
-                json!({}),
-                None,
-                true,
+                Tier2ActionInput {
+                    widget_id: "toolbar.layout_composer",
+                    label: tr(&app.locale, "cmd.ui.layout.composer.open"),
+                    command_id: "ui.layout.composer.open",
+                    params: json!({}),
+                    enabled: modal_enabled,
+                    disabled_reason: None,
+                    primary: true,
+                },
             ));
             actions.push(make_ui_action(
                 app,
-                modal_enabled,
-                "toolbar.rulers",
-                tr(&app.locale, "toolbar.rulers"),
-                "ui.rulers.toggle",
-                json!({}),
-                None,
-                false,
+                Tier2ActionInput {
+                    widget_id: "toolbar.rulers",
+                    label: tr(&app.locale, "toolbar.rulers"),
+                    command_id: "ui.rulers.toggle",
+                    params: json!({}),
+                    enabled: modal_enabled,
+                    disabled_reason: None,
+                    primary: false,
+                },
             ));
             actions.push(make_ui_action(
                 app,
-                modal_enabled,
-                "toolbar.canvas_preset",
-                "Page Preset",
-                "ui.canvas.applyPreset",
-                json!({ "preset": "ColumnAndHalf130mm" }),
-                None,
-                false,
+                Tier2ActionInput {
+                    widget_id: "toolbar.canvas_preset",
+                    label: "Page Preset",
+                    command_id: "ui.canvas.applyPreset",
+                    params: json!({ "preset": "ColumnAndHalf130mm" }),
+                    enabled: modal_enabled,
+                    disabled_reason: None,
+                    primary: false,
+                },
             ));
             actions.push(make_ui_action(
                 app,
-                modal_enabled,
-                "toolbar.export_svg",
-                tr(&app.locale, "toolbar.export_svg"),
-                "ui.export.figure.open",
-                json!({}),
-                None,
-                false,
+                Tier2ActionInput {
+                    widget_id: "toolbar.export_svg",
+                    label: tr(&app.locale, "toolbar.export_svg"),
+                    command_id: "ui.export.figure.open",
+                    params: json!({}),
+                    enabled: modal_enabled,
+                    disabled_reason: None,
+                    primary: false,
+                },
             ));
         }
         Tier2SheetContext::InfoSheet => {
             let info_id = doc.active_sheet_id.as_ref().map(|id| id.as_str()).unwrap_or_default();
             actions.push(make_engine_action(
                 app,
-                modal_enabled,
-                "toolbar.info_add_constant",
-                "+ Constant",
-                "info.setConstant",
-                json!({ "sheet_id": info_id, "name": "Constant", "value": 1.0 }),
-                true,
-                None,
+                Tier2ActionInput {
+                    widget_id: "toolbar.info_add_constant",
+                    label: "+ Constant",
+                    command_id: "info.setConstant",
+                    params: json!({ "sheet_id": info_id, "name": "Constant", "value": 1.0 }),
+                    enabled: modal_enabled,
+                    disabled_reason: None,
+                    primary: true,
+                },
                 true,
             ));
             let first_ds = doc.data_sheets.first().map(|ds| ds.id.as_str().to_owned());
             let can_new_graph = first_ds.is_some();
             actions.push(make_engine_action(
                 app,
-                modal_enabled && can_new_graph,
-                "toolbar.new_graph",
-                tr(&app.locale, "menu.insert.new_graph"),
-                "graph.create",
-                first_ds.as_ref().map_or_else(|| json!({}), |id| json!({ "data_sheet_id": id })),
+                Tier2ActionInput {
+                    widget_id: "toolbar.new_graph",
+                    label: tr(&app.locale, "menu.insert.new_graph"),
+                    command_id: "graph.create",
+                    params: first_ds.as_ref().map_or_else(|| json!({}), |id| json!({ "data_sheet_id": id })),
+                    enabled: modal_enabled && can_new_graph,
+                    disabled_reason: Some(if modal_enabled { "Create a DataSheet before creating a Graph" } else { "modal dialog is active" }),
+                    primary: false,
+                },
                 can_new_graph,
-                Some(if modal_enabled { "Create a DataSheet before creating a Graph" } else { "modal dialog is active" }),
-                false,
             ));
             actions.push(make_ui_action(
                 app,
-                analyze_ready,
-                "toolbar.analyze",
-                tr(&app.locale, "menu.analyze.analyze"),
-                "ui.analyze.open",
-                json!({}),
-                analyze_reason,
-                false,
+                Tier2ActionInput {
+                    widget_id: "toolbar.analyze",
+                    label: tr(&app.locale, "menu.analyze.analyze"),
+                    command_id: "ui.analyze.open",
+                    params: json!({}),
+                    enabled: analyze_ready,
+                    disabled_reason: analyze_reason,
+                    primary: false,
+                },
             ));
         }
     }
@@ -1663,18 +1849,8 @@ fn format_command_tooltip(tip: Option<CommandTooltip>, fallback: &str) -> String
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn make_engine_action(
-    app: &UiApp,
-    enabled: bool,
-    widget_id: &str,
-    label: &str,
-    command_id: &str,
-    params: Value,
-    base_enabled: bool,
-    disabled_reason: Option<&str>,
-    primary: bool,
-) -> Tier2ActionSpec {
+fn make_engine_action(app: &UiApp, input: Tier2ActionInput<'_>, base_enabled: bool) -> Tier2ActionSpec {
+    let Tier2ActionInput { widget_id, label, command_id, params, enabled, disabled_reason, primary } = input;
     let eff_enabled = enabled && base_enabled;
     Tier2ActionSpec {
         widget_id: widget_id.to_owned(),
@@ -1690,17 +1866,8 @@ fn make_engine_action(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn make_ui_action(
-    app: &UiApp,
-    enabled: bool,
-    widget_id: &str,
-    label: &str,
-    command_id: &str,
-    params: Value,
-    disabled_reason: Option<&str>,
-    primary: bool,
-) -> Tier2ActionSpec {
+fn make_ui_action(app: &UiApp, input: Tier2ActionInput<'_>) -> Tier2ActionSpec {
+    let Tier2ActionInput { widget_id, label, command_id, params, enabled, disabled_reason, primary } = input;
     Tier2ActionSpec {
         widget_id: widget_id.to_owned(),
         label: label.to_owned(),
@@ -1848,19 +2015,8 @@ fn render_single_line_title_badge(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn chrome_button_fitted(
-    ui: &mut egui::Ui,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    widget_id: &str,
-    label: &str,
-    command_id: Option<&str>,
-    selected: bool,
-    enabled: bool,
-    disabled_reason: Option<&str>,
-    max_w: f32,
-) -> egui::Response {
+fn chrome_button_fitted(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInspectMeta, spec: ChromeButtonSpec<'_>) -> egui::Response {
+    let ChromeButtonSpec { widget_id, label, command_id, selected, enabled, disabled_reason, max_w } = spec;
     let text_max = (max_w - 14.0).max(12.0);
     let (galley, ellipsized) = layout_single_line_job(ui.painter(), label, text_max, tokens.text_primary, 12.0);
     let min_w = max_w.min(34.0);
@@ -1922,17 +2078,8 @@ fn chrome_button_fitted(
     resp
 }
 
-#[allow(clippy::too_many_arguments)]
-fn popup_action_button(
-    ui: &mut egui::Ui,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    widget_id: &str,
-    label: &str,
-    selected: bool,
-    enabled: bool,
-    disabled_reason: Option<&str>,
-) -> egui::Response {
+fn popup_action_button(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInspectMeta, spec: PopupActionButtonSpec<'_>) -> egui::Response {
+    let PopupActionButtonSpec { widget_id, label, selected, enabled, disabled_reason } = spec;
     let w = ui.available_width().max(120.0);
     let (galley, ellipsized) = layout_single_line_job(ui.painter(), label, (w - 14.0).max(40.0), tokens.text_primary, 12.0);
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 24.0), if enabled { Sense::click() } else { Sense::hover() });
@@ -1980,17 +2127,8 @@ fn popup_action_button(
     resp
 }
 
-#[allow(clippy::too_many_arguments)]
-fn chrome_tab(
-    ui: &mut egui::Ui,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    widget_id: &str,
-    label: &str,
-    selected: bool,
-    enabled: bool,
-    max_w: f32,
-) -> egui::Response {
+fn chrome_tab(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInspectMeta, spec: ChromeTabSpec<'_>) -> egui::Response {
+    let ChromeTabSpec { widget_id, label, selected, enabled, max_w } = spec;
     let text_max_w = (max_w - 14.0).max(16.0);
     let (galley, ellipsized) = layout_single_line_job(ui.painter(), label, text_max_w, tokens.text_primary, 11.5);
     let w = (galley.size().x + 14.0).clamp(32.0_f32.min(max_w), max_w);

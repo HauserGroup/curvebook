@@ -78,6 +78,14 @@ pub struct ManageVarsModalFrameReport {
     pub outside_wheel_captured: bool,
 }
 
+#[derive(Clone, Copy)]
+struct ManageVarsSheetCtx<'a> {
+    ds: &'a DataSheet,
+    mv: &'a MultipleVariablesTable,
+    col: usize,
+    tokens: &'a Tokens,
+}
+
 fn split_title_and_unit(raw: &str) -> (String, String) {
     let trimmed = raw.trim();
     if let Some(open) = trimmed.rfind(" (")
@@ -172,6 +180,7 @@ pub fn render_manage_vars_modal(
                 }
             }
 
+            let sheet = ManageVarsSheetCtx { ds, mv, col: sel_col, tokens };
             let compact = inner_w < 540.0;
             if compact {
                 egui::ScrollArea::vertical()
@@ -182,11 +191,11 @@ pub fn render_manage_vars_modal(
                     .show(ui, |scroll_ui| {
                         let content_w = (inner_w - 18.0).max(200.0);
                         scroll_ui.set_max_width(content_w);
-                        render_master_pane(scroll_ui, ds, mv, sel_col, state, tokens, meta, intents, content_w);
+                        render_master_pane(scroll_ui, sheet, content_w, state, meta, intents);
                         scroll_ui.add_space(6.0);
                         widgets::divider(scroll_ui);
                         scroll_ui.add_space(6.0);
-                        render_detail_pane(scroll_ui, app, ds, mv, sel_col, state, tokens, meta, intents, body_h);
+                        render_detail_pane(scroll_ui, app, sheet, body_h, state, meta, intents);
                     });
             } else {
                 let left_w = (inner_w * 0.35).clamp(170.0, 240.0);
@@ -201,7 +210,7 @@ pub fn render_manage_vars_modal(
                             .show(left_ui, |inner| {
                                 let lw = (left_w - 16.0).max(140.0);
                                 inner.set_max_width(lw);
-                                render_master_pane(inner, ds, mv, sel_col, state, tokens, meta, intents, lw);
+                                render_master_pane(inner, sheet, lw, state, meta, intents);
                             });
                     });
                     split_ui.separator();
@@ -214,7 +223,7 @@ pub fn render_manage_vars_modal(
                             .show(right_ui, |inner| {
                                 let rw = (right_w - 16.0).max(180.0);
                                 inner.set_max_width(rw);
-                                render_detail_pane(inner, app, ds, mv, sel_col, state, tokens, meta, intents, body_h);
+                                render_detail_pane(inner, app, sheet, body_h, state, meta, intents);
                             });
                     });
                 });
@@ -268,18 +277,15 @@ pub fn render_manage_vars_modal(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_master_pane(
     ui: &mut Ui,
-    ds: &DataSheet,
-    mv: &MultipleVariablesTable,
-    sel_col: usize,
+    sheet: ManageVarsSheetCtx<'_>,
+    avail_w: f32,
     state: &mut ManageVarsModalEguiState,
-    tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
-    avail_w: f32,
 ) {
+    let ManageVarsSheetCtx { ds, mv, col: sel_col, tokens } = sheet;
     ui.label(RichText::new("Variables").strong().color(tokens.text_primary));
     let sr = ui.add(egui::TextEdit::singleline(&mut state.search_query).hint_text("Search variables…").desired_width(avail_w));
     meta.record_modal_response(
@@ -336,19 +342,16 @@ fn render_master_pane(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_detail_pane(
     ui: &mut Ui,
     app: &UiApp,
-    ds: &DataSheet,
-    mv: &MultipleVariablesTable,
-    col: usize,
+    sheet: ManageVarsSheetCtx<'_>,
+    body_h: f32,
     state: &mut ManageVarsModalEguiState,
-    tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
-    body_h: f32,
 ) {
+    let ManageVarsSheetCtx { ds, mv, col, tokens } = sheet;
     let Some(var) = mv.variables.get(col) else {
         ui.label("No variable selected.");
         return;
@@ -504,7 +507,7 @@ fn render_detail_pane(
 
         ui.add_space(4.0);
         let live_levels = var.ordered_levels();
-        render_levels_inspector(ui, ds, &live_levels, col, state, tokens, meta, intents);
+        render_levels_inspector(ui, sheet, &live_levels, state, meta, intents);
 
         if !tight_h {
             ui.add_space(8.0);
@@ -587,17 +590,15 @@ fn render_detail_pane(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_levels_inspector(
     ui: &mut Ui,
-    ds: &DataSheet,
+    sheet: ManageVarsSheetCtx<'_>,
     levels: &[CategoricalLevelSummary],
-    col: usize,
     state: &mut ManageVarsModalEguiState,
-    tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let ManageVarsSheetCtx { ds, col, tokens, .. } = sheet;
     let mut explicit_names: Vec<String> = levels.iter().map(|l| l.level.clone()).collect();
     let sel_idx = state.selected_level.as_ref().and_then(|s| explicit_names.iter().position(|x| x == s));
 

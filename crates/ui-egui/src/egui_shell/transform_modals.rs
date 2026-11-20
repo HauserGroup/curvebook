@@ -122,6 +122,16 @@ pub struct TransformModalFrameReport {
     pub outside_wheel_captured: bool,
 }
 
+struct TransformModalCtx<'a> {
+    app: &'a UiApp,
+    ds: Option<&'a DataSheet>,
+    state: &'a mut TransformModalsEguiState,
+    from_edit: bool,
+    tokens: &'a Tokens,
+    meta: &'a mut FrameInspectMeta,
+    intents: &'a mut PendingUiIntents,
+}
+
 /// Return `true` when `ActiveDialog::EditAnalysisParameters` edits a `Transform` analysis spec.
 #[must_use]
 pub fn is_transform_edit_dialog_active(app: &UiApp) -> bool {
@@ -175,39 +185,32 @@ pub fn render_transform_modal(
         ui.add_space(4.0);
         widgets::divider(ui);
 
+        let mut modal_cx = TransformModalCtx { app, ds: source_sheet, state, from_edit, tokens, meta, intents };
         let body_h = (dlg_h - 92.0).max(110.0);
         egui::ScrollArea::vertical().id_salt("transform_modal_scroll").max_width(inner_w).max_height(body_h).auto_shrink([false, false]).show(
             ui,
             |body| {
                 body.set_max_width((inner_w - 18.0).max(200.0));
                 match effective_kind {
-                    TransformModalKind::TransformValues => {
-                        render_transform_values_body(body, app, source_sheet, state, from_edit, tokens, meta, intents)
-                    }
-                    TransformModalKind::Normalize => render_normalize_body(body, app, source_sheet, state, from_edit, tokens, meta, intents),
-                    TransformModalKind::RemoveBaseline => {
-                        render_remove_baseline_body(body, app, source_sheet, state, from_edit, tokens, meta, intents)
-                    }
-                    TransformModalKind::MvFilterAndTransform => {
-                        render_mv_filter_transform_body(body, app, source_sheet, state, from_edit, tokens, meta, intents)
-                    }
+                    TransformModalKind::TransformValues => render_transform_values_body(body, &mut modal_cx),
+                    TransformModalKind::Normalize => render_normalize_body(body, &mut modal_cx),
+                    TransformModalKind::RemoveBaseline => render_remove_baseline_body(body, &mut modal_cx),
+                    TransformModalKind::MvFilterAndTransform => render_mv_filter_transform_body(body, &mut modal_cx),
                     TransformModalKind::ExtractAndRearrange
                     | TransformModalKind::Transpose
                     | TransformModalKind::PruneRows
                     | TransformModalKind::Simulate
-                    | TransformModalKind::RandomSample => {
-                        render_extract_and_rearrange_body(body, app, source_sheet, effective_kind, state, from_edit, tokens, meta, intents)
-                    }
+                    | TransformModalKind::RandomSample => render_extract_and_rearrange_body(body, &mut modal_cx, effective_kind),
                 }
 
-                if state.hook_picker_open {
+                if modal_cx.state.hook_picker_open {
                     body.add_space(6.0);
-                    render_inline_hook_picker(body, app, state, tokens, meta);
+                    render_inline_hook_picker(body, modal_cx.app, modal_cx.state, modal_cx.tokens, modal_cx.meta);
                 }
 
-                if let Some(err) = &state.validation_error {
+                if let Some(err) = &modal_cx.state.validation_error {
                     body.add_space(4.0);
-                    body.label(RichText::new(err).color(tokens.link_red).size(11.5));
+                    body.label(RichText::new(err).color(modal_cx.tokens.link_red).size(11.5));
                 }
             },
         );
@@ -215,7 +218,7 @@ pub fn render_transform_modal(
         ui.add_space(6.0);
         widgets::divider(ui);
         ui.add_space(4.0);
-        render_transform_footer(ui, app, source_sheet, effective_kind, state, from_edit, tokens, meta, intents);
+        render_transform_footer(ui, &mut modal_cx, effective_kind);
     });
 
     let title_for_ak = title.to_owned();
@@ -339,17 +342,14 @@ fn validate_transform_k(active_k_op: Option<ConstantKOp>, raw_k: &str, locale_pr
     None
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_transform_values_body(
-    ui: &mut Ui,
-    app: &UiApp,
-    ds: Option<&DataSheet>,
-    state: &mut TransformModalsEguiState,
-    from_edit: bool,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
+fn render_transform_values_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
+    let app = cx.app;
+    let ds = cx.ds;
+    let from_edit = cx.from_edit;
+    let tokens = cx.tokens;
+    let state = &mut *cx.state;
+    let meta = &mut *cx.meta;
+    let intents = &mut *cx.intents;
     let mut draft_spec = app.canvas_dialogs.edit_params.draft.clone();
     if !from_edit {
         state.selected_k_op = state.standalone_y_preset.as_deref().and_then(ConstantKOp::from_slug);
@@ -601,17 +601,11 @@ fn render_transform_values_body(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_normalize_body(
-    ui: &mut Ui,
-    _app: &UiApp,
-    ds: Option<&DataSheet>,
-    state: &mut TransformModalsEguiState,
-    _from_edit: bool,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    _intents: &mut PendingUiIntents,
-) {
+fn render_normalize_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
+    let ds = cx.ds;
+    let tokens = cx.tokens;
+    let state = &mut *cx.state;
+    let meta = &mut *cx.meta;
     ui.label(RichText::new(format!("Normalize Series ({})", ds.map_or("Sheet", |s| s.title.as_str()))).strong().color(tokens.text_primary));
     ui.horizontal_wrapped(|row| {
         row.label("0% Anchor:");
@@ -643,17 +637,14 @@ fn render_normalize_body(
     });
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_remove_baseline_body(
-    ui: &mut Ui,
-    app: &UiApp,
-    ds: Option<&DataSheet>,
-    state: &mut TransformModalsEguiState,
-    from_edit: bool,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
+fn render_remove_baseline_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
+    let app = cx.app;
+    let ds = cx.ds;
+    let from_edit = cx.from_edit;
+    let tokens = cx.tokens;
+    let state = &mut *cx.state;
+    let meta = &mut *cx.meta;
+    let intents = &mut *cx.intents;
     let mut draft_spec = app.canvas_dialogs.edit_params.draft.clone();
     let (cur_cols, cur_op) = match draft_spec.as_ref().map(|s| &s.kind) {
         Some(AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns, operation })) => {
@@ -756,17 +747,14 @@ fn render_remove_baseline_body(
     state.validation_error = if cur_cols.is_empty() { Some(String::from("Select at least one baseline column.")) } else { None };
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_mv_filter_transform_body(
-    ui: &mut Ui,
-    app: &UiApp,
-    ds: Option<&DataSheet>,
-    state: &mut TransformModalsEguiState,
-    from_edit: bool,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
+fn render_mv_filter_transform_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
+    let app = cx.app;
+    let ds = cx.ds;
+    let from_edit = cx.from_edit;
+    let tokens = cx.tokens;
+    let state = &mut *cx.state;
+    let meta = &mut *cx.meta;
+    let intents = &mut *cx.intents;
     let mut draft_spec = app.canvas_dialogs.edit_params.draft.clone();
     let (mut filter_formula, target_arch, derived) = match draft_spec.as_ref().map(|s| &s.kind) {
         Some(AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula, target_archetype, derived_columns })) => {
@@ -943,18 +931,14 @@ fn render_mv_filter_transform_body(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_extract_and_rearrange_body(
-    ui: &mut Ui,
-    app: &UiApp,
-    ds: Option<&DataSheet>,
-    kind: TransformModalKind,
-    state: &mut TransformModalsEguiState,
-    from_edit: bool,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
+fn render_extract_and_rearrange_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>, kind: TransformModalKind) {
+    let app = cx.app;
+    let ds = cx.ds;
+    let from_edit = cx.from_edit;
+    let tokens = cx.tokens;
+    let state = &mut *cx.state;
+    let meta = &mut *cx.meta;
+    let intents = &mut *cx.intents;
     let mut draft_spec = app.canvas_dialogs.edit_params.draft.clone();
     let target_kind = state.extract_target_kind.unwrap_or_else(|| match draft_spec.as_ref().map(|d| &d.kind) {
         Some(AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { target_archetype, .. })) => *target_archetype,
@@ -1081,18 +1065,14 @@ fn render_inline_hook_picker(ui: &mut Ui, app: &UiApp, state: &mut TransformModa
     );
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_transform_footer(
-    ui: &mut Ui,
-    app: &UiApp,
-    ds: Option<&DataSheet>,
-    kind: TransformModalKind,
-    state: &mut TransformModalsEguiState,
-    from_edit: bool,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
+fn render_transform_footer(ui: &mut Ui, cx: &mut TransformModalCtx<'_>, kind: TransformModalKind) {
+    let app = cx.app;
+    let ds = cx.ds;
+    let from_edit = cx.from_edit;
+    let tokens = cx.tokens;
+    let state = &mut *cx.state;
+    let meta = &mut *cx.meta;
+    let intents = &mut *cx.intents;
     ui.horizontal(|footer| {
         let cancel_lbl = tr_or_fallback(tokens.locale, "btn.cancel", "Cancel");
         let cancel_resp = widgets::secondary_button(footer, cancel_lbl);

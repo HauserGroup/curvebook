@@ -211,7 +211,7 @@ pub fn render_command_palette(
                                 );
                                 ui.scroll_to_rect(target, Some(egui::Align::Center));
                             }
-                            render_palette_rows(ui, app, state, &rows, row_range, tokens, meta, intents);
+                            render_palette_rows(ui, PaletteRowsRenderCtx { app, rows: &rows, row_range, tokens }, state, meta, intents);
                         },
                     );
                 }
@@ -294,17 +294,21 @@ fn consume_palette_keys(
     PaletteKeyNavResult { moved }
 }
 
-#[allow(clippy::too_many_arguments)]
+struct PaletteRowsRenderCtx<'a> {
+    app: &'a UiApp,
+    rows: &'a [CommandPaletteRow],
+    row_range: std::ops::Range<usize>,
+    tokens: &'a Tokens,
+}
+
 fn render_palette_rows(
     ui: &mut egui::Ui,
-    app: &UiApp,
+    ctx: PaletteRowsRenderCtx<'_>,
     state: &mut CommandPaletteEguiState,
-    rows: &[CommandPaletteRow],
-    row_range: std::ops::Range<usize>,
-    tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let PaletteRowsRenderCtx { app, rows, row_range, tokens } = ctx;
     for idx in row_range {
         let Some(row) = rows.get(idx) else {
             continue;

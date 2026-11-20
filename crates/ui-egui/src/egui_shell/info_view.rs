@@ -311,10 +311,11 @@ pub fn render_info_view_for_sheet(
     ensure_solid_scrollbar_style(ui, tokens);
 
     // Left Pane (38%): Structured Constants Table with Hook Badges + Typed Inline Edit
+    let pane_ctx = InfoPaneRenderCtx { app, doc, info, tokens, enabled };
     ui.scope_builder(egui::UiBuilder::new().max_rect(table_rect), |ui| {
         ui.set_clip_rect(table_rect);
         ui.painter().rect_filled(table_rect, CornerRadius::ZERO, tokens.surface_bg);
-        report.hook_badge_count = render_constants_pane(ui, app, info, state, tokens, enabled, meta, intents);
+        report.hook_badge_count = render_constants_pane(ui, &pane_ctx, state, meta, intents);
     });
 
     // Draggable 4pt Divider with 8pt hit slop
@@ -357,7 +358,7 @@ pub fn render_info_view_for_sheet(
         ui.scope_builder(egui::UiBuilder::new().max_rect(notes_rect), |ui| {
             ui.set_clip_rect(notes_rect);
             ui.painter().rect_filled(notes_rect, CornerRadius::ZERO, tokens.surface_bg);
-            render_notes_pane(ui, doc, info, state, tokens, enabled, meta, intents);
+            render_notes_pane(ui, &pane_ctx, state, meta, intents);
         });
     }
 
@@ -386,17 +387,22 @@ fn format_localized_constant_value(value: &ConstantValue, locale_preset: &Locale
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+struct InfoPaneRenderCtx<'a> {
+    app: &'a UiApp,
+    doc: &'a ProjectDocument,
+    info: &'a InfoSheet,
+    tokens: &'a Tokens,
+    enabled: bool,
+}
+
 fn render_constants_pane(
     ui: &mut egui::Ui,
-    app: &UiApp,
-    info: &InfoSheet,
+    ctx: &InfoPaneRenderCtx<'_>,
     state: &mut InfoViewEguiState,
-    tokens: &Tokens,
-    enabled: bool,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) -> usize {
+    let InfoPaneRenderCtx { app, info, tokens, enabled, .. } = *ctx;
     let doc = app.document();
     let locale_preset = &app.locale_preset;
     let mut hook_badge_count = 0usize;
@@ -841,17 +847,14 @@ fn sync_notes_draft_with_sheet(state: &mut InfoViewEguiState, info: &InfoSheet) 
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_notes_pane(
     ui: &mut egui::Ui,
-    doc: &ProjectDocument,
-    info: &InfoSheet,
+    ctx: &InfoPaneRenderCtx<'_>,
     state: &mut InfoViewEguiState,
-    tokens: &Tokens,
-    enabled: bool,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let InfoPaneRenderCtx { doc, info, tokens, enabled, .. } = *ctx;
     let padded = ui.available_rect_before_wrap().shrink(8.0);
     if !padded.is_positive() {
         return;

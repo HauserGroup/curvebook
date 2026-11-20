@@ -216,6 +216,34 @@ struct AppBtn<'a> {
     disabled_reason: Option<&'a str>,
 }
 
+#[derive(Clone, Copy)]
+struct PrefsTabCtx<'a> {
+    app: &'a UiApp,
+    locale: &'a str,
+    body_w: f32,
+    tokens: &'a Tokens,
+}
+
+#[derive(Clone, Copy)]
+struct ShortcutEditorSpec<'a> {
+    active_shortcuts: &'a ShortcutRegistry,
+    cmd_id: &'a str,
+    binding_opt: Option<&'a ShortcutBinding>,
+    body_w: f32,
+    tokens: &'a Tokens,
+}
+
+#[derive(Clone, Copy)]
+struct ExportBodyCtx<'a> {
+    app: &'a UiApp,
+    sheet_id: &'a SheetId,
+    is_graph: bool,
+    is_layout: bool,
+    target_valid: bool,
+    body_w: f32,
+    tokens: &'a Tokens,
+}
+
 /// Render whichever application-level modal (`UnsavedChanges`, `Preferences`,
 /// `FindAndReplace`, `ExportFigure`, `Print`, or `About`) is currently active.
 pub fn render_app_modal(
@@ -405,11 +433,12 @@ fn render_preferences_modal(
             .show(ui, |ui| {
                 ui.set_width(body_w);
                 ui.set_max_width(body_w);
+                let prefs_ctx = PrefsTabCtx { app, locale, body_w, tokens };
                 match state.preferences.active_category {
                     PreferencesCategory::General => render_prefs_general(ui, app, locale, body_w, tokens, meta, intents),
-                    PreferencesCategory::Appearance => render_prefs_appearance(ui, app, state, locale, body_w, tokens, meta, intents),
+                    PreferencesCategory::Appearance => render_prefs_appearance(ui, prefs_ctx, state, meta, intents),
                     PreferencesCategory::Language => render_prefs_language(ui, locale, body_w, tokens, meta, intents),
-                    PreferencesCategory::KeyboardShortcuts => render_prefs_shortcuts(ui, app, state, locale, body_w, tokens, meta, intents),
+                    PreferencesCategory::KeyboardShortcuts => render_prefs_shortcuts(ui, prefs_ctx, state, meta, intents),
                 }
             });
 
@@ -483,17 +512,14 @@ fn render_prefs_general(
     ui.label(format!("Active regional format preset: {}", app.locale_preset.locale));
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_prefs_appearance(
     ui: &mut Ui,
-    app: &UiApp,
+    ctx: PrefsTabCtx<'_>,
     state: &mut AppModalsEguiState,
-    locale: &str,
-    body_w: f32,
-    tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let PrefsTabCtx { app, locale, body_w, tokens } = ctx;
     ui.label(egui::RichText::new(atr(locale, "prefs.appearance.theme_heading")).strong());
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(body_w);
@@ -568,17 +594,14 @@ fn render_prefs_language(ui: &mut Ui, locale: &str, body_w: f32, tokens: &Tokens
     });
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_prefs_shortcuts(
     ui: &mut Ui,
-    app: &UiApp,
+    ctx: PrefsTabCtx<'_>,
     state: &mut AppModalsEguiState,
-    locale: &str,
-    body_w: f32,
-    tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let PrefsTabCtx { app, locale, body_w, tokens } = ctx;
     let active_shortcuts = state.preferences.effective_shortcuts(&app.shortcuts).clone();
 
     ui.horizontal_wrapped(|ui| {
@@ -619,7 +642,13 @@ fn render_prefs_shortcuts(
     // Selected command editor + pure-Rust conflict check against the staged shortcut snapshot.
     if let Some(sel_id) = state.preferences.selected_shortcut_command.clone() {
         let binding_opt = active_shortcuts.get(&sel_id);
-        render_shortcut_editor_bar(ui, &active_shortcuts, state, &sel_id, binding_opt, body_w, tokens, meta, intents);
+        render_shortcut_editor_bar(
+            ui,
+            ShortcutEditorSpec { active_shortcuts: &active_shortcuts, cmd_id: &sel_id, binding_opt, body_w, tokens },
+            state,
+            meta,
+            intents,
+        );
         ui.add_space(6.0);
     } else {
         ui.label(egui::RichText::new("Select any command below to rebind its keyboard shortcut.").color(tokens.text_muted));
@@ -697,18 +726,14 @@ fn render_prefs_shortcuts(
         });
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_shortcut_editor_bar(
     ui: &mut Ui,
-    active_shortcuts: &ShortcutRegistry,
+    spec: ShortcutEditorSpec<'_>,
     state: &mut AppModalsEguiState,
-    cmd_id: &str,
-    binding_opt: Option<&ShortcutBinding>,
-    body_w: f32,
-    tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let ShortcutEditorSpec { active_shortcuts, cmd_id, binding_opt, body_w, tokens } = spec;
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(body_w);
         ui.label(egui::RichText::new(format!("Editing: {cmd_id}")).strong());
@@ -1054,7 +1079,13 @@ fn render_export_modal(
                 .show(ui, |ui| {
                     ui.set_width(body_w);
                     ui.set_max_width(body_w);
-                    render_export_body(ui, app, state, &sheet_id, is_graph, is_layout, target_valid, body_w, tokens, meta, intents);
+                    render_export_body(
+                        ui,
+                        ExportBodyCtx { app, sheet_id: &sheet_id, is_graph, is_layout, target_valid, body_w, tokens },
+                        state,
+                        meta,
+                        intents,
+                    );
                 });
             ui.add_space(6.0);
             ui.separator();
@@ -1109,20 +1140,14 @@ fn render_export_modal(
     build_report(ctx, &modal_resp, "dialog.export_figure", title, meta)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_export_body(
     ui: &mut Ui,
-    app: &UiApp,
+    ctx: ExportBodyCtx<'_>,
     state: &mut AppModalsEguiState,
-    sheet_id: &SheetId,
-    is_graph: bool,
-    is_layout: bool,
-    target_valid: bool,
-    body_w: f32,
-    tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let ExportBodyCtx { app, sheet_id, is_graph, is_layout, target_valid, body_w, tokens } = ctx;
     let ef = app.canvas_dialogs.export_figure;
     let vs = &app.view_shards.dialogs_graph_misc;
     let target_kind_lbl = if is_layout {

@@ -287,7 +287,7 @@ fn render_scrub_value_chip(
         if val_btn.hovered() && !state.dragging {
             ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
         }
-        apply_drag_interaction(&val_btn, ui, cfg, bounds.min_val, bounds.max_val, bounds.clamped_in, state, committed_value);
+        apply_drag_interaction(&val_btn, ui, cfg, bounds, state, committed_value);
 
         if val_btn.clicked() && !state.dragging {
             state.editing = true;
@@ -450,7 +450,7 @@ pub fn render_scrub_unit_field(
                         galley,
                         if cfg.enabled { tokens.text_primary } else { tokens.text_disabled },
                     );
-                    apply_drag_interaction(&label_btn, ui, cfg, min_val, max_val, clamped_in, state, &mut committed_value);
+                    apply_drag_interaction(&label_btn, ui, cfg, &bounds, state, &mut committed_value);
                 }
 
                 if state.editing && cfg.enabled {
@@ -537,17 +537,15 @@ pub fn render_scrub_length_pt_field(
     out
 }
 
-#[allow(clippy::too_many_arguments)]
 fn apply_drag_interaction(
     resp: &egui::Response,
     ui: &Ui,
     cfg: ScrubUnitFieldConfig<'_>,
-    min_val: f64,
-    max_val: f64,
-    clamped_in: f64,
+    bounds: &ScrubChipBounds,
     state: &mut ScrubUnitFieldState,
     committed_value: &mut Option<f64>,
 ) {
+    let ScrubChipBounds { min_val, max_val, clamped_in, .. } = *bounds;
     if !cfg.enabled {
         if resp.hovered() {
             ui.ctx().set_cursor_icon(CursorIcon::NotAllowed);
