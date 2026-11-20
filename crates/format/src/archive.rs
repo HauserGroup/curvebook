@@ -8,7 +8,6 @@ use std::io::Write;
 #[cfg(all(unix, not(target_arch = "wasm32")))]
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use curvebook_doc::{
     AnalysisKind, CURRENT_SCHEMA_VERSION, Cell, CellValue, CiBound, CloneDataSheetOptions, ConstantValue, DataSetColumn, DataSheet, GraphAnnotation,
@@ -35,8 +34,6 @@ pub(crate) const LEGACY_FORMAT_MAGIC: &str = "lumencraft-archive";
 const MAX_CHECKPOINTS_PER_PROJECT: usize = 64;
 const MAX_SHEET_CSV_STEM_LEN: usize = 64;
 const MAX_MANIFEST_CSV_STEM_LEN: usize = 128;
-
-static UNPACKED_STAGE_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Maximum byte length permitted when reading a `.curvebook`, `.cbtemplate`, or `.prism` archive file.
 pub const MAX_ARCHIVE_FILE_BYTES: usize = 128 * 1024 * 1024;
@@ -184,6 +181,30 @@ fn platform_sync_dir(dir: &Path) -> Result<(), FormatError> {
 #[cfg(target_arch = "wasm32")]
 fn platform_sync_dir(_dir: &Path) -> Result<(), FormatError> {
     Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn stage_unpacked_entry_file(
+    parent: &Path,
+    target: &Path,
+    rel: &str,
+    bytes: &[u8],
+    existing_perms: Option<Permissions>,
+) -> Result<(PathBuf, String), FormatError> {
+    let staged = curvebook_platform::fs::write_staged_sibling(parent, target, "stage", bytes, existing_perms)?;
+    let stage_rel = stage_rel_for_entry(rel, staged.path())?;
+    Ok((staged.into_path(), stage_rel))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn stage_unpacked_entry_file(
+    _parent: &Path,
+    _target: &Path,
+    _rel: &str,
+    _bytes: &[u8],
+    _existing_perms: Option<Permissions>,
+) -> Result<(PathBuf, String), FormatError> {
+    Err(FormatError::Io(String::from("unpacked directory staging is not supported on wasm32")))
 }
 
 fn clamp_peek_schema_version(raw: u64) -> u32 {
@@ -1417,8 +1438,7 @@ fn stage_changed_unpacked_entries(canon_root: &Path, entries: &[(String, Vec<u8>
             ExistingEntryState::NeedsWrite { prior, perms } => (prior, perms),
         };
 
-        let stage_path = create_and_write_stage_file(parent, &target, bytes, existing_perms)?;
-        let stage_rel = stage_rel_for_entry(rel, &stage_path)?;
+        let (stage_path, stage_rel) = stage_unpacked_entry_file(parent, &target, rel, bytes, existing_perms)?;
         guard.push(stage_path.clone());
         staged.push(StagedWrite { rel: rel.clone(), stage_rel, target_path: target, stage_path, prior });
     }
@@ -1455,44 +1475,6 @@ fn inspect_existing_unpacked_entry(target: &Path, new_bytes: &[u8]) -> Result<Ex
         }
         Err(err) => Err(FormatError::Io(err.to_string())),
     }
-}
-
-fn create_and_write_stage_file(parent: &Path, target: &Path, bytes: &[u8], existing_perms: Option<Permissions>) -> Result<PathBuf, FormatError> {
-    let raw_name = target.file_name().and_then(|s| s.to_str()).unwrap_or("entry");
-    let stem: String = raw_name.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-' || *c == '_').take(48).collect();
-    let safe_stem = if stem.is_empty() { String::from("entry") } else { stem };
-    let pid = std::process::id();
-
-    for _ in 0..32 {
-        let seq = UNPACKED_STAGE_SEQ.fetch_add(1, Ordering::Relaxed);
-        let stage_path = parent.join(format!(".{safe_stem}.stage.{pid}.{seq}"));
-        let mut opts = OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(all(unix, not(target_arch = "wasm32")))]
-        if existing_perms.is_some() {
-            opts.mode(0o600);
-        }
-        let write_res = {
-            let mut file = match opts.open(&stage_path) {
-                Ok(file) => file,
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(err) => return Err(FormatError::Io(err.to_string())),
-            };
-            (|| -> Result<(), std::io::Error> {
-                file.write_all(bytes)?;
-                if let Some(perms) = existing_perms {
-                    file.set_permissions(perms)?;
-                }
-                file.sync_all()
-            })()
-        };
-        if let Err(err) = write_res {
-            let _ = std::fs::remove_file(&stage_path);
-            return Err(FormatError::Io(err.to_string()));
-        }
-        return Ok(stage_path);
-    }
-    Err(FormatError::Io(String::from("exhausted unique unpacked staging attempts")))
 }
 
 fn commit_staged_unpacked_entries_with_rollback<F, R>(

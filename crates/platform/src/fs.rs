@@ -23,30 +23,92 @@ const MAX_TEMP_CREATE_ATTEMPTS: usize = 32;
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_SYMLINK_HOPS: usize = 40;
 
+/// Guard owning a freshly written, `sync_all`-ed sibling staging file.
+///
+/// Dropping a [`StagedSibling`] removes the staged file unless the caller either commits it via
+/// [`Self::persist_to`] or explicitly takes ownership of its path via [`Self::into_path`].
 #[cfg(not(target_arch = "wasm32"))]
-struct TempFileGuard {
+#[derive(Debug)]
+pub struct StagedSibling {
     path: PathBuf,
     armed: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl TempFileGuard {
-    fn new(path: PathBuf) -> Self {
-        Self { path, armed: true }
+impl StagedSibling {
+    /// Borrow the filesystem path of the staged sibling file.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
-    fn disarm(&mut self) {
+    /// Disarm automatic cleanup and hand off ownership of the staged file path to the caller.
+    ///
+    /// Multi-file transactional writers (such as unpacked project saves) use this handoff after
+    /// recording the staged path in their own commit/recovery manifest.
+    #[must_use]
+    pub fn into_path(mut self) -> PathBuf {
         self.armed = false;
+        std::mem::take(&mut self.path)
+    }
+
+    /// Atomically rename the staged sibling onto `target`, disarming cleanup on success.
+    ///
+    /// # Errors
+    /// Returns [`PlatformError::Io`] if renaming fails (leaving the staged sibling armed for
+    /// cleanup on drop).
+    pub fn persist_to(mut self, target: &Path) -> Result<(), PlatformError> {
+        std::fs::rename(&self.path, target).map_err(|err| io_err(&format!("rename `{}` to `{}`", self.path.display(), target.display()), &err))?;
+        self.armed = false;
+        Ok(())
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl Drop for TempFileGuard {
+impl Drop for StagedSibling {
     fn drop(&mut self) {
-        if self.armed {
+        if self.armed && !self.path.as_os_str().is_empty() {
             let _ = std::fs::remove_file(&self.path);
         }
     }
+}
+
+/// Create, write, permission-restore, and `sync_all` an exclusive sibling staging file in `parent`.
+///
+/// The staged file is named `.{sanitized_stem}.{tag}.{pid}.{seq}`, where `sanitized_stem` keeps
+/// up to 48 ASCII alphanumeric / `.` / `-` / `_` characters from `target`'s file name (defaulting
+/// to `"file"`). When `existing_perms` is `Some`, Unix creation starts with mode `0o600` before
+/// restoring `existing_perms` so replacement writes never expose restricted files under a
+/// permissive umask.
+///
+/// If writing, restoring permissions, or `sync_all` fails, the staged file is removed before
+/// returning. On success, the returned [`StagedSibling`] remains armed for cleanup until committed
+/// with [`StagedSibling::persist_to`] or explicitly handed off with [`StagedSibling::into_path`].
+///
+/// # Errors
+/// Returns [`PlatformError::Io`] if unique sibling creation is exhausted or if writing, restoring
+/// permissions, or syncing fails.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn write_staged_sibling(
+    parent: &Path,
+    target: &Path,
+    tag: &str,
+    bytes: &[u8],
+    existing_perms: Option<Permissions>,
+) -> Result<StagedSibling, PlatformError> {
+    let stem = sanitize_sibling_stem(target);
+    let safe_tag: String = tag.chars().filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_').take(16).collect();
+    let effective_tag = if safe_tag.is_empty() { "tmp" } else { safe_tag.as_str() };
+    let (mut file, staged_path) = create_unique_sibling_temp(parent, &stem, effective_tag, existing_perms.is_some())?;
+    let staged = StagedSibling { path: staged_path, armed: true };
+
+    file.write_all(bytes).map_err(|err| io_err(&format!("write temp file `{}`", staged.path.display()), &err))?;
+    if let Some(perms) = existing_perms {
+        file.set_permissions(perms).map_err(|err| io_err(&format!("set permissions on temp file `{}`", staged.path.display()), &err))?;
+    }
+    file.sync_all().map_err(|err| io_err(&format!("sync temp file `{}`", staged.path.display()), &err))?;
+    drop(file);
+    Ok(staged)
 }
 
 /// Atomically write `bytes` to `path` using a unique sibling temp file, `sync_all`, and `rename`.
@@ -75,21 +137,11 @@ where
 {
     let _ = validate_target_path(path)?;
     let (resolved_target, existing_perms) = resolve_atomic_target(path)?;
-    let (parent, file_stem) = validate_target_path(&resolved_target)?;
-    let (mut file, tmp_path) = create_unique_sibling_temp(parent, &file_stem, existing_perms.is_some())?;
-    let mut guard = TempFileGuard::new(tmp_path.clone());
+    let parent = validate_target_path(&resolved_target)?;
+    let staged = write_staged_sibling(parent, &resolved_target, "tmp", bytes, existing_perms)?;
 
-    file.write_all(bytes).map_err(|err| io_err(&format!("write temp file `{}`", tmp_path.display()), &err))?;
-    if let Some(perms) = existing_perms {
-        file.set_permissions(perms).map_err(|err| io_err(&format!("set permissions on temp file `{}`", tmp_path.display()), &err))?;
-    }
-    file.sync_all().map_err(|err| io_err(&format!("sync temp file `{}`", tmp_path.display()), &err))?;
-    drop(file);
-
-    before_rename(&tmp_path).map_err(|err| io_err(&format!("pre-rename hook for `{}`", resolved_target.display()), &err))?;
-    std::fs::rename(&tmp_path, &resolved_target)
-        .map_err(|err| io_err(&format!("rename `{}` to `{}`", tmp_path.display(), resolved_target.display()), &err))?;
-    guard.disarm();
+    before_rename(staged.path()).map_err(|err| io_err(&format!("pre-rename hook for `{}`", resolved_target.display()), &err))?;
+    staged.persist_to(&resolved_target)?;
 
     sync_dir(parent)?;
     Ok(())
@@ -148,18 +200,25 @@ fn resolve_symlink_target(path: &Path) -> Result<(PathBuf, Option<Permissions>),
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn validate_target_path(path: &Path) -> Result<(&Path, String), PlatformError> {
+fn validate_target_path(path: &Path) -> Result<&Path, PlatformError> {
     if path.as_os_str().is_empty() {
         return Err(PlatformError::InvalidPath { reason: String::from("target path must not be empty") });
     }
-    let Some(file_name) = path.file_name() else {
+    if path.file_name().is_none() {
         return Err(PlatformError::InvalidPath { reason: format!("target path `{}` has no file name", path.display()) });
-    };
-    let parent = resolve_parent_dir(path);
-    let sanitized: String =
-        file_name.to_string_lossy().chars().filter(|ch| ch.is_ascii_alphanumeric() || *ch == '.' || *ch == '-' || *ch == '_').take(48).collect();
-    let stem = if sanitized.is_empty() { String::from("file") } else { sanitized };
-    Ok((parent, stem))
+    }
+    Ok(resolve_parent_dir(path))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn sanitize_sibling_stem(target: &Path) -> String {
+    let sanitized: String = target
+        .file_name()
+        .map(|name| {
+            name.to_string_lossy().chars().filter(|ch| ch.is_ascii_alphanumeric() || *ch == '.' || *ch == '-' || *ch == '_').take(48).collect()
+        })
+        .unwrap_or_default();
+    if sanitized.is_empty() { String::from("file") } else { sanitized }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -171,11 +230,11 @@ fn resolve_parent_dir(path: &Path) -> &Path {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn create_unique_sibling_temp(parent: &Path, stem: &str, restrict_mode: bool) -> Result<(File, PathBuf), PlatformError> {
+fn create_unique_sibling_temp(parent: &Path, stem: &str, tag: &str, restrict_mode: bool) -> Result<(File, PathBuf), PlatformError> {
     let pid = std::process::id();
     for _ in 0..MAX_TEMP_CREATE_ATTEMPTS {
         let seq = TMP_FILE_SEQ.fetch_add(1, Ordering::Relaxed);
-        let tmp_path = parent.join(format!(".{stem}.tmp.{pid}.{seq}"));
+        let tmp_path = parent.join(format!(".{stem}.{tag}.{pid}.{seq}"));
         let mut opts = OpenOptions::new();
         opts.write(true).create_new(true);
         #[cfg(unix)]
@@ -533,6 +592,34 @@ mod tests {
 
         let missing = sync_dir(&dir.join("does-not-exist")).unwrap_err();
         assert!(matches!(missing, PlatformError::Io { .. }));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_staged_sibling_cleans_up_on_drop_and_supports_explicit_handoff() {
+        use super::write_staged_sibling;
+
+        let dir = temp_dir("staged-sibling");
+        let target = dir.join("weird name!?.json");
+
+        // Dropping without handoff removes the staged file.
+        let dropped_path = {
+            let staged = write_staged_sibling(&dir, &target, "stage", b"ephemeral", None).unwrap();
+            let p = staged.path().to_path_buf();
+            assert!(p.is_file());
+            assert_eq!(std::fs::read(&p).unwrap(), b"ephemeral");
+            let fname = p.file_name().unwrap().to_string_lossy();
+            assert!(fname.starts_with(".weirdname.json.stage."), "unexpected staged name: {fname}");
+            p
+        };
+        assert!(!dropped_path.exists(), "dropped StagedSibling must remove file");
+
+        // Explicit handoff via `into_path` preserves the file for caller-managed commit/cleanup.
+        let staged = write_staged_sibling(&dir, &target, "stage", b"handed-off", None).unwrap();
+        let handed_off = staged.into_path();
+        assert!(handed_off.is_file());
+        assert_eq!(std::fs::read(&handed_off).unwrap(), b"handed-off");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
