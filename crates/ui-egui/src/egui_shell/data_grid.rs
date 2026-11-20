@@ -1742,7 +1742,11 @@ mod multi_archetype {
                 .id_salt(("r15_4_multi_grid_scroll", ds.id.as_str()))
                 .scroll_offset(state.scroll_offset_pt)
                 .scroll_bar_visibility(if blocked { ScrollBarVisibility::AlwaysHidden } else { ScrollBarVisibility::AlwaysVisible })
-                .scroll_source(if blocked { ScrollSource::NONE } else { ScrollSource::ALL })
+                .scroll_source(if blocked {
+                    ScrollSource::NONE
+                } else {
+                    ScrollSource { scroll_bar: true, drag: DragScroll::Never, mouse_wheel: true }
+                })
                 .auto_shrink([false, false])
                 .show_viewport(body_parent, |body_ui, viewport| {
                     let origin = body_ui.min_rect().min;
@@ -1825,6 +1829,7 @@ mod multi_archetype {
                     }
 
                     paint_multi_vertical_hairlines(body_ui, origin.x, geom, &vis_all_flat, tokens);
+                    super::clear_grid_drag_anchor_if_released(body_ui, &ds.id);
                 })
         });
         if !blocked {
@@ -1900,7 +1905,8 @@ mod multi_archetype {
 
         dbuf.id_buf.clear();
         let _ = write!(dbuf.id_buf, "grid.xcell.{row}.{subcol}");
-        let resp = body_ui.interact(clipped, body_ui.make_persistent_id(&*dbuf.id_buf), if dbuf.blocked { Sense::hover() } else { Sense::click() });
+        let resp =
+            body_ui.interact(clipped, body_ui.make_persistent_id(&*dbuf.id_buf), if dbuf.blocked { Sense::hover() } else { Sense::click_and_drag() });
         dbuf.acc_buf.clear();
         if dbuf.text_buf.is_empty() {
             let _ = write!(dbuf.acc_buf, "R{}X{}", row + 1, subcol + 1);
@@ -2014,7 +2020,8 @@ mod multi_archetype {
 
         dbuf.id_buf.clear();
         let _ = write!(dbuf.id_buf, "grid.cell.{}.{}.{}", coord.row, coord.col, coord.subcol);
-        let resp = body_ui.interact(clipped, body_ui.make_persistent_id(&*dbuf.id_buf), if dbuf.blocked { Sense::hover() } else { Sense::click() });
+        let resp =
+            body_ui.interact(clipped, body_ui.make_persistent_id(&*dbuf.id_buf), if dbuf.blocked { Sense::hover() } else { Sense::click_and_drag() });
         dbuf.acc_buf.clear();
         if dbuf.text_buf.is_empty() {
             let _ = write!(dbuf.acc_buf, "R{}C{}", coord.row + 1, coord.col + 1);
@@ -2180,6 +2187,16 @@ mod multi_archetype {
                     );
                 }
             }
+        } else if !dbuf.blocked
+            && aux.active_role_menu_col.is_none()
+            && aux.context_menu.is_none()
+            && !is_multi_click_edit(resp)
+            && !resp.secondary_clicked()
+            && super::handle_cell_pointer_drag_select(body_ui, &ds.id, coord, resp, intents)
+        {
+            aux.selected_x_cell = None;
+            aux.active_role_menu_col = None;
+            aux.context_menu = None;
         }
         if !dbuf.blocked
             && resp.secondary_clicked()
@@ -3739,6 +3756,7 @@ fn render_visible_cells(
     }
 
     render_grid_hairlines(ui, rctx, content_origin, clip_rect, &row_range, &flat_range);
+    clear_grid_drag_anchor_if_released(ui, &rctx.ds.id);
     if let Some(active_rect) = active_border_rect {
         ui.painter().rect_stroke(active_rect, CornerRadius::ZERO, Stroke::new(2.0, tokens.focus_ring), StrokeKind::Inside);
     }
@@ -3760,7 +3778,7 @@ fn render_single_cell(
     let tokens = rctx.tokens;
     let coord = draw.coord;
     let cell_id = rctx.sheet_id_base.with(("cell", coord.row, coord.col, coord.subcol));
-    let sense = if draw.blocked { Sense::hover() } else { Sense::click() };
+    let sense = if draw.blocked { Sense::hover() } else { Sense::click_and_drag() };
     let resp = ui.interact(draw.clipped_rect, cell_id, sense);
 
     if let Some(reg) = draw.linked_reg {
@@ -3859,6 +3877,9 @@ fn render_single_cell(
             interacted = true;
             set_grid_focus_active(ui, true);
             intents.push_select_grid_cell(coord);
+            ui.ctx().request_repaint();
+        } else if handle_cell_pointer_drag_select(ui, &rctx.ds.id, coord, &resp, intents) {
+            interacted = true;
             ui.ctx().request_repaint();
         }
     }
@@ -4401,6 +4422,50 @@ fn pending_commit_key(sheet_id: &SheetId) -> Id {
 
 fn grid_focus_key(sheet_id: &SheetId) -> Id {
     Id::unique(("column_grid_focused", sheet_id.as_str()))
+}
+
+fn grid_drag_anchor_key(sheet_id: &SheetId) -> Id {
+    Id::unique(("grid_drag_anchor", sheet_id.as_str()))
+}
+
+fn handle_cell_pointer_drag_select(ui: &Ui, sheet_id: &SheetId, coord: GridCellCoord, resp: &egui::Response, intents: &mut PendingUiIntents) -> bool {
+    let key = grid_drag_anchor_key(sheet_id);
+    let (primary_pressed, primary_down, primary_released, shift, ptr_pos) = ui.input(|i| {
+        (
+            i.pointer.primary_pressed(),
+            i.pointer.primary_down(),
+            i.pointer.primary_released(),
+            i.modifiers.shift,
+            i.pointer.interact_pos().or_else(|| i.pointer.latest_pos()),
+        )
+    });
+    if primary_pressed && !shift && resp.is_pointer_button_down_on() {
+        ui.ctx().data_mut(|d| d.insert_temp(key, Some(coord)));
+        intents.push_select_grid_cell(coord);
+        set_grid_focus_active(ui, true);
+        return true;
+    }
+    let Some(pos) = ptr_pos.filter(|p| resp.rect.contains(*p)) else {
+        return false;
+    };
+    let _ = pos;
+    if primary_down || primary_released {
+        let anchor = ui.ctx().data(|d| d.get_temp::<Option<GridCellCoord>>(key).flatten());
+        if let Some(a) = anchor
+            && a != coord
+        {
+            intents.push_extend_grid_selection(coord);
+            set_grid_focus_active(ui, true);
+            return true;
+        }
+    }
+    false
+}
+
+fn clear_grid_drag_anchor_if_released(ui: &Ui, sheet_id: &SheetId) {
+    if !ui.input(|i| i.pointer.primary_down()) {
+        ui.ctx().data_mut(|d| d.remove_temp::<Option<GridCellCoord>>(grid_drag_anchor_key(sheet_id)));
+    }
 }
 
 fn set_grid_focus_active(ui: &Ui, focused: bool) {

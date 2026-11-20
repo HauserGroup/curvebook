@@ -586,9 +586,12 @@ fn run_egui_case_b_analyze_to_resultsheet(
     driver: &mut EguiHumanPathDriver<'_, EguiAnovaQaState>,
     metrics: ViewportMetrics,
 ) -> Result<SheetId, String> {
+    // Keep explicit legacy `AnalyzeSheet` hybrid Case B coverage intact until `R15.5`.
+    driver.state_mut().views.native_analyze_sheet = false;
+    driver.state_mut().app.egui_views.native_analyze_sheet = false;
     driver.click_widget_id("toolbar.analyze")?;
     assert!(matches!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::AnalyzeSheet { .. }));
-    let d_case_b = HybridCoexistenceArbiter::evaluate(&driver.state().app, false);
+    let d_case_b = HybridCoexistenceArbiter::evaluate_with_views(&driver.state().app, &driver.state().views, false);
     assert_eq!(d_case_b.sheet_surface, HybridSheetSurface::EguiColumnGrid);
     assert_eq!(d_case_b.modal_surface, HybridModalSurface::LegacyModal);
     assert!(d_case_b.blocks_egui_grid);

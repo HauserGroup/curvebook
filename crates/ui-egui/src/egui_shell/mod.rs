@@ -167,7 +167,7 @@ impl WorkspacePreset {
 }
 
 /// Persistent pure-UI `egui_shell` view states owned alongside [`UiApp`] (`R15.2+`).
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EguiShellViewState {
     pub column_grid: data_grid::ColumnGridEguiState,
     pub anova_modal: stat_anova_modal::AnovaModalEguiState,
@@ -179,8 +179,8 @@ pub struct EguiShellViewState {
     pub power_studio: power_studio::PowerStudioEguiState,
     pub graph_modals: graph_modals::GraphModalEguiState,
     pub app_modals: app_modals::AppModalsEguiState,
-    /// When `true`, `ActiveDialog::AnalyzeSheet` routes natively to [`stats_modals::render_analyze_sheet_modal`].
-    /// Defaults to `false` during Wave 4 slice development until `stats_modals` parity lands cleanly.
+    /// When `true` (default from Wave 4 integration onward), `ActiveDialog::AnalyzeSheet` routes
+    /// natively to [`stats_modals::render_analyze_sheet_modal`]; set `false` only for legacy Case B parity.
     pub native_analyze_sheet: bool,
     pub workspace_preset: WorkspacePreset,
     pub top_chrome: top_chrome::TopChromeEguiState,
@@ -205,6 +205,47 @@ pub struct EguiShellViewState {
     pub quick_stats_cache: status_footer::QuickStatsCache,
     pub progress_modal: Option<center_stage::ProgressModalState>,
     pub last_shell_layout: Option<ResponsiveShellLayout>,
+}
+
+impl Default for EguiShellViewState {
+    fn default() -> Self {
+        Self {
+            column_grid: data_grid::ColumnGridEguiState::default(),
+            anova_modal: stat_anova_modal::AnovaModalEguiState::default(),
+            manage_vars_modal: manage_vars_modal::ManageVarsModalEguiState::default(),
+            import_wizard: import_wizard::ImportWizardEguiState::default(),
+            transform_modals: transform_modals::TransformModalsEguiState::default(),
+            stats_modals: stats_modals::StatsModalsEguiState::default(),
+            fit_modal: fit_modal::FitModalEguiState::default(),
+            power_studio: power_studio::PowerStudioEguiState::default(),
+            graph_modals: graph_modals::GraphModalEguiState::default(),
+            app_modals: app_modals::AppModalsEguiState::default(),
+            native_analyze_sheet: true,
+            workspace_preset: WorkspacePreset::default(),
+            top_chrome: top_chrome::TopChromeEguiState::default(),
+            command_palette: command_palette::CommandPaletteEguiState::default(),
+            welcome_hub: welcome_hub::WelcomeHubEguiState::default(),
+            leading_dock: leading_dock::LeadingDockEguiState::default(),
+            center_stage: center_stage::CenterStageEguiState::default(),
+            info_view: info_view::InfoViewEguiState::default(),
+            results_view: results_view::ResultsViewEguiState::default(),
+            canvas_view: canvas_view::CanvasViewEguiState::default(),
+            trailing_studio: trailing_studio::TrailingStudioEguiState::default(),
+            status_footer: status_footer::StatusFooterEguiState::default(),
+            launcher_open: false,
+            leading_width_pt: None,
+            trailing_width_pt: None,
+            leading_collapsed_rail: false,
+            trailing_collapsed_rail: false,
+            leading_flyout_open: false,
+            trailing_flyout_open: false,
+            active_sheet_history: Vec::new(),
+            history_cursor: 0,
+            quick_stats_cache: status_footer::QuickStatsCache::default(),
+            progress_modal: None,
+            last_shell_layout: None,
+        }
+    }
 }
 
 /// Resolve any sheet's display title by [`SheetId`] across all five folders.

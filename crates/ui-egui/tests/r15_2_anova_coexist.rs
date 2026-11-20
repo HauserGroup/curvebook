@@ -186,12 +186,14 @@ fn scroll_and_select_one_way_anova(
 
 #[test]
 fn hybrid_case_b_legacy_analyze_over_egui_column_grid_and_focus_handoff_to_resultsheet() -> Result<(), Box<dyn std::error::Error>> {
-    let (app, col_id) = seed_column_anova_app(true)?;
+    let (mut app, col_id) = seed_column_anova_app(true)?;
+    // Explicitly opt into legacy `AnalyzeSheet` coexistence for Case B regression coverage until `R15.5`.
+    app.egui_views = app.egui_views.clone().with_native_analyze_sheet(false);
     let metrics = ViewportMetrics::new(1024.0, 640.0, 1.0);
     let mut driver = make_coexist_driver(CoexistDriverState::new(app), metrics);
 
     // Initially on Egui Column grid with Analyze… button enabled and no modal open.
-    let d0 = HybridCoexistenceArbiter::evaluate(&driver.state().app, false);
+    let d0 = HybridCoexistenceArbiter::evaluate_with_views(&driver.state().app, &driver.state().views, false);
     assert_eq!(d0.sheet_surface, HybridSheetSurface::EguiColumnGrid);
     assert_eq!(d0.modal_surface, HybridModalSurface::None);
     assert!(!d0.blocks_egui_grid);
@@ -200,7 +202,7 @@ fn hybrid_case_b_legacy_analyze_over_egui_column_grid_and_focus_handoff_to_resul
     driver.click_widget_id("toolbar.analyze")?;
     assert!(matches!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::AnalyzeSheet { .. }));
 
-    let d_case_b = HybridCoexistenceArbiter::evaluate(&driver.state().app, false);
+    let d_case_b = HybridCoexistenceArbiter::evaluate_with_views(&driver.state().app, &driver.state().views, false);
     assert_eq!(d_case_b.sheet_surface, HybridSheetSurface::EguiColumnGrid);
     assert_eq!(d_case_b.modal_surface, HybridModalSurface::LegacyModal);
     assert!(d_case_b.blocks_egui_grid);
@@ -445,6 +447,7 @@ fn all_14_beta_locales_and_hybrid_screenshots_pass_at_640x420_and_1440x600() -> 
     for (w_px, h_px) in [(640_u32, 420_u32), (1440_u32, 600_u32)] {
         // Case B: legacy `AnalyzeSheet` over `egui` `Column` grid.
         let (mut app_b, _) = seed_column_anova_app(true)?;
+        app_b.egui_views = app_b.egui_views.clone().with_native_analyze_sheet(false);
         let doc_b = app_b.document().clone();
         assert!(app_b.canvas_dialogs.open_analyze_dialog(&doc_b, &col_id));
         app_b.set_theme_mode(UiThemeMode::Dark);
