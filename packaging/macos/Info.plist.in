@@ -35,6 +35,8 @@
   <key>CFBundleDocumentTypes</key>
   <array>
     <dict>
+      <key>CFBundleTypeIconFile</key>
+      <string>curvebook.icns</string>
       <key>CFBundleTypeName</key>
       <string>CurveBook Project</string>
       <key>CFBundleTypeRole</key>
@@ -47,6 +49,8 @@
       </array>
     </dict>
     <dict>
+      <key>CFBundleTypeIconFile</key>
+      <string>curvebook.icns</string>
       <key>CFBundleTypeName</key>
       <string>CurveBook Project Template</string>
       <key>CFBundleTypeRole</key>
@@ -88,6 +92,8 @@
   <key>UTExportedTypeDeclarations</key>
   <array>
     <dict>
+      <key>UTTypeIconFile</key>
+      <string>curvebook.icns</string>
       <key>UTTypeIdentifier</key>
       <string>org.curvebook.project</string>
       <key>UTTypeDescription</key>
@@ -110,6 +116,8 @@
       </dict>
     </dict>
     <dict>
+      <key>UTTypeIconFile</key>
+      <string>curvebook.icns</string>
       <key>UTTypeIdentifier</key>
       <string>org.curvebook.template</string>
       <key>UTTypeDescription</key>

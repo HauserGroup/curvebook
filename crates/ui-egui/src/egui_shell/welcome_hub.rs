@@ -375,8 +375,17 @@ fn ensure_clone_source_default(app: &UiApp, state: &mut WelcomeHubEguiState) {
 fn render_card_header(ui: &mut egui::Ui, app: &UiApp, tokens: &Tokens, z_layer: ZLayer, meta: &mut FrameInspectMeta) {
     let title_txt = tr(&app.locale, "welcome.title");
     let sub_txt = tr(&app.locale, "welcome.subtitle");
-    render_clipped_text_label(ui, "welcome.header.title", title_txt, FontId::proportional(15.5), tokens.text_strong, z_layer, meta);
-    render_clipped_text_label(ui, "welcome.header.subtitle", sub_txt, FontId::proportional(11.5), tokens.text_muted, z_layer, meta);
+    let avail_w = ui.available_width();
+    ui.horizontal_centered(|ui| {
+        let (mark_rect, _) = ui.allocate_exact_size(Vec2::splat(32.0), Sense::hover());
+        crate::egui_shell::brand::paint_mark(ui, mark_rect);
+        let text_w = (avail_w - 32.0 - ui.spacing().item_spacing.x).max(80.0);
+        ui.vertical(|ui| {
+            ui.set_max_width(text_w);
+            render_clipped_text_label(ui, "welcome.header.title", title_txt, FontId::proportional(15.5), tokens.text_strong, z_layer, meta);
+            render_clipped_text_label(ui, "welcome.header.subtitle", sub_txt, FontId::proportional(11.5), tokens.text_muted, z_layer, meta);
+        });
+    });
 }
 
 fn render_left_rail(

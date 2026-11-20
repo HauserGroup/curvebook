@@ -389,6 +389,8 @@ impl MacNativeMenuHost {
             &[
                 &muda::MenuItem::with_id(muda::MenuId::new("app.about"), "About CurveBook", true, None),
                 &muda::PredefinedMenuItem::separator(),
+                &muda::MenuItem::with_id(muda::MenuId::new("app.preferences"), "Settings…", true, parse_muda_accelerator("Cmd+,")),
+                &muda::PredefinedMenuItem::separator(),
                 &muda::PredefinedMenuItem::hide(None),
                 &muda::PredefinedMenuItem::hide_others(None),
                 &muda::PredefinedMenuItem::show_all(None),
