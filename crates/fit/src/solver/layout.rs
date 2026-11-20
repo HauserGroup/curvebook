@@ -11,7 +11,7 @@ use crate::dsl::ode_fit_budget_exceeded;
 use crate::error::{FitError, ParameterNote};
 use crate::library::ParametricModel;
 use crate::solver::results::SolverConfig;
-use crate::types::{DataPoint, DatasetSeries, HookContext, validated_replicate_moments};
+use crate::types::{DataPoint, DatasetSeries, HookContext, per_dataset_parameter_key, validated_replicate_moments};
 
 #[derive(Debug, Clone)]
 pub(in crate::solver) struct FreeSlot {
@@ -125,11 +125,11 @@ impl ParameterLayout {
                     for (ds_idx, ds) in datasets.iter().enumerate() {
                         if let Some(&(_, val)) = pairs.iter().rev().find(|&&(idx, _)| idx == ds.data_set_index) {
                             bindings[ds_idx][p_idx] = ParamBinding::Fixed(val);
-                            let label = if n_datasets > 1 { format!("{pname} [DS{}]", ds.data_set_index + 1) } else { pname.clone() };
+                            let label = if n_datasets > 1 { per_dataset_parameter_key(pname, ds.data_set_index) } else { pname.clone() };
                             fixed_constants.push((label, val, vec![ParameterNote::Constant]));
                         } else if let Some(eq_val) = equal_bound {
                             bindings[ds_idx][p_idx] = ParamBinding::Fixed(eq_val);
-                            let label = if n_datasets > 1 { format!("{pname} [DS{}]", ds.data_set_index + 1) } else { pname.clone() };
+                            let label = if n_datasets > 1 { per_dataset_parameter_key(pname, ds.data_set_index) } else { pname.clone() };
                             fixed_constants.push((label, eq_val, vec![ParameterNote::Constant]));
                         } else {
                             let slot = free_slots.len();
@@ -157,7 +157,7 @@ impl ParameterLayout {
                                 },
                             )?;
                         bindings[ds_idx][p_idx] = ParamBinding::Fixed(val);
-                        let label = if n_datasets > 1 { format!("{pname} [DS{}]", ds.data_set_index + 1) } else { pname.clone() };
+                        let label = if n_datasets > 1 { per_dataset_parameter_key(pname, ds.data_set_index) } else { pname.clone() };
                         fixed_constants.push((label, val, vec![ParameterNote::Hooked]));
                     }
                 }

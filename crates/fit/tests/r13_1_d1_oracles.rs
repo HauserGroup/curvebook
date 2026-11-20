@@ -223,15 +223,15 @@ fn r13_1_sparse_4pl_identifiability_recovery_r_oracle() {
     );
     let indep_params = find_tab(&indep_res, "nonlinear_parameters");
     assert!(
-        ["Top [DS2] (Unstable)", "LogEC50 [DS2] (Unstable)", "HillSlope [DS2] (Unstable)"]
+        ["Top [B] (Unstable)", "LogEC50 [B] (Unstable)", "HillSlope [B] (Unstable)"]
             .iter()
             .all(|expected| indep_params.row_labels.iter().any(|lbl| lbl == expected)),
-        "expected all Dataset B (DS2) parameters tagged (Unstable), got {:?}",
+        "expected all Dataset B parameters tagged (Unstable), got {:?}",
         indep_params.row_labels
     );
     assert!(
-        indep_params.row_labels.iter().filter(|lbl| lbl.contains("[DS1]")).all(|lbl| !lbl.ends_with("(Unstable)")),
-        "expected Dataset A (DS1) parameters to remain stable, got {:?}",
+        indep_params.row_labels.iter().filter(|lbl| lbl.contains("[A]")).all(|lbl| !lbl.ends_with("(Unstable)")),
+        "expected Dataset A parameters to remain stable, got {:?}",
         indep_params.row_labels
     );
 
@@ -285,8 +285,8 @@ fn r13_1_sparse_4pl_identifiability_recovery_r_oracle() {
     let pooled_oracles = [
         ("Top", 99.77111824194645, 0.26241943098077725),
         ("HillSlope", 1.009530731975136, 0.010931735463543379),
-        ("LogEC50 [DS1]", -6.462008648887402, 0.006280679075401399),
-        ("LogEC50 [DS2]", -6.036237822355189, 0.026404474352218665),
+        ("LogEC50 [A]", -6.462008648887402, 0.006280679075401399),
+        ("LogEC50 [B]", -6.036237822355189, 0.026404474352218665),
     ];
     for (row_lbl, est_oracle, se_oracle) in pooled_oracles {
         let r = row_index(rec_params, row_lbl);

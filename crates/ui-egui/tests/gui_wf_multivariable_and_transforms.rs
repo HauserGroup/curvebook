@@ -1211,8 +1211,8 @@ B8\tInhibitorB\t-3.0\t0.8";
 
     let rs_fit = result_sheet(&app, &fit_id)?;
     let params_tab = tab_by_id(rs_fit, "nonlinear_parameters")?;
-    let ic50_a_before = tab_cell_f64(params_tab, "LogIC50 [DS1]", "Best-fit value")?;
-    let ic50_b_before = tab_cell_f64(params_tab, "LogIC50 [DS2]", "Best-fit value")?;
+    let ic50_a_before = tab_cell_f64(params_tab, "LogIC50 [InhibitorA]", "Best-fit value")?;
+    let ic50_b_before = tab_cell_f64(params_tab, "LogIC50 [InhibitorB]", "Best-fit value")?;
     let _bot_const = tab_cell_f64(params_tab, "Bottom (Constant)", "Best-fit value")?;
     let _top_const = tab_cell_f64(params_tab, "Top (Constant)", "Best-fit value")?;
     assert_approx(ic50_a_before, -7.0, 0.25, "InhibitorA LogIC50")?;
@@ -1277,7 +1277,7 @@ B8\tInhibitorB\t-3.0\t0.8";
     // Live upstream edit on InhibitorA Response updates LogIC50.
     switch_tab(&mut app, "mv_wf36")?;
     edit_cell_at(&mut app, 3, 3, "85.0")?;
-    let ic50_a_after = tab_cell_f64(tab_by_id(result_sheet(&app, &fit_id)?, "nonlinear_parameters")?, "LogIC50 [DS1]", "Best-fit value")?;
+    let ic50_a_after = tab_cell_f64(tab_by_id(result_sheet(&app, &fit_id)?, "nonlinear_parameters")?, "LogIC50 [InhibitorA]", "Best-fit value")?;
     if (ic50_a_after - ic50_a_before).abs() < 0.05 {
         return Err(format!("4PL LogIC50 did not update reactively: before={ic50_a_before}, after={ic50_a_after}"));
     }

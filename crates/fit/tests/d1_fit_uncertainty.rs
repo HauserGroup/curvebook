@@ -685,7 +685,7 @@ fn shared_weighted_gaussian_covariance_and_pointwise_bands_match_independent_ora
     assert_eq!(res.status, ResultStatus::UpToDate);
     assert_eq!(res.fitted_curves.len(), 2);
 
-    for ((label, (&exp_est, &exp_se)), (&exp_lo, &exp_hi)) in ["Slope", "YIntercept [DS1]", "YIntercept [DS2]"]
+    for ((label, (&exp_est, &exp_se)), (&exp_lo, &exp_hi)) in ["Slope", "YIntercept [Series A]", "YIntercept [Series B]"]
         .into_iter()
         .zip(GAUSS_THETA_HAT.iter().zip(GAUSS_SE.iter()))
         .zip(GAUSS_CI_LO.iter().zip(GAUSS_CI_HI.iter()))
@@ -720,7 +720,7 @@ fn shared_weighted_gaussian_covariance_and_pointwise_bands_match_independent_ora
     );
 
     let cov_tab = res.tabs.iter().find(|t| t.id == "nonlinear_covariance").expect("nonlinear_covariance tab");
-    assert_eq!(cov_tab.row_labels, vec!["Slope", "YIntercept [DS1]", "YIntercept [DS2]"]);
+    assert_eq!(cov_tab.row_labels, vec!["Slope", "YIntercept [Series A]", "YIntercept [Series B]"]);
     for (r, row) in GAUSS_COV.iter().enumerate() {
         for (c, &expected) in row.iter().enumerate() {
             assert_num_cell(&cov_tab.rows[r][c], expected, GAUSS_EXACT_ABS_TOL, GAUSS_EXACT_REL_TOL, &format!("ResultSheet cov[{r}][{c}]"));
