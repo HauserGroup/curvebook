@@ -35,19 +35,19 @@ Run a statistical test, curve fit, or table transform from **Analyze › Analyze
 - CurveBook attaches a linked `ResultSheet` under **Analyses** (with multi-tab tables, [`QOL-7` diagnostics-only assumption banner](qol.md#active-qol), and [`QOL-6` Copy Methods & Statistical Reporting](qol.md#active-qol)) and updates dependent **Graphs** automatically through the reactive DAG.
 - Toggle **View › Toggle Split Data + Graph Workspace** (`Cmd/Ctrl+\`, `QOL-4`) to display a `Graph` alongside your `Data` or `Result` sheet: edits, cell exclusions, and model parameter tweaks immediately redraw the fitted curve and bands, with two-way cell/point brushing (`QOL-5`) highlighting linked coordinates between grid and plot.
 
-![CurveBook split workspace showing an XY data table and live nonlinear dose–response curve fit with confidence bands](../images/workspace-split-fit.png)
+![CurveBook light theme egui split workspace showing Project Navigator, Family tree, XY data table, live 4PL nonlinear dose–response curve fit with confidence bands, and Graph Inspector](../images/workspace-split-fit.png)
 
 ---
 
 ## 4. Composing Multi-Panel Page Layouts {#page-layouts}
 
-Switch to the **Layouts** section in the Project Navigator to arrange multiple `GraphSheet`s onto a physical page canvas (`LayoutSpec`, `MAX_LAYOUT_ITEMS = 64`), apply [journal column-width presets](graphs.md#page-layouts) (`SingleColumn88mm`, `ColumnAndHalf130mm`, `DoubleColumn180mm`), align axis origins across panels (**Graph › Align Plot Origins** or the Layout Format Inspector), customize Light / Dark / High-Contrast themes in [Settings & Languages](settings.md), and toggle live [CVD / grayscale canvas preview](graphs.md#palettes-and-cvd) (`QOL-9`).
+Switch to the **Layouts** section in the Project Navigator to arrange multiple `GraphSheet`s onto a physical page canvas (`LayoutSpec`, `MAX_LAYOUT_ITEMS = 64`), apply [journal column-width presets](graphs.md#page-layouts) (`SingleColumn88mm`, `ColumnAndHalf130mm`, `DoubleColumn180mm`), align axis origins across panels (**Graph › Align Plot Origins** or the **Page Layout Composer**), customize Light / Dark / High-Contrast themes in [Settings & Languages](settings.md), and toggle live [CVD / grayscale canvas preview](graphs.md#palettes-and-cvd) (`QOL-9`).
 
-![CurveBook multi-panel Page Layout workspace in dark theme with panel badges and publication formatting](../images/workspace-layout-dark.png)
+![CurveBook dark theme egui multi-panel Page Layout workspace with physical millimeter rulers, significance brackets, embedded summary table, and Page Layout Composer](../images/workspace-layout-dark.png)
 
 ---
 
 ## 5. Saving Projects, Templates & Publication Exports {#saving-and-exporting}
 
 - **Save Project (`.curvebook` or `.curvebook.d/`):** **File › Save** and **File › Save As…** write atomic deterministic `.curvebook` ZIP archives (with forward-version overwrite refusal), alongside crash-recovery WAL journals between saves ([Files, Storage & Interchange](files.md)). Create persistent milestone snapshots via **File › Checkpoints › Create Checkpoint…**.
-- **Export Figures & Tables:** Use **File › Export** (`SVG`, `PDF`, `PNG`, `TIFF`, or EMF / table exports via Command Palette and CLI/MCP) to generate publication **SVG 1.1**, **`%PDF-1.7`** (sRGB / CMYK / Grayscale, optional glyph outlining), high-DPI **PNG** / **TIFF** (`LZW` / `Deflate` / uncompressed), Windows **`.emf`**, tidy/tab **CSV**, or structured **JSON**.
+- **Export Figures & Tables:** Use **Export** or **File › Export Figure…** (`SVG`, `PDF`, `PNG`, `TIFF`, or EMF / table exports via Command Palette and CLI/MCP) to generate publication **SVG 1.1**, **`%PDF-1.7`** (sRGB / CMYK / Grayscale, optional glyph outlining), high-DPI **PNG** / **TIFF** (`LZW` / `Deflate` / uncompressed), Windows **`.emf`**, tidy/tab **CSV**, or structured **JSON**.

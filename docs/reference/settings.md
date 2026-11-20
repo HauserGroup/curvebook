@@ -51,7 +51,7 @@ CurveBook's i18n catalog (`crates/ui-egui/src/i18n.rs`) provides full key covera
 | **English** | `en` | LTR | Primary reviewed source (`English (en)`) |
 | **Tier-1 Scientific** | `de`, `es`, `fr`, `ja`, `ko`, `pt-BR`, `zh-CN`, `zh-TW` | LTR | Marked **`[Draft]`** in Beta pending native-speaker scientific review |
 | **Tier-2 European** | `it`, `nl`, `pl`, `ru`, `tr` | LTR | Marked **`[Draft]`** in Beta pending native-speaker scientific review |
-| **Right-to-Left (RTL)** | `ar`, `he` | RTL | Marked **`[Draft]`** in Beta pending native-speaker scientific review |
+| **Right-to-Left (RTL)** | `ar`, `he` | RTL | Catalog & PDF/SVG BiDi ready; desktop GUI picker deferred to `1.0` (`normalize_beta_gui_locale` falls back to `"en"` in Beta) |
 
 - **`[Draft]` Beta indicator:** Every non-English entry in the UI locale picker appends `[Draft]` (`<Autonym> (<code>) [Draft]`) to indicate machine-drafted translations awaiting community/native review.
 - **Locale normalization (`normalize_locale`):** Regional variants normalize cleanly onto supported tags (e.g., `en-US` -> `en`, `zh-Hans` -> `zh-CN`, `zh-Hant` -> `zh-TW`, `pt` -> `pt-BR`). See [Localization Architecture](../localization.md).
