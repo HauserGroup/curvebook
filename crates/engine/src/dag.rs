@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
+use curvebook_doc::analysis::{AnalysisRecomputeStrategy, descriptor_for_kind};
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, CellCoord, CellValue, CiBound, DataSetColumn, DataSheet, ErrorCode, HookSource, ImportLinkSpec, InfoSheet,
     InternalLinkKind, LayoutItem, LinkSource, PlacementMode, ProjectDocument, ResultCell, ResultSheet, ResultStatus, SheetCellRange, SheetId,
@@ -1034,8 +1035,9 @@ fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize) -> bool {
         }
     }
 
-    let output: Result<ResultSheet, String> = match &existing.analysis.kind {
-        AnalysisKind::Transform(_) => {
+    let desc = descriptor_for_kind(&existing.analysis.kind);
+    let output: Result<ResultSheet, String> = match desc.recompute_strategy {
+        AnalysisRecomputeStrategy::Transform => {
             let info_opt = resolve_transform_info_sheet(doc, &source_ds, &existing.analysis);
             let ctx = TransformContext {
                 info_sheet: info_opt,
@@ -1047,7 +1049,7 @@ fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize) -> bool {
             };
             execute_analysis_transform(&source_ds, &existing.analysis, &ctx).map_err(|err| err.to_string())
         }
-        AnalysisKind::LinearRegression(_) | AnalysisKind::NonlinearRegression(_) => {
+        AnalysisRecomputeStrategy::Fit => {
             let primary_info_id = resolve_origin_info_sheet_id(doc, &source_ds, &existing.analysis);
             if let Err(message) = validate_info_constant_hooks(doc, &existing.analysis, primary_info_id) {
                 Err(message)
@@ -1064,8 +1066,14 @@ fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize) -> bool {
                 curvebook_fit::execute_analysis(&existing.analysis, &source_ds, &hooks).map_err(|err| err.to_string())
             }
         }
-        AnalysisKind::PowerAnalysis(p_spec) => resolve_power_analysis_with_info_hooks(doc, &source_ds, &existing, p_spec),
-        _ => {
+        AnalysisRecomputeStrategy::PowerWithInfoHooks => {
+            if let AnalysisKind::PowerAnalysis(p_spec) = &existing.analysis.kind {
+                resolve_power_analysis_with_info_hooks(doc, &source_ds, &existing, p_spec)
+            } else {
+                Err(format!("descriptor strategy mismatch: `{}` expected PowerAnalysis", desc.slug))
+            }
+        }
+        AnalysisRecomputeStrategy::Stats => {
             if !existing.analysis.kind.is_compatible_with(source_ds.kind()) {
                 Err(format!(
                     "analysis `{}` is incompatible with {} table `{}`",
@@ -1406,5 +1414,59 @@ mod tests {
         assert!(r_curve.tabs.is_empty());
         assert!(r_curve.analyzable_data.is_none());
         assert_eq!(r_curve.floating_notes, vec![note]);
+    }
+
+    #[test]
+    fn recompute_result_sheet_routes_all_descriptor_strategies() {
+        use curvebook_doc::{
+            DescriptiveSpec, LinearRegressionSpec, PowerAnalysisSpec, PowerEffectSpec, PowerSolveTarget, PowerTestFamily, SubcolumnMode, XyTable,
+        };
+
+        let mut doc = ProjectDocument::new("descriptor-routing-test").expect("doc");
+
+        let mut xy = XyTable::new(SubcolumnMode::Single, 1, 4).expect("xy");
+        for (r, (x, y)) in [(1.0, 2.0), (2.0, 4.0), (3.0, 6.0), (4.0, 8.0)].into_iter().enumerate() {
+            xy.x_cells[r][0] = Cell::number(x);
+            xy.data_sets[0].cells[r][0] = Cell::number(y);
+        }
+        doc.add_data_sheet(DataSheet::new("xy-1", "XY", TableArchetype::Xy(xy)).expect("xy ds")).expect("add xy");
+
+        let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 4).expect("col");
+        for (r, y) in [10.0, 12.0, 14.0, 16.0].into_iter().enumerate() {
+            col.data_sets[0].cells[r][0] = Cell::number(y);
+        }
+        doc.add_data_sheet(DataSheet::new("col-1", "Column", TableArchetype::Column(col)).expect("col ds")).expect("add col");
+
+        // Transform strategy
+        let tr_spec =
+            AnalysisSpec::new("res-tr", "col-1", AnalysisKind::Transform(TransformAnalysisSpec::Transpose { swap_row_and_column_titles: true }))
+                .expect("tr spec");
+        doc.add_result_sheet(ResultSheet::new(tr_spec).expect("tr res")).expect("add tr");
+
+        // Fit strategy
+        let fit_spec = AnalysisSpec::new("res-fit", "xy-1", AnalysisKind::LinearRegression(LinearRegressionSpec::default())).expect("fit spec");
+        doc.add_result_sheet(ResultSheet::new(fit_spec).expect("fit res")).expect("add fit");
+
+        // Stats strategy
+        let stats_spec = AnalysisSpec::new("res-stats", "col-1", AnalysisKind::DescriptiveStats(DescriptiveSpec::default())).expect("stats spec");
+        doc.add_result_sheet(ResultSheet::new(stats_spec).expect("stats res")).expect("add stats");
+
+        // PowerWithInfoHooks strategy
+        let pwr = PowerAnalysisSpec {
+            family: PowerTestFamily::OneSampleT,
+            solve_target: PowerSolveTarget::SampleSize,
+            effect: PowerEffectSpec::Standardized(0.8),
+            ..PowerAnalysisSpec::default()
+        };
+        let pwr_spec = AnalysisSpec::new("res-pwr", "col-1", AnalysisKind::PowerAnalysis(pwr)).expect("pwr spec");
+        doc.add_result_sheet(ResultSheet::new(pwr_spec).expect("pwr res")).expect("add pwr");
+
+        let report = recalculate_project_with_report(&mut doc).expect("recalc succeeds");
+        assert!(report.failed_result_sheets.is_empty());
+        assert_eq!(report.updated_result_sheets.len(), 4);
+        for id in ["res-tr", "res-fit", "res-stats", "res-pwr"] {
+            let rs = doc.result_sheet(&SheetId::new(id)).expect("result sheet present");
+            assert_eq!(rs.status, ResultStatus::UpToDate, "{id} should be UpToDate");
+        }
     }
 }
