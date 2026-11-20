@@ -1166,21 +1166,10 @@ impl AggOp {
 }
 
 fn linear_percentile(sorted: &[f64], p_percent: f64) -> FormulaValue {
-    if sorted.is_empty() || !p_percent.is_finite() || !(0.0..=100.0).contains(&p_percent) {
+    if !p_percent.is_finite() || !(0.0..=100.0).contains(&p_percent) {
         return FormulaValue::Missing;
     }
-    if sorted.len() == 1 {
-        return sorted.first().copied().map_or(FormulaValue::Missing, FormulaValue::from_f64);
-    }
-    let pos = (p_percent / 100.0) * ((sorted.len() - 1) as f64);
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let lo = (pos.floor() as usize).min(sorted.len() - 1);
-    let hi = (lo + 1).min(sorted.len() - 1);
-    let frac = pos - (lo as f64);
-    let (Some(&lo_v), Some(&hi_v)) = (sorted.get(lo), sorted.get(hi)) else {
-        return FormulaValue::Missing;
-    };
-    FormulaValue::from_f64(lo_v + frac * (hi_v - lo_v))
+    curvebook_math::quantile_type7_sorted(sorted, p_percent / 100.0).map_or(FormulaValue::Missing, FormulaValue::from_f64)
 }
 
 fn compute_agg_over_rows(
