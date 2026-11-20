@@ -15,9 +15,10 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
 
-use crate::json::Json;
+use serde_json::Value;
+
 use crate::layers::Crate;
-use crate::{cargo_metadata, cargo_metadata_resolved, ci, has_cargo_nextest, layers, run_cargo};
+use crate::{cargo_metadata_resolved, ci, has_cargo_nextest, layers, run_cargo};
 
 /// Root-level files whose edits can change how every workspace package builds or lints.
 const WORKSPACE_WIDE_FILES: &[&str] = &["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain", "clippy.toml", ".clippy.toml"];
@@ -59,8 +60,9 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
         None => default_base(root)?,
     };
     let changed = changed_files(root, &base)?;
-    let dirs = package_dirs(&cargo_metadata(root)?)?;
-    let graph = layers::from_metadata(&cargo_metadata_resolved(root)?)?;
+    let meta = cargo_metadata_resolved(root)?;
+    let dirs = package_dirs(&meta)?;
+    let graph = layers::from_metadata(&meta)?;
     let selection = select(&changed, &dirs, &graph);
     print_plan(&base, changed.len(), &selection);
 
@@ -143,13 +145,24 @@ fn git_stdout(root: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 /// `(package name, package directory relative to the workspace root with a trailing `/`)`.
-fn package_dirs(meta: &Json) -> Result<Vec<(String, String)>, String> {
-    let ws_root = meta.get("workspace_root").and_then(Json::as_str).ok_or_else(|| String::from("metadata: no workspace_root"))?;
-    let pkgs = meta.get("packages").and_then(Json::as_array).ok_or_else(|| String::from("metadata: no packages array"))?;
-    let mut dirs = Vec::with_capacity(pkgs.len());
+///
+/// When `workspace_members` is present (such as in a resolved `cargo metadata` snapshot),
+/// directory ownership is restricted to workspace member package IDs.
+fn package_dirs(meta: &Value) -> Result<Vec<(String, String)>, String> {
+    let ws_root = meta.get("workspace_root").and_then(Value::as_str).ok_or_else(|| String::from("metadata: no workspace_root"))?;
+    let pkgs = meta.get("packages").and_then(Value::as_array).ok_or_else(|| String::from("metadata: no packages array"))?;
+    let member_ids: Option<BTreeSet<&str>> =
+        meta.get("workspace_members").and_then(Value::as_array).map(|arr| arr.iter().filter_map(Value::as_str).collect());
+    let mut dirs = Vec::with_capacity(member_ids.as_ref().map_or(pkgs.len(), BTreeSet::len));
     for p in pkgs {
-        let name = p.get("name").and_then(Json::as_str).ok_or_else(|| String::from("metadata: package without name"))?;
-        let manifest = p.get("manifest_path").and_then(Json::as_str).ok_or_else(|| format!("metadata: `{name}` has no manifest_path"))?;
+        if let Some(ids) = &member_ids {
+            let id = p.get("id").and_then(Value::as_str).ok_or_else(|| String::from("metadata: package without id"))?;
+            if !ids.contains(id) {
+                continue;
+            }
+        }
+        let name = p.get("name").and_then(Value::as_str).ok_or_else(|| String::from("metadata: package without name"))?;
+        let manifest = p.get("manifest_path").and_then(Value::as_str).ok_or_else(|| format!("metadata: `{name}` has no manifest_path"))?;
         let rel = Path::new(manifest)
             .strip_prefix(ws_root)
             .ok()
@@ -200,8 +213,8 @@ pub fn select(changed: &[String], dirs: &[(String, String)], graph: &[Crate]) ->
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{Selection, parse_args, select};
-    use crate::layers::{Crate, Dep, DepKind};
+    use super::{Selection, package_dirs, parse_args, select};
+    use crate::layers::{self, Crate, Dep, DepKind};
 
     fn dirs() -> Vec<(String, String)> {
         [("curvebook-math", "crates/math/"), ("curvebook-stats", "crates/stats/"), ("curvebook-ui-egui", "crates/ui-egui/"), ("xtask", "xtask/")]
@@ -276,5 +289,36 @@ mod tests {
         assert!(parse_args(&[String::from("--base")]).is_err());
         assert!(parse_args(&[String::from("--base"), String::from("--workspace")]).is_err());
         assert!(parse_args(&[String::from("--fast")]).is_err());
+    }
+
+    #[test]
+    fn package_dirs_restricts_resolved_metadata_to_workspace_members() {
+        let meta: serde_json::Value = serde_json::from_str(
+            r#"{
+                "workspace_root": "/repo",
+                "workspace_members": ["math 0.1.0", "stats 0.1.0"],
+                "packages": [
+                    {"id": "math 0.1.0", "name": "curvebook-math", "manifest_path": "/repo/crates/math/Cargo.toml", "dependencies": []},
+                    {"id": "stats 0.1.0", "name": "curvebook-stats", "manifest_path": "/repo/crates/stats/Cargo.toml", "dependencies": []},
+                    {"id": "serde 1.0.0", "name": "serde", "manifest_path": "/cargo/registry/serde-1.0.0/Cargo.toml", "dependencies": []}
+                ],
+                "resolve": {
+                    "nodes": [
+                        {"id": "math 0.1.0", "deps": [{"pkg": "serde 1.0.0", "dep_kinds": [{"kind": null}]}]},
+                        {"id": "stats 0.1.0", "deps": [{"pkg": "math 0.1.0", "dep_kinds": [{"kind": null}]}]},
+                        {"id": "serde 1.0.0", "deps": []}
+                    ]
+                }
+            }"#,
+        )
+        .unwrap();
+        let dirs = package_dirs(&meta).unwrap();
+        assert_eq!(
+            dirs,
+            vec![(String::from("curvebook-math"), String::from("crates/math/")), (String::from("curvebook-stats"), String::from("crates/stats/")),]
+        );
+        let graph = layers::from_metadata(&meta).unwrap();
+        assert_eq!(select(&files(&["crates/math/src/lib.rs"]), &dirs, &graph), Selection::Workspace);
+        assert_eq!(select(&files(&["crates/stats/src/lib.rs"]), &dirs, &graph), set(&["curvebook-stats"]));
     }
 }

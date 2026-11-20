@@ -383,19 +383,7 @@ fn take_flag_value<'a>(args: &'a [String], idx: usize, flag: &str) -> Result<&'a
 pub(crate) fn normalize_release_version(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();
     let ver = trimmed.strip_prefix('v').unwrap_or(trimmed);
-    if ver.is_empty() || ver.contains('/') || ver.contains('\\') || ver.contains("..") || ver.chars().any(char::is_whitespace) {
-        return Err(format!("invalid release version `{raw}` for `--expect-beta-set`"));
-    }
-    let core_and_pre = ver.split_once('+').map_or(ver, |(left, build)| if build.is_empty() { "" } else { left });
-    if core_and_pre.is_empty() {
-        return Err(format!("invalid release version `{raw}` for `--expect-beta-set`"));
-    }
-    crate::version::validate_semver(core_and_pre)?;
-    if let Some((_, build)) = ver.split_once('+')
-        && !build.split('.').all(|seg| !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
-    {
-        return Err(format!("invalid SemVer build metadata in `{raw}`"));
-    }
+    semver::Version::parse(ver).map_err(|err| format!("invalid release version `{raw}` for `--expect-beta-set`: {err}"))?;
     Ok(ver.to_owned())
 }
 
@@ -2103,5 +2091,21 @@ mod tests {
         write_checksums(&rel_dir);
         let extra_err = scan_release_dir_with_tools(&root, &ok_opts, &linux_host_tools).unwrap_err();
         assert!(extra_err.contains("unexpected extra file(s)") && extra_err.contains(&format!("curvebook-web-{ver}.zip")), "{extra_err}");
+    }
+
+    #[test]
+    fn normalize_release_version_accepts_optional_v_and_build_metadata_and_rejects_invalid() {
+        for (raw, expected) in [
+            ("0.1.0", "0.1.0"),
+            ("v0.1.0-beta.1", "0.1.0-beta.1"),
+            (" 0.2.0-rc.1+build.001 ", "0.2.0-rc.1+build.001"),
+            ("v1.2.3+sha.abcdef", "1.2.3+sha.abcdef"),
+        ] {
+            assert_eq!(super::normalize_release_version(raw).as_deref(), Ok(expected), "raw={raw}");
+        }
+        for bad in ["", "v", "vv0.1.0", "../evil", "0.1.0/foo", "0.1.0\\foo", "0.1.0+", "0.1.0+bad..meta", "0.1.0 beta", "1.2", "0.1.0-", "0.1.0-01"]
+        {
+            assert!(super::normalize_release_version(bad).is_err(), "expected failure for `{bad}`");
+        }
     }
 }

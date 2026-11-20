@@ -21,6 +21,7 @@ curvebook-stats = { workspace = true }
 curvebook-svg = { workspace = true }
 curvebook-testkit = { workspace = true }
 curvebook-ui-egui = { workspace = true, default-features = false }
+semver = { workspace = true }
 serde_json = { workspace = true }
 
 [lints]

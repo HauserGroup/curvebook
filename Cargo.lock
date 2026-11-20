@@ -4389,6 +4389,7 @@ dependencies = [
  "curvebook-testkit",
  "curvebook-ui-egui",
  "image",
+ "semver",
  "serde_json",
 ]
 

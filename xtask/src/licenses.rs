@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::json::Json;
+use serde_json::Value;
 
 const DEFAULT_HTML_OUT: &str = "THIRD-PARTY-LICENSES.html";
 const BANNED_LICENSE_PREFIXES: &[&str] = &["GPL", "AGPL", "LGPL"];
@@ -240,7 +240,7 @@ fn parse_about_accepted(text: &str) -> Result<Vec<String>, String> {
     Ok(accepted)
 }
 
-fn run_locked_offline_metadata(root: &Path) -> Result<Json, String> {
+fn run_locked_offline_metadata(root: &Path) -> Result<Value, String> {
     let out = Command::new("cargo")
         .current_dir(root)
         .args(["metadata", "--format-version", "1", "--locked", "--offline"])
@@ -249,16 +249,15 @@ fn run_locked_offline_metadata(root: &Path) -> Result<Json, String> {
     if !out.status.success() {
         return Err(format!("cargo metadata --locked --offline failed: {}", String::from_utf8_lossy(&out.stderr)));
     }
-    let text = String::from_utf8(out.stdout).map_err(|e| format!("cargo metadata utf-8: {e}"))?;
-    crate::json::parse(&text)
+    serde_json::from_slice(&out.stdout).map_err(|e| format!("cargo metadata json: {e}"))
 }
 
 /// Evaluate every active resolved crate in `meta` against `allow_licenses` using boolean SPDX semantics.
-pub fn verify_resolved_spdx_metadata(meta: &Json, allow_licenses: &[String]) -> Result<Vec<ResolvedLicensePkg>, String> {
-    let pkgs_arr = meta.get("packages").and_then(Json::as_array).ok_or_else(|| String::from("cargo metadata missing `packages` array"))?;
-    let mut pkg_map: BTreeMap<String, &Json> = BTreeMap::new();
+pub fn verify_resolved_spdx_metadata(meta: &Value, allow_licenses: &[String]) -> Result<Vec<ResolvedLicensePkg>, String> {
+    let pkgs_arr = meta.get("packages").and_then(Value::as_array).ok_or_else(|| String::from("cargo metadata missing `packages` array"))?;
+    let mut pkg_map: BTreeMap<String, &Value> = BTreeMap::new();
     for p in pkgs_arr {
-        if let Some(id) = p.get("id").and_then(Json::as_str) {
+        if let Some(id) = p.get("id").and_then(Value::as_str) {
             pkg_map.insert(id.to_owned(), p);
         }
     }
@@ -266,17 +265,17 @@ pub fn verify_resolved_spdx_metadata(meta: &Json, allow_licenses: &[String]) -> 
     let nodes_arr = meta
         .get("resolve")
         .and_then(|r| r.get("nodes"))
-        .and_then(Json::as_array)
+        .and_then(Value::as_array)
         .ok_or_else(|| String::from("cargo metadata missing `resolve.nodes` array"))?;
-    let mut node_map: BTreeMap<String, &Json> = BTreeMap::new();
+    let mut node_map: BTreeMap<String, &Value> = BTreeMap::new();
     for n in nodes_arr {
-        if let Some(id) = n.get("id").and_then(Json::as_str) {
+        if let Some(id) = n.get("id").and_then(Value::as_str) {
             node_map.insert(id.to_owned(), n);
         }
     }
 
     let members =
-        meta.get("workspace_members").and_then(Json::as_array).ok_or_else(|| String::from("cargo metadata missing `workspace_members` array"))?;
+        meta.get("workspace_members").and_then(Value::as_array).ok_or_else(|| String::from("cargo metadata missing `workspace_members` array"))?;
     let mut reachable = BTreeMap::<String, bool>::new();
     let mut queue: VecDeque<(String, bool)> = VecDeque::new();
     for member in members {
@@ -313,12 +312,12 @@ pub fn verify_resolved_spdx_metadata(meta: &Json, allow_licenses: &[String]) -> 
         let Some(&pkg) = pkg_map.get(&pid) else {
             continue;
         };
-        let name = pkg.get("name").and_then(Json::as_str).unwrap_or("<unknown>").to_owned();
-        let version = pkg.get("version").and_then(Json::as_str).unwrap_or("0.0.0").to_owned();
-        let source = pkg.get("source").and_then(Json::as_str).map(ToOwned::to_owned);
-        let license = pkg.get("license").and_then(Json::as_str).unwrap_or("").trim().to_owned();
-        let license_file = pkg.get("license_file").and_then(Json::as_str).map(ToOwned::to_owned);
-        let manifest_path = pkg.get("manifest_path").and_then(Json::as_str).map(PathBuf::from);
+        let name = pkg.get("name").and_then(Value::as_str).unwrap_or("<unknown>").to_owned();
+        let version = pkg.get("version").and_then(Value::as_str).unwrap_or("0.0.0").to_owned();
+        let source = pkg.get("source").and_then(Value::as_str).map(ToOwned::to_owned);
+        let license = pkg.get("license").and_then(Value::as_str).unwrap_or("").trim().to_owned();
+        let license_file = pkg.get("license_file").and_then(Value::as_str).map(ToOwned::to_owned);
+        let manifest_path = pkg.get("manifest_path").and_then(Value::as_str).map(PathBuf::from);
 
         if license.is_empty() || license.eq_ignore_ascii_case("NONE") || license.eq_ignore_ascii_case("NOASSERTION") {
             errors.push(format!("{name} {version}: missing SPDX `license` field in crate metadata"));
@@ -336,9 +335,9 @@ pub fn verify_resolved_spdx_metadata(meta: &Json, allow_licenses: &[String]) -> 
     Ok(out)
 }
 
-fn active_resolve_edges(pkg: &Json, node: &Json, parent_shipped: bool) -> Vec<(String, bool)> {
+fn active_resolve_edges(pkg: &Value, node: &Value, parent_shipped: bool) -> Vec<(String, bool)> {
     let mut enabled_feats: BTreeSet<String> = BTreeSet::new();
-    if let Some(arr) = node.get("features").and_then(Json::as_array) {
+    if let Some(arr) = node.get("features").and_then(Value::as_array) {
         for item in arr {
             if let Some(s) = item.as_str() {
                 enabled_feats.insert(s.replace('-', "_"));
@@ -346,7 +345,7 @@ fn active_resolve_edges(pkg: &Json, node: &Json, parent_shipped: bool) -> Vec<(S
         }
     }
     let mut enabled_opt = enabled_feats.clone();
-    if let Some(Json::Object(feat_map)) = pkg.get("features") {
+    if let Some(Value::Object(feat_map)) = pkg.get("features") {
         for feat in &enabled_feats {
             let Some(arr) = feat_map.iter().find(|(k, _)| k.replace('-', "_") == *feat).and_then(|(_, v)| v.as_array()) else {
                 continue;
@@ -367,11 +366,11 @@ fn active_resolve_edges(pkg: &Json, node: &Json, parent_shipped: bool) -> Vec<(S
     }
 
     let mut opt_map: BTreeMap<String, bool> = BTreeMap::new();
-    if let Some(deps) = pkg.get("dependencies").and_then(Json::as_array) {
+    if let Some(deps) = pkg.get("dependencies").and_then(Value::as_array) {
         for dep in deps {
-            let raw_name = dep.get("rename").and_then(Json::as_str).or_else(|| dep.get("name").and_then(Json::as_str)).unwrap_or("");
+            let raw_name = dep.get("rename").and_then(Value::as_str).or_else(|| dep.get("name").and_then(Value::as_str)).unwrap_or("");
             let key = raw_name.replace('-', "_");
-            let is_opt = matches!(dep.get("optional"), Some(Json::Bool(true)));
+            let is_opt = matches!(dep.get("optional"), Some(Value::Bool(true)));
             if is_opt {
                 opt_map.entry(key).or_insert(true);
             } else {
@@ -381,12 +380,12 @@ fn active_resolve_edges(pkg: &Json, node: &Json, parent_shipped: bool) -> Vec<(S
     }
 
     let mut edges = Vec::new();
-    if let Some(deps) = node.get("deps").and_then(Json::as_array) {
+    if let Some(deps) = node.get("deps").and_then(Value::as_array) {
         for dep in deps {
-            let Some(dep_pkg) = dep.get("pkg").and_then(Json::as_str) else {
+            let Some(dep_pkg) = dep.get("pkg").and_then(Value::as_str) else {
                 continue;
             };
-            let name_key = dep.get("name").and_then(Json::as_str).unwrap_or("").replace('-', "_");
+            let name_key = dep.get("name").and_then(Value::as_str).unwrap_or("").replace('-', "_");
             let is_opt = opt_map.get(&name_key).copied().unwrap_or(false);
             if is_opt && !enabled_opt.contains(&name_key) {
                 continue;
@@ -398,14 +397,14 @@ fn active_resolve_edges(pkg: &Json, node: &Json, parent_shipped: bool) -> Vec<(S
     edges
 }
 
-fn dep_has_non_dev_kind(dep: &Json) -> bool {
-    let Some(kinds) = dep.get("dep_kinds").and_then(Json::as_array) else {
+fn dep_has_non_dev_kind(dep: &Value) -> bool {
+    let Some(kinds) = dep.get("dep_kinds").and_then(Value::as_array) else {
         return true;
     };
     if kinds.is_empty() {
         return true;
     }
-    kinds.iter().any(|k| !matches!(k.get("kind").and_then(Json::as_str), Some("dev")))
+    kinds.iter().any(|k| !matches!(k.get("kind").and_then(Value::as_str), Some("dev")))
 }
 
 /// Evaluate a SPDX 2.x expression (`MIT AND Apache-2.0`, `(MIT OR Apache-2.0) AND Unicode-3.0`,
@@ -1109,7 +1108,7 @@ source = \"registry+https://example.com/index\"
         assert!(validate_deny_policy(&bad_policy).is_err());
 
         // Metadata with inactive optional BSL-1.0 crate passes, while active `MIT AND GPL-3.0-only` fails.
-        let clean_meta = crate::json::parse(
+        let clean_meta: serde_json::Value = serde_json::from_str(
             r#"{
                 "packages":[
                     {"id":"app 0.1.0","name":"app","version":"0.1.0","source":null,"license":"MIT OR Apache-2.0","dependencies":[{"name":"opt_bsl","optional":true}],"features":{"feat_bsl":["dep:opt_bsl"]}},
@@ -1126,7 +1125,7 @@ source = \"registry+https://example.com/index\"
         let resolved = verify_resolved_spdx_metadata(&clean_meta, &allow).unwrap();
         assert_eq!(resolved.len(), 1);
 
-        let bad_meta = crate::json::parse(
+        let bad_meta: serde_json::Value = serde_json::from_str(
             r#"{
                 "packages":[
                     {"id":"app 0.1.0","name":"app","version":"0.1.0","source":null,"license":"MIT","dependencies":[{"name":"bad","optional":false}]},
