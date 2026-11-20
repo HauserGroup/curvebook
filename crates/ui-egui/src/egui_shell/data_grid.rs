@@ -28,7 +28,7 @@ use crate::i18n::{LocalePreset, tr};
 use crate::inspect::ZLayer;
 use crate::views::grid_core::{grid_tr, linked_region_for_cell};
 
-use super::{FrameInspectEntryInput, FrameInspectMeta, LayoutMetrics, PendingUiIntents, Tokens};
+use super::{FrameInspectEntryInput, FrameInspectMeta, LayoutMetrics, PendingUiIntents, Tokens, UiIntent};
 
 const ROW_NUM_WIDTH_PT: f32 = 48.0;
 const ROW_TITLES_EXPANDED_WIDTH_PT: f32 = 112.0;
@@ -411,6 +411,7 @@ mod multi_archetype {
         aux_edit: Option<(AuxInlineTarget, String, bool)>,
         selected_x_cell: Option<(usize, usize)>,
         last_app_x_cell: Option<(usize, usize)>,
+        last_app_y_selection: Option<(Option<GridCellCoord>, Option<GridCellCoord>, usize)>,
         active_role_menu_col: Option<usize>,
         context_menu: Option<ContextMenuState>,
         suppress_loss_commit_once: bool,
@@ -526,12 +527,16 @@ mod multi_archetype {
             state.inline_edit = None;
             state.active_link_popover = None;
         }
+        let cur_app_y_sel = Some((app.grid.tool.active, app.grid.tool.anchor, app.grid.selected_coords.len()));
         if app.grid.active_x_cell != aux.last_app_x_cell {
             aux.selected_x_cell = app.grid.active_x_cell;
             aux.last_app_x_cell = app.grid.active_x_cell;
         }
-        if app.grid.tool.active.is_some() && app.grid.active_x_cell.is_none() {
-            aux.selected_x_cell = None;
+        if cur_app_y_sel != aux.last_app_y_selection {
+            aux.last_app_y_selection = cur_app_y_sel;
+            if app.grid.tool.active.is_some() && app.grid.active_x_cell.is_none() {
+                aux.selected_x_cell = None;
+            }
         }
 
         let geom = compute_multi_geom(app, ds, state, render_ctx.metrics, available);
@@ -1549,7 +1554,7 @@ mod multi_archetype {
                 #[allow(clippy::cast_precision_loss)]
                 let y0 = g_rect.min.y + (row as f32) * geom.row_h - scroll_y;
                 let y1 = y0 + geom.row_h;
-                let row_selected = app.grid.selected_rows.contains(&row);
+                let row_selected = aux.selected_x_cell.map_or_else(|| app.grid.selected_rows.contains(&row), |(xr, _)| xr == row);
                 let num_r = Rect::from_min_max(pos2(x0, y0), pos2(x_mid, y1)).intersect(g_rect);
                 if num_r.height() > 1.0 {
                     if row_selected {
@@ -1957,6 +1962,7 @@ mod multi_archetype {
             aux.active_role_menu_col = None;
             aux.context_menu = None;
             set_grid_focus_active(body_ui, true);
+            body_ui.ctx().request_repaint();
             if is_multi_click_edit(&resp) && editable {
                 state.inline_edit = None;
                 aux.aux_edit = Some((AuxInlineTarget::XCell { row, subcol }, initial_edit_text_for_cell(cell_opt, &app.locale_preset), true));
@@ -1967,6 +1973,7 @@ mod multi_archetype {
             && let Some(pos) = resp.interact_pointer_pos()
         {
             aux.selected_x_cell = Some((row, subcol));
+            body_ui.ctx().request_repaint();
             aux.context_menu = Some(ContextMenuState { pos, row, cell: Some(ContextCellTarget { is_x: true, row, col: 0, subcol }) });
         }
     }
@@ -2012,7 +2019,7 @@ mod multi_archetype {
         let mv_is_calc = mv_var.is_some_and(|v| matches!(v.source, VariableSource::Calculated { .. }));
         let mv_is_cat_or_lbl = mv_var.is_some_and(|v| matches!(v.role, VariableRole::Categorical | VariableRole::Label));
         let linked = linked_region_for_cell(ds, coord.row, coord.col);
-        let (is_active, is_selected) = is_coord_selected(app, coord);
+        let (is_active, is_selected) = if aux.selected_x_cell.is_some() { (false, false) } else { is_coord_selected(app, coord) };
         let flags = MultiCellFlags {
             cell_opt,
             excluded: cell_opt.is_some_and(|c| c.excluded),
@@ -2180,7 +2187,9 @@ mod multi_archetype {
         }
 
         if !dbuf.blocked && resp.clicked() {
-            aux.selected_x_cell = None;
+            if aux.selected_x_cell.take().is_some() {
+                body_ui.ctx().request_repaint();
+            }
             aux.active_role_menu_col = None;
             aux.context_menu = None;
             set_grid_focus_active(body_ui, true);
@@ -2465,6 +2474,13 @@ mod multi_archetype {
                 AuxInlineTarget::SheetTitle => String::from("grid.sheet_title"),
             };
             let te_id = ui.make_persistent_id(("multi_aux_inline", &wid));
+            if matches!(target, AuxInlineTarget::XCell { .. })
+                && (!just_focused || ui.memory(|m| m.has_focus(te_id)))
+                && let Some(multi_text) = extract_multiline_or_tab_x_input(ui, app)
+            {
+                commit_aux_inline_edit(app, ds, aux, &target, multi_text, intents);
+                return;
+            }
             let resp = ui.put(rect, egui::TextEdit::singleline(&mut draft).id(te_id).desired_width(rect.width()));
             if just_focused {
                 resp.request_focus();
@@ -2583,6 +2599,154 @@ mod multi_archetype {
         }
     }
 
+    fn x_subcolumn_count(arch: &TableArchetype) -> usize {
+        match arch {
+            TableArchetype::Xy(xy) => xy.x_cells.first().map_or(1, Vec::len).max(1),
+            TableArchetype::Survival(_) => 1,
+            _ => 0,
+        }
+    }
+
+    fn is_x_column_readonly(ds: &DataSheet) -> bool {
+        ds.frozen || matches!(&ds.archetype, TableArchetype::Xy(xy) if matches!(xy.x_mode, XColumnMode::GeneratedSequence { .. }))
+    }
+
+    fn x_clipboard_cache_id() -> Id {
+        Id::unique("r15_6_grid_x_clipboard")
+    }
+
+    fn copy_x_cell_to_clipboard(ui: &Ui, app: &UiApp, ds: &DataSheet, row: usize, subcol: usize) {
+        let mut text = String::new();
+        if let Some(cell) = ds.archetype.x_or_time_cell(row, subcol) {
+            format_cell_into(cell, &app.locale_preset, &mut text);
+        }
+        let _ = app.write_clipboard_text(&text);
+        ui.ctx().copy_text(text.clone());
+        let snapshot = app.interaction.last_clipboard_text.clone();
+        ui.ctx().data_mut(|d| d.insert_temp(x_clipboard_cache_id(), Some((text, snapshot))));
+    }
+
+    fn clear_x_clipboard_cache(ui: &Ui) {
+        ui.ctx().data_mut(|d| d.insert_temp::<Option<(String, Option<String>)>>(x_clipboard_cache_id(), None));
+    }
+
+    fn read_x_cached_clipboard_if_fresher(ui: &Ui, app: &UiApp) -> Option<String> {
+        let cached = ui.ctx().data(|d| d.get_temp::<Option<(String, Option<String>)>>(x_clipboard_cache_id())).flatten()?;
+        let (x_text, app_snapshot) = cached;
+        if app.interaction.last_clipboard_text != app_snapshot {
+            return None;
+        }
+        (!x_text.is_empty()).then_some(x_text)
+    }
+
+    fn read_clipboard_text_for_x_paste(ui: &Ui, app: &UiApp) -> Option<String> {
+        if let Ok(status) = app.read_clipboard_text()
+            && status.available
+            && let Some(text) = status.text
+            && !text.is_empty()
+        {
+            return Some(text);
+        }
+        if let Some(x_text) = read_x_cached_clipboard_if_fresher(ui, app) {
+            return Some(x_text);
+        }
+        app.interaction.last_clipboard_text.clone().filter(|t| !t.is_empty())
+    }
+
+    fn extract_multiline_or_tab_x_input(ui: &Ui, app: &UiApp) -> Option<String> {
+        let direct = ui.input(|i| {
+            i.events.iter().find_map(|ev| match ev {
+                egui::Event::Paste(t) | egui::Event::Text(t) if t.contains('\n') || t.contains('\r') || t.contains('\t') => Some(t.clone()),
+                _ => None,
+            })
+        });
+        if direct.is_some() {
+            return direct;
+        }
+        if pressed_key_event_modifiers(ui, Key::V).is_some_and(|m| m.command || m.mac_cmd || m.ctrl)
+            && let Some(clip) = read_clipboard_text_for_x_paste(ui, app)
+            && (clip.contains('\n') || clip.contains('\r') || clip.contains('\t'))
+        {
+            return Some(clip);
+        }
+        None
+    }
+
+    fn push_x_cell_text_paste_intents(
+        app: &UiApp,
+        ds: &DataSheet,
+        start_row: usize,
+        start_subcol: usize,
+        text: &str,
+        intents: &mut PendingUiIntents,
+    ) {
+        if is_x_column_readonly(ds) {
+            return;
+        }
+        let x_subcols = x_subcolumn_count(&ds.archetype);
+        let avail_x_cols = x_subcols.saturating_sub(start_subcol);
+        let row_count = ds.archetype.row_count();
+        if avail_x_cols == 0 || row_count == 0 {
+            return;
+        }
+        let mut x_edits = Vec::new();
+        let mut y_lines = Vec::new();
+        let mut has_y_cols = false;
+        for (dr, raw_line) in text.lines().enumerate() {
+            let target_row = start_row.saturating_add(dr);
+            if target_row >= row_count {
+                break;
+            }
+            let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+            let cols: Vec<&str> = line.split('\t').collect();
+            for (dc, token) in cols.iter().take(avail_x_cols).enumerate() {
+                let val = parse_inline_cell_input(app, token);
+                x_edits.push(json!({
+                    "row": target_row,
+                    "subcol": start_subcol + dc,
+                    "value": val,
+                }));
+            }
+            if cols.len() > avail_x_cols {
+                has_y_cols = true;
+                y_lines.push(cols[avail_x_cols..].join("\t"));
+            } else {
+                y_lines.push(String::new());
+            }
+        }
+        if !x_edits.is_empty() {
+            intents.push_engine("table.setXCells", json!({ "sheet_id": ds.id.as_str(), "edits": x_edits }));
+        }
+        if has_y_cols {
+            let dec = if app.locale_preset.decimal_separator == ',' { "," } else { "." };
+            intents.push_engine(
+                "table.paste",
+                json!({
+                    "sheet_id": ds.id.as_str(),
+                    "text": y_lines.join("\n"),
+                    "start_row": start_row,
+                    "start_col": 0,
+                    "start_subcol": 0,
+                    "delimiter": "\t",
+                    "decimal_separator": dec,
+                    "propagate_title_header": false,
+                }),
+            );
+        }
+    }
+
+    fn take_workspace_copy_intent(intents: &mut PendingUiIntents) -> bool {
+        if !intents.intents().iter().any(|it| matches!(it, UiIntent::WorkspaceCopy { .. })) {
+            return false;
+        }
+        let kept: Vec<UiIntent> = intents.intents().iter().filter(|it| !matches!(it, UiIntent::WorkspaceCopy { .. })).cloned().collect();
+        intents.clear();
+        for it in kept {
+            intents.push(it);
+        }
+        true
+    }
+
     fn commit_aux_inline_edit(
         app: &UiApp,
         ds: &DataSheet,
@@ -2593,18 +2757,8 @@ mod multi_archetype {
     ) {
         match *target {
             AuxInlineTarget::XCell { row, subcol } => {
-                if draft.contains('\t') || draft.contains('\n') {
-                    intents.push_engine(
-                        "table.paste",
-                        json!({
-                            "sheet_id": ds.id.as_str(),
-                            "text": draft,
-                            "start_row": row,
-                            "start_col": 0,
-                            "start_subcol": 0,
-                            "propagate_title_header": false,
-                        }),
-                    );
+                if draft.contains('\t') || draft.contains('\n') || draft.contains('\r') {
+                    push_x_cell_text_paste_intents(app, ds, row, subcol, &draft, intents);
                 } else {
                     let val = parse_inline_cell_input(app, &draft);
                     intents.push_engine("table.setXCells", json!({ "sheet_id": ds.id.as_str(), "row": row, "subcol": subcol, "value": val }));
@@ -2793,8 +2947,29 @@ mod multi_archetype {
                                 }
                             }
                             "grid.ctx.exclude_reason" => intents.push_ui("ui.grid.excludeWithReason", json!({ "sheet_id": ds.id.as_str() })),
-                            "grid.ctx.copy" => intents.push_grid_copy_selection(),
-                            "grid.ctx.paste" => intents.push_grid_paste_from_clipboard(app.grid.tool.active),
+                            "grid.ctx.copy" => {
+                                if let Some(tgt) = cell_ctx && tgt.is_x {
+                                    copy_x_cell_to_clipboard(list, app, ds, tgt.row, tgt.subcol);
+                                } else if let Some((xr, xs)) = aux.selected_x_cell {
+                                    copy_x_cell_to_clipboard(list, app, ds, xr, xs);
+                                } else {
+                                    clear_x_clipboard_cache(list);
+                                    intents.push_grid_copy_selection();
+                                }
+                            }
+                            "grid.ctx.paste" => {
+                                if let Some(tgt) = cell_ctx && tgt.is_x {
+                                    if let Some(clip) = read_clipboard_text_for_x_paste(list, app) {
+                                        push_x_cell_text_paste_intents(app, ds, tgt.row, tgt.subcol, &clip, intents);
+                                    }
+                                } else if let Some((xr, xs)) = aux.selected_x_cell {
+                                    if let Some(clip) = read_clipboard_text_for_x_paste(list, app) {
+                                        push_x_cell_text_paste_intents(app, ds, xr, xs, &clip, intents);
+                                    }
+                                } else {
+                                    intents.push_grid_paste_from_clipboard(app.grid.tool.active);
+                                }
+                            }
                             _ => {}
                         }
                         aux.context_menu = None;
@@ -2805,6 +2980,80 @@ mod multi_archetype {
         if area_resp.response.clicked_elsewhere() {
             aux.context_menu = None;
         }
+    }
+
+    fn handle_multi_clipboard_shortcuts(ui: &Ui, app: &UiApp, ds: &DataSheet, aux: &MultiGridAuxState, intents: &mut PendingUiIntents) -> bool {
+        let has_workspace_copy = intents.intents().iter().any(|it| matches!(it, UiIntent::WorkspaceCopy { .. }));
+        let copy_key = ui.input(|i| i.events.iter().any(|ev| matches!(ev, egui::Event::Copy)))
+            || pressed_key_event_modifiers(ui, Key::C).is_some_and(|m| m.command || m.mac_cmd || m.ctrl);
+        if has_workspace_copy || copy_key {
+            if let Some((xr, xs)) = aux.selected_x_cell {
+                let _ = take_workspace_copy_intent(intents);
+                copy_x_cell_to_clipboard(ui, app, ds, xr, xs);
+                return true;
+            }
+            clear_x_clipboard_cache(ui);
+            if !has_workspace_copy {
+                intents.push_grid_copy_selection();
+            }
+            return true;
+        }
+
+        let cut_key = ui.input(|i| i.events.iter().any(|ev| matches!(ev, egui::Event::Cut)))
+            || pressed_key_event_modifiers(ui, Key::X).is_some_and(|m| m.command || m.mac_cmd || m.ctrl);
+        if cut_key {
+            if let Some((xr, xs)) = aux.selected_x_cell {
+                copy_x_cell_to_clipboard(ui, app, ds, xr, xs);
+                if !is_x_column_readonly(ds) {
+                    intents.push_engine(
+                        "table.setXCells",
+                        json!({ "sheet_id": ds.id.as_str(), "row": xr, "subcol": xs, "value": serde_json::Value::Null }),
+                    );
+                }
+                return true;
+            }
+            clear_x_clipboard_cache(ui);
+            intents.push_grid_cut_selection();
+            return true;
+        }
+
+        let paste_event_text = ui.input(|i| {
+            i.events.iter().find_map(|ev| match ev {
+                egui::Event::Paste(t) if !t.is_empty() => Some(t.clone()),
+                _ => None,
+            })
+        });
+        let paste_key = paste_event_text.is_some() || pressed_key_event_modifiers(ui, Key::V).is_some_and(|m| m.command || m.mac_cmd || m.ctrl);
+        if paste_key {
+            if let Some((xr, xs)) = aux.selected_x_cell {
+                if let Some(clip) = paste_event_text.or_else(|| read_clipboard_text_for_x_paste(ui, app)) {
+                    push_x_cell_text_paste_intents(app, ds, xr, xs, &clip, intents);
+                }
+                return true;
+            }
+            let x_fallback = paste_event_text.or_else(|| {
+                let live_avail = app.read_clipboard_text().ok().is_some_and(|s| s.available && s.text.as_deref().is_some_and(|t| !t.is_empty()));
+                if live_avail { None } else { read_x_cached_clipboard_if_fresher(ui, app) }
+            });
+            if let Some(clip) = x_fallback {
+                let anchor = app.grid.tool.active.unwrap_or(GridCellCoord::new(0, 0, 0));
+                intents.push_engine(
+                    "table.paste",
+                    json!({
+                        "sheet_id": ds.id.as_str(),
+                        "text": clip,
+                        "start_row": anchor.row,
+                        "start_col": anchor.col,
+                        "start_subcol": anchor.subcol,
+                        "propagate_title_header": false,
+                    }),
+                );
+                return true;
+            }
+            intents.push_grid_paste_from_clipboard(app.grid.tool.active);
+            return true;
+        }
+        false
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2846,29 +3095,18 @@ mod multi_archetype {
             }
         }
 
-        if let Some(c_mods) = pressed_key_event_modifiers(ui, Key::C)
-            && (c_mods.command || c_mods.mac_cmd || c_mods.ctrl)
-        {
-            intents.push_grid_copy_selection();
-            return;
-        }
-        if let Some(x_mods) = pressed_key_event_modifiers(ui, Key::X)
-            && (x_mods.command || x_mods.mac_cmd || x_mods.ctrl)
-        {
-            intents.push_grid_cut_selection();
-            return;
-        }
-        if let Some(v_mods) = pressed_key_event_modifiers(ui, Key::V)
-            && (v_mods.command || v_mods.mac_cmd || v_mods.ctrl)
-        {
-            intents.push_grid_paste_from_clipboard(app.grid.tool.active);
+        if handle_multi_clipboard_shortcuts(ui, app, ds, aux, intents) {
             return;
         }
 
         if (pressed_key_event_modifiers(ui, Key::Delete).is_some() || pressed_key_event_modifiers(ui, Key::Backspace).is_some()) && !ds.frozen {
             if let Some((xr, xs)) = aux.selected_x_cell {
-                intents
-                    .push_engine("table.setXCells", json!({ "sheet_id": ds.id.as_str(), "row": xr, "subcol": xs, "value": serde_json::Value::Null }));
+                if !is_x_column_readonly(ds) {
+                    intents.push_engine(
+                        "table.setXCells",
+                        json!({ "sheet_id": ds.id.as_str(), "row": xr, "subcol": xs, "value": serde_json::Value::Null }),
+                    );
+                }
                 return;
             }
             if let Some(range) = app.grid.tool.selection_bounds() {
@@ -2893,6 +3131,7 @@ mod multi_archetype {
                 let next_flat = cur_flat.saturating_add_signed(dx).min(geom.total_flat_cols.saturating_sub(1));
                 if next_flat < geom.x_subcols {
                     aux.selected_x_cell = Some((next_row, next_flat));
+                    ui.ctx().request_repaint();
                 } else if let Some((nc, ns)) = geom.flat_data_to_coord(next_flat - geom.x_subcols) {
                     aux.selected_x_cell = None;
                     let coord = GridCellCoord::new(next_row, nc, ns);
@@ -2901,6 +3140,7 @@ mod multi_archetype {
                     } else {
                         intents.push_select_grid_cell(coord);
                     }
+                    ui.ctx().request_repaint();
                 }
                 return;
             }
@@ -2910,9 +3150,11 @@ mod multi_archetype {
             let (is_x, nc_opt, x_opt) = step_cell_horiz(geom, app.grid.tool.active, aux.selected_x_cell, km.shift);
             if is_x {
                 aux.selected_x_cell = x_opt;
+                ui.ctx().request_repaint();
             } else if let Some(nc) = nc_opt {
                 aux.selected_x_cell = None;
                 intents.push_select_grid_cell(nc);
+                ui.ctx().request_repaint();
             }
             return;
         }
