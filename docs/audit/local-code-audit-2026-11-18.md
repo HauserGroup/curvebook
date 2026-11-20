@@ -1348,3 +1348,18 @@ All 126 findings (`#1`–`#126`) in this audit have been reconciled across the `
 
 - **`#2` (GUI mixed-batch remainder) / `#118`:** Fixed in `crates/ui-egui/src/control_io.rs` and `apps/curvebook/src/desktop_host.rs` (`apps/curvebook/tests/recovery_wiring.rs`: `audit_118_mixed_batch_gui_menu_then_create_recovers_exact_sheets`, `audit_118_mixed_batch_save_then_gui_mutation_keeps_dirty_and_recovers`).
 - **`#14` (UI formula argument-order hints):** Fixed in `crates/ui-egui/src/grid_view.rs`, `crates/ui-egui/src/views/mv_formula.rs`, and `crates/ui-egui/src/egui_shell/trailing_studio.rs` alongside the already-fixed evaluator in `crates/transform/tests/r63_window_and_conditional.rs` (`curvebook_ui_egui::grid_view::tests::audit_14_conditional_aggregate_hints_match_evaluator_arg_order`, `crates/ui-egui/tests/r15_3_studio_footer.rs`).
+
+## Later findings (2026-11-20)
+
+These findings were recorded after the remediation summary above. They are open, and the `#1`–`#126` summary does not cover them.
+
+#### 127. Medium · New nonlinear fits default to a log-X model with no check of the X scale
+
+**Reproduced.** Status: open. The Analyze picker's `fit.nonlinear` entry creates `NonlinearFitSpec::new("log_agonist_vs_response_4pl")`, and the engine's `nonlinear` shorthand falls back to the same model when no `equation_id` is given. That model takes X as log10 concentration. The picker offers no equation choice when the fit is created. Users have to open the fit modal afterwards with `Cmd+T` to change the model. Nothing checks whether the X column already holds log values. Raw concentrations therefore produce a meaningless fit that reports as converged with a high R². The engine does flag the fit as ambiguous, and the GUI shows that flag, which is why this is Medium and not High.
+
+- Evidence from `crates/ui-egui/src/dialogs_canvas.rs:458`, `crates/engine/src/cmd/analysis.rs:2565`, and the model's doc comment ("on log10 concentration") at `crates/fit/src/library/pharma.rs:359`. Code cited at `1b54e3748d5ff3de9b08485dd91bd46e01dd5983`. Reproduced through MCP over stdio with `target/release/curvebook-cli` `0.1.0-alpha.2`, built 2026-11-17.
+- Data: an XY table with X = 1e-9, 3e-9, 1e-8, 3e-8, 1e-7, 3e-7, 1e-6 (raw molar concentrations) and Y = 4, 11, 27, 52, 76, 91, 97.
+- With the default model, the result was `UpToDate` with `converged: true` and `ambiguous: true`. The fit gave Bottom −57,112,348, Top 91.87, LogEC50 −5.79e-7 (so EC50 ≈ 1.0), HillSlope 10,054,848, and R² 0.9866. Every CI was open. The result sheet marks the parameters with `~`, the checklist reports "Parameter identifiability: Violated", and the runs test passes. The GUI shows the flag through the Center Stage banner (`crates/ui-egui/src/egui_shell/center_stage.rs:1512`) and the Studio checklist (`crates/ui-egui/src/egui_shell/trailing_studio.rs`), so the bad fit is not silent in the GUI.
+- `agonist_vs_response_4pl` on the same data gave Bottom −0.32, Top 100.77, EC50 2.854e-8, HillSlope 0.926, and R² 0.99985.
+- Secondary: the `scalars` in the `fit.run` payload, which MCP and CLI callers see first, carry no ambiguity marker. The bad fit reads there as R² 0.987 with plain numbers.
+- Regression target: when every X value is positive and the values span orders of magnitude, or the largest X is far outside a plausible log10 range, either default to the non-log model or require an explicit model choice. Warn when a `log_*` model is applied to such X values. Include the ambiguity flag alongside the scalars in the `fit.run` payload.

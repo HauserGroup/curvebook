@@ -628,3 +628,105 @@ Every desktop layout change in `crates/ui-egui` and `apps/curvebook` must pass (
 3. **14-Locale Beta Text Fitting, Symbol Coverage & Ellipsis Gate (`R10.9` / `R15.1`):** Zero unclipped text bleed across all `14` Beta-active LTR/CJK locales (extending to all `16` incl. the `4` RTL locales at **1.0**); mandatory non-missing glyph coverage across UI and scientific symbols (`→ ▾ ● ✓ ± ≤ ≥ μ χ²`); and any ellipsized label sets `state.ellipsized = true` and exposes its full un-truncated label via hover tooltip and accessibility name.
 4. **1,000,000-Cell 60-FPS Virtualization Gate (`R10.22` / `R15.2`):** Matched `1,000,000`-cell `Column` scrolling, selection, and exclusion benchmarks stay strictly inside `<= 16.67 ms` steady-state frame time and `<= 50 ms` input-to-paint latency (`1.0x`/`2.0x` DPI).
 5. **Clean-Room & Brand Gate (`cargo xtask brands && cargo xtask cleanroom && cargo xtask assets`):** Zero competitor trademarks, zero external suite identifiers, zero unattributed assets, and zero bundled font binaries.
+
+---
+
+## 10. Visual Design Rules
+
+> **Status:** Proposed. These rules apply within the structure set by §1–9. Token names below are design names. Values marked *new* are not yet in `LayoutMetrics` or `Tokens` (`crates/ui-egui/src/egui_shell/mod.rs`); until they land there, these rules guide new code only. Existing values map to the §9.1 fields (`font_ui_body_pt`, `font_ui_small_pt`, `font_grid_numeral_pt`, `grid_row_h`, `min_toolbar_target_pt`).
+
+### 10.1 Spacing Scale
+
+All padding, gaps, and margins come from this scale. Any other value needs a code comment explaining why.
+
+| Token | Value | Use |
+|---|---|---|
+| `space.xxs` *new* | `2 pt` | Between an icon and its badge, or inside a control |
+| `space.xs` *new* | `4 pt` | Between an icon and its label, or between controls that work together |
+| `space.sm` *new* | `6 pt` | Between rows in a form, or between controls in one row |
+| `space.md` *new* | `8 pt` | Padding inside a panel or card |
+| `space.lg` *new* | `12 pt` | Between groups in a panel, and dialog margins |
+| `space.xl` *new* | `16 pt` | Between major sections in a dialog or page |
+| `space.xxl` *new* | `24 pt` | Around the edges of the Welcome screen and empty states |
+
+**Rules**
+
+1. **Groups are set apart by space first.** The gap between groups is at least twice the gap inside a group. Add a divider line only when spacing alone cannot separate them.
+2. **One framed box per level.** No frame inside a frame inside a panel. A group inside a frame is shown by spacing and a heading.
+3. Gaps that fall off the scale (for example `3 pt` and `10 pt`) move to the nearest value on the scale.
+
+### 10.2 Type Scale & Text Hierarchy
+
+| Token | Size | Use |
+|---|---|---|
+| `type.caption` *new* | `10.5 pt` | Badges, axis-unit hints, footnotes. Smallest UI text allowed. |
+| `type.small` | `11.5 pt` | Secondary labels, status bar, inspector hints (`font_ui_small_pt`) |
+| `type.numeral` | `12.5 pt` tabular | Grid cells and numbers in results (`font_grid_numeral_pt`) |
+| `type.body` | `13 pt` | Default text for labels, controls, and menus (`font_ui_body_pt`) |
+| `type.section` *new* | `13 pt`, `text_strong` colour | Group headings inside panels and dialogs |
+| `type.title` *new* | `15 pt` | Panel and dialog titles. Replaces the `15 pt` heading size currently set directly in `Tokens::configure_style`. |
+| `type.display` *new* | `18 pt` | Welcome screen and empty-state headlines only |
+
+**Rules**
+
+1. **At most three text levels on one panel at a time.**
+2. **Show hierarchy with colour before size.** Use the existing colour tokens in order: `text_strong`, then `text_primary`, then `text_muted`. Use bold only when a bold font face is loaded; because fonts are discovered on the system at run time, the design must not depend on weight.
+3. **Numbers** use tabular digits, right-aligned, with decimal points lined up (§9.1).
+4. **Labels** use sentence case and are never written in all capitals. The one exception is variable-role badges such as `NUM` and `CAT` (§9.2).
+5. UI text below `10.5 pt` is not allowed. Chart text follows the graph's own format settings instead.
+
+### 10.3 Corner Radius, Strokes & Elevation
+
+| Token | Value | Use |
+|---|---|---|
+| `radius.sm` *new* | `2 pt` | Badges, chips, cell highlights |
+| `radius.md` *new* | `4 pt` | Buttons, inputs, toggles, list rows |
+| `radius.lg` *new* | `6 pt` | Popups, menus, cards, windows (matches the current `window_corner_radius`) |
+
+- **Strokes.** Borders and dividers are a single `1 px` line. Only the keyboard focus ring and the active selection use `2 px`.
+- **Elevation has four levels:**
+  - **Base** (`panel_bg`): docks and toolbars.
+  - **Raised** (`surface_bg` plus a `1 px` `border`): cards and the center stage.
+  - **Floating** (`border` plus a soft shadow): menus, popovers, tooltips.
+  - **Modal** (`scrim` backdrop): dialogs.
+- Shadows are used only at the floating and modal levels, never on content inside a panel.
+- Radii that fall off the scale move to the nearest token. Round shapes such as toggle tracks keep a radius of half their height.
+
+### 10.4 Alignment, Density & Grouping
+
+1. **One left edge per panel.** Labels, headings, and controls start on the same vertical line. Indent only to show nesting, one step of `space.lg`.
+2. **Inspector forms.** Labels sit in a fixed-width left column and are left-aligned. Controls fill the remaining width.
+3. **Rows.** Controls in one row are centred vertically on each other. Text in a row shares a baseline.
+4. **Compact density by default.** Use the §9.1 heights (`grid_row_h`, `min_toolbar_target_pt`). Make room by removing clutter, not by shrinking controls below those targets.
+5. **One primary action per surface.** In dialogs it goes at the trailing end of the button row, with Cancel next to it. Destructive actions are never the primary action.
+6. **Progressive disclosure.** Advanced options go in a collapsed group, not in a second column.
+
+### 10.5 Iconography & Imagery
+
+1. **Sizes.** `16 pt` in toolbars and the action strip, `14 pt` beside text, `12 pt` in badges. Line weight stays the same within a size.
+2. All icons use the `icon` colour token and come from CurveBook's own icon set ([`../../ASSETS.md`](../../ASSETS.md)).
+3. **Icon-only buttons** need a tooltip and an accessible name, the same as ellipsized labels in §9.4.
+4. **State is never shown by colour alone.** Pair colour with an icon, a text change, or a pattern.
+
+### 10.6 Motion & State Feedback
+
+1. **Every interactive widget has distinct looks for six states:** rest, hover, pressed, focused, selected, and disabled, using the existing tokens (`hover_bg`, `active_bg`, `focus_ring`, `text_disabled`).
+2. **Keyboard focus is always visible,** shown by the `2 px` `focus_ring`.
+3. **Motion is short and functional.** At most `150 ms` for hover, expand, and collapse. Data, grid, and chart updates appear immediately, without animation.
+4. When a reduced-motion setting is available, every transition becomes immediate.
+
+### 10.7 Visual Review Checklist
+
+Before a GUI change counts as done, take screenshots at `1280 × 800 pt` and `640 × 420 pt`, in the `Light`, `Dark`, and `HighContrast` themes. Check each one for:
+
+- [ ] Every gap and padding comes from §10.1, and the gap between groups is at least twice the gap inside a group.
+- [ ] Each panel has one left edge, and there are no frames nested beyond one level.
+- [ ] No more than three text levels per panel, and no UI text below `10.5 pt`.
+- [ ] Each surface has exactly one primary action.
+- [ ] Corner radius is the same across each kind of element (§10.3).
+- [ ] Icons are the same size within each area, and every icon-only button has a tooltip.
+- [ ] Colours come only from `Tokens`, with no colours written directly into widget code.
+- [ ] Disabled controls are clearly different from enabled ones in all three themes.
+- [ ] Nothing is cut off without an ellipsis and tooltip (§9.4).
+
+This checklist reviews appearance only. It is not evidence that a person can complete a workflow through the GUI ([`../pitfalls.md`](../pitfalls.md) #6).
