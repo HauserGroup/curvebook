@@ -65,6 +65,7 @@ pub struct ManageVarsModalEguiState {
     pub unit_draft: String,
     pub dragging_level: Option<usize>,
     pub synced_sheet_col: Option<(SheetId, usize)>,
+    pub synced_var_title: Option<String>,
     pub synced_level_key: Option<String>,
     pub level_merge_target_draft: String,
     pub compact_detail_tab: usize,
@@ -125,6 +126,8 @@ pub fn render_manage_vars_modal(
     intents: &mut PendingUiIntents,
 ) -> ManageVarsModalFrameReport {
     if !app.grid.variables_dialog.open {
+        state.synced_sheet_col = None;
+        state.synced_var_title = None;
         return ManageVarsModalFrameReport::default();
     }
 
@@ -159,14 +162,19 @@ pub fn render_manage_vars_modal(
         let body_h = (max_h - 92.0).max(120.0);
         if let Some((ds, mv)) = mv_ctx {
             let sel_col = app.grid.variables_dialog.selected_column.unwrap_or(0).min(mv.variables.len().saturating_sub(1));
-            if state.synced_sheet_col.as_ref() != Some(&(ds.id.clone(), sel_col)) {
+            let col_changed = state.synced_sheet_col.as_ref() != Some(&(ds.id.clone(), sel_col));
+            let live_title = mv.variables.get(sel_col).map(|v| v.title.as_str());
+            if col_changed {
                 state.synced_sheet_col = Some((ds.id.clone(), sel_col));
                 state.selected_level = None;
                 state.synced_level_key = None;
                 state.rename_draft.clear();
                 state.dragging_level = None;
-                if let Some(v) = mv.variables.get(sel_col) {
-                    let (n, u) = split_title_and_unit(&v.title);
+            }
+            if col_changed || state.synced_var_title.as_deref() != live_title {
+                state.synced_var_title = live_title.map(str::to_owned);
+                if let Some(title) = live_title {
+                    let (n, u) = split_title_and_unit(title);
                     state.title_draft = n;
                     state.unit_draft = u;
                 }
