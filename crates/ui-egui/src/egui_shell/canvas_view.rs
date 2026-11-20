@@ -982,7 +982,7 @@ fn extract_x_axis_ticks_pt(gs: &GraphSheet, scene: &ChartScene) -> Vec<(f64, f64
 
 fn gdo_primary_color(gdo: &GraphicalDataObject) -> Option<Rgba8> {
     match gdo {
-        GraphicalDataObject::ScatterAndLine { marker, line, area_fill } => {
+        GraphicalDataObject::ScatterAndLine { marker, line, area_fill, .. } => {
             marker.as_ref().map(|m| m.fill_color).or_else(|| line.as_ref().map(|l| l.color)).or_else(|| area_fill.as_ref().map(|a| a.fill_color))
         }
         GraphicalDataObject::BarWithReplicates { fill_color, .. }

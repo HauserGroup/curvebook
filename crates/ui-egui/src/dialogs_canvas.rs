@@ -4605,6 +4605,7 @@ fn build_gdo_for_option(option_id: &str, color: Rgba8, marker: MarkerStyle, summ
             marker: Some(marker),
             line: Some(ConnectingLineStyle { kind: LineConnectionKind::PointToPoint, dash_style: LineDashStyle::Solid, stroke_width_pt: 1.5, color }),
             area_fill: None,
+            replicate_lines: curvebook_doc::ReplicateLineMode::default(),
         },
         "col.before_after" => GraphicalDataObject::BeforeAfterLines { marker: Some(marker), line_color: color, stroke_width_pt: 1.2 },
         "col.box_whisker" => GraphicalDataObject::BoxAndWhisker {
@@ -4642,9 +4643,17 @@ fn build_gdo_for_option(option_id: &str, color: Rgba8, marker: MarkerStyle, summ
             show_censored_ticks: true,
             show_greenwood_ci: false,
             ci_dashed: true,
+            display_metric: curvebook_doc::SurvivalDisplayMetric::default(),
+            staircase: true,
+            error_display: None,
         },
         "parts.donut" => GraphicalDataObject::PartsOfWhole { layout: PartsOfWholeLayout::Donut, show_center_total: true },
-        _ => GraphicalDataObject::ScatterAndLine { marker: Some(marker), line: None, area_fill: None },
+        _ => GraphicalDataObject::ScatterAndLine {
+            marker: Some(marker),
+            line: None,
+            area_fill: None,
+            replicate_lines: curvebook_doc::ReplicateLineMode::default(),
+        },
     }
 }
 
@@ -6315,7 +6324,15 @@ impl PageLayoutComposerState {
     /// Append a live embedded table item.
     pub fn add_live_table(&mut self, source_sheet_id: SheetId, tab_id: Option<String>, bounds_pt: RectPt) {
         let next = self.items.len() + 1;
-        self.items.push(LayoutItem::LiveTable { id: format!("table-{next}"), source_sheet_id, tab_id, bounds_pt });
+        self.items.push(LayoutItem::LiveTable {
+            id: format!("table-{next}"),
+            source_sheet_id,
+            tab_id,
+            bounds_pt,
+            selected_rows: None,
+            selected_cols: None,
+            style: curvebook_doc::EmbeddedTableStyle::default(),
+        });
     }
 
     /// Append a Markdown / hook-interpolated callout item.

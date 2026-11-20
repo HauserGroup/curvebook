@@ -637,6 +637,14 @@ fn sweep_valid_graph_and_layout_commands(s: &mut Session, covered: &mut BTreeSet
         "layout.applyCanvasPreset",
         json!({ "sheet_id": "lay-1", "preset": "DoubleColumn180mm", "resize_mode": "KeepTypographyPt" }),
     )?;
+    run_valid(
+        s,
+        covered,
+        "edit.pasteResultTable",
+        json!({ "source_sheet_id": "res-fit", "target_sheet_id": "gr-1", "bounds_pt": [40.0, 40.0, 140.0, 60.0] }),
+    )?;
+    run_valid(s, covered, "layout.equalizeScaling", json!({ "sheet_id": "lay-1", "mode": "match_smallest" }))?;
+    run_valid(s, covered, "layout.reorderPanel", json!({ "sheet_id": "lay-1", "panel_index": 0, "action": "bring_to_front" }))?;
     Ok(())
 }
 
@@ -835,9 +843,16 @@ fn run_targeted_hostile_cases(base: &Session, command_id: &str) {
             json!({ "sheet_id": "gr-seed", "result_sheet_id": "res-anova-seed", "alpha_override": 1.5 }),
             json!({ "sheet_id": "gr-seed", "result_sheet_id": "res-anova-seed", "font_size_pt": 0.0 }),
         ],
-        "layout.create" | "layout.addPanel" | "layout.alignOrigins" => vec![
+        "layout.create" | "layout.addPanel" | "layout.alignOrigins" | "layout.equalizeScaling" | "layout.reorderPanel" => vec![
             json!({ "sheet_id": "", "preset": "nonexistent" }),
             json!({ "sheet_id": "missing-layout", "kind": "graph", "graph_sheet_id": "gr-seed", "bounds_pt": ["bad"] }),
+            json!({ "sheet_id": "lay-seed", "mode": "explicit_percent", "percent": 0.5, "panel_index": 999, "action": "invalid_action" }),
+        ],
+        "edit.pasteResultTable" => vec![
+            json!({}),
+            json!({ "source_sheet_id": "missing-res", "target_sheet_id": "gr-seed" }),
+            json!({ "source_sheet_id": "res-anova-seed", "target_sheet_id": "col-1" }),
+            json!({ "source_sheet_id": "res-anova-seed", "target_sheet_id": "gr-seed", "bounds_pt": [10.0, 10.0, -5.0, 20.0] }),
         ],
         "export.png" | "export.tiff" | "graph.exportPng" => vec![
             json!({ "sheet_id": "gr-seed", "width_px": u32::MAX, "height_px": u32::MAX }),

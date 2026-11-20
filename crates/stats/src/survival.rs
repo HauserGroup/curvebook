@@ -2020,6 +2020,19 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
                     if let Some(v) = hr.peto_one_step_hr_opt() {
                         push_scalar(&mut out, "Hazard ratio (Peto one-step)", None, v);
                     }
+                    let hr_tab = build_tab(
+                        "hazard-ratio",
+                        "Hazard ratio",
+                        ResultTabKind::ParametersAndConfidenceIntervals,
+                        vec![String::from("Hazard ratio"), format!("{}% CI", confidence.percent())],
+                        vec![String::from("Log-rank"), String::from("Mantel-Haenszel"), String::from("Peto one-step")],
+                        vec![
+                            vec![opt_num_cell(hr.log_rank_hr_opt()), opt_ci_cell(hr.log_rank_ci)],
+                            vec![opt_num_cell(hr.mantel_haenszel_hr_opt()), opt_ci_cell(hr.mantel_haenszel_ci)],
+                            vec![opt_num_cell(hr.peto_one_step_hr_opt()), opt_ci_cell(hr.peto_one_step_ci)],
+                        ],
+                    );
+                    out.tabs.push(hr_tab);
                 } else if refs.len() >= 3 {
                     append_survival_pairwise(&mut out, &indices, &km_results, &cohort_obs, multiplicity, p_fmt, confidence)?;
                 }

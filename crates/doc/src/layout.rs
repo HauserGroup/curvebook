@@ -5,6 +5,7 @@
 use curvebook_palette::Rgba8;
 
 use crate::error::{DocError, validate_title};
+use crate::graph::EmbeddedTableStyle;
 use crate::ids::{FloatingNote, HookSource, RectPt, SheetId, SizePt, extract_template_hooks};
 
 /// Physical measurement unit for figure and page dimensions (`docs/implementation/graphing-and-layouts.md` §6).
@@ -241,6 +242,15 @@ pub enum LayoutItem {
         tab_id: Option<String>,
         /// Bounding box on the layout page in typographic points (`width > 0`, `height > 0`).
         bounds_pt: RectPt,
+        /// Optional zero-based row subset to display; `None` includes all rows.
+        #[serde(default)]
+        selected_rows: Option<Vec<usize>>,
+        /// Optional zero-based column subset to display; `None` includes all columns.
+        #[serde(default)]
+        selected_cols: Option<Vec<usize>>,
+        /// Table formatting, header visibility, transposition, and border styling.
+        #[serde(default)]
+        style: EmbeddedTableStyle,
     },
     /// Free-placed Markdown caption or callout box supporting inline `{{info:...}}` and `{{result:...}}` hooks.
     TextCallout {
@@ -350,9 +360,12 @@ impl LayoutSpec {
                         return Some("spec.items.live_graph.scale_percent");
                     }
                 }
-                LayoutItem::LiveTable { bounds_pt, .. } => {
+                LayoutItem::LiveTable { bounds_pt, style, .. } => {
                     if !rect_is_finite(*bounds_pt) {
                         return Some("spec.items.live_table.bounds_pt");
+                    }
+                    if let Some(field) = style.first_non_finite_float("spec.items.live_table.style") {
+                        return Some(field);
                     }
                 }
                 LayoutItem::TextCallout { bounds_pt, font_size_pt, .. } => {
@@ -393,10 +406,11 @@ impl LayoutSpec {
                         return Err(geom_err("layout live_graph scale_percent must be finite and > 0"));
                     }
                 }
-                LayoutItem::LiveTable { bounds_pt, .. } => {
+                LayoutItem::LiveTable { bounds_pt, style, .. } => {
                     if bounds_pt.width <= 0.0 || bounds_pt.height <= 0.0 {
                         return Err(geom_err("layout item bounds width and height must be finite and > 0"));
                     }
+                    style.validate(crate::TableKind::Column)?;
                 }
                 LayoutItem::TextCallout { bounds_pt, font_size_pt, .. } => {
                     if bounds_pt.width <= 0.0 || bounds_pt.height <= 0.0 {

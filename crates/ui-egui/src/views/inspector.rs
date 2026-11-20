@@ -233,7 +233,7 @@ fn series_marker_style(s: &SeriesSpec) -> MarkerStyle {
 
 fn set_series_primary_color(s: &mut SeriesSpec, rgba: Rgba8) {
     match &mut s.gdo {
-        GraphicalDataObject::ScatterAndLine { marker, line, area_fill } => {
+        GraphicalDataObject::ScatterAndLine { marker, line, area_fill, .. } => {
             if let Some(m) = marker {
                 m.fill_color = rgba;
                 m.stroke_color = rgba;
@@ -329,6 +329,7 @@ fn retopologize_series(series: &[SeriesSpec], topo: &str) -> Vec<SeriesSpec> {
                     marker: Some(MarkerStyle { fill_color: col, stroke_color: col, ..cur_marker }),
                     line: Some(default_connecting_line(col)),
                     area_fill: None,
+                    replicate_lines: curvebook_doc::ReplicateLineMode::default(),
                 },
                 _ => s.gdo.clone(),
             };

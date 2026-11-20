@@ -298,6 +298,7 @@ fn xy_all_markers_splines_area_fill_and_okabe_ito() {
                 color,
             }),
             area_fill: (idx == 0).then_some(AreaFillSpec { baseline_y: 0.0, fill_color: color.with_alpha(55) }),
+            replicate_lines: curvebook_doc::ReplicateLineMode::default(),
         };
     }
 
@@ -398,6 +399,7 @@ fn xy_broken_axes_split_curves_and_emit_log_warnings() {
             color: Rgba8::BLACK,
         }),
         area_fill: None,
+        replicate_lines: curvebook_doc::ReplicateLineMode::default(),
     };
     graph.spec.series[0].regression_overlay = Some(RegressionOverlaySpec {
         result_sheet_id: SheetId::new("fit-brk"),

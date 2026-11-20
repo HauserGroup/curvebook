@@ -1635,6 +1635,9 @@ mod tests {
             result_sheet_id: SheetId::new("r-1"),
             tab_id: Some("summary".into()),
             bounds_pt: DocRectPt { x: 200.0, y: 60.0, width: 90.0, height: 50.0 },
+            selected_rows: None,
+            selected_cols: None,
+            style: curvebook_doc::EmbeddedTableStyle::default(),
         });
         spec
     }
@@ -1700,6 +1703,9 @@ mod tests {
                     source_sheet_id: SheetId::new("t-1"),
                     tab_id: Some("summary".into()),
                     bounds_pt: DocRectPt { x: 300.0, y: 60.0, width: 120.0, height: 80.0 },
+                    selected_rows: None,
+                    selected_cols: None,
+                    style: curvebook_doc::EmbeddedTableStyle::default(),
                 },
             ],
             ..LayoutSpec::default()

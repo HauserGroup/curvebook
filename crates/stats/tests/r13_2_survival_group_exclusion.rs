@@ -9,8 +9,8 @@
 //! arithmetic on identical inputs). The datasets are original synthetic values.
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, Cell, ChecklistStatus, ConfidenceLevel, DataSheet, MultiplicitySpec, ResultSheet, SheetId, SurvivalAnalysisSpec,
-    SurvivalObservation, SurvivalStatus, SurvivalTable, TableArchetype,
+    AnalysisKind, AnalysisSpec, Cell, ChecklistStatus, CiBound, ConfidenceLevel, DataSheet, MultiplicitySpec, ResultCell, ResultSheet, ResultTabKind,
+    SheetId, SurvivalAnalysisSpec, SurvivalObservation, SurvivalStatus, SurvivalTable, TableArchetype,
 };
 use curvebook_stats::survival::two_cohort_hazard_ratio;
 use curvebook_stats::{StatsError, run_analysis};
@@ -122,6 +122,10 @@ fn assert_two_arm_equivalent(reduced: &ResultSheet, two_arm: &ResultSheet, label
     let summary = reduced.tabs.iter().find(|t| t.id == "km-summary").unwrap();
     assert_eq!(summary.row_labels, vec!["Arm A".to_owned(), "Arm B".to_owned()], "{label}: summary rows");
     assert!(reduced.tabs.iter().all(|t| t.id != "survival-pairwise"), "{label}: no 3-arm pairwise tab");
+    let hr_reduced = reduced.tabs.iter().find(|t| t.id == "hazard-ratio").expect("two-arm KM must emit hazard-ratio tab");
+    let hr_two = two_arm.tabs.iter().find(|t| t.id == "hazard-ratio").expect("two-arm reference hazard-ratio tab");
+    assert_eq!(hr_reduced.kind, ResultTabKind::ParametersAndConfidenceIntervals);
+    assert_eq!(hr_reduced.rows, hr_two.rows, "{label}: hazard-ratio tab parity");
     let cmp = reduced.tabs.iter().find(|t| t.id == "curve-comparison").unwrap();
     assert_eq!(cmp.rows.len(), 2, "{label}: log-rank + Gehan only; trend needs 3 arms");
     assert_eq!(reduced.fitted_curves.len(), 2, "{label}: two KM curves");
@@ -194,4 +198,74 @@ fn every_arm_without_data_is_empty_input() {
         }
     }
     assert!(matches!(run_analysis(&s, &km_spec()), Err(StatsError::EmptyInput)));
+}
+
+#[test]
+fn two_arm_emits_hazard_ratio_tab_with_95ci() {
+    let rs = run_analysis(&sheet(ArmC::Absent), &km_spec()).unwrap();
+    let hr = two_cohort_hazard_ratio(&obs(&ARM_A), &obs(&ARM_B), ConfidenceLevel::new(95.0).unwrap()).unwrap();
+    let hr_tab = rs.tabs.iter().find(|t| t.id == "hazard-ratio").expect("two-arm KM must emit hazard-ratio tab");
+    assert_eq!(hr_tab.kind, ResultTabKind::ParametersAndConfidenceIntervals);
+    assert_eq!(hr_tab.column_headers, vec!["Hazard ratio".to_owned(), "95% CI".to_owned()]);
+    assert_eq!(hr_tab.row_labels, vec!["Log-rank".to_owned(), "Mantel-Haenszel".to_owned(), "Peto one-step".to_owned()]);
+    assert_eq!(hr_tab.rows.len(), 3);
+
+    let check_row = |row_idx: usize, expected_hr: f64, expected_ci: (f64, f64)| {
+        let ResultCell::Number { value, .. } = hr_tab.rows[row_idx][0] else {
+            panic!("expected finite HR number in row {row_idx}: {:?}", hr_tab.rows[row_idx][0]);
+        };
+        assert!((value - expected_hr).abs() <= TOL, "row {row_idx} HR mismatch: {value} vs {expected_hr}");
+        let ResultCell::ConfidenceInterval { lower: CiBound::Finite(lo), upper: CiBound::Finite(hi) } = hr_tab.rows[row_idx][1] else {
+            panic!("expected finite HR 95% CI in row {row_idx}: {:?}", hr_tab.rows[row_idx][1]);
+        };
+        assert!((lo - expected_ci.0).abs() <= TOL && (hi - expected_ci.1).abs() <= TOL, "row {row_idx} CI mismatch");
+    };
+
+    check_row(0, hr.log_rank_hr, hr.log_rank_ci.unwrap());
+    check_row(1, hr.mantel_haenszel_hr, hr.mantel_haenszel_ci.unwrap());
+    check_row(2, hr.peto_one_step_hr, hr.peto_one_step_ci.unwrap());
+}
+
+#[test]
+fn hundred_percent_censored_arm_produces_flat_survival_and_valid_nar() {
+    // Arm 0 has events; Arm 1 is 100% censored across follow-up times with blank spacer rows.
+    let mut t = SurvivalTable::new(2, 10).unwrap();
+    t.cohorts[0].title = "Treated".into();
+    t.cohorts[1].title = "All-Censored".into();
+
+    let arm_events = [(1.0, 1.0), (4.0, 1.0), (8.0, 0.0), (10.0, 1.0)];
+    let mut r = 0;
+    for &(time, st) in &arm_events {
+        t.times[r] = Cell::number(time);
+        t.cohorts[0].cells[r][0] = Cell::number(st);
+        r += 1;
+    }
+    // Two blank spacer rows between cohorts.
+    r += 2;
+    for &time in &[2.0, 5.0, 9.0, 14.0] {
+        t.times[r] = Cell::number(time);
+        t.cohorts[1].cells[r][0] = Cell::number(0.0);
+        r += 1;
+    }
+
+    let ds = DataSheet::new(SheetId::new("km-censored"), "All-censored arm", TableArchetype::Survival(t)).unwrap();
+    let mut spec = km_spec();
+    spec.source_sheet_id = SheetId::new("km-censored");
+    let rs = run_analysis(&ds, &spec).unwrap();
+
+    let summary = rs.tabs.iter().find(|t| t.id == "km-summary").unwrap();
+    assert_eq!(summary.row_labels, vec!["Treated".to_owned(), "All-Censored".to_owned()]);
+    assert!(matches!(summary.rows[1][1], ResultCell::Number { value, .. } if value == 0.0), "expected 0 events in all-censored arm");
+    assert!(matches!(summary.rows[1][2], ResultCell::Number { value, .. } if value == 4.0), "expected 4 censored observations");
+    assert!(matches!(summary.rows[1][3], ResultCell::Empty), "all-censored arm has undefined median");
+
+    let cens_curve = rs.fitted_curves.iter().find(|c| c.data_set_index == 1).expect("curve for 100%-censored arm");
+    assert!(cens_curve.points.iter().all(|p| p.y.is_finite() && (p.y - 1.0).abs() <= TOL));
+    assert!((cens_curve.points.last().unwrap().x - 14.0).abs() <= TOL);
+
+    let nar = rs.tabs.iter().find(|t| t.id == "number-at-risk").unwrap();
+    let cens_nar: Vec<_> = nar.rows.iter().filter(|row| matches!(&row[0], ResultCell::Text(s) if s == "All-Censored")).collect();
+    assert_eq!(cens_nar.len(), 4);
+    assert!(matches!(cens_nar[0][2], ResultCell::Number { value, .. } if (value - 4.0).abs() <= TOL));
+    assert!(matches!(cens_nar[3][2], ResultCell::Number { value, .. } if (value - 1.0).abs() <= TOL));
 }

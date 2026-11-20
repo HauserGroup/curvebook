@@ -633,6 +633,7 @@ fn r2_s08_03_point_override_subcol_targets_single_replicate() -> TestResult {
         }),
         line: None,
         area_fill: None,
+        replicate_lines: curvebook_doc::ReplicateLineMode::default(),
     };
     xy_gs.spec.point_overrides = vec![
         PointStyleOverride { series_index: 0, point_index: 1, subcol: Some(1), hidden: true, ..PointStyleOverride::default() },

@@ -4252,6 +4252,24 @@ pub const CATALOG: &[CatalogEntry] = &[
         ar: "إعادة",
         he: "בצע שוב",
     ]),
+    entry!("cmd.edit.pasteResultTable" => [
+        en: "Paste Result Table",
+        de: "Ergebnistabelle einfügen",
+        es: "Pegar tabla de resultados",
+        fr: "Coller la table de résultats",
+        ja: "結果テーブルを貼り付け",
+        ko: "결과 표 붙여넣기",
+        pt_br: "Colar tabela de resultados",
+        zh_cn: "粘贴结果表",
+        zh_tw: "貼上結果表",
+        it: "Incolla tabella dei risultati",
+        nl: "Resultatentabel plakken",
+        pl: "Wklej tabelę wyników",
+        ru: "Вставить таблицу результатов",
+        tr: "Sonuç Tablosunu Yapıştır",
+        ar: "لصق جدول النتائج",
+        he: "הדבק טבלת תוצאות",
+    ]),
     entry!("cmd.sheet.createData" => [
         en: "New Data Table",
         de: "Neue Datentabelle",
@@ -5566,6 +5584,42 @@ pub const CATALOG: &[CatalogEntry] = &[
         ar: "تطبيق إعداد لوحة التخطيط",
         he: "החל תבנית קנבס פריסה",
     ]),
+    entry!("cmd.layout.equalizeScaling" => [
+        en: "Equalize Scaling",
+        de: "Skalierung angleichen",
+        es: "Igualar escala",
+        fr: "Égaliser l'échelle",
+        ja: "スケーリングを揃える",
+        ko: "배율 균일화",
+        pt_br: "Equalizar escala",
+        zh_cn: "统一缩放比例",
+        zh_tw: "統一縮放比例",
+        it: "Uniforma scala",
+        nl: "Schaal gelijktrekken",
+        pl: "Wyrównaj skalowanie",
+        ru: "Выровнять масштаб",
+        tr: "Ölçeklendirmeyi Eşitle",
+        ar: "موازنة القياس",
+        he: "השווה קנה מידה",
+    ]),
+    entry!("cmd.layout.reorderPanel" => [
+        en: "Reorder Panel",
+        de: "Panel anordnen",
+        es: "Reordenar panel",
+        fr: "Réorganiser le panneau",
+        ja: "パネルの重ね順を変更",
+        ko: "패널 순서 변경",
+        pt_br: "Reordenar painel",
+        zh_cn: "调整面板顺序",
+        zh_tw: "調整面板順序",
+        it: "Riordina pannello",
+        nl: "Paneelvolgorde wijzigen",
+        pl: "Zmień kolejność panelu",
+        ru: "Изменить порядок панели",
+        tr: "Panel Sırasını Değiştir",
+        ar: "إعادة ترتيب اللوحة",
+        he: "סדר פאנל מחדש",
+    ]),
     entry!("cmd.export.svg" => [
         en: "Export SVG",
         de: "SVG exportieren",
@@ -6181,8 +6235,8 @@ mod tests {
         let expected = ["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr", "ar", "he"];
         assert_eq!(LOCALES, &expected);
         assert_eq!(LOCALES.len(), 16);
-        assert_eq!(catalog_len(), 779);
-        assert_eq!(LOCALES.len() * catalog_len(), 12_464);
+        assert_eq!(catalog_len(), 782);
+        assert_eq!(LOCALES.len() * catalog_len(), 12_512);
         assert!(!CATALOG.is_empty());
 
         let mut seen_keys = HashSet::new();
@@ -6219,7 +6273,7 @@ mod tests {
 
     fn verify_command_catalog_coverage() {
         let engine_specs: Vec<_> = curvebook_engine::cmd::registry().specs().collect();
-        assert_eq!(engine_specs.len(), 97, "expected 97 engine CommandSpec entries");
+        assert_eq!(engine_specs.len(), 100, "expected 100 engine CommandSpec entries");
         assert_eq!(crate::menus::UI_COMMANDS.len(), 47, "expected 47 UiCommandSpec entries");
 
         let mut missing_cmd = Vec::new();

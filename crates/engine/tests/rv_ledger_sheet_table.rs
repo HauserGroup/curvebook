@@ -265,6 +265,9 @@ fn rv61_sheet_delete_checks_and_prunes_result_backed_graph_overlays_and_annotati
         result_sheet_id: SheetId::new("res-anova"),
         tab_id: None,
         bounds_pt: RectPt::new(10.0, 10.0, 120.0, 60.0),
+        selected_rows: None,
+        selected_cols: None,
+        style: curvebook_doc::EmbeddedTableStyle::default(),
     });
     gspec.annotations.push(GraphAnnotation::ModelEquation {
         result_sheet_id: SheetId::new("res-fit"),

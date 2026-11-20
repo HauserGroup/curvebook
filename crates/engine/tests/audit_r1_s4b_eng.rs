@@ -420,6 +420,9 @@ fn build_colliding_source_archive_b64() -> String {
         source_sheet_id: SheetId::new("res-1"),
         tab_id: None,
         bounds_pt: RectPt::new(210.0, 0.0, 200.0, 150.0),
+        selected_rows: None,
+        selected_cols: None,
+        style: curvebook_doc::EmbeddedTableStyle::default(),
     });
     src_layout.items.push(LayoutItem::TextCallout {
         id: String::from("tc-1"),

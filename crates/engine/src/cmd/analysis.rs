@@ -4,14 +4,14 @@ use std::collections::HashSet;
 
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, BaselineOperation, BlandAltmanSpec, CellValue, ClusterDistance, ClusterLinkage, ContingencyMethod, ContingencySpec,
-    CoxTieMethod, DataSheet, DerivedColumnFormula, DescriptiveSpec, ErrorCode, ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily,
-    GlmSpec, HookSource, KappaWeighting, LinearRegressionSpec, MathTransformPreset, MixedModelDfMethod, ModelComparisonSpec, MultipleRowTestsSpec,
-    MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor,
-    OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueStackMethod, PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec,
-    PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget, PowerTailMode, PowerTestFamily, ProjectDocument,
-    RepeatedMeasuresDesign, ResidualCovariance, ResultSheet, ResultStatus, RocCiMethod, RocSpec, SheetId, SimulationNoise, SumOfSquaresType,
-    SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableColumn, VariableRole,
-    WeightingScheme, XyTable,
+    CoxTieMethod, DataSheet, DerivedColumnFormula, DescriptiveSpec, DocError, ErrorCode, ErrorPropagationMode, FactorialAnovaSpec, FitMethod,
+    GlmFamily, GlmSpec, GraphSheet, HookSource, KappaWeighting, LinearRegressionSpec, MAX_SHEETS_PER_PROJECT, MathTransformPreset,
+    MixedModelDfMethod, ModelComparisonSpec, MultipleRowTestsSpec, MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec, MultivariateSpec,
+    NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueStackMethod, PValueStackSpec,
+    ParameterRule, ParameterScope, PassingBablokSpec, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget, PowerTailMode,
+    PowerTestFamily, ProjectDocument, RepeatedMeasuresDesign, ResidualCovariance, ResultSheet, ResultStatus, RocCiMethod, RocSpec, SheetId,
+    SimulationNoise, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec,
+    VariableColumn, VariableRole, WeightingScheme, XyTable,
 };
 use curvebook_fit::{get_builtin_model, resolve_model_from_spec};
 use curvebook_format::{CsvOptions, export_result_sheet_json, export_result_sheet_tidy_csv, export_result_tab_csv};
@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use super::export::{de_opt_usize, write_atomic_output_file};
-use super::helpers::{next_unique_sheet_id, parse_sheet_id, require_analyzable_data_sheet, require_result_sheet};
+use super::helpers::{next_unique_sheet_id, parse_sheet_id, require_analyzable_data_sheet, require_result_sheet, sheet_id_exists};
 use super::params::{
     any_json_schema, array_schema, bool_schema, deserialize_strict, int_schema, non_empty_str_schema, nullable_schema, num_schema,
     obj_schema_with_aliases, parse_params, str_schema,
@@ -356,6 +356,10 @@ struct RunAnalysisParams {
     selected_data_sets: Option<Vec<Value>>,
     #[serde(default)]
     p_value_format: Option<Value>,
+    #[serde(default)]
+    create_graph: Option<bool>,
+    #[serde(default)]
+    graph_sheet_id: Option<String>,
     #[serde(flatten)]
     extra: Map<String, Value>,
 }
@@ -446,11 +450,22 @@ fn schema_analysis_base(summary: &str, include_fit_extras: bool, include_stats_e
 }
 
 fn schema_transform_run() -> Value {
-    schema_analysis_base(
+    let mut schema = schema_analysis_base(
         "Transform kind (`math`, `normalize`, `remove_baseline`, `transpose`, `prune_rows`, `select_and_transform`, `simulate`, `random_sample`) or typed object",
         false,
         false,
-    )
+    );
+    if let Some(props) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+        props.insert(
+            String::from("create_graph"),
+            nullable_schema(bool_schema("When true, create a reactive GraphSheet bound to the transform output")),
+        );
+        props.insert(
+            String::from("graph_sheet_id"),
+            nullable_schema(non_empty_str_schema("Optional explicit GraphSheet ID created when `create_graph` is true")),
+        );
+    }
+    schema
 }
 
 fn schema_stats_run() -> Value {
@@ -755,6 +770,23 @@ fn run_analysis_with_domain(
     let spec = build_analysis_spec(doc, &parsed, &combined, domain)?;
     let sheet_id = spec.id.clone();
     let overwrite = parsed.overwrite.unwrap_or(false);
+    let wants_create_graph = command_id == "transform.run" && parsed.create_graph.unwrap_or(false);
+    let explicit_graph_id = if wants_create_graph {
+        let candidate_graph_id = parsed.graph_sheet_id.as_deref().map(parse_sheet_id).transpose()?;
+        if let Some(ref gid) = candidate_graph_id
+            && (gid == &sheet_id || sheet_id_exists(doc, gid))
+        {
+            return Err(DocError::DuplicateSheetId { sheet_id: gid.clone() }.into());
+        }
+        let result_added = usize::from(doc.sheet_section(&sheet_id).is_none());
+        let needed_total = doc.total_sheet_count().saturating_add(result_added).saturating_add(1);
+        if needed_total > MAX_SHEETS_PER_PROJECT {
+            return Err(DocError::TooManySheets { count: needed_total, max: MAX_SHEETS_PER_PROJECT }.into());
+        }
+        candidate_graph_id
+    } else {
+        None
+    };
 
     if doc.sheet_section(&sheet_id).is_some() {
         if overwrite && let Some(existing) = doc.result_sheet_mut(&sheet_id) {
@@ -774,8 +806,31 @@ fn run_analysis_with_domain(
     let recalculated = dag::recalculate_dirty_with_report(doc, std::slice::from_ref(&sheet_id))?.total_updated();
     let res = require_result_sheet(doc, &sheet_id)?;
     ensure_result_succeeded(res)?;
+    let mut payload = result_summary_payload(res, recalculated);
+    let eff_title = res.analysis.effective_title().to_owned();
 
-    Ok(CommandOutcome::mutated(command_id, format!("ran {}", res.analysis.effective_title()), result_summary_payload(res, recalculated)))
+    if wants_create_graph {
+        let graph_id = match explicit_graph_id {
+            Some(gid) => gid,
+            None => next_unique_sheet_id(doc, "graph")?,
+        };
+        let (ds, _) = super::graph::resolve_graph_create_source_sheet(doc, &sheet_id)?;
+        let mut graph = GraphSheet::new_uninitialized_for_data(graph_id.clone(), &ds)?;
+        graph.title.clone_from(&eff_title);
+        graph.spec.title.clone_from(&eff_title);
+        graph.initialized = true;
+        graph.spec.primary_source_sheet_id = sheet_id.clone();
+        for s in &mut graph.spec.series {
+            s.source_sheet_id = sheet_id.clone();
+        }
+        super::graph::validate_graph_spec_in_doc(doc, &graph_id, &graph.spec)?;
+        doc.add_graph_sheet(graph)?;
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert(String::from("graph_sheet_id"), Value::String(graph_id.as_str().to_owned()));
+        }
+    }
+
+    Ok(CommandOutcome::mutated(command_id, format!("ran {eff_title}"), payload))
 }
 
 fn run_existing_or_project_analysis(doc: &mut ProjectDocument, command_id: &str, raw_id: Option<&str>) -> Result<CommandOutcome, EngineError> {

@@ -122,6 +122,7 @@ fn multi_hop_data_transform_fit_and_downstream_graph_reactivity() {
         }),
         line: None,
         area_fill: None,
+        replicate_lines: curvebook_doc::ReplicateLineMode::default(),
     };
     gsheet.spec.series[0].regression_overlay = Some(RegressionOverlaySpec {
         result_sheet_id: SheetId::new("res-fit"),
@@ -953,6 +954,9 @@ fn cycle_detection_and_atomic_rollback_across_all_topologies() {
         source_sheet_id: SheetId::new("layout-self"),
         tab_id: None,
         bounds_pt: RectPt::new(0.0, 0.0, 100.0, 100.0),
+        selected_rows: None,
+        selected_cols: None,
+        style: curvebook_doc::EmbeddedTableStyle::default(),
     });
     doc_self_layout.layout_sheets.push(LayoutSheet::new("layout-self", "Self", lspec).expect("layout"));
     let snap = doc_self_layout.clone();

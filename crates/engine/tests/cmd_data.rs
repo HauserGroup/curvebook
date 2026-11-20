@@ -321,6 +321,9 @@ fn sheet_clone_pipeline_and_duplicate_family_for_fresh_assay_run() {
         source_sheet_id: SheetId::new("res-base"),
         tab_id: None,
         bounds_pt: RectPt::new(220.0, 10.0, 200.0, 150.0),
+        selected_rows: None,
+        selected_cols: None,
+        style: curvebook_doc::EmbeddedTableStyle::default(),
     });
     let layout = LayoutSheet::new(SheetId::new("layout-base"), "Figure 1", layout_spec).expect("layout");
     doc.add_layout_sheet(layout).expect("add layout");

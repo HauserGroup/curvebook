@@ -14,10 +14,10 @@ use super::graph::{
     parse_canvas_resize_mode, parse_figure_canvas_preset, parse_rect_pt, parse_rgba8, safe_scale_ratio, scale_finite, scale_rect_pt,
     schema_apply_canvas_preset,
 };
-use super::helpers::{next_unique_sheet_id, parse_sheet_id, require_layout_sheet, require_layout_sheet_mut};
+use super::helpers::{next_unique_sheet_id, parse_sheet_id, require_graph_sheet, require_layout_sheet, require_layout_sheet_mut};
 use super::params::{
-    any_json_schema, array_schema, bool_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema_with_aliases, parse_params,
-    str_schema,
+    any_json_schema, array_schema, bool_schema, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema,
+    obj_schema_with_aliases, parse_params, str_schema,
 };
 use super::{CommandGroup, CommandSpec, Ctx, Effects};
 use crate::{CommandOutcome, EngineError, Session};
@@ -95,6 +95,32 @@ static SPECS: &[CommandSpec] = &[
         input_schema: schema_apply_canvas_preset,
         enabled: has_layout_sheet,
         run: run_layout_apply_canvas_preset,
+    },
+    CommandSpec {
+        id: "layout.equalizeScaling",
+        label: "Equalize Scaling",
+        menu_path: "Arrange/Equalize Scaling",
+        shortcut: "",
+        summary: "Equalize rendered inner plot scaling across live graph panels on a layout sheet.",
+        beginner: "Resizes selected or all graph panels on a layout to match the smallest, largest, or an explicit scale percentage.",
+        group: CommandGroup::Layout,
+        effects: MUTATE_IDEMPOTENT,
+        input_schema: schema_layout_equalize_scaling,
+        enabled: has_layout_sheet,
+        run: run_layout_equalize_scaling,
+    },
+    CommandSpec {
+        id: "layout.reorderPanel",
+        label: "Reorder Panel",
+        menu_path: "Arrange/Reorder Panel",
+        shortcut: "",
+        summary: "Change the z-order stacking depth of a panel on a layout sheet.",
+        beginner: "Moves a graph, table, or text panel forward or backward in the layout paint order.",
+        group: CommandGroup::Layout,
+        effects: Effects::MUTATES_DOCUMENT,
+        input_schema: schema_layout_reorder_panel,
+        enabled: has_layout_sheet,
+        run: run_layout_reorder_panel,
     },
 ];
 
@@ -275,6 +301,96 @@ struct LayoutApplyCanvasPresetParams {
     resize_mode: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct LayoutEqualizeScalingParams {
+    #[serde(alias = "id")]
+    sheet_id: String,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    percent: Option<f64>,
+    #[serde(default)]
+    panel_ids: Option<Vec<String>>,
+    #[serde(default)]
+    panel_indices: Option<Vec<usize>>,
+}
+
+fn schema_layout_equalize_scaling() -> Value {
+    obj_schema_with_aliases(
+        vec![
+            ("sheet_id", non_empty_str_schema("Target layout sheet ID")),
+            (
+                "mode",
+                nullable_schema(enum_str_schema(
+                    "Scaling equalization rule (`match_smallest`, `match_largest`, or `explicit_percent`)",
+                    &["match_smallest", "match_largest", "explicit_percent", "MatchSmallest", "MatchLargest", "ExplicitPercent"],
+                )),
+            ),
+            (
+                "percent",
+                nullable_schema(num_schema("Explicit target scale percentage in [5.0, 500.0] for `explicit_percent`", Some(5.0), Some(500.0))),
+            ),
+            (
+                "panel_ids",
+                nullable_schema(array_schema("Optional subset of live graph panel IDs to equalize", non_empty_str_schema("Panel ID"), None, None)),
+            ),
+            (
+                "panel_indices",
+                nullable_schema(array_schema(
+                    "Optional subset of zero-based panel indices to equalize",
+                    int_schema("Panel index", Some(0), None),
+                    None,
+                    None,
+                )),
+            ),
+        ],
+        &["sheet_id"],
+        vec![("sheet_id", &["id"])],
+        false,
+    )
+}
+
+#[derive(Debug, Deserialize)]
+struct LayoutReorderPanelParams {
+    #[serde(alias = "id")]
+    sheet_id: String,
+    #[serde(default, deserialize_with = "de_opt_usize")]
+    panel_index: Option<usize>,
+    #[serde(default)]
+    panel_id: Option<String>,
+    #[serde(alias = "operation", alias = "direction", alias = "order")]
+    action: String,
+}
+
+fn schema_layout_reorder_panel() -> Value {
+    obj_schema_with_aliases(
+        vec![
+            ("sheet_id", non_empty_str_schema("Target layout sheet ID")),
+            ("panel_index", nullable_schema(int_schema("Zero-based index in `layout.spec.items`", Some(0), None))),
+            ("panel_id", nullable_schema(non_empty_str_schema("Panel ID in `layout.spec.items`"))),
+            (
+                "action",
+                enum_str_schema(
+                    "Z-order stacking action",
+                    &[
+                        "bring_to_front",
+                        "bring_forward",
+                        "send_backward",
+                        "send_to_back",
+                        "BringToFront",
+                        "BringForward",
+                        "SendBackward",
+                        "SendToBack",
+                    ],
+                ),
+            ),
+        ],
+        &["sheet_id", "action"],
+        vec![("sheet_id", &["id"]), ("action", &["operation", "direction", "order"])],
+        false,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Command Runners
 // ---------------------------------------------------------------------------
@@ -308,7 +424,7 @@ fn run_layout_create(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, En
     ))
 }
 
-fn validate_layout_spec_in_doc(
+pub(super) fn validate_layout_spec_in_doc(
     doc: &curvebook_doc::ProjectDocument,
     layout_id: &curvebook_doc::SheetId,
     spec: &LayoutSpec,
@@ -472,7 +588,15 @@ fn run_layout_add_panel(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
                     .with_remediation("Verify `source_sheet_id` references an existing sheet in the project.")
                     .with_details(json!({ "pointer": "/source_sheet_id", "sheet_id": source_id.as_str() })));
             }
-            LayoutItem::LiveTable { id: panel_id, source_sheet_id: source_id, tab_id: params.tab_id, bounds_pt }
+            LayoutItem::LiveTable {
+                id: panel_id,
+                source_sheet_id: source_id,
+                tab_id: params.tab_id,
+                bounds_pt,
+                selected_rows: None,
+                selected_cols: None,
+                style: curvebook_doc::EmbeddedTableStyle::default(),
+            }
         }
         "text" | "callout" | "text_callout" => LayoutItem::TextCallout {
             id: panel_id,
@@ -576,6 +700,255 @@ fn run_layout_apply_canvas_preset(ctx: &mut Ctx<'_>, raw: Value) -> Result<Comma
             "issues": issues,
         }),
     ))
+}
+
+#[derive(Debug, Clone, Copy)]
+enum EqualizeScaleMode {
+    MatchSmallest,
+    MatchLargest,
+    ExplicitPercent(f64),
+}
+
+fn parse_equalize_scale_mode(mode: Option<&str>, percent: Option<f64>) -> Result<EqualizeScaleMode, EngineError> {
+    let norm = mode.map(|m| m.trim().chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect::<String>());
+    match norm.as_deref() {
+        None => {
+            if let Some(p) = percent {
+                validate_scale_percent_range(p)?;
+                Ok(EqualizeScaleMode::ExplicitPercent(p))
+            } else {
+                Ok(EqualizeScaleMode::MatchSmallest)
+            }
+        }
+        Some("matchsmallest" | "smallest") => Ok(EqualizeScaleMode::MatchSmallest),
+        Some("matchlargest" | "largest") => Ok(EqualizeScaleMode::MatchLargest),
+        Some("explicitpercent" | "explicit") => {
+            let p = percent.ok_or_else(|| {
+                EngineError::with_code(ErrorCode::BadInput, "`explicit_percent` mode requires `percent` in [5.0, 500.0]")
+                    .with_details(json!({ "pointer": "/percent" }))
+            })?;
+            validate_scale_percent_range(p)?;
+            Ok(EqualizeScaleMode::ExplicitPercent(p))
+        }
+        Some(other) => Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid `equalizeScaling` mode `{other}`"))
+            .with_details(json!({ "pointer": "/mode" }))),
+    }
+}
+
+fn validate_scale_percent_range(p: f64) -> Result<(), EngineError> {
+    if !p.is_finite() || !(5.0..=500.0).contains(&p) {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "`percent` must be finite and in [5.0, 500.0]")
+            .with_details(json!({ "pointer": "/percent" })));
+    }
+    Ok(())
+}
+
+fn layout_item_id(item: &LayoutItem) -> &str {
+    match item {
+        LayoutItem::LiveGraph { id, .. } | LayoutItem::LiveTable { id, .. } | LayoutItem::TextCallout { id, .. } => id.as_str(),
+    }
+}
+
+fn run_layout_equalize_scaling(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
+    let schema = schema_layout_equalize_scaling();
+    let params: LayoutEqualizeScalingParams = parse_params(&schema, raw)?;
+    let id = parse_sheet_id(&params.sheet_id)?;
+    let mode = parse_equalize_scale_mode(params.mode.as_deref(), params.percent)?;
+    let doc = &ctx.session.doc;
+    let mut candidate_spec = require_layout_sheet(doc, &id)?.spec.clone();
+
+    let mut target_indices: Vec<usize> = Vec::new();
+    let filter_by_id_or_idx = params.panel_ids.is_some() || params.panel_indices.is_some();
+    if let Some(ref indices) = params.panel_indices {
+        for &idx in indices {
+            let Some(item) = candidate_spec.items.get(idx) else {
+                return Err(EngineError::with_code(ErrorCode::BadInput, format!("`panel_index` {idx} out of bounds")));
+            };
+            if !matches!(item, LayoutItem::LiveGraph { .. }) {
+                return Err(EngineError::with_code(ErrorCode::BadInput, format!("panel `{idx}` is not a live graph panel")));
+            }
+            if !target_indices.contains(&idx) {
+                target_indices.push(idx);
+            }
+        }
+    }
+    if let Some(ref ids) = params.panel_ids {
+        for pid in ids {
+            let Some(idx) = candidate_spec.items.iter().position(|it| layout_item_id(it) == pid) else {
+                return Err(EngineError::with_code(ErrorCode::NotFound, format!("panel `{pid}` not found on layout `{id}`")));
+            };
+            if !matches!(candidate_spec.items[idx], LayoutItem::LiveGraph { .. }) {
+                return Err(EngineError::with_code(ErrorCode::BadInput, format!("panel `{pid}` is not a live graph panel")));
+            }
+            if !target_indices.contains(&idx) {
+                target_indices.push(idx);
+            }
+        }
+    }
+    if !filter_by_id_or_idx {
+        for (idx, item) in candidate_spec.items.iter().enumerate() {
+            if matches!(item, LayoutItem::LiveGraph { .. }) {
+                target_indices.push(idx);
+            }
+        }
+    }
+    if target_indices.is_empty() {
+        return Err(EngineError::with_code(ErrorCode::Conflict, format!("layout `{id}` has no target live graph panels to equalize")));
+    }
+
+    struct PanelMetric {
+        idx: usize,
+        sub_w: f64,
+        sub_h: f64,
+        plot_w: f64,
+        plot_h: f64,
+        cur_plot_w: f64,
+    }
+    let mut metrics: Vec<PanelMetric> = Vec::with_capacity(target_indices.len());
+    for &idx in &target_indices {
+        let LayoutItem::LiveGraph { graph_sheet_id, bounds_pt, scale_percent, .. } = &candidate_spec.items[idx] else {
+            continue;
+        };
+        let gs = require_graph_sheet(doc, graph_sheet_id)?;
+        let sub = curvebook_chart::compile_graph(gs, doc)
+            .map_err(|err| EngineError::with_code(ErrorCode::InternalError, format!("failed compiling panel graph `{graph_sheet_id}`: {err}")))?;
+        let sub_w = sub.width_pt.max(1.0);
+        let sub_h = sub.height_pt.max(1.0);
+        let plot_w = sub.plot_rect_pt.width.max(1.0);
+        let plot_h = sub.plot_rect_pt.height.max(1.0);
+        let fit = (bounds_pt.width / sub_w).min(bounds_pt.height / sub_h);
+        let pct_frac = if scale_percent.is_finite() && *scale_percent > 0.0 { *scale_percent / 100.0 } else { 1.0 };
+        let cur_scale = (fit * pct_frac).max(0.05);
+        metrics.push(PanelMetric { idx, sub_w, sub_h, plot_w, plot_h, cur_plot_w: plot_w * cur_scale });
+    }
+
+    let target_plot_w = match mode {
+        EqualizeScaleMode::MatchSmallest => metrics.iter().map(|m| m.cur_plot_w).fold(f64::INFINITY, f64::min),
+        EqualizeScaleMode::MatchLargest => metrics.iter().map(|m| m.cur_plot_w).fold(0.0_f64, f64::max),
+        EqualizeScaleMode::ExplicitPercent(p) => metrics[0].plot_w * (p / 100.0).max(0.05),
+    };
+
+    let mut summary_panels = Vec::with_capacity(metrics.len());
+    for m in metrics {
+        let desired_scale = match mode {
+            EqualizeScaleMode::MatchSmallest | EqualizeScaleMode::MatchLargest => (target_plot_w / m.plot_w).max(0.05),
+            EqualizeScaleMode::ExplicitPercent(p) => (p / 100.0).max(0.05),
+        };
+        if let Some(LayoutItem::LiveGraph { id: panel_id, graph_sheet_id, bounds_pt, scale_percent, .. }) = candidate_spec.items.get_mut(m.idx) {
+            let needed_w = m.sub_w * desired_scale;
+            let needed_h = m.sub_h * desired_scale;
+            if bounds_pt.width + 1e-6 < needed_w {
+                bounds_pt.width = needed_w;
+            }
+            if bounds_pt.height + 1e-6 < needed_h {
+                bounds_pt.height = needed_h;
+            }
+            let new_fit = (bounds_pt.width / m.sub_w).min(bounds_pt.height / m.sub_h);
+            let next_pct = ((desired_scale / new_fit.max(1e-6)) * 100.0).max(0.01);
+            *scale_percent = next_pct;
+            summary_panels.push(json!({
+                "panel_index": m.idx,
+                "panel_id": panel_id,
+                "graph_sheet_id": graph_sheet_id.as_str(),
+                "scale_percent": next_pct,
+                "effective_scale": desired_scale,
+                "rendered_plot_width_pt": m.plot_w * desired_scale,
+                "rendered_plot_height_pt": m.plot_h * desired_scale,
+            }));
+        }
+    }
+
+    validate_layout_spec_in_doc(doc, &id, &candidate_spec)?;
+    require_layout_sheet_mut(&mut ctx.session.doc, &id)?.spec = candidate_spec;
+
+    Ok(CommandOutcome::mutated(
+        "layout.equalizeScaling",
+        format!("equalized scaling across {} panel(s) on layout `{id}`", summary_panels.len()),
+        json!({
+            "sheet_id": id.as_str(),
+            "target_plot_width_pt": target_plot_w,
+            "panels": summary_panels,
+        }),
+    ))
+}
+
+fn run_layout_reorder_panel(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
+    let schema = schema_layout_reorder_panel();
+    let params: LayoutReorderPanelParams = parse_params(&schema, raw)?;
+    let id = parse_sheet_id(&params.sheet_id)?;
+    let doc = &ctx.session.doc;
+    let mut candidate_spec = require_layout_sheet(doc, &id)?.spec.clone();
+    let len = candidate_spec.items.len();
+    if len == 0 {
+        return Err(EngineError::with_code(ErrorCode::Conflict, format!("layout `{id}` has no panels to reorder")));
+    }
+
+    let idx_from_opt = if let Some(idx) = params.panel_index {
+        if idx >= len {
+            return Err(EngineError::with_code(ErrorCode::BadInput, format!("`panel_index` {idx} out of bounds ({len} panels)"))
+                .with_details(json!({ "pointer": "/panel_index" })));
+        }
+        Some(idx)
+    } else {
+        None
+    };
+    let idx_from_id = if let Some(ref pid) = params.panel_id {
+        let pos = candidate_spec.items.iter().position(|it| layout_item_id(it) == pid).ok_or_else(|| {
+            EngineError::with_code(ErrorCode::NotFound, format!("panel `{pid}` not found on layout `{id}`"))
+                .with_details(json!({ "pointer": "/panel_id" }))
+        })?;
+        Some(pos)
+    } else {
+        None
+    };
+
+    let old_idx = match (idx_from_opt, idx_from_id) {
+        (Some(a), Some(b)) if a != b => {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "`panel_index` and `panel_id` refer to different panels"));
+        }
+        (Some(a), _) | (None, Some(a)) => a,
+        (None, None) => {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "provide either `panel_index` or `panel_id`"));
+        }
+    };
+
+    let norm_action: String = params.action.trim().chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+    let (canonical_action, new_idx) = match norm_action.as_str() {
+        "bringtofront" | "front" | "top" => ("bring_to_front", len - 1),
+        "bringforward" | "forward" | "up" => ("bring_forward", (old_idx + 1).min(len - 1)),
+        "sendbackward" | "backward" | "down" => ("send_backward", old_idx.saturating_sub(1)),
+        "sendtoback" | "back" | "bottom" => ("send_to_back", 0),
+        _ => {
+            return Err(EngineError::with_code(
+                ErrorCode::BadInput,
+                format!("unknown reorder action `{}`; expected `bring_to_front`, `bring_forward`, `send_backward`, or `send_to_back`", params.action),
+            )
+            .with_details(json!({ "pointer": "/action" })));
+        }
+    };
+
+    let moved_id = layout_item_id(&candidate_spec.items[old_idx]).to_owned();
+    let mutated = old_idx != new_idx;
+    if mutated {
+        let item = candidate_spec.items.remove(old_idx);
+        candidate_spec.items.insert(new_idx, item);
+        validate_layout_spec_in_doc(doc, &id, &candidate_spec)?;
+        require_layout_sheet_mut(&mut ctx.session.doc, &id)?.spec = candidate_spec;
+    }
+
+    Ok(CommandOutcome {
+        command_id: String::from("layout.reorderPanel"),
+        mutated,
+        message: format!("reordered panel `{moved_id}` on layout `{id}` ({canonical_action}: {old_idx} -> {new_idx})"),
+        payload: json!({
+            "sheet_id": id.as_str(),
+            "panel_id": moved_id,
+            "old_index": old_idx,
+            "new_index": new_idx,
+            "action": canonical_action,
+            "panel_count": len,
+        }),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -829,8 +1202,8 @@ mod tests {
     }
 
     #[test]
-    fn registry_contains_all_five_layout_commands() {
-        assert_eq!(specs().len(), 5);
+    fn registry_contains_all_seven_layout_commands() {
+        assert_eq!(specs().len(), 7);
         for spec in specs() {
             assert_eq!(spec.group, CommandGroup::Layout);
             assert!(!spec.summary.is_empty());
