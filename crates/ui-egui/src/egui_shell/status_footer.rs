@@ -328,11 +328,14 @@ impl<'a> StatsAccum<'a> {
 
 #[inline]
 fn scan_dataset_col_range(rows: &[Vec<Cell>], r0: usize, r_end_incl: usize, subcol: usize, acc: &mut StatsAccum<'_>) {
-    let hi = r_end_incl.min(rows.len().saturating_sub(1));
-    if r0 > hi {
+    if rows.is_empty() {
         return;
     }
-    for row_cells in &rows[r0..=hi] {
+    let hi = r_end_incl.min(rows.len() - 1);
+    let Some(slice) = rows.get(r0..=hi) else {
+        return;
+    };
+    for row_cells in slice {
         if let Some(cell) = row_cells.get(subcol) {
             acc.push_cell(cell);
         }
@@ -393,10 +396,11 @@ fn scan_rect_selection(
             TableArchetype::MultipleVariables(t) => {
                 if subcol == 0
                     && let Some(var) = t.variables.get(col)
+                    && !var.cells.is_empty()
                 {
-                    let hi = r_end.min(var.cells.len().saturating_sub(1));
-                    if r0 <= hi {
-                        for cell in &var.cells[r0..=hi] {
+                    let hi = r_end.min(var.cells.len() - 1);
+                    if let Some(slice) = var.cells.get(r0..=hi) {
+                        for cell in slice {
                             acc.push_cell(cell);
                         }
                     }
@@ -1650,4 +1654,40 @@ pub fn render_status_footer(
 
     report.footer_rect_pt = Some(resp);
     report
+}
+
+#[cfg(test)]
+mod tests {
+    use curvebook_doc::{ColumnDesignHint, ColumnTable, DataSheet, MultipleVariablesTable, TableArchetype};
+
+    use super::{StatsAccum, scan_dataset_col_range, scan_rect_selection};
+
+    #[test]
+    fn quick_stats_empty_column_vec_at_r0_zero_does_not_panic() {
+        let mut scratch = Vec::new();
+        let mut acc = StatsAccum::new(&mut scratch, 16);
+        scan_dataset_col_range(&[], 0, 5, 0, &mut acc);
+        let summary = acc.finalize(6, false);
+        assert_eq!(summary.n, 0);
+        assert_eq!(summary.mean, None);
+
+        // Also exercise `scan_rect_selection` on ragged empty column vectors (Column and MultipleVariables).
+        let col_tbl = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 1).expect("column table");
+        let mut ds_col = DataSheet::new("ds-empty-col", "Empty Col", TableArchetype::Column(col_tbl)).expect("ds");
+        if let TableArchetype::Column(ref mut c) = ds_col.archetype {
+            c.data_sets[0].cells.clear();
+        }
+        let (col_summary, _) = scan_rect_selection(&ds_col, 0, 3, &[(0, 0)], &mut scratch);
+        assert_eq!(col_summary.n, 0);
+        assert_eq!(col_summary.mean, None);
+
+        let mv_tbl = MultipleVariablesTable::new(1, 1).expect("mv table");
+        let mut ds_mv = DataSheet::new("ds-empty-mv", "Empty MV", TableArchetype::MultipleVariables(mv_tbl)).expect("ds");
+        if let TableArchetype::MultipleVariables(ref mut mv) = ds_mv.archetype {
+            mv.variables[0].cells.clear();
+        }
+        let (mv_summary, _) = scan_rect_selection(&ds_mv, 0, 3, &[(0, 0)], &mut scratch);
+        assert_eq!(mv_summary.n, 0);
+        assert_eq!(mv_summary.mean, None);
+    }
 }
