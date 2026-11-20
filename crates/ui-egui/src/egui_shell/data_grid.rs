@@ -371,127 +371,2580 @@ pub fn render_data_grid(
     if active_column_sheet(app).is_some() {
         return render_column_grid(ui, app, state, render_ctx, meta, intents);
     }
+    multi_archetype::render_multi_archetype_grid(ui, app, state, render_ctx, meta, intents)
+}
 
-    let available = ui.available_rect_before_wrap();
-    state.ellipsized_headers = 0;
+mod multi_archetype {
+    use super::*;
+    use crate::grid_view::data_set_subcolumn_count;
+    use curvebook_doc::{SheetCellRange, VariableRole, VariableSource, XColumnMode};
 
-    let Some(ds) = app.document().active_sheet_id.as_ref().and_then(|id| app.document().data_sheet(id)) else {
-        state.last_visible_rows = 0..0;
-        state.last_visible_subcols = 0..0;
-        return DataGridFrameReport {
-            grid_rect_pt: available,
-            rendered_modal_guard_open: state.active_link_popover.is_some(),
-            ..DataGridFrameReport::default()
-        };
-    };
-
-    ensure_solid_scrollbar_style(ui, render_ctx.metrics);
-    if !available.is_positive() {
-        return DataGridFrameReport { grid_rect_pt: available, ..DataGridFrameReport::default() };
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum AuxInlineTarget {
+        XCell { row: usize, subcol: usize },
+        XTitle { subcol: usize },
+        SubcolumnTitle { col: usize, subcol: usize },
+        SheetTitle,
     }
 
-    let tokens = render_ctx.tokens;
-    let enabled = !render_ctx.modal_blocked;
-    let row_count = ds.archetype.row_count();
-    let col_count = ds.archetype.column_count();
-    let badge = match &ds.archetype {
-        TableArchetype::Column(_) => "Col",
-        TableArchetype::Xy(_) => "XY",
-        TableArchetype::Grouped(_) => "Grp",
-        TableArchetype::Contingency(_) => "Cont",
-        TableArchetype::Survival(_) => "Surv",
-        TableArchetype::PartsOfWhole(_) => "PoW",
-        TableArchetype::MultipleVariables(_) => "MV",
-        TableArchetype::Nested(_) => "Nest",
-    };
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct ContextCellTarget {
+        is_x: bool,
+        row: usize,
+        col: usize,
+        subcol: usize,
+    }
 
-    let mut rendered_cells = 0usize;
-    let max_vis_rows = row_count.min(32);
-    let max_vis_cols = col_count.min(12);
-    ui.scope_builder(UiBuilder::new().max_rect(available), |grid_ui| {
-        grid_ui.set_clip_rect(available);
-        grid_ui.horizontal(|hdr| {
-            let corner_resp = hdr.add_enabled(enabled, egui::Button::new(badge).min_size(vec2(48.0, 24.0)));
-            meta.record_response(
-                hdr,
-                &corner_resp,
+    #[derive(Debug, Clone)]
+    struct ContextMenuState {
+        pos: egui::Pos2,
+        row: usize,
+        cell: Option<ContextCellTarget>,
+    }
+
+    #[derive(Debug, Clone, Default)]
+    struct MultiGridAuxState {
+        sheet_id: Option<SheetId>,
+        aux_edit: Option<(AuxInlineTarget, String, bool)>,
+        selected_x_cell: Option<(usize, usize)>,
+        last_app_x_cell: Option<(usize, usize)>,
+        active_role_menu_col: Option<usize>,
+        context_menu: Option<ContextMenuState>,
+        suppress_loss_commit_once: bool,
+    }
+
+    #[derive(Debug, Clone)]
+    struct MultiGridGeom {
+        grid_outer_rect: Rect,
+        link_strip_rect: Option<Rect>,
+        h_tier1: f32,
+        h_tier2: f32,
+        h_tier3: f32,
+        row_h: f32,
+        row_num_w: f32,
+        row_title_w: f32,
+        subcol_w: f32,
+        bar_reserve: f32,
+        row_count: usize,
+        col_count: usize,
+        x_subcols: usize,
+        uniform_data_subcols: Option<usize>,
+        col_flat_offsets: Vec<usize>,
+        total_data_flat_cols: usize,
+        total_flat_cols: usize,
+        row_titles_collapsed: bool,
+        corner_rect: Rect,
+        col_header_rect: Rect,
+        row_gutter_rect: Rect,
+        body_rect: Rect,
+        body_inner_clip: Rect,
+        content_w: f32,
+        content_h: f32,
+        font_num_pt: f32,
+        font_small_pt: f32,
+    }
+
+    impl MultiGridGeom {
+        fn flat_data_to_coord(&self, flat_data_col: usize) -> Option<(usize, usize)> {
+            if flat_data_col >= self.total_data_flat_cols || self.col_count == 0 {
+                return None;
+            }
+            if let Some(subs) = self.uniform_data_subcols {
+                let s = subs.max(1);
+                return Some((flat_data_col / s, flat_data_col % s));
+            }
+            let col = match self.col_flat_offsets.binary_search(&flat_data_col) {
+                Ok(idx) => idx,
+                Err(ins) => ins.saturating_sub(1),
+            };
+            let start = self.col_flat_offsets.get(col).copied().unwrap_or(0);
+            Some((col, flat_data_col.saturating_sub(start)))
+        }
+
+        fn coord_to_flat_all(&self, is_x: bool, col: usize, subcol: usize) -> usize {
+            if is_x {
+                return subcol.min(self.x_subcols.saturating_sub(1));
+            }
+            let data_flat = if let Some(subs) = self.uniform_data_subcols {
+                col.saturating_mul(subs.max(1)).saturating_add(subcol)
+            } else {
+                self.col_flat_offsets.get(col).copied().unwrap_or(0).saturating_add(subcol)
+            };
+            self.x_subcols.saturating_add(data_flat)
+        }
+
+        fn col_span_flat(&self, col: usize) -> (usize, usize) {
+            if let Some(subs) = self.uniform_data_subcols {
+                let s = subs.max(1);
+                (self.x_subcols + col * s, s)
+            } else {
+                let start = self.col_flat_offsets.get(col).copied().unwrap_or(0);
+                let next = self.col_flat_offsets.get(col + 1).copied().unwrap_or(self.total_data_flat_cols);
+                (self.x_subcols + start, next.saturating_sub(start).max(1))
+            }
+        }
+    }
+
+    fn text_style(pt: f32, mono: bool, color: Color32, align: Align, italic: bool, strike: bool) -> CellTextStyle {
+        let font_id = if mono { egui::FontId::new(pt, egui::FontFamily::Monospace) } else { egui::FontId::proportional(pt) };
+        CellTextStyle { font_id, color, align, italic, strike }
+    }
+
+    pub(super) fn render_multi_archetype_grid(
+        ui: &mut Ui,
+        app: &UiApp,
+        state: &mut DataGridEguiState,
+        render_ctx: DataGridRenderContext<'_>,
+        meta: &mut FrameInspectMeta,
+        intents: &mut PendingUiIntents,
+    ) -> DataGridFrameReport {
+        let available = ui.available_rect_before_wrap();
+        state.ellipsized_headers = 0;
+
+        let Some(ds) = app.document().active_sheet_id.as_ref().and_then(|id| app.document().data_sheet(id)) else {
+            state.last_visible_rows = 0..0;
+            state.last_visible_subcols = 0..0;
+            return DataGridFrameReport {
+                grid_rect_pt: available,
+                rendered_modal_guard_open: state.active_link_popover.is_some(),
+                ..DataGridFrameReport::default()
+            };
+        };
+
+        ensure_solid_scrollbar_style(ui, render_ctx.metrics);
+        if !available.is_positive() {
+            return DataGridFrameReport { grid_rect_pt: available, ..DataGridFrameReport::default() };
+        }
+
+        let aux_id = Id::unique(("r15_4_multi_grid_aux", ds.id.as_str()));
+        let mut aux: MultiGridAuxState = ui.ctx().data_mut(|d| d.get_temp::<MultiGridAuxState>(aux_id).unwrap_or_default());
+        if aux.sheet_id.as_ref() != Some(&ds.id) {
+            aux = MultiGridAuxState { sheet_id: Some(ds.id.clone()), ..MultiGridAuxState::default() };
+            state.inline_edit = None;
+            state.active_link_popover = None;
+        }
+        if app.grid.active_x_cell != aux.last_app_x_cell {
+            aux.selected_x_cell = app.grid.active_x_cell;
+            aux.last_app_x_cell = app.grid.active_x_cell;
+        }
+        if app.grid.tool.active.is_some() && app.grid.active_x_cell.is_none() {
+            aux.selected_x_cell = None;
+        }
+
+        let geom = compute_multi_geom(app, ds, state, render_ctx.metrics, available);
+        clamp_multi_scroll(state, &geom);
+
+        let blocked = render_ctx.modal_blocked || state.active_link_popover.is_some();
+        let outside_click_blocked = render_ctx.modal_blocked && any_pointer_click_in(ui, available);
+        let tokens = render_ctx.tokens;
+
+        let painter = ui.painter();
+        painter.rect_filled(geom.grid_outer_rect, 0.0, tokens.surface_bg);
+        painter.rect_stroke(geom.grid_outer_rect, 0.0, Stroke::new(1.0, tokens.border), egui::StrokeKind::Inside);
+
+        if let Some(strip_rect) = geom.link_strip_rect {
+            render_multi_link_strip(ui, app, ds, strip_rect, state, tokens, meta);
+        }
+        if !blocked {
+            forward_frozen_wheel(ui, &geom, state);
+        }
+
+        render_multi_corner(ui, app, ds, state, &mut aux, &geom, tokens, meta, intents, blocked);
+        let active_mv_operands = active_mv_formula_operands(app, ds);
+        render_multi_column_headers(ui, app, ds, state, &mut aux, &geom, &active_mv_operands, tokens, meta, intents, blocked);
+        render_multi_gutter_body(ui, app, ds, state, &mut aux, &geom, tokens, meta, intents, blocked);
+        let body_out = render_multi_body(ui, app, ds, state, &mut aux, &geom, tokens, meta, intents, blocked);
+
+        let cap_rect = Rect::from_min_max(
+            pos2(
+                (geom.body_rect.max.x - geom.bar_reserve).max(geom.body_rect.min.x),
+                (geom.body_rect.max.y - geom.bar_reserve).max(geom.body_rect.min.y),
+            ),
+            geom.body_rect.max,
+        );
+        if cap_rect.is_positive() {
+            ui.painter().rect_filled(cap_rect, 0.0, tokens.header_bg);
+        }
+
+        render_multi_inline_editors(ui, app, ds, state, &mut aux, &geom, tokens, meta, intents, blocked);
+        render_mv_role_menu_popup(ui, ds, &mut aux, &geom, state.scroll_offset_pt.x, tokens, meta, intents, blocked);
+        render_row_context_menu_popup(ui, app, ds, &mut aux, tokens, meta, intents, blocked);
+        if !blocked {
+            handle_multi_keyboard_shortcuts(ui, app, ds, state, &mut aux, &geom, intents);
+        }
+
+        render_multi_link_guard_popover(ui, ds, state, tokens, meta, intents, geom.grid_outer_rect);
+
+        let (v_sb, h_sb) = compute_multi_scrollbar_rects(&geom);
+        state.last_visible_rows = body_out.vis_rows.clone();
+        state.last_visible_subcols = body_out.vis_all_flat.clone();
+        ui.ctx().data_mut(|d| d.insert_temp(aux_id, aux));
+
+        DataGridFrameReport {
+            grid_rect_pt: geom.grid_outer_rect,
+            rendered_cells: body_out.rendered_cells,
+            visible_rows: body_out.vis_rows,
+            visible_subcols: body_out.vis_all_flat,
+            vertical_scrollbar_rect_pt: v_sb,
+            horizontal_scrollbar_rect_pt: h_sb,
+            rendered_modal_guard_open: state.active_link_popover.is_some(),
+            outside_click_blocked,
+        }
+    }
+
+    fn compute_multi_geom(app: &UiApp, ds: &DataSheet, state: &ColumnGridEguiState, metrics: LayoutMetrics, available: Rect) -> MultiGridGeom {
+        let link_h = if ds.linked_regions.is_empty() { 0.0 } else { LINK_STRIP_HEIGHT_PT };
+        let link_strip_rect = (link_h > 0.0).then(|| Rect::from_min_max(available.min, pos2(available.max.x, available.min.y + link_h)));
+        let grid_outer_rect = Rect::from_min_max(pos2(available.min.x, available.min.y + link_h), available.max);
+
+        let row_titles_collapsed = app.grid.row_titles_collapsed_override.unwrap_or(state.row_titles_collapsed);
+        let [h_tier1, h_tier2, h_tier3] = metrics.grid_header_tier_heights;
+        let header_h = h_tier1 + h_tier2 + h_tier3;
+        let row_h = metrics.grid_row_h.max(20.0);
+        let row_num_w = ROW_NUM_WIDTH_PT.min((grid_outer_rect.width() * 0.25).floor()).max(24.0);
+        let row_title_w = if row_titles_collapsed { ROW_TITLES_COLLAPSED_WIDTH_PT } else { ROW_TITLES_EXPANDED_WIDTH_PT }
+            .min((grid_outer_rect.width() * 0.35).floor())
+            .max(28.0);
+        let gutter_w = row_num_w + row_title_w;
+        let subcol_w = DEFAULT_DATA_COL_WIDTH_PT;
+        let bar_reserve = (metrics.scroll_bar_thickness + 4.0).max(14.0);
+
+        let row_count = ds.archetype.row_count();
+        let col_count = ds.archetype.column_count();
+        let x_subcols = archetype_x_subcol_count(&ds.archetype);
+
+        let (uniform_data_subcols, col_flat_offsets, total_data_flat_cols) = match &ds.archetype {
+            TableArchetype::Nested(_) => {
+                let mut offsets = Vec::with_capacity(col_count + 1);
+                let mut acc = 0usize;
+                for c in 0..col_count {
+                    offsets.push(acc);
+                    acc = acc.saturating_add(data_set_subcolumn_count(&ds.archetype, c).max(1));
+                }
+                offsets.push(acc);
+                (None, offsets, acc)
+            }
+            _ => {
+                let subs = if col_count > 0 { data_set_subcolumn_count(&ds.archetype, 0).max(1) } else { 1 };
+                (Some(subs), Vec::new(), col_count.saturating_mul(subs))
+            }
+        };
+        let total_flat_cols = x_subcols.saturating_add(total_data_flat_cols);
+
+        let body_x0 = (grid_outer_rect.min.x + gutter_w).min(grid_outer_rect.max.x);
+        let body_y0 = (grid_outer_rect.min.y + header_h).min(grid_outer_rect.max.y);
+        let corner_rect = Rect::from_min_max(grid_outer_rect.min, pos2(body_x0, body_y0));
+        let col_header_rect =
+            Rect::from_min_max(pos2(body_x0, grid_outer_rect.min.y), pos2((grid_outer_rect.max.x - bar_reserve).max(body_x0), body_y0));
+        let row_gutter_rect =
+            Rect::from_min_max(pos2(grid_outer_rect.min.x, body_y0), pos2(body_x0, (grid_outer_rect.max.y - bar_reserve).max(body_y0)));
+        let body_rect = Rect::from_min_max(pos2(body_x0, body_y0), grid_outer_rect.max);
+        let body_inner_clip = Rect::from_min_max(
+            body_rect.min,
+            pos2((body_rect.max.x - bar_reserve).max(body_rect.min.x), (body_rect.max.y - bar_reserve).max(body_rect.min.y)),
+        );
+
+        #[allow(clippy::cast_precision_loss)]
+        let content_w = (total_flat_cols as f32) * subcol_w;
+        #[allow(clippy::cast_precision_loss)]
+        let content_h = (row_count as f32) * row_h;
+
+        MultiGridGeom {
+            grid_outer_rect,
+            link_strip_rect,
+            h_tier1,
+            h_tier2,
+            h_tier3,
+            row_h,
+            row_num_w,
+            row_title_w,
+            subcol_w,
+            bar_reserve,
+            row_count,
+            col_count,
+            x_subcols,
+            uniform_data_subcols,
+            col_flat_offsets,
+            total_data_flat_cols,
+            total_flat_cols,
+            row_titles_collapsed,
+            corner_rect,
+            col_header_rect,
+            row_gutter_rect,
+            body_rect,
+            body_inner_clip,
+            content_w,
+            content_h,
+            font_num_pt: metrics.font_grid_numeral_pt,
+            font_small_pt: metrics.font_ui_small_pt,
+        }
+    }
+
+    fn clamp_multi_scroll(state: &mut ColumnGridEguiState, geom: &MultiGridGeom) {
+        let max_x = (geom.content_w - geom.body_inner_clip.width()).max(0.0);
+        let max_y = (geom.content_h - geom.body_inner_clip.height()).max(0.0);
+        state.scroll_offset_pt.x = state.scroll_offset_pt.x.clamp(0.0, max_x);
+        state.scroll_offset_pt.y = state.scroll_offset_pt.y.clamp(0.0, max_y);
+    }
+
+    fn forward_frozen_wheel(ui: &mut Ui, geom: &MultiGridGeom, state: &mut ColumnGridEguiState) {
+        let pointer = ui.input(|i| i.pointer.hover_pos());
+        let over_frozen = pointer.is_some_and(|p| geom.col_header_rect.contains(p) || geom.row_gutter_rect.contains(p));
+        if !over_frozen {
+            return;
+        }
+        let delta = ui.input(|i| i.smooth_scroll_delta);
+        if delta.length_sq() > 0.0 {
+            state.scroll_offset_pt.x -= delta.x;
+            state.scroll_offset_pt.y -= delta.y;
+            clamp_multi_scroll(state, geom);
+        }
+    }
+
+    fn compute_multi_scrollbar_rects(geom: &MultiGridGeom) -> (Option<Rect>, Option<Rect>) {
+        let b = geom.body_rect;
+        if b.width() <= geom.bar_reserve || b.height() <= geom.bar_reserve {
+            return (None, None);
+        }
+        let v_sb = Rect::from_min_max(pos2(b.max.x - geom.bar_reserve, b.min.y), pos2(b.max.x, b.max.y - geom.bar_reserve));
+        let h_sb = Rect::from_min_max(pos2(b.min.x, b.max.y - geom.bar_reserve), pos2(b.max.x - geom.bar_reserve, b.max.y));
+        (v_sb.is_positive().then_some(v_sb), h_sb.is_positive().then_some(h_sb))
+    }
+
+    fn archetype_x_subcol_count(arch: &TableArchetype) -> usize {
+        match arch {
+            TableArchetype::Xy(xy) => xy.x_mode.subcolumn_count().max(1),
+            TableArchetype::Survival(_) => 1,
+            _ => 0,
+        }
+    }
+
+    fn archetype_badge(arch: &TableArchetype) -> &'static str {
+        match arch {
+            TableArchetype::Column(_) => "Col",
+            TableArchetype::Xy(_) => "XY",
+            TableArchetype::Grouped(_) => "Grp",
+            TableArchetype::Contingency(_) => "Cont",
+            TableArchetype::Survival(_) => "Surv",
+            TableArchetype::PartsOfWhole(_) => "PoW",
+            TableArchetype::MultipleVariables(_) => "MV",
+            TableArchetype::Nested(_) => "Nest",
+        }
+    }
+
+    fn render_multi_link_strip(
+        ui: &mut Ui,
+        app: &UiApp,
+        ds: &DataSheet,
+        strip_rect: Rect,
+        state: &mut ColumnGridEguiState,
+        tokens: &Tokens,
+        meta: &mut FrameInspectMeta,
+    ) {
+        ui.painter().rect_filled(strip_rect, 0.0, tokens.panel_bg);
+        ui.painter()
+            .line_segment([pos2(strip_rect.min.x, strip_rect.max.y), pos2(strip_rect.max.x, strip_rect.max.y)], Stroke::new(1.0, tokens.divider));
+        let mut cursor_x = strip_rect.min.x + 6.0;
+        for (idx, reg) in ds.linked_regions.iter().enumerate() {
+            let color = link_border_color32(reg.spec.source.border_color(), tokens);
+            let badge_txt = format!("Link {}: {}", idx + 1, reg.provenance_summary);
+            #[allow(clippy::cast_precision_loss)]
+            let pill_w = (badge_txt.len() as f32 * 6.5 + 18.0).min(240.0);
+            if cursor_x + pill_w > strip_rect.max.x - 4.0 {
+                break;
+            }
+            let r = Rect::from_min_size(pos2(cursor_x, strip_rect.min.y + 2.0), vec2(pill_w, strip_rect.height() - 4.0));
+            let wid = format!("grid.link_badge.{idx}");
+            let resp = ui.interact(r, ui.make_persistent_id(&wid), Sense::click());
+            ui.painter().rect_filled(r, 3.0, color.linear_multiply(0.16));
+            ui.painter().rect_stroke(r, 3.0, Stroke::new(1.0, color), egui::StrokeKind::Inside);
+            render_ellipsized_text(
+                ui,
+                r.shrink2(vec2(5.0, 1.0)),
+                &badge_txt,
+                CellTextStyle::plain(egui::FontId::proportional(11.0), tokens.text_primary, Align::LEFT),
+            );
+            record_meta_if_enabled(
+                ui,
+                meta,
+                state.record_inspect_meta,
+                &resp,
                 FrameInspectEntryInput {
-                    widget_id: "grid.corner.archetype",
+                    widget_id: &wid,
                     role: "button",
-                    label: badge,
-                    command_id: Some("ui.table.convertArchetype.open"),
+                    label: &badge_txt,
+                    command_id: None,
                     value: None,
-                    enabled,
-                    disabled_reason: (!enabled).then_some("modal dialog is active"),
+                    enabled: true,
+                    disabled_reason: None,
                     z_layer: ZLayer::Workspace,
                     ellipsized: false,
                     full_label: None,
                 },
             );
-            if corner_resp.clicked() && enabled {
-                intents.push_ui("ui.table.convertArchetype.open", json!({ "sheet_id": ds.id.as_str() }));
+            if resp.clicked() {
+                open_link_popover(state, reg, &app.locale);
             }
-            hdr.label(egui::RichText::new(format!("{} · {row_count}×{col_count}", ds.title)).strong().color(tokens.text_primary));
+            cursor_x += pill_w + 6.0;
+        }
+    }
+
+    fn render_multi_link_guard_popover(
+        ui: &mut Ui,
+        ds: &DataSheet,
+        state: &mut ColumnGridEguiState,
+        tokens: &Tokens,
+        meta: &mut FrameInspectMeta,
+        intents: &mut PendingUiIntents,
+        bounds: Rect,
+    ) {
+        let Some(pop) = state.active_link_popover.clone() else { return };
+        let pop_w = (bounds.width() - 24.0).clamp(240.0, 360.0);
+        let pos = pos2(bounds.center().x - pop_w * 0.5, bounds.min.y + 32.0);
+        egui::Area::new(Id::unique(("multi_link_guard", ds.id.as_str()))).fixed_pos(pos).order(egui::Order::Foreground).show(ui.ctx(), |pui| {
+            egui::Frame::popup(pui.style()).fill(tokens.panel_bg).stroke(Stroke::new(1.5, tokens.link_blue)).show(pui, |box_ui| {
+                box_ui.set_min_width(pop_w);
+                box_ui.label(egui::RichText::new(&pop.message).color(tokens.text_primary));
+                box_ui.add_space(6.0);
+                box_ui.horizontal(|row| {
+                    if let Some(up) = &pop.upstream_sheet_id {
+                        let go = row.button("Go To Source");
+                        record_meta_if_enabled(
+                            row,
+                            meta,
+                            true,
+                            &go,
+                            FrameInspectEntryInput {
+                                widget_id: "grid.link_guard.go_to_source",
+                                role: "button",
+                                label: "Go To Source",
+                                command_id: Some("sheet.select"),
+                                value: None,
+                                enabled: true,
+                                disabled_reason: None,
+                                z_layer: ZLayer::ModalDialog,
+                                ellipsized: false,
+                                full_label: None,
+                            },
+                        );
+                        if go.clicked() {
+                            intents.push_engine("sheet.select", json!({ "sheet_id": up.as_str() }));
+                            state.active_link_popover = None;
+                        }
+                    }
+                    let ul = row.button("Unlink Region");
+                    record_meta_if_enabled(
+                        row,
+                        meta,
+                        true,
+                        &ul,
+                        FrameInspectEntryInput {
+                            widget_id: "grid.link_guard.unlink",
+                            role: "button",
+                            label: "Unlink Region",
+                            command_id: Some("table.unlinkRegion"),
+                            value: None,
+                            enabled: true,
+                            disabled_reason: None,
+                            z_layer: ZLayer::ModalDialog,
+                            ellipsized: false,
+                            full_label: None,
+                        },
+                    );
+                    if ul.clicked() {
+                        intents.push_engine("table.unlinkRegion", json!({ "sheet_id": ds.id.as_str(), "link_id": pop.region_id }));
+                        state.active_link_popover = None;
+                    }
+                    let dis = row.button("Dismiss");
+                    record_meta_if_enabled(
+                        row,
+                        meta,
+                        true,
+                        &dis,
+                        FrameInspectEntryInput {
+                            widget_id: "grid.link_guard.dismiss",
+                            role: "button",
+                            label: "Dismiss",
+                            command_id: None,
+                            value: None,
+                            enabled: true,
+                            disabled_reason: None,
+                            z_layer: ZLayer::ModalDialog,
+                            ellipsized: false,
+                            full_label: None,
+                        },
+                    );
+                    if dis.clicked() {
+                        state.active_link_popover = None;
+                    }
+                });
+            });
         });
-        grid_ui.separator();
-        let scroll = egui::ScrollArea::both().id_salt(("data_grid_stub", ds.id.as_str())).auto_shrink([false, false]).show(grid_ui, |body| {
-            for row in 0..max_vis_rows {
-                body.horizontal(|row_ui| {
-                    for col in 0..max_vis_cols {
-                        let text = ds
-                            .archetype
-                            .data_cell(CellCoord::new(row, col, 0))
-                            .map(|c| match &c.value {
-                                CellValue::Empty => String::new(),
-                                CellValue::Number(v) => format!("{v}"),
-                                CellValue::Text(s) => s.clone(),
-                            })
-                            .unwrap_or_default();
-                        let acc_label =
-                            if text.is_empty() { format!("R{}C{}", row + 1, col + 1) } else { format!("R{}C{} {text}", row + 1, col + 1) };
-                        let cell_resp = row_ui.add_enabled(enabled, egui::Button::new(text).min_size(vec2(76.0, 22.0)));
-                        cell_resp.widget_info(move || WidgetInfo::labeled(egui::Role::Cell, enabled, acc_label.clone()));
-                        rendered_cells += 1;
-                        if row < 8 && col < 4 && state.record_inspect_meta {
-                            let wid = format!("grid.cell.{row}.{col}.0");
-                            meta.record_response(
-                                row_ui,
-                                &cell_resp,
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_multi_corner(
+        ui: &mut Ui,
+        app: &UiApp,
+        ds: &DataSheet,
+        state: &mut ColumnGridEguiState,
+        aux: &mut MultiGridAuxState,
+        geom: &MultiGridGeom,
+        tokens: &Tokens,
+        meta: &mut FrameInspectMeta,
+        intents: &mut PendingUiIntents,
+        blocked: bool,
+    ) {
+        let cr = geom.corner_rect;
+        ui.painter().rect_filled(cr, 0.0, tokens.header_bg);
+        ui.painter().rect_stroke(cr, 0.0, Stroke::new(1.0, tokens.border), egui::StrokeKind::Inside);
+
+        let y1 = cr.min.y;
+        let y2 = y1 + geom.h_tier1;
+        let y3 = y2 + geom.h_tier2;
+        let y4 = cr.max.y;
+        let x_mid = cr.min.x + geom.row_num_w;
+        let x_end = cr.max.x;
+
+        let corner_btn_r = Rect::from_min_max(pos2(cr.min.x, y1), pos2(x_mid, y2));
+        let badge = archetype_badge(&ds.archetype);
+        let corner_resp =
+            ui.interact(corner_btn_r, ui.make_persistent_id("grid.corner.archetype"), if blocked { Sense::hover() } else { Sense::click() });
+        let fill = if corner_resp.hovered() && !blocked { tokens.hover_bg } else { tokens.header_bg };
+        ui.painter().rect_filled(corner_btn_r, 0.0, fill);
+        render_ellipsized_text(
+            ui,
+            corner_btn_r.shrink(2.0),
+            badge,
+            CellTextStyle::plain(egui::FontId::proportional(11.0), tokens.accent, Align::Center),
+        );
+        let acc_badge = badge.to_owned();
+        corner_resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, !blocked, acc_badge.clone()));
+        record_meta_if_enabled(
+            ui,
+            meta,
+            state.record_inspect_meta,
+            &corner_resp,
+            FrameInspectEntryInput {
+                widget_id: "grid.corner.archetype",
+                role: "button",
+                label: badge,
+                command_id: Some("ui.table.convertArchetype.open"),
+                value: None,
+                enabled: !blocked,
+                disabled_reason: blocked.then_some("modal dialog is active"),
+                z_layer: ZLayer::Workspace,
+                ellipsized: false,
+                full_label: None,
+            },
+        );
+        if corner_resp.clicked() && !blocked {
+            intents.push_ui("ui.table.convertArchetype.open", json!({ "sheet_id": ds.id.as_str() }));
+        }
+
+        let sheet_btn_r = Rect::from_min_max(pos2(x_mid, y1), pos2(x_end, y2));
+        if sheet_btn_r.width() > 8.0 {
+            let st_resp = ui.interact(sheet_btn_r, ui.make_persistent_id("grid.sheet_title"), if blocked { Sense::hover() } else { Sense::click() });
+            if st_resp.hovered() && !blocked {
+                ui.painter().rect_filled(sheet_btn_r, 0.0, tokens.hover_bg);
+            }
+            let (ellip, _) = render_ellipsized_text(
+                ui,
+                sheet_btn_r.shrink2(vec2(4.0, 1.0)),
+                &ds.title,
+                CellTextStyle::plain(egui::FontId::proportional(11.0), tokens.text_strong, Align::LEFT),
+            );
+            if ellip {
+                state.ellipsized_headers += 1;
+            }
+            let acc_title = ds.title.clone();
+            st_resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, !blocked, acc_title.clone()));
+            record_meta_if_enabled(
+                ui,
+                meta,
+                state.record_inspect_meta,
+                &st_resp,
+                FrameInspectEntryInput {
+                    widget_id: "grid.sheet_title",
+                    role: "button",
+                    label: &ds.title,
+                    command_id: Some("sheet.rename"),
+                    value: Some(serde_json::Value::String(ds.title.clone())),
+                    enabled: !blocked,
+                    disabled_reason: blocked.then_some("modal dialog is active"),
+                    z_layer: ZLayer::Workspace,
+                    ellipsized: ellip,
+                    full_label: ellip.then_some(ds.title.as_str()),
+                },
+            );
+            if st_resp.clicked() && !blocked {
+                state.inline_edit = None;
+                aux.aux_edit = Some((AuxInlineTarget::SheetTitle, ds.title.clone(), true));
+            }
+        }
+
+        let hash_r = Rect::from_min_max(pos2(cr.min.x, y2), pos2(x_mid, y3));
+        let hash_resp = ui.interact(hash_r, ui.make_persistent_id("grid.corner.row_num"), Sense::hover());
+        render_ellipsized_text(ui, hash_r, "#", CellTextStyle::plain(egui::FontId::proportional(11.0), tokens.text_muted, Align::Center));
+        hash_resp.widget_info(|| WidgetInfo::labeled(egui::Role::Label, true, String::from("#")));
+        record_meta_if_enabled(
+            ui,
+            meta,
+            state.record_inspect_meta,
+            &hash_resp,
+            FrameInspectEntryInput {
+                widget_id: "grid.corner.row_num",
+                role: "label",
+                label: "#",
+                command_id: None,
+                value: None,
+                enabled: true,
+                disabled_reason: None,
+                z_layer: ZLayer::Workspace,
+                ellipsized: false,
+                full_label: None,
+            },
+        );
+
+        let rt_hdr_r = Rect::from_min_max(pos2(x_mid, y2), pos2(x_end, y3));
+        let rt_band_label = row_titles_band_label(ds, &app.locale);
+        let rt_resp = ui.interact(rt_hdr_r, ui.make_persistent_id("grid.row_titles.band"), Sense::hover());
+        if !geom.row_titles_collapsed {
+            render_ellipsized_text(
+                ui,
+                rt_hdr_r.shrink2(vec2(5.0, 1.0)),
+                &rt_band_label,
+                CellTextStyle::plain(egui::FontId::proportional(11.0), tokens.text_strong, Align::LEFT),
+            );
+        }
+        let acc_rt = rt_band_label.clone();
+        rt_resp.widget_info(move || WidgetInfo::labeled(egui::Role::Label, true, acc_rt.clone()));
+        record_meta_if_enabled(
+            ui,
+            meta,
+            state.record_inspect_meta,
+            &rt_resp,
+            FrameInspectEntryInput {
+                widget_id: "grid.row_titles.band",
+                role: "label",
+                label: &rt_band_label,
+                command_id: None,
+                value: None,
+                enabled: true,
+                disabled_reason: None,
+                z_layer: ZLayer::Workspace,
+                ellipsized: false,
+                full_label: None,
+            },
+        );
+
+        let toggle_r = Rect::from_min_max(pos2(x_mid, y3), pos2(x_end, y4));
+        let toggle_lbl = if geom.row_titles_collapsed { ">" } else { "<|>" };
+        let toggle_resp =
+            ui.interact(toggle_r, ui.make_persistent_id("grid.row_titles.toggle"), if blocked { Sense::hover() } else { Sense::click() });
+        if toggle_resp.hovered() && !blocked {
+            ui.painter().rect_filled(toggle_r, 0.0, tokens.hover_bg);
+        }
+        render_ellipsized_text(
+            ui,
+            toggle_r.shrink(2.0),
+            toggle_lbl,
+            CellTextStyle::plain(egui::FontId::proportional(10.5), tokens.text_muted, Align::Center),
+        );
+        let acc_tgl = if geom.row_titles_collapsed { "Expand Row Titles" } else { "Collapse Row Titles" };
+        toggle_resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, !blocked, acc_tgl.to_owned()));
+        record_meta_if_enabled(
+            ui,
+            meta,
+            state.record_inspect_meta,
+            &toggle_resp,
+            FrameInspectEntryInput {
+                widget_id: "grid.row_titles.toggle",
+                role: "button",
+                label: toggle_lbl,
+                command_id: None,
+                value: None,
+                enabled: !blocked,
+                disabled_reason: blocked.then_some("modal dialog is active"),
+                z_layer: ZLayer::Workspace,
+                ellipsized: false,
+                full_label: None,
+            },
+        );
+        if toggle_resp.clicked() && !blocked {
+            let next = !geom.row_titles_collapsed;
+            state.row_titles_collapsed = next;
+            intents.push_set_row_titles_collapsed(next);
+        }
+
+        let p = ui.painter();
+        p.line_segment([pos2(cr.min.x, y2), pos2(cr.max.x, y2)], Stroke::new(1.0, tokens.divider));
+        p.line_segment([pos2(cr.min.x, y3), pos2(cr.max.x, y3)], Stroke::new(1.0, tokens.divider));
+        p.line_segment([pos2(x_mid, y1), pos2(x_mid, y4)], Stroke::new(1.0, tokens.divider));
+    }
+
+    fn row_titles_band_label(ds: &DataSheet, locale: &str) -> String {
+        match &ds.archetype {
+            TableArchetype::Grouped(g) if !g.row_factor_title.trim().is_empty() => g.row_factor_title.clone(),
+            TableArchetype::Contingency(c) if !c.row_factor_title.trim().is_empty() => c.row_factor_title.clone(),
+            TableArchetype::PartsOfWhole(_) => String::from("Slice Labels"),
+            _ => grid_tr(locale, "w6.grid.row_titles", "Row Titles").to_owned(),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_multi_column_headers(
+        ui: &mut Ui,
+        app: &UiApp,
+        ds: &DataSheet,
+        state: &mut ColumnGridEguiState,
+        aux: &mut MultiGridAuxState,
+        geom: &MultiGridGeom,
+        active_mv_operands: &HashSet<usize>,
+        tokens: &Tokens,
+        meta: &mut FrameInspectMeta,
+        intents: &mut PendingUiIntents,
+        blocked: bool,
+    ) {
+        let hdr_rect = geom.col_header_rect;
+        if !hdr_rect.is_positive() {
+            return;
+        }
+        let scroll_x = state.scroll_offset_pt.x;
+        let vis_flat = compute_visible_range(scroll_x, hdr_rect.width(), geom.subcol_w, geom.total_flat_cols);
+
+        ui.scope_builder(UiBuilder::new().max_rect(hdr_rect), |hdr_ui| {
+            hdr_ui.set_clip_rect(hdr_rect);
+            hdr_ui.painter().rect_filled(hdr_rect, 0.0, tokens.header_bg);
+
+            let y1 = hdr_rect.min.y;
+            let y2 = y1 + geom.h_tier1;
+            let y3 = y2 + geom.h_tier2;
+            let y4 = hdr_rect.max.y;
+
+            if geom.x_subcols > 0 && vis_flat.start < geom.x_subcols {
+                render_multi_x_headers(hdr_ui, ds, state, aux, geom, &vis_flat, scroll_x, hdr_rect, tokens, meta, blocked);
+            }
+
+            let vis_data_start = vis_flat.start.saturating_sub(geom.x_subcols);
+            let vis_data_end = vis_flat.end.saturating_sub(geom.x_subcols);
+            if vis_data_start < vis_data_end && geom.col_count > 0 {
+                render_multi_data_col_headers(
+                    hdr_ui,
+                    app,
+                    ds,
+                    state,
+                    aux,
+                    geom,
+                    vis_data_start..vis_data_end,
+                    scroll_x,
+                    hdr_rect,
+                    active_mv_operands,
+                    tokens,
+                    meta,
+                    intents,
+                    blocked,
+                );
+            }
+
+            hdr_ui.painter().line_segment([pos2(hdr_rect.min.x, y2), pos2(hdr_rect.max.x, y2)], Stroke::new(1.0, tokens.divider));
+            hdr_ui.painter().line_segment([pos2(hdr_rect.min.x, y3), pos2(hdr_rect.max.x, y3)], Stroke::new(1.0, tokens.divider));
+            hdr_ui.painter().line_segment([pos2(hdr_rect.min.x, y4), pos2(hdr_rect.max.x, y4)], Stroke::new(1.5, tokens.border));
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_multi_x_headers(
+        hdr_ui: &mut Ui,
+        ds: &DataSheet,
+        state: &mut ColumnGridEguiState,
+        aux: &mut MultiGridAuxState,
+        geom: &MultiGridGeom,
+        vis_flat: &Range<usize>,
+        scroll_x: f32,
+        hdr_rect: Rect,
+        tokens: &Tokens,
+        meta: &mut FrameInspectMeta,
+        blocked: bool,
+    ) {
+        let y1 = hdr_rect.min.y;
+        let y2 = y1 + geom.h_tier1;
+        let y3 = y2 + geom.h_tier2;
+        let y4 = hdr_rect.max.y;
+        let x_x0 = hdr_rect.min.x - scroll_x;
+        #[allow(clippy::cast_precision_loss)]
+        let x_w = (geom.x_subcols as f32) * geom.subcol_w;
+        let x_tier1_r = Rect::from_min_max(pos2(x_x0, y1), pos2(x_x0 + x_w, y2));
+        let super_x = if matches!(ds.archetype, TableArchetype::Survival(_)) { "Time" } else { "X" };
+        render_ellipsized_text(
+            hdr_ui,
+            x_tier1_r.intersect(hdr_rect).shrink2(vec2(4.0, 1.0)),
+            super_x,
+            CellTextStyle::plain(egui::FontId::proportional(11.0), tokens.text_muted, Align::Center),
+        );
+
+        for sx in 0..geom.x_subcols {
+            if !vis_flat.contains(&sx) {
+                continue;
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let sx_x0 = x_x0 + (sx as f32) * geom.subcol_w;
+            let sx_x1 = sx_x0 + geom.subcol_w;
+
+            let t2_r = Rect::from_min_max(pos2(sx_x0, y2), pos2(sx_x1, y3)).intersect(hdr_rect);
+            let x_title = x_column_title(&ds.archetype, sx);
+            if t2_r.width() > 2.0 {
+                let wid = format!("grid.x_title.{sx}");
+                let resp = hdr_ui.interact(t2_r, hdr_ui.make_persistent_id(&wid), if blocked { Sense::hover() } else { Sense::click() });
+                if resp.hovered() && !blocked {
+                    hdr_ui.painter().rect_filled(t2_r, 0.0, tokens.hover_bg);
+                }
+                render_ellipsized_text(
+                    hdr_ui,
+                    t2_r.shrink2(vec2(4.0, 1.0)),
+                    &x_title,
+                    CellTextStyle::plain(egui::FontId::proportional(12.0), tokens.accent, Align::Center),
+                );
+                let acc = format!("X Title: {x_title}");
+                resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, !blocked, acc.clone()));
+                record_meta_if_enabled(
+                    hdr_ui,
+                    meta,
+                    state.record_inspect_meta,
+                    &resp,
+                    FrameInspectEntryInput {
+                        widget_id: &wid,
+                        role: "button",
+                        label: &x_title,
+                        command_id: Some("table.setTitles"),
+                        value: Some(serde_json::Value::String(x_title.clone())),
+                        enabled: !blocked,
+                        disabled_reason: blocked.then_some("modal dialog is active"),
+                        z_layer: ZLayer::Workspace,
+                        ellipsized: false,
+                        full_label: None,
+                    },
+                );
+                if resp.clicked() && !blocked && sx == 0 {
+                    state.inline_edit = None;
+                    aux.aux_edit = Some((AuxInlineTarget::XTitle { subcol: sx }, x_title, true));
+                }
+            }
+
+            let t3_r = Rect::from_min_max(pos2(sx_x0, y3), pos2(sx_x1, y4)).intersect(hdr_rect);
+            let x_sub_lbl = x_subcolumn_label(&ds.archetype, sx);
+            if t3_r.width() > 2.0 {
+                let swid = format!("grid.subcol_hdr.x.{sx}");
+                let sresp = hdr_ui.interact(t3_r, hdr_ui.make_persistent_id(&swid), Sense::hover());
+                render_ellipsized_text(
+                    hdr_ui,
+                    t3_r.shrink2(vec2(3.0, 1.0)),
+                    &x_sub_lbl,
+                    CellTextStyle::plain(egui::FontId::proportional(11.0), tokens.text_muted, Align::Center),
+                );
+                let acc_s = x_sub_lbl.clone();
+                sresp.widget_info(move || WidgetInfo::labeled(egui::Role::ColumnHeader, true, acc_s.clone()));
+                record_meta_if_enabled(
+                    hdr_ui,
+                    meta,
+                    state.record_inspect_meta,
+                    &sresp,
+                    FrameInspectEntryInput {
+                        widget_id: &swid,
+                        role: "columnheader",
+                        label: &x_sub_lbl,
+                        command_id: None,
+                        value: None,
+                        enabled: true,
+                        disabled_reason: None,
+                        z_layer: ZLayer::Workspace,
+                        ellipsized: false,
+                        full_label: None,
+                    },
+                );
+            }
+            hdr_ui.painter().line_segment([pos2(sx_x1, y2), pos2(sx_x1, y4)], Stroke::new(1.0, tokens.divider));
+        }
+        let x_sep_x = x_x0 + x_w;
+        hdr_ui.painter().line_segment([pos2(x_sep_x, y1), pos2(x_sep_x, y4)], Stroke::new(1.5, tokens.border));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_multi_data_col_headers(
+        hdr_ui: &mut Ui,
+        app: &UiApp,
+        ds: &DataSheet,
+        state: &mut ColumnGridEguiState,
+        aux: &mut MultiGridAuxState,
+        geom: &MultiGridGeom,
+        vis_data: Range<usize>,
+        scroll_x: f32,
+        hdr_rect: Rect,
+        active_mv_operands: &HashSet<usize>,
+        tokens: &Tokens,
+        meta: &mut FrameInspectMeta,
+        intents: &mut PendingUiIntents,
+        blocked: bool,
+    ) {
+        let y1 = hdr_rect.min.y;
+        let y2 = y1 + geom.h_tier1;
+        let y3 = y2 + geom.h_tier2;
+        let y4 = hdr_rect.max.y;
+        let first_col = geom.flat_data_to_coord(vis_data.start).map_or(0, |(c, _)| c);
+        let last_col = geom.flat_data_to_coord(vis_data.end.saturating_sub(1)).map_or(geom.col_count - 1, |(c, _)| c);
+
+        for col in first_col..=last_col.min(geom.col_count.saturating_sub(1)) {
+            let (span_flat_start, span_subs) = geom.col_span_flat(col);
+            #[allow(clippy::cast_precision_loss)]
+            let cx0 = hdr_rect.min.x + (span_flat_start as f32) * geom.subcol_w - scroll_x;
+            #[allow(clippy::cast_precision_loss)]
+            let cx1 = cx0 + (span_subs as f32) * geom.subcol_w;
+
+            if active_mv_operands.contains(&col) {
+                let highlight_r = Rect::from_min_max(pos2(cx0, y1), pos2(cx1, y4)).intersect(hdr_rect);
+                hdr_ui.painter().rect_filled(highlight_r, 0.0, tokens.accent.linear_multiply(0.14));
+            }
+
+            let t1_r = Rect::from_min_max(pos2(cx0, y1), pos2(cx1, y2)).intersect(hdr_rect);
+            let super_lbl = data_super_column_label(&ds.archetype, col);
+            if t1_r.width() > 4.0 {
+                render_ellipsized_text(
+                    hdr_ui,
+                    t1_r.shrink2(vec2(4.0, 1.0)),
+                    &super_lbl,
+                    CellTextStyle::plain(egui::FontId::proportional(11.0), tokens.text_muted, Align::Center),
+                );
+            }
+
+            let t2_r = Rect::from_min_max(pos2(cx0, y2), pos2(cx1, y3)).intersect(hdr_rect);
+            let col_title = data_column_title(&ds.archetype, col);
+            if t2_r.width() > 4.0 && state.inline_edit.as_ref().is_none_or(|e| e.target != GridInlineEditTarget::ColumnTitle { col }) {
+                let wid = format!("grid.col_title.{col}");
+                let resp = hdr_ui.interact(t2_r, hdr_ui.make_persistent_id(&wid), if blocked { Sense::hover() } else { Sense::click() });
+                if resp.hovered() && !blocked {
+                    hdr_ui.painter().rect_filled(t2_r, 0.0, tokens.hover_bg);
+                }
+                let (ellip, _) = render_ellipsized_text(
+                    hdr_ui,
+                    t2_r.shrink2(vec2(4.0, 1.0)),
+                    &col_title,
+                    CellTextStyle::plain(egui::FontId::proportional(12.0), tokens.text_strong, Align::Center),
+                );
+                if ellip {
+                    state.ellipsized_headers += 1;
+                }
+                let acc = col_title.clone();
+                resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, !blocked, acc.clone()));
+                record_meta_if_enabled(
+                    hdr_ui,
+                    meta,
+                    state.record_inspect_meta,
+                    &resp,
+                    FrameInspectEntryInput {
+                        widget_id: &wid,
+                        role: "button",
+                        label: &col_title,
+                        command_id: Some("table.setTitles"),
+                        value: Some(serde_json::Value::String(col_title.clone())),
+                        enabled: !blocked,
+                        disabled_reason: blocked.then_some("modal dialog is active"),
+                        z_layer: ZLayer::Workspace,
+                        ellipsized: ellip,
+                        full_label: ellip.then_some(col_title.as_str()),
+                    },
+                );
+                if resp.clicked() && !blocked {
+                    aux.aux_edit = None;
+                    begin_inline_edit(hdr_ui, state, GridInlineEditTarget::ColumnTitle { col }, col_title);
+                }
+            }
+
+            if let TableArchetype::MultipleVariables(mv) = &ds.archetype {
+                if let Some(var) = mv.variables.get(col) {
+                    let chip_r = Rect::from_min_max(pos2(cx0 + 2.0, y3 + 2.0), pos2(cx1 - 2.0, y4 - 2.0)).intersect(hdr_rect);
+                    if chip_r.width() > 6.0 {
+                        render_mv_tier3_role_chip(hdr_ui, ds, state, aux, col, var, chip_r, tokens, meta, intents, blocked);
+                    }
+                }
+            } else {
+                render_subcolumn_tier3_cells(hdr_ui, app, ds, state, aux, geom, col, span_subs, cx0, hdr_rect, tokens, meta, blocked);
+            }
+            hdr_ui.painter().line_segment([pos2(cx1, y1), pos2(cx1, y4)], Stroke::new(1.25, tokens.border));
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_subcolumn_tier3_cells(
+        hdr_ui: &mut Ui,
+        app: &UiApp,
+        ds: &DataSheet,
+        state: &mut ColumnGridEguiState,
+        aux: &mut MultiGridAuxState,
+        geom: &MultiGridGeom,
+        col: usize,
+        span_subs: usize,
+        cx0: f32,
+        hdr_rect: Rect,
+        tokens: &Tokens,
+        meta: &mut FrameInspectMeta,
+        blocked: bool,
+    ) {
+        let y3 = hdr_rect.min.y + geom.h_tier1 + geom.h_tier2;
+        let y4 = hdr_rect.max.y;
+        let is_nested = matches!(ds.archetype, TableArchetype::Nested(_));
+        for subcol in 0..span_subs {
+            #[allow(clippy::cast_precision_loss)]
+            let sx0 = cx0 + (subcol as f32) * geom.subcol_w;
+            let sx1 = sx0 + geom.subcol_w;
+            let t3_r = Rect::from_min_max(pos2(sx0, y3), pos2(sx1, y4)).intersect(hdr_rect);
+            if t3_r.width() <= 2.0 {
+                continue;
+            }
+            let sub_lbl = data_subcolumn_header_label(ds, col, subcol, &app.locale);
+            let swid = if is_nested { format!("grid.subcol_title.{col}.{subcol}") } else { format!("grid.subcol_hdr.{col}.{subcol}") };
+            let sense = if is_nested && !blocked { Sense::click() } else { Sense::hover() };
+            let sresp = hdr_ui.interact(t3_r, hdr_ui.make_persistent_id(&swid), sense);
+            if is_nested && sresp.hovered() && !blocked {
+                hdr_ui.painter().rect_filled(t3_r, 0.0, tokens.hover_bg);
+            }
+            let fg = if is_nested { tokens.text_primary } else { tokens.text_muted };
+            render_ellipsized_text(
+                hdr_ui,
+                t3_r.shrink2(vec2(3.0, 1.0)),
+                &sub_lbl,
+                CellTextStyle::plain(egui::FontId::proportional(11.0), fg, Align::Center),
+            );
+            let acc_s = sub_lbl.clone();
+            let role = if is_nested { egui::Role::Button } else { egui::Role::ColumnHeader };
+            let role_str = if is_nested { "button" } else { "columnheader" };
+            sresp.widget_info(move || WidgetInfo::labeled(role, !is_nested || !blocked, acc_s.clone()));
+            record_meta_if_enabled(
+                hdr_ui,
+                meta,
+                state.record_inspect_meta,
+                &sresp,
+                FrameInspectEntryInput {
+                    widget_id: &swid,
+                    role: role_str,
+                    label: &sub_lbl,
+                    command_id: is_nested.then_some("table.setSubcolumnTitles"),
+                    value: is_nested.then(|| serde_json::Value::String(sub_lbl.clone())),
+                    enabled: !is_nested || !blocked,
+                    disabled_reason: (is_nested && blocked).then_some("modal dialog is active"),
+                    z_layer: ZLayer::Workspace,
+                    ellipsized: false,
+                    full_label: None,
+                },
+            );
+            if is_nested && sresp.clicked() && !blocked {
+                state.inline_edit = None;
+                aux.aux_edit = Some((AuxInlineTarget::SubcolumnTitle { col, subcol }, sub_lbl, true));
+            }
+            if subcol + 1 < span_subs {
+                hdr_ui.painter().line_segment([pos2(sx1, y3), pos2(sx1, y4)], Stroke::new(1.0, tokens.divider));
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_mv_tier3_role_chip(
+        ui: &mut Ui,
+        ds: &DataSheet,
+        state: &ColumnGridEguiState,
+        aux: &mut MultiGridAuxState,
+        col: usize,
+        var: &curvebook_doc::VariableColumn,
+        rect: Rect,
+        tokens: &Tokens,
+        meta: &mut FrameInspectMeta,
+        intents: &mut PendingUiIntents,
+        blocked: bool,
+    ) {
+        let is_calc = matches!(var.source, VariableSource::Calculated { .. });
+        let (chip_txt, chip_col) = if is_calc {
+            ("FX=", tokens.role_fx)
+        } else {
+            let short = match var.role {
+                VariableRole::Continuous => "NUM",
+                VariableRole::Categorical => "CAT",
+                VariableRole::Label => "LBL",
+                VariableRole::Calculated => "FX=",
+            };
+            let c = match var.role {
+                VariableRole::Continuous => tokens.role_num,
+                VariableRole::Categorical => tokens.role_cat,
+                VariableRole::Label => tokens.role_lbl,
+                VariableRole::Calculated => tokens.role_fx,
+            };
+            (short, c)
+        };
+        let label = if !is_calc && var.role_inferred { format!("Auto·{chip_txt}") } else { chip_txt.to_owned() };
+        let wid = format!("mv_formula.role_badge.{col}");
+        let resp = ui.interact(rect, ui.make_persistent_id(&wid), if blocked { Sense::hover() } else { Sense::click() });
+        let alpha = if is_calc || !var.role_inferred { 0.22 } else { 0.10 };
+        ui.painter().rect_filled(rect, 3.0, chip_col.linear_multiply(alpha));
+        let stroke_w = if !is_calc && var.role_inferred { 1.0 } else { 1.5 };
+        ui.painter().rect_stroke(rect, 3.0, Stroke::new(stroke_w, chip_col), egui::StrokeKind::Inside);
+        render_ellipsized_text(ui, rect.shrink2(vec2(4.0, 0.0)), &label, text_style(10.5, false, chip_col, Align::Center, is_calc, false));
+        let acc = format!("Variable {} role: {label}", var.title);
+        resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, !blocked, acc.clone()));
+        record_meta_if_enabled(
+            ui,
+            meta,
+            state.record_inspect_meta,
+            &resp,
+            FrameInspectEntryInput {
+                widget_id: &wid,
+                role: "button",
+                label: &label,
+                command_id: Some(if is_calc { "ui.table.openFormulaBar" } else { "table.setVariableRole" }),
+                value: Some(serde_json::Value::String(label.clone())),
+                enabled: !blocked,
+                disabled_reason: blocked.then_some("modal dialog is active"),
+                z_layer: ZLayer::Workspace,
+                ellipsized: false,
+                full_label: None,
+            },
+        );
+        if resp.clicked() && !blocked {
+            if is_calc {
+                aux.active_role_menu_col = None;
+                intents.push_ui("ui.table.openFormulaBar", json!({ "sheet_id": ds.id.as_str(), "col": col }));
+            } else {
+                aux.active_role_menu_col = if aux.active_role_menu_col == Some(col) { None } else { Some(col) };
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_multi_gutter_body(
+        ui: &mut Ui,
+        app: &UiApp,
+        ds: &DataSheet,
+        state: &mut ColumnGridEguiState,
+        aux: &mut MultiGridAuxState,
+        geom: &MultiGridGeom,
+        tokens: &Tokens,
+        meta: &mut FrameInspectMeta,
+        intents: &mut PendingUiIntents,
+        blocked: bool,
+    ) {
+        let g_rect = geom.row_gutter_rect;
+        if !g_rect.is_positive() {
+            return;
+        }
+        let scroll_y = state.scroll_offset_pt.y;
+        let vis_rows = compute_visible_range(scroll_y, g_rect.height(), geom.row_h, geom.row_count);
+        let x0 = g_rect.min.x;
+        let x_mid = x0 + geom.row_num_w;
+        let x1 = g_rect.max.x;
+
+        ui.scope_builder(UiBuilder::new().max_rect(g_rect), |gui| {
+            gui.set_clip_rect(g_rect);
+            gui.painter().rect_filled(g_rect, 0.0, tokens.panel_bg);
+            for row in vis_rows {
+                #[allow(clippy::cast_precision_loss)]
+                let y0 = g_rect.min.y + (row as f32) * geom.row_h - scroll_y;
+                let y1 = y0 + geom.row_h;
+                let row_selected = app.grid.selected_rows.contains(&row);
+                let num_r = Rect::from_min_max(pos2(x0, y0), pos2(x_mid, y1)).intersect(g_rect);
+                if num_r.height() > 1.0 {
+                    if row_selected {
+                        gui.painter().rect_filled(num_r, 0.0, tokens.accent.linear_multiply(0.18));
+                    }
+                    let wid = format!("grid.row_num.{row}");
+                    let resp = gui.interact(num_r, gui.make_persistent_id(&wid), if blocked { Sense::hover() } else { Sense::click() });
+                    let row_str = format!("{}", row + 1);
+                    render_ellipsized_text(
+                        gui,
+                        num_r.shrink2(vec2(4.0, 0.0)),
+                        &row_str,
+                        text_style(11.0, true, tokens.text_muted, Align::RIGHT, false, false),
+                    );
+                    let acc_rn = format!("Row {}", row + 1);
+                    resp.widget_info(move || WidgetInfo::labeled(egui::Role::RowHeader, !blocked, acc_rn.clone()));
+                    record_meta_if_enabled(
+                        gui,
+                        meta,
+                        state.record_inspect_meta,
+                        &resp,
+                        FrameInspectEntryInput {
+                            widget_id: &wid,
+                            role: "rowheader",
+                            label: &row_str,
+                            command_id: None,
+                            value: None,
+                            enabled: !blocked,
+                            disabled_reason: blocked.then_some("modal dialog is active"),
+                            z_layer: ZLayer::Workspace,
+                            ellipsized: false,
+                            full_label: None,
+                        },
+                    );
+                    if resp.clicked() && !blocked && geom.col_count > 0 {
+                        let c = GridCellCoord::new(row, 0, 0);
+                        aux.selected_x_cell = None;
+                        intents.push_select_grid_cell(c);
+                    }
+                    if resp.secondary_clicked()
+                        && !blocked
+                        && let Some(pos) = resp.interact_pointer_pos()
+                    {
+                        aux.context_menu = Some(ContextMenuState { pos, row, cell: None });
+                    }
+                }
+
+                let rt_r = Rect::from_min_max(pos2(x_mid, y0), pos2(x1, y1)).intersect(g_rect);
+                if rt_r.height() > 1.0 {
+                    let row_title = row_title_at(&ds.archetype, row);
+                    if geom.row_titles_collapsed {
+                        let wid = format!("grid.row_title_collapsed.{row}");
+                        let resp = gui.interact(rt_r, gui.make_persistent_id(&wid), Sense::hover());
+                        let abbr: String = row_title.chars().take(2).collect();
+                        render_ellipsized_text(
+                            gui,
+                            rt_r.shrink2(vec2(3.0, 0.0)),
+                            &abbr,
+                            CellTextStyle::plain(egui::FontId::proportional(11.0), tokens.text_muted, Align::Center),
+                        );
+                        let acc_c = format!("Row {} Title {}", row + 1, row_title);
+                        resp.widget_info(move || WidgetInfo::labeled(egui::Role::Label, true, acc_c.clone()));
+                        record_meta_if_enabled(
+                            gui,
+                            meta,
+                            state.record_inspect_meta,
+                            &resp,
+                            FrameInspectEntryInput {
+                                widget_id: &wid,
+                                role: "label",
+                                label: &abbr,
+                                command_id: None,
+                                value: Some(serde_json::Value::String(row_title)),
+                                enabled: true,
+                                disabled_reason: None,
+                                z_layer: ZLayer::Workspace,
+                                ellipsized: false,
+                                full_label: None,
+                            },
+                        );
+                    } else {
+                        let wid = format!("grid.row_title.{row}");
+                        let editing_this = state.inline_edit.as_ref().is_some_and(|e| e.target == GridInlineEditTarget::RowTitle { row });
+                        if !editing_this {
+                            let resp = gui.interact(rt_r, gui.make_persistent_id(&wid), if blocked { Sense::hover() } else { Sense::click() });
+                            if resp.hovered() && !blocked {
+                                gui.painter().rect_filled(rt_r, 0.0, tokens.hover_bg);
+                            }
+                            render_ellipsized_text(
+                                gui,
+                                rt_r.shrink2(vec2(5.0, 0.0)),
+                                &row_title,
+                                CellTextStyle::plain(egui::FontId::proportional(12.0), tokens.text_primary, Align::LEFT),
+                            );
+                            let acc_rt = if row_title.is_empty() { format!("Row {} Title", row + 1) } else { row_title.clone() };
+                            resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, !blocked, acc_rt.clone()));
+                            record_meta_if_enabled(
+                                gui,
+                                meta,
+                                state.record_inspect_meta,
+                                &resp,
                                 FrameInspectEntryInput {
                                     widget_id: &wid,
-                                    role: "gridcell",
-                                    label: &wid,
-                                    command_id: None,
-                                    value: None,
-                                    enabled,
-                                    disabled_reason: (!enabled).then_some("modal dialog is active"),
+                                    role: "button",
+                                    label: &row_title,
+                                    command_id: Some("table.setRowTitles"),
+                                    value: Some(serde_json::Value::String(row_title.clone())),
+                                    enabled: !blocked,
+                                    disabled_reason: blocked.then_some("modal dialog is active"),
                                     z_layer: ZLayer::Workspace,
                                     ellipsized: false,
                                     full_label: None,
                                 },
                             );
-                        }
-                        if cell_resp.clicked() && enabled {
-                            intents.push_select_grid_cell(GridCellCoord::new(row, col, 0));
+                            if resp.clicked() && !blocked {
+                                aux.aux_edit = None;
+                                begin_inline_edit(gui, state, GridInlineEditTarget::RowTitle { row }, row_title);
+                            }
                         }
                     }
-                });
+                }
+                gui.painter().line_segment([pos2(x0, y1), pos2(x1, y1)], Stroke::new(1.0, tokens.divider));
             }
+            gui.painter().line_segment([pos2(x_mid, g_rect.min.y), pos2(x_mid, g_rect.max.y)], Stroke::new(1.0, tokens.divider));
+            gui.painter().line_segment([pos2(x1, g_rect.min.y), pos2(x1, g_rect.max.y)], Stroke::new(1.5, tokens.border));
         });
-        let _ = scroll;
-    });
+    }
 
-    state.last_visible_rows = 0..max_vis_rows;
-    state.last_visible_subcols = 0..max_vis_cols;
-    DataGridFrameReport {
-        grid_rect_pt: available,
-        rendered_cells,
-        visible_rows: 0..max_vis_rows,
-        visible_subcols: 0..max_vis_cols,
-        vertical_scrollbar_rect_pt: None,
-        horizontal_scrollbar_rect_pt: None,
-        rendered_modal_guard_open: state.active_link_popover.is_some(),
-        outside_click_blocked: render_ctx.modal_blocked && any_pointer_click_in(ui, available),
+    struct MultiBodyOut {
+        rendered_cells: usize,
+        vis_rows: Range<usize>,
+        vis_all_flat: Range<usize>,
+    }
+
+    fn is_coord_selected(app: &UiApp, coord: GridCellCoord) -> (bool, bool) {
+        let is_active = app.grid.tool.active == Some(coord);
+        if is_active {
+            return (true, true);
+        }
+        if let Some((s, e)) = app.grid.tool.selection_bounds()
+            && coord.row >= s.row
+            && coord.row <= e.row
+            && coord.col >= s.col
+            && coord.col <= e.col
+            && coord.subcol >= s.subcol
+            && coord.subcol <= e.subcol
+        {
+            return (false, true);
+        }
+        if app.grid.selected_coords.contains(&coord) {
+            return (false, true);
+        }
+        (false, false)
+    }
+
+    struct MultiBodyDrawBuffers<'a> {
+        text_buf: &'a mut String,
+        id_buf: &'a mut String,
+        acc_buf: &'a mut String,
+        record_meta: bool,
+        base_row_bg: Color32,
+        x_seq_readonly: bool,
+        is_mv: bool,
+        is_cont: bool,
+        is_surv: bool,
+        blocked: bool,
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_multi_body(
+        ui: &mut Ui,
+        app: &UiApp,
+        ds: &DataSheet,
+        state: &mut ColumnGridEguiState,
+        aux: &mut MultiGridAuxState,
+        geom: &MultiGridGeom,
+        tokens: &Tokens,
+        meta: &mut FrameInspectMeta,
+        intents: &mut PendingUiIntents,
+        blocked: bool,
+    ) -> MultiBodyOut {
+        let b_rect = geom.body_rect;
+        if !b_rect.is_positive() {
+            return MultiBodyOut { rendered_cells: 0, vis_rows: 0..0, vis_all_flat: 0..0 };
+        }
+        let mut out = MultiBodyOut { rendered_cells: 0, vis_rows: 0..0, vis_all_flat: 0..0 };
+
+        let scroll_out = ui.scope_builder(UiBuilder::new().max_rect(b_rect), |body_parent| {
+            if blocked {
+                body_parent.disable();
+            }
+            egui::ScrollArea::both()
+                .id_salt(("r15_4_multi_grid_scroll", ds.id.as_str()))
+                .scroll_offset(state.scroll_offset_pt)
+                .scroll_bar_visibility(if blocked { ScrollBarVisibility::AlwaysHidden } else { ScrollBarVisibility::AlwaysVisible })
+                .scroll_source(if blocked { ScrollSource::NONE } else { ScrollSource::ALL })
+                .auto_shrink([false, false])
+                .show_viewport(body_parent, |body_ui, viewport| {
+                    let origin = body_ui.min_rect().min;
+                    body_ui.allocate_space(vec2(geom.content_w.max(geom.body_inner_clip.width()), geom.content_h.max(geom.body_inner_clip.height())));
+
+                    let vis_rows = compute_visible_range(viewport.min.y, geom.body_inner_clip.height(), geom.row_h, geom.row_count);
+                    let vis_all_flat = compute_visible_range(viewport.min.x, geom.body_inner_clip.width(), geom.subcol_w, geom.total_flat_cols);
+                    out.vis_rows = vis_rows.clone();
+                    out.vis_all_flat = vis_all_flat.clone();
+
+                    let mut text_buf = String::with_capacity(32);
+                    let mut id_buf = String::with_capacity(32);
+                    let mut acc_buf = String::with_capacity(48);
+                    let record_meta = state.record_inspect_meta && !body_ui.ctx().will_discard();
+
+                    body_ui.set_clip_rect(geom.body_inner_clip);
+
+                    let x_seq_readonly =
+                        matches!(&ds.archetype, TableArchetype::Xy(xy) if matches!(xy.x_mode, XColumnMode::GeneratedSequence { .. }));
+                    let is_mv = matches!(&ds.archetype, TableArchetype::MultipleVariables(_));
+                    let is_cont = matches!(&ds.archetype, TableArchetype::Contingency(_));
+                    let is_surv = matches!(&ds.archetype, TableArchetype::Survival(_));
+                    let alt_fill = alt_row_fill(tokens.surface_bg, tokens.panel_bg);
+
+                    for row in vis_rows.clone() {
+                        #[allow(clippy::cast_precision_loss)]
+                        let y0 = origin.y + (row as f32) * geom.row_h;
+                        let y1 = y0 + geom.row_h;
+                        if y1 <= geom.body_inner_clip.min.y || y0 >= geom.body_inner_clip.max.y {
+                            continue;
+                        }
+                        let mut dbuf = MultiBodyDrawBuffers {
+                            text_buf: &mut text_buf,
+                            id_buf: &mut id_buf,
+                            acc_buf: &mut acc_buf,
+                            record_meta,
+                            base_row_bg: if row % 2 == 1 { alt_fill } else { tokens.surface_bg },
+                            x_seq_readonly,
+                            is_mv,
+                            is_cont,
+                            is_surv,
+                            blocked,
+                        };
+
+                        for flat in vis_all_flat.clone() {
+                            #[allow(clippy::cast_precision_loss)]
+                            let x0 = origin.x + (flat as f32) * geom.subcol_w;
+                            let raw_cell_r = Rect::from_min_max(pos2(x0, y0), pos2(x0 + geom.subcol_w, y1));
+                            let clipped = raw_cell_r.intersect(geom.body_inner_clip);
+                            if clipped.width() < 1.0 || clipped.height() < 1.0 {
+                                continue;
+                            }
+                            if flat < geom.x_subcols {
+                                render_single_multi_x_cell(body_ui, app, ds, state, aux, geom, row, flat, clipped, &mut dbuf, tokens, meta);
+                                out.rendered_cells += 1;
+                            } else if let Some((col, subcol)) = geom.flat_data_to_coord(flat - geom.x_subcols) {
+                                render_single_multi_data_cell(
+                                    body_ui,
+                                    app,
+                                    ds,
+                                    state,
+                                    aux,
+                                    geom,
+                                    GridCellCoord::new(row, col, subcol),
+                                    raw_cell_r,
+                                    clipped,
+                                    &mut dbuf,
+                                    tokens,
+                                    meta,
+                                    intents,
+                                );
+                                out.rendered_cells += 1;
+                            }
+                        }
+
+                        body_ui.painter().line_segment(
+                            [pos2(geom.body_inner_clip.min.x, y1), pos2(geom.body_inner_clip.max.x, y1)],
+                            Stroke::new(1.0, tokens.divider),
+                        );
+                    }
+
+                    paint_multi_vertical_hairlines(body_ui, origin.x, geom, &vis_all_flat, tokens);
+                })
+        });
+        if !blocked {
+            state.scroll_offset_pt = scroll_out.inner.state.clamped_offset();
+            clamp_multi_scroll(state, geom);
+        }
+        out
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_single_multi_x_cell(
+        body_ui: &mut Ui,
+        app: &UiApp,
+        ds: &DataSheet,
+        state: &mut ColumnGridEguiState,
+        aux: &mut MultiGridAuxState,
+        geom: &MultiGridGeom,
+        row: usize,
+        subcol: usize,
+        clipped: Rect,
+        dbuf: &mut MultiBodyDrawBuffers<'_>,
+        tokens: &Tokens,
+        meta: &mut FrameInspectMeta,
+    ) {
+        let cell_opt = ds.archetype.x_or_time_cell(row, subcol);
+        dbuf.text_buf.clear();
+        if let Some(c) = cell_opt {
+            format_cell_into(c, &app.locale_preset, dbuf.text_buf);
+        } else if dbuf.x_seq_readonly
+            && subcol == 0
+            && let TableArchetype::Xy(xy) = &ds.archetype
+            && let XColumnMode::GeneratedSequence { start, step, progression } = &xy.x_mode
+        {
+            #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let seq_val = match progression {
+                curvebook_doc::SequenceProgression::Arithmetic => *start + (row as f64) * (*step),
+                curvebook_doc::SequenceProgression::Geometric => *start * step.powi(row as i32),
+            };
+            format_cell_into(&Cell::number(seq_val), &app.locale_preset, dbuf.text_buf);
+        }
+        let excluded = cell_opt.is_some_and(|c| c.excluded);
+        let editable = !dbuf.blocked && !ds.frozen && !dbuf.x_seq_readonly;
+        let is_selected = aux.selected_x_cell == Some((row, subcol));
+        let editing_this = aux.aux_edit.as_ref().is_some_and(|(t, _, _)| *t == AuxInlineTarget::XCell { row, subcol });
+
+        let fill = if is_selected {
+            tokens.active_bg
+        } else if dbuf.x_seq_readonly {
+            tokens.panel_bg
+        } else {
+            dbuf.base_row_bg
+        };
+        body_ui.painter().rect_filled(clipped, 0.0, fill);
+        if is_selected {
+            body_ui.painter().rect_stroke(clipped, 0.0, Stroke::new(1.5, tokens.accent), egui::StrokeKind::Inside);
+        }
+
+        if !editing_this && !dbuf.text_buf.is_empty() {
+            let text_col = if excluded {
+                tokens.excluded_cell_text
+            } else if dbuf.x_seq_readonly {
+                tokens.text_muted
+            } else {
+                tokens.text_primary
+            };
+            render_ellipsized_text(
+                body_ui,
+                clipped.shrink2(vec2(5.0, 1.0)),
+                dbuf.text_buf,
+                text_style(geom.font_num_pt, true, text_col, Align::RIGHT, excluded || dbuf.x_seq_readonly, excluded),
+            );
+        }
+
+        dbuf.id_buf.clear();
+        let _ = write!(dbuf.id_buf, "grid.xcell.{row}.{subcol}");
+        let resp = body_ui.interact(clipped, body_ui.make_persistent_id(&*dbuf.id_buf), if dbuf.blocked { Sense::hover() } else { Sense::click() });
+        dbuf.acc_buf.clear();
+        if dbuf.text_buf.is_empty() {
+            let _ = write!(dbuf.acc_buf, "R{}X{}", row + 1, subcol + 1);
+        } else {
+            let _ = write!(dbuf.acc_buf, "R{}X{} {}", row + 1, subcol + 1, dbuf.text_buf);
+        }
+        let acc_owned = dbuf.acc_buf.clone();
+        resp.widget_info(move || WidgetInfo::labeled(egui::Role::Cell, editable, acc_owned.clone()));
+
+        if dbuf.record_meta {
+            meta.record_response(
+                body_ui,
+                &resp,
+                FrameInspectEntryInput {
+                    widget_id: dbuf.id_buf,
+                    role: "gridcell",
+                    label: dbuf.acc_buf,
+                    command_id: Some("table.setXCells"),
+                    value: Some(serde_json::Value::String(dbuf.text_buf.clone())),
+                    enabled: editable,
+                    disabled_reason: if dbuf.blocked {
+                        Some("modal dialog is active")
+                    } else if dbuf.x_seq_readonly {
+                        Some("X column is a generated sequence (read-only)")
+                    } else if ds.frozen {
+                        Some("sheet is frozen")
+                    } else {
+                        None
+                    },
+                    z_layer: ZLayer::Workspace,
+                    ellipsized: false,
+                    full_label: None,
+                },
+            );
+        }
+
+        if !dbuf.blocked && resp.clicked() {
+            aux.selected_x_cell = Some((row, subcol));
+            aux.active_role_menu_col = None;
+            aux.context_menu = None;
+            set_grid_focus_active(body_ui, true);
+            if is_multi_click_edit(&resp) && editable {
+                state.inline_edit = None;
+                aux.aux_edit = Some((AuxInlineTarget::XCell { row, subcol }, initial_edit_text_for_cell(cell_opt, &app.locale_preset), true));
+            }
+        }
+        if !dbuf.blocked
+            && resp.secondary_clicked()
+            && let Some(pos) = resp.interact_pointer_pos()
+        {
+            aux.selected_x_cell = Some((row, subcol));
+            aux.context_menu = Some(ContextMenuState { pos, row, cell: Some(ContextCellTarget { is_x: true, row, col: 0, subcol }) });
+        }
+    }
+
+    struct MultiCellFlags<'a> {
+        cell_opt: Option<&'a curvebook_doc::Cell>,
+        excluded: bool,
+        mv_is_cat_or_lbl: bool,
+        mv_is_calc: bool,
+        linked: Option<&'a LinkedDataRegion>,
+        editable: bool,
+        is_active: bool,
+        is_selected: bool,
+        contingency_invalid: bool,
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_single_multi_data_cell(
+        body_ui: &mut Ui,
+        app: &UiApp,
+        ds: &DataSheet,
+        state: &mut ColumnGridEguiState,
+        aux: &mut MultiGridAuxState,
+        geom: &MultiGridGeom,
+        coord: GridCellCoord,
+        raw_cell_r: Rect,
+        clipped: Rect,
+        dbuf: &mut MultiBodyDrawBuffers<'_>,
+        tokens: &Tokens,
+        meta: &mut FrameInspectMeta,
+        intents: &mut PendingUiIntents,
+    ) {
+        let cell_opt = ds.archetype.data_cell(curvebook_doc::CellCoord::from(coord));
+        dbuf.text_buf.clear();
+        if let Some(c) = cell_opt {
+            format_cell_into(c, &app.locale_preset, dbuf.text_buf);
+        }
+        let mv_var = if dbuf.is_mv {
+            if let TableArchetype::MultipleVariables(mv) = &ds.archetype { mv.variables.get(coord.col) } else { None }
+        } else {
+            None
+        };
+        let mv_is_calc = mv_var.is_some_and(|v| matches!(v.source, VariableSource::Calculated { .. }));
+        let mv_is_cat_or_lbl = mv_var.is_some_and(|v| matches!(v.role, VariableRole::Categorical | VariableRole::Label));
+        let linked = linked_region_for_cell(ds, coord.row, coord.col);
+        let (is_active, is_selected) = is_coord_selected(app, coord);
+        let flags = MultiCellFlags {
+            cell_opt,
+            excluded: cell_opt.is_some_and(|c| c.excluded),
+            mv_is_cat_or_lbl,
+            mv_is_calc,
+            linked,
+            editable: !dbuf.blocked && !ds.frozen && !mv_is_calc && linked.is_none(),
+            is_active,
+            is_selected,
+            contingency_invalid: dbuf.is_cont && is_invalid_contingency_cell(cell_opt),
+        };
+
+        paint_single_multi_data_cell(body_ui, ds, state, geom, coord, raw_cell_r, clipped, dbuf, tokens, &flags);
+
+        dbuf.id_buf.clear();
+        let _ = write!(dbuf.id_buf, "grid.cell.{}.{}.{}", coord.row, coord.col, coord.subcol);
+        let resp = body_ui.interact(clipped, body_ui.make_persistent_id(&*dbuf.id_buf), if dbuf.blocked { Sense::hover() } else { Sense::click() });
+        dbuf.acc_buf.clear();
+        if dbuf.text_buf.is_empty() {
+            let _ = write!(dbuf.acc_buf, "R{}C{}", coord.row + 1, coord.col + 1);
+        } else {
+            let _ = write!(dbuf.acc_buf, "R{}C{} {}", coord.row + 1, coord.col + 1, dbuf.text_buf);
+        }
+        let acc_owned = dbuf.acc_buf.clone();
+        let acc_enabled = flags.editable || flags.mv_is_calc;
+        resp.widget_info(move || WidgetInfo::labeled(egui::Role::Cell, acc_enabled, acc_owned.clone()));
+
+        handle_multi_data_cell_interactions(body_ui, app, ds, state, aux, coord, dbuf, meta, intents, &flags, &resp);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn paint_single_multi_data_cell(
+        body_ui: &Ui,
+        ds: &DataSheet,
+        state: &ColumnGridEguiState,
+        geom: &MultiGridGeom,
+        coord: GridCellCoord,
+        raw_cell_r: Rect,
+        clipped: Rect,
+        dbuf: &MultiBodyDrawBuffers<'_>,
+        tokens: &Tokens,
+        flags: &MultiCellFlags<'_>,
+    ) {
+        let fill = if flags.is_active {
+            tokens.active_bg
+        } else if flags.is_selected {
+            tokens.hover_bg
+        } else if flags.mv_is_calc {
+            tokens.role_fx.linear_multiply(0.06)
+        } else if flags.contingency_invalid {
+            tokens.link_red.linear_multiply(0.12)
+        } else {
+            dbuf.base_row_bg
+        };
+        body_ui.painter().rect_filled(clipped, 0.0, fill);
+        if flags.is_active {
+            body_ui.painter().rect_stroke(clipped, 0.0, Stroke::new(1.5, tokens.accent), egui::StrokeKind::Inside);
+        }
+        if let Some(reg) = flags.linked {
+            let (_, span_subs) = geom.col_span_flat(coord.col);
+            paint_linked_perimeter_edges(
+                body_ui,
+                raw_cell_r,
+                clipped,
+                reg,
+                coord,
+                span_subs,
+                link_border_color32(reg.spec.source.border_color(), tokens),
+            );
+        }
+        if flags.excluded {
+            paint_exclusion_corner_marker(body_ui, raw_cell_r, clipped, ds, coord, tokens);
+        }
+
+        if state.inline_edit.as_ref().is_none_or(|e| e.target != GridInlineEditTarget::Cell(coord)) && !dbuf.text_buf.is_empty() {
+            let is_numeric = matches!(flags.cell_opt.map(|c| &c.value), Some(CellValue::Number(_))) && !flags.mv_is_cat_or_lbl;
+            let align = if is_numeric { Align::RIGHT } else { Align::LEFT };
+            let text_col = if flags.excluded {
+                tokens.excluded_cell_text
+            } else if flags.contingency_invalid {
+                tokens.link_red
+            } else if flags.mv_is_calc {
+                tokens.role_fx
+            } else if dbuf.is_surv && cell_is_survival_event(ds, flags.cell_opt) {
+                tokens.accent
+            } else {
+                tokens.text_primary
+            };
+            render_ellipsized_text(
+                body_ui,
+                clipped.shrink2(vec2(5.0, 1.0)),
+                dbuf.text_buf,
+                text_style(
+                    if is_numeric { geom.font_num_pt } else { geom.font_small_pt },
+                    is_numeric,
+                    text_col,
+                    align,
+                    flags.excluded || flags.mv_is_calc,
+                    flags.excluded,
+                ),
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn handle_multi_data_cell_interactions(
+        body_ui: &Ui,
+        app: &UiApp,
+        ds: &DataSheet,
+        state: &mut ColumnGridEguiState,
+        aux: &mut MultiGridAuxState,
+        coord: GridCellCoord,
+        dbuf: &MultiBodyDrawBuffers<'_>,
+        meta: &mut FrameInspectMeta,
+        intents: &mut PendingUiIntents,
+        flags: &MultiCellFlags<'_>,
+        resp: &egui::Response,
+    ) {
+        if !dbuf.blocked && resp.hovered() {
+            if flags.excluded
+                && let Some(tip) = GridViewState::cell_exclusion_tooltip(ds, coord)
+            {
+                resp.clone().on_hover_text(tip);
+            } else if flags.contingency_invalid {
+                resp.clone().on_hover_text("Contingency counts should be non-negative integers");
+            }
+        }
+
+        if dbuf.record_meta {
+            meta.record_response(
+                body_ui,
+                resp,
+                FrameInspectEntryInput {
+                    widget_id: dbuf.id_buf,
+                    role: "gridcell",
+                    label: dbuf.acc_buf,
+                    command_id: Some("table.setCell"),
+                    value: Some(serde_json::Value::String(dbuf.text_buf.clone())),
+                    enabled: flags.editable,
+                    disabled_reason: if dbuf.blocked {
+                        Some("modal dialog is active")
+                    } else if flags.mv_is_calc {
+                        Some("calculated variable output is read-only")
+                    } else if flags.linked.is_some() {
+                        Some("cell is inside a read-only linked region")
+                    } else if ds.frozen {
+                        Some("sheet is frozen")
+                    } else {
+                        None
+                    },
+                    z_layer: ZLayer::Workspace,
+                    ellipsized: false,
+                    full_label: None,
+                },
+            );
+        }
+
+        if !dbuf.blocked && resp.clicked() {
+            aux.selected_x_cell = None;
+            aux.active_role_menu_col = None;
+            aux.context_menu = None;
+            set_grid_focus_active(body_ui, true);
+            if body_ui.input(|i| i.modifiers).shift {
+                intents.push_extend_grid_selection(coord);
+            } else {
+                intents.push_select_grid_cell(coord);
+            }
+            if is_multi_click_edit(resp) {
+                if flags.mv_is_calc {
+                    intents.push_ui("ui.table.openFormulaBar", json!({ "sheet_id": ds.id.as_str(), "col": coord.col }));
+                } else if let Some(reg) = flags.linked {
+                    open_link_popover(state, reg, &app.locale);
+                } else if !ds.frozen {
+                    aux.aux_edit = None;
+                    begin_inline_edit(
+                        body_ui,
+                        state,
+                        GridInlineEditTarget::Cell(coord),
+                        initial_edit_text_for_cell(flags.cell_opt, &app.locale_preset),
+                    );
+                }
+            }
+        }
+        if !dbuf.blocked
+            && resp.secondary_clicked()
+            && let Some(pos) = resp.interact_pointer_pos()
+        {
+            aux.selected_x_cell = None;
+            intents.push_select_grid_cell(coord);
+            aux.context_menu = Some(ContextMenuState {
+                pos,
+                row: coord.row,
+                cell: Some(ContextCellTarget { is_x: false, row: coord.row, col: coord.col, subcol: coord.subcol }),
+            });
+        }
+    }
+
+    fn paint_multi_vertical_hairlines(body_ui: &Ui, origin_x: f32, geom: &MultiGridGeom, vis_all_flat: &Range<usize>, tokens: &Tokens) {
+        for flat in vis_all_flat.clone() {
+            #[allow(clippy::cast_precision_loss)]
+            let x1 = origin_x + ((flat + 1) as f32) * geom.subcol_w;
+            if x1 <= geom.body_inner_clip.min.x || x1 >= geom.body_inner_clip.max.x {
+                continue;
+            }
+            let is_group_boundary = if flat + 1 == geom.x_subcols {
+                true
+            } else if flat >= geom.x_subcols {
+                geom.flat_data_to_coord(flat + 1 - geom.x_subcols).is_none_or(|(_, s)| s == 0)
+            } else {
+                false
+            };
+            let w = if is_group_boundary { 1.25 } else { 0.75 };
+            body_ui
+                .painter()
+                .line_segment([pos2(x1, geom.body_inner_clip.min.y), pos2(x1, geom.body_inner_clip.max.y)], Stroke::new(w, tokens.divider));
+        }
+    }
+
+    fn is_invalid_contingency_cell(cell: Option<&Cell>) -> bool {
+        let Some(c) = cell else { return false };
+        match c.value {
+            CellValue::Number(v) => !v.is_finite() || v < 0.0 || (v - v.round()).abs() > 1e-6,
+            CellValue::Text(ref s) => !s.trim().is_empty(),
+            CellValue::Empty => false,
+        }
+    }
+
+    fn cell_is_survival_event(ds: &DataSheet, cell: Option<&Cell>) -> bool {
+        let TableArchetype::Survival(s) = &ds.archetype else { return false };
+        matches!(cell.map(|c| &c.value), Some(CellValue::Number(v)) if (*v - s.event_code as f64).abs() < 1e-6)
+    }
+
+    fn x_column_title(arch: &TableArchetype, subcol: usize) -> String {
+        match arch {
+            TableArchetype::Xy(xy) => {
+                if subcol == 1 {
+                    String::from("±X Error")
+                } else {
+                    xy.x_title.clone()
+                }
+            }
+            TableArchetype::Survival(s) => s.time_title.clone(),
+            _ => String::from("X"),
+        }
+    }
+
+    fn x_subcolumn_label(arch: &TableArchetype, subcol: usize) -> String {
+        match arch {
+            TableArchetype::Xy(xy) => match &xy.x_mode {
+                XColumnMode::Numbers { subcolumn_mode } => {
+                    if subcolumn_mode.subcolumn_count() > 1 && subcol > 0 {
+                        String::from("X Error")
+                    } else {
+                        String::from("X")
+                    }
+                }
+                XColumnMode::DateOrElapsedTime { unit_label } => {
+                    if unit_label.trim().is_empty() {
+                        String::from("Time")
+                    } else {
+                        format!("Time ({unit_label})")
+                    }
+                }
+                XColumnMode::GeneratedSequence { .. } => String::from("Seq"),
+            },
+            TableArchetype::Survival(_) => String::from("Time"),
+            _ => String::from("X"),
+        }
+    }
+
+    fn data_super_column_label(arch: &TableArchetype, col: usize) -> String {
+        let letter = (b'A' + u8::try_from(col % 26).unwrap_or(0)) as char;
+        match arch {
+            TableArchetype::Grouped(g) if !g.column_factor_title.trim().is_empty() => format!("{} {letter}", g.column_factor_title),
+            TableArchetype::Survival(_) => format!("Cohort {letter}"),
+            TableArchetype::MultipleVariables(_) => format!("Var {}", col + 1),
+            TableArchetype::PartsOfWhole(_) => String::from("Slice Share"),
+            _ => format!("Group {letter}"),
+        }
+    }
+
+    fn data_column_title(arch: &TableArchetype, col: usize) -> String {
+        match arch {
+            TableArchetype::Column(t) => t.data_sets.get(col).map_or_else(String::new, |d| d.title.clone()),
+            TableArchetype::Xy(t) => t.data_sets.get(col).map_or_else(String::new, |d| d.title.clone()),
+            TableArchetype::Grouped(t) => t.data_sets.get(col).map_or_else(String::new, |d| d.title.clone()),
+            TableArchetype::Contingency(t) => t.data_sets.get(col).map_or_else(String::new, |d| d.title.clone()),
+            TableArchetype::Survival(t) => t.cohorts.get(col).map_or_else(String::new, |d| d.title.clone()),
+            TableArchetype::PartsOfWhole(t) => t.data_sets.get(col).map_or_else(String::new, |d| d.title.clone()),
+            TableArchetype::MultipleVariables(t) => t.variables.get(col).map_or_else(String::new, |v| v.title.clone()),
+            TableArchetype::Nested(t) => t.groups.get(col).map_or_else(String::new, |g| g.title.clone()),
+        }
+    }
+
+    fn data_subcolumn_header_label(ds: &DataSheet, col: usize, subcol: usize, locale: &str) -> String {
+        match &ds.archetype {
+            TableArchetype::Xy(t) => column_subcolumn_role_label(t.y_subcolumn_mode, subcol, locale),
+            TableArchetype::Grouped(t) => column_subcolumn_role_label(t.subcolumn_mode, subcol, locale),
+            TableArchetype::Column(t) => column_subcolumn_role_label(t.subcolumn_mode, subcol, locale),
+            TableArchetype::Contingency(_) => String::from("Count"),
+            TableArchetype::Survival(s) => format!("Event({}) / Cens({})", s.event_code, s.censored_code),
+            TableArchetype::PartsOfWhole(_) => String::from("Value"),
+            TableArchetype::MultipleVariables(_) => String::from("Var"),
+            TableArchetype::Nested(t) => t
+                .groups
+                .get(col)
+                .and_then(|g| g.subcolumn_titles.get(subcol))
+                .cloned()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| format!("Unit {}", subcol + 1)),
+        }
+    }
+
+    fn row_title_at(arch: &TableArchetype, row: usize) -> String {
+        let slice = match arch {
+            TableArchetype::Column(t) => &t.row_titles,
+            TableArchetype::Xy(t) => &t.row_titles,
+            TableArchetype::Grouped(t) => &t.row_titles,
+            TableArchetype::Contingency(t) => &t.row_titles,
+            TableArchetype::Survival(t) => &t.row_titles,
+            TableArchetype::PartsOfWhole(t) => &t.slice_labels,
+            TableArchetype::MultipleVariables(t) => &t.row_titles,
+            TableArchetype::Nested(t) => &t.row_titles,
+        };
+        slice.get(row).cloned().unwrap_or_default()
+    }
+
+    fn active_mv_formula_operands(app: &UiApp, ds: &DataSheet) -> HashSet<usize> {
+        let mut out = HashSet::new();
+        let TableArchetype::MultipleVariables(mv) = &ds.archetype else { return out };
+        let formula_opt = if app.grid.formula_bar.active && !app.grid.formula_bar.input.trim().is_empty() {
+            Some(app.grid.formula_bar.input.as_str())
+        } else if let Some(active) = app.grid.tool.active {
+            mv.variables.get(active.col).and_then(|v| match &v.source {
+                VariableSource::Calculated { formula, .. } => Some(formula.as_str()),
+                VariableSource::Entered => None,
+            })
+        } else {
+            None
+        };
+        let Some(formula) = formula_opt else { return out };
+        for (idx, var) in mv.variables.iter().enumerate() {
+            let bracketed = format!("[{}]", var.title);
+            if formula.contains(&bracketed) || formula.contains(&var.title) {
+                out.insert(idx);
+            }
+        }
+        out
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_multi_inline_editors(
+        ui: &mut Ui,
+        app: &UiApp,
+        ds: &DataSheet,
+        state: &mut ColumnGridEguiState,
+        aux: &mut MultiGridAuxState,
+        geom: &MultiGridGeom,
+        _tokens: &Tokens,
+        meta: &mut FrameInspectMeta,
+        intents: &mut PendingUiIntents,
+        blocked: bool,
+    ) {
+        if blocked {
+            return;
+        }
+        if let Some(mut edit) = state.inline_edit.take() {
+            let Some(rect) = rect_for_standard_target(geom, state, &edit.target) else { return };
+            let wid = match &edit.target {
+                GridInlineEditTarget::Cell(c) => format!("grid.cell.{}.{}.{}", c.row, c.col, c.subcol),
+                GridInlineEditTarget::ColumnTitle { col } => format!("grid.col_title.{col}"),
+                GridInlineEditTarget::RowTitle { row } => format!("grid.row_title.{row}"),
+            };
+            let te_id = ui.make_persistent_id(("multi_std_inline", &wid));
+            let resp = ui.put(rect, egui::TextEdit::singleline(&mut edit.draft).id(te_id).desired_width(rect.width()));
+            let first_frame = !edit.focused_once;
+            if first_frame {
+                resp.request_focus();
+                edit.focused_once = true;
+            }
+            record_meta_if_enabled(
+                ui,
+                meta,
+                state.record_inspect_meta,
+                &resp,
+                FrameInspectEntryInput {
+                    widget_id: &wid,
+                    role: "textbox",
+                    label: &edit.draft,
+                    command_id: None,
+                    value: Some(serde_json::Value::String(edit.draft.clone())),
+                    enabled: true,
+                    disabled_reason: None,
+                    z_layer: ZLayer::Workspace,
+                    ellipsized: false,
+                    full_label: None,
+                },
+            );
+            let esc = pressed_key_event_modifiers(ui, Key::Escape).is_some();
+            let enter = pressed_key_event_modifiers(ui, Key::Enter).is_some();
+            let tab = pressed_key_event_modifiers(ui, Key::Tab);
+            if esc {
+                return;
+            }
+            if enter || tab.is_some() || (resp.lost_focus() && !first_frame) {
+                commit_standard_inline_edit(app, ds, edit.target, edit.draft, intents);
+                if enter {
+                    if let Some(c) = app.grid.tool.active {
+                        intents.push_select_grid_cell(GridCellCoord::new((c.row + 1).min(geom.row_count.saturating_sub(1)), c.col, c.subcol));
+                    }
+                } else if let Some(mods) = tab
+                    && let Some(c) = app.grid.tool.active
+                {
+                    let next = step_cell_horiz(geom, Some(c), None, mods.shift);
+                    if let (false, Some(nc), _) = next {
+                        intents.push_select_grid_cell(nc);
+                    }
+                }
+                return;
+            }
+            state.inline_edit = Some(edit);
+            return;
+        }
+
+        if let Some((target, mut draft, mut just_focused)) = aux.aux_edit.take() {
+            let Some(rect) = rect_for_aux_target(geom, state, &target) else { return };
+            let wid = match &target {
+                AuxInlineTarget::XCell { row, subcol } => format!("grid.xcell.{row}.{subcol}"),
+                AuxInlineTarget::XTitle { subcol } => format!("grid.x_title.{subcol}"),
+                AuxInlineTarget::SubcolumnTitle { col, subcol } => format!("grid.subcol_title.{col}.{subcol}"),
+                AuxInlineTarget::SheetTitle => String::from("grid.sheet_title"),
+            };
+            let te_id = ui.make_persistent_id(("multi_aux_inline", &wid));
+            let resp = ui.put(rect, egui::TextEdit::singleline(&mut draft).id(te_id).desired_width(rect.width()));
+            if just_focused {
+                resp.request_focus();
+                just_focused = false;
+                aux.suppress_loss_commit_once = true;
+            }
+            record_meta_if_enabled(
+                ui,
+                meta,
+                state.record_inspect_meta,
+                &resp,
+                FrameInspectEntryInput {
+                    widget_id: &wid,
+                    role: "textbox",
+                    label: &draft,
+                    command_id: None,
+                    value: Some(serde_json::Value::String(draft.clone())),
+                    enabled: true,
+                    disabled_reason: None,
+                    z_layer: ZLayer::Workspace,
+                    ellipsized: false,
+                    full_label: None,
+                },
+            );
+            let esc = pressed_key_event_modifiers(ui, Key::Escape).is_some();
+            let enter = pressed_key_event_modifiers(ui, Key::Enter).is_some();
+            let tab = pressed_key_event_modifiers(ui, Key::Tab);
+            let lost = resp.lost_focus() && !aux.suppress_loss_commit_once;
+            aux.suppress_loss_commit_once = false;
+            if esc {
+                return;
+            }
+            if enter || tab.is_some() || lost {
+                commit_aux_inline_edit(app, ds, aux, &target, draft, intents);
+                if enter && let AuxInlineTarget::XCell { row, subcol } = target {
+                    aux.selected_x_cell = Some(((row + 1).min(geom.row_count.saturating_sub(1)), subcol));
+                }
+                return;
+            }
+            aux.aux_edit = Some((target, draft, just_focused));
+        }
+    }
+
+    fn rect_for_standard_target(geom: &MultiGridGeom, state: &ColumnGridEguiState, target: &GridInlineEditTarget) -> Option<Rect> {
+        match *target {
+            GridInlineEditTarget::Cell(coord) => {
+                let flat = geom.coord_to_flat_all(false, coord.col, coord.subcol);
+                #[allow(clippy::cast_precision_loss)]
+                let x0 = geom.body_rect.min.x + (flat as f32) * geom.subcol_w - state.scroll_offset_pt.x;
+                #[allow(clippy::cast_precision_loss)]
+                let y0 = geom.body_rect.min.y + (coord.row as f32) * geom.row_h - state.scroll_offset_pt.y;
+                Some(Rect::from_min_size(pos2(x0, y0), vec2(geom.subcol_w, geom.row_h)).intersect(geom.body_inner_clip))
+            }
+            GridInlineEditTarget::ColumnTitle { col } => {
+                let (flat, span) = geom.col_span_flat(col);
+                #[allow(clippy::cast_precision_loss)]
+                let x0 = geom.col_header_rect.min.x + (flat as f32) * geom.subcol_w - state.scroll_offset_pt.x;
+                #[allow(clippy::cast_precision_loss)]
+                let w = (span as f32) * geom.subcol_w;
+                let y0 = geom.col_header_rect.min.y + geom.h_tier1;
+                Some(Rect::from_min_size(pos2(x0, y0), vec2(w, geom.h_tier2)).intersect(geom.col_header_rect))
+            }
+            GridInlineEditTarget::RowTitle { row } => {
+                #[allow(clippy::cast_precision_loss)]
+                let y0 = geom.row_gutter_rect.min.y + (row as f32) * geom.row_h - state.scroll_offset_pt.y;
+                let x0 = geom.row_gutter_rect.min.x + geom.row_num_w;
+                Some(Rect::from_min_size(pos2(x0, y0), vec2(geom.row_title_w, geom.row_h)).intersect(geom.row_gutter_rect))
+            }
+        }
+    }
+
+    fn rect_for_aux_target(geom: &MultiGridGeom, state: &ColumnGridEguiState, target: &AuxInlineTarget) -> Option<Rect> {
+        match *target {
+            AuxInlineTarget::XCell { row, subcol } => {
+                #[allow(clippy::cast_precision_loss)]
+                let x0 = geom.body_rect.min.x + (subcol as f32) * geom.subcol_w - state.scroll_offset_pt.x;
+                #[allow(clippy::cast_precision_loss)]
+                let y0 = geom.body_rect.min.y + (row as f32) * geom.row_h - state.scroll_offset_pt.y;
+                Some(Rect::from_min_size(pos2(x0, y0), vec2(geom.subcol_w, geom.row_h)).intersect(geom.body_inner_clip))
+            }
+            AuxInlineTarget::XTitle { subcol } => {
+                #[allow(clippy::cast_precision_loss)]
+                let x0 = geom.col_header_rect.min.x + (subcol as f32) * geom.subcol_w - state.scroll_offset_pt.x;
+                let y0 = geom.col_header_rect.min.y + geom.h_tier1;
+                Some(Rect::from_min_size(pos2(x0, y0), vec2(geom.subcol_w, geom.h_tier2)).intersect(geom.col_header_rect))
+            }
+            AuxInlineTarget::SubcolumnTitle { col, subcol } => {
+                let flat = geom.coord_to_flat_all(false, col, subcol);
+                #[allow(clippy::cast_precision_loss)]
+                let x0 = geom.col_header_rect.min.x + (flat as f32) * geom.subcol_w - state.scroll_offset_pt.x;
+                let y0 = geom.col_header_rect.min.y + geom.h_tier1 + geom.h_tier2;
+                Some(Rect::from_min_size(pos2(x0, y0), vec2(geom.subcol_w, geom.h_tier3)).intersect(geom.col_header_rect))
+            }
+            AuxInlineTarget::SheetTitle => {
+                let x0 = geom.corner_rect.min.x + geom.row_num_w;
+                Some(Rect::from_min_size(pos2(x0, geom.corner_rect.min.y), vec2(geom.row_title_w, geom.h_tier1)))
+            }
+        }
+    }
+
+    fn commit_standard_inline_edit(app: &UiApp, ds: &DataSheet, target: GridInlineEditTarget, draft: String, intents: &mut PendingUiIntents) {
+        match target {
+            GridInlineEditTarget::Cell(coord) => {
+                let val = parse_inline_cell_input(app, &draft);
+                intents.push_engine(
+                    "table.setCell",
+                    json!({ "sheet_id": ds.id.as_str(), "row": coord.row, "col": coord.col, "subcol": coord.subcol, "value": val }),
+                );
+            }
+            GridInlineEditTarget::ColumnTitle { col } => {
+                intents.push_engine("table.setTitles", json!({ "sheet_id": ds.id.as_str(), "col": col, "title": draft.trim() }));
+            }
+            GridInlineEditTarget::RowTitle { row } => {
+                intents.push_engine("table.setRowTitles", json!({ "sheet_id": ds.id.as_str(), "row": row, "title": draft.trim() }));
+            }
+        }
+    }
+
+    fn commit_aux_inline_edit(
+        app: &UiApp,
+        ds: &DataSheet,
+        aux: &mut MultiGridAuxState,
+        target: &AuxInlineTarget,
+        draft: String,
+        intents: &mut PendingUiIntents,
+    ) {
+        match *target {
+            AuxInlineTarget::XCell { row, subcol } => {
+                if draft.contains('\t') || draft.contains('\n') {
+                    intents.push_engine(
+                        "table.paste",
+                        json!({
+                            "sheet_id": ds.id.as_str(),
+                            "text": draft,
+                            "start_row": row,
+                            "start_col": 0,
+                            "start_subcol": 0,
+                            "propagate_title_header": false,
+                        }),
+                    );
+                } else {
+                    let val = parse_inline_cell_input(app, &draft);
+                    intents.push_engine("table.setXCells", json!({ "sheet_id": ds.id.as_str(), "row": row, "subcol": subcol, "value": val }));
+                }
+                aux.selected_x_cell = Some((row, subcol));
+            }
+            AuxInlineTarget::XTitle { .. } => {
+                intents.push_engine("table.setTitles", json!({ "sheet_id": ds.id.as_str(), "x_title": draft.trim() }));
+            }
+            AuxInlineTarget::SubcolumnTitle { col, subcol } => {
+                intents.push_engine(
+                    "table.setSubcolumnTitles",
+                    json!({ "sheet_id": ds.id.as_str(), "col": col, "subcol": subcol, "title": draft.trim() }),
+                );
+            }
+            AuxInlineTarget::SheetTitle => {
+                let t = draft.trim();
+                if !t.is_empty() {
+                    intents.push_engine("sheet.rename", json!({ "sheet_id": ds.id.as_str(), "title": t }));
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_mv_role_menu_popup(
+        ui: &mut Ui,
+        ds: &DataSheet,
+        aux: &mut MultiGridAuxState,
+        geom: &MultiGridGeom,
+        scroll_x: f32,
+        tokens: &Tokens,
+        meta: &mut FrameInspectMeta,
+        intents: &mut PendingUiIntents,
+        blocked: bool,
+    ) {
+        let Some(col) = aux.active_role_menu_col else { return };
+        if blocked || !matches!(ds.archetype, TableArchetype::MultipleVariables(_)) {
+            aux.active_role_menu_col = None;
+            return;
+        }
+        let (flat, _) = geom.col_span_flat(col);
+        #[allow(clippy::cast_precision_loss)]
+        let x0 = (geom.col_header_rect.min.x + (flat as f32) * geom.subcol_w - scroll_x)
+            .clamp(geom.grid_outer_rect.min.x, (geom.grid_outer_rect.max.x - 180.0).max(geom.grid_outer_rect.min.x));
+        let pos = pos2(x0, geom.col_header_rect.max.y + 2.0);
+        egui::Area::new(Id::unique(("mv_role_popup", ds.id.as_str(), col))).fixed_pos(pos).order(egui::Order::Foreground).show(ui.ctx(), |pui| {
+            egui::Frame::popup(pui.style()).fill(tokens.panel_bg).stroke(Stroke::new(1.0, tokens.border)).show(pui, |m| {
+                m.set_min_width(172.0);
+                for (slug, text) in [
+                    ("auto", "Auto (Infer role)"),
+                    ("continuous", "NUM · Continuous"),
+                    ("categorical", "CAT · Categorical"),
+                    ("label", "LBL · Label / ID"),
+                ] {
+                    let wid = format!("mv_formula.role_opt.{col}.{slug}");
+                    let r = m.button(text);
+                    record_meta_if_enabled(
+                        m,
+                        meta,
+                        true,
+                        &r,
+                        FrameInspectEntryInput {
+                            widget_id: &wid,
+                            role: "menuitem",
+                            label: text,
+                            command_id: Some("table.setVariableRole"),
+                            value: Some(serde_json::Value::String(slug.to_owned())),
+                            enabled: true,
+                            disabled_reason: None,
+                            z_layer: ZLayer::FloatingOverlay,
+                            ellipsized: false,
+                            full_label: None,
+                        },
+                    );
+                    if r.clicked() {
+                        intents.push_engine("table.setVariableRole", json!({ "sheet_id": ds.id.as_str(), "col": col, "role": slug }));
+                        aux.active_role_menu_col = None;
+                    }
+                }
+                m.separator();
+                let mwid = format!("mv_formula.role_manage.{col}");
+                let mr = m.button("Manage Variables & Levels…");
+                record_meta_if_enabled(
+                    m,
+                    meta,
+                    true,
+                    &mr,
+                    FrameInspectEntryInput {
+                        widget_id: &mwid,
+                        role: "menuitem",
+                        label: "Manage Variables & Levels…",
+                        command_id: None,
+                        value: None,
+                        enabled: true,
+                        disabled_reason: None,
+                        z_layer: ZLayer::FloatingOverlay,
+                        ellipsized: false,
+                        full_label: None,
+                    },
+                );
+                if mr.clicked() {
+                    intents.push_open_manage_variables(ds.id.clone(), Some(col));
+                    aux.active_role_menu_col = None;
+                }
+            });
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_row_context_menu_popup(
+        ui: &mut Ui,
+        app: &UiApp,
+        ds: &DataSheet,
+        aux: &mut MultiGridAuxState,
+        tokens: &Tokens,
+        meta: &mut FrameInspectMeta,
+        intents: &mut PendingUiIntents,
+        blocked: bool,
+    ) {
+        let Some(ctx_menu) = aux.context_menu.clone() else { return };
+        let (pos, row, cell_ctx) = (ctx_menu.pos, ctx_menu.row, ctx_menu.cell);
+        if blocked {
+            aux.context_menu = None;
+            return;
+        }
+        let area_resp = egui::Area::new(Id::unique(("grid_ctx_menu", ds.id.as_str()))).fixed_pos(pos).order(egui::Order::Foreground).show(ui.ctx(), |m| {
+            egui::Frame::popup(m.style()).fill(tokens.panel_bg).stroke(Stroke::new(1.0, tokens.border)).show(m, |list| {
+                list.set_min_width(210.0);
+                list.label(egui::RichText::new(format!("Row {} Actions", row + 1)).strong().size(11.5).color(tokens.text_muted));
+                list.separator();
+                for (wid, label) in [
+                    ("grid.ctx.style_points", "Style Selected Points on Graph…"),
+                    ("grid.ctx.show_row_titles", "Show Row Titles on Graph"),
+                    ("grid.ctx.reset_style", "Reset to Dataset Style"),
+                    ("grid.ctx.exclude", "Exclude Selected (Cmd/Ctrl+E)"),
+                    ("grid.ctx.exclude_reason", "Exclude with Reason…"),
+                    ("grid.ctx.copy", "Copy Selection"),
+                    ("grid.ctx.paste", "Paste Here"),
+                ] {
+                    let r = list.button(label);
+                    record_meta_if_enabled(
+                        list,
+                        meta,
+                        true,
+                        &r,
+                        FrameInspectEntryInput {
+                            widget_id: wid,
+                            role: "menuitem",
+                            label,
+                            command_id: None,
+                            value: None,
+                            enabled: true,
+                            disabled_reason: None,
+                            z_layer: ZLayer::FloatingOverlay,
+                            ellipsized: false,
+                            full_label: None,
+                        },
+                    );
+                    if r.clicked() {
+                        match wid {
+                            "grid.ctx.style_points" => {
+                                if let Some(g) = app.document().graph_sheets.iter().find(|g| g.spec.primary_source_sheet_id == ds.id) {
+                                    intents.push_engine("sheet.select", json!({ "sheet_id": g.id.as_str() }));
+                                }
+                                intents.push_ui("ui.inspector.select", json!({ "inspector": "format_graph" }));
+                            }
+                            "grid.ctx.show_row_titles" => {
+                                if let Some(g) = app.document().graph_sheets.iter().find(|g| g.spec.primary_source_sheet_id == ds.id) {
+                                    intents.push_engine("graph.format", json!({ "sheet_id": g.id.as_str(), "row_point_labels_row": row, "show_row_titles": true }));
+                                }
+                            }
+                            "grid.ctx.reset_style" => {
+                                if let Some(g) = app.document().graph_sheets.iter().find(|g| g.spec.primary_source_sheet_id == ds.id) {
+                                    intents.push_engine("graph.format", json!({ "sheet_id": g.id.as_str(), "reset_row_override": row }));
+                                }
+                            }
+                            "grid.ctx.exclude" => {
+                                if let Some(tgt) = cell_ctx && tgt.is_x {
+                                    let was_ex = ds.archetype.x_or_time_cell(tgt.row, tgt.subcol).is_some_and(|c| c.excluded);
+                                    intents.push_engine("table.excludeCells", json!({ "sheet_id": ds.id.as_str(), "target": "x", "row": tgt.row, "subcol": tgt.subcol, "excluded": !was_ex }));
+                                } else {
+                                    let c = app.grid.tool.active.unwrap_or(GridCellCoord::new(row, 0, 0));
+                                    let was_ex = ds.archetype.data_cell(c.into()).is_some_and(|cell| cell.excluded);
+                                    intents.push_engine("table.excludeCells", json!({ "sheet_id": ds.id.as_str(), "row": c.row, "col": c.col, "subcol": c.subcol, "excluded": !was_ex }));
+                                }
+                            }
+                            "grid.ctx.exclude_reason" => intents.push_ui("ui.grid.excludeWithReason", json!({ "sheet_id": ds.id.as_str() })),
+                            "grid.ctx.copy" => intents.push_grid_copy_selection(),
+                            "grid.ctx.paste" => intents.push_grid_paste_from_clipboard(app.grid.tool.active),
+                            _ => {}
+                        }
+                        aux.context_menu = None;
+                    }
+                }
+            });
+        });
+        if area_resp.response.clicked_elsewhere() {
+            aux.context_menu = None;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn handle_multi_keyboard_shortcuts(
+        ui: &mut Ui,
+        app: &UiApp,
+        ds: &DataSheet,
+        state: &mut ColumnGridEguiState,
+        aux: &mut MultiGridAuxState,
+        geom: &MultiGridGeom,
+        intents: &mut PendingUiIntents,
+    ) {
+        if state.inline_edit.is_some() || aux.aux_edit.is_some() || ui.ctx().egui_wants_keyboard_input() {
+            return;
+        }
+        if !is_grid_focus_active(ui, app, &ds.id) && aux.selected_x_cell.is_none() && app.grid.tool.active.is_none() {
+            return;
+        }
+        if let Some(e_mods) = pressed_key_event_modifiers(ui, Key::E)
+            && (e_mods.command || e_mods.mac_cmd || e_mods.ctrl)
+        {
+            if e_mods.shift {
+                intents.push_ui("ui.grid.excludeWithReason", json!({ "sheet_id": ds.id.as_str() }));
+                return;
+            }
+            if let Some((xr, xs)) = aux.selected_x_cell {
+                let was_ex = ds.archetype.x_or_time_cell(xr, xs).is_some_and(|c| c.excluded);
+                intents.push_engine(
+                    "table.excludeCells",
+                    json!({ "sheet_id": ds.id.as_str(), "target": "x", "row": xr, "subcol": xs, "excluded": !was_ex }),
+                );
+                return;
+            }
+            if let Some(range) = app.grid.tool.selection_bounds() {
+                let target_excluded = !ds.archetype.data_cell(curvebook_doc::CellCoord::from(range.0)).is_some_and(|c| c.excluded);
+                let doc_range = SheetCellRange::new(curvebook_doc::CellCoord::from(range.0), curvebook_doc::CellCoord::from(range.1));
+                intents.push_engine("table.excludeCells", json!({ "sheet_id": ds.id.as_str(), "range": doc_range, "excluded": target_excluded }));
+                return;
+            }
+        }
+
+        if let Some(c_mods) = pressed_key_event_modifiers(ui, Key::C)
+            && (c_mods.command || c_mods.mac_cmd || c_mods.ctrl)
+        {
+            intents.push_grid_copy_selection();
+            return;
+        }
+        if let Some(x_mods) = pressed_key_event_modifiers(ui, Key::X)
+            && (x_mods.command || x_mods.mac_cmd || x_mods.ctrl)
+        {
+            intents.push_grid_cut_selection();
+            return;
+        }
+        if let Some(v_mods) = pressed_key_event_modifiers(ui, Key::V)
+            && (v_mods.command || v_mods.mac_cmd || v_mods.ctrl)
+        {
+            intents.push_grid_paste_from_clipboard(app.grid.tool.active);
+            return;
+        }
+
+        if (pressed_key_event_modifiers(ui, Key::Delete).is_some() || pressed_key_event_modifiers(ui, Key::Backspace).is_some()) && !ds.frozen {
+            if let Some((xr, xs)) = aux.selected_x_cell {
+                intents
+                    .push_engine("table.setXCells", json!({ "sheet_id": ds.id.as_str(), "row": xr, "subcol": xs, "value": serde_json::Value::Null }));
+                return;
+            }
+            if let Some(range) = app.grid.tool.selection_bounds() {
+                let doc_range = SheetCellRange::new(curvebook_doc::CellCoord::from(range.0), curvebook_doc::CellCoord::from(range.1));
+                intents.push_engine("table.clearCells", json!({ "sheet_id": ds.id.as_str(), "range": doc_range }));
+                return;
+            }
+        }
+
+        for (key, dx, dy) in [(Key::ArrowLeft, -1_isize, 0_isize), (Key::ArrowRight, 1, 0), (Key::ArrowUp, 0, -1), (Key::ArrowDown, 0, 1)] {
+            if let Some(km) = pressed_key_event_modifiers(ui, key) {
+                if geom.row_count == 0 || geom.total_flat_cols == 0 {
+                    return;
+                }
+                let cur_row = aux.selected_x_cell.map(|(r, _)| r).or_else(|| app.grid.tool.active.map(|c| c.row)).unwrap_or(0);
+                let cur_flat = match (aux.selected_x_cell, app.grid.tool.active) {
+                    (Some((_, xs)), _) => xs,
+                    (None, Some(c)) => geom.coord_to_flat_all(false, c.col, c.subcol),
+                    (None, None) => 0,
+                };
+                let next_row = cur_row.saturating_add_signed(dy).min(geom.row_count.saturating_sub(1));
+                let next_flat = cur_flat.saturating_add_signed(dx).min(geom.total_flat_cols.saturating_sub(1));
+                if next_flat < geom.x_subcols {
+                    aux.selected_x_cell = Some((next_row, next_flat));
+                } else if let Some((nc, ns)) = geom.flat_data_to_coord(next_flat - geom.x_subcols) {
+                    aux.selected_x_cell = None;
+                    let coord = GridCellCoord::new(next_row, nc, ns);
+                    if km.shift {
+                        intents.push_extend_grid_selection(coord);
+                    } else {
+                        intents.push_select_grid_cell(coord);
+                    }
+                }
+                return;
+            }
+        }
+
+        if let Some(km) = pressed_key_event_modifiers(ui, Key::Tab) {
+            let (is_x, nc_opt, x_opt) = step_cell_horiz(geom, app.grid.tool.active, aux.selected_x_cell, km.shift);
+            if is_x {
+                aux.selected_x_cell = x_opt;
+            } else if let Some(nc) = nc_opt {
+                aux.selected_x_cell = None;
+                intents.push_select_grid_cell(nc);
+            }
+            return;
+        }
+
+        if pressed_key_event_modifiers(ui, Key::F2).is_some() && !ds.frozen {
+            if let Some((xr, xs)) = aux.selected_x_cell {
+                let init = initial_edit_text_for_cell(ds.archetype.x_or_time_cell(xr, xs), &app.locale_preset);
+                aux.aux_edit = Some((AuxInlineTarget::XCell { row: xr, subcol: xs }, init, true));
+                return;
+            }
+            if let Some(c) = app.grid.tool.active {
+                let init = initial_edit_text_for_cell(ds.archetype.data_cell(c.into()), &app.locale_preset);
+                begin_inline_edit(ui, state, GridInlineEditTarget::Cell(c), init);
+                return;
+            }
+        }
+
+        let mods = ui.input(|i| i.modifiers);
+        let cmd = mods.command || mods.mac_cmd || mods.ctrl;
+        if !cmd && !ds.frozen {
+            let typed: String = ui.input(|i| {
+                i.events
+                    .iter()
+                    .filter_map(|ev| match ev {
+                        egui::Event::Text(t) if !t.is_empty() && t.chars().all(|c| !c.is_control()) => Some(t.as_str()),
+                        _ => None,
+                    })
+                    .collect()
+            });
+            if !typed.is_empty() {
+                if let Some((xr, xs)) = aux.selected_x_cell {
+                    let x_ro = matches!(&ds.archetype, TableArchetype::Xy(xy) if matches!(xy.x_mode, XColumnMode::GeneratedSequence { .. }));
+                    if !x_ro {
+                        aux.aux_edit = Some((AuxInlineTarget::XCell { row: xr, subcol: xs }, typed, true));
+                    }
+                } else if let Some(c) = app.grid.tool.active {
+                    let is_calc = matches!(&ds.archetype, TableArchetype::MultipleVariables(mv) if mv.variables.get(c.col).is_some_and(|v| matches!(v.source, VariableSource::Calculated { .. })));
+                    if !is_calc && linked_region_for_cell(ds, c.row, c.col).is_none() {
+                        begin_inline_edit(ui, state, GridInlineEditTarget::Cell(c), typed);
+                    }
+                }
+            }
+        }
+    }
+
+    fn step_cell_horiz(
+        geom: &MultiGridGeom,
+        active_y: Option<GridCellCoord>,
+        active_x: Option<(usize, usize)>,
+        backward: bool,
+    ) -> (bool, Option<GridCellCoord>, Option<(usize, usize)>) {
+        if geom.total_flat_cols == 0 || geom.row_count == 0 {
+            return (false, None, None);
+        }
+        let row = active_x.map(|(r, _)| r).or_else(|| active_y.map(|c| c.row)).unwrap_or(0);
+        let cur = match (active_x, active_y) {
+            (Some((_, xs)), _) => xs,
+            (None, Some(c)) => geom.coord_to_flat_all(false, c.col, c.subcol),
+            (None, None) => 0,
+        };
+        let next = if backward { cur.saturating_sub(1) } else { (cur + 1).min(geom.total_flat_cols - 1) };
+        if next < geom.x_subcols {
+            (true, None, Some((row, next)))
+        } else {
+            (false, geom.flat_data_to_coord(next - geom.x_subcols).map(|(c, s)| GridCellCoord::new(row, c, s)), None)
+        }
     }
 }
 
