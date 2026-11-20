@@ -360,7 +360,7 @@ pub fn render_one_way_anova_modal(
     report
 }
 
-fn compute_modal_dimensions(screen_rect: Rect) -> (f32, f32) {
+pub(super) fn compute_modal_dimensions(screen_rect: Rect) -> (f32, f32) {
     let max_w = (screen_rect.width() - 24.0).max(280.0);
     let max_h = (screen_rect.height() - 24.0).max(240.0);
     let target_w = max_w.min(760.0);
@@ -1399,12 +1399,12 @@ struct ModalFooterCtx<'a> {
     apply_enabled: bool,
 }
 
-struct FooterBtnSpec<'a> {
-    widget_id: &'a str,
-    label: &'a str,
-    primary: bool,
-    selected: bool,
-    enabled: bool,
+pub(super) struct FooterBtnSpec<'a> {
+    pub(super) widget_id: &'a str,
+    pub(super) label: &'a str,
+    pub(super) primary: bool,
+    pub(super) selected: bool,
+    pub(super) enabled: bool,
 }
 
 fn render_modal_footer(
@@ -1555,7 +1555,7 @@ fn render_modal_footer(
     }
 }
 
-fn render_footer_button(ui: &mut Ui, tokens: &Tokens, meta: &mut FrameInspectMeta, spec: FooterBtnSpec<'_>) -> bool {
+pub(super) fn render_footer_button(ui: &mut Ui, tokens: &Tokens, meta: &mut FrameInspectMeta, spec: FooterBtnSpec<'_>) -> bool {
     let FooterBtnSpec { widget_id, label, primary, selected, enabled } = spec;
     let min_w: f32 = if primary { 96.0 } else { 68.0 };
     let max_w = (ui.available_width() - 4.0).max(48.0);
@@ -1675,14 +1675,14 @@ fn render_alpha_stepper(ui: &mut Ui, rc: &TabRenderCtx<'_>, meta: &mut FrameInsp
     }
 }
 
-struct StepperSpec<'a> {
-    id_prefix: &'a str,
-    label: &'a str,
-    value_text: &'a str,
-    enablement: &'a ControlEnablement,
+pub(super) struct StepperSpec<'a> {
+    pub(super) id_prefix: &'a str,
+    pub(super) label: &'a str,
+    pub(super) value_text: &'a str,
+    pub(super) enablement: &'a ControlEnablement,
 }
 
-fn render_stepper_row(ui: &mut Ui, tokens: &Tokens, meta: &mut FrameInspectMeta, spec: StepperSpec<'_>) -> i8 {
+pub(super) fn render_stepper_row(ui: &mut Ui, tokens: &Tokens, meta: &mut FrameInspectMeta, spec: StepperSpec<'_>) -> i8 {
     let enabled = spec.enablement.enabled;
     let mut delta: i8 = 0;
     ui.horizontal(|ui| {
@@ -1745,7 +1745,7 @@ fn render_stepper_row(ui: &mut Ui, tokens: &Tokens, meta: &mut FrameInspectMeta,
     delta
 }
 
-fn render_section_title(ui: &mut Ui, tokens: &Tokens, title: &str) {
+pub(super) fn render_section_title(ui: &mut Ui, tokens: &Tokens, title: &str) {
     let mut job = egui::text::LayoutJob::single_section(title.to_owned(), egui::TextFormat::simple(FontId::proportional(11.5), tokens.text_muted));
     job.wrap =
         egui::text::TextWrapping { max_width: ui.available_width().max(40.0), max_rows: 1, break_anywhere: false, overflow_character: Some('…') };
@@ -1754,18 +1754,18 @@ fn render_section_title(ui: &mut Ui, tokens: &Tokens, title: &str) {
     ui.painter().with_clip_rect(rect).galley(Pos2::new(rect.left(), rect.center().y - galley.size().y * 0.5), galley, tokens.text_muted);
 }
 
-struct ClippedTextSpec<'a> {
-    widget_id: &'a str,
-    role: &'a str,
-    text: &'a str,
-    font_size: f32,
-    color: Color32,
-    z_layer: ZLayer,
-    tooltip: Option<&'a str>,
-    record_meta: bool,
+pub(super) struct ClippedTextSpec<'a> {
+    pub(super) widget_id: &'a str,
+    pub(super) role: &'a str,
+    pub(super) text: &'a str,
+    pub(super) font_size: f32,
+    pub(super) color: Color32,
+    pub(super) z_layer: ZLayer,
+    pub(super) tooltip: Option<&'a str>,
+    pub(super) record_meta: bool,
 }
 
-fn render_clipped_text(ui: &mut Ui, meta: &mut FrameInspectMeta, spec: ClippedTextSpec<'_>) -> Response {
+pub(super) fn render_clipped_text(ui: &mut Ui, meta: &mut FrameInspectMeta, spec: ClippedTextSpec<'_>) -> Response {
     let avail_w = ui.available_width().max(24.0);
     let font = FontId::proportional(spec.font_size);
     let mut job = egui::text::LayoutJob::single_section(spec.text.to_owned(), egui::TextFormat::simple(font, spec.color));
@@ -1805,7 +1805,7 @@ fn render_clipped_text(ui: &mut Ui, meta: &mut FrameInspectMeta, spec: ClippedTe
     resp
 }
 
-fn render_modal_checkbox(
+pub(super) fn render_modal_checkbox(
     ui: &mut Ui,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
@@ -1817,7 +1817,7 @@ fn render_modal_checkbox(
     render_modal_choice_row(ui, tokens, meta, ModalChoiceSpec { widget_id, label, checked, is_radio: false, enablement })
 }
 
-fn render_modal_radio(
+pub(super) fn render_modal_radio(
     ui: &mut Ui,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
@@ -1829,15 +1829,15 @@ fn render_modal_radio(
     render_modal_choice_row(ui, tokens, meta, ModalChoiceSpec { widget_id, label, checked: selected, is_radio: true, enablement })
 }
 
-struct ModalChoiceSpec<'a> {
-    widget_id: &'a str,
-    label: &'a str,
-    checked: bool,
-    is_radio: bool,
-    enablement: &'a ControlEnablement,
+pub(super) struct ModalChoiceSpec<'a> {
+    pub(super) widget_id: &'a str,
+    pub(super) label: &'a str,
+    pub(super) checked: bool,
+    pub(super) is_radio: bool,
+    pub(super) enablement: &'a ControlEnablement,
 }
 
-fn render_modal_choice_row(ui: &mut Ui, tokens: &Tokens, meta: &mut FrameInspectMeta, spec: ModalChoiceSpec<'_>) -> bool {
+pub(super) fn render_modal_choice_row(ui: &mut Ui, tokens: &Tokens, meta: &mut FrameInspectMeta, spec: ModalChoiceSpec<'_>) -> bool {
     let ModalChoiceSpec { widget_id, label, checked, is_radio, enablement } = spec;
     let enabled = enablement.enabled;
     let avail_w = ui.available_width().max(48.0);
@@ -1848,6 +1848,13 @@ fn render_modal_choice_row(ui: &mut Ui, tokens: &Tokens, meta: &mut FrameInspect
     let galley = ui.painter().layout_job(job);
     let ellipsized = galley.elided;
     let row_w = (22.0 + galley.size().x).min(avail_w);
+    let vis_clip = if meta.viewport_rect.is_positive() { ui.clip_rect().intersect(meta.viewport_rect) } else { ui.clip_rect() };
+    let row_top = ui.cursor().top();
+    let row_bot = row_top + 22.0;
+    if row_top > vis_clip.bottom() || row_bot < vis_clip.top() {
+        ui.allocate_space(Vec2::new(row_w, 22.0));
+        return false;
+    }
     // Keep `Sense::click()` so `ScrollArea`'s outer hover sensor never swallows disabled tooltip hover; clicks stay gated by `enabled`.
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(row_w, 22.0), Sense::click());
     let resp = if enabled { resp } else { resp.on_hover_cursor(egui::CursorIcon::Default) };
@@ -1911,7 +1918,7 @@ fn render_modal_choice_row(ui: &mut Ui, tokens: &Tokens, meta: &mut FrameInspect
     enabled && resp.clicked()
 }
 
-fn render_modal_seg_btn(
+pub(super) fn render_modal_seg_btn(
     ui: &mut Ui,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
@@ -1934,6 +1941,14 @@ fn render_modal_seg_btn(
     let galley = ui.painter().layout_job(job);
     let ellipsized = galley.elided;
     let w = (galley.size().x + 14.0).clamp(24.0, max_w);
+    let vis_clip = if meta.viewport_rect.is_positive() { ui.clip_rect().intersect(meta.viewport_rect) } else { ui.clip_rect() };
+    let row_top = ui.cursor().top();
+    let row_bot = row_top + 22.0;
+    let can_skip_top = !ui.layout().main_wrap() || ui.available_width() >= w;
+    if row_top > vis_clip.bottom() || (can_skip_top && row_bot < vis_clip.top()) {
+        ui.allocate_space(Vec2::new(w, 22.0));
+        return false;
+    }
     // Keep `Sense::click()` so `ScrollArea`'s outer hover sensor never swallows disabled tooltip hover; clicks stay gated by `enabled`.
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 22.0), Sense::click());
     let resp = if enabled { resp } else { resp.on_hover_cursor(egui::CursorIcon::Default) };
@@ -1993,7 +2008,7 @@ fn render_modal_seg_btn(
     enabled && resp.clicked()
 }
 
-fn attach_modal_hover_tooltip(ui: &Ui, resp: egui::Response, tip: &str) -> egui::Response {
+pub(super) fn attach_modal_hover_tooltip(ui: &Ui, resp: egui::Response, tip: &str) -> egui::Response {
     if tip.is_empty() {
         return resp;
     }
@@ -2008,7 +2023,7 @@ fn attach_modal_hover_tooltip(ui: &Ui, resp: egui::Response, tip: &str) -> egui:
 }
 
 #[allow(clippy::too_many_arguments)]
-fn record_widget(
+pub(super) fn record_widget(
     ui: &Ui,
     meta: &mut FrameInspectMeta,
     resp: &Response,
@@ -2034,7 +2049,7 @@ fn record_widget(
     );
 }
 
-fn column_titles_for_draft(doc: &ProjectDocument, src_id: Option<&SheetId>) -> Vec<String> {
+pub(super) fn column_titles_for_draft(doc: &ProjectDocument, src_id: Option<&SheetId>) -> Vec<String> {
     let Some(id) = src_id else {
         return Vec::new();
     };
