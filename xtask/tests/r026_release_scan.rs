@@ -937,3 +937,96 @@ fn r026_unknown_extensions_empty_dir_path_traversal_and_unextractable_containers
     }
     Ok(())
 }
+
+#[cfg(unix)]
+fn write_mock_msiexec(dir: &Path, args_log: &Path) -> Result<PathBuf, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("mock-msiexec");
+    let body = format!(
+        "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$1\" \"$2\" \"$3\" \"$4\" > \"{}\"\n[ \"$1\" = \"/a\" ] && [ \"$3\" = \"/qn\" ]\nmsi=\"$2\"\ntarget=\"${{4#TARGETDIR=}}\"\n[ \"$target\" != \"$4\" ]\ncp \"$msi\" \"$target/$(basename \"$msi\")\"\nmkdir -p \"$target/PFiles/CurveBook\"\ncp \"$msi\" \"$target/PFiles/CurveBook/README.txt\"\n",
+        args_log.display()
+    );
+    fs::write(&path, body).map_err(|e| format!("write mock-msiexec: {e}"))?;
+    let mut perms = fs::metadata(&path).map_err(|e| e.to_string())?.permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&path, perms).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+#[cfg(windows)]
+fn write_mock_msiexec(dir: &Path, args_log: &Path) -> Result<PathBuf, String> {
+    let path = dir.join("mock-msiexec.cmd");
+    let body = format!(
+        "@echo off\r\nsetlocal\r\nset \"MSI=%~2\"\r\nif \"%~4\"==\"TARGETDIR\" (\r\n  set \"TARGET=%~5\"\r\n) else (\r\n  set \"TARGET=%~4\"\r\n)\r\nif \"%TARGET:~0,10%\"==\"TARGETDIR=\" set \"TARGET=%TARGET:~10%\"\r\n> \"{}\" (\r\n  echo %~1\r\n  echo %MSI%\r\n  echo %~3\r\n  echo TARGETDIR=%TARGET%\r\n)\r\ncopy /Y \"%MSI%\" \"%TARGET%\\%~nx2\" >nul\r\nmkdir \"%TARGET%\\PFiles\\CurveBook\"\r\ncopy /Y \"%MSI%\" \"%TARGET%\\PFiles\\CurveBook\\README.txt\" >nul\r\n",
+        args_log.display()
+    );
+    fs::write(&path, body).map_err(|e| format!("write mock-msiexec.cmd: {e}"))?;
+    Ok(path)
+}
+
+#[test]
+fn r026_msi_scan_on_relative_dir_passes_absolute_paths_to_msiexec() -> Result<(), String> {
+    let fx = TempDirGuard::new("msi-relative")?;
+    let bin_dir = fx.path.join("mock-bin");
+    fs::create_dir_all(&bin_dir).map_err(|e| e.to_string())?;
+    let args_log = fx.path.join("msiexec-args.log");
+    let mock_msiexec = write_mock_msiexec(&bin_dir, &args_log)?;
+
+    // 1. Clean relative `dist/release` passes and hands absolute, non-verbatim paths to `msiexec`.
+    let rel_clean = Path::new("dist").join("release");
+    let clean_dir = fx.path.join(&rel_clean);
+    fs::create_dir_all(&clean_dir).map_err(|e| e.to_string())?;
+    let clean_msi = clean_dir.join("curvebook-0.1.0-windows-x64.msi");
+    fs::write(&clean_msi, b"Clean CurveBook Windows installer payload\n").map_err(|e| e.to_string())?;
+    write_sha256sums_for_dir(&clean_dir)?;
+
+    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .current_dir(&fx.path)
+        .args(["release-scan", "--report", "scan-report.json", rel_clean.to_str().unwrap()])
+        .env("CURVEBOOK_RELEASE_SCAN_MSIEXEC", mock_msiexec.to_str().unwrap())
+        .output()
+        .map_err(|e| format!("run release-scan on relative dir: {e}"))?;
+    assert!(
+        out.status.success(),
+        "relative msi release-scan failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let logged = fs::read_to_string(&args_log).map_err(|e| format!("read msiexec-args.log: {e}"))?;
+    let lines: Vec<&str> = logged.lines().map(str::trim_end).collect();
+    assert_eq!(lines.len(), 4, "expected 4 args passed to msiexec, got {lines:?}");
+    assert_eq!(lines[0], "/a");
+    assert_eq!(lines[2], "/qn");
+    let msi_arg = lines[1];
+    let target_arg = lines[3].strip_prefix("TARGETDIR=").unwrap_or_else(|| panic!("expected TARGETDIR= arg, got `{}`", lines[3]));
+    assert!(Path::new(msi_arg).is_absolute(), "msiexec /a arg must be absolute, got `{msi_arg}`");
+    assert!(Path::new(target_arg).is_absolute(), "msiexec TARGETDIR= arg must be absolute, got `{target_arg}`");
+    assert!(!msi_arg.starts_with(r"\\?\"), "msiexec /a arg must not have \\\\?\\ prefix: `{msi_arg}`");
+    assert!(!target_arg.starts_with(r"\\?\"), "msiexec TARGETDIR= arg must not have \\\\?\\ prefix: `{target_arg}`");
+    assert_eq!(fs::canonicalize(msi_arg).unwrap(), fs::canonicalize(&clean_msi).unwrap());
+
+    let report: serde_json::Value = serde_json::from_str(&fs::read_to_string(fx.path.join("scan-report.json")).unwrap()).unwrap();
+    assert_eq!(report["ok"], serde_json::json!(true));
+    assert_eq!(report["asset_count"], serde_json::json!(2));
+    assert_eq!(report["total_unpacked_files"], serde_json::json!(2));
+
+    // 2. Contaminated `.msi` scanned via relative path still fails closed with container attribution.
+    let rel_dirty = Path::new("dist").join("dirty-release");
+    let dirty_dir = fx.path.join(&rel_dirty);
+    fs::create_dir_all(&dirty_dir).map_err(|e| e.to_string())?;
+    let planted_brand = join(&["Ori", "gin", "Pro"]);
+    fs::write(dirty_dir.join("curvebook-0.1.0-windows-x64.msi"), format!("Bundled {planted_brand} guide\n")).map_err(|e| e.to_string())?;
+    write_sha256sums_for_dir(&dirty_dir)?;
+
+    let dirty_out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .current_dir(&fx.path)
+        .args(["release-scan", rel_dirty.to_str().unwrap()])
+        .env("CURVEBOOK_RELEASE_SCAN_MSIEXEC", mock_msiexec.to_str().unwrap())
+        .output()
+        .map_err(|e| format!("run dirty release-scan on relative dir: {e}"))?;
+    assert!(!dirty_out.status.success(), "contaminated msi must fail closed");
+    let stderr = String::from_utf8_lossy(&dirty_out.stderr);
+    assert!(stderr.contains("curvebook-0.1.0-windows-x64.msi!PFiles/CurveBook/README.txt"), "{stderr}");
+    Ok(())
+}

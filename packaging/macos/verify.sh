@@ -4,6 +4,10 @@
 #   - Notarization & Gatekeeper checks (`xcrun stapler validate`, `spctl`, `codesign --test-requirement="=notarized"`)
 #     when signed with a Developer ID certificate or `--require-notarized` is passed.
 #
+# Environment overrides:
+#   CURVEBOOK_VERIFY_RETRIES           Bounded retry attempts for network-backed notarization checks (default: 5)
+#   CURVEBOOK_VERIFY_RETRY_DELAY_SECS  Fixed delay in seconds between failed retry attempts (default: 10)
+#
 # Usage: packaging/macos/verify.sh [--arch universal|aarch64|x86_64] [--require-notarized] [artifact...]
 set -euo pipefail
 # shellcheck source=../env.sh
@@ -25,7 +29,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     -h | --help)
-      sed -n '2,7p' "$0"
+      sed -n '2,11p' "$0"
       exit 0
       ;;
     *)
@@ -38,6 +42,17 @@ done
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "error: packaging/macos/verify.sh must run on macOS" >&2
   exit 1
+fi
+
+VERIFY_RETRIES="${CURVEBOOK_VERIFY_RETRIES:-5}"
+VERIFY_RETRY_DELAY_SECS="${CURVEBOOK_VERIFY_RETRY_DELAY_SECS:-10}"
+if [[ ! "$VERIFY_RETRIES" =~ ^[1-9][0-9]*$ ]]; then
+  echo "error: CURVEBOOK_VERIFY_RETRIES must be a positive integer (got '$VERIFY_RETRIES')" >&2
+  exit 2
+fi
+if [[ ! "$VERIFY_RETRY_DELAY_SECS" =~ ^[0-9]+$ ]]; then
+  echo "error: CURVEBOOK_VERIFY_RETRY_DELAY_SECS must be a non-negative integer (got '$VERIFY_RETRY_DELAY_SECS')" >&2
+  exit 2
 fi
 
 if [[ ${#TARGETS[@]} -eq 0 ]]; then
@@ -71,6 +86,40 @@ is_adhoc_signed() {
   return 1
 }
 
+# Retry transient network-backed Gatekeeper/notarization checks only.
+# Never wrap local cryptographic `codesign --verify --strict` checks with this helper.
+retry_notarization_check() {
+  if [[ $# -eq 0 ]]; then
+    echo "error: retry_notarization_check requires a command" >&2
+    return 2
+  fi
+  local retries="$VERIFY_RETRIES"
+  local delay="$VERIFY_RETRY_DELAY_SECS"
+  local attempt=1
+  local rc=1
+  local cmd_str
+  printf -v cmd_str '%q ' "$@"
+  cmd_str="${cmd_str% }"
+
+  while [[ "$attempt" -le "$retries" ]]; do
+    if "$@"; then
+      return 0
+    else
+      rc=$?
+    fi
+    if [[ "$attempt" -lt "$retries" ]]; then
+      echo "warning: notarization check failed (attempt $attempt/$retries, exit $rc): $cmd_str; retrying in ${delay}s" >&2
+      if [[ "$delay" -gt 0 ]]; then
+        sleep "$delay"
+      fi
+    else
+      echo "error: notarization check failed (attempt $attempt/$retries, exit $rc): $cmd_str" >&2
+    fi
+    attempt=$((attempt + 1))
+  done
+  return "$rc"
+}
+
 verify_bundled_cli() {
   local app="$1" bin cs_info host_arch bin_archs can_run
   bin="$app/Contents/MacOS/curvebook-cli"
@@ -93,7 +142,7 @@ verify_bundled_cli() {
       echo "error: $bin lacks a secure signing timestamp required for notarization" >&2
       exit 1
     fi
-    codesign --test-requirement="=notarized" --verify --strict --verbose=2 "$bin"
+    retry_notarization_check codesign --test-requirement="=notarized" --verify --strict --verbose=2 "$bin"
   fi
   host_arch="$(uname -m)"
   bin_archs="$(lipo -archs "$bin" 2>/dev/null || true)"
@@ -125,8 +174,8 @@ verify_app() {
     fi
     warn "$app is ad-hoc signed; skipping xcrun stapler validate and spctl"
   else
-    xcrun stapler validate "$app"
-    spctl --assess --type execute -vvv "$app"
+    retry_notarization_check xcrun stapler validate "$app"
+    retry_notarization_check spctl --assess --type execute -vvv "$app"
   fi
   verify_bundled_cli "$app"
 }
@@ -143,8 +192,8 @@ verify_dmg() {
     fi
     warn "$dmg is ad-hoc signed; skipping xcrun stapler validate and spctl"
   else
-    xcrun stapler validate "$dmg"
-    spctl --assess --type open --context context:primary-signature -vvv "$dmg"
+    retry_notarization_check xcrun stapler validate "$dmg"
+    retry_notarization_check spctl --assess --type open --context context:primary-signature -vvv "$dmg"
   fi
   mp="$WORK/mount-$(basename "$dmg" .dmg)"
   mkdir -p "$mp"

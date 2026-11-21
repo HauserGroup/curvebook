@@ -181,6 +181,17 @@ impl Default for ToolConfig {
     }
 }
 
+impl ToolConfig {
+    fn from_env() -> Self {
+        let mut tools = Self::default();
+        if let Some(msiexec) = std::env::var_os("CURVEBOOK_RELEASE_SCAN_MSIEXEC").filter(|v| !v.is_empty()) {
+            tools.msiexec_bin = msiexec.to_string_lossy().into_owned();
+            tools.allow_msi = true;
+        }
+        tools
+    }
+}
+
 struct ScratchDirGuard {
     path: PathBuf,
 }
@@ -279,7 +290,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     let options = parse_args(args)?;
-    let tools = ToolConfig::default();
+    let tools = ToolConfig::from_env();
     let report = scan_release_dir_with_tools(root, &options, &tools)?;
     if let Some(report_path) = &options.report_path {
         if let Some(parent) = report_path.parent()
@@ -1340,12 +1351,41 @@ fn copy_mounted_tree_no_symlinks(
     Ok(())
 }
 
+/// Strip a leading Windows verbatim path prefix (`\\?\` or `\\?\UNC\`) when present.
+///
+/// Windows `msiexec /a` rejects both relative paths (exit code `1619`) and `\\?\`
+/// verbatim paths returned by `std::fs::canonicalize`.
+fn strip_windows_verbatim_prefix(path: &Path) -> PathBuf {
+    let Some(raw) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{unc}"))
+    } else if let Some(stripped) = raw.strip_prefix(r"\\?\") {
+        PathBuf::from(stripped)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// Resolve `path` to an absolute path using [`std::path::absolute`] and strip any
+/// leading Windows `\\?\` verbatim prefix before handing paths to external tools.
+pub(crate) fn absolute_tool_path(path: &Path) -> Result<PathBuf, String> {
+    if path.as_os_str().is_empty() {
+        return Err(String::from("cannot resolve empty tool path"));
+    }
+    let abs = std::path::absolute(path).map_err(|e| format!("resolve absolute path `{}`: {e}", path.display()))?;
+    Ok(strip_windows_verbatim_prefix(&abs))
+}
+
 fn unpack_msi(tools: &ToolConfig, asset_name: &str, msi_path: &Path, stage_dir: &Path) -> Result<(), String> {
     if !tools.allow_msi {
         return Err(format!("`{asset_name}`: cannot unpack Windows `.msi` installer on non-Windows host (run `release-scan` on Windows)"));
     }
-    let msi_str = msi_path.to_string_lossy();
-    let target_arg = format!("TARGETDIR={}", stage_dir.to_string_lossy());
+    let abs_msi = absolute_tool_path(msi_path)?;
+    let abs_stage = absolute_tool_path(stage_dir)?;
+    let msi_str = abs_msi.to_string_lossy();
+    let target_arg = format!("TARGETDIR={}", abs_stage.to_string_lossy());
     run_checked_tool(
         tools,
         &tools.msiexec_bin,
@@ -1356,7 +1396,7 @@ fn unpack_msi(tools: &ToolConfig, asset_name: &str, msi_path: &Path, stage_dir: 
 
     // `msiexec /a` places a stripped administrative copy of `<name>.msi` at the root of `TARGETDIR`
     // alongside the extracted directory hierarchy; remove that administrative stub before counting payload files.
-    let admin_stub = stage_dir.join(asset_name);
+    let admin_stub = abs_stage.join(asset_name);
     if admin_stub.is_file() {
         let _ = std::fs::remove_file(&admin_stub);
     }
@@ -1836,11 +1876,11 @@ mod tests {
             ),
         );
 
-        // 4. Mock `msiexec`: verifies `/a <msi> /qn TARGETDIR=<dir>` and also drops administrative `<name>.msi` stub.
+        // 4. Mock `msiexec`: verifies `/a <abs_msi> /qn TARGETDIR=<abs_dir>` and drops administrative `<name>.msi` stub.
         let msiexec = write_exec_script(
             &bin_dir,
             "msiexec",
-            "#!/bin/sh\nset -eu\n[ \"$1\" = \"/a\" ] && [ \"$3\" = \"/qn\" ]\nmsi=\"$2\"\ntarget=\"${4#TARGETDIR=}\"\ncp \"$msi\" \"$target/$(basename \"$msi\")\"\nmkdir -p \"$target/PFiles/CurveBook\"\ncp \"$msi\" \"$target/PFiles/CurveBook/README.txt\"\n",
+            "#!/bin/sh\nset -eu\n[ \"$1\" = \"/a\" ] && [ \"$3\" = \"/qn\" ]\nmsi=\"$2\"\ntarget=\"${4#TARGETDIR=}\"\n[ \"$target\" != \"$4\" ]\ncase \"$msi\" in /*) ;; *) echo \"expected absolute /a path, got $msi\" >&2; exit 2 ;; esac\ncase \"$target\" in /*) ;; *) echo \"expected absolute TARGETDIR path, got $target\" >&2; exit 2 ;; esac\ncp \"$msi\" \"$target/$(basename \"$msi\")\"\nmkdir -p \"$target/PFiles/CurveBook\"\ncp \"$msi\" \"$target/PFiles/CurveBook/README.txt\"\n",
         );
 
         // 5. Mock `rpm2cpio`: emits a valid SVR4 `newc` cpio stream piped into real host `cpio -it` / `cpio -idm`.
@@ -2106,6 +2146,39 @@ mod tests {
         for bad in ["", "v", "vv0.1.0", "../evil", "0.1.0/foo", "0.1.0\\foo", "0.1.0+", "0.1.0+bad..meta", "0.1.0 beta", "1.2", "0.1.0-", "0.1.0-01"]
         {
             assert!(super::normalize_release_version(bad).is_err(), "expected failure for `{bad}`");
+        }
+    }
+
+    #[test]
+    fn absolute_tool_path_resolves_relative_paths_and_strips_windows_verbatim_prefixes() {
+        let cwd = std::env::current_dir().unwrap();
+        let rel = Path::new("dist").join("release").join("curvebook-0.1.0-windows-x64.msi");
+        let abs = super::absolute_tool_path(&rel).unwrap();
+        assert!(abs.is_absolute(), "expected absolute path, got {}", abs.display());
+        assert!(abs.ends_with(&rel), "expected `{}` to end with `{}`", abs.display(), rel.display());
+        assert_eq!(abs, cwd.join(&rel));
+        assert!(!abs.to_string_lossy().starts_with(r"\\?\"));
+
+        let dotted = Path::new(".").join("dist").join(".").join("release").join("curvebook.msi");
+        assert_eq!(super::absolute_tool_path(&dotted).unwrap(), cwd.join("dist").join("release").join("curvebook.msi"));
+
+        assert!(super::absolute_tool_path(Path::new("")).is_err());
+
+        assert_eq!(super::strip_windows_verbatim_prefix(Path::new(r"\\?\C:\dist\release\app.msi")), PathBuf::from(r"C:\dist\release\app.msi"));
+        assert_eq!(
+            super::strip_windows_verbatim_prefix(Path::new(r"\\?\UNC\server\share\dist\app.msi")),
+            PathBuf::from(r"\\server\share\dist\app.msi")
+        );
+        assert_eq!(super::strip_windows_verbatim_prefix(Path::new(r"C:\dist\release\app.msi")), PathBuf::from(r"C:\dist\release\app.msi"));
+        assert_eq!(super::strip_windows_verbatim_prefix(Path::new("/tmp/dist/app.msi")), PathBuf::from("/tmp/dist/app.msi"));
+
+        #[cfg(windows)]
+        {
+            assert_eq!(super::absolute_tool_path(Path::new(r"\\?\C:\dist\release\app.msi")).unwrap(), PathBuf::from(r"C:\dist\release\app.msi"));
+            assert_eq!(
+                super::absolute_tool_path(Path::new(r"\\?\UNC\server\share\dist\app.msi")).unwrap(),
+                PathBuf::from(r"\\server\share\dist\app.msi")
+            );
         }
     }
 }
