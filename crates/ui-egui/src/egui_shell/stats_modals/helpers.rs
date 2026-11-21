@@ -1,6 +1,8 @@
 //! Shared modal chrome, action button, live formula bar, TeX equation preview, role badge, and picker helpers.
 
-use curvebook_doc::{AnalysisKind, ContingencyMethod, MixedModelDfMethod, MultiplicityMethod, ProjectDocument, ResidualCovariance, VariableRole};
+use curvebook_doc::{
+    AnalysisKind, ContingencyMethod, DataSheet, MixedModelDfMethod, MultiplicityMethod, ProjectDocument, ResidualCovariance, SheetId, VariableRole,
+};
 use curvebook_text::{EquationSegment, SpanScript, SpanSlope, SpanWeight, parse_equation_segments};
 use egui::{Color32, Context, CornerRadius, FontId, Id, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, scroll_area::ScrollBarVisibility};
 use serde_json::json;
@@ -505,6 +507,12 @@ pub(super) fn render_dataset_checklist(
             }
         }
     });
+}
+
+/// Resolve the source [`DataSheet`] for an analysis, falling back to `ResultSheet::analyzable_data`
+/// when an analysis chains onto an upstream `Transform` / `Normalize` / `PruneRows` result sheet.
+pub(super) fn resolve_source_data_sheet<'a>(doc: &'a ProjectDocument, id: &SheetId) -> Option<&'a DataSheet> {
+    doc.data_sheet(id).or_else(|| doc.result_sheet(id).and_then(|rs| rs.analyzable_data.as_ref()))
 }
 
 pub(super) fn df_method_label(m: MixedModelDfMethod) -> &'static str {

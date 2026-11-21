@@ -3,8 +3,8 @@
 //! `gui-layout-spec.md` §8.6).
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, BaselineOperation, DataSheet, DerivedColumnFormula, ErrorPropagationMode, MathTransformPreset, SheetId,
-    TableArchetype, TableKind, TransformAnalysisSpec,
+    AnalysisKind, AnalysisSpec, BaselineOperation, DataSheet, DerivedColumnFormula, ErrorPropagationMode, MathTransformPreset, NormalizeAnchor,
+    SheetId, TableArchetype, TableKind, TransformAnalysisSpec,
 };
 use curvebook_transform::formula::parser::parse_formula;
 use egui::{Align, Context, Layout, Rect, RichText, Stroke, Ui, vec2};
@@ -151,8 +151,8 @@ impl Default for TransformModalsEguiState {
             extract_binding_grp: String::new(),
             norm_zero_idx: 0,
             norm_hundred_idx: 0,
-            norm_percent: false,
-            norm_per_dataset: false,
+            norm_percent: true,
+            norm_per_dataset: true,
             hook_picker_open: false,
             exclude_note_draft: String::new(),
             synced_exclude_tag: String::new(),
@@ -328,7 +328,7 @@ fn modal_title_for(kind: TransformModalKind, locale: &str) -> &'static str {
 fn resolve_source_sheet<'a>(app: &'a UiApp, state: &TransformModalsEguiState, from_edit: bool) -> Option<&'a DataSheet> {
     let doc = app.document();
     if from_edit && let Some(spec) = app.canvas_dialogs.edit_params.draft.as_ref() {
-        return doc.data_sheet(&spec.source_sheet_id);
+        return doc.data_sheet(&spec.source_sheet_id).or_else(|| doc.result_sheet(&spec.source_sheet_id).and_then(|rs| rs.analyzable_data.as_ref()));
     }
     state
         .target_sheet_id
@@ -358,6 +358,11 @@ fn sync_standalone_transform_state(kind: TransformModalKind, state: &mut Transfo
     state.prune_every_k_rows = 2;
     state.prune_every_k_draft = String::from("2");
     state.prune_average_window = false;
+    state.norm_zero_idx = 0;
+    state.norm_hundred_idx = 0;
+    state.norm_percent = true;
+    state.norm_per_dataset = true;
+    state.create_new_graph = false;
     state.standalone_selected_cols.clear();
     state.validation_error = None;
 }
@@ -379,6 +384,11 @@ fn sync_transform_edit_state(app: &UiApp, state: &mut TransformModalsEguiState) 
     state.prune_every_k_rows = 2;
     state.prune_every_k_draft = String::from("2");
     state.prune_average_window = false;
+    state.norm_zero_idx = 0;
+    state.norm_hundred_idx = 0;
+    state.norm_percent = true;
+    state.norm_per_dataset = true;
+    state.create_new_graph = false;
     state.filter_formula_draft.clear();
     state.derived_cols.clear();
     state.extract_target_kind = None;
@@ -388,6 +398,20 @@ fn sync_transform_edit_state(app: &UiApp, state: &mut TransformModalsEguiState) 
                 state.selected_k_op = Some(op);
                 state.constant_k_draft = format!("{k}");
             }
+        }
+        Some(AnalysisKind::Transform(TransformAnalysisSpec::Normalize { zero_anchor, hundred_anchor, output_percent, per_data_set })) => {
+            state.norm_zero_idx = match zero_anchor {
+                NormalizeAnchor::FirstRow => 1,
+                NormalizeAnchor::FixedValue(_) => 2,
+                _ => 0,
+            };
+            state.norm_hundred_idx = match hundred_anchor {
+                NormalizeAnchor::ColumnSum => 1,
+                NormalizeAnchor::LastRow => 2,
+                _ => 0,
+            };
+            state.norm_percent = *output_percent;
+            state.norm_per_dataset = *per_data_set;
         }
         Some(AnalysisKind::Transform(TransformAnalysisSpec::Transpose { swap_row_and_column_titles })) => {
             state.transpose_swap_titles = *swap_row_and_column_titles;
@@ -705,12 +729,57 @@ fn render_transform_values_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
     );
 }
 
+fn normalize_zero_anchor_from_idx(idx: usize) -> NormalizeAnchor {
+    match idx {
+        1 => NormalizeAnchor::FirstRow,
+        2 => NormalizeAnchor::FixedValue(0.0),
+        _ => NormalizeAnchor::ColumnMin,
+    }
+}
+
+fn normalize_hundred_anchor_from_idx(idx: usize) -> NormalizeAnchor {
+    match idx {
+        1 => NormalizeAnchor::ColumnSum,
+        2 => NormalizeAnchor::LastRow,
+        _ => NormalizeAnchor::ColumnMax,
+    }
+}
+
+fn push_normalize_edit_draft(
+    app: &UiApp,
+    state: &TransformModalsEguiState,
+    zero_override: Option<NormalizeAnchor>,
+    hundred_override: Option<NormalizeAnchor>,
+    intents: &mut PendingUiIntents,
+) {
+    let Some(mut spec) = app.canvas_dialogs.edit_params.draft.clone() else {
+        return;
+    };
+    if let AnalysisKind::Transform(TransformAnalysisSpec::Normalize { zero_anchor, hundred_anchor, output_percent, per_data_set }) = &mut spec.kind {
+        if let Some(z) = zero_override {
+            *zero_anchor = z;
+        } else if matches!(zero_anchor, NormalizeAnchor::ColumnMin | NormalizeAnchor::FirstRow | NormalizeAnchor::FixedValue(0.0)) {
+            *zero_anchor = normalize_zero_anchor_from_idx(state.norm_zero_idx);
+        }
+        if let Some(h) = hundred_override {
+            *hundred_anchor = h;
+        } else if matches!(hundred_anchor, NormalizeAnchor::ColumnMax | NormalizeAnchor::ColumnSum | NormalizeAnchor::LastRow) {
+            *hundred_anchor = normalize_hundred_anchor_from_idx(state.norm_hundred_idx);
+        }
+        *output_percent = state.norm_percent;
+        *per_data_set = state.norm_per_dataset;
+        intents.push_set_edit_params_draft(spec);
+    }
+}
+
 fn render_normalize_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
+    let app = cx.app;
     let ds = cx.ds;
     let from_edit = cx.from_edit;
     let tokens = cx.tokens;
     let state = &mut *cx.state;
     let meta = &mut *cx.meta;
+    let intents = &mut *cx.intents;
     ui.label(RichText::new(format!("Normalize Series ({})", ds.map_or("Sheet", |s| s.title.as_str()))).strong().color(tokens.text_primary));
     ui.horizontal_wrapped(|row| {
         row.label("0% Anchor:");
@@ -719,6 +788,9 @@ fn render_normalize_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
             meta.record_modal_response(row, &r, FrameInspectEntryInput::modal(&format!("edit.transform.norm_zero.{idx}"), "radio", lbl, None, true));
             if r.clicked() {
                 state.norm_zero_idx = idx;
+                if from_edit {
+                    push_normalize_edit_draft(app, state, Some(normalize_zero_anchor_from_idx(idx)), None, intents);
+                }
             }
         }
     });
@@ -733,26 +805,57 @@ fn render_normalize_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
             );
             if r.clicked() {
                 state.norm_hundred_idx = idx;
+                if from_edit {
+                    push_normalize_edit_draft(app, state, None, Some(normalize_hundred_anchor_from_idx(idx)), intents);
+                }
             }
         }
     });
     ui.horizontal_wrapped(|row| {
-        let _ = row.checkbox(&mut state.norm_percent, "Scale output to 0-100% (unchecked = 0-1 fraction)");
-        let _ = row.checkbox(&mut state.norm_per_dataset, "Normalize each data set independently");
-        if !from_edit {
-            let cr = row.checkbox(&mut state.create_new_graph, "Create new graph of normalized results");
-            meta.record_modal_response(
-                row,
-                &cr,
-                FrameInspectEntryInput::modal(
-                    "edit.transform.normalize.create_graph",
-                    "checkbox",
-                    "Create New Graph",
-                    Some(state.create_new_graph.to_string()),
-                    true,
-                ),
-            );
+        let pct_resp = row.checkbox(&mut state.norm_percent, "Scale output to 0-100% (unchecked = 0-1 fraction)");
+        meta.record_modal_response(
+            row,
+            &pct_resp,
+            FrameInspectEntryInput::modal(
+                "edit.transform.norm_percent",
+                "checkbox",
+                "Scale Output to 0-100%",
+                Some(state.norm_percent.to_string()),
+                true,
+            ),
+        );
+        if pct_resp.changed() && from_edit {
+            push_normalize_edit_draft(app, state, None, None, intents);
         }
+
+        let ds_resp = row.checkbox(&mut state.norm_per_dataset, "Normalize each data set independently");
+        meta.record_modal_response(
+            row,
+            &ds_resp,
+            FrameInspectEntryInput::modal(
+                "edit.transform.norm_per_dataset",
+                "checkbox",
+                "Normalize Each Data Set",
+                Some(state.norm_per_dataset.to_string()),
+                true,
+            ),
+        );
+        if ds_resp.changed() && from_edit {
+            push_normalize_edit_draft(app, state, None, None, intents);
+        }
+
+        let cr = row.checkbox(&mut state.create_new_graph, "Create new graph of normalized results");
+        meta.record_modal_response(
+            row,
+            &cr,
+            FrameInspectEntryInput::modal(
+                "edit.transform.normalize.create_graph",
+                "checkbox",
+                "Create New Graph",
+                Some(state.create_new_graph.to_string()),
+                true,
+            ),
+        );
     });
 }
 
@@ -1471,6 +1574,7 @@ fn render_transform_footer(ui: &mut Ui, cx: &mut TransformModalCtx<'_>, kind: Tr
                 if from_edit {
                     if commit_edit_transform_k_if_needed(app, kind, state, intents) {
                         intents.push_dialog_button("ok");
+                        push_normalize_graph_if_requested(app, kind, state, intents);
                     }
                 } else {
                     if let Some(sheet) = ds {
@@ -1495,10 +1599,28 @@ fn render_transform_footer(ui: &mut Ui, cx: &mut TransformModalCtx<'_>, kind: Tr
                 meta.record_modal_response(rhs, &apply_resp, FrameInspectEntryInput::modal("modal.apply", "button", apply_lbl, None, can_ok));
                 if apply_resp.clicked() && commit_edit_transform_k_if_needed(app, kind, state, intents) {
                     intents.push_dialog_button("apply");
+                    push_normalize_graph_if_requested(app, kind, state, intents);
                 }
             }
         });
     });
+}
+
+fn push_normalize_graph_if_requested(app: &UiApp, kind: TransformModalKind, state: &TransformModalsEguiState, intents: &mut PendingUiIntents) {
+    if kind != TransformModalKind::Normalize || !state.create_new_graph {
+        return;
+    }
+    if let ActiveDialog::EditAnalysisParameters { result_sheet_id } = &app.canvas_dialogs.active_dialog
+        && !app.document().graph_sheets.iter().any(|g| g.spec.primary_source_sheet_id == *result_sheet_id)
+    {
+        intents.push_engine(
+            "graph.create",
+            json!({
+                "data_sheet_id": result_sheet_id.as_str(),
+                "initialized": true,
+            }),
+        );
+    }
 }
 
 fn commit_edit_transform_k_if_needed(

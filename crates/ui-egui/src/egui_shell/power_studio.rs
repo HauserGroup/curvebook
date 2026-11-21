@@ -87,14 +87,31 @@ pub fn render_power_studio_modal(
         state.power_spinner = ScrubUnitFieldState::new(ScrubUnitKind::Percent);
     }
 
+    let is_edit_mode = matches!(app.canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. });
     let pw = &app.canvas_dialogs.power_wizard;
     let locale = normalize_locale(&app.locale);
     let title = tr(locale, "w6.view.modal.power_and_sample_size");
     let solved_summary = format_power_banner(pw);
 
-    let can_next = evaluate_dialog_button(&app.canvas_dialogs, app.document(), "next").unwrap_or_else(ControlEnablement::enabled);
-    let can_back = evaluate_dialog_button(&app.canvas_dialogs, app.document(), "back").unwrap_or_else(ControlEnablement::enabled);
+    let can_next = if is_edit_mode {
+        if pw.stage.next().is_some() && pw.can_advance().is_ok() {
+            ControlEnablement::enabled()
+        } else {
+            ControlEnablement::disabled("Complete current stage parameters before advancing.")
+        }
+    } else {
+        evaluate_dialog_button(&app.canvas_dialogs, app.document(), "next").unwrap_or_else(ControlEnablement::enabled)
+    };
+    let can_back = if is_edit_mode {
+        if pw.stage.prev().is_some() { ControlEnablement::enabled() } else { ControlEnablement::disabled("Already on the first stage.") }
+    } else {
+        evaluate_dialog_button(&app.canvas_dialogs, app.document(), "back").unwrap_or_else(ControlEnablement::enabled)
+    };
     let can_create = evaluate_dialog_button(&app.canvas_dialogs, app.document(), "create").unwrap_or_else(ControlEnablement::enabled);
+    let can_ok_edit = match &pw.validation_error {
+        Some(err) => ControlEnablement::disabled(err.clone()),
+        None => ControlEnablement::enabled(),
+    };
 
     let capture = show_wave4_modal(
         ctx,
@@ -182,10 +199,29 @@ pub fn render_power_studio_modal(
         |ui, _state, meta, intents| {
             ui.horizontal(|ui| {
                 if render_modal_action_button(ui, tokens, meta, "modal.back", "← Back", false, false, &can_back) {
-                    intents.push_commit_power_wizard("back");
+                    if is_edit_mode {
+                        let mut prev = pw.clone();
+                        if prev.go_back().is_ok() {
+                            intents.push_update_power_wizard_state(prev);
+                        }
+                    } else {
+                        intents.push_commit_power_wizard("back");
+                    }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if pw.stage == PowerWizardStage::Results {
+                    if is_edit_mode {
+                        if render_modal_action_button(ui, tokens, meta, "modal.ok", tr(locale, "btn.ok"), true, false, &can_ok_edit) {
+                            intents.push_dialog_button("ok");
+                        }
+                        if pw.stage != PowerWizardStage::Results
+                            && render_modal_action_button(ui, tokens, meta, "modal.next", "Next →", false, false, &can_next)
+                        {
+                            let mut next = pw.clone();
+                            if next.advance().is_ok() {
+                                intents.push_update_power_wizard_state(next);
+                            }
+                        }
+                    } else if pw.stage == PowerWizardStage::Results {
                         if render_modal_action_button(ui, tokens, meta, "modal.ok", tr(locale, "w6.view.btn.create"), true, false, &can_create) {
                             intents.push_commit_power_wizard("create");
                         }
@@ -202,7 +238,11 @@ pub fn render_power_studio_modal(
                         false,
                         &ControlEnablement::enabled(),
                     ) {
-                        intents.push_commit_power_wizard("cancel");
+                        if is_edit_mode {
+                            intents.push_dialog_button("cancel");
+                        } else {
+                            intents.push_commit_power_wizard("cancel");
+                        }
                     }
                 });
             });
@@ -210,7 +250,11 @@ pub fn render_power_studio_modal(
     );
 
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
-        intents.push_commit_power_wizard("cancel");
+        if is_edit_mode {
+            intents.push_dialog_button("cancel");
+        } else {
+            intents.push_commit_power_wizard("cancel");
+        }
     }
 
     PowerStudioFrameReport {
@@ -532,7 +576,15 @@ fn render_stage3_alpha_power(
     intents: &mut PendingUiIntents,
 ) {
     render_section_title(ui, tokens, "3. Hypothesis Tail, Alpha & Target Power");
-    let one_en = evaluate_dialog_widget(&app.canvas_dialogs, app.document(), "power.one_sided");
+    let one_en = if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }) {
+        if pw.family.supports_one_sided() {
+            ControlEnablement::enabled()
+        } else {
+            ControlEnablement::disabled("One-sided tests are not supported for omnibus ANOVA or chi-square families.")
+        }
+    } else {
+        evaluate_dialog_widget(&app.canvas_dialogs, app.document(), "power.one_sided")
+    };
     if render_modal_radio(ui, tokens, meta, "power.two_tailed", "Two-tailed test", pw.two_tailed, &ControlEnablement::enabled()) {
         let mut next = pw.clone();
         next.two_tailed = true;

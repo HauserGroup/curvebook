@@ -111,6 +111,7 @@ pub struct FitModalEguiState {
     pub initial_override_drafts: BTreeMap<String, String>,
     pub lower_bound_drafts: BTreeMap<String, String>,
     pub upper_bound_drafts: BTreeMap<String, String>,
+    pub constant_drafts: BTreeMap<String, String>,
 }
 
 /// Frame geometry and modal capture report emitted by `fit_modal`.
@@ -150,15 +151,18 @@ pub fn render_fit_modal(
 ) -> FitModalFrameReport {
     let ActiveDialog::EditAnalysisParameters { result_sheet_id } = &app.canvas_dialogs.active_dialog else {
         state.open_session_sheet_id = None;
+        state.constant_drafts.clear();
         return FitModalFrameReport::default();
     };
     let doc = app.document();
     let Some(spec) = app.canvas_dialogs.edit_params.draft.as_ref().or_else(|| doc.result_sheet(result_sheet_id).map(|rs| &rs.analysis)) else {
         state.open_session_sheet_id = None;
+        state.constant_drafts.clear();
         return FitModalFrameReport::default();
     };
     let AnalysisKind::NonlinearRegression(nl) = &spec.kind else {
         state.open_session_sheet_id = None;
+        state.constant_drafts.clear();
         return FitModalFrameReport::default();
     };
 
@@ -430,7 +434,11 @@ fn sync_fit_modal_state(result_sheet_id: &SheetId, ep: &EditAnalysisParametersSt
         state.initial_override_drafts.clear();
         state.lower_bound_drafts.clear();
         state.upper_bound_drafts.clear();
+        state.constant_drafts.clear();
         for rule in &nl.parameter_rules {
+            if let ParameterScope::Constant(val) = rule.scope {
+                state.constant_drafts.insert(rule.name.clone(), format_fit_number(val));
+            }
             if let Some(init) = rule.initial_override {
                 state.initial_override_drafts.insert(rule.name.clone(), format_fit_number(init));
             }
@@ -1026,7 +1034,14 @@ fn render_fit_constrain_tab(
                     if render_modal_seg_btn(ui, tokens, meta, &format!("fit.con.rule.{p}.{slug}"), lbl, scope_eq, &ControlEnablement::enabled()) {
                         let new_scope = match slug {
                             "shared" => ParameterScope::SharedGlobal,
-                            "fixed" => ParameterScope::Constant(1.0),
+                            "fixed" => {
+                                let cur = match rule.scope {
+                                    ParameterScope::Constant(v) => v,
+                                    _ => 1.0,
+                                };
+                                state.constant_drafts.insert(p.clone(), format_fit_number(cur));
+                                ParameterScope::Constant(cur)
+                            }
                             "col_title" => ParameterScope::ColumnTitleConstant,
                             _ => ParameterScope::Local,
                         };
@@ -1048,16 +1063,32 @@ fn render_fit_constrain_tab(
             });
 
             if let ParameterScope::Constant(val) = rule.scope {
-                let buf_id = Id::unique(("fit_con_const", p.as_str()));
-                let mut text: String = ctx.data(|d| d.get_temp(buf_id)).unwrap_or_else(|| format_fit_number(val));
+                let mut text = state.constant_drafts.get(p).cloned().unwrap_or_else(|| format_fit_number(val));
                 ui.horizontal(|ui| {
                     ui.label("Constant value:");
-                    let ed = ui.add_sized(Vec2::new(90.0, 20.0), TextEdit::singleline(&mut text));
-                    ctx.data_mut(|d| d.insert_temp(buf_id, text.clone()));
-                    if ed.changed()
-                        && let Some(parsed) = parse_fit_number(&text, locale_preset)
-                    {
-                        update_param_rule(spec, p, |r| r.scope = ParameterScope::Constant(parsed), intents);
+                    let ed = ui.add_sized(Vec2::new(90.0, 20.0), TextEdit::singleline(&mut text).id(Id::unique(("fit_con_const", p.as_str()))));
+                    record_widget(
+                        ui,
+                        meta,
+                        &ed,
+                        &format!("fit.con.const.{p}"),
+                        "textbox",
+                        &format!("{p} Constant Value"),
+                        None,
+                        Some(serde_json::json!(text)),
+                        true,
+                        None,
+                        ZLayer::ModalDialog,
+                        false,
+                        None,
+                    );
+                    if ed.changed() {
+                        state.constant_drafts.insert(p.clone(), text.clone());
+                        if let Some(parsed) = parse_fit_number(&text, locale_preset) {
+                            update_param_rule(spec, p, |r| r.scope = ParameterScope::Constant(parsed), intents);
+                        }
+                    } else if !state.constant_drafts.contains_key(p) {
+                        state.constant_drafts.insert(p.clone(), text);
                     }
                 });
             } else if let ParameterScope::HookedConstant(ref src) = rule.scope {

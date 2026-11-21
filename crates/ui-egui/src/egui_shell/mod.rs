@@ -1114,6 +1114,7 @@ pub enum UiIntent {
     CloseManageVariables,
     OpenImportWizard { origin: ImportOriginKind, is_live_link: bool, target_sheet_id: Option<SheetId> },
     UpdateImportWizard(Box<ImportPasteWizardState>),
+    PasteClipboardIntoImportReshape,
     CommitImportWizard { close_after: bool },
     CloseImportWizard,
     OpenTransformModal { sheet_id: SheetId, kind: transform_modals::TransformModalKind },
@@ -1508,6 +1509,11 @@ impl PendingUiIntents {
     /// Persist a settled snapshot update to `app.grid.import_wizard`.
     pub fn push_update_import_wizard(&mut self, wizard: ImportPasteWizardState) {
         self.queue.push(UiIntent::UpdateImportWizard(Box::new(wizard)));
+    }
+
+    /// Populate `ImportReshape` / `ImportWizard` fields from the system clipboard.
+    pub fn push_paste_clipboard_into_import_reshape(&mut self) {
+        self.queue.push(UiIntent::PasteClipboardIntoImportReshape);
     }
 
     /// Commit the configured `Import & Paste Special` wizard via `Caller::Ui`.
@@ -1954,6 +1960,9 @@ fn apply_single_ui_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentO
             let res = crate::views::dispatch_custom_view_action(app, &mut shards, &domain, &payload);
             app.view_shards = shards;
             let outcome = res.map_err(|msg| EngineError::with_code(curvebook_doc::ErrorCode::Conflict, msg))?;
+            if domain == "power_wizard" {
+                sync_edit_params_from_power_wizard(app);
+            }
             Ok(UiIntentOutcome::Ui {
                 command_id: outcome.command_id.unwrap_or_else(|| format!("{domain}:{payload}")),
                 result: outcome.command_result,
@@ -2110,6 +2119,7 @@ fn apply_wave4_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutco
         | UiIntent::CloseManageVariables
         | UiIntent::OpenImportWizard { .. }
         | UiIntent::UpdateImportWizard(_)
+        | UiIntent::PasteClipboardIntoImportReshape
         | UiIntent::CommitImportWizard { .. }
         | UiIntent::CloseImportWizard
         | UiIntent::OpenTransformModal { .. }
@@ -2236,22 +2246,109 @@ fn apply_wave4_grid_wizard_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
             app.grid.import_wizard = *wizard;
             Ok(UiIntentOutcome::ShellUpdated)
         }
+        UiIntent::PasteClipboardIntoImportReshape => {
+            let clip = app
+                .read_clipboard_text()
+                .ok()
+                .filter(|s| s.available)
+                .and_then(|s| s.text)
+                .filter(|t| !t.is_empty())
+                .or_else(|| app.interaction.last_clipboard_text.clone())
+                .unwrap_or_default();
+            if clip.is_empty() {
+                return Ok(UiIntentOutcome::ShellUpdated);
+            }
+            if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::ImportReshape) || app.grid.import_reshape.open {
+                let mut fields = serde_json::Map::new();
+                if app.grid.import_reshape.mode == crate::grid_view::ImportReshapeMode::TidyLongPivot {
+                    fields.insert(String::from("tidy_csv"), serde_json::Value::String(clip.clone()));
+                    app.grid
+                        .import_reshape
+                        .apply_field_patch_localized(&fields, &app.locale_preset)
+                        .map_err(|msg| EngineError::with_code(ErrorCode::BadInput, msg))?;
+                    app.egui_views.import_wizard.reshape_tidy_csv_draft = app.grid.import_reshape.tidy_csv.clone();
+                } else {
+                    fields.insert(String::from("data"), serde_json::Value::String(clip));
+                    let expected = if app.grid.import_reshape.mode == crate::grid_view::ImportReshapeMode::Plate384 { 384 } else { 96 };
+                    if app.grid.import_reshape.plate_roles.len() != expected {
+                        fields.insert(
+                            String::from("plate_roles"),
+                            serde_json::Value::Array(import_wizard::default_plate_roles(
+                                expected == 384,
+                                app.grid.import_reshape.subtract_blank_mean,
+                            )),
+                        );
+                    }
+                    app.grid
+                        .import_reshape
+                        .apply_field_patch_localized(&fields, &app.locale_preset)
+                        .map_err(|msg| EngineError::with_code(ErrorCode::BadInput, msg))?;
+                    app.egui_views.import_wizard.plate_values_draft = app
+                        .grid
+                        .import_reshape
+                        .plate_values
+                        .iter()
+                        .map(|v| v.map_or_else(|| String::from("NA"), |n| format!("{n}")))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                }
+            } else if app.grid.import_wizard.open {
+                app.grid.import_wizard.raw_clipboard_text = clip.clone();
+                app.egui_views.import_wizard.raw_source_draft = clip;
+            }
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
         UiIntent::CommitImportWizard { close_after } => {
             let doc = app.session.document();
-            let target_id = app
+            let existing_target = app
                 .grid
                 .import_wizard
                 .target_sheet_id
                 .as_ref()
                 .filter(|id| doc.data_sheet(id).is_some())
                 .cloned()
-                .or_else(|| doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()).cloned())
-                .ok_or_else(|| {
-                    EngineError::with_code(
-                        ErrorCode::Conflict,
-                        "no target data sheet available for import wizard; activate or select a target data sheet first",
-                    )
-                })?;
+                .or_else(|| doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()).cloned());
+            let target_id = if let Some(id) = existing_target {
+                id
+            } else if doc.data_sheets.is_empty()
+                && matches!(app.grid.import_wizard.origin_kind, ImportOriginKind::Clipboard | ImportOriginKind::ExternalDelimitedFile)
+            {
+                if app.grid.import_wizard.origin_kind == ImportOriginKind::ExternalDelimitedFile
+                    && !app.grid.import_wizard.is_live_link
+                    && app.grid.import_wizard.raw_clipboard_text.trim().is_empty()
+                    && !app.grid.import_wizard.external_file_path.trim().is_empty()
+                {
+                    let delim =
+                        if app.grid.import_wizard.delimiter == '\0' { String::from("\t") } else { app.grid.import_wizard.delimiter.to_string() };
+                    let dec = if app.grid.import_wizard.decimal_separator == ',' { "," } else { "." };
+                    let outcome = app.execute_session_ui_cmd(
+                        "table.importCsv",
+                        serde_json::json!({
+                            "title": "Imported Data",
+                            "path": app.grid.import_wizard.external_file_path,
+                            "delimiter": delim,
+                            "decimal_separator": dec,
+                        }),
+                    )?;
+                    if close_after {
+                        app.grid.import_wizard.open = false;
+                    }
+                    return Ok(UiIntentOutcome::Engine { command_id: String::from("table.importCsv"), outcome });
+                }
+                let created = app.execute_session_ui_cmd("sheet.createData", serde_json::json!({ "kind": "Column", "title": "Imported Data" }))?;
+                created
+                    .payload
+                    .get("sheet_id")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|s| SheetId::try_new(s).ok())
+                    .or_else(|| app.session.document().data_sheets.last().map(|s| s.id.clone()))
+                    .ok_or_else(|| EngineError::with_code(ErrorCode::Conflict, "failed to create target data sheet for import wizard"))?
+            } else {
+                return Err(EngineError::with_code(
+                    ErrorCode::Conflict,
+                    "no target data sheet available for import wizard; activate or select a target data sheet first",
+                ));
+            };
             if matches!(app.grid.import_wizard.origin_kind, ImportOriginKind::InternalDataSheet | ImportOriginKind::InternalResultSheet) {
                 let Some(src_id) = app.grid.import_wizard.source_sheet_id.as_ref() else {
                     return Err(EngineError::with_code(ErrorCode::Conflict, "select a source sheet before committing an internal link or import"));
@@ -2263,7 +2360,7 @@ fn apply_wave4_grid_wizard_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
                     ));
                 }
             }
-            let tool_intent = app.grid.import_wizard.build_command_intent(&target_id, Some(doc));
+            let tool_intent = app.grid.import_wizard.build_command_intent(&target_id, Some(app.session.document()));
             let outcome = app.execute_session_ui_cmd(&tool_intent.command_id, tool_intent.params)?;
             if close_after {
                 app.grid.import_wizard.open = false;
@@ -2520,6 +2617,7 @@ fn apply_wave4_modal_state_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
         UiIntent::UpdatePowerWizardState(state) => {
             app.canvas_dialogs.power_wizard = *state;
             let _ = app.canvas_dialogs.power_wizard.recalculate();
+            sync_edit_params_from_power_wizard(app);
         }
         UiIntent::CommitPowerWizard { action } => {
             let result = crate::gui_actions::execute_dialog_button_action(app, &action)?;
@@ -2553,6 +2651,18 @@ fn apply_wave4_modal_state_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
         _ => {}
     }
     Ok(UiIntentOutcome::ShellUpdated)
+}
+
+fn sync_edit_params_from_power_wizard(app: &mut UiApp) {
+    if !matches!(app.canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }) {
+        return;
+    }
+    if let Some(spec) = &mut app.canvas_dialogs.edit_params.draft
+        && let curvebook_doc::AnalysisKind::PowerAnalysis(ref existing) = spec.kind
+    {
+        let info_id = existing.info_sheet_id.clone();
+        spec.update_kind(curvebook_doc::AnalysisKind::PowerAnalysis(app.canvas_dialogs.power_wizard.to_doc_spec(info_id)));
+    }
 }
 
 fn apply_wave4_app_modal_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutcome, EngineError> {

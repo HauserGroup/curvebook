@@ -22,10 +22,10 @@ use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens};
 use super::factorial_mv::{MultivariateDesignCtx, render_factorial_anova_design, render_multivariate_design_controls};
 use super::helpers::{
     Wave4ModalShell, contingency_method_label, df_method_label, method_reference_text, multiplicity_short_label, render_cov_structure_picker,
-    render_df_method_picker, render_formula_bar, render_modal_action_button, show_wave4_modal,
+    render_df_method_picker, render_formula_bar, render_modal_action_button, resolve_source_data_sheet, show_wave4_modal,
 };
 use super::model_formula::{build_live_symbolic_formula, render_stat_mv_data_tab, render_survival_design};
-use super::nested_misc::{render_contingency_design, render_misc_stats_design};
+use super::nested_misc::{ContingencyDesignCtx, render_contingency_design, render_misc_stats_design};
 use super::two_group::render_two_group_design;
 use super::{StatsModalFrameReport, StatsModalsEguiState};
 
@@ -40,7 +40,8 @@ struct StatTabDef {
 }
 
 fn tabs_for_spec(app: &UiApp, spec: &curvebook_doc::AnalysisSpec) -> Vec<StatTabDef> {
-    let is_mv = app.document().data_sheet(&spec.source_sheet_id).is_some_and(|ds| matches!(ds.archetype, TableArchetype::MultipleVariables(_)));
+    let is_mv = resolve_source_data_sheet(app.document(), &spec.source_sheet_id)
+        .is_some_and(|ds| matches!(ds.archetype, TableArchetype::MultipleVariables(_)));
     match &spec.kind {
         AnalysisKind::TwoGroupComparison(_) => vec![
             StatTabDef { slug: "experimental_design", label: "Design & Test" },
@@ -607,7 +608,7 @@ fn render_stat_design_tab(
             }
         }
         AnalysisKind::Survival(surv) => render_survival_design(ui, doc, spec, surv, tokens, meta, intents),
-        AnalysisKind::Contingency(c) => render_contingency_design(ui, doc, spec, c, tokens, meta, intents),
+        AnalysisKind::Contingency(c) => render_contingency_design(ui, ContingencyDesignCtx { doc, ep, spec, c }, tokens, meta, intents),
         AnalysisKind::Multivariate(mv) => {
             render_multivariate_design_controls(ui, MultivariateDesignCtx { doc, ep, spec, mv }, tokens, meta, intents);
         }

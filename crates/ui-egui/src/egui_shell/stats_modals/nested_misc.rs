@@ -3,8 +3,10 @@
 use curvebook_doc::{AnalysisKind, ContingencyMethod, KappaWeighting, OutlierSpec, PValueStackMethod, ProjectDocument, SubcolumnAggregation};
 use egui::Ui;
 
+use crate::dialogs_canvas::EditAnalysisParametersState;
 use crate::modal_predicates::{
-    ControlEnablement, r5_contingency_2x2_effect_sizes, r5_contingency_cochran_armitage_trend, r8_subcolumn_aggregation, source_table_shape,
+    ControlEnablement, r5_contingency_2x2_effect_sizes, r5_contingency_cochran_armitage_trend, r6_contingency_ci_selector, r8_subcolumn_aggregation,
+    source_table_shape,
 };
 
 use crate::egui_shell::stat_anova_modal::{
@@ -14,15 +16,21 @@ use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens};
 
 use super::helpers::{render_dataset_checklist, render_df_method_picker};
 
+pub(super) struct ContingencyDesignCtx<'a> {
+    pub(super) doc: &'a ProjectDocument,
+    pub(super) ep: &'a EditAnalysisParametersState,
+    pub(super) spec: &'a curvebook_doc::AnalysisSpec,
+    pub(super) c: &'a curvebook_doc::ContingencySpec,
+}
+
 pub(super) fn render_contingency_design(
     ui: &mut Ui,
-    doc: &ProjectDocument,
-    spec: &curvebook_doc::AnalysisSpec,
-    c: &curvebook_doc::ContingencySpec,
+    cx: ContingencyDesignCtx<'_>,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let ContingencyDesignCtx { doc, ep, spec, c } = cx;
     let (rows, cols, _) = source_table_shape(doc, Some(&spec.source_sheet_id));
     let two_by_two_en = r5_contingency_2x2_effect_sizes(rows, cols);
     let trend_en = r5_contingency_cochran_armitage_trend(rows, cols);
@@ -78,6 +86,61 @@ pub(super) fn render_contingency_design(
         }
         intents.push_set_edit_params_draft(next);
     }
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "edit.contingency.attributable_risk",
+        "Attributable Risk (ARR & NNT / NNH)",
+        ep.contingency_attributable_risk_checked,
+        &two_by_two_en,
+    ) {
+        intents.push_dialog_widget_click("edit.contingency.attributable_risk");
+    }
+
+    ui.add_space(6.0);
+    render_section_title(ui, tokens, "2×2 Effect-Size CI Methods");
+    let or_ci_en =
+        r6_contingency_ci_selector(rows, cols, ep.contingency_odds_ratio_checked || c.compute_odds_and_risk_ratios, "Baptista-Pike / Woolf");
+    let rr_ci_en = r6_contingency_ci_selector(rows, cols, ep.contingency_relative_risk_checked || c.compute_odds_and_risk_ratios, "Koopman");
+    let arr_ci_en = r6_contingency_ci_selector(rows, cols, ep.contingency_attributable_risk_checked, "Newcombe-Wilson");
+    let diag_ci_en = r6_contingency_ci_selector(rows, cols, c.compute_sensitivity_specificity, "Wilson-Brown");
+    ui.horizontal_wrapped(|ui| {
+        for (wid, lbl, active, en, payload) in [
+            (
+                "edit.contingency.ci.baptista_pike",
+                format!("OR CI: {}", ep.contingency_or_ci_method),
+                ep.contingency_or_ci_method == "Baptista-Pike",
+                or_ci_en,
+                "cycle_contingency_ci:or",
+            ),
+            (
+                "edit.contingency.ci.koopman",
+                format!("RR CI: {}", ep.contingency_rr_ci_method),
+                ep.contingency_rr_ci_method == "Koopman",
+                rr_ci_en,
+                "cycle_contingency_ci:rr",
+            ),
+            (
+                "edit.contingency.ci.newcombe_wilson",
+                format!("ARR CI: {}", ep.contingency_arr_ci_method),
+                ep.contingency_arr_ci_method == "Newcombe-Wilson",
+                arr_ci_en,
+                "cycle_contingency_ci:arr",
+            ),
+            (
+                "edit.contingency.ci.wilson_brown",
+                format!("Diag CI: {}", ep.contingency_diag_ci_method),
+                ep.contingency_diag_ci_method == "Wilson-Brown",
+                diag_ci_en,
+                "cycle_contingency_ci:diag",
+            ),
+        ] {
+            if render_modal_seg_btn(ui, tokens, meta, wid, &lbl, active, &en) {
+                intents.push_custom_view_action("stat_params", payload);
+            }
+        }
+    });
 }
 
 pub(super) fn render_misc_stats_design(

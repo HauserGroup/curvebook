@@ -12,7 +12,7 @@ use crate::egui_shell::stat_anova_modal::{
 };
 use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens};
 
-use super::helpers::{render_dataset_checklist, render_mv_role_badge};
+use super::helpers::{render_dataset_checklist, render_mv_role_badge, resolve_source_data_sheet};
 
 pub(super) fn render_factorial_anova_design(
     ui: &mut Ui,
@@ -89,7 +89,7 @@ pub(super) fn render_factorial_anova_design(
         }
         intents.push_set_edit_params_draft(next);
     }
-    if let Some(ds) = doc.data_sheet(&spec.source_sheet_id)
+    if let Some(ds) = resolve_source_data_sheet(doc, &spec.source_sheet_id)
         && let TableArchetype::MultipleVariables(mv) = &ds.archetype
     {
         ui.add_space(4.0);
