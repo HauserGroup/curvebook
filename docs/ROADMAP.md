@@ -123,6 +123,17 @@ Owner: open · Status: todo · Was: cross-repository infrastructure drift audit 
 - [ ] Document the rule in [`pitfalls-engineering.md`](pitfalls-engineering.md) and [`extending.md`](extending.md).
 - [ ] Verify: `cargo xtask ci quick`; hosted CI passes on the pull request.
 
+### R0.35 Keep the CI cache under the repository budget
+Owner: open · Status: todo · Was: hosted CI and release review 2026-11-21 · Depends on: none · Gate: none · Est. note: 6–10 h
+
+GitHub keeps at most 10 GB of Actions cache per repository and evicts the least recently used entries above that. On 2026-11-21 CurveBook held 9.42 GB in 11 entries. The `ci-setup` Rust cache (`.github/actions/ci-setup/action.yml`) saves a new entry for every commit (`key: ${{ github.sha }}`) with `cache-workspace-crates: true` and no trimming, so each entry is 1.7–2.5 GB and pushes out the FreeBSD, Windows ARM64 and release caches. A fresh checkout also gives every file a new modification time, so Cargo rebuilds the cached workspace crates anyway.
+
+- [ ] Record the build units each saving job uses (Cargo or nextest JSON messages) and trim the target directory to them before the cache saves.
+- [ ] Replace per-commit keys with one rolling entry per job and OS, and delete superseded entries from a job that holds `actions: write` only for that step. Keep the workflow-level `permissions: contents: read` rule (`cargo xtask telemetry`).
+- [ ] Restore file modification times after checkout from the commit the cache was built from, so Cargo rebuilds only the files that changed since then. Check that an unchanged crate is not recompiled.
+- [ ] Let the nightly release dry run restore caches but never save them.
+- [ ] Verify: on `main`, after a week of runs, the cache stays under the budget with room to spare and every platform cache is still present; record the before and after sizes and the `tests` stage time.
+
 ---
 
 ## R8 Desktop & WebAssembly live shell, localization & `1.0` hardening
@@ -538,6 +549,7 @@ Everything the Beta GitHub Release needs from the build and publish pipeline. Th
 **Release-asset scan** *(from R0.26)*
 - [x] Wire `cargo xtask release-scan` into `.github/workflows/release.yml`: one scan step per build job, after packaging (`.dmg` on macOS, `.msi` on Windows, the AppImage on Linux, the FreeBSD tarball on any runner), each uploading a scan report artifact. The *Draft GitHub Release* job must depend on every scan passing. Keep workflow `permissions` unchanged and add no egress beyond the existing pinned tool installs; `cargo xtask workflows` and `cargo xtask telemetry` must pass. *(Done 2026-11-18 in `.github/workflows/release.yml`.)*
 - [ ] Backfill the published `v0.1.0-alpha.1`: download its assets, run the scan, and record the result in [`alpha-branding-clearance.md`](history/release/alpha-branding-clearance.md). If anything is found, remediate and publish a corrected Alpha build.
+- [ ] **Fix the Windows `.msi` scan.** The nightly release dry runs on 2026-11-20 and 2026-11-21 failed in *Scan Windows release assets* on x64 and arm64: `msiexec /a` exited with `1619` (the package could not be opened). `release-scan` is run with the relative path `dist/release`, and `unpack_msi` in `xtask/src/release_scan.rs` passes the asset path to `msiexec` unchanged. Likely cause, not yet confirmed: `msiexec` needs an absolute package path. Pass absolute paths for the package and `TARGETDIR`, add a regression test, and confirm with a manual release dry run.
 
 **macOS signing** *(from R8.10)*
 - [x] Sign the app bundle and CLI with Developer ID and the hardened runtime, notarize the `.dmg`, and staple tickets to the app bundle and `.dmg`. CI verifies signatures with `codesign --verify --strict`, Gatekeeper assessment with `spctl --assess`, and attached tickets with `stapler validate` where supported. *(Wired 2026-11-18 in `packaging/macos/{package,verify}.sh` and `.github/workflows/release.yml`; live runner proof is in the rehearsal release below.)*
@@ -571,6 +583,15 @@ The release workflow attests build provenance for every artefact, but publishes 
 - [ ] Make the SBOM a required release asset in `cargo xtask release-scan` and in [`releasing.md`](release/releasing.md).
 - [ ] **Decision:** add a runner-hardening step (network egress allowlist) to `ci.yml` and `release.yml`, or record why not. Adopt only a mode that sends no build or network data to a third-party service. Pin any new action by commit SHA and keep `cargo xtask telemetry` and `cargo xtask workflows` passing.
 - [ ] Verify: hosted CI and one release dry run pass.
+
+### R14.3 Retry transient release verification failures
+Owner: maintainers · Status: todo · Was: hosted CI and release review 2026-11-21 · Depends on: [`R14.1`](#r141-beta-release-pipeline) · Gate: none · Est. note: 1–3 h
+
+Apple's Gatekeeper and ticket checks can fail briefly right after notarization. `packaging/macos/verify.sh` runs `xcrun stapler validate` and `spctl --assess` once, so one transient failure fails the whole release.
+
+- [ ] Retry `stapler validate` and `spctl --assess` a bounded number of times with a fixed delay. Retry only the network-backed checks, never `codesign --verify`, and print each failed attempt.
+- [ ] If a FreeBSD release or CI build is ever killed for running out of memory, cap the VM's ZFS ARC before building and print memory and swap figures. Otherwise close this sub-task as not needed.
+- [ ] Verify: a release dry run passes, and a forced failure still fails after the last attempt.
 
 ---
 
@@ -742,7 +763,7 @@ See [earlier sequencing](history/roadmap.md#earlier-sequencing) for foundational
 | **Step 14d (`R13` GUI views)** | [`R13.8`](#r138-desktop-gui-views-for-r13-features) (`egui` dialogs, inspector controls, and canvas handles for `R13.2`–`R13.5` and `R13.7` — done) | [`R15.5`](history/roadmap/r15.md#r155-default-desktop-egui-cutover-screenshot-refresh-and-beta-readiness) (done) | **Beta** (moved from **1.0** 2026-11-20) |
 | **Step 14e (`R13` 15-workflow acceptance)** | [`R13.6`](#r136-extended-15-workflow-wf-51-to-wf-65-agent-harness-desktop-human-path--web-acceptance) (`WF-51`–`WF-65` `--gui-only` and desktop `EguiHumanPathDriver` suites — done; live browser parity and walkthroughs stay **1.0** in `R11.9`, `R10.13`, and `R11.10`) | `R13.1`–`R13.5`, `R13.7`, `R13.8`, [`R15.5`](history/roadmap/r15.md#r155-default-desktop-egui-cutover-screenshot-refresh-and-beta-readiness) (done) | **Beta** (moved from **1.0** 2026-11-20) |
 | **Core-crate maintainability (`R16`)** | [`R16.1`](#r161-split-the-stats-anova-module-by-method-family), [`R16.2`](history/roadmap/r16.md#r162-split-the-fit-solver-and-model-dsl-modules) (done), [`R16.4`](history/roadmap/r16.md#r164-typed-engine-command-parameters-wire-compatible) (done), and [`R16.6`](history/roadmap/r16.md#r166-one-home-for-analysis-spec-validation-and-an-accurate-extension-checklist) (done) in parallel (disjoint crates: `stats`, `fit`, `engine`, `doc` + `format/archive.rs`); then [`R16.3`](#r163-split-per-graph-family-chart-builders); [`R16.5`](history/roadmap/r16.md#r165-retire-duplicate-parameter-spellings-after-the-egui-cutover) (done); GUI splits & cleanups [`R16.7`](#r167-split-the-data-grid-by-archetype)–[`R16.9`](#r169-split-the-graph-modals), [`R16.11`](#r1611-further-gui-module-splits-optional-one-pr-each)–[`R16.18`](#r1618-gui-helper-deduplication) (done) | None for `R16.1`, `R16.2`, `R16.4`, `R16.6`; `R16.3` unblocked (`R13.2`–`R13.5` done); `R16.5` needed `R16.4` and [`R15.5`](history/roadmap/r15.md#r155-default-desktop-egui-cutover-screenshot-refresh-and-beta-readiness) (both done). | none (engineering hygiene) |
-| **Infrastructure hygiene** | [`R0.34`](#r034-checked-lock-wrapper-for-shared-state) checked lock wrapper, [`R14.2`](#r142-release-sbom-and-ci-runner-hardening) release SBOM and runner hardening, [`R16.19`](#r1619-replace-egui-combo-boxes-with-a-dropdown-that-can-grow-while-open) growable dropdown (independent of each other) | None for `R0.34` and `R16.19`; `R14.2` after [`R14.1`](#r141-beta-release-pipeline) | none (engineering hygiene) |
+| **Infrastructure hygiene** | [`R0.34`](#r034-checked-lock-wrapper-for-shared-state) checked lock wrapper, [`R14.2`](#r142-release-sbom-and-ci-runner-hardening) release SBOM and runner hardening, [`R16.19`](#r1619-replace-egui-combo-boxes-with-a-dropdown-that-can-grow-while-open) growable dropdown, [`R0.35`](#r035-keep-the-ci-cache-under-the-repository-budget) CI cache budget, [`R14.3`](#r143-retry-transient-release-verification-failures) release verification retries (independent of each other) | None for `R0.34`, `R0.35` and `R16.19`; `R14.2` and `R14.3` after [`R14.1`](#r141-beta-release-pipeline) | none (engineering hygiene) |
 
 **Open and parked decisions**
 
