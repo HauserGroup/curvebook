@@ -484,11 +484,75 @@ fn with_shift_modifier(canonical_combo: &str) -> Option<String> {
     normalize_shortcut_combo(&format!("Shift+{canonical_combo}")).ok()
 }
 
+/// Format a canonical shortcut string (e.g. `"Cmd+Shift+K"`) for display on a target OS.
+#[must_use]
+pub fn format_shortcut_for_os(combo: &str, is_macos: bool) -> String {
+    let mut rest = combo.trim();
+    if rest.is_empty() {
+        return String::new();
+    }
+    let mut ctrl = false;
+    let mut alt = false;
+    let mut shift = false;
+    let mut cmd = false;
+    while let Some(plus_idx) = rest.find('+') {
+        let mod_tok = &rest[..plus_idx];
+        if mod_tok.eq_ignore_ascii_case("cmd") || mod_tok.eq_ignore_ascii_case("meta") || mod_tok.eq_ignore_ascii_case("super") {
+            cmd = true;
+        } else if mod_tok.eq_ignore_ascii_case("ctrl") || mod_tok.eq_ignore_ascii_case("control") {
+            ctrl = true;
+        } else if mod_tok.eq_ignore_ascii_case("shift") {
+            shift = true;
+        } else if mod_tok.eq_ignore_ascii_case("alt") || mod_tok.eq_ignore_ascii_case("opt") || mod_tok.eq_ignore_ascii_case("option") {
+            alt = true;
+        } else {
+            break;
+        }
+        rest = &rest[plus_idx + 1..];
+    }
+    if is_macos {
+        let mut out = String::new();
+        if ctrl {
+            out.push('⌃');
+        }
+        if alt {
+            out.push('⌥');
+        }
+        if shift {
+            out.push('⇧');
+        }
+        if cmd {
+            out.push('⌘');
+        }
+        out.push_str(rest);
+        out
+    } else {
+        let mut parts: Vec<&str> = Vec::new();
+        if ctrl || cmd {
+            parts.push("Ctrl");
+        }
+        if alt {
+            parts.push("Alt");
+        }
+        if shift {
+            parts.push("Shift");
+        }
+        parts.push(rest);
+        parts.join("+")
+    }
+}
+
+/// Format a canonical shortcut string for display on the current host platform.
+#[must_use]
+pub fn format_shortcut_for_platform(combo: &str) -> String {
+    format_shortcut_for_os(combo, cfg!(target_os = "macos"))
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
-    use super::{ShortcutRegistry, normalize_shortcut_combo};
+    use super::{ShortcutRegistry, format_shortcut_for_os, normalize_shortcut_combo};
 
     #[test]
     fn registry_seeds_all_defaults_without_conflicts() {
@@ -572,5 +636,18 @@ mod tests {
         assert!(reg.import_overrides_json(r#"{"ui.palette.open":"F6","ui.gallery.toggle":"F6"}"#).is_err());
         assert_eq!(reg.active_combo("ui.gallery.toggle"), Some("Ctrl+Shift+G"));
         Ok(())
+    }
+
+    #[test]
+    fn platform_shortcut_formatting_maps_macos_glyphs_and_ctrl_on_desktop() {
+        assert_eq!(format_shortcut_for_os("Cmd+K", true), "⌘K");
+        assert_eq!(format_shortcut_for_os("Cmd+K", false), "Ctrl+K");
+        assert_eq!(format_shortcut_for_os("Cmd+Shift+S", true), "⇧⌘S");
+        assert_eq!(format_shortcut_for_os("Cmd+Shift+S", false), "Ctrl+Shift+S");
+        assert_eq!(format_shortcut_for_os("Ctrl+Alt+X", true), "⌃⌥X");
+        assert_eq!(format_shortcut_for_os("Cmd++", true), "⌘+");
+        assert_eq!(format_shortcut_for_os("Cmd++", false), "Ctrl++");
+        assert_eq!(format_shortcut_for_os("F6", false), "F6");
+        assert_eq!(format_shortcut_for_os("", true), "");
     }
 }

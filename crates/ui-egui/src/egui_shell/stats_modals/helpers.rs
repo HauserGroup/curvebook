@@ -59,7 +59,7 @@ where
     let frame = egui::Frame::window(&ctx.global_style())
         .fill(tokens.surface_bg)
         .stroke(Stroke::new(1.5, tokens.accent_strong))
-        .corner_radius(CornerRadius::same(8))
+        .corner_radius(CornerRadius::same(tokens.metrics.radius_lg))
         .inner_margin(egui::Margin::same(12));
 
     let modal_resp =
@@ -188,7 +188,7 @@ pub(in crate::egui_shell) fn render_modal_action_button(
     let fg_text = if !enabled {
         tokens.text_disabled
     } else if primary {
-        Color32::WHITE
+        tokens.on_accent
     } else {
         tokens.text_strong
     };
@@ -210,16 +210,21 @@ pub(in crate::egui_shell) fn render_modal_action_button(
     let (bg, fg, border) = if !enabled {
         (tokens.panel_bg, tokens.text_disabled, tokens.divider)
     } else if primary {
-        (tokens.accent_strong, Color32::WHITE, tokens.accent_strong)
+        (
+            if resp.hovered() { tokens.accent_hover } else { tokens.accent_strong },
+            tokens.on_accent,
+            if resp.hovered() { tokens.hover_border } else { tokens.accent_strong },
+        )
     } else if selected {
         (tokens.active_bg, tokens.text_strong, tokens.accent)
     } else if resp.hovered() {
-        (tokens.hover_bg, tokens.text_strong, tokens.button_border)
+        (tokens.hover_bg, tokens.text_strong, tokens.hover_border)
     } else {
         (tokens.button_bg, tokens.text_strong, tokens.button_border)
     };
-    ui.painter().rect_filled(rect, CornerRadius::same(5), bg);
-    ui.painter().rect_stroke(rect, CornerRadius::same(5), Stroke::new(1.0, border), StrokeKind::Inside);
+    let r = CornerRadius::same(tokens.metrics.radius_md);
+    ui.painter().rect_filled(rect, r, bg);
+    ui.painter().rect_stroke(rect, r, Stroke::new(1.0, border), StrokeKind::Inside);
     ui.painter().with_clip_rect(rect.shrink(3.0)).galley(
         Pos2::new(rect.center().x - galley.size().x * 0.5, rect.center().y - galley.size().y * 0.5),
         galley,
@@ -300,8 +305,9 @@ pub(in crate::egui_shell) fn render_tex_equation_preview(
     let (eq_w, eq_h) = measure_equation_segments(ui, &segments, font_size);
     let card_h = (eq_h + 16.0).clamp(36.0, 92.0);
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(avail_w, card_h), Sense::hover());
-    ui.painter().rect_filled(rect, CornerRadius::same(5), tokens.panel_bg);
-    ui.painter().rect_stroke(rect, CornerRadius::same(5), Stroke::new(1.0, tokens.border), StrokeKind::Inside);
+    let r_md = CornerRadius::same(tokens.metrics.radius_md);
+    ui.painter().rect_filled(rect, r_md, tokens.panel_bg);
+    ui.painter().rect_stroke(rect, r_md, Stroke::new(1.0, tokens.border), StrokeKind::Inside);
 
     if segments.is_empty() {
         let mut job =
@@ -413,10 +419,10 @@ pub(in crate::egui_shell) fn render_mv_role_badge(ui: &mut Ui, tokens: &Tokens, 
     egui::Frame::NONE
         .fill(tokens.panel_bg)
         .stroke(Stroke::new(1.0, col))
-        .corner_radius(CornerRadius::same(3))
+        .corner_radius(CornerRadius::same(tokens.metrics.radius_sm))
         .inner_margin(Vec2::new(4.0, 1.0))
         .show(ui, |ui| {
-            ui.label(egui::RichText::new(text).size(10.0).strong().color(col));
+            ui.label(egui::RichText::new(text).size(tokens.metrics.font_ui_small_pt).strong().color(col));
         });
 }
 

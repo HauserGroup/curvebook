@@ -10,7 +10,7 @@ use std::sync::{Arc, OnceLock, mpsc};
 use curvebook_text::TrueTypeFont;
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::egui_shell::rasterizer::EguiScreenshotRegions;
-use curvebook_ui_egui::egui_shell::{FrameInspectMeta, GeometryStamp, PendingUiIntents, Tokens, UiIntent, inspect_bridge, top_chrome};
+use curvebook_ui_egui::egui_shell::{FrameInspectMeta, GeometryStamp, PendingUiIntents, Tokens, UiIntent, inspect_bridge};
 use curvebook_ui_egui::interaction::KeyModifiers;
 use curvebook_ui_egui::{ControlAuth, ControlPostRequestContext, ControlRequest, UiApp, is_desktop_host_routed_command};
 use eframe::egui;
@@ -698,19 +698,7 @@ impl CurveBookNativeApp {
         let input_window_id = self.active_window_id();
         let ppp = ctx.pixels_per_point().max(1.0);
         let available_rect = ui.available_rect_before_wrap();
-        let (active_sheet_id, modal_backdrop_active) = self
-            .runtime
-            .window(input_window_id)
-            .map(|w| {
-                let app = w.app();
-                let modal = self.close_dialog_open
-                    || app.canvas_dialogs.active_dialog != ActiveDialog::None
-                    || app.nav.welcome.open
-                    || app.grid.import_wizard.open
-                    || app.grid.variables_dialog.open;
-                (app.document().active_sheet_id.clone(), modal)
-            })
-            .unwrap_or((None, self.close_dialog_open));
+        let active_sheet_id = self.runtime.window(input_window_id).map(|w| w.app().document().active_sheet_id.clone()).unwrap_or(None);
 
         if active_sheet_id != self.last_active_sheet_id {
             self.last_active_sheet_id = active_sheet_id;
@@ -738,23 +726,6 @@ impl CurveBookNativeApp {
         self.last_regions = report.regions;
         self.pending_intents.merge_pass(next_intents);
         self.menu_popup_was_open |= report.menu_popup_open;
-
-        if let Ok(win) = self.runtime.window(input_window_id)
-            && win.app().presentation_mode
-            && self.inspect_meta.find_by_widget_id("toolbar.presentation.exit").is_none()
-        {
-            let tokens = Tokens::from_theme_spec(&win.app().theme, &win.app().locale);
-            let mut chip_intents = PendingUiIntents::default();
-            let _ = top_chrome::render_presentation_exit_chip(
-                &ctx,
-                win.app(),
-                &tokens,
-                !modal_backdrop_active,
-                &mut self.inspect_meta,
-                &mut chip_intents,
-            );
-            self.pending_intents.merge_pass(chip_intents);
-        }
 
         let canvas_rect = report.regions.canvas_rect_pt.unwrap_or(available_rect);
         self.sync_canvas_viewport(input_window_id, canvas_rect, ppp);
@@ -898,8 +869,11 @@ impl CurveBookNativeApp {
                 } else if outcome.opened_window_id.is_some() {
                     self.on_active_window_switched();
                 }
-                if outcome.command_id.as_deref().is_some_and(|c| c == "edit.copy") {
+                if outcome.command_id.as_deref().is_some_and(|c| matches!(c, "edit.copy" | "edit.cut")) {
                     self.apply_clipboard_outcome_status(&outcome);
+                    if let Some(ctx_ref) = ctx {
+                        self.maybe_sync_plain_text_fallback(ctx_ref, &outcome);
+                    }
                 }
             }
             Err(err) => {

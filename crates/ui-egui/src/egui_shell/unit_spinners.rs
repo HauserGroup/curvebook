@@ -262,8 +262,9 @@ fn render_scrub_value_chip(
     } else {
         tokens.button_bg
     };
-    ui.painter().rect_filled(chip_rect, CornerRadius::same(3), chip_bg);
-    ui.painter().rect_stroke(chip_rect, CornerRadius::same(3), Stroke::new(1.0, tokens.border), egui::StrokeKind::Inside);
+    let r_sm = CornerRadius::same(tokens.metrics.radius_sm);
+    ui.painter().rect_filled(chip_rect, r_sm, chip_bg);
+    ui.painter().rect_stroke(chip_rect, r_sm, Stroke::new(1.0, tokens.border), egui::StrokeKind::Inside);
 
     if cfg.enabled && state.dragging && bounds.max_val > bounds.min_val {
         let frac = ((bounds.active_display - bounds.min_val) / (bounds.max_val - bounds.min_val)).clamp(0.0, 1.0) as f32;
@@ -348,13 +349,14 @@ fn render_scrub_unit_badge(
         } else {
             tokens.button_bg
         };
-        ui.painter().rect_filled(u_rect, CornerRadius::same(3), u_bg);
-        ui.painter().rect_stroke(u_rect, CornerRadius::same(3), Stroke::new(1.0, tokens.border), egui::StrokeKind::Inside);
+        let r_sm = CornerRadius::same(tokens.metrics.radius_sm);
+        ui.painter().rect_filled(u_rect, r_sm, u_bg);
+        ui.painter().rect_stroke(u_rect, r_sm, Stroke::new(1.0, tokens.border), egui::StrokeKind::Inside);
         ui.painter().text(
             u_rect.center(),
             Align2::CENTER_CENTER,
             unit_lbl,
-            FontId::proportional(10.5),
+            FontId::proportional(tokens.metrics.font_ui_small_pt),
             if cfg.enabled { tokens.accent_strong } else { tokens.text_disabled },
         );
         if cfg.enabled && unit_btn.clicked() {

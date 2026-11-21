@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use curvebook_doc::TableArchetype;
 use curvebook_engine::EngineError;
-use egui::{Color32, Key, Modifiers, Pos2, Rect, Vec2};
+use egui::{Key, Modifiers, Pos2, Rect, Vec2};
 use serde_json::json;
 
 use crate::UiApp;
@@ -253,7 +253,9 @@ fn classify_active_dialog_surface(app: &UiApp) -> HybridModalSurface {
     match &app.canvas_dialogs.active_dialog {
         ActiveDialog::None => HybridModalSurface::None,
         ActiveDialog::About => HybridModalSurface::EguiAbout,
-        ActiveDialog::ExportFigure { .. } | ActiveDialog::Print { .. } | ActiveDialog::Feedback => HybridModalSurface::EguiAppModal,
+        ActiveDialog::ExportFigure { .. } | ActiveDialog::Print { .. } | ActiveDialog::Checkpoints | ActiveDialog::Feedback => {
+            HybridModalSurface::EguiAppModal
+        }
         ActiveDialog::CommandPalette => HybridModalSurface::EguiCommandPalette,
         ActiveDialog::AnalyzeSheet { .. } => HybridModalSurface::EguiAnalyzeSheet,
         ActiveDialog::DuplicateAnalysisPrompt { .. } => HybridModalSurface::EguiDuplicateAnalysis,
@@ -999,7 +1001,6 @@ pub fn render_egui_shell_frame_with_host(
     let layout = tokens.metrics.solve_shell_layout(ShellLayoutInput {
         viewport_w_pt: content_rect.width(),
         viewport_h_pt: content_rect.height(),
-        presentation_mode: app.presentation_mode,
         empty_workspace: app.document().total_sheet_count() == 0,
         navigator_open: app.nav.navigator_open,
         inspector_open: app.nav.inspector_open,
@@ -1013,62 +1014,60 @@ pub fn render_egui_shell_frame_with_host(
     views.last_shell_layout = Some(layout);
 
     let enabled = !decision.modal_backdrop_active;
-    if !app.presentation_mode {
-        let project_title = app.session().file_path().and_then(|p| p.file_name()).and_then(|s| s.to_str()).unwrap_or("CurveBook Project");
-        let top_rep = render_top_chrome(
-            ui,
-            app,
-            &mut views.top_chrome,
-            TopChromeContext {
-                tokens: &tokens,
-                decision: &decision,
-                layout,
-                workspace_preset: views.workspace_preset,
-                launcher_open: views.launcher_open,
-                host_draws_menu_bar: app.host_draws_menu_bar,
-                project_title,
-                dirty: app.session().is_dirty(),
-            },
-            meta,
-            intents,
-        );
-        report.tier1_rect_pt = top_rep.tier1_rect_pt;
-        report.tier2_rect_pt = top_rep.tier2_rect_pt;
-        report.menu_popup_open = top_rep.menu_popup_open;
+    let project_title = app.session().file_path().and_then(|p| p.file_name()).and_then(|s| s.to_str()).unwrap_or("CurveBook Project");
+    let top_rep = render_top_chrome(
+        ui,
+        app,
+        &mut views.top_chrome,
+        TopChromeContext {
+            tokens: &tokens,
+            decision: &decision,
+            layout,
+            workspace_preset: views.workspace_preset,
+            launcher_open: views.launcher_open,
+            host_draws_menu_bar: app.host_draws_menu_bar,
+            project_title,
+            dirty: app.session().is_dirty(),
+        },
+        meta,
+        intents,
+    );
+    report.tier1_rect_pt = top_rep.tier1_rect_pt;
+    report.tier2_rect_pt = top_rep.tier2_rect_pt;
+    report.menu_popup_open = top_rep.menu_popup_open;
 
-        let history_can_back = views.can_go_back();
-        let history_can_forward = views.can_go_forward();
-        let hover_readout = views.canvas_view.hover_readout.clone();
-        let foot_rep = render_status_footer(
-            ui,
-            app,
-            views,
-            StatusFooterContext { tokens: &tokens, layout, history_can_back, history_can_forward, hover_readout: hover_readout.as_ref(), enabled },
-            meta,
-            intents,
-        );
-        report.footer_rect_pt = foot_rep.footer_rect_pt;
+    let history_can_back = views.can_go_back();
+    let history_can_forward = views.can_go_forward();
+    let hover_readout = views.canvas_view.hover_readout.clone();
+    let foot_rep = render_status_footer(
+        ui,
+        app,
+        views,
+        StatusFooterContext { tokens: &tokens, layout, history_can_back, history_can_forward, hover_readout: hover_readout.as_ref(), enabled },
+        meta,
+        intents,
+    );
+    report.footer_rect_pt = foot_rep.footer_rect_pt;
 
-        let lead_rep = render_leading_dock(
-            ui,
-            app,
-            &mut views.leading_dock,
-            LeadingDockContext { tokens: &tokens, layout, enabled, focused: app.nav.active_pane == ActiveWorkspacePane::Navigator },
-            meta,
-            intents,
-        );
-        report.leading_dock_rect_pt = lead_rep.dock_rect_pt;
+    let lead_rep = render_leading_dock(
+        ui,
+        app,
+        &mut views.leading_dock,
+        LeadingDockContext { tokens: &tokens, layout, enabled, focused: app.nav.active_pane == ActiveWorkspacePane::Navigator },
+        meta,
+        intents,
+    );
+    report.leading_dock_rect_pt = lead_rep.dock_rect_pt;
 
-        let trail_rep = render_trailing_studio(
-            ui,
-            app,
-            &mut views.trailing_studio,
-            TrailingStudioContext { tokens: &tokens, layout, enabled, focused: app.nav.active_pane == ActiveWorkspacePane::Inspector },
-            meta,
-            intents,
-        );
-        report.trailing_dock_rect_pt = trail_rep.dock_rect_pt;
-    }
+    let trail_rep = render_trailing_studio(
+        ui,
+        app,
+        &mut views.trailing_studio,
+        TrailingStudioContext { tokens: &tokens, layout, enabled, focused: app.nav.active_pane == ActiveWorkspacePane::Inspector },
+        meta,
+        intents,
+    );
+    report.trailing_dock_rect_pt = trail_rep.dock_rect_pt;
 
     egui::CentralPanel::default().frame(egui::Frame::NONE.fill(tokens.surface_bg)).show(ui, |ui| {
         let canvas_rect = ui.available_rect_before_wrap();
@@ -1088,10 +1087,6 @@ pub fn render_egui_shell_frame_with_host(
         report.center_stage_handled_natively = stage_rep.handled_natively;
         report.grid_overlay_shown = stage_rep.grid_overlay_shown;
     });
-
-    if app.presentation_mode && meta.find_by_widget_id("toolbar.presentation.exit").is_none() {
-        let _ = crate::egui_shell::top_chrome::render_presentation_exit_chip(&ctx, app, &tokens, enabled, meta, intents);
-    }
 
     if !matches!(decision.modal_surface, HybridModalSurface::EguiStatParams | HybridModalSurface::EguiFitModal) {
         views.stats_modals.open_session_sheet_id = None;
@@ -1302,15 +1297,6 @@ fn handle_shell_global_shortcuts(
     }) {
         intents.push_ui("ui.split.toggle", json!({}));
     }
-    let toggle_presentation = ctx.input_mut(|i| {
-        i.consume_key(Modifiers::NONE, Key::F11)
-            || i.consume_key(shift_cmd, Key::P)
-            || i.consume_key(shift_ctrl, Key::P)
-            || i.consume_key(shift_mac, Key::P)
-    }) || (app.presentation_mode && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)));
-    if toggle_presentation {
-        intents.push_ui("ui.presentation.toggle", json!({}));
-    }
     if ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::F6)) {
         intents.push_ui("ui.pane.cycle", json!({ "reverse": true }));
     } else if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F6)) {
@@ -1354,106 +1340,11 @@ fn render_about_modal(
     intents: &mut PendingUiIntents,
     report: &mut ShellAboutFrameReport,
 ) {
-    let about_label = tr(&app.locale, "menu.help.about");
-    let viewport = ctx.content_rect();
-    let backdrop_scrim = if tokens.dark { Color32::from_black_alpha(150) } else { Color32::from_black_alpha(110) };
-
-    let modal_resp = egui::Modal::new(egui::Id::unique("egui_shell_about_dialog")).backdrop_color(backdrop_scrim).show(ctx, |ui| {
-        ui.heading(about_label);
-        ui.label(format!("CurveBook {}", env!("CARGO_PKG_VERSION")));
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            let ok_label = tr(&app.locale, "btn.ok");
-            let ok_resp = ui.button(ok_label);
-            meta.record_response(
-                ui,
-                &ok_resp,
-                FrameInspectEntryInput {
-                    widget_id: "dialog.button.ok",
-                    role: "button",
-                    label: ok_label,
-                    command_id: None,
-                    value: None,
-                    enabled: true,
-                    disabled_reason: None,
-                    z_layer: ZLayer::ModalDialog,
-                    ellipsized: false,
-                    full_label: None,
-                },
-            );
-            if ok_resp.clicked() {
-                intents.push_ui("dialog.ok", json!({}));
-            }
-
-            let cancel_label = tr(&app.locale, "btn.cancel");
-            let cancel_resp = ui.button(cancel_label);
-            meta.record_response(
-                ui,
-                &cancel_resp,
-                FrameInspectEntryInput {
-                    widget_id: "dialog.button.cancel",
-                    role: "button",
-                    label: cancel_label,
-                    command_id: None,
-                    value: None,
-                    enabled: true,
-                    disabled_reason: None,
-                    z_layer: ZLayer::ModalDialog,
-                    ellipsized: false,
-                    full_label: None,
-                },
-            );
-            if cancel_resp.clicked() {
-                intents.push_ui("dialog.cancel", json!({}));
-            }
-        });
-    });
-
-    meta.record(FrameInspectNodeMeta {
-        egui_id: modal_resp.backdrop_response.id,
-        accesskit_id: modal_resp.backdrop_response.id.accesskit_id(),
-        widget_id: String::from("modal.backdrop"),
-        role: String::from("backdrop"),
-        label: String::from("Modal Backdrop"),
-        command_id: None,
-        value: None,
-        enabled: true,
-        disabled_reason: None,
-        clipped_rect: viewport,
-        z_layer: ZLayer::ModalBackdrop,
-        ellipsized: false,
-        full_label: None,
-    });
-
-    let has_wheel = ctx.input(|i| i.smooth_scroll_delta.length_sq() > 0.0 || i.events.iter().any(|ev| matches!(ev, egui::Event::MouseWheel { .. })));
-    if modal_resp.backdrop_response.clicked() {
-        report.outside_click_captured = true;
-    }
-    if has_wheel {
-        ctx.input_mut(|i| {
-            i.smooth_scroll_delta = Vec2::ZERO;
-            i.events.retain(|ev| !matches!(ev, egui::Event::MouseWheel { .. }));
-        });
-        report.outside_wheel_captured = true;
-    }
-
-    let dlg_rect = modal_resp.response.rect;
-    report.regions.dialog_rect_pt = Some(dlg_rect);
-    meta.record(FrameInspectNodeMeta {
-        egui_id: modal_resp.response.id,
-        accesskit_id: modal_resp.response.id.accesskit_id(),
-        widget_id: String::from("dialog.about"),
-        role: String::from("dialog"),
-        label: String::from(about_label),
-        command_id: None,
-        value: None,
-        enabled: true,
-        disabled_reason: None,
-        clipped_rect: meta.viewport_rect.intersect(dlg_rect),
-        z_layer: ZLayer::ModalDialog,
-        ellipsized: false,
-        full_label: None,
-    });
+    let app_state = crate::egui_shell::app_modals::AppModalsEguiState::default();
+    let app_rep = crate::egui_shell::app_modals::render_about_modal(ctx, app, &app_state, tokens, meta, intents);
+    report.regions.dialog_rect_pt = app_rep.dialog_rect_pt;
+    report.outside_click_captured = app_rep.outside_click_captured;
+    report.outside_wheel_captured = app_rep.outside_wheel_captured;
 }
 
 fn rects_overlap_significantly(a: egui::accesskit::Rect, b: egui::accesskit::Rect, tol: f64) -> bool {

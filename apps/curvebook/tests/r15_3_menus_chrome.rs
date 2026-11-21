@@ -99,7 +99,7 @@ fn bounds_close(a: [f64; 4], b: [f64; 4], tol: f64) -> bool {
 
 #[test]
 fn muda_vs_egui_menubar_1_to_1_parity_across_locales_and_sheet_states() -> Result<(), Box<dyn std::error::Error>> {
-    assert_eq!(NATIVE_MENU_BAR_TITLES.len(), 10);
+    assert_eq!(NATIVE_MENU_BAR_TITLES.len(), 8);
 
     for &loc in BETA_ACTIVE_LOCALES {
         let metrics = ViewportMetrics::new(1280.0, 800.0, 1.0);
@@ -172,7 +172,7 @@ fn muda_vs_egui_menubar_1_to_1_parity_across_locales_and_sheet_states() -> Resul
     // Verify helper mirror on UiApp itself.
     let mut app = UiApp::new();
     app.set_ui_backend(UiBackend::Egui);
-    assert_eq!(collect_egui_menubar_parity(&app).len(), 7);
+    assert_eq!(collect_egui_menubar_parity(&app).len(), 8);
     let mut helper_rt = DesktopHostRuntime::new(DesktopHostConfig::default());
     let helper_win = helper_rt.open_window(None, ViewportMetrics::new(800.0, 600.0, 1.0))?;
     let _ = collect_menu_parity_entries(&helper_rt.window(helper_win)?.chrome_state());
@@ -287,7 +287,7 @@ fn run_qa3_parity_case(use_bundled_fonts: bool, in_window_menus: bool, scale: f6
     let offscreen_snap = offscreen_app.inspect_egui_shell_snapshot(initial, None, true);
     let offscreen_val = json!({ "result": serde_json::to_value(&offscreen_snap)? });
 
-    for wid in ["toolbar.home", "toolbar.help.about", "toolbar.command_palette", "toolbar.analyze", "sheet.tab.ds-qa3"] {
+    for wid in ["toolbar.home", "toolbar.command_palette", "toolbar.analyze", "sheet.tab.ds-qa3"] {
         let live_entry = native_app
             .inspect_meta()
             .find_by_widget_id(wid)

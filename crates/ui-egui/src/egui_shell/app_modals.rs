@@ -268,6 +268,7 @@ pub fn render_app_modal(
     match &app.canvas_dialogs.active_dialog {
         ActiveDialog::ExportFigure { sheet_id } => render_export_modal(ctx, app, state, sheet_id.clone(), tokens, meta, intents),
         ActiveDialog::Print { .. } => render_print_modal(ctx, app, state, tokens, meta, intents),
+        ActiveDialog::Checkpoints => render_checkpoints_modal(ctx, app, tokens, meta, intents),
         ActiveDialog::About => render_about_modal(ctx, app, state, tokens, meta, intents),
         ActiveDialog::Feedback => render_feedback_modal(ctx, app, tokens, meta, intents),
         _ => AppModalFrameReport::default(),
@@ -316,10 +317,10 @@ fn render_unsaved_modal(
                 ui,
                 meta,
                 AppBtn {
-                    widget_id: "dialog.button.save",
-                    label: tr(locale, "menu.file.save"),
-                    command_id: Some("project.save"),
-                    selected: true,
+                    widget_id: "dialog.button.cancel",
+                    label: tr(locale, "btn.cancel"),
+                    command_id: None,
+                    selected: false,
                     enabled: true,
                     disabled_reason: None,
                 },
@@ -327,7 +328,7 @@ fn render_unsaved_modal(
             )
             .clicked()
             {
-                intents.push_resolve_unsaved_changes(UnsavedCloseAction::Save);
+                intents.push_resolve_unsaved_changes(UnsavedCloseAction::Cancel);
             }
             if app_button(
                 ui,
@@ -350,10 +351,10 @@ fn render_unsaved_modal(
                 ui,
                 meta,
                 AppBtn {
-                    widget_id: "dialog.button.cancel",
-                    label: tr(locale, "btn.cancel"),
-                    command_id: None,
-                    selected: false,
+                    widget_id: "dialog.button.save",
+                    label: tr(locale, "menu.file.save"),
+                    command_id: Some("project.save"),
+                    selected: true,
                     enabled: true,
                     disabled_reason: None,
                 },
@@ -361,7 +362,7 @@ fn render_unsaved_modal(
             )
             .clicked()
             {
-                intents.push_resolve_unsaved_changes(UnsavedCloseAction::Cancel);
+                intents.push_resolve_unsaved_changes(UnsavedCloseAction::Save);
             }
         });
     });
@@ -1636,7 +1637,7 @@ fn format_about_diagnostic_summary(app: &UiApp, build_sha: Option<&str>) -> Stri
     )
 }
 
-fn render_about_modal(
+pub(crate) fn render_about_modal(
     ctx: &Context,
     app: &UiApp,
     state: &AppModalsEguiState,
@@ -1647,10 +1648,14 @@ fn render_about_modal(
     let _ = state.about_tab;
     let locale = normalize_locale(&app.locale);
     let title = tr(locale, "menu.help.about");
-    let (inner_w, max_h, body_w) = modal_bounds(ctx, 340.0);
+    let (inner_w, max_h, body_w) = modal_bounds(ctx, 400.0);
     let build_sha = option_env!("CURVEBOOK_BUILD_SHA");
     let version_line = format_about_version_line(env!("CARGO_PKG_VERSION"), build_sha);
     let copied_id = egui::Id::unique(("egui_shell_app_modal", "dialog.about.copied"));
+
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+        intents.push_dialog_button("cancel");
+    }
 
     let modal_resp = egui::Modal::new(egui::Id::unique(("egui_shell_app_modal", "dialog.about"))).backdrop_color(tokens.scrim).show(ctx, |ui| {
         ui.set_min_width(inner_w);
@@ -1678,10 +1683,16 @@ fn render_about_modal(
                         ui.add(egui::Label::new("Native scientific biostatistics, curve fitting, and publication graphing suite.").wrap());
                     });
                 });
-                ui.add_space(6.0);
-                ui.label(format!("Active theme: {:?}, UI scale: {:.0}%", app.theme.mode, app.theme.ui_scale * 100.0));
-                ui.label(format!("Active Beta locales supported: {} (RTL locales excluded at Beta)", BETA_ACTIVE_LOCALES.len()));
-                ui.label(format!("Registered keyboard shortcuts: {}", app.shortcuts.bindings().count()));
+                ui.add_space(8.0);
+                ui.add(egui::Label::new("Copyright © 2026 CurveBook Contributors").wrap());
+                ui.add(egui::Label::new("Licensed under MIT OR Apache-2.0.").wrap());
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new("See NOTICE and ATTRIBUTION.md in the distribution for third-party licenses and clean-room notices.")
+                            .color(tokens.text_muted),
+                    )
+                    .wrap(),
+                );
             });
         ui.add_space(6.0);
         ui.separator();
@@ -1758,35 +1769,197 @@ fn render_about_modal(
             );
             if ok_resp.clicked() {
                 ctx.data_mut(|d| d.insert_temp(copied_id, false));
-                intents.push_ui("dialog.ok", json!({}));
-            }
-
-            let cancel_lbl = tr(locale, "btn.cancel");
-            let cancel_resp = ui.button(cancel_lbl);
-            app_record_visible(
-                ui,
-                &cancel_resp,
-                meta,
-                FrameInspectEntryInput {
-                    widget_id: "dialog.button.cancel",
-                    role: "button",
-                    label: cancel_lbl,
-                    command_id: None,
-                    value: None,
-                    enabled: true,
-                    disabled_reason: None,
-                    z_layer: ZLayer::ModalDialog,
-                    ellipsized: false,
-                    full_label: None,
-                },
-            );
-            if cancel_resp.clicked() {
-                intents.push_ui("dialog.cancel", json!({}));
+                intents.push_dialog_button("ok");
             }
         });
     });
 
     build_report(ctx, &modal_resp, "dialog.about", title, meta)
+}
+
+fn render_checkpoints_modal(
+    ctx: &Context,
+    app: &UiApp,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) -> AppModalFrameReport {
+    let locale = normalize_locale(&app.locale);
+    let title = tr(locale, "cmd.project.listCheckpoints");
+    let (inner_w, max_h, body_w) = modal_bounds(ctx, 500.0);
+
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+        intents.push_dialog_button("cancel");
+    }
+
+    let mut name_draft = app.canvas_dialogs.checkpoints.name_draft.clone();
+    let mut note_draft = app.canvas_dialogs.checkpoints.note_draft.clone();
+    let doc = app.document();
+
+    let modal_resp =
+        egui::Modal::new(egui::Id::unique(("egui_shell_app_modal", "dialog.checkpoints"))).backdrop_color(tokens.scrim).show(ctx, |ui| {
+            ui.set_min_width(inner_w);
+            ui.set_max_width(inner_w);
+            ui.set_max_height(max_h);
+            ui.style_mut().spacing.scroll = egui::style::ScrollStyle::solid();
+
+            ui.heading(title);
+            ui.add_space(6.0);
+            egui::ScrollArea::vertical()
+                .id_salt("app_modal.checkpoints.scroll")
+                .max_height((max_h - 112.0).max(120.0))
+                .auto_shrink([false, true])
+                .scroll_bar_visibility(ScrollBarVisibility::AlwaysVisible)
+                .show(ui, |ui| {
+                    ui.set_width(body_w);
+                    ui.set_max_width(body_w);
+
+                    ui.label(egui::RichText::new("Create Checkpoint").strong());
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Name");
+                        let name_resp = ui.add(egui::TextEdit::singleline(&mut name_draft).desired_width((body_w - 64.0).max(120.0)));
+                        app_input(ui, &name_resp, meta, "checkpoints.name", "Checkpoint Name", &name_draft, true);
+                        if name_resp.changed() {
+                            intents.push(UiIntent::PatchActiveDialog {
+                                fields: serde_json::Map::from_iter([(String::from("name"), Value::String(name_draft.clone()))]),
+                            });
+                        }
+                    });
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Note");
+                        let note_resp = ui.add(egui::TextEdit::singleline(&mut note_draft).desired_width((body_w - 64.0).max(120.0)));
+                        app_input(ui, &note_resp, meta, "checkpoints.note", "Checkpoint Note", &note_draft, true);
+                        if note_resp.changed() {
+                            intents.push(UiIntent::PatchActiveDialog {
+                                fields: serde_json::Map::from_iter([(String::from("note"), Value::String(note_draft.clone()))]),
+                            });
+                        }
+                    });
+                    ui.add_space(6.0);
+                    let can_create = !name_draft.trim().is_empty();
+                    let create_resp = app_button(
+                        ui,
+                        meta,
+                        AppBtn {
+                            widget_id: "checkpoints.create",
+                            label: tr(locale, "cmd.project.createCheckpoint"),
+                            command_id: Some("project.createCheckpoint"),
+                            selected: can_create,
+                            enabled: can_create,
+                            disabled_reason: (!can_create).then_some("Enter a checkpoint name"),
+                        },
+                        tokens,
+                    );
+                    if create_resp.clicked() && can_create {
+                        let trimmed_name = name_draft.trim().to_owned();
+                        let trimmed_note = note_draft.trim().to_owned();
+                        let mut params = serde_json::Map::new();
+                        params.insert(String::from("name"), Value::String(trimmed_name));
+                        if !trimmed_note.is_empty() {
+                            params.insert(String::from("note"), Value::String(trimmed_note));
+                        }
+                        intents.push_engine("project.createCheckpoint", Value::Object(params));
+                        let next_default = format!("Checkpoint {}", doc.checkpoints.len() + 2);
+                        intents.push(UiIntent::PatchActiveDialog {
+                            fields: serde_json::Map::from_iter([
+                                (String::from("name"), Value::String(next_default)),
+                                (String::from("note"), Value::String(String::new())),
+                            ]),
+                        });
+                    }
+
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new("Saved Checkpoints").strong());
+                    ui.add_space(4.0);
+
+                    if doc.checkpoints.is_empty() {
+                        ui.add(egui::Label::new(egui::RichText::new("No checkpoints saved yet.").color(tokens.text_muted)).wrap());
+                    } else {
+                        for (idx, cp) in doc.checkpoints.iter().enumerate() {
+                            egui::Frame::NONE
+                                .fill(tokens.surface_bg)
+                                .stroke(Stroke::new(1.0, tokens.border))
+                                .corner_radius(egui::CornerRadius::same(4))
+                                .inner_margin(egui::Margin::same(8))
+                                .show(ui, |ui| {
+                                    ui.set_width((body_w - 18.0).max(120.0));
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.label(egui::RichText::new(&cp.name).strong());
+                                        if !cp.created_utc.is_empty() {
+                                            ui.label(egui::RichText::new(&cp.created_utc).color(tokens.text_muted).small());
+                                        }
+                                    });
+                                    if !cp.note.is_empty() {
+                                        ui.add(egui::Label::new(egui::RichText::new(&cp.note).color(tokens.text_muted)).wrap());
+                                    }
+                                    ui.add_space(4.0);
+                                    ui.horizontal(|ui| {
+                                        let restore_wid = format!("checkpoints.restore.{idx}");
+                                        let delete_wid = format!("checkpoints.delete.{idx}");
+                                        if app_button(
+                                            ui,
+                                            meta,
+                                            AppBtn {
+                                                widget_id: &restore_wid,
+                                                label: tr(locale, "cmd.project.restoreCheckpoint"),
+                                                command_id: Some("project.restoreCheckpoint"),
+                                                selected: false,
+                                                enabled: true,
+                                                disabled_reason: None,
+                                            },
+                                            tokens,
+                                        )
+                                        .clicked()
+                                        {
+                                            intents.push_engine("project.restoreCheckpoint", json!({ "id": cp.id }));
+                                        }
+                                        if app_button(
+                                            ui,
+                                            meta,
+                                            AppBtn {
+                                                widget_id: &delete_wid,
+                                                label: tr(locale, "cmd.project.deleteCheckpoint"),
+                                                command_id: Some("project.deleteCheckpoint"),
+                                                selected: false,
+                                                enabled: true,
+                                                disabled_reason: None,
+                                            },
+                                            tokens,
+                                        )
+                                        .clicked()
+                                        {
+                                            intents.push_engine("project.deleteCheckpoint", json!({ "id": cp.id }));
+                                        }
+                                    });
+                                });
+                            ui.add_space(4.0);
+                        }
+                    }
+                });
+
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(4.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let close_lbl = tr(locale, "btn.cancel");
+                if app_button(
+                    ui,
+                    meta,
+                    AppBtn { widget_id: "modal.cancel", label: close_lbl, command_id: None, selected: false, enabled: true, disabled_reason: None },
+                    tokens,
+                )
+                .clicked()
+                {
+                    intents.push_dialog_button("cancel");
+                }
+            });
+        });
+
+    build_report(ctx, &modal_resp, "dialog.checkpoints", title, meta)
 }
 
 fn render_feedback_modal(
@@ -1872,13 +2045,15 @@ fn render_feedback_category_row(ui: &mut Ui, draft: &mut crate::feedback::Feedba
 fn render_feedback_fields(ui: &mut Ui, draft: &mut crate::feedback::FeedbackDraft, body_w: f32, meta: &mut FrameInspectMeta) -> bool {
     let mut changed = false;
 
-    ui.label("Title");
-    let title_resp = ui.add(
-        egui::TextEdit::singleline(&mut draft.title)
-            .id_salt("feedback.title")
-            .desired_width(body_w)
-            .hint_text("Short summary of the issue or request"),
-    );
+    let title_lbl_resp = ui.label("Title");
+    let title_resp = ui
+        .add(
+            egui::TextEdit::singleline(&mut draft.title)
+                .id_salt("feedback.title")
+                .desired_width(body_w)
+                .hint_text("Short summary of the issue or request"),
+        )
+        .labelled_by(title_lbl_resp.id);
     record_feedback_text_edit(ui, &title_resp, meta, "feedback.title", "Title", &draft.title);
     if title_resp.changed() {
         changed = true;
@@ -1886,8 +2061,10 @@ fn render_feedback_fields(ui: &mut Ui, draft: &mut crate::feedback::FeedbackDraf
 
     ui.add_space(6.0);
     let summary_lbl = draft.category.summary_label();
-    ui.label(summary_lbl);
-    let summary_resp = ui.add(egui::TextEdit::multiline(&mut draft.summary).id_salt("feedback.summary").desired_width(body_w).desired_rows(3));
+    let summary_lbl_resp = ui.label(summary_lbl);
+    let summary_resp = ui
+        .add(egui::TextEdit::multiline(&mut draft.summary).id_salt("feedback.summary").desired_width(body_w).desired_rows(3))
+        .labelled_by(summary_lbl_resp.id);
     record_feedback_text_edit(ui, &summary_resp, meta, "feedback.summary", summary_lbl, &draft.summary);
     if summary_resp.changed() {
         changed = true;
@@ -1895,8 +2072,10 @@ fn render_feedback_fields(ui: &mut Ui, draft: &mut crate::feedback::FeedbackDraf
 
     ui.add_space(6.0);
     let details_lbl = draft.category.details_label();
-    ui.label(details_lbl);
-    let details_resp = ui.add(egui::TextEdit::multiline(&mut draft.details).id_salt("feedback.details").desired_width(body_w).desired_rows(3));
+    let details_lbl_resp = ui.label(details_lbl);
+    let details_resp = ui
+        .add(egui::TextEdit::multiline(&mut draft.details).id_salt("feedback.details").desired_width(body_w).desired_rows(3))
+        .labelled_by(details_lbl_resp.id);
     record_feedback_text_edit(ui, &details_resp, meta, "feedback.details", details_lbl, &draft.details);
     if details_resp.changed() {
         changed = true;
@@ -1904,8 +2083,10 @@ fn render_feedback_fields(ui: &mut Ui, draft: &mut crate::feedback::FeedbackDraf
 
     ui.add_space(6.0);
     let extra_lbl = draft.category.extra_label();
-    ui.label(extra_lbl);
-    let extra_resp = ui.add(egui::TextEdit::multiline(&mut draft.extra).id_salt("feedback.extra").desired_width(body_w).desired_rows(2));
+    let extra_lbl_resp = ui.label(extra_lbl);
+    let extra_resp = ui
+        .add(egui::TextEdit::multiline(&mut draft.extra).id_salt("feedback.extra").desired_width(body_w).desired_rows(2))
+        .labelled_by(extra_lbl_resp.id);
     record_feedback_text_edit(ui, &extra_resp, meta, "feedback.extra", extra_lbl, &draft.extra);
     if extra_resp.changed() {
         changed = true;
@@ -1975,10 +2156,10 @@ fn render_feedback_footer(ui: &mut Ui, input: &FeedbackFooterInput<'_>, meta: &m
             ui,
             meta,
             AppBtn {
-                widget_id: "dialog.feedback.open_github",
-                label: "Open on GitHub...",
+                widget_id: "dialog.button.cancel",
+                label: tr(locale, "btn.cancel"),
                 command_id: None,
-                selected: true,
+                selected: false,
                 enabled: true,
                 disabled_reason: None,
             },
@@ -1986,7 +2167,18 @@ fn render_feedback_footer(ui: &mut Ui, input: &FeedbackFooterInput<'_>, meta: &m
         )
         .clicked()
         {
-            intents.push_open_feedback_on_github();
+            intents.push_dialog_button("cancel");
+        }
+
+        if app_button(
+            ui,
+            meta,
+            AppBtn { widget_id: "dialog.feedback.reset", label: "Clear", command_id: None, selected: false, enabled: true, disabled_reason: None },
+            tokens,
+        )
+        .clicked()
+        {
+            intents.push_reset_feedback_draft();
         }
 
         let copy_lbl = if draft.copied_markdown { "Copied Markdown" } else { "Copy Markdown" };
@@ -2013,22 +2205,11 @@ fn render_feedback_footer(ui: &mut Ui, input: &FeedbackFooterInput<'_>, meta: &m
         if app_button(
             ui,
             meta,
-            AppBtn { widget_id: "dialog.feedback.reset", label: "Clear", command_id: None, selected: false, enabled: true, disabled_reason: None },
-            tokens,
-        )
-        .clicked()
-        {
-            intents.push_reset_feedback_draft();
-        }
-
-        if app_button(
-            ui,
-            meta,
             AppBtn {
-                widget_id: "dialog.button.cancel",
-                label: tr(locale, "btn.cancel"),
+                widget_id: "dialog.feedback.open_github",
+                label: "Open on GitHub...",
                 command_id: None,
-                selected: false,
+                selected: true,
                 enabled: true,
                 disabled_reason: None,
             },
@@ -2036,7 +2217,7 @@ fn render_feedback_footer(ui: &mut Ui, input: &FeedbackFooterInput<'_>, meta: &m
         )
         .clicked()
         {
-            intents.push_dialog_button("cancel");
+            intents.push_open_feedback_on_github();
         }
     });
 }
@@ -2099,9 +2280,16 @@ fn app_record_visible(ui: &Ui, resp: &Response, meta: &mut FrameInspectMeta, inp
 }
 
 fn app_button(ui: &mut Ui, meta: &mut FrameInspectMeta, entry: AppBtn<'_>, tokens: &Tokens) -> Response {
-    let btn = egui::Button::new(entry.label)
-        .fill(if entry.selected { tokens.active_bg } else { tokens.panel_bg })
-        .stroke(Stroke::new(1.0, if entry.selected { tokens.accent_strong } else { tokens.border }));
+    let is_primary_footer = entry.selected && matches!(entry.widget_id, "modal.ok" | "dialog.button.save" | "dialog.feedback.open_github");
+    let btn = if is_primary_footer && entry.enabled {
+        egui::Button::new(egui::RichText::new(entry.label).color(tokens.on_accent))
+            .fill(tokens.accent_strong)
+            .stroke(Stroke::new(1.0, tokens.accent_strong))
+    } else if entry.selected {
+        egui::Button::new(entry.label).fill(tokens.active_bg).stroke(Stroke::new(1.0, tokens.accent_strong))
+    } else {
+        egui::Button::new(entry.label)
+    };
     let mut resp = ui.add_enabled(entry.enabled, btn);
     if let Some(reason) = entry.disabled_reason {
         resp = resp.on_disabled_hover_text(reason);

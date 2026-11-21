@@ -16,6 +16,7 @@ use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, FrameInspectNo
 use crate::grid_view::ImportOriginKind;
 use crate::i18n::BETA_ACTIVE_LOCALES;
 use crate::inspect::ZLayer;
+use crate::menus::format_shortcut_for_platform;
 use crate::theme::UiThemeMode;
 use crate::tr;
 
@@ -153,14 +154,14 @@ pub fn render_command_palette(
             egui::Frame::NONE
                 .fill(tokens.panel_bg)
                 .stroke(Stroke::new(1.0, tokens.border))
-                .corner_radius(CornerRadius::same(8))
+                .corner_radius(CornerRadius::same(tokens.metrics.radius_lg))
                 .inner_margin(egui::Margin::same(12)),
         )
         .show(ctx, |ui| {
             let prev_query = state.query.clone();
-            let query_resp = ui.add(
-                egui::TextEdit::singleline(&mut state.query).hint_text("Search commands, analyses & sheets (Cmd+K)").desired_width(f32::INFINITY),
-            );
+            let plat_shortcut = format_shortcut_for_platform(app.shortcuts.active_combo("ui.palette.open").unwrap_or("Cmd+K"));
+            let hint = format!("Search commands, analyses & sheets ({plat_shortcut})");
+            let query_resp = ui.add(egui::TextEdit::singleline(&mut state.query).hint_text(hint).desired_width(f32::INFINITY));
             if state.just_opened {
                 query_resp.request_focus();
                 state.just_opened = false;
@@ -353,7 +354,8 @@ fn render_palette_rows(
         );
 
         if !row.shortcut.is_empty() {
-            let (sc_galley, _) = layout_palette_line(ui.painter(), &row.shortcut, 86.0, tokens.text_muted, 11.0);
+            let plat_sc = format_shortcut_for_platform(&row.shortcut);
+            let (sc_galley, _) = layout_palette_line(ui.painter(), &plat_sc, 86.0, tokens.text_muted, 11.0);
             let sc_pos = Pos2::new((rect.right() - sc_galley.size().x - 10.0).max(rect.left() + 40.0), rect.center().y - sc_galley.size().y * 0.5);
             ui.painter().with_clip_rect(rect.shrink(4.0).intersect(ui.clip_rect())).galley(sc_pos, sc_galley, tokens.text_muted);
         }
@@ -424,10 +426,14 @@ fn disabled_reason_for_row(app: &UiApp, row: &CommandPaletteRow) -> String {
     }
 }
 
-enum PaletteCommandRoute {
+pub(crate) enum PaletteCommandRoute {
     UiCommand { command_id: String, params: Value },
     EngineCommand { command_id: String, params: Value },
     DirectIntent(UiIntent),
+}
+
+pub(crate) fn resolve_renderable_sheet_id_for_menu(doc: &ProjectDocument) -> Option<SheetId> {
+    resolve_renderable_sheet_id(doc)
 }
 
 fn sheet_id_param(sheet_id: Option<SheetId>) -> Value {
@@ -670,6 +676,9 @@ fn resolve_palette_dialog_engine_route(doc: &ProjectDocument, command_id: &str) 
             target_sheet_id: resolve_data_sheet_id(doc),
         })),
         "project.instantiateTemplate" => Some(PaletteCommandRoute::DirectIntent(UiIntent::SetLauncherOpen { open: true })),
+        "project.createCheckpoint" | "project.listCheckpoints" | "project.restoreCheckpoint" | "project.deleteCheckpoint" => {
+            Some(PaletteCommandRoute::DirectIntent(UiIntent::OpenCheckpointsDialog))
+        }
         _ => None,
     }
 }
@@ -705,7 +714,6 @@ fn resolve_palette_sheet_engine_route(doc: &ProjectDocument, command_id: &str) -
             }
             eng(params)
         }
-        "project.createCheckpoint" => eng(json!({ "name": format!("Checkpoint {}", doc.checkpoints.len() + 1) })),
         "export.svg" | "export.pdf" | "export.png" | "export.tiff" => eng(sheet_id_param(resolve_renderable_sheet_id(doc))),
         "graph.exportSvg" | "graph.exportPdf" | "graph.exportPng" | "graph.exportEmf" => eng(sheet_id_param(resolve_graph_sheet_id(doc))),
         "layout.exportEmf" => eng(sheet_id_param(resolve_layout_sheet_id(doc))),
@@ -739,8 +747,6 @@ fn is_palette_hidden_engine_command(command_id: &str) -> bool {
         command_id,
         "sheet.rename"
             | "sheet.reorder"
-            | "project.restoreCheckpoint"
-            | "project.deleteCheckpoint"
             | "project.saveTemplate"
             | "table.setCell"
             | "table.setCells"
@@ -764,8 +770,8 @@ fn is_palette_hidden_engine_command(command_id: &str) -> bool {
     )
 }
 
-fn resolve_palette_engine_route(app: &UiApp, command_id: &str) -> Option<PaletteCommandRoute> {
-    if is_palette_hidden_engine_command(command_id) {
+fn resolve_engine_route_with_policy(app: &UiApp, command_id: &str, allow_palette_hidden: bool) -> Option<PaletteCommandRoute> {
+    if !allow_palette_hidden && is_palette_hidden_engine_command(command_id) {
         return None;
     }
     let doc = app.document();
@@ -775,6 +781,32 @@ fn resolve_palette_engine_route(app: &UiApp, command_id: &str) -> Option<Palette
     if let Some(route) = resolve_palette_sheet_engine_route(doc, command_id) {
         return Some(route);
     }
+    if allow_palette_hidden {
+        let eng = |params: Value| Some(PaletteCommandRoute::EngineCommand { command_id: command_id.to_owned(), params });
+        match command_id {
+            "project.saveTemplate" => return eng(json!({ "return_bytes": true })),
+            "edit.pasteImage" => {
+                if let Some(sid) = resolve_renderable_sheet_id(doc) {
+                    return Some(PaletteCommandRoute::DirectIntent(UiIntent::PasteImageFromClipboard { target_sheet_id: sid, anchor_pt: None }));
+                }
+            }
+            "edit.pasteResultTable" => {
+                if let Some(gid) = resolve_graph_sheet_id(doc) {
+                    return Some(PaletteCommandRoute::DirectIntent(UiIntent::CanvasPaste { target_sheet_id: gid, anchor_pt: None }));
+                }
+            }
+            "graph.insertImage" => return eng(sheet_id_param(resolve_graph_sheet_id(doc))),
+            "layout.insertImage" => return eng(sheet_id_param(resolve_layout_sheet_id(doc))),
+            "table.clearCells" => {
+                let params = match resolve_data_sheet_id(doc) {
+                    Some(id) => json!({ "sheet_id": id.as_str(), "all": true }),
+                    None => json!({}),
+                };
+                return eng(params);
+            }
+            _ => {}
+        }
+    }
     // Only surface remaining engine commands when their schema has no required parameters
     // (so they can safely execute from `{}` without failing due to missing fields).
     let spec = engine_cmd::registry().get(command_id)?;
@@ -783,7 +815,13 @@ fn resolve_palette_engine_route(app: &UiApp, command_id: &str) -> Option<Palette
 }
 
 fn resolve_palette_route(app: &UiApp, command_id: &str, is_ui_command: bool) -> Option<PaletteCommandRoute> {
-    if is_ui_command { resolve_palette_ui_route(app, command_id) } else { resolve_palette_engine_route(app, command_id) }
+    if is_ui_command { resolve_palette_ui_route(app, command_id) } else { resolve_engine_route_with_policy(app, command_id, false) }
+}
+
+/// Resolve a menu or shell command invocation into an interactive UI/dialog route or parameterized
+/// engine command payload (`R15-GUI-30`).
+pub(crate) fn resolve_shell_command_route(app: &UiApp, command_id: &str, is_ui_command: bool) -> Option<PaletteCommandRoute> {
+    if is_ui_command { resolve_palette_ui_route(app, command_id) } else { resolve_engine_route_with_policy(app, command_id, true) }
 }
 
 fn commit_palette_row(app: &UiApp, row: &CommandPaletteRow, intents: &mut PendingUiIntents) {

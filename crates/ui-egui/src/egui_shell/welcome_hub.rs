@@ -375,8 +375,8 @@ pub fn render_welcome_hub(
     if !card_enabled {
         card_ui.disable();
     }
-    card_ui.painter().rect_filled(card_rect, CornerRadius::same(8), tokens.surface_bg);
-    card_ui.painter().rect_stroke(card_rect, CornerRadius::same(8), Stroke::new(1.0, tokens.border), StrokeKind::Inside);
+    card_ui.painter().rect_filled(card_rect, CornerRadius::same(tokens.metrics.radius_lg), tokens.surface_bg);
+    card_ui.painter().rect_stroke(card_rect, CornerRadius::same(tokens.metrics.radius_lg), Stroke::new(1.0, tokens.border), StrokeKind::Inside);
 
     let inner_rect = card_rect.shrink2(Vec2::new(12.0, 10.0));
     let header_h = 36.0;
@@ -486,7 +486,7 @@ fn render_left_rail(
             ui,
             "welcome.rail.archetypes",
             tr(locale, "welcome.rail.archetypes"),
-            FontId::proportional(11.0),
+            FontId::proportional(tokens.metrics.font_ui_small_pt),
             tokens.text_muted,
             z_layer,
             meta,
@@ -519,7 +519,7 @@ fn render_left_rail(
             ui,
             "welcome.rail.actions",
             tr(locale, "welcome.rail.actions"),
-            FontId::proportional(11.0),
+            FontId::proportional(tokens.metrics.font_ui_small_pt),
             tokens.text_muted,
             z_layer,
             meta,
@@ -649,7 +649,7 @@ fn render_middle_new_table(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>, arc
     );
     ui.add_space(4.0);
 
-    render_plain_clipped_label(ui, tr(locale, "welcome.field.title"), FontId::proportional(11.0), tokens.text_muted);
+    render_plain_clipped_label(ui, tr(locale, "welcome.field.title"), FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted);
     render_clipped_text_edit(
         ui,
         &mut cx.state.schema.title,
@@ -719,7 +719,12 @@ fn render_middle_new_table(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>, arc
     if cx.state.schema.entry_mode_sample {
         let fixtures = matching_samples_for(arch);
         if fixtures.is_empty() {
-            render_plain_clipped_label(ui, "No tutorial fixture registered for this archetype.", FontId::proportional(11.0), tokens.text_muted);
+            render_plain_clipped_label(
+                ui,
+                "No tutorial fixture registered for this archetype.",
+                FontId::proportional(tokens.metrics.font_ui_small_pt),
+                tokens.text_muted,
+            );
         } else {
             let sel_idx = cx.state.schema.selected_sample_index.min(fixtures.len() - 1);
             for (idx, fx) in fixtures.iter().enumerate() {
@@ -747,7 +752,7 @@ fn render_middle_new_table(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>, arc
                 ui.add_space(2.0);
             }
             if let Some(chosen) = fixtures.get(sel_idx) {
-                render_plain_clipped_label(ui, chosen.summary, FontId::proportional(11.0), tokens.text_muted);
+                render_plain_clipped_label(ui, chosen.summary, FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted);
             }
         }
     } else {
@@ -935,7 +940,12 @@ fn render_archetype_schema_controls(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx
             render_dimension_steppers(ui, cx, tr(locale, "welcome.field.datasets"), tr(locale, "welcome.field.rows"), 1..=64);
         }
         WelcomeArchetypeChoice::Contingency => {
-            render_plain_clipped_label(ui, "Enter integer frequency counts per cross-tabulated cell.", FontId::proportional(11.0), tokens.text_muted);
+            render_plain_clipped_label(
+                ui,
+                "Enter integer frequency counts per cross-tabulated cell.",
+                FontId::proportional(tokens.metrics.font_ui_small_pt),
+                tokens.text_muted,
+            );
             ui.add_space(4.0);
             render_dimension_steppers(ui, cx, "Columns", "Rows", 2..=32);
         }
@@ -1000,7 +1010,12 @@ fn render_archetype_schema_controls(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx
             render_dimension_steppers(ui, cx, "Cohorts", tr(locale, "welcome.field.rows"), 1..=32);
         }
         WelcomeArchetypeChoice::PartsOfWhole => {
-            render_plain_clipped_label(ui, "One slice or proportion per category row.", FontId::proportional(11.0), tokens.text_muted);
+            render_plain_clipped_label(
+                ui,
+                "One slice or proportion per category row.",
+                FontId::proportional(tokens.metrics.font_ui_small_pt),
+                tokens.text_muted,
+            );
             if render_check_toggle(
                 ui,
                 tokens,
@@ -1037,7 +1052,13 @@ fn render_archetype_schema_controls(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx
                 if rect_visible_in_clip(ui, Vec2::new(content_w, 24.0)) {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 3.0;
-                        render_plain_clipped_label_w(ui, &format!("Var {}", v_idx + 1), 40.0, FontId::proportional(11.0), tokens.text_primary);
+                        render_plain_clipped_label_w(
+                            ui,
+                            &format!("Var {}", v_idx + 1),
+                            40.0,
+                            FontId::proportional(tokens.metrics.font_ui_small_pt),
+                            tokens.text_primary,
+                        );
                         for (r_idx, (short, full)) in roles.iter().enumerate() {
                             let wid = format!("welcome.mv.role.{v_idx}.{full}");
                             if render_pill_button(
@@ -1072,7 +1093,7 @@ fn render_archetype_schema_controls(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx
             render_plain_clipped_label(
                 ui,
                 "Groups contain biological-unit subcolumns with technical rows.",
-                FontId::proportional(11.0),
+                FontId::proportional(tokens.metrics.font_ui_small_pt),
                 tokens.text_muted,
             );
             cx.state.schema.subcols = render_usize_stepper(
@@ -1286,10 +1307,10 @@ fn render_middle_starter_templates(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<
     }
     if let Some(chosen) = STARTER_TEMPLATES.get(sel) {
         ui.add_space(4.0);
-        render_plain_clipped_label(ui, chosen.summary, FontId::proportional(11.0), tokens.text_muted);
+        render_plain_clipped_label(ui, chosen.summary, FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted);
     }
     ui.add_space(6.0);
-    render_plain_clipped_label(ui, tr(locale, "welcome.field.title"), FontId::proportional(11.0), tokens.text_muted);
+    render_plain_clipped_label(ui, tr(locale, "welcome.field.title"), FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted);
     render_clipped_text_edit(
         ui,
         &mut state.schema.title,
@@ -1326,7 +1347,7 @@ fn render_middle_clone_pipeline(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>
     );
     ui.add_space(4.0);
 
-    render_plain_clipped_label(ui, tr(locale, "welcome.clone.source"), FontId::proportional(11.0), tokens.text_muted);
+    render_plain_clipped_label(ui, tr(locale, "welcome.clone.source"), FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted);
     for ds in &app.document().data_sheets {
         let selected = state.schema.clone_source_sheet_id.as_ref() == Some(&ds.id);
         let wid = format!("welcome.clone.source.{}", ds.id.as_str());
@@ -1355,7 +1376,7 @@ fn render_middle_clone_pipeline(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>
     }
 
     ui.add_space(6.0);
-    render_plain_clipped_label(ui, tr(locale, "welcome.field.title"), FontId::proportional(11.0), tokens.text_muted);
+    render_plain_clipped_label(ui, tr(locale, "welcome.field.title"), FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted);
     render_clipped_text_edit(
         ui,
         &mut state.schema.title,
@@ -1377,7 +1398,7 @@ fn render_middle_clone_pipeline(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>
         if state.schema.clone_clear_values { "Clear" } else { "Copy" },
         if state.schema.clone_rerun_analyses { "Re-run" } else { "Deferred" },
     );
-    render_plain_clipped_label(ui, &summary, FontId::proportional(11.0), tokens.text_muted);
+    render_plain_clipped_label(ui, &summary, FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted);
     ui.add_space(4.0);
 
     if render_pill_button(
@@ -1425,7 +1446,7 @@ fn render_middle_open_file(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>) {
         ui,
         "welcome.open.subtitle",
         tr(locale, "welcome.open.subtitle"),
-        FontId::proportional(11.0),
+        FontId::proportional(tokens.metrics.font_ui_small_pt),
         tokens.text_muted,
         z_layer,
         meta,
@@ -1502,7 +1523,15 @@ fn render_right_pane(
                 (false, false) => "Data only",
             },
         };
-        render_clipped_text_label(ui, "welcome.preview.pipeline", pipeline, FontId::proportional(11.0), tokens.text_muted, z_layer, meta);
+        render_clipped_text_label(
+            ui,
+            "welcome.preview.pipeline",
+            pipeline,
+            FontId::proportional(tokens.metrics.font_ui_small_pt),
+            tokens.text_muted,
+            z_layer,
+            meta,
+        );
     });
     schematic_rect
 }
@@ -1704,7 +1733,7 @@ fn render_clone_options_submodal(
         let frame_resp = egui::Frame::NONE
             .fill(tokens.surface_bg)
             .stroke(Stroke::new(1.0, tokens.border))
-            .corner_radius(CornerRadius::same(8))
+            .corner_radius(CornerRadius::same(tokens.metrics.radius_lg))
             .inner_margin(egui::Margin::symmetric(12, 10))
             .show(&mut modal_ui, |ui| {
                 let z = ZLayer::ModalDialog;
@@ -1855,10 +1884,10 @@ fn render_clone_options_submodal(
                         meta,
                         ActionButtonSpec {
                             max_w: 92.0,
-                            primary: true,
+                            primary: false,
                             enabled,
-                            label: tr(locale, "btn.apply"),
-                            widget_id: "welcome.clone_modal.apply",
+                            label: tr(locale, "btn.close"),
+                            widget_id: "welcome.clone_modal.close",
                             command_id: None,
                             disabled_reason: None,
                             z_layer: z,
@@ -1873,10 +1902,10 @@ fn render_clone_options_submodal(
                         meta,
                         ActionButtonSpec {
                             max_w: 92.0,
-                            primary: false,
+                            primary: true,
                             enabled,
-                            label: tr(locale, "btn.close"),
-                            widget_id: "welcome.clone_modal.close",
+                            label: tr(locale, "btn.apply"),
+                            widget_id: "welcome.clone_modal.apply",
                             command_id: None,
                             disabled_reason: None,
                             z_layer: z,

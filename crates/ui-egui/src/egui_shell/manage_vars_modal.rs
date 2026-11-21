@@ -372,23 +372,25 @@ fn render_detail_pane(
             }
         });
     }
-    ui.add_space(4.0);
+    ui.add_space(if tight_h { tokens.metrics.space_xxs } else { tokens.metrics.space_xs });
 
     let show_primary = !tight_h || state.compact_detail_tab == 0;
     let show_recode = !tight_h || state.compact_detail_tab == 1;
 
     if show_primary {
         // Title & Unit metadata editing.
+        let name_w = if tight_h { 92.0 } else { 120.0 };
+        let unit_w = if tight_h { 64.0 } else { 82.0 };
         ui.horizontal_wrapped(|row| {
             row.label("Name:");
-            let nr = row.add(egui::TextEdit::singleline(&mut state.title_draft).hint_text("Variable name").desired_width(120.0));
+            let nr = row.add(egui::TextEdit::singleline(&mut state.title_draft).hint_text("Variable name").desired_width(name_w));
             meta.record_modal_response(
                 row,
                 &nr,
                 FrameInspectEntryInput::modal("mv_formula.vars.title_input", "textbox", "Variable Name", Some(state.title_draft.clone()), !ds.frozen),
             );
             row.label("Unit:");
-            let ur = row.add(egui::TextEdit::singleline(&mut state.unit_draft).hint_text("e.g. uM, mg/kg").desired_width(82.0));
+            let ur = row.add(egui::TextEdit::singleline(&mut state.unit_draft).hint_text("e.g. uM, mg/kg").desired_width(unit_w));
             meta.record_modal_response(
                 row,
                 &ur,
@@ -406,7 +408,7 @@ fn render_detail_pane(
             }
         });
 
-        ui.add_space(6.0);
+        ui.add_space(if tight_h { tokens.metrics.space_xxs } else { tokens.metrics.space_sm });
         // Role + Auto checkbox (`table.setVariableRole`).
         ui.horizontal_wrapped(|row| {
             row.label("Role:");
@@ -463,9 +465,9 @@ fn render_detail_pane(
             });
         }
 
-        ui.add_space(8.0);
+        ui.add_space(if tight_h { tokens.metrics.space_xs } else { tokens.metrics.space_md });
         widgets::divider(ui);
-        ui.add_space(6.0);
+        ui.add_space(if tight_h { tokens.metrics.space_xxs } else { tokens.metrics.space_sm });
 
         // Level Ordering & Reference Level Controls.
         ui.label(RichText::new("Categorical Level Ordering & Reference Pin").strong().color(tokens.text_primary));
@@ -505,7 +507,7 @@ fn render_detail_pane(
             }
         });
 
-        ui.add_space(4.0);
+        ui.add_space(if tight_h { tokens.metrics.space_xxs } else { tokens.metrics.space_xs });
         let live_levels = var.ordered_levels();
         render_levels_inspector(ui, sheet, &live_levels, state, meta, intents);
 
@@ -562,7 +564,7 @@ fn render_detail_pane(
             if clear_r.clicked() {
                 intents.push_clear_manage_var_recodes();
             }
-            let apply_r = widgets::primary_button_enabled(row, "Apply Recodes", can_apply);
+            let apply_r = widgets::secondary_button_enabled(row, "Apply Recodes", can_apply);
             meta.record_modal_response(
                 row,
                 &apply_r,
@@ -684,7 +686,9 @@ fn render_levels_inspector(
                     }
 
                     h.label(
-                        RichText::new(format!("{} incl / {} excl", item.included_count, item.excluded_count)).size(11.0).color(tokens.text_muted),
+                        RichText::new(format!("{} incl / {} excl", item.included_count, item.excluded_count))
+                            .size(tokens.metrics.font_ui_small_pt)
+                            .color(tokens.text_muted),
                     );
 
                     let up_r = choice_pill(h, tokens, "Up", false, !ds.frozen && idx > 0);

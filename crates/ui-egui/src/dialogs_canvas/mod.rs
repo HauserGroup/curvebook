@@ -147,8 +147,16 @@ pub enum ActiveDialog {
         is_layout: bool,
     },
     CommandPalette,
+    Checkpoints,
     About,
     Feedback,
+}
+
+/// Editable draft state for the `Checkpoints` modal (`R15-GUI-31`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CheckpointsDialogState {
+    pub name_draft: String,
+    pub note_draft: String,
 }
 
 /// Active non-modal inspector docked on the right side of the workspace.
@@ -251,6 +259,8 @@ pub struct CanvasDialogState {
     pub format_embedded_table: FormatEmbeddedTableDialogState,
     #[serde(default)]
     pub format_image: FormatImageDialogState,
+    #[serde(default)]
+    pub checkpoints: CheckpointsDialogState,
 }
 
 impl Default for CanvasDialogState {
@@ -297,6 +307,7 @@ impl Default for CanvasDialogState {
             equalize_scaling: EqualizeScalingDialogState::default(),
             format_embedded_table: FormatEmbeddedTableDialogState::default(),
             format_image: FormatImageDialogState::default(),
+            checkpoints: CheckpointsDialogState::default(),
         }
     }
 }
@@ -644,6 +655,13 @@ impl CanvasDialogState {
     pub fn open_command_palette(&mut self) {
         self.command_palette.open();
         self.active_dialog = ActiveDialog::CommandPalette;
+    }
+
+    /// Open `Checkpoints` manager modal (`R15-GUI-31`).
+    pub fn open_checkpoints(&mut self, doc: &ProjectDocument) {
+        self.checkpoints.name_draft = format!("Checkpoint {}", doc.checkpoints.len() + 1);
+        self.checkpoints.note_draft.clear();
+        self.active_dialog = ActiveDialog::Checkpoints;
     }
 
     /// Open `Print...` dialog for `sheet_id` (or first printable sheet in `doc`).

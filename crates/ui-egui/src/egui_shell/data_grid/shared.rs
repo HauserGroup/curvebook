@@ -5,7 +5,9 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::ops::Range;
 
-use curvebook_doc::{Cell, CellCoord, CellValue, ColumnTable, DataSheet, LinkBorderColor, LinkedDataRegion, SheetId, TableArchetype};
+use curvebook_doc::{
+    Cell, CellCoord, CellValue, ColumnTable, DataSheet, LinkBorderColor, LinkedDataRegion, ProjectDocument, ResultStatus, SheetId, TableArchetype,
+};
 use curvebook_tools::GridCellCoord;
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
 use egui::{Align, Color32, CornerRadius, FontId, Id, Key, Modifiers, Pos2, Rect, Response, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
@@ -144,15 +146,15 @@ pub(super) enum AuxInlineTarget {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct ContextCellTarget {
+pub(in crate::egui_shell) struct ContextCellTarget {
     pub(super) is_x: bool,
     pub(super) row: usize,
     pub(super) col: usize,
     pub(super) subcol: usize,
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct ContextMenuState {
+#[derive(Debug, Clone, PartialEq)]
+pub(in crate::egui_shell) struct ContextMenuState {
     pub(super) pos: Pos2,
     pub(super) row: usize,
     pub(super) cell: Option<ContextCellTarget>,
@@ -706,17 +708,111 @@ pub(super) fn record_meta_if_enabled(ui: &Ui, meta: &mut FrameInspectMeta, enabl
     meta.record_response(ui, resp, input);
 }
 
-pub(super) fn paint_linked_perimeter_edges(
-    ui: &Ui,
-    cell_rect: Rect,
-    clipped: Rect,
-    reg: &LinkedDataRegion,
-    coord: GridCellCoord,
-    subs_per_col: usize,
-    color: Color32,
-) {
+pub(super) struct LinkedEdgePaint<'a> {
+    pub(super) reg: &'a LinkedDataRegion,
+    pub(super) coord: GridCellCoord,
+    pub(super) subs_per_col: usize,
+    pub(super) color: Color32,
+    pub(super) broken: bool,
+}
+
+#[must_use]
+pub(in crate::egui_shell) fn is_linked_region_broken(doc: &ProjectDocument, reg: &LinkedDataRegion) -> bool {
+    reg.spec.source.upstream_sheet_id().is_some_and(|up_id| {
+        doc.sheet_section(up_id).is_none() || doc.result_sheet(up_id).is_some_and(|rs| matches!(rs.status, ResultStatus::Failed { .. }))
+    })
+}
+
+pub(super) fn paint_broken_link_glyph(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let inner = rect.shrink(1.0);
+    if !inner.is_positive() {
+        return;
+    }
+    let c = inner.center();
+    let s = (inner.width().min(inner.height()) * 0.28).max(2.2);
+    let stroke = Stroke::new(1.4, color);
+    painter.add(egui::Shape::line(
+        vec![
+            pos2(c.x - s * 1.15, c.y + s * 0.3),
+            pos2(c.x - s * 1.55, c.y - s * 0.1),
+            pos2(c.x - s * 0.85, c.y - s * 0.8),
+            pos2(c.x - s * 0.3, c.y - s * 0.4),
+        ],
+        stroke,
+    ));
+    painter.add(egui::Shape::line(
+        vec![
+            pos2(c.x + s * 0.3, c.y + s * 0.4),
+            pos2(c.x + s * 0.85, c.y + s * 0.8),
+            pos2(c.x + s * 1.55, c.y + s * 0.1),
+            pos2(c.x + s * 1.15, c.y - s * 0.3),
+        ],
+        stroke,
+    ));
+    painter.line_segment([pos2(c.x - s * 0.25, c.y - s * 0.85), pos2(c.x + s * 0.25, c.y + s * 0.85)], Stroke::new(1.2, color));
+}
+
+pub(super) fn paint_dashed_segment(painter: &egui::Painter, start: Pos2, end: Pos2, stroke: Stroke) {
+    let delta = end - start;
+    let total = delta.length();
+    if total <= 0.5 {
+        return;
+    }
+    let dir = delta / total;
+    let dash = 4.0_f32;
+    let gap = 3.0_f32;
+    let mut offset = 0.0_f32;
+    while offset < total {
+        let seg_end = (offset + dash).min(total);
+        painter.line_segment([start + dir * offset, start + dir * seg_end], stroke);
+        offset += dash + gap;
+    }
+}
+
+pub(super) fn paint_dashed_rect_stroke(painter: &egui::Painter, rect: Rect, stroke: Stroke) {
+    let r = rect.shrink(stroke.width * 0.5);
+    paint_dashed_segment(painter, r.left_top(), r.right_top(), stroke);
+    paint_dashed_segment(painter, r.right_top(), r.right_bottom(), stroke);
+    paint_dashed_segment(painter, r.right_bottom(), r.left_bottom(), stroke);
+    paint_dashed_segment(painter, r.left_bottom(), r.left_top(), stroke);
+}
+
+pub(super) fn paint_linked_perimeter_edges(ui: &Ui, cell_rect: Rect, clipped: Rect, spec: &LinkedEdgePaint<'_>) {
+    let LinkedEdgePaint { reg, coord, subs_per_col, color, broken } = *spec;
     let r = &reg.target_range;
     let painter = ui.painter().with_clip_rect(clipped);
+    let last_sub = if coord.col == r.end.col { r.end.subcol.min(subs_per_col.saturating_sub(1)) } else { subs_per_col.saturating_sub(1) };
+
+    if broken {
+        let stroke = Stroke::new(2.0, color);
+        if coord.row == r.start.row {
+            paint_dashed_segment(&painter, pos2(cell_rect.left(), cell_rect.top() + 1.0), pos2(cell_rect.right(), cell_rect.top() + 1.0), stroke);
+        }
+        if coord.row == r.end.row {
+            paint_dashed_segment(
+                &painter,
+                pos2(cell_rect.left(), cell_rect.bottom() - 1.0),
+                pos2(cell_rect.right(), cell_rect.bottom() - 1.0),
+                stroke,
+            );
+        }
+        if coord.col == r.start.col && coord.subcol == r.start.subcol {
+            paint_dashed_segment(&painter, pos2(cell_rect.left() + 1.0, cell_rect.top()), pos2(cell_rect.left() + 1.0, cell_rect.bottom()), stroke);
+        }
+        if coord.col == r.end.col && coord.subcol == last_sub {
+            paint_dashed_segment(&painter, pos2(cell_rect.right() - 1.0, cell_rect.top()), pos2(cell_rect.right() - 1.0, cell_rect.bottom()), stroke);
+        }
+        if coord.row == r.start.row
+            && coord.col == r.start.col
+            && coord.subcol == r.start.subcol
+            && clipped.width() >= 14.0
+            && clipped.height() >= 14.0
+        {
+            paint_broken_link_glyph(&painter, Rect::from_min_size(cell_rect.min + vec2(2.0, 2.0), vec2(10.0, 10.0)), color);
+        }
+        return;
+    }
+
     if coord.row == r.start.row {
         painter.rect_filled(Rect::from_min_size(cell_rect.min, vec2(cell_rect.width(), 2.0)), CornerRadius::ZERO, color);
     }
@@ -730,7 +826,6 @@ pub(super) fn paint_linked_perimeter_edges(
     if coord.col == r.start.col && coord.subcol == r.start.subcol {
         painter.rect_filled(Rect::from_min_size(cell_rect.min, vec2(2.0, cell_rect.height())), CornerRadius::ZERO, color);
     }
-    let last_sub = if coord.col == r.end.col { r.end.subcol.min(subs_per_col.saturating_sub(1)) } else { subs_per_col.saturating_sub(1) };
     if coord.col == r.end.col && coord.subcol == last_sub {
         painter.rect_filled(
             Rect::from_min_size(pos2(cell_rect.right() - 2.0, cell_rect.top()), vec2(2.0, cell_rect.height())),

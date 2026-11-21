@@ -89,30 +89,33 @@ pub(super) fn render_data_point_drill_back_studio(
     });
 
     ui.add_space(4.0);
-    egui::Frame::NONE.fill(tokens.panel_bg).stroke(Stroke::new(1.0, tokens.divider)).corner_radius(5.0).inner_margin(egui::Margin::same(8)).show(
-        ui,
-        |ui| {
+    egui::Frame::NONE
+        .fill(tokens.panel_bg)
+        .stroke(Stroke::new(1.0, tokens.divider))
+        .corner_radius(f32::from(tokens.metrics.radius_md))
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            let small = tokens.metrics.font_ui_small_pt;
             ui.label(egui::RichText::new(src_title).size(12.0).strong().color(tokens.text_strong));
             ui.label(
                 egui::RichText::new(format!("Row {}  •  Col {}  •  Sub {}", brushed.row + 1, brushed.col + 1, brushed.subcol + 1))
-                    .size(11.0)
+                    .size(small)
                     .color(tokens.text_primary),
             );
-            ui.label(egui::RichText::new(format!("Value: {raw_val}")).size(11.0).color(tokens.text_primary));
+            ui.label(egui::RichText::new(format!("Value: {raw_val}")).size(small).color(tokens.text_primary));
             if let Some(pt) = matched_pt {
-                ui.label(egui::RichText::new(format!("Series: {}", pt.series_label)).size(11.0).color(tokens.text_muted));
-                ui.label(egui::RichText::new(pt.value_summary.clone()).size(11.0).color(tokens.text_primary));
+                ui.label(egui::RichText::new(format!("Series: {}", pt.series_label)).size(small).color(tokens.text_muted));
+                ui.label(egui::RichText::new(pt.value_summary.clone()).size(small).color(tokens.text_primary));
                 ui.label(
                     egui::RichText::new(format!("Canvas: ({:.1}, {:.1}) pt", (pt.x_pt_tenths as f64) * 0.1, (pt.y_pt_tenths as f64) * 0.1))
-                        .size(10.5)
+                        .size(small)
                         .color(tokens.text_muted),
                 );
             }
             if currently_excluded {
-                ui.label(egui::RichText::new("Status: Excluded from analyses").size(11.0).strong().color(tokens.link_red));
+                ui.label(egui::RichText::new("Status: Excluded from analyses").size(small).strong().color(tokens.link_red));
             }
-        },
-    );
+        });
 
     ui.add_space(6.0);
     let ds_frozen = src_ds.is_some_and(|d| d.frozen);

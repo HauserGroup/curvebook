@@ -83,8 +83,10 @@ fn human_path_feedback_modal_builds_prefilled_github_url_and_copies_markdown() -
 
     let mut driver = make_driver(app);
 
-    // 1. Open About dialog via visible top-bar About button, then click Send Feedback... inside About.
-    let about_pos = widget_center(&driver, "toolbar.help.about")?;
+    // 1. Open About dialog via Help > About CurveBook..., then click Send Feedback... inside About.
+    let help_pos = widget_center(&driver, "menu.help")?;
+    driver.click_at(help_pos)?;
+    let about_pos = widget_center(&driver, "menu.app.about")?;
     driver.click_at(about_pos)?;
     assert_eq!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::About);
 

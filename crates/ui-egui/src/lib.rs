@@ -64,9 +64,10 @@ pub use interaction::{
     UiEventOutcome, UiInputEvent, ViewportMetrics, VirtualWorkspaceFolder, build_shortcut_candidates, dispatch_mouse_wheel, dispatch_ui_event,
 };
 pub use menus::{
-    CommandTooltip, DESKTOP_HOST_ROUTED_COMMANDS, MenuSectionTooltips, ShortcutBinding, ShortcutExecution, ShortcutMatch, ShortcutRegistry,
-    ShortcutScope, TOOLBAR_BUTTONS, ToolbarButtonSpec, ToolbarButtonTooltip, UI_COMMANDS, UiCommandSpec, command_tooltip,
-    is_desktop_host_routed_command, menu_bar_tooltips, normalize_shortcut_combo, toolbar_caption_command_id, toolbar_tooltips,
+    CommandTooltip, CuratedMenuNode, CuratedMenuSection, DESKTOP_HOST_ROUTED_COMMANDS, MenuSectionTooltips, ShortcutBinding, ShortcutExecution,
+    ShortcutMatch, ShortcutRegistry, ShortcutScope, TOOLBAR_BUTTONS, ToolbarButtonSpec, ToolbarButtonTooltip, UI_COMMANDS, UiCommandSpec,
+    command_tooltip, curated_menu_bar, format_shortcut_for_os, format_shortcut_for_platform, is_desktop_host_routed_command, menu_bar_tooltips,
+    normalize_shortcut_combo, toolbar_caption_command_id, toolbar_tooltips,
 };
 pub use modal_predicates::ControlEnablement;
 pub use os_integration::{
@@ -211,7 +212,6 @@ pub(crate) struct UiShellSnapshot {
     pub brushed_cell: Option<SourceCellId>,
     pub brushed_points: Vec<SourceCellId>,
     pub preview_filter: CanvasPreviewFilter,
-    pub presentation_mode: bool,
     pub virtual_workspace: VirtualWorkspaceFolder,
     pub inline_editor: InlineEditorState,
     pub interaction: InteractionControllerState,
@@ -354,7 +354,6 @@ pub struct UiApp {
     pub brushed_cell: Option<SourceCellId>,
     pub brushed_points: Vec<SourceCellId>,
     pub preview_filter: CanvasPreviewFilter,
-    pub presentation_mode: bool,
     pub virtual_workspace: VirtualWorkspaceFolder,
     pub inline_editor: InlineEditorState,
     pub interaction: InteractionControllerState,
@@ -406,7 +405,6 @@ impl UiApp {
             brushed_cell: None,
             brushed_points: Vec::new(),
             preview_filter: CanvasPreviewFilter::default(),
-            presentation_mode: false,
             virtual_workspace: VirtualWorkspaceFolder::default(),
             inline_editor: InlineEditorState::default(),
             interaction: InteractionControllerState::default(),
@@ -447,7 +445,6 @@ impl UiApp {
             brushed_cell: self.brushed_cell.clone(),
             brushed_points: self.brushed_points.clone(),
             preview_filter: self.preview_filter,
-            presentation_mode: self.presentation_mode,
             virtual_workspace: self.virtual_workspace.clone(),
             inline_editor: self.inline_editor.clone(),
             interaction: self.interaction.clone(),
@@ -482,7 +479,6 @@ impl UiApp {
         self.brushed_cell = snap.brushed_cell;
         self.brushed_points = snap.brushed_points;
         self.preview_filter = snap.preview_filter;
-        self.presentation_mode = snap.presentation_mode;
         self.virtual_workspace = snap.virtual_workspace;
         self.inline_editor = snap.inline_editor;
         self.interaction = snap.interaction;
@@ -852,9 +848,6 @@ impl UiApp {
     /// Return whether `pane` is currently visible in the workspace layout.
     #[must_use]
     pub fn is_workspace_pane_visible(&self, pane: workspace_nav::ActiveWorkspacePane) -> bool {
-        if self.presentation_mode {
-            return matches!(pane, workspace_nav::ActiveWorkspacePane::MainCanvasOrGrid);
-        }
         match pane {
             workspace_nav::ActiveWorkspacePane::Navigator => self.nav.navigator_open,
             workspace_nav::ActiveWorkspacePane::FamilyStrip => self.nav.navigator_open && self.family_open,
@@ -1319,6 +1312,20 @@ impl UiApp {
             Some(SheetSection::Info) | None => Cursor::Select,
         }
     }
+
+    /// Serialize the active [`ResultSheet`](curvebook_doc::ResultSheet) selection (or active tab)
+    /// into TSV and update internal clipboard state (`R15-GUI-32`).
+    pub fn copy_active_result_selection_tsv(&mut self) -> Option<String> {
+        let rs_id = crate::interaction::resolve_result_sheet_for_shortcut(self, false)?;
+        let mut results_state = std::mem::take(&mut self.view_shards.results);
+        let out = crate::views::results::handle_custom_action(self, &mut results_state, &format!("copy_selection:{}", rs_id.as_str()));
+        self.view_shards.results = results_state;
+        out.ok()
+            .filter(|outcome| outcome.handled)
+            .and_then(|outcome| outcome.command_result)
+            .and_then(|val| val.get("copied_text").and_then(serde_json::Value::as_str).map(ToOwned::to_owned))
+            .filter(|s| !s.is_empty())
+    }
 }
 
 /// Encode a `ControlResponse` preserving structured [`EngineError`] details cleanly.
@@ -1594,6 +1601,11 @@ fn run_settled_egui_on_ctx(
         o.zoom_factor = zoom;
     });
     egui_shell::Tokens::from_theme_spec(&app.theme, &app.locale).apply_theme_to_ctx(ctx);
+    ctx.all_styles_mut(|style| {
+        style.visuals.text_cursor.blink = false;
+        style.scroll_animation = egui::style::ScrollAnimation::none();
+        style.animation_time = 0.0;
+    });
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let width_px = (w_pt * ppp).round().clamp(1.0, 16_384.0) as u32;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -1604,18 +1616,22 @@ fn run_settled_egui_on_ctx(
     for pass in 0..8_u32 {
         let raw_input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w_pt, h_pt))),
+            time: Some(f64::from(pass) * (1.0 / 60.0)),
             viewports: [(egui::ViewportId::ROOT, egui::ViewportInfo { native_pixels_per_point: Some(native_ppp), ..Default::default() })]
                 .into_iter()
                 .collect(),
             ..Default::default()
         };
-        let mut settled_in_pass = false;
+        let mut not_discarded = false;
         let mut output = ctx.run_ui(raw_input, |ui| {
             let mut pass_intents = egui_shell::PendingUiIntents::default();
             build_ui(ui, app, &mut meta, &mut pass_intents);
             carried_intents.merge_pass(pass_intents);
-            settled_in_pass = !ui.ctx().will_discard();
+            not_discarded = !ui.ctx().will_discard();
         });
+        let wants_immediate_repaint =
+            output.viewport_output.get(&egui::ViewportId::ROOT).is_some_and(|v| v.repaint_delay == std::time::Duration::ZERO);
+        let settled_in_pass = not_discarded && !output.platform_output.requested_discard() && (!wants_immediate_repaint || pass >= 4);
         let stamp = egui_shell::GeometryStamp::from_context(u64::from(pass) + 1, ctx, [width_px, height_px], settled_in_pass);
         if let Some(rast) = rasterizer.as_deref_mut() {
             rast.consume_textures_set(&mut output.textures_delta);
@@ -1647,7 +1663,7 @@ mod tests {
 
     #[test]
     fn ui_commands_table_covers_parity_surface() {
-        assert_eq!(UI_COMMANDS.len(), 54);
+        assert_eq!(UI_COMMANDS.len(), 53);
         for required in [
             "ui.navigator.toggle",
             "ui.inspector.toggle",
@@ -1681,7 +1697,6 @@ mod tests {
             "ui.canvas.applyPreset",
             "ui.canvas.preflight",
             "ui.previewFilter.set",
-            "ui.presentation.toggle",
             "ui.grid.excludeWithReason",
             "ui.table.convertArchetype.open",
             "ui.import.reshape.open",

@@ -3244,6 +3244,7 @@ fn check_all_dialogs_and_inspectors(app: &mut UiApp, hits: &mut Vec<BrandHit>) {
         ActiveDialog::FormatEmbeddedTable { sheet_id: graph_id.clone(), target_index: 0, is_layout: false },
         ActiveDialog::FormatImage { sheet_id: graph_id.clone(), target_index: 0, is_layout: false },
         ActiveDialog::CommandPalette,
+        ActiveDialog::Checkpoints,
         ActiveDialog::About,
     ];
     for dlg in dialogs {
@@ -3952,6 +3953,7 @@ fn sweep_dialog_states() -> Vec<ActiveDialog> {
         ActiveDialog::FormatEmbeddedTable { sheet_id: SheetId::new("graph-1"), target_index: 0, is_layout: false },
         ActiveDialog::FormatImage { sheet_id: SheetId::new("graph-1"), target_index: 0, is_layout: false },
         ActiveDialog::CommandPalette,
+        ActiveDialog::Checkpoints,
         ActiveDialog::About,
     ]
 }

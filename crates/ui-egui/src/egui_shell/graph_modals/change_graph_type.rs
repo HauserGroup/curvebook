@@ -448,14 +448,20 @@ fn render_live_dataset_preview(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>, graph_
             paint_chart_scene_compact(ui.painter(), &scene, rect.shrink(6.0));
         }
         Some(Err(err)) => {
-            ui.painter().text(rect.center(), Align2::CENTER_CENTER, &err, FontId::proportional(11.0), gctx.tokens.text_muted);
+            ui.painter().text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                &err,
+                FontId::proportional(gctx.tokens.metrics.font_ui_small_pt),
+                gctx.tokens.text_muted,
+            );
         }
         _ => {
             ui.painter().text(
                 rect.center(),
                 Align2::CENTER_CENTER,
                 gtr(gctx.locale, "cgt.preview.empty"),
-                FontId::proportional(11.0),
+                FontId::proportional(gctx.tokens.metrics.font_ui_small_pt),
                 gctx.tokens.text_muted,
             );
         }

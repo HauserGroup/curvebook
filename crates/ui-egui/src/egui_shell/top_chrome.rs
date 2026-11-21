@@ -16,7 +16,7 @@ use crate::egui_shell::{
 use crate::i18n::{LOCALES, locale_picker_label, normalize_locale};
 use crate::inspect::ZLayer;
 use crate::interaction::resolve_result_sheet_for_shortcut;
-use crate::menus::{CommandTooltip, command_tooltip, menu_bar_tooltips};
+use crate::menus::{CommandTooltip, CuratedMenuNode, command_tooltip, curated_menu_bar, format_shortcut_for_platform};
 use crate::tr;
 use curvebook_doc::{AnalysisKind, MultivariateSpec, SheetId, TableArchetype};
 
@@ -43,13 +43,13 @@ pub fn submenu_variants_for_command(command_id: &str) -> Option<&'static [(&'sta
     }
 }
 
-/// Extra desktop File menu actions surfaced whenever absent from `menu_bar_tooltips(app)`.
-pub const EXTRA_FILE_MENU_ACTIONS: &[(&str, &str, &[&str])] = &[
-    ("Open Unpacked Folder…", "file.open_unpacked_dir", &["file.open_unpacked_dir"]),
-    ("Save As…", "file.save_as", &["project.saveAs", "file.save_as"]),
-    ("Export PDF…", "export.pdf", &["export.pdf", "file.export_pdf"]),
-    ("Export PNG…", "export.png", &["export.png", "file.export_png"]),
-];
+/// Hierarchical node inside [`InWindowMenuSectionParity`] (`R15-GUI-34`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InWindowMenuNode {
+    Action(InWindowMenuItemParity),
+    Separator,
+    Submenu { id: String, title: String, children: Vec<Self> },
+}
 
 /// Cross-backend parity item descriptor shared between Tier 1 inline `egui::MenuBar` and `muda`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +68,7 @@ pub struct InWindowMenuSectionParity {
     pub menu_key: String,
     pub title: String,
     pub items: Vec<InWindowMenuItemParity>,
+    pub nodes: Vec<InWindowMenuNode>,
 }
 
 /// Canonical filtering & effective enablement check for menu items across all hosts.
@@ -82,28 +83,45 @@ pub fn effective_menu_item_enabled(command_id: &str, base_enabled: bool) -> bool
     base_enabled && command_id != "ui.result.applyRemediation"
 }
 
-/// Build canonical localized menu sections directly from [`menu_bar_tooltips`] for `egui::MenuBar`
-/// and desktop menu-bar parity checks.
-#[must_use]
-pub fn collect_in_window_menu_sections(app: &UiApp) -> Vec<InWindowMenuSectionParity> {
-    menu_bar_tooltips(app)
-        .into_iter()
-        .map(|sec| InWindowMenuSectionParity {
-            menu_key: sec.menu_key.to_owned(),
-            title: sec.title.to_owned(),
-            items: sec
-                .items
-                .into_iter()
-                .filter(|item| is_menu_item_visible(item.command_id))
-                .map(|item| InWindowMenuItemParity {
+fn convert_curated_nodes_for_window(nodes: Vec<CuratedMenuNode>, flat: &mut Vec<InWindowMenuItemParity>) -> Vec<InWindowMenuNode> {
+    let mut out = Vec::new();
+    for node in nodes {
+        match node {
+            CuratedMenuNode::Action(item) if is_menu_item_visible(item.command_id) => {
+                let entry = InWindowMenuItemParity {
                     command_id: item.command_id.to_owned(),
                     label: item.localized_label.to_owned(),
                     shortcut: item.shortcut,
                     summary: item.summary.to_owned(),
                     beginner: item.beginner.to_owned(),
                     enabled: effective_menu_item_enabled(item.command_id, item.enabled),
-                })
-                .collect(),
+                };
+                flat.push(entry.clone());
+                out.push(InWindowMenuNode::Action(entry));
+            }
+            CuratedMenuNode::Action(_) => {}
+            CuratedMenuNode::Separator => out.push(InWindowMenuNode::Separator),
+            CuratedMenuNode::Submenu { id, title, children, .. } => {
+                let converted = convert_curated_nodes_for_window(children, flat);
+                if !converted.is_empty() {
+                    out.push(InWindowMenuNode::Submenu { id: id.to_owned(), title, children: converted });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Build canonical localized hierarchical menu sections from [`curated_menu_bar`] for `egui::MenuBar`
+/// and desktop menu-bar parity checks.
+#[must_use]
+pub fn collect_in_window_menu_sections(app: &UiApp) -> Vec<InWindowMenuSectionParity> {
+    curated_menu_bar(app)
+        .into_iter()
+        .map(|sec| {
+            let mut items = Vec::new();
+            let nodes = convert_curated_nodes_for_window(sec.nodes, &mut items);
+            InWindowMenuSectionParity { menu_key: sec.menu_key.to_owned(), title: sec.title.to_owned(), items, nodes }
         })
         .collect()
 }
@@ -203,10 +221,17 @@ struct Tier2OverflowState {
 
 #[derive(Clone, Copy)]
 struct TopMenuButtonSpec<'a> {
+    app: &'a UiApp,
     tokens: &'a Tokens,
     sec: &'a InWindowMenuSectionParity,
     sec_w: f32,
     enabled: bool,
+}
+
+#[derive(Clone, Copy)]
+struct MenuRenderCtx<'a> {
+    app: &'a UiApp,
+    locale: &'a str,
 }
 
 struct Tier2ActionInput<'a> {
@@ -250,8 +275,8 @@ struct ChromeTabSpec<'a> {
 
 /// Render Tier 1 (`32 pt`) Application Bar and Tier 2 (`38 pt`) Contextual Action Strip cleanly.
 ///
-/// Preserves exact widget IDs (`toolbar.home`, `toolbar.help.about`, `toolbar.command_palette`,
-/// `toolbar.split`, `toolbar.preset`, `toolbar.presentation`, `toolbar.analyze`,
+/// Preserves exact widget IDs (`toolbar.home`, `toolbar.command_palette`,
+/// `toolbar.split`, `toolbar.preset`, `toolbar.analyze`,
 /// `toolbar.edit_params`, `toolbar.overflow`, `sheet.tab.<id>`).
 pub fn render_top_chrome(
     ui: &mut egui::Ui,
@@ -337,66 +362,6 @@ pub fn render_top_chrome(
     report
 }
 
-/// Render minimal floating Presentation Mode exit chip (`toolbar.presentation.exit`) in top-right corner.
-pub fn render_presentation_exit_chip(
-    ctx: &egui::Context,
-    app: &UiApp,
-    tokens: &Tokens,
-    enabled: bool,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) -> Option<Rect> {
-    if !app.presentation_mode {
-        return None;
-    }
-    let label = match app.locale.as_str() {
-        "de" => "Präsentation beenden (Esc)",
-        "fr" => "Quitter le mode présentation (Esc)",
-        "es" => "Salir de presentación (Esc)",
-        "ja" => "プレゼン終了 (Esc)",
-        _ => "Exit Presentation (Esc)",
-    };
-    let area = egui::Area::new(Id::unique("egui_shell.presentation.exit_chip"))
-        .anchor(egui::Align2::RIGHT_TOP, Vec2::new(-12.0, 10.0))
-        .order(Order::Foreground)
-        .show(ctx, |ui| {
-            let (galley, _) = layout_single_line_job(ui.painter(), label, 220.0, tokens.text_strong, 11.5);
-            let w = (galley.size().x + 18.0).clamp(96.0, 236.0);
-            let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 26.0), if enabled { Sense::click() } else { Sense::hover() });
-            let bg = if resp.hovered() && enabled { tokens.hover_bg } else { tokens.panel_bg };
-            ui.painter().rect_filled(rect, CornerRadius::same(13), bg);
-            ui.painter().rect_stroke(rect, CornerRadius::same(13), Stroke::new(1.0, tokens.border), StrokeKind::Inside);
-            ui.painter().with_clip_rect(rect.shrink(4.0)).galley(
-                Pos2::new(rect.center().x - galley.size().x * 0.5, rect.center().y - galley.size().y * 0.5),
-                galley,
-                tokens.text_strong,
-            );
-            let ak_label = label.to_owned();
-            resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, enabled, ak_label.clone()));
-            meta.record_response(
-                ui,
-                &resp,
-                FrameInspectEntryInput {
-                    widget_id: "toolbar.presentation.exit",
-                    role: "button",
-                    label,
-                    command_id: Some("ui.presentation.toggle"),
-                    value: Some(json!(false)),
-                    enabled,
-                    disabled_reason: (!enabled).then_some("modal dialog is active"),
-                    z_layer: ZLayer::FloatingOverlay,
-                    ellipsized: false,
-                    full_label: None,
-                },
-            );
-            if resp.clicked() && enabled {
-                intents.push_ui("ui.presentation.toggle", json!({ "enabled": false }));
-            }
-            rect
-        });
-    Some(area.inner)
-}
-
 fn render_tier1_bar(
     ui: &mut egui::Ui,
     input: Tier1BarInput<'_>,
@@ -407,7 +372,6 @@ fn render_tier1_bar(
 ) {
     let Tier1BarInput { app, ctx_in, enabled } = input;
     let tokens = ctx_in.tokens;
-    let about_label = tr(&app.locale, "menu.help.about");
     let home_label = localized_home_label(&app.locale);
     let total_w = ui.available_width().max(40.0);
 
@@ -435,28 +399,9 @@ fn render_tier1_bar(
             intents.push_set_launcher_open(!ctx_in.launcher_open);
         }
 
-        let about_resp = chrome_button_fitted(
-            ui,
-            tokens,
-            meta,
-            ChromeButtonSpec {
-                widget_id: "toolbar.help.about",
-                label: about_label,
-                command_id: Some("app.about"),
-                selected: false,
-                enabled,
-                disabled_reason: modal_reason(enabled),
-                max_w: 104.0,
-            },
-        );
-        if about_resp.clicked() && enabled {
-            state.close_all_popups();
-            intents.push_ui("app.about", json!({}));
-        }
-
         // Compute compact right-group budget before placing middle menus/title so right cluster never clips.
         let right_min_reserve = if total_w >= 540.0 { 196.0 } else { 112.0 };
-        let used_left = (brand_rect.width() + home_resp.rect.width() + about_resp.rect.width() + 24.0).min(total_w);
+        let used_left = (brand_rect.width() + home_resp.rect.width() + 18.0).min(total_w);
         let middle_budget = (total_w - used_left - right_min_reserve).max(0.0);
 
         state.active_in_window_menu = None;
@@ -505,9 +450,6 @@ fn estimate_tier1_right_width(fitted: &crate::egui_shell::top_bar_fit::RightGrou
     if fitted.switcher {
         parts.push(fitted.switcher_w.max(MIN_SWITCHER_PT));
     }
-    if fitted.presentation_toggle {
-        parts.push(64.0);
-    }
     let gaps = parts.len().saturating_sub(1) as f32 * 6.0;
     parts.into_iter().sum::<f32>() + gaps
 }
@@ -552,7 +494,7 @@ fn render_inline_menu_bar(
         egui::MenuBar::new().ui(ui, |ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             for (sec, &sec_w) in sections.iter().take(visible_count).zip(measured_widths.iter()) {
-                render_top_menu_button(ui, TopMenuButtonSpec { tokens, sec, sec_w, enabled }, state, meta, intents);
+                render_top_menu_button(ui, TopMenuButtonSpec { app, tokens, sec, sec_w, enabled }, state, meta, intents);
             }
             if visible_count < sections.len() {
                 let ov_resp = ui.add_enabled(enabled, egui::Button::new(overflow_lbl).min_size(Vec2::new(28.0, 22.0)));
@@ -575,11 +517,12 @@ fn render_inline_menu_bar(
                     },
                 );
                 if enabled {
+                    let mctx = MenuRenderCtx { app, locale: tokens.locale };
                     egui::Popup::menu(&ov_resp).show(|ui| {
                         state.active_in_window_menu = Some(String::from("menu.bar.overflow"));
                         for sec in &sections[visible_count..] {
                             ui.menu_button(&sec.title, |ui| {
-                                render_section_menu_items(ui, &sec.menu_key, &sec.items, tokens.locale, meta, intents);
+                                render_section_menu_nodes(ui, mctx, &sec.nodes, meta, intents);
                             });
                         }
                     });
@@ -596,7 +539,7 @@ fn render_top_menu_button(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
-    let TopMenuButtonSpec { tokens, sec, sec_w, enabled } = spec;
+    let TopMenuButtonSpec { app, tokens, sec, sec_w, enabled } = spec;
     let (galley, ellipsized) = layout_single_line_job(ui.painter(), &sec.title, (sec_w - 10.0).max(16.0), tokens.text_primary, 12.0);
     let resp = ui.add_enabled_ui(enabled, |ui| ui.allocate_response(Vec2::new(sec_w, 22.0), Sense::click())).inner;
     let is_open = enabled && egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
@@ -607,8 +550,11 @@ fn render_top_menu_button(
     } else {
         Color32::TRANSPARENT
     };
-    if bg != Color32::TRANSPARENT {
-        ui.painter().rect_filled(resp.rect, CornerRadius::same(4), bg);
+    let r = CornerRadius::same(tokens.metrics.radius_md);
+    if is_open {
+        ui.painter().rect(resp.rect, r, bg, Stroke::new(1.5, tokens.focus_ring), StrokeKind::Inside);
+    } else if resp.hovered() && enabled {
+        ui.painter().rect(resp.rect, r, bg, Stroke::new(1.0, tokens.hover_border), StrokeKind::Inside);
     }
     let fg = if enabled { tokens.text_primary } else { tokens.text_disabled };
     ui.painter().with_clip_rect(resp.rect.shrink(3.0)).galley(
@@ -639,9 +585,10 @@ fn render_top_menu_button(
     }
 
     if enabled {
+        let mctx = MenuRenderCtx { app, locale: tokens.locale };
         egui::Popup::menu(&resp).show(|ui| {
             state.active_in_window_menu = Some(sec.menu_key.clone());
-            render_section_menu_items(ui, &sec.menu_key, &sec.items, tokens.locale, meta, intents);
+            render_section_menu_nodes(ui, mctx, &sec.nodes, meta, intents);
             let popup_rect = ui.min_rect().intersect(ui.clip_rect()).intersect(meta.viewport_rect);
             if popup_rect.is_positive() {
                 let popup_id = ui.scope_id().with(("popup", &sec.menu_key));
@@ -695,56 +642,38 @@ fn record_menu_popup_response(ui: &egui::Ui, resp: &egui::Response, meta: &mut F
     );
 }
 
-fn render_section_menu_items(
+fn render_section_menu_nodes(
     ui: &mut egui::Ui,
-    menu_key: &str,
-    items: &[InWindowMenuItemParity],
-    current_locale: &str,
+    mctx: MenuRenderCtx<'_>,
+    nodes: &[InWindowMenuNode],
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
-    if matches!(menu_key, "menu.file" | "file") {
-        let is_primary_file_cmd =
-            |cmd: &str| matches!(cmd, "project.new" | "file.new" | "project.open" | "project.save" | "export.svg" | "export.pdf" | "export.png");
-        for item in items.iter().filter(|it| is_primary_file_cmd(&it.command_id)) {
-            render_menu_leaf_item(ui, item, current_locale, meta, intents);
-        }
-        let mut added_extra = false;
-        for &(label, cmd, aliases) in EXTRA_FILE_MENU_ACTIONS {
-            if items.iter().any(|existing| aliases.contains(&existing.command_id.as_str())) {
-                continue;
-            }
-            if !added_extra {
+    for node in nodes {
+        match node {
+            InWindowMenuNode::Action(item) => render_menu_leaf_item(ui, mctx, item, meta, intents),
+            InWindowMenuNode::Separator => {
                 ui.separator();
-                added_extra = true;
             }
-            let resp = ui.button(label);
-            record_menu_popup_response(
-                ui,
-                &resp,
-                meta,
-                MenuPopupInspect { widget_id: &format!("menu.{cmd}"), label, command_id: Some(cmd), selected: None, enabled: true },
-            );
-            if resp.clicked() {
-                push_menu_command_intent(cmd, None, intents);
-                ui.close();
+            InWindowMenuNode::Submenu { id, title, children } => {
+                let sub = ui.menu_button(title, |ui| {
+                    render_section_menu_nodes(ui, mctx, children, meta, intents);
+                });
+                record_menu_popup_response(
+                    ui,
+                    &sub.response,
+                    meta,
+                    MenuPopupInspect { widget_id: id, label: title, command_id: None, selected: None, enabled: true },
+                );
             }
         }
-        ui.separator();
-        for item in items.iter().filter(|it| !is_primary_file_cmd(&it.command_id)) {
-            render_menu_leaf_item(ui, item, current_locale, meta, intents);
-        }
-        return;
-    }
-    for item in items {
-        render_menu_leaf_item(ui, item, current_locale, meta, intents);
     }
 }
 
 fn render_menu_leaf_item(
     ui: &mut egui::Ui,
+    mctx: MenuRenderCtx<'_>,
     item: &InWindowMenuItemParity,
-    current_locale: &str,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
@@ -754,11 +683,11 @@ fn render_menu_leaf_item(
             for &(v_label, variant) in variants {
                 let mut btn = egui::Button::new(v_label);
                 if item.command_id == "ui.canvas.applyPreset" && !item.shortcut.is_empty() && variant == "SingleColumn88mm" {
-                    btn = btn.shortcut_text(&item.shortcut);
+                    btn = btn.shortcut_text(format_shortcut_for_platform(&item.shortcut));
                 }
                 let resp = ui.add_enabled(item.enabled, btn).on_hover_text(&tooltip).on_disabled_hover_text(&tooltip);
                 if resp.clicked() {
-                    push_menu_command_intent(&item.command_id, Some(variant), intents);
+                    push_menu_command_intent(mctx.app, &item.command_id, Some(variant), intents);
                     ui.close();
                 }
             }
@@ -779,7 +708,7 @@ fn render_menu_leaf_item(
     }
 
     if item.command_id == "ui.locale.set" {
-        let active_canonical = normalize_locale(current_locale);
+        let active_canonical = normalize_locale(mctx.locale);
         let sub = ui.menu_button(&item.label, |ui| {
             let scroll_out = egui::ScrollArea::vertical().id_salt("popup.menu.ui.locale.set").max_height(240.0).show(ui, |ui| {
                 for (idx, &loc) in LOCALES.iter().enumerate() {
@@ -799,7 +728,7 @@ fn render_menu_leaf_item(
                         },
                     );
                     if opt_resp.clicked() {
-                        push_menu_command_intent(&item.command_id, Some(canonical), intents);
+                        push_menu_command_intent(mctx.app, &item.command_id, Some(canonical), intents);
                         ui.close();
                     }
                 }
@@ -841,7 +770,7 @@ fn render_menu_leaf_item(
 
     let mut btn = egui::Button::new(&item.label);
     if !item.shortcut.is_empty() {
-        btn = btn.shortcut_text(&item.shortcut);
+        btn = btn.shortcut_text(format_shortcut_for_platform(&item.shortcut));
     }
     let resp = ui.add_enabled(item.enabled, btn).on_hover_text(&tooltip).on_disabled_hover_text(&tooltip);
     record_menu_popup_response(
@@ -857,28 +786,46 @@ fn render_menu_leaf_item(
         },
     );
     if resp.clicked() {
-        push_menu_command_intent(&item.command_id, None, intents);
+        push_menu_command_intent(mctx.app, &item.command_id, None, intents);
         ui.close();
     }
 }
 
-fn push_menu_command_intent(command_id: &str, variant: Option<&str>, intents: &mut PendingUiIntents) {
+fn push_menu_command_intent(app: &UiApp, command_id: &str, variant: Option<&str>, intents: &mut PendingUiIntents) {
     if let Some(var) = variant {
         match command_id {
             "ui.theme.set" => intents.push_ui("ui.theme.set", json!({ "mode": var })),
             "ui.locale.set" => intents.push_ui("ui.locale.set", json!({ "locale": var })),
             "ui.previewFilter.set" => intents.push_ui("ui.previewFilter.set", json!({ "filter": var })),
             "ui.canvas.applyPreset" | "graph.applyCanvasPreset" | "layout.applyCanvasPreset" => {
-                intents.push_ui("ui.canvas.applyPreset", json!({ "preset": var }));
+                let mut params = json!({ "preset": var, "resize_mode": "KeepTypographyPt" });
+                if let Some(sid) = super::command_palette::resolve_renderable_sheet_id_for_menu(app.document())
+                    && let Some(obj) = params.as_object_mut()
+                {
+                    obj.insert(String::from("sheet_id"), json!(sid.as_str()));
+                }
+                intents.push_ui("ui.canvas.applyPreset", params);
             }
             other => intents.push_ui(other, json!({ "value": var })),
         }
         return;
     }
-    if command_id.starts_with("ui.") || command_id.starts_with("app.") || crate::menus::is_desktop_host_routed_command(command_id) {
+    if crate::menus::is_desktop_host_routed_command(command_id) {
         intents.push_ui(command_id, json!({}));
-    } else {
-        intents.push_engine(command_id, json!({}));
+        return;
+    }
+    let is_ui = command_id.starts_with("ui.") || command_id.starts_with("app.");
+    match super::command_palette::resolve_shell_command_route(app, command_id, is_ui) {
+        Some(super::command_palette::PaletteCommandRoute::UiCommand { command_id, params }) => {
+            intents.push_ui(command_id, params);
+        }
+        Some(super::command_palette::PaletteCommandRoute::EngineCommand { command_id, params }) => {
+            intents.push_engine(command_id, params);
+        }
+        Some(super::command_palette::PaletteCommandRoute::DirectIntent(intent)) => {
+            intents.push(intent);
+        }
+        None => {}
     }
 }
 
@@ -894,25 +841,30 @@ fn render_tier1_right_group(
     let Tier1BarInput { app, ctx_in, enabled } = input;
     let tokens = ctx_in.tokens;
     if !matches!(fitted.search, SearchVisibility::Hidden) {
-        let search_lbl = match fitted.search {
-            SearchVisibility::Field => format!("{} (Cmd+K)", tr(&app.locale, "toolbar.palette")),
-            SearchVisibility::Icon | SearchVisibility::Hidden => String::from("Cmd+K"),
+        let base_label = tr(&app.locale, "toolbar.palette");
+        let plat_shortcut = format_shortcut_for_platform(app.shortcuts.active_combo("ui.palette.open").unwrap_or("Cmd+K"));
+        let selected = matches!(app.canvas_dialogs.active_dialog, ActiveDialog::CommandPalette);
+        let tip_text = if enabled { format!("{base_label} ({plat_shortcut})") } else { String::from("modal dialog is active") };
+        let pal_resp = match fitted.search {
+            SearchVisibility::Field => chrome_button_fitted(
+                ui,
+                tokens,
+                meta,
+                ChromeButtonSpec {
+                    widget_id: "toolbar.command_palette",
+                    label: base_label,
+                    command_id: Some("ui.palette.open"),
+                    selected,
+                    enabled,
+                    disabled_reason: modal_reason(enabled),
+                    max_w: 176.0,
+                },
+            )
+            .on_hover_text(tip_text),
+            SearchVisibility::Icon | SearchVisibility::Hidden => {
+                render_command_palette_icon_button(ui, tokens, meta, base_label, &tip_text, selected, enabled)
+            }
         };
-        let max_w = if matches!(fitted.search, SearchVisibility::Field) { 176.0 } else { 52.0 };
-        let pal_resp = chrome_button_fitted(
-            ui,
-            tokens,
-            meta,
-            ChromeButtonSpec {
-                widget_id: "toolbar.command_palette",
-                label: &search_lbl,
-                command_id: Some("ui.palette.open"),
-                selected: matches!(app.canvas_dialogs.active_dialog, ActiveDialog::CommandPalette),
-                enabled,
-                disabled_reason: modal_reason(enabled),
-                max_w,
-            },
-        );
         if pal_resp.clicked() && enabled {
             state.close_all_popups();
             intents.push_set_palette_open(true);
@@ -963,28 +915,6 @@ fn render_tier1_right_group(
             let next = !state.preset_menu_open;
             state.close_all_popups();
             state.preset_menu_open = next;
-        }
-    }
-
-    if fitted.presentation_toggle {
-        let pres_lbl = localized_present_label(&app.locale);
-        let pres_resp = chrome_button_fitted(
-            ui,
-            tokens,
-            meta,
-            ChromeButtonSpec {
-                widget_id: "toolbar.presentation",
-                label: pres_lbl,
-                command_id: Some("ui.presentation.toggle"),
-                selected: app.presentation_mode,
-                enabled,
-                disabled_reason: modal_reason(enabled),
-                max_w: 76.0,
-            },
-        );
-        if pres_resp.clicked() && enabled {
-            state.close_all_popups();
-            intents.push_ui("ui.presentation.toggle", json!({}));
         }
     }
 }
@@ -1956,20 +1886,6 @@ fn localized_home_label(locale: &str) -> &'static str {
     }
 }
 
-fn localized_present_label(locale: &str) -> &'static str {
-    match locale {
-        "de" => "Präs.",
-        "fr" => "Prés.",
-        "es" => "Pres.",
-        "ru" => "Показ",
-        "ja" => "発表",
-        "ko" => "발표",
-        "zh-CN" => "演示",
-        "zh-TW" => "簡報",
-        _ => "Present",
-    }
-}
-
 const fn modal_reason(enabled: bool) -> Option<&'static str> {
     if enabled { None } else { Some("modal dialog is active") }
 }
@@ -2022,25 +1938,22 @@ fn chrome_button_fitted(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInsp
     let min_w = max_w.min(34.0);
     let w = (galley.size().x + 14.0).clamp(min_w, max_w);
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 24.0), if enabled { Sense::click() } else { Sense::hover() });
-    let bg = if !enabled {
-        tokens.panel_bg
-    } else if selected {
-        tokens.active_bg
-    } else if resp.hovered() {
-        tokens.hover_bg
-    } else {
-        tokens.button_bg
-    };
+    let radius = CornerRadius::same(tokens.metrics.radius_md);
+    super::widgets::paint_interactive_chrome(
+        ui,
+        rect,
+        tokens,
+        super::widgets::InteractiveChromeSpec {
+            radius,
+            base_bg: if enabled { tokens.button_bg } else { tokens.panel_bg },
+            base_border: Some(if enabled { tokens.button_border } else { tokens.divider }),
+            hovered: resp.hovered(),
+            selected,
+            pressed: resp.is_pointer_button_down_on(),
+            enabled,
+        },
+    );
     let fg = if enabled { tokens.text_strong } else { tokens.text_disabled };
-    let border = if !enabled {
-        tokens.divider
-    } else if selected {
-        tokens.accent_strong
-    } else {
-        tokens.button_border
-    };
-    ui.painter().rect_filled(rect, CornerRadius::same(4), bg);
-    ui.painter().rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, border), StrokeKind::Inside);
     ui.painter().with_clip_rect(rect.shrink(3.0)).galley(
         Pos2::new(rect.center().x - galley.size().x * 0.5, rect.center().y - galley.size().y * 0.5),
         galley,
@@ -2083,17 +1996,21 @@ fn popup_action_button(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInspe
     let w = ui.available_width().max(120.0);
     let (galley, ellipsized) = layout_single_line_job(ui.painter(), label, (w - 14.0).max(40.0), tokens.text_primary, 12.0);
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 24.0), if enabled { Sense::click() } else { Sense::hover() });
-    let bg = if !enabled {
-        tokens.panel_bg
-    } else if selected {
-        tokens.active_bg
-    } else if resp.hovered() {
-        tokens.hover_bg
-    } else {
-        tokens.surface_bg
-    };
+    super::widgets::paint_interactive_chrome(
+        ui,
+        rect,
+        tokens,
+        super::widgets::InteractiveChromeSpec {
+            radius: CornerRadius::same(tokens.metrics.radius_md),
+            base_bg: if enabled { tokens.surface_bg } else { tokens.panel_bg },
+            base_border: None,
+            hovered: resp.hovered(),
+            selected,
+            pressed: resp.is_pointer_button_down_on(),
+            enabled,
+        },
+    );
     let fg = if enabled { tokens.text_strong } else { tokens.text_disabled };
-    ui.painter().rect_filled(rect, CornerRadius::same(4), bg);
     ui.painter().with_clip_rect(rect.shrink(4.0)).galley(Pos2::new(rect.left() + 8.0, rect.center().y - galley.size().y * 0.5), galley, fg);
 
     let ak_label = label.to_owned();
@@ -2127,21 +2044,81 @@ fn popup_action_button(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInspe
     resp
 }
 
+fn render_command_palette_icon_button(
+    ui: &mut egui::Ui,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    label: &str,
+    tooltip: &str,
+    selected: bool,
+    enabled: bool,
+) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(28.0, 24.0), if enabled { Sense::click() } else { Sense::hover() });
+    let radius = CornerRadius::same(tokens.metrics.radius_md);
+    super::widgets::paint_interactive_chrome(
+        ui,
+        rect,
+        tokens,
+        super::widgets::InteractiveChromeSpec {
+            radius,
+            base_bg: if enabled { tokens.button_bg } else { tokens.panel_bg },
+            base_border: Some(if enabled { tokens.button_border } else { tokens.divider }),
+            hovered: resp.hovered(),
+            selected,
+            pressed: resp.is_pointer_button_down_on(),
+            enabled,
+        },
+    );
+    let fg = if enabled { tokens.text_strong } else { tokens.text_disabled };
+
+    // Monochrome vector magnifying-glass icon centered inside the button.
+    let lens_center = rect.center() + Vec2::new(-1.5, -1.5);
+    ui.painter().circle_stroke(lens_center, 4.5, Stroke::new(1.5, fg));
+    ui.painter().line_segment([lens_center + Vec2::splat(3.1), lens_center + Vec2::splat(6.5)], Stroke::new(1.5, fg));
+
+    let ak_label = label.to_owned();
+    resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, enabled, ak_label.clone()));
+    if rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect).is_positive() {
+        meta.record_response(
+            ui,
+            &resp,
+            FrameInspectEntryInput {
+                widget_id: "toolbar.command_palette",
+                role: "button",
+                label,
+                command_id: Some("ui.palette.open"),
+                value: Some(json!(selected)),
+                enabled,
+                disabled_reason: modal_reason(enabled),
+                z_layer: ZLayer::Workspace,
+                ellipsized: false,
+                full_label: None,
+            },
+        );
+    }
+    resp.on_hover_text(tooltip)
+}
+
 fn chrome_tab(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInspectMeta, spec: ChromeTabSpec<'_>) -> egui::Response {
     let ChromeTabSpec { widget_id, label, selected, enabled, max_w } = spec;
     let text_max_w = (max_w - 14.0).max(16.0);
     let (galley, ellipsized) = layout_single_line_job(ui.painter(), label, text_max_w, tokens.text_primary, 11.5);
     let w = (galley.size().x + 14.0).clamp(32.0_f32.min(max_w), max_w);
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 24.0), if enabled { Sense::click() } else { Sense::hover() });
-    let bg = if !enabled {
-        tokens.panel_bg
-    } else if selected {
-        tokens.active_bg
-    } else if resp.hovered() {
-        tokens.hover_bg
-    } else {
-        tokens.surface_bg
-    };
+    super::widgets::paint_interactive_chrome(
+        ui,
+        rect,
+        tokens,
+        super::widgets::InteractiveChromeSpec {
+            radius: CornerRadius::same(tokens.metrics.radius_md),
+            base_bg: if enabled { tokens.surface_bg } else { tokens.panel_bg },
+            base_border: Some(if enabled { tokens.border } else { tokens.divider }),
+            hovered: resp.hovered(),
+            selected,
+            pressed: resp.is_pointer_button_down_on(),
+            enabled,
+        },
+    );
     let fg = if !enabled {
         tokens.text_disabled
     } else if selected {
@@ -2149,15 +2126,6 @@ fn chrome_tab(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInspectMeta, s
     } else {
         tokens.text_primary
     };
-    let border = if !enabled {
-        tokens.divider
-    } else if selected {
-        tokens.accent_strong
-    } else {
-        tokens.border
-    };
-    ui.painter().rect_filled(rect, CornerRadius::same(4), bg);
-    ui.painter().rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, border), StrokeKind::Inside);
     ui.painter().with_clip_rect(rect.shrink(3.0)).galley(
         Pos2::new(rect.center().x - galley.size().x * 0.5, rect.center().y - galley.size().y * 0.5),
         galley,

@@ -59,11 +59,12 @@ pub(super) fn render_results_interpret_studio(
     let locale = &tokens.locale;
     let doc = app.document();
 
+    let small = tokens.metrics.font_ui_small_pt;
     let (status_lbl, status_clr) = match &rs.status {
         ResultStatus::UpToDate => ("Up to date", tokens.link_green),
         ResultStatus::Dirty => ("Recalculating", tokens.accent_strong),
         ResultStatus::Failed { message, .. } => {
-            ui.add(egui::Label::new(egui::RichText::new(format!("Failed: {message}")).size(11.0).color(tokens.link_red)).wrap());
+            ui.add(egui::Label::new(egui::RichText::new(format!("Failed: {message}")).size(small).color(tokens.link_red)).wrap());
             ("Failed", tokens.link_red)
         }
     };
@@ -72,10 +73,10 @@ pub(super) fn render_results_interpret_studio(
     let pass_n = rs.checklist.iter().filter(|c| c.status == ChecklistStatus::Pass).count();
 
     ui.horizontal_wrapped(|ui| {
-        ui.add(egui::Label::new(egui::RichText::new(status_lbl).size(11.0).strong().color(status_clr)).wrap());
+        ui.add(egui::Label::new(egui::RichText::new(status_lbl).size(small).strong().color(status_clr)).wrap());
         ui.add(
             egui::Label::new(
-                egui::RichText::new(format!("• {} pass / {} warn / {} viol", pass_n, warn_n, violated_n)).size(11.0).color(tokens.text_muted),
+                egui::RichText::new(format!("• {} pass / {} warn / {} viol", pass_n, warn_n, violated_n)).size(small).color(tokens.text_muted),
             )
             .wrap(),
         );
@@ -121,7 +122,7 @@ pub(super) fn render_results_interpret_studio(
     ui.add_space(4.0);
     match state.results_tab {
         ResultsStudioTab::Assumptions => {
-            ui.add(egui::Label::new(egui::RichText::new(tr(locale, "results.diagnostics_only")).size(10.5).color(tokens.text_muted)).wrap());
+            ui.add(egui::Label::new(egui::RichText::new(tr(locale, "results.diagnostics_only")).size(small).color(tokens.text_muted)).wrap());
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 if studio_chip(
@@ -180,13 +181,13 @@ pub(super) fn render_results_interpret_studio(
                     .show(ui, |ui| {
                         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                         ui.horizontal_wrapped(|ui| {
-                            ui.add(egui::Label::new(egui::RichText::new(tag).size(10.0).strong().color(clr)));
-                            ui.add(egui::Label::new(egui::RichText::new(&item.assumption).size(11.0).strong().color(tokens.text_strong)).wrap());
+                            ui.add(egui::Label::new(egui::RichText::new(tag).size(small).strong().color(clr)));
+                            ui.add(egui::Label::new(egui::RichText::new(&item.assumption).size(small).strong().color(tokens.text_strong)).wrap());
                         });
                         if let Some(metric) = &item.diagnostic_metric {
-                            ui.add(egui::Label::new(egui::RichText::new(metric).size(10.5).color(tokens.text_primary)).wrap());
+                            ui.add(egui::Label::new(egui::RichText::new(metric).size(small).color(tokens.text_primary)).wrap());
                         }
-                        ui.add(egui::Label::new(egui::RichText::new(safe_text).size(10.5).color(tokens.text_muted)).wrap());
+                        ui.add(egui::Label::new(egui::RichText::new(safe_text).size(small).color(tokens.text_muted)).wrap());
                     });
                 ui.add_space(3.0);
             }
@@ -195,19 +196,19 @@ pub(super) fn render_results_interpret_studio(
             }
         }
         ResultsStudioTab::Guidance => {
-            ui.add(egui::Label::new(egui::RichText::new(tr(locale, "results.diagnostics_only")).size(10.5).color(tokens.text_muted)).wrap());
+            ui.add(egui::Label::new(egui::RichText::new(tr(locale, "results.diagnostics_only")).size(small).color(tokens.text_muted)).wrap());
             ui.add_space(4.0);
             let src_title = doc_sheet_title(doc, &rs.analysis.source_sheet_id).unwrap_or(rs.analysis.source_sheet_id.as_str());
-            ui.add(egui::Label::new(egui::RichText::new(format!("Analysis: {}", rs.title())).size(11.5).strong().color(tokens.text_strong)).wrap());
+            ui.add(egui::Label::new(egui::RichText::new(format!("Analysis: {}", rs.title())).size(small).strong().color(tokens.text_strong)).wrap());
             widgets::dim_label(ui, &format!("Source table: {src_title} • Pairwise comparisons: {}", rs.pairwise_comparisons.len()));
             if !rs.scalars.is_empty() {
                 ui.add_space(4.0);
                 widgets::subheader(ui, "Key Diagnostic Scalars");
                 for scalar in rs.scalars.iter().take(6) {
                     ui.horizontal_wrapped(|ui| {
-                        ui.add(egui::Label::new(egui::RichText::new(&scalar.key).size(11.0).color(tokens.text_muted)).wrap());
+                        ui.add(egui::Label::new(egui::RichText::new(&scalar.key).size(small).color(tokens.text_muted)).wrap());
                         ui.add(
-                            egui::Label::new(egui::RichText::new(format!("{:.4}", scalar.value)).size(11.0).strong().color(tokens.text_primary))
+                            egui::Label::new(egui::RichText::new(format!("{:.4}", scalar.value)).size(small).strong().color(tokens.text_primary))
                                 .wrap(),
                         );
                     });
@@ -264,7 +265,7 @@ pub(super) fn render_results_interpret_studio(
                 intents.push_ui("ui.result.copyMethodsReport", json!({ "result_sheet_id": rs.id.as_str(), "format": state.methods_format }));
             }
             if state.last_copied_methods {
-                ui.label(egui::RichText::new("Methods paragraph copied").size(10.5).color(tokens.link_green));
+                ui.label(egui::RichText::new("Methods paragraph copied").size(small).color(tokens.link_green));
             }
             ui.add_space(4.0);
             egui::Frame::NONE

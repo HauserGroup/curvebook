@@ -1,10 +1,15 @@
 //! Menu definitions, customizable shortcuts, and desktop UI command metadata.
 
+pub mod menu_bar;
 pub mod shortcuts;
 pub mod tooltips;
 pub mod ui_commands;
 
-pub use shortcuts::{ShortcutBinding, ShortcutExecution, ShortcutMatch, ShortcutRegistry, ShortcutScope, normalize_shortcut_combo};
+pub use menu_bar::{CuratedMenuNode, CuratedMenuSection, curated_menu_bar};
+pub use shortcuts::{
+    ShortcutBinding, ShortcutExecution, ShortcutMatch, ShortcutRegistry, ShortcutScope, format_shortcut_for_os, format_shortcut_for_platform,
+    normalize_shortcut_combo,
+};
 pub use tooltips::{
     CommandTooltip, MenuSectionTooltips, TOOLBAR_BUTTONS, ToolbarButtonSpec, ToolbarButtonTooltip, command_tooltip, menu_bar_tooltips,
     toolbar_caption_command_id, toolbar_tooltips,
@@ -37,6 +42,7 @@ pub const DESKTOP_HOST_ROUTED_COMMANDS: &[&str] = &[
     "file.close",
     "file.quit",
     "app.quit",
+    "edit.cut",
     "edit.copy",
     "edit.paste",
 ];

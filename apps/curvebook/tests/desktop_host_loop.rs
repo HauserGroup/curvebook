@@ -84,11 +84,7 @@ fn in_window_menus_chrome_and_menu_action_vs_native_mode() -> Result<(), Box<dyn
     assert!(chrome_in.menu_bar_visible);
     assert!(chrome_in.menu_bar_height_pt > 0.0);
     assert!(
-        chrome_in
-            .sections
-            .iter()
-            .flat_map(|s| s.items.iter())
-            .any(|item| item.command_id == "project.save" && item.localized_label == "Projekt speichern")
+        chrome_in.sections.iter().flat_map(|s| s.items.iter()).any(|item| item.command_id == "project.save" && item.localized_label == "Speichern")
     );
 
     let initial_nav = in_window_rt.window(w_in)?.app().nav.navigator_open;

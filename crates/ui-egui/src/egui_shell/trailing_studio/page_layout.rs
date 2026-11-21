@@ -179,7 +179,7 @@ pub(super) fn render_page_layout_composer_studio(
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
-        ui.label(egui::RichText::new(tr(locale, "inspector.layout.margins")).size(11.0).color(tokens.text_muted));
+        ui.label(egui::RichText::new(tr(locale, "inspector.layout.margins")).size(tokens.metrics.font_ui_small_pt).color(tokens.text_muted));
         if studio_chip(
             ui,
             tokens,
@@ -199,7 +199,9 @@ pub(super) fn render_page_layout_composer_studio(
         ) {
             state.layout_margin_mm = state.layout_margin_mm.saturating_sub(2).max(2);
         }
-        ui.label(egui::RichText::new(format!("{} mm", state.layout_margin_mm)).size(11.0).strong().color(tokens.text_primary));
+        ui.label(
+            egui::RichText::new(format!("{} mm", state.layout_margin_mm)).size(tokens.metrics.font_ui_small_pt).strong().color(tokens.text_primary),
+        );
         if studio_chip(
             ui,
             tokens,

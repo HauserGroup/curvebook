@@ -326,12 +326,16 @@ pub fn render_trailing_studio(
             ui.horizontal(|ui| {
                 let title = surface_localized_title(ctx_in.tokens.locale, surface);
                 let title_budget = (ui.available_width() - 32.0).max(40.0);
-                let mut job = egui::text::LayoutJob::simple_singleline(title.to_owned(), egui::FontId::proportional(13.0), ctx_in.tokens.text_strong);
+                let mut job = egui::text::LayoutJob::simple_singleline(
+                    title.to_owned(),
+                    egui::FontId::proportional(ctx_in.tokens.metrics.font_ui_title_pt),
+                    ctx_in.tokens.text_strong,
+                );
                 job.wrap = egui::text::TextWrapping { max_rows: 1, break_anywhere: true, overflow_character: Some('…'), ..Default::default() };
                 job.wrap.max_width = title_budget;
                 let galley = ui.fonts_mut(|f| f.layout_job(job));
                 let elided = galley.elided;
-                let (t_rect, t_resp) = ui.allocate_exact_size(Vec2::new(title_budget, 22.0), Sense::hover());
+                let (t_rect, t_resp) = ui.allocate_exact_size(Vec2::new(title_budget, 24.0), Sense::hover());
                 if ui.is_rect_visible(t_rect) {
                     let tp = Pos2::new(t_rect.min.x, t_rect.center().y - galley.size().y * 0.5);
                     let painter = ui.painter().with_clip_rect(t_rect);
@@ -440,5 +444,86 @@ pub fn render_trailing_studio(
         .rect;
 
     report.dock_rect_pt = Some(resp);
+    if !ctx_in.layout.trailing_collapsed_to_rail && ctx_in.layout.trailing_visible && ctx_in.layout.trailing_splitter_w_pt > 0.5 {
+        render_trailing_dock_splitter(ui, app, ctx_in, meta, intents);
+    }
     report
+}
+
+fn render_trailing_dock_splitter(
+    ui: &mut egui::Ui,
+    app: &UiApp,
+    ctx_in: TrailingStudioContext<'_>,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let tokens = ctx_in.tokens;
+    let metrics = tokens.metrics;
+    let splitter_w = ctx_in.layout.trailing_splitter_w_pt;
+    egui::Panel::right("egui_shell.trailing_dock_splitter")
+        .exact_size(splitter_w)
+        .resizable(false)
+        .frame(egui::Frame::NONE.fill(tokens.panel_bg))
+        .show(ui, |ui| {
+            let split_rect = ui.available_rect_before_wrap();
+            let _ = ui.allocate_rect(split_rect, Sense::hover());
+            let slop = ((metrics.splitter_hit_slop_w - split_rect.width()) * 0.5).max(0.0);
+            let hit_rect = split_rect.expand2(Vec2::new(slop, 0.0)).intersect(meta.viewport_rect);
+            ui.set_clip_rect(hit_rect);
+            let enabled = ctx_in.enabled;
+            let sense = if enabled { Sense::click_and_drag() } else { Sense::hover() };
+            let resp = ui.interact(hit_rect, ui.scope_id().with("inspector_dock_splitter"), sense);
+            resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Splitter, enabled, "Inspector Dock Splitter"));
+            if enabled && (resp.hovered() || resp.dragged()) {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            }
+            let line_col = if enabled && (resp.hovered() || resp.dragged()) { tokens.accent } else { tokens.border };
+            ui.painter().vline(split_rect.center().x, split_rect.y_range(), Stroke::new(1.0, line_col));
+
+            if enabled {
+                if resp.double_clicked() {
+                    let default_w = app.egui_views.workspace_preset.default_dock_config().trailing_width_pt;
+                    intents.push_sync_trailing_width(default_w);
+                } else if resp.dragged() {
+                    let delta_w = -resp.drag_delta().x;
+                    if delta_w.abs() > 0.01 {
+                        let vw = ui.ctx().content_rect().width().max(1.0);
+                        let target_center_min = if !ctx_in.layout.leading_collapsed_to_rail
+                            && !ctx_in.layout.trailing_collapsed_to_rail
+                            && vw >= metrics.inspector_collapse_breakpoint_w
+                        {
+                            480.0
+                        } else {
+                            metrics.center_stage_min_w
+                        };
+                        let max_for_center = (vw
+                            - ctx_in.layout.leading_dock_w_pt
+                            - ctx_in.layout.leading_splitter_w_pt
+                            - ctx_in.layout.trailing_splitter_w_pt
+                            - target_center_min)
+                            .max(metrics.inspector_min_w);
+                        let new_w =
+                            (ctx_in.layout.trailing_dock_w_pt + delta_w).clamp(metrics.inspector_min_w, metrics.inspector_max_w.min(max_for_center));
+                        intents.push_sync_trailing_width(new_w);
+                    }
+                }
+            }
+
+            meta.record_response(
+                ui,
+                &resp,
+                FrameInspectEntryInput {
+                    widget_id: "inspector.dock_splitter",
+                    role: "splitter",
+                    label: "Inspector Dock Splitter",
+                    command_id: None,
+                    value: Some(json!({ "width_pt": ctx_in.layout.trailing_dock_w_pt })),
+                    enabled,
+                    disabled_reason: (!enabled).then_some("modal dialog is active"),
+                    z_layer: ZLayer::SplitHandle,
+                    ellipsized: false,
+                    full_label: None,
+                },
+            );
+        });
 }

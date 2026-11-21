@@ -185,7 +185,6 @@ fn make_stage_driver<'a>(state: StageHarness, metrics: ViewportMetrics, tokens: 
             LayoutMetrics::default().solve_shell_layout(ShellLayoutInput {
                 viewport_w_pt: ui.available_width(),
                 viewport_h_pt: ui.available_height(),
-                presentation_mode: false,
                 empty_workspace: false,
                 navigator_open: true,
                 inspector_open: true,

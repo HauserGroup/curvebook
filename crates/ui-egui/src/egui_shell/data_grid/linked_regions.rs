@@ -10,7 +10,10 @@ use crate::inspect::ZLayer;
 use crate::views::grid_core::grid_tr;
 
 use super::super::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens};
-use super::shared::{CellTextStyle, GridRenderCtx, link_border_color32, record_meta_if_enabled, render_ellipsized_text};
+use super::shared::{
+    CellTextStyle, GridRenderCtx, is_linked_region_broken, link_border_color32, paint_broken_link_glyph, paint_dashed_rect_stroke,
+    record_meta_if_enabled, render_ellipsized_text,
+};
 use super::{ColumnGridEguiState, LinkedRegionPopover};
 
 pub(super) fn open_link_popover(state: &mut ColumnGridEguiState, reg: &LinkedDataRegion, locale: &str) {
@@ -44,19 +47,32 @@ pub(super) fn render_link_provenance_strip(
             }
             let chip_w = 240.0_f32.min((rem - 6.0).max(0.0));
             let chip_rect = Rect::from_min_size(pos2(cursor_x, strip_rect.top() + 3.0), vec2(chip_w, (strip_rect.height() - 6.0).max(16.0)));
-            let color = link_border_color32(reg.border_color(), tokens);
-            let label = if reg.provenance_summary.is_empty() {
+            let broken = is_linked_region_broken(rctx.app.document(), reg);
+            let color = if broken { tokens.link_red } else { link_border_color32(reg.border_color(), tokens) };
+            let raw_label = if reg.provenance_summary.is_empty() {
                 format!("{badge_lbl} #{}", idx + 1)
             } else {
                 format!("{badge_lbl}: {}", reg.provenance_summary)
             };
+            let label = if broken { format!("Broken {raw_label}") } else { raw_label };
             let sense = if blocked { Sense::hover() } else { Sense::click() };
             let resp = ui.interact(chip_rect, rctx.sheet_id_base.with(("link_badge", idx)), sense);
             let fill = if resp.hovered() && !blocked { color.gamma_multiply(0.24) } else { color.gamma_multiply(0.12) };
-            ui.painter().rect_filled(chip_rect, CornerRadius::same(3), fill);
-            ui.painter().rect_stroke(chip_rect, CornerRadius::same(3), Stroke::new(2.0, color), StrokeKind::Inside);
-            let (elided, _) =
-                render_ellipsized_text(ui, chip_rect, &label, CellTextStyle::plain(FontId::proportional(11.5), tokens.text_primary, Align::LEFT));
+            ui.painter().rect_filled(chip_rect, CornerRadius::same(tokens.metrics.radius_sm), fill);
+            if broken {
+                paint_dashed_rect_stroke(ui.painter(), chip_rect, Stroke::new(2.0, color));
+                let glyph_r = Rect::from_min_size(pos2(chip_rect.left() + 4.0, chip_rect.center().y - 6.0), vec2(12.0, 12.0));
+                paint_broken_link_glyph(ui.painter(), glyph_r, color);
+            } else {
+                ui.painter().rect_stroke(chip_rect, CornerRadius::same(tokens.metrics.radius_sm), Stroke::new(2.0, color), StrokeKind::Inside);
+            }
+            let text_rect = if broken { Rect::from_min_max(pos2(chip_rect.left() + 18.0, chip_rect.top()), chip_rect.max) } else { chip_rect };
+            let (elided, _) = render_ellipsized_text(
+                ui,
+                text_rect,
+                &label,
+                CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_primary, Align::LEFT),
+            );
             let acc_label = label.clone();
             resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, !blocked, acc_label.clone()));
             if elided {
@@ -273,23 +289,36 @@ pub(super) fn render_multi_link_strip(
     ui.painter().line_segment([pos2(strip_rect.min.x, strip_rect.max.y), pos2(strip_rect.max.x, strip_rect.max.y)], Stroke::new(1.0, tokens.divider));
     let mut cursor_x = strip_rect.min.x + 6.0;
     for (idx, reg) in ds.linked_regions.iter().enumerate() {
-        let color = link_border_color32(reg.spec.source.border_color(), tokens);
-        let badge_txt = format!("Link {}: {}", idx + 1, reg.provenance_summary);
+        let broken = is_linked_region_broken(app.document(), reg);
+        let color = if broken { tokens.link_red } else { link_border_color32(reg.spec.source.border_color(), tokens) };
+        let badge_txt = if broken {
+            format!("Broken Link {}: {}", idx + 1, reg.provenance_summary)
+        } else {
+            format!("Link {}: {}", idx + 1, reg.provenance_summary)
+        };
         #[allow(clippy::cast_precision_loss)]
-        let pill_w = (badge_txt.len() as f32 * 6.5 + 18.0).min(240.0);
+        let pill_w = (badge_txt.len() as f32 * 6.5 + if broken { 32.0 } else { 18.0 }).min(260.0);
         if cursor_x + pill_w > strip_rect.max.x - 4.0 {
             break;
         }
         let r = Rect::from_min_size(pos2(cursor_x, strip_rect.min.y + 2.0), vec2(pill_w, strip_rect.height() - 4.0));
         let wid = format!("grid.link_badge.{idx}");
         let resp = ui.interact(r, ui.make_persistent_id(&wid), Sense::click());
-        ui.painter().rect_filled(r, 3.0, color.linear_multiply(0.16));
-        ui.painter().rect_stroke(r, 3.0, Stroke::new(1.0, color), StrokeKind::Inside);
+        ui.painter().rect_filled(r, CornerRadius::same(tokens.metrics.radius_sm), color.gamma_multiply(0.16));
+        if broken {
+            paint_dashed_rect_stroke(ui.painter(), r, Stroke::new(1.5, color));
+            let glyph_r = Rect::from_min_size(pos2(r.left() + 4.0, r.center().y - 6.0), vec2(12.0, 12.0));
+            paint_broken_link_glyph(ui.painter(), glyph_r, color);
+        } else {
+            ui.painter().rect_stroke(r, CornerRadius::same(tokens.metrics.radius_sm), Stroke::new(1.0, color), StrokeKind::Inside);
+        }
+        let text_r =
+            if broken { Rect::from_min_max(pos2(r.left() + 18.0, r.top()), r.max).shrink2(vec2(3.0, 1.0)) } else { r.shrink2(vec2(5.0, 1.0)) };
         render_ellipsized_text(
             ui,
-            r.shrink2(vec2(5.0, 1.0)),
+            text_r,
             &badge_txt,
-            CellTextStyle::plain(FontId::proportional(11.0), tokens.text_primary, Align::LEFT),
+            CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_primary, Align::LEFT),
         );
         record_meta_if_enabled(
             ui,
@@ -359,7 +388,8 @@ pub(super) fn render_multi_link_guard_popover(
                         state.active_link_popover = None;
                     }
                 }
-                let ul = row.button("Unlink Region");
+                let can_unlink = !ds.frozen;
+                let ul = row.add_enabled(can_unlink, egui::Button::new("Unlink Region"));
                 record_meta_if_enabled(
                     row,
                     meta,
@@ -369,17 +399,17 @@ pub(super) fn render_multi_link_guard_popover(
                         widget_id: "grid.link_guard.unlink",
                         role: "button",
                         label: "Unlink Region",
-                        command_id: Some("table.unlinkRegion"),
+                        command_id: Some("table.clearCells"),
                         value: None,
-                        enabled: true,
-                        disabled_reason: None,
+                        enabled: can_unlink,
+                        disabled_reason: ds.frozen.then_some("Data sheet is frozen (read-only)."),
                         z_layer: ZLayer::ModalDialog,
                         ellipsized: false,
                         full_label: None,
                     },
                 );
-                if ul.clicked() {
-                    intents.push_engine("table.unlinkRegion", json!({ "sheet_id": ds.id.as_str(), "link_id": pop.region_id }));
+                if ul.clicked() && can_unlink {
+                    intents.push_engine("table.clearCells", json!({ "sheet_id": ds.id.as_str(), "cells": [], "unlink": true }));
                     state.active_link_popover = None;
                 }
                 let dis = row.button("Dismiss");

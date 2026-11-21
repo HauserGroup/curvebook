@@ -59,7 +59,7 @@ CurveBook is an integrated scientific workbench for structured tabular data entr
 
 ```mermaid
 flowchart TB
-    subgraph TopChrome["Top Window Chrome (70 pt total; hidden in Presentation Mode)"]
+    subgraph TopChrome["Top Window Chrome (70 pt total)"]
         AppBar["Tier 1: Application & Document Bar (32 pt)<br/>Home | Menus | Active Project Header | Command Search (Cmd/Ctrl+K) | Workspace Preset"]
         ActionStrip["Tier 2: Contextual Action Strip (38 pt)<br/>Sheet Lifecycle & Undo | Sheet-Adaptive Primary CTAs | Archetype Quick Actions | Overflow (...)"]
     end
@@ -113,7 +113,6 @@ Minimum supported desktop window size is **`640 × 420 pt`** (default **`1280 ×
 | **Wide Desktop** | `>= 1440 pt` | Both `Navigator` (`240 pt`) and `TrailingDock` (`280–310 pt`) open comfortably alongside a `>= 900 pt` `CenterStage` (ideal for side-by-side Split Comparison). `AppBar` shows full `Cmd/Ctrl+K` search field and workspace preset label. |
 | **Standard Laptop** | `960 – 1439 pt` | `Navigator` (`210–240 pt`), `CenterStage` (`>= 480 pt`), and `TrailingDock` (`250–280 pt`) remain simultaneously visible; `ActionStrip` condenses secondary labels into icon+tooltip buttons before spilling to `⋯`. |
 | **Compact / Tablet** | `640 – 959 pt` | Auto-collapses in strict priority order to preserve `>= 360 pt` for `CenterStage`: (1) `AppBar` search field condenses to a search icon; (2) `TrailingDock` collapses into a `36 pt` vertical tab strip (opening as an overlay flyout when clicked); (3) if `< 760 pt`, `Navigator` collapses into a `36 pt` leading icon strip; (4) Center Split switches from horizontal (`Left || Right`) to vertical (`Top / Bottom`) below `720 pt`. |
-| **Presentation Mode** | Any (`Cmd/Ctrl+Shift+P` / `F11`) | Hides `AppBar`, `ActionStrip`, `Navigator`, `TrailingDock`, and `StatusBar` (`0 pt`), giving **100%** of viewport area to the active `GraphSheet`, `LayoutSheet`, or `PortfolioGallery` (`Escape` exits). |
 
 ### 2.4 Keyboard Focus Cycling & RTL Mirroring
 
@@ -133,7 +132,7 @@ Minimum supported desktop window size is **`640 × 420 pt`** (default **`1280 ×
   - Platform window caption clearance on macOS transparent titlebars (with double-click-to-zoom drag area on empty bar space).
   - **Home / Launcher Button** (`20 × 20 pt`, hit box `28 × 28 pt`): Toggles the Project Launcher / Template Hub without closing the current project.
   - **Menu Bar:** Routed to the native macOS menu bar via macOS-only `muda` (`cfg(target_os = "macos")`, `default-features = false`) while keeping the in-`egui` `MenuBar` active on Windows/Linux/FreeBSD, under `--in-window-menus`, and across `EguiHumanPathDriver`/`egui_kittest` runs with an automated `command_id`/enablement parity test:
-    `File` · `Edit` · `View` · `Insert` · `Data` · `Analyze` · `Graph` · `Arrange` · `Window` · `Help`.
+    `File` · `Edit` · `View` · `Insert` · `Data` · `Analyze` · `Graph` · `Help`.
 - **Middle Cluster — Active Project Header / Optional Multi-Project Tabs:**
   - In **Beta**, renders the active project header and dirty-state indicator (`•`) for `apps/curvebook`'s single-session window; multi-project in-window document tabs (`.curvebook` tab strip, `+` new project, OS window drag-out, and `Window › Consolidate / Tile`) are optional post-Beta enhancements.
 - **Trailing Cluster (Right-to-Left Fit Solver):**
@@ -585,7 +584,7 @@ Includes cross-jump buttons (`Change Graph Type…`, `Format Axes…`) plus `Can
 
 | Token | Logical Value | Scaling & Ergonomic Rule |
 |---|---|---|
-| `chrome.app_bar_h` | `32 pt` | Scales by `round(px * scale_factor)`; `0 pt` in Presentation Mode |
+| `chrome.app_bar_h` | `32 pt` | Scales by `round(px * scale_factor)` |
 | `chrome.action_strip_h` | `38 pt` | Single horizontal row; overflow items collapse into trailing `⋯` popup |
 | `chrome.status_bar_h` | `26 pt` | Fixed single-line footer; tabular numerals for quick-stats & zoom |
 | `dock.navigator_w` | `240 pt` (`180–380 pt`) | Collapses to `36 pt` icon rail; auto-collapses below `760 pt` window width |
@@ -633,7 +632,7 @@ Every desktop layout change in `crates/ui-egui` and `apps/curvebook` must pass (
 
 ## 10. Visual Design Rules
 
-> **Status:** Proposed. These rules apply within the structure set by §1–9. Token names below are design names. Values marked *new* are not yet in `LayoutMetrics`, `Tokens`, or the font setup (`crates/ui-egui/src/egui_shell/mod.rs`, `crates/ui-egui/src/egui_shell/fonts.rs`); until they land there, these rules guide new code only. Existing values map to the §9.1 fields (`font_ui_body_pt`, `font_ui_small_pt`, `font_grid_numeral_pt`, `grid_row_h`, `min_toolbar_target_pt`). All sizes are logical points at `1.0x`.
+> **Status:** Accepted. These rules apply across the structure set by §1–9. The §10.1–10.6 design tokens, spacing/type/radius scales, bold system UI face (`type.section` with `14 pt` regular fallback when no bold face is present), 150 ms motion cap, hover contrast (`>= 3:1` border + elevated fill delta), modal footer button ordering, and §10.5 broken-link glyph/pattern live in `LayoutMetrics`, `Tokens` (`crates/ui-egui/src/egui_shell/mod.rs`), `UiThemeSpec` (`crates/ui-egui/src/theme.rs`), and `crates/ui-egui/src/egui_shell/fonts.rs`. Token names below map directly to `LayoutMetrics` and `Tokens` fields; all sizes are logical points at `1.0x`.
 
 ### 10.1 Spacing Scale
 

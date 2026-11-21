@@ -789,7 +789,6 @@ fn r2_s10_09_split_pane_preserves_primary_singleton_geometry() -> TestRes {
             let layout = LayoutMetrics::CANONICAL.solve_shell_layout(curvebook_ui_egui::egui_shell::ShellLayoutInput {
                 viewport_w_pt: ui.max_rect().width(),
                 viewport_h_pt: ui.max_rect().height(),
-                presentation_mode: false,
                 empty_workspace: false,
                 navigator_open: false,
                 inspector_open: false,

@@ -39,8 +39,12 @@ fn build_column_app(cols: usize, rows: usize) -> Result<(UiApp, SheetId), String
 #[test]
 fn rv75_context_scoped_cmd_t_shortcuts_rebind_and_conflicts() -> TestRes {
     // Integrated UI command & i18n invariants:
-    assert_eq!(UI_COMMANDS.len(), 54, "UI_COMMANDS length should be 54 after R13.8 Part 2 and app.feedback");
-    assert_eq!(catalog_len(), 858, "i18n::catalog_len() should be 858 after R13.8 Part 2, app.feedback, and R15-GUI-14 welcome keys");
+    assert_eq!(UI_COMMANDS.len(), 53, "UI_COMMANDS length should be 53 after R13.8 Part 2, app.feedback, and R15-GUI-35");
+    assert_eq!(
+        catalog_len(),
+        867,
+        "i18n::catalog_len() should be 867 after R13.8 Part 2, app.feedback, R15-GUI-14 welcome keys, R15-GUI-35, and R15-GUI-34"
+    );
     assert!(UI_COMMANDS.iter().any(|c| c.id == "ui.editParams.open" && c.shortcut == "Cmd+T"));
     for entry in w8_rv_ui::STAGED_ENTRIES {
         assert_eq!(entry.translations.len(), LOCALES.len());

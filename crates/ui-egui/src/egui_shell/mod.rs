@@ -320,7 +320,8 @@ impl UiBackend {
     }
 }
 
-/// Canonical `1.0x` logical-point geometry and typography tokens (`docs/planning/gui-layout-spec.md` §9.1).
+/// Canonical `1.0x` logical-point geometry, spacing, typography, radius, and motion tokens
+/// (`docs/planning/gui-layout-spec.md` §9.1 & §10).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayoutMetrics {
     pub app_bar_h: f32,
@@ -348,6 +349,20 @@ pub struct LayoutMetrics {
     pub font_ui_body_pt: f32,
     pub font_ui_small_pt: f32,
     pub font_grid_numeral_pt: f32,
+    pub font_ui_section_pt: f32,
+    pub font_ui_title_pt: f32,
+    pub font_ui_display_pt: f32,
+    pub space_xxs: f32,
+    pub space_xs: f32,
+    pub space_sm: f32,
+    pub space_md: f32,
+    pub space_lg: f32,
+    pub space_xl: f32,
+    pub space_xxl: f32,
+    pub radius_sm: u8,
+    pub radius_md: u8,
+    pub radius_lg: u8,
+    pub max_motion_sec: f32,
     pub min_window_w_pt: f32,
     pub min_window_h_pt: f32,
     pub default_window_w_pt: f32,
@@ -356,7 +371,7 @@ pub struct LayoutMetrics {
 }
 
 impl LayoutMetrics {
-    /// Canonical `1.0x` logical-point metrics from `docs/planning/gui-layout-spec.md` §9.1.
+    /// Canonical `1.0x` logical-point metrics from `docs/planning/gui-layout-spec.md` §9.1 & §10.
     pub const CANONICAL: Self = Self {
         app_bar_h: 32.0,
         action_strip_h: 38.0,
@@ -383,6 +398,20 @@ impl LayoutMetrics {
         font_ui_body_pt: 13.0,
         font_ui_small_pt: 11.5,
         font_grid_numeral_pt: 12.5,
+        font_ui_section_pt: 13.0,
+        font_ui_title_pt: 15.0,
+        font_ui_display_pt: 18.0,
+        space_xxs: 2.0,
+        space_xs: 4.0,
+        space_sm: 6.0,
+        space_md: 8.0,
+        space_lg: 12.0,
+        space_xl: 16.0,
+        space_xxl: 24.0,
+        radius_sm: 2,
+        radius_md: 4,
+        radius_lg: 6,
+        max_motion_sec: 0.15,
         min_window_w_pt: 640.0,
         min_window_h_pt: 420.0,
         default_window_w_pt: 1280.0,
@@ -404,16 +433,16 @@ impl LayoutMetrics {
         (safe_pt * safe_scale).round()
     }
 
-    /// Total top chrome height (`70 pt` normally, `0 pt` in Presentation Mode).
+    /// Total top chrome height (`70 pt`).
     #[must_use]
-    pub const fn top_chrome_height(self, presentation_mode: bool) -> f32 {
-        if presentation_mode { 0.0 } else { self.app_bar_h + self.action_strip_h }
+    pub const fn top_chrome_height(self) -> f32 {
+        self.app_bar_h + self.action_strip_h
     }
 
-    /// Bottom status footer height (`26 pt` normally, `0 pt` in Presentation Mode).
+    /// Bottom status footer height (`26 pt`).
     #[must_use]
-    pub const fn status_bar_height(self, presentation_mode: bool) -> f32 {
-        if presentation_mode { 0.0 } else { self.status_bar_h }
+    pub const fn status_bar_height(self) -> f32 {
+        self.status_bar_h
     }
 
     /// Combined 3-tier frozen column-grid header height (`64 pt`).
@@ -437,29 +466,6 @@ impl LayoutMetrics {
             ViewportTier::NarrowHeadless
         };
         let split_orientation = if w >= self.split_vertical_breakpoint_w { SplitOrientation::Horizontal } else { SplitOrientation::Vertical };
-
-        if input.presentation_mode {
-            return ResponsiveShellLayout {
-                tier,
-                top_chrome_h_pt: 0.0,
-                tier1_app_bar_h_pt: 0.0,
-                tier2_action_strip_h_pt: 0.0,
-                status_bar_h_pt: 0.0,
-                leading_dock_w_pt: 0.0,
-                leading_collapsed_to_rail: false,
-                leading_visible: false,
-                leading_splitter_w_pt: 0.0,
-                family_visible: false,
-                trailing_dock_w_pt: 0.0,
-                trailing_collapsed_to_rail: false,
-                trailing_visible: false,
-                trailing_splitter_w_pt: 0.0,
-                center_stage_w_pt: w,
-                center_stage_h_pt: h,
-                split_orientation,
-                rtl_mirrored: false,
-            };
-        }
 
         let tier1_app_bar_h_pt = self.app_bar_h.min(h * 0.45).max(0.0);
         let tier2_action_strip_h_pt = self.action_strip_h.min((h - tier1_app_bar_h_pt).max(0.0) * 0.65).max(0.0);
@@ -622,7 +628,6 @@ pub enum SplitOrientation {
 pub struct ShellLayoutInput {
     pub viewport_w_pt: f32,
     pub viewport_h_pt: f32,
-    pub presentation_mode: bool,
     pub empty_workspace: bool,
     pub navigator_open: bool,
     pub inspector_open: bool,
@@ -743,6 +748,7 @@ pub struct Tokens {
     pub border: Color32,
     pub divider: Color32,
     pub hover_bg: Color32,
+    pub hover_border: Color32,
     pub active_bg: Color32,
     pub focus_ring: Color32,
     pub input_bg: Color32,
@@ -756,6 +762,8 @@ pub struct Tokens {
     pub icon: Color32,
     pub accent: Color32,
     pub accent_strong: Color32,
+    pub accent_hover: Color32,
+    pub on_accent: Color32,
     pub paper_white: Color32,
     pub scrim: Color32,
     pub role_num: Color32,
@@ -808,12 +816,13 @@ impl Tokens {
                 header_bg: Color32::from_rgb(232, 236, 242),
                 border,
                 divider: Color32::from_rgb(214, 219, 228),
-                hover_bg: Color32::from_rgb(228, 234, 244),
-                active_bg: Color32::from_rgb(212, 224, 245),
+                hover_bg: Color32::from_rgb(196, 213, 242),
+                hover_border: Color32::from_rgb(29, 78, 216),
+                active_bg: Color32::from_rgb(176, 200, 238),
                 focus_ring: Color32::from_rgb(29, 78, 216),
                 input_bg: Color32::WHITE,
                 input_border: Color32::from_rgb(132, 140, 154),
-                button_bg: Color32::from_rgb(232, 236, 242),
+                button_bg: Color32::from_rgb(238, 241, 246),
                 button_border: Color32::from_rgb(120, 129, 145),
                 text_primary,
                 text_strong: Color32::from_rgb(15, 19, 26),
@@ -822,6 +831,8 @@ impl Tokens {
                 icon: Color32::from_rgb(38, 45, 58),
                 accent,
                 accent_strong: Color32::from_rgb(24, 64, 184),
+                accent_hover: Color32::from_rgb(18, 49, 148),
+                on_accent: Color32::WHITE,
                 paper_white: rgba8_to_color32(spec.paper_white),
                 scrim: Color32::from_rgba_unmultiplied(15, 23, 42, 128),
                 role_num: Color32::from_rgb(29, 78, 216),
@@ -846,12 +857,13 @@ impl Tokens {
                 header_bg: Color32::from_rgb(38, 43, 53),
                 border,
                 divider: Color32::from_rgb(56, 63, 76),
-                hover_bg: Color32::from_rgb(45, 52, 66),
-                active_bg: Color32::from_rgb(52, 66, 92),
+                hover_bg: Color32::from_rgb(58, 74, 104),
+                hover_border: Color32::from_rgb(96, 165, 250),
+                active_bg: Color32::from_rgb(44, 64, 98),
                 focus_ring: Color32::from_rgb(96, 165, 250),
                 input_bg: Color32::from_rgb(20, 23, 29),
                 input_border: border,
-                button_bg: Color32::from_rgb(43, 49, 60),
+                button_bg: Color32::from_rgb(40, 46, 56),
                 button_border: Color32::from_rgb(112, 123, 140),
                 text_primary,
                 text_strong: Color32::from_rgb(248, 250, 252),
@@ -860,6 +872,8 @@ impl Tokens {
                 icon: Color32::from_rgb(212, 220, 232),
                 accent,
                 accent_strong: Color32::from_rgb(37, 99, 235),
+                accent_hover: Color32::from_rgb(29, 78, 216),
+                on_accent: Color32::WHITE,
                 paper_white: rgba8_to_color32(spec.paper_white),
                 scrim: Color32::from_rgba_unmultiplied(15, 23, 42, 128),
                 role_num: Color32::from_rgb(96, 165, 250),
@@ -884,12 +898,13 @@ impl Tokens {
                 header_bg: Color32::from_rgb(22, 26, 34),
                 border,
                 divider: Color32::from_rgb(160, 170, 188),
-                hover_bg: Color32::from_rgb(32, 38, 52),
-                active_bg: Color32::from_rgb(38, 60, 96),
+                hover_bg: Color32::from_rgb(42, 64, 102),
+                hover_border: Color32::from_rgb(125, 211, 252),
+                active_bg: Color32::from_rgb(26, 76, 128),
                 focus_ring: Color32::from_rgb(125, 211, 252),
                 input_bg: Color32::BLACK,
                 input_border: border,
-                button_bg: Color32::from_rgb(24, 28, 36),
+                button_bg: Color32::from_rgb(20, 24, 32),
                 button_border: Color32::from_rgb(210, 218, 230),
                 text_primary,
                 text_strong: Color32::WHITE,
@@ -898,6 +913,8 @@ impl Tokens {
                 icon: Color32::WHITE,
                 accent,
                 accent_strong: Color32::from_rgb(14, 116, 144),
+                accent_hover: Color32::from_rgb(10, 88, 112),
+                on_accent: Color32::WHITE,
                 paper_white: rgba8_to_color32(spec.paper_white),
                 scrim: Color32::from_rgba_unmultiplied(15, 23, 42, 128),
                 role_num: Color32::from_rgb(125, 211, 252),
@@ -930,25 +947,31 @@ impl Tokens {
         visuals.extreme_bg_color = self.input_bg;
         visuals.faint_bg_color = self.header_bg;
         visuals.window_stroke = Stroke::new(1.0, self.border);
-        visuals.window_corner_radius = CornerRadius::same(6);
+        visuals.window_corner_radius = CornerRadius::same(self.metrics.radius_lg);
         visuals.selection.bg_fill = self.active_bg;
         visuals.selection.stroke = Stroke::new(2.0, self.focus_ring);
+        let md_radius = CornerRadius::same(self.metrics.radius_md);
+        visuals.widgets.noninteractive.corner_radius = md_radius;
         visuals.widgets.noninteractive.bg_fill = self.panel_bg;
         visuals.widgets.noninteractive.weak_bg_fill = self.panel_bg;
         visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, self.border);
         visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, self.text_primary);
+        visuals.widgets.inactive.corner_radius = md_radius;
         visuals.widgets.inactive.bg_fill = self.button_bg;
         visuals.widgets.inactive.weak_bg_fill = self.button_bg;
         visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, self.button_border);
         visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, self.text_primary);
+        visuals.widgets.hovered.corner_radius = md_radius;
         visuals.widgets.hovered.bg_fill = self.hover_bg;
         visuals.widgets.hovered.weak_bg_fill = self.hover_bg;
-        visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, self.focus_ring);
+        visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, self.hover_border);
         visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, self.text_strong);
+        visuals.widgets.active.corner_radius = md_radius;
         visuals.widgets.active.bg_fill = self.active_bg;
         visuals.widgets.active.weak_bg_fill = self.active_bg;
         visuals.widgets.active.bg_stroke = Stroke::new(2.0, self.focus_ring);
         visuals.widgets.active.fg_stroke = Stroke::new(1.0, self.text_strong);
+        visuals.widgets.open.corner_radius = md_radius;
         visuals.widgets.open.bg_fill = self.hover_bg;
         visuals.widgets.open.weak_bg_fill = self.hover_bg;
         visuals.widgets.open.bg_stroke = Stroke::new(1.0, self.border);
@@ -956,14 +979,15 @@ impl Tokens {
         visuals
     }
 
-    /// Apply theme visuals, canonical typography sizes, and non-overlapping scrollbar metrics to `style`.
+    /// Apply theme visuals, canonical typography sizes, motion cap (`<= 150 ms`), and non-overlapping scrollbar metrics to `style`.
     pub fn configure_style(&self, style: &mut egui::Style) {
         style.visuals = self.to_visuals();
         style.text_styles.insert(TextStyle::Body, FontId::proportional(self.metrics.font_ui_body_pt));
         style.text_styles.insert(TextStyle::Button, FontId::proportional(self.metrics.font_ui_body_pt));
         style.text_styles.insert(TextStyle::Small, FontId::proportional(self.metrics.font_ui_small_pt));
         style.text_styles.insert(TextStyle::Monospace, FontId::monospace(self.metrics.font_grid_numeral_pt));
-        style.text_styles.insert(TextStyle::Heading, FontId::proportional(15.0));
+        style.text_styles.insert(TextStyle::Heading, FontId::proportional(self.metrics.font_ui_title_pt));
+        style.animation_time = style.animation_time.min(self.metrics.max_motion_sec);
 
         style.spacing.scroll.floating = false;
         style.spacing.scroll.bar_width = self.metrics.scroll_bar_thickness;
@@ -1005,9 +1029,17 @@ impl Tokens {
             (self.text_primary, self.panel_bg),
             (self.text_primary, self.app_bar),
             (self.text_primary, self.header_bg),
+            (self.text_primary, self.hover_bg),
+            (self.text_primary, self.active_bg),
+            (self.text_strong, self.hover_bg),
+            (self.text_strong, self.active_bg),
             (self.text_muted, self.surface_bg),
             (self.text_muted, self.panel_bg),
             (self.text_muted, self.app_bar),
+            (self.text_muted, self.hover_bg),
+            (self.text_muted, self.active_bg),
+            (self.on_accent, self.accent_strong),
+            (self.on_accent, self.accent_hover),
         ];
         let ui_pairs = [
             (self.border, self.surface_bg),
@@ -1015,13 +1047,20 @@ impl Tokens {
             (self.input_border, self.surface_bg),
             (self.button_border, self.panel_bg),
             (self.focus_ring, self.surface_bg),
+            (self.hover_border, self.panel_bg),
+            (self.hover_border, self.surface_bg),
+            (self.hover_border, self.hover_bg),
             (self.role_num, self.surface_bg),
             (self.role_cat, self.surface_bg),
             (self.role_lbl, self.surface_bg),
             (self.role_fx, self.surface_bg),
         ];
+        let hover_vs_panel = color32_to_rgba8(self.hover_bg).contrast_ratio(color32_to_rgba8(self.panel_bg)) >= 1.30;
+        let hover_vs_btn = color32_to_rgba8(self.hover_bg).contrast_ratio(color32_to_rgba8(self.button_bg)) >= 1.25;
         text_pairs.into_iter().all(|(fg, bg)| color32_to_rgba8(fg).contrast_ratio(color32_to_rgba8(bg)) >= 4.5)
             && ui_pairs.into_iter().all(|(fg, bg)| color32_to_rgba8(fg).contrast_ratio(color32_to_rgba8(bg)) >= 3.0)
+            && hover_vs_panel
+            && hover_vs_btn
     }
 }
 
@@ -1050,6 +1089,7 @@ pub enum UiIntent {
     SetSplitRatio { ratio: f64 },
     SetPreviewFilter { filter: CanvasPreviewFilter },
     SetPaletteOpen { open: bool },
+    OpenCheckpointsDialog,
     SetLauncherOpen { open: bool },
     ApplyWorkspacePreset { preset: WorkspacePreset },
     SyncLeadingWidth { width_pt: f32 },
@@ -1841,6 +1881,22 @@ fn apply_single_ui_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentO
             Ok(UiIntentOutcome::Engine { command_id, outcome })
         }
         UiIntent::UiCommand { command_id, params } => {
+            if command_id == "edit.cut" {
+                return apply_wave4_grid_wizard_intent(app, UiIntent::GridCutSelection);
+            }
+            if command_id == "edit.copy" {
+                return apply_wave4_grid_wizard_intent(app, UiIntent::WorkspaceCopy { dpi: 144 });
+            }
+            if command_id == "edit.paste" {
+                let doc = app.session.document();
+                let active_id = doc.active_sheet_id.clone();
+                if active_id.as_ref().is_some_and(|id| doc.data_sheet(id).is_some()) {
+                    return apply_wave4_grid_wizard_intent(app, UiIntent::GridPasteFromClipboard { start_coord: None });
+                }
+                if let Some(target_sheet_id) = crate::interaction::resolve_figure_sheet_for_shortcut(app) {
+                    return apply_wave4_grid_wizard_intent(app, UiIntent::CanvasPaste { target_sheet_id, anchor_pt: None });
+                }
+            }
             let result = dispatch_ui_command_as_ui(app, &command_id, &params)?;
             Ok(UiIntentOutcome::Ui { command_id, result })
         }
@@ -1959,6 +2015,10 @@ fn apply_shell_workspace_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiI
             } else if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::CommandPalette) {
                 app.canvas_dialogs.active_dialog = ActiveDialog::None;
             }
+        }
+        UiIntent::OpenCheckpointsDialog => {
+            let doc = app.session.document().clone();
+            app.canvas_dialogs.open_checkpoints(&doc);
         }
         UiIntent::SetLauncherOpen { open } => {
             app.egui_views.launcher_open = open;
@@ -2948,9 +3008,8 @@ mod tests {
             assert_eq!(visuals.widgets.active.weak_bg_fill, tokens.active_bg);
             assert_eq!(visuals.widgets.open.weak_bg_fill, tokens.hover_bg);
         }
-        assert_eq!(LayoutMetrics::CANONICAL.top_chrome_height(false), 70.0);
-        assert_eq!(LayoutMetrics::CANONICAL.top_chrome_height(true), 0.0);
-        assert_eq!(LayoutMetrics::CANONICAL.status_bar_height(false), 26.0);
+        assert_eq!(LayoutMetrics::CANONICAL.top_chrome_height(), 70.0);
+        assert_eq!(LayoutMetrics::CANONICAL.status_bar_height(), 26.0);
         assert_eq!(LayoutMetrics::CANONICAL.grid_header_total_height(), 64.0);
         assert_eq!(ScientificPaletteTokens::okabe_ito_series().len(), 8);
         assert_eq!(ScientificPaletteTokens::viridis_stops().len(), 17);
@@ -3044,14 +3103,13 @@ mod tests {
     }
 
     #[test]
-    fn responsive_shell_layout_enforces_spec_breakpoints_and_presentation_mode() {
+    fn responsive_shell_layout_enforces_spec_breakpoints() {
         use super::{ShellLayoutInput, SplitOrientation, ViewportTier, WorkspacePreset};
 
         let metrics = LayoutMetrics::CANONICAL;
         let base_in = ShellLayoutInput {
             viewport_w_pt: 1440.0,
             viewport_h_pt: 900.0,
-            presentation_mode: false,
             empty_workspace: false,
             navigator_open: true,
             inspector_open: true,
@@ -3088,14 +3146,6 @@ mod tests {
         assert!(tablet_640.trailing_collapsed_to_rail);
         assert_eq!(tablet_640.split_orientation, SplitOrientation::Vertical);
         assert!(tablet_640.center_stage_w_pt >= 360.0);
-
-        let present = metrics.solve_shell_layout(ShellLayoutInput { presentation_mode: true, ..base_in });
-        assert_eq!(present.top_chrome_h_pt, 0.0);
-        assert_eq!(present.status_bar_h_pt, 0.0);
-        assert!(!present.leading_visible);
-        assert!(!present.trailing_visible);
-        assert_eq!(present.center_stage_w_pt, 1440.0);
-        assert_eq!(present.center_stage_h_pt, 900.0);
 
         for preset in WorkspacePreset::ALL {
             assert_eq!(WorkspacePreset::parse(preset.as_str()), Some(preset));

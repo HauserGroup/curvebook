@@ -20,11 +20,12 @@ use super::headers::{render_multi_column_headers, render_multi_corner, row_title
 use super::inline_edit::{begin_inline_edit, render_multi_inline_editors};
 use super::linked_regions::{open_link_popover, render_multi_link_guard_popover, render_multi_link_strip};
 use super::mv_roles::{active_mv_formula_operands, render_mv_role_menu_popup};
+use super::shared::LinkedEdgePaint;
 use super::shared::{
     AuxInlineTarget, CellTextStyle, ContextCellTarget, ContextMenuState, MultiGridAuxState, MultiGridCtx, MultiGridFrameState, MultiGridGeom,
     alt_row_fill, any_pointer_click_in, clamp_multi_scroll, clear_grid_drag_anchor_if_released, compute_multi_geom, compute_multi_scrollbar_rects,
     compute_visible_range, ensure_solid_scrollbar_style, format_cell_into, forward_frozen_wheel, handle_cell_pointer_drag_select,
-    initial_edit_text_for_cell, is_multi_click_edit, link_border_color32, multi_text_style, paint_exclusion_corner_marker,
+    initial_edit_text_for_cell, is_linked_region_broken, is_multi_click_edit, link_border_color32, multi_text_style, paint_exclusion_corner_marker,
     paint_linked_perimeter_edges, record_meta_if_enabled, render_ellipsized_text, set_grid_focus_active,
 };
 use super::shortcuts::{
@@ -180,7 +181,7 @@ fn render_multi_gutter_body(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut M
                     gui,
                     num_r.shrink2(vec2(4.0, 0.0)),
                     &row_str,
-                    multi_text_style(11.0, true, tokens.text_muted, Align::RIGHT, false, false),
+                    multi_text_style(tokens.metrics.font_ui_small_pt, true, tokens.text_muted, Align::RIGHT, false, false),
                 );
                 let acc_rn = format!("Row {}", row + 1);
                 resp.widget_info(move || WidgetInfo::labeled(egui::Role::RowHeader, !blocked, acc_rn.clone()));
@@ -226,7 +227,7 @@ fn render_multi_gutter_body(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut M
                         gui,
                         rt_r.shrink2(vec2(3.0, 0.0)),
                         &abbr,
-                        CellTextStyle::plain(FontId::proportional(11.0), tokens.text_muted, Align::Center),
+                        CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted, Align::Center),
                     );
                     let acc_c = format!("Row {} Title {}", row + 1, row_title);
                     resp.widget_info(move || WidgetInfo::labeled(egui::Role::Label, true, acc_c.clone()));
@@ -677,15 +678,9 @@ fn paint_single_multi_data_cell(
     }
     if let Some(reg) = flags.linked {
         let (_, span_subs) = geom.col_span_flat(coord.col);
-        paint_linked_perimeter_edges(
-            body_ui,
-            raw_cell_r,
-            clipped,
-            reg,
-            coord,
-            span_subs,
-            link_border_color32(reg.spec.source.border_color(), tokens),
-        );
+        let broken = is_linked_region_broken(mctx.app.document(), reg);
+        let lc = if broken { tokens.link_red } else { link_border_color32(reg.spec.source.border_color(), tokens) };
+        paint_linked_perimeter_edges(body_ui, raw_cell_r, clipped, &LinkedEdgePaint { reg, coord, subs_per_col: span_subs, color: lc, broken });
     }
     if flags.excluded {
         paint_exclusion_corner_marker(body_ui, raw_cell_r, clipped, ds, coord, tokens);
@@ -822,7 +817,10 @@ fn handle_multi_data_cell_interactions(
         && let Some(pos) = resp.interact_pointer_pos()
     {
         fstate.aux.selected_x_cell = None;
-        fstate.intents.push_select_grid_cell(coord);
+        let already_selected = app.grid.selected_coords.contains(&coord) || app.grid.tool.active == Some(coord);
+        if !already_selected {
+            fstate.intents.push_select_grid_cell(coord);
+        }
         fstate.aux.context_menu = Some(ContextMenuState {
             pos,
             row: coord.row,
@@ -864,68 +862,188 @@ fn cell_is_survival_event(ds: &DataSheet, cell: Option<&Cell>) -> bool {
     matches!(cell.map(|c| &c.value), Some(CellValue::Number(v)) if (*v - s.event_code as f64).abs() < 1e-6)
 }
 
-fn render_row_context_menu_popup(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut MultiGridFrameState<'_>) {
-    let app = mctx.app;
-    let ds = mctx.ds;
-    let tokens = mctx.tokens;
-    let Some(ctx_menu) = fstate.aux.context_menu.clone() else { return };
+fn find_linked_graph_for_data_sheet<'a>(app: &'a UiApp, ds_id: &curvebook_doc::SheetId) -> Option<&'a curvebook_doc::GraphSheet> {
+    let doc = app.document();
+    if let Some(active) = doc.active_sheet_id.as_ref().and_then(|id| doc.graph_sheet(id))
+        && (active.spec.primary_source_sheet_id == *ds_id
+            || doc.result_sheet(&active.spec.primary_source_sheet_id).is_some_and(|r| r.analysis.source_sheet_id == *ds_id))
+    {
+        return Some(active);
+    }
+    doc.graph_sheets.iter().find(|g| g.spec.primary_source_sheet_id == *ds_id).or_else(|| {
+        doc.graph_sheets.iter().find(|g| doc.result_sheet(&g.spec.primary_source_sheet_id).is_some_and(|r| r.analysis.source_sheet_id == *ds_id))
+    })
+}
+
+fn row_title_or_default(ds: &DataSheet, row: usize) -> String {
+    let raw = row_title_at(&ds.archetype, row);
+    if raw.trim().is_empty() { format!("Row {}", row + 1) } else { raw }
+}
+
+pub(super) struct GridContextMenuHost<'a> {
+    pub(super) app: &'a UiApp,
+    pub(super) ds: &'a DataSheet,
+    pub(super) tokens: &'a Tokens,
+    pub(super) blocked: bool,
+    pub(super) selected_x_cell: Option<(usize, usize)>,
+}
+
+pub(super) fn render_grid_context_menu_popup(
+    ui: &mut Ui,
+    host: &GridContextMenuHost<'_>,
+    context_menu: &mut Option<ContextMenuState>,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let app = host.app;
+    let ds = host.ds;
+    let tokens = host.tokens;
+    let Some(ctx_menu) = context_menu.clone() else { return };
     let (pos, row, cell_ctx) = (ctx_menu.pos, ctx_menu.row, ctx_menu.cell);
-    if mctx.blocked {
-        fstate.aux.context_menu = None;
+    if host.blocked {
+        *context_menu = None;
         return;
     }
+
+    let linked_graph = find_linked_graph_for_data_sheet(app, &ds.id);
+    let has_graph = linked_graph.is_some();
+    let row_override_points: Vec<serde_json::Value> = linked_graph
+        .map(|g| {
+            g.spec
+                .point_overrides
+                .iter()
+                .filter(|ov| ov.point_index == row)
+                .map(|ov| match ov.subcol {
+                    Some(sc) => json!({ "series_index": ov.series_index, "point_index": ov.point_index, "subcol": sc }),
+                    None => json!({ "series_index": ov.series_index, "point_index": ov.point_index }),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     let area_resp = egui::Area::new(Id::unique(("grid_ctx_menu", ds.id.as_str()))).fixed_pos(pos).order(Order::Foreground).show(ui.ctx(), |m| {
         egui::Frame::popup(m.style()).fill(tokens.panel_bg).stroke(Stroke::new(1.0, tokens.border)).show(m, |list| {
             list.set_min_width(210.0);
             list.label(egui::RichText::new(format!("Row {} Actions", row + 1)).strong().size(11.5).color(tokens.text_muted));
             list.separator();
-            for (wid, label) in [
-                ("grid.ctx.style_points", "Style Selected Points on Graph…"),
-                ("grid.ctx.show_row_titles", "Show Row Titles on Graph"),
-                ("grid.ctx.reset_style", "Reset to Dataset Style"),
-                ("grid.ctx.exclude", "Exclude Selected (Cmd/Ctrl+E)"),
-                ("grid.ctx.exclude_reason", "Exclude with Reason…"),
-                ("grid.ctx.copy", "Copy Selection"),
-                ("grid.ctx.paste", "Paste Here"),
-            ] {
-                let r = list.button(label);
+            type GridCtxItemTuple<'a> = (&'a str, &'a str, Option<&'a str>, bool, Option<&'a str>);
+            let items: [GridCtxItemTuple<'_>; 8] = [
+                (
+                    "grid.ctx.style_points",
+                    "Style Selected Points on Graph…",
+                    Some("ui.formatPoints.open"),
+                    has_graph,
+                    (!has_graph).then_some("No graph linked to this data table yet."),
+                ),
+                (
+                    "grid.ctx.show_row_titles",
+                    "Show Row Titles on Graph",
+                    Some("graph.addAnnotation"),
+                    has_graph,
+                    (!has_graph).then_some("No graph linked to this data table yet."),
+                ),
+                (
+                    "grid.ctx.reset_style",
+                    "Reset to Dataset Style",
+                    Some("graph.formatSelectedPoints"),
+                    has_graph && !row_override_points.is_empty(),
+                    if !has_graph {
+                        Some("No graph linked to this data table yet.")
+                    } else if row_override_points.is_empty() {
+                        Some("No per-point style overrides exist on this row.")
+                    } else {
+                        None
+                    },
+                ),
+                (
+                    "grid.ctx.exclude",
+                    "Exclude Selected (Cmd/Ctrl+E)",
+                    Some("table.excludeCells"),
+                    !ds.frozen,
+                    ds.frozen.then_some("Data sheet is frozen (read-only)."),
+                ),
+                (
+                    "grid.ctx.exclude_reason",
+                    "Exclude with Reason…",
+                    Some("ui.grid.excludeWithReason"),
+                    !ds.frozen,
+                    ds.frozen.then_some("Data sheet is frozen (read-only)."),
+                ),
+                ("grid.ctx.cut", "Cut Selection", Some("edit.cut"), !ds.frozen, ds.frozen.then_some("Data sheet is frozen (read-only).")),
+                ("grid.ctx.copy", "Copy Selection", Some("edit.copy"), true, None),
+                ("grid.ctx.paste", "Paste Here", Some("edit.paste"), !ds.frozen, ds.frozen.then_some("Data sheet is frozen (read-only).")),
+            ];
+            for (wid, label, command_id, enabled, disabled_reason) in items {
+                let mut r = list.add_enabled(enabled, egui::Button::new(label));
+                if let Some(reason) = disabled_reason {
+                    r = r.on_disabled_hover_text(reason);
+                }
                 record_meta_if_enabled(
                     list,
-                    fstate.meta,
+                    meta,
                     true,
                     &r,
                     FrameInspectEntryInput {
                         widget_id: wid,
                         role: "menuitem",
                         label,
-                        command_id: None,
+                        command_id,
                         value: None,
-                        enabled: true,
-                        disabled_reason: None,
+                        enabled,
+                        disabled_reason,
                         z_layer: ZLayer::FloatingOverlay,
                         ellipsized: false,
                         full_label: None,
                     },
                 );
-                if r.clicked() {
+                if r.clicked() && enabled {
                     match wid {
                         "grid.ctx.style_points" => {
-                            if let Some(g) = app.document().graph_sheets.iter().find(|g| g.spec.primary_source_sheet_id == ds.id) {
-                                fstate.intents.push_engine("sheet.select", json!({ "sheet_id": g.id.as_str() }));
+                            if let Some(g) = linked_graph {
+                                let points: Vec<serde_json::Value> = if let Some(tgt) = cell_ctx
+                                    && !tgt.is_x
+                                    && tgt.col < g.spec.series.len()
+                                {
+                                    vec![json!({ "series_index": tgt.col, "point_index": row })]
+                                } else if !g.spec.series.is_empty() {
+                                    vec![json!({ "series_index": 0, "point_index": row })]
+                                } else {
+                                    Vec::new()
+                                };
+                                intents.push_ui("ui.formatPoints.open", json!({ "sheet_id": g.id.as_str(), "points": points }));
                             }
-                            fstate.intents.push_ui("ui.inspector.select", json!({ "inspector": "format_graph" }));
                         }
                         "grid.ctx.show_row_titles" => {
-                            if let Some(g) = app.document().graph_sheets.iter().find(|g| g.spec.primary_source_sheet_id == ds.id) {
-                                fstate.intents.push_engine(
-                                    "graph.format",
-                                    json!({ "sheet_id": g.id.as_str(), "row_point_labels_row": row, "show_row_titles": true }),
+                            if let Some(g) = linked_graph {
+                                let text = row_title_or_default(ds, row);
+                                #[allow(clippy::cast_precision_loss)]
+                                let x_pt = 72.0 + f64::from((row % 3) as u32) * 124.0;
+                                #[allow(clippy::cast_precision_loss)]
+                                let y_pt = 48.0 + f64::from((row / 3) as u32) * 30.0;
+                                intents.push_engine(
+                                    "graph.addAnnotation",
+                                    json!({
+                                        "sheet_id": g.id.as_str(),
+                                        "kind": "text",
+                                        "text": text,
+                                        "x_pt": x_pt,
+                                        "y_pt": y_pt,
+                                    }),
                                 );
                             }
                         }
                         "grid.ctx.reset_style" => {
-                            if let Some(g) = app.document().graph_sheets.iter().find(|g| g.spec.primary_source_sheet_id == ds.id) {
-                                fstate.intents.push_engine("graph.format", json!({ "sheet_id": g.id.as_str(), "reset_row_override": row }));
+                            if let Some(g) = linked_graph
+                                && !row_override_points.is_empty()
+                            {
+                                intents.push_engine(
+                                    "graph.formatSelectedPoints",
+                                    json!({
+                                        "sheet_id": g.id.as_str(),
+                                        "mode": "clear",
+                                        "points": row_override_points,
+                                    }),
+                                );
                             }
                         }
                         "grid.ctx.exclude" => {
@@ -933,30 +1051,38 @@ fn render_row_context_menu_popup(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &
                                 && tgt.is_x
                             {
                                 let was_ex = ds.archetype.x_or_time_cell(tgt.row, tgt.subcol).is_some_and(|c| c.excluded);
-                                fstate.intents.push_engine(
+                                intents.push_engine(
                                     "table.excludeCells",
                                     json!({ "sheet_id": ds.id.as_str(), "target": "x", "row": tgt.row, "subcol": tgt.subcol, "excluded": !was_ex }),
                                 );
                             } else {
-                                let c = app.grid.tool.active.unwrap_or(GridCellCoord::new(row, 0, 0));
+                                let c = cell_ctx
+                                    .filter(|t| !t.is_x)
+                                    .map(|t| GridCellCoord::new(t.row, t.col, t.subcol))
+                                    .or(app.grid.tool.active)
+                                    .unwrap_or(GridCellCoord::new(row, 0, 0));
                                 let was_ex = ds.archetype.data_cell(c.into()).is_some_and(|cell| cell.excluded);
-                                fstate.intents.push_engine(
+                                intents.push_engine(
                                     "table.excludeCells",
                                     json!({ "sheet_id": ds.id.as_str(), "row": c.row, "col": c.col, "subcol": c.subcol, "excluded": !was_ex }),
                                 );
                             }
                         }
-                        "grid.ctx.exclude_reason" => fstate.intents.push_ui("ui.grid.excludeWithReason", json!({ "sheet_id": ds.id.as_str() })),
+                        "grid.ctx.exclude_reason" => intents.push_ui("ui.grid.excludeWithReason", json!({ "sheet_id": ds.id.as_str() })),
+                        "grid.ctx.cut" => {
+                            clear_x_clipboard_cache(list);
+                            intents.push_grid_cut_selection();
+                        }
                         "grid.ctx.copy" => {
                             if let Some(tgt) = cell_ctx
                                 && tgt.is_x
                             {
                                 copy_x_cell_to_clipboard(list, app, ds, tgt.row, tgt.subcol);
-                            } else if let Some((xr, xs)) = fstate.aux.selected_x_cell {
+                            } else if let Some((xr, xs)) = host.selected_x_cell {
                                 copy_x_cell_to_clipboard(list, app, ds, xr, xs);
                             } else {
                                 clear_x_clipboard_cache(list);
-                                fstate.intents.push_grid_copy_selection();
+                                intents.push_grid_copy_selection();
                             }
                         }
                         "grid.ctx.paste" => {
@@ -964,24 +1090,32 @@ fn render_row_context_menu_popup(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &
                                 && tgt.is_x
                             {
                                 if let Some(clip) = read_clipboard_text_for_x_paste(list, app) {
-                                    push_x_cell_text_paste_intents(app, ds, tgt.row, tgt.subcol, &clip, fstate.intents);
+                                    push_x_cell_text_paste_intents(app, ds, tgt.row, tgt.subcol, &clip, intents);
                                 }
-                            } else if let Some((xr, xs)) = fstate.aux.selected_x_cell {
+                            } else if let Some((xr, xs)) = host.selected_x_cell {
                                 if let Some(clip) = read_clipboard_text_for_x_paste(list, app) {
-                                    push_x_cell_text_paste_intents(app, ds, xr, xs, &clip, fstate.intents);
+                                    push_x_cell_text_paste_intents(app, ds, xr, xs, &clip, intents);
                                 }
                             } else {
-                                fstate.intents.push_grid_paste_from_clipboard(app.grid.tool.active);
+                                intents.push_grid_paste_from_clipboard(app.grid.tool.active);
                             }
                         }
                         _ => {}
                     }
-                    fstate.aux.context_menu = None;
+                    *context_menu = None;
                 }
             }
         });
     });
-    if area_resp.response.clicked_elsewhere() {
-        fstate.aux.context_menu = None;
+    let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+    let outside_click = ui.input(|i| i.pointer.primary_clicked() && i.pointer.interact_pos().is_some_and(|p| !area_resp.response.rect.contains(p)));
+    if esc || outside_click {
+        *context_menu = None;
     }
+}
+
+fn render_row_context_menu_popup(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut MultiGridFrameState<'_>) {
+    let host =
+        GridContextMenuHost { app: mctx.app, ds: mctx.ds, tokens: mctx.tokens, blocked: mctx.blocked, selected_x_cell: fstate.aux.selected_x_cell };
+    render_grid_context_menu_popup(ui, &host, &mut fstate.aux.context_menu, fstate.meta, fstate.intents);
 }

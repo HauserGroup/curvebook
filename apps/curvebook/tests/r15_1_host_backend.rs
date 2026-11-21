@@ -19,7 +19,6 @@ use curvebook::desktop_host::{
 };
 use curvebook::gui_window::{CurveBookNativeApp, build_egui_font_definitions};
 use curvebook::live_control::{LiveControlBridge, serve_live_control_io};
-use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::egui_shell::UiBackend;
 use curvebook_ui_egui::interaction::ViewportMetrics;
 use curvebook_ui_egui::{BETA_ACTIVE_LOCALES, ControlAuth, LOCALES, inspect_ui_tree, normalize_beta_gui_locale};
@@ -483,47 +482,47 @@ fn step_ui_clears_discarded_pass_intents_without_double_or_stale_execution() -> 
     let mut out_init = ctx.run_ui(raw_empty.clone(), |ui| native.step_ui(ui));
     out_init.textures_delta.clear();
 
-    let about_center = native
+    let home_center = native
         .inspect_meta()
-        .find_by_widget_id("toolbar.help.about")
+        .find_by_widget_id("toolbar.home")
         .map(|n| n.clipped_rect.center())
-        .ok_or("missing toolbar.help.about clipped_rect in egui_shell")?;
+        .ok_or("missing toolbar.home clipped_rect in egui_shell")?;
 
-    // Emulate an `egui` multi-pass frame where Pass 0 emits an intent (`toolbar.help.about` click)
+    // Emulate an `egui` multi-pass frame where Pass 0 emits an intent (`toolbar.home` click)
     // AND calls `request_discard`. Because egui 0.37 delivers input events only to Pass 0,
     // Pass 0 must NOT commit while discarded, and Pass 1 (settled) must preserve and commit
     // Pass 0's click strictly once (`R15-GUI-05`), without replaying on later frames.
     let raw_click = egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(960.0, 640.0))),
         events: vec![
-            egui::Event::PointerMoved(about_center),
-            egui::Event::PointerButton { pos: about_center, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
-            egui::Event::PointerButton { pos: about_center, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+            egui::Event::PointerMoved(home_center),
+            egui::Event::PointerButton { pos: home_center, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+            egui::Event::PointerButton { pos: home_center, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
         ],
         ..Default::default()
     };
-    let mut pass_records: Vec<(bool, ActiveDialog)> = Vec::new();
+    let mut pass_records: Vec<(bool, bool)> = Vec::new();
     let mut out_discard = ctx.run_ui(raw_click.clone(), |ui| {
         if pass_records.is_empty() {
             ui.ctx().request_discard("simulated multi-pass resize discard");
         }
         native.step_ui(ui);
         let settled = native.geometry_stamp().is_some_and(|s| s.settled);
-        let dialog = native.runtime().window(win_id).map_or(ActiveDialog::None, |w| w.app().canvas_dialogs.active_dialog.clone());
-        pass_records.push((settled, dialog));
+        let launcher_open = native.runtime().window(win_id).is_ok_and(|w| w.app().egui_views.launcher_open);
+        pass_records.push((settled, launcher_open));
     });
     out_discard.textures_delta.clear();
     assert_eq!(pass_records.len(), 2, "expected Pass 0 discarded + Pass 1 settled, got {pass_records:?}");
-    assert_eq!(pass_records[0], (false, ActiveDialog::None), "discarded Pass 0 must not commit intent");
-    assert_eq!(pass_records[1], (true, ActiveDialog::About), "settled Pass 1 must preserve and commit Pass 0 click once (R15-GUI-05)");
+    assert_eq!(pass_records[0], (false, false), "discarded Pass 0 must not commit intent");
+    assert_eq!(pass_records[1], (true, true), "settled Pass 1 must preserve and commit Pass 0 click once (R15-GUI-05)");
 
-    // Dismiss About and verify the next separate empty frame does not replay any stale carried intent.
-    native.runtime_mut().window_mut(win_id)?.app_mut().canvas_dialogs.active_dialog = ActiveDialog::None;
+    // Dismiss Welcome launcher and verify the next separate empty frame does not replay any stale carried intent.
+    native.runtime_mut().window_mut(win_id)?.app_mut().egui_views.launcher_open = false;
+    native.runtime_mut().window_mut(win_id)?.app_mut().nav.welcome.open = false;
     let mut out_after_discard = ctx.run_ui(raw_empty, |ui| native.step_ui(ui));
     out_after_discard.textures_delta.clear();
-    assert_eq!(
-        native.runtime().window(win_id)?.app().canvas_dialogs.active_dialog,
-        ActiveDialog::None,
+    assert!(
+        !native.runtime().window(win_id)?.app().egui_views.launcher_open,
         "committed Pass 0 intent must be drained on settlement and never replay on a later frame"
     );
     assert!(native.geometry_stamp().ok_or("missing GeometryStamp")?.settled);
@@ -531,7 +530,7 @@ fn step_ui_clears_discarded_pass_intents_without_double_or_stale_execution() -> 
     // A genuinely settled click (no `request_discard`) must execute the intent cleanly once.
     let mut out_settled = ctx.run_ui(raw_click, |ui| native.step_ui(ui));
     out_settled.textures_delta.clear();
-    assert_eq!(native.runtime().window(win_id)?.app().canvas_dialogs.active_dialog, ActiveDialog::About);
+    assert!(native.runtime().window(win_id)?.app().egui_views.launcher_open);
     Ok(())
 }
 

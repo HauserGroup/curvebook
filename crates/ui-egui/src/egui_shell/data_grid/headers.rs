@@ -49,7 +49,7 @@ pub(super) fn render_corner_and_row_titles_header(
             ui,
             trigger_rect,
             &archetype_label,
-            CellTextStyle::plain(FontId::proportional(11.0), tokens.text_strong, Align::Center),
+            CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_strong, Align::Center),
         );
         if trigger_elided {
             state.ellipsized_headers += 1;
@@ -96,8 +96,12 @@ pub(super) fn render_corner_and_row_titles_header(
         ui.painter().rect_filled(hash_rect, CornerRadius::ZERO, tokens.header_bg);
         ui.painter().rect_stroke(hash_rect, CornerRadius::ZERO, Stroke::new(1.0, tokens.border), StrokeKind::Inside);
         let hash_label = grid_tr(rctx.locale, "w5.grid_core.row_number_header", "#");
-        let (hash_elided, _) =
-            render_ellipsized_text(ui, hash_rect, hash_label, CellTextStyle::plain(FontId::proportional(11.0), tokens.text_muted, Align::Center));
+        let (hash_elided, _) = render_ellipsized_text(
+            ui,
+            hash_rect,
+            hash_label,
+            CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted, Align::Center),
+        );
         let acc_hash = hash_label.to_owned();
         hash_resp.widget_info(move || WidgetInfo::labeled(egui::Role::Label, true, acc_hash.clone()));
         record_meta_if_enabled(
@@ -150,7 +154,7 @@ fn render_row_titles_header_block(
             ui,
             rt_header_rect,
             short_lbl,
-            CellTextStyle::plain(FontId::proportional(11.0), tokens.text_primary, Align::Center),
+            CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_primary, Align::Center),
         );
         if elided {
             state.ellipsized_headers += 1;
@@ -191,8 +195,12 @@ fn render_row_titles_header_block(
     let band_resp = ui.interact(top_rect, rctx.sheet_id_base.with("row_titles_band"), Sense::hover());
     ui.painter().rect_filled(top_rect, CornerRadius::ZERO, tokens.header_bg);
     ui.painter().rect_stroke(top_rect, CornerRadius::ZERO, Stroke::new(1.0, tokens.border), StrokeKind::Inside);
-    let (band_elided, _) =
-        render_ellipsized_text(ui, top_rect, rt_title, CellTextStyle::plain(FontId::proportional(11.0), tokens.text_strong, Align::Center));
+    let (band_elided, _) = render_ellipsized_text(
+        ui,
+        top_rect,
+        rt_title,
+        CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_strong, Align::Center),
+    );
     if band_elided {
         state.ellipsized_headers += 1;
     }
@@ -227,8 +235,12 @@ fn render_row_titles_header_block(
     ui.painter().rect_filled(toggle_rect, CornerRadius::ZERO, bg);
     ui.painter().rect_stroke(toggle_rect, CornerRadius::ZERO, Stroke::new(1.0, tokens.border), StrokeKind::Inside);
     let toggle_visual = format!("◀ {}", grid_tr(rctx.locale, "w5.grid_core.row_titles_short", "RT"));
-    let (elided, _) =
-        render_ellipsized_text(ui, toggle_rect, &toggle_visual, CellTextStyle::plain(FontId::proportional(11.0), tokens.text_muted, Align::Center));
+    let (elided, _) = render_ellipsized_text(
+        ui,
+        toggle_rect,
+        &toggle_visual,
+        CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted, Align::Center),
+    );
     let acc_toggle = collapse_lbl.to_owned();
     resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, !blocked, acc_toggle.clone()));
     if resp.hovered() {
@@ -307,8 +319,12 @@ pub(super) fn render_column_headers_3tier(
                 let r1_resp = ui.interact(r1, rctx.sheet_id_base.with(("col_super", col)), Sense::hover());
                 ui.painter().rect_filled(r1, CornerRadius::ZERO, tokens.header_bg);
                 ui.painter().rect_stroke(r1, CornerRadius::ZERO, Stroke::new(1.0, tokens.border), StrokeKind::Inside);
-                let (elided, _) =
-                    render_ellipsized_text(ui, r1, &super_label, CellTextStyle::plain(FontId::proportional(11.0), tokens.text_muted, Align::Center));
+                let (elided, _) = render_ellipsized_text(
+                    ui,
+                    r1,
+                    &super_label,
+                    CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted, Align::Center),
+                );
                 if elided {
                     state.ellipsized_headers += 1;
                 }
@@ -423,8 +439,12 @@ pub(super) fn render_column_headers_3tier(
                 let r3_resp = ui.interact(r3, rctx.sheet_id_base.with(("subcol_hdr", col, subcol)), Sense::hover());
                 ui.painter().rect_filled(r3, CornerRadius::ZERO, tokens.header_bg);
                 ui.painter().rect_stroke(r3, CornerRadius::ZERO, Stroke::new(1.0, tokens.border), StrokeKind::Inside);
-                let (elided, _) =
-                    render_ellipsized_text(ui, r3, &sub_label, CellTextStyle::plain(FontId::proportional(11.0), tokens.text_muted, Align::Center));
+                let (elided, _) = render_ellipsized_text(
+                    ui,
+                    r3,
+                    &sub_label,
+                    CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted, Align::Center),
+                );
                 if elided {
                     state.ellipsized_headers += 1;
                 }
@@ -515,7 +535,12 @@ pub(super) fn render_multi_corner(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: 
         ui.interact(corner_btn_r, ui.make_persistent_id("grid.corner.archetype"), if blocked { Sense::hover() } else { Sense::click() });
     let fill = if corner_resp.hovered() && !blocked { tokens.hover_bg } else { tokens.header_bg };
     ui.painter().rect_filled(corner_btn_r, 0.0, fill);
-    render_ellipsized_text(ui, corner_btn_r.shrink(2.0), badge, CellTextStyle::plain(FontId::proportional(11.0), tokens.accent, Align::Center));
+    render_ellipsized_text(
+        ui,
+        corner_btn_r.shrink(2.0),
+        badge,
+        CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.accent, Align::Center),
+    );
     let acc_badge = badge.to_owned();
     corner_resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, !blocked, acc_badge.clone()));
     record_meta_if_enabled(
@@ -550,7 +575,7 @@ pub(super) fn render_multi_corner(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: 
             ui,
             sheet_btn_r.shrink2(vec2(4.0, 1.0)),
             &ds.title,
-            CellTextStyle::plain(FontId::proportional(11.0), tokens.text_strong, Align::LEFT),
+            CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_strong, Align::LEFT),
         );
         if ellip {
             fstate.state.ellipsized_headers += 1;
@@ -583,7 +608,12 @@ pub(super) fn render_multi_corner(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: 
 
     let hash_r = Rect::from_min_max(pos2(cr.min.x, y2), pos2(x_mid, y3));
     let hash_resp = ui.interact(hash_r, ui.make_persistent_id("grid.corner.row_num"), Sense::hover());
-    render_ellipsized_text(ui, hash_r, "#", CellTextStyle::plain(FontId::proportional(11.0), tokens.text_muted, Align::Center));
+    render_ellipsized_text(
+        ui,
+        hash_r,
+        "#",
+        CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted, Align::Center),
+    );
     hash_resp.widget_info(|| WidgetInfo::labeled(egui::Role::Label, true, String::from("#")));
     record_meta_if_enabled(
         ui,
@@ -612,7 +642,7 @@ pub(super) fn render_multi_corner(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: 
             ui,
             rt_hdr_r.shrink2(vec2(5.0, 1.0)),
             &rt_band_label,
-            CellTextStyle::plain(FontId::proportional(11.0), tokens.text_strong, Align::LEFT),
+            CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_strong, Align::LEFT),
         );
     }
     let acc_rt = rt_band_label.clone();
@@ -642,7 +672,12 @@ pub(super) fn render_multi_corner(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: 
     if toggle_resp.hovered() && !blocked {
         ui.painter().rect_filled(toggle_r, 0.0, tokens.hover_bg);
     }
-    render_ellipsized_text(ui, toggle_r.shrink(2.0), toggle_lbl, CellTextStyle::plain(FontId::proportional(10.5), tokens.text_muted, Align::Center));
+    render_ellipsized_text(
+        ui,
+        toggle_r.shrink(2.0),
+        toggle_lbl,
+        CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted, Align::Center),
+    );
     let acc_tgl = if geom.row_titles_collapsed { "Expand Row Titles" } else { "Collapse Row Titles" };
     toggle_resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, !blocked, acc_tgl.to_owned()));
     record_meta_if_enabled(
@@ -743,7 +778,7 @@ fn render_multi_x_headers(hdr_ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut
         hdr_ui,
         x_tier1_r.intersect(hdr_rect).shrink2(vec2(4.0, 1.0)),
         super_x,
-        CellTextStyle::plain(FontId::proportional(11.0), tokens.text_muted, Align::Center),
+        CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted, Align::Center),
     );
 
     for sx in 0..geom.x_subcols {
@@ -803,7 +838,7 @@ fn render_multi_x_headers(hdr_ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut
                 hdr_ui,
                 t3_r.shrink2(vec2(3.0, 1.0)),
                 &x_sub_lbl,
-                CellTextStyle::plain(FontId::proportional(11.0), tokens.text_muted, Align::Center),
+                CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted, Align::Center),
             );
             let acc_s = x_sub_lbl.clone();
             sresp.widget_info(move || WidgetInfo::labeled(egui::Role::ColumnHeader, true, acc_s.clone()));
@@ -871,7 +906,7 @@ fn render_multi_data_col_headers(
                 hdr_ui,
                 t1_r.shrink2(vec2(4.0, 1.0)),
                 &super_lbl,
-                CellTextStyle::plain(FontId::proportional(11.0), tokens.text_muted, Align::Center),
+                CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted, Align::Center),
             );
         }
 
@@ -965,7 +1000,12 @@ fn render_subcolumn_tier3_cells(
             hdr_ui.painter().rect_filled(t3_r, 0.0, tokens.hover_bg);
         }
         let fg = if is_nested { tokens.text_primary } else { tokens.text_muted };
-        render_ellipsized_text(hdr_ui, t3_r.shrink2(vec2(3.0, 1.0)), &sub_lbl, CellTextStyle::plain(FontId::proportional(11.0), fg, Align::Center));
+        render_ellipsized_text(
+            hdr_ui,
+            t3_r.shrink2(vec2(3.0, 1.0)),
+            &sub_lbl,
+            CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), fg, Align::Center),
+        );
         let acc_s = sub_lbl.clone();
         let role = if is_nested { egui::Role::Button } else { egui::Role::ColumnHeader };
         let role_str = if is_nested { "button" } else { "columnheader" };

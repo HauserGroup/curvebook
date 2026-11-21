@@ -168,7 +168,7 @@ Planning decisions in [`qol-enhancements.md`](planning/qol-enhancements.md) sepa
 ### R9.10 Zero-install client-side WASM viewer & virtual workspace folder (`QOL-10`)
 Owner: maintainers · Status: deferred · Was: QOL-10, M8+ · Scheduling: no milestone assigned
 
-- Existing `VirtualWorkspaceFolder`, `presentation_mode`, and `WebWorkspaceHost` code remains supported. Further collaborator-viewer and folder-workspace QoL work is deferred. Core WASM compatibility and baseline browser hosting in `R8.4` remain separate requirements.
+- Existing `VirtualWorkspaceFolder` and `WebWorkspaceHost` code remains supported. Further collaborator-viewer and folder-workspace QoL work is deferred. Core WASM compatibility and baseline browser hosting in `R8.4` remain separate requirements.
 
 ### R9.11 Unpacked Git-friendly `.curvebook.d/` directory & checkpoints (`QOL-11`)
 Owner: maintainers · Status: deferred · Was: QOL-11, M8+ · Scheduling: no milestone assigned
@@ -577,6 +577,33 @@ Every fix proves itself through the rendered GUI with an `EguiHumanPathDriver` r
 - [x] **B8 (`R15-GUI-24`, `R15-GUI-15`, `R15-GUI-28`):** Re-sync Format Axes local drafts on open/Cancel and send `frame_preset` only when changed; display auto bounds as auto and report rejected bounds; stage additional ticks with dialog OK/Cancel. *(Done 2026-11-20 in `a49f40e`.)*
 - [x] **B9 (`R15-GUI-21`):** Reproduce variable unit edits against calculated-variable `[Title]` formulas and rewrite `[Title]` references in the engine on rename (per Decision D2b). *(Done 2026-11-20 in `d3ca76e`, `0044291`.)*
 - [x] **B10 (`R15-GUI-14`, `R15-GUI-25`, `R15-GUI-26`):** Fix `.curvebook` wording via i18n keys in Welcome Hub, persist/apply Preferences graph defaults and stage shortcut edits until OK (or revert on Cancel), and remove unreachable dead Recovery modal code. *(Done 2026-11-20 in `9b4acf8`; follow-up visual/inspection addendum `R15-GUI-29`–`R15-GUI-40` recorded in [`r15-gui-audit-addendum-2026-11-20.md`](audit/r15-gui-audit-addendum-2026-11-20.md).)*
+
+### R15.7 Post-cutover GUI addendum bugfixes & Presentation Mode removal (Beta gate)
+Owner: open · Status: done · Was: R15 GUI audit addendum 2026-11-20 ([`r15-gui-audit-addendum-2026-11-20.md`](audit/r15-gui-audit-addendum-2026-11-20.md)) · Depends on: [`R15.6`](#r156-post-cutover-gui-audit-remediation-beta-gate) (done) · Gate: **Beta** (Medium findings + Presentation Mode removal)
+
+Every fix proves itself through the rendered GUI with an `EguiHumanPathDriver` regression test ([pitfalls §6](pitfalls.md#6-treating-semantic-agent-harness-tests-as-proof-of-human-gui-parity)).
+
+- [x] **Presentation Mode removal (`R15-GUI-35`):** Remove Presentation Mode (`ui.presentation.toggle`, `UiApp::presentation_mode`, toolbar toggle, exit chip, `F11`/`Cmd+Shift+P` handler, web `SetPresentationMode`, and spec §2.3 row), while preserving the `"Presentation Slide 16:9"` canvas preset and pairwise significance `presentation_mode` in `crates/doc/src/graph.rs`, and regenerate `crates/mcp/src/ui_catalog.rs`.
+- [x] **Unregistered grid/link commands (`R15-GUI-29` + audit sweep):** Replace unregistered `graph.format` in grid row context menu (`graph.addAnnotation` / `graph.formatSelectedPoints`), fix bonus unregistered `table.unlinkRegion` and unhandled `ui.inspector.select`, and add a static guard asserting every `push_engine` literal in `egui_shell/` is in `cmd::registry()`.
+- [x] **Shared in-window menu parameter routing (`R15-GUI-30`):** Route in-window menu clicks through a shared parameter-populating resolver matching the Command Palette and desktop host rather than sending `{}`.
+- [x] **Checkpoint Manager dialog (`R15-GUI-31`):** Add `ActiveDialog::Checkpoints` (create, list, restore, confirm-delete) wired from menus, Command Palette, and desktop host.
+- [x] **Mouse-accessible clipboard actions (`R15-GUI-32`):** Add Cut to grid context menus (plus Column cell context menu), `Edit › Cut / Copy / Paste` routed for both native host and headless shell (including `ResultSheet` copy), and `"Copy as Image"` on Graph and Layout context menus.
+- [x] **About dialog close & content + Tier 1 cleanup (`R15-GUI-33`):** Close About cleanly via OK/Close, Escape, and backdrop `should_close()`, deduplicate `inspect_bridge.rs` copy, replace internal settings text with product version, copyright, licence, and clean-room notice/attribution links (keeping diagnostics under `"Copy version info"`), and remove the redundant standalone Tier 1 `[About CurveBook]` button.
+- [x] **Draggable side-pane dividers (`R15-GUI-36`):** Add `Role::Splitter` inner-edge resize handles with double-click preset reset and protected Center Stage width on Leading Dock and Trailing Studio.
+- [x] **Project Navigator context menu (`R15-GUI-38`):** Add sheet-type-scoped right-click menu on Navigator rows targeting the clicked `sheet_id` directly, disabling failed predicates with tooltips, and confirming cascading deletes.
+- [x] **Command-palette button label (`R15-GUI-39`):** Label `toolbar.command_palette` cleanly without literal `"Cmd+K"` (`"Commands"` / magnifier icon when narrow) and show the platform-formatted active shortcut in its tooltip.
+- [x] **Single-drawn model equations (`R15-GUI-40`):** Keep `ChartScene` as sole renderer for `ModelEquation` annotations and convert the canvas HUD overlay into an invisible hit and AccessKit label target.
+
+### R15.8 Curated 8-menu bar restructure
+Owner: agent · Status: done — branch `refactor/R15.8-curated-menu-bar` · Was: R15 GUI audit addendum 2026-11-20 (`R15-GUI-34`) · Depends on: [`R15.7`](#r157-post-cutover-gui-addendum-bugfixes--presentation-mode-removal-beta-gate) (done) · Gate: **Beta**
+
+- [x] **Declarative curated 8-menu bar (`R15-GUI-34`):** Replace flat registry dumps with a single hierarchical menu definition (`File`, `Edit`, `View`, `Insert`, `Data`, `Analyze`, `Graph` [with `Layout ▸`], `Help` and `File › Import ▸` / `Export ▸` / `Checkpoints ▸` submenus) shared between `egui::MenuBar` and native macOS `muda`, keeping `ui.invoke_menu` backwards-compatible and adding menu-hygiene parity tests.
+
+### R15.9 Section 10 visual design rules, hover contrast & broken-link glyph
+Owner: agent · Status: done — branch `refactor/R15.9-visual-design-tokens` · Was: [`gui-layout-spec.md`](planning/gui-layout-spec.md) §10 (PR #55) & `R15-GUI-37` · Depends on: [`R15.8`](#r158-curated-menu-bar) (done) · Gate: **Beta**
+
+- [x] **Accept §10, implement visual tokens & bold system face (`R15-GUI-37`):** Mark `gui-layout-spec.md` §10 Accepted; add §10 tokens (`space.*`, `type.*`, `radius.*`, `icon.*`, strokes, `150 ms` motion cap) to `LayoutMetrics`/`Tokens`; load static bold face (`Helvetica Neue` preferred on macOS) with `14 pt` fallback; fix `R15-GUI-37` hover highlight contrast plus `WHITE`-on-`accent` and Dark `text_muted`/`active_bg` WCAG contrast; standardize `widgets.rs`, `trailing_studio/`, `leading_dock.rs`, dialog footers, and sub-`11.5 pt`/off-scale Chrome across `egui_shell/`.
+- [x] **Broken-link glyph (§10.5) & §10.7 visual review:** Add broken-link vector glyph + dashed pattern + status labels across grid borders, link strips, status footer, and Table Selection studio; regenerate `docs/images/workspace-{split-fit,layout-dark}.png` and verify `1280×800`, `1440×600`, `640×420` across `Light`/`Dark`/`HighContrast`.
 
 ---
 

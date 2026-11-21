@@ -232,7 +232,7 @@ fn verify_egui_inspect_and_shot(c: &mut EguiGuiClient, expected_sheet: &str) -> 
         snap.get("active_sheet_id").and_then(Value::as_str) == Some(expected_sheet),
         format!("expected active_sheet_id `{expected_sheet}`, got {:?}", snap.get("active_sheet_id")),
     )?;
-    ensure(snap.get("menus").and_then(Value::as_array).is_some_and(|m| m.len() == 7), "expected 7 top-level menus in ui.inspect")?;
+    ensure(snap.get("menus").and_then(Value::as_array).is_some_and(|m| m.len() == 8), "expected 8 top-level menus in ui.inspect")?;
     let png = c.screenshot_png("full_window")?;
     let _canvas_png = c.screenshot_png("canvas")?;
     Ok(png)

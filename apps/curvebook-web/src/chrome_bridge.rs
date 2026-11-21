@@ -186,15 +186,6 @@ pub const WEB_SHORTCUT_MAPPINGS: &[WebShortcutMapping] = &[
         menu_fallback_path: "View/Toggle Format Inspector",
     },
     WebShortcutMapping {
-        command_id: "ui.presentation.toggle",
-        desktop_combo: "Cmd+Shift+P",
-        web_combo: "Alt+Shift+P",
-        browser_reserved: true,
-        prevent_default_on_canvas: true,
-        reservation_reason: Some("Browsers reserve Cmd/Ctrl+Shift+P for system print"),
-        menu_fallback_path: "View/Toggle Presentation Mode",
-    },
-    WebShortcutMapping {
         command_id: "sheet.freeze",
         desktop_combo: "Ctrl+L",
         web_combo: "Alt+L",
@@ -478,7 +469,6 @@ impl WebShortcutRouter {
             ("n", true) => ("file.new", "Alt+Shift+N mapped from browser-reserved Cmd/Ctrl+N"),
             ("b", true) => ("ui.navigator.toggle", "Alt+Shift+B mapped from browser-reserved Cmd/Ctrl+Shift+N"),
             ("i", true) => ("ui.inspector.toggle", "Alt+Shift+I mapped from browser-reserved Cmd/Ctrl+Shift+I"),
-            ("p", true) => ("ui.presentation.toggle", "Alt+Shift+P mapped from browser-reserved Cmd/Ctrl+Shift+P"),
             ("l", false) => ("sheet.freeze", "Alt+L mapped from browser-reserved Ctrl+L"),
             ("k", false) => ("ui.palette.open", "Alt+K opens Command Palette without browser address-bar clash"),
             ("0", false) => ("ui.zoom.fitSheet", "Alt+0 mapped from browser-reserved Cmd/Ctrl+0"),

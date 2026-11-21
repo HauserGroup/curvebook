@@ -583,8 +583,8 @@ fn summarize_sheet_links(app: &UiApp, tokens: &Tokens) -> Option<LinkHealthSumma
         let missing = doc.sheet_section(src_id).is_none();
         let accent = if missing { tokens.link_red } else { tokens.link_blue };
         return Some(LinkHealthSummary {
-            badge_text: format!("↗ {src_title}"),
-            tooltip: format!("Primary source: {src_title}"),
+            badge_text: if missing { format!("Broken: {src_title}") } else { format!("↗ {src_title}") },
+            tooltip: format!("Primary source: {src_title}{}", if missing { " (missing)" } else { "" }),
             accent,
             upstream_links: vec![(src_title, String::from(if missing { "Missing" } else { "Linked" }), (!missing).then_some(src_id.clone()), accent)],
         });
@@ -612,26 +612,32 @@ fn link_border_color(region: &LinkedDataRegion, doc: &ProjectDocument, tokens: &
 }
 
 fn build_data_links_summary(doc: &ProjectDocument, ds: &DataSheet, tokens: &Tokens) -> LinkHealthSummary {
-    let mut has_error = false;
+    let mut has_broken = false;
     let mut has_green = false;
     let mut has_blue = false;
+    let mut has_red = false;
+    let mut broken_count = 0usize;
     let mut upstream_links = Vec::with_capacity(ds.linked_regions.len());
 
     for reg in &ds.linked_regions {
         let (clr, status_lbl) = link_border_color(reg, doc, tokens);
-        if clr == tokens.link_red {
-            has_error = true;
+        let broken = crate::egui_shell::data_grid::is_linked_region_broken(doc, reg);
+        if broken {
+            has_broken = true;
+            broken_count += 1;
         } else if clr == tokens.link_green {
             has_green = true;
         } else if clr == tokens.link_blue {
             has_blue = true;
+        } else if clr == tokens.link_red {
+            has_red = true;
         }
         let up_id = reg.spec.source.upstream_sheet_id().cloned();
         let up_label = up_id.as_ref().and_then(|sid| doc_sheet_title(doc, sid)).map_or_else(|| reg.provenance_summary.clone(), str::to_owned);
         upstream_links.push((up_label, String::from(status_lbl), up_id, clr));
     }
 
-    let accent = if has_error {
+    let accent = if has_broken || has_red {
         tokens.link_red
     } else if has_green {
         tokens.link_green
@@ -643,7 +649,9 @@ fn build_data_links_summary(doc: &ProjectDocument, ds: &DataSheet, tokens: &Toke
     let n = ds.linked_regions.len();
     let badge_text = if n == 1 {
         let first = upstream_links.first().map_or("Link", |(t, _, _, _)| t.as_str());
-        format!("🔗 {first}")
+        if has_broken { format!("Broken: {first}") } else { format!("🔗 {first}") }
+    } else if has_broken {
+        format!("Broken: {broken_count}/{n} links")
     } else {
         format!("🔗 {n} links")
     };
@@ -724,7 +732,7 @@ struct FooterChipSpec<'a> {
 
 fn draw_footer_chip(ui: &mut egui::Ui, tokens: &Tokens, spec: FooterChipSpec<'_>, meta: &mut FrameInspectMeta) -> Response {
     let FooterChipSpec { label, tooltip, max_w, min_w, selected, enabled, accent_override, widget_id, role, command_id, disabled_reason } = spec;
-    let font_id = egui::FontId::proportional(11.0);
+    let font_id = egui::FontId::proportional(tokens.metrics.font_ui_small_pt);
     let text_color = if !enabled {
         tokens.text_disabled
     } else if let Some(ov) = accent_override {
@@ -818,7 +826,7 @@ struct FooterSummarySpec<'a> {
 }
 
 fn draw_footer_summary_label(ui: &mut egui::Ui, tokens: &Tokens, spec: FooterSummarySpec<'_>, meta: &mut FrameInspectMeta) -> Response {
-    let font_id = egui::FontId::proportional(11.0);
+    let font_id = egui::FontId::proportional(tokens.metrics.font_ui_small_pt);
     let mut job = egui::text::LayoutJob::simple_singleline(spec.text.to_owned(), font_id, tokens.text_primary);
     job.wrap = egui::text::TextWrapping { max_rows: 1, break_anywhere: true, overflow_character: Some('…'), ..Default::default() };
     job.wrap.max_width = (spec.max_w - 8.0).max(8.0);
@@ -1583,9 +1591,9 @@ fn render_footer_popovers(
                 ];
                 for (k, v) in rows {
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(k).size(11.0).color(tokens.text_muted));
+                        ui.label(egui::RichText::new(k).size(tokens.metrics.font_ui_small_pt).color(tokens.text_muted));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(egui::RichText::new(v).size(11.0).strong().color(tokens.text_primary));
+                            ui.label(egui::RichText::new(v).size(tokens.metrics.font_ui_small_pt).strong().color(tokens.text_primary));
                         });
                     });
                 }

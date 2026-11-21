@@ -27,6 +27,7 @@ use crate::UiApp;
 use super::{FrameInspectMeta, LayoutMetrics, PendingUiIntents, Tokens};
 
 pub use column::render_column_grid;
+pub(in crate::egui_shell) use shared::is_linked_region_broken;
 
 /// Target inside the `Column` grid currently undergoing buffered inline text editing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -59,6 +60,7 @@ pub struct ColumnGridEguiState {
     pub row_titles_collapsed: bool,
     pub inline_edit: Option<GridInlineEditBuffer>,
     pub active_link_popover: Option<LinkedRegionPopover>,
+    pub(super) context_menu: Option<shared::ContextMenuState>,
     pub last_visible_rows: Range<usize>,
     pub last_visible_subcols: Range<usize>,
     pub ellipsized_headers: usize,
@@ -72,6 +74,7 @@ impl Default for ColumnGridEguiState {
             row_titles_collapsed: false,
             inline_edit: None,
             active_link_popover: None,
+            context_menu: None,
             last_visible_rows: 0..0,
             last_visible_subcols: 0..0,
             ellipsized_headers: 0,

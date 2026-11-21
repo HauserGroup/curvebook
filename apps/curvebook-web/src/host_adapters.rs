@@ -1693,7 +1693,6 @@ pub enum WebBridgeEvent {
     RenewHeartbeat { now_ms: u64 },
     ReleaseLock { now_ms: u64 },
     SetPreviewFilter { filter: CanvasPreviewFilter },
-    SetPresentationMode { enabled: bool },
     Wheel { x: f64, y: f64, delta_x: f64, delta_y: f64, modifiers: KeyModifiers },
     ImePreedit { text: String },
     ImeCommit { text: String },
@@ -1795,7 +1794,6 @@ impl WebBridgeEvent {
                 let encoded = serde_json::to_value(filter).map_err(|err| WebAdapterError::Serialization(err.to_string()))?;
                 json!({ "kind": "set_preview_filter", "filter": encoded })
             }
-            Self::SetPresentationMode { enabled } => json!({ "kind": "set_presentation_mode", "enabled": enabled }),
             Self::Wheel { x, y, delta_x, delta_y, modifiers } => json!({
                 "kind": "wheel",
                 "x": x,
@@ -1936,7 +1934,6 @@ impl WebBridgeEvent {
                 };
                 Ok(Self::SetPreviewFilter { filter })
             }
-            "set_presentation_mode" => Ok(Self::SetPresentationMode { enabled: obj.get("enabled").and_then(Value::as_bool).unwrap_or(false) }),
             other => decode_extended_bridge_event(other, obj),
         }
     }
@@ -2558,10 +2555,6 @@ impl WebBridgeSession {
             WebBridgeEvent::SetPreviewFilter { filter } => {
                 self.host.set_preview_filter(filter);
                 Ok(vec![self.render_frame_command(self.render_dpi, Some(String::from("ui.previewFilter.set")), None)?])
-            }
-            WebBridgeEvent::SetPresentationMode { enabled } => {
-                self.host.set_presentation_mode(enabled);
-                Ok(vec![self.render_frame_command(self.render_dpi, Some(String::from("ui.presentation.set")), None)?])
             }
             other => self.handle_extended_event(other),
         }
@@ -3672,8 +3665,6 @@ fn is_command_read_only(command_id: &str, params: Option<&Value>) -> bool {
             | "app.about"
             | "app.feedback"
             | "ui.previewFilter.set"
-            | "ui.presentation.set"
-            | "ui.presentation.toggle"
             | "ui.rulers.toggle"
             | "ui.theme.set"
             | "ui.locale.set"
@@ -4556,7 +4547,7 @@ mod tests {
             .expect("click Locale dropdown item toggles to de");
         assert_eq!(session.host.app().locale, "de");
 
-        // Open `menu.analyze`: if `ui.result.applyRemediation` appears, it stays disabled (QOL-7 diagnostic-only).
+        // Open `menu.analyze`: curated Analyze dropdown surfaces `ui.analyze.open` and omits internal `ui.result.applyRemediation`.
         session
             .handle_event(WebBridgeEvent::ClickChromeNode {
                 node_id: String::from("menu.analyze"),
@@ -4564,10 +4555,12 @@ mod tests {
                 modifiers: KeyModifiers::default(),
             })
             .expect("open Analyze dropdown");
-        scroll_popup_until_node_visible(&mut session, "popup.menu.analyze", "menu.ui.result.applyRemediation");
-        let rem_node =
-            session.current_chrome_layout().find_node("menu.ui.result.applyRemediation").cloned().expect("applyRemediation node in menu.analyze");
-        assert!(!rem_node.enabled, "ui.result.applyRemediation must stay disabled in web dropdown");
+        scroll_popup_until_node_visible(&mut session, "popup.menu.analyze", "menu.ui.analyze.open");
+        assert!(session.current_chrome_layout().find_node("menu.ui.analyze.open").is_some(), "menu.ui.analyze.open missing in menu.analyze");
+        assert!(
+            session.current_chrome_layout().find_node("menu.ui.result.applyRemediation").is_none(),
+            "internal ui.result.applyRemediation must not clutter curated Analyze menu"
+        );
         session
             .handle_event(WebBridgeEvent::UiInput {
                 event: UiInputEvent::KeyDown { key: String::from("Escape"), modifiers: KeyModifiers::default() },

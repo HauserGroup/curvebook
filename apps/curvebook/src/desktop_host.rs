@@ -25,7 +25,7 @@ use curvebook_ui_egui::grid_view::ImportOriginKind;
 use curvebook_ui_egui::interaction::{
     InlineEditorTarget, KeyModifiers, PointerButton, UiEventOutcome, UiInputEvent, ViewportMetrics, build_shortcut_candidates,
 };
-use curvebook_ui_egui::menus::{MenuSectionTooltips, TOOLBAR_BUTTONS, is_desktop_host_routed_command, menu_bar_tooltips};
+use curvebook_ui_egui::menus::{CuratedMenuNode, TOOLBAR_BUTTONS, curated_menu_bar, is_desktop_host_routed_command};
 use curvebook_ui_egui::theme::UiThemeMode;
 use curvebook_ui_egui::workspace_nav::WelcomeMode;
 use curvebook_ui_egui::{
@@ -96,11 +96,22 @@ pub struct DesktopMenuItem {
     pub beginner: String,
 }
 
-/// One localized top-level menu bar section (`File`, `Edit`, `Insert`, ...).
+/// Hierarchical menu node in a top-level [`DesktopMenuSection`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DesktopMenuNode {
+    Action(DesktopMenuItem),
+    Separator,
+    Submenu { id: String, title: String, children: Vec<Self> },
+}
+
+/// One localized top-level menu bar section (`File`, `Edit`, `View`, ...).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DesktopMenuSection {
     pub menu_key: String,
     pub title: String,
+    #[serde(default)]
+    pub nodes: Vec<DesktopMenuNode>,
     pub items: Vec<DesktopMenuItem>,
 }
 
@@ -522,17 +533,12 @@ pub fn open_document_from_files(files: &[PathBuf]) -> Result<Session, String> {
     Ok(session)
 }
 
-fn build_menu_sections(app: &UiApp) -> Vec<DesktopMenuSection> {
-    let raw_sections: Vec<MenuSectionTooltips> = menu_bar_tooltips(app);
-    raw_sections
+fn build_desktop_menu_nodes(nodes: Vec<CuratedMenuNode>, flat_items: &mut Vec<DesktopMenuItem>) -> Vec<DesktopMenuNode> {
+    nodes
         .into_iter()
-        .map(|sec| DesktopMenuSection {
-            menu_key: sec.menu_key.to_owned(),
-            title: sec.title.to_owned(),
-            items: sec
-                .items
-                .into_iter()
-                .map(|item| DesktopMenuItem {
+        .map(|node| match node {
+            CuratedMenuNode::Action(item) => {
+                let desktop_item = DesktopMenuItem {
                     command_id: item.command_id.to_owned(),
                     localized_label: item.localized_label.to_owned(),
                     shortcut: item.shortcut,
@@ -540,8 +546,26 @@ fn build_menu_sections(app: &UiApp) -> Vec<DesktopMenuSection> {
                     enabled: item.enabled,
                     summary: item.summary.to_owned(),
                     beginner: item.beginner.to_owned(),
-                })
-                .collect(),
+                };
+                flat_items.push(desktop_item.clone());
+                DesktopMenuNode::Action(desktop_item)
+            }
+            CuratedMenuNode::Separator => DesktopMenuNode::Separator,
+            CuratedMenuNode::Submenu { id, title, children, .. } => {
+                let child_nodes = build_desktop_menu_nodes(children, flat_items);
+                DesktopMenuNode::Submenu { id: id.to_owned(), title, children: child_nodes }
+            }
+        })
+        .collect()
+}
+
+fn build_menu_sections(app: &UiApp) -> Vec<DesktopMenuSection> {
+    curated_menu_bar(app)
+        .into_iter()
+        .map(|sec| {
+            let mut items = Vec::new();
+            let nodes = build_desktop_menu_nodes(sec.nodes, &mut items);
+            DesktopMenuSection { menu_key: sec.menu_key.to_owned(), title: sec.title.to_owned(), nodes, items }
         })
         .collect()
 }
@@ -2889,6 +2913,7 @@ impl DesktopHostRuntime {
                     self.persist_window_preferences(window_id);
                     self.handle_window_close_requested(window_id, false)
                 }
+                "edit.cut" => self.cut_selection(window_id),
                 "edit.copy" => self.handle_clipboard_copy(window_id),
                 "edit.paste" => self.handle_clipboard_paste(window_id, None),
                 other => Err(format!("unhandled host action `{other}`")),
@@ -3066,11 +3091,11 @@ impl DesktopHostRuntime {
         }
 
         let target = {
-            let win = self.window(window_id)?;
+            let win = self.window_mut(window_id)?;
             if win.app.inline_editor.active {
                 CopyTarget::InlineText(win.app.inline_editor.buffer.clone())
             } else {
-                let doc = win.app.document();
+                let doc = win.app.document().clone();
                 let active_id = doc.active_sheet_id.as_ref();
                 if let Some(sheet_id) = active_id
                     && let Some(ds) = doc.data_sheet(sheet_id)
@@ -3078,6 +3103,8 @@ impl DesktopHostRuntime {
                     let dec = win.app.locale_preset.decimal_separator;
                     let plan = win.app.grid.prepare_clipboard_selection(ds, dec)?;
                     CopyTarget::TableTsv(plan.tsv)
+                } else if active_id.is_some_and(|id| doc.result_sheet(id).is_some()) {
+                    if let Some(tsv) = win.app.copy_active_result_selection_tsv() { CopyTarget::TableTsv(tsv) } else { CopyTarget::NothingSelected }
                 } else if let Some(sheet_id) = active_id
                     && matches!(doc.sheet_section(sheet_id), Some(SheetSection::Graphs | SheetSection::Layouts))
                 {
@@ -3259,6 +3286,7 @@ pub enum DesktopDialogOpener {
     ApplyStyleFrom,
     InfoNotesEditor,
     InfoConstantHookPicker,
+    Checkpoints,
     CommandPalette,
 }
 
@@ -3472,6 +3500,7 @@ fn resolve_host_or_ui_route(
     match base_cmd {
         "window.new" | "file.newWindow" => Ok(Some(DesktopCommandRoute::HostAction { action: "window.new" })),
         "window.close" | "file.close" | "file.quit" | "app.quit" => Ok(Some(DesktopCommandRoute::HostAction { action: "window.close" })),
+        "edit.cut" => Ok(Some(DesktopCommandRoute::HostAction { action: "edit.cut" })),
         "edit.copy" => Ok(Some(DesktopCommandRoute::HostAction { action: "edit.copy" })),
         "edit.paste" => Ok(Some(DesktopCommandRoute::HostAction { action: "edit.paste" })),
         "toolbar.axes" => Ok(Some(DesktopCommandRoute::UiCommand {
@@ -3550,15 +3579,10 @@ fn resolve_project_or_sheet_route(
     base_cmd: &str,
 ) -> Result<Option<DesktopCommandRoute>, String> {
     match base_cmd {
-        "edit.undo"
-        | "edit.redo"
-        | "file.new"
-        | "project.new"
-        | "project.inspect"
-        | "project.recalculate"
-        | "project.listCheckpoints"
-        | "layout.create" => Ok(Some(DesktopCommandRoute::EngineCommand { engine_command_id: base_cmd.to_owned(), params: json!({}) })),
-        "project.open" | "file.open" => {
+        "edit.undo" | "edit.redo" | "file.new" | "project.new" | "project.inspect" | "project.recalculate" | "layout.create" => {
+            Ok(Some(DesktopCommandRoute::EngineCommand { engine_command_id: base_cmd.to_owned(), params: json!({}) }))
+        }
+        "project.open" | "file.open" | "file.open_unpacked_dir" => {
             Ok(Some(DesktopCommandRoute::UiDialogOpener { kind: DesktopDialogOpener::WelcomeOpenProject, target_sheet_id: None, query: None }))
         }
         "project.instantiateTemplate" => {
@@ -3575,11 +3599,10 @@ fn resolve_project_or_sheet_route(
             engine_command_id: String::from("project.saveTemplate"),
             params: json!({ "return_bytes": true }),
         })),
-        "project.createCheckpoint" => Ok(Some(DesktopCommandRoute::EngineCommand {
-            engine_command_id: String::from("project.createCheckpoint"),
-            params: json!({ "name": format!("Checkpoint {}", doc.checkpoints.len() + 1) }),
-        })),
-        "project.restoreCheckpoint" | "project.deleteCheckpoint" | "sheet.rename" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
+        "project.createCheckpoint" | "project.listCheckpoints" | "project.restoreCheckpoint" | "project.deleteCheckpoint" => {
+            Ok(Some(DesktopCommandRoute::UiDialogOpener { kind: DesktopDialogOpener::Checkpoints, target_sheet_id: None, query: None }))
+        }
+        "sheet.rename" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
             kind: DesktopDialogOpener::CommandPalette,
             target_sheet_id: resolve_any_sheet_id(doc).map(|id| id.as_str().to_owned()),
             query: Some(base_cmd.to_owned()),
@@ -4090,6 +4113,10 @@ fn open_desktop_dialog(app: &mut UiApp, opener: DesktopDialogOpener, target_shee
             app.canvas_dialogs.open_hook_picker(&doc, &iid, None);
             Ok(json!({ "dialog": "ConstantHookPicker", "target_sheet_id": iid.as_str() }))
         }
+        DesktopDialogOpener::Checkpoints => {
+            app.canvas_dialogs.open_checkpoints(&doc);
+            Ok(json!({ "dialog": "Checkpoints", "count": doc.checkpoints.len() }))
+        }
         DesktopDialogOpener::CommandPalette => {
             app.canvas_dialogs.open_command_palette();
             if let Some(q) = query {
@@ -4246,6 +4273,59 @@ mod wave_b_host_tests {
         let _ = rt.dispatch(DesktopHostEvent::MenuAction { window_id: wid, command_id: String::from("table.pasteLink") })?;
         let wiz2 = &rt.window(wid)?.app.grid.import_wizard;
         assert_eq!(wiz2.target_sheet_id, None, "graph-active opener must not silently target primary source sheet");
+        Ok(())
+    }
+
+    #[test]
+    fn desktop_host_menu_cut_and_result_sheet_copy_work_cleanly() -> Result<(), String> {
+        let mut doc = ProjectDocument::new("Host Cut & Result Copy").map_err(|e| e.to_string())?;
+        let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 3).map_err(|e| e.to_string())?;
+        col.data_sets[0].cells[0][0] = Cell::number(10.0);
+        col.data_sets[1].cells[0][0] = Cell::number(20.0);
+        col.data_sets[0].cells[1][0] = Cell::number(30.0);
+        col.data_sets[1].cells[1][0] = Cell::number(40.0);
+        let ds = DataSheet::new("ds-1", "Table", TableArchetype::Column(col)).map_err(|e| e.to_string())?;
+        doc.add_data_sheet(ds).map_err(|e| e.to_string())?;
+        doc.active_sheet_id = Some(SheetId::new("ds-1"));
+
+        let mut rt = DesktopHostRuntime::new(DesktopHostConfig::default());
+        let wid = rt.open_window_with_session(Session::from_document(doc), ViewportMetrics::new(1280.0, 800.0, 1.0), false)?;
+        rt.window_mut(wid)?.app.grid.select_single_sync(CellCoord::new(0, 0, 0).into());
+
+        // `edit.cut` via host menu action copies and clears cell.
+        let cut_out = rt.dispatch(DesktopHostEvent::MenuAction { window_id: wid, command_id: String::from("edit.cut") })?;
+        assert!(cut_out.handled, "edit.cut host menu action should handle DataSheet selection");
+        assert!(rt.clipboard_text.as_deref().is_some_and(|t| t.contains("10")));
+        let ds_after = rt.window(wid)?.app.document().data_sheet(&SheetId::new("ds-1")).ok_or("missing ds-1")?;
+        assert!(ds_after.cell(CellCoord::new(0, 0, 0)).is_some_and(Cell::is_empty));
+
+        // Paste back and run analysis, then test `edit.copy` on ResultSheet.
+        let _ = rt.window_mut(wid)?.app.execute_command("table.setCell", json!({ "sheet_id": "ds-1", "row": 0, "col": 0, "value": 10.0 }));
+        let res = rt
+            .window_mut(wid)?
+            .app
+            .execute_command(
+                "analysis.run",
+                json!({
+                    "source_sheet_id": "ds-1",
+                    "kind": {
+                        "DescriptiveStats": {
+                            "aggregation": "PerSubcolumn",
+                            "custom_upper_percentile": null,
+                            "run_normality_battery": false,
+                            "hypothetical_value": null
+                        }
+                    }
+                }),
+            )
+            .map_err(|e| e.to_string())?;
+        let rs_id = res.payload["sheet_id"].as_str().ok_or("missing result sheet_id")?.to_owned();
+        let _ = rt.window_mut(wid)?.app.execute_command("sheet.select", json!({ "sheet_id": rs_id }));
+
+        rt.clipboard_text = None;
+        let copy_out = rt.dispatch(DesktopHostEvent::MenuAction { window_id: wid, command_id: String::from("edit.copy") })?;
+        assert!(copy_out.handled, "edit.copy on ResultSheet should copy active tab TSV");
+        assert!(rt.clipboard_text.as_deref().is_some_and(|t| !t.trim().is_empty()), "expected non-empty ResultSheet TSV");
         Ok(())
     }
 }

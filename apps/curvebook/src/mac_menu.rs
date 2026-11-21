@@ -3,17 +3,17 @@
 
 use curvebook_ui_egui::UiApp;
 #[cfg(target_os = "macos")]
-use curvebook_ui_egui::egui_shell::top_chrome::{EXTRA_FILE_MENU_ACTIONS, submenu_variants_for_command};
+use curvebook_ui_egui::egui_shell::top_chrome::submenu_variants_for_command;
 use curvebook_ui_egui::egui_shell::top_chrome::{collect_in_window_menu_sections, effective_menu_item_enabled, is_menu_item_visible};
 #[cfg(target_os = "macos")]
 use curvebook_ui_egui::i18n::{BETA_ACTIVE_LOCALES, normalize_locale};
 
 use crate::desktop_host::DesktopMenuChromeState;
 #[cfg(target_os = "macos")]
-use crate::desktop_host::DesktopMenuItem;
+use crate::desktop_host::{DesktopMenuItem, DesktopMenuNode};
 
-/// Canonical 10-menu top-level bar titles specified in `docs/planning/gui-layout-spec.md` §3.1.
-pub const NATIVE_MENU_BAR_TITLES: [&str; 10] = ["File", "Edit", "View", "Insert", "Data", "Analyze", "Graph", "Arrange", "Window", "Help"];
+/// Canonical 8-menu top-level bar titles specified in `docs/planning/gui-layout-spec.md` §3.1.
+pub const NATIVE_MENU_BAR_TITLES: [&str; 8] = ["File", "Edit", "View", "Insert", "Data", "Analyze", "Graph", "Help"];
 
 /// Cross-platform parity snapshot of one menu item's `command_id`, label, shortcut, and enablement.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,17 +116,26 @@ pub struct MudaMenuItemSpec {
     pub variants: Vec<(String, String)>,
 }
 
+/// Hierarchical node in a `muda` menu section.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MudaMenuNodeSpec {
+    Action(MudaMenuItemSpec),
+    Separator,
+    Submenu { id: String, title: String, children: Vec<Self> },
+}
+
 /// Pure `muda` submenu specification constructed off AppKit main thread for panic-free testing.
 #[cfg(target_os = "macos")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MudaMenuSectionSpec {
     pub menu_key: String,
     pub title: String,
+    pub nodes: Vec<MudaMenuNodeSpec>,
     pub items: Vec<MudaMenuItemSpec>,
-    pub extra_file_actions: Vec<(String, String)>,
 }
 
-/// Parse CurveBook shortcut notation (e.g. `"Cmd+Shift+P"`, `"Cmd+\\"`, `"F11"`, `"Cmd+K / Ctrl+K"`)
+/// Parse CurveBook shortcut notation (e.g. `"Cmd+Shift+I"`, `"Cmd+\\"`, `"F6"`, `"Cmd+K / Ctrl+K"`)
 /// into a [`muda::accelerator::Accelerator`] without panicking on unknown or empty strings.
 #[cfg(target_os = "macos")]
 #[must_use]
@@ -410,31 +419,7 @@ impl MacNativeMenuHost {
 
         for sec in &self.section_specs {
             let sub = muda::Submenu::with_id(muda::MenuId::new(&sec.menu_key), &sec.title, true);
-            for item in &sec.items {
-                if item.variants.is_empty() {
-                    let entry = muda::MenuItem::with_id(item.menu_id.clone(), &item.label, item.enabled, item.accelerator);
-                    sub.append(&entry).map_err(|err| format!("append menu item `{}`: {err}", item.command_id))?;
-                    next_items.push((flat_idx, entry));
-                } else {
-                    let nested = muda::Submenu::new(&item.label, true);
-                    for (v_label, v_cmd) in &item.variants {
-                        let accel =
-                            if item.command_id == "ui.canvas.applyPreset" && v_cmd.ends_with("SingleColumn88mm") { item.accelerator } else { None };
-                        let v_item = muda::MenuItem::with_id(muda::MenuId::new(v_cmd), v_label, item.enabled, accel);
-                        nested.append(&v_item).map_err(|err| format!("append variant `{v_cmd}`: {err}"))?;
-                        next_variants.push((item.command_id.clone(), v_item));
-                    }
-                    sub.append(&nested).map_err(|err| format!("append submenu `{}`: {err}", item.command_id))?;
-                }
-                flat_idx += 1;
-            }
-            if !sec.extra_file_actions.is_empty() {
-                sub.append(&muda::PredefinedMenuItem::separator()).map_err(|err| format!("append separator: {err}"))?;
-                for (label, cmd) in &sec.extra_file_actions {
-                    let entry = muda::MenuItem::with_id(muda::MenuId::new(cmd), label, true, None);
-                    sub.append(&entry).map_err(|err| format!("append extra file action `{cmd}`: {err}"))?;
-                }
-            }
+            append_muda_nodes(&sub, &sec.nodes, &mut next_items, &mut next_variants, &mut flat_idx)?;
             menu.append(&sub).map_err(|err| format!("append submenu `{}`: {err}", sec.menu_key))?;
         }
 
@@ -446,22 +431,91 @@ impl MacNativeMenuHost {
 }
 
 #[cfg(target_os = "macos")]
+fn append_muda_nodes(
+    parent: &muda::Submenu,
+    nodes: &[MudaMenuNodeSpec],
+    next_items: &mut Vec<(usize, muda::MenuItem)>,
+    next_variants: &mut Vec<(String, muda::MenuItem)>,
+    flat_idx: &mut usize,
+) -> Result<(), String> {
+    for node in nodes {
+        match node {
+            MudaMenuNodeSpec::Separator => {
+                parent.append(&muda::PredefinedMenuItem::separator()).map_err(|err| format!("append separator: {err}"))?;
+            }
+            MudaMenuNodeSpec::Submenu { id: _, title, children } => {
+                let nested = muda::Submenu::new(title, true);
+                append_muda_nodes(&nested, children, next_items, next_variants, flat_idx)?;
+                parent.append(&nested).map_err(|err| format!("append nested submenu `{title}`: {err}"))?;
+            }
+            MudaMenuNodeSpec::Action(item) => {
+                if item.variants.is_empty() {
+                    let entry = muda::MenuItem::with_id(item.menu_id.clone(), &item.label, item.enabled, item.accelerator);
+                    parent.append(&entry).map_err(|err| format!("append menu item `{}`: {err}", item.command_id))?;
+                    next_items.push((*flat_idx, entry));
+                } else {
+                    let nested = muda::Submenu::new(&item.label, true);
+                    for (v_label, v_cmd) in &item.variants {
+                        let accel =
+                            if item.command_id == "ui.canvas.applyPreset" && v_cmd.ends_with("SingleColumn88mm") { item.accelerator } else { None };
+                        let v_item = muda::MenuItem::with_id(muda::MenuId::new(v_cmd), v_label, item.enabled, accel);
+                        nested.append(&v_item).map_err(|err| format!("append variant `{v_cmd}`: {err}"))?;
+                        next_variants.push((item.command_id.clone(), v_item));
+                    }
+                    parent.append(&nested).map_err(|err| format!("append submenu `{}`: {err}", item.command_id))?;
+                }
+                *flat_idx += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn build_muda_nodes(nodes: &[DesktopMenuNode], flat_items: &mut Vec<MudaMenuItemSpec>) -> Vec<MudaMenuNodeSpec> {
+    let mut out = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        match node {
+            DesktopMenuNode::Action(item) => {
+                if is_menu_item_visible(&item.command_id) {
+                    let spec = build_muda_item_spec(item);
+                    flat_items.push(spec.clone());
+                    out.push(MudaMenuNodeSpec::Action(spec));
+                }
+            }
+            DesktopMenuNode::Separator => out.push(MudaMenuNodeSpec::Separator),
+            DesktopMenuNode::Submenu { id, title, children } => {
+                let child_nodes = build_muda_nodes(children, flat_items);
+                if !child_nodes.is_empty() {
+                    out.push(MudaMenuNodeSpec::Submenu { id: id.clone(), title: title.clone(), children: child_nodes });
+                }
+            }
+        }
+    }
+    out
+}
+
+#[cfg(target_os = "macos")]
 fn build_muda_section_specs(chrome: &DesktopMenuChromeState) -> Vec<MudaMenuSectionSpec> {
     chrome
         .sections
         .iter()
         .map(|sec| {
-            let items = sec.items.iter().filter(|item| is_menu_item_visible(&item.command_id)).map(build_muda_item_spec).collect();
-            let extra_file_actions = if matches!(sec.menu_key.as_str(), "menu.file" | "file") {
-                EXTRA_FILE_MENU_ACTIONS
+            let mut items = Vec::new();
+            let nodes = if sec.nodes.is_empty() {
+                sec.items
                     .iter()
-                    .filter(|(_, _, aliases)| !sec.items.iter().any(|existing| aliases.contains(&existing.command_id.as_str())))
-                    .map(|&(label, cmd, _)| (label.to_owned(), cmd.to_owned()))
+                    .filter(|item| is_menu_item_visible(&item.command_id))
+                    .map(|item| {
+                        let spec = build_muda_item_spec(item);
+                        items.push(spec.clone());
+                        MudaMenuNodeSpec::Action(spec)
+                    })
                     .collect()
             } else {
-                Vec::new()
+                build_muda_nodes(&sec.nodes, &mut items)
             };
-            MudaMenuSectionSpec { menu_key: sec.menu_key.clone(), title: sec.title.clone(), items, extra_file_actions }
+            MudaMenuSectionSpec { menu_key: sec.menu_key.clone(), title: sec.title.clone(), nodes, items }
         })
         .collect()
 }
@@ -494,11 +548,26 @@ fn build_muda_item_spec(item: &DesktopMenuItem) -> MudaMenuItemSpec {
 }
 
 #[cfg(target_os = "macos")]
+fn push_node_structure_signature(nodes: &[MudaMenuNodeSpec], out: &mut Vec<(String, String, String)>) {
+    for node in nodes {
+        match node {
+            MudaMenuNodeSpec::Action(it) => out.push((it.command_id.clone(), it.label.clone(), it.shortcut.clone())),
+            MudaMenuNodeSpec::Separator => out.push((String::from("__separator__"), String::new(), String::new())),
+            MudaMenuNodeSpec::Submenu { id, title, children } => {
+                out.push((id.clone(), title.clone(), String::from("__submenu__")));
+                push_node_structure_signature(children, out);
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn compute_structure_signature(specs: &[MudaMenuSectionSpec]) -> MenuStructureSignature {
     specs
         .iter()
         .map(|sec| {
-            let items = sec.items.iter().map(|it| (it.command_id.clone(), it.label.clone(), it.shortcut.clone())).collect();
+            let mut items = Vec::new();
+            push_node_structure_signature(&sec.nodes, &mut items);
             (sec.menu_key.clone(), sec.title.clone(), items)
         })
         .collect()
@@ -525,6 +594,7 @@ mod tests {
             sections: vec![DesktopMenuSection {
                 menu_key: String::from("menu.file"),
                 title: String::from("File"),
+                nodes: Vec::new(),
                 items: vec![DesktopMenuItem {
                     command_id: String::from("file.new"),
                     localized_label: String::from("New Project"),

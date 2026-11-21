@@ -29,6 +29,12 @@ pub const SYMBOL_FALLBACK_FONT_NAME: &str = "curvebook_symbol_fallback";
 /// [`egui::FontDefinitions::font_data`].
 pub const CLEANROOM_SANS_FALLBACK_FONT_NAME: &str = "curvebook_cleanroom_sans";
 
+/// Named [`egui::FontFamily::Name`] family holding the bold system UI face (`>= Semibold`)
+/// followed by the proportional fallback chain (§10.2).
+pub const BOLD_FONT_FAMILY: &str = "curvebook_bold";
+
+const BOLD_AVAILABLE_DATA_KEY: &str = "curvebook_bold_face_loaded";
+
 const MAX_FONT_FILE_BYTES: usize = 48 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: usize = 256 * 1024;
 const MAX_ENV_FONT_FILES: usize = 48;
@@ -76,6 +82,8 @@ pub struct FontDiscoveryReport {
     pub symbol_fallback_loaded: bool,
     /// Whether [`CLEANROOM_SANS_FALLBACK_FONT_NAME`] was installed in `FontDefinitions`.
     pub cleanroom_sans_loaded: bool,
+    /// Whether a distinct bold (`>= Semibold`) face of the primary UI family was registered in [`BOLD_FONT_FAMILY`].
+    pub bold_face_loaded: bool,
 }
 
 /// Constructed [`egui::FontDefinitions`] paired with its [`FontDiscoveryReport`].
@@ -97,20 +105,48 @@ pub fn build_egui_font_definitions() -> BuiltEguiFonts {
 /// Discover system/override fonts and install them into `ctx`, returning a [`FontDiscoveryReport`].
 pub fn install_egui_fonts(ctx: &egui::Context) -> FontDiscoveryReport {
     let built = build_egui_font_definitions();
-    ctx.set_fonts(built.definitions);
+    install_font_definitions(ctx, built.definitions);
     built.report
+}
+
+/// Install an already-built [`egui::FontDefinitions`] into `ctx`, recording whether [`BOLD_FONT_FAMILY`]
+/// is populated so [`has_bold_font`] and [`section_heading_font_id`] match §10.2 reliably.
+pub fn install_font_definitions(ctx: &egui::Context, definitions: egui::FontDefinitions) {
+    let has_bold = definitions.families.get(&egui::FontFamily::Name(Arc::from(BOLD_FONT_FAMILY))).is_some_and(|chain| !chain.is_empty());
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique(BOLD_AVAILABLE_DATA_KEY), has_bold));
+    ctx.set_fonts(definitions);
+}
+
+/// Returns `true` when the active font setup registered a distinct bold UI face (`>= Semibold`).
+#[must_use]
+pub fn has_bold_font(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp::<bool>(egui::Id::unique(BOLD_AVAILABLE_DATA_KEY))).unwrap_or(false)
+}
+
+/// Section heading font per §10.2: `type.section` (`13 pt` bold) or `14 pt` regular fallback when no bold face was loaded.
+#[must_use]
+pub fn section_heading_font_id(ctx: &egui::Context, tokens: &super::Tokens) -> egui::FontId {
+    if has_bold_font(ctx) {
+        egui::FontId::new(tokens.metrics.font_ui_section_pt, egui::FontFamily::Name(Arc::from(BOLD_FONT_FAMILY)))
+    } else {
+        egui::FontId::proportional(14.0)
+    }
 }
 
 /// Install [`egui::FontDefinitions`] into `ctx`, reusing a process-wide cached default build when
 /// `CURVEBOOK_FONTS_DIR` is unset so offscreen inspection/raster passes do not re-index host fonts.
 pub fn install_default_egui_fonts_cached(ctx: &egui::Context) {
-    static DEFAULT_FONT_DEFS: OnceLock<egui::FontDefinitions> = OnceLock::new();
+    static DEFAULT_FONT_DEFS: OnceLock<(egui::FontDefinitions, bool)> = OnceLock::new();
     let has_env_override = std::env::var_os("CURVEBOOK_FONTS_DIR").is_some_and(|v| !v.is_empty());
     if has_env_override {
         let _ = install_egui_fonts(ctx);
         return;
     }
-    let defs = DEFAULT_FONT_DEFS.get_or_init(|| build_egui_font_definitions().definitions);
+    let (defs, has_bold) = DEFAULT_FONT_DEFS.get_or_init(|| {
+        let built = build_egui_font_definitions();
+        (built.definitions, built.report.bold_face_loaded)
+    });
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique(BOLD_AVAILABLE_DATA_KEY), *has_bold));
     ctx.set_fonts(defs.clone());
 }
 
@@ -251,12 +287,33 @@ fn assemble_font_definitions(
         }
     }
 
+    let bold_id = first_regular_nonmono_id(db, env_ids)
+        .or_else(|| first_regular_nonmono_id(db, bundled_ids))
+        .or(os_prop_id)
+        .and_then(|reg_id| query_primary_proportional_bold(db, reg_id));
+
     defs.families.insert(egui::FontFamily::Proportional, proportional);
     defs.families.insert(egui::FontFamily::Monospace, monospace);
 
     // Deterministic cleanroom SFNT layers: sans first, mandatory symbols right after.
     append_cleanroom_sans_fallback(&mut defs);
     append_symbol_fallback(&mut defs);
+
+    if let Some(bid) = bold_id {
+        let mut bold_chain = Vec::new();
+        let mut bold_seen = HashSet::new();
+        if register_face_for_family(db, bid, "os_proportional_bold", &mut defs, &mut bold_seen, &mut bold_chain) {
+            if let Some(prop_chain) = defs.families.get(&egui::FontFamily::Proportional) {
+                for key in prop_chain {
+                    if !bold_chain.iter().any(|existing| existing == key) {
+                        bold_chain.push(key.clone());
+                    }
+                }
+            }
+            defs.families.insert(egui::FontFamily::Name(Arc::from(BOLD_FONT_FAMILY)), bold_chain);
+            report.bold_face_loaded = true;
+        }
+    }
 
     report.proportional_chain = defs.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default();
     report.monospace_chain = defs.families.get(&egui::FontFamily::Monospace).cloned().unwrap_or_default();
@@ -334,13 +391,19 @@ fn first_regular_id(db: &fontdb::Database, ids: &[fontdb::ID], require_mono: boo
         .or_else(|| ids.iter().copied().find(|&id| !require_mono || db.face(id).is_some_and(|f| f.monospaced)))
 }
 
+fn first_regular_nonmono_id(db: &fontdb::Database, ids: &[fontdb::ID]) -> Option<fontdb::ID> {
+    ids.iter()
+        .copied()
+        .find(|&id| db.face(id).is_some_and(|f| f.style == fontdb::Style::Normal && f.weight == fontdb::Weight::NORMAL && !f.monospaced))
+}
+
 fn query_primary_proportional(db: &fontdb::Database) -> Option<fontdb::ID> {
     db.query(&fontdb::Query {
         families: &[
             fontdb::Family::Name("SF Pro Text"),
             fontdb::Family::Name("SF NS Text"),
-            fontdb::Family::Name(".SF NS"),
             fontdb::Family::Name("Helvetica Neue"),
+            fontdb::Family::Name(".SF NS"),
             fontdb::Family::Name("Segoe UI"),
             fontdb::Family::Name("DejaVu Sans"),
             fontdb::Family::Name("Liberation Sans"),
@@ -353,6 +416,23 @@ fn query_primary_proportional(db: &fontdb::Database) -> Option<fontdb::ID> {
         stretch: fontdb::Stretch::Normal,
         style: fontdb::Style::Normal,
     })
+}
+
+fn query_primary_proportional_bold(db: &fontdb::Database, regular_id: fontdb::ID) -> Option<fontdb::ID> {
+    let regular_face = db.face(regular_id)?;
+    let family_filters: Vec<fontdb::Family<'_>> = regular_face.families.iter().map(|(name, _)| fontdb::Family::Name(name.as_str())).collect();
+    if family_filters.is_empty() {
+        return None;
+    }
+    let bold_id = db.query(&fontdb::Query {
+        families: &family_filters,
+        weight: fontdb::Weight::BOLD,
+        stretch: fontdb::Stretch::Normal,
+        style: fontdb::Style::Normal,
+    })?;
+    let is_distinct_bold =
+        bold_id != regular_id && db.face(bold_id).is_some_and(|f| f.style == fontdb::Style::Normal && f.weight.0 >= fontdb::Weight::SEMIBOLD.0);
+    is_distinct_bold.then_some(bold_id)
 }
 
 fn query_primary_monospace(db: &fontdb::Database) -> Option<fontdb::ID> {
@@ -535,9 +615,11 @@ fn curated_os_font_candidates() -> &'static [&'static str] {
     #[cfg(target_os = "macos")]
     {
         &[
+            "/System/Library/Fonts/HelveticaNeue.ttc",
             "/System/Library/Fonts/SFNS.ttf",
             "/System/Library/Fonts/Helvetica.ttc",
             "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
             "/System/Library/Fonts/SFNSMono.ttf",
             "/System/Library/Fonts/Menlo.ttc",
             "/System/Library/Fonts/Supplemental/Courier New.ttf",
@@ -551,7 +633,9 @@ fn curated_os_font_candidates() -> &'static [&'static str] {
     {
         &[
             r"C:\Windows\Fonts\segoeui.ttf",
+            r"C:\Windows\Fonts\segoeuib.ttf",
             r"C:\Windows\Fonts\arial.ttf",
+            r"C:\Windows\Fonts\arialbd.ttf",
             r"C:\Windows\Fonts\consola.ttf",
             r"C:\Windows\Fonts\cour.ttf",
             r"C:\Windows\Fonts\seguisym.ttf",
@@ -564,12 +648,16 @@ fn curated_os_font_candidates() -> &'static [&'static str] {
     {
         &[
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
             "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
             "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
             "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
             "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
             "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
             "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
             "/usr/share/fonts/noto/NotoSans-Regular.ttf",
             "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
@@ -782,6 +870,29 @@ mod tests {
         let built = build_egui_font_definitions();
         if !cfg!(feature = "bundled-fonts") || curvebook_text::BUNDLED_FONTS.is_empty() {
             assert_eq!(built.report.bundled_faces, 0);
+        }
+    }
+
+    #[test]
+    fn bold_section_heading_uses_bold_face_or_14pt_fallback() {
+        let headless =
+            build_egui_font_definitions_with_config(&FontDiscoveryConfig { fonts_dir: None, include_os_fonts: false, include_bundled_fonts: false });
+        assert!(!headless.report.bold_face_loaded);
+        let headless_ctx = egui::Context::default();
+        super::install_font_definitions(&headless_ctx, headless.definitions);
+        let tokens = crate::egui_shell::Tokens::default();
+        assert_eq!(super::section_heading_font_id(&headless_ctx, &tokens), egui::FontId::proportional(14.0));
+
+        let host = build_egui_font_definitions();
+        let host_ctx = egui::Context::default();
+        let report = install_egui_fonts(&host_ctx);
+        assert_eq!(report.bold_face_loaded, host.report.bold_face_loaded);
+        if cfg!(target_os = "macos") {
+            assert!(report.bold_face_loaded, "expected distinct bold UI face on macOS via Helvetica Neue");
+            assert_eq!(
+                super::section_heading_font_id(&host_ctx, &tokens),
+                egui::FontId::new(13.0, egui::FontFamily::Name(std::sync::Arc::from(super::BOLD_FONT_FAMILY)))
+            );
         }
     }
 }
