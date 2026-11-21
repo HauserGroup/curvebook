@@ -112,6 +112,17 @@ Fixes for reported issues had no roadmap ID to use, merged PRs did not reference
 - [x] Create the `numerical`, `confirmed`, and `needs-repro` labels on GitHub. *(Done 2026-11-20 with `gh label create`.)*
 - [ ] Hosted CI passes on the pull request.
 
+### R0.34 Checked lock wrapper for shared state
+Owner: open · Status: todo · Was: cross-repository infrastructure drift audit 2026-11-21 · Depends on: none · Gate: none · Est. note: 6–10 h
+
+[`clippy.toml`](../clippy.toml) bans `std::sync::Mutex` "until a checked lock wrapper lands", but shared state now uses raw `std::sync::RwLock` instead (`crates/mcp/src/tools.rs`, `crates/ui-egui/src/os_integration.rs`, `crates/ui-egui/src/egui_shell/canvas_view.rs`, `apps/curvebook/src/desktop_host.rs`, `apps/curvebook/src/gui_window.rs`). An `RwLock` deadlocks in the same ways as a `Mutex` (a thread locking twice, two threads waiting on each other, a holder that never lets go), so the ban moves the risk instead of removing it. Design and write the wrapper independently, in CurveBook's own words.
+
+- [ ] Add `curvebook_platform::sync::{Mutex, RwLock}` with the standard-library API that records which thread holds each lock. A waiter that would wait on itself or on a cycle returns a typed error instead of blocking (never a panic and never `catch_unwind`, per [`AGENTS.md`](../AGENTS.md) › CurveBook Never Crashes). A holder that is not labelled as a long job and keeps others waiting past a documented limit is reported, and waiters give up after a second documented limit. Keep it `wasm32`-clean: no watchdog thread on `wasm32-unknown-unknown` (`cargo xtask ci wasm`).
+- [ ] Unit tests: a thread taking a lock it already holds, a two-thread cycle, a labelled long job that is waited for rather than cut off, poisoning, and both time limits.
+- [ ] Move the existing shared-state `RwLock` sites to the wrapper. Add `std::sync::RwLock`, `std::sync::RwLockReadGuard`, `std::sync::RwLockWriteGuard`, and `std::sync::MutexGuard` to `disallowed-types` with the wrapper as the reason, and replace the "until a checked lock wrapper lands" wording.
+- [ ] Document the rule in [`pitfalls-engineering.md`](pitfalls-engineering.md) and [`extending.md`](extending.md).
+- [ ] Verify: `cargo xtask ci quick`; hosted CI passes on the pull request.
+
 ---
 
 ## R8 Desktop & WebAssembly live shell, localization & `1.0` hardening
@@ -551,6 +562,16 @@ Everything the Beta GitHub Release needs from the build and publish pipeline. Th
 **Maintainer docs**
 - [x] Update [`releasing.md`](release/releasing.md) once for everything above: the scan as a mandatory step, the asset table, the signed macOS path, and fail-closed behaviour. Point [`get-started.md#verifying-downloads`](reference/get-started.md#verifying-downloads) and `packaging/*/INSTALLATION.md` at the `R12.5` install page instead of repeating install steps. *(Done 2026-11-18 across [`releasing.md`](release/releasing.md), [`get-started.md#verifying-downloads`](reference/get-started.md#verifying-downloads), and [`packaging/windows/INSTALLATION.md`](../packaging/windows/INSTALLATION.md); `packaging/macos/INSTALLATION.md` removed.)*
 
+### R14.2 Release SBOM and CI runner hardening
+Owner: maintainers · Status: todo · Was: cross-repository infrastructure drift audit 2026-11-21 · Depends on: [`R14.1`](#r141-beta-release-pipeline) · Gate: none (before or after Beta) · Est. note: 4–8 h
+
+The release workflow attests build provenance for every artefact, but publishes no software bill of materials (SBOM), and no workflow restricts or records where the runners connect to.
+
+- [ ] Generate a CycloneDX SBOM from `Cargo.lock` for every release with a tool installed in CI only (never a workspace dependency; check its licence against [`licences.md`](licences.md)). Attach it to the draft release and attest it next to the existing build-provenance attestations in `.github/workflows/release.yml`.
+- [ ] Make the SBOM a required release asset in `cargo xtask release-scan` and in [`releasing.md`](release/releasing.md).
+- [ ] **Decision:** add a runner-hardening step (network egress allowlist) to `ci.yml` and `release.yml`, or record why not. Adopt only a mode that sends no build or network data to a third-party service. Pin any new action by commit SHA and keep `cargo xtask telemetry` and `cargo xtask workflows` passing.
+- [ ] Verify: hosted CI and one release dry run pass.
+
 ---
 
 ## R15 Modern egui desktop GUI overhaul (Beta gate)
@@ -678,6 +699,16 @@ Owner: maintainers · Status: done · Was: Maintainability ledger 2026-11-20 (`R
 
 - [x] Add shared i18n fallback helper (`R15-1`), unify modal `FrameInspectMeta` recording adapter (`R15-2`), share the shortcut candidate builder (`R8-1`), deduplicate accessibility state transitions (`R10-1`), share journal width preset name tables (`R9-1`), share the linked-paste TSV cell formatter (`R10-2`), and share capped raster sizing between MCP and control (`R5-4`). *(Done 2026-11-20 in `3663e09`.)*
 
+### R16.19 Replace egui combo boxes with a dropdown that can grow while open
+Owner: open · Status: todo · Was: cross-repository infrastructure drift audit 2026-11-21 · Depends on: none · Gate: none · Est. note: 2–4 h
+
+An open `egui::ComboBox` popup is reported upstream (egui issue #5225) to keep the size it opened at, so a list that changes while open cannot grow back. CurveBook uses it in `crates/ui-egui/src/egui_shell/stat_anova_modal.rs` and `crates/ui-egui/src/egui_shell/center_stage.rs`.
+
+- [ ] Confirm the behaviour on the pinned `egui` version with an `egui_kittest` test. If it no longer reproduces, drop this item with that evidence.
+- [ ] Add a small dropdown helper in `curvebook-ui-egui`, move both call sites to it, and add `egui::ComboBox` to `disallowed-types` in [`clippy.toml`](../clippy.toml) with the helper as the reason.
+- [ ] Add a human-path test for each migrated control ([pitfalls §6](pitfalls.md#6-treating-semantic-agent-harness-tests-as-proof-of-human-gui-parity)).
+- [ ] Verify: `cargo xtask ci quick` and `cargo xtask screenshots --check`; hosted CI passes on the pull request.
+
 ---
 
 ## Order and dependencies
@@ -711,6 +742,7 @@ See [earlier sequencing](history/roadmap.md#earlier-sequencing) for foundational
 | **Step 14d (`R13` GUI views)** | [`R13.8`](#r138-desktop-gui-views-for-r13-features) (`egui` dialogs, inspector controls, and canvas handles for `R13.2`–`R13.5` and `R13.7` — done) | [`R15.5`](history/roadmap/r15.md#r155-default-desktop-egui-cutover-screenshot-refresh-and-beta-readiness) (done) | **Beta** (moved from **1.0** 2026-11-20) |
 | **Step 14e (`R13` 15-workflow acceptance)** | [`R13.6`](#r136-extended-15-workflow-wf-51-to-wf-65-agent-harness-desktop-human-path--web-acceptance) (`WF-51`–`WF-65` `--gui-only` and desktop `EguiHumanPathDriver` suites — done; live browser parity and walkthroughs stay **1.0** in `R11.9`, `R10.13`, and `R11.10`) | `R13.1`–`R13.5`, `R13.7`, `R13.8`, [`R15.5`](history/roadmap/r15.md#r155-default-desktop-egui-cutover-screenshot-refresh-and-beta-readiness) (done) | **Beta** (moved from **1.0** 2026-11-20) |
 | **Core-crate maintainability (`R16`)** | [`R16.1`](#r161-split-the-stats-anova-module-by-method-family), [`R16.2`](history/roadmap/r16.md#r162-split-the-fit-solver-and-model-dsl-modules) (done), [`R16.4`](history/roadmap/r16.md#r164-typed-engine-command-parameters-wire-compatible) (done), and [`R16.6`](history/roadmap/r16.md#r166-one-home-for-analysis-spec-validation-and-an-accurate-extension-checklist) (done) in parallel (disjoint crates: `stats`, `fit`, `engine`, `doc` + `format/archive.rs`); then [`R16.3`](#r163-split-per-graph-family-chart-builders); [`R16.5`](history/roadmap/r16.md#r165-retire-duplicate-parameter-spellings-after-the-egui-cutover) (done); GUI splits & cleanups [`R16.7`](#r167-split-the-data-grid-by-archetype)–[`R16.9`](#r169-split-the-graph-modals), [`R16.11`](#r1611-further-gui-module-splits-optional-one-pr-each)–[`R16.18`](#r1618-gui-helper-deduplication) (done) | None for `R16.1`, `R16.2`, `R16.4`, `R16.6`; `R16.3` unblocked (`R13.2`–`R13.5` done); `R16.5` needed `R16.4` and [`R15.5`](history/roadmap/r15.md#r155-default-desktop-egui-cutover-screenshot-refresh-and-beta-readiness) (both done). | none (engineering hygiene) |
+| **Infrastructure hygiene** | [`R0.34`](#r034-checked-lock-wrapper-for-shared-state) checked lock wrapper, [`R14.2`](#r142-release-sbom-and-ci-runner-hardening) release SBOM and runner hardening, [`R16.19`](#r1619-replace-egui-combo-boxes-with-a-dropdown-that-can-grow-while-open) growable dropdown (independent of each other) | None for `R0.34` and `R16.19`; `R14.2` after [`R14.1`](#r141-beta-release-pipeline) | none (engineering hygiene) |
 
 **Open and parked decisions**
 
