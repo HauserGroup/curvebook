@@ -1142,6 +1142,7 @@ fn collect_transitive(start: &SheetId, adj: &BTreeMap<SheetId, Vec<SheetId>>) ->
 }
 
 /// Collect all downstream dependent sheet IDs transitively relying on `root_id`.
+#[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub(crate) fn collect_downstream_dependents(doc: &ProjectDocument, root_id: &SheetId) -> Vec<SheetId> {
     let upstream = build_upstream_map(doc);
