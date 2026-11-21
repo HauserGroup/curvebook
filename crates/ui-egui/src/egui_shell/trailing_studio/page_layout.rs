@@ -351,6 +351,8 @@ pub(super) fn render_page_layout_composer_studio(
         }
     });
 
+    render_layout_add_panel_controls(ui, app, ls, ctx_in, meta, intents);
+
     let has_live_graphs = spec.items.iter().any(|it| matches!(it, LayoutItem::LiveGraph { .. }));
     let can_reorder = ctx_in.enabled && spec.items.len() >= 2;
     let target_panel_idx = app.egui_views.canvas_view.selected_panel_index.unwrap_or(0).min(spec.items.len().saturating_sub(1));
@@ -447,6 +449,58 @@ pub(super) fn render_page_layout_composer_studio(
     ) {
         intents.push_ui("ui.export.figure.open", json!({ "sheet_id": ls.id.as_str(), "dpi": state.layout_dpi }));
     }
+}
+
+fn render_layout_add_panel_controls(
+    ui: &mut egui::Ui,
+    app: &UiApp,
+    ls: &LayoutSheet,
+    ctx_in: TrailingStudioContext<'_>,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let tokens = ctx_in.tokens;
+    ui.add_space(6.0);
+    widgets::subheader(ui, "Add Graph Panel");
+    let graphs = &app.document().graph_sheets;
+    if graphs.is_empty() {
+        ui.label(egui::RichText::new("No graph sheets in document.").small().color(tokens.text_muted));
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+        for (idx, gs) in graphs.iter().enumerate() {
+            let label = format!("+ {}", gs.title);
+            let widget_id = format!("studio.layout.add_panel.{idx}");
+            let tip = format!("Add a panel for {} to this layout", gs.title);
+            if studio_chip(
+                ui,
+                tokens,
+                meta,
+                &StudioChipSpec {
+                    label: &label,
+                    tooltip: &tip,
+                    max_w: 156.0,
+                    selected: false,
+                    enabled: ctx_in.enabled,
+                    border_override: None,
+                    widget_id: &widget_id,
+                    role: "button",
+                    command_id: Some("layout.addPanel"),
+                    disabled_reason: None,
+                },
+            ) {
+                intents.push_engine(
+                    "layout.addPanel",
+                    json!({
+                        "sheet_id": ls.id.as_str(),
+                        "kind": "graph",
+                        "graph_sheet_id": gs.id.as_str(),
+                    }),
+                );
+            }
+        }
+    });
 }
 
 fn render_layout_media_controls(

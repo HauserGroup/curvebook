@@ -1421,6 +1421,8 @@ fn render_layout_hud_overlays(
         let h_rects = image_handle_rects(sel_r, mat_rect);
         ptr_pos.is_some_and(|p| h_rects.iter().any(|hr| hr.contains(p)))
     });
+    let (selected_non_img_idx, pointer_in_panel_resize, panel_resize_active) =
+        selected_non_image_panel_state(ls, state, paper_rect, sx, sy, ptr_pos, selected_img.is_some());
 
     let mut panel_rects = Vec::with_capacity(ls.spec.items.len());
     for (idx, item) in ls.spec.items.iter().enumerate() {
@@ -1460,7 +1462,7 @@ fn render_layout_hud_overlays(
     let mut panel_opened_ctx_menu = false;
     for (idx, item, bounds, r) in panel_rects {
         let selected = state.selected_panel_index == Some(idx);
-        let suppress_drag = selected && (pointer_in_img_handle || resize_or_rot_active);
+        let suppress_drag = selected && (pointer_in_img_handle || resize_or_rot_active || pointer_in_panel_resize || panel_resize_active);
         let sense = if ctx_in.enabled && !suppress_drag { Sense::click_and_drag() } else { Sense::hover() };
         let p_resp = ui.interact(r, Id::unique(("layout_panel", ls.id.as_str(), idx)), sense);
 
@@ -1551,6 +1553,7 @@ fn render_layout_hud_overlays(
             if p_resp.dragged()
                 && let Some(drag) = state.layout_drag.as_mut()
                 && drag.item_index == idx
+                && !drag.resizing_corner
             {
                 let ptr = ui.input(|i| i.pointer.latest_pos().or_else(|| i.pointer.interact_pos())).unwrap_or(r.center());
                 let scene_pt =
@@ -1566,8 +1569,8 @@ fn render_layout_hud_overlays(
                 state.last_snap_readout = Some(format!("Snap: X={:.1} pt, Y={:.1} pt (0.1 pt)", snapped.x, snapped.y));
             }
             if p_resp.drag_stopped()
+                && state.layout_drag.as_ref().is_some_and(|d| d.item_index == idx && !d.resizing_corner)
                 && let Some(drag) = state.layout_drag.take()
-                && drag.item_index == idx
             {
                 let mut updated_items = ls.spec.items.clone();
                 if let Some(target_item) = updated_items.get_mut(idx) {
@@ -1593,6 +1596,10 @@ fn render_layout_hud_overlays(
             meta,
             intents,
         );
+    } else if ctx_in.enabled
+        && let Some(sel_idx) = selected_non_img_idx
+    {
+        render_layout_panel_resize_handle(ui, &ov, ls, state, sel_idx, meta, intents);
     }
 
     // Draw active 0.1 pt snap guides (both internal live drag & CanvasToolState active_snap_guides)
@@ -1621,80 +1628,7 @@ fn render_layout_hud_overlays(
         paint_hover_hud_card(painter, pos2(paper_rect.left() + 8.0, paper_rect.top() + 8.0), readout, tokens);
     }
 
-    if !ctx_in.enabled {
-        state.layout_context_menu = None;
-    } else if let Some((ref menu_sheet, opt_panel_idx, anchor)) = state.layout_context_menu.clone() {
-        if menu_sheet != &ls.id || opt_panel_idx.is_some_and(|idx| idx >= ls.spec.items.len()) {
-            state.layout_context_menu = None;
-        } else {
-            let screen = ui.ctx().content_rect();
-            let pos = pos2(
-                anchor.x.clamp(screen.left() + 4.0, (screen.right() - 242.0).max(screen.left() + 4.0)),
-                anchor.y.clamp(screen.top() + 4.0, (screen.bottom() - 260.0).max(screen.top() + 4.0)),
-            );
-            let mut close_menu = false;
-            let area_resp = egui::Area::new(Id::unique(("layout_panel_ctx_menu", ls.id.as_str())))
-                .order(egui::Order::Foreground)
-                .fixed_pos(pos)
-                .show(ui.ctx(), |menu_ui| {
-                    egui::Frame::popup(menu_ui.style())
-                        .fill(tokens.surface_bg)
-                        .stroke(Stroke::new(1.0, tokens.border))
-                        .corner_radius(CornerRadius::same(4))
-                        .show(menu_ui, |ui| {
-                            ui.set_min_width(232.0);
-                            if let Some(panel_idx) = opt_panel_idx {
-                                for (slug, lbl, action_str) in [
-                                    ("front", "Bring to Front", "bring_to_front"),
-                                    ("forward", "Bring Forward", "bring_forward"),
-                                    ("backward", "Send Backward", "send_backward"),
-                                    ("back", "Send to Back", "send_to_back"),
-                                ] {
-                                    let wid = format!("canvas.layout_ctx.{slug}");
-                                    let btn = ui.add_sized([228.0, 26.0], egui::Button::new(lbl).fill(Color32::TRANSPARENT));
-                                    meta.record_response(
-                                        ui,
-                                        &btn,
-                                        FrameInspectEntryInput {
-                                            widget_id: &wid,
-                                            role: "menuitem",
-                                            label: lbl,
-                                            command_id: Some("layout.reorderPanel"),
-                                            value: Some(json!(action_str)),
-                                            enabled: true,
-                                            disabled_reason: None,
-                                            z_layer: ZLayer::ContextMenu,
-                                            ellipsized: false,
-                                            full_label: None,
-                                        },
-                                    );
-                                    if btn.clicked() {
-                                        intents.push_engine(
-                                            "layout.reorderPanel",
-                                            json!({
-                                                "sheet_id": ls.id.as_str(),
-                                                "panel_index": panel_idx,
-                                                "action": action_str,
-                                            }),
-                                        );
-                                        close_menu = true;
-                                    }
-                                }
-                                ui.separator();
-                            }
-                            if append_layout_context_menu_extras(ui, &ov, ls, opt_panel_idx, anchor, meta, intents) {
-                                close_menu = true;
-                            }
-                        });
-                });
-            let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
-            let outside_click =
-                ui.input(|i| i.pointer.primary_clicked() && i.pointer.interact_pos().is_some_and(|p| !area_resp.response.rect.contains(p)));
-            if close_menu || esc || outside_click {
-                state.layout_context_menu = None;
-            }
-        }
-    }
+    render_layout_context_menu_popup(ui, &ov, ls, state, meta, intents);
 }
 
 fn snap_panel_with_tenth_precision(
@@ -2343,7 +2277,262 @@ fn append_layout_context_menu_extras(
         intents.push_ui("ui.gridOverlay.toggle", json!({}));
         clicked = true;
     }
+    ui.separator();
+    ui.label(egui::RichText::new("Add Graph Panel").small().color(ov.tokens.text_muted));
+    let graphs = &ov.app.document().graph_sheets;
+    if graphs.is_empty() {
+        let _ = render_context_menu_item(ui, meta, "canvas.layout_ctx.add_panel.empty", "No Graph Sheets", Some("layout.addPanel"), false);
+    } else if graphs.len() > 4 {
+        egui::ScrollArea::vertical().id_salt("layout_ctx_add_panel_scroll").max_height(130.0).show(ui, |ui| {
+            for (idx, gs) in graphs.iter().enumerate() {
+                if render_add_graph_panel_ctx_item(ui, ls.id.as_str(), idx, gs, meta, intents) {
+                    clicked = true;
+                }
+            }
+        });
+    } else {
+        for (idx, gs) in graphs.iter().enumerate() {
+            if render_add_graph_panel_ctx_item(ui, ls.id.as_str(), idx, gs, meta, intents) {
+                clicked = true;
+            }
+        }
+    }
     clicked
+}
+
+fn render_add_graph_panel_ctx_item(
+    ui: &mut egui::Ui,
+    layout_sheet_id: &str,
+    idx: usize,
+    gs: &GraphSheet,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) -> bool {
+    let wid = format!("canvas.layout_ctx.add_panel.{idx}");
+    let lbl = format!("+ {}", gs.title);
+    if render_context_menu_item(ui, meta, &wid, &lbl, Some("layout.addPanel"), true) {
+        intents.push_engine(
+            "layout.addPanel",
+            json!({
+                "sheet_id": layout_sheet_id,
+                "kind": "graph",
+                "graph_sheet_id": gs.id.as_str(),
+            }),
+        );
+        return true;
+    }
+    false
+}
+
+fn render_layout_context_menu_popup(
+    ui: &mut egui::Ui,
+    ov: &CanvasOverlayCtx<'_>,
+    ls: &LayoutSheet,
+    state: &mut CanvasViewEguiState,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    if !ov.enabled {
+        state.layout_context_menu = None;
+        return;
+    }
+    let Some((ref menu_sheet, opt_panel_idx, anchor)) = state.layout_context_menu.clone() else {
+        return;
+    };
+    if menu_sheet != &ls.id || opt_panel_idx.is_some_and(|idx| idx >= ls.spec.items.len()) {
+        state.layout_context_menu = None;
+        return;
+    }
+    let screen = ui.ctx().content_rect();
+    let pos = pos2(
+        anchor.x.clamp(screen.left() + 4.0, (screen.right() - 242.0).max(screen.left() + 4.0)),
+        anchor.y.clamp(screen.top() + 4.0, (screen.bottom() - 360.0).max(screen.top() + 4.0)),
+    );
+    let mut close_menu = false;
+    let area_resp = egui::Area::new(Id::unique(("layout_panel_ctx_menu", ls.id.as_str()))).order(egui::Order::Foreground).fixed_pos(pos).show(
+        ui.ctx(),
+        |menu_ui| {
+            egui::Frame::popup(menu_ui.style())
+                .fill(ov.tokens.surface_bg)
+                .stroke(Stroke::new(1.0, ov.tokens.border))
+                .corner_radius(CornerRadius::same(4))
+                .show(menu_ui, |ui| {
+                    ui.set_min_width(232.0);
+                    if let Some(panel_idx) = opt_panel_idx {
+                        for (slug, lbl, action_str) in [
+                            ("front", "Bring to Front", "bring_to_front"),
+                            ("forward", "Bring Forward", "bring_forward"),
+                            ("backward", "Send Backward", "send_backward"),
+                            ("back", "Send to Back", "send_to_back"),
+                        ] {
+                            let wid = format!("canvas.layout_ctx.{slug}");
+                            let btn = ui.add_sized([228.0, 26.0], egui::Button::new(lbl).fill(Color32::TRANSPARENT));
+                            meta.record_response(
+                                ui,
+                                &btn,
+                                FrameInspectEntryInput {
+                                    widget_id: &wid,
+                                    role: "menuitem",
+                                    label: lbl,
+                                    command_id: Some("layout.reorderPanel"),
+                                    value: Some(json!(action_str)),
+                                    enabled: true,
+                                    disabled_reason: None,
+                                    z_layer: ZLayer::ContextMenu,
+                                    ellipsized: false,
+                                    full_label: None,
+                                },
+                            );
+                            if btn.clicked() {
+                                intents.push_engine(
+                                    "layout.reorderPanel",
+                                    json!({
+                                        "sheet_id": ls.id.as_str(),
+                                        "panel_index": panel_idx,
+                                        "action": action_str,
+                                    }),
+                                );
+                                close_menu = true;
+                            }
+                        }
+                        ui.separator();
+                    }
+                    if append_layout_context_menu_extras(ui, ov, ls, opt_panel_idx, anchor, meta, intents) {
+                        close_menu = true;
+                    }
+                });
+        },
+    );
+    let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+    let outside_click = ui.input(|i| i.pointer.primary_clicked() && i.pointer.interact_pos().is_some_and(|p| !area_resp.response.rect.contains(p)));
+    if close_menu || esc || outside_click {
+        state.layout_context_menu = None;
+    }
+}
+
+fn selected_non_image_panel_state(
+    ls: &LayoutSheet,
+    state: &CanvasViewEguiState,
+    paper_rect: Rect,
+    sx: f32,
+    sy: f32,
+    ptr_pos: Option<Pos2>,
+    selected_is_image: bool,
+) -> (Option<usize>, bool, bool) {
+    let panel_resize_active = state.layout_drag.as_ref().is_some_and(|d| d.sheet_id == ls.id && d.resizing_corner);
+    if selected_is_image {
+        return (None, false, panel_resize_active);
+    }
+    let Some(sel_idx) = state.selected_panel_index else {
+        return (None, false, panel_resize_active);
+    };
+    let Some(item) = ls.spec.items.get(sel_idx) else {
+        return (None, false, panel_resize_active);
+    };
+    let b = state
+        .layout_drag
+        .as_ref()
+        .filter(|d| d.sheet_id == ls.id && d.item_index == sel_idx)
+        .map_or_else(|| layout_item_bounds_doc(item), |d| d.current_bounds_pt);
+    let sel_r = doc_rect_to_screen(paper_rect, sx, sy, b);
+    let se_rect = Rect::from_center_size(sel_r.right_bottom(), vec2(10.0, 10.0));
+    let ptr_in_handle = ptr_pos.is_some_and(|p| se_rect.contains(p));
+    (Some(sel_idx), ptr_in_handle, panel_resize_active)
+}
+
+fn render_layout_panel_resize_handle(
+    ui: &mut egui::Ui,
+    ov: &CanvasOverlayCtx<'_>,
+    ls: &LayoutSheet,
+    state: &mut CanvasViewEguiState,
+    sel_idx: usize,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let Some(item) = ls.spec.items.get(sel_idx) else {
+        return;
+    };
+    let bounds = state
+        .layout_drag
+        .as_ref()
+        .filter(|d| d.sheet_id == ls.id && d.item_index == sel_idx)
+        .map_or_else(|| layout_item_bounds_doc(item), |d| d.current_bounds_pt);
+    let sel_r = doc_rect_to_screen(ov.paper_rect, ov.sx, ov.sy, bounds);
+    let clip_all = ov.mat_rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect);
+    let se_rect = Rect::from_center_size(sel_r.right_bottom(), vec2(10.0, 10.0));
+    let se_vis = se_rect.intersect(clip_all);
+    if se_vis.width() < 4.0 || se_vis.height() < 4.0 {
+        return;
+    }
+
+    let resizing_this = state.layout_drag.as_ref().is_some_and(|d| d.sheet_id == ls.id && d.item_index == sel_idx && d.resizing_corner);
+    if resizing_this {
+        ov.painter.rect_stroke(sel_r, CornerRadius::ZERO, Stroke::new(1.5, ov.tokens.accent), StrokeKind::Outside);
+    }
+
+    let wid = format!("canvas.layout_panel.{sel_idx}.resize_se");
+    let h_resp = ui
+        .interact(se_vis, Id::unique(("layout_panel_resize_se", ls.id.as_str(), sel_idx)), Sense::click_and_drag())
+        .on_hover_cursor(egui::CursorIcon::ResizeNwSe);
+    h_resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ov.enabled, "Resize Panel Corner (SE)"));
+    let fill = if h_resp.hovered() || resizing_this { ov.tokens.accent } else { ov.tokens.surface_bg };
+    ov.painter.rect(se_rect, CornerRadius::same(2), fill, Stroke::new(1.5, ov.tokens.accent), StrokeKind::Middle);
+    meta.record_response(
+        ui,
+        &h_resp,
+        FrameInspectEntryInput {
+            widget_id: &wid,
+            role: "button",
+            label: "Resize Panel Corner (SE)",
+            command_id: Some("layout.setSpec"),
+            value: Some(json!({ "bounds_pt": [bounds.x, bounds.y, bounds.width, bounds.height] })),
+            enabled: ov.enabled,
+            disabled_reason: None,
+            z_layer: ZLayer::FloatingOverlay,
+            ellipsized: false,
+            full_label: None,
+        },
+    );
+
+    if h_resp.drag_started() {
+        let ptr = ui.input(|i| i.pointer.interact_pos()).unwrap_or(se_rect.center());
+        let sc = ov.screen_to_scene(ptr);
+        let base_bounds = layout_item_bounds_doc(item);
+        state.selected_panel_index = Some(sel_idx);
+        state.layout_drag = Some(LayoutPanelDragState {
+            sheet_id: ls.id.clone(),
+            item_index: sel_idx,
+            start_scene_pt: [sc.x, sc.y],
+            initial_bounds_pt: base_bounds,
+            current_bounds_pt: base_bounds,
+            resizing_corner: true,
+        });
+    }
+    if h_resp.dragged()
+        && let Some(drag) = state.layout_drag.as_mut()
+        && drag.sheet_id == ls.id
+        && drag.item_index == sel_idx
+        && drag.resizing_corner
+    {
+        let ptr = ui.input(|i| i.pointer.interact_pos().or_else(|| i.pointer.latest_pos())).unwrap_or(se_rect.center());
+        let sc = ov.screen_to_scene(ptr);
+        let new_w = round_tenth_pt((drag.initial_bounds_pt.width + (sc.x - drag.start_scene_pt[0])).max(16.0));
+        let new_h = round_tenth_pt((drag.initial_bounds_pt.height + (sc.y - drag.start_scene_pt[1])).max(16.0));
+        drag.current_bounds_pt = DocRectPt::new(drag.initial_bounds_pt.x, drag.initial_bounds_pt.y, new_w, new_h);
+        state.last_snap_readout = Some(format!("Size: W={new_w:.1} pt, H={new_h:.1} pt (0.1 pt)"));
+    }
+    if h_resp.drag_stopped()
+        && state.layout_drag.as_ref().is_some_and(|d| d.sheet_id == ls.id && d.item_index == sel_idx && d.resizing_corner)
+        && let Some(drag) = state.layout_drag.take()
+    {
+        let mut updated_items = ls.spec.items.clone();
+        if let Some(target_item) = updated_items.get_mut(sel_idx) {
+            set_layout_item_bounds_doc(target_item, drag.current_bounds_pt);
+            intents.push_engine("layout.setSpec", json!({ "sheet_id": ls.id.as_str(), "spec": { "items": updated_items } }));
+        }
+        state.active_snap_guides.clear();
+        state.last_snap_readout = None;
+    }
 }
 
 fn image_handle_rects(r: Rect, mat_rect: Rect) -> [Rect; 5] {

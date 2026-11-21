@@ -63,6 +63,25 @@ fn drain_actions_from_nodes(nodes: Vec<CuratedMenuNode>, out: &mut Vec<CommandTo
     }
 }
 
+fn localized_preferences_label(locale: &str) -> &'static str {
+    match i18n::normalize_locale(locale) {
+        "de" => "Einstellungen...",
+        "es" => "Preferencias...",
+        "fr" => "Préférences...",
+        "it" => "Preferenze...",
+        "ja" => "環境設定...",
+        "ko" => "환경설정...",
+        "nl" => "Voorkeuren...",
+        "pl" => "Preferencje...",
+        "pt-BR" => "Preferências...",
+        "ru" => "Настройки...",
+        "tr" => "Tercihler...",
+        "zh-CN" => "首选项...",
+        "zh-TW" => "偏好設定...",
+        _ => "Preferences...",
+    }
+}
+
 fn host_routed_tooltip(app: &UiApp, command_id: &'static str) -> Option<CommandTooltip> {
     let has_sheet = app.document().total_sheet_count() > 0;
     match command_id {
@@ -128,6 +147,19 @@ fn host_routed_tooltip(app: &UiApp, command_id: &'static str) -> Option<CommandT
             menu_path: "Edit/Paste",
             enabled: has_sheet,
             read_only: false,
+            destructive: false,
+            needs_consent: false,
+        }),
+        "app.preferences" => Some(CommandTooltip {
+            command_id: "app.preferences",
+            label: "Preferences...",
+            localized_label: localized_preferences_label(&app.locale),
+            shortcut: app.shortcuts.active_combo("app.preferences").unwrap_or("").to_owned(),
+            summary: "Open application preferences (appearance, language, defaults, shortcuts).",
+            beginner: "Configure interface theme, language, figure defaults, and keyboard shortcuts.",
+            menu_path: "Edit/Preferences...",
+            enabled: true,
+            read_only: true,
             destructive: false,
             needs_consent: false,
         }),
@@ -214,6 +246,8 @@ fn build_edit_menu(app: &UiApp) -> CuratedMenuSection {
     push_action(&mut nodes, app, "table.excludeCells", None);
     push_action(&mut nodes, app, "ui.grid.excludeWithReason", None);
     push_action(&mut nodes, app, "table.exclusionAuditReport", None);
+    nodes.push(CuratedMenuNode::Separator);
+    push_action(&mut nodes, app, "app.preferences", None);
     CuratedMenuSection { menu_key: "menu.edit", title: app.tr("menu.edit"), nodes }
 }
 

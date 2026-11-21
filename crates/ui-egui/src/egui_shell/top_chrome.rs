@@ -43,6 +43,21 @@ pub fn submenu_variants_for_command(command_id: &str) -> Option<&'static [(&'sta
     }
 }
 
+fn is_submenu_variant_selected(app: &UiApp, command_id: &str, variant: &str) -> Option<bool> {
+    match command_id {
+        "ui.theme.set" => {
+            let active = match app.theme.mode {
+                crate::theme::UiThemeMode::Light => "light",
+                crate::theme::UiThemeMode::Dark => "dark",
+                crate::theme::UiThemeMode::HighContrast => "high_contrast",
+            };
+            Some(active == variant)
+        }
+        "ui.previewFilter.set" => Some(app.preview_filter.as_str() == variant),
+        _ => None,
+    }
+}
+
 /// Hierarchical node inside [`InWindowMenuSectionParity`] (`R15-GUI-34`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InWindowMenuNode {
@@ -681,11 +696,27 @@ fn render_menu_leaf_item(
     if let Some(variants) = submenu_variants_for_command(&item.command_id) {
         let sub = ui.menu_button(&item.label, |ui| {
             for &(v_label, variant) in variants {
+                let is_selected = is_submenu_variant_selected(mctx.app, &item.command_id, variant);
                 let mut btn = egui::Button::new(v_label);
+                if is_selected == Some(true) {
+                    btn = btn.selected(true);
+                }
                 if item.command_id == "ui.canvas.applyPreset" && !item.shortcut.is_empty() && variant == "SingleColumn88mm" {
                     btn = btn.shortcut_text(format_shortcut_for_platform(&item.shortcut));
                 }
                 let resp = ui.add_enabled(item.enabled, btn).on_hover_text(&tooltip).on_disabled_hover_text(&tooltip);
+                record_menu_popup_response(
+                    ui,
+                    &resp,
+                    meta,
+                    MenuPopupInspect {
+                        widget_id: &format!("popup.menu.{}.opt.{}", item.command_id, variant),
+                        label: v_label,
+                        command_id: Some(&item.command_id),
+                        selected: is_selected,
+                        enabled: item.enabled,
+                    },
+                );
                 if resp.clicked() {
                     push_menu_command_intent(mctx.app, &item.command_id, Some(variant), intents);
                     ui.close();

@@ -4,9 +4,9 @@
 use std::collections::HashSet;
 use std::ops::Range;
 
-use curvebook_doc::{ColumnDesignHint, DataSheet, SubcolumnMode, TableArchetype, XColumnMode, default_column_label};
+use curvebook_doc::{ColumnDesignHint, DataSheet, SheetId, SubcolumnMode, TableArchetype, XColumnMode, default_column_label};
 use curvebook_tools::GridCellCoord;
-use egui::{Align, CornerRadius, FontId, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder, WidgetInfo, pos2, vec2};
+use egui::{Align, CornerRadius, FontId, Key, Modifiers, Rect, Sense, Stroke, StrokeKind, TextEdit, Ui, UiBuilder, WidgetInfo, pos2, vec2};
 use serde_json::json;
 
 use crate::i18n::tr;
@@ -18,9 +18,138 @@ use super::inline_edit::{InlineTextEditSpec, begin_inline_edit, render_inline_te
 use super::mv_roles::render_mv_tier3_role_chip;
 use super::shared::{
     AuxInlineTarget, CORNER_TRIGGER_HEIGHT_PT, CellTextStyle, GridRenderCtx, MultiGridCtx, MultiGridFrameState, archetype_badge,
-    compute_visible_range, is_multi_click_edit, record_meta_if_enabled, render_ellipsized_text, set_grid_focus_active,
+    compute_visible_range, is_multi_click_edit, pressed_key_event_modifiers, record_meta_if_enabled, render_ellipsized_text, set_grid_focus_active,
 };
 use super::{ColumnGridEguiState, GridInlineEditTarget};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum FactorTitleTarget {
+    RowFactor,
+    ColumnFactor { col: usize },
+}
+
+#[derive(Clone, Debug)]
+struct FactorTitleEditBuffer {
+    target: FactorTitleTarget,
+    original: String,
+    draft: String,
+    just_focused: bool,
+    suppress_loss_once: bool,
+}
+
+fn factor_title_edit_key(sheet_id: &SheetId) -> egui::Id {
+    egui::Id::unique(("r10_27_factor_title_edit", sheet_id.as_str()))
+}
+
+fn factor_te_id(ui: &Ui, sheet_id: &SheetId, widget_id: &str) -> egui::Id {
+    ui.make_persistent_id(("r10_27_factor_te", sheet_id.as_str(), widget_id))
+}
+
+fn current_row_factor_title(arch: &TableArchetype) -> Option<&str> {
+    match arch {
+        TableArchetype::Grouped(g) => Some(g.row_factor_title.as_str()),
+        TableArchetype::Contingency(c) => Some(c.row_factor_title.as_str()),
+        _ => None,
+    }
+}
+
+fn current_col_factor_title(arch: &TableArchetype) -> Option<&str> {
+    match arch {
+        TableArchetype::Grouped(g) => Some(g.column_factor_title.as_str()),
+        TableArchetype::Contingency(c) => Some(c.column_factor_title.as_str()),
+        _ => None,
+    }
+}
+
+fn begin_factor_title_edit(
+    ui: &Ui,
+    fstate: &mut MultiGridFrameState<'_>,
+    sheet_id: &SheetId,
+    widget_id: &str,
+    target: FactorTitleTarget,
+    current: &str,
+) {
+    fstate.state.inline_edit = None;
+    fstate.aux.aux_edit = None;
+    let buf = FactorTitleEditBuffer { target, original: current.to_owned(), draft: current.to_owned(), just_focused: true, suppress_loss_once: true };
+    let key = factor_title_edit_key(sheet_id);
+    ui.ctx().data_mut(|d| d.insert_temp(key, Some(buf)));
+    let te_id = factor_te_id(ui, sheet_id, widget_id);
+    ui.memory_mut(|m| m.request_focus(te_id));
+    ui.ctx().request_repaint();
+}
+
+fn render_factor_title_editor(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut MultiGridFrameState<'_>, rect: Rect, widget_id: &str, hint: &str) {
+    let ds = mctx.ds;
+    let key = factor_title_edit_key(&ds.id);
+    let Some(mut edit) = ui.ctx().data_mut(|d| d.get_temp::<Option<FactorTitleEditBuffer>>(key).flatten()) else {
+        return;
+    };
+    let te_id = factor_te_id(ui, &ds.id, widget_id);
+    let mut te = TextEdit::singleline(&mut edit.draft).id(te_id).desired_width(rect.width()).margin(vec2(4.0, 2.0));
+    if !hint.is_empty() {
+        te = te.hint_text(hint);
+    }
+    let resp = ui.put(rect, te);
+    if edit.just_focused {
+        resp.request_focus();
+        edit.just_focused = false;
+        edit.suppress_loss_once = true;
+    }
+    record_meta_if_enabled(
+        ui,
+        fstate.meta,
+        fstate.state.record_inspect_meta,
+        &resp,
+        FrameInspectEntryInput {
+            widget_id,
+            role: "textbox",
+            label: &edit.draft,
+            command_id: Some("table.setTitles"),
+            value: Some(serde_json::Value::String(edit.draft.clone())),
+            enabled: true,
+            disabled_reason: None,
+            z_layer: ZLayer::Workspace,
+            ellipsized: false,
+            full_label: None,
+        },
+    );
+
+    let esc = ui.input(|i| i.key_pressed(Key::Escape));
+    let enter = ui.input(|i| i.key_pressed(Key::Enter));
+    let tab = pressed_key_event_modifiers(ui, Key::Tab).is_some();
+    let lost = resp.lost_focus() && !edit.suppress_loss_once;
+    edit.suppress_loss_once = false;
+
+    if esc {
+        ui.ctx().data_mut(|d| d.remove_temp::<Option<FactorTitleEditBuffer>>(key));
+        ui.memory_mut(|m| m.surrender_focus(te_id));
+        return;
+    }
+    if enter || tab || lost {
+        if enter {
+            ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
+        }
+        if tab {
+            ui.input_mut(|i| {
+                i.consume_key(Modifiers::NONE, Key::Tab);
+                i.consume_key(Modifiers::SHIFT, Key::Tab);
+            });
+        }
+        let trimmed = edit.draft.trim();
+        let field = match edit.target {
+            FactorTitleTarget::RowFactor => "row_factor_title",
+            FactorTitleTarget::ColumnFactor { .. } => "column_factor_title",
+        };
+        if trimmed != edit.original.trim() {
+            fstate.intents.push_engine("table.setTitles", json!({ "sheet_id": ds.id.as_str(), field: trimmed }));
+        }
+        ui.ctx().data_mut(|d| d.remove_temp::<Option<FactorTitleEditBuffer>>(key));
+        ui.memory_mut(|m| m.surrender_focus(te_id));
+        return;
+    }
+    ui.ctx().data_mut(|d| d.insert_temp(key, Some(edit)));
+}
 
 pub(super) fn render_corner_and_row_titles_header(
     ui: &mut Ui,
@@ -636,35 +765,60 @@ pub(super) fn render_multi_corner(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: 
 
     let rt_hdr_r = Rect::from_min_max(pos2(x_mid, y2), pos2(x_end, y3));
     let rt_band_label = row_titles_band_label(ds, &app.locale);
-    let rt_resp = ui.interact(rt_hdr_r, ui.make_persistent_id("grid.row_titles.band"), Sense::hover());
-    if !geom.row_titles_collapsed {
-        render_ellipsized_text(
+    let row_factor = current_row_factor_title(&ds.archetype).map(str::to_owned);
+    let row_factor_editable = !blocked && !ds.frozen && !geom.row_titles_collapsed && row_factor.is_some();
+    let editing_row_factor = row_factor_editable
+        && ui.ctx().data(|d| {
+            d.get_temp::<Option<FactorTitleEditBuffer>>(factor_title_edit_key(&ds.id))
+                .flatten()
+                .is_some_and(|e| e.target == FactorTitleTarget::RowFactor)
+        });
+    if editing_row_factor {
+        render_factor_title_editor(ui, mctx, fstate, rt_hdr_r, "grid.row_titles.band", "Row factor...");
+    } else {
+        let rt_sense = if row_factor_editable { Sense::click() } else { Sense::hover() };
+        let rt_resp = ui.interact(rt_hdr_r, ui.make_persistent_id("grid.row_titles.band"), rt_sense);
+        if row_factor_editable && rt_resp.hovered() {
+            ui.painter().rect_filled(rt_hdr_r, CornerRadius::ZERO, tokens.hover_bg);
+            let _ = rt_resp.clone().on_hover_text("Double-click to edit row factor title");
+        }
+        if !geom.row_titles_collapsed {
+            render_ellipsized_text(
+                ui,
+                rt_hdr_r.shrink2(vec2(5.0, 1.0)),
+                &rt_band_label,
+                CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_strong, Align::LEFT),
+            );
+        }
+        let acc_rt = rt_band_label.clone();
+        let has_row_factor = row_factor.is_some();
+        let role = if has_row_factor { egui::Role::Button } else { egui::Role::Label };
+        rt_resp.widget_info(move || WidgetInfo::labeled(role, !has_row_factor || row_factor_editable, acc_rt.clone()));
+        record_meta_if_enabled(
             ui,
-            rt_hdr_r.shrink2(vec2(5.0, 1.0)),
-            &rt_band_label,
-            CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_strong, Align::LEFT),
+            fstate.meta,
+            fstate.state.record_inspect_meta,
+            &rt_resp,
+            FrameInspectEntryInput {
+                widget_id: "grid.row_titles.band",
+                role: if has_row_factor { "button" } else { "label" },
+                label: &rt_band_label,
+                command_id: row_factor.as_ref().map(|_| "table.setTitles"),
+                value: row_factor.as_deref().map(|rf| serde_json::Value::String(rf.to_owned())),
+                enabled: !has_row_factor || row_factor_editable,
+                disabled_reason: (has_row_factor && !row_factor_editable).then_some("Frozen or blocked"),
+                z_layer: ZLayer::Workspace,
+                ellipsized: false,
+                full_label: None,
+            },
         );
+        if row_factor_editable
+            && is_multi_click_edit(&rt_resp)
+            && let Some(rf) = row_factor.as_deref()
+        {
+            begin_factor_title_edit(ui, fstate, &ds.id, "grid.row_titles.band", FactorTitleTarget::RowFactor, rf);
+        }
     }
-    let acc_rt = rt_band_label.clone();
-    rt_resp.widget_info(move || WidgetInfo::labeled(egui::Role::Label, true, acc_rt.clone()));
-    record_meta_if_enabled(
-        ui,
-        fstate.meta,
-        fstate.state.record_inspect_meta,
-        &rt_resp,
-        FrameInspectEntryInput {
-            widget_id: "grid.row_titles.band",
-            role: "label",
-            label: &rt_band_label,
-            command_id: None,
-            value: None,
-            enabled: true,
-            disabled_reason: None,
-            z_layer: ZLayer::Workspace,
-            ellipsized: false,
-            full_label: None,
-        },
-    );
 
     let toggle_r = Rect::from_min_max(pos2(x_mid, y3), pos2(x_end, y4));
     let toggle_lbl = if geom.row_titles_collapsed { ">" } else { "<|>" };
@@ -901,13 +1055,60 @@ fn render_multi_data_col_headers(
 
         let t1_r = Rect::from_min_max(pos2(cx0, y1), pos2(cx1, y2)).intersect(hdr_rect);
         let super_lbl = data_super_column_label(&ds.archetype, col);
+        let col_factor = current_col_factor_title(&ds.archetype).map(str::to_owned);
+        let col_factor_editable = !blocked && !ds.frozen && col_factor.is_some();
+        let super_wid = format!("grid.col_super.{col}");
+        let editing_col_factor = col_factor_editable
+            && hdr_ui.ctx().data(|d| {
+                d.get_temp::<Option<FactorTitleEditBuffer>>(factor_title_edit_key(&ds.id))
+                    .flatten()
+                    .is_some_and(|e| e.target == FactorTitleTarget::ColumnFactor { col })
+            });
         if t1_r.width() > 4.0 {
-            render_ellipsized_text(
-                hdr_ui,
-                t1_r.shrink2(vec2(4.0, 1.0)),
-                &super_lbl,
-                CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted, Align::Center),
-            );
+            if editing_col_factor {
+                render_factor_title_editor(hdr_ui, mctx, fstate, t1_r, &super_wid, "Column factor...");
+            } else {
+                let s_sense = if col_factor_editable { Sense::click() } else { Sense::hover() };
+                let s_resp = hdr_ui.interact(t1_r, hdr_ui.make_persistent_id(&super_wid), s_sense);
+                if col_factor_editable && s_resp.hovered() {
+                    hdr_ui.painter().rect_filled(t1_r, CornerRadius::ZERO, tokens.hover_bg);
+                    let _ = s_resp.clone().on_hover_text("Double-click to edit column factor title");
+                }
+                let (ellip_s, _) = render_ellipsized_text(
+                    hdr_ui,
+                    t1_r.shrink2(vec2(4.0, 1.0)),
+                    &super_lbl,
+                    CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted, Align::Center),
+                );
+                let acc_s = super_lbl.clone();
+                let has_col_factor = col_factor.is_some();
+                let s_role = if has_col_factor { egui::Role::Button } else { egui::Role::Label };
+                s_resp.widget_info(move || WidgetInfo::labeled(s_role, !has_col_factor || col_factor_editable, acc_s.clone()));
+                record_meta_if_enabled(
+                    hdr_ui,
+                    fstate.meta,
+                    fstate.state.record_inspect_meta,
+                    &s_resp,
+                    FrameInspectEntryInput {
+                        widget_id: &super_wid,
+                        role: if has_col_factor { "button" } else { "label" },
+                        label: &super_lbl,
+                        command_id: col_factor.as_ref().map(|_| "table.setTitles"),
+                        value: col_factor.as_deref().map(|cf| json!({ "col": col, "column_factor_title": cf })),
+                        enabled: !has_col_factor || col_factor_editable,
+                        disabled_reason: (has_col_factor && !col_factor_editable).then_some("Frozen or blocked"),
+                        z_layer: ZLayer::Workspace,
+                        ellipsized: ellip_s,
+                        full_label: ellip_s.then_some(super_lbl.as_str()),
+                    },
+                );
+                if col_factor_editable
+                    && is_multi_click_edit(&s_resp)
+                    && let Some(cf) = col_factor.as_deref()
+                {
+                    begin_factor_title_edit(hdr_ui, fstate, &ds.id, &super_wid, FactorTitleTarget::ColumnFactor { col }, cf);
+                }
+            }
         }
 
         let t2_r = Rect::from_min_max(pos2(cx0, y2), pos2(cx1, y3)).intersect(hdr_rect);
@@ -1080,6 +1281,7 @@ fn data_super_column_label(arch: &TableArchetype, col: usize) -> String {
     let letter = (b'A' + u8::try_from(col % 26).unwrap_or(0)) as char;
     match arch {
         TableArchetype::Grouped(g) if !g.column_factor_title.trim().is_empty() => format!("{} {letter}", g.column_factor_title),
+        TableArchetype::Contingency(c) if !c.column_factor_title.trim().is_empty() => format!("{} {letter}", c.column_factor_title),
         TableArchetype::Survival(_) => format!("Cohort {letter}"),
         TableArchetype::MultipleVariables(_) => format!("Var {}", col + 1),
         TableArchetype::PartsOfWhole(_) => String::from("Slice Share"),
