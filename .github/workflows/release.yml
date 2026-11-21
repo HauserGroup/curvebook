@@ -145,6 +145,8 @@ jobs:
         with:
           toolchain: "1.99.1"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.event_name != 'schedule' }}
       - name: Install locked cargo-deny and cargo-about
         run: |
           set -euo pipefail
@@ -224,6 +226,8 @@ jobs:
         with:
           toolchain: "1.99.1"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.event_name != 'schedule' }}
       - name: Build Linux AppImage
         env:
           INPUT_VERSION: ${{ inputs.version }}
@@ -275,6 +279,8 @@ jobs:
           toolchain: "1.99.1"
           targets: aarch64-apple-darwin, x86_64-apple-darwin
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.event_name != 'schedule' }}
       - name: Import macOS Developer ID signing certificate
         if: inputs.alpha != true
         env:
@@ -392,6 +398,8 @@ jobs:
           toolchain: "1.99.1"
           targets: x86_64-pc-windows-msvc, aarch64-pc-windows-msvc
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.event_name != 'schedule' }}
       - name: Install WiX v5
         shell: pwsh
         run: |
@@ -483,6 +491,8 @@ jobs:
         with:
           toolchain: "1.99.1"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.event_name != 'schedule' }}
       - name: Scan FreeBSD release assets on Ubuntu host
         run: cargo run --locked -p xtask -- release-scan --no-checksums --report dist/scan-report-freebsd-x86_64.json dist/release
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -533,6 +543,8 @@ jobs:
         with:
           toolchain: "1.99.1"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.event_name != 'schedule' }}
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: release-*

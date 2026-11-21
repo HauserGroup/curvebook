@@ -4,6 +4,12 @@ inputs:
   save-cache:
     description: Only the build job writes the shared cache, before tests run.
     default: 'false'
+  cache-key:
+    description: Rolling cache namespace for this job stream.
+    default: 'ci-build'
+  restore-mtimes:
+    description: Restore unchanged file mtimes from the cached base commit SHA after cache restore.
+    default: 'true'
   install-deny:
     description: Ensure cargo-deny is installed (needed by the build cache writer and policy stage).
     default: 'false'
@@ -78,13 +84,49 @@ runs:
       with:
         toolchain: '1.99.1'
         components: rustfmt, clippy
-    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+    - name: Prepare Cargo cache directories
+      shell: bash
+      run: mkdir -p ~/.cargo/bin ~/.cargo/registry/index ~/.cargo/registry/cache ~/.cargo/git/db target
+    - name: Restore Rust and Cargo build cache
+      if: inputs.save-cache != 'true'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        shared-key: ci-linux-v2
-        key: ${{ github.sha }}
-        cache-workspace-crates: true
-        cache-on-failure: true
-        save-if: ${{ inputs.save-cache == 'true' }}
+        path: |
+          ~/.cargo/bin/cargo-deny*
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+          target
+        key: rolling-${{ inputs.cache-key }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          rolling-${{ inputs.cache-key }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+          rolling-${{ inputs.cache-key }}-${{ runner.os }}-${{ runner.arch }}-
+    - name: Restore and save Rust and Cargo build cache
+      if: inputs.save-cache == 'true'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/.cargo/bin/cargo-deny*
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+          target
+        key: rolling-${{ inputs.cache-key }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          rolling-${{ inputs.cache-key }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+          rolling-${{ inputs.cache-key }}-${{ runner.os }}-${{ runner.arch }}-
+    - name: Restore unchanged file mtimes from cached base SHA
+      if: inputs.restore-mtimes == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ -f target/.ci-cache-base-sha ]; then
+          if [ -x target/debug/xtask ]; then
+            ./target/debug/xtask ci-cache restore-mtimes || cargo run --locked --no-default-features -p xtask -- ci-cache restore-mtimes
+          else
+            cargo run --locked --no-default-features -p xtask -- ci-cache restore-mtimes
+          fi
+        fi
     - name: Install pinned verification tools
       shell: bash
       env:

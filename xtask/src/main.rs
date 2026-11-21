@@ -5,6 +5,7 @@ mod assets;
 mod brands;
 mod bundle;
 mod ci;
+mod ci_cache;
 mod ci_quick;
 mod citations;
 mod cleanroom;
@@ -44,6 +45,8 @@ usage: cargo xtask <command> [args...]
 commands:
   ci [stage]            run default gates or build/policy/lint/tests/doctests/features/performance/wasm
   ci quick [--base <ref>] policy gates + clippy/tests for packages changed since main and their dependents
+  ci-cache <trim|restore-mtimes>
+                        trim Cargo target cache to active build units or restore unchanged file mtimes
   r10-gate              run R10 parity, Unicode, screenshot baseline, web parity & latency gates
   test [args...]        run workspace test suite (uses cargo-nextest when installed, else cargo test)
   layers                verify L0..L7 dependency rules, UI-crate isolation, and source hygiene
@@ -102,6 +105,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "ci" => ci::run(&root, rest),
+        "ci-cache" => ci_cache::run(&root, rest),
         "r10-gate" => cmd_r10_gate(&root),
         "test" => cmd_test(&root, rest),
         "layers" => cmd_layers(&root),
