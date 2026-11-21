@@ -60,6 +60,7 @@ pub fn render_graph_modal(
 ) -> GraphModalFrameReport {
     if !matches!(app.canvas_dialogs.active_dialog, ActiveDialog::FormatAxes { .. }) {
         reset_format_axes_session_state(state);
+        state.axis_ticks_error = None;
     }
     let locale = normalize_locale(&app.locale);
     let (widget_id, title, preferred_w) = match &app.canvas_dialogs.active_dialog {
@@ -278,6 +279,7 @@ fn render_dialog_footer(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &mut
         .clicked()
         {
             reset_format_axes_session_state(state);
+            state.axis_ticks_error = None;
             state.heatmap_range_error = None;
             gctx.intents.push_dialog_button("cancel");
         }
@@ -369,7 +371,7 @@ fn commit_graph_modal_action(gctx: &mut GraphModalCtx<'_>, state: &mut GraphModa
             gctx.intents.push_dialog_button(action);
         }
         ActiveDialog::FormatAxes { .. } => {
-            if state.axis_bounds_error.is_some() {
+            if state.axis_bounds_error.is_some() || state.axis_ticks_error.is_some() {
                 return;
             }
             let fa = &gctx.app.canvas_dialogs.format_axes;
@@ -391,6 +393,7 @@ fn commit_graph_modal_action(gctx: &mut GraphModalCtx<'_>, state: &mut GraphModa
                 state.format_axes_frame_preset_dirty = false;
             } else {
                 reset_format_axes_session_state(state);
+                state.axis_ticks_error = None;
                 gctx.intents.push_dialog_button(action);
             }
         }

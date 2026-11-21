@@ -1,8 +1,8 @@
 //! Statistical parameter modal dispatcher, dynamic test banners, and shared tabs (Design router, Range, RM, Multiplicity, Options, Diagnostics).
 
 use curvebook_doc::{
-    AnalysisKind, GlmFamily, MultiplicityMethod, MultivariateSpec, OutlierSpec, PValueFormat, RepeatedMeasuresDesign, SumOfSquaresType,
-    SurvivalAnalysisSpec, TableArchetype, TwoGroupMethod,
+    AnalysisKind, GlmFamily, MultiplicityMethod, MultivariateSpec, OneWayMethod, OutlierSpec, PValueFormat, RepeatedMeasuresDesign,
+    ResidualCovariance, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TwoGroupMethod,
 };
 use egui::{Context, CornerRadius, Key, Modifiers, Stroke, Ui, Vec2};
 
@@ -19,7 +19,7 @@ use crate::egui_shell::stat_anova_modal::{
 };
 use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens};
 
-use super::factorial_mv::{render_factorial_anova_design, render_multivariate_design_controls};
+use super::factorial_mv::{MultivariateDesignCtx, render_factorial_anova_design, render_multivariate_design_controls};
 use super::helpers::{
     Wave4ModalShell, contingency_method_label, df_method_label, method_reference_text, multiplicity_short_label, render_cov_structure_picker,
     render_df_method_picker, render_formula_bar, render_modal_action_button, show_wave4_modal,
@@ -486,8 +486,8 @@ fn render_stat_params_tab_body(
         "range" => render_linear_range_tab(ui, state, spec, tokens, meta, intents),
         "repeated_measures" => render_stat_rm_tab(ui, app, ep, spec, tokens, meta, intents),
         "multiple_comparisons" => render_stat_multiplicity_tab(ui, app, ep, spec, tokens, meta, intents),
-        "options" => render_stat_options_tab(ui, spec, tokens, meta, intents),
-        "diagnostics" => render_stat_diagnostics_tab(ui, spec, tokens, meta, intents),
+        "options" => render_stat_options_tab(ui, ep, spec, tokens, meta, intents),
+        "diagnostics" => render_stat_diagnostics_tab(ui, app, spec, tokens, meta, intents),
         _ => render_stat_design_tab(ui, app, ep, spec, tokens, meta, intents),
     }
 }
@@ -608,7 +608,9 @@ fn render_stat_design_tab(
         }
         AnalysisKind::Survival(surv) => render_survival_design(ui, doc, spec, surv, tokens, meta, intents),
         AnalysisKind::Contingency(c) => render_contingency_design(ui, doc, spec, c, tokens, meta, intents),
-        AnalysisKind::Multivariate(mv) => render_multivariate_design_controls(ui, doc, spec, mv, tokens, meta, intents),
+        AnalysisKind::Multivariate(mv) => {
+            render_multivariate_design_controls(ui, MultivariateDesignCtx { doc, ep, spec, mv }, tokens, meta, intents);
+        }
         _ => render_misc_stats_design(ui, doc, spec, tokens, meta, intents),
     }
 }
@@ -722,6 +724,7 @@ fn render_stat_multiplicity_tab(
 
 fn render_stat_options_tab(
     ui: &mut Ui,
+    ep: &EditAnalysisParametersState,
     spec: &curvebook_doc::AnalysisSpec,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
@@ -768,14 +771,19 @@ fn render_stat_options_tab(
         intents.push_custom_view_action("stat_params", format!("spinner:edit.pvalue.digits:{step}"));
     }
 
-    if let AnalysisKind::OneWayAnova(_) = &spec.kind {
-        let sph = r1b_sphericity_correction(false, false);
-        let _ = render_modal_checkbox(ui, tokens, meta, "edit.sphericity.geisser_greenhouse", "Geisser-Greenhouse", true, &sph);
+    if let AnalysisKind::OneWayAnova(a) = &spec.kind {
+        let reml_active = a.mixed_effects_reml || a.residual_covariance == ResidualCovariance::Unstructured;
+        let sph = r1b_sphericity_correction(ep.paired_or_matched, reml_active);
+        let gg_checked = !matches!(a.method, OneWayMethod::RepeatedMeasures { geisser_greenhouse: false });
+        if render_modal_checkbox(ui, tokens, meta, "edit.sphericity.geisser_greenhouse", "Geisser-Greenhouse", gg_checked, &sph) {
+            intents.push_dialog_widget_click("edit.sphericity.geisser_greenhouse");
+        }
     }
 }
 
 fn render_stat_diagnostics_tab(
     ui: &mut Ui,
+    app: &UiApp,
     spec: &curvebook_doc::AnalysisSpec,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
@@ -785,8 +793,28 @@ fn render_stat_diagnostics_tab(
     match &spec.kind {
         AnalysisKind::TwoGroupComparison(t) => {
             let diag_en = r4_two_group_diagnostics(t.method);
-            let _ = render_modal_checkbox(ui, tokens, meta, "edit.diag.qq", "Quantile-Quantile (QQ) residual plot", diag_en.enabled, &diag_en);
-            let _ = render_modal_checkbox(ui, tokens, meta, "edit.diag.shapiro", "Shapiro-Wilk normality check", diag_en.enabled, &diag_en);
+            if render_modal_checkbox(
+                ui,
+                tokens,
+                meta,
+                "edit.diag.qq",
+                "Quantile-Quantile (QQ) residual plot",
+                app.view_shards.stat_params.diag_qq_plot,
+                &diag_en,
+            ) {
+                intents.push_custom_view_action("stat_params", "toggle_diag:qq");
+            }
+            if render_modal_checkbox(
+                ui,
+                tokens,
+                meta,
+                "edit.diag.shapiro",
+                "Shapiro-Wilk normality check",
+                app.view_shards.stat_params.diag_assumption_checklist,
+                &diag_en,
+            ) {
+                intents.push_custom_view_action("stat_params", "toggle_diag:checklist");
+            }
         }
         AnalysisKind::LinearRegression(lin) => {
             if render_modal_checkbox(

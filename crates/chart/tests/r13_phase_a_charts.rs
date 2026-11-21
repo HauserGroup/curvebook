@@ -583,6 +583,7 @@ fn heatmap_thirteen_gene_label_modes_and_angles() {
         row_labels: HeatmapRowLabelMode::RowTitles,
         column_labels: HeatmapColumnLabelMode::ColumnTitles,
         column_angle: HeatmapColumnLabelAngle::Horizontal0,
+        ..HeatmapLabelSpec::default()
     };
     let s_h = compile_graph(&gs, &doc).expect("compile 0deg");
 
@@ -603,6 +604,7 @@ fn heatmap_thirteen_gene_label_modes_and_angles() {
         row_labels: HeatmapRowLabelMode::RowNumbers,
         column_labels: HeatmapColumnLabelMode::ColumnLetters,
         column_angle: HeatmapColumnLabelAngle::Horizontal0,
+        ..HeatmapLabelSpec::default()
     };
     let s_num = compile_graph(&gs, &doc).expect("compile RowNumbers/ColLetters");
     let num_texts = plain_texts(&s_num);
@@ -613,6 +615,7 @@ fn heatmap_thirteen_gene_label_modes_and_angles() {
         row_labels: HeatmapRowLabelMode::None,
         column_labels: HeatmapColumnLabelMode::None,
         column_angle: HeatmapColumnLabelAngle::Horizontal0,
+        ..HeatmapLabelSpec::default()
     };
     let s_none = compile_graph(&gs, &doc).expect("compile None");
     let none_texts = plain_texts(&s_none);

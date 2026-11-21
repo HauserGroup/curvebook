@@ -1432,6 +1432,8 @@ fn compile_heatmap(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
     let grid = RectPt::new(r.x + dendro_w, r.y, (r.width - dendro_w).max(20.0), r.height);
     let cell_w = grid.width / (n_cols as f64);
     let cell_h = grid.height / (n_rows as f64);
+    let gap = if lbl_spec.cell_gap_pt.is_finite() { lbl_spec.cell_gap_pt.clamp(0.0, (cell_w.min(cell_h) * 0.4).max(0.0)) } else { 0.0 };
+    let half_gap = gap * 0.5;
     let cell_border = solid_stroke(Rgba8::rgba(255, 255, 255, 160), 0.5, LineDashStyle::Solid);
     let missing_border = solid_stroke(Rgba8::rgba(170, 176, 186, 180), 0.5, LineDashStyle::Solid);
     let missing_hatch = solid_stroke(Rgba8::rgba(150, 156, 166, 175), 0.65, LineDashStyle::Solid);
@@ -1442,24 +1444,34 @@ fn compile_heatmap(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
         let y = grid.y + (vis_row as f64) * cell_h;
         for c in 0..n_cols {
             let x = grid.x + (c as f64) * cell_w;
+            let tile_rect = RectPt::new(x + half_gap, y + half_gap, (cell_w - gap).max(1.0), (cell_h - gap).max(1.0));
             if let Some(val) = row_vals.get(c).copied().flatten().filter(|v| v.is_finite()) {
                 let t = crate::clamp_f64_safe((val - dom_lo) / denom, 0.0, 1.0);
+                let fill_color = ramp.sample(t);
                 scene.primitives.push(ScenePrimitive::Path {
-                    path: Path2D::rect(RectPt::new(x, y, cell_w, cell_h)),
-                    fill: Some(FillPaint::solid(ramp.sample(t))),
+                    path: Path2D::rect(tile_rect),
+                    fill: Some(FillPaint::solid(fill_color)),
                     stroke: Some(cell_border),
                     clip: None,
                 });
+                if lbl_spec.annotate_cells {
+                    let font_pt = crate::clamp_f64_safe(tile_rect.width.min(tile_rect.height) * 0.36, 5.5, 9.0);
+                    let ink =
+                        if Rgba8::WHITE.contrast_ratio(fill_color) >= Rgba8::BLACK.contrast_ratio(fill_color) { Rgba8::WHITE } else { Rgba8::BLACK };
+                    scene.primitives.push(ScenePrimitive::Text(PositionedText {
+                        rich: RichText::plain(crate::scales::format_scalar_clean(val)),
+                        anchor_pt: PointPt::new(tile_rect.x + tile_rect.width * 0.5, tile_rect.y + tile_rect.height * 0.5 + font_pt * 0.35),
+                        anchor: TextAnchor::Middle,
+                        font_size_pt: font_pt,
+                        rotation_deg: 0.0,
+                        color: ink,
+                    }));
+                }
             } else {
-                scene.primitives.push(ScenePrimitive::Path {
-                    path: Path2D::rect(RectPt::new(x, y, cell_w, cell_h)),
-                    fill: None,
-                    stroke: Some(missing_border),
-                    clip: None,
-                });
+                scene.primitives.push(ScenePrimitive::Path { path: Path2D::rect(tile_rect), fill: None, stroke: Some(missing_border), clip: None });
                 let mut slash = Path2D::new();
-                path_move(&mut slash, PointPt::new(x, y + cell_h));
-                path_line(&mut slash, PointPt::new(x + cell_w, y));
+                path_move(&mut slash, PointPt::new(tile_rect.x, tile_rect.y + tile_rect.height));
+                path_line(&mut slash, PointPt::new(tile_rect.x + tile_rect.width, tile_rect.y));
                 scene.primitives.push(ScenePrimitive::Path { path: slash, fill: None, stroke: Some(missing_hatch), clip: None });
             }
         }

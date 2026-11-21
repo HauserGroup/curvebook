@@ -353,6 +353,7 @@ fn r13_3_create_graph_gallery_multiselect_apply_style_normalize_and_heatmap_labe
             row_labels: HeatmapRowLabelMode::RowNumbers,
             column_labels: HeatmapColumnLabelMode::ColumnLetters,
             column_angle: HeatmapColumnLabelAngle::Vertical90,
+            ..HeatmapLabelSpec::default()
         }
     );
     Ok(())
