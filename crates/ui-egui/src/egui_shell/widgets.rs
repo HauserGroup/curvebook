@@ -968,6 +968,240 @@ pub fn chevron_cell(ui: &mut Ui, h: f32) -> Response {
 }
 
 // ============================================================================
+// Growable Dropdown (Combobox replacement free of egui #5225 height trapping)
+// ============================================================================
+
+const DEFAULT_DROPDOWN_MAX_HEIGHT: f32 = 260.0;
+
+/// Output returned by [`Dropdown::show_ui`].
+pub struct DropdownOutput<R> {
+    /// Trigger button [`Response`] exposing `egui::Role::ComboBox` metadata.
+    pub response: Response,
+    /// Inner closure output when the dropdown popup is open.
+    pub inner: Option<R>,
+    /// Whether the selected label was ellipsized to fit the trigger button width.
+    pub ellipsized: bool,
+}
+
+/// Growable combobox dropdown widget replacing `egui::ComboBox` (which traps open popups at opening height; egui #5225).
+pub struct Dropdown<S> {
+    id_salt: S,
+    selected_text: egui::WidgetText,
+    width: Option<f32>,
+    height: Option<f32>,
+    max_popup_height: f32,
+    enabled: bool,
+    accessible_name: Option<String>,
+}
+
+/// Construct a growable [`Dropdown`] keyed by `id_salt` displaying `selected_text`.
+#[must_use]
+pub fn dropdown<S: std::hash::Hash + std::fmt::Debug>(id_salt: S, selected_text: impl Into<egui::WidgetText>) -> Dropdown<S> {
+    Dropdown {
+        id_salt,
+        selected_text: selected_text.into(),
+        width: None,
+        height: None,
+        max_popup_height: DEFAULT_DROPDOWN_MAX_HEIGHT,
+        enabled: true,
+        accessible_name: None,
+    }
+}
+
+impl<S: std::hash::Hash + std::fmt::Debug> Dropdown<S> {
+    /// Set the trigger button width in logical points.
+    #[must_use]
+    pub const fn width(mut self, width: f32) -> Self {
+        self.width = Some(width);
+        self
+    }
+
+    /// Override the trigger button height in logical points.
+    #[must_use]
+    pub const fn height(mut self, height: f32) -> Self {
+        self.height = Some(height);
+        self
+    }
+
+    /// Maximum height of the open dropdown list before vertical scrolling activates.
+    #[must_use]
+    pub const fn max_popup_height(mut self, max_popup_height: f32) -> Self {
+        self.max_popup_height = max_popup_height;
+        self
+    }
+
+    /// Enable or disable opening the dropdown popup.
+    #[must_use]
+    pub const fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Override the AccessKit label exposed on the `Role::ComboBox` trigger button.
+    #[must_use]
+    pub fn accessible_name(mut self, name: impl Into<String>) -> Self {
+        self.accessible_name = Some(name.into());
+        self
+    }
+
+    /// Render the dropdown trigger button and, when open, its dynamically sized scrollable popup.
+    pub fn show_ui<R>(self, ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> DropdownOutput<R> {
+        let Self { id_salt, selected_text, width, height, max_popup_height, enabled, accessible_name } = self;
+        ui.push_id(id_salt, |ui| show_dropdown_inner(ui, selected_text, width, height, max_popup_height, enabled, accessible_name, add_contents))
+            .inner
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn show_dropdown_inner<R>(
+    ui: &mut Ui,
+    selected_text: egui::WidgetText,
+    width: Option<f32>,
+    height: Option<f32>,
+    max_popup_height: f32,
+    enabled: bool,
+    accessible_name: Option<String>,
+    add_contents: impl FnOnce(&mut Ui) -> R,
+) -> DropdownOutput<R> {
+    let t = Tokens::get(ui.ctx());
+    let row_enabled = enabled && ui.is_enabled();
+    let button_w = width.unwrap_or_else(|| ui.spacing().combo_width).max(32.0);
+    let pad_x = ui.spacing().button_padding.x.max(6.0);
+    let icon_size = 12.0_f32;
+    let icon_gap = 4.0_f32;
+    let text_max_w = (button_w - pad_x * 2.0 - icon_size - icon_gap).max(8.0);
+
+    let galley = selected_text.into_galley(ui, Some(egui::TextWrapMode::Truncate), text_max_w, egui::TextStyle::Button);
+    let ellipsized = galley.elided;
+    let full_text = galley.text().to_owned();
+    let pad_y = ui.spacing().button_padding.y.max(2.0);
+    let button_h = height.unwrap_or_else(|| ui.spacing().interact_size.y.max(galley.size().y + pad_y * 2.0));
+
+    let (rect, mut resp) = ui.allocate_exact_size(vec2(button_w, button_h), if row_enabled { Sense::click() } else { Sense::hover() });
+    let popup_id = egui::Popup::default_response_id(&resp);
+    if !row_enabled {
+        egui::Popup::close_id(ui.ctx(), popup_id);
+    }
+    let is_open = row_enabled && egui::Popup::is_id_open(ui.ctx(), popup_id);
+
+    if ui.is_rect_visible(rect) {
+        paint_dropdown_trigger(ui, &t, rect, &resp, is_open, row_enabled, galley, pad_x, icon_size, icon_gap);
+    }
+
+    let accessible = accessible_name
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| if full_text.trim().is_empty() { String::from("(None)") } else { full_text.clone() });
+    resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::ComboBox, row_enabled, accessible.clone()));
+    ui.ctx().accesskit_node_builder(resp.id, |node| node.set_expanded(is_open));
+    if ellipsized && !full_text.is_empty() {
+        resp = resp.on_hover_text(full_text);
+    }
+
+    let inner = if row_enabled { show_dropdown_popup(ui, &t, &resp, popup_id, button_w, max_popup_height, add_contents) } else { None };
+
+    DropdownOutput { response: resp, inner, ellipsized }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_dropdown_trigger(
+    ui: &Ui,
+    t: &Tokens,
+    rect: Rect,
+    resp: &Response,
+    is_open: bool,
+    row_enabled: bool,
+    galley: std::sync::Arc<egui::Galley>,
+    pad_x: f32,
+    icon_size: f32,
+    icon_gap: f32,
+) {
+    paint_interactive_chrome(
+        ui,
+        rect,
+        t,
+        InteractiveChromeSpec {
+            radius: CornerRadius::same(t.metrics.radius_md),
+            base_bg: if row_enabled { t.button_bg } else { t.panel_bg },
+            base_border: Some(if row_enabled { t.button_border } else { t.divider }),
+            hovered: resp.hovered(),
+            selected: is_open,
+            pressed: resp.is_pointer_button_down_on(),
+            enabled: row_enabled,
+        },
+    );
+    let active_tint = resp.hovered() || is_open || resp.is_pointer_button_down_on();
+    let text_color = if !row_enabled {
+        t.text_disabled
+    } else if active_tint {
+        t.text_strong
+    } else {
+        t.text_primary
+    };
+    let text_right = (rect.right() - pad_x - icon_size - icon_gap).max(rect.left() + pad_x + 4.0);
+    let text_clip = Rect::from_min_max(pos2(rect.left() + pad_x, rect.top() + 1.0), pos2(text_right, rect.bottom() - 1.0));
+    let text_pos = pos2(rect.left() + pad_x, rect.center().y - galley.size().y * 0.5);
+    ui.painter().with_clip_rect(text_clip).galley(text_pos, galley, text_color);
+
+    let chevron_rect = Rect::from_center_size(pos2(rect.right() - pad_x - icon_size * 0.5, rect.center().y), Vec2::splat(icon_size));
+    let chevron_color = if !row_enabled {
+        t.text_disabled
+    } else if active_tint {
+        t.text_strong
+    } else {
+        t.icon
+    };
+    paint_chevron(ui, chevron_rect, true, chevron_color);
+}
+
+fn show_dropdown_popup<R>(
+    ui: &Ui,
+    t: &Tokens,
+    trigger_resp: &Response,
+    popup_id: egui::Id,
+    button_w: f32,
+    max_popup_height: f32,
+    add_contents: impl FnOnce(&mut Ui) -> R,
+) -> Option<R> {
+    let screen = ui.ctx().content_rect();
+    let max_popup_h = max_popup_height.min((screen.height() - 24.0).max(80.0)).max(48.0);
+    let max_popup_w = (screen.width() - 24.0).max(button_w);
+    let inner_min_w = (button_w - 8.0).max(40.0);
+    let inner_max_w = (max_popup_w - 8.0).max(inner_min_w);
+    let popup_frame = egui::Frame::popup(ui.style())
+        .fill(t.surface_bg)
+        .stroke(Stroke::new(1.0, t.border))
+        .corner_radius(CornerRadius::same(t.metrics.radius_md))
+        .inner_margin(egui::Margin::same(4));
+
+    egui::Popup::from_toggle_button_response(trigger_resp)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+        .frame(popup_frame)
+        .show(|ui| {
+            ui.style_mut().spacing.scroll = egui::style::ScrollStyle::solid();
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            ui.set_min_width(inner_min_w);
+            ui.set_max_width(inner_max_w);
+            // Supply an explicit max-height budget to `ScrollArea` instead of inheriting the
+            // `Area`'s previous-frame height so dynamic item additions grow immediately (#5225).
+            let budget_rect = Rect::from_min_size(ui.next_widget_position(), vec2(inner_max_w, max_popup_h));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(budget_rect), |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt(popup_id.with("scroll"))
+                    .max_height(max_popup_h)
+                    .auto_shrink([true, true])
+                    .show(ui, |ui| {
+                        ui.set_min_width(inner_min_w);
+                        ui.set_max_width(inner_max_w);
+                        add_contents(ui)
+                    })
+                    .inner
+            })
+            .inner
+        })
+        .map(|res| res.inner)
+}
+
+// ============================================================================
 // Wheel Stream Ownership
 // ============================================================================
 
@@ -1118,6 +1352,9 @@ mod tests {
             let _ = super::orientation_button(ui, true, true, "Landscape");
             let _ = super::layout_button(ui, &[(0, 0), (1, 0)], true, "2x1");
             let _ = super::chevron_cell(ui, 24.0);
+            let _ = super::dropdown("unit_dropdown", "Tukey HSD").width(140.0).show_ui(ui, |ui| {
+                let _ = ui.selectable_label(true, "Tukey HSD");
+            });
         });
         output.textures_delta.clear();
     }

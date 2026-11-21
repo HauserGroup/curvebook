@@ -24,7 +24,7 @@ use crate::modal_predicates::{
     source_table_shape,
 };
 
-use super::widgets::paint_icon_button_named;
+use super::widgets::{dropdown, paint_icon_button_named};
 use super::{FrameInspectEntryInput, FrameInspectMeta, FrameInspectNodeMeta, PendingUiIntents, Tokens};
 
 /// Five parameter tabs defined for the standardized One-Way ANOVA modal (`gui-layout-spec.md` §8.8).
@@ -1648,17 +1648,16 @@ fn render_multiplicity_dropdown(
         ("none", "None", MultiplicityMethod::None),
     ];
 
-    let cb =
-        egui::ComboBox::from_id_salt(salt).selected_text(selected_text).width((ui.available_width() - 8.0).clamp(120.0, 260.0)).show_ui(ui, |ui| {
-            for (slug, lbl, method) in options {
-                let en = r1b_post_hoc_option_enabled(rc.ep.assume_gaussian, reml_active, method);
-                let resp = ui.add_enabled(en.enabled, egui::Button::selectable(rc.anova.multiplicity.method == method, lbl));
-                let resp = if let Some(reason) = en.disabled_reason.as_deref() { resp.on_disabled_hover_text(reason) } else { resp };
-                if en.enabled && resp.clicked() {
-                    intents.push_custom_view_action("stat_params", format!("set_multiplicity:{slug}"));
-                }
+    let cb = dropdown(salt, selected_text).width((ui.available_width() - 8.0).clamp(120.0, 260.0)).show_ui(ui, |ui| {
+        for (slug, lbl, method) in options {
+            let en = r1b_post_hoc_option_enabled(rc.ep.assume_gaussian, reml_active, method);
+            let resp = ui.add_enabled(en.enabled, egui::Button::selectable(rc.anova.multiplicity.method == method, lbl));
+            let resp = if let Some(reason) = en.disabled_reason.as_deref() { resp.on_disabled_hover_text(reason) } else { resp };
+            if en.enabled && resp.clicked() {
+                intents.push_custom_view_action("stat_params", format!("set_multiplicity:{slug}"));
             }
-        });
+        }
+    });
     record_widget(
         ui,
         meta,
@@ -1671,8 +1670,8 @@ fn render_multiplicity_dropdown(
         true,
         None,
         ZLayer::ModalDialog,
-        false,
-        None,
+        cb.ellipsized,
+        cb.ellipsized.then_some(selected_text),
     );
 }
 

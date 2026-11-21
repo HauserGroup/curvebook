@@ -10,5 +10,6 @@ disallowed-types = [
   { path = "std::sync::RwLock", reason = "use curvebook_platform::sync::RwLock so lock re-entry, cycles, and unbounded waits are caught" },
   { path = "std::sync::RwLockReadGuard", reason = "use curvebook_platform::sync::RwLockReadGuard via curvebook_platform::sync::RwLock" },
   { path = "std::sync::RwLockWriteGuard", reason = "use curvebook_platform::sync::RwLockWriteGuard via curvebook_platform::sync::RwLock" },
+  { path = "egui::ComboBox", reason = "egui::ComboBox traps its open popup at its opening height (egui #5225); use `crate::egui_shell::widgets::dropdown` instead" },
 ]
 cognitive-complexity-threshold = 30
