@@ -923,6 +923,8 @@ fn render_result_data_row(
             egui::Id::unique(("res_cell", rs.id.as_str(), active_tab_idx, r_idx, c_idx)),
             if enabled { Sense::click() } else { Sense::hover() },
         );
+        let cell_ak = if fmt.text.is_empty() { String::from("Cell") } else { fmt.text.clone() };
+        cell_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Cell, enabled, cell_ak.clone()));
         let cell_wid = format!("result.cell.{r_idx}.{c_idx}");
         meta.record_response(
             ui,
