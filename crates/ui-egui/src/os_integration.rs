@@ -5,7 +5,9 @@
 use std::time::Duration;
 
 use curvebook_chart::ChartScene;
-use curvebook_doc::{DataSheet, MAX_IMAGE_ASSET_BYTES, SheetCellRange, SheetId};
+#[cfg(not(target_arch = "wasm32"))]
+use curvebook_doc::MAX_IMAGE_ASSET_BYTES;
+use curvebook_doc::{DataSheet, SheetCellRange, SheetId};
 use curvebook_engine::Session;
 use curvebook_format::{CsvOptions, export_datasheet_to_csv, format_cell_token, write_delimited_records};
 use curvebook_pdf::{PdfExportOptions, render_pdf};

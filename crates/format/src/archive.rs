@@ -1592,6 +1592,7 @@ impl Drop for UnpackedStageGuard {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn stage_rel_for_entry(entry_rel: &str, stage_path: &Path) -> Result<String, FormatError> {
     let file_name = stage_path.file_name().and_then(|s| s.to_str()).ok_or_else(|| FormatError::UnsafePath { path: entry_rel.to_owned() })?;
     let stage_rel = match entry_rel.rsplit_once('/') {

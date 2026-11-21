@@ -645,6 +645,10 @@ fn render_levels_inspector(
     let mut commit_reorder: Option<(usize, usize)> = None;
 
     for (idx, item) in levels.iter().enumerate() {
+        if ui.cursor().top() > ui.clip_rect().bottom() + 1.0 {
+            ui.allocate_space(vec2(ui.available_width().max(1.0), 30.0));
+            continue;
+        }
         let is_selected = state.selected_level.as_deref() == Some(item.level.as_str());
         if is_selected && state.synced_level_key.as_deref() != Some(item.level.as_str()) {
             state.synced_level_key = Some(item.level.clone());

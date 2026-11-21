@@ -325,7 +325,8 @@ pub fn render_results_view_for_sheet(
 
             let next_btn_w = 26.0;
             let strip_w = (ui.available_width() - next_btn_w - 6.0).max(0.0);
-            let max_tab_w = (strip_w - 4.0).clamp(36.0, 136.0);
+            let max_tab_cap = if tab_count > 5 { 96.0 } else { 120.0 };
+            let max_tab_w = (strip_w - 4.0).clamp(36.0, max_tab_cap);
             let gap = 4.0_f32;
             let tab_font = FontId::proportional(tokens.metrics.font_ui_small_pt);
             let tab_text_budget = (max_tab_w - 14.0).max(8.0);

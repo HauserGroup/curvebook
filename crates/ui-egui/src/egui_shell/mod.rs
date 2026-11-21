@@ -970,6 +970,7 @@ impl Tokens {
         style.spacing.scroll.bar_inner_margin = 2.0;
         style.spacing.scroll.bar_outer_margin = 2.0;
         style.spacing.interact_size.y = self.metrics.min_hit_target_pt;
+        style.spacing.tooltip_width = 320.0;
     }
 
     /// Synchronize the currently executing [`egui::Ui`] style immediately (including pass-0 frames).
