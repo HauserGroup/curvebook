@@ -112,6 +112,28 @@ Fixes for reported issues had no roadmap ID to use, merged PRs did not reference
 - [x] Create the `numerical`, `confirmed`, and `needs-repro` labels on GitHub. *(Done 2026-11-20 with `gh label create`.)*
 - [ ] Hosted CI passes on the pull request.
 
+### R0.34 Checked lock wrapper for shared state
+Owner: open · Status: todo · Was: cross-repository infrastructure drift audit 2026-11-21 · Depends on: none · Gate: none · Est. note: 6–10 h
+
+[`clippy.toml`](../clippy.toml) bans `std::sync::Mutex` "until a checked lock wrapper lands", but shared state now uses raw `std::sync::RwLock` instead (`crates/mcp/src/tools.rs`, `crates/ui-egui/src/os_integration.rs`, `crates/ui-egui/src/egui_shell/canvas_view.rs`, `apps/curvebook/src/desktop_host.rs`, `apps/curvebook/src/gui_window.rs`). An `RwLock` deadlocks in the same ways as a `Mutex` (a thread locking twice, two threads waiting on each other, a holder that never lets go), so the ban moves the risk instead of removing it (see also the `AsyncRasterWorkerOwner` worker self-join deadlock in `crates/ui-egui/src/egui_shell/canvas_view.rs`, fixed in `7116d92` / `GWF-12`). Design and write the wrapper independently, in CurveBook's own words.
+
+- [ ] Add `curvebook_platform::sync::{Mutex, RwLock}` with the standard-library API that records which thread holds each lock. A waiter that would wait on itself or on a cycle returns a typed error instead of blocking (never a panic and never `catch_unwind`, per [`AGENTS.md`](../AGENTS.md) › CurveBook Never Crashes). A holder that is not labelled as a long job and keeps others waiting past a documented limit is reported, and waiters give up after a second documented limit. Keep it `wasm32`-clean: no watchdog thread on `wasm32-unknown-unknown` (`cargo xtask ci wasm`).
+- [ ] Unit tests: a thread taking a lock it already holds, a two-thread cycle, a labelled long job that is waited for rather than cut off, poisoning, and both time limits.
+- [ ] Move the existing shared-state `RwLock` sites to the wrapper. Add `std::sync::RwLock`, `std::sync::RwLockReadGuard`, `std::sync::RwLockWriteGuard`, and `std::sync::MutexGuard` to `disallowed-types` with the wrapper as the reason, and replace the "until a checked lock wrapper lands" wording.
+- [ ] Document the rule in [`pitfalls-engineering.md`](pitfalls-engineering.md) and [`extending.md`](extending.md).
+- [ ] Verify: `cargo xtask ci quick`; hosted CI passes on the pull request.
+
+### R0.35 Keep the CI cache under the repository budget
+Owner: open · Status: todo · Was: hosted CI and release review 2026-11-21 · Depends on: none · Gate: none · Est. note: 6–10 h
+
+GitHub keeps at most 10 GB of Actions cache per repository and evicts the least recently used entries above that. On 2026-11-21 CurveBook held 9.42 GB in 11 entries. The `ci-setup` Rust cache (`.github/actions/ci-setup/action.yml`) saves a new entry for every commit (`key: ${{ github.sha }}`) with `cache-workspace-crates: true` and no trimming, so each entry is 1.7–2.5 GB and pushes out the FreeBSD, Windows ARM64 and release caches. A fresh checkout also gives every file a new modification time, so Cargo rebuilds the cached workspace crates anyway.
+
+- [ ] Record the build units each saving job uses (Cargo or nextest JSON messages) and trim the target directory to them before the cache saves.
+- [ ] Replace per-commit keys with one rolling entry per job and OS, and delete superseded entries from a job that holds `actions: write` only for that step. Keep the workflow-level `permissions: contents: read` rule (`cargo xtask telemetry`).
+- [ ] Restore file modification times after checkout from the commit the cache was built from, so Cargo rebuilds only the files that changed since then. Check that an unchanged crate is not recompiled.
+- [ ] Let the nightly release dry run restore caches but never save them.
+- [ ] Verify: on `main`, after a week of runs, the cache stays under the budget with room to spare and every platform cache is still present; record the before and after sizes and the `tests` stage time.
+
 ---
 
 ## R8 Desktop & WebAssembly live shell, localization & `1.0` hardening
@@ -527,6 +549,7 @@ Everything the Beta GitHub Release needs from the build and publish pipeline. Th
 **Release-asset scan** *(from R0.26)*
 - [x] Wire `cargo xtask release-scan` into `.github/workflows/release.yml`: one scan step per build job, after packaging (`.dmg` on macOS, `.msi` on Windows, the AppImage on Linux, the FreeBSD tarball on any runner), each uploading a scan report artifact. The *Draft GitHub Release* job must depend on every scan passing. Keep workflow `permissions` unchanged and add no egress beyond the existing pinned tool installs; `cargo xtask workflows` and `cargo xtask telemetry` must pass. *(Done 2026-11-18 in `.github/workflows/release.yml`.)*
 - [ ] Backfill the published `v0.1.0-alpha.1`: download its assets, run the scan, and record the result in [`alpha-branding-clearance.md`](history/release/alpha-branding-clearance.md). If anything is found, remediate and publish a corrected Alpha build.
+- [ ] **Fix the Windows `.msi` scan.** The nightly release dry runs on 2026-11-20 and 2026-11-21 failed in *Scan Windows release assets* on x64 and arm64: `msiexec /a` exited with `1619` (the package could not be opened). `release-scan` is run with the relative path `dist/release`, and `unpack_msi` in `xtask/src/release_scan.rs` passes the asset path to `msiexec` unchanged. Likely cause, not yet confirmed: `msiexec` needs an absolute package path. Pass absolute paths for the package and `TARGETDIR`, add a regression test, and confirm with a manual release dry run.
 
 **macOS signing** *(from R8.10)*
 - [x] Sign the app bundle and CLI with Developer ID and the hardened runtime, notarize the `.dmg`, and staple tickets to the app bundle and `.dmg`. CI verifies signatures with `codesign --verify --strict`, Gatekeeper assessment with `spctl --assess`, and attached tickets with `stapler validate` where supported. *(Wired 2026-11-18 in `packaging/macos/{package,verify}.sh` and `.github/workflows/release.yml`; live runner proof is in the rehearsal release below.)*
@@ -550,6 +573,25 @@ Everything the Beta GitHub Release needs from the build and publish pipeline. Th
 
 **Maintainer docs**
 - [x] Update [`releasing.md`](release/releasing.md) once for everything above: the scan as a mandatory step, the asset table, the signed macOS path, and fail-closed behaviour. Point [`get-started.md#verifying-downloads`](reference/get-started.md#verifying-downloads) and `packaging/*/INSTALLATION.md` at the `R12.5` install page instead of repeating install steps. *(Done 2026-11-18 across [`releasing.md`](release/releasing.md), [`get-started.md#verifying-downloads`](reference/get-started.md#verifying-downloads), and [`packaging/windows/INSTALLATION.md`](../packaging/windows/INSTALLATION.md); `packaging/macos/INSTALLATION.md` removed.)*
+
+### R14.2 Release SBOM and CI runner hardening
+Owner: maintainers · Status: todo · Was: cross-repository infrastructure drift audit 2026-11-21 · Depends on: [`R14.1`](#r141-beta-release-pipeline) · Gate: none (before or after Beta) · Est. note: 4–8 h
+
+The release workflow attests build provenance for every artefact, but publishes no software bill of materials (SBOM), and no workflow restricts or records where the runners connect to.
+
+- [ ] Generate a CycloneDX SBOM from `Cargo.lock` for every release with a tool installed in CI only (never a workspace dependency; check its licence against [`licences.md`](licences.md)). Attach it to the draft release and attest it next to the existing build-provenance attestations in `.github/workflows/release.yml`.
+- [ ] Make the SBOM a required release asset in `cargo xtask release-scan` and in [`releasing.md`](release/releasing.md).
+- [ ] **Decision:** add a runner-hardening step (network egress allowlist) to `ci.yml` and `release.yml`, or record why not. Adopt only a mode that sends no build or network data to a third-party service. Pin any new action by commit SHA and keep `cargo xtask telemetry` and `cargo xtask workflows` passing.
+- [ ] Verify: hosted CI and one release dry run pass.
+
+### R14.3 Retry transient release verification failures
+Owner: maintainers · Status: todo · Was: hosted CI and release review 2026-11-21 · Depends on: [`R14.1`](#r141-beta-release-pipeline) · Gate: none · Est. note: 1–3 h
+
+Apple's Gatekeeper and ticket checks can fail briefly right after notarization. `packaging/macos/verify.sh` runs `xcrun stapler validate` and `spctl --assess` once, so one transient failure fails the whole release.
+
+- [ ] Retry `stapler validate` and `spctl --assess` a bounded number of times with a fixed delay. Retry only the network-backed checks, never `codesign --verify`, and print each failed attempt.
+- [ ] If a FreeBSD release or CI build is ever killed for running out of memory, cap the VM's ZFS ARC before building and print memory and swap figures. Otherwise close this sub-task as not needed.
+- [ ] Verify: a release dry run passes, and a forced failure still fails after the last attempt.
 
 ---
 
@@ -705,6 +747,16 @@ Owner: maintainers · Status: done · Was: Maintainability ledger 2026-11-20 (`R
 
 - [x] Add shared i18n fallback helper (`R15-1`), unify modal `FrameInspectMeta` recording adapter (`R15-2`), share the shortcut candidate builder (`R8-1`), deduplicate accessibility state transitions (`R10-1`), share journal width preset name tables (`R9-1`), share the linked-paste TSV cell formatter (`R10-2`), and share capped raster sizing between MCP and control (`R5-4`). *(Done 2026-11-20 in `3663e09`.)*
 
+### R16.19 Replace egui combo boxes with a dropdown that can grow while open
+Owner: open · Status: todo · Was: cross-repository infrastructure drift audit 2026-11-21 · Depends on: none · Gate: none · Est. note: 2–4 h
+
+An open `egui::ComboBox` popup is reported upstream (egui issue #5225) to keep the size it opened at, so a list that changes while open cannot grow back. CurveBook uses it in `crates/ui-egui/src/egui_shell/stat_anova_modal.rs` and `crates/ui-egui/src/egui_shell/center_stage.rs`.
+
+- [ ] Confirm the behaviour on the pinned `egui` version with an `egui_kittest` test. If it no longer reproduces, drop this item with that evidence.
+- [ ] Add a small dropdown helper in `curvebook-ui-egui`, move both call sites to it, and add `egui::ComboBox` to `disallowed-types` in [`clippy.toml`](../clippy.toml) with the helper as the reason.
+- [ ] Add a human-path test for each migrated control ([pitfalls §6](pitfalls.md#6-treating-semantic-agent-harness-tests-as-proof-of-human-gui-parity)).
+- [ ] Verify: `cargo xtask ci quick` and `cargo xtask screenshots --check`; hosted CI passes on the pull request.
+
 ---
 
 ## Order and dependencies
@@ -738,6 +790,7 @@ See [earlier sequencing](history/roadmap.md#earlier-sequencing) for foundational
 | **Step 14d (`R13` GUI views)** | [`R13.8`](#r138-desktop-gui-views-for-r13-features) (`egui` dialogs, inspector controls, and canvas handles for `R13.2`–`R13.5` and `R13.7` — done) | [`R15.5`](history/roadmap/r15.md#r155-default-desktop-egui-cutover-screenshot-refresh-and-beta-readiness) (done) | **Beta** (moved from **1.0** 2026-11-20) |
 | **Step 14e (`R13` 15-workflow acceptance)** | [`R13.6`](#r136-extended-15-workflow-wf-51-to-wf-65-agent-harness-desktop-human-path--web-acceptance) (`WF-51`–`WF-65` `--gui-only` and desktop `EguiHumanPathDriver` suites — done; live browser parity and walkthroughs stay **1.0** in `R11.9`, `R10.13`, and `R11.10`) | `R13.1`–`R13.5`, `R13.7`, `R13.8`, [`R15.5`](history/roadmap/r15.md#r155-default-desktop-egui-cutover-screenshot-refresh-and-beta-readiness) (done) | **Beta** (moved from **1.0** 2026-11-20) |
 | **Core-crate maintainability (`R16`)** | [`R16.1`](#r161-split-the-stats-anova-module-by-method-family), [`R16.2`](history/roadmap/r16.md#r162-split-the-fit-solver-and-model-dsl-modules) (done), [`R16.4`](history/roadmap/r16.md#r164-typed-engine-command-parameters-wire-compatible) (done), and [`R16.6`](history/roadmap/r16.md#r166-one-home-for-analysis-spec-validation-and-an-accurate-extension-checklist) (done) in parallel (disjoint crates: `stats`, `fit`, `engine`, `doc` + `format/archive.rs`); then [`R16.3`](#r163-split-per-graph-family-chart-builders); [`R16.5`](history/roadmap/r16.md#r165-retire-duplicate-parameter-spellings-after-the-egui-cutover) (done); GUI splits & cleanups [`R16.7`](#r167-split-the-data-grid-by-archetype)–[`R16.9`](#r169-split-the-graph-modals), [`R16.11`](#r1611-further-gui-module-splits-optional-one-pr-each)–[`R16.18`](#r1618-gui-helper-deduplication) (done) | None for `R16.1`, `R16.2`, `R16.4`, `R16.6`; `R16.3` unblocked (`R13.2`–`R13.5` done); `R16.5` needed `R16.4` and [`R15.5`](history/roadmap/r15.md#r155-default-desktop-egui-cutover-screenshot-refresh-and-beta-readiness) (both done). | none (engineering hygiene) |
+| **Infrastructure hygiene** | [`R0.34`](#r034-checked-lock-wrapper-for-shared-state) checked lock wrapper, [`R14.2`](#r142-release-sbom-and-ci-runner-hardening) release SBOM and runner hardening, [`R16.19`](#r1619-replace-egui-combo-boxes-with-a-dropdown-that-can-grow-while-open) growable dropdown, [`R0.35`](#r035-keep-the-ci-cache-under-the-repository-budget) CI cache budget, [`R14.3`](#r143-retry-transient-release-verification-failures) release verification retries (independent of each other) | None for `R0.34`, `R0.35` and `R16.19`; `R14.2` and `R14.3` after [`R14.1`](#r141-beta-release-pipeline) | none (engineering hygiene) |
 
 **Open and parked decisions**
 
@@ -776,7 +829,6 @@ Legacy `G1`–`G14` gap IDs, the legacy milestone and spike IDs (`Slice 0`, `S1`
 Items explicitly deferred until needed or post-`1.0`:
 
 - **Translated READMEs:** localized `README.<locale>.md` translations are product polish deferred beyond initial `1.0` release scaffold (`R0.27`).
-- **Mutex wrapper & locks check:** `clippy.toml` already disallows raw `std::sync::Mutex`; a deadlock-detecting lock wrapper and `xtask locks` check stay parked while the workspace remains single-owner / message-passing.
 - **Plugin SDK / dynamic plugins:** deferred (`**decision**`; closed domain seams use typed traits and registries inside the workspace).
 
 ---
