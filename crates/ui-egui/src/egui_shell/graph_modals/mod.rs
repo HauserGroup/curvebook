@@ -17,7 +17,7 @@ mod r13_modals;
 mod selected_points;
 mod state;
 
-use curvebook_doc::ColorChannelMapping;
+use curvebook_doc::{ColorChannelMapping, MultivariateGraphEncoding, MultivariatePlotMode, SheetId, SizeChannelMapping};
 use curvebook_palette::ColorRamp;
 use egui::scroll_area::ScrollBarVisibility;
 use egui::{Context, Ui};
@@ -61,6 +61,14 @@ pub fn render_graph_modal(
     if !matches!(app.canvas_dialogs.active_dialog, ActiveDialog::FormatAxes { .. }) {
         reset_format_axes_session_state(state);
         state.axis_ticks_error = None;
+    }
+    if let ActiveDialog::FormatGraph { graph_sheet_id } = &app.canvas_dialogs.active_dialog {
+        sync_format_graph_local_drafts(app, state, graph_sheet_id);
+    } else {
+        state.format_graph_session_synced = false;
+        state.format_graph_last_sheet_id = None;
+        state.mv_clamp_min_draft.clear();
+        state.mv_clamp_max_draft.clear();
     }
     let locale = normalize_locale(&app.locale);
     let (widget_id, title, preferred_w) = match &app.canvas_dialogs.active_dialog {
@@ -279,6 +287,10 @@ fn render_dialog_footer(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &mut
         .clicked()
         {
             reset_format_axes_session_state(state);
+            state.format_graph_session_synced = false;
+            state.format_graph_last_sheet_id = None;
+            state.mv_clamp_min_draft.clear();
+            state.mv_clamp_max_draft.clear();
             state.axis_ticks_error = None;
             state.heatmap_range_error = None;
             gctx.intents.push_dialog_button("cancel");
@@ -322,6 +334,32 @@ fn render_dialog_footer(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &mut
     });
 }
 
+fn sync_format_graph_local_drafts(app: &UiApp, state: &mut GraphModalEguiState, sheet_id: &SheetId) {
+    let key = sheet_id.as_str();
+    if state.format_graph_session_synced && state.format_graph_last_sheet_id.as_deref() == Some(key) {
+        return;
+    }
+    state.format_graph_session_synced = true;
+    state.format_graph_last_sheet_id = Some(key.to_owned());
+    let enc_opt = app
+        .canvas_dialogs
+        .format_graph
+        .mv_encoding
+        .as_ref()
+        .or_else(|| app.document().graph_sheet(sheet_id).and_then(|g| g.spec.multivariate.as_ref()));
+    if let Some(enc) = enc_opt
+        && let ColorChannelMapping::Continuous { domain_clamp: Some((lo, hi)), .. } = enc.color
+    {
+        state.mv_clamp_min_draft = helpers::format_localized_draft_f64(lo, &app.locale_preset);
+        state.mv_clamp_max_draft = helpers::format_localized_draft_f64(hi, &app.locale_preset);
+        state.mv_out_of_range = MvOutOfRangePolicy::ClampToBounds;
+    } else {
+        state.mv_clamp_min_draft.clear();
+        state.mv_clamp_max_draft.clear();
+        state.mv_out_of_range = MvOutOfRangePolicy::ClampToBounds;
+    }
+}
+
 fn commit_graph_modal_action(gctx: &mut GraphModalCtx<'_>, state: &mut GraphModalEguiState, action: &str) {
     match &gctx.app.canvas_dialogs.active_dialog {
         ActiveDialog::FormatGraph { .. } => {
@@ -341,24 +379,36 @@ fn commit_graph_modal_action(gctx: &mut GraphModalCtx<'_>, state: &mut GraphModa
                         return;
                     }
                 };
-                if let Some(mut enc) = fg.mv_encoding.clone() {
-                    let col = match enc.color {
-                        ColorChannelMapping::Continuous { column, .. } | ColorChannelMapping::Categorical { column, .. } => column,
-                        ColorChannelMapping::Constant(_) => enc.y_column,
-                    };
-                    enc.color = ColorChannelMapping::Continuous {
-                        column: col,
-                        ramp: ColorRamp::Named { id: state.heatmap_colormap, reversed: state.heatmap_reversed },
-                        domain_clamp: clamp,
-                    };
-                    gctx.intents.push_engine(
-                        "graph.setSpec",
-                        json!({
-                            "sheet_id": gid.as_str(),
-                            "multivariate": enc,
-                        }),
+                let mut enc =
+                    fg.mv_encoding.clone().or_else(|| gctx.app.document().graph_sheet(gid).and_then(|g| g.spec.multivariate.clone())).unwrap_or_else(
+                        || MultivariateGraphEncoding {
+                            plot_mode: MultivariatePlotMode::BubbleScatter,
+                            x_column: 0,
+                            y_column: 0,
+                            color: ColorChannelMapping::Constant(fg.palette.color_at(0)),
+                            size: SizeChannelMapping::Constant { radius_pt: 5.0 },
+                            label_column: None,
+                            x_level_order_override: None,
+                            show_convex_hulls: false,
+                            show_confidence_ellipses: false,
+                        },
                     );
-                }
+                let col = match enc.color {
+                    ColorChannelMapping::Continuous { column, .. } | ColorChannelMapping::Categorical { column, .. } => column,
+                    ColorChannelMapping::Constant(_) => enc.y_column,
+                };
+                enc.color = ColorChannelMapping::Continuous {
+                    column: col,
+                    ramp: ColorRamp::Named { id: state.heatmap_colormap, reversed: state.heatmap_reversed },
+                    domain_clamp: clamp,
+                };
+                gctx.intents.push_engine(
+                    "graph.setSpec",
+                    json!({
+                        "sheet_id": gid.as_str(),
+                        "multivariate": enc,
+                    }),
+                );
                 gctx.intents.push_engine(
                     "graph.setAxes",
                     json!({

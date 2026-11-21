@@ -1,9 +1,10 @@
 //! Non-modal `Format Graph` inspector state machine (palette, CVD preview, frame, error bars, markers).
 
 use curvebook_doc::{
-    CartesianOrientation, ColorChannelMapping, EquationDisplayMode, ErrorBarSpec, FramePreset, GraphAnnotation, GraphKind, GraphSheet, GraphSpec,
-    GraphicalDataObject, GroupedArrangement, HeatmapLabelSpec, LegendSpec, LevelOrderKind, LevelOrderSpec, MultivariateGraphEncoding,
-    MultivariatePlotMode, ProjectDocument, RegressionOverlaySpec, ReplicateLineMode, SheetId, TableArchetype, VariableRole,
+    CartesianOrientation, ColorChannelMapping, ConnectingLineStyle, EquationDisplayMode, ErrorBarSpec, FramePreset, GraphAnnotation, GraphKind,
+    GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, HeatmapLabelSpec, LegendSpec, LevelOrderKind, LevelOrderSpec, LineConnectionKind,
+    MultivariateGraphEncoding, MultivariatePlotMode, ProjectDocument, RegressionOverlaySpec, ReplicateLineMode, SheetId, SummaryMeasure,
+    TableArchetype, VariableRole,
 };
 use curvebook_palette::{CvdKind, LineDashStyle, MarkerFillMode, MarkerStyle, PaletteId, Rgba8, simulate_cvd};
 
@@ -113,6 +114,12 @@ pub struct FormatGraphState {
     pub forest_show_pooled_diamond: bool,
     #[serde(default)]
     pub forest_show_pooled_diamond_dirty: bool,
+    #[serde(default)]
+    pub pending_overlay_result_id: Option<Option<SheetId>>,
+    #[serde(default)]
+    pub series_gdo_bar: bool,
+    #[serde(default)]
+    pub series_gdo_dirty: bool,
 }
 
 impl Default for FormatGraphState {
@@ -166,6 +173,9 @@ impl Default for FormatGraphState {
             bar_border_width_dirty: false,
             forest_show_pooled_diamond: false,
             forest_show_pooled_diamond_dirty: false,
+            pending_overlay_result_id: None,
+            series_gdo_bar: false,
+            series_gdo_dirty: false,
         }
     }
 }
@@ -209,6 +219,8 @@ impl FormatGraphState {
     pub fn sync_selected_series_from_spec(&mut self, spec: &GraphSpec) {
         let series_idx = self.selected_series_index.min(spec.series.len().saturating_sub(1));
         self.selected_series_index = series_idx;
+        self.pending_overlay_result_id = None;
+        self.series_gdo_dirty = false;
         if let Some(series) = spec.series.get(series_idx) {
             self.error_bar_enabled = series.y_error_bars.is_some();
             self.error_bar_spec = series.y_error_bars.unwrap_or_default();
@@ -219,6 +231,7 @@ impl FormatGraphState {
                 self.half_violin_with_points = false;
                 self.initial_violin_options = None;
             }
+            self.series_gdo_bar = matches!(series.gdo, GraphicalDataObject::BarWithReplicates { .. });
             self.show_raw_data = series.show_raw_data;
             self.cached_regression_overlay.clone_from(&series.regression_overlay);
             self.show_fitted_curve = series.regression_overlay.is_some();
@@ -246,6 +259,8 @@ impl FormatGraphState {
             let alpha_u8 = extract_gdo_alpha_byte(&series.gdo);
             self.series_alpha_pct = ((f64::from(alpha_u8) / 255.0) * 100.0).round().clamp(0.0, 100.0) as u8;
             self.extract_series_marker_and_dash(&series.gdo);
+        } else {
+            self.series_gdo_bar = false;
         }
     }
 
@@ -390,6 +405,12 @@ impl FormatGraphState {
             if let Some(series) = spec.series.get_mut(idx) {
                 series.y_error_bars = self.error_bar_enabled.then_some(self.error_bar_spec);
                 let swatch = self.palette.color_at(idx);
+                if self.series_gdo_dirty {
+                    series.gdo = self.build_switched_series_gdo(swatch);
+                }
+                if self.pending_overlay_result_id.is_some() || self.cached_regression_overlay.is_some() {
+                    series.regression_overlay = if self.show_fitted_curve { self.cached_regression_overlay.clone() } else { None };
+                }
                 if let GraphicalDataObject::Violin { half_violin_with_points, .. } = &mut series.gdo {
                     *half_violin_with_points = self.half_violin_with_points;
                 }
@@ -679,11 +700,14 @@ impl FormatGraphState {
             let alpha_u8 = ((f64::from(self.series_alpha_pct) / 100.0) * 255.0).round().clamp(0.0, 255.0) as u8;
             series_patch.insert(String::from("alpha"), json!(alpha_u8));
         }
-        if self.cached_regression_overlay.is_some() {
+        if self.pending_overlay_result_id.is_none() && self.cached_regression_overlay.is_some() {
             series_patch
                 .insert(String::from("regression_overlay"), if self.show_fitted_curve { json!(self.cached_regression_overlay) } else { Value::Null });
         }
-        if self.half_violin_with_points || self.initial_violin_options.is_some_and(|(_, _, was_half)| was_half) {
+        if self.series_gdo_dirty {
+            let swatch = self.palette.color_at(self.selected_series_index);
+            series_patch.insert(String::from("gdo"), json!(self.build_switched_series_gdo(swatch)));
+        } else if self.half_violin_with_points || self.initial_violin_options.is_some_and(|(_, _, was_half)| was_half) {
             let swatch = self.palette.color_at(self.selected_series_index);
             let (clip_to_observed_range, show_median_and_quartiles, _) = self.initial_violin_options.unwrap_or((true, true, false));
             series_patch.insert(
@@ -701,8 +725,61 @@ impl FormatGraphState {
         let mut intents = vec![ToolCommandIntent::new("graph.setSpec", Value::Object(spec_patch))];
         if !matches!(self.graph_kind, Some(GraphKind::MultipleVariables)) {
             intents.push(ToolCommandIntent::new("graph.setSeries", series_obj));
+            if let Some(overlay_target) = &self.pending_overlay_result_id {
+                let mut ov_params = serde_json::Map::new();
+                ov_params.insert(String::from("sheet_id"), json!(id.as_str()));
+                if self.apply_all_data_sets {
+                    ov_params.insert(String::from("all_series"), json!(true));
+                } else {
+                    ov_params.insert(String::from("series_index"), json!(self.selected_series_index));
+                }
+                match overlay_target {
+                    Some(rs_id) if self.show_fitted_curve => {
+                        ov_params.insert(String::from("result_sheet_id"), json!(rs_id.as_str()));
+                        ov_params.insert(String::from("show_confidence_band"), json!(true));
+                        ov_params.insert(String::from("show_prediction_band"), json!(false));
+                    }
+                    _ => {
+                        ov_params.insert(String::from("clear"), json!(true));
+                    }
+                }
+                intents.push(ToolCommandIntent::new("graph.setRegressionOverlay", Value::Object(ov_params)));
+            }
         }
         intents
+    }
+
+    fn build_switched_series_gdo(&self, swatch: Rgba8) -> GraphicalDataObject {
+        let alpha_u8 = ((f64::from(self.series_alpha_pct) / 100.0) * 255.0).round().clamp(0.0, 255.0) as u8;
+        let col = swatch.with_alpha(alpha_u8);
+        if self.series_gdo_bar {
+            GraphicalDataObject::BarWithReplicates {
+                summary: SummaryMeasure::Mean,
+                fill_color: col,
+                border_color: Rgba8::BLACK,
+                border_width_pt: self.bar_border_width_pt.max(0.5),
+                replicate_overlay: None,
+            }
+        } else {
+            let clamped_size = if self.marker_size_pt.is_finite() { self.marker_size_pt.clamp(1.0, 24.0) } else { 5.0 };
+            GraphicalDataObject::ScatterAndLine {
+                marker: self.show_symbols.then(|| MarkerStyle {
+                    size_pt: clamped_size,
+                    fill_mode: self.marker_fill_mode,
+                    fill_color: col,
+                    stroke_color: swatch,
+                    ..MarkerStyle::default()
+                }),
+                line: Some(ConnectingLineStyle {
+                    kind: LineConnectionKind::PointToPoint,
+                    dash_style: self.line_dash,
+                    stroke_width_pt: 1.5,
+                    color: col,
+                }),
+                area_fill: None,
+                replicate_lines: self.replicate_lines,
+            }
+        }
     }
 }
 

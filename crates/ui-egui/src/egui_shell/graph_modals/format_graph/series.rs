@@ -1,7 +1,9 @@
 //! Series-based `Format Graph` schema tabs: Appearance, Series & Arrangement, Graph Settings,
 //! and Value Annotations.
 
-use curvebook_doc::{EquationDisplayMode, ErrorBarDirection, ErrorBarMetric, GroupedArrangement};
+use curvebook_doc::{
+    AnalysisKind, EquationDisplayMode, ErrorBarDirection, ErrorBarMetric, GraphKind, GraphicalDataObject, GroupedArrangement, RegressionOverlaySpec,
+};
 use curvebook_palette::{CvdKind, LineDashStyle, MarkerFillMode, PaletteId, Rgba8};
 use egui::{CornerRadius, Sense, Ui, Vec2};
 
@@ -236,7 +238,112 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
 
     let active_gs = fg.graph_sheet_id.as_ref().and_then(|id| gctx.app.document().graph_sheet(id));
     let active_series = active_gs.and_then(|gs| gs.spec.series.get(fg.selected_series_index));
-    let is_scatter_series = active_series.is_some_and(|s| matches!(s.gdo, curvebook_doc::GraphicalDataObject::ScatterAndLine { .. }));
+    let effective_kind = fg.graph_kind.or_else(|| active_gs.map(|gs| gs.spec.kind));
+    if effective_kind == Some(GraphKind::Xy) {
+        let compatible_fits: Vec<&curvebook_doc::ResultSheet> = gctx
+            .app
+            .document()
+            .result_sheets
+            .iter()
+            .filter(|rs| matches!(rs.analysis.kind, AnalysisKind::LinearRegression(_) | AnalysisKind::NonlinearRegression(_)))
+            .collect();
+        if !compatible_fits.is_empty() || fg.cached_regression_overlay.is_some() {
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.set_max_width(gctx.body_w);
+                ui.label("Regression Overlay:");
+                for (idx, rs) in compatible_fits.iter().enumerate() {
+                    let selected = fg.cached_regression_overlay.as_ref().is_some_and(|o| o.result_sheet_id == rs.id);
+                    if record_button(
+                        ui,
+                        gctx.meta,
+                        ButtonEntry {
+                            widget_id: &format!("format_graph.overlay.attach.{idx}"),
+                            label: rs.title(),
+                            command_id: None,
+                            selected,
+                            enabled: true,
+                            disabled_reason: None,
+                        },
+                        gctx.tokens,
+                    )
+                    .clicked()
+                    {
+                        let mut next = fg.clone();
+                        next.cached_regression_overlay = Some(RegressionOverlaySpec {
+                            result_sheet_id: rs.id.clone(),
+                            sample_segments: 256,
+                            show_confidence_band: true,
+                            show_prediction_band: false,
+                            shaded_ribbon: false,
+                        });
+                        next.pending_overlay_result_id = Some(Some(rs.id.clone()));
+                        next.show_fitted_curve = true;
+                        gctx.intents.push_update_format_graph_state(next);
+                    }
+                }
+                if fg.cached_regression_overlay.is_some()
+                    && record_button(
+                        ui,
+                        gctx.meta,
+                        ButtonEntry {
+                            widget_id: "format_graph.overlay.clear",
+                            label: "Clear Overlay",
+                            command_id: None,
+                            selected: false,
+                            enabled: true,
+                            disabled_reason: None,
+                        },
+                        gctx.tokens,
+                    )
+                    .clicked()
+                {
+                    let mut next = fg.clone();
+                    next.cached_regression_overlay = None;
+                    next.pending_overlay_result_id = Some(None);
+                    next.show_fitted_curve = false;
+                    gctx.intents.push_update_format_graph_state(next);
+                }
+            });
+        }
+    }
+
+    let raw_is_scatter = active_series.is_some_and(|s| matches!(s.gdo, GraphicalDataObject::ScatterAndLine { .. }));
+    let is_scatter_series = if fg.series_gdo_dirty { !fg.series_gdo_bar } else { raw_is_scatter };
+    if matches!(effective_kind, Some(GraphKind::Xy | GraphKind::Column | GraphKind::Grouped)) {
+        let scatter_selected = if fg.series_gdo_dirty { !fg.series_gdo_bar } else { raw_is_scatter };
+        let bar_selected = fg.series_gdo_bar;
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.set_max_width(gctx.body_w);
+            ui.label("Series Display:");
+            for (slug, lbl, target_bar, selected) in
+                [("scatter_line", "Scatter / Line", false, scatter_selected), ("bar_replicates", "Bar with Replicates", true, bar_selected)]
+            {
+                if record_button(
+                    ui,
+                    gctx.meta,
+                    ButtonEntry {
+                        widget_id: &format!("format_graph.series_gdo.{slug}"),
+                        label: lbl,
+                        command_id: None,
+                        selected,
+                        enabled: true,
+                        disabled_reason: None,
+                    },
+                    gctx.tokens,
+                )
+                .clicked()
+                {
+                    let mut next = fg.clone();
+                    next.series_gdo_bar = target_bar;
+                    next.series_gdo_dirty = true;
+                    gctx.intents.push_update_format_graph_state(next);
+                }
+            }
+        });
+    }
+
     if is_scatter_series {
         ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
@@ -270,16 +377,14 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
         });
     }
 
-    let has_bar_border = if fg.apply_all_data_sets {
+    let has_bar_border = if fg.series_gdo_dirty {
+        fg.series_gdo_bar
+    } else if fg.apply_all_data_sets {
         active_gs.is_some_and(|gs| {
-            gs.spec.series.iter().any(|s| {
-                matches!(s.gdo, curvebook_doc::GraphicalDataObject::BarWithReplicates { .. } | curvebook_doc::GraphicalDataObject::FloatingBar { .. })
-            })
+            gs.spec.series.iter().any(|s| matches!(s.gdo, GraphicalDataObject::BarWithReplicates { .. } | GraphicalDataObject::FloatingBar { .. }))
         })
     } else {
-        active_series.is_some_and(|s| {
-            matches!(s.gdo, curvebook_doc::GraphicalDataObject::BarWithReplicates { .. } | curvebook_doc::GraphicalDataObject::FloatingBar { .. })
-        })
+        active_series.is_some_and(|s| matches!(s.gdo, GraphicalDataObject::BarWithReplicates { .. } | GraphicalDataObject::FloatingBar { .. }))
     };
     if has_bar_border {
         ui.add_space(4.0);

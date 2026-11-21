@@ -1,18 +1,88 @@
 //! `Bubble Plot Channels` modal body (`gui-layout-spec.md` §8.11).
 
-use curvebook_doc::SizeChannelMapping;
+use curvebook_doc::{ColorChannelMapping, GraphicalDataObject, MultivariatePlotMode, SizeChannelMapping, VariableRole, WhiskerMethod};
+use curvebook_palette::{ColormapId, PaletteId};
 use egui::Ui;
+
+use crate::dialogs_canvas::BubblePlotInspectorState;
 
 use super::super::unit_spinners::{ScrubUnitFieldConfig, render_scrub_unit_field};
 use super::helpers::{ButtonEntry, GraphModalCtx, record_button, record_checkbox};
 use super::state::GraphModalEguiState;
 
+fn col_title(bp: &BubblePlotInspectorState, idx: usize) -> &str {
+    bp.available_columns.get(idx).map_or("Var", |c| c.title.as_str())
+}
+
 pub(super) fn render_bubble_plot_body(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &mut GraphModalCtx<'_>) {
     let bp = gctx.app.canvas_dialogs.bubble_plot.clone();
     let n_cols = bp.available_columns.len().max(1);
+
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(gctx.body_w);
-        ui.label(format!("X Column: #{} | Y Column: #{}", bp.x_column + 1, bp.y_column + 1));
+        ui.label("Plot Mode:");
+        let is_bubble = matches!(bp.plot_mode, MultivariatePlotMode::BubbleScatter);
+        let is_cat_summary = matches!(bp.plot_mode, MultivariatePlotMode::CategoricalSummary { .. });
+        if record_button(
+            ui,
+            gctx.meta,
+            ButtonEntry {
+                widget_id: "bubble.plot_mode.bubble_scatter",
+                label: "Bubble Scatter",
+                command_id: None,
+                selected: is_bubble,
+                enabled: true,
+                disabled_reason: None,
+            },
+            gctx.tokens,
+        )
+        .clicked()
+        {
+            let mut next = bp.clone();
+            next.plot_mode = MultivariatePlotMode::BubbleScatter;
+            gctx.intents.push_update_bubble_plot_state(next);
+        }
+        if record_button(
+            ui,
+            gctx.meta,
+            ButtonEntry {
+                widget_id: "bubble.plot_mode.categorical_summary",
+                label: "Categorical Summary",
+                command_id: None,
+                selected: is_cat_summary,
+                enabled: true,
+                disabled_reason: None,
+            },
+            gctx.tokens,
+        )
+        .clicked()
+        {
+            let mut next = bp.clone();
+            let color = PaletteId::OkabeIto.color_at(0);
+            next.plot_mode = MultivariatePlotMode::CategoricalSummary {
+                gdo: GraphicalDataObject::BoxAndWhisker {
+                    whiskers: WhiskerMethod::Tukey1_5Iqr,
+                    fill_color: color.with_alpha(190),
+                    stroke_color: color,
+                    show_outliers: true,
+                    show_all_points: false,
+                },
+                y_error_bars: None,
+            };
+            gctx.intents.push_update_bubble_plot_state(next);
+        }
+    });
+
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        ui.label(format!(
+            "X Column: #{} ({}) | Y Column: #{} ({})",
+            bp.x_column + 1,
+            col_title(&bp, bp.x_column),
+            bp.y_column + 1,
+            col_title(&bp, bp.y_column)
+        ));
         if record_button(
             ui,
             gctx.meta,
@@ -50,6 +120,104 @@ pub(super) fn render_bubble_plot_body(ui: &mut Ui, state: &mut GraphModalEguiSta
             let mut next = bp.clone();
             next.y_column = (next.y_column + 1) % n_cols;
             gctx.intents.push_update_bubble_plot_state(next);
+        }
+    });
+
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        let color_summary = match &bp.color_channel {
+            ColorChannelMapping::Constant(_) => String::from("Color: Uniform"),
+            ColorChannelMapping::Categorical { column, .. } => format!("Color: Cat #{} ({})", column + 1, col_title(&bp, *column)),
+            ColorChannelMapping::Continuous { column, .. } => format!("Color: Cont #{} ({})", column + 1, col_title(&bp, *column)),
+        };
+        ui.label(color_summary);
+        if record_button(
+            ui,
+            gctx.meta,
+            ButtonEntry {
+                widget_id: "bubble.color_col_next",
+                label: "Cycle Color Col",
+                command_id: None,
+                selected: false,
+                enabled: n_cols > 1 || matches!(bp.color_channel, ColorChannelMapping::Constant(_)),
+                disabled_reason: None,
+            },
+            gctx.tokens,
+        )
+        .clicked()
+        {
+            let mut next = bp.clone();
+            match &bp.color_channel {
+                ColorChannelMapping::Constant(_) => {
+                    let is_numeric =
+                        bp.available_columns.first().is_some_and(|c| matches!(c.role, VariableRole::Continuous | VariableRole::Calculated));
+                    if is_numeric {
+                        next.set_color_continuous(0, ColormapId::Viridis, None);
+                    } else {
+                        next.set_color_categorical(0, PaletteId::OkabeIto);
+                    }
+                }
+                ColorChannelMapping::Categorical { column, palette, .. } => {
+                    next.set_color_categorical((column + 1) % n_cols, *palette);
+                }
+                ColorChannelMapping::Continuous { column, ramp, domain_clamp } => {
+                    next.color_channel =
+                        ColorChannelMapping::Continuous { column: (column + 1) % n_cols, ramp: ramp.clone(), domain_clamp: *domain_clamp };
+                }
+            }
+            gctx.intents.push_update_bubble_plot_state(next);
+        }
+    });
+
+    ui.add_space(4.0);
+    let is_size_var = matches!(bp.size_channel, SizeChannelMapping::Variable { .. });
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        if record_button(
+            ui,
+            gctx.meta,
+            ButtonEntry {
+                widget_id: "bubble.size_variable",
+                label: "Variable Size",
+                command_id: None,
+                selected: is_size_var,
+                enabled: true,
+                disabled_reason: None,
+            },
+            gctx.tokens,
+        )
+        .clicked()
+        {
+            let mut next = bp.clone();
+            if is_size_var {
+                next.size_channel = SizeChannelMapping::Constant { radius_pt: 5.0 };
+            } else {
+                next.size_channel = SizeChannelMapping::Variable { column: bp.x_column.min(n_cols - 1), min_radius_pt: 2.5, max_radius_pt: 14.0 };
+            }
+            gctx.intents.push_update_bubble_plot_state(next);
+        }
+        if let SizeChannelMapping::Variable { column, min_radius_pt, max_radius_pt } = bp.size_channel {
+            ui.label(format!("Size: #{} ({})", column + 1, col_title(&bp, column)));
+            if record_button(
+                ui,
+                gctx.meta,
+                ButtonEntry {
+                    widget_id: "bubble.size_col_next",
+                    label: "Cycle Size Col",
+                    command_id: None,
+                    selected: false,
+                    enabled: n_cols > 1,
+                    disabled_reason: None,
+                },
+                gctx.tokens,
+            )
+            .clicked()
+            {
+                let mut next = bp.clone();
+                next.set_size_variable((column + 1) % n_cols, min_radius_pt, max_radius_pt);
+                gctx.intents.push_update_bubble_plot_state(next);
+            }
         }
     });
 

@@ -1721,22 +1721,31 @@ struct CanvasRulersSpec<'a> {
 
 fn render_canvas_rulers(ui: &egui::Ui, spec: CanvasRulersSpec<'_>) {
     let CanvasRulersSpec { mat_rect, top_r, left_r, paper_rect, eff_scale, unit, tokens } = spec;
+    let outer_clip = ui.painter().clip_rect();
     let corner = Rect::from_min_size(pos2(left_r.left(), top_r.top()), vec2(RULER_THICKNESS_PT, RULER_THICKNESS_PT));
+    let corner_clip = outer_clip.intersect(corner);
+    let top_clip = outer_clip.intersect(top_r);
+    let left_clip = outer_clip.intersect(left_r);
+    let corner_painter = ui.painter().with_clip_rect(corner_clip);
+    let top_painter = ui.painter().with_clip_rect(top_clip);
+    let left_painter = ui.painter().with_clip_rect(left_clip);
     let unit_lbl = match unit {
         PhysicalUnit::Points => "pt",
         PhysicalUnit::Inches => "in",
         PhysicalUnit::Millimeters => "mm",
     };
-    ui.painter().rect_filled(corner, CornerRadius::ZERO, tokens.header_bg);
-    ui.painter().rect_filled(top_r, CornerRadius::ZERO, tokens.header_bg);
-    ui.painter().rect_filled(left_r, CornerRadius::ZERO, tokens.header_bg);
-    ui.painter().text(
-        corner.center(),
-        egui::Align2::CENTER_CENTER,
-        unit_lbl,
-        FontId::proportional(tokens.metrics.font_ui_small_pt),
-        tokens.text_muted,
-    );
+    corner_painter.rect_filled(corner, CornerRadius::ZERO, tokens.header_bg);
+    top_painter.rect_filled(top_r, CornerRadius::ZERO, tokens.header_bg);
+    left_painter.rect_filled(left_r, CornerRadius::ZERO, tokens.header_bg);
+    let unit_galley = corner_painter.layout_no_wrap(unit_lbl.to_owned(), FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted);
+    let unit_pos = corner.center() - unit_galley.size() * 0.5;
+    if unit_pos.x >= corner_clip.left()
+        && unit_pos.y >= corner_clip.top()
+        && unit_pos.x + unit_galley.size().x <= corner_clip.right()
+        && unit_pos.y + unit_galley.size().y <= corner_clip.bottom()
+    {
+        corner_painter.galley(unit_pos, unit_galley, tokens.text_muted);
+    }
 
     let pt_per_unit = match unit {
         PhysicalUnit::Points => 72.0_f32,
@@ -1748,13 +1757,21 @@ fn render_canvas_rulers(ui: &egui::Ui, spec: CanvasRulersSpec<'_>) {
     let mut tick_idx = 0i32;
     while x <= mat_rect.right() && tick_idx < 32 {
         if x >= top_r.left() {
-            ui.painter().line_segment([pos2(x, top_r.bottom() - 6.0), pos2(x, top_r.bottom())], Stroke::new(1.0, tokens.border));
+            top_painter.line_segment([pos2(x, top_r.bottom() - 6.0), pos2(x, top_r.bottom())], Stroke::new(1.0, tokens.border));
             let val = match unit {
                 PhysicalUnit::Points => tick_idx * 72,
                 PhysicalUnit::Inches => tick_idx,
                 PhysicalUnit::Millimeters => tick_idx * 10,
             };
-            ui.painter().text(pos2(x + 2.0, top_r.top() + 3.0), egui::Align2::LEFT_TOP, format!("{val}"), FontId::monospace(9.0), tokens.text_muted);
+            let galley = top_painter.layout_no_wrap(format!("{val}"), FontId::monospace(9.0), tokens.text_muted);
+            let label_pos = pos2(x + 2.0, top_r.top() + 3.0);
+            if label_pos.x >= top_clip.left()
+                && label_pos.y >= top_clip.top()
+                && label_pos.x + galley.size().x <= top_clip.right() - 1.0
+                && label_pos.y + galley.size().y <= top_clip.bottom()
+            {
+                top_painter.galley(label_pos, galley, tokens.text_muted);
+            }
         }
         x += step_px;
         tick_idx += 1;
@@ -1764,19 +1781,25 @@ fn render_canvas_rulers(ui: &egui::Ui, spec: CanvasRulersSpec<'_>) {
     let mut y_idx = 0i32;
     while y <= mat_rect.bottom() && y_idx < 32 {
         if y >= left_r.top() {
-            ui.painter().line_segment([pos2(left_r.right() - 6.0, y), pos2(left_r.right(), y)], Stroke::new(1.0, tokens.border));
+            left_painter.line_segment([pos2(left_r.right() - 6.0, y), pos2(left_r.right(), y)], Stroke::new(1.0, tokens.border));
             let val = match unit {
                 PhysicalUnit::Points => y_idx * 72,
                 PhysicalUnit::Inches => y_idx,
                 PhysicalUnit::Millimeters => y_idx * 10,
             };
-            ui.painter().text(
-                pos2(left_r.left() + 2.0, y + 2.0),
-                egui::Align2::LEFT_TOP,
-                format!("{val}"),
-                FontId::monospace(9.0),
-                tokens.text_muted,
-            );
+            let label = format!("{val}");
+            let mut galley = left_painter.layout_no_wrap(label.clone(), FontId::monospace(9.0), tokens.text_muted);
+            if galley.size().x > left_clip.width() - 2.0 {
+                galley = left_painter.layout_no_wrap(label, FontId::monospace(8.5), tokens.text_muted);
+            }
+            let label_pos = pos2(left_r.left() + 2.0, y + 2.0);
+            if label_pos.x >= left_clip.left()
+                && label_pos.y >= left_clip.top()
+                && label_pos.y + galley.size().y <= left_clip.bottom() - 1.0
+                && label_pos.x + galley.size().x <= left_clip.right()
+            {
+                left_painter.galley(label_pos, galley, tokens.text_muted);
+            }
         }
         y += step_px;
         y_idx += 1;
