@@ -27,9 +27,7 @@ use egui::{Key, Modifiers};
 use serde_json::json;
 
 use human_wf_common::workflow_run::{LiveEditExpectation, LiveEditTarget, ReferenceSpec, WorkflowRun};
-use human_wf_common::{
-    EguiWfHarness, TestRes, assert_input_to_paint_budget, assert_zero_shortcut_compliance, ensure,
-};
+use human_wf_common::{TestRes, ensure};
 
 fn graph_svg(doc: &ProjectDocument, graph_id: &str) -> Result<String, String> {
     let gs = doc.graph_sheet(&SheetId::new(graph_id)).ok_or_else(|| format!("missing graph `{graph_id}`"))?;
@@ -206,8 +204,8 @@ fn wf59_human_layout_equalize_scaling_transparent_overlay_and_inset() -> TestRes
     }
 
     // Stage 4: verify transparent axis-free BoxAndWhisker graph against headless Session oracle.
-    let mut ref_col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, fx.paired_cols.len(), fx.paired_rows.len())
-        .map_err(|e| e.to_string())?;
+    let mut ref_col =
+        ColumnTable::new(ColumnDesignHint::UnpairedReplicates, fx.paired_cols.len(), fx.paired_rows.len()).map_err(|e| e.to_string())?;
     for (c, &ct) in fx.paired_cols.iter().enumerate() {
         ref_col.data_sets[c].title = ct.to_owned();
     }
@@ -268,48 +266,142 @@ fn bounds_before_unwrap(b: &RectPt) -> &RectPt {
 
 #[test]
 fn wf60_human_subset_regression_decoupled_points_and_red_outlier_override() -> TestRes {
-    let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
+    let mut run = WorkflowRun::start("WF-60");
+    run.set_viewport(ViewportMetrics::new(1440.0, 900.0, 1.0));
     let fx = wf60_subset_linear_with_outliers_xy();
-    let sid = h.create_table_via_welcome("welcome.arch.xy", "WF60 Subset Outlier", &["welcome.stepper.cols.dec"])?;
+    let sid = run.create_table_via_welcome("welcome.arch.xy", fx.title, &["welcome.stepper.cols.dec", "welcome.stepper.cols.dec"])?;
+    run.enter_column_title(0, "All Points")?;
 
     for (r, &(x, y)) in fx.rows.iter().enumerate() {
-        h.enter_x_cell(r, 0, &format!("{x}"))?;
-        h.enter_grid_cell(r, 0, 0, &format!("{y}"))?;
-        h.enter_grid_cell(r, 1, 0, &format!("{y}"))?;
+        run.enter_x_cell(r, 0, &format!("{x}"))?;
+        run.enter_grid_cell(r, 0, 0, &format!("{y}"))?;
     }
 
-    // Exclude outlier rows in col 1 via Shift+Click + Cmd+E.
+    // 1) Hover plotted point on canvas and assert `(Row ...)` cursor readout appears (`GWF-21`).
+    let gs_id = graph_for_source(run.document(), &sid)?;
+    run.select_sheet(&gs_id)?;
+    let scene_raw = {
+        let gs = run.document().graph_sheet(&gs_id).ok_or("WF-60 missing auto graph")?;
+        compile_graph(gs, run.document()).map_err(|e| e.to_string())?
+    };
+    let pt0 = scene_raw.plotted_points.first().ok_or("WF-60 expected plotted points")?;
+    let canvas_rect = run.frame_meta().find_by_widget_id("canvas.viewport").ok_or("WF-60 missing canvas.viewport")?.clipped_rect;
+    let margin = 16.0_f32;
+    let avail_w = (canvas_rect.width() - margin * 2.0).max(80.0);
+    let avail_h = (canvas_rect.height() - margin * 2.0).max(80.0);
+    let sx = (avail_w / (scene_raw.width_pt.max(1.0) as f32)).min(avail_h / (scene_raw.height_pt.max(1.0) as f32));
+    let paper_min =
+        egui::pos2(canvas_rect.center().x - (scene_raw.width_pt as f32) * sx * 0.5, canvas_rect.center().y - (scene_raw.height_pt as f32) * sx * 0.5);
+    let pt0_screen = egui::pos2(paper_min.x + (pt0.center_pt.x as f32) * sx, paper_min.y + (pt0.center_pt.y as f32) * sx);
+    run.hover_at(pt0_screen)?;
+    let readout = run.state().views.canvas_view.hover_readout.as_ref().ok_or("WF-60 expected canvas point hover readout")?;
+    ensure(readout.value_summary.contains("Row 1"), format!("WF-60 hover readout must include Row 1, got `{}`", readout.value_summary))?;
+
+    // 2) Duplicate Y column via DataGrid context menu (`grid.ctx.duplicate_column`), title Col 1, and exclude outlier rows [6, 7] via Cmd+E.
+    run.select_sheet(&sid)?;
+    let cell00 = run.widget_center("grid.cell.0.0.0")?;
+    run.click_at_button(cell00, PointerButton::Secondary, KeyModifiers::default())?;
+    run.click("grid.ctx.duplicate_column")?;
+    ensure(
+        run.document().data_sheet(&sid).is_some_and(|ds| ds.archetype.column_count() == 2),
+        "WF-60 duplicate_column must create Included Subset column",
+    )?;
+    run.enter_column_title(1, "Included Subset")?;
+
     let w_start = format!("grid.cell.{}.1.0", fx.outlier_rows[0]);
     let w_end = format!("grid.cell.{}.1.0", fx.outlier_rows[1]);
-    h.click(&w_start)?;
-    let end_pos = h.widget_center(&w_end)?;
-    h.driver.click_at_button(end_pos, PointerButton::Primary, KeyModifiers { shift: true, ..Default::default() })?;
-    h.driver.press_key("E", KeyModifiers { meta: true, ..Default::default() })?;
+    run.click(&w_start)?;
+    let end_pos = run.widget_center(&w_end)?;
+    run.click_at_button(end_pos, PointerButton::Primary, KeyModifiers { shift: true, ..Default::default() })?;
+    run.press_key("E", KeyModifiers { meta: true, ..Default::default() })?;
 
-    let lin_id = h.run_analyze_entry("Linear", "analyze.entry.fit.linear")?;
-    let tabs_before = format!("{:?}", h.app().document().result_sheet(&lin_id).ok_or("WF-60 missing linear fit")?.tabs);
+    // 3) Run linear regression selectively on duplicate column (uncheck Dataset 0 -> selected_data_sets = [1]).
+    let before_rs = run.document().result_sheets.len();
+    run.click("toolbar.analyze")?;
+    run.replace_textbox("analyze.search", "Linear")?;
+    run.click("analyze.entry.fit.linear")?;
+    run.click("analyze.mv.var.0")?;
+    run.commit_modal_ok()?;
+    ensure(run.document().result_sheets.len() == before_rs + 1, "WF-60 selective Linear must create ResultSheet")?;
+    let lin_id = run.document().result_sheets.last().map(|r| r.id.clone()).ok_or("WF-60 missing linear fit")?;
 
-    let gs_id = h.app().document().graph_sheets.last().map(|g| g.id.clone()).ok_or("WF-60 missing auto graph")?;
-    h.select_sheet(&gs_id)?;
-    h.click("toolbar.format_graph")?;
-    h.click("format_graph.series_next")?;
-    h.click("format_graph.show_raw_data")?;
-    h.click("modal.ok")?;
+    // 4) Format full Series 0 (rows 0..8) red via Format Selected Points (`inspector.table.style_subset`, zero guarded clicks).
+    run.select_sheet(&sid)?;
+    run.click("grid.cell.0.0.0")?;
+    let p_last = run.widget_center("grid.cell.7.0.0")?;
+    run.click_at_button(p_last, PointerButton::Primary, KeyModifiers { shift: true, ..Default::default() })?;
+    run.click("inspector.table.style_subset")?;
+    run.click("fmt_pts.col.Red")?;
+    run.commit_modal_ok()?;
+
+    // 5) Attach linear regression overlay on Series 1 AND decouple Show data points off while keeping Show fitted curve on.
+    run.select_sheet(&gs_id)?;
+    run.click("toolbar.format_graph")?;
+    run.click("format_graph.series_next")?;
+    run.click("format_graph.overlay.attach.0")?;
+    run.click("format_graph.show_raw_data")?;
+    run.commit_modal_ok()?;
     {
-        let gs = h.app().document().graph_sheet(&gs_id).ok_or("WF-60 missing graph")?;
-        ensure(!gs.spec.series[1].show_raw_data, "WF-60 series 1 raw points must decouple off")?;
+        let doc = run.document();
+        let gs = doc.graph_sheet(&gs_id).ok_or("WF-60 missing graph after FormatGraph")?;
+        ensure(!gs.spec.series[1].show_raw_data, "WF-60 series 1 Show data points must be decoupled off")?;
+        ensure(
+            gs.spec.series[1].regression_overlay.as_ref().is_some_and(|ov| ov.result_sheet_id == lin_id),
+            "WF-60 series 1 must carry linear regression overlay",
+        )?;
+        ensure(
+            gs.spec.point_overrides.len() >= fx.rows.len(),
+            format!("WF-60 expected >= {} red point overrides on Series 0, got {}", fx.rows.len(), gs.spec.point_overrides.len()),
+        )?;
+        ensure(
+            gs.spec.point_overrides.iter().any(|ov| ov.series_index == 0 && ov.fill_color.is_some()),
+            "WF-60 Series 0 point overrides must carry red fill color",
+        )?;
+        let _svg = graph_svg(doc, gs_id.as_str())?;
     }
 
-    // Re-include row 6 in col 1 via Cmd+E -> linear fit updates reactively.
-    h.select_sheet(&sid)?;
-    h.click(&w_start)?;
-    h.driver.press_key("E", KeyModifiers { meta: true, ..Default::default() })?;
-    let tabs_after = format!("{:?}", h.app().document().result_sheet(&lin_id).ok_or("WF-60 missing linear post toggle")?.tabs);
-    ensure(tabs_before != tabs_after, "WF-60 re-including outlier must recompute regression")?;
+    // Stage 4: Oracle verification of selective subset linear regression on Col 1 (`excluded = [6, 7]`).
+    let mut ref_xy = XyTable::new(SubcolumnMode::Single, 2, fx.rows.len()).map_err(|e| e.to_string())?;
+    ref_xy.data_sets[0].title = String::from("All Points");
+    ref_xy.data_sets[1].title = String::from("Included Subset");
+    for (r, &(x, y)) in fx.rows.iter().enumerate() {
+        ref_xy.x_cells[r][0] = Cell::number(x);
+        ref_xy.data_sets[0].cells[r][0] = Cell::number(y);
+        ref_xy.data_sets[1].cells[r][0] = Cell::number(y);
+    }
+    let ref_sheet = DataSheet::new("ref-xy-60", fx.title, TableArchetype::Xy(ref_xy)).map_err(|e| e.to_string())?;
+    let excl_cells: Vec<_> = fx.outlier_rows.iter().map(|&row| json!({ "row": row, "col": 1, "subcol": 0 })).collect();
+    run.verify_reference(
+        ReferenceSpec::for_result(lin_id.clone(), move |sess| {
+            sess.execute("table.excludeCells", json!({ "sheet_id": "ref-xy-60", "cells": excl_cells, "excluded": true }))
+                .map_err(|e| e.to_string())?;
+            sess.execute(
+                "analysis.run",
+                json!({ "sheet_id": "ref-lin-60", "source_sheet_id": "ref-xy-60", "kind": "linear_regression", "selected_data_sets": [1] }),
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .with_reference_sheet(ref_sheet)?
+        .ref_result_id(SheetId::new("ref-lin-60"))
+        .scalar("Slope", Some(1), 1e-6, 1e-6)
+        .scalar("YIntercept", Some(1), 1e-6, 1e-6)
+        .scalar("R2", Some(1), 1e-6, 1e-6),
+    )?;
 
-    assert_zero_shortcut_compliance(&mut h)?;
-    h.verify_14_locales_section_9_4("WF-60")?;
-    assert_input_to_paint_budget(&h, 50.0)
+    // Stage 5: Re-include outlier row 6 on Col 1 via Cmd+E -> linear slope and fitted curve SVG update reactively.
+    let sid_for_edit = sid;
+    let cell_reincl = w_start;
+    run.live_edit_all(
+        LiveEditTarget::gui(move |r| {
+            r.select_sheet(&sid_for_edit)?;
+            r.click(&cell_reincl)?;
+            r.press_key("E", KeyModifiers { meta: true, ..Default::default() })
+        }),
+        vec![LiveEditExpectation::scalar_changed(lin_id, "Slope", Some(1), 1e-2), LiveEditExpectation::graph_svg_changed(gs_id)],
+    )?;
+
+    run.finish()
 }
 
 #[test]
@@ -329,12 +421,7 @@ fn wf61_human_per_column_normalized_heatmap_and_vertical_column_titles() -> Test
     }
     // Paste full 6x13 matrix into subcol 0 of each column (`val\t` across 2-subcol RawReplicates(2) layout).
     run.click("grid.cell.0.0.0")?;
-    let tsv = fx
-        .rows
-        .iter()
-        .map(|row| row.iter().map(|v| format!("{v}\t")).collect::<Vec<_>>().join("\t"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let tsv = fx.rows.iter().map(|row| row.iter().map(|v| format!("{v}\t")).collect::<Vec<_>>().join("\t")).collect::<Vec<_>>().join("\n");
     run.paste_clipboard(&tsv)?;
 
     for (c, &at) in fx.analyte_titles.iter().enumerate() {
@@ -368,19 +455,18 @@ fn wf61_human_per_column_normalized_heatmap_and_vertical_column_titles() -> Test
     run.commit_modal_ok()?;
     let _raw_svg = graph_svg(run.document(), g_raw_id.as_str())?;
 
-    // Run Analyze > Normalize (0%-100% per dataset), create linked heatmap with Vertical90 labels.
+    // Run Analyze > Normalize (0%-100% per dataset + `[x] Create a new graph of the results`), creating linked Heatmap directly.
     run.select_sheet(&sid)?;
     let norm_id = run.run_analyze_entry("Normalize", "analyze.entry.transform.normalize")?;
-    run.open_menu_and_click("menu.insert", &[], "menu.ui.graph.create.open")?;
-    ensure(matches!(run.active_dialog(), ActiveDialog::CreateGraph { .. }), "WF-61 CreateGraph modal must open")?;
-    let src_wid = run
-        .frame_meta()
-        .entries
-        .iter()
-        .find(|e| e.widget_id.starts_with("create_graph.source.") && (e.label.contains("Normalize") || e.label.contains(norm_id.as_str())))
-        .map(|e| e.widget_id.clone())
-        .ok_or("WF-61 missing Normalize source in CreateGraph")?;
-    run.click(&src_wid)?;
+    run.select_sheet(&norm_id)?;
+    run.open_cmd_t()?;
+    ensure(
+        run.frame_meta().find_by_widget_id("edit.transform.norm_percent").is_some()
+            && run.frame_meta().find_by_widget_id("edit.transform.norm_per_dataset").is_some()
+            && run.frame_meta().find_by_widget_id("edit.transform.normalize.create_graph").is_some(),
+        "WF-61 Normalize Cmd+T modal must expose norm_percent, norm_per_dataset, and normalize.create_graph",
+    )?;
+    run.click("edit.transform.normalize.create_graph")?;
     run.commit_modal_ok()?;
 
     let g_norm_id = graph_for_source(run.document(), &norm_id)?;
@@ -497,8 +583,7 @@ fn wf62_human_five_design_nested_paired_and_rm_anova_trial_comparison() -> TestR
     let fx = wf62_five_design_trial();
 
     // 1) Nested hierarchical t-test vs flattened Column unpaired t-test
-    let nest_id =
-        run.create_table_via_welcome("welcome.arch.nested", fx.nested_title, &["welcome.stepper.cols.dec", "welcome.nested.depth.inc"])?;
+    let nest_id = run.create_table_via_welcome("welcome.arch.nested", fx.nested_title, &["welcome.stepper.cols.dec", "welcome.nested.depth.inc"])?;
     for (group_idx, subjects) in fx.nested_values.iter().enumerate() {
         for (subject_idx, reps) in subjects.iter().enumerate() {
             for (rep_idx, &val) in reps.iter().enumerate() {
@@ -593,12 +678,9 @@ fn wf62_human_five_design_nested_paired_and_rm_anova_trial_comparison() -> TestR
     let ref_nest_sheet = DataSheet::new("ref-nest-62", fx.nested_title, TableArchetype::Nested(ref_nest)).map_err(|e| e.to_string())?;
     run.verify_reference(
         ReferenceSpec::for_result(nest_res.clone(), |sess| {
-            sess.execute(
-                "analysis.run",
-                json!({ "sheet_id": "ref-nest-res-62", "source_sheet_id": "ref-nest-62", "kind": "nested_t" }),
-            )
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+            sess.execute("analysis.run", json!({ "sheet_id": "ref-nest-res-62", "source_sheet_id": "ref-nest-62", "kind": "nested_t" }))
+                .map(|_| ())
+                .map_err(|e| e.to_string())
         })
         .with_reference_sheet(ref_nest_sheet)?
         .ref_result_id(SheetId::new("ref-nest-res-62"))
@@ -698,19 +780,12 @@ fn wf63_human_forest_plot_upper_lower_limits_and_null_reference_line() -> TestRe
 
     {
         let gs = run.document().graph_sheet(&gs_id).ok_or("WF-63 missing graph")?;
-        let tick = gs
-            .spec
-            .x_axis
-            .additional_ticks
-            .iter()
-            .find(|t| t.label.as_deref() == Some("No Effect"))
-            .ok_or("WF-63 custom No Effect tick missing")?;
+        let tick =
+            gs.spec.x_axis.additional_ticks.iter().find(|t| t.label.as_deref() == Some("No Effect")).ok_or("WF-63 custom No Effect tick missing")?;
         ensure((tick.value - 1.0).abs() < 1e-9 && tick.draw_gridline, "WF-63 additional tick must be at X=1.0 with gridline=true")?;
         let scene = compile_graph(gs, run.document()).map_err(|e| e.to_string())?;
-        let has_dotted = scene
-            .primitives
-            .iter()
-            .any(|p| matches!(p, ScenePrimitive::Path { stroke: Some(st), .. } if st.dash == LineDashStyle::Dotted));
+        let has_dotted =
+            scene.primitives.iter().any(|p| matches!(p, ScenePrimitive::Path { stroke: Some(st), .. } if st.dash == LineDashStyle::Dotted));
         ensure(has_dotted, "WF-63 compiled Forest scene must emit dotted vertical reference line")?;
         let svg = graph_svg(run.document(), gs_id.as_str())?;
         ensure(svg.contains("No Effect") && svg.contains("stroke-dasharray"), "WF-63 SVG must contain No Effect label and dotted rule")?;
@@ -733,8 +808,7 @@ fn wf63_human_forest_plot_upper_lower_limits_and_null_reference_line() -> TestRe
                 .map_err(|e| e.to_string())?;
             sess.execute("graph.setKind", json!({ "sheet_id": "ref-g-63", "kind": "diagnostic", "option_id": "diag.forest" }))
                 .map_err(|e| e.to_string())?;
-            sess.execute("graph.setSpec", json!({ "sheet_id": "ref-g-63", "forest_show_pooled_diamond": true }))
-                .map_err(|e| e.to_string())?;
+            sess.execute("graph.setSpec", json!({ "sheet_id": "ref-g-63", "forest_show_pooled_diamond": true })).map_err(|e| e.to_string())?;
             sess.execute(
                 "graph.setAxes",
                 json!({ "sheet_id": "ref-g-63", "x_axis": { "additional_ticks": [{ "value": 1.0, "label": "No Effect", "draw_gridline": true }] } }),

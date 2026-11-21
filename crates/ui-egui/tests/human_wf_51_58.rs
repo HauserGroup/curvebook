@@ -14,8 +14,8 @@ use std::sync::Arc;
 use curvebook_chart::{compile_graph, compile_layout};
 use curvebook_doc::{
     AnalysisKind, Cell, ColumnDesignHint, ColumnTable, DataSheet, ErrorBarMetric, FramePreset, GraphAnnotation, GraphicalDataObject, GroupedTable,
-    LayoutItem, ProjectDocument, ResultCell, ResultStatus, ResultTabKind, SheetId, SubcolumnMode, SurvivalDisplayMetric, SurvivalTable,
-    TableArchetype, TickLabelFormat, XyTable,
+    LayoutItem, ParameterScope, ProjectDocument, ResultCell, ResultStatus, ResultTabKind, SheetId, SubcolumnMode, SurvivalDisplayMetric,
+    SurvivalTable, TableArchetype, TickLabelFormat, XyTable,
 };
 use curvebook_pdf::{PdfExportOptions, render_pdf};
 use curvebook_render::{RasterImage, RenderTargetSpec, encode_png, render_scene};
@@ -25,14 +25,13 @@ use curvebook_testkit::r13_datasets::{
     wf56_exponential_growth_xy, wf57_schematic_rgba, wf58_descriptive_column,
 };
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
-use curvebook_ui_egui::inspect::ScreenshotRegionTarget;
 use curvebook_ui_egui::interaction::{KeyModifiers, PointerButton, ViewportMetrics};
 use curvebook_ui_egui::os_integration::StubPlatformClipboardAdapter;
 use egui::{Key, Modifiers};
 use serde_json::json;
 
 use human_wf_common::workflow_run::{LiveEditExpectation, LiveEditTarget, ReferenceSpec, WorkflowRun};
-use human_wf_common::{EguiWfHarness, TestRes, assert_input_to_paint_budget, assert_zero_shortcut_compliance, ensure};
+use human_wf_common::{TestRes, ensure};
 
 fn graph_for_source(doc: &ProjectDocument, source_id: &SheetId) -> Result<SheetId, String> {
     doc.graph_sheets
@@ -48,129 +47,373 @@ fn graph_svg_rendered(doc: &ProjectDocument, graph_id: &SheetId) -> Result<Strin
     render_svg(&scene, &SvgExportOptions::default()).map_err(|e| e.to_string())
 }
 
-fn find_first_fit_cmp_alt(h: &EguiWfHarness, exclude_id: &str) -> Option<String> {
-    let preferred = "fit.cmp.alt.log_inhibitor_vs_response_3pl";
-    if h.driver.frame_meta().find_by_widget_id(preferred).is_some() {
-        return Some(String::from(preferred));
-    }
-    h.driver
+fn set_scrub_field_wf(run: &mut WorkflowRun, wid: &str, chip_offset_from_right_pt: f32, text: &str) -> TestRes {
+    let r = run
         .frame_meta()
         .entries
         .iter()
-        .find(|e| e.widget_id.starts_with("fit.cmp.alt.") && e.widget_id != format!("fit.cmp.alt.{exclude_id}"))
-        .map(|e| e.widget_id.clone())
+        .find(|e| e.widget_id == wid && e.clipped_rect.is_positive())
+        .map(|e| e.clipped_rect)
+        .ok_or_else(|| format!("missing scrub widget `{wid}`"))?;
+    let click_pt = egui::pos2((r.right() - chip_offset_from_right_pt).max(r.left() + 6.0), r.center().y);
+    run.click_at(click_pt)?;
+    for _ in 0..12 {
+        run.press_egui_key(Key::Backspace, Modifiers::NONE)?;
+    }
+    run.type_text(text)?;
+    run.press_egui_key(Key::Enter, Modifiers::NONE)
 }
 
 #[test]
 fn wf51_human_nonlinear_rout_replicate_interp_compare_and_relative_ic50() -> TestRes {
-    let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
+    let mut run = WorkflowRun::start("WF-51");
     let fx = wf51_inhibitor_triplicate_xy();
-    let sid = h.create_table_via_welcome(
+    let sid = run.create_table_via_welcome(
         "welcome.arch.xy",
         "WF51 Inhibitor ROUT",
         &["welcome.subcol.raw", "welcome.stepper.cols.dec", "welcome.stepper.cols.dec"],
     )?;
+    run.enter_column_title(0, fx.data_set_title)?;
 
     for (r, pt) in fx.known_rows.iter().enumerate() {
-        h.enter_x_cell(r, 0, &format!("{}", pt.log_dose))?;
+        run.enter_x_cell(r, 0, &format!("{}", pt.log_dose))?;
         for (s, &v) in pt.replicates.iter().enumerate() {
-            h.enter_grid_cell(r, 0, s, &format!("{v}"))?;
+            run.enter_grid_cell(r, 0, s, &format!("{v}"))?;
         }
     }
     for (u_idx, reps) in fx.unknown_rows.iter().enumerate() {
         let r = fx.known_rows.len() + u_idx;
         for (s, &v) in reps.iter().enumerate() {
-            h.enter_grid_cell(r, 0, s, &format!("{v}"))?;
+            run.enter_grid_cell(r, 0, s, &format!("{v}"))?;
         }
     }
 
-    h.select_sheet(&sid)?;
-    let rs_id = h.run_analyze_entry("Nonlinear", "analyze.entry.fit.nonlinear")?;
-    h.select_sheet(&rs_id)?;
-    h.open_cmd_t()?;
-    h.click("fit.tab.weight")?;
-    h.click("fit.method.rout")?;
-    h.click("fit.tab.compare")?;
-    h.click("fit.cmp.extra_f")?;
-    if let Some(alt_wid) = find_first_fit_cmp_alt(&h, "linear") {
-        h.click(&alt_wid)?;
-    }
-    h.click("fit.tab.output")?;
-    h.click("fit.out.interp")?;
-    h.replace_textbox("fit.diagnostics.r2.input", "0.999999")?;
-    h.click("modal.ok")?;
+    run.select_sheet(&sid)?;
+    let rs_id = run.run_analyze_entry("Nonlinear", "analyze.entry.fit.nonlinear")?;
+    run.select_sheet(&rs_id)?;
+    run.open_cmd_t()?;
+    run.replace_textbox("fit.eq.search", "inhibitor")?;
+    run.click("fit.eq.item.log_inhibitor_vs_response_4pl")?;
+    run.click("fit.tab.weight")?;
+    run.click("fit.method.rout")?;
+    run.click("fit.tab.compare")?;
+    run.click("fit.cmp.extra_f")?;
+    let cmp_pt = run.widget_center("fit.cmp.extra_f")?;
+    run.wheel(cmp_pt, egui::vec2(0.0, -280.0))?;
+    run.click("fit.cmp.alt.log_inhibitor_vs_response_3pl")?;
+    run.click("fit.tab.output")?;
+    run.click("fit.out.interp")?;
+    run.replace_textbox("fit.diagnostics.r2.input", "0.999999")?;
+    run.commit_modal_ok()?;
 
-    let tabs_before = {
-        let rs = h.app().document().result_sheet(&rs_id).ok_or("WF-51 missing result sheet")?;
+    let (rep_tab_idx, rep_num_col) = {
+        let rs = run.document().result_sheet(&rs_id).ok_or("WF-51 missing result sheet")?;
         ensure(matches!(rs.status, ResultStatus::UpToDate), "WF-51 nonlinear result not UpToDate")?;
+        ensure(!rs.eliminated_outliers.is_empty(), "WF-51 ROUT Q=1% must eliminate injected outlier")?;
         ensure(rs.tabs.iter().any(|t| t.id == "nonlinear_interpolated_mean_x"), "WF-51 missing Mean X interp tab")?;
-        ensure(rs.tabs.iter().any(|t| t.id == "nonlinear_interpolated_replicates"), "WF-51 missing Replicates interp tab")?;
-        format!("{:?}", rs.tabs)
+        let rep_pos = rs.tabs.iter().position(|t| t.id == "nonlinear_interpolated_replicates").ok_or("WF-51 missing Replicates interp tab")?;
+        let rep_col = rs.tabs[rep_pos]
+            .rows
+            .first()
+            .and_then(|row| row.iter().position(|c| matches!(c, ResultCell::Number { value, .. } if value.is_finite())))
+            .ok_or("WF-51 Replicates interp row 0 missing numeric interpolated value")?;
+        ensure(rs.tabs.iter().any(|t| t.kind == ResultTabKind::ModelComparison || t.id.contains("cmp")), "WF-51 missing 3PL vs 4PL comparison tab")?;
+        ensure(
+            rs.checklist.iter().any(|c| c.assumption.contains("R squared below threshold")),
+            format!("WF-51 missing Flag R^2 checklist note: {:?}", rs.checklist),
+        )?;
+        (rep_pos, rep_col)
     };
 
-    // Edit unknown replicate via human cell entry and verify reactive update.
-    h.select_sheet(&sid)?;
-    h.enter_grid_cell(fx.known_rows.len(), 0, 1, "64.0")?;
-    let rs_after = h.app().document().result_sheet(&rs_id).ok_or("WF-51 missing result after edit")?;
-    ensure(format!("{:?}", rs_after.tabs) != tabs_before, "WF-51 unknown replicate edit must recompute")?;
+    // Attach overlay to graph and verify ROUT outlier Cross badge compiles onto GraphSheet.
+    let gs_id = graph_for_source(run.document(), &sid)?;
+    run.select_sheet(&gs_id)?;
+    run.click("toolbar.format_graph")?;
+    run.click("format_graph.overlay.attach.0")?;
+    run.commit_modal_ok()?;
+    {
+        let doc = run.document();
+        let gs = doc.graph_sheet(&gs_id).ok_or("WF-51 missing graph after overlay")?;
+        let ov = gs.spec.series[0].regression_overlay.as_ref().ok_or("WF-51 expected regression_overlay on series 0")?;
+        ensure(ov.result_sheet_id == rs_id, "WF-51 overlay must point to ROUT ResultSheet")?;
+        let scene = compile_graph(gs, doc).map_err(|e| e.to_string())?;
+        ensure(scene.warnings.is_empty(), format!("WF-51 graph compile warnings: {:?}", scene.warnings))?;
+        ensure(
+            scene.plotted_points.iter().any(|p| p.value_summary.contains("ROUT outlier")),
+            "WF-51 graph scene must emit ROUT outlier marker metadata",
+        )?;
+        ensure(!render_svg(&scene, &SvgExportOptions::default()).map_err(|e| e.to_string())?.is_empty(), "WF-51 SVG must render non-empty")?;
+    }
 
-    // Chain Normalize transform from DataSheet.
-    let norm_id = h.run_analyze_entry("Normalize", "analyze.entry.transform.normalize")?;
-    ensure(h.app().document().result_sheet(&norm_id).is_some(), "WF-51 missing Normalize result sheet")?;
+    // Chain Normalize -> Nonlinear 4PL relative IC50 (`analyze.entry.fit.nonlinear` on Normalize output).
+    run.select_sheet(&sid)?;
+    let norm_id = run.run_analyze_entry("Normalize", "analyze.entry.transform.normalize")?;
+    ensure(
+        run.document().result_sheet(&norm_id).is_some_and(|r| matches!(r.status, ResultStatus::UpToDate) && r.analyzable_data.is_some()),
+        "WF-51 Normalize must produce UpToDate analyzable_data",
+    )?;
+    run.select_sheet(&norm_id)?;
+    let rel_ic50_id = run.run_analyze_entry("Nonlinear", "analyze.entry.fit.nonlinear")?;
+    run.select_sheet(&rel_ic50_id)?;
+    run.open_cmd_t()?;
+    run.replace_textbox("fit.eq.search", "inhibitor")?;
+    run.click("fit.eq.item.log_inhibitor_vs_response_4pl")?;
+    run.commit_modal_ok()?;
+    ensure(
+        run.document().result_sheet(&rel_ic50_id).is_some_and(|r| matches!(r.status, ResultStatus::UpToDate)),
+        "WF-51 chained relative IC50 fit must be UpToDate",
+    )?;
 
-    let png = h.screenshot_png(ScreenshotRegionTarget::Canvas)?;
-    ensure(png.starts_with(b"\x89PNG\r\n\x1a\n") && png.len() > 256, "WF-51 PNG invalid")?;
-    assert_zero_shortcut_compliance(&mut h)?;
-    h.verify_14_locales_section_9_4("WF-51")?;
-    assert_input_to_paint_budget(&h, 50.0)
+    // Stage 4: Oracle verification for both ROUT 4PL + unknowns and chained Normalize relative IC50.
+    let total_rows = fx.known_rows.len() + fx.unknown_rows.len();
+    let mut ref_xy = XyTable::new(SubcolumnMode::RawReplicates(3), 1, total_rows).map_err(|e| e.to_string())?;
+    ref_xy.data_sets[0].title = String::from(fx.data_set_title);
+    for (r, pt) in fx.known_rows.iter().enumerate() {
+        ref_xy.x_cells[r][0] = Cell::number(pt.log_dose);
+        for (s, &v) in pt.replicates.iter().enumerate() {
+            ref_xy.data_sets[0].cells[r][s] = Cell::number(v);
+        }
+    }
+    for (u_idx, reps) in fx.unknown_rows.iter().enumerate() {
+        let r = fx.known_rows.len() + u_idx;
+        for (s, &v) in reps.iter().enumerate() {
+            ref_xy.data_sets[0].cells[r][s] = Cell::number(v);
+        }
+    }
+    let ref_sheet = DataSheet::new("ref-xy-51", fx.title, TableArchetype::Xy(ref_xy)).map_err(|e| e.to_string())?;
+    run.verify_reference(
+        ReferenceSpec::for_result(rs_id.clone(), |sess| {
+            sess.execute(
+                "analysis.run",
+                json!({
+                    "sheet_id": "ref-nl-51",
+                    "source_sheet_id": "ref-xy-51",
+                    "kind": "nonlinear_regression",
+                    "equation_id": "log_inhibitor_vs_response_4pl",
+                    "fit_method": "rout",
+                    "fdr_q_percent": 1.0,
+                    "interpolate_unknowns": true,
+                    "flag_r_squared_below": 0.999999,
+                    "comparison": {
+                        "method": "extra_sum_of_squares_f",
+                        "alternative_equation_id": "log_inhibitor_vs_response_3pl"
+                    }
+                }),
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .with_reference_sheet(ref_sheet.clone())?
+        .ref_result_id(SheetId::new("ref-nl-51"))
+        .scalar("LogIC50", Some(0), 1e-4, 1e-4)
+        .scalar("IC50", Some(0), 1e-4, 1e-4)
+        .scalar("R2", None, 1e-5, 1e-5)
+        .tab_cell(rep_tab_idx, 0, rep_num_col, 1e-4, 1e-4),
+    )?;
+
+    run.verify_reference(
+        ReferenceSpec::for_result(rel_ic50_id, |sess| {
+            sess.execute(
+                "transform.run",
+                json!({
+                    "sheet_id": "ref-norm-51",
+                    "source_sheet_id": "ref-xy-51",
+                    "kind": "normalize",
+                    "zero_anchor": "smallest",
+                    "hundred_anchor": "largest"
+                }),
+            )
+            .map_err(|e| e.to_string())?;
+            sess.execute(
+                "analysis.run",
+                json!({
+                    "sheet_id": "ref-rel-ic50-51",
+                    "source_sheet_id": "ref-norm-51",
+                    "kind": "nonlinear_regression",
+                    "equation_id": "log_inhibitor_vs_response_4pl"
+                }),
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .with_reference_sheet(ref_sheet)?
+        .ref_result_id(SheetId::new("ref-rel-ic50-51"))
+        .scalar("LogIC50", Some(0), 1e-4, 1e-4)
+        .scalar("IC50", Some(0), 1e-4, 1e-4)
+        .scalar("R2", None, 1e-5, 1e-5),
+    )?;
+
+    // Stage 5: Live unknown replicate edit recomputes Interpolated Replicates tab cleanly.
+    let rs_for_chk = rs_id.clone();
+    let before_rep_rows =
+        run.document().result_sheet(&rs_id).and_then(|r| r.tabs.get(rep_tab_idx)).map(|t| t.rows.clone()).ok_or("WF-51 missing rep tab rows")?;
+    run.live_edit_all(
+        LiveEditTarget::sheet_grid_cell(sid, fx.known_rows.len(), 0, 1, "64.0"),
+        vec![LiveEditExpectation::custom(move |_, _, doc| {
+            let rs_after = doc.result_sheet(&rs_for_chk).ok_or("WF-51 missing result after edit")?;
+            let after_rows = &rs_after.tabs[rep_tab_idx].rows;
+            ensure(after_rows != &before_rep_rows, "WF-51 unknown replicate edit must recompute Interpolated Replicates")
+        })],
+    )?;
+
+    run.select_sheet(&gs_id)?;
+    run.finish()
 }
 
 #[test]
 fn wf52_human_4pl_identifiability_recovery_extrapolation_and_qq_drillback() -> TestRes {
-    let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
+    let mut run = WorkflowRun::start("WF-52");
+    run.set_viewport(ViewportMetrics::new(1440.0, 900.0, 1.0));
     let fx = wf52_sparse_agonist_4pl_xy();
-    let sid = h.create_table_via_welcome("welcome.arch.xy", "WF52 Ambiguous 4PL", &["welcome.stepper.cols.dec"])?;
+    let sid = run.create_table_via_welcome("welcome.arch.xy", "WF52 Ambiguous 4PL", &["welcome.stepper.cols.dec"])?;
+    for (c, s) in fx.series.iter().enumerate() {
+        run.enter_column_title(c, s.title)?;
+    }
 
     for (r, &(x, y)) in fx.series[0].rows.iter().enumerate() {
-        h.enter_x_cell(r, 0, &format!("{x}"))?;
-        h.enter_grid_cell(r, 0, 0, &format!("{y}"))?;
+        run.enter_x_cell(r, 0, &format!("{x}"))?;
+        run.enter_grid_cell(r, 0, 0, &format!("{y}"))?;
     }
     for (r, &(_x, y)) in fx.series[1].rows.iter().enumerate() {
-        h.enter_grid_cell(r, 1, 0, &format!("{y}"))?;
+        run.enter_grid_cell(r, 1, 0, &format!("{y}"))?;
     }
 
-    h.select_sheet(&sid)?;
-    let rs_id = h.run_analyze_entry("Nonlinear", "analyze.entry.fit.nonlinear")?;
-    h.select_sheet(&rs_id)?;
-    h.open_cmd_t()?;
-    h.click("fit.tab.output")?;
-    h.click("fit.out.unstable")?;
-    h.click("fit.tab.constraints")?;
-    if h.driver.frame_meta().find_by_widget_id("fit.con.rule.Bottom.fixed").is_some() {
-        h.click("fit.con.rule.Bottom.fixed")?;
-    }
-    if h.driver.frame_meta().find_by_widget_id("fit.con.rule.HillSlope.shared").is_some() {
-        h.click("fit.con.rule.HillSlope.shared")?;
-    }
-    h.click("modal.ok")?;
+    // 1) Initial sparse-plateau fit with Identify unstable parameters enabled -> Ambiguous / (Unstable) + Extrapolation.
+    run.select_sheet(&sid)?;
+    let rs_id = run.run_analyze_entry("Nonlinear", "analyze.entry.fit.nonlinear")?;
+    run.select_sheet(&rs_id)?;
+    run.open_cmd_t()?;
+    run.click("fit.tab.output")?;
+    run.click("fit.out.unstable")?;
+    run.commit_modal_ok()?;
 
-    let summary_before = {
-        let rs = h.app().document().result_sheet(&rs_id).ok_or("WF-52 missing fit result")?;
+    {
+        let rs = run.document().result_sheet(&rs_id).ok_or("WF-52 missing sparse fit result")?;
         ensure(
             matches!(&rs.analysis.kind, AnalysisKind::NonlinearRegression(nl) if nl.identify_unstable_parameters),
             "WF-52 identify_unstable_parameters must persist",
         )?;
-        format!("{:?}", rs.tabs)
+        let has_ambig = rs.checklist.iter().any(|c| c.assumption.contains("Ambiguous"))
+            || rs.tabs.iter().any(|t| t.row_labels.iter().any(|l| l.contains("(Unstable)")));
+        ensure(has_ambig, "WF-52 sparse 4PL must flag Ambiguous / (Unstable) parameters")?;
+        ensure(
+            rs.checklist.iter().any(|c| c.assumption.contains("outside observed X range")),
+            format!("WF-52 missing midpoint extrapolation checklist item: {:?}", rs.checklist),
+        )?;
+    }
+
+    // 2) Recover identifiability via Bottom=Constant(0) + SharedGlobal HillSlope & Top (zero guarded clicks).
+    run.open_cmd_t()?;
+    run.click("fit.tab.constraints")?;
+    run.click("fit.con.rule.Bottom.fixed")?;
+    run.replace_textbox("fit.con.const.Bottom", "0")?;
+    let con_pt = run.widget_center("fit.con.rule.Bottom.fixed")?;
+    run.wheel(con_pt, egui::vec2(0.0, -180.0))?;
+    run.click("fit.con.rule.Top.shared")?;
+    let top_pt = run.widget_center("fit.con.rule.Top.shared")?;
+    run.wheel(top_pt, egui::vec2(0.0, -280.0))?;
+    run.click("fit.con.rule.HillSlope.shared")?;
+    run.commit_modal_ok()?;
+
+    {
+        let rs = run.document().result_sheet(&rs_id).ok_or("WF-52 missing recovered fit")?;
+        ensure(matches!(rs.status, ResultStatus::UpToDate), "WF-52 recovered fit must be UpToDate")?;
+        let AnalysisKind::NonlinearRegression(nl) = &rs.analysis.kind else {
+            return Err(String::from("WF-52 expected NonlinearRegression"));
+        };
+        let b_rule = nl.parameter_rules.iter().find(|r| r.name == "Bottom").ok_or("WF-52 missing Bottom rule")?;
+        let h_rule = nl.parameter_rules.iter().find(|r| r.name == "HillSlope").ok_or("WF-52 missing HillSlope rule")?;
+        let t_rule = nl.parameter_rules.iter().find(|r| r.name == "Top").ok_or("WF-52 missing Top rule")?;
+        ensure(b_rule.scope == ParameterScope::Constant(0.0), format!("WF-52 expected Bottom Constant(0.0), got {:?}", b_rule.scope))?;
+        ensure(h_rule.scope == ParameterScope::SharedGlobal, format!("WF-52 expected HillSlope SharedGlobal, got {:?}", h_rule.scope))?;
+        ensure(t_rule.scope == ParameterScope::SharedGlobal, format!("WF-52 expected Top SharedGlobal, got {:?}", t_rule.scope))?;
+    }
+
+    // 3) Create Normal Q-Q diagnostic graph from data via Insert -> Create Graph, click plotted point, and drill back to source cell.
+    let before_graphs = run.document().graph_sheets.len();
+    run.open_menu_and_click("menu.insert", &[], "menu.ui.graph.create.open")?;
+    run.click("create_graph.source.0")?;
+    run.commit_modal_ok()?;
+    ensure(run.document().graph_sheets.len() == before_graphs + 1, "WF-52 CreateGraph must add Normal Q-Q target graph")?;
+    let g_qq_id = run.document().graph_sheets.last().map(|g| g.id.clone()).ok_or("WF-52 missing g_qq")?;
+
+    run.select_sheet(&g_qq_id)?;
+    run.click("toolbar.graph_type")?;
+    run.click("graph_type.card.diag.normal_qq")?;
+    run.commit_modal_ok()?;
+
+    let qq_scene = {
+        let gs = run.document().graph_sheet(&g_qq_id).ok_or("WF-52 missing g_qq")?;
+        compile_graph(gs, run.document()).map_err(|e| e.to_string())?
     };
+    let first_pt = qq_scene
+        .plotted_points
+        .iter()
+        .find(|p| p.source_cell.sheet_id == sid)
+        .ok_or("WF-52 Normal Q-Q plotted points must carry source_cell back to XY sheet")?
+        .clone();
+    let canvas_rect = run.frame_meta().find_by_widget_id("canvas.viewport").ok_or("WF-52 missing canvas.viewport")?.clipped_rect;
+    let margin = 16.0_f32;
+    let avail_w = (canvas_rect.width() - margin * 2.0).max(80.0);
+    let avail_h = (canvas_rect.height() - margin * 2.0).max(80.0);
+    let sx = (avail_w / (qq_scene.width_pt.max(1.0) as f32)).min(avail_h / (qq_scene.height_pt.max(1.0) as f32));
+    let paper_min =
+        egui::pos2(canvas_rect.center().x - (qq_scene.width_pt as f32) * sx * 0.5, canvas_rect.center().y - (qq_scene.height_pt as f32) * sx * 0.5);
+    let hit_screen = egui::pos2(paper_min.x + (first_pt.center_pt.x as f32) * sx, paper_min.y + (first_pt.center_pt.y as f32) * sx);
+    run.click_at(hit_screen)?;
+    ensure(
+        run.frame_meta().find_by_widget_id("inspector.drill_back.jump").is_some(),
+        "WF-52 clicking Q-Q point must surface drill-back jump button",
+    )?;
+    run.click("inspector.drill_back.jump")?;
+    ensure(run.document().active_sheet_id.as_ref() == Some(&sid), "WF-52 drill-back jump must activate source XY sheet")?;
 
-    h.select_sheet(&sid)?;
-    h.enter_grid_cell(4, 1, 0, "84.0")?;
-    let summary_after = format!("{:?}", h.app().document().result_sheet(&rs_id).ok_or("WF-52 post edit")?.tabs);
-    ensure(summary_after != summary_before, "WF-52 live dose response cell edit must recompute")?;
+    // Stage 4: Oracle verification of recovered 4PL constrained fit.
+    let mut ref_xy = XyTable::new(SubcolumnMode::Single, 2, fx.series[0].rows.len()).map_err(|e| e.to_string())?;
+    for (c, s) in fx.series.iter().enumerate() {
+        ref_xy.data_sets[c].title = String::from(s.title);
+    }
+    for (r, &(x, y0)) in fx.series[0].rows.iter().enumerate() {
+        ref_xy.x_cells[r][0] = Cell::number(x);
+        ref_xy.data_sets[0].cells[r][0] = Cell::number(y0);
+        ref_xy.data_sets[1].cells[r][0] = Cell::number(fx.series[1].rows[r].1);
+    }
+    let ref_sheet = DataSheet::new("ref-xy-52", fx.title, TableArchetype::Xy(ref_xy)).map_err(|e| e.to_string())?;
+    run.verify_reference(
+        ReferenceSpec::for_result(rs_id.clone(), |sess| {
+            sess.execute(
+                "analysis.run",
+                json!({
+                    "sheet_id": "ref-nl-52",
+                    "source_sheet_id": "ref-xy-52",
+                    "kind": "nonlinear_regression",
+                    "equation_id": "log_agonist_vs_response_4pl",
+                    "identify_unstable_parameters": true,
+                    "parameter_rules": [
+                        { "parameter": "Bottom", "scope": "constant", "value": 0.0 },
+                        { "parameter": "HillSlope", "scope": "shared_global" },
+                        { "parameter": "Top", "scope": "shared_global" }
+                    ]
+                }),
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .with_reference_sheet(ref_sheet)?
+        .ref_result_id(SheetId::new("ref-nl-52"))
+        .scalar("LogEC50", Some(0), 1e-4, 1e-4)
+        .scalar("LogEC50", Some(1), 1e-4, 1e-4)
+        .scalar("Top", None, 1e-3, 1e-3)
+        .scalar("HillSlope", None, 1e-3, 1e-3),
+    )?;
 
-    assert_zero_shortcut_compliance(&mut h)?;
-    h.verify_14_locales_section_9_4("WF-52")?;
-    assert_input_to_paint_budget(&h, 50.0)
+    // Stage 5: Live cell correction updates LogEC50 and Q-Q graph SVG cleanly.
+    run.live_edit_all(
+        LiveEditTarget::sheet_grid_cell(sid, 4, 1, 0, "58.0"),
+        vec![LiveEditExpectation::scalar_changed(rs_id, "LogEC50", Some(1), 1e-4), LiveEditExpectation::graph_svg_changed(g_qq_id)],
+    )?;
+
+    run.finish()
 }
 
 #[test]
@@ -340,42 +583,140 @@ fn wf53_human_kaplan_meier_display_modes_and_column_exclude_hr() -> TestRes {
 
 #[test]
 fn wf54_human_dual_axis_nudged_bars_alpha_lines_and_selective_decay_fit() -> TestRes {
-    let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
+    let mut run = WorkflowRun::start("WF-54");
     let fx = wf54_dual_axis_mean_sd_n_xy();
-    let _sid = h.create_table_via_welcome("welcome.arch.xy", "WF54 Dual Axis", &["welcome.subcol.mean_sd_n", "welcome.stepper.cols.dec"])?;
+    let sid = run.create_table_via_welcome("welcome.arch.xy", fx.title, &["welcome.subcol.mean_sd_n", "welcome.stepper.cols.dec"])?;
+    for (c, &title) in fx.series_titles.iter().enumerate() {
+        run.enter_column_title(c, title)?;
+    }
 
     for (r, &x) in fx.x_hours.iter().enumerate() {
-        h.enter_x_cell(r, 0, &format!("{x}"))?;
+        run.enter_x_cell(r, 0, &format!("{x}"))?;
         let m0 = &fx.fluorescence[r];
         let m1 = &fx.metabolite[r];
         for (c, m) in [(0, m0), (1, m1)] {
-            h.enter_grid_cell(r, c, 0, &format!("{}", m.mean))?;
-            h.enter_grid_cell(r, c, 1, &format!("{}", m.sd))?;
-            h.enter_grid_cell(r, c, 2, &format!("{}", m.n))?;
+            run.enter_grid_cell(r, c, 0, &format!("{}", m.mean))?;
+            run.enter_grid_cell(r, c, 1, &format!("{}", m.sd))?;
+            run.enter_grid_cell(r, c, 2, &format!("{}", m.n))?;
         }
     }
 
-    let gs_id = h.app().document().graph_sheets.last().map(|g| g.id.clone()).ok_or("WF-54 missing auto graph")?;
-    h.select_sheet(&gs_id)?;
-    h.click("toolbar.format_graph")?;
-    h.click("format_graph.alpha.50")?;
-    h.click("format_graph.apply_globally")?;
-    h.click("modal.ok")?;
+    // Selective single-series fit (Series 0 only) via Analyze Data checkbox + One-Phase Exponential Decay.
+    run.select_sheet(&sid)?;
+    let before_rs = run.document().result_sheets.len();
+    run.click("toolbar.analyze")?;
+    run.replace_textbox("analyze.search", "Nonlinear")?;
+    run.click("analyze.entry.fit.nonlinear")?;
+    run.click("analyze.mv.var.1")?;
+    run.commit_modal_ok()?;
+    ensure(run.document().result_sheets.len() == before_rs + 1, "WF-54 selective Nonlinear must create ResultSheet")?;
+    let fit_id = run.document().result_sheets.last().map(|r| r.id.clone()).ok_or("WF-54 missing fit ResultSheet")?;
+
+    run.select_sheet(&fit_id)?;
+    run.open_cmd_t()?;
+    run.replace_textbox("fit.eq.search", "one_phase_decay")?;
+    run.click("fit.eq.item.one_phase_decay")?;
+    run.commit_modal_ok()?;
+    {
+        let rs = run.document().result_sheet(&fit_id).ok_or("WF-54 missing decay fit")?;
+        ensure(matches!(rs.status, ResultStatus::UpToDate), "WF-54 selective One-Phase Decay fit must be UpToDate")?;
+        ensure(
+            rs.analysis.selected_data_sets == vec![0],
+            format!("WF-54 expected fit selected_data_sets=[0], got {:?}", rs.analysis.selected_data_sets),
+        )?;
+        ensure(
+            matches!(&rs.analysis.kind, AnalysisKind::NonlinearRegression(nl) if nl.equation_id == "one_phase_decay"),
+            "WF-54 fit must persist one_phase_decay equation",
+        )?;
+    }
+
+    // Configure Dual-Y2 axis + 50% alpha overlay on Series 0 + Right-Y2 nudged BarWithReplicates on Series 1.
+    let gs_id = graph_for_source(run.document(), &sid)?;
+    run.select_sheet(&gs_id)?;
+    run.click("toolbar.axes")?;
+    run.click("edit.tab.axes.y2")?;
+    run.click("axes.enable_y2")?;
+    run.click("edit.tab.axes.titles")?;
+    run.replace_textbox("axes.title", "Metabolite Pool (uM)")?;
+    run.commit_modal_ok()?;
+
+    run.click("toolbar.format_graph")?;
+    run.click("format_graph.alpha.50")?;
+    run.click("format_graph.overlay.attach.0")?;
+    run.click("modal.apply")?;
+    run.click("edit.tab.format_graph.series")?;
+    run.click("format_graph.series_select.1")?;
+    run.click("format_graph.series_axis.right_y2")?;
+    set_scrub_field_wf(&mut run, "format_graph.series_offset_x", 24.0, "0.5")?;
+    run.click("edit.tab.format_graph.appearance")?;
+    run.click("format_graph.series_gdo.bar_replicates")?;
+    run.commit_modal_ok()?;
 
     {
-        let gs = h.app().document().graph_sheet(&gs_id).ok_or("WF-54 missing g")?;
+        let doc = run.document();
+        let gs = doc.graph_sheet(&gs_id).ok_or("WF-54 missing dual-axis graph")?;
         let a0 = match gs.spec.series[0].gdo {
             GraphicalDataObject::ScatterAndLine { marker: Some(ref m), .. } => m.fill_color.a,
             _ => 255,
         };
-        ensure((120..=135).contains(&a0), format!("WF-54 expected ~50% opacity, got {a0}"))?;
+        ensure((120..=135).contains(&a0), format!("WF-54 expected ~50% opacity on Series 0, got {a0}"))?;
+        ensure(
+            gs.spec.series[0].regression_overlay.as_ref().is_some_and(|ov| ov.result_sheet_id == fit_id),
+            "WF-54 Series 0 must carry One-Phase Decay regression overlay",
+        )?;
+        ensure(!gs.spec.series[0].bind_to_right_y2 && gs.spec.series[1].bind_to_right_y2, "WF-54 Series 1 must bind to Right Y2")?;
+        ensure(
+            matches!(gs.spec.series[1].gdo, GraphicalDataObject::BarWithReplicates { .. }),
+            format!("WF-54 Series 1 expected BarWithReplicates, got {:?}", gs.spec.series[1].gdo),
+        )?;
+        ensure((gs.spec.series[1].offset.x_data - 0.5).abs() < 1e-6, "WF-54 Series 1 offset_x must be +0.5")?;
+        let _svg = graph_svg_rendered(doc, &gs_id)?;
     }
 
-    let png = h.screenshot_png(ScreenshotRegionTarget::Canvas)?;
-    ensure(png.starts_with(b"\x89PNG\r\n\x1a\n") && png.len() > 256, "WF-54 PNG invalid")?;
-    assert_zero_shortcut_compliance(&mut h)?;
-    h.verify_14_locales_section_9_4("WF-54")?;
-    assert_input_to_paint_budget(&h, 50.0)
+    // Stage 4: Oracle verification for selective One-Phase Decay fit + dual-axis GraphSpec.
+    let mut ref_xy = XyTable::new(SubcolumnMode::MeanSdN, 2, fx.x_hours.len()).map_err(|e| e.to_string())?;
+    for (c, &title) in fx.series_titles.iter().enumerate() {
+        ref_xy.data_sets[c].title = String::from(title);
+    }
+    for (r, &x) in fx.x_hours.iter().enumerate() {
+        ref_xy.x_cells[r][0] = Cell::number(x);
+        for (c, m) in [(0, &fx.fluorescence[r]), (1, &fx.metabolite[r])] {
+            ref_xy.data_sets[c].cells[r][0] = Cell::number(m.mean);
+            ref_xy.data_sets[c].cells[r][1] = Cell::number(m.sd);
+            ref_xy.data_sets[c].cells[r][2] = Cell::number(m.n);
+        }
+    }
+    let ref_sheet = DataSheet::new("ref-xy-54", fx.title, TableArchetype::Xy(ref_xy)).map_err(|e| e.to_string())?;
+    run.verify_reference(
+        ReferenceSpec::for_result(fit_id.clone(), |sess| {
+            sess.execute(
+                "analysis.run",
+                json!({
+                    "sheet_id": "ref-decay-54",
+                    "source_sheet_id": "ref-xy-54",
+                    "kind": "nonlinear_regression",
+                    "equation_id": "one_phase_decay",
+                    "selected_data_sets": [0]
+                }),
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .with_reference_sheet(ref_sheet)?
+        .ref_result_id(SheetId::new("ref-decay-54"))
+        .scalar("Y0", Some(0), 1e-4, 1e-4)
+        .scalar("Plateau", Some(0), 1e-4, 1e-4)
+        .scalar("K", Some(0), 1e-5, 1e-5)
+        .scalar("R2", None, 1e-5, 1e-5),
+    )?;
+
+    // Stage 5: Live mean cell edit updates One-Phase Decay K and dual-axis SVG.
+    run.live_edit_all(
+        LiveEditTarget::sheet_grid_cell(sid, 1, 0, 0, "84.5"),
+        vec![LiveEditExpectation::scalar_changed(fit_id, "K", Some(0), 1e-4), LiveEditExpectation::graph_svg_changed(gs_id)],
+    )?;
+
+    run.finish()
 }
 
 #[test]
@@ -496,9 +837,7 @@ fn wf55_human_grouped_transpose_batch_graphs_and_gallery_apply_style() -> TestRe
                 }),
             )
             .map_err(|e| e.to_string())?;
-            sess.execute("graph.setSpec", json!({ "sheet_id": "ref-g-55_12", "frame_preset": "PlainBoxed" }))
-                .map(|_| ())
-                .map_err(|e| e.to_string())
+            sess.execute("graph.setSpec", json!({ "sheet_id": "ref-g-55_12", "frame_preset": "PlainBoxed" })).map(|_| ()).map_err(|e| e.to_string())
         })
         .with_reference_sheet(ref_sheet)?
         .ref_result_id(SheetId::new("ref-tr-55"))
@@ -665,10 +1004,7 @@ fn wf56_human_log_transform_antilog_axis_and_restricted_x_range_fit() -> TestRes
     // Stage 5b: edit log-linear X >= 10 cell (row 6: X=14.0) -> restricted linear slope CHANGES.
     run.live_edit_all(
         LiveEditTarget::sheet_grid_cell(sid, 6, 0, 0, "250.0"),
-        vec![
-            LiveEditExpectation::scalar_changed(lin_id, "Slope", Some(0), 1e-3),
-            LiveEditExpectation::graph_svg_changed(log_graph_id.clone()),
-        ],
+        vec![LiveEditExpectation::scalar_changed(lin_id, "Slope", Some(0), 1e-3), LiveEditExpectation::graph_svg_changed(log_graph_id.clone())],
     )?;
 
     run.select_sheet(&log_graph_id)?;
@@ -736,7 +1072,10 @@ fn wf57_human_layout_embedded_image_crop_rotate_and_non_exported_grid() -> TestR
     run.commit_modal_ok()?;
     match &run.document().layout_sheet(&lay_id).ok_or("WF-57 layout")?.spec.items[img_idx] {
         LayoutItem::EmbeddedImage { crop, border, rotation_deg, .. } => {
-            ensure(crop.left_pt > 0.0 && crop.right_pt > 0.0 && crop.top_pt > 0.0 && crop.bottom_pt > 0.0, "WF-57 expected non-zero 4-edge crop insets")?;
+            ensure(
+                crop.left_pt > 0.0 && crop.right_pt > 0.0 && crop.top_pt > 0.0 && crop.bottom_pt > 0.0,
+                "WF-57 expected non-zero 4-edge crop insets",
+            )?;
             ensure(border.is_some(), "WF-57 expected border enabled")?;
             ensure((*rotation_deg - 90.0).abs() < 1e-6, "WF-57 expected 90 deg rotation")?;
         }
@@ -792,8 +1131,8 @@ fn wf57_human_layout_embedded_image_crop_rotate_and_non_exported_grid() -> TestR
             LiveEditExpectation::graph_svg_changed(g_id),
             LiveEditExpectation::custom(move |_, _, doc| {
                 let lay = doc.layout_sheet(&lay_for_chk).ok_or("WF-57 missing layout post edit")?;
-                let lay_svg_after = render_svg(&compile_layout(lay, doc).map_err(|e| e.to_string())?, &SvgExportOptions::default())
-                    .map_err(|e| e.to_string())?;
+                let lay_svg_after =
+                    render_svg(&compile_layout(lay, doc).map_err(|e| e.to_string())?, &SvgExportOptions::default()).map_err(|e| e.to_string())?;
                 ensure(lay_svg_after != lay_svg_before, "WF-57 upstream cell edit must update layout SVG")
             }),
         ],
