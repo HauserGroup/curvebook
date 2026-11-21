@@ -11,27 +11,42 @@ mod human_wf_common;
 
 use std::sync::Arc;
 
+use curvebook_chart::{compile_graph, compile_layout};
 use curvebook_doc::{
-    AnalysisKind, Cell, DataSheet, ErrorBarMetric, FramePreset, GraphAnnotation, GraphicalDataObject, LayoutItem, ProjectDocument, ResultStatus,
-    SheetId, SubcolumnMode, SurvivalDisplayMetric, TableArchetype, XyTable,
+    AnalysisKind, Cell, ColumnDesignHint, ColumnTable, DataSheet, ErrorBarMetric, FramePreset, GraphAnnotation, GraphicalDataObject, GroupedTable,
+    LayoutItem, ProjectDocument, ResultCell, ResultStatus, ResultTabKind, SheetId, SubcolumnMode, SurvivalDisplayMetric, SurvivalTable,
+    TableArchetype, TickLabelFormat, XyTable,
 };
-use curvebook_engine::Session;
-use curvebook_render::{RasterImage, encode_png};
+use curvebook_pdf::{PdfExportOptions, render_pdf};
+use curvebook_render::{RasterImage, RenderTargetSpec, encode_png, render_scene};
 use curvebook_svg::{SvgExportOptions, render_svg};
 use curvebook_testkit::r13_datasets::{
     wf51_inhibitor_triplicate_xy, wf52_sparse_agonist_4pl_xy, wf53_three_arm_survival, wf54_dual_axis_mean_sd_n_xy, wf55_multisite_grouped_cohort,
     wf56_exponential_growth_xy, wf57_schematic_rgba, wf58_descriptive_column,
 };
-use curvebook_ui_egui::UiApp;
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
-use curvebook_ui_egui::egui_shell::UiBackend;
 use curvebook_ui_egui::inspect::ScreenshotRegionTarget;
 use curvebook_ui_egui::interaction::{KeyModifiers, PointerButton, ViewportMetrics};
 use curvebook_ui_egui::os_integration::StubPlatformClipboardAdapter;
 use egui::{Key, Modifiers};
 use serde_json::json;
 
+use human_wf_common::workflow_run::{LiveEditExpectation, LiveEditTarget, ReferenceSpec, WorkflowRun};
 use human_wf_common::{EguiWfHarness, TestRes, assert_input_to_paint_budget, assert_zero_shortcut_compliance, ensure};
+
+fn graph_for_source(doc: &ProjectDocument, source_id: &SheetId) -> Result<SheetId, String> {
+    doc.graph_sheets
+        .iter()
+        .rfind(|g| g.spec.primary_source_sheet_id == *source_id)
+        .map(|g| g.id.clone())
+        .ok_or_else(|| format!("missing GraphSheet for primary source `{}`", source_id.as_str()))
+}
+
+fn graph_svg_rendered(doc: &ProjectDocument, graph_id: &SheetId) -> Result<String, String> {
+    let gs = doc.graph_sheet(graph_id).ok_or_else(|| format!("missing graph `{}`", graph_id.as_str()))?;
+    let scene = compile_graph(gs, doc).map_err(|e| e.to_string())?;
+    render_svg(&scene, &SvgExportOptions::default()).map_err(|e| e.to_string())
+}
 
 fn find_first_fit_cmp_alt(h: &EguiWfHarness, exclude_id: &str) -> Option<String> {
     let preferred = "fit.cmp.alt.log_inhibitor_vs_response_3pl";
@@ -160,35 +175,45 @@ fn wf52_human_4pl_identifiability_recovery_extrapolation_and_qq_drillback() -> T
 
 #[test]
 fn wf53_human_kaplan_meier_display_modes_and_column_exclude_hr() -> TestRes {
-    let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
+    let mut run = WorkflowRun::start("WF-53");
     let fx = wf53_three_arm_survival();
-    let sid = h.create_table_via_welcome("welcome.arch.survival", "WF53 3-Arm KM", &[])?;
+    let sid = run.create_table_via_welcome("welcome.arch.survival", "WF53 3-Arm KM", &[])?;
 
+    for (c, &cohort) in fx.cohorts.iter().enumerate() {
+        run.enter_column_title(c, cohort)?;
+    }
     for (r, row) in fx.rows.iter().enumerate() {
         if let Some(t) = row.elapsed_days {
-            h.enter_x_cell(r, 0, &format!("{t}"))?;
+            run.enter_x_cell(r, 0, &format!("{t}"))?;
         }
         for (c, status) in row.status.iter().enumerate() {
             if let Some(v) = status {
-                h.enter_grid_cell(r, c, 0, &format!("{v}"))?;
+                run.enter_grid_cell(r, c, 0, &format!("{v}"))?;
             }
         }
     }
 
-    h.select_sheet(&sid)?;
-    let km_id = h.run_analyze_entry("Kaplan", "analyze.entry.stats.survival_km")?;
-    ensure(h.app().document().result_sheet(&km_id).is_some(), "WF-53 missing KM result")?;
-
-    let gs_id = h.app().document().graph_sheets.last().map(|g| g.id.clone()).ok_or("WF-53 missing KM graph")?;
-    h.select_sheet(&gs_id)?;
-    h.click("toolbar.graph_type")?;
-    h.click("graph_type.survival.metric.pct_event")?;
-    h.click("graph_type.survival.point_to_point")?;
-    h.click("graph_type.survival.err.sem")?;
-    h.click("modal.ok")?;
-
+    run.select_sheet(&sid)?;
+    let km_id = run.run_analyze_entry("Kaplan", "analyze.entry.stats.survival_km")?;
     {
-        let gs = h.app().document().graph_sheet(&gs_id).ok_or("WF-53 missing g-surv")?;
+        let rs = run.document().result_sheet(&km_id).ok_or("WF-53 missing KM result")?;
+        ensure(matches!(rs.status, ResultStatus::UpToDate), "WF-53 KM result must be UpToDate")?;
+        let nar = rs.tabs.iter().find(|t| t.kind == ResultTabKind::NumberAtRisk).ok_or("WF-53 missing Number at risk tab")?;
+        ensure(nar.column_headers.iter().any(|h| h.contains("CI")) && !nar.rows.is_empty(), "WF-53 Number at risk must report rows & CI")?;
+    }
+
+    let gs_id = graph_for_source(run.document(), &sid)?;
+    let svg_default = graph_svg_rendered(run.document(), &gs_id)?;
+
+    // Switch Survival -> % Cumulative Event + PointToPoint + SEM error bars.
+    run.select_sheet(&gs_id)?;
+    run.click("toolbar.graph_type")?;
+    run.click("graph_type.survival.metric.pct_event")?;
+    run.click("graph_type.survival.point_to_point")?;
+    run.click("graph_type.survival.err.sem")?;
+    run.commit_modal_ok()?;
+    let svg_event_ptp = {
+        let gs = run.document().graph_sheet(&gs_id).ok_or("WF-53 missing g-surv")?;
         ensure(
             matches!(
                 gs.spec.series[0].gdo,
@@ -202,22 +227,115 @@ fn wf53_human_kaplan_meier_display_modes_and_column_exclude_hr() -> TestRes {
             ),
             "WF-53 survival display options failed to persist",
         )?;
+        graph_svg_rendered(run.document(), &gs_id)?
+    };
+    ensure(svg_event_ptp != svg_default, "WF-53 switching to Cumulative Event + Point-to-Point + SEM must update SVG")?;
+
+    // Switch back -> % Survival + Staircase + Greenwood 95% CI and confirm bidirectional toggle in GraphSpec & SVG.
+    run.click("toolbar.graph_type")?;
+    run.click("graph_type.survival.metric.pct_survival")?;
+    run.click("graph_type.survival.staircase")?;
+    run.click("graph_type.survival.err.ci95")?;
+    run.commit_modal_ok()?;
+    let svg_surv_stair = {
+        let gs = run.document().graph_sheet(&gs_id).ok_or("WF-53 missing g-surv roundtrip")?;
+        ensure(
+            matches!(
+                gs.spec.series[0].gdo,
+                GraphicalDataObject::KaplanMeierStep {
+                    display_metric: SurvivalDisplayMetric::PercentSurvival,
+                    staircase: true,
+                    error_display: Some(ErrorBarMetric::ConfidenceInterval95),
+                    show_greenwood_ci: true,
+                    ..
+                }
+            ),
+            "WF-53 reverse toggle back to PercentSurvival + Staircase failed",
+        )?;
+        graph_svg_rendered(run.document(), &gs_id)?
+    };
+    ensure(svg_surv_stair != svg_event_ptp, "WF-53 reverse toggle must update survival SVG")?;
+
+    // Stage 4: verify 3-arm KM numerical parity & graph parity against headless Session oracle.
+    let mut ref_surv = SurvivalTable::new(fx.cohorts.len(), fx.rows.len()).map_err(|e| e.to_string())?;
+    for (c, &cohort) in fx.cohorts.iter().enumerate() {
+        ref_surv.cohorts[c].title = cohort.to_owned();
     }
+    for (r, row) in fx.rows.iter().enumerate() {
+        if let Some(t) = row.elapsed_days {
+            ref_surv.times[r] = Cell::number(t);
+        }
+        for (c, status) in row.status.iter().enumerate() {
+            if let Some(v) = status {
+                ref_surv.cohorts[c].cells[r][0] = Cell::number(f64::from(*v));
+            }
+        }
+    }
+    let ref_sheet = DataSheet::new("ref-surv-53", fx.title, TableArchetype::Survival(ref_surv)).map_err(|e| e.to_string())?;
+    run.verify_reference(
+        ReferenceSpec::for_result(km_id.clone(), |sess| {
+            sess.execute(
+                "analysis.run",
+                json!({
+                    "sheet_id": "ref-km-53",
+                    "source_sheet_id": "ref-surv-53",
+                    "kind": "survival"
+                }),
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .with_reference_sheet(ref_sheet.clone())?
+        .ref_result_id(SheetId::new("ref-km-53"))
+        .scalar("Log-rank chi-square", None, 1e-6, 1e-6)
+        .scalar("Log-rank P value", None, 1e-6, 1e-6)
+        .tab_cell(1, 0, 2, 1e-6, 1e-6),
+    )?;
 
-    // Exclude entire 100%-censored Vehicle arm (col 0 rows 0..=8) via Shift+Click + Cmd+E -> transitions to 2-arm Hazard Ratio.
-    let km_before = format!("{:?}", h.app().document().result_sheet(&km_id).ok_or("WF-53 km_before")?.tabs);
-    h.select_sheet(&sid)?;
-    h.click("grid.cell.0.0.0")?;
-    let p_end = h.widget_center("grid.cell.8.0.0")?;
-    h.driver.click_at_button(p_end, PointerButton::Primary, KeyModifiers { shift: true, ..Default::default() })?;
-    h.driver.press_key("E", KeyModifiers { meta: true, ..Default::default() })?;
-    let km_after_rs = h.app().document().result_sheet(&km_id).ok_or("WF-53 km_after")?;
-    ensure(format!("{:?}", km_after_rs.tabs) != km_before, "WF-53 Cmd+E exclusion must recompute KM statistics")?;
-    ensure(km_after_rs.tabs.iter().any(|t| t.id == "hazard-ratio"), "WF-53 excluding 100%-censored arm must yield 2-arm Hazard Ratio tab")?;
+    // Stage 5: Exclude entire 100%-censored Vehicle arm (col 0 rows 0..=8) via Shift+Click + Cmd+E -> 2-arm Hazard Ratio + 95% CI.
+    let sid_for_edit = sid.clone();
+    let km_for_check = km_id.clone();
+    let last_r = fx.rows.len() - 1;
+    run.live_edit(
+        LiveEditTarget::gui(move |r| {
+            r.select_sheet(&sid_for_edit)?;
+            r.click("grid.cell.0.0.0")?;
+            let p_end = r.widget_center(&format!("grid.cell.{last_r}.0.0"))?;
+            r.click_at_button(p_end, PointerButton::Primary, KeyModifiers { shift: true, ..Default::default() })?;
+            r.press_key("E", KeyModifiers { meta: true, ..Default::default() })
+        }),
+        LiveEditExpectation::custom(move |before, after, doc| {
+            let b_chi = before.scalar(&km_for_check, "Log-rank chi-square", None).ok_or("WF-53 before missing chi-square")?;
+            let a_chi = after.scalar(&km_for_check, "Log-rank chi-square", None).ok_or("WF-53 after missing chi-square")?;
+            ensure((b_chi - a_chi).abs() > 1e-3, format!("WF-53 3-arm vs 2-arm log-rank chi-square must change ({b_chi} -> {a_chi})"))?;
+            let hr = after.scalar(&km_for_check, "Hazard ratio (log-rank)", None).ok_or("WF-53 missing Hazard ratio (log-rank) scalar")?;
+            ensure(hr.is_finite() && hr > 0.0, format!("WF-53 expected finite positive HR, got {hr}"))?;
+            let rs = doc.result_sheet(&km_for_check).ok_or("WF-53 missing ResultSheet after exclusion")?;
+            let hr_tab = rs.tabs.iter().find(|t| t.id == "hazard-ratio").ok_or("WF-53 missing hazard-ratio tab")?;
+            let has_ci = hr_tab.rows.iter().any(|row| row.iter().any(|c| matches!(c, curvebook_doc::ResultCell::ConfidenceInterval { .. })));
+            ensure(has_ci, "WF-53 hazard-ratio tab must include finite 95% CI")
+        }),
+    )?;
 
-    assert_zero_shortcut_compliance(&mut h)?;
-    h.verify_14_locales_section_9_4("WF-53")?;
-    assert_input_to_paint_budget(&h, 50.0)
+    // Also verify post-exclusion 2-arm Hazard Ratio & 95% CI numerically against headless Session oracle.
+    let exclude_cells: Vec<_> = (0..fx.rows.len()).map(|row| json!({ "row": row, "col": 0, "subcol": 0 })).collect();
+    run.verify_reference(
+        ReferenceSpec::for_result(km_id, move |sess| {
+            sess.execute("table.excludeCells", json!({ "sheet_id": "ref-surv-53", "cells": exclude_cells, "excluded": true }))
+                .map_err(|e| e.to_string())?;
+            sess.execute("analysis.run", json!({ "sheet_id": "ref-km-2arm", "source_sheet_id": "ref-surv-53", "kind": "survival" }))
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+        .with_reference_sheet(ref_sheet)?
+        .ref_result_id(SheetId::new("ref-km-2arm"))
+        .scalar("Log-rank chi-square", None, 1e-6, 1e-6)
+        .scalar("Hazard ratio (log-rank)", None, 1e-6, 1e-6)
+        .scalar("Hazard ratio (Mantel-Haenszel)", None, 1e-6, 1e-6),
+    )?;
+
+    run.select_sheet(&gs_id)?;
+    run.finish()
 }
 
 #[test]
@@ -262,258 +380,540 @@ fn wf54_human_dual_axis_nudged_bars_alpha_lines_and_selective_decay_fit() -> Tes
 
 #[test]
 fn wf55_human_grouped_transpose_batch_graphs_and_gallery_apply_style() -> TestRes {
+    let mut run = WorkflowRun::start("WF-55");
+    run.set_viewport(ViewportMetrics::new(1600.0, 900.0, 1.0));
     let fx = wf55_multisite_grouped_cohort();
-    let mut app = UiApp::new().with_ui_backend(UiBackend::Egui);
-    app.execute_command(
-        "sheet.createData",
-        json!({ "sheet_id": "grp-wf55", "title": fx.title, "kind": "grouped", "subcolumn_mode": SubcolumnMode::RawReplicates(1), "rows": fx.row_titles.len(), "cols": fx.col_titles.len() }),
-    )
-    .map_err(|e| e.to_string())?;
-    app.execute_command("table.setRowTitles", json!({ "sheet_id": "grp-wf55", "titles": fx.row_titles })).map_err(|e| e.to_string())?;
-    app.execute_command("table.setGroupTitles", json!({ "sheet_id": "grp-wf55", "titles": fx.col_titles })).map_err(|e| e.to_string())?;
+    let sid = run.create_table_via_welcome("welcome.arch.grouped", fx.title, &["welcome.subcol.single", "welcome.stepper.cols.inc"])?;
+
+    for (r, &rt) in fx.row_titles.iter().enumerate() {
+        run.enter_row_title(r, rt)?;
+    }
+    for (c, &ct) in fx.col_titles.iter().enumerate() {
+        run.enter_column_title(c, ct)?;
+    }
     for (r, row) in fx.rows.iter().enumerate() {
         for (c, &val) in row.iter().enumerate() {
-            app.execute_command("table.setCell", json!({ "sheet_id": "grp-wf55", "row": r, "col": c, "subcol": 0, "value": val }))
-                .map_err(|e| e.to_string())?;
+            run.enter_grid_cell(r, c, 0, &format!("{val}"))?;
         }
     }
-    app.execute_command("sheet.select", json!({ "sheet_id": "grp-wf55" })).map_err(|e| e.to_string())?;
-    app.sync_views();
 
-    let mut h = EguiWfHarness::from_app(app, ViewportMetrics::new(1280.0, 800.0, 1.0));
-    let tr_id = h.run_analyze_entry("Transpose", "analyze.entry.transform.transpose")?;
-    h.select_sheet(&tr_id)?;
+    run.select_sheet(&sid)?;
+    let tr_id = run.run_analyze_entry("Transpose", "analyze.entry.transform.transpose")?;
+    run.select_sheet(&tr_id)?;
+    run.open_cmd_t()?;
+    run.click("edit.transform.transpose.swap_titles")?;
+    run.click("edit.transform.transpose.swap_titles")?;
+    run.commit_modal_ok()?;
 
-    let before_graphs = h.app().document().graph_sheets.len();
-    h.click("toolbar.command_palette")?;
-    h.driver.type_text("ui.graph.create.open")?;
-    h.driver.press_key("Enter", KeyModifiers::default())?;
-    ensure(matches!(h.app().canvas_dialogs.active_dialog, ActiveDialog::CreateGraph { .. }), "WF-55 CreateGraph modal must open")?;
-    if let Some(src_node) =
-        h.driver.frame_meta().entries.iter().find(|e| e.widget_id.starts_with("create_graph.source.") && e.label.contains("Transpose"))
-    {
-        let src_wid = src_node.widget_id.clone();
-        h.click(&src_wid)?;
-    }
-    h.click("create_graph.one_per_data_set")?;
-    h.replace_textbox("create_graph.y_axis_title", "Quarter Index")?;
-    h.click("modal.ok")?;
+    let before_graphs = run.document().graph_sheets.len();
+    run.open_menu_and_click("menu.insert", &[], "menu.ui.graph.create.open")?;
+    ensure(matches!(run.active_dialog(), ActiveDialog::CreateGraph { .. }), "WF-55 CreateGraph modal must open")?;
+    let src_wid = run
+        .frame_meta()
+        .entries
+        .iter()
+        .find(|e| e.widget_id.starts_with("create_graph.source.") && e.label.contains("Transpose"))
+        .map(|e| e.widget_id.clone())
+        .ok_or("WF-55 missing Transpose source option in CreateGraph")?;
+    run.click(&src_wid)?;
+    run.click("create_graph.one_per_data_set")?;
+    run.replace_textbox("create_graph.y_axis_title", "Quarter Index")?;
+    run.commit_modal_ok()?;
 
+    let batch_graphs: Vec<SheetId> =
+        run.document().graph_sheets.iter().filter(|g| g.spec.primary_source_sheet_id == tr_id).map(|g| g.id.clone()).collect();
     ensure(
-        h.app().document().graph_sheets.len() == before_graphs + 12,
-        format!("WF-55 expected 12 batch graphs, total graphs={}", h.app().document().graph_sheets.len()),
+        batch_graphs.len() == fx.row_titles.len(),
+        format!("WF-55 expected {} batch graphs for transposed sites, got {}", fx.row_titles.len(), batch_graphs.len()),
     )?;
-    let donor_id = h.app().document().graph_sheets[before_graphs].id.clone();
-    let last_id = h.app().document().graph_sheets.last().ok_or("WF-55 missing last graph")?.id.clone();
+    ensure(run.document().graph_sheets.len() >= before_graphs + 12, "WF-55 batch graph count mismatch")?;
+    let donor_id = batch_graphs[0].clone();
+    let last_id = batch_graphs[batch_graphs.len() - 1].clone();
 
-    // Format donor frame preset via inspector then batch ApplyStyleFrom through Portfolio Gallery Shift+Click.
-    h.select_sheet(&donor_id)?;
-    h.click("inspector.graph.tab.axes")?;
-    h.click("inspector.graph.frame.PlainBoxed")?;
+    // Format donor frame preset via inspector then batch ApplyStyleFrom through Portfolio Gallery real Shift+Click range (no select_all).
+    run.select_sheet(&donor_id)?;
+    run.click("inspector.graph.tab.axes")?;
+    run.click("inspector.graph.frame.PlainBoxed")?;
 
-    h.click("status.section.gallery")?;
-    let p_first = h.widget_center(&format!("gallery.card.{}", donor_id.as_str()))?;
-    h.driver.click_at_button(p_first, PointerButton::Primary, KeyModifiers { ctrl: true, ..Default::default() })?;
-    let p_last = h.widget_center(&format!("gallery.card.{}", last_id.as_str()))?;
-    h.driver.click_at_button(p_last, PointerButton::Primary, KeyModifiers { shift: true, ..Default::default() })?;
-    h.click("gallery.apply_style_from")?;
-    h.click("apply_style.donor.0")?;
-    h.click("apply_style.target.select_all")?;
-    h.click("modal.ok")?;
+    let donor_title = run.document().graph_sheet(&donor_id).ok_or("WF-55 missing donor graph")?.title.clone();
+    run.click("status.section.gallery")?;
+    let p_first = run.widget_center(&format!("gallery.card.{}", donor_id.as_str()))?;
+    run.click_at_button(p_first, PointerButton::Primary, KeyModifiers { ctrl: true, ..Default::default() })?;
+    let p_last = run.widget_center(&format!("gallery.card.{}", last_id.as_str()))?;
+    run.click_at_button(p_last, PointerButton::Primary, KeyModifiers { shift: true, ..Default::default() })?;
+    run.click("gallery.apply_style_from")?;
+    let donor_wid = run
+        .frame_meta()
+        .entries
+        .iter()
+        .find(|e| e.widget_id.starts_with("apply_style.donor.") && e.label == donor_title)
+        .map(|e| e.widget_id.clone())
+        .ok_or("WF-55 missing donor graph in ApplyStyleFrom")?;
+    run.click(&donor_wid)?;
+    run.commit_modal_ok()?;
 
-    ensure(
-        h.app().document().graph_sheet(&last_id).ok_or("WF-55 last graph")?.spec.frame_preset == FramePreset::PlainBoxed,
-        "WF-55 batch ApplyStyleFrom must propagate FramePreset::PlainBoxed",
-    )?;
-
-    if h.driver.frame_meta().find_by_widget_id("gallery.close").is_some() {
-        h.click("gallery.close")?;
-    } else if h.app().nav.gallery.open {
-        h.click("status.section.gallery")?;
+    for gid in &batch_graphs {
+        let gs = run.document().graph_sheet(gid).ok_or_else(|| format!("WF-55 missing batch graph `{}`", gid.as_str()))?;
+        ensure(gs.spec.frame_preset == FramePreset::PlainBoxed, "WF-55 batch ApplyStyleFrom must propagate FramePreset::PlainBoxed")?;
+        ensure(gs.spec.y_axis.title == "Quarter Index", "WF-55 batch graphs must keep shared Y title")?;
     }
-    assert_zero_shortcut_compliance(&mut h)?;
-    h.verify_14_locales_section_9_4("WF-55")?;
-    assert_input_to_paint_budget(&h, 50.0)
+    ensure(!run.app().nav.gallery.open, "WF-55 Apply Style From must close Portfolio Gallery cleanly")?;
+
+    // Stage 4: verify transposed result cells and batch graph style against headless Session oracle.
+    let mut ref_grp = GroupedTable::new(SubcolumnMode::RawReplicates(1), fx.col_titles.len(), fx.row_titles.len()).map_err(|e| e.to_string())?;
+    for (r, &rt) in fx.row_titles.iter().enumerate() {
+        ref_grp.row_titles[r] = rt.to_owned();
+    }
+    for (c, &ct) in fx.col_titles.iter().enumerate() {
+        ref_grp.data_sets[c].title = ct.to_owned();
+    }
+    for (r, row) in fx.rows.iter().enumerate() {
+        for (c, &val) in row.iter().enumerate() {
+            ref_grp.data_sets[c].cells[r][0] = Cell::number(val);
+        }
+    }
+    let ref_sheet = DataSheet::new("ref-grp-55", fx.title, TableArchetype::Grouped(ref_grp)).map_err(|e| e.to_string())?;
+    run.verify_reference(
+        ReferenceSpec::for_result(tr_id.clone(), |sess| {
+            sess.execute(
+                "transform.run",
+                json!({
+                    "sheet_id": "ref-tr-55",
+                    "source_sheet_id": "ref-grp-55",
+                    "kind": "transpose",
+                    "swap_row_and_column_titles": true
+                }),
+            )
+            .map_err(|e| e.to_string())?;
+            sess.execute(
+                "graph.create",
+                json!({
+                    "sheet_id": "ref-g-55",
+                    "data_sheet_id": "ref-tr-55",
+                    "kind": "grouped",
+                    "one_per_data_set": true,
+                    "y_axis_title": "Quarter Index"
+                }),
+            )
+            .map_err(|e| e.to_string())?;
+            sess.execute("graph.setSpec", json!({ "sheet_id": "ref-g-55_12", "frame_preset": "PlainBoxed" }))
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+        .with_reference_sheet(ref_sheet)?
+        .ref_result_id(SheetId::new("ref-tr-55"))
+        .tab_cell(0, 0, 0, 1e-9, 1e-9)
+        .tab_cell(0, 1, 0, 1e-9, 1e-9)
+        .with_graph(last_id.clone())
+        .ref_graph_id(SheetId::new("ref-g-55_12"))
+        .check_graph(|gui_gs, ref_gs| {
+            ensure(gui_gs.spec.frame_preset == ref_gs.spec.frame_preset, "WF-55 FramePreset mismatch vs ref")?;
+            ensure(gui_gs.spec.y_axis.title == ref_gs.spec.y_axis.title, "WF-55 Y-axis title mismatch vs ref")
+        }),
+    )?;
+
+    // Stage 5: two-hop reactive live_edit from original grouped cell -> Transpose analyzable_data -> donor graph SVG.
+    let edited_val = fx.rows[0][0] + 150.0;
+    let tr_for_chk = tr_id.clone();
+    run.live_edit_all(
+        LiveEditTarget::sheet_grid_cell(sid, 0, 0, 0, format!("{edited_val}")),
+        vec![
+            LiveEditExpectation::custom(move |_, _, doc| {
+                let rs = doc.result_sheet(&tr_for_chk).ok_or("WF-55 missing Transpose ResultSheet")?;
+                let ds = rs.analyzable_data.as_ref().ok_or("WF-55 missing Transpose analyzable_data")?;
+                let v = match &ds.archetype {
+                    TableArchetype::Grouped(g) => g.data_sets[0].cells[0][0].active_number(),
+                    _ => None,
+                }
+                .ok_or("WF-55 transposed cell (0,0) not numeric")?;
+                ensure((v - edited_val).abs() < 1e-6, format!("WF-55 expected transposed (0,0)={edited_val}, got {v}"))
+            }),
+            LiveEditExpectation::graph_svg_changed(donor_id.clone()),
+        ],
+    )?;
+
+    run.select_sheet(&donor_id)?;
+    run.finish()
 }
 
 #[test]
 fn wf56_human_log_transform_antilog_axis_and_restricted_x_range_fit() -> TestRes {
-    let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
+    let mut run = WorkflowRun::start("WF-56");
     let fx = wf56_exponential_growth_xy();
-    let sid = h.create_table_via_welcome("welcome.arch.xy", "WF56 Growth Log", &[])?;
+    let sid = run.create_table_via_welcome("welcome.arch.xy", "WF56 Growth Log", &["welcome.stepper.cols.dec", "welcome.stepper.cols.dec"])?;
 
     for (r, &(x, y)) in fx.rows.iter().enumerate() {
-        h.enter_x_cell(r, 0, &format!("{x}"))?;
-        h.enter_grid_cell(r, 0, 0, &format!("{y}"))?;
+        run.enter_x_cell(r, 0, &format!("{x}"))?;
+        run.enter_grid_cell(r, 0, 0, &format!("{y}"))?;
     }
 
-    h.select_sheet(&sid)?;
-    let log_id = h.run_analyze_entry("Transform", "analyze.entry.transform.math")?;
-    h.select_sheet(&log_id)?;
-    h.open_cmd_t()?;
-    h.click("edit.transform.y_transform.log10")?;
-    h.click("modal.ok")?;
+    run.select_sheet(&sid)?;
+    let log_id = run.run_analyze_entry("Transform", "analyze.entry.transform.math")?;
+    run.select_sheet(&log_id)?;
+    run.open_cmd_t()?;
+    run.click("edit.transform.y_transform.log10")?;
+    run.commit_modal_ok()?;
 
-    let lin_id = h.run_analyze_entry("Linear", "analyze.entry.fit.linear")?;
-    h.select_sheet(&lin_id)?;
-    h.open_cmd_t()?;
-    h.click("edit.tab.range")?;
-    h.replace_textbox("fit.lr.range.input.x_min", "10")?;
-    h.replace_textbox("fit.lr.range.input.x_max", "20")?;
-    h.click("modal.ok")?;
+    // Create graph of the transformed result, switch Y ticks to Antilog + 9 logarithmic minor ticks (GWF-18).
+    run.open_menu_and_click("menu.insert", &[], "menu.ui.graph.create.open")?;
+    let log_src_wid = run
+        .frame_meta()
+        .entries
+        .iter()
+        .find(|e| e.widget_id.starts_with("create_graph.source.") && e.label.contains("Transform"))
+        .map(|e| e.widget_id.clone())
+        .ok_or("WF-56 missing Transform source in CreateGraph")?;
+    run.click(&log_src_wid)?;
+    run.commit_modal_ok()?;
+    let log_graph_id = graph_for_source(run.document(), &log_id)?;
+    run.select_sheet(&log_graph_id)?;
+    run.click("toolbar.axes")?;
+    run.click("edit.tab.axes.y")?;
+    run.click("axes.tick_format.antilog")?;
+    run.replace_textbox("axes.seg.0.minor_ticks_per_interval", "9")?;
+    run.commit_modal_ok()?;
+    {
+        let gs = run.document().graph_sheet(&log_graph_id).ok_or("WF-56 missing log graph")?;
+        ensure(gs.spec.y_axis.tick_format == TickLabelFormat::Antilog, "WF-56 expected Antilog Y tick format")?;
+        ensure(gs.spec.y_axis.segments[0].minor_ticks_per_interval == 9, "WF-56 expected 9 Y minor ticks per interval")?;
+    }
+
+    run.select_sheet(&log_id)?;
+    let lin_id = run.run_analyze_entry("Linear", "analyze.entry.fit.linear")?;
+    run.select_sheet(&lin_id)?;
+    run.open_cmd_t()?;
+    run.click("edit.tab.range")?;
+    run.replace_textbox("fit.lr.range.input.x_min", "10")?;
+    run.replace_textbox("fit.lr.range.input.x_max", "20")?;
+    run.commit_modal_ok()?;
 
     {
-        let rs = h.app().document().result_sheet(&lin_id).ok_or("WF-56 missing restricted fit")?;
+        let rs = run.document().result_sheet(&lin_id).ok_or("WF-56 missing restricted fit")?;
         ensure(
             matches!(&rs.analysis.kind, AnalysisKind::LinearRegression(spec) if spec.x_range_filter == Some((Some(10.0), Some(20.0)))),
             "WF-56 expected restricted [10, 20] linear range",
         )?;
+        let curve = rs.fitted_curves.first().ok_or("WF-56 missing fitted polyline")?;
+        let (xmin, xmax) = curve.points.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), pt| (a.min(pt.x), b.max(pt.x)));
+        ensure(xmin >= 10.0 - 1e-9 && xmax <= 20.0 + 1e-9, format!("WF-56 fitted polyline escaped [10, 20]: ({xmin}, {xmax})"))?;
     }
 
-    assert_zero_shortcut_compliance(&mut h)?;
-    h.verify_14_locales_section_9_4("WF-56")?;
-    assert_input_to_paint_budget(&h, 50.0)
+    // Stage 4: verify restricted [10, 20] slope/intercept/R2 + graph Y Antilog ticks vs headless Session oracle.
+    let mut ref_xy = XyTable::new(SubcolumnMode::Single, 1, fx.rows.len()).map_err(|e| e.to_string())?;
+    for (r, &(x, y)) in fx.rows.iter().enumerate() {
+        ref_xy.x_cells[r][0] = Cell::number(x);
+        ref_xy.data_sets[0].cells[r][0] = Cell::number(y);
+    }
+    let ref_sheet = DataSheet::new("ref-xy-56", fx.title, TableArchetype::Xy(ref_xy)).map_err(|e| e.to_string())?;
+    run.verify_reference(
+        ReferenceSpec::for_result(lin_id.clone(), |sess| {
+            sess.execute(
+                "transform.run",
+                json!({ "sheet_id": "ref-log-56", "source_sheet_id": "ref-xy-56", "kind": "math", "y_transform": "log10" }),
+            )
+            .map_err(|e| e.to_string())?;
+            sess.execute(
+                "analysis.run",
+                json!({ "sheet_id": "ref-lin-56", "source_sheet_id": "ref-log-56", "kind": "linear_regression", "x_range_filter": [10.0, 20.0] }),
+            )
+            .map_err(|e| e.to_string())?;
+            sess.execute("graph.create", json!({ "sheet_id": "ref-g-56", "data_sheet_id": "ref-log-56", "kind": "xy" }))
+                .map_err(|e| e.to_string())?;
+            sess.execute(
+                "graph.setAxes",
+                json!({ "sheet_id": "ref-g-56", "y_axis": { "tick_format": "antilog", "segments": [{ "minor_ticks_per_interval": 9 }] } }),
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .with_reference_sheet(ref_sheet)?
+        .ref_result_id(SheetId::new("ref-lin-56"))
+        .scalar("Slope", Some(0), 1e-6, 1e-6)
+        .scalar("YIntercept", Some(0), 1e-6, 1e-6)
+        .scalar("R2", Some(0), 1e-6, 1e-6)
+        .with_graph(log_graph_id.clone())
+        .ref_graph_id(SheetId::new("ref-g-56"))
+        .check_graph(|gui_gs, ref_gs| {
+            ensure(gui_gs.spec.y_axis.tick_format == ref_gs.spec.y_axis.tick_format, "WF-56 Y tick_format mismatch")?;
+            ensure(
+                gui_gs.spec.y_axis.segments[0].minor_ticks_per_interval == ref_gs.spec.y_axis.segments[0].minor_ticks_per_interval,
+                "WF-56 minor_ticks mismatch",
+            )
+        }),
+    )?;
+
+    // Stage 5a: edit lag-phase X < 10 cell (row 1: X=4.0) -> transform analyzable_data updates, restricted linear slope remains INVARIANT.
+    let log_for_chk = log_id.clone();
+    run.live_edit_all(
+        LiveEditTarget::sheet_grid_cell(sid.clone(), 1, 0, 0, "45.0"),
+        vec![
+            LiveEditExpectation::custom(move |_, _, doc| {
+                let rs = doc.result_sheet(&log_for_chk).ok_or("WF-56 missing Math ResultSheet")?;
+                let ds = rs.analyzable_data.as_ref().ok_or("WF-56 missing Math analyzable_data")?;
+                let v = match &ds.archetype {
+                    TableArchetype::Xy(t) => t.data_sets[0].cells[1][0].active_number(),
+                    _ => None,
+                }
+                .ok_or("WF-56 transformed cell (1,0) not numeric")?;
+                let expected = 45.0_f64.log10();
+                ensure((v - expected).abs() < 1e-6, format!("WF-56 expected log10(45.0)={expected}, got {v}"))
+            }),
+            LiveEditExpectation::scalar_invariant(lin_id.clone(), "Slope", Some(0), 1e-12, 1e-12),
+        ],
+    )?;
+
+    // Stage 5b: edit log-linear X >= 10 cell (row 6: X=14.0) -> restricted linear slope CHANGES.
+    run.live_edit_all(
+        LiveEditTarget::sheet_grid_cell(sid, 6, 0, 0, "250.0"),
+        vec![
+            LiveEditExpectation::scalar_changed(lin_id, "Slope", Some(0), 1e-3),
+            LiveEditExpectation::graph_svg_changed(log_graph_id.clone()),
+        ],
+    )?;
+
+    run.select_sheet(&log_graph_id)?;
+    run.finish()
 }
 
 #[test]
 fn wf57_human_layout_embedded_image_crop_rotate_and_non_exported_grid() -> TestRes {
     let fx = wf57_schematic_rgba();
-    let mut doc = ProjectDocument::new("WF57 Layout Image").map_err(|e| e.to_string())?;
-    let mut xy = XyTable::new(SubcolumnMode::Single, 1, fx.assay_xy.len()).map_err(|e| e.to_string())?;
-    for (r, &(x, y)) in fx.assay_xy.iter().enumerate() {
-        xy.x_cells[r][0] = Cell::number(x);
-        xy.data_sets[0].cells[r][0] = Cell::number(y);
-    }
-    doc.add_data_sheet(DataSheet::new("xy-wf57", "Assay WF57", TableArchetype::Xy(xy)).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    let mut app = UiApp::from_session(Session::from_document(doc));
     let clip = Arc::new(StubPlatformClipboardAdapter::new());
     let png = encode_png(&RasterImage { width_px: fx.width_px, height_px: fx.height_px, dpi: 96, rgba: fx.rgba }).map_err(|e| e.to_string())?;
     clip.seed_image_bytes(png);
-    app.set_clipboard_adapter(clip);
-    app.execute_command("graph.create", json!({ "sheet_id": "g-wf57", "data_sheet_id": "xy-wf57", "kind": "xy" })).map_err(|e| e.to_string())?;
-    app.execute_command("layout.create", json!({ "sheet_id": "lay-wf57", "title": "WF57 Schematic Layout" })).map_err(|e| e.to_string())?;
-    app.execute_command(
-        "layout.addPanel",
-        json!({ "sheet_id": "lay-wf57", "panel_id": "p-g", "kind": "graph", "graph_sheet_id": "g-wf57", "bounds_pt": [20.0, 20.0, 220.0, 150.0] }),
-    )
-    .map_err(|e| e.to_string())?;
-    app.execute_command("sheet.select", json!({ "sheet_id": "lay-wf57" })).map_err(|e| e.to_string())?;
-    app.nav.inspector_open = true;
-    app.egui_views.trailing_collapsed_rail = false;
-    app.sync_views();
 
-    let mut h = EguiWfHarness::from_app(app, ViewportMetrics::new(1280.0, 800.0, 1.0));
-    h.driver.press_key("V", KeyModifiers { meta: true, ..Default::default() })?;
+    let mut run = WorkflowRun::start_with_clipboard("WF-57", clip);
+    let sid = run.create_table_via_welcome("welcome.arch.xy", "Assay WF57", &["welcome.stepper.cols.dec", "welcome.stepper.cols.dec"])?;
+    for (r, &(x, y)) in fx.assay_xy.iter().enumerate() {
+        run.enter_x_cell(r, 0, &format!("{x}"))?;
+        run.enter_grid_cell(r, 0, 0, &format!("{y}"))?;
+    }
+    let g_id = graph_for_source(run.document(), &sid)?;
 
-    let img_idx = h
-        .app()
+    // Create LayoutSheet via GUI (Insert > New Layout…) and add the graph panel via Trailing Studio.
+    run.open_menu_and_click("menu.insert", &[], "menu.layout.create")?;
+    let lay_id = run.document().layout_sheets.last().ok_or("WF-57 missing created LayoutSheet")?.id.clone();
+    run.select_sheet(&lay_id)?;
+    run.click("studio.layout.add_panel.0")?;
+
+    // Paste schematic EmbeddedImage from clipboard via Cmd+V.
+    run.press_key("V", KeyModifiers { meta: true, ..Default::default() })?;
+    let img_idx = run
         .document()
-        .layout_sheet(&SheetId::new("lay-wf57"))
+        .layout_sheet(&lay_id)
         .and_then(|ls| ls.spec.items.iter().position(|it| matches!(it, LayoutItem::EmbeddedImage { .. })))
         .ok_or("WF-57 expected Cmd+V EmbeddedImage on LayoutSheet")?;
     let panel_wid = format!("canvas.layout_panel.{img_idx}");
-    h.click(&panel_wid)?;
+    run.click(&panel_wid)?;
 
-    let se_center = h.widget_center("canvas.image.handle.se")?;
-    h.driver.drag_with_modifiers(se_center, se_center + egui::vec2(50.0, -15.0), KeyModifiers { shift: true, ..Default::default() })?;
-    let rot_center = h.widget_center("canvas.image.handle.rotate")?;
-    h.driver.drag(rot_center, rot_center + egui::vec2(30.0, 15.0))?;
+    // Corner-resize with Shift (free aspect) + drag rotation handle.
+    let (w_before, h_before, rot_before) = match &run.document().layout_sheet(&lay_id).ok_or("WF-57 layout")?.spec.items[img_idx] {
+        &LayoutItem::EmbeddedImage { bounds_pt, rotation_deg, .. } => (bounds_pt.width, bounds_pt.height, rotation_deg),
+        _ => return Err(String::from("WF-57 expected EmbeddedImage item")),
+    };
+    let se_center = run.widget_center("canvas.image.handle.se")?;
+    run.drag_with_modifiers(se_center, se_center + egui::vec2(54.0, -16.0), KeyModifiers { shift: true, ..Default::default() })?;
+    let rot_center = run.widget_center("canvas.image.handle.rotate")?;
+    run.drag(rot_center, rot_center + egui::vec2(30.0, 15.0))?;
+    let (w_after, h_after, rot_after) = match &run.document().layout_sheet(&lay_id).ok_or("WF-57 layout")?.spec.items[img_idx] {
+        &LayoutItem::EmbeddedImage { bounds_pt, rotation_deg, .. } => (bounds_pt.width, bounds_pt.height, rotation_deg),
+        _ => return Err(String::from("WF-57 expected EmbeddedImage item post handle drag")),
+    };
+    ensure((w_after - w_before).abs() > 1.0 && (h_after - h_before).abs() > 1.0, "WF-57 Shift+corner resize must change image bounds")?;
+    ensure((rot_after - rot_before).abs() > 0.5, "WF-57 rotate handle drag must change rotation")?;
 
-    // Open FormatImage via double-click or context menu and apply 4-edge crop + border.
-    let img_pos = h.widget_center(&panel_wid)?;
-    h.driver.click_at_button(img_pos, PointerButton::Secondary, KeyModifiers::default())?;
-    h.click("canvas.layout_ctx.format_image")?;
-    ensure(matches!(h.app().canvas_dialogs.active_dialog, ActiveDialog::FormatImage { .. }), "WF-57 FormatImage dialog must open")?;
-    h.click("format_image.crop.left_plus4")?;
-    h.click("format_image.border.enabled")?;
-    h.click("format_image.rotation.90")?;
-    h.click("modal.ok")?;
+    // Open Format Image via context menu, apply 4-edge crop + border + 90 deg rotation.
+    let img_pos = run.widget_center(&panel_wid)?;
+    run.click_at_button(img_pos, PointerButton::Secondary, KeyModifiers::default())?;
+    run.click("canvas.layout_ctx.format_image")?;
+    ensure(matches!(run.active_dialog(), ActiveDialog::FormatImage { .. }), "WF-57 FormatImage dialog must open")?;
+    run.click("format_image.crop.left_plus4")?;
+    run.click("format_image.crop.right_plus4")?;
+    run.click("format_image.crop.top_plus4")?;
+    run.click("format_image.crop.bottom_plus4")?;
+    run.click("format_image.border.enabled")?;
+    run.click("format_image.rotation.90")?;
+    run.commit_modal_ok()?;
+    match &run.document().layout_sheet(&lay_id).ok_or("WF-57 layout")?.spec.items[img_idx] {
+        LayoutItem::EmbeddedImage { crop, border, rotation_deg, .. } => {
+            ensure(crop.left_pt > 0.0 && crop.right_pt > 0.0 && crop.top_pt > 0.0 && crop.bottom_pt > 0.0, "WF-57 expected non-zero 4-edge crop insets")?;
+            ensure(border.is_some(), "WF-57 expected border enabled")?;
+            ensure((*rotation_deg - 90.0).abs() < 1e-6, "WF-57 expected 90 deg rotation")?;
+        }
+        _ => return Err(String::from("WF-57 expected EmbeddedImage after FormatImage")),
+    }
 
-    // Toggle Canvas Grid via right-click context menu and assert non-exported SVG identity.
-    let lay_before = h.app().document().layout_sheet(&SheetId::new("lay-wf57")).ok_or("missing lay-wf57")?.clone();
-    let svg_off =
-        render_svg(&curvebook_chart::compile_layout(&lay_before, h.app().document()).map_err(|e| e.to_string())?, &SvgExportOptions::default())
-            .map_err(|e| e.to_string())?;
-    let panel_pos = h.widget_center(&panel_wid)?;
-    h.driver.click_at_button(panel_pos, PointerButton::Secondary, KeyModifiers::default())?;
-    h.click("canvas.layout_ctx.toggle_grid")?;
-    ensure(h.app().canvas_dialogs.grid_overlay_visible, "WF-57 grid overlay must toggle visible")?;
-    let lay_after = h.app().document().layout_sheet(&SheetId::new("lay-wf57")).ok_or("missing lay-wf57 post grid")?.clone();
-    let svg_on =
-        render_svg(&curvebook_chart::compile_layout(&lay_after, h.app().document()).map_err(|e| e.to_string())?, &SvgExportOptions::default())
-            .map_err(|e| e.to_string())?;
-    ensure(svg_off == svg_on, "WF-57 canvas grid overlay must not alter exported SVG")?;
+    // Export SVG, PDF, PNG before & after toggling View > Rulers and View > Canvas Grid -> must be byte-identical.
+    let render_exports = |r: &WorkflowRun| -> Result<(String, Vec<u8>, Vec<u8>), String> {
+        let lay = r.document().layout_sheet(&lay_id).ok_or("missing lay-wf57")?;
+        let scene = compile_layout(lay, r.document()).map_err(|e| e.to_string())?;
+        let svg = render_svg(&scene, &SvgExportOptions::default()).map_err(|e| e.to_string())?;
+        let pdf = render_pdf(&scene, &PdfExportOptions::default()).map_err(|e| e.to_string())?;
+        let raster = render_scene(&scene, RenderTargetSpec { width_px: 320, height_px: 220, dpi: 96 }).map_err(|e| e.to_string())?;
+        let png = encode_png(&raster).map_err(|e| e.to_string())?;
+        Ok((svg, pdf, png))
+    };
+    let (svg_off, pdf_off, png_off) = render_exports(&run)?;
 
-    assert_zero_shortcut_compliance(&mut h)?;
-    h.verify_14_locales_section_9_4("WF-57")?;
-    assert_input_to_paint_budget(&h, 50.0)
+    run.open_menu_and_click("menu.view", &[], "menu.ui.rulers.toggle")?;
+    run.open_menu_and_click("menu.view", &[], "menu.ui.gridOverlay.toggle")?;
+    ensure(run.app().canvas_dialogs.rulers_visible, "WF-57 View > Rulers must toggle rulers_visible")?;
+    ensure(run.app().canvas_dialogs.grid_overlay_visible, "WF-57 View > Canvas Grid must toggle grid_overlay_visible")?;
+
+    let (svg_on, pdf_on, png_on) = render_exports(&run)?;
+    ensure(svg_off == svg_on, "WF-57 rulers & canvas grid must not alter exported SVG")?;
+    ensure(pdf_off == pdf_on, "WF-57 rulers & canvas grid must not alter exported PDF")?;
+    ensure(png_off == png_on, "WF-57 rulers & canvas grid must not alter exported PNG")?;
+
+    // Stage 4: verify embedded companion XY graph against headless Session oracle.
+    let mut ref_xy = XyTable::new(SubcolumnMode::Single, 1, fx.assay_xy.len()).map_err(|e| e.to_string())?;
+    for (r, &(x, y)) in fx.assay_xy.iter().enumerate() {
+        ref_xy.x_cells[r][0] = Cell::number(x);
+        ref_xy.data_sets[0].cells[r][0] = Cell::number(y);
+    }
+    let ref_sheet = DataSheet::new("ref-xy-57", "Assay WF57", TableArchetype::Xy(ref_xy)).map_err(|e| e.to_string())?;
+    run.verify_reference(
+        ReferenceSpec::for_graph(g_id.clone(), |sess| {
+            sess.execute("graph.create", json!({ "sheet_id": "ref-g-57", "data_sheet_id": "ref-xy-57", "kind": "xy" }))
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+        .with_reference_sheet(ref_sheet)?
+        .ref_graph_id(SheetId::new("ref-g-57"))
+        .check_graph(|gui_gs, ref_gs| ensure(gui_gs.spec.series.len() == ref_gs.spec.series.len(), "WF-57 series mismatch vs ref")),
+    )?;
+
+    // Stage 5: live_edit on Assay XY cell propagates to embedded LiveGraph panel inside LayoutSheet SVG.
+    let lay_svg_before = svg_on;
+    let lay_for_chk = lay_id.clone();
+    run.live_edit_all(
+        LiveEditTarget::sheet_grid_cell(sid, 0, 0, 0, "88.0"),
+        vec![
+            LiveEditExpectation::graph_svg_changed(g_id),
+            LiveEditExpectation::custom(move |_, _, doc| {
+                let lay = doc.layout_sheet(&lay_for_chk).ok_or("WF-57 missing layout post edit")?;
+                let lay_svg_after = render_svg(&compile_layout(lay, doc).map_err(|e| e.to_string())?, &SvgExportOptions::default())
+                    .map_err(|e| e.to_string())?;
+                ensure(lay_svg_after != lay_svg_before, "WF-57 upstream cell edit must update layout SVG")
+            }),
+        ],
+    )?;
+
+    run.select_sheet(&lay_id)?;
+    run.finish()
 }
 
 #[test]
 fn wf58_human_result_slice_paste_table_transpose_borderless_reactive() -> TestRes {
-    let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
+    let mut run = WorkflowRun::start("WF-58");
     let fx = wf58_descriptive_column();
-    let sid = h.create_table_via_welcome("welcome.arch.column", "WF58 Descriptive Embed", &["welcome.stepper.cols.inc"])?;
+    let sid = run.create_table_via_welcome("welcome.arch.column", fx.title, &["welcome.stepper.cols.inc"])?;
 
+    for (c, &title) in fx.group_titles.iter().enumerate() {
+        run.enter_column_title(c, title)?;
+    }
     for (r, row) in fx.rows.iter().enumerate() {
         for (c, &val) in row.iter().enumerate() {
-            h.enter_grid_cell(r, c, 0, &format!("{val}"))?;
+            run.enter_grid_cell(r, c, 0, &format!("{val}"))?;
         }
     }
 
-    h.select_sheet(&sid)?;
-    let desc_id = h.run_analyze_entry("Descriptive", "analyze.entry.stats.descriptive")?;
-    h.select_sheet(&desc_id)?;
+    run.select_sheet(&sid)?;
+    let desc_id = run.run_analyze_entry("Descriptive", "analyze.entry.stats.descriptive")?;
+    run.select_sheet(&desc_id)?;
 
-    let c0_pos = h.widget_center("result.cell.0.0")?;
-    let c1_pos = h.widget_center("result.cell.2.2")?;
-    h.driver.click_at(c0_pos)?;
-    h.driver.click_at_button(c1_pos, PointerButton::Primary, KeyModifiers { shift: true, ..Default::default() })?;
-    h.driver.click_at_button(c1_pos, PointerButton::Secondary, KeyModifiers::default())?;
-    h.click("result.ctx.copy_selection")?;
+    // Drag-copy rectangular slice (rows 0..=2, cols 0..=2) from ResultsView via real pointer drag.
+    let c0_pos = run.widget_center("result.cell.0.0")?;
+    let c1_pos = run.widget_center("result.cell.2.2")?;
+    run.drag(c0_pos, c1_pos)?;
+    run.click("result.copy_selection")?;
 
-    let gs_id = h.app().document().graph_sheets.last().map(|g| g.id.clone()).ok_or("WF-58 missing graph")?;
-    h.select_sheet(&gs_id)?;
-    let canvas_rect = h.driver.frame_meta().find_by_widget_id("canvas.viewport").ok_or("WF-58 missing canvas.viewport")?.clipped_rect;
+    let gs_id = graph_for_source(run.document(), &sid)?;
+    run.select_sheet(&gs_id)?;
+    let canvas_rect = run.frame_meta().find_by_widget_id("canvas.viewport").ok_or("WF-58 missing canvas.viewport")?.clipped_rect;
     let anchor = egui::pos2(canvas_rect.right() - 40.0, canvas_rect.bottom() - 40.0);
-    h.driver.click_at_button(anchor, PointerButton::Secondary, KeyModifiers::default())?;
-    h.click("canvas.graph_ctx.paste_table")?;
+    run.click_at_button(anchor, PointerButton::Secondary, KeyModifiers::default())?;
+    run.click("canvas.graph_ctx.paste_table")?;
 
-    h.dbl_click_widget("canvas.graph_ann.0")?;
-    ensure(matches!(h.app().canvas_dialogs.active_dialog, ActiveDialog::FormatEmbeddedTable { .. }), "WF-58 FormatEmbeddedTable must open")?;
-    h.click("embedded_table.transpose")?;
-    h.click("embedded_table.outer_border.0")?;
-    h.click("embedded_table.gridline.0")?;
-    h.click("modal.ok")?;
+    run.dbl_click("canvas.graph_ann.0")?;
+    ensure(matches!(run.active_dialog(), ActiveDialog::FormatEmbeddedTable { .. }), "WF-58 FormatEmbeddedTable must open")?;
+    run.click("embedded_table.transpose")?;
+    run.click("embedded_table.outer_border.0")?;
+    run.click("embedded_table.gridline.0")?;
+    run.commit_modal_ok()?;
 
-    let scene_before = {
-        let gs = h.app().document().graph_sheet(&gs_id).ok_or("WF-58 missing graph post embed")?;
+    let svg_before = {
+        let gs = run.document().graph_sheet(&gs_id).ok_or("WF-58 missing graph post embed")?;
+        let Some(GraphAnnotation::EmbeddedResultTable { style, .. }) = gs.spec.annotations.first() else {
+            return Err(String::from("WF-58 missing EmbeddedResultTable annotation"));
+        };
         ensure(
-            matches!(
-                gs.spec.annotations.first(),
-                Some(GraphAnnotation::EmbeddedResultTable { style, .. })
-                    if style.transpose && style.outer_border_width_pt == 0.0 && style.gridline_width_pt == 0.0
-            ),
+            style.transpose && style.outer_border_width_pt == 0.0 && style.gridline_width_pt == 0.0,
             "WF-58 borderless transpose settings must persist",
         )?;
-        render_svg(&curvebook_chart::compile_graph(gs, h.app().document()).map_err(|e| e.to_string())?, &SvgExportOptions::default())
-            .map_err(|e| e.to_string())?
+        let rs = run.document().result_sheet(&desc_id).ok_or("WF-58 missing desc result")?;
+        let tab0 = rs.tabs.first().ok_or("WF-58 missing desc tab 0")?;
+        let hdr_text = tab0.column_headers.first().map(String::as_str).unwrap_or("");
+        let cell_text = tab0
+            .rows
+            .first()
+            .and_then(|r| r.first())
+            .map(|c| match c {
+                ResultCell::Number { value, .. } => format!("{value}"),
+                ResultCell::Text(s) => s.clone(),
+                _ => String::new(),
+            })
+            .unwrap_or_default();
+        let svg = graph_svg_rendered(run.document(), &gs_id)?;
+        ensure(!hdr_text.is_empty() && svg.contains(hdr_text), format!("WF-58 SVG missing embedded slice header `{hdr_text}`"))?;
+        ensure(!cell_text.is_empty() && svg.contains(&cell_text), format!("WF-58 SVG missing embedded slice cell `{cell_text}`"))?;
+        svg
     };
 
-    // Delete upstream cell via real Backspace/Enter key handling -> embedded table recomputes.
-    h.select_sheet(&sid)?;
-    h.dbl_click_widget("grid.cell.0.1.0")?;
-    h.driver.press_egui_key(Key::A, Modifiers::COMMAND);
-    h.driver.press_key("Backspace", KeyModifiers::default())?;
-    h.driver.press_key("Enter", KeyModifiers::default())?;
+    // Stage 4: verify Descriptive Statistics values against headless Session oracle.
+    let mut ref_col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, fx.group_titles.len(), fx.rows.len()).map_err(|e| e.to_string())?;
+    for (c, &title) in fx.group_titles.iter().enumerate() {
+        ref_col.data_sets[c].title = title.to_owned();
+    }
+    for (r, row) in fx.rows.iter().enumerate() {
+        for (c, &val) in row.iter().enumerate() {
+            ref_col.data_sets[c].cells[r][0] = Cell::number(val);
+        }
+    }
+    let ref_sheet = DataSheet::new("ref-col-58", fx.title, TableArchetype::Column(ref_col)).map_err(|e| e.to_string())?;
+    run.verify_reference(
+        ReferenceSpec::for_result(desc_id.clone(), |sess| {
+            sess.execute("analysis.run", json!({ "sheet_id": "ref-desc-58", "source_sheet_id": "ref-col-58", "kind": "descriptive" }))
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+        .with_reference_sheet(ref_sheet)?
+        .ref_result_id(SheetId::new("ref-desc-58"))
+        .scalar("Mean", Some(1), 1e-9, 1e-9)
+        .scalar("SD", Some(1), 1e-9, 1e-9)
+        .tab_cell(0, 0, 1, 1e-9, 1e-9),
+    )?;
 
-    let gs_after = h.app().document().graph_sheet(&gs_id).ok_or("WF-58 missing graph after delete")?;
-    let scene_after =
-        render_svg(&curvebook_chart::compile_graph(gs_after, h.app().document()).map_err(|e| e.to_string())?, &SvgExportOptions::default())
-            .map_err(|e| e.to_string())?;
-    ensure(scene_before != scene_after, "WF-58 deleting upstream cell must update embedded table SVG")?;
+    // Stage 5: deleting upstream cell (row 0, col 1) recomputes Descriptive Stats & embedded table SVG.
+    let sid_del = sid.clone();
+    let gs_for_chk = gs_id.clone();
+    run.live_edit_all(
+        LiveEditTarget::gui(move |r| {
+            r.select_sheet(&sid_del)?;
+            r.dbl_click("grid.cell.0.1.0")?;
+            r.press_egui_key(Key::A, Modifiers::COMMAND)?;
+            r.press_key("Backspace", KeyModifiers::default())?;
+            r.press_key("Enter", KeyModifiers::default())
+        }),
+        vec![
+            LiveEditExpectation::scalar_changed(desc_id, "Mean", Some(1), 1e-3),
+            LiveEditExpectation::custom(move |_, _, doc| {
+                let svg_after = graph_svg_rendered(doc, &gs_for_chk)?;
+                ensure(svg_after != svg_before, "WF-58 deleting upstream cell must update embedded table SVG")
+            }),
+        ],
+    )?;
 
-    assert_zero_shortcut_compliance(&mut h)?;
-    h.verify_14_locales_section_9_4("WF-58")?;
-    assert_input_to_paint_budget(&h, 50.0)
+    run.select_sheet(&gs_id)?;
+    run.finish()
 }
