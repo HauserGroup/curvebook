@@ -3324,13 +3324,18 @@ fn parse_cartesian_orientation(val: &Value) -> Result<CartesianOrientation, Engi
 }
 
 fn parse_heatmap_label_spec(val: &Value, current: HeatmapLabelSpec) -> Result<HeatmapLabelSpec, EngineError> {
-    if let Ok(full) = serde_json::from_value::<HeatmapLabelSpec>(val.clone()) {
-        return Ok(full);
-    }
     let Some(obj) = val.as_object() else {
         return Err(EngineError::with_code(ErrorCode::BadInput, "`heatmap_labels` must be an object"));
     };
     let mut out = current;
+    if let Some(ann_val) = obj.get("annotate_cells") {
+        out.annotate_cells =
+            ann_val.as_bool().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`heatmap_labels.annotate_cells` must be a boolean"))?;
+    }
+    if let Some(gap_val) = obj.get("cell_gap_pt") {
+        let gap = parse_finite_f64(gap_val, "heatmap_labels.cell_gap_pt")?;
+        out.cell_gap_pt = gap.clamp(0.0, 12.0);
+    }
     if let Some(rv) = obj.get("row_labels").or_else(|| obj.get("row_mode")) {
         if let Ok(m) = serde_json::from_value::<HeatmapRowLabelMode>(rv.clone()) {
             out.row_labels = m;

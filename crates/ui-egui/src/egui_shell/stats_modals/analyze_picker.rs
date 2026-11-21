@@ -8,7 +8,7 @@ use crate::UiApp;
 use crate::dialogs_canvas::{ActiveDialog, AnalysisCategory, AnalyzeDialogState, VariableRoleFilter};
 use crate::i18n::{normalize_locale, tr};
 use crate::inspect::ZLayer;
-use crate::modal_predicates::{ControlEnablement, evaluate_dialog_button, r10_pcr_outcome_column, source_table_shape};
+use crate::modal_predicates::{ControlEnablement, evaluate_dialog_button, r7_correlation_heatmap_toggle, r10_pcr_outcome_column, source_table_shape};
 use crate::views::analyze_picker::DuplicateChoice;
 
 use crate::egui_shell::stat_anova_modal::{
@@ -398,6 +398,33 @@ fn render_analyze_datasets_pane(
             )
         {
             intents.push_custom_view_action("analyze_picker", "outlier_toggle_iterative");
+        }
+    }
+    if matches!(az.selected_entry_id.as_deref(), Some("stats.corr_matrix" | "correlation" | "correlation_matrix")) {
+        ui.add_space(6.0);
+        crate::egui_shell::stat_anova_modal::render_section_title(ui, tokens, "Correlation Options");
+        if render_modal_checkbox(
+            ui,
+            tokens,
+            meta,
+            "analyze.correlation_all_pairs",
+            "Compute all pairwise correlations",
+            az.correlation_all_pairs,
+            &ControlEnablement::enabled(),
+        ) {
+            intents.push_dialog_widget_click("analyze.correlation_all_pairs");
+        }
+        let heat_en = r7_correlation_heatmap_toggle(az.correlation_all_pairs);
+        if render_modal_checkbox(
+            ui,
+            tokens,
+            meta,
+            "analyze.correlation.heatmap",
+            "Generate correlation heatmap graph",
+            az.correlation_heatmap,
+            &heat_en,
+        ) {
+            intents.push_dialog_widget_click("analyze.correlation.heatmap");
         }
     }
 }

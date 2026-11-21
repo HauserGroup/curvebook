@@ -9,7 +9,9 @@ use curvebook_tools::ToolCommandIntent;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::dialogs_r9::{norm_key, parse_axis_scale_str, parse_break_ornament_str, parse_finite_f64_with_locale, parse_opt_finite_f64_with_locale};
+use crate::dialogs_r9::{
+    norm_key, parse_axis_scale_str, parse_break_ornament_str, parse_finite_f64_with_locale, parse_opt_finite_f64_with_locale, parse_usize_min,
+};
 use crate::i18n::LocalePreset;
 
 /// Which axis (`X`, `Y`, or optional right `Y2`) is being edited in `Format Axes`.
@@ -409,6 +411,26 @@ impl FormatAxesState {
                 "max" | "axis_max" | "axes.max" => {
                     pending_max = parse_opt_finite_f64_with_locale(val, key, preset)?;
                     bounds_changed = true;
+                }
+                "major_tick_interval" | "axes.major_tick_interval" => {
+                    let interval = parse_opt_finite_f64_with_locale(val, key, preset)?;
+                    if let Some(v) = interval
+                        && v <= 0.0
+                    {
+                        return Err(format!("`{key}` ({v}) must be > 0"));
+                    }
+                    if let Some(seg) = self.axis_draft.segments.first_mut() {
+                        seg.major_tick_interval = interval;
+                    }
+                }
+                "minor_ticks_per_interval" | "axes.minor_ticks_per_interval" => {
+                    let minor = parse_usize_min(val, key, 0)?;
+                    if minor > 10 {
+                        return Err(format!("`{key}` ({minor}) must be in 0..=10"));
+                    }
+                    if let Some(seg) = self.axis_draft.segments.first_mut() {
+                        seg.minor_ticks_per_interval = minor as u8;
+                    }
                 }
                 "break_ornament" | "axes.break_ornament" => {
                     let raw = val.as_str().ok_or_else(|| String::from("`break_ornament` must be a string"))?;

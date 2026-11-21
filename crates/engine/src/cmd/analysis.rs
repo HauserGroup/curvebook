@@ -2436,8 +2436,14 @@ fn resolve_transform_shorthand(name: &str, params: &Value) -> Result<Option<Anal
         },
         "select_and_transform" | "select" | "transform.select_and_transform" => TransformAnalysisSpec::SelectAndTransform {
             filter_formula: opt_str_checked(params, &["filter_formula"])?.map(str::to_owned),
-            target_archetype: TableKind::Xy,
-            derived_columns: Vec::new(),
+            target_archetype: match params.get("target_archetype").filter(|v| !v.is_null()) {
+                Some(tv) => parse_target_table_kind(tv)?,
+                None => TableKind::Xy,
+            },
+            derived_columns: match first_present(params, spellings::TRANSFORM_DERIVED_COLUMNS) {
+                Some(dv) => parse_derived_columns_value(dv)?,
+                None => Vec::new(),
+            },
         },
         "simulate" | "simulate_xy" | "transform.simulate" => TransformAnalysisSpec::Simulate {
             seed: parse_opt_u64_field(params, "seed", 42)?,
@@ -3007,8 +3013,7 @@ fn apply_transform_overrides(spec: &mut TransformAnalysisSpec, params: &Value) -
             if let Some(tv) = params.get("target_archetype")
                 && !tv.is_null()
             {
-                *target_archetype = serde_json::from_value(tv.clone())
-                    .map_err(|err| EngineError::with_code(ErrorCode::BadInput, format!("invalid `target_archetype`: {err}")))?;
+                *target_archetype = parse_target_table_kind(tv)?;
             }
             if let Some(dv) = first_present(params, spellings::TRANSFORM_DERIVED_COLUMNS) {
                 *derived_columns = parse_derived_columns_value(dv)?;
@@ -3505,6 +3510,24 @@ fn default_km_survival() -> SurvivalAnalysisSpec {
 
 fn default_multiple_imputation(seed: u64) -> MultivariateSpec {
     MultivariateSpec::MultipleImputation { imputations_m: 5, max_iters: 10, seed, response_column: None, predictor_columns: Vec::new() }
+}
+
+fn parse_target_table_kind(val: &Value) -> Result<TableKind, EngineError> {
+    if let Ok(parsed) = serde_json::from_value::<TableKind>(val.clone()) {
+        return Ok(parsed);
+    }
+    let raw = val.as_str().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`target_archetype` must be a valid TableKind"))?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "xy" => Ok(TableKind::Xy),
+        "column" => Ok(TableKind::Column),
+        "grouped" => Ok(TableKind::Grouped),
+        "contingency" => Ok(TableKind::Contingency),
+        "survival" => Ok(TableKind::Survival),
+        "parts_of_whole" | "partsofwhole" => Ok(TableKind::PartsOfWhole),
+        "multiple_variables" | "multiplevariables" | "mv" => Ok(TableKind::MultipleVariables),
+        "nested" => Ok(TableKind::Nested),
+        other => Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid `target_archetype`: `{other}`"))),
+    }
 }
 
 fn parse_cox_tie_method(val: &Value) -> Result<CoxTieMethod, EngineError> {

@@ -295,6 +295,12 @@ pub(super) fn render_axis_ticks_section(
         gctx.intents.push_update_format_axes_state(next);
     }
 
+    ui.add_space(4.0);
+    render_major_tick_interval_row(ui, state, gctx, fa);
+
+    ui.add_space(4.0);
+    render_minor_ticks_stepper_row(ui, state, gctx, fa);
+
     ui.add_space(6.0);
     let tick_count = fa.axis_draft.additional_ticks.len();
     let thresh_count = fa.axis_draft.thresholds.len();
@@ -317,4 +323,147 @@ pub(super) fn render_axis_ticks_section(
         state.additional_ticks.open = true;
         state.additional_tick_status = None;
     }
+}
+
+fn render_major_tick_interval_row(
+    ui: &mut Ui,
+    state: &mut GraphModalEguiState,
+    gctx: &mut GraphModalCtx<'_>,
+    fa: &crate::dialogs_canvas::FormatAxesState,
+) {
+    let cur_interval = fa.axis_draft.segments.first().and_then(|s| s.major_tick_interval);
+    let mut edited = false;
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        ui.label("Major Tick Interval:");
+        let resp = ui.add(egui::TextEdit::singleline(&mut state.axis_major_interval_draft).hint_text("Auto").desired_width(96.0));
+        record_input(ui, &resp, gctx.meta, "axes.seg.0.major_tick_interval", "Major Tick Interval", &state.axis_major_interval_draft, true);
+        if resp.changed() || resp.lost_focus() {
+            edited = true;
+        }
+    });
+    if edited {
+        let trimmed = state.axis_major_interval_draft.trim();
+        if trimmed.is_empty() {
+            state.axis_ticks_error = None;
+            if cur_interval.is_some() {
+                let mut next = fa.clone();
+                if let Some(seg0) = next.axis_draft.segments.first_mut() {
+                    seg0.major_tick_interval = None;
+                }
+                gctx.intents.push_update_format_axes_state(next);
+            }
+        } else if let Some(val) = parse_localized_number_input(trimmed, &gctx.app.locale_preset).filter(|v| v.is_finite() && *v > 0.0) {
+            state.axis_ticks_error = None;
+            if cur_interval != Some(val) {
+                let mut next = fa.clone();
+                if let Some(seg0) = next.axis_draft.segments.first_mut() {
+                    seg0.major_tick_interval = Some(val);
+                }
+                gctx.intents.push_update_format_axes_state(next);
+            }
+        } else {
+            state.axis_ticks_error = Some(format!("Invalid major tick interval `{trimmed}` (must be > 0)"));
+        }
+    }
+    if let Some(err) = &state.axis_ticks_error {
+        let err_resp = ui.add(egui::Label::new(egui::RichText::new(err).color(gctx.tokens.link_red)).wrap());
+        record_label(ui, &err_resp, gctx.meta, "axes.seg.0.ticks_error", err);
+    }
+}
+
+fn push_minor_ticks_update(gctx: &mut GraphModalCtx<'_>, fa: &crate::dialogs_canvas::FormatAxesState, minor_ticks: u8) {
+    let cur = fa.axis_draft.segments.first().map_or(0, |s| s.minor_ticks_per_interval);
+    if cur != minor_ticks {
+        let mut next = fa.clone();
+        if let Some(seg0) = next.axis_draft.segments.first_mut() {
+            seg0.minor_ticks_per_interval = minor_ticks;
+        }
+        gctx.intents.push_update_format_axes_state(next);
+    }
+}
+
+fn render_minor_ticks_stepper_row(
+    ui: &mut Ui,
+    state: &mut GraphModalEguiState,
+    gctx: &mut GraphModalCtx<'_>,
+    fa: &crate::dialogs_canvas::FormatAxesState,
+) {
+    let buf_id = egui::Id::unique(("axes.seg.0.minor_ticks_buf", fa.target_axis));
+    let (last_synced, mut buf) = ui
+        .ctx()
+        .data(|d| d.get_temp::<(u8, String)>(buf_id))
+        .unwrap_or_else(|| (state.axis_minor_ticks_draft, state.axis_minor_ticks_draft.to_string()));
+    if last_synced != state.axis_minor_ticks_draft {
+        buf = state.axis_minor_ticks_draft.to_string();
+    }
+
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        ui.label("Minor Ticks per Interval:");
+        if record_button(
+            ui,
+            gctx.meta,
+            ButtonEntry {
+                widget_id: "axes.seg.0.minor_ticks.minus",
+                label: "-",
+                command_id: None,
+                selected: false,
+                enabled: state.axis_minor_ticks_draft > 0,
+                disabled_reason: (state.axis_minor_ticks_draft == 0).then_some("Minimum 0 minor ticks"),
+            },
+            gctx.tokens,
+        )
+        .clicked()
+        {
+            state.axis_minor_ticks_draft = state.axis_minor_ticks_draft.saturating_sub(1);
+            buf = state.axis_minor_ticks_draft.to_string();
+            push_minor_ticks_update(gctx, fa, state.axis_minor_ticks_draft);
+        }
+
+        let resp = ui.add(egui::TextEdit::singleline(&mut buf).desired_width(44.0));
+        record_input(ui, &resp, gctx.meta, "axes.seg.0.minor_ticks_per_interval", "Minor Ticks per Interval", &buf, true);
+        if resp.changed() {
+            let trimmed = buf.trim();
+            if let Ok(parsed) = trimmed.parse::<u16>() {
+                let clamped = parsed.min(10) as u8;
+                state.axis_minor_ticks_draft = clamped;
+                if parsed > 10 {
+                    buf = clamped.to_string();
+                }
+                push_minor_ticks_update(gctx, fa, clamped);
+            }
+        } else if resp.lost_focus() {
+            let trimmed = buf.trim();
+            if trimmed.is_empty() {
+                state.axis_minor_ticks_draft = 0;
+                buf = String::from("0");
+                push_minor_ticks_update(gctx, fa, 0);
+            } else if trimmed.parse::<u16>().is_err() {
+                buf = state.axis_minor_ticks_draft.to_string();
+            }
+        }
+
+        if record_button(
+            ui,
+            gctx.meta,
+            ButtonEntry {
+                widget_id: "axes.seg.0.minor_ticks.plus",
+                label: "+",
+                command_id: None,
+                selected: false,
+                enabled: state.axis_minor_ticks_draft < 10,
+                disabled_reason: (state.axis_minor_ticks_draft >= 10).then_some("Maximum 10 minor ticks"),
+            },
+            gctx.tokens,
+        )
+        .clicked()
+        {
+            state.axis_minor_ticks_draft = state.axis_minor_ticks_draft.saturating_add(1).min(10);
+            buf = state.axis_minor_ticks_draft.to_string();
+            push_minor_ticks_update(gctx, fa, state.axis_minor_ticks_draft);
+        }
+    });
+
+    ui.ctx().data_mut(|d| d.insert_temp(buf_id, (state.axis_minor_ticks_draft, buf)));
 }

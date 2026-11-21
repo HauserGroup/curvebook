@@ -100,8 +100,16 @@ pub(super) fn render_fg_heatmap_color_mapping(ui: &mut Ui, state: &mut GraphModa
 
 pub(super) fn render_fg_heatmap_labels(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &mut GraphModalCtx<'_>) {
     let fg = gctx.app.canvas_dialogs.format_graph.clone();
-    let ann_chk = ui.checkbox(&mut state.heatmap_annotate_cells, "Show Numeric Cell Annotations");
-    record_checkbox(ui, &ann_chk, gctx.meta, "format_graph.heatmap.annotate_cells", "Show Numeric Cell Annotations", state.heatmap_annotate_cells);
+    let mut annotate = fg.heatmap_labels.annotate_cells;
+    let ann_chk = ui.checkbox(&mut annotate, "Show Numeric Cell Annotations");
+    record_checkbox(ui, &ann_chk, gctx.meta, "format_graph.heatmap.annotate_cells", "Show Numeric Cell Annotations", annotate);
+    if ann_chk.changed() {
+        state.heatmap_annotate_cells = annotate;
+        let mut next = fg.clone();
+        next.heatmap_labels.annotate_cells = annotate;
+        next.heatmap_labels_dirty = true;
+        gctx.intents.push_update_format_graph_state(next);
+    }
 
     ui.add_space(6.0);
     ui.horizontal_wrapped(|ui| {
@@ -214,9 +222,14 @@ pub(super) fn render_fg_heatmap_borders(ui: &mut Ui, state: &mut GraphModalEguiS
         allow_unit_switch: false,
         ..ScrubUnitFieldConfig::new("format_graph.heatmap.cell_gap", "Tile Gap", 0.0, 12.0)
     };
-    let out = render_scrub_unit_field(ui, state.heatmap_cell_gap_pt, &mut state.heatmap_gap_spinner, gap_cfg, gctx.tokens, gctx.meta);
+    let out = render_scrub_unit_field(ui, fg.heatmap_labels.cell_gap_pt, &mut state.heatmap_gap_spinner, gap_cfg, gctx.tokens, gctx.meta);
     if let Some(v) = out.committed_value {
-        state.heatmap_cell_gap_pt = v.clamp(0.0, 12.0);
+        let clamped = v.clamp(0.0, 12.0);
+        state.heatmap_cell_gap_pt = clamped;
+        let mut next = fg.clone();
+        next.heatmap_labels.cell_gap_pt = clamped;
+        next.heatmap_labels_dirty = true;
+        gctx.intents.push_update_format_graph_state(next);
     }
     ui.add_space(6.0);
     render_legend_toggles(ui, gctx, &fg);

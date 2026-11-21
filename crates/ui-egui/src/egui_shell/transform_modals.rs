@@ -80,16 +80,18 @@ impl ConstantKOp {
 }
 
 /// Persistent transient UI state for `render_transform_modal` and `render_exclude_with_reason_modal`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransformModalsEguiState {
     pub open_kind: Option<TransformModalKind>,
     pub target_sheet_id: Option<SheetId>,
     pub active_tab: usize,
     pub formula_draft: String,
+    pub filter_formula_draft: String,
     pub constant_k_draft: String,
     pub create_new_graph: bool,
     pub selected_k_op: Option<ConstantKOp>,
     pub synced_edit_sheet_id: Option<String>,
+    pub synced_standalone_key: Option<(TransformModalKind, Option<SheetId>)>,
     pub filter_rows: Vec<MvFilterPredicateRow>,
     pub exclude_reason_draft: String,
     pub validation_error: Option<String>,
@@ -112,6 +114,55 @@ pub struct TransformModalsEguiState {
     pub hook_picker_open: bool,
     pub exclude_note_draft: String,
     pub synced_exclude_tag: String,
+    pub transpose_swap_titles: bool,
+    pub prune_every_k_rows: usize,
+    pub prune_every_k_draft: String,
+    pub prune_average_window: bool,
+    pub standalone_selected_cols: Vec<usize>,
+}
+
+impl Default for TransformModalsEguiState {
+    fn default() -> Self {
+        Self {
+            open_kind: None,
+            target_sheet_id: None,
+            active_tab: 0,
+            formula_draft: String::new(),
+            filter_formula_draft: String::new(),
+            constant_k_draft: String::new(),
+            create_new_graph: false,
+            selected_k_op: None,
+            synced_edit_sheet_id: None,
+            synced_standalone_key: None,
+            filter_rows: Vec::new(),
+            exclude_reason_draft: String::new(),
+            validation_error: None,
+            standalone_x_preset: None,
+            standalone_y_preset: None,
+            standalone_error_propagation: ErrorPropagationMode::default(),
+            pharmacology_mode: false,
+            baseline_cols: Vec::new(),
+            baseline_op: 0,
+            derived_title_draft: String::new(),
+            derived_cols: Vec::new(),
+            extract_target_kind: None,
+            extract_binding_x: String::new(),
+            extract_binding_y: String::new(),
+            extract_binding_grp: String::new(),
+            norm_zero_idx: 0,
+            norm_hundred_idx: 0,
+            norm_percent: false,
+            norm_per_dataset: false,
+            hook_picker_open: false,
+            exclude_note_draft: String::new(),
+            synced_exclude_tag: String::new(),
+            transpose_swap_titles: true,
+            prune_every_k_rows: 2,
+            prune_every_k_draft: String::from("2"),
+            prune_average_window: false,
+            standalone_selected_cols: Vec::new(),
+        }
+    }
 }
 
 /// Frame geometry and modal capture report emitted by transform modals.
@@ -157,12 +208,17 @@ pub fn render_transform_modal(
     let from_edit = is_transform_edit_dialog_active(app);
     if !from_edit {
         state.synced_edit_sheet_id = None;
+    } else {
+        state.synced_standalone_key = None;
     }
     if !from_edit && state.open_kind.is_none() {
+        state.synced_standalone_key = None;
         return TransformModalFrameReport::default();
     }
     if from_edit {
         sync_transform_edit_state(app, state);
+    } else if let Some(kind) = state.open_kind {
+        sync_standalone_transform_state(kind, state);
     }
 
     let draft_kind = if from_edit { app.canvas_dialogs.edit_params.draft.as_ref().map(|d| &d.kind) } else { None };
@@ -197,11 +253,11 @@ pub fn render_transform_modal(
                     TransformModalKind::Normalize => render_normalize_body(body, &mut modal_cx),
                     TransformModalKind::RemoveBaseline => render_remove_baseline_body(body, &mut modal_cx),
                     TransformModalKind::MvFilterAndTransform => render_mv_filter_transform_body(body, &mut modal_cx),
-                    TransformModalKind::ExtractAndRearrange
-                    | TransformModalKind::Transpose
-                    | TransformModalKind::PruneRows
-                    | TransformModalKind::Simulate
-                    | TransformModalKind::RandomSample => render_extract_and_rearrange_body(body, &mut modal_cx, effective_kind),
+                    TransformModalKind::Transpose => render_transpose_body(body, &mut modal_cx),
+                    TransformModalKind::PruneRows => render_prune_rows_body(body, &mut modal_cx),
+                    TransformModalKind::ExtractAndRearrange | TransformModalKind::Simulate | TransformModalKind::RandomSample => {
+                        render_extract_and_rearrange_body(body, &mut modal_cx, effective_kind)
+                    }
                 }
 
                 if modal_cx.state.hook_picker_open {
@@ -282,6 +338,30 @@ fn resolve_source_sheet<'a>(app: &'a UiApp, state: &TransformModalsEguiState, fr
         .or_else(|| doc.data_sheets.first())
 }
 
+fn sync_standalone_transform_state(kind: TransformModalKind, state: &mut TransformModalsEguiState) {
+    let key = (kind, state.target_sheet_id.clone());
+    if state.synced_standalone_key.as_ref() == Some(&key) {
+        return;
+    }
+    state.synced_standalone_key = Some(key);
+    state.active_tab = 0;
+    state.formula_draft.clear();
+    state.filter_formula_draft.clear();
+    state.filter_rows.clear();
+    state.derived_title_draft.clear();
+    state.derived_cols.clear();
+    state.extract_target_kind = None;
+    state.extract_binding_x.clear();
+    state.extract_binding_y.clear();
+    state.extract_binding_grp.clear();
+    state.transpose_swap_titles = true;
+    state.prune_every_k_rows = 2;
+    state.prune_every_k_draft = String::from("2");
+    state.prune_average_window = false;
+    state.standalone_selected_cols.clear();
+    state.validation_error = None;
+}
+
 fn sync_transform_edit_state(app: &UiApp, state: &mut TransformModalsEguiState) {
     let ActiveDialog::EditAnalysisParameters { result_sheet_id } = &app.canvas_dialogs.active_dialog else {
         return;
@@ -290,16 +370,39 @@ fn sync_transform_edit_state(app: &UiApp, state: &mut TransformModalsEguiState) 
         return;
     }
     state.synced_edit_sheet_id = Some(result_sheet_id.as_str().to_owned());
+    state.active_tab = 0;
+    state.validation_error = None;
     let spec = app.canvas_dialogs.edit_params.draft.as_ref().or_else(|| app.document().result_sheet(result_sheet_id).map(|rs| &rs.analysis));
-    if let Some(AnalysisKind::Transform(TransformAnalysisSpec::Math { y_transform, .. })) = spec.map(|s| &s.kind) {
-        if let Some((op, k)) = y_transform.and_then(ConstantKOp::infer_from_preset) {
-            state.selected_k_op = Some(op);
-            state.constant_k_draft = format!("{k}");
-        } else {
-            state.selected_k_op = None;
+    state.standalone_selected_cols = spec.map(|s| s.selected_data_sets.clone()).unwrap_or_default();
+    state.selected_k_op = None;
+    state.transpose_swap_titles = true;
+    state.prune_every_k_rows = 2;
+    state.prune_every_k_draft = String::from("2");
+    state.prune_average_window = false;
+    state.filter_formula_draft.clear();
+    state.derived_cols.clear();
+    state.extract_target_kind = None;
+    match spec.map(|s| &s.kind) {
+        Some(AnalysisKind::Transform(TransformAnalysisSpec::Math { y_transform, .. })) => {
+            if let Some((op, k)) = y_transform.and_then(ConstantKOp::infer_from_preset) {
+                state.selected_k_op = Some(op);
+                state.constant_k_draft = format!("{k}");
+            }
         }
-    } else {
-        state.selected_k_op = None;
+        Some(AnalysisKind::Transform(TransformAnalysisSpec::Transpose { swap_row_and_column_titles })) => {
+            state.transpose_swap_titles = *swap_row_and_column_titles;
+        }
+        Some(AnalysisKind::Transform(TransformAnalysisSpec::PruneRows { every_k_rows, average_window })) => {
+            state.prune_every_k_rows = (*every_k_rows).max(1);
+            state.prune_every_k_draft = state.prune_every_k_rows.to_string();
+            state.prune_average_window = *average_window;
+        }
+        Some(AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula, target_archetype, derived_columns })) => {
+            state.filter_formula_draft = filter_formula.clone().unwrap_or_default();
+            state.extract_target_kind = Some(*target_archetype);
+            state.derived_cols = derived_columns.iter().map(|d| (d.title.clone(), d.formula.clone())).collect();
+        }
+        _ => {}
     }
 }
 
@@ -776,14 +879,19 @@ fn render_mv_filter_transform_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) 
         Some(AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula, target_archetype, derived_columns })) => {
             (filter_formula.clone().unwrap_or_default(), *target_archetype, derived_columns.clone())
         }
-        _ => (state.formula_draft.clone(), TableKind::MultipleVariables, Vec::new()),
+        _ => (
+            state.filter_formula_draft.clone(),
+            state.extract_target_kind.unwrap_or(TableKind::MultipleVariables),
+            state.derived_cols.iter().map(|(t, f)| DerivedColumnFormula::new(t.clone(), f.clone())).collect(),
+        ),
     };
 
-    ui.horizontal(|tabs| {
+    ui.horizontal_wrapped(|tabs| {
         for (idx, wid, lbl) in [
             (0usize, "edit.tab.transform", "1. Transform"),
             (1, "edit.tab.select_rows", "2. Select Rows"),
             (2, "edit.tab.select_cols", "3. Select Columns"),
+            (3, "edit.tab.target_format", "4. Target Format"),
         ] {
             let r = choice_pill(tabs, tokens, lbl, state.active_tab == idx, true);
             meta.record_modal_response(tabs, &r, FrameInspectEntryInput::modal(wid, "tab", lbl, Some((state.active_tab == idx).to_string()), true));
@@ -799,7 +907,18 @@ fn render_mv_filter_transform_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) 
             ui.label(RichText::new("Derived Variable Formula:").strong().color(tokens.text_primary));
             ui.horizontal(|row| {
                 row.label("Name:");
-                let _ = row.add(egui::TextEdit::singleline(&mut state.derived_title_draft).hint_text("Derived1").desired_width(110.0));
+                let tr = row.add(egui::TextEdit::singleline(&mut state.derived_title_draft).hint_text("Derived1").desired_width(110.0));
+                meta.record_modal_response(
+                    row,
+                    &tr,
+                    FrameInspectEntryInput::modal(
+                        "edit.transform.derived_title",
+                        "textbox",
+                        "Derived Name",
+                        Some(state.derived_title_draft.clone()),
+                        true,
+                    ),
+                );
                 row.label("Expr:");
                 let er = row.add(egui::TextEdit::singleline(&mut state.formula_draft).hint_text("= log10([Dose])").desired_width(210.0));
                 meta.record_modal_response(
@@ -808,7 +927,13 @@ fn render_mv_filter_transform_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) 
                     FrameInspectEntryInput::modal("edit.transform.formula", "textbox", "Derived Formula", Some(state.formula_draft.clone()), true),
                 );
                 let can_add = !state.derived_title_draft.trim().is_empty() && !state.formula_draft.trim().is_empty();
-                if row.add_enabled(can_add, egui::Button::new("Add Derived")).clicked() {
+                let add_resp = row.add_enabled(can_add, egui::Button::new("Add Derived"));
+                meta.record_modal_response(
+                    row,
+                    &add_resp,
+                    FrameInspectEntryInput::modal("edit.transform.add_derived", "button", "Add Derived", None, can_add),
+                );
+                if add_resp.clicked() {
                     let t = state.derived_title_draft.trim().to_owned();
                     let f = state.formula_draft.trim().to_owned();
                     if from_edit && let Some(spec) = draft_spec.as_mut() {
@@ -823,13 +948,46 @@ fn render_mv_filter_transform_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) 
                     } else {
                         state.derived_cols.push((t, f));
                     }
+                    state.derived_title_draft.clear();
+                    state.formula_draft.clear();
                 }
             });
-            state.validation_error = if !state.formula_draft.trim().is_empty() {
-                parse_formula(state.formula_draft.trim()).err().map(|e| format!("Formula error: {e}"))
-            } else {
-                None
-            };
+            if !derived.is_empty() {
+                ui.add_space(4.0);
+                for (idx, dcol) in derived.iter().enumerate() {
+                    ui.horizontal(|drow| {
+                        drow.label(RichText::new(format!("{} = {}", dcol.title, dcol.formula)).size(11.5).color(tokens.text_muted));
+                        let rem = widgets::secondary_button(drow, "Remove");
+                        meta.record_modal_response(
+                            drow,
+                            &rem,
+                            FrameInspectEntryInput::modal(
+                                &format!("edit.transform.derived.remove.{idx}"),
+                                "button",
+                                "Remove",
+                                Some(dcol.title.clone()),
+                                true,
+                            ),
+                        );
+                        if rem.clicked() {
+                            if from_edit && let Some(spec) = draft_spec.as_mut() {
+                                let mut next_d = derived.clone();
+                                if idx < next_d.len() {
+                                    next_d.remove(idx);
+                                }
+                                spec.kind = AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform {
+                                    filter_formula: (!filter_formula.trim().is_empty()).then_some(filter_formula.clone()),
+                                    target_archetype: target_arch,
+                                    derived_columns: next_d,
+                                });
+                                intents.push_set_edit_params_draft(spec.clone());
+                            } else if idx < state.derived_cols.len() {
+                                state.derived_cols.remove(idx);
+                            }
+                        }
+                    });
+                }
+            }
         }
         1 => {
             ui.label(RichText::new("Conjunctive Row Filter Formula:").strong().color(tokens.text_primary));
@@ -841,6 +999,7 @@ fn render_mv_filter_transform_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) 
                 FrameInspectEntryInput::modal("edit.transform.filter_formula", "textbox", "Filter Formula", Some(filter_formula.clone()), true),
             );
             if fr.changed() {
+                state.filter_formula_draft = filter_formula.clone();
                 if from_edit && let Some(spec) = draft_spec.as_mut() {
                     spec.kind = AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform {
                         filter_formula: (!filter_formula.trim().is_empty()).then_some(filter_formula.clone()),
@@ -848,8 +1007,6 @@ fn render_mv_filter_transform_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) 
                         derived_columns: derived.clone(),
                     });
                     intents.push_set_edit_params_draft(spec.clone());
-                } else {
-                    state.formula_draft = filter_formula.clone();
                 }
             }
             ui.horizontal(|row| {
@@ -898,7 +1055,8 @@ fn render_mv_filter_transform_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) 
                     })
                     .collect::<Vec<_>>()
                     .join(" && ");
-                state.formula_draft = synth.clone();
+                state.filter_formula_draft = synth.clone();
+                filter_formula = synth.clone();
                 if from_edit && let Some(spec) = draft_spec.as_mut() {
                     spec.kind = AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform {
                         filter_formula: Some(synth),
@@ -908,20 +1066,22 @@ fn render_mv_filter_transform_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) 
                     intents.push_set_edit_params_draft(spec.clone());
                 }
             }
-            state.validation_error = if !filter_formula.trim().is_empty() {
-                parse_formula(filter_formula.trim()).err().map(|e| format!("Filter syntax: {e}"))
-            } else {
-                None
-            };
         }
-        _ => {
+        2 => {
             ui.label(RichText::new("Selected Data Columns:").strong().color(tokens.text_primary));
             if let Some(s) = ds {
-                let mut selected =
-                    draft_spec.as_ref().map(|d| d.selected_data_sets.clone()).unwrap_or_else(|| (0..s.archetype.column_count()).collect());
+                let all_cols: Vec<usize> = (0..s.archetype.column_count()).collect();
+                let mut selected = if from_edit {
+                    let raw = draft_spec.as_ref().map(|d| d.selected_data_sets.clone()).unwrap_or_default();
+                    if raw.is_empty() { all_cols } else { raw }
+                } else if state.standalone_selected_cols.is_empty() {
+                    all_cols
+                } else {
+                    state.standalone_selected_cols.clone()
+                };
                 ui.horizontal_wrapped(|row| {
                     for c in 0..s.archetype.column_count().min(20) {
-                        let active = selected.is_empty() || selected.contains(&c);
+                        let active = selected.contains(&c);
                         let cname = s.title_at(c);
                         let r = choice_pill(row, tokens, &cname, active, true);
                         meta.record_modal_response(
@@ -929,13 +1089,17 @@ fn render_mv_filter_transform_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) 
                             &r,
                             FrameInspectEntryInput::modal(&format!("edit.transform.col.{c}"), "checkbox", &cname, Some(active.to_string()), true),
                         );
-                        if r.clicked() && from_edit {
+                        if r.clicked() {
                             if let Some(pos) = selected.iter().position(|x| *x == c) {
-                                selected.remove(pos);
+                                if selected.len() > 1 {
+                                    selected.remove(pos);
+                                }
                             } else {
                                 selected.push(c);
+                                selected.sort_unstable();
                             }
-                            if let Some(spec) = draft_spec.as_mut() {
+                            state.standalone_selected_cols = selected.clone();
+                            if from_edit && let Some(spec) = draft_spec.as_mut() {
                                 spec.selected_data_sets = selected.clone();
                                 intents.push_set_edit_params_draft(spec.clone());
                             }
@@ -944,6 +1108,212 @@ fn render_mv_filter_transform_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) 
                 });
             }
         }
+        _ => {
+            render_target_archetype_selector(
+                ui,
+                TargetArchetypePickerCtx { tokens, meta, state, from_edit, draft_spec: &mut draft_spec, intents },
+                target_arch,
+            );
+        }
+    }
+    state.validation_error = validate_mv_formulas(&state.formula_draft, &filter_formula);
+}
+
+fn validate_mv_formulas(derived_expr: &str, filter_formula: &str) -> Option<String> {
+    if !derived_expr.trim().is_empty()
+        && let Err(err) = parse_formula(derived_expr.trim())
+    {
+        return Some(format!("Formula error: {err}"));
+    }
+    if !filter_formula.trim().is_empty()
+        && let Err(err) = parse_formula(filter_formula.trim())
+    {
+        return Some(format!("Filter syntax: {err}"));
+    }
+    None
+}
+
+struct TargetArchetypePickerCtx<'a> {
+    tokens: &'a Tokens,
+    meta: &'a mut FrameInspectMeta,
+    state: &'a mut TransformModalsEguiState,
+    from_edit: bool,
+    draft_spec: &'a mut Option<AnalysisSpec>,
+    intents: &'a mut PendingUiIntents,
+}
+
+fn render_target_archetype_selector(ui: &mut Ui, pcx: TargetArchetypePickerCtx<'_>, target_kind: TableKind) {
+    let TargetArchetypePickerCtx { tokens, meta, state, from_edit, draft_spec, intents } = pcx;
+    let apply_target =
+        |tk: TableKind, state: &mut TransformModalsEguiState, draft_spec: &mut Option<AnalysisSpec>, intents: &mut PendingUiIntents| {
+            state.extract_target_kind = Some(tk);
+            if from_edit
+                && let Some(spec) = draft_spec.as_mut()
+                && let AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula, derived_columns, .. }) = &spec.kind
+            {
+                spec.kind = AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform {
+                    filter_formula: filter_formula.clone(),
+                    target_archetype: tk,
+                    derived_columns: derived_columns.clone(),
+                });
+                intents.push_set_edit_params_draft(spec.clone());
+            }
+        };
+    ui.label(RichText::new("Target Table Archetype:").strong().color(tokens.text_primary));
+    ui.horizontal_wrapped(|row| {
+        for (tk, slug, lbl) in [
+            (TableKind::Xy, "xy", "Coordinate (XY)"),
+            (TableKind::Column, "column", "Column"),
+            (TableKind::Grouped, "grouped", "Grouped"),
+            (TableKind::Contingency, "contingency", "Contingency"),
+            (TableKind::Survival, "survival", "Survival"),
+            (TableKind::PartsOfWhole, "parts_of_whole", "Parts of Whole"),
+            (TableKind::MultipleVariables, "multiple_variables", "Multiple Variables"),
+            (TableKind::Nested, "nested", "Nested"),
+        ] {
+            let active = target_kind == tk;
+            let r = choice_pill(row, tokens, lbl, active, true);
+            meta.record_modal_response(
+                row,
+                &r,
+                FrameInspectEntryInput::modal(&format!("edit.transform.target_archetype.{slug}"), "radio", lbl, Some(active.to_string()), true),
+            );
+            if r.clicked() {
+                apply_target(tk, state, draft_spec, intents);
+            }
+        }
+    });
+    let legacy_ta = widgets::secondary_button(ui, "Cycle Target Archetype");
+    meta.record_modal_response(
+        ui,
+        &legacy_ta,
+        FrameInspectEntryInput::modal("edit.transform.target_archetype", "button", "Target Archetype", None, true),
+    );
+    if legacy_ta.clicked() {
+        let next_tk = if target_kind == TableKind::Xy { TableKind::Column } else { TableKind::Xy };
+        apply_target(next_tk, state, draft_spec, intents);
+    }
+}
+
+fn render_transpose_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
+    let app = cx.app;
+    let from_edit = cx.from_edit;
+    let tokens = cx.tokens;
+    let state = &mut *cx.state;
+    let meta = &mut *cx.meta;
+    let intents = &mut *cx.intents;
+    let mut draft_spec = app.canvas_dialogs.edit_params.draft.clone();
+    let mut swap_titles = match draft_spec.as_ref().map(|d| &d.kind) {
+        Some(AnalysisKind::Transform(TransformAnalysisSpec::Transpose { swap_row_and_column_titles })) => *swap_row_and_column_titles,
+        _ => state.transpose_swap_titles,
+    };
+
+    ui.label(RichText::new("Transpose Orientation:").strong().color(tokens.text_primary));
+    ui.label(RichText::new("Flip rows and columns into a transposed output table.").size(11.5).color(tokens.text_muted));
+    ui.add_space(4.0);
+    let chk = ui.checkbox(&mut swap_titles, "Swap row and column titles");
+    meta.record_modal_response(
+        ui,
+        &chk,
+        FrameInspectEntryInput::modal(
+            "edit.transform.transpose.swap_titles",
+            "checkbox",
+            "Swap row and column titles",
+            Some(swap_titles.to_string()),
+            true,
+        ),
+    );
+    if chk.changed() {
+        state.transpose_swap_titles = swap_titles;
+        if from_edit && let Some(spec) = draft_spec.as_mut() {
+            spec.kind = AnalysisKind::Transform(TransformAnalysisSpec::Transpose { swap_row_and_column_titles: swap_titles });
+            intents.push_set_edit_params_draft(spec.clone());
+        }
+    }
+}
+
+fn render_prune_rows_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
+    let app = cx.app;
+    let from_edit = cx.from_edit;
+    let tokens = cx.tokens;
+    let state = &mut *cx.state;
+    let meta = &mut *cx.meta;
+    let intents = &mut *cx.intents;
+    let mut draft_spec = app.canvas_dialogs.edit_params.draft.clone();
+    let (every_k, mut avg_win) = match draft_spec.as_ref().map(|d| &d.kind) {
+        Some(AnalysisKind::Transform(TransformAnalysisSpec::PruneRows { every_k_rows, average_window })) => ((*every_k_rows).max(1), *average_window),
+        _ => (state.prune_every_k_rows.max(1), state.prune_average_window),
+    };
+
+    let push_prune = |k: usize, avg: bool, draft_spec: &mut Option<AnalysisSpec>, intents: &mut PendingUiIntents| {
+        if from_edit && let Some(spec) = draft_spec.as_mut() {
+            spec.kind = AnalysisKind::Transform(TransformAnalysisSpec::PruneRows { every_k_rows: k, average_window: avg });
+            intents.push_set_edit_params_draft(spec.clone());
+        }
+    };
+
+    ui.label(RichText::new("Row Pruning Options:").strong().color(tokens.text_primary));
+    ui.horizontal(|row| {
+        row.label("Keep every K rows:");
+        let can_dec = every_k > 1;
+        let minus = row.add_enabled(can_dec, egui::Button::new("-"));
+        meta.record_modal_response(row, &minus, FrameInspectEntryInput::modal("edit.transform.prune.every_k.minus", "button", "-", None, can_dec));
+        if minus.clicked() {
+            let next_k = every_k.saturating_sub(1).max(1);
+            state.prune_every_k_rows = next_k;
+            state.prune_every_k_draft = next_k.to_string();
+            state.validation_error = None;
+            push_prune(next_k, avg_win, &mut draft_spec, intents);
+        }
+
+        let k_edit = row.add(egui::TextEdit::singleline(&mut state.prune_every_k_draft).hint_text("2").desired_width(56.0));
+        meta.record_modal_response(
+            row,
+            &k_edit,
+            FrameInspectEntryInput::modal(
+                "edit.transform.prune.every_k_rows",
+                "textbox",
+                "Keep every K rows",
+                Some(state.prune_every_k_draft.clone()),
+                true,
+            ),
+        );
+        if k_edit.changed() {
+            let trimmed = state.prune_every_k_draft.trim();
+            match trimmed.parse::<usize>() {
+                Ok(k) if (1..=1000).contains(&k) => {
+                    state.prune_every_k_rows = k;
+                    state.validation_error = None;
+                    push_prune(k, avg_win, &mut draft_spec, intents);
+                }
+                _ => {
+                    state.validation_error = Some(String::from("Keep every K rows must be an integer between 1 and 1000."));
+                }
+            }
+        }
+
+        let can_inc = every_k < 1000;
+        let plus = row.add_enabled(can_inc, egui::Button::new("+"));
+        meta.record_modal_response(row, &plus, FrameInspectEntryInput::modal("edit.transform.prune.every_k.plus", "button", "+", None, can_inc));
+        if plus.clicked() {
+            let next_k = (every_k + 1).min(1000);
+            state.prune_every_k_rows = next_k;
+            state.prune_every_k_draft = next_k.to_string();
+            state.validation_error = None;
+            push_prune(next_k, avg_win, &mut draft_spec, intents);
+        }
+    });
+
+    ui.add_space(4.0);
+    let avg_chk = ui.checkbox(&mut avg_win, "Average each K-row block");
+    meta.record_modal_response(
+        ui,
+        &avg_chk,
+        FrameInspectEntryInput::modal("edit.transform.prune.average_window", "checkbox", "Average each K-row block", Some(avg_win.to_string()), true),
+    );
+    if avg_chk.changed() {
+        state.prune_average_window = avg_win;
+        push_prune(state.prune_every_k_rows.max(1), avg_win, &mut draft_spec, intents);
     }
 }
 
@@ -974,55 +1344,13 @@ fn render_extract_and_rearrange_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>
     widgets::divider(ui);
 
     if state.active_tab == 0 {
-        ui.label(RichText::new("Target Table Archetype:").strong().color(tokens.text_primary));
-        ui.horizontal_wrapped(|row| {
-            for (tk, slug, lbl) in [
-                (TableKind::Xy, "xy", "Coordinate (XY)"),
-                (TableKind::Column, "column", "Column"),
-                (TableKind::Grouped, "grouped", "Grouped"),
-                (TableKind::Contingency, "contingency", "Contingency"),
-                (TableKind::Survival, "survival", "Survival"),
-                (TableKind::PartsOfWhole, "parts_of_whole", "Parts of Whole"),
-                (TableKind::MultipleVariables, "multiple_variables", "Multiple Variables"),
-                (TableKind::Nested, "nested", "Nested"),
-            ] {
-                let active = target_kind == tk;
-                let r = choice_pill(row, tokens, lbl, active, true);
-                meta.record_modal_response(
-                    row,
-                    &r,
-                    FrameInspectEntryInput::modal(&format!("edit.transform.target_archetype.{slug}"), "radio", lbl, Some(active.to_string()), true),
-                );
-                if r.clicked() {
-                    state.extract_target_kind = Some(tk);
-                    if from_edit
-                        && let Some(spec) = draft_spec.as_mut()
-                        && let AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula, derived_columns, .. }) = &spec.kind
-                    {
-                        spec.kind = AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform {
-                            filter_formula: filter_formula.clone(),
-                            target_archetype: tk,
-                            derived_columns: derived_columns.clone(),
-                        });
-                        intents.push_set_edit_params_draft(spec.clone());
-                    }
-                }
-            }
-        });
-        let legacy_ta = widgets::secondary_button(ui, "Cycle Target Archetype");
-        meta.record_modal_response(
+        render_target_archetype_selector(
             ui,
-            &legacy_ta,
-            FrameInspectEntryInput::modal("edit.transform.target_archetype", "button", "Target Archetype", None, true),
+            TargetArchetypePickerCtx { tokens, meta, state, from_edit, draft_spec: &mut draft_spec, intents },
+            target_kind,
         );
-        if legacy_ta.clicked() && from_edit {
-            let next_tk = if target_kind == TableKind::Xy { TableKind::Column } else { TableKind::Xy };
-            state.extract_target_kind = Some(next_tk);
-        }
     } else {
         let mode_desc = match kind {
-            TransformModalKind::Transpose => "Transpose rows <-> columns (swap Row & Column titles)",
-            TransformModalKind::PruneRows => "Prune every K rows (optional block averaging)",
             TransformModalKind::Simulate => "Simulate deterministic curve + replicate noise",
             TransformModalKind::RandomSample => "Deterministic random / stratified row sub-sampling",
             _ => "Map source variables into target table roles",
@@ -1031,18 +1359,51 @@ fn render_extract_and_rearrange_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>
         ui.add_space(4.0);
         let sheet_cols: Vec<String> = ds.map(|s| (0..s.archetype.column_count()).map(|c| s.title_at(c)).collect()).unwrap_or_default();
         if !sheet_cols.is_empty() {
-            ui.horizontal(|row| {
+            ui.horizontal_wrapped(|row| {
                 row.label("Predictor / X:");
-                let _ = row.add(egui::TextEdit::singleline(&mut state.extract_binding_x).hint_text(sheet_cols[0].as_str()).desired_width(100.0));
+                let rx = row.add(egui::TextEdit::singleline(&mut state.extract_binding_x).hint_text(sheet_cols[0].as_str()).desired_width(100.0));
+                meta.record_modal_response(
+                    row,
+                    &rx,
+                    FrameInspectEntryInput::modal(
+                        "edit.transform.extract.binding_x",
+                        "textbox",
+                        "Predictor / X",
+                        Some(state.extract_binding_x.clone()),
+                        true,
+                    ),
+                );
                 row.label("Response / Y:");
-                let _ = row.add(
+                let ry = row.add(
                     egui::TextEdit::singleline(&mut state.extract_binding_y)
                         .hint_text(sheet_cols.get(1).map_or("Y", String::as_str))
                         .desired_width(100.0),
                 );
+                meta.record_modal_response(
+                    row,
+                    &ry,
+                    FrameInspectEntryInput::modal(
+                        "edit.transform.extract.binding_y",
+                        "textbox",
+                        "Response / Y",
+                        Some(state.extract_binding_y.clone()),
+                        true,
+                    ),
+                );
                 if matches!(target_kind, TableKind::Grouped | TableKind::Nested | TableKind::Survival) {
                     row.label("Group / Factor:");
-                    let _ = row.add(egui::TextEdit::singleline(&mut state.extract_binding_grp).hint_text("Group").desired_width(90.0));
+                    let rgrp = row.add(egui::TextEdit::singleline(&mut state.extract_binding_grp).hint_text("Group").desired_width(90.0));
+                    meta.record_modal_response(
+                        row,
+                        &rgrp,
+                        FrameInspectEntryInput::modal(
+                            "edit.transform.extract.binding_grp",
+                            "textbox",
+                            "Group / Factor",
+                            Some(state.extract_binding_grp.clone()),
+                            true,
+                        ),
+                    );
                 }
             });
         }
@@ -1248,15 +1609,40 @@ fn build_standalone_transform_params(
                 _ => "difference",
             },
         })),
-        TransformModalKind::MvFilterAndTransform | TransformModalKind::ExtractAndRearrange => Ok(json!({
-            "source_sheet_id": ds.id.as_str(),
-            "kind": "select_and_transform",
-            "filter_formula": (!state.formula_draft.trim().is_empty()).then_some(state.formula_draft.trim()),
-        })),
-        TransformModalKind::Transpose => Ok(json!({ "source_sheet_id": ds.id.as_str(), "kind": "transpose", "swap_row_and_column_titles": true })),
-        TransformModalKind::PruneRows => {
-            Ok(json!({ "source_sheet_id": ds.id.as_str(), "kind": "prune_rows", "every_k_rows": 2, "average_window": false }))
+        TransformModalKind::MvFilterAndTransform | TransformModalKind::ExtractAndRearrange => {
+            let default_target = if kind == TransformModalKind::MvFilterAndTransform { TableKind::MultipleVariables } else { TableKind::Xy };
+            let filter_formula = (!state.filter_formula_draft.trim().is_empty()).then(|| state.filter_formula_draft.trim().to_owned());
+            let target_archetype = state.extract_target_kind.unwrap_or(default_target);
+            let derived_columns =
+                state.derived_cols.iter().map(|(title, formula)| DerivedColumnFormula::new(title.clone(), formula.clone())).collect();
+            let kind_val = serde_json::to_value(AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform {
+                filter_formula,
+                target_archetype,
+                derived_columns,
+            }))
+            .map_err(|err| format!("Failed to encode select/transform spec: {err}"))?;
+            let mut obj = json!({
+                "source_sheet_id": ds.id.as_str(),
+                "kind": kind_val,
+            });
+            if !state.standalone_selected_cols.is_empty()
+                && let Some(m) = obj.as_object_mut()
+            {
+                m.insert(String::from("selected_data_sets"), json!(state.standalone_selected_cols));
+            }
+            Ok(obj)
         }
+        TransformModalKind::Transpose => Ok(json!({
+            "source_sheet_id": ds.id.as_str(),
+            "kind": "transpose",
+            "swap_row_and_column_titles": state.transpose_swap_titles,
+        })),
+        TransformModalKind::PruneRows => Ok(json!({
+            "source_sheet_id": ds.id.as_str(),
+            "kind": "prune_rows",
+            "every_k_rows": state.prune_every_k_rows.max(1),
+            "average_window": state.prune_average_window,
+        })),
         TransformModalKind::Simulate => {
             Ok(json!({ "source_sheet_id": ds.id.as_str(), "kind": "simulate", "seed": 42, "row_count": 13, "replicates": 3 }))
         }

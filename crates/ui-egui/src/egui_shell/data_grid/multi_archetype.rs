@@ -921,13 +921,31 @@ pub(super) fn render_grid_context_menu_popup(
         })
         .unwrap_or_default();
 
+    let is_parts_of_whole = matches!(ds.archetype, TableArchetype::PartsOfWhole(_));
+    let at_col_cap = ds.archetype.column_count() >= curvebook_doc::MAX_DATA_SETS;
+    let right_clicked_x = cell_ctx.is_some_and(|t| t.is_x);
+    let dup_enabled = !ds.frozen && !right_clicked_x && ds.archetype.column_count() > 0 && !is_parts_of_whole && !at_col_cap;
+    let dup_disabled_reason = if ds.frozen {
+        Some("Data sheet is frozen (read-only).")
+    } else if right_clicked_x {
+        Some("Right-click a data column cell (not X/Time) to duplicate.")
+    } else if is_parts_of_whole {
+        Some("Parts-of-Whole tables contain a single column.")
+    } else if at_col_cap {
+        Some("Maximum data column limit reached.")
+    } else if ds.archetype.column_count() == 0 {
+        Some("No data columns available to duplicate.")
+    } else {
+        None
+    };
+
     let area_resp = egui::Area::new(Id::unique(("grid_ctx_menu", ds.id.as_str()))).fixed_pos(pos).order(Order::Foreground).show(ui.ctx(), |m| {
         egui::Frame::popup(m.style()).fill(tokens.panel_bg).stroke(Stroke::new(1.0, tokens.border)).show(m, |list| {
             list.set_min_width(210.0);
             list.label(egui::RichText::new(format!("Row {} Actions", row + 1)).strong().size(11.5).color(tokens.text_muted));
             list.separator();
             type GridCtxItemTuple<'a> = (&'a str, &'a str, Option<&'a str>, bool, Option<&'a str>);
-            let items: [GridCtxItemTuple<'_>; 8] = [
+            let items: [GridCtxItemTuple<'_>; 9] = [
                 (
                     "grid.ctx.style_points",
                     "Style Selected Points on Graph…",
@@ -972,6 +990,7 @@ pub(super) fn render_grid_context_menu_popup(
                 ("grid.ctx.cut", "Cut Selection", Some("edit.cut"), !ds.frozen, ds.frozen.then_some("Data sheet is frozen (read-only).")),
                 ("grid.ctx.copy", "Copy Selection", Some("edit.copy"), true, None),
                 ("grid.ctx.paste", "Paste Here", Some("edit.paste"), !ds.frozen, ds.frozen.then_some("Data sheet is frozen (read-only).")),
+                ("grid.ctx.duplicate_column", "Duplicate Column", Some("table.paste"), dup_enabled, dup_disabled_reason),
             ];
             for (wid, label, command_id, enabled, disabled_reason) in items {
                 let mut r = list.add_enabled(enabled, egui::Button::new(label));
@@ -1098,6 +1117,57 @@ pub(super) fn render_grid_context_menu_popup(
                                 }
                             } else {
                                 intents.push_grid_paste_from_clipboard(app.grid.tool.active);
+                            }
+                        }
+                        "grid.ctx.duplicate_column" => {
+                            let col_count = ds.archetype.column_count();
+                            if col_count > 0 {
+                                let src_col = cell_ctx
+                                    .filter(|t| !t.is_x)
+                                    .map(|t| t.col)
+                                    .or_else(|| app.grid.tool.active.map(|c| c.col))
+                                    .unwrap_or(0)
+                                    .min(col_count.saturating_sub(1));
+                                let n_rows = ds.archetype.row_count().max(1);
+                                let n_sub = crate::grid_view::data_set_subcolumn_count(&ds.archetype, src_col).max(1);
+                                let mut rows_json = Vec::with_capacity(n_rows);
+                                for r in 0..n_rows {
+                                    let mut row_vals = Vec::with_capacity(n_sub);
+                                    for s in 0..n_sub {
+                                        let val = match ds.archetype.data_cell(CellCoord::new(r, src_col, s)).map(|c| &c.value) {
+                                            Some(CellValue::Number(v)) => json!(v),
+                                            Some(CellValue::Text(t)) => json!(t),
+                                            Some(CellValue::Empty) | None => serde_json::Value::Null,
+                                        };
+                                        row_vals.push(val);
+                                    }
+                                    rows_json.push(row_vals);
+                                }
+                                let src_title = crate::dialogs_canvas::data_column_title(ds, src_col)
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty())
+                                    .map_or_else(|| curvebook_doc::default_column_label(src_col), str::to_owned);
+                                let max_base_len = curvebook_doc::MAX_TITLE_BYTES.saturating_sub(" (Copy)".len());
+                                let truncated_base: String =
+                                    src_title.char_indices().take_while(|(idx, ch)| idx + ch.len_utf8() <= max_base_len).map(|(_, ch)| ch).collect();
+                                let new_title = format!("{truncated_base} (Copy)");
+                                intents.push_engine(
+                                    "table.paste",
+                                    json!({
+                                        "sheet_id": ds.id.as_str(),
+                                        "mode": "append_columns",
+                                        "start_row": 0,
+                                        "rows": rows_json,
+                                    }),
+                                );
+                                intents.push_engine(
+                                    "table.setTitles",
+                                    json!({
+                                        "sheet_id": ds.id.as_str(),
+                                        "col": col_count,
+                                        "title": new_title,
+                                    }),
+                                );
                             }
                         }
                         _ => {}

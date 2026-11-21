@@ -61,6 +61,10 @@ fn sync_format_axes_local_drafts(app: &UiApp, state: &mut GraphModalEguiState) {
         state.axis_min_draft = seg0.and_then(|s| s.min).map(|v| format_localized_draft_f64(v, &app.locale_preset)).unwrap_or_default();
         state.axis_max_draft = seg0.and_then(|s| s.max).map(|v| format_localized_draft_f64(v, &app.locale_preset)).unwrap_or_default();
         state.axis_bounds_error = None;
+        state.axis_major_interval_draft =
+            seg0.and_then(|s| s.major_tick_interval).map(|v| format_localized_draft_f64(v, &app.locale_preset)).unwrap_or_default();
+        state.axis_minor_ticks_draft = seg0.map_or(0, |s| s.minor_ticks_per_interval.min(10));
+        state.axis_ticks_error = None;
         state.axis_min_spinner.draft_text.clear();
         state.axis_min_spinner.editing = false;
         state.axis_max_spinner.draft_text.clear();

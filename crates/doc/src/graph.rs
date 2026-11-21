@@ -176,7 +176,7 @@ pub enum HeatmapColumnLabelAngle {
 }
 
 /// Row/column label display and rotation configuration for diagnostic heatmaps.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct HeatmapLabelSpec {
     /// Row label text mode along the vertical axis.
     #[serde(default)]
@@ -187,6 +187,12 @@ pub struct HeatmapLabelSpec {
     /// Column label rotation preset.
     #[serde(default)]
     pub column_angle: HeatmapColumnLabelAngle,
+    /// Whether to render centered numeric value annotations inside heatmap tiles.
+    #[serde(default)]
+    pub annotate_cells: bool,
+    /// Gap inset in points between adjacent heatmap tiles (`0.0..=12.0`).
+    #[serde(default)]
+    pub cell_gap_pt: f64,
 }
 
 /// Display metric plotted by [`GraphicalDataObject::KaplanMeierStep`] curves.
@@ -1552,6 +1558,9 @@ impl GraphSpec {
         }
         if self.legend.position_pt.is_some_and(|(x, y)| !x.is_finite() || !y.is_finite()) {
             return Some("spec.legend.position_pt");
+        }
+        if !self.heatmap_labels.cell_gap_pt.is_finite() {
+            return Some("spec.heatmap_labels.cell_gap_pt");
         }
         None
     }

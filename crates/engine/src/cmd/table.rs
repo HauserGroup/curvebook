@@ -3,12 +3,12 @@
 use std::collections::{BTreeMap, HashSet};
 
 use curvebook_doc::{
-    AnalysisKind, BaselineOperation, Cell, CellCoord, CellValue, ColorChannelMapping, ConstantValue, DataSetColumn, DataSheet, GraphSheet,
-    HookSource, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet, InternalLinkKind, LevelOrderKind, LevelOrderSpec, LinkSource,
-    MAX_DATA_SETS, MultipleVariablesTable, MultiplicityMethod, MultivariateSpec, NestedGroupColumn, NestedTable, NormalizeAnchor, ParameterScope,
-    PlacementMode, ProjectDocument, ResultSheet, SheetCellRange, SheetId, SimulationNoise, SizeChannelMapping, SubcolumnMode, SurvivalAnalysisSpec,
-    TableArchetype, TableKind, TransformAnalysisSpec, VariableColumn, VariableRole, VariableSource, XColumnMode, format_linked_paste_tsv_cell,
-    validate_rows, validate_title,
+    AnalysisKind, BaselineOperation, Cell, CellCoord, CellValue, ColorChannelMapping, ConstantValue, DataSetColumn, DataSheet, GraphKind, GraphSheet,
+    GraphSpec, HookSource, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet, InternalLinkKind, LevelOrderKind, LevelOrderSpec,
+    LinkSource, MAX_DATA_SETS, MultipleVariablesTable, MultiplicityMethod, MultivariateSpec, NestedGroupColumn, NestedTable, NormalizeAnchor,
+    ParameterScope, PlacementMode, ProjectDocument, ResultSheet, SheetCellRange, SheetId, SimulationNoise, SizeChannelMapping, SubcolumnMode,
+    SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, VariableColumn, VariableRole, VariableSource, XColumnMode,
+    format_linked_paste_tsv_cell, validate_rows, validate_title,
 };
 use curvebook_format::{CsvOptions, export_datasheet_to_csv, export_result_sheet_tidy_csv};
 use curvebook_transform::{
@@ -2575,6 +2575,7 @@ fn run_paste(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineErro
 
     let doc = &mut ctx.session.doc;
     let ds = require_unfrozen_data_sheet_mut(doc, &id)?;
+    let old_cols = ds.archetype.column_count();
     let existing_links = ds.linked_regions.len();
     let opts = ImportPipelineOptions::default();
 
@@ -2594,6 +2595,21 @@ fn run_paste(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineErro
     };
 
     ds.linked_regions.truncate(existing_links);
+    let new_cols = ds.archetype.column_count();
+    let appended_ds = (spec.placement.mode == PlacementMode::AppendColumns && new_cols > old_cols).then(|| ds.clone());
+    if let Some(updated_ds) = appended_ds {
+        let default_spec = GraphSpec::default_for_data_sheet(&updated_ds);
+        for g in &mut doc.graph_sheets {
+            if g.spec.primary_source_sheet_id == id
+                && matches!(g.spec.kind, GraphKind::Xy | GraphKind::Column | GraphKind::Grouped | GraphKind::Survival)
+                && g.spec.series.len() == old_cols
+                && (0..old_cols).all(|i| g.spec.series[i].data_set_index == i)
+                && let Some(new_series) = default_spec.series.get(old_cols..new_cols)
+            {
+                g.spec.series.extend(new_series.iter().cloned());
+            }
+        }
+    }
     let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         "table.paste",

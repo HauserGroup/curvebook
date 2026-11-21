@@ -143,15 +143,21 @@ pub(super) fn render_factorial_anova_design(
     render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
 }
 
+pub(super) struct MultivariateDesignCtx<'a> {
+    pub doc: &'a ProjectDocument,
+    pub ep: &'a EditAnalysisParametersState,
+    pub spec: &'a curvebook_doc::AnalysisSpec,
+    pub mv: &'a MultivariateSpec,
+}
+
 pub(super) fn render_multivariate_design_controls(
     ui: &mut Ui,
-    doc: &ProjectDocument,
-    spec: &curvebook_doc::AnalysisSpec,
-    mv: &MultivariateSpec,
+    mvx: MultivariateDesignCtx<'_>,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let MultivariateDesignCtx { doc, ep, spec, mv } = mvx;
     match mv {
         MultivariateSpec::Pca { standardize, parallel_analysis_seed } => {
             render_section_title(ui, tokens, "PCA Matrix & Component Retention");
@@ -225,8 +231,21 @@ pub(super) fn render_multivariate_design_controls(
                 }
                 intents.push_set_edit_params_draft(next);
             }
-            let heat_en = r7_correlation_heatmap_toggle(true);
-            let _ = render_modal_checkbox(ui, tokens, meta, "edit.corr.heatmap", "Generate correlation heatmap graph", true, &heat_en);
+            if render_modal_checkbox(
+                ui,
+                tokens,
+                meta,
+                "edit.corr.all_pairs",
+                "Compute all pairwise correlations",
+                ep.correlation_all_pairs,
+                &ControlEnablement::enabled(),
+            ) {
+                intents.push_custom_view_action("stat_params", "toggle_corr_all_pairs");
+            }
+            let heat_en = r7_correlation_heatmap_toggle(ep.correlation_all_pairs);
+            if render_modal_checkbox(ui, tokens, meta, "edit.corr.heatmap", "Generate correlation heatmap graph", ep.correlation_heatmap, &heat_en) {
+                intents.push_custom_view_action("stat_params", "toggle_corr_heatmap");
+            }
         }
         MultivariateSpec::Clustering { k_means_k, distance, linkage, k_sweep_max } => {
             render_section_title(ui, tokens, "Distance Metric & Linkage");
