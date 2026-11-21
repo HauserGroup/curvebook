@@ -5,13 +5,14 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fmt;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use curvebook_doc::{ErrorCode, ProjectDocument, ResultSheet, SheetId, SheetSection};
 use curvebook_engine::cmd::{Caller, CommandGroup, Effects, registry};
 use curvebook_engine::{EngineError, ExternalPathPolicy, GuiOnlyPolicy, Session};
 use curvebook_format::{CsvOptions, export_datasheet_to_csv};
+use curvebook_platform::sync::{LockError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 #[cfg(not(target_arch = "wasm32"))]
 use curvebook_platform::{PlatformError, WorkdirGuard};
 use serde::{Deserialize, Serialize};
@@ -33,18 +34,27 @@ struct CancellationInner {
 }
 
 /// Thread-safe registry mapping JSON-RPC request IDs to cooperative [`AtomicBool`] cancellation tokens.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct CancellationRegistry {
     inner: Arc<RwLock<CancellationInner>>,
 }
 
+impl Default for CancellationRegistry {
+    fn default() -> Self {
+        Self { inner: Arc::new(RwLock::named("mcp.cancellation_registry", CancellationInner::default())) }
+    }
+}
+
 impl fmt::Debug for CancellationRegistry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let guard = self.read_inner();
-        f.debug_struct("CancellationRegistry")
-            .field("active_count", &guard.active.len())
-            .field("pre_cancelled_count", &guard.pre_cancelled.len())
-            .finish()
+        match self.read_inner() {
+            Ok(guard) => f
+                .debug_struct("CancellationRegistry")
+                .field("active_count", &guard.active.len())
+                .field("pre_cancelled_count", &guard.pre_cancelled.len())
+                .finish(),
+            Err(err) => f.debug_struct("CancellationRegistry").field("lock_error", &err.to_string()).finish(),
+        }
     }
 }
 
@@ -55,8 +65,9 @@ pub(crate) struct ActiveRequestCancelGuard {
 
 impl Drop for ActiveRequestCancelGuard {
     fn drop(&mut self) {
-        let mut guard = self.registry.write_inner();
-        guard.active.remove(&self.key);
+        if let Ok(mut guard) = self.registry.write_inner() {
+            guard.active.remove(&self.key);
+        }
     }
 }
 
@@ -75,18 +86,12 @@ impl CancellationRegistry {
         Self::default()
     }
 
-    fn read_inner(&self) -> RwLockReadGuard<'_, CancellationInner> {
-        match self.inner.read() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+    fn read_inner(&self) -> Result<RwLockReadGuard<'_, CancellationInner>, LockError> {
+        self.inner.read_or_recover()
     }
 
-    fn write_inner(&self) -> RwLockWriteGuard<'_, CancellationInner> {
-        match self.inner.write() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+    fn write_inner(&self) -> Result<RwLockWriteGuard<'_, CancellationInner>, LockError> {
+        self.inner.write_or_recover()
     }
 
     /// Signal cooperative cancellation for `request_id`.
@@ -99,7 +104,9 @@ impl CancellationRegistry {
         let Some(key) = canonical_request_id_key(request_id) else {
             return false;
         };
-        let mut guard = self.write_inner();
+        let Ok(mut guard) = self.write_inner() else {
+            return false;
+        };
         if let Some(token) = guard.active.get(&key) {
             token.store(true, Ordering::Release);
             return true;
@@ -116,14 +123,16 @@ impl CancellationRegistry {
     /// Number of currently registered in-flight requests.
     #[must_use]
     pub fn active_count(&self) -> usize {
-        self.read_inner().active.len()
+        self.read_inner().map_or(0, |guard| guard.active.len())
     }
 
     pub(crate) fn begin_request(&self, request_id: &Value) -> (Arc<AtomicBool>, Option<ActiveRequestCancelGuard>) {
         let Some(key) = canonical_request_id_key(request_id) else {
             return (Arc::new(AtomicBool::new(false)), None);
         };
-        let mut guard = self.write_inner();
+        let Ok(mut guard) = self.write_inner() else {
+            return (Arc::new(AtomicBool::new(false)), None);
+        };
         let was_pre_cancelled = if let Some(pos) = guard.pre_cancelled.iter().position(|item| item == &key) {
             let _ = guard.pre_cancelled.remove(pos);
             true

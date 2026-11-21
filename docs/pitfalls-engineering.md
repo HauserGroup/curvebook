@@ -296,7 +296,11 @@ Starting a backend can load a faulty driver that crashes natively before any pan
 
 **Bind a lock guard once per statement, and never re-lock what the caller holds.**
 A temporary guard lives to the end of its statement, so a second lock in the same expression deadlocks, and a handler that locks the session it is running under waits forever.
-*In CurveBook:* [clippy.toml](../clippy.toml) disallows raw `std::sync::Mutex` until a checked lock wrapper lands, and command handlers receive the session through `Ctx` (`crates/engine/src/cmd/mod.rs`) rather than reaching for a shared one. Any future lock wrapper should keep both properties.
+*In CurveBook:* [clippy.toml](../clippy.toml) disallows raw `std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard}` across all targets, and command handlers receive the session through `Ctx` (`crates/engine/src/cmd/mod.rs`) rather than reaching for a shared one. Use `curvebook_platform::sync::{Mutex, RwLock}` (`crates/platform/src/sync.rs`), bind each guard to a local variable (`let guard = ...;`), and drop it before calling back into code that could acquire the same or another lock.
+
+**Always use `curvebook_platform::sync::{Mutex, RwLock}` with descriptive names and explicit long-job markers.**
+Raw synchronization primitives hang silently on self-reentry, AB/BA lock-order inversions, and wedged holders, and `wasm32-unknown-unknown` panics on `std::time::Instant::now()` or background watchdog threads.
+*In CurveBook:* construct locks with `Mutex::named` / `RwLock::named`, handle `LockError::{WouldDeadlock, TimedOut, Poisoned}` explicitly (or use `lock_or_recover` / `read_or_recover` / `write_or_recover` for stubs/caches that opt into poison recovery, never `unwrap()` / `expect()` / `catch_unwind`), keep heavy computation outside the lock guard, and mark intentionally long critical sections with `lock_long_job` / `read_long_job` / `write_long_job` so waiters are not cut off at the normal wait limit. Only `crates/platform/src/sync.rs` may carry narrow `#[allow(clippy::disallowed_types)]` annotations on the wrapped primitives themselves.
 
 **Atomic rename does not make read-modify-write safe across processes.**
 Each writer can read, modify, and rename its own copy and silently drop the other's update.

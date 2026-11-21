@@ -13,7 +13,9 @@
 mod human_wf_common;
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use curvebook_platform::sync::RwLock;
 
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, CellCoord, DataSheet, DescriptiveSpec, GraphKind, GraphSheet, InfoConstant, InfoSheet, LayoutItem, LayoutSheet,
@@ -266,7 +268,7 @@ impl PlatformClipboardAdapter for CustomBundleCaptureAdapter {
     }
 
     fn write_bundle(&self, bundle: &ClipboardBundle) -> Result<OsAdapterStatus, String> {
-        let mut guard = self.captured.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = self.captured.write_or_recover().map_err(|err| err.to_string())?;
         guard.push(bundle.clone());
         Ok(OsAdapterStatus {
             available: true,
@@ -330,7 +332,7 @@ fn r10_23_graph_and_layout_cmd_ctrl_c_vector_clipboard_bundle_human_path() -> Re
     custom_harness.click("nav.chip.layouts")?;
     custom_harness.click("nav.sheet.layout-1")?;
     custom_harness.driver.press_egui_key(Key::C, Modifiers::COMMAND);
-    let custom_captured = custom_adapter.captured.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let custom_captured = custom_adapter.captured.read_or_recover().map_err(|err| err.to_string())?;
     assert_eq!(custom_captured.len(), 1);
     assert_eq!(custom_captured[0].dpi, 288, "2.0x HiDPI viewport should encode 288 DPI raster fallback");
     assert_valid_vector_bundle(&custom_captured[0], "HiDPI 2.0x LayoutSheet Cmd+C")?;

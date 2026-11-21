@@ -257,7 +257,7 @@ struct StubClipboardInner {
 /// to capture [`ClipboardBundle`] and UTF-8 text writes with zero live OS pasteboard mutation.
 #[derive(Debug, Clone)]
 pub struct StubPlatformClipboardAdapter {
-    inner: std::sync::Arc<std::sync::RwLock<StubClipboardInner>>,
+    inner: std::sync::Arc<curvebook_platform::sync::RwLock<StubClipboardInner>>,
 }
 
 impl Default for StubPlatformClipboardAdapter {
@@ -271,12 +271,10 @@ impl StubPlatformClipboardAdapter {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            inner: std::sync::Arc::new(std::sync::RwLock::new(StubClipboardInner {
-                bundles: Vec::new(),
-                texts: Vec::new(),
-                image_bytes: None,
-                available: true,
-            })),
+            inner: std::sync::Arc::new(curvebook_platform::sync::RwLock::named(
+                "ui.stub_clipboard",
+                StubClipboardInner { bundles: Vec::new(), texts: Vec::new(), image_bytes: None, available: true },
+            )),
         }
     }
 
@@ -285,68 +283,65 @@ impl StubPlatformClipboardAdapter {
     #[must_use]
     pub fn unavailable() -> Self {
         Self {
-            inner: std::sync::Arc::new(std::sync::RwLock::new(StubClipboardInner {
-                bundles: Vec::new(),
-                texts: Vec::new(),
-                image_bytes: None,
-                available: false,
-            })),
+            inner: std::sync::Arc::new(curvebook_platform::sync::RwLock::named(
+                "ui.stub_clipboard.unavailable",
+                StubClipboardInner { bundles: Vec::new(), texts: Vec::new(), image_bytes: None, available: false },
+            )),
         }
     }
 
     /// Return all captured multi-flavor [`ClipboardBundle`] writes in submission order.
     #[must_use]
     pub fn captured_bundles(&self) -> Vec<ClipboardBundle> {
-        let guard = self.inner.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.bundles.clone()
+        self.inner.read_or_recover().map(|guard| guard.bundles.clone()).unwrap_or_default()
     }
 
     /// Return the most recently captured [`ClipboardBundle`], if any.
     #[must_use]
     pub fn last_bundle(&self) -> Option<ClipboardBundle> {
-        let guard = self.inner.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.bundles.last().cloned()
+        self.inner.read_or_recover().ok().and_then(|guard| guard.bundles.last().cloned())
     }
 
     /// Return all captured plain-text / TSV writes in submission order.
     #[must_use]
     pub fn captured_texts(&self) -> Vec<String> {
-        let guard = self.inner.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.texts.clone()
+        self.inner.read_or_recover().map(|guard| guard.texts.clone()).unwrap_or_default()
     }
 
     /// Return the most recently captured plain-text / TSV write, if any.
     #[must_use]
     pub fn last_text(&self) -> Option<String> {
-        let guard = self.inner.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.texts.last().cloned()
+        self.inner.read_or_recover().ok().and_then(|guard| guard.texts.last().cloned())
     }
 
     /// Seed plain UTF-8 / TSV text into the stub clipboard so raw `Cmd/Ctrl+V` reads it.
     pub fn seed_text(&self, text: impl Into<String>) {
-        let mut guard = self.inner.write().unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.image_bytes = None;
-        guard.texts.push(text.into());
+        if let Ok(mut guard) = self.inner.write_or_recover() {
+            guard.image_bytes = None;
+            guard.texts.push(text.into());
+        }
     }
 
     /// Seed encoded PNG/JPEG/TIFF bytes into the stub clipboard for image paste testing.
     pub fn seed_image_bytes(&self, bytes: Vec<u8>) {
-        let mut guard = self.inner.write().unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.image_bytes = Some(bytes);
+        if let Ok(mut guard) = self.inner.write_or_recover() {
+            guard.image_bytes = Some(bytes);
+        }
     }
 
     /// Clear all captured bundle, text, and seeded image entries.
     pub fn clear(&self) {
-        let mut guard = self.inner.write().unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.bundles.clear();
-        guard.texts.clear();
-        guard.image_bytes = None;
+        if let Ok(mut guard) = self.inner.write_or_recover() {
+            guard.bundles.clear();
+            guard.texts.clear();
+            guard.image_bytes = None;
+        }
     }
 }
 
 impl PlatformClipboardAdapter for StubPlatformClipboardAdapter {
     fn write_text(&self, text: &str) -> Result<OsAdapterStatus, String> {
-        let mut guard = self.inner.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = self.inner.write_or_recover().map_err(|err| err.to_string())?;
         guard.image_bytes = None;
         guard.texts.push(text.to_owned());
         if guard.available {
@@ -368,7 +363,7 @@ impl PlatformClipboardAdapter for StubPlatformClipboardAdapter {
         if flavors.is_empty() {
             return Err(String::from("cannot write empty clipboard bundle to pasteboard"));
         }
-        let mut guard = self.inner.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = self.inner.write_or_recover().map_err(|err| err.to_string())?;
         guard.bundles.push(bundle.clone());
         if guard.available {
             Ok(OsAdapterStatus {
@@ -385,7 +380,7 @@ impl PlatformClipboardAdapter for StubPlatformClipboardAdapter {
     }
 
     fn read_text(&self) -> Result<OsAdapterStatus, String> {
-        let guard = self.inner.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let guard = self.inner.read_or_recover().map_err(|err| err.to_string())?;
         if !guard.available {
             return Ok(OsAdapterStatus::unavailable("stub-pasteboard", "stubbed pasteboard marked unavailable"));
         }
@@ -401,7 +396,7 @@ impl PlatformClipboardAdapter for StubPlatformClipboardAdapter {
     }
 
     fn read_image_bytes(&self) -> Result<Option<Vec<u8>>, String> {
-        let guard = self.inner.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let guard = self.inner.read_or_recover().map_err(|err| err.to_string())?;
         if !guard.available {
             return Ok(None);
         }
@@ -460,7 +455,7 @@ struct StubUrlOpenerInner {
 /// In-memory [`PlatformUrlOpener`] test double recording allowlisted URL launches with zero OS side effects.
 #[derive(Debug, Clone)]
 pub struct StubPlatformUrlOpener {
-    inner: std::sync::Arc<std::sync::RwLock<StubUrlOpenerInner>>,
+    inner: std::sync::Arc<curvebook_platform::sync::RwLock<StubUrlOpenerInner>>,
 }
 
 impl Default for StubPlatformUrlOpener {
@@ -473,40 +468,49 @@ impl StubPlatformUrlOpener {
     /// Construct an available URL opener stub.
     #[must_use]
     pub fn new() -> Self {
-        Self { inner: std::sync::Arc::new(std::sync::RwLock::new(StubUrlOpenerInner { urls: Vec::new(), available: true })) }
+        Self {
+            inner: std::sync::Arc::new(curvebook_platform::sync::RwLock::named(
+                "ui.stub_url_opener",
+                StubUrlOpenerInner { urls: Vec::new(), available: true },
+            )),
+        }
     }
 
     /// Construct an unavailable URL opener stub that still records submitted allowlisted URLs.
     #[must_use]
     pub fn unavailable() -> Self {
-        Self { inner: std::sync::Arc::new(std::sync::RwLock::new(StubUrlOpenerInner { urls: Vec::new(), available: false })) }
+        Self {
+            inner: std::sync::Arc::new(curvebook_platform::sync::RwLock::named(
+                "ui.stub_url_opener.unavailable",
+                StubUrlOpenerInner { urls: Vec::new(), available: false },
+            )),
+        }
     }
 
     /// Return all captured URLs in submission order.
     #[must_use]
     pub fn captured_urls(&self) -> Vec<String> {
-        let guard = self.inner.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.urls.clone()
+        self.inner.read_or_recover().map(|guard| guard.urls.clone()).unwrap_or_default()
     }
 
     /// Return the most recently captured URL, if any.
     #[must_use]
     pub fn last_url(&self) -> Option<String> {
-        let guard = self.inner.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.urls.last().cloned()
+        self.inner.read_or_recover().ok().and_then(|guard| guard.urls.last().cloned())
     }
 
     /// Clear all captured URLs.
     pub fn clear(&self) {
-        let mut guard = self.inner.write().unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.urls.clear();
+        if let Ok(mut guard) = self.inner.write_or_recover() {
+            guard.urls.clear();
+        }
     }
 }
 
 impl PlatformUrlOpener for StubPlatformUrlOpener {
     fn open_external_url(&self, url: &str) -> Result<OsAdapterStatus, String> {
         crate::feedback::validate_github_issue_url(url)?;
-        let mut guard = self.inner.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = self.inner.write_or_recover().map_err(|err| err.to_string())?;
         guard.urls.push(url.to_owned());
         if guard.available {
             Ok(OsAdapterStatus {

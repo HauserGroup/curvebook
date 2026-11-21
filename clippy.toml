@@ -5,6 +5,10 @@ allow-expect-in-tests = true
 allow-panic-in-tests = true
 allow-indexing-slicing-in-tests = true
 disallowed-types = [
-  { path = "std::sync::Mutex", reason = "avoid raw std::sync::Mutex; keep shared state single-owner or use message passing until a checked lock wrapper lands" },
+  { path = "std::sync::Mutex", reason = "use curvebook_platform::sync::Mutex (or single-owner / message passing) so lock re-entry, cycles, and unbounded waits are caught" },
+  { path = "std::sync::MutexGuard", reason = "use curvebook_platform::sync::MutexGuard via curvebook_platform::sync::Mutex" },
+  { path = "std::sync::RwLock", reason = "use curvebook_platform::sync::RwLock so lock re-entry, cycles, and unbounded waits are caught" },
+  { path = "std::sync::RwLockReadGuard", reason = "use curvebook_platform::sync::RwLockReadGuard via curvebook_platform::sync::RwLock" },
+  { path = "std::sync::RwLockWriteGuard", reason = "use curvebook_platform::sync::RwLockWriteGuard via curvebook_platform::sync::RwLock" },
 ]
 cognitive-complexity-threshold = 30

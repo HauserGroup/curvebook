@@ -55,6 +55,11 @@ Follow the existing seams below whenever adding a capability. Every user-facing 
 - **Where:** `crates/ui-egui/src/i18n.rs` and registered catalog shards; [localization guide](localization.md)
 - **How:** Add the key in the appropriate registered catalog or shard and provide translations across all active locale tables without duplicating existing keys. Run `cargo xtask i18n-report` (runs the `untranslated_report` test in `curvebook-ui-egui`) to list untranslated keys, and `cargo test -p curvebook-ui-egui`.
 
+### Checked shared-state lock (`curvebook_platform::sync`)
+
+- **Where:** `crates/platform/src/sync.rs` (`Mutex`, `RwLock`, `LockError`, `LockLimits`), enforced workspace-wide by `disallowed-types` in [`clippy.toml`](../clippy.toml)
+- **How:** Prefer single-owner state or message passing first. When shared mutable state across threads is genuinely needed, wrap it in `curvebook_platform::sync::Mutex::named` or `RwLock::named` instead of `std::sync::{Mutex, RwLock}` (never place `#[allow(clippy::disallowed_types)]` outside `crates/platform/src/sync.rs`). Keep guards short-lived (never perform rendering, I/O, or callbacks while holding a lock), label intentionally long critical sections with `lock_long_job` / `read_long_job` / `write_long_job`, surface or recover from `LockError::{WouldDeadlock, TimedOut, Poisoned}` without `unwrap()` / `catch_unwind`, and verify `cargo xtask ci wasm` stays green (the wrapper avoids `Instant::now()` and watchdog threads on `wasm32-unknown-unknown`).
+
 ### Persisted-file version / migration
 
 - **Where:** `crates/format/src/versioned.rs` (`VersionStep`, `upgrade`, `PREFERENCES_MIGRATION_STEPS`), `crates/format/src/archive.rs` (`MIGRATION_STEPS`), config loaders in `apps/curvebook/src/main.rs`

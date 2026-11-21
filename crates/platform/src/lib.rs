@@ -1,5 +1,5 @@
 //! Host platform safety primitives for CurveBook: atomic filesystem writes, bounded
-//! subprocess execution, and canonicalized `--workdir` path containment.
+//! subprocess execution, canonicalized `--workdir` path containment, and checked shared-state locks.
 //!
 //! Layer L0 crate: depends only on `std`, `serde`, and `serde_json`. Compiles cleanly on
 //! `wasm32` targets with host-only OS operations gated behind `#[cfg(not(target_arch = "wasm32"))]`.
@@ -8,6 +8,7 @@
 pub mod fs;
 pub mod path_guard;
 pub mod process;
+pub mod sync;
 
 use std::fmt;
 
