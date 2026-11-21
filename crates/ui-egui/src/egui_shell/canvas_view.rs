@@ -1,7 +1,7 @@
 //! Native `egui` async `ChartScene` / `LayoutScene` viewport (`docs/planning/gui-layout-spec.md`
 //! §8.11A & §8.12, `R15.3`).
 
-use std::sync::{Arc, PoisonError, RwLock, mpsc};
+use std::sync::{Arc, mpsc};
 
 use curvebook_chart::equation_box::resolve_model_equation_hit_bounds;
 use curvebook_chart::{ChartScene, PathCmd, PointPt, RectPt, ScenePrimitive};
@@ -11,6 +11,7 @@ use curvebook_doc::{
 };
 use curvebook_fit::tex_format::{format_model_equation_tex, format_polynomial_equation_tex};
 use curvebook_palette::{CanvasPreviewFilter, Rgba8};
+use curvebook_platform::sync::RwLock;
 use curvebook_render::{RasterImage, RenderTargetSpec, apply_canvas_preview_filter, render_scene};
 use curvebook_tools::GridCellCoord;
 use curvebook_tools::canvas::{PhysicalUnit, SnapGuide, SnapOrientation, SnapSource};
@@ -153,7 +154,7 @@ pub struct CanvasAsyncWorkerStats {
 pub fn canvas_async_worker_stats(ctx: &egui::Context) -> Option<CanvasAsyncWorkerStats> {
     let worker_id = Id::unique("egui_shell.canvas_async_worker");
     let handle: AsyncRasterWorkerHandle = ctx.data(|d| d.get_temp(worker_id))?;
-    let guard = handle.owner.results.read().unwrap_or_else(PoisonError::into_inner);
+    let guard = handle.owner.results.read_or_recover().ok()?;
     Some(CanvasAsyncWorkerStats {
         worker_spawn_count: guard.worker_spawn_count,
         submitted_count: guard.submitted_count,
@@ -187,8 +188,10 @@ struct AsyncRasterWorkerOwner {
 impl Drop for AsyncRasterWorkerOwner {
     fn drop(&mut self) {
         // Close the request channel first so the worker exits its `recv()` loop cleanly.
-        let _ = self.tx.write().unwrap_or_else(PoisonError::into_inner).take();
-        let handle = self.join.write().unwrap_or_else(PoisonError::into_inner).take();
+        if let Ok(mut tx_guard) = self.tx.write_or_recover() {
+            let _ = tx_guard.take();
+        }
+        let handle = self.join.write_or_recover().ok().and_then(|mut guard| guard.take());
         if let Some(join_handle) = handle {
             // An in-flight job holds an `egui::Context` clone, and the context owns this worker
             // handle. When the worker drops the last context reference, this `Drop` runs on the
@@ -213,11 +216,20 @@ impl AsyncRasterWorkerHandle {
             return Some(existing);
         }
         let (tx, rx) = mpsc::channel();
-        let results = Arc::new(RwLock::new(RasterWorkerResults { worker_spawn_count: 1, ..RasterWorkerResults::default() }));
+        let results = Arc::new(RwLock::named(
+            "egui_shell.canvas_raster_results",
+            RasterWorkerResults { worker_spawn_count: 1, ..RasterWorkerResults::default() },
+        ));
         let results_bg = Arc::clone(&results);
         let join_handle =
             std::thread::Builder::new().name(String::from("cb-canvas-raster")).spawn(move || raster_worker_loop(&rx, &results_bg)).ok()?;
-        let handle = Self { owner: Arc::new(AsyncRasterWorkerOwner { tx: RwLock::new(Some(tx)), results, join: RwLock::new(Some(join_handle)) }) };
+        let handle = Self {
+            owner: Arc::new(AsyncRasterWorkerOwner {
+                tx: RwLock::named("egui_shell.canvas_raster_tx", Some(tx)),
+                results,
+                join: RwLock::named("egui_shell.canvas_raster_join", Some(join_handle)),
+            }),
+        };
         ctx.data_mut(|d| d.insert_temp(worker_id, handle.clone()));
         Some(handle)
     }
@@ -230,30 +242,30 @@ impl AsyncRasterWorkerHandle {
         filter: CanvasPreviewFilter,
         ctx_wake: &egui::Context,
     ) -> Option<Option<RasterImage>> {
-        let mut guard = self.owner.results.write().unwrap_or_else(PoisonError::into_inner);
+        let mut guard = self.owner.results.write_or_recover().ok()?;
         if let Some(pos) = guard.completed.iter().position(|(sk, rk, _)| *sk == slot_key && *rk == req_key) {
             let (_, _, img) = guard.completed.remove(pos);
             return Some(img);
         }
         let already_submitted = guard.last_submitted.iter().any(|(sk, rk)| *sk == slot_key && *rk == req_key);
-        if !already_submitted {
-            let tx_guard = self.owner.tx.read().unwrap_or_else(PoisonError::into_inner);
-            if let Some(tx) = tx_guard.as_ref() {
-                let request = RasterJobRequest {
-                    slot_key: slot_key.clone(),
-                    req_key: req_key.clone(),
-                    scene: Arc::clone(scene),
-                    filter,
-                    ctx_wake: ctx_wake.clone(),
-                };
-                if tx.send(request).is_ok() {
-                    if let Some(entry) = guard.last_submitted.iter_mut().find(|(sk, _)| *sk == slot_key) {
-                        entry.1 = req_key;
-                    } else {
-                        guard.last_submitted.push((slot_key, req_key));
-                    }
-                    guard.submitted_count = guard.submitted_count.saturating_add(1);
+        if !already_submitted
+            && let Ok(tx_guard) = self.owner.tx.read_or_recover()
+            && let Some(tx) = tx_guard.as_ref()
+        {
+            let request = RasterJobRequest {
+                slot_key: slot_key.clone(),
+                req_key: req_key.clone(),
+                scene: Arc::clone(scene),
+                filter,
+                ctx_wake: ctx_wake.clone(),
+            };
+            if tx.send(request).is_ok() {
+                if let Some(entry) = guard.last_submitted.iter_mut().find(|(sk, _)| *sk == slot_key) {
+                    entry.1 = req_key;
+                } else {
+                    guard.last_submitted.push((slot_key, req_key));
                 }
+                guard.submitted_count = guard.submitted_count.saturating_add(1);
             }
         }
         None
@@ -295,8 +307,7 @@ fn raster_worker_loop(rx: &mpsc::Receiver<RasterJobRequest>, results: &RwLock<Ra
 
         coalesce_pending_raster_jobs(rx, &mut pending);
         let superseded = pending.iter().any(|p| p.slot_key == job.slot_key);
-        {
-            let mut guard = results.write().unwrap_or_else(PoisonError::into_inner);
+        if let Ok(mut guard) = results.write_or_recover() {
             guard.rendered_count = guard.rendered_count.saturating_add(1);
             if !superseded {
                 if let Some(slot) = guard.completed.iter_mut().find(|(sk, _, _)| *sk == job.slot_key) {
@@ -2581,8 +2592,10 @@ fn update_corner_resize_gesture(ui: &egui::Ui, ov: &CanvasOverlayCtx<'_>, g: &mu
 #[cfg(test)]
 mod raster_worker_drop_tests {
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, RwLock, mpsc};
+    use std::sync::{Arc, mpsc};
     use std::time::{Duration, Instant};
+
+    use curvebook_platform::sync::RwLock;
 
     use super::{AsyncRasterWorkerOwner, RasterWorkerResults};
 

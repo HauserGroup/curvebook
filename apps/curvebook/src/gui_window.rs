@@ -1599,7 +1599,7 @@ mod tests {
     struct TestGuiClipboard {
         fail_writes: bool,
         available: bool,
-        writes_text: std::sync::RwLock<Vec<String>>,
+        writes_text: curvebook_platform::sync::RwLock<Vec<String>>,
         writes_bundle_count: std::sync::atomic::AtomicUsize,
     }
 
@@ -1608,7 +1608,7 @@ mod tests {
             Self {
                 fail_writes,
                 available,
-                writes_text: std::sync::RwLock::new(Vec::new()),
+                writes_text: curvebook_platform::sync::RwLock::named("gui_window.test_clipboard", Vec::new()),
                 writes_bundle_count: std::sync::atomic::AtomicUsize::new(0),
             }
         }

@@ -6,9 +6,11 @@
 use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use curvebook_platform::sync::RwLock;
 
 use curvebook::desktop_host::{
     DesktopHostConfig, DesktopHostEvent, DesktopHostRuntime, OsClipboardAdapter, dir_has_unrecovered_crash, find_stale_recovery_dirs,

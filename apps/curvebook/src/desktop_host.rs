@@ -8,9 +8,11 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::io::{BufRead, BufReader, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+use curvebook_platform::sync::RwLock;
 
 use curvebook_doc::{CellCoord, CellValue, ProjectDocument, SheetId, SheetSection, SubcolumnMode, TableArchetype, TableKind, VariableSource};
 use curvebook_engine::{CommandOutcome, Session, cmd as engine_cmd};
@@ -1410,7 +1412,7 @@ impl StubNativeFileDialogAdapter {
 
 impl NativeFileDialogAdapter for StubNativeFileDialogAdapter {
     fn pick(&self, request: &NativeFileDialogRequest) -> Result<Option<PathBuf>, String> {
-        let mut guard = self.state.write().map_err(|_| String::from("stub file dialog lock poisoned"))?;
+        let mut guard = self.state.write().map_err(|err| format!("stub file dialog lock error: {err}"))?;
         guard.requests.push(request.clone());
         if let Some(queue) = guard.keyed_responses.get_mut(&request.command_id)
             && let Some(resp) = queue.pop_front()
