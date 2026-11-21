@@ -291,3 +291,163 @@ fn w6_heatmap_commit_intents_and_grouped_superimposed() -> Result<(), String> {
     assert_eq!(intents[1].params["kind"], json!(GraphKind::Diagnostic(DiagnosticPlotKind::Heatmap)));
     Ok(())
 }
+
+mod r13_10_format_graph_unit_tests {
+    use std::collections::BTreeSet;
+
+    use curvebook_doc::{
+        CartesianOrientation, ColumnDesignHint, ColumnTable, DataSheet, GraphSheet, GraphicalDataObject, ReplicateLineMode, SheetId, SubcolumnMode,
+        TableArchetype, XyTable,
+    };
+    use curvebook_palette::{MarkerStyle, Rgba8};
+    use serde_json::{Value, json};
+
+    use crate::dialogs_canvas::FormatGraphState;
+
+    #[test]
+    fn orientation_dirty_gate_sync_and_commit_intents() {
+        let mut table = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 3).unwrap();
+        table.data_sets[0].title = String::from("Ctrl");
+        table.data_sets[1].title = String::from("Drug");
+        let ds = DataSheet::new(SheetId::new("col-orient"), "Col", TableArchetype::Column(table)).unwrap();
+        let mut gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g-col"), &ds).unwrap();
+        gs.spec.orientation = CartesianOrientation::Vertical;
+
+        let mut fg = FormatGraphState::default();
+        fg.sync_from_graph(&gs);
+        assert_eq!(fg.orientation, CartesianOrientation::Vertical);
+        assert!(!fg.orientation_dirty);
+
+        // Clean state must NOT emit `"orientation"` in `graph.setSpec`.
+        let clean_intents = fg.commit_intents();
+        let spec_intent = clean_intents.iter().find(|i| i.command_id == "graph.setSpec").unwrap();
+        assert!(spec_intent.params.get("orientation").is_none());
+
+        // Patching orientation marks dirty and emits `"orientation"` in `graph.setSpec`.
+        let mut patch = serde_json::Map::new();
+        patch.insert(String::from("orientation"), json!("horizontal"));
+        fg.apply_field_patch(&patch).unwrap();
+        assert_eq!(fg.orientation, CartesianOrientation::Horizontal);
+        assert!(fg.orientation_dirty);
+
+        let dirty_intents = fg.commit_intents();
+        let dirty_spec = dirty_intents.iter().find(|i| i.command_id == "graph.setSpec").unwrap();
+        assert_eq!(dirty_spec.params.get("orientation"), Some(&json!("horizontal")));
+
+        // Re-syncing clears dirty flag.
+        gs.spec.orientation = CartesianOrientation::Horizontal;
+        fg.sync_from_graph(&gs);
+        assert_eq!(fg.orientation, CartesianOrientation::Horizontal);
+        assert!(!fg.orientation_dirty);
+    }
+
+    #[test]
+    fn show_symbols_null_marker_and_replicate_lines_dirty_gate() {
+        let mut xy = XyTable::new(SubcolumnMode::RawReplicates(2), 1, 3).unwrap();
+        xy.data_sets[0].title = String::from("Dose");
+        let ds = DataSheet::new(SheetId::new("xy-sym"), "XY", TableArchetype::Xy(xy)).unwrap();
+        let mut gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g-xy"), &ds).unwrap();
+        gs.spec.series[0].gdo = GraphicalDataObject::ScatterAndLine {
+            marker: Some(MarkerStyle::default()),
+            line: None,
+            area_fill: None,
+            replicate_lines: ReplicateLineMode::IndividualReplicateTrajectories,
+        };
+
+        let mut fg = FormatGraphState::default();
+        fg.sync_from_graph(&gs);
+        assert!(fg.show_symbols);
+        assert_eq!(fg.replicate_lines, ReplicateLineMode::IndividualReplicateTrajectories);
+        assert!(!fg.replicate_lines_dirty);
+
+        // When clean, `replicate_lines` is omitted and `marker` is an object.
+        let clean = fg.commit_intents();
+        let s_clean = clean.iter().find(|i| i.command_id == "graph.setSeries").unwrap();
+        assert!(s_clean.params.get("replicate_lines").is_none());
+        assert!(s_clean.params.get("marker").is_some_and(Value::is_object));
+
+        // Hiding symbols + switching replicate line mode emits `"marker": null` & `"replicate_lines"`.
+        let mut patch = serde_json::Map::new();
+        patch.insert(String::from("show_symbols"), json!(false));
+        patch.insert(String::from("replicate_lines"), json!("summary_center"));
+        fg.apply_field_patch(&patch).unwrap();
+        assert!(!fg.show_symbols);
+        assert!(fg.show_symbols_dirty);
+        assert_eq!(fg.replicate_lines, ReplicateLineMode::SummaryCenter);
+        assert!(fg.replicate_lines_dirty);
+
+        let dirty = fg.commit_intents();
+        let s_dirty = dirty.iter().find(|i| i.command_id == "graph.setSeries").unwrap();
+        assert_eq!(s_dirty.params.get("marker"), Some(&Value::Null));
+        assert_eq!(s_dirty.params.get("replicate_lines"), Some(&json!(ReplicateLineMode::SummaryCenter)));
+
+        // Syncing a series that already has `marker: None` sets `show_symbols = false`.
+        gs.spec.series[0].gdo =
+            GraphicalDataObject::ScatterAndLine { marker: None, line: None, area_fill: None, replicate_lines: ReplicateLineMode::SummaryCenter };
+        fg.sync_from_graph(&gs);
+        assert!(!fg.show_symbols);
+    }
+
+    #[test]
+    fn y2_nudge_bar_border_and_forest_pooled_diamond_sync_and_commit() {
+        let mut table = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 3).unwrap();
+        table.data_sets[0].title = String::from("Group A");
+        table.data_sets[1].title = String::from("Group B");
+        let ds = DataSheet::new(SheetId::new("col-y2"), "Col", TableArchetype::Column(table)).unwrap();
+        let mut gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g-y2"), &ds).unwrap();
+        gs.spec.series[0].gdo = GraphicalDataObject::BarWithReplicates {
+            summary: curvebook_doc::SummaryMeasure::Mean,
+            fill_color: Rgba8::rgb(40, 120, 220),
+            border_color: Rgba8::BLACK,
+            border_width_pt: 1.0,
+            replicate_overlay: None,
+        };
+        gs.spec.series[1].gdo = GraphicalDataObject::BarWithReplicates {
+            summary: curvebook_doc::SummaryMeasure::Mean,
+            fill_color: Rgba8::rgb(40, 180, 90),
+            border_color: Rgba8::BLACK,
+            border_width_pt: 1.5,
+            replicate_overlay: None,
+        };
+        gs.spec.series[1].bind_to_right_y2 = true;
+        gs.spec.series[1].offset.x_data = 0.35;
+        gs.spec.forest_show_pooled_diamond = false;
+
+        let mut fg = FormatGraphState::default();
+        fg.sync_from_graph(&gs);
+        assert!(!fg.bind_to_right_y2);
+        assert!((fg.offset_x_data - 0.0).abs() < 1e-9);
+        assert!((fg.bar_border_width_pt - 1.0).abs() < 1e-9);
+        assert!(!fg.forest_show_pooled_diamond);
+
+        // Selecting series 1 syncs Y2 binding, horizontal nudge, and border width.
+        fg.selected_series_index = 1;
+        fg.sync_selected_series_from_spec(&gs.spec);
+        assert!(fg.bind_to_right_y2);
+        assert!((fg.offset_x_data - 0.35).abs() < 1e-9);
+        assert!((fg.bar_border_width_pt - 1.5).abs() < 1e-9);
+
+        let mut patch = serde_json::Map::new();
+        patch.insert(String::from("apply_all_data_sets"), json!(true));
+        patch.insert(String::from("bar_border_width_pt"), json!(0.5));
+        patch.insert(String::from("bind_to_right_y2"), json!(false));
+        patch.insert(String::from("offset_x_data"), json!(0.25));
+        patch.insert(String::from("forest_show_pooled_diamond"), json!(true));
+        fg.apply_field_patch(&patch).unwrap();
+
+        let intents = fg.commit_intents();
+        let spec_p = &intents.iter().find(|i| i.command_id == "graph.setSpec").unwrap().params;
+        assert_eq!(spec_p.get("forest_show_pooled_diamond"), Some(&json!(true)));
+
+        let series_p = &intents.iter().find(|i| i.command_id == "graph.setSeries").unwrap().params;
+        assert_eq!(series_p.get("all_series"), Some(&json!(true)));
+        assert_eq!(series_p.get("border_width_pt"), Some(&json!(0.5)));
+        assert_eq!(series_p.get("bind_to_right_y2"), Some(&json!(false)));
+        assert_eq!(series_p.get("offset"), Some(&json!({ "x_data": 0.25 })));
+
+        // Verify unique widget coverage invariant on serde roundtrip.
+        let roundtrip: FormatGraphState = serde_json::from_value(serde_json::to_value(&fg).unwrap()).unwrap();
+        assert_eq!(roundtrip, fg);
+        let _ = BTreeSet::<String>::new();
+    }
+}

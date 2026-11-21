@@ -1,11 +1,11 @@
 //! Non-modal `Format Graph` inspector state machine (palette, CVD preview, frame, error bars, markers).
 
 use curvebook_doc::{
-    ColorChannelMapping, EquationDisplayMode, ErrorBarSpec, FramePreset, GraphAnnotation, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject,
-    GroupedArrangement, HeatmapLabelSpec, LegendSpec, LevelOrderKind, LevelOrderSpec, MultivariateGraphEncoding, MultivariatePlotMode,
-    ProjectDocument, RegressionOverlaySpec, SheetId, TableArchetype, VariableRole,
+    CartesianOrientation, ColorChannelMapping, EquationDisplayMode, ErrorBarSpec, FramePreset, GraphAnnotation, GraphKind, GraphSheet, GraphSpec,
+    GraphicalDataObject, GroupedArrangement, HeatmapLabelSpec, LegendSpec, LevelOrderKind, LevelOrderSpec, MultivariateGraphEncoding,
+    MultivariatePlotMode, ProjectDocument, RegressionOverlaySpec, ReplicateLineMode, SheetId, TableArchetype, VariableRole,
 };
-use curvebook_palette::{CvdKind, LineDashStyle, MarkerFillMode, PaletteId, Rgba8, simulate_cvd};
+use curvebook_palette::{CvdKind, LineDashStyle, MarkerFillMode, MarkerStyle, PaletteId, Rgba8, simulate_cvd};
 
 use curvebook_tools::ToolCommandIntent;
 use serde::{Deserialize, Serialize};
@@ -85,6 +85,34 @@ pub struct FormatGraphState {
     pub heatmap_labels: HeatmapLabelSpec,
     #[serde(default)]
     pub heatmap_labels_dirty: bool,
+    #[serde(default)]
+    pub orientation: CartesianOrientation,
+    #[serde(default)]
+    pub orientation_dirty: bool,
+    #[serde(default = "default_true_flag")]
+    pub show_symbols: bool,
+    #[serde(default)]
+    pub show_symbols_dirty: bool,
+    #[serde(default)]
+    pub replicate_lines: ReplicateLineMode,
+    #[serde(default)]
+    pub replicate_lines_dirty: bool,
+    #[serde(default)]
+    pub bind_to_right_y2: bool,
+    #[serde(default)]
+    pub bind_to_right_y2_dirty: bool,
+    #[serde(default)]
+    pub offset_x_data: f64,
+    #[serde(default)]
+    pub offset_x_data_dirty: bool,
+    #[serde(default = "default_bar_border_width_pt")]
+    pub bar_border_width_pt: f64,
+    #[serde(default)]
+    pub bar_border_width_dirty: bool,
+    #[serde(default)]
+    pub forest_show_pooled_diamond: bool,
+    #[serde(default)]
+    pub forest_show_pooled_diamond_dirty: bool,
 }
 
 impl Default for FormatGraphState {
@@ -124,6 +152,20 @@ impl Default for FormatGraphState {
             paper_fill_dirty: false,
             heatmap_labels: HeatmapLabelSpec::default(),
             heatmap_labels_dirty: false,
+            orientation: CartesianOrientation::default(),
+            orientation_dirty: false,
+            show_symbols: true,
+            show_symbols_dirty: false,
+            replicate_lines: ReplicateLineMode::default(),
+            replicate_lines_dirty: false,
+            bind_to_right_y2: false,
+            bind_to_right_y2_dirty: false,
+            offset_x_data: 0.0,
+            offset_x_data_dirty: false,
+            bar_border_width_pt: 1.0,
+            bar_border_width_dirty: false,
+            forest_show_pooled_diamond: false,
+            forest_show_pooled_diamond_dirty: false,
         }
     }
 }
@@ -136,6 +178,10 @@ impl FormatGraphState {
         self.frame_preset = graph.spec.frame_preset;
         self.grouped_arrangement = graph.spec.grouped_arrangement;
         self.graph_kind = Some(graph.spec.kind);
+        self.orientation = graph.spec.orientation;
+        self.orientation_dirty = false;
+        self.forest_show_pooled_diamond = graph.spec.forest_show_pooled_diamond;
+        self.forest_show_pooled_diamond_dirty = false;
         self.show_legend = graph.spec.legend.visible;
         self.legend_bordered = graph.spec.legend.bordered;
         self.model_equation_annotations.clone_from(&graph.spec.annotations);
@@ -176,6 +222,27 @@ impl FormatGraphState {
             self.show_raw_data = series.show_raw_data;
             self.cached_regression_overlay.clone_from(&series.regression_overlay);
             self.show_fitted_curve = series.regression_overlay.is_some();
+            self.bind_to_right_y2 = series.bind_to_right_y2;
+            self.bind_to_right_y2_dirty = false;
+            self.offset_x_data = series.offset.x_data;
+            self.offset_x_data_dirty = false;
+            self.show_symbols = match &series.gdo {
+                GraphicalDataObject::ScatterAndLine { marker, .. } | GraphicalDataObject::BeforeAfterLines { marker, .. } => marker.is_some(),
+                _ => true,
+            };
+            self.show_symbols_dirty = false;
+            self.replicate_lines = match &series.gdo {
+                GraphicalDataObject::ScatterAndLine { replicate_lines, .. } => *replicate_lines,
+                _ => ReplicateLineMode::default(),
+            };
+            self.replicate_lines_dirty = false;
+            self.bar_border_width_pt = match &series.gdo {
+                GraphicalDataObject::BarWithReplicates { border_width_pt, .. } | GraphicalDataObject::FloatingBar { border_width_pt, .. } => {
+                    *border_width_pt
+                }
+                _ => 1.0,
+            };
+            self.bar_border_width_dirty = false;
             let alpha_u8 = extract_gdo_alpha_byte(&series.gdo);
             self.series_alpha_pct = ((f64::from(alpha_u8) / 255.0) * 100.0).round().clamp(0.0, 100.0) as u8;
             self.extract_series_marker_and_dash(&series.gdo);
@@ -300,6 +367,12 @@ impl FormatGraphState {
         spec.palette = self.palette;
         spec.frame_preset = self.frame_preset;
         spec.grouped_arrangement = self.grouped_arrangement;
+        if self.orientation_dirty {
+            spec.orientation = self.orientation;
+        }
+        if self.forest_show_pooled_diamond_dirty {
+            spec.forest_show_pooled_diamond = self.forest_show_pooled_diamond;
+        }
         if let Some(kind) = self.graph_kind {
             spec.kind = kind;
         }
@@ -312,13 +385,44 @@ impl FormatGraphState {
         {
             spec.multivariate = Some(enc.clone());
         }
-        if let Some(series) = spec.series.get_mut(self.selected_series_index) {
-            series.y_error_bars = self.error_bar_enabled.then_some(self.error_bar_spec);
-            let swatch = self.palette.color_at(self.selected_series_index);
-            if let GraphicalDataObject::Violin { half_violin_with_points, .. } = &mut series.gdo {
-                *half_violin_with_points = self.half_violin_with_points;
+        let target_indices: Vec<usize> = if self.apply_all_data_sets { (0..spec.series.len()).collect() } else { vec![self.selected_series_index] };
+        for idx in target_indices {
+            if let Some(series) = spec.series.get_mut(idx) {
+                series.y_error_bars = self.error_bar_enabled.then_some(self.error_bar_spec);
+                let swatch = self.palette.color_at(idx);
+                if let GraphicalDataObject::Violin { half_violin_with_points, .. } = &mut series.gdo {
+                    *half_violin_with_points = self.half_violin_with_points;
+                }
+                if !self.show_symbols {
+                    if let GraphicalDataObject::ScatterAndLine { marker, .. } | GraphicalDataObject::BeforeAfterLines { marker, .. } = &mut series.gdo
+                    {
+                        *marker = None;
+                    }
+                } else if self.show_symbols_dirty
+                    && let GraphicalDataObject::ScatterAndLine { marker, .. } | GraphicalDataObject::BeforeAfterLines { marker, .. } = &mut series.gdo
+                    && marker.is_none()
+                {
+                    *marker = Some(MarkerStyle::default());
+                }
+                if self.replicate_lines_dirty
+                    && let GraphicalDataObject::ScatterAndLine { replicate_lines, .. } = &mut series.gdo
+                {
+                    *replicate_lines = self.replicate_lines;
+                }
+                if self.bind_to_right_y2_dirty {
+                    series.bind_to_right_y2 = self.bind_to_right_y2;
+                }
+                if self.offset_x_data_dirty {
+                    series.offset.x_data = self.offset_x_data;
+                }
+                if self.bar_border_width_dirty
+                    && let GraphicalDataObject::BarWithReplicates { border_width_pt, .. } | GraphicalDataObject::FloatingBar { border_width_pt, .. } =
+                        &mut series.gdo
+                {
+                    *border_width_pt = self.bar_border_width_pt;
+                }
+                apply_marker_and_dash(&mut series.gdo, swatch, self.marker_size_pt, self.marker_fill_mode, self.line_dash);
             }
-            apply_marker_and_dash(&mut series.gdo, swatch, self.marker_size_pt, self.marker_fill_mode, self.line_dash);
         }
     }
 
@@ -436,6 +540,49 @@ impl FormatGraphState {
                     serde_json::from_value::<HeatmapLabelSpec>(val.clone()).map_err(|err| format!("invalid `heatmap_labels`: {err}"))?;
                 self.heatmap_labels_dirty = true;
             }
+            "orientation" | "format_graph.orientation" => {
+                self.orientation = match val.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+                    Some("vertical") => CartesianOrientation::Vertical,
+                    Some("horizontal") => CartesianOrientation::Horizontal,
+                    _ => serde_json::from_value::<CartesianOrientation>(val.clone()).map_err(|err| format!("invalid `orientation`: {err}"))?,
+                };
+                self.orientation_dirty = true;
+            }
+            "show_symbols" | "format_graph.show_symbols" => {
+                self.show_symbols = val.as_bool().ok_or_else(|| String::from("`show_symbols` must be a boolean"))?;
+                self.show_symbols_dirty = true;
+            }
+            "replicate_lines" | "format_graph.replicate_lines" => {
+                self.replicate_lines = match val.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+                    Some("summary_center" | "summary") => ReplicateLineMode::SummaryCenter,
+                    Some("individual_replicate_trajectories" | "individual" | "individual_trajectories" | "spaghetti") => {
+                        ReplicateLineMode::IndividualReplicateTrajectories
+                    }
+                    _ => serde_json::from_value::<ReplicateLineMode>(val.clone()).map_err(|err| format!("invalid `replicate_lines`: {err}"))?,
+                };
+                self.replicate_lines_dirty = true;
+            }
+            "bind_to_right_y2" | "format_graph.bind_to_right_y2" => {
+                self.bind_to_right_y2 = val.as_bool().ok_or_else(|| String::from("`bind_to_right_y2` must be a boolean"))?;
+                self.bind_to_right_y2_dirty = true;
+            }
+            "offset_x_data" | "format_graph.offset_x_data" => {
+                let parsed = parse_dialog_num_with_locale(val, "offset_x_data", preset)?;
+                self.offset_x_data = parsed;
+                self.offset_x_data_dirty = true;
+            }
+            "bar_border_width_pt" | "border_width_pt" | "format_graph.bar_border_width_pt" => {
+                let parsed = parse_dialog_num_with_locale(val, "bar_border_width_pt", preset)?;
+                if parsed < 0.0 {
+                    return Err(String::from("`bar_border_width_pt` must be >= 0.0"));
+                }
+                self.bar_border_width_pt = parsed;
+                self.bar_border_width_dirty = true;
+            }
+            "forest_show_pooled_diamond" | "format_graph.forest_show_pooled_diamond" => {
+                self.forest_show_pooled_diamond = val.as_bool().ok_or_else(|| String::from("`forest_show_pooled_diamond` must be a boolean"))?;
+                self.forest_show_pooled_diamond_dirty = true;
+            }
             other => return Err(format!("unknown Format Graph field `{other}`")),
         }
         Ok(())
@@ -481,6 +628,16 @@ impl FormatGraphState {
         if self.heatmap_labels_dirty {
             spec_patch.insert(String::from("heatmap_labels"), json!(self.heatmap_labels));
         }
+        if self.orientation_dirty {
+            let orient_str = match self.orientation {
+                CartesianOrientation::Vertical => "vertical",
+                CartesianOrientation::Horizontal => "horizontal",
+            };
+            spec_patch.insert(String::from("orientation"), json!(orient_str));
+        }
+        if self.forest_show_pooled_diamond_dirty {
+            spec_patch.insert(String::from("forest_show_pooled_diamond"), json!(self.forest_show_pooled_diamond));
+        }
         spec_patch.insert(String::from("legend"), json!({ "visible": self.show_legend, "bordered": self.legend_bordered }));
         let mut series_patch = serde_json::Map::new();
         series_patch.insert(String::from("sheet_id"), json!(id.as_str()));
@@ -491,19 +648,33 @@ impl FormatGraphState {
         }
         series_patch.insert(String::from("y_error_bars"), json!(error_bars));
         series_patch.insert(String::from("show_raw_data"), json!(self.show_raw_data));
-        series_patch.insert(
-            String::from("marker"),
+        let marker_val = if self.show_symbols {
             json!({
                 "size_pt": self.marker_size_pt,
                 "fill_mode": self.marker_fill_mode,
-            }),
-        );
+            })
+        } else {
+            Value::Null
+        };
+        series_patch.insert(String::from("marker"), marker_val);
         series_patch.insert(
             String::from("connecting_line"),
             json!({
                 "dash_style": self.line_dash,
             }),
         );
+        if self.replicate_lines_dirty {
+            series_patch.insert(String::from("replicate_lines"), json!(self.replicate_lines));
+        }
+        if self.bind_to_right_y2_dirty {
+            series_patch.insert(String::from("bind_to_right_y2"), json!(self.bind_to_right_y2));
+        }
+        if self.offset_x_data_dirty {
+            series_patch.insert(String::from("offset"), json!({ "x_data": self.offset_x_data }));
+        }
+        if self.bar_border_width_dirty {
+            series_patch.insert(String::from("border_width_pt"), json!(self.bar_border_width_pt));
+        }
         if self.alpha_dirty {
             let alpha_u8 = ((f64::from(self.series_alpha_pct) / 100.0) * 255.0).round().clamp(0.0, 255.0) as u8;
             series_patch.insert(String::from("alpha"), json!(alpha_u8));
@@ -602,4 +773,8 @@ fn parse_paper_fill_patch(val: &Value) -> Result<Option<Rgba8>, String> {
         };
     }
     serde_json::from_value::<Rgba8>(val.clone()).map(Some).map_err(|err| format!("invalid `paper_fill`: {err}"))
+}
+
+const fn default_bar_border_width_pt() -> f64 {
+    1.0
 }

@@ -112,6 +112,47 @@ const fn extract_series_alpha_byte(gdo: &GraphicalDataObject) -> u8 {
     }
 }
 
+fn render_graph_orientation_chips(
+    ui: &mut egui::Ui,
+    gs: &GraphSheet,
+    ctx_in: TrailingStudioContext<'_>,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    if !matches!(gs.spec.kind, curvebook_doc::GraphKind::Column | curvebook_doc::GraphKind::Grouped) {
+        return;
+    }
+    ui.add_space(4.0);
+    widgets::subheader(ui, "Bar / Plot Orientation");
+    ui.horizontal_wrapped(|row| {
+        row.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+        for (slug, lbl, target) in [
+            ("vertical", "Vertical", curvebook_doc::CartesianOrientation::Vertical),
+            ("horizontal", "Horizontal", curvebook_doc::CartesianOrientation::Horizontal),
+        ] {
+            if studio_chip(
+                row,
+                ctx_in.tokens,
+                meta,
+                &StudioChipSpec {
+                    label: lbl,
+                    tooltip: "Orient column/grouped plot vertically or horizontally (graph.setSpec)",
+                    max_w: 96.0,
+                    selected: gs.spec.orientation == target,
+                    enabled: ctx_in.enabled,
+                    border_override: None,
+                    widget_id: &format!("inspector.graph.orientation.{slug}"),
+                    role: "button",
+                    command_id: Some("graph.setSpec"),
+                    disabled_reason: None,
+                },
+            ) {
+                intents.push_engine("graph.setSpec", json!({ "sheet_id": gs.id.as_str(), "orientation": slug }));
+            }
+        }
+    });
+}
+
 pub(super) fn render_graph_inspector_studio(
     ui: &mut egui::Ui,
     app: &UiApp,
@@ -429,6 +470,8 @@ pub(super) fn render_graph_inspector_studio(
                     }
                 });
             }
+
+            render_graph_orientation_chips(ui, gs, ctx_in, meta, intents);
 
             ui.add_space(6.0);
             widgets::divider(ui);
