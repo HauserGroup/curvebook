@@ -13,19 +13,20 @@
 
 mod human_wf_common;
 
-use std::sync::RwLock;
+use std::sync::LazyLock;
 
 use curvebook_doc::{
     AnalysisKind, Cell, ColumnDesignHint, ColumnTable, DataSheet, NonlinearFitSpec, OneWayAnovaSpec, ResultStatus, SheetId, SubcolumnMode,
     TableArchetype, XyTable,
 };
+use curvebook_platform::sync::RwLock;
 use curvebook_testkit::wf_datasets;
 use human_wf_common::TestRes;
 use human_wf_common::workflow_run::{LiveEditExpectation, LiveEditTarget, ReferenceSpec, WorkflowRun};
 use serde_json::json;
 
 /// Isolates background-panic self-testing from parallel tests within this binary.
-static SELF_TEST_GATE: RwLock<()> = RwLock::new(());
+static SELF_TEST_GATE: LazyLock<RwLock<()>> = LazyLock::new(|| RwLock::named("r10_26_self_test_gate", ()));
 
 fn setup_column_anova_through_configure(wf_id: &str) -> Result<(WorkflowRun, SheetId, SheetId), String> {
     let mut run = WorkflowRun::start(wf_id);
@@ -66,7 +67,7 @@ fn verify_column_anova(run: &mut WorkflowRun, rs_id: &SheetId) -> TestRes {
 
 #[test]
 fn pos_five_stage_workflow_run_passes_and_verifies_oracle() -> TestRes {
-    let _guard = SELF_TEST_GATE.read().map_err(|_| String::from("lock poisoned"))?;
+    let _guard = SELF_TEST_GATE.read_long_job().map_err(|e| format!("{e}"))?;
     let (mut run, ds_id, rs_id) = setup_column_anova_through_configure("WF-SELF-POS")?;
     verify_column_anova(&mut run, &rs_id)?;
     run.live_edit(LiveEditTarget::sheet_grid_cell(ds_id, 0, 2, 0, "34.5"), LiveEditExpectation::scalar_changed(rs_id, "F", None, 0.1))?;
@@ -75,7 +76,7 @@ fn pos_five_stage_workflow_run_passes_and_verifies_oracle() -> TestRes {
 
 #[test]
 fn neg_deliberately_failing_live_edit_fails_and_blocks_finish() -> TestRes {
-    let _guard = SELF_TEST_GATE.read().map_err(|_| String::from("lock poisoned"))?;
+    let _guard = SELF_TEST_GATE.read_long_job().map_err(|e| format!("{e}"))?;
     let (mut run, ds_id, rs_id) = setup_column_anova_through_configure("WF-SELF-NEG-LIVE")?;
     verify_column_anova(&mut run, &rs_id)?;
 
@@ -105,7 +106,7 @@ fn neg_deliberately_failing_live_edit_fails_and_blocks_finish() -> TestRes {
 
 #[test]
 fn neg_failed_result_sheet_fails_finish() -> TestRes {
-    let _guard = SELF_TEST_GATE.read().map_err(|_| String::from("lock poisoned"))?;
+    let _guard = SELF_TEST_GATE.read_long_job().map_err(|e| format!("{e}"))?;
     let (mut run, ds_id, rs_id) = setup_column_anova_through_configure("WF-SELF-NEG-FAILED")?;
     verify_column_anova(&mut run, &rs_id)?;
     run.live_edit(
@@ -134,7 +135,7 @@ fn neg_failed_result_sheet_fails_finish() -> TestRes {
 
 #[test]
 fn neg_intent_error_fails_finish_even_after_later_success() -> TestRes {
-    let _guard = SELF_TEST_GATE.read().map_err(|_| String::from("lock poisoned"))?;
+    let _guard = SELF_TEST_GATE.read_long_job().map_err(|e| format!("{e}"))?;
     let mut run = WorkflowRun::start("WF-SELF-NEG-INTENT");
     let ds_id = run.create_table_via_welcome("welcome.arch.xy", "Dose Self Test", &[])?;
     let rows = [(-9.0, 5.1), (-8.0, 6.0), (-7.0, 8.4), (-6.0, 28.2), (-5.0, 76.5), (-4.0, 97.1)];
@@ -186,7 +187,7 @@ fn neg_intent_error_fails_finish_even_after_later_success() -> TestRes {
 
 #[test]
 fn neg_missing_or_out_of_order_stages_fail_finish() -> TestRes {
-    let _guard = SELF_TEST_GATE.read().map_err(|_| String::from("lock poisoned"))?;
+    let _guard = SELF_TEST_GATE.read_long_job().map_err(|e| format!("{e}"))?;
 
     // Missing Create
     let r0 = WorkflowRun::start("WF-SELF-S0");
@@ -241,7 +242,7 @@ fn neg_missing_or_out_of_order_stages_fail_finish() -> TestRes {
 
 #[test]
 fn neg_background_thread_panic_fails_finish() -> TestRes {
-    let _guard = SELF_TEST_GATE.write().map_err(|_| String::from("lock poisoned"))?;
+    let _guard = SELF_TEST_GATE.write_long_job().map_err(|e| format!("{e}"))?;
     let (mut run, ds_id, rs_id) = setup_column_anova_through_configure("WF-SELF-NEG-PANIC")?;
     verify_column_anova(&mut run, &rs_id)?;
     run.live_edit(LiveEditTarget::sheet_grid_cell(ds_id, 0, 2, 0, "34.5"), LiveEditExpectation::scalar_changed(rs_id, "F", None, 0.1))?;
