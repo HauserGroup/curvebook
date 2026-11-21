@@ -31,6 +31,8 @@ pub fn default_viewport() -> ViewportMetrics {
     ViewportMetrics::new(1280.0, 800.0, 1.0)
 }
 
+pub mod workflow_run;
+
 /// Live `egui` shell test state tracked by [`EguiHumanPathDriver`] across multi-pass frames.
 pub struct WfShellState {
     pub app: UiApp,
@@ -38,6 +40,7 @@ pub struct WfShellState {
     pub intents: PendingUiIntents,
     pub dialog_rect_pt: Option<egui::Rect>,
     pub last_intent_error: Option<String>,
+    pub intent_errors: Vec<String>,
 }
 
 impl WfShellState {
@@ -48,7 +51,7 @@ impl WfShellState {
         app.set_gui_only(true);
         app.set_human_path_only(true);
         let views = app.egui_views.clone();
-        Self { app, views, intents: PendingUiIntents::new(), dialog_rect_pt: None, last_intent_error: None }
+        Self { app, views, intents: PendingUiIntents::new(), dialog_rect_pt: None, last_intent_error: None, intent_errors: Vec::new() }
     }
 }
 
@@ -61,10 +64,16 @@ impl EguiWfHarness {
     /// Create a fresh strict `egui` desktop harness under `metrics`.
     #[must_use]
     pub fn new(metrics: ViewportMetrics) -> Self {
+        Self::new_with_clipboard(metrics, Arc::new(StubPlatformClipboardAdapter::new()))
+    }
+
+    /// Create a fresh strict `egui` desktop harness wired to a caller-held [`StubPlatformClipboardAdapter`].
+    #[must_use]
+    pub fn new_with_clipboard(metrics: ViewportMetrics, clipboard: Arc<StubPlatformClipboardAdapter>) -> Self {
         let mut app = UiApp::new().with_ui_backend(UiBackend::Egui);
         app.set_gui_only(true);
         app.set_human_path_only(true);
-        app.set_clipboard_adapter(Arc::new(StubPlatformClipboardAdapter::new()));
+        app.set_clipboard_adapter(clipboard);
         Self::from_app(app, metrics)
     }
 
@@ -85,11 +94,13 @@ impl EguiWfHarness {
             if settled {
                 st.app.egui_views = st.views.clone();
                 if !st.intents.is_empty() {
-                    if let Err(err) = st.intents.commit_if_settled(&mut st.app, false) {
-                        st.last_intent_error = Some(err.to_string());
-                    } else {
-                        st.last_intent_error = None;
+                    let batch = st.intents.commit_all_if_settled(&mut st.app, false);
+                    for outcome in &batch.results {
+                        if let Err(err) = outcome {
+                            st.intent_errors.push(err.to_string());
+                        }
                     }
+                    st.last_intent_error = batch.first_error().map(ToString::to_string);
                 }
                 st.views = st.app.egui_views.clone();
             } else {

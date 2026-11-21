@@ -50,6 +50,8 @@ const AGENT_HARNESS_MARKERS: &[&str] = &[
 const HUMAN_DRIVER_TOKENS: &[&str] = &["humanpathdriver", "eguihumanpathdriver", "egui_kittest"];
 
 const KNOWN_BACKENDS: &[&str] = &["legacy", "egui"];
+const TOTAL_WORKFLOWS: usize = 65;
+const TOTAL_WORKFLOWS_U8: u8 = 65;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DuplicateKey {
@@ -114,20 +116,30 @@ pub fn run(root: &Path) -> Result<(), String> {
     let mut violations = check_live_status_metrics(root, &status_text);
 
     let workspace_tests = collect_workspace_tests(root)?;
+    let (complete_wfs, mut wf_violations) = scan_human_wf_completion(root)?;
     let ui_parity_text = fs::read_to_string(root.join(UI_EVIDENCE_REL)).map_err(|e| format!("{UI_EVIDENCE_REL}: {e}"))?;
     violations.extend(check_ui_parity_evidence(UI_EVIDENCE_REL, &ui_parity_text, Some(&workspace_tests)));
+    violations.extend(check_ui_parity_five_stage_claims(UI_EVIDENCE_REL, &ui_parity_text, &complete_wfs));
     let (telemetry, telemetry_violations) = check_backend_workflow_telemetry(UI_EVIDENCE_REL, &ui_parity_text, &workspace_tests);
     violations.extend(telemetry_violations);
 
     let workflows_text = fs::read_to_string(root.join(GUI_WORKFLOWS_REL)).map_err(|e| format!("{GUI_WORKFLOWS_REL}: {e}"))?;
-    violations.extend(check_gui_workflows_human_path(GUI_WORKFLOWS_REL, &workflows_text, Some(&workspace_tests)));
+    violations.extend(check_gui_workflows_human_path_with_completion(
+        GUI_WORKFLOWS_REL,
+        &workflows_text,
+        Some(&workspace_tests),
+        Some(&complete_wfs),
+    ));
+    violations.append(&mut wf_violations);
 
     if duplicates.is_empty() && violations.is_empty() {
         println!(
             "status: verified {total_tables} Markdown table(s) across {STATUS_REL} and {ROADMAP_REL}, \
              live metrics, [x] evidence in {UI_EVIDENCE_REL}, and §6.2 Human path column in {GUI_WORKFLOWS_REL} \
-             ({}/50 egui; backed human tests: {}/50 egui)",
-            telemetry.egui_claimed, telemetry.egui_backed
+             ({}/65 egui; backed human tests: {}/65 egui; five-stage complete: {}/65)",
+            telemetry.egui_claimed,
+            telemetry.egui_backed,
+            complete_wfs.len()
         );
         return Ok(());
     }
@@ -327,8 +339,21 @@ pub fn check_ui_parity_evidence(path: &str, md: &str, known_tests: Option<&Works
 }
 
 /// Enforce evidence requirements for the `Human path` column of `docs/gui-workflows.md` §6.2.
+/// Validate `docs/gui-workflows.md` §6.2 Human path column evidence against `known_tests`.
+#[cfg(test)]
 #[must_use]
 pub fn check_gui_workflows_human_path(path: &str, md: &str, known_tests: Option<&WorkspaceTests>) -> Vec<EvidenceViolation> {
+    check_gui_workflows_human_path_with_completion(path, md, known_tests, None)
+}
+
+/// Validate `docs/gui-workflows.md` §6.2 Human path column evidence and optional `WorkflowRun` `complete N / M` counts.
+#[must_use]
+pub fn check_gui_workflows_human_path_with_completion(
+    path: &str,
+    md: &str,
+    known_tests: Option<&WorkspaceTests>,
+    complete_wfs: Option<&BTreeSet<u8>>,
+) -> Vec<EvidenceViolation> {
     let mut violations = Vec::new();
     let mut state = Section62State::default();
 
@@ -337,7 +362,7 @@ pub fn check_gui_workflows_human_path(path: &str, md: &str, known_tests: Option<
         if update_fence(trimmed, &mut state.fence) || state.fence.is_some() {
             continue;
         }
-        state.step(path, idx + 1, trimmed, known_tests, &mut violations);
+        state.step(path, idx + 1, trimmed, known_tests, complete_wfs, &mut violations);
     }
 
     if !state.verified_table {
@@ -357,7 +382,15 @@ struct Section62State {
 }
 
 impl Section62State {
-    fn step(&mut self, path: &str, line_no: usize, trimmed: &str, known_tests: Option<&WorkspaceTests>, violations: &mut Vec<EvidenceViolation>) {
+    fn step(
+        &mut self,
+        path: &str,
+        line_no: usize,
+        trimmed: &str,
+        known_tests: Option<&WorkspaceTests>,
+        complete_wfs: Option<&BTreeSet<u8>>,
+        violations: &mut Vec<EvidenceViolation>,
+    ) {
         let lower = trimmed.to_ascii_lowercase();
         if lower.starts_with("### 6.2") {
             self.in_section = true;
@@ -375,7 +408,7 @@ impl Section62State {
             }
             return;
         }
-        self.visit_table_row(path, line_no, trimmed, known_tests, violations);
+        self.visit_table_row(path, line_no, trimmed, known_tests, complete_wfs, violations);
     }
 
     fn reset_table(&mut self) {
@@ -389,6 +422,7 @@ impl Section62State {
         line_no: usize,
         trimmed: &str,
         known_tests: Option<&WorkspaceTests>,
+        complete_wfs: Option<&BTreeSet<u8>>,
         violations: &mut Vec<EvidenceViolation>,
     ) {
         let cells = split_table_cells(trimmed);
@@ -405,11 +439,16 @@ impl Section62State {
             self.saw_separator = true;
             return;
         }
-        if let Some(cell) = cells.get(col_idx)
-            && human_path_requires_evidence(cell)
-            && let Some(violation) = validate_human_evidence(path, line_no, cell, known_tests)
-        {
-            violations.push(violation);
+        if let Some(cell) = cells.get(col_idx) {
+            if human_path_requires_evidence(cell)
+                && let Some(violation) = validate_human_evidence(path, line_no, cell, known_tests)
+            {
+                violations.push(violation);
+            }
+            if let Some(complete_set) = complete_wfs {
+                let shard_cell = cells.first().copied().unwrap_or("");
+                validate_section62_completion_counts(path, line_no, shard_cell, cell, complete_set, violations);
+            }
         }
     }
 }
@@ -519,7 +558,7 @@ fn parse_workflow_fractions(text: &str) -> Vec<(usize, usize, Option<&str>)> {
     out
 }
 
-/// Per-backend `WF-01`..`WF-50` human-path telemetry parsed from documentation and workspace tests.
+/// Per-backend `WF-01`..`WF-65` human-path telemetry parsed from documentation and workspace tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct BackendWorkflowTelemetry {
     pub legacy_claimed: usize,
@@ -535,7 +574,7 @@ fn parse_backend_wf_index(fn_name: &str) -> Option<(&'static str, u8)> {
         return None;
     }
     let idx: u8 = rest[..digits_len].parse().ok()?;
-    if !(1..=50).contains(&idx) {
+    if !(1..=TOTAL_WORKFLOWS_U8).contains(&idx) {
         return None;
     }
     let suffix = &rest[digits_len..];
@@ -546,7 +585,7 @@ fn parse_backend_wf_index(fn_name: &str) -> Option<(&'static str, u8)> {
     }
 }
 
-/// Count distinct non-ignored `WF-01`..`WF-50` human-path tests per backend (`legacy`, `egui`).
+/// Count distinct non-ignored `WF-01`..`WF-65` human-path tests per backend (`legacy`, `egui`).
 #[must_use]
 pub fn count_backed_backend_workflows(known_tests: &WorkspaceTests) -> (usize, usize) {
     let mut legacy_ids = BTreeSet::new();
@@ -595,7 +634,7 @@ pub fn check_backend_workflow_telemetry(
             continue;
         }
         for (num, den, backend) in parse_workflow_fractions(&trimmed.to_ascii_lowercase()) {
-            if den != 50 {
+            if den != TOTAL_WORKFLOWS {
                 continue;
             }
             match backend {
@@ -615,7 +654,11 @@ pub fn check_backend_workflow_telemetry(
 
 fn summarize_backend_claims(path: &str, backend: &str, claims: &[(usize, usize)], backed: usize, violations: &mut Vec<EvidenceViolation>) -> usize {
     let Some(&(first_line, first_num)) = claims.first() else {
-        violations.push(EvidenceViolation { path: path.to_owned(), line: 1, reason: format!("missing `N/50 {backend}` workflow checklist count") });
+        violations.push(EvidenceViolation {
+            path: path.to_owned(),
+            line: 1,
+            reason: format!("missing `N/{TOTAL_WORKFLOWS} {backend}` workflow checklist count"),
+        });
         return 0;
     };
 
@@ -624,14 +667,18 @@ fn summarize_backend_claims(path: &str, backend: &str, claims: &[(usize, usize)]
             violations.push(EvidenceViolation {
                 path: path.to_owned(),
                 line,
-                reason: format!("conflicting `{num}/50 {backend}` count (line {first_line} reports `{first_num}/50 {backend}`)"),
+                reason: format!(
+                    "conflicting `{num}/{TOTAL_WORKFLOWS} {backend}` count (line {first_line} reports `{first_num}/{TOTAL_WORKFLOWS} {backend}`)"
+                ),
             });
         }
-        if num > 50 || num > backed {
+        if num > TOTAL_WORKFLOWS || num > backed {
             violations.push(EvidenceViolation {
                 path: path.to_owned(),
                 line,
-                reason: format!("claims `{num}/50 {backend}` human-path workflows, but only `{backed}/50` backed non-ignored tests exist"),
+                reason: format!(
+                    "claims `{num}/{TOTAL_WORKFLOWS} {backend}` human-path workflows, but only `{backed}/{TOTAL_WORKFLOWS}` backed non-ignored tests exist"
+                ),
             });
         }
     }
@@ -854,6 +901,692 @@ fn has_concrete_manual_detail(after: &str) -> bool {
         .unwrap_or("")
         .trim_matches(|c: char| matches!(c, '`' | '*' | '_' | '.' | ':' | ';' | ',' | '!' | '?'));
     !first.is_empty() && !matches!(first, "none" | "no" | "todo" | "n/a" | "pending" | "tbd" | "planned" | "missing" | "needed" | "untested")
+}
+
+/// Scan all `crates/ui-egui/tests/human_wf_*.rs` suites on disk for statically complete `WF-01`..`WF-65`
+/// `WorkflowRun` tests and forbidden bypass/guard patterns (`R10.26`).
+pub fn scan_human_wf_completion(root: &Path) -> Result<(BTreeSet<u8>, Vec<EvidenceViolation>), String> {
+    let tests_dir = root.join("crates/ui-egui/tests");
+    if !tests_dir.is_dir() {
+        return Ok((BTreeSet::new(), Vec::new()));
+    }
+    let mut paths = Vec::new();
+    let entries = fs::read_dir(&tests_dir).map_err(|e| format!("{}: {e}", tests_dir.display()))?;
+    for entry_res in entries {
+        let entry = entry_res.map_err(|e| format!("{}: {e}", tests_dir.display()))?;
+        let path = entry.path();
+        if path.is_file()
+            && path.extension().and_then(|s| s.to_str()) == Some("rs")
+            && path.file_name().and_then(|s| s.to_str()).is_some_and(|n| n.starts_with("human_wf_"))
+        {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+
+    let mut files = Vec::with_capacity(paths.len());
+    for path in &paths {
+        let rel = path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/");
+        let src = fs::read_to_string(path).map_err(|e| format!("{rel}: {e}"))?;
+        files.push((rel, src));
+    }
+    let refs: Vec<(&str, &str)> = files.iter().map(|(p, s)| (p.as_str(), s.as_str())).collect();
+    Ok(analyze_human_wf_sources(&refs))
+}
+
+/// Analyze `(rel_path, rust_source)` pairs for `WF-NN` `WorkflowRun` five-stage completeness and forbidden bypasses.
+#[must_use]
+pub fn analyze_human_wf_sources(sources: &[(&str, &str)]) -> (BTreeSet<u8>, Vec<EvidenceViolation>) {
+    let mut complete = BTreeSet::new();
+    let mut violations = Vec::new();
+    for &(path, src) in sources {
+        for func in extract_rust_functions(src) {
+            if func.header_and_body_code.contains("WorkflowRun") {
+                check_workflow_run_lint(path, &func, &mut violations);
+            }
+            if func.is_test
+                && !func.is_ignored
+                && let Some(idx) = parse_wf_fn_prefix(&func.name)
+                && has_wf_start(&func.body_with_strings, idx)
+                && has_finish(&func.body_code_only)
+            {
+                complete.insert(idx);
+            }
+        }
+    }
+    (complete, violations)
+}
+
+struct ScannedRustFn {
+    is_test: bool,
+    is_ignored: bool,
+    name: String,
+    line: usize,
+    header_and_body_code: String,
+    body_with_strings: String,
+    body_code_only: String,
+}
+
+#[derive(Clone, Copy)]
+enum LexSegment {
+    Code,
+    Comment,
+    StringOrChar,
+}
+
+fn lex_rust_segments(src: &str) -> Vec<(LexSegment, usize, &str)> {
+    let mut out = Vec::new();
+    let b = src.as_bytes();
+    let n = b.len();
+    let mut i = 0usize;
+    let mut code_start = 0usize;
+
+    while i < n {
+        if i + 1 < n && b[i] == b'/' && b[i + 1] == b'/' {
+            if i > code_start {
+                out.push((LexSegment::Code, code_start, &src[code_start..i]));
+            }
+            let start = i;
+            i += 2;
+            while i < n && b[i] != b'\n' {
+                i += 1;
+            }
+            out.push((LexSegment::Comment, start, &src[start..i]));
+            code_start = i;
+            continue;
+        }
+        if i + 1 < n && b[i] == b'/' && b[i + 1] == b'*' {
+            if i > code_start {
+                out.push((LexSegment::Code, code_start, &src[code_start..i]));
+            }
+            let start = i;
+            i += 2;
+            let mut depth = 1usize;
+            while i + 1 < n && depth > 0 {
+                if b[i] == b'/' && b[i + 1] == b'*' {
+                    depth += 1;
+                    i += 2;
+                } else if b[i] == b'*' && b[i + 1] == b'/' {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            if depth > 0 {
+                i = n;
+            }
+            out.push((LexSegment::Comment, start, &src[start..i]));
+            code_start = i;
+            continue;
+        }
+        if let Some(raw_end) = try_skip_raw_string(b, i) {
+            if i > code_start {
+                out.push((LexSegment::Code, code_start, &src[code_start..i]));
+            }
+            out.push((LexSegment::StringOrChar, i, &src[i..raw_end]));
+            i = raw_end;
+            code_start = i;
+            continue;
+        }
+        if b[i] == b'"' {
+            if i > code_start {
+                out.push((LexSegment::Code, code_start, &src[code_start..i]));
+            }
+            let start = i;
+            i += 1;
+            while i < n {
+                if b[i] == b'\\' {
+                    i = (i + 2).min(n);
+                } else if b[i] == b'"' {
+                    i += 1;
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+            out.push((LexSegment::StringOrChar, start, &src[start..i]));
+            code_start = i;
+            continue;
+        }
+        if b[i] == b'\''
+            && let Some(char_end) = try_skip_char_literal(src, i)
+        {
+            if i > code_start {
+                out.push((LexSegment::Code, code_start, &src[code_start..i]));
+            }
+            out.push((LexSegment::StringOrChar, i, &src[i..char_end]));
+            i = char_end;
+            code_start = i;
+            continue;
+        }
+        i += 1;
+    }
+    if code_start < n {
+        out.push((LexSegment::Code, code_start, &src[code_start..n]));
+    }
+    out
+}
+
+fn try_skip_raw_string(b: &[u8], idx: usize) -> Option<usize> {
+    let mut pos = idx;
+    if b.get(pos) == Some(&b'b') {
+        pos += 1;
+    }
+    if b.get(pos) != Some(&b'r') {
+        return None;
+    }
+    pos += 1;
+    let mut hashes = 0usize;
+    while b.get(pos) == Some(&b'#') {
+        hashes += 1;
+        pos += 1;
+    }
+    if b.get(pos) != Some(&b'"') {
+        return None;
+    }
+    pos += 1;
+    while pos < b.len() {
+        if b[pos] == b'"' {
+            let mut match_hashes = 0usize;
+            while match_hashes < hashes && b.get(pos + 1 + match_hashes) == Some(&b'#') {
+                match_hashes += 1;
+            }
+            if match_hashes == hashes {
+                return Some(pos + 1 + hashes);
+            }
+        }
+        pos += 1;
+    }
+    Some(b.len())
+}
+
+fn try_skip_char_literal(src: &str, idx: usize) -> Option<usize> {
+    let tail = &src[idx + 1..];
+    let mut chars = tail.char_indices();
+    let (_, first) = chars.next()?;
+    if first == '\\' {
+        for (off, ch) in chars {
+            if ch == '\'' {
+                return Some(idx + 1 + off + 1);
+            }
+            if ch == '\n' || off > 12 {
+                return None;
+            }
+        }
+        None
+    } else {
+        let (off, next) = chars.next()?;
+        if first != '\'' && next == '\'' { Some(idx + 1 + off + 1) } else { None }
+    }
+}
+
+fn build_stripped_views(src: &str) -> (String, String) {
+    let segments = lex_rust_segments(src);
+    let mut with_strings = String::with_capacity(src.len());
+    let mut code_only = String::with_capacity(src.len());
+
+    for (kind, _start, slice) in segments {
+        match kind {
+            LexSegment::Code => {
+                with_strings.push_str(slice);
+                code_only.push_str(slice);
+            }
+            LexSegment::Comment => {
+                for ch in slice.chars() {
+                    let rep = if ch == '\n' { '\n' } else { ' ' };
+                    with_strings.push(rep);
+                    code_only.push(rep);
+                }
+            }
+            LexSegment::StringOrChar => {
+                with_strings.push_str(slice);
+                for ch in slice.chars() {
+                    code_only.push(if ch == '\n' { '\n' } else { ' ' });
+                }
+            }
+        }
+    }
+    (with_strings, code_only)
+}
+
+fn extract_rust_functions(src: &str) -> Vec<ScannedRustFn> {
+    let (with_strings, code_only) = build_stripped_views(src);
+    let bytes = code_only.as_bytes();
+    let n = bytes.len();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    let mut line_no = 1usize;
+    let mut brace_depth = 0usize;
+    let mut pending_test = false;
+    let mut pending_ignored = false;
+
+    while i < n {
+        if brace_depth == 0 {
+            if i + 1 < n
+                && bytes[i] == b'#'
+                && bytes[i + 1] == b'['
+                && let Some((attr, tail)) = split_balanced_attr(&code_only[i..])
+            {
+                pending_test |= is_test_attribute(attr);
+                pending_ignored |= is_ignore_attribute(attr);
+                let consumed = code_only[i..].len() - tail.len();
+                line_no += code_only[i..i + consumed].bytes().filter(|&b| b == b'\n').count();
+                i += consumed;
+                continue;
+            }
+            if is_word_at(&code_only, i, "fn") && can_start_item_before(&code_only[..i]) {
+                let fn_start = i;
+                let fn_line = line_no;
+                let after_fn = code_only[i + 2..].trim_start();
+                let name: String = after_fn.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+                if !name.is_empty()
+                    && let Some((body_open, body_close)) = find_fn_body_braces(bytes, i + 2)
+                {
+                    out.push(ScannedRustFn {
+                        is_test: pending_test,
+                        is_ignored: pending_ignored,
+                        name,
+                        line: fn_line,
+                        header_and_body_code: code_only[fn_start..=body_close].to_owned(),
+                        body_with_strings: with_strings[body_open..=body_close].to_owned(),
+                        body_code_only: code_only[body_open..=body_close].to_owned(),
+                    });
+                    line_no += code_only[i..=body_close].bytes().filter(|&b| b == b'\n').count();
+                    i = body_close + 1;
+                    pending_test = false;
+                    pending_ignored = false;
+                    continue;
+                }
+            }
+            if bytes[i] == b';' {
+                pending_test = false;
+                pending_ignored = false;
+            }
+        }
+
+        let step = code_only[i..].chars().next().map_or(1, char::len_utf8);
+        if bytes[i] == b'{' {
+            brace_depth += 1;
+        } else if bytes[i] == b'}' && brace_depth > 0 {
+            brace_depth -= 1;
+            if brace_depth == 0 {
+                pending_test = false;
+                pending_ignored = false;
+            }
+        }
+        if bytes[i] == b'\n' {
+            line_no += 1;
+        }
+        i += step;
+    }
+    out
+}
+
+fn can_start_item_before(prefix: &str) -> bool {
+    let trimmed = prefix.trim_end();
+    if trimmed.is_empty() {
+        return true;
+    }
+    if let Some(last) = trimmed.chars().next_back()
+        && matches!(last, ';' | '}' | ']')
+    {
+        return true;
+    }
+    let last_word: String =
+        trimmed.chars().rev().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect::<Vec<_>>().into_iter().rev().collect();
+    matches!(last_word.as_str(), "pub" | "async" | "const" | "unsafe")
+}
+
+fn find_fn_body_braces(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
+    let mut paren = 0usize;
+    let mut bracket = 0usize;
+    let mut idx = start;
+    while idx < bytes.len() {
+        match bytes[idx] {
+            b'(' => paren += 1,
+            b')' => paren = paren.saturating_sub(1),
+            b'[' => bracket += 1,
+            b']' => bracket = bracket.saturating_sub(1),
+            b';' if paren == 0 && bracket == 0 => return None,
+            b'{' if paren == 0 && bracket == 0 => {
+                let mut depth = 1usize;
+                let mut end = idx + 1;
+                while end < bytes.len() && depth > 0 {
+                    if bytes[end] == b'{' {
+                        depth += 1;
+                    } else if bytes[end] == b'}' {
+                        depth -= 1;
+                    }
+                    if depth == 0 {
+                        return Some((idx, end));
+                    }
+                    end += 1;
+                }
+                return None;
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn is_word_at(text: &str, pos: usize, word: &str) -> bool {
+    if !text[pos..].starts_with(word) {
+        return false;
+    }
+    let left_ok = pos == 0 || !text.as_bytes()[pos - 1].is_ascii_alphanumeric() && text.as_bytes()[pos - 1] != b'_';
+    let end = pos + word.len();
+    let right_ok = end == text.len() || !text.as_bytes()[end].is_ascii_alphanumeric() && text.as_bytes()[end] != b'_';
+    left_ok && right_ok
+}
+
+fn parse_wf_fn_prefix(fn_name: &str) -> Option<u8> {
+    let rest = fn_name.strip_prefix("wf")?;
+    let digits_len = rest.chars().take_while(char::is_ascii_digit).count();
+    if digits_len == 0 || !rest[digits_len..].starts_with('_') {
+        return None;
+    }
+    let idx: u8 = rest[..digits_len].parse().ok()?;
+    (1..=TOTAL_WORKFLOWS_U8).contains(&idx).then_some(idx)
+}
+
+fn has_wf_start(body_with_strings: &str, idx: u8) -> bool {
+    let compact: String = body_with_strings.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    let p1 = format!("WorkflowRun::start(\"WF-{idx:02}\"");
+    let p2 = format!("WorkflowRun::start_with_clipboard(\"WF-{idx:02}\"");
+    compact.contains(&p1) || compact.contains(&p2)
+}
+
+fn has_finish(body_code_only: &str) -> bool {
+    let compact: String = body_code_only.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    compact.contains(".finish()")
+}
+
+fn contains_word_token(haystack: &str, needle: &str) -> bool {
+    let mut start = 0usize;
+    while let Some(rel) = haystack[start..].find(needle) {
+        let pos = start + rel;
+        if is_word_at(haystack, pos, needle) {
+            return true;
+        }
+        start = pos + 1;
+    }
+    false
+}
+
+fn has_guarded_find_by_widget_id(code: &str) -> bool {
+    for (i, _) in code.match_indices("if") {
+        if is_word_at(code, i, "if") && if_condition_contains_find(code, i + 2) {
+            return true;
+        }
+    }
+    false
+}
+
+fn if_condition_contains_find(code: &str, after_if: usize) -> bool {
+    let bytes = code.as_bytes();
+    let trimmed = code[after_if..].trim_start();
+    let start = code.len() - trimmed.len();
+    let is_if_let = is_word_at(code, start, "let");
+    let mut past_eq = !is_if_let;
+    let mut paren = 0usize;
+    let mut bracket = 0usize;
+    let mut pat_brace = 0usize;
+
+    for (rel, ch) in code[start..].char_indices() {
+        let j = start + rel;
+        if code[j..].starts_with("find_by_widget_id(") {
+            return true;
+        }
+        match ch {
+            '(' => paren += 1,
+            ')' => paren = paren.saturating_sub(1),
+            '[' => bracket += 1,
+            ']' => bracket = bracket.saturating_sub(1),
+            ';' if paren == 0 && bracket == 0 => return false,
+            '=' if !past_eq && paren == 0 && bracket == 0 && pat_brace == 0 => {
+                let prev = j.checked_sub(1).map(|k| bytes[k]);
+                let next = bytes.get(j + 1).copied();
+                if !matches!(prev, Some(b'!' | b'<' | b'>' | b'=')) && !matches!(next, Some(b'=' | b'>')) {
+                    past_eq = true;
+                }
+            }
+            '{' if !past_eq => pat_brace += 1,
+            '}' if !past_eq => pat_brace = pat_brace.saturating_sub(1),
+            '{' if past_eq && paren == 0 && bracket == 0 => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
+fn check_workflow_run_lint(path: &str, func: &ScannedRustFn, violations: &mut Vec<EvidenceViolation>) {
+    let code = &func.body_code_only;
+    let compact: String = code.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    for token in ["execute_command", "app_mut", "state_mut", "dispatch_gui_action"] {
+        if contains_word_token(code, token) {
+            violations.push(EvidenceViolation {
+                path: path.to_owned(),
+                line: func.line,
+                reason: format!("`WorkflowRun` test `{}` contains forbidden bypass `{token}`", func.name),
+            });
+        }
+    }
+    if compact.contains("Session::from_document") {
+        violations.push(EvidenceViolation {
+            path: path.to_owned(),
+            line: func.line,
+            reason: format!("`WorkflowRun` test `{}` contains forbidden seeded bypass `Session::from_document`", func.name),
+        });
+    }
+    if has_guarded_find_by_widget_id(code) {
+        violations.push(EvidenceViolation {
+            path: path.to_owned(),
+            line: func.line,
+            reason: format!("`WorkflowRun` test `{}` guards a UI step on `if`/`if let` `find_by_widget_id(`", func.name),
+        });
+    }
+}
+
+fn parse_shard_wf_range(shard_cell: &str) -> Option<(u8, u8)> {
+    let lower = shard_cell.to_ascii_lowercase();
+    let mut nums = Vec::new();
+    let bytes = lower.as_bytes();
+    for (i, _) in lower.match_indices("wf-") {
+        let mut end = i + 3;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        if end > i + 3
+            && let Ok(val) = lower[i + 3..end].parse::<u8>()
+            && (1..=TOTAL_WORKFLOWS_U8).contains(&val)
+        {
+            nums.push(val);
+        }
+    }
+    if nums.len() >= 2 && nums[0] <= nums[1] {
+        return Some((nums[0], nums[1]));
+    }
+    if nums.len() == 1 {
+        return Some((nums[0], nums[0]));
+    }
+    for (pat, range) in [
+        ("shard 1", (1, 6)),
+        ("shard 2", (7, 15)),
+        ("shard 3", (16, 23)),
+        ("shard 4", (24, 28)),
+        ("shard 5", (29, 36)),
+        ("shard 6", (37, 43)),
+        ("shard 7", (44, 49)),
+        ("shard 8", (51, 58)),
+        ("shard 9", (59, 65)),
+        ("baseline", (1, 50)),
+        ("extended", (51, 65)),
+    ] {
+        if lower.contains(pat) {
+            return Some(range);
+        }
+    }
+    None
+}
+
+fn parse_labeled_fraction(text: &str, label: &str) -> Vec<(usize, usize)> {
+    let lower = text.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut out = Vec::new();
+    let mut search_from = 0usize;
+
+    while let Some(rel) = lower[search_from..].find(label) {
+        let pos = search_from + rel;
+        let left_ok = pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric();
+        let after_label = pos + label.len();
+        search_from = after_label;
+        if !left_ok {
+            continue;
+        }
+        let mut cur = after_label;
+        while cur < bytes.len() && (bytes[cur].is_ascii_whitespace() || matches!(bytes[cur], b'`' | b'*' | b'_' | b':')) {
+            cur += 1;
+        }
+        let num_start = cur;
+        while cur < bytes.len() && bytes[cur].is_ascii_digit() {
+            cur += 1;
+        }
+        if cur == num_start {
+            continue;
+        }
+        let Ok(num) = lower[num_start..cur].parse::<usize>() else {
+            continue;
+        };
+        while cur < bytes.len() && bytes[cur].is_ascii_whitespace() {
+            cur += 1;
+        }
+        if cur >= bytes.len() || bytes[cur] != b'/' {
+            continue;
+        }
+        cur += 1;
+        while cur < bytes.len() && bytes[cur].is_ascii_whitespace() {
+            cur += 1;
+        }
+        let den_start = cur;
+        while cur < bytes.len() && bytes[cur].is_ascii_digit() {
+            cur += 1;
+        }
+        if cur > den_start
+            && let Ok(den) = lower[den_start..cur].parse::<usize>()
+        {
+            out.push((num, den));
+        }
+    }
+    out
+}
+
+fn count_complete_in_range(complete_wfs: &BTreeSet<u8>, start: u8, end: u8) -> usize {
+    (start..=end).filter(|i| complete_wfs.contains(i)).count()
+}
+
+fn validate_section62_completion_counts(
+    path: &str,
+    line: usize,
+    shard_cell: &str,
+    human_cell: &str,
+    complete_wfs: &BTreeSet<u8>,
+    violations: &mut Vec<EvidenceViolation>,
+) {
+    let complete_claims = parse_labeled_fraction(human_cell, "complete");
+    let five_stage_claims = parse_labeled_fraction(human_cell, "five-stage");
+    if complete_claims.is_empty() && five_stage_claims.is_empty() {
+        return;
+    }
+
+    let Some((start, end)) = parse_shard_wf_range(shard_cell) else {
+        violations.push(EvidenceViolation {
+            path: path.to_owned(),
+            line,
+            reason: format!("cannot resolve `WF` shard range for §6.2 row `{}`", shard_cell.trim()),
+        });
+        return;
+    };
+    let expected_m = usize::from(end - start + 1);
+    let actual = count_complete_in_range(complete_wfs, start, end);
+
+    for (n, m) in complete_claims {
+        if m != expected_m || n != actual {
+            violations.push(EvidenceViolation {
+                path: path.to_owned(),
+                line,
+                reason: format!(
+                    "§6.2 row claims `complete {n} / {m}` for `WF-{start:02}`..`WF-{end:02}`, but statically counted `{actual} / {expected_m}` five-stage complete tests"
+                ),
+            });
+        }
+    }
+    for (n, m) in five_stage_claims {
+        if m != expected_m || n != actual {
+            violations.push(EvidenceViolation {
+                path: path.to_owned(),
+                line,
+                reason: format!(
+                    "§6.2 row claims `five-stage {n} / {m}` for `WF-{start:02}`..`WF-{end:02}`, but statically counted `{actual} / {expected_m}` five-stage complete tests (use `complete {actual} / {expected_m}`)"
+                ),
+            });
+        }
+    }
+}
+
+/// Fail if any checked `[x]` checklist item in `docs/evidence/user-interface.md` claims five-stage
+/// completion beyond the statically counted `WorkflowRun` complete set (`R10.26`).
+#[must_use]
+pub fn check_ui_parity_five_stage_claims(path: &str, ui_parity_md: &str, complete_wfs: &BTreeSet<u8>) -> Vec<EvidenceViolation> {
+    let mut violations = Vec::new();
+    let mut fence: Option<char> = None;
+
+    for (idx, line) in ui_parity_md.lines().enumerate() {
+        let trimmed = line.trim();
+        if update_fence(trimmed, &mut fence) || fence.is_some() {
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if !is_checked_markdown_item(trimmed) || lower.contains(AGENT_HARNESS_TAG) {
+            continue;
+        }
+        let complete_fracs = parse_labeled_fraction(&lower, "complete");
+        let five_stage_fracs = parse_labeled_fraction(&lower, "five-stage");
+        let mentions_five_stage = lower.contains("five-stage") || lower.contains("five stage") || !complete_fracs.is_empty();
+        if !mentions_five_stage {
+            continue;
+        }
+
+        let (start, end) = if lower.contains("wf-01") && lower.contains("wf-50") {
+            (1, 50)
+        } else if lower.contains("wf-51") && lower.contains("wf-65") {
+            (51, 65)
+        } else {
+            (1, TOTAL_WORKFLOWS_U8)
+        };
+        let expected_m = usize::from(end - start + 1);
+        let actual = count_complete_in_range(complete_wfs, start, end);
+
+        let mut explicit_claims: Vec<usize> = complete_fracs.into_iter().chain(five_stage_fracs).map(|(n, _)| n).collect();
+        for (num, den, _) in parse_workflow_fractions(&lower) {
+            if den == expected_m || den == TOTAL_WORKFLOWS {
+                explicit_claims.push(num);
+            }
+        }
+        let exceeds = if explicit_claims.is_empty() { actual < expected_m } else { explicit_claims.iter().any(|&n| n > actual) };
+        if exceeds {
+            violations.push(EvidenceViolation {
+                path: path.to_owned(),
+                line: idx + 1,
+                reason: format!(
+                    "checked `[x]` item claims five-stage completion beyond counted `WorkflowRun` tests (`{actual}/{expected_m}` complete in `WF-{start:02}`..`WF-{end:02}`)"
+                ),
+            });
+        }
+    }
+    violations
 }
 
 #[cfg(test)]
@@ -1134,30 +1867,137 @@ fn active_human_test() {}
     #[test]
     fn r15_4_backend_workflow_telemetry_enforces_consistency_and_backed_counts() {
         let mut tests = WorkspaceTests::default();
-        for idx in 1..=50 {
+        for idx in 1..=65 {
             let egui_name = format!("wf{idx:02}_human_example");
             tests.unqualified.insert(egui_name.clone());
             tests.qualified.insert(format!("human_wf_demo::{egui_name}"));
         }
 
         let valid_md = "\
-- [x] *(human path)* All 50 reference workflows — `50/50 egui`
-- [x] *(human path — `egui` backend, `R15.5`)* Native `egui` desktop shell (`50/50 egui`)
+- [x] *(human path)* All 65 reference workflows — `65/65 egui`
+- [x] *(human path — `egui` backend, `R15.5`)* Native `egui` desktop shell (`65/65 egui`)
 ";
         let (telemetry, violations) = super::check_backend_workflow_telemetry("docs/evidence/user-interface.md", valid_md, &tests);
         assert!(violations.is_empty(), "unexpected violations: {violations:?}");
         assert_eq!(telemetry.legacy_claimed, 0);
-        assert_eq!(telemetry.egui_claimed, 50);
+        assert_eq!(telemetry.egui_claimed, 65);
         assert_eq!(telemetry.legacy_backed, 0);
-        assert_eq!(telemetry.egui_backed, 50);
+        assert_eq!(telemetry.egui_backed, 65);
 
         let stale_legacy_md = "\
-- [x] *(human path)* All 50 reference workflows — `50/50 legacy, 50/50 egui`
-- [ ] *(human path — `egui` backend)* Overhaul (`2/50 egui` vs `50/50 legacy`)
+- [x] *(human path)* All 65 reference workflows — `65/65 legacy, 65/65 egui`
+- [ ] *(human path — `egui` backend)* Overhaul (`2/65 egui` vs `65/65 legacy`)
 ";
         let (_bad_tel, bad_violations) = super::check_backend_workflow_telemetry("docs/evidence/user-interface.md", stale_legacy_md, &tests);
-        assert!(bad_violations.iter().any(|v| v.reason.contains("only `0/50`")), "{bad_violations:?}");
+        assert!(bad_violations.iter().any(|v| v.reason.contains("only `0/65`")), "{bad_violations:?}");
         assert!(bad_violations.iter().any(|v| v.reason.contains("conflicting")), "{bad_violations:?}");
+    }
+
+    #[test]
+    fn r10_26_static_gate_rejects_seeded_guarded_missing_finish_and_mismatched_counts() {
+        let valid_src = r#"
+            #[test]
+            fn wf01_human_xy_demo() -> Result<(), String> {
+                let mut run = WorkflowRun::start("WF-01");
+                let _ = run.create_table_via_welcome("welcome.arch.xy", "Demo", &[])?;
+                run.finish()
+            }
+            #[test]
+            fn wf02_human_clip_demo() -> Result<(), String> {
+                let mut run = WorkflowRun::start_with_clipboard("WF-02", clip);
+                run.finish()
+            }
+        "#;
+        let (complete, lints) = super::analyze_human_wf_sources(&[("crates/ui-egui/tests/human_wf_01_06.rs", valid_src)]);
+        assert!(lints.is_empty(), "expected clean lints, got {lints:?}");
+        assert_eq!(complete.into_iter().collect::<Vec<_>>(), vec![1, 2]);
+
+        // 1. Seeded body + forbidden bypasses in a WorkflowRun test.
+        let seeded_src = r#"
+            #[test]
+            fn wf03_human_seeded() -> Result<(), String> {
+                let sess = Session::from_document(doc);
+                app.execute_command("sheet.select", json!({}));
+                let mut run = WorkflowRun::start("WF-03");
+                let _ = run.app_mut();
+                let _ = run.state_mut();
+                let _ = dispatch_gui_action(&mut app, "x", json!({}));
+                run.finish()
+            }
+        "#;
+        let (_c_seed, seed_lints) = super::analyze_human_wf_sources(&[("crates/ui-egui/tests/human_wf_01_06.rs", seeded_src)]);
+        assert_eq!(seed_lints.len(), 5, "expected 5 bypass violations, got {seed_lints:?}");
+
+        // 2. Guarded `find_by_widget_id(` inside `if` and `if let` conditions.
+        let guarded_src = r#"
+            #[test]
+            fn wf04_human_guarded_if() -> Result<(), String> {
+                let mut run = WorkflowRun::start("WF-04");
+                if run.frame_meta().find_by_widget_id("opt.btn").is_some() {
+                    run.click("opt.btn")?;
+                }
+                run.finish()
+            }
+            #[test]
+            fn wf05_human_guarded_if_let() -> Result<(), String> {
+                let mut run = WorkflowRun::start("WF-05");
+                if let Some(_n) = run.frame_meta().find_by_widget_id("opt.btn2") {
+                    run.click("opt.btn2")?;
+                }
+                run.finish()
+            }
+        "#;
+        let (_c_guard, guard_lints) = super::analyze_human_wf_sources(&[("crates/ui-egui/tests/human_wf_01_06.rs", guarded_src)]);
+        assert_eq!(guard_lints.len(), 2, "expected 2 guarded find_by_widget_id violations, got {guard_lints:?}");
+        assert!(guard_lints.iter().all(|v| v.reason.contains("find_by_widget_id(")));
+
+        // 3. Missing `.finish()` is NOT counted as complete.
+        let missing_finish_src = r#"
+            #[test]
+            fn wf01_human_no_finish() -> Result<(), String> {
+                let mut run = WorkflowRun::start("WF-01");
+                let _ = run.create_table_via_welcome("welcome.arch.xy", "Demo", &[])?;
+                Ok(())
+            }
+        "#;
+        let (c_no_fin, _lint_no_fin) = super::analyze_human_wf_sources(&[("crates/ui-egui/tests/human_wf_01_06.rs", missing_finish_src)]);
+        assert!(c_no_fin.is_empty(), "test missing .finish() must not count as complete: {c_no_fin:?}");
+
+        // 4. `complete N / M` mismatch in §6.2 + premature `[x]` five-stage claim in user-interface.md.
+        let mut tests = WorkspaceTests::default();
+        tests.qualified.insert(String::from("human_wf_01_06::wf01_human_xy_demo"));
+        tests.unqualified.insert(String::from("wf01_human_xy_demo"));
+        let mut one_complete = BTreeSet::new();
+        one_complete.insert(1);
+
+        let ok_62 = "\
+### 6.2 Per-shard human-path status
+
+| Shard / workflows | Agent harness | Human path | Blockers | Remaining gaps |
+|---|---|---|---|---|
+| Shard 1 (`WF-01`–`WF-06`) | Pass | complete `1 / 6` (`human_wf_01_06::wf01_human_xy_demo`) | None | None |
+";
+        assert!(
+            super::check_gui_workflows_human_path_with_completion("docs/gui-workflows.md", ok_62, Some(&tests), Some(&one_complete)).is_empty(),
+            "expected matching complete 1 / 6 row to pass"
+        );
+
+        let bad_62 = "\
+### 6.2 Per-shard human-path status
+
+| Shard / workflows | Agent harness | Human path | Blockers | Remaining gaps |
+|---|---|---|---|---|
+| Shard 1 (`WF-01`–`WF-06`) | Pass | complete `2 / 6` (`human_wf_01_06::wf01_human_xy_demo`) | None | None |
+";
+        let mismatch_violations =
+            super::check_gui_workflows_human_path_with_completion("docs/gui-workflows.md", bad_62, Some(&tests), Some(&c_no_fin));
+        assert_eq!(mismatch_violations.len(), 1, "{mismatch_violations:?}");
+        assert!(mismatch_violations[0].reason.contains("statically counted `0 / 6`"));
+
+        let bad_ui_claim = "- [x] *(human path)* Five-stage `WF-01`–`WF-50` complete (`human_wf_01_06::wf01_human_xy_demo`).\n";
+        let ui_claim_violations = super::check_ui_parity_five_stage_claims("docs/evidence/user-interface.md", bad_ui_claim, &one_complete);
+        assert_eq!(ui_claim_violations.len(), 1, "{ui_claim_violations:?}");
+        assert!(ui_claim_violations[0].reason.contains("1/50"));
     }
 }
 
