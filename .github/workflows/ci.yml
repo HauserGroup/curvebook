@@ -39,8 +39,12 @@ jobs:
         run: |
           cargo fmt --all -- --check
           actionlint -config-file .github/actionlint.yaml
-      - name: Build all native test targets without executing tests
-        run: cargo run --locked -p xtask -- ci build
+      - name: Build all native test targets and record active build units
+        run: |
+          set -euo pipefail
+          mkdir -p target
+          cargo build --locked -p xtask --message-format=json-render-diagnostics > target/.ci-cache-units.jsonl
+          cargo nextest archive --locked --workspace --all-targets --cargo-message-format=json-render-diagnostics --archive-file target/ci-tests.tar.zst >> target/.ci-cache-units.jsonl
       - name: Share the exact compiled test binaries
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -49,8 +53,12 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 2
-      - name: Avoid duplicating the uploaded archive in the build cache
-        run: rm -- target/ci-tests.tar.zst
+      - name: Trim build cache to active units and record base commit SHA
+        run: |
+          set -euo pipefail
+          rm -f -- target/ci-tests.tar.zst
+          ./target/debug/xtask ci-cache trim --messages target/.ci-cache-units.jsonl
+          rm -f -- target/.ci-cache-units.jsonl
 
   checks:
     name: CI / ${{ matrix.stage }}
@@ -133,3 +141,71 @@ jobs:
         run: |
           test "$BUILD_RESULT" = success
           test "$CHECKS_RESULT" = success
+
+  prune-caches:
+    name: Prune superseded CI caches
+    needs: [build]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Delete superseded rolling CI caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_SUFFIX: -${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          for prefix in "rolling-ci-build-" "v0-rust-ci-linux-v2-"; do
+            json="$(gh cache list --repo "$REPO" --key "$prefix" --sort created_at --order desc --limit 100 --json id,key,ref,createdAt)"
+            ids="$(
+              JSON_DATA="$json" PREFIX="$prefix" RUN_SUFFIX="$RUN_SUFFIX" python3 - <<'PY'
+          import datetime, json, os
+
+          entries = json.loads(os.environ["JSON_DATA"])
+          prefix = os.environ["PREFIX"]
+          run_suffix = os.environ["RUN_SUFFIX"]
+          now = datetime.datetime.now(datetime.timezone.utc)
+
+          def parse_age_hours(entry):
+              raw = entry.get("createdAt", "")
+              if not raw:
+                  return 9999.0
+              dt = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+              return (now - dt).total_seconds() / 3600.0
+
+          if prefix == "v0-rust-ci-linux-v2-":
+              for e in entries:
+                  if e.get("ref") == "refs/heads/main" or parse_age_hours(e) >= 2.0:
+                      print(e["id"])
+          else:
+              groups = {}
+              for e in entries:
+                  parts = e.get("key", "").split("-")
+                  # Key shape: rolling-ci-build-<os>-<arch>-<lockhash>-<run_id>-<attempt>
+                  slot = "-".join(parts[:5]) if len(parts) >= 5 else e.get("key", "")
+                  groups.setdefault((e.get("ref", ""), slot), []).append(e)
+
+              for (ref, _slot), group in groups.items():
+                  group.sort(key=lambda e: e.get("createdAt", ""), reverse=True)
+                  if ref == "refs/heads/main":
+                      keep_id = next((e["id"] for e in group if e.get("key", "").endswith(run_suffix)), None)
+                      if keep_id is None and group:
+                          keep_id = group[0]["id"]
+                      for e in group:
+                          if e["id"] != keep_id:
+                              print(e["id"])
+                  elif ref.startswith("refs/pull/"):
+                      keep_id = group[0]["id"] if group and parse_age_hours(group[0]) < 24.0 else None
+                      for e in group:
+                          if e["id"] != keep_id:
+                              print(e["id"])
+          PY
+            )"
+            while IFS= read -r cache_id; do
+              [ -n "$cache_id" ] || continue
+              gh cache delete "$cache_id" --repo "$REPO" || echo "warning: failed to delete cache $cache_id" >&2
+            done <<< "$ids"
+          done

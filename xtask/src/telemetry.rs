@@ -989,14 +989,17 @@ fn validate_permission_entry(
             && rel == ".github/workflows/release.yml"
             && state.current_job.as_deref() == Some("publish")
             && matches!(clean_scope, "contents" | "id-token" | "attestations");
-        if !publish_ok {
+        let prune_caches_ok =
+            !is_top && rel == ".github/workflows/ci.yml" && state.current_job.as_deref() == Some("prune-caches") && clean_scope == "actions";
+        if !publish_ok && !prune_caches_ok {
             violations.push(TelemetryViolation {
                 check: 4,
                 path: rel.to_owned(),
                 line: line_no,
                 detail: format!(
                     "unexpected write permission `{clean_scope}: write` \
-                     (only release.yml `publish` job may declare `contents: write`, `id-token: write`, or `attestations: write`)"
+                     (only release.yml `publish` job may declare `contents: write`, `id-token: write`, or `attestations: write`, \
+                     and ci.yml `prune-caches` job may declare `actions: write`)"
                 ),
             });
         }
@@ -2084,6 +2087,58 @@ mod tests {
         let (_, scope_hits) = run_checks(&dir_bad_scope.path).unwrap();
         assert_eq!(scope_hits.len(), 1, "{scope_hits:?}");
         assert!(has_bad_write(&scope_hits, ".github/workflows/release.yml", "packages"), "{scope_hits:?}");
+    }
+
+    #[test]
+    fn check4_allows_ci_prune_caches_actions_write_and_rejects_elsewhere() {
+        let has_bad_write = |hits: &[super::TelemetryViolation], path: &str, scope: &str| {
+            let prefix = format!("unexpected write permission `{scope}: write`");
+            hits.iter().any(|v| v.check == 4 && v.path == path && v.detail.starts_with(&prefix))
+        };
+
+        let dir_ok_inline = create_clean_fixture("check4-prune-ok-inline");
+        dir_ok_inline.write(
+            ".github/workflows/ci.yml",
+            "name: CI\non: [push]\npermissions:\n  contents: read\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo test\n  prune-caches:\n    needs: [build]\n    runs-on: ubuntu-latest\n    permissions: { actions: write }\n    steps:\n      - run: gh cache list\n",
+        );
+        let (_, ok_inline_hits) = run_checks(&dir_ok_inline.path).unwrap();
+        assert!(ok_inline_hits.is_empty(), "expected ci.yml prune-caches actions: write (inline) to pass: {ok_inline_hits:?}");
+
+        let dir_ok_block = create_clean_fixture("check4-prune-ok-block");
+        dir_ok_block.write(
+            ".github/workflows/ci.yml",
+            "name: CI\non: [push]\npermissions:\n  contents: read\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo test\n  prune-caches:\n    needs: [build]\n    runs-on: ubuntu-latest\n    permissions:\n      actions: write\n    steps:\n      - run: gh cache list\n",
+        );
+        let (_, ok_block_hits) = run_checks(&dir_ok_block.path).unwrap();
+        assert!(ok_block_hits.is_empty(), "expected ci.yml prune-caches actions: write (block) to pass: {ok_block_hits:?}");
+
+        let dir_top = create_clean_fixture("check4-prune-top");
+        dir_top.write(
+            ".github/workflows/ci.yml",
+            "name: CI\non: [push]\npermissions:\n  contents: read\n  actions: write\njobs:\n  prune-caches:\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh cache list\n",
+        );
+        let (_, top_hits) = run_checks(&dir_top.path).unwrap();
+        assert_eq!(top_hits.len(), 1, "{top_hits:?}");
+        assert!(has_bad_write(&top_hits, ".github/workflows/ci.yml", "actions"), "{top_hits:?}");
+
+        let dir_other_job = create_clean_fixture("check4-prune-other-job");
+        dir_other_job.write(
+            ".github/workflows/ci.yml",
+            "name: CI\non: [push]\npermissions:\n  contents: read\njobs:\n  build:\n    runs-on: ubuntu-latest\n    permissions:\n      actions: write\n    steps:\n      - run: cargo test\n  prune-caches:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: write\n    steps:\n      - run: echo bad\n",
+        );
+        let (_, other_hits) = run_checks(&dir_other_job.path).unwrap();
+        assert_eq!(other_hits.len(), 2, "{other_hits:?}");
+        assert!(has_bad_write(&other_hits, ".github/workflows/ci.yml", "actions"), "{other_hits:?}");
+        assert!(has_bad_write(&other_hits, ".github/workflows/ci.yml", "contents"), "{other_hits:?}");
+
+        let dir_other_wf = create_clean_fixture("check4-prune-other-wf");
+        dir_other_wf.write(
+            ".github/workflows/release.yml",
+            "name: Release\non: [workflow_dispatch]\npermissions:\n  contents: read\njobs:\n  prune-caches:\n    runs-on: ubuntu-latest\n    permissions:\n      actions: write\n    steps:\n      - run: echo bad\n",
+        );
+        let (_, wf_hits) = run_checks(&dir_other_wf.path).unwrap();
+        assert_eq!(wf_hits.len(), 1, "{wf_hits:?}");
+        assert!(has_bad_write(&wf_hits, ".github/workflows/release.yml", "actions"), "{wf_hits:?}");
     }
 
     #[test]
