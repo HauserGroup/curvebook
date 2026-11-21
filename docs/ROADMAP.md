@@ -113,7 +113,7 @@ Fixes for reported issues had no roadmap ID to use, merged PRs did not reference
 - [ ] Hosted CI passes on the pull request.
 
 ### R0.34 Checked lock wrapper for shared state
-Owner: open · Status: todo · Was: cross-repository infrastructure drift audit 2026-11-21 · Depends on: none · Gate: none · Est. note: 6–10 h
+Owner: open · Status: in progress — claimed: agent-r0-34, branch `feature/R0.34-checked-lock-wrapper` · Was: cross-repository infrastructure drift audit 2026-11-21 · Depends on: none · Gate: none · Est. note: 6–10 h
 
 [`clippy.toml`](../clippy.toml) bans `std::sync::Mutex` "until a checked lock wrapper lands", but shared state now uses raw `std::sync::RwLock` instead (`crates/mcp/src/tools.rs`, `crates/ui-egui/src/os_integration.rs`, `crates/ui-egui/src/egui_shell/canvas_view.rs`, `apps/curvebook/src/desktop_host.rs`, `apps/curvebook/src/gui_window.rs`). An `RwLock` deadlocks in the same ways as a `Mutex` (a thread locking twice, two threads waiting on each other, a holder that never lets go), so the ban moves the risk instead of removing it (see also the `AsyncRasterWorkerOwner` worker self-join deadlock in `crates/ui-egui/src/egui_shell/canvas_view.rs`, fixed in `7116d92` / `GWF-12`). Design and write the wrapper independently, in CurveBook's own words.
 
@@ -124,7 +124,7 @@ Owner: open · Status: todo · Was: cross-repository infrastructure drift audit 
 - [ ] Verify: `cargo xtask ci quick`; hosted CI passes on the pull request.
 
 ### R0.35 Keep the CI cache under the repository budget
-Owner: open · Status: todo · Was: hosted CI and release review 2026-11-21 · Depends on: none · Gate: none · Est. note: 6–10 h
+Owner: open · Status: in progress — claimed: agent-r0-35, branch `chore/R0.35-ci-cache-budget` · Was: hosted CI and release review 2026-11-21 · Depends on: none · Gate: none · Est. note: 6–10 h
 
 GitHub keeps at most 10 GB of Actions cache per repository and evicts the least recently used entries above that. On 2026-11-21 CurveBook held 9.42 GB in 11 entries. The `ci-setup` Rust cache (`.github/actions/ci-setup/action.yml`) saves a new entry for every commit (`key: ${{ github.sha }}`) with `cache-workspace-crates: true` and no trimming, so each entry is 1.7–2.5 GB and pushes out the FreeBSD, Windows ARM64 and release caches. A fresh checkout also gives every file a new modification time, so Cargo rebuilds the cached workspace crates anyway.
 
@@ -267,7 +267,7 @@ Owner: maintainers · Status: in progress · Was: Beta gate decision 2026-11-20 
 - [ ] Run every `human_wf_*` and `gui_wf_*` suite on the Beta candidate revision with `cargo xtask status` at `65 / 65` complete, and record the revision, command, and result (`0` failed, `0` skipped, `0` background panics) in [`gui-workflows.md` §6.2](gui-workflows.md#62-per-shard-human-path-status) and [`STATUS.md`](STATUS.md). Beta ships only when all `65` complete.
 
 ### R10.26 Five-stage GUI workflow completion contract and gate
-Owner: open · Status: todo · Was: GUI workflow completion audit 2026-11-21 ([`gui-workflow-completion-audit-2026-11-21.md`](audit/gui-workflow-completion-audit-2026-11-21.md), [`gui-workflow-completion-plan.md`](planning/gui-workflow-completion-plan.md)) · Depends on: none · Gate: **Beta** · Est. note: 8–16 h
+Owner: open · Status: in progress — claimed: agent-r10-26, branch `test/R10.26-gui-completion-contract` · Was: GUI workflow completion audit 2026-11-21 ([`gui-workflow-completion-audit-2026-11-21.md`](audit/gui-workflow-completion-audit-2026-11-21.md), [`gui-workflow-completion-plan.md`](planning/gui-workflow-completion-plan.md)) · Depends on: none · Gate: **Beta** · Est. note: 8–16 h
 
 - [ ] Add `WorkflowRun` in `crates/ui-egui/tests/human_wf_common/workflow_run.rs` wrapping `EguiWfHarness` (exposing `start` / `start_with_clipboard` from an empty `UiApp`, hiding `from_app`/`app_mut`/`state_mut`/`dispatch_gui_action`), accumulating `intent_errors`, catching background-thread panics, enforcing ordered 5-stage execution (`Create`, `Enter`, `Configure`, `Verify`, `Live edit`), `ResultStatus::UpToDate`, `verify_reference` against headless `Session` (`D1`), and `finish()` (`assert_zero_shortcut_compliance`, `verify_14_locales_section_9_4`, `assert_input_to_paint_budget`), plus clean-room `wf_datasets` fixtures in `crates/testkit`.
 - [ ] Extend `xtask/src/status.rs`: raise the workflow cap from `50` to `65` (with `docs/evidence/user-interface.md` fractions synced), statically count `WF-NN` functions in `human_wf_*.rs` using `WorkflowRun::start("WF-NN")` + `.finish()`, lint against bypasses (`execute_command`, `Session::from_document`, `app_mut`, `state_mut`, `dispatch_gui_action`, guarded `find_by_widget_id(`), and enforce `"complete N / M"` counts in `docs/gui-workflows.md` §6.2 and `docs/evidence/user-interface.md` (with `evidence_tests` negative fixtures).
@@ -275,7 +275,7 @@ Owner: open · Status: todo · Was: GUI workflow completion audit 2026-11-21 ([`
 - [ ] Verify: `cargo test -p xtask status`, `cargo test -p curvebook-ui-egui --test r10_26_workflow_run_self_test`, `cargo xtask status`, `cargo xtask ci quick`.
 
 ### R10.27 Remaining desktop GUI path gaps (layout panels, theme, and factor titles)
-Owner: open · Status: todo · Was: GUI workflow completion audit 2026-11-21 (`GWF-15`, `GWF-16`) · Depends on: none · Gate: **Beta** · Est. note: 8–12 h
+Owner: open · Status: in progress — claimed: agent-r10-27, branch `feature/R10.27-layout-panels-theme-paths` · Was: GUI workflow completion audit 2026-11-21 (`GWF-15`, `GWF-16`) · Depends on: none · Gate: **Beta** · Est. note: 8–12 h
 
 - [ ] **Layout panels (`GWF-15`):** add an "Add graph panel" picker in `trailing_studio/page_layout.rs` / layout canvas context menu emitting `layout.addPanel`, wire corner resize handles (`resizing_corner`) in `canvas_view.rs` writing `layout.setSpec`, and ensure z-order controls are clickable.
 - [ ] **Theme & Preferences (`GWF-16`):** record `popup.menu.ui.theme.set.opt.{slug}` (and other submenu variants) in `top_chrome.rs`, and add `app.preferences` to the curated menu bar (`menus/menu_bar.rs`).
@@ -550,7 +550,7 @@ Owner: maintainers · Status: in progress · Was: Advanced workflow & graphing s
 - **1.0 follow-ups (moved 2026-11-20):** live browser/`WebRunner` human-path parity for `WF-51`–`WF-65` is in [`R11.9`](#r119-50-workflow-human-path-parity-on-the-web-host), and the recorded desktop and browser walkthroughs that include `WF-51`–`WF-65` are in [`R10.13`](#r1013-human-operable-50-workflow-acceptance--manual-qa) and [`R11.10`](#r1110-live-browser-qa--supported-browser-matrix).
 
 ### R13.10 Missing Format Graph controls and 65-workflow control-gap sweep
-Owner: open · Status: todo · Was: GUI workflow completion audit 2026-11-21 (`GWF-01`, `GWF-02`, `GWF-17`) · Depends on: [`R13.8`](#r138-desktop-gui-views-for-r13-features) (done) · Gate: **Beta** · Est. note: 8–12 h
+Owner: open · Status: in progress — claimed: agent-r13-10, branch `feature/R13.10-graph-orientation-replicate-lines` · Was: GUI workflow completion audit 2026-11-21 (`GWF-01`, `GWF-02`, `GWF-17`) · Depends on: [`R13.8`](#r138-desktop-gui-views-for-r13-features) (done) · Gate: **Beta** · Est. note: 8–12 h
 
 - [ ] **Control-gap sweep:** audit every `WF-01`–`WF-65` spec row in [`gui-workflows.md`](gui-workflows.md), citing each named feature's drawn GUI widget ID or logging a `GWF-*` gap in [`gui-workflow-completion-audit-2026-11-21.md`](audit/gui-workflow-completion-audit-2026-11-21.md) before Wave B test rewrites begin.
 - [ ] **Orientation (`GWF-01`):** add `orientation` + `orientation_dirty` to `FormatGraphState` (`dialogs_canvas/format_graph.rs`), `format_graph.orientation.{vertical,horizontal}` gated to `Column | Grouped` in `format_graph/series.rs`, and matching chips in `trailing_studio/graph_inspector.rs`.
@@ -618,7 +618,7 @@ The release workflow attests build provenance for every artefact, but publishes 
 - [ ] Verify: hosted CI and one release dry run pass.
 
 ### R14.3 Retry transient release verification failures
-Owner: maintainers · Status: todo · Was: hosted CI and release review 2026-11-21 · Depends on: [`R14.1`](#r141-beta-release-pipeline) · Gate: none · Est. note: 1–3 h
+Owner: maintainers · Status: in progress — claimed: agent-r14-beta, branch `bugfix/R14.1-msi-scan-and-R14.3-macos-retries` (covers `R14.1` `.msi` scan fix and `R14.3` macOS verify retries) · Was: hosted CI and release review 2026-11-21 · Depends on: [`R14.1`](#r141-beta-release-pipeline) · Gate: none · Est. note: 1–3 h
 
 Apple's Gatekeeper and ticket checks can fail briefly right after notarization. `packaging/macos/verify.sh` runs `xcrun stapler validate` and `spctl --assess` once, so one transient failure fails the whole release.
 
@@ -781,7 +781,7 @@ Owner: maintainers · Status: done · Was: Maintainability ledger 2026-11-20 (`R
 - [x] Add shared i18n fallback helper (`R15-1`), unify modal `FrameInspectMeta` recording adapter (`R15-2`), share the shortcut candidate builder (`R8-1`), deduplicate accessibility state transitions (`R10-1`), share journal width preset name tables (`R9-1`), share the linked-paste TSV cell formatter (`R10-2`), and share capped raster sizing between MCP and control (`R5-4`). *(Done 2026-11-20 in `3663e09`.)*
 
 ### R16.19 Replace egui combo boxes with a dropdown that can grow while open
-Owner: open · Status: todo · Was: cross-repository infrastructure drift audit 2026-11-21 · Depends on: none · Gate: none · Est. note: 2–4 h
+Owner: open · Status: in progress — claimed: agent-r16-19, branch `refactor/R16.19-growable-dropdown` · Was: cross-repository infrastructure drift audit 2026-11-21 · Depends on: none · Gate: none · Est. note: 2–4 h
 
 An open `egui::ComboBox` popup is reported upstream (egui issue #5225) to keep the size it opened at, so a list that changes while open cannot grow back. CurveBook uses it in `crates/ui-egui/src/egui_shell/stat_anova_modal.rs` and `crates/ui-egui/src/egui_shell/center_stage.rs`.
 
