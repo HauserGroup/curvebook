@@ -798,6 +798,7 @@ impl UiApp {
         self.clipboard_adapter.adapter.read_text()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn read_clipboard_image(&self) -> Result<Option<Vec<u8>>, String> {
         if !self.clipboard_adapter.is_custom && (self.is_gui_only() || self.is_human_path_only()) {
             return Ok(None);

@@ -3406,11 +3406,18 @@ fn dispatch_ui_image_format_open(app: &mut UiApp, params: &Value) -> Result<Valu
 
 fn dispatch_ui_row_titles_toggle(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     let explicit_collapsed = opt_bool_param(params, &["collapsed"])?;
-    let current_collapsed = app.grid.row_titles_collapsed_override.unwrap_or(app.egui_views.column_grid.row_titles_collapsed);
+    #[cfg(not(target_arch = "wasm32"))]
+    let fallback_collapsed = app.egui_views.column_grid.row_titles_collapsed;
+    #[cfg(target_arch = "wasm32")]
+    let fallback_collapsed = app.view_shards.grid_core.row_titles_collapsed;
+    let current_collapsed = app.grid.row_titles_collapsed_override.unwrap_or(fallback_collapsed);
     let next_collapsed = explicit_collapsed.unwrap_or(!current_collapsed);
     app.grid.row_titles_collapsed_override = Some(next_collapsed);
     app.view_shards.grid_core.row_titles_collapsed = next_collapsed;
-    app.egui_views.column_grid.row_titles_collapsed = next_collapsed;
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        app.egui_views.column_grid.row_titles_collapsed = next_collapsed;
+    }
     Ok(json!({
         "row_titles_collapsed": next_collapsed,
         "row_titles_expanded": !next_collapsed,

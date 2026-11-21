@@ -2,12 +2,15 @@
 //! plus platform-neutral menu parity descriptors shared across OS hosts (`R15.3`).
 
 use curvebook_ui_egui::UiApp;
-use curvebook_ui_egui::egui_shell::top_chrome::{
-    EXTRA_FILE_MENU_ACTIONS, collect_in_window_menu_sections, effective_menu_item_enabled, is_menu_item_visible, submenu_variants_for_command,
-};
+#[cfg(target_os = "macos")]
+use curvebook_ui_egui::egui_shell::top_chrome::{EXTRA_FILE_MENU_ACTIONS, submenu_variants_for_command};
+use curvebook_ui_egui::egui_shell::top_chrome::{collect_in_window_menu_sections, effective_menu_item_enabled, is_menu_item_visible};
+#[cfg(target_os = "macos")]
 use curvebook_ui_egui::i18n::{BETA_ACTIVE_LOCALES, normalize_locale};
 
-use crate::desktop_host::{DesktopMenuChromeState, DesktopMenuItem};
+use crate::desktop_host::DesktopMenuChromeState;
+#[cfg(target_os = "macos")]
+use crate::desktop_host::DesktopMenuItem;
 
 /// Canonical 10-menu top-level bar titles specified in `docs/planning/gui-layout-spec.md` §3.1.
 pub const NATIVE_MENU_BAR_TITLES: [&str; 10] = ["File", "Edit", "View", "Insert", "Data", "Analyze", "Graph", "Arrange", "Window", "Help"];

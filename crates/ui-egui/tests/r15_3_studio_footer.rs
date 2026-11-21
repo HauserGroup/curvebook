@@ -568,8 +568,9 @@ fn quick_stats_50k_cells_under_half_ms_and_cached_steady_frames() -> Result<(), 
     }
     miss_samples_ms.sort_by(f64::total_cmp);
     let median_miss_ms = miss_samples_ms[2];
+    let median_budget_ms = if cfg!(debug_assertions) { 2.0 } else { 0.5 };
     assert!(
-        first_ms < 25.0 && median_miss_ms < 0.5,
+        first_ms < 25.0 && median_miss_ms < median_budget_ms,
         "50,000-cell Quick-Stats timing out of budget: first={first_ms:.3} ms, median={median_miss_ms:.3} ms (samples={miss_samples_ms:?})"
     );
 

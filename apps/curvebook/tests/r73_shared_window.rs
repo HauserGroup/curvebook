@@ -336,6 +336,7 @@ fn shared_live_window_human_and_control_edits_render_repaint_and_persist() -> Re
         |ui| app.step_ui(ui),
     );
     out0.textures_delta.clear();
+    let _ = app.runtime_mut().dispatch(DesktopHostEvent::RedrawRequested { window_id: win_id })?;
     let initial_frame_rgba = app.runtime().window(win_id)?.last_frame().ok_or("missing initial frame")?.rgba_bytes.clone();
     let initial_title = app.runtime().window(win_id)?.window_title();
     assert!(initial_title.contains("Untitled *"));
@@ -478,6 +479,7 @@ fn shared_live_window_human_and_control_edits_render_repaint_and_persist() -> Re
         "incoming control requests must trigger egui::Context::request_repaint()"
     );
 
+    let _ = app.runtime_mut().dispatch(DesktopHostEvent::RedrawRequested { window_id: win_id })?;
     let updated_frame_rgba = app.runtime().window(win_id)?.last_frame().ok_or("missing post-control frame")?.rgba_bytes.clone();
     assert_ne!(initial_frame_rgba, updated_frame_rgba, "live window framebuffer must repaint with control edits");
     let final_title = app.runtime().window(win_id)?.window_title();

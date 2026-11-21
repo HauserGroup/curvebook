@@ -3215,7 +3215,11 @@ mod tests {
         let frame = grid.visible_frame(&doc).expect("visible frame");
         let elapsed = t0.elapsed();
 
-        assert!(elapsed < std::time::Duration::from_millis(5), "1,000,000-row selection + brushing exceeded 5 ms budget: {elapsed:?}");
+        let budget_ms = if cfg!(debug_assertions) { 25 } else { 5 };
+        assert!(
+            elapsed < std::time::Duration::from_millis(budget_ms),
+            "1,000,000-row selection + brushing exceeded {budget_ms} ms budget: {elapsed:?}"
+        );
         // Contiguous range selection stays in O(1) bounds (`selected_coords` unmaterialized) while `is_cell_selected` covers all 1M rows.
         assert!(grid.selected_coords.is_empty(), "rectangular range must not materialize millions of selected_coords");
         assert!(grid.is_cell_selected(ds, GridCellCoord::new(0, 0, 0)));

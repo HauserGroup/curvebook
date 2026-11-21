@@ -1404,15 +1404,26 @@ fn render_gallery_card(
     let thumb_rect = Rect::from_min_max(card_rect.min + vec2(8.0, 8.0), pos2(card_rect.right() - 8.0, card_rect.bottom() - 38.0));
     paint_gallery_thumbnail(ui, doc, card, thumb_rect, tokens);
 
-    let title_pos = pos2(card_rect.left() + 8.0, card_rect.bottom() - 32.0);
-    let max_title_w = (card_rect.width() - 16.0).max(20.0);
-    let galley = ui.painter().layout(card.title.clone(), FontId::proportional(11.5), tokens.text_primary, max_title_w);
-    ui.painter().with_clip_rect(card_rect.shrink(4.0)).galley(title_pos, galley, tokens.text_primary);
+    let text_clip = card_rect.shrink(4.0).intersect(ui.clip_rect());
+    if text_clip.is_positive() && text_clip.width() >= 20.0 {
+        let title_pos = pos2(card_rect.left() + 8.0, card_rect.bottom() - 32.0);
+        let max_title_w = (text_clip.right() - title_pos.x - 4.0).min(card_rect.width() - 16.0).max(16.0);
+        let mut title_job = egui::text::LayoutJob::single_section(
+            card.title.clone(),
+            egui::text::TextFormat::simple(FontId::proportional(11.5), tokens.text_primary),
+        );
+        title_job.wrap = egui::text::TextWrapping { max_width: max_title_w, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+        let galley = ui.painter().layout_job(title_job);
+        ui.painter().with_clip_rect(text_clip).galley(title_pos, galley, tokens.text_primary);
 
-    let sub_pos = pos2(card_rect.left() + 8.0, card_rect.bottom() - 16.0);
-    let sub_text = format!("{} · {}", card.badge_label, card.subtitle);
-    let sub_galley = ui.painter().layout(sub_text, FontId::proportional(9.5), tokens.text_muted, max_title_w);
-    ui.painter().with_clip_rect(card_rect.shrink(4.0)).galley(sub_pos, sub_galley, tokens.text_muted);
+        let sub_pos = pos2(card_rect.left() + 8.0, card_rect.bottom() - 16.0);
+        let sub_text = format!("{} · {}", card.badge_label, card.subtitle);
+        let mut sub_job =
+            egui::text::LayoutJob::single_section(sub_text, egui::text::TextFormat::simple(FontId::proportional(9.5), tokens.text_muted));
+        sub_job.wrap = egui::text::TextWrapping { max_width: max_title_w, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+        let sub_galley = ui.painter().layout_job(sub_job);
+        ui.painter().with_clip_rect(text_clip).galley(sub_pos, sub_galley, tokens.text_muted);
+    }
 
     let wid = format!("gallery.card.{}", card.sheet_id.as_str());
     meta.record_response(
