@@ -234,7 +234,7 @@ pub fn render_one_way_anova_modal(
     let frame = egui::Frame::window(&ctx.global_style())
         .fill(tokens.surface_bg)
         .stroke(Stroke::new(1.5, tokens.accent_strong))
-        .corner_radius(CornerRadius::same(8))
+        .corner_radius(CornerRadius::same(tokens.metrics.radius_lg))
         .inner_margin(egui::Margin::same(12));
 
     let dialog_area = egui::Area::new(Id::unique("anova_modal.dialog"))
@@ -856,8 +856,10 @@ fn draw_experimental_design_schematic(
     } else {
         tr_anova(rc.locale, "anova.schematic.independent")
     };
-    let mut job =
-        egui::text::LayoutJob::single_section(caption.to_owned(), egui::TextFormat::simple(FontId::proportional(11.0), rc.tokens.text_muted));
+    let mut job = egui::text::LayoutJob::single_section(
+        caption.to_owned(),
+        egui::TextFormat::simple(FontId::proportional(rc.tokens.metrics.font_ui_small_pt), rc.tokens.text_muted),
+    );
     job.wrap =
         egui::text::TextWrapping { max_width: (rect.width() - 16.0).max(40.0), max_rows: 1, break_anywhere: false, overflow_character: Some('…') };
     let cap_galley = ui.painter().layout_job(job);
@@ -1319,7 +1321,7 @@ fn draw_residual_qq_schematic(ui: &mut Ui, rc: &TabRenderCtx<'_>, meta: &mut Fra
         Pos2::new(rect.left() + 8.0, rect.top() + 5.0),
         Align2::LEFT_TOP,
         title,
-        FontId::proportional(11.0),
+        FontId::proportional(rc.tokens.metrics.font_ui_small_pt),
         rc.tokens.text_muted,
     );
 
@@ -1388,7 +1390,7 @@ fn render_method_reference_card(
                 widget_id: "edit.method_ref.body",
                 role: "label",
                 text: summary,
-                font_size: 11.0,
+                font_size: tokens.metrics.font_ui_small_pt,
                 color: tokens.text_primary,
                 z_layer: ZLayer::ModalDialog,
                 tooltip: None,
@@ -1564,24 +1566,38 @@ pub(super) fn render_footer_button(ui: &mut Ui, tokens: &Tokens, meta: &mut Fram
     let FooterBtnSpec { widget_id, label, primary, selected, enabled } = spec;
     let min_w: f32 = if primary { 96.0 } else { 68.0 };
     let max_w = (ui.available_width() - 4.0).max(48.0);
-    let mut job = egui::text::LayoutJob::single_section(label.to_owned(), egui::TextFormat::simple(FontId::proportional(12.0), tokens.text_strong));
+    let fg_text = if !enabled {
+        tokens.text_disabled
+    } else if primary {
+        tokens.on_accent
+    } else {
+        tokens.text_strong
+    };
+    let mut job = egui::text::LayoutJob::single_section(label.to_owned(), egui::TextFormat::simple(FontId::proportional(12.0), fg_text));
     job.wrap = egui::text::TextWrapping { max_width: (max_w - 16.0).max(24.0), max_rows: 1, break_anywhere: false, overflow_character: Some('…') };
     let galley = ui.painter().layout_job(job);
     let ellipsized = galley.elided;
     let w = (galley.size().x + 18.0).clamp(min_w.min(max_w), max_w);
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 26.0), if enabled { Sense::click() } else { Sense::hover() });
 
-    let (bg, fg, border) = if primary {
-        (tokens.accent_strong, Color32::WHITE, tokens.accent_strong)
+    let (bg, fg, border) = if !enabled {
+        (tokens.panel_bg, tokens.text_disabled, tokens.divider)
+    } else if primary {
+        (
+            if resp.hovered() { tokens.accent_hover } else { tokens.accent_strong },
+            tokens.on_accent,
+            if resp.hovered() { tokens.hover_border } else { tokens.accent_strong },
+        )
     } else if selected {
         (tokens.active_bg, tokens.text_strong, tokens.accent)
     } else if resp.hovered() {
-        (tokens.hover_bg, tokens.text_strong, tokens.button_border)
+        (tokens.hover_bg, tokens.text_strong, tokens.hover_border)
     } else {
         (tokens.button_bg, tokens.text_strong, tokens.button_border)
     };
-    ui.painter().rect_filled(rect, CornerRadius::same(5), bg);
-    ui.painter().rect_stroke(rect, CornerRadius::same(5), Stroke::new(1.0, border), StrokeKind::Inside);
+    let r = CornerRadius::same(tokens.metrics.radius_md);
+    ui.painter().rect_filled(rect, r, bg);
+    ui.painter().rect_stroke(rect, r, Stroke::new(1.0, border), StrokeKind::Inside);
 
     let text_pos = Pos2::new(rect.center().x - galley.size().x * 0.5, rect.center().y - galley.size().y * 0.5);
     ui.painter().with_clip_rect(rect.shrink(3.0)).galley(text_pos, galley, fg);
@@ -1718,8 +1734,8 @@ pub(super) fn render_stepper_row(ui: &mut Ui, tokens: &Tokens, meta: &mut FrameI
             delta = -1;
         }
         let (val_rect, val_resp) = ui.allocate_exact_size(Vec2::new(val_w, 22.0), Sense::hover());
-        ui.painter().rect_filled(val_rect, CornerRadius::same(3), tokens.input_bg);
-        ui.painter().rect_stroke(val_rect, CornerRadius::same(3), Stroke::new(1.0, tokens.divider), StrokeKind::Inside);
+        ui.painter().rect_filled(val_rect, CornerRadius::same(tokens.metrics.radius_sm), tokens.input_bg);
+        ui.painter().rect_stroke(val_rect, CornerRadius::same(tokens.metrics.radius_sm), Stroke::new(1.0, tokens.divider), StrokeKind::Inside);
         let mut job = egui::text::LayoutJob::single_section(spec.value_text.to_owned(), egui::TextFormat::simple(val_font, text_col));
         job.wrap =
             egui::text::TextWrapping { max_width: (val_w - 6.0).max(16.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };

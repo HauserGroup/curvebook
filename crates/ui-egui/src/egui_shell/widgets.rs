@@ -216,8 +216,49 @@ fn radio_row(ui: &mut Ui, text: &str, name: &str, selected: bool, enabled: bool)
 }
 
 // ============================================================================
-// Buttons
+// Buttons & Interactive Chrome (§10.3 & §10.6)
 // ============================================================================
+
+/// Parameters controlling [`paint_interactive_chrome`].
+#[derive(Clone, Copy, Debug)]
+pub struct InteractiveChromeSpec {
+    pub radius: CornerRadius,
+    pub base_bg: Color32,
+    pub base_border: Option<Color32>,
+    pub hovered: bool,
+    pub selected: bool,
+    pub pressed: bool,
+    pub enabled: bool,
+}
+
+/// Paint canonical §10.6 rest / hover / active / selected / disabled background and border chrome.
+pub fn paint_interactive_chrome(ui: &Ui, rect: Rect, tokens: &Tokens, spec: InteractiveChromeSpec) {
+    let (bg, stroke) = if !spec.enabled {
+        (spec.base_bg, spec.base_border.map_or(Stroke::NONE, |c| Stroke::new(1.0, c)))
+    } else if spec.pressed {
+        (tokens.active_bg, Stroke::new(2.0, tokens.focus_ring))
+    } else if spec.selected {
+        let sc = if spec.hovered { tokens.focus_ring } else { tokens.accent };
+        (tokens.active_bg, Stroke::new(1.5, sc))
+    } else if spec.hovered {
+        (tokens.hover_bg, Stroke::new(1.0, tokens.hover_border))
+    } else {
+        (spec.base_bg, spec.base_border.map_or(Stroke::NONE, |c| Stroke::new(1.0, c)))
+    };
+    if bg != Color32::TRANSPARENT || stroke != Stroke::NONE {
+        ui.painter().rect(rect, spec.radius, bg, stroke, StrokeKind::Inside);
+    }
+}
+
+/// Paint canonical §10.6 hover/selected chrome for list rows, menu headers, and transparent buttons.
+pub fn paint_hover_row(ui: &Ui, rect: Rect, radius: CornerRadius, hovered: bool, selected: bool, tokens: &Tokens) {
+    paint_interactive_chrome(
+        ui,
+        rect,
+        tokens,
+        InteractiveChromeSpec { radius, base_bg: Color32::TRANSPARENT, base_border: None, hovered, selected, pressed: false, enabled: true },
+    );
+}
 
 /// Square icon/symbol button; `selected` draws the active well.
 pub fn icon_button(ui: &mut Ui, symbol: &str, tip: &str, selected: bool, size: f32) -> Response {
@@ -236,19 +277,25 @@ pub fn paint_icon_button_named(ui: &mut Ui, resp: Response, symbol: &str, name: 
     let t = Tokens::get(ui.ctx());
     let rect = resp.rect;
     let size = rect.width();
-    let bg = if selected {
-        t.active_bg
-    } else if resp.hovered() {
-        t.hover_bg
-    } else {
-        Color32::TRANSPARENT
-    };
-    ui.painter().rect_filled(rect, CornerRadius::same(5), bg);
+    let enabled = ui.is_enabled();
+    paint_interactive_chrome(
+        ui,
+        rect,
+        &t,
+        InteractiveChromeSpec {
+            radius: CornerRadius::same(t.metrics.radius_md),
+            base_bg: Color32::TRANSPARENT,
+            base_border: None,
+            hovered: resp.hovered(),
+            selected,
+            pressed: resp.is_pointer_button_down_on(),
+            enabled,
+        },
+    );
     let pad = (size * 0.2).round();
     paint_symbol(ui, symbol, rect.shrink(pad), if selected { t.text_strong } else { t.icon });
     let accessible_name = name.to_owned();
-    let ui_enabled = ui.is_enabled();
-    resp.widget_info(move || icon_button_info(ui_enabled, selected, &accessible_name));
+    resp.widget_info(move || icon_button_info(enabled, selected, &accessible_name));
     if tip.is_empty() { resp } else { resp.on_hover_text(tip) }
 }
 
@@ -258,7 +305,8 @@ pub fn flat_button(ui: &mut Ui, text: &str, width: f32) -> Response {
     let label = tr_text(ui, text).into_owned();
     let (rect, resp) = ui.allocate_exact_size(vec2(width, 24.0), Sense::click());
     let rect = rect.shrink2(vec2(0.0, 0.5));
-    ui.painter().rect_filled(rect, CornerRadius::same(5), t.button_bg);
+    let r = CornerRadius::same(t.metrics.radius_md);
+    ui.painter().rect_filled(rect, r, t.button_bg);
     flat_fill(ui, rect, &resp);
     ui.painter().with_clip_rect(rect).text(rect.center(), egui::Align2::CENTER_CENTER, &label, egui::FontId::proportional(12.5), t.text_strong);
     let ui_enabled = ui.is_enabled();
@@ -273,7 +321,8 @@ pub fn flat_button_fit(ui: &mut Ui, text: &str, min_width: f32) -> Response {
     let width = flat_button_fit_width(ui, &label, min_width);
     let (rect, resp) = ui.allocate_exact_size(vec2(width, 24.0), Sense::click());
     let rect = rect.shrink2(vec2(0.0, 0.5));
-    ui.painter().rect_filled(rect, CornerRadius::same(5), t.button_bg);
+    let r = CornerRadius::same(t.metrics.radius_md);
+    ui.painter().rect_filled(rect, r, t.button_bg);
     flat_fill(ui, rect, &resp);
     ui.painter().with_clip_rect(rect).text(rect.center(), egui::Align2::CENTER_CENTER, &label, egui::FontId::proportional(12.5), t.text_strong);
     let ui_enabled = ui.is_enabled();
@@ -306,7 +355,7 @@ pub fn split_button_named(ui: &mut Ui, text: &str, arrow_tip: &str, width: f32) 
     let arrow_rect = Rect::from_min_max(pos2(split, rect.top()), rect.max);
     let main = ui.interact(main_rect, ui.scope_id().with((text, "split")), Sense::click());
     let arrow = ui.interact(arrow_rect, ui.scope_id().with((text, "split-arrow")), Sense::click());
-    ui.painter().rect_filled(rect, CornerRadius::same(5), t.button_bg);
+    ui.painter().rect_filled(rect, CornerRadius::same(t.metrics.radius_md), t.button_bg);
     flat_fill(ui, main_rect, &main);
     flat_fill(ui, arrow_rect, &arrow);
     ui.painter().vline(split, rect.y_range().shrink(5.0), Stroke::new(1.0, t.panel_bg));
@@ -330,11 +379,20 @@ pub fn split_button_named(ui: &mut Ui, text: &str, arrow_tip: &str, width: f32) 
 
 fn flat_fill(ui: &Ui, rect: Rect, resp: &Response) {
     let t = Tokens::get(ui.ctx());
-    if resp.is_pointer_button_down_on() {
-        ui.painter().rect_filled(rect, CornerRadius::same(5), t.active_bg);
-    } else if resp.hovered() {
-        ui.painter().rect_filled(rect, CornerRadius::same(5), t.hover_bg);
-    }
+    paint_interactive_chrome(
+        ui,
+        rect,
+        &t,
+        InteractiveChromeSpec {
+            radius: CornerRadius::same(t.metrics.radius_md),
+            base_bg: Color32::TRANSPARENT,
+            base_border: None,
+            hovered: resp.hovered(),
+            selected: false,
+            pressed: resp.is_pointer_button_down_on(),
+            enabled: ui.is_enabled(),
+        },
+    );
 }
 
 /// Width [`primary_button`] and [`secondary_button`] allocate for `text`.
@@ -362,18 +420,21 @@ pub fn primary_button_width(ui: &mut Ui, text: &str, min_width: f32) -> Response
 fn primary_button_sized(ui: &mut Ui, text: &str, enabled: bool, min_width: f32) -> Response {
     let t = Tokens::get(ui.ctx());
     let label = tr_text(ui, text).into_owned();
-    let fg = if enabled { Color32::WHITE } else { t.text_disabled };
+    let fg = if enabled { t.on_accent } else { t.text_disabled };
     let galley = ui.painter().layout_no_wrap(label.clone(), egui::FontId::proportional(12.5), fg);
     let w = galley.size().x + 32.0;
     let (rect, resp) = ui.allocate_exact_size(vec2(w.max(min_width), 28.0), if enabled { Sense::click() } else { Sense::hover() });
     let bg = match (enabled, resp.hovered()) {
         (false, _) => t.input_bg,
-        (true, true) => t.accent,
+        (true, true) => t.accent_hover,
         (true, false) => t.accent_strong,
     };
-    ui.painter().rect_filled(rect, CornerRadius::same(6), bg);
+    let radius = CornerRadius::same(t.metrics.radius_md);
+    ui.painter().rect_filled(rect, radius, bg);
     if !enabled {
-        ui.painter().rect_stroke(rect, CornerRadius::same(6), Stroke::new(1.0, t.button_border), StrokeKind::Inside);
+        ui.painter().rect_stroke(rect, radius, Stroke::new(1.0, t.button_border), StrokeKind::Inside);
+    } else if resp.hovered() {
+        ui.painter().rect_stroke(rect, radius, Stroke::new(1.0, t.hover_border), StrokeKind::Inside);
     }
     ui.painter().galley(rect.center() - galley.size() / 2.0, galley, fg);
     let row_enabled = enabled && ui.is_enabled();
@@ -383,18 +444,41 @@ fn primary_button_sized(ui: &mut Ui, text: &str, enabled: bool, min_width: f32) 
 
 /// Secondary action button (e.g. `Cancel`).
 pub fn secondary_button(ui: &mut Ui, text: &str) -> Response {
-    secondary_button_width(ui, text, 72.0)
+    secondary_button_width_enabled(ui, text, 72.0, true)
+}
+
+/// [`secondary_button`] rendered disabled when `enabled` is `false`.
+pub fn secondary_button_enabled(ui: &mut Ui, text: &str, enabled: bool) -> Response {
+    secondary_button_width_enabled(ui, text, 72.0, enabled)
 }
 
 pub fn secondary_button_width(ui: &mut Ui, text: &str, min_width: f32) -> Response {
+    secondary_button_width_enabled(ui, text, min_width, true)
+}
+
+fn secondary_button_width_enabled(ui: &mut Ui, text: &str, min_width: f32, enabled: bool) -> Response {
     let t = Tokens::get(ui.ctx());
     let label = tr_text(ui, text).into_owned();
-    let galley = ui.painter().layout_no_wrap(label.clone(), egui::FontId::proportional(12.5), t.text_primary);
+    let fg = if enabled { t.text_primary } else { t.text_disabled };
+    let galley = ui.painter().layout_no_wrap(label.clone(), egui::FontId::proportional(12.5), fg);
     let w = galley.size().x + 32.0;
-    let (rect, resp) = ui.allocate_exact_size(vec2(w.max(min_width), 28.0), Sense::click());
-    ui.painter().rect_filled(rect, CornerRadius::same(6), if resp.hovered() { t.hover_bg } else { t.button_bg });
-    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, t.text_primary);
-    let ui_enabled = ui.is_enabled();
+    let (rect, resp) = ui.allocate_exact_size(vec2(w.max(min_width), 28.0), if enabled { Sense::click() } else { Sense::hover() });
+    paint_interactive_chrome(
+        ui,
+        rect,
+        &t,
+        InteractiveChromeSpec {
+            radius: CornerRadius::same(t.metrics.radius_md),
+            base_bg: if enabled { t.button_bg } else { t.panel_bg },
+            base_border: Some(if enabled { t.button_border } else { t.divider }),
+            hovered: resp.hovered(),
+            selected: false,
+            pressed: resp.is_pointer_button_down_on(),
+            enabled,
+        },
+    );
+    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, fg);
+    let ui_enabled = enabled && ui.is_enabled();
     resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, ui_enabled, label.clone()));
     resp
 }
@@ -462,13 +546,14 @@ pub fn dim_label_width(ui: &Ui, text: &str) -> f32 {
     text_width(ui, egui::RichText::new(shown).size(12.5))
 }
 
-/// Bold section heading in inspector/panel forms.
+/// Bold section heading in inspector/panel forms (§10.2 `type.section` or `14 pt` regular fallback).
 pub fn section_header(ui: &mut Ui, text: &str) {
     let t = Tokens::get(ui.ctx());
     let shown = tr_text(ui, text).into_owned();
-    ui.add_space(2.0);
-    ui.label(egui::RichText::new(shown).size(12.5).color(t.text_strong));
-    ui.add_space(2.0);
+    let font = super::fonts::section_heading_font_id(ui.ctx(), &t);
+    ui.add_space(t.metrics.space_sm);
+    ui.label(egui::RichText::new(shown).font(font).color(t.text_strong));
+    ui.add_space(t.metrics.space_xs);
 }
 
 /// Collapsible section header with disclosure chevron; returns `true` when clicked.
@@ -481,12 +566,11 @@ pub fn section_toggle(ui: &mut Ui, text: &str, open: bool) -> bool {
 pub fn section_toggle_name(ui: &mut Ui, text: &str, open: bool) -> Response {
     let t = Tokens::get(ui.ctx());
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
-    if resp.hovered() {
-        ui.painter().rect_filled(rect, 3.0, t.hover_bg);
-    }
+    paint_hover_row(ui, rect, CornerRadius::same(t.metrics.radius_md), resp.hovered(), false, &t);
     let chevron = Rect::from_center_size(pos2(rect.left() + 8.0, rect.center().y), vec2(12.0, 12.0));
     paint_chevron(ui, chevron, open, if resp.hovered() { t.text_strong } else { t.icon });
-    ui.painter().text(pos2(rect.left() + 18.0, rect.center().y), egui::Align2::LEFT_CENTER, text, egui::FontId::proportional(12.5), t.text_primary);
+    let font = super::fonts::section_heading_font_id(ui.ctx(), &t);
+    ui.painter().with_clip_rect(rect).text(pos2(rect.left() + 18.0, rect.center().y), egui::Align2::LEFT_CENTER, text, font, t.text_strong);
     let accessible = text.to_owned();
     resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::DisclosureTriangle, true, accessible.clone()));
     ui.ctx().accesskit_node_builder(resp.id, |node| node.set_expanded(open));
@@ -569,11 +653,27 @@ pub fn dim_name(ui: &mut Ui, text: &str) -> Response {
 }
 
 /// Horizontal form row with fixed-width `label` column paired to the control emitted by `add`.
+///
+/// Caps label width at `40%` of the panel width per §10.4; stacks above `add` instead of truncating.
 pub fn label_row(ui: &mut Ui, label: &str, label_width: f32, add: impl FnOnce(&mut Ui)) {
+    let t = Tokens::get(ui.ctx());
+    let shown = tr_text(ui, label).into_owned();
+    let cap = (ui.available_width() * 0.40).max(48.0);
+    let capped_w = label_width.min(cap);
+    let measured_w = if shown.trim().is_empty() {
+        0.0
+    } else {
+        ui.painter().layout_no_wrap(shown.clone(), egui::FontId::proportional(t.metrics.font_ui_body_pt), t.text_primary).size().x
+    };
+    if !shown.trim().is_empty() && measured_w > cap {
+        ui.vertical(|ui| {
+            let resp = ui.label(egui::RichText::new(&shown).size(t.metrics.font_ui_body_pt).color(t.text_primary));
+            ui.label_inputs_by(resp.id, add);
+        });
+        return;
+    }
     ui.horizontal(|ui| {
-        let (r, resp) = ui.allocate_exact_size(vec2(label_width, 24.0), Sense::hover());
-        let t = Tokens::get(ui.ctx());
-        let shown = tr_text(ui, label).into_owned();
+        let (r, resp) = ui.allocate_exact_size(vec2(capped_w, 24.0), Sense::hover());
         ui.painter().text(r.left_center(), egui::Align2::LEFT_CENTER, &shown, egui::FontId::proportional(12.5), t.text_primary);
         let accessible = shown.clone();
         let ui_enabled = ui.is_enabled();
@@ -586,11 +686,12 @@ pub fn label_row(ui: &mut Ui, label: &str, label_width: f32, add: impl FnOnce(&m
     });
 }
 
-/// Regular-weight panel sub-header.
+/// Panel section sub-header styled with `type.section` (`13 pt` bold or `14 pt` regular fallback).
 pub fn subheader(ui: &mut Ui, text: &str) {
     let t = Tokens::get(ui.ctx());
     let shown = tr_text(ui, text).into_owned();
-    ui.label(egui::RichText::new(shown).size(12.5).color(t.text_primary));
+    let font = super::fonts::section_heading_font_id(ui.ctx(), &t);
+    ui.label(egui::RichText::new(shown).font(font).color(t.text_strong));
 }
 
 /// Label rendered with a dotted underline acting as an interactive link button.
@@ -719,9 +820,7 @@ pub fn orientation_button(ui: &mut Ui, landscape: bool, selected: bool, tip: &st
     let t = Tokens::get(ui.ctx());
     let label = tr_text(ui, tip).into_owned();
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::click());
-    if resp.hovered() && !selected {
-        ui.painter().rect_filled(rect, CornerRadius::same(3), t.hover_bg);
-    }
+    paint_hover_row(ui, rect, CornerRadius::same(t.metrics.radius_md), resp.hovered(), selected, &t);
     let size = if landscape { vec2(16.0, 12.0) } else { vec2(12.0, 16.0) };
     let page = Rect::from_center_size(rect.center(), size);
     let color = if selected { t.accent } else { t.icon };
@@ -743,14 +842,20 @@ pub fn layout_button(ui: &mut Ui, tiles: &[(u8, u8)], selected: bool, tip: &str)
     let t = Tokens::get(ui.ctx());
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::click());
     let enabled = ui.is_enabled();
-    let bg = if selected {
-        t.active_bg
-    } else if resp.hovered() && enabled {
-        t.hover_bg
-    } else {
-        Color32::TRANSPARENT
-    };
-    ui.painter().rect_filled(rect, CornerRadius::same(3), bg);
+    paint_interactive_chrome(
+        ui,
+        rect,
+        &t,
+        InteractiveChromeSpec {
+            radius: CornerRadius::same(t.metrics.radius_md),
+            base_bg: Color32::TRANSPARENT,
+            base_border: None,
+            hovered: resp.hovered(),
+            selected,
+            pressed: resp.is_pointer_button_down_on(),
+            enabled,
+        },
+    );
     let color = if !enabled {
         t.text_disabled
     } else if selected {

@@ -1078,7 +1078,7 @@ fn render_wizard_footer(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, is_wizard: boo
                     state.active_step = ImportWizardStep::ALL[idx - 1];
                 }
             } else if is_reshape {
-                let _ = rhs.label(RichText::new("Single atomic commit").size(11.0).color(tokens.text_muted));
+                let _ = rhs.label(RichText::new("Single atomic commit").size(tokens.metrics.font_ui_small_pt).color(tokens.text_muted));
             }
         });
     });

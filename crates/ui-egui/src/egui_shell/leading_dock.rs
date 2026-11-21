@@ -505,16 +505,20 @@ fn render_collapsed_icon_rail(
 fn render_rail_icon_button(ui: &mut egui::Ui, spec: RailIconButtonSpec<'_>, tokens: &Tokens, meta: &mut FrameInspectMeta) -> Response {
     let RailIconButtonSpec { widget_id, glyph, tooltip, command_id, selected, enabled } = spec;
     let (rect, mut resp) = ui.allocate_exact_size(Vec2::splat(26.0), if enabled { Sense::click() } else { Sense::hover() });
-    let bg = if selected {
-        tokens.active_bg
-    } else if resp.hovered() && enabled {
-        tokens.hover_bg
-    } else {
-        tokens.surface_bg
-    };
-    let border = if selected { tokens.accent_strong } else { tokens.border };
-    ui.painter().rect_filled(rect, CornerRadius::same(4), bg);
-    ui.painter().rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, border), StrokeKind::Inside);
+    super::widgets::paint_interactive_chrome(
+        ui,
+        rect,
+        tokens,
+        super::widgets::InteractiveChromeSpec {
+            radius: CornerRadius::same(tokens.metrics.radius_md),
+            base_bg: tokens.surface_bg,
+            base_border: Some(tokens.border),
+            hovered: resp.hovered(),
+            selected,
+            pressed: resp.is_pointer_button_down_on(),
+            enabled,
+        },
+    );
     let fg = if !enabled {
         tokens.text_disabled
     } else if selected {
@@ -750,7 +754,7 @@ fn render_folder_navigator_tree(
                 .filter(|f| state.kind_chip.matches_section(f.section))
                 .all(|f| !f.entries.iter().any(|e| entry_matches_query(e, query))))
     {
-        ui.label(egui::RichText::new(tr(locale, "nav.no_matches")).size(11.0).color(tokens.text_muted));
+        ui.label(egui::RichText::new(tr(locale, "nav.no_matches")).size(tokens.metrics.font_ui_small_pt).color(tokens.text_muted));
     }
 }
 
@@ -868,7 +872,7 @@ fn render_nested_navigator_tree(
         intents,
     );
     if !any && !query.is_empty() {
-        ui.label(egui::RichText::new(tr(&app.locale, "nav.no_matches")).size(11.0).color(ctx_in.tokens.text_muted));
+        ui.label(egui::RichText::new(tr(&app.locale, "nav.no_matches")).size(ctx_in.tokens.metrics.font_ui_small_pt).color(ctx_in.tokens.text_muted));
     }
 }
 
@@ -934,8 +938,8 @@ fn render_folder_header(ui: &mut egui::Ui, app: &UiApp, spec: FolderHeaderSpec<'
         return;
     };
     let label = format!("{} ({count})", tr(&app.locale, section_label_key(section)));
-    if resp.hovered() && enabled {
-        ui.painter().rect_filled(rect, CornerRadius::same(3), tokens.hover_bg);
+    if enabled {
+        super::widgets::paint_hover_row(ui, rect, CornerRadius::same(tokens.metrics.radius_md), resp.hovered(), false, tokens);
     }
     let arrow = if collapsed { "▸" } else { "▾" };
     let text = format!("{arrow} {label}");
@@ -1007,15 +1011,10 @@ fn render_navigator_row(
     let pointer_pos = ui.ctx().input(|i| i.pointer.latest_pos().or_else(|| i.pointer.hover_pos()));
     let pointer_inside = pointer_pos.is_some_and(|p| rect.contains(p));
 
-    let bg = if entry.is_active {
-        tokens.active_bg
-    } else if resp.hovered() && enabled {
-        tokens.hover_bg
-    } else {
-        Color32::TRANSPARENT
-    };
-    if bg != Color32::TRANSPARENT {
-        ui.painter().rect_filled(rect, CornerRadius::same(4), bg);
+    if enabled {
+        super::widgets::paint_hover_row(ui, rect, CornerRadius::same(tokens.metrics.radius_md), resp.hovered(), entry.is_active, tokens);
+    } else if entry.is_active {
+        ui.painter().rect_filled(rect, CornerRadius::same(tokens.metrics.radius_md), tokens.active_bg);
     }
     if entry.is_active {
         let bar = Rect::from_min_size(Pos2::new(rect.left() + 1.0, rect.top() + 3.0), Vec2::new(3.0, rect.height() - 6.0));
@@ -1054,7 +1053,13 @@ fn render_navigator_row(
         let tri_resp =
             ui.interact(tri_rect, ui.scope_id().with(("nested_tri", &entry.sheet_id)), if enabled { Sense::click() } else { Sense::hover() });
         let tri = if nested_collapsed { "▸" } else { "▾" };
-        ui.painter().text(tri_rect.center(), egui::Align2::CENTER_CENTER, tri, FontId::proportional(11.0), tokens.text_muted);
+        ui.painter().text(
+            tri_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            tri,
+            FontId::proportional(tokens.metrics.font_ui_small_pt),
+            tokens.text_muted,
+        );
         if tri_resp.clicked() && enabled {
             if nested_collapsed {
                 state.nested_collapsed_parents.remove(&entry.sheet_id);
@@ -1249,15 +1254,16 @@ fn render_section_new_row(ui: &mut egui::Ui, app: &UiApp, spec: SectionNewRowSpe
         }
     };
 
-    let text = format!(">+ {label}");
+    let text = if label.starts_with('+') { label.to_owned() } else { format!("+ {label}") };
     let fg = if row_enabled { tokens.accent_strong } else { tokens.text_disabled };
     let Some((rect, mut resp)) = allocate_visible_slot(ui, Vec2::new(row_w, 26.0), if row_enabled { Sense::click() } else { Sense::hover() }) else {
         return;
     };
-    if resp.hovered() && row_enabled {
-        ui.painter().rect_filled(rect, CornerRadius::same(4), tokens.hover_bg);
+    if row_enabled {
+        super::widgets::paint_hover_row(ui, rect, CornerRadius::same(tokens.metrics.radius_md), resp.hovered(), false, tokens);
     }
-    let mut job = egui::text::LayoutJob::single_section(text.clone(), egui::TextFormat::simple(FontId::proportional(11.0), fg));
+    let mut job =
+        egui::text::LayoutJob::single_section(text.clone(), egui::TextFormat::simple(FontId::proportional(tokens.metrics.font_ui_small_pt), fg));
     job.wrap = TextWrapping { max_width: (row_w - 12.0).max(20.0), max_rows: 1, break_anywhere: false, overflow_character: Some('…') };
     let galley = ui.painter().layout_job(job);
     let elided = galley.elided;
@@ -1365,7 +1371,7 @@ fn render_family_pane(
     ui.add_space(2.0);
 
     if app.nav.family_nodes.is_empty() {
-        ui.label(egui::RichText::new(tr(locale, "nav.family_empty")).size(11.0).color(tokens.text_muted));
+        ui.label(egui::RichText::new(tr(locale, "nav.family_empty")).size(tokens.metrics.font_ui_small_pt).color(tokens.text_muted));
         return;
     }
 
@@ -1382,15 +1388,10 @@ fn render_family_pane(
             };
             let in_chain = node.is_active || node.is_anchor || active_chain.contains(&node.sheet_id);
 
-            let bg = if node.is_active {
-                tokens.active_bg
-            } else if resp.hovered() && enabled {
-                tokens.hover_bg
-            } else {
-                Color32::TRANSPARENT
-            };
-            if bg != Color32::TRANSPARENT {
-                ui.painter().rect_filled(rect, CornerRadius::same(4), bg);
+            if enabled {
+                super::widgets::paint_hover_row(ui, rect, CornerRadius::same(tokens.metrics.radius_md), resp.hovered(), node.is_active, tokens);
+            } else if node.is_active {
+                ui.painter().rect_filled(rect, CornerRadius::same(tokens.metrics.radius_md), tokens.active_bg);
             }
 
             let indent = ((*depth).min(4) as f32) * 12.0;
@@ -1433,7 +1434,7 @@ fn render_family_pane(
                     Pos2::new(rect.right() - 4.0, rect.center().y),
                     egui::Align2::RIGHT_CENTER,
                     dep_lbl,
-                    FontId::proportional(9.5),
+                    FontId::proportional(tokens.metrics.font_ui_small_pt),
                     tokens.link_blue,
                 );
             }
@@ -1635,11 +1636,11 @@ fn render_hover_preview_contents(ui: &mut egui::Ui, doc: &ProjectDocument, sheet
     if let Some(ds) = doc.data_sheet(sheet_id) {
         ui.label(
             egui::RichText::new(format!("Data ({:?}) • {}×{}", ds.archetype.kind(), ds.archetype.row_count(), ds.archetype.column_count()))
-                .size(11.0)
+                .size(tokens.metrics.font_ui_small_pt)
                 .color(tokens.text_muted),
         );
         if ds.frozen {
-            ui.label(egui::RichText::new("Frozen").size(10.5).color(tokens.link_blue));
+            ui.label(egui::RichText::new("Frozen").size(tokens.metrics.font_ui_small_pt).color(tokens.link_blue));
         }
     } else if let Some(res) = doc.result_sheet(sheet_id) {
         let status = match &res.status {
@@ -1647,26 +1648,34 @@ fn render_hover_preview_contents(ui: &mut egui::Ui, doc: &ProjectDocument, sheet
             ResultStatus::Dirty => "Dirty (recalc pending)",
             ResultStatus::Failed { .. } => "Failed",
         };
-        ui.label(egui::RichText::new(format!("Result • {status}")).size(11.0).color(tokens.text_muted));
+        ui.label(egui::RichText::new(format!("Result • {status}")).size(tokens.metrics.font_ui_small_pt).color(tokens.text_muted));
         for scalar in res.scalars.iter().take(2) {
-            ui.label(egui::RichText::new(format!("{}: {:.4}", scalar.key, scalar.value)).size(10.5).color(tokens.text_primary));
+            ui.label(
+                egui::RichText::new(format!("{}: {:.4}", scalar.key, scalar.value)).size(tokens.metrics.font_ui_small_pt).color(tokens.text_primary),
+            );
         }
     } else if let Some(graph) = doc.graph_sheet(sheet_id) {
         ui.label(
-            egui::RichText::new(format!("Graph ({:?}) • {} series", graph.spec.kind, graph.spec.series.len())).size(11.0).color(tokens.text_muted),
+            egui::RichText::new(format!("Graph ({:?}) • {} series", graph.spec.kind, graph.spec.series.len()))
+                .size(tokens.metrics.font_ui_small_pt)
+                .color(tokens.text_muted),
         );
         let (plot_r, _) = ui.allocate_exact_size(Vec2::new(184.0, 44.0), Sense::hover());
-        ui.painter().rect_filled(plot_r, CornerRadius::same(4), tokens.paper_white);
-        ui.painter().rect_stroke(plot_r, CornerRadius::same(4), Stroke::new(1.0, tokens.divider), StrokeKind::Inside);
+        ui.painter().rect_filled(plot_r, CornerRadius::same(tokens.metrics.radius_md), tokens.paper_white);
+        ui.painter().rect_stroke(plot_r, CornerRadius::same(tokens.metrics.radius_md), Stroke::new(1.0, tokens.divider), StrokeKind::Inside);
         let p0 = Pos2::new(plot_r.left() + 12.0, plot_r.bottom() - 10.0);
         let p1 = Pos2::new(plot_r.center().x, plot_r.center().y - 4.0);
         let p2 = Pos2::new(plot_r.right() - 14.0, plot_r.top() + 10.0);
         ui.painter().line_segment([p0, p1], Stroke::new(1.5, tokens.accent_strong));
         ui.painter().line_segment([p1, p2], Stroke::new(1.5, tokens.accent_strong));
     } else if let Some(info) = doc.info_sheet(sheet_id) {
-        ui.label(egui::RichText::new(format!("Info • {} constants", info.constants.len())).size(11.0).color(tokens.text_muted));
+        ui.label(
+            egui::RichText::new(format!("Info • {} constants", info.constants.len())).size(tokens.metrics.font_ui_small_pt).color(tokens.text_muted),
+        );
     } else if let Some(layout) = doc.layout_sheet(sheet_id) {
-        ui.label(egui::RichText::new(format!("Layout • {} items", layout.spec.items.len())).size(11.0).color(tokens.text_muted));
+        ui.label(
+            egui::RichText::new(format!("Layout • {} items", layout.spec.items.len())).size(tokens.metrics.font_ui_small_pt).color(tokens.text_muted),
+        );
     }
 }
 
@@ -1676,7 +1685,7 @@ fn finalize_drag_state(ui: &egui::Ui, state: &mut LeadingDockEguiState, signals:
     {
         let badge_pos = pos + Vec2::new(12.0, 10.0);
         egui::Area::new(Id::unique("nav_drag_ghost")).order(egui::Order::Tooltip).fixed_pos(badge_pos).interactable(false).show(ui.ctx(), |ui| {
-            ui.label(egui::RichText::new(format!("Moving {}", drag_id.as_str())).size(10.5));
+            ui.label(egui::RichText::new(format!("Moving {}", drag_id.as_str())).size(11.5));
         });
     }
 
@@ -1841,21 +1850,26 @@ fn render_compact_chip(ui: &mut egui::Ui, spec: CompactChipSpec<'_>, tokens: &To
     } else {
         tokens.text_primary
     };
-    let mut job = egui::text::LayoutJob::single_section(label.to_owned(), egui::TextFormat::simple(FontId::proportional(11.0), fg));
+    let mut job =
+        egui::text::LayoutJob::single_section(label.to_owned(), egui::TextFormat::simple(FontId::proportional(tokens.metrics.font_ui_small_pt), fg));
     job.wrap = TextWrapping { max_width: (max_w - 8.0).max(12.0), max_rows: 1, break_anywhere: false, overflow_character: Some('…') };
     let galley = ui.painter().layout_job(job);
     let ellipsized = galley.elided;
     let (rect, mut resp) = ui.allocate_exact_size(Vec2::new(max_w.max(20.0), 20.0), if enabled { Sense::click() } else { Sense::hover() });
-    let bg = if selected {
-        tokens.active_bg
-    } else if resp.hovered() && enabled {
-        tokens.hover_bg
-    } else {
-        tokens.button_bg
-    };
-    let border = if selected { tokens.accent_strong } else { tokens.button_border };
-    ui.painter().rect_filled(rect, CornerRadius::same(4), bg);
-    ui.painter().rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, border), StrokeKind::Inside);
+    super::widgets::paint_interactive_chrome(
+        ui,
+        rect,
+        tokens,
+        super::widgets::InteractiveChromeSpec {
+            radius: CornerRadius::same(tokens.metrics.radius_md),
+            base_bg: tokens.button_bg,
+            base_border: Some(tokens.button_border),
+            hovered: resp.hovered(),
+            selected,
+            pressed: resp.is_pointer_button_down_on(),
+            enabled,
+        },
+    );
     ui.painter().with_clip_rect(rect.shrink(2.0)).galley(rect.center() - galley.size() * 0.5, galley, fg);
     if ellipsized {
         resp = resp.on_hover_text(label);
@@ -2022,9 +2036,10 @@ struct NavCtxItemSpec<'a> {
 fn render_nav_ctx_item(ui: &mut egui::Ui, meta: &mut FrameInspectMeta, spec: NavCtxItemSpec<'_>) -> bool {
     let sense = if spec.enabled { Sense::click() } else { Sense::hover() };
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(208.0, 26.0), sense);
-    let bg = if spec.enabled && resp.hovered() { spec.tokens.hover_bg } else { Color32::TRANSPARENT };
     let fg = if spec.enabled { spec.tokens.text_strong } else { spec.tokens.text_disabled };
-    ui.painter().rect_filled(rect, CornerRadius::same(4), bg);
+    if spec.enabled {
+        super::widgets::paint_hover_row(ui, rect, CornerRadius::same(spec.tokens.metrics.radius_md), resp.hovered(), false, spec.tokens);
+    }
     ui.painter().text(Pos2::new(rect.left() + 8.0, rect.center().y), egui::Align2::LEFT_CENTER, spec.label, FontId::proportional(12.0), fg);
     let ak_lbl = spec.label.to_owned();
     resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::MenuItem, spec.enabled, ak_lbl.clone()));

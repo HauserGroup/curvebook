@@ -27,6 +27,7 @@ use crate::UiApp;
 use super::{FrameInspectMeta, LayoutMetrics, PendingUiIntents, Tokens};
 
 pub use column::render_column_grid;
+pub(in crate::egui_shell) use shared::is_linked_region_broken;
 
 /// Target inside the `Column` grid currently undergoing buffered inline text editing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

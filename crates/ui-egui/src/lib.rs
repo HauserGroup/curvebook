@@ -1601,6 +1601,11 @@ fn run_settled_egui_on_ctx(
         o.zoom_factor = zoom;
     });
     egui_shell::Tokens::from_theme_spec(&app.theme, &app.locale).apply_theme_to_ctx(ctx);
+    ctx.all_styles_mut(|style| {
+        style.visuals.text_cursor.blink = false;
+        style.scroll_animation = egui::style::ScrollAnimation::none();
+        style.animation_time = 0.0;
+    });
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let width_px = (w_pt * ppp).round().clamp(1.0, 16_384.0) as u32;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -1611,18 +1616,22 @@ fn run_settled_egui_on_ctx(
     for pass in 0..8_u32 {
         let raw_input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w_pt, h_pt))),
+            time: Some(f64::from(pass) * (1.0 / 60.0)),
             viewports: [(egui::ViewportId::ROOT, egui::ViewportInfo { native_pixels_per_point: Some(native_ppp), ..Default::default() })]
                 .into_iter()
                 .collect(),
             ..Default::default()
         };
-        let mut settled_in_pass = false;
+        let mut not_discarded = false;
         let mut output = ctx.run_ui(raw_input, |ui| {
             let mut pass_intents = egui_shell::PendingUiIntents::default();
             build_ui(ui, app, &mut meta, &mut pass_intents);
             carried_intents.merge_pass(pass_intents);
-            settled_in_pass = !ui.ctx().will_discard();
+            not_discarded = !ui.ctx().will_discard();
         });
+        let wants_immediate_repaint =
+            output.viewport_output.get(&egui::ViewportId::ROOT).is_some_and(|v| v.repaint_delay == std::time::Duration::ZERO);
+        let settled_in_pass = not_discarded && !output.platform_output.requested_discard() && (!wants_immediate_repaint || pass >= 4);
         let stamp = egui_shell::GeometryStamp::from_context(u64::from(pass) + 1, ctx, [width_px, height_px], settled_in_pass);
         if let Some(rast) = rasterizer.as_deref_mut() {
             rast.consume_textures_set(&mut output.textures_delta);

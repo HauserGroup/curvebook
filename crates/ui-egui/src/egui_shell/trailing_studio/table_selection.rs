@@ -57,7 +57,7 @@ pub(super) fn render_table_selection_studio(
             .color(tokens.text_strong),
     );
     if ds.frozen {
-        ui.label(egui::RichText::new("Frozen (read-only)").size(11.0).color(tokens.accent_strong));
+        ui.label(egui::RichText::new("Frozen (read-only)").size(tokens.metrics.font_ui_small_pt).color(tokens.accent_strong));
     }
 
     ui.add_space(4.0);
@@ -194,20 +194,31 @@ pub(super) fn render_table_selection_studio(
         widgets::subheader(ui, "Linked Data Regions");
         for (idx, reg) in ds.linked_regions.iter().enumerate() {
             let up_id = reg.spec.source.upstream_sheet_id().cloned();
+            let broken = crate::egui_shell::data_grid::is_linked_region_broken(doc, reg);
+            let upstream_exists = up_id.as_ref().is_some_and(|sid| doc.sheet_section(sid).is_some());
+            let label = if broken { format!("Broken: {}", reg.provenance_summary) } else { reg.provenance_summary.clone() };
+            let tooltip = if broken { "Upstream linked sheet is missing or failed" } else { "Jump to upstream linked source sheet" };
+            let disabled_reason = if !upstream_exists && up_id.is_some() {
+                Some("upstream linked sheet is missing")
+            } else if up_id.is_none() {
+                Some("external or clipboard provenance")
+            } else {
+                None
+            };
             let wid = format!("inspector.table.link.{idx}");
             if studio_full_button(
                 ui,
                 tokens,
                 meta,
                 &StudioButtonSpec {
-                    label: &reg.provenance_summary,
-                    tooltip: "Jump to upstream linked source sheet",
+                    label: &label,
+                    tooltip,
                     selected: false,
-                    enabled: ctx_in.enabled && up_id.is_some(),
+                    enabled: ctx_in.enabled && upstream_exists,
                     primary: false,
                     widget_id: &wid,
                     command_id: up_id.as_ref().map(|_| "sheet.select"),
-                    disabled_reason: up_id.is_none().then_some("external or clipboard provenance"),
+                    disabled_reason,
                 },
             ) && let Some(sid) = up_id
             {

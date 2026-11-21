@@ -317,10 +317,10 @@ fn render_unsaved_modal(
                 ui,
                 meta,
                 AppBtn {
-                    widget_id: "dialog.button.save",
-                    label: tr(locale, "menu.file.save"),
-                    command_id: Some("project.save"),
-                    selected: true,
+                    widget_id: "dialog.button.cancel",
+                    label: tr(locale, "btn.cancel"),
+                    command_id: None,
+                    selected: false,
                     enabled: true,
                     disabled_reason: None,
                 },
@@ -328,7 +328,7 @@ fn render_unsaved_modal(
             )
             .clicked()
             {
-                intents.push_resolve_unsaved_changes(UnsavedCloseAction::Save);
+                intents.push_resolve_unsaved_changes(UnsavedCloseAction::Cancel);
             }
             if app_button(
                 ui,
@@ -351,10 +351,10 @@ fn render_unsaved_modal(
                 ui,
                 meta,
                 AppBtn {
-                    widget_id: "dialog.button.cancel",
-                    label: tr(locale, "btn.cancel"),
-                    command_id: None,
-                    selected: false,
+                    widget_id: "dialog.button.save",
+                    label: tr(locale, "menu.file.save"),
+                    command_id: Some("project.save"),
+                    selected: true,
                     enabled: true,
                     disabled_reason: None,
                 },
@@ -362,7 +362,7 @@ fn render_unsaved_modal(
             )
             .clicked()
             {
-                intents.push_resolve_unsaved_changes(UnsavedCloseAction::Cancel);
+                intents.push_resolve_unsaved_changes(UnsavedCloseAction::Save);
             }
         });
     });
@@ -2045,13 +2045,15 @@ fn render_feedback_category_row(ui: &mut Ui, draft: &mut crate::feedback::Feedba
 fn render_feedback_fields(ui: &mut Ui, draft: &mut crate::feedback::FeedbackDraft, body_w: f32, meta: &mut FrameInspectMeta) -> bool {
     let mut changed = false;
 
-    ui.label("Title");
-    let title_resp = ui.add(
-        egui::TextEdit::singleline(&mut draft.title)
-            .id_salt("feedback.title")
-            .desired_width(body_w)
-            .hint_text("Short summary of the issue or request"),
-    );
+    let title_lbl_resp = ui.label("Title");
+    let title_resp = ui
+        .add(
+            egui::TextEdit::singleline(&mut draft.title)
+                .id_salt("feedback.title")
+                .desired_width(body_w)
+                .hint_text("Short summary of the issue or request"),
+        )
+        .labelled_by(title_lbl_resp.id);
     record_feedback_text_edit(ui, &title_resp, meta, "feedback.title", "Title", &draft.title);
     if title_resp.changed() {
         changed = true;
@@ -2059,8 +2061,10 @@ fn render_feedback_fields(ui: &mut Ui, draft: &mut crate::feedback::FeedbackDraf
 
     ui.add_space(6.0);
     let summary_lbl = draft.category.summary_label();
-    ui.label(summary_lbl);
-    let summary_resp = ui.add(egui::TextEdit::multiline(&mut draft.summary).id_salt("feedback.summary").desired_width(body_w).desired_rows(3));
+    let summary_lbl_resp = ui.label(summary_lbl);
+    let summary_resp = ui
+        .add(egui::TextEdit::multiline(&mut draft.summary).id_salt("feedback.summary").desired_width(body_w).desired_rows(3))
+        .labelled_by(summary_lbl_resp.id);
     record_feedback_text_edit(ui, &summary_resp, meta, "feedback.summary", summary_lbl, &draft.summary);
     if summary_resp.changed() {
         changed = true;
@@ -2068,8 +2072,10 @@ fn render_feedback_fields(ui: &mut Ui, draft: &mut crate::feedback::FeedbackDraf
 
     ui.add_space(6.0);
     let details_lbl = draft.category.details_label();
-    ui.label(details_lbl);
-    let details_resp = ui.add(egui::TextEdit::multiline(&mut draft.details).id_salt("feedback.details").desired_width(body_w).desired_rows(3));
+    let details_lbl_resp = ui.label(details_lbl);
+    let details_resp = ui
+        .add(egui::TextEdit::multiline(&mut draft.details).id_salt("feedback.details").desired_width(body_w).desired_rows(3))
+        .labelled_by(details_lbl_resp.id);
     record_feedback_text_edit(ui, &details_resp, meta, "feedback.details", details_lbl, &draft.details);
     if details_resp.changed() {
         changed = true;
@@ -2077,8 +2083,10 @@ fn render_feedback_fields(ui: &mut Ui, draft: &mut crate::feedback::FeedbackDraf
 
     ui.add_space(6.0);
     let extra_lbl = draft.category.extra_label();
-    ui.label(extra_lbl);
-    let extra_resp = ui.add(egui::TextEdit::multiline(&mut draft.extra).id_salt("feedback.extra").desired_width(body_w).desired_rows(2));
+    let extra_lbl_resp = ui.label(extra_lbl);
+    let extra_resp = ui
+        .add(egui::TextEdit::multiline(&mut draft.extra).id_salt("feedback.extra").desired_width(body_w).desired_rows(2))
+        .labelled_by(extra_lbl_resp.id);
     record_feedback_text_edit(ui, &extra_resp, meta, "feedback.extra", extra_lbl, &draft.extra);
     if extra_resp.changed() {
         changed = true;
@@ -2148,10 +2156,10 @@ fn render_feedback_footer(ui: &mut Ui, input: &FeedbackFooterInput<'_>, meta: &m
             ui,
             meta,
             AppBtn {
-                widget_id: "dialog.feedback.open_github",
-                label: "Open on GitHub...",
+                widget_id: "dialog.button.cancel",
+                label: tr(locale, "btn.cancel"),
                 command_id: None,
-                selected: true,
+                selected: false,
                 enabled: true,
                 disabled_reason: None,
             },
@@ -2159,7 +2167,18 @@ fn render_feedback_footer(ui: &mut Ui, input: &FeedbackFooterInput<'_>, meta: &m
         )
         .clicked()
         {
-            intents.push_open_feedback_on_github();
+            intents.push_dialog_button("cancel");
+        }
+
+        if app_button(
+            ui,
+            meta,
+            AppBtn { widget_id: "dialog.feedback.reset", label: "Clear", command_id: None, selected: false, enabled: true, disabled_reason: None },
+            tokens,
+        )
+        .clicked()
+        {
+            intents.push_reset_feedback_draft();
         }
 
         let copy_lbl = if draft.copied_markdown { "Copied Markdown" } else { "Copy Markdown" };
@@ -2186,22 +2205,11 @@ fn render_feedback_footer(ui: &mut Ui, input: &FeedbackFooterInput<'_>, meta: &m
         if app_button(
             ui,
             meta,
-            AppBtn { widget_id: "dialog.feedback.reset", label: "Clear", command_id: None, selected: false, enabled: true, disabled_reason: None },
-            tokens,
-        )
-        .clicked()
-        {
-            intents.push_reset_feedback_draft();
-        }
-
-        if app_button(
-            ui,
-            meta,
             AppBtn {
-                widget_id: "dialog.button.cancel",
-                label: tr(locale, "btn.cancel"),
+                widget_id: "dialog.feedback.open_github",
+                label: "Open on GitHub...",
                 command_id: None,
-                selected: false,
+                selected: true,
                 enabled: true,
                 disabled_reason: None,
             },
@@ -2209,7 +2217,7 @@ fn render_feedback_footer(ui: &mut Ui, input: &FeedbackFooterInput<'_>, meta: &m
         )
         .clicked()
         {
-            intents.push_dialog_button("cancel");
+            intents.push_open_feedback_on_github();
         }
     });
 }
@@ -2272,9 +2280,16 @@ fn app_record_visible(ui: &Ui, resp: &Response, meta: &mut FrameInspectMeta, inp
 }
 
 fn app_button(ui: &mut Ui, meta: &mut FrameInspectMeta, entry: AppBtn<'_>, tokens: &Tokens) -> Response {
-    let btn = egui::Button::new(entry.label)
-        .fill(if entry.selected { tokens.active_bg } else { tokens.panel_bg })
-        .stroke(Stroke::new(1.0, if entry.selected { tokens.accent_strong } else { tokens.border }));
+    let is_primary_footer = entry.selected && matches!(entry.widget_id, "modal.ok" | "dialog.button.save" | "dialog.feedback.open_github");
+    let btn = if is_primary_footer && entry.enabled {
+        egui::Button::new(egui::RichText::new(entry.label).color(tokens.on_accent))
+            .fill(tokens.accent_strong)
+            .stroke(Stroke::new(1.0, tokens.accent_strong))
+    } else if entry.selected {
+        egui::Button::new(entry.label).fill(tokens.active_bg).stroke(Stroke::new(1.0, tokens.accent_strong))
+    } else {
+        egui::Button::new(entry.label)
+    };
     let mut resp = ui.add_enabled(entry.enabled, btn);
     if let Some(reason) = entry.disabled_reason {
         resp = resp.on_disabled_hover_text(reason);

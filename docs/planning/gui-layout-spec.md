@@ -632,7 +632,7 @@ Every desktop layout change in `crates/ui-egui` and `apps/curvebook` must pass (
 
 ## 10. Visual Design Rules
 
-> **Status:** Proposed. These rules apply within the structure set by §1–9. Token names below are design names. Values marked *new* are not yet in `LayoutMetrics`, `Tokens`, or the font setup (`crates/ui-egui/src/egui_shell/mod.rs`, `crates/ui-egui/src/egui_shell/fonts.rs`); until they land there, these rules guide new code only. Existing values map to the §9.1 fields (`font_ui_body_pt`, `font_ui_small_pt`, `font_grid_numeral_pt`, `grid_row_h`, `min_toolbar_target_pt`). All sizes are logical points at `1.0x`.
+> **Status:** Accepted. These rules apply across the structure set by §1–9. The §10.1–10.6 design tokens, spacing/type/radius scales, bold system UI face (`type.section` with `14 pt` regular fallback when no bold face is present), 150 ms motion cap, hover contrast (`>= 3:1` border + elevated fill delta), modal footer button ordering, and §10.5 broken-link glyph/pattern live in `LayoutMetrics`, `Tokens` (`crates/ui-egui/src/egui_shell/mod.rs`), `UiThemeSpec` (`crates/ui-egui/src/theme.rs`), and `crates/ui-egui/src/egui_shell/fonts.rs`. Token names below map directly to `LayoutMetrics` and `Tokens` fields; all sizes are logical points at `1.0x`.
 
 ### 10.1 Spacing Scale
 

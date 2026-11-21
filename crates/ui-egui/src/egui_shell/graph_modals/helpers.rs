@@ -96,9 +96,16 @@ pub(super) fn record_if_visible(ui: &Ui, resp: &Response, meta: &mut FrameInspec
 }
 
 pub(super) fn record_button(ui: &mut Ui, meta: &mut FrameInspectMeta, entry: ButtonEntry<'_>, tokens: &Tokens) -> Response {
-    let btn = egui::Button::new(entry.label)
-        .fill(if entry.selected { tokens.active_bg } else { tokens.panel_bg })
-        .stroke(Stroke::new(1.0, if entry.selected { tokens.accent_strong } else { tokens.border }));
+    let is_primary_footer = entry.selected && entry.widget_id == "modal.ok";
+    let btn = if is_primary_footer && entry.enabled {
+        egui::Button::new(egui::RichText::new(entry.label).color(tokens.on_accent))
+            .fill(tokens.accent_strong)
+            .stroke(Stroke::new(1.0, tokens.accent_strong))
+    } else if entry.selected {
+        egui::Button::new(entry.label).fill(tokens.active_bg).stroke(Stroke::new(1.0, tokens.accent_strong))
+    } else {
+        egui::Button::new(entry.label)
+    };
     let mut resp = ui.add_enabled(entry.enabled, btn);
     if let Some(reason) = entry.disabled_reason {
         resp = resp.on_disabled_hover_text(reason);

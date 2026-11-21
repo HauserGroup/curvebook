@@ -22,7 +22,7 @@ use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, PendingUiInten
 use crate::i18n::tr;
 use crate::inspect::ZLayer;
 
-const RULER_THICKNESS_PT: f32 = 20.0;
+const RULER_THICKNESS_PT: f32 = 24.0;
 const BREADCRUMB_HEIGHT_PT: f32 = 28.0;
 
 /// Active gesture kind on an embedded canvas image or annotation (`R13.4` / `R13.7`).
@@ -1129,7 +1129,7 @@ fn render_km_number_at_risk_track(
         pos2(label_right.max(track_rect.left() + 82.0), track_rect.top() + 10.0),
         egui::Align2::RIGHT_CENTER,
         "Number at risk",
-        FontId::proportional(10.5),
+        FontId::proportional(tokens.metrics.font_ui_small_pt),
         tokens.text_strong,
     );
 
@@ -1140,7 +1140,7 @@ fn render_km_number_at_risk_track(
             pos2(tx, track_rect.top() + 10.0),
             egui::Align2::CENTER_CENTER,
             format!("{t_val:.4}").trim_end_matches('0').trim_end_matches('.'),
-            FontId::monospace(10.0),
+            FontId::monospace(tokens.metrics.font_ui_small_pt),
             tokens.text_muted,
         );
     }
@@ -1151,12 +1151,18 @@ fn render_km_number_at_risk_track(
             pos2(label_right.max(track_rect.left() + 82.0), ry),
             egui::Align2::RIGHT_CENTER,
             &row.label,
-            FontId::proportional(10.5),
+            FontId::proportional(tokens.metrics.font_ui_small_pt),
             row.color,
         );
         for (&(_, x_pt), &count) in ticks.iter().zip(row.counts.iter()) {
             let tx = paper_rect.left() + (x_pt as f32) * sx;
-            painter.text(pos2(tx, ry), egui::Align2::CENTER_CENTER, format!("{count}"), FontId::monospace(10.5), tokens.text_primary);
+            painter.text(
+                pos2(tx, ry),
+                egui::Align2::CENTER_CENTER,
+                format!("{count}"),
+                FontId::monospace(tokens.metrics.font_ui_small_pt),
+                tokens.text_primary,
+            );
         }
     }
 
@@ -1454,9 +1460,15 @@ fn render_layout_hud_overlays(
 
         let badge = ls.spec.panel_badges.badge_for(idx).unwrap_or_else(|| format!("P{}", idx + 1));
         if selected || p_resp.hovered() {
-            let chip_rect = Rect::from_min_size(r.min + vec2(4.0, 4.0), vec2(26.0, 18.0));
-            painter.rect_filled(chip_rect, CornerRadius::same(2), tokens.accent);
-            painter.text(chip_rect.center(), egui::Align2::CENTER_CENTER, &badge, FontId::proportional(10.0), tokens.paper_white);
+            let chip_rect = Rect::from_min_size(r.min + vec2(4.0, 4.0), vec2(30.0, 20.0));
+            painter.rect_filled(chip_rect, CornerRadius::same(tokens.metrics.radius_sm), tokens.accent_strong);
+            painter.text(
+                chip_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                &badge,
+                FontId::proportional(tokens.metrics.font_ui_small_pt),
+                tokens.on_accent,
+            );
         }
 
         let wid = format!("canvas.layout_panel.{idx}");
@@ -1767,7 +1779,13 @@ fn render_canvas_rulers(ui: &egui::Ui, spec: CanvasRulersSpec<'_>) {
     ui.painter().rect_filled(corner, CornerRadius::ZERO, tokens.header_bg);
     ui.painter().rect_filled(top_r, CornerRadius::ZERO, tokens.header_bg);
     ui.painter().rect_filled(left_r, CornerRadius::ZERO, tokens.header_bg);
-    ui.painter().text(corner.center(), egui::Align2::CENTER_CENTER, unit_lbl, FontId::proportional(9.5), tokens.text_muted);
+    ui.painter().text(
+        corner.center(),
+        egui::Align2::CENTER_CENTER,
+        unit_lbl,
+        FontId::proportional(tokens.metrics.font_ui_small_pt),
+        tokens.text_muted,
+    );
 
     let pt_per_unit = match unit {
         PhysicalUnit::Points => 72.0_f32,

@@ -675,7 +675,7 @@ impl<'a, State> EguiHumanPathDriver<'a, State> {
     ) -> Self {
         let ctx = Context::default();
         ctx.enable_accesskit();
-        ctx.set_fonts(fonts);
+        super::fonts::install_font_definitions(&ctx, fonts);
         apply_driver_tokens(&ctx, &tokens);
 
         let mut driver = Self {

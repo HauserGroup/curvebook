@@ -550,8 +550,11 @@ fn render_top_menu_button(
     } else {
         Color32::TRANSPARENT
     };
-    if bg != Color32::TRANSPARENT {
-        ui.painter().rect_filled(resp.rect, CornerRadius::same(4), bg);
+    let r = CornerRadius::same(tokens.metrics.radius_md);
+    if is_open {
+        ui.painter().rect(resp.rect, r, bg, Stroke::new(1.5, tokens.focus_ring), StrokeKind::Inside);
+    } else if resp.hovered() && enabled {
+        ui.painter().rect(resp.rect, r, bg, Stroke::new(1.0, tokens.hover_border), StrokeKind::Inside);
     }
     let fg = if enabled { tokens.text_primary } else { tokens.text_disabled };
     ui.painter().with_clip_rect(resp.rect.shrink(3.0)).galley(
@@ -1935,25 +1938,22 @@ fn chrome_button_fitted(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInsp
     let min_w = max_w.min(34.0);
     let w = (galley.size().x + 14.0).clamp(min_w, max_w);
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 24.0), if enabled { Sense::click() } else { Sense::hover() });
-    let bg = if !enabled {
-        tokens.panel_bg
-    } else if selected {
-        tokens.active_bg
-    } else if resp.hovered() {
-        tokens.hover_bg
-    } else {
-        tokens.button_bg
-    };
+    let radius = CornerRadius::same(tokens.metrics.radius_md);
+    super::widgets::paint_interactive_chrome(
+        ui,
+        rect,
+        tokens,
+        super::widgets::InteractiveChromeSpec {
+            radius,
+            base_bg: if enabled { tokens.button_bg } else { tokens.panel_bg },
+            base_border: Some(if enabled { tokens.button_border } else { tokens.divider }),
+            hovered: resp.hovered(),
+            selected,
+            pressed: resp.is_pointer_button_down_on(),
+            enabled,
+        },
+    );
     let fg = if enabled { tokens.text_strong } else { tokens.text_disabled };
-    let border = if !enabled {
-        tokens.divider
-    } else if selected {
-        tokens.accent_strong
-    } else {
-        tokens.button_border
-    };
-    ui.painter().rect_filled(rect, CornerRadius::same(4), bg);
-    ui.painter().rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, border), StrokeKind::Inside);
     ui.painter().with_clip_rect(rect.shrink(3.0)).galley(
         Pos2::new(rect.center().x - galley.size().x * 0.5, rect.center().y - galley.size().y * 0.5),
         galley,
@@ -1996,17 +1996,21 @@ fn popup_action_button(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInspe
     let w = ui.available_width().max(120.0);
     let (galley, ellipsized) = layout_single_line_job(ui.painter(), label, (w - 14.0).max(40.0), tokens.text_primary, 12.0);
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 24.0), if enabled { Sense::click() } else { Sense::hover() });
-    let bg = if !enabled {
-        tokens.panel_bg
-    } else if selected {
-        tokens.active_bg
-    } else if resp.hovered() {
-        tokens.hover_bg
-    } else {
-        tokens.surface_bg
-    };
+    super::widgets::paint_interactive_chrome(
+        ui,
+        rect,
+        tokens,
+        super::widgets::InteractiveChromeSpec {
+            radius: CornerRadius::same(tokens.metrics.radius_md),
+            base_bg: if enabled { tokens.surface_bg } else { tokens.panel_bg },
+            base_border: None,
+            hovered: resp.hovered(),
+            selected,
+            pressed: resp.is_pointer_button_down_on(),
+            enabled,
+        },
+    );
     let fg = if enabled { tokens.text_strong } else { tokens.text_disabled };
-    ui.painter().rect_filled(rect, CornerRadius::same(4), bg);
     ui.painter().with_clip_rect(rect.shrink(4.0)).galley(Pos2::new(rect.left() + 8.0, rect.center().y - galley.size().y * 0.5), galley, fg);
 
     let ak_label = label.to_owned();
@@ -2050,25 +2054,22 @@ fn render_command_palette_icon_button(
     enabled: bool,
 ) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(28.0, 24.0), if enabled { Sense::click() } else { Sense::hover() });
-    let bg = if !enabled {
-        tokens.panel_bg
-    } else if selected {
-        tokens.active_bg
-    } else if resp.hovered() {
-        tokens.hover_bg
-    } else {
-        tokens.button_bg
-    };
+    let radius = CornerRadius::same(tokens.metrics.radius_md);
+    super::widgets::paint_interactive_chrome(
+        ui,
+        rect,
+        tokens,
+        super::widgets::InteractiveChromeSpec {
+            radius,
+            base_bg: if enabled { tokens.button_bg } else { tokens.panel_bg },
+            base_border: Some(if enabled { tokens.button_border } else { tokens.divider }),
+            hovered: resp.hovered(),
+            selected,
+            pressed: resp.is_pointer_button_down_on(),
+            enabled,
+        },
+    );
     let fg = if enabled { tokens.text_strong } else { tokens.text_disabled };
-    let border = if !enabled {
-        tokens.divider
-    } else if selected {
-        tokens.accent_strong
-    } else {
-        tokens.button_border
-    };
-    ui.painter().rect_filled(rect, CornerRadius::same(4), bg);
-    ui.painter().rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, border), StrokeKind::Inside);
 
     // Monochrome vector magnifying-glass icon centered inside the button.
     let lens_center = rect.center() + Vec2::new(-1.5, -1.5);
@@ -2104,15 +2105,20 @@ fn chrome_tab(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInspectMeta, s
     let (galley, ellipsized) = layout_single_line_job(ui.painter(), label, text_max_w, tokens.text_primary, 11.5);
     let w = (galley.size().x + 14.0).clamp(32.0_f32.min(max_w), max_w);
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 24.0), if enabled { Sense::click() } else { Sense::hover() });
-    let bg = if !enabled {
-        tokens.panel_bg
-    } else if selected {
-        tokens.active_bg
-    } else if resp.hovered() {
-        tokens.hover_bg
-    } else {
-        tokens.surface_bg
-    };
+    super::widgets::paint_interactive_chrome(
+        ui,
+        rect,
+        tokens,
+        super::widgets::InteractiveChromeSpec {
+            radius: CornerRadius::same(tokens.metrics.radius_md),
+            base_bg: if enabled { tokens.surface_bg } else { tokens.panel_bg },
+            base_border: Some(if enabled { tokens.border } else { tokens.divider }),
+            hovered: resp.hovered(),
+            selected,
+            pressed: resp.is_pointer_button_down_on(),
+            enabled,
+        },
+    );
     let fg = if !enabled {
         tokens.text_disabled
     } else if selected {
@@ -2120,15 +2126,6 @@ fn chrome_tab(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInspectMeta, s
     } else {
         tokens.text_primary
     };
-    let border = if !enabled {
-        tokens.divider
-    } else if selected {
-        tokens.accent_strong
-    } else {
-        tokens.border
-    };
-    ui.painter().rect_filled(rect, CornerRadius::same(4), bg);
-    ui.painter().rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, border), StrokeKind::Inside);
     ui.painter().with_clip_rect(rect.shrink(3.0)).galley(
         Pos2::new(rect.center().x - galley.size().x * 0.5, rect.center().y - galley.size().y * 0.5),
         galley,

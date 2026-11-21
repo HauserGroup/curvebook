@@ -704,7 +704,7 @@ fn render_stage4_results(
             egui::Frame::NONE
                 .fill(tokens.panel_bg)
                 .stroke(Stroke::new(1.0, tokens.border))
-                .corner_radius(CornerRadius::same(5))
+                .corner_radius(CornerRadius::same(tokens.metrics.radius_md))
                 .inner_margin(Vec2::new(10.0, 8.0))
                 .show(ui, |ui| {
                     ui.label(egui::RichText::new("Methods & Sample Size Narrative").strong().color(tokens.accent_strong));
@@ -801,19 +801,25 @@ fn render_power_curve_plot(ui: &mut Ui, res: &PowerAnalysisResult, state: &mut P
         }
     }
 
-    ui.painter().text(Pos2::new(plot.right(), plot.top() + 2.0), Align2::RIGHT_TOP, &hover_desc, FontId::proportional(10.5), tokens.text_strong);
+    ui.painter().text(
+        Pos2::new(plot.right(), plot.top() + 2.0),
+        Align2::RIGHT_TOP,
+        &hover_desc,
+        FontId::proportional(tokens.metrics.font_ui_small_pt),
+        tokens.text_strong,
+    );
     ui.painter().text(
         Pos2::new(plot.left(), plot.bottom() + 4.0),
         Align2::LEFT_TOP,
         format!("N={min_n:.0}"),
-        FontId::proportional(10.0),
+        FontId::proportional(tokens.metrics.font_ui_small_pt),
         tokens.text_muted,
     );
     ui.painter().text(
         Pos2::new(plot.right(), plot.bottom() + 4.0),
         Align2::RIGHT_TOP,
         format!("N={max_n:.0}"),
-        FontId::proportional(10.0),
+        FontId::proportional(tokens.metrics.font_ui_small_pt),
         tokens.text_muted,
     );
 

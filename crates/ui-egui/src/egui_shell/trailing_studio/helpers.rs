@@ -1,7 +1,7 @@
 //! Shared widget primitives, localization titles, and collapsed-rail renderer for the Trailing Studio Dock.
 
 use curvebook_doc::SheetId;
-use egui::{Color32, Pos2, Sense, Stroke, StrokeKind, Vec2};
+use egui::{Color32, CornerRadius, Pos2, Sense, Stroke, StrokeKind, Vec2};
 use serde_json::json;
 
 use crate::UiApp;
@@ -81,15 +81,17 @@ pub(super) fn studio_chip(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameIn
         tokens.divider
     } else if let Some(ov) = border_override {
         ov
-    } else if selected || resp.hovered() {
+    } else if selected {
         tokens.accent
+    } else if resp.hovered() {
+        tokens.hover_border
     } else {
         tokens.button_border
     };
     let sw = if border_override.is_some() { 1.5 } else { 1.0 };
 
     let painter = ui.painter().with_clip_rect(visible);
-    painter.rect(rect, 4.0, bg, Stroke::new(sw, bc), StrokeKind::Inside);
+    painter.rect(rect, CornerRadius::same(tokens.metrics.radius_md), bg, Stroke::new(sw, bc), StrokeKind::Inside);
     if galley.size().x <= visible.width() - 8.0 || ellipsized {
         let tp = Pos2::new(visible.min.x + 7.0, rect.center().y - galley.size().y * 0.5);
         painter.galley(tp, galley, tc);
@@ -150,7 +152,7 @@ pub(super) fn studio_full_button(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut 
     let tc = if !enabled {
         tokens.text_disabled
     } else if primary {
-        tokens.paper_white
+        tokens.on_accent
     } else if selected {
         tokens.text_strong
     } else {
@@ -176,7 +178,7 @@ pub(super) fn studio_full_button(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut 
     let bg = if !enabled {
         tokens.panel_bg
     } else if primary {
-        if resp.hovered() { tokens.accent_strong } else { tokens.accent }
+        if resp.hovered() { tokens.accent_hover } else { tokens.accent_strong }
     } else if selected {
         tokens.active_bg
     } else if resp.hovered() {
@@ -186,14 +188,18 @@ pub(super) fn studio_full_button(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut 
     };
     let bc = if !enabled {
         tokens.divider
-    } else if primary || selected || resp.hovered() {
+    } else if primary {
+        if resp.hovered() { tokens.hover_border } else { tokens.accent_strong }
+    } else if selected {
         tokens.accent
+    } else if resp.hovered() {
+        tokens.hover_border
     } else {
         tokens.button_border
     };
 
     let painter = ui.painter().with_clip_rect(visible);
-    painter.rect(rect, 5.0, bg, Stroke::new(1.0, bc), StrokeKind::Inside);
+    painter.rect(rect, CornerRadius::same(tokens.metrics.radius_md), bg, Stroke::new(1.0, bc), StrokeKind::Inside);
     if galley.size().x <= visible.width() - 8.0 || ellipsized {
         let tp = Pos2::new(visible.min.x + ((visible.width() - galley.size().x) * 0.5).max(8.0), rect.center().y - galley.size().y * 0.5);
         painter.galley(tp, galley, tc);

@@ -942,7 +942,9 @@ fn render_split_column_sheet_preview(
     };
     let avail = ui.available_rect_before_wrap();
     let bar_h = 26.0_f32.min(avail.height());
-    let bar_rect = Rect::from_min_max(avail.min, pos2(avail.right(), avail.top() + bar_h));
+    let pad_x = tokens.metrics.space_sm;
+    let bar_rect =
+        Rect::from_min_max(pos2(avail.left() + pad_x, avail.top()), pos2((avail.right() - pad_x).max(avail.left() + pad_x), avail.top() + bar_h));
     let body_rect = Rect::from_min_max(pos2(avail.left(), bar_rect.bottom()), avail.max);
 
     ui.scope_builder(egui::UiBuilder::new().max_rect(bar_rect), |bar_ui| {
@@ -1041,7 +1043,9 @@ fn render_split_non_column_preview(
     let SplitSheetPreviewSpec { ds, slot, tokens, enabled } = spec;
     let avail = ui.available_rect_before_wrap();
     let bar_h = 26.0_f32.min(avail.height());
-    let bar_rect = Rect::from_min_max(avail.min, pos2(avail.right(), avail.top() + bar_h));
+    let pad_x = tokens.metrics.space_sm;
+    let bar_rect =
+        Rect::from_min_max(pos2(avail.left() + pad_x, avail.top()), pos2((avail.right() - pad_x).max(avail.left() + pad_x), avail.top() + bar_h));
     let body_rect = Rect::from_min_max(pos2(avail.left(), bar_rect.bottom()), avail.max);
 
     ui.scope_builder(egui::UiBuilder::new().max_rect(bar_rect), |bar_ui| {
@@ -1418,8 +1422,10 @@ fn render_gallery_card(
 
         let sub_pos = pos2(card_rect.left() + 8.0, card_rect.bottom() - 16.0);
         let sub_text = format!("{} · {}", card.badge_label, card.subtitle);
-        let mut sub_job =
-            egui::text::LayoutJob::single_section(sub_text, egui::text::TextFormat::simple(FontId::proportional(9.5), tokens.text_muted));
+        let mut sub_job = egui::text::LayoutJob::single_section(
+            sub_text,
+            egui::text::TextFormat::simple(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted),
+        );
         sub_job.wrap = egui::text::TextWrapping { max_width: max_title_w, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
         let sub_galley = ui.painter().layout_job(sub_job);
         ui.painter().with_clip_rect(text_clip).galley(sub_pos, sub_galley, tokens.text_muted);
@@ -1911,7 +1917,7 @@ fn render_floating_notes_overlay(
                     drag_rect.left_center() + vec2(6.0, 0.0),
                     egui::Align2::LEFT_CENTER,
                     format!("Note · {note_id}"),
-                    FontId::proportional(11.0),
+                    FontId::proportional(tokens.metrics.font_ui_small_pt),
                     Color32::from_rgb(35, 32, 24),
                 );
 
@@ -1924,12 +1930,16 @@ fn render_floating_notes_overlay(
                     if enabled { Sense::click() } else { Sense::hover() },
                 );
                 pin_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, enabled, "Pin Floating Note"));
-                area_ui.painter().rect_filled(pin_rect, CornerRadius::same(2), if pinned { tokens.active_bg } else { Color32::TRANSPARENT });
+                area_ui.painter().rect_filled(
+                    pin_rect,
+                    CornerRadius::same(tokens.metrics.radius_sm),
+                    if pinned { tokens.active_bg } else { Color32::TRANSPARENT },
+                );
                 area_ui.painter().text(
                     pin_rect.center(),
                     egui::Align2::CENTER_CENTER,
                     if pinned { "P*" } else { "P" },
-                    FontId::proportional(10.5),
+                    FontId::proportional(tokens.metrics.font_ui_small_pt),
                     Color32::from_rgb(35, 32, 24),
                 );
                 if pin_resp.clicked() && enabled {
@@ -1962,8 +1972,12 @@ fn render_floating_notes_overlay(
                         pos2(frame_rect.right() - 8.0, frame_rect.bottom() - 14.0),
                     );
                     let expanded = expand_template_hooks(&note.body_markdown, |tok| resolve_stage_hook(doc, tok));
-                    let body_galley =
-                        area_ui.painter().layout(expanded, FontId::proportional(11.0), Color32::from_rgb(35, 32, 24), body_rect.width().max(40.0));
+                    let body_galley = area_ui.painter().layout(
+                        expanded,
+                        FontId::proportional(tokens.metrics.font_ui_small_pt),
+                        Color32::from_rgb(35, 32, 24),
+                        body_rect.width().max(40.0),
+                    );
                     area_ui.painter().with_clip_rect(body_rect).galley(body_rect.min, body_galley, Color32::from_rgb(35, 32, 24));
 
                     let resize_rect = Rect::from_min_max(pos2(frame_rect.right() - 14.0, frame_rect.bottom() - 14.0), frame_rect.max);
@@ -2118,12 +2132,13 @@ fn render_progress_modal_if_open(ui: &mut egui::Ui, app: &UiApp, views: &mut Egu
 
                 let bar_w = (card_w - 28.0).max(120.0);
                 let (bar_rect, _) = body.allocate_exact_size(vec2(bar_w, 10.0), Sense::hover());
-                body.painter().rect_filled(bar_rect, CornerRadius::same(5), tokens.surface_bg);
+                let bar_r = CornerRadius::same(tokens.metrics.radius_md);
+                body.painter().rect_filled(bar_rect, bar_r, tokens.surface_bg);
 
                 if let Some(frac) = snapshot.progress_0_to_1 {
                     let clamped = frac.clamp(0.0, 1.0);
                     let fill_rect = Rect::from_min_max(bar_rect.min, pos2(bar_rect.left() + bar_rect.width() * clamped, bar_rect.bottom()));
-                    body.painter().rect_filled(fill_rect, CornerRadius::same(5), tokens.accent);
+                    body.painter().rect_filled(fill_rect, bar_r, tokens.accent);
                     body.add_space(4.0);
                     body.label(RichText::new(format!("{:.0}%", clamped * 100.0)).small().monospace().color(tokens.text_muted));
                 } else {
@@ -2137,7 +2152,7 @@ fn render_progress_modal_if_open(ui: &mut egui::Ui, app: &UiApp, views: &mut Egu
                         pos2(bar_rect.left() + bar_rect.width() * start, bar_rect.top()),
                         pos2(bar_rect.left() + bar_rect.width() * end, bar_rect.bottom()),
                     );
-                    body.painter().rect_filled(pulse_rect, CornerRadius::same(5), tokens.accent);
+                    body.painter().rect_filled(pulse_rect, bar_r, tokens.accent);
                     body.ctx().request_repaint();
                 }
 

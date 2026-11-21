@@ -216,8 +216,8 @@ pub(super) fn render_mv_formula_studio(
             parse_formula(&state.mv_formula_draft).map(|_| String::from("Valid formula")).map_err(|e| e.to_string())
         };
         match &formula_status {
-            Ok(msg) => ui.label(egui::RichText::new(msg).size(11.0).color(tokens.link_green)),
-            Err(err) => ui.label(egui::RichText::new(err).size(11.0).color(tokens.link_red)),
+            Ok(msg) => ui.label(egui::RichText::new(msg).size(tokens.metrics.font_ui_small_pt).color(tokens.link_green)),
+            Err(err) => ui.label(egui::RichText::new(err).size(tokens.metrics.font_ui_small_pt).color(tokens.link_red)),
         };
 
         // Colored operand column outline chips
@@ -360,8 +360,8 @@ pub(super) fn render_mv_formula_studio(
                 .corner_radius(4.0)
                 .inner_margin(egui::Margin::same(6))
                 .show(ui, |ui| {
-                    ui.label(egui::RichText::new(spec.signature).size(11.5).strong().color(tokens.text_strong));
-                    ui.label(egui::RichText::new(spec.summary).size(10.5).color(tokens.text_muted));
+                    ui.label(egui::RichText::new(spec.signature).size(tokens.metrics.font_ui_small_pt).strong().color(tokens.text_strong));
+                    ui.label(egui::RichText::new(spec.summary).size(tokens.metrics.font_ui_small_pt).color(tokens.text_muted));
                 });
         }
     } else if let Some(var) = mv.variables.get(active_col) {

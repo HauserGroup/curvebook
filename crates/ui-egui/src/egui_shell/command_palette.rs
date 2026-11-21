@@ -154,7 +154,7 @@ pub fn render_command_palette(
             egui::Frame::NONE
                 .fill(tokens.panel_bg)
                 .stroke(Stroke::new(1.0, tokens.border))
-                .corner_radius(CornerRadius::same(8))
+                .corner_radius(CornerRadius::same(tokens.metrics.radius_lg))
                 .inner_margin(egui::Margin::same(12)),
         )
         .show(ctx, |ui| {

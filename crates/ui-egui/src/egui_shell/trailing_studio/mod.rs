@@ -326,12 +326,16 @@ pub fn render_trailing_studio(
             ui.horizontal(|ui| {
                 let title = surface_localized_title(ctx_in.tokens.locale, surface);
                 let title_budget = (ui.available_width() - 32.0).max(40.0);
-                let mut job = egui::text::LayoutJob::simple_singleline(title.to_owned(), egui::FontId::proportional(13.0), ctx_in.tokens.text_strong);
+                let mut job = egui::text::LayoutJob::simple_singleline(
+                    title.to_owned(),
+                    egui::FontId::proportional(ctx_in.tokens.metrics.font_ui_title_pt),
+                    ctx_in.tokens.text_strong,
+                );
                 job.wrap = egui::text::TextWrapping { max_rows: 1, break_anywhere: true, overflow_character: Some('…'), ..Default::default() };
                 job.wrap.max_width = title_budget;
                 let galley = ui.fonts_mut(|f| f.layout_job(job));
                 let elided = galley.elided;
-                let (t_rect, t_resp) = ui.allocate_exact_size(Vec2::new(title_budget, 22.0), Sense::hover());
+                let (t_rect, t_resp) = ui.allocate_exact_size(Vec2::new(title_budget, 24.0), Sense::hover());
                 if ui.is_rect_visible(t_rect) {
                     let tp = Pos2::new(t_rect.min.x, t_rect.center().y - galley.size().y * 0.5);
                     let painter = ui.painter().with_clip_rect(t_rect);

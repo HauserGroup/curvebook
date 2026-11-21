@@ -240,7 +240,7 @@ fn render_analyze_entries_pane(
                 widget_id: "analyze.duplicate_hint",
                 role: "status",
                 text: &msg,
-                font_size: 11.0,
+                font_size: tokens.metrics.font_ui_small_pt,
                 color: tokens.accent_strong,
                 z_layer: ZLayer::ModalDialog,
                 tooltip: Some(&msg),

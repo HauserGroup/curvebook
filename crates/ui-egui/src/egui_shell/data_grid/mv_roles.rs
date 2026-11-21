@@ -68,10 +68,10 @@ pub(super) fn render_mv_tier3_role_chip(
     let wid = format!("mv_formula.role_badge.{col}");
     let resp = ui.interact(rect, ui.make_persistent_id(&wid), if blocked { Sense::hover() } else { Sense::click() });
     let alpha = if is_calc || !var.role_inferred { 0.22 } else { 0.10 };
-    ui.painter().rect_filled(rect, 3.0, chip_col.linear_multiply(alpha));
+    ui.painter().rect_filled(rect, 2.0, chip_col.linear_multiply(alpha));
     let stroke_w = if !is_calc && var.role_inferred { 1.0 } else { 1.5 };
-    ui.painter().rect_stroke(rect, 3.0, Stroke::new(stroke_w, chip_col), StrokeKind::Inside);
-    render_ellipsized_text(ui, rect.shrink2(vec2(4.0, 0.0)), &label, multi_text_style(10.5, false, chip_col, Align::Center, is_calc, false));
+    ui.painter().rect_stroke(rect, 2.0, Stroke::new(stroke_w, chip_col), StrokeKind::Inside);
+    render_ellipsized_text(ui, rect.shrink2(vec2(4.0, 0.0)), &label, multi_text_style(11.5, false, chip_col, Align::Center, is_calc, false));
     let acc = format!("Variable {} role: {label}", var.title);
     resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, !blocked, acc.clone()));
     record_meta_if_enabled(

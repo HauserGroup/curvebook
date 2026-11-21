@@ -367,7 +367,7 @@ pub(super) fn render_fg_series_arrangement(ui: &mut Ui, gctx: &mut GraphModalCtx
             let swatch = fg.preview_swatch(idx);
             ui.horizontal(|ui| {
                 let (s_rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
-                ui.painter().rect_filled(s_rect, CornerRadius::same(3), rgba_to_color32(swatch));
+                ui.painter().rect_filled(s_rect, CornerRadius::same(gctx.tokens.metrics.radius_sm), rgba_to_color32(swatch));
                 let title = series.legend_label.clone().unwrap_or_else(|| format!("Series {}", idx + 1));
                 let axis_lbl = if series.bind_to_right_y2 { "Right Y2" } else { "Left Y" };
                 ui.label(format!("#{}: {} ({axis_lbl})", idx + 1, title));

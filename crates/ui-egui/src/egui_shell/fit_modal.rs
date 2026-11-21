@@ -237,7 +237,7 @@ pub fn render_fit_modal(
                                     widget_id: &format!("fit.alert.{idx}"),
                                     role: "status",
                                     text: alert,
-                                    font_size: 11.0,
+                                    font_size: tokens.metrics.font_ui_small_pt,
                                     color: tokens.link_red,
                                     z_layer: ZLayer::ModalDialog,
                                     tooltip: Some(alert),
@@ -1073,7 +1073,7 @@ fn render_fit_constrain_tab(
         egui::Frame::NONE
             .fill(tokens.panel_bg)
             .stroke(Stroke::new(1.2, tokens.accent_strong))
-            .corner_radius(egui::CornerRadius::same(5))
+            .corner_radius(egui::CornerRadius::same(tokens.metrics.radius_md))
             .inner_margin(Vec2::new(8.0, 6.0))
             .show(ui, |ui| {
                 let mut picker = ConstantHookPickerState::default();

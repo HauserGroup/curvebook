@@ -20,11 +20,12 @@ use super::headers::{render_multi_column_headers, render_multi_corner, row_title
 use super::inline_edit::{begin_inline_edit, render_multi_inline_editors};
 use super::linked_regions::{open_link_popover, render_multi_link_guard_popover, render_multi_link_strip};
 use super::mv_roles::{active_mv_formula_operands, render_mv_role_menu_popup};
+use super::shared::LinkedEdgePaint;
 use super::shared::{
     AuxInlineTarget, CellTextStyle, ContextCellTarget, ContextMenuState, MultiGridAuxState, MultiGridCtx, MultiGridFrameState, MultiGridGeom,
     alt_row_fill, any_pointer_click_in, clamp_multi_scroll, clear_grid_drag_anchor_if_released, compute_multi_geom, compute_multi_scrollbar_rects,
     compute_visible_range, ensure_solid_scrollbar_style, format_cell_into, forward_frozen_wheel, handle_cell_pointer_drag_select,
-    initial_edit_text_for_cell, is_multi_click_edit, link_border_color32, multi_text_style, paint_exclusion_corner_marker,
+    initial_edit_text_for_cell, is_linked_region_broken, is_multi_click_edit, link_border_color32, multi_text_style, paint_exclusion_corner_marker,
     paint_linked_perimeter_edges, record_meta_if_enabled, render_ellipsized_text, set_grid_focus_active,
 };
 use super::shortcuts::{
@@ -180,7 +181,7 @@ fn render_multi_gutter_body(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut M
                     gui,
                     num_r.shrink2(vec2(4.0, 0.0)),
                     &row_str,
-                    multi_text_style(11.0, true, tokens.text_muted, Align::RIGHT, false, false),
+                    multi_text_style(tokens.metrics.font_ui_small_pt, true, tokens.text_muted, Align::RIGHT, false, false),
                 );
                 let acc_rn = format!("Row {}", row + 1);
                 resp.widget_info(move || WidgetInfo::labeled(egui::Role::RowHeader, !blocked, acc_rn.clone()));
@@ -226,7 +227,7 @@ fn render_multi_gutter_body(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut M
                         gui,
                         rt_r.shrink2(vec2(3.0, 0.0)),
                         &abbr,
-                        CellTextStyle::plain(FontId::proportional(11.0), tokens.text_muted, Align::Center),
+                        CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted, Align::Center),
                     );
                     let acc_c = format!("Row {} Title {}", row + 1, row_title);
                     resp.widget_info(move || WidgetInfo::labeled(egui::Role::Label, true, acc_c.clone()));
@@ -677,15 +678,9 @@ fn paint_single_multi_data_cell(
     }
     if let Some(reg) = flags.linked {
         let (_, span_subs) = geom.col_span_flat(coord.col);
-        paint_linked_perimeter_edges(
-            body_ui,
-            raw_cell_r,
-            clipped,
-            reg,
-            coord,
-            span_subs,
-            link_border_color32(reg.spec.source.border_color(), tokens),
-        );
+        let broken = is_linked_region_broken(mctx.app.document(), reg);
+        let lc = if broken { tokens.link_red } else { link_border_color32(reg.spec.source.border_color(), tokens) };
+        paint_linked_perimeter_edges(body_ui, raw_cell_r, clipped, &LinkedEdgePaint { reg, coord, subs_per_col: span_subs, color: lc, broken });
     }
     if flags.excluded {
         paint_exclusion_corner_marker(body_ui, raw_cell_r, clipped, ds, coord, tokens);

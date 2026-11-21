@@ -18,12 +18,14 @@ use super::headers::{render_column_headers_3tier, render_corner_and_row_titles_h
 use super::inline_edit::{InlineTextEditSpec, begin_inline_edit, render_inline_text_edit};
 use super::linked_regions::{open_link_popover, render_link_provenance_strip, render_linked_region_guard_popover};
 use super::multi_archetype::{GridContextMenuHost, render_grid_context_menu_popup};
+use super::shared::LinkedEdgePaint;
 use super::shared::{
     BodyRenderResult, CellTextStyle, ContextCellTarget, ContextMenuState, GridRenderCtx, LINK_STRIP_HEIGHT_PT, SelectionFastLookup,
     active_column_sheet, alt_row_fill, any_pointer_click_in, clamp_scroll_offset, clear_grid_drag_anchor_if_released, compute_grid_geometry,
     compute_scrollbar_rects, compute_visible_range, ensure_solid_scrollbar_style, format_cell_into, forward_gutter_header_wheel,
-    handle_cell_pointer_drag_select, initial_edit_text_for_cell, is_multi_click_edit, link_border_color32, paint_exclusion_corner_marker,
-    paint_linked_perimeter_edges, paint_scrollbar_corner_cap, record_meta_if_enabled, render_ellipsized_text, set_grid_focus_active,
+    handle_cell_pointer_drag_select, initial_edit_text_for_cell, is_linked_region_broken, is_multi_click_edit, link_border_color32,
+    paint_exclusion_corner_marker, paint_linked_perimeter_edges, paint_scrollbar_corner_cap, record_meta_if_enabled, render_ellipsized_text,
+    set_grid_focus_active,
 };
 use super::shortcuts::handle_grid_keyboard_shortcuts;
 use super::{ColumnGridEguiState, ColumnGridFrameReport, ColumnGridRenderContext, GridInlineEditTarget};
@@ -346,9 +348,15 @@ fn render_single_cell(
     let resp = ui.interact(draw.clipped_rect, cell_id, sense);
 
     if let Some(reg) = draw.linked_reg {
-        let lc = link_border_color32(reg.border_color(), tokens);
+        let broken = is_linked_region_broken(rctx.app.document(), reg);
+        let lc = if broken { tokens.link_red } else { link_border_color32(reg.border_color(), tokens) };
         ui.painter().rect_filled(draw.clipped_rect, CornerRadius::ZERO, lc.gamma_multiply(0.08));
-        paint_linked_perimeter_edges(ui, draw.cell_rect, draw.clipped_rect, reg, coord, rctx.geom.subs_per_col, lc);
+        paint_linked_perimeter_edges(
+            ui,
+            draw.cell_rect,
+            draw.clipped_rect,
+            &LinkedEdgePaint { reg, coord, subs_per_col: rctx.geom.subs_per_col, color: lc, broken },
+        );
     }
     if draw.is_selected {
         ui.painter().rect_filled(draw.clipped_rect, CornerRadius::ZERO, tokens.active_bg.gamma_multiply(0.65));
@@ -551,7 +559,7 @@ fn render_gutter_body(
                     ui,
                     rn_rect,
                     &rn_text,
-                    CellTextStyle::plain(FontId::new(11.0, FontFamily::Monospace), tokens.text_muted, Align::RIGHT),
+                    CellTextStyle::plain(FontId::new(tokens.metrics.font_ui_small_pt, FontFamily::Monospace), tokens.text_muted, Align::RIGHT),
                 );
                 let acc = rn_text.clone();
                 rn_resp.widget_info(move || WidgetInfo::labeled(egui::Role::RowHeader, !blocked, acc.clone()));

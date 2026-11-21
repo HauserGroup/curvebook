@@ -578,7 +578,7 @@ fn render_constants_pane(
                             pos2(badge_rect.center().x, badge_rect.center().y),
                             egui::Align2::CENTER_CENTER,
                             kind_badge,
-                            FontId::proportional(10.5),
+                            FontId::proportional(tokens.metrics.font_ui_small_pt),
                             tokens.text_muted,
                         );
                     }
