@@ -211,6 +211,17 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
             gctx.intents.push_update_format_graph_state(next);
         }
 
+        let mut sym_on = fg.show_symbols;
+        let sym_lbl = "Show symbols";
+        let sym_chk = ui.checkbox(&mut sym_on, sym_lbl);
+        record_checkbox(ui, &sym_chk, gctx.meta, "format_graph.show_symbols", sym_lbl, sym_on);
+        if sym_chk.changed() {
+            let mut next = fg.clone();
+            next.show_symbols = sym_on;
+            next.show_symbols_dirty = true;
+            gctx.intents.push_update_format_graph_state(next);
+        }
+
         let mut fit_on = fg.show_fitted_curve;
         let fit_lbl = tr(gctx.locale, "r13.fg.show_fitted_curve");
         let fit_enabled = fg.cached_regression_overlay.is_some();
@@ -222,6 +233,100 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
             gctx.intents.push_update_format_graph_state(next);
         }
     });
+
+    let active_gs = fg.graph_sheet_id.as_ref().and_then(|id| gctx.app.document().graph_sheet(id));
+    let active_series = active_gs.and_then(|gs| gs.spec.series.get(fg.selected_series_index));
+    let is_scatter_series = active_series.is_some_and(|s| matches!(s.gdo, curvebook_doc::GraphicalDataObject::ScatterAndLine { .. }));
+    if is_scatter_series {
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.set_max_width(gctx.body_w);
+            ui.label("Connecting Line Mode:");
+            for (slug, lbl, mode) in [
+                ("summary_center", "Summary center", curvebook_doc::ReplicateLineMode::SummaryCenter),
+                ("individual_trajectories", "Individual trajectories", curvebook_doc::ReplicateLineMode::IndividualReplicateTrajectories),
+            ] {
+                if record_button(
+                    ui,
+                    gctx.meta,
+                    ButtonEntry {
+                        widget_id: &format!("format_graph.replicate_lines.{slug}"),
+                        label: lbl,
+                        command_id: None,
+                        selected: fg.replicate_lines == mode,
+                        enabled: true,
+                        disabled_reason: None,
+                    },
+                    gctx.tokens,
+                )
+                .clicked()
+                {
+                    let mut next = fg.clone();
+                    next.replicate_lines = mode;
+                    next.replicate_lines_dirty = true;
+                    gctx.intents.push_update_format_graph_state(next);
+                }
+            }
+        });
+    }
+
+    let has_bar_border = if fg.apply_all_data_sets {
+        active_gs.is_some_and(|gs| {
+            gs.spec.series.iter().any(|s| {
+                matches!(s.gdo, curvebook_doc::GraphicalDataObject::BarWithReplicates { .. } | curvebook_doc::GraphicalDataObject::FloatingBar { .. })
+            })
+        })
+    } else {
+        active_series.is_some_and(|s| {
+            matches!(s.gdo, curvebook_doc::GraphicalDataObject::BarWithReplicates { .. } | curvebook_doc::GraphicalDataObject::FloatingBar { .. })
+        })
+    };
+    if has_bar_border {
+        ui.add_space(4.0);
+        let spin_id = egui::Id::unique("format_graph.bar_border_width_spinner");
+        let mut bar_spin = ui.ctx().data_mut(|d| {
+            d.get_temp::<crate::egui_shell::unit_spinners::ScrubUnitFieldState>(spin_id).unwrap_or_else(|| {
+                crate::egui_shell::unit_spinners::ScrubUnitFieldState::new(crate::egui_shell::unit_spinners::ScrubUnitKind::Points)
+            })
+        });
+        let committed = super::super::helpers::render_length_spinner_pt(
+            ui,
+            super::super::helpers::LengthSpinnerSpec {
+                widget_id: "format_graph.bar_border_width_pt",
+                label: "Bar Border",
+                value_pt: fg.bar_border_width_pt,
+                min_pt: 0.0,
+                max_pt: 6.0,
+                step_pt: 0.25,
+                enabled: true,
+                disabled_reason: None,
+            },
+            &mut bar_spin,
+            gctx.tokens,
+            gctx.meta,
+        );
+        ui.ctx().data_mut(|d| d.insert_temp(spin_id, bar_spin));
+        if let Some(w) = committed {
+            let mut next = fg.clone();
+            next.bar_border_width_pt = w;
+            next.bar_border_width_dirty = true;
+            gctx.intents.push_update_format_graph_state(next);
+        }
+    }
+
+    if fg.graph_kind == Some(curvebook_doc::GraphKind::Diagnostic(curvebook_doc::DiagnosticPlotKind::ForestPlot)) {
+        ui.add_space(4.0);
+        let mut pooled_on = fg.forest_show_pooled_diamond;
+        let pooled_lbl = "Show pooled summary diamond";
+        let pooled_chk = ui.checkbox(&mut pooled_on, pooled_lbl);
+        record_checkbox(ui, &pooled_chk, gctx.meta, "format_graph.forest_show_pooled_diamond", pooled_lbl, pooled_on);
+        if pooled_chk.changed() {
+            let mut next = fg.clone();
+            next.forest_show_pooled_diamond = pooled_on;
+            next.forest_show_pooled_diamond_dirty = true;
+            gctx.intents.push_update_format_graph_state(next);
+        }
+    }
 
     ui.add_space(6.0);
     ui.separator();
@@ -360,18 +465,126 @@ pub(super) fn render_fg_series_arrangement(ui: &mut Ui, gctx: &mut GraphModalCtx
         }
     });
 
+    if matches!(fg.graph_kind, Some(curvebook_doc::GraphKind::Column | curvebook_doc::GraphKind::Grouped)) {
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Plot Orientation").strong());
+        ui.horizontal_wrapped(|ui| {
+            ui.set_max_width(gctx.body_w);
+            for (slug, lbl, target) in [
+                ("vertical", "Vertical", curvebook_doc::CartesianOrientation::Vertical),
+                ("horizontal", "Horizontal", curvebook_doc::CartesianOrientation::Horizontal),
+            ] {
+                if record_button(
+                    ui,
+                    gctx.meta,
+                    ButtonEntry {
+                        widget_id: &format!("format_graph.orientation.{slug}"),
+                        label: lbl,
+                        command_id: None,
+                        selected: fg.orientation == target,
+                        enabled: true,
+                        disabled_reason: None,
+                    },
+                    gctx.tokens,
+                )
+                .clicked()
+                {
+                    let mut next = fg.clone();
+                    next.orientation = target;
+                    next.orientation_dirty = true;
+                    gctx.intents.push_update_format_graph_state(next);
+                }
+            }
+        });
+    }
+
     ui.add_space(8.0);
     ui.label(egui::RichText::new(gtr(gctx.locale, "fg.active_series_list")).strong());
     if let Some(gs) = fg.graph_sheet_id.as_ref().and_then(|id| gctx.app.document().graph_sheet(id)) {
         for (idx, series) in gs.spec.series.iter().enumerate() {
             let swatch = fg.preview_swatch(idx);
+            let selected = idx == fg.selected_series_index;
+            let bind_y2 = if selected && fg.bind_to_right_y2_dirty { fg.bind_to_right_y2 } else { series.bind_to_right_y2 };
+            let axis_lbl = if bind_y2 { "Right Y2" } else { "Left Y" };
+            let title = series.legend_label.clone().unwrap_or_else(|| format!("Series {}", idx + 1));
+            let row_lbl = format!("#{}: {} ({axis_lbl})", idx + 1, title);
             ui.horizontal(|ui| {
                 let (s_rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
                 ui.painter().rect_filled(s_rect, CornerRadius::same(gctx.tokens.metrics.radius_sm), rgba_to_color32(swatch));
-                let title = series.legend_label.clone().unwrap_or_else(|| format!("Series {}", idx + 1));
-                let axis_lbl = if series.bind_to_right_y2 { "Right Y2" } else { "Left Y" };
-                ui.label(format!("#{}: {} ({axis_lbl})", idx + 1, title));
+                if record_button(
+                    ui,
+                    gctx.meta,
+                    ButtonEntry {
+                        widget_id: &format!("format_graph.series_select.{idx}"),
+                        label: &row_lbl,
+                        command_id: None,
+                        selected,
+                        enabled: true,
+                        disabled_reason: None,
+                    },
+                    gctx.tokens,
+                )
+                .clicked()
+                {
+                    let mut next = fg.clone();
+                    next.selected_series_index = idx;
+                    next.sync_selected_series_from_spec(&gs.spec);
+                    gctx.intents.push_update_format_graph_state(next);
+                }
             });
+        }
+
+        if !gs.spec.series.is_empty() {
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.set_max_width(gctx.body_w);
+                ui.label("Selected Series Y Axis:");
+                for (slug, lbl, y2_target) in [("left_y", "Left Y", false), ("right_y2", "Right Y2", true)] {
+                    if record_button(
+                        ui,
+                        gctx.meta,
+                        ButtonEntry {
+                            widget_id: &format!("format_graph.series_axis.{slug}"),
+                            label: lbl,
+                            command_id: None,
+                            selected: fg.bind_to_right_y2 == y2_target,
+                            enabled: true,
+                            disabled_reason: None,
+                        },
+                        gctx.tokens,
+                    )
+                    .clicked()
+                    {
+                        let mut next = fg.clone();
+                        next.bind_to_right_y2 = y2_target;
+                        next.bind_to_right_y2_dirty = true;
+                        gctx.intents.push_update_format_graph_state(next);
+                    }
+                }
+            });
+
+            ui.add_space(4.0);
+            let off_spin_id = egui::Id::unique("format_graph.series_offset_x_spinner");
+            let mut off_spin = ui.ctx().data_mut(|d| {
+                d.get_temp::<crate::egui_shell::unit_spinners::ScrubUnitFieldState>(off_spin_id).unwrap_or_else(|| {
+                    crate::egui_shell::unit_spinners::ScrubUnitFieldState::new(crate::egui_shell::unit_spinners::ScrubUnitKind::Generic)
+                })
+            });
+            let off_cfg = crate::egui_shell::unit_spinners::ScrubUnitFieldConfig {
+                step_per_pt: 0.05,
+                decimals: 2,
+                allow_unit_switch: false,
+                ..crate::egui_shell::unit_spinners::ScrubUnitFieldConfig::new("format_graph.series_offset_x", "Horizontal Nudge (X)", -1000.0, 1000.0)
+            };
+            let off_out =
+                crate::egui_shell::unit_spinners::render_scrub_unit_field(ui, fg.offset_x_data, &mut off_spin, off_cfg, gctx.tokens, gctx.meta);
+            ui.ctx().data_mut(|d| d.insert_temp(off_spin_id, off_spin));
+            if let Some(x_val) = off_out.committed_value {
+                let mut next = fg.clone();
+                next.offset_x_data = x_val;
+                next.offset_x_data_dirty = true;
+                gctx.intents.push_update_format_graph_state(next);
+            }
         }
     }
 }

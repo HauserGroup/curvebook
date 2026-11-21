@@ -329,7 +329,11 @@ fn retopologize_series(series: &[SeriesSpec], topo: &str) -> Vec<SeriesSpec> {
                     marker: Some(MarkerStyle { fill_color: col, stroke_color: col, ..cur_marker }),
                     line: Some(default_connecting_line(col)),
                     area_fill: None,
-                    replicate_lines: curvebook_doc::ReplicateLineMode::default(),
+                    replicate_lines: if let GraphicalDataObject::ScatterAndLine { replicate_lines, .. } = &s.gdo {
+                        *replicate_lines
+                    } else {
+                        curvebook_doc::ReplicateLineMode::default()
+                    },
                 },
                 _ => s.gdo.clone(),
             };
