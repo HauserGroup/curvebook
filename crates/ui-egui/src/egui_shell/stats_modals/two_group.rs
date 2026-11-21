@@ -12,7 +12,7 @@ use crate::modal_predicates::{
 use crate::egui_shell::stat_anova_modal::{render_modal_checkbox, render_modal_radio, render_modal_seg_btn, render_section_title};
 use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens};
 
-use super::helpers::{render_dataset_checklist, render_mv_role_badge};
+use super::helpers::{render_dataset_checklist, render_mv_role_badge, resolve_source_data_sheet};
 
 pub(super) fn render_two_group_design(
     ui: &mut Ui,
@@ -110,7 +110,7 @@ pub(super) fn render_two_group_design(
             intents.push_dialog_widget_click("edit.two_group.hodges_lehmann");
         }
     });
-    if let Some(ds) = doc.data_sheet(&spec.source_sheet_id)
+    if let Some(ds) = resolve_source_data_sheet(doc, &spec.source_sheet_id)
         && let TableArchetype::MultipleVariables(mv) = &ds.archetype
     {
         ui.add_space(4.0);

@@ -410,6 +410,113 @@ impl PowerWizardState {
         }
     }
 
+    /// Populate wizard fields from an existing L1 [`curvebook_doc::PowerAnalysisSpec`] (`Cmd+T` re-entry).
+    pub fn sync_from_doc_spec(&mut self, spec: &curvebook_doc::PowerAnalysisSpec) {
+        self.stage = PowerWizardStage::ExperimentDesign;
+        self.family = match spec.family {
+            curvebook_doc::PowerTestFamily::TwoSampleUnpairedT => PowerTestFamily::TwoSampleUnpairedT,
+            curvebook_doc::PowerTestFamily::TwoSamplePairedT => PowerTestFamily::TwoSamplePairedT,
+            curvebook_doc::PowerTestFamily::OneSampleT => PowerTestFamily::OneSampleT,
+            curvebook_doc::PowerTestFamily::OneWayAnova => PowerTestFamily::OneWayAnova,
+            curvebook_doc::PowerTestFamily::TwoProportions => PowerTestFamily::TwoProportions,
+            curvebook_doc::PowerTestFamily::Correlation => PowerTestFamily::Correlation,
+            curvebook_doc::PowerTestFamily::ChiSquare => PowerTestFamily::ChiSquare,
+            curvebook_doc::PowerTestFamily::SimpleLinearRegression => PowerTestFamily::SimpleLinearRegression,
+        };
+        self.solve_target = match spec.solve_target {
+            curvebook_doc::PowerSolveTarget::SampleSize => PowerSolveTarget::SampleSize,
+            curvebook_doc::PowerSolveTarget::Power => PowerSolveTarget::Power,
+            curvebook_doc::PowerSolveTarget::DetectableEffect => PowerSolveTarget::DetectableEffect,
+        };
+        match spec.tail_mode {
+            curvebook_doc::PowerTailMode::TwoSided => self.two_tailed = true,
+            curvebook_doc::PowerTailMode::OneSided(curvebook_doc::PowerOneSidedDirection::Greater) => {
+                self.two_tailed = false;
+                self.one_sided_greater = true;
+            }
+            curvebook_doc::PowerTailMode::OneSided(curvebook_doc::PowerOneSidedDirection::Less) => {
+                self.two_tailed = false;
+                self.one_sided_greater = false;
+            }
+        }
+        self.alpha = spec.alpha;
+        if let Some(tp) = spec.target_power {
+            self.target_power = tp;
+        }
+        if let Some(n) = spec.sample_size {
+            self.sample_size = n;
+        }
+        self.sample_size_group2 = spec.sample_size_group2;
+        self.allocation_ratio = spec.allocation_ratio;
+        self.chi_square_df = spec.chi_square_df;
+        self.two_proportions_mode = match spec.two_proportions_mode {
+            curvebook_doc::TwoProportionsMethod::PooledNullUnpooledAlt => TwoProportionsMethod::PooledNullUnpooledAlt,
+            curvebook_doc::TwoProportionsMethod::Unpooled => TwoProportionsMethod::Unpooled,
+            curvebook_doc::TwoProportionsMethod::CohensH => TwoProportionsMethod::CohensH,
+        };
+        self.continuity_correction = spec.continuity_correction;
+        self.correlation_method = match spec.correlation_method {
+            curvebook_doc::CorrelationPowerMethod::FisherZ => CorrelationPowerMethod::FisherZ,
+            curvebook_doc::CorrelationPowerMethod::FisherZWithTCrit => CorrelationPowerMethod::FisherZWithTCrit,
+            curvebook_doc::CorrelationPowerMethod::ExactTTransform => CorrelationPowerMethod::ExactTTransform,
+            curvebook_doc::CorrelationPowerMethod::ConditionalSlopeT => CorrelationPowerMethod::ConditionalSlopeT,
+        };
+        if let Some(k) = spec.num_groups {
+            self.anova_groups = k.max(2);
+        }
+        match &spec.effect {
+            curvebook_doc::PowerEffectSpec::Unspecified => {}
+            curvebook_doc::PowerEffectSpec::Standardized(d) => {
+                self.effect_mode = PowerEffectInputMode::Standardized;
+                self.standardized_effect = *d;
+            }
+            curvebook_doc::PowerEffectSpec::MeanDiffAndSd { mean_diff, sd, sd_group2, within_pair_correlation } => {
+                self.effect_mode = PowerEffectInputMode::MeansAndSd;
+                self.mean_diff = *mean_diff;
+                self.sd = *sd;
+                self.sd_group2 = *sd_group2;
+                if let Some(rho) = within_pair_correlation {
+                    self.within_pair_correlation = *rho;
+                }
+            }
+            curvebook_doc::PowerEffectSpec::PairedDiff { mean_diff, sd_diff } => {
+                self.effect_mode = PowerEffectInputMode::PairedDiffDirect;
+                self.mean_diff = *mean_diff;
+                self.paired_sd_diff = *sd_diff;
+            }
+            curvebook_doc::PowerEffectSpec::GroupMeansAndSd { means, within_sd } => {
+                self.effect_mode = PowerEffectInputMode::MeansAndSd;
+                if !means.is_empty() {
+                    self.group_means = means.clone();
+                    self.anova_groups = spec.num_groups.unwrap_or(means.len()).max(2);
+                }
+                self.sd = *within_sd;
+            }
+            curvebook_doc::PowerEffectSpec::TwoProportions { p1, p2 } => {
+                self.effect_mode = PowerEffectInputMode::Proportions;
+                self.p1 = *p1;
+                self.p2 = *p2;
+            }
+            curvebook_doc::PowerEffectSpec::BaselineProportion { p1 } => {
+                self.effect_mode = PowerEffectInputMode::Proportions;
+                self.p1 = *p1;
+            }
+            curvebook_doc::PowerEffectSpec::RSquared(r2) => {
+                self.effect_mode = PowerEffectInputMode::RegressionRSquared;
+                self.r_squared = *r2;
+            }
+            curvebook_doc::PowerEffectSpec::RegressionSlope { beta1, sigma_x, sigma_eps } => {
+                self.effect_mode = PowerEffectInputMode::RegressionSlope;
+                self.beta1 = *beta1;
+                self.sigma_x = *sigma_x;
+                self.sigma_eps = *sigma_eps;
+            }
+        }
+        self.created_sheets = None;
+        self.clear_hover();
+        let _ = self.recalculate();
+    }
+
     fn build_effect_spec(&self) -> PowerEffectSpec {
         if self.solve_target == PowerSolveTarget::DetectableEffect {
             return match self.family {

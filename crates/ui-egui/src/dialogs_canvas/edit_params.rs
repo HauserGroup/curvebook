@@ -1009,6 +1009,7 @@ impl EditAnalysisParametersState {
             _ => {}
         }
         spec.update_kind(updated);
+        self.sync_rule_flags_from_kind();
     }
 
     fn apply_r9_param_patch(&mut self, key: &str, val: &Value) -> Result<bool, String> {

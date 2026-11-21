@@ -10,7 +10,7 @@ use crate::egui_shell::stat_anova_modal::{
 };
 use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens};
 
-use super::helpers::{render_dataset_checklist, render_mv_role_badge};
+use super::helpers::{render_dataset_checklist, render_mv_role_badge, resolve_source_data_sheet};
 
 fn collect_term_combinations(n: usize, k: usize, start: usize, cur: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
     if cur.len() == k {
@@ -74,7 +74,7 @@ pub(super) fn render_stat_mv_data_tab(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
-    let Some(ds) = doc.data_sheet(&spec.source_sheet_id) else {
+    let Some(ds) = resolve_source_data_sheet(doc, &spec.source_sheet_id) else {
         return;
     };
     let TableArchetype::MultipleVariables(mv) = &ds.archetype else {

@@ -161,7 +161,12 @@ fn handle_stage_action(app: &mut UiApp, state: &mut PowerWizardViewState, raw_st
 }
 
 fn handle_family_action(app: &mut UiApp, state: &mut PowerWizardViewState, key: &str) -> Result<UiEventOutcome, String> {
-    let Some(card) = FAMILY_CARDS.iter().find(|c| c.key == key) else {
+    let normalized_key = match key {
+        "two_sample_t" => "unpaired_t",
+        "simple_linear" => "regression",
+        other => other,
+    };
+    let Some(card) = FAMILY_CARDS.iter().find(|c| c.key == normalized_key) else {
         return Err(format!("unknown power test family `{key}`"));
     };
     state.survival_log_rank = card.is_survival;
@@ -191,8 +196,14 @@ fn handle_solve_action(app: &mut UiApp, state: &mut PowerWizardViewState, target
 }
 
 fn handle_effect_mode_action(app: &mut UiApp, state: &mut PowerWizardViewState, mode: &str) -> Result<UiEventOutcome, String> {
+    let family = app.canvas_dialogs.power_wizard.family;
     let next_mode = match mode {
-        "standardized" => PowerEffectInputMode::Standardized,
+        "standardized" | "direct" => PowerEffectInputMode::Standardized,
+        "pilot" => match family {
+            PowerTestFamily::TwoProportions => PowerEffectInputMode::Proportions,
+            PowerTestFamily::SimpleLinearRegression => PowerEffectInputMode::RegressionSlope,
+            _ => PowerEffectInputMode::MeansAndSd,
+        },
         "means_and_sd" => PowerEffectInputMode::MeansAndSd,
         "paired_diff" => PowerEffectInputMode::PairedDiffDirect,
         "proportions" => PowerEffectInputMode::Proportions,

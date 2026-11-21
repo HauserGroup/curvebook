@@ -556,6 +556,9 @@ impl CanvasDialogState {
             return false;
         };
         self.edit_params.open_for_result(rs);
+        if let curvebook_doc::AnalysisKind::PowerAnalysis(ref pa) = rs.analysis.kind {
+            self.power_wizard.sync_from_doc_spec(pa);
+        }
         self.active_dialog = ActiveDialog::EditAnalysisParameters { result_sheet_id: rs.id.clone() };
         true
     }

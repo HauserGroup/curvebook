@@ -96,6 +96,9 @@ pub struct ImportWizardEguiState {
     pub reshape_group_col_draft: String,
     pub reshape_value_col_draft: String,
     pub reshape_x_col_draft: String,
+    pub reshape_replicate_col_draft: String,
+    pub reshape_excluded_col_draft: String,
+    pub reshape_tidy_csv_draft: String,
     pub initialized_for_open: bool,
 }
 
@@ -218,6 +221,9 @@ fn sync_drafts_from_app(app: &UiApp, state: &mut ImportWizardEguiState) {
     state.reshape_group_col_draft = ir.group_col.clone();
     state.reshape_value_col_draft = ir.value_col.clone();
     state.reshape_x_col_draft = ir.x_col.clone().unwrap_or_default();
+    state.reshape_replicate_col_draft = ir.replicate_col.clone().unwrap_or_default();
+    state.reshape_excluded_col_draft = ir.excluded_col.clone().unwrap_or_default();
+    state.reshape_tidy_csv_draft = ir.tidy_csv.clone();
     state.plate_values_draft =
         ir.plate_values.iter().map(|v| v.map_or_else(|| String::from("NA"), |n| format!("{n}"))).collect::<Vec<_>>().join(", ");
 }
@@ -352,7 +358,10 @@ fn render_step_source(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w: f32) {
     }
 
     ui.add_space(4.0);
-    ui.label("Delimited Source Text / Preview Feed:");
+    ui.horizontal(|row| {
+        row.label("Delimited Source Text / Preview Feed:");
+        render_paste_clipboard_button(row, meta, intents);
+    });
     let tr_edit = ui.add(
         egui::TextEdit::multiline(&mut state.raw_source_draft)
             .hint_text("Paste CSV / TSV table rows…")
@@ -783,6 +792,20 @@ fn render_step_metadata(ui: &mut Ui, cx: &mut ImportModalCtx<'_>) {
     }
 }
 
+fn render_paste_clipboard_button(ui: &mut Ui, meta: &mut FrameInspectMeta, intents: &mut PendingUiIntents) {
+    let pb = widgets::secondary_button(ui, "Paste Clipboard");
+    meta.record_modal_response(ui, &pb, FrameInspectEntryInput::modal("import_paste.btn.paste_clipboard", "button", "Paste Clipboard", None, true));
+    if pb.clicked() {
+        intents.push_paste_clipboard_into_import_reshape();
+    }
+}
+
+fn patch_import_reshape_field(intents: &mut PendingUiIntents, key: &str, value: Value) {
+    let mut fields = Map::new();
+    fields.insert(key.to_owned(), value);
+    intents.push_patch_active_dialog(fields);
+}
+
 fn render_import_reshape_body(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w: f32, body_h: f32) {
     let app = cx.app;
     let tokens = cx.tokens;
@@ -803,16 +826,33 @@ fn render_import_reshape_body(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w:
                     let r = choice_pill(row, tokens, lbl, ir.mode == mode, true);
                     meta.record_modal_response(row, &r, FrameInspectEntryInput::modal(wid, "radio", lbl, Some((ir.mode == mode).to_string()), true));
                     if r.clicked() {
-                        let mut fields = Map::new();
-                        fields.insert(
-                            String::from("mode"),
+                        patch_import_reshape_field(
+                            intents,
+                            "mode",
                             Value::String(String::from(match mode {
                                 ImportReshapeMode::Plate96 => "plate96",
                                 ImportReshapeMode::Plate384 => "plate384",
                                 ImportReshapeMode::TidyLongPivot => "tidylongpivot",
                             })),
                         );
-                        intents.push_patch_active_dialog(fields);
+                    }
+                }
+            });
+
+            body.add_space(4.0);
+            body.horizontal_wrapped(|row| {
+                row.label("Target Kind:");
+                for (kind, slug, wid, lbl) in [
+                    (TableKind::Xy, "xy", "import_paste.target.xy", "XY"),
+                    (TableKind::Column, "column", "import_paste.target.column", "Column"),
+                    (TableKind::Grouped, "grouped", "import_paste.target.grouped", "Grouped"),
+                    (TableKind::MultipleVariables, "multiple_variables", "import_paste.target.multiple_variables", "Multiple Variables"),
+                ] {
+                    let selected = ir.target_kind == kind;
+                    let kr = choice_pill(row, tokens, lbl, selected, true);
+                    meta.record_modal_response(row, &kr, FrameInspectEntryInput::modal(wid, "radio", lbl, Some(selected.to_string()), true));
+                    if kr.clicked() {
+                        patch_import_reshape_field(intents, "target_kind", Value::String(String::from(slug)));
                     }
                 }
             });
@@ -820,7 +860,7 @@ fn render_import_reshape_body(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w:
             body.add_space(6.0);
             body.horizontal_wrapped(|row| {
                 row.label("Table Title:");
-                let tr = row.add(egui::TextEdit::singleline(&mut state.reshape_title_draft).hint_text("Sheet title").desired_width(150.0));
+                let tr = row.add(egui::TextEdit::singleline(&mut state.reshape_title_draft).hint_text("Sheet title").desired_width(140.0));
                 meta.record_modal_response(
                     row,
                     &tr,
@@ -833,9 +873,7 @@ fn render_import_reshape_body(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w:
                     ),
                 );
                 if tr.changed() {
-                    let mut f = Map::new();
-                    f.insert(String::from("title"), Value::String(state.reshape_title_draft.clone()));
-                    intents.push_patch_active_dialog(f);
+                    patch_import_reshape_field(intents, "title", Value::String(state.reshape_title_draft.clone()));
                 }
                 row.label("X Title:");
                 let xr = row.add(egui::TextEdit::singleline(&mut state.reshape_x_title_draft).hint_text("X column title").desired_width(110.0));
@@ -851,10 +889,9 @@ fn render_import_reshape_body(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w:
                     ),
                 );
                 if xr.changed() {
-                    let mut f = Map::new();
-                    f.insert(String::from("x_title"), Value::String(state.reshape_x_title_draft.clone()));
-                    intents.push_patch_active_dialog(f);
+                    patch_import_reshape_field(intents, "x_title", Value::String(state.reshape_x_title_draft.clone()));
                 }
+                render_paste_clipboard_button(row, meta, intents);
             });
 
             body.add_space(6.0);
@@ -870,47 +907,69 @@ fn render_import_reshape_body(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w:
                 let is_384 = ir.mode == ImportReshapeMode::Plate384;
                 let expected = if is_384 { 384 } else { 96 };
                 if sub_blank && (ir.plate_roles.len() != expected || !ir.plate_roles.iter().any(|r| r.as_str() == Some("Blank"))) {
-                    let mut f = Map::new();
-                    f.insert(String::from("plate_roles"), Value::Array(default_plate_roles(is_384, true)));
-                    intents.push_patch_active_dialog(f);
+                    patch_import_reshape_field(intents, "plate_roles", Value::Array(default_plate_roles(is_384, true)));
                 }
             }
 
             if ir.mode == ImportReshapeMode::TidyLongPivot {
+                body.add_space(4.0);
                 body.horizontal_wrapped(|row| {
-                    row.label("Group Col:");
-                    let gr = row.add(egui::TextEdit::singleline(&mut state.reshape_group_col_draft).hint_text("Group").desired_width(96.0));
-                    meta.record_modal_response(
-                        row,
-                        &gr,
-                        FrameInspectEntryInput::modal(
-                            "import_paste.input.group_col",
-                            "textbox",
-                            "Group Column",
-                            Some(state.reshape_group_col_draft.clone()),
-                            true,
-                        ),
-                    );
-                    row.label("Value Col:");
-                    let vr = row.add(egui::TextEdit::singleline(&mut state.reshape_value_col_draft).hint_text("Value").desired_width(96.0));
-                    meta.record_modal_response(
-                        row,
-                        &vr,
-                        FrameInspectEntryInput::modal(
-                            "import_paste.input.value_col",
-                            "textbox",
-                            "Value Column",
-                            Some(state.reshape_value_col_draft.clone()),
-                            true,
-                        ),
-                    );
-                    if gr.changed() || vr.changed() {
-                        let mut f = Map::new();
-                        f.insert(String::from("group_col"), Value::String(state.reshape_group_col_draft.clone()));
-                        f.insert(String::from("value_col"), Value::String(state.reshape_value_col_draft.clone()));
-                        intents.push_patch_active_dialog(f);
+                    row.label("Delimiter:");
+                    for (delim, wire, wid, lbl) in [
+                        (',', "comma", "import_paste.delim.comma", "Comma"),
+                        ('\t', "tab", "import_paste.delim.tab", "Tab"),
+                        (';', "semicolon", "import_paste.delim.semi", "Semicolon"),
+                    ] {
+                        let sel = ir.tidy_delimiter == delim;
+                        let dr = choice_pill(row, tokens, lbl, sel, true);
+                        meta.record_modal_response(row, &dr, FrameInspectEntryInput::modal(wid, "radio", lbl, Some(sel.to_string()), true));
+                        if dr.clicked() {
+                            patch_import_reshape_field(intents, "delimiter", Value::String(String::from(wire)));
+                        }
                     }
                 });
+
+                body.add_space(4.0);
+                body.horizontal_wrapped(|row| {
+                    for (field_key, wid, lbl, hint, draft) in [
+                        ("x_col", "import_paste.input.x_col", "X Col", "Optional", &mut state.reshape_x_col_draft),
+                        ("group_col", "import_paste.input.group_col", "Group Col", "Group", &mut state.reshape_group_col_draft),
+                        ("replicate_col", "import_paste.input.replicate_col", "Replicate Col", "Optional", &mut state.reshape_replicate_col_draft),
+                        ("value_col", "import_paste.input.value_col", "Value Col", "Value", &mut state.reshape_value_col_draft),
+                        ("excluded_col", "import_paste.input.excluded_col", "Excluded Col", "Optional", &mut state.reshape_excluded_col_draft),
+                    ] {
+                        row.label(format!("{lbl}:"));
+                        let ed = row.add(egui::TextEdit::singleline(draft).id(egui::Id::unique(wid)).hint_text(hint).desired_width(82.0));
+                        meta.record_modal_response(row, &ed, FrameInspectEntryInput::modal(wid, "textbox", lbl, Some(draft.clone()), true));
+                        if ed.changed() {
+                            patch_import_reshape_field(intents, field_key, Value::String(draft.clone()));
+                        }
+                    }
+                });
+
+                body.add_space(4.0);
+                body.label("Delimited Tidy-Long CSV / TSV:");
+                let csv_ed = body.add(
+                    egui::TextEdit::multiline(&mut state.reshape_tidy_csv_draft)
+                        .id(egui::Id::unique("import_paste.input.csv"))
+                        .hint_text("Paste header + tidy-long rows (e.g. Group,Replicate,Value)...")
+                        .desired_rows(5)
+                        .desired_width((avail_w - 28.0).clamp(180.0, 560.0)),
+                );
+                meta.record_modal_response(
+                    body,
+                    &csv_ed,
+                    FrameInspectEntryInput::modal(
+                        "import_paste.input.csv",
+                        "textbox",
+                        "Delimited Tidy-Long CSV",
+                        Some(state.reshape_tidy_csv_draft.clone()),
+                        true,
+                    ),
+                );
+                if csv_ed.changed() {
+                    patch_import_reshape_field(intents, "tidy_csv", Value::String(state.reshape_tidy_csv_draft.clone()));
+                }
             } else {
                 let is_384 = ir.mode == ImportReshapeMode::Plate384;
                 let expected = if is_384 { 384 } else { 96 };
@@ -1243,7 +1302,7 @@ fn render_preview_grid_table(ui: &mut Ui, app: &UiApp, grid: &[Vec<Cell>], token
     );
 }
 
-fn default_plate_roles(is_384: bool, blank_row_a: bool) -> Vec<Value> {
+pub(super) fn default_plate_roles(is_384: bool, blank_row_a: bool) -> Vec<Value> {
     let row_len = if is_384 { 24 } else { 12 };
     let total = if is_384 { 384 } else { 96 };
     (0..total)
