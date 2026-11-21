@@ -24,6 +24,7 @@ use crate::egui_shell::info_view::{InfoViewEguiState, render_info_view_for_sheet
 use crate::egui_shell::inspect_bridge::HybridCoexistenceDecision;
 use crate::egui_shell::results_view::{ResultsViewEguiState, render_results_view_for_sheet};
 use crate::egui_shell::welcome_hub::render_welcome_hub;
+use crate::egui_shell::widgets::dropdown;
 use crate::egui_shell::{
     EguiShellViewState, FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, ResponsiveShellLayout, SplitOrientation, Tokens, UiIntent,
     doc_sheet_title, rgba8_to_color32,
@@ -764,9 +765,9 @@ fn render_split_pane_header(
         SplitPaneSlot::Secondary => "split.secondary_selector",
     };
     let all_sheets = collect_all_sheet_ids(doc);
-    let combo = egui::ComboBox::from_id_salt(("split_pane_sheet", slot))
-        .selected_text(RichText::new(current_title).small())
+    let combo = dropdown(("split_pane_sheet", slot), RichText::new(current_title).small())
         .width((header_rect.width() * 0.40).clamp(72.0, 200.0))
+        .enabled(enabled)
         .show_ui(&mut hdr_ui, |combo_ui| {
             for (cand_id, cand_title, kind_badge) in &all_sheets {
                 let selected = sheet_id == Some(cand_id);
@@ -779,11 +780,10 @@ fn render_split_pane_header(
                 }
             }
         });
-    meta.record_response(
-        &hdr_ui,
-        &combo.response,
-        inspect_input(sel_wid, "combobox", current_title, Some("ui.split.toggle"), None, enabled, ZLayer::Workspace),
-    );
+    let mut inspect = inspect_input(sel_wid, "combobox", current_title, Some("ui.split.toggle"), None, enabled, ZLayer::Workspace);
+    inspect.ellipsized = combo.ellipsized;
+    inspect.full_label = combo.ellipsized.then_some(current_title);
+    meta.record_response(&hdr_ui, &combo.response, inspect);
 
     if let Some(brushed) = app.brushed_cell.as_ref() {
         let brush_label = format!("Brush R{}C{}", brushed.row + 1, brushed.col + 1);

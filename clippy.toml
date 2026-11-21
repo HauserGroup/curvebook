@@ -6,5 +6,6 @@ allow-panic-in-tests = true
 allow-indexing-slicing-in-tests = true
 disallowed-types = [
   { path = "std::sync::Mutex", reason = "avoid raw std::sync::Mutex; keep shared state single-owner or use message passing until a checked lock wrapper lands" },
+  { path = "egui::ComboBox", reason = "egui::ComboBox traps its open popup at its opening height (egui #5225); use `crate::egui_shell::widgets::dropdown` instead" },
 ]
 cognitive-complexity-threshold = 30
