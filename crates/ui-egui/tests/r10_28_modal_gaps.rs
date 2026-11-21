@@ -8,7 +8,7 @@
 //!   `Cmd+T` parameter re-entry (`sync_from_doc_spec`, live draft sync, `modal.ok` / `cancel` / `one_sided`).
 //! - `WF-19`: Contingency `edit.contingency.attributable_risk` + `R6` 2×2 CI method selector buttons.
 //! - `WF-36`/`43`/`52`: Nonlinear Fit Constrain `fit.con.const.{param}` persistent draft & commit.
-//! - `WF-61`: Normalize Prism defaults (`norm_percent: true`, `norm_per_dataset: true`), inspect-recorded
+//! - `WF-61`: Normalize defaults (`norm_percent: true`, `norm_per_dataset: true`), inspect-recorded
 //!   checkboxes, and `edit.transform.normalize.create_graph` in both standalone and `Cmd+T` edit flows.
 //! - `WF-10`: One-Way ANOVA `edit.compare_against_control` syncing `compare_against_control` and
 //!   advancing `Dunnett { control_column }` via `edit.control_column`.

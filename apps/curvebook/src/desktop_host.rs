@@ -3290,6 +3290,7 @@ pub enum DesktopDialogOpener {
     InfoConstantHookPicker,
     Checkpoints,
     CommandPalette,
+    Preferences,
 }
 
 /// Resolved desktop command dispatch plan produced by [`resolve_desktop_command_route`].
@@ -3568,6 +3569,9 @@ fn resolve_host_or_ui_route(
                 "metrics": { "logical_width": 1024.0, "logical_height": 640.0, "scale_factor": 1.0 }
             }),
         })),
+        "app.preferences" => {
+            Ok(Some(DesktopCommandRoute::UiDialogOpener { kind: DesktopDialogOpener::Preferences, target_sheet_id: None, query: None }))
+        }
         cmd if cmd.starts_with("ui.") || cmd == "app.about" || cmd == "app.feedback" => {
             Ok(Some(DesktopCommandRoute::UiCommand { ui_command_id: cmd.to_owned(), params: json!({}) }))
         }
@@ -4126,6 +4130,11 @@ fn open_desktop_dialog(app: &mut UiApp, opener: DesktopDialogOpener, target_shee
             }
             Ok(json!({ "dialog": "CommandPalette", "query": app.canvas_dialogs.command_palette.query }))
         }
+        DesktopDialogOpener::Preferences => {
+            let shortcuts = app.shortcuts.clone();
+            app.egui_views.app_modals.open_preferences(&shortcuts, None);
+            Ok(json!({ "dialog": "Preferences" }))
+        }
     }
 }
 
@@ -4134,6 +4143,7 @@ fn shortcut_uses_desktop_routing(command_id: &str) -> bool {
         || matches!(
             command_id,
             "sheet.createData"
+                | "app.preferences"
                 | "ui.theme.set"
                 | "ui.locale.set"
                 | "ui.previewFilter.set"
