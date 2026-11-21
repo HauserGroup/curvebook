@@ -25,6 +25,7 @@ pub mod metrics;
 pub mod nist_strd;
 pub mod r13_datasets;
 pub mod sha256;
+pub mod wf_datasets;
 
 pub use dd::{DoubleDouble, oracle_univariate_f64};
 pub use metrics::{MAX_F64_LRE_DIGITS, approx_eq, assert_approx_eq, assert_lre_at_least, assert_ulp_le, log_relative_error, ulp_distance};
