@@ -190,7 +190,13 @@ impl Drop for AsyncRasterWorkerOwner {
         let _ = self.tx.write().unwrap_or_else(PoisonError::into_inner).take();
         let handle = self.join.write().unwrap_or_else(PoisonError::into_inner).take();
         if let Some(join_handle) = handle {
-            let _ = join_handle.join();
+            // An in-flight job holds an `egui::Context` clone, and the context owns this worker
+            // handle. When the worker drops the last context reference, this `Drop` runs on the
+            // worker thread itself; joining there fails with `EDEADLK` and `JoinHandle::join`
+            // panics. The closed channel already makes the worker return, so detach instead.
+            if join_handle.thread().id() != std::thread::current().id() {
+                let _ = join_handle.join();
+            }
         }
     }
 }
@@ -2570,4 +2576,42 @@ fn update_corner_resize_gesture(ui: &egui::Ui, ov: &CanvasOverlayCtx<'_>, g: &mu
     let new_x = if left { anchor_x - new_w } else { init.x };
     let new_y = if top { anchor_y - new_h } else { init.y };
     g.current_bounds_pt = DocRectPt::new(round_tenth_pt(new_x), round_tenth_pt(new_y), round_tenth_pt(new_w), round_tenth_pt(new_h));
+}
+
+#[cfg(test)]
+mod raster_worker_drop_tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, RwLock, mpsc};
+    use std::time::{Duration, Instant};
+
+    use super::{AsyncRasterWorkerOwner, RasterWorkerResults};
+
+    /// Dropping the last owner reference on the worker thread itself must detach rather than
+    /// self-join (which panics with `EDEADLK`), so the thread runs to completion.
+    #[test]
+    fn owner_dropped_on_its_own_worker_thread_does_not_self_join() {
+        let (owner_tx, owner_rx) = mpsc::channel::<Arc<AsyncRasterWorkerOwner>>();
+        let finished = Arc::new(AtomicBool::new(false));
+        let finished_bg = Arc::clone(&finished);
+        let spawned = std::thread::Builder::new().spawn(move || {
+            if let Ok(owner) = owner_rx.recv() {
+                drop(owner);
+                finished_bg.store(true, Ordering::SeqCst);
+            }
+        });
+        let Ok(join_handle) = spawned else {
+            return;
+        };
+        let owner = Arc::new(AsyncRasterWorkerOwner {
+            tx: RwLock::new(None),
+            results: Arc::new(RwLock::new(RasterWorkerResults::default())),
+            join: RwLock::new(Some(join_handle)),
+        });
+        assert!(owner_tx.send(owner).is_ok(), "owner hand-off to worker thread failed");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !finished.load(Ordering::SeqCst) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(finished.load(Ordering::SeqCst), "worker thread panicked or hung while dropping its own owner");
+    }
 }
