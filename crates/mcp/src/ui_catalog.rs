@@ -185,10 +185,10 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
     },
     UiCommandSpec {
         id: "ui.result.applyRemediation",
-        label: "Diagnostic Remediation Disabled (QOL-7 Diagnostics-Only)",
+        label: "Diagnostic Remediation Disabled (Diagnostics-Only)",
         shortcut: "",
         params_doc: "{\"result_sheet_id\":\"optional ResultSheetId\"}",
-        summary: "Deprecated under QOL-7 diagnostics-only policy; does not create sibling analyses or mutate the project.",
+        summary: "Deprecated under diagnostics-only policy; does not create sibling analyses or mutate the project.",
         beginner: "Diagnostics remain observational only. Inspect Residuals/Diagnostics tabs or press Cmd+T to change test parameters explicitly.",
     },
     UiCommandSpec {

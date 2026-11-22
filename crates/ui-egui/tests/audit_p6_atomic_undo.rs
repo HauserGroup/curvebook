@@ -12,13 +12,13 @@ use curvebook_engine::Session;
 use curvebook_ui_egui::control_io::dispatch_gui_action;
 use curvebook_ui_egui::os_integration::StubPlatformClipboardAdapter;
 use curvebook_ui_egui::views::{ViewShardStates, dispatch_custom_view_action};
-use curvebook_ui_egui::{KeyModifiers, UiApp, UiInputEvent, dispatch_ui_event, inspect_ui_tree};
+use curvebook_ui_egui::{KeyModifiers, UiApp, UiInputEvent, ViewportMetrics, dispatch_ui_event, inspect_ui_tree};
 use serde_json::json;
 
 type TestRes = Result<(), String>;
 
-fn find_widget<'a>(snap: &'a curvebook_ui_egui::UiTreeSnapshot, id: &str) -> Option<&'a curvebook_ui_egui::inspect::UiWidgetNode> {
-    snap.widgets.iter().find(|n| n.id == id)
+fn find_widget(snap: &curvebook_ui_egui::inspect::UiTreeSnapshot, id: &str) -> Option<curvebook_ui_egui::inspect::UiWidgetNode> {
+    snap.find_widget(id)
 }
 
 #[test]
@@ -42,7 +42,7 @@ fn fa_sec13_14_xy_spill_paste_collapses_into_single_undo_entry() -> TestRes {
     app.grid.select_x_cell_sync(1, 0);
 
     let paste_ev = UiInputEvent::KeyDown { key: String::from("v"), modifiers: KeyModifiers { meta: true, ..KeyModifiers::default() } };
-    dispatch_ui_event(&mut app, &paste_ev).map_err(|e| format!("paste: {e}"))?;
+    dispatch_ui_event(&mut app, paste_ev, ViewportMetrics::default()).map_err(|e| format!("paste: {e}"))?;
 
     assert_eq!(app.session().undo_depth(), before_undo + 1, "X+Y spill paste must create exactly 1 undo step");
     let ds_after = app.document().data_sheet(&SheetId::from("xy-1")).ok_or_else(|| String::from("missing xy-1"))?;
@@ -62,6 +62,10 @@ fn fa_sec14_11_power_wizard_create_collapses_into_single_undo_entry() -> TestRes
     let before_undo = app.session().undo_depth();
 
     dispatch_gui_action(&mut app, "ui.invoke_menu", json!({ "command_id": "ui.powerWizard.open" })).map_err(|e| format!("open power wizard: {e}"))?;
+    for step in 0..3 {
+        let _ = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "action": "next" }))
+            .map_err(|e| format!("advance power wizard stage {step}: {e}"))?;
+    }
     app.canvas_dialogs.power_wizard.recalculate().map_err(|e| format!("recalc: {e}"))?;
     let _ = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "action": "create" })).map_err(|e| format!("power create: {e}"))?;
 

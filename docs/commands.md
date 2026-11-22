@@ -238,7 +238,7 @@ Registered commands: 105
 - **Menu:** `Edit/Clear Cells`
 - **Summary:** Clear single cells, lists, ranges, or an entire table, optionally breaking live links.
 - **Beginner note:** Erase values from selected cells or clear the entire data table.
-- **Parameters:** `all` (boolean), `cells` (array), `clear_x` (boolean), `col` (integer), `col_end` (integer), `col_start` (integer), `coord` (object), `range` (object), `row` (integer), `row_end` (integer), `row_start` (integer), `sheet_id*` (string), `subcol` (integer), `subcol_end` (integer), `subcol_start` (integer), `unlink` (boolean)
+- **Parameters:** `all` (boolean), `cells` (array), `clear_x` (boolean), `col` (integer), `col_end` (integer), `col_start` (integer), `coord` (object), `range` (object), `region_id` (string), `row` (integer), `row_end` (integer), `row_start` (integer), `sheet_id*` (string), `subcol` (integer), `subcol_end` (integer), `subcol_start` (integer), `unlink` (boolean)
 
 ### `table.convertArchetype` — Convert Table Archetype
 
