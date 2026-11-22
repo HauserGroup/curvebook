@@ -9,15 +9,17 @@ use std::collections::HashMap;
 use crate::dsl::ast::{BinaryKind, BinaryOp, BuiltinFn, CompiledProgram, Expr, OpCode, UnaryKind, UnaryOp};
 use crate::dsl::limits::MAX_TOTAL_OPCODES;
 use crate::dsl::parser::LocalResolver;
+use crate::dsl::statements::parse_predictor_index;
 use crate::error::FitError;
 
 pub(in crate::dsl) fn check_opcode_budget(code: &[OpCode], max_opcodes: usize) -> Result<(), FitError> {
     if code.len() > max_opcodes {
-        return Err(FitError::DslCompileError {
-            message: format!("Compiled equation exceeds total bytecode budget ({MAX_TOTAL_OPCODES} opcodes)"),
-            line: 1,
-            column: 1,
-        });
+        let message = if max_opcodes == MAX_TOTAL_OPCODES {
+            format!("Compiled equation exceeds total bytecode budget ({MAX_TOTAL_OPCODES} opcodes)")
+        } else {
+            format!("Compiled equation exceeds remaining bytecode budget ({max_opcodes} of {MAX_TOTAL_OPCODES} total opcodes)")
+        };
+        return Err(FitError::DslCompileError { message, line: 1, column: 1 });
     }
     Ok(())
 }
@@ -255,13 +257,8 @@ pub(in crate::dsl) fn compile_ident(
         "INF" => code.push(OpCode::PushConst(f64::INFINITY)),
         "NAN" => code.push(OpCode::PushConst(f64::NAN)),
         _ => {
-            if let Some(rest) = u.strip_prefix('X')
-                && !rest.is_empty()
-                && rest != "0"
-                && let Ok(idx) = rest.parse::<usize>()
-                && idx >= 1
-            {
-                code.push(OpCode::LoadPredictor(idx - 1));
+            if let Some(idx) = parse_predictor_index(name) {
+                code.push(OpCode::LoadPredictor(idx));
                 return Ok(());
             }
             if let Some(&pidx) = params.get(name) {

@@ -57,7 +57,9 @@
 //! - Morrison, J. F. (1969). Kinetics of the reversible inhibition of enzyme-catalysed reactions by
 //!   tight-binding inhibitors. *Biochimica et Biophysica Acta* 185:269–286.
 
-use crate::library::{BuiltinEquationSpec, ParametricModel, data_x_min_max, data_y_min_max, estimate_x_at_ymid, resolve_from_specs, spec_ids};
+use crate::library::{
+    BuiltinEquationSpec, ParametricModel, data_x_min_max, data_y_min_max, estimate_x_at_ymid, resolve_from_specs, safe_exp, spec_ids,
+};
 use crate::types::{DataPoint, DerivedScalar, EquationCategory};
 use curvebook_doc::{ParameterRule, ParameterScope};
 
@@ -793,11 +795,23 @@ impl ParametricModel for RichardsFivePl {
     fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
         let (log_xb, hill, s) = (params[2], params[3], params[4]);
         let mut out = Vec::new();
-        if s > 0.0 && hill.abs() > 1e-12 {
-            let log_ec50 = log_xb - ((2.0_f64.powf(1.0 / s) - 1.0).log10()) / hill;
-            out.push(DerivedScalar { name: "LogEC50".to_owned(), value: log_ec50, units: None });
-            if let Some(ec50) = safe_pow10(log_ec50) {
-                out.push(DerivedScalar { name: "EC50".to_owned(), value: ec50, units: None });
+        if log_xb.is_finite() && hill.is_finite() && s.is_finite() && s > 0.0 && hill.abs() > 1e-12 {
+            let log10_term = if s == 1.0 {
+                0.0
+            } else if s < 0.01 {
+                let ln_term = (-core::f64::consts::LN_2 / s).exp();
+                core::f64::consts::LOG10_2 / s + (-ln_term).ln_1p() / core::f64::consts::LN_10
+            } else if s > 1e100 {
+                core::f64::consts::LN_2.log10() - s.log10()
+            } else {
+                (core::f64::consts::LN_2 / s).exp_m1().log10()
+            };
+            let log_ec50 = log_xb - log10_term / hill;
+            if log_ec50.is_finite() {
+                out.push(DerivedScalar { name: "LogEC50".to_owned(), value: log_ec50, units: None });
+                if let Some(ec50) = safe_pow10(log_ec50) {
+                    out.push(DerivedScalar { name: "EC50".to_owned(), value: ec50, units: None });
+                }
             }
         }
         out
@@ -1141,6 +1155,39 @@ struct OneSiteBinding {
     params: Vec<String>,
 }
 
+fn eval_hill_binding(c: f64, scale: f64, kd: f64, h: f64) -> Option<f64> {
+    if !c.is_finite() || c < 0.0 || !scale.is_finite() || !kd.is_finite() || kd <= 0.0 || !h.is_finite() {
+        return None;
+    }
+    if c == 0.0 {
+        return (h > 0.0).then_some(0.0);
+    }
+    let base = c / kd;
+    let ratio = if base.is_finite() && base > 0.0 {
+        base.powf(h)
+    } else {
+        let log_arg = h * (c.ln() - kd.ln());
+        if !log_arg.is_finite() {
+            return None;
+        }
+        if log_arg > 709.0 {
+            f64::INFINITY
+        } else if log_arg < -745.0 {
+            0.0
+        } else {
+            log_arg.exp()
+        }
+    };
+    if !ratio.is_finite() {
+        return (ratio.is_infinite() && h > 0.0).then_some(scale);
+    }
+    if ratio == 0.0 {
+        return Some(0.0);
+    }
+    let y = scale * (ratio / (1.0 + ratio));
+    y.is_finite().then_some(y)
+}
+
 impl ParametricModel for OneSiteBinding {
     fn id(&self) -> &str {
         self.id
@@ -1160,20 +1207,41 @@ impl ParametricModel for OneSiteBinding {
             return None;
         }
         let (bmax, kd) = (params[0], params[1]);
-        if kd <= 0.0 {
+        if !bmax.is_finite() || !kd.is_finite() || kd <= 0.0 {
             return None;
         }
         if self.with_hill {
-            let h = params[2];
-            if c == 0.0 {
-                return Some(0.0);
-            }
-            let ch = c.powf(h);
-            let kdh = kd.powf(h);
-            return Some(bmax * ch / (kdh + ch));
+            return eval_hill_binding(c, bmax, kd, params[2]);
         }
-        let spec = bmax * c / (kd + c);
-        if self.with_ns { Some(spec + params[2] * c + params[3]) } else { Some(spec) }
+        let frac = if c == 0.0 {
+            0.0
+        } else {
+            let r = c / kd;
+            if r.is_infinite() {
+                1.0
+            } else if r == 0.0 {
+                let log_r = c.ln() - kd.ln();
+                if log_r < -745.0 {
+                    0.0
+                } else {
+                    let rv = log_r.exp();
+                    rv / (1.0 + rv)
+                }
+            } else {
+                r / (1.0 + r)
+            }
+        };
+        let spec = bmax * frac;
+        let y = if self.with_ns {
+            let (ns, bg) = (params[2], params[3]);
+            if !ns.is_finite() || !bg.is_finite() {
+                return None;
+            }
+            spec + ns * c + bg
+        } else {
+            spec
+        };
+        y.is_finite().then_some(y)
     }
     fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
         if self.with_hill {
@@ -1347,11 +1415,12 @@ impl ParametricModel for DissociationOnePhase {
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let t = x.first().copied()?;
         let (y0, ns, koff) = (params[0], params[1], params[2]);
-        let arg = -koff * t;
-        if arg > 700.0 {
+        if !t.is_finite() || !y0.is_finite() || !ns.is_finite() || !koff.is_finite() {
             return None;
         }
-        Some((y0 - ns) * arg.exp() + ns)
+        let e = safe_exp(-koff * t)?;
+        let y = (y0 - ns) * e + ns;
+        y.is_finite().then_some(y)
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
@@ -1383,11 +1452,12 @@ impl ParametricModel for AssociationOneConc {
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let t = x.first().copied()?;
         let (ymax, kobs) = (params[0], params[1]);
-        let arg = -kobs * t;
-        if arg > 700.0 {
+        if !t.is_finite() || !ymax.is_finite() || !kobs.is_finite() {
             return None;
         }
-        Some(ymax * (1.0 - arg.exp()))
+        let e = safe_exp(-kobs * t)?;
+        let y = ymax * (1.0 - e);
+        y.is_finite().then_some(y)
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (_, ymax) = data_y_min_max(points);
@@ -1420,12 +1490,17 @@ impl ParametricModel for AssociationTwoConc {
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let t = x.first().copied()?;
         let (bmax, kon, koff, conc) = (params[0], params[1], params[2], params[3]);
-        let kobs = kon * conc + koff;
-        if kobs <= 0.0 || (-kobs * t) > 700.0 {
+        if !t.is_finite() || !bmax.is_finite() || !kon.is_finite() || !koff.is_finite() || !conc.is_finite() {
             return None;
         }
-        let eq = bmax * kon * conc / kobs;
-        Some(eq * (1.0 - (-kobs * t).exp()))
+        let kobs = kon * conc + koff;
+        if !kobs.is_finite() || kobs <= 0.0 {
+            return None;
+        }
+        let e = safe_exp(-kobs * t)?;
+        let eq = bmax * (kon * conc / kobs);
+        let y = eq * (1.0 - e);
+        y.is_finite().then_some(y)
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (_, ymax) = data_y_min_max(points);
@@ -1456,25 +1531,27 @@ impl ParametricModel for AssocThenDissoc {
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let t = x.first().copied()?;
         let (bmax, kon, koff, conc, t0) = (params[0], params[1], params[2], params[3], params[4]);
-        let kobs = kon * conc + koff;
-        if kobs <= 0.0 {
+        if !t.is_finite() || !bmax.is_finite() || !kon.is_finite() || !koff.is_finite() || !conc.is_finite() || !t0.is_finite() {
             return None;
         }
-        let eq = bmax * kon * conc / kobs;
-        if t < t0 {
-            let arg = -kobs * t;
-            if arg > 700.0 {
-                return None;
-            }
-            Some(eq * (1.0 - arg.exp()))
-        } else {
-            let bound_at_t0 = eq * (1.0 - (-kobs * t0).exp());
-            let arg = -koff * (t - t0);
-            if arg > 700.0 {
-                return None;
-            }
-            Some(bound_at_t0 * arg.exp())
+        let kobs = kon * conc + koff;
+        if !kobs.is_finite() || kobs <= 0.0 {
+            return None;
         }
+        let eq = bmax * (kon * conc / kobs);
+        if !eq.is_finite() {
+            return None;
+        }
+        let y = if t < t0 {
+            let e = safe_exp(-kobs * t)?;
+            eq * (1.0 - e)
+        } else {
+            let e_t0 = safe_exp(-kobs * t0)?;
+            let bound_at_t0 = eq * (1.0 - e_t0);
+            let e_dissoc = safe_exp(-koff * (t - t0))?;
+            bound_at_t0 * e_dissoc
+        };
+        y.is_finite().then_some(y)
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (_, ymax) = data_y_min_max(points);
@@ -1582,18 +1659,7 @@ impl ParametricModel for AllostericSigmoidal {
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let s = x.first().copied()?;
         let (vmax, khalf, h) = (params[0], params[1], params[2]);
-        if s < 0.0 || khalf <= 0.0 {
-            return None;
-        }
-        if s == 0.0 {
-            return Some(0.0);
-        }
-        let sh = s.powf(h);
-        let kh = khalf.powf(h);
-        if !sh.is_finite() || !kh.is_finite() || (kh + sh) == 0.0 {
-            return None;
-        }
-        Some(vmax * sh / (kh + sh))
+        eval_hill_binding(s, vmax, khalf, h)
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (_, ymax) = data_y_min_max(points);
@@ -1743,13 +1809,46 @@ impl ParametricModel for MorrisonKi {
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let i_conc = x.first().copied()?;
         let (vo, et, ki, s_conc, km) = (params[0], params[1], params[2], params[3], params[4]);
-        if i_conc < 0.0 || et <= 0.0 || ki <= 0.0 || km <= 0.0 {
+        if !i_conc.is_finite()
+            || i_conc < 0.0
+            || !vo.is_finite()
+            || !et.is_finite()
+            || et <= 0.0
+            || !ki.is_finite()
+            || ki <= 0.0
+            || !s_conc.is_finite()
+            || s_conc < 0.0
+            || !km.is_finite()
+            || km <= 0.0
+        {
             return None;
         }
         let ki_app = ki * (1.0 + s_conc / km);
-        let sum = et + i_conc + ki_app;
-        let disc = (sum * sum - 4.0 * et * i_conc).max(0.0).sqrt();
-        Some(vo * (1.0 - (sum - disc) / (2.0 * et)))
+        if !ki_app.is_finite() || ki_app <= 0.0 {
+            return None;
+        }
+        if i_conc == 0.0 {
+            return Some(vo);
+        }
+        let max_term = et.max(i_conc).max(ki_app);
+        let (et_s, i_s, k_s) =
+            if max_term > 1e150 || max_term < 1e-150 { (et / max_term, i_conc / max_term, ki_app / max_term) } else { (et, i_conc, ki_app) };
+        let disc = (et_s - i_s + k_s).hypot(2.0 * i_s.sqrt() * k_s.sqrt());
+        if !disc.is_finite() {
+            return None;
+        }
+        let b = i_s + k_s - et_s;
+        let frac = if b >= 0.0 {
+            let denom = b + disc;
+            if denom <= 0.0 || !denom.is_finite() {
+                return None;
+            }
+            (2.0 * k_s) / denom
+        } else {
+            ((et_s - i_s - k_s) + disc) / (2.0 * et_s)
+        };
+        let y = vo * frac;
+        y.is_finite().then_some(y)
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (_, ymax) = data_y_min_max(points);
@@ -1766,22 +1865,25 @@ fn split_total_and_ns_datasets(points: &[DataPoint]) -> (Vec<DataPoint>, Vec<Dat
 fn estimate_global_ns_and_bg(primary: &[DataPoint], ds1: &[DataPoint]) -> (f64, f64) {
     let (ymin, ymax) = data_y_min_max(primary);
     let (_, xmax) = data_x_min_max(primary);
-    if ds1.len() >= 2 {
-        let n = ds1.len() as f64;
-        let mx = ds1.iter().map(|p| p.x0()).sum::<f64>() / n;
-        let my = ds1.iter().map(|p| p.y).sum::<f64>() / n;
+    let finite_ds1: Vec<(f64, f64)> = ds1.iter().filter(|p| p.x0().is_finite() && p.y.is_finite()).map(|p| (p.x0(), p.y)).collect();
+    if finite_ds1.len() >= 2 {
+        let n = finite_ds1.len() as f64;
+        let mx = finite_ds1.iter().map(|&(x, _)| x).sum::<f64>() / n;
+        let my = finite_ds1.iter().map(|&(_, y)| y).sum::<f64>() / n;
         let mut sxx = 0.0_f64;
         let mut sxy = 0.0_f64;
-        for p in ds1 {
-            let dx = p.x0() - mx;
+        for &(x, y) in &finite_ds1 {
+            let dx = x - mx;
             sxx += dx * dx;
-            sxy += dx * (p.y - my);
+            sxy += dx * (y - my);
         }
-        let slope = if sxx > 1e-30 { (sxy / sxx).max(0.0) } else { 0.0 };
-        (slope, my - slope * mx)
-    } else {
-        (((ymax - ymin) / xmax.max(1e-12)) * 0.05, ymin)
+        let slope = if sxx > 1e-30 && sxx.is_finite() && sxy.is_finite() { (sxy / sxx).max(0.0) } else { 0.0 };
+        let bg = my - slope * mx;
+        if slope.is_finite() && bg.is_finite() {
+            return (slope, bg);
+        }
     }
+    (((ymax - ymin) / xmax.max(1e-12)) * 0.05, ymin)
 }
 
 /// Global one-site total and nonspecific binding (`dataset 0` = Total, `dataset >= 1` = Nonspecific).

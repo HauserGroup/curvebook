@@ -26,30 +26,28 @@ pub(in crate::dsl) fn byte_offset_in_line(raw_line: &str, slice: &str) -> usize 
 
 pub(in crate::dsl) fn strip_comment<'a>(line: &'a str, line_no: usize, hints: &mut HashMap<String, f64>) -> Result<&'a str, FitError> {
     let trimmed = line.trim();
-    for marker in ['#', ';'] {
-        if let Some(pos) = trimmed.find(marker) {
-            let comment = trimmed[pos + 1..].trim();
-            if let Some(rest) = comment.strip_prefix("initial:") {
-                for pair in rest.split(',') {
-                    if let Some((k, v)) = pair.split_once('=') {
-                        let key = k.trim();
-                        if !key.is_empty() && is_builtin_constant_or_var(key) {
-                            return Err(FitError::DslCompileError {
-                                message: format!("Cannot assign `# initial:` hint to reserved identifier `{key}`"),
-                                line: line_no,
-                                column: 1,
-                            });
-                        }
-                        if let Ok(num) = v.trim().parse::<f64>()
-                            && num.is_finite()
-                        {
-                            hints.insert(key.to_owned(), num);
-                        }
+    if let Some(pos) = [trimmed.find('#'), trimmed.find(';')].into_iter().flatten().min() {
+        let comment = trimmed[pos + 1..].trim();
+        if let Some(rest) = comment.strip_prefix("initial:") {
+            for pair in rest.split(',') {
+                if let Some((k, v)) = pair.split_once('=') {
+                    let key = k.trim();
+                    if !key.is_empty() && is_builtin_constant_or_var(key) {
+                        return Err(FitError::DslCompileError {
+                            message: format!("Cannot assign `# initial:` hint to reserved identifier `{key}`"),
+                            line: line_no,
+                            column: 1,
+                        });
+                    }
+                    if let Ok(num) = v.trim().parse::<f64>()
+                        && num.is_finite()
+                    {
+                        hints.insert(key.to_owned(), num);
                     }
                 }
             }
-            return Ok(trimmed[..pos].trim());
         }
+        return Ok(trimmed[..pos].trim());
     }
     Ok(trimmed)
 }
@@ -509,16 +507,17 @@ pub(in crate::dsl) fn branch_uses_unbound_scoped_indices(
     let Some(target) = eq_items[target_idx].target_raw_expr(has_ode) else {
         return false;
     };
+    let declared_scoped: HashSet<&str> = scoped_names.iter().map(String::as_str).collect();
     let mut free = Vec::new();
     let mut seen = BTreeSet::new();
     let mut bound = BTreeSet::new();
     for &idx in local_indices {
         if let EqItem::Local { name, rhs, .. } = &eq_items[idx] {
-            collect_free_idents(rhs, &bound, &mut seen, &mut free);
+            collect_free_idents_with_declared_locals(rhs, &bound, &declared_scoped, &mut seen, &mut free);
             bound.insert(name.clone());
         }
     }
-    collect_free_idents(target, &bound, &mut seen, &mut free);
+    collect_free_idents_with_declared_locals(target, &bound, &declared_scoped, &mut seen, &mut free);
     free.iter().any(|ident| scoped_names.contains(ident))
 }
 
@@ -562,33 +561,60 @@ fn needed_locals_for_expr(locals: &[(String, Expr)], rhs: &Expr) -> Vec<(String,
     locals.iter().zip(keep).filter_map(|(pair, k)| if k { Some(pair.clone()) } else { None }).collect()
 }
 
+struct BranchValidationCtx<'a> {
+    eq_items: &'a [EqItem],
+    has_ode: bool,
+    scoped_names: &'a HashSet<String>,
+    last_any_target_idx: Option<usize>,
+}
+
 fn validate_branch_locals_and_trailing(
-    eq_items: &[EqItem],
+    ctx: &BranchValidationCtx<'_>,
     all_class_locals: &[usize],
     loc_len: usize,
     target_idx: usize,
-    has_ode: bool,
-    scoped_names: &HashSet<String>,
     skip_scoped_check: bool,
+    target_is_specific: bool,
 ) -> Result<Vec<(String, Expr)>, FitError> {
-    if let Some(trailing_idx) = all_class_locals.get(loc_len..)
-        && let Some(&idx) = trailing_idx.first()
-        && let EqItem::Local { name, line_no, .. } = &eq_items[idx]
-    {
-        return Err(FitError::DslCompileError {
-            message: format!("Local variable `{name}` assigned after equation target; move local assignments above the equation line"),
-            line: *line_no,
-            column: 1,
-        });
+    let eq_items = ctx.eq_items;
+    let is_overridden_any_local = |pos: usize, idx: usize| -> bool {
+        pos >= loc_len
+            && target_is_specific
+            && *eq_items[idx].filter() == DatasetFilter::Any
+            && ctx.last_any_target_idx.is_some_and(|t_idx| idx < t_idx)
+    };
+
+    if let Some(trailing_slice) = all_class_locals.get(loc_len..) {
+        for (offset, &idx) in trailing_slice.iter().enumerate() {
+            if !is_overridden_any_local(loc_len + offset, idx)
+                && let EqItem::Local { name, line_no, .. } = &eq_items[idx]
+            {
+                return Err(FitError::DslCompileError {
+                    message: format!("Local variable `{name}` assigned after equation target; move local assignments above the equation line"),
+                    line: *line_no,
+                    column: 1,
+                });
+            }
+        }
     }
 
     let branch_local_names: HashSet<&str> = all_class_locals
         .iter()
-        .filter_map(|&idx| match &eq_items[idx] {
-            EqItem::Local { name, .. } => Some(name.as_str()),
-            _ => None,
+        .enumerate()
+        .filter_map(|(pos, &idx)| {
+            if is_overridden_any_local(pos, idx) {
+                return None;
+            }
+            match &eq_items[idx] {
+                EqItem::Local { name, .. } => Some(name.as_str()),
+                _ => None,
+            }
         })
         .collect();
+    let mut declared_locals = branch_local_names.clone();
+    if !skip_scoped_check {
+        declared_locals.extend(ctx.scoped_names.iter().map(String::as_str));
+    }
 
     let mut bound = BTreeSet::new();
     let mut materialized = Vec::with_capacity(loc_len);
@@ -596,7 +622,7 @@ fn validate_branch_locals_and_trailing(
         if let EqItem::Local { name, rhs, line_no, .. } = &eq_items[idx] {
             let mut free = Vec::new();
             let mut seen = BTreeSet::new();
-            collect_free_idents(rhs, &bound, &mut seen, &mut free);
+            collect_free_idents_with_declared_locals(rhs, &bound, &declared_locals, &mut seen, &mut free);
             for ident in &free {
                 if branch_local_names.contains(ident.as_str()) {
                     return Err(FitError::DslCompileError {
@@ -605,7 +631,7 @@ fn validate_branch_locals_and_trailing(
                         column: 1,
                     });
                 }
-                if !skip_scoped_check && scoped_names.contains(ident) {
+                if !skip_scoped_check && ctx.scoped_names.contains(ident) {
                     return Err(FitError::DslCompileError {
                         message: format!("Local variable `{ident}` is out of scope for this dataset branch"),
                         line: *line_no,
@@ -618,11 +644,11 @@ fn validate_branch_locals_and_trailing(
         }
     }
 
-    if let Some(target_expr) = eq_items[target_idx].target_raw_expr(has_ode) {
+    if let Some(target_expr) = eq_items[target_idx].target_raw_expr(ctx.has_ode) {
         let target_line = eq_items[target_idx].line_no();
         let mut free = Vec::new();
         let mut seen = BTreeSet::new();
-        collect_free_idents(target_expr, &bound, &mut seen, &mut free);
+        collect_free_idents_with_declared_locals(target_expr, &bound, &declared_locals, &mut seen, &mut free);
         for ident in &free {
             if branch_local_names.contains(ident.as_str()) {
                 return Err(FitError::DslCompileError {
@@ -631,7 +657,7 @@ fn validate_branch_locals_and_trailing(
                     column: 1,
                 });
             }
-            if !skip_scoped_check && scoped_names.contains(ident) {
+            if !skip_scoped_check && ctx.scoped_names.contains(ident) {
                 return Err(FitError::DslCompileError {
                     message: format!("Local variable `{ident}` is out of scope for this dataset branch"),
                     line: target_line,
@@ -675,7 +701,7 @@ fn resolve_ode_init_for_class(
         }
         let mut free = Vec::new();
         let mut seen = BTreeSet::new();
-        collect_free_idents(lrhs, &bound, &mut seen, &mut free);
+        collect_free_idents_with_declared_locals(lrhs, &bound, all_local_names, &mut seen, &mut free);
         for ident in &free {
             if all_local_names.contains(ident.as_str()) {
                 return Err(FitError::DslCompileError {
@@ -694,7 +720,7 @@ fn resolve_ode_init_for_class(
     }
     let mut free = Vec::new();
     let mut seen = BTreeSet::new();
-    collect_free_idents(rhs, &bound, &mut seen, &mut free);
+    collect_free_idents_with_declared_locals(rhs, &bound, all_local_names, &mut seen, &mut free);
     for ident in &free {
         if all_local_names.contains(ident.as_str()) {
             return Err(FitError::DslCompileError {
@@ -722,17 +748,8 @@ fn reserved_ident_info(raw: &str) -> Option<(String, &'static str)> {
         "NAN" => "IEEE-754 NaN",
         "T" => "predictor variable X (x[0] alias)",
         "DS" | "DATASET" => "0-based dataset index",
-        _ => {
-            if let Some(rest) = upper.strip_prefix('X')
-                && !rest.is_empty()
-                && rest != "0"
-                && rest.bytes().all(|b| b.is_ascii_digit())
-            {
-                "predictor column X_k"
-            } else {
-                return None;
-            }
-        }
+        _ if parse_predictor_index(&upper).is_some() => "predictor column X_k",
+        _ => return None,
     };
     Some((upper, desc))
 }
@@ -774,6 +791,93 @@ fn collect_dsl_warnings(ident_locs: &HashMap<String, (usize, usize)>, local_name
     warnings
 }
 
+struct PendingBranch {
+    class_idx: usize,
+    filter: DatasetFilter,
+    locals: Vec<(String, Expr)>,
+    item_idx: usize,
+    init_sel: Option<(usize, usize)>,
+    target_was_any: bool,
+}
+
+fn validate_ode_branch_inits(eq_items: &[EqItem], pending_branches: &[PendingBranch], outside_class: usize) -> Result<(), FitError> {
+    let missing_ic_line = pending_branches.iter().find_map(|b| {
+        if b.init_sel.is_some() {
+            return None;
+        }
+        if b.class_idx != outside_class || !b.target_was_any {
+            return Some(eq_items[b.item_idx].line_no());
+        }
+        let shared_with_init_branch = pending_branches.iter().any(|other| other.init_sel.is_some() && other.item_idx == b.item_idx);
+        (!shared_with_init_branch).then(|| eq_items[b.item_idx].line_no())
+    });
+    if let Some(line) = missing_ic_line {
+        return Err(FitError::DslCompileError {
+            message: "ODE branch is missing a matching initial condition (`Y0 = ...` or `Y(t0) = ...`)".to_owned(),
+            line,
+            column: 1,
+        });
+    }
+    Ok(())
+}
+
+fn update_specific_slot(slot: &mut Option<(usize, usize, bool)>, loc_len: usize, item_idx: usize, is_specific: bool) {
+    let prev_specific = slot.is_some_and(|(_, _, s)| s);
+    if is_specific || !prev_specific {
+        *slot = Some((loc_len, item_idx, is_specific));
+    }
+}
+
+fn infer_final_equation_kind(eq_items: &[EqItem], pending_branches: &[PendingBranch], has_ode: bool) -> DslEquationKind {
+    if has_ode {
+        return DslEquationKind::OdeFirstOrder;
+    }
+    let is_implicit = pending_branches.iter().any(|b| {
+        let item = &eq_items[b.item_idx];
+        matches!(item, EqItem::TargetImplicitDiff { .. })
+            || item.target_raw_expr(false).is_some_and(|expr| branch_target_depends_on_y(&b.locals, expr))
+    });
+    if is_implicit { DslEquationKind::Implicit } else { DslEquationKind::Explicit }
+}
+
+fn select_outside_branch(
+    val_ctx: &BranchValidationCtx<'_>,
+    outside_class: usize,
+    outside_filter: DatasetFilter,
+    outside_locals: &[usize],
+    outside_outputs: &[(usize, usize, bool)],
+    outside_inits: &[(usize, usize, bool)],
+    any_explicit_branch: bool,
+) -> Result<Option<PendingBranch>, FitError> {
+    let outside_candidates = outside_outputs
+        .iter()
+        .copied()
+        .rev()
+        .filter(|&(_, _, was_any)| !was_any)
+        .chain(outside_outputs.iter().copied().rev().filter(|&(_, _, was_any)| was_any));
+    for (loc_len, item_idx, was_any) in outside_candidates {
+        let local_slice = &outside_locals[..loc_len];
+        if any_explicit_branch
+            && was_any
+            && branch_uses_unbound_scoped_indices(val_ctx.eq_items, local_slice, item_idx, val_ctx.has_ode, val_ctx.scoped_names)
+        {
+            continue;
+        }
+        let locals = validate_branch_locals_and_trailing(val_ctx, outside_locals, loc_len, item_idx, any_explicit_branch && was_any, !was_any)?;
+        let selected_outside_init =
+            outside_inits.iter().rev().find(|&&(_, _, spec)| spec).or_else(|| outside_inits.last()).map(|&(i_loc, i_idx, _)| (i_loc, i_idx));
+        return Ok(Some(PendingBranch {
+            class_idx: outside_class,
+            filter: outside_filter,
+            locals,
+            item_idx,
+            init_sel: selected_outside_init,
+            target_was_any: was_any,
+        }));
+    }
+    Ok(None)
+}
+
 pub(in crate::dsl) struct ResolvedEquationBody {
     pub(in crate::dsl) kind: DslEquationKind,
     pub(in crate::dsl) body_stmts: Vec<OutputBranch>,
@@ -811,11 +915,12 @@ pub(in crate::dsl) fn resolve_equation_branches(
     let total_classes = num_explicit + 1;
 
     let mut class_locals: Vec<Vec<usize>> = vec![Vec::new(); total_classes];
-    let mut explicit_outputs: Vec<Option<(usize, usize)>> = vec![None; num_explicit];
+    let mut explicit_outputs: Vec<Option<(usize, usize, bool)>> = vec![None; num_explicit];
     let mut outside_outputs: Vec<(usize, usize, bool)> = Vec::new();
     let mut explicit_inits: Vec<Option<(usize, usize, bool)>> = vec![None; num_explicit];
     let mut outside_inits: Vec<(usize, usize, bool)> = Vec::new();
     let mut total_branch_refs = 0_usize;
+    let mut last_any_target_idx: Option<usize> = None;
 
     for (item_idx, item) in eq_items.iter().enumerate() {
         let is_local = matches!(item, EqItem::Local { .. });
@@ -826,6 +931,9 @@ pub(in crate::dsl) fn resolve_equation_branches(
         }
         let f = item.filter();
         let was_any = *f == DatasetFilter::Any;
+        if is_target && was_any {
+            last_any_target_idx = Some(item_idx);
+        }
         let classes_slice: &[usize] = if was_any {
             &[]
         } else if let Some(&fi) = partition.filter_ids.get(f) {
@@ -856,76 +964,43 @@ pub(in crate::dsl) fn resolve_equation_branches(
                 if c_idx == outside_class {
                     outside_inits.push((class_locals[outside_class].len(), item_idx, is_specific));
                 } else {
-                    let prev_specific = explicit_inits[c_idx].is_some_and(|(_, _, s)| s);
-                    if is_specific || !prev_specific {
-                        explicit_inits[c_idx] = Some((class_locals[c_idx].len(), item_idx, is_specific));
-                    }
+                    update_specific_slot(&mut explicit_inits[c_idx], class_locals[c_idx].len(), item_idx, is_specific);
                 }
             } else if c_idx == outside_class {
                 outside_outputs.push((class_locals[outside_class].len(), item_idx, was_any));
             } else {
-                explicit_outputs[c_idx] = Some((class_locals[c_idx].len(), item_idx));
+                update_specific_slot(&mut explicit_outputs[c_idx], class_locals[c_idx].len(), item_idx, !was_any);
             }
         }
     }
 
-    struct PendingBranch {
-        class_idx: usize,
-        filter: DatasetFilter,
-        locals: Vec<(String, Expr)>,
-        item_idx: usize,
-        init_sel: Option<(usize, usize)>,
-    }
-
+    let val_ctx = BranchValidationCtx { eq_items: &eq_items, has_ode, scoped_names: &scoped_local_names, last_any_target_idx };
     let mut pending_branches: Vec<PendingBranch> = Vec::new();
     for (c_idx, class_filter) in partition.explicit_classes.into_iter().enumerate() {
-        if let Some((loc_len, item_idx)) = explicit_outputs[c_idx] {
-            let locals =
-                validate_branch_locals_and_trailing(&eq_items, &class_locals[c_idx], loc_len, item_idx, has_ode, &scoped_local_names, false)?;
+        if let Some((loc_len, item_idx, is_specific)) = explicit_outputs[c_idx] {
+            let locals = validate_branch_locals_and_trailing(&val_ctx, &class_locals[c_idx], loc_len, item_idx, false, is_specific)?;
             let init_sel = explicit_inits[c_idx].map(|(i_loc, i_idx, _)| (i_loc, i_idx));
-            pending_branches.push(PendingBranch { class_idx: c_idx, filter: class_filter, locals, item_idx, init_sel });
+            pending_branches.push(PendingBranch { class_idx: c_idx, filter: class_filter, locals, item_idx, init_sel, target_was_any: !is_specific });
         }
     }
 
-    let any_explicit_branch = !pending_branches.is_empty();
-    for (loc_len, item_idx, was_any) in outside_outputs.into_iter().rev() {
-        let local_slice = &class_locals[outside_class][..loc_len];
-        if any_explicit_branch && was_any && branch_uses_unbound_scoped_indices(&eq_items, local_slice, item_idx, has_ode, &scoped_local_names) {
-            continue;
-        }
-        let locals = validate_branch_locals_and_trailing(
-            &eq_items,
-            &class_locals[outside_class],
-            loc_len,
-            item_idx,
-            has_ode,
-            &scoped_local_names,
-            any_explicit_branch && was_any,
-        )?;
-        let selected_outside_init =
-            outside_inits.iter().rev().find(|&&(_, _, spec)| spec).or_else(|| outside_inits.last()).map(|&(i_loc, i_idx, _)| (i_loc, i_idx));
-        pending_branches.push(PendingBranch {
-            class_idx: outside_class,
-            filter: partition.outside_filter,
-            locals,
-            item_idx,
-            init_sel: selected_outside_init,
-        });
-        break;
+    if let Some(outside_branch) = select_outside_branch(
+        &val_ctx,
+        outside_class,
+        partition.outside_filter,
+        &class_locals[outside_class],
+        &outside_outputs,
+        &outside_inits,
+        !pending_branches.is_empty(),
+    )? {
+        pending_branches.push(outside_branch);
     }
 
-    let mut final_kind = if has_ode { DslEquationKind::OdeFirstOrder } else { DslEquationKind::Explicit };
-    if !has_ode {
-        for b in &pending_branches {
-            let item = &eq_items[b.item_idx];
-            let depends_on_y = matches!(item, EqItem::TargetImplicitDiff { .. })
-                || item.target_raw_expr(false).is_some_and(|expr| branch_target_depends_on_y(&b.locals, expr));
-            if depends_on_y {
-                final_kind = DslEquationKind::Implicit;
-                break;
-            }
-        }
+    if has_ode && has_ode_init {
+        validate_ode_branch_inits(&eq_items, &pending_branches, outside_class)?;
     }
+
+    let final_kind = infer_final_equation_kind(&eq_items, &pending_branches, has_ode);
 
     let mut body_stmts = Vec::with_capacity(pending_branches.len());
     let mut ode_init_branches = Vec::new();
@@ -1146,28 +1221,41 @@ pub(in crate::dsl) fn expr_references_y(expr: &Expr) -> bool {
     false
 }
 
-pub(in crate::dsl) fn is_builtin_constant_or_var(name: &str) -> bool {
-    let u = name.to_ascii_uppercase();
-    if matches!(u.as_str(), "X" | "T" | "Y" | "DS" | "DATASET" | "PI" | "E" | "LN2" | "LN10" | "SQRT2" | "INF" | "NAN") {
-        return true;
+/// Parse a 1-based multi-column predictor identifier (`X1`, `X2`, ..., `x2`) into its
+/// zero-based predictor index (`0`, `1`, ...). Returns `None` for `"X"`, `"X0"`, `"X00"`,
+/// non-digit suffixes, or integer overflow.
+pub(in crate::dsl) fn parse_predictor_index(name: &str) -> Option<usize> {
+    let rest = name.strip_prefix(['X', 'x'])?;
+    if rest.is_empty() || !rest.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
     }
-    if let Some(rest) = u.strip_prefix('X')
-        && !rest.is_empty()
-        && rest != "0"
-        && rest.bytes().all(|b| b.is_ascii_digit())
-    {
-        return true;
-    }
-    false
+    rest.parse::<usize>().ok()?.checked_sub(1)
 }
 
-pub(in crate::dsl) fn collect_free_idents(expr: &Expr, bound_locals: &BTreeSet<String>, seen: &mut BTreeSet<String>, order: &mut Vec<String>) {
+pub(in crate::dsl) fn is_builtin_constant_or_var(name: &str) -> bool {
+    if parse_predictor_index(name).is_some() {
+        return true;
+    }
+    let u = name.to_ascii_uppercase();
+    matches!(u.as_str(), "X" | "T" | "Y" | "DS" | "DATASET" | "PI" | "E" | "LN2" | "LN10" | "SQRT2" | "INF" | "NAN")
+}
+
+fn collect_free_idents_with_declared_locals(
+    expr: &Expr,
+    bound_locals: &BTreeSet<String>,
+    declared_locals: &HashSet<&str>,
+    seen: &mut BTreeSet<String>,
+    order: &mut Vec<String>,
+) {
     let mut stack = vec![expr];
     while let Some(node) = stack.pop() {
         match node {
             Expr::Num(_) => {}
             Expr::Ident(name) => {
-                if !is_builtin_constant_or_var(name) && !bound_locals.contains(name) && !seen.contains(name) {
+                if !bound_locals.contains(name)
+                    && (!is_builtin_constant_or_var(name) || declared_locals.contains(name.as_str()))
+                    && !seen.contains(name)
+                {
                     seen.insert(name.clone());
                     order.push(name.clone());
                 }
@@ -1189,4 +1277,9 @@ pub(in crate::dsl) fn collect_free_idents(expr: &Expr, bound_locals: &BTreeSet<S
             }
         }
     }
+}
+
+pub(in crate::dsl) fn collect_free_idents(expr: &Expr, bound_locals: &BTreeSet<String>, seen: &mut BTreeSet<String>, order: &mut Vec<String>) {
+    let empty_declared = HashSet::new();
+    collect_free_idents_with_declared_locals(expr, bound_locals, &empty_declared, seen, order);
 }
