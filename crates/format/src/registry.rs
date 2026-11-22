@@ -13,7 +13,7 @@ use crate::archive::{
 use crate::archive::{platform_read_regular_file, save_project_file, save_template_file};
 use crate::csv::{CsvOptions, MAX_CSV_FILE_BYTES, export_datasheet_to_csv, import_csv_to_datasheet};
 use crate::error::{FormatError, ImportReport};
-use crate::export::{export_result_sheet_json, export_result_sheet_tidy_csv};
+use crate::export::{export_result_sheet_json, try_export_result_sheet_tidy_csv};
 use crate::prism::import_prism_bytes;
 use crate::pzfx::import_pzfx_bytes;
 use crate::xml::MAX_XML_BYTES;
@@ -639,7 +639,7 @@ fn serialize_json_text<T: serde::Serialize>(value: &T, pretty: bool) -> Result<S
 fn export_delimited_bytes(source: ExportSource<'_>, opts: &ExportOptions, csv_opts: &CsvOptions, format_id: &str) -> Result<Vec<u8>, FormatError> {
     let text = match source {
         ExportSource::DataSheet(sheet) => export_datasheet_to_csv(sheet, csv_opts)?,
-        ExportSource::ResultSheet(sheet) => export_result_sheet_tidy_csv(sheet, csv_opts),
+        ExportSource::ResultSheet(sheet) => try_export_result_sheet_tidy_csv(sheet, csv_opts)?,
         ExportSource::Document(doc) => export_document_delimited_text(doc, opts, csv_opts, format_id)?,
     };
     Ok(text.into_bytes())
@@ -656,7 +656,7 @@ fn export_document_delimited_text(
             return export_datasheet_to_csv(ds, csv_opts);
         }
         if let Some(rs) = doc.result_sheets.iter().find(|s| s.id.as_str() == target_id) {
-            return Ok(export_result_sheet_tidy_csv(rs, csv_opts));
+            return try_export_result_sheet_tidy_csv(rs, csv_opts);
         }
         return Err(FormatError::Doc(curvebook_doc::DocError::SheetNotFound { sheet_id: SheetId::new(target_id) }));
     }
@@ -664,7 +664,7 @@ fn export_document_delimited_text(
         return export_datasheet_to_csv(ds, csv_opts);
     }
     if let Some(rs) = doc.result_sheets.first() {
-        return Ok(export_result_sheet_tidy_csv(rs, csv_opts));
+        return try_export_result_sheet_tidy_csv(rs, csv_opts);
     }
     Err(FormatError::UnsupportedFormat { reason: format!("project has no data or result sheet to export as `{format_id}`") })
 }
