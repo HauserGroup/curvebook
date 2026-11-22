@@ -5,10 +5,11 @@ use std::collections::BTreeMap;
 
 use curvebook_tools::ToolCommandIntent;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::menus::shortcuts::ShortcutRegistry;
 use crate::menus::ui_commands::UI_COMMANDS;
+use crate::menus::{ui_command_enabled_for_doc, ui_command_menu_info};
 
 // ============================================================================
 // Command Palette (Cmd+K) Fuzzy Filter Over Engine + UI Commands
@@ -28,7 +29,7 @@ pub struct CommandPaletteEntry {
     pub label: &'static str,
     pub menu_path: &'static str,
     pub shortcut: String,
-    pub params_doc: &'static str,
+    pub params_doc: String,
     pub summary: &'static str,
     pub beginner: &'static str,
     pub enabled: bool,
@@ -82,7 +83,7 @@ struct PaletteCandidate<'a> {
     label: &'static str,
     menu_path: &'static str,
     default_shortcut: &'a str,
-    params_doc: &'static str,
+    params_doc: String,
     summary: &'static str,
     beginner: &'static str,
     enabled: bool,
@@ -199,12 +200,14 @@ impl CommandPaletteState {
     fn collect_matches(&self, session: Option<&Session>, shortcuts: Option<&ShortcutRegistry>) -> Vec<CommandPaletteEntry> {
         let mut results = Vec::new();
         for spec in cmd::registry().specs() {
+            let schema = (spec.input_schema)();
+            let params_doc = format_schema_params_doc(&schema, spec.summary);
             let candidate = PaletteCandidate {
                 id: spec.id,
                 label: spec.label,
                 menu_path: spec.menu_path,
                 default_shortcut: spec.shortcut,
-                params_doc: spec.summary,
+                params_doc,
                 summary: spec.summary,
                 beginner: spec.beginner,
                 enabled: session.is_none_or(|s| (spec.enabled)(s)),
@@ -215,18 +218,19 @@ impl CommandPaletteState {
             }
         }
         for spec in UI_COMMANDS {
+            let (_menu_key, menu_path) = ui_command_menu_info(spec.id);
             let candidate = PaletteCandidate {
                 id: spec.id,
                 label: spec.label,
-                menu_path: "UI",
+                menu_path,
                 default_shortcut: spec.shortcut,
-                params_doc: spec.params_doc,
+                params_doc: spec.params_doc.to_owned(),
                 summary: spec.summary,
                 beginner: spec.beginner,
-                enabled: true,
+                enabled: session.is_none_or(|s| ui_command_enabled_for_doc(s.document(), spec.id)),
                 origin: CommandOrigin::Ui,
             };
-            if let Some(entry) = self.try_build_entry(shortcuts, candidate, "View") {
+            if let Some(entry) = self.try_build_entry(shortcuts, candidate, menu_path) {
                 results.push(entry);
             }
         }
@@ -269,13 +273,159 @@ impl CommandPaletteState {
         }
     }
 
-    /// Emit [`ToolCommandIntent`] for the highlighted entry.
+    /// Emit [`ToolCommandIntent`] for the highlighted entry when no live [`Session`] is supplied.
     #[must_use]
     pub fn activate_selected(&self) -> Option<ToolCommandIntent> {
-        let list = self.matches();
-        let entry = list.get(self.selected_index).or_else(|| list.first())?;
-        Some(ToolCommandIntent::new(entry.id, json!({})))
+        self.activate_selected_for_session(None)
     }
+
+    /// Emit [`ToolCommandIntent`] for the highlighted enabled entry, populating schema-required
+    /// sheet identifiers and safe defaults from `session` when available.
+    #[must_use]
+    pub fn activate_selected_for_session(&self, session: Option<&Session>) -> Option<ToolCommandIntent> {
+        let list = match session {
+            Some(s) => self.matches_for_session(s),
+            None => self.matches(),
+        };
+        let entry = list.get(self.selected_index).or_else(|| list.first())?;
+        if session.is_some() && !entry.enabled {
+            return None;
+        }
+        let params = build_default_params(entry.id, session);
+        Some(ToolCommandIntent::new(entry.id, params))
+    }
+}
+
+fn format_schema_params_doc(schema: &Value, fallback: &str) -> String {
+    let Some(props) = schema.get("properties").and_then(Value::as_object) else {
+        return fallback.to_owned();
+    };
+    if props.is_empty() {
+        return String::from("{}");
+    }
+    let required: Vec<&str> =
+        schema.get("required").and_then(Value::as_array).map(|arr| arr.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+    let mut parts = Vec::with_capacity(props.len());
+    for (name, prop_schema) in props {
+        let ty = prop_schema
+            .get("type")
+            .and_then(Value::as_str)
+            .or_else(|| prop_schema.get("type").and_then(Value::as_array).and_then(|arr| arr.iter().filter_map(Value::as_str).find(|&t| t != "null")))
+            .unwrap_or("value");
+        let req = if required.contains(&name.as_str()) { "" } else { "optional " };
+        parts.push(format!("\"{name}\":\"{req}{ty}\""));
+    }
+    format!("{{{}}}", parts.join(","))
+}
+
+fn build_default_params(command_id: &str, session: Option<&Session>) -> Value {
+    let Some(doc) = session.map(Session::document) else {
+        return json!({});
+    };
+    let active_data = doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()).or_else(|| doc.data_sheets.first().map(|s| &s.id));
+    let active_result = doc.active_sheet_id.as_ref().filter(|id| doc.result_sheet(id).is_some()).or_else(|| doc.result_sheets.first().map(|s| &s.id));
+    let active_graph = doc.active_sheet_id.as_ref().filter(|id| doc.graph_sheet(id).is_some()).or_else(|| doc.graph_sheets.first().map(|s| &s.id));
+    let active_layout = doc.active_sheet_id.as_ref().filter(|id| doc.layout_sheet(id).is_some()).or_else(|| doc.layout_sheets.first().map(|s| &s.id));
+    let active_renderable =
+        doc.active_sheet_id.as_ref().filter(|id| doc.graph_sheet(id).is_some() || doc.layout_sheet(id).is_some()).or(active_graph).or(active_layout);
+    let active_any = doc.active_sheet_id.as_ref().or(active_data).or(active_graph).or(active_result).or(active_layout);
+
+    let mut obj = serde_json::Map::new();
+    match command_id {
+        "ui.brush.point" => {
+            if let Some(id) = active_data {
+                obj.insert(String::from("sheet_id"), Value::String(id.as_str().to_owned()));
+                obj.insert(String::from("row"), json!(0));
+                obj.insert(String::from("col"), json!(0));
+                obj.insert(String::from("subcol"), json!(0));
+            }
+        }
+        "ui.canvas.applyPreset" | "graph.applyCanvasPreset" | "layout.applyCanvasPreset" => {
+            let target = if command_id == "layout.applyCanvasPreset" { active_layout } else { active_renderable };
+            if let Some(id) = target {
+                obj.insert(String::from("sheet_id"), Value::String(id.as_str().to_owned()));
+            }
+            obj.insert(String::from("preset"), Value::String(String::from("SingleColumn88mm")));
+            obj.insert(String::from("resize_mode"), Value::String(String::from("KeepTypographyPt")));
+        }
+        "ui.analyze.open" | "ui.grid.excludeWithReason" | "ui.table.convertArchetype.open" | "ui.graph.create.open" | "ui.table.openFormulaBar" => {
+            if let Some(id) = active_data {
+                obj.insert(String::from("sheet_id"), Value::String(id.as_str().to_owned()));
+            }
+        }
+        "ui.editParams.open" | "ui.result.copyMethodsReport" | "ui.result.inspectDiagnostics" | "ui.result.appendClusterColumn" => {
+            if let Some(id) = active_result {
+                obj.insert(String::from("sheet_id"), Value::String(id.as_str().to_owned()));
+            }
+        }
+        "ui.graph.axes.open"
+        | "ui.graph.format.open"
+        | "ui.changeGraphType.open"
+        | "ui.formatPoints.open"
+        | "ui.applyStyleFrom.open"
+        | "ui.graph.pairwise.open"
+        | "ui.graph.bubblePlot.open"
+        | "ui.graph.insertModelEquation" => {
+            if let Some(id) = active_graph {
+                obj.insert(String::from("sheet_id"), Value::String(id.as_str().to_owned()));
+            }
+        }
+        "ui.layout.composer.open" | "ui.layout.equalizeScaling.open" => {
+            if let Some(id) = active_layout {
+                obj.insert(String::from("sheet_id"), Value::String(id.as_str().to_owned()));
+            }
+        }
+        "ui.canvas.preflight" | "ui.export.figure.open" | "ui.embeddedTable.format.open" | "ui.image.format.open" => {
+            if let Some(id) = active_renderable {
+                obj.insert(String::from("sheet_id"), Value::String(id.as_str().to_owned()));
+            }
+        }
+        "ui.clonePipeline.open" | "ui.print.open" => {
+            if let Some(id) = active_any {
+                obj.insert(String::from("sheet_id"), Value::String(id.as_str().to_owned()));
+            }
+        }
+        _ => {
+            if let Some(spec) = cmd::registry().get(command_id)
+                && let Some(props) = (spec.input_schema)().get("properties").and_then(Value::as_object)
+            {
+                let preferred = if command_id.starts_with("graph.") {
+                    active_graph
+                } else if command_id.starts_with("layout.") {
+                    active_layout
+                } else if command_id.starts_with("analysis.") || command_id.starts_with("result.") {
+                    active_result
+                } else if command_id.starts_with("table.") || command_id.starts_with("transform.") {
+                    active_data
+                } else if command_id.starts_with("export.") {
+                    active_renderable
+                } else {
+                    active_any
+                };
+                if props.contains_key("sheet_id")
+                    && let Some(id) = preferred.or(active_any)
+                {
+                    obj.insert(String::from("sheet_id"), Value::String(id.as_str().to_owned()));
+                }
+                if props.contains_key("data_sheet_id")
+                    && let Some(id) = active_data
+                {
+                    obj.insert(String::from("data_sheet_id"), Value::String(id.as_str().to_owned()));
+                }
+                if props.contains_key("source_sheet_id")
+                    && let Some(id) = active_data
+                {
+                    obj.insert(String::from("source_sheet_id"), Value::String(id.as_str().to_owned()));
+                }
+                if props.contains_key("result_sheet_id")
+                    && let Some(id) = active_result
+                {
+                    obj.insert(String::from("result_sheet_id"), Value::String(id.as_str().to_owned()));
+                }
+            }
+        }
+    }
+    Value::Object(obj)
 }
 
 fn score_command(query: &str, id: &str, label: &str, menu_path: &str, shortcut: &str) -> Option<i32> {

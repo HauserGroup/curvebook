@@ -472,7 +472,11 @@ fn categorical_survival_roc_glm_and_multivariate() {
 
     let pca_out = run_analysis(
         &msheet,
-        &spec_for("r-pca", "s-mv", AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: Some(42) })),
+        &spec_for(
+            "r-pca",
+            "s-mv",
+            AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: Some(42), pcr_outcome_column: None }),
+        ),
     )
     .unwrap();
     assert!(!pca_out.tabs.is_empty());

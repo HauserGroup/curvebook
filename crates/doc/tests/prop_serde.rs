@@ -503,7 +503,7 @@ fn full_project_document_covers_all_eight_archetypes_specs_results_graphs_layout
             reference_levels: vec![(1, String::from("Baseline"))],
             compute_vif: true,
         }),
-        AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: Some(123) }),
+        AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: Some(123), pcr_outcome_column: None }),
         AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation {
             imputations_m: 5,
             max_iters: 20,

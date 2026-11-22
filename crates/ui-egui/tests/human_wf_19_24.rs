@@ -546,8 +546,12 @@ fn wf22_human_pca_clustering_glm_volcano_format_points() -> TestRes {
             ref_mv_ds.set_cell(CellCoord::new(r, c, 0), Cell::number(rounded)).map_err(|e| e.to_string())?;
         }
     }
-    let pca_val = serde_json::to_value(AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: false, parallel_analysis_seed: Some(7) }))
-        .map_err(|e| e.to_string())?;
+    let pca_val = serde_json::to_value(AnalysisKind::Multivariate(MultivariateSpec::Pca {
+        standardize: false,
+        parallel_analysis_seed: Some(7),
+        pcr_outcome_column: None,
+    }))
+    .map_err(|e| e.to_string())?;
     run.verify_reference(
         ReferenceSpec::for_result(pca_id.clone(), move |sess| {
             sess.execute("analysis.run", json!({ "source_sheet_id": "ref-wf22-mv", "kind": pca_val })).map(|_| ()).map_err(|e| e.to_string())

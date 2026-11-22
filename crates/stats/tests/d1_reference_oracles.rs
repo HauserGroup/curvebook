@@ -1496,7 +1496,7 @@ fn oracle_end_to_end_run_analysis_multifactor_mv_and_nested() {
     let sp_pca = AnalysisSpec::new(
         "res-pca",
         "mv-1",
-        AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: Some(9) }),
+        AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: Some(9), pcr_outcome_column: None }),
     )
     .unwrap();
     let res_pca = run_analysis(&s_mv, &sp_pca).unwrap();

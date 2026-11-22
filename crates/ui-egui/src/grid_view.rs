@@ -803,8 +803,18 @@ impl ImportReshapeState {
     /// # Errors
     /// Returns an error if any field name or value is invalid.
     pub fn apply_field_patch_localized(&mut self, fields: &serde_json::Map<String, Value>, preset: &LocalePreset) -> Result<(), String> {
-        let active_preset = if fields.contains_key("decimal_separator") || fields.contains_key("import.decimal_separator") {
-            preset.clone()
+        let dec_raw = fields.get("decimal_separator").or_else(|| fields.get("decimal_sep")).or_else(|| fields.get("import.decimal_separator"));
+        let active_preset = if let Some(dec_val) = dec_raw {
+            let ds = dec_val.as_str().ok_or_else(|| String::from("`decimal_separator` must be a string"))?;
+            let sep = match ds.trim() {
+                "," => ',',
+                "." => '.',
+                _ => return Err(format!("unsupported decimal_separator `{ds}`")),
+            };
+            self.decimal_separator = sep;
+            let mut p = preset.clone();
+            p.decimal_separator = sep;
+            p
         } else {
             let mut p = preset.clone();
             if self.decimal_separator == ',' || self.decimal_separator == '.' {
@@ -812,14 +822,7 @@ impl ImportReshapeState {
             }
             p
         };
-        let effective_preset =
-            if let Some(ds) = fields.get("decimal_separator").or_else(|| fields.get("import.decimal_separator")).and_then(Value::as_str) {
-                let mut p = active_preset;
-                p.decimal_separator = if ds.trim() == "," { ',' } else { '.' };
-                p
-            } else {
-                active_preset
-            };
+        let effective_preset = active_preset;
         for key in ["mode", "import.mode", "reshape_mode"] {
             if let Some(val) = fields.get(key) {
                 let raw = val.as_str().ok_or_else(|| String::from("`mode` must be a string"))?;
@@ -1158,7 +1161,6 @@ impl ImportPasteWizardState {
                     "link_id": link_id,
                     "link_spec": spec,
                     "provenance": provenance,
-                    "record_in_info_sheet": self.record_in_info_sheet,
                 }),
             };
         }
@@ -1389,16 +1391,35 @@ impl GridViewState {
         } else {
             self.selection_coords(sheet).into_iter().collect()
         };
+        let mut removed = false;
         if set.contains(&coord) {
             if set.len() > 1 {
                 set.remove(&coord);
+                removed = true;
             }
         } else if set.len() < MAX_MATERIALIZED_SELECTION_COORDS {
             set.insert(coord);
         }
-        self.tool.active = Some(coord);
-        if self.tool.anchor.is_none() {
-            self.tool.anchor = Some(coord);
+        if set.len() == 1
+            && let Some(&only) = set.iter().next()
+        {
+            self.tool.select_single(only);
+            self.selected_coords.clear();
+            self.selected_rows = vec![only.row];
+            return;
+        }
+        if removed {
+            if self.tool.anchor == Some(coord) || !self.tool.anchor.is_some_and(|a| set.contains(&a)) {
+                self.tool.anchor = set.iter().next().copied();
+            }
+            if self.tool.active == Some(coord) || !self.tool.active.is_some_and(|a| set.contains(&a)) {
+                self.tool.active = set.iter().next_back().copied();
+            }
+        } else {
+            self.tool.active = Some(coord);
+            if self.tool.anchor.is_none() || !self.tool.anchor.is_some_and(|a| set.contains(&a)) {
+                self.tool.anchor = set.iter().next().copied();
+            }
         }
         self.selected_rows = set.iter().map(|c| c.row).collect::<BTreeSet<_>>().into_iter().collect();
         self.selected_coords = set.into_iter().collect();
@@ -1448,10 +1469,12 @@ impl GridViewState {
         } else {
             self.selection_coords(sheet).into_iter().collect()
         };
+        let mut removed = false;
         if row_set.contains(&clamped_row) {
             if row_set.len() > 1 {
                 row_set.remove(&clamped_row);
                 coord_set.retain(|c| c.row != clamped_row);
+                removed = true;
             }
         } else {
             if row_set.len() < MAX_MATERIALIZED_SELECTION_COORDS {
@@ -1459,11 +1482,31 @@ impl GridViewState {
             }
             append_row_coords_bounded(&sheet.archetype, clamped_row, col_count, &mut coord_set);
         }
+        if row_set.len() == 1
+            && let Some(&only_row) = row_set.iter().next()
+        {
+            let last_col = col_count.saturating_sub(1);
+            let last_sub = data_set_subcolumn_count(&sheet.archetype, last_col).saturating_sub(1);
+            self.tool.select_single(GridCellCoord::new(only_row, 0, 0));
+            self.tool.extend_selection(GridCellCoord::new(only_row, last_col, last_sub));
+            self.selected_rows = vec![only_row];
+            self.selected_coords.clear();
+            return;
+        }
         self.selected_rows = row_set.into_iter().collect();
         self.selected_coords = coord_set.into_iter().collect();
-        self.tool.active = Some(first_coord);
-        if self.tool.anchor.is_none() {
-            self.tool.anchor = Some(first_coord);
+        if removed {
+            if self.tool.anchor.is_some_and(|a| a.row == clamped_row) || !self.tool.anchor.is_some_and(|a| self.selected_rows.contains(&a.row)) {
+                self.tool.anchor = self.selected_coords.first().copied();
+            }
+            if self.tool.active.is_some_and(|a| a.row == clamped_row) || !self.tool.active.is_some_and(|a| self.selected_rows.contains(&a.row)) {
+                self.tool.active = self.selected_coords.last().copied();
+            }
+        } else {
+            self.tool.active = Some(first_coord);
+            if self.tool.anchor.is_none() || !self.tool.anchor.is_some_and(|a| self.selected_rows.contains(&a.row)) {
+                self.tool.anchor = self.selected_coords.first().copied().or(Some(first_coord));
+            }
         }
     }
 
@@ -1498,7 +1541,7 @@ impl GridViewState {
     }
 
     fn has_discontiguous_selection(&self) -> bool {
-        self.selected_coords.len() > 1 || (!self.selected_coords.is_empty() && self.tool.anchor == self.tool.active)
+        !self.selected_coords.is_empty()
     }
 
     /// Resolve the uncapped clipboard copy/cut target for `sheet` (`R15-GUI-19`):
@@ -1764,14 +1807,19 @@ impl GridViewState {
             return Some((r0, r0, lo, hi));
         }
 
-        let max_rows_for_cols = (MAX_MATERIALIZED_SELECTION_COORDS / (hi - lo + 1).max(1)).max(1);
-        let window_r1 = raw_r1.min(r0.saturating_add(max_rows_for_cols - 1));
-        if let Some(last_pop) = last_populated_row_in_range(sheet, r0, window_r1) {
-            return Some((r0, last_pop, lo, hi));
-        }
         let span_cells = (raw_r1 - r0 + 1).saturating_mul(hi - lo + 1);
-        if !require_populated_on_small && span_cells <= MAX_MATERIALIZED_SELECTION_COORDS && total_rows <= MAX_MATERIALIZED_SELECTION_COORDS {
-            return Some((r0, window_r1, lo, hi));
+        if !require_populated_on_small && span_cells <= MAX_MATERIALIZED_SELECTION_COORDS {
+            return Some((r0, raw_r1, lo, hi));
+        }
+
+        let max_rows_for_cols = (MAX_MATERIALIZED_SELECTION_COORDS / (hi - lo + 1).max(1)).max(1);
+        if let Some(last_pop) = last_populated_row_in_range(sheet, r0, raw_r1) {
+            if last_pop.saturating_sub(r0) < max_rows_for_cols {
+                return Some((r0, last_pop, lo, hi));
+            }
+            let first_pop = first_populated_row_in_range(sheet, r0, last_pop).unwrap_or(r0);
+            let win_r1 = last_pop.min(first_pop.saturating_add(max_rows_for_cols - 1));
+            return Some((first_pop, win_r1, lo, hi));
         }
         None
     }
@@ -1823,11 +1871,7 @@ impl GridViewState {
 
         let sel_bounds = selection_flat_bounds(&sheet.archetype, self.tool.anchor, self.tool.active);
         let selected_set: std::collections::HashSet<GridCellCoord> =
-            if self.selected_coords.len() > 1 || (!self.selected_coords.is_empty() && self.tool.anchor == self.tool.active) {
-                self.selected_coords.iter().copied().collect()
-            } else {
-                std::collections::HashSet::new()
-            };
+            if !self.selected_coords.is_empty() { self.selected_coords.iter().copied().collect() } else { std::collections::HashSet::new() };
         let fmt_ctx = CellFormatContext { decimal_sep, sel_bounds, selected_set: &selected_set, active_coord: self.tool.active };
         let mut rows = Vec::with_capacity(window.end_row.saturating_sub(window.start_row));
         for r in window.start_row..window.end_row {
@@ -1902,14 +1946,19 @@ impl GridViewState {
             return;
         };
         let next = GridCellCoord::new(next_row, col, subcol);
+        self.active_x_cell = None;
+        self.selected_coords.clear();
         if extend_selection {
             if self.tool.anchor.is_none() {
                 self.tool.anchor = Some(GridCellCoord::new(curr_row, current.col, current.subcol));
             }
             self.tool.active = Some(next);
+            self.selected_rows = self.bounded_selected_rows(sheet);
         } else {
             self.tool.select_single(next);
+            self.selected_rows = vec![next_row];
         }
+        self.refresh_selection_stats_for_sheet(sheet);
     }
 
     /// Emit batched rectangular `"table.excludeCells"` range intents (`Cmd+E` / `Ctrl+E`) toggling
@@ -2117,16 +2166,12 @@ fn bounded_row_range_vec(sheet: &DataSheet, r0: usize, r1: usize) -> Vec<usize> 
         return Vec::new();
     }
     let clamped_r1 = r1.min(total_rows - 1);
-    if clamped_r1 - r0 < MAX_MATERIALIZED_SELECTION_COORDS && total_rows <= MAX_MATERIALIZED_SELECTION_COORDS {
-        let end = last_populated_row_in_range(sheet, r0, clamped_r1).unwrap_or(clamped_r1);
-        return (r0..=end).collect();
+    if clamped_r1 - r0 < MAX_MATERIALIZED_SELECTION_COORDS {
+        return (r0..=clamped_r1).collect();
     }
-    let window_r1 = clamped_r1.min(r0.saturating_add(MAX_MATERIALIZED_SELECTION_COORDS - 1));
-    match last_populated_row_in_range(sheet, r0, window_r1) {
-        Some(last_pop) => (r0..=last_pop).collect(),
-        None if r0 == clamped_r1 => vec![r0],
-        None => Vec::new(),
-    }
+    // Large contiguous selections stay in O(1) tool bounds (`selected_coords` / `selected_rows`
+    // unmaterialized until `all_selected_coords` or `inspect` intersects populated rows).
+    Vec::new()
 }
 
 fn populated_row_bound_for_sheet(sheet: &DataSheet) -> usize {
@@ -2134,97 +2179,113 @@ fn populated_row_bound_for_sheet(sheet: &DataSheet) -> usize {
     if total_rows == 0 {
         return 0;
     }
-    let window_end = (total_rows - 1).min(MAX_MATERIALIZED_SELECTION_COORDS - 1);
-    if let Some(last_pop) = last_populated_row_in_range(sheet, 0, window_end) {
-        if window_end == total_rows - 1 || last_pop < window_end {
-            return last_pop + 1;
-        }
-        return total_rows;
-    }
-    0
+    last_populated_row_in_range(sheet, 0, total_rows - 1).map_or(0, |last_pop| last_pop + 1)
 }
 
+#[inline(always)]
 fn is_cell_populated(cell: &Cell) -> bool {
-    !cell.is_empty() || cell.excluded
+    match &cell.value {
+        curvebook_doc::CellValue::Empty => cell.excluded,
+        curvebook_doc::CellValue::Number(_) => true,
+        curvebook_doc::CellValue::Text(s) => cell.excluded || !s.trim().is_empty(),
+    }
 }
 
+#[inline(always)]
 fn is_subrow_populated(subs: &[Cell]) -> bool {
-    subs.iter().any(is_cell_populated)
+    match subs {
+        [c] => is_cell_populated(c),
+        _ => subs.iter().any(is_cell_populated),
+    }
 }
 
-fn rfind_in_window<T, F>(slice: &[T], r0: usize, r1: usize, best: Option<usize>, is_pop: F) -> Option<usize>
+#[inline(always)]
+fn scan_window<T, F>(slice: &[T], r0: usize, r1: usize, best: Option<usize>, from_end: bool, is_pop: F) -> Option<usize>
 where
     F: Fn(&T) -> bool,
 {
     if r0 > r1 || r0 >= slice.len() {
         return best;
     }
-    let hi = r1.min(slice.len() - 1);
-    let lo = best.map_or(r0, |b| (b + 1).max(r0));
+    let max_hi = r1.min(slice.len() - 1);
+    let (lo, hi) =
+        if from_end { (best.map_or(r0, |b| (b + 1).max(r0)), max_hi) } else { (r0, best.map_or(max_hi, |b| b.saturating_sub(1).min(max_hi))) };
     if lo > hi {
         return best;
     }
-    slice[lo..=hi].iter().rposition(is_pop).map_or(best, |rel| Some(lo + rel))
+    if from_end {
+        slice[lo..=hi].iter().rposition(is_pop).map_or(best, |rel| Some(lo + rel))
+    } else {
+        slice[lo..=hi].iter().position(is_pop).map_or(best, |rel| Some(lo + rel))
+    }
 }
 
-fn last_populated_row_in_range(sheet: &DataSheet, r0: usize, r1: usize) -> Option<usize> {
+fn populated_row_in_range(sheet: &DataSheet, r0: usize, r1: usize, from_end: bool) -> Option<usize> {
     let mut best = None;
     match &sheet.archetype {
         TableArchetype::Xy(t) => {
             if matches!(t.x_mode, XColumnMode::GeneratedSequence { .. }) {
-                return (r0 <= r1 && r0 < t.row_count()).then(|| r1.min(t.row_count() - 1));
+                return (r0 <= r1 && r0 < t.row_count()).then(|| if from_end { r1.min(t.row_count() - 1) } else { r0 });
             }
-            best = rfind_in_window(&t.row_titles, r0, r1, best, |s| !s.is_empty());
-            best = rfind_in_window(&t.x_cells, r0, r1, best, |subs| is_subrow_populated(subs));
+            best = scan_window(&t.x_cells, r0, r1, best, from_end, |subs| is_subrow_populated(subs));
             for col in &t.data_sets {
-                best = rfind_in_window(&col.cells, r0, r1, best, |subs| is_subrow_populated(subs));
+                best = scan_window(&col.cells, r0, r1, best, from_end, |subs| is_subrow_populated(subs));
             }
+            best = scan_window(&t.row_titles, r0, r1, best, from_end, |s| !s.is_empty());
         }
         TableArchetype::Column(t) => {
-            best = rfind_in_window(&t.row_titles, r0, r1, best, |s| !s.is_empty());
             for col in &t.data_sets {
-                best = rfind_in_window(&col.cells, r0, r1, best, |subs| is_subrow_populated(subs));
+                best = scan_window(&col.cells, r0, r1, best, from_end, |subs| is_subrow_populated(subs));
             }
+            best = scan_window(&t.row_titles, r0, r1, best, from_end, |s| !s.is_empty());
         }
         TableArchetype::Grouped(t) => {
-            best = rfind_in_window(&t.row_titles, r0, r1, best, |s| !s.is_empty());
             for col in &t.data_sets {
-                best = rfind_in_window(&col.cells, r0, r1, best, |subs| is_subrow_populated(subs));
+                best = scan_window(&col.cells, r0, r1, best, from_end, |subs| is_subrow_populated(subs));
             }
+            best = scan_window(&t.row_titles, r0, r1, best, from_end, |s| !s.is_empty());
         }
         TableArchetype::Contingency(t) => {
-            best = rfind_in_window(&t.row_titles, r0, r1, best, |s| !s.is_empty());
             for col in &t.data_sets {
-                best = rfind_in_window(&col.cells, r0, r1, best, |subs| is_subrow_populated(subs));
+                best = scan_window(&col.cells, r0, r1, best, from_end, |subs| is_subrow_populated(subs));
             }
+            best = scan_window(&t.row_titles, r0, r1, best, from_end, |s| !s.is_empty());
         }
         TableArchetype::Survival(t) => {
-            best = rfind_in_window(&t.row_titles, r0, r1, best, |s| !s.is_empty());
-            best = rfind_in_window(&t.times, r0, r1, best, is_cell_populated);
+            best = scan_window(&t.times, r0, r1, best, from_end, is_cell_populated);
             for col in &t.cohorts {
-                best = rfind_in_window(&col.cells, r0, r1, best, |subs| is_subrow_populated(subs));
+                best = scan_window(&col.cells, r0, r1, best, from_end, |subs| is_subrow_populated(subs));
             }
+            best = scan_window(&t.row_titles, r0, r1, best, from_end, |s| !s.is_empty());
         }
         TableArchetype::PartsOfWhole(t) => {
-            best = rfind_in_window(&t.slice_labels, r0, r1, best, |s| !s.is_empty());
             for col in &t.data_sets {
-                best = rfind_in_window(&col.cells, r0, r1, best, |subs| is_subrow_populated(subs));
+                best = scan_window(&col.cells, r0, r1, best, from_end, |subs| is_subrow_populated(subs));
             }
+            best = scan_window(&t.slice_labels, r0, r1, best, from_end, |s| !s.is_empty());
         }
         TableArchetype::MultipleVariables(t) => {
-            best = rfind_in_window(&t.row_titles, r0, r1, best, |s| !s.is_empty());
             for var in &t.variables {
-                best = rfind_in_window(&var.cells, r0, r1, best, is_cell_populated);
+                best = scan_window(&var.cells, r0, r1, best, from_end, is_cell_populated);
             }
+            best = scan_window(&t.row_titles, r0, r1, best, from_end, |s| !s.is_empty());
         }
         TableArchetype::Nested(t) => {
-            best = rfind_in_window(&t.row_titles, r0, r1, best, |s| !s.is_empty());
             for grp in &t.groups {
-                best = rfind_in_window(&grp.cells, r0, r1, best, |subs| is_subrow_populated(subs));
+                best = scan_window(&grp.cells, r0, r1, best, from_end, |subs| is_subrow_populated(subs));
             }
+            best = scan_window(&t.row_titles, r0, r1, best, from_end, |s| !s.is_empty());
         }
     }
     best
+}
+
+fn first_populated_row_in_range(sheet: &DataSheet, r0: usize, r1: usize) -> Option<usize> {
+    populated_row_in_range(sheet, r0, r1, false)
+}
+
+fn last_populated_row_in_range(sheet: &DataSheet, r0: usize, r1: usize) -> Option<usize> {
+    populated_row_in_range(sheet, r0, r1, true)
 }
 
 fn build_exclusion_ranges(arch: &TableArchetype, r0: usize, r1: usize, c0: usize, c1: usize) -> Vec<SheetCellRange> {

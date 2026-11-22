@@ -702,8 +702,12 @@ fn wf05_human_transform_pca_and_clustering_pipeline() -> TestRes {
     let ref_mv = fx.to_data_sheet("ref-wf05").map_err(|e| e.to_string())?;
     let prune_kind = serde_json::to_value(AnalysisKind::Transform(TransformAnalysisSpec::PruneRows { every_k_rows: 2, average_window: true }))
         .map_err(|e| e.to_string())?;
-    let pca_kind = serde_json::to_value(AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: None }))
-        .map_err(|e| e.to_string())?;
+    let pca_kind = serde_json::to_value(AnalysisKind::Multivariate(MultivariateSpec::Pca {
+        standardize: true,
+        parallel_analysis_seed: None,
+        pcr_outcome_column: None,
+    }))
+    .map_err(|e| e.to_string())?;
     let clust_kind = serde_json::to_value(AnalysisKind::Multivariate(MultivariateSpec::Clustering {
         k_means_k: Some(2),
         distance: curvebook_doc::ClusterDistance::Manhattan,

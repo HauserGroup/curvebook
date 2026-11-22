@@ -41,11 +41,29 @@ pub struct FormatAxesState {
     #[serde(default)]
     pub pending_y_thresholds: Option<Vec<AxisThreshold>>,
     #[serde(default)]
+    pub pending_y2_thresholds: Option<Vec<AxisThreshold>>,
+    #[serde(default)]
     pub pending_x_additional_ticks: Option<Vec<AdditionalTick>>,
     #[serde(default)]
     pub pending_y_additional_ticks: Option<Vec<AdditionalTick>>,
     #[serde(default)]
     pub pending_y2_additional_ticks: Option<Vec<AdditionalTick>>,
+    #[serde(default)]
+    pub base_y2_thresholds: Vec<AxisThreshold>,
+    #[serde(default)]
+    pub staged_x_axis: Option<AxisSpec>,
+    #[serde(default)]
+    pub staged_y_axis: Option<AxisSpec>,
+    #[serde(default)]
+    pub staged_y2_axis: Option<AxisSpec>,
+    #[serde(default)]
+    pub baseline_x_axis: Option<AxisSpec>,
+    #[serde(default)]
+    pub baseline_y_axis: Option<AxisSpec>,
+    #[serde(default)]
+    pub baseline_y2_axis: Option<AxisSpec>,
+    #[serde(default)]
+    pub initial_enable_y2: bool,
 }
 
 impl Default for FormatAxesState {
@@ -60,9 +78,18 @@ impl Default for FormatAxesState {
             base_y_thresholds: Vec::new(),
             pending_x_thresholds: None,
             pending_y_thresholds: None,
+            pending_y2_thresholds: None,
             pending_x_additional_ticks: None,
             pending_y_additional_ticks: None,
             pending_y2_additional_ticks: None,
+            base_y2_thresholds: Vec::new(),
+            staged_x_axis: None,
+            staged_y_axis: None,
+            staged_y2_axis: None,
+            baseline_x_axis: None,
+            baseline_y_axis: None,
+            baseline_y2_axis: None,
+            initial_enable_y2: false,
         }
     }
 }
@@ -74,13 +101,22 @@ impl FormatAxesState {
         self.graph_sheet_id = Some(graph.id.clone());
         self.target_axis = target;
         self.enable_y2 = graph.spec.y2_axis.is_some();
+        self.initial_enable_y2 = self.enable_y2;
         self.base_x_thresholds = graph.spec.x_axis.thresholds.clone();
         self.base_y_thresholds = graph.spec.y_axis.thresholds.clone();
+        self.base_y2_thresholds = graph.spec.y2_axis.as_ref().map_or_else(Vec::new, |y2| y2.thresholds.clone());
         self.pending_x_thresholds = None;
         self.pending_y_thresholds = None;
+        self.pending_y2_thresholds = None;
         self.pending_x_additional_ticks = None;
         self.pending_y_additional_ticks = None;
         self.pending_y2_additional_ticks = None;
+        self.staged_x_axis = None;
+        self.staged_y_axis = None;
+        self.staged_y2_axis = None;
+        self.baseline_x_axis = Some(graph.spec.x_axis.clone());
+        self.baseline_y_axis = Some(graph.spec.y_axis.clone());
+        self.baseline_y2_axis = graph.spec.y2_axis.clone();
         self.axis_draft = match target {
             AxisTarget::X => graph.spec.x_axis.clone(),
             AxisTarget::Y => graph.spec.y_axis.clone(),
@@ -104,7 +140,7 @@ impl FormatAxesState {
         match self.target_axis {
             AxisTarget::X => self.pending_x_thresholds = Some(thresholds),
             AxisTarget::Y => self.pending_y_thresholds = Some(thresholds),
-            AxisTarget::Y2 => {}
+            AxisTarget::Y2 => self.pending_y2_thresholds = Some(thresholds),
         }
     }
 
@@ -115,6 +151,8 @@ impl FormatAxesState {
             &self.axis_draft.thresholds
         } else if let Some(ref xs) = self.pending_x_thresholds {
             xs
+        } else if let Some(ref staged) = self.staged_x_axis {
+            &staged.thresholds
         } else {
             &self.base_x_thresholds
         }
@@ -127,6 +165,8 @@ impl FormatAxesState {
             &self.axis_draft.thresholds
         } else if let Some(ref ys) = self.pending_y_thresholds {
             ys
+        } else if let Some(ref staged) = self.staged_y_axis {
+            &staged.thresholds
         } else {
             &self.base_y_thresholds
         }
@@ -136,6 +176,9 @@ impl FormatAxesState {
         if self.target_axis == AxisTarget::X {
             self.axis_draft.thresholds = thresholds.clone();
         }
+        if let Some(ref mut staged) = self.staged_x_axis {
+            staged.thresholds = thresholds.clone();
+        }
         self.pending_x_thresholds = Some(thresholds);
     }
 
@@ -143,7 +186,20 @@ impl FormatAxesState {
         if self.target_axis == AxisTarget::Y {
             self.axis_draft.thresholds = thresholds.clone();
         }
+        if let Some(ref mut staged) = self.staged_y_axis {
+            staged.thresholds = thresholds.clone();
+        }
         self.pending_y_thresholds = Some(thresholds);
+    }
+
+    fn set_y2_thresholds(&mut self, thresholds: Vec<AxisThreshold>) {
+        if self.target_axis == AxisTarget::Y2 {
+            self.axis_draft.thresholds = thresholds.clone();
+        }
+        if let Some(ref mut staged) = self.staged_y2_axis {
+            staged.thresholds = thresholds.clone();
+        }
+        self.pending_y2_thresholds = Some(thresholds);
     }
 
     fn set_active_thresholds(&mut self, thresholds: Vec<AxisThreshold>) {
@@ -151,7 +207,7 @@ impl FormatAxesState {
         match self.target_axis {
             AxisTarget::X => self.pending_x_thresholds = Some(thresholds),
             AxisTarget::Y => self.pending_y_thresholds = Some(thresholds),
-            AxisTarget::Y2 => {}
+            AxisTarget::Y2 => self.pending_y2_thresholds = Some(thresholds),
         }
     }
 
@@ -168,65 +224,102 @@ impl FormatAxesState {
                 self.set_y_thresholds(next);
             }
             AxisTarget::Y2 => {
-                self.axis_draft.thresholds.append(&mut items);
+                let mut next = if self.target_axis == AxisTarget::Y2 {
+                    self.axis_draft.thresholds.clone()
+                } else if let Some(ref y2s) = self.pending_y2_thresholds {
+                    y2s.clone()
+                } else if let Some(ref staged) = self.staged_y2_axis {
+                    staged.thresholds.clone()
+                } else {
+                    self.base_y2_thresholds.clone()
+                };
+                next.append(&mut items);
+                self.set_y2_thresholds(next);
             }
         }
     }
 
-    fn set_x_additional_ticks(&mut self, ticks: Vec<AdditionalTick>) {
-        if self.target_axis == AxisTarget::X {
-            self.axis_draft.additional_ticks = ticks.clone();
+    fn stash_active_axis_draft(&mut self) {
+        let draft = self.axis_draft.clone();
+        match self.target_axis {
+            AxisTarget::X => {
+                self.pending_x_thresholds = Some(draft.thresholds.clone());
+                self.pending_x_additional_ticks = Some(draft.additional_ticks.clone());
+                self.staged_x_axis = Some(draft);
+            }
+            AxisTarget::Y => {
+                self.pending_y_thresholds = Some(draft.thresholds.clone());
+                self.pending_y_additional_ticks = Some(draft.additional_ticks.clone());
+                self.staged_y_axis = Some(draft);
+            }
+            AxisTarget::Y2 => {
+                self.pending_y2_thresholds = Some(draft.thresholds.clone());
+                self.pending_y2_additional_ticks = Some(draft.additional_ticks.clone());
+                self.staged_y2_axis = Some(draft);
+            }
         }
-        self.pending_x_additional_ticks = Some(ticks);
     }
 
-    fn set_y_additional_ticks(&mut self, ticks: Vec<AdditionalTick>) {
-        if self.target_axis == AxisTarget::Y {
-            self.axis_draft.additional_ticks = ticks.clone();
+    fn resolve_axis_from_sources(&self, axis: AxisTarget, doc: Option<&ProjectDocument>) -> Option<AxisSpec> {
+        let mut resolved = match axis {
+            AxisTarget::X => self
+                .staged_x_axis
+                .clone()
+                .or_else(|| doc.and_then(|d| self.graph_sheet_id.as_ref().and_then(|gid| d.graph_sheet(gid))).map(|gs| gs.spec.x_axis.clone()))
+                .or_else(|| self.baseline_x_axis.clone()),
+            AxisTarget::Y => self
+                .staged_y_axis
+                .clone()
+                .or_else(|| doc.and_then(|d| self.graph_sheet_id.as_ref().and_then(|gid| d.graph_sheet(gid))).map(|gs| gs.spec.y_axis.clone()))
+                .or_else(|| self.baseline_y_axis.clone()),
+            AxisTarget::Y2 => self
+                .staged_y2_axis
+                .clone()
+                .or_else(|| doc.and_then(|d| self.graph_sheet_id.as_ref().and_then(|gid| d.graph_sheet(gid))).and_then(|gs| gs.spec.y2_axis.clone()))
+                .or_else(|| self.baseline_y2_axis.clone()),
+        };
+        if resolved.is_none() && axis == AxisTarget::Y2 {
+            resolved = Some(AxisSpec::linear("Y2"));
         }
-        self.pending_y_additional_ticks = Some(ticks);
-    }
-
-    fn set_y2_additional_ticks(&mut self, ticks: Vec<AdditionalTick>) {
-        if self.target_axis == AxisTarget::Y2 {
-            self.axis_draft.additional_ticks = ticks.clone();
+        if let Some(ref mut ax) = resolved {
+            match axis {
+                AxisTarget::X => {
+                    if let Some(ref xs) = self.pending_x_thresholds {
+                        ax.thresholds = xs.clone();
+                    }
+                    if let Some(ref xt) = self.pending_x_additional_ticks {
+                        ax.additional_ticks = xt.clone();
+                    }
+                }
+                AxisTarget::Y => {
+                    if let Some(ref ys) = self.pending_y_thresholds {
+                        ax.thresholds = ys.clone();
+                    }
+                    if let Some(ref yt) = self.pending_y_additional_ticks {
+                        ax.additional_ticks = yt.clone();
+                    }
+                }
+                AxisTarget::Y2 => {
+                    if let Some(ref y2s) = self.pending_y2_thresholds {
+                        ax.thresholds = y2s.clone();
+                    }
+                    if let Some(ref y2t) = self.pending_y2_additional_ticks {
+                        ax.additional_ticks = y2t.clone();
+                    }
+                }
+            }
         }
-        self.pending_y2_additional_ticks = Some(ticks);
+        resolved
     }
 
     fn switch_target_axis_preserving_thresholds(&mut self, next: AxisTarget, doc: Option<&ProjectDocument>) {
-        let preserved_generation = self.open_generation;
-        let saved_x = (self.target_axis == AxisTarget::X).then(|| self.axis_draft.thresholds.clone()).or_else(|| self.pending_x_thresholds.clone());
-        let saved_y = (self.target_axis == AxisTarget::Y).then(|| self.axis_draft.thresholds.clone()).or_else(|| self.pending_y_thresholds.clone());
-        let saved_x_ticks =
-            (self.target_axis == AxisTarget::X).then(|| self.axis_draft.additional_ticks.clone()).or_else(|| self.pending_x_additional_ticks.clone());
-        let saved_y_ticks =
-            (self.target_axis == AxisTarget::Y).then(|| self.axis_draft.additional_ticks.clone()).or_else(|| self.pending_y_additional_ticks.clone());
-        let saved_y2_ticks = (self.target_axis == AxisTarget::Y2)
-            .then(|| self.axis_draft.additional_ticks.clone())
-            .or_else(|| self.pending_y2_additional_ticks.clone());
-        if let (Some(d), Some(gid)) = (doc, &self.graph_sheet_id)
-            && let Some(gs) = d.graph_sheet(gid)
-        {
-            self.sync_from_graph(gs, next);
-        } else {
-            self.target_axis = next;
+        if next == self.target_axis {
+            return;
         }
-        self.open_generation = preserved_generation;
-        if let Some(xs) = saved_x {
-            self.set_x_thresholds(xs);
-        }
-        if let Some(ys) = saved_y {
-            self.set_y_thresholds(ys);
-        }
-        if let Some(xt) = saved_x_ticks {
-            self.set_x_additional_ticks(xt);
-        }
-        if let Some(yt) = saved_y_ticks {
-            self.set_y_additional_ticks(yt);
-        }
-        if let Some(y2t) = saved_y2_ticks {
-            self.set_y2_additional_ticks(y2t);
+        self.stash_active_axis_draft();
+        self.target_axis = next;
+        if let Some(next_draft) = self.resolve_axis_from_sources(next, doc) {
+            self.axis_draft = next_draft;
         }
     }
 
@@ -284,9 +377,21 @@ impl FormatAxesState {
         true
     }
 
-    /// Write the validated axis draft back onto `spec`.
+    /// Write the validated axis drafts back onto `spec`.
     pub fn apply_to_spec(&self, spec: &mut GraphSpec) -> Result<(), String> {
         self.axis_draft.validate().map_err(|e| e.to_string())?;
+        if let Some(ref sx) = self.staged_x_axis
+            && self.target_axis != AxisTarget::X
+        {
+            sx.validate().map_err(|e| e.to_string())?;
+            spec.x_axis = sx.clone();
+        }
+        if let Some(ref sy) = self.staged_y_axis
+            && self.target_axis != AxisTarget::Y
+        {
+            sy.validate().map_err(|e| e.to_string())?;
+            spec.y_axis = sy.clone();
+        }
         match self.target_axis {
             AxisTarget::X => spec.x_axis = self.axis_draft.clone(),
             AxisTarget::Y => spec.y_axis = self.axis_draft.clone(),
@@ -295,6 +400,21 @@ impl FormatAxesState {
                 if self.enable_y2 {
                     spec.frame_preset = FramePreset::DualYSecondaryRight;
                 }
+            }
+        }
+        if self.target_axis != AxisTarget::Y2 {
+            if self.enable_y2 {
+                if let Some(ref sy2) = self.staged_y2_axis {
+                    sy2.validate().map_err(|e| e.to_string())?;
+                    spec.y2_axis = Some(sy2.clone());
+                } else if spec.y2_axis.is_none() {
+                    spec.y2_axis = Some(self.baseline_y2_axis.clone().unwrap_or_else(|| AxisSpec::linear("Y2")));
+                }
+                if !self.initial_enable_y2 {
+                    spec.frame_preset = FramePreset::DualYSecondaryRight;
+                }
+            } else {
+                spec.y2_axis = None;
             }
         }
         if self.target_axis != AxisTarget::X
@@ -306,6 +426,12 @@ impl FormatAxesState {
             && let Some(ref ys) = self.pending_y_thresholds
         {
             spec.y_axis.thresholds = ys.clone();
+        }
+        if self.target_axis != AxisTarget::Y2
+            && let Some(ref y2s) = self.pending_y2_thresholds
+            && let Some(ref mut y2) = spec.y2_axis
+        {
+            y2.thresholds = y2s.clone();
         }
         if self.target_axis != AxisTarget::X
             && let Some(ref xt) = self.pending_x_additional_ticks
@@ -351,23 +477,50 @@ impl FormatAxesState {
                 }
             }
         }
-        if self.target_axis != AxisTarget::X
-            && let Some(obj) = build_pending_axis_patch(self.pending_x_thresholds.as_deref(), self.pending_x_additional_ticks.as_deref())
-        {
-            payload.insert(String::from("x_axis"), Value::Object(obj));
+        if self.target_axis != AxisTarget::X {
+            insert_secondary_axis_payload(
+                &mut payload,
+                "x_axis",
+                self.staged_x_axis.as_ref(),
+                self.pending_x_thresholds.as_deref(),
+                self.pending_x_additional_ticks.as_deref(),
+            )?;
         }
-        if self.target_axis != AxisTarget::Y
-            && let Some(obj) = build_pending_axis_patch(self.pending_y_thresholds.as_deref(), self.pending_y_additional_ticks.as_deref())
-        {
-            payload.insert(String::from("y_axis"), Value::Object(obj));
+        if self.target_axis != AxisTarget::Y {
+            insert_secondary_axis_payload(
+                &mut payload,
+                "y_axis",
+                self.staged_y_axis.as_ref(),
+                self.pending_y_thresholds.as_deref(),
+                self.pending_y_additional_ticks.as_deref(),
+            )?;
         }
-        if self.target_axis != AxisTarget::Y2
-            && self.enable_y2
-            && let Some(obj) = build_pending_axis_patch(None, self.pending_y2_additional_ticks.as_deref())
-        {
-            payload.insert(String::from("y2_axis"), Value::Object(obj));
+        if self.target_axis != AxisTarget::Y2 {
+            self.insert_secondary_y2_payload(&mut payload)?;
         }
         Some(ToolCommandIntent::new("graph.setAxes", Value::Object(payload)))
+    }
+
+    fn insert_secondary_y2_payload(&self, payload: &mut serde_json::Map<String, Value>) -> Option<()> {
+        if !self.enable_y2 {
+            if self.initial_enable_y2 || self.staged_y2_axis.is_some() || self.baseline_y2_axis.is_some() {
+                payload.insert(String::from("y2_axis"), Value::Null);
+            }
+            return Some(());
+        }
+        if !self.initial_enable_y2 {
+            payload.insert(String::from("frame_preset"), serde_json::to_value(FramePreset::DualYSecondaryRight).ok()?);
+        }
+        let fallback_y2;
+        let staged = match self.staged_y2_axis.as_ref() {
+            Some(ax) => Some(ax),
+            None if !self.initial_enable_y2 => {
+                fallback_y2 = self.baseline_y2_axis.clone().unwrap_or_else(|| AxisSpec::linear("Y2"));
+                Some(&fallback_y2)
+            }
+            None => None,
+        };
+        insert_secondary_axis_payload(payload, "y2_axis", staged, self.pending_y2_thresholds.as_deref(), self.pending_y2_additional_ticks.as_deref())
     }
 
     /// Apply modal/inspector field updates using regional numeric parsing (`preset`).
@@ -506,6 +659,31 @@ impl FormatAxesState {
         }
         Ok(())
     }
+}
+
+fn insert_secondary_axis_payload(
+    payload: &mut serde_json::Map<String, Value>,
+    field_key: &str,
+    staged: Option<&AxisSpec>,
+    thresholds: Option<&[AxisThreshold]>,
+    additional_ticks: Option<&[AdditionalTick]>,
+) -> Option<()> {
+    if let Some(base) = staged {
+        let mut ax = base.clone();
+        if let Some(ts) = thresholds {
+            ax.thresholds = ts.to_vec();
+        }
+        if let Some(ticks) = additional_ticks {
+            ax.additional_ticks = ticks.to_vec();
+        }
+        if ax.validate().is_err() {
+            return None;
+        }
+        payload.insert(String::from(field_key), serde_json::to_value(&ax).ok()?);
+    } else if let Some(obj) = build_pending_axis_patch(thresholds, additional_ticks) {
+        payload.insert(String::from(field_key), Value::Object(obj));
+    }
+    Some(())
 }
 
 fn build_pending_axis_patch(
