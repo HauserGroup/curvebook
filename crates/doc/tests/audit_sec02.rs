@@ -126,6 +126,17 @@ fn fa_sec02_02_datasheet_shift_rows_down_updates_exclusions_and_links() -> TestR
     assert_eq!(ds.linked_regions[0].target_range.start.row, 5);
     assert_eq!(ds.linked_regions[0].target_range.end.row, 7);
     assert_eq!(ds.linked_regions[0].spec.placement.anchor.row, 5);
+
+    // start_row >= existing_rows and frozen == true must leave metadata untouched.
+    ds.shift_rows_down(5, 2, 5);
+    assert_eq!(ds.exclusion_notes[1].coord.row, 5);
+    assert_eq!(ds.linked_regions[0].target_range.start.row, 5);
+
+    ds.frozen = true;
+    ds.shift_rows_down(0, 2, 10);
+    assert_eq!(ds.exclusion_notes[0].coord.row, 0);
+    assert_eq!(ds.exclusion_notes[1].coord.row, 5);
+    assert_eq!(ds.linked_regions[0].target_range.start.row, 5);
     Ok(())
 }
 
@@ -166,12 +177,22 @@ fn fa_sec02_04_project_and_image_asset_deserialize_enforce_budgets() -> TestRes 
     doc_json["info_sheets"] = serde_json::Value::Array(info_arr);
     assert!(serde_json::from_value::<ProjectDocument>(doc_json).is_err());
 
-    // Cumulative project cell budget (> MAX_PROJECT_CELLS) enforced in add_data_sheet.
+    // Cumulative project cell budget (> MAX_PROJECT_CELLS) enforced in add_data_sheet & add_result_sheet.
     let s1 = make_col_sheet("big-1", 250, 105_000)?;
     let s2 = make_col_sheet("big-2", 250, 105_000)?;
+    let s3 = make_col_sheet("big-3", 250, 105_000)?;
     let mut cell_doc = ProjectDocument::new("CellsCap")?;
     cell_doc.add_data_sheet(s1)?;
     assert!(matches!(cell_doc.add_data_sheet(s2), Err(DocError::TooManyCells { max, .. }) if max == MAX_PROJECT_CELLS));
+
+    let rspec = AnalysisSpec::new(
+        "res-big",
+        "big-1",
+        AnalysisKind::Transform(curvebook_doc::TransformAnalysisSpec::Transpose { swap_row_and_column_titles: false }),
+    )?;
+    let mut rsheet = ResultSheet::new(rspec)?;
+    rsheet.analyzable_data = Some(s3);
+    assert!(matches!(cell_doc.add_result_sheet(rsheet), Err(DocError::TooManyCells { max, .. }) if max == MAX_PROJECT_CELLS));
     drop(cell_doc);
 
     // Over MAX_PROJECT_IMAGE_ASSETS rejected on ProjectDocument::Deserialize.
@@ -184,11 +205,12 @@ fn fa_sec02_04_project_and_image_asset_deserialize_enforce_budgets() -> TestRes 
     img_doc_json["image_assets"] = serde_json::Value::Array(vec![valid_asset; MAX_PROJECT_IMAGE_ASSETS + 1]);
     assert!(serde_json::from_value::<ProjectDocument>(img_doc_json).is_err());
 
-    // Corrupt ProjectImageAsset rejected on Deserialize.
+    // Corrupt ProjectImageAsset rejected on Deserialize (including MAX_IMAGE_DIM_PX & MAX_IMAGE_PIXELS).
     for bad_asset in [
         serde_json::json!({ "asset_id": "not-valid-id", "media_type": "Png", "pixel_size": [4, 4] }),
         serde_json::json!({ "asset_id": "img-0123456789abcdef", "media_type": "Png", "pixel_size": [0, 4] }),
-        serde_json::json!({ "asset_id": "img-0123456789abcdef", "media_type": "Png", "pixel_size": [100_000, 100_000] }),
+        serde_json::json!({ "asset_id": "img-0123456789abcdef", "media_type": "Png", "pixel_size": [16_385, 1] }),
+        serde_json::json!({ "asset_id": "img-0123456789abcdef", "media_type": "Png", "pixel_size": [8_193, 8_193] }),
     ] {
         assert!(serde_json::from_value::<ProjectImageAsset>(bad_asset).is_err());
     }
@@ -289,6 +311,10 @@ fn fa_sec02_07_sheet_id_validation_and_project_validate() -> TestRes {
     )?;
     doc.data_sheets.push(ds_long);
     assert!(doc.validate().is_err(), "ProjectDocument::validate must reject >256 byte SheetId");
+
+    let mut retarget = AnalysisSpec::new("res-rt", "data-1", AnalysisKind::DescriptiveStats(Default::default()))?;
+    assert!(retarget.retarget_source("bad\0id", curvebook_doc::TableKind::Column, vec![]).is_err());
+    assert!(retarget.retarget_source("x".repeat(MAX_TITLE_BYTES + 1), curvebook_doc::TableKind::Column, vec![]).is_err());
     Ok(())
 }
 
@@ -406,9 +432,90 @@ fn fa_sec02_11_deserialize_enforces_domain_bounds_on_specs_and_sheets() -> TestR
     zero_share["x_axis"]["segments"] = serde_json::json!([serde_json::to_value(AxisSegment { length_share: 0.0, ..AxisSegment::default() })?]);
     assert!(serde_json::from_value::<GraphSpec>(zero_share).is_err());
 
-    let mut bad_gap = base_gjson;
+    let mut bad_gap = base_gjson.clone();
     bad_gap["heatmap_labels"]["cell_gap_pt"] = serde_json::json!(20.0);
     assert!(serde_json::from_value::<GraphSpec>(bad_gap).is_err());
+
+    // Negative GDO stroke / border widths & invalid markers rejected on GraphSpec::Deserialize.
+    let mut bad_bar = base_gjson.clone();
+    bad_bar["series"][0]["gdo"] = serde_json::json!({
+        "BarWithReplicates": {
+            "summary": "Mean",
+            "fill_color": { "r": 0, "g": 0, "b": 0, "a": 255 },
+            "border_color": { "r": 0, "g": 0, "b": 0, "a": 255 },
+            "border_width_pt": -1.0,
+            "replicate_overlay": null
+        }
+    });
+    assert!(serde_json::from_value::<GraphSpec>(bad_bar).is_err());
+
+    let mut bad_line = base_gjson.clone();
+    bad_line["series"][0]["gdo"] = serde_json::json!({
+        "ScatterAndLine": {
+            "marker": null,
+            "line": {
+                "kind": "PointToPoint",
+                "dash_style": "Solid",
+                "stroke_width_pt": -0.5,
+                "color": { "r": 0, "g": 0, "b": 0, "a": 255 }
+            },
+            "area_fill": null,
+            "replicate_lines": "MeanTrajectory"
+        }
+    });
+    assert!(serde_json::from_value::<GraphSpec>(bad_line).is_err());
+
+    let mut bad_fbar = base_gjson.clone();
+    bad_fbar["series"][0]["gdo"] = serde_json::json!({
+        "FloatingBar": {
+            "summary": null,
+            "fill_color": { "r": 0, "g": 0, "b": 0, "a": 255 },
+            "border_color": { "r": 0, "g": 0, "b": 0, "a": 255 },
+            "border_width_pt": -2.0
+        }
+    });
+    assert!(serde_json::from_value::<GraphSpec>(bad_fbar).is_err());
+
+    let mut bad_ba = base_gjson.clone();
+    bad_ba["series"][0]["gdo"] = serde_json::json!({
+        "BeforeAfterLines": {
+            "marker": null,
+            "line_color": { "r": 0, "g": 0, "b": 0, "a": 255 },
+            "stroke_width_pt": -1.0
+        }
+    });
+    assert!(serde_json::from_value::<GraphSpec>(bad_ba).is_err());
+
+    let mut bad_km = base_gjson;
+    bad_km["series"][0]["gdo"] = serde_json::json!({
+        "KaplanMeierStep": {
+            "line_color": { "r": 0, "g": 0, "b": 0, "a": 255 },
+            "stroke_width_pt": -1.0,
+            "show_censored_ticks": true,
+            "show_greenwood_ci": false,
+            "ci_dashed": false
+        }
+    });
+    assert!(serde_json::from_value::<GraphSpec>(bad_km).is_err());
+
+    let mv = MultipleVariablesTable::new(2, 2)?;
+    let mv_ds = DataSheet::new("mv-g", "MV", TableArchetype::MultipleVariables(mv))?;
+    let mut mv_gspec = serde_json::to_value(GraphSpec::default_for_data_sheet(&mv_ds))?;
+    mv_gspec["multivariate"]["plot_mode"] = serde_json::json!({
+        "CategoricalSummary": {
+            "gdo": {
+                "BarWithReplicates": {
+                    "summary": "Mean",
+                    "fill_color": { "r": 0, "g": 0, "b": 0, "a": 255 },
+                    "border_color": { "r": 0, "g": 0, "b": 0, "a": 255 },
+                    "border_width_pt": -1.0,
+                    "replicate_overlay": null
+                }
+            },
+            "y_error_bars": null
+        }
+    });
+    assert!(serde_json::from_value::<GraphSpec>(mv_gspec).is_err());
 
     // FloatingNote negative width rejected on InfoSheet/GraphSheet/LayoutSheet Deserialize.
     let mut gs = GraphSheet::new_uninitialized_for_data("g-1", &ds)?;

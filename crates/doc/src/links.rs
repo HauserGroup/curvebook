@@ -500,11 +500,15 @@ impl DataSheet {
 
     /// Shift rows in `[start_row .. existing_rows)` down by `insert_rows` across both the table
     /// archetype and sheet-level row-indexed metadata (`exclusion_notes` and `linked_regions`).
+    ///
+    /// Mirrors [`TableArchetype::shift_rows_down`] early-exit invariants and is a no-op when
+    /// `self.frozen` is `true`, `insert_rows == 0`, `start_row >= existing_rows`, or
+    /// `existing_rows + insert_rows` overflows `usize`.
     pub fn shift_rows_down(&mut self, start_row: usize, insert_rows: usize, existing_rows: usize) {
-        self.archetype.shift_rows_down(start_row, insert_rows, existing_rows);
-        if insert_rows == 0 {
+        if self.frozen || insert_rows == 0 || start_row >= existing_rows || existing_rows.checked_add(insert_rows).is_none() {
             return;
         }
+        self.archetype.shift_rows_down(start_row, insert_rows, existing_rows);
         for note in &mut self.exclusion_notes {
             if note.coord.row >= start_row {
                 note.coord.row = note.coord.row.saturating_add(insert_rows);

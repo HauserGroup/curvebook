@@ -262,9 +262,14 @@ impl ProjectDocument {
         Ok(())
     }
 
-    /// Append a [`ResultSheet`] to the `Analyses` folder after checking ID uniqueness and project sheet limits.
+    /// Append a [`ResultSheet`] to the `Analyses` folder after checking ID uniqueness, project sheet limits,
+    /// and cumulative cell budget when `analyzable_data` is attached.
     pub fn add_result_sheet(&mut self, sheet: ResultSheet) -> Result<(), DocError> {
         self.ensure_can_insert(&sheet.id)?;
+        if let Some(ds) = &sheet.analyzable_data {
+            let existing_cells = self.total_allocated_cells()?;
+            crate::error::validate_project_cells(existing_cells, ds.archetype.allocated_cell_slots())?;
+        }
         self.result_sheets.push(sheet);
         Ok(())
     }

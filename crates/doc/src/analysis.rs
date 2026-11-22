@@ -2193,9 +2193,7 @@ impl AnalysisSpec {
             return Err(DocError::IncompatibleRetargetTable { analysis_title: self.effective_title().to_owned(), target_kind: target_table_kind });
         }
         let new_id = new_source_sheet_id.into();
-        if new_id.as_str().trim().is_empty() {
-            return Err(DocError::EmptyIdentifier);
-        }
+        new_id.validate_non_empty_bounded()?;
         self.source_sheet_id = new_id;
         self.selected_data_sets = selected_data_sets;
         Ok(())

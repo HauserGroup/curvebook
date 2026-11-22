@@ -1625,6 +1625,7 @@ impl GraphSpec {
         }
         for series in &self.series {
             series.source_sheet_id.validate_non_empty_bounded()?;
+            validate_gdo_bounds(&series.gdo)?;
             if series.bar_width_override_pt.is_some_and(|w| w <= 0.0) {
                 return Err(geom_err("spec.series.bar_width_override_pt must be finite and > 0"));
             }
@@ -1655,10 +1656,13 @@ impl GraphSpec {
                 }
                 _ => {}
             }
-            if let MultivariatePlotMode::CategoricalSummary { y_error_bars: Some(eb), .. } = &mv.plot_mode
-                && (eb.stroke_width_pt < 0.0 || eb.cap_width_pt < 0.0)
-            {
-                return Err(geom_err("spec.multivariate.plot_mode.y_error_bars widths must be >= 0"));
+            if let MultivariatePlotMode::CategoricalSummary { gdo, y_error_bars } = &mv.plot_mode {
+                validate_gdo_bounds(gdo)?;
+                if let Some(eb) = y_error_bars
+                    && (eb.stroke_width_pt < 0.0 || eb.cap_width_pt < 0.0)
+                {
+                    return Err(geom_err("spec.multivariate.plot_mode.y_error_bars widths must be >= 0"));
+                }
             }
         }
         for ann in &self.annotations {
@@ -2004,6 +2008,59 @@ fn error_bars_non_finite(bars: &ErrorBarSpec) -> Option<&'static str> {
         return Some("spec.series.error_bars");
     }
     None
+}
+
+fn validate_marker_bounds(marker: &MarkerStyle) -> Result<(), DocError> {
+    if marker.size_pt <= 0.0 || marker.stroke_width_pt < 0.0 {
+        return Err(DocError::InvalidCellValue {
+            archetype: crate::TableKind::Xy,
+            row: 0,
+            col: 0,
+            reason: "marker size_pt must be > 0 and stroke_width_pt >= 0",
+        });
+    }
+    Ok(())
+}
+
+fn validate_gdo_bounds(gdo: &GraphicalDataObject) -> Result<(), DocError> {
+    let invalid = |reason: &'static str| DocError::InvalidCellValue { archetype: crate::TableKind::Xy, row: 0, col: 0, reason };
+    match gdo {
+        GraphicalDataObject::ScatterAndLine { marker, line, .. } => {
+            if let Some(m) = marker {
+                validate_marker_bounds(m)?;
+            }
+            if let Some(l) = line
+                && l.stroke_width_pt < 0.0
+            {
+                return Err(invalid("spec.series.gdo connecting line stroke_width_pt must be >= 0"));
+            }
+        }
+        GraphicalDataObject::BarWithReplicates { border_width_pt, .. } if *border_width_pt < 0.0 => {
+            return Err(invalid("spec.series.gdo bar border_width_pt must be >= 0"));
+        }
+        GraphicalDataObject::AlignedDotPlot { marker, .. } => validate_marker_bounds(marker)?,
+        GraphicalDataObject::FloatingBar { border_width_pt, .. } if *border_width_pt < 0.0 => {
+            return Err(invalid("spec.series.gdo floating_bar border_width_pt must be >= 0"));
+        }
+        GraphicalDataObject::BeforeAfterLines { marker, stroke_width_pt, .. } => {
+            if let Some(m) = marker {
+                validate_marker_bounds(m)?;
+            }
+            if *stroke_width_pt < 0.0 {
+                return Err(invalid("spec.series.gdo before_after_lines stroke_width_pt must be >= 0"));
+            }
+        }
+        GraphicalDataObject::KaplanMeierStep { stroke_width_pt, .. } if *stroke_width_pt < 0.0 => {
+            return Err(invalid("spec.series.gdo kaplan_meier_step stroke_width_pt must be >= 0"));
+        }
+        GraphicalDataObject::BarWithReplicates { .. }
+        | GraphicalDataObject::BoxAndWhisker { .. }
+        | GraphicalDataObject::Violin { .. }
+        | GraphicalDataObject::FloatingBar { .. }
+        | GraphicalDataObject::KaplanMeierStep { .. }
+        | GraphicalDataObject::PartsOfWhole { .. } => {}
+    }
+    Ok(())
 }
 
 fn gdo_non_finite(gdo: &GraphicalDataObject) -> Option<&'static str> {

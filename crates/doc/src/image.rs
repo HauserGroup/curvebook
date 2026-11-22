@@ -461,11 +461,13 @@ impl ProjectImageAsset {
         if !is_valid_asset_id(&self.asset_id) {
             return Err(crate::error::DocError::InvalidIdentifier { reason: "asset_id must match `img-<16 lowercase hex>`" });
         }
-        if self.pixel_size.0 == 0 || self.pixel_size.1 == 0 {
-            return Err(crate::error::DocError::InvalidIdentifier { reason: "image asset pixel_size dimensions must be > 0" });
+        if self.pixel_size.0 == 0 || self.pixel_size.1 == 0 || self.pixel_size.0 > MAX_IMAGE_DIM_PX || self.pixel_size.1 > MAX_IMAGE_DIM_PX {
+            return Err(crate::error::DocError::InvalidIdentifier {
+                reason: "image asset pixel_size dimensions must lie in 1..=MAX_IMAGE_DIM_PX (16,384)",
+            });
         }
-        if u64::from(self.pixel_size.0).saturating_mul(u64::from(self.pixel_size.1)) > 268_435_456 {
-            return Err(crate::error::DocError::InvalidIdentifier { reason: "image asset total pixel count exceeds 268,435,456" });
+        if u64::from(self.pixel_size.0).saturating_mul(u64::from(self.pixel_size.1)) > MAX_IMAGE_PIXELS {
+            return Err(crate::error::DocError::InvalidIdentifier { reason: "image asset total pixel count exceeds MAX_IMAGE_PIXELS (67,108,864)" });
         }
         if self.bytes.len() > MAX_IMAGE_ASSET_BYTES {
             return Err(crate::error::DocError::InvalidIdentifier { reason: "image asset byte payload exceeds MAX_IMAGE_ASSET_BYTES" });
