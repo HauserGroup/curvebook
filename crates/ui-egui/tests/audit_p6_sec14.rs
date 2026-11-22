@@ -178,6 +178,52 @@ fn fa_sec14_02_bubble_plot_preserves_x_level_order_override() {
     assert_eq!(saved.x_level_order_override, Some(override_order));
 }
 
+fn assert_pcr_dialog_sync_and_leakage_guard(ds: &DataSheet) -> AnalysisKind {
+    // AnalyzeDialogState `toggle_variable` syncs `pca_predictors` and clears overlapping `pcr_outcome_column`,
+    // and field patches hoist predictors BEFORE outcome regardless of key order and reject leakage & non-usize.
+    let mut az = AnalyzeDialogState::default();
+    az.open_for_data_sheet(ds);
+    az.select_catalog_entry("stats.pcr");
+    az.toggle_variable(0);
+    az.toggle_variable(1);
+    assert_eq!(az.pca_predictors, vec![0, 1]);
+    assert_eq!(az.selected_data_sets, vec![0, 1]);
+    az.select_pcr_outcome(3).unwrap();
+    assert_eq!(az.pcr_outcome_column, Some(3));
+    az.toggle_variable(3);
+    assert_eq!(az.pca_predictors, vec![0, 1, 3]);
+    assert_eq!(az.selected_data_sets, vec![0, 1, 3]);
+    assert_eq!(az.pcr_outcome_column, None, "toggle_variable adding outcome column as predictor must clear pcr_outcome_column");
+    az.toggle_variable(3);
+
+    let mut leak_patch = Map::new();
+    leak_patch.insert(String::from("pcr_outcome_column"), json!(1));
+    leak_patch.insert(String::from("selected_data_sets"), json!([0, 1, 2]));
+    assert!(az.apply_field_patch(&leak_patch).is_err(), "reverse BTreeMap order must still catch target leakage");
+
+    let mut bad_type = Map::new();
+    bad_type.insert(String::from("pcr_outcome_column"), json!("invalid"));
+    assert!(az.apply_field_patch(&bad_type).is_err());
+
+    // `response_column` on non-PCR entry (`stats.multiple_regression`) must NOT trigger PCA leakage guard.
+    let mut reg_az = AnalyzeDialogState::default();
+    reg_az.open_for_data_sheet(ds);
+    let mut reg_patch = Map::new();
+    reg_patch.insert(String::from("entry_id"), json!("stats.multiple_regression"));
+    reg_patch.insert(String::from("selected_data_sets"), json!([0, 1, 2]));
+    reg_patch.insert(String::from("response_column"), json!(2));
+    reg_az.apply_field_patch(&reg_patch).unwrap();
+    assert_eq!(reg_az.pcr_outcome_column, None);
+
+    let mut ok_patch = Map::new();
+    ok_patch.insert(String::from("selected_data_sets"), json!([0, 1, 2]));
+    ok_patch.insert(String::from("pcr_outcome_column"), json!(3));
+    az.apply_field_patch(&ok_patch).unwrap();
+    let built_kind = az.build_analysis_kind().unwrap();
+    assert!(matches!(built_kind, AnalysisKind::Multivariate(MultivariateSpec::Pca { pcr_outcome_column: Some(3), .. })));
+    built_kind
+}
+
 #[test]
 fn fa_sec14_03_pcr_end_to_end_distinct_from_pca_with_leakage_guard_and_methods_report() {
     let mut mv = MultipleVariablesTable::new(5, 8).unwrap();
@@ -263,35 +309,8 @@ fn fa_sec14_03_pcr_end_to_end_distinct_from_pca_with_leakage_guard_and_methods_r
     let pca_ev1 = pcr_res.scalars.iter().find(|s| s.key == "PC1 eigenvalue").unwrap().value;
     assert!((pca_ev1 - direct_pca.eigenvalues[0]).abs() < 1e-10);
 
-    // 2. AnalyzeDialogState hoists predictors BEFORE outcome regardless of key order and rejects leakage & non-usize.
-    let mut az = AnalyzeDialogState::default();
-    az.open_for_data_sheet(&ds);
-    az.select_catalog_entry("stats.pcr");
-    let mut leak_patch = Map::new();
-    leak_patch.insert(String::from("pcr_outcome_column"), json!(1));
-    leak_patch.insert(String::from("selected_data_sets"), json!([0, 1, 2]));
-    assert!(az.apply_field_patch(&leak_patch).is_err(), "reverse BTreeMap order must still catch target leakage");
-
-    let mut bad_type = Map::new();
-    bad_type.insert(String::from("pcr_outcome_column"), json!("invalid"));
-    assert!(az.apply_field_patch(&bad_type).is_err());
-
-    // `response_column` on non-PCR entry (`stats.multiple_regression`) must NOT trigger PCA leakage guard.
-    let mut reg_az = AnalyzeDialogState::default();
-    reg_az.open_for_data_sheet(&ds);
-    let mut reg_patch = Map::new();
-    reg_patch.insert(String::from("entry_id"), json!("stats.multiple_regression"));
-    reg_patch.insert(String::from("selected_data_sets"), json!([0, 1, 2]));
-    reg_patch.insert(String::from("response_column"), json!(2));
-    reg_az.apply_field_patch(&reg_patch).unwrap();
-    assert_eq!(reg_az.pcr_outcome_column, None);
-
-    let mut ok_patch = Map::new();
-    ok_patch.insert(String::from("selected_data_sets"), json!([0, 1, 2]));
-    ok_patch.insert(String::from("pcr_outcome_column"), json!(3));
-    az.apply_field_patch(&ok_patch).unwrap();
-    let built_kind = az.build_analysis_kind().unwrap();
-    assert!(matches!(built_kind, AnalysisKind::Multivariate(MultivariateSpec::Pca { pcr_outcome_column: Some(3), .. })));
+    // 2. AnalyzeDialogState `toggle_variable`, field-patch hoisting, leakage guard, and non-PCR pass-through.
+    let built_kind = assert_pcr_dialog_sync_and_leakage_guard(&ds);
 
     // 3. Engine run, methods report, EditAnalysisParametersState reopen/clear roundtrip.
     let mut doc = ProjectDocument::new("SEC14-03 Engine").unwrap();

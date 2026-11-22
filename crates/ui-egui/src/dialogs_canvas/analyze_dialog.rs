@@ -571,6 +571,25 @@ impl AnalyzeDialogState {
         }
     }
 
+    fn is_pca_or_pcr_entry(&self) -> bool {
+        matches!(self.selected_entry_id.as_deref(), Some("stats.pca" | "stats.pcr" | "pca" | "pcr"))
+    }
+
+    fn clear_overlapping_pcr_outcome(&mut self) {
+        if let Some(y) = self.pcr_outcome_column
+            && (self.pca_predictors.contains(&y) || self.selected_data_sets.contains(&y))
+        {
+            self.pcr_outcome_column = None;
+            if self.is_pca_or_pcr_entry() {
+                for cand in &mut self.variable_candidates {
+                    if cand.col_index == y {
+                        cand.is_response = false;
+                    }
+                }
+            }
+        }
+    }
+
     /// Toggle a MV predictor column for PCA/PCR while preserving disjoint PCR outcome selection.
     pub fn toggle_pca_predictor(&mut self, col: usize) {
         if let Some(pos) = self.pca_predictors.iter().position(|&c| c == col) {
@@ -584,10 +603,8 @@ impl AnalyzeDialogState {
         } else {
             self.selected_data_sets.push(col);
             self.selected_data_sets.sort_unstable();
-            if self.pcr_outcome_column == Some(col) {
-                self.pcr_outcome_column = None;
-            }
         }
+        self.clear_overlapping_pcr_outcome();
         for cand in &mut self.variable_candidates {
             cand.selected = self.selected_data_sets.contains(&cand.col_index);
         }
@@ -601,6 +618,12 @@ impl AnalyzeDialogState {
         self.pcr_outcome_column = if self.pcr_outcome_column == Some(col) { None } else { Some(col) };
         if let Some(outcome) = self.pcr_outcome_column {
             self.set_response_column(outcome);
+        } else {
+            for cand in &mut self.variable_candidates {
+                if cand.col_index == col {
+                    cand.is_response = false;
+                }
+            }
         }
         Ok(())
     }
@@ -665,14 +688,10 @@ impl AnalyzeDialogState {
         let apply_predictor_cols = |this: &mut Self, key: &str, val: &Value| -> Result<(), String> {
             let cols = parse_usize_list(val, key)?;
             this.selected_data_sets = cols.clone();
-            if matches!(key, "pca_predictors" | "analyze.pca_predictors")
-                || matches!(this.selected_entry_id.as_deref(), Some("stats.pca" | "stats.pcr" | "pca" | "pcr"))
-            {
+            if matches!(key, "pca_predictors" | "analyze.pca_predictors") || this.is_pca_or_pcr_entry() {
                 this.pca_predictors = cols;
             }
-            if this.pcr_outcome_column.is_some_and(|y| this.pca_predictors.contains(&y) || this.selected_data_sets.contains(&y)) {
-                this.pcr_outcome_column = None;
-            }
+            this.clear_overlapping_pcr_outcome();
             for cand in &mut this.variable_candidates {
                 cand.selected = this.selected_data_sets.contains(&cand.col_index);
             }
@@ -1176,6 +1195,10 @@ impl AnalyzeDialogState {
             var.selected = !var.selected;
         }
         self.selected_data_sets = self.variable_candidates.iter().filter(|v| v.selected).map(|v| v.col_index).collect();
+        if self.is_pca_or_pcr_entry() {
+            self.pca_predictors = self.selected_data_sets.clone();
+            self.clear_overlapping_pcr_outcome();
+        }
     }
 
     /// Assign a primary response column (for GLM / Cox / Factorial modeling on MV tables).
