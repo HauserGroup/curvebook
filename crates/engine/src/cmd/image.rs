@@ -9,6 +9,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::graph::{parse_line_dash_style, parse_rect_pt, parse_rgba8};
+use super::helpers::decode_base64_capped;
 use super::params::{any_json_schema, bool_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema};
 use crate::EngineError;
 
@@ -127,69 +128,6 @@ fn read_image_file_bytes(_raw_path: &str) -> Result<Vec<u8>, EngineError> {
     .with_details(json!({ "pointer": "/path" })))
 }
 
-const fn base64_decode_val(b: u8) -> Option<u8> {
-    match b {
-        b'A'..=b'Z' => Some(b - b'A'),
-        b'a'..=b'z' => Some(b - b'a' + 26),
-        b'0'..=b'9' => Some(b - b'0' + 52),
-        b'+' => Some(62),
-        b'/' => Some(63),
-        _ => None,
-    }
-}
-
-fn decode_base64_capped(input: &str) -> Result<Vec<u8>, EngineError> {
-    let clean: Vec<u8> = input.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
-    let max_b64_len = MAX_IMAGE_ASSET_BYTES.saturating_div(3).saturating_add(1).saturating_mul(4);
-    if clean.len() > max_b64_len {
-        return Err(EngineError::with_code(ErrorCode::ResourceLimit, "`bytes_base64` exceeds maximum image size limit")
-            .with_details(json!({ "pointer": "/bytes_base64" })));
-    }
-    if clean.is_empty() {
-        return Err(
-            EngineError::with_code(ErrorCode::BadInput, "`bytes_base64` must not be empty").with_details(json!({ "pointer": "/bytes_base64" }))
-        );
-    }
-    if !clean.len().is_multiple_of(4) {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "invalid base64 length in `bytes_base64`")
-            .with_details(json!({ "pointer": "/bytes_base64" })));
-    }
-    let chunk_count = clean.len() / 4;
-    let mut out = Vec::with_capacity(chunk_count * 3);
-    for (idx, quad) in clean.as_chunks::<4>().0.iter().enumerate() {
-        let is_last = idx + 1 == chunk_count;
-        let (q0, q1, q2, q3) = (quad[0], quad[1], quad[2], quad[3]);
-        let bad = || {
-            EngineError::with_code(ErrorCode::BadInput, "invalid base64 data in `bytes_base64`").with_details(json!({ "pointer": "/bytes_base64" }))
-        };
-        let v0 = u32::from(base64_decode_val(q0).ok_or_else(bad)?);
-        let v1 = u32::from(base64_decode_val(q1).ok_or_else(bad)?);
-        if q2 == b'=' {
-            if !is_last || q3 != b'=' {
-                return Err(bad());
-            }
-            let triple = (v0 << 18) | (v1 << 12);
-            out.push(((triple >> 16) & 0xFF) as u8);
-        } else if q3 == b'=' {
-            if !is_last {
-                return Err(bad());
-            }
-            let v2 = u32::from(base64_decode_val(q2).ok_or_else(bad)?);
-            let triple = (v0 << 18) | (v1 << 12) | (v2 << 6);
-            out.push(((triple >> 16) & 0xFF) as u8);
-            out.push(((triple >> 8) & 0xFF) as u8);
-        } else {
-            let v2 = u32::from(base64_decode_val(q2).ok_or_else(bad)?);
-            let v3 = u32::from(base64_decode_val(q3).ok_or_else(bad)?);
-            let triple = (v0 << 18) | (v1 << 12) | (v2 << 6) | v3;
-            out.push(((triple >> 16) & 0xFF) as u8);
-            out.push(((triple >> 8) & 0xFF) as u8);
-            out.push((triple & 0xFF) as u8);
-        }
-    }
-    Ok(out)
-}
-
 /// Resolve and ingest an image from exactly one of `path`, `bytes_base64`, or `asset_id`.
 pub(super) fn resolve_image_source(
     doc: &mut ProjectDocument,
@@ -214,7 +152,7 @@ pub(super) fn resolve_image_source(
     }
 
     let (raw_bytes, pointer) = if let Some(b64) = bytes_base64 {
-        (decode_base64_capped(b64)?, "/bytes_base64")
+        (decode_base64_capped(b64, MAX_IMAGE_ASSET_BYTES, "/bytes_base64")?, "/bytes_base64")
     } else if let Some(raw_path) = path {
         reject_uri_scheme(raw_path)?;
         (read_image_file_bytes(raw_path)?, "/path")

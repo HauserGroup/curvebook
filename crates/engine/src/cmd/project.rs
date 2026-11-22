@@ -4,7 +4,7 @@ use std::collections::HashSet;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use curvebook_doc::{AnalysisKind, AnalysisSpec, ErrorCode, NamedCheckpoint, ParameterScope, ProjectDocument, SheetId, validate_title};
+use curvebook_doc::{ErrorCode, NamedCheckpoint, ProjectDocument, SheetId, validate_title};
 use curvebook_format::{
     MAX_ARCHIVE_FILE_BYTES, instantiate_template_bytes, migrate_document_json, open_project_bytes, open_project_file, open_project_unpacked_dir,
     sanitize_circular_hooks, save_project_bytes, save_project_unpacked_dir, save_template_bytes, validate_project_document,
@@ -375,116 +375,9 @@ fn inspect_project_schema() -> Value {
 
 fn run_project_inspect(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
     let parsed: InspectProjectParams = parse_params(&inspect_project_schema(), params)?;
-    let doc = &ctx.session.doc;
-
-    let focus_info = if let Some(focus_str) = parsed.sheet_id {
-        let focus_id = parse_sheet_id(&focus_str)?;
-        let section = doc
-            .sheet_section(&focus_id)
-            .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("sheet `{}` not found", focus_id.as_str())))?;
-        let upstream = doc.upstream_dependencies(&focus_id);
-        let upstream_strs: Vec<&str> = upstream.iter().map(SheetId::as_str).collect();
-        Some(json!({
-            "sheet_id": focus_id.as_str(),
-            "section": format!("{section:?}"),
-            "upstream_dependencies": upstream_strs,
-        }))
-    } else {
-        None
-    };
-
-    let data_sheets: Vec<Value> = doc
-        .data_sheets
-        .iter()
-        .map(|ds| {
-            json!({
-                "id": ds.id.as_str(),
-                "title": ds.title,
-                "kind": format!("{:?}", ds.kind()),
-                "frozen": ds.frozen,
-                "rows": ds.archetype.row_count(),
-                "cols": ds.archetype.column_count(),
-                "allocated_cells": ds.archetype.allocated_cell_slots(),
-                "info_sheet_id": ds.info_sheet_id.as_ref().map(SheetId::as_str),
-                "linked_regions": ds.linked_regions.len(),
-            })
-        })
-        .collect();
-
-    let info_sheets: Vec<Value> = doc
-        .info_sheets
-        .iter()
-        .map(|info| {
-            json!({
-                "id": info.id.as_str(),
-                "title": info.title,
-                "notes_len": info.notes_markdown.len(),
-                "constants": info.constants.iter().map(|c| json!({ "name": c.name, "value": &c.value, "units": c.units })).collect::<Vec<_>>(),
-            })
-        })
-        .collect();
-
-    let result_sheets: Vec<Value> = doc
-        .result_sheets
-        .iter()
-        .map(|rs| {
-            json!({
-                "id": rs.id.as_str(),
-                "source_sheet_id": rs.analysis.source_sheet_id.as_str(),
-                "title": rs.analysis.effective_title(),
-                "status": format!("{:?}", rs.status),
-                "hook_count": count_analysis_hooks(&rs.analysis),
-                "tabs": rs.tabs.len(),
-                "scalars": rs.scalars.len(),
-                "analyzable": rs.analyzable_data.is_some(),
-            })
-        })
-        .collect();
-
-    let graph_sheets: Vec<Value> = doc
-        .graph_sheets
-        .iter()
-        .map(|gs| {
-            json!({
-                "id": gs.id.as_str(),
-                "title": gs.title,
-                "initialized": gs.initialized,
-                "kind": format!("{:?}", gs.spec.kind),
-                "primary_source_sheet_id": gs.spec.primary_source_sheet_id.as_str(),
-                "series_count": gs.spec.series.len(),
-            })
-        })
-        .collect();
-
-    let layout_sheets: Vec<Value> =
-        doc.layout_sheets.iter().map(|ls| json!({ "id": ls.id.as_str(), "title": ls.title, "item_count": ls.spec.items.len() })).collect();
-
-    Ok(CommandOutcome::read_only(
-        "project.inspect",
-        "inspected project",
-        json!({
-            "schema_version": doc.schema_version,
-            "title": doc.title,
-            "total_sheet_count": doc.total_sheet_count(),
-            "active_sheet_id": doc.active_sheet_id.as_ref().map(SheetId::as_str),
-            "family_anchor_sheet_id": doc.family_anchor_sheet_id.as_ref().map(SheetId::as_str),
-            "checkpoints": doc.checkpoints.len(),
-            "data_sheets": data_sheets,
-            "info_sheets": info_sheets,
-            "result_sheets": result_sheets,
-            "graph_sheets": graph_sheets,
-            "layout_sheets": layout_sheets,
-            "focus": focus_info,
-        }),
-    ))
-}
-
-fn count_analysis_hooks(spec: &AnalysisSpec) -> usize {
-    match &spec.kind {
-        AnalysisKind::NonlinearRegression(nl) => nl.parameter_rules.iter().filter(|r| matches!(r.scope, ParameterScope::HookedConstant(_))).count(),
-        AnalysisKind::PowerAnalysis(p) => usize::from(p.info_sheet_id.is_some()),
-        _ => 0,
-    }
+    let focus_id = parsed.sheet_id.as_deref().map(parse_sheet_id).transpose()?;
+    let summary = crate::services::inspect_project_summary(&ctx.session.doc, ctx.session.is_dirty(), ctx.session.file_path(), focus_id.as_ref())?;
+    Ok(CommandOutcome::read_only("project.inspect", "inspected project", summary.to_project_inspect_json()))
 }
 
 #[derive(Debug, Deserialize)]

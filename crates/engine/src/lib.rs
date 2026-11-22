@@ -13,6 +13,8 @@ pub mod guard;
 pub mod methods_report;
 pub mod path_policy;
 pub use path_policy::ExternalPathPolicy;
+pub mod services;
+pub use services::{BatchCommandStep, BatchStepFailure};
 
 use std::collections::VecDeque;
 use std::fmt;

@@ -15,7 +15,7 @@ use curvebook_math::sum::{covariance, sample_sd};
 use curvebook_math::{AxisScale, ConfidenceLevel};
 use curvebook_palette::{ColorRamp, ColormapId, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8};
 use curvebook_stats::common::quartiles_hinge;
-use curvebook_stats::multivariate::{DendrogramMerge, hierarchical_clustering_with_metrics};
+use curvebook_stats::multivariate::{DendrogramMerge, hierarchical_clustering_pairwise_complete, hierarchical_clustering_with_metrics};
 use curvebook_stats::roc::{RocCiMethod, roc_curve_analysis};
 use curvebook_stats::two_group::bland_altman;
 use curvebook_text::{RichText, parse_markup};
@@ -1804,7 +1804,7 @@ fn cluster_heatmap_rows(
         let dense: Vec<Vec<f64>> = rows.iter().map(|r| r.iter().take(n_cols).flatten().copied().collect()).collect();
         return hierarchical_clustering_with_metrics(&dense, distance, linkage).unwrap_or_default();
     }
-    if let Some(merges) = pairwise_hierarchical_clustering(rows, n_cols, distance, linkage) {
+    if let Ok(Some(merges)) = hierarchical_clustering_pairwise_complete(rows, n_cols, distance, linkage) {
         return merges;
     }
     warnings.push(ChartWarning::new(
@@ -1812,192 +1812,6 @@ fn cluster_heatmap_rows(
         "hierarchical clustering skipped because rows lack overlapping finite observations",
     ));
     Vec::new()
-}
-
-fn pairwise_row_distance(a: &[Option<f64>], b: &[Option<f64>], n_cols: usize, metric: ClusterDistance) -> Option<f64> {
-    match metric {
-        ClusterDistance::Euclidean | ClusterDistance::Manhattan => {
-            let mut count = 0usize;
-            let mut sum = 0.0;
-            for c in 0..n_cols {
-                let Some(va) = a.get(c).copied().flatten().filter(|x| x.is_finite()) else { continue };
-                let Some(vb) = b.get(c).copied().flatten().filter(|x| x.is_finite()) else { continue };
-                let diff = (va - vb).abs();
-                sum += if matches!(metric, ClusterDistance::Euclidean) { diff * diff } else { diff };
-                count += 1;
-            }
-            if count == 0 {
-                return None;
-            }
-            let scaled = sum * ((n_cols as f64) / (count as f64));
-            let dist = if matches!(metric, ClusterDistance::Euclidean) { scaled.sqrt() } else { scaled };
-            dist.is_finite().then_some(dist)
-        }
-        ClusterDistance::Cosine => {
-            let (mut count, mut dot, mut norm_a, mut norm_b) = (0usize, 0.0, 0.0, 0.0);
-            for c in 0..n_cols {
-                let Some(va) = a.get(c).copied().flatten().filter(|x| x.is_finite()) else { continue };
-                let Some(vb) = b.get(c).copied().flatten().filter(|x| x.is_finite()) else { continue };
-                dot += va * vb;
-                norm_a += va * va;
-                norm_b += vb * vb;
-                count += 1;
-            }
-            if count == 0 {
-                return None;
-            }
-            let dist = if norm_a <= 1e-30 && norm_b <= 1e-30 {
-                0.0
-            } else if norm_a <= 1e-30 || norm_b <= 1e-30 {
-                1.0
-            } else {
-                let cos = (dot / (norm_a * norm_b).sqrt()).clamp(-1.0, 1.0);
-                (1.0 - cos).clamp(0.0, 2.0)
-            };
-            dist.is_finite().then_some(dist)
-        }
-        ClusterDistance::Pearson => {
-            let (mut count, mut sum_a, mut sum_b) = (0usize, 0.0, 0.0);
-            for c in 0..n_cols {
-                let Some(va) = a.get(c).copied().flatten().filter(|x| x.is_finite()) else { continue };
-                let Some(vb) = b.get(c).copied().flatten().filter(|x| x.is_finite()) else { continue };
-                sum_a += va;
-                sum_b += vb;
-                count += 1;
-            }
-            if count < 2 {
-                return None;
-            }
-            let mean_a = sum_a / (count as f64);
-            let mean_b = sum_b / (count as f64);
-            let (mut num, mut da, mut db, mut max_diff) = (0.0, 0.0, 0.0, 0.0_f64);
-            for c in 0..n_cols {
-                let Some(va) = a.get(c).copied().flatten().filter(|x| x.is_finite()) else { continue };
-                let Some(vb) = b.get(c).copied().flatten().filter(|x| x.is_finite()) else { continue };
-                let xa = va - mean_a;
-                let xb = vb - mean_b;
-                num += xa * xb;
-                da += xa * xa;
-                db += xb * xb;
-                max_diff = max_diff.max((va - vb).abs());
-            }
-            let denom = (da * db).sqrt();
-            let dist = if !denom.is_finite() || denom <= 1e-30 {
-                if max_diff < 1e-12 { 0.0 } else { 1.0 }
-            } else {
-                let r = (num / denom).clamp(-1.0, 1.0);
-                (1.0 - r).clamp(0.0, 2.0)
-            };
-            dist.is_finite().then_some(dist)
-        }
-    }
-}
-
-fn lance_williams_distance(linkage: ClusterLinkage, d_iu: f64, d_ju: f64, d_ij: f64, n_i: f64, n_j: f64, n_u: f64) -> f64 {
-    match linkage {
-        ClusterLinkage::Single => d_iu.min(d_ju),
-        ClusterLinkage::Complete => d_iu.max(d_ju),
-        ClusterLinkage::Upgma => (n_i * d_iu + n_j * d_ju) / (n_i + n_j),
-        ClusterLinkage::Wpgma => 0.5 * (d_iu + d_ju),
-        ClusterLinkage::Centroid => {
-            let n_k = n_i + n_j;
-            let sq = (n_i * d_iu * d_iu + n_j * d_ju * d_ju) / n_k - (n_i * n_j * d_ij * d_ij) / (n_k * n_k);
-            sq.max(0.0).sqrt()
-        }
-        ClusterLinkage::Median => (0.5 * d_iu * d_iu + 0.5 * d_ju * d_ju - 0.25 * d_ij * d_ij).max(0.0).sqrt(),
-        ClusterLinkage::Ward => {
-            let denom = n_i + n_j + n_u;
-            let sq = ((n_i + n_u) * d_iu * d_iu + (n_j + n_u) * d_ju * d_ju - n_u * d_ij * d_ij) / denom;
-            sq.max(0.0).sqrt()
-        }
-    }
-}
-
-fn pairwise_hierarchical_clustering(
-    rows: &[Vec<Option<f64>>],
-    n_cols: usize,
-    distance: ClusterDistance,
-    linkage: ClusterLinkage,
-) -> Option<Vec<DendrogramMerge>> {
-    let n = rows.len();
-    if n < 2 || n_cols < 2 {
-        return None;
-    }
-
-    let mut dist = vec![0.0_f64; n * n];
-    for i in 0..n {
-        let row_i = rows.get(i)?;
-        for j in (i + 1)..n {
-            let row_j = rows.get(j)?;
-            let d = pairwise_row_distance(row_i, row_j, n_cols, distance)?;
-            if !d.is_finite() {
-                return None;
-            }
-            if let Some(s) = dist.get_mut(i * n + j) {
-                *s = d;
-            }
-            if let Some(s) = dist.get_mut(j * n + i) {
-                *s = d;
-            }
-        }
-    }
-
-    let mut active = vec![true; n];
-    let mut sizes = vec![1usize; n];
-    let mut node_ids: Vec<isize> =
-        (0..n).map(|i| isize::try_from(i).ok().and_then(|v| v.checked_add(1)).and_then(isize::checked_neg)).collect::<Option<Vec<isize>>>()?;
-    let mut merges = Vec::with_capacity(n - 1);
-
-    for step in 0..(n - 1) {
-        let mut best: Option<(usize, usize, f64)> = None;
-        for i in 0..n {
-            if !active.get(i).copied().unwrap_or(false) {
-                continue;
-            }
-            for j in (i + 1)..n {
-                if !active.get(j).copied().unwrap_or(false) {
-                    continue;
-                }
-                let d = dist.get(i * n + j).copied().unwrap_or(f64::INFINITY);
-                if best.is_none_or(|(_, _, bd)| d < bd) {
-                    best = Some((i, j, d));
-                }
-            }
-        }
-        let (ci, cj, min_d) = best?;
-        let n_i = sizes.get(ci).copied().unwrap_or(1);
-        let n_j = sizes.get(cj).copied().unwrap_or(1);
-        let left = node_ids.get(ci).copied().unwrap_or(0);
-        let right = node_ids.get(cj).copied().unwrap_or(0);
-        merges.push(DendrogramMerge { left, right, distance: min_d, cluster_size: n_i + n_j });
-
-        for u in 0..n {
-            if u == ci || u == cj || !active.get(u).copied().unwrap_or(false) {
-                continue;
-            }
-            let d_iu = dist.get(ci * n + u).copied().unwrap_or(0.0);
-            let d_ju = dist.get(cj * n + u).copied().unwrap_or(0.0);
-            let n_u = sizes.get(u).copied().unwrap_or(1) as f64;
-            let d_new = lance_williams_distance(linkage, d_iu, d_ju, min_d, n_i as f64, n_j as f64, n_u);
-            if let Some(s) = dist.get_mut(ci * n + u) {
-                *s = d_new;
-            }
-            if let Some(s) = dist.get_mut(u * n + ci) {
-                *s = d_new;
-            }
-        }
-        if let Some(sz) = sizes.get_mut(ci) {
-            *sz = n_i + n_j;
-        }
-        if let Some(id) = node_ids.get_mut(ci) {
-            *id = isize::try_from(step).ok()?;
-        }
-        if let Some(act) = active.get_mut(cj) {
-            *act = false;
-        }
-    }
-
-    Some(merges)
 }
 
 fn dendrogram_leaf_order(merges: &[DendrogramMerge], n_leaves: usize) -> Vec<usize> {
