@@ -177,9 +177,18 @@ fn cjk_rtl_locales_render_mirror_panes_and_keep_hidpi_hit_test_parity() {
 
             let layout = measure_qa_regions(&app, metrics);
             assert!(layout.navigator.width > 0 && layout.canvas.width > 0 && layout.inspector.width > 0);
-            assert_eq!(layout.navigator.x, 0, "{locale}@{scale}x: navigator starts on left");
-            assert!(layout.navigator.x < layout.canvas.x && layout.canvas.x < layout.inspector.x);
-            assert_eq!(layout.inspector.x + layout.inspector.width, phys_w, "{locale}@{scale}x: inspector flushes right");
+            if curvebook_ui_egui::i18n::is_rtl_locale(locale) {
+                assert_eq!(layout.inspector.x, 0, "{locale}@{scale}x: RTL inspector must dock flush left");
+                assert!(
+                    layout.inspector.x < layout.canvas.x && layout.canvas.x < layout.navigator.x,
+                    "{locale}@{scale}x: expected mirrored RTL pane order inspector < canvas < navigator: {layout:?}"
+                );
+                assert_eq!(layout.navigator.x + layout.navigator.width, phys_w, "{locale}@{scale}x: RTL navigator must flush right");
+            } else {
+                assert_eq!(layout.navigator.x, 0, "{locale}@{scale}x: navigator starts on left");
+                assert!(layout.navigator.x < layout.canvas.x && layout.canvas.x < layout.inspector.x);
+                assert_eq!(layout.inspector.x + layout.inspector.width, phys_w, "{locale}@{scale}x: inspector flushes right");
+            }
 
             let target = RenderTargetSpec { width_px: phys_w, height_px: phys_h, dpi };
             let img = app.render_egui_shell_rgba(target, ScreenshotRegionTarget::FullWindow).expect("render egui shell rgba");
