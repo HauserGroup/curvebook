@@ -15,6 +15,7 @@ crc32fast = { workspace = true }
 curvebook-chart = { workspace = true }
 curvebook-doc = { workspace = true }
 curvebook-palette = { workspace = true }
+curvebook-platform = { workspace = true }
 curvebook-text = { workspace = true }
 png = { workspace = true }
 quick-xml = { workspace = true }

@@ -8,6 +8,7 @@ use curvebook_chart::{
     TextAnchor,
 };
 use curvebook_palette::Rgba8;
+use curvebook_platform::base64::encode as encode_base64;
 use curvebook_text::metrics::split_rich_text_lines;
 use curvebook_text::{BUNDLED_FONTS, GlyphOutlineCmd, RichText, SpanScript, SpanSlope, SpanWeight, outline_rich_text};
 use png::{BitDepth, ColorType, Encoder as PngEncoder};
@@ -808,34 +809,6 @@ fn escape_css_string(raw: &str) -> String {
 
 fn escape_cdata_text(raw: &str) -> String {
     raw.replace("]]>", "]]]]><![CDATA[>")
-}
-
-fn encode_base64(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk.first().copied().unwrap_or(0);
-        let b1 = chunk.get(1).copied().unwrap_or(0);
-        let b2 = chunk.get(2).copied().unwrap_or(0);
-        let triple = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
-        let i0 = ((triple >> 18) & 0x3F) as usize;
-        let i1 = ((triple >> 12) & 0x3F) as usize;
-        let i2 = ((triple >> 6) & 0x3F) as usize;
-        let i3 = (triple & 0x3F) as usize;
-        out.push(char::from(TABLE.get(i0).copied().unwrap_or(b'A')));
-        out.push(char::from(TABLE.get(i1).copied().unwrap_or(b'A')));
-        if chunk.len() > 1 {
-            out.push(char::from(TABLE.get(i2).copied().unwrap_or(b'A')));
-        } else {
-            out.push('=');
-        }
-        if chunk.len() > 2 {
-            out.push(char::from(TABLE.get(i3).copied().unwrap_or(b'A')));
-        } else {
-            out.push('=');
-        }
-    }
-    out
 }
 
 #[derive(Default)]

@@ -953,6 +953,7 @@ dependencies = [
  "curvebook-chart",
  "curvebook-doc",
  "curvebook-palette",
+ "curvebook-platform",
  "curvebook-testkit",
  "curvebook-text",
  "png",
