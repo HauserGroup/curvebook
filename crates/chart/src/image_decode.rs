@@ -1,5 +1,6 @@
 //! Bounded decoding and scene emission for embedded PNG, JPEG, and TIFF raster images.
 
+use std::collections::BTreeMap;
 use std::io::Cursor;
 
 use curvebook_doc::{
@@ -75,6 +76,22 @@ pub struct EmbeddedImageDrawSpec<'a> {
     pub badge_override: Option<&'a str>,
 }
 
+type CachedImageDecode = Result<((u32, u32), Vec<u8>), String>;
+
+/// Per-scene decoded RGBA cache keyed by `asset_id` so repeated references decode once.
+#[derive(Debug, Default)]
+pub(crate) struct DecodedImageCache {
+    entries: BTreeMap<String, CachedImageDecode>,
+    decode_calls: usize,
+}
+
+impl DecodedImageCache {
+    #[cfg(test)]
+    pub(crate) fn decode_calls(&self) -> usize {
+        self.decode_calls
+    }
+}
+
 /// Resolve, bounded-decode, and push a [`ScenePrimitive::RasterImage`] (plus optional rotated
 /// border [`ScenePrimitive::Path`] and optional badge [`ScenePrimitive::Text`]) onto `scene`.
 pub fn emit_embedded_image_primitive(
@@ -82,6 +99,18 @@ pub fn emit_embedded_image_primitive(
     doc: &ProjectDocument,
     spec: &EmbeddedImageDrawSpec<'_>,
     pixel_budget: Option<&mut u64>,
+) {
+    emit_embedded_image_primitive_cached(scene, doc, spec, pixel_budget, None);
+}
+
+/// Same as [`emit_embedded_image_primitive`], reusing a per-scene [`DecodedImageCache`] when provided
+/// while still counting every materialized raster against `pixel_budget`.
+pub(crate) fn emit_embedded_image_primitive_cached(
+    scene: &mut ChartScene,
+    doc: &ProjectDocument,
+    spec: &EmbeddedImageDrawSpec<'_>,
+    pixel_budget: Option<&mut u64>,
+    cache: Option<&mut DecodedImageCache>,
 ) {
     if !spec.bounds_pt.x.is_finite()
         || !spec.bounds_pt.y.is_finite()
@@ -106,12 +135,42 @@ pub fn emit_embedded_image_primitive(
     {
         scene.warnings.push(ChartWarning::new(
             "embedded_image_budget_exceeded",
-            format!("layout embedded image `{}` exceeds cumulative pixel budget {MAX_IMAGE_PIXELS}", spec.asset_id),
+            format!("embedded image `{}` exceeds cumulative pixel budget {MAX_IMAGE_PIXELS}", spec.asset_id),
         ));
         return;
     }
 
-    let ((w, h), rgba) = match decode_asset_rgba8(asset) {
+    let decoded_res: CachedImageDecode = match cache {
+        Some(c) => {
+            if let Some(existing) = c.entries.get(&asset.asset_id) {
+                match existing {
+                    Ok(((w, h), bytes)) => {
+                        let actual_px = u64::from(*w).saturating_mul(u64::from(*h));
+                        if let Some(used) = pixel_budget.as_deref()
+                            && used.saturating_add(actual_px) > MAX_IMAGE_PIXELS
+                        {
+                            scene.warnings.push(ChartWarning::new(
+                                "embedded_image_budget_exceeded",
+                                format!("embedded image `{}` exceeds cumulative pixel budget {MAX_IMAGE_PIXELS}", spec.asset_id),
+                            ));
+                            return;
+                        }
+                        Ok(((*w, *h), bytes.clone()))
+                    }
+                    Err(msg) => Err(msg.clone()),
+                }
+            } else {
+                c.decode_calls += 1;
+                let res = decode_asset_rgba8(asset);
+                let out = res.clone();
+                c.entries.insert(asset.asset_id.clone(), res);
+                out
+            }
+        }
+        None => decode_asset_rgba8(asset),
+    };
+
+    let ((w, h), rgba) = match decoded_res {
         Ok(decoded) => decoded,
         Err(msg) => {
             scene.warnings.push(ChartWarning::new("invalid_embedded_image", msg));
@@ -124,7 +183,7 @@ pub fn emit_embedded_image_primitive(
         if next > MAX_IMAGE_PIXELS {
             scene.warnings.push(ChartWarning::new(
                 "embedded_image_budget_exceeded",
-                format!("layout embedded image `{}` exceeds cumulative pixel budget {MAX_IMAGE_PIXELS}", spec.asset_id),
+                format!("embedded image `{}` exceeds cumulative pixel budget {MAX_IMAGE_PIXELS}", spec.asset_id),
             ));
             return;
         }
@@ -185,5 +244,55 @@ pub fn emit_embedded_image_primitive(
             rotation_deg: 0.0,
             color: curvebook_palette::Rgba8::BLACK,
         }));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use curvebook_doc::{
+        CropInsetsPt, ImageMimeKind, MAX_IMAGE_PIXELS, ProjectDocument, ProjectImageAsset, RectPt as DocRectPt, content_addressed_asset_id,
+    };
+    use image::{ImageEncoder, RgbaImage, codecs::png::PngEncoder};
+
+    use super::{DecodedImageCache, EmbeddedImageDrawSpec, emit_embedded_image_primitive_cached};
+    use crate::scene::{ChartScene, ScenePrimitive};
+
+    fn make_png_bytes(w: u32, h: u32) -> Vec<u8> {
+        let img = RgbaImage::from_pixel(w, h, image::Rgba([10, 120, 200, 255]));
+        let mut buf = Vec::new();
+        PngEncoder::new(Cursor::new(&mut buf)).write_image(img.as_raw(), w, h, image::ExtendedColorType::Rgba8).expect("encode png");
+        buf
+    }
+
+    #[test]
+    fn decoded_image_cache_decodes_repeated_asset_id_once_while_enforcing_pixel_budget() {
+        let bytes = make_png_bytes(32, 32);
+        let asset_id = content_addressed_asset_id(&bytes);
+        let asset = ProjectImageAsset { asset_id: asset_id.clone(), media_type: ImageMimeKind::Png, pixel_size: (32, 32), bytes };
+        let mut doc = ProjectDocument::default();
+        let inserted_id = doc.upsert_image_asset(asset).expect("add asset");
+
+        let mut scene = ChartScene::new("cache-test", "Cache Test", 400.0, 300.0, None);
+        let mut budget: u64 = 0;
+        let mut cache = DecodedImageCache::default();
+        let spec = EmbeddedImageDrawSpec {
+            asset_id: &inserted_id,
+            bounds_pt: DocRectPt::new(10.0, 10.0, 50.0, 50.0),
+            rotation_deg: 0.0,
+            crop: CropInsetsPt::default(),
+            border: None,
+            clip: None,
+            badge_override: None,
+        };
+        for _ in 0..4 {
+            emit_embedded_image_primitive_cached(&mut scene, &doc, &spec, Some(&mut budget), Some(&mut cache));
+        }
+        assert_eq!(cache.decode_calls(), 1, "repeated asset_id should decode exactly once per scene");
+        let raster_count = scene.primitives.iter().filter(|p| matches!(p, ScenePrimitive::RasterImage(_))).count();
+        assert_eq!(raster_count, 4);
+        assert_eq!(budget, 4 * 32 * 32);
+        assert!(budget <= MAX_IMAGE_PIXELS);
     }
 }

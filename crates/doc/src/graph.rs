@@ -1251,6 +1251,9 @@ impl CompactLetterDisplaySpec {
     }
 }
 
+/// Maximum number of annotations allowed on a single [`GraphSpec`].
+pub const MAX_GRAPH_ANNOTATIONS: usize = 64;
+
 /// Resolution-independent figure specification compiled by `curvebook-chart`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct GraphSpec {
@@ -1623,6 +1626,9 @@ impl GraphSpec {
         if !(0.0..=12.0).contains(&self.heatmap_labels.cell_gap_pt) {
             return Err(geom_err("spec.heatmap_labels.cell_gap_pt must lie in [0, 12]"));
         }
+        if self.annotations.len() > MAX_GRAPH_ANNOTATIONS {
+            return Err(geom_err("spec.annotations count exceeds maximum allowed MAX_GRAPH_ANNOTATIONS"));
+        }
         for series in &self.series {
             series.source_sheet_id.validate_non_empty_bounded()?;
             validate_gdo_bounds(&series.gdo)?;
@@ -1800,6 +1806,38 @@ impl GraphSpec {
     }
 }
 
+fn deserialize_bounded_annotations<'de, D>(deserializer: D) -> Result<Vec<GraphAnnotation>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct BoundedAnnotationsVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for BoundedAnnotationsVisitor {
+        type Value = Vec<GraphAnnotation>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "a sequence of at most {MAX_GRAPH_ANNOTATIONS} graph annotations")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let cap = seq.size_hint().unwrap_or(0).min(MAX_GRAPH_ANNOTATIONS);
+            let mut items = Vec::with_capacity(cap);
+            while let Some(item) = seq.next_element()? {
+                if items.len() >= MAX_GRAPH_ANNOTATIONS {
+                    return Err(serde::de::Error::custom(format!("graph annotation count exceeds maximum allowed {MAX_GRAPH_ANNOTATIONS}")));
+                }
+                items.push(item);
+            }
+            Ok(items)
+        }
+    }
+
+    deserializer.deserialize_seq(BoundedAnnotationsVisitor)
+}
+
 impl<'de> serde::Deserialize<'de> for GraphSpec {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -1830,7 +1868,7 @@ impl<'de> serde::Deserialize<'de> for GraphSpec {
             compact_letter_display: Option<CompactLetterDisplaySpec>,
             #[serde(default)]
             pairwise_display_mode: PairwiseDisplayMode,
-            #[serde(default)]
+            #[serde(default, deserialize_with = "deserialize_bounded_annotations")]
             annotations: Vec<GraphAnnotation>,
             #[serde(default)]
             point_overrides: Vec<PointStyleOverride>,
@@ -2334,5 +2372,34 @@ mod tests {
         assert_eq!(enc_cont.plot_mode, MultivariatePlotMode::BubbleScatter);
         assert_eq!(enc_cont.x_column, 0);
         assert_eq!(enc_cont.y_column, 1);
+    }
+
+    #[test]
+    fn graph_spec_enforces_max_graph_annotations_in_validate_and_serde() {
+        use super::{GraphAnnotation, MAX_GRAPH_ANNOTATIONS};
+        use crate::RectPt;
+
+        let col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 2).expect("column table");
+        let ds = DataSheet::new(SheetId::new("col_ann"), "Annotations", TableArchetype::Column(col)).expect("data sheet");
+        let mut spec = GraphSpec::default_for_data_sheet(&ds);
+        let make_box =
+            |i: usize| GraphAnnotation::TextBox { bounds_pt: RectPt::new(10.0, 10.0, 40.0, 20.0), markdown: format!("Note {i}"), bordered: false };
+        for i in 0..MAX_GRAPH_ANNOTATIONS {
+            spec.annotations.push(make_box(i));
+        }
+        assert!(spec.validate_geometry_and_bounds().is_ok());
+        assert!(spec.validate().is_ok());
+
+        let at_limit_json = serde_json::to_value(&spec).expect("serialize at limit");
+        let decoded_ok: GraphSpec = serde_json::from_value(at_limit_json).expect("deserialize at limit");
+        assert_eq!(decoded_ok.annotations.len(), MAX_GRAPH_ANNOTATIONS);
+
+        spec.annotations.push(make_box(MAX_GRAPH_ANNOTATIONS));
+        assert!(spec.validate_geometry_and_bounds().is_err());
+        assert!(spec.validate().is_err());
+
+        let over_limit_json = serde_json::to_value(&spec).expect("serialize over limit");
+        let err = serde_json::from_value::<GraphSpec>(over_limit_json).expect_err("over-limit annotations must be rejected on deserialize");
+        assert!(err.to_string().contains(&MAX_GRAPH_ANNOTATIONS.to_string()), "unexpected error: {err}");
     }
 }

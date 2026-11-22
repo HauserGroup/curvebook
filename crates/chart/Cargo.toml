@@ -18,7 +18,6 @@ curvebook-math = { workspace = true }
 curvebook-palette = { workspace = true }
 curvebook-stats = { workspace = true }
 curvebook-text = { workspace = true }
-curvebook-transform = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
