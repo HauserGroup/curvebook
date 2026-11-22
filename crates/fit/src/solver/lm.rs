@@ -549,8 +549,8 @@ pub(in crate::solver) fn update_tr_radius_more(ctx: &LmStepContext<'_>, outcome:
         let mut temp = 0.5_f64;
         if let Some(ss_t) = outcome.ss_trial
             && ss_t > outcome.ss_curr
+            && let Ok(jp) = ctx.j_mat.matvec(outcome.actual_step)
         {
-            let jp = matvec(ctx.j_mat, outcome.actual_step);
             let r_dot_jp: f64 = ctx.w_res.iter().zip(jp.iter()).map(|(r, j)| r * j).sum();
             let dir_deriv = -r_dot_jp;
             let ratio_t = 0.5 * dir_deriv / (dir_deriv + 0.5 * (outcome.ss_curr - ss_t));
@@ -775,7 +775,9 @@ pub(in crate::solver) fn more_r_inv_t_norm_sq(
 }
 
 pub(in crate::solver) fn quadratic_pred_num(j_mat: &DenseMatrix, w_res: &[f64], step: &[f64]) -> f64 {
-    let jp = matvec(j_mat, step);
+    let Ok(jp) = j_mat.matvec(step) else {
+        return 0.0;
+    };
     let jp_ss: f64 = jp.iter().map(|v| v * v).sum();
     let r_dot_jp: f64 = w_res.iter().zip(jp.iter()).map(|(r, j)| r * j).sum();
     2.0 * r_dot_jp - jp_ss
@@ -841,18 +843,6 @@ pub(in crate::solver) fn scaled_l2_norm(diag: &[f64], v: &[f64]) -> f64 {
         s.add(prod * prod);
     }
     s.total().sqrt()
-}
-
-pub(in crate::solver) fn matvec(a: &DenseMatrix, v: &[f64]) -> Vec<f64> {
-    let mut out = vec![0.0_f64; a.nrows()];
-    for (i, row_out) in out.iter_mut().enumerate() {
-        let mut acc = NeumaierSum::new();
-        for (j, &vj) in v.iter().enumerate() {
-            acc.add(mat_get(a, i, j) * vj);
-        }
-        *row_out = acc.total();
-    }
-    out
 }
 
 pub(in crate::solver) fn run_trust_region_lm(

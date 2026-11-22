@@ -69,13 +69,15 @@ use std::collections::BTreeMap;
 use curvebook_doc::CiBound;
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{
-    chi2_isf, chi2_sf, f_sf, lilliefors_d_from_sorted, lilliefors_p_value, norm_cdf, norm_ppf, norm_sf, norm_two_sided_isf, student_t_two_sided_isf,
+    chi2_isf, chi2_sf, f_sf, lilliefors_d_from_sorted, lilliefors_p_value, norm_sf, norm_two_sided_isf, student_t_two_sided_isf,
     student_t_two_sided_p,
 };
 use curvebook_math::linalg::{DenseMatrix, qr_col_pivoted, svd};
+use curvebook_math::normality::{anderson_darling, average_ranks, dagostino_pearson, shapiro_wilk};
 use curvebook_math::roots::{RootOptions, brent_root};
+use curvebook_math::rout::{compute_rsdr as math_compute_rsdr, rout_detect_outliers_core as math_rout_detect_outliers_core};
 use curvebook_math::special::ln_choose;
-use curvebook_math::sum::{NeumaierSum, SummaryMoments, pearson_r};
+use curvebook_math::sum::{NeumaierSum, pearson_r};
 
 use crate::error::FitError;
 use crate::types::{DataPoint, validated_replicate_moments};
@@ -1486,228 +1488,50 @@ pub fn replicates_lack_of_fit(points: &[DataPoint], ss_res: f64, df_res: usize) 
 
 /// Shapiro–Wilk normality test (Royston 1992; 1995 AS R94) on residuals (`3 <= n <= 5000`).
 ///
-/// Shapiro & Wilk (1965) `W` with Royston's (1992, 1995 AS R94) polynomial approximations for
-/// `a_n` (`n >= 4`) and `a_{n-1}` (`n >= 6`), exact `a = [-1/sqrt(2), 0, 1/sqrt(2)]` and arcsine
-/// p-value at `n = 3`, and Royston's normalising transformations for `4 <= n <= 5000`.
+/// Delegates to [`curvebook_math::normality::shapiro_wilk`]: Shapiro & Wilk (1965) `W` with
+/// Royston's (1992, 1995 AS R94) polynomial approximations for `a_n` (`n >= 4`) and `a_{n-1}`
+/// (`n >= 6`), exact `a = [-1/sqrt(2), 0, 1/sqrt(2)]` and arcsine p-value at `n = 3`, and
+/// Royston's normalising transformations for `4 <= n <= 5000`.
 #[must_use]
 pub fn shapiro_wilk_test(values: &[f64]) -> Option<NormalityTestResult> {
-    let n = values.len();
-    if !(3..=5000).contains(&n) {
-        return None;
-    }
-    let mut sorted = values.to_vec();
-    for &v in &sorted {
-        if !v.is_finite() {
-            return None;
-        }
-    }
-    sorted.sort_by(f64::total_cmp);
-    let moments = SummaryMoments::from_slice(&sorted).ok()?;
-    if moments.css <= 0.0 {
-        return None;
-    }
-
-    let a = royston_sw_weights(n)?;
-    let mut num_acc = NeumaierSum::new();
-    for i in 0..(n / 2) {
-        num_acc.add(a[n - 1 - i] * (sorted[n - 1 - i] - sorted[i]));
-    }
-    let num = num_acc.total();
-    let w = ((num * num) / moments.css).clamp(0.0, 1.0);
-    let p_value = royston_sw_p_value(w, n as f64);
-    Some(NormalityTestResult { test_name: String::from("Shapiro-Wilk"), statistic: w, p_value, passed: p_value >= 0.05 })
-}
-
-fn royston_sw_weights(n: usize) -> Option<Vec<f64>> {
-    if n == 3 {
-        let s = core::f64::consts::FRAC_1_SQRT_2;
-        return Some(vec![-s, 0.0, s]);
-    }
-    let nf = n as f64;
-    let mut m = Vec::with_capacity(n);
-    let mut m_ss = 0.0_f64;
-    for i in 1..=n {
-        let p = ((i as f64) - 0.375) / (nf + 0.25);
-        let mi = norm_ppf(p).ok()?;
-        m_ss += mi * mi;
-        m.push(mi);
-    }
-    let m_norm = m_ss.sqrt();
-    let u = 1.0 / nf.sqrt();
-    let a_n = royston_poly_an(u) + m[n - 1] / m_norm;
-
-    let mut a = vec![0.0_f64; n];
-    a[n - 1] = a_n;
-    a[0] = -a_n;
-
-    if n <= 5 {
-        let num = m_ss - 2.0 * m[n - 1] * m[n - 1];
-        let den = (1.0 - 2.0 * a_n * a_n).max(1e-12);
-        let phi = (num / den).sqrt();
-        for i in 1..(n - 1) {
-            a[i] = m[i] / phi;
-        }
-    } else {
-        let a_n1 = royston_poly_an1(u) + m[n - 2] / m_norm;
-        a[n - 2] = a_n1;
-        a[1] = -a_n1;
-        let num = m_ss - 2.0 * m[n - 1] * m[n - 1] - 2.0 * m[n - 2] * m[n - 2];
-        let den = (1.0 - 2.0 * a_n * a_n - 2.0 * a_n1 * a_n1).max(1e-12);
-        let phi = (num / den).sqrt();
-        for i in 2..(n - 2) {
-            a[i] = m[i] / phi;
-        }
-    }
-    Some(a)
-}
-
-fn royston_poly_an(u: f64) -> f64 {
-    const C: [f64; 6] = [0.0, 0.221_157, -0.147_981, -2.071_19, 4.434_685, -2.706_056];
-    let mut acc = C[5];
-    for &c in C[..5].iter().rev() {
-        acc = acc * u + c;
-    }
-    acc
-}
-
-fn royston_poly_an1(u: f64) -> f64 {
-    const C: [f64; 6] = [0.0, 0.042_981, -0.293_762, -1.752_461, 5.682_633, -3.582_633];
-    let mut acc = C[5];
-    for &c in C[..5].iter().rev() {
-        acc = acc * u + c;
-    }
-    acc
-}
-
-fn royston_sw_p_value(w: f64, nf: f64) -> f64 {
-    if w >= 1.0 {
-        return 1.0;
-    }
-    if nf == 3.0 {
-        let sqrtw = w.max(0.0).sqrt();
-        let pi6 = 6.0 / core::f64::consts::PI;
-        let p = pi6 * (sqrtw.clamp(-1.0, 1.0).asin() - core::f64::consts::FRAC_PI_3);
-        return p.clamp(0.0, 1.0);
-    }
-    let y = (1.0 - w).max(1e-16).ln();
-    let z = if nf <= 11.0 {
-        let gamma = 0.459 * nf - 2.273;
-        if y >= gamma {
-            return 0.0;
-        }
-        let mu = -0.000_671_4 * nf.powi(3) + 0.025_054 * nf.powi(2) - 0.399_78 * nf + 0.544;
-        let sigma = (-0.002_032_2 * nf.powi(3) + 0.062_767 * nf.powi(2) - 0.778_57 * nf + 1.382_2).exp();
-        let w_trans = -(gamma - y).ln();
-        (w_trans - mu) / sigma
-    } else {
-        let lnn = nf.ln();
-        let mu = 0.003_891_5 * lnn.powi(3) - 0.083_751 * lnn.powi(2) - 0.310_82 * lnn - 1.586_1;
-        let sigma = (0.003_030_2 * lnn.powi(2) - 0.082_676 * lnn - 0.480_3).exp();
-        (y - mu) / sigma
-    };
-    norm_sf(z).clamp(0.0, 1.0)
+    let res = shapiro_wilk(values).ok()?;
+    Some(NormalityTestResult { test_name: String::from("Shapiro-Wilk"), statistic: res.statistic, p_value: res.p_value, passed: res.p_value >= 0.05 })
 }
 
 /// D'Agostino–Pearson $K^2$ omnibus normality test (`n >= 8`).
 ///
-/// `K^2 = Z_1^2 + Z_2^2 ~ chi^2_2`, with the skewness transformation `Z_1` (D'Agostino 1970) and
-/// the kurtosis transformation `Z_2` of Anscombe & Glynn (1983), as assembled by
-/// D'Agostino, Belanger & D'Agostino (1990).
+/// Delegates to [`curvebook_math::normality::dagostino_pearson`]: `K^2 = Z_1^2 + Z_2^2 ~ chi^2_2`,
+/// with the skewness transformation `Z_1` (D'Agostino 1970) and the kurtosis transformation `Z_2`
+/// of Anscombe & Glynn (1983), as assembled by D'Agostino, Belanger & D'Agostino (1990).
 ///
 /// Reference: D'Agostino, R. B. (1970). Transformation to normality of the null distribution of g1. *Biometrika* 57(3), 679–681.
 #[must_use]
 pub fn dagostino_pearson_test(values: &[f64]) -> Option<NormalityTestResult> {
-    let n = values.len();
-    if n < 8 {
-        return None;
-    }
-    let moments = SummaryMoments::from_slice(values).ok()?;
-    if moments.css <= 0.0 {
-        return None;
-    }
-    let nf = n as f64;
-    let m2 = moments.css / nf;
-    let mut m3_acc = NeumaierSum::new();
-    let mut m4_acc = NeumaierSum::new();
-    for &x in values {
-        let d = x - moments.mean;
-        let d2 = d * d;
-        m3_acc.add(d2 * d);
-        m4_acc.add(d2 * d2);
-    }
-    let m3 = m3_acc.total() / nf;
-    let m4 = m4_acc.total() / nf;
-    let sqrt_b1 = m3 / m2.powf(1.5);
-    let b2 = m4 / (m2 * m2);
-
-    // Skewness Z1 (D'Agostino 1970)
-    let y = sqrt_b1 * ((nf + 1.0) * (nf + 3.0) / (6.0 * (nf - 2.0))).sqrt();
-    let beta2 = (3.0 * (nf * nf + 27.0 * nf - 70.0) * (nf + 1.0) * (nf + 3.0)) / ((nf - 2.0) * (nf + 5.0) * (nf + 7.0) * (nf + 9.0));
-    let w2 = -1.0 + (2.0 * (beta2 - 1.0)).sqrt();
-    let delta = 1.0 / (0.5 * w2.ln()).sqrt();
-    let alpha = (2.0 / (w2 - 1.0)).sqrt();
-    let z1 = delta * ((y / alpha) + ((y / alpha).powi(2) + 1.0).sqrt()).ln();
-
-    // Kurtosis Z2 (Anscombe & Glynn 1983)
-    let e_b2 = 3.0 * (nf - 1.0) / (nf + 1.0);
-    let var_b2 = (24.0 * nf * (nf - 2.0) * (nf - 3.0)) / ((nf + 1.0).powi(2) * (nf + 3.0) * (nf + 5.0));
-    let x_k = (b2 - e_b2) / var_b2.sqrt();
-    let sqrt_beta1 =
-        (6.0 * (nf * nf - 5.0 * nf + 2.0) / ((nf + 7.0) * (nf + 9.0))) * ((6.0 * (nf + 3.0) * (nf + 5.0)) / (nf * (nf - 2.0) * (nf - 3.0))).sqrt();
-    let a_k = 6.0 + (8.0 / sqrt_beta1) * (2.0 / sqrt_beta1 + (1.0 + 4.0 / (sqrt_beta1 * sqrt_beta1)).sqrt());
-    let term = (1.0 - 2.0 / a_k) / (1.0 + x_k * (2.0 / (a_k - 4.0)).sqrt()).max(1e-12);
-    let z2 = ((1.0 - 2.0 / (9.0 * a_k)) - term.cbrt()) / (2.0 / (9.0 * a_k)).sqrt();
-
-    let k2 = z1 * z1 + z2 * z2;
-    let p_value = chi2_sf(k2, 2.0).unwrap_or(1.0).clamp(0.0, 1.0);
-    Some(NormalityTestResult { test_name: String::from("D'Agostino-Pearson K2"), statistic: k2, p_value, passed: p_value >= 0.05 })
+    let res = dagostino_pearson(values).ok()?;
+    Some(NormalityTestResult {
+        test_name: String::from("D'Agostino-Pearson K2"),
+        statistic: res.statistic,
+        p_value: res.p_value,
+        passed: res.p_value >= 0.05,
+    })
 }
 
 /// Anderson–Darling normality test on residuals (`n >= 8`) with Stephens small-sample adjustment $A^{*2}$.
 ///
+/// Filters non-finite entries and delegates to [`curvebook_math::normality::anderson_darling`]:
 /// `A^2` of Anderson & Darling (1954) with mean and SD estimated, the case-3 modification
 /// `A*^2 = A^2 (1 + 0.75/n + 2.25/n^2)`, and the piecewise exponential p-value approximation
 /// tabulated in D'Agostino & Stephens (1986).
 #[must_use]
 pub fn anderson_darling_test(values: &[f64]) -> Option<NormalityTestResult> {
-    let mut sorted: Vec<f64> = values.iter().copied().filter(|v| v.is_finite()).collect();
-    let n = sorted.len();
-    if n < 8 {
-        return None;
-    }
-    sorted.sort_by(f64::total_cmp);
-    let moments = SummaryMoments::from_slice(&sorted).ok()?;
-    let sd = moments.sample_sd().ok()?;
-    if sd <= 0.0 {
-        return None;
-    }
-    let nf = n as f64;
-    let mut sum_acc = NeumaierSum::new();
-    for i in 0..n {
-        let z_lo = (sorted[i] - moments.mean) / sd;
-        let z_hi = (sorted[n - 1 - i] - moments.mean) / sd;
-        let p_lo = norm_cdf(z_lo).clamp(1e-16, 1.0 - 1e-16);
-        let q_hi = norm_sf(z_hi).clamp(1e-16, 1.0 - 1e-16);
-        sum_acc.add(((2 * i + 1) as f64) * (p_lo.ln() + q_hi.ln()));
-    }
-    let a2 = (-nf - sum_acc.total() / nf).max(0.0);
-    let a2_star = a2 * (1.0 + 0.75 / nf + 2.25 / (nf * nf));
-
-    let p_value = if a2_star >= 0.6 {
-        // Clamp at the quadratic vertex (5.709 / (2 * 0.0186) ~= 153.468) so the D'Agostino &
-        // Stephens (1986) tail approximation stays strictly non-increasing for large A*^2.
-        let a_clamped = a2_star.min(5.709 / (2.0 * 0.0186));
-        (1.2937 - 5.709 * a_clamped + 0.0186 * a_clamped * a_clamped).exp()
-    } else if a2_star > 0.34 {
-        (0.9177 - 4.279 * a2_star - 1.38 * a2_star * a2_star).exp()
-    } else if a2_star > 0.20 {
-        1.0 - (-8.318 + 42.796 * a2_star - 59.938 * a2_star * a2_star).exp()
-    } else {
-        1.0 - (-13.436 + 101.14 * a2_star - 223.73 * a2_star * a2_star).exp()
-    }
-    .clamp(0.0, 1.0);
-
-    Some(NormalityTestResult { test_name: String::from("Anderson-Darling A2*"), statistic: a2_star, p_value, passed: p_value >= 0.05 })
+    let finite: Vec<f64> = values.iter().copied().filter(|v| v.is_finite()).collect();
+    let res = anderson_darling(&finite).ok()?;
+    Some(NormalityTestResult {
+        test_name: String::from("Anderson-Darling A2*"),
+        statistic: res.statistic,
+        p_value: res.p_value,
+        passed: res.p_value >= 0.05,
+    })
 }
 
 /// Lilliefors-adjusted Kolmogorov–Smirnov normality test on residuals (`n >= 5`).
@@ -1728,26 +1552,6 @@ pub fn lilliefors_ks_test(values: &[f64]) -> Option<NormalityTestResult> {
     let p_value = lilliefors_p_value(d_max, n).ok()?;
 
     Some(NormalityTestResult { test_name: String::from("Kolmogorov-Smirnov (Lilliefors)"), statistic: d_max, p_value, passed: p_value >= 0.05 })
-}
-
-fn average_ranks(vals: &[f64]) -> Vec<f64> {
-    let n = vals.len();
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| vals[a].total_cmp(&vals[b]));
-    let mut ranks = vec![0.0_f64; n];
-    let mut i = 0_usize;
-    while i < n {
-        let mut j = i + 1;
-        while j < n && vals[order[j]] == vals[order[i]] {
-            j += 1;
-        }
-        let avg_rank = 0.5 * ((i + 1 + j) as f64);
-        for &idx in &order[i..j] {
-            ranks[idx] = avg_rank;
-        }
-        i = j;
-    }
-    ranks
 }
 
 /// Homoscedasticity check via Spearman rank correlation between `|residual|` and predicted `Y`.
@@ -1787,24 +1591,11 @@ pub fn homoscedasticity_spearman_test(y_hat: &[f64], residuals: &[f64], alpha: f
 /// Compute the 68.27th percentile of absolute residuals multiplied by `N / (N - K)`
 /// (`RSDR` scale per Motulsky & Brown 2006).
 ///
-/// `RSDR = P68 * N / (N - K)`, where `P68` is the 68.27th percentile of `|r_i|` by linear
-/// interpolation, matching the definition in Motulsky & Brown (2006).
+/// Delegates to [`curvebook_math::rout::compute_rsdr`]: `RSDR = P68 * N / (N - K)`, where `P68` is
+/// the 68.27th percentile of `|r_i|` by linear interpolation, matching Motulsky & Brown (2006).
 #[must_use]
 pub fn compute_rsdr(abs_residuals: &[f64], k_free: usize) -> f64 {
-    let n = abs_residuals.len();
-    if n == 0 {
-        return 0.0;
-    }
-    let mut sorted = abs_residuals.to_vec();
-    sorted.sort_by(f64::total_cmp);
-    // 68.2689492th percentile via linear interpolation on 0..(n-1).
-    let pos = 0.682_689_492 * ((n - 1) as f64);
-    let lo = (pos.floor() as usize).min(n - 1);
-    let hi = (pos.ceil() as usize).min(n - 1);
-    let frac = pos - (lo as f64);
-    let p68 = sorted[lo] * (1.0 - frac) + sorted[hi] * frac;
-    let df = n.saturating_sub(k_free).max(1);
-    p68 * (n as f64) / (df as f64)
+    math_compute_rsdr(abs_residuals, k_free)
 }
 
 /// Nonlinear ROUT outlier detection (`Motulsky & Brown 2006`):
@@ -1847,60 +1638,16 @@ pub(crate) fn rout_detect_outliers_core(
     if !fdr_q_percent.is_finite() || fdr_q_percent <= 0.0 || fdr_q_percent > 50.0 {
         return Err(FitError::InvalidParameter { name: q_param_name, reason: format!("FDR Q% must lie in (0, 50], got {fdr_q_percent}") });
     }
+    if weighted_residuals.iter().any(|r| !r.is_finite()) {
+        return Err(FitError::InvalidParameter { name: residuals_param_name, reason: String::from("ROUT residuals must all be finite") });
+    }
 
-    let df = n - k_free;
-    let abs_res: Vec<f64> = weighted_residuals.iter().map(|r| r.abs()).collect();
     let w_y_scale = points.iter().zip(sqrt_weights.iter()).map(|(p, &sw)| (p.y * sw).abs()).fold(0.0_f64, f64::max).max(f64::MIN_POSITIVE);
-    let rsdr = compute_rsdr(&abs_res, k_free).max(1e-10 * w_y_scale);
-    let zero_floor = (1e-30 * w_y_scale).max(f64::MIN_POSITIVE);
-    let mut p_values = Vec::with_capacity(n);
-    for &r in weighted_residuals {
-        if !r.is_finite() {
-            return Err(FitError::InvalidParameter { name: residuals_param_name, reason: String::from("ROUT residuals must all be finite") });
-        }
-        let p = if rsdr <= zero_floor { if r.abs() <= zero_floor { 1.0 } else { 0.0 } } else { student_t_two_sided_p((r / rsdr).abs(), df as f64)? };
-        p_values.push(p);
-    }
+    let rsdr_floor = 1e-10 * w_y_scale;
+    let core = math_rout_detect_outliers_core(weighted_residuals, k_free, fdr_q_percent, rsdr_floor)?;
 
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| p_values[a].total_cmp(&p_values[b]).then_with(|| abs_res[b].total_cmp(&abs_res[a])).then_with(|| a.cmp(&b)));
-
-    // Motulsky & Brown (2006): test only the top ~30% furthest points (`m_test = N - floor(0.70 * N)`).
-    let start = ((0.70 * (n as f64)).floor() as usize).min(n - 1);
-    let m_test = n - start;
-    let q_alpha = fdr_q_percent / 100.0;
-
-    let mut q_values = vec![1.0_f64; n];
-    let mut running_min = 1.0_f64;
-    for j in (0..m_test).rev() {
-        let rank = (j + 1) as f64;
-        let raw_q = ((n as f64) / rank * p_values[order[j]]).min(1.0);
-        running_min = running_min.min(raw_q);
-        q_values[order[j]] = running_min;
-    }
-
-    let mut last_rejected: Option<usize> = None;
-    for j in 0..m_test {
-        let rank = (j + 1) as f64;
-        let threshold = q_alpha * rank / (n as f64);
-        if p_values[order[j]] <= threshold {
-            last_rejected = Some(j);
-        }
-    }
-
-    let mut is_outlier = vec![false; n];
-    if let Some(j_max) = last_rejected {
-        for &idx in &order[..=j_max] {
-            is_outlier[idx] = true;
-        }
-    }
-
-    let mut outlier_indices = Vec::new();
     let mut audit = Vec::with_capacity(n);
     for (idx, pt) in points.iter().enumerate() {
-        if is_outlier[idx] {
-            outlier_indices.push(idx);
-        }
         audit.push(RoutPointAudit {
             index: idx,
             data_set_index: pt.data_set_index,
@@ -1909,13 +1656,13 @@ pub(crate) fn rout_detect_outliers_core(
             x0: pt.x0(),
             y: pt.y,
             residual: weighted_residuals[idx],
-            p_value: p_values[idx],
-            q_value: q_values[idx],
-            is_outlier: is_outlier[idx],
+            p_value: core.p_values[idx],
+            q_value: core.q_values[idx],
+            is_outlier: core.is_outlier[idx],
         });
     }
 
-    Ok(RoutDetectionResult { rsdr, df, q_threshold_percent: fdr_q_percent, outlier_indices, audit })
+    Ok(RoutDetectionResult { rsdr: core.rsdr, df: core.df, q_threshold_percent: fdr_q_percent, outlier_indices: core.outlier_indices, audit })
 }
 
 #[cfg(test)]
