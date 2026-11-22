@@ -1342,8 +1342,6 @@ fn try_eval_aggregate_call(
             } else if args.len() == 2 {
                 if let Expr::Text(lit) = &args[1]
                     && !is_condition_ast(&args[0])
-                    && !lit.eq_ignore_ascii_case("true")
-                    && !lit.eq_ignore_ascii_case("false")
                 {
                     let val_col = eval_column_expr_inner(&args[0], ctx)?;
                     let cond_vals: Vec<FormulaValue> = val_col
@@ -1448,16 +1446,119 @@ fn try_eval_aggregate_call(
     Ok(Some(out))
 }
 
-fn eval_scalar_const_arg(expr: &Expr, ctx: &dyn FormulaContext) -> Result<f64, TransformError> {
-    if ctx.row_count() == 0 {
-        let env = ScalarEnv::default();
-        let vals = eval_column_expr_inner(expr, &env)?;
-        return vals
-            .first()
-            .and_then(FormulaValue::as_finite_f64)
-            .ok_or_else(|| TransformError::EvalError { message: String::from("expected finite numeric parameter") });
+struct ScalarOnlyContext<'a> {
+    inner: &'a dyn FormulaContext,
+}
+
+impl FormulaContext for ScalarOnlyContext<'_> {
+    fn row_count(&self) -> usize {
+        1
     }
-    let vals = eval_column_expr_inner(expr, ctx)?;
+
+    fn column_count(&self) -> usize {
+        0
+    }
+
+    fn resolve_column_index(&self, _name: &str) -> Option<usize> {
+        None
+    }
+
+    fn column_values(&self, _idx: usize) -> Option<Vec<FormulaValue>> {
+        None
+    }
+
+    fn resolve_x_column(&self) -> Option<Vec<FormulaValue>> {
+        None
+    }
+
+    fn resolve_info_constant(&self, key: &str) -> Option<FormulaValue> {
+        self.inner.resolve_info_constant(key)
+    }
+
+    fn resolve_scalar(&self, name: &str) -> Option<FormulaValue> {
+        self.inner.resolve_scalar(name)
+    }
+}
+
+fn is_scalar_disallowed_column_ident(name: &str, ctx: &dyn FormulaContext) -> bool {
+    let trimmed = name.trim();
+    if reserved_literal(trimmed).is_some() {
+        return false;
+    }
+    if is_math_constant(trimmed) {
+        return ctx.resolve_column_index_exact(trimmed).is_some();
+    }
+    ctx.resolve_scalar(trimmed).is_none()
+        && (ctx.resolve_column_index(trimmed).is_some() || (trimmed.eq_ignore_ascii_case("x") && ctx.resolve_x_column().is_some()))
+}
+
+fn is_window_or_series_function_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "row_number"
+            | "rank"
+            | "dense_rank"
+            | "lag"
+            | "lead"
+            | "diff"
+            | "cumsum"
+            | "cumprod"
+            | "cummean"
+            | "center"
+            | "standardize"
+            | "zscore"
+            | "rolling_mean"
+            | "moving_avg"
+            | "rolling_sum"
+    )
+}
+
+fn ensure_scalar_only_expr(expr: &Expr, ctx: &dyn FormulaContext) -> Result<(), TransformError> {
+    let mut stack = vec![expr];
+    while let Some(node) = stack.pop() {
+        match node {
+            Expr::Number(_) | Expr::Text(_) => {}
+            Expr::Unary { expr: inner, .. } => stack.push(inner),
+            Expr::Binary { left, right, .. } => {
+                stack.push(left);
+                stack.push(right);
+            }
+            Expr::Call { name, args } => {
+                if is_window_or_series_function_name(name) {
+                    return Err(TransformError::InvalidSpec { message: format!("function `{name}` is not allowed in scalar parameter expression") });
+                }
+                for arg in args {
+                    stack.push(arg);
+                }
+            }
+            Expr::WindowCall { name, .. } => {
+                return Err(TransformError::InvalidSpec {
+                    message: format!("window expression `{name}` is not allowed in scalar parameter expression"),
+                });
+            }
+            Expr::Var(VarRef::InfoConstant(_)) => {}
+            Expr::Var(VarRef::RowOneBased | VarRef::IndexZeroBased) => {
+                return Err(TransformError::InvalidSpec {
+                    message: String::from("row index variable is not allowed in scalar parameter expression"),
+                });
+            }
+            Expr::Var(VarRef::ColumnByIndex(_) | VarRef::ColumnByName(_) | VarRef::Bracketed(_)) => {
+                return Err(TransformError::InvalidSpec { message: String::from("column reference is not allowed in scalar parameter expression") });
+            }
+            Expr::Var(VarRef::Ident(name)) => {
+                if is_scalar_disallowed_column_ident(name, ctx) {
+                    return Err(TransformError::InvalidSpec { message: format!("column `{name}` is not allowed in scalar parameter expression") });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn eval_scalar_const_arg(expr: &Expr, ctx: &dyn FormulaContext) -> Result<f64, TransformError> {
+    ensure_scalar_only_expr(expr, ctx)?;
+    let scalar_ctx = ScalarOnlyContext { inner: ctx };
+    let vals = eval_column_expr_inner(expr, &scalar_ctx)?;
     vals.first()
         .and_then(FormulaValue::as_finite_f64)
         .ok_or_else(|| TransformError::EvalError { message: String::from("expected finite numeric parameter") })

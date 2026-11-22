@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
 use curvebook_doc::analysis::{AnalysisRecomputeStrategy, descriptor_for_kind};
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, Cell, CellCoord, CellValue, CiBound, DataSetColumn, DataSheet, ErrorCode, HookSource, ImportLinkSpec, InfoSheet,
+    AnalysisKind, AnalysisSpec, Cell, CellCoord, CellValue, CiBound, DataSetColumn, DataSheet, ErrorCode, HookSource, ImportLinkSpec,
     InternalLinkKind, LayoutItem, LinkSource, PlacementMode, ProjectDocument, ResultCell, ResultSheet, ResultStatus, SheetCellRange, SheetId,
     TableArchetype, XColumnMode,
 };
@@ -1005,17 +1005,6 @@ fn validate_info_constant_hooks(doc: &ProjectDocument, analysis: &AnalysisSpec, 
     Ok(())
 }
 
-fn resolve_transform_info_sheet<'a>(doc: &'a ProjectDocument, source_ds: &'a DataSheet, analysis: &AnalysisSpec) -> Option<&'a InfoSheet> {
-    for hook in analysis.kind.hooked_sources() {
-        if let HookSource::InfoConstant { info_sheet_id: Some(id), .. } = hook
-            && let Some(info) = doc.info_sheet(&id)
-        {
-            return Some(info);
-        }
-    }
-    resolve_origin_info_sheet_id(doc, source_ds, analysis).and_then(|id| doc.info_sheet(id))
-}
-
 fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize) -> bool {
     let existing = doc.result_sheets[res_idx].clone();
     let source_ds = match resolve_source_table(doc, &existing.analysis.source_sheet_id) {
@@ -1038,16 +1027,24 @@ fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize) -> bool {
     let desc = descriptor_for_kind(&existing.analysis.kind);
     let output: Result<ResultSheet, String> = match desc.recompute_strategy {
         AnalysisRecomputeStrategy::Transform => {
-            let info_opt = resolve_transform_info_sheet(doc, &source_ds, &existing.analysis);
-            let ctx = TransformContext {
-                info_sheet: info_opt,
-                result_sheets: &doc.result_sheets,
-                data_sheets: &doc.data_sheets,
-                selected_data_sets: existing.analysis.selected_data_sets.clone(),
-                output_id: Some(existing.id.as_str().to_owned()),
-                output_title: Some(existing.title().to_owned()),
-            };
-            execute_analysis_transform(&source_ds, &existing.analysis, &ctx).map_err(|err| err.to_string())
+            let primary_info_id = resolve_origin_info_sheet_id(doc, &source_ds, &existing.analysis);
+            if let Err(message) = validate_info_constant_hooks(doc, &existing.analysis, primary_info_id) {
+                Err(message)
+            } else {
+                let info_opt = primary_info_id.and_then(|id| doc.info_sheet(id));
+                let has_explicit_info_hook =
+                    existing.analysis.kind.hooked_sources().iter().any(|h| matches!(h, HookSource::InfoConstant { info_sheet_id: Some(_), .. }));
+                let ctx = TransformContext {
+                    info_sheet: info_opt,
+                    info_sheets: if primary_info_id.is_some() || has_explicit_info_hook { &doc.info_sheets } else { &[] },
+                    result_sheets: &doc.result_sheets,
+                    data_sheets: &doc.data_sheets,
+                    selected_data_sets: existing.analysis.selected_data_sets.clone(),
+                    output_id: Some(existing.id.as_str().to_owned()),
+                    output_title: Some(existing.title().to_owned()),
+                };
+                execute_analysis_transform(&source_ds, &existing.analysis, &ctx).map_err(|err| err.to_string())
+            }
         }
         AnalysisRecomputeStrategy::Fit => {
             let primary_info_id = resolve_origin_info_sheet_id(doc, &source_ds, &existing.analysis);

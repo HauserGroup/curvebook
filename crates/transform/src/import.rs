@@ -4,10 +4,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use curvebook_doc::{
-    BaselineOperation, Cell, CellCoord, CellValue, DataSetColumn, DataSheet, DelimitedScanError, DelimitedScanOptions, DelimitedVisitorError,
-    ImportFilterSpec, ImportLinkSpec, InfoSheet, LinkSource, LinkedDataRegion, MAX_DATA_SETS, MAX_ROWS, MAX_SUBCOLUMNS, NestedGroupColumn,
-    PlacementMode, ResultCell, ResultSheet, SheetCellRange, SheetId, TableArchetype, VariableColumn, default_column_label, scan_delimited,
-    transpose_cell_grid, validate_data_sets, validate_rows, validate_sheet_cells, validate_subcolumns,
+    BaselineOperation, Cell, CellCoord, CellValue, CiBound, DataSetColumn, DataSheet, DelimitedScanError, DelimitedScanOptions,
+    DelimitedVisitorError, ImportFilterSpec, ImportLinkSpec, InfoSheet, LinkSource, LinkedDataRegion, MAX_DATA_SETS, MAX_ROWS, MAX_SUBCOLUMNS,
+    NestedGroupColumn, PlacementMode, ResultCell, ResultSheet, SheetCellRange, SheetId, TableArchetype, VariableColumn, default_column_label,
+    scan_delimited, transpose_cell_grid, validate_data_sets, validate_rows, validate_sheet_cells, validate_subcolumns,
 };
 
 use crate::error::TransformError;
@@ -170,7 +170,7 @@ pub fn apply_import_link_pipeline(
     let (raw_grid, mut header_row) = extract_stage1(&spec.source, &spec.filter, payload)?;
 
     // Stage 2: Row/column window, decimation, unstacking, baseline, and exclusion rules.
-    let mut shaped = apply_stage2_filter(raw_grid, &spec.filter, opts, &mut header_row)?;
+    let mut shaped = apply_stage2_filter(raw_grid, &spec.filter, opts, &mut header_row, info_sheet.as_deref())?;
 
     // Stage 3: Orientation (transpose), blank-skipping, and placement at anchor.
     if spec.placement.skip_contiguous_blanks {
@@ -226,13 +226,58 @@ pub fn apply_import_link_pipeline(
     Ok(ImportPipelineReport { rows_placed, cols_placed, target_range, provenance_summary })
 }
 
+fn internal_col_max_sub(arch: &TableArchetype, col: usize) -> usize {
+    match arch {
+        TableArchetype::Xy(t) => t.y_subcolumn_mode.subcolumn_count().saturating_sub(1),
+        TableArchetype::Column(t) => t.subcolumn_mode.subcolumn_count().saturating_sub(1),
+        TableArchetype::Grouped(t) => t.subcolumn_mode.subcolumn_count().saturating_sub(1),
+        TableArchetype::Nested(t) => t.groups.get(col).map_or(0, |g| g.biological_unit_count().saturating_sub(1)),
+        _ => 0,
+    }
+}
+
+fn validate_internal_data_extract_budget(sheet: &DataSheet, range: SheetCellRange) -> Result<(), TransformError> {
+    let row_count = sheet.archetype.row_count();
+    let col_count = sheet.archetype.column_count();
+    if row_count == 0
+        || col_count == 0
+        || range.end.row < range.start.row
+        || range.end.col < range.start.col
+        || range.start.row >= row_count
+        || range.start.col >= col_count
+    {
+        return Ok(());
+    }
+    let end_row = range.end.row.min(row_count - 1);
+    let end_col = range.end.col.min(col_count - 1);
+    let row_span = end_row - range.start.row + 1;
+    let mut width = 0_usize;
+    for c in range.start.col..=end_col {
+        let max_sub = internal_col_max_sub(&sheet.archetype, c);
+        let s_min = if c == range.start.col { range.start.subcol } else { 0 };
+        let s_max = if c == range.end.col { range.end.subcol.min(max_sub) } else { max_sub };
+        if s_max >= s_min {
+            width = width.checked_add(s_max - s_min + 1).ok_or_else(|| TransformError::InvalidSpec {
+                message: format!("internal data import cell allocation overflows budget cap {MAX_IMPORT_CELLS}"),
+            })?;
+        }
+    }
+    if width == 0 {
+        return Ok(());
+    }
+    check_transform_cell_budget(row_span.checked_mul(width), "internal data import")
+}
+
 fn extract_stage1(
     source: &LinkSource,
     filter: &ImportFilterSpec,
     payload: ImportSourcePayload<'_>,
 ) -> Result<(Vec<Vec<Cell>>, Vec<Cell>), TransformError> {
     match (source, payload) {
-        (LinkSource::InternalSheet { range, .. }, ImportSourcePayload::InternalData(sheet)) => Ok((sheet.extract_cell_grid(*range), Vec::new())),
+        (LinkSource::InternalSheet { range, .. }, ImportSourcePayload::InternalData(sheet)) => {
+            validate_internal_data_extract_budget(sheet, *range)?;
+            Ok((sheet.extract_cell_grid(*range), Vec::new()))
+        }
         (LinkSource::InternalSheet { tab_id, range, .. }, ImportSourcePayload::InternalResult(res)) => {
             let tab = if let Some(tid) = tab_id { res.tabs.iter().find(|t| &t.id == tid) } else { res.tabs.first() };
             let Some(tab) = tab else {
@@ -272,9 +317,20 @@ fn extract_stage1(
         }
         (LinkSource::Clipboard, ImportSourcePayload::InternalData(sheet)) => {
             let full = SheetCellRange::new(CellCoord::default(), CellCoord::new(usize::MAX, usize::MAX, usize::MAX));
+            validate_internal_data_extract_budget(sheet, full)?;
             Ok((sheet.extract_cell_grid(full), Vec::new()))
         }
         _ => Err(TransformError::InvalidInput { message: String::from("mismatched LinkSource and ImportSourcePayload") }),
+    }
+}
+
+fn format_ci_bound(bound: CiBound, is_lower: bool) -> String {
+    match bound {
+        CiBound::Finite(v) => {
+            let clean = if v == 0.0 { 0.0 } else { v };
+            if clean.fract() == 0.0 && clean.abs() < 1e12 { format!("{clean:.0}") } else { clean.to_string() }
+        }
+        CiBound::Open => String::from(if is_lower { "-inf" } else { "+inf" }),
     }
 }
 
@@ -285,7 +341,9 @@ fn result_cell_to_cell(rc: &ResultCell) -> Cell {
         ResultCell::PValue { raw, .. } => Cell::number(*raw),
         ResultCell::Text(s) => Cell::text(s.clone()),
         ResultCell::Boolean(b) => Cell::number(if *b { 1.0 } else { 0.0 }),
-        ResultCell::ConfidenceInterval { .. } => Cell::empty(),
+        ResultCell::ConfidenceInterval { lower, upper } => {
+            Cell::text(format!("[{}, {}]", format_ci_bound(*lower, true), format_ci_bound(*upper, false)))
+        }
     }
 }
 
@@ -304,8 +362,8 @@ fn map_delimited_scan_error(err: DelimitedScanError) -> TransformError {
 }
 
 fn parse_delimited_text(text: &str, delimiter: char, decimal_sep: char, parse_asterisk: bool) -> Result<Vec<Vec<Cell>>, TransformError> {
-    let max_cols = MAX_DATA_SETS.saturating_mul(MAX_SUBCOLUMNS).saturating_add(4);
-    let max_cells = MAX_IMPORT_CELLS.saturating_add(65_536);
+    let max_cols = MAX_DATA_SETS.saturating_mul(MAX_SUBCOLUMNS);
+    let max_cells = MAX_IMPORT_CELLS;
 
     let mut rows: Vec<Vec<Cell>> = Vec::new();
     let mut current_row: Vec<Cell> = Vec::new();
@@ -326,7 +384,7 @@ fn parse_delimited_text(text: &str, delimiter: char, decimal_sep: char, parse_as
         total_cells = next_total;
         current_row.push(Cell::parse_import_token(&field.text, decimal_sep, parse_asterisk));
         if field.end_of_record {
-            if rows.len() >= MAX_ROWS + 16 {
+            if rows.len() >= MAX_ROWS {
                 return Err(TransformError::InvalidSpec { message: format!("delimited row count exceeds limit {MAX_ROWS}") });
             }
             rows.push(std::mem::take(&mut current_row));
@@ -346,6 +404,7 @@ fn apply_stage2_filter(
     filter: &ImportFilterSpec,
     opts: &ImportPipelineOptions,
     header_row: &mut Vec<Cell>,
+    info_sheet: Option<&InfoSheet>,
 ) -> Result<Vec<Vec<Cell>>, TransformError> {
     if let Some((r0, r1)) = filter.row_window {
         if r0 > r1 {
@@ -391,7 +450,7 @@ fn apply_stage2_filter(
     }
 
     if let Some(pred) = opts.exclude_row_predicate.as_deref().or(filter.exclude_row_predicate.as_deref()) {
-        apply_row_exclusion_predicate(&mut grid, header_row, pred)?;
+        apply_row_exclusion_predicate(&mut grid, header_row, pred, info_sheet)?;
     }
 
     for &(r, c) in &opts.exclude_coords {
@@ -404,6 +463,20 @@ fn apply_stage2_filter(
 }
 
 fn unstack_grid_by_group(grid: &[Vec<Cell>], group_col: usize) -> Result<(Vec<Vec<Cell>>, Vec<Cell>), TransformError> {
+    let max_width = grid.iter().map(Vec::len).max().unwrap_or(0);
+    if !grid.is_empty() && max_width > 2 {
+        return Err(TransformError::InvalidSpec {
+            message: format!(
+                "unstack_group_column requires a 2-column (group, value) window, found {max_width} columns; narrow with col_window first"
+            ),
+        });
+    }
+    if !grid.is_empty() && max_width < 2 {
+        return Err(TransformError::InvalidSpec {
+            message: String::from("unstack_group_column requires at least one value column alongside the group column"),
+        });
+    }
+
     let mut group_order: Vec<String> = Vec::new();
     let mut buckets: BTreeMap<String, Vec<Cell>> = BTreeMap::new();
 
@@ -413,7 +486,10 @@ fn unstack_grid_by_group(grid: &[Vec<Cell>], group_col: usize) -> Result<(Vec<Ve
         };
         let key = match &g_cell.value {
             CellValue::Text(s) => s.trim().to_owned(),
-            CellValue::Number(v) if v.is_finite() => format!("{v}"),
+            CellValue::Number(v) if v.is_finite() => {
+                let norm = if *v == 0.0 { 0.0 } else { *v };
+                format!("{norm}")
+            }
             _ => continue,
         };
         if key.is_empty() {
@@ -517,8 +593,8 @@ impl crate::formula::FormulaContext for ImportRowEnv<'_> {
         Some(vec![val])
     }
 
-    fn resolve_info_constant(&self, _name: &str) -> Option<crate::formula::FormulaValue> {
-        None
+    fn resolve_info_constant(&self, name: &str) -> Option<crate::formula::FormulaValue> {
+        crate::formula::FormulaContext::resolve_info_constant(&self.scalars, name)
     }
 
     fn resolve_scalar(&self, name: &str) -> Option<crate::formula::FormulaValue> {
@@ -526,7 +602,12 @@ impl crate::formula::FormulaContext for ImportRowEnv<'_> {
     }
 }
 
-fn apply_row_exclusion_predicate(grid: &mut [Vec<Cell>], header_row: &[Cell], pred: &str) -> Result<(), TransformError> {
+fn apply_row_exclusion_predicate(
+    grid: &mut [Vec<Cell>],
+    header_row: &[Cell],
+    pred: &str,
+    info_sheet: Option<&InfoSheet>,
+) -> Result<(), TransformError> {
     let expr = parse_formula(pred)?;
     if grid.is_empty() {
         return Ok(());
@@ -535,7 +616,7 @@ fn apply_row_exclusion_predicate(grid: &mut [Vec<Cell>], header_row: &[Cell], pr
     let col_labels: Vec<String> = (0..col_count).map(default_column_label).collect();
     for (r, row) in grid.iter_mut().enumerate() {
         #[allow(clippy::cast_precision_loss)]
-        let scalars = ScalarEnv::new(vec![("$row", (r + 1) as f64), ("$index", r as f64)], None);
+        let scalars = ScalarEnv::new(vec![("$row", (r + 1) as f64), ("$index", r as f64)], info_sheet);
         let excluded = {
             let env = ImportRowEnv { row, header_row, col_labels: &col_labels, scalars };
             eval_scalar_expr(&expr, &env)?.as_bool() == Some(true)
@@ -564,6 +645,12 @@ fn collapse_contiguous_blank_rows(grid: Vec<Vec<Cell>>) -> Vec<Vec<Cell>> {
 }
 
 fn place_grid(target: &mut DataSheet, grid: &[Vec<Cell>], mode: PlacementMode, anchor: CellCoord) -> Result<SheetCellRange, TransformError> {
+    let subs_per_col = subcolumns_per_data_column(&target.archetype).max(1);
+    if anchor.subcol >= subs_per_col {
+        return Err(TransformError::InvalidSpec {
+            message: format!("anchor.subcol {} out of bounds for target subcolumn count {subs_per_col}", anchor.subcol),
+        });
+    }
     if grid.is_empty() {
         return Ok(SheetCellRange::new(anchor, anchor));
     }

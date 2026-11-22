@@ -123,7 +123,7 @@ pub fn simulate_xy_sheet(
             x_min
         } else {
             let frac = (row as f64) / ((row_count - 1) as f64);
-            x_min + frac * (x_max - x_min)
+            if (x_max - x_min).is_finite() { x_min + frac * (x_max - x_min) } else { (1.0 - frac) * x_min + frac * x_max }
         };
         xy.set_x_cell(row, Cell::number(x))?;
         let y_true = match evaluate_equation(equation_id, x, parameters) {

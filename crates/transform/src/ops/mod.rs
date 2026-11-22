@@ -21,8 +21,10 @@ use crate::simulate::simulate_xy_sheet;
 /// supplied when executing a derived data transformation.
 #[derive(Debug, Clone, Default)]
 pub struct TransformContext<'a> {
-    /// Optional paired [`InfoSheet`] resolving [`HookSource::InfoConstant`] hooks and `Info("Key")` formula references.
+    /// Optional primary paired [`InfoSheet`] resolving untargeted [`HookSource::InfoConstant`] hooks and `Info("Key")` formula references.
     pub info_sheet: Option<&'a InfoSheet>,
+    /// Optional project [`InfoSheet`] slice resolving targeted [`HookSource::InfoConstant`] hooks across multiple info sheets.
+    pub info_sheets: &'a [InfoSheet],
     /// Upstream [`ResultSheet`] slice resolving [`HookSource::ResultScalar`] hooks.
     pub result_sheets: &'a [ResultSheet],
     /// Project [`DataSheet`] slice resolving cross-sheet [`HookSource::ColumnTitleValue`] hooks.
@@ -42,20 +44,40 @@ impl<'a> TransformContext<'a> {
         Self { info_sheet: Some(info_sheet), ..Self::default() }
     }
 
+    pub(crate) fn primary_info_sheet(&self) -> Option<&'a InfoSheet> {
+        self.info_sheet.or_else(|| self.info_sheets.first())
+    }
+
+    fn resolve_info_sheet_for_hook(
+        &self,
+        info_sheet_id: Option<&curvebook_doc::SheetId>,
+        constant_name: &str,
+    ) -> Result<&'a InfoSheet, TransformError> {
+        if let Some(expected_id) = info_sheet_id {
+            if let Some(info) =
+                self.info_sheet.filter(|info| &info.id == expected_id).or_else(|| self.info_sheets.iter().find(|info| &info.id == expected_id))
+            {
+                return Ok(info);
+            }
+            if self.info_sheet.is_none() && self.info_sheets.is_empty() {
+                return Err(TransformError::MissingHook { description: format!("no InfoSheet provided to resolve `{constant_name}`") });
+            }
+            if let Some(primary) = self.info_sheet
+                && self.info_sheets.is_empty()
+            {
+                return Err(TransformError::MissingHook { description: format!("InfoSheet `{}` does not match hooked `{expected_id}`", primary.id) });
+            }
+            return Err(TransformError::MissingHook { description: format!("InfoSheet `{expected_id}` not found to resolve `{constant_name}`") });
+        }
+        self.primary_info_sheet()
+            .ok_or_else(|| TransformError::MissingHook { description: format!("no InfoSheet provided to resolve `{constant_name}`") })
+    }
+
     /// Resolve a [`HookSource`] into a finite scalar `f64`.
     pub fn resolve_hook(&self, hook: &HookSource, source_sheet: &DataSheet) -> Result<f64, TransformError> {
         match hook {
             HookSource::InfoConstant { info_sheet_id, constant_name } => {
-                let info = self
-                    .info_sheet
-                    .ok_or_else(|| TransformError::MissingHook { description: format!("no InfoSheet provided to resolve `{constant_name}`") })?;
-                if let Some(expected_id) = info_sheet_id
-                    && &info.id != expected_id
-                {
-                    return Err(TransformError::MissingHook {
-                        description: format!("InfoSheet `{}` does not match hooked `{}`", info.id, expected_id),
-                    });
-                }
+                let info = self.resolve_info_sheet_for_hook(info_sheet_id.as_ref(), constant_name)?;
                 let entry = info.get_constant(constant_name).ok_or_else(|| TransformError::MissingHook {
                     description: format!("constant `{constant_name}` not found in InfoSheet `{}`", info.id),
                 })?;
@@ -70,8 +92,18 @@ impl<'a> TransformContext<'a> {
                     .iter()
                     .find(|r| &r.id == result_sheet_id)
                     .ok_or_else(|| TransformError::MissingHook { description: format!("ResultSheet `{result_sheet_id}` not found") })?;
-                if let ResultStatus::Failed { message, .. } = &res.status {
-                    return Err(TransformError::MissingHook { description: format!("upstream ResultSheet `{result_sheet_id}` failed: {message}") });
+                match &res.status {
+                    ResultStatus::UpToDate => {}
+                    ResultStatus::Dirty => {
+                        return Err(TransformError::MissingHook {
+                            description: format!("upstream ResultSheet `{result_sheet_id}` is dirty / not up to date"),
+                        });
+                    }
+                    ResultStatus::Failed { message, .. } => {
+                        return Err(TransformError::MissingHook {
+                            description: format!("upstream ResultSheet `{result_sheet_id}` failed: {message}"),
+                        });
+                    }
                 }
                 res.lookup_scalar(parameter_key, *data_set_index).ok_or_else(|| TransformError::MissingHook {
                     description: format!("scalar `{parameter_key}` not found on ResultSheet `{result_sheet_id}`"),
@@ -208,11 +240,14 @@ pub fn execute_transform(source: &DataSheet, spec: &TransformAnalysisSpec, ctx: 
                 ],
                 Vec::new(),
             );
-            let scalars = vec![
+            let mut scalars = vec![
                 ResultScalarEntry { key: String::from("sample_size"), data_set_index: None, value: *sample_size as f64, units: None },
                 ResultScalarEntry { key: String::from("population_size"), data_set_index: None, value: population_size as f64, units: None },
-                ResultScalarEntry { key: String::from("seed"), data_set_index: None, value: *seed as f64, units: None },
             ];
+            if *seed <= (1_u64 << 53) {
+                #[allow(clippy::cast_precision_loss)]
+                scalars.push(ResultScalarEntry { key: String::from("seed"), data_set_index: None, value: *seed as f64, units: None });
+            }
             Ok(TransformOutput { data_sheet, summary_tab, scalars, warnings: Vec::new() })
         }
     }
