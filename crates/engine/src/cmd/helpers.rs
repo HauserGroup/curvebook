@@ -1,7 +1,6 @@
 //! Shared sheet lookup, table geometry, color, base64, and export helpers for engine commands.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 
 use curvebook_chart::ChartScene;
 use curvebook_doc::{
@@ -9,10 +8,11 @@ use curvebook_doc::{
     LayoutSheet, LayoutSpec, LinkSource, NormalizeAnchor, ParameterScope, ProjectDocument, ResultCell, ResultSheet, ResultTab, SheetId,
     TableArchetype, TransformAnalysisSpec, VariableRole, validate_title,
 };
+use curvebook_format::MAX_ARCHIVE_FILE_BYTES;
 use curvebook_palette::Rgba8;
 use serde_json::json;
 
-use crate::{EngineError, ErrorCode};
+use crate::{EngineError, ErrorCode, ExternalPathPolicy};
 
 /// Parse and validate a non-empty [`SheetId`].
 ///
@@ -294,27 +294,14 @@ pub fn compile_sheet_scene(doc: &ProjectDocument, sheet_id: &SheetId) -> Result<
     })
 }
 
-/// Write exported bytes to a filesystem path, mapping I/O errors to structured [`EngineError`].
+/// Write exported bytes to a filesystem path atomically while enforcing `policy`.
 ///
 /// # Errors
-/// Returns [`EngineError`] with [`ErrorCode::BadInput`] for empty paths or [`ErrorCode::IoError`] on failure.
-pub fn write_output_file(path: &str, bytes: &[u8]) -> Result<(), EngineError> {
-    if path.trim().is_empty() {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "output path must not be empty"));
-    }
-    let out = Path::new(path);
-    if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent).map_err(|err| {
-            EngineError::with_code(ErrorCode::IoError, format!("failed to create output directory `{}`: {err}", parent.display()))
-                .with_retryable(true)
-                .with_details(json!({ "path": path }))
-        })?;
-    }
-    std::fs::write(out, bytes).map_err(|err| {
-        EngineError::with_code(ErrorCode::IoError, format!("failed to write output file `{path}`: {err}"))
-            .with_retryable(true)
-            .with_details(json!({ "path": path }))
-    })
+/// Returns [`EngineError`] with [`ErrorCode::PathEscape`] on policy violations,
+/// [`ErrorCode::BadInput`] for empty or invalid paths, [`ErrorCode::UnsupportedFormat`] on
+/// `wasm32`, or [`ErrorCode::IoError`] on I/O failure.
+pub fn write_output_file(policy: &ExternalPathPolicy, path: &str, bytes: &[u8]) -> Result<(), EngineError> {
+    policy.write_atomic_bytes(path, bytes)
 }
 
 /// Encode binary bytes into standard RFC 4648 base64 without line wrapping.
@@ -354,40 +341,97 @@ fn decode_b64_sextet(byte: u8) -> Result<u8, EngineError> {
     }
 }
 
-/// Decode standard RFC 4648 base64 string (ignoring ASCII whitespace).
+fn decode_base64_quad(quad: [u8; 4], pointer: &str) -> Result<([u8; 3], usize, bool), EngineError> {
+    let bad = |msg: &str| EngineError::with_code(ErrorCode::BadInput, msg).with_details(json!({ "pointer": pointer }));
+    if quad[0] == b'=' || quad[1] == b'=' {
+        return Err(bad("misplaced base64 `=` padding"));
+    }
+    if quad[2] == b'=' && quad[3] != b'=' {
+        return Err(bad("malformed base64 trailing padding"));
+    }
+    let s0 = u32::from(decode_b64_sextet(quad[0]).map_err(|err| err.with_details(json!({ "pointer": pointer })))?);
+    let s1 = u32::from(decode_b64_sextet(quad[1]).map_err(|err| err.with_details(json!({ "pointer": pointer })))?);
+    let pad_len = usize::from(quad[2] == b'=') + usize::from(quad[3] == b'=');
+    let s2 = if quad[2] == b'=' { 0 } else { u32::from(decode_b64_sextet(quad[2]).map_err(|err| err.with_details(json!({ "pointer": pointer })))?) };
+    let s3 = if quad[3] == b'=' { 0 } else { u32::from(decode_b64_sextet(quad[3]).map_err(|err| err.with_details(json!({ "pointer": pointer })))?) };
+    let word = (s0 << 18) | (s1 << 12) | (s2 << 6) | s3;
+    let bytes = [((word >> 16) & 0xff) as u8, ((word >> 8) & 0xff) as u8, (word & 0xff) as u8];
+    Ok((bytes, 3 - pad_len, pad_len > 0))
+}
+
+/// Decode standard RFC 4648 base64 string (ignoring ASCII whitespace) up to `max_bytes` decoded bytes.
+///
+/// Enforces an early raw byte bound before scanning, rejects empty or whitespace-only inputs with
+/// [`ErrorCode::BadInput`], and rejects payloads exceeding `max_bytes` with [`ErrorCode::ResourceLimit`].
 ///
 /// # Errors
-/// Returns [`EngineError`] with [`ErrorCode::BadInput`] if length or characters are invalid.
-pub fn decode_base64(input: &str) -> Result<Vec<u8>, EngineError> {
-    let cleaned: Vec<u8> = input.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
-    if !cleaned.len().is_multiple_of(4) {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "base64 payload length must be a multiple of 4"));
+/// Returns [`EngineError`] with [`ErrorCode::BadInput`] if empty, length is invalid, or characters/padding
+/// are invalid, or [`ErrorCode::ResourceLimit`] if the payload exceeds `max_bytes`.
+pub fn decode_base64_capped(input: &str, max_bytes: usize, pointer: &str) -> Result<Vec<u8>, EngineError> {
+    let limit_err = || {
+        EngineError::with_code(ErrorCode::ResourceLimit, format!("base64 payload exceeds maximum allowed size ({max_bytes} bytes)"))
+            .with_details(json!({ "pointer": pointer, "max_bytes": max_bytes }))
+    };
+    let max_b64_len = max_bytes.div_ceil(3).saturating_mul(4);
+    // Allow modest MIME whitespace overhead while rejecting oversized raw payloads before scanning.
+    let max_raw_len = max_b64_len.saturating_add(max_b64_len / 4).saturating_add(1024);
+    if input.len() > max_raw_len {
+        return Err(limit_err());
     }
-    let (chunks, _) = cleaned.as_chunks::<4>();
-    let mut out = Vec::with_capacity(chunks.len().saturating_mul(3));
-    for (idx, chunk) in chunks.iter().enumerate() {
-        let is_last = idx.saturating_add(1) == chunks.len();
-        if (chunk[0] == b'=' || chunk[1] == b'=') || (!is_last && (chunk[2] == b'=' || chunk[3] == b'=')) {
-            return Err(EngineError::with_code(ErrorCode::BadInput, "misplaced base64 `=` padding"));
+
+    let mut out = Vec::with_capacity((input.len().min(4096) / 4).saturating_mul(3).min(max_bytes));
+    let mut quad = [0_u8; 4];
+    let mut quad_len = 0_usize;
+    let mut non_ws_len = 0_usize;
+    let mut saw_padding = false;
+
+    for byte in input.bytes() {
+        if byte.is_ascii_whitespace() {
+            continue;
         }
-        if chunk[2] == b'=' && chunk[3] != b'=' {
-            return Err(EngineError::with_code(ErrorCode::BadInput, "malformed base64 trailing padding"));
+        non_ws_len = non_ws_len.saturating_add(1);
+        if non_ws_len > max_b64_len {
+            return Err(limit_err());
         }
-        let s0 = u32::from(decode_b64_sextet(chunk[0])?);
-        let s1 = u32::from(decode_b64_sextet(chunk[1])?);
-        let pad_len = usize::from(chunk[2] == b'=') + usize::from(chunk[3] == b'=');
-        let s2 = if chunk[2] == b'=' { 0 } else { u32::from(decode_b64_sextet(chunk[2])?) };
-        let s3 = if chunk[3] == b'=' { 0 } else { u32::from(decode_b64_sextet(chunk[3])?) };
-        let word = (s0 << 18) | (s1 << 12) | (s2 << 6) | s3;
-        out.push(((word >> 16) & 0xff) as u8);
-        if pad_len < 2 {
-            out.push(((word >> 8) & 0xff) as u8);
+        if saw_padding {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "misplaced base64 `=` padding").with_details(json!({ "pointer": pointer })));
         }
-        if pad_len == 0 {
-            out.push((word & 0xff) as u8);
+        quad[quad_len] = byte;
+        quad_len += 1;
+        if quad_len < 4 {
+            continue;
         }
+        quad_len = 0;
+        let (bytes, decoded_len, padded) = decode_base64_quad(quad, pointer)?;
+        saw_padding = padded;
+        if out.len().saturating_add(decoded_len) > max_bytes {
+            return Err(limit_err());
+        }
+        if out.capacity() - out.len() < decoded_len {
+            let grow = out.len().max(1024).min(max_bytes - out.len()).max(decoded_len);
+            out.reserve_exact(grow);
+        }
+        out.extend_from_slice(&bytes[..decoded_len]);
+    }
+
+    if non_ws_len == 0 {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "base64 payload must not be empty").with_details(json!({ "pointer": pointer })));
+    }
+    if quad_len != 0 {
+        return Err(
+            EngineError::with_code(ErrorCode::BadInput, "base64 payload length must be a multiple of 4").with_details(json!({ "pointer": pointer }))
+        );
     }
     Ok(out)
+}
+
+/// Decode standard non-empty RFC 4648 base64 string (ignoring ASCII whitespace), capped at [`MAX_ARCHIVE_FILE_BYTES`].
+///
+/// # Errors
+/// Returns [`EngineError`] with [`ErrorCode::BadInput`] if empty, length is invalid, or characters are invalid,
+/// or [`ErrorCode::ResourceLimit`] if the payload exceeds [`MAX_ARCHIVE_FILE_BYTES`].
+pub fn decode_base64(input: &str) -> Result<Vec<u8>, EngineError> {
+    decode_base64_capped(input, MAX_ARCHIVE_FILE_BYTES, "/bytes_base64")
 }
 
 /// Parse a named color (`black`, `white`, `transparent`, `red`, `blue`, `green`, `orange`, `purple`)

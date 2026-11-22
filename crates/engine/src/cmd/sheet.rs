@@ -7,8 +7,8 @@ use curvebook_doc::{
     GraphSheet, GroupedTable, HookSource, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet, InternalLinkKind, LayoutItem,
     LayoutSheet, LinkSource, MultipleVariablesTable, NestedTable, PartsOfWholeTable, PlacementMode, ProjectDocument, ResultCell, ResultSheet,
     ResultStatus, ResultTab, SheetCellRange, SheetFolderKind, SheetId, SheetSection, SubcolumnMode, SurvivalTable, TableArchetype, TableKind,
-    VariableRole, XColumnMode, XyTable, validate_cell_grid, validate_data_sets, validate_project_cells, validate_rows, validate_sheet_cells,
-    validate_subcolumns, validate_title,
+    VariableRole, XColumnMode, XyTable, extract_template_hooks, validate_cell_grid, validate_data_sets, validate_project_cells, validate_rows,
+    validate_sheet_cells, validate_subcolumns, validate_title,
 };
 use curvebook_transform::{ImportPipelineOptions, ImportSourcePayload, apply_import_link_pipeline};
 use serde::Deserialize;
@@ -174,7 +174,7 @@ fn create_data_schema() -> Value {
             ("info_sheet_id", &["infoSheetId"]),
             ("graph_sheet_id", &["graphSheetId"]),
         ],
-        true,
+        false,
     )
 }
 
@@ -567,7 +567,7 @@ fn rename_sheet_schema() -> Value {
         vec![("sheet_id", non_empty_str_schema("ID of sheet to rename")), ("title", non_empty_str_schema("New title for the sheet"))],
         &["sheet_id", "title"],
         vec![("sheet_id", &["sheetId", "id"]), ("title", &["new_title", "newTitle", "name"])],
-        true,
+        false,
     )
 }
 
@@ -653,7 +653,7 @@ fn delete_sheet_schema() -> Value {
         ],
         &["sheet_id"],
         vec![("sheet_id", &["sheetId", "id"])],
-        true,
+        false,
     )
 }
 
@@ -941,7 +941,7 @@ fn duplicate_sheet_schema() -> Value {
             ("new_sheet_id", &["newSheetId", "target_sheet_id", "targetSheetId", "new_id"]),
             ("title", &["new_title", "newTitle"]),
         ],
-        true,
+        false,
     )
 }
 
@@ -1096,7 +1096,7 @@ fn duplicate_family_schema() -> Value {
             ("new_sheet_id", &["newSheetId", "target_sheet_id", "targetSheetId"]),
             ("title", &["new_title", "newTitle"]),
         ],
-        true,
+        false,
     )
 }
 
@@ -1165,7 +1165,7 @@ fn clone_pipeline_schema() -> Value {
             ("clone_layouts", &["cloneLayouts"]),
             ("clear_results", &["clearResults"]),
         ],
-        true,
+        false,
     )
 }
 
@@ -1471,6 +1471,53 @@ fn remap_result_sheet(
     Ok(res)
 }
 
+fn text_hooks_any_sheet(text: &str, id_map: &HashMap<SheetId, SheetId>) -> bool {
+    if extract_template_hooks(text).iter().any(|hook| hook.upstream_sheet_id().is_some_and(|id| id_map.contains_key(id))) {
+        return true;
+    }
+    let mut rest = text;
+    while let Some(open) = rest.find("{{") {
+        let after_open = &rest[open + 2..];
+        let Some(close) = after_open.find("}}") else {
+            break;
+        };
+        let parts: Vec<&str> = after_open[..close].trim().split(':').map(str::trim).collect();
+        if let ["scalar", sheet, rest_parts @ ..] = parts.as_slice()
+            && !sheet.is_empty()
+            && !rest_parts.is_empty()
+            && id_map.contains_key(&SheetId::new(*sheet))
+        {
+            return true;
+        }
+        rest = &after_open[close + 2..];
+    }
+    false
+}
+
+fn graph_references_family(gs: &GraphSheet, id_map: &HashMap<SheetId, SheetId>) -> bool {
+    let spec = &gs.spec;
+    id_map.contains_key(&spec.primary_source_sheet_id)
+        || spec.series.iter().any(|s| {
+            id_map.contains_key(&s.source_sheet_id)
+                || s.regression_overlay.as_ref().is_some_and(|ov| id_map.contains_key(&ov.result_sheet_id))
+                || s.legend_label.as_deref().is_some_and(|lbl| text_hooks_any_sheet(lbl, id_map))
+        })
+        || spec.compact_letter_display.as_ref().is_some_and(|cld| id_map.contains_key(&cld.result_sheet_id))
+        || spec.comparisons.iter().any(|cmp| id_map.contains_key(&cmp.result_sheet_id))
+        || spec.annotations.iter().any(|ann| match ann {
+            GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. } | GraphAnnotation::ModelEquation { result_sheet_id, .. } => {
+                id_map.contains_key(result_sheet_id)
+            }
+            GraphAnnotation::TextBox { markdown, .. } => text_hooks_any_sheet(markdown, id_map),
+            GraphAnnotation::LineOrArrow { .. } | GraphAnnotation::Shape { .. } | GraphAnnotation::EmbeddedImage { .. } => false,
+        })
+        || spec.inline_hooks().iter().any(|hook| hook.upstream_sheet_id().is_some_and(|id| id_map.contains_key(id)))
+        || text_hooks_any_sheet(&spec.title, id_map)
+        || text_hooks_any_sheet(&spec.x_axis.title, id_map)
+        || text_hooks_any_sheet(&spec.y_axis.title, id_map)
+        || spec.y2_axis.as_ref().is_some_and(|y2| text_hooks_any_sheet(&y2.title, id_map))
+}
+
 fn clone_downstream_graphs(
     doc: &mut ProjectDocument,
     id_map: &mut HashMap<SheetId, SheetId>,
@@ -1481,13 +1528,7 @@ fn clone_downstream_graphs(
     let mut created = Vec::new();
     let original_graphs = doc.graph_sheets.clone();
     for gs in &original_graphs {
-        let references_family = id_map.contains_key(&gs.spec.primary_source_sheet_id)
-            || gs.spec.series.iter().any(|s| {
-                id_map.contains_key(&s.source_sheet_id) || s.regression_overlay.as_ref().is_some_and(|ov| id_map.contains_key(&ov.result_sheet_id))
-            })
-            || gs.spec.compact_letter_display.as_ref().is_some_and(|cld| id_map.contains_key(&cld.result_sheet_id))
-            || gs.spec.comparisons.iter().any(|cmp| id_map.contains_key(&cmp.result_sheet_id));
-        if !references_family {
+        if !graph_references_family(gs, id_map) {
             continue;
         }
         let new_graph_id = next_unique_id_with_reserved(doc, &format!("{id_prefix}-graph"), reserved)?;
@@ -1594,7 +1635,7 @@ struct SheetIdParams {
 }
 
 fn sheet_id_schema(desc: &str) -> Value {
-    obj_schema_with_aliases(vec![("sheet_id", non_empty_str_schema(desc))], &["sheet_id"], vec![("sheet_id", &["sheetId", "id"])], true)
+    obj_schema_with_aliases(vec![("sheet_id", non_empty_str_schema(desc))], &["sheet_id"], vec![("sheet_id", &["sheetId", "id"])], false)
 }
 
 fn freeze_sheet_schema() -> Value {
@@ -1667,7 +1708,7 @@ fn reorder_sheet_schema() -> Value {
         ],
         &[],
         vec![("from_index", &["fromIndex"]), ("to_index", &["toIndex"]), ("sheet_id", &["sheetId", "id"]), ("index", &["position"])],
-        true,
+        false,
     )
 }
 
@@ -1823,7 +1864,7 @@ fn select_sheet_schema() -> Value {
         ],
         &["sheet_id"],
         vec![("sheet_id", &["sheetId", "id"]), ("mode", &["pane"])],
-        true,
+        false,
     )
 }
 
@@ -1934,6 +1975,8 @@ fn run_sheet_extract_result_tab(ctx: &mut Ctx<'_>, params: Value) -> Result<Comm
     let row_count = tab.rows.len();
     let col_count = tab.rows.iter().map(Vec::len).max().unwrap_or(0).max(tab.column_headers.len()).max(1);
     let target_kind = resolve_extracted_table_kind(&tab, parsed.archetype.as_deref())?;
+    let existing_cells = document_used_cells(&ctx.session.doc);
+    validate_sheet_and_project_budget(existing_cells, row_count, col_count, 1, 0)?;
 
     let target_id = allocate_new_sheet_id(&ctx.session.doc, parsed.sheet_id.as_deref(), "data")?;
     let title = match parsed.title.as_deref() {
@@ -1995,6 +2038,7 @@ fn run_sheet_extract_result_tab(ctx: &mut Ctx<'_>, params: Value) -> Result<Comm
     };
     let graph_id = new_graph.as_ref().map(|g| g.id.as_str().to_owned());
 
+    validate_project_cells(existing_cells, sheet.archetype.allocated_cell_slots())?;
     ctx.session.doc.add_data_sheet(sheet)?;
     if let Some(graph) = new_graph {
         ctx.session.doc.add_graph_sheet(graph)?;
