@@ -5,15 +5,15 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use curvebook_chart::scales::{
-    AxisMapping, AxisOrientation, AxisRenderOptions, MAX_TICKS_PER_SEGMENT, ResolvedAxis, ScaleDiagnostics, TickComputeConfig, TickKind,
-    compute_axis_ticks_with_warnings, render_graph_chrome, resolve_axes_and_ticks,
+    AxisMapping, AxisOrientation, MAX_TICKS_PER_SEGMENT, ResolvedAxis, ScaleDiagnostics, TickComputeConfig, TickKind,
+    compute_axis_ticks_with_warnings,
 };
 use curvebook_chart::{ChartScene, PathCmd, RectPt, ScenePrimitive, compile_graph};
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, AxisSegment, AxisSpec, Cell, ClusterDistance, ClusterLinkage, ColumnDesignHint, ColumnTable, DataSheet,
     DiagnosticPlotKind, ErrorBarDirection, ErrorBarMetric, ErrorBarSpec, GraphKind, GraphSheet, LogitDomain, MultipleVariablesTable,
-    MultivariateSpec, ProjectDocument, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SheetId, SizePt, SubcolumnMode,
-    SurvivalTable, TableArchetype, VariableRole, XyTable,
+    MultivariateSpec, ProjectDocument, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SheetId, SubcolumnMode, SurvivalTable,
+    TableArchetype, VariableRole, XyTable,
 };
 use curvebook_math::AxisScale;
 use curvebook_text::LocaleNumberPolicy;
@@ -94,7 +94,7 @@ fn r1_s08_09_scales_and_compile_graph_share_guards_and_tick_engine() {
     let policy = LocaleNumberPolicy::publication();
     let plot_rect = RectPt::new(50.0, 24.0, 300.0, 200.0);
 
-    // 1. Extreme log ranges (5e-324..=f64::MAX) through `ResolvedAxis`, `compute_axis_ticks_with_warnings`, and `render_graph_chrome`.
+    // 1. Extreme log ranges (5e-324..=f64::MAX) through `ResolvedAxis`, `compute_axis_ticks_with_warnings`, and `compile_graph`.
     for scale in [AxisScale::Log10, AxisScale::Log2, AxisScale::Ln] {
         let mut spec = AxisSpec::linear("Extreme Log");
         spec.segments = vec![AxisSegment { scale, ..AxisSegment::default() }];
@@ -110,32 +110,30 @@ fn r1_s08_09_scales_and_compile_graph_share_guards_and_tick_engine() {
 
         let (doc, mut graph) = xy_doc_with_points(&[(1.0, 5e-324), (2.0, f64::MAX)]);
         graph.spec.y_axis = spec;
-        let mut chrome_scene = ChartScene::new("chrome", "Extreme Log", 420.0, 300.0, None);
-        let opts = AxisRenderOptions { y_data_bounds: Some((5e-324, f64::MAX)), ..AxisRenderOptions::default() };
-        let _ = render_graph_chrome(&graph.spec, &doc, &mut chrome_scene, &opts);
-        assert_all_primitives_finite(&chrome_scene);
-
         let compiled = compile_guarded(doc, graph);
         assert_all_primitives_finite(&compiled);
     }
 
-    // 2. Tiny `major_tick_interval` emits `major_tick_interval_capped` across BOTH `resolve_axes_and_ticks` AND `compile_graph` (XY, Column, Survival).
+    // 2. Tiny `major_tick_interval` emits `major_tick_interval_capped` across BOTH `compute_axis_ticks_with_warnings` AND `compile_graph` (XY, Column, Survival).
     let mut capped_y_spec = AxisSpec::linear("Y Capped");
     capped_y_spec.segments = vec![AxisSegment { min: Some(0.0), max: Some(100.0), major_tick_interval: Some(1e-12), ..AxisSegment::default() }];
 
+    let mut scales_warnings = Vec::new();
+    let capped_resolved = ResolvedAxis::resolve(&capped_y_spec, AxisOrientation::Vertical, plot_rect, None, &mut scales_warnings);
+    let scales_y_ticks = compute_axis_ticks_with_warnings(
+        &capped_resolved,
+        TickComputeConfig { tick_format: capped_y_spec.tick_format, policy: &policy, auto_log_minor_ticks: true, categorical_ticks: None },
+        &mut scales_warnings,
+    );
+    assert!(
+        scales_warnings.iter().any(|w| w.code == "major_tick_interval_capped"),
+        "scales::compute_axis_ticks_with_warnings must warn on tiny major_tick_interval: {scales_warnings:?}",
+    );
+    let scales_y_majors: Vec<f64> = scales_y_ticks.iter().filter(|t| t.kind == TickKind::Major).map(|t| t.value).collect();
+    assert!(!scales_y_majors.is_empty() && scales_y_majors.len() <= MAX_TICKS_PER_SEGMENT);
+
     let (xy_doc, mut xy_graph) = xy_doc_with_points(&[(1.0, 10.0), (2.0, 90.0)]);
     xy_graph.spec.y_axis = capped_y_spec.clone();
-    let mut chrome_spec = xy_graph.spec.clone();
-    chrome_spec.canvas_size_pt = SizePt::new(420.0, 300.0);
-    let mut scales_scene = ChartScene::new("scales-cap", "Cap", 420.0, 300.0, None);
-    let compiled_axes = resolve_axes_and_ticks(&chrome_spec, &mut scales_scene, &AxisRenderOptions::default());
-    assert!(
-        scales_scene.warnings.iter().any(|w| w.code == "major_tick_interval_capped"),
-        "scales::resolve_axes_and_ticks must warn on tiny major_tick_interval: {:?}",
-        scales_scene.warnings
-    );
-    let scales_y_majors: Vec<f64> = compiled_axes.y_ticks.iter().filter(|t| t.kind == TickKind::Major).map(|t| t.value).collect();
-    assert!(!scales_y_majors.is_empty() && scales_y_majors.len() <= MAX_TICKS_PER_SEGMENT);
 
     let xy_scene = compile_guarded(xy_doc, xy_graph);
     assert!(xy_scene.warnings.iter().any(|w| w.code == "major_tick_interval_capped"));

@@ -955,7 +955,7 @@ dependencies = [
  "curvebook-palette",
  "curvebook-testkit",
  "curvebook-text",
- "flate2",
+ "png",
  "quick-xml",
  "serde",
 ]

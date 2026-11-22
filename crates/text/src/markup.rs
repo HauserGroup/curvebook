@@ -367,10 +367,11 @@ fn handle_backslash(rest: &str, state: &StyleState, spans: &mut Vec<RichSpan>, d
         }
 
         if matches!(name, "left" | "right")
-            && let Some((delim, delim_consumed)) = parse_tex_delimiter(tail)
+            && let Some((delim, delim_consumed)) = parse_tex_delimiter_token(tail)
         {
-            push_styled(spans, delim, state);
-            return Some((1 + name_len + delim_consumed, delim.chars().last()));
+            let delim_str = delim.as_str();
+            push_styled(spans, delim_str, state);
+            return Some((1 + name_len + delim_consumed, delim_str.chars().last()));
         }
 
         if let Some(op) = lookup_roman_operator(name) {
@@ -416,7 +417,12 @@ fn handle_dollar_math(rest: &str, state: &StyleState, spans: &mut Vec<RichSpan>,
     Some((consumed, Some('$')))
 }
 
-fn match_balanced_math_delimiters(rest: &str, delim_len: usize) -> Option<(&str, usize)> {
+/// Match balanced `$...$` (`delim_len == 1`) or `$$...$$` (`delim_len == 2`) math delimiters
+/// at the start of `rest`, rejecting currency literals like `"$100"` or `"Costs $5 to $10"`.
+///
+/// Returns `(inner_slice, total_bytes_consumed)` when balanced math-mode content is found.
+#[must_use]
+pub fn match_balanced_math_delimiters(rest: &str, delim_len: usize) -> Option<(&str, usize)> {
     let after_open = rest.get(delim_len..)?;
     if delim_len == 1 && after_open.starts_with('$') {
         return None;
@@ -427,10 +433,10 @@ fn match_balanced_math_delimiters(rest: &str, delim_len: usize) -> Option<(&str,
     let mut brace_depth = 0usize;
 
     while i < bytes.len() {
-        let ch = after_open[i..].chars().next()?;
+        let ch = after_open.get(i..)?.chars().next()?;
         if ch == '\\' {
             i += 1;
-            if let Some(next_ch) = after_open[i..].chars().next() {
+            if let Some(next_ch) = after_open.get(i..).and_then(|s| s.chars().next()) {
                 i += next_ch.len_utf8();
             }
             continue;
@@ -451,9 +457,9 @@ fn match_balanced_math_delimiters(rest: &str, delim_len: usize) -> Option<(&str,
             i += 1;
             continue;
         }
-        if brace_depth == 0 && ((delim_len == 1 && ch == '$') || (delim_len == 2 && after_open[i..].starts_with("$$"))) {
-            let inner = &after_open[..i];
-            let after_close = &after_open[i + delim_len..];
+        if brace_depth == 0 && ((delim_len == 1 && ch == '$') || (delim_len == 2 && after_open.get(i..).is_some_and(|s| s.starts_with("$$")))) {
+            let inner = after_open.get(..i)?;
+            let after_close = after_open.get(i + delim_len..)?;
             if is_math_mode_content(inner, after_close) {
                 return Some((inner, delim_len + i + delim_len));
             }
@@ -634,7 +640,10 @@ fn scan_script_token(after: &str) -> Option<usize> {
     Some(end)
 }
 
-fn extract_braced(s: &str) -> Option<(&str, usize)> {
+/// Extract a balanced `{...}` group starting at index 0 of `s`, respecting `\` escapes and
+/// [`MAX_MARKUP_DEPTH`]. Returns `(inner_slice, bytes_consumed)`.
+#[must_use]
+pub fn extract_braced(s: &str) -> Option<(&str, usize)> {
     if !s.starts_with('{') {
         return None;
     }
@@ -657,14 +666,17 @@ fn extract_braced(s: &str) -> Option<(&str, usize)> {
         } else if ch == '}' {
             depth = depth.saturating_sub(1);
             if depth == 0 {
-                return Some((&s[1..idx], idx + 1));
+                return Some((s.get(1..idx)?, idx + 1));
             }
         }
     }
     None
 }
 
-fn extract_braced_opt_ws(s: &str) -> Option<(&str, usize)> {
+/// Extract a balanced `{...}` group after skipping optional leading spaces or tabs.
+/// Returns `(inner_slice, total_bytes_consumed)`.
+#[must_use]
+pub fn extract_braced_opt_ws(s: &str) -> Option<(&str, usize)> {
     let trimmed = s.trim_start_matches([' ', '\t']);
     let ws_len = s.len() - trimmed.len();
     let (inner, consumed) = extract_braced(trimmed)?;
@@ -797,30 +809,65 @@ fn emit_parsed_sqrt(
     Some((total_consumed, last_ch))
 }
 
-fn parse_tex_delimiter(s: &str) -> Option<(&'static str, usize)> {
+/// Recognized TeX `\left` / `\right` delimiter token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TexDelimiter {
+    LeftParen,
+    RightParen,
+    LeftBracket,
+    RightBracket,
+    LeftBrace,
+    RightBrace,
+    Pipe,
+    DoublePipe,
+    Null,
+}
+
+impl TexDelimiter {
+    /// Rendered Unicode text for inline markup flattening (`""` for null delimiter `.`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LeftParen => "(",
+            Self::RightParen => ")",
+            Self::LeftBracket => "[",
+            Self::RightBracket => "]",
+            Self::LeftBrace => "{",
+            Self::RightBrace => "}",
+            Self::Pipe => "|",
+            Self::DoublePipe => "\u{2016}",
+            Self::Null => "",
+        }
+    }
+}
+
+/// Parse a TeX delimiter token following `\left` or `\right` (skipping leading horizontal whitespace).
+#[must_use]
+pub fn parse_tex_delimiter_token(s: &str) -> Option<(TexDelimiter, usize)> {
     let trimmed = s.trim_start_matches([' ', '\t']);
     let ws = s.len() - trimmed.len();
-    if trimmed.starts_with('(') {
-        Some(("(", ws + 1))
+    let (delim, len) = if trimmed.starts_with('(') {
+        (TexDelimiter::LeftParen, 1)
     } else if trimmed.starts_with(')') {
-        Some((")", ws + 1))
+        (TexDelimiter::RightParen, 1)
     } else if trimmed.starts_with('[') {
-        Some(("[", ws + 1))
+        (TexDelimiter::LeftBracket, 1)
     } else if trimmed.starts_with(']') {
-        Some(("]", ws + 1))
+        (TexDelimiter::RightBracket, 1)
     } else if trimmed.starts_with('|') {
-        Some(("|", ws + 1))
+        (TexDelimiter::Pipe, 1)
     } else if trimmed.starts_with('.') {
-        Some(("", ws + 1))
+        (TexDelimiter::Null, 1)
     } else if trimmed.starts_with("\\{") {
-        Some(("{", ws + 2))
+        (TexDelimiter::LeftBrace, 2)
     } else if trimmed.starts_with("\\}") {
-        Some(("}", ws + 2))
+        (TexDelimiter::RightBrace, 2)
     } else if trimmed.starts_with("\\|") {
-        Some(("\u{2016}", ws + 2))
+        (TexDelimiter::DoublePipe, 2)
     } else {
-        None
-    }
+        return None;
+    };
+    Some((delim, ws + len))
 }
 
 /// Look up a standard TeX roman-font mathematical operator name (e.g., `"log"`, `"sin"`, `"exp"`).
@@ -890,7 +937,9 @@ fn push_styled(spans: &mut Vec<RichSpan>, text: &str, state: &StyleState) {
     push_rich_span(spans, RichSpan { text: text.to_owned(), script, weight, slope, color: None, font_family: None, scale });
 }
 
-fn lookup_latex_escape(name: &str) -> Option<&'static str> {
+/// Look up any supported LaTeX Greek or mathematical symbol escape name (e.g., `"alpha"`, `"pm"`).
+#[must_use]
+pub fn lookup_latex_escape(name: &str) -> Option<&'static str> {
     if let Some(greek) = lookup_greek_escape(name) {
         return Some(greek);
     }
@@ -960,7 +1009,9 @@ pub fn lookup_greek_escape(name: &str) -> Option<&'static str> {
     }
 }
 
-fn lookup_math_escape(name: &str) -> Option<&'static str> {
+/// Look up a TeX mathematical/scientific symbol escape name (e.g., `"pm"` -> `"±"`, `"leq"` -> `"≤"`).
+#[must_use]
+pub fn lookup_math_escape(name: &str) -> Option<&'static str> {
     match name {
         "pm" => Some("\u{00B1}"),
         "mp" => Some("\u{2213}"),
@@ -1184,7 +1235,9 @@ pub fn parse_equation_segments(input: &str) -> Vec<EquationSegment> {
     out
 }
 
-fn unwrap_outer_math_delimiters(trimmed: &str) -> Option<&str> {
+/// Unwrap enclosing balanced `$...$` or `$$...$$` math delimiters when they span the entire `trimmed` string.
+#[must_use]
+pub fn unwrap_outer_math_delimiters(trimmed: &str) -> Option<&str> {
     if trimmed.starts_with("$$") {
         let (inner, consumed) = match_balanced_math_delimiters(trimmed, 2)?;
         return (consumed == trimmed.len()).then_some(inner);

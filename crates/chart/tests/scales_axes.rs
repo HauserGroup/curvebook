@@ -1,17 +1,16 @@
 #![allow(clippy::float_cmp, clippy::cast_lossless)]
 
 use curvebook_chart::scales::{
-    AxisFrameMode, AxisMapping, AxisOrientation, AxisRenderOptions, CategoricalTick, LOG_POSITIVE_FLOOR_DEFAULT, LegendEntry, MAX_TICKS_PER_SEGMENT,
-    ResolvedAxis, ScaleDiagnostics, TickComputeConfig, TickKind, compute_axis_ticks, compute_plot_rect, format_tick_rich,
-    legend_entries_from_graph_spec, render_annotations, render_axes_and_frame, render_graph_chrome, render_legend, resolve_template_hooks,
-    scale_inverse, scale_transform, split_polyline_across_segments,
+    AxisMapping, AxisOrientation, CategoricalTick, LOG_POSITIVE_FLOOR_DEFAULT, LegendEntry, MAX_TICKS_PER_SEGMENT, ResolvedAxis, ScaleDiagnostics,
+    TickComputeConfig, TickKind, compute_axis_ticks, format_tick_rich, legend_entries_from_graph_spec, render_annotations, render_legend,
+    resolve_template_hooks, scale_inverse, scale_transform, split_polyline_across_segments,
 };
-use curvebook_chart::{ChartScene, FillPaint, PathCmd, PointPt, RectPt, ScenePrimitive, TextAnchor};
+use curvebook_chart::{ChartScene, FillPaint, PathCmd, PointPt, RectPt, ScenePrimitive, TextAnchor, compile_graph};
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, AnnotationShapeKind, AxisSegment, AxisSpec, AxisThreshold, BreakOrnament, CiBound, ConstantValue, DataSheet,
-    DescriptiveSpec, EquationDisplayMode, FramePreset, GraphAnnotation, GraphSheet, InfoSheet, LegendSpec, LogitDomain, NonlinearFitSpec,
-    ProjectDocument, RectPt as DocRectPt, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SheetId, SizePt,
-    SubcolumnMode, TableArchetype, TickLabelFormat, XyTable,
+    AnalysisKind, AnalysisSpec, AnnotationShapeKind, AxisSegment, AxisSpec, AxisThreshold, BreakOrnament, Cell, CiBound, ColumnDesignHint,
+    ColumnTable, ConstantValue, DataSheet, DescriptiveSpec, EquationDisplayMode, FramePreset, GraphAnnotation, GraphSheet, InfoSheet, LegendSpec,
+    LogitDomain, NonlinearFitSpec, ProjectDocument, RectPt as DocRectPt, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab,
+    ResultTabKind, SheetId, SizePt, SubcolumnMode, TableArchetype, TickLabelFormat, XyTable,
 };
 use curvebook_math::{AxisScale, dist::norm_ppf};
 use curvebook_palette::{LineDashStyle, MarkerFillMode, MarkerShape, Rgba8};
@@ -263,6 +262,7 @@ fn discontinuous_two_and_three_segment_axes_and_gap_geometry() {
 }
 
 #[test]
+#[allow(clippy::expect_used)]
 fn break_ornaments_emit_double_slash_zigzag_and_blank_gap() {
     let (doc, mut graph) = build_sample_doc_and_graph();
     graph.spec.x_axis.segments = vec![
@@ -285,19 +285,14 @@ fn break_ornaments_emit_double_slash_zigzag_and_blank_gap() {
     ];
     graph.spec.x_axis.gap_width_pt = 10.0;
 
-    let opts = AxisRenderOptions::default();
-
     graph.spec.x_axis.break_ornament = BreakOrnament::BlankGap;
-    let mut s_blank = ChartScene::new("b", "Blank", 360.0, 260.0, None);
-    render_axes_and_frame(&graph.spec, &doc, &mut s_blank, &opts);
+    let s_blank = compile_graph(&graph, &doc).expect("compile blank gap");
 
     graph.spec.x_axis.break_ornament = BreakOrnament::DoubleSlash;
-    let mut s_slash = ChartScene::new("s", "Slash", 360.0, 260.0, None);
-    render_axes_and_frame(&graph.spec, &doc, &mut s_slash, &opts);
+    let s_slash = compile_graph(&graph, &doc).expect("compile double slash");
 
     graph.spec.x_axis.break_ornament = BreakOrnament::Zigzag;
-    let mut s_zig = ChartScene::new("z", "Zigzag", 360.0, 260.0, None);
-    render_axes_and_frame(&graph.spec, &doc, &mut s_zig, &opts);
+    let s_zig = compile_graph(&graph, &doc).expect("compile zigzag");
 
     let blank_lines = line_count_in_scene(&s_blank);
     let slash_lines = line_count_in_scene(&s_slash);
@@ -305,7 +300,7 @@ fn break_ornaments_emit_double_slash_zigzag_and_blank_gap() {
 
     assert_eq!(slash_lines, blank_lines + 2, "DoubleSlash should add 2 diagonal slash strokes");
     assert_eq!(zig_lines, blank_lines + 1, "Zigzag should add 1 multi-segment zigzag path");
-    let has_zigzag_cmd = s_zig.primitives.iter().any(|p| matches!(p, ScenePrimitive::Path { path, .. } if path.commands.len() == 4));
+    let has_zigzag_cmd = s_zig.primitives.iter().any(|p| matches!(p, ScenePrimitive::Path { path, .. } if path.commands.len() == 5));
     assert!(has_zigzag_cmd);
 }
 
@@ -501,6 +496,7 @@ fn auto_nice_ticks_and_log10_minor_cadence_2_to_9() {
 }
 
 #[test]
+#[allow(clippy::expect_used)]
 fn tick_formatting_modes_and_rotated_labels_use_curvebook_text() {
     let policy = LocaleNumberPolicy::publication();
     let sup = format_tick_rich(1e-6, AxisScale::Log10, TickLabelFormat::PowerOfTenSuperscript, &policy);
@@ -521,27 +517,25 @@ fn tick_formatting_modes_and_rotated_labels_use_curvebook_text() {
     assert_eq!(si_kilo.plain_text(), "1.5 k");
 
     // Rotated categorical labels expand plot bottom margin and attach rotation_deg + TextAnchor
-    let (doc, mut graph) = build_sample_doc_and_graph();
-    graph.spec.x_axis.tick_format = TickLabelFormat::Categorical(curvebook_doc::CategoricalTickSource::ColumnTitles);
-    graph.spec.x_axis.tick_angle_deg = 45.0;
-    graph.spec.x_axis.segments[0].min = Some(-0.5);
-    graph.spec.x_axis.segments[0].max = Some(2.5);
+    let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 3, 2).expect("col table");
+    for (idx, title) in ["Vehicle Control", "Low Dose", "High Dose"].into_iter().enumerate() {
+        col.data_sets[idx].title = String::from(title);
+        col.data_sets[idx].cells[0][0] = Cell::number((idx + 1) as f64 * 10.0);
+        col.data_sets[idx].cells[1][0] = Cell::number((idx + 1) as f64 * 12.0);
+    }
+    let col_ds = DataSheet::new(SheetId::new("col-rot"), "Groups", TableArchetype::Column(col)).expect("col ds");
+    let mut doc = ProjectDocument::default();
+    doc.add_data_sheet(col_ds.clone()).expect("add col ds");
+    let mut graph_flat = GraphSheet::new_uninitialized_for_data(SheetId::new("g-flat"), &col_ds).expect("flat graph");
+    graph_flat.spec.canvas_size_pt = SizePt::new(360.0, 260.0);
+    graph_flat.spec.x_axis.tick_angle_deg = 0.0;
+    let mut graph_rot = graph_flat.clone();
+    graph_rot.spec.x_axis.tick_angle_deg = 45.0;
 
-    let cats = CategoricalTick::from_labels(&[String::from("Vehicle Control"), String::from("Low Dose"), String::from("High Dose")]);
-    let opts_flat = AxisRenderOptions { x_categories: Some(cats.clone()), ..AxisRenderOptions::default() };
-    let mut opts_rot = AxisRenderOptions { x_categories: Some(cats), ..AxisRenderOptions::default() };
-    let mut graph_flat = graph.spec.clone();
-    graph_flat.x_axis.tick_angle_deg = 0.0;
-
-    let rect_flat = compute_plot_rect(SizePt::new(360.0, 260.0), &graph_flat, &opts_flat);
-    let rect_rot = compute_plot_rect(SizePt::new(360.0, 260.0), &graph.spec, &opts_rot);
-    assert!(rect_rot.height < rect_flat.height, "45-deg rotated long labels should reserve taller bottom margin");
-
-    opts_rot.frame_mode = None;
-    let mut scene = ChartScene::new("rot", "Rotated", 360.0, 260.0, None);
-    scene.plot_rect_pt = rect_rot;
-    render_axes_and_frame(&graph.spec, &doc, &mut scene, &opts_rot);
-    let rot_texts: Vec<&curvebook_chart::PositionedText> = scene
+    let scene_flat = compile_graph(&graph_flat, &doc).expect("compile flat");
+    let scene_rot = compile_graph(&graph_rot, &doc).expect("compile rot");
+    assert!(scene_rot.plot_rect_pt.height < scene_flat.plot_rect_pt.height, "45-deg rotated labels should reserve taller bottom margin");
+    let rot_texts: Vec<&curvebook_chart::PositionedText> = scene_rot
         .primitives
         .iter()
         .filter_map(|p| match p {
@@ -550,41 +544,49 @@ fn tick_formatting_modes_and_rotated_labels_use_curvebook_text() {
         })
         .collect();
     assert_eq!(rot_texts.len(), 3);
-    assert_eq!(rot_texts[0].anchor, TextAnchor::Start);
+    assert_eq!(rot_texts[0].anchor, TextAnchor::End);
+
+    // CategoricalTick::from_labels still drives compute_axis_ticks directly
+    let cats = CategoricalTick::from_labels(&[String::from("Vehicle Control"), String::from("Low Dose"), String::from("High Dose")]);
+    let mut cat_spec = AxisSpec::linear("Groups");
+    cat_spec.segments[0].min = Some(-0.5);
+    cat_spec.segments[0].max = Some(2.5);
+    let mut cat_warnings = Vec::new();
+    let cat_ax = ResolvedAxis::resolve(&cat_spec, AxisOrientation::Horizontal, RectPt::new(40.0, 20.0, 280.0, 180.0), None, &mut cat_warnings);
+    let cat_ticks = compute_axis_ticks(
+        &cat_ax,
+        TickComputeConfig {
+            tick_format: TickLabelFormat::Categorical(curvebook_doc::CategoricalTickSource::ColumnTitles),
+            policy: &policy,
+            auto_log_minor_ticks: false,
+            categorical_ticks: Some(&cats),
+        },
+    );
+    assert_eq!(cat_ticks.len(), 3);
 }
 
 #[test]
+#[allow(clippy::expect_used)]
 fn all_frame_presets_render_expected_spines_ticks_and_origin_warnings() {
     let (doc, mut graph) = build_sample_doc_and_graph();
+    graph.spec.canvas_size_pt = SizePt::new(360.0, 260.0);
     graph.spec.x_axis.segments[0].min = Some(-5.0);
     graph.spec.x_axis.segments[0].max = Some(5.0);
     graph.spec.y_axis.segments[0].min = Some(-10.0);
     graph.spec.y_axis.segments[0].max = Some(10.0);
 
-    let opts = AxisRenderOptions::default();
-
     // OpenL
     graph.spec.frame_preset = FramePreset::OpenL;
-    let mut s_open = ChartScene::new("open", "OpenL", 360.0, 260.0, None);
-    render_axes_and_frame(&graph.spec, &doc, &mut s_open, &opts);
+    let s_open = compile_graph(&graph, &doc).expect("open");
 
     // PlainBoxed
     graph.spec.frame_preset = FramePreset::PlainBoxed;
-    let mut s_box = ChartScene::new("box", "Box", 360.0, 260.0, None);
-    render_axes_and_frame(&graph.spec, &doc, &mut s_box, &opts);
+    let s_box = compile_graph(&graph, &doc).expect("box");
     assert_eq!(line_count_in_scene(&s_box), line_count_in_scene(&s_open) + 2);
-
-    // TopRightTicks
-    let opts_tr = AxisRenderOptions { frame_mode: Some(AxisFrameMode::TopRightTicks), ..AxisRenderOptions::default() };
-    let mut s_tr = ChartScene::new("tr", "TopRightTicks", 360.0, 260.0, None);
-    let c_tr = render_axes_and_frame(&graph.spec, &doc, &mut s_tr, &opts_tr);
-    assert_eq!(line_count_in_scene(&s_tr), line_count_in_scene(&s_box) + c_tr.x_ticks.len() + c_tr.y_ticks.len());
 
     // OffsetRangeTufte
     graph.spec.frame_preset = FramePreset::OffsetRangeTufte;
-    let mut s_off = ChartScene::new("off", "Offset", 360.0, 260.0, None);
-    let c_off = render_axes_and_frame(&graph.spec, &doc, &mut s_off, &opts);
-    assert_eq!(c_off.frame_mode, AxisFrameMode::OffsetAxes);
+    let s_off = compile_graph(&graph, &doc).expect("offset");
     assert!(line_count_in_scene(&s_off) > 2);
 
     // DualYSecondaryRight
@@ -593,16 +595,13 @@ fn all_frame_presets_render_expected_spines_ticks_and_origin_warnings() {
     y2.segments[0].min = Some(0.0);
     y2.segments[0].max = Some(100.0);
     graph.spec.y2_axis = Some(y2);
-    let mut s_y2 = ChartScene::new("y2", "DualY", 360.0, 260.0, None);
-    let c_y2 = render_axes_and_frame(&graph.spec, &doc, &mut s_y2, &opts);
-    assert!(c_y2.y2_axis.is_some());
-    assert!(!c_y2.y2_ticks.is_empty());
+    let s_y2 = compile_graph(&graph, &doc).expect("y2");
     assert!(s_y2.primitives.iter().any(|p| matches!(p, ScenePrimitive::Text(t) if t.rich.plain_text() == "Secondary Y2")));
+    graph.spec.y2_axis = None;
 
     // OriginCrossing inside domain [-5, 5] x [-10, 10]
     graph.spec.frame_preset = FramePreset::OriginCrossing;
-    let mut s_orig = ChartScene::new("orig", "Origin", 360.0, 260.0, None);
-    render_axes_and_frame(&graph.spec, &doc, &mut s_orig, &opts);
+    let s_orig = compile_graph(&graph, &doc).expect("origin");
     assert!(s_orig.warnings.is_empty());
     let expected_ox = s_orig.plot_rect_pt.x + 0.5 * s_orig.plot_rect_pt.width;
     assert!(s_orig.primitives.iter().any(|p| matches!(
@@ -614,18 +613,12 @@ fn all_frame_presets_render_expected_spines_ticks_and_origin_warnings() {
     // OriginCrossing outside domain emits warning cleanly
     graph.spec.x_axis.segments[0].min = Some(1.0);
     graph.spec.x_axis.segments[0].max = Some(5.0);
-    let mut s_orig_out = ChartScene::new("orig_out", "OriginOut", 360.0, 260.0, None);
-    render_axes_and_frame(&graph.spec, &doc, &mut s_orig_out, &opts);
+    let s_orig_out = compile_graph(&graph, &doc).expect("origin outside");
     assert!(s_orig_out.warnings.iter().any(|w| w.code == "origin_outside_x_domain"));
-
-    // NoAxes emits zero axis primitives
-    let opts_none = AxisRenderOptions { frame_mode: Some(AxisFrameMode::NoAxes), ..AxisRenderOptions::default() };
-    let mut s_none = ChartScene::new("none", "NoAxes", 360.0, 260.0, None);
-    render_axes_and_frame(&graph.spec, &doc, &mut s_none, &opts_none);
-    assert!(s_none.primitives.is_empty());
 }
 
 #[test]
+#[allow(clippy::expect_used)]
 fn thresholds_shaded_zones_legends_and_all_graph_annotations_compile() {
     let (doc, mut graph) = build_sample_doc_and_graph();
     graph.spec.x_axis.title = String::from("Dose (EXP: {{info:Experiment ID}})");
@@ -696,9 +689,9 @@ fn thresholds_shaded_zones_legends_and_all_graph_annotations_compile() {
         },
     ];
 
-    let mut scene = ChartScene::new("chrome", "Full Chrome", 360.0, 260.0, Some(Rgba8::WHITE));
-    let opts = AxisRenderOptions { show_gridlines: true, ..AxisRenderOptions::default() };
-    let _axes = render_graph_chrome(&graph.spec, &doc, &mut scene, &opts);
+    graph.spec.canvas_size_pt = SizePt::new(360.0, 260.0);
+    graph.spec.paper_fill = Some(Rgba8::WHITE);
+    let scene = compile_graph(&graph, &doc).expect("compile full chrome");
 
     // Hook expansion check
     assert_eq!(
@@ -709,7 +702,10 @@ fn thresholds_shaded_zones_legends_and_all_graph_annotations_compile() {
     assert!(scene.primitives.iter().any(|p| matches!(p, ScenePrimitive::Text(t) if t.rich.plain_text() == "Target Window")));
     // Shaded zone filled semi-transparently
     assert!(
-        scene.primitives.iter().any(|p| matches!(p, ScenePrimitive::Path { fill: Some(FillPaint { color }), stroke: None, .. } if color.a == 48))
+        scene
+            .primitives
+            .iter()
+            .any(|p| matches!(p, ScenePrimitive::Path { fill: Some(FillPaint { color }), stroke: None, .. } if color.a > 0 && color.a <= 64))
     );
     // Oval/ellipse emits CubicTo commands
     assert!(

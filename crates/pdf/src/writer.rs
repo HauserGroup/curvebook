@@ -17,7 +17,7 @@ use curvebook_text::glyph_paths::outline_visual_rich_text_rotated_with_fonts_and
 use curvebook_text::metrics::{core14_advance_em, is_combining_mark, reorder_rich_text_bidi, rich_contains_rtl, split_rich_text_lines};
 use curvebook_text::{
     BUNDLED_FONTS, GlyphOutlineCmd, PositionedGlyphOutline, RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, SystemFontSet, TrueTypeFont,
-    TrueTypeFontInfo, parse_truetype_font_info,
+    TrueTypeFontInfo,
 };
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
@@ -139,7 +139,7 @@ pub fn render_pdf_page_refs(pages: &[&ChartScene], options: &PdfExportOptions) -
 
     let embedded_ttf = resolve_embedded_truetype(options, !options.outline_text)?;
     let embedded_info = embedded_ttf.as_ref().map(|ttf| &ttf.info);
-    let parsed_ttf = embedded_ttf.as_ref().and_then(|ttf| TrueTypeFont::parse(&ttf.raw_bytes));
+    let parsed_ttf = embedded_ttf.as_ref().map(|ttf| &ttf.parsed);
     let mut cumulative_stream_bytes = 0_usize;
     let mut doc_ttf_charged = false;
 
@@ -150,8 +150,7 @@ pub fn render_pdf_page_refs(pages: &[&ChartScene], options: &PdfExportOptions) -
 
     for scene in pages {
         validate_scene_bounds(scene)?;
-        let (raw_stream, used) =
-            encode_page_stream(scene, options, embedded_info, parsed_ttf.as_ref(), &mut image_registry, &mut cumulative_stream_bytes)?;
+        let (raw_stream, used) = encode_page_stream(scene, options, embedded_info, parsed_ttf, &mut image_registry, &mut cumulative_stream_bytes)?;
         if !options.outline_text && used.ttf && !doc_ttf_charged {
             let font_bytes = embedded_ttf.as_ref().map_or(0_usize, |t| t.compressed_bytes.len());
             cumulative_stream_bytes = cumulative_stream_bytes
@@ -180,9 +179,10 @@ pub fn render_pdf_page_refs(pages: &[&ChartScene], options: &PdfExportOptions) -
     assemble_pdf_document(pages, &encoded_pages, &doc_resources, options)
 }
 
-struct EmbeddedTrueTypeFont {
-    raw_bytes: Vec<u8>,
+struct EmbeddedTrueTypeFont<'a> {
+    raw_len: usize,
     compressed_bytes: Vec<u8>,
+    parsed: TrueTypeFont<'a>,
     info: TrueTypeFontInfo,
     ps_name: String,
 }
@@ -208,21 +208,28 @@ fn sanitize_pdf_font_name(primary: &str, fallback: &str) -> String {
     if !fb.is_empty() { fb } else { String::from("CurveBookEmbedded") }
 }
 
-fn resolve_embedded_truetype(options: &PdfExportOptions, compress_for_embedding: bool) -> Result<Option<EmbeddedTrueTypeFont>, PdfError> {
+fn parse_embedded_sfnt(bytes: &[u8]) -> Option<(&[u8], TrueTypeFont<'_>, TrueTypeFontInfo)> {
+    if !is_truetype_sfnt(bytes) {
+        return None;
+    }
+    let parsed = TrueTypeFont::parse_checked(bytes).ok()?;
+    let info = parsed.inspect_info().ok()?;
+    Some((bytes, parsed, info))
+}
+
+fn resolve_embedded_truetype(options: &PdfExportOptions, compress_for_embedding: bool) -> Result<Option<EmbeddedTrueTypeFont<'_>>, PdfError> {
     let candidate = if let Some(bytes) = options.embedded_truetype_font.as_deref() {
-        is_truetype_sfnt(bytes).then(|| parse_truetype_font_info(bytes).ok().map(|info| (bytes, info))).flatten()
+        parse_embedded_sfnt(bytes)
     } else {
-        BUNDLED_FONTS
-            .iter()
-            .find_map(|&(_, bytes)| if is_truetype_sfnt(bytes) { parse_truetype_font_info(bytes).ok().map(|info| (bytes, info)) } else { None })
+        BUNDLED_FONTS.iter().find_map(|&(_, bytes)| parse_embedded_sfnt(bytes))
     };
 
-    let Some((raw_bytes, info)) = candidate else {
+    let Some((raw_bytes, parsed, info)) = candidate else {
         return Ok(None);
     };
     let ps_name = sanitize_pdf_font_name(&info.postscript_name, &info.family_name);
     let compressed_bytes = if compress_for_embedding { compress_if_requested(raw_bytes.to_vec(), true)? } else { Vec::new() };
-    Ok(Some(EmbeddedTrueTypeFont { raw_bytes: raw_bytes.to_vec(), compressed_bytes, info, ps_name }))
+    Ok(Some(EmbeddedTrueTypeFont { raw_len: raw_bytes.len(), compressed_bytes, parsed, info, ps_name }))
 }
 
 #[derive(Default)]
@@ -255,7 +262,7 @@ struct PdfImageRegistry {
 struct PdfDocResources<'a> {
     all_gs_both: &'a BTreeSet<u8>,
     all_gs_stroke: &'a BTreeSet<u8>,
-    embedded_ttf: Option<&'a EmbeddedTrueTypeFont>,
+    embedded_ttf: Option<&'a EmbeddedTrueTypeFont<'a>>,
     images: &'a PdfImageRegistry,
 }
 
@@ -563,7 +570,7 @@ fn assemble_pdf_document(
 fn write_truetype_font_objects(
     pdf: &mut Vec<u8>,
     offsets: &mut [usize],
-    ttf: &EmbeddedTrueTypeFont,
+    ttf: &EmbeddedTrueTypeFont<'_>,
     font_id: usize,
     desc_id: usize,
     stream_id: usize,
@@ -607,7 +614,7 @@ fn write_truetype_font_objects(
     write_pdf_obj(pdf, offsets, desc_id, desc_dict.as_bytes());
 
     let mut stream_obj = Vec::with_capacity(ttf.compressed_bytes.len() + 128);
-    let header = format!("<< /Length {} /Length1 {} /Filter /FlateDecode >>\nstream\n", ttf.compressed_bytes.len(), ttf.raw_bytes.len());
+    let header = format!("<< /Length {} /Length1 {} /Filter /FlateDecode >>\nstream\n", ttf.compressed_bytes.len(), ttf.raw_len);
     stream_obj.extend_from_slice(header.as_bytes());
     stream_obj.extend_from_slice(&ttf.compressed_bytes);
     stream_obj.extend_from_slice(b"\nendstream\n");

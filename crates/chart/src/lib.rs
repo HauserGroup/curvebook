@@ -8,6 +8,7 @@
 pub mod column_grouped;
 pub mod equation_box;
 pub mod image_decode;
+pub mod markers;
 pub mod multivariate_layout;
 pub mod scales;
 pub mod scene;
