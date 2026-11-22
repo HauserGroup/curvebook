@@ -857,9 +857,9 @@ fn refresh_single_region(
 
     let refresh_spec = make_refresh_spec(&region.spec, region.target_range.start);
     let opts = ImportPipelineOptions {
-        baseline: None,
+        baseline: region.spec.filter.baseline,
         exclude_coords: Vec::new(),
-        exclude_row_predicate: None,
+        exclude_row_predicate: region.spec.filter.exclude_row_predicate.clone(),
         link_id: Some(region.id.clone()),
         provenance_summary: Some(region.provenance_summary.clone()),
     };

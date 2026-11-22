@@ -249,6 +249,7 @@ pub(super) fn build_paste_link_spec(
     p: &PasteLinkParams,
     policy: &ExternalPathPolicy,
 ) -> Result<ImportLinkSpec, EngineError> {
+    let resolved_baseline = resolve_baseline_adjustment(p.baseline.clone())?;
     if let Some(raw_spec) = &p.link_spec
         && let Ok(mut parsed) = serde_json::from_value::<ImportLinkSpec>(raw_spec.clone())
     {
@@ -262,6 +263,12 @@ pub(super) fn build_paste_link_spec(
         if let Some(prop) = p.placement.propagate_title_header {
             parsed.placement.propagate_title_header = prop;
         }
+        if let Some(baseline) = resolved_baseline {
+            parsed.filter.baseline = Some(baseline);
+        }
+        if let Some(ref pred) = p.exclude_row_predicate {
+            parsed.filter.exclude_row_predicate = Some(pred.clone());
+        }
         return Ok(parsed);
     }
 
@@ -269,7 +276,13 @@ pub(super) fn build_paste_link_spec(
     let transpose = p.placement.transpose.unwrap_or(false);
     let default_prop = transpose && anchor.row == 0;
     let placement = p.placement.to_placement_spec(default_prop)?;
-    let filter = parse_import_filter_val(p.filter.as_ref())?;
+    let mut filter = parse_import_filter_val(p.filter.as_ref())?;
+    if let Some(baseline) = resolved_baseline {
+        filter.baseline = Some(baseline);
+    }
+    if let Some(ref pred) = p.exclude_row_predicate {
+        filter.exclude_row_predicate = Some(pred.clone());
+    }
 
     let source = if let Some(src_str) = p.source_sheet_id.as_deref() {
         let src_id = parse_sheet_id(src_str)?;
@@ -343,9 +356,9 @@ pub(super) fn run_paste_link(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOut
     };
     let provenance_summary = p.provenance.unwrap_or_else(|| summarize_link_source(&spec.source));
     let opts = ImportPipelineOptions {
-        baseline: resolve_baseline_adjustment(p.baseline)?,
+        baseline: spec.filter.baseline,
         exclude_coords: Vec::new(),
-        exclude_row_predicate: p.exclude_row_predicate,
+        exclude_row_predicate: spec.filter.exclude_row_predicate.clone(),
         link_id: Some(link_id),
         provenance_summary: Some(provenance_summary),
     };
