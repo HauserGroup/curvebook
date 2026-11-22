@@ -622,7 +622,7 @@ pub fn solve_linear_least_squares(x: &DenseMatrix, y: &[f64]) -> Result<(LeastSq
         let r_inv = pqr.inverse_r()?;
         let cov_s = pqr.unpermute_covariance(&r_inv)?;
         if !is_borderline_singular_cov(&cov_s, pqr.default_tol, p) {
-            let (beta_refined, rss_refined) = bjorck_refined_qr_solve(x, &x_pow2, y, &scales, &pqr)?;
+            let (beta_refined, rss_refined) = bjorck_refined_qr_solve(&x_pow2, y, &scales, &pqr)?;
             let cov_u = refined_covariance(&x_pow2, &scales, &pqr, &r_inv)?;
             return Ok((
                 LeastSquaresSolution { coefficients: beta_refined, rank: p, aliased_columns: Vec::new(), rss: rss_refined, df_residual: n - p },
@@ -634,7 +634,7 @@ pub fn solve_linear_least_squares(x: &DenseMatrix, y: &[f64]) -> Result<(LeastSq
         let svd_s = svd(&x_scaled)?;
         let svd_tol = svd_s.default_tol().max(pqr.default_tol);
         if svd_s.rank_with_tol(svd_tol) == p {
-            let (beta_refined, rss_refined) = bjorck_refined_qr_solve(x, &x_pow2, y, &scales, &pqr)?;
+            let (beta_refined, rss_refined) = bjorck_refined_qr_solve(&x_pow2, y, &scales, &pqr)?;
             let cov_u = unscale_covariance(&cov_s, &scales)?;
             return Ok((
                 LeastSquaresSolution { coefficients: beta_refined, rank: p, aliased_columns: Vec::new(), rss: rss_refined, df_residual: n - p },
@@ -743,7 +743,7 @@ fn solve_basic_subset(
     let n = x.nrows();
     while !active_cols.is_empty() {
         let r = active_cols.len();
-        let (x_sub, scales_sub, x_pow2_sub, x_scaled_sub) = extract_basic_submatrix(x, scales, &active_cols)?;
+        let (_x_sub, scales_sub, x_pow2_sub, x_scaled_sub) = extract_basic_submatrix(x, scales, &active_cols)?;
         let pqr_sub = qr_col_pivoted(&x_scaled_sub)?;
         if pqr_sub.rank() < r || n < r {
             let next_r = pqr_sub.rank().min(n);
@@ -754,7 +754,7 @@ fn solve_basic_subset(
         let r_inv_sub = pqr_sub.inverse_r()?;
         let cov_s_sub = pqr_sub.unpermute_covariance(&r_inv_sub)?;
         if !is_borderline_singular_cov(&cov_s_sub, pqr_sub.default_tol, r) {
-            let (beta_sub, _) = bjorck_refined_qr_solve(&x_sub, &x_pow2_sub, y, &scales_sub, &pqr_sub)?;
+            let (beta_sub, _) = bjorck_refined_qr_solve(&x_pow2_sub, y, &scales_sub, &pqr_sub)?;
             let cov_u_sub = refined_covariance(&x_pow2_sub, &scales_sub, &pqr_sub, &r_inv_sub)?;
             return Ok((active_cols, beta_sub, cov_u_sub));
         }
@@ -766,7 +766,7 @@ fn solve_basic_subset(
             active_cols.sort_unstable();
             continue;
         }
-        let (beta_sub, _) = bjorck_refined_qr_solve(&x_sub, &x_pow2_sub, y, &scales_sub, &pqr_sub)?;
+        let (beta_sub, _) = bjorck_refined_qr_solve(&x_pow2_sub, y, &scales_sub, &pqr_sub)?;
         let cov_u_sub = unscale_covariance(&cov_s_sub, &scales_sub)?;
         return Ok((active_cols, beta_sub, cov_u_sub));
     }
@@ -847,16 +847,14 @@ fn compensated_rss(x: &DenseMatrix, y: &[f64], beta: &[f64]) -> f64 {
 /// Bjorck (1967) mixed-precision augmented KKT iterative refinement using `Dot2` FMA inner products
 /// against the unscaled matrix `X` so equilibration rounding and moderate-to-high condition numbers
 /// retain near-full `f64` accuracy even when residuals are large (`Wampler1`-`Wampler5`).
-fn bjorck_refined_qr_solve(
-    x: &DenseMatrix,
-    x_pow2: &DenseMatrix,
-    y: &[f64],
-    scales: &[ColScale],
-    pqr: &PivotedQr,
-) -> Result<(Vec<f64>, f64), MathError> {
-    let n = x.nrows();
-    let p = x.ncols();
-    let qty = pqr.apply_qt(y)?;
+fn bjorck_refined_qr_solve(x_pow2: &DenseMatrix, y: &[f64], scales: &[ColScale], pqr: &PivotedQr) -> Result<(Vec<f64>, f64), MathError> {
+    let n = x_pow2.nrows();
+    let p = x_pow2.ncols();
+    let y_max = y.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
+    let y_exp2 = if y_max == 0.0 || !y_max.is_finite() { 0 } else { (y_max.log2().floor() as i32).clamp(-1060, 1020) };
+    let y_p2: Vec<f64> = y.iter().map(|&v| scale_pow2(v, -y_exp2)).collect();
+
+    let qty = pqr.apply_qt(&y_p2)?;
     let z_piv0 = pqr.solve_r_full(qty.get(..p).unwrap_or(&[]));
     let mut z = vec![0.0_f64; p];
     for (piv_idx, &orig_col) in pqr.perm.iter().enumerate() {
@@ -871,22 +869,22 @@ fn bjorck_refined_qr_solve(
     let mut r_vec = pqr.apply_q_vec(&q_rhs0)?;
 
     for _ in 0..3 {
-        let beta_curr: Vec<f64> = z.iter().zip(scales.iter()).map(|(&zj, &sj)| scale_pow2(zj / sj.norm, -sj.exp2)).collect();
-        if !beta_curr.iter().all(|v| v.is_finite()) {
+        let gamma: Vec<f64> = z.iter().zip(scales.iter()).map(|(&zj, &sj)| zj / sj.norm).collect();
+        if !gamma.iter().all(|v| v.is_finite()) {
             break;
         }
-        // Primal defect: f = y - r - X * beta_curr (evaluated in Dot2 precision).
+        // Primal defect: f = y_p2 - r - X_pow2 * gamma (evaluated in Dot2 precision, O(1) exponent scale).
         let mut f_def = Vec::with_capacity(n);
         for i in 0..n {
             let mut main = NeumaierSum::new();
             let mut err = NeumaierSum::new();
-            main.add(y.get(i).copied().unwrap_or(0.0));
+            main.add(y_p2.get(i).copied().unwrap_or(0.0));
             main.add(-r_vec.get(i).copied().unwrap_or(0.0));
-            for (j, &bj) in beta_curr.iter().enumerate() {
-                let xij = x.entry(i, j);
-                let prod = -xij * bj;
+            for (j, &gj) in gamma.iter().enumerate() {
+                let xij_p2 = x_pow2.entry(i, j);
+                let prod = -xij_p2 * gj;
                 main.add(prod);
-                err.add((-xij).mul_add(bj, -prod));
+                err.add((-xij_p2).mul_add(gj, -prod));
             }
             f_def.push(main.total() + err.total());
         }
@@ -953,8 +951,10 @@ fn bjorck_refined_qr_solve(
         }
     }
 
-    let beta_final: Vec<f64> = z.iter().zip(scales.iter()).map(|(&zj, &sj)| scale_pow2(zj / sj.norm, -sj.exp2)).collect();
-    let rss = compensated_rss(x, y, &beta_final);
+    let gamma_final: Vec<f64> = z.iter().zip(scales.iter()).map(|(&zj, &sj)| zj / sj.norm).collect();
+    let rss_p2 = compensated_rss(x_pow2, &y_p2, &gamma_final);
+    let rss = scale_pow2(scale_pow2(rss_p2, y_exp2), y_exp2);
+    let beta_final: Vec<f64> = gamma_final.iter().zip(scales.iter()).map(|(&gj, &sj)| scale_pow2(gj, y_exp2 - sj.exp2)).collect();
     Ok((beta_final, rss))
 }
 

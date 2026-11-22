@@ -4,13 +4,13 @@
 use std::fmt;
 
 use curvebook_math::dist::core::{
-    chi2_cdf, chi2_sf, f_cdf, f_isf, f_ln_pdf, f_ln_sf, f_ppf, f_sf, norm_two_sided_isf, student_t_isf, student_t_two_sided_isf,
+    chi2_cdf, chi2_sf, f_cdf, f_isf, f_ln_pdf, f_ln_sf, f_ppf, f_sf, norm_cdf, norm_two_sided_isf, student_t_isf, student_t_two_sided_isf,
     student_t_two_sided_p,
 };
 use curvebook_math::dist::dunnett::{dunnett_loadings_from_sizes, dunnett_two_sided_crit, dunnett_two_sided_p, dunnett_two_sided_p_loadings};
 use curvebook_math::dist::noncentral::{ncchi2_cdf, ncchi2_sf, ncf_cdf, nct_cdf, nct_sf};
 use curvebook_math::dist::studentized_range::{max_studentized_range_isf, studentized_range_cdf, studentized_range_ln_sf, studentized_range_sf};
-use curvebook_math::quad::{QuadOptions, integrate_adaptive};
+use curvebook_math::quad::{QuadOptions, gauss_kronrod_15_panel, integrate_adaptive};
 use curvebook_math::roots::{RootOptions, brent_root};
 use curvebook_math::special::{erfc_inv, gamma, ln_factorial, ln_reg_beta_xy, reg_beta, reg_gamma_p, reg_gamma_q};
 use curvebook_math::sum::{SummaryMoments, pearson_r};
@@ -80,6 +80,32 @@ fn fa_sec01_01_poisson_ptrs_goodness_of_fit_without_stirling_bias() {
         let p_val = chi2_sf(chi2_stat, dof).expect("chi2_sf");
         assert!(p_val > 1e-4, "lambda={lambda}: Poisson PTRS chi2={chi2_stat}, dof={dof}, p={p_val} indicates bias");
     }
+
+    // Large-lambda PTRS regime (lambda = 1e15): standardized z = (k - lambda) / sqrt(lambda) across
+    // bins including both normal tails |z| > 1.5 where PTRS us < 0.07 rejection occurs.
+    let lambda_big = 1e15_f64;
+    let sigma_big = lambda_big.sqrt();
+    let n_big = 200_000_usize;
+    let n_big_f = n_big as f64;
+    let edges = [f64::NEG_INFINITY, -2.5, -2.0, -1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 2.5, f64::INFINITY];
+    let mut big_counts = [0_usize; 12];
+    for _ in 0..n_big {
+        let k = rng.poisson(lambda_big).expect("valid Poisson 1e15");
+        let z = ((k as f64) - lambda_big) / sigma_big;
+        let bin = edges.windows(2).position(|w| z >= w[0] && z < w[1]).unwrap_or(11);
+        big_counts[bin] += 1;
+    }
+    let mut big_chi2 = 0.0_f64;
+    for (i, &obs) in big_counts.iter().enumerate() {
+        let lo = edges[i];
+        let hi = edges[i + 1];
+        let prob = (if hi.is_infinite() { 1.0 } else { norm_cdf(hi) }) - (if lo.is_infinite() { 0.0 } else { norm_cdf(lo) });
+        let exp_c = n_big_f * prob;
+        let diff = (obs as f64) - exp_c;
+        big_chi2 += (diff * diff) / exp_c;
+    }
+    let big_p = chi2_sf(big_chi2, 11.0).expect("chi2_sf 1e15");
+    assert!(big_p > 1e-4, "lambda=1e15 PTRS standardized chi2={big_chi2}, p={big_p} indicates tail rejection bias");
 }
 
 #[test]
@@ -97,6 +123,17 @@ fn fa_sec01_02_pearson_r_avoids_css_product_overflow() {
     let y_orth = [1e200, -2e200, 1e200];
     let r_orth = pearson_r(&x_orth, &y_orth).expect("pearson_r orthogonal 1e200");
     assert!(r_orth.abs() < 1e-14, "expected ~0, got {r_orth}");
+
+    // Unscaled (1e-140, 1e130) band where css itself is normal yet css_x * css_y overflows or flushes:
+    assert_rel(pearson_r(&[-1e80, 1e80], &[-1e80, 1e80]).expect("pearson_r 1e80"), 1.0, 1e-14, "pearson_r 1e80");
+    assert_rel(
+        pearson_r(&[-1e-85, 1e-85, 0.0, 0.0], &[-1e-85, 0.0, 1e-85, 0.0]).expect("pearson_r 1e-85 r=0.5"),
+        0.5,
+        1e-14,
+        "pearson_r 1e-85 r=0.5",
+    );
+    let r_orth_tiny = pearson_r(&[-1e-85, 0.0, 1e-85, 0.0], &[0.0, -1e-85, 0.0, 1e-85]).expect("pearson_r 1e-85 orth");
+    assert_eq!(r_orth_tiny, 0.0);
 }
 
 #[test]
@@ -201,6 +238,33 @@ fn fa_sec01_08_svd_and_sym_eigen_rescale_extreme_entries() {
     let s_tiny = svd(&a_tiny).expect("svd 1e-200");
     assert_rel(s_tiny.singular_values[0], 3e-200, 1e-13, "svd tiny 0");
     assert_rel(s_tiny.singular_values[1], 2e-200, 1e-13, "svd tiny 1");
+
+    // Matrices whose unscaled `frobenius_norm()` genuinely overflows to +Inf:
+    let big4 =
+        DenseMatrix::from_row_major(4, 4, vec![9e307, 4e307, 0.0, 0.0, 4e307, 9e307, 0.0, 0.0, 0.0, 0.0, 9e307, 4e307, 0.0, 0.0, 4e307, 9e307])
+            .expect("big4");
+    assert!(big4.frobenius_norm().is_infinite(), "precondition: frobenius_norm must overflow +Inf");
+    let eig4 = sym_eigen(&big4).expect("sym_eigen frobenius Inf");
+    assert_rel(eig4.eigenvalues[0], 1.3e308, 1e-13, "eig4 0");
+    assert_rel(eig4.eigenvalues[1], 1.3e308, 1e-13, "eig4 1");
+    assert_rel(eig4.eigenvalues[2], 5e307, 1e-13, "eig4 2");
+    assert_rel(eig4.eigenvalues[3], 5e307, 1e-13, "eig4 3");
+
+    let svd4 = svd(&big4).expect("svd frobenius Inf");
+    assert_rel(svd4.singular_values[0], 1.3e308, 1e-13, "svd4 0");
+    assert_rel(svd4.singular_values[1], 1.3e308, 1e-13, "svd4 1");
+    assert_rel(svd4.singular_values[2], 5e307, 1e-13, "svd4 2");
+    assert_rel(svd4.singular_values[3], 5e307, 1e-13, "svd4 3");
+
+    // 6x6 matrix with overflowing frobenius_norm() and large asymmetry must still be rejected cleanly.
+    let mut skew6 = DenseMatrix::zeros(6, 6).expect("skew6 zeros");
+    for i in 0..6 {
+        skew6.set(i, i, 8e307).expect("diag");
+    }
+    skew6.set(0, 1, 2e307).expect("upper");
+    skew6.set(1, 0, -2e307).expect("lower");
+    assert!(skew6.frobenius_norm().is_infinite());
+    assert!(matches!(sym_eigen(&skew6), Err(MathError::DomainError { name: "symmetry", .. })));
 }
 
 #[test]
@@ -213,6 +277,29 @@ fn fa_sec01_09_norms_qr_least_squares_and_parameter_deps_extreme_scaling() {
     let sub_col = DenseMatrix::from_row_major(2, 1, vec![3e-310, 4e-310]).expect("subnormal col");
     let qr_res = qr_col_pivoted(&sub_col).expect("qr subnormal");
     assert_eq!(qr_res.rank(), 1);
+
+    let big_col = DenseMatrix::from_row_major(2, 1, vec![1.5e308, 1.5e308]).expect("big col");
+    let qr_big = qr_col_pivoted(&big_col).expect("qr big col");
+    assert_eq!(qr_big.rank(), 1);
+    let q_big = qr_big.thin_q().expect("thin_q big");
+    assert_rel(q_big.get(0, 0).expect("q00").abs(), std::f64::consts::FRAC_1_SQRT_2, 1e-14, "thin_q big 00");
+    assert_rel(q_big.get(1, 0).expect("q10").abs(), std::f64::consts::FRAC_1_SQRT_2, 1e-14, "thin_q big 10");
+
+    // Subnormal 1e-310 * I_2 least squares:
+    let sub_eye = DenseMatrix::from_row_major(2, 2, vec![1e-310, 0.0, 0.0, 1e-310]).expect("subnormal I2");
+    let (sol_sub, _) = solve_linear_least_squares(&sub_eye, &[1e-310, 2e-310]).expect("lsq subnormal I2");
+    assert_rel(sol_sub.coefficients[0], 1.0, 1e-12, "subnormal I2 x0");
+    assert_rel(sol_sub.coefficients[1], 2.0, 1e-12, "subnormal I2 x1");
+
+    // Overflowing column norm [1.5e308, 0.0; 1.5e308, 1.0]:
+    let big_col_mat = DenseMatrix::from_row_major(2, 2, vec![1.5e308, 0.0, 1.5e308, 1.0]).expect("big col mat");
+    let (sol_big, _) = solve_linear_least_squares(&big_col_mat, &[1.5e308, 1.5e308]).expect("lsq 1.5e308");
+    assert_eq!(sol_big.rank, 2);
+    assert_rel(sol_big.coefficients[0], 1.0, 1e-12, "1.5e308 col x0");
+    assert!(sol_big.coefficients[1].abs() < 1e-6, "1.5e308 col x1={}", sol_big.coefficients[1]);
+    let (sol_big2, _) = solve_linear_least_squares(&big_col_mat, &[0.0, 1.0]).expect("lsq 1.5e308 rhs=[0,1]");
+    assert!(sol_big2.coefficients[0].abs() < 1e-300, "x0={}", sol_big2.coefficients[0]);
+    assert_rel(sol_big2.coefficients[1], 1.0, 1e-12, "1.5e308 col2 x1");
 
     let design = DenseMatrix::from_row_major(3, 2, vec![1e-200, 1e200, 2e-200, -1e200, 1e-200, 3e200]).expect("design");
     let rhs = [2.0, 1.0, 4.0];
@@ -327,6 +414,13 @@ fn fa_sec01_14_quad_honors_exact_tolerance_and_extreme_midpoints() {
 
     let root = brent_root(|x| x, -1e308, 1e308, RootOptions::default()).expect("extreme bracket brent_root");
     assert_eq!(root, 0.0);
+
+    // Exhausting max_subdivisions with total_err = 4 * tol (inside old 16x slack) must fail NotConverged.
+    let (_est_l, err_l) = gauss_kronrod_15_panel(&mut |x: f64| (x - 0.3).abs(), 0.0, 0.5);
+    assert!(err_l > 0.0);
+    let err = integrate_adaptive(|x: f64| (x - 0.3).abs(), 0.0, 1.0, QuadOptions { abs_tol: 0.25 * err_l, rel_tol: 0.0, max_subdivisions: 1 })
+        .expect_err("total_err = 4 * tol must fail without 16x relaxation");
+    assert!(matches!(err, MathError::NotConverged { algorithm: "integrate_adaptive", iterations: 1 }));
 }
 
 #[test]
