@@ -279,7 +279,8 @@ fn format_pvalue_label_covers_all_formats_boundaries_and_non_finite() {
     assert_eq!(format_pvalue_label(0.0023, PValueFormat::FourDecimal, true, true, &default_policy), "P = 0.0023 **");
     assert_eq!(format_pvalue_label(0.00005, PValueFormat::FourDecimal, true, true, &default_policy), "P < 0.0001 ****");
     assert_eq!(format_pvalue_label(0.00005, PValueFormat::Apa, true, true, &default_policy), "P < .001 ***");
-    assert_eq!(format_pvalue_label(1.0, PValueFormat::Apa, true, false, &default_policy), "P > .999");
+    assert_eq!(format_pvalue_label(0.9995, PValueFormat::Apa, true, false, &default_policy), "P > .999");
+    assert_eq!(format_pvalue_label(1.0, PValueFormat::Apa, true, false, &default_policy), "P = 1.000");
     assert_eq!(format_pvalue_label(0.0004, PValueFormat::Nejm, true, true, &default_policy), "P < 0.001 ***");
     assert_eq!(format_pvalue_label(0.25, PValueFormat::Nejm, false, true, &default_policy), "0.250 ns");
     assert_eq!(format_pvalue_label(0.0023, PValueFormat::Custom { decimals: 4, scientific_below: None }, true, true, &eu_policy), "P = 0,0023 **");

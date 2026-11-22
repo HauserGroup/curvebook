@@ -193,10 +193,17 @@ fn consume_chars_prefix(text: &str, cursor: &mut usize, char_count: usize) -> St
     text.get(start..end).unwrap_or_default().to_owned()
 }
 
-/// Reorder `rich` into visual left-to-right span order while preserving span styles and character count.
+/// Reorder `rich` into visual left-to-right span order while preserving span styles and character
+/// count, inferring the paragraph base direction from the first strong character.
 #[must_use]
 pub fn reorder_rich_text_bidi(rich: &RichText) -> RichText {
-    let base_dir = infer_base_direction(rich);
+    reorder_rich_text_bidi_with_direction(rich, infer_base_direction(rich))
+}
+
+/// Reorder `rich` into visual left-to-right span order under an explicit paragraph `base_dir`
+/// while preserving span styles and character count across multi-span runs.
+#[must_use]
+pub fn reorder_rich_text_bidi_with_direction(rich: &RichText, base_dir: TextDirection) -> RichText {
     if rich.spans.len() == 1
         && let Some(span) = rich.spans.first()
     {
@@ -1141,7 +1148,8 @@ impl TrueTypeFontInfo {
         if ch == '\t' {
             return 4.0 * self.width_pt(' ', font_size_pt);
         }
-        if let Some(code) = char_to_win1252_byte(ch)
+        if self.glyph_id(ch) != 0
+            && let Some(code) = char_to_win1252_byte(ch)
             && code >= 32
             && let Some(&w1000) = self.widths_1000.get(usize::from(code - 32))
         {

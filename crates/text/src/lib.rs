@@ -12,7 +12,7 @@ pub mod shaping;
 
 use std::fmt;
 
-pub use glyph_paths::{GlyphOutlineCmd, PositionedGlyphOutline, has_cleanroom_vector_outline, outline_rich_text};
+pub use glyph_paths::{GlyphOutlineCmd, PositionedGlyphOutline, has_cleanroom_vector_outline, outline_rich_text, outline_rich_text_with_fonts};
 pub use markup::{
     BidiRun, EquationSegment, RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, TextDirection, contains_rtl_script, expand_template_hooks,
     is_rtl_locale, lookup_greek_escape, lookup_roman_operator, parse_equation_segments, parse_markup, reorder_visual_bidi, shape_bidi_runs,
