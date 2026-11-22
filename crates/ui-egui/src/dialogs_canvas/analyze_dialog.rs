@@ -18,8 +18,10 @@ use crate::theme::UiThemeSpec;
 use super::analysis_catalog::{ANALYSIS_CATALOG, AnalysisCatalogItem, AnalysisCategory, default_analysis_kind_for_id};
 use super::edit_params::default_true_flag;
 use super::parse_helpers::{
-    apply_transform_formula_str, parse_baseline_operation_str, parse_contingency_method_name, parse_error_prop_value, parse_math_preset_opt,
-    parse_multiplicity_method_name, parse_subcolumn_aggregation_val, parse_table_kind_str,
+    TwoGroupSubmethodMemory, apply_transform_formula_str, check_pcr_target_leakage, parse_baseline_operation_str, parse_bool_field,
+    parse_contingency_method_name, parse_error_prop_value, parse_math_preset_opt, parse_multiplicity_method_name, parse_open_unit_f64_with_val,
+    parse_opt_usize_min, parse_str_field, parse_subcolumn_aggregation_val, parse_table_kind_str, toggle_sorted_col, two_group_is_gaussian,
+    two_group_is_paired,
 };
 use crate::dialogs_r9::{
     parse_cluster_distance_str, parse_cluster_linkage_str, parse_cox_tie_method_str, parse_f64_list_with_locale, parse_finite_f64_with_locale,
@@ -270,14 +272,8 @@ pub struct AnalyzeDialogState {
     pub outlier_fdr_q_percent: f64,
     #[serde(default)]
     pub outlier_iterative: bool,
-    #[serde(default = "default_tg_param_unpaired")]
-    pub saved_two_group_param_unpaired: TwoGroupMethod,
-    #[serde(default = "default_tg_param_paired")]
-    pub saved_two_group_param_paired: TwoGroupMethod,
-    #[serde(default = "default_tg_nonparam_unpaired")]
-    pub saved_two_group_nonparam_unpaired: TwoGroupMethod,
-    #[serde(default = "default_tg_nonparam_paired")]
-    pub saved_two_group_nonparam_paired: TwoGroupMethod,
+    #[serde(flatten)]
+    pub two_group_memory: TwoGroupSubmethodMemory,
     #[serde(skip)]
     pub explicit_response_column: Option<usize>,
 }
@@ -292,22 +288,6 @@ pub(super) const fn default_outlier_alpha() -> f64 {
 
 pub(super) const fn default_outlier_fdr_q() -> f64 {
     1.0
-}
-
-pub(super) const fn default_tg_param_unpaired() -> TwoGroupMethod {
-    TwoGroupMethod::UnpairedT
-}
-
-pub(super) const fn default_tg_param_paired() -> TwoGroupMethod {
-    TwoGroupMethod::PairedT
-}
-
-pub(super) const fn default_tg_nonparam_unpaired() -> TwoGroupMethod {
-    TwoGroupMethod::MannWhitneyU
-}
-
-pub(super) const fn default_tg_nonparam_paired() -> TwoGroupMethod {
-    TwoGroupMethod::WilcoxonSignedRank
 }
 
 pub(super) const fn default_one_way_param_unpaired() -> OneWayMethod {
@@ -364,12 +344,12 @@ impl Default for AnalyzeDialogState {
             correlation_all_pairs: true,
             correlation_heatmap: false,
             transform_x: None,
-            transform_y: Some(MathTransformPreset::Log10),
+            transform_y: default_transform_y(),
             transform_error_propagation: ErrorPropagationMode::ReplicateEndpoints,
             transform_formula: None,
-            transform_target_archetype: TableKind::Column,
-            baseline_columns: vec![0],
-            baseline_operation: BaselineOperation::Difference,
+            transform_target_archetype: default_transform_target_archetype(),
+            baseline_columns: default_baseline_columns(),
+            baseline_operation: default_baseline_operation(),
             two_group_method: None,
             two_group_hypothetical: 0.0,
             mv_group_column: None,
@@ -388,7 +368,7 @@ impl Default for AnalyzeDialogState {
             cluster_k_sweep_max: None,
             pca_standardize: true,
             corr_spearman_rank: false,
-            imputation_m: 5,
+            imputation_m: default_imputation_m(),
             glm_family: GlmFamily::Linear,
             glm_reference_levels: Vec::new(),
             glm_compute_vif: true,
@@ -410,8 +390,8 @@ impl Default for AnalyzeDialogState {
             mv_x_columns: Vec::new(),
             mv_y_column: None,
             mv_group_columns: Vec::new(),
-            sample_seed: 1,
-            sample_size: 10,
+            sample_seed: default_sample_seed(),
+            sample_size: default_sample_size(),
             sample_stratify_column: None,
             sample_proportional: true,
             descriptive_aggregation: SubcolumnAggregation::RowMeans,
@@ -423,138 +403,41 @@ impl Default for AnalyzeDialogState {
             outlier_alpha: default_outlier_alpha(),
             outlier_fdr_q_percent: default_outlier_fdr_q(),
             outlier_iterative: false,
-            saved_two_group_param_unpaired: default_tg_param_unpaired(),
-            saved_two_group_param_paired: default_tg_param_paired(),
-            saved_two_group_nonparam_unpaired: default_tg_nonparam_unpaired(),
-            saved_two_group_nonparam_paired: default_tg_nonparam_paired(),
+            two_group_memory: TwoGroupSubmethodMemory::default(),
             explicit_response_column: None,
         }
     }
 }
 
 impl AnalyzeDialogState {
-    fn reset_r9_options(&mut self) {
-        self.two_group_method = None;
-        self.two_group_hypothetical = 0.0;
-        self.mv_group_column = None;
-        self.mv_response_column = None;
-        self.contingency_method = None;
-        self.contingency_null_proportion = None;
-        self.contingency_expected_proportions = None;
-        self.factorial_three_way = false;
-        self.factorial_repeated_measures = RepeatedMeasuresDesign::None;
-        self.factorial_residual_covariance = ResidualCovariance::CompoundSymmetry;
-        self.factorial_ss_type = SumOfSquaresType::TypeIII;
-        self.factorial_multiplicity = MultiplicityMethod::None;
-        self.cluster_distance = ClusterDistance::Euclidean;
-        self.cluster_linkage = ClusterLinkage::Ward;
-        self.cluster_k_means_k = Some(3);
-        self.cluster_k_sweep_max = None;
-        self.pca_standardize = true;
-        self.corr_spearman_rank = false;
-        self.imputation_m = 5;
-        self.glm_family = GlmFamily::Linear;
-        self.glm_reference_levels.clear();
-        self.glm_compute_vif = true;
-        self.cox_time_column = None;
-        self.cox_status_column = None;
-        self.cox_predictor_columns.clear();
-        self.cox_tie_method = CoxTieMethod::Efron;
-        self.cox_reference_levels.clear();
-        self.km_mv_time_column = None;
-        self.km_mv_status_column = None;
-        self.km_log_rank_mantel_cox = true;
-        self.km_gehan_breslow_wilcoxon = false;
-        self.km_trend_test = false;
-        self.km_multiplicity_method = MultiplicityMethod::None;
-        self.transform_target_archetype = TableKind::Column;
-        self.baseline_columns = vec![0];
-        self.baseline_operation = BaselineOperation::Difference;
-        self.custom_dsl = None;
-        self.fit_method = FitMethod::LeastSquares;
-        self.fit_weighting = WeightingScheme::None;
-        self.parameter_rules.clear();
-        self.mv_x_columns.clear();
-        self.mv_y_column = None;
-        self.mv_group_columns.clear();
-        self.sample_seed = 1;
-        self.sample_size = 10;
-        self.sample_stratify_column = None;
-        self.sample_proportional = true;
-        self.descriptive_aggregation = SubcolumnAggregation::RowMeans;
-        self.pvalue_stack_method = PValueStackMethod::default();
-        self.pvalue_stack_threshold = default_pvalue_stack_threshold();
-        self.outlier_method = default_outlier_method();
-        self.outlier_alpha = default_outlier_alpha();
-        self.outlier_fdr_q_percent = default_outlier_fdr_q();
-        self.outlier_iterative = false;
-        self.saved_two_group_param_unpaired = default_tg_param_unpaired();
-        self.saved_two_group_param_paired = default_tg_param_paired();
-        self.saved_two_group_nonparam_unpaired = default_tg_nonparam_unpaired();
-        self.saved_two_group_nonparam_paired = default_tg_nonparam_paired();
-        self.pvalue_stack_column = None;
-        self.compute_effect_sizes = None;
-        self.explicit_response_column = None;
+    fn reset_for_open(&mut self) {
+        let equation_id =
+            if self.equation_id.is_empty() { String::from("log_agonist_vs_response_4pl") } else { std::mem::take(&mut self.equation_id) };
+        *self = Self { equation_id, ..Self::default() };
     }
 
     /// Populate defaults and variable candidates for `sheet`.
     pub fn open_for_data_sheet(&mut self, sheet: &DataSheet) {
+        self.reset_for_open();
         self.source_sheet_id = Some(sheet.id.clone());
         self.source_table_kind = Some(sheet.kind());
-        self.extracted_result_tab_id = None;
-        self.search_query.clear();
-        self.category_filter = None;
-        self.selected_data_sets.clear();
-        self.role_filter = VariableRoleFilter::All;
-        self.pca_predictors.clear();
-        self.pcr_outcome_column = None;
-        self.correlation_all_pairs = true;
-        self.correlation_heatmap = false;
-        self.transform_x = None;
-        self.transform_y = Some(MathTransformPreset::Log10);
-        self.transform_error_propagation = ErrorPropagationMode::ReplicateEndpoints;
-        self.transform_formula = None;
-        self.reset_r9_options();
-        if self.equation_id.is_empty() {
-            self.equation_id = String::from("log_agonist_vs_response_4pl");
-        }
         self.variable_candidates = collect_variable_candidates(sheet);
-        let first_id = self.compatible_entries().first().map(|item| item.id.to_owned());
-        self.selected_entry_id = first_id;
+        self.selected_entry_id = self.compatible_entries().first().map(|item| item.id.to_owned());
     }
 
     /// Populate defaults and column candidates from a non-analyzable [`ResultTab`] for chained GUI `Analyze` (`docs/gui-workflows.md` §3.3).
     pub fn open_for_result_tab(&mut self, result: &ResultSheet, tab: &ResultTab) {
+        self.reset_for_open();
         self.source_sheet_id = Some(result.id.clone());
         self.extracted_result_tab_id = Some(tab.id.clone());
         let has_text = tab.rows.iter().flatten().any(|cell| matches!(cell, ResultCell::Text(_) | ResultCell::Boolean(_)));
         self.source_table_kind = Some(if has_text { TableKind::MultipleVariables } else { TableKind::Column });
-        self.search_query.clear();
-        self.category_filter = None;
-        self.selected_data_sets.clear();
-        self.role_filter = VariableRoleFilter::All;
-        self.pca_predictors = if matches!(result.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::Pca { .. })) {
-            result.analysis.selected_data_sets.clone()
-        } else {
-            Vec::new()
-        };
-        self.pcr_outcome_column = match &result.analysis.kind {
-            AnalysisKind::Multivariate(MultivariateSpec::Pca { pcr_outcome_column, .. }) => *pcr_outcome_column,
-            _ => None,
-        };
-        self.correlation_all_pairs = true;
-        self.correlation_heatmap = false;
-        self.transform_x = None;
-        self.transform_y = Some(MathTransformPreset::Log10);
-        self.transform_error_propagation = ErrorPropagationMode::ReplicateEndpoints;
-        self.transform_formula = None;
-        self.reset_r9_options();
-        if self.equation_id.is_empty() {
-            self.equation_id = String::from("log_agonist_vs_response_4pl");
+        if let AnalysisKind::Multivariate(MultivariateSpec::Pca { pcr_outcome_column, .. }) = &result.analysis.kind {
+            self.pca_predictors.clone_from(&result.analysis.selected_data_sets);
+            self.pcr_outcome_column = *pcr_outcome_column;
         }
         self.variable_candidates = collect_result_tab_candidates(tab);
-        let first_id = self.compatible_entries().first().map(|item| item.id.to_owned());
-        self.selected_entry_id = first_id;
+        self.selected_entry_id = self.compatible_entries().first().map(|item| item.id.to_owned());
     }
 
     /// Switch the selected catalog entry (`analyze.entry.<id>`), resetting PCR selection cleanly when entering `stats.pcr`.
@@ -590,20 +473,14 @@ impl AnalyzeDialogState {
         }
     }
 
+    fn is_pca_predictor(&self, col: usize) -> bool {
+        self.pca_predictors.contains(&col) || self.selected_data_sets.contains(&col)
+    }
+
     /// Toggle a MV predictor column for PCA/PCR while preserving disjoint PCR outcome selection.
     pub fn toggle_pca_predictor(&mut self, col: usize) {
-        if let Some(pos) = self.pca_predictors.iter().position(|&c| c == col) {
-            self.pca_predictors.remove(pos);
-        } else {
-            self.pca_predictors.push(col);
-            self.pca_predictors.sort_unstable();
-        }
-        if let Some(pos) = self.selected_data_sets.iter().position(|&c| c == col) {
-            self.selected_data_sets.remove(pos);
-        } else {
-            self.selected_data_sets.push(col);
-            self.selected_data_sets.sort_unstable();
-        }
+        toggle_sorted_col(&mut self.pca_predictors, col);
+        toggle_sorted_col(&mut self.selected_data_sets, col);
         self.clear_overlapping_pcr_outcome();
         for cand in &mut self.variable_candidates {
             cand.selected = self.selected_data_sets.contains(&cand.col_index);
@@ -612,9 +489,7 @@ impl AnalyzeDialogState {
 
     /// Select (or toggle off) the disjoint PCR outcome column with R10 predictor leakage guard.
     pub fn select_pcr_outcome(&mut self, col: usize) -> Result<(), String> {
-        if self.pca_predictors.contains(&col) || self.selected_data_sets.contains(&col) {
-            return Err(format!("Column {col} is checked as a PCA input predictor and cannot be selected as PCR outcome (target leakage guard)."));
-        }
+        check_pcr_target_leakage(col, self.is_pca_predictor(col))?;
         self.pcr_outcome_column = if self.pcr_outcome_column == Some(col) { None } else { Some(col) };
         if let Some(outcome) = self.pcr_outcome_column {
             self.set_response_column(outcome);
@@ -633,47 +508,14 @@ impl AnalyzeDialogState {
         self.apply_field_patch_localized(fields, &LocalePreset::period_comma("en-US"))
     }
 
-    /// Apply modal field updates using regional numeric parsing (`preset`).
-    fn remember_two_group_submethod(&mut self, method: TwoGroupMethod) {
-        match method {
-            TwoGroupMethod::UnpairedT | TwoGroupMethod::WelchT | TwoGroupMethod::LognormalUnpairedT => {
-                self.saved_two_group_param_unpaired = method;
-            }
-            TwoGroupMethod::PairedT | TwoGroupMethod::RatioPairedT => {
-                self.saved_two_group_param_paired = method;
-            }
-            TwoGroupMethod::MannWhitneyU | TwoGroupMethod::KolmogorovSmirnov => {
-                self.saved_two_group_nonparam_unpaired = method;
-            }
-            TwoGroupMethod::WilcoxonSignedRank | TwoGroupMethod::PairedSignTest => {
-                self.saved_two_group_nonparam_paired = method;
-            }
-            TwoGroupMethod::OneSampleT { .. } | TwoGroupMethod::OneSampleWilcoxon { .. } => {}
-        }
-    }
-
     fn toggle_two_group_design(&mut self, gaussian: bool, paired: bool) {
         if let Some(cur) = self.two_group_method {
-            self.remember_two_group_submethod(cur);
-            if let TwoGroupMethod::OneSampleT { hypothetical } | TwoGroupMethod::OneSampleWilcoxon { hypothetical } = cur {
-                self.two_group_method =
-                    Some(if gaussian { TwoGroupMethod::OneSampleT { hypothetical } } else { TwoGroupMethod::OneSampleWilcoxon { hypothetical } });
-                return;
-            }
+            self.two_group_memory.remember(cur);
         }
-        self.two_group_method = Some(match (gaussian, paired) {
-            (true, false) => self.saved_two_group_param_unpaired,
-            (true, true) => self.saved_two_group_param_paired,
-            (false, false) => self.saved_two_group_nonparam_unpaired,
-            (false, true) => self.saved_two_group_nonparam_paired,
-        });
+        self.two_group_method = Some(self.two_group_memory.resolve(gaussian, paired, self.two_group_method));
     }
 
-    /// Apply modal field updates using regional numeric parsing (`preset`).
-    ///
-    /// # Errors
-    /// Returns an error if an explicit field fails validation or points to an unknown key.
-    pub fn apply_field_patch_localized(&mut self, fields: &serde_json::Map<String, Value>, preset: &LocalePreset) -> Result<(), String> {
+    fn apply_priority_fields(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
         let has_explicit_predictors =
             ["selected_data_sets", "analyze.selected_data_sets", "pca_predictors", "analyze.pca_predictors"].iter().any(|k| fields.contains_key(*k));
         for key in ["entry_id", "selected_entry_id", "analysis", "analyze.entry", "analyze.entries_list"] {
@@ -685,23 +527,19 @@ impl AnalyzeDialogState {
                 }
             }
         }
-        let apply_predictor_cols = |this: &mut Self, key: &str, val: &Value| -> Result<(), String> {
-            let cols = parse_usize_list(val, key)?;
-            this.selected_data_sets = cols.clone();
-            if matches!(key, "pca_predictors" | "analyze.pca_predictors") || this.is_pca_or_pcr_entry() {
-                this.pca_predictors = cols;
-            }
-            this.clear_overlapping_pcr_outcome();
-            for cand in &mut this.variable_candidates {
-                cand.selected = this.selected_data_sets.contains(&cand.col_index);
-            }
-            Ok(())
-        };
         for key in
             ["selected_data_sets", "analyze.selected_data_sets", "analyze.transform.selected_data_sets", "pca_predictors", "analyze.pca_predictors"]
         {
             if let Some(val) = fields.get(key) {
-                apply_predictor_cols(self, key, val)?;
+                let cols = parse_usize_list(val, key)?;
+                self.selected_data_sets = cols.clone();
+                if matches!(key, "pca_predictors" | "analyze.pca_predictors") || self.is_pca_or_pcr_entry() {
+                    self.pca_predictors = cols;
+                }
+                self.clear_overlapping_pcr_outcome();
+                for cand in &mut self.variable_candidates {
+                    cand.selected = self.selected_data_sets.contains(&cand.col_index);
+                }
             }
         }
         // Apply method selectors before sub-parameters (`alpha`, `fdr_q_percent`, `rout_q`) so JSON
@@ -711,8 +549,7 @@ impl AnalyzeDialogState {
                 if matches!(key, "outlier_method" | "analyze.outlier.method")
                     || (key == "method" && self.selected_entry_id.as_deref() == Some("stats.outliers"))
                 {
-                    let raw = val.as_str().ok_or_else(|| String::from("`outlier_method` must be a string"))?;
-                    let (m, iter_opt) = parse_outlier_method_str(raw)?;
+                    let (m, iter_opt) = parse_outlier_method_str(parse_str_field(val, "outlier_method")?)?;
                     self.outlier_method = m.to_owned();
                     if let Some(it) = iter_opt {
                         self.outlier_iterative = it;
@@ -724,6 +561,15 @@ impl AnalyzeDialogState {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Apply modal field updates using regional numeric parsing (`preset`).
+    ///
+    /// # Errors
+    /// Returns an error if an explicit field fails validation or points to an unknown key.
+    pub fn apply_field_patch_localized(&mut self, fields: &serde_json::Map<String, Value>, preset: &LocalePreset) -> Result<(), String> {
+        self.apply_priority_fields(fields)?;
         for (key, val) in fields {
             match key.as_str() {
                 "entry_id"
@@ -767,36 +613,24 @@ impl AnalyzeDialogState {
                     }
                 }
                 "pcr_outcome_column" | "analyze.pcr_outcome_column" => {
-                    if val.is_null() {
-                        self.pcr_outcome_column = None;
-                    } else {
-                        let col = parse_usize_min(val, key, 0)?;
-                        if self.pca_predictors.contains(&col) || self.selected_data_sets.contains(&col) {
-                            return Err(format!(
-                                "Column {col} is checked as a PCA input predictor and cannot be selected as PCR outcome (target leakage guard)."
-                            ));
-                        }
+                    if let Some(col) = parse_opt_usize_min(val, key, 0)? {
+                        check_pcr_target_leakage(col, self.is_pca_predictor(col))?;
                         self.pcr_outcome_column = Some(col);
                         self.set_response_column(col);
+                    } else {
+                        self.pcr_outcome_column = None;
                     }
                 }
                 "response_column" => {
                     let is_pcr = matches!(self.selected_entry_id.as_deref(), Some("stats.pcr" | "pcr"));
-                    if val.is_null() {
+                    if let Some(col) = parse_opt_usize_min(val, key, 0)? {
                         if is_pcr {
-                            self.pcr_outcome_column = None;
-                        }
-                    } else {
-                        let col = parse_usize_min(val, key, 0)?;
-                        if is_pcr {
-                            if self.pca_predictors.contains(&col) || self.selected_data_sets.contains(&col) {
-                                return Err(format!(
-                                    "Column {col} is checked as a PCA input predictor and cannot be selected as PCR outcome (target leakage guard)."
-                                ));
-                            }
+                            check_pcr_target_leakage(col, self.is_pca_predictor(col))?;
                             self.pcr_outcome_column = Some(col);
                         }
                         self.set_response_column(col);
+                    } else if is_pcr {
+                        self.pcr_outcome_column = None;
                     }
                 }
                 "formula" | "transform_formula" | "analyze.transform.formula" | "filter_formula" | "analyze.transform.filter_formula" => {
@@ -815,15 +649,13 @@ impl AnalyzeDialogState {
                     }
                 }
                 "target_archetype" | "analyze.transform.target_archetype" => {
-                    let raw = val.as_str().ok_or_else(|| String::from("`target_archetype` must be a string"))?;
-                    self.transform_target_archetype = parse_table_kind_str(raw)?;
+                    self.transform_target_archetype = parse_table_kind_str(parse_str_field(val, "target_archetype")?)?;
                 }
                 "baseline_columns" | "analyze.transform.baseline_columns" => {
                     self.baseline_columns = parse_usize_list(val, key)?;
                 }
                 "baseline_operation" | "operation" | "analyze.transform.baseline_operation" => {
-                    let raw = val.as_str().ok_or_else(|| String::from("`baseline_operation` must be a string"))?;
-                    self.baseline_operation = parse_baseline_operation_str(raw)?;
+                    self.baseline_operation = parse_baseline_operation_str(parse_str_field(val, "baseline_operation")?)?;
                 }
                 "x_transform" | "analyze.transform.x_transform" | "transform_x" => {
                     self.transform_x = parse_math_preset_opt(val)?;
@@ -853,13 +685,8 @@ impl AnalyzeDialogState {
         if let Some(col_raw) = key.strip_prefix("analyze.pcr.outcome.")
             && let Ok(col) = col_raw.parse::<usize>()
         {
-            let selected = val.as_bool().unwrap_or(true);
-            if selected {
-                if self.pca_predictors.contains(&col) || self.selected_data_sets.contains(&col) {
-                    return Err(format!(
-                        "Column {col} is checked as a PCA input predictor and cannot be selected as PCR outcome (target leakage guard)."
-                    ));
-                }
+            if val.as_bool().unwrap_or(true) {
+                check_pcr_target_leakage(col, self.is_pca_predictor(col))?;
                 self.pcr_outcome_column = Some(col);
                 self.set_response_column(col);
             } else if self.pcr_outcome_column == Some(col) {
@@ -869,194 +696,130 @@ impl AnalyzeDialogState {
         }
         match key {
             "assume_gaussian" | "analyze.assume_gaussian" => {
-                let g = val.as_bool().ok_or_else(|| String::from("`assume_gaussian` must be boolean"))?;
-                let paired = matches!(
-                    self.two_group_method,
-                    Some(
-                        TwoGroupMethod::PairedT | TwoGroupMethod::RatioPairedT | TwoGroupMethod::WilcoxonSignedRank | TwoGroupMethod::PairedSignTest
-                    )
-                );
+                let g = parse_bool_field(val, "assume_gaussian")?;
+                let paired = self.two_group_method.is_some_and(two_group_is_paired);
                 self.toggle_two_group_design(g, paired);
             }
             "paired_or_matched" | "analyze.paired_or_matched" => {
-                let paired = val.as_bool().ok_or_else(|| String::from("`paired_or_matched` must be boolean"))?;
-                let gaussian = !matches!(
-                    self.two_group_method,
-                    Some(
-                        TwoGroupMethod::MannWhitneyU
-                            | TwoGroupMethod::WilcoxonSignedRank
-                            | TwoGroupMethod::PairedSignTest
-                            | TwoGroupMethod::KolmogorovSmirnov
-                            | TwoGroupMethod::OneSampleWilcoxon { .. }
-                    )
-                );
+                let paired = parse_bool_field(val, "paired_or_matched")?;
+                let gaussian = self.two_group_method.is_none_or(two_group_is_gaussian);
                 self.toggle_two_group_design(gaussian, paired);
             }
             "descriptive_subcolumn_agg" | "subcolumn_agg" | "analyze.descriptive.subcolumn_agg" => {
                 self.descriptive_aggregation = parse_subcolumn_aggregation_val(val)?;
             }
             "two_group_method" | "analyze.two_group.method" | "analyze.two_group_method" => {
-                let raw = val.as_str().ok_or_else(|| String::from("`two_group_method` must be a string"))?;
-                let parsed = parse_two_group_method_str(raw, self.two_group_hypothetical)?;
-                self.remember_two_group_submethod(parsed);
+                let parsed = parse_two_group_method_str(parse_str_field(val, "two_group_method")?, self.two_group_hypothetical)?;
+                self.two_group_memory.remember(parsed);
                 self.two_group_method = Some(parsed);
             }
             "compute_effect_sizes" | "analyze.compute_effect_sizes" | "analyze.two_group.compute_effect_sizes" => {
-                let b = val.as_bool().ok_or_else(|| String::from("`compute_effect_sizes` must be boolean"))?;
-                self.compute_effect_sizes = Some(b);
+                self.compute_effect_sizes = Some(parse_bool_field(val, "compute_effect_sizes")?);
             }
             "hypothetical" | "two_group_hypothetical" | "analyze.two_group.hypothetical" => {
                 self.two_group_hypothetical = parse_finite_f64_with_locale(val, key, preset)?;
             }
             "mv_group_column" | "analyze.mv_group_column" | "analyze.km.mv_group_column" => {
-                self.mv_group_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
+                self.mv_group_column = parse_opt_usize_min(val, key, 0)?;
             }
             "mv_response_column" | "analyze.mv_response_column" => {
-                self.mv_response_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
+                self.mv_response_column = parse_opt_usize_min(val, key, 0)?;
             }
             "contingency_method" | "analyze.contingency.method" | "analyze.contingency_method" => {
-                let raw = val.as_str().ok_or_else(|| String::from("`contingency_method` must be a string"))?;
-                self.contingency_method = Some(parse_contingency_method_name(raw)?);
+                self.contingency_method = Some(parse_contingency_method_name(parse_str_field(val, "contingency_method")?)?);
             }
             "kappa_weighting" | "analyze.contingency.kappa_weighting" => {
-                let w = parse_kappa_weighting(val)?;
-                self.contingency_method = Some(ContingencyMethod::CohenKappa { weighting: w });
+                self.contingency_method = Some(ContingencyMethod::CohenKappa { weighting: parse_kappa_weighting(val)? });
             }
             "weighting" => {
                 if self.selected_entry_id.as_deref() == Some("stats.contingency") {
-                    let w = parse_kappa_weighting(val)?;
-                    self.contingency_method = Some(ContingencyMethod::CohenKappa { weighting: w });
+                    self.contingency_method = Some(ContingencyMethod::CohenKappa { weighting: parse_kappa_weighting(val)? });
                 } else {
                     self.fit_weighting = parse_weighting_scheme(val)?;
                 }
             }
-            "fit_weighting" | "analyze.fit.weighting" => {
-                self.fit_weighting = parse_weighting_scheme(val)?;
-            }
+            "fit_weighting" | "analyze.fit.weighting" => self.fit_weighting = parse_weighting_scheme(val)?,
             "null_proportion" | "analyze.contingency.null_proportion" | "analyze.null_proportion" => {
                 self.contingency_null_proportion = parse_opt_finite_f64_with_locale(val, key, preset)?;
             }
             "expected_proportions" | "analyze.contingency.expected_proportions" | "analyze.expected_proportions" => {
                 self.contingency_expected_proportions = if val.is_null() { None } else { Some(parse_f64_list_with_locale(val, key, preset)?) };
             }
-            "three_way" | "analyze.factorial.three_way" => {
-                self.factorial_three_way = val.as_bool().ok_or_else(|| String::from("`three_way` must be boolean"))?;
-            }
+            "three_way" | "analyze.factorial.three_way" => self.factorial_three_way = parse_bool_field(val, "three_way")?,
             "repeated_measures" | "analyze.factorial.repeated_measures" => {
-                let raw = val.as_str().ok_or_else(|| String::from("`repeated_measures` must be a string"))?;
-                self.factorial_repeated_measures = parse_rm_design_str(raw)?;
+                self.factorial_repeated_measures = parse_rm_design_str(parse_str_field(val, "repeated_measures")?)?;
             }
             "residual_covariance" | "factorial_residual_covariance" | "analyze.factorial.residual_covariance" => {
-                let raw = val.as_str().ok_or_else(|| String::from("`residual_covariance` must be a string"))?;
-                self.factorial_residual_covariance = parse_residual_covariance_str(raw)?;
+                self.factorial_residual_covariance = parse_residual_covariance_str(parse_str_field(val, "residual_covariance")?)?;
             }
             "ss_type" | "sum_of_squares" | "analyze.factorial.ss_type" => {
-                let raw = val.as_str().ok_or_else(|| String::from("`ss_type` must be a string"))?;
-                self.factorial_ss_type = parse_ss_type_str(raw)?;
+                self.factorial_ss_type = parse_ss_type_str(parse_str_field(val, "ss_type")?)?;
             }
             "multiplicity_method" | "analyze.multiplicity_method" | "analyze.factorial.multiplicity" => {
                 if self.selected_entry_id.as_deref() == Some("stats.pvalue_stack") {
                     self.pvalue_stack_method = parse_pvalue_stack_method_val(val)?;
                 } else {
-                    let raw = val.as_str().ok_or_else(|| String::from("`multiplicity_method` must be a string"))?;
-                    let parsed = parse_multiplicity_method_name(raw, 0)?;
+                    let parsed = parse_multiplicity_method_name(parse_str_field(val, "multiplicity_method")?, 0)?;
                     self.factorial_multiplicity = parsed;
                     self.km_multiplicity_method = parsed;
                 }
             }
             "distance" | "cluster_distance" | "analyze.cluster.distance" => {
-                let raw = val.as_str().ok_or_else(|| String::from("`distance` must be a string"))?;
-                self.cluster_distance = parse_cluster_distance_str(raw)?;
+                self.cluster_distance = parse_cluster_distance_str(parse_str_field(val, "distance")?)?;
             }
             "linkage" | "cluster_linkage" | "analyze.cluster.linkage" => {
-                let raw = val.as_str().ok_or_else(|| String::from("`linkage` must be a string"))?;
-                self.cluster_linkage = parse_cluster_linkage_str(raw)?;
+                self.cluster_linkage = parse_cluster_linkage_str(parse_str_field(val, "linkage")?)?;
             }
-            "k_means_k" | "k" | "analyze.cluster.k_means_k" => {
-                self.cluster_k_means_k = if val.is_null() { None } else { Some(parse_usize_min(val, key, 1)?) };
-            }
-            "k_sweep_max" | "analyze.cluster.k_sweep_max" => {
-                self.cluster_k_sweep_max = if val.is_null() { None } else { Some(parse_usize_min(val, key, 2)?) };
-            }
-            "standardize" | "pca_standardize" | "analyze.pca.standardize" => {
-                self.pca_standardize = val.as_bool().ok_or_else(|| String::from("`standardize` must be boolean"))?;
-            }
+            "k_means_k" | "k" | "analyze.cluster.k_means_k" => self.cluster_k_means_k = parse_opt_usize_min(val, key, 1)?,
+            "k_sweep_max" | "analyze.cluster.k_sweep_max" => self.cluster_k_sweep_max = parse_opt_usize_min(val, key, 2)?,
+            "standardize" | "pca_standardize" | "analyze.pca.standardize" => self.pca_standardize = parse_bool_field(val, "standardize")?,
             "spearman_rank" | "analyze.corr.spearman_rank" | "analyze.correlation.spearman_rank" => {
-                self.corr_spearman_rank = val.as_bool().ok_or_else(|| String::from("`spearman_rank` must be boolean"))?;
+                self.corr_spearman_rank = parse_bool_field(val, "spearman_rank")?;
             }
-            "imputations_m" | "m" | "analyze.mi.imputations_m" | "analyze.imputation.m" => {
-                self.imputation_m = parse_usize_min(val, key, 1)?;
-            }
-            "family" | "glm_family" | "analyze.glm.family" => {
-                let raw = val.as_str().ok_or_else(|| String::from("`glm_family` must be a string"))?;
-                self.glm_family = parse_glm_family_str(raw)?;
-            }
+            "imputations_m" | "m" | "analyze.mi.imputations_m" | "analyze.imputation.m" => self.imputation_m = parse_usize_min(val, key, 1)?,
+            "family" | "glm_family" | "analyze.glm.family" => self.glm_family = parse_glm_family_str(parse_str_field(val, "glm_family")?)?,
             "reference_levels" | "analyze.reference_levels" => {
                 let refs = parse_reference_levels(val)?;
                 self.glm_reference_levels.clone_from(&refs);
                 self.cox_reference_levels = refs;
             }
-            "compute_vif" | "analyze.glm.compute_vif" => {
-                self.glm_compute_vif = val.as_bool().ok_or_else(|| String::from("`compute_vif` must be boolean"))?;
-            }
-            "time_column" | "cox_time_column" | "analyze.cox.time_column" => {
-                self.cox_time_column = Some(parse_usize_min(val, key, 0)?);
-            }
-            "status_column" | "cox_status_column" | "analyze.cox.status_column" => {
-                self.cox_status_column = Some(parse_usize_min(val, key, 0)?);
-            }
+            "compute_vif" | "analyze.glm.compute_vif" => self.glm_compute_vif = parse_bool_field(val, "compute_vif")?,
+            "time_column" | "cox_time_column" | "analyze.cox.time_column" => self.cox_time_column = Some(parse_usize_min(val, key, 0)?),
+            "status_column" | "cox_status_column" | "analyze.cox.status_column" => self.cox_status_column = Some(parse_usize_min(val, key, 0)?),
             "predictor_columns" | "cox_predictor_columns" | "analyze.cox.predictor_columns" => {
                 self.cox_predictor_columns = parse_usize_list(val, key)?;
             }
             "tie_method" | "cox_tie_method" | "analyze.cox.tie_method" => {
-                let raw = val.as_str().ok_or_else(|| String::from("`tie_method` must be a string"))?;
-                self.cox_tie_method = parse_cox_tie_method_str(raw)?;
+                self.cox_tie_method = parse_cox_tie_method_str(parse_str_field(val, "tie_method")?)?;
             }
             "trend_test" | "km_trend_test" | "analyze.km.trend_test" | "log_rank_for_trend" | "analyze.km.log_rank_for_trend" => {
-                self.km_trend_test = val.as_bool().ok_or_else(|| String::from("`trend_test` must be boolean"))?;
+                self.km_trend_test = parse_bool_field(val, "trend_test")?;
             }
-            "mv_time_column" | "km_mv_time_column" | "analyze.km.mv_time_column" => {
-                self.km_mv_time_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
-            }
+            "mv_time_column" | "km_mv_time_column" | "analyze.km.mv_time_column" => self.km_mv_time_column = parse_opt_usize_min(val, key, 0)?,
             "mv_status_column" | "km_mv_status_column" | "analyze.km.mv_status_column" => {
-                self.km_mv_status_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
+                self.km_mv_status_column = parse_opt_usize_min(val, key, 0)?;
             }
             "log_rank_mantel_cox" | "km_log_rank_mantel_cox" | "analyze.km.log_rank_mantel_cox" => {
-                self.km_log_rank_mantel_cox = val.as_bool().ok_or_else(|| String::from("`log_rank_mantel_cox` must be boolean"))?;
+                self.km_log_rank_mantel_cox = parse_bool_field(val, "log_rank_mantel_cox")?;
             }
             "gehan_breslow_wilcoxon" | "km_gehan_breslow_wilcoxon" | "analyze.km.gehan_breslow_wilcoxon" => {
-                self.km_gehan_breslow_wilcoxon = val.as_bool().ok_or_else(|| String::from("`gehan_breslow_wilcoxon` must be boolean"))?;
+                self.km_gehan_breslow_wilcoxon = parse_bool_field(val, "gehan_breslow_wilcoxon")?;
             }
             "km_multiplicity_method" | "analyze.km.multiplicity_method" => {
-                let raw = val.as_str().ok_or_else(|| String::from("`multiplicity_method` must be a string"))?;
-                self.km_multiplicity_method = parse_multiplicity_method_name(raw, 0)?;
+                self.km_multiplicity_method = parse_multiplicity_method_name(parse_str_field(val, "multiplicity_method")?, 0)?;
             }
             "custom_dsl" | "analyze.fit.custom_dsl" => {
                 self.custom_dsl = val.as_str().map(str::trim).filter(|s| !s.is_empty()).map(ToOwned::to_owned);
             }
-            "parameter_rules" | "analyze.fit.parameter_rules" => {
-                self.parameter_rules = parse_parameter_rules(val)?;
-            }
-            "mv_x_columns" | "analyze.fit.mv_x_columns" => {
-                self.mv_x_columns = parse_usize_list(val, key)?;
-            }
-            "mv_y_column" | "analyze.fit.mv_y_column" => {
-                self.mv_y_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
-            }
-            "mv_group_columns" | "analyze.fit.mv_group_columns" => {
-                self.mv_group_columns = parse_usize_list(val, key)?;
-            }
-            "sample_size" | "analyze.sample.sample_size" => {
-                self.sample_size = parse_usize_min(val, key, 1)?;
-            }
-            "seed" | "sample_seed" | "analyze.sample.seed" => {
-                self.sample_seed = parse_u64_val(val, key)?;
-            }
-            "stratify_column" | "analyze.sample.stratify_column" => {
-                self.sample_stratify_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
-            }
+            "parameter_rules" | "analyze.fit.parameter_rules" => self.parameter_rules = parse_parameter_rules(val)?,
+            "mv_x_columns" | "analyze.fit.mv_x_columns" => self.mv_x_columns = parse_usize_list(val, key)?,
+            "mv_y_column" | "analyze.fit.mv_y_column" => self.mv_y_column = parse_opt_usize_min(val, key, 0)?,
+            "mv_group_columns" | "analyze.fit.mv_group_columns" => self.mv_group_columns = parse_usize_list(val, key)?,
+            "sample_size" | "analyze.sample.sample_size" => self.sample_size = parse_usize_min(val, key, 1)?,
+            "seed" | "sample_seed" | "analyze.sample.seed" => self.sample_seed = parse_u64_val(val, key)?,
+            "stratify_column" | "analyze.sample.stratify_column" => self.sample_stratify_column = parse_opt_usize_min(val, key, 0)?,
             "proportional_allocation" | "analyze.sample.proportional_allocation" => {
-                self.sample_proportional = val.as_bool().ok_or_else(|| String::from("`proportional_allocation` must be boolean"))?;
+                self.sample_proportional = parse_bool_field(val, "proportional_allocation")?;
             }
             _ => self.apply_pvalue_stack_analyze_field(key, val, preset)?,
         }
@@ -1074,16 +837,9 @@ impl AnalyzeDialogState {
                 if let FitMethod::RoutOutlierElimination { fdr_q_percent } = &mut self.fit_method {
                     *fdr_q_percent = q;
                 }
-                return Ok(());
             }
-            "outlier_alpha" | "analyze.outlier.alpha" => {
-                self.outlier_alpha = parse_outlier_alpha(val)?;
-                return Ok(());
-            }
-            "outlier_iterative" | "analyze.outlier.iterative" => {
-                self.outlier_iterative = val.as_bool().ok_or_else(|| String::from("`outlier_iterative` must be boolean"))?;
-                return Ok(());
-            }
+            "outlier_alpha" | "analyze.outlier.alpha" => self.outlier_alpha = parse_outlier_alpha(val)?,
+            "outlier_iterative" | "analyze.outlier.iterative" => self.outlier_iterative = parse_bool_field(val, "outlier_iterative")?,
             "fdr_q_percent" | "q_percent" | "rout_q" if is_outliers || is_nonlinear => {
                 let q = parse_outlier_fdr_q_percent(val)?;
                 if is_outliers {
@@ -1095,45 +851,24 @@ impl AnalyzeDialogState {
                     };
                     *fdr_q_percent = q;
                 }
-                return Ok(());
             }
-            "alpha" if is_outliers => {
-                self.outlier_alpha = parse_outlier_alpha(val)?;
-                return Ok(());
-            }
-            "iterative" if is_outliers => {
-                self.outlier_iterative = val.as_bool().ok_or_else(|| String::from("`iterative` must be boolean"))?;
-                return Ok(());
-            }
-            "method" if is_outliers || is_nonlinear => {
-                return Ok(());
-            }
+            "alpha" if is_outliers => self.outlier_alpha = parse_outlier_alpha(val)?,
+            "iterative" if is_outliers => self.outlier_iterative = parse_bool_field(val, "iterative")?,
+            "method" if is_outliers || is_nonlinear => {}
             "pvalue_stack_method" | "analyze.pvalue_stack.method" | "analyze.pvalue_stack.multiplicity_method" => {
                 self.pvalue_stack_method = parse_pvalue_stack_method_val(val)?;
             }
             "pvalue_stack_threshold" | "analyze.pvalue_stack.threshold" => {
-                let t = parse_finite_f64_with_locale(val, key, preset)?;
-                if !(0.0 < t && t < 1.0) {
-                    return Err(format!("`{key}` ({t}) must lie strictly in (0, 1)"));
-                }
-                self.pvalue_stack_threshold = t;
+                self.pvalue_stack_threshold = parse_open_unit_f64_with_val(val, key, preset)?;
             }
             "pvalue_stack_column" | "analyze.pvalue_stack.column" => {
-                self.pvalue_stack_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
+                self.pvalue_stack_column = parse_opt_usize_min(val, key, 0)?;
             }
-            "method" if is_pstack => {
-                self.pvalue_stack_method = parse_pvalue_stack_method_val(val)?;
-            }
+            "method" if is_pstack => self.pvalue_stack_method = parse_pvalue_stack_method_val(val)?,
             "threshold" | "alpha" | "q" | "fdr_q" if is_pstack => {
-                let t = parse_finite_f64_with_locale(val, key, preset)?;
-                if !(0.0 < t && t < 1.0) {
-                    return Err(format!("`{key}` ({t}) must lie strictly in (0, 1)"));
-                }
-                self.pvalue_stack_threshold = t;
+                self.pvalue_stack_threshold = parse_open_unit_f64_with_val(val, key, preset)?;
             }
-            "column" if is_pstack => {
-                self.pvalue_stack_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
-            }
+            "column" if is_pstack => self.pvalue_stack_column = parse_opt_usize_min(val, key, 0)?,
             other => return Err(format!("unknown Analyze field `{other}`")),
         }
         Ok(())
@@ -1231,9 +966,7 @@ impl AnalyzeDialogState {
                     OutlierSpec::Rout { fdr_q_percent: self.outlier_fdr_q_percent }
                 };
             }
-            AnalysisKind::DescriptiveStats(desc) => {
-                desc.aggregation = self.descriptive_aggregation;
-            }
+            AnalysisKind::DescriptiveStats(desc) => desc.aggregation = self.descriptive_aggregation,
             AnalysisKind::TwoGroupComparison(tg) => {
                 if let Some(m) = self.two_group_method {
                     tg.method = m;

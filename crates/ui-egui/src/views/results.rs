@@ -1,5 +1,4 @@
-//! Scrollable multi-column results viewer, overflow sub-tabs, Interpret / Assumption Checklist
-//! drawer, diagnostic banners, and `Cmd/Ctrl+T` parameter re-entry (`R10.5`, `R9.7` diagnostics-only).
+//! Scrollable multi-column results viewer state and live clipboard/selection actions (`R10.5`).
 
 use std::collections::BTreeMap;
 
@@ -8,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::UiApp;
-use crate::dialogs_canvas::{ChecklistSeverityFilter, ResultSheetViewState};
+use crate::dialogs_canvas::ResultSheetViewState;
 use crate::grid_view::format_cell_display;
 use crate::interaction::UiEventOutcome;
 
@@ -65,32 +64,8 @@ impl ResultsViewState {
 /// # Errors
 /// Returns an error if a requested result sheet cannot be resolved or parameter dialog fails.
 pub fn handle_custom_action(app: &mut UiApp, state: &mut ResultsViewState, payload: &str) -> Result<UiEventOutcome, String> {
-    if let Some(sheet_id) = payload.strip_prefix("edit_params:") {
-        return handle_edit_params_action(app, sheet_id);
-    }
-    if let Some(sheet_id) = payload.strip_prefix("toggle_interpret:") {
-        return Ok(handle_toggle_interpret_action(app, state, sheet_id));
-    }
-    if let Some(tab_name) = payload.strip_prefix("interpret_tab:") {
-        return Ok(handle_interpret_tab_action(state, tab_name));
-    }
-    if let Some(filter_mode) = payload.strip_prefix("checklist_filter:") {
-        return Ok(handle_checklist_filter_action(app, filter_mode));
-    }
-    if let Some(fmt) = payload.strip_prefix("report_format:") {
-        return Ok(handle_report_format_action(app, fmt));
-    }
-    if let Some(rest) = payload.strip_prefix("tabs_scroll:") {
-        return Ok(handle_tabs_scroll_action(app, rest));
-    }
     if let Some(rest) = payload.strip_prefix("select_cell:") {
         return Ok(handle_select_cell_action(state, rest));
-    }
-    if let Some(rest) = payload.strip_prefix("select_row:") {
-        return Ok(handle_select_row_action(state, rest));
-    }
-    if let Some(rest) = payload.strip_prefix("select_col:") {
-        return Ok(handle_select_col_action(state, rest));
     }
     if let Some(sheet_id) = payload.strip_prefix("copy_selection:") {
         return Ok(handle_copy_action(app, state, sheet_id, false));
@@ -99,75 +74,6 @@ pub fn handle_custom_action(app: &mut UiApp, state: &mut ResultsViewState, paylo
         return Ok(handle_copy_action(app, state, sheet_id, true));
     }
     Ok(UiEventOutcome::default())
-}
-
-fn handle_edit_params_action(app: &mut UiApp, sheet_id: &str) -> Result<UiEventOutcome, String> {
-    let rs_id = curvebook_doc::SheetId::try_new(sheet_id).map_err(|e| e.to_string())?;
-    let doc = app.document().clone();
-    if doc.result_sheet(&rs_id).is_none() {
-        return Err(format!("result sheet `{}` not found", rs_id.as_str()));
-    }
-    app.canvas_dialogs.open_edit_parameters(&doc, &rs_id);
-    Ok(UiEventOutcome {
-        handled: true,
-        action: String::from("results.edit_params"),
-        command_id: Some(String::from("ui.editParams.open")),
-        command_result: Some(json!({ "dialog": "EditAnalysisParameters", "result_sheet_id": rs_id.as_str() })),
-    })
-}
-
-fn handle_toggle_interpret_action(app: &mut UiApp, state: &mut ResultsViewState, sheet_id: &str) -> UiEventOutcome {
-    let next = !state.is_interpret_open(sheet_id);
-    state.interpret_open_by_sheet.insert(sheet_id.to_owned(), next);
-    app.canvas_dialogs.result_view.checklist_expanded = next;
-    UiEventOutcome {
-        handled: true,
-        action: format!("results.toggle_interpret:{next}"),
-        command_id: None,
-        command_result: Some(json!({ "sheet_id": sheet_id, "interpret_open": next })),
-    }
-}
-
-fn handle_interpret_tab_action(state: &mut ResultsViewState, tab_name: &str) -> UiEventOutcome {
-    state.interpret_tab = match tab_name {
-        "narrative" => InterpretDrawerTab::Narrative,
-        "methods" => InterpretDrawerTab::Methods,
-        _ => InterpretDrawerTab::Assumptions,
-    };
-    UiEventOutcome { handled: true, action: format!("results.interpret_tab:{tab_name}"), ..Default::default() }
-}
-
-fn handle_checklist_filter_action(app: &mut UiApp, filter_mode: &str) -> UiEventOutcome {
-    app.canvas_dialogs.result_view.checklist_filter =
-        if filter_mode == "flagged" { ChecklistSeverityFilter::WarningsAndViolations } else { ChecklistSeverityFilter::All };
-    UiEventOutcome { handled: true, action: format!("results.checklist_filter:{filter_mode}"), ..Default::default() }
-}
-
-fn handle_report_format_action(app: &mut UiApp, fmt: &str) -> UiEventOutcome {
-    if matches!(fmt, "plain" | "markdown" | "latex") {
-        app.canvas_dialogs.result_view.report_format = fmt.to_owned();
-    }
-    UiEventOutcome { handled: true, action: format!("results.report_format:{fmt}"), ..Default::default() }
-}
-
-fn handle_tabs_scroll_action(app: &mut UiApp, rest: &str) -> UiEventOutcome {
-    let Some((raw_off, sheet_id)) = rest.split_once(':') else {
-        return UiEventOutcome::default();
-    };
-    let Ok(offset_px) = raw_off.parse::<f64>() else {
-        return UiEventOutcome::default();
-    };
-    let clean_x = if offset_px.is_finite() { offset_px.max(0.0) } else { 0.0 };
-    for key in [format!("scroll.result.tabs.{sheet_id}"), format!("scroll.result.sec.tabs.{sheet_id}")] {
-        let entry = app.interaction.scroll_offsets.offsets.entry(key).or_insert([0.0, 0.0]);
-        entry[0] = clean_x;
-    }
-    UiEventOutcome {
-        handled: true,
-        action: String::from("results.tabs_scroll"),
-        command_id: None,
-        command_result: Some(json!({ "sheet_id": sheet_id, "offset_x": clean_x })),
-    }
 }
 
 fn handle_select_cell_action(state: &mut ResultsViewState, rest: &str) -> UiEventOutcome {
@@ -187,46 +93,6 @@ fn handle_select_cell_action(state: &mut ResultsViewState, rest: &str) -> UiEven
         action: format!("results.select_cell:{row}:{col}"),
         command_id: None,
         command_result: Some(json!({ "sheet_id": sheet_id, "tab_index": tab_idx, "row": row, "col": col })),
-    }
-}
-
-fn handle_select_row_action(state: &mut ResultsViewState, rest: &str) -> UiEventOutcome {
-    let mut parts = rest.splitn(4, ':');
-    let (Some(t_s), Some(r_s), Some(mc_s), Some(sheet_id)) = (parts.next(), parts.next(), parts.next(), parts.next()) else {
-        return UiEventOutcome::default();
-    };
-    let (Ok(tab_idx), Ok(row), Ok(max_col)) = (t_s.parse::<usize>(), r_s.parse::<usize>(), mc_s.parse::<usize>()) else {
-        return UiEventOutcome::default();
-    };
-    state.bound_sheet_id = Some(sheet_id.to_owned());
-    state.bound_tab_idx = Some(tab_idx);
-    state.selected_anchor = Some((row, 0));
-    state.selected_focus = Some((row, max_col));
-    UiEventOutcome {
-        handled: true,
-        action: format!("results.select_row:{row}"),
-        command_id: None,
-        command_result: Some(json!({ "sheet_id": sheet_id, "tab_index": tab_idx, "row": row, "max_col": max_col })),
-    }
-}
-
-fn handle_select_col_action(state: &mut ResultsViewState, rest: &str) -> UiEventOutcome {
-    let mut parts = rest.splitn(4, ':');
-    let (Some(t_s), Some(c_s), Some(mr_s), Some(sheet_id)) = (parts.next(), parts.next(), parts.next(), parts.next()) else {
-        return UiEventOutcome::default();
-    };
-    let (Ok(tab_idx), Ok(col), Ok(max_row)) = (t_s.parse::<usize>(), c_s.parse::<usize>(), mr_s.parse::<usize>()) else {
-        return UiEventOutcome::default();
-    };
-    state.bound_sheet_id = Some(sheet_id.to_owned());
-    state.bound_tab_idx = Some(tab_idx);
-    state.selected_anchor = Some((0, col));
-    state.selected_focus = Some((max_row, col));
-    UiEventOutcome {
-        handled: true,
-        action: format!("results.select_col:{col}"),
-        command_id: None,
-        command_result: Some(json!({ "sheet_id": sheet_id, "tab_index": tab_idx, "col": col, "max_row": max_row })),
     }
 }
 

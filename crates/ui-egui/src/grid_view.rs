@@ -1046,15 +1046,6 @@ impl ImportPasteWizardState {
         };
     }
 
-    /// Step back to the previous stage.
-    pub fn prev_stage(&mut self) {
-        self.stage = match self.stage {
-            ImportWizardStage::Source | ImportWizardStage::Filter => ImportWizardStage::Source,
-            ImportWizardStage::Placement => ImportWizardStage::Filter,
-            ImportWizardStage::Provenance => ImportWizardStage::Placement,
-        };
-    }
-
     /// Build the [`LinkSource`] corresponding to Stage 1 settings.
     #[must_use]
     pub fn build_link_source(&self, doc: Option<&ProjectDocument>) -> LinkSource {
@@ -1669,20 +1660,6 @@ impl GridViewState {
         self.selection_coords(sheet)
     }
 
-    /// Map currently selected grid rows/cells into graph `(series_index, point_index)` targets.
-    #[must_use]
-    pub fn selected_graph_point_indices(&self, sheet: &DataSheet, max_series: usize) -> Vec<(usize, usize)> {
-        let targets = self.selected_graph_point_targets(sheet, max_series);
-        let mut seen = HashSet::with_capacity(targets.len());
-        let mut out = Vec::with_capacity(targets.len());
-        for (s, p, _) in targets {
-            if seen.insert((s, p)) {
-                out.push((s, p));
-            }
-        }
-        out
-    }
-
     /// Map currently selected grid rows/cells into `(series_index, point_index, subcol)` targets,
     /// intersecting with populated sheet rows and deduplicating in `O(n)` via `HashSet` (`RV-50`).
     #[must_use]
@@ -1899,12 +1876,6 @@ impl GridViewState {
             tier2_subcolumns,
             rows,
         }
-    }
-
-    /// Non-destructively toggle the `Row Titles` column expansion state without mutating `DataSheet`.
-    pub fn toggle_row_titles(&mut self, sheet: &DataSheet) {
-        let current = effective_row_titles_expanded(sheet, self.row_titles_collapsed_override);
-        self.row_titles_collapsed_override = Some(!current);
     }
 
     /// Inspect any [`LinkedDataRegion`] containing `coord` (for double-click `Format Link`).
