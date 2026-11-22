@@ -5,12 +5,12 @@ use std::collections::{BTreeMap, HashSet};
 use curvebook_doc::{
     AnalysisKind, BaselineOperation, Cell, CellCoord, CellValue, ColorChannelMapping, ConstantValue, DataSetColumn, DataSheet, GraphKind, GraphSheet,
     GraphSpec, HookSource, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet, InternalLinkKind, LevelOrderKind, LevelOrderSpec,
-    LinkSource, MAX_DATA_SETS, MultipleVariablesTable, MultiplicityMethod, MultivariateSpec, NestedGroupColumn, NestedTable, NormalizeAnchor,
-    ParameterScope, PlacementMode, ProjectDocument, ResultSheet, SheetCellRange, SheetId, SimulationNoise, SizeChannelMapping, SubcolumnMode,
-    SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, VariableColumn, VariableRole, VariableSource, XColumnMode,
-    format_linked_paste_tsv_cell, validate_rows, validate_title,
+    LinkSource, MAX_DATA_SETS, MAX_PROJECT_CELLS, MAX_SHEET_CELLS, MultipleVariablesTable, MultiplicityMethod, MultivariateSpec, NestedGroupColumn,
+    NestedTable, NormalizeAnchor, ParameterScope, PlacementMode, PointStyleOverride, ProjectDocument, ResultSheet, SheetCellRange, SheetId,
+    SimulationNoise, SizeChannelMapping, SubcolumnMode, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, VariableColumn,
+    VariableRole, VariableSource, XColumnMode, format_linked_paste_tsv_cell, validate_project_cells, validate_rows, validate_title,
 };
-use curvebook_format::{CsvOptions, export_datasheet_to_csv, export_result_sheet_tidy_csv};
+use curvebook_format::{CsvOptions, export_datasheet_to_csv, try_export_result_sheet_tidy_csv};
 use curvebook_transform::{
     AllocationScheme, DistributionSimulationConfig, GroupAllocationWeight, ImportPipelineOptions, ImportPipelineReport, ImportSourcePayload,
     RowSampleConfig, SimulatedColumnSpec, SimulatedDistribution, SubjectRandomizationConfig, TargetArchetypeKind, apply_import_link_pipeline,
@@ -26,8 +26,8 @@ use super::helpers::{
     snapshot_active_series_lengths, x_subcolumn_count,
 };
 use super::params::{
-    array_schema, bool_schema, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema, obj_schema_with_aliases,
-    parse_params, record_deprecated_object_aliases, str_schema,
+    array_schema, bool_schema, deserialize_strict, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema,
+    obj_schema_with_aliases, parse_params, record_deprecated_object_aliases, str_schema,
 };
 use super::project::recalculate_dirty_with_links;
 use super::spellings::{self, first_present};
@@ -530,7 +530,7 @@ struct CellPayloadFields {
 
 impl CellPayloadFields {
     fn into_cell(self) -> Result<Cell, EngineError> {
-        let dec = parse_decimal_opt(self.decimal_separator.as_deref()).unwrap_or('.');
+        let dec = parse_explicit_decimal_opt(self.decimal_separator.as_deref())?.unwrap_or('.');
         let parse_asterisk = self.parse_asterisk_exclusion.unwrap_or(true);
         let mut cell = parse_cell_value_with_options(&self.value, dec, parse_asterisk)?;
         if let Some(ex) = self.excluded {
@@ -553,8 +553,7 @@ fn parse_cell_value_with_options(val: &Value, dec: char, parse_asterisk: bool) -
         }
         Value::String(s) => Ok(Cell::parse_import_token(s, dec, parse_asterisk)),
         Value::Object(_) => {
-            let nested: CellPayloadFields = serde_json::from_value(val.clone())
-                .map_err(|err| EngineError::with_code(ErrorCode::BadInput, format!("invalid cell value object: {err}")))?;
+            let nested: CellPayloadFields = deserialize_strict(val, "/value")?;
             nested.into_cell()
         }
         Value::Array(_) => Err(EngineError::with_code(ErrorCode::BadInput, "cell value cannot be a JSON array")
@@ -566,11 +565,15 @@ fn parse_cell_from_grid_value(val: &Value) -> Result<Cell, EngineError> {
     parse_cell_value_with_options(val, '.', true)
 }
 
-fn parse_decimal_opt(raw: Option<&str>) -> Option<char> {
-    match raw?.to_ascii_lowercase().as_str() {
-        "." | "dot" | "period" => Some('.'),
-        "," | "comma" => Some(','),
-        _ => None,
+fn parse_explicit_decimal_opt(raw: Option<&str>) -> Result<Option<char>, EngineError> {
+    let Some(s) = raw else {
+        return Ok(None);
+    };
+    match s.trim().to_ascii_lowercase().as_str() {
+        "." | "dot" | "period" => Ok(Some('.')),
+        "," | "comma" => Ok(Some(',')),
+        _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("unsupported decimal separator `{s}` (expected `.` or `,`)"))
+            .with_remediation("Supply an explicit `.`/`dot`/`period` or `,`/`comma`.")),
     }
 }
 
@@ -734,7 +737,7 @@ fn parse_import_filter_val(val: Option<&Value>) -> Result<ImportFilterSpec, Engi
     if v.is_null() {
         return Ok(ImportFilterSpec::default());
     }
-    if let Ok(parsed) = serde_json::from_value::<ImportFilterSpec>(v.clone()) {
+    if let Ok(parsed) = deserialize_strict::<ImportFilterSpec>(v, "/filter") {
         return Ok(parsed);
     }
     #[derive(Deserialize)]
@@ -754,8 +757,7 @@ fn parse_import_filter_val(val: Option<&Value>) -> Result<ImportFilterSpec, Engi
         #[serde(alias = "parseAsteriskExclusions", alias = "parse_asterisk_exclusion", alias = "parseAsteriskExclusion")]
         parse_asterisk_exclusions: Option<bool>,
     }
-    let obj: FilterObj =
-        serde_json::from_value(v.clone()).map_err(|err| EngineError::with_code(ErrorCode::BadInput, format!("invalid import filter: {err}")))?;
+    let obj: FilterObj = deserialize_strict(v, "/filter")?;
     let mut filter = ImportFilterSpec::default();
     if obj.row_start.is_some() || obj.row_end.is_some() {
         filter.row_window = Some((obj.row_start.unwrap_or(0), obj.row_end.unwrap_or(usize::MAX)));
@@ -805,32 +807,57 @@ fn resolve_baseline_adjustment(baseline: Option<BaselineInput>) -> Result<Option
 // ---------------------------------------------------------------------------
 
 fn coord_object_schema() -> Value {
+    let inner_coord = obj_schema_with_aliases(
+        vec![
+            ("row", int_schema("Zero-based row index", Some(0), None)),
+            ("col", int_schema("Zero-based dataset/column index", Some(0), None)),
+            ("subcol", int_schema("Zero-based replicate subcolumn index (default 0)", Some(0), None)),
+        ],
+        &[],
+        vec![("col", &["data_set", "dataSet", "column"]), ("subcol", &["subcolumn", "replicate"])],
+        false,
+    );
     obj_schema_with_aliases(
         vec![
-            ("coord", obj_schema(vec![], &[], true)),
+            ("coord", inner_coord),
             ("row", int_schema("Zero-based row index", Some(0), None)),
             ("col", int_schema("Zero-based dataset/column index", Some(0), None)),
             ("subcol", int_schema("Zero-based replicate subcolumn index (default 0)", Some(0), None)),
         ],
         &[],
         vec![("coord", &["coordinate"]), ("col", &["data_set", "dataSet", "column"]), ("subcol", &["subcolumn", "replicate"])],
-        true,
+        false,
     )
 }
 
 fn cell_range_schema() -> Value {
     let endpoint = coord_object_schema();
-    obj_schema_with_aliases(vec![("start", endpoint.clone()), ("end", endpoint)], &["start"], vec![("start", &["from"]), ("end", &["to"])], true)
+    obj_schema_with_aliases(vec![("start", endpoint.clone()), ("end", endpoint)], &["start"], vec![("start", &["from"]), ("end", &["to"])], false)
 }
 
 fn cell_value_schema() -> Value {
+    let dec_schema = explicit_decimal_sep_schema();
+    let ast_schema = bool_schema("Interpret trailing `*` in string tokens as excluded (default true)");
+    let cell_obj_schema = json!({
+        "type": "object",
+        "properties": {
+            "value": { "description": "Cell scalar value: finite number, text/numeric string, boolean, or null" },
+            "excluded": bool_schema("Optional explicit exclusion flag"),
+            "decimal_separator": dec_schema,
+            "decimalSeparator": dec_schema,
+            "decimal": dec_schema,
+            "parse_asterisk_exclusion": ast_schema,
+            "parseAsteriskExclusion": ast_schema
+        },
+        "additionalProperties": false
+    });
     json!({
         "description": "Cell scalar value: finite number, text/numeric string, boolean, cell object, or null to clear",
         "anyOf": [
             num_schema("Finite numeric cell value", None, None),
             str_schema("String or numeric token (trailing `*` sets excluded when enabled)"),
             bool_schema("Boolean text cell"),
-            { "type": "object" },
+            cell_obj_schema,
             { "type": "null" }
         ]
     })
@@ -849,7 +876,7 @@ fn anchor_schema() -> Value {
             ("col", &["target_col", "targetCol", "data_set", "dataSet", "column"]),
             ("subcol", &["target_subcol", "targetSubcol", "subcolumn", "replicate"]),
         ],
-        true,
+        false,
     )
 }
 
@@ -860,9 +887,29 @@ pub(super) fn import_filter_schema() -> Value {
             ("row_end", nullable_schema(int_schema("Last zero-based source row to include", Some(0), None))),
             ("col_start", nullable_schema(int_schema("First zero-based source column to include", Some(0), None))),
             ("col_end", nullable_schema(int_schema("Last zero-based source column to include", Some(0), None))),
+            (
+                "row_window",
+                nullable_schema(array_schema(
+                    "Inclusive zero-based [start_row, end_row] slice",
+                    int_schema("Row index", Some(0), None),
+                    Some(2),
+                    Some(2),
+                )),
+            ),
+            (
+                "col_window",
+                nullable_schema(array_schema(
+                    "Inclusive zero-based [start_col, end_col] slice",
+                    int_schema("Column index", Some(0), None),
+                    Some(2),
+                    Some(2),
+                )),
+            ),
             ("decimate_every_k", nullable_schema(int_schema("Keep every k-th source row (>= 1)", Some(1), None))),
             ("unstack_group_column", nullable_schema(int_schema("Optional grouping column index for unstacking", Some(0), None))),
             ("parse_asterisk_exclusions", nullable_schema(bool_schema("Interpret `*` suffix tokens as excluded cells"))),
+            ("baseline", nullable_schema(json!({ "description": "Optional ImportFilterSpec baseline tuple `[col, operation]`" }))),
+            ("exclude_row_predicate", nullable_schema(str_schema("Optional row-level exclusion predicate formula"))),
         ],
         &[],
         vec![
@@ -874,7 +921,7 @@ pub(super) fn import_filter_schema() -> Value {
             ("unstack_group_column", &["unstackGroupColumn"]),
             ("parse_asterisk_exclusions", &["parseAsteriskExclusions", "parse_asterisk_exclusion", "parseAsteriskExclusion"]),
         ],
-        true,
+        false,
     )
 }
 
@@ -886,7 +933,7 @@ pub(super) fn baseline_schema() -> Value {
         ],
         &[],
         vec![("col", &["column", "reference_col", "referenceCol"]), ("op", &["operation", "mode"])],
-        true,
+        false,
     )
 }
 
@@ -896,6 +943,31 @@ fn delimiter_schema() -> Value {
 
 fn decimal_sep_schema() -> Value {
     nullable_schema(str_schema("Decimal separator (`.`, `,`, `dot`, `comma`, `period`, or `auto`)"))
+}
+
+fn explicit_decimal_sep_schema() -> Value {
+    nullable_schema(str_schema("Explicit decimal separator (`.`, `,`, `dot`, `comma`, or `period`)"))
+}
+
+pub(super) fn validate_project_cell_budget(doc: &ProjectDocument) -> Result<(), EngineError> {
+    let total = doc.total_allocated_cells()?;
+    validate_project_cells(total, 0)?;
+    Ok(())
+}
+
+pub(super) fn validate_project_cell_budget_after_change(
+    doc: &ProjectDocument,
+    replaced_sheet_id: Option<&SheetId>,
+    replacement_or_added_cells: usize,
+) -> Result<(), EngineError> {
+    let mut existing = doc.total_allocated_cells()?;
+    if let Some(target_id) = replaced_sheet_id
+        && let Some(existing_ds) = doc.data_sheet(target_id)
+    {
+        existing = existing.saturating_sub(existing_ds.archetype.allocated_cell_slots());
+    }
+    validate_project_cells(existing, replacement_or_added_cells)?;
+    Ok(())
 }
 
 fn col_ref_schema(desc: &str) -> Value {
@@ -1126,7 +1198,7 @@ fn schema_set_cell() -> Value {
             ("subcol", int_schema("Zero-based subcolumn index (default 0)", Some(0), None)),
             ("value", cell_value_schema()),
             ("excluded", bool_schema("Optional explicit exclusion flag")),
-            ("decimal_separator", decimal_sep_schema()),
+            ("decimal_separator", explicit_decimal_sep_schema()),
             ("parse_asterisk_exclusion", bool_schema("Interpret trailing `*` in string tokens as excluded (default true)")),
         ],
         &["sheet_id"],
@@ -1138,7 +1210,7 @@ fn schema_set_cell() -> Value {
             ("decimal_separator", &["decimalSeparator", "decimal"]),
             ("parse_asterisk_exclusion", &["parseAsteriskExclusion"]),
         ],
-        true,
+        false,
     )
 }
 
@@ -1250,7 +1322,7 @@ fn schema_set_cells() -> Value {
             ("subcol", int_schema("Zero-based subcolumn index", Some(0), None)),
             ("value", cell_value_schema()),
             ("excluded", bool_schema("Optional explicit exclusion flag")),
-            ("decimal_separator", decimal_sep_schema()),
+            ("decimal_separator", explicit_decimal_sep_schema()),
             ("parse_asterisk_exclusion", bool_schema("Parse trailing `*` exclusion marker")),
         ],
         &[],
@@ -1261,7 +1333,7 @@ fn schema_set_cells() -> Value {
             ("decimal_separator", &["decimalSeparator", "decimal"]),
             ("parse_asterisk_exclusion", &["parseAsteriskExclusion"]),
         ],
-        true,
+        false,
     );
     obj_schema_with_aliases(
         vec![
@@ -1281,7 +1353,7 @@ fn schema_set_cells() -> Value {
             ("start_col", &["startCol"]),
             ("start_subcol", &["startSubcol"]),
         ],
-        true,
+        false,
     )
 }
 
@@ -1369,7 +1441,7 @@ fn schema_set_x_cells() -> Value {
             ("subcol", int_schema("Zero-based X subcolumn index (default 0)", Some(0), None)),
             ("value", cell_value_schema()),
             ("excluded", bool_schema("Optional explicit exclusion flag")),
-            ("decimal_separator", decimal_sep_schema()),
+            ("decimal_separator", explicit_decimal_sep_schema()),
             ("parse_asterisk_exclusion", bool_schema("Parse trailing `*` exclusion marker")),
         ],
         &["row"],
@@ -1378,7 +1450,7 @@ fn schema_set_x_cells() -> Value {
             ("decimal_separator", &["decimalSeparator", "decimal"]),
             ("parse_asterisk_exclusion", &["parseAsteriskExclusion"]),
         ],
-        true,
+        false,
     );
     obj_schema_with_aliases(
         vec![
@@ -1390,7 +1462,7 @@ fn schema_set_x_cells() -> Value {
             ("subcol", int_schema("X subcolumn index (default 0)", Some(0), None)),
             ("value", cell_value_schema()),
             ("excluded", bool_schema("Optional explicit exclusion flag")),
-            ("decimal_separator", decimal_sep_schema()),
+            ("decimal_separator", explicit_decimal_sep_schema()),
             ("parse_asterisk_exclusion", bool_schema("Parse trailing `*` exclusion marker")),
         ],
         &["sheet_id"],
@@ -1403,7 +1475,7 @@ fn schema_set_x_cells() -> Value {
             ("decimal_separator", &["decimalSeparator", "decimal"]),
             ("parse_asterisk_exclusion", &["parseAsteriskExclusion"]),
         ],
-        true,
+        false,
     )
 }
 
@@ -1480,7 +1552,7 @@ fn schema_set_row_titles() -> Value {
         ],
         &["sheet_id"],
         vec![("sheet_id", &["sheetId"]), ("titles", &["row_titles", "rowTitles"]), ("start_row", &["startRow"])],
-        true,
+        false,
     )
 }
 
@@ -1564,7 +1636,7 @@ fn schema_set_titles() -> Value {
             ("col", &["group", "data_set", "dataSet", "column", "index"]),
             ("row_titles", &["rowTitles"]),
         ],
-        true,
+        false,
     )
 }
 
@@ -1635,6 +1707,30 @@ fn propagate_mv_variable_renames(doc: &mut ProjectDocument, sheet_id: &SheetId, 
 fn run_set_titles_with_id(command_id: &str, ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let p: SetTitlesParams = parse_params(&schema_set_titles(), raw)?;
     let id = parse_sheet_id(&p.sheet_id)?;
+    if p.titles.is_some() && p.title.is_some() {
+        return Err(EngineError::with_code(ErrorCode::BadInput, format!("cannot combine `titles` with single `title` in `{command_id}`"))
+            .with_remediation("Supply either `titles` (with optional `start_col`) or single `title` with `col`, not both.")
+            .with_details(json!({ "pointer": "/titles" })));
+    }
+    if p.title.is_some() && p.col.is_none() {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "missing required `col` for single `title` update")
+            .with_remediation("Provide `col` (or pass a `titles` array).")
+            .with_details(json!({ "pointer": "/col" })));
+    }
+    if p.x_title.is_none()
+        && p.row_factor_title.is_none()
+        && p.column_factor_title.is_none()
+        && p.titles.as_ref().is_none_or(Vec::is_empty)
+        && p.title.is_none()
+        && p.row_titles.as_ref().is_none_or(Vec::is_empty)
+    {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!(
+                "{command_id} requires at least one title update (`title`/`col`, `titles`, `x_title`, `row_factor_title`, `column_factor_title`, or `row_titles`)"
+            ),
+        ));
+    }
     if let Some(ref title) = p.title {
         validate_title(title)?;
     }
@@ -1657,8 +1753,6 @@ fn run_set_titles_with_id(command_id: &str, ctx: &mut Ctx<'_>, raw: Value) -> Re
         for title in titles {
             validate_title(title)?;
         }
-    } else if let Some(title) = p.title.as_deref() {
-        validate_title(title)?;
     }
     if let Some(row_titles) = p.row_titles.as_deref() {
         validate_row_title_batch(&ds.archetype, 0, row_titles)?;
@@ -1689,11 +1783,13 @@ fn run_set_titles_with_id(command_id: &str, ctx: &mut Ctx<'_>, raw: Value) -> Re
         updated = updated.saturating_add(1);
     }
     if let Some(row_titles) = p.row_titles {
-        validate_row_title_batch(&ds.archetype, 0, &row_titles)?;
         for (idx, title) in row_titles.into_iter().enumerate() {
             set_row_title(&mut ds.archetype, idx, title)?;
             updated = updated.saturating_add(1);
         }
+    }
+    if updated == 0 {
+        return Err(EngineError::with_code(ErrorCode::BadInput, format!("{command_id} applied zero title updates")));
     }
 
     if let Some(old_titles) = old_mv_titles.as_deref() {
@@ -1745,7 +1841,7 @@ fn schema_set_subcolumn_titles() -> Value {
             ("start_subcol", &["startSubcol"]),
             ("subcol", &["subcolumn", "replicate", "index"]),
         ],
-        true,
+        false,
     )
 }
 
@@ -1886,7 +1982,7 @@ fn schema_exclude_cells() -> Value {
             ("subcol_start", &["subcolStart"]),
             ("subcol_end", &["subcolEnd"]),
         ],
-        true,
+        false,
     )
 }
 
@@ -2038,7 +2134,7 @@ fn schema_exclude_cells_with_reason() -> Value {
             ("col", &["data_set", "dataSet", "column"]),
             ("subcol", &["subcolumn", "replicate"]),
         ],
-        true,
+        false,
     )
 }
 
@@ -2153,7 +2249,7 @@ fn schema_exclusion_audit_report() -> Value {
         vec![("sheet_id", nullable_schema(non_empty_str_schema("Optional sheet ID to filter report")))],
         &[],
         vec![("sheet_id", &["sheetId", "id"])],
-        true,
+        false,
     )
 }
 
@@ -2316,7 +2412,7 @@ fn schema_clear_cells() -> Value {
             ("subcol_start", &["subcolStart"]),
             ("subcol_end", &["subcolEnd"]),
         ],
-        true,
+        false,
     )
 }
 
@@ -2514,7 +2610,7 @@ fn schema_paste() -> Value {
             ("propagate_title_header", &["propagateTitleHeader"]),
             ("skip_contiguous_blanks", &["skipContiguousBlanks"]),
         ],
-        true,
+        false,
     )
 }
 
@@ -2536,12 +2632,14 @@ fn apply_paste_payload(
     spec: &ImportLinkSpec,
     payload: ImportSourcePayload<'_>,
     opts: &ImportPipelineOptions,
+    other_project_cells: usize,
 ) -> Result<ImportPipelineReport, EngineError> {
     let has_calc_mv = matches!(
         &ds.archetype,
         TableArchetype::MultipleVariables(mv) if mv.variables.iter().any(|v| matches!(v.source, VariableSource::Calculated { .. }))
     );
-    if !has_calc_mv && ds.linked_regions.is_empty() {
+    let needs_budget_stage = other_project_cells > MAX_PROJECT_CELLS.saturating_sub(MAX_SHEET_CELLS);
+    if !has_calc_mv && ds.linked_regions.is_empty() && !needs_budget_stage {
         let report = apply_import_link_pipeline(ds, spec, payload, opts, None)?;
         ds.prune_stale_exclusion_notes();
         return Ok(report);
@@ -2549,6 +2647,7 @@ fn apply_paste_payload(
     let mut staged = ds.clone();
     let report = apply_import_link_pipeline(&mut staged, spec, payload, opts, None)?;
     staged.prune_stale_exclusion_notes();
+    validate_project_cells(other_project_cells, staged.archetype.allocated_cell_slots())?;
     if has_calc_mv {
         ensure_mv_edit_preserves_calculated(ds, &staged, report.cols_placed, report.target_range)?;
     }
@@ -2574,6 +2673,7 @@ fn run_paste(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineErro
     let spec = ImportLinkSpec { source: LinkSource::Clipboard, filter, placement };
 
     let doc = &mut ctx.session.doc;
+    let other_project_cells = doc.total_allocated_cells()?.saturating_sub(doc.data_sheet(&id).map_or(0, |d| d.archetype.allocated_cell_slots()));
     let ds = require_unfrozen_data_sheet_mut(doc, &id)?;
     let old_cols = ds.archetype.column_count();
     let existing_links = ds.linked_regions.len();
@@ -2583,12 +2683,12 @@ fn run_paste(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineErro
         let delimiter = resolve_delimiter(p.delimiter.as_deref(), text)?;
         let decimal_separator = resolve_decimal_char(p.decimal_separator.as_deref(), p.normalize_decimal.unwrap_or(false), text, delimiter)?;
         let payload = ImportSourcePayload::DelimitedText { text, delimiter, decimal_separator };
-        apply_paste_payload(ds, &spec, payload, &opts)?
+        apply_paste_payload(ds, &spec, payload, &opts, other_project_cells)?
     } else if let Some(rows_arr) = p.rows.as_ref() {
-        let dec = parse_decimal_opt(p.decimal_separator.as_deref()).unwrap_or('.');
+        let dec = parse_explicit_decimal_opt(p.decimal_separator.as_deref())?.unwrap_or('.');
         let tsv = serialize_2d_rows_as_tsv(rows_arr, dec)?;
         let payload = ImportSourcePayload::DelimitedText { text: &tsv, delimiter: '\t', decimal_separator: '.' };
-        apply_paste_payload(ds, &spec, payload, &opts)?
+        apply_paste_payload(ds, &spec, payload, &opts, other_project_cells)?
     } else {
         return Err(EngineError::with_code(ErrorCode::BadInput, "table.paste requires `text`/`tsv`/`csv` or `rows`/`grid`")
             .with_remediation("Supply delimited `text` or a 2D `rows` array."));
@@ -2643,11 +2743,11 @@ fn schema_export_csv() -> Value {
             ("sheet_id", non_empty_str_schema("Data or Result sheet identifier to export")),
             ("path", nullable_schema(non_empty_str_schema("Optional output file path"))),
             ("delimiter", nullable_schema(str_schema("Delimiter character (`,`, `\\t`/`tab`, `;`, or 1 char)"))),
-            ("decimal_separator", decimal_sep_schema()),
+            ("decimal_separator", explicit_decimal_sep_schema()),
         ],
         &["sheet_id"],
         vec![("sheet_id", &["sheetId"]), ("path", &["file_path", "filePath"]), ("decimal_separator", &["decimalSeparator", "decimal"])],
-        true,
+        false,
     )
 }
 
@@ -2658,7 +2758,7 @@ fn run_export_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engin
     if let Some(delim) = p.delimiter.as_deref() {
         csv_opts.delimiter = parse_delimiter_char(delim)?;
     }
-    if let Some(dec) = parse_decimal_opt(p.decimal_separator.as_deref()) {
+    if let Some(dec) = parse_explicit_decimal_opt(p.decimal_separator.as_deref())? {
         csv_opts.decimal_separator = dec;
     }
 
@@ -2666,7 +2766,7 @@ fn run_export_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engin
     let csv_text = if let Some(ds) = doc.data_sheet(&id) {
         export_datasheet_to_csv(ds, &csv_opts)?
     } else if let Some(res) = doc.result_sheet(&id) {
-        export_result_sheet_tidy_csv(res, &csv_opts)
+        try_export_result_sheet_tidy_csv(res, &csv_opts)?
     } else {
         return Err(EngineError::with_code(ErrorCode::NotFound, format!("data or result sheet `{id}` not found"))
             .with_remediation("Provide an existing data or result sheet ID."));
@@ -2738,7 +2838,7 @@ fn schema_set_variable_role() -> Value {
         ],
         &["sheet_id", "role"],
         vec![("sheet_id", &["sheetId"]), ("col", &["column", "column_index", "columnIndex", "index", "variable"])],
-        true,
+        false,
     )
 }
 
@@ -2841,7 +2941,7 @@ fn schema_recode_levels() -> Value {
         vec![("from", str_schema("Existing level text")), ("to", str_schema("Replacement level text"))],
         &["from", "to"],
         vec![("from", &["old", "source"]), ("to", &["new", "target"])],
-        true,
+        false,
     );
     let mappings_schema = json!({
         "description": "Recode mapping: object `{ old: new }` or array of `{ from, to }`",
@@ -2863,7 +2963,7 @@ fn schema_recode_levels() -> Value {
             ("col", &["column", "column_index", "columnIndex", "index", "variable"]),
             ("mappings", &["mapping", "map", "recode"]),
         ],
-        true,
+        false,
     )
 }
 
@@ -3079,7 +3179,7 @@ fn schema_set_categorical_order() -> Value {
             ("levels", &["explicit"]),
             ("order", &["kind", "mode"]),
         ],
-        true,
+        false,
     )
 }
 
@@ -3233,7 +3333,7 @@ fn schema_set_calculated_variable() -> Value {
             ("title", &["name"]),
             ("formula", &["expression"]),
         ],
-        true,
+        false,
     )
 }
 
@@ -3245,28 +3345,48 @@ fn run_set_calculated_variable(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandO
     }
     let doc = &mut ctx.session.doc;
 
+    let other_cells = doc.total_allocated_cells()?.saturating_sub(doc.data_sheet(&id).map_or(0, |d| d.archetype.allocated_cell_slots()));
     let info_snapshot = doc.data_sheet(&id).and_then(|ds| ds.info_sheet_id.as_ref()).and_then(|iid| doc.info_sheet(iid)).cloned();
     let ds = require_unfrozen_data_sheet_mut(doc, &id)?;
+    let (resolved_col_idx, created_new, row_count, cur_slots) = {
+        let cur_slots = ds.archetype.allocated_cell_slots();
+        let TableArchetype::MultipleVariables(mv) = &ds.archetype else {
+            return Err(EngineError::with_code(ErrorCode::BadInput, format!("sheet `{id}` is not a MultipleVariables table"))
+                .with_remediation("Select a MultipleVariables data sheet."));
+        };
+        if let Some(ref col_ref) = p.col {
+            (resolve_mv_variable_index(mv, Some(col_ref), None)?, false, mv.row_count(), cur_slots)
+        } else if let Some(ref title) = p.title {
+            if let Some(existing) = mv.find_variable(title) {
+                (existing, false, mv.row_count(), cur_slots)
+            } else {
+                (mv.variables.len(), true, mv.row_count(), cur_slots)
+            }
+        } else {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "table.setCalculatedVariable requires `column`/`col` or `title`")
+                .with_remediation("Specify a target column index or a `title` for the calculated variable."));
+        }
+    };
+    if !created_new {
+        ensure_range_outside_linked_regions(
+            ds,
+            SheetCellRange::new(CellCoord::new(0, resolved_col_idx, 0), CellCoord::new(row_count.saturating_sub(1), resolved_col_idx, 0)),
+            "convert to calculated variable",
+        )?;
+    } else {
+        validate_project_cells(other_cells, cur_slots.saturating_add(row_count))?;
+    }
 
     let TableArchetype::MultipleVariables(mv) = &mut ds.archetype else {
-        return Err(EngineError::with_code(ErrorCode::BadInput, format!("sheet `{id}` is not a MultipleVariables table"))
-            .with_remediation("Select a MultipleVariables data sheet."));
+        return Err(EngineError::with_code(ErrorCode::BadInput, format!("sheet `{id}` is not a MultipleVariables table")));
     };
-
-    let (col_idx, created_new) = if let Some(ref col_ref) = p.col {
-        (resolve_mv_variable_index(mv, Some(col_ref), None)?, false)
-    } else if let Some(ref title) = p.title {
-        if let Some(existing) = mv.find_variable(title) {
-            (existing, false)
-        } else {
-            let row_count = mv.row_count();
-            let col = VariableColumn::new(title.as_str(), row_count)?;
-            mv.variables.push(col);
-            (mv.variables.len().saturating_sub(1), true)
-        }
+    let col_idx = if created_new {
+        let title = p.title.as_deref().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "missing `title` for new calculated variable"))?;
+        let col = VariableColumn::new(title, row_count)?;
+        mv.variables.push(col);
+        mv.variables.len().saturating_sub(1)
     } else {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "table.setCalculatedVariable requires `column`/`col` or `title`")
-            .with_remediation("Specify a target column index or a `title` for the calculated variable."));
+        resolved_col_idx
     };
 
     if col_idx >= mv.variables.len() {
@@ -3386,7 +3506,7 @@ fn schema_simulate_xy() -> Value {
             ("auto_info", &["autoInfo"]),
             ("graph_sheet_id", &["graphSheetId"]),
         ],
-        true,
+        false,
     )
 }
 
@@ -3455,6 +3575,7 @@ fn run_simulate_xy(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
     let mut simulated = simulate_xy_sheet(id.as_str(), title, seed, row_count, replicates, x_min, x_max, equation_id, &sim_params, noise)?;
 
     if doc.data_sheet(&id).is_some() {
+        validate_project_cell_budget_after_change(doc, Some(&id), simulated.archetype.allocated_cell_slots())?;
         let existing_info = doc.data_sheet(&id).and_then(|d| d.info_sheet_id.clone());
         let slot = require_unfrozen_data_sheet_mut(doc, &id)?;
         if let Some(info_id) = existing_info {
@@ -3462,6 +3583,7 @@ fn run_simulate_xy(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
         }
         *slot = simulated;
     } else {
+        validate_project_cell_budget_after_change(doc, None, simulated.archetype.allocated_cell_slots())?;
         doc.add_data_sheet(simulated)?;
         if p.auto_info.unwrap_or(false) {
             let iid = next_unique_sheet_id(doc, "info")?;
@@ -3541,7 +3663,7 @@ fn schema_convert_archetype() -> Value {
             ("allow_lossy", &["allowLossy"]),
             ("preview_only", &["previewOnly", "preview", "dry_run", "dryRun"]),
         ],
-        true,
+        false,
     )
 }
 
@@ -3595,6 +3717,7 @@ fn run_convert_archetype(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome
         ));
     }
     converted.id = sheet_id.clone();
+    validate_project_cell_budget_after_change(doc, Some(&sheet_id), converted.archetype.allocated_cell_slots())?;
     preserve_mappable_incoming_links(&old_ds, &mut converted, &impact.col_plan);
     converted.prune_stale_exclusion_notes();
     doc.data_sheets[idx] = converted;
@@ -4441,22 +4564,145 @@ fn remap_analysis_kind_columns(kind: &mut AnalysisKind, plan: &ConversionColPlan
     }
 }
 
+fn remap_point_override_for_conversion(
+    mut ov: PointStyleOverride,
+    plan: &ConversionColPlan,
+    converted_ds: Option<&DataSheet>,
+    warnings: &mut Vec<String>,
+    graph_id: &SheetId,
+) -> Vec<PointStyleOverride> {
+    let row_ok = |point_index: usize| converted_ds.is_none_or(|ds| point_index < ds.archetype.row_count());
+    let subcol_ok = |series_index: usize, subcol: Option<usize>| match (converted_ds, subcol) {
+        (Some(ds), Some(sc)) => sc < column_subcolumn_count(&ds.archetype, series_index),
+        _ => true,
+    };
+    match plan.cols.get(ov.series_index) {
+        Some(ColMapTarget::Exact(new_col)) if !plan.transposes_row_subcol => {
+            ov.series_index = *new_col;
+            if row_ok(ov.point_index) && subcol_ok(*new_col, ov.subcol) {
+                vec![ov]
+            } else {
+                warnings.push(format!(
+                    "Graph `{graph_id}` dropped out-of-bounds point override ({}, {}) after conversion",
+                    ov.series_index, ov.point_index
+                ));
+                Vec::new()
+            }
+        }
+        Some(ColMapTarget::Exact(new_col)) => {
+            if ov.point_index != 0 {
+                warnings.push(format!("Graph `{graph_id}` dropped point override on out-of-range row {} after conversion", ov.point_index));
+                return Vec::new();
+            }
+            if let Some(sc) = ov.subcol {
+                ov.series_index = *new_col;
+                ov.point_index = sc;
+                ov.subcol = None;
+                if row_ok(ov.point_index) && subcol_ok(*new_col, ov.subcol) { vec![ov] } else { Vec::new() }
+            } else if let Some(ds) = converted_ds {
+                (0..ds.archetype.row_count())
+                    .map(|dst_r| {
+                        let mut cloned = ov.clone();
+                        cloned.series_index = *new_col;
+                        cloned.point_index = dst_r;
+                        cloned.subcol = None;
+                        cloned
+                    })
+                    .collect()
+            } else {
+                ov.series_index = *new_col;
+                ov.subcol = None;
+                vec![ov]
+            }
+        }
+        Some(ColMapTarget::Expanded(cols)) if !plan.transposes_row_subcol && !cols.is_empty() => {
+            if let Some(sc) = ov.subcol {
+                let Some(&new_col) = cols.get(sc) else {
+                    warnings
+                        .push(format!("Graph `{graph_id}` dropped point override with out-of-range subcolumn {sc} on column {}", ov.series_index));
+                    return Vec::new();
+                };
+                ov.series_index = new_col;
+                ov.subcol = None;
+                if row_ok(ov.point_index) && subcol_ok(new_col, ov.subcol) { vec![ov] } else { Vec::new() }
+            } else if row_ok(ov.point_index) {
+                cols.iter()
+                    .filter_map(|&new_col| {
+                        let mut cloned = ov.clone();
+                        cloned.series_index = new_col;
+                        cloned.subcol = None;
+                        subcol_ok(new_col, None).then_some(cloned)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        }
+        Some(ColMapTarget::Expanded(cols)) if !cols.is_empty() => {
+            let Some(&new_col) = cols.get(ov.point_index) else {
+                warnings.push(format!(
+                    "Graph `{graph_id}` dropped point override with out-of-range row {} on transposed column {}",
+                    ov.point_index, ov.series_index
+                ));
+                return Vec::new();
+            };
+            if let Some(sc) = ov.subcol {
+                ov.series_index = new_col;
+                ov.point_index = sc;
+                ov.subcol = None;
+                if row_ok(ov.point_index) && subcol_ok(new_col, None) { vec![ov] } else { Vec::new() }
+            } else if let Some(ds) = converted_ds {
+                (0..ds.archetype.row_count())
+                    .map(|dst_r| {
+                        let mut cloned = ov.clone();
+                        cloned.series_index = new_col;
+                        cloned.point_index = dst_r;
+                        cloned.subcol = None;
+                        cloned
+                    })
+                    .collect()
+            } else {
+                ov.series_index = new_col;
+                ov.subcol = None;
+                vec![ov]
+            }
+        }
+        _ => {
+            warnings.push(format!("Graph `{graph_id}` dropped point override for unmappable column {}", ov.series_index));
+            Vec::new()
+        }
+    }
+}
+
 fn remap_graph_spec_for_conversion(
     spec: &mut curvebook_doc::GraphSpec,
     target_sheet_id: &SheetId,
     plan: &ConversionColPlan,
+    converted_ds: Option<&DataSheet>,
     warnings: &mut Vec<String>,
     graph_id: &SheetId,
 ) {
+    let old_series = spec.series.clone();
     let mut kept_series = Vec::with_capacity(spec.series.len());
     for mut s in std::mem::take(&mut spec.series) {
         if s.source_sheet_id == *target_sheet_id {
-            match plan.map_one(s.data_set_index, "graph series") {
-                Ok(new_col) => {
-                    s.data_set_index = new_col;
+            match plan.cols.get(s.data_set_index) {
+                Some(ColMapTarget::Exact(new_col)) => {
+                    s.data_set_index = *new_col;
                     kept_series.push(s);
                 }
-                Err(reason) => {
+                Some(ColMapTarget::Expanded(cols)) if !cols.is_empty() => {
+                    for &new_col in cols {
+                        let mut expanded = s.clone();
+                        expanded.data_set_index = new_col;
+                        kept_series.push(expanded);
+                    }
+                }
+                _ => {
+                    let reason = plan
+                        .map_one(s.data_set_index, "graph series")
+                        .err()
+                        .unwrap_or_else(|| format!("column {} has no target after conversion", s.data_set_index));
                     warnings.push(format!("Graph `{graph_id}` dropped series binding: {reason}"));
                 }
             }
@@ -4465,32 +4711,81 @@ fn remap_graph_spec_for_conversion(
         }
     }
     spec.series = kept_series;
+
+    if !spec.point_overrides.is_empty() {
+        let mut kept_overrides = Vec::with_capacity(spec.point_overrides.len());
+        for ov in std::mem::take(&mut spec.point_overrides) {
+            if !old_series.is_empty() {
+                let Some(prev_series) = old_series.iter().find(|s| s.data_set_index == ov.series_index) else {
+                    warnings.push(format!("Graph `{graph_id}` dropped orphaned point override on series {}", ov.series_index));
+                    continue;
+                };
+                if prev_series.source_sheet_id != *target_sheet_id {
+                    kept_overrides.push(ov);
+                    continue;
+                }
+            } else if spec.primary_source_sheet_id != *target_sheet_id {
+                kept_overrides.push(ov);
+                continue;
+            }
+            kept_overrides.extend(remap_point_override_for_conversion(ov, plan, converted_ds, warnings, graph_id));
+        }
+        spec.point_overrides = kept_overrides;
+    }
+
     if spec.primary_source_sheet_id == *target_sheet_id
         && let Some(mv) = &mut spec.multivariate
     {
-        if let Ok(xc) = plan.map_one(mv.x_column, "graph multivariate x_column") {
-            mv.x_column = xc;
+        let mut clear_multivariate = false;
+        match plan.map_one(mv.x_column, "graph multivariate x_column") {
+            Ok(xc) => mv.x_column = xc,
+            Err(reason) => {
+                warnings.push(format!("Graph `{graph_id}` cleared multivariate encoding: {reason}"));
+                clear_multivariate = true;
+            }
         }
-        if let Ok(yc) = plan.map_one(mv.y_column, "graph multivariate y_column") {
-            mv.y_column = yc;
+        if !clear_multivariate {
+            match plan.map_one(mv.y_column, "graph multivariate y_column") {
+                Ok(yc) => mv.y_column = yc,
+                Err(reason) => {
+                    warnings.push(format!("Graph `{graph_id}` cleared multivariate encoding: {reason}"));
+                    clear_multivariate = true;
+                }
+            }
         }
-        if let Some(lc) = mv.label_column.as_mut()
-            && let Ok(nlc) = plan.map_one(*lc, "graph multivariate label_column")
-        {
-            *lc = nlc;
+        if clear_multivariate {
+            spec.multivariate = None;
+            return;
+        }
+        if let Some(lc) = mv.label_column {
+            match plan.map_one(lc, "graph multivariate label_column") {
+                Ok(nlc) => mv.label_column = Some(nlc),
+                Err(reason) => {
+                    warnings.push(format!("Graph `{graph_id}` cleared multivariate label_column: {reason}"));
+                    mv.label_column = None;
+                }
+            }
         }
         match &mut mv.color {
             ColorChannelMapping::Categorical { column, .. } | ColorChannelMapping::Continuous { column, .. } => {
-                if let Ok(nc) = plan.map_one(*column, "graph multivariate color column") {
-                    *column = nc;
+                match plan.map_one(*column, "graph multivariate color column") {
+                    Ok(nc) => *column = nc,
+                    Err(reason) => {
+                        warnings.push(format!("Graph `{graph_id}` reset multivariate color channel to constant: {reason}"));
+                        mv.color = ColorChannelMapping::Constant(curvebook_palette::PaletteId::OkabeIto.swatches()[0]);
+                    }
                 }
             }
             ColorChannelMapping::Constant(_) => {}
         }
-        if let SizeChannelMapping::Variable { column, .. } = &mut mv.size
-            && let Ok(nc) = plan.map_one(*column, "graph multivariate size column")
-        {
-            *column = nc;
+        if let SizeChannelMapping::Variable { column, .. } = &mut mv.size {
+            match plan.map_one(*column, "graph multivariate size column") {
+                Ok(nc) => *column = nc,
+                Err(reason) => {
+                    warnings.push(format!("Graph `{graph_id}` reset multivariate size channel to constant: {reason}"));
+                    mv.size = SizeChannelMapping::Constant { radius_pt: 5.0 };
+                }
+            }
         }
     }
 }
@@ -4543,7 +4838,7 @@ fn plan_conversion_impacts(doc: &ProjectDocument, old_ds: &DataSheet, target_kin
 
     for gs in &doc.graph_sheets {
         let mut staged_gs = gs.spec.clone();
-        remap_graph_spec_for_conversion(&mut staged_gs, &old_ds.id, &col_plan, &mut warnings, &gs.id);
+        remap_graph_spec_for_conversion(&mut staged_gs, &old_ds.id, &col_plan, None, &mut warnings, &gs.id);
     }
 
     ConversionImpact {
@@ -4614,9 +4909,10 @@ fn apply_conversion_dependents(doc: &mut ProjectDocument, target_sheet_id: &Shee
             }
         }
     }
+    let converted_ds = doc.data_sheet(target_sheet_id).cloned();
     for gs in &mut doc.graph_sheets {
         let mut graph_warnings = Vec::new();
-        remap_graph_spec_for_conversion(&mut gs.spec, target_sheet_id, &impact.col_plan, &mut graph_warnings, &gs.id);
+        remap_graph_spec_for_conversion(&mut gs.spec, target_sheet_id, &impact.col_plan, converted_ds.as_ref(), &mut graph_warnings, &gs.id);
     }
 }
 
@@ -4730,7 +5026,7 @@ fn schema_randomize_groups() -> Value {
         vec![("label", non_empty_str_schema("Treatment arm label")), ("weight", int_schema("Allocation weight", Some(1), None))],
         &["label"],
         vec![("label", &["name"])],
-        true,
+        false,
     );
     let group_item = json!({
         "anyOf": [
@@ -4766,7 +5062,7 @@ fn schema_randomize_groups() -> Value {
         ],
         &["groups"],
         vec![("sheet_id", &["sheetId", "id"]), ("title", &["name"]), ("subject_count", &["n_subjects", "count"]), ("info_sheet_id", &["info_sheet"])],
-        true,
+        false,
     )
 }
 
@@ -4826,6 +5122,7 @@ fn run_randomize_groups(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
 
     let subject_count = config.subject_ids.len();
     let mut rand_out = randomize_subjects_to_groups(&config)?;
+    validate_project_cell_budget_after_change(doc, None, rand_out.data_sheet.archetype.allocated_cell_slots())?;
     let info_id = upsert_info_constants(doc, p.info_sheet_id.as_deref(), None, true, &format!("{title} Info"), &rand_out.arrive_constants)?
         .ok_or_else(|| EngineError::with_code(ErrorCode::InternalError, "failed resolving InfoSheet for ARRIVE constants"))?;
     rand_out.data_sheet.info_sheet_id = Some(info_id.clone());
@@ -4890,7 +5187,7 @@ fn schema_random_sample_rows() -> Value {
             ("title", &["name"]),
             ("info_sheet_id", &["info_sheet"]),
         ],
-        true,
+        false,
     )
 }
 
@@ -4921,6 +5218,7 @@ fn run_random_sample_rows(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcom
 
     let out_rows = sampled.archetype.row_count();
     let out_cols = sampled.archetype.column_count();
+    validate_project_cell_budget_after_change(doc, None, sampled.archetype.allocated_cell_slots())?;
     let mut provenance = vec![
         (String::from("sample.source_sheet_id"), src_id.to_string()),
         (String::from("sample.seed"), seed.to_string()),
@@ -5085,10 +5383,29 @@ fn schema_simulate_distributions() -> Value {
                         { "type": "string", "enum": ["uniform", "gaussian", "log_normal", "binomial", "poisson", "exponential"] },
                         { "type": "object" }
                     ]
-                }
+                },
+                "params": { "type": "object" },
+                "min": num_schema("Minimum bound for uniform distribution", None, None),
+                "max": num_schema("Maximum bound for uniform distribution", None, None),
+                "mean": num_schema("Mean for gaussian/poisson distribution", None, None),
+                "mu": num_schema("Mean alias for gaussian/log_normal distribution", None, None),
+                "sd": num_schema("Standard deviation for gaussian distribution", None, None),
+                "std": num_schema("Standard deviation alias", None, None),
+                "sigma": num_schema("Standard deviation alias", None, None),
+                "mean_log": num_schema("Log-space mean for log_normal distribution", None, None),
+                "meanlog": num_schema("Log-space mean alias", None, None),
+                "sd_log": num_schema("Log-space standard deviation for log_normal distribution", None, None),
+                "sdlog": num_schema("Log-space standard deviation alias", None, None),
+                "trials": int_schema("Number of trials for binomial distribution", Some(0), None),
+                "n": int_schema("Number of trials alias", Some(0), None),
+                "p": num_schema("Success probability for binomial distribution", None, None),
+                "prob": num_schema("Success probability alias", None, None),
+                "probability": num_schema("Success probability alias", None, None),
+                "lambda": num_schema("Rate/mean parameter for poisson/exponential distribution", None, None),
+                "rate": num_schema("Rate parameter for exponential/poisson distribution", None, None)
             },
             "required": ["name", "distribution"],
-            "additionalProperties": true
+            "additionalProperties": false
         }),
         vec![("name", &["title"])],
     );
@@ -5108,7 +5425,7 @@ fn schema_simulate_distributions() -> Value {
             ("sheet_id", &["sheetId", "id"]),
             ("title", &["name"]),
         ],
-        true,
+        false,
     )
 }
 
@@ -5133,6 +5450,7 @@ fn run_simulate_distributions(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
     };
     let sheet = simulate_distribution_columns(&cfg)?;
     let kind = sheet.archetype.kind();
+    validate_project_cell_budget_after_change(doc, None, sheet.archetype.allocated_cell_slots())?;
     doc.add_data_sheet(sheet)?;
     let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
 

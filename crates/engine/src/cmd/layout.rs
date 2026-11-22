@@ -16,8 +16,8 @@ use super::graph::{
 };
 use super::helpers::{next_unique_sheet_id, parse_sheet_id, require_graph_sheet, require_layout_sheet, require_layout_sheet_mut};
 use super::params::{
-    any_json_schema, array_schema, bool_schema, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema,
-    obj_schema_with_aliases, parse_params, str_schema,
+    any_json_schema, array_schema, bool_schema, deserialize_strict, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema,
+    obj_schema, obj_schema_with_aliases, parse_params, str_schema,
 };
 use super::{CommandGroup, CommandSpec, Ctx, Effects};
 use crate::{CommandOutcome, EngineError, Session};
@@ -175,6 +175,20 @@ struct LayoutSpecFieldsParams {
     panel_badges: Option<Value>,
     #[serde(default, deserialize_with = "de_present_opt")]
     background_fill: Option<Option<Value>>,
+}
+
+impl LayoutSpecFieldsParams {
+    fn has_any(&self) -> bool {
+        self.preset.is_some()
+            || self.width.is_some()
+            || self.height.is_some()
+            || self.unit.is_some()
+            || self.orientation.is_some()
+            || self.grid_template.is_some()
+            || self.align_plot_origins.is_some()
+            || self.panel_badges.is_some()
+            || self.background_fill.is_some()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -524,16 +538,25 @@ fn run_layout_set_spec(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, 
     let mut spec = current.spec.clone();
 
     if let Some(ref spec_val) = params.spec {
+        if params.fields.has_any() {
+            return Err(EngineError::with_code(
+                ErrorCode::BadInput,
+                "cannot combine `spec` with shorthand layout spec fields in `layout.setSpec`",
+            )
+            .with_remediation("Supply either `spec` or top-level shorthand fields (`preset`, `width`, `height`, `unit`, `orientation`, `grid_template`, `align_plot_origins`, `panel_badges`, `background_fill`), not both.")
+            .with_details(json!({ "pointer": "/spec" })));
+        }
         if let Some(items_arr) = spec_val.get("items").and_then(Value::as_array)
             && items_arr.len() > MAX_LAYOUT_ITEMS
         {
             return Err(DocError::TooManyLayoutItems { count: items_arr.len(), max: MAX_LAYOUT_ITEMS }.into());
         }
         let merged = merge_json_struct(&spec, spec_val)?;
-        spec = serde_json::from_value(merged).map_err(|err| {
-            EngineError::with_code(ErrorCode::BadInput, format!("invalid layout `spec`: {err}"))
-                .with_remediation("Supply fields matching LayoutSpec or use shorthand fields without `spec`.")
-                .with_details(json!({ "pointer": "/spec" }))
+        spec = deserialize_strict::<LayoutSpec>(&merged, "/spec").map_err(|mut err| {
+            let mut mapped = EngineError::with_code(ErrorCode::BadInput, format!("invalid layout `spec`: {err}"))
+                .with_remediation("Supply fields matching LayoutSpec or use shorthand fields without `spec`.");
+            mapped.details = err.details.take().or_else(|| Some(json!({ "pointer": "/spec" })));
+            mapped
         })?;
     } else {
         apply_layout_spec_fields(&mut spec, &params.fields)?;

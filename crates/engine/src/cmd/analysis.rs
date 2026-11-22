@@ -14,7 +14,7 @@ use curvebook_doc::{
     VariableColumn, VariableRole, WeightingScheme, XyTable,
 };
 use curvebook_fit::{get_builtin_model, resolve_model_from_spec};
-use curvebook_format::{CsvOptions, export_result_sheet_json, export_result_sheet_tidy_csv, export_result_tab_csv};
+use curvebook_format::{CsvOptions, export_result_sheet_json, try_export_result_sheet_tidy_csv, try_export_result_tab_csv};
 use curvebook_math::PValueFormat;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -1037,15 +1037,15 @@ fn run_analysis_export_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutco
             .iter()
             .find(|t| t.id == *tab_id)
             .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("result tab `{tab_id}` not found")))?;
-        export_result_tab_csv(tab, &opts)
+        try_export_result_tab_csv(res, tab, &opts)?
     } else if let Some(tab_index) = params.tab_index {
         let tab = res
             .tabs
             .get(tab_index)
             .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("result tab index {tab_index} out of bounds")))?;
-        export_result_tab_csv(tab, &opts)
+        try_export_result_tab_csv(res, tab, &opts)?
     } else {
-        export_result_sheet_tidy_csv(res, &opts)
+        try_export_result_sheet_tidy_csv(res, &opts)?
     };
 
     if let Some(ref p) = params.path {
@@ -3057,9 +3057,8 @@ fn apply_transform_overrides(spec: &mut TransformAnalysisSpec, params: &Value) -
             }
             if let Some(p_val) = first_present(params, &["parameters", "params"])
                 && !p_val.is_null()
-                && p_val.is_object()
             {
-                *parameters = parse_named_params_vec(Some(p_val))?;
+                *parameters = parse_simulate_parameters_override(p_val)?;
             }
         }
     }
@@ -3356,6 +3355,7 @@ const SHORTHAND_OVERRIDDEN_PATCH_KEYS: &[&str] = &[
     "zero_anchor",
     "hundred_anchor",
     "operation",
+    "parameters",
     "filter_formula",
     "target_archetype",
     "derived_columns",
@@ -3889,6 +3889,33 @@ fn parse_named_params_vec(val: Option<&Value>) -> Result<Vec<(String, f64)>, Eng
         vec.push((k.clone(), num));
     }
     Ok(vec)
+}
+
+fn parse_simulate_parameters_override(val: &Value) -> Result<Vec<(String, f64)>, EngineError> {
+    if val.is_object() {
+        return parse_named_params_vec(Some(val));
+    }
+    if val.is_array() {
+        let pairs: Vec<(String, f64)> = serde_json::from_value(val.clone()).map_err(|_| {
+            EngineError::with_code(
+                ErrorCode::BadInput,
+                "`parameters` must be an object of numeric parameter overrides or an array of `[name, value]` pairs",
+            )
+        })?;
+        for (idx, (name, num)) in pairs.iter().enumerate() {
+            if name.trim().is_empty() {
+                return Err(EngineError::with_code(ErrorCode::BadInput, format!("`parameters[{idx}]` name must be non-empty")));
+            }
+            if !num.is_finite() {
+                return Err(EngineError::with_code(ErrorCode::BadInput, format!("parameter `{name}` must be finite")));
+            }
+        }
+        return Ok(pairs);
+    }
+    Err(EngineError::with_code(
+        ErrorCode::BadInput,
+        "`parameters` must be an object of numeric parameter overrides or an array of `[name, value]` pairs",
+    ))
 }
 
 fn apply_bool_opt_checked(params: &Value, keys: &[&str], target: &mut bool) -> Result<(), EngineError> {

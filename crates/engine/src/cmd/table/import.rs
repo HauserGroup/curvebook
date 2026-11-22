@@ -25,6 +25,7 @@ use super::{
     BaselineInput, CellRangeInput, PlacementFields, anchor_schema, baseline_schema, cell_range_schema, col_ref_schema, decimal_sep_schema,
     delimiter_schema, ensure_mv_edit_preserves_calculated, ensure_range_outside_linked_regions, import_filter_schema, parse_import_filter_val,
     parse_table_kind, parse_target_archetype_kind, resolve_baseline_adjustment, resolve_decimal_char, resolve_delimiter, resolve_subcolumn_mode,
+    validate_project_cell_budget, validate_project_cell_budget_after_change,
 };
 use crate::cmd::Ctx;
 use crate::cmd::helpers::{
@@ -33,10 +34,20 @@ use crate::cmd::helpers::{
     remap_layout_spec_references, remap_sheet_id, require_data_sheet, select_result_tab, sync_info_linked_data_sheets,
 };
 use crate::cmd::params::{
-    any_json_schema, array_schema, bool_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema_with_aliases, parse_params,
-    record_deprecated_object_aliases, str_schema,
+    any_json_schema, array_schema, bool_schema, deserialize_strict, int_schema, non_empty_str_schema, nullable_schema, num_schema,
+    obj_schema_with_aliases, parse_params, record_deprecated_object_aliases, str_schema,
 };
 use crate::cmd::project::recalculate_dirty_with_links;
+
+fn check_inline_payload_len(len: usize, max_bytes: usize, label: &str) -> Result<(), EngineError> {
+    if len > max_bytes {
+        return Err(EngineError::with_code(
+            ErrorCode::ResourceLimit,
+            format!("{label} payload size ({len} bytes) exceeds maximum ({max_bytes} bytes)"),
+        ));
+    }
+    Ok(())
+}
 
 pub(super) enum OwnedSourcePayload {
     Data(Box<DataSheet>),
@@ -177,7 +188,7 @@ pub(super) fn schema_paste_link() -> Value {
             ("propagate_title_header", &["propagateTitleHeader"]),
             ("skip_contiguous_blanks", &["skipContiguousBlanks"]),
         ],
-        true,
+        false,
     )
 }
 
@@ -250,9 +261,13 @@ pub(super) fn build_paste_link_spec(
     policy: &ExternalPathPolicy,
 ) -> Result<ImportLinkSpec, EngineError> {
     let resolved_baseline = resolve_baseline_adjustment(p.baseline.clone())?;
-    if let Some(raw_spec) = &p.link_spec
-        && let Ok(mut parsed) = serde_json::from_value::<ImportLinkSpec>(raw_spec.clone())
-    {
+    if let Some(raw_spec) = &p.link_spec {
+        let mut parsed: ImportLinkSpec = deserialize_strict(raw_spec, "/link_spec").map_err(|mut err| {
+            if err.remediation.is_none() {
+                err.remediation = Some(String::from("Provide a valid ImportLinkSpec object or omit `link_spec` to use shorthand parameters."));
+            }
+            err
+        })?;
         policy.normalize_stored_link_source(&mut parsed.source)?;
         if p.placement.anchor.is_some() {
             parsed.placement.anchor = p.placement.resolve_anchor();
@@ -386,6 +401,7 @@ pub(super) fn run_paste_link(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOut
         if let (Some(old_ds), Some(new_ds)) = (prev_ds.as_ref(), doc.data_sheets.get(target_idx)) {
             ensure_mv_edit_preserves_calculated(old_ds, new_ds, rep.cols_placed, rep.target_range)?;
         }
+        validate_project_cell_budget(doc)?;
         let _ = dag::topological_order(doc)?;
         Ok(rep)
     })() {
@@ -502,7 +518,7 @@ pub(super) fn schema_import_csv() -> Value {
             ("propagate_title_header", &["propagateTitleHeader"]),
             ("skip_contiguous_blanks", &["skipContiguousBlanks"]),
         ],
-        true,
+        false,
     )
 }
 
@@ -540,6 +556,7 @@ pub(super) fn import_into_existing_sheet(
             None => cur_kind,
         };
         let mut imported = import_csv_to_datasheet(id.clone(), title, &text, kind, subcolumn_mode, csv_opts)?;
+        validate_project_cell_budget_after_change(doc, Some(id), imported.archetype.allocated_cell_slots())?;
         imported.info_sheet_id = info_id;
         if let Some(slot) = doc.data_sheet_mut(id) {
             *slot = imported;
@@ -568,10 +585,21 @@ pub(super) fn import_into_existing_sheet(
             TableArchetype::MultipleVariables(mv) if mv.variables.iter().any(|v| matches!(v.source, VariableSource::Calculated { .. }))
         )
     });
-    let pre_import_snapshot = if has_calc_mv || (!keep_link && link_before > 0) { doc.data_sheets.get(target_idx).cloned() } else { None };
+    let pre_import_snapshot = doc.data_sheets.get(target_idx).cloned();
     let pre_info_snapshot = info_idx.and_then(|idx| doc.info_sheets.get(idx).cloned());
     let payload = OwnedSourcePayload::Delimited { text, delimiter, decimal_separator };
     let report = apply_pipeline_with_split_info(doc, target_idx, info_idx, &link_spec, &payload, &opts)?;
+    if let Err(err) = validate_project_cell_budget(doc) {
+        if let (Some(slot), Some(prev_ds)) = (doc.data_sheets.get_mut(target_idx), pre_import_snapshot) {
+            *slot = prev_ds;
+        }
+        if let (Some(idx), Some(prev_info)) = (info_idx, pre_info_snapshot)
+            && let Some(slot) = doc.info_sheets.get_mut(idx)
+        {
+            *slot = prev_info;
+        }
+        return Err(err);
+    }
     if let (Some(prev_ds), Some(new_ds)) = (pre_import_snapshot.as_ref(), doc.data_sheets.get(target_idx)) {
         if has_calc_mv && let Err(err) = ensure_mv_edit_preserves_calculated(prev_ds, new_ds, report.cols_placed, report.target_range) {
             if let Some(slot) = doc.data_sheets.get_mut(target_idx) {
@@ -619,6 +647,7 @@ pub(super) fn run_import_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOut
         None => next_unique_sheet_id(doc, "data")?,
     };
     let text = if let Some(inline) = &p.csv {
+        check_inline_payload_len(inline.len(), MAX_CSV_FILE_BYTES, "CSV")?;
         inline.clone()
     } else if let Some(path) = &p.path {
         policy.read_utf8_file(path, "CSV", MAX_CSV_FILE_BYTES)?
@@ -690,7 +719,7 @@ pub(super) fn schema_import_prism() -> Value {
         ],
         &[],
         vec![("path", &["file_path", "filePath"]), ("bytes_base64", &["bytesBase64", "archive_base64"])],
-        true,
+        false,
     )
 }
 
@@ -754,8 +783,8 @@ pub(super) fn merge_imported_document(doc: &mut ProjectDocument, mut imported: P
     if total_sheets > MAX_SHEETS_PER_PROJECT {
         return Err(EngineError::from(DocError::TooManySheets { count: total_sheets, max: MAX_SHEETS_PER_PROJECT }));
     }
-    let existing_cells: usize = doc.data_sheets.iter().map(|s| s.archetype.allocated_cell_slots()).sum();
-    let added_cells: usize = imported.data_sheets.iter().map(|s| s.archetype.allocated_cell_slots()).sum();
+    let existing_cells = doc.total_allocated_cells()?;
+    let added_cells = imported.total_allocated_cells()?;
     validate_project_cells(existing_cells, added_cells)?;
 
     let id_map = plan_imported_id_remap(doc, &imported)?;
@@ -811,14 +840,19 @@ pub(super) fn merge_imported_document(doc: &mut ProjectDocument, mut imported: P
 
 pub(super) fn run_import_prism(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let p: ImportPrismParams = parse_params(&schema_import_prism(), raw)?;
+    import_prism_with_params(ctx, p)
+}
+
+fn import_prism_with_params(ctx: &mut Ctx<'_>, p: ImportPrismParams) -> Result<CommandOutcome, EngineError> {
     let bytes = if let Some(path) = p.path.as_deref() {
         ctx.session.path_policy.read_binary_file(path, "archive", MAX_ARCHIVE_FILE_BYTES)?
     } else if let Some(b64) = p.bytes_base64.as_deref() {
         decode_base64(b64)?
     } else if let Some(raw_bytes) = p.bytes {
+        check_inline_payload_len(raw_bytes.len(), MAX_ARCHIVE_FILE_BYTES, "archive")?;
         raw_bytes
     } else {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "table.importPrism requires `path` or `bytes_base64`")
+        return Err(EngineError::with_code(ErrorCode::BadInput, "table.importPrism requires `path`, `bytes_base64`, or `bytes`")
             .with_remediation("Supply `path`, `bytes_base64`, or `bytes`."));
     };
 
@@ -827,6 +861,7 @@ pub(super) fn run_import_prism(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandO
     if p.merge.unwrap_or(false) {
         merge_imported_document(doc, report.document)?;
     } else {
+        validate_project_cells(0, report.document.total_allocated_cells()?)?;
         *doc = report.document;
     }
     sync_info_linked_data_sheets(doc, &HashSet::new());
@@ -863,13 +898,14 @@ pub(super) fn schema_import_pzfx() -> Value {
         ],
         &[],
         vec![("xml", &["text", "content"]), ("path", &["file_path", "filePath"]), ("bytes_base64", &["bytesBase64"])],
-        true,
+        false,
     )
 }
 
 pub(super) fn run_import_pzfx(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let p: ImportPzfxParams = parse_params(&schema_import_pzfx(), raw)?;
     let report = if let Some(xml) = p.xml.as_deref() {
+        check_inline_payload_len(xml.len(), MAX_XML_BYTES, "XML")?;
         import_pzfx_str(xml)?
     } else if let Some(path) = p.path.as_deref() {
         let bytes = ctx.session.path_policy.read_binary_file(path, "XML file", MAX_XML_BYTES)?;
@@ -886,6 +922,7 @@ pub(super) fn run_import_pzfx(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
     if p.merge.unwrap_or(false) {
         merge_imported_document(doc, report.document)?;
     } else {
+        validate_project_cells(0, report.document.total_allocated_cells()?)?;
         *doc = report.document;
     }
     sync_info_linked_data_sheets(doc, &HashSet::new());
@@ -1042,7 +1079,7 @@ pub(super) fn schema_import_plate_map() -> Value {
             ("target_kind", &["targetKind", "kind"]),
             ("subtract_blank_mean", &["subtractBlankMean"]),
         ],
-        true,
+        false,
     )
 }
 
@@ -1167,6 +1204,7 @@ pub(super) fn assign_and_add_imported_sheet(
     let title = sheet.title.clone();
     let rows = sheet.archetype.row_count();
     let cols = sheet.archetype.column_count();
+    validate_project_cell_budget_after_change(doc, None, sheet.archetype.allocated_cell_slots())?;
     doc.add_data_sheet(sheet)?;
     Ok((sheet_id, title, rows, cols))
 }
@@ -1279,7 +1317,7 @@ pub(super) fn schema_import_tidy_long() -> Value {
             ("value_col", &["valueCol"]),
             ("excluded_col", &["excludedCol"]),
         ],
-        true,
+        false,
     );
     obj_schema_with_aliases(
         vec![
@@ -1324,7 +1362,7 @@ pub(super) fn schema_import_tidy_long() -> Value {
             ("value_col", &["valueCol"]),
             ("excluded_col", &["excludedCol"]),
         ],
-        true,
+        false,
     )
 }
 
@@ -1381,6 +1419,7 @@ pub(super) fn extract_tidy_data(p: &ImportTidyLongParams, policy: &ExternalPathP
     }
 
     let text = if let Some(inline) = &p.csv {
+        check_inline_payload_len(inline.len(), MAX_CSV_FILE_BYTES, "CSV")?;
         inline.clone()
     } else if let Some(path) = &p.path {
         policy.read_utf8_file(path, "tidy file", MAX_CSV_FILE_BYTES)?
@@ -1465,3 +1504,22 @@ pub(super) fn run_import_tidy_long(ctx: &mut Ctx<'_>, raw: Value) -> Result<Comm
 // ---------------------------------------------------------------------------
 // 26–28. table.randomizeGroups, table.randomSampleRows, table.simulateDistributions
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicBool;
+
+    use super::*;
+    use crate::Session;
+    use crate::cmd::Caller;
+
+    #[test]
+    fn sec12_03_import_prism_rejects_oversized_inline_bytes() {
+        let mut session = Session::new();
+        let cancelled = AtomicBool::new(false);
+        let mut ctx = Ctx { session: &mut session, caller: Caller::Cli, cancelled: &cancelled };
+        let params = ImportPrismParams { path: None, bytes_base64: None, bytes: Some(vec![0u8; MAX_ARCHIVE_FILE_BYTES + 1]), merge: None };
+        let res = import_prism_with_params(&mut ctx, params);
+        assert!(matches!(res, Err(err) if err.code == ErrorCode::ResourceLimit));
+    }
+}

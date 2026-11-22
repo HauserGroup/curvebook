@@ -53,8 +53,7 @@ fn g2_paste_link_missing_or_deleted_external_file_fails_loudly() {
         "table.pasteLink",
         json!({
             "target_sheet_id": "col-1",
-            "path": missing_path.to_string_lossy(),
-            "sync_immediately": false
+            "path": missing_path.to_string_lossy()
         }),
     );
     assert!(err.contains("failed reading external link file"), "unexpected error: {err}");
