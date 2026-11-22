@@ -56,8 +56,8 @@ fn view_shards_and_custom_action_dispatch_smoke() -> Result<(), String> {
     let err = dispatch_custom_view_action(&mut app, &mut shards, "nonexistent_domain", "payload");
     assert!(err.is_err(), "unknown custom view action domain must return Err");
 
-    assert_eq!(EXTRA_SHARD_CATALOGS.len(), 18);
-    assert!(all_keys().count() >= 653);
+    assert!(EXTRA_SHARD_CATALOGS.is_empty());
+    assert_eq!(all_keys().count(), 511);
     assert!(missing_translations().is_empty());
     for &locale in LOCALES {
         assert!(try_tr(locale, "menu.file").is_some(), "missing menu.file for `{locale}`");

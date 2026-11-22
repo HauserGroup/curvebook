@@ -28,152 +28,11 @@ pub struct CatalogEntry {
     pub translations: [&'static str; 16],
 }
 
-macro_rules! entry {
-    (
-        $key:expr => [
-            en: $en:expr,
-            de: $de:expr,
-            es: $es:expr,
-            fr: $fr:expr,
-            ja: $ja:expr,
-            ko: $ko:expr,
-            pt_br: $pt_br:expr,
-            zh_cn: $zh_cn:expr,
-            zh_tw: $zh_tw:expr,
-            it: $it:expr,
-            nl: $nl:expr,
-            pl: $pl:expr,
-            ru: $ru:expr,
-            tr: $tr:expr,
-            ar: $ar:expr,
-            he: $he:expr $(,)?
-        ]
-    ) => {
-        $crate::i18n::CatalogEntry {
-            key: $key,
-            translations: [$en, $de, $es, $fr, $ja, $ko, $pt_br, $zh_cn, $zh_tw, $it, $nl, $pl, $ru, $tr, $ar, $he],
-        }
-    };
-}
+/// Legacy shard-slice registry retained empty after consolidating all active entries into
+/// [`CATALOG`] (generated from `locales/catalog.tsv` in lexicographic key order).
+pub const EXTRA_SHARD_CATALOGS: &[&[CatalogEntry]] = &[];
 
-#[allow(unused_imports)]
-pub(crate) use entry;
-
-mod core_analyses;
-mod core_cmd_analysis_graph;
-mod core_cmd_project_sheet;
-mod core_cmd_table;
-mod core_cmd_ui;
-mod core_dialogs;
-mod core_inspector;
-mod core_menus;
-mod core_nav_tables;
-
-pub mod eu;
-pub mod r13_8_ui;
-pub mod w5_analyze_picker;
-pub mod w5_dialogs_graph_misc;
-pub mod w5_fit_params;
-pub mod w5_grid_core;
-pub mod w5_import_paste;
-pub mod w5_inspector;
-pub mod w5_mv_formula;
-pub mod w5_nav_notes;
-pub mod w5_power_wizard;
-pub mod w5_results;
-pub mod w5_stat_params;
-pub mod w5_toolbar_menus;
-pub mod w5_welcome;
-pub mod w7_mv_ui;
-pub mod w7_rm_reml;
-pub mod w8_rv_ui;
-
-/// Additional translation catalog shard slices merged with [`CATALOG`] during lookup and reporting.
-pub const EXTRA_SHARD_CATALOGS: &[&[CatalogEntry]] = &[
-    eu::ENTRIES,
-    w5_welcome::ENTRIES,
-    w5_nav_notes::ENTRIES,
-    w5_toolbar_menus::ENTRIES,
-    w5_grid_core::ENTRIES,
-    w5_mv_formula::ENTRIES,
-    w5_results::ENTRIES,
-    w5_analyze_picker::ENTRIES,
-    w5_stat_params::ENTRIES,
-    w5_fit_params::ENTRIES,
-    w5_power_wizard::ENTRIES,
-    w5_dialogs_graph_misc::ENTRIES,
-    w5_import_paste::ENTRIES,
-    w5_inspector::ENTRIES,
-    w7_rm_reml::ENTRIES,
-    w7_mv_ui::ENTRIES,
-    w8_rv_ui::ENTRIES,
-    r13_8_ui::ENTRIES,
-];
-
-// Kept in `i18n.rs` so the Italian wording allowlist in `xtask brands` matches its path.
-const METHODS_REPORT_ENTRY: &[CatalogEntry] = &[entry!("cmd.ui.result.copyMethodsReport" => [
-    en: "Copy Methods & Statistical Reporting",
-    de: "Methoden- und Statistikbericht kopieren",
-    es: "Copiar informe estadístico y métodos",
-    fr: "Copier le rapport méthodologique et statistique",
-    ja: "手法と統計レポートをコピー",
-    ko: "방법론 및 통계 보고서 복사",
-    pt_br: "Copiar relatório de métodos e estatística",
-    zh_cn: "复制方法与统计报告",
-    zh_tw: "複製方法與統計報告",
-    it: "Copia report metodi e statistica",
-    nl: "Methode- en statistiekrapport kopiëren",
-    pl: "Kopiuj raport metod i statystyki",
-    ru: "Копировать отчёт о методах и статистике",
-    tr: "Yöntem ve İstatistik Raporunu Kopyala",
-    ar: "نسخ تقرير الأساليب والإحصاء",
-    he: "העתק דוח שיטות וסטטיסטיקה",
-])];
-
-const CORE_CATALOG_SHARDS: &[&[CatalogEntry]] = &[
-    core_menus::ENTRIES,
-    core_nav_tables::ENTRIES,
-    core_analyses::ENTRIES,
-    core_dialogs::ENTRIES,
-    core_inspector::ENTRIES,
-    core_cmd_ui::ENTRIES_PART1,
-    METHODS_REPORT_ENTRY,
-    core_cmd_ui::ENTRIES_PART2,
-    core_cmd_project_sheet::ENTRIES,
-    core_cmd_table::ENTRIES,
-    core_cmd_analysis_graph::ENTRIES,
-];
-
-const CORE_CATALOG_LEN: usize = {
-    let mut total = 0;
-    let mut s = 0;
-    while s < CORE_CATALOG_SHARDS.len() {
-        total += CORE_CATALOG_SHARDS[s].len();
-        s += 1;
-    }
-    total
-};
-
-const EMPTY_CATALOG_ENTRY: CatalogEntry = CatalogEntry { key: "", translations: [""; 16] };
-
-/// Complete interface translation catalog covering menus, navigator folders, the 8 data-table
-/// archetypes, analysis/fit families, dialog actions, inspector controls, and themes.
-pub const CATALOG: &[CatalogEntry] = &const {
-    let mut out = [EMPTY_CATALOG_ENTRY; CORE_CATALOG_LEN];
-    let mut dst = 0;
-    let mut s = 0;
-    while s < CORE_CATALOG_SHARDS.len() {
-        let shard = CORE_CATALOG_SHARDS[s];
-        let mut i = 0;
-        while i < shard.len() {
-            out[dst] = shard[i];
-            dst += 1;
-            i += 1;
-        }
-        s += 1;
-    }
-    out
-};
+include!(concat!(env!("OUT_DIR"), "/i18n_catalog.rs"));
 
 /// Return `true` when `code` identifies a right-to-left (RTL) locale (`ar`, `he`, `fa`, `ur`, and
 /// regional variants such as `ar-EG` or `he-IL`, plus legacy `iw`).
@@ -317,6 +176,22 @@ pub fn all_entries() -> impl Iterator<Item = &'static CatalogEntry> {
     CATALOG.iter().chain(EXTRA_SHARD_CATALOGS.iter().flat_map(|shard| shard.iter()))
 }
 
+fn lookup_catalog_entry(key: &str) -> Option<&'static CatalogEntry> {
+    CATALOG.binary_search_by_key(&key, |entry| entry.key).ok().and_then(|idx| CATALOG.get(idx))
+}
+
+fn cmp_prefixed_key(entry_key: &str, prefix: &str, suffix: &str) -> std::cmp::Ordering {
+    let p_len = prefix.len();
+    match entry_key.as_bytes().get(..p_len) {
+        Some(head) => head.cmp(prefix.as_bytes()).then_with(|| entry_key.as_bytes()[p_len..].cmp(suffix.as_bytes())),
+        None => entry_key.as_bytes().cmp(prefix.as_bytes()),
+    }
+}
+
+fn lookup_command_entry(command_id: &str) -> Option<&'static CatalogEntry> {
+    CATALOG.binary_search_by(|entry| cmp_prefixed_key(entry.key, "cmd.", command_id)).ok().and_then(|idx| CATALOG.get(idx))
+}
+
 fn try_tr_in_entries<'a>(entries: impl Iterator<Item = &'a CatalogEntry>, locale: &str, key: &str) -> Option<&'static str> {
     let idx = exact_locale_index(locale)?;
     entries.filter(|entry| entry.key == key).filter_map(|entry| entry.translations.get(idx).copied()).find(|text| !text.trim().is_empty())
@@ -333,7 +208,11 @@ pub fn try_tr_in_slices(slices: &[&[CatalogEntry]], locale: &str, key: &str) -> 
 /// Returns `None` if `locale` is not a registered code or if `key` is missing/empty in that locale.
 #[must_use]
 pub fn try_tr(locale: &str, key: &str) -> Option<&'static str> {
-    try_tr_in_entries(all_entries(), locale, key)
+    let idx = exact_locale_index(locale)?;
+    if let Some(text) = lookup_catalog_entry(key).and_then(|entry| entry.translations.get(idx).copied()).filter(|text| !text.trim().is_empty()) {
+        return Some(text);
+    }
+    try_tr_in_slices(EXTRA_SHARD_CATALOGS, locale, key)
 }
 
 /// Look up a localized string for `(locale, key)`, normalizing BCP-47 tags and falling back to
@@ -363,7 +242,13 @@ pub fn tr_or<'a>(locale: &str, key: &'a str) -> Cow<'a, str> {
 #[must_use]
 pub fn try_tr_command(locale: &str, command_id: &str) -> Option<&'static str> {
     let idx = exact_locale_index(locale)?;
-    all_entries()
+    if let Some(text) = lookup_command_entry(command_id).and_then(|entry| entry.translations.get(idx).copied()).filter(|text| !text.trim().is_empty())
+    {
+        return Some(text);
+    }
+    EXTRA_SHARD_CATALOGS
+        .iter()
+        .flat_map(|shard| shard.iter())
         .filter(|entry| entry.key.strip_prefix("cmd.") == Some(command_id))
         .filter_map(|entry| entry.translations.get(idx).copied())
         .find(|text| !text.trim().is_empty())
@@ -383,8 +268,11 @@ pub fn translate_command_label(locale: &str, english_label: &'static str) -> &'s
     let Some(idx) = exact_locale_index(canonical) else {
         return english_label;
     };
-    all_entries()
-        .filter(|entry| entry.key.starts_with("cmd.") && entry.translations[0] == english_label)
+    let start = CATALOG.partition_point(|entry| entry.key < "cmd.");
+    CATALOG[start..]
+        .iter()
+        .take_while(|entry| entry.key.starts_with("cmd."))
+        .filter(|entry| entry.translations[0] == english_label)
         .filter_map(|entry| entry.translations.get(idx).copied())
         .find(|text| !text.trim().is_empty())
         .unwrap_or(english_label)
