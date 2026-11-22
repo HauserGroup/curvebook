@@ -22,7 +22,7 @@ use crate::anova::sheet::one_way::{
     RemlEffectDesign, build_reml_effect_design, emit_multi_vc_rm_reml, emit_random_intercept_reml, emit_unstructured_rm_reml,
 };
 use crate::common::{
-    build_tab, checklist_item, init_result_sheet, num_cell, opt_num_cell, p_cell_at_alpha, push_scalar, sanitize_result_sheet_floats,
+    TabBuilder, checklist_item, init_result_sheet, num_cell, opt_num_cell, p_cell_at_alpha, push_scalar, sanitize_result_sheet_floats,
     try_resolve_selected_indices,
 };
 use crate::error::StatsError;
@@ -65,13 +65,11 @@ pub fn run_factorial_anova(sheet: &DataSheet, spec: &AnalysisSpec, fac_spec: &Fa
 
     let mut headers = vec![String::from("SS"), String::from("df"), String::from("MS"), String::from("F"), String::from("P value")];
     if fac_spec.compute_effect_sizes {
-        headers.push(String::from("Partial eta squared"));
-        headers.push(String::from("Eta squared"));
+        headers.extend([String::from("Partial eta squared"), String::from("Eta squared")]);
     }
-    let mut row_labels = Vec::with_capacity(result.terms.len() + 2);
-    let mut rows = Vec::with_capacity(result.terms.len() + 2);
+    let tab_title = if fac_spec.three_way { "Three-way ANOVA" } else { "Factorial ANOVA" };
+    let mut main_tab = TabBuilder::new("factorial-anova", tab_title, ResultTabKind::AnovaTable).headers(headers);
     for t in &result.terms {
-        row_labels.push(t.name.clone());
         let mut r = vec![
             num_cell(t.ss),
             num_cell(t.df),
@@ -83,26 +81,20 @@ pub fn run_factorial_anova(sheet: &DataSheet, spec: &AnalysisSpec, fac_spec: &Fa
             r.push(opt_num_cell(t.partial_eta_squared));
             r.push(opt_num_cell(t.eta_squared));
         }
-        rows.push(r);
+        main_tab.push_row(t.name.clone(), r);
     }
-    row_labels.push(String::from("Residual"));
     let mut r_res =
         vec![num_cell(result.ss_residual), num_cell(result.df_residual), num_cell(result.ms_residual), ResultCell::Empty, ResultCell::Empty];
-    row_labels.push(String::from("Total"));
     let mut r_tot = vec![num_cell(result.ss_total), num_cell(result.df_total), ResultCell::Empty, ResultCell::Empty, ResultCell::Empty];
     if fac_spec.compute_effect_sizes {
-        r_res.extend(vec![ResultCell::Empty, ResultCell::Empty]);
-        r_tot.extend(vec![ResultCell::Empty, ResultCell::Empty]);
+        r_res.extend([ResultCell::Empty, ResultCell::Empty]);
+        r_tot.extend([ResultCell::Empty, ResultCell::Empty]);
     }
-    rows.push(r_res);
-    rows.push(r_tot);
-
-    let tab_title = if fac_spec.three_way { "Three-way ANOVA" } else { "Factorial ANOVA" };
-    let mut main_tab = build_tab("factorial-anova", tab_title, ResultTabKind::AnovaTable, headers, row_labels, rows);
+    main_tab.push_row("Residual", r_res).push_row("Total", r_tot);
     if let Some(note) = estimator_note {
-        main_tab.footnotes.push(note);
+        main_tab.push_footnote(note);
     }
-    out.tabs.push(main_tab);
+    out.tabs.push(main_tab.build());
     out.tabs.extend(aux_tabs);
 
     run_factorial_multiplicity(&mut out, &obs, &post_hoc, &result, &fac_spec.multiplicity, p_fmt, confidence)?;
@@ -157,18 +149,17 @@ pub(in crate::anova) fn build_rm_sphericity_tab(
         RepeatedMeasuresDesign::None => return Ok(None),
     };
 
-    let headers = vec![
-        String::from("Mauchly W"),
-        String::from("Mauchly chi2"),
-        String::from("df"),
-        String::from("Mauchly P"),
-        String::from("G-G epsilon"),
-        String::from("H-F epsilon"),
-        String::from("G-G P"),
-        String::from("H-F P"),
-    ];
-    let mut row_labels = Vec::new();
-    let mut rows = Vec::new();
+    let mut tab = TabBuilder::new("rm-sphericity", "Repeated-measures sphericity", ResultTabKind::Diagnostics).headers([
+        "Mauchly W",
+        "Mauchly chi2",
+        "df",
+        "Mauchly P",
+        "G-G epsilon",
+        "H-F epsilon",
+        "G-G P",
+        "H-F P",
+    ]);
+    let mut row_count = 0_usize;
     for (label, s_opt, term_idx) in entries {
         let (Some(s), Some(term), Some(&df_err)) = (s_opt, res.terms.get(term_idx), rm_res.term_error_dfs.get(term_idx)) else {
             continue;
@@ -176,22 +167,22 @@ pub(in crate::anova) fn build_rm_sphericity_tab(
         let f_val = term.f_statistic.unwrap_or(0.0);
         let p_gg = apply_rm_sphericity_p(f_val, term.df, df_err, Some(s), RmSphericityCorrection::GreenhouseGeisser)?;
         let p_hf = apply_rm_sphericity_p(f_val, term.df, df_err, Some(s), RmSphericityCorrection::HuynhFeldt)?;
-        row_labels.push(label.to_owned());
-        rows.push(vec![
-            num_cell(s.mauchly_w),
-            num_cell(s.mauchly_chi2),
-            num_cell(s.mauchly_df),
-            p_cell_at_alpha(s.mauchly_p, p_fmt, alpha),
-            num_cell(s.greenhouse_geisser_eps),
-            num_cell(s.huynh_feldt_eps),
-            p_cell_at_alpha(p_gg, p_fmt, alpha),
-            p_cell_at_alpha(p_hf, p_fmt, alpha),
-        ]);
+        tab.push_row(
+            label,
+            [
+                num_cell(s.mauchly_w),
+                num_cell(s.mauchly_chi2),
+                num_cell(s.mauchly_df),
+                p_cell_at_alpha(s.mauchly_p, p_fmt, alpha),
+                num_cell(s.greenhouse_geisser_eps),
+                num_cell(s.huynh_feldt_eps),
+                p_cell_at_alpha(p_gg, p_fmt, alpha),
+                p_cell_at_alpha(p_hf, p_fmt, alpha),
+            ],
+        );
+        row_count += 1;
     }
-    if rows.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(build_tab("rm-sphericity", "Repeated-measures sphericity", ResultTabKind::Diagnostics, headers, row_labels, rows)))
+    Ok((row_count > 0).then(|| tab.build()))
 }
 
 pub(in crate::anova) fn push_rm_sphericity_outputs(

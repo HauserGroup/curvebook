@@ -27,9 +27,9 @@ use curvebook_math::sum::{NeumaierSum, SummaryMoments};
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
-    append_ignored_text_checklist_and_footnote, append_listwise_filtered_checklist_and_footnote, build_tab, checklist_item, ci_cell, finite_ci_cell,
-    init_result_sheet, is_ignored_non_numeric_cell, num_cell, opt_num_cell, p_cell_at_alpha, push_scalar, sanitize_result_sheet_floats,
-    validate_finite_slice,
+    KvTabBuilder, TabBuilder, append_ignored_text_checklist_and_footnote, append_listwise_filtered_checklist_and_footnote, checklist_item, ci_cell,
+    finite_ci_cell, init_result_sheet, is_ignored_non_numeric_cell, num_cell, opt_num_cell, p_cell_at_alpha, push_scalar,
+    sanitize_result_sheet_floats, text_cell, validate_finite_slice,
 };
 use crate::error::StatsError;
 use crate::roc::{RocCiMethod, roc_curve_analysis};
@@ -2073,66 +2073,53 @@ pub fn run_passing_bablok_analysis(sheet: &DataSheet, spec: &AnalysisSpec, pb_sp
     let prop_ok = res.slope_ci.0.is_finite() && res.slope_ci.1.is_finite() && (res.slope_ci.0..=res.slope_ci.1).contains(&1.0);
     let sys_ok = res.intercept_ci.0.is_finite() && res.intercept_ci.1.is_finite() && (res.intercept_ci.0..=res.intercept_ci.1).contains(&0.0);
 
-    let param_headers = vec![String::from("Estimate"), format!("{}% CI", conf.percent()), String::from("Identity check")];
-    let param_rows = vec![
-        vec![
-            num_cell(res.slope),
-            ci_cell(res.slope_ci.0, res.slope_ci.1),
-            ResultCell::Text(String::from(if prop_ok { "CI includes 1 (no proportional bias)" } else { "CI excludes 1 (proportional bias)" })),
-        ],
-        vec![
-            num_cell(res.intercept),
-            ci_cell(res.intercept_ci.0, res.intercept_ci.1),
-            ResultCell::Text(String::from(if sys_ok { "CI includes 0 (no systematic bias)" } else { "CI excludes 0 (systematic bias)" })),
-        ],
-    ];
-    out.tabs.push(build_tab(
-        "pb-parameters",
-        format!("Passing-Bablok regression ({y_label} vs {x_label})"),
-        ResultTabKind::ParametersAndConfidenceIntervals,
-        param_headers,
-        vec![String::from("Slope (b)"), String::from("Intercept (a)")],
-        param_rows,
-    ));
+    out.tabs.push(
+        TabBuilder::new(
+            "pb-parameters",
+            format!("Passing-Bablok regression ({y_label} vs {x_label})"),
+            ResultTabKind::ParametersAndConfidenceIntervals,
+        )
+        .headers([String::from("Estimate"), format!("{}% CI", conf.percent()), String::from("Identity check")])
+        .row(
+            "Slope (b)",
+            [
+                num_cell(res.slope),
+                ci_cell(res.slope_ci.0, res.slope_ci.1),
+                text_cell(if prop_ok { "CI includes 1 (no proportional bias)" } else { "CI excludes 1 (proportional bias)" }),
+            ],
+        )
+        .row(
+            "Intercept (a)",
+            [
+                num_cell(res.intercept),
+                ci_cell(res.intercept_ci.0, res.intercept_ci.1),
+                text_cell(if sys_ok { "CI includes 0 (no systematic bias)" } else { "CI excludes 0 (systematic bias)" }),
+            ],
+        )
+        .build(),
+    );
 
-    let summary_rows = vec![
-        vec![num_cell(res.n as f64)],
-        vec![num_cell(res.valid_slopes as f64)],
-        vec![num_cell(res.k_offset as f64)],
-        vec![num_cell(res.cusum_h)],
-        vec![num_cell(res.cusum_statistic)],
-        vec![p_cell_at_alpha(res.cusum_p_value, p_fmt, conf.alpha())],
-    ];
-    out.tabs.push(build_tab(
-        "pb-summary",
-        "Passing-Bablok linearity & slope counts",
-        ResultTabKind::MainSummary,
-        vec![String::from("Value")],
-        vec![
-            String::from("Paired observations (n)"),
-            String::from("Valid pairwise slopes (N)"),
-            String::from("Negative-slope offset (K)"),
-            String::from("CUSUM linearity H"),
-            String::from("CUSUM standardized H / sqrt(L + 1)"),
-            String::from("CUSUM linearity P value"),
-        ],
-        summary_rows,
-    ));
+    out.tabs.push(
+        KvTabBuilder::new("pb-summary", "Passing-Bablok linearity & slope counts", ResultTabKind::MainSummary, "Value")
+            .num("Paired observations (n)", res.n as f64)
+            .num("Valid pairwise slopes (N)", res.valid_slopes as f64)
+            .num("Negative-slope offset (K)", res.k_offset as f64)
+            .num("CUSUM linearity H", res.cusum_h)
+            .num("CUSUM standardized H / sqrt(L + 1)", res.cusum_statistic)
+            .p("CUSUM linearity P value", res.cusum_p_value, p_fmt, conf.alpha())
+            .build(),
+    );
 
-    let resid_rows: Vec<Vec<ResultCell>> = xs
-        .iter()
-        .zip(ys.iter())
-        .zip(res.residuals.iter())
-        .map(|((&xv, &yv), &rv)| vec![num_cell(xv), num_cell(yv), num_cell(res.intercept + res.slope * xv), num_cell(rv)])
-        .collect();
-    out.tabs.push(build_tab(
-        "pb-residuals",
-        "Passing-Bablok residuals",
-        ResultTabKind::Residuals,
-        vec![x_label, y_label, String::from("Fitted Y"), String::from("Residual (Y - a - bX)")],
-        resid_labels,
-        resid_rows,
-    ));
+    let mut resid_tab = TabBuilder::new("pb-residuals", "Passing-Bablok residuals", ResultTabKind::Residuals).headers([
+        x_label,
+        y_label,
+        String::from("Fitted Y"),
+        String::from("Residual (Y - a - bX)"),
+    ]);
+    for (lbl, ((&xv, &yv), &rv)) in resid_labels.into_iter().zip(xs.iter().zip(ys.iter()).zip(res.residuals.iter())) {
+        resid_tab.push_row(lbl, [num_cell(xv), num_cell(yv), num_cell(res.intercept + res.slope * xv), num_cell(rv)]);
+    }
+    out.tabs.push(resid_tab.build());
 
     let x_min = xs.iter().copied().fold(f64::INFINITY, f64::min);
     let x_max = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
@@ -2215,8 +2202,9 @@ fn append_linear_type_iii_tab(
     p_fmt: PValueFormat,
     alpha: f64,
 ) -> Result<(), StatsError> {
-    let mut type_iii_labels = Vec::new();
-    let mut type_iii_rows = Vec::new();
+    let mut type_iii_tab = TabBuilder::new("glm-linear-type-iii", "Type III partial sums of squares", ResultTabKind::AnovaTable)
+        .headers(["SS", "df", "MS", "F", "P value"]);
+    let mut row_count = 0_usize;
     let mse = res.residual_sd * res.residual_sd;
     for span in factor_spans {
         let col_count = span.col_end.saturating_sub(span.col_start);
@@ -2227,8 +2215,9 @@ fn append_linear_type_iii_tab(
             if let Some(t) = res.terms.get(span.col_start)
                 && let (Some(ss), Some(f_val), Some(p_val)) = (t.type_iii_ss, t.type_iii_f, t.type_iii_p)
             {
-                type_iii_labels.push(span.label.clone());
-                type_iii_rows.push(vec![num_cell(ss), num_cell(1.0), num_cell(ss), num_cell(f_val), p_cell_at_alpha(p_val, p_fmt, alpha)]);
+                type_iii_tab
+                    .push_row(span.label.clone(), [num_cell(ss), num_cell(1.0), num_cell(ss), num_cell(f_val), p_cell_at_alpha(p_val, p_fmt, alpha)]);
+                row_count += 1;
             }
             continue;
         }
@@ -2248,25 +2237,15 @@ fn append_linear_type_iii_tab(
                 0.0
             };
             let p_drop = f_sf(f_drop, df_factor, res.df_residual).unwrap_or(1.0);
-            type_iii_labels.push(span.label.clone());
-            type_iii_rows.push(vec![
-                num_cell(ss_drop),
-                num_cell(df_factor),
-                num_cell(ms_drop),
-                num_cell(f_drop),
-                p_cell_at_alpha(p_drop, p_fmt, alpha),
-            ]);
+            type_iii_tab.push_row(
+                span.label.clone(),
+                [num_cell(ss_drop), num_cell(df_factor), num_cell(ms_drop), num_cell(f_drop), p_cell_at_alpha(p_drop, p_fmt, alpha)],
+            );
+            row_count += 1;
         }
     }
-    if !type_iii_rows.is_empty() {
-        out.tabs.push(build_tab(
-            "glm-linear-type-iii",
-            "Type III partial sums of squares",
-            ResultTabKind::AnovaTable,
-            vec![String::from("SS"), String::from("df"), String::from("MS"), String::from("F"), String::from("P value")],
-            type_iii_labels,
-            type_iii_rows,
-        ));
+    if row_count > 0 {
+        out.tabs.push(type_iii_tab.build());
     }
     Ok(())
 }
@@ -2293,15 +2272,17 @@ fn populate_linear_glm_sheet(
     if glm_spec.compute_vif {
         headers.push(String::from("VIF"));
     }
+    let mut params_tab =
+        TabBuilder::new("glm-linear-params", "Multiple linear regression parameters", ResultTabKind::ParametersAndConfidenceIntervals)
+            .headers(headers);
     let mut labels = Vec::with_capacity(res.terms.len());
-    let mut rows = Vec::with_capacity(res.terms.len());
     let mut aliased_names = Vec::new();
     let mut exact_fit_terms = false;
     for (idx, t) in res.terms.iter().enumerate() {
         labels.push(t.name.clone());
         let mut r = if res.aliased_columns.get(idx).copied().unwrap_or(false) {
             aliased_names.push(t.name.clone());
-            vec![ResultCell::Text(String::from("Aliased")), ResultCell::Empty, ResultCell::Empty, ResultCell::Empty, ResultCell::Empty]
+            vec![text_cell("Aliased"), ResultCell::Empty, ResultCell::Empty, ResultCell::Empty, ResultCell::Empty]
         } else {
             if !t.t_statistic.is_finite() {
                 exact_fit_terms = true;
@@ -2317,78 +2298,63 @@ fn populate_linear_glm_sheet(
         if glm_spec.compute_vif {
             r.push(opt_num_cell(t.vif));
         }
-        rows.push(r);
+        params_tab.push_row(t.name.clone(), r);
     }
-    let mut params_tab = build_tab(
-        "glm-linear-params",
-        "Multiple linear regression parameters",
-        ResultTabKind::ParametersAndConfidenceIntervals,
-        headers,
-        labels.clone(),
-        rows,
-    );
     if !aliased_names.is_empty() {
         params_tab
-            .footnotes
-            .push(format!("Aliased predictor(s) omitted from estimation due to exact linear dependence: {}.", aliased_names.join(", ")));
+            .push_footnote(format!("Aliased predictor(s) omitted from estimation due to exact linear dependence: {}.", aliased_names.join(", ")));
     }
     if exact_fit_terms {
-        params_tab.footnotes.push(String::from(
+        params_tab.push_footnote(
             "Exact linear fit (zero residual sum of squares): coefficient t statistics, P values, and confidence intervals are unavailable.",
-        ));
+        );
     }
-    out.tabs.push(params_tab);
+    out.tabs.push(params_tab.build());
 
-    let anova_rows = vec![
-        vec![
-            num_cell(res.ss_regression),
-            num_cell(res.df_model),
-            num_cell(res.ss_regression / res.df_model.max(1.0)),
-            num_cell(res.f_statistic),
-            p_cell_at_alpha(res.f_p_value, p_fmt, confidence.alpha()),
-        ],
-        vec![num_cell(res.rss), num_cell(res.df_residual), num_cell(res.residual_sd * res.residual_sd), ResultCell::Empty, ResultCell::Empty],
-        vec![num_cell(res.ss_total), num_cell((res.n - 1) as f64), ResultCell::Empty, ResultCell::Empty, ResultCell::Empty],
-    ];
-    out.tabs.push(build_tab(
-        "glm-linear-anova",
-        "ANOVA of regression",
-        ResultTabKind::AnovaTable,
-        vec![String::from("SS"), String::from("df"), String::from("MS"), String::from("F"), String::from("P value")],
-        vec![String::from("Regression"), String::from("Residual"), String::from("Total")],
-        anova_rows,
-    ));
+    out.tabs.push(
+        TabBuilder::new("glm-linear-anova", "ANOVA of regression", ResultTabKind::AnovaTable)
+            .headers(["SS", "df", "MS", "F", "P value"])
+            .row(
+                "Regression",
+                [
+                    num_cell(res.ss_regression),
+                    num_cell(res.df_model),
+                    num_cell(res.ss_regression / res.df_model.max(1.0)),
+                    num_cell(res.f_statistic),
+                    p_cell_at_alpha(res.f_p_value, p_fmt, confidence.alpha()),
+                ],
+            )
+            .row(
+                "Residual",
+                [num_cell(res.rss), num_cell(res.df_residual), num_cell(res.residual_sd * res.residual_sd), ResultCell::Empty, ResultCell::Empty],
+            )
+            .row("Total", [num_cell(res.ss_total), num_cell((res.n - 1) as f64), ResultCell::Empty, ResultCell::Empty, ResultCell::Empty])
+            .build(),
+    );
 
     append_linear_type_iii_tab(out, &res, &design.x_mat, &design.y_vec, &design.factor_spans, p_fmt, confidence.alpha())?;
 
-    let cov_rows: Vec<Vec<ResultCell>> = res.cov_beta.iter().map(|r| r.iter().map(|&v| num_cell(v)).collect()).collect();
-    out.tabs.push(build_tab(
-        "glm-linear-covariance",
-        "Parameter covariance matrix",
-        ResultTabKind::CovarianceMatrix,
-        labels.clone(),
-        labels,
-        cov_rows,
-    ));
-
-    let mut resid_rows = Vec::with_capacity(res.n);
-    for (i, &yi) in design.y_vec.iter().enumerate().take(res.n) {
-        resid_rows.push(vec![
-            num_cell(yi),
-            num_cell(res.fitted[i]),
-            num_cell(res.residuals[i]),
-            num_cell(res.leverage[i]),
-            num_cell(res.cooks_distance[i]),
-        ]);
+    let mut cov_tab =
+        TabBuilder::new("glm-linear-covariance", "Parameter covariance matrix", ResultTabKind::CovarianceMatrix).headers(labels.clone());
+    for (lbl, row) in labels.into_iter().zip(res.cov_beta.iter()) {
+        cov_tab.push_row(lbl, row.iter().map(|&v| num_cell(v)));
     }
-    out.tabs.push(build_tab(
-        "glm-linear-residuals",
-        "Linear regression residuals and influence",
-        ResultTabKind::Residuals,
-        vec![String::from("Observed Y"), String::from("Predicted Y"), String::from("Residual"), String::from("Leverage"), String::from("Cook's D")],
-        design.row_labels,
-        resid_rows,
-    ));
+    out.tabs.push(cov_tab.build());
+
+    let mut resid_tab = TabBuilder::new("glm-linear-residuals", "Linear regression residuals and influence", ResultTabKind::Residuals).headers([
+        "Observed Y",
+        "Predicted Y",
+        "Residual",
+        "Leverage",
+        "Cook's D",
+    ]);
+    for (i, (lbl, &yi)) in design.row_labels.into_iter().zip(design.y_vec.iter()).take(res.n).enumerate() {
+        resid_tab.push_row(
+            lbl,
+            [num_cell(yi), num_cell(res.fitted[i]), num_cell(res.residuals[i]), num_cell(res.leverage[i]), num_cell(res.cooks_distance[i])],
+        );
+    }
+    out.tabs.push(resid_tab.build());
 
     if !aliased_names.is_empty() {
         out.checklist.push(checklist_item(
@@ -2458,68 +2424,35 @@ fn populate_logistic_glm_sheet(
         push_scalar(out, "ROC AUC", None, auc);
     }
 
-    let mut headers = vec![
-        String::from("beta"),
-        String::from("SE"),
-        String::from("Wald z"),
-        String::from("P value"),
-        String::from("Odds Ratio"),
-        format!("{}% CI (OR)", confidence.percent()),
-    ];
-    if glm_spec.compute_vif {
-        headers.push(String::from("VIF"));
-    }
-    let mut labels = Vec::with_capacity(res.terms.len());
-    let mut rows = Vec::with_capacity(res.terms.len());
-    for t in &res.terms {
-        labels.push(t.name.clone());
-        let mut r = vec![
-            num_cell(t.beta),
-            num_cell(t.se),
-            num_cell(t.z_statistic),
-            p_cell_at_alpha(t.p_value, p_fmt, confidence.alpha()),
-            num_cell(t.exp_beta),
-            finite_ci_cell(t.exp_beta_ci.0, t.exp_beta_ci.1),
-        ];
-        if glm_spec.compute_vif {
-            r.push(opt_num_cell(t.vif));
-        }
-        rows.push(r);
-    }
-    let mut params_tab =
-        build_tab("glm-logistic-params", "Logistic regression odds ratios", ResultTabKind::ParametersAndConfidenceIntervals, headers, labels, rows);
+    let mut params_tab = build_glm_ratio_params_tab(
+        "glm-logistic-params",
+        "Logistic regression odds ratios",
+        "Odds Ratio",
+        "OR",
+        &res.terms,
+        glm_spec.compute_vif,
+        confidence,
+        p_fmt,
+    );
     if res.separation_detected {
-        params_tab
-            .footnotes
-            .push(String::from("Complete or quasi-complete separation detected: unpenalized MLE did not converge; ridge safeguard applied."));
+        params_tab.push_footnote("Complete or quasi-complete separation detected: unpenalized MLE did not converge; ridge safeguard applied.");
     } else if !res.converged {
-        params_tab
-            .footnotes
-            .push(String::from("IRLS did not converge within maximum iterations; parameter estimates and Wald statistics may be unreliable."));
+        params_tab.push_footnote("IRLS did not converge within maximum iterations; parameter estimates and Wald statistics may be unreliable.");
     }
     if !res.hosmer_lemeshow_p.is_finite() {
-        params_tab.footnotes.push(String::from(
-            "Hosmer-Lemeshow goodness-of-fit test is unavailable because fewer than 3 distinct fitted-probability groups remain.",
-        ));
+        params_tab
+            .push_footnote("Hosmer-Lemeshow goodness-of-fit test is unavailable because fewer than 3 distinct fitted-probability groups remain.");
     }
-    out.tabs.push(params_tab);
+    out.tabs.push(params_tab.build());
 
     out.tabs.push(build_logistic_classification_tab(&design.y_vec, &res.predicted_probs));
 
-    let pred_rows: Vec<Vec<ResultCell>> = design
-        .y_vec
-        .iter()
-        .zip(res.predicted_probs.iter())
-        .map(|(&yi, &pi)| vec![num_cell(yi), num_cell(pi), num_cell(if pi >= 0.5 { 1.0 } else { 0.0 })])
-        .collect();
-    out.tabs.push(build_tab(
-        "glm-logistic-predictions",
-        "Logistic regression predicted probabilities",
-        ResultTabKind::Residuals,
-        vec![String::from("Observed Y"), String::from("Predicted probability"), String::from("Predicted class")],
-        design.row_labels,
-        pred_rows,
-    ));
+    let mut pred_tab = TabBuilder::new("glm-logistic-predictions", "Logistic regression predicted probabilities", ResultTabKind::Residuals)
+        .headers(["Observed Y", "Predicted probability", "Predicted class"]);
+    for (lbl, (&yi, &pi)) in design.row_labels.into_iter().zip(design.y_vec.iter().zip(res.predicted_probs.iter())) {
+        pred_tab.push_row(lbl, [num_cell(yi), num_cell(pi), num_cell(if pi >= 0.5 { 1.0 } else { 0.0 })]);
+    }
+    out.tabs.push(pred_tab.build());
 
     let hl_str = if res.hosmer_lemeshow_p.is_finite() { format!("{:.4}", res.hosmer_lemeshow_p) } else { String::from("unavailable") };
     let status = if res.separation_detected || !res.converged { ChecklistStatus::Warn } else { ChecklistStatus::Pass };
@@ -2560,63 +2493,32 @@ fn populate_poisson_glm_sheet(
     push_scalar(out, "AICc", None, res.aicc);
     push_scalar(out, "McFadden R squared", None, mcfadden_r2);
 
-    let mut headers = vec![
-        String::from("beta"),
-        String::from("SE"),
-        String::from("Wald z"),
-        String::from("P value"),
-        String::from("Rate Ratio"),
-        format!("{}% CI (RR)", confidence.percent()),
-    ];
-    if glm_spec.compute_vif {
-        headers.push(String::from("VIF"));
-    }
-    let mut labels = Vec::with_capacity(res.terms.len());
-    let mut rows = Vec::with_capacity(res.terms.len());
-    for t in &res.terms {
-        labels.push(t.name.clone());
-        let mut r = vec![
-            num_cell(t.beta),
-            num_cell(t.se),
-            num_cell(t.z_statistic),
-            p_cell_at_alpha(t.p_value, p_fmt, confidence.alpha()),
-            num_cell(t.exp_beta),
-            finite_ci_cell(t.exp_beta_ci.0, t.exp_beta_ci.1),
-        ];
-        if glm_spec.compute_vif {
-            r.push(opt_num_cell(t.vif));
-        }
-        rows.push(r);
-    }
-    let mut params_tab =
-        build_tab("glm-poisson-params", "Poisson regression rate ratios", ResultTabKind::ParametersAndConfidenceIntervals, headers, labels, rows);
+    let mut params_tab = build_glm_ratio_params_tab(
+        "glm-poisson-params",
+        "Poisson regression rate ratios",
+        "Rate Ratio",
+        "RR",
+        &res.terms,
+        glm_spec.compute_vif,
+        confidence,
+        p_fmt,
+    );
     if !res.converged {
-        params_tab.footnotes.push(String::from(
-            "Poisson IRLS did not converge within maximum iterations; parameter estimates and Wald statistics may be unreliable.",
-        ));
+        params_tab
+            .push_footnote("Poisson IRLS did not converge within maximum iterations; parameter estimates and Wald statistics may be unreliable.");
     }
-    out.tabs.push(params_tab);
+    out.tabs.push(params_tab.build());
 
-    let resid_rows: Vec<Vec<ResultCell>> = design
-        .y_vec
-        .iter()
-        .zip(res.predicted_means.iter())
-        .map(|(&yi, &mui)| {
-            let mu = mui.max(1e-12);
-            let pearson = (yi - mui) / mu.sqrt();
-            let dev_sq = if yi > 0.0 { 2.0 * (yi * (yi / mu).ln() - (yi - mu)) } else { 2.0 * mu };
-            let dev_res = if yi >= mui { dev_sq.max(0.0).sqrt() } else { -dev_sq.max(0.0).sqrt() };
-            vec![num_cell(yi), num_cell(mui), num_cell(pearson), num_cell(dev_res)]
-        })
-        .collect();
-    out.tabs.push(build_tab(
-        "glm-poisson-residuals",
-        "Poisson regression Pearson and deviance residuals",
-        ResultTabKind::Residuals,
-        vec![String::from("Observed Y"), String::from("Predicted count"), String::from("Pearson residual"), String::from("Deviance residual")],
-        design.row_labels,
-        resid_rows,
-    ));
+    let mut resid_tab = TabBuilder::new("glm-poisson-residuals", "Poisson regression Pearson and deviance residuals", ResultTabKind::Residuals)
+        .headers(["Observed Y", "Predicted count", "Pearson residual", "Deviance residual"]);
+    for (lbl, (&yi, &mui)) in design.row_labels.into_iter().zip(design.y_vec.iter().zip(res.predicted_means.iter())) {
+        let mu = mui.max(1e-12);
+        let pearson = (yi - mui) / mu.sqrt();
+        let dev_sq = if yi > 0.0 { 2.0 * (yi * (yi / mu).ln() - (yi - mu)) } else { 2.0 * mu };
+        let dev_res = if yi >= mui { dev_sq.max(0.0).sqrt() } else { -dev_sq.max(0.0).sqrt() };
+        resid_tab.push_row(lbl, [num_cell(yi), num_cell(mui), num_cell(pearson), num_cell(dev_res)]);
+    }
+    out.tabs.push(resid_tab.build());
 
     out.checklist.push(checklist_item(
         "Poisson IRLS convergence",
@@ -2700,9 +2602,49 @@ fn residual_normality_checklist_item(residuals: &[f64], alpha: f64) -> curvebook
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn build_glm_ratio_params_tab(
+    id: &str,
+    title: &str,
+    ratio_col: &str,
+    ratio_abbr: &str,
+    terms: &[GlmTermEstimate],
+    compute_vif: bool,
+    confidence: ConfidenceLevel,
+    p_fmt: PValueFormat,
+) -> TabBuilder {
+    let mut headers = vec![
+        String::from("beta"),
+        String::from("SE"),
+        String::from("Wald z"),
+        String::from("P value"),
+        String::from(ratio_col),
+        format!("{}% CI ({ratio_abbr})", confidence.percent()),
+    ];
+    if compute_vif {
+        headers.push(String::from("VIF"));
+    }
+    let mut tab = TabBuilder::new(id, title, ResultTabKind::ParametersAndConfidenceIntervals).headers(headers);
+    for t in terms {
+        let mut r = vec![
+            num_cell(t.beta),
+            num_cell(t.se),
+            num_cell(t.z_statistic),
+            p_cell_at_alpha(t.p_value, p_fmt, confidence.alpha()),
+            num_cell(t.exp_beta),
+            finite_ci_cell(t.exp_beta_ci.0, t.exp_beta_ci.1),
+        ];
+        if compute_vif {
+            r.push(opt_num_cell(t.vif));
+        }
+        tab.push_row(t.name.clone(), r);
+    }
+    tab
+}
+
 /// Build logistic classification summary (cutoff 0.50) and cutoff-accuracy sweep (`0.1..=0.9`).
 fn build_logistic_classification_tab(y: &[f64], probs: &[f64]) -> curvebook_doc::ResultTab {
-    fn metrics_row(y: &[f64], probs: &[f64], cutoff: f64) -> Vec<ResultCell> {
+    fn metrics_row(y: &[f64], probs: &[f64], cutoff: f64) -> [ResultCell; 10] {
         let mut tp = 0_usize;
         let mut fp = 0_usize;
         let mut fn_cnt = 0_usize;
@@ -2722,7 +2664,7 @@ fn build_logistic_classification_tab(y: &[f64], probs: &[f64]) -> curvebook_doc:
         let ppv = (tp + fp > 0).then(|| (tp as f64) / ((tp + fp) as f64));
         let npv = (tn + fn_cnt > 0).then(|| (tn as f64) / ((tn + fn_cnt) as f64));
         let acc = ((tp + tn) as f64) / (y.len().max(1) as f64);
-        vec![
+        [
             num_cell(cutoff),
             num_cell(tp as f64),
             num_cell(fp as f64),
@@ -2736,26 +2678,12 @@ fn build_logistic_classification_tab(y: &[f64], probs: &[f64]) -> curvebook_doc:
         ]
     }
 
-    let headers = vec![
-        String::from("Cutoff"),
-        String::from("TP"),
-        String::from("FP"),
-        String::from("FN"),
-        String::from("TN"),
-        String::from("Sensitivity"),
-        String::from("Specificity"),
-        String::from("PPV"),
-        String::from("NPV"),
-        String::from("Accuracy"),
-    ];
-    let mut row_labels = Vec::with_capacity(10);
-    let mut rows = Vec::with_capacity(10);
-    row_labels.push(String::from("Cutoff 0.50 (2x2)"));
-    rows.push(metrics_row(y, probs, 0.5));
+    let mut tab = TabBuilder::new("glm-logistic-classification", "Logistic classification table & cutoff sweep", ResultTabKind::Diagnostics)
+        .headers(["Cutoff", "TP", "FP", "FN", "TN", "Sensitivity", "Specificity", "PPV", "NPV", "Accuracy"])
+        .row("Cutoff 0.50 (2x2)", metrics_row(y, probs, 0.5));
     for k in 1..=9 {
         let cutoff = (k as f64) * 0.1;
-        row_labels.push(format!("Sweep cutoff {cutoff:.1}"));
-        rows.push(metrics_row(y, probs, cutoff));
+        tab.push_row(format!("Sweep cutoff {cutoff:.1}"), metrics_row(y, probs, cutoff));
     }
-    build_tab("glm-logistic-classification", "Logistic classification table & cutoff sweep", ResultTabKind::Diagnostics, headers, row_labels, rows)
+    tab.build()
 }

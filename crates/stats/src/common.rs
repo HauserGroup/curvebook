@@ -10,8 +10,11 @@
 //!   `doi:10.1080/01621459.1952.10483441`.
 
 use curvebook_doc::{
-    AnalysisSpec, Cell, ChecklistItem, ChecklistStatus, CiBound, DataSheet, PValueFormat, RemediationKind, ResultCell, ResultScalarEntry,
-    ResultSheet, ResultStatus, ResultTab, ResultTabKind, SubcolumnMode, TableArchetype, VariableRole,
+    AnalysisSpec, Cell, ChecklistItem, ChecklistStatus, CiBound, DataSheet, RemediationKind, ResultCell, ResultScalarEntry, ResultSheet,
+    ResultStatus, ResultTab, ResultTabKind, SubcolumnMode, TableArchetype, VariableRole,
+};
+pub use curvebook_doc::{
+    KvTabBuilder, TabBuilder, bool_cell, ci_cell, finite_ci_cell, num_cell, opt_ci_cell, opt_num_cell, p_cell, p_cell_at_alpha, text_cell,
 };
 use curvebook_math::ConfidenceLevel;
 
@@ -134,72 +137,6 @@ pub fn rank_with_ties(values: &[f64]) -> Result<TieRankResult, StatsError> {
         i = j;
     }
     Ok(TieRankResult { ranks, tie_counts, tie_sum_t3_minus_t: tie_sum })
-}
-
-/// Build a numeric [`ResultCell`].
-#[must_use]
-pub fn num_cell(value: f64) -> ResultCell {
-    if value.is_finite() { ResultCell::Number { value, prefix: None, units: None } } else { ResultCell::Empty }
-}
-
-/// Build an optional numeric [`ResultCell`].
-#[must_use]
-pub fn opt_num_cell(value: Option<f64>) -> ResultCell {
-    match value {
-        Some(v) if v.is_finite() => ResultCell::Number { value: v, prefix: None, units: None },
-        _ => ResultCell::Empty,
-    }
-}
-
-/// Build a [`ResultCell::ConfidenceInterval`] from finite bounds.
-#[must_use]
-pub fn ci_cell(lower: f64, upper: f64) -> ResultCell {
-    let lo = if lower.is_finite() { CiBound::Finite(lower) } else { CiBound::Open };
-    let hi = if upper.is_finite() { CiBound::Finite(upper) } else { CiBound::Open };
-    ResultCell::ConfidenceInterval { lower: lo, upper: hi }
-}
-
-/// Build a [`ResultCell::ConfidenceInterval`] when neither bound is `NaN`, or [`ResultCell::Empty`]
-/// if either bound is missing (`NaN`). Infinite bounds still delegate to [`ci_cell`] and render as
-/// [`CiBound::Open`].
-#[must_use]
-pub fn finite_ci_cell(lower: f64, upper: f64) -> ResultCell {
-    if lower.is_nan() || upper.is_nan() { ResultCell::Empty } else { ci_cell(lower, upper) }
-}
-
-/// Build a [`ResultCell::ConfidenceInterval`] from `Option<(f64, f64)>`.
-#[must_use]
-pub fn opt_ci_cell(bounds: Option<(f64, f64)>) -> ResultCell {
-    match bounds {
-        Some((lo, hi)) => ci_cell(lo, hi),
-        None => ResultCell::Empty,
-    }
-}
-
-/// Build a [`ResultCell::PValue`] storing unrounded `raw` probability and formatted strings.
-#[must_use]
-pub fn p_cell(raw_p: f64, format: PValueFormat) -> ResultCell {
-    if !raw_p.is_finite() {
-        return ResultCell::Empty;
-    }
-    let clamped = raw_p.clamp(0.0, 1.0);
-    ResultCell::PValue { raw: clamped, formatted: format.format_p(clamped), stars: format.stars(clamped).to_owned() }
-}
-
-/// Build a [`ResultCell::PValue`] storing unrounded `raw` probability, formatted strings, and
-/// significance stars evaluated against the analysis threshold `alpha` (`p <= alpha`).
-#[must_use]
-pub fn p_cell_at_alpha(raw_p: f64, format: PValueFormat, alpha: f64) -> ResultCell {
-    if !raw_p.is_finite() {
-        return ResultCell::Empty;
-    }
-    let clamped = raw_p.clamp(0.0, 1.0);
-    let stars = if matches!(format, PValueFormat::FourDecimal | PValueFormat::Custom { .. }) {
-        curvebook_math::pvalue::p_value_stars_at_alpha(clamped, alpha)
-    } else {
-        format.stars_at_alpha(clamped, alpha)
-    };
-    ResultCell::PValue { raw: clamped, formatted: format.format_p(clamped), stars: stars.to_owned() }
 }
 
 /// Construct a [`ChecklistItem`] with an optional structured [`RemediationKind`].

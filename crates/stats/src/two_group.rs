@@ -85,10 +85,10 @@ use crate::column::{
     shapiro_wilk, summarize_pre_summarized_points, wilcoxon_exact_p, wilcoxon_max_achievable_coverage_percent,
 };
 use crate::common::{
-    append_ignored_text_checklist_and_footnote, append_listwise_filtered_checklist_and_footnote, build_tab, checklist_item, ci_cell,
-    extract_numeric_columns, extract_paired_values_with_report, init_result_sheet, is_ignored_non_numeric_cell, num_cell, opt_ci_cell, opt_num_cell,
-    p_cell_at_alpha, push_scalar, quantile_type6_sorted, quartiles_hinge, rank_with_ties, sanitize_result_sheet_floats, select_kth_pairwise_sum,
-    sorted_finite, t_crit_two_sided, try_resolve_selected_indices, validate_finite_slice,
+    KvTabBuilder, TabBuilder, append_ignored_text_checklist_and_footnote, append_listwise_filtered_checklist_and_footnote, checklist_item,
+    extract_numeric_columns, extract_paired_values_with_report, init_result_sheet, is_ignored_non_numeric_cell, num_cell, p_cell_at_alpha,
+    push_scalar, quantile_type6_sorted, quartiles_hinge, rank_with_ties, sanitize_result_sheet_floats, select_kth_pairwise_sum, sorted_finite,
+    t_crit_two_sided, try_resolve_selected_indices, validate_finite_slice,
 };
 use crate::error::StatsError;
 use crate::multiplicity::{MultiplicityProcedure, adjust_p_values};
@@ -1924,47 +1924,32 @@ pub fn run_bland_altman_analysis(sheet: &DataSheet, spec: &AnalysisSpec, ba: &Bl
     let out = bland_altman(&vals_a, &vals_b, ba.percent_difference, conf)?;
 
     let mode_text = if out.percent_difference { "Percent difference (100 * (A - B) / Mean)" } else { "Absolute difference (A - B)" };
-    let row_labels = vec![
-        String::from("Difference mode"),
-        String::from("N pairs"),
-        String::from("Bias"),
-        String::from("SD of bias"),
-        String::from("SE of bias"),
-        format!("{}% CI of bias", conf.percent()),
-        format!("Lower {}% LoA", conf.percent()),
-        format!("{}% CI of lower LoA", conf.percent()),
-        format!("Upper {}% LoA", conf.percent()),
-        format!("{}% CI of upper LoA", conf.percent()),
-    ];
-    let rows = vec![
-        vec![ResultCell::Text(mode_text.to_owned())],
-        vec![num_cell(out.n as f64)],
-        vec![num_cell(out.bias)],
-        vec![num_cell(out.sd_bias)],
-        vec![num_cell(out.se_bias)],
-        vec![ci_cell(out.bias_ci.0, out.bias_ci.1)],
-        vec![num_cell(out.loa_lower)],
-        vec![ci_cell(out.loa_lower_ci.0, out.loa_lower_ci.1)],
-        vec![num_cell(out.loa_upper)],
-        vec![ci_cell(out.loa_upper_ci.0, out.loa_upper_ci.1)],
-    ];
-    res.tabs.push(build_tab(
-        "bland-altman-summary",
-        "Bland-Altman method comparison",
-        ResultTabKind::MainSummary,
-        vec![format!("{lbl_a} vs. {lbl_b}")],
-        row_labels,
-        rows,
-    ));
+    let pct = conf.percent();
+    res.tabs.push(
+        KvTabBuilder::new("bland-altman-summary", "Bland-Altman method comparison", ResultTabKind::MainSummary, format!("{lbl_a} vs. {lbl_b}"))
+            .text("Difference mode", mode_text)
+            .num("N pairs", out.n as f64)
+            .num("Bias", out.bias)
+            .num("SD of bias", out.sd_bias)
+            .num("SE of bias", out.se_bias)
+            .ci(format!("{pct}% CI of bias"), out.bias_ci.0, out.bias_ci.1)
+            .num(format!("Lower {pct}% LoA"), out.loa_lower)
+            .ci(format!("{pct}% CI of lower LoA"), out.loa_lower_ci.0, out.loa_lower_ci.1)
+            .num(format!("Upper {pct}% LoA"), out.loa_upper)
+            .ci(format!("{pct}% CI of upper LoA"), out.loa_upper_ci.0, out.loa_upper_ci.1)
+            .build(),
+    );
 
-    let diff_header = if out.percent_difference { String::from("Percent Difference (%)") } else { String::from("Difference (A - B)") };
-    let coord_headers = vec![String::from("Average (A + B) / 2"), diff_header, lbl_a.clone(), lbl_b.clone()];
-    let mut coord_labels = Vec::with_capacity(out.n);
-    let mut coord_rows = Vec::with_capacity(out.n);
+    let diff_header = if out.percent_difference { "Percent Difference (%)" } else { "Difference (A - B)" };
+    let mut coord_tab = TabBuilder::new("bland-altman-coordinates", "Bland-Altman Pair Coordinates", ResultTabKind::Residuals).headers([
+        String::from("Average (A + B) / 2"),
+        String::from(diff_header),
+        lbl_a.clone(),
+        lbl_b.clone(),
+    ]);
     let mut overlay_pts = Vec::with_capacity(out.n);
     for (idx, ((&(avg, diff), &a), &b)) in out.points.iter().zip(vals_a.iter()).zip(vals_b.iter()).enumerate() {
-        coord_labels.push(format!("Pair {}", idx + 1));
-        coord_rows.push(vec![num_cell(avg), num_cell(diff), num_cell(a), num_cell(b)]);
+        coord_tab.push_row(format!("Pair {}", idx + 1), [num_cell(avg), num_cell(diff), num_cell(a), num_cell(b)]);
         overlay_pts.push(CurveSamplePoint {
             x: avg,
             y: diff,
@@ -1974,14 +1959,7 @@ pub fn run_bland_altman_analysis(sheet: &DataSheet, spec: &AnalysisSpec, ba: &Bl
             pred_upper: None,
         });
     }
-    res.tabs.push(build_tab(
-        "bland-altman-coordinates",
-        "Bland-Altman Pair Coordinates",
-        ResultTabKind::Residuals,
-        coord_headers,
-        coord_labels,
-        coord_rows,
-    ));
+    res.tabs.push(coord_tab.build());
     res.fitted_curves.push(FittedCurveOverlay {
         data_set_index: ba.column_a,
         equation_id: String::from("BlandAltman"),
@@ -2079,36 +2057,21 @@ pub fn run_multiple_row_t_tests_analysis(sheet: &DataSheet, spec: &AnalysisSpec,
         (false, false, false) => "Welch unpaired t test",
     };
 
-    let sum_labels = vec![
-        String::from("Rows tested"),
-        String::from("Rows skipped (insufficient data)"),
-        String::from("Significant discoveries"),
-        String::from("Test family"),
-        String::from("Multiplicity method"),
-        String::from("Significance / FDR threshold"),
-        String::from("Minimum raw P"),
-        String::from("Minimum adjusted P / q"),
-    ];
-    let sum_rows = vec![
-        vec![num_cell(entries.len() as f64)],
-        vec![num_cell(skipped_rows as f64)],
-        vec![num_cell(discoveries as f64)],
-        vec![ResultCell::Text(String::from(variant_label))],
-        vec![ResultCell::Text(format!("{:?}", mr.multiplicity.method))],
-        vec![num_cell(threshold)],
-        vec![p_cell_at_alpha(min_raw_p, p_fmt, conf.alpha())],
-        vec![p_cell_at_alpha(min_adj_p, p_fmt, threshold)],
-    ];
-    res.tabs.push(build_tab(
-        "multiple-row-summary",
-        "Multiple Row t-Tests Summary",
-        ResultTabKind::MainSummary,
-        vec![format!("{lbl_a} vs. {lbl_b}")],
-        sum_labels,
-        sum_rows,
-    ));
+    let pair_desc = format!("{lbl_a} vs. {lbl_b}");
+    res.tabs.push(
+        KvTabBuilder::new("multiple-row-summary", "Multiple Row t-Tests Summary", ResultTabKind::MainSummary, pair_desc.clone())
+            .num("Rows tested", entries.len() as f64)
+            .num("Rows skipped (insufficient data)", skipped_rows as f64)
+            .num("Significant discoveries", discoveries as f64)
+            .text("Test family", variant_label)
+            .text("Multiplicity method", format!("{:?}", mr.multiplicity.method))
+            .num("Significance / FDR threshold", threshold)
+            .p("Minimum raw P", min_raw_p, p_fmt, conf.alpha())
+            .p("Minimum adjusted P / q", min_adj_p, p_fmt, threshold)
+            .build(),
+    );
 
-    let cmp_headers = vec![
+    let mut cmp_tab = TabBuilder::new("multiple-row-comparisons", "Multiple Row-Wise Comparisons", ResultTabKind::MultipleComparisons).headers([
         format!("Mean ({lbl_a})"),
         format!("Mean ({lbl_b})"),
         String::from("Difference (A - B)"),
@@ -2117,22 +2080,21 @@ pub fn run_multiple_row_t_tests_analysis(sheet: &DataSheet, spec: &AnalysisSpec,
         String::from("Raw P"),
         String::from("Adjusted P / q"),
         String::from("Significant"),
-    ];
-    let mut cmp_labels = Vec::with_capacity(entries.len());
-    let mut cmp_rows = Vec::with_capacity(entries.len());
-    let pair_desc = format!("{lbl_a} vs. {lbl_b}");
+    ]);
     for e in &entries {
-        cmp_labels.push(e.label.clone());
-        cmp_rows.push(vec![
-            num_cell(e.mean_a),
-            num_cell(e.mean_b),
-            num_cell(e.difference),
-            num_cell(e.statistic),
-            num_cell(e.df),
-            p_cell_at_alpha(e.raw_p, p_fmt, conf.alpha()),
-            p_cell_at_alpha(e.adjusted_p_or_q, p_fmt, threshold),
-            ResultCell::Boolean(e.significant),
-        ]);
+        cmp_tab.push_row(
+            e.label.clone(),
+            [
+                num_cell(e.mean_a),
+                num_cell(e.mean_b),
+                num_cell(e.difference),
+                num_cell(e.statistic),
+                num_cell(e.df),
+                p_cell_at_alpha(e.raw_p, p_fmt, conf.alpha()),
+                p_cell_at_alpha(e.adjusted_p_or_q, p_fmt, threshold),
+                ResultCell::Boolean(e.significant),
+            ],
+        );
         res.pairwise_comparisons.push(PairwiseComparisonRecord {
             group_a: e.row_index,
             group_b: 1,
@@ -2144,18 +2106,14 @@ pub fn run_multiple_row_t_tests_analysis(sheet: &DataSheet, spec: &AnalysisSpec,
             significant: e.significant,
         });
     }
-    let mut cmp_tab =
-        build_tab("multiple-row-comparisons", "Multiple Row-Wise Comparisons", ResultTabKind::MultipleComparisons, cmp_headers, cmp_labels, cmp_rows);
     if mr.paired && mr.nonparametric {
-        cmp_tab.footnotes.push(String::from(
+        cmp_tab.push_footnote(
             "Paired nonparametric rows use Wilcoxon matched-pairs signed-rank with Pratt (1959) zero-difference handling; df is omitted (not applicable) for rank tests.",
-        ));
+        );
     } else if mr.nonparametric {
-        cmp_tab
-            .footnotes
-            .push(String::from("Unpaired nonparametric rows use the Mann-Whitney U test; df is omitted (not applicable) for rank tests."));
+        cmp_tab.push_footnote("Unpaired nonparametric rows use the Mann-Whitney U test; df is omitted (not applicable) for rank tests.");
     }
-    res.tabs.push(cmp_tab);
+    res.tabs.push(cmp_tab.build());
 
     push_scalar(&mut res, "RowsTested", None, entries.len() as f64);
     push_scalar(&mut res, "Discoveries", None, discoveries as f64);
@@ -2870,102 +2828,49 @@ fn populate_unpaired_t_sheet_impl(
 ) {
     let is_lognormal = out.geometric_mean_ratio.is_some();
     let alpha = conf.alpha();
-    let mut row_labels = if is_lognormal {
-        vec![
-            String::from("P value"),
-            String::from("t statistic"),
-            String::from("df"),
-            format!("Mean of ln({lbl_a})"),
-            format!("Mean of ln({lbl_b})"),
-            String::from("Difference of ln means (ln A - ln B)"),
-            String::from("SE of ln difference"),
-            format!("{}% CI of ln difference", conf.percent()),
-            String::from("F-test to compare ln variances (F)"),
-            String::from("F-test P value (ln scale)"),
-        ]
-    } else {
-        vec![
-            String::from("P value"),
-            String::from("t statistic"),
-            String::from("df"),
-            format!("Mean ({lbl_a})"),
-            format!("Mean ({lbl_b})"),
-            String::from("Difference between means (A - B)"),
-            String::from("SE of difference"),
-            format!("{}% CI of difference", conf.percent()),
-            String::from("F-test to compare variances (F)"),
-            String::from("F-test P value"),
-        ]
-    };
-    let mut rows = vec![
-        vec![p_cell_at_alpha(out.p_value, p_fmt, alpha)],
-        vec![num_cell(out.t_statistic)],
-        vec![num_cell(out.df)],
-        vec![num_cell(out.mean_a)],
-        vec![num_cell(out.mean_b)],
-        vec![num_cell(out.difference)],
-        vec![num_cell(out.se_difference)],
-        vec![ci_cell(out.ci.0, out.ci.1)],
-        vec![num_cell(out.f_test.f_statistic)],
-        vec![p_cell_at_alpha(out.f_test.p_value, p_fmt, alpha)],
-    ];
+    let pct = conf.percent();
+    let suffix = if is_lognormal { " (ln scale)" } else { "" };
+    let mut tab = KvTabBuilder::new("two-group", out.method_label, ResultTabKind::MainSummary, format!("{lbl_a} vs. {lbl_b}"))
+        .p("P value", out.p_value, p_fmt, alpha)
+        .num("t statistic", out.t_statistic)
+        .num("df", out.df)
+        .num(if is_lognormal { format!("Mean of ln({lbl_a})") } else { format!("Mean ({lbl_a})") }, out.mean_a)
+        .num(if is_lognormal { format!("Mean of ln({lbl_b})") } else { format!("Mean ({lbl_b})") }, out.mean_b)
+        .num(if is_lognormal { "Difference of ln means (ln A - ln B)" } else { "Difference between means (A - B)" }, out.difference)
+        .num(if is_lognormal { "SE of ln difference" } else { "SE of difference" }, out.se_difference)
+        .ci(if is_lognormal { format!("{pct}% CI of ln difference") } else { format!("{pct}% CI of difference") }, out.ci.0, out.ci.1)
+        .num(if is_lognormal { "F-test to compare ln variances (F)" } else { "F-test to compare variances (F)" }, out.f_test.f_statistic)
+        .p(format!("F-test P value{suffix}"), out.f_test.p_value, p_fmt, alpha);
     if let Some(gmr) = out.geometric_mean_ratio {
-        row_labels.push(String::from("Geometric mean ratio (A / B)"));
-        rows.push(vec![num_cell(gmr)]);
-        row_labels.push(format!("{}% CI of geometric ratio", conf.percent()));
-        rows.push(vec![opt_ci_cell(out.geometric_mean_ratio_ci)]);
+        tab.push_num("Geometric mean ratio (A / B)", gmr).push_opt_ci(format!("{pct}% CI of geometric ratio"), out.geometric_mean_ratio_ci);
     }
     if include_es {
-        if is_lognormal {
-            row_labels.extend([
-                String::from("Cohen's d (ln scale)"),
-                format!("{}% CI of Cohen's d (ln scale)", conf.percent()),
-                String::from("Hedges' g (ln scale)"),
-                format!("{}% CI of Hedges' g (ln scale)", conf.percent()),
-                String::from("Glass's Delta (ln scale)"),
-                String::from("Glass's Delta standardizing group"),
-                String::from("R squared (ln scale)"),
-            ]);
-        } else {
-            row_labels.extend([
-                String::from("Cohen's d"),
-                format!("{}% CI of Cohen's d", conf.percent()),
-                String::from("Hedges' g"),
-                format!("{}% CI of Hedges' g", conf.percent()),
-                String::from("Glass's Delta"),
-                String::from("Glass's Delta standardizing group"),
-                String::from("R squared"),
-            ]);
-        }
         let std_grp = if is_lognormal { format!("ln({lbl_a})") } else { lbl_a.to_owned() };
-        rows.extend([
-            vec![num_cell(out.effect_sizes.cohens_d)],
-            vec![opt_ci_cell(out.effect_sizes.cohens_d_ci)],
-            vec![num_cell(out.effect_sizes.hedges_g)],
-            vec![opt_ci_cell(out.effect_sizes.hedges_g_ci)],
-            vec![opt_num_cell(out.effect_sizes.glass_delta)],
-            vec![ResultCell::Text(std_grp)],
-            vec![num_cell(out.effect_sizes.r_squared)],
-        ]);
+        tab.push_num(format!("Cohen's d{suffix}"), out.effect_sizes.cohens_d)
+            .push_opt_ci(format!("{pct}% CI of Cohen's d{suffix}"), out.effect_sizes.cohens_d_ci)
+            .push_num(format!("Hedges' g{suffix}"), out.effect_sizes.hedges_g)
+            .push_opt_ci(format!("{pct}% CI of Hedges' g{suffix}"), out.effect_sizes.hedges_g_ci)
+            .push_opt_num(format!("Glass's Delta{suffix}"), out.effect_sizes.glass_delta)
+            .push_text("Glass's Delta standardizing group", std_grp)
+            .push_num(format!("R squared{suffix}"), out.effect_sizes.r_squared);
     }
-    let mut tab = build_tab("two-group", out.method_label, ResultTabKind::MainSummary, vec![format!("{lbl_a} vs. {lbl_b}")], row_labels, rows);
     if is_lognormal {
-        tab.footnotes.push(String::from(
+        tab.push_footnote(
             "Lognormal unpaired t-test evaluates Student's t on ln(Y); log-scale means, differences, CIs, and effect sizes are on the natural-log scale alongside the back-transformed geometric mean ratio.",
-        ));
+        );
     }
     if include_es {
         if out.effect_sizes.glass_delta.is_none() {
             let msg = format!(
                 "Glass's Delta standardizes by group \"{lbl_a}\" SD and is unavailable because \"{lbl_a}\" has zero SD (group \"{lbl_b}\" SD is not substituted)."
             );
-            tab.footnotes.push(msg.clone());
+            tab.push_footnote(msg.clone());
             res.checklist.push(checklist_item("Glass's Delta standardizing SD", ChecklistStatus::Info, Some(format!("SD({lbl_a}) = 0")), msg));
         } else {
-            tab.footnotes.push(format!("Glass's Delta standardizes by group \"{lbl_a}\" SD."));
+            tab.push_footnote(format!("Glass's Delta standardizes by group \"{lbl_a}\" SD."));
         }
     }
-    res.tabs.push(tab);
+    res.tabs.push(tab.build());
     push_scalar(res, "PValue", None, out.p_value);
     push_scalar(res, "t", None, out.t_statistic);
     push_scalar(res, "CohensD", None, out.effect_sizes.cohens_d);
@@ -3108,40 +3013,27 @@ fn populate_paired_t_sheet(
     conf: ConfidenceLevel,
     p_fmt: PValueFormat,
 ) {
-    let mut row_labels = vec![
-        String::from("P value"),
-        String::from("t statistic"),
-        String::from("df"),
-        String::from("Number of pairs"),
-        String::from("Mean of differences (A - B)"),
-        String::from("SD of differences"),
-        format!("{}% CI of difference", conf.percent()),
-        String::from("Pairing correlation (r)"),
-        String::from("Pairing effectiveness P"),
-    ];
     let alpha = conf.alpha();
-    let mut rows = vec![
-        vec![p_cell_at_alpha(out.p_value, p_fmt, alpha)],
-        vec![num_cell(out.t_statistic)],
-        vec![num_cell(out.df)],
-        vec![num_cell(out.n_pairs as f64)],
-        vec![num_cell(out.mean_of_differences)],
-        vec![num_cell(out.sd_of_differences)],
-        vec![ci_cell(out.ci.0, out.ci.1)],
-        vec![opt_num_cell(out.pairing_r)],
-        vec![out.pairing_p.map_or(ResultCell::Empty, |p| p_cell_at_alpha(p, p_fmt, alpha))],
-    ];
+    let pct = conf.percent();
+    let mut tab = KvTabBuilder::new("paired-t", out.method_label, ResultTabKind::MainSummary, format!("{lbl_a} vs. {lbl_b}"))
+        .p("P value", out.p_value, p_fmt, alpha)
+        .num("t statistic", out.t_statistic)
+        .num("df", out.df)
+        .num("Number of pairs", out.n_pairs as f64)
+        .num("Mean of differences (A - B)", out.mean_of_differences)
+        .num("SD of differences", out.sd_of_differences)
+        .ci(format!("{pct}% CI of difference"), out.ci.0, out.ci.1)
+        .opt_num("Pairing correlation (r)", out.pairing_r)
+        .cell("Pairing effectiveness P", out.pairing_p.map_or(ResultCell::Empty, |p| p_cell_at_alpha(p, p_fmt, alpha)));
     if let Some(gmr) = out.geometric_mean_ratio {
-        row_labels.push(String::from("Geometric mean of ratios (A / B)"));
-        rows.push(vec![num_cell(gmr)]);
-        row_labels.push(format!("{}% CI of ratio", conf.percent()));
-        rows.push(vec![opt_ci_cell(out.geometric_mean_ratio_ci)]);
+        tab.push_num("Geometric mean of ratios (A / B)", gmr).push_opt_ci(format!("{pct}% CI of ratio"), out.geometric_mean_ratio_ci);
     }
     if include_es {
-        row_labels.extend([String::from("Cohen's dz"), String::from("Hedges' gz"), format!("{}% CI of Hedges' gz", conf.percent())]);
-        rows.extend([vec![num_cell(out.cohens_dz)], vec![opt_num_cell(out.hedges_gz)], vec![opt_ci_cell(out.hedges_gz_ci)]]);
+        tab.push_num("Cohen's dz", out.cohens_dz)
+            .push_opt_num("Hedges' gz", out.hedges_gz)
+            .push_opt_ci(format!("{pct}% CI of Hedges' gz"), out.hedges_gz_ci);
     }
-    res.tabs.push(build_tab("paired-t", out.method_label, ResultTabKind::MainSummary, vec![format!("{lbl_a} vs. {lbl_b}")], row_labels, rows));
+    res.tabs.push(tab.build());
     push_scalar(res, "PValue", None, out.p_value);
     push_scalar(res, "t", None, out.t_statistic);
     res.pairwise_comparisons.push(PairwiseComparisonRecord {
@@ -3167,10 +3059,8 @@ fn populate_paired_t_sheet(
     ));
 }
 
-#[allow(clippy::too_many_arguments)]
 fn format_hl_ci_row_and_warn(
-    row_labels: &mut Vec<String>,
-    rows: &mut Vec<Vec<ResultCell>>,
+    tab: &mut KvTabBuilder,
     checklist: &mut Vec<ChecklistItem>,
     target_desc: &str,
     ci: Option<(f64, f64)>,
@@ -3185,10 +3075,7 @@ fn format_hl_ci_row_and_warn(
         Some(actual) if actual + 1e-9 < nominal => format!("{actual:.2}% CI of {target_desc} (requested {nominal}%)"),
         _ => format!("{nominal}% CI of {target_desc}"),
     };
-    row_labels.push(ci_label);
-    rows.push(vec![opt_ci_cell(ci)]);
-    row_labels.push(String::from("HL CI actual confidence (%)"));
-    rows.push(vec![opt_num_cell(actual_conf_pct)]);
+    tab.push_opt_ci(ci_label, ci).push_opt_num("HL CI actual confidence (%)", actual_conf_pct);
 
     if unattainable {
         let (metric, msg) = if let Some(actual) = actual_conf_pct {
@@ -3227,17 +3114,13 @@ fn populate_mann_whitney_sheet(
     p_fmt: PValueFormat,
 ) {
     let alpha = conf.alpha();
-    let mut row_labels =
-        vec![String::from("P value"), String::from("Exact P used"), String::from("Mann-Whitney U"), String::from("Hodges-Lehmann median diff.")];
-    let mut rows = vec![
-        vec![p_cell_at_alpha(out.p_value, p_fmt, alpha)],
-        vec![ResultCell::Boolean(out.exact_p_used)],
-        vec![num_cell(out.u_min)],
-        vec![num_cell(out.hodges_lehmann_diff)],
-    ];
+    let mut tab = KvTabBuilder::new("mann-whitney", "Mann-Whitney test", ResultTabKind::MainSummary, format!("{lbl_a} vs. {lbl_b}"))
+        .p("P value", out.p_value, p_fmt, alpha)
+        .boolean("Exact P used", out.exact_p_used)
+        .num("Mann-Whitney U", out.u_min)
+        .num("Hodges-Lehmann median diff.", out.hodges_lehmann_diff);
     let hl_warn = format_hl_ci_row_and_warn(
-        &mut row_labels,
-        &mut rows,
+        &mut tab,
         &mut res.checklist,
         "median diff.",
         out.hodges_lehmann_ci,
@@ -3245,13 +3128,11 @@ fn populate_mann_whitney_sheet(
         mann_whitney_max_achievable_coverage_percent(out.n_a, out.n_b),
         conf,
     );
-    row_labels.extend([String::from("Cliff's delta"), String::from("Rank-biserial r")]);
-    rows.extend([vec![num_cell(out.cliffs_delta)], vec![num_cell(out.rank_biserial_r)]]);
-    let mut tab = build_tab("mann-whitney", "Mann-Whitney test", ResultTabKind::MainSummary, vec![format!("{lbl_a} vs. {lbl_b}")], row_labels, rows);
+    tab.push_num("Cliff's delta", out.cliffs_delta).push_num("Rank-biserial r", out.rank_biserial_r);
     if let Some(msg) = hl_warn {
-        tab.footnotes.push(msg);
+        tab.push_footnote(msg);
     }
-    res.tabs.push(tab);
+    res.tabs.push(tab.build());
     push_scalar(res, "PValue", None, out.p_value);
     push_scalar(res, "MannWhitneyU", None, out.u_min);
     res.pairwise_comparisons.push(PairwiseComparisonRecord {
@@ -3288,23 +3169,14 @@ fn populate_wilcoxon_paired_sheet(
     p_fmt: PValueFormat,
 ) {
     let alpha = conf.alpha();
-    let mut row_labels = vec![
-        String::from("P value"),
-        String::from("Exact P used"),
-        String::from("Sum of positive ranks (W+)"),
-        String::from("Sum of negative ranks (W-)"),
-        String::from("Hodges-Lehmann pseudomedian"),
-    ];
-    let mut rows = vec![
-        vec![p_cell_at_alpha(out.p_value, p_fmt, alpha)],
-        vec![ResultCell::Boolean(out.exact_p_used)],
-        vec![num_cell(out.w_plus)],
-        vec![num_cell(out.w_minus)],
-        vec![num_cell(out.hodges_lehmann_pseudomedian)],
-    ];
+    let mut tab = KvTabBuilder::new("wilcoxon-paired", "Wilcoxon matched-pairs test", ResultTabKind::MainSummary, format!("{lbl_a} vs. {lbl_b}"))
+        .p("P value", out.p_value, p_fmt, alpha)
+        .boolean("Exact P used", out.exact_p_used)
+        .num("Sum of positive ranks (W+)", out.w_plus)
+        .num("Sum of negative ranks (W-)", out.w_minus)
+        .num("Hodges-Lehmann pseudomedian", out.hodges_lehmann_pseudomedian);
     let hl_warn = format_hl_ci_row_and_warn(
-        &mut row_labels,
-        &mut rows,
+        &mut tab,
         &mut res.checklist,
         "pseudomedian",
         out.hodges_lehmann_ci,
@@ -3312,23 +3184,14 @@ fn populate_wilcoxon_paired_sheet(
         wilcoxon_max_achievable_coverage_percent(out.n_pairs),
         conf,
     );
-    row_labels.push(String::from("Rank-biserial r"));
-    rows.push(vec![num_cell(out.rank_biserial_r)]);
-    let mut tab = build_tab(
-        "wilcoxon-paired",
-        "Wilcoxon matched-pairs test",
-        ResultTabKind::MainSummary,
-        vec![format!("{lbl_a} vs. {lbl_b}")],
-        row_labels,
-        rows,
-    );
+    tab.push_num("Rank-biserial r", out.rank_biserial_r);
     if let Some(msg) = hl_warn {
-        tab.footnotes.push(msg);
+        tab.push_footnote(msg);
     }
-    tab.footnotes.push(String::from(
+    tab.push_footnote(
         "Zero differences follow Pratt's (1959) method: all pairs (including exact zeros) are ranked by |d|, zero-difference ranks are excluded from W+ and W-, and exact small-sample P values are used when no zero differences or ties occur (n <= 25).",
-    ));
-    res.tabs.push(tab);
+    );
+    res.tabs.push(tab.build());
     push_scalar(res, "PValue", None, out.p_value);
     res.pairwise_comparisons.push(PairwiseComparisonRecord {
         group_a: idx_a,
@@ -3359,16 +3222,13 @@ fn populate_ks_sheet(
     let (idx_a, idx_b) = indices;
     let (lbl_a, lbl_b) = labels;
     let alpha = conf.alpha();
-    let row_labels = vec![String::from("P value"), String::from("Kolmogorov-Smirnov D"), String::from("Exact P used")];
-    let rows = vec![vec![p_cell_at_alpha(out.p_value, p_fmt, alpha)], vec![num_cell(out.d_statistic)], vec![ResultCell::Boolean(out.exact_p_used)]];
-    res.tabs.push(build_tab(
-        "ks-two-sample",
-        "Kolmogorov-Smirnov test",
-        ResultTabKind::MainSummary,
-        vec![format!("{lbl_a} vs. {lbl_b}")],
-        row_labels,
-        rows,
-    ));
+    res.tabs.push(
+        KvTabBuilder::new("ks-two-sample", "Kolmogorov-Smirnov test", ResultTabKind::MainSummary, format!("{lbl_a} vs. {lbl_b}"))
+            .p("P value", out.p_value, p_fmt, alpha)
+            .num("Kolmogorov-Smirnov D", out.d_statistic)
+            .boolean("Exact P used", out.exact_p_used)
+            .build(),
+    );
     push_scalar(res, "PValue", None, out.p_value);
     push_scalar(res, "KSD", None, out.d_statistic);
     res.pairwise_comparisons.push(PairwiseComparisonRecord {
@@ -3397,27 +3257,18 @@ fn populate_one_sample_t_sheet_impl(
     conf: ConfidenceLevel,
     p_fmt: PValueFormat,
 ) {
-    let row_labels = vec![
-        String::from("Hypothetical mean"),
-        String::from("Sample mean"),
-        String::from("Discrepancy"),
-        String::from("t statistic"),
-        String::from("df"),
-        String::from("P value"),
-        format!("{}% CI of discrepancy", conf.percent()),
-        String::from("Hedges' g"),
-    ];
-    let rows = vec![
-        vec![num_cell(out.hypothetical_mean)],
-        vec![num_cell(out.sample_mean)],
-        vec![num_cell(out.discrepancy)],
-        vec![num_cell(out.t_statistic)],
-        vec![num_cell(out.df)],
-        vec![p_cell_at_alpha(out.p_value, p_fmt, conf.alpha())],
-        vec![ci_cell(out.ci.0, out.ci.1)],
-        vec![opt_num_cell(out.hedges_g)],
-    ];
-    res.tabs.push(build_tab("one-sample-t", "One-sample t test", ResultTabKind::MainSummary, vec![label.to_owned()], row_labels, rows));
+    res.tabs.push(
+        KvTabBuilder::new("one-sample-t", "One-sample t test", ResultTabKind::MainSummary, label)
+            .num("Hypothetical mean", out.hypothetical_mean)
+            .num("Sample mean", out.sample_mean)
+            .num("Discrepancy", out.discrepancy)
+            .num("t statistic", out.t_statistic)
+            .num("df", out.df)
+            .p("P value", out.p_value, p_fmt, conf.alpha())
+            .ci(format!("{}% CI of discrepancy", conf.percent()), out.ci.0, out.ci.1)
+            .opt_num("Hedges' g", out.hedges_g)
+            .build(),
+    );
     push_scalar(res, "PValue", None, out.p_value);
     push_scalar(res, "t", None, out.t_statistic);
 
@@ -3465,58 +3316,30 @@ fn populate_paired_sign_sheet(
     conf: ConfidenceLevel,
     p_fmt: PValueFormat,
 ) {
-    let row_labels = vec![
-        String::from("P value"),
-        String::from("Median difference (A - B)"),
-        format!("{}% CI of median difference", conf.percent()),
-        String::from("Median CI actual confidence (%)"),
-        String::from("Positive differences (n+)"),
-        String::from("Negative differences (n-)"),
-        String::from("Zero ties (n0)"),
-        String::from("Effective pairs (n+ + n-)"),
-    ];
-    let rows = vec![
-        vec![p_cell_at_alpha(out.p_value, p_fmt, conf.alpha())],
-        vec![num_cell(out.median_difference)],
-        vec![opt_ci_cell(out.ci)],
-        vec![opt_num_cell(out.ci_actual_confidence_percent)],
-        vec![num_cell(out.n_positive as f64)],
-        vec![num_cell(out.n_negative as f64)],
-        vec![num_cell(out.n_ties as f64)],
-        vec![num_cell(out.n_nonzero as f64)],
-    ];
-    res.tabs.push(build_tab(
-        "paired-sign-test",
-        "Paired sign test",
-        ResultTabKind::MainSummary,
-        vec![format!("{lbl_a} vs. {lbl_b}")],
-        row_labels,
-        rows,
-    ));
+    let pair_hdr = format!("{lbl_a} vs. {lbl_b}");
+    res.tabs.push(
+        KvTabBuilder::new("paired-sign-test", "Paired sign test", ResultTabKind::MainSummary, pair_hdr.clone())
+            .p("P value", out.p_value, p_fmt, conf.alpha())
+            .num("Median difference (A - B)", out.median_difference)
+            .opt_ci(format!("{}% CI of median difference", conf.percent()), out.ci)
+            .opt_num("Median CI actual confidence (%)", out.ci_actual_confidence_percent)
+            .num("Positive differences (n+)", out.n_positive as f64)
+            .num("Negative differences (n-)", out.n_negative as f64)
+            .num("Zero ties (n0)", out.n_ties as f64)
+            .num("Effective pairs (n+ + n-)", out.n_nonzero as f64)
+            .build(),
+    );
 
     let pos_prop = if out.n_nonzero > 0 { Some((out.n_positive as f64) / (out.n_nonzero as f64)) } else { None };
-    let diag_labels = vec![
-        String::from("Total matched pairs"),
-        String::from("Effective non-tie pairs"),
-        String::from("Dropped exact zero ties"),
-        String::from("Positive sign proportion"),
-        String::from("Null binomial probability (p0)"),
-    ];
-    let diag_rows = vec![
-        vec![num_cell(out.n_total as f64)],
-        vec![num_cell(out.n_nonzero as f64)],
-        vec![num_cell(out.n_ties as f64)],
-        vec![opt_num_cell(pos_prop)],
-        vec![num_cell(0.5)],
-    ];
-    res.tabs.push(build_tab(
-        "paired-sign-diagnostics",
-        "Paired sign test diagnostics",
-        ResultTabKind::Diagnostics,
-        vec![format!("{lbl_a} vs. {lbl_b}")],
-        diag_labels,
-        diag_rows,
-    ));
+    res.tabs.push(
+        KvTabBuilder::new("paired-sign-diagnostics", "Paired sign test diagnostics", ResultTabKind::Diagnostics, pair_hdr)
+            .num("Total matched pairs", out.n_total as f64)
+            .num("Effective non-tie pairs", out.n_nonzero as f64)
+            .num("Dropped exact zero ties", out.n_ties as f64)
+            .opt_num("Positive sign proportion", pos_prop)
+            .num("Null binomial probability (p0)", 0.5)
+            .build(),
+    );
 
     push_scalar(res, "median_difference", None, out.median_difference);
     push_scalar(res, "p_value", None, out.p_value);
@@ -3551,23 +3374,14 @@ fn populate_one_sample_w_sheet(
     conf: ConfidenceLevel,
     p_fmt: PValueFormat,
 ) {
-    let mut row_labels = vec![
-        String::from("Hypothetical median"),
-        String::from("Sample median"),
-        String::from("W statistic (W+ - W-)"),
-        String::from("P value"),
-        String::from("Hodges-Lehmann pseudomedian"),
-    ];
-    let mut rows = vec![
-        vec![num_cell(out.hypothetical_median)],
-        vec![num_cell(out.sample_median)],
-        vec![num_cell(out.w_stat)],
-        vec![p_cell_at_alpha(out.p_value, p_fmt, conf.alpha())],
-        vec![num_cell(out.pseudomedian_hl)],
-    ];
+    let mut tab = KvTabBuilder::new("one-sample-w", "One-sample Wilcoxon test", ResultTabKind::MainSummary, label)
+        .num("Hypothetical median", out.hypothetical_median)
+        .num("Sample median", out.sample_median)
+        .num("W statistic (W+ - W-)", out.w_stat)
+        .p("P value", out.p_value, p_fmt, conf.alpha())
+        .num("Hodges-Lehmann pseudomedian", out.pseudomedian_hl);
     let hl_warn = format_hl_ci_row_and_warn(
-        &mut row_labels,
-        &mut rows,
+        &mut tab,
         &mut res.checklist,
         "pseudomedian",
         out.pseudomedian_ci,
@@ -3575,11 +3389,10 @@ fn populate_one_sample_w_sheet(
         wilcoxon_max_achievable_coverage_percent(out.n_total),
         conf,
     );
-    let mut tab = build_tab("one-sample-w", "One-sample Wilcoxon test", ResultTabKind::MainSummary, vec![label.to_owned()], row_labels, rows);
     if let Some(msg) = hl_warn {
-        tab.footnotes.push(msg);
+        tab.push_footnote(msg);
     }
-    res.tabs.push(tab);
+    res.tabs.push(tab.build());
     push_scalar(res, "PValue", None, out.p_value);
     res.checklist.push(checklist_item(
         "One-sample symmetry",

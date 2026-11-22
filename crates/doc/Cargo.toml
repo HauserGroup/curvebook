@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 curvebook-math = { workspace = true }
 curvebook-palette = { workspace = true }
+curvebook-platform = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
