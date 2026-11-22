@@ -1157,12 +1157,13 @@ impl Session {
     }
 
     /// Whether replaying `command_id` from `{ command_id, params }` alone is unsafe across crash
-    /// recovery (undo/redo depend on ephemeral stacks; `READS_FILESYSTEM` commands depend on
+    /// recovery (undo/redo depend on ephemeral stacks; wall-clock-defaulting checkpoint commands
+    /// mint non-deterministic timestamps when omitted; `READS_FILESYSTEM` commands depend on
     /// external files that may change or disappear before recovery) and must instead checkpoint an
     /// atomic document snapshot.
     #[must_use]
     pub fn command_requires_wal_checkpoint(command_id: &str) -> bool {
-        if command_id == "edit.undo" || command_id == "edit.redo" {
+        if matches!(command_id, "edit.undo" | "edit.redo" | "project.createCheckpoint") {
             return true;
         }
         cmd::registry().get(command_id).is_some_and(|spec| spec.effects.contains(cmd::Effects::READS_FILESYSTEM))
@@ -1598,10 +1599,14 @@ impl Session {
         if read_only {
             let before_active = self.doc.active_sheet_id.clone();
             let before_anchor = self.doc.family_anchor_sheet_id.clone();
+            let before_path = self.file_path.clone();
+            let before_dirty = self.dirty;
             let res = invoke_spec_run(self, spec, params, caller, cancelled)?;
             if let Err(hook_err) = after_commit(self, &res) {
                 self.doc.active_sheet_id = before_active;
                 self.doc.family_anchor_sheet_id = before_anchor;
+                self.file_path = before_path;
+                self.dirty = before_dirty;
                 return Err(hook_err);
             }
             return Ok(res);
@@ -1664,12 +1669,13 @@ impl Session {
     where
         F: FnOnce(&Self, &CommandOutcome) -> Result<(), EngineError>,
     {
+        let opens_project_path = spec.id == "project.open"
+            && cmd::spellings::first_present(&params, &["path", "file_path", "filePath"])
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.trim().is_empty());
         let clears_file_path_on_mutate = matches!(spec.id, "file.new" | "project.new" | "project.instantiateTemplate")
             || (matches!(spec.id, "table.importPrism" | "table.importPzfx") && !params.get("merge").and_then(Value::as_bool).unwrap_or(false))
-            || (spec.id == "project.open"
-                && !cmd::spellings::first_present(&params, &["path", "file_path", "filePath"])
-                    .and_then(Value::as_str)
-                    .is_some_and(|s| !s.trim().is_empty()));
+            || (spec.id == "project.open" && !opens_project_path);
         let has_inline_bytes = has_inline_archive_bytes(&params);
         let before = self.doc.clone();
         let before_path = self.file_path.clone();
@@ -1706,7 +1712,7 @@ impl Session {
                     if clears_file_path_on_mutate {
                         self.file_path = None;
                     }
-                    self.dirty = true;
+                    self.dirty = !opens_project_path;
                     if let Err(hook_err) = after_commit(self, &res) {
                         self.doc = before;
                         self.file_path = before_path;

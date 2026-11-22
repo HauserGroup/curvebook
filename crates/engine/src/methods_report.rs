@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, BaselineOperation, BlandAltmanSpec, ChecklistItem, ChecklistStatus, CiBound, ClusterDistance, ClusterLinkage,
     ContingencyMethod, ContingencySpec, CorrelationPowerMethod, CoxTieMethod, DataSheet, DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec,
-    FitMethod, GlmFamily, GlmSpec, KappaWeighting, LinearRegressionSpec, MathTransformPreset, MixedModelDfMethod, ModelComparisonSpec,
+    FitMethod, GlmFamily, GlmSpec, HookSource, KappaWeighting, LinearRegressionSpec, MathTransformPreset, MixedModelDfMethod, ModelComparisonSpec,
     MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor,
     OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat, PValueStackMethod, PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec,
     PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget, PowerTailMode, PowerTestFamily, ProjectDocument,
@@ -784,8 +784,19 @@ fn describe_nested(s: &NestedAnalysisSpec, res: &ResultSheet, source_ds: Option<
 }
 
 fn describe_bland_altman(s: &BlandAltmanSpec, source_ds: Option<&DataSheet>, conf_percent: f64) -> Vec<ReportBlock> {
-    let col_a = column_title_at(source_ds, s.column_a);
-    let col_b = column_title_at(source_ds, s.column_b);
+    let (col_a, col_b) = match source_ds.map(|ds| &ds.archetype) {
+        Some(TableArchetype::Xy(xy)) if s.xy_compare_x_vs_y.unwrap_or(xy.data_sets.len() == 1) => {
+            let a = if xy.x_title.trim().is_empty() { String::from("X") } else { xy.x_title.clone() };
+            let b = xy
+                .data_sets
+                .first()
+                .map(|c| c.title.as_str())
+                .filter(|t| !t.trim().is_empty())
+                .map_or_else(|| String::from("Column 1"), str::to_owned);
+            (a, b)
+        }
+        _ => (column_title_at(source_ds, s.column_a), column_title_at(source_ds, s.column_b)),
+    };
     let scale = if s.percent_difference { "percentage differences relative to the pair mean" } else { "raw paired differences (A - B)" };
     let conf_pct = format_exact_float(conf_percent);
     vec![ReportBlock::Paragraph(vec![
@@ -1431,7 +1442,7 @@ fn describe_parameter_rule(canonical_name: &str, rule: &ParameterRule) -> Vec<Te
         ParameterScope::Local => String::from("fitted independently per dataset (local)"),
         ParameterScope::SharedGlobal => String::from("shared globally across all datasets"),
         ParameterScope::Constant(v) => format!("constrained to fixed constant {}", format_exact_float(*v)),
-        ParameterScope::HookedConstant(hook) => format!("constrained to hooked constant ({hook:?})"),
+        ParameterScope::HookedConstant(hook) => format!("constrained to hooked constant ({})", format_hook_source(hook)),
         ParameterScope::PerDatasetConstant(pairs) => {
             let parts: Vec<String> = pairs.iter().map(|(ds, v)| format!("DS{} = {}", ds + 1, format_exact_float(*v))).collect();
             format!("constrained per dataset ({})", parts.join(", "))
@@ -2120,6 +2131,26 @@ fn format_math_preset(preset: MathTransformPreset, axis_symbol: &str) -> String 
     }
 }
 
+fn format_hook_source(hook: &HookSource) -> String {
+    match hook {
+        HookSource::InfoConstant { info_sheet_id: Some(sheet_id), constant_name } => {
+            format!("info constant '{constant_name}' on sheet '{}'", sheet_id.as_str())
+        }
+        HookSource::InfoConstant { info_sheet_id: None, constant_name } => {
+            format!("info constant '{constant_name}' on paired info sheet")
+        }
+        HookSource::ResultScalar { result_sheet_id, parameter_key, data_set_index: Some(idx) } => {
+            format!("fitted scalar '{parameter_key}' (dataset {}) from '{}'", idx + 1, result_sheet_id.as_str())
+        }
+        HookSource::ResultScalar { result_sheet_id, parameter_key, data_set_index: None } => {
+            format!("fitted scalar '{parameter_key}' from '{}'", result_sheet_id.as_str())
+        }
+        HookSource::ColumnTitleValue { data_sheet_id, data_set_index } => {
+            format!("column {} title on sheet '{}'", data_set_index + 1, data_sheet_id.as_str())
+        }
+    }
+}
+
 fn format_anchor(anchor: &NormalizeAnchor) -> String {
     match anchor {
         NormalizeAnchor::ColumnMin => String::from("column minimum"),
@@ -2129,7 +2160,7 @@ fn format_anchor(anchor: &NormalizeAnchor) -> String {
         NormalizeAnchor::LastRow => String::from("last row"),
         NormalizeAnchor::FixedValue(v) => format_exact_float(*v),
         NormalizeAnchor::ControlColumnMean { column } => format!("mean of control column {}", column + 1),
-        NormalizeAnchor::Hooked(h) => format!("hooked scalar ({h:?})"),
+        NormalizeAnchor::Hooked(h) => format!("hooked scalar ({})", format_hook_source(h)),
     }
 }
 

@@ -827,7 +827,6 @@ dependencies = [
  "curvebook-svg",
  "curvebook-testkit",
  "curvebook-text",
- "curvebook-tools",
  "curvebook-transform",
  "image",
  "proptest",

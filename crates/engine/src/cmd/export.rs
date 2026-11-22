@@ -2,8 +2,6 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-#[cfg(not(target_arch = "wasm32"))]
-use std::path::Path;
 
 use curvebook_chart::{ChartScene, compile_graph, compile_layout};
 use curvebook_doc::{ErrorCode, ProjectDocument, SheetId};
@@ -14,12 +12,12 @@ use serde::Deserialize;
 use serde::de::{Deserializer, Error as DeError, Visitor};
 use serde_json::{Value, json};
 
-use super::helpers::{encode_base64, parse_sheet_id, require_graph_sheet, require_layout_sheet};
+use super::helpers::{encode_base64, parse_sheet_id, require_graph_sheet, require_layout_sheet, write_output_file};
 use super::params::{
     array_schema, bool_schema, int_schema, non_empty_str_schema, nullable_schema, obj_schema_with_aliases, parse_params, str_schema,
 };
 use super::{CommandGroup, CommandSpec, Ctx, Effects};
-use crate::{CommandOutcome, EngineError, Session};
+use crate::{CommandOutcome, EngineError, ExternalPathPolicy, Session};
 
 const EXPORT_EFFECTS: Effects = Effects::WRITES_FILESYSTEM.with(Effects::IDEMPOTENT);
 
@@ -167,31 +165,16 @@ fn has_layout_sheet(session: &Session) -> bool {
 
 /// Atomically write exported bytes to `path`, creating parent directories when needed.
 pub(super) fn write_atomic_output_file(path: &str, bytes: &[u8]) -> Result<(), EngineError> {
+    write_output_with_policy(&ExternalPathPolicy::Unconstrained, path, bytes)
+}
+
+fn write_output_with_policy(policy: &ExternalPathPolicy, path: &str, bytes: &[u8]) -> Result<(), EngineError> {
     if path.trim().is_empty() {
         return Err(EngineError::with_code(ErrorCode::BadInput, "`path` must not be empty")
             .with_remediation("Provide a non-empty destination file path or omit `path` to return exported bytes inline.")
             .with_details(json!({ "pointer": "/path" })));
     }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let target = Path::new(path);
-        if let Some(parent) = target.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent).map_err(|err| {
-                EngineError::with_code(ErrorCode::IoError, format!("failed creating parent directory `{}`: {err}", parent.display()))
-                    .with_retryable(true)
-                    .with_remediation("Ensure the target directory path is writable.")
-                    .with_details(json!({ "path": path, "parent": parent.display().to_string() }))
-            })?;
-        }
-        curvebook_platform::fs::write_atomic(target, bytes)?;
-        Ok(())
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        super::helpers::write_output_file(path, bytes)
-    }
+    write_output_file(policy, path, bytes)
 }
 
 /// Compile either a graph sheet or a layout sheet into a device-independent [`ChartScene`].
@@ -479,7 +462,7 @@ fn run_svg_with_id(ctx: &mut Ctx<'_>, command_id: &str, raw: Value) -> Result<Co
 
     let svg = render_svg(&scene, &opts)?;
     if let Some(ref p) = params.path {
-        write_atomic_output_file(p, svg.as_bytes())?;
+        write_output_with_policy(&ctx.session.path_policy, p, svg.as_bytes())?;
     }
 
     Ok(CommandOutcome::read_only(
@@ -588,7 +571,7 @@ fn run_pdf_with_id(ctx: &mut Ctx<'_>, command_id: &str, raw: Value) -> Result<Co
     };
 
     if let Some(ref p) = params.path {
-        write_atomic_output_file(p, &pdf)?;
+        write_output_with_policy(&ctx.session.path_policy, p, &pdf)?;
     }
 
     Ok(CommandOutcome::read_only(
@@ -721,7 +704,7 @@ fn run_png_with_id(ctx: &mut Ctx<'_>, command_id: &str, raw: Value) -> Result<Co
     let png = encode_png(&img)?;
 
     if let Some(ref p) = params.path {
-        write_atomic_output_file(p, &png)?;
+        write_output_with_policy(&ctx.session.path_policy, p, &png)?;
     }
 
     Ok(CommandOutcome::read_only(
@@ -763,7 +746,7 @@ fn run_export_tiff(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
     let tiff = encode_tiff(&img, compression)?;
 
     if let Some(ref p) = params.path {
-        write_atomic_output_file(p, &tiff)?;
+        write_output_with_policy(&ctx.session.path_policy, p, &tiff)?;
     }
 
     Ok(CommandOutcome::read_only(
@@ -806,7 +789,7 @@ fn run_emf_with_kind(ctx: &mut Ctx<'_>, command_id: &str, is_layout: bool, raw: 
 
     let emf = encode_emf(&scene)?;
     let bytes_written = if let Some(ref p) = params.path {
-        write_atomic_output_file(p, &emf)?;
+        write_output_with_policy(&ctx.session.path_policy, p, &emf)?;
         emf.len()
     } else {
         0

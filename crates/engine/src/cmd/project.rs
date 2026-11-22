@@ -12,7 +12,7 @@ use curvebook_format::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::cmd::helpers::{decode_base64, encode_base64, parse_sheet_id, prune_out_of_bounds_point_overrides};
+use crate::cmd::helpers::{decode_base64_capped, encode_base64, parse_sheet_id, prune_out_of_bounds_point_overrides};
 use crate::cmd::params::{
     bool_schema, empty_object_schema, non_empty_str_schema, nullable_schema, obj_schema_with_aliases, parse_params, str_schema,
 };
@@ -160,15 +160,16 @@ fn run_project_open(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
         return Err(EngineError::with_code(ErrorCode::BadInput, "project.open with `unpacked: true` requires `path`")
             .with_remediation("Provide a directory path in `path` when opening an unpacked project."));
     } else if let Some(ref b64) = parsed.bytes_base64 {
-        let bytes = decode_base64(b64)?;
+        let bytes = decode_base64_capped(b64, MAX_ARCHIVE_FILE_BYTES, "/bytes_base64")?;
         (open_project_bytes(&bytes)?, false, None)
     } else {
         return Err(EngineError::with_code(ErrorCode::BadInput, "project.open requires `path` or `bytes_base64`")
             .with_remediation("Pass either `path` or `bytes_base64`."));
     };
 
+    let opened_from_path = opened_path.is_some();
     ctx.session.doc = loaded;
-    ctx.session.set_file_path(opened_path, false);
+    ctx.session.set_file_path(opened_path, opened_from_path);
     Ok(CommandOutcome::mutated(
         "project.open",
         "opened project",
@@ -221,7 +222,7 @@ fn run_project_save(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
     }
     let return_bytes = parsed.return_bytes.unwrap_or(parsed.path.is_none());
 
-    let (used_unpacked, archive_bytes) = if let Some(ref path) = parsed.path {
+    let (used_unpacked, archive_bytes, saved_path) = if let Some(ref path) = parsed.path {
         if path.trim().is_empty() {
             return Err(EngineError::with_code(ErrorCode::BadInput, "project.save `path` must not be empty"));
         }
@@ -229,16 +230,20 @@ fn run_project_save(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
         if use_unpacked {
             save_project_unpacked_dir(&ctx.session.doc, &resolved)?;
             let bytes = if return_bytes { save_project_bytes(&ctx.session.doc)? } else { Vec::new() };
-            (true, bytes)
+            (true, bytes, Some(resolved))
         } else {
             let bytes = save_project_bytes(&ctx.session.doc)?;
             ctx.session.path_policy.write_atomic_archive_bytes(path, &bytes)?;
-            (false, bytes)
+            (false, bytes, Some(resolved))
         }
     } else {
         let bytes = save_project_bytes(&ctx.session.doc)?;
-        (false, bytes)
+        (false, bytes, None)
     };
+
+    if let Some(resolved_path) = saved_path {
+        ctx.session.set_file_path(Some(resolved_path), true);
+    }
 
     let bytes_len = archive_bytes.len();
     let encoded = if return_bytes { Some(encode_base64(&archive_bytes)) } else { None };
@@ -330,7 +335,7 @@ fn run_project_instantiate_template(ctx: &mut Ctx<'_>, params: Value) -> Result<
     let bytes = if let Some(ref path) = parsed.path {
         ctx.session.path_policy.read_binary_file(path, "template file", MAX_ARCHIVE_FILE_BYTES)?
     } else if let Some(ref b64) = parsed.bytes_base64 {
-        decode_base64(b64)?
+        decode_base64_capped(b64, MAX_ARCHIVE_FILE_BYTES, "/bytes_base64")?
     } else {
         return Err(EngineError::with_code(ErrorCode::BadInput, "project.instantiateTemplate requires `path` or `bytes_base64`")
             .with_remediation("Pass either `path` or `bytes_base64` pointing to a template archive."));
