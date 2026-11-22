@@ -1557,57 +1557,43 @@ fn apply_type_text_to_x_cell(
             }
         }
 
-        // Snapshot session & batch log before Y-spill paste so any downstream X-write error rolls
-        // back cleanly without leaving half-pasted Y columns (`FA-SEC13-14`).
-        let rollback_snapshot = has_y_cols.then(|| (app.session.clone(), app.mutation_seq, app.batch_undo_log.clone()));
-
-        if has_y_cols {
-            let dec = if preset.decimal_separator == ',' { "," } else { "." };
-            let _ = app.execute_command(
-                "table.paste",
-                json!({
-                    "sheet_id": sheet_id.as_str(),
-                    "text": y_lines.join("\n"),
-                    "start_row": x_row,
-                    "start_col": 0,
-                    "start_subcol": 0,
-                    "delimiter": "\t",
-                    "decimal_separator": dec,
-                }),
-            )?;
-        }
-
-        let x_res = if x_edits.is_empty() {
-            app.execute_command(
-                "table.setXCells",
-                json!({
-                    "sheet_id": sheet_id.as_str(),
-                    "start_row": x_row,
-                    "subcol": x_subcol,
-                    "values": [],
-                }),
-            )
-        } else {
-            app.execute_command(
-                "table.setXCells",
-                json!({
-                    "sheet_id": sheet_id.as_str(),
-                    "edits": x_edits,
-                }),
-            )
-        };
-        let out = match x_res {
-            Ok(outcome) => outcome,
-            Err(err) => {
-                if let Some((prev_session, prev_seq, prev_tracker)) = rollback_snapshot {
-                    app.session = prev_session;
-                    app.mutation_seq = prev_seq;
-                    app.batch_undo_log = prev_tracker;
-                    app.sync_views();
-                }
-                return Err(err);
+        let dec = if preset.decimal_separator == ',' { "," } else { "." };
+        let out = app.execute_atomic_group(|app| {
+            if has_y_cols {
+                let _ = app.execute_command(
+                    "table.paste",
+                    json!({
+                        "sheet_id": sheet_id.as_str(),
+                        "text": y_lines.join("\n"),
+                        "start_row": x_row,
+                        "start_col": 0,
+                        "start_subcol": 0,
+                        "delimiter": "\t",
+                        "decimal_separator": dec,
+                    }),
+                )?;
             }
-        };
+
+            if x_edits.is_empty() {
+                app.execute_command(
+                    "table.setXCells",
+                    json!({
+                        "sheet_id": sheet_id.as_str(),
+                        "start_row": x_row,
+                        "subcol": x_subcol,
+                        "values": [],
+                    }),
+                )
+            } else {
+                app.execute_command(
+                    "table.setXCells",
+                    json!({
+                        "sheet_id": sheet_id.as_str(),
+                        "edits": x_edits,
+                    }),
+                )
+            }
+        })?;
         app.grid.select_x_cell_sync(x_row, x_subcol);
         app.grid.refresh_selection_stats(app.session.document());
         return Ok(json!({

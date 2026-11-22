@@ -1015,15 +1015,11 @@ impl PowerWizardState {
 
     /// Build the Power Curve DataSheet, ResultSheet, InfoSheet, and GraphSheet into `session`.
     pub fn execute_create(&mut self, session: &mut Session) -> Result<PowerWizardCreatedSheets, EngineError> {
-        let snapshot = session.clone();
-        match self.execute_create_with(&mut |command_id, params| session.execute_as_ui(command_id, params)) {
-            Ok(created) => Ok(created),
-            Err(err) => {
-                *session = snapshot;
-                self.created_sheets = None;
-                Err(err)
-            }
+        let res = session.execute_atomic_group(|s| self.execute_create_with(&mut |command_id, params| s.execute_as_ui(command_id, params)));
+        if res.is_err() {
+            self.created_sheets = None;
         }
+        res
     }
 }
 

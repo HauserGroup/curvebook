@@ -114,7 +114,8 @@ fn build_qa_two_panel_app() -> (UiApp, SheetId, SheetId, SheetId) {
 
     let g1 = app.session().document().graph_sheets[0].id.clone();
     let g2 = app.session().document().graph_sheets[1].id.clone();
-    app.execute_command("graph.setAxes", json!({ "sheet_id": g1.as_str(), "x_title": "Time (min)", "y_title": "Signal A" })).expect("set axes g1");
+    app.execute_command("graph.setAxes", json!({ "sheet_id": g1.as_str(), "x_axis": { "title": "Time (min)" }, "y_axis": { "title": "Signal A" } }))
+        .expect("set axes g1");
 
     app.execute_command(
         "layout.create",

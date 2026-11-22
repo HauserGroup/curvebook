@@ -540,6 +540,37 @@ impl UiApp {
         Ok(outcome)
     }
 
+    pub(crate) fn execute_atomic_group<T, E>(&mut self, f: impl FnOnce(&mut Self) -> Result<T, E>) -> Result<T, E> {
+        let baseline_session = self.session.clone();
+        let baseline_tracker = self.batch_undo_log.clone();
+        let baseline_seq = self.mutation_seq;
+        match f(self) {
+            Ok(val) => {
+                let mutated = self.session.collapse_atomic_group(baseline_session.clone());
+                self.batch_undo_log = baseline_tracker;
+                if mutated {
+                    self.mutation_seq.0 = baseline_seq.0.wrapping_add(1);
+                    if let Some(t) = self.batch_undo_log.as_mut() {
+                        t.capture_fallback_baseline_before(&baseline_session, true);
+                        if t.fallback_session.is_none() {
+                            t.net_batch_depth += 1;
+                        }
+                    }
+                } else {
+                    self.mutation_seq = baseline_seq;
+                }
+                Ok(val)
+            }
+            Err(err) => {
+                self.session = baseline_session;
+                self.batch_undo_log = baseline_tracker;
+                self.mutation_seq = baseline_seq;
+                self.sync_views();
+                Err(err)
+            }
+        }
+    }
+
     pub(crate) fn execute_session_ui_cmd(&mut self, command_id: &str, params: serde_json::Value) -> Result<CommandOutcome, EngineError> {
         Self::record_session_cmd_on(&mut self.session, self.batch_undo_log.as_mut(), &mut self.mutation_seq, command_id, |session| {
             session.execute_as_ui(command_id, params)
@@ -547,13 +578,19 @@ impl UiApp {
     }
 
     pub(crate) fn execute_power_wizard_create(&mut self) -> Result<power_wizard::PowerWizardCreatedSheets, EngineError> {
-        let wizard = &mut self.canvas_dialogs.power_wizard;
-        let session = &mut self.session;
-        let tracker = &mut self.batch_undo_log;
-        let mutation_seq = &mut self.mutation_seq;
-        wizard.execute_create_with(&mut |cmd_id, params| {
-            Self::record_session_cmd_on(session, tracker.as_mut(), mutation_seq, cmd_id, |s| s.execute_as_ui(cmd_id, params))
-        })
+        let res = self.execute_atomic_group(|app| {
+            let wizard = &mut app.canvas_dialogs.power_wizard;
+            let session = &mut app.session;
+            let tracker = &mut app.batch_undo_log;
+            let mutation_seq = &mut app.mutation_seq;
+            wizard.execute_create_with(&mut |cmd_id, params| {
+                Self::record_session_cmd_on(session, tracker.as_mut(), mutation_seq, cmd_id, |s| s.execute_as_ui(cmd_id, params))
+            })
+        });
+        if res.is_err() {
+            self.canvas_dialogs.power_wizard.created_sheets = None;
+        }
+        res
     }
 
     /// Update active UI locale and synchronize its regional numeric/CSV [`LocalePreset`].

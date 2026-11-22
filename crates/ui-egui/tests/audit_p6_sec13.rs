@@ -829,9 +829,10 @@ fn fa_sec13_11_newcombe_wilson_enabled_for_reopened_2x2_contingency_with_odds_ra
 
     let mut app = UiApp::from_session(Session::from_document(doc));
     app.canvas_dialogs.open_edit_parameters(&app.document().clone(), &SheetId::from("res-cont"));
-    if app.canvas_dialogs.edit_params.contingency_attributable_risk_checked {
-        return Err(String::from("expected attributable_risk default flag false for regression test"));
-    }
+    // Even after explicitly unchecking `attributable_risk` in the draft, `compute_odds_and_risk_ratios=true`
+    // must keep Newcombe-Wilson enabled (`FA-SEC13-11`).
+    let _ = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "fields": { "edit.contingency.attributable_risk": false } }))
+        .map_err(|e| format!("patch attributable_risk off: {e}"))?;
 
     let pred = evaluate_dialog_widget(&app.canvas_dialogs, app.document(), "edit.contingency.ci.newcombe_wilson");
     if !pred.enabled {

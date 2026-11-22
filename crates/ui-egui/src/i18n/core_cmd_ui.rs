@@ -349,7 +349,7 @@ pub(super) const ENTRIES_PART1: &[CatalogEntry] = &[
 
 pub(super) const ENTRIES_PART2: &[CatalogEntry] = &[
     entry!("cmd.ui.result.applyRemediation" => [
-        en: "Diagnostic Remediation Disabled (QOL-7 Diagnostics-Only)",
+        en: "Diagnostic Remediation Disabled (Diagnostics-Only)",
         de: "Diagnose-Korrektur deaktiviert (nur Diagnose)",
         es: "Remediación diagnóstica deshabilitada (solo diagnóstico)",
         fr: "Remédiation diagnostique désactivée (diagnostic uniquement)",

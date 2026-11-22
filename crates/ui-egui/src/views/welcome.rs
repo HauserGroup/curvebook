@@ -533,11 +533,8 @@ fn run_sample_creation_tx<F>(app: &mut UiApp, f: F) -> Result<UiEventOutcome, St
 where
     F: FnOnce(&mut UiApp) -> Result<Value, String>,
 {
-    let prev_session = app.session.clone();
-    let prev_batch_undo = app.batch_undo_log.clone();
     let prev_shell = app.snapshot_ui_shell();
-
-    match f(app) {
+    match app.execute_atomic_group(f) {
         Ok(payload) => Ok(UiEventOutcome {
             handled: true,
             action: String::from("welcome.create_sample"),
@@ -545,8 +542,6 @@ where
             command_result: Some(payload),
         }),
         Err(err) => {
-            app.session = prev_session;
-            app.batch_undo_log = prev_batch_undo;
             app.restore_ui_shell(prev_shell);
             app.sync_views();
             Err(err)

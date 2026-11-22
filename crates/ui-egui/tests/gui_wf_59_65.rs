@@ -336,7 +336,7 @@ fn wf60_subset_regression_decoupled_points_and_red_outlier_override() -> TestRes
             "show_raw_data": false,
             "regression_overlay": {
                 "result_sheet_id": "res-lin-wf60",
-                "sample_segments": 128,
+                "sample_segments": 256,
                 "show_confidence_band": false,
                 "show_prediction_band": false,
                 "shaded_ribbon": false
