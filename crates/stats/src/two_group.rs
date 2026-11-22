@@ -2480,7 +2480,7 @@ fn extract_bland_altman_pairs(sheet: &DataSheet, ba: &BlandAltmanSpec) -> Result
                     if !is_gen && is_ignored_non_numeric_cell(&x_cell) {
                         non_numeric_cells += 1;
                     }
-                    let x_opt = xy.x_value_at(r);
+                    let x_opt = xy.x_summary_at(r)?;
                     let x_has_entry = is_gen || !x_cell.is_empty() || x_cell.excluded;
                     for cy in ds.cells.get(r).map(Vec::as_slice).unwrap_or(&[]) {
                         if is_ignored_non_numeric_cell(cy) {
