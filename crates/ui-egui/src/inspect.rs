@@ -1454,12 +1454,7 @@ fn build_edit_params_dialog_nodes(
             "combobox",
             "AR CI (Newcombe-Wilson)",
             json!(ep.contingency_arr_ci_method),
-            r6_contingency_ci_selector(
-                rows,
-                cols,
-                ep.contingency_attributable_risk_checked || cont_spec.compute_odds_and_risk_ratios,
-                "Newcombe-Wilson",
-            ),
+            r6_contingency_ci_selector(rows, cols, ep.contingency_attributable_risk_checked, "Newcombe-Wilson"),
             pos(19),
         ),
         node(

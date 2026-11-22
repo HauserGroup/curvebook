@@ -929,12 +929,7 @@ fn evaluate_edit_params_widget(
             return r6_contingency_ci_selector(rows, cols, edit.contingency_relative_risk_checked || cont.compute_odds_and_risk_ratios, "Koopman");
         }
         if norm.contains("newcombewilson") {
-            return r6_contingency_ci_selector(
-                rows,
-                cols,
-                edit.contingency_attributable_risk_checked || cont.compute_odds_and_risk_ratios,
-                "Newcombe-Wilson",
-            );
+            return r6_contingency_ci_selector(rows, cols, edit.contingency_attributable_risk_checked, "Newcombe-Wilson");
         }
         if norm.contains("wilsonbrown") {
             return r6_contingency_ci_selector(rows, cols, cont.compute_sensitivity_specificity, "Wilson-Brown");

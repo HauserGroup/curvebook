@@ -103,8 +103,7 @@ pub(super) fn render_contingency_design(
     let or_ci_en =
         r6_contingency_ci_selector(rows, cols, ep.contingency_odds_ratio_checked || c.compute_odds_and_risk_ratios, "Baptista-Pike / Woolf");
     let rr_ci_en = r6_contingency_ci_selector(rows, cols, ep.contingency_relative_risk_checked || c.compute_odds_and_risk_ratios, "Koopman");
-    let arr_ci_en =
-        r6_contingency_ci_selector(rows, cols, ep.contingency_attributable_risk_checked || c.compute_odds_and_risk_ratios, "Newcombe-Wilson");
+    let arr_ci_en = r6_contingency_ci_selector(rows, cols, ep.contingency_attributable_risk_checked, "Newcombe-Wilson");
     let diag_ci_en = r6_contingency_ci_selector(rows, cols, c.compute_sensitivity_specificity, "Wilson-Brown");
     ui.horizontal_wrapped(|ui| {
         for (wid, lbl, active, en, payload) in [

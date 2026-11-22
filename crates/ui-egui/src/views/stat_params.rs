@@ -863,7 +863,7 @@ fn cycle_contingency_ci(app: &mut UiApp, which: &str) -> Result<bool, String> {
         ),
         "arr" => (
             "edit.contingency.ci.newcombe_wilson",
-            ep.contingency_attributable_risk_checked || cont.compute_odds_and_risk_ratios,
+            ep.contingency_attributable_risk_checked,
             "Newcombe-Wilson",
             if ep.contingency_arr_ci_method == "Newcombe-Wilson" { "Wald" } else { "Newcombe-Wilson" },
         ),
