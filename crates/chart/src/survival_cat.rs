@@ -9,7 +9,7 @@ use curvebook_doc::{
     SurvivalAnalysisSpec, SurvivalDisplayMetric, SurvivalObservation, SurvivalStatus, TableArchetype, TickLabelFormat,
 };
 use curvebook_math::{AxisScale, ConfidenceLevel};
-use curvebook_palette::{ColorRamp, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, Rgba8};
+use curvebook_palette::{ColorRamp, LineDashStyle, MarkerFillMode, MarkerStyle, Rgba8};
 use curvebook_stats::survival::kaplan_meier_curve;
 use curvebook_text::{LocaleNumberPolicy, RichText, TextMetricsPt, format_axis_tick, measure_text_pt, parse_markup};
 
@@ -20,7 +20,6 @@ use crate::scene::{
 };
 use crate::xy::{ChromeAxes, SegmentedAxis, format_point_value, render_cartesian_chrome_full};
 
-const CIRCLE_KAPPA: f64 = 0.552_284_749_830_793_6;
 const COLORBAR_STEPS: usize = 48;
 
 /// Margin calculation hints for dynamic `plot_rect_pt` sizing.
@@ -221,58 +220,6 @@ pub(crate) fn path_close(path: &mut Path2D) {
     path.commands.push(PathCmd::Close);
 }
 
-pub(crate) fn circle_path(cx: f64, cy: f64, r: f64) -> Path2D {
-    ellipse_path(cx, cy, r, r, 0.0)
-}
-
-pub(crate) fn ellipse_path(cx: f64, cy: f64, rx: f64, ry: f64, angle_rad: f64) -> Path2D {
-    let (sin_a, cos_a) = angle_rad.sin_cos();
-    let xf = |lx: f64, ly: f64| PointPt::new(cx + lx * cos_a - ly * sin_a, cy + lx * sin_a + ly * cos_a);
-    let kx = rx * CIRCLE_KAPPA;
-    let ky = ry * CIRCLE_KAPPA;
-
-    let mut path = Path2D::new();
-    path_move(&mut path, xf(rx, 0.0));
-    path_cubic(&mut path, xf(rx, ky), xf(kx, ry), xf(0.0, ry));
-    path_cubic(&mut path, xf(-kx, ry), xf(-rx, ky), xf(-rx, 0.0));
-    path_cubic(&mut path, xf(-rx, -ky), xf(-kx, -ry), xf(0.0, -ry));
-    path_cubic(&mut path, xf(kx, -ry), xf(rx, -ky), xf(rx, 0.0));
-    path_close(&mut path);
-    path
-}
-
-pub(crate) fn marker_path(shape: MarkerShape, cx: f64, cy: f64, radius: f64) -> Path2D {
-    let r = radius.max(0.75);
-    match shape {
-        MarkerShape::Circle => circle_path(cx, cy, r),
-        MarkerShape::Square => Path2D::rect(RectPt::new(cx - r, cy - r, 2.0 * r, 2.0 * r)),
-        MarkerShape::TriangleUp => polygon_path(&[(cx, cy - r * 1.15), (cx + r, cy + r * 0.85), (cx - r, cy + r * 0.85)]),
-        MarkerShape::TriangleDown => polygon_path(&[(cx - r, cy - r * 0.85), (cx + r, cy - r * 0.85), (cx, cy + r * 1.15)]),
-        MarkerShape::Diamond => polygon_path(&[(cx, cy - r * 1.15), (cx + r * 1.05, cy), (cx, cy + r * 1.15), (cx - r * 1.05, cy)]),
-        MarkerShape::Hexagon => regular_polygon_path(cx, cy, r, 6, 0.0),
-        MarkerShape::Star => star_path(cx, cy, r * 1.15, r * 0.48, 5),
-        MarkerShape::Plus => {
-            let mut p = Path2D::new();
-            path_move(&mut p, PointPt::new(cx - r, cy));
-            path_line(&mut p, PointPt::new(cx + r, cy));
-            path_move(&mut p, PointPt::new(cx, cy - r));
-            path_line(&mut p, PointPt::new(cx, cy + r));
-            p
-        }
-        MarkerShape::Cross => {
-            let d = r * 0.78;
-            let mut p = Path2D::new();
-            path_move(&mut p, PointPt::new(cx - d, cy - d));
-            path_line(&mut p, PointPt::new(cx + d, cy + d));
-            path_move(&mut p, PointPt::new(cx - d, cy + d));
-            path_line(&mut p, PointPt::new(cx + d, cy - d));
-            p
-        }
-        MarkerShape::HorizontalBar => Path2D::line(PointPt::new(cx - r * 1.2, cy), PointPt::new(cx + r * 1.2, cy)),
-        MarkerShape::VerticalBar => Path2D::line(PointPt::new(cx, cy - r * 1.2), PointPt::new(cx, cy + r * 1.2)),
-    }
-}
-
 pub(crate) fn polygon_path(pts: &[(f64, f64)]) -> Path2D {
     let mut p = Path2D::new();
     let Some(&(x0, y0)) = pts.first() else { return p };
@@ -282,63 +229,6 @@ pub(crate) fn polygon_path(pts: &[(f64, f64)]) -> Path2D {
     }
     path_close(&mut p);
     p
-}
-
-fn regular_polygon_path(cx: f64, cy: f64, r: f64, sides: usize, offset_rad: f64) -> Path2D {
-    let n = sides.max(3);
-    let mut pts = Vec::with_capacity(n);
-    for i in 0..n {
-        let a = offset_rad + (i as f64) * (2.0 * PI / (n as f64));
-        pts.push((cx + r * a.cos(), cy + r * a.sin()));
-    }
-    polygon_path(&pts)
-}
-
-fn star_path(cx: f64, cy: f64, r_outer: f64, r_inner: f64, tips: usize) -> Path2D {
-    let count = tips.max(3) * 2;
-    let mut pts = Vec::with_capacity(count);
-    for i in 0..count {
-        let a = -PI * 0.5 + (i as f64) * (PI / (tips as f64));
-        let r = if i % 2 == 0 { r_outer } else { r_inner };
-        pts.push((cx + r * a.cos(), cy + r * a.sin()));
-    }
-    polygon_path(&pts)
-}
-
-pub(crate) fn emit_marker(scene: &mut ChartScene, center: PointPt, style: MarkerStyle, clip: Option<RectPt>) {
-    let radius = (style.size_pt * 0.5).max(1.0);
-    let path = marker_path(style.shape, center.x, center.y, radius);
-    let stroke_only_shape = matches!(style.shape, MarkerShape::Plus | MarkerShape::Cross | MarkerShape::HorizontalBar | MarkerShape::VerticalBar);
-    let stroke = Some(solid_stroke(style.stroke_color, style.stroke_width_pt.max(0.75), LineDashStyle::Solid));
-
-    if stroke_only_shape {
-        scene.primitives.push(ScenePrimitive::Path { path, fill: None, stroke, clip });
-        return;
-    }
-
-    match style.fill_mode {
-        MarkerFillMode::Filled => {
-            scene.primitives.push(ScenePrimitive::Path { path, fill: Some(FillPaint::solid(style.fill_color)), stroke, clip });
-        }
-        MarkerFillMode::Open => {
-            scene.primitives.push(ScenePrimitive::Path { path, fill: None, stroke, clip });
-        }
-        MarkerFillMode::SemiFilledTop | MarkerFillMode::SemiFilledBottom | MarkerFillMode::SemiFilledLeft | MarkerFillMode::SemiFilledRight => {
-            let half = match style.fill_mode {
-                MarkerFillMode::SemiFilledTop => RectPt::new(center.x - radius - 1.0, center.y - radius - 1.0, 2.0 * (radius + 1.0), radius + 1.0),
-                MarkerFillMode::SemiFilledBottom => RectPt::new(center.x - radius - 1.0, center.y, 2.0 * (radius + 1.0), radius + 1.0),
-                MarkerFillMode::SemiFilledLeft => RectPt::new(center.x - radius - 1.0, center.y - radius - 1.0, radius + 1.0, 2.0 * (radius + 1.0)),
-                _ => RectPt::new(center.x, center.y - radius - 1.0, radius + 1.0, 2.0 * (radius + 1.0)),
-            };
-            scene.primitives.push(ScenePrimitive::Path {
-                path: path.clone(),
-                fill: Some(FillPaint::solid(style.fill_color)),
-                stroke: None,
-                clip: Some(half),
-            });
-            scene.primitives.push(ScenePrimitive::Path { path, fill: None, stroke, clip });
-        }
-    }
 }
 
 /// Build an annular or full wedge path from `start_rad` to `end_rad` using cubic Beziers.

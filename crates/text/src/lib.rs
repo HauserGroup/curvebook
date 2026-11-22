@@ -14,8 +14,10 @@ use std::fmt;
 
 pub use glyph_paths::{GlyphOutlineCmd, PositionedGlyphOutline, has_cleanroom_vector_outline, outline_rich_text, outline_rich_text_with_fonts};
 pub use markup::{
-    BidiRun, EquationSegment, RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, TextDirection, contains_rtl_script, expand_template_hooks,
-    is_rtl_locale, lookup_greek_escape, lookup_roman_operator, parse_equation_segments, parse_markup, reorder_visual_bidi, shape_bidi_runs,
+    BidiRun, EquationSegment, RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, TexDelimiter, TextDirection, contains_rtl_script,
+    expand_template_hooks, extract_braced, extract_braced_opt_ws, is_rtl_locale, lookup_greek_escape, lookup_latex_escape, lookup_math_escape,
+    lookup_roman_operator, match_balanced_math_delimiters, parse_equation_segments, parse_markup, parse_tex_delimiter_token, reorder_visual_bidi,
+    shape_bidi_runs, unwrap_outer_math_delimiters,
 };
 pub use metrics::{
     TextMetricsPt, TrueTypeFont, TrueTypeFontInfo, build_minimal_truetype_font, effective_span_scale, has_bundled_or_ttf_font, measure_text_pt,

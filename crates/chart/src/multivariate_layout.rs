@@ -6,9 +6,9 @@ use std::collections::BTreeMap;
 use curvebook_doc::{
     AnalysisKind, ClusterDistance, ClusterLinkage, ColorChannelMapping, DataSheet, DiagnosticPlotKind, ErrorBarDirection, ErrorBarMetric, GraphKind,
     GraphSheet, GraphSpec, GraphicalDataObject, HeatmapColumnLabelAngle, HeatmapColumnLabelMode, HeatmapRowLabelMode, LayoutItem, LayoutSheet,
-    LevelOrderSpec, MAX_IMAGE_PIXELS, MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec, ProjectDocument, ResultCell, ResultSheet,
-    ResultStatus, ResultTab, ResultTabKind, SheetId, SizeChannelMapping, SubcolumnMode, SummaryMeasure, TableArchetype, VariableColumn, VariableRole,
-    WhiskerMethod,
+    LevelOrderSpec, MAX_IMAGE_PIXELS, MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec, ProjectDocument, ReplicateOverlayStyle,
+    ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SheetId, SizeChannelMapping, SubcolumnMode, SummaryMeasure, TableArchetype,
+    VariableColumn, VariableRole,
 };
 use curvebook_math::dist::{chi2_isf, norm_ppf, norm_two_sided_isf};
 use curvebook_math::sum::{covariance, sample_sd};
@@ -20,14 +20,19 @@ use curvebook_stats::roc::{RocCiMethod, roc_curve_analysis};
 use curvebook_stats::two_group::bland_altman;
 use curvebook_text::{RichText, parse_markup};
 
+use crate::column_grouped::{
+    BoxWhiskerRenderCfg, FloatingBarRenderCfg, RawObs, ReplicateDotCtx, ViolinRenderCfg, emit_replicate_dots_oriented, render_box_whisker_obs,
+    render_floating_bar_bounds, render_violin_obs,
+};
+use crate::markers::{emit_marker, rotated_ellipse_path};
 use crate::scene::{
     ChartError, ChartScene, ChartWarning, FillPaint, Path2D, PathCmd, PlottedPointMeta, PointPt, PositionedText, RectPt, ScenePrimitive,
     SourceCellId, TextAnchor,
 };
 use crate::survival_cat::{
     LegendEntry, PlotMarginConfig, SegmentedFrameSpec, alpha_fill, draw_colorbar, draw_empty_open_frame, draw_graph_annotations, draw_legend_entries,
-    emit_marker, layout_and_render_segmented_chrome, path_close, path_line, path_move, polygon_path, resolve_graph_text, sanitize_range,
-    solid_stroke, text_metrics, update_plot_rect_for_labels,
+    layout_and_render_segmented_chrome, path_close, path_line, path_move, polygon_path, resolve_graph_text, sanitize_range, solid_stroke,
+    text_metrics, update_plot_rect_for_labels,
 };
 use crate::xy::{
     AxisErrorTarget, EmbeddedTableDrawSpec, SegmentedAxis, compute_central_tendency, compute_raw_error_bounds, emit_directional_error_bar,
@@ -250,7 +255,7 @@ fn compile_bubble_scatter(
             continue;
         };
         let center_pt = PointPt::new(px, py);
-        emit_marker(scene, center_pt, marker, Some(r));
+        emit_marker(&mut scene.primitives, center_pt, &marker, Some(r));
         scene.plotted_points.push(PlottedPointMeta {
             center_pt,
             radius_pt: (marker.size_pt * 0.5).max(3.0),
@@ -459,7 +464,7 @@ fn emit_confidence_ellipse(scene: &mut ChartScene, pts: &[(f64, f64)], color: Rg
 
     let rx = k * lam1.sqrt();
     let ry = k * lam2.sqrt();
-    let path = crate::survival_cat::ellipse_path(mx, my, rx, ry, angle);
+    let path = rotated_ellipse_path(mx, my, rx, ry, angle);
     scene.primitives.push(ScenePrimitive::Path {
         path,
         fill: Some(alpha_fill(color, 26)),
@@ -470,21 +475,15 @@ fn emit_confidence_ellipse(scene: &mut ChartScene, pts: &[(f64, f64)], color: Rg
 
 // Categorical × Continuous Summary (Gap G7)
 
-#[derive(Debug, Clone, Copy)]
-struct CatObs {
-    value: f64,
-    row: usize,
-}
-
 struct CatSlotComputed {
-    sorted_obs: Vec<CatObs>,
+    sorted_obs: Vec<RawObs>,
     center_opt: Option<f64>,
     err_bounds: Option<(f64, f64)>,
 }
 
 struct CatSlotDraw<'a> {
     graph: &'a GraphSheet,
-    y_col_idx: usize,
+    override_series_index: Option<usize>,
     level_label: &'a str,
     gdo: &'a GraphicalDataObject,
     y_error_bars: Option<curvebook_doc::ErrorBarSpec>,
@@ -493,17 +492,6 @@ struct CatSlotDraw<'a> {
     box_w: f64,
     y_zero: f64,
     y_axis: &'a SegmentedAxis,
-}
-
-struct CatDotCtx<'a> {
-    graph: &'a GraphSheet,
-    y_col_idx: usize,
-    level_label: &'a str,
-    cx: f64,
-    spread_w: f64,
-    y_axis: &'a SegmentedAxis,
-    clip: RectPt,
-    marker: MarkerStyle,
 }
 
 fn resolve_categorical_cld_overlay(
@@ -537,13 +525,34 @@ fn gdo_summary_measure(gdo: &GraphicalDataObject) -> Option<SummaryMeasure> {
     }
 }
 
+fn emit_cat_slot_dots(
+    scene: &mut ChartScene,
+    obs: &[RawObs],
+    draw: &CatSlotDraw<'_>,
+    max_half_w: f64,
+    style: ReplicateOverlayStyle,
+    marker: &MarkerStyle,
+) {
+    let ctx = ReplicateDotCtx {
+        spec: &draw.graph.spec,
+        override_series_index: draw.override_series_index,
+        cx: draw.cx,
+        max_half_w,
+        val_axis: draw.y_axis,
+        style,
+        marker,
+        series_label: draw.level_label,
+        is_horizontal: false,
+    };
+    let _ = emit_replicate_dots_oriented(scene, obs, &ctx);
+}
+
 fn draw_categorical_summary_slot(scene: &mut ChartScene, slot: &CatSlotComputed, draw: &CatSlotDraw<'_>) -> f64 {
     let r = scene.plot_rect_pt;
     let cx = draw.cx;
     let box_w = draw.box_w;
     let y_axis = draw.y_axis;
     let color = draw.color;
-    let sorted: Vec<f64> = slot.sorted_obs.iter().map(|o| o.value).collect();
     let default_dot = MarkerStyle {
         shape: MarkerShape::Circle,
         fill_mode: MarkerFillMode::Filled,
@@ -552,7 +561,8 @@ fn draw_categorical_summary_slot(scene: &mut ChartScene, slot: &CatSlotComputed,
         stroke_color: Rgba8::WHITE,
         stroke_width_pt: 0.5,
     };
-    let mut top_data_val = slot.center_opt.or_else(|| sorted.last().copied()).unwrap_or(0.0);
+    let max_obs_val = slot.sorted_obs.last().map(|o| o.value);
+    let mut top_data_val = slot.center_opt.or(max_obs_val).unwrap_or(0.0);
 
     match draw.gdo {
         GraphicalDataObject::BarWithReplicates { border_color, border_width_pt, replicate_overlay, .. } => {
@@ -567,113 +577,83 @@ fn draw_categorical_summary_slot(scene: &mut ChartScene, slot: &CatSlotComputed,
                     clip: Some(r),
                 });
             }
-            if replicate_overlay.is_some() {
+            if let Some(overlay_style) = *replicate_overlay {
                 let bar_dot = MarkerStyle { fill_color: Rgba8::rgb(35, 35, 35), ..default_dot };
-                emit_categorical_dots(
-                    scene,
-                    &slot.sorted_obs,
-                    &CatDotCtx {
-                        graph: draw.graph,
-                        y_col_idx: draw.y_col_idx,
-                        level_label: draw.level_label,
-                        cx,
-                        spread_w: box_w * 0.6,
-                        y_axis,
-                        clip: r,
-                        marker: bar_dot,
-                    },
-                );
-                if let Some(&max_v) = sorted.last() {
+                emit_cat_slot_dots(scene, &slot.sorted_obs, draw, box_w * 0.30, overlay_style, &bar_dot);
+                if let Some(max_v) = max_obs_val {
                     top_data_val = top_data_val.max(max_v);
                 }
             }
         }
         GraphicalDataObject::BoxAndWhisker { whiskers, stroke_color, show_outliers, show_all_points, .. } => {
-            draw_box_and_whisker_slot(
+            let _ = render_box_whisker_obs(
                 scene,
                 &slot.sorted_obs,
-                &sorted,
-                &BoxSlotSpec {
-                    graph: draw.graph,
-                    y_col_idx: draw.y_col_idx,
-                    level_label: draw.level_label,
+                &BoxWhiskerRenderCfg {
+                    spec: &draw.graph.spec,
+                    override_series_index: draw.override_series_index,
                     cx,
                     box_w,
                     whiskers: *whiskers,
-                    fill_color: color,
+                    fill_color: color.with_alpha(175),
                     stroke_color: *stroke_color,
                     show_outliers: *show_outliers,
-                    show_all: *show_all_points,
-                    y_axis,
+                    show_all_points: *show_all_points,
+                    val_axis: y_axis,
+                    series_label: draw.level_label,
+                    is_horizontal: false,
                 },
             );
-            if let Some(&max_v) = sorted.last() {
+            if let Some(max_v) = max_obs_val {
                 top_data_val = max_v;
             }
         }
-        GraphicalDataObject::Violin { stroke_color, show_median_and_quartiles, half_violin_with_points, .. } => {
-            draw_violin_slot(
+        GraphicalDataObject::Violin { stroke_color, clip_to_observed_range, show_median_and_quartiles, half_violin_with_points, .. } => {
+            let _ = render_violin_obs(
                 scene,
                 &slot.sorted_obs,
-                &sorted,
-                &ViolinSlotSpec {
-                    graph: draw.graph,
-                    y_col_idx: draw.y_col_idx,
-                    level_label: draw.level_label,
+                &ViolinRenderCfg {
+                    spec: &draw.graph.spec,
+                    override_series_index: draw.override_series_index,
                     cx,
-                    half_w: box_w * 0.9,
-                    fill_color: color,
+                    half_max_w: box_w * 0.45,
+                    fill_color: color.with_alpha(175),
                     stroke_color: *stroke_color,
-                    show_med: *show_median_and_quartiles,
-                    half_violin: *half_violin_with_points,
-                    y_axis,
+                    clip_to_observed_range: *clip_to_observed_range,
+                    show_median_and_quartiles: *show_median_and_quartiles,
+                    half_violin_with_points: *half_violin_with_points,
+                    val_axis: y_axis,
+                    series_label: draw.level_label,
+                    is_horizontal: false,
                 },
             );
-            if let Some(&max_v) = sorted.last() {
+            if let Some(max_v) = max_obs_val {
                 top_data_val = max_v;
             }
         }
         GraphicalDataObject::FloatingBar { border_color, border_width_pt, summary, .. } => {
-            if let (Some(&lo), Some(&hi)) = (sorted.first(), sorted.last())
-                && let (Some((_, y_lo_pt)), Some((_, y_hi_pt))) = (y_axis.map_value(lo), y_axis.map_value(hi))
-            {
+            if let (Some(lo), Some(hi)) = (slot.sorted_obs.first().map(|o| o.value), max_obs_val) {
                 top_data_val = hi;
-                let rect = RectPt::new(cx - box_w * 0.5, y_hi_pt.min(y_lo_pt), box_w, (y_lo_pt - y_hi_pt).abs().max(1.0));
-                scene.primitives.push(ScenePrimitive::Path {
-                    path: Path2D::rect(rect),
-                    fill: Some(alpha_fill(color, 180)),
-                    stroke: Some(solid_stroke(*border_color, *border_width_pt, LineDashStyle::Solid)),
-                    clip: Some(r),
-                });
-                if summary.is_some()
-                    && let Some(center_y) = slot.center_opt
-                    && let Some((_, ym)) = y_axis.map_value(center_y)
-                {
-                    scene.primitives.push(ScenePrimitive::Path {
-                        path: Path2D::line(PointPt::new(cx - box_w * 0.5, ym), PointPt::new(cx + box_w * 0.5, ym)),
-                        fill: None,
-                        stroke: Some(solid_stroke(*border_color, 1.5, LineDashStyle::Solid)),
-                        clip: Some(r),
-                    });
-                }
+                let _ = render_floating_bar_bounds(
+                    scene,
+                    lo,
+                    hi,
+                    summary.and(slot.center_opt),
+                    &FloatingBarRenderCfg {
+                        cx,
+                        slot_w_pt: box_w,
+                        fill_color: color.with_alpha(180),
+                        border_color: *border_color,
+                        border_width_pt: *border_width_pt,
+                        val_axis: y_axis,
+                        is_horizontal: false,
+                    },
+                );
             }
         }
         GraphicalDataObject::AlignedDotPlot { show_crossbar, marker, .. } => {
-            emit_categorical_dots(
-                scene,
-                &slot.sorted_obs,
-                &CatDotCtx {
-                    graph: draw.graph,
-                    y_col_idx: draw.y_col_idx,
-                    level_label: draw.level_label,
-                    cx,
-                    spread_w: box_w * 0.65,
-                    y_axis,
-                    clip: r,
-                    marker: *marker,
-                },
-            );
-            if let Some(&max_v) = sorted.last() {
+            emit_cat_slot_dots(scene, &slot.sorted_obs, draw, box_w * 0.325, ReplicateOverlayStyle::DeterministicBeeswarm, marker);
+            if let Some(max_v) = max_obs_val {
                 top_data_val = top_data_val.max(max_v);
             }
             if *show_crossbar
@@ -690,62 +670,23 @@ fn draw_categorical_summary_slot(scene: &mut ChartScene, slot: &CatSlotComputed,
         }
         GraphicalDataObject::ScatterAndLine { marker, line, .. } => {
             if let Some(m) = marker.or_else(|| line.is_none().then_some(default_dot)) {
-                emit_categorical_dots(
-                    scene,
-                    &slot.sorted_obs,
-                    &CatDotCtx {
-                        graph: draw.graph,
-                        y_col_idx: draw.y_col_idx,
-                        level_label: draw.level_label,
-                        cx,
-                        spread_w: box_w * 0.65,
-                        y_axis,
-                        clip: r,
-                        marker: m,
-                    },
-                );
+                emit_cat_slot_dots(scene, &slot.sorted_obs, draw, box_w * 0.325, ReplicateOverlayStyle::DeterministicBeeswarm, &m);
             }
-            if let Some(&max_v) = sorted.last() {
+            if let Some(max_v) = max_obs_val {
                 top_data_val = top_data_val.max(max_v);
             }
         }
         GraphicalDataObject::BeforeAfterLines { marker, .. } => {
             if let Some(m) = marker {
-                emit_categorical_dots(
-                    scene,
-                    &slot.sorted_obs,
-                    &CatDotCtx {
-                        graph: draw.graph,
-                        y_col_idx: draw.y_col_idx,
-                        level_label: draw.level_label,
-                        cx,
-                        spread_w: box_w * 0.65,
-                        y_axis,
-                        clip: r,
-                        marker: *m,
-                    },
-                );
+                emit_cat_slot_dots(scene, &slot.sorted_obs, draw, box_w * 0.325, ReplicateOverlayStyle::DeterministicBeeswarm, m);
             }
-            if let Some(&max_v) = sorted.last() {
+            if let Some(max_v) = max_obs_val {
                 top_data_val = top_data_val.max(max_v);
             }
         }
         _ => {
-            emit_categorical_dots(
-                scene,
-                &slot.sorted_obs,
-                &CatDotCtx {
-                    graph: draw.graph,
-                    y_col_idx: draw.y_col_idx,
-                    level_label: draw.level_label,
-                    cx,
-                    spread_w: box_w * 0.65,
-                    y_axis,
-                    clip: r,
-                    marker: default_dot,
-                },
-            );
-            if let Some(&max_v) = sorted.last() {
+            emit_cat_slot_dots(scene, &slot.sorted_obs, draw, box_w * 0.325, ReplicateOverlayStyle::DeterministicBeeswarm, &default_dot);
+            if let Some(max_v) = max_obs_val {
                 top_data_val = top_data_val.max(max_v);
             }
         }
@@ -768,7 +709,7 @@ fn draw_categorical_summary_slot(scene: &mut ChartScene, slot: &CatSlotComputed,
 }
 
 fn build_categorical_slots(
-    groups: Vec<Vec<CatObs>>,
+    groups: Vec<Vec<RawObs>>,
     summary_for_center: Option<SummaryMeasure>,
     y_error_bars: Option<curvebook_doc::ErrorBarSpec>,
     is_log_y: bool,
@@ -778,7 +719,7 @@ fn build_categorical_slots(
     let mut data_hi = f64::NEG_INFINITY;
     let mut slots = Vec::with_capacity(groups.len());
     for mut obs in groups {
-        obs.sort_by(|a, b| a.value.total_cmp(&b.value).then_with(|| a.row.cmp(&b.row)));
+        obs.sort_by(|a, b| a.value.total_cmp(&b.value).then_with(|| a.source.row.cmp(&b.source.row)));
         let raw_vals: Vec<f64> = obs.iter().map(|o| o.value).collect();
         for &v in &raw_vals {
             data_lo = data_lo.min(v);
@@ -856,14 +797,16 @@ fn compile_categorical_summary(
         return Ok(());
     }
 
-    let mut groups: Vec<Vec<CatObs>> = vec![Vec::new(); levels.len()];
+    let sheet_id = &graph.spec.primary_source_sheet_id;
+    let override_series_index = crate::override_series_index_for_col(&graph.spec, sheet_id, enc.y_column);
+    let mut groups: Vec<Vec<RawObs>> = vec![Vec::new(); levels.len()];
     for row in 0..mv.row_count() {
         let Some(tok) = cell_token(x_col, row) else { continue };
         let Some(yv) = y_col.cells.get(row).and_then(|c| c.active_number()).filter(|v| v.is_finite()) else { continue };
         if let Some(pos) = levels.iter().position(|l| l == &tok)
             && let Some(bucket) = groups.get_mut(pos)
         {
-            bucket.push(CatObs { value: yv, row });
+            bucket.push(RawObs { value: yv, source: SourceCellId { sheet_id: sheet_id.clone(), row, col: enc.y_column, subcol: 0 } });
         }
     }
 
@@ -925,7 +868,7 @@ fn compile_categorical_summary(
         let top_data_val = draw_categorical_summary_slot(
             scene,
             slot,
-            &CatSlotDraw { graph, y_col_idx: enc.y_column, level_label: &levels[idx], gdo, y_error_bars, color, cx, box_w, y_zero, y_axis: &y_axis },
+            &CatSlotDraw { graph, override_series_index, level_label: &levels[idx], gdo, y_error_bars, color, cx, box_w, y_zero, y_axis: &y_axis },
         );
         let top_y_pt = y_axis.map_value(top_data_val).map_or(r.y, |(_, py)| crate::clamp_f64_safe(py, r.y, r.bottom()));
         slot_bounds.push(crate::column_grouped::RenderedSlotBound {
@@ -948,279 +891,6 @@ fn compile_categorical_summary(
     emit_categorical_connecting_line(scene, gdo, &line_centers, r);
 
     Ok(())
-}
-
-fn percentile_linear(sorted: &[f64], q: f64) -> f64 {
-    let qc = crate::clamp_f64_safe(q, 0.0, 1.0);
-    curvebook_math::quantile_type7_sorted(sorted, qc).unwrap_or(0.0)
-}
-
-fn emit_categorical_dots(scene: &mut ChartScene, sorted_obs: &[CatObs], ctx: &CatDotCtx<'_>) {
-    let sheet_id = &ctx.graph.spec.primary_source_sheet_id;
-    for (i, obs) in sorted_obs.iter().enumerate() {
-        let Some(marker) = crate::resolve_overridden_marker_for_col(
-            &ctx.graph.spec,
-            &ctx.graph.spec.primary_source_sheet_id,
-            ctx.y_col_idx,
-            obs.row,
-            Some(0),
-            ctx.marker,
-        ) else {
-            continue;
-        };
-        let Some((_, py)) = ctx.y_axis.map_value(obs.value) else { continue };
-        let phase = ((i as f64) * 0.618_033_988_75).fract() - 0.5;
-        let px = ctx.cx + phase * ctx.spread_w;
-        let center_pt = PointPt::new(px, py);
-        emit_marker(scene, center_pt, marker, Some(ctx.clip));
-        scene.plotted_points.push(PlottedPointMeta {
-            center_pt,
-            radius_pt: (marker.size_pt * 0.5).max(3.0),
-            source_cell: SourceCellId { sheet_id: sheet_id.clone(), row: obs.row, col: ctx.y_col_idx, subcol: 0 },
-            series_label: ctx.level_label.to_owned(),
-            value_summary: format!("{}: Y={}", ctx.level_label, format_point_value(obs.value)),
-        });
-    }
-}
-
-struct BoxSlotSpec<'a> {
-    graph: &'a GraphSheet,
-    y_col_idx: usize,
-    level_label: &'a str,
-    cx: f64,
-    box_w: f64,
-    whiskers: WhiskerMethod,
-    fill_color: Rgba8,
-    stroke_color: Rgba8,
-    show_outliers: bool,
-    show_all: bool,
-    y_axis: &'a SegmentedAxis,
-}
-
-fn draw_box_and_whisker_slot(scene: &mut ChartScene, sorted_obs: &[CatObs], sorted: &[f64], slot: &BoxSlotSpec<'_>) {
-    let cx = slot.cx;
-    let box_w = slot.box_w;
-    let fill_color = slot.fill_color;
-    let stroke_color = slot.stroke_color;
-    let y_axis = slot.y_axis;
-    let r = scene.plot_rect_pt;
-    let Some((q1, med, q3)) = quartiles_hinge(sorted) else { return };
-    let iqr = (q3 - q1).max(0.0);
-    let (w_lo, w_hi) = match slot.whiskers {
-        WhiskerMethod::MinToMax => (sorted.first().copied().unwrap_or(q1), sorted.last().copied().unwrap_or(q3)),
-        WhiskerMethod::Percentile10To90 => (percentile_linear(sorted, 0.10), percentile_linear(sorted, 0.90)),
-        WhiskerMethod::Percentile5To95 => (percentile_linear(sorted, 0.05), percentile_linear(sorted, 0.95)),
-        WhiskerMethod::Percentile2_5To97_5 => (percentile_linear(sorted, 0.025), percentile_linear(sorted, 0.975)),
-        WhiskerMethod::Percentile1To99 => (percentile_linear(sorted, 0.01), percentile_linear(sorted, 0.99)),
-        WhiskerMethod::Tukey1_5Iqr => {
-            let lo_fence = q1 - 1.5 * iqr;
-            let hi_fence = q3 + 1.5 * iqr;
-            let w_l = sorted.iter().copied().find(|&v| v >= lo_fence).unwrap_or(q1);
-            let w_h = sorted.iter().rev().copied().find(|&v| v <= hi_fence).unwrap_or(q3);
-            (w_l, w_h)
-        }
-    };
-
-    let (Some((_, yq1)), Some((_, ymed)), Some((_, yq3)), Some((_, yw_lo)), Some((_, yw_hi))) =
-        (y_axis.map_value(q1), y_axis.map_value(med), y_axis.map_value(q3), y_axis.map_value(w_lo), y_axis.map_value(w_hi))
-    else {
-        return;
-    };
-
-    let stroke = solid_stroke(stroke_color, 1.1, LineDashStyle::Solid);
-    scene.primitives.push(ScenePrimitive::Path {
-        path: Path2D::rect(RectPt::new(cx - box_w * 0.5, yq3.min(yq1), box_w, (yq1 - yq3).abs().max(1.0))),
-        fill: Some(alpha_fill(fill_color, 175)),
-        stroke: Some(stroke),
-        clip: Some(r),
-    });
-    scene.primitives.push(ScenePrimitive::Path {
-        path: Path2D::line(PointPt::new(cx - box_w * 0.5, ymed), PointPt::new(cx + box_w * 0.5, ymed)),
-        fill: None,
-        stroke: Some(solid_stroke(stroke_color, 1.8, LineDashStyle::Solid)),
-        clip: Some(r),
-    });
-    scene.primitives.push(ScenePrimitive::Path {
-        path: Path2D::line(PointPt::new(cx, yq3), PointPt::new(cx, yw_hi)),
-        fill: None,
-        stroke: Some(stroke),
-        clip: Some(r),
-    });
-    scene.primitives.push(ScenePrimitive::Path {
-        path: Path2D::line(PointPt::new(cx, yq1), PointPt::new(cx, yw_lo)),
-        fill: None,
-        stroke: Some(stroke),
-        clip: Some(r),
-    });
-    for ycap in [yw_hi, yw_lo] {
-        scene.primitives.push(ScenePrimitive::Path {
-            path: Path2D::line(PointPt::new(cx - box_w * 0.25, ycap), PointPt::new(cx + box_w * 0.25, ycap)),
-            fill: None,
-            stroke: Some(stroke),
-            clip: Some(r),
-        });
-    }
-    if slot.show_all {
-        let dot_marker = MarkerStyle {
-            shape: MarkerShape::Circle,
-            fill_mode: MarkerFillMode::Filled,
-            size_pt: 4.5,
-            fill_color: stroke_color,
-            stroke_color: Rgba8::WHITE,
-            stroke_width_pt: 0.5,
-        };
-        emit_categorical_dots(
-            scene,
-            sorted_obs,
-            &CatDotCtx {
-                graph: slot.graph,
-                y_col_idx: slot.y_col_idx,
-                level_label: slot.level_label,
-                cx,
-                spread_w: box_w * 0.5,
-                y_axis,
-                clip: r,
-                marker: dot_marker,
-            },
-        );
-    } else if slot.show_outliers {
-        let base_outlier = MarkerStyle { size_pt: 4.5, fill_color, stroke_color, ..MarkerStyle::default() };
-        for obs in sorted_obs {
-            if (obs.value < w_lo || obs.value > w_hi)
-                && let Some(marker) = crate::resolve_overridden_marker_for_col(
-                    &slot.graph.spec,
-                    &slot.graph.spec.primary_source_sheet_id,
-                    slot.y_col_idx,
-                    obs.row,
-                    Some(0),
-                    base_outlier,
-                )
-                && let Some((_, py)) = y_axis.map_value(obs.value)
-            {
-                let center_pt = PointPt::new(cx, py);
-                emit_marker(scene, center_pt, marker, Some(r));
-                scene.plotted_points.push(PlottedPointMeta {
-                    center_pt,
-                    radius_pt: (marker.size_pt * 0.5).max(3.0),
-                    source_cell: SourceCellId {
-                        sheet_id: slot.graph.spec.primary_source_sheet_id.clone(),
-                        row: obs.row,
-                        col: slot.y_col_idx,
-                        subcol: 0,
-                    },
-                    series_label: slot.level_label.to_owned(),
-                    value_summary: format!("{}: Y={}", slot.level_label, format_point_value(obs.value)),
-                });
-            }
-        }
-    }
-}
-
-struct ViolinSlotSpec<'a> {
-    graph: &'a GraphSheet,
-    y_col_idx: usize,
-    level_label: &'a str,
-    cx: f64,
-    half_w: f64,
-    fill_color: Rgba8,
-    stroke_color: Rgba8,
-    show_med: bool,
-    half_violin: bool,
-    y_axis: &'a SegmentedAxis,
-}
-
-fn draw_violin_slot(scene: &mut ChartScene, sorted_obs: &[CatObs], sorted: &[f64], slot: &ViolinSlotSpec<'_>) {
-    let cx = slot.cx;
-    let half_w = slot.half_w;
-    let fill_color = slot.fill_color;
-    let stroke_color = slot.stroke_color;
-    let y_axis = slot.y_axis;
-    let r = scene.plot_rect_pt;
-    let (Some(&min_v), Some(&max_v)) = (sorted.first(), sorted.last()) else { return };
-    let sd = sample_sd(sorted).unwrap_or(1.0).max((max_v - min_v) * 0.08).max(1e-6);
-    let bw = 1.06 * sd * (sorted.len() as f64).powf(-0.2);
-    let steps = 24_usize;
-    let mut ys = Vec::with_capacity(steps + 1);
-    let mut densities = Vec::with_capacity(steps + 1);
-    let span = (max_v - min_v).max(bw * 0.5);
-    for i in 0..=steps {
-        let y = min_v + span * ((i as f64) / (steps as f64));
-        let mut dens = 0.0;
-        for &v in sorted {
-            let z = (y - v) / bw;
-            dens += (-0.5 * z * z).exp();
-        }
-        ys.push(y);
-        densities.push(dens);
-    }
-    let max_dens = densities.iter().copied().fold(0.0_f64, f64::max).max(1e-12);
-    let mut poly = Path2D::new();
-    let mut right_pts = Vec::with_capacity(steps + 1);
-    let mut left_pts = Vec::with_capacity(steps + 1);
-    for (&y, &d) in ys.iter().zip(densities.iter()) {
-        let Some((_, py)) = y_axis.map_value(y) else { continue };
-        let w = (d / max_dens) * (half_w * 0.5);
-        right_pts.push((cx + w, py));
-        left_pts.push((if slot.half_violin { cx } else { cx - w }, py));
-    }
-    if let Some(&(x0, y0)) = right_pts.first() {
-        path_move(&mut poly, PointPt::new(x0, y0));
-        for &(x, y) in right_pts.iter().skip(1) {
-            path_line(&mut poly, PointPt::new(x, y));
-        }
-        for &(x, y) in left_pts.iter().rev() {
-            path_line(&mut poly, PointPt::new(x, y));
-        }
-        path_close(&mut poly);
-    }
-    scene.primitives.push(ScenePrimitive::Path {
-        path: poly,
-        fill: Some(alpha_fill(fill_color, 175)),
-        stroke: Some(solid_stroke(stroke_color, 1.0, LineDashStyle::Solid)),
-        clip: Some(r),
-    });
-
-    if slot.show_med
-        && let Some((q1, med, q3)) = quartiles_hinge(sorted)
-        && let (Some((_, yq1)), Some((_, yq3)), Some((_, ymed))) = (y_axis.map_value(q1), y_axis.map_value(q3), y_axis.map_value(med))
-    {
-        scene.primitives.push(ScenePrimitive::Path {
-            path: Path2D::line(PointPt::new(cx, yq1), PointPt::new(cx, yq3)),
-            fill: None,
-            stroke: Some(solid_stroke(stroke_color, 2.2, LineDashStyle::Solid)),
-            clip: Some(r),
-        });
-        emit_marker(
-            scene,
-            PointPt::new(cx, ymed),
-            MarkerStyle { size_pt: 4.0, fill_color: Rgba8::WHITE, stroke_color, ..MarkerStyle::default() },
-            Some(r),
-        );
-    }
-    if slot.half_violin {
-        let dot_marker = MarkerStyle {
-            shape: MarkerShape::Circle,
-            fill_mode: MarkerFillMode::Filled,
-            size_pt: 4.5,
-            fill_color: stroke_color,
-            stroke_color: Rgba8::WHITE,
-            stroke_width_pt: 0.5,
-        };
-        emit_categorical_dots(
-            scene,
-            sorted_obs,
-            &CatDotCtx {
-                graph: slot.graph,
-                y_col_idx: slot.y_col_idx,
-                level_label: slot.level_label,
-                cx: cx - half_w * 0.25,
-                spread_w: half_w * 0.3,
-                y_axis,
-                clip: r,
-                marker: dot_marker,
-            },
-        );
-    }
 }
 
 // ============================================================================
@@ -2513,7 +2183,7 @@ fn compile_volcano(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
             continue;
         };
         let center_pt = PointPt::new(px, py);
-        emit_marker(scene, center_pt, marker, Some(r));
+        emit_marker(&mut scene.primitives, center_pt, &marker, Some(r));
         scene.plotted_points.push(PlottedPointMeta {
             center_pt,
             radius_pt: (marker.size_pt * 0.5).max(3.0),
@@ -2784,7 +2454,7 @@ fn compile_bland_altman(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut C
                 base_marker,
             ) {
                 let center_pt = PointPt::new(px, py);
-                emit_marker(scene, center_pt, marker, Some(r));
+                emit_marker(&mut scene.primitives, center_pt, &marker, Some(r));
                 scene.plotted_points.push(PlottedPointMeta {
                     center_pt,
                     radius_pt: (marker.size_pt * 0.5).max(3.0),
@@ -3471,9 +3141,9 @@ fn compile_forest_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Ch
             });
             if let Some(x_est_pt) = x_est_opt {
                 emit_marker(
-                    scene,
+                    &mut scene.primitives,
                     PointPt::new(x_est_pt, cy),
-                    MarkerStyle {
+                    &MarkerStyle {
                         shape: MarkerShape::Square,
                         fill_mode: MarkerFillMode::Filled,
                         size_pt: 5.5,
@@ -3733,7 +3403,7 @@ fn compile_residual_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut 
                 base_marker,
             ) {
                 let center_pt = PointPt::new(px, py);
-                emit_marker(scene, center_pt, marker, Some(r));
+                emit_marker(&mut scene.primitives, center_pt, &marker, Some(r));
                 scene.plotted_points.push(PlottedPointMeta {
                     center_pt,
                     radius_pt: (marker.size_pt * 0.5).max(3.0),
@@ -3933,7 +3603,7 @@ fn compile_normal_qq_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut
                 base_marker,
             ) {
                 let center_pt = PointPt::new(px, py);
-                emit_marker(scene, center_pt, marker, Some(r));
+                emit_marker(&mut scene.primitives, center_pt, &marker, Some(r));
                 scene.plotted_points.push(PlottedPointMeta {
                     center_pt,
                     radius_pt: (marker.size_pt * 0.5).max(3.0),
@@ -4807,20 +4477,20 @@ mod tests {
 
     #[test]
     fn percentile_linear_preserves_empty_default_exact_rank_and_extreme_span() {
-        use super::percentile_linear;
+        let eval = |sorted: &[f64], q: f64| curvebook_math::quantile_type7_sorted(sorted, crate::clamp_f64_safe(q, 0.0, 1.0)).unwrap_or(0.0);
 
-        assert_eq!(percentile_linear(&[], 0.5), 0.0);
-        assert_eq!(percentile_linear(&[7.5], 0.5), 7.5);
-        assert_eq!(percentile_linear(&[10.0, 20.0, 30.0, 40.0], 0.25), 17.5);
-        assert_eq!(percentile_linear(&[10.0, 20.0, 30.0, 40.0], 0.5), 25.0);
-        assert_eq!(percentile_linear(&[10.0, 20.0, 30.0, 40.0], f64::NAN), 10.0);
-        assert_eq!(percentile_linear(&[10.0, 20.0, 30.0, 40.0], f64::NEG_INFINITY), 10.0);
-        assert_eq!(percentile_linear(&[10.0, 20.0, 30.0, 40.0], f64::INFINITY), 40.0);
+        assert_eq!(eval(&[], 0.5), 0.0);
+        assert_eq!(eval(&[7.5], 0.5), 7.5);
+        assert_eq!(eval(&[10.0, 20.0, 30.0, 40.0], 0.25), 17.5);
+        assert_eq!(eval(&[10.0, 20.0, 30.0, 40.0], 0.5), 25.0);
+        assert_eq!(eval(&[10.0, 20.0, 30.0, 40.0], f64::NAN), 10.0);
+        assert_eq!(eval(&[10.0, 20.0, 30.0, 40.0], f64::NEG_INFINITY), 10.0);
+        assert_eq!(eval(&[10.0, 20.0, 30.0, 40.0], f64::INFINITY), 40.0);
 
         // Exact-rank endpoints and non-exact midpoint on extreme finite spans must not produce NaN or Inf.
         let extreme = [f64::MIN, f64::MAX];
-        assert_eq!(percentile_linear(&extreme, 0.0), f64::MIN);
-        assert_eq!(percentile_linear(&extreme, 1.0), f64::MAX);
-        assert_eq!(percentile_linear(&extreme, 0.5), 0.0);
+        assert_eq!(eval(&extreme, 0.0), f64::MIN);
+        assert_eq!(eval(&extreme, 1.0), f64::MAX);
+        assert_eq!(eval(&extreme, 0.5), 0.0);
     }
 }

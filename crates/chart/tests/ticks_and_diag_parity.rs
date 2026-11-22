@@ -3,7 +3,7 @@
 //! consuming live `ResultSheet` / `ResultTabKind` outputs.
 
 use curvebook_chart::compile_graph;
-use curvebook_chart::scales::{AxisRenderOptions, compute_additional_ticks, render_axes_and_frame, render_graph_chrome, resolve_axes_and_ticks};
+use curvebook_chart::scales::{AxisOrientation, ResolvedAxis, compute_additional_ticks};
 use curvebook_chart::scene::{ChartScene, PathCmd, ScenePrimitive};
 use curvebook_doc::{
     AdditionalTick, AnalysisKind, AnalysisSpec, AxisScale, AxisSegment, AxisSpec, AxisThreshold, BlandAltmanSpec, Cell, ColumnDesignHint,
@@ -88,7 +88,7 @@ fn build_minimal_doc_graph() -> TestResult<(ProjectDocument, GraphSheet)> {
 fn additional_ticks_map_across_all_scales_broken_segments_and_gridlines() -> TestResult {
     let policy = LocaleNumberPolicy::publication();
     let (doc, mut gs) = build_minimal_doc_graph()?;
-    let opts = AxisRenderOptions::default();
+    gs.spec.canvas_size_pt = SizePt::new(400.0, 280.0);
 
     // 1. Broken 3-segment Linear X axis: [0..=10], [50..=100], [500..=1000]
     let mut x_lin_broken = AxisSpec::linear("X Broken");
@@ -117,10 +117,10 @@ fn additional_ticks_map_across_all_scales_broken_segments_and_gridlines() -> Tes
         AxisSegment { min: Some(60.0), max: Some(100.0), scale: AxisScale::Linear, length_share: 1.0, ..AxisSegment::default() },
     ];
 
-    let mut s_probe = ChartScene::new("probe", "Probe", 400.0, 280.0, None);
-    s_probe.plot_rect_pt = curvebook_chart::scales::compute_plot_rect(SizePt::new(400.0, 280.0), &gs.spec, &opts);
-    let axes = resolve_axes_and_ticks(&gs.spec, &mut s_probe, &opts);
-    let resolved_x = compute_additional_ticks(&axes.x_axis, &gs.spec.x_axis.additional_ticks, gs.spec.x_axis.tick_format, &policy);
+    let s_chrome = compile_graph(&gs, &doc)?;
+    let mut probe_warnings = Vec::new();
+    let x_axis = ResolvedAxis::resolve(&gs.spec.x_axis, AxisOrientation::Horizontal, s_chrome.plot_rect_pt, None, &mut probe_warnings);
+    let resolved_x = compute_additional_ticks(&x_axis, &gs.spec.x_axis.additional_ticks, gs.spec.x_axis.tick_format, &policy);
     assert_eq!(resolved_x.len(), 3, "only 5, 75, 800 lie inside active segments; got {resolved_x:?}");
     assert_eq!(resolved_x[0].segment_index, 0);
     assert_eq!(resolved_x[0].label.as_ref().map(|r| r.plain_text()), Some(String::from("Cut1")));
@@ -130,8 +130,6 @@ fn additional_ticks_map_across_all_scales_broken_segments_and_gridlines() -> Tes
     assert_eq!(resolved_x[2].label.as_ref().map(|r| r.plain_text()), Some(String::from("High")));
     assert!(resolved_x[0].coord_pt < resolved_x[1].coord_pt && resolved_x[1].coord_pt < resolved_x[2].coord_pt);
 
-    let mut s_chrome = ChartScene::new("chrome", "Chrome", 400.0, 280.0, None);
-    let compiled = render_graph_chrome(&gs.spec, &doc, &mut s_chrome, &opts);
     let texts = plain_texts(&s_chrome);
     assert!(texts.contains(&String::from("Cut1")));
     assert!(texts.contains(&String::from("75")));
@@ -145,11 +143,7 @@ fn additional_ticks_map_across_all_scales_broken_segments_and_gridlines() -> Tes
         .iter()
         .filter(|(a, b, dash)| *dash == LineDashStyle::Dotted && (a.0 - grid_x_75).abs() < 1e-3 && (b.0 - grid_x_75).abs() < 1e-3)
         .collect();
-    assert_eq!(
-        vertical_grid_at_75.len(),
-        compiled.y_axis.segments.len(),
-        "draw_gridline=true emits 1 dotted line per active perpendicular Y segment"
-    );
+    assert_eq!(vertical_grid_at_75.len(), gs.spec.y_axis.segments.len(), "draw_gridline=true emits 1 dotted line per active perpendicular Y segment");
 
     // 2. Broken Log10, Log2, Ln, Logit(Proportion & Percent), Probit, Reciprocal scales
     let scale_cases: Vec<ScaleCase> = vec![
@@ -230,19 +224,18 @@ fn additional_ticks_map_across_all_scales_broken_segments_and_gridlines() -> Tes
     ];
 
     for (scale, segs, add_ticks, expected, omitted) in scale_cases {
-        let mut spec = gs.spec.clone();
-        spec.x_axis.segments = segs
+        let mut case_gs = gs.clone();
+        case_gs.spec.canvas_size_pt = SizePt::new(360.0, 260.0);
+        case_gs.spec.x_axis.segments = segs
             .into_iter()
             .map(|(lo, hi)| AxisSegment { min: Some(lo), max: Some(hi), scale, length_share: 1.0, ..AxisSegment::default() })
             .collect();
-        spec.x_axis.additional_ticks = add_ticks;
-        spec.y_axis = AxisSpec::linear("Y");
-        spec.y_axis.segments[0].min = Some(0.0);
-        spec.y_axis.segments[0].max = Some(100.0);
+        case_gs.spec.x_axis.additional_ticks = add_ticks;
+        case_gs.spec.y_axis = AxisSpec::linear("Y");
+        case_gs.spec.y_axis.segments[0].min = Some(0.0);
+        case_gs.spec.y_axis.segments[0].max = Some(100.0);
 
-        let mut sc = ChartScene::new("scale-case", "Scale Case", 360.0, 260.0, None);
-        sc.plot_rect_pt = curvebook_chart::scales::compute_plot_rect(SizePt::new(360.0, 260.0), &spec, &opts);
-        render_axes_and_frame(&spec, &doc, &mut sc, &opts);
+        let sc = compile_graph(&case_gs, &doc)?;
         let sc_texts = plain_texts(&sc);
         for lbl in expected {
             assert!(sc_texts.contains(&String::from(lbl)), "expected additional tick '{lbl}' on scale {scale:?}; got {sc_texts:?}");

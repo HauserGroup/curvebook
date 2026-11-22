@@ -17,22 +17,23 @@ use curvebook_stats::column::summarize_pre_summarized_points;
 use curvebook_stats::common::{quantile_sorted, quartiles_hinge, sorted_finite};
 use curvebook_text::{LocaleNumberPolicy, RichText, format_pvalue_label, measure_text_pt, parse_markup};
 
+use crate::markers::{emit_marker, polygon_path};
 use crate::scene::{
     ChartError, ChartScene, ChartWarning, FillPaint, Path2D, PathCmd, PlottedPointMeta, PointPt, PositionedText, RectPt, ScenePrimitive,
     SourceCellId, StrokePaint, TextAnchor,
 };
 use crate::xy::{
     AxisErrorTarget, ChromeAxes, LegendItem, SegmentedAxis, compute_central_tendency, compute_raw_error_bounds, configure_plot_rect,
-    emit_directional_error_bar, emit_marker, expand_doc_text, format_point_value, is_log_like, polygon_path, primary_info_sheet_id,
-    render_cartesian_chrome, render_cartesian_chrome_full, render_legend_and_annotations, resolve_data_sheet, stroke_with_dash, summarize_subcells,
+    emit_directional_error_bar, expand_doc_text, format_point_value, is_log_like, primary_info_sheet_id, render_cartesian_chrome,
+    render_cartesian_chrome_full, render_legend_and_annotations, resolve_data_sheet, stroke_with_dash, summarize_subcells,
 };
 
 const KDE_SAMPLES: usize = 65;
 
 #[derive(Debug, Clone)]
-struct RawObs {
-    value: f64,
-    source: SourceCellId,
+pub(crate) struct RawObs {
+    pub(crate) value: f64,
+    pub(crate) source: SourceCellId,
 }
 
 #[derive(Debug, Clone)]
@@ -164,7 +165,7 @@ pub fn compile_column_or_grouped_graph(graph: &GraphSheet, doc: &ProjectDocument
             continue;
         }
         let target_y = if item.bind_to_right_y2 { y2_axis.as_ref().unwrap_or(&y_axis) } else { &y_axis };
-        let top_y = render_single_item(scene, &graph.spec, item, &x_axis, target_y, &mut stacks);
+        let top_y = render_single_item_oriented(scene, &graph.spec, item, &x_axis, target_y, &mut stacks, false);
         if let Some((_, x_pt)) = x_axis.map_value(item.x_pos) {
             bounds.push(RenderedSlotBound {
                 group_key: item.group_key,
@@ -294,7 +295,7 @@ fn compile_horizontal_column_or_grouped(
         if matches!(item.gdo, GraphicalDataObject::BeforeAfterLines { .. }) {
             continue;
         }
-        let right_x = render_horizontal_item(scene, &graph.spec, item, &x_axis, &y_axis, &mut stacks);
+        let right_x = render_single_item_oriented(scene, &graph.spec, item, &y_axis, &x_axis, &mut stacks, true);
         if let Some((_, y_pt)) = y_axis.map_value(item.x_pos) {
             horiz_bounds.push(HorizontalSlotBound {
                 group_key: item.group_key,
@@ -316,288 +317,6 @@ fn compile_horizontal_column_or_grouped(
     let legend_items = build_legend_items(graph, primary);
     render_legend_and_annotations(scene, graph, doc, &legend_items)?;
     Ok(())
-}
-
-fn render_horizontal_item(
-    scene: &mut ChartScene,
-    graph_spec: &GraphSpec,
-    item: &CategorySlotItem,
-    x_axis: &SegmentedAxis,
-    y_axis: &SegmentedAxis,
-    stacks: &mut StackAccum,
-) -> Option<f64> {
-    let (_, cy) = y_axis.map_value(item.x_pos)?;
-    let (_, y_lo_pt, _) = y_axis.map_clamped_to_nearest(item.x_pos - 0.5 * item.slot_width_data);
-    let (_, y_hi_pt, _) = y_axis.map_clamped_to_nearest(item.x_pos + 0.5 * item.slot_width_data);
-    let slot = SlotGeom { cx: cy, width_pt: (y_hi_pt - y_lo_pt).abs().max(4.0) };
-
-    match &item.gdo {
-        GraphicalDataObject::BeforeAfterLines { .. } => None,
-        GraphicalDataObject::BarWithReplicates { .. } => render_horizontal_bar_item(scene, graph_spec, item, slot, x_axis, stacks),
-        GraphicalDataObject::AlignedDotPlot { .. } | GraphicalDataObject::ScatterAndLine { .. } => {
-            render_horizontal_dot_item(scene, graph_spec, item, slot, x_axis)
-        }
-        GraphicalDataObject::BoxAndWhisker { .. } => render_box_whisker_item_oriented(scene, graph_spec, item, slot, x_axis, true),
-        GraphicalDataObject::Violin { .. } => render_violin_item_oriented(scene, graph_spec, item, slot, x_axis, true),
-        GraphicalDataObject::FloatingBar { .. } => render_floating_bar_item_oriented(scene, item, slot, x_axis, true),
-        GraphicalDataObject::KaplanMeierStep { .. } | GraphicalDataObject::PartsOfWhole { .. } => None,
-    }
-}
-
-fn render_horizontal_bar_item(
-    scene: &mut ChartScene,
-    graph_spec: &GraphSpec,
-    item: &CategorySlotItem,
-    slot: SlotGeom,
-    x_axis: &SegmentedAxis,
-    stacks: &mut StackAccum,
-) -> Option<f64> {
-    let GraphicalDataObject::BarWithReplicates { summary, fill_color, border_color, border_width_pt, replicate_overlay } = item.gdo else {
-        return None;
-    };
-    let cy = slot.cx;
-    let slot_h_pt = slot.width_pt;
-    let clip = scene.plot_rect_pt;
-    let (center, err_lo, err_hi, raw_obs) = match &item.payload {
-        ExtractedKind::PreSummarized { center, lower, upper, .. } => (*center, *lower, *upper, Vec::new()),
-        ExtractedKind::Raw(obs) => {
-            let vals = raw_values(obs);
-            let c = compute_central_tendency(&vals, summary, &mut scene.warnings)?;
-            let (lo, hi) = if let Some(eb) = &item.y_error_bars { compute_raw_error_bounds(&vals, c, eb.metric, 0.05) } else { (c, c) };
-            (c, lo, hi, obs.clone())
-        }
-    };
-
-    let (base_data, tip_data) = if let Some(sg) = item.stack_group {
-        if stacks.pos.len() <= sg {
-            stacks.pos.resize(sg + 1, 0.0);
-            stacks.neg.resize(sg + 1, 0.0);
-        }
-        if center >= 0.0 {
-            let b = stacks.pos[sg];
-            stacks.pos[sg] = b + center;
-            (b, b + center)
-        } else {
-            let b = stacks.neg[sg];
-            stacks.neg[sg] = b + center;
-            (b, b + center)
-        }
-    } else {
-        let b = if let Some(seg) = x_axis.segments.first() {
-            if is_log_like(seg.scale) {
-                if center <= 0.0 {
-                    scene.warnings.push(ChartWarning::new("non_positive_on_log_axis", format!("bar value {center} omitted on log axis")));
-                    return None;
-                }
-                seg.domain_min
-            } else if seg.domain_min <= 0.0 && seg.domain_max >= 0.0 {
-                0.0
-            } else {
-                seg.domain_min
-            }
-        } else {
-            0.0
-        };
-        (b, center)
-    };
-
-    let (_, base_px, _) = x_axis.map_clamped_to_nearest(base_data);
-    let (_, tip_px, tip_clipped) = x_axis.map_clamped_to_nearest(tip_data);
-    if tip_clipped && x_axis.segments.iter().any(|s| is_log_like(s.scale)) && tip_data <= 0.0 {
-        scene.warnings.push(ChartWarning::new("non_positive_on_log_axis", format!("bar value {tip_data} omitted on log axis")));
-        return None;
-    }
-
-    let x0 = base_px.min(tip_px);
-    let x1 = base_px.max(tip_px);
-    let bar_rect = RectPt::new(x0, cy - 0.5 * slot_h_pt, (x1 - x0).max(0.5), slot_h_pt);
-    let border = (border_width_pt > 0.0).then(|| StrokePaint::solid(border_color, border_width_pt));
-    scene.primitives.push(ScenePrimitive::Path {
-        path: Path2D::rect(bar_rect),
-        fill: Some(FillPaint::solid(fill_color)),
-        stroke: border,
-        clip: Some(clip),
-    });
-
-    let mut right_pt = x1;
-    if let Some(eb) = &item.y_error_bars {
-        let mut eb_use = *eb;
-        let shifted_lo = tip_data - (center - err_lo);
-        let shifted_hi = tip_data + (err_hi - center);
-        if item.stack_group.is_some() {
-            eb_use.direction = if center >= 0.0 { ErrorBarDirection::UpperOnly } else { ErrorBarDirection::LowerOnly };
-        }
-        emit_directional_error_bar(
-            scene,
-            cy,
-            tip_data,
-            shifted_lo,
-            shifted_hi,
-            AxisErrorTarget { axis: x_axis, is_vertical: false, spec: &eb_use, default_color: border_color, clip },
-        );
-        let (_, ehi_px, _) = x_axis.map_clamped_to_nearest(shifted_hi);
-        right_pt = right_pt.max(ehi_px);
-    }
-
-    if let Some(overlay) = replicate_overlay
-        && !raw_obs.is_empty()
-        && item.stack_group.is_none()
-    {
-        let dot_style = MarkerStyle {
-            shape: MarkerShape::Circle,
-            fill_mode: curvebook_palette::MarkerFillMode::Filled,
-            size_pt: 3.4,
-            fill_color: border_color,
-            stroke_color: Rgba8::WHITE,
-            stroke_width_pt: 0.4,
-        };
-        let ctx = HorizontalDotCtx {
-            spec: graph_spec,
-            override_series_index: item.override_series_index,
-            cy,
-            max_half_h: slot_h_pt * 0.40,
-            x_axis,
-            style: overlay,
-            marker: &dot_style,
-            series_label: &item.match_label,
-        };
-        if let Some(dot_right) = emit_horizontal_replicate_dots(scene, &raw_obs, &ctx) {
-            right_pt = right_pt.max(dot_right);
-        }
-    }
-    Some(right_pt)
-}
-
-fn render_horizontal_dot_item(
-    scene: &mut ChartScene,
-    graph_spec: &GraphSpec,
-    item: &CategorySlotItem,
-    slot: SlotGeom,
-    x_axis: &SegmentedAxis,
-) -> Option<f64> {
-    let (summary, marker, show_crossbar) = match &item.gdo {
-        GraphicalDataObject::AlignedDotPlot { summary, marker, show_crossbar } => (*summary, *marker, *show_crossbar),
-        GraphicalDataObject::ScatterAndLine { marker, .. } => {
-            let m = marker.unwrap_or(MarkerStyle { fill_color: item.default_color, stroke_color: item.default_color, ..MarkerStyle::default() });
-            (SummaryMeasure::Mean, m, false)
-        }
-        _ => return None,
-    };
-    let cy = slot.cx;
-    let slot_h_pt = slot.width_pt;
-    let clip = scene.plot_rect_pt;
-    let raw_obs = match &item.payload {
-        ExtractedKind::Raw(obs) => obs.clone(),
-        ExtractedKind::PreSummarized { center, source, .. } => vec![RawObs { value: *center, source: source.clone() }],
-    };
-    let ctx = HorizontalDotCtx {
-        spec: graph_spec,
-        override_series_index: item.override_series_index,
-        cy,
-        max_half_h: slot_h_pt * 0.42,
-        x_axis,
-        style: ReplicateOverlayStyle::DeterministicBeeswarm,
-        marker: &marker,
-        series_label: &item.match_label,
-    };
-    let mut right_pt = emit_horizontal_replicate_dots(scene, &raw_obs, &ctx).unwrap_or(clip.x);
-
-    let (center, lo, hi) = match &item.payload {
-        ExtractedKind::PreSummarized { center, lower, upper, .. } => (*center, *lower, *upper),
-        ExtractedKind::Raw(obs) => {
-            let vals = raw_values(obs);
-            let c = compute_central_tendency(&vals, summary, &mut scene.warnings)?;
-            let (l, h) = if let Some(eb) = &item.y_error_bars { compute_raw_error_bounds(&vals, c, eb.metric, 0.05) } else { (c, c) };
-            (c, l, h)
-        }
-    };
-    if let Some((_, c_px)) = x_axis.map_value(center) {
-        right_pt = right_pt.max(c_px);
-        if show_crossbar {
-            let half_bar = (slot_h_pt * 0.35).max(5.0);
-            scene.primitives.push(ScenePrimitive::Path {
-                path: Path2D::line(PointPt::new(c_px, cy - half_bar), PointPt::new(c_px, cy + half_bar)),
-                fill: None,
-                stroke: Some(StrokePaint::solid(Rgba8::BLACK, 1.5)),
-                clip: Some(clip),
-            });
-        }
-    }
-    if let Some(eb) = &item.y_error_bars {
-        emit_directional_error_bar(
-            scene,
-            cy,
-            center,
-            lo,
-            hi,
-            AxisErrorTarget { axis: x_axis, is_vertical: false, spec: eb, default_color: Rgba8::BLACK, clip },
-        );
-        let (_, ehi_px, _) = x_axis.map_clamped_to_nearest(hi);
-        right_pt = right_pt.max(ehi_px);
-    }
-    Some(right_pt)
-}
-
-struct HorizontalDotCtx<'a> {
-    spec: &'a GraphSpec,
-    override_series_index: Option<usize>,
-    cy: f64,
-    max_half_h: f64,
-    x_axis: &'a SegmentedAxis,
-    style: ReplicateOverlayStyle,
-    marker: &'a MarkerStyle,
-    series_label: &'a str,
-}
-
-fn emit_horizontal_replicate_dots(scene: &mut ChartScene, obs: &[RawObs], ctx: &HorizontalDotCtx<'_>) -> Option<f64> {
-    let clip = scene.plot_rect_pt;
-    let mut mapped: Vec<(f64, &RawObs, MarkerStyle)> = Vec::with_capacity(obs.len());
-    let mut pts_x: Vec<f64> = Vec::with_capacity(obs.len());
-    let mut max_dot_r = (ctx.marker.size_pt * 0.5).max(1.2);
-    for o in obs {
-        let resolved = if let Some(series_index) = ctx.override_series_index {
-            let Some(m) = crate::resolve_overridden_marker_for_cell(ctx.spec, series_index, o.source.row, Some(o.source.subcol), *ctx.marker) else {
-                continue;
-            };
-            m
-        } else {
-            *ctx.marker
-        };
-        if let Some((_, px)) = ctx.x_axis.map_value(o.value) {
-            max_dot_r = max_dot_r.max(resolved.size_pt * 0.5);
-            mapped.push((px, o, resolved));
-            pts_x.push(px);
-        }
-    }
-    if mapped.is_empty() {
-        return None;
-    }
-
-    if mapped.len() > MAX_REPLICATE_MARKERS {
-        let total = mapped.len();
-        let keep = subsample_sorted_indices(&pts_x, MAX_REPLICATE_MARKERS);
-        mapped = keep.iter().map(|&idx| mapped[idx]).collect();
-        pts_x = keep.iter().map(|&idx| pts_x[idx]).collect();
-        if !scene.warnings.iter().any(|w| w.code == "replicate_markers_capped") {
-            scene.warnings.push(ChartWarning::new(
-                "replicate_markers_capped",
-                format!("replicate overlay capped to {MAX_REPLICATE_MARKERS} representative markers (from {total} points)"),
-            ));
-        }
-    }
-
-    let offsets = match ctx.style {
-        ReplicateOverlayStyle::AlignedColumn => vec![0.0; mapped.len()],
-        ReplicateOverlayStyle::DeterministicBeeswarm => deterministic_beeswarm_offsets(&pts_x, ctx.max_half_h, max_dot_r),
-    };
-    let mut max_right = clip.x;
-    for (&(px, raw, resolved), dy) in mapped.iter().zip(offsets.iter()) {
-        let dot_pt = PointPt::new(px, ctx.cy + dy);
-        emit_marker(&mut scene.primitives, dot_pt, &resolved, Some(clip));
-        push_col_point_meta(scene, dot_pt, resolved.size_pt, raw, ctx.series_label);
-        max_right = max_right.max(px + resolved.size_pt * 0.5);
-    }
-    Some(max_right)
 }
 
 fn count_active_brackets(graph: &GraphSheet, doc: &ProjectDocument, items: &[CategorySlotItem]) -> usize {
@@ -1526,39 +1245,41 @@ fn render_before_after_connectors_oriented(
     }
 }
 
-fn render_single_item(
+fn render_single_item_oriented(
     scene: &mut ChartScene,
     graph_spec: &GraphSpec,
     item: &CategorySlotItem,
-    x_axis: &SegmentedAxis,
-    y_axis: &SegmentedAxis,
+    cat_axis: &SegmentedAxis,
+    val_axis: &SegmentedAxis,
     stacks: &mut StackAccum,
+    is_horizontal: bool,
 ) -> Option<f64> {
-    let (_, cx) = x_axis.map_value(item.x_pos)?;
-    let (_, x_left, _) = x_axis.map_clamped_to_nearest(item.x_pos - 0.5 * item.slot_width_data);
-    let (_, x_right, _) = x_axis.map_clamped_to_nearest(item.x_pos + 0.5 * item.slot_width_data);
-    let slot = SlotGeom { cx, width_pt: (x_right - x_left).abs().max(4.0) };
+    let (_, cx) = cat_axis.map_value(item.x_pos)?;
+    let (_, cat_lo, _) = cat_axis.map_clamped_to_nearest(item.x_pos - 0.5 * item.slot_width_data);
+    let (_, cat_hi, _) = cat_axis.map_clamped_to_nearest(item.x_pos + 0.5 * item.slot_width_data);
+    let slot = SlotGeom { cx, width_pt: (cat_hi - cat_lo).abs().max(4.0) };
 
     match &item.gdo {
         GraphicalDataObject::BeforeAfterLines { .. } => None,
-        GraphicalDataObject::BarWithReplicates { .. } => render_bar_item(scene, graph_spec, item, slot, y_axis, stacks),
+        GraphicalDataObject::BarWithReplicates { .. } => render_bar_item_oriented(scene, graph_spec, item, slot, val_axis, stacks, is_horizontal),
         GraphicalDataObject::AlignedDotPlot { .. } | GraphicalDataObject::ScatterAndLine { .. } => {
-            render_aligned_dot_item(scene, graph_spec, item, slot, y_axis)
+            render_aligned_dot_item_oriented(scene, graph_spec, item, slot, val_axis, is_horizontal)
         }
-        GraphicalDataObject::BoxAndWhisker { .. } => render_box_whisker_item(scene, graph_spec, item, slot, y_axis),
-        GraphicalDataObject::Violin { .. } => render_violin_item(scene, graph_spec, item, slot, y_axis),
-        GraphicalDataObject::FloatingBar { .. } => render_floating_bar_item(scene, item, slot, y_axis),
+        GraphicalDataObject::BoxAndWhisker { .. } => render_box_whisker_item_oriented(scene, graph_spec, item, slot, val_axis, is_horizontal),
+        GraphicalDataObject::Violin { .. } => render_violin_item_oriented(scene, graph_spec, item, slot, val_axis, is_horizontal),
+        GraphicalDataObject::FloatingBar { .. } => render_floating_bar_item_oriented(scene, item, slot, val_axis, is_horizontal),
         GraphicalDataObject::KaplanMeierStep { .. } | GraphicalDataObject::PartsOfWhole { .. } => None,
     }
 }
 
-fn render_bar_item(
+fn render_bar_item_oriented(
     scene: &mut ChartScene,
     graph_spec: &GraphSpec,
     item: &CategorySlotItem,
     slot: SlotGeom,
-    y_axis: &SegmentedAxis,
+    val_axis: &SegmentedAxis,
     stacks: &mut StackAccum,
+    is_horizontal: bool,
 ) -> Option<f64> {
     let GraphicalDataObject::BarWithReplicates { summary, fill_color, border_color, border_width_pt, replicate_overlay } = item.gdo else {
         return None;
@@ -1576,7 +1297,7 @@ fn render_bar_item(
         }
     };
 
-    let (base_data, top_data) = if let Some(sg) = item.stack_group {
+    let (base_data, tip_data) = if let Some(sg) = item.stack_group {
         if stacks.pos.len() <= sg {
             stacks.pos.resize(sg + 1, 0.0);
             stacks.neg.resize(sg + 1, 0.0);
@@ -1591,7 +1312,7 @@ fn render_bar_item(
             (b, b + center)
         }
     } else {
-        let b = if let Some(seg) = y_axis.segments.first() {
+        let b = if let Some(seg) = val_axis.segments.first() {
             if is_log_like(seg.scale) {
                 if center <= 0.0 {
                     scene.warnings.push(ChartWarning::new("non_positive_on_log_axis", format!("bar value {center} omitted on log axis")));
@@ -1609,16 +1330,20 @@ fn render_bar_item(
         (b, center)
     };
 
-    let (_, base_py, _) = y_axis.map_clamped_to_nearest(base_data);
-    let (_, top_py, top_clipped) = y_axis.map_clamped_to_nearest(top_data);
-    if top_clipped && y_axis.segments.iter().any(|s| is_log_like(s.scale)) && top_data <= 0.0 {
-        scene.warnings.push(ChartWarning::new("non_positive_on_log_axis", format!("bar value {top_data} omitted on log axis")));
+    let (_, base_pv, _) = val_axis.map_clamped_to_nearest(base_data);
+    let (_, tip_pv, tip_clipped) = val_axis.map_clamped_to_nearest(tip_data);
+    if tip_clipped && val_axis.segments.iter().any(|s| is_log_like(s.scale)) && tip_data <= 0.0 {
+        scene.warnings.push(ChartWarning::new("non_positive_on_log_axis", format!("bar value {tip_data} omitted on log axis")));
         return None;
     }
 
-    let y0 = base_py.min(top_py);
-    let y1 = base_py.max(top_py);
-    let bar_rect = RectPt::new(cx - 0.5 * slot_w_pt, y0, slot_w_pt, (y1 - y0).max(0.5));
+    let v0 = base_pv.min(tip_pv);
+    let v1 = base_pv.max(tip_pv);
+    let bar_rect = if is_horizontal {
+        RectPt::new(v0, cx - 0.5 * slot_w_pt, (v1 - v0).max(0.5), slot_w_pt)
+    } else {
+        RectPt::new(cx - 0.5 * slot_w_pt, v0, slot_w_pt, (v1 - v0).max(0.5))
+    };
     let border = (border_width_pt > 0.0).then(|| StrokePaint::solid(border_color, border_width_pt));
     scene.primitives.push(ScenePrimitive::Path {
         path: Path2D::rect(bar_rect),
@@ -1627,25 +1352,25 @@ fn render_bar_item(
         clip: Some(clip),
     });
 
-    let mut highest_pt = y0;
+    let mut extent_pt = if is_horizontal { v1 } else { v0 };
     if let Some(eb) = &item.y_error_bars {
         let mut eb_use = *eb;
-        let shifted_lo = top_data - (center - err_lo);
-        let shifted_hi = top_data + (err_hi - center);
+        let shifted_lo = tip_data - (center - err_lo);
+        let shifted_hi = tip_data + (err_hi - center);
         if item.stack_group.is_some() {
             eb_use.direction = if center >= 0.0 { ErrorBarDirection::UpperOnly } else { ErrorBarDirection::LowerOnly };
         }
         emit_directional_error_bar(
             scene,
             cx,
-            top_data,
+            tip_data,
             shifted_lo,
             shifted_hi,
-            AxisErrorTarget { axis: y_axis, is_vertical: true, spec: &eb_use, default_color: border_color, clip },
+            AxisErrorTarget { axis: val_axis, is_vertical: !is_horizontal, spec: &eb_use, default_color: border_color, clip },
         );
-        if !matches!(eb_use.direction, ErrorBarDirection::LowerOnly) {
-            let (_, ehi_py, _) = y_axis.map_clamped_to_nearest(shifted_hi);
-            highest_pt = highest_pt.min(ehi_py);
+        if is_horizontal || !matches!(eb_use.direction, ErrorBarDirection::LowerOnly) {
+            let (_, ehi_pv, _) = val_axis.map_clamped_to_nearest(shifted_hi);
+            extent_pt = if is_horizontal { extent_pt.max(ehi_pv) } else { extent_pt.min(ehi_pv) };
         }
     }
 
@@ -1666,24 +1391,27 @@ fn render_bar_item(
             override_series_index: item.override_series_index,
             cx,
             max_half_w: slot_w_pt * 0.40,
-            y_axis,
+            val_axis,
             style: overlay,
             marker: &dot_style,
             series_label: &item.match_label,
+            is_horizontal,
         };
-        let top_dot = emit_replicate_dots(scene, &raw_obs, &ctx);
-        highest_pt = highest_pt.min(top_dot);
+        if let Some(dot_ext) = emit_replicate_dots_oriented(scene, &raw_obs, &ctx) {
+            extent_pt = if is_horizontal { extent_pt.max(dot_ext) } else { extent_pt.min(dot_ext) };
+        }
     }
 
-    Some(highest_pt)
+    Some(extent_pt)
 }
 
-fn render_aligned_dot_item(
+fn render_aligned_dot_item_oriented(
     scene: &mut ChartScene,
     graph_spec: &GraphSpec,
     item: &CategorySlotItem,
     slot: SlotGeom,
-    y_axis: &SegmentedAxis,
+    val_axis: &SegmentedAxis,
+    is_horizontal: bool,
 ) -> Option<f64> {
     let (summary, marker, show_crossbar) = match &item.gdo {
         GraphicalDataObject::AlignedDotPlot { summary, marker, show_crossbar } => (*summary, *marker, *show_crossbar),
@@ -1705,12 +1433,14 @@ fn render_aligned_dot_item(
         override_series_index: item.override_series_index,
         cx,
         max_half_w: slot_w_pt * 0.42,
-        y_axis,
+        val_axis,
         style: ReplicateOverlayStyle::DeterministicBeeswarm,
         marker: &marker,
         series_label: &item.match_label,
+        is_horizontal,
     };
-    let mut highest_pt = emit_replicate_dots(scene, &raw_obs, &dot_ctx);
+    let fallback_ext = if is_horizontal { clip.x } else { clip.bottom() };
+    let mut extent_pt = emit_replicate_dots_oriented(scene, &raw_obs, &dot_ctx).unwrap_or(fallback_ext);
 
     let (center, lo, hi) = match &item.payload {
         ExtractedKind::PreSummarized { center, lower, upper, .. } => (*center, *lower, *upper),
@@ -1721,12 +1451,12 @@ fn render_aligned_dot_item(
             (c, l, h)
         }
     };
-    if let Some((_, c_py)) = y_axis.map_value(center) {
-        highest_pt = highest_pt.min(c_py);
+    if let Some((_, c_pv)) = val_axis.map_value(center) {
+        extent_pt = if is_horizontal { extent_pt.max(c_pv) } else { extent_pt.min(c_pv) };
         if show_crossbar {
             let half_bar = (slot_w_pt * 0.35).max(5.0);
             scene.primitives.push(ScenePrimitive::Path {
-                path: Path2D::line(PointPt::new(cx - half_bar, c_py), PointPt::new(cx + half_bar, c_py)),
+                path: Path2D::line(oriented_pt(cx, is_horizontal, -half_bar, c_pv), oriented_pt(cx, is_horizontal, half_bar, c_pv)),
                 fill: None,
                 stroke: Some(StrokePaint::solid(Rgba8::BLACK, 1.5)),
                 clip: Some(clip),
@@ -1740,12 +1470,12 @@ fn render_aligned_dot_item(
             center,
             lo,
             hi,
-            AxisErrorTarget { axis: y_axis, is_vertical: true, spec: eb, default_color: Rgba8::BLACK, clip },
+            AxisErrorTarget { axis: val_axis, is_vertical: !is_horizontal, spec: eb, default_color: Rgba8::BLACK, clip },
         );
-        let (_, ehi_py, _) = y_axis.map_clamped_to_nearest(hi);
-        highest_pt = highest_pt.min(ehi_py);
+        let (_, ehi_pv, _) = val_axis.map_clamped_to_nearest(hi);
+        extent_pt = if is_horizontal { extent_pt.max(ehi_pv) } else { extent_pt.min(ehi_pv) };
     }
-    Some(highest_pt)
+    Some(extent_pt)
 }
 
 fn sorted_obs_for_item(payload: &ExtractedKind) -> Vec<RawObs> {
@@ -1783,53 +1513,21 @@ fn oriented_span_rect(cx: f64, is_horizontal: bool, half_cat_w: f64, v0_pt: f64,
     }
 }
 
-struct OrientedDotCfg<'a> {
-    spec: &'a GraphSpec,
-    override_series_index: Option<usize>,
-    cx: f64,
-    max_half_w: f64,
-    val_axis: &'a SegmentedAxis,
-    marker: &'a MarkerStyle,
-    series_label: &'a str,
-    is_horizontal: bool,
-}
-
-fn emit_oriented_dots(scene: &mut ChartScene, obs: &[RawObs], cfg: &OrientedDotCfg<'_>) -> Option<f64> {
-    if cfg.is_horizontal {
-        let ctx = HorizontalDotCtx {
-            spec: cfg.spec,
-            override_series_index: cfg.override_series_index,
-            cy: cfg.cx,
-            max_half_h: cfg.max_half_w,
-            x_axis: cfg.val_axis,
-            style: ReplicateOverlayStyle::DeterministicBeeswarm,
-            marker: cfg.marker,
-            series_label: cfg.series_label,
-        };
-        emit_horizontal_replicate_dots(scene, obs, &ctx)
-    } else {
-        let dot_ctx = ReplicateDotCtx {
-            spec: cfg.spec,
-            override_series_index: cfg.override_series_index,
-            cx: cfg.cx,
-            max_half_w: cfg.max_half_w,
-            y_axis: cfg.val_axis,
-            style: ReplicateOverlayStyle::DeterministicBeeswarm,
-            marker: cfg.marker,
-            series_label: cfg.series_label,
-        };
-        Some(emit_replicate_dots(scene, obs, &dot_ctx))
-    }
-}
-
-fn render_box_whisker_item(
-    scene: &mut ChartScene,
-    graph_spec: &GraphSpec,
-    item: &CategorySlotItem,
-    slot: SlotGeom,
-    y_axis: &SegmentedAxis,
-) -> Option<f64> {
-    render_box_whisker_item_oriented(scene, graph_spec, item, slot, y_axis, false)
+/// Orientation-parameterized box-and-whisker configuration shared across column, grouped, and
+/// multivariate categorical summary renderers.
+pub(crate) struct BoxWhiskerRenderCfg<'a> {
+    pub(crate) spec: &'a GraphSpec,
+    pub(crate) override_series_index: Option<usize>,
+    pub(crate) cx: f64,
+    pub(crate) box_w: f64,
+    pub(crate) whiskers: WhiskerMethod,
+    pub(crate) fill_color: Rgba8,
+    pub(crate) stroke_color: Rgba8,
+    pub(crate) show_outliers: bool,
+    pub(crate) show_all_points: bool,
+    pub(crate) val_axis: &'a SegmentedAxis,
+    pub(crate) series_label: &'a str,
+    pub(crate) is_horizontal: bool,
 }
 
 fn render_box_whisker_item_oriented(
@@ -1843,16 +1541,40 @@ fn render_box_whisker_item_oriented(
     let GraphicalDataObject::BoxAndWhisker { whiskers, fill_color, stroke_color, show_outliers, show_all_points } = item.gdo else {
         return None;
     };
-    let cx = slot.cx;
-    let slot_w_pt = slot.width_pt;
-    let clip = scene.plot_rect_pt;
     let sorted_obs = sorted_obs_for_item(&item.payload);
+    render_box_whisker_obs(
+        scene,
+        &sorted_obs,
+        &BoxWhiskerRenderCfg {
+            spec: graph_spec,
+            override_series_index: item.override_series_index,
+            cx: slot.cx,
+            box_w: slot.width_pt * 0.72,
+            whiskers,
+            fill_color,
+            stroke_color,
+            show_outliers,
+            show_all_points,
+            val_axis,
+            series_label: &item.match_label,
+            is_horizontal,
+        },
+    )
+}
+
+pub(crate) fn render_box_whisker_obs(scene: &mut ChartScene, sorted_obs: &[RawObs], cfg: &BoxWhiskerRenderCfg<'_>) -> Option<f64> {
     if sorted_obs.is_empty() {
         return None;
     }
-    let sorted = raw_values(&sorted_obs);
+    let cx = cfg.cx;
+    let box_w = cfg.box_w;
+    let val_axis = cfg.val_axis;
+    let is_horizontal = cfg.is_horizontal;
+    let stroke_color = cfg.stroke_color;
+    let clip = scene.plot_rect_pt;
+    let sorted = raw_values(sorted_obs);
     let (q1, median, q3) = quartiles_hinge(&sorted)?;
-    let (w_lo, w_hi, outlier_indices) = compute_box_whiskers(&sorted, q1, q3, whiskers);
+    let (w_lo, w_hi, outlier_indices) = compute_box_whiskers(&sorted, q1, q3, cfg.whiskers);
 
     let (_, py_q1, c_q1) = val_axis.map_clamped_to_nearest(q1);
     let (_, py_med, c_med) = val_axis.map_clamped_to_nearest(median);
@@ -1863,7 +1585,6 @@ fn render_box_whisker_item_oriented(
         emit_clipped_domain_warning(&mut scene.warnings, val_axis, &[q1, median, q3, w_lo, w_hi]);
     }
 
-    let box_w = slot_w_pt * 0.72;
     let cap_half = box_w * 0.28;
     let stroke = StrokePaint::solid(stroke_color, 1.1);
 
@@ -1897,7 +1618,7 @@ fn render_box_whisker_item_oriented(
     let box_rect = oriented_span_rect(cx, is_horizontal, 0.5 * box_w, py_q1, py_q3);
     scene.primitives.push(ScenePrimitive::Path {
         path: Path2D::rect(box_rect),
-        fill: Some(FillPaint::solid(fill_color)),
+        fill: Some(FillPaint::solid(cfg.fill_color)),
         stroke: Some(stroke),
         clip: Some(clip),
     });
@@ -1917,25 +1638,26 @@ fn render_box_whisker_item_oriented(
         stroke_color,
         stroke_width_pt: 0.5,
     };
-    if show_all_points {
-        let cfg = OrientedDotCfg {
-            spec: graph_spec,
-            override_series_index: item.override_series_index,
+    if cfg.show_all_points {
+        let dot_ctx = ReplicateDotCtx {
+            spec: cfg.spec,
+            override_series_index: cfg.override_series_index,
             cx,
             max_half_w: box_w * 0.42,
             val_axis,
+            style: ReplicateOverlayStyle::DeterministicBeeswarm,
             marker: &dot_style,
-            series_label: &item.match_label,
+            series_label: cfg.series_label,
             is_horizontal,
         };
-        if let Some(dot_ext) = emit_oriented_dots(scene, &sorted_obs, &cfg) {
+        if let Some(dot_ext) = emit_replicate_dots_oriented(scene, sorted_obs, &dot_ctx) {
             extent_pt = if is_horizontal { extent_pt.max(dot_ext) } else { extent_pt.min(dot_ext) };
         }
-    } else if show_outliers {
+    } else if cfg.show_outliers {
         for idx in outlier_indices {
             let obs = &sorted_obs[idx];
-            let resolved = if let Some(series_index) = item.override_series_index {
-                let Some(m) = crate::resolve_overridden_marker_for_cell(graph_spec, series_index, obs.source.row, Some(obs.source.subcol), dot_style)
+            let resolved = if let Some(series_index) = cfg.override_series_index {
+                let Some(m) = crate::resolve_overridden_marker_for_cell(cfg.spec, series_index, obs.source.row, Some(obs.source.subcol), dot_style)
                 else {
                     continue;
                 };
@@ -1946,7 +1668,7 @@ fn render_box_whisker_item_oriented(
             if let Some((_, p_val)) = val_axis.map_value(obs.value) {
                 let dot_pt = oriented_pt(cx, is_horizontal, 0.0, p_val);
                 emit_marker(&mut scene.primitives, dot_pt, &resolved, Some(clip));
-                push_col_point_meta(scene, dot_pt, resolved.size_pt, obs, &item.match_label);
+                push_col_point_meta(scene, dot_pt, resolved.size_pt, obs, cfg.series_label);
                 extent_pt = if is_horizontal { extent_pt.max(p_val + resolved.size_pt * 0.5) } else { extent_pt.min(p_val) };
             }
         }
@@ -1982,14 +1704,21 @@ fn percentile_whiskers(sorted: &[f64], p_lo: f64, p_hi: f64) -> (f64, f64, Vec<u
     (w_lo, w_hi, outliers)
 }
 
-fn render_violin_item(
-    scene: &mut ChartScene,
-    graph_spec: &GraphSpec,
-    item: &CategorySlotItem,
-    slot: SlotGeom,
-    y_axis: &SegmentedAxis,
-) -> Option<f64> {
-    render_violin_item_oriented(scene, graph_spec, item, slot, y_axis, false)
+/// Orientation-parameterized KDE violin configuration shared across column, grouped, and
+/// multivariate categorical summary renderers.
+pub(crate) struct ViolinRenderCfg<'a> {
+    pub(crate) spec: &'a GraphSpec,
+    pub(crate) override_series_index: Option<usize>,
+    pub(crate) cx: f64,
+    pub(crate) half_max_w: f64,
+    pub(crate) fill_color: Rgba8,
+    pub(crate) stroke_color: Rgba8,
+    pub(crate) clip_to_observed_range: bool,
+    pub(crate) show_median_and_quartiles: bool,
+    pub(crate) half_violin_with_points: bool,
+    pub(crate) val_axis: &'a SegmentedAxis,
+    pub(crate) series_label: &'a str,
+    pub(crate) is_horizontal: bool,
 }
 
 fn render_violin_item_oriented(
@@ -2005,19 +1734,42 @@ fn render_violin_item_oriented(
     else {
         return None;
     };
-    let cx = slot.cx;
-    let slot_w_pt = slot.width_pt;
-    let clip = scene.plot_rect_pt;
     let sorted_obs = sorted_obs_for_item(&item.payload);
+    render_violin_obs(
+        scene,
+        &sorted_obs,
+        &ViolinRenderCfg {
+            spec: graph_spec,
+            override_series_index: item.override_series_index,
+            cx: slot.cx,
+            half_max_w: slot.width_pt * 0.45,
+            fill_color,
+            stroke_color,
+            clip_to_observed_range,
+            show_median_and_quartiles,
+            half_violin_with_points,
+            val_axis,
+            series_label: &item.match_label,
+            is_horizontal,
+        },
+    )
+}
+
+pub(crate) fn render_violin_obs(scene: &mut ChartScene, sorted_obs: &[RawObs], cfg: &ViolinRenderCfg<'_>) -> Option<f64> {
     if sorted_obs.is_empty() {
         return None;
     }
-    let sorted = raw_values(&sorted_obs);
+    let cx = cfg.cx;
+    let half_max_w = cfg.half_max_w;
+    let val_axis = cfg.val_axis;
+    let is_horizontal = cfg.is_horizontal;
+    let stroke_color = cfg.stroke_color;
+    let clip = scene.plot_rect_pt;
+    let sorted = raw_values(sorted_obs);
 
     let (q1, median, q3) = quartiles_hinge(&sorted)?;
-    let half_max_w = slot_w_pt * 0.45;
 
-    let profile = build_kde_profile(&sorted, q1, q3, clip_to_observed_range, val_axis);
+    let profile = build_kde_profile(&sorted, q1, q3, cfg.clip_to_observed_range, val_axis);
     if profile.len() < 2 {
         let (_, py, clipped) = val_axis.map_clamped_to_nearest(median);
         if clipped {
@@ -2039,7 +1791,7 @@ fn render_violin_item_oriented(
         if let Some((_, pv)) = val_axis.map_value(yv) {
             let dx = norm_d * half_max_w;
             right_pts.push(oriented_pt(cx, is_horizontal, dx, pv));
-            left_pts.push(oriented_pt(cx, is_horizontal, if half_violin_with_points { 0.0 } else { -dx }, pv));
+            left_pts.push(oriented_pt(cx, is_horizontal, if cfg.half_violin_with_points { 0.0 } else { -dx }, pv));
             extent_pt = if is_horizontal { extent_pt.max(pv) } else { extent_pt.min(pv) };
         }
     }
@@ -2052,17 +1804,17 @@ fn render_violin_item_oriented(
         }
         scene.primitives.push(ScenePrimitive::Path {
             path: polygon_path(&contour),
-            fill: Some(FillPaint::solid(fill_color)),
+            fill: Some(FillPaint::solid(cfg.fill_color)),
             stroke: Some(StrokePaint::solid(stroke_color, 1.0)),
             clip: Some(clip),
         });
     }
 
-    if show_median_and_quartiles {
+    if cfg.show_median_and_quartiles {
         for (val, width, dash) in [(median, 1.75, LineDashStyle::Solid), (q1, 0.9, LineDashStyle::Dashed), (q3, 0.9, LineDashStyle::Dashed)] {
             if let Some((_, pv)) = val_axis.map_value(val) {
                 let d_at_val = interpolate_profile_width(&profile, val) * half_max_w;
-                let off0 = if half_violin_with_points { 0.0 } else { -d_at_val.max(2.0) };
+                let off0 = if cfg.half_violin_with_points { 0.0 } else { -d_at_val.max(2.0) };
                 let off1 = d_at_val.max(2.0);
                 scene.primitives.push(ScenePrimitive::Path {
                     path: Path2D::line(oriented_pt(cx, is_horizontal, off0, pv), oriented_pt(cx, is_horizontal, off1, pv)),
@@ -2074,7 +1826,7 @@ fn render_violin_item_oriented(
         }
     }
 
-    if half_violin_with_points {
+    if cfg.half_violin_with_points {
         let dot_style = MarkerStyle {
             shape: MarkerShape::Circle,
             fill_mode: curvebook_palette::MarkerFillMode::Filled,
@@ -2084,17 +1836,18 @@ fn render_violin_item_oriented(
             stroke_width_pt: 0.4,
         };
         let half_center = cx - 0.52 * half_max_w;
-        let cfg = OrientedDotCfg {
-            spec: graph_spec,
-            override_series_index: item.override_series_index,
+        let dot_ctx = ReplicateDotCtx {
+            spec: cfg.spec,
+            override_series_index: cfg.override_series_index,
             cx: half_center,
             max_half_w: 0.40 * half_max_w,
             val_axis,
+            style: ReplicateOverlayStyle::DeterministicBeeswarm,
             marker: &dot_style,
-            series_label: &item.match_label,
+            series_label: cfg.series_label,
             is_horizontal,
         };
-        if let Some(dot_ext) = emit_oriented_dots(scene, &sorted_obs, &cfg) {
+        if let Some(dot_ext) = emit_replicate_dots_oriented(scene, sorted_obs, &dot_ctx) {
             extent_pt = if is_horizontal { extent_pt.max(dot_ext) } else { extent_pt.min(dot_ext) };
         }
     }
@@ -2169,8 +1922,16 @@ fn interpolate_profile_width(profile: &[(f64, f64)], target_y: f64) -> f64 {
     d0 + w * (d1 - d0)
 }
 
-fn render_floating_bar_item(scene: &mut ChartScene, item: &CategorySlotItem, slot: SlotGeom, y_axis: &SegmentedAxis) -> Option<f64> {
-    render_floating_bar_item_oriented(scene, item, slot, y_axis, false)
+/// Orientation-parameterized floating-bar configuration shared across column, grouped, and
+/// multivariate categorical summary renderers.
+pub(crate) struct FloatingBarRenderCfg<'a> {
+    pub(crate) cx: f64,
+    pub(crate) slot_w_pt: f64,
+    pub(crate) fill_color: Rgba8,
+    pub(crate) border_color: Rgba8,
+    pub(crate) border_width_pt: f64,
+    pub(crate) val_axis: &'a SegmentedAxis,
+    pub(crate) is_horizontal: bool,
 }
 
 fn render_floating_bar_item_oriented(
@@ -2183,9 +1944,6 @@ fn render_floating_bar_item_oriented(
     let GraphicalDataObject::FloatingBar { summary, fill_color, border_color, border_width_pt } = item.gdo else {
         return None;
     };
-    let cx = slot.cx;
-    let slot_w_pt = slot.width_pt;
-    let clip = scene.plot_rect_pt;
     let (lo, hi, mid) = match &item.payload {
         ExtractedKind::PreSummarized { center, lower, upper, .. } => (lower.min(*upper), lower.max(*upper), summary.map(|_| *center)),
         ExtractedKind::Raw(obs) => {
@@ -2200,43 +1958,57 @@ fn render_floating_bar_item_oriented(
             (min_v, max_v, mid_v)
         }
     };
+    render_floating_bar_bounds(
+        scene,
+        lo,
+        hi,
+        mid,
+        &FloatingBarRenderCfg { cx: slot.cx, slot_w_pt: slot.width_pt, fill_color, border_color, border_width_pt, val_axis, is_horizontal },
+    )
+}
 
-    let (_, py_lo, c_lo) = val_axis.map_clamped_to_nearest(lo);
-    let (_, py_hi, c_hi) = val_axis.map_clamped_to_nearest(hi);
+pub(crate) fn render_floating_bar_bounds(scene: &mut ChartScene, lo: f64, hi: f64, mid: Option<f64>, cfg: &FloatingBarRenderCfg<'_>) -> Option<f64> {
+    let clip = scene.plot_rect_pt;
+    let (_, py_lo, c_lo) = cfg.val_axis.map_clamped_to_nearest(lo);
+    let (_, py_hi, c_hi) = cfg.val_axis.map_clamped_to_nearest(hi);
     if c_lo || c_hi {
-        emit_clipped_domain_warning(&mut scene.warnings, val_axis, &[lo, hi]);
+        emit_clipped_domain_warning(&mut scene.warnings, cfg.val_axis, &[lo, hi]);
     }
-    let rect = oriented_span_rect(cx, is_horizontal, 0.5 * slot_w_pt, py_lo, py_hi);
-    let border = (border_width_pt > 0.0).then(|| StrokePaint::solid(border_color, border_width_pt));
+    let rect = oriented_span_rect(cfg.cx, cfg.is_horizontal, 0.5 * cfg.slot_w_pt, py_lo, py_hi);
+    let border = (cfg.border_width_pt > 0.0).then(|| StrokePaint::solid(cfg.border_color, cfg.border_width_pt));
     scene.primitives.push(ScenePrimitive::Path {
         path: Path2D::rect(rect),
-        fill: Some(FillPaint::solid(fill_color)),
+        fill: Some(FillPaint::solid(cfg.fill_color)),
         stroke: border,
         clip: Some(clip),
     });
 
     if let Some(m) = mid
-        && let Some((_, pv_m)) = val_axis.map_value(m)
+        && let Some((_, pv_m)) = cfg.val_axis.map_value(m)
     {
         scene.primitives.push(ScenePrimitive::Path {
-            path: Path2D::line(oriented_pt(cx, is_horizontal, -0.5 * slot_w_pt, pv_m), oriented_pt(cx, is_horizontal, 0.5 * slot_w_pt, pv_m)),
+            path: Path2D::line(
+                oriented_pt(cfg.cx, cfg.is_horizontal, -0.5 * cfg.slot_w_pt, pv_m),
+                oriented_pt(cfg.cx, cfg.is_horizontal, 0.5 * cfg.slot_w_pt, pv_m),
+            ),
             fill: None,
-            stroke: Some(StrokePaint::solid(border_color, border_width_pt.max(1.2))),
+            stroke: Some(StrokePaint::solid(cfg.border_color, cfg.border_width_pt.max(1.2))),
             clip: Some(clip),
         });
     }
-    Some(if is_horizontal { rect.right() } else { rect.y })
+    Some(if cfg.is_horizontal { rect.right() } else { rect.y })
 }
 
-struct ReplicateDotCtx<'a> {
-    spec: &'a GraphSpec,
-    override_series_index: Option<usize>,
-    cx: f64,
-    max_half_w: f64,
-    y_axis: &'a SegmentedAxis,
-    style: ReplicateOverlayStyle,
-    marker: &'a MarkerStyle,
-    series_label: &'a str,
+pub(crate) struct ReplicateDotCtx<'a> {
+    pub(crate) spec: &'a GraphSpec,
+    pub(crate) override_series_index: Option<usize>,
+    pub(crate) cx: f64,
+    pub(crate) max_half_w: f64,
+    pub(crate) val_axis: &'a SegmentedAxis,
+    pub(crate) style: ReplicateOverlayStyle,
+    pub(crate) marker: &'a MarkerStyle,
+    pub(crate) series_label: &'a str,
+    pub(crate) is_horizontal: bool,
 }
 
 fn push_col_point_meta(scene: &mut ChartScene, center_pt: PointPt, marker_size_pt: f64, obs: &RawObs, series_label: &str) {
@@ -2251,9 +2023,9 @@ fn push_col_point_meta(scene: &mut ChartScene, center_pt: PointPt, marker_size_p
 
 const MAX_REPLICATE_MARKERS: usize = 4_096;
 
-fn subsample_sorted_indices(pts_y: &[f64], cap: usize) -> Vec<usize> {
-    let mut order: Vec<usize> = (0..pts_y.len()).collect();
-    order.sort_by(|&a, &b| pts_y[a].total_cmp(&pts_y[b]).then_with(|| a.cmp(&b)));
+fn subsample_sorted_indices(pts_v: &[f64], cap: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..pts_v.len()).collect();
+    order.sort_by(|&a, &b| pts_v[a].total_cmp(&pts_v[b]).then_with(|| a.cmp(&b)));
     if order.len() <= cap || cap < 2 {
         return order.into_iter().take(cap).collect();
     }
@@ -2262,11 +2034,10 @@ fn subsample_sorted_indices(pts_y: &[f64], cap: usize) -> Vec<usize> {
     (0..cap).map(|i| order[((i as u64 * last) / denom) as usize]).collect()
 }
 
-fn emit_replicate_dots(scene: &mut ChartScene, obs: &[RawObs], ctx: &ReplicateDotCtx<'_>) -> f64 {
+pub(crate) fn emit_replicate_dots_oriented(scene: &mut ChartScene, obs: &[RawObs], ctx: &ReplicateDotCtx<'_>) -> Option<f64> {
     let clip = scene.plot_rect_pt;
-    let mut top_pt = clip.bottom();
     let mut mapped: Vec<(f64, &RawObs, MarkerStyle)> = Vec::with_capacity(obs.len());
-    let mut pts_y: Vec<f64> = Vec::with_capacity(obs.len());
+    let mut pts_v: Vec<f64> = Vec::with_capacity(obs.len());
     let mut max_dot_r = (ctx.marker.size_pt * 0.5).max(1.2);
     for o in obs {
         let resolved = if let Some(series_index) = ctx.override_series_index {
@@ -2277,22 +2048,21 @@ fn emit_replicate_dots(scene: &mut ChartScene, obs: &[RawObs], ctx: &ReplicateDo
         } else {
             *ctx.marker
         };
-        if let Some((_, py)) = ctx.y_axis.map_value(o.value) {
+        if let Some((_, pv)) = ctx.val_axis.map_value(o.value) {
             max_dot_r = max_dot_r.max(resolved.size_pt * 0.5);
-            mapped.push((py, o, resolved));
-            pts_y.push(py);
-            top_pt = top_pt.min(py);
+            mapped.push((pv, o, resolved));
+            pts_v.push(pv);
         }
     }
     if mapped.is_empty() {
-        return top_pt;
+        return None;
     }
 
     if mapped.len() > MAX_REPLICATE_MARKERS {
         let total = mapped.len();
-        let keep = subsample_sorted_indices(&pts_y, MAX_REPLICATE_MARKERS);
+        let keep = subsample_sorted_indices(&pts_v, MAX_REPLICATE_MARKERS);
         mapped = keep.iter().map(|&idx| mapped[idx]).collect();
-        pts_y = keep.iter().map(|&idx| pts_y[idx]).collect();
+        pts_v = keep.iter().map(|&idx| pts_v[idx]).collect();
         if !scene.warnings.iter().any(|w| w.code == "replicate_markers_capped") {
             scene.warnings.push(ChartWarning::new(
                 "replicate_markers_capped",
@@ -2303,14 +2073,16 @@ fn emit_replicate_dots(scene: &mut ChartScene, obs: &[RawObs], ctx: &ReplicateDo
 
     let offsets = match ctx.style {
         ReplicateOverlayStyle::AlignedColumn => vec![0.0; mapped.len()],
-        ReplicateOverlayStyle::DeterministicBeeswarm => deterministic_beeswarm_offsets(&pts_y, ctx.max_half_w, max_dot_r),
+        ReplicateOverlayStyle::DeterministicBeeswarm => deterministic_beeswarm_offsets(&pts_v, ctx.max_half_w, max_dot_r),
     };
-    for (&(py, raw, resolved), dx) in mapped.iter().zip(offsets.iter()) {
-        let dot_pt = PointPt::new(ctx.cx + dx, py);
+    let mut extent_pt = if ctx.is_horizontal { clip.x } else { clip.bottom() };
+    for (&(pv, raw, resolved), off) in mapped.iter().zip(offsets.iter()) {
+        let dot_pt = oriented_pt(ctx.cx, ctx.is_horizontal, *off, pv);
         emit_marker(&mut scene.primitives, dot_pt, &resolved, Some(clip));
         push_col_point_meta(scene, dot_pt, resolved.size_pt, raw, ctx.series_label);
+        extent_pt = if ctx.is_horizontal { extent_pt.max(pv + resolved.size_pt * 0.5) } else { extent_pt.min(pv - max_dot_r) };
     }
-    top_pt - max_dot_r
+    Some(extent_pt)
 }
 
 struct BeeswarmState {

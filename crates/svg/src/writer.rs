@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
-use std::io::Write as IoWrite;
 
 use curvebook_chart::{
     ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, SceneRasterImage, StrokePaint,
@@ -11,8 +10,7 @@ use curvebook_chart::{
 use curvebook_palette::Rgba8;
 use curvebook_text::metrics::split_rich_text_lines;
 use curvebook_text::{BUNDLED_FONTS, GlyphOutlineCmd, RichText, SpanScript, SpanSlope, SpanWeight, outline_rich_text};
-use flate2::Compression;
-use flate2::write::ZlibEncoder;
+use png::{BitDepth, ColorType, Encoder as PngEncoder};
 use quick_xml::encoding::Decoder;
 use quick_xml::events::{BytesEnd, BytesRef, BytesStart, Event};
 use quick_xml::{Reader as XmlReader, XmlVersion};
@@ -374,42 +372,16 @@ fn write_raster_image_element(ctx: &mut SvgRenderCtx<'_>, raster: &SceneRasterIm
 }
 
 fn encode_rgba_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, SvgError> {
-    let row_bytes = (width as usize) * 4;
-    let raw_len = row_bytes.saturating_add(1).saturating_mul(height as usize);
-    let mut scanlines = Vec::with_capacity(raw_len);
-    for row in rgba.chunks_exact(row_bytes) {
-        scanlines.push(0); // Filter type 0 (None)
-        scanlines.extend_from_slice(row);
+    let mut out = Vec::new();
+    {
+        let mut encoder = PngEncoder::new(&mut out, width, height);
+        encoder.set_color(ColorType::Rgba);
+        encoder.set_depth(BitDepth::Eight);
+        let mut writer = encoder.write_header().map_err(|err| SvgError::InvalidScene { message: format!("PNG header encoding failed: {err}") })?;
+        writer.write_image_data(rgba).map_err(|err| SvgError::InvalidScene { message: format!("PNG scanline encoding failed: {err}") })?;
+        writer.finish().map_err(|err| SvgError::InvalidScene { message: format!("PNG stream finish failed: {err}") })?;
     }
-
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(&scanlines).map_err(|err| SvgError::InvalidScene { message: format!("PNG scanline compression failed: {err}") })?;
-    let idat = encoder.finish().map_err(|err| SvgError::InvalidScene { message: format!("PNG scanline finish failed: {err}") })?;
-
-    let mut out = Vec::with_capacity(idat.len().saturating_add(96));
-    out.extend_from_slice(b"\x89PNG\r\n\x1a\n");
-
-    let mut ihdr = [0u8; 13];
-    ihdr[0..4].copy_from_slice(&width.to_be_bytes());
-    ihdr[4..8].copy_from_slice(&height.to_be_bytes());
-    ihdr[8] = 8;
-    ihdr[9] = 6;
-    push_png_chunk(&mut out, b"IHDR", &ihdr)?;
-    push_png_chunk(&mut out, b"IDAT", &idat)?;
-    push_png_chunk(&mut out, b"IEND", &[])?;
     Ok(out)
-}
-
-fn push_png_chunk(out: &mut Vec<u8>, chunk_type: &[u8; 4], data: &[u8]) -> Result<(), SvgError> {
-    let len = u32::try_from(data.len()).map_err(|_| SvgError::InvalidScene { message: String::from("PNG chunk exceeds 4 GiB") })?;
-    out.extend_from_slice(&len.to_be_bytes());
-    out.extend_from_slice(chunk_type);
-    out.extend_from_slice(data);
-    let mut hasher = crc32fast::Hasher::new();
-    hasher.update(chunk_type);
-    hasher.update(data);
-    out.extend_from_slice(&hasher.finalize().to_be_bytes());
-    Ok(())
 }
 
 fn write_stroke_attrs(ctx: &mut SvgRenderCtx<'_>, st: &StrokePaint) -> Result<(), SvgError> {
