@@ -105,6 +105,41 @@ struct DeferredLivePointerGesture {
 }
 
 /// Interactive `eframe::App` wrapping a [`DesktopHostRuntime`] session.
+fn has_non_null_field(params: &serde_json::Value, key: &str) -> bool {
+    params.get(key).is_some_and(|v| !v.is_null())
+}
+
+fn should_bypass_native_file_picker(command_id: &str, params: &serde_json::Value) -> bool {
+    match command_id {
+        "project.instantiateTemplate" => has_non_null_field(params, "bytes_base64") || has_non_null_field(params, "path"),
+        "graph.insertImage" | "layout.insertImage" => {
+            has_non_null_field(params, "path") || has_non_null_field(params, "bytes_base64") || has_non_null_field(params, "asset_id")
+        }
+        "table.importCsv" => has_non_null_field(params, "path") || has_non_null_field(params, "csv"),
+        "table.importPrism" | "table.importPzfx" => {
+            has_non_null_field(params, "path") || has_non_null_field(params, "bytes_base64") || has_non_null_field(params, "xml")
+        }
+        "export.svg"
+        | "file.export_svg"
+        | "graph.exportSvg"
+        | "export.pdf"
+        | "file.export_pdf"
+        | "graph.exportPdf"
+        | "export.png"
+        | "file.export_png"
+        | "graph.exportPng"
+        | "export.tiff"
+        | "graph.exportEmf"
+        | "layout.exportEmf"
+        | "table.exportCsv"
+        | "analysis.exportJson"
+        | "analysis.exportCsv"
+        | "result.generateReport"
+        | "project.saveTemplate" => has_non_null_field(params, "path"),
+        _ => false,
+    }
+}
+
 pub struct CurveBookNativeApp {
     runtime: DesktopHostRuntime,
     primary_window_id: DesktopWindowId,
@@ -114,6 +149,8 @@ pub struct CurveBookNativeApp {
     last_title: String,
     hovered_paths_active: bool,
     close_dialog_open: bool,
+    quit_in_progress: bool,
+    window_switcher_rects: std::collections::BTreeMap<DesktopWindowId, (egui::Rect, egui::Rect)>,
     close_confirmed: bool,
     status_banner: Option<String>,
     on_exit_cleanup: Option<CleanupHook>,
@@ -147,6 +184,8 @@ impl CurveBookNativeApp {
             last_title: String::new(),
             hovered_paths_active: false,
             close_dialog_open: false,
+            quit_in_progress: false,
+            window_switcher_rects: std::collections::BTreeMap::new(),
             close_confirmed: false,
             status_banner: None,
             on_exit_cleanup,
@@ -550,7 +589,7 @@ impl CurveBookNativeApp {
         for intent in raw_intents.intents().iter().cloned() {
             match &intent {
                 UiIntent::UiCommand { command_id, params } | UiIntent::EngineCommand { command_id, params }
-                    if is_desktop_host_routed_command(command_id) =>
+                    if is_desktop_host_routed_command(command_id) && !should_bypass_native_file_picker(command_id, params) =>
                 {
                     host_commands.push((command_id.clone(), params.clone()));
                 }
@@ -645,21 +684,33 @@ impl CurveBookNativeApp {
             UnsavedCloseAction::Save => match self.handle_native_save(window_id, false) {
                 Ok(()) => {
                     let still_dirty = self.runtime.window(window_id).map(|w| w.has_unsaved_changes()).unwrap_or(false);
-                    if !still_dirty {
+                    if still_dirty {
+                        self.quit_in_progress = false;
+                    } else {
                         match self.runtime.dispatch(DesktopHostEvent::WindowCloseRequested { window_id, force: false }) {
                             Ok(outcome) => self.apply_close_outcome(Some(ctx), &outcome),
-                            Err(err) => self.status_banner = Some(err),
+                            Err(err) => {
+                                self.quit_in_progress = false;
+                                self.status_banner = Some(err);
+                            }
                         }
                     }
                 }
-                Err(err) => self.status_banner = Some(err),
+                Err(err) => {
+                    self.quit_in_progress = false;
+                    self.status_banner = Some(err);
+                }
             },
             UnsavedCloseAction::DontSave => match self.runtime.dispatch(DesktopHostEvent::WindowCloseRequested { window_id, force: true }) {
                 Ok(outcome) => self.apply_close_outcome(Some(ctx), &outcome),
-                Err(err) => self.status_banner = Some(err),
+                Err(err) => {
+                    self.quit_in_progress = false;
+                    self.status_banner = Some(err);
+                }
             },
             UnsavedCloseAction::Cancel => {
                 self.close_dialog_open = false;
+                self.quit_in_progress = false;
             }
         }
     }
@@ -693,6 +744,11 @@ impl CurveBookNativeApp {
         if let Ok(win) = self.runtime.window_mut(bar_window_id) {
             let in_window_menus = win.chrome_state().menu_bar_visible;
             win.app_mut().host_draws_menu_bar = !in_window_menus;
+        }
+        self.render_window_switcher_strip(ui);
+        if !self.close_dialog_open && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Q)) {
+            let quit_win_id = self.active_window_id();
+            self.execute_menu_command(Some(&ctx), quit_win_id, "app.quit");
         }
 
         let input_window_id = self.active_window_id();
@@ -796,27 +852,133 @@ impl CurveBookNativeApp {
         self.close_dialog_open = false;
     }
 
+    /// Returns `true` when the multi-window switcher strip is currently displayed (`window_count() > 1`).
+    #[must_use]
+    pub fn is_window_switcher_visible(&self) -> bool {
+        self.runtime.window_count() > 1
+    }
+
+    /// Returns `(switch_button_rect, close_button_rect)` in logical points for `window_id` from the last rendered frame.
+    #[must_use]
+    pub fn window_switcher_button_rects(&self, window_id: DesktopWindowId) -> Option<(egui::Rect, egui::Rect)> {
+        self.window_switcher_rects.get(&window_id).copied()
+    }
+
+    fn window_switcher_labels(win: &crate::desktop_host::DesktopWindowSession, win_id: DesktopWindowId) -> (String, String) {
+        let base_name = win
+            .app()
+            .session()
+            .file_path()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .map_or_else(|| format!("Untitled {}", win_id.0), ToOwned::to_owned);
+        let dirty_mark = if win.has_unsaved_changes() { " *" } else { "" };
+        let recovered_mark = if win.recovered_from_crash() { " [Recovered]" } else { "" };
+        (format!("{base_name}{dirty_mark}{recovered_mark}"), base_name)
+    }
+
+    fn apply_window_switcher_action(&mut self, ctx: &egui::Context, switch_target: Option<DesktopWindowId>, close_target: Option<DesktopWindowId>) {
+        if let Some(target_id) = switch_target {
+            if let Ok(changed) = self.runtime.focus_window(target_id)
+                && changed
+            {
+                self.close_dialog_open = false;
+                self.quit_in_progress = false;
+                self.on_active_window_switched();
+            }
+            ctx.request_repaint();
+        }
+        if let Some(target_id) = close_target {
+            self.quit_in_progress = false;
+            match self.runtime.dispatch(DesktopHostEvent::WindowCloseRequested { window_id: target_id, force: false }) {
+                Ok(outcome) => self.apply_close_outcome(Some(ctx), &outcome),
+                Err(err) => self.status_banner = Some(err),
+            }
+            ctx.request_repaint();
+        }
+    }
+
+    fn render_window_switcher_strip(&mut self, ui: &mut egui::Ui) {
+        self.window_switcher_rects.clear();
+        if self.runtime.window_count() <= 1 {
+            return;
+        }
+        let ids = self.runtime.window_ids();
+        let focused_id = self.runtime.focused_window_id();
+        let mut switch_target: Option<DesktopWindowId> = None;
+        let mut close_target: Option<DesktopWindowId> = None;
+
+        egui::Panel::top("desktop.window_switcher").exact_size(26.0).show(ui, |ui| {
+            ui.horizontal_centered(|ui| {
+                ui.label(egui::RichText::new(format!("Windows ({}):", ids.len())).small().strong());
+                for win_id in ids {
+                    let Ok(win) = self.runtime.window(win_id) else {
+                        continue;
+                    };
+                    let (label, base_name) = Self::window_switcher_labels(win, win_id);
+                    let is_focused = focused_id == Some(win_id);
+
+                    let switch_btn = egui::Button::new(egui::RichText::new(&label).small()).selected(is_focused);
+                    let switch_resp = ui.add(switch_btn);
+                    if switch_resp.clicked() {
+                        switch_target = Some(win_id);
+                    }
+                    let close_resp = ui.small_button("×").on_hover_text(format!("Close {base_name}"));
+                    if close_resp.clicked() {
+                        close_target = Some(win_id);
+                    }
+                    self.window_switcher_rects.insert(win_id, (switch_resp.rect, close_resp.rect));
+                }
+            });
+        });
+
+        self.apply_window_switcher_action(ui.ctx(), switch_target, close_target);
+    }
+
+    fn focus_and_prompt_unsaved(&mut self, ctx: Option<&egui::Context>, window_id: DesktopWindowId) {
+        if self.runtime.focused_window_id() != Some(window_id) && self.runtime.focus_window(window_id).unwrap_or(false) {
+            self.on_active_window_switched();
+        }
+        if let Some(ctx) = ctx {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
+        self.close_dialog_open = true;
+    }
+
     fn apply_close_outcome(&mut self, ctx: Option<&egui::Context>, outcome: &DesktopEventOutcome) {
-        if matches!(outcome.close_disposition, Some(CloseDisposition::PromptUnsaved { .. })) {
+        if let Some(CloseDisposition::PromptUnsaved { window_id, .. }) = outcome.close_disposition {
+            self.focus_and_prompt_unsaved(ctx, window_id);
+            return;
+        }
+        if !matches!(outcome.close_disposition, Some(CloseDisposition::Closed)) {
+            return;
+        }
+        self.close_dialog_open = false;
+        if self.runtime.window_count() > 0 && self.quit_in_progress {
+            match self.runtime.request_app_quit(None, false) {
+                Ok(next_outcome) => {
+                    if let Some(CloseDisposition::PromptUnsaved { window_id, .. }) = next_outcome.close_disposition {
+                        self.focus_and_prompt_unsaved(ctx, window_id);
+                        return;
+                    }
+                }
+                Err(err) => {
+                    self.quit_in_progress = false;
+                    self.status_banner = Some(err);
+                }
+            }
+        }
+        if self.runtime.window_count() > 0 {
             if let Some(ctx) = ctx {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             }
-            self.close_dialog_open = true;
-            return;
-        }
-        if matches!(outcome.close_disposition, Some(CloseDisposition::Closed)) {
-            self.close_dialog_open = false;
-            if self.runtime.window_count() > 0 {
-                if let Some(ctx) = ctx {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                }
-                self.close_confirmed = false;
-                self.on_active_window_switched();
-            } else {
-                self.close_confirmed = true;
-                if let Some(ctx) = ctx {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
+            self.close_confirmed = false;
+            self.on_active_window_switched();
+        } else {
+            self.quit_in_progress = false;
+            self.close_confirmed = true;
+            if let Some(ctx) = ctx {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
     }
@@ -825,6 +987,7 @@ impl CurveBookNativeApp {
         if !ctx.input(|i| i.viewport().close_requested()) || self.close_confirmed {
             return;
         }
+        self.quit_in_progress = false;
         match self.runtime.dispatch(DesktopHostEvent::WindowCloseRequested { window_id, force: false }) {
             Ok(outcome) => {
                 self.apply_close_outcome(Some(ctx), &outcome);
@@ -835,6 +998,12 @@ impl CurveBookNativeApp {
                 self.close_dialog_open = true;
             }
         }
+    }
+
+    /// Dispatch a desktop host or UI menu command for the currently active window inside a live frame.
+    pub fn trigger_menu_action(&mut self, ctx: &egui::Context, command_id: &str) {
+        let win_id = self.active_window_id();
+        self.execute_menu_command(Some(ctx), win_id, command_id);
     }
 
     fn execute_menu_command(&mut self, ctx: Option<&egui::Context>, window_id: DesktopWindowId, command_id: &str) {
@@ -857,16 +1026,27 @@ impl CurveBookNativeApp {
             return;
         }
         if let Some(native_result) = self.try_handle_native_file_command_with_params(window_id, command_id, params) {
-            if let Err(err) = native_result {
-                self.status_banner = Some(err);
+            match native_result {
+                Ok(()) => {
+                    if self.active_window_id() != window_id {
+                        self.on_active_window_switched();
+                    }
+                }
+                Err(err) => self.status_banner = Some(err),
             }
             return;
+        }
+        if matches!(command_id, "app.quit" | "file.quit") {
+            self.quit_in_progress = true;
+        } else if matches!(command_id, "window.close" | "file.close") {
+            self.quit_in_progress = false;
         }
         match self.runtime.dispatch(DesktopHostEvent::MenuAction { window_id, command_id: command_id.to_string() }) {
             Ok(outcome) => {
                 if outcome.close_disposition.is_some() {
                     self.apply_close_outcome(ctx, &outcome);
                 } else if outcome.opened_window_id.is_some() {
+                    self.quit_in_progress = false;
                     self.on_active_window_switched();
                 }
                 if outcome.command_id.as_deref().is_some_and(|c| matches!(c, "edit.copy" | "edit.cut")) {
@@ -877,6 +1057,7 @@ impl CurveBookNativeApp {
                 }
             }
             Err(err) => {
+                self.quit_in_progress = false;
                 self.status_banner = Some(err);
             }
         }
@@ -1079,7 +1260,14 @@ impl CurveBookNativeApp {
                     && (menu_action_triggers_native_file_dialog(&cmd)
                         || matches!(
                             cmd.as_str(),
-                            "window.close" | "file.close" | "window.new" | "file.newWindow" | "ui.editParams.open" | "ui.analyze.open"
+                            "window.close"
+                                | "file.close"
+                                | "app.quit"
+                                | "file.quit"
+                                | "window.new"
+                                | "file.newWindow"
+                                | "ui.editParams.open"
+                                | "ui.analyze.open"
                         ))
                 {
                     self.execute_menu_command(Some(ctx), window_id, &cmd);
