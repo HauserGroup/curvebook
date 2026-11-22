@@ -1523,65 +1523,17 @@ pub fn run_multivariate_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mv_spec
                 },
             ));
         }
-        MultivariateSpec::Pca { standardize, parallel_analysis_seed } => {
+        MultivariateSpec::Pca { standardize, parallel_analysis_seed, pcr_outcome_column } => {
+            if let Some(outcome_col) = *pcr_outcome_column {
+                return run_pcr_branch(sheet, spec, *standardize, *parallel_analysis_seed, outcome_col);
+            }
             let (labels, rows) = extract_complete_matrix_rows(sheet, &spec.selected_data_sets)?;
             let n = rows.len();
             let p = labels.len();
             let flat: Vec<f64> = rows.into_iter().flat_map(|r| r.into_iter()).collect();
             let mat = DenseMatrix::from_row_major(n, p, flat)?;
             let pca = pca_analysis(&mat, &labels, *standardize, *parallel_analysis_seed)?;
-
-            if let Some(ev1) = pca.eigenvalues.first() {
-                push_scalar(&mut out, "PC1 eigenvalue", None, *ev1);
-            }
-            if let Some(vp1) = pca.variance_proportion.first() {
-                push_scalar(&mut out, "PC1 variance proportion", None, *vp1);
-            }
-            push_scalar(&mut out, "Kaiser retained PCs", None, pca.kaiser_components as f64);
-
-            let mut headers = vec![String::from("Eigenvalue"), String::from("Variance %"), String::from("Cumulative %")];
-            if pca.parallel_analysis_thresholds.is_some() {
-                headers.push(String::from("Parallel Analysis (95th pct)"));
-            }
-            let mut pc_labels = Vec::with_capacity(pca.eigenvalues.len());
-            let mut scree_rows = Vec::with_capacity(pca.eigenvalues.len());
-            for (idx, &ev) in pca.eigenvalues.iter().enumerate() {
-                pc_labels.push(format!("PC{}", idx + 1));
-                let mut r = vec![num_cell(ev), num_cell(100.0 * pca.variance_proportion[idx]), num_cell(100.0 * pca.cumulative_proportion[idx])];
-                if let Some(pa) = &pca.parallel_analysis_thresholds {
-                    r.push(opt_num_cell(pa.get(idx).copied()));
-                }
-                scree_rows.push(r);
-            }
-            out.tabs.push(build_tab(
-                "pca-eigenvalues",
-                "PCA eigenvalues & scree",
-                ResultTabKind::MainSummary,
-                headers,
-                pc_labels.clone(),
-                scree_rows,
-            ));
-
-            let load_rows: Vec<Vec<ResultCell>> = pca.loadings.iter().map(|r| r.iter().map(|&v| num_cell(v)).collect()).collect();
-            out.tabs.push(build_tab(
-                "pca-loadings",
-                "PCA component loadings",
-                ResultTabKind::ParametersAndConfidenceIntervals,
-                pc_labels,
-                labels,
-                load_rows,
-            ));
-
-            out.checklist.push(checklist_item(
-                "Component retention (Kaiser & Parallel Analysis)",
-                ChecklistStatus::Pass,
-                Some(format!(
-                    "Kaiser = {} PCs{}",
-                    pca.kaiser_components,
-                    pca.parallel_analysis_components.map_or(String::new(), |c| format!(", Parallel Analysis = {c} PCs"))
-                )),
-                "Horn's parallel analysis compares empirical eigenvalues to 95th-percentile eigenvalues of uncorrelated Gaussian matrices.",
-            ));
+            append_pca_outputs(&mut out, &pca, labels);
         }
         MultivariateSpec::Clustering { k_means_k, distance, linkage, k_sweep_max } => {
             if let Some(k_max_req) = k_sweep_max
@@ -2900,6 +2852,326 @@ fn extract_optional_columns(sheet: &DataSheet, selected: &[usize]) -> Result<Opt
 }
 
 type CompleteMatrixWithNames = (Vec<String>, Vec<String>, Vec<Vec<f64>>);
+
+fn append_pca_outputs(out: &mut ResultSheet, pca: &PcaResult, labels: Vec<String>) {
+    if let Some(ev1) = pca.eigenvalues.first() {
+        push_scalar(out, "PC1 eigenvalue", None, *ev1);
+    }
+    if let Some(vp1) = pca.variance_proportion.first() {
+        push_scalar(out, "PC1 variance proportion", None, *vp1);
+    }
+    push_scalar(out, "Kaiser retained PCs", None, pca.kaiser_components as f64);
+
+    let mut headers = vec![String::from("Eigenvalue"), String::from("Variance %"), String::from("Cumulative %")];
+    if pca.parallel_analysis_thresholds.is_some() {
+        headers.push(String::from("Parallel Analysis (95th pct)"));
+    }
+    let mut pc_labels = Vec::with_capacity(pca.eigenvalues.len());
+    let mut scree_rows = Vec::with_capacity(pca.eigenvalues.len());
+    for (idx, &ev) in pca.eigenvalues.iter().enumerate() {
+        pc_labels.push(format!("PC{}", idx + 1));
+        let mut r = vec![num_cell(ev), num_cell(100.0 * pca.variance_proportion[idx]), num_cell(100.0 * pca.cumulative_proportion[idx])];
+        if let Some(pa) = &pca.parallel_analysis_thresholds {
+            r.push(opt_num_cell(pa.get(idx).copied()));
+        }
+        scree_rows.push(r);
+    }
+    out.tabs.push(build_tab("pca-eigenvalues", "PCA eigenvalues & scree", ResultTabKind::MainSummary, headers, pc_labels.clone(), scree_rows));
+
+    let load_rows: Vec<Vec<ResultCell>> = pca.loadings.iter().map(|r| r.iter().map(|&v| num_cell(v)).collect()).collect();
+    out.tabs.push(build_tab("pca-loadings", "PCA component loadings", ResultTabKind::ParametersAndConfidenceIntervals, pc_labels, labels, load_rows));
+
+    out.checklist.push(checklist_item(
+        "Component retention (Kaiser & Parallel Analysis)",
+        ChecklistStatus::Pass,
+        Some(format!(
+            "Kaiser = {} PCs{}",
+            pca.kaiser_components,
+            pca.parallel_analysis_components.map_or(String::new(), |c| format!(", Parallel Analysis = {c} PCs"))
+        )),
+        "Horn's parallel analysis compares empirical eigenvalues to 95th-percentile eigenvalues of uncorrelated Gaussian matrices.",
+    ));
+}
+
+fn validate_pcr_column_indices(sheet: &DataSheet, selected: &[usize], outcome_col: usize) -> Result<Vec<usize>, StatsError> {
+    let raw = extract_raw_optional_columns(sheet)?;
+    if outcome_col >= raw.cols.len() {
+        return Err(StatsError::MissingColumn { index: outcome_col });
+    }
+    let is_excluded_role = |col: usize| {
+        raw.is_label.get(col).copied().unwrap_or(false)
+            || matches!(
+                &sheet.archetype,
+                TableArchetype::MultipleVariables(mv)
+                    if mv.variables.get(col).is_some_and(|v| matches!(v.role, VariableRole::Label | VariableRole::Categorical))
+            )
+    };
+    if is_excluded_role(outcome_col) {
+        return Err(StatsError::InvalidParameter { name: "pcr_outcome_column", value: outcome_col as f64 });
+    }
+    let mut pred_indices = Vec::new();
+    if selected.is_empty() {
+        for col in 0..raw.cols.len() {
+            if col != outcome_col && !is_excluded_role(col) && raw.cols[col].iter().any(Option::is_some) {
+                pred_indices.push(col);
+            }
+        }
+    } else {
+        for &col in selected {
+            if col >= raw.cols.len() {
+                return Err(StatsError::MissingColumn { index: col });
+            }
+            if col == outcome_col {
+                return Err(StatsError::InvalidParameter { name: "pcr_outcome_column", value: outcome_col as f64 });
+            }
+            if is_excluded_role(col) {
+                return Err(StatsError::InvalidParameter { name: "selected_data_sets", value: col as f64 });
+            }
+            if !pred_indices.contains(&col) {
+                pred_indices.push(col);
+            }
+        }
+    }
+    if pred_indices.len() < 2 {
+        return Err(StatsError::InsufficientSampleSize { context: "PCR predictors", required: 2, actual: pred_indices.len() });
+    }
+    Ok(pred_indices)
+}
+
+fn run_pcr_branch(
+    sheet: &DataSheet,
+    spec: &AnalysisSpec,
+    standardize: bool,
+    parallel_analysis_seed: Option<u64>,
+    outcome_col: usize,
+) -> Result<ResultSheet, StatsError> {
+    let pred_indices = validate_pcr_column_indices(sheet, &spec.selected_data_sets, outcome_col)?;
+    let p = pred_indices.len();
+    let mut combined_cols = pred_indices;
+    combined_cols.push(outcome_col);
+
+    let (mut all_labels, obs_labels, rows) = extract_complete_matrix_rows_with_names(sheet, &combined_cols)?;
+    let outcome_label = all_labels.pop().unwrap_or_else(|| format!("Column {}", outcome_col + 1));
+    let pred_labels = all_labels;
+    let n = rows.len();
+
+    let mut flat_x = Vec::with_capacity(n * p);
+    let mut y = Vec::with_capacity(n);
+    let mut col_vals = vec![Vec::with_capacity(n); p];
+    for row in &rows {
+        for (j, &xv) in row[..p].iter().enumerate() {
+            flat_x.push(xv);
+            col_vals[j].push(xv);
+        }
+        y.push(row[p]);
+    }
+    let y_moments = SummaryMoments::from_slice(&y)?;
+    let y_sd = y_moments.sample_sd().unwrap_or(0.0);
+    if !y_sd.is_finite() || y_sd <= 0.0 {
+        return Err(StatsError::ZeroVariance { context: "PCR outcome column" });
+    }
+
+    let x_mat = DenseMatrix::from_row_major(n, p, flat_x)?;
+    let pca = pca_analysis(&x_mat, &pred_labels, standardize, parallel_analysis_seed)?;
+
+    let k_avail = pca.loadings.first().map_or(0, Vec::len).min(pca.scores.first().map_or(0, Vec::len));
+    if k_avail == 0 {
+        return Err(StatsError::InsufficientSampleSize { context: "PCR components", required: 1, actual: 0 });
+    }
+    let k_raw = pca.parallel_analysis_components.unwrap_or(pca.kaiser_components).max(1);
+    let k_ret = k_raw.min(k_avail).min(n.saturating_sub(2)).max(1);
+    if n < k_ret + 2 {
+        return Err(StatsError::InsufficientSampleSize { context: "PCR observations", required: k_ret + 2, actual: n });
+    }
+
+    let mut score_data = Vec::with_capacity(n * (k_ret + 1));
+    for score_row in &pca.scores {
+        score_data.push(1.0);
+        score_data.extend_from_slice(&score_row[..k_ret]);
+    }
+    let score_mat = DenseMatrix::from_row_major(n, k_ret + 1, score_data)?;
+    let mut pc_names = Vec::with_capacity(k_ret + 1);
+    pc_names.push(String::from("Intercept"));
+    for c in 1..=k_ret {
+        pc_names.push(format!("PC{c}"));
+    }
+    let pc_reg = multiple_linear_regression(&score_mat, &y, &pc_names, true, true, spec.confidence_level)?;
+
+    let mut means = Vec::with_capacity(p);
+    let mut scales = Vec::with_capacity(p);
+    for vals in &col_vals {
+        let m = SummaryMoments::from_slice(vals)?;
+        means.push(m.mean);
+        let scale = if standardize { m.sample_sd().ok().filter(|&s| s.is_finite() && s > 0.0).unwrap_or(1.0) } else { 1.0 };
+        scales.push(scale);
+    }
+
+    // Build linear transform A ((p + 1) x (k_ret + 1)) mapping [gamma_0, gamma_1..gamma_k] -> [beta_0, beta_1..beta_p].
+    let mut transform = vec![vec![0.0_f64; k_ret + 1]; p + 1];
+    transform[0][0] = 1.0;
+    for j in 0..p {
+        for c in 0..k_ret {
+            let w_jc = pca.loadings[j][c] / scales[j];
+            transform[j + 1][c + 1] = w_jc;
+            transform[0][c + 1] -= means[j] * w_jc;
+        }
+    }
+
+    let df_res = pc_reg.df_residual;
+    let alpha = spec.confidence_level.alpha();
+    let p_fmt = spec.p_value_format;
+    let ci_header = format!("{}% CI", spec.confidence_level.percent());
+    let t_crit = if df_res > 0.0 { t_crit_two_sided(spec.confidence_level, df_res)? } else { f64::NAN };
+    let gamma: Vec<f64> = pc_reg.terms.iter().map(|t| t.estimate).collect();
+    let mut back_rows = Vec::with_capacity(p + 1);
+    let mut back_names = Vec::with_capacity(p + 1);
+    back_names.push(String::from("Intercept"));
+    back_names.extend(pred_labels.iter().cloned());
+
+    for a_row in &transform {
+        let est: f64 = a_row.iter().zip(&gamma).map(|(a, g)| a * g).sum();
+        let var_est = if pc_reg.cov_beta.len() == k_ret + 1 {
+            let mut v = 0.0_f64;
+            for (a_idx, &ai) in a_row.iter().enumerate() {
+                for (b_idx, &bi) in a_row.iter().enumerate() {
+                    v += ai * pc_reg.cov_beta[a_idx][b_idx] * bi;
+                }
+            }
+            v.max(0.0)
+        } else {
+            a_row.iter().zip(&pc_reg.terms).map(|(a, t)| (a * t.se).powi(2)).sum()
+        };
+        let se = var_est.sqrt();
+        let t_stat = if se > 0.0 { est / se } else { f64::NAN };
+        let p_val = if t_stat.is_finite() && df_res > 0.0 { student_t_two_sided_p(t_stat, df_res)? } else { f64::NAN };
+        let ci = if se.is_finite() && t_crit.is_finite() { finite_ci_cell(est - t_crit * se, est + t_crit * se) } else { ResultCell::Empty };
+        back_rows.push(vec![num_cell(est), num_cell(se), num_cell(t_stat), p_cell_at_alpha(p_val, p_fmt, alpha), ci]);
+    }
+
+    let rmse = (pc_reg.rss / (n as f64)).sqrt();
+    let mut out = init_result_sheet(spec)?;
+    push_scalar(&mut out, "PCR R squared", None, pc_reg.r_squared);
+    push_scalar(&mut out, "PCR Adjusted R squared", None, pc_reg.adjusted_r_squared);
+    push_scalar(&mut out, "PCR F statistic", None, pc_reg.f_statistic);
+    push_scalar(&mut out, "PCR F P value", None, pc_reg.f_p_value);
+    push_scalar(&mut out, "PCR Sy.x", None, pc_reg.residual_sd);
+    push_scalar(&mut out, "PCR RMSE", None, rmse);
+    push_scalar(&mut out, "PCR Retained components", None, k_ret as f64);
+    push_scalar(&mut out, "PCR Predictor count", None, p as f64);
+    push_scalar(&mut out, "PCR Observation count", None, n as f64);
+    append_pca_outputs(&mut out, &pca, pred_labels);
+
+    out.tabs.insert(
+        0,
+        build_tab(
+            "pcr-summary",
+            "PCR model summary",
+            ResultTabKind::MainSummary,
+            vec![String::from("Value")],
+            vec![
+                format!("Outcome ({outcome_label})"),
+                String::from("Retained components (k)"),
+                String::from("R squared"),
+                String::from("Adjusted R squared"),
+                String::from("F statistic"),
+                String::from("F P value"),
+                String::from("Residual SD (Sy.x)"),
+                String::from("RMSE"),
+                String::from("AIC"),
+                String::from("BIC"),
+                String::from("Observations (n)"),
+                String::from("Predictors (p)"),
+            ],
+            vec![
+                vec![ResultCell::Text(outcome_label.clone())],
+                vec![num_cell(k_ret as f64)],
+                vec![num_cell(pc_reg.r_squared)],
+                vec![num_cell(pc_reg.adjusted_r_squared)],
+                vec![num_cell(pc_reg.f_statistic)],
+                vec![p_cell_at_alpha(pc_reg.f_p_value, p_fmt, alpha)],
+                vec![num_cell(pc_reg.residual_sd)],
+                vec![num_cell(rmse)],
+                vec![num_cell(pc_reg.aic)],
+                vec![num_cell(pc_reg.bic)],
+                vec![num_cell(n as f64)],
+                vec![num_cell(p as f64)],
+            ],
+        ),
+    );
+    out.tabs.insert(
+        1,
+        build_tab(
+            "pcr-predictors",
+            "PCR predictor coefficients (original scale)",
+            ResultTabKind::ParametersAndConfidenceIntervals,
+            vec![String::from("Estimate"), String::from("SE"), String::from("t"), String::from("P value"), ci_header.clone()],
+            back_names,
+            back_rows,
+        ),
+    );
+    let comp_rows: Vec<Vec<ResultCell>> = pc_reg
+        .terms
+        .iter()
+        .map(|t| {
+            vec![
+                num_cell(t.estimate),
+                num_cell(t.se),
+                num_cell(t.t_statistic),
+                p_cell_at_alpha(t.p_value, p_fmt, alpha),
+                finite_ci_cell(t.ci.0, t.ci.1),
+                opt_num_cell(t.vif),
+            ]
+        })
+        .collect();
+    let comp_names: Vec<String> = pc_reg.terms.iter().map(|t| t.name.clone()).collect();
+    out.tabs.insert(
+        2,
+        build_tab(
+            "pcr-components",
+            "PCR retained principal component regression",
+            ResultTabKind::ParametersAndConfidenceIntervals,
+            vec![String::from("Estimate"), String::from("SE"), String::from("t"), String::from("P value"), ci_header, String::from("VIF")],
+            comp_names,
+            comp_rows,
+        ),
+    );
+    let diag_rows: Vec<Vec<ResultCell>> = (0..n)
+        .map(|i| {
+            vec![
+                num_cell(y[i]),
+                num_cell(pc_reg.fitted[i]),
+                num_cell(pc_reg.residuals[i]),
+                num_cell(pc_reg.leverage[i]),
+                num_cell(pc_reg.cooks_distance[i]),
+            ]
+        })
+        .collect();
+    out.tabs.insert(
+        3,
+        build_tab(
+            "pcr-diagnostics",
+            "PCR fitted values & residuals",
+            ResultTabKind::Diagnostics,
+            vec![
+                format!("Observed ({outcome_label})"),
+                String::from("Predicted Y"),
+                String::from("Residual"),
+                String::from("Leverage"),
+                String::from("Cook's D"),
+            ],
+            obs_labels,
+            diag_rows,
+        ),
+    );
+    out.checklist.push(checklist_item(
+        "Supervised PCR outcome exclusion (target leakage guard)",
+        ChecklistStatus::Pass,
+        Some(format!("Outcome = `{outcome_label}` (col {outcome_col}), retained PCs = {k_ret}/{k_avail}")),
+        "Outcome column was strictly excluded from PCA decomposition and regressed on retained orthogonal component scores.",
+    ));
+    sanitize_result_sheet_floats(&mut out)?;
+    Ok(out)
+}
 
 fn extract_complete_matrix_rows_with_names(sheet: &DataSheet, selected: &[usize]) -> Result<CompleteMatrixWithNames, StatsError> {
     let (labels, opt_cols, all_row_labels) = extract_optional_columns_with_row_labels(sheet, selected)?;

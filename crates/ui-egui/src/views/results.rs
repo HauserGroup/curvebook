@@ -235,14 +235,24 @@ fn handle_copy_action(app: &mut UiApp, state: &mut ResultsViewState, sheet_id: &
         let Some(rs) = app.document().result_sheets.iter().find(|r| r.id.as_str() == sheet_id) else {
             return UiEventOutcome::default();
         };
-        let active_idx = app.canvas_dialogs.result_view.active_tab_index;
+        let requested_idx = if !force_full && state.bound_sheet_id.as_deref() == Some(sheet_id) {
+            state.bound_tab_idx.unwrap_or(app.canvas_dialogs.result_view.active_tab_index)
+        } else {
+            app.canvas_dialogs.result_view.active_tab_index
+        };
         let fallback_tab =
             rs.tabs.is_empty().then(|| rs.analyzable_data.as_ref().map(|ds| datasheet_to_preview_tab(ds, &app.locale_preset))).flatten();
-        let tab_ref = rs.tabs.get(active_idx).or_else(|| rs.tabs.first()).or(fallback_tab.as_ref());
+        let (resolved_idx, tab_ref) = if let Some(tab) = rs.tabs.get(requested_idx) {
+            (requested_idx, Some(tab))
+        } else if let Some(tab) = rs.tabs.first() {
+            (0, Some(tab))
+        } else {
+            (0, fallback_tab.as_ref())
+        };
         let Some(tab) = tab_ref else {
             return UiEventOutcome::default();
         };
-        let sel = if force_full { None } else { state.selection_bounds(sheet_id, active_idx) };
+        let sel = if force_full { None } else { state.selection_bounds(sheet_id, resolved_idx) };
         let tsv = format_tab_selection_tsv(tab, rs.analysis.p_value_format, sel);
         (rs.id.clone(), tab.id.clone(), (tsv, sel))
     };

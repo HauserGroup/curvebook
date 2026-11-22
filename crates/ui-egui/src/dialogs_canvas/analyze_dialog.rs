@@ -538,7 +538,10 @@ impl AnalyzeDialogState {
         } else {
             Vec::new()
         };
-        self.pcr_outcome_column = None;
+        self.pcr_outcome_column = match &result.analysis.kind {
+            AnalysisKind::Multivariate(MultivariateSpec::Pca { pcr_outcome_column, .. }) => *pcr_outcome_column,
+            _ => None,
+        };
         self.correlation_all_pairs = true;
         self.correlation_heatmap = false;
         self.transform_x = None;
@@ -568,6 +571,25 @@ impl AnalyzeDialogState {
         }
     }
 
+    fn is_pca_or_pcr_entry(&self) -> bool {
+        matches!(self.selected_entry_id.as_deref(), Some("stats.pca" | "stats.pcr" | "pca" | "pcr"))
+    }
+
+    fn clear_overlapping_pcr_outcome(&mut self) {
+        if let Some(y) = self.pcr_outcome_column
+            && (self.pca_predictors.contains(&y) || self.selected_data_sets.contains(&y))
+        {
+            self.pcr_outcome_column = None;
+            if self.is_pca_or_pcr_entry() {
+                for cand in &mut self.variable_candidates {
+                    if cand.col_index == y {
+                        cand.is_response = false;
+                    }
+                }
+            }
+        }
+    }
+
     /// Toggle a MV predictor column for PCA/PCR while preserving disjoint PCR outcome selection.
     pub fn toggle_pca_predictor(&mut self, col: usize) {
         if let Some(pos) = self.pca_predictors.iter().position(|&c| c == col) {
@@ -581,10 +603,8 @@ impl AnalyzeDialogState {
         } else {
             self.selected_data_sets.push(col);
             self.selected_data_sets.sort_unstable();
-            if self.pcr_outcome_column == Some(col) {
-                self.pcr_outcome_column = None;
-            }
         }
+        self.clear_overlapping_pcr_outcome();
         for cand in &mut self.variable_candidates {
             cand.selected = self.selected_data_sets.contains(&cand.col_index);
         }
@@ -598,6 +618,12 @@ impl AnalyzeDialogState {
         self.pcr_outcome_column = if self.pcr_outcome_column == Some(col) { None } else { Some(col) };
         if let Some(outcome) = self.pcr_outcome_column {
             self.set_response_column(outcome);
+        } else {
+            for cand in &mut self.variable_candidates {
+                if cand.col_index == col {
+                    cand.is_response = false;
+                }
+            }
         }
         Ok(())
     }
@@ -659,6 +685,25 @@ impl AnalyzeDialogState {
                 }
             }
         }
+        let apply_predictor_cols = |this: &mut Self, key: &str, val: &Value| -> Result<(), String> {
+            let cols = parse_usize_list(val, key)?;
+            this.selected_data_sets = cols.clone();
+            if matches!(key, "pca_predictors" | "analyze.pca_predictors") || this.is_pca_or_pcr_entry() {
+                this.pca_predictors = cols;
+            }
+            this.clear_overlapping_pcr_outcome();
+            for cand in &mut this.variable_candidates {
+                cand.selected = this.selected_data_sets.contains(&cand.col_index);
+            }
+            Ok(())
+        };
+        for key in
+            ["selected_data_sets", "analyze.selected_data_sets", "analyze.transform.selected_data_sets", "pca_predictors", "analyze.pca_predictors"]
+        {
+            if let Some(val) = fields.get(key) {
+                apply_predictor_cols(self, key, val)?;
+            }
+        }
         // Apply method selectors before sub-parameters (`alpha`, `fdr_q_percent`, `rout_q`) so JSON
         // object key ordering never resets a caller-provided Q% or alpha (`RV-76`).
         for key in ["outlier_method", "analyze.outlier.method", "fit_method", "analyze.fit.method", "method"] {
@@ -686,6 +731,11 @@ impl AnalyzeDialogState {
                 | "analysis"
                 | "analyze.entry"
                 | "analyze.entries_list"
+                | "selected_data_sets"
+                | "analyze.selected_data_sets"
+                | "analyze.transform.selected_data_sets"
+                | "pca_predictors"
+                | "analyze.pca_predictors"
                 | "outlier_method"
                 | "analyze.outlier.method"
                 | "fit_method"
@@ -716,28 +766,36 @@ impl AnalyzeDialogState {
                         self.correlation_heatmap = b;
                     }
                 }
-                "selected_data_sets"
-                | "analyze.selected_data_sets"
-                | "analyze.transform.selected_data_sets"
-                | "pca_predictors"
-                | "analyze.pca_predictors" => {
-                    let cols = parse_usize_list(val, key)?;
-                    self.selected_data_sets = cols.clone();
-                    if matches!(key.as_str(), "pca_predictors" | "analyze.pca_predictors") {
-                        self.pca_predictors = cols;
-                    }
-                    for cand in &mut self.variable_candidates {
-                        cand.selected = self.selected_data_sets.contains(&cand.col_index);
-                    }
-                }
-                "pcr_outcome_column" | "response_column" | "analyze.pcr_outcome_column" => {
-                    if let Some(col) = val.as_u64().map(|n| n as usize) {
+                "pcr_outcome_column" | "analyze.pcr_outcome_column" => {
+                    if val.is_null() {
+                        self.pcr_outcome_column = None;
+                    } else {
+                        let col = parse_usize_min(val, key, 0)?;
                         if self.pca_predictors.contains(&col) || self.selected_data_sets.contains(&col) {
                             return Err(format!(
                                 "Column {col} is checked as a PCA input predictor and cannot be selected as PCR outcome (target leakage guard)."
                             ));
                         }
                         self.pcr_outcome_column = Some(col);
+                        self.set_response_column(col);
+                    }
+                }
+                "response_column" => {
+                    let is_pcr = matches!(self.selected_entry_id.as_deref(), Some("stats.pcr" | "pcr"));
+                    if val.is_null() {
+                        if is_pcr {
+                            self.pcr_outcome_column = None;
+                        }
+                    } else {
+                        let col = parse_usize_min(val, key, 0)?;
+                        if is_pcr {
+                            if self.pca_predictors.contains(&col) || self.selected_data_sets.contains(&col) {
+                                return Err(format!(
+                                    "Column {col} is checked as a PCA input predictor and cannot be selected as PCR outcome (target leakage guard)."
+                                ));
+                            }
+                            self.pcr_outcome_column = Some(col);
+                        }
                         self.set_response_column(col);
                     }
                 }
@@ -1137,6 +1195,10 @@ impl AnalyzeDialogState {
             var.selected = !var.selected;
         }
         self.selected_data_sets = self.variable_candidates.iter().filter(|v| v.selected).map(|v| v.col_index).collect();
+        if self.is_pca_or_pcr_entry() {
+            self.pca_predictors = self.selected_data_sets.clone();
+            self.clear_overlapping_pcr_outcome();
+        }
     }
 
     /// Assign a primary response column (for GLM / Cox / Factorial modeling on MV tables).
@@ -1248,8 +1310,9 @@ impl AnalyzeDialogState {
                 *linkage = self.cluster_linkage;
                 *k_sweep_max = self.cluster_k_sweep_max;
             }
-            AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize, .. }) => {
+            AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize, pcr_outcome_column, .. }) => {
                 *standardize = self.pca_standardize;
+                *pcr_outcome_column = self.pcr_outcome_column;
             }
             AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank }) => {
                 *spearman_rank = self.corr_spearman_rank;

@@ -592,6 +592,21 @@ fn evaluate_pairwise_widget(pw: &PairwiseComparisonsState, widget_id: &str) -> C
 }
 
 /// Evaluate dialog footer buttons (`ok`, `apply`, `cancel`, `back`, `next`, `create`, `preview`)
+/// with live [`crate::UiApp`] context (including brushed/grid fallback targets for
+/// `FormatSelectedPoints`).
+#[must_use]
+pub fn evaluate_dialog_button_for_app(app: &crate::UiApp, action: &str) -> Option<ControlEnablement> {
+    let norm = normalize_key(action);
+    if let ActiveDialog::FormatSelectedPoints { graph_sheet_id } = &app.canvas_dialogs.active_dialog
+        && matches!(norm.as_str(), "ok" | "apply" | "cancel")
+    {
+        let has_fallback = !crate::gui_actions::resolve_format_points_fallback_targets(app).is_empty();
+        return Some(evaluate_format_points_button_with_fallback(&app.canvas_dialogs, app.document(), graph_sheet_id, &norm, has_fallback));
+    }
+    evaluate_dialog_button(&app.canvas_dialogs, app.document(), action)
+}
+
+/// Evaluate dialog footer buttons (`ok`, `apply`, `cancel`, `back`, `next`, `create`, `preview`)
 /// for `ui.inspect` and `ui.answer_dialog` validation.
 #[must_use]
 pub fn evaluate_dialog_button(dialogs: &CanvasDialogState, doc: &ProjectDocument, action: &str) -> Option<ControlEnablement> {
@@ -734,16 +749,36 @@ fn evaluate_power_button(dialogs: &CanvasDialogState, button: &str) -> ControlEn
 }
 
 fn evaluate_format_points_button(dialogs: &CanvasDialogState, doc: &ProjectDocument, graph_id: &SheetId, button: &str) -> ControlEnablement {
+    evaluate_format_points_button_with_fallback(dialogs, doc, graph_id, button, false)
+}
+
+fn evaluate_format_points_button_with_fallback(
+    dialogs: &CanvasDialogState,
+    doc: &ProjectDocument,
+    graph_id: &SheetId,
+    button: &str,
+    has_brushed_fallback: bool,
+) -> ControlEnablement {
     if !matches!(button, "ok" | "apply") {
         return ControlEnablement::enabled();
     }
     if doc.graph_sheet(graph_id).is_none() {
         return ControlEnablement::disabled("Target graph sheet does not exist.");
     }
-    if dialogs.format_points.selected_points.is_empty() {
+    let fp = &dialogs.format_points;
+    if fp.selected_points.is_empty() && !has_brushed_fallback {
         return ControlEnablement::disabled("Select at least one data point before applying point formatting.");
     }
-    if !dialogs.format_points.clear_overrides && !dialogs.format_points.show_row_labels && dialogs.format_points.build_commit_intent().is_none() {
+    let has_override = fp.clear_overrides
+        || fp.show_row_labels
+        || fp.color.is_some()
+        || fp.fill_color.is_some()
+        || fp.symbol.is_some()
+        || fp.size_pt.is_some()
+        || fp.border_width_pt.is_some()
+        || fp.fill_mode.is_some()
+        || fp.hidden.is_some();
+    if !has_override {
         return ControlEnablement::disabled("Specify at least one visual override (color, shape, size, border, or row labels) or Clear.");
     }
     ControlEnablement::enabled()
@@ -894,7 +929,12 @@ fn evaluate_edit_params_widget(
             return r6_contingency_ci_selector(rows, cols, edit.contingency_relative_risk_checked || cont.compute_odds_and_risk_ratios, "Koopman");
         }
         if norm.contains("newcombewilson") {
-            return r6_contingency_ci_selector(rows, cols, edit.contingency_attributable_risk_checked, "Newcombe-Wilson");
+            return r6_contingency_ci_selector(
+                rows,
+                cols,
+                edit.contingency_attributable_risk_checked || cont.compute_odds_and_risk_ratios,
+                "Newcombe-Wilson",
+            );
         }
         if norm.contains("wilsonbrown") {
             return r6_contingency_ci_selector(rows, cols, cont.compute_sensitivity_specificity, "Wilson-Brown");
@@ -945,6 +985,9 @@ fn evaluate_analyze_widget(
     }
     if norm == "analyzekmtrendtest" || norm == "analyzekmlogrankfortrend" {
         return r_km_trend_test(survival_group_count(doc, source_sheet_id, analyze.mv_group_column));
+    }
+    if norm == "analyzefactorialresidualcovariance" {
+        return r1_sphericity_or_reml_control(analyze.factorial_repeated_measures != RepeatedMeasuresDesign::None);
     }
     if norm.contains("heatmap") {
         return r7_correlation_heatmap_toggle(analyze.correlation_all_pairs);

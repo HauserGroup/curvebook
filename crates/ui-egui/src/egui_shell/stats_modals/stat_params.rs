@@ -131,14 +131,17 @@ fn resolve_survival_banner(surv: &SurvivalAnalysisSpec) -> (String, String) {
 
 fn resolve_multivariate_banner(mv: &MultivariateSpec, alpha: f64) -> (String, String) {
     match mv {
-        MultivariateSpec::Pca { standardize, parallel_analysis_seed } => (
-            String::from("Parameters: Principal Component Analysis (PCA)"),
-            format!(
-                "{}{}",
-                if *standardize { "Correlation matrix (standardized)" } else { "Covariance matrix (centered)" },
-                if parallel_analysis_seed.is_some() { " + Horn parallel analysis" } else { "" }
-            ),
-        ),
+        MultivariateSpec::Pca { standardize, parallel_analysis_seed, pcr_outcome_column } => {
+            let title = if pcr_outcome_column.is_some() {
+                String::from("Parameters: Principal Component Regression (PCR)")
+            } else {
+                String::from("Parameters: Principal Component Analysis (PCA)")
+            };
+            let matrix = if *standardize { "Correlation matrix (standardized)" } else { "Covariance matrix (centered)" };
+            let pa = if parallel_analysis_seed.is_some() { " + Horn parallel analysis" } else { "" };
+            let outcome = pcr_outcome_column.map_or(String::new(), |col| format!(" | Outcome: col {}", col + 1));
+            (title, format!("{matrix}{pa}{outcome}"))
+        }
         MultivariateSpec::CorrelationMatrix { spearman_rank } => (
             String::from("Parameters: Correlation Matrix"),
             format!("{} pairwise matrix (α={alpha:.3})", if *spearman_rank { "Spearman rank r_s" } else { "Pearson product-moment r" }),

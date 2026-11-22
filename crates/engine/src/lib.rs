@@ -1490,6 +1490,44 @@ impl Session {
         }
     }
 
+    /// Collapse a sequence of mutating operations executed after `baseline` into a single atomic
+    /// undo step on `self`, returning `true` when the document or file path changed.
+    pub fn collapse_atomic_group(&mut self, mut baseline: Self) -> bool {
+        let mut mutated = self.doc != baseline.doc || self.file_path != baseline.file_path;
+        if mutated {
+            let pre_doc = std::mem::take(&mut baseline.doc);
+            let pre_path = baseline.file_path.take();
+            self.undo_stack = baseline.undo_stack;
+            self.push_undo_snapshot(pre_doc, pre_path);
+            self.redo_stack.clear();
+            self.dirty = true;
+        } else {
+            self.undo_stack = baseline.undo_stack;
+            self.redo_stack = baseline.redo_stack;
+            self.dirty = baseline.dirty;
+            mutated = false;
+        }
+        mutated
+    }
+
+    /// Execute a multi-step session operation `f` as a single atomic transaction: if `f` returns
+    /// `Err`, the entire [`Session`] (document, undo/redo stacks, dirty state, path) rolls back
+    /// cleanly; if `f` returns `Ok` and mutated the document, intermediate undo entries collapse into
+    /// a single undo step.
+    pub fn execute_atomic_group<T, E>(&mut self, f: impl FnOnce(&mut Self) -> Result<T, E>) -> Result<T, E> {
+        let baseline = self.clone();
+        match f(self) {
+            Ok(val) => {
+                let _ = self.collapse_atomic_group(baseline);
+                Ok(val)
+            }
+            Err(err) => {
+                *self = baseline;
+                Err(err)
+            }
+        }
+    }
+
     /// Execute an engine command with panic recovery and transactional undo recording.
     ///
     /// # Errors

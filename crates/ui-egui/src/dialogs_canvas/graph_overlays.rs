@@ -35,6 +35,10 @@ pub struct PairwiseComparisonsState {
     #[serde(default)]
     pub brackets_dirty: bool,
     #[serde(default)]
+    pub had_brackets_on_graph: bool,
+    #[serde(default)]
+    pub synced_brackets: Vec<PairwiseBracketSpec>,
+    #[serde(default)]
     pub had_cld_on_graph: bool,
     #[serde(default)]
     pub display_mode: PairwiseDisplayMode,
@@ -65,6 +69,8 @@ impl Default for PairwiseComparisonsState {
             hide_non_significant: true,
             brackets: Vec::new(),
             brackets_dirty: false,
+            had_brackets_on_graph: false,
+            synced_brackets: Vec::new(),
             had_cld_on_graph: false,
             display_mode: PairwiseDisplayMode::BracketsOnly,
             cld_enabled: false,
@@ -84,6 +90,8 @@ impl PairwiseComparisonsState {
         self.graph_sheet_id = Some(graph.id.clone());
         self.brackets = graph.spec.comparisons.clone();
         self.brackets_dirty = false;
+        self.had_brackets_on_graph = !graph.spec.comparisons.is_empty();
+        self.synced_brackets = graph.spec.comparisons.clone();
         self.available_result_ids = doc.result_sheets.iter().filter(|rs| !rs.pairwise_comparisons.is_empty()).map(|rs| rs.id.clone()).collect();
         self.display_mode = graph.spec.pairwise_display_mode;
         if let Some(cld) = &graph.spec.compact_letter_display {
@@ -202,36 +210,75 @@ impl PairwiseComparisonsState {
         };
     }
 
+    fn effective_brackets(&self) -> Vec<PairwiseBracketSpec> {
+        let style_changed = self.synced_brackets.first().is_some_and(|first| {
+            first.style != self.bracket_style || first.label_mode != self.label_mode || first.hide_if_non_significant != self.hide_non_significant
+        });
+        let mut out = self.brackets.clone();
+        if style_changed || self.synced_brackets.is_empty() {
+            for b in &mut out {
+                b.style = self.bracket_style;
+                b.label_mode = self.label_mode.clone();
+                b.hide_if_non_significant = self.hide_non_significant;
+            }
+        }
+        out
+    }
+
     #[must_use]
     fn brackets_commit_intent(&self) -> Option<ToolCommandIntent> {
         let id = self.graph_sheet_id.as_ref()?;
-        let res_id = self.selected_result_sheet_id.as_ref()?;
-        if self.brackets.is_empty() {
+        let effective = self.effective_brackets();
+        if effective.is_empty() {
+            if self.had_brackets_on_graph || !self.synced_brackets.is_empty() {
+                return Some(ToolCommandIntent::new(
+                    "graph.setSpec",
+                    json!({
+                        "sheet_id": id.as_str(),
+                        "comparisons": [],
+                    }),
+                ));
+            }
             return None;
         }
-        let style_str = match self.bracket_style {
-            BracketStyle::Square => "square",
-            BracketStyle::HalfTick => "half_tick",
-            BracketStyle::FlatLine => "flat_line",
-            BracketStyle::CurlyBrace => "curly_brace",
-        };
-        let mut payload = json!({
-            "sheet_id": id.as_str(),
-            "result_sheet_id": res_id.as_str(),
-            "clear_existing": true,
-            "style": style_str,
-            "label_mode": self.label_mode,
-            "hide_if_non_significant": self.hide_non_significant,
-            "significant_only": self.hide_non_significant,
-            "stroke_width_pt": 1.0,
-            "font_size_pt": 9.0,
-            "bracket_step_pt": 12.0,
-        });
-        if let ([first], Some(map)) = (self.brackets.as_slice(), payload.as_object_mut()) {
-            map.insert(String::from("group_a"), json!(first.group_a));
-            map.insert(String::from("group_b"), json!(first.group_b));
+        if effective.len() == 1
+            && self.synced_brackets.is_empty()
+            && !self.had_brackets_on_graph
+            && let Some(res_id) = self.selected_result_sheet_id.as_ref()
+            && let [first] = effective.as_slice()
+            && first.result_sheet_id == *res_id
+        {
+            let style_str = match self.bracket_style {
+                BracketStyle::Square => "square",
+                BracketStyle::HalfTick => "half_tick",
+                BracketStyle::FlatLine => "flat_line",
+                BracketStyle::CurlyBrace => "curly_brace",
+            };
+            let mut payload = json!({
+                "sheet_id": id.as_str(),
+                "result_sheet_id": res_id.as_str(),
+                "clear_existing": true,
+                "style": style_str,
+                "label_mode": self.label_mode,
+                "hide_if_non_significant": self.hide_non_significant,
+                "significant_only": self.hide_non_significant,
+                "stroke_width_pt": first.stroke_width_pt,
+                "font_size_pt": first.font_size_pt,
+                "bracket_step_pt": first.bracket_step_pt,
+            });
+            if let Some(map) = payload.as_object_mut() {
+                map.insert(String::from("group_a"), json!(first.group_a));
+                map.insert(String::from("group_b"), json!(first.group_b));
+            }
+            return Some(ToolCommandIntent::new("graph.addComparisonBrackets", payload));
         }
-        Some(ToolCommandIntent::new("graph.addComparisonBrackets", payload))
+        Some(ToolCommandIntent::new(
+            "graph.setSpec",
+            json!({
+                "sheet_id": id.as_str(),
+                "comparisons": effective,
+            }),
+        ))
     }
 
     /// Emit `graph.setCompactLetterDisplay` intent when CLD or pairwise display mode should be updated.
@@ -283,7 +330,6 @@ impl PairwiseComparisonsState {
     pub fn commit_intents(&self) -> Vec<ToolCommandIntent> {
         let mut intents = Vec::new();
         if self.brackets_dirty
-            && !self.brackets.is_empty()
             && let Some(brackets_intent) = self.brackets_commit_intent()
         {
             intents.push(brackets_intent);
@@ -424,6 +470,8 @@ pub struct BubblePlotInspectorState {
     pub show_convex_hulls: bool,
     pub show_confidence_ellipses: bool,
     pub available_columns: Vec<VariableCandidate>,
+    #[serde(default)]
+    pub x_level_order_override: Option<curvebook_doc::LevelOrderSpec>,
 }
 
 impl Default for BubblePlotInspectorState {
@@ -439,6 +487,7 @@ impl Default for BubblePlotInspectorState {
             show_convex_hulls: false,
             show_confidence_ellipses: false,
             available_columns: Vec::new(),
+            x_level_order_override: None,
         }
     }
 }
@@ -457,6 +506,9 @@ impl BubblePlotInspectorState {
             self.label_column = mv.label_column;
             self.show_convex_hulls = mv.show_convex_hulls;
             self.show_confidence_ellipses = mv.show_confidence_ellipses;
+            self.x_level_order_override = mv.x_level_order_override.clone();
+        } else {
+            self.x_level_order_override = None;
         }
     }
 
@@ -487,7 +539,7 @@ impl BubblePlotInspectorState {
             color: self.color_channel.clone(),
             size: self.size_channel,
             label_column: self.label_column,
-            x_level_order_override: None,
+            x_level_order_override: self.x_level_order_override.clone(),
             show_convex_hulls: self.show_convex_hulls,
             show_confidence_ellipses: self.show_confidence_ellipses,
         }

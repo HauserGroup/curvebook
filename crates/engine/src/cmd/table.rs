@@ -2369,6 +2369,7 @@ struct ClearCellsParams {
     all: Option<bool>,
     clear_x: Option<bool>,
     unlink: Option<bool>,
+    region_id: Option<String>,
     #[serde(flatten)]
     bounds: FlatRangeBounds,
     cells: Option<Vec<CoordInput>>,
@@ -2381,7 +2382,8 @@ fn schema_clear_cells() -> Value {
             ("sheet_id", non_empty_str_schema("Target data sheet identifier")),
             ("all", bool_schema("Clear all data cells across the sheet")),
             ("clear_x", bool_schema("When `all` is true, also clear X/time cells")),
-            ("unlink", bool_schema("Also detach all live linked regions on this sheet")),
+            ("unlink", bool_schema("Detach live linked regions on this sheet (all regions unless `region_id` is supplied)")),
+            ("region_id", non_empty_str_schema("When `unlink` is true, detach only the linked region matching this identifier")),
             ("range", cell_range_schema()),
             ("cells", array_schema("List of cell coordinates to clear", coord_object_schema(), None, None)),
             ("coord", coord_object_schema()),
@@ -2400,6 +2402,7 @@ fn schema_clear_cells() -> Value {
             ("sheet_id", &["sheetId"]),
             ("clear_x", &["clearX", "include_x", "includeX"]),
             ("unlink", &["break_links", "breakLinks"]),
+            ("region_id", &["regionId"]),
             ("range", &["selection"]),
             ("cells", &["coords"]),
             ("coord", &["coordinate"]),
@@ -2457,20 +2460,29 @@ fn run_clear_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
     let ds = require_unfrozen_data_sheet_mut(doc, &id)?;
 
     let unlink = p.unlink.unwrap_or(false);
+    let target_region_id = p.region_id.as_deref();
+    if unlink
+        && let Some(rid) = target_region_id
+        && !ds.linked_regions.iter().any(|r| r.id == rid)
+    {
+        return Err(EngineError::with_code(ErrorCode::NotFound, format!("linked region `{rid}` not found on `{}`", ds.id)));
+    }
+    let check_remaining_links = !unlink || target_region_id.is_some();
+    let skip_region_id = if unlink { target_region_id } else { None };
     let mut cleared = 0usize;
     if p.all.unwrap_or(false) {
-        if !unlink && let Some(region) = ds.linked_regions.first() {
+        if check_remaining_links && let Some(region) = ds.linked_regions.iter().find(|r| skip_region_id != Some(r.id.as_str())) {
             return Err(linked_region_conflict_error(&ds.id, region, "clear", None));
         }
         cleared = clear_all_cells_in_sheet(ds, p.clear_x.unwrap_or(false))?;
     } else if let Some(range) = range_opt {
         validate_cell_range_bounds(ds, range, false)?;
         ensure_mv_columns_editable(ds, range.start.col..=range.end.col)?;
-        if !unlink {
+        if check_remaining_links {
             for r in range.start.row..=range.end.row {
                 for c in range.start.col..=range.end.col {
                     for s in range.start.subcol..=range.end.subcol {
-                        ensure_coord_outside_linked_regions(ds, CellCoord::new(r, c, s), "clear")?;
+                        ensure_coord_outside_linked_regions_except(ds, CellCoord::new(r, c, s), "clear", skip_region_id)?;
                     }
                 }
             }
@@ -2486,8 +2498,10 @@ fn run_clear_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
     } else if let Some(coords) = p.cells {
         let resolved: Vec<CellCoord> = coords.iter().map(CoordInput::resolve).collect::<Result<_, _>>()?;
         ensure_mv_columns_editable(ds, resolved.iter().map(|c| c.col))?;
-        if !unlink {
-            ensure_coords_outside_linked_regions(ds, resolved.iter().copied(), "clear")?;
+        if check_remaining_links {
+            for coord in resolved.iter().copied() {
+                ensure_coord_outside_linked_regions_except(ds, coord, "clear", skip_region_id)?;
+            }
         }
         for coord in resolved {
             ds.set_cell(coord, Cell::empty())?;
@@ -2496,15 +2510,18 @@ fn run_clear_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
     } else {
         let coord = CoordInput { coord: p.coord, row: p.bounds.row, col: p.bounds.col, subcol: p.bounds.subcol }.resolve()?;
         ensure_mv_columns_editable(ds, std::iter::once(coord.col))?;
-        if !unlink {
-            ensure_coord_outside_linked_regions(ds, coord, "clear")?;
+        if check_remaining_links {
+            ensure_coord_outside_linked_regions_except(ds, coord, "clear", skip_region_id)?;
         }
         ds.set_cell(coord, Cell::empty())?;
         cleared = 1;
     }
 
     if unlink {
-        ds.linked_regions.clear();
+        match target_region_id {
+            Some(rid) => ds.linked_regions.retain(|r| r.id != rid),
+            None => ds.linked_regions.clear(),
+        }
     }
     let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     prune_shortened_series_overrides(doc, &id, &before_active);
@@ -3022,13 +3039,25 @@ fn linked_region_conflict_error(sheet_id: &SheetId, region: &curvebook_doc::Link
     .with_details(detail)
 }
 
-fn ensure_coord_outside_linked_regions(ds: &DataSheet, coord: CellCoord, action: &str) -> Result<(), EngineError> {
+fn ensure_coord_outside_linked_regions_except(
+    ds: &DataSheet,
+    coord: CellCoord,
+    action: &str,
+    skip_region_id: Option<&str>,
+) -> Result<(), EngineError> {
     for region in &ds.linked_regions {
+        if skip_region_id == Some(region.id.as_str()) {
+            continue;
+        }
         if coord_in_sheet_range(region.target_range, coord) {
             return Err(linked_region_conflict_error(&ds.id, region, action, Some(coord)));
         }
     }
     Ok(())
+}
+
+fn ensure_coord_outside_linked_regions(ds: &DataSheet, coord: CellCoord, action: &str) -> Result<(), EngineError> {
+    ensure_coord_outside_linked_regions_except(ds, coord, action, None)
 }
 
 fn ensure_coords_outside_linked_regions(ds: &DataSheet, coords: impl IntoIterator<Item = CellCoord>, action: &str) -> Result<(), EngineError> {
@@ -5788,6 +5817,57 @@ mod tests {
         assert_eq!(mv_undo.variables[0].title, "Dose");
         assert_eq!(mv_undo.variables[2].source, VariableSource::Calculated { formula: String::from("[Dose] / [Weight]") });
         assert_eq!(mv_undo.variables[2].cells[0].active_number(), Some(5.0));
+        Ok(())
+    }
+
+    #[test]
+    fn clear_cells_unlink_region_id_detaches_only_target_and_validates_before_mutating() -> Result<(), String> {
+        let mut s = Session::new();
+        s.execute("sheet.createData", json!({ "sheet_id": "src-a", "kind": "column", "cols": 1, "rows": 2 })).map_err(|e| e.to_string())?;
+        s.execute("sheet.createData", json!({ "sheet_id": "src-b", "kind": "column", "cols": 1, "rows": 2 })).map_err(|e| e.to_string())?;
+        s.execute(
+            "table.setCells",
+            json!({ "sheet_id": "src-a", "edits": [{ "row": 0, "col": 0, "value": 10.0 }, { "row": 1, "col": 0, "value": 11.0 }] }),
+        )
+        .map_err(|e| e.to_string())?;
+        s.execute(
+            "table.setCells",
+            json!({ "sheet_id": "src-b", "edits": [{ "row": 0, "col": 0, "value": 20.0 }, { "row": 1, "col": 0, "value": 21.0 }] }),
+        )
+        .map_err(|e| e.to_string())?;
+        s.execute("sheet.createData", json!({ "sheet_id": "dst", "kind": "column", "cols": 2, "rows": 2 })).map_err(|e| e.to_string())?;
+        s.execute("table.pasteLink", json!({ "target_sheet_id": "dst", "source_sheet_id": "src-a", "anchor": { "row": 0, "col": 0 } }))
+            .map_err(|e| e.to_string())?;
+        s.execute("table.pasteLink", json!({ "target_sheet_id": "dst", "source_sheet_id": "src-b", "anchor": { "row": 0, "col": 1 } }))
+            .map_err(|e| e.to_string())?;
+
+        let region_ids: Vec<String> = {
+            let ds = s.document().data_sheet(&SheetId::new("dst")).ok_or_else(|| String::from("missing dst"))?;
+            ds.linked_regions.iter().map(|r| r.id.clone()).collect()
+        };
+        assert_eq!(region_ids.len(), 2);
+        let first_id = region_ids[0].clone();
+        let second_id = region_ids[1].clone();
+
+        // Unknown region_id must fail with NotFound before clearing any cells or detaching existing regions.
+        let missing_err = s
+            .execute("table.clearCells", json!({ "sheet_id": "dst", "row": 0, "col": 0, "unlink": true, "regionId": "missing-region" }))
+            .expect_err("unknown region_id must fail");
+        assert_eq!(missing_err.code, ErrorCode::NotFound);
+        let dst_after_miss = s.document().data_sheet(&SheetId::new("dst")).ok_or_else(|| String::from("missing dst"))?;
+        assert_eq!(dst_after_miss.linked_regions.len(), 2);
+        assert_eq!(dst_after_miss.cell(CellCoord::new(0, 0, 0)).and_then(Cell::active_number), Some(10.0));
+
+        // Detaching first_id via cells: [] preserves the second linked region and existing values.
+        s.execute("table.clearCells", json!({ "sheet_id": "dst", "cells": [], "unlink": true, "region_id": first_id })).map_err(|e| e.to_string())?;
+        let dst_after_detach = s.document().data_sheet(&SheetId::new("dst")).ok_or_else(|| String::from("missing dst"))?;
+        assert_eq!(dst_after_detach.linked_regions.len(), 1);
+        assert_eq!(dst_after_detach.linked_regions[0].id, second_id);
+
+        // Detach all remaining regions when region_id is omitted.
+        s.execute("table.clearCells", json!({ "sheet_id": "dst", "cells": [], "unlink": true })).map_err(|e| e.to_string())?;
+        let dst_after_clear_all = s.document().data_sheet(&SheetId::new("dst")).ok_or_else(|| String::from("missing dst"))?;
+        assert!(dst_after_clear_all.linked_regions.is_empty());
         Ok(())
     }
 }

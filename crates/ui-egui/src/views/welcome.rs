@@ -529,6 +529,26 @@ fn cell_to_json_value(cell: &Cell) -> Option<Value> {
     }
 }
 
+fn run_sample_creation_tx<F>(app: &mut UiApp, f: F) -> Result<UiEventOutcome, String>
+where
+    F: FnOnce(&mut UiApp) -> Result<Value, String>,
+{
+    let prev_shell = app.snapshot_ui_shell();
+    match app.execute_atomic_group(f) {
+        Ok(payload) => Ok(UiEventOutcome {
+            handled: true,
+            action: String::from("welcome.create_sample"),
+            command_id: Some(String::from("sheet.createData")),
+            command_result: Some(payload),
+        }),
+        Err(err) => {
+            app.restore_ui_shell(prev_shell);
+            app.sync_views();
+            Err(err)
+        }
+    }
+}
+
 fn instantiate_sample_via_commands(
     app: &mut UiApp,
     fixture_id: &str,
@@ -541,18 +561,14 @@ fn instantiate_sample_via_commands(
     let title = title_override.unwrap_or(&fixture.title).to_owned();
     let sid = new_sheet_id.as_str();
     let create_params = build_sample_create_params(&fixture.archetype, sid, &title, auto_graph, auto_info);
-    let create_out = app.execute_command("sheet.createData", create_params).map_err(|e| e.to_string())?;
 
-    populate_sample_x_values(app, sid, &fixture.archetype)?;
-    populate_sample_titles(app, sid, &fixture.archetype)?;
-    populate_sample_cells(app, sid, &fixture.archetype)?;
-    populate_sample_mv_roles_and_formulas(app, sid, &fixture.archetype)?;
-
-    Ok(UiEventOutcome {
-        handled: true,
-        action: String::from("welcome.create_sample"),
-        command_id: Some(String::from("sheet.createData")),
-        command_result: Some(create_out.payload),
+    run_sample_creation_tx(app, |app| {
+        let create_out = app.execute_command("sheet.createData", create_params).map_err(|e| e.to_string())?;
+        populate_sample_x_values(app, sid, &fixture.archetype)?;
+        populate_sample_titles(app, sid, &fixture.archetype)?;
+        populate_sample_cells(app, sid, &fixture.archetype)?;
+        populate_sample_mv_roles_and_formulas(app, sid, &fixture.archetype)?;
+        Ok(create_out.payload)
     })
 }
 
@@ -863,4 +879,32 @@ fn execute_clone_pipeline(app: &mut UiApp, state: &mut WelcomeViewState) -> Resu
     })
 }
 
-// ============================================================================
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fa_sec15_11_sample_tx_rolls_back_session_and_shell_on_midway_failure() {
+        let mut app = UiApp::new();
+        let initial_data_len = app.document().data_sheets.len();
+        let initial_graph_len = app.document().graph_sheets.len();
+        let initial_undo = app.session.undo_depth();
+
+        let err = run_sample_creation_tx(&mut app, |app| {
+            app.execute_command(
+                "sheet.createData",
+                json!({ "sheet_id": "partial-sample", "kind": "column", "cols": 2, "rows": 4, "auto_graph": true, "auto_info": true }),
+            )
+            .map_err(|e| e.to_string())?;
+            assert!(app.document().data_sheet(&SheetId::from("partial-sample")).is_some());
+            Err(String::from("simulated populate_sample_cells failure"))
+        })
+        .expect_err("mid-creation failure must return Err");
+
+        assert!(err.contains("simulated populate_sample_cells failure"));
+        assert!(app.document().data_sheet(&SheetId::from("partial-sample")).is_none(), "partial DataSheet must be rolled back");
+        assert_eq!(app.document().data_sheets.len(), initial_data_len);
+        assert_eq!(app.document().graph_sheets.len(), initial_graph_len);
+        assert_eq!(app.session.undo_depth(), initial_undo);
+    }
+}

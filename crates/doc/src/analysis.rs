@@ -893,12 +893,16 @@ pub enum ClusterLinkage {
 /// Exploratory multivariate analysis or Rubin multiple-imputation specification (`crates/stats::multivariate`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum MultivariateSpec {
-    /// Principal Component Analysis via SVD of the centered (and optionally standardized) data matrix (Jolliffe 2002).
+    /// Principal Component Analysis via SVD of the centered (and optionally standardized) data matrix (Jolliffe 2002),
+    /// or supervised Principal Component Regression (PCR) when `pcr_outcome_column` is specified.
     Pca {
         /// When `true`, centers and scales each continuous variable to unit variance (correlation-matrix PCA); when `false`, centers only (covariance-matrix PCA).
         standardize: bool,
         /// Optional deterministic PRNG seed enabling Horn (1965) Monte Carlo parallel analysis eigenvalue retention thresholds; `None` uses Kaiser (`lambda > 1`) / cumulative-variance criteria only.
         parallel_analysis_seed: Option<u64>,
+        /// Optional zero-based continuous outcome variable column index enabling supervised Principal Component Regression (PCR); `None` runs unsupervised PCA.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pcr_outcome_column: Option<usize>,
     },
     /// Pairwise correlation matrix across continuous columns with two-sided *p*-values and Fisher-*z* confidence intervals.
     CorrelationMatrix {
@@ -2000,7 +2004,9 @@ impl AnalysisKind {
                 GlmFamily::Logistic => String::from("Multiple logistic regression"),
                 GlmFamily::Poisson => String::from("Multiple Poisson regression"),
             },
-            Self::Multivariate(MultivariateSpec::Pca { .. }) => String::from("Principal component analysis"),
+            Self::Multivariate(MultivariateSpec::Pca { pcr_outcome_column, .. }) => {
+                String::from(if pcr_outcome_column.is_some() { "Principal component regression" } else { "Principal component analysis" })
+            }
             Self::Multivariate(MultivariateSpec::CorrelationMatrix { .. }) => String::from("Correlation matrix"),
             Self::Multivariate(MultivariateSpec::Clustering { .. }) => String::from("Cluster analysis"),
             Self::Multivariate(MultivariateSpec::MultipleImputation { .. }) => String::from("Multiple imputation"),

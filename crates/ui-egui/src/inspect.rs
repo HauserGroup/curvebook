@@ -20,13 +20,73 @@ use crate::grid_view::format_cell_display;
 use crate::interaction::ViewportMetrics;
 use crate::menus::tooltips::{menu_bar_tooltips, toolbar_tooltips};
 use crate::modal_predicates::{
-    ControlEnablement, evaluate_dialog_button, evaluate_dialog_widget, evaluate_edit_params_tab, is_reml_mixed_effects_active, r_km_trend_test,
-    r1_paired_or_matched_allowed, r1_sphericity_or_reml_control, r1b_post_hoc_option_enabled, r1b_sphericity_correction, r2_assume_gaussian_allowed,
-    r3_control_column_picker, r4_two_group_diagnostics, r4_two_group_graph_differences, r4_two_group_nonparametric_options,
-    r4_two_group_welch_correction, r5_contingency_2x2_effect_sizes, r5_contingency_cochran_armitage_trend, r6_contingency_ci_selector,
-    r7_correlation_heatmap_toggle, r8_subcolumn_aggregation, r9_pvalue_precision_spinner, r10_pcr_outcome_column, source_table_shape,
-    survival_group_count,
+    ControlEnablement, evaluate_dialog_button_for_app, evaluate_dialog_widget, evaluate_edit_params_tab, is_reml_mixed_effects_active,
+    r_km_trend_test, r1_paired_or_matched_allowed, r1_sphericity_or_reml_control, r1b_post_hoc_option_enabled, r1b_sphericity_correction,
+    r2_assume_gaussian_allowed, r3_control_column_picker, r4_two_group_diagnostics, r4_two_group_graph_differences,
+    r4_two_group_nonparametric_options, r4_two_group_welch_correction, r5_contingency_2x2_effect_sizes, r5_contingency_cochran_armitage_trend,
+    r6_contingency_ci_selector, r7_correlation_heatmap_toggle, r8_subcolumn_aggregation, r9_pvalue_precision_spinner, r10_pcr_outcome_column,
+    source_table_shape, survival_group_count,
 };
+
+/// Canonical registry of active `textbox` widget IDs emitted by [`UiTreeSnapshot`] (`FA-SEC13-09`).
+pub(crate) const TEXTBOX_WIDGET_IDS: &[&str] = &[
+    "formula_bar.input",
+    "power.standardized_effect",
+    "power.within_pair_correlation",
+    "power.alpha",
+    "power.target_power",
+    "format_points.color",
+    "format_points.size_pt",
+    "analyze.search",
+    "analyze.transform.formula",
+    "analyze.transform.filter_formula",
+    "analyze.transform.selected_data_sets",
+    "analyze.transform.baseline_columns",
+    "analyze.expected_proportions",
+    "analyze.fit.equation_id",
+    "analyze.fit.custom_dsl",
+    "edit.custom_title",
+    "edit.transform.formula",
+    "edit.transform.filter_formula",
+    "edit.transform.selected_data_sets",
+    "edit.transform.baseline_columns",
+    "edit.contingency.expected_proportions",
+    "edit.glm.predictor_columns",
+    "edit.cox.predictor_columns",
+    "edit.fit.model_id",
+    "edit.fit.custom_dsl",
+    "import.title",
+    "import.x_title",
+    "import.tidy_csv",
+    "import.group_col",
+    "import.value_col",
+    "import.x_col",
+    "import.replicate_col",
+    "axes.title",
+    "axes.thresholds",
+    "axes.x_thresholds",
+    "axes.y_thresholds",
+    "create_graph.y_axis_title",
+    "create_graph.title",
+    "randomize.groups",
+    "randomize.block_sizes",
+    "randomize.title",
+    "sample.title",
+    "simulate.title",
+    "simulate.column_name",
+    "change_data.selected_data_sets",
+    "hook.search_query",
+    "exclude.note",
+    "palette.query",
+    "checkpoints.name",
+    "checkpoints.note",
+];
+
+/// Returns `true` when `wid` is a canonical `textbox` widget ID in [`TEXTBOX_WIDGET_IDS`].
+#[must_use]
+pub(crate) fn is_textbox_widget_id(wid: &str) -> bool {
+    TEXTBOX_WIDGET_IDS.contains(&wid)
+}
 use crate::power_wizard::PowerWizardStage;
 use curvebook_tools::SelectionQuickStats;
 
@@ -340,7 +400,7 @@ pub(crate) fn inspect_semantic_snapshot(app: &UiApp, _metrics: ViewportMetrics, 
         tabs: want("tabs").then(|| build_tabs_snapshot(app, doc)),
         canvas_elements: want("canvas").then(|| build_canvas_snapshot(app, doc)),
         grid_cells: want("grid").then(|| build_grid_cells_snapshot(app, doc)),
-        dialog: want("dialog").then(|| build_dialog_snapshot(app, doc)).flatten(),
+        dialog: want("dialog").then(|| build_dialog_snapshot(app)).flatten(),
     }
 }
 
@@ -467,7 +527,7 @@ fn build_tabs_snapshot(app: &UiApp, doc: &ProjectDocument) -> Vec<UiWidgetNode> 
             });
         }
     }
-    if let Some(dlg) = build_dialog_snapshot(app, doc) {
+    if let Some(dlg) = build_dialog_snapshot(app) {
         tabs.extend(dlg.tabs);
     }
     tabs
@@ -749,14 +809,14 @@ pub(crate) fn dialog_widget_descriptors(app: &UiApp) -> Option<DialogBuildParts>
     })
 }
 
-fn build_dialog_snapshot(app: &UiApp, doc: &ProjectDocument) -> Option<UiDialogSnapshot> {
+fn build_dialog_snapshot(app: &UiApp) -> Option<UiDialogSnapshot> {
     let dialogs = &app.canvas_dialogs;
     let (title, target_sheet_id, stage, tabs, controls, buttons_list) = dialog_widget_descriptors(app)?;
 
     let buttons = buttons_list
         .into_iter()
         .map(|(id, label)| {
-            let pred = evaluate_dialog_button(dialogs, doc, id).unwrap_or_else(ControlEnablement::enabled);
+            let pred = evaluate_dialog_button_for_app(app, id).unwrap_or_else(ControlEnablement::enabled);
             UiWidgetNode {
                 widget_id: format!("dialog.button.{id}"),
                 role: String::from("button"),
@@ -1394,7 +1454,12 @@ fn build_edit_params_dialog_nodes(
             "combobox",
             "AR CI (Newcombe-Wilson)",
             json!(ep.contingency_arr_ci_method),
-            r6_contingency_ci_selector(rows, cols, ep.contingency_attributable_risk_checked, "Newcombe-Wilson"),
+            r6_contingency_ci_selector(
+                rows,
+                cols,
+                ep.contingency_attributable_risk_checked || cont_spec.compute_odds_and_risk_ratios,
+                "Newcombe-Wilson",
+            ),
             pos(19),
         ),
         node(
@@ -2341,7 +2406,11 @@ fn build_generic_dialog_nodes(app: &UiApp, dialog: &ActiveDialog, bx: f64, by: f
     let mut controls = Vec::new();
     let (title, target) = match dialog {
         ActiveDialog::DuplicateAnalysisPrompt { source_sheet_id, .. } => {
-            controls.push(node("duplicate.choice", "combobox", "Duplicate handling", json!("create_new"), ControlEnablement::enabled(), pos(0)));
+            let choice_str = match app.view_shards.analyze_picker.duplicate_choice {
+                crate::views::analyze_picker::DuplicateChoice::ModifyExisting => "modify_existing",
+                crate::views::analyze_picker::DuplicateChoice::CreateNew => "create_new",
+            };
+            controls.push(node("duplicate.choice", "combobox", "Duplicate handling", json!(choice_str), ControlEnablement::enabled(), pos(0)));
             (insp_tr(app, "w6.view.modal.analysis_already_exists", "Analysis Already Exists"), Some(source_sheet_id))
         }
         ActiveDialog::ChangeDataAnalyzed { result_sheet_id } => {
@@ -2503,4 +2572,46 @@ pub(crate) fn active_dialog_slug(dialog: &ActiveDialog) -> String {
 #[must_use]
 pub fn table_dimensions_summary(arch: &TableArchetype) -> (usize, usize) {
     (arch.row_count(), arch.column_count())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::UiInputEvent;
+    use curvebook_doc::{AnalysisSpec, ContingencySpec, ContingencyTable, DataSheet, ResultSheet};
+    use curvebook_engine::Session;
+
+    #[test]
+    fn semantic_inspect_newcombe_wilson_matches_odds_ratio_flag() -> Result<(), String> {
+        let mut doc = ProjectDocument::new("Semantic Inspect Contingency").map_err(|e| format!("{e}"))?;
+        let ds = DataSheet::new("cont-1", "2x2", TableArchetype::Contingency(ContingencyTable::new(2, 2).map_err(|e| format!("{e}"))?))
+            .map_err(|e| format!("{e}"))?;
+        doc.add_data_sheet(ds).map_err(|e| format!("{e}"))?;
+        let cont = ContingencySpec { compute_odds_and_risk_ratios: true, ..ContingencySpec::default() };
+        let spec = AnalysisSpec::new("res-cont", "cont-1", AnalysisKind::Contingency(cont)).map_err(|e| format!("{e}"))?;
+        doc.add_result_sheet(ResultSheet::new(spec).map_err(|e| format!("{e}"))?).map_err(|e| format!("{e}"))?;
+
+        let mut app = UiApp::from_session(Session::from_document(doc));
+        app.canvas_dialogs.open_edit_parameters(&app.document().clone(), &SheetId::from("res-cont"));
+        let snap = inspect_semantic_snapshot(&app, ViewportMetrics::default(), Some("dialog"), false);
+        let node = snap.find_widget("edit.contingency.ci.newcombe_wilson").ok_or_else(|| String::from("missing semantic newcombe_wilson node"))?;
+        let pred = evaluate_dialog_widget(&app.canvas_dialogs, app.document(), "edit.contingency.ci.newcombe_wilson");
+        if !node.enabled || !pred.enabled {
+            return Err(format!("expected semantic node & predicate enabled: node={node:?}, pred={pred:?}"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn all_registered_textbox_ids_accept_text_input() -> Result<(), String> {
+        let mut app = UiApp::new();
+        for &wid in TEXTBOX_WIDGET_IDS {
+            app.focus_widget_id = Some(wid.to_owned());
+            let out = crate::dispatch_ui_event(&mut app, UiInputEvent::TextInput { text: String::from("1") }, ViewportMetrics::default())?;
+            if !out.handled || out.action == "text_input_ignored" {
+                return Err(format!("registered textbox `{wid}` ignored TextInput: {out:?}"));
+            }
+        }
+        Ok(())
+    }
 }

@@ -919,7 +919,35 @@ impl PowerWizardState {
         self.recalculate().map_err(|msg| EngineError::with_code(ErrorCode::BadInput, msg))?;
         let res = self.result.clone().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "power calculation produced no result"))?;
 
-        let curve_rows = build_power_curve_table_rows(&res);
+        let mut undoable_steps = 0_usize;
+        let run_result = self.execute_create_steps(&res, &mut |cmd_id, params| {
+            let outcome = exec(cmd_id, params)?;
+            if outcome.mutated {
+                undoable_steps = undoable_steps.saturating_add(1);
+            }
+            Ok(outcome)
+        });
+        match run_result {
+            Ok(created) => {
+                self.created_sheets = Some(created.clone());
+                Ok(created)
+            }
+            Err(err) => {
+                for _ in 0..undoable_steps {
+                    let _ = exec("edit.undo", json!({}));
+                }
+                self.created_sheets = None;
+                Err(err)
+            }
+        }
+    }
+
+    fn execute_create_steps(
+        &self,
+        res: &PowerAnalysisResult,
+        exec: &mut dyn FnMut(&str, Value) -> Result<curvebook_engine::CommandOutcome, EngineError>,
+    ) -> Result<PowerWizardCreatedSheets, EngineError> {
+        let curve_rows = build_power_curve_table_rows(res);
         let create_data_outcome = exec(
             "sheet.createData",
             json!({
@@ -952,10 +980,10 @@ impl PowerWizardState {
         exec("table.setCells", json!({ "sheet_id": &data_id_str, "rows": y_rows }))?;
 
         if let Some(ref info_id) = info_id_str {
-            populate_power_info_sheet(exec, info_id, &res)?;
+            populate_power_info_sheet(exec, info_id, res)?;
         }
         if let Some(ref graph_id) = graph_id_str {
-            configure_power_graph_sheet(exec, graph_id, &res)?;
+            configure_power_graph_sheet(exec, graph_id, res)?;
         }
 
         let info_sid =
@@ -974,7 +1002,7 @@ impl PowerWizardState {
         let result_id_str = extract_str_field(&res_outcome.payload, "sheet_id", "result sheet")?;
         let _ = exec("sheet.select", json!({ "sheet_id": &result_id_str }));
 
-        let created = PowerWizardCreatedSheets {
+        Ok(PowerWizardCreatedSheets {
             data_sheet_id: SheetId::try_new(&data_id_str).map_err(|e| EngineError::with_code(ErrorCode::InternalError, e.to_string()))?,
             info_sheet_id: info_sid,
             graph_sheet_id: graph_id_str
@@ -982,14 +1010,16 @@ impl PowerWizardState {
                 .transpose()
                 .map_err(|e| EngineError::with_code(ErrorCode::InternalError, e.to_string()))?,
             result_sheet_id: SheetId::try_new(&result_id_str).map_err(|e| EngineError::with_code(ErrorCode::InternalError, e.to_string()))?,
-        };
-        self.created_sheets = Some(created.clone());
-        Ok(created)
+        })
     }
 
     /// Build the Power Curve DataSheet, ResultSheet, InfoSheet, and GraphSheet into `session`.
     pub fn execute_create(&mut self, session: &mut Session) -> Result<PowerWizardCreatedSheets, EngineError> {
-        self.execute_create_with(&mut |command_id, params| session.execute_as_ui(command_id, params))
+        let res = session.execute_atomic_group(|s| self.execute_create_with(&mut |command_id, params| s.execute_as_ui(command_id, params)));
+        if res.is_err() {
+            self.created_sheets = None;
+        }
+        res
     }
 }
 
