@@ -541,10 +541,10 @@ Every `S1` finding is release-blocking across security isolation, runtime stabil
 | Severity | Open | In Progress | Fixed & Verified | Total |
 |---|---:|---:|---:|---:|
 | `S1` (Release Blockers) | `0` | `0` | `24` | `24` |
-| `S2` (High-Impact Contracts, Solvers, UI & Gates) | `58` | `3` | `89` | `150` |
-| `S3` (Robustness, Schemas, Edge Cases & Hygiene) | `33` | `6` | `87` | `126` |
-| `S4` (Code Cleanliness, Docs & Test Hygiene) | `7` | `2` | `25` | `34` |
-| **Total** | **`98`** | **`11`** | **`225`** | **`334`** |
+| `S2` (High-Impact Contracts, Solvers, UI & Gates) | `45` | `13` | `92` | `150` |
+| `S3` (Robustness, Schemas, Edge Cases & Hygiene) | `21` | `12` | `93` | `126` |
+| `S4` (Code Cleanliness, Docs & Test Hygiene) | `5` | `2` | `27` | `34` |
+| **Total** | **`71`** | **`27`** | **`236`** | **`334`** |
 
 > **Pre-Wave-1 Audit Hygiene Pass (`FA-X3-06` Partial Unblock):** Relative-link conversion across `docs/audit/full-2026-11-22/*.md` cleared local home-path URIs so `cargo xtask secrets` unblocks on the working tree; `FA-X3-06` stays `OPEN` (`S2`) until Phase 9 addresses `xtask/src/{brands,cleanroom,ci}.rs` directory/policy parity.
 
@@ -560,10 +560,10 @@ Every `S1` finding is release-blocking across security isolation, runtime stabil
 | **Phase 4** | `SEC-09` (`06..13`), `SEC-10` (`01..11`), `FA-X1-03` (Chart, Text, Publication & Raster DoS) | `12 S2 / 5 S3 / 3 S4` | `0` | `0` | `20` | `20` | `FIXED_VERIFIED` | `250977d` (`output`), `88304a7` (`chart`), integrated `356/0` across 62 runs + `schemas`/`brands`/`cleanroom`/`secrets` = 0 — `20/20` complete (`157/334` cumulative) |
 | **Phase 5** | `SEC-11` (`01..10`), `SEC-12` (`01..11`), `FA-X2-02..08` (Engine & Data-Fidelity Seams) | `11 S2 / 15 S3 / 2 S4` | `0` | `0` | `28` | `28` | `FIXED_VERIFIED` | `8813cfa` (`eng-core`), `3609fab` (`eng-cmd`), `c312d34`+`812f8b5` (`x2`), integrated `1404/0` across `187` runs + `commands`/`schemas`/`brands`/`cleanroom`/`secrets` = 0 — `28/28` complete (`185/334` cumulative) |
 | **Phase 6** | `SEC-13` (`02..14`), `SEC-14` (`01..05,07..13`), `SEC-15` (`01..15`) (UI Core, Dialogs, Views & i18n) | `24 S2 / 15 S3 / 1 S4` | `0` | `0` | `40` | `40` | `FIXED_VERIFIED` | `45fb7e8` (`ui-core`), `f5c5c85` (`ui-dlg`), `d700163` (`ui-views`), integrated `601e67d` (`1379/0` across `174` runs + `ui-commands`/`commands`/`schemas`/`brands`/`cleanroom`/`secrets` = 0) — `40/40` complete (`225/334` cumulative) |
-| **Phase 7** | `SEC-16` (`02..12`), `SEC-17` (`01..11`), `SEC-18` (`05..20`) (Egui Shell Chrome, Studio & Modals) | `16 S2 / 18 S3 / 4 S4` | `27` | `11` | `0` | `38` | `IN_PROGRESS` | Stage 7.1 active: `fix-p7-shell-chrome` (`FA-SEC16-02..12`); Stage 7.2 (`SEC-17`, `SEC-18`) queued |
+| **Phase 7** | `SEC-16` (`02..12`), `SEC-17` (`01..11`), `SEC-18` (`05..20`) (Egui Shell Chrome, Studio & Modals) | `16 S2 / 18 S3 / 4 S4` | `0` | `27` | `11` | `38` | `IN_PROGRESS` | Stage 7.1 complete: `146cf15` (`shell-chrome`, `11/38`, `236/334` cumulative); Stage 7.2 active: `fix-p7-shell-studio` (`SEC-17`), `fix-p7-shell-modals` (`SEC-18`) |
 | **Phase 8** | `SEC-19` (`01,04..11`), `SEC-20` (`04..10`), `SEC-21` (`01..07`), `FA-X1-02,05,06` | `16 S2 / 9 S3 / 1 S4` | `26` | `0` | `0` | `26` | `OPEN` | `L6`–`L7` tools, desktop/web/CLI/MCP parity & trust boundary seams |
 | **Phase 9** | `SEC-22` (`01..19`), `SEC-23` (`01..16`), `FA-X3-01..10` (Xtask Gates, Packaging & Test Integrity) | `29 S2 / 12 S3 / 4 S4` | `45` | `0` | `0` | `45` | `OPEN` | CI cache, scanners, packaging scripts, fail-closed tests (`FA-X3-06` full closure) |
-| **Total** | **All `26` Sections (`334` Unique Confirmed Findings)** | **`24 S1 / 150 S2 / 126 S3 / 34 S4`** | **`98`** | **`11`** | **`225`** | **`334`** | **`IN_PROGRESS`** | Integrated `601e67d` (Phase 6 complete; Phase 7 Stage 7.1 active) |
+| **Total** | **All `26` Sections (`334` Unique Confirmed Findings)** | **`24 S1 / 150 S2 / 126 S3 / 34 S4`** | **`71`** | **`27`** | **`236`** | **`334`** | **`IN_PROGRESS`** | Integrated `146cf15` (Phase 7 Stage 7.1 complete; Stage 7.2 active) |
 
 ### 9.4 Wave 1.1 Worker Dispatch (`13 / 13` `FIXED_VERIFIED`)
 
@@ -624,11 +624,13 @@ Every `S1` finding is release-blocking across security isolation, runtime stabil
 | `fix-p6-ui-dlg` | `audit/fix-p6-ui-dlg` | `ver-p6-a` | `crates/ui-egui/src/{grid_view,dialogs_r9,power_wizard}.rs`, `crates/ui-egui/src/{menus,dialogs_canvas}/**`, `crates/ui-egui/src/egui_shell/stats_modals/{stat_params,factorial_mv}.rs`, `crates/doc/src/analysis.rs`, `crates/stats/src/multivariate.rs`, `crates/engine/src/{cmd/analysis,methods_report}.rs`, `crates/ui-egui/tests/audit_p6_sec14.rs` | `FA-SEC14-01`..`FA-SEC14-05`, `FA-SEC14-07`..`FA-SEC14-13` (`12`: `9 S2 / 3 S3`; `FA-SEC14-06` closed as duplicate of Wave 1 `FA-SEC19-02`) | `FIXED_VERIFIED` | `f5c5c85` (author `7cac965`) + `5b48f1a` | `ver-p6-a` (`#339`): `719/0` (`doc`/`stats`/`engine` `90` runs) + `audit_p6_sec14` `12/0`, `--lib` `122/0` + integrated `601e67d` `1379/0` across `174` runs; `fmt`/`clippy`/`xtask` ok |
 | `fix-p6-ui-views` | `audit/fix-p6-ui-views` | `ver-p6-b` | `crates/ui-egui/src/{views,i18n}/**`, `crates/doc/src/param_spellings.rs`, `crates/engine/src/cmd/table.rs` (`FA-SEC15-10` `region_id` unlink), `crates/ui-egui/tests/{audit_p6_sec15,i18n_theme,r10_human_wf_scaffold_smoke,rv_ledger_third_pass_ui}.rs` | `FA-SEC15-01`..`FA-SEC15-15` (`15`: `7 S2 / 7 S3 / 1 S4`) | `FIXED_VERIFIED` | `d700163` (author `abc0eba`) + `5b48f1a` + `83b7a52` + `cc87e27` | `ver-p6-b` (`#335`): `94/0` `doc`, `307/0` `engine`, `audit_p6_sec15` `15/0`, `152/0` across 5 targeted UI suites + integrated `601e67d` `1379/0` across `174` runs (`1128` files `xtask` ok) |
 
-### 9.11 Active Phase 7 Stage 7.1 Worker Dispatch (`11` Findings — `IN_PROGRESS`)
+### 9.11 Phase 7 Worker Dispatch (`11 / 38` `FIXED_VERIFIED`; Stage 7.2 `27` `IN_PROGRESS`)
 
 | Worker | Branch | Verifier | Owned Scope | Assigned IDs | Status | Merge Commit | Verified Tests |
 |---|---|---|---|---|---|---|---|
-| `fix-p7-shell-chrome` | `audit/fix-p7-shell-chrome` | `ver-p7-a` | `crates/ui-egui/src/egui_shell/{mod,brand,canvas_view,center_stage,command_palette,driver,fonts,inspect_bridge,leading_dock,rasterizer,status_footer,top_bar_fit,top_chrome,widgets}.rs`, `apps/curvebook/src/desktop_host.rs` (`insertImage` `sheet_id`), `crates/ui-egui/tests/audit_p7_sec16.rs` | `FA-SEC16-02`..`FA-SEC16-12` (`11`: `3 S2 / 6 S3 / 2 S4`; `FA-SEC16-01` closed as duplicate of Wave 1 `FA-SEC19-02`) | `IN_PROGRESS` | - | - |
+| `fix-p7-shell-chrome` | `audit/fix-p7-shell-chrome` | `ver-p7-a` | `crates/ui-egui/src/egui_shell/{canvas_view,center_stage,command_palette,driver,fonts,inspect_bridge,leading_dock,mod,status_footer,top_chrome,trailing_studio/mod}.rs`, `apps/curvebook/src/desktop_host.rs` (`insertImage` `sheet_id`), `crates/ui-egui/src/i18n/{w5_nav_notes,tests}.rs`, `crates/ui-egui/tests/{audit_p7_sec16,audit_p6_sec15,audit_r2_s10,cjk_rtl_hidpi_desktop_qa,i18n_theme,r15_3_stage_canvas,r16_19_growable_dropdown,rv_ledger_third_pass_ui}.rs` | `FA-SEC16-02`..`FA-SEC16-12` (`11`: `3 S2 / 6 S3 / 2 S4`; `FA-SEC16-01` closed as duplicate of Wave 1 `FA-SEC19-02`) | `FIXED_VERIFIED` | `146cf15` (author `af6178b`) | `ver-p7-a` (`#349`): `curvebook-ui-egui` `670/0/1` (`audit_p7_sec16` `11/0`, `r15_3_stage_canvas` `13/0`, `cjk_rtl_hidpi_desktop_qa` `5/0`), `curvebook` `111/0` (`r10_command_routing` `10/0`); `fmt`/workspace `clippy` `0`/`check`/`xtask brands+cleanroom+secrets` (`1075` files, `12784` i18n entries) ok |
+| `fix-p7-shell-studio` | `audit/fix-p7-shell-studio` | `ver-p7-b` | `crates/ui-egui/src/egui_shell/{info_view,results_view,unit_spinners,welcome_hub}.rs`, `crates/ui-egui/src/egui_shell/{data_grid,trailing_studio}/**`, `inspect_bridge.rs` (`TrailingStudioContext`), `crates/engine/src/cmd/sheet.rs`, `crates/doc/src/param_spellings.rs`, `crates/ui-egui/tests/audit_p7_sec17.rs` | `FA-SEC17-01`..`FA-SEC17-11` (`11`: `4 S2 / 6 S3 / 1 S4`) | `IN_PROGRESS` | - | - |
+| `fix-p7-shell-modals` | `audit/fix-p7-shell-modals` | `ver-p7-b` | `crates/ui-egui/src/egui_shell/{app_modals,fit_modal,import_wizard,manage_vars_modal,power_studio,stat_anova_modal,transform_modals,mod}.rs`, `crates/ui-egui/src/egui_shell/{graph_modals,stats_modals}/**`, `crates/ui-egui/src/i18n*`, `crates/ui-egui/tests/{audit_p7_sec18,audit_p6_sec15,i18n_theme,r10_human_wf_scaffold_smoke,rv_ledger_third_pass_ui}.rs` | `FA-SEC18-05`..`FA-SEC18-20` (`16`: `9 S2 / 6 S3 / 1 S4`; `FA-SEC18-01..04` closed Wave 1.2) | `IN_PROGRESS` | - | - |
 
 ### 9.12 Complete Finding-Level Remediation Tracker (`334 / 334` Unique Confirmed IDs)
 
@@ -859,44 +861,44 @@ Every `S1` finding is release-blocking across security isolation, runtime stabil
 | `FA-SEC15-12` | `S3` | `SEC-15` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `d700163` (author `abc0eba`) + `5b48f1a`/`83b7a52`/`cc87e27` | `ver-p6-b` (`#335`): `audit_p6_sec15` `15/0`, `152/0` 5 UI suites + integrated `601e67d` `1379/0` (`174` runs) |
 | `FA-SEC15-14` | `S3` | `SEC-15` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `d700163` (author `abc0eba`) + `5b48f1a`/`83b7a52`/`cc87e27` | `ver-p6-b` (`#335`): `audit_p6_sec15` `15/0`, `152/0` 5 UI suites + integrated `601e67d` `1379/0` (`174` runs) |
 | `FA-SEC15-15` | `S4` | `SEC-15` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `d700163` (author `abc0eba`) + `5b48f1a`/`83b7a52`/`cc87e27` | `ver-p6-b` (`#335`): `audit_p6_sec15` `15/0`, `152/0` 5 UI suites + integrated `601e67d` `1379/0` (`174` runs) |
-| `FA-SEC16-02` | `S2` | `SEC-16` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `-` | Phase 7 Stage 7.1 active fix |
-| `FA-SEC16-03` | `S2` | `SEC-16` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `-` | Phase 7 Stage 7.1 active fix |
-| `FA-SEC16-04` | `S2` | `SEC-16` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `-` | Phase 7 Stage 7.1 active fix |
-| `FA-SEC17-01` | `S2` | `SEC-17` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC17-02` | `S2` | `SEC-17` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC17-03` | `S2` | `SEC-17` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC17-04` | `S2` | `SEC-17` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC18-05` | `S2` | `SEC-18` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC18-06` | `S2` | `SEC-18` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC18-07` | `S2` | `SEC-18` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC18-08` | `S2` | `SEC-18` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC18-09` | `S2` | `SEC-18` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC18-10` | `S2` | `SEC-18` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC18-11` | `S2` | `SEC-18` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC18-12` | `S2` | `SEC-18` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC18-13` | `S2` | `SEC-18` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC16-05` | `S3` | `SEC-16` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `-` | Phase 7 Stage 7.1 active fix |
-| `FA-SEC16-06` | `S3` | `SEC-16` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `-` | Phase 7 Stage 7.1 active fix |
-| `FA-SEC16-07` | `S3` | `SEC-16` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `-` | Phase 7 Stage 7.1 active fix |
-| `FA-SEC16-08` | `S3` | `SEC-16` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `-` | Phase 7 Stage 7.1 active fix |
-| `FA-SEC16-09` | `S3` | `SEC-16` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `-` | Phase 7 Stage 7.1 active fix |
-| `FA-SEC16-10` | `S3` | `SEC-16` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `-` | Phase 7 Stage 7.1 active fix |
-| `FA-SEC17-05` | `S3` | `SEC-17` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC17-06` | `S3` | `SEC-17` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC17-07` | `S3` | `SEC-17` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC17-08` | `S3` | `SEC-17` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC17-09` | `S3` | `SEC-17` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC17-10` | `S3` | `SEC-17` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC18-14` | `S3` | `SEC-18` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC18-15` | `S3` | `SEC-18` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC18-16` | `S3` | `SEC-18` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC18-17` | `S3` | `SEC-18` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC18-18` | `S3` | `SEC-18` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC18-19` | `S3` | `SEC-18` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC16-11` | `S4` | `SEC-16` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `-` | Phase 7 Stage 7.1 active fix |
-| `FA-SEC16-12` | `S4` | `SEC-16` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `-` | Phase 7 Stage 7.1 active fix |
-| `FA-SEC17-11` | `S4` | `SEC-17` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC18-20` | `S4` | `SEC-18` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
+| `FA-SEC16-02` | `S2` | `SEC-16` | `Phase 7` | `FIXED_VERIFIED` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `146cf15` (author `af6178b`) | `ver-p7-a` (`#349`): `ui-egui` `670/0/1` (`audit_p7_sec16` `11/0`), `curvebook` `111/0`; `fmt`/workspace `clippy`/`xtask` ok |
+| `FA-SEC16-03` | `S2` | `SEC-16` | `Phase 7` | `FIXED_VERIFIED` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `146cf15` (author `af6178b`) | `ver-p7-a` (`#349`): `ui-egui` `670/0/1` (`audit_p7_sec16` `11/0`), `curvebook` `111/0`; `fmt`/workspace `clippy`/`xtask` ok |
+| `FA-SEC16-04` | `S2` | `SEC-16` | `Phase 7` | `FIXED_VERIFIED` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `146cf15` (author `af6178b`) | `ver-p7-a` (`#349`): `ui-egui` `670/0/1` (`audit_p7_sec16` `11/0`), `curvebook` `111/0`; `fmt`/workspace `clippy`/`xtask` ok |
+| `FA-SEC17-01` | `S2` | `SEC-17` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-studio` (`audit/fix-p7-shell-studio`) | `-` | Phase 7 Stage 7.2 active fix |
+| `FA-SEC17-02` | `S2` | `SEC-17` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-studio` (`audit/fix-p7-shell-studio`) | `-` | Phase 7 Stage 7.2 active fix |
+| `FA-SEC17-03` | `S2` | `SEC-17` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-studio` (`audit/fix-p7-shell-studio`) | `-` | Phase 7 Stage 7.2 active fix |
+| `FA-SEC17-04` | `S2` | `SEC-17` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-studio` (`audit/fix-p7-shell-studio`) | `-` | Phase 7 Stage 7.2 active fix |
+| `FA-SEC18-05` | `S2` | `SEC-18` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-modals` (`audit/fix-p7-shell-modals`) | `-` | Phase 7 Stage 7.2 active fix |
+| `FA-SEC18-06` | `S2` | `SEC-18` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-modals` (`audit/fix-p7-shell-modals`) | `-` | Phase 7 Stage 7.2 active fix |
+| `FA-SEC18-07` | `S2` | `SEC-18` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-modals` (`audit/fix-p7-shell-modals`) | `-` | Phase 7 Stage 7.2 active fix |
+| `FA-SEC18-08` | `S2` | `SEC-18` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-modals` (`audit/fix-p7-shell-modals`) | `-` | Phase 7 Stage 7.2 active fix |
+| `FA-SEC18-09` | `S2` | `SEC-18` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-modals` (`audit/fix-p7-shell-modals`) | `-` | Phase 7 Stage 7.2 active fix |
+| `FA-SEC18-10` | `S2` | `SEC-18` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-modals` (`audit/fix-p7-shell-modals`) | `-` | Phase 7 Stage 7.2 active fix |
+| `FA-SEC18-11` | `S2` | `SEC-18` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-modals` (`audit/fix-p7-shell-modals`) | `-` | Phase 7 Stage 7.2 active fix |
+| `FA-SEC18-12` | `S2` | `SEC-18` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-modals` (`audit/fix-p7-shell-modals`) | `-` | Phase 7 Stage 7.2 active fix |
+| `FA-SEC18-13` | `S2` | `SEC-18` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-modals` (`audit/fix-p7-shell-modals`) | `-` | Phase 7 Stage 7.2 active fix |
+| `FA-SEC16-05` | `S3` | `SEC-16` | `Phase 7` | `FIXED_VERIFIED` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `146cf15` (author `af6178b`) | `ver-p7-a` (`#349`): `ui-egui` `670/0/1` (`audit_p7_sec16` `11/0`), `curvebook` `111/0`; `fmt`/workspace `clippy`/`xtask` ok |
+| `FA-SEC16-06` | `S3` | `SEC-16` | `Phase 7` | `FIXED_VERIFIED` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `146cf15` (author `af6178b`) | `ver-p7-a` (`#349`): `ui-egui` `670/0/1` (`audit_p7_sec16` `11/0`), `curvebook` `111/0`; `fmt`/workspace `clippy`/`xtask` ok |
+| `FA-SEC16-07` | `S3` | `SEC-16` | `Phase 7` | `FIXED_VERIFIED` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `146cf15` (author `af6178b`) | `ver-p7-a` (`#349`): `ui-egui` `670/0/1` (`audit_p7_sec16` `11/0`), `curvebook` `111/0`; `fmt`/workspace `clippy`/`xtask` ok |
+| `FA-SEC16-08` | `S3` | `SEC-16` | `Phase 7` | `FIXED_VERIFIED` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `146cf15` (author `af6178b`) | `ver-p7-a` (`#349`): `ui-egui` `670/0/1` (`audit_p7_sec16` `11/0`), `curvebook` `111/0`; `fmt`/workspace `clippy`/`xtask` ok |
+| `FA-SEC16-09` | `S3` | `SEC-16` | `Phase 7` | `FIXED_VERIFIED` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `146cf15` (author `af6178b`) | `ver-p7-a` (`#349`): `ui-egui` `670/0/1` (`audit_p7_sec16` `11/0`), `curvebook` `111/0`; `fmt`/workspace `clippy`/`xtask` ok |
+| `FA-SEC16-10` | `S3` | `SEC-16` | `Phase 7` | `FIXED_VERIFIED` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `146cf15` (author `af6178b`) | `ver-p7-a` (`#349`): `ui-egui` `670/0/1` (`audit_p7_sec16` `11/0`), `curvebook` `111/0`; `fmt`/workspace `clippy`/`xtask` ok |
+| `FA-SEC17-05` | `S3` | `SEC-17` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-studio` (`audit/fix-p7-shell-studio`) | `-` | Phase 7 Stage 7.2 active fix |
+| `FA-SEC17-06` | `S3` | `SEC-17` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-studio` (`audit/fix-p7-shell-studio`) | `-` | Phase 7 Stage 7.2 active fix |
+| `FA-SEC17-07` | `S3` | `SEC-17` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-studio` (`audit/fix-p7-shell-studio`) | `-` | Phase 7 Stage 7.2 active fix |
+| `FA-SEC17-08` | `S3` | `SEC-17` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-studio` (`audit/fix-p7-shell-studio`) | `-` | Phase 7 Stage 7.2 active fix |
+| `FA-SEC17-09` | `S3` | `SEC-17` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-studio` (`audit/fix-p7-shell-studio`) | `-` | Phase 7 Stage 7.2 active fix |
+| `FA-SEC17-10` | `S3` | `SEC-17` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-studio` (`audit/fix-p7-shell-studio`) | `-` | Phase 7 Stage 7.2 active fix |
+| `FA-SEC18-14` | `S3` | `SEC-18` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-modals` (`audit/fix-p7-shell-modals`) | `-` | Phase 7 Stage 7.2 active fix |
+| `FA-SEC18-15` | `S3` | `SEC-18` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-modals` (`audit/fix-p7-shell-modals`) | `-` | Phase 7 Stage 7.2 active fix |
+| `FA-SEC18-16` | `S3` | `SEC-18` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-modals` (`audit/fix-p7-shell-modals`) | `-` | Phase 7 Stage 7.2 active fix |
+| `FA-SEC18-17` | `S3` | `SEC-18` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-modals` (`audit/fix-p7-shell-modals`) | `-` | Phase 7 Stage 7.2 active fix |
+| `FA-SEC18-18` | `S3` | `SEC-18` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-modals` (`audit/fix-p7-shell-modals`) | `-` | Phase 7 Stage 7.2 active fix |
+| `FA-SEC18-19` | `S3` | `SEC-18` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-modals` (`audit/fix-p7-shell-modals`) | `-` | Phase 7 Stage 7.2 active fix |
+| `FA-SEC16-11` | `S4` | `SEC-16` | `Phase 7` | `FIXED_VERIFIED` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `146cf15` (author `af6178b`) | `ver-p7-a` (`#349`): `ui-egui` `670/0/1` (`audit_p7_sec16` `11/0`), `curvebook` `111/0`; `fmt`/workspace `clippy`/`xtask` ok |
+| `FA-SEC16-12` | `S4` | `SEC-16` | `Phase 7` | `FIXED_VERIFIED` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `146cf15` (author `af6178b`) | `ver-p7-a` (`#349`): `ui-egui` `670/0/1` (`audit_p7_sec16` `11/0`), `curvebook` `111/0`; `fmt`/workspace `clippy`/`xtask` ok |
+| `FA-SEC17-11` | `S4` | `SEC-17` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-studio` (`audit/fix-p7-shell-studio`) | `-` | Phase 7 Stage 7.2 active fix |
+| `FA-SEC18-20` | `S4` | `SEC-18` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-modals` (`audit/fix-p7-shell-modals`) | `-` | Phase 7 Stage 7.2 active fix |
 | `FA-SEC19-01` | `S2` | `SEC-19` | `Phase 8` | `OPEN` | - | `-` | Queued for Phase 8 |
 | `FA-SEC19-04` | `S2` | `SEC-19` | `Phase 8` | `OPEN` | - | `-` | Queued for Phase 8 |
 | `FA-SEC19-05` | `S2` | `SEC-19` | `Phase 8` | `OPEN` | - | `-` | Queued for Phase 8 |
