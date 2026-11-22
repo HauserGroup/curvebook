@@ -1439,15 +1439,19 @@ fn dispatch_egui_screenshot_action(app: &mut UiApp, params: &serde_json::Value) 
         .with_remediation("Omit `path` and inspect the returned in-memory `data_base64` PNG instead."));
     }
     let opt_path = control_io::opt_str_param(params, &["path"]).map_err(egui_bad_input)?.map(str::trim).filter(|s| !s.is_empty());
+    let validated_path = match opt_path {
+        Some(path) => Some((path, app.session().validate_host_write_path(path)?)),
+        None => None,
+    };
 
     let (png_bytes, out_w, out_h) = app
         .render_egui_shell_screenshot_png(RenderTargetSpec { width_px, height_px, dpi }, region)
         .map_err(|err| EngineError::with_code(curvebook_doc::ErrorCode::Conflict, format!("screenshot capture failed: {err}")))?;
 
-    let saved_path = match opt_path {
-        Some(path) => {
-            control_io::write_host_file(path, &png_bytes).map_err(|err| EngineError::with_code(curvebook_doc::ErrorCode::IoError, err))?;
-            Some(path.to_owned())
+    let saved_path = match validated_path {
+        Some((raw_path, resolved_path)) => {
+            app.session().write_host_file_atomic(raw_path, &png_bytes)?;
+            Some(resolved_path)
         }
         None => None,
     };
