@@ -37,6 +37,7 @@ pub(super) fn render_fg_heatmap_color_mapping(ui: &mut Ui, state: &mut GraphModa
             .clicked()
             {
                 state.heatmap_colormap = cmap;
+                state.heatmap_color_dirty = true;
             }
         }
     });
@@ -62,9 +63,13 @@ pub(super) fn render_fg_heatmap_color_mapping(ui: &mut Ui, state: &mut GraphModa
     ui.add_space(6.0);
     let rev_chk = ui.checkbox(&mut state.heatmap_reversed, "Reverse Colormap");
     record_checkbox(ui, &rev_chk, gctx.meta, "format_graph.heatmap.reversed", "Reverse Colormap", state.heatmap_reversed);
+    if rev_chk.changed() {
+        state.heatmap_color_dirty = true;
+    }
     let auto_chk = ui.checkbox(&mut state.heatmap_auto_range, "Automatic Domain Bounds");
     record_checkbox(ui, &auto_chk, gctx.meta, "format_graph.heatmap.auto_range", "Automatic Domain Bounds", state.heatmap_auto_range);
     if auto_chk.changed() {
+        state.heatmap_color_dirty = true;
         if state.heatmap_auto_range {
             state.heatmap_range_error = None;
         } else {
@@ -86,6 +91,9 @@ pub(super) fn render_fg_heatmap_color_mapping(ui: &mut Ui, state: &mut GraphModa
             ui.label("Max:");
             let max_resp = ui.add(egui::TextEdit::singleline(&mut state.heatmap_max_draft).desired_width(72.0));
             record_input(ui, &max_resp, gctx.meta, "format_graph.heatmap.max", "Max", &state.heatmap_max_draft, true);
+            if min_resp.changed() || max_resp.changed() {
+                state.heatmap_color_dirty = true;
+            }
         });
         match validate_heatmap_range(state, &gctx.app.locale_preset) {
             Ok(_) => state.heatmap_range_error = None,
@@ -99,16 +107,16 @@ pub(super) fn render_fg_heatmap_color_mapping(ui: &mut Ui, state: &mut GraphModa
 }
 
 pub(super) fn render_fg_heatmap_labels(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &mut GraphModalCtx<'_>) {
-    let fg = gctx.app.canvas_dialogs.format_graph.clone();
-    let mut annotate = fg.heatmap_labels.annotate_cells;
+    let mut next_fg = gctx.app.canvas_dialogs.format_graph.clone();
+    let mut fg_dirty = false;
+    let mut annotate = next_fg.heatmap_labels.annotate_cells;
     let ann_chk = ui.checkbox(&mut annotate, "Show Numeric Cell Annotations");
     record_checkbox(ui, &ann_chk, gctx.meta, "format_graph.heatmap.annotate_cells", "Show Numeric Cell Annotations", annotate);
     if ann_chk.changed() {
         state.heatmap_annotate_cells = annotate;
-        let mut next = fg.clone();
-        next.heatmap_labels.annotate_cells = annotate;
-        next.heatmap_labels_dirty = true;
-        gctx.intents.push_update_format_graph_state(next);
+        next_fg.heatmap_labels.annotate_cells = annotate;
+        next_fg.heatmap_labels_dirty = true;
+        fg_dirty = true;
     }
 
     ui.add_space(6.0);
@@ -128,7 +136,7 @@ pub(super) fn render_fg_heatmap_labels(ui: &mut Ui, state: &mut GraphModalEguiSt
                     widget_id: &format!("format_graph.heatmap.row_labels.{slug}"),
                     label: lbl,
                     command_id: None,
-                    selected: fg.heatmap_labels.row_labels == mode,
+                    selected: next_fg.heatmap_labels.row_labels == mode,
                     enabled: true,
                     disabled_reason: None,
                 },
@@ -136,10 +144,9 @@ pub(super) fn render_fg_heatmap_labels(ui: &mut Ui, state: &mut GraphModalEguiSt
             )
             .clicked()
             {
-                let mut next = fg.clone();
-                next.heatmap_labels.row_labels = mode;
-                next.heatmap_labels_dirty = true;
-                gctx.intents.push_update_format_graph_state(next);
+                next_fg.heatmap_labels.row_labels = mode;
+                next_fg.heatmap_labels_dirty = true;
+                fg_dirty = true;
             }
         }
     });
@@ -161,7 +168,7 @@ pub(super) fn render_fg_heatmap_labels(ui: &mut Ui, state: &mut GraphModalEguiSt
                     widget_id: &format!("format_graph.heatmap.col_labels.{slug}"),
                     label: lbl,
                     command_id: None,
-                    selected: fg.heatmap_labels.column_labels == mode,
+                    selected: next_fg.heatmap_labels.column_labels == mode,
                     enabled: true,
                     disabled_reason: None,
                 },
@@ -169,10 +176,9 @@ pub(super) fn render_fg_heatmap_labels(ui: &mut Ui, state: &mut GraphModalEguiSt
             )
             .clicked()
             {
-                let mut next = fg.clone();
-                next.heatmap_labels.column_labels = mode;
-                next.heatmap_labels_dirty = true;
-                gctx.intents.push_update_format_graph_state(next);
+                next_fg.heatmap_labels.column_labels = mode;
+                next_fg.heatmap_labels_dirty = true;
+                fg_dirty = true;
             }
         }
     });
@@ -186,7 +192,7 @@ pub(super) fn render_fg_heatmap_labels(ui: &mut Ui, state: &mut GraphModalEguiSt
             ("45 deg", 45.0_f64, HeatmapColumnLabelAngle::Angled45),
             ("90 deg", 90.0_f64, HeatmapColumnLabelAngle::Vertical90),
         ] {
-            let selected = fg.heatmap_labels.column_angle == angle_variant;
+            let selected = (state.heatmap_tick_angle_deg - deg).abs() < 0.5;
             if record_button(
                 ui,
                 gctx.meta,
@@ -203,15 +209,18 @@ pub(super) fn render_fg_heatmap_labels(ui: &mut Ui, state: &mut GraphModalEguiSt
             .clicked()
             {
                 state.heatmap_tick_angle_deg = deg;
-                let mut next = fg.clone();
-                next.heatmap_labels.column_angle = angle_variant;
-                next.heatmap_labels_dirty = true;
-                gctx.intents.push_update_format_graph_state(next);
+                state.heatmap_tick_angle_dirty = true;
+                next_fg.heatmap_labels.column_angle = angle_variant;
+                next_fg.heatmap_labels_dirty = true;
+                fg_dirty = true;
             }
         }
     });
+    if fg_dirty {
+        gctx.intents.push_update_format_graph_state(next_fg.clone());
+    }
     ui.add_space(6.0);
-    render_legend_toggles(ui, gctx, &fg);
+    render_legend_toggles(ui, gctx, &next_fg);
 }
 
 pub(super) fn render_fg_heatmap_borders(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &mut GraphModalCtx<'_>) {

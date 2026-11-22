@@ -3,8 +3,8 @@
 //! `gui-layout-spec.md` §8.6).
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, BaselineOperation, DataSheet, DerivedColumnFormula, ErrorPropagationMode, MathTransformPreset, NormalizeAnchor,
-    SheetId, TableArchetype, TableKind, TransformAnalysisSpec,
+    AnalysisKind, AnalysisSpec, BaselineOperation, DataSheet, DerivedColumnFormula, ErrorPropagationMode, MAX_ROWS, MAX_SUBCOLUMNS,
+    MathTransformPreset, NormalizeAnchor, SheetId, SimulationNoise, TableArchetype, TableKind, TransformAnalysisSpec,
 };
 use curvebook_transform::formula::parser::parse_formula;
 use egui::{Align, Context, Layout, Rect, RichText, Stroke, Ui, vec2};
@@ -119,6 +119,19 @@ pub struct TransformModalsEguiState {
     pub prune_every_k_draft: String,
     pub prune_average_window: bool,
     pub standalone_selected_cols: Vec<usize>,
+    pub sim_seed_draft: String,
+    pub sim_row_count_draft: String,
+    pub sim_replicates_draft: String,
+    pub sim_x_min_draft: String,
+    pub sim_x_max_draft: String,
+    pub sim_equation_id_draft: String,
+    pub sim_params_draft: String,
+    pub sim_noise_kind: usize,
+    pub sim_noise_param_draft: String,
+    pub rand_sample_size_draft: String,
+    pub rand_seed_draft: String,
+    pub rand_stratify_col: Option<usize>,
+    pub rand_proportional_allocation: bool,
 }
 
 impl Default for TransformModalsEguiState {
@@ -161,6 +174,19 @@ impl Default for TransformModalsEguiState {
             prune_every_k_draft: String::from("2"),
             prune_average_window: false,
             standalone_selected_cols: Vec::new(),
+            sim_seed_draft: String::from("42"),
+            sim_row_count_draft: String::from("13"),
+            sim_replicates_draft: String::from("3"),
+            sim_x_min_draft: String::from("-9"),
+            sim_x_max_draft: String::from("-3"),
+            sim_equation_id_draft: String::from("hill_4pl"),
+            sim_params_draft: String::new(),
+            sim_noise_kind: 0,
+            sim_noise_param_draft: String::from("5"),
+            rand_sample_size_draft: String::from("5"),
+            rand_seed_draft: String::from("42"),
+            rand_stratify_col: None,
+            rand_proportional_allocation: true,
         }
     }
 }
@@ -255,9 +281,9 @@ pub fn render_transform_modal(
                     TransformModalKind::MvFilterAndTransform => render_mv_filter_transform_body(body, &mut modal_cx),
                     TransformModalKind::Transpose => render_transpose_body(body, &mut modal_cx),
                     TransformModalKind::PruneRows => render_prune_rows_body(body, &mut modal_cx),
-                    TransformModalKind::ExtractAndRearrange | TransformModalKind::Simulate | TransformModalKind::RandomSample => {
-                        render_extract_and_rearrange_body(body, &mut modal_cx, effective_kind)
-                    }
+                    TransformModalKind::ExtractAndRearrange => render_extract_and_rearrange_body(body, &mut modal_cx),
+                    TransformModalKind::Simulate => render_simulate_body(body, &mut modal_cx),
+                    TransformModalKind::RandomSample => render_random_sample_body(body, &mut modal_cx),
                 }
 
                 if modal_cx.state.hook_picker_open {
@@ -364,6 +390,19 @@ fn sync_standalone_transform_state(kind: TransformModalKind, state: &mut Transfo
     state.norm_per_dataset = true;
     state.create_new_graph = false;
     state.standalone_selected_cols.clear();
+    state.sim_seed_draft = String::from("42");
+    state.sim_row_count_draft = String::from("13");
+    state.sim_replicates_draft = String::from("3");
+    state.sim_x_min_draft = String::from("-9");
+    state.sim_x_max_draft = String::from("-3");
+    state.sim_equation_id_draft = String::from("hill_4pl");
+    state.sim_params_draft.clear();
+    state.sim_noise_kind = 0;
+    state.sim_noise_param_draft = String::from("5");
+    state.rand_sample_size_draft = String::from("5");
+    state.rand_seed_draft = String::from("42");
+    state.rand_stratify_col = None;
+    state.rand_proportional_allocation = true;
     state.validation_error = None;
 }
 
@@ -392,6 +431,22 @@ fn sync_transform_edit_state(app: &UiApp, state: &mut TransformModalsEguiState) 
     state.filter_formula_draft.clear();
     state.derived_cols.clear();
     state.extract_target_kind = None;
+    state.extract_binding_x.clear();
+    state.extract_binding_y.clear();
+    state.extract_binding_grp.clear();
+    state.sim_seed_draft = String::from("42");
+    state.sim_row_count_draft = String::from("13");
+    state.sim_replicates_draft = String::from("3");
+    state.sim_x_min_draft = String::from("-9");
+    state.sim_x_max_draft = String::from("-3");
+    state.sim_equation_id_draft = String::from("hill_4pl");
+    state.sim_params_draft.clear();
+    state.sim_noise_kind = 0;
+    state.sim_noise_param_draft = String::from("5");
+    state.rand_sample_size_draft = String::from("5");
+    state.rand_seed_draft = String::from("42");
+    state.rand_stratify_col = None;
+    state.rand_proportional_allocation = true;
     match spec.map(|s| &s.kind) {
         Some(AnalysisKind::Transform(TransformAnalysisSpec::Math { y_transform, .. })) => {
             if let Some((op, k)) = y_transform.and_then(ConstantKOp::infer_from_preset) {
@@ -426,8 +481,47 @@ fn sync_transform_edit_state(app: &UiApp, state: &mut TransformModalsEguiState) 
             state.extract_target_kind = Some(*target_archetype);
             state.derived_cols = derived_columns.iter().map(|d| (d.title.clone(), d.formula.clone())).collect();
         }
+        Some(AnalysisKind::Transform(TransformAnalysisSpec::Simulate {
+            seed,
+            row_count,
+            replicates,
+            x_min,
+            x_max,
+            equation_id,
+            parameters,
+            noise,
+        })) => {
+            state.sim_seed_draft = seed.to_string();
+            state.sim_row_count_draft = row_count.to_string();
+            state.sim_replicates_draft = replicates.to_string();
+            state.sim_x_min_draft = format_draft_f64(*x_min, &app.locale_preset);
+            state.sim_x_max_draft = format_draft_f64(*x_max, &app.locale_preset);
+            state.sim_equation_id_draft = equation_id.clone();
+            state.sim_params_draft =
+                parameters.iter().map(|(k, v)| format!("{k}={}", format_draft_f64(*v, &app.locale_preset))).collect::<Vec<_>>().join(", ");
+            let (nkind, nparam) = match noise {
+                SimulationNoise::None => (0, String::from("5")),
+                SimulationNoise::Gaussian { sd } => (1, format_draft_f64(*sd, &app.locale_preset)),
+                SimulationNoise::RelativePercent { cv_percent } => (2, format_draft_f64(*cv_percent, &app.locale_preset)),
+                SimulationNoise::Poisson => (3, String::from("5")),
+            };
+            state.sim_noise_kind = nkind;
+            state.sim_noise_param_draft = nparam;
+        }
+        Some(AnalysisKind::Transform(TransformAnalysisSpec::RandomSample { seed, sample_size, stratify_column, proportional_allocation })) => {
+            state.rand_seed_draft = seed.to_string();
+            state.rand_sample_size_draft = sample_size.to_string();
+            state.rand_stratify_col = *stratify_column;
+            state.rand_proportional_allocation = *proportional_allocation;
+        }
         _ => {}
     }
+}
+
+fn format_draft_f64(value: f64, preset: &crate::i18n::LocalePreset) -> String {
+    let norm = if value == 0.0 { 0.0 } else { value };
+    let text = format!("{norm}");
+    if preset.decimal_separator != '.' { text.replace('.', &preset.decimal_separator.to_string()) } else { text }
 }
 
 fn parse_k_constant(raw: &str, locale_preset: &crate::i18n::LocalePreset) -> Option<f64> {
@@ -1420,15 +1514,14 @@ fn render_prune_rows_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
     }
 }
 
-fn render_extract_and_rearrange_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>, kind: TransformModalKind) {
-    let app = cx.app;
+fn render_extract_and_rearrange_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
     let ds = cx.ds;
     let from_edit = cx.from_edit;
     let tokens = cx.tokens;
     let state = &mut *cx.state;
     let meta = &mut *cx.meta;
     let intents = &mut *cx.intents;
-    let mut draft_spec = app.canvas_dialogs.edit_params.draft.clone();
+    let mut draft_spec = cx.app.canvas_dialogs.edit_params.draft.clone();
     let target_kind = state.extract_target_kind.unwrap_or_else(|| match draft_spec.as_ref().map(|d| &d.kind) {
         Some(AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { target_archetype, .. })) => *target_archetype,
         _ => TableKind::Xy,
@@ -1453,15 +1546,12 @@ fn render_extract_and_rearrange_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>
             target_kind,
         );
     } else {
-        let mode_desc = match kind {
-            TransformModalKind::Simulate => "Simulate deterministic curve + replicate noise",
-            TransformModalKind::RandomSample => "Deterministic random / stratified row sub-sampling",
-            _ => "Map source variables into target table roles",
-        };
-        ui.label(RichText::new(mode_desc).color(tokens.text_muted));
+        ui.label(RichText::new("Map source columns into target table roles (comma-separated titles supported)").color(tokens.text_muted));
         ui.add_space(4.0);
         let sheet_cols: Vec<String> = ds.map(|s| (0..s.archetype.column_count()).map(|c| s.title_at(c)).collect()).unwrap_or_default();
         if !sheet_cols.is_empty() {
+            ui.label(RichText::new(format!("Available columns: {}", sheet_cols.join(", "))).size(11.0).color(tokens.text_muted));
+            ui.add_space(2.0);
             ui.horizontal_wrapped(|row| {
                 row.label("Predictor / X:");
                 let rx = row.add(egui::TextEdit::singleline(&mut state.extract_binding_x).hint_text(sheet_cols[0].as_str()).desired_width(100.0));
@@ -1511,6 +1601,437 @@ fn render_extract_and_rearrange_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>
             });
         }
     }
+
+    state.validation_error = ds.and_then(|sheet| resolve_extract_column_bindings(sheet, state, target_kind).err());
+}
+
+fn render_simulate_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
+    let app = cx.app;
+    let from_edit = cx.from_edit;
+    let tokens = cx.tokens;
+    let state = &mut *cx.state;
+    let meta = &mut *cx.meta;
+    let mut changed = false;
+
+    ui.label(RichText::new("Equation Preset & Curve Expression").strong().color(tokens.text_primary));
+    ui.horizontal_wrapped(|row| {
+        for (eq_id, lbl) in [
+            ("hill_4pl", "4PL Sigmoidal"),
+            ("hill_3pl", "3PL Sigmoidal"),
+            ("linear", "Linear"),
+            ("quadratic", "Quadratic"),
+            ("one_phase_decay", "1-Phase Decay"),
+            ("michaelis_menten", "Michaelis-Menten"),
+            ("gaussian", "Gaussian"),
+            ("sine", "Sine"),
+        ] {
+            let sel = state.sim_equation_id_draft.trim().eq_ignore_ascii_case(eq_id);
+            let r = choice_pill(row, tokens, lbl, sel, true);
+            meta.record_modal_response(
+                row,
+                &r,
+                FrameInspectEntryInput::modal(&format!("edit.transform.simulate.equation.{eq_id}"), "radio", lbl, Some(sel.to_string()), true),
+            );
+            if r.clicked() {
+                state.sim_equation_id_draft = eq_id.to_owned();
+                changed = true;
+            }
+        }
+    });
+
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|row| {
+        row.label("Equation ID / formula:");
+        let eq_r = row.add(egui::TextEdit::singleline(&mut state.sim_equation_id_draft).hint_text("hill_4pl").desired_width(180.0));
+        meta.record_modal_response(
+            row,
+            &eq_r,
+            FrameInspectEntryInput::modal(
+                "edit.transform.simulate.equation_id",
+                "textbox",
+                "Equation ID",
+                Some(state.sim_equation_id_draft.clone()),
+                true,
+            ),
+        );
+        if eq_r.changed() {
+            changed = true;
+        }
+    });
+
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|row| {
+        row.label("X min:");
+        let xmin_r = row.add(egui::TextEdit::singleline(&mut state.sim_x_min_draft).desired_width(64.0));
+        meta.record_modal_response(
+            row,
+            &xmin_r,
+            FrameInspectEntryInput::modal("edit.transform.simulate.x_min", "textbox", "X Min", Some(state.sim_x_min_draft.clone()), true),
+        );
+        row.label("X max:");
+        let xmax_r = row.add(egui::TextEdit::singleline(&mut state.sim_x_max_draft).desired_width(64.0));
+        meta.record_modal_response(
+            row,
+            &xmax_r,
+            FrameInspectEntryInput::modal("edit.transform.simulate.x_max", "textbox", "X Max", Some(state.sim_x_max_draft.clone()), true),
+        );
+        row.label("Rows:");
+        let rows_r = row.add(egui::TextEdit::singleline(&mut state.sim_row_count_draft).desired_width(56.0));
+        meta.record_modal_response(
+            row,
+            &rows_r,
+            FrameInspectEntryInput::modal("edit.transform.simulate.row_count", "textbox", "Row Count", Some(state.sim_row_count_draft.clone()), true),
+        );
+        row.label("Replicates:");
+        let reps_r = row.add(egui::TextEdit::singleline(&mut state.sim_replicates_draft).desired_width(48.0));
+        meta.record_modal_response(
+            row,
+            &reps_r,
+            FrameInspectEntryInput::modal(
+                "edit.transform.simulate.replicates",
+                "textbox",
+                "Replicates",
+                Some(state.sim_replicates_draft.clone()),
+                true,
+            ),
+        );
+        row.label("Seed:");
+        let seed_r = row.add(egui::TextEdit::singleline(&mut state.sim_seed_draft).desired_width(64.0));
+        meta.record_modal_response(
+            row,
+            &seed_r,
+            FrameInspectEntryInput::modal("edit.transform.simulate.seed", "textbox", "RNG Seed", Some(state.sim_seed_draft.clone()), true),
+        );
+        if xmin_r.changed() || xmax_r.changed() || rows_r.changed() || reps_r.changed() || seed_r.changed() {
+            changed = true;
+        }
+    });
+
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|row| {
+        row.label("Parameters (name=val, ...):");
+        let pr = row.add(
+            egui::TextEdit::singleline(&mut state.sim_params_draft).hint_text("Bottom=0, Top=100, LogEC50=-6, HillSlope=1").desired_width(280.0),
+        );
+        meta.record_modal_response(
+            row,
+            &pr,
+            FrameInspectEntryInput::modal("edit.transform.simulate.params", "textbox", "Parameters", Some(state.sim_params_draft.clone()), true),
+        );
+        if pr.changed() {
+            changed = true;
+        }
+    });
+
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|row| {
+        row.label("Noise:");
+        for (idx, slug, lbl) in
+            [(0usize, "none", "None"), (1, "gaussian", "Gaussian (SD)"), (2, "relative_cv", "Relative (%CV)"), (3, "poisson", "Poisson")]
+        {
+            let sel = state.sim_noise_kind == idx;
+            let nr = choice_pill(row, tokens, lbl, sel, true);
+            meta.record_modal_response(
+                row,
+                &nr,
+                FrameInspectEntryInput::modal(&format!("edit.transform.simulate.noise.{slug}"), "radio", lbl, Some(sel.to_string()), true),
+            );
+            if nr.clicked() {
+                state.sim_noise_kind = idx;
+                changed = true;
+            }
+        }
+        if matches!(state.sim_noise_kind, 1 | 2) {
+            row.label(if state.sim_noise_kind == 1 { "SD:" } else { "CV (%):" });
+            let npr = row.add(egui::TextEdit::singleline(&mut state.sim_noise_param_draft).desired_width(64.0));
+            meta.record_modal_response(
+                row,
+                &npr,
+                FrameInspectEntryInput::modal(
+                    "edit.transform.simulate.noise_param",
+                    "textbox",
+                    "Noise Level",
+                    Some(state.sim_noise_param_draft.clone()),
+                    true,
+                ),
+            );
+            if npr.changed() {
+                changed = true;
+            }
+        }
+    });
+
+    match validate_and_build_simulate_spec(state, &app.locale_preset) {
+        Ok(tr_spec) => {
+            state.validation_error = None;
+            if from_edit
+                && changed
+                && let Some(mut spec) = app.canvas_dialogs.edit_params.draft.clone()
+            {
+                spec.kind = AnalysisKind::Transform(tr_spec);
+                cx.intents.push_set_edit_params_draft(spec);
+            }
+        }
+        Err(err) => {
+            state.validation_error = Some(err);
+        }
+    }
+}
+
+fn render_random_sample_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
+    let app = cx.app;
+    let ds = cx.ds;
+    let from_edit = cx.from_edit;
+    let tokens = cx.tokens;
+    let state = &mut *cx.state;
+    let meta = &mut *cx.meta;
+    let mut changed = false;
+
+    ui.label(RichText::new("Deterministic Random / Stratified Row Sampling").strong().color(tokens.text_primary));
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|row| {
+        row.label("Sample size (rows):");
+        let sr = row.add(egui::TextEdit::singleline(&mut state.rand_sample_size_draft).hint_text("5").desired_width(72.0));
+        meta.record_modal_response(
+            row,
+            &sr,
+            FrameInspectEntryInput::modal(
+                "edit.transform.random_sample.sample_size",
+                "textbox",
+                "Sample Size",
+                Some(state.rand_sample_size_draft.clone()),
+                true,
+            ),
+        );
+        row.label("RNG seed:");
+        let seed_r = row.add(egui::TextEdit::singleline(&mut state.rand_seed_draft).hint_text("42").desired_width(80.0));
+        meta.record_modal_response(
+            row,
+            &seed_r,
+            FrameInspectEntryInput::modal("edit.transform.random_sample.seed", "textbox", "RNG Seed", Some(state.rand_seed_draft.clone()), true),
+        );
+        if sr.changed() || seed_r.changed() {
+            changed = true;
+        }
+    });
+
+    ui.add_space(6.0);
+    ui.label("Stratification column:");
+    ui.horizontal_wrapped(|row| {
+        let none_sel = state.rand_stratify_col.is_none();
+        let nr = choice_pill(row, tokens, "None (Simple Random)", none_sel, true);
+        meta.record_modal_response(
+            row,
+            &nr,
+            FrameInspectEntryInput::modal(
+                "edit.transform.random_sample.stratify.none",
+                "radio",
+                "None (Simple Random)",
+                Some(none_sel.to_string()),
+                true,
+            ),
+        );
+        if nr.clicked() {
+            state.rand_stratify_col = None;
+            changed = true;
+        }
+        if let Some(sheet) = ds {
+            for col in 0..sheet.archetype.column_count() {
+                let lbl = sheet.title_at(col);
+                let sel = state.rand_stratify_col == Some(col);
+                let cr = choice_pill(row, tokens, &lbl, sel, true);
+                meta.record_modal_response(
+                    row,
+                    &cr,
+                    FrameInspectEntryInput::modal(
+                        &format!("edit.transform.random_sample.stratify.{col}"),
+                        "radio",
+                        &lbl,
+                        Some(sel.to_string()),
+                        true,
+                    ),
+                );
+                if cr.clicked() {
+                    state.rand_stratify_col = Some(col);
+                    changed = true;
+                }
+            }
+        }
+    });
+
+    ui.add_space(4.0);
+    let has_strat = state.rand_stratify_col.is_some();
+    let pr = ui.add_enabled(has_strat, egui::Checkbox::new(&mut state.rand_proportional_allocation, "Proportional allocation across strata"));
+    meta.record_modal_response(
+        ui,
+        &pr,
+        FrameInspectEntryInput::modal(
+            "edit.transform.random_sample.proportional",
+            "checkbox",
+            "Proportional Allocation",
+            Some(state.rand_proportional_allocation.to_string()),
+            has_strat,
+        ),
+    );
+    if pr.changed() {
+        changed = true;
+    }
+
+    match validate_and_build_random_sample_spec(ds, state) {
+        Ok(tr_spec) => {
+            state.validation_error = None;
+            if from_edit
+                && changed
+                && let Some(mut spec) = app.canvas_dialogs.edit_params.draft.clone()
+            {
+                spec.kind = AnalysisKind::Transform(tr_spec);
+                cx.intents.push_set_edit_params_draft(spec);
+            }
+        }
+        Err(err) => {
+            state.validation_error = Some(err);
+        }
+    }
+}
+
+fn validate_and_build_simulate_spec(state: &TransformModalsEguiState, preset: &crate::i18n::LocalePreset) -> Result<TransformAnalysisSpec, String> {
+    let eq = state.sim_equation_id_draft.trim();
+    if eq.is_empty() {
+        return Err(String::from("Enter a simulation equation ID or expression."));
+    }
+    let seed = state.sim_seed_draft.trim().parse::<u64>().map_err(|_| String::from("Simulation seed must be a non-negative integer."))?;
+    let row_count = state
+        .sim_row_count_draft
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|&n| (1..=MAX_ROWS).contains(&n))
+        .ok_or_else(|| format!("Row count must be between 1 and {MAX_ROWS}."))?;
+    let replicates = state
+        .sim_replicates_draft
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|&n| (1..=MAX_SUBCOLUMNS).contains(&n))
+        .ok_or_else(|| format!("Replicates must be between 1 and {MAX_SUBCOLUMNS}."))?;
+    let x_min = parse_localized_number_input(state.sim_x_min_draft.trim(), preset)
+        .filter(|v| v.is_finite())
+        .ok_or_else(|| String::from("X min must be a finite number."))?;
+    let x_max = parse_localized_number_input(state.sim_x_max_draft.trim(), preset)
+        .filter(|v| v.is_finite())
+        .ok_or_else(|| String::from("X max must be a finite number."))?;
+    if row_count > 1 && x_min >= x_max {
+        return Err(String::from("X min must be strictly less than X max when rows > 1."));
+    }
+    if x_min > x_max {
+        return Err(String::from("X min must not exceed X max."));
+    }
+    let parameters = parse_simulate_parameters(&state.sim_params_draft, preset)?;
+    let noise = match state.sim_noise_kind {
+        1 => {
+            let sd = parse_localized_number_input(state.sim_noise_param_draft.trim(), preset)
+                .filter(|v| v.is_finite() && *v >= 0.0)
+                .ok_or_else(|| String::from("Gaussian SD must be finite and >= 0."))?;
+            SimulationNoise::Gaussian { sd }
+        }
+        2 => {
+            let cv_percent = parse_localized_number_input(state.sim_noise_param_draft.trim(), preset)
+                .filter(|v| v.is_finite() && *v >= 0.0)
+                .ok_or_else(|| String::from("Relative %CV must be finite and >= 0."))?;
+            SimulationNoise::RelativePercent { cv_percent }
+        }
+        3 => SimulationNoise::Poisson,
+        _ => SimulationNoise::None,
+    };
+    Ok(TransformAnalysisSpec::Simulate { seed, row_count, replicates, x_min, x_max, equation_id: eq.to_owned(), parameters, noise })
+}
+
+fn parse_simulate_parameters(raw: &str, preset: &crate::i18n::LocalePreset) -> Result<Vec<(String, f64)>, String> {
+    let mut out = Vec::new();
+    for entry in raw.split([',', ';']).map(str::trim).filter(|s| !s.is_empty()) {
+        let Some((name, val_s)) = entry.split_once('=') else {
+            return Err(format!("Parameter `{entry}` must use `name=value` syntax."));
+        };
+        let key = name.trim();
+        if key.is_empty() {
+            return Err(String::from("Parameter name must not be empty."));
+        }
+        let val = parse_localized_number_input(val_s.trim(), preset)
+            .filter(|v| v.is_finite())
+            .ok_or_else(|| format!("Parameter `{key}` has non-numeric value `{}`.", val_s.trim()))?;
+        out.push((key.to_owned(), val));
+    }
+    Ok(out)
+}
+
+fn validate_and_build_random_sample_spec(ds: Option<&DataSheet>, state: &TransformModalsEguiState) -> Result<TransformAnalysisSpec, String> {
+    let sample_size = state
+        .rand_sample_size_draft
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|&n| n >= 1)
+        .ok_or_else(|| String::from("Sample size must be an integer >= 1."))?;
+    let seed = state.rand_seed_draft.trim().parse::<u64>().map_err(|_| String::from("RNG seed must be a non-negative integer."))?;
+    if let (Some(col), Some(sheet)) = (state.rand_stratify_col, ds)
+        && col >= sheet.archetype.column_count()
+    {
+        return Err(format!("Stratification column index {col} is out of range for `{}`.", sheet.title));
+    }
+    Ok(TransformAnalysisSpec::RandomSample {
+        seed,
+        sample_size,
+        stratify_column: state.rand_stratify_col,
+        proportional_allocation: state.rand_proportional_allocation,
+    })
+}
+
+fn resolve_extract_column_bindings(ds: &DataSheet, state: &TransformModalsEguiState, target_kind: TableKind) -> Result<Option<Vec<usize>>, String> {
+    let mut raw_fields = vec![state.extract_binding_x.trim(), state.extract_binding_y.trim()];
+    if matches!(target_kind, TableKind::Grouped | TableKind::Nested | TableKind::Survival) {
+        raw_fields.push(state.extract_binding_grp.trim());
+    }
+    let non_empty: Vec<&str> = raw_fields.into_iter().filter(|s| !s.is_empty()).collect();
+    if non_empty.is_empty() {
+        return Ok(None);
+    }
+
+    let col_count = ds.archetype.column_count();
+    let titles: Vec<String> = (0..col_count).map(|c| ds.title_at(c)).collect();
+    let axis_title = match &ds.archetype {
+        TableArchetype::Xy(t) => Some(if t.x_title.trim().is_empty() { String::from("X") } else { t.x_title.clone() }),
+        TableArchetype::Survival(t) => Some(if t.time_title.trim().is_empty() { String::from("Time") } else { t.time_title.clone() }),
+        _ => None,
+    };
+
+    let mut cols = Vec::new();
+    for field in non_empty {
+        if let Some(idx) = match_single_column_title(&titles, field) {
+            if !cols.contains(&idx) {
+                cols.push(idx);
+            }
+            continue;
+        }
+        if axis_title.as_deref().is_some_and(|at| at.trim().eq_ignore_ascii_case(field)) {
+            continue;
+        }
+        for tok in field.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some(idx) = match_single_column_title(&titles, tok) {
+                if !cols.contains(&idx) {
+                    cols.push(idx);
+                }
+            } else if axis_title.as_deref().is_some_and(|at| at.trim().eq_ignore_ascii_case(tok)) {
+                continue;
+            } else {
+                return Err(format!("Unknown column binding `{tok}` on sheet `{}`.", ds.title));
+            }
+        }
+    }
+    Ok(if cols.is_empty() { None } else { Some(cols) })
+}
+
+fn match_single_column_title(titles: &[String], needle: &str) -> Option<usize> {
+    titles.iter().position(|t| t.trim() == needle).or_else(|| titles.iter().position(|t| t.trim().eq_ignore_ascii_case(needle)))
 }
 
 fn render_inline_hook_picker(ui: &mut Ui, app: &UiApp, state: &mut TransformModalsEguiState, tokens: &Tokens, meta: &mut FrameInspectMeta) {
@@ -1572,7 +2093,7 @@ fn render_transform_footer(ui: &mut Ui, cx: &mut TransformModalCtx<'_>, kind: Tr
             meta.record_modal_response(rhs, &ok_resp, FrameInspectEntryInput::modal("modal.ok", "button", ok_lbl, None, can_ok));
             if ok_resp.clicked() {
                 if from_edit {
-                    if commit_edit_transform_k_if_needed(app, kind, state, intents) {
+                    if commit_edit_transform_draft_if_needed(app, ds, kind, state, intents) {
                         intents.push_dialog_button("ok");
                         push_normalize_graph_if_requested(app, kind, state, intents);
                     }
@@ -1597,7 +2118,7 @@ fn render_transform_footer(ui: &mut Ui, cx: &mut TransformModalCtx<'_>, kind: Tr
                 let apply_lbl = tr_or_fallback(tokens.locale, "btn.apply", "Apply");
                 let apply_resp = rhs.add_enabled(can_ok, egui::Button::new(apply_lbl));
                 meta.record_modal_response(rhs, &apply_resp, FrameInspectEntryInput::modal("modal.apply", "button", apply_lbl, None, can_ok));
-                if apply_resp.clicked() && commit_edit_transform_k_if_needed(app, kind, state, intents) {
+                if apply_resp.clicked() && commit_edit_transform_draft_if_needed(app, ds, kind, state, intents) {
                     intents.push_dialog_button("apply");
                     push_normalize_graph_if_requested(app, kind, state, intents);
                 }
@@ -1623,28 +2144,78 @@ fn push_normalize_graph_if_requested(app: &UiApp, kind: TransformModalKind, stat
     }
 }
 
-fn commit_edit_transform_k_if_needed(
+fn commit_edit_transform_draft_if_needed(
     app: &UiApp,
+    ds: Option<&DataSheet>,
     kind: TransformModalKind,
     state: &mut TransformModalsEguiState,
     intents: &mut PendingUiIntents,
 ) -> bool {
-    if kind != TransformModalKind::TransformValues {
-        return true;
-    }
-    let Some(k_op) = state.selected_k_op else {
-        return true;
-    };
-    match build_linear_scale_for_k(k_op, &state.constant_k_draft, &app.locale_preset) {
-        Ok(linear) => {
-            let mut draft_spec = app.canvas_dialogs.edit_params.draft.clone();
-            apply_math_patch(draft_spec.as_mut(), None, Some(Some(linear)), None, intents);
-            true
+    match kind {
+        TransformModalKind::TransformValues => {
+            let Some(k_op) = state.selected_k_op else {
+                return true;
+            };
+            match build_linear_scale_for_k(k_op, &state.constant_k_draft, &app.locale_preset) {
+                Ok(linear) => {
+                    let mut draft_spec = app.canvas_dialogs.edit_params.draft.clone();
+                    apply_math_patch(draft_spec.as_mut(), None, Some(Some(linear)), None, intents);
+                    true
+                }
+                Err(err) => {
+                    state.validation_error = Some(err);
+                    false
+                }
+            }
         }
-        Err(err) => {
-            state.validation_error = Some(err);
-            false
+        TransformModalKind::Simulate => match validate_and_build_simulate_spec(state, &app.locale_preset) {
+            Ok(tr_spec) => {
+                if let Some(mut spec) = app.canvas_dialogs.edit_params.draft.clone() {
+                    spec.kind = AnalysisKind::Transform(tr_spec);
+                    intents.push_set_edit_params_draft(spec);
+                }
+                true
+            }
+            Err(err) => {
+                state.validation_error = Some(err);
+                false
+            }
+        },
+        TransformModalKind::RandomSample => match validate_and_build_random_sample_spec(ds, state) {
+            Ok(tr_spec) => {
+                if let Some(mut spec) = app.canvas_dialogs.edit_params.draft.clone() {
+                    spec.kind = AnalysisKind::Transform(tr_spec);
+                    intents.push_set_edit_params_draft(spec);
+                }
+                true
+            }
+            Err(err) => {
+                state.validation_error = Some(err);
+                false
+            }
+        },
+        TransformModalKind::ExtractAndRearrange => {
+            let target_kind = state.extract_target_kind.unwrap_or(TableKind::Xy);
+            if let Some(sheet) = ds {
+                match resolve_extract_column_bindings(sheet, state, target_kind) {
+                    Ok(Some(cols)) => {
+                        if let Some(mut spec) = app.canvas_dialogs.edit_params.draft.clone() {
+                            spec.selected_data_sets = cols;
+                            intents.push_set_edit_params_draft(spec);
+                        }
+                        true
+                    }
+                    Ok(None) => true,
+                    Err(err) => {
+                        state.validation_error = Some(err);
+                        false
+                    }
+                }
+            } else {
+                true
+            }
         }
+        _ => true,
     }
 }
 
@@ -1737,6 +2308,9 @@ fn build_standalone_transform_params(
             let target_archetype = state.extract_target_kind.unwrap_or(default_target);
             let derived_columns =
                 state.derived_cols.iter().map(|(title, formula)| DerivedColumnFormula::new(title.clone(), formula.clone())).collect();
+            let bound_cols =
+                if kind == TransformModalKind::ExtractAndRearrange { resolve_extract_column_bindings(ds, state, target_archetype)? } else { None };
+            let selected_cols = bound_cols.unwrap_or_else(|| state.standalone_selected_cols.clone());
             let kind_val = serde_json::to_value(AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform {
                 filter_formula,
                 target_archetype,
@@ -1747,10 +2321,10 @@ fn build_standalone_transform_params(
                 "source_sheet_id": ds.id.as_str(),
                 "kind": kind_val,
             });
-            if !state.standalone_selected_cols.is_empty()
+            if !selected_cols.is_empty()
                 && let Some(m) = obj.as_object_mut()
             {
-                m.insert(String::from("selected_data_sets"), json!(state.standalone_selected_cols));
+                m.insert(String::from("selected_data_sets"), json!(selected_cols));
             }
             Ok(obj)
         }
@@ -1766,9 +2340,22 @@ fn build_standalone_transform_params(
             "average_window": state.prune_average_window,
         })),
         TransformModalKind::Simulate => {
-            Ok(json!({ "source_sheet_id": ds.id.as_str(), "kind": "simulate", "seed": 42, "row_count": 13, "replicates": 3 }))
+            let tr_spec = validate_and_build_simulate_spec(state, &app.locale_preset)?;
+            let kind_val = serde_json::to_value(AnalysisKind::Transform(tr_spec)).map_err(|err| format!("Failed to encode simulate spec: {err}"))?;
+            Ok(json!({
+                "source_sheet_id": ds.id.as_str(),
+                "kind": kind_val,
+            }))
         }
-        TransformModalKind::RandomSample => Ok(json!({ "source_sheet_id": ds.id.as_str(), "kind": "random_sample", "seed": 42, "sample_size": 5 })),
+        TransformModalKind::RandomSample => {
+            let tr_spec = validate_and_build_random_sample_spec(Some(ds), state)?;
+            let kind_val =
+                serde_json::to_value(AnalysisKind::Transform(tr_spec)).map_err(|err| format!("Failed to encode random sample spec: {err}"))?;
+            Ok(json!({
+                "source_sheet_id": ds.id.as_str(),
+                "kind": kind_val,
+            }))
+        }
     }
 }
 
