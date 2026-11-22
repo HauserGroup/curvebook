@@ -16,13 +16,13 @@
 
 use std::sync::OnceLock;
 
-use crate::dist::core::{chi2_cdf, chi2_sf, f_cdf, f_sf, norm_cdf, norm_isf, norm_sf, student_t_cdf, student_t_sf};
+use crate::dist::core::{chi2_cdf, chi2_sf, f_cdf, f_sf, mul_div3, norm_cdf, norm_isf, norm_ln_sf, norm_sf, student_t_cdf, student_t_sf};
 use crate::error::MathError;
 use crate::roots::{RootOptions, brent_root};
 use crate::special::erf::{erfc, exp_neg_sq};
 use crate::special::gamma::{deviance_bd0, ln_factorial, ln_gamma, stirling_err};
-use crate::special::inc_beta::{ln_beta_kernel, reg_beta_xy};
-use crate::special::inc_gamma::{reg_gamma_p, reg_gamma_q};
+use crate::special::inc_beta::{ln_beta_kernel, ln_reg_beta_xy, reg_beta_xy};
+use crate::special::inc_gamma::{ln_reg_gamma_p, ln_reg_gamma_q, reg_gamma_p, reg_gamma_q};
 
 const MAX_POISSON_TERMS: usize = 4096;
 const POISSON_SUM_MAX_LAM_HALF: f64 = 1_000_000.0;
@@ -129,15 +129,160 @@ fn reg_beta_eval_safe(x: f64, y: f64, a: f64, b: f64) -> Result<f64, MathError> 
     match reg_beta_xy(x, y, a, b) {
         Ok(v) => Ok(v),
         Err(MathError::NotConverged { .. }) if a >= 1e6 && b >= 1e6 => {
-            let s = a + b;
-            let pm = a / s;
-            let qm = b / s;
-            let sd = (pm * qm / (s + 1.0)).sqrt();
-            let diff = (b * x - a * y) / (s * (x + y));
+            let half_a = 0.5 * a;
+            let half_b = 0.5 * b;
+            let half_s = half_a + half_b;
+            let pm = half_a / half_s;
+            let qm = half_b / half_s;
+            let sd = (0.5 * pm * qm / (half_s + 0.5)).sqrt();
+            let diff = (half_b * x - half_a * y) / (half_s * (x + y));
             Ok(norm_cdf(diff / sd))
         }
         Err(e) => Err(e),
     }
+}
+
+fn ln_reg_beta_eval_safe(x: f64, y: f64, a: f64, b: f64) -> Result<f64, MathError> {
+    match ln_reg_beta_xy(x, y, a, b) {
+        Ok(v) => Ok(v),
+        Err(MathError::NotConverged { .. }) if a >= 1e6 && b >= 1e6 => {
+            let half_a = 0.5 * a;
+            let half_b = 0.5 * b;
+            let half_s = half_a + half_b;
+            let pm = half_a / half_s;
+            let qm = half_b / half_s;
+            let sd = (0.5 * pm * qm / (half_s + 0.5)).sqrt();
+            let diff = (half_b * x - half_a * y) / (half_s * (x + y));
+            let z = diff / sd;
+            if z <= 0.0 {
+                Ok(norm_ln_sf(-z))
+            } else {
+                let sf = norm_sf(z);
+                Ok((-sf).ln_1p())
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn ln_poisson_pmf_at(k: usize, lam_half: f64) -> Result<f64, MathError> {
+    if lam_half == 0.0 {
+        return Ok(if k == 0 { 0.0 } else { f64::NEG_INFINITY });
+    }
+    if k == 0 {
+        return Ok(-lam_half);
+    }
+    let kf = k as f64;
+    if k >= 12 {
+        Ok(-deviance_bd0(kf, lam_half) - HALF_LN_2PI - 0.5 * kf.ln() - stirling_err(kf))
+    } else {
+        Ok(-lam_half + kf * lam_half.ln() - ln_factorial(k as u64))
+    }
+}
+
+/// Evaluate `sum_{k=0}^inf P(Poisson(lam_half) = k) * T_k` in log-space via unimodal peak search
+/// + separate `k = 0` evaluation (handling tiny-shape non-unimodality when `a0 < 1`) and log-sum-exp.
+fn sum_poisson_mixture_log_space<F: FnMut(usize) -> Result<f64, MathError>>(
+    lam_half: f64,
+    k0: usize,
+    upper: bool,
+    mut eval_ln_tail: F,
+) -> Result<f64, MathError> {
+    let mut ln_term = |k: usize| -> Result<f64, MathError> {
+        let lp = ln_poisson_pmf_at(k, lam_half)?;
+        let lt = eval_ln_tail(k)?;
+        Ok(lp + lt)
+    };
+
+    let l_0 = ln_term(0)?;
+    let (mut lo, mut hi) = if !upper {
+        (1_usize, k0.max(1))
+    } else {
+        let mut prev_prev = k0.max(1);
+        let mut cur = prev_prev;
+        let mut prev_val = ln_term(cur)?;
+        let mut step = 1_usize;
+        let bracket_hi;
+        let limit = k0.saturating_add(2_000_000);
+        loop {
+            let next = cur.saturating_add(step);
+            if next > limit {
+                bracket_hi = limit;
+                break;
+            }
+            let next_val = ln_term(next)?;
+            if next_val <= prev_val {
+                bracket_hi = next;
+                break;
+            }
+            prev_prev = cur;
+            cur = next;
+            prev_val = next_val;
+            step = step.saturating_mul(2);
+        }
+        (prev_prev, bracket_hi)
+    };
+
+    if k0 == 0 && !upper {
+        let mut sum = 1.0_f64;
+        if !l_0.is_finite() || l_0 < -755.0 {
+            return Ok(0.0);
+        }
+        for k in 1..=50_000 {
+            let diff = ln_term(k)? - l_0;
+            if diff < -42.0 {
+                break;
+            }
+            sum += diff.exp();
+        }
+        return Ok((l_0 + sum.ln()).exp().clamp(0.0, 1.0));
+    }
+
+    while hi - lo > 3 {
+        let m1 = lo + (hi - lo) / 3;
+        let m2 = hi - (hi - lo) / 3;
+        if ln_term(m1)? < ln_term(m2)? {
+            lo = m1 + 1;
+        } else {
+            hi = m2 - 1;
+        }
+    }
+
+    let mut k_star = lo;
+    let mut l_star = ln_term(lo)?;
+    for k in (lo + 1)..=hi {
+        let val = ln_term(k)?;
+        if val > l_star {
+            l_star = val;
+            k_star = k;
+        }
+    }
+
+    let l_max = if !upper || k0 == 0 { l_0.max(l_star) } else { l_star };
+    if !l_max.is_finite() || l_max < -755.0 {
+        return Ok(0.0);
+    }
+
+    let mut sum = (l_star - l_max).exp();
+    if (!upper || k0 == 0) && l_0 - l_max >= -42.0 {
+        sum += (l_0 - l_max).exp();
+    }
+    for k in (1..k_star).rev() {
+        let diff = ln_term(k)? - l_max;
+        if diff < -42.0 {
+            break;
+        }
+        sum += diff.exp();
+    }
+    let up_limit = k_star.saturating_add(50_000);
+    for k in (k_star + 1)..=up_limit {
+        let diff = ln_term(k)? - l_max;
+        if diff < -42.0 {
+            break;
+        }
+        sum += diff.exp();
+    }
+    Ok((l_max + sum.ln()).exp().clamp(0.0, 1.0))
 }
 
 fn poisson_gl_expectation<F: FnMut(f64) -> Result<f64, MathError>>(lam_half: f64, mut f: F) -> Result<f64, MathError> {
@@ -230,37 +375,150 @@ pub fn nct_sf(t: f64, df: f64, delta: f64) -> Result<f64, MathError> {
     nct_positive_t_eval(t, df, delta, true)
 }
 
+/// Cancellation-free 1D saddlepoint log-sum-exp quadrature for opposite-tail `P(T_{df, delta} > t)`
+/// when `t > 0` and `delta < 0` across arbitrary finite `df < 1e9`, avoiding `1 - cdf` cancellation.
+fn nct_sf_pos_t_neg_delta_quad(t: f64, df: f64, delta: f64) -> Result<f64, MathError> {
+    let ad = -delta;
+    if ad >= 45.0 {
+        // Since P((Z - ad) / U > t) <= P(Z > ad) < 1e-440 for ad >= 45, exact in f64.
+        return Ok(0.0);
+    }
+    let half_df = 0.5 * df;
+    let ln_norm = if half_df >= 10.0 {
+        0.5 * (df / std::f64::consts::PI).ln() - stirling_err(half_df)
+    } else {
+        std::f64::consts::LN_2 + half_df * (half_df.ln() - 1.0) - ln_gamma(half_df)?
+    };
+    let log_factor = |s: f64| -> f64 {
+        let y = 2.0 * s;
+        if y.abs() < 1e-4 { -y * y * (0.5 + y * (1.0 / 6.0 + y * (1.0 / 24.0 + y * (1.0 / 120.0 + y / 720.0)))) } else { y - y.exp_m1() }
+    };
+    let ln_t = t.ln();
+    let ln_int = |s: f64| -> f64 {
+        let arg = s + ln_t;
+        if arg > 700.0 {
+            return f64::NEG_INFINITY;
+        }
+        let z = arg.exp() + ad;
+        let lsf = norm_ln_sf(z);
+        if !lsf.is_finite() {
+            return f64::NEG_INFINITY;
+        }
+        ln_norm + half_df * log_factor(s) + lsf
+    };
+
+    let rt_df = df.sqrt();
+    let ad_t = ad * t;
+    let u_star = if ad_t.is_finite() {
+        let denom = ad_t + ad_t.hypot(2.0 * rt_df * rt_df.hypot(t));
+        2.0 * df / denom
+    } else {
+        (df.ln() - ad.ln() - ln_t).exp()
+    };
+    let s_star = u_star.max(1e-300).ln();
+    let neg_g2 = (2.0 * (df + t * t) * u_star * u_star + ad * t * u_star).max(1e-300);
+    let sigma = 1.0 / neg_g2.sqrt();
+
+    // Refine mode s_peak within a narrow neighborhood around saddlepoint u_star using golden section.
+    let mut g_lo = s_star - 2.0 * sigma;
+    let mut g_hi = s_star + 2.0 * sigma;
+    const INV_PHI: f64 = 0.618_033_988_749_894_9;
+    let mut x1 = g_hi - INV_PHI * (g_hi - g_lo);
+    let mut x2 = g_lo + INV_PHI * (g_hi - g_lo);
+    let mut f1 = ln_int(x1);
+    let mut f2 = ln_int(x2);
+    for _ in 0..16 {
+        if f1 < f2 {
+            g_lo = x1;
+            x1 = x2;
+            f1 = f2;
+            x2 = g_lo + INV_PHI * (g_hi - g_lo);
+            f2 = ln_int(x2);
+        } else {
+            g_hi = x2;
+            x2 = x1;
+            f2 = f1;
+            x1 = g_hi - INV_PHI * (g_hi - g_lo);
+            f1 = ln_int(x1);
+        }
+    }
+    let s_peak = 0.5 * g_lo + 0.5 * g_hi;
+    let ln_ref = ln_int(s_peak).max(ln_int(s_star));
+    if !ln_ref.is_finite() || ln_ref < -760.0 {
+        return Ok(0.0);
+    }
+
+    let mut step_l = sigma.max(1.0 / df);
+    let mut s_lo = s_peak - step_l;
+    for _ in 0..24 {
+        if ln_int(s_lo) - ln_ref <= -50.0 {
+            break;
+        }
+        step_l *= 2.0;
+        s_lo = s_peak - step_l;
+    }
+    let mut step_r = sigma;
+    let mut s_hi = s_peak + step_r;
+    for _ in 0..24 {
+        if ln_int(s_hi) - ln_ref <= -50.0 {
+            break;
+        }
+        step_r *= 2.0;
+        s_hi = s_peak + step_r;
+    }
+
+    let opts = crate::quad::QuadOptions { abs_tol: 1e-13, rel_tol: 1e-12, max_subdivisions: 256 };
+    let integrand = |s: f64| -> f64 {
+        let diff = ln_int(s) - ln_ref;
+        if diff < -55.0 { 0.0 } else { diff.min(50.0).exp() }
+    };
+    let left = if s_peak > s_lo { crate::quad::integrate_adaptive(integrand, s_lo, s_peak, opts)? } else { 0.0 };
+    let right = if s_hi > s_peak { crate::quad::integrate_adaptive(integrand, s_peak, s_hi, opts)? } else { 0.0 };
+    let scaled = left + right;
+    if scaled <= 0.0 {
+        return Ok(0.0);
+    }
+    Ok((ln_ref + scaled.ln()).exp().clamp(0.0, 1.0))
+}
+
 /// Evaluate `P(T <= t)` (`upper = false`) or `P(T > t)` (`upper = true`) for `t > 0`.
 fn nct_positive_t_large_delta_quad(t: f64, df: f64, delta: f64, upper: bool) -> Result<f64, MathError> {
-    if df > 1e6 || delta.abs() > 1e9 {
+    if df > 1e6 {
         // Two-moment Gaussian approximation for U = sqrt(chi2_df / df):
         //   E[U] = 1 - 1/(4*df) + 1/(32*df^2) + O(df^-3)
         //   Var(U) = 1/(2*df) - 1/(8*df^2) + O(df^-3)
         //   skew(U) = 1/sqrt(2*df) + O(df^-3/2).
         // Stirling expansion avoids catastrophic cancellation in ln_gamma differences and 1 - E[U]^2.
-        //
-        // Accuracy bound (verified numerically against adaptive 1D chi-square quadrature over
-        // df in [1.01e6, 1e8], |delta| in [448, 1e8], z in [-5, +5]):
-        // - Worst-case absolute CDF/SF error across all (t, delta) is governed by the leading
-        //   Edgeworth skewness term |(z^2 - 1) * phi(z)| * skew(U) / 6 <= 1 / (12 * sqrt(pi * df)),
-        //   which is <= 4.70e-5 for df > 1e6 (observed max 4.68e-5 at df = 1.01e6, delta = 1e8, z = 0)
-        //   and <= 4.70e-6 for df >= 1e8.
-        // - For |delta| <= 1e3 and df > 1e6, |t*sigma_U| / sigma_W < 0.58 dampens skewness by ~0.2,
-        //   giving max |abs_err| < 9.0e-6; at |z| <= 5 tails, relative error stays <= 1.5e-2 (df ~ 1e6)
-        //   and <= 1.5e-3 (df >= 1e8).
-        let (eu, var_u) = if df > 1e5 {
-            let inv_df = 1.0 / df;
-            let inv_df2 = inv_df * inv_df;
-            let eu = 1.0 - 0.25 * inv_df + (1.0 / 32.0) * inv_df2;
-            let var_u = (0.5 * inv_df - 0.125 * inv_df2).max(0.0);
-            (eu, var_u)
-        } else {
-            let half_df = 0.5 * df;
-            let eu = half_df.sqrt() * (ln_gamma(half_df + 0.5)? - ln_gamma(half_df)?).exp() / half_df;
-            (eu, (1.0 - eu * eu).max(0.0))
-        };
-        let z_eff = (t * eu - delta) / (1.0 + t * t * var_u).sqrt();
+        let inv_df = 1.0 / df;
+        let inv_df2 = inv_df * inv_df;
+        let eu = 1.0 - 0.25 * inv_df + (1.0 / 32.0) * inv_df2;
+        let var_u = (0.5 * inv_df - 0.125 * inv_df2).max(0.0);
+        let sigma_u = var_u.sqrt();
+        let s_t = t * sigma_u;
+        let z_eff = if s_t.is_finite() { (t * eu - delta) / 1.0_f64.hypot(s_t) } else { (eu / sigma_u).copysign(t) };
         return Ok(if upper { norm_sf(z_eff) } else { norm_cdf(z_eff) });
+    }
+    if !upper && delta < -45.0 {
+        return Ok(1.0);
+    }
+    if delta > 1e12 {
+        // For delta > 1e12 and df <= 1e6, P(Z/delta + 1 <= (t/delta)*U) matches P(chi2_df >= df*(delta/t)^2)
+        // to O(df / delta^2) <= 1e-18 without 53-bit s0 = ln(delta/t) step quantization.
+        let ratio = mul_div3(delta, 1.0, t);
+        let ratio2 = if ratio.is_finite() { mul_div3(ratio, ratio, 1.0) } else { f64::INFINITY };
+        let x = if ratio2.is_finite() { mul_div3(df, ratio2, 1.0) } else { f64::INFINITY };
+        if x.is_infinite() {
+            return Ok(if upper { 1.0 } else { 0.0 });
+        }
+        if x == 0.0 {
+            if df < 1e-2 {
+                let a = 0.5 * df;
+                let ln_p = (a * (a.ln() + 2.0 * (delta.ln() - t.ln())) - ln_gamma(a + 1.0)?).min(0.0);
+                return Ok(if upper { ln_p.exp().clamp(0.0, 1.0) } else { (-ln_p.exp_m1()).clamp(0.0, 1.0) });
+            }
+            return Ok(if upper { 0.0 } else { 1.0 });
+        }
+        return if upper { chi2_cdf(x, df) } else { chi2_sf(x, df) };
     }
 
     // Exact 1D quadrature in s = 0.5 * ln(chi2_df / df) so U = e^s > 0:
@@ -279,9 +537,9 @@ fn nct_positive_t_large_delta_quad(t: f64, df: f64, delta: f64, upper: bool) -> 
     // Support [s_lo, s_hi] where log_chi_density drops by exp(-45) (~3e-20).
     let tau = 45.0 / half_df;
     let mut lo_a = 0.0_f64;
-    let mut lo_b = (4.0 * tau.sqrt()).min(tau + 1.0);
+    let mut lo_b = (4.0 * tau.sqrt()).max(tau + 2.0);
     for _ in 0..32 {
-        let mid = 0.5 * (lo_a + lo_b);
+        let mid = 0.5 * lo_a + 0.5 * lo_b;
         let f_lo = if mid < 1e-3 { mid * mid * (0.5 - mid * (1.0 / 6.0 - mid * (1.0 / 24.0 - mid / 120.0))) } else { (-mid).exp_m1() + mid };
         if f_lo >= tau {
             lo_b = mid;
@@ -294,7 +552,7 @@ fn nct_positive_t_large_delta_quad(t: f64, df: f64, delta: f64, upper: bool) -> 
     let mut hi_a = 0.0_f64;
     let mut hi_b = (2.0 * tau).sqrt().min(tau.ln_1p() + 3.0);
     for _ in 0..32 {
-        let mid = 0.5 * (hi_a + hi_b);
+        let mid = 0.5 * hi_a + 0.5 * hi_b;
         let f_hi = if mid < 1e-3 { mid * mid * (0.5 + mid * (1.0 / 6.0 + mid * (1.0 / 24.0 + mid / 120.0))) } else { mid.exp_m1() - mid };
         if f_hi >= tau {
             hi_b = mid;
@@ -304,18 +562,15 @@ fn nct_positive_t_large_delta_quad(t: f64, df: f64, delta: f64, upper: bool) -> 
     }
     let s_hi = 0.5 * hi_b;
 
-    let mut pts = Vec::with_capacity(4);
+    let s0 = if delta > 0.0 { delta.ln() - t.ln() } else { 0.0 };
+    let mut pts = Vec::with_capacity(5);
     pts.push(s_lo);
     if delta > 0.0 {
-        let s0 = (delta / t).ln();
-        let w = (14.0 / delta).max(1e-7);
-        let a = s0 - w;
-        let b = s0 + w;
-        if a > s_lo && a < s_hi {
-            pts.push(a);
-        }
-        if b > s_lo && b < s_hi {
-            pts.push(b);
+        let w = (14.0 / delta).max(4.0 * f64::EPSILON * (1.0 + s0.abs()));
+        for candidate in [s0 - w, s0, s0 + w] {
+            if candidate > pts.last().copied().unwrap_or(s_lo) && candidate < s_hi {
+                pts.push(candidate);
+            }
         }
     }
     pts.push(s_hi);
@@ -332,7 +587,8 @@ fn nct_positive_t_large_delta_quad(t: f64, df: f64, delta: f64, upper: bool) -> 
             |s| {
                 let u = s.exp();
                 let dens = (ln_norm + half_df * log_factor(s)).exp();
-                let prob = if upper { norm_sf(t * u - delta) } else { norm_cdf(t * u - delta) };
+                let z = if delta > 0.0 && (s - s0).abs() < 1e-3 { delta * (s - s0).exp_m1() } else { t * u - delta };
+                let prob = if upper { norm_sf(z) } else { norm_cdf(z) };
                 dens * prob
             },
             a,
@@ -345,8 +601,11 @@ fn nct_positive_t_large_delta_quad(t: f64, df: f64, delta: f64, upper: bool) -> 
 }
 
 fn nct_positive_t_eval(t: f64, df: f64, delta: f64, upper: bool) -> Result<f64, MathError> {
+    if upper && delta < 0.0 {
+        return nct_sf_pos_t_neg_delta_quad(t, df, delta);
+    }
     let lambda_half = 0.5 * delta * delta;
-    if lambda_half > 1e5 {
+    if lambda_half > 1e5 || df > 1e6 {
         return nct_positive_t_large_delta_quad(t, df, delta, upper);
     }
 
@@ -590,10 +849,11 @@ fn ncf_eval(f: f64, df1: f64, df2: f64, lambda: f64, upper: bool) -> Result<f64,
         return Ok(if upper { 0.0 } else { 1.0 });
     }
     if df2.is_infinite() {
-        return if upper { ncchi2_sf(df1 * f, df1, lambda) } else { ncchi2_cdf(df1 * f, df1, lambda) };
+        let x_chi2 = mul_div3(df1, f, 1.0);
+        return if upper { ncchi2_sf(x_chi2, df1, lambda) } else { ncchi2_cdf(x_chi2, df1, lambda) };
     }
 
-    let ratio = (df1 / df2) * f;
+    let ratio = mul_div3(df1, f, df2);
     let (x, y) = if ratio <= 1.0 {
         (ratio / (1.0 + ratio), 1.0 / (1.0 + ratio))
     } else {
@@ -615,9 +875,17 @@ fn ncf_eval(f: f64, df1: f64, df2: f64, lambda: f64, upper: bool) -> Result<f64,
     let k0_f = k0 as f64;
     let p_k0 = poisson_pmf_at(k0, lam_half);
 
-    let a0 = 0.5 * df1 + k0_f;
+    let a_base = 0.5 * df1;
+    let a0 = a_base + k0_f;
     let i0 = if upper { reg_beta_eval_safe(y, x, b, a0)? } else { reg_beta_eval_safe(x, y, a0, b)? };
     let g0 = (ln_beta_kernel(x, y, a0, b)? - a0.ln()).exp();
+
+    if p_k0 == 0.0 || i0 < 1e-20 || (i0 < 0.5 && g0 == 0.0) {
+        return sum_poisson_mixture_log_space(lam_half, k0, upper, |k| {
+            let ak = a_base + (k as f64);
+            if upper { ln_reg_beta_eval_safe(y, x, b, ak) } else { ln_reg_beta_eval_safe(x, y, ak, b) }
+        });
+    }
 
     let max_steps = MAX_POISSON_TERMS.max((12.0 * lam_half.sqrt()).ceil() as usize + 128);
     let mut total = p_k0 * i0;
@@ -626,7 +894,7 @@ fn ncf_eval(f: f64, df1: f64, df2: f64, lambda: f64, upper: bool) -> Result<f64,
     let mut gk = g0;
     for step in 1..=max_steps {
         let j = (k0 + step) as f64;
-        let a_prev = 0.5 * df1 + j - 1.0;
+        let a_prev = a_base + j - 1.0;
         pk *= lam_half / j;
         ik = if upper { (ik + gk).min(1.0) } else { (ik - gk).max(0.0) };
         gk *= x * (a_prev + b) / (a_prev + 1.0);
@@ -641,7 +909,7 @@ fn ncf_eval(f: f64, df1: f64, df2: f64, lambda: f64, upper: bool) -> Result<f64,
     let mut gk_b = g0;
     for k_curr in (1..=k0.min(max_steps)).map(|d| k0 - d + 1) {
         let jf = k_curr as f64;
-        let a_prev = 0.5 * df1 + jf - 1.0;
+        let a_prev = a_base + jf - 1.0;
         pk_b *= jf / lam_half;
         gk_b *= (a_prev + 1.0) / (x * (a_prev + b));
         ik_b = if upper { (ik_b - gk_b).max(0.0) } else { (ik_b + gk_b).min(1.0) };
@@ -659,6 +927,12 @@ fn ncf_eval(f: f64, df1: f64, df2: f64, lambda: f64, upper: bool) -> Result<f64,
 /// # Errors
 /// Returns an error if `f_obs < 0`, `df1 <= 0`, `df2 <= 0`, or `confidence_percent` is out of `[0.01, 99.99]`.
 pub fn noncentral_f_ci(f_obs: f64, df1: f64, df2: f64, confidence_percent: f64) -> Result<(f64, f64), MathError> {
+    if !df1.is_finite() || df1 <= 0.0 {
+        return Err(MathError::InvalidParameter { name: "df1", value: df1 });
+    }
+    if df2.is_nan() || df2 <= 0.0 {
+        return Err(MathError::InvalidParameter { name: "df2", value: df2 });
+    }
     if !f_obs.is_finite() || f_obs < 0.0 {
         return Err(MathError::DomainError { name: "f_obs", value: f_obs });
     }
@@ -735,11 +1009,19 @@ fn ncchi2_eval(x: f64, df: f64, lambda: f64, upper: bool) -> Result<f64, MathErr
     let k0_f = k0 as f64;
     let p_k0 = poisson_pmf_at(k0, lam_half);
 
-    let a0 = 0.5 * df + k0_f;
+    let a_base = 0.5 * df;
+    let a0 = a_base + k0_f;
     let g_fn0 = reg_gamma_eval_safe(a0, z, upper)?;
     let ln_step0 =
         if a0 >= 12.0 { -deviance_bd0(a0, z) - HALF_LN_2PI - 0.5 * a0.ln() - stirling_err(a0) } else { a0 * z.ln() - z - ln_gamma(a0 + 1.0)? };
     let step0 = ln_step0.exp();
+
+    if p_k0 == 0.0 || g_fn0 < 1e-20 || (g_fn0 < 0.5 && step0 == 0.0) {
+        return sum_poisson_mixture_log_space(lam_half, k0, upper, |k| {
+            let ak = a_base + (k as f64);
+            if upper { ln_reg_gamma_q(ak, z) } else { ln_reg_gamma_p(ak, z) }
+        });
+    }
 
     let max_steps = MAX_POISSON_TERMS.max((12.0 * lam_half.sqrt()).ceil() as usize + 128);
     let mut total = p_k0 * g_fn0;
@@ -748,7 +1030,7 @@ fn ncchi2_eval(x: f64, df: f64, lambda: f64, upper: bool) -> Result<f64, MathErr
     let mut tk = step0;
     for step in 1..=max_steps {
         let j = (k0 + step) as f64;
-        let a_curr = 0.5 * df + j;
+        let a_curr = a_base + j;
         pk *= lam_half / j;
         gk = if upper { (gk + tk).min(1.0) } else { (gk - tk).max(0.0) };
         tk *= z / a_curr;
@@ -763,7 +1045,7 @@ fn ncchi2_eval(x: f64, df: f64, lambda: f64, upper: bool) -> Result<f64, MathErr
     let mut tk_b = step0;
     for k_curr in (1..=k0.min(max_steps)).map(|d| k0 - d + 1) {
         let jf = k_curr as f64;
-        let a_curr = 0.5 * df + jf;
+        let a_curr = a_base + jf;
         pk_b *= jf / lam_half;
         tk_b *= a_curr / z;
         gk_b = if upper { (gk_b - tk_b).max(0.0) } else { (gk_b + tk_b).min(1.0) };
@@ -781,6 +1063,9 @@ fn ncchi2_eval(x: f64, df: f64, lambda: f64, upper: bool) -> Result<f64, MathErr
 /// # Errors
 /// Returns an error if `chi2_obs < 0`, `df <= 0`, or `confidence_percent` is outside `[0.01, 99.99]`.
 pub fn noncentral_chi2_ci(chi2_obs: f64, df: f64, confidence_percent: f64) -> Result<(f64, f64), MathError> {
+    if !df.is_finite() || df <= 0.0 {
+        return Err(MathError::InvalidParameter { name: "df", value: df });
+    }
     if !chi2_obs.is_finite() || chi2_obs < 0.0 {
         return Err(MathError::DomainError { name: "chi2_obs", value: chi2_obs });
     }

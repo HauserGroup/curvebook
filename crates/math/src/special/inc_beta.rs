@@ -14,9 +14,9 @@
 
 use crate::error::MathError;
 use crate::roots::safeguarded_halley_step;
-use crate::special::erf::norm_isf_raw;
+use crate::special::erf::{erfc, erfcx, exp_neg_sq, norm_isf_raw};
 use crate::special::gamma::{aln1p_minus_arg, deviance_bd0, ln_beta, ln_gamma, stirling_err};
-use crate::special::inc_gamma::reg_gamma_q_inv;
+use crate::special::inc_gamma::{ln_reg_gamma_p, ln_reg_gamma_q, reg_gamma_p, reg_gamma_q, reg_gamma_q_inv};
 
 const MAX_BETA_CF_ITERS: usize = 20_000;
 const MAX_BETA_INV_ITERS: usize = 64;
@@ -46,10 +46,17 @@ fn validate_beta_params(a: f64, b: f64) -> Result<(), MathError> {
 /// small, imbalanced, and large `(a, b)` regimes.
 pub(crate) fn ln_beta_kernel(x: f64, y: f64, a: f64, b: f64) -> Result<f64, MathError> {
     if a >= 12.0 && b >= 12.0 {
+        let half_a = 0.5 * a;
+        let half_b = 0.5 * b;
+        let half_s = half_a + half_b;
         let s = a + b;
-        let dev = -deviance_bd0(a, s * x) - deviance_bd0(b, s * y);
-        let scale = 0.5 * ((a * b) / (std::f64::consts::TAU * s)).ln();
-        let corr = stirling_err(s) - stirling_err(a) - stirling_err(b);
+        let (dev, ln_s, st_s) = if s.is_finite() {
+            (-deviance_bd0(a, s * x) - deviance_bd0(b, s * y), s.ln(), stirling_err(s))
+        } else {
+            (-2.0 * (deviance_bd0(half_a, half_s * x) + deviance_bd0(half_b, half_s * y)), std::f64::consts::LN_2 + half_s.ln(), 0.0)
+        };
+        let scale = 0.5 * (a.ln() + b.ln() - ln_s - std::f64::consts::TAU.ln());
+        let corr = st_s - stirling_err(a) - stirling_err(b);
         return Ok(dev + scale + corr);
     }
     if a >= 12.0 {
@@ -57,7 +64,8 @@ pub(crate) fn ln_beta_kernel(x: f64, y: f64, a: f64, b: f64) -> Result<f64, Math
         let ln_x = if y < 0.5 { (-y).ln_1p() } else { x.ln() };
         let term_x = a * ln_x;
         let term_ay = b * (a * y).ln();
-        let ratio_corr = aln1p_minus_arg(a, b) + (b - 0.5) * (b / a).ln_1p() + stirling_err(a + b) - stirling_err(a);
+        let st_ab = if (a + b).is_finite() { stirling_err(a + b) } else { 0.0 };
+        let ratio_corr = aln1p_minus_arg(a, b) + (b - 0.5) * (b / a).ln_1p() + st_ab - stirling_err(a);
         return Ok(term_x + term_ay - ln_gamma(b)? + ratio_corr);
     }
     if b >= 12.0 {
@@ -72,7 +80,8 @@ pub(crate) fn ln_beta_kernel(x: f64, y: f64, a: f64, b: f64) -> Result<f64, Math
 /// `I_x(a, b) = (x^a y^b / (a B(a, b))) * (1 / CF(x, y; a, b))`, returning `ln(1 / CF) = -ln(CF)`.
 ///
 /// Accepts both `x` and `y = 1 - x` so that when `a` is huge and `y` is tiny (`x ~ 1`), the `O(a^2)`
-/// cancellation in `1 - (a + b) x / (a + 1)` and `1 + d_{2m+1}` is eliminated analytically.
+/// cancellation in `1 - (a + b) x / (a + 1)` and `1 + d_{2m+1}` is eliminated analytically, and
+/// factors all numerator/denominator pairs before multiplication so `a, b >= 1e155` never overflow.
 fn ln_beta_continued_fraction(x: f64, y: f64, a: f64, b: f64) -> Result<f64, MathError> {
     let qab = a + b;
     let qap = a + 1.0;
@@ -81,7 +90,13 @@ fn ln_beta_continued_fraction(x: f64, y: f64, a: f64, b: f64) -> Result<f64, Mat
 
     let mut c = 1.0_f64;
     // Exact identity: 1 - (a + b) * x / (a + 1) = ((a + b) * y + (1 - b)) / (a + 1).
-    let mut d = if x > 0.5 { (qab * y + (1.0 - b)) / qap } else { 1.0 - qab * x / qap };
+    let mut d = if x > 0.5 {
+        if qab.is_finite() && (qab * y).is_finite() { (qab * y + (1.0 - b)) / qap } else { (a / qap) * y - (b / qap) * x + 1.0 / qap }
+    } else if qab.is_finite() {
+        1.0 - qab * x / qap
+    } else {
+        1.0 - (a / qap + b / qap) * x
+    };
     if d.abs() < tiny {
         d = tiny;
     }
@@ -93,7 +108,7 @@ fn ln_beta_continued_fraction(x: f64, y: f64, a: f64, b: f64) -> Result<f64, Mat
         let m2 = 2.0 * mf;
 
         // Even step: d_{2m} = m (b - m) x / ((a + 2m - 1)(a + 2m)).
-        let aa_even = mf * (b - mf) * x / ((qam + m2) * (a + m2));
+        let aa_even = (mf / (qam + m2)) * ((b - mf) / (a + m2)) * x;
         let d_prev = d;
         let c_prev = c;
         let denom_even = 1.0 + aa_even * d_prev;
@@ -103,11 +118,19 @@ fn ln_beta_continued_fraction(x: f64, y: f64, a: f64, b: f64) -> Result<f64, Mat
         h *= d * c;
 
         // Odd step: d_{2m+1} = -(a + m)(a + b + m) x / ((a + 2m)(a + 2m + 1)).
-        let odd_denom = (a + m2) * (qap + m2);
-        let aa_odd = -(a + mf) * (qab + mf) * x / odd_denom;
+        let d1 = a + m2;
+        let d2 = qap + m2;
+        let r_a = (a + mf) / d1;
+        let r_qab = if qab.is_finite() { (qab + mf) / d2 } else { (a / d2) + ((b + mf) / d2) };
+        let aa_odd = -r_a * r_qab * x;
         if x > 0.5 {
             // Exact cancellation-free 1 + d_{2m+1} when x = 1 - y is close to 1:
-            let one_plus_aa_odd = ((m2 + 1.0 - b) * a + mf * (3.0 * mf + 2.0 - b) + (a + mf) * (qab + mf) * y) / odd_denom;
+            let odd_denom = d1 * d2;
+            let one_plus_aa_odd = if qab.is_finite() && odd_denom.is_finite() && ((a + mf) * (qab + mf)).is_finite() {
+                ((m2 + 1.0 - b) * a + mf * (3.0 * mf + 2.0 - b) + (a + mf) * (qab + mf) * y) / odd_denom
+            } else {
+                (a / d1) * ((m2 + 1.0 - b) / d2) + (mf / d1) * ((3.0 * mf + 2.0 - b) / d2) + r_a * r_qab * y
+            };
             let d_minus_one = -aa_even * d_prev * d;
             let inv_c_minus_one = -(aa_even / c_prev) / c;
             d = one_plus_aa_odd + aa_odd * d_minus_one;
@@ -131,6 +154,77 @@ fn ln_beta_continued_fraction(x: f64, y: f64, a: f64, b: f64) -> Result<f64, Mat
         }
     }
     Err(MathError::NotConverged { algorithm: "inc_beta_cf", iterations: MAX_BETA_CF_ITERS })
+}
+
+fn kl_dev_unit(u: f64) -> f64 {
+    // Evaluate u - ln(1 + u) >= 0 for u > -1 without catastrophic cancellation near u = 0.
+    if u.abs() < 1e-2 {
+        u * u * (0.5 - u * (1.0 / 3.0 - u * (0.25 - u * (0.2 - u * (1.0 / 6.0 - u * (1.0 / 7.0 - u / 8.0))))))
+    } else {
+        u - u.ln_1p()
+    }
+}
+
+/// Evaluate `2 * (D(a/2 || (s/2)*x) + D(b/2 || (s/2)*y))` without `s * x` precision loss when
+/// `a` and `b` are huge (`>= 1e6`) and `x` is close to the mean `a / (a + b)`.
+fn beta_deviance_temme(x: f64, y: f64, a: f64, b: f64) -> (f64, f64, f64, f64, f64) {
+    let half_a = 0.5 * a;
+    let half_b = 0.5 * b;
+    let half_s = half_a + half_b;
+    let an = half_a / half_s;
+    let bn = half_b / half_s;
+    let diff = bn * x - an * y;
+    let ua = diff / an;
+    let ub = -diff / bn;
+    let dev = if ua.abs() < 0.25 && ub.abs() < 0.25 {
+        2.0 * (half_a * kl_dev_unit(ua) + half_b * kl_dev_unit(ub))
+    } else {
+        2.0 * (deviance_bd0(half_a, half_s * x) + deviance_bd0(half_b, half_s * y))
+    };
+    (dev, half_s, an, bn, diff)
+}
+
+/// Temme's uniform asymptotic `erfc` expansion for `I_x(a, b)` when `min(a, b) >= 1e6` near the
+/// transition `x ~ a / (a + b)`, avoiding slow O(sqrt(min(a, b))) CF convergence and `a + b` overflow.
+fn temme_beta_terms(x: f64, y: f64, a: f64, b: f64) -> (f64, f64, f64) {
+    let (d, half_s, an, bn, diff) = beta_deviance_temme(x, y, a, b);
+    let z = (2.0 * d).sqrt().copysign(diff);
+    let c0 = if diff == 0.0 || z.abs() < 1e-5 {
+        let denom_ln = 0.5 * (an.ln() + bn.ln() + std::f64::consts::LN_2 + half_s.ln());
+        (bn - an) / (3.0 * denom_ln.exp())
+    } else {
+        let ln_sd = 0.5 * (an.ln() + bn.ln() - std::f64::consts::LN_2 - half_s.ln());
+        let u = (diff.abs().ln() - ln_sd).exp().copysign(diff);
+        (u - z) / (z * u)
+    };
+    (d, z, c0)
+}
+
+fn temme_beta_lower(x: f64, y: f64, a: f64, b: f64) -> f64 {
+    let (d, z, c0) = temme_beta_terms(x, y, a, b);
+    if z <= 0.0 {
+        if z >= -2.0 {
+            let p = 0.5 * erfc(-z * std::f64::consts::FRAC_1_SQRT_2)
+                + exp_neg_sq(z * std::f64::consts::FRAC_1_SQRT_2) * c0 / std::f64::consts::TAU.sqrt();
+            p.clamp(0.0, 1.0)
+        } else {
+            let scaled = (0.5 * erfcx(-z * std::f64::consts::FRAC_1_SQRT_2) + c0 / std::f64::consts::TAU.sqrt()).max(0.0);
+            if scaled == 0.0 { 0.0 } else { (-d + scaled.ln()).exp().clamp(0.0, 1.0) }
+        }
+    } else {
+        (1.0 - temme_beta_lower(y, x, b, a)).clamp(0.0, 1.0)
+    }
+}
+
+fn temme_ln_beta_lower(x: f64, y: f64, a: f64, b: f64) -> f64 {
+    let (d, z, c0) = temme_beta_terms(x, y, a, b);
+    if z <= 0.0 {
+        let scaled = (0.5 * erfcx(-z * std::f64::consts::FRAC_1_SQRT_2) + c0 / std::f64::consts::TAU.sqrt()).max(f64::MIN_POSITIVE);
+        (-d + scaled.ln()).min(0.0)
+    } else {
+        let ln_comp = temme_ln_beta_lower(y, x, b, a);
+        ln_one_minus_exp(ln_comp)
+    }
 }
 
 /// Regularized incomplete beta `I_x(a, b)` for `x in [0, 1]` and `a > 0, b > 0`.
@@ -169,12 +263,51 @@ pub fn reg_beta_xy(x: f64, y: f64, a: f64, b: f64) -> Result<f64, MathError> {
     let xn = x / sum;
     let yn = y / sum;
 
+    if a >= 1e8 && b >= 1e8 {
+        let (dev, ..) = beta_deviance_temme(xn, yn, a, b);
+        if dev < 200.0 {
+            return Ok(temme_beta_lower(xn, yn, a, b));
+        }
+    }
+    if b >= 1e18 && a.max(1.0).powi(2) <= 1e-16 * b {
+        let ln_y = if xn < 0.5 { (-xn).ln_1p() } else { yn.ln() };
+        return reg_gamma_p(a, (-b * ln_y).max(0.0));
+    }
+    if a >= 1e18 && b.max(1.0).powi(2) <= 1e-16 * a {
+        let ln_x = if yn < 0.5 { (-yn).ln_1p() } else { xn.ln() };
+        return reg_gamma_q(b, (-a * ln_x).max(0.0));
+    }
+
     if xn * (b + 1.0) <= yn * (a + 1.0) {
-        let ln_val = ln_beta_kernel(xn, yn, a, b)? - a.ln() + ln_beta_continued_fraction(xn, yn, a, b)?;
-        Ok(ln_val.exp().clamp(0.0, 1.0))
+        let kern = ln_beta_kernel(xn, yn, a, b)?;
+        match ln_beta_continued_fraction(xn, yn, a, b) {
+            Ok(ln_cf) => Ok((kern - a.ln() + ln_cf).exp().clamp(0.0, 1.0)),
+            Err(MathError::NotConverged { .. }) if a >= 1e6 && b >= 1e6 => Ok(temme_beta_lower(xn, yn, a, b)),
+            Err(MathError::NotConverged { .. }) if b >= 1e12 && a <= 1e-6 * b => {
+                let ln_y = if xn < 0.5 { (-xn).ln_1p() } else { yn.ln() };
+                reg_gamma_p(a, (-b * ln_y).max(0.0))
+            }
+            Err(MathError::NotConverged { .. }) if a >= 1e12 && b <= 1e-6 * a => {
+                let ln_x = if yn < 0.5 { (-yn).ln_1p() } else { xn.ln() };
+                reg_gamma_q(b, (-a * ln_x).max(0.0))
+            }
+            Err(e) => Err(e),
+        }
     } else {
-        let ln_comp = ln_beta_kernel(yn, xn, b, a)? - b.ln() + ln_beta_continued_fraction(yn, xn, b, a)?;
-        Ok((-ln_comp.min(0.0).exp_m1()).clamp(0.0, 1.0))
+        let kern = ln_beta_kernel(yn, xn, b, a)?;
+        match ln_beta_continued_fraction(yn, xn, b, a) {
+            Ok(ln_cf) => Ok((-(kern - b.ln() + ln_cf).min(0.0).exp_m1()).clamp(0.0, 1.0)),
+            Err(MathError::NotConverged { .. }) if a >= 1e6 && b >= 1e6 => Ok(temme_beta_lower(xn, yn, a, b)),
+            Err(MathError::NotConverged { .. }) if b >= 1e12 && a <= 1e-6 * b => {
+                let ln_y = if xn < 0.5 { (-xn).ln_1p() } else { yn.ln() };
+                reg_gamma_p(a, (-b * ln_y).max(0.0))
+            }
+            Err(MathError::NotConverged { .. }) if a >= 1e12 && b <= 1e-6 * a => {
+                let ln_x = if yn < 0.5 { (-yn).ln_1p() } else { xn.ln() };
+                reg_gamma_q(b, (-a * ln_x).max(0.0))
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -201,11 +334,51 @@ pub fn ln_reg_beta_xy(x: f64, y: f64, a: f64, b: f64) -> Result<f64, MathError> 
     let xn = x / sum;
     let yn = y / sum;
 
+    if a >= 1e8 && b >= 1e8 {
+        let (dev, ..) = beta_deviance_temme(xn, yn, a, b);
+        if dev < 200.0 {
+            return Ok(temme_ln_beta_lower(xn, yn, a, b));
+        }
+    }
+    if b >= 1e18 && a.max(1.0).powi(2) <= 1e-16 * b {
+        let ln_y = if xn < 0.5 { (-xn).ln_1p() } else { yn.ln() };
+        return ln_reg_gamma_p(a, (-b * ln_y).max(0.0));
+    }
+    if a >= 1e18 && b.max(1.0).powi(2) <= 1e-16 * a {
+        let ln_x = if yn < 0.5 { (-yn).ln_1p() } else { xn.ln() };
+        return ln_reg_gamma_q(b, (-a * ln_x).max(0.0));
+    }
+
     if xn * (b + 1.0) <= yn * (a + 1.0) {
-        Ok((ln_beta_kernel(xn, yn, a, b)? - a.ln() + ln_beta_continued_fraction(xn, yn, a, b)?).min(0.0))
+        let kern = ln_beta_kernel(xn, yn, a, b)?;
+        match ln_beta_continued_fraction(xn, yn, a, b) {
+            Ok(ln_cf) => Ok((kern - a.ln() + ln_cf).min(0.0)),
+            Err(MathError::NotConverged { .. }) if a >= 1e6 && b >= 1e6 => Ok(temme_ln_beta_lower(xn, yn, a, b)),
+            Err(MathError::NotConverged { .. }) if b >= 1e12 && a <= 1e-6 * b => {
+                let ln_y = if xn < 0.5 { (-xn).ln_1p() } else { yn.ln() };
+                ln_reg_gamma_p(a, (-b * ln_y).max(0.0))
+            }
+            Err(MathError::NotConverged { .. }) if a >= 1e12 && b <= 1e-6 * a => {
+                let ln_x = if yn < 0.5 { (-yn).ln_1p() } else { xn.ln() };
+                ln_reg_gamma_q(b, (-a * ln_x).max(0.0))
+            }
+            Err(e) => Err(e),
+        }
     } else {
-        let ln_comp = ln_beta_kernel(yn, xn, b, a)? - b.ln() + ln_beta_continued_fraction(yn, xn, b, a)?;
-        Ok(ln_one_minus_exp(ln_comp))
+        let kern = ln_beta_kernel(yn, xn, b, a)?;
+        match ln_beta_continued_fraction(yn, xn, b, a) {
+            Ok(ln_cf) => Ok(ln_one_minus_exp(kern - b.ln() + ln_cf)),
+            Err(MathError::NotConverged { .. }) if a >= 1e6 && b >= 1e6 => Ok(temme_ln_beta_lower(xn, yn, a, b)),
+            Err(MathError::NotConverged { .. }) if b >= 1e12 && a <= 1e-6 * b => {
+                let ln_y = if xn < 0.5 { (-xn).ln_1p() } else { yn.ln() };
+                ln_reg_gamma_p(a, (-b * ln_y).max(0.0))
+            }
+            Err(MathError::NotConverged { .. }) if a >= 1e12 && b <= 1e-6 * a => {
+                let ln_x = if yn < 0.5 { (-yn).ln_1p() } else { xn.ln() };
+                ln_reg_gamma_q(b, (-a * ln_x).max(0.0))
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 

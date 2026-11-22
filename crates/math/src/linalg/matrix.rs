@@ -136,7 +136,7 @@ impl DenseMatrix {
         let ncols = self.ncols;
         let nrows = self.nrows;
         let Some(slot) = self.get_mut(r, c) else {
-            return Err(MathError::DimensionMismatch { expected: nrows * ncols, actual: r.saturating_mul(ncols) + c });
+            return Err(MathError::DimensionMismatch { expected: nrows * ncols, actual: r.saturating_mul(ncols).saturating_add(c) });
         };
         *slot = val;
         Ok(())
@@ -275,10 +275,12 @@ impl DenseMatrix {
         if scale == 0.0 || !scale.is_finite() {
             return scale;
         }
-        let inv = 1.0 / scale;
+        let subnormal_scale = scale < f64::MIN_POSITIVE;
+        let inv = if subnormal_scale { 0.0 } else { 1.0 / scale };
         let mut acc = NeumaierSum::new();
         for r in row_start..self.nrows {
-            let u = self.entry(r, col) * inv;
+            let v = self.entry(r, col);
+            let u = if subnormal_scale { v / scale } else { v * inv };
             let sq = u * u;
             acc.add(sq);
             acc.add(u.mul_add(u, -sq));
@@ -302,14 +304,48 @@ impl DenseMatrix {
         if scale == 0.0 || !scale.is_finite() {
             return scale;
         }
-        let inv = 1.0 / scale;
+        let subnormal_scale = scale < f64::MIN_POSITIVE;
+        let inv = if subnormal_scale { 0.0 } else { 1.0 / scale };
         let mut acc = NeumaierSum::new();
         for &v in &self.data {
-            let u = v * inv;
+            let u = if subnormal_scale { v / scale } else { v * inv };
             acc.add(u * u);
         }
         scale * acc.total().max(0.0).sqrt()
     }
+
+    /// Maximum element magnitude `max_{r, c} |A[r, c]|` (`0.0` if empty).
+    #[must_use]
+    pub(crate) fn max_abs(&self) -> f64 {
+        self.data.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()))
+    }
+}
+
+/// Power-of-two exponent `exp` for exact matrix scaling (`A * 2^{-exp}`) when entries sit outside
+/// `[1e-100, 1e100]`, returning `0` inside the safe middle exponent band.
+#[inline]
+pub(crate) fn pow2_exp_for_max_abs(max_abs: f64) -> i32 {
+    if max_abs == 0.0 || !max_abs.is_finite() || (max_abs > 1e-100 && max_abs < 1e100) {
+        return 0;
+    }
+    (max_abs.log2().floor() as i32).clamp(-1020, 1020)
+}
+
+/// Multiply finite `v` by `2^{exp}` without intermediate `2^{exp}` overflow/underflow for `|exp| <= 2048`.
+#[inline]
+pub(crate) fn scale_pow2(mut v: f64, mut exp: i32) -> f64 {
+    if v == 0.0 || !v.is_finite() || exp == 0 {
+        return v;
+    }
+    while exp > 1000 {
+        v *= 2.0_f64.powi(1000);
+        exp -= 1000;
+    }
+    while exp < -1000 {
+        v *= 2.0_f64.powi(-1000);
+        exp += 1000;
+    }
+    v * 2.0_f64.powi(exp)
 }
 
 #[cfg(test)]

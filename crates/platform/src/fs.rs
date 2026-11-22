@@ -155,8 +155,8 @@ fn resolve_atomic_target(path: &Path) -> Result<(PathBuf, Option<Permissions>), 
         Err(err) => return Err(io_err(&format!("inspect target `{}`", path.display()), &err)),
     };
     if !lmeta.file_type().is_symlink() {
-        if lmeta.is_dir() {
-            return Err(PlatformError::InvalidPath { reason: format!("target path `{}` is a directory", path.display()) });
+        if !lmeta.file_type().is_file() {
+            return Err(PlatformError::InvalidPath { reason: format!("target path `{}` exists and is not a regular file", path.display()) });
         }
         return Ok((path.to_path_buf(), Some(lmeta.permissions())));
     }
@@ -167,8 +167,8 @@ fn resolve_atomic_target(path: &Path) -> Result<(PathBuf, Option<Permissions>), 
 fn resolve_symlink_target(path: &Path) -> Result<(PathBuf, Option<Permissions>), PlatformError> {
     match std::fs::metadata(path) {
         Ok(meta) => {
-            if meta.is_dir() {
-                return Err(PlatformError::InvalidPath { reason: format!("target path `{}` resolves to a directory", path.display()) });
+            if !meta.file_type().is_file() {
+                return Err(PlatformError::InvalidPath { reason: format!("target path `{}` resolves to a non-regular file", path.display()) });
             }
             let canonical = std::fs::canonicalize(path).map_err(|err| io_err(&format!("canonicalize symlink `{}`", path.display()), &err))?;
             Ok((canonical, Some(meta.permissions())))
@@ -182,8 +182,10 @@ fn resolve_symlink_target(path: &Path) -> Result<(PathBuf, Option<Permissions>),
                             std::fs::read_link(&current).map_err(|read_err| io_err(&format!("read symlink `{}`", current.display()), &read_err))?;
                         current = if target.is_relative() { resolve_parent_dir(&current).join(target) } else { target };
                     }
-                    Ok(meta) if meta.is_dir() => {
-                        return Err(PlatformError::InvalidPath { reason: format!("target path `{}` resolves to a directory", current.display()) });
+                    Ok(meta) if !meta.file_type().is_file() => {
+                        return Err(PlatformError::InvalidPath {
+                            reason: format!("target path `{}` resolves to a non-regular file", current.display()),
+                        });
                     }
                     Ok(meta) => return Ok((current, Some(meta.permissions()))),
                     Err(not_found) if not_found.kind() == ErrorKind::NotFound => return Ok((current, None)),

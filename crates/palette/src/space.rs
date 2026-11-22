@@ -217,7 +217,8 @@ impl Oklab {
         let a = sanitize_finite(self.a);
         let b = sanitize_finite(self.b);
         let c = a.hypot(b);
-        let h_deg = if c <= 1e-12 { 0.0 } else { b.atan2(a).to_degrees().rem_euclid(360.0) };
+        let raw_h_deg = if c <= 1e-12 { 0.0 } else { b.atan2(a).to_degrees().rem_euclid(360.0) };
+        let h_deg = if raw_h_deg >= 360.0 || raw_h_deg == 0.0 { 0.0 } else { raw_h_deg };
         Oklch { l: sanitize_finite(self.l), c, h_deg, alpha: sanitize_unit(self.alpha) }
     }
 

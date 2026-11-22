@@ -28,20 +28,28 @@ const MAX_BRACKET_STEPS: usize = 64;
 /// Returns [`MathError::EmptyInput`] if `n_treatments` is empty or [`MathError::InvalidParameter`]
 /// if any group size is `<= 0` or non-finite.
 pub fn dunnett_loadings_from_sizes(n_control: f64, n_treatments: &[f64]) -> Result<Vec<f64>, MathError> {
+    let scales = dunnett_scales_from_sizes(n_control, n_treatments)?;
+    Ok(scales.into_iter().map(|(lam, _)| lam).collect())
+}
+
+fn dunnett_scales_from_sizes(n_control: f64, n_treatments: &[f64]) -> Result<Vec<(f64, f64)>, MathError> {
     if n_treatments.is_empty() {
         return Err(MathError::EmptyInput);
     }
     if !n_control.is_finite() || n_control <= 0.0 {
         return Err(MathError::InvalidParameter { name: "n_control", value: n_control });
     }
-    let mut loadings = Vec::with_capacity(n_treatments.len());
+    let mut scales = Vec::with_capacity(n_treatments.len());
     for &ni in n_treatments {
         if !ni.is_finite() || ni <= 0.0 {
             return Err(MathError::InvalidParameter { name: "n_treatment", value: ni });
         }
-        loadings.push((ni / (n_control + ni)).sqrt());
+        let r = ni.sqrt() / n_control.sqrt();
+        let inv_compl = 1.0_f64.hypot(r);
+        let lam = r / inv_compl;
+        scales.push((lam, inv_compl));
     }
-    Ok(loadings)
+    Ok(scales)
 }
 
 fn validate_loadings_and_df(loadings: &[f64], df: f64) -> Result<(), MathError> {
@@ -52,11 +60,53 @@ fn validate_loadings_and_df(loadings: &[f64], df: f64) -> Result<(), MathError> 
         return Err(MathError::InvalidParameter { name: "df", value: df });
     }
     for &lam in loadings {
-        if !lam.is_finite() || !(0.0..1.0).contains(&lam) {
+        if !lam.is_finite() || !(0.0..=1.0).contains(&lam) {
             return Err(MathError::InvalidParameter { name: "lambda", value: lam });
         }
     }
     Ok(())
+}
+
+fn integrate_z0_with_scales<F: FnMut(f64) -> f64>(mut integrand: F, w: f64, scales: &[(f64, f64)], two_sided: bool) -> f64 {
+    if !scales.iter().any(|&(_, inv_compl)| inv_compl > 25.0) {
+        let i1 = gauss_legendre_32(&mut integrand, -Z0_LIMIT, -2.5);
+        let i2 = gauss_legendre_32(&mut integrand, -2.5, 0.0);
+        let i3 = gauss_legendre_32(&mut integrand, 0.0, 2.5);
+        let i4 = gauss_legendre_32(&mut integrand, 2.5, Z0_LIMIT);
+        return (i1 + i2 + i3 + i4).clamp(0.0, 1.0);
+    }
+    let mut pts = Vec::with_capacity(5 + 6 * scales.len());
+    pts.extend_from_slice(&[-Z0_LIMIT, -2.5, 0.0, 2.5, Z0_LIMIT]);
+    for &(lam, inv_compl) in scales {
+        if inv_compl <= 25.0 || lam <= 0.0 {
+            continue;
+        }
+        let z_step = w / lam;
+        let delta = if inv_compl.is_finite() { (10.0 / inv_compl).min(1.0) } else { 0.0 };
+        let push_around = |pts: &mut Vec<f64>, center: f64| {
+            if center.abs() < Z0_LIMIT + delta {
+                pts.push(center.clamp(-Z0_LIMIT, Z0_LIMIT));
+                if delta > 0.0 {
+                    pts.push((center - delta).clamp(-Z0_LIMIT, Z0_LIMIT));
+                    pts.push((center + delta).clamp(-Z0_LIMIT, Z0_LIMIT));
+                }
+            }
+        };
+        push_around(&mut pts, -z_step);
+        if two_sided {
+            push_around(&mut pts, z_step);
+        }
+    }
+    pts.sort_by(f64::total_cmp);
+    let mut total = 0.0_f64;
+    let mut prev = -Z0_LIMIT;
+    for b in pts {
+        if b - prev > 1e-14 * (1.0 + prev.abs()) {
+            total += gauss_legendre_32(&mut integrand, prev, b);
+            prev = b;
+        }
+    }
+    total.clamp(0.0, 1.0)
 }
 
 /// Cancellation-free conditional upper-tail probability `1 - prod_{i=1}^m P(|Z_i^*| <= w | Z_0 = z0)`
@@ -69,7 +119,13 @@ fn dunnett_two_sided_gaussian_sf(w: f64, scales: &[(f64, f64)]) -> f64 {
         let mut sum_ln_keep = 0.0_f64;
         for &(lam, inv_compl) in scales {
             let shift = lam * z0;
-            let tau = (norm_sf((w - shift) * inv_compl) + norm_sf((w + shift) * inv_compl)).min(1.0);
+            let tau = if inv_compl.is_finite() {
+                (norm_sf((w - shift) * inv_compl) + norm_sf((w + shift) * inv_compl)).min(1.0)
+            } else if w < shift.abs() {
+                1.0
+            } else {
+                0.0
+            };
             if tau >= 1.0 {
                 return norm_pdf(z0);
             }
@@ -77,11 +133,7 @@ fn dunnett_two_sided_gaussian_sf(w: f64, scales: &[(f64, f64)]) -> f64 {
         }
         norm_pdf(z0) * (-sum_ln_keep.exp_m1()).max(0.0)
     };
-    let i1 = gauss_legendre_32(integrand, -Z0_LIMIT, -2.5);
-    let i2 = gauss_legendre_32(integrand, -2.5, 0.0);
-    let i3 = gauss_legendre_32(integrand, 0.0, 2.5);
-    let i4 = gauss_legendre_32(integrand, 2.5, Z0_LIMIT);
-    (i1 + i2 + i3 + i4).clamp(0.0, 1.0)
+    integrate_z0_with_scales(integrand, w, scales, true)
 }
 
 /// Cancellation-free conditional one-sided upper-tail `1 - prod_{i=1}^m P(Z_i^* <= w | Z_0 = z0)`
@@ -91,7 +143,14 @@ fn dunnett_one_sided_gaussian_sf(w: f64, scales: &[(f64, f64)]) -> f64 {
         let mut sum_ln_keep = 0.0_f64;
         for &(lam, inv_compl) in scales {
             // T_i = sqrt(1 - lam^2) Z_i - lam Z_0 <= w  <=>  Z_i <= (w + lam z0) / sqrt(1 - lam^2).
-            let tau = norm_sf((w + lam * z0) * inv_compl).min(1.0);
+            let shift = lam * z0;
+            let tau = if inv_compl.is_finite() {
+                norm_sf((w + shift) * inv_compl).min(1.0)
+            } else if w + shift < 0.0 {
+                1.0
+            } else {
+                0.0
+            };
             if tau >= 1.0 {
                 return norm_pdf(z0);
             }
@@ -99,24 +158,21 @@ fn dunnett_one_sided_gaussian_sf(w: f64, scales: &[(f64, f64)]) -> f64 {
         }
         norm_pdf(z0) * (-sum_ln_keep.exp_m1()).max(0.0)
     };
-    let i1 = gauss_legendre_32(integrand, -Z0_LIMIT, -2.5);
-    let i2 = gauss_legendre_32(integrand, -2.5, 0.0);
-    let i3 = gauss_legendre_32(integrand, 0.0, 2.5);
-    let i4 = gauss_legendre_32(integrand, 2.5, Z0_LIMIT);
-    (i1 + i2 + i3 + i4).clamp(0.0, 1.0)
+    integrate_z0_with_scales(integrand, w, scales, false)
 }
 
 fn precompute_loading_scales(loadings: &[f64]) -> Vec<(f64, f64)> {
-    loadings.iter().map(|&lam| (lam, 1.0 / (1.0 - lam * lam).sqrt())).collect()
+    loadings
+        .iter()
+        .map(|&lam| {
+            let compl = ((1.0 - lam) * (1.0 + lam)).max(0.0).sqrt();
+            let inv_compl = if compl > 0.0 { 1.0 / compl } else { f64::INFINITY };
+            (lam, inv_compl)
+        })
+        .collect()
 }
 
-/// Exact two-sided Dunnett *p*-value `P(max_{1<=i<=m} |T_i| >= |d|)` from factor loadings
-/// `lambda_i in [0, 1)` (`Corr(T_i, T_j | S) = lambda_i * lambda_j`) and real `df > 0` (or `+inf`).
-///
-/// # Errors
-/// Returns an error if `loadings` is empty, any `lambda_i` lies outside `[0, 1)`, `df <= 0`, or `d` is `NaN`.
-pub fn dunnett_two_sided_p_loadings(d: f64, df: f64, loadings: &[f64]) -> Result<f64, MathError> {
-    validate_loadings_and_df(loadings, df)?;
+fn dunnett_two_sided_p_scales(d: f64, df: f64, scales: &[(f64, f64)]) -> Result<f64, MathError> {
     if d.is_nan() {
         return Err(MathError::DomainError { name: "d", value: d });
     }
@@ -127,14 +183,40 @@ pub fn dunnett_two_sided_p_loadings(d: f64, df: f64, loadings: &[f64]) -> Result
     if ad.is_infinite() {
         return Ok(0.0);
     }
-    if loadings.len() == 1 {
+    if scales.len() == 1 {
         return student_t_two_sided_p(ad, df);
     }
-    let scales = precompute_loading_scales(loadings);
     if df.is_infinite() || df >= HUGE_DF_CUTOFF {
-        return Ok(dunnett_two_sided_gaussian_sf(ad, &scales));
+        return Ok(dunnett_two_sided_gaussian_sf(ad, scales));
     }
-    Ok(integrate_over_chi_scale_tail(df, ad * ad, |u| dunnett_two_sided_gaussian_sf(ad * u, &scales))?.clamp(0.0, 1.0))
+    Ok(integrate_over_chi_scale_tail(df, ad, |u| dunnett_two_sided_gaussian_sf(ad * u, scales))?.clamp(0.0, 1.0))
+}
+
+fn dunnett_one_sided_p_scales(d: f64, df: f64, scales: &[(f64, f64)]) -> Result<f64, MathError> {
+    if d.is_nan() {
+        return Err(MathError::DomainError { name: "d", value: d });
+    }
+    if d.is_infinite() {
+        return Ok(if d.is_sign_positive() { 0.0 } else { 1.0 });
+    }
+    if scales.len() == 1 {
+        return student_t_sf(d, df);
+    }
+    if df.is_infinite() || df >= HUGE_DF_CUTOFF {
+        return Ok(dunnett_one_sided_gaussian_sf(d, scales));
+    }
+    Ok(integrate_over_chi_scale_tail(df, d.max(0.0), |u| dunnett_one_sided_gaussian_sf(d * u, scales))?.clamp(0.0, 1.0))
+}
+
+/// Exact two-sided Dunnett *p*-value `P(max_{1<=i<=m} |T_i| >= |d|)` from factor loadings
+/// `lambda_i in [0, 1]` (`Corr(T_i, T_j | S) = lambda_i * lambda_j`) and real `df > 0` (or `+inf`).
+///
+/// # Errors
+/// Returns an error if `loadings` is empty, any `lambda_i` lies outside `[0, 1]`, `df <= 0`, or `d` is `NaN`.
+pub fn dunnett_two_sided_p_loadings(d: f64, df: f64, loadings: &[f64]) -> Result<f64, MathError> {
+    validate_loadings_and_df(loadings, df)?;
+    let scales = precompute_loading_scales(loadings);
+    dunnett_two_sided_p_scales(d, df, &scales)
 }
 
 /// Exact two-sided Dunnett *p*-value given control size `n_control` and treatment sizes `n_treatments`.
@@ -142,32 +224,22 @@ pub fn dunnett_two_sided_p_loadings(d: f64, df: f64, loadings: &[f64]) -> Result
 /// # Errors
 /// Returns an error if any sample size is `<= 0`, `n_treatments` is empty, `df <= 0`, or `d` is `NaN`.
 pub fn dunnett_two_sided_p(d: f64, df: f64, n_control: f64, n_treatments: &[f64]) -> Result<f64, MathError> {
-    let loadings = dunnett_loadings_from_sizes(n_control, n_treatments)?;
-    dunnett_two_sided_p_loadings(d, df, &loadings)
+    if df.is_nan() || df <= 0.0 {
+        return Err(MathError::InvalidParameter { name: "df", value: df });
+    }
+    let scales = dunnett_scales_from_sizes(n_control, n_treatments)?;
+    dunnett_two_sided_p_scales(d, df, &scales)
 }
 
 /// Exact one-sided Dunnett *p*-value `P(max_{1<=i<=m} T_i >= d)` (equivalently `P(min T_i <= -d)`)
-/// from factor loadings `lambda_i in [0, 1)` and real `df > 0` (or `+inf`).
+/// from factor loadings `lambda_i in [0, 1]` and real `df > 0` (or `+inf`).
 ///
 /// # Errors
-/// Returns an error if `loadings` is empty, any `lambda_i` lies outside `[0, 1)`, `df <= 0`, or `d` is `NaN`.
+/// Returns an error if `loadings` is empty, any `lambda_i` lies outside `[0, 1]`, `df <= 0`, or `d` is `NaN`.
 pub fn dunnett_one_sided_p_loadings(d: f64, df: f64, loadings: &[f64]) -> Result<f64, MathError> {
     validate_loadings_and_df(loadings, df)?;
-    if d.is_nan() {
-        return Err(MathError::DomainError { name: "d", value: d });
-    }
-    if d.is_infinite() {
-        return Ok(if d.is_sign_positive() { 0.0 } else { 1.0 });
-    }
-    if loadings.len() == 1 {
-        return student_t_sf(d, df);
-    }
     let scales = precompute_loading_scales(loadings);
-    if df.is_infinite() || df >= HUGE_DF_CUTOFF {
-        return Ok(dunnett_one_sided_gaussian_sf(d, &scales));
-    }
-    let tail_rate_sq = if d > 0.0 { d * d } else { 0.0 };
-    Ok(integrate_over_chi_scale_tail(df, tail_rate_sq, |u| dunnett_one_sided_gaussian_sf(d * u, &scales))?.clamp(0.0, 1.0))
+    dunnett_one_sided_p_scales(d, df, &scales)
 }
 
 /// Exact one-sided Dunnett *p*-value given control size `n_control` and treatment sizes `n_treatments`.
@@ -175,17 +247,14 @@ pub fn dunnett_one_sided_p_loadings(d: f64, df: f64, loadings: &[f64]) -> Result
 /// # Errors
 /// Returns an error if any sample size is `<= 0`, `n_treatments` is empty, `df <= 0`, or `d` is `NaN`.
 pub fn dunnett_one_sided_p(d: f64, df: f64, n_control: f64, n_treatments: &[f64]) -> Result<f64, MathError> {
-    let loadings = dunnett_loadings_from_sizes(n_control, n_treatments)?;
-    dunnett_one_sided_p_loadings(d, df, &loadings)
+    if df.is_nan() || df <= 0.0 {
+        return Err(MathError::InvalidParameter { name: "df", value: df });
+    }
+    let scales = dunnett_scales_from_sizes(n_control, n_treatments)?;
+    dunnett_one_sided_p_scales(d, df, &scales)
 }
 
-/// Exact two-sided Dunnett critical value `d_{alpha, df} >= 0` solving
-/// `P(max_{1<=i<=m} |T_i| >= d) = alpha` for `alpha in [0, 1]` and arbitrary loadings `lambda_i`.
-///
-/// # Errors
-/// Returns an error if `loadings` is invalid, `df <= 0`, or `alpha` lies outside `[0, 1]`.
-pub fn dunnett_two_sided_crit_loadings(alpha: f64, df: f64, loadings: &[f64]) -> Result<f64, MathError> {
-    validate_loadings_and_df(loadings, df)?;
+fn dunnett_two_sided_crit_scales(alpha: f64, df: f64, scales: &[(f64, f64)]) -> Result<f64, MathError> {
     if !alpha.is_finite() || !(0.0..=1.0).contains(&alpha) {
         return Err(MathError::DomainError { name: "alpha", value: alpha });
     }
@@ -195,37 +264,48 @@ pub fn dunnett_two_sided_crit_loadings(alpha: f64, df: f64, loadings: &[f64]) ->
     if alpha == 1.0 {
         return Ok(0.0);
     }
-    if loadings.len() == 1 {
+    if scales.len() == 1 {
         return student_t_two_sided_isf(alpha, df);
     }
 
     // Bracketed tightly between single-comparison Student-t and Bonferroni Student-t!
-    let m = loadings.len() as f64;
+    let m = scales.len() as f64;
     let mut lo = (0.99 * student_t_two_sided_isf(alpha, df)?).max(0.0);
     let mut hi = 1.02 * student_t_two_sided_isf((alpha / m).max(f64::MIN_POSITIVE), df)? + 0.05;
 
     for _ in 0..MAX_BRACKET_STEPS {
-        if dunnett_two_sided_p_loadings(lo, df, loadings)? >= alpha || lo == 0.0 {
+        if dunnett_two_sided_p_scales(lo, df, scales)? >= alpha || lo == 0.0 {
             break;
         }
         lo *= 0.5;
     }
     for _ in 0..MAX_BRACKET_STEPS {
-        if dunnett_two_sided_p_loadings(hi, df, loadings)? <= alpha {
+        if dunnett_two_sided_p_scales(hi, df, scales)? <= alpha {
             break;
         }
         hi *= 1.5;
     }
-    if dunnett_two_sided_p_loadings(lo, df, loadings)? < alpha || dunnett_two_sided_p_loadings(hi, df, loadings)? > alpha {
+    if dunnett_two_sided_p_scales(lo, df, scales)? < alpha || dunnett_two_sided_p_scales(hi, df, scales)? > alpha {
         return Err(MathError::NotConverged { algorithm: "dunnett_two_sided_crit_loadings", iterations: MAX_BRACKET_STEPS });
     }
 
     brent_root(
-        |d| dunnett_two_sided_p_loadings(d, df, loadings).unwrap_or(f64::NAN) - alpha,
+        |d| dunnett_two_sided_p_scales(d, df, scales).unwrap_or(f64::NAN) - alpha,
         lo,
         hi,
         RootOptions { rel_tol: 1e-11, abs_tol: 1e-12, max_iters: 96 },
     )
+}
+
+/// Exact two-sided Dunnett critical value `d_{alpha, df} >= 0` solving
+/// `P(max_{1<=i<=m} |T_i| >= d) = alpha` for `alpha in [0, 1]` and arbitrary loadings `lambda_i`.
+///
+/// # Errors
+/// Returns an error if `loadings` is invalid, `df <= 0`, or `alpha` lies outside `[0, 1]`.
+pub fn dunnett_two_sided_crit_loadings(alpha: f64, df: f64, loadings: &[f64]) -> Result<f64, MathError> {
+    validate_loadings_and_df(loadings, df)?;
+    let scales = precompute_loading_scales(loadings);
+    dunnett_two_sided_crit_scales(alpha, df, &scales)
 }
 
 /// Exact two-sided Dunnett critical value given control size `n_control` and treatment sizes `n_treatments`.
@@ -233,16 +313,14 @@ pub fn dunnett_two_sided_crit_loadings(alpha: f64, df: f64, loadings: &[f64]) ->
 /// # Errors
 /// Returns an error on invalid group sizes, `df <= 0`, or `alpha` outside `[0, 1]`.
 pub fn dunnett_two_sided_crit(alpha: f64, df: f64, n_control: f64, n_treatments: &[f64]) -> Result<f64, MathError> {
-    let loadings = dunnett_loadings_from_sizes(n_control, n_treatments)?;
-    dunnett_two_sided_crit_loadings(alpha, df, &loadings)
+    if df.is_nan() || df <= 0.0 {
+        return Err(MathError::InvalidParameter { name: "df", value: df });
+    }
+    let scales = dunnett_scales_from_sizes(n_control, n_treatments)?;
+    dunnett_two_sided_crit_scales(alpha, df, &scales)
 }
 
-/// Exact one-sided Dunnett critical value `d_{alpha, df}` solving `P(max_{1<=i<=m} T_i >= d) = alpha`.
-///
-/// # Errors
-/// Returns an error if `loadings` is invalid, `df <= 0`, or `alpha` lies outside `[0, 1]`.
-pub fn dunnett_one_sided_crit_loadings(alpha: f64, df: f64, loadings: &[f64]) -> Result<f64, MathError> {
-    validate_loadings_and_df(loadings, df)?;
+fn dunnett_one_sided_crit_scales(alpha: f64, df: f64, scales: &[(f64, f64)]) -> Result<f64, MathError> {
     if !alpha.is_finite() || !(0.0..=1.0).contains(&alpha) {
         return Err(MathError::DomainError { name: "alpha", value: alpha });
     }
@@ -252,38 +330,48 @@ pub fn dunnett_one_sided_crit_loadings(alpha: f64, df: f64, loadings: &[f64]) ->
     if alpha == 1.0 {
         return Ok(f64::NEG_INFINITY);
     }
-    if loadings.len() == 1 {
+    if scales.len() == 1 {
         return student_t_isf(alpha, df);
     }
 
-    let m = loadings.len() as f64;
+    let m = scales.len() as f64;
     let t_single = student_t_isf(alpha, df)?;
     let t_bonf = student_t_isf((alpha / m).max(f64::MIN_POSITIVE), df)?;
     let mut lo = t_single.min(t_bonf) - 0.5;
     let mut hi = t_single.max(t_bonf) + 0.5;
 
     for _ in 0..MAX_BRACKET_STEPS {
-        if dunnett_one_sided_p_loadings(lo, df, loadings)? >= alpha {
+        if dunnett_one_sided_p_scales(lo, df, scales)? >= alpha {
             break;
         }
         lo -= lo.abs() + 2.0;
     }
     for _ in 0..MAX_BRACKET_STEPS {
-        if dunnett_one_sided_p_loadings(hi, df, loadings)? <= alpha {
+        if dunnett_one_sided_p_scales(hi, df, scales)? <= alpha {
             break;
         }
         hi += hi.abs() + 2.0;
     }
-    if dunnett_one_sided_p_loadings(lo, df, loadings)? < alpha || dunnett_one_sided_p_loadings(hi, df, loadings)? > alpha {
+    if dunnett_one_sided_p_scales(lo, df, scales)? < alpha || dunnett_one_sided_p_scales(hi, df, scales)? > alpha {
         return Err(MathError::NotConverged { algorithm: "dunnett_one_sided_crit_loadings", iterations: MAX_BRACKET_STEPS });
     }
 
     brent_root(
-        |d| dunnett_one_sided_p_loadings(d, df, loadings).unwrap_or(f64::NAN) - alpha,
+        |d| dunnett_one_sided_p_scales(d, df, scales).unwrap_or(f64::NAN) - alpha,
         lo,
         hi,
         RootOptions { rel_tol: 1e-11, abs_tol: 1e-12, max_iters: 96 },
     )
+}
+
+/// Exact one-sided Dunnett critical value `d_{alpha, df}` solving `P(max_{1<=i<=m} T_i >= d) = alpha`.
+///
+/// # Errors
+/// Returns an error if `loadings` is invalid, `df <= 0`, or `alpha` lies outside `[0, 1]`.
+pub fn dunnett_one_sided_crit_loadings(alpha: f64, df: f64, loadings: &[f64]) -> Result<f64, MathError> {
+    validate_loadings_and_df(loadings, df)?;
+    let scales = precompute_loading_scales(loadings);
+    dunnett_one_sided_crit_scales(alpha, df, &scales)
 }
 
 /// Exact one-sided Dunnett critical value given control size `n_control` and treatment sizes `n_treatments`.
@@ -291,8 +379,11 @@ pub fn dunnett_one_sided_crit_loadings(alpha: f64, df: f64, loadings: &[f64]) ->
 /// # Errors
 /// Returns an error on invalid group sizes, `df <= 0`, or `alpha` outside `[0, 1]`.
 pub fn dunnett_one_sided_crit(alpha: f64, df: f64, n_control: f64, n_treatments: &[f64]) -> Result<f64, MathError> {
-    let loadings = dunnett_loadings_from_sizes(n_control, n_treatments)?;
-    dunnett_one_sided_crit_loadings(alpha, df, &loadings)
+    if df.is_nan() || df <= 0.0 {
+        return Err(MathError::InvalidParameter { name: "df", value: df });
+    }
+    let scales = dunnett_scales_from_sizes(n_control, n_treatments)?;
+    dunnett_one_sided_crit_scales(alpha, df, &scales)
 }
 
 #[cfg(test)]

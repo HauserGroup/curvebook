@@ -73,21 +73,28 @@ fn ln_gamma_1p_small(a: f64) -> f64 {
 
 /// Series deviance `bd0(a, x) = a * ln(a / x) + x - a` keeping full accuracy for `|a - x| < 0.45 (a + x)`.
 fn gamma_deviance(a: f64, x: f64) -> f64 {
-    if (a - x).abs() < 0.45 * (a + x) {
-        let v = (a - x) / (a + x);
+    let m = a.max(x);
+    if m == 0.0 || !m.is_finite() {
+        return deviance_bd0(a, x);
+    }
+    let diff_s = (a - x) / m;
+    let a_s = a / m;
+    let sum_s = a_s + x / m;
+    if diff_s.abs() < 0.45 * sum_s {
+        let v = diff_s / sum_s;
         let v2 = v * v;
-        let mut s = (a - x) * v;
-        let mut ej = 2.0 * a * v * v2;
+        let mut s = diff_s * v;
+        let mut ej = 2.0 * a_s * v * v2;
         for j in 1..64_u32 {
             let term = ej / f64::from(2 * j + 1);
             let next = s + term;
             if term.abs() <= 0.25 * f64::EPSILON * next.abs() {
-                return next.max(0.0);
+                return (m * next).max(0.0);
             }
             s = next;
             ej *= v2;
         }
-        return s.max(0.0);
+        return (m * s).max(0.0);
     }
     deviance_bd0(a, x)
 }
@@ -203,7 +210,7 @@ fn temme_corr_and_z(a: f64, x: f64) -> (f64, f64, f64) {
 
     let inv_a = 1.0 / a;
     let series = c0 + inv_a * (c1 + inv_a * c2);
-    let corr = series / (std::f64::consts::TAU * a).sqrt();
+    let corr = series / (std::f64::consts::TAU.sqrt() * a.sqrt());
     (z_sq, z, corr)
 }
 

@@ -14,7 +14,7 @@
 //!   257-278. `doi:10.1007/bf01939321`.
 
 use crate::error::MathError;
-use crate::linalg::matrix::DenseMatrix;
+use crate::linalg::matrix::{DenseMatrix, scale_pow2};
 use crate::linalg::svd::svd;
 use crate::sum::{NeumaierSum, sum_iter};
 
@@ -98,11 +98,12 @@ fn factor_householder(a: &DenseMatrix, pivot_columns: bool) -> Result<PivotedQr,
         }
     }
 
-    let diag_scale = if pivot_columns {
+    let diag_raw = if pivot_columns {
         if k_max > 0 { work.entry(0, 0).abs() } else { 0.0 }
     } else {
         (0..k_max).fold(0.0_f64, |acc, k| acc.max(work.entry(k, k).abs()))
     };
+    let diag_scale = if diag_raw.is_finite() { diag_raw } else { f64::MAX };
     let default_tol = f64::EPSILON * (m.max(n) as f64) * diag_scale;
     let rank = count_rank(&work, k_max, default_tol, pivot_columns);
 
@@ -140,24 +141,42 @@ fn compute_householder_column(work: &mut DenseMatrix, k: usize, m: usize) -> f64
     if k + 1 >= m {
         return 0.0;
     }
-    let norm_x = work.col_norm2_from(k, k);
-    if norm_x == 0.0 {
+    let mut col_max = 0.0_f64;
+    for r in k..m {
+        col_max = col_max.max(work.entry(r, k).abs());
+    }
+    if col_max == 0.0 || !col_max.is_finite() {
         return 0.0;
     }
-    let alpha = work.entry(k, k);
+    let subnormal_scale = col_max < f64::MIN_POSITIVE;
+    let inv_max = if subnormal_scale { 0.0 } else { 1.0 / col_max };
+    let scale_entry = |v: f64| if subnormal_scale { v / col_max } else { v * inv_max };
+
+    let mut acc = NeumaierSum::new();
+    for r in k..m {
+        let u = scale_entry(work.entry(r, k));
+        let sq = u * u;
+        acc.add(sq);
+        acc.add(u.mul_add(u, -sq));
+    }
+    let norm_s = acc.total().max(0.0).sqrt();
+    if norm_s == 0.0 {
+        return 0.0;
+    }
+    let alpha_s = scale_entry(work.entry(k, k));
     // Choose beta with opposite sign to alpha to avoid subtraction cancellation in `alpha - beta`.
-    let beta = if alpha >= 0.0 { -norm_x } else { norm_x };
-    let v0 = alpha - beta;
-    if v0 == 0.0 {
+    let beta_s = if alpha_s >= 0.0 { -norm_s } else { norm_s };
+    let v0_s = alpha_s - beta_s;
+    if v0_s == 0.0 {
         return 0.0;
     }
-    let inv_v0 = 1.0 / v0;
+    let inv_v0_s = 1.0 / v0_s;
     for r in (k + 1)..m {
-        let scaled = work.entry(r, k) * inv_v0;
+        let scaled = scale_entry(work.entry(r, k)) * inv_v0_s;
         work.set_in_bounds(r, k, scaled);
     }
-    work.set_in_bounds(k, k, beta);
-    (beta - alpha) / beta
+    work.set_in_bounds(k, k, col_max * beta_s);
+    (beta_s - alpha_s) / beta_s
 }
 
 fn apply_householder_to_trailing(work: &mut DenseMatrix, k: usize, m: usize, n: usize, tau: f64) {
@@ -500,6 +519,41 @@ impl PivotedQr {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ColScale {
+    exp2: i32,
+    norm: f64,
+}
+
+fn equilibrate_columns(x: &DenseMatrix) -> Result<(Vec<ColScale>, DenseMatrix, DenseMatrix), MathError> {
+    let n = x.nrows();
+    let p = x.ncols();
+    let mut scales = vec![ColScale { exp2: 0, norm: 1.0 }; p];
+    let mut x_pow2 = DenseMatrix::zeros(n, p)?;
+    let mut x_scaled = DenseMatrix::zeros(n, p)?;
+    for (j, scale_slot) in scales.iter_mut().enumerate().take(p) {
+        let mut col_max = 0.0_f64;
+        for i in 0..n {
+            col_max = col_max.max(x.entry(i, j).abs());
+        }
+        if col_max > 0.0 && col_max.is_finite() {
+            let exp2 = (col_max.log2().floor() as i32).clamp(-1060, 1020);
+            for i in 0..n {
+                x_pow2.set_in_bounds(i, j, scale_pow2(x.entry(i, j), -exp2));
+            }
+            let norm = x_pow2.col_norm2(j);
+            if norm > 0.0 && norm.is_finite() {
+                *scale_slot = ColScale { exp2, norm };
+                let inv_norm = 1.0 / norm;
+                for i in 0..n {
+                    x_scaled.set_in_bounds(i, j, x_pow2.entry(i, j) * inv_norm);
+                }
+            }
+        }
+    }
+    Ok((scales, x_pow2, x_scaled))
+}
+
 /// Compute nonlinear/linear regression parameter dependencies
 /// `Dependency_k = 1 - 1 / ((A^T A)_{kk} * [(A^T A)^{-1}]_{kk})` in `[0, 1)`
 /// per `docs/implementation/curve-fitting-implementation.md` §2.1.
@@ -507,14 +561,14 @@ impl PivotedQr {
 /// # Errors
 /// Returns [`MathError::SingularMatrix`] if `a` does not have full column rank.
 pub fn parameter_dependencies(a: &DenseMatrix) -> Result<Vec<f64>, MathError> {
-    let pqr = qr_col_pivoted(a)?;
+    let (_, _, a_scaled) = equilibrate_columns(a)?;
+    let pqr = qr_col_pivoted(&a_scaled)?;
     let xtx_inv = pqr.xtx_inverse()?;
     let mut deps = Vec::with_capacity(a.ncols());
     for k in 0..a.ncols() {
-        let col_norm = a.col_norm2(k);
-        let ata_kk = col_norm * col_norm;
-        let inv_kk = xtx_inv.entry(k, k);
-        let prod = ata_kk * inv_kk;
+        // Since each column of `a_scaled` has unit 2-norm, `(A_s^T A_s)_{kk} == 1`, so
+        // `(A^T A)_{kk} * [(A^T A)^{-1}]_{kk} == [(A_s^T A_s)^{-1}]_{kk}` analytically without squaring!
+        let prod = xtx_inv.entry(k, k);
         let dep = if prod <= 1.0 { 0.0 } else { (1.0 - 1.0 / prod).clamp(0.0, 1.0) };
         deps.push(dep);
     }
@@ -560,26 +614,16 @@ pub fn solve_linear_least_squares(x: &DenseMatrix, y: &[f64]) -> Result<(LeastSq
         ));
     }
 
-    // Column equilibration X_scaled[:, j] = X[:, j] / scale[j].
-    let mut scales = vec![1.0_f64; p];
-    let mut x_scaled = DenseMatrix::zeros(n, p)?;
-    for (j, scale_slot) in scales.iter_mut().enumerate().take(p) {
-        let norm_j = x.col_norm2(j);
-        if norm_j > 0.0 {
-            *scale_slot = norm_j;
-            for i in 0..n {
-                x_scaled.set_in_bounds(i, j, x.entry(i, j) / norm_j);
-            }
-        }
-    }
+    // Column equilibration X_scaled[:, j] = X[:, j] / scale[j] factored into power-of-two + [1, sqrt(n)].
+    let (scales, x_pow2, x_scaled) = equilibrate_columns(x)?;
 
     let pqr = qr_col_pivoted(&x_scaled)?;
     if pqr.rank() == p && n >= p {
         let r_inv = pqr.inverse_r()?;
         let cov_s = pqr.unpermute_covariance(&r_inv)?;
         if !is_borderline_singular_cov(&cov_s, pqr.default_tol, p) {
-            let (beta_refined, rss_refined) = bjorck_refined_qr_solve(x, y, &scales, &pqr)?;
-            let cov_u = refined_covariance(x, &scales, &pqr, &r_inv)?;
+            let (beta_refined, rss_refined) = bjorck_refined_qr_solve(x, &x_pow2, y, &scales, &pqr)?;
+            let cov_u = refined_covariance(&x_pow2, &scales, &pqr, &r_inv)?;
             return Ok((
                 LeastSquaresSolution { coefficients: beta_refined, rank: p, aliased_columns: Vec::new(), rss: rss_refined, df_residual: n - p },
                 cov_u,
@@ -590,7 +634,7 @@ pub fn solve_linear_least_squares(x: &DenseMatrix, y: &[f64]) -> Result<(LeastSq
         let svd_s = svd(&x_scaled)?;
         let svd_tol = svd_s.default_tol().max(pqr.default_tol);
         if svd_s.rank_with_tol(svd_tol) == p {
-            let (beta_refined, rss_refined) = bjorck_refined_qr_solve(x, y, &scales, &pqr)?;
+            let (beta_refined, rss_refined) = bjorck_refined_qr_solve(x, &x_pow2, y, &scales, &pqr)?;
             let cov_u = unscale_covariance(&cov_s, &scales)?;
             return Ok((
                 LeastSquaresSolution { coefficients: beta_refined, rank: p, aliased_columns: Vec::new(), rss: rss_refined, df_residual: n - p },
@@ -610,20 +654,33 @@ pub fn solve_linear_least_squares(x: &DenseMatrix, y: &[f64]) -> Result<(LeastSq
 }
 
 /// Factor the nearly orthonormal design `X H = Q_c R_c`, where `H = D^{-1} P R^{-1}`.
-/// The compensated product uses the original design to recover rounding lost in the first QR.
-/// Then `X (H R_c^{-1}) = Q_c`, yielding a covariance factor without forming `X^T X`.
-fn refined_covariance(x: &DenseMatrix, scales: &[f64], pqr: &PivotedQr, r_inv: &DenseMatrix) -> Result<DenseMatrix, MathError> {
-    let p = x.ncols();
+/// Operates in power-of-two scaled space `X_pow2` so subnormal/huge columns never overflow `1 / scale`
+/// inside `preconditioner`, then unscales covariance by exact exponents `-exp2_i - exp2_j`.
+fn refined_covariance(x_pow2: &DenseMatrix, scales: &[ColScale], pqr: &PivotedQr, r_inv: &DenseMatrix) -> Result<DenseMatrix, MathError> {
+    let p = x_pow2.ncols();
     let mut preconditioner = DenseMatrix::zeros(p, p)?;
     for (i, &orig) in pqr.perm.iter().enumerate() {
         let scale = scales.get(orig).copied().ok_or(MathError::DimensionMismatch { expected: p, actual: scales.len() })?;
         for j in i..p {
-            preconditioner.set_in_bounds(orig, j, r_inv.entry(i, j) / scale);
+            preconditioner.set_in_bounds(orig, j, r_inv.entry(i, j) / scale.norm);
         }
     }
-    let corrected_qr = qr(&x.matmul(&preconditioner)?)?;
+    let corrected_qr = qr(&x_pow2.matmul(&preconditioner)?)?;
     let covariance_factor = preconditioner.matmul(&corrected_qr.inverse_r()?)?;
-    covariance_factor.matmul(&covariance_factor.transpose())
+    let cov_pow2 = covariance_factor.matmul(&covariance_factor.transpose())?;
+    unscale_pow2_covariance(&cov_pow2, scales)
+}
+
+fn unscale_pow2_covariance(cov_pow2: &DenseMatrix, scales: &[ColScale]) -> Result<DenseMatrix, MathError> {
+    let p = scales.len();
+    let mut cov_unscaled = DenseMatrix::zeros(p, p)?;
+    for (i, &si) in scales.iter().enumerate() {
+        for (j, &sj) in scales.iter().enumerate() {
+            let v = scale_pow2(scale_pow2(cov_pow2.entry(i, j), -si.exp2), -sj.exp2);
+            cov_unscaled.set_in_bounds(i, j, v);
+        }
+    }
+    Ok(cov_unscaled)
 }
 
 fn is_borderline_singular_cov(cov_scaled: &DenseMatrix, qr_tol: f64, p: usize) -> bool {
@@ -643,7 +700,7 @@ fn is_borderline_singular_cov(cov_scaled: &DenseMatrix, qr_tol: f64, p: usize) -
 fn finish_basic_least_squares(
     x: &DenseMatrix,
     y: &[f64],
-    scales: &[f64],
+    scales: &[ColScale],
     qr_perm: &[usize],
     initial_rank: usize,
 ) -> Result<(LeastSquaresSolution, DenseMatrix), MathError> {
@@ -680,13 +737,13 @@ fn finish_basic_least_squares(
 fn solve_basic_subset(
     x: &DenseMatrix,
     y: &[f64],
-    scales: &[f64],
+    scales: &[ColScale],
     mut active_cols: Vec<usize>,
 ) -> Result<(Vec<usize>, Vec<f64>, DenseMatrix), MathError> {
     let n = x.nrows();
     while !active_cols.is_empty() {
         let r = active_cols.len();
-        let (x_sub, scales_sub, x_scaled_sub) = extract_basic_submatrix(x, scales, &active_cols)?;
+        let (x_sub, scales_sub, x_pow2_sub, x_scaled_sub) = extract_basic_submatrix(x, scales, &active_cols)?;
         let pqr_sub = qr_col_pivoted(&x_scaled_sub)?;
         if pqr_sub.rank() < r || n < r {
             let next_r = pqr_sub.rank().min(n);
@@ -697,8 +754,8 @@ fn solve_basic_subset(
         let r_inv_sub = pqr_sub.inverse_r()?;
         let cov_s_sub = pqr_sub.unpermute_covariance(&r_inv_sub)?;
         if !is_borderline_singular_cov(&cov_s_sub, pqr_sub.default_tol, r) {
-            let (beta_sub, _) = bjorck_refined_qr_solve(&x_sub, y, &scales_sub, &pqr_sub)?;
-            let cov_u_sub = refined_covariance(&x_sub, &scales_sub, &pqr_sub, &r_inv_sub)?;
+            let (beta_sub, _) = bjorck_refined_qr_solve(&x_sub, &x_pow2_sub, y, &scales_sub, &pqr_sub)?;
+            let cov_u_sub = refined_covariance(&x_pow2_sub, &scales_sub, &pqr_sub, &r_inv_sub)?;
             return Ok((active_cols, beta_sub, cov_u_sub));
         }
         let svd_sub = svd(&x_scaled_sub)?;
@@ -709,39 +766,47 @@ fn solve_basic_subset(
             active_cols.sort_unstable();
             continue;
         }
-        let (beta_sub, _) = bjorck_refined_qr_solve(&x_sub, y, &scales_sub, &pqr_sub)?;
+        let (beta_sub, _) = bjorck_refined_qr_solve(&x_sub, &x_pow2_sub, y, &scales_sub, &pqr_sub)?;
         let cov_u_sub = unscale_covariance(&cov_s_sub, &scales_sub)?;
         return Ok((active_cols, beta_sub, cov_u_sub));
     }
     Ok((Vec::new(), Vec::new(), DenseMatrix::zeros(0, 0)?))
 }
 
-fn extract_basic_submatrix(x: &DenseMatrix, scales: &[f64], active_cols: &[usize]) -> Result<(DenseMatrix, Vec<f64>, DenseMatrix), MathError> {
+fn extract_basic_submatrix(
+    x: &DenseMatrix,
+    scales: &[ColScale],
+    active_cols: &[usize],
+) -> Result<(DenseMatrix, Vec<ColScale>, DenseMatrix, DenseMatrix), MathError> {
     let n = x.nrows();
     let r = active_cols.len();
     let mut x_sub = DenseMatrix::zeros(n, r)?;
+    let mut x_pow2_sub = DenseMatrix::zeros(n, r)?;
     let mut x_scaled_sub = DenseMatrix::zeros(n, r)?;
     let mut scales_sub = Vec::with_capacity(r);
     for (sub_c, &orig_c) in active_cols.iter().enumerate() {
-        let s = scales.get(orig_c).copied().unwrap_or(1.0);
+        let s = scales.get(orig_c).copied().unwrap_or(ColScale { exp2: 0, norm: 1.0 });
         scales_sub.push(s);
+        let inv_norm = 1.0 / s.norm;
         for row in 0..n {
             let v = x.entry(row, orig_c);
+            let v_pow2 = scale_pow2(v, -s.exp2);
             x_sub.set_in_bounds(row, sub_c, v);
-            x_scaled_sub.set_in_bounds(row, sub_c, if s > 0.0 { v / s } else { 0.0 });
+            x_pow2_sub.set_in_bounds(row, sub_c, v_pow2);
+            x_scaled_sub.set_in_bounds(row, sub_c, v_pow2 * inv_norm);
         }
     }
-    Ok((x_sub, scales_sub, x_scaled_sub))
+    Ok((x_sub, scales_sub, x_pow2_sub, x_scaled_sub))
 }
 
-fn unscale_covariance(cov_scaled: &DenseMatrix, scales: &[f64]) -> Result<DenseMatrix, MathError> {
+fn unscale_covariance(cov_scaled: &DenseMatrix, scales: &[ColScale]) -> Result<DenseMatrix, MathError> {
     let p = scales.len();
     let mut cov_unscaled = DenseMatrix::zeros(p, p)?;
     for (i, &si) in scales.iter().enumerate() {
         for (j, &sj) in scales.iter().enumerate() {
-            let denom = si * sj;
-            let v = if denom > 0.0 { cov_scaled.entry(i, j) / denom } else { 0.0 };
-            cov_unscaled.set_in_bounds(i, j, v);
+            let denom = si.norm * sj.norm;
+            let raw = if denom > 0.0 { cov_scaled.entry(i, j) / denom } else { 0.0 };
+            cov_unscaled.set_in_bounds(i, j, scale_pow2(scale_pow2(raw, -si.exp2), -sj.exp2));
         }
     }
     Ok(cov_unscaled)
@@ -782,7 +847,13 @@ fn compensated_rss(x: &DenseMatrix, y: &[f64], beta: &[f64]) -> f64 {
 /// Bjorck (1967) mixed-precision augmented KKT iterative refinement using `Dot2` FMA inner products
 /// against the unscaled matrix `X` so equilibration rounding and moderate-to-high condition numbers
 /// retain near-full `f64` accuracy even when residuals are large (`Wampler1`-`Wampler5`).
-fn bjorck_refined_qr_solve(x: &DenseMatrix, y: &[f64], scales: &[f64], pqr: &PivotedQr) -> Result<(Vec<f64>, f64), MathError> {
+fn bjorck_refined_qr_solve(
+    x: &DenseMatrix,
+    x_pow2: &DenseMatrix,
+    y: &[f64],
+    scales: &[ColScale],
+    pqr: &PivotedQr,
+) -> Result<(Vec<f64>, f64), MathError> {
     let n = x.nrows();
     let p = x.ncols();
     let qty = pqr.apply_qt(y)?;
@@ -800,7 +871,7 @@ fn bjorck_refined_qr_solve(x: &DenseMatrix, y: &[f64], scales: &[f64], pqr: &Piv
     let mut r_vec = pqr.apply_q_vec(&q_rhs0)?;
 
     for _ in 0..3 {
-        let beta_curr: Vec<f64> = z.iter().zip(scales.iter()).map(|(&zj, &sj)| zj / sj).collect();
+        let beta_curr: Vec<f64> = z.iter().zip(scales.iter()).map(|(&zj, &sj)| scale_pow2(zj / sj.norm, -sj.exp2)).collect();
         if !beta_curr.iter().all(|v| v.is_finite()) {
             break;
         }
@@ -820,18 +891,18 @@ fn bjorck_refined_qr_solve(x: &DenseMatrix, y: &[f64], scales: &[f64], pqr: &Piv
             f_def.push(main.total() + err.total());
         }
 
-        // Dual defect: g_j = -(X^T r)_j / scales[j] (evaluated in Dot2 precision).
+        // Dual defect: g_j = -(X^T r)_j / scales[j] (evaluated in pow2-scaled space without overflow/underflow).
         let mut g_def = vec![0.0_f64; p];
         for (j, (g_slot, &sj)) in g_def.iter_mut().zip(scales.iter()).enumerate() {
             let mut main = NeumaierSum::new();
             let mut err = NeumaierSum::new();
             for (i, &ri) in r_vec.iter().enumerate() {
-                let xij = x.entry(i, j);
-                let prod = -xij * ri;
+                let xij_p2 = x_pow2.entry(i, j);
+                let prod = -xij_p2 * ri;
                 main.add(prod);
-                err.add((-xij).mul_add(ri, -prod));
+                err.add((-xij_p2).mul_add(ri, -prod));
             }
-            *g_slot = (main.total() + err.total()) / sj;
+            *g_slot = (main.total() + err.total()) / sj.norm;
         }
         if !f_def.iter().all(|v| v.is_finite()) || !g_def.iter().all(|v| v.is_finite()) {
             break;
@@ -882,7 +953,7 @@ fn bjorck_refined_qr_solve(x: &DenseMatrix, y: &[f64], scales: &[f64], pqr: &Piv
         }
     }
 
-    let beta_final: Vec<f64> = z.iter().zip(scales.iter()).map(|(&zj, &sj)| zj / sj).collect();
+    let beta_final: Vec<f64> = z.iter().zip(scales.iter()).map(|(&zj, &sj)| scale_pow2(zj / sj.norm, -sj.exp2)).collect();
     let rss = compensated_rss(x, y, &beta_final);
     Ok((beta_final, rss))
 }

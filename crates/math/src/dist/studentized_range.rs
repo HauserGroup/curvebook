@@ -31,6 +31,14 @@ fn active_z_upper_bound(km1_f: f64) -> f64 {
     norm_isf(tail_floor).unwrap_or(NORMAL_Z_MAX).clamp(-2.0, NORMAL_Z_MAX)
 }
 
+#[inline]
+fn pow_usize(base: f64, exp: usize) -> f64 {
+    match i32::try_from(exp) {
+        Ok(e) => base.powi(e),
+        Err(_) => base.powf(exp as f64),
+    }
+}
+
 /// Integrate `f` over `[lo, hi]` across non-degenerate sub-panels partitioned by `knots`.
 fn sum_gl32_panels<F: FnMut(f64) -> f64>(mut f: F, lo: f64, hi: f64, knots: &[f64], min_gap: f64) -> f64 {
     if hi <= lo {
@@ -50,10 +58,11 @@ fn sum_gl32_panels<F: FnMut(f64) -> f64>(mut f: F, lo: f64, hi: f64, knots: &[f6
         active.sort_by(f64::total_cmp);
     }
 
+    let hi_guard = min_gap.max(1e-12 * hi.abs());
     let mut total = 0.0_f64;
     let mut cur = lo;
     for &x in sorted.get(..count).unwrap_or(&[]) {
-        if x > cur + min_gap && x + min_gap < hi {
+        if x > cur + min_gap && x + hi_guard < hi {
             total += gauss_legendre_32(&mut f, cur, x);
             cur = x;
         }
@@ -118,11 +127,11 @@ fn gaussian_range_cdf(w: f64, k: usize) -> f64 {
     }
     let half_w = 0.5 * w;
     let center_prob = normal_interval_prob(-half_w, half_w);
-    let center_term = if center_prob > 0.0 { center_prob.powi(k as i32) } else { 0.0 };
+    let center_term = if center_prob > 0.0 { pow_usize(center_prob, k) } else { 0.0 };
 
     let kf = k as f64;
-    let km1_f = (k - 1) as f64;
-    let km1_i = (k - 1) as i32;
+    let km1 = k - 1;
+    let km1_f = km1 as f64;
     let v_mode = norm_isf(1.0 / kf).unwrap_or(0.0).clamp(0.0, 5.5);
     let v_max = active_z_upper_bound(km1_f).max(v_mode + 2.5).max(half_w + 4.0).min(11.0);
     if half_w >= v_max {
@@ -131,9 +140,9 @@ fn gaussian_range_cdf(w: f64, k: usize) -> f64 {
 
     let wing_integrand = |v: f64| -> f64 {
         let diff = normal_interval_prob(v - w, v);
-        if diff <= 0.0 { 0.0 } else { 2.0 * kf * norm_pdf(v) * diff.powi(km1_i) }
+        if diff <= 0.0 { 0.0 } else { 2.0 * kf * norm_pdf(v) * pow_usize(diff, km1) }
     };
-    let mid = 0.5 * (half_w + v_max);
+    let mid = 0.5 * half_w + 0.5 * v_max;
     let knots = [v_mode, v_mode + 2.0, mid];
     let wings = sum_gl32_panels(wing_integrand, half_w, v_max, &knots, 0.25);
     (center_term + wings).clamp(0.0, 1.0)
@@ -154,8 +163,8 @@ fn gaussian_range_sf(w: f64, k: usize) -> f64 {
         return 0.0;
     }
     let kf = k as f64;
-    let km1_f = (k - 1) as f64;
-    let km1_i = (k - 1) as i32;
+    let km1 = k - 1;
+    let km1_f = km1 as f64;
 
     let integrand = |z: f64| -> f64 {
         let a = norm_sf(z);
@@ -169,9 +178,9 @@ fn gaussian_range_sf(w: f64, k: usize) -> f64 {
             -((-ratio).ln_1p() * km1_f).exp_m1()
         } else {
             let da = (d / a).clamp(0.0, 1.0);
-            1.0 - da.powi(km1_i)
+            1.0 - pow_usize(da, km1)
         };
-        kf * norm_pdf(z) * a.powi(km1_i) * bracket_gap.max(0.0)
+        kf * norm_pdf(z) * pow_usize(a, km1) * bracket_gap.max(0.0)
     };
     integrate_z_sf_panels(integrand, w, k).clamp(0.0, 1.0)
 }
@@ -225,18 +234,21 @@ pub(crate) fn integrate_over_chi_scale<F: FnMut(f64) -> f64>(df: f64, inner: F) 
 }
 
 /// Integrate `inner(u)` against `U = sqrt(chi^2_{df} / df)` over `(0, inf)`, placing extra panel
-/// resolution around the joint saddle point `u_* = sqrt((df - 1) / (df + tail_rate_sq))` when
-/// `inner(u)` decays like `exp(-0.5 * tail_rate_sq * u^2)`.
-pub(crate) fn integrate_over_chi_scale_tail<F: FnMut(f64) -> f64>(df: f64, tail_rate_sq: f64, mut inner: F) -> Result<f64, MathError> {
+/// resolution around the joint saddle point `u_* = sqrt((df - 1) / (df + tail_scale^2))` when
+/// `inner(u)` decays like `exp(-0.5 * (tail_scale * u)^2)`.
+pub(crate) fn integrate_over_chi_scale_tail<F: FnMut(f64) -> f64>(df: f64, tail_scale: f64, mut inner: F) -> Result<f64, MathError> {
     let a = 0.5 * df;
     let lg_a = if a < 12.0 { ln_gamma(a)? } else { 0.0 };
-    let rate = tail_rate_sq.max(0.0);
+    let scale = if tail_scale.is_finite() { tail_scale.max(0.0) } else { f64::MAX };
+    let rt_df = df.sqrt();
+    let rt_eff = rt_df.hypot(scale);
 
     if df < 2.0 {
         // Substitute u = t^{1 / a} (a = df / 2): x = a u^2 = a t^{2 / a},
         // f_X(x) dx = 2 * a^{a - 1} * t * exp(-x - ln Gamma(a)) dt — smooth at t = 0 with mode at t = 1.
         let p = 1.0 / a;
-        let t_star = (df / (df + rate)).powf(0.5 * a);
+        let ratio_rt = rt_df / rt_eff;
+        let t_star = ratio_rt.powf(a);
         let t_mid = (12.0 / a).max(2.0).powf(0.5 * a);
         let t_max = (65.0 / a).max(16.0).powf(0.5 * a);
         let mapped = |t: f64| -> f64 {
@@ -248,25 +260,35 @@ pub(crate) fn integrate_over_chi_scale_tail<F: FnMut(f64) -> f64>(df: f64, tail_
             let dens_dt = 2.0 * a.powf(a - 1.0) * t * (-x - lg_a).exp();
             dens_dt * inner(u)
         };
-        let knots = [0.2 * t_star, t_star, 0.2, 1.0, t_mid];
-        return Ok(sum_gl32_panels(mapped, 0.0, t_max, &knots, 0.02));
+        let min_gap = (0.05 * t_star).clamp(1e-300, 0.02);
+        let knots = [0.2 * t_star, t_star, 2.0 * t_star, 5.0 * t_star, 20.0 * t_star, 0.2, 1.0, t_mid];
+        return Ok(sum_gl32_panels(mapped, 0.0, t_max, &knots, min_gap));
     }
 
-    let u_mode = ((df - 1.0) / df).sqrt();
-    let sigma_u = (0.5 / df).sqrt();
-    let eff_df = df + rate;
-    let u_star = ((df - 1.0) / eff_df).sqrt();
-    let sigma_star = (0.5 / eff_df).sqrt();
+    let rt_dm1 = (df - 1.0).sqrt();
+    let u_mode = rt_dm1 / rt_df;
+    let sigma_u = 1.0 / (2.0 * df).sqrt();
+    let u_star = rt_dm1 / rt_eff;
+    let sigma_star = 1.0 / (std::f64::consts::SQRT_2 * rt_eff);
 
     let u_min = (u_star - 11.0 * sigma_star).min(u_mode - 11.0 * sigma_u).max(0.0);
     let u_max = (u_mode + 13.5 * sigma_u).max(u_star + 11.0 * sigma_star);
-    let min_gap = (0.25 * sigma_star.min(sigma_u)).max(1e-6);
+    let min_gap = (0.25 * sigma_star.min(sigma_u)).max(1e-300);
 
     let weighted = |u: f64| -> f64 {
         let dens = chi_scale_pdf(u, df, lg_a);
         if dens <= 1e-300 { 0.0 } else { dens * inner(u) }
     };
-    let knots = [u_star - 3.5 * sigma_star, u_star, u_star + 3.5 * sigma_star, u_mode - 3.5 * sigma_u, u_mode, u_mode + 4.0 * sigma_u];
+    let knots = [
+        u_star - 3.5 * sigma_star,
+        u_star,
+        u_star + 3.5 * sigma_star,
+        u_star + 10.0 * sigma_star,
+        10.0 * u_star + 30.0 * sigma_star,
+        u_mode - 3.5 * sigma_u,
+        u_mode,
+        u_mode + 4.0 * sigma_u,
+    ];
     Ok(sum_gl32_panels(weighted, u_min, u_max, &knots, min_gap))
 }
 
@@ -311,7 +333,7 @@ pub fn studentized_range_sf(q: f64, k: usize, df: f64) -> Result<f64, MathError>
     if df.is_infinite() || df >= HUGE_DF_CUTOFF {
         return Ok(gaussian_range_sf(q, k));
     }
-    Ok(integrate_over_chi_scale_tail(df, 0.5 * q * q, |u| gaussian_range_sf(q * u, k))?.clamp(0.0, 1.0))
+    Ok(integrate_over_chi_scale_tail(df, q * std::f64::consts::FRAC_1_SQRT_2, |u| gaussian_range_sf(q * u, k))?.clamp(0.0, 1.0))
 }
 
 fn ln_one_minus_exp_neg(ln_val: f64) -> f64 {
@@ -442,7 +464,8 @@ fn integrate_over_chi_scale_ln_sf(q: f64, k: usize, df: f64) -> Result<f64, Math
         let min_gap = (0.25 * sigma_star).max(1e-6);
 
         let ln_w_integrand = |w: f64| -> f64 { ln_chi_w_density(w, ln_q, df, lg_a) + gaussian_range_ln_sf(w, k) };
-        let probes = [(0.5 * w_star).max(w_min + min_gap), w_star, 0.5 * (w_star + w_peak), w_peak, (w_peak + 2.0 * sigma_star).min(w_max - min_gap)];
+        let probes =
+            [(0.5 * w_star).max(w_min + min_gap), w_star, 0.5 * w_star + 0.5 * w_peak, w_peak, (w_peak + 2.0 * sigma_star).min(w_max - min_gap)];
         let mut ln_ref = f64::NEG_INFINITY;
         for &wp in &probes {
             if wp > w_min && wp < w_max {
@@ -456,8 +479,8 @@ fn integrate_over_chi_scale_ln_sf(q: f64, k: usize, df: f64) -> Result<f64, Math
         }
     }
 
-    let pairs = (k * (k - 1)) / 2;
-    Ok(((pairs as f64).ln() + crate::dist::core::student_t_ln_two_sided_p(q * std::f64::consts::FRAC_1_SQRT_2, df)?).min(0.0))
+    let pairs = 0.5 * (k as f64) * ((k - 1) as f64);
+    Ok((pairs.ln() + crate::dist::core::student_t_ln_two_sided_p(q * std::f64::consts::FRAC_1_SQRT_2, df)?).min(0.0))
 }
 
 /// Natural logarithm of the Studentized range upper-tail probability `ln P(Q_{k, df} > q)`.
@@ -553,7 +576,7 @@ pub fn max_studentized_range_sf(q: f64, r: usize, c: usize, df: f64) -> Result<f
     if df.is_infinite() || df >= HUGE_DF_CUTOFF {
         return Ok(max_gaussian_range_sf(q, r, c));
     }
-    Ok(integrate_over_chi_scale_tail(df, 0.5 * q * q, |u| max_gaussian_range_sf(q * u, r, c))?.clamp(0.0, 1.0))
+    Ok(integrate_over_chi_scale_tail(df, q * std::f64::consts::FRAC_1_SQRT_2, |u| max_gaussian_range_sf(q * u, r, c))?.clamp(0.0, 1.0))
 }
 
 /// Upper-tail critical value `q(alpha; r, c, df)` solving `P(max_{1 <= i <= r} Q_i > q) = alpha`
@@ -587,7 +610,7 @@ pub fn max_studentized_range_isf(alpha: f64, r: usize, c: usize, df: f64) -> Res
     // Rigorous mathematical bounds:
     // Lower bound: single-pair range (r = 1, c = 2) sqrt(2) * t_{alpha, df}.
     // Upper bound: Bonferroni over all r * c * (c - 1) / 2 pairwise comparisons.
-    let pairs_per_range = ((c * (c - 1)) / 2) as f64;
+    let pairs_per_range = 0.5 * (c as f64) * ((c - 1) as f64);
     let total_pairs = (r as f64) * pairs_per_range;
     let lo_base = std::f64::consts::SQRT_2 * student_t_two_sided_isf(alpha, df)?;
     let hi_base = std::f64::consts::SQRT_2 * student_t_two_sided_isf((alpha / total_pairs).max(f64::MIN_POSITIVE), df)?;

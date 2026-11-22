@@ -96,8 +96,8 @@ pub fn gauss_legendre_64<F: FnMut(f64) -> f64>(mut f: F, a: f64, b: f64) -> f64 
 }
 
 fn eval_symmetric_rule<F: FnMut(f64) -> f64>(nodes: &[f64], weights: &[f64], f: &mut F, a: f64, b: f64) -> f64 {
-    let center = 0.5 * (a + b);
-    let half = 0.5 * (b - a);
+    let center = 0.5 * a + 0.5 * b;
+    let half = 0.5 * b - 0.5 * a;
     let mut acc = NeumaierSum::new();
     for (&xi, &wi) in nodes.iter().zip(weights.iter()) {
         let offset = half * xi;
@@ -109,8 +109,8 @@ fn eval_symmetric_rule<F: FnMut(f64) -> f64>(nodes: &[f64], weights: &[f64], f: 
 
 /// Evaluate a single 15-point Gauss-Kronrod panel over `[a, b]`, returning `(integral, abs_error)`.
 pub fn gauss_kronrod_15_panel<F: FnMut(f64) -> f64>(f: &mut F, a: f64, b: f64) -> (f64, f64) {
-    let center = 0.5 * (a + b);
-    let half = 0.5 * (b - a);
+    let center = 0.5 * a + 0.5 * b;
+    let half = 0.5 * b - 0.5 * a;
     let abs_half = half.abs();
 
     let f_center = f(center);
@@ -179,7 +179,7 @@ pub fn integrate_adaptive<F: FnMut(f64) -> f64>(mut f: F, a: f64, b: f64, option
     if !a.is_finite() || !b.is_finite() {
         return Err(MathError::DomainError { name: "interval", value: a + b });
     }
-    if (b - a).abs() == 0.0 {
+    if a == b {
         return Ok(0.0);
     }
     let (init_est, init_err) = gauss_kronrod_15_panel(&mut f, a, b);
@@ -205,7 +205,7 @@ pub fn integrate_adaptive<F: FnMut(f64) -> f64>(mut f: F, a: f64, b: f64, option
             break;
         };
         let worst = pool.swap_remove(worst_idx);
-        let mid = 0.5 * (worst.a + worst.b);
+        let mid = 0.5 * worst.a + 0.5 * worst.b;
         if mid == worst.a || mid == worst.b {
             pool.push(worst);
             break;
@@ -227,7 +227,7 @@ pub fn integrate_adaptive<F: FnMut(f64) -> f64>(mut f: F, a: f64, b: f64, option
     }
     let refined = sum_acc.total();
     let final_tol = options.abs_tol.max(options.rel_tol * refined.abs());
-    if total_err <= final_tol * 16.0 { Ok(refined) } else { Err(MathError::NotConverged { algorithm: "integrate_adaptive", iterations: cap }) }
+    if total_err <= final_tol { Ok(refined) } else { Err(MathError::NotConverged { algorithm: "integrate_adaptive", iterations: cap }) }
 }
 
 #[cfg(test)]
