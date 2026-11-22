@@ -174,7 +174,7 @@ fn fa_sec04_04_result_csv_reexports_and_registry_refuse_failed_status() {
 // ============================================================================
 
 #[test]
-fn fa_sec04_05_large_v0_v6_and_prism_projects_load_while_bombs_fail() {
+fn fa_sec04_05_large_v0_v6_and_container_projects_load_while_bombs_fail() {
     // 140_000 rows x 2 cols = 280_000 cells (> 1_120_000 JSON DOM nodes if materialized as Value)
     // plus a ResultSheet with 120_000 ResultTab rows x 3 cols = 360_000 result cells (> 1M nodes)
     let mut big_doc = ProjectDocument::new("Large Legacy Study").unwrap();
@@ -583,7 +583,7 @@ fn fa_sec04_10_export_result_sheet_json_rejects_non_finite_analysis_floats() {
 #[test]
 fn fa_sec04_11_nested_pzfx_csv_round_trip_preserves_groups_and_subcolumns() {
     let pzfx_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
-<GraphPadPrismFile PrismXMLVersion="5.00">
+<PrismFile PrismXMLVersion="5.00">
   <Table ID="Table0" TableType="Nested" Replicates="2">
     <Title>Nested Study</Title>
     <RowTitlesColumn><Subcolumn><d>R1</d><d>R2</d></Subcolumn></RowTitlesColumn>
@@ -598,7 +598,7 @@ fn fa_sec04_11_nested_pzfx_csv_round_trip_preserves_groups_and_subcolumns() {
       <Subcolumn><Title>Mouse 4</Title><d>22.5</d><d>23.0</d></Subcolumn>
     </YColumn>
   </Table>
-</GraphPadPrismFile>"#;
+</PrismFile>"#;
 
     let report = import_pzfx_str(pzfx_xml).unwrap();
     assert_eq!(report.document.data_sheets.len(), 1);
@@ -665,7 +665,7 @@ fn fa_sec04_11_nested_pzfx_csv_round_trip_preserves_groups_and_subcolumns() {
 // ============================================================================
 
 #[test]
-fn fa_sec04_12_prism_sheet_id_remap_covers_hooks_outliers_notes_and_inline_tokens() {
+fn fa_sec04_12_container_sheet_id_remap_covers_hooks_outliers_notes_and_inline_tokens() {
     let xy = XyTable::new(SubcolumnMode::Single, 1, 3).unwrap();
     let ds = DataSheet::new("Data 1", "Data 1", TableArchetype::Xy(xy)).unwrap();
 
@@ -799,7 +799,7 @@ fn fa_sec04_12_prism_sheet_id_remap_covers_hooks_outliers_notes_and_inline_token
 // ============================================================================
 
 #[test]
-fn fa_sec04_13_prism_schema_version_clamps_u64_and_rejects_non_u64() {
+fn fa_sec04_13_container_schema_version_clamps_u64_and_rejects_non_u64() {
     let base_payload = |extra: Option<(&str, serde_json::Value)>| {
         let mut obj = serde_json::json!({
             "title": "Schema Peek",
