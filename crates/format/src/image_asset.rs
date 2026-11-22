@@ -111,42 +111,46 @@ pub fn ingest_image_asset(bytes: &[u8]) -> Result<ProjectImageAsset, FormatError
 /// Verify an existing [`ProjectImageAsset`]'s ID syntax, size limit, SHA-256 content address,
 /// container header signature, and intrinsic pixel dimensions.
 pub fn validate_image_asset(asset: &ProjectImageAsset) -> Result<(), FormatError> {
-    if !is_valid_asset_id(&asset.asset_id) {
-        return Err(FormatError::UnsupportedFormat { reason: format!("invalid image asset identifier `{}`", asset.asset_id) });
+    validate_image_asset_parts(&asset.asset_id, asset.media_type, asset.pixel_size, &asset.bytes)
+}
+
+/// Validate image asset metadata and payload bytes directly from a borrowed slice without
+/// allocating or cloning `bytes` upfront.
+pub(crate) fn validate_image_asset_parts(asset_id: &str, media_type: ImageMimeKind, pixel_size: (u32, u32), bytes: &[u8]) -> Result<(), FormatError> {
+    if !is_valid_asset_id(asset_id) {
+        return Err(FormatError::UnsupportedFormat { reason: format!("invalid image asset identifier `{asset_id}`") });
     }
-    if asset.bytes.is_empty() {
-        return Err(FormatError::MissingArchiveEntry { path: format!("assets/{}.{}", asset.asset_id, asset.media_type.extension()) });
+    if bytes.is_empty() {
+        return Err(FormatError::MissingArchiveEntry { path: format!("assets/{asset_id}.{}", media_type.extension()) });
     }
-    if asset.bytes.len() > MAX_IMAGE_ASSET_BYTES {
+    if bytes.len() > MAX_IMAGE_ASSET_BYTES {
         return Err(FormatError::FileTooLarge {
-            path: format!("assets/{}.{}", asset.asset_id, asset.media_type.extension()),
-            actual_bytes: Some(asset.bytes.len() as u64),
+            path: format!("assets/{asset_id}.{}", media_type.extension()),
+            actual_bytes: Some(bytes.len() as u64),
             limit_bytes: MAX_IMAGE_ASSET_BYTES,
         });
     }
-    let actual_id = content_addressed_asset_id(&asset.bytes);
-    if actual_id != asset.asset_id {
-        return Err(FormatError::UnsupportedFormat {
-            reason: format!("image asset `{}` SHA-256 digest mismatch (computed `{actual_id}`)", asset.asset_id),
-        });
+    let actual_id = content_addressed_asset_id(bytes);
+    if actual_id != asset_id {
+        return Err(FormatError::UnsupportedFormat { reason: format!("image asset `{asset_id}` SHA-256 digest mismatch (computed `{actual_id}`)") });
     }
-    let Some(sniffed) = ImageMimeKind::sniff_header(&asset.bytes) else {
-        return Err(FormatError::UnsupportedFormat { reason: format!("image asset `{}` has unrecognized magic bytes", asset.asset_id) });
+    let Some(sniffed) = ImageMimeKind::sniff_header(bytes) else {
+        return Err(FormatError::UnsupportedFormat { reason: format!("image asset `{asset_id}` has unrecognized magic bytes") });
     };
-    if sniffed != asset.media_type {
+    if sniffed != media_type {
         return Err(FormatError::UnsupportedFormat {
-            reason: format!("image asset `{}` declares {:?} but magic bytes are {:?}", asset.asset_id, asset.media_type, sniffed),
+            reason: format!("image asset `{asset_id}` declares {media_type:?} but magic bytes are {sniffed:?}"),
         });
     }
-    let (width, height) = bounded_reader(&asset.bytes, asset.media_type)
+    let (width, height) = bounded_reader(bytes, media_type)
         .into_dimensions()
-        .map_err(|err| FormatError::UnsupportedFormat { reason: format!("image asset `{}` header could not be decoded: {err}", asset.asset_id) })?;
+        .map_err(|err| FormatError::UnsupportedFormat { reason: format!("image asset `{asset_id}` header could not be decoded: {err}") })?;
     validate_dimensions(width, height)?;
-    if (width, height) != asset.pixel_size {
+    if (width, height) != pixel_size {
         return Err(FormatError::UnsupportedFormat {
             reason: format!(
-                "image asset `{}` declares pixel_size {}x{} but image header reports {width}x{height}",
-                asset.asset_id, asset.pixel_size.0, asset.pixel_size.1
+                "image asset `{asset_id}` declares pixel_size {}x{} but image header reports {width}x{height}",
+                pixel_size.0, pixel_size.1
             ),
         });
     }
