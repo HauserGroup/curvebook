@@ -233,6 +233,10 @@ pub enum DesktopHostEvent {
         #[serde(default)]
         force: bool,
     },
+    AppQuitRequested {
+        #[serde(default)]
+        force: bool,
+    },
     WindowFocused {
         window_id: DesktopWindowId,
     },
@@ -1913,16 +1917,7 @@ impl DesktopHostRuntime {
                 match adapter.pick(&req)? {
                     Some(path) => {
                         let path_str = path.to_string_lossy().into_owned();
-                        let export_params = if spec.command == "result.generateReport" {
-                            let report_fmt = match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
-                                Some("tex") => "latex",
-                                Some("txt") => "plain",
-                                _ => "markdown",
-                            };
-                            json!({ "result_sheet_id": target_sheet_id.as_str(), "format": report_fmt, "path": path_str })
-                        } else {
-                            json!({ "sheet_id": target_sheet_id.as_str(), "path": path_str })
-                        };
+                        let export_params = Self::build_native_export_params(spec.command, &target_sheet_id, &path, &path_str, params);
                         let win = self.window_mut(window_id)?;
                         win.execute_and_journal(spec.command, export_params)?;
                         Self::completed_file_dialog_outcome(window_id, spec.command, &path)
@@ -1932,6 +1927,69 @@ impl DesktopHostRuntime {
             }
         };
         Ok(Some(outcome))
+    }
+
+    fn copy_present_params(dst: &mut serde_json::Map<String, Value>, src: &Value, allowed_keys: &[&str]) {
+        let Some(obj) = src.as_object() else {
+            return;
+        };
+        for &key in allowed_keys {
+            if let Some(val) = obj.get(key)
+                && !val.is_null()
+            {
+                dst.insert(key.to_owned(), val.clone());
+            }
+        }
+    }
+
+    fn allowed_native_export_keys(command: &str) -> &'static [&'static str] {
+        match command {
+            "export.svg" | "graph.exportSvg" => {
+                &["pretty", "include_xml_declaration", "include_metadata", "embed_fonts", "precision", "outline_text"]
+            }
+            "export.pdf" | "graph.exportPdf" => &["color_space", "compress_streams", "title", "outline_text", "sheet_ids"],
+            "export.png" | "graph.exportPng" => &["width_px", "height_px", "dpi"],
+            "export.tiff" => &["width_px", "height_px", "dpi", "compression"],
+            "table.exportCsv" => &["delimiter", "decimal_separator"],
+            "analysis.exportJson" => &["pretty"],
+            "analysis.exportCsv" => &["tab_id", "tab_index", "delimiter", "decimal_separator"],
+            _ => &[],
+        }
+    }
+
+    fn build_native_export_params(
+        command: &str,
+        target_sheet_id: &curvebook_doc::SheetId,
+        path: &std::path::Path,
+        path_str: &str,
+        caller_params: &Value,
+    ) -> Value {
+        let mut map = serde_json::Map::new();
+        if command == "result.generateReport" {
+            let report_fmt = caller_params
+                .get("format")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| matches!(*s, "plain" | "markdown" | "latex"))
+                .unwrap_or_else(|| match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+                    Some("tex") => "latex",
+                    Some("txt") => "plain",
+                    _ => "markdown",
+                });
+            map.insert(String::from("result_sheet_id"), Value::String(target_sheet_id.as_str().to_owned()));
+            map.insert(String::from("format"), Value::String(report_fmt.to_owned()));
+            map.insert(String::from("path"), Value::String(path_str.to_owned()));
+            return Value::Object(map);
+        }
+
+        Self::copy_present_params(&mut map, caller_params, Self::allowed_native_export_keys(command));
+        let has_multi_pdf =
+            matches!(command, "export.pdf" | "graph.exportPdf") && map.get("sheet_ids").and_then(Value::as_array).is_some_and(|arr| !arr.is_empty());
+        if !has_multi_pdf {
+            map.insert(String::from("sheet_id"), Value::String(target_sheet_id.as_str().to_owned()));
+        }
+        map.insert(String::from("path"), Value::String(path_str.to_owned()));
+        Value::Object(map)
     }
 
     fn execute_native_save_with_adapter(
@@ -2028,6 +2086,89 @@ impl DesktopHostRuntime {
     #[must_use]
     pub const fn focused_window_id(&self) -> Option<DesktopWindowId> {
         self.focused_window
+    }
+
+    /// Focus an existing open window by `window_id` and return `true` when focus changed.
+    ///
+    /// # Errors
+    /// Returns an error if `window_id` is not an open window.
+    pub fn focus_window(&mut self, window_id: DesktopWindowId) -> Result<bool, String> {
+        let changed = self.focused_window != Some(window_id);
+        let _ = self.handle_window_focused(window_id)?;
+        Ok(changed)
+    }
+
+    /// Close all clean windows or prompt on the first dirty window (`preferred_window` first if dirty).
+    ///
+    /// Returns [`CloseDisposition::Closed`] once every open window has closed cleanly.
+    ///
+    /// # Errors
+    /// Returns an error if closing a window fails.
+    pub fn request_app_quit(&mut self, preferred_window: Option<DesktopWindowId>, force: bool) -> Result<DesktopEventOutcome, String> {
+        if force {
+            for id in self.window_ids() {
+                self.persist_window_preferences(id);
+            }
+            self.close_all_force()?;
+            return Ok(DesktopEventOutcome {
+                handled: true,
+                action: String::from("app.quit"),
+                window_id: None,
+                close_disposition: Some(CloseDisposition::Closed),
+                command_id: Some(String::from("app.quit")),
+                ..Default::default()
+            });
+        }
+
+        let mut ordered = Vec::with_capacity(self.windows.len());
+        if let Some(pref) = preferred_window.or(self.focused_window)
+            && self.windows.contains_key(&pref)
+        {
+            ordered.push(pref);
+        }
+        for id in self.window_ids() {
+            if !ordered.contains(&id) {
+                ordered.push(id);
+            }
+        }
+
+        for id in &ordered {
+            let is_dirty = self.windows.get(id).is_some_and(DesktopWindowSession::has_unsaved_changes);
+            if is_dirty {
+                let _ = self.focus_window(*id);
+                let dirty_commands = self.windows.get(id).map_or_else(
+                    || vec![String::from("unsaved.edits")],
+                    |w| {
+                        if w.dirty_commands.is_empty() { vec![String::from("unsaved.edits")] } else { w.dirty_commands.clone() }
+                    },
+                );
+                return Ok(DesktopEventOutcome {
+                    handled: true,
+                    action: String::from("app.quit_prompt_unsaved"),
+                    window_id: Some(*id),
+                    close_disposition: Some(CloseDisposition::PromptUnsaved { window_id: *id, dirty_commands }),
+                    command_id: Some(String::from("app.quit")),
+                    ..Default::default()
+                });
+            }
+        }
+
+        for id in ordered {
+            self.persist_window_preferences(id);
+            let outcome = self.handle_window_close_requested(id, false)?;
+            if matches!(outcome.close_disposition, Some(CloseDisposition::PromptUnsaved { .. })) {
+                return Ok(outcome);
+            }
+        }
+
+        Ok(DesktopEventOutcome {
+            handled: true,
+            action: String::from("app.quit"),
+            window_id: None,
+            close_disposition: Some(CloseDisposition::Closed),
+            command_id: Some(String::from("app.quit")),
+            ..Default::default()
+        })
     }
 
     /// Immutable reference to an open window session.
@@ -2305,6 +2446,7 @@ impl DesktopHostRuntime {
                 self.persist_window_preferences(window_id);
                 self.handle_window_close_requested(window_id, force)
             }
+            DesktopHostEvent::AppQuitRequested { force } => self.request_app_quit(None, force),
             DesktopHostEvent::WindowFocused { window_id } => self.handle_window_focused(window_id),
             DesktopHostEvent::Resized { window_id, width_px, height_px } => self.handle_resized(window_id, width_px, height_px),
             DesktopHostEvent::ScaleFactorChanged { window_id, scale_factor } => self.handle_scale_factor_changed(window_id, scale_factor),
@@ -2915,6 +3057,7 @@ impl DesktopHostRuntime {
                     self.persist_window_preferences(window_id);
                     self.handle_window_close_requested(window_id, false)
                 }
+                "app.quit" => self.request_app_quit(Some(window_id), false),
                 "edit.cut" => self.cut_selection(window_id),
                 "edit.copy" => self.handle_clipboard_copy(window_id),
                 "edit.paste" => self.handle_clipboard_paste(window_id, None),
@@ -3502,7 +3645,8 @@ fn resolve_host_or_ui_route(
 ) -> Result<Option<DesktopCommandRoute>, String> {
     match base_cmd {
         "window.new" | "file.newWindow" => Ok(Some(DesktopCommandRoute::HostAction { action: "window.new" })),
-        "window.close" | "file.close" | "file.quit" | "app.quit" => Ok(Some(DesktopCommandRoute::HostAction { action: "window.close" })),
+        "window.close" | "file.close" => Ok(Some(DesktopCommandRoute::HostAction { action: "window.close" })),
+        "file.quit" | "app.quit" => Ok(Some(DesktopCommandRoute::HostAction { action: "app.quit" })),
         "edit.cut" => Ok(Some(DesktopCommandRoute::HostAction { action: "edit.cut" })),
         "edit.copy" => Ok(Some(DesktopCommandRoute::HostAction { action: "edit.copy" })),
         "edit.paste" => Ok(Some(DesktopCommandRoute::HostAction { action: "edit.paste" })),

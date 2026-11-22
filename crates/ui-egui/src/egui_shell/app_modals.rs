@@ -195,6 +195,7 @@ impl AppModalsEguiState {
         self.preferences_open = false;
         self.unsaved_changes_open = false;
         self.find_replace_open = false;
+        self.export_emf_selected = false;
     }
 }
 
@@ -1127,19 +1128,68 @@ fn render_export_modal(
                 )
                 .clicked()
                 {
-                    if state.export_emf_selected {
-                        let cmd = if is_layout { "layout.exportEmf" } else { "graph.exportEmf" };
-                        state.export_emf_selected = false;
-                        intents.push_engine(cmd, json!({ "sheet_id": sheet_id.as_str() }));
-                        intents.push(UiIntent::CloseAllModals);
-                    } else {
-                        intents.push_dialog_button("ok");
-                    }
+                    let (cmd, params) = export_figure_command_and_params(app, is_layout, &sheet_id, state.export_emf_selected);
+                    state.export_emf_selected = false;
+                    intents.push_engine(cmd, params);
+                    intents.push(UiIntent::CloseAllModals);
                 }
             });
         });
 
     build_report(ctx, &modal_resp, "dialog.export_figure", title, meta)
+}
+
+fn export_figure_command_and_params(
+    app: &UiApp,
+    is_layout: bool,
+    sheet_id: &SheetId,
+    export_emf_selected: bool,
+) -> (&'static str, serde_json::Value) {
+    if export_emf_selected {
+        let cmd = if is_layout { "layout.exportEmf" } else { "graph.exportEmf" };
+        return (cmd, json!({ "sheet_id": sheet_id.as_str() }));
+    }
+    let ef = &app.canvas_dialogs.export_figure;
+    match ef.format {
+        ExportFigureFormat::Svg => {
+            let cmd = if is_layout { "export.svg" } else { "graph.exportSvg" };
+            (cmd, json!({ "sheet_id": sheet_id.as_str() }))
+        }
+        ExportFigureFormat::Pdf => {
+            let cmd = if is_layout { "export.pdf" } else { "graph.exportPdf" };
+            let cs = if app.view_shards.dialogs_graph_misc.export_color_space == "CMYK-Proof" { "cmyk" } else { "srgb" };
+            (cmd, json!({ "sheet_id": sheet_id.as_str(), "color_space": cs }))
+        }
+        ExportFigureFormat::Png => {
+            let cmd = if is_layout { "export.png" } else { "graph.exportPng" };
+            (
+                cmd,
+                json!({
+                    "sheet_id": sheet_id.as_str(),
+                    "width_px": ef.width_px,
+                    "height_px": ef.height_px,
+                    "dpi": ef.dpi,
+                }),
+            )
+        }
+        ExportFigureFormat::Tiff(compression) => {
+            let comp = match compression {
+                TiffCompression::Deflate => "deflate",
+                TiffCompression::Lzw => "lzw",
+                TiffCompression::None => "none",
+            };
+            (
+                "export.tiff",
+                json!({
+                    "sheet_id": sheet_id.as_str(),
+                    "width_px": ef.width_px,
+                    "height_px": ef.height_px,
+                    "dpi": ef.dpi,
+                    "compression": comp,
+                }),
+            )
+        }
+    }
 }
 
 fn render_export_body(
@@ -1235,6 +1285,7 @@ fn render_export_body(
     // Physical Dimension units + spinners (`px`, `mm`, `in`) + Journal presets (`85/114/174 mm`).
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(body_w);
+        let dim_disabled_reason = is_vector.then_some("Vector formats (PDF/SVG/EMF) use sheet geometry instead of pixel dimensions");
         ui.label("Unit:");
         for (slug, lbl) in [("px", "px"), ("mm", "mm"), ("in", "in")] {
             if app_button(
@@ -1245,8 +1296,8 @@ fn render_export_body(
                     label: lbl,
                     command_id: None,
                     selected: vs.export_unit == slug,
-                    enabled: true,
-                    disabled_reason: None,
+                    enabled: !is_vector,
+                    disabled_reason: dim_disabled_reason,
                 },
                 tokens,
             )
@@ -1265,8 +1316,8 @@ fn render_export_body(
                     label: &format!("{} mm", mm as u32),
                     command_id: None,
                     selected: false,
-                    enabled: true,
-                    disabled_reason: None,
+                    enabled: !is_vector,
+                    disabled_reason: dim_disabled_reason,
                 },
                 tokens,
             )
@@ -1279,6 +1330,7 @@ fn render_export_body(
         }
     });
 
+    let dim_disabled_reason = is_vector.then_some("Vector formats (PDF/SVG/EMF) use sheet geometry instead of pixel dimensions");
     let dpi_f = f64::from(ef.dpi.max(72));
     let (w_display, h_display, dim_max) = match vs.export_unit.as_str() {
         "mm" => ((f64::from(ef.width_px) / dpi_f) * 25.4, (f64::from(ef.height_px) / dpi_f) * 25.4, 1000.0),
@@ -1289,10 +1341,12 @@ fn render_export_body(
         step_per_pt: 2.0,
         decimals: if vs.export_unit == "px" { 0 } else { 1 },
         allow_unit_switch: false,
+        enabled: !is_vector,
+        disabled_reason: dim_disabled_reason,
         ..ScrubUnitFieldConfig::new("export.width", "Width", 1.0, dim_max)
     };
     let w_out = render_scrub_unit_field(ui, w_display, &mut state.export_width_spinner, w_cfg, tokens, meta);
-    if let Some(val) = w_out.committed_value {
+    if !is_vector && let Some(val) = w_out.committed_value {
         let mut next = ef;
         let px = match vs.export_unit.as_str() {
             "mm" => (val / 25.4) * dpi_f,
@@ -1307,10 +1361,12 @@ fn render_export_body(
         step_per_pt: 2.0,
         decimals: if vs.export_unit == "px" { 0 } else { 1 },
         allow_unit_switch: false,
+        enabled: !is_vector,
+        disabled_reason: dim_disabled_reason,
         ..ScrubUnitFieldConfig::new("export.height", "Height", 1.0, dim_max)
     };
     let h_out = render_scrub_unit_field(ui, h_display, &mut state.export_height_spinner, h_cfg, tokens, meta);
-    if let Some(val) = h_out.committed_value {
+    if !is_vector && let Some(val) = h_out.committed_value {
         let mut next = ef;
         let px = match vs.export_unit.as_str() {
             "mm" => (val / 25.4) * dpi_f,
@@ -1348,14 +1404,34 @@ fn render_export_body(
     if trans_chk.changed() && !is_opaque_vector {
         intents.push_custom_view_action("dialogs_graph_misc", "export:transparent_bg");
     }
+    if transparent {
+        ui.label(egui::RichText::new("Note: exported files preserve the sheet canvas background.").small().weak());
+    }
 
     ui.add_space(4.0);
+    let is_pdf_export = !state.export_emf_selected && matches!(ef.format, ExportFigureFormat::Pdf);
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(body_w);
         ui.label("Color Space:");
         for (slug, lbl, val) in
             [("srgb", "sRGB", "sRGB"), ("p3", "Display-P3", "Display-P3"), ("gray", "Grayscale", "Grayscale"), ("cmyk", "CMYK-Proof", "CMYK-Proof")]
         {
+            let cs_enabled = match slug {
+                "srgb" => true,
+                "cmyk" => is_pdf_export,
+                _ => false,
+            };
+            let cs_reason = match slug {
+                "cmyk" if !is_pdf_export => Some("CMYK color space is supported for PDF exports only"),
+                "p3" | "gray" => Some("Display-P3 and Grayscale color spaces are not yet supported"),
+                _ => None,
+            };
+            let cs_selected = if is_pdf_export && vs.export_color_space == "CMYK-Proof" {
+                slug == "cmyk"
+            } else {
+                let _ = val;
+                slug == "srgb"
+            };
             if app_button(
                 ui,
                 meta,
@@ -1363,9 +1439,9 @@ fn render_export_body(
                     widget_id: &format!("export.cs.{slug}"),
                     label: lbl,
                     command_id: None,
-                    selected: vs.export_color_space == val,
-                    enabled: true,
-                    disabled_reason: None,
+                    selected: cs_selected,
+                    enabled: cs_enabled,
+                    disabled_reason: cs_reason,
                 },
                 tokens,
             )

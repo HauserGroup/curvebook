@@ -456,21 +456,24 @@ fn launch_application_with_env(cfg: &LaunchConfig, env_get: impl Fn(&str) -> Opt
     };
     let mut runtime_guard = RuntimeShutdownGuard::new(DesktopHostRuntime::new(host_cfg));
 
-    if cfg.new_instance {
+    let initial_win_id = if cfg.new_instance {
         let session = load_startup_session(&cfg.files)?;
         let attach_recovery = recovery_root.is_some();
-        let _ = runtime_guard.get_mut()?.open_window_with_session(session, initial_viewport, attach_recovery)?;
+        runtime_guard.get_mut()?.open_window_with_session(session, initial_viewport, attach_recovery)?
     } else {
         let startup = open_startup_session_with_recovery(&cfg.files, &app_paths, enable_recovery, now_epoch_ms())?;
         let recovery_dir = startup.recovery_dir.unwrap_or_else(|| app_paths.recovery_dir.clone());
         if let Some(journal) = startup.journal {
-            let _ = runtime_guard.get_mut()?.open_window_with_recovery(startup.session, initial_viewport, recovery_dir, journal, startup.report)?;
+            runtime_guard.get_mut()?.open_window_with_recovery(startup.session, initial_viewport, recovery_dir, journal, startup.report)?
         } else {
-            let _ = runtime_guard.get_mut()?.open_window_with_session(startup.session, initial_viewport, false)?;
+            runtime_guard.get_mut()?.open_window_with_session(startup.session, initial_viewport, false)?
         }
-    }
+    };
     if enable_recovery && !cfg.headless_once {
         let _ = runtime_guard.get_mut()?.recover_stale_journals(initial_viewport, now_epoch_ms())?;
+        if !cfg.files.is_empty() {
+            let _ = runtime_guard.get_mut()?.focus_window(initial_win_id);
+        }
     }
 
     let window_ids = runtime_guard.get_mut()?.window_ids();
@@ -502,8 +505,17 @@ fn launch_application_with_env(cfg: &LaunchConfig, env_get: impl Fn(&str) -> Opt
             .transpose()?;
         let cleanup_paths = app_paths.clone();
         let cleanup = Box::new(move |rt: &mut DesktopHostRuntime| -> Result<(), String> {
-            if let Some(focused_id) = rt.focused_window_id() {
-                let win = rt.window_mut(focused_id)?;
+            let focused_id = rt.focused_window_id();
+            for win_id in rt.window_ids() {
+                if Some(win_id) != focused_id
+                    && let Ok(win) = rt.window(win_id)
+                {
+                    persist_window_preferences_best_effort(win.app(), &cleanup_paths, no_prefs);
+                }
+            }
+            if let Some(focused_id) = focused_id
+                && let Ok(win) = rt.window(focused_id)
+            {
                 persist_window_preferences_best_effort(win.app(), &cleanup_paths, no_prefs);
             }
             Ok(())
@@ -550,8 +562,17 @@ fn launch_application_with_env(cfg: &LaunchConfig, env_get: impl Fn(&str) -> Opt
 
     {
         let rt = runtime_guard.get_mut()?;
-        if let Some(focused_id) = rt.focused_window_id() {
-            let win = rt.window_mut(focused_id)?;
+        let focused_id = rt.focused_window_id();
+        for win_id in rt.window_ids() {
+            if Some(win_id) != focused_id
+                && let Ok(win) = rt.window(win_id)
+            {
+                persist_window_preferences_best_effort(win.app(), &app_paths, no_prefs);
+            }
+        }
+        if let Some(focused_id) = focused_id
+            && let Ok(win) = rt.window(focused_id)
+        {
             persist_window_preferences_best_effort(win.app(), &app_paths, no_prefs);
         }
     }
