@@ -58,11 +58,11 @@ pub(in crate::anova) fn nested_one_way_anova_with_reml_status(
     df_method: MixedModelDfMethod,
 ) -> Result<(NestedAnovaResult, bool, bool), StatsError> {
     let g_count = selected_groups.len();
-    if two_group_t_test && g_count != 2 {
-        return Err(StatsError::InsufficientSampleSize { context: "nested ANOVA groups", required: 2, actual: g_count });
-    }
     if g_count < 2 {
         return Err(StatsError::InsufficientSampleSize { context: "nested ANOVA groups", required: 2, actual: g_count });
+    }
+    if two_group_t_test && g_count != 2 {
+        return Err(StatsError::InvalidParameter { name: "nested_t_test_groups", value: g_count as f64 });
     }
 
     let mut group_labels = Vec::with_capacity(g_count);

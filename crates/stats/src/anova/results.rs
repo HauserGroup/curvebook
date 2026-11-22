@@ -341,6 +341,12 @@ pub struct MultiVcRemlResult {
     pub satterthwaite_df: Vec<f64>,
     /// Kenward & Roger (1997) adjusted denominator df per fixed effect.
     pub kenward_roger_df: Vec<f64>,
+    /// Whether the Average-Information / EM REML optimizer satisfied its convergence criterion within the iteration budget.
+    #[serde(default = "default_true")]
+    pub converged: bool,
+    /// Whether one or more variance components lie on the zero non-negativity constraint boundary ($\hat{\sigma}^2 = 0$).
+    #[serde(default)]
+    pub at_boundary: bool,
 }
 
 /// Reason an unstructured repeated-measures REML covariance fit engaged a regularized

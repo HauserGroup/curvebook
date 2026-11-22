@@ -70,7 +70,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::{
     append_ignored_text_checklist_and_footnote, append_listwise_filtered_checklist_and_footnote, build_tab, checklist_item, ci_cell,
-    init_result_sheet, is_ignored_non_numeric_cell, num_cell, opt_ci_cell, opt_num_cell, p_cell, push_scalar, resolve_selected_indices,
+    init_result_sheet, is_ignored_non_numeric_cell, num_cell, opt_ci_cell, opt_num_cell, p_cell_at_alpha, push_scalar, resolve_selected_indices,
     sanitize_result_sheet_floats,
 };
 use crate::error::StatsError;
@@ -771,7 +771,7 @@ fn weighted_log_rank_stats(cohorts: &[&[SurvivalObservation]], weight_kind: Surv
 /// Input observation record for Cox Proportional Hazards regression.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CoxSubject {
-    /// Positive follow-up time (`> 0.0`; non-finite or `<= 0` subjects are rejected).
+    /// Non-negative follow-up time (`>= 0.0`; non-finite or `< 0.0` subjects are rejected).
     pub time: f64,
     /// Event indicator (`true` = failure event observed at `time`, `false` = right-censored).
     pub event: bool,
@@ -1964,7 +1964,7 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
                         non_estimable_tests.push(lr.test_name.clone());
                     }
                     cmp_labels.push(lr.test_name);
-                    cmp_rows.push(vec![num_cell(lr.chi_square), num_cell(lr.df), p_cell(lr.p_value, p_fmt)]);
+                    cmp_rows.push(vec![num_cell(lr.chi_square), num_cell(lr.df), p_cell_at_alpha(lr.p_value, p_fmt, confidence.alpha())]);
                 }
                 if *gehan_breslow_wilcoxon {
                     let gbw = compare_survival_curves(&refs, true)?;
@@ -1974,7 +1974,7 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
                         non_estimable_tests.push(gbw.test_name.clone());
                     }
                     cmp_labels.push(gbw.test_name);
-                    cmp_rows.push(vec![num_cell(gbw.chi_square), num_cell(gbw.df), p_cell(gbw.p_value, p_fmt)]);
+                    cmp_rows.push(vec![num_cell(gbw.chi_square), num_cell(gbw.df), p_cell_at_alpha(gbw.p_value, p_fmt, confidence.alpha())]);
                 }
                 if *trend_test && refs.len() >= 3 {
                     let tr = log_rank_trend_test(&refs)?;
@@ -1982,7 +1982,7 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
                         non_estimable_tests.push(tr.test_name.clone());
                     }
                     cmp_labels.push(tr.test_name);
-                    cmp_rows.push(vec![num_cell(tr.chi_square), num_cell(tr.df), p_cell(tr.p_value, p_fmt)]);
+                    cmp_rows.push(vec![num_cell(tr.chi_square), num_cell(tr.df), p_cell_at_alpha(tr.p_value, p_fmt, confidence.alpha())]);
                 }
                 if !cmp_rows.is_empty() {
                     let mut cmp_tab = build_tab(
@@ -2120,10 +2120,10 @@ fn append_cox_ph_scalars_and_tabs(out: &mut ResultSheet, cox: &CoxPhResult, conf
             num_cell(cov.beta),
             num_cell(cov.se),
             num_cell(cov.z_statistic),
-            p_cell(cov.p_value, p_fmt),
+            p_cell_at_alpha(cov.p_value, p_fmt, confidence.alpha()),
             num_cell(cov.hazard_ratio),
             ci_cell(cov.hr_ci.0, cov.hr_ci.1),
-            p_cell(cov.schoenfeld_p, p_fmt),
+            p_cell_at_alpha(cov.schoenfeld_p, p_fmt, confidence.alpha()),
         ]);
     }
     let mut cox_tab =
@@ -2872,8 +2872,8 @@ fn append_survival_pairwise(
             let sig = ap <= mult.threshold;
             rows.push(vec![
                 num_cell(chi2),
-                p_cell(rp, p_fmt),
-                p_cell(ap, p_fmt),
+                p_cell_at_alpha(rp, p_fmt, confidence.alpha()),
+                p_cell_at_alpha(ap, p_fmt, mult.threshold),
                 opt_num_cell(hr.log_rank_hr_opt()),
                 opt_ci_cell(hr.log_rank_ci),
                 ResultCell::Boolean(sig),
@@ -2892,8 +2892,8 @@ fn append_survival_pairwise(
             non_estimable_pairs.push(pair_label);
             rows.push(vec![
                 num_cell(chi2),
-                p_cell(rp, p_fmt),
-                p_cell(ap, p_fmt),
+                p_cell_at_alpha(rp, p_fmt, confidence.alpha()),
+                p_cell_at_alpha(ap, p_fmt, mult.threshold),
                 opt_num_cell(hr.log_rank_hr_opt()),
                 opt_ci_cell(hr.log_rank_ci),
                 ResultCell::Empty,

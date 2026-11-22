@@ -13,7 +13,8 @@ use crate::anova::nested::nested_one_way_anova_with_reml_status;
 use crate::anova::results::NestedAnovaResult;
 use crate::anova::sheet::one_way::{append_reml_boundary_checklist, push_pairwise_outputs};
 use crate::common::{
-    build_tab, checklist_item, init_result_sheet, num_cell, p_cell, push_scalar, sanitize_result_sheet_floats, try_resolve_selected_indices,
+    append_ignored_text_checklist_and_footnote, build_tab, checklist_item, init_result_sheet, is_ignored_non_numeric_cell, num_cell, p_cell_at_alpha,
+    push_scalar, sanitize_result_sheet_floats, try_resolve_selected_indices,
 };
 use crate::error::StatsError;
 use crate::multiplicity::{GroupComparisonInput, MultiplicityProcedure, compare_groups_pairwise_with_confidence, linear_trend_test};
@@ -25,10 +26,19 @@ pub fn run_nested_analysis(sheet: &DataSheet, spec: &AnalysisSpec, nested_spec: 
     };
     let mut out = init_result_sheet(spec)?;
     let p_fmt = spec.p_value_format;
+    let alpha = spec.confidence_level.alpha();
 
     let selected_groups = try_resolve_selected_indices(&spec.selected_data_sets, nested.groups.len())?;
     let (res, reml_converged, reml_at_boundary) =
         nested_one_way_anova_with_reml_status(nested, &selected_groups, nested_spec.two_group_t_test, nested_spec.df_method)?;
+    let mut ignored_non_numeric = Vec::new();
+    for &g_idx in &selected_groups {
+        let group = &nested.groups[g_idx];
+        let count = group.cells.iter().flatten().filter(|cell| is_ignored_non_numeric_cell(cell)).count();
+        if count > 0 {
+            ignored_non_numeric.push((group.title.clone(), count));
+        }
+    }
     let active_df2 = match nested_spec.df_method {
         MixedModelDfMethod::KenwardRoger => res.df2_groups_kenward_roger,
         MixedModelDfMethod::Satterthwaite => res.df2_groups_satterthwaite,
@@ -51,14 +61,14 @@ pub fn run_nested_analysis(sheet: &DataSheet, spec: &AnalysisSpec, nested_spec: 
             num_cell(res.df1_groups),
             num_cell(res.ms_groups),
             num_cell(res.f_among_groups),
-            p_cell(res.p_among_groups, p_fmt),
+            p_cell_at_alpha(res.p_among_groups, p_fmt, alpha),
         ],
         vec![
             num_cell(res.ss_subclusters),
             num_cell(res.df1_subclusters),
             num_cell(res.ms_subclusters),
             num_cell(res.f_among_subclusters),
-            p_cell(res.p_among_subclusters, p_fmt),
+            p_cell_at_alpha(res.p_among_subclusters, p_fmt, alpha),
         ],
         vec![num_cell(res.ss_error), num_cell(res.df2_error), num_cell(res.ms_error), ResultCell::Empty, ResultCell::Empty],
     ];
@@ -122,6 +132,7 @@ pub fn run_nested_analysis(sheet: &DataSheet, spec: &AnalysisSpec, nested_spec: 
         "Nested REML prevents pseudoreplication by separating biological-unit variance from technical replicate variance.",
     ));
     out.checklist.push(append_reml_boundary_checklist(reml_converged, reml_at_boundary, res.variance_subclusters, res.variance_error));
+    append_ignored_text_checklist_and_footnote(&mut out, "nested ANOVA", &ignored_non_numeric);
     sanitize_result_sheet_floats(&mut out)?;
     Ok(out)
 }
@@ -174,7 +185,12 @@ pub(in crate::anova) fn append_nested_multiplicity(
         push_scalar(out, "Linear trend F", None, trend.f_statistic);
         push_scalar(out, "Linear trend P", None, trend.p_value);
         let headers = vec![String::from("Slope"), String::from("R squared"), String::from("F"), String::from("P value")];
-        let rows = vec![vec![num_cell(trend.slope_estimate), num_cell(trend.r_squared), num_cell(trend.f_statistic), p_cell(trend.p_value, p_fmt)]];
+        let rows = vec![vec![
+            num_cell(trend.slope_estimate),
+            num_cell(trend.r_squared),
+            num_cell(trend.f_statistic),
+            p_cell_at_alpha(trend.p_value, p_fmt, confidence.alpha()),
+        ]];
         out.tabs.push(build_tab(
             "linear-trend",
             "Test for linear trend",

@@ -130,6 +130,19 @@ pub(in crate::anova) fn fit_factorial_anova_with_model(
     if n_obs < 3 || n_factors == 0 {
         return Err(StatsError::InsufficientSampleSize { context: "factorial ANOVA observations", required: 3, actual: n_obs });
     }
+    if data.factor_levels.len() != n_factors {
+        return Err(StatsError::DimensionMismatch { expected: n_factors, actual: data.factor_levels.len() });
+    }
+    for (lvls, _) in &data.rows {
+        if lvls.len() != n_factors {
+            return Err(StatsError::DimensionMismatch { expected: n_factors, actual: lvls.len() });
+        }
+        for (f_idx, &lvl) in lvls.iter().enumerate() {
+            if lvl >= data.factor_levels[f_idx].len() {
+                return Err(StatsError::InvalidParameter { name: "factor_level_index", value: lvl as f64 });
+            }
+        }
+    }
     let y: Vec<f64> = data.rows.iter().map(|(_, yv)| *yv).collect();
     validate_finite_slice(&y)?;
     let y_moments = SummaryMoments::from_slice(&y)?;
@@ -311,14 +324,24 @@ pub(in crate::anova) fn sum_contrast_vectors(n_levels: usize) -> Vec<Vec<f64>> {
 pub(in crate::anova) fn kronecker_term_columns(rows: &[(Vec<usize>, f64)], factor_basis: &[Vec<Vec<f64>>], sub_factors: &[usize]) -> Vec<Vec<f64>> {
     let mut prod = vec![vec![1.0_f64; rows.len()]];
     for &f_idx in sub_factors {
-        let n_cols_f = factor_basis[f_idx].first().map_or(0, Vec::len);
+        let Some(f_rows) = factor_basis.get(f_idx) else {
+            return Vec::new();
+        };
+        let n_cols_f = f_rows.first().map_or(0, Vec::len);
         if n_cols_f == 0 {
             return Vec::new();
         }
-        let f_rows = &factor_basis[f_idx];
         let mut next = Vec::with_capacity(prod.len() * n_cols_f);
         for prev in &prod {
-            next.extend((0..n_cols_f).map(|c_f| rows.iter().enumerate().map(|(r_idx, (lvls, _))| prev[r_idx] * f_rows[lvls[f_idx]][c_f]).collect()));
+            next.extend((0..n_cols_f).map(|c_f| {
+                rows.iter()
+                    .enumerate()
+                    .map(|(r_idx, (lvls, _))| {
+                        let coeff = lvls.get(f_idx).and_then(|&lvl| f_rows.get(lvl)).and_then(|row| row.get(c_f)).copied().unwrap_or(0.0);
+                        prev[r_idx] * coeff
+                    })
+                    .collect()
+            }));
         }
         prod = next;
     }
@@ -344,7 +367,9 @@ pub(in crate::anova) fn is_design_unbalanced(rows: &[(Vec<usize>, f64)], levels:
     for (lvls, _) in rows {
         *counts.entry(lvls.clone()).or_insert(0) += 1;
     }
-    let expected_cells: usize = levels.iter().map(|v| v.len().max(1)).product();
+    let Some(expected_cells) = levels.iter().try_fold(1_usize, |acc, v| acc.checked_mul(v.len().max(1))) else {
+        return true;
+    };
     if counts.len() < expected_cells {
         return true;
     }
