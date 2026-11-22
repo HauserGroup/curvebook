@@ -2,7 +2,7 @@
 //! schema migration, dimension/float validation, and circular dependency guards.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fs::{OpenOptions, Permissions};
 use std::io::Write;
 #[cfg(all(unix, not(target_arch = "wasm32")))]
@@ -10,12 +10,10 @@ use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 
 use curvebook_doc::{
-    AnalysisKind, CURRENT_SCHEMA_VERSION, Cell, CellExclusionNote, CellValue, CiBound, CloneDataSheetOptions, ConstantValue, DataSetColumn,
-    DataSheet, DocError, FittedCurveOverlay, FloatingNote, GraphAnnotation, GraphSheet, HookSource, ImageMimeKind, InfoSheet, LayoutItem,
-    LayoutSheet, LinkedDataRegion, MAX_DATA_SETS, MAX_IMAGE_ASSET_BYTES, MAX_PROJECT_IMAGE_ASSETS, MAX_ROWS, MAX_SHEET_CELLS, MAX_SHEETS_PER_PROJECT,
-    MAX_SUBCOLUMNS, NormalizeAnchor, ParameterScope, ProjectDocument, ResultCell, ResultSheet, ResultStatus, ResultTab, SheetId, SheetSection,
-    SourceCellId, TableArchetype, TransformAnalysisSpec, extract_template_hooks, is_valid_asset_id, validate_data_sets, validate_project_cells,
-    validate_rows, validate_subcolumns, validate_title,
+    AnalysisKind, CURRENT_SCHEMA_VERSION, CellExclusionNote, CloneDataSheetOptions, DataSheet, DocError, FittedCurveOverlay, FloatingNote,
+    GraphAnnotation, HookSource, ImageMimeKind, LayoutItem, LinkedDataRegion, MAX_IMAGE_ASSET_BYTES, MAX_PROJECT_IMAGE_ASSETS, MAX_ROWS,
+    MAX_SHEET_CELLS, MAX_SHEETS_PER_PROJECT, NormalizeAnchor, ParameterScope, ProjectDocument, ResultStatus, ResultTab, SheetId, SheetSection,
+    SourceCellId, TableArchetype, TransformAnalysisSpec, extract_template_hooks, is_valid_asset_id, validate_project_cells, validate_title,
 };
 
 use crate::csv::{CsvOptions, export_datasheet_to_csv};
@@ -931,6 +929,36 @@ where
     }
 }
 
+macro_rules! forward_visit_val {
+    ($($method:ident($ty:ty)),* $(,)?) => {
+        $(
+            fn $method<E: serde::de::Error>(self, v: $ty) -> Result<Self::Value, E> {
+                self.inner.$method(v)
+            }
+        )*
+    };
+}
+
+macro_rules! forward_deser_direct {
+    ($($method:ident),* $(,)?) => {
+        $(
+            fn $method<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+                self.inner.$method(visitor)
+            }
+        )*
+    };
+}
+
+macro_rules! forward_deser_wrapped {
+    ($($method:ident),* $(,)?) => {
+        $(
+            fn $method<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+                self.inner.$method(BoundedSeqVisitor { inner: visitor, budget: self.budget })
+            }
+        )*
+    };
+}
+
 impl<'de, 'a, V> serde::de::Visitor<'de> for BoundedSeqVisitor<'a, V>
 where
     V: serde::de::Visitor<'de>,
@@ -941,53 +969,20 @@ where
         self.inner.expecting(formatter)
     }
 
-    fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> {
-        self.inner.visit_bool(v)
-    }
-
-    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
-        self.inner.visit_i64(v)
-    }
-
-    fn visit_i128<E: serde::de::Error>(self, v: i128) -> Result<Self::Value, E> {
-        self.inner.visit_i128(v)
-    }
-
-    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
-        self.inner.visit_u64(v)
-    }
-
-    fn visit_u128<E: serde::de::Error>(self, v: u128) -> Result<Self::Value, E> {
-        self.inner.visit_u128(v)
-    }
-
-    fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> {
-        self.inner.visit_f64(v)
-    }
-
-    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
-        self.inner.visit_str(v)
-    }
-
-    fn visit_borrowed_str<E: serde::de::Error>(self, v: &'de str) -> Result<Self::Value, E> {
-        self.inner.visit_borrowed_str(v)
-    }
-
-    fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
-        self.inner.visit_string(v)
-    }
-
-    fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<Self::Value, E> {
-        self.inner.visit_bytes(v)
-    }
-
-    fn visit_borrowed_bytes<E: serde::de::Error>(self, v: &'de [u8]) -> Result<Self::Value, E> {
-        self.inner.visit_borrowed_bytes(v)
-    }
-
-    fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<Self::Value, E> {
-        self.inner.visit_byte_buf(v)
-    }
+    forward_visit_val!(
+        visit_bool(bool),
+        visit_i64(i64),
+        visit_i128(i128),
+        visit_u64(u64),
+        visit_u128(u128),
+        visit_f64(f64),
+        visit_str(&str),
+        visit_borrowed_str(&'de str),
+        visit_string(String),
+        visit_bytes(&[u8]),
+        visit_borrowed_bytes(&'de [u8]),
+        visit_byte_buf(Vec<u8>),
+    );
 
     fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
         self.inner.visit_none()
@@ -1078,81 +1073,28 @@ where
 {
     type Error = D::Error;
 
-    fn deserialize_any<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        self.inner.deserialize_any(BoundedSeqVisitor { inner: visitor, budget: self.budget })
-    }
+    forward_deser_direct!(
+        deserialize_bool,
+        deserialize_i8,
+        deserialize_i16,
+        deserialize_i32,
+        deserialize_i64,
+        deserialize_u8,
+        deserialize_u16,
+        deserialize_u32,
+        deserialize_u64,
+        deserialize_f32,
+        deserialize_f64,
+        deserialize_char,
+        deserialize_str,
+        deserialize_string,
+        deserialize_bytes,
+        deserialize_byte_buf,
+        deserialize_unit,
+        deserialize_identifier,
+    );
 
-    fn deserialize_bool<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        self.inner.deserialize_bool(visitor)
-    }
-
-    fn deserialize_i8<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        self.inner.deserialize_i8(visitor)
-    }
-
-    fn deserialize_i16<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        self.inner.deserialize_i16(visitor)
-    }
-
-    fn deserialize_i32<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        self.inner.deserialize_i32(visitor)
-    }
-
-    fn deserialize_i64<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        self.inner.deserialize_i64(visitor)
-    }
-
-    fn deserialize_u8<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        self.inner.deserialize_u8(visitor)
-    }
-
-    fn deserialize_u16<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        self.inner.deserialize_u16(visitor)
-    }
-
-    fn deserialize_u32<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        self.inner.deserialize_u32(visitor)
-    }
-
-    fn deserialize_u64<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        self.inner.deserialize_u64(visitor)
-    }
-
-    fn deserialize_f32<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        self.inner.deserialize_f32(visitor)
-    }
-
-    fn deserialize_f64<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        self.inner.deserialize_f64(visitor)
-    }
-
-    fn deserialize_char<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        self.inner.deserialize_char(visitor)
-    }
-
-    fn deserialize_str<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        self.inner.deserialize_str(visitor)
-    }
-
-    fn deserialize_string<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        self.inner.deserialize_string(visitor)
-    }
-
-    fn deserialize_bytes<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        self.inner.deserialize_bytes(visitor)
-    }
-
-    fn deserialize_byte_buf<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        self.inner.deserialize_byte_buf(visitor)
-    }
-
-    fn deserialize_option<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        self.inner.deserialize_option(BoundedSeqVisitor { inner: visitor, budget: self.budget })
-    }
-
-    fn deserialize_unit<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        self.inner.deserialize_unit(visitor)
-    }
+    forward_deser_wrapped!(deserialize_any, deserialize_option, deserialize_seq, deserialize_map, deserialize_ignored_any);
 
     fn deserialize_unit_struct<V: serde::de::Visitor<'de>>(self, name: &'static str, visitor: V) -> Result<V::Value, Self::Error> {
         self.inner.deserialize_unit_struct(name, visitor)
@@ -1162,20 +1104,12 @@ where
         self.inner.deserialize_newtype_struct(name, BoundedSeqVisitor { inner: visitor, budget: self.budget })
     }
 
-    fn deserialize_seq<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        self.inner.deserialize_seq(BoundedSeqVisitor { inner: visitor, budget: self.budget })
-    }
-
     fn deserialize_tuple<V: serde::de::Visitor<'de>>(self, len: usize, visitor: V) -> Result<V::Value, Self::Error> {
         self.inner.deserialize_tuple(len, BoundedSeqVisitor { inner: visitor, budget: self.budget })
     }
 
     fn deserialize_tuple_struct<V: serde::de::Visitor<'de>>(self, name: &'static str, len: usize, visitor: V) -> Result<V::Value, Self::Error> {
         self.inner.deserialize_tuple_struct(name, len, BoundedSeqVisitor { inner: visitor, budget: self.budget })
-    }
-
-    fn deserialize_map<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        self.inner.deserialize_map(BoundedSeqVisitor { inner: visitor, budget: self.budget })
     }
 
     fn deserialize_struct<V: serde::de::Visitor<'de>>(
@@ -1212,14 +1146,6 @@ where
             }
         }
         self.inner.deserialize_enum(name, variants, EnumWrapperVisitor { inner: visitor, budget: self.budget })
-    }
-
-    fn deserialize_identifier<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        self.inner.deserialize_identifier(visitor)
-    }
-
-    fn deserialize_ignored_any<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        self.inner.deserialize_ignored_any(BoundedSeqVisitor { inner: visitor, budget: self.budget })
     }
 }
 
@@ -1412,6 +1338,46 @@ impl<'de> serde::de::DeserializeSeed<'de> for DataSheetsSeqSeed<'_> {
     }
 }
 
+macro_rules! forward_bounded_non_map {
+    ($wrap:expr) => {
+        fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> {
+            Ok($wrap(BoundedValueVisitor(&mut self.0.dom_budget).visit_bool(v)?))
+        }
+
+        fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+            Ok($wrap(BoundedValueVisitor(&mut self.0.dom_budget).visit_i64(v)?))
+        }
+
+        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+            Ok($wrap(BoundedValueVisitor(&mut self.0.dom_budget).visit_u64(v)?))
+        }
+
+        fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> {
+            Ok($wrap(BoundedValueVisitor(&mut self.0.dom_budget).visit_f64(v)?))
+        }
+
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            Ok($wrap(BoundedValueVisitor(&mut self.0.dom_budget).visit_str(v)?))
+        }
+
+        fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
+            Ok($wrap(BoundedValueVisitor(&mut self.0.dom_budget).visit_string(v)?))
+        }
+
+        fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok($wrap(BoundedValueVisitor(&mut self.0.dom_budget).visit_none()?))
+        }
+
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok($wrap(BoundedValueVisitor(&mut self.0.dom_budget).visit_unit()?))
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, seq: A) -> Result<Self::Value, A::Error> {
+            Ok($wrap(BoundedValueVisitor(&mut self.0.dom_budget).visit_seq(seq)?))
+        }
+    };
+}
+
 struct ResultSheetMigrationSeed<'a>(&'a mut StreamedDocContext);
 
 impl<'de> serde::de::DeserializeSeed<'de> for ResultSheetMigrationSeed<'_> {
@@ -1469,41 +1435,7 @@ impl<'de> serde::de::DeserializeSeed<'de> for ResultSheetMigrationSeed<'_> {
                 Ok((serde_json::Value::Object(meta_obj), heavy))
             }
 
-            fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> {
-                Ok((BoundedValueVisitor(&mut self.0.dom_budget).visit_bool(v)?, StreamedResultHeavyParts::default()))
-            }
-
-            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
-                Ok((BoundedValueVisitor(&mut self.0.dom_budget).visit_i64(v)?, StreamedResultHeavyParts::default()))
-            }
-
-            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
-                Ok((BoundedValueVisitor(&mut self.0.dom_budget).visit_u64(v)?, StreamedResultHeavyParts::default()))
-            }
-
-            fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> {
-                Ok((BoundedValueVisitor(&mut self.0.dom_budget).visit_f64(v)?, StreamedResultHeavyParts::default()))
-            }
-
-            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
-                Ok((BoundedValueVisitor(&mut self.0.dom_budget).visit_str(v)?, StreamedResultHeavyParts::default()))
-            }
-
-            fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
-                Ok((BoundedValueVisitor(&mut self.0.dom_budget).visit_string(v)?, StreamedResultHeavyParts::default()))
-            }
-
-            fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-                Ok((BoundedValueVisitor(&mut self.0.dom_budget).visit_none()?, StreamedResultHeavyParts::default()))
-            }
-
-            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-                Ok((BoundedValueVisitor(&mut self.0.dom_budget).visit_unit()?, StreamedResultHeavyParts::default()))
-            }
-
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, seq: A) -> Result<Self::Value, A::Error> {
-                Ok((BoundedValueVisitor(&mut self.0.dom_budget).visit_seq(seq)?, StreamedResultHeavyParts::default()))
-            }
+            forward_bounded_non_map!(|v| (v, StreamedResultHeavyParts::default()));
         }
 
         deserializer.deserialize_any(ResultVisitor(self.0))
@@ -1598,50 +1530,7 @@ impl<'de> serde::de::DeserializeSeed<'de> for HybridDocumentSeed<'_> {
                 }))
             }
 
-            fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> {
-                let _ = BoundedValueVisitor(&mut self.0.dom_budget).visit_bool(v)?;
-                Ok(None)
-            }
-
-            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
-                let _ = BoundedValueVisitor(&mut self.0.dom_budget).visit_i64(v)?;
-                Ok(None)
-            }
-
-            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
-                let _ = BoundedValueVisitor(&mut self.0.dom_budget).visit_u64(v)?;
-                Ok(None)
-            }
-
-            fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> {
-                let _ = BoundedValueVisitor(&mut self.0.dom_budget).visit_f64(v)?;
-                Ok(None)
-            }
-
-            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
-                let _ = BoundedValueVisitor(&mut self.0.dom_budget).visit_str(v)?;
-                Ok(None)
-            }
-
-            fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
-                let _ = BoundedValueVisitor(&mut self.0.dom_budget).visit_string(v)?;
-                Ok(None)
-            }
-
-            fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-                let _ = BoundedValueVisitor(&mut self.0.dom_budget).visit_none()?;
-                Ok(None)
-            }
-
-            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-                let _ = BoundedValueVisitor(&mut self.0.dom_budget).visit_unit()?;
-                Ok(None)
-            }
-
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, seq: A) -> Result<Self::Value, A::Error> {
-                let _ = BoundedValueVisitor(&mut self.0.dom_budget).visit_seq(seq)?;
-                Ok(None)
-            }
+            forward_bounded_non_map!(|_v| None);
         }
 
         deserializer.deserialize_any(RootVisitor(self.0))
@@ -3045,52 +2934,37 @@ pub fn validate_project_document(doc: &ProjectDocument) -> Result<(), FormatErro
 }
 
 fn validate_project_document_inner(doc: &ProjectDocument, validate_checkpoint_entries: bool) -> Result<(), FormatError> {
-    validate_title(&doc.title)?;
-    let total = doc.total_sheet_count();
-    if total > MAX_SHEETS_PER_PROJECT {
-        return Err(FormatError::Doc(curvebook_doc::DocError::TooManySheets { count: total, max: MAX_SHEETS_PER_PROJECT }));
+    doc.validate_structural_limits()?;
+    if let Some(location) = doc.first_non_finite_float() {
+        return Err(FormatError::NonFiniteFloat { location });
     }
-
-    let mut seen_ids = HashSet::with_capacity(total);
     for ds in &doc.data_sheets {
-        register_unique_sheet_id(&mut seen_ids, &ds.id)?;
-        validate_data_sheet_floats(ds)?;
+        ds.validate()?;
+        validate_exclusion_notes(ds)?;
     }
     for info in &doc.info_sheets {
-        register_unique_sheet_id(&mut seen_ids, &info.id)?;
-        validate_info_sheet(info)?;
-        validate_floating_notes(&info.floating_notes, info.id.as_str())?;
+        validate_title(&info.title)?;
+        for c in &info.constants {
+            validate_title(&c.name)?;
+            if let Some(u) = &c.units {
+                validate_title(u)?;
+            }
+        }
     }
     for res in &doc.result_sheets {
-        register_unique_sheet_id(&mut seen_ids, &res.id)?;
-        validate_result_sheet(res)?;
+        validate_title(res.title())?;
         if let Some(data) = &res.analyzable_data {
-            validate_archetype_extra_floats(&data.archetype, res.id.as_str())?;
-            validate_floating_notes(&data.floating_notes, res.id.as_str())?;
+            data.validate()?;
+            validate_exclusion_notes(data)?;
         }
-        if let Some(field) = res.analysis.first_non_finite_float() {
-            return Err(FormatError::NonFiniteFloat { location: format!("{}.{field}", res.id.as_str()) });
-        }
-        validate_floating_notes(&res.floating_notes, res.id.as_str())?;
     }
     for graph in &doc.graph_sheets {
-        register_unique_sheet_id(&mut seen_ids, &graph.id)?;
-        if let Some(field) = graph.first_non_finite_float() {
-            return Err(FormatError::NonFiniteFloat { location: format!("{}.{field}", graph.id) });
-        }
         graph.validate()?;
     }
     for layout in &doc.layout_sheets {
-        register_unique_sheet_id(&mut seen_ids, &layout.id)?;
-        if let Some(field) = layout.first_non_finite_float() {
-            return Err(FormatError::NonFiniteFloat { location: format!("{}.{field}", layout.id) });
-        }
         layout.validate()?;
     }
 
-    if doc.image_assets.len() > MAX_PROJECT_IMAGE_ASSETS {
-        return Err(FormatError::Doc(curvebook_doc::DocError::TooManyImageAssets { count: doc.image_assets.len(), max: MAX_PROJECT_IMAGE_ASSETS }));
-    }
     let mut seen_asset_ids = HashSet::with_capacity(doc.image_assets.len());
     for asset in &doc.image_assets {
         if !seen_asset_ids.insert(asset.asset_id.as_str()) {
@@ -3106,9 +2980,11 @@ fn validate_project_document_inner(doc: &ProjectDocument, validate_checkpoint_en
 }
 
 pub(crate) fn validate_data_sheet_floats(ds: &DataSheet) -> Result<(), FormatError> {
-    validate_data_sheet(ds)?;
-    validate_archetype_extra_floats(&ds.archetype, ds.id.as_str())?;
-    validate_floating_notes(&ds.floating_notes, ds.id.as_str())
+    ds.validate()?;
+    if let Some(location) = ProjectDocument::first_non_finite_data_sheet_float(ds) {
+        return Err(FormatError::NonFiniteFloat { location });
+    }
+    validate_exclusion_notes(ds)
 }
 
 fn validate_checkpoints(doc: &ProjectDocument) -> Result<(), FormatError> {
@@ -3139,130 +3015,6 @@ fn validate_checkpoints(doc: &ProjectDocument) -> Result<(), FormatError> {
         }
     }
     Ok(())
-}
-
-fn check_finite(value: f64, location: impl FnOnce() -> String) -> Result<(), FormatError> {
-    if value.is_finite() { Ok(()) } else { Err(FormatError::NonFiniteFloat { location: location() }) }
-}
-
-fn check_opt_finite(value: Option<f64>, location: impl FnOnce() -> String) -> Result<(), FormatError> {
-    if let Some(v) = value { check_finite(v, location) } else { Ok(()) }
-}
-
-fn validate_floating_notes(notes: &[curvebook_doc::FloatingNote], sheet_id: &str) -> Result<(), FormatError> {
-    for (idx, note) in notes.iter().enumerate() {
-        let b = note.bounds_pt;
-        if !b.x.is_finite() || !b.y.is_finite() || !b.width.is_finite() || !b.height.is_finite() {
-            return Err(FormatError::NonFiniteFloat { location: format!("{sheet_id}.floating_notes[{idx}].bounds_pt") });
-        }
-    }
-    Ok(())
-}
-
-fn validate_archetype_extra_floats(arch: &curvebook_doc::TableArchetype, ctx: &str) -> Result<(), FormatError> {
-    if let curvebook_doc::TableArchetype::Grouped(t) = arch
-        && let Some(spacing) = &t.row_numeric_spacing
-    {
-        for (row, maybe_v) in spacing.iter().enumerate() {
-            check_opt_finite(*maybe_v, || format!("{ctx}.row_numeric_spacing[{row}]"))?;
-        }
-    }
-    Ok(())
-}
-
-fn register_unique_sheet_id(seen: &mut HashSet<SheetId>, id: &SheetId) -> Result<(), FormatError> {
-    if id.as_str().trim().is_empty() {
-        return Err(FormatError::Doc(curvebook_doc::DocError::EmptyIdentifier));
-    }
-    if !seen.insert(id.clone()) {
-        return Err(FormatError::Doc(curvebook_doc::DocError::DuplicateSheetId { sheet_id: id.clone() }));
-    }
-    Ok(())
-}
-
-fn validate_data_sheet(ds: &DataSheet) -> Result<(), FormatError> {
-    ds.validate()?;
-    let ctx = ds.id.as_str();
-    match &ds.archetype {
-        TableArchetype::Xy(t) => {
-            if let curvebook_doc::XColumnMode::GeneratedSequence { start, step, .. } = t.x_mode
-                && (!start.is_finite() || !step.is_finite())
-            {
-                return Err(FormatError::NonFiniteFloat { location: format!("{ctx}.x_mode") });
-            }
-            validate_title(&t.x_title)?;
-            validate_rows(t.row_count())?;
-            validate_data_sets(t.data_sets.len())?;
-            validate_subcolumns(t.y_subcolumn_mode.subcolumn_count())?;
-            validate_cell_rows(&t.x_cells, MAX_SUBCOLUMNS, &format!("{ctx}.x_cells"))?;
-            validate_titles(&t.row_titles)?;
-            validate_dataset_columns(&t.data_sets, ctx)?;
-        }
-        TableArchetype::Column(t) => {
-            validate_rows(t.row_count())?;
-            validate_data_sets(t.data_sets.len())?;
-            validate_subcolumns(t.subcolumn_mode.subcolumn_count())?;
-            validate_titles(&t.row_titles)?;
-            validate_dataset_columns(&t.data_sets, ctx)?;
-        }
-        TableArchetype::Grouped(t) => {
-            validate_title(&t.row_factor_title)?;
-            validate_title(&t.column_factor_title)?;
-            validate_rows(t.row_count())?;
-            validate_data_sets(t.data_sets.len())?;
-            validate_subcolumns(t.subcolumn_mode.subcolumn_count())?;
-            validate_titles(&t.row_titles)?;
-            validate_dataset_columns(&t.data_sets, ctx)?;
-        }
-        TableArchetype::Contingency(t) => {
-            validate_title(&t.row_factor_title)?;
-            validate_title(&t.column_factor_title)?;
-            validate_rows(t.row_count())?;
-            validate_data_sets(t.data_sets.len())?;
-            validate_titles(&t.row_titles)?;
-            validate_dataset_columns(&t.data_sets, ctx)?;
-        }
-        TableArchetype::Survival(t) => {
-            validate_title(&t.time_title)?;
-            validate_rows(t.row_count())?;
-            validate_data_sets(t.cohorts.len())?;
-            for (r, c) in t.times.iter().enumerate() {
-                validate_cell(c, &format!("{ctx}.times[{r}]"))?;
-            }
-            validate_titles(&t.row_titles)?;
-            validate_dataset_columns(&t.cohorts, ctx)?;
-        }
-        TableArchetype::PartsOfWhole(t) => {
-            validate_rows(t.row_count())?;
-            validate_data_sets(t.data_sets.len())?;
-            validate_titles(&t.slice_labels)?;
-            validate_dataset_columns(&t.data_sets, ctx)?;
-        }
-        TableArchetype::MultipleVariables(t) => {
-            validate_rows(t.row_count())?;
-            validate_data_sets(t.variables.len())?;
-            validate_titles(&t.row_titles)?;
-            for (c, var) in t.variables.iter().enumerate() {
-                validate_title(&var.title)?;
-                validate_rows(var.cells.len())?;
-                for (r, cell) in var.cells.iter().enumerate() {
-                    validate_cell(cell, &format!("{ctx}.var[{c}][{r}]"))?;
-                }
-            }
-        }
-        TableArchetype::Nested(t) => {
-            validate_rows(t.row_count())?;
-            validate_data_sets(t.groups.len())?;
-            validate_titles(&t.row_titles)?;
-            for (g_idx, grp) in t.groups.iter().enumerate() {
-                validate_title(&grp.title)?;
-                validate_subcolumns(grp.biological_unit_count())?;
-                validate_titles(&grp.subcolumn_titles)?;
-                validate_cell_rows(&grp.cells, MAX_SUBCOLUMNS, &format!("{ctx}.group[{g_idx}]"))?;
-            }
-        }
-    }
-    validate_exclusion_notes(ds)
 }
 
 fn validate_exclusion_notes(ds: &DataSheet) -> Result<(), FormatError> {
@@ -3299,235 +3051,13 @@ fn validate_exclusion_notes(ds: &DataSheet) -> Result<(), FormatError> {
     Ok(())
 }
 
-fn validate_titles(titles: &[String]) -> Result<(), FormatError> {
-    if titles.len() > MAX_ROWS {
-        return Err(FormatError::Doc(curvebook_doc::DocError::TooManyRows { count: titles.len(), max: MAX_ROWS }));
-    }
-    for title in titles {
-        validate_title(title)?;
-    }
-    Ok(())
-}
-
-fn validate_dataset_columns(cols: &[DataSetColumn], ctx: &str) -> Result<(), FormatError> {
-    if cols.len() > MAX_DATA_SETS {
-        return Err(FormatError::Doc(curvebook_doc::DocError::TooManyDataSets { count: cols.len(), max: MAX_DATA_SETS }));
-    }
-    for (c, col) in cols.iter().enumerate() {
-        validate_title(&col.title)?;
-        validate_cell_rows(&col.cells, MAX_SUBCOLUMNS, &format!("{ctx}.col[{c}]"))?;
-    }
-    Ok(())
-}
-
-fn validate_cell_rows(rows: &[Vec<Cell>], max_subs: usize, ctx: &str) -> Result<(), FormatError> {
-    validate_rows(rows.len())?;
-    for (r, row) in rows.iter().enumerate() {
-        if row.len() > max_subs {
-            return Err(FormatError::Doc(curvebook_doc::DocError::TooManySubcolumns { count: row.len(), max: max_subs }));
-        }
-        for (s, cell) in row.iter().enumerate() {
-            validate_cell(cell, &format!("{ctx}[{r}][{s}]"))?;
-        }
-    }
-    Ok(())
-}
-
-fn validate_cell(cell: &Cell, loc: &str) -> Result<(), FormatError> {
-    if let CellValue::Number(v) = cell.value
-        && !v.is_finite()
-    {
-        return Err(FormatError::NonFiniteFloat { location: loc.to_owned() });
-    }
-    Ok(())
-}
-
-fn validate_info_sheet(info: &InfoSheet) -> Result<(), FormatError> {
-    validate_title(&info.title)?;
-    for (idx, c) in info.constants.iter().enumerate() {
-        validate_title(&c.name)?;
-        if let Some(u) = &c.units {
-            validate_title(u)?;
-        }
-        if let ConstantValue::Number(v) = c.value
-            && !v.is_finite()
-        {
-            return Err(FormatError::NonFiniteFloat { location: format!("{}.constants[{idx}]", info.id) });
-        }
-    }
-    Ok(())
-}
-
-fn validate_result_sheet(res: &ResultSheet) -> Result<(), FormatError> {
-    validate_title(res.title())?;
-    for (idx, s) in res.scalars.iter().enumerate() {
-        if !s.value.is_finite() {
-            return Err(FormatError::NonFiniteFloat { location: format!("{}.scalars[{idx}]", res.id) });
-        }
-    }
-    for (tab_idx, tab) in res.tabs.iter().enumerate() {
-        for (r, row) in tab.rows.iter().enumerate() {
-            for (c, cell) in row.iter().enumerate() {
-                validate_result_cell_finite(cell, || format!("{}.tabs[{tab_idx}].rows[{r}][{c}]", res.id))?;
-            }
-        }
-    }
-    for (idx, cmp) in res.pairwise_comparisons.iter().enumerate() {
-        if cmp.estimate_diff.is_some_and(|v| !v.is_finite()) || !cmp.raw_p_or_q.is_finite() {
-            return Err(FormatError::NonFiniteFloat { location: format!("{}.pairwise_comparisons[{idx}]", res.id) });
-        }
-    }
-    for (c_idx, curve) in res.fitted_curves.iter().enumerate() {
-        for (p_idx, pt) in curve.points.iter().enumerate() {
-            if [Some(pt.x), Some(pt.y), pt.ci_lower, pt.ci_upper, pt.pred_lower, pt.pred_upper].into_iter().flatten().any(|v| !v.is_finite()) {
-                return Err(FormatError::NonFiniteFloat { location: format!("{}.fitted_curves[{c_idx}].points[{p_idx}]", res.id) });
-            }
-        }
-    }
-    if let Some(data) = &res.analyzable_data {
-        validate_data_sheet(data)?;
-    }
-    validate_analysis_hooks_and_bounds(&res.analysis.kind, &res.id)?;
-    Ok(())
-}
-
-fn validate_analysis_hooks_and_bounds(kind: &AnalysisKind, sheet_id: &SheetId) -> Result<(), FormatError> {
-    if let AnalysisKind::NonlinearRegression(fit) = kind {
-        for (idx, rule) in fit.parameter_rules.iter().enumerate() {
-            if let ParameterScope::PerDatasetConstant(pairs) = &rule.scope {
-                for (ds_idx, val) in pairs {
-                    if !val.is_finite() {
-                        return Err(FormatError::NonFiniteFloat { location: format!("{sheet_id}.parameter_rules[{idx}].per_dataset[{ds_idx}]") });
-                    }
-                }
-            }
-        }
-        let bounds = [fit.plot_x_min, fit.plot_x_max]
-            .into_iter()
-            .chain(fit.x_range_filter.into_iter().flat_map(|(a, b)| [a, b]))
-            .chain(fit.y_range_filter.into_iter().flat_map(|(a, b)| [a, b]))
-            .flatten();
-        if bounds.into_iter().any(|v| !v.is_finite()) {
-            return Err(FormatError::NonFiniteFloat { location: format!("{sheet_id}.nonlinear_fit_bounds") });
-        }
-    }
-    Ok(())
-}
-
-fn validate_result_cell_finite<F>(cell: &ResultCell, loc: F) -> Result<(), FormatError>
-where
-    F: FnOnce() -> String,
-{
-    let is_ok = match cell {
-        ResultCell::Number { value, .. } => value.is_finite(),
-        ResultCell::PValue { raw, .. } => raw.is_finite(),
-        ResultCell::ConfidenceInterval { lower, upper } => ci_bound_finite(*lower) && ci_bound_finite(*upper),
-        ResultCell::Empty | ResultCell::Text(_) | ResultCell::Boolean(_) => true,
-    };
-    if is_ok { Ok(()) } else { Err(FormatError::NonFiniteFloat { location: loc() }) }
-}
-
-fn ci_bound_finite(bound: CiBound) -> bool {
-    match bound {
-        CiBound::Finite(v) => v.is_finite(),
-        CiBound::Open => true,
-    }
-}
-
 /// Detect circular `HookSource`, `ImportLinkSpec`, and transform/analysis DAG dependencies across
 /// all sheets in `doc` (including self-referential loops).
 pub fn detect_dependency_cycles(doc: &ProjectDocument) -> Result<(), FormatError> {
-    let mut adj: BTreeMap<SheetId, Vec<SheetId>> = BTreeMap::new();
-    let default_info = doc.info_sheets.first().map(|s| s.id.clone());
-
-    for ds in &doc.data_sheets {
-        let mut deps = Vec::new();
-        if let Some(info_id) = &ds.info_sheet_id {
-            deps.push(info_id.clone());
-        }
-        for region in &ds.linked_regions {
-            if let Some(up) = region.spec.source.upstream_sheet_id() {
-                deps.push(up.clone());
-            }
-        }
-        adj.insert(ds.id.clone(), deps);
+    match doc.find_dependency_cycle() {
+        Some(cycle) => Err(FormatError::DependencyCycle { cycle }),
+        None => Ok(()),
     }
-    for info in &doc.info_sheets {
-        adj.insert(info.id.clone(), Vec::new());
-    }
-    for res in &doc.result_sheets {
-        let mut deps = vec![res.analysis.source_sheet_id.clone()];
-        let paired_info = doc.data_sheet(&res.analysis.source_sheet_id).and_then(|d| d.info_sheet_id.clone()).or_else(|| default_info.clone());
-        for hook in res.analysis.kind.hooked_sources() {
-            if let Some(up) = resolve_hook_target(&hook, paired_info.as_ref()) {
-                deps.push(up);
-            }
-        }
-        if let AnalysisKind::PowerAnalysis(p) = &res.analysis.kind
-            && let Some(info_id) = &p.info_sheet_id
-        {
-            deps.push(info_id.clone());
-        }
-        adj.insert(res.id.clone(), deps);
-    }
-    for gs in &doc.graph_sheets {
-        adj.insert(gs.id.clone(), collect_graph_deps(gs, default_info.as_ref()));
-    }
-    for ls in &doc.layout_sheets {
-        adj.insert(ls.id.clone(), collect_layout_deps(ls, default_info.as_ref()));
-    }
-
-    run_cycle_dfs(&adj)
-}
-
-fn collect_graph_deps(gs: &GraphSheet, default_info: Option<&SheetId>) -> Vec<SheetId> {
-    let mut deps = vec![gs.spec.primary_source_sheet_id.clone()];
-    for series in &gs.spec.series {
-        deps.push(series.source_sheet_id.clone());
-        if let Some(ov) = &series.regression_overlay {
-            deps.push(ov.result_sheet_id.clone());
-        }
-    }
-    for cmp in &gs.spec.comparisons {
-        deps.push(cmp.result_sheet_id.clone());
-    }
-    if let Some(cld) = &gs.spec.compact_letter_display {
-        deps.push(cld.result_sheet_id.clone());
-    }
-    for ann in &gs.spec.annotations {
-        match ann {
-            GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. } | GraphAnnotation::ModelEquation { result_sheet_id, .. } => {
-                deps.push(result_sheet_id.clone());
-            }
-            GraphAnnotation::TextBox { .. }
-            | GraphAnnotation::LineOrArrow { .. }
-            | GraphAnnotation::Shape { .. }
-            | GraphAnnotation::EmbeddedImage { .. } => {}
-        }
-    }
-    for hook in gs.spec.inline_hooks() {
-        if let Some(up) = resolve_hook_target(&hook, default_info) {
-            deps.push(up);
-        }
-    }
-    deps
-}
-
-fn collect_layout_deps(ls: &LayoutSheet, default_info: Option<&SheetId>) -> Vec<SheetId> {
-    let mut deps = Vec::new();
-    for item in &ls.spec.items {
-        match item {
-            LayoutItem::LiveGraph { graph_sheet_id, .. } => deps.push(graph_sheet_id.clone()),
-            LayoutItem::LiveTable { source_sheet_id, .. } => deps.push(source_sheet_id.clone()),
-            LayoutItem::TextCallout { .. } | LayoutItem::EmbeddedImage { .. } => {}
-        }
-    }
-    for hook in ls.spec.inline_hooks() {
-        if let Some(up) = resolve_hook_target(&hook, default_info) {
-            deps.push(up);
-        }
-    }
-    deps
 }
 
 fn resolve_hook_target(hook: &HookSource, fallback_info: Option<&SheetId>) -> Option<SheetId> {
@@ -3537,54 +3067,6 @@ fn resolve_hook_target(hook: &HookSource, fallback_info: Option<&SheetId>) -> Op
         HookSource::ResultScalar { result_sheet_id, .. } => Some(result_sheet_id.clone()),
         HookSource::ColumnTitleValue { data_sheet_id, .. } => Some(data_sheet_id.clone()),
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum VisitState {
-    Visiting,
-    Done,
-}
-
-fn run_cycle_dfs(adj: &BTreeMap<SheetId, Vec<SheetId>>) -> Result<(), FormatError> {
-    let mut state: HashMap<SheetId, VisitState> = HashMap::with_capacity(adj.len());
-    let mut stack: Vec<SheetId> = Vec::new();
-    for node in adj.keys() {
-        if !state.contains_key(node) {
-            dfs_visit(node, adj, &mut state, &mut stack)?;
-        }
-    }
-    Ok(())
-}
-
-fn dfs_visit(
-    node: &SheetId,
-    adj: &BTreeMap<SheetId, Vec<SheetId>>,
-    state: &mut HashMap<SheetId, VisitState>,
-    stack: &mut Vec<SheetId>,
-) -> Result<(), FormatError> {
-    state.insert(node.clone(), VisitState::Visiting);
-    stack.push(node.clone());
-    if let Some(neighbors) = adj.get(node) {
-        for next in neighbors {
-            match state.get(next).copied() {
-                Some(VisitState::Visiting) => {
-                    let start = stack.iter().position(|id| id == next).unwrap_or(0);
-                    let mut cycle = stack[start..].to_vec();
-                    cycle.push(next.clone());
-                    return Err(FormatError::DependencyCycle { cycle });
-                }
-                Some(VisitState::Done) => {}
-                None => {
-                    if adj.contains_key(next) {
-                        dfs_visit(next, adj, state, stack)?;
-                    }
-                }
-            }
-        }
-    }
-    let _ = stack.pop();
-    state.insert(node.clone(), VisitState::Done);
-    Ok(())
 }
 
 /// Recovery helper that detects circular [`HookSource`] references inside `doc`, breaks the

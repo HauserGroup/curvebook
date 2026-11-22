@@ -2,15 +2,20 @@
 //! `Graphs`, `Layouts`), stable `family_anchor_sheet_id` navigation state, and canonical upstream
 //! dependency extraction for `curvebook-engine`'s topological DAG.
 
+use std::collections::{BTreeMap, HashMap};
+
 use crate::SheetSection;
+use crate::analysis::{AnalysisKind, ParameterScope};
+use crate::archetypes::{DataSetColumn, TableArchetype, XColumnMode};
+use crate::cell::{Cell, CellValue};
 use crate::error::{CURRENT_SCHEMA_VERSION, DocError, MAX_SHEETS_PER_PROJECT, validate_title};
 use crate::graph::{GraphAnnotation, GraphSheet};
-use crate::ids::{HookSource, SheetId};
+use crate::ids::{FloatingNote, HookSource, SheetId};
 use crate::image::{MAX_PROJECT_IMAGE_ASSETS, ProjectImageAsset};
-use crate::info::InfoSheet;
+use crate::info::{ConstantValue, InfoSheet};
 use crate::layout::{LayoutItem, LayoutSheet};
 use crate::links::DataSheet;
-use crate::result::ResultSheet;
+use crate::result::{CiBound, ResultCell, ResultSheet};
 
 /// Navigator sheet folder targeted by sheet-ordering operations such as [`ProjectDocument::reorder_sheet`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -506,6 +511,78 @@ impl ProjectDocument {
         deps.dedup();
         deps
     }
+
+    /// Detect circular `HookSource`, `ImportLinkSpec`, and analysis/graph/layout DAG dependencies
+    /// across all sheets in this project (including self-referential loops).
+    ///
+    /// Returns `Some(cycle)` containing the closed cycle path (`[start, ..., start]`) on the first
+    /// cycle encountered in deterministic `SheetId` order, or `None` when the project graph is acyclic.
+    #[must_use]
+    pub fn find_dependency_cycle(&self) -> Option<Vec<SheetId>> {
+        let mut adj: BTreeMap<SheetId, Vec<SheetId>> = BTreeMap::new();
+        for id in self
+            .data_sheets
+            .iter()
+            .map(|s| &s.id)
+            .chain(self.info_sheets.iter().map(|s| &s.id))
+            .chain(self.result_sheets.iter().map(|s| &s.id))
+            .chain(self.graph_sheets.iter().map(|s| &s.id))
+            .chain(self.layout_sheets.iter().map(|s| &s.id))
+        {
+            adj.insert(id.clone(), self.upstream_dependencies(id));
+        }
+
+        let mut state: HashMap<SheetId, CycleVisitState> = HashMap::with_capacity(adj.len());
+        let mut stack: Vec<SheetId> = Vec::new();
+        for node in adj.keys() {
+            if !state.contains_key(node)
+                && let Some(cycle) = dfs_find_cycle(node, &adj, &mut state, &mut stack)
+            {
+                return Some(cycle);
+            }
+        }
+        None
+    }
+
+    /// Inspect a single [`DataSheet`] for any non-finite (`NaN` or `±Inf`) numeric cell, sequence
+    /// parameter, numeric row spacing, or floating-note coordinate, returning its field path.
+    #[must_use]
+    pub fn first_non_finite_data_sheet_float(ds: &DataSheet) -> Option<String> {
+        let ctx = ds.id.as_str();
+        first_non_finite_archetype_float(&ds.archetype, ctx).or_else(|| first_non_finite_notes_float(&ds.floating_notes, ctx))
+    }
+
+    /// Inspect every sheet in this project for any non-finite (`NaN` or `±Inf`) floating-point
+    /// value, returning the first offending field path if present.
+    #[must_use]
+    pub fn first_non_finite_float(&self) -> Option<String> {
+        for ds in &self.data_sheets {
+            if let Some(loc) = Self::first_non_finite_data_sheet_float(ds) {
+                return Some(loc);
+            }
+        }
+        for info in &self.info_sheets {
+            if let Some(loc) = first_non_finite_info_float(info) {
+                return Some(loc);
+            }
+        }
+        for res in &self.result_sheets {
+            if let Some(loc) = first_non_finite_result_float(res) {
+                return Some(loc);
+            }
+        }
+        for graph in &self.graph_sheets {
+            if let Some(field) = graph.first_non_finite_float() {
+                return Some(format!("{}.{field}", graph.id));
+            }
+        }
+        for layout in &self.layout_sheets {
+            if let Some(field) = layout.first_non_finite_float() {
+                return Some(format!("{}.{field}", layout.id));
+            }
+        }
+        None
+    }
 }
 
 impl<'de> serde::Deserialize<'de> for ProjectDocument {
@@ -580,4 +657,224 @@ fn push_hook_dep(deps: &mut Vec<SheetId>, hook: &HookSource, fallback_info: Opti
         HookSource::ResultScalar { result_sheet_id, .. } => deps.push(result_sheet_id.clone()),
         HookSource::ColumnTitleValue { data_sheet_id, .. } => deps.push(data_sheet_id.clone()),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CycleVisitState {
+    Visiting,
+    Done,
+}
+
+fn dfs_find_cycle(
+    node: &SheetId,
+    adj: &BTreeMap<SheetId, Vec<SheetId>>,
+    state: &mut HashMap<SheetId, CycleVisitState>,
+    stack: &mut Vec<SheetId>,
+) -> Option<Vec<SheetId>> {
+    state.insert(node.clone(), CycleVisitState::Visiting);
+    stack.push(node.clone());
+    if let Some(neighbors) = adj.get(node) {
+        for next in neighbors {
+            match state.get(next).copied() {
+                Some(CycleVisitState::Visiting) => {
+                    let start = stack.iter().position(|id| id == next).unwrap_or(0);
+                    let mut cycle = stack.get(start..).unwrap_or(&[]).to_vec();
+                    cycle.push(next.clone());
+                    return Some(cycle);
+                }
+                Some(CycleVisitState::Done) => {}
+                None => {
+                    if adj.contains_key(next)
+                        && let Some(cycle) = dfs_find_cycle(next, adj, state, stack)
+                    {
+                        return Some(cycle);
+                    }
+                }
+            }
+        }
+    }
+    let _ = stack.pop();
+    state.insert(node.clone(), CycleVisitState::Done);
+    None
+}
+
+fn first_non_finite_notes_float(notes: &[FloatingNote], sheet_id: &str) -> Option<String> {
+    for (idx, note) in notes.iter().enumerate() {
+        let b = note.bounds_pt;
+        if !b.x.is_finite() || !b.y.is_finite() || !b.width.is_finite() || !b.height.is_finite() {
+            return Some(format!("{sheet_id}.floating_notes[{idx}].bounds_pt"));
+        }
+    }
+    None
+}
+
+fn first_non_finite_cell_rows(rows: &[Vec<Cell>], ctx: &str) -> Option<String> {
+    for (r, row) in rows.iter().enumerate() {
+        for (s, cell) in row.iter().enumerate() {
+            if let CellValue::Number(v) = cell.value
+                && !v.is_finite()
+            {
+                return Some(format!("{ctx}[{r}][{s}]"));
+            }
+        }
+    }
+    None
+}
+
+fn first_non_finite_dataset_columns(cols: &[DataSetColumn], ctx: &str) -> Option<String> {
+    for (c, col) in cols.iter().enumerate() {
+        if let Some(loc) = first_non_finite_cell_rows(&col.cells, &format!("{ctx}.col[{c}]")) {
+            return Some(loc);
+        }
+    }
+    None
+}
+
+fn first_non_finite_archetype_float(arch: &TableArchetype, ctx: &str) -> Option<String> {
+    match arch {
+        TableArchetype::Xy(t) => {
+            if let XColumnMode::GeneratedSequence { start, step, .. } = t.x_mode
+                && (!start.is_finite() || !step.is_finite())
+            {
+                return Some(format!("{ctx}.x_mode"));
+            }
+            first_non_finite_cell_rows(&t.x_cells, &format!("{ctx}.x_cells")).or_else(|| first_non_finite_dataset_columns(&t.data_sets, ctx))
+        }
+        TableArchetype::Column(t) => first_non_finite_dataset_columns(&t.data_sets, ctx),
+        TableArchetype::Grouped(t) => {
+            if let Some(loc) = first_non_finite_dataset_columns(&t.data_sets, ctx) {
+                return Some(loc);
+            }
+            if let Some(spacing) = &t.row_numeric_spacing {
+                for (row, maybe_v) in spacing.iter().enumerate() {
+                    if maybe_v.is_some_and(|v| !v.is_finite()) {
+                        return Some(format!("{ctx}.row_numeric_spacing[{row}]"));
+                    }
+                }
+            }
+            None
+        }
+        TableArchetype::Contingency(t) => first_non_finite_dataset_columns(&t.data_sets, ctx),
+        TableArchetype::Survival(t) => {
+            for (r, cell) in t.times.iter().enumerate() {
+                if let CellValue::Number(v) = cell.value
+                    && !v.is_finite()
+                {
+                    return Some(format!("{ctx}.times[{r}]"));
+                }
+            }
+            first_non_finite_dataset_columns(&t.cohorts, ctx)
+        }
+        TableArchetype::PartsOfWhole(t) => first_non_finite_dataset_columns(&t.data_sets, ctx),
+        TableArchetype::MultipleVariables(t) => {
+            for (c, var) in t.variables.iter().enumerate() {
+                for (r, cell) in var.cells.iter().enumerate() {
+                    if let CellValue::Number(v) = cell.value
+                        && !v.is_finite()
+                    {
+                        return Some(format!("{ctx}.var[{c}][{r}]"));
+                    }
+                }
+            }
+            None
+        }
+        TableArchetype::Nested(t) => {
+            for (g_idx, grp) in t.groups.iter().enumerate() {
+                if let Some(loc) = first_non_finite_cell_rows(&grp.cells, &format!("{ctx}.group[{g_idx}]")) {
+                    return Some(loc);
+                }
+            }
+            None
+        }
+    }
+}
+
+fn first_non_finite_info_float(info: &InfoSheet) -> Option<String> {
+    for (idx, c) in info.constants.iter().enumerate() {
+        if let ConstantValue::Number(v) = c.value
+            && !v.is_finite()
+        {
+            return Some(format!("{}.constants[{idx}]", info.id));
+        }
+    }
+    first_non_finite_notes_float(&info.floating_notes, info.id.as_str())
+}
+
+fn result_cell_is_finite(cell: &ResultCell) -> bool {
+    match cell {
+        ResultCell::Number { value, .. } => value.is_finite(),
+        ResultCell::PValue { raw, .. } => raw.is_finite(),
+        ResultCell::ConfidenceInterval { lower, upper } => {
+            matches!(*lower, CiBound::Open).then_some(true).unwrap_or_else(|| matches!(*lower, CiBound::Finite(v) if v.is_finite()))
+                && matches!(*upper, CiBound::Open).then_some(true).unwrap_or_else(|| matches!(*upper, CiBound::Finite(v) if v.is_finite()))
+        }
+        ResultCell::Empty | ResultCell::Text(_) | ResultCell::Boolean(_) => true,
+    }
+}
+
+fn first_non_finite_result_tabs_and_curves(res: &ResultSheet) -> Option<String> {
+    for (tab_idx, tab) in res.tabs.iter().enumerate() {
+        for (r, row) in tab.rows.iter().enumerate() {
+            for (c, cell) in row.iter().enumerate() {
+                if !result_cell_is_finite(cell) {
+                    return Some(format!("{}.tabs[{tab_idx}].rows[{r}][{c}]", res.id));
+                }
+            }
+        }
+    }
+    for (idx, cmp) in res.pairwise_comparisons.iter().enumerate() {
+        if cmp.estimate_diff.is_some_and(|v| !v.is_finite()) || !cmp.raw_p_or_q.is_finite() {
+            return Some(format!("{}.pairwise_comparisons[{idx}]", res.id));
+        }
+    }
+    for (c_idx, curve) in res.fitted_curves.iter().enumerate() {
+        for (p_idx, pt) in curve.points.iter().enumerate() {
+            if [Some(pt.x), Some(pt.y), pt.ci_lower, pt.ci_upper, pt.pred_lower, pt.pred_upper].into_iter().flatten().any(|v| !v.is_finite()) {
+                return Some(format!("{}.fitted_curves[{c_idx}].points[{p_idx}]", res.id));
+            }
+        }
+    }
+    None
+}
+
+fn first_non_finite_nonlinear_bounds(kind: &AnalysisKind, sheet_id: &SheetId) -> Option<String> {
+    let AnalysisKind::NonlinearRegression(fit) = kind else {
+        return None;
+    };
+    for (idx, rule) in fit.parameter_rules.iter().enumerate() {
+        if let ParameterScope::PerDatasetConstant(pairs) = &rule.scope {
+            for (ds_idx, val) in pairs {
+                if !val.is_finite() {
+                    return Some(format!("{sheet_id}.parameter_rules[{idx}].per_dataset[{ds_idx}]"));
+                }
+            }
+        }
+    }
+    let bounds = [fit.plot_x_min, fit.plot_x_max]
+        .into_iter()
+        .chain(fit.x_range_filter.into_iter().flat_map(|(a, b)| [a, b]))
+        .chain(fit.y_range_filter.into_iter().flat_map(|(a, b)| [a, b]))
+        .flatten();
+    bounds.into_iter().any(|v| !v.is_finite()).then(|| format!("{sheet_id}.nonlinear_fit_bounds"))
+}
+
+fn first_non_finite_result_float(res: &ResultSheet) -> Option<String> {
+    for (idx, s) in res.scalars.iter().enumerate() {
+        if !s.value.is_finite() {
+            return Some(format!("{}.scalars[{idx}]", res.id));
+        }
+    }
+    if let Some(loc) = first_non_finite_result_tabs_and_curves(res) {
+        return Some(loc);
+    }
+    if let Some(data) = &res.analyzable_data
+        && let Some(loc) = first_non_finite_archetype_float(&data.archetype, res.id.as_str())
+            .or_else(|| first_non_finite_notes_float(&data.floating_notes, res.id.as_str()))
+    {
+        return Some(loc);
+    }
+    if let Some(field) = res.analysis.first_non_finite_float() {
+        return Some(format!("{}.{field}", res.id.as_str()));
+    }
+    first_non_finite_nonlinear_bounds(&res.analysis.kind, &res.id).or_else(|| first_non_finite_notes_float(&res.floating_notes, res.id.as_str()))
 }

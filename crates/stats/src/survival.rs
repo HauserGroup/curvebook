@@ -69,9 +69,9 @@ use curvebook_math::linalg::{DenseMatrix, cholesky, solve_linear_least_squares, 
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
-    append_ignored_text_checklist_and_footnote, append_listwise_filtered_checklist_and_footnote, build_tab, checklist_item, ci_cell,
+    TabBuilder, append_ignored_text_checklist_and_footnote, append_listwise_filtered_checklist_and_footnote, checklist_item, ci_cell,
     init_result_sheet, is_ignored_non_numeric_cell, num_cell, opt_ci_cell, opt_num_cell, p_cell_at_alpha, push_scalar, resolve_selected_indices,
-    sanitize_result_sheet_floats,
+    sanitize_result_sheet_floats, text_cell,
 };
 use crate::error::StatsError;
 use crate::multiplicity::{MultiplicityProcedure, adjust_p_values, adjust_sidak};
@@ -1889,17 +1889,14 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
             }
 
             // Median survival summary tab.
-            let m_headers = vec![
+            let mut m_tab = TabBuilder::new("km-summary", "Kaplan-Meier cohort summary", ResultTabKind::MainSummary).headers([
                 String::from("N total"),
                 String::from("Events"),
                 String::from("Censored"),
                 String::from("Median survival"),
                 format!("{}% CI (median)", confidence.percent()),
-            ];
-            let mut m_labels = Vec::with_capacity(km_results.len());
-            let mut m_rows = Vec::with_capacity(km_results.len());
+            ]);
             for km in &km_results {
-                m_labels.push(km.label.clone());
                 let med_ci = match km.median_ci {
                     (Some(lo), Some(hi)) => ci_cell(lo, hi),
                     (Some(lo), None) => {
@@ -1907,98 +1904,87 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
                     }
                     _ => ResultCell::Empty,
                 };
-                m_rows.push(vec![
-                    num_cell(km.n_total as f64),
-                    num_cell(km.n_events as f64),
-                    num_cell(km.n_censored as f64),
-                    opt_num_cell(km.median_survival),
-                    med_ci,
-                ]);
+                m_tab.push_row(
+                    km.label.clone(),
+                    [
+                        num_cell(km.n_total as f64),
+                        num_cell(km.n_events as f64),
+                        num_cell(km.n_censored as f64),
+                        opt_num_cell(km.median_survival),
+                        med_ci,
+                    ],
+                );
             }
-            out.tabs.push(build_tab("km-summary", "Kaplan-Meier cohort summary", ResultTabKind::MainSummary, m_headers, m_labels, m_rows));
+            out.tabs.push(m_tab.build());
 
             // Number at risk tab.
-            let nar_headers = vec![
+            let mut nar_tab = TabBuilder::new("number-at-risk", "Survival schedule & number at risk", ResultTabKind::NumberAtRisk).headers([
                 String::from("Cohort"),
                 String::from("Time"),
                 String::from("At risk"),
                 String::from("Events"),
                 String::from("Survival"),
                 format!("{}% CI", confidence.percent()),
-            ];
-            let mut nar_labels = Vec::new();
-            let mut nar_rows = Vec::new();
+            ]);
             for km in &km_results {
                 for s in &km.steps {
-                    nar_labels.push(format!("{} @ {:.3}", km.label, s.time));
-                    nar_rows.push(vec![
-                        ResultCell::Text(km.label.clone()),
-                        num_cell(s.time),
-                        num_cell(s.n_at_risk as f64),
-                        num_cell(s.n_events as f64),
-                        num_cell(s.survival),
-                        ci_cell(s.ci_lower, s.ci_upper),
-                    ]);
+                    nar_tab.push_row(
+                        format!("{} @ {:.3}", km.label, s.time),
+                        [
+                            text_cell(km.label.clone()),
+                            num_cell(s.time),
+                            num_cell(s.n_at_risk as f64),
+                            num_cell(s.n_events as f64),
+                            num_cell(s.survival),
+                            ci_cell(s.ci_lower, s.ci_upper),
+                        ],
+                    );
                 }
             }
-            out.tabs.push(build_tab(
-                "number-at-risk",
-                "Survival schedule & number at risk",
-                ResultTabKind::NumberAtRisk,
-                nar_headers,
-                nar_labels,
-                nar_rows,
-            ));
+            out.tabs.push(nar_tab.build());
 
             // Curve comparisons if >= 2 cohorts.
             if cohort_obs.len() >= 2 {
                 let refs: Vec<&[SurvivalObservation]> = cohort_obs.iter().map(Vec::as_slice).collect();
-                let mut cmp_rows = Vec::new();
-                let mut cmp_labels = Vec::new();
+                let mut cmp_tab = TabBuilder::new("curve-comparison", "Comparison of survival curves", ResultTabKind::ModelComparison).headers([
+                    "Chi-square",
+                    "df",
+                    "P value",
+                ]);
+                let mut cmp_count = 0_usize;
                 let mut non_estimable_tests = Vec::new();
+                let mut record_cmp = |cmp: SurvivalComparisonResult| {
+                    if !cmp.chi_square.is_finite() {
+                        non_estimable_tests.push(cmp.test_name.clone());
+                    }
+                    cmp_tab.push_row(
+                        cmp.test_name,
+                        [num_cell(cmp.chi_square), num_cell(cmp.df), p_cell_at_alpha(cmp.p_value, p_fmt, confidence.alpha())],
+                    );
+                    cmp_count += 1;
+                };
                 if *log_rank_mantel_cox {
                     let lr = compare_survival_curves(&refs, false)?;
                     push_scalar(&mut out, "Log-rank chi-square", None, lr.chi_square);
                     push_scalar(&mut out, "Log-rank P value", None, lr.p_value);
-                    if !lr.chi_square.is_finite() {
-                        non_estimable_tests.push(lr.test_name.clone());
-                    }
-                    cmp_labels.push(lr.test_name);
-                    cmp_rows.push(vec![num_cell(lr.chi_square), num_cell(lr.df), p_cell_at_alpha(lr.p_value, p_fmt, confidence.alpha())]);
+                    record_cmp(lr);
                 }
                 if *gehan_breslow_wilcoxon {
                     let gbw = compare_survival_curves(&refs, true)?;
                     push_scalar(&mut out, "Gehan-Breslow-Wilcoxon chi-square", None, gbw.chi_square);
                     push_scalar(&mut out, "Gehan-Breslow-Wilcoxon P", None, gbw.p_value);
-                    if !gbw.chi_square.is_finite() {
-                        non_estimable_tests.push(gbw.test_name.clone());
-                    }
-                    cmp_labels.push(gbw.test_name);
-                    cmp_rows.push(vec![num_cell(gbw.chi_square), num_cell(gbw.df), p_cell_at_alpha(gbw.p_value, p_fmt, confidence.alpha())]);
+                    record_cmp(gbw);
                 }
                 if *trend_test && refs.len() >= 3 {
-                    let tr = log_rank_trend_test(&refs)?;
-                    if !tr.chi_square.is_finite() {
-                        non_estimable_tests.push(tr.test_name.clone());
-                    }
-                    cmp_labels.push(tr.test_name);
-                    cmp_rows.push(vec![num_cell(tr.chi_square), num_cell(tr.df), p_cell_at_alpha(tr.p_value, p_fmt, confidence.alpha())]);
+                    record_cmp(log_rank_trend_test(&refs)?);
                 }
-                if !cmp_rows.is_empty() {
-                    let mut cmp_tab = build_tab(
-                        "curve-comparison",
-                        "Comparison of survival curves",
-                        ResultTabKind::ModelComparison,
-                        vec![String::from("Chi-square"), String::from("df"), String::from("P value")],
-                        cmp_labels,
-                        cmp_rows,
-                    );
+                if cmp_count > 0 {
                     if !non_estimable_tests.is_empty() {
                         let msg = format!(
                             "Survival comparison statistic unavailable for {} because no events were observed across overlapping risk sets (zero covariance rank).",
                             non_estimable_tests.join(", ")
                         );
-                        cmp_tab.footnotes.push(msg.clone());
+                        cmp_tab.push_footnote(msg.clone());
                         out.checklist.push(checklist_item(
                             "Survival curve comparison estimability",
                             ChecklistStatus::Info,
@@ -2006,7 +1992,7 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
                             msg,
                         ));
                     }
-                    out.tabs.push(cmp_tab);
+                    out.tabs.push(cmp_tab.build());
                 }
 
                 if refs.len() == 2 {
@@ -2020,19 +2006,14 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
                     if let Some(v) = hr.peto_one_step_hr_opt() {
                         push_scalar(&mut out, "Hazard ratio (Peto one-step)", None, v);
                     }
-                    let hr_tab = build_tab(
-                        "hazard-ratio",
-                        "Hazard ratio",
-                        ResultTabKind::ParametersAndConfidenceIntervals,
-                        vec![String::from("Hazard ratio"), format!("{}% CI", confidence.percent())],
-                        vec![String::from("Log-rank"), String::from("Mantel-Haenszel"), String::from("Peto one-step")],
-                        vec![
-                            vec![opt_num_cell(hr.log_rank_hr_opt()), opt_ci_cell(hr.log_rank_ci)],
-                            vec![opt_num_cell(hr.mantel_haenszel_hr_opt()), opt_ci_cell(hr.mantel_haenszel_ci)],
-                            vec![opt_num_cell(hr.peto_one_step_hr_opt()), opt_ci_cell(hr.peto_one_step_ci)],
-                        ],
+                    out.tabs.push(
+                        TabBuilder::new("hazard-ratio", "Hazard ratio", ResultTabKind::ParametersAndConfidenceIntervals)
+                            .headers([String::from("Hazard ratio"), format!("{}% CI", confidence.percent())])
+                            .row("Log-rank", [opt_num_cell(hr.log_rank_hr_opt()), opt_ci_cell(hr.log_rank_ci)])
+                            .row("Mantel-Haenszel", [opt_num_cell(hr.mantel_haenszel_hr_opt()), opt_ci_cell(hr.mantel_haenszel_ci)])
+                            .row("Peto one-step", [opt_num_cell(hr.peto_one_step_hr_opt()), opt_ci_cell(hr.peto_one_step_ci)])
+                            .build(),
                     );
-                    out.tabs.push(hr_tab);
                 } else if refs.len() >= 3 {
                     append_survival_pairwise(&mut out, &indices, &km_results, &cohort_obs, multiplicity, p_fmt, confidence)?;
                 }
@@ -2103,7 +2084,7 @@ fn append_cox_ph_scalars_and_tabs(out: &mut ResultSheet, cox: &CoxPhResult, conf
     push_scalar(out, "Global Schoenfeld P", None, cox.global_schoenfeld_p);
     push_scalar(out, "AIC", None, aic);
 
-    let headers = vec![
+    let mut cox_tab = TabBuilder::new("cox-ph", "Cox proportional hazards estimates", ResultTabKind::ParametersAndConfidenceIntervals).headers([
         String::from("beta"),
         String::from("SE"),
         String::from("Wald z"),
@@ -2111,50 +2092,44 @@ fn append_cox_ph_scalars_and_tabs(out: &mut ResultSheet, cox: &CoxPhResult, conf
         String::from("Hazard Ratio"),
         format!("{}% CI (HR)", confidence.percent()),
         String::from("Schoenfeld P"),
-    ];
+    ]);
     let mut labels = Vec::with_capacity(cox.covariates.len());
-    let mut rows = Vec::with_capacity(cox.covariates.len());
     for cov in &cox.covariates {
         labels.push(cov.name.clone());
-        rows.push(vec![
-            num_cell(cov.beta),
-            num_cell(cov.se),
-            num_cell(cov.z_statistic),
-            p_cell_at_alpha(cov.p_value, p_fmt, confidence.alpha()),
-            num_cell(cov.hazard_ratio),
-            ci_cell(cov.hr_ci.0, cov.hr_ci.1),
-            p_cell_at_alpha(cov.schoenfeld_p, p_fmt, confidence.alpha()),
-        ]);
+        cox_tab.push_row(
+            cov.name.clone(),
+            [
+                num_cell(cov.beta),
+                num_cell(cov.se),
+                num_cell(cov.z_statistic),
+                p_cell_at_alpha(cov.p_value, p_fmt, confidence.alpha()),
+                num_cell(cov.hazard_ratio),
+                ci_cell(cov.hr_ci.0, cov.hr_ci.1),
+                p_cell_at_alpha(cov.schoenfeld_p, p_fmt, confidence.alpha()),
+            ],
+        );
     }
-    let mut cox_tab =
-        build_tab("cox-ph", "Cox proportional hazards estimates", ResultTabKind::ParametersAndConfidenceIntervals, headers, labels.clone(), rows);
     if !cox.converged || has_non_estimable {
-        cox_tab.footnotes.push(String::from(
+        cox_tab.push_footnote(
             "Model did not converge or exhibited separation/collinearity; non-estimable SE, Wald Z/P, and HR CI bounds are omitted. Refer to Likelihood ratio P for the omnibus test.",
-        ));
+        );
     } else if !cox.global_schoenfeld_p.is_finite() {
-        cox_tab.footnotes.push(String::from(
+        cox_tab.push_footnote(
             "Schoenfeld proportional-hazards residual test is non-estimable when fewer than 3 events (or fewer than 2 distinct event times) are observed.",
-        ));
+        );
     }
     if cox.concordance.is_none() {
-        cox_tab
-            .footnotes
-            .push(String::from("Harrell's concordance index (C-index) is unavailable (\"—\") because 0 comparable subject pairs exist."));
+        cox_tab.push_footnote("Harrell's concordance index (C-index) is unavailable (\"—\") because 0 comparable subject pairs exist.");
     }
-    out.tabs.push(cox_tab);
+    out.tabs.push(cox_tab.build());
 
     append_cox_baseline_tabs(out, &cox.baseline_survival);
 
-    let corr_rows: Vec<Vec<ResultCell>> = cox.correlation_matrix.iter().map(|r| r.iter().map(|&v| num_cell(v)).collect()).collect();
-    out.tabs.push(build_tab(
-        "cox-covariance",
-        "Cox parameter correlation matrix",
-        ResultTabKind::CovarianceMatrix,
-        labels.clone(),
-        labels,
-        corr_rows,
-    ));
+    let mut corr_tab = TabBuilder::new("cox-covariance", "Cox parameter correlation matrix", ResultTabKind::CovarianceMatrix).headers(labels.clone());
+    for (lbl, row) in labels.into_iter().zip(cox.correlation_matrix.iter()) {
+        corr_tab.push_row(lbl, row.iter().map(|&v| num_cell(v)));
+    }
+    out.tabs.push(corr_tab.build());
 
     append_cox_curve_overlays(out, cox);
 }
@@ -2209,45 +2184,33 @@ fn append_cox_ph_diagnostics(out: &mut ResultSheet, cox: &CoxPhResult) {
 }
 
 fn append_cox_baseline_tabs(out: &mut ResultSheet, baseline: &[CoxBaselinePoint]) {
-    let mut base_labels = Vec::with_capacity(baseline.len() + 1);
-    let mut base_rows = Vec::with_capacity(baseline.len() + 1);
+    let mut base_tab = TabBuilder::new("cox-baseline-survival", "Cox baseline survival curve (at mean covariates)", ResultTabKind::BaselineSurvival)
+        .headers(["Time", "Cumulative Hazard H0(t)", "Baseline Survival S0(t)"])
+        .footnote("Evaluated at sample covariate means using the fitted cumulative hazard step function.");
     if baseline.first().is_some_and(|p| p.time > 0.0) {
-        base_labels.push(String::from("t = 0.0000"));
-        base_rows.push(vec![num_cell(0.0), num_cell(0.0), num_cell(1.0)]);
+        base_tab.push_row("t = 0.0000", [num_cell(0.0), num_cell(0.0), num_cell(1.0)]);
     }
     for pt in baseline {
-        base_labels.push(format!("t = {:.4}", pt.time));
-        base_rows.push(vec![num_cell(pt.time), num_cell(pt.cum_hazard), num_cell(pt.survival)]);
+        base_tab.push_row(format!("t = {:.4}", pt.time), [num_cell(pt.time), num_cell(pt.cum_hazard), num_cell(pt.survival)]);
     }
-    let mut base_tab = build_tab(
-        "cox-baseline-survival",
-        "Cox baseline survival curve (at mean covariates)",
-        ResultTabKind::BaselineSurvival,
-        vec![String::from("Time"), String::from("Cumulative Hazard H0(t)"), String::from("Baseline Survival S0(t)")],
-        base_labels,
-        base_rows,
-    );
-    base_tab.footnotes.push(String::from("Evaluated at sample covariate means using the fitted cumulative hazard step function."));
-    out.tabs.push(base_tab);
+    out.tabs.push(base_tab.build());
 
-    let mut lml_labels = Vec::with_capacity(baseline.len());
-    let mut lml_rows = Vec::with_capacity(baseline.len());
+    let mut lml_tab = TabBuilder::new("cox-log-minus-log", "Cox log-minus-log survival coordinates", ResultTabKind::LogMinusLog).headers([
+        "Time",
+        "ln(Time)",
+        "Baseline Survival S0(t)",
+        "ln(-ln S0(t))",
+    ]);
     for pt in baseline {
         if pt.cum_hazard > 0.0 && pt.survival > 0.0 && pt.survival < 1.0 {
             let log_t = (pt.time > 0.0).then(|| pt.time.ln());
-            let lml = pt.cum_hazard.ln();
-            lml_labels.push(format!("t = {:.4}", pt.time));
-            lml_rows.push(vec![num_cell(pt.time), opt_num_cell(log_t), num_cell(pt.survival), num_cell(lml)]);
+            lml_tab.push_row(
+                format!("t = {:.4}", pt.time),
+                [num_cell(pt.time), opt_num_cell(log_t), num_cell(pt.survival), num_cell(pt.cum_hazard.ln())],
+            );
         }
     }
-    out.tabs.push(build_tab(
-        "cox-log-minus-log",
-        "Cox log-minus-log survival coordinates",
-        ResultTabKind::LogMinusLog,
-        vec![String::from("Time"), String::from("ln(Time)"), String::from("Baseline Survival S0(t)"), String::from("ln(-ln S0(t))")],
-        lml_labels,
-        lml_rows,
-    ));
+    out.tabs.push(lml_tab.build());
 }
 
 /// Build Cox PH predictor names and complete-case subjects, expanding categorical predictors
@@ -2852,32 +2815,21 @@ fn append_survival_pairwise(
         adjust_p_values(&raw_p, plan.procedure, mult.threshold)
     };
 
-    let headers = vec![
+    let mut pw_tab = TabBuilder::new("survival-pairwise", "Pairwise survival comparisons", ResultTabKind::MultipleComparisons).headers([
         String::from("Chi-square"),
         String::from("Raw P"),
         String::from("Adjusted P / q"),
         String::from("Hazard Ratio"),
         format!("{}% CI (HR)", confidence.percent()),
         String::from("Significant"),
-    ];
-    let mut row_labels = Vec::with_capacity(pairs.len());
-    let mut rows = Vec::with_capacity(pairs.len());
+    ]);
     let mut non_estimable_pairs = Vec::new();
     for ((i, j, chi2, rp, hr), ap) in pairs.into_iter().zip(adj) {
         let lbl_a = km_results[i].label.clone();
         let lbl_b = km_results[j].label.clone();
         let pair_label = format!("{lbl_a} vs. {lbl_b}");
-        row_labels.push(pair_label.clone());
-        if ap.is_finite() {
+        let sig_cell = if ap.is_finite() {
             let sig = ap <= mult.threshold;
-            rows.push(vec![
-                num_cell(chi2),
-                p_cell_at_alpha(rp, p_fmt, confidence.alpha()),
-                p_cell_at_alpha(ap, p_fmt, mult.threshold),
-                opt_num_cell(hr.log_rank_hr_opt()),
-                opt_ci_cell(hr.log_rank_ci),
-                ResultCell::Boolean(sig),
-            ]);
             out.pairwise_comparisons.push(PairwiseComparisonRecord {
                 group_a: indices[i],
                 group_b: indices[j],
@@ -2888,30 +2840,34 @@ fn append_survival_pairwise(
                 is_fdr_q: is_fdr,
                 significant: sig,
             });
+            ResultCell::Boolean(sig)
         } else {
-            non_estimable_pairs.push(pair_label);
-            rows.push(vec![
+            non_estimable_pairs.push(pair_label.clone());
+            ResultCell::Empty
+        };
+        pw_tab.push_row(
+            pair_label,
+            [
                 num_cell(chi2),
                 p_cell_at_alpha(rp, p_fmt, confidence.alpha()),
                 p_cell_at_alpha(ap, p_fmt, mult.threshold),
                 opt_num_cell(hr.log_rank_hr_opt()),
                 opt_ci_cell(hr.log_rank_ci),
-                ResultCell::Empty,
-            ]);
-        }
+                sig_cell,
+            ],
+        );
     }
-    let mut pw_tab = build_tab("survival-pairwise", "Pairwise survival comparisons", ResultTabKind::MultipleComparisons, headers, row_labels, rows);
     if !non_estimable_pairs.is_empty() {
-        pw_tab.footnotes.push(format!(
+        pw_tab.push_footnote(format!(
             "Pairwise log-rank comparisons unavailable and excluded from multiplicity adjustment for {} due to zero observed events.",
             non_estimable_pairs.join(", ")
         ));
     }
     if let Some(note) = plan.note {
-        pw_tab.footnotes.push(note.clone());
+        pw_tab.push_footnote(note.clone());
         out.checklist.push(checklist_item("Pairwise survival multiplicity adjustment", ChecklistStatus::Info, None, note));
     }
-    out.tabs.push(pw_tab);
+    out.tabs.push(pw_tab.build());
     Ok(())
 }
 

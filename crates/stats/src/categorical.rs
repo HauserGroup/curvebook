@@ -57,8 +57,8 @@ use curvebook_math::sum::NeumaierSum;
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
-    build_tab, checklist_item, ci_cell, init_result_sheet, num_cell, opt_ci_cell, opt_num_cell, p_cell_at_alpha, push_scalar,
-    sanitize_result_sheet_floats, try_resolve_selected_indices,
+    KvTabBuilder, TabBuilder, checklist_item, ci_cell, init_result_sheet, num_cell, opt_ci_cell, opt_num_cell, p_cell_at_alpha, push_scalar,
+    sanitize_result_sheet_floats, text_cell, try_resolve_selected_indices,
 };
 use crate::error::StatsError;
 
@@ -2536,26 +2536,16 @@ fn append_mcnemar_outputs(out: &mut ResultSheet, b: u64, c: u64, confidence: Con
     };
     let disc_total = mc.b.checked_add(mc.c).ok_or(StatsError::InvalidParameter { name: "mcnemar_discordant_total", value: f64::INFINITY })?;
     let disc_prop_cell = if disc_total > 0 { num_cell((mc.b as f64) / (disc_total as f64)) } else { ResultCell::Empty };
-    out.tabs.push(build_tab(
-        "contingency-mcnemar",
-        "McNemar discordant pairs & exact odds ratio",
-        ResultTabKind::ParametersAndConfidenceIntervals,
-        vec![String::from("Estimate"), format!("{}% exact CI", confidence.percent())],
-        vec![
-            String::from("Discordant pair ratio (b / c)"),
-            String::from("Discordant odds ratio (Clopper-Pearson)"),
-            String::from("Discordant proportion b / (b + c)"),
-            String::from("McNemar chi-square (Yates)"),
-            String::from("McNemar exact P value"),
-        ],
-        vec![
-            vec![ResultCell::Text(format!("{} / {}", mc.b, mc.c)), ResultCell::Empty],
-            vec![or_cell, opt_ci_cell(mc.discordant_or_ci)],
-            vec![disc_prop_cell, ci_cell(mc.discordant_p_ci.0, mc.discordant_p_ci.1)],
-            vec![num_cell(mc.chi_square_yates), ResultCell::Empty],
-            vec![p_cell_at_alpha(mc.exact_p_value, p_fmt, confidence.alpha()), ResultCell::Empty],
-        ],
-    ));
+    out.tabs.push(
+        TabBuilder::new("contingency-mcnemar", "McNemar discordant pairs & exact odds ratio", ResultTabKind::ParametersAndConfidenceIntervals)
+            .headers([String::from("Estimate"), format!("{}% exact CI", confidence.percent())])
+            .row("Discordant pair ratio (b / c)", [text_cell(format!("{} / {}", mc.b, mc.c)), ResultCell::Empty])
+            .row("Discordant odds ratio (Clopper-Pearson)", [or_cell, opt_ci_cell(mc.discordant_or_ci)])
+            .row("Discordant proportion b / (b + c)", [disc_prop_cell, ci_cell(mc.discordant_p_ci.0, mc.discordant_p_ci.1)])
+            .row("McNemar chi-square (Yates)", [num_cell(mc.chi_square_yates), ResultCell::Empty])
+            .row("McNemar exact P value", [p_cell_at_alpha(mc.exact_p_value, p_fmt, confidence.alpha()), ResultCell::Empty])
+            .build(),
+    );
     Ok(())
 }
 
@@ -2577,43 +2567,22 @@ fn append_2x2_ratios_tab(
         push_scalar(out, "NNT", None, nnt_v);
     }
 
-    let r_headers = vec![String::from("Estimate"), format!("{}% CI", confidence.percent())];
-    let mut r_labels = Vec::new();
-    let mut r_rows = Vec::new();
+    let mut tab = TabBuilder::new("contingency-ratios", "Effect sizes & diagnostic proportions", ResultTabKind::ParametersAndConfidenceIntervals)
+        .headers([String::from("Estimate"), format!("{}% CI", confidence.percent())]);
     if cont_spec.compute_odds_and_risk_ratios {
-        r_labels.extend([
-            String::from("Odds ratio (Baptista-Pike CI)"),
-            String::from("Relative risk (Koopman CI)"),
-            String::from("Risk difference (Newcombe CI)"),
-            String::from("Number needed to treat (NNT)"),
-            String::from("NNT magnitude (1 / |RD|)"),
-        ]);
-        r_rows.push(vec![opt_num_cell(r2x2.odds_ratio), opt_ci_cell(r2x2.or_baptista_pike_ci)]);
-        r_rows.push(vec![opt_num_cell(r2x2.relative_risk), opt_ci_cell(r2x2.rr_koopman_ci)]);
-        r_rows.push(vec![num_cell(r2x2.risk_difference), opt_ci_cell(r2x2.rd_newcombe_ci)]);
-        r_rows.push(vec![ResultCell::Text(r2x2.nnt_point_label.clone()), ResultCell::Text(r2x2.nnt_ci_label.clone())]);
-        r_rows.push(vec![opt_num_cell(r2x2.nnt_value), opt_ci_cell(r2x2.nnt_ci_bounds)]);
+        tab.push_row("Odds ratio (Baptista-Pike CI)", [opt_num_cell(r2x2.odds_ratio), opt_ci_cell(r2x2.or_baptista_pike_ci)])
+            .push_row("Relative risk (Koopman CI)", [opt_num_cell(r2x2.relative_risk), opt_ci_cell(r2x2.rr_koopman_ci)])
+            .push_row("Risk difference (Newcombe CI)", [num_cell(r2x2.risk_difference), opt_ci_cell(r2x2.rd_newcombe_ci)])
+            .push_row("Number needed to treat (NNT)", [text_cell(r2x2.nnt_point_label.clone()), text_cell(r2x2.nnt_ci_label.clone())])
+            .push_row("NNT magnitude (1 / |RD|)", [opt_num_cell(r2x2.nnt_value), opt_ci_cell(r2x2.nnt_ci_bounds)]);
     }
     if cont_spec.compute_sensitivity_specificity {
-        r_labels.extend([
-            String::from("Sensitivity (Wilson CI)"),
-            String::from("Specificity (Wilson CI)"),
-            String::from("PPV (Wilson CI)"),
-            String::from("NPV (Wilson CI)"),
-        ]);
-        r_rows.push(vec![opt_num_cell(r2x2.sensitivity), opt_ci_cell(r2x2.sensitivity_wilson_ci)]);
-        r_rows.push(vec![opt_num_cell(r2x2.specificity), opt_ci_cell(r2x2.specificity_wilson_ci)]);
-        r_rows.push(vec![num_cell(r2x2.ppv), ci_cell(r2x2.ppv_wilson_ci.0, r2x2.ppv_wilson_ci.1)]);
-        r_rows.push(vec![num_cell(r2x2.npv), ci_cell(r2x2.npv_wilson_ci.0, r2x2.npv_wilson_ci.1)]);
+        tab.push_row("Sensitivity (Wilson CI)", [opt_num_cell(r2x2.sensitivity), opt_ci_cell(r2x2.sensitivity_wilson_ci)])
+            .push_row("Specificity (Wilson CI)", [opt_num_cell(r2x2.specificity), opt_ci_cell(r2x2.specificity_wilson_ci)])
+            .push_row("PPV (Wilson CI)", [num_cell(r2x2.ppv), ci_cell(r2x2.ppv_wilson_ci.0, r2x2.ppv_wilson_ci.1)])
+            .push_row("NPV (Wilson CI)", [num_cell(r2x2.npv), ci_cell(r2x2.npv_wilson_ci.0, r2x2.npv_wilson_ci.1)]);
     }
-    out.tabs.push(build_tab(
-        "contingency-ratios",
-        "Effect sizes & diagnostic proportions",
-        ResultTabKind::ParametersAndConfidenceIntervals,
-        r_headers,
-        r_labels,
-        r_rows,
-    ));
+    out.tabs.push(tab.build());
     Ok(())
 }
 
@@ -2691,28 +2660,19 @@ fn run_contingency_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, cont_s
     let primary = resolve_contingency_primary(&mut out, sheet, &reduced.counts, &res, barnard_res.as_ref(), cont_spec.method)?;
 
     let mut headers = vec![String::from("Statistic"), String::from("df"), String::from("P value")];
+    let mut row_main = vec![opt_num_cell(primary.stat), opt_num_cell(primary.df), p_cell_at_alpha(primary.p_value, p_fmt, confidence.alpha())];
     if cont_spec.compute_phi_and_cramers_v {
         headers.push(String::from("Cramer's V / Phi"));
         headers.push(format!("{}% CI", confidence.percent()));
-    }
-    let mut row_main = vec![opt_num_cell(primary.stat), opt_num_cell(primary.df), p_cell_at_alpha(primary.p_value, p_fmt, confidence.alpha())];
-    if cont_spec.compute_phi_and_cramers_v {
         row_main.push(num_cell(res.phi.unwrap_or(res.cramers_v)));
         row_main.push(opt_ci_cell(res.cramers_v_ci));
     }
-    out.tabs.push(build_tab(
-        "contingency-main",
-        "Contingency analysis",
-        ResultTabKind::MainSummary,
-        headers,
-        vec![primary.name.to_owned()],
-        vec![row_main],
-    ));
-    if let Some(note) = primary.footnote
-        && let Some(tab) = out.tabs.last_mut()
-    {
-        tab.footnotes.push(String::from(note));
+    let mut main_tab =
+        TabBuilder::new("contingency-main", "Contingency analysis", ResultTabKind::MainSummary).headers(headers).row(primary.name, row_main);
+    if let Some(note) = primary.footnote {
+        main_tab.push_footnote(note);
     }
+    out.tabs.push(main_tab.build());
     append_reduced_margins_note(&mut out, &reduced);
 
     if matches!(cont_spec.method, ContingencyMethod::McNemarPaired) {
@@ -2756,8 +2716,7 @@ fn push_kappa_outputs(
     out: &mut ResultSheet,
     res: &KappaResult,
     row_label: &str,
-    diag_labels: Vec<String>,
-    diag_rows: Vec<Vec<ResultCell>>,
+    diag_rows: &[(&str, f64)],
     confidence: ConfidenceLevel,
     p_fmt: PValueFormat,
 ) {
@@ -2770,29 +2729,33 @@ fn push_kappa_outputs(
     push_scalar(out, "observed_agreement", None, res.observed_agreement);
     push_scalar(out, "expected_agreement", None, res.expected_agreement);
 
-    out.tabs.push(build_tab(
-        "contingency-kappa",
-        "Inter-rater agreement (kappa)",
-        ResultTabKind::MainSummary,
-        vec![String::from("Kappa"), String::from("ASE (SE)"), format!("{}% CI", confidence.percent()), String::from("Z"), String::from("P value")],
-        vec![row_label.to_owned()],
-        vec![vec![
-            num_cell(res.kappa),
-            num_cell(res.se),
-            ci_cell(res.ci.0, res.ci.1),
-            num_cell(res.z_statistic),
-            p_cell_at_alpha(res.p_value, p_fmt, confidence.alpha()),
-        ]],
-    ));
+    out.tabs.push(
+        TabBuilder::new("contingency-kappa", "Inter-rater agreement (kappa)", ResultTabKind::MainSummary)
+            .headers([
+                String::from("Kappa"),
+                String::from("ASE (SE)"),
+                format!("{}% CI", confidence.percent()),
+                String::from("Z"),
+                String::from("P value"),
+            ])
+            .row(
+                row_label,
+                [
+                    num_cell(res.kappa),
+                    num_cell(res.se),
+                    ci_cell(res.ci.0, res.ci.1),
+                    num_cell(res.z_statistic),
+                    p_cell_at_alpha(res.p_value, p_fmt, confidence.alpha()),
+                ],
+            )
+            .build(),
+    );
 
-    out.tabs.push(build_tab(
-        "contingency-kappa-diagnostics",
-        "Agreement decomposition diagnostics",
-        ResultTabKind::Diagnostics,
-        vec![String::from("Value")],
-        diag_labels,
-        diag_rows,
-    ));
+    let mut diag = KvTabBuilder::new("contingency-kappa-diagnostics", "Agreement decomposition diagnostics", ResultTabKind::Diagnostics, "Value");
+    for &(label, val) in diag_rows {
+        diag.push_num(label, val);
+    }
+    out.tabs.push(diag.build());
 }
 
 fn run_cohen_kappa_sheet(
@@ -2814,19 +2777,12 @@ fn run_cohen_kappa_sheet(
         &mut out,
         &res,
         label,
-        vec![
-            String::from("Observed agreement (P_o)"),
-            String::from("Chance-expected agreement (P_e)"),
-            String::from("Chance-corrected denominator (1 - P_e)"),
-            String::from("Subjects / total paired ratings (N)"),
-            String::from("Categories (K)"),
-        ],
-        vec![
-            vec![num_cell(res.observed_agreement)],
-            vec![num_cell(res.expected_agreement)],
-            vec![num_cell(1.0 - res.expected_agreement)],
-            vec![num_cell(total as f64)],
-            vec![num_cell(k as f64)],
+        &[
+            ("Observed agreement (P_o)", res.observed_agreement),
+            ("Chance-expected agreement (P_e)", res.expected_agreement),
+            ("Chance-corrected denominator (1 - P_e)", 1.0 - res.expected_agreement),
+            ("Subjects / total paired ratings (N)", total as f64),
+            ("Categories (K)", k as f64),
         ],
         confidence,
         p_fmt,
@@ -2859,21 +2815,13 @@ fn run_fleiss_kappa_sheet(
         &mut out,
         &res,
         "Fleiss' multi-rater kappa",
-        vec![
-            String::from("Mean observed agreement (P_bar)"),
-            String::from("Chance-expected agreement (P_e)"),
-            String::from("Chance-corrected denominator (1 - P_e)"),
-            String::from("Subjects (N)"),
-            String::from("Categories (K)"),
-            String::from("Raters per subject (m)"),
-        ],
-        vec![
-            vec![num_cell(res.observed_agreement)],
-            vec![num_cell(res.expected_agreement)],
-            vec![num_cell(1.0 - res.expected_agreement)],
-            vec![num_cell(n as f64)],
-            vec![num_cell(k as f64)],
-            vec![num_cell(m as f64)],
+        &[
+            ("Mean observed agreement (P_bar)", res.observed_agreement),
+            ("Chance-expected agreement (P_e)", res.expected_agreement),
+            ("Chance-corrected denominator (1 - P_e)", 1.0 - res.expected_agreement),
+            ("Subjects (N)", n as f64),
+            ("Categories (K)", k as f64),
+            ("Raters per subject (m)", m as f64),
         ],
         confidence,
         p_fmt,
@@ -3009,71 +2957,55 @@ fn run_exact_binomial_analysis(
     push_scalar(&mut out, "successes", None, res.successes as f64);
     push_scalar(&mut out, "total", None, res.total as f64);
 
-    out.tabs.push(build_tab(
-        "exact-binomial-main",
-        "Exact binomial test",
-        ResultTabKind::MainSummary,
-        vec![
-            String::from("Successes (k)"),
-            String::from("Trials (n)"),
-            String::from("Observed p"),
-            String::from("Null p0"),
-            String::from("Exact P (Sterne)"),
-            String::from("Exact P (doubled tail)"),
-            String::from("Lower P(X <= k)"),
-            String::from("Upper P(X >= k)"),
-        ],
-        vec![String::from("Binomial proportion vs null")],
-        vec![vec![
-            num_cell(res.successes as f64),
-            num_cell(res.total as f64),
-            num_cell(res.proportion),
-            num_cell(res.null_proportion),
-            p_cell_at_alpha(res.p_value_sterne, p_fmt, confidence.alpha()),
-            p_cell_at_alpha(res.p_value_doubled_tail, p_fmt, confidence.alpha()),
-            p_cell_at_alpha(res.p_value_lower, p_fmt, confidence.alpha()),
-            p_cell_at_alpha(res.p_value_upper, p_fmt, confidence.alpha()),
-        ]],
-    ));
+    let alpha = confidence.alpha();
+    out.tabs.push(
+        TabBuilder::new("exact-binomial-main", "Exact binomial test", ResultTabKind::MainSummary)
+            .headers([
+                "Successes (k)",
+                "Trials (n)",
+                "Observed p",
+                "Null p0",
+                "Exact P (Sterne)",
+                "Exact P (doubled tail)",
+                "Lower P(X <= k)",
+                "Upper P(X >= k)",
+            ])
+            .row(
+                "Binomial proportion vs null",
+                [
+                    num_cell(res.successes as f64),
+                    num_cell(res.total as f64),
+                    num_cell(res.proportion),
+                    num_cell(res.null_proportion),
+                    p_cell_at_alpha(res.p_value_sterne, p_fmt, alpha),
+                    p_cell_at_alpha(res.p_value_doubled_tail, p_fmt, alpha),
+                    p_cell_at_alpha(res.p_value_lower, p_fmt, alpha),
+                    p_cell_at_alpha(res.p_value_upper, p_fmt, alpha),
+                ],
+            )
+            .build(),
+    );
 
-    out.tabs.push(build_tab(
-        "exact-binomial-cis",
-        "Binomial proportion confidence intervals",
-        ResultTabKind::ParametersAndConfidenceIntervals,
-        vec![String::from("Observed p"), format!("{}% CI", confidence.percent()), String::from("Lower bound"), String::from("Upper bound")],
-        vec![String::from("Clopper-Pearson (exact)"), String::from("Wilson score"), String::from("Agresti-Coull")],
-        vec![
-            vec![
-                num_cell(res.proportion),
-                ci_cell(res.clopper_pearson_ci.0, res.clopper_pearson_ci.1),
-                num_cell(res.clopper_pearson_ci.0),
-                num_cell(res.clopper_pearson_ci.1),
-            ],
-            vec![num_cell(res.proportion), ci_cell(res.wilson_ci.0, res.wilson_ci.1), num_cell(res.wilson_ci.0), num_cell(res.wilson_ci.1)],
-            vec![
-                num_cell(res.proportion),
-                ci_cell(res.agresti_coull_ci.0, res.agresti_coull_ci.1),
-                num_cell(res.agresti_coull_ci.0),
-                num_cell(res.agresti_coull_ci.1),
-            ],
-        ],
-    ));
+    let ci_row = |ci: (f64, f64)| [num_cell(res.proportion), ci_cell(ci.0, ci.1), num_cell(ci.0), num_cell(ci.1)];
+    out.tabs.push(
+        TabBuilder::new("exact-binomial-cis", "Binomial proportion confidence intervals", ResultTabKind::ParametersAndConfidenceIntervals)
+            .headers([String::from("Observed p"), format!("{}% CI", confidence.percent()), String::from("Lower bound"), String::from("Upper bound")])
+            .row("Clopper-Pearson (exact)", ci_row(res.clopper_pearson_ci))
+            .row("Wilson score", ci_row(res.wilson_ci))
+            .row("Agresti-Coull", ci_row(res.agresti_coull_ci))
+            .build(),
+    );
 
     let np0 = (n as f64) * p0;
     let nq0 = (n as f64) * (1.0 - p0);
     let min_expected = np0.min(nq0);
-    out.tabs.push(build_tab(
-        "exact-binomial-diagnostics",
-        "Binomial model diagnostics",
-        ResultTabKind::Diagnostics,
-        vec![String::from("Value")],
-        vec![
-            String::from("Expected successes under H0 (n * p0)"),
-            String::from("Expected failures under H0 (n * (1 - p0))"),
-            String::from("Minimum expected cell count min(n*p0, n*(1-p0))"),
-        ],
-        vec![vec![num_cell(np0)], vec![num_cell(nq0)], vec![num_cell(min_expected)]],
-    ));
+    out.tabs.push(
+        KvTabBuilder::new("exact-binomial-diagnostics", "Binomial model diagnostics", ResultTabKind::Diagnostics, "Value")
+            .num("Expected successes under H0 (n * p0)", np0)
+            .num("Expected failures under H0 (n * (1 - p0))", nq0)
+            .num("Minimum expected cell count min(n*p0, n*(1-p0))", min_expected)
+            .build(),
+    );
 
     out.checklist.push(checklist_item(
         "Exact discrete binomial enumeration",
@@ -3134,8 +3066,9 @@ fn run_parts_of_whole_gof(
     let mut active_categories = 0_usize;
     let mut min_expected = f64::INFINITY;
     let mut lt5_count = 0_usize;
-    let mut cat_labels = Vec::with_capacity(k);
-    let mut cat_rows = Vec::with_capacity(k);
+    let mut cat_tab =
+        TabBuilder::new("parts-gof-categories", "Category observed vs expected proportions", ResultTabKind::ParametersAndConfidenceIntervals)
+            .headers(["Observed", "Observed proportion", "Expected proportion", "Expected count", "Pearson residual"]);
 
     for (idx, (slice, &p_exp)) in slices.iter().zip(proportions.iter()).enumerate() {
         let obs = slice.value;
@@ -3159,8 +3092,7 @@ fn run_parts_of_whole_gof(
             0.0
         };
         let label = if slice.label.trim().is_empty() { format!("Category {}", idx + 1) } else { slice.label.clone() };
-        cat_labels.push(label);
-        cat_rows.push(vec![num_cell(obs), num_cell(obs / total), num_cell(p_exp), num_cell(exp), num_cell(pearson_resid)]);
+        cat_tab.push_row(label, [num_cell(obs), num_cell(obs / total), num_cell(p_exp), num_cell(exp), num_cell(pearson_resid)]);
     }
 
     if active_categories < 2 {
@@ -3184,31 +3116,19 @@ fn run_parts_of_whole_gof(
         (false, true) => "Chi-square goodness of fit (custom expected proportions)",
         (false, false) => "Chi-square goodness of fit (uniform expected)",
     };
-    let headers = vec![String::from("Statistic"), String::from("df"), String::from("P value")];
     let alpha = confidence.alpha();
-    let chi2_row = vec![num_cell(chi2), num_cell(df), p_cell_at_alpha(p_val, p_fmt, alpha)];
-    let g2_row = vec![num_cell(g2), num_cell(df), p_cell_at_alpha(g2_p, p_fmt, alpha)];
-    let (row_labels, rows) = if is_g2 {
-        (vec![String::from("Likelihood-ratio G2"), String::from("Pearson chi-square")], vec![g2_row, chi2_row])
-    } else {
-        (vec![String::from("Pearson chi-square"), String::from("Likelihood-ratio G2")], vec![chi2_row, g2_row])
-    };
-    out.tabs.push(build_tab("parts-gof", title, ResultTabKind::MainSummary, headers, row_labels, rows));
-
-    out.tabs.push(build_tab(
-        "parts-gof-categories",
-        "Category observed vs expected proportions",
-        ResultTabKind::ParametersAndConfidenceIntervals,
-        vec![
-            String::from("Observed"),
-            String::from("Observed proportion"),
-            String::from("Expected proportion"),
-            String::from("Expected count"),
-            String::from("Pearson residual"),
-        ],
-        cat_labels,
-        cat_rows,
-    ));
+    let chi2_row = [num_cell(chi2), num_cell(df), p_cell_at_alpha(p_val, p_fmt, alpha)];
+    let g2_row = [num_cell(g2), num_cell(df), p_cell_at_alpha(g2_p, p_fmt, alpha)];
+    let gof_tab = TabBuilder::new("parts-gof", title, ResultTabKind::MainSummary).headers(["Statistic", "df", "P value"]);
+    out.tabs.push(
+        if is_g2 {
+            gof_tab.row("Likelihood-ratio G2", g2_row).row("Pearson chi-square", chi2_row)
+        } else {
+            gof_tab.row("Pearson chi-square", chi2_row).row("Likelihood-ratio G2", g2_row)
+        }
+        .build(),
+    );
+    out.tabs.push(cat_tab.build());
 
     let expected_ok = min_expected >= 5.0 || (active_categories > 2 && (lt5_count as f64) / (active_categories as f64) <= 0.2 && min_expected >= 1.0);
     out.checklist.push(checklist_item(
