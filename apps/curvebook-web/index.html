@@ -256,8 +256,37 @@
         ? "tab-" + window.crypto.randomUUID()
         : "tab-" + String(Date.now()) + "-" + String(Math.floor(Math.random() * 1e6));
 
+      const SESSION_DOC_ID_KEY = "curvebook.v1.session_doc_id";
+      function loadOrCreateTabDocId() {
+        const fallback = "untitled-" + tabId;
+        try {
+          if (window.sessionStorage) {
+            const existing = window.sessionStorage.getItem(SESSION_DOC_ID_KEY);
+            if (existing && existing.trim().length > 0) {
+              return existing.trim();
+            }
+            window.sessionStorage.setItem(SESSION_DOC_ID_KEY, fallback);
+          }
+        } catch (_err) {
+          // Ignore sessionStorage restrictions.
+        }
+        return fallback;
+      }
+      function persistTabDocId(docId) {
+        if (!docId || typeof docId !== "string") {
+          return;
+        }
+        try {
+          if (window.sessionStorage) {
+            window.sessionStorage.setItem(SESSION_DOC_ID_KEY, docId);
+          }
+        } catch (_err) {
+          // Ignore sessionStorage restrictions.
+        }
+      }
+
       let activeDirectoryHandle = null;
-      let activeLockDocId = "default";
+      let activeLockDocId = loadOrCreateTabDocId();
       let lockChannel = null;
       let releaseCurrentWebLock = null;
       let pendingLockAbort = null;
@@ -463,21 +492,31 @@
       function emitEvent(eventObj) {
         if (typeof dispatchFn !== "function") {
           pendingEvents.push(eventObj);
-          return;
+          return null;
         }
         try {
           const reply = dispatchFn(JSON.stringify(eventObj));
           if (reply) {
             const cmds = typeof reply === "string" ? JSON.parse(reply) : reply;
             if (Array.isArray(cmds)) {
+              const switchesDoc = cmds.some((c) => c && c.kind === "set_document_lock" && c.doc_id && c.doc_id !== activeLockDocId);
+              if (switchesDoc) {
+                if (autosaveTimerId !== null) {
+                  clearTimeout(autosaveTimerId);
+                  autosaveTimerId = null;
+                }
+                hasUnflushedAutosave = false;
+              }
               for (const cmd of cmds) {
                 void applyBridgeCommand(cmd);
               }
+              return cmds;
             }
           }
         } catch (err) {
           console.error("CurveBook bridge dispatch error:", err);
         }
+        return null;
       }
 
       function drawClippedTextOp(ctx, op) {
@@ -896,6 +935,17 @@
           });
           return;
         }
+        if (activeDirectoryHandle.name && activeDirectoryHandle.name !== rootName) {
+          emitEvent({
+            kind: "confirm_directory_sync",
+            root_name: rootName,
+            written_paths: [],
+            removed_paths: [],
+            succeeded: false,
+            error: "active directory handle `" + activeDirectoryHandle.name + "` does not match `" + rootName + "`"
+          });
+          return;
+        }
         const writtenPaths = [];
         const removedPaths = [];
         try {
@@ -997,7 +1047,8 @@
           action.startsWith("sync_directory.") ||
           action.startsWith("viewport.") ||
           action.startsWith("view.") ||
-          action.startsWith("clipboard.")
+          action.startsWith("clipboard.") ||
+          (!documentDirty && (action === "open_file" || action === "import_directory" || action === "import_dropped_files" || action === "project.new" || action === "file.new"))
         ) {
           return;
         }
@@ -1094,6 +1145,15 @@
           case "trigger_file_picker":
             await applyTriggerFilePickerCommand(cmd);
             break;
+          case "clear_directory_handle":
+            activeDirectoryHandle = null;
+            break;
+          case "set_document_lock":
+            if (cmd.doc_id) {
+              persistTabDocId(cmd.doc_id);
+              coordinateDocumentLock(cmd.doc_id);
+            }
+            break;
           case "notify_status":
             showNotice(cmd.level || "info", cmd.message || cmd.code || "");
             break;
@@ -1111,9 +1171,12 @@
         const width = Math.max(1, rect.width || window.innerWidth || 1280);
         const height = Math.max(1, rect.height || window.innerHeight || 800);
         const maxTex = (glState && glState.maxTextureSize) ? glState.maxTextureSize : 8192;
+        // Reserve >= 50% of MAX_FRAME_RGBA_BYTES (64 MiB) + popup overlay so modals never overflow budget on HiDPI screens.
+        const maxPixels = 8000000;
         const maxDprW = maxTex / width;
         const maxDprH = maxTex / height;
-        const dpr = Math.max(0.5, Math.min(rawDpr, maxDprW, maxDprH));
+        const maxDprPixels = Math.sqrt(maxPixels / (width * height));
+        const dpr = Math.max(0.5, Math.min(rawDpr, maxDprW, maxDprH, maxDprPixels));
         const physW = Math.max(1, Math.min(maxTex, Math.round(width * dpr)));
         const physH = Math.max(1, Math.min(maxTex, Math.round(height * dpr)));
         if (canvas.width !== physW) canvas.width = physW;
@@ -1340,6 +1403,7 @@
           if (files.length === 1) {
             const file = files[0];
             const bytes = new Uint8Array(await file.arrayBuffer());
+            activeDirectoryHandle = null;
             emitEvent({ kind: "open_file_bytes", file_name: file.name, bytes_base64: bytesToBase64(bytes) });
           } else {
             const batch = [];
@@ -1348,6 +1412,7 @@
               const bytes = new Uint8Array(await file.arrayBuffer());
               batch.push({ path: file.name, bytes_base64: bytesToBase64(bytes) });
             }
+            activeDirectoryHandle = null;
             emitEvent({ kind: "import_dropped_files", files: batch });
           }
           fileInputEl.value = "";
@@ -1370,6 +1435,7 @@
             const bytes = new Uint8Array(await file.arrayBuffer());
             entries.push({ path: rel, bytes_base64: bytesToBase64(bytes) });
           }
+          activeDirectoryHandle = null;
           emitEvent({ kind: "import_directory_entries", root_name: rootName, entries });
           dirInputEl.value = "";
         });
@@ -1408,6 +1474,7 @@
           });
           const file = await handle.getFile();
           const bytes = new Uint8Array(await file.arrayBuffer());
+          activeDirectoryHandle = null;
           emitEvent({ kind: "open_file_bytes", file_name: file.name, bytes_base64: bytesToBase64(bytes) });
           return true;
         } catch (err) {
@@ -1438,10 +1505,16 @@
         }
         try {
           const dirHandle = await window.showDirectoryPicker({ mode: "readwrite" });
-          activeDirectoryHandle = dirHandle;
           const entries = [];
           await readDirectoryHandleEntries(dirHandle, "", entries);
-          emitEvent({ kind: "import_directory_entries", root_name: dirHandle.name, entries });
+          const cmds = emitEvent({ kind: "import_directory_entries", root_name: dirHandle.name, entries });
+          if (
+            Array.isArray(cmds) &&
+            cmds.some((c) => c && c.kind === "set_document_lock") &&
+            !cmds.some((c) => c && c.kind === "notify_status" && c.level === "error")
+          ) {
+            activeDirectoryHandle = dirHandle;
+          }
           return true;
         } catch (err) {
           if (err && err.name === "AbortError") {
@@ -1533,6 +1606,7 @@
           }
         }
         if (collected.length > 0) {
+          activeDirectoryHandle = null;
           emitEvent({ kind: "import_dropped_files", files: collected });
         }
       });
@@ -1621,6 +1695,9 @@
         if (lockChannel) {
           lockChannel.postMessage({ type: "holder", docId: activeLockDocId, tabId });
         }
+        if (documentDirty && autosaveTimerId === null) {
+          scheduleAutosave("lock.acquired");
+        }
         return new Promise((resolve) => {
           releaseCurrentWebLock = () => {
             holdsCurrentWebLock = false;
@@ -1630,8 +1707,12 @@
       }
 
       function coordinateDocumentLock(docId) {
-        const nextDocId = docId || "default";
+        const nextDocId = (docId && String(docId).trim()) ? String(docId).trim() : loadOrCreateTabDocId();
         const prevDocId = activeLockDocId;
+        persistTabDocId(nextDocId);
+        if (nextDocId === prevDocId && holdsCurrentWebLock) {
+          return;
+        }
         const wasHolder = holdsCurrentWebLock;
         lockGeneration += 1;
         const reqGen = lockGeneration;
@@ -1774,6 +1855,7 @@
 
       window.CurveBookHost = {
         tabId,
+        initialDocId: activeLockDocId,
         connectBridge(fn) {
           dispatchFn = fn;
           const stored = collectLocalStorageSnapshot();

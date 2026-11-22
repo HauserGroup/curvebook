@@ -1450,15 +1450,98 @@ pub enum WebCommandRoute {
     NoticeOnly { level: WebNoticeLevel, code: String, message: String },
 }
 
+/// Explicit allowlist of front-end UI commands that do not mutate the project document.
+pub(crate) fn is_read_only_ui_command(command_id: &str) -> bool {
+    let base = command_id.split(':').next().unwrap_or(command_id);
+    matches!(
+        base,
+        "app.about"
+            | "app.feedback"
+            | "ui.previewFilter.set"
+            | "ui.rulers.toggle"
+            | "ui.theme.set"
+            | "ui.locale.set"
+            | "ui.palette.open"
+            | "ui.about.open"
+            | "ui.sheet.select"
+            | "ui.split.set"
+            | "ui.grid.selectRange"
+            | "ui.clipboard.copy"
+            | "ui.export.figure"
+            | "ui.print.open"
+            | "file.print"
+            | "ui.navigator.toggle"
+            | "ui.inspector.toggle"
+            | "ui.family.toggle"
+            | "ui.zoom.fitSheet"
+            | "ui.split.toggle"
+            | "ui.gallery.toggle"
+            | "ui.pane.cycle"
+            | "ui.shortcut.set"
+            | "ui.shortcut.reset"
+            | "ui.closeWorkspace.prompt"
+            | "ui.analyze.open"
+            | "ui.powerWizard.open"
+            | "ui.formatPoints.open"
+            | "ui.changeGraphType.open"
+            | "ui.clonePipeline.open"
+            | "ui.graph.axes.open"
+            | "ui.graph.format.open"
+            | "ui.graph.pairwise.open"
+            | "ui.graph.insertModelEquation"
+            | "ui.graph.bubblePlot.open"
+            | "ui.applyStyleFrom.open"
+            | "ui.layout.composer.open"
+            | "ui.layout.equalizeScaling.open"
+            | "ui.graph.create.open"
+            | "ui.view.rowTitles.toggle"
+            | "ui.gridOverlay.toggle"
+            | "ui.embeddedTable.format.open"
+            | "ui.image.format.open"
+            | "ui.export.figure.open"
+            | "ui.import.reshape.open"
+            | "ui.result.copyMethodsReport"
+            | "ui.result.applyRemediation"
+            | "ui.result.inspectDiagnostics"
+            | "ui.canvas.preflight"
+            | "ui.brush.point"
+            | "ui.table.convertArchetype.open"
+            | "ui.table.randomizeGroups"
+            | "ui.table.randomSampleRows"
+            | "ui.table.simulateDistributions"
+            | "ui.table.openFormulaBar"
+    )
+}
+
+/// Explicit allowlist of read-only control-protocol inspection and vector/preview methods.
+pub(crate) fn is_read_only_control_method(command_id: &str) -> bool {
+    matches!(
+        command_id,
+        "ping" | "command.list" | "doc.inspect" | "doc.export" | "render.svg" | "render.pdf" | "render.preview" | "ui.state" | "state.snapshot"
+    )
+}
+
+pub(crate) fn has_non_null_path_param(params: &Value) -> bool {
+    params.get("path").or_else(|| params.get("file_path")).or_else(|| params.get("filePath")).is_some_and(|v| !v.is_null())
+}
+
 impl WebCommandRoute {
     /// Whether this route only reads/views state or opens a non-mutating picker/export.
     #[must_use]
     pub fn is_read_only_hint(&self) -> bool {
         match self {
-            Self::OpenFilePicker { .. } | Self::OpenEditAnalysisParameters(_) => false,
-            Self::ExportFormat { .. } | Self::PrintCurrentSheet | Self::NoticeOnly { .. } => true,
-            Self::UiCommand { command_id, .. } => !matches!(command_id.as_str(), "ui.grid.excludeWithReason" | "ui.result.appendClusterColumn"),
-            Self::EngineCommand { command_id, .. } => cmd::registry().get(command_id).is_some_and(|spec| spec.effects.read_only_hint()),
+            Self::OpenEditAnalysisParameters(_) => false,
+            Self::OpenFilePicker { .. } | Self::ExportFormat { .. } | Self::PrintCurrentSheet | Self::NoticeOnly { .. } => true,
+            Self::UiCommand { command_id, .. } => is_read_only_ui_command(command_id),
+            Self::EngineCommand { command_id, params } => {
+                if let Some(spec) = cmd::registry().get(command_id) {
+                    spec.effects.read_only_hint()
+                        || (matches!(command_id.as_str(), "analysis.exportJson" | "analysis.exportCsv" | "result.generateReport")
+                            && !has_non_null_path_param(params))
+                } else {
+                    is_read_only_control_method(command_id)
+                }
+            }
         }
     }
 }

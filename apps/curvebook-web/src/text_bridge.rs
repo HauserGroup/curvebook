@@ -26,6 +26,9 @@ pub const DEFAULT_TEXT_CACHE_CAPACITY: usize = 4096;
 /// Baseline CSS pixel density (`1 CSS px = 1/96 in`).
 pub const CSS_REFERENCE_DPI: u16 = 96;
 
+/// Maximum combined RGBA byte budget across a layered frame and its overlay bands (`64 MiB`).
+pub const MAX_FRAME_RGBA_BYTES: usize = 64 * 1024 * 1024;
+
 /// Font family classification matching `curvebook-text` shaping categories (`#248` §2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum FontFamilyKind {
@@ -784,20 +787,16 @@ impl LayoutRectPx {
         json!({ "x": self.x, "y": self.y, "width": self.width, "height": self.height })
     }
 
-    /// Decode a [`LayoutRectPx`] from JSON.
+    /// Decode a [`LayoutRectPx`] from JSON with checked `i32`/`u32` bounds.
     ///
     /// # Errors
-    /// Returns [`WebAdapterError::Serialization`] when missing integer fields.
+    /// Returns [`WebAdapterError::Serialization`] when integer fields are missing, invalid, or out of range.
     pub fn from_json_value(value: &Value) -> Result<Self, WebAdapterError> {
         let obj = value.as_object().ok_or_else(|| WebAdapterError::Serialization(String::from("rect_px must be an object")))?;
-        #[allow(clippy::cast_possible_truncation)]
-        let x = obj.get("x").and_then(Value::as_i64).unwrap_or(0) as i32;
-        #[allow(clippy::cast_possible_truncation)]
-        let y = obj.get("y").and_then(Value::as_i64).unwrap_or(0) as i32;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let width = obj.get("width").and_then(Value::as_u64).unwrap_or(0) as u32;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let height = obj.get("height").and_then(Value::as_u64).unwrap_or(0) as u32;
+        let x = parse_required_i32_field(obj, "x")?;
+        let y = parse_required_i32_field(obj, "y")?;
+        let width = parse_required_u32_field(obj, "width")?;
+        let height = parse_required_u32_field(obj, "height")?;
         Ok(Self { x, y, width, height })
     }
 
@@ -986,8 +985,7 @@ impl WebTextDrawOp {
         let obj = value.as_object().ok_or_else(|| WebAdapterError::Serialization(String::from("text_op must be an object")))?;
         let z_layer = obj.get("z_layer").and_then(Value::as_str).and_then(ZLayer::from_name).unwrap_or(ZLayer::Workspace);
         let z_band = obj.get("z_band").and_then(Value::as_str).and_then(ZLayerBand::from_name).unwrap_or_else(|| z_layer.band());
-        #[allow(clippy::cast_possible_truncation)]
-        let paint_order = obj.get("paint_order").and_then(Value::as_u64).unwrap_or(0) as u32;
+        let paint_order = parse_optional_u32_field(obj, "paint_order", 0)?;
         let clip_px = obj.get("clip_px").filter(|v| !v.is_null()).map(LayoutRectPx::from_json_value).transpose()?;
         let x_px = obj.get("x_px").and_then(Value::as_f64).unwrap_or(0.0);
         let y_px = obj.get("y_px").and_then(Value::as_f64).unwrap_or(0.0);
@@ -1067,10 +1065,24 @@ impl WebRgbaLayer {
         let opaque = obj.get("opaque").and_then(Value::as_bool).unwrap_or(false);
         let rgba_bytes = if uses_base_frame {
             Vec::new()
-        } else if let Some(b64) = obj.get("rgba_base64").and_then(Value::as_str) {
-            decode_base64_str(b64)?
         } else {
-            Vec::new()
+            if rect_px.width > 0 && rect_px.height > 0 {
+                let expected = checked_rgba_byte_len(rect_px.width, rect_px.height)?;
+                if expected > MAX_FRAME_RGBA_BYTES {
+                    return Err(WebAdapterError::Validation(format!(
+                        "rgba_layer buffer size {expected} exceeds maximum {MAX_FRAME_RGBA_BYTES} bytes"
+                    )));
+                }
+            }
+            if let Some(b64) = obj.get("rgba_base64").and_then(Value::as_str) {
+                let max_b64_bytes = (MAX_FRAME_RGBA_BYTES / 3).saturating_add(2).saturating_mul(4);
+                if b64.len() > max_b64_bytes {
+                    return Err(WebAdapterError::Validation(format!("rgba_layer base64 length {} exceeds bounded frame budget", b64.len())));
+                }
+                decode_base64_str(b64)?
+            } else {
+                Vec::new()
+            }
         };
         Ok(Self { z_band, rect_px, uses_base_frame, opaque, rgba_bytes })
     }
@@ -1102,14 +1114,27 @@ pub struct WebLayeredFrame {
 pub struct WebTextBridge;
 
 impl WebTextBridge {
-    /// Split non-text RGBA background/overlay primitives and `text_ops` into sorted [`ZLayerBand`] layers.
-    #[must_use]
-    pub fn compose_layered_frame(base_frame: RasterImage, rect_primitives: &[WebRectPrimitive], mut text_ops: Vec<WebTextDrawOp>) -> WebLayeredFrame {
+    /// Split non-text RGBA background/overlay primitives and `text_ops` into sorted [`ZLayerBand`] layers,
+    /// returning an error if combined RGBA buffers would exceed [`MAX_FRAME_RGBA_BYTES`] or fail reservation.
+    ///
+    /// # Errors
+    /// Returns [`WebAdapterError::Validation`] if frame dimensions or combined buffer bytes exceed the cap.
+    pub fn try_compose_layered_frame(
+        base_frame: RasterImage,
+        rect_primitives: &[WebRectPrimitive],
+        mut text_ops: Vec<WebTextDrawOp>,
+    ) -> Result<WebLayeredFrame, WebAdapterError> {
         let width_px = base_frame.width_px;
         let height_px = base_frame.height_px;
-        let mut base_img = base_frame;
-        let viewport_rect = LayoutRectPx::new(0, 0, width_px, height_px);
+        let base_expected = checked_rgba_byte_len(width_px, height_px)?;
+        if base_frame.rgba.len() != base_expected {
+            return Err(WebAdapterError::Validation(format!("base_frame rgba len {} != expected {base_expected}", base_frame.rgba.len())));
+        }
+        if base_expected > MAX_FRAME_RGBA_BYTES {
+            return Err(WebAdapterError::Validation(format!("frame base buffer {base_expected} bytes exceeds {MAX_FRAME_RGBA_BYTES}-byte cap")));
+        }
 
+        let viewport_rect = LayoutRectPx::new(0, 0, width_px, height_px);
         let mut band_rects: [Vec<WebRectPrimitive>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
         for prim in rect_primitives {
             let idx = usize::from(prim.z_layer.band() as u8);
@@ -1118,13 +1143,27 @@ impl WebTextBridge {
             }
         }
 
-        // Paint Workspace-band chrome backgrounds directly onto the base RGBA buffer so no
-        // redundant full-viewport buffer is duplicated over the bridge.
+        // Preflight total byte budget across all non-workspace overlay bands BEFORE allocating any buffer.
+        let mut projected_total = base_expected;
+        let mut planned_bands: Vec<(ZLayerBand, LayoutRectPx, usize)> = Vec::with_capacity(3);
+        for band in [ZLayerBand::PopupDropdown, ZLayerBand::ModalOverlay, ZLayerBand::TopOverlay] {
+            let prims = &band_rects[band as usize];
+            if let Some(bounds) = band_bounds_for_primitives(viewport_rect, prims) {
+                let band_bytes = checked_rgba_byte_len(bounds.width, bounds.height)?;
+                projected_total = projected_total
+                    .checked_add(band_bytes)
+                    .filter(|&sum| sum <= MAX_FRAME_RGBA_BYTES)
+                    .ok_or_else(|| WebAdapterError::Validation(format!("layered frame RGBA allocation exceeds {MAX_FRAME_RGBA_BYTES}-byte cap")))?;
+                planned_bands.push((band, bounds, band_bytes));
+            }
+        }
+
+        let mut base_img = base_frame;
         for prim in &band_rects[ZLayerBand::Workspace as usize] {
             paint_rect_primitive(&mut base_img, viewport_rect, prim);
         }
 
-        let mut rgba_layers = Vec::with_capacity(4);
+        let mut rgba_layers = Vec::with_capacity(1 + planned_bands.len());
         rgba_layers.push(WebRgbaLayer {
             z_band: ZLayerBand::Workspace,
             rect_px: viewport_rect,
@@ -1133,22 +1172,83 @@ impl WebTextBridge {
             rgba_bytes: Vec::new(),
         });
 
-        for band in [ZLayerBand::PopupDropdown, ZLayerBand::ModalOverlay, ZLayerBand::TopOverlay] {
+        for (band, bounds, band_bytes) in planned_bands {
             let prims = &band_rects[band as usize];
-            if let Some(layer) = rasterize_band_layer(band, viewport_rect, prims) {
-                rgba_layers.push(layer);
-            }
+            rgba_layers.push(try_rasterize_band_layer(band, bounds, band_bytes, prims)?);
         }
 
-        text_ops.sort_by(|a, b| a.z_layer.cmp(&b.z_layer).then_with(|| a.paint_order.cmp(&b.paint_order)));
-        for op in &mut text_ops {
-            op.z_band = op.z_layer.band();
-            if op.font_css.is_empty() {
-                op.font_css = canvas_font_css(&op.style, CSS_REFERENCE_DPI);
-            }
-        }
+        normalize_text_ops(&mut text_ops);
+        Ok(WebLayeredFrame { width_px, height_px, base_rgba_bytes: base_img.rgba, rgba_layers, text_ops })
+    }
 
-        WebLayeredFrame { width_px, height_px, base_rgba_bytes: base_img.rgba, rgba_layers, text_ops }
+    /// Split non-text RGBA background/overlay primitives and `text_ops` into sorted [`ZLayerBand`] layers
+    /// while bounding allocations within [`MAX_FRAME_RGBA_BYTES`].
+    #[must_use]
+    pub fn compose_layered_frame(base_frame: RasterImage, rect_primitives: &[WebRectPrimitive], text_ops: Vec<WebTextDrawOp>) -> WebLayeredFrame {
+        if let Ok(frame) = Self::try_compose_layered_frame(base_frame.clone(), rect_primitives, text_ops.clone()) {
+            return frame;
+        }
+        // Bounded fallback if caller passed an oversized frame or overlay primitives: never allocate > cap.
+        let mut safe_text = text_ops;
+        normalize_text_ops(&mut safe_text);
+        let safe_base = try_solid_raster_image(1, 1, base_frame.dpi.max(72), [24, 28, 36, 255]).unwrap_or(RasterImage {
+            width_px: 1,
+            height_px: 1,
+            dpi: CSS_REFERENCE_DPI,
+            rgba: vec![24, 28, 36, 255],
+        });
+        WebLayeredFrame {
+            width_px: 1,
+            height_px: 1,
+            base_rgba_bytes: safe_base.rgba,
+            rgba_layers: vec![WebRgbaLayer {
+                z_band: ZLayerBand::Workspace,
+                rect_px: LayoutRectPx::new(0, 0, 1, 1),
+                uses_base_frame: true,
+                opaque: true,
+                rgba_bytes: Vec::new(),
+            }],
+            text_ops: safe_text,
+        }
+    }
+
+    /// Render the minimal strict-CSP placeholder frame until full browser canvas rollout (`R11.11`),
+    /// returning an error if dimensions exceed [`MAX_FRAME_RGBA_BYTES`].
+    ///
+    /// # Errors
+    /// Returns [`WebAdapterError::Validation`] when frame buffers exceed [`MAX_FRAME_RGBA_BYTES`].
+    pub fn try_compose_placeholder_frame(
+        width_px: u32,
+        height_px: u32,
+        dpi: u16,
+        surface_bg: [u8; 4],
+        status_label: &str,
+        modal_active: bool,
+    ) -> Result<WebLayeredFrame, WebAdapterError> {
+        Self::try_compose_placeholder_frame_with_popup(width_px, height_px, dpi, surface_bg, status_label, false, modal_active)
+    }
+
+    /// Render the minimal strict-CSP placeholder frame with optional popup-dropdown and modal layers,
+    /// enforcing [`MAX_FRAME_RGBA_BYTES`] before any pixel allocation.
+    ///
+    /// # Errors
+    /// Returns [`WebAdapterError::Validation`] when projected RGBA buffers exceed [`MAX_FRAME_RGBA_BYTES`]
+    /// or allocation reservation fails.
+    pub fn try_compose_placeholder_frame_with_popup(
+        width_px: u32,
+        height_px: u32,
+        dpi: u16,
+        surface_bg: [u8; 4],
+        status_label: &str,
+        popup_open: bool,
+        modal_active: bool,
+    ) -> Result<WebLayeredFrame, WebAdapterError> {
+        let w = width_px.max(1);
+        let h = height_px.max(1);
+        let _total = project_placeholder_frame_bytes(w, h, popup_open, modal_active)?;
+        let base_img = try_solid_raster_image(w, h, dpi.max(72), [surface_bg[0], surface_bg[1], surface_bg[2], 255])?;
+        let (rect_primitives, text_ops) = build_placeholder_primitives(w, h, dpi, surface_bg, status_label, popup_open, modal_active);
+        Self::try_compose_layered_frame(base_img, &rect_primitives, text_ops)
     }
 
     /// Render the minimal strict-CSP placeholder frame until full browser canvas rollout (`R11.11`).
@@ -1164,7 +1264,8 @@ impl WebTextBridge {
         Self::compose_placeholder_frame_with_popup(width_px, height_px, dpi, surface_bg, status_label, false, modal_active)
     }
 
-    /// Render the minimal strict-CSP placeholder frame with optional popup-dropdown and modal layers.
+    /// Render the minimal strict-CSP placeholder frame with optional popup-dropdown and modal layers,
+    /// clamping oversized dimensions into [`MAX_FRAME_RGBA_BYTES`] so direct callers never abort on OOM.
     #[must_use]
     pub fn compose_placeholder_frame_with_popup(
         width_px: u32,
@@ -1175,95 +1276,37 @@ impl WebTextBridge {
         popup_open: bool,
         modal_active: bool,
     ) -> WebLayeredFrame {
-        let w = width_px.max(1);
-        let h = height_px.max(1);
-        let base_img = solid_raster_image(w, h, dpi.max(72), [surface_bg[0], surface_bg[1], surface_bg[2], 255]);
-        let viewport_rect = LayoutRectPx::new(0, 0, w, h);
-        let header_h = h.min(36);
-        let mut rect_primitives = vec![WebRectPrimitive {
-            z_layer: ZLayer::Workspace,
-            clip_px: Some(viewport_rect),
-            rect_px: LayoutRectPx::new(0, 0, w, header_h),
-            fill: Some([surface_bg[0].saturating_sub(10), surface_bg[1].saturating_sub(10), surface_bg[2].saturating_sub(8), 255]),
-            stroke: None,
-            stroke_width_px: 0,
-        }];
-        if popup_open {
-            rect_primitives.push(WebRectPrimitive {
-                z_layer: ZLayer::DropdownMenu,
-                clip_px: Some(viewport_rect),
-                rect_px: LayoutRectPx::new(8, 28, w.saturating_sub(16).min(220), h.saturating_sub(32).min(240)),
-                fill: Some([30, 41, 59, 240]),
-                stroke: Some([99, 102, 241, 255]),
-                stroke_width_px: 1,
-            });
+        let (bw, bh) = bound_placeholder_dimensions(width_px.max(1), height_px.max(1), popup_open, modal_active);
+        if let Ok(frame) = Self::try_compose_placeholder_frame_with_popup(bw, bh, dpi, surface_bg, status_label, popup_open, modal_active) {
+            return frame;
         }
-        if modal_active {
-            rect_primitives.push(WebRectPrimitive {
-                z_layer: ZLayer::ModalBackdrop,
-                clip_px: Some(viewport_rect),
-                rect_px: viewport_rect,
-                fill: Some([15, 23, 42, 110]),
-                stroke: None,
-                stroke_width_px: 0,
-            });
-        }
-        let style = UiTextStyle::ui_sans(13.0);
-        let font_css = canvas_font_css(&style, dpi.max(72));
-        let direction = if curvebook_text::contains_rtl_script(status_label) { WebTextDirection::Rtl } else { WebTextDirection::Ltr };
-        let mut text_ops = Vec::new();
-        if !status_label.is_empty() {
-            text_ops.push(WebTextDrawOp {
-                z_layer: if modal_active { ZLayer::ModalDialog } else { ZLayer::Workspace },
-                z_band: if modal_active { ZLayerBand::ModalOverlay } else { ZLayerBand::Workspace },
-                paint_order: 1,
-                clip_px: Some(viewport_rect),
-                x_px: 16.0,
-                y_px: 10.0,
-                baseline_y_px: 23.0,
-                max_width_px: Some(f64::from(w.saturating_sub(32))),
-                text: status_label.to_owned(),
-                style: style.clone(),
-                font_css: font_css.clone(),
-                color_rgba: [226, 232, 240, 255],
-                align: WebTextAlign::Left,
-                direction,
-                ellipsized: false,
-                node_id: Some(String::from("status.bar")),
-            });
-        }
-        if popup_open {
-            let pop_clip = LayoutRectPx::new(8, 28, w.saturating_sub(16).min(220), h.saturating_sub(32).min(240));
-            text_ops.push(WebTextDrawOp {
-                z_layer: ZLayer::DropdownMenu,
-                z_band: ZLayerBand::PopupDropdown,
-                paint_order: 2,
-                clip_px: Some(pop_clip),
-                x_px: 16.0,
-                y_px: 34.0,
-                baseline_y_px: 47.0,
-                max_width_px: Some(200.0),
-                text: String::from("Menu"),
-                style,
-                font_css,
-                color_rgba: [226, 232, 240, 255],
-                align: WebTextAlign::Left,
-                direction: WebTextDirection::Ltr,
-                ellipsized: false,
-                node_id: Some(String::from("popup.menu")),
-            });
-        }
-        Self::compose_layered_frame(base_img, &rect_primitives, text_ops)
+        Self::try_compose_placeholder_frame_with_popup(1, 1, dpi, surface_bg, status_label, false, false).unwrap_or(WebLayeredFrame {
+            width_px: 1,
+            height_px: 1,
+            base_rgba_bytes: vec![surface_bg[0], surface_bg[1], surface_bg[2], 255],
+            rgba_layers: vec![WebRgbaLayer {
+                z_band: ZLayerBand::Workspace,
+                rect_px: LayoutRectPx::new(0, 0, 1, 1),
+                uses_base_frame: true,
+                opaque: true,
+                rgba_bytes: Vec::new(),
+            }],
+            text_ops: Vec::new(),
+        })
     }
 
-    /// Validate Z-order invariants, RGBA layer byte lengths, and text clip bounds on `frame`.
+    /// Validate Z-order invariants, RGBA layer byte lengths, total frame byte budget, and text clip bounds on `frame`.
     ///
     /// # Errors
-    /// Returns [`WebAdapterError::Validation`] if any band, buffer size, or text draw op is malformed.
+    /// Returns [`WebAdapterError::Validation`] if any band, buffer size, total budget, or text draw op is malformed.
     pub fn validate_layered_frame(frame: &WebLayeredFrame) -> Result<(), WebAdapterError> {
-        let expected_base = (frame.width_px as usize).saturating_mul(frame.height_px as usize).saturating_mul(4);
+        let expected_base = checked_rgba_byte_len(frame.width_px, frame.height_px)?;
         if frame.base_rgba_bytes.len() != expected_base {
             return Err(WebAdapterError::Validation(format!("base_rgba_bytes len {} != expected {expected_base}", frame.base_rgba_bytes.len())));
+        }
+        let mut total_rgba_bytes = frame.base_rgba_bytes.len();
+        if total_rgba_bytes > MAX_FRAME_RGBA_BYTES {
+            return Err(WebAdapterError::Validation(format!("base_rgba_bytes len {total_rgba_bytes} exceeds {MAX_FRAME_RGBA_BYTES}-byte cap")));
         }
 
         let mut last_band: Option<ZLayerBand> = None;
@@ -1275,7 +1318,7 @@ impl WebTextBridge {
             }
             last_band = Some(layer.z_band);
             if !layer.uses_base_frame {
-                let expected = (layer.rect_px.width as usize).saturating_mul(layer.rect_px.height as usize).saturating_mul(4);
+                let expected = checked_rgba_byte_len(layer.rect_px.width, layer.rect_px.height)?;
                 if layer.rgba_bytes.len() != expected {
                     return Err(WebAdapterError::Validation(format!(
                         "band {:?} rgba_bytes len {} != expected {expected}",
@@ -1283,6 +1326,10 @@ impl WebTextBridge {
                         layer.rgba_bytes.len()
                     )));
                 }
+                total_rgba_bytes = total_rgba_bytes
+                    .checked_add(layer.rgba_bytes.len())
+                    .filter(|&sum| sum <= MAX_FRAME_RGBA_BYTES)
+                    .ok_or_else(|| WebAdapterError::Validation(format!("total layered RGBA bytes exceed {MAX_FRAME_RGBA_BYTES}-byte cap")))?;
             }
         }
 
@@ -1306,16 +1353,39 @@ impl WebTextBridge {
     }
 }
 
-fn solid_raster_image(width_px: u32, height_px: u32, dpi: u16, rgba: [u8; 4]) -> RasterImage {
-    let pixel_count = (width_px as usize).saturating_mul(height_px as usize);
-    let mut bytes = Vec::with_capacity(pixel_count.saturating_mul(4));
-    for _ in 0..pixel_count {
-        bytes.extend_from_slice(&rgba);
-    }
-    RasterImage { width_px, height_px, dpi, rgba: bytes }
+fn parse_required_i32_field(obj: &Map<String, Value>, key: &str) -> Result<i32, WebAdapterError> {
+    let val = obj.get(key).and_then(Value::as_i64).ok_or_else(|| WebAdapterError::Serialization(format!("rect_px missing integer `{key}`")))?;
+    i32::try_from(val).map_err(|_| WebAdapterError::Serialization(format!("rect_px `{key}` value {val} out of i32 range")))
 }
 
-fn rasterize_band_layer(band: ZLayerBand, viewport_rect: LayoutRectPx, prims: &[WebRectPrimitive]) -> Option<WebRgbaLayer> {
+fn parse_required_u32_field(obj: &Map<String, Value>, key: &str) -> Result<u32, WebAdapterError> {
+    let val =
+        obj.get(key).and_then(Value::as_u64).ok_or_else(|| WebAdapterError::Serialization(format!("rect_px missing unsigned integer `{key}`")))?;
+    u32::try_from(val).map_err(|_| WebAdapterError::Serialization(format!("rect_px `{key}` value {val} out of u32 range")))
+}
+
+fn parse_optional_u32_field(obj: &Map<String, Value>, key: &str, default: u32) -> Result<u32, WebAdapterError> {
+    match obj.get(key) {
+        None | Some(Value::Null) => Ok(default),
+        Some(raw) => {
+            let val = raw.as_u64().ok_or_else(|| WebAdapterError::Serialization(format!("`{key}` must be an unsigned integer")))?;
+            u32::try_from(val).map_err(|_| WebAdapterError::Serialization(format!("`{key}` value {val} out of u32 range")))
+        }
+    }
+}
+
+fn checked_rgba_byte_len(width_px: u32, height_px: u32) -> Result<usize, WebAdapterError> {
+    if width_px == 0 || height_px == 0 {
+        return Err(WebAdapterError::Validation(String::from("RGBA dimensions must be positive")));
+    }
+    let w = usize::try_from(width_px).map_err(|_| WebAdapterError::Validation(String::from("frame width exceeds addressable range")))?;
+    let h = usize::try_from(height_px).map_err(|_| WebAdapterError::Validation(String::from("frame height exceeds addressable range")))?;
+    let pixels =
+        w.checked_mul(h).ok_or_else(|| WebAdapterError::Validation(format!("frame dimensions {width_px}x{height_px} overflow pixel count")))?;
+    pixels.checked_mul(4).ok_or_else(|| WebAdapterError::Validation(format!("frame dimensions {width_px}x{height_px} overflow RGBA byte count")))
+}
+
+fn band_bounds_for_primitives(viewport_rect: LayoutRectPx, prims: &[WebRectPrimitive]) -> Option<LayoutRectPx> {
     if prims.is_empty() || viewport_rect.width == 0 || viewport_rect.height == 0 {
         return None;
     }
@@ -1325,17 +1395,177 @@ fn rasterize_band_layer(band: ZLayerBand, viewport_rect: LayoutRectPx, prims: &[
             bounds = bounds.union(clipped);
         }
     }
-    if bounds.width == 0 || bounds.height == 0 {
-        return None;
-    }
+    (bounds.width > 0 && bounds.height > 0).then_some(bounds)
+}
 
-    let byte_len = (bounds.width as usize).saturating_mul(bounds.height as usize).saturating_mul(4);
-    let mut img = RasterImage { width_px: bounds.width, height_px: bounds.height, dpi: CSS_REFERENCE_DPI, rgba: vec![0; byte_len] };
+fn project_placeholder_frame_bytes(w: u32, h: u32, popup_open: bool, modal_active: bool) -> Result<usize, WebAdapterError> {
+    let base_bytes = checked_rgba_byte_len(w, h)?;
+    let popup_bytes = if popup_open {
+        let pw = w.saturating_sub(16).min(220);
+        let ph = h.saturating_sub(32).min(240);
+        if pw > 0 && ph > 0 { checked_rgba_byte_len(pw, ph)? } else { 0 }
+    } else {
+        0
+    };
+    let modal_bytes = if modal_active { base_bytes } else { 0 };
+    let total = base_bytes
+        .checked_add(popup_bytes)
+        .and_then(|s| s.checked_add(modal_bytes))
+        .ok_or_else(|| WebAdapterError::Validation(format!("frame {w}x{h} overflows RGBA budget")))?;
+    if total > MAX_FRAME_RGBA_BYTES {
+        return Err(WebAdapterError::Validation(format!("frame {w}x{h} requires {total} RGBA bytes, exceeding {MAX_FRAME_RGBA_BYTES}-byte cap")));
+    }
+    Ok(total)
+}
+
+fn bound_placeholder_dimensions(w: u32, h: u32, popup_open: bool, modal_active: bool) -> (u32, u32) {
+    if project_placeholder_frame_bytes(w, h, popup_open, modal_active).is_ok() {
+        return (w, h);
+    }
+    let layer_multiplier: f64 = if modal_active { 2.0 } else { 1.0 };
+    let popup_reserve: f64 = if popup_open { 220.0 * 240.0 * 4.0 } else { 0.0 };
+    let avail_pixels = ((MAX_FRAME_RGBA_BYTES as f64 - popup_reserve).max(4096.0)) / (4.0 * layer_multiplier);
+    let cur_pixels = f64::from(w) * f64::from(h);
+    let scale = (avail_pixels / cur_pixels).sqrt().clamp(0.0, 1.0);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let mut bw = ((f64::from(w) * scale).floor() as u32).max(1);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let mut bh = ((f64::from(h) * scale).floor() as u32).max(1);
+    while project_placeholder_frame_bytes(bw, bh, popup_open, modal_active).is_err() && (bw > 1 || bh > 1) {
+        bw = (bw / 2).max(1);
+        bh = (bh / 2).max(1);
+    }
+    (bw, bh)
+}
+
+fn normalize_text_ops(text_ops: &mut [WebTextDrawOp]) {
+    text_ops.sort_by(|a, b| a.z_layer.cmp(&b.z_layer).then_with(|| a.paint_order.cmp(&b.paint_order)));
+    for op in text_ops {
+        op.z_band = op.z_layer.band();
+        if op.font_css.is_empty() {
+            op.font_css = canvas_font_css(&op.style, CSS_REFERENCE_DPI);
+        }
+    }
+}
+
+fn build_placeholder_primitives(
+    w: u32,
+    h: u32,
+    dpi: u16,
+    surface_bg: [u8; 4],
+    status_label: &str,
+    popup_open: bool,
+    modal_active: bool,
+) -> (Vec<WebRectPrimitive>, Vec<WebTextDrawOp>) {
+    let viewport_rect = LayoutRectPx::new(0, 0, w, h);
+    let header_h = h.min(36);
+    let mut rect_primitives = vec![WebRectPrimitive {
+        z_layer: ZLayer::Workspace,
+        clip_px: Some(viewport_rect),
+        rect_px: LayoutRectPx::new(0, 0, w, header_h),
+        fill: Some([surface_bg[0].saturating_sub(10), surface_bg[1].saturating_sub(10), surface_bg[2].saturating_sub(8), 255]),
+        stroke: None,
+        stroke_width_px: 0,
+    }];
+    if popup_open {
+        rect_primitives.push(WebRectPrimitive {
+            z_layer: ZLayer::DropdownMenu,
+            clip_px: Some(viewport_rect),
+            rect_px: LayoutRectPx::new(8, 28, w.saturating_sub(16).min(220), h.saturating_sub(32).min(240)),
+            fill: Some([30, 41, 59, 240]),
+            stroke: Some([99, 102, 241, 255]),
+            stroke_width_px: 1,
+        });
+    }
+    if modal_active {
+        rect_primitives.push(WebRectPrimitive {
+            z_layer: ZLayer::ModalBackdrop,
+            clip_px: Some(viewport_rect),
+            rect_px: viewport_rect,
+            fill: Some([15, 23, 42, 110]),
+            stroke: None,
+            stroke_width_px: 0,
+        });
+    }
+    let style = UiTextStyle::ui_sans(13.0);
+    let font_css = canvas_font_css(&style, dpi.max(72));
+    let direction = if curvebook_text::contains_rtl_script(status_label) { WebTextDirection::Rtl } else { WebTextDirection::Ltr };
+    let mut text_ops = Vec::new();
+    if !status_label.is_empty() {
+        text_ops.push(WebTextDrawOp {
+            z_layer: if modal_active { ZLayer::ModalDialog } else { ZLayer::Workspace },
+            z_band: if modal_active { ZLayerBand::ModalOverlay } else { ZLayerBand::Workspace },
+            paint_order: 1,
+            clip_px: Some(viewport_rect),
+            x_px: 16.0,
+            y_px: 10.0,
+            baseline_y_px: 23.0,
+            max_width_px: Some(f64::from(w.saturating_sub(32))),
+            text: status_label.to_owned(),
+            style: style.clone(),
+            font_css: font_css.clone(),
+            color_rgba: [226, 232, 240, 255],
+            align: WebTextAlign::Left,
+            direction,
+            ellipsized: false,
+            node_id: Some(String::from("status.bar")),
+        });
+    }
+    if popup_open {
+        let pop_clip = LayoutRectPx::new(8, 28, w.saturating_sub(16).min(220), h.saturating_sub(32).min(240));
+        text_ops.push(WebTextDrawOp {
+            z_layer: ZLayer::DropdownMenu,
+            z_band: ZLayerBand::PopupDropdown,
+            paint_order: 2,
+            clip_px: Some(pop_clip),
+            x_px: 16.0,
+            y_px: 34.0,
+            baseline_y_px: 47.0,
+            max_width_px: Some(200.0),
+            text: String::from("Menu"),
+            style,
+            font_css,
+            color_rgba: [226, 232, 240, 255],
+            align: WebTextAlign::Left,
+            direction: WebTextDirection::Ltr,
+            ellipsized: false,
+            node_id: Some(String::from("popup.menu")),
+        });
+    }
+    (rect_primitives, text_ops)
+}
+
+fn try_solid_raster_image(width_px: u32, height_px: u32, dpi: u16, rgba: [u8; 4]) -> Result<RasterImage, WebAdapterError> {
+    let byte_len = checked_rgba_byte_len(width_px, height_px)?;
+    if byte_len > MAX_FRAME_RGBA_BYTES {
+        return Err(WebAdapterError::Validation(format!(
+            "solid raster {width_px}x{height_px} ({byte_len} bytes) exceeds {MAX_FRAME_RGBA_BYTES}-byte cap"
+        )));
+    }
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(byte_len)
+        .map_err(|_| WebAdapterError::Validation(format!("failed reserving {byte_len} bytes for {width_px}x{height_px} RGBA buffer")))?;
+    for _ in 0..(byte_len / 4) {
+        bytes.extend_from_slice(&rgba);
+    }
+    Ok(RasterImage { width_px, height_px, dpi, rgba: bytes })
+}
+
+fn try_rasterize_band_layer(
+    band: ZLayerBand,
+    bounds: LayoutRectPx,
+    byte_len: usize,
+    prims: &[WebRectPrimitive],
+) -> Result<WebRgbaLayer, WebAdapterError> {
+    let mut rgba = Vec::new();
+    rgba.try_reserve_exact(byte_len).map_err(|_| WebAdapterError::Validation(format!("failed reserving {byte_len} bytes for band {band:?}")))?;
+    rgba.resize(byte_len, 0);
+    let mut img = RasterImage { width_px: bounds.width, height_px: bounds.height, dpi: CSS_REFERENCE_DPI, rgba };
     for prim in prims {
         paint_rect_primitive(&mut img, bounds, prim);
     }
-
-    Some(WebRgbaLayer { z_band: band, rect_px: bounds, uses_base_frame: false, opaque: false, rgba_bytes: img.rgba })
+    Ok(WebRgbaLayer { z_band: band, rect_px: bounds, uses_base_frame: false, opaque: false, rgba_bytes: img.rgba })
 }
 
 fn fill_clipped_rect_px(img: &mut RasterImage, origin: LayoutRectPx, rect: LayoutRectPx, clip: LayoutRectPx, color: [u8; 4]) {

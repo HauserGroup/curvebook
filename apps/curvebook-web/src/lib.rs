@@ -34,9 +34,10 @@ pub use host_adapters::{
     WebStorageBackend, WebStorageManager,
 };
 pub use text_bridge::{
-    BrowserCanvasTextMeasurer, DEFAULT_TEXT_CACHE_CAPACITY, DeterministicTextMeasureBackend, FontFamilyKind, LayoutRectPx, MeasuredTextMetrics,
-    PlatformCanvasMeasureBackend, ShapedGlyphRun, ShapedTextLine, TextCacheStats, UiTextStyle, WebLayeredFrame, WebRectPrimitive, WebRgbaLayer,
-    WebTextAlign, WebTextBridge, WebTextDirection, WebTextDrawOp, WebTextMeasurer, ZLayer, ZLayerBand, canvas_font_css,
+    BrowserCanvasTextMeasurer, DEFAULT_TEXT_CACHE_CAPACITY, DeterministicTextMeasureBackend, FontFamilyKind, LayoutRectPx, MAX_FRAME_RGBA_BYTES,
+    MeasuredTextMetrics, PlatformCanvasMeasureBackend, ShapedGlyphRun, ShapedTextLine, TextCacheStats, UiTextStyle, WebLayeredFrame,
+    WebRectPrimitive, WebRgbaLayer, WebTextAlign, WebTextBridge, WebTextDirection, WebTextDrawOp, WebTextMeasurer, ZLayer, ZLayerBand,
+    canvas_font_css,
 };
 
 /// Default logical viewport width used when [`WebWorkspaceHost::new`] starts.
@@ -206,7 +207,7 @@ impl WebWorkspaceHost {
             ArchiveKind::Project => "curvebook",
             ArchiveKind::Template => "cbtemplate",
         };
-        self.install_session(Session::from_document(doc), tag, Vec::new(), true);
+        self.install_session(Session::from_document(doc), tag, Vec::new(), true, false);
         Ok(self.inspect_summary())
     }
 
@@ -216,7 +217,7 @@ impl WebWorkspaceHost {
     /// Returns an error description if template decoding or instantiation fails.
     pub fn open_template_bytes(&mut self, bytes: &[u8], title_override: Option<&str>) -> Result<WorkspaceSummary, String> {
         let doc = instantiate_template_bytes(bytes, title_override).map_err(|err| err.to_string())?;
-        self.install_session(Session::from_document(doc), "cbtemplate", Vec::new(), false);
+        self.install_session(Session::from_document(doc), "cbtemplate", Vec::new(), false, false);
         Ok(self.inspect_summary())
     }
 
@@ -257,7 +258,7 @@ impl WebWorkspaceHost {
         let migrated = migrate_document_json(raw_val, from_version).map_err(|err| format!("invalid project JSON: {err}"))?;
         let doc = serde_json::from_value(migrated).map_err(|err| format!("invalid project JSON: {err}"))?;
         validate_project_document(&doc).map_err(|err| format!("invalid project document: {err}"))?;
-        self.install_session(Session::from_document(doc), "json", Vec::new(), false);
+        self.install_session(Session::from_document(doc), "json", Vec::new(), false, false);
         Ok(self.inspect_summary())
     }
 
@@ -267,6 +268,7 @@ impl WebWorkspaceHost {
     /// Returns an error description if `bytes` are not valid UTF-8 or CSV import fails.
     pub fn open_delimited_bytes(&mut self, bytes: &[u8], is_tsv: bool, title: Option<&str>, kind: Option<&str>) -> Result<WorkspaceSummary, String> {
         *self.app.session_mut() = Session::new();
+        self.app.virtual_workspace = VirtualWorkspaceFolder::default();
         self.app.sync_views();
         self.warnings.clear();
         let summary = self.import_delimited_bytes(bytes, is_tsv, title, kind)?;
@@ -352,14 +354,16 @@ impl WebWorkspaceHost {
         for (rel_path, bytes) in entries {
             folder.write_file(rel_path.as_ref(), bytes.into())?;
         }
-        self.app.virtual_workspace = folder;
 
-        if self.app.virtual_workspace.contains("document.json") {
-            return self.open_virtual_unpacked_snapshot();
+        if folder.contains("document.json") {
+            let doc = folder.open_unpacked_snapshot()?;
+            self.app.virtual_workspace = folder;
+            self.install_session(Session::from_document(doc), "curvebook.d", Vec::new(), true, true);
+            return Ok(self.inspect_summary());
         }
-        let archive_entry = self.app.virtual_workspace.list_files().into_iter().find(|name| !name.ends_with(".csv") && name != "manifest.json");
+        let archive_entry = folder.list_files().into_iter().find(|name| !name.ends_with(".csv") && name != "manifest.json");
         if let Some(entry_name) = archive_entry
-            && let Some(bytes) = self.app.virtual_workspace.read_file(&entry_name).map(<[u8]>::to_vec)
+            && let Some(bytes) = folder.read_file(&entry_name).map(<[u8]>::to_vec)
         {
             return self.open_bytes_for_name(&entry_name, &bytes);
         }
@@ -372,8 +376,19 @@ impl WebWorkspaceHost {
     /// Returns an error description if `document.json` is absent or invalid.
     pub fn open_virtual_unpacked_snapshot(&mut self) -> Result<WorkspaceSummary, String> {
         let doc = self.app.virtual_workspace.open_unpacked_snapshot()?;
-        self.install_session(Session::from_document(doc), "curvebook.d", Vec::new(), true);
+        self.install_session(Session::from_document(doc), "curvebook.d", Vec::new(), true, true);
         Ok(self.inspect_summary())
+    }
+
+    /// Reset [`Self::virtual_workspace`] to an empty default folder after switching away from a
+    /// directory-backed project (such as `project.new` or `file.new`).
+    pub fn reset_virtual_workspace(&mut self) {
+        self.app.virtual_workspace = VirtualWorkspaceFolder::default();
+    }
+
+    /// Update the active project format tag label.
+    pub fn set_format_tag(&mut self, tag: &str) {
+        self.format_tag = String::from(tag);
     }
 
     /// Persist the active project as an unpacked `.curvebook.d` snapshot (`manifest.json`,
@@ -515,6 +530,20 @@ impl WebWorkspaceHost {
         WebTextBridge::compose_placeholder_frame(w, h, base_dpi.max(72), [bg.r, bg.g, bg.b, bg.a], &label, false)
     }
 
+    /// Render the strict-CSP layered placeholder frame, returning an error if viewport dimensions
+    /// exceed [`MAX_FRAME_RGBA_BYTES`].
+    ///
+    /// # Errors
+    /// Returns [`WebAdapterError::Validation`] when frame buffers exceed the bounded RGBA budget.
+    pub fn try_render_placeholder_frame(&self, base_dpi: u16) -> Result<WebLayeredFrame, WebAdapterError> {
+        let w = self.viewport.physical_width_px().max(1);
+        let h = self.viewport.physical_height_px().max(1);
+        let bg = self.app.theme.surface_bg;
+        let summary = self.inspect_summary();
+        let label = format!("{} ({} sheets) | Web Placeholder (post-Beta R11.11)", summary.title, summary.sheet_count);
+        WebTextBridge::try_compose_placeholder_frame(w, h, base_dpi.max(72), [bg.r, bg.g, bg.b, bg.a], &label, false)
+    }
+
     /// Parse and validate TrueType/OpenType SFNT font bytes strictly in memory.
     ///
     /// # Errors
@@ -525,14 +554,17 @@ impl WebWorkspaceHost {
 
     fn apply_import_report(&mut self, report: ImportReport, tag: &str) {
         let warnings = report.warnings.into_iter().map(|w| w.message).collect();
-        self.install_session(Session::from_document(report.document), tag, warnings, false);
+        self.install_session(Session::from_document(report.document), tag, warnings, false, false);
     }
 
-    fn install_session(&mut self, mut session: Session, tag: &str, warnings: Vec<String>, mark_clean: bool) {
+    fn install_session(&mut self, mut session: Session, tag: &str, warnings: Vec<String>, mark_clean: bool, preserve_virtual_workspace: bool) {
         if mark_clean {
             session.set_file_path(None, true);
         }
         *self.app.session_mut() = session;
+        if !preserve_virtual_workspace {
+            self.app.virtual_workspace = VirtualWorkspaceFolder::default();
+        }
         self.app.sync_views();
         self.format_tag = String::from(tag);
         self.warnings = warnings;

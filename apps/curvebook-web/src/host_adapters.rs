@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use curvebook_engine::cmd;
 use curvebook_format::{CURRENT_PREFERENCES_VERSION, CsvOptions, PreferencesFile, export_datasheet_to_csv, parse_preferences_json};
@@ -22,7 +23,8 @@ use crate::chrome_bridge::{
     WebShortcutAction, commit_active_modal_dialog, contextual_command_params, resolve_web_command_route,
 };
 use crate::text_bridge::{
-    BrowserCanvasTextMeasurer, WebRgbaLayer, WebTextBridge, WebTextDrawOp, decode_rgba_layers_json, decode_text_ops_json, encode_text_ops_json,
+    BrowserCanvasTextMeasurer, MAX_FRAME_RGBA_BYTES, WebRgbaLayer, WebTextBridge, WebTextDrawOp, decode_rgba_layers_json, decode_text_ops_json,
+    encode_text_ops_json,
 };
 use crate::{WebWorkspaceHost, WorkspaceSummary};
 
@@ -970,16 +972,21 @@ impl FileSystemAccessBridge {
         self.pending_sync.as_ref().map(|p| p.root_name.as_str())
     }
 
+    /// Clear incremental directory sync tracking after switching to a non-directory or new project.
+    pub fn reset_directory_sync(&mut self) {
+        self.last_synced_root = None;
+        self.last_synced_tree.clear();
+        self.last_attempted_root = None;
+        self.pending_sync = None;
+    }
+
     /// Import a single picked or dropped file (`curvebook`, `cbtemplate`, `pzfx`, `prism`, `csv`, `tsv`).
     ///
     /// # Errors
     /// Returns [`WebAdapterError::Workspace`] if decoding fails.
     pub fn import_file_bytes(&mut self, host: &mut WebWorkspaceHost, file_name: &str, bytes: &[u8]) -> Result<WorkspaceSummary, WebAdapterError> {
         let summary = host.open_bytes_for_name(file_name, bytes).map_err(WebAdapterError::Workspace)?;
-        self.last_synced_root = None;
-        self.last_synced_tree.clear();
-        self.last_attempted_root = None;
-        self.pending_sync = None;
+        self.reset_directory_sync();
         Ok(summary)
     }
 
@@ -999,6 +1006,15 @@ impl FileSystemAccessBridge {
             return Err(WebAdapterError::Validation(String::from("directory tree must contain at least document.json")));
         }
         let normalized = normalize_directory_entries(root, entries)?;
+        self.import_normalized_directory_tree(host, root, normalized)
+    }
+
+    fn import_normalized_directory_tree(
+        &mut self,
+        host: &mut WebWorkspaceHost,
+        root: &str,
+        normalized: BTreeMap<String, Vec<u8>>,
+    ) -> Result<WorkspaceSummary, WebAdapterError> {
         let summary =
             host.load_virtual_folder_entries(root, normalized.iter().map(|(k, v)| (k.clone(), v.clone()))).map_err(WebAdapterError::Workspace)?;
         self.last_synced_root = Some(root.to_owned());
@@ -1097,7 +1113,8 @@ impl FileSystemAccessBridge {
         } else if let Some(attempted) = &self.last_attempted_root {
             attempted.clone()
         } else {
-            host.virtual_workspace().root_name.clone()
+            let vw_root = host.virtual_workspace().root_name.trim();
+            if vw_root.is_empty() { String::from("workspace.curvebook.d") } else { vw_root.to_owned() }
         };
 
         let entries = host.snapshot_virtual_entries_with_root(Some(&resolved_root)).map_err(WebAdapterError::Workspace)?;
@@ -1654,8 +1671,8 @@ impl WebClipboardPayload {
         let plain_text = optional_str_field(obj, "plain_text");
         let width_pt = require_f64_or_default(obj, "width_pt", 0.0)?;
         let height_pt = require_f64_or_default(obj, "height_pt", 0.0)?;
-        let width_px = u32::try_from(obj.get("width_px").and_then(Value::as_u64).unwrap_or(0)).unwrap_or(0);
-        let height_px = u32::try_from(obj.get("height_px").and_then(Value::as_u64).unwrap_or(0)).unwrap_or(0);
+        let width_px = parse_optional_u32_field(obj, "width_px", 0)?;
+        let height_px = parse_optional_u32_field(obj, "height_px", 0)?;
         let dpi = parse_optional_validated_dpi(obj, "dpi", 300)?;
         let flavors = obj
             .get("flavors")
@@ -2050,6 +2067,10 @@ pub enum WebBridgeCommand {
         code: String,
         message: String,
     },
+    ClearDirectoryHandle,
+    SetDocumentLock {
+        doc_id: String,
+    },
 }
 
 impl WebBridgeCommand {
@@ -2124,6 +2145,13 @@ impl WebBridgeCommand {
                 "code": code,
                 "message": message,
             }),
+            Self::ClearDirectoryHandle => json!({
+                "kind": "clear_directory_handle",
+            }),
+            Self::SetDocumentLock { doc_id } => json!({
+                "kind": "set_document_lock",
+                "doc_id": doc_id,
+            }),
         }
     }
 
@@ -2136,10 +2164,30 @@ impl WebBridgeCommand {
         let kind = require_str_field(obj, "kind")?;
         match kind {
             "render_rgba_frame" => {
-                let width_px = u32::try_from(obj.get("width_px").and_then(Value::as_u64).unwrap_or(0)).unwrap_or(0);
-                let height_px = u32::try_from(obj.get("height_px").and_then(Value::as_u64).unwrap_or(0)).unwrap_or(0);
+                let width_px = parse_required_u32_field(obj, "width_px")?;
+                let height_px = parse_required_u32_field(obj, "height_px")?;
                 let dpi = parse_optional_validated_dpi(obj, "dpi", 96)?;
+                let expected_bytes = usize::try_from(width_px)
+                    .ok()
+                    .and_then(|w| usize::try_from(height_px).ok().and_then(|h| w.checked_mul(h)?.checked_mul(4)))
+                    .filter(|&bytes| bytes <= MAX_FRAME_RGBA_BYTES)
+                    .ok_or_else(|| {
+                        WebAdapterError::Validation(format!(
+                            "render_rgba_frame dimensions {width_px}x{height_px} exceed MAX_FRAME_RGBA_BYTES ({MAX_FRAME_RGBA_BYTES})"
+                        ))
+                    })?;
+                if let Some(raw_b64) = obj.get("rgba_base64").and_then(Value::as_str)
+                    && raw_b64.len() > MAX_FRAME_RGBA_BYTES.div_ceil(3).saturating_mul(4).saturating_add(64)
+                {
+                    return Err(WebAdapterError::Validation(String::from("rgba_base64 exceeds MAX_FRAME_RGBA_BYTES")));
+                }
                 let rgba_bytes = decode_base64_field(obj, "rgba_base64", "rgba_bytes")?;
+                if !rgba_bytes.is_empty() && rgba_bytes.len() != expected_bytes {
+                    return Err(WebAdapterError::Validation(format!(
+                        "rgba_bytes length {} does not match {width_px}x{height_px}x4 ({expected_bytes})",
+                        rgba_bytes.len()
+                    )));
+                }
                 let rgba_layers = decode_rgba_layers_json(obj)?;
                 let text_ops = decode_text_ops_json(obj)?;
                 let chrome = obj.get("chrome").map(WebChromeSnapshot::from_json_value).unwrap_or_default();
@@ -2186,7 +2234,7 @@ impl WebBridgeCommand {
                     .and_then(Value::as_array)
                     .map(|arr| arr.iter().filter_map(Value::as_str).map(str::to_owned).collect())
                     .unwrap_or_default();
-                let unchanged_count = usize::try_from(obj.get("unchanged_count").and_then(Value::as_u64).unwrap_or(0)).unwrap_or(0);
+                let unchanged_count = parse_optional_usize_field(obj, "unchanged_count", 0)?;
                 Ok(Self::ApplyDirectorySync { root_name, plan: DirectorySyncPlan { writes, removals, unchanged_count } })
             }
             "persist_local_storage" => {
@@ -2228,6 +2276,11 @@ impl WebBridgeCommand {
                     code: optional_str_field(obj, "code").unwrap_or_else(|| String::from("status")),
                     message: optional_str_field(obj, "message").unwrap_or_default(),
                 })
+            }
+            "clear_directory_handle" => Ok(Self::ClearDirectoryHandle),
+            "set_document_lock" => {
+                let doc_id = require_non_empty(require_str_field(obj, "doc_id")?, "doc_id")?.to_owned();
+                Ok(Self::SetDocumentLock { doc_id })
             }
             other => Err(WebAdapterError::Serialization(format!("unknown bridge command kind `{other}`"))),
         }
@@ -2454,8 +2507,15 @@ impl WebBridgeSession {
         match event {
             WebBridgeEvent::ResizeViewport { logical_width, logical_height, scale_factor } => {
                 let metrics = ViewportMetrics::new(logical_width, logical_height, scale_factor);
+                let prev = self.host.viewport();
                 self.host.set_viewport(metrics);
-                Ok(vec![self.render_frame_command(self.render_dpi, Some(String::from("viewport.resize")), None)?])
+                match self.render_frame_command(self.render_dpi, Some(String::from("viewport.resize")), None) {
+                    Ok(frame) => Ok(vec![frame]),
+                    Err(err) => {
+                        self.host.set_viewport(prev);
+                        Err(err)
+                    }
+                }
             }
             WebBridgeEvent::TouchStart { points, dt_sec } => {
                 let was_single_press = !self.touch.is_two_finger_gesture() && self.touch.has_primary_pointer_down();
@@ -2499,24 +2559,9 @@ impl WebBridgeSession {
                 Ok(vec![WebBridgeCommand::WriteClipboardItems { payload }])
             }
             WebBridgeEvent::PrintCurrentSheet { sheet_id, scale_percent } => Ok(vec![self.build_print_command(sheet_id.as_deref(), scale_percent)?]),
-            WebBridgeEvent::OpenFileBytes { file_name, bytes } => {
-                self.require_write_lock("open_file_bytes")?;
-                let summary = self.fs.import_file_bytes(&mut self.host, &file_name, &bytes)?;
-                self.chrome.close_popups();
-                Ok(vec![self.summary_render_command("open_file_bytes", &summary)?])
-            }
-            WebBridgeEvent::ImportDroppedFiles { files } => {
-                self.require_write_lock("import_dropped_files")?;
-                let summary = self.fs.import_dropped_files(&mut self.host, files)?;
-                self.chrome.close_popups();
-                Ok(vec![self.summary_render_command("import_dropped_files", &summary)?])
-            }
-            WebBridgeEvent::ImportDirectoryEntries { root_name, entries } => {
-                self.require_write_lock("import_directory_entries")?;
-                let summary = self.fs.import_directory_tree(&mut self.host, &root_name, entries)?;
-                self.chrome.close_popups();
-                Ok(vec![self.summary_render_command("import_directory_entries", &summary)?])
-            }
+            WebBridgeEvent::OpenFileBytes { file_name, bytes } => self.handle_open_file_bytes(&file_name, &bytes),
+            WebBridgeEvent::ImportDroppedFiles { files } => self.handle_import_dropped_files(files),
+            WebBridgeEvent::ImportDirectoryEntries { root_name, entries } => self.handle_import_directory_entries(&root_name, entries),
             WebBridgeEvent::SyncDirectory { root_name } => {
                 self.require_write_lock("sync_directory")?;
                 let plan = self.fs.sync_directory_from_host(&mut self.host, root_name.as_deref())?;
@@ -2524,6 +2569,7 @@ impl WebBridgeSession {
                 Ok(vec![WebBridgeCommand::ApplyDirectorySync { root_name: resolved_root, plan }])
             }
             WebBridgeEvent::SavePreferences { preferences } => {
+                self.require_write_lock("save_preferences")?;
                 let cmd = self.persist_preferences_command(&preferences)?;
                 Ok(vec![cmd])
             }
@@ -2990,14 +3036,20 @@ impl WebBridgeSession {
     fn execute_chrome_command_or_dispatch(&mut self, command_id: &str, params: Value) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
         let route = resolve_web_command_route(self.host.app(), command_id);
         let has_explicit_params = params.as_object().is_some_and(|obj| !obj.is_empty());
-        if self.access_mode.is_read_only() && !route.is_read_only_hint() && !is_command_read_only(command_id, Some(&params)) {
+        let is_read_only_export_or_notice =
+            matches!(route, WebCommandRoute::OpenFilePicker { .. } | WebCommandRoute::PrintCurrentSheet | WebCommandRoute::NoticeOnly { .. })
+                || matches!(route, WebCommandRoute::ExportFormat { .. } if !chrome_bridge::has_non_null_path_param(&params));
+        if self.access_mode.is_read_only()
+            && !is_read_only_export_or_notice
+            && (!route.is_read_only_hint() || !is_command_read_only(command_id, Some(&params)))
+        {
             return Err(self.read_only_err(command_id));
         }
 
         match route {
             WebCommandRoute::OpenFilePicker { accept } => Ok(vec![WebBridgeCommand::TriggerFilePicker { accept, multiple: true, directory: false }]),
             WebCommandRoute::ExportFormat { format, sheet_id } => {
-                if has_explicit_params && params.get("path").is_some() && cmd::registry().get(command_id).is_some() {
+                if has_explicit_params && chrome_bridge::has_non_null_path_param(&params) && cmd::registry().get(command_id).is_some() {
                     return self.handle_execute_command(command_id, params);
                 }
                 let art = self.fs.export_bytes(&mut self.host, format, sheet_id.as_deref(), 300)?;
@@ -3124,7 +3176,7 @@ impl WebBridgeSession {
         before: &(String, curvebook_ui_egui::theme::UiThemeMode, String),
         cmds: &mut Vec<WebBridgeCommand>,
     ) {
-        if self.capture_pref_fingerprint() == *before {
+        if self.access_mode.is_read_only() || self.capture_pref_fingerprint() == *before {
             return;
         }
         let prefs = self.build_preferences_file();
@@ -3265,52 +3317,139 @@ impl WebBridgeSession {
         }
     }
 
+    fn handle_open_file_bytes(&mut self, file_name: &str, bytes: &[u8]) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
+        let next_doc_id = derive_file_doc_id(file_name, bytes);
+        if next_doc_id == self.doc_id {
+            self.require_write_lock("open_file_bytes")?;
+        }
+        let summary = self.fs.import_file_bytes(&mut self.host, file_name, bytes)?;
+        let mut extra = vec![WebBridgeCommand::ClearDirectoryHandle];
+        self.rotate_document_context(next_doc_id, &mut extra);
+        let mut cmds = vec![self.summary_render_command("open_file", &summary)?];
+        cmds.extend(extra);
+        Ok(cmds)
+    }
+
+    fn handle_import_dropped_files(&mut self, files: Vec<(String, Vec<u8>)>) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
+        if files.is_empty() {
+            return Err(WebAdapterError::Validation(String::from("no dropped files supplied")));
+        }
+        let next_doc_id = derive_dropped_files_doc_id(&files);
+        if next_doc_id == self.doc_id {
+            self.require_write_lock("import_dropped_files")?;
+        }
+        let summary = self.fs.import_dropped_files(&mut self.host, files)?;
+        let mut extra = vec![WebBridgeCommand::ClearDirectoryHandle];
+        self.rotate_document_context(next_doc_id, &mut extra);
+        let mut cmds = vec![self.summary_render_command("import_dropped_files", &summary)?];
+        cmds.extend(extra);
+        Ok(cmds)
+    }
+
+    fn handle_import_directory_entries(
+        &mut self,
+        root_name: &str,
+        entries: BTreeMap<String, Vec<u8>>,
+    ) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
+        let root = require_non_empty(root_name, "root_name")?;
+        if entries.is_empty() {
+            return Err(WebAdapterError::Validation(String::from("directory tree must contain at least document.json")));
+        }
+        let normalized = normalize_directory_entries(root, entries)?;
+        let next_doc_id = derive_directory_doc_id(root, &normalized);
+        if next_doc_id == self.doc_id {
+            self.require_write_lock("import_directory_entries")?;
+        }
+        let summary = self.fs.import_normalized_directory_tree(&mut self.host, root, normalized)?;
+        let mut extra = Vec::new();
+        self.rotate_document_context(next_doc_id, &mut extra);
+        let mut cmds = vec![self.summary_render_command("import_directory", &summary)?];
+        cmds.extend(extra);
+        Ok(cmds)
+    }
+
+    fn rotate_document_context(&mut self, next_doc_id: String, cmds: &mut Vec<WebBridgeCommand>) {
+        let trimmed = next_doc_id.trim();
+        let resolved = if trimmed.is_empty() { next_untitled_doc_id(&self.tab_id) } else { trimmed.to_owned() };
+        if resolved != self.doc_id {
+            let _ = self.locks.release_document_lock(&self.doc_id, &self.tab_id, 0);
+            self.doc_id = resolved;
+        }
+        let banner = self.apply_access_mode(TabAccessMode::ExclusiveReadWrite);
+        cmds.push(WebBridgeCommand::SetDocumentLock { doc_id: self.doc_id.clone() });
+        cmds.push(banner);
+    }
+
+    fn apply_project_replacement_state(&mut self, emit_clear_dir: bool) -> Vec<WebBridgeCommand> {
+        self.host.reset_virtual_workspace();
+        self.fs.reset_directory_sync();
+        let mut extra = Vec::new();
+        if emit_clear_dir {
+            extra.push(WebBridgeCommand::ClearDirectoryHandle);
+        }
+        let next_doc_id = next_untitled_doc_id(&self.tab_id);
+        self.rotate_document_context(next_doc_id, &mut extra);
+        extra
+    }
+
     fn handle_execute_command(&mut self, command_id: &str, params: Value) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
-        if self.access_mode.is_read_only() && !is_command_read_only(command_id, Some(&params)) {
-            return Err(self.read_only_err(command_id));
+        let trimmed_id = command_id.trim();
+        if self.access_mode.is_read_only() && !is_command_read_only(trimmed_id, Some(&params)) {
+            return Err(self.read_only_err(trimmed_id));
         }
 
         let before = self.capture_pref_fingerprint();
-        if cmd::registry().get(command_id).is_some() {
-            let result = self.host.execute_command(command_id, params).map_err(WebAdapterError::Workspace)?;
-            let mut cmds = vec![self.render_frame_command(self.render_dpi, Some(command_id.to_owned()), Some(result))?];
+        let replaces = command_replaces_project(trimmed_id, &params);
+        if cmd::registry().get(trimmed_id).is_some() {
+            let result = self.host.execute_command(trimmed_id, params).map_err(WebAdapterError::Workspace)?;
+            let extra = if replaces { self.apply_project_replacement_state(true) } else { Vec::new() };
+            let mut cmds = vec![self.render_frame_command(self.render_dpi, Some(trimmed_id.to_owned()), Some(result))?];
+            cmds.extend(extra);
             self.maybe_append_preferences_persist(&before, &mut cmds);
             return Ok(cmds);
         }
 
-        let line = json!({ "id": "bridge", "method": command_id, "params": params }).to_string();
+        let line = json!({ "id": "bridge", "method": trimmed_id, "params": params }).to_string();
         let reply_raw = self.host.dispatch_control_line(&line);
         let reply: Value = serde_json::from_str(&reply_raw).map_err(|err| WebAdapterError::Workspace(err.to_string()))?;
         if reply.get("ok").and_then(Value::as_bool) != Some(true) {
             let err_msg = reply.get("error").and_then(|e| e.get("message")).and_then(Value::as_str).unwrap_or("control command failed");
             return Err(WebAdapterError::Workspace(err_msg.to_owned()));
         }
-        let mut cmds = vec![self.render_frame_command(self.render_dpi, Some(command_id.to_owned()), reply.get("result").cloned())?];
+        let extra = if replaces { self.apply_project_replacement_state(true) } else { Vec::new() };
+        let mut cmds = vec![self.render_frame_command(self.render_dpi, Some(trimmed_id.to_owned()), reply.get("result").cloned())?];
+        cmds.extend(extra);
         self.maybe_append_preferences_persist(&before, &mut cmds);
         Ok(cmds)
     }
 
     fn handle_control_line(&mut self, line: &str) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
         let req: Value = serde_json::from_str(line).map_err(|err| WebAdapterError::Serialization(err.to_string()))?;
-        let method = req
+        let obj = require_object(&req, "control request")?;
+        let method = obj
             .get("method")
-            .or_else(|| req.get("op"))
+            .or_else(|| obj.get("op"))
             .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
             .ok_or_else(|| WebAdapterError::Serialization(String::from("control request missing `method` or `op`")))?;
-        let params = req.get("params");
+        let normalized_params = normalize_control_request_params(method, obj);
 
-        if self.access_mode.is_read_only() && !is_command_read_only(method, params) {
+        if self.access_mode.is_read_only() && !is_command_read_only(method, Some(&normalized_params)) {
             return Err(self.read_only_err(method));
         }
 
         let before = self.capture_pref_fingerprint();
+        let replaces = command_replaces_project(method, &normalized_params);
         let reply_raw = self.host.dispatch_control_line(line);
         let reply: Value = serde_json::from_str(&reply_raw).map_err(|err| WebAdapterError::Workspace(err.to_string()))?;
         if reply.get("ok").and_then(Value::as_bool) != Some(true) {
             let err_msg = reply.get("error").and_then(|e| e.get("message")).and_then(Value::as_str).unwrap_or("control line failed");
             return Err(WebAdapterError::Workspace(err_msg.to_owned()));
         }
+        let extra = if replaces { self.apply_project_replacement_state(true) } else { Vec::new() };
         let mut cmds = vec![self.render_frame_command(self.render_dpi, Some(method.to_owned()), Some(reply))?];
+        cmds.extend(extra);
         self.maybe_append_preferences_persist(&before, &mut cmds);
         Ok(cmds)
     }
@@ -3342,7 +3481,7 @@ impl WebBridgeSession {
         let height_px = viewport.physical_height_px().max(1);
         let modal_active = self.host.app().canvas_dialogs.active_dialog != ActiveDialog::None;
         let popup_open = self.chrome.open_menu_key.is_some() || self.chrome.context_menu.is_some() || self.host.app().interaction.open_menu.is_some();
-        let layered = WebTextBridge::compose_placeholder_frame_with_popup(
+        let layered = WebTextBridge::try_compose_placeholder_frame_with_popup(
             width_px,
             height_px,
             dpi,
@@ -3350,7 +3489,7 @@ impl WebBridgeSession {
             &chrome_layout.snapshot.status_summary,
             popup_open,
             modal_active,
-        );
+        )?;
         WebTextBridge::validate_layered_frame(&layered)?;
         let pan_zoom = &self.host.app().canvas_dialogs.pan_zoom;
         Ok(WebBridgeCommand::RenderRgbaFrame {
@@ -3633,86 +3772,216 @@ fn ui_input_label(event: &UiInputEvent) -> &'static str {
     }
 }
 
-fn is_command_read_only(command_id: &str, params: Option<&Value>) -> bool {
-    if let Some(spec) = cmd::registry().get(command_id) {
-        return spec.effects.read_only_hint();
+const MAX_READ_ONLY_NESTING_DEPTH: usize = 8;
+
+static NEXT_UNTITLED_DOC_SEQ: AtomicU64 = AtomicU64::new(1);
+
+fn fnv1a_64_hex(parts: &[&[u8]]) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for part in parts {
+        for &byte in *part {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
-    if command_id == "engine.execute"
-        && let Some(p) = params
-        && let Some(inner) = p.get("command_id").or_else(|| p.get("command")).or_else(|| p.get("op")).and_then(Value::as_str)
-    {
-        return is_command_read_only(inner, p.get("params"));
+    format!("{hash:016x}")
+}
+
+fn sanitize_doc_id_component(raw: &str, fallback: &str) -> String {
+    let mut out = String::with_capacity(raw.len().min(40));
+    let mut prev_underscore = false;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' {
+            out.push(ch.to_ascii_lowercase());
+            prev_underscore = false;
+        } else if !prev_underscore && !out.is_empty() {
+            out.push('_');
+            prev_underscore = true;
+        }
+        if out.len() >= 40 {
+            break;
+        }
     }
-    if command_id == "batch.run" {
-        return params.and_then(|p| p.get("commands")).and_then(Value::as_array).is_some_and(|cmds| {
-            cmds.iter().all(|entry| {
-                entry
-                    .get("command")
-                    .or_else(|| entry.get("command_id"))
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| is_command_read_only(id, entry.get("params")))
+    let trimmed = out.trim_matches('_');
+    if trimmed.is_empty() { String::from(fallback) } else { trimmed.to_owned() }
+}
+
+fn derive_file_doc_id(file_name: &str, bytes: &[u8]) -> String {
+    let label = sanitize_doc_id_component(file_name, "file");
+    let digest = fnv1a_64_hex(&[file_name.as_bytes(), bytes]);
+    format!("file-{label}-{digest}")
+}
+
+fn derive_directory_doc_id(root_name: &str, entries: &BTreeMap<String, Vec<u8>>) -> String {
+    let label = sanitize_doc_id_component(root_name, "folder");
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in root_name.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    for (path, bytes) in entries {
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+        for byte in path.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+        hash ^= 0xfe;
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    format!("dir-{label}-{hash:016x}")
+}
+
+fn derive_dropped_files_doc_id(files: &[(String, Vec<u8>)]) -> String {
+    if files.len() == 1 && !looks_like_directory_entry(&files[0].0) {
+        return derive_file_doc_id(&files[0].0, &files[0].1);
+    }
+    let root = detect_dropped_directory_root(files).unwrap_or_else(|| String::from("dropped.curvebook.d"));
+    let mut sorted: Vec<(&str, &[u8])> = files.iter().map(|(p, b)| (p.as_str(), b.as_slice())).collect();
+    sorted.sort_by(|a, b| a.0.cmp(b.0));
+    let mut parts: Vec<&[u8]> = Vec::with_capacity(1 + sorted.len() * 2);
+    parts.push(root.as_bytes());
+    for (p, b) in sorted {
+        parts.push(p.as_bytes());
+        parts.push(b);
+    }
+    let label = sanitize_doc_id_component(&root, "dropped");
+    let digest = fnv1a_64_hex(&parts);
+    format!("drop-{label}-{digest}")
+}
+
+fn next_untitled_doc_id(tab_id: &str) -> String {
+    let seq = NEXT_UNTITLED_DOC_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tab = sanitize_doc_id_component(tab_id, "tab");
+    format!("untitled-{tab}-{seq}")
+}
+
+fn normalize_control_request_params(method: &str, obj: &Map<String, Value>) -> Value {
+    if method == "command.run" && (obj.contains_key("command") || obj.contains_key("command_id")) {
+        let mut out = Map::new();
+        if let Some(cmd) = obj.get("command") {
+            out.insert(String::from("command"), cmd.clone());
+        }
+        if let Some(cmd_id) = obj.get("command_id") {
+            out.insert(String::from("command_id"), cmd_id.clone());
+        }
+        if let Some(inner) = obj.get("params") {
+            out.insert(String::from("params"), inner.clone());
+        } else {
+            let mut inner = Map::new();
+            for (key, value) in obj {
+                if !matches!(key.as_str(), "id" | "method" | "op" | "command" | "command_id" | "params" | "token" | "auth_token") {
+                    inner.insert(key.clone(), value.clone());
+                }
+            }
+            if !inner.is_empty() {
+                out.insert(String::from("params"), Value::Object(inner));
+            }
+        }
+        return Value::Object(out);
+    }
+
+    let mut base = match obj.get("params") {
+        Some(Value::Object(map)) => map.clone(),
+        Some(other) if !other.is_null() => return other.clone(),
+        _ => Map::new(),
+    };
+    for (key, value) in obj {
+        if matches!(key.as_str(), "id" | "method" | "op" | "params" | "token" | "auth_token") {
+            continue;
+        }
+        base.entry(key.clone()).or_insert_with(|| value.clone());
+    }
+    Value::Object(base)
+}
+
+fn first_present_trimmed_str<'a>(obj: &'a Map<String, Value>, fields: &[&str]) -> Option<&'a str> {
+    for &field in fields {
+        if let Some(val) = obj.get(field)
+            && !val.is_null()
+        {
+            return val.as_str().map(str::trim).filter(|s| !s.is_empty());
+        }
+    }
+    None
+}
+
+fn extract_nested_params_like_control_io(obj: &Map<String, Value>) -> Value {
+    if let Some(explicit) = obj.get("params") {
+        return explicit.clone();
+    }
+    let mut stripped = obj.clone();
+    stripped.remove("command");
+    stripped.remove("command_id");
+    if stripped.is_empty() { Value::Null } else { Value::Object(stripped) }
+}
+
+fn extract_control_subcommand(command_id: &str, params: Option<&Value>) -> Option<(String, Value)> {
+    let obj = params?.as_object()?;
+    match command_id {
+        "command.run" => {
+            let inner = first_present_trimmed_str(obj, &["command", "command_id"])?.to_owned();
+            Some((inner, extract_nested_params_like_control_io(obj)))
+        }
+        "engine.execute" => {
+            let inner = first_present_trimmed_str(obj, &["command_id", "command"])?.to_owned();
+            let nested = obj.get("params").cloned().unwrap_or(Value::Null);
+            Some((inner, nested))
+        }
+        _ => None,
+    }
+}
+
+fn extract_batch_item_command(entry: &Value) -> Option<(String, Value)> {
+    let obj = entry.as_object()?;
+    let inner = first_present_trimmed_str(obj, &["command", "command_id"])?.to_owned();
+    Some((inner, extract_nested_params_like_control_io(obj)))
+}
+
+fn command_replaces_project(command_id: &str, params: &Value) -> bool {
+    command_replaces_project_depth(command_id, params, 0)
+}
+
+fn command_replaces_project_depth(command_id: &str, params: &Value, depth: usize) -> bool {
+    if depth > MAX_READ_ONLY_NESTING_DEPTH {
+        return false;
+    }
+    let trimmed = command_id.trim();
+    match trimmed {
+        "project.new" | "file.new" | "project.open" | "project.instantiateTemplate" => true,
+        "command.run" | "engine.execute" => extract_control_subcommand(trimmed, Some(params))
+            .is_some_and(|(inner, inner_params)| command_replaces_project_depth(&inner, &inner_params, depth + 1)),
+        "command.batch" => params.get("commands").and_then(Value::as_array).is_some_and(|cmds| {
+            cmds.iter().any(|entry| {
+                extract_batch_item_command(entry)
+                    .is_some_and(|(inner, inner_params)| command_replaces_project_depth(&inner, &inner_params, depth + 1))
             })
-        });
+        }),
+        _ => false,
     }
-    let base = command_id.split(':').next().unwrap_or(command_id);
-    matches!(
-        base,
-        "render.svg"
-            | "render.pdf"
-            | "doc.inspect"
-            | "ui.state"
-            | "state.snapshot"
-            | "app.about"
-            | "app.feedback"
-            | "ui.previewFilter.set"
-            | "ui.rulers.toggle"
-            | "ui.theme.set"
-            | "ui.locale.set"
-            | "ui.palette.open"
-            | "ui.about.open"
-            | "ui.sheet.select"
-            | "ui.split.set"
-            | "ui.grid.selectRange"
-            | "ui.clipboard.copy"
-            | "ui.export.figure"
-            | "ui.print.open"
-            | "file.print"
-            | "ui.navigator.toggle"
-            | "ui.inspector.toggle"
-            | "ui.family.toggle"
-            | "ui.zoom.fitSheet"
-            | "ui.split.toggle"
-            | "ui.gallery.toggle"
-            | "ui.pane.cycle"
-            | "ui.shortcut.set"
-            | "ui.shortcut.reset"
-            | "ui.closeWorkspace.prompt"
-            | "ui.analyze.open"
-            | "ui.powerWizard.open"
-            | "ui.formatPoints.open"
-            | "ui.changeGraphType.open"
-            | "ui.clonePipeline.open"
-            | "ui.graph.axes.open"
-            | "ui.graph.format.open"
-            | "ui.graph.pairwise.open"
-            | "ui.graph.insertModelEquation"
-            | "ui.graph.bubblePlot.open"
-            | "ui.layout.composer.open"
-            | "ui.layout.equalizeScaling.open"
-            | "ui.graph.create.open"
-            | "ui.view.rowTitles.toggle"
-            | "ui.gridOverlay.toggle"
-            | "ui.embeddedTable.format.open"
-            | "ui.image.format.open"
-            | "ui.export.figure.open"
-            | "ui.import.reshape.open"
-            | "ui.result.copyMethodsReport"
-            | "ui.result.applyRemediation"
-            | "ui.result.inspectDiagnostics"
-            | "ui.canvas.preflight"
-            | "ui.brush.point"
-            | "toolbar.axes"
-            | "ui.export.csv"
+}
+
+fn is_command_read_only(command_id: &str, params: Option<&Value>) -> bool {
+    is_command_read_only_depth(command_id, params, 0)
+}
+
+fn is_command_read_only_depth(command_id: &str, params: Option<&Value>, depth: usize) -> bool {
+    if depth > MAX_READ_ONLY_NESTING_DEPTH {
+        return false;
+    }
+    let command_id = command_id.trim();
+    let has_path = params.is_some_and(chrome_bridge::has_non_null_path_param);
+    if matches!(
+        command_id,
+        "analysis.exportJson"
+            | "analysis.exportCsv"
+            | "result.generateReport"
             | "table.exportCsv"
             | "export.svg"
             | "graph.exportSvg"
@@ -3721,12 +3990,37 @@ fn is_command_read_only(command_id: &str, params: Option<&Value>) -> bool {
             | "export.png"
             | "graph.exportPng"
             | "export.tiff"
-            | "analysis.exportJson"
-            | "analysis.exportCsv"
-            | "result.generateReport"
-            | "graph.preflightCheck"
-            | "table.exclusionAuditReport"
-    )
+    ) {
+        return !has_path;
+    }
+    if let Some(spec) = cmd::registry().get(command_id) {
+        return spec.effects.read_only_hint();
+    }
+    if matches!(command_id, "command.run" | "engine.execute") {
+        return extract_control_subcommand(command_id, params)
+            .is_some_and(|(inner, inner_params)| is_command_read_only_depth(&inner, Some(&inner_params), depth + 1));
+    }
+    if command_id == "command.batch" {
+        return params.and_then(|p| p.get("commands")).and_then(Value::as_array).is_some_and(|cmds| {
+            cmds.iter().all(|entry| extract_batch_item_command(entry).is_some_and(|(id, p)| is_command_read_only_depth(&id, Some(&p), depth + 1)))
+        });
+    }
+    let base = command_id.split(':').next().unwrap_or(command_id);
+    if matches!(
+        base,
+        "ui.export.csv"
+            | "table.exportCsv"
+            | "export.svg"
+            | "graph.exportSvg"
+            | "export.pdf"
+            | "graph.exportPdf"
+            | "export.png"
+            | "graph.exportPng"
+            | "export.tiff"
+    ) {
+        return !has_path;
+    }
+    chrome_bridge::is_read_only_ui_command(base) || chrome_bridge::is_read_only_control_method(command_id)
 }
 
 fn build_print_html_document(title: &str, svg_pages: &[String], scale_percent: f64) -> String {
@@ -3827,6 +4121,34 @@ fn parse_optional_validated_dpi(obj: &Map<String, Value>, key: &str, default: u1
 
 fn require_u64_or_default(obj: &Map<String, Value>, key: &str, default: u64) -> u64 {
     obj.get(key).and_then(Value::as_u64).unwrap_or(default)
+}
+
+fn parse_required_u32_field(obj: &Map<String, Value>, key: &str) -> Result<u32, WebAdapterError> {
+    let raw =
+        obj.get(key).and_then(Value::as_u64).ok_or_else(|| WebAdapterError::Serialization(format!("missing non-negative integer field `{key}`")))?;
+    u32::try_from(raw).map_err(|_| WebAdapterError::Serialization(format!("integer field `{key}` value {raw} exceeds u32 range")))
+}
+
+fn parse_optional_u32_field(obj: &Map<String, Value>, key: &str, default: u32) -> Result<u32, WebAdapterError> {
+    let Some(val) = obj.get(key) else {
+        return Ok(default);
+    };
+    if val.is_null() {
+        return Ok(default);
+    }
+    let raw = val.as_u64().ok_or_else(|| WebAdapterError::Serialization(format!("field `{key}` must be a non-negative integer")))?;
+    u32::try_from(raw).map_err(|_| WebAdapterError::Serialization(format!("integer field `{key}` value {raw} exceeds u32 range")))
+}
+
+fn parse_optional_usize_field(obj: &Map<String, Value>, key: &str, default: usize) -> Result<usize, WebAdapterError> {
+    let Some(val) = obj.get(key) else {
+        return Ok(default);
+    };
+    if val.is_null() {
+        return Ok(default);
+    }
+    let raw = val.as_u64().ok_or_else(|| WebAdapterError::Serialization(format!("field `{key}` must be a non-negative integer")))?;
+    usize::try_from(raw).map_err(|_| WebAdapterError::Serialization(format!("integer field `{key}` value {raw} exceeds usize range")))
 }
 
 fn parse_touch_points_field(obj: &Map<String, Value>, key: &str) -> Result<Vec<TouchPoint>, WebAdapterError> {
@@ -3940,7 +4262,8 @@ fn decode_base64_field(obj: &Map<String, Value>, b64_key: &str, array_key: &str)
         return decode_base64(raw_b64);
     }
     if let Some(arr) = obj.get(array_key).and_then(Value::as_array) {
-        let mut out = Vec::with_capacity(arr.len());
+        let mut out = Vec::new();
+        out.try_reserve_exact(arr.len()).map_err(|_| WebAdapterError::Serialization(format!("`{array_key}` exceeds memory budget")))?;
         for item in arr {
             let byte = item
                 .as_u64()
@@ -4004,7 +4327,10 @@ fn encode_base64(input: &[u8]) -> String {
     if input.is_empty() {
         return String::new();
     }
-    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    let mut out = String::new();
+    if out.try_reserve_exact(input.len().div_ceil(3).saturating_mul(4)).is_err() {
+        return String::new();
+    }
     for chunk in input.chunks(3) {
         let b0 = usize::from(chunk[0]);
         let b1 = usize::from(chunk.get(1).copied().unwrap_or(0));
@@ -4028,7 +4354,9 @@ fn encode_base64(input: &[u8]) -> String {
 }
 
 fn decode_base64(input: &str) -> Result<Vec<u8>, WebAdapterError> {
-    let compact: Vec<u8> = input.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    let mut compact = Vec::new();
+    compact.try_reserve_exact(input.len()).map_err(|_| WebAdapterError::Serialization(String::from("base64 input exceeds memory budget")))?;
+    compact.extend(input.bytes().filter(|b| !b.is_ascii_whitespace()));
     if compact.is_empty() {
         return Ok(Vec::new());
     }
@@ -4036,7 +4364,9 @@ fn decode_base64(input: &str) -> Result<Vec<u8>, WebAdapterError> {
         return Err(WebAdapterError::Serialization(String::from("base64 length must be a multiple of 4")));
     }
 
-    let mut out = Vec::with_capacity((compact.len() / 4) * 3);
+    let mut out = Vec::new();
+    out.try_reserve_exact((compact.len() / 4) * 3)
+        .map_err(|_| WebAdapterError::Serialization(String::from("decoded base64 payload exceeds memory budget")))?;
     let (chunks, _rem) = compact.as_chunks::<4>();
     for (chunk_idx, chunk) in chunks.iter().enumerate() {
         let is_last = chunk_idx + 1 == compact.len() / 4;

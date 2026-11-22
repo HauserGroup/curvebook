@@ -73,7 +73,19 @@ fn connect_wasm_bridge() {
         return;
     };
 
-    let session = Rc::new(RefCell::new(WebBridgeSession::new()));
+    let tab_id = Reflect::get(&host, &JsValue::from_str("tabId"))
+        .ok()
+        .and_then(|v| v.as_string())
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| String::from("tab-1"));
+    let doc_id = Reflect::get(&host, &JsValue::from_str("initialDocId"))
+        .ok()
+        .and_then(|v| v.as_string())
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| String::from("default"));
+    let session = Rc::new(RefCell::new(WebBridgeSession::with_ids(&doc_id, &tab_id)));
     let callback_session = Rc::clone(&session);
     let handler = Closure::<dyn FnMut(String) -> String>::new(move |raw_json: String| {
         let Ok(mut guard) = callback_session.try_borrow_mut() else {
