@@ -116,27 +116,111 @@ impl RenderTargetSpec {
         Ok(Self { width_px, height_px, dpi })
     }
 
-    /// Resolve pixel dimensions for capped preview/export outputs (MCP and desktop control).
+    /// Resolve uniform aspect-preserving pixel dimensions and effective DPI for capped
+    /// preview/export outputs (MCP and desktop control).
     ///
-    /// Positive finite `scene` point dimensions are scaled by `dpi / 72.0`, rounded to the nearest
-    /// integer pixel, and clamped independently to
-    /// [`MIN_CAPPED_RASTER_DIM_PX`]..=[`MAX_CAPPED_RASTER_DIM_PX`] (`64..=8192`). Non-finite or
-    /// non-positive axes fall back to [`DEFAULT_CAPPED_RASTER_WIDTH_PX`] x
-    /// [`DEFAULT_CAPPED_RASTER_HEIGHT_PX`] (`960 x 640`). Caller-supplied `requested_width_px` and
-    /// `requested_height_px` override the derived dimensions verbatim.
+    /// Positive finite `scene` point dimensions are scaled uniformly at `dpi / 72.0` and fitted
+    /// proportionally within [`MIN_CAPPED_RASTER_DIM_PX`]..=[`MAX_CAPPED_RASTER_DIM_PX`] (`64..=8192`),
+    /// adjusting `dpi` to the resulting effective physical resolution when scaled. When only one of
+    /// `requested_width_px` or `requested_height_px` is supplied on a valid scene, the unspecified
+    /// axis and effective `dpi` are derived uniformly from the scene aspect ratio. Non-finite or
+    /// non-positive scene dimensions fall back to [`DEFAULT_CAPPED_RASTER_WIDTH_PX`] x
+    /// [`DEFAULT_CAPPED_RASTER_HEIGHT_PX`] (`960 x 640`).
     #[must_use]
     pub fn from_scene_capped(scene: &ChartScene, requested_width_px: Option<u32>, requested_height_px: Option<u32>, dpi: u16) -> Self {
-        let scale_axis = |dim_pt: f64, fallback_px: u32| -> u32 {
-            if dim_pt.is_finite() && dim_pt > 0.0 {
-                let scaled = (dim_pt * f64::from(dpi) / 72.0).round();
-                scaled.clamp(f64::from(MIN_CAPPED_RASTER_DIM_PX), f64::from(MAX_CAPPED_RASTER_DIM_PX)) as u32
+        let valid_scene = scene.width_pt.is_finite() && scene.height_pt.is_finite() && scene.width_pt > 0.0 && scene.height_pt > 0.0;
+        if !valid_scene {
+            return Self {
+                width_px: requested_width_px.unwrap_or(DEFAULT_CAPPED_RASTER_WIDTH_PX),
+                height_px: requested_height_px.unwrap_or(DEFAULT_CAPPED_RASTER_HEIGHT_PX),
+                dpi,
+            };
+        }
+
+        let w_pt = scene.width_pt;
+        let h_pt = scene.height_pt;
+        let max_dim = f64::from(MAX_CAPPED_RASTER_DIM_PX);
+        let min_dim = f64::from(MIN_CAPPED_RASTER_DIM_PX);
+        let to_eff_dpi = |scale: f64| -> u16 {
+            if dpi == 0 {
+                0
             } else {
-                fallback_px
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let rounded = (scale * 72.0).round().clamp(1.0, f64::from(u16::MAX)) as u16;
+                rounded
             }
         };
-        let default_w = scale_axis(scene.width_pt, DEFAULT_CAPPED_RASTER_WIDTH_PX);
-        let default_h = scale_axis(scene.height_pt, DEFAULT_CAPPED_RASTER_HEIGHT_PX);
-        Self { width_px: requested_width_px.unwrap_or(default_w), height_px: requested_height_px.unwrap_or(default_h), dpi }
+
+        match (requested_width_px, requested_height_px) {
+            (Some(w), Some(h)) => {
+                let eff_dpi = if dpi > 0 && w > 0 && h > 0 {
+                    let sx = f64::from(w) / w_pt;
+                    let sy = f64::from(h) / h_pt;
+                    if (sx - sy).abs() <= 1e-3 * sx.max(sy) { to_eff_dpi(0.5 * (sx + sy)) } else { dpi }
+                } else {
+                    dpi
+                };
+                Self { width_px: w, height_px: h, dpi: eff_dpi }
+            }
+            (Some(w), None) => {
+                if w == 0 {
+                    return Self { width_px: 0, height_px: 0, dpi };
+                }
+                let raw_scale = f64::from(w) / w_pt;
+                let max_h_scale = max_dim / h_pt;
+                if raw_scale <= max_h_scale {
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let height_px = (h_pt * raw_scale).round().clamp(1.0, max_dim) as u32;
+                    Self { width_px: w, height_px, dpi: to_eff_dpi(raw_scale) }
+                } else {
+                    let eff_scale = max_h_scale.min(f64::from(w) / w_pt);
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let width_px = (w_pt * eff_scale).round().clamp(1.0, max_dim) as u32;
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let height_px = (h_pt * eff_scale).round().clamp(1.0, max_dim) as u32;
+                    Self { width_px, height_px, dpi: to_eff_dpi(eff_scale) }
+                }
+            }
+            (None, Some(h)) => {
+                if h == 0 {
+                    return Self { width_px: 0, height_px: 0, dpi };
+                }
+                let raw_scale = f64::from(h) / h_pt;
+                let max_w_scale = max_dim / w_pt;
+                if raw_scale <= max_w_scale {
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let width_px = (w_pt * raw_scale).round().clamp(1.0, max_dim) as u32;
+                    Self { width_px, height_px: h, dpi: to_eff_dpi(raw_scale) }
+                } else {
+                    let eff_scale = max_w_scale.min(f64::from(h) / h_pt);
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let width_px = (w_pt * eff_scale).round().clamp(1.0, max_dim) as u32;
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let height_px = (h_pt * eff_scale).round().clamp(1.0, max_dim) as u32;
+                    Self { width_px, height_px, dpi: to_eff_dpi(eff_scale) }
+                }
+            }
+            (None, None) => {
+                if dpi == 0 {
+                    return Self { width_px: 0, height_px: 0, dpi: 0 };
+                }
+                let raw_scale = f64::from(dpi) / 72.0;
+                let max_scale = (max_dim / w_pt).min(max_dim / h_pt);
+                let min_scale = (min_dim / w_pt).max(min_dim / h_pt);
+                let eff_scale = if min_scale <= max_scale {
+                    raw_scale.clamp(min_scale, max_scale)
+                } else {
+                    let floor_scale = (min_dim / w_pt.max(h_pt)).max(1.0 / w_pt.min(h_pt));
+                    raw_scale.min(max_scale).max(floor_scale.min(max_scale))
+                };
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let width_px = (w_pt * eff_scale).round().clamp(1.0, max_dim) as u32;
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let height_px = (h_pt * eff_scale).round().clamp(1.0, max_dim) as u32;
+                let eff_dpi = if (eff_scale - raw_scale).abs() <= 1e-12 { dpi } else { to_eff_dpi(eff_scale) };
+                Self { width_px, height_px, dpi: eff_dpi }
+            }
+        }
     }
 }
 
@@ -1148,9 +1232,9 @@ fn try_rasterize_ellipse_path(
     env: PathStyleEnv,
     scratch: &mut RasterScratch,
 ) -> bool {
-    let is_near_circle = (ellipse.rx - ellipse.ry).abs() <= 0.05 * ellipse.rx.max(ellipse.ry).max(1.0);
+    let is_exact_circle = (ellipse.rx - ellipse.ry).abs() < 1e-4;
     if let Some(sp) = stroke_paint
-        && (sp.dash != LineDashStyle::Solid || !is_near_circle)
+        && (sp.dash != LineDashStyle::Solid || !is_exact_circle)
     {
         return false;
     }
@@ -3278,17 +3362,18 @@ mod tests {
         assert_eq!(RenderTargetSpec::from_scene_capped(&normal, None, None, 144), RenderTargetSpec { width_px: 288, height_px: 144, dpi: 144 });
 
         let tiny = ChartScene::new("g2", "Tiny", 1.0, 2.0, Some(Rgba8::WHITE));
-        assert_eq!(RenderTargetSpec::from_scene_capped(&tiny, None, None, 72), RenderTargetSpec { width_px: 64, height_px: 64, dpi: 72 });
+        assert_eq!(RenderTargetSpec::from_scene_capped(&tiny, None, None, 72), RenderTargetSpec { width_px: 64, height_px: 128, dpi: 4608 });
 
         let huge = ChartScene::new("g3", "Huge", 10_000.0, 20_000.0, Some(Rgba8::WHITE));
-        assert_eq!(RenderTargetSpec::from_scene_capped(&huge, None, None, 300), RenderTargetSpec { width_px: 8192, height_px: 8192, dpi: 300 });
+        assert_eq!(RenderTargetSpec::from_scene_capped(&huge, None, None, 300), RenderTargetSpec { width_px: 4096, height_px: 8192, dpi: 29 });
 
         let mut invalid = ChartScene::new("g4", "Invalid", 144.0, 72.0, Some(Rgba8::WHITE));
         invalid.width_pt = f64::NAN;
         invalid.height_pt = 0.0;
         assert_eq!(RenderTargetSpec::from_scene_capped(&invalid, None, None, 144), RenderTargetSpec { width_px: 960, height_px: 640, dpi: 144 });
 
-        assert_eq!(RenderTargetSpec::from_scene_capped(&normal, Some(512), None, 144), RenderTargetSpec { width_px: 512, height_px: 144, dpi: 144 });
+        assert_eq!(RenderTargetSpec::from_scene_capped(&normal, Some(512), None, 144), RenderTargetSpec { width_px: 512, height_px: 256, dpi: 256 });
+        assert_eq!(RenderTargetSpec::from_scene_capped(&normal, None, Some(256), 144), RenderTargetSpec { width_px: 512, height_px: 256, dpi: 256 });
         assert_eq!(RenderTargetSpec::from_scene_capped(&invalid, None, Some(300), 144), RenderTargetSpec { width_px: 960, height_px: 300, dpi: 144 });
     }
 }

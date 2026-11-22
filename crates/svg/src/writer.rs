@@ -97,6 +97,7 @@ impl ClipRegistry {
 
 struct SvgRenderCtx<'a> {
     options: &'a SvgExportOptions,
+    bundled_fonts: &'a [(&'a str, &'a [u8])],
     prec: usize,
     opacity_prec: usize,
     clips: ClipRegistry,
@@ -106,9 +107,10 @@ struct SvgRenderCtx<'a> {
 }
 
 impl<'a> SvgRenderCtx<'a> {
-    fn new(options: &'a SvgExportOptions, prec: usize) -> Self {
+    fn new(options: &'a SvgExportOptions, bundled_fonts: &'a [(&'a str, &'a [u8])], prec: usize) -> Self {
         Self {
             options,
+            bundled_fonts,
             prec,
             opacity_prec: prec.max(3),
             clips: ClipRegistry::default(),
@@ -140,6 +142,10 @@ impl<'a> SvgRenderCtx<'a> {
 /// Returns [`SvgError::InvalidScene`] when scene dimensions, coordinates, or stroke widths are
 /// non-finite or invalid.
 pub fn render_svg(scene: &ChartScene, options: &SvgExportOptions) -> Result<String, SvgError> {
+    render_svg_with_bundled_fonts(scene, options, BUNDLED_FONTS)
+}
+
+fn render_svg_with_bundled_fonts(scene: &ChartScene, options: &SvgExportOptions, bundled_fonts: &[(&str, &[u8])]) -> Result<String, SvgError> {
     if !scene.width_pt.is_finite() || !scene.height_pt.is_finite() || scene.width_pt <= 0.0 || scene.height_pt <= 0.0 {
         return Err(SvgError::InvalidScene { message: String::from("scene dimensions must be finite and positive") });
     }
@@ -147,7 +153,7 @@ pub fn render_svg(scene: &ChartScene, options: &SvgExportOptions) -> Result<Stri
     let w = format_scalar(scene.width_pt, prec)?;
     let h = format_scalar(scene.height_pt, prec)?;
 
-    let mut ctx = SvgRenderCtx::new(options, prec);
+    let mut ctx = SvgRenderCtx::new(options, bundled_fonts, prec);
     for prim in &scene.primitives {
         match prim {
             ScenePrimitive::Path { path, fill, stroke, clip } => {
@@ -201,14 +207,18 @@ pub fn render_svg(scene: &ChartScene, options: &SvgExportOptions) -> Result<Stri
         }
     }
 
-    write_defs(&mut out, &ctx.clips.entries, options);
+    write_defs(&mut out, &ctx.clips.entries, options, bundled_fonts);
     out.push_str(&ctx.body);
     out.push_str("</svg>\n");
     Ok(out)
 }
 
-fn write_defs(out: &mut String, clips: &[ClipEntry], options: &SvgExportOptions) {
-    let embed_faces = options.embed_fonts && !options.outline_text && !BUNDLED_FONTS.is_empty();
+fn has_embeddable_faces(options: &SvgExportOptions, bundled_fonts: &[(&str, &[u8])]) -> bool {
+    options.embed_fonts && !options.outline_text && bundled_fonts.iter().any(|(name, bytes)| !name.is_empty() && !bytes.is_empty())
+}
+
+fn write_defs(out: &mut String, clips: &[ClipEntry], options: &SvgExportOptions, bundled_fonts: &[(&str, &[u8])]) {
+    let embed_faces = has_embeddable_faces(options, bundled_fonts);
     if clips.is_empty() && !embed_faces {
         return;
     }
@@ -225,13 +235,17 @@ fn write_defs(out: &mut String, clips: &[ClipEntry], options: &SvgExportOptions)
         let _ = write!(out, "{indent2}</clipPath>{nl}");
     }
     if embed_faces {
-        let _ = write!(out, "{indent2}<style type=\"text/css\"><![CDATA[{nl}");
-        for (name, bytes) in BUNDLED_FONTS {
+        let mut css = String::from(nl);
+        for (name, bytes) in bundled_fonts {
+            if name.is_empty() || bytes.is_empty() {
+                continue;
+            }
             let b64 = encode_base64(bytes);
             let family = escape_css_string(name);
-            let _ = write!(out, "@font-face {{ font-family: \"{family}\"; src: url(\"data:font/ttf;base64,{b64}\"); }}{nl}");
+            let _ = write!(css, "@font-face {{ font-family: \"{family}\"; src: url(\"data:font/ttf;base64,{b64}\"); }}{nl}");
         }
-        let _ = write!(out, "]]></style>{nl}");
+        let safe_cdata = escape_cdata_text(&css);
+        let _ = write!(out, "{indent2}<style type=\"text/css\"><![CDATA[{safe_cdata}]]></style>{nl}");
     }
     let _ = write!(out, "{indent1}</defs>{nl}");
 }
@@ -496,10 +510,13 @@ fn write_editable_text(ctx: &mut SvgRenderCtx<'_>, text: &PositionedText) -> Res
     let lines = split_rich_text_lines(&text.rich);
     let preserve_space = needs_xml_space_preserve_lines(&lines);
 
+    let embed_faces = has_embeddable_faces(ctx.options, ctx.bundled_fonts);
+    let font_family_stack = build_editable_font_family(ctx.bundled_fonts, embed_faces);
+
     ctx.push_indent(0);
     let _ = write!(
         ctx.body,
-        "<text x=\"{x}\" y=\"{y}\" font-family=\"{DEFAULT_FONT_FAMILY}\" font-size=\"{font_size}\" text-anchor=\"{anchor}\" fill=\"{color}\""
+        "<text x=\"{x}\" y=\"{y}\" font-family=\"{font_family_stack}\" font-size=\"{font_size}\" text-anchor=\"{anchor}\" fill=\"{color}\""
     );
     if text.color.a < u8::MAX {
         let opacity = format_opacity(text.color.a, ctx.opacity_prec)?;
@@ -781,6 +798,23 @@ fn escape_xml(raw: &str) -> String {
     out
 }
 
+fn build_editable_font_family(bundled_fonts: &[(&str, &[u8])], embed_faces: bool) -> String {
+    if !embed_faces {
+        return String::from(DEFAULT_FONT_FAMILY);
+    }
+    let mut stack = String::new();
+    for &(name, bytes) in bundled_fonts {
+        if name.is_empty() || bytes.is_empty() {
+            continue;
+        }
+        let quoted = format!("\"{}\"", escape_css_string(name));
+        stack.push_str(&escape_xml(&quoted));
+        stack.push_str(", ");
+    }
+    stack.push_str(DEFAULT_FONT_FAMILY);
+    stack
+}
+
 fn escape_css_string(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     for ch in raw.chars() {
@@ -790,10 +824,18 @@ fn escape_css_string(raw: &str) -> String {
         match ch {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
+            '>' => out.push_str("\\3e "),
+            '\n' => out.push_str("\\a "),
+            '\r' => out.push_str("\\d "),
+            '\u{000C}' => out.push_str("\\c "),
             _ => out.push(ch),
         }
     }
     out
+}
+
+fn escape_cdata_text(raw: &str) -> String {
+    raw.replace("]]>", "]]]]><![CDATA[>")
 }
 
 fn encode_base64(bytes: &[u8]) -> String {
@@ -1188,5 +1230,46 @@ mod tests {
         for bad in invalid {
             assert!(validate_svg_structure(&bad).is_err(), "expected validation failure for: {bad}");
         }
+    }
+
+    #[test]
+    fn sec10_07_font_face_family_alignment_and_cdata_escaping() {
+        use curvebook_chart::{ChartScene, PointPt, PositionedText, ScenePrimitive, TextAnchor};
+        use curvebook_palette::Rgba8;
+        use curvebook_text::{RichSpan, RichText};
+
+        use super::{escape_cdata_text, render_svg_with_bundled_fonts};
+        use crate::SvgExportOptions;
+
+        assert_eq!(escape_cdata_text("x]]>y"), "x]]]]><![CDATA[>y");
+
+        let mut scene = ChartScene::new("svg-sec10-07", "Font Alignment", 320.0, 120.0, Some(Rgba8::WHITE));
+        scene.primitives.push(ScenePrimitive::Text(PositionedText {
+            rich: RichText::new(vec![
+                RichSpan::plain("Default Family "),
+                RichSpan { font_family: Some(String::from("ChartSerif")), ..RichSpan::plain("Explicit") },
+            ]),
+            anchor_pt: PointPt::new(20.0, 60.0),
+            font_size_pt: 12.0,
+            anchor: TextAnchor::Start,
+            rotation_deg: 0.0,
+            color: Rgba8::BLACK,
+        }));
+
+        let synthetic_fonts: &[(&str, &[u8])] = &[("Plot]]>Sans", b"\x00\x01\x00\x00fontbytes")];
+        let opts = SvgExportOptions { outline_text: false, embed_fonts: true, ..SvgExportOptions::default() };
+        let svg = render_svg_with_bundled_fonts(&scene, &opts, synthetic_fonts).expect("render svg with bundled fonts");
+
+        validate_svg_structure(&svg).expect("SVG with ]]> font name must pass XML validation");
+        assert!(svg.contains("@font-face"), "expected @font-face rule: {svg}");
+        assert!(svg.contains("Plot]]\\3e Sans"), "CSS font-family must escape '>' inside CDATA: {svg}");
+        assert_eq!(svg.matches("]]></style>").count(), 1, "CDATA must terminate exactly once at </style>: {svg}");
+        assert!(svg.contains("font-family=\"&quot;Plot]]\\3e Sans&quot;"), "text font-family must include aligned @font-face name: {svg}");
+        assert!(svg.contains("ChartSerif"), "explicit span font-family should remain in fallback stack: {svg}");
+
+        let no_embed = SvgExportOptions { outline_text: false, embed_fonts: false, ..SvgExportOptions::default() };
+        let plain_svg = render_svg_with_bundled_fonts(&scene, &no_embed, synthetic_fonts).expect("render without font embed");
+        assert!(!plain_svg.contains("@font-face"));
+        assert!(!plain_svg.contains("Plot]]"));
     }
 }

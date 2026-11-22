@@ -6,18 +6,16 @@
 //! vector-outline fallbacks (wasm-safe and `--no-default-features` safe).
 
 use std::borrow::Cow;
-use std::sync::Arc;
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
 use crate::BUNDLED_FONTS;
-use crate::glyph_paths::has_cleanroom_vector_outline;
-use crate::markup::{RichSpan, RichText, SpanSlope, SpanWeight, TextDirection, contains_rtl_script, parse_markup, reorder_visual_bidi};
+use crate::glyph_paths::{GlyphOutlineCmd, has_cleanroom_vector_outline, outline_ttf_glyph};
+use crate::markup::{RichText, SpanSlope, SpanWeight, TextDirection, contains_rtl_script, parse_markup, reorder_visual_bidi};
 use crate::metrics::{
     CachedSfntLayout, SfntFaceMeta, TrueTypeFont, core14_advance_em, effective_span_scale, inspect_sfnt_face_meta_at, is_combining_mark, read_u32_be,
-    reorder_rich_text_bidi, rich_contains_rtl, script_baseline_offset_pt, split_rich_text_lines,
+    reorder_rich_text_bidi_with_direction, rich_contains_rtl, script_baseline_offset_pt, split_rich_text_lines,
 };
 
 const BASE_UI_DPI: f64 = 96.0;
@@ -291,6 +289,13 @@ impl SystemFontSet {
         Self::from_env_and_system()
     }
 
+    /// Return a cached process-wide [`SystemFontSet`] constructed via [`Self::from_env_and_system`].
+    #[must_use]
+    pub fn global() -> &'static Self {
+        static GLOBAL: OnceLock<SystemFontSet> = OnceLock::new();
+        GLOBAL.get_or_init(Self::from_env_and_system)
+    }
+
     /// Construct a [`SystemFontSet`] from `CURVEBOOK_FONTS_DIR` (if set), optional `BUNDLED_FONTS`,
     /// and cached host OS system fonts.
     #[must_use]
@@ -387,6 +392,61 @@ impl SystemFontSet {
     #[must_use]
     pub fn shape_line_with_direction(&self, style: &UiTextStyle, text: &str, dpi: u16, direction: Option<TextDirection>) -> ShapedTextLine {
         self.shape_internal(style, text, dpi, direction, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn outline_char(
+        &self,
+        family: FontFamilyKind,
+        weight: SpanWeight,
+        slope: SpanSlope,
+        ch: char,
+        origin_x_pt: f64,
+        origin_y_pt: f64,
+        font_size_pt: f64,
+        primary_tiers_only: bool,
+    ) -> Option<(Vec<GlyphOutlineCmd>, f64)> {
+        let order = self.face_order(family, weight, slope);
+        let visible = !ch.is_whitespace() && !ch.is_control() && !is_zero_width_format(ch);
+        for &idx in order {
+            let face = self.faces.get(idx)?;
+            let is_primary = matches!(face.source_tier, FontSourceTier::EnvOverride | FontSourceTier::Bundled);
+            if primary_tiers_only != is_primary {
+                continue;
+            }
+            let Some(ttf) = face.parsed() else {
+                continue;
+            };
+            let slant = slope == SpanSlope::Italic && !face.meta.is_italic;
+            if let Some(cmds) = outline_ttf_glyph(&ttf, ch, origin_x_pt, origin_y_pt, font_size_pt, slant) {
+                if visible && cmds.is_empty() {
+                    continue;
+                }
+                let adv_em = if is_combining_mark(ch) || is_rtl_combining_mark(ch) || is_zero_width_format(ch) || ch.is_control() {
+                    0.0
+                } else {
+                    ttf.advance_em(ch).unwrap_or_else(|| core14_advance_em(ch, weight, slope))
+                };
+                return Some((cmds, adv_em));
+            }
+        }
+        None
+    }
+
+    pub(crate) fn primary_tier_advance_em(&self, family: FontFamilyKind, weight: SpanWeight, slope: SpanSlope, ch: char) -> Option<f64> {
+        let order = self.face_order(family, weight, slope);
+        for &idx in order {
+            let face = self.faces.get(idx)?;
+            if !matches!(face.source_tier, FontSourceTier::EnvOverride | FontSourceTier::Bundled) {
+                continue;
+            }
+            if let Some(ttf) = face.parsed()
+                && let Some(adv) = ttf.advance_em(ch)
+            {
+                return Some(adv);
+            }
+        }
+        None
     }
 
     fn face_order(&self, family: FontFamilyKind, weight: SpanWeight, slope: SpanSlope) -> &[usize] {
@@ -827,13 +887,7 @@ fn apply_style_to_rich(mut rich: RichText, style: &UiTextStyle) -> RichText {
 
 fn reorder_rich_line<'a>(line: &'a RichText, direction: TextDirection) -> Cow<'a, RichText> {
     if direction == TextDirection::Rtl || rich_contains_rtl(line) {
-        if direction == TextDirection::Rtl && !rich_contains_rtl(line) {
-            let reordered_spans =
-                line.spans.iter().map(|span| RichSpan { text: reorder_visual_bidi(&span.text, TextDirection::Rtl), ..span.clone() }).collect();
-            Cow::Owned(RichText::new(reordered_spans))
-        } else {
-            Cow::Owned(reorder_rich_text_bidi(line))
-        }
+        Cow::Owned(reorder_rich_text_bidi_with_direction(line, direction))
     } else {
         Cow::Borrowed(line)
     }
@@ -1002,6 +1056,35 @@ fn append_bundled_faces(out: &mut Vec<Arc<LoadedFontFace>>) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn is_safe_relative_manifest_path(rel: &str) -> bool {
+    if rel.is_empty() {
+        return false;
+    }
+    let bytes = rel.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return false;
+    }
+    let path = std::path::Path::new(rel);
+    if path.is_absolute() {
+        return false;
+    }
+    let mut has_normal = false;
+    for comp in path.components() {
+        match comp {
+            std::path::Component::Normal(part) => {
+                let s = part.to_string_lossy();
+                if s.starts_with('\\') || s.split('\\').any(|seg| seg == "..") {
+                    return false;
+                }
+                has_normal = true;
+            }
+            _ => return false,
+        }
+    }
+    has_normal
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn load_faces_from_dir(dir: &std::path::Path, tier: FontSourceTier, out: &mut Vec<Arc<LoadedFontFace>>) {
     let mut loaded_paths = Vec::new();
     let manifest_specs = [(dir.join("fonts").join("manifest.txt"), dir.join("fonts")), (dir.join("manifest.txt"), dir.to_path_buf())];
@@ -1009,7 +1092,7 @@ fn load_faces_from_dir(dir: &std::path::Path, tier: FontSourceTier, out: &mut Ve
         if let Ok(text) = read_regular_text_bounded(&manifest_path, 256 * 1024) {
             for line in text.lines() {
                 let rel = line.split('#').next().unwrap_or_default().trim();
-                if rel.is_empty() || rel.contains("..") {
+                if !is_safe_relative_manifest_path(rel) {
                     continue;
                 }
                 let candidate = base_dir.join(rel);

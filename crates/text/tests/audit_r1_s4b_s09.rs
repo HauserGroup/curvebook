@@ -3,9 +3,9 @@
 use std::time::Instant;
 
 use curvebook_palette::Rgba8;
-use curvebook_text::glyph_paths::{GlyphOutlineCmd, outline_rich_text, outline_rich_text_rotated};
+use curvebook_text::glyph_paths::{GlyphOutlineCmd, outline_rich_text, outline_rich_text_rotated, outline_rich_text_with_fonts};
 use curvebook_text::metrics::{core14_advance_em, is_combining_mark, reorder_rich_text_bidi, rich_contains_rtl, split_rich_text_lines};
-use curvebook_text::{BUNDLED_FONTS, RichSpan, RichText, measure_text_pt, parse_markup, parse_truetype_font_info};
+use curvebook_text::{BUNDLED_FONTS, RichSpan, RichText, SystemFontSet, measure_text_pt, parse_markup, parse_truetype_font_info};
 
 fn bbox_of_cmds(cmds: &[GlyphOutlineCmd]) -> Option<(f64, f64, f64, f64)> {
     let mut min_x = f64::INFINITY;
@@ -161,7 +161,7 @@ fn r1_s09_07_accented_latin_and_combining_marks_do_not_collapse_to_fallback_box(
     if !BUNDLED_FONTS.is_empty() {
         return;
     }
-    let box_cmds = outline_rich_text(&RichText::plain("\u{4E2D}"), 0.0, 20.0, 12.0)[0].commands.len();
+    let box_cmds = outline_rich_text_with_fonts(&RichText::plain("\u{4E2D}"), 0.0, 20.0, 12.0, &SystemFontSet::cleanroom_only())[0].commands.len();
     for ch in ['é', 'ü', 'ñ', 'ç', 'ß', 'ö', 'Á', 'Č', 'ğ', 'Ł', 'ł', 'Œ', 'œ', 'ř', 'š', 'ž', 'ð', 'þ', 'ø', 'Æ', 'æ'] {
         let s = ch.to_string();
         let glyphs = outline_rich_text(&RichText::plain(&s), 0.0, 20.0, 12.0);

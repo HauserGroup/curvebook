@@ -11,11 +11,12 @@ use std::borrow::Cow;
 use curvebook_palette::Rgba8;
 use serde::{Deserialize, Serialize};
 
-use crate::markup::{RichText, SpanSlope, SpanWeight};
+use crate::markup::{RichSpan, RichText, SpanSlope, SpanWeight};
 use crate::metrics::{
-    TrueTypeFont, char_advance_em_with_font, effective_span_scale, is_combining_mark, read_i16_be, read_u16_be, reorder_rich_text_bidi,
-    rich_contains_rtl, script_baseline_offset_pt, select_bundled_font,
+    TrueTypeFont, char_advance_em_with_font, core14_advance_em, effective_span_scale, is_combining_mark, read_i16_be, read_u16_be,
+    reorder_rich_text_bidi, rich_contains_rtl, script_baseline_offset_pt,
 };
+use crate::shaping::{FontFamilyKind, SystemFontSet};
 
 const MAX_TTF_CONTOURS: usize = 256;
 const MAX_TTF_POINTS: usize = 4096;
@@ -69,12 +70,25 @@ pub struct PositionedGlyphOutline {
 
 /// Position [`RichText`] runs starting at `(origin_x_pt, origin_y_pt)` and emit closed filled glyph outlines.
 ///
-/// Works identically with or without the `bundled-fonts` feature enabled; when bundled TrueType
-/// font tables are linked in [`crate::BUNDLED_FONTS`], native `glyf` contours are decoded first
-/// with seamless clean-room fallback for unmapped scientific or Greek glyphs.
+/// Works identically with or without the `bundled-fonts` feature enabled; queries compiled
+/// [`crate::BUNDLED_FONTS`], runtime `CURVEBOOK_FONTS_DIR`, cleanroom scientific vector strokes, and
+/// host [`SystemFontSet`] TrueType faces before falling back to placeholder boxes.
 #[must_use]
 pub fn outline_rich_text(rich: &RichText, origin_x_pt: f64, origin_y_pt: f64, font_size_pt: f64) -> Vec<PositionedGlyphOutline> {
     outline_rich_text_rotated(rich, origin_x_pt, origin_y_pt, font_size_pt, 0.0)
+}
+
+/// Position [`RichText`] runs starting at `(origin_x_pt, origin_y_pt)` using caller-supplied
+/// [`SystemFontSet`] faces for SFNT outlining and script fallback.
+#[must_use]
+pub fn outline_rich_text_with_fonts(
+    rich: &RichText,
+    origin_x_pt: f64,
+    origin_y_pt: f64,
+    font_size_pt: f64,
+    fonts: &SystemFontSet,
+) -> Vec<PositionedGlyphOutline> {
+    outline_rich_text_rotated_with_fonts(rich, origin_x_pt, origin_y_pt, font_size_pt, 0.0, fonts)
 }
 
 /// Position [`RichText`] runs starting at `(origin_x_pt, origin_y_pt)` rotated by `angle_deg`
@@ -88,8 +102,22 @@ pub fn outline_rich_text_rotated(
     font_size_pt: f64,
     angle_deg: f64,
 ) -> Vec<PositionedGlyphOutline> {
+    outline_rich_text_rotated_with_fonts(rich, origin_x_pt, origin_y_pt, font_size_pt, angle_deg, SystemFontSet::global())
+}
+
+/// Position [`RichText`] runs rotated by `angle_deg` using `fonts` for SFNT glyph outlining
+/// and non-Latin script fallback, applying BiDi visual reordering automatically.
+#[must_use]
+pub fn outline_rich_text_rotated_with_fonts(
+    rich: &RichText,
+    origin_x_pt: f64,
+    origin_y_pt: f64,
+    font_size_pt: f64,
+    angle_deg: f64,
+    fonts: &SystemFontSet,
+) -> Vec<PositionedGlyphOutline> {
     let visual: Cow<'_, RichText> = if rich_contains_rtl(rich) { Cow::Owned(reorder_rich_text_bidi(rich)) } else { Cow::Borrowed(rich) };
-    outline_visual_rich_text_rotated(&visual, origin_x_pt, origin_y_pt, font_size_pt, angle_deg)
+    outline_visual_rich_text_rotated_with_fonts(&visual, origin_x_pt, origin_y_pt, font_size_pt, angle_deg, fonts)
 }
 
 /// Position an already visually ordered [`RichText`] starting at `(origin_x_pt, origin_y_pt)`
@@ -101,6 +129,36 @@ pub fn outline_visual_rich_text_rotated(
     origin_y_pt: f64,
     font_size_pt: f64,
     angle_deg: f64,
+) -> Vec<PositionedGlyphOutline> {
+    outline_visual_rich_text_rotated_with_fonts(rich, origin_x_pt, origin_y_pt, font_size_pt, angle_deg, SystemFontSet::global())
+}
+
+/// Position an already visually ordered [`RichText`] rotated by `angle_deg` using `fonts`
+/// without re-running BiDi.
+#[must_use]
+pub fn outline_visual_rich_text_rotated_with_fonts(
+    rich: &RichText,
+    origin_x_pt: f64,
+    origin_y_pt: f64,
+    font_size_pt: f64,
+    angle_deg: f64,
+    fonts: &SystemFontSet,
+) -> Vec<PositionedGlyphOutline> {
+    outline_visual_rich_text_rotated_with_fonts_and_ttf(rich, origin_x_pt, origin_y_pt, font_size_pt, angle_deg, fonts, None)
+}
+
+/// Position an already visually ordered [`RichText`] rotated by `angle_deg`, preferring
+/// `preferred_ttf` first (when supplied), then `fonts` primary tiers, cleanroom vector strokes,
+/// and `fonts` host fallback faces without re-running BiDi.
+#[must_use]
+pub fn outline_visual_rich_text_rotated_with_fonts_and_ttf(
+    rich: &RichText,
+    origin_x_pt: f64,
+    origin_y_pt: f64,
+    font_size_pt: f64,
+    angle_deg: f64,
+    fonts: &SystemFontSet,
+    preferred_ttf: Option<&TrueTypeFont<'_>>,
 ) -> Vec<PositionedGlyphOutline> {
     let base_size = if font_size_pt.is_finite() && font_size_pt > 0.0 { font_size_pt } else { 0.0 };
     if base_size == 0.0 || !origin_x_pt.is_finite() || !origin_y_pt.is_finite() {
@@ -121,7 +179,7 @@ pub fn outline_visual_rich_text_rotated(
         let span_scale = effective_span_scale(span);
         let glyph_size = base_size * span_scale;
         let y_offset = script_baseline_offset_pt(span.script, base_size);
-        let bundled = select_bundled_font(span.weight, span.slope);
+        let family = font_family_for_span(span);
 
         for ch in span.text.chars() {
             if ch == '\n' {
@@ -165,9 +223,11 @@ pub fn outline_visual_rich_text_rotated(
                         base.above_stack = base.above_stack.saturating_add(1);
                         (if base.tall_top { 0.20 } else { 0.0 }) + f64::from(k) * 0.16
                     };
-                    if let Some(ttf) = bundled
+                    if let Some(ttf) = preferred_ttf
                         && let Some(cmds) = outline_ttf_glyph(ttf, ch, pen_x, glyph_origin_y, glyph_size, span.slope == SpanSlope::Italic)
                     {
+                        (cmds, pen_x, glyph_origin_y)
+                    } else if let Some((cmds, _)) = fonts.outline_char(family, span.weight, span.slope, ch, pen_x, glyph_origin_y, glyph_size, true) {
                         (cmds, pen_x, glyph_origin_y)
                     } else {
                         let cmds = cleanroom_vector_outline_with_y_shift(
@@ -183,9 +243,11 @@ pub fn outline_visual_rich_text_rotated(
                         (cmds, base.pen_x, base.origin_y)
                     }
                 } else {
-                    let cmds = if let Some(ttf) = bundled
+                    let cmds = if let Some(ttf) = preferred_ttf
                         && let Some(cmds) = outline_ttf_glyph(ttf, ch, pen_x, glyph_origin_y, glyph_size, span.slope == SpanSlope::Italic)
                     {
+                        cmds
+                    } else if let Some((cmds, _)) = fonts.outline_char(family, span.weight, span.slope, ch, pen_x, glyph_origin_y, glyph_size, true) {
                         cmds
                     } else {
                         cleanroom_vector_outline_with_y_shift(ch, pen_x, glyph_origin_y, glyph_size, 0.36, span.weight, span.slope, 0.0)
@@ -207,13 +269,13 @@ pub fn outline_visual_rich_text_rotated(
                 continue;
             }
 
-            let adv_em = char_advance_em_with_font(ch, span.weight, span.slope, bundled);
-            let advance = glyph_size * adv_em;
-
-            let mut commands = if ch.is_whitespace() {
+            let (mut commands, adv_em) = if ch.is_whitespace() {
                 last_base = None;
-                Vec::new()
+                let adv_em = resolve_whitespace_advance_em(ch, span.weight, span.slope, family, fonts, preferred_ttf);
+                (Vec::new(), adv_em)
             } else {
+                let (cmds, adv_em) =
+                    build_glyph_commands_with_fonts(ch, pen_x, glyph_origin_y, glyph_size, span.weight, span.slope, family, fonts, preferred_ttf);
                 last_base = Some(BaseGlyphPlacement {
                     pen_x,
                     origin_y: glyph_origin_y,
@@ -223,8 +285,9 @@ pub fn outline_visual_rich_text_rotated(
                     above_stack: 0,
                     below_stack: 0,
                 });
-                build_glyph_commands(ch, pen_x, glyph_origin_y, glyph_size, adv_em, span.weight, span.slope, bundled)
+                (cmds, adv_em)
             };
+            let advance = glyph_size * adv_em;
 
             if rotate_active && !commands.is_empty() {
                 rotate_commands(&mut commands, origin_x_pt, origin_y_pt, cos_a, sin_a);
@@ -297,23 +360,75 @@ pub fn outline_ttf_glyph(
     Some(cmds)
 }
 
+fn font_family_for_span(span: &RichSpan) -> FontFamilyKind {
+    let Some(raw) = span.font_family.as_deref() else {
+        return FontFamilyKind::UiSans;
+    };
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("mono") || lower.contains("courier") || lower.contains("consola") || lower.contains("menlo") || lower.contains("monaco") {
+        FontFamilyKind::UiMono
+    } else if lower.contains("serif") || lower.contains("times") || lower.contains("georgia") || lower.contains("cambria") {
+        FontFamilyKind::ScientificSerif
+    } else {
+        FontFamilyKind::UiSans
+    }
+}
+
+fn resolve_whitespace_advance_em(
+    ch: char,
+    weight: SpanWeight,
+    slope: SpanSlope,
+    family: FontFamilyKind,
+    fonts: &SystemFontSet,
+    preferred_ttf: Option<&TrueTypeFont<'_>>,
+) -> f64 {
+    if ch == '\t' {
+        return 4.0 * resolve_whitespace_advance_em(' ', weight, slope, family, fonts, preferred_ttf);
+    }
+    if let Some(ttf) = preferred_ttf
+        && let Some(adv) = ttf.advance_em(ch)
+    {
+        return adv;
+    }
+    if let Some(adv) = fonts.primary_tier_advance_em(family, weight, slope, ch) {
+        return adv;
+    }
+    core14_advance_em(ch, weight, slope)
+}
+
 #[allow(clippy::too_many_arguments)]
-fn build_glyph_commands(
+fn build_glyph_commands_with_fonts(
     ch: char,
     pen_x: f64,
     origin_y: f64,
     glyph_size: f64,
-    adv_em: f64,
     weight: SpanWeight,
     slope: SpanSlope,
-    bundled: Option<&TrueTypeFont<'_>>,
-) -> Vec<GlyphOutlineCmd> {
-    if let Some(ttf) = bundled
+    family: FontFamilyKind,
+    fonts: &SystemFontSet,
+    preferred_ttf: Option<&TrueTypeFont<'_>>,
+) -> (Vec<GlyphOutlineCmd>, f64) {
+    if let Some(ttf) = preferred_ttf
         && let Some(cmds) = outline_ttf_glyph(ttf, ch, pen_x, origin_y, glyph_size, slope == SpanSlope::Italic)
+        && (!cmds.is_empty() || ch.is_control())
     {
-        return cmds;
+        let adv_em = ttf.advance_em(ch).unwrap_or_else(|| core14_advance_em(ch, weight, slope));
+        return (cmds, adv_em);
     }
-    cleanroom_vector_outline(ch, pen_x, origin_y, glyph_size, adv_em, weight, slope)
+    if let Some((cmds, adv_em)) = fonts.outline_char(family, weight, slope, ch, pen_x, origin_y, glyph_size, true) {
+        return (cmds, adv_em);
+    }
+    if has_cleanroom_vector_outline(ch) {
+        let adv_em = char_advance_em_with_font(ch, weight, slope, preferred_ttf);
+        let cmds = cleanroom_vector_outline(ch, pen_x, origin_y, glyph_size, adv_em, weight, slope);
+        return (cmds, adv_em);
+    }
+    if let Some((cmds, adv_em)) = fonts.outline_char(family, weight, slope, ch, pen_x, origin_y, glyph_size, false) {
+        return (cmds, adv_em);
+    }
+    let adv_em = char_advance_em_with_font(ch, weight, slope, preferred_ttf);
+    let cmds = cleanroom_vector_outline(ch, pen_x, origin_y, glyph_size, adv_em, weight, slope);
+    (cmds, adv_em)
 }
 
 fn rotate_point(x: f64, y: f64, cx: f64, cy: f64, cos_a: f64, sin_a: f64, active: bool) -> (f64, f64) {
@@ -377,7 +492,10 @@ fn decode_ttf_glyph_recursive(
         return Some(());
     }
     if num_contours > 0 {
-        let count = usize::try_from(num_contours).ok()?.min(MAX_TTF_CONTOURS);
+        let count = usize::try_from(num_contours).ok()?;
+        if count > MAX_TTF_CONTOURS {
+            return None;
+        }
         return decode_simple_ttf_glyph(slice, count, affine, scale, origin_x, origin_y, slant, state, out);
     }
     *state.active_gids.get_mut(depth)? = gid;

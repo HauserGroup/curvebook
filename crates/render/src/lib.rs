@@ -11,7 +11,7 @@ pub mod tiff;
 
 use serde::{Deserialize, Serialize};
 
-pub use emf::{encode_emf, encode_emf_with_raster, encode_raster_emf};
+pub use emf::{MAX_EMF_OUTPUT_BYTES, MAX_EMF_PRIMITIVES, encode_emf, encode_emf_with_raster, encode_raster_emf};
 pub use png::encode_png;
 pub use rasterizer::{
     DEFAULT_CAPPED_RASTER_HEIGHT_PX, DEFAULT_CAPPED_RASTER_WIDTH_PX, MAX_CAPPED_RASTER_DIM_PX, MAX_RASTER_DIM_PX, MAX_RASTER_PIXELS,

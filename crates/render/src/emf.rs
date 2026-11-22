@@ -6,6 +6,8 @@
 //! labels, optional bottom-up BGRA `EMR_STRETCHDIBITS` bitmaps, and clean `EMR_DELETEOBJECT`
 //! handle lifecycle management.
 
+use std::borrow::Cow;
+
 use curvebook_chart::{
     ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, SceneRasterImage, StrokePaint,
     TextAnchor,
@@ -13,11 +15,17 @@ use curvebook_chart::{
 use curvebook_palette::{LineDashStyle, Rgba8};
 use curvebook_text::{
     RichSpan, RichText, SpanSlope, SpanWeight, effective_span_scale, measure_text_pt,
-    metrics::{char_advance_pt, split_rich_text_lines},
+    metrics::{char_advance_pt, reorder_rich_text_bidi, rich_contains_rtl, split_rich_text_lines},
     script_baseline_offset_pt,
 };
 
-use crate::rasterizer::{MAX_RASTER_DIM_PX, MAX_RASTER_PIXELS, RasterImage, RenderError};
+use crate::rasterizer::{RasterImage, RenderError};
+
+/// Hard ceiling on scene primitives encoded into a single EMF output.
+pub const MAX_EMF_PRIMITIVES: usize = 500_000;
+
+/// Hard ceiling on emitted EMF byte length (320 MiB, accommodating a full `MAX_RASTER_PIXELS` DIB).
+pub const MAX_EMF_OUTPUT_BYTES: usize = 320 * 1024 * 1024;
 
 /// Scale factor from PostScript points (`1/72` in) into integer EMF logical twips (`1/20` pt).
 const LOGICAL_SCALE: f64 = 20.0;
@@ -111,7 +119,8 @@ pub fn encode_emf(scene: &ChartScene) -> Result<Vec<u8>, RenderError> {
 /// Returns [`RenderError::InvalidTarget`] on invalid target geometry or
 /// [`RenderError::BufferSizeMismatch`] if `image.rgba` length does not match `width * height * 4`.
 pub fn encode_raster_emf(image: &RasterImage) -> Result<Vec<u8>, RenderError> {
-    let dpi = f64::from(image.dpi.max(1));
+    let _ = image.validated_rgba("EMF")?;
+    let dpi = f64::from(image.dpi);
     let width_pt = f64::from(image.width_px) * 72.0 / dpi;
     let height_pt = f64::from(image.height_px) * 72.0 / dpi;
     let scene = ChartScene::new(String::from("raster"), String::from("raster"), width_pt, height_pt, None);
@@ -124,8 +133,13 @@ pub fn encode_raster_emf(image: &RasterImage) -> Result<Vec<u8>, RenderError> {
 ///
 /// # Errors
 /// Returns [`RenderError`] if dimensions/coordinates are invalid, buffer sizes mismatch, or output
-/// size exceeds 32-bit EMF bounds.
+/// size or primitive count exceeds EMF bounds.
 pub fn encode_emf_with_raster(scene: &ChartScene, raster: Option<(&RasterImage, RectPt)>) -> Result<Vec<u8>, RenderError> {
+    if scene.primitives.len() > MAX_EMF_PRIMITIVES {
+        return Err(RenderError::EncodingFailed {
+            message: format!("EMF scene primitive count {} exceeds maximum {MAX_EMF_PRIMITIVES}", scene.primitives.len()),
+        });
+    }
     let metrics = SceneMetrics::from_scene(scene)?;
     let mut writer = EmfWriter::new(metrics, scene.background.unwrap_or(Rgba8::WHITE))?;
 
@@ -533,7 +547,13 @@ impl EmfWriter {
         let rcl = poly_bounds.as_ltrb(self.metrics.vp_w, self.metrics.vp_h);
         let cptl =
             u32::try_from(pts.len()).map_err(|_| RenderError::EncodingFailed { message: String::from("EMR_POLYBEZIERTO point count overflow") })?;
-        let mut payload = Vec::with_capacity(20 + pts.len() * 8);
+        let payload_len = pts
+            .len()
+            .checked_mul(8)
+            .and_then(|b| b.checked_add(20))
+            .ok_or_else(|| RenderError::EncodingFailed { message: String::from("EMR_POLYBEZIERTO payload size overflow") })?;
+        self.ensure_budget(8usize.saturating_add(payload_len))?;
+        let mut payload = Vec::with_capacity(payload_len);
         push_rect_bytes(&mut payload, rcl);
         payload.extend_from_slice(&cptl.to_le_bytes());
         for pt in pts.iter() {
@@ -562,7 +582,8 @@ impl EmfWriter {
             if line.spans.is_empty() {
                 continue;
             }
-            let total_w = measure_text_pt(line, text.font_size_pt).width_pt;
+            let visual_line: Cow<'_, RichText> = if rich_contains_rtl(line) { Cow::Owned(reorder_rich_text_bidi(line)) } else { Cow::Borrowed(line) };
+            let total_w = measure_text_pt(&visual_line, text.font_size_pt).width_pt;
             let anchor_dx = match text.anchor {
                 TextAnchor::Start => 0.0,
                 TextAnchor::Middle => -0.5 * total_w,
@@ -570,7 +591,7 @@ impl EmfWriter {
             };
             let line_y = (line_idx as f64) * line_step;
             let mut cursor_x = anchor_dx;
-            for span in &line.spans {
+            for span in &visual_line.spans {
                 if span.text.is_empty() {
                     continue;
                 }
@@ -650,7 +671,12 @@ impl EmfWriter {
         let off_dx = off_string + padded_str_bytes as u32;
         let ex_scale = (2540.0_f64 / (72.0 * LOGICAL_SCALE)) as f32;
 
-        let mut payload = Vec::with_capacity((off_dx as usize) + dx_logical.len() * 4 - 8);
+        let payload_len = (off_dx as usize)
+            .checked_add(dx_logical.len().saturating_mul(4))
+            .and_then(|n| n.checked_sub(8))
+            .ok_or_else(|| RenderError::EncodingFailed { message: String::from("EMF text payload size overflow") })?;
+        self.ensure_budget(8usize.saturating_add((payload_len + 3) & !3))?;
+        let mut payload = Vec::with_capacity(payload_len);
         push_rect_bytes(&mut payload, span_bounds.as_ltrb(self.metrics.vp_w, self.metrics.vp_h));
         payload.extend_from_slice(&GM_COMPATIBLE.to_le_bytes());
         payload.extend_from_slice(&ex_scale.to_le_bytes());
@@ -678,22 +704,8 @@ impl EmfWriter {
     }
 
     fn emit_stretch_dibits(&mut self, image: &RasterImage, dest_rect: RectPt) -> Result<(), RenderError> {
-        if image.width_px == 0
-            || image.height_px == 0
-            || image.width_px > MAX_RASTER_DIM_PX
-            || image.height_px > MAX_RASTER_DIM_PX
-            || u64::from(image.width_px).saturating_mul(u64::from(image.height_px)) > MAX_RASTER_PIXELS
-        {
-            return Err(RenderError::InvalidTarget {
-                message: format!("invalid raster dimensions {}x{} for EMF DIB", image.width_px, image.height_px),
-            });
-        }
-        let expected_len = image
-            .expected_byte_len()
-            .ok_or_else(|| RenderError::InvalidTarget { message: String::from("raster dimensions overflow byte length") })?;
-        if image.rgba.len() != expected_len {
-            return Err(RenderError::BufferSizeMismatch { expected: expected_len, actual: image.rgba.len() });
-        }
+        let rgba = image.validated_rgba("EMF")?;
+        let expected_len = rgba.len();
         if !rect_is_finite(dest_rect) || dest_rect.width <= 0.0 || dest_rect.height <= 0.0 {
             return Err(RenderError::InvalidTarget { message: String::from("EMF raster destination rectangle must be positive and finite") });
         }
@@ -714,9 +726,14 @@ impl EmfWriter {
         let off_bmi: u32 = 80;
         let cb_bmi: u32 = 40;
         let off_bits: u32 = off_bmi + cb_bmi;
-        let ppm = ((f64::from(image.dpi.max(1)) / 25.4) * 1000.0).round() as i32;
+        let ppm = ((f64::from(image.dpi) / 25.4) * 1000.0).round() as i32;
 
-        let mut payload = Vec::with_capacity(72 + 40 + expected_len);
+        let payload_len = 72usize
+            .checked_add(40)
+            .and_then(|n| n.checked_add(expected_len))
+            .ok_or_else(|| RenderError::EncodingFailed { message: String::from("EMF DIB payload size overflow") })?;
+        self.ensure_budget(8usize.saturating_add((payload_len + 3) & !3))?;
+        let mut payload = Vec::with_capacity(payload_len);
         push_rect_bytes(&mut payload, dev_bounds.as_ltrb(self.metrics.vp_w, self.metrics.vp_h));
         payload.extend_from_slice(&x0.to_le_bytes()); // xDest
         payload.extend_from_slice(&y0.to_le_bytes()); // yDest
@@ -812,6 +829,13 @@ impl EmfWriter {
         let bh = (aabb.height * scale).ceil().clamp(1.0, 2048.0) as u32;
         let sx = f64::from(bw) / aabb.width;
         let sy = f64::from(bh) / aabb.height;
+
+        let projected_dib_bytes = (bw as usize)
+            .checked_mul(bh as usize)
+            .and_then(|p| p.checked_mul(4))
+            .and_then(|b| b.checked_add(120))
+            .ok_or_else(|| RenderError::EncodingFailed { message: String::from("EMF baked raster size overflow") })?;
+        self.ensure_budget(projected_dib_bytes)?;
 
         let opaque_bg = if self.bg_color.a == u8::MAX {
             self.bg_color
@@ -1036,9 +1060,24 @@ impl EmfWriter {
         self.emit_record(i_type, &payload)
     }
 
+    fn ensure_budget(&self, additional_bytes: usize) -> Result<(), RenderError> {
+        let projected = self
+            .buf
+            .len()
+            .checked_add(additional_bytes)
+            .ok_or_else(|| RenderError::EncodingFailed { message: String::from("EMF stream byte length overflows usize") })?;
+        if projected > MAX_EMF_OUTPUT_BYTES {
+            return Err(RenderError::EncodingFailed {
+                message: format!("EMF output size {projected} bytes exceeds maximum {MAX_EMF_OUTPUT_BYTES} bytes"),
+            });
+        }
+        Ok(())
+    }
+
     fn emit_record(&mut self, i_type: u32, payload: &[u8]) -> Result<(), RenderError> {
         let padded_payload = (payload.len() + 3) & !3;
         let record_len = 8usize.saturating_add(padded_payload);
+        self.ensure_budget(record_len)?;
         let n_size = u32::try_from(record_len).map_err(|_| RenderError::EncodingFailed { message: String::from("EMF record exceeds u32 length") })?;
         self.buf.extend_from_slice(&i_type.to_le_bytes());
         self.buf.extend_from_slice(&n_size.to_le_bytes());
