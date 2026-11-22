@@ -129,6 +129,15 @@ pub(crate) fn normalize_id(raw: &str) -> String {
     raw.trim().to_ascii_lowercase().replace(['-', ' '], "_")
 }
 
+#[inline]
+pub(crate) fn safe_exp(arg: f64) -> Option<f64> {
+    if !arg.is_finite() || arg > 700.0 {
+        return None;
+    }
+    let v = arg.exp();
+    v.is_finite().then_some(v)
+}
+
 pub(crate) fn data_y_min_max(points: &[DataPoint]) -> (f64, f64) {
     let mut y_min = f64::INFINITY;
     let mut y_max = f64::NEG_INFINITY;
@@ -156,26 +165,32 @@ pub(crate) fn data_x_min_max(points: &[DataPoint]) -> (f64, f64) {
 
 /// Estimate X at which Y crosses the midpoint `(y_min + y_max) / 2` via sorted linear scan.
 pub(crate) fn estimate_x_at_ymid(points: &[DataPoint]) -> f64 {
-    if points.is_empty() {
+    let mut sorted: Vec<(f64, f64)> = points.iter().filter(|p| p.x0().is_finite() && p.y.is_finite()).map(|p| (p.x0(), p.y)).collect();
+    if sorted.is_empty() {
         return 0.0;
     }
-    let (y_min, y_max) = data_y_min_max(points);
-    let y_mid = 0.5 * (y_min + y_max);
-    let mut sorted: Vec<(f64, f64)> = points.iter().map(|p| (p.x0(), p.y)).collect();
+    let mut y_min = f64::INFINITY;
+    let mut y_max = f64::NEG_INFINITY;
+    for &(_, y) in &sorted {
+        y_min = y_min.min(y);
+        y_max = y_max.max(y);
+    }
+    let y_mid = 0.5 * y_min + 0.5 * y_max;
     sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
     for w in sorted.windows(2) {
         let (x0, y0) = w[0];
         let (x1, y1) = w[1];
         if (y0 <= y_mid && y1 >= y_mid) || (y0 >= y_mid && y1 <= y_mid) {
             let dy = y1 - y0;
-            if dy.abs() > 1e-15 {
+            if dy.abs() > 1e-15 && dy.is_finite() {
                 let frac = ((y_mid - y0) / dy).clamp(0.0, 1.0);
-                return x0 + frac * (x1 - x0);
+                let est = x0 + frac * (x1 - x0);
+                return if est.is_finite() { est } else { 0.5 * x0 + 0.5 * x1 };
             }
-            return 0.5 * (x0 + x1);
+            return 0.5 * x0 + 0.5 * x1;
         }
     }
-    0.5 * (sorted.first().map_or(0.0, |v| v.0) + sorted.last().map_or(0.0, |v| v.0))
+    0.5 * sorted[0].0 + 0.5 * sorted[sorted.len() - 1].0
 }
 
 #[cfg(test)]

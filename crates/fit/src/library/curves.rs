@@ -38,7 +38,7 @@
 //!   two-regime straight-line data. *Technometrics* 16.
 //! - Huxley, J. S. (1932). *Problems of Relative Growth*. London: Methuen.
 
-use crate::library::{BuiltinEquationSpec, ParametricModel, data_x_min_max, data_y_min_max, resolve_from_specs, spec_ids};
+use crate::library::{BuiltinEquationSpec, ParametricModel, data_x_min_max, data_y_min_max, resolve_from_specs, safe_exp, spec_ids};
 use crate::types::{DataPoint, DerivedScalar, EquationCategory};
 use curvebook_doc::{ParameterRule, ParameterScope};
 
@@ -216,15 +216,6 @@ pub const CURVE_EQUATION_IDS: &[&str] = &CURVE_EQUATION_ID_ARRAY;
 
 fn names(slice: &[&str]) -> Vec<String> {
     slice.iter().map(|s| (*s).to_owned()).collect()
-}
-
-#[inline]
-fn safe_exp(arg: f64) -> Option<f64> {
-    if !arg.is_finite() || arg > 700.0 {
-        return None;
-    }
-    let v = arg.exp();
-    if v.is_finite() { Some(v) } else { None }
 }
 
 /// Resolve any non-pharmacology, non-NIST built-in equation ID into a [`ParametricModel`].
@@ -806,7 +797,11 @@ impl ParametricModel for GaussianCurve {
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
         let (xmin, xmax) = data_x_min_max(points);
-        let peak_x = points.iter().max_by(|a, b| a.y.total_cmp(&b.y)).map_or(0.5 * (xmin + xmax), |p| p.x0());
+        let peak_x = points
+            .iter()
+            .filter(|p| p.x0().is_finite() && p.y.is_finite())
+            .max_by(|a, b| a.y.total_cmp(&b.y))
+            .map_or(0.5 * (xmin + xmax), |p| p.x0());
         let sd = ((xmax - xmin) / 6.0).max(1e-3);
         if self.with_baseline { vec![ymin, ymax - ymin, peak_x, sd] } else { vec![ymax, peak_x, sd] }
     }
@@ -980,15 +975,23 @@ impl ParametricModel for WeibullPeak {
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
         let (amp, scale, shape) = (params[0], params[1], params[2]);
-        if x0 < 0.0 || scale <= 0.0 || shape <= 0.0 {
+        if !x0.is_finite() || x0 < 0.0 || !amp.is_finite() || !scale.is_finite() || scale <= 0.0 || !shape.is_finite() || shape <= 0.0 {
             return None;
         }
         if x0 == 0.0 {
-            return Some(0.0);
+            if (shape - 1.0).abs() <= 1e-15 {
+                let y = amp / scale;
+                return y.is_finite().then_some(y);
+            }
+            return (shape > 1.0).then_some(0.0);
         }
         let u = x0 / scale;
+        if !u.is_finite() {
+            return None;
+        }
         let e = safe_exp(-u.powf(shape))?;
-        Some(amp * (shape / scale) * u.powf(shape - 1.0) * e)
+        let y = amp * (shape / scale) * u.powf(shape - 1.0) * e;
+        y.is_finite().then_some(y)
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (_, ymax) = data_y_min_max(points);

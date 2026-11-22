@@ -318,11 +318,16 @@ impl CompiledDslModel {
         self.ode_inits.get(idx).filter(|(f, _)| f.matches(ds_idx)).map(|(_, init)| init)
     }
 
-    /// Solve the implicit equation `F(x, y; theta) = 0` for `y`: bracket a sign change over a
-    /// fixed list of trial `y` values and refine with Brent (1973); if no bracket is found, fall
-    /// back to a step-clamped Newton iteration with central-difference derivative and accept
-    /// only `|F| < 1e-7`. Only one root is returned (the first bracket found), so equations with
-    /// several real roots in `y` may select a branch that depends on the trial order.
+    /// Solve the implicit equation `F(x, y; theta) = 0` for `y`: test `y = 0`, scan positive and
+    /// negative half-lines outward across a multi-decade, scale-augmented probe grid to bracket a
+    /// sign change, refine with Brent (1973) at scale-matched tolerances (`abs_tol` scaled to the
+    /// bracket, `rel_tol = 1e-13`, with a tight `[0, root]` re-bracket near zero), and validate the
+    /// root against poles/discontinuities via `verify_implicit_root` (`|F(root)| <= max(1e-2 *
+    /// local_var, 1e-3 * end_min, 1e-12 * end_max)`). If no sign change is bracketed, fall back to
+    /// damped Newton iteration (`implicit_newton_fallback`) from the lowest-`|F|` probes using
+    /// scale-invariant residual and step tolerances (`|F| <= 1e-12 * ref_f` mid-loop or `<= 1e-11 *
+    /// ref_f` on exit). Only one verified root is returned (the first found), so equations with
+    /// several real roots in `y` may select a branch that depends on the probe order.
     pub(in crate::dsl) fn eval_implicit(&self, x: &[f64], params: &[f64], ds_idx: usize) -> Option<f64> {
         let prog = self.select_program(ds_idx)?;
         let f = |y: f64| -> f64 { eval_bytecode(prog, x, y, params, ds_idx).unwrap_or(f64::NAN) };
@@ -582,7 +587,14 @@ impl ParametricModel for CompiledDslModel {
         }
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
-        let mean_y = if points.is_empty() { 1.0 } else { points.iter().map(|p| p.y).sum::<f64>() / points.len() as f64 };
+        let finite_ys: Vec<f64> = points.iter().filter(|p| p.x0().is_finite() && p.y.is_finite()).map(|p| p.y).collect();
+        let mean_y = if finite_ys.is_empty() {
+            1.0
+        } else {
+            let n = finite_ys.len() as f64;
+            let avg = finite_ys.iter().map(|&y| y / n).sum::<f64>();
+            if avg.is_finite() { avg } else { 1.0 }
+        };
         let mut guesses: Vec<f64> = self
             .param_names
             .iter()
