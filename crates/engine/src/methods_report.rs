@@ -1138,7 +1138,7 @@ fn resolve_mi_effective_settings(res: &ResultSheet, requested_m: usize, requeste
 
 fn describe_multivariate(s: &MultivariateSpec, res: &ResultSheet, source_ds: Option<&DataSheet>) -> Vec<ReportBlock> {
     match s {
-        MultivariateSpec::Pca { standardize, parallel_analysis_seed } => {
+        MultivariateSpec::Pca { standardize, parallel_analysis_seed, pcr_outcome_column } => {
             let matrix_kind =
                 if *standardize { "standardized correlation matrix (z-scored variables)" } else { "unstandardized sample covariance matrix" };
             let pa_note = match parallel_analysis_seed {
@@ -1147,9 +1147,15 @@ fn describe_multivariate(s: &MultivariateSpec, res: &ResultSheet, source_ds: Opt
                 ),
                 None => String::from(" Component retention was evaluated using the Kaiser eigenvalue criterion."),
             };
-            vec![ReportBlock::Paragraph(vec![plain(format!(
-                "Principal component analysis (PCA) decomposed the {matrix_kind} across complete multivariate rows.{pa_note}"
-            ))])]
+            let prose = if let Some(outcome_col) = pcr_outcome_column {
+                let outcome_name = column_title_at(source_ds, *outcome_col);
+                format!(
+                    "Principal component regression (PCR) decomposed the predictor {matrix_kind} across complete multivariate rows while strictly excluding outcome `{outcome_name}` (column {outcome_col}) to prevent target leakage.{pa_note} Retained orthogonal component scores were then regressed on `{outcome_name}` by ordinary least squares and back-transformed onto the original predictor scale."
+                )
+            } else {
+                format!("Principal component analysis (PCA) decomposed the {matrix_kind} across complete multivariate rows.{pa_note}")
+            };
+            vec![ReportBlock::Paragraph(vec![plain(prose)])]
         }
         MultivariateSpec::CorrelationMatrix { spearman_rank } => {
             let corr_kind = if *spearman_rank { "Spearman rank correlation (rho)" } else { "Pearson product-moment correlation (r)" };

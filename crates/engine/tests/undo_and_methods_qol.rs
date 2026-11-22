@@ -638,7 +638,7 @@ fn qol6_contingency_regression_and_multivariate_methods_reports() {
     let mut pca_spec = AnalysisSpec::new(
         "res-pca",
         "mv-1",
-        AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: Some(42) }),
+        AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: Some(42), pcr_outcome_column: None }),
     )
     .unwrap();
     pca_spec.selected_data_sets = vec![0, 1, 2];

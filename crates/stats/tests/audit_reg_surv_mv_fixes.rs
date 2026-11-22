@@ -233,7 +233,7 @@ fn audit_32_selected_data_sets_rejects_oob_and_duplicates_across_modules() {
         }),
         AnalysisKind::PassingBablok(PassingBablokSpec { x_column: 1, y_column: 0 }),
         AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false }),
-        AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: None }),
+        AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: None, pcr_outcome_column: None }),
         AnalysisKind::Multivariate(MultivariateSpec::Clustering {
             k_means_k: Some(2),
             distance: ClusterDistance::Euclidean,

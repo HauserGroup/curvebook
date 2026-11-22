@@ -159,6 +159,9 @@ impl EditAnalysisParametersState {
         }
         if let Some(spec) = &mut self.draft {
             spec.selected_data_sets.clone_from(&self.pca_predictors);
+            if let AnalysisKind::Multivariate(MultivariateSpec::Pca { pcr_outcome_column, .. }) = &mut spec.kind {
+                *pcr_outcome_column = self.pcr_outcome_column;
+            }
         }
     }
 
@@ -169,7 +172,12 @@ impl EditAnalysisParametersState {
         }
         self.pcr_outcome_column = if self.pcr_outcome_column == Some(col) { None } else { Some(col) };
         if let Some(spec) = &mut self.draft {
-            spec.selected_data_sets.retain(|&c| Some(c) != self.pcr_outcome_column);
+            if let Some(outcome) = self.pcr_outcome_column {
+                spec.selected_data_sets.retain(|&c| c != outcome);
+            }
+            if let AnalysisKind::Multivariate(MultivariateSpec::Pca { pcr_outcome_column, .. }) = &mut spec.kind {
+                *pcr_outcome_column = self.pcr_outcome_column;
+            }
         }
         Ok(())
     }
@@ -186,8 +194,22 @@ impl EditAnalysisParametersState {
         } else {
             Vec::new()
         };
-        self.pcr_outcome_column = None;
+        self.pcr_outcome_column = match &result.analysis.kind {
+            AnalysisKind::Multivariate(MultivariateSpec::Pca { pcr_outcome_column, .. }) => *pcr_outcome_column,
+            _ => None,
+        };
         self.sync_rule_flags_from_kind();
+        match &result.analysis.kind {
+            AnalysisKind::Contingency(cg) => {
+                self.contingency_odds_ratio_checked = cg.compute_odds_and_risk_ratios;
+                self.contingency_relative_risk_checked = cg.compute_odds_and_risk_ratios;
+                self.contingency_attributable_risk_checked = cg.compute_odds_and_risk_ratios;
+            }
+            AnalysisKind::TwoGroupComparison(two) => {
+                self.hodges_lehmann_ci = matches!(two.method, TwoGroupMethod::MannWhitneyU | TwoGroupMethod::WilcoxonSignedRank);
+            }
+            _ => {}
+        }
     }
 
     /// Capture compatible sub-method selections before a design/Gaussian toggle (`RV-76`, `RV-78`).
@@ -281,10 +303,24 @@ impl EditAnalysisParametersState {
                     TwoGroupMethod::PairedT | TwoGroupMethod::RatioPairedT | TwoGroupMethod::WilcoxonSignedRank | TwoGroupMethod::PairedSignTest
                 );
                 self.welch_correction = spec.method == TwoGroupMethod::WelchT;
+                if !crate::modal_predicates::r4_two_group_graph_differences(spec.method).enabled {
+                    self.graph_differences = false;
+                }
+                if !crate::modal_predicates::r4_two_group_nonparametric_options(spec.method).enabled {
+                    self.graph_ranks = false;
+                    self.hodges_lehmann_ci = false;
+                }
             }
-            AnalysisKind::Contingency(spec) => {
-                self.contingency_odds_ratio_checked = spec.compute_odds_and_risk_ratios;
-                self.contingency_relative_risk_checked = spec.compute_odds_and_risk_ratios;
+            AnalysisKind::Contingency(cg) => {
+                self.contingency_odds_ratio_checked = cg.compute_odds_and_risk_ratios;
+                self.contingency_relative_risk_checked = cg.compute_odds_and_risk_ratios;
+                if !cg.compute_odds_and_risk_ratios {
+                    self.contingency_attributable_risk_checked = false;
+                }
+            }
+            AnalysisKind::Multivariate(MultivariateSpec::Pca { pcr_outcome_column, .. }) => {
+                self.pca_predictors = self.draft.as_ref().map(|d| d.selected_data_sets.clone()).unwrap_or_default();
+                self.pcr_outcome_column = *pcr_outcome_column;
             }
             AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { .. }) => {
                 self.correlation_all_pairs = true;
@@ -362,12 +398,118 @@ impl EditAnalysisParametersState {
         Ok(())
     }
 
+    fn apply_two_group_param_patch(&mut self, key: &str, val: &Value) -> Result<bool, String> {
+        match key {
+            "welch_correction" | "edit.welch_correction" | "edit.two_group.welch" => {
+                let w = val.as_bool().ok_or_else(|| String::from("`welch_correction` must be boolean"))?;
+                if let Some(spec) = &mut self.draft
+                    && let AnalysisKind::TwoGroupComparison(mut two) = spec.kind.clone()
+                {
+                    if w && !crate::modal_predicates::r4_two_group_welch_correction(two.method).enabled {
+                        return Err(String::from("Welch's correction is disabled for paired or nonparametric tests."));
+                    }
+                    self.welch_correction = w;
+                    two.method = if w { TwoGroupMethod::WelchT } else { TwoGroupMethod::UnpairedT };
+                    spec.update_kind(AnalysisKind::TwoGroupComparison(two));
+                    self.sync_rule_flags_from_kind();
+                }
+                Ok(true)
+            }
+            "graph_differences" | "edit.two_group.graph_differences" => {
+                let b = val.as_bool().ok_or_else(|| String::from("`graph_differences` must be boolean"))?;
+                if let Some(spec) = &mut self.draft
+                    && let AnalysisKind::TwoGroupComparison(two) = &spec.kind
+                    && b
+                    && !crate::modal_predicates::r4_two_group_graph_differences(two.method).enabled
+                {
+                    return Err(String::from("Estimation plot of differences is disabled in nonparametric/rank mode."));
+                }
+                self.graph_differences = b;
+                Ok(true)
+            }
+            "graph_ranks" | "edit.two_group.graph_ranks" => {
+                let b = val.as_bool().ok_or_else(|| String::from("`graph_ranks` must be boolean"))?;
+                if let Some(spec) = &mut self.draft
+                    && let AnalysisKind::TwoGroupComparison(two) = &spec.kind
+                    && b
+                    && !crate::modal_predicates::r4_two_group_nonparametric_options(two.method).enabled
+                {
+                    return Err(String::from("Rank-based option is disabled in Gaussian parametric mode."));
+                }
+                self.graph_ranks = b;
+                Ok(true)
+            }
+            "hodges_lehmann_ci" | "hodges_lehmann" | "edit.two_group.hodges_lehmann" => {
+                let b = val.as_bool().ok_or_else(|| String::from("`hodges_lehmann_ci` must be boolean"))?;
+                if let Some(spec) = &mut self.draft
+                    && let AnalysisKind::TwoGroupComparison(two) = &spec.kind
+                    && b
+                    && !crate::modal_predicates::r4_two_group_nonparametric_options(two.method).enabled
+                {
+                    return Err(String::from("Hodges-Lehmann CI is disabled in Gaussian parametric mode."));
+                }
+                self.hodges_lehmann_ci = b;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn set_draft_pcr_outcome(&mut self, outcome: Option<usize>) {
+        self.pcr_outcome_column = outcome;
+        if let Some(spec) = &mut self.draft {
+            if let Some(col) = outcome {
+                spec.selected_data_sets.retain(|&c| c != col);
+            }
+            if let AnalysisKind::Multivariate(MultivariateSpec::Pca { pcr_outcome_column, .. }) = &mut spec.kind {
+                *pcr_outcome_column = outcome;
+            }
+        }
+    }
+
+    fn apply_pca_param_patch(&mut self, key: &str, val: &Value) -> Result<bool, String> {
+        match key {
+            "selected_data_sets" | "edit.selected_data_sets" | "edit.transform.selected_data_sets" | "pca_predictors" | "edit.pca.predictors" => {
+                let cols = parse_usize_list(val, key)?;
+                let is_pca_key = matches!(key, "pca_predictors" | "edit.pca.predictors");
+                let is_pca_draft = self.draft.as_ref().is_some_and(|s| matches!(s.kind, AnalysisKind::Multivariate(MultivariateSpec::Pca { .. })));
+                if is_pca_key || is_pca_draft {
+                    self.pca_predictors.clone_from(&cols);
+                    if self.pcr_outcome_column.is_some_and(|y| cols.contains(&y)) {
+                        self.set_draft_pcr_outcome(None);
+                    }
+                }
+                if let Some(spec) = &mut self.draft {
+                    spec.selected_data_sets = cols;
+                }
+                Ok(true)
+            }
+            "pcr_outcome_column" | "edit.pcr.outcome_column" => {
+                if val.is_null() {
+                    self.set_draft_pcr_outcome(None);
+                } else {
+                    let col = parse_usize_min(val, key, 0)?;
+                    if self.pca_predictors.contains(&col) {
+                        return Err(format!(
+                            "Column {col} is checked as a PCA input predictor and cannot be selected as PCR outcome (target leakage guard)."
+                        ));
+                    }
+                    self.set_draft_pcr_outcome(Some(col));
+                }
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     fn apply_single_param_patch(&mut self, key: &str, val: &Value, preset: &LocalePreset) -> Result<(), String> {
         if self.apply_contingency_param_patch(key, val, preset)?
             || self.apply_transform_param_patch(key, val)?
             || self.apply_pvalue_stack_param_patch(key, val, preset)?
             || self.apply_power_analysis_param_patch(key, val, preset)?
             || self.apply_r9_param_patch(key, val)?
+            || self.apply_two_group_param_patch(key, val)?
+            || self.apply_pca_param_patch(key, val)?
         {
             return Ok(());
         }
@@ -403,53 +545,6 @@ impl EditAnalysisParametersState {
                 if self.compare_against_control {
                     self.set_anova_multiplicity(MultiplicityMethod::Dunnett { control_column: col });
                 }
-            }
-            "welch_correction" | "edit.welch_correction" | "edit.two_group.welch" => {
-                let w = val.as_bool().ok_or_else(|| String::from("`welch_correction` must be boolean"))?;
-                if let Some(spec) = &mut self.draft
-                    && let AnalysisKind::TwoGroupComparison(mut two) = spec.kind.clone()
-                {
-                    if w && !crate::modal_predicates::r4_two_group_welch_correction(two.method).enabled {
-                        return Err(String::from("Welch's correction is disabled for paired or nonparametric tests."));
-                    }
-                    self.welch_correction = w;
-                    two.method = if w { TwoGroupMethod::WelchT } else { TwoGroupMethod::UnpairedT };
-                    spec.update_kind(AnalysisKind::TwoGroupComparison(two));
-                    self.sync_rule_flags_from_kind();
-                }
-            }
-            "graph_differences" | "edit.two_group.graph_differences" => {
-                let b = val.as_bool().ok_or_else(|| String::from("`graph_differences` must be boolean"))?;
-                if let Some(spec) = &mut self.draft
-                    && let AnalysisKind::TwoGroupComparison(two) = &spec.kind
-                    && b
-                    && !crate::modal_predicates::r4_two_group_graph_differences(two.method).enabled
-                {
-                    return Err(String::from("Estimation plot of differences is disabled in nonparametric/rank mode."));
-                }
-                self.graph_differences = b;
-            }
-            "graph_ranks" | "edit.two_group.graph_ranks" => {
-                let b = val.as_bool().ok_or_else(|| String::from("`graph_ranks` must be boolean"))?;
-                if let Some(spec) = &mut self.draft
-                    && let AnalysisKind::TwoGroupComparison(two) = &spec.kind
-                    && b
-                    && !crate::modal_predicates::r4_two_group_nonparametric_options(two.method).enabled
-                {
-                    return Err(String::from("Rank-based option is disabled in Gaussian parametric mode."));
-                }
-                self.graph_ranks = b;
-            }
-            "hodges_lehmann_ci" | "hodges_lehmann" | "edit.two_group.hodges_lehmann" => {
-                let b = val.as_bool().ok_or_else(|| String::from("`hodges_lehmann_ci` must be boolean"))?;
-                if let Some(spec) = &mut self.draft
-                    && let AnalysisKind::TwoGroupComparison(two) = &spec.kind
-                    && b
-                    && !crate::modal_predicates::r4_two_group_nonparametric_options(two.method).enabled
-                {
-                    return Err(String::from("Hodges-Lehmann CI is disabled in Gaussian parametric mode."));
-                }
-                self.hodges_lehmann_ci = b;
             }
             "correlation_all_pairs" | "edit.correlation_all_pairs" => {
                 if let Some(b) = val.as_bool() {
@@ -506,38 +601,6 @@ impl EditAnalysisParametersState {
                     _ => return Err(String::from("`custom_title` must be a string or null")),
                 };
                 self.set_custom_title(parsed)?;
-            }
-            "selected_data_sets" | "edit.selected_data_sets" | "edit.transform.selected_data_sets" => {
-                let cols = parse_usize_list(val, key)?;
-                if let Some(spec) = &mut self.draft {
-                    if matches!(spec.kind, AnalysisKind::Multivariate(MultivariateSpec::Pca { .. })) {
-                        self.pca_predictors.clone_from(&cols);
-                    }
-                    spec.selected_data_sets = cols;
-                }
-            }
-            "pca_predictors" | "edit.pca.predictors" => {
-                let cols = parse_usize_list(val, key)?;
-                self.pca_predictors.clone_from(&cols);
-                if let Some(spec) = &mut self.draft {
-                    spec.selected_data_sets = cols;
-                }
-            }
-            "pcr_outcome_column" | "edit.pcr.outcome_column" => {
-                if val.is_null() {
-                    self.pcr_outcome_column = None;
-                } else {
-                    let col = parse_usize_min(val, key, 0)?;
-                    if self.pca_predictors.contains(&col) {
-                        return Err(format!(
-                            "Column {col} is checked as a PCA input predictor and cannot be selected as PCR outcome (target leakage guard)."
-                        ));
-                    }
-                    self.pcr_outcome_column = Some(col);
-                    if let Some(spec) = &mut self.draft {
-                        spec.selected_data_sets.retain(|&c| c != col);
-                    }
-                }
             }
             "geisser_greenhouse" | "edit.geisser_greenhouse" | "edit.sphericity.geisser_greenhouse" => {
                 if !self.paired_or_matched {
@@ -645,36 +708,53 @@ impl EditAnalysisParametersState {
             }
             "edit.contingency.ci.baptista_pike" => {
                 let s = val.as_str().ok_or_else(|| format!("`{key}` must be a string"))?;
+                if !matches!(s, "Baptista-Pike" | "Woolf") {
+                    return Err(format!("unsupported OR CI method `{s}`; expected `Baptista-Pike` or `Woolf`"));
+                }
                 self.contingency_or_ci_method = s.to_owned();
             }
             "edit.contingency.ci.koopman" => {
                 let s = val.as_str().ok_or_else(|| format!("`{key}` must be a string"))?;
+                if !matches!(s, "Koopman" | "Katz") {
+                    return Err(format!("unsupported RR CI method `{s}`; expected `Koopman` or `Katz`"));
+                }
                 self.contingency_rr_ci_method = s.to_owned();
             }
             "edit.contingency.ci.newcombe_wilson" => {
                 let s = val.as_str().ok_or_else(|| format!("`{key}` must be a string"))?;
+                if !matches!(s, "Newcombe-Wilson" | "Wald") {
+                    return Err(format!("unsupported ARR CI method `{s}`; expected `Newcombe-Wilson` or `Wald`"));
+                }
                 self.contingency_arr_ci_method = s.to_owned();
             }
             "edit.contingency.ci.wilson_brown" => {
                 let s = val.as_str().ok_or_else(|| format!("`{key}` must be a string"))?;
+                if !matches!(s, "Wilson-Brown" | "Clopper-Pearson") {
+                    return Err(format!("unsupported diagnostic CI method `{s}`; expected `Wilson-Brown` or `Clopper-Pearson`"));
+                }
                 self.contingency_diag_ci_method = s.to_owned();
             }
             "compute_odds_and_risk_ratios" | "contingency_odds_ratio_checked" | "edit.contingency.odds_ratio" => {
-                if let Some(b) = val.as_bool() {
-                    self.contingency_odds_ratio_checked = b;
-                    self.contingency_relative_risk_checked = b;
-                    self.update_contingency_spec(|c| c.compute_odds_and_risk_ratios = b);
+                let b = val.as_bool().ok_or_else(|| format!("`{key}` must be boolean"))?;
+                self.contingency_odds_ratio_checked = b;
+                self.contingency_relative_risk_checked = b;
+                if !b {
+                    self.contingency_attributable_risk_checked = false;
                 }
+                self.update_contingency_spec(|c| c.compute_odds_and_risk_ratios = b);
             }
             "contingency_attributable_risk_checked" | "attributable_risk" | "compute_attributable_risk" | "edit.contingency.attributable_risk" => {
-                if let Some(b) = val.as_bool() {
-                    self.contingency_attributable_risk_checked = b;
+                let b = val.as_bool().ok_or_else(|| format!("`{key}` must be boolean"))?;
+                self.contingency_attributable_risk_checked = b;
+                if b {
+                    self.update_contingency_spec(|c| c.compute_odds_and_risk_ratios = true);
+                } else if !self.contingency_odds_ratio_checked && !self.contingency_relative_risk_checked {
+                    self.update_contingency_spec(|c| c.compute_odds_and_risk_ratios = false);
                 }
             }
             "compute_sensitivity_specificity" | "sensitivity_specificity" | "edit.contingency.sensitivity_specificity" => {
-                if let Some(b) = val.as_bool() {
-                    self.update_contingency_spec(|c| c.compute_sensitivity_specificity = b);
-                }
+                let b = val.as_bool().ok_or_else(|| format!("`{key}` must be boolean"))?;
+                self.update_contingency_spec(|c| c.compute_sensitivity_specificity = b);
             }
             "contingency_method" => {
                 if let Some(raw) = val.as_str() {
@@ -1523,8 +1603,8 @@ impl EditAnalysisParametersState {
                 map.insert(String::from("correlation_all_pairs"), json!(self.correlation_all_pairs));
                 map.insert(String::from("correlation_heatmap"), json!(self.correlation_heatmap));
             }
-            if let Some(outcome_col) = self.pcr_outcome_column {
-                map.insert(String::from("pcr_outcome_column"), json!(outcome_col));
+            if matches!(spec.kind, AnalysisKind::Multivariate(MultivariateSpec::Pca { .. })) {
+                map.insert(String::from("pcr_outcome_column"), json!(self.pcr_outcome_column));
             }
         }
         Some(ToolCommandIntent::new("analysis.updateParams", payload))
@@ -1557,6 +1637,50 @@ impl EditAnalysisParametersState {
                         "initialized": true,
                     }),
                 ));
+            }
+        }
+        if let (Some(spec), Some(d)) = (&self.draft, doc)
+            && self.graph_differences
+            && let AnalysisKind::TwoGroupComparison(two) = &spec.kind
+            && crate::modal_predicates::r4_two_group_graph_differences(two.method).enabled
+            && let Some(source_ds) = d.data_sheet(&spec.source_sheet_id)
+            && matches!(source_ds.archetype, curvebook_doc::TableArchetype::Column(_))
+        {
+            let already_has_before_after = d.graph_sheets.iter().any(|g| {
+                g.spec.primary_source_sheet_id == spec.source_sheet_id
+                    && g.spec.series.iter().any(|s| matches!(s.gdo, curvebook_doc::GraphicalDataObject::BeforeAfterLines { .. }))
+            });
+            if !already_has_before_after {
+                let base_id = format!("{}_diff", spec.source_sheet_id.as_str());
+                let mut cand = base_id.clone();
+                let mut suffix = 2_usize;
+                while let Ok(sid) = SheetId::try_new(cand.as_str())
+                    && d.sheet_section(&sid).is_some()
+                {
+                    cand = format!("{base_id}_{suffix}");
+                    suffix += 1;
+                }
+                if SheetId::try_new(cand.as_str()).is_ok() {
+                    intents.push(ToolCommandIntent::new(
+                        "graph.create",
+                        json!({
+                            "sheet_id": cand,
+                            "data_sheet_id": spec.source_sheet_id.as_str(),
+                            "kind": GraphKind::Column,
+                            "title": format!("{} (Before-After)", source_ds.title),
+                            "initialized": true,
+                        }),
+                    ));
+                    intents.push(ToolCommandIntent::new(
+                        "graph.setKind",
+                        json!({
+                            "sheet_id": cand,
+                            "option_id": "col.before_after",
+                            "kind": GraphKind::Column,
+                            "reset_series_style": true,
+                        }),
+                    ));
+                }
             }
         }
         intents

@@ -94,7 +94,7 @@ fn fa_sec06_01_rm_one_way_and_friedman_reject_presummarized_column_table() {
 fn fa_sec06_02_multivariate_guards_presummarized_and_handles_xy_replicates() {
     let mv_kinds = vec![
         MultivariateSpec::CorrelationMatrix { spearman_rank: false },
-        MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: None },
+        MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: None, pcr_outcome_column: None },
         MultivariateSpec::Clustering { k_means_k: Some(2), distance: ClusterDistance::Euclidean, linkage: ClusterLinkage::Ward, k_sweep_max: None },
         MultivariateSpec::MultipleImputation { imputations_m: 3, max_iters: 5, seed: 42, response_column: None, predictor_columns: Vec::new() },
     ];

@@ -159,7 +159,7 @@ pub(super) fn render_multivariate_design_controls(
 ) {
     let MultivariateDesignCtx { doc, ep, spec, mv } = mvx;
     match mv {
-        MultivariateSpec::Pca { standardize, parallel_analysis_seed } => {
+        MultivariateSpec::Pca { standardize, parallel_analysis_seed, pcr_outcome_column } => {
             render_section_title(ui, tokens, "PCA Matrix & Component Retention");
             if render_modal_radio(
                 ui,
@@ -197,6 +197,33 @@ pub(super) fn render_multivariate_design_controls(
                     *seed = if seed.is_some() { None } else { Some(42) };
                 }
                 intents.push_set_edit_params_draft(next);
+            }
+            if let Some(ds) = resolve_source_data_sheet(doc, &spec.source_sheet_id)
+                && let TableArchetype::MultipleVariables(mv_tbl) = &ds.archetype
+            {
+                let selected_outcome = (*pcr_outcome_column).or(ep.pcr_outcome_column);
+                ui.add_space(4.0);
+                render_section_title(ui, tokens, "Optional PCR Outcome Variable (Supervised Mode)");
+                ui.horizontal_wrapped(|ui| {
+                    for (idx, var) in mv_tbl.variables.iter().enumerate() {
+                        if matches!(var.role, curvebook_doc::VariableRole::Label | curvebook_doc::VariableRole::Categorical) {
+                            continue;
+                        }
+                        let en = crate::modal_predicates::r10_pcr_outcome_column(idx, &spec.selected_data_sets);
+                        if render_modal_seg_btn(ui, tokens, meta, &format!("edit.pcr.outcome.{idx}"), &var.title, selected_outcome == Some(idx), &en)
+                        {
+                            let mut next = spec.clone();
+                            let next_outcome = if selected_outcome == Some(idx) { None } else { Some(idx) };
+                            if let AnalysisKind::Multivariate(MultivariateSpec::Pca { pcr_outcome_column: out_col, .. }) = &mut next.kind {
+                                *out_col = next_outcome;
+                            }
+                            if let Some(y_col) = next_outcome {
+                                next.selected_data_sets.retain(|&c| c != y_col);
+                            }
+                            intents.push_set_edit_params_draft(next);
+                        }
+                    }
+                });
             }
         }
         MultivariateSpec::CorrelationMatrix { spearman_rank } => {

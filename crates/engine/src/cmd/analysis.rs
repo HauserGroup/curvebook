@@ -1577,6 +1577,14 @@ fn validate_grouped_or_xy_row_tests(label: &str, total: usize, selected: &[usize
 
 fn validate_analysis_spec_semantics(spec: &AnalysisSpec) -> Result<(), EngineError> {
     match &spec.kind {
+        AnalysisKind::Multivariate(MultivariateSpec::Pca { pcr_outcome_column: Some(outcome_col), .. }) => {
+            if spec.selected_data_sets.contains(outcome_col) {
+                return Err(EngineError::with_code(
+                    ErrorCode::BadInput,
+                    format!("PCR `pcr_outcome_column` ({outcome_col}) cannot overlap `selected_data_sets` predictors (target leakage)"),
+                ));
+            }
+        }
         AnalysisKind::OutlierDetection(OutlierSpec::Rout { fdr_q_percent }) => {
             if !fdr_q_percent.is_finite() || *fdr_q_percent <= 0.0 || *fdr_q_percent > 100.0 {
                 return Err(EngineError::with_code(ErrorCode::BadInput, format!("ROUT `fdr_q_percent` ({fdr_q_percent}) must lie in (0, 100]")));
@@ -1651,9 +1659,15 @@ fn persist_default_mv_columns(source_ds: &DataSheet, spec: &mut AnalysisSpec, ex
     match &mut spec.kind {
         AnalysisKind::Multivariate(mv_spec) => {
             if spec.selected_data_sets.is_empty() {
-                let defaults = default_multivariate_numeric_columns(mv);
-                let skip_all_continuous_explicit_pca =
-                    explicit_empty_selection && matches!(mv_spec, MultivariateSpec::Pca { .. }) && defaults.len() == mv.variables.len();
+                let pcr_outcome = match mv_spec {
+                    MultivariateSpec::Pca { pcr_outcome_column, .. } => *pcr_outcome_column,
+                    _ => None,
+                };
+                let defaults: Vec<usize> = default_multivariate_numeric_columns(mv).into_iter().filter(|c| Some(*c) != pcr_outcome).collect();
+                let skip_all_continuous_explicit_pca = explicit_empty_selection
+                    && pcr_outcome.is_none()
+                    && matches!(mv_spec, MultivariateSpec::Pca { .. })
+                    && defaults.len() == mv.variables.len();
                 if !skip_all_continuous_explicit_pca {
                     spec.selected_data_sets = defaults;
                 }
@@ -2565,7 +2579,9 @@ fn resolve_other_stats_shorthand(name: &str, params: &Value) -> Result<Option<An
         "glm" | "linear_glm" | "multiple_linear" => AnalysisKind::GeneralizedLinearModel(default_glm(GlmFamily::Linear)),
         "logistic_glm" | "multiple_logistic" => AnalysisKind::GeneralizedLinearModel(default_glm(GlmFamily::Logistic)),
         "poisson_glm" | "multiple_poisson" => AnalysisKind::GeneralizedLinearModel(default_glm(GlmFamily::Poisson)),
-        "pca" | "principal_components" => AnalysisKind::Multivariate(default_pca()),
+        "pca" | "stats.pca" | "principal_components" | "pcr" | "stats.pcr" | "principal_component_regression" => {
+            AnalysisKind::Multivariate(default_pca())
+        }
         "correlation" | "correlation_matrix" => AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix {
             spearman_rank: opt_bool_checked(params, spellings::MULTIVARIATE_SPEARMAN)?.unwrap_or(false),
         }),
@@ -3190,11 +3206,12 @@ fn apply_glm_overrides(spec: &mut GlmSpec, params: &Value) -> Result<(), EngineE
 
 fn apply_multivariate_overrides(spec: &mut MultivariateSpec, params: &Value) -> Result<(), EngineError> {
     match spec {
-        MultivariateSpec::Pca { standardize, parallel_analysis_seed } => {
+        MultivariateSpec::Pca { standardize, parallel_analysis_seed, pcr_outcome_column } => {
             apply_bool_opt_checked(params, &["standardize"], standardize)?;
             if let Some(seed_val) = params.get("parallel_analysis_seed") {
                 *parallel_analysis_seed = if seed_val.is_null() { None } else { Some(parse_u64_json_value(seed_val, "parallel_analysis_seed")?) };
             }
+            apply_opt_usize_field(params, &["pcr_outcome_column"], pcr_outcome_column)?;
         }
         MultivariateSpec::CorrelationMatrix { spearman_rank } => {
             apply_bool_opt_checked(params, spellings::MULTIVARIATE_SPEARMAN, spearman_rank)?;
@@ -3602,7 +3619,7 @@ fn default_glm(family: GlmFamily) -> GlmSpec {
 }
 
 fn default_pca() -> MultivariateSpec {
-    MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: Some(42) }
+    MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: Some(42), pcr_outcome_column: None }
 }
 
 fn parse_multiplicity_method(raw: &str) -> Result<MultiplicitySpec, EngineError> {

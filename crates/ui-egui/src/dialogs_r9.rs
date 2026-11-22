@@ -1316,21 +1316,30 @@ impl InsertModelEquationDialogState {
             && gs.spec.annotations.iter().any(|ann| matches!(ann, GraphAnnotation::ModelEquation { .. }))
         {
             let mut next_annotations = gs.spec.annotations.clone();
-            let mut updated = false;
-            for ann in &mut next_annotations {
-                if let GraphAnnotation::ModelEquation { result_sheet_id, data_set_index, mode, bounds_pt, font_size_pt, bordered } = ann
-                    && (result_sheet_id == res_id || !updated)
-                {
-                    *result_sheet_id = res_id.clone();
-                    *data_set_index = self.data_set_index;
-                    *mode = self.mode;
-                    *bounds_pt = self.bounds_pt;
-                    *font_size_pt = self.font_size_pt;
-                    *bordered = self.bordered;
-                    updated = true;
-                }
-            }
-            if updated {
+            let exact_idx = next_annotations.iter().position(|ann| {
+                matches!(
+                    ann,
+                    GraphAnnotation::ModelEquation { result_sheet_id, data_set_index, .. }
+                        if result_sheet_id == res_id && *data_set_index == self.data_set_index
+                )
+            });
+            let result_idx = next_annotations.iter().position(|ann| {
+                matches!(
+                    ann,
+                    GraphAnnotation::ModelEquation { result_sheet_id, .. } if result_sheet_id == res_id
+                )
+            });
+            let fallback_idx = next_annotations.iter().position(|ann| matches!(ann, GraphAnnotation::ModelEquation { .. }));
+            if let Some(idx) = exact_idx.or(result_idx).or(fallback_idx)
+                && let GraphAnnotation::ModelEquation { result_sheet_id, data_set_index, mode, bounds_pt, font_size_pt, bordered } =
+                    &mut next_annotations[idx]
+            {
+                *result_sheet_id = res_id.clone();
+                *data_set_index = self.data_set_index;
+                *mode = self.mode;
+                *bounds_pt = self.bounds_pt;
+                *font_size_pt = self.font_size_pt;
+                *bordered = self.bordered;
                 return Some(ToolCommandIntent::new(
                     "graph.setSpec",
                     json!({

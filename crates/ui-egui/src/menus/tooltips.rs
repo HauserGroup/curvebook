@@ -116,10 +116,26 @@ pub fn command_tooltip(app: &UiApp, command_id: &str) -> Option<CommandTooltip> 
     })
 }
 
-fn ui_command_menu_info(id: &str) -> (&'static str, &'static str) {
+pub(crate) fn ui_command_menu_info(id: &str) -> (&'static str, &'static str) {
     match id {
-        "app.about" => ("menu.help", "Help"),
-        "app.feedback" => ("menu.help", "Help"),
+        "app.about" => ("menu.help", "Help/About"),
+        "app.feedback" => ("menu.help", "Help/Send Feedback..."),
+        "ui.navigator.toggle" => ("menu.view", "View/Navigator"),
+        "ui.inspector.toggle" => ("menu.view", "View/Inspector"),
+        "ui.family.toggle" => ("menu.view", "View/Family Pane"),
+        "ui.palette.open" => ("menu.view", "View/Command Palette..."),
+        "ui.zoom.fitSheet" => ("menu.view", "View/Zoom to Fit"),
+        "ui.gallery.toggle" => ("menu.view", "View/Gallery View"),
+        "ui.rulers.toggle" => ("menu.view", "View/Rulers"),
+        "ui.pane.cycle" => ("menu.view", "View/Cycle Focus Pane"),
+        "ui.shortcut.set" => ("menu.edit", "Edit/Preferences/Keyboard Shortcuts..."),
+        "ui.shortcut.reset" => ("menu.edit", "Edit/Preferences/Reset Shortcuts"),
+        "ui.locale.set" => ("menu.view", "View/Language"),
+        "ui.theme.set" => ("menu.view", "View/Theme"),
+        "ui.previewFilter.set" => ("menu.view", "View/Colorblind Preview"),
+        "ui.split.toggle" => ("menu.view", "View/Split Workspace"),
+        "ui.screenshot" => ("menu.view", "View/Capture Screenshot"),
+        "ui.event.dispatch" => ("menu.view", "Tools/Dispatch UI Event"),
         "ui.powerWizard.open" => ("menu.analyze", "Analyze/Power and Sample Size..."),
         "ui.analyze.open" => ("menu.analyze", "Analyze/Analyze..."),
         "ui.editParams.open" => ("menu.analyze", "Analyze/Change Analysis Parameters..."),
@@ -141,13 +157,13 @@ fn ui_command_menu_info(id: &str) -> (&'static str, &'static str) {
         "ui.brush.point" => ("menu.graph", "Graph/Brush Point"),
         "ui.print.open" => ("menu.file", "File/Print..."),
         "ui.export.figure.open" => ("menu.file", "File/Export Figure..."),
-        "ui.clonePipeline.open" => ("menu.file", "File/Clone Pipeline..."),
         "ui.import.reshape.open" => ("menu.file", "File/Import Reshape..."),
-        "ui.table.convertArchetype.open" => ("menu.insert", "Data/Convert Table Archetype..."),
-        "ui.table.randomizeGroups" => ("menu.insert", "Data/Randomize Groups Dialog..."),
-        "ui.table.randomSampleRows" => ("menu.insert", "Data/Random Sample Rows Dialog..."),
+        "ui.clonePipeline.open" => ("menu.data", "Data/Clone Pipeline..."),
+        "ui.table.convertArchetype.open" => ("menu.data", "Data/Convert Table Archetype..."),
+        "ui.table.randomizeGroups" => ("menu.data", "Data/Randomize Groups Dialog..."),
+        "ui.table.randomSampleRows" => ("menu.data", "Data/Random Sample Rows Dialog..."),
         "ui.table.simulateDistributions" => ("menu.insert", "Insert/Simulate Distributions Dialog..."),
-        "ui.table.openFormulaBar" => ("menu.insert", "Data/Open Formula Bar..."),
+        "ui.table.openFormulaBar" => ("menu.data", "Data/Open Formula Bar..."),
         "ui.grid.excludeWithReason" => ("menu.edit", "Edit/Exclude with Reason..."),
         "ui.view.rowTitles.toggle" => ("menu.view", "View/Row Titles"),
         "ui.gridOverlay.toggle" => ("menu.view", "View/Canvas Grid"),
@@ -159,8 +175,7 @@ fn ui_command_menu_info(id: &str) -> (&'static str, &'static str) {
     }
 }
 
-fn ui_command_enabled(app: &UiApp, id: &str) -> bool {
-    let doc = app.document();
+pub(crate) fn ui_command_enabled_for_doc(doc: &curvebook_doc::ProjectDocument, id: &str) -> bool {
     match id {
         "ui.analyze.open" => {
             let active_analyzable = doc.active_sheet_id.as_ref().is_some_and(|sid| {
@@ -187,9 +202,13 @@ fn ui_command_enabled(app: &UiApp, id: &str) -> bool {
             .iter()
             .any(|rs| matches!(rs.analysis.kind, curvebook_doc::AnalysisKind::Multivariate(curvebook_doc::MultivariateSpec::Clustering { .. }))),
         "ui.table.openFormulaBar" => doc.data_sheets.iter().any(|ds| matches!(ds.archetype, curvebook_doc::TableArchetype::MultipleVariables(_))),
-        "ui.table.convertArchetype.open" | "ui.table.randomSampleRows" | "ui.grid.excludeWithReason" | "ui.graph.create.open" => {
-            !doc.data_sheets.is_empty()
-        }
+        "ui.table.convertArchetype.open"
+        | "ui.table.randomSampleRows"
+        | "ui.grid.excludeWithReason"
+        | "ui.graph.create.open"
+        | "ui.brush.point"
+        | "ui.view.rowTitles.toggle" => !doc.data_sheets.is_empty(),
+        "ui.zoom.fitSheet" => doc.total_sheet_count() > 0,
         "ui.layout.composer.open" | "ui.layout.equalizeScaling.open" => !doc.layout_sheets.is_empty(),
         "ui.embeddedTable.format.open" => {
             doc.graph_sheets
@@ -204,6 +223,10 @@ fn ui_command_enabled(app: &UiApp, id: &str) -> bool {
         "ui.canvas.applyPreset" | "ui.canvas.preflight" | "ui.export.figure.open" => !doc.graph_sheets.is_empty() || !doc.layout_sheets.is_empty(),
         _ => true,
     }
+}
+
+fn ui_command_enabled(app: &UiApp, id: &str) -> bool {
+    ui_command_enabled_for_doc(app.document(), id)
 }
 
 /// Resolved localized toolbar button entry paired with its hover [`CommandTooltip`].

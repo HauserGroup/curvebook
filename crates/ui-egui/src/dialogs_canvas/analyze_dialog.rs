@@ -538,7 +538,10 @@ impl AnalyzeDialogState {
         } else {
             Vec::new()
         };
-        self.pcr_outcome_column = None;
+        self.pcr_outcome_column = match &result.analysis.kind {
+            AnalysisKind::Multivariate(MultivariateSpec::Pca { pcr_outcome_column, .. }) => *pcr_outcome_column,
+            _ => None,
+        };
         self.correlation_all_pairs = true;
         self.correlation_heatmap = false;
         self.transform_x = None;
@@ -659,6 +662,29 @@ impl AnalyzeDialogState {
                 }
             }
         }
+        let apply_predictor_cols = |this: &mut Self, key: &str, val: &Value| -> Result<(), String> {
+            let cols = parse_usize_list(val, key)?;
+            this.selected_data_sets = cols.clone();
+            if matches!(key, "pca_predictors" | "analyze.pca_predictors")
+                || matches!(this.selected_entry_id.as_deref(), Some("stats.pca" | "stats.pcr" | "pca" | "pcr"))
+            {
+                this.pca_predictors = cols;
+            }
+            if this.pcr_outcome_column.is_some_and(|y| this.pca_predictors.contains(&y) || this.selected_data_sets.contains(&y)) {
+                this.pcr_outcome_column = None;
+            }
+            for cand in &mut this.variable_candidates {
+                cand.selected = this.selected_data_sets.contains(&cand.col_index);
+            }
+            Ok(())
+        };
+        for key in
+            ["selected_data_sets", "analyze.selected_data_sets", "analyze.transform.selected_data_sets", "pca_predictors", "analyze.pca_predictors"]
+        {
+            if let Some(val) = fields.get(key) {
+                apply_predictor_cols(self, key, val)?;
+            }
+        }
         // Apply method selectors before sub-parameters (`alpha`, `fdr_q_percent`, `rout_q`) so JSON
         // object key ordering never resets a caller-provided Q% or alpha (`RV-76`).
         for key in ["outlier_method", "analyze.outlier.method", "fit_method", "analyze.fit.method", "method"] {
@@ -686,6 +712,11 @@ impl AnalyzeDialogState {
                 | "analysis"
                 | "analyze.entry"
                 | "analyze.entries_list"
+                | "selected_data_sets"
+                | "analyze.selected_data_sets"
+                | "analyze.transform.selected_data_sets"
+                | "pca_predictors"
+                | "analyze.pca_predictors"
                 | "outlier_method"
                 | "analyze.outlier.method"
                 | "fit_method"
@@ -716,28 +747,36 @@ impl AnalyzeDialogState {
                         self.correlation_heatmap = b;
                     }
                 }
-                "selected_data_sets"
-                | "analyze.selected_data_sets"
-                | "analyze.transform.selected_data_sets"
-                | "pca_predictors"
-                | "analyze.pca_predictors" => {
-                    let cols = parse_usize_list(val, key)?;
-                    self.selected_data_sets = cols.clone();
-                    if matches!(key.as_str(), "pca_predictors" | "analyze.pca_predictors") {
-                        self.pca_predictors = cols;
-                    }
-                    for cand in &mut self.variable_candidates {
-                        cand.selected = self.selected_data_sets.contains(&cand.col_index);
-                    }
-                }
-                "pcr_outcome_column" | "response_column" | "analyze.pcr_outcome_column" => {
-                    if let Some(col) = val.as_u64().map(|n| n as usize) {
+                "pcr_outcome_column" | "analyze.pcr_outcome_column" => {
+                    if val.is_null() {
+                        self.pcr_outcome_column = None;
+                    } else {
+                        let col = parse_usize_min(val, key, 0)?;
                         if self.pca_predictors.contains(&col) || self.selected_data_sets.contains(&col) {
                             return Err(format!(
                                 "Column {col} is checked as a PCA input predictor and cannot be selected as PCR outcome (target leakage guard)."
                             ));
                         }
                         self.pcr_outcome_column = Some(col);
+                        self.set_response_column(col);
+                    }
+                }
+                "response_column" => {
+                    let is_pcr = matches!(self.selected_entry_id.as_deref(), Some("stats.pcr" | "pcr"));
+                    if val.is_null() {
+                        if is_pcr {
+                            self.pcr_outcome_column = None;
+                        }
+                    } else {
+                        let col = parse_usize_min(val, key, 0)?;
+                        if is_pcr {
+                            if self.pca_predictors.contains(&col) || self.selected_data_sets.contains(&col) {
+                                return Err(format!(
+                                    "Column {col} is checked as a PCA input predictor and cannot be selected as PCR outcome (target leakage guard)."
+                                ));
+                            }
+                            self.pcr_outcome_column = Some(col);
+                        }
                         self.set_response_column(col);
                     }
                 }
@@ -1248,8 +1287,9 @@ impl AnalyzeDialogState {
                 *linkage = self.cluster_linkage;
                 *k_sweep_max = self.cluster_k_sweep_max;
             }
-            AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize, .. }) => {
+            AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize, pcr_outcome_column, .. }) => {
                 *standardize = self.pca_standardize;
+                *pcr_outcome_column = self.pcr_outcome_column;
             }
             AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank }) => {
                 *spearman_rank = self.corr_spearman_rank;
