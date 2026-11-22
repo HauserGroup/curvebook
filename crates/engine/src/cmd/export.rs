@@ -1,22 +1,25 @@
 //! Vector and raster figure export commands (`export.*`, `graph.export*`, `layout.export*`).
 
-use std::collections::BTreeMap;
 use std::fmt;
 
-use curvebook_chart::{ChartScene, compile_graph, compile_layout};
+use curvebook_chart::ChartScene;
 use curvebook_doc::{ErrorCode, ProjectDocument, SheetId};
-use curvebook_pdf::{MAX_PDF_PAGES, MAX_PDF_TOTAL_PRIMITIVES, PdfColorSpace, PdfExportOptions, render_pdf, render_pdf_page_refs};
-use curvebook_render::{MAX_RASTER_DIM_PX, MAX_RASTER_PIXELS, RenderTargetSpec, TiffCompression, encode_emf, encode_png, encode_tiff, render_scene};
-use curvebook_svg::{SvgExportOptions, render_svg};
+use curvebook_pdf::{PdfColorSpace, PdfExportOptions};
+use curvebook_render::TiffCompression;
+use curvebook_svg::SvgExportOptions;
 use serde::Deserialize;
 use serde::de::{Deserializer, Error as DeError, Visitor};
 use serde_json::{Value, json};
 
-use super::helpers::{encode_base64, parse_sheet_id, require_graph_sheet, require_layout_sheet, write_output_file};
+use super::helpers::{encode_base64, parse_sheet_id, write_output_file};
 use super::params::{
     array_schema, bool_schema, int_schema, non_empty_str_schema, nullable_schema, obj_schema_with_aliases, parse_params, str_schema,
 };
 use super::{CommandGroup, CommandSpec, Ctx, Effects};
+use crate::services::{
+    EmfSheetKind, ExportArtifactFormat, ExportArtifactRequest, ExportTarget, RasterSizingPolicy, compile_visual_scene_for_sheet,
+    export_document_artifact,
+};
 use crate::{CommandOutcome, EngineError, ExternalPathPolicy, Session};
 
 const EXPORT_EFFECTS: Effects = Effects::WRITES_FILESYSTEM.with(Effects::IDEMPOTENT);
@@ -179,15 +182,7 @@ fn write_output_with_policy(policy: &ExternalPathPolicy, path: &str, bytes: &[u8
 
 /// Compile either a graph sheet or a layout sheet into a device-independent [`ChartScene`].
 pub(super) fn compile_scene_for_sheet(doc: &ProjectDocument, id: &SheetId) -> Result<ChartScene, EngineError> {
-    if let Some(graph) = doc.graph_sheet(id) {
-        return Ok(compile_graph(graph, doc)?);
-    }
-    if let Some(layout) = doc.layout_sheet(id) {
-        return Ok(compile_layout(layout, doc)?);
-    }
-    Err(EngineError::with_code(ErrorCode::NotFound, format!("sheet `{id}` is not a graph or layout sheet"))
-        .with_remediation("Supply an existing graph or layout `sheet_id`.")
-        .with_details(json!({ "sheet_id": id.as_str() })))
+    compile_visual_scene_for_sheet(doc, id)
 }
 
 struct WholeU64Visitor {
@@ -259,15 +254,6 @@ pub(super) fn de_opt_u32<'de, D: Deserializer<'de>>(deserializer: D) -> Result<O
 pub(super) fn de_opt_usize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<usize>, D::Error> {
     let raw = deserializer.deserialize_option(WholeU64Visitor { max: usize::MAX as u64 })?;
     raw.map(|v| usize::try_from(v).map_err(|_| D::Error::custom(format!("value {v} exceeds usize::MAX")))).transpose()
-}
-
-fn check_not_cancelled(ctx: &Ctx<'_>, command_id: &str) -> Result<(), EngineError> {
-    if ctx.is_cancelled() {
-        return Err(EngineError::with_code(ErrorCode::Cancelled, format!("command `{command_id}` cancelled"))
-            .with_retryable(true)
-            .with_details(json!({ "command_id": command_id })));
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -437,8 +423,6 @@ fn run_svg_with_id(ctx: &mut Ctx<'_>, command_id: &str, raw: Value) -> Result<Co
     let schema = schema_export_svg();
     let params: ExportSvgParams = parse_params(&schema, raw)?;
     let id = parse_sheet_id(&params.sheet_id)?;
-    let scene = compile_scene_for_sheet(ctx.session.document(), &id)?;
-    check_not_cancelled(ctx, command_id)?;
 
     let mut opts = SvgExportOptions::default();
     if let Some(p) = params.pretty {
@@ -460,10 +444,13 @@ fn run_svg_with_id(ctx: &mut Ctx<'_>, command_id: &str, raw: Value) -> Result<Co
         opts.outline_text = ot;
     }
 
-    let svg = render_svg(&scene, &opts)?;
-    if let Some(ref p) = params.path {
-        write_output_with_policy(&ctx.session.path_policy, p, svg.as_bytes())?;
-    }
+    let req = ExportArtifactRequest { target: ExportTarget::Explicit(id.clone()), format: ExportArtifactFormat::Svg { options: opts } };
+    let artifact = export_document_artifact(ctx.session.document(), &req, Some(ctx.cancelled), command_id)?;
+    artifact.write_if_requested(&ctx.session.path_policy, params.path.as_deref())?;
+    let width_pt = artifact.width_pt.unwrap_or(0.0);
+    let height_pt = artifact.height_pt.unwrap_or(0.0);
+    let warnings_count = artifact.warnings_count;
+    let svg = artifact.into_utf8_string()?;
 
     Ok(CommandOutcome::read_only(
         command_id,
@@ -471,9 +458,9 @@ fn run_svg_with_id(ctx: &mut Ctx<'_>, command_id: &str, raw: Value) -> Result<Co
         json!({
             "sheet_id": id.as_str(),
             "byte_len": svg.len(),
-            "width_pt": scene.width_pt,
-            "height_pt": scene.height_pt,
-            "warnings_count": scene.warnings.len(),
+            "width_pt": width_pt,
+            "height_pt": height_pt,
+            "warnings_count": warnings_count,
             "path": params.path,
             "svg": svg,
         }),
@@ -501,9 +488,9 @@ fn parse_pdf_color_space(raw: Option<&str>) -> Result<PdfColorSpace, EngineError
 fn run_pdf_with_id(ctx: &mut Ctx<'_>, command_id: &str, raw: Value) -> Result<CommandOutcome, EngineError> {
     let schema = schema_export_pdf();
     let params: ExportPdfParams = parse_params(&schema, raw)?;
-    check_not_cancelled(ctx, command_id)?;
 
-    let mut opts = PdfExportOptions { color_space: parse_pdf_color_space(params.color_space.as_deref())?, ..PdfExportOptions::default() };
+    let color_space = parse_pdf_color_space(params.color_space.as_deref())?;
+    let mut opts = PdfExportOptions { color_space, ..PdfExportOptions::default() };
     if let Some(comp) = params.compress_streams {
         opts.compress_streams = comp;
     }
@@ -514,174 +501,39 @@ fn run_pdf_with_id(ctx: &mut Ctx<'_>, command_id: &str, raw: Value) -> Result<Co
         opts.outline_text = outline;
     }
 
-    let doc = ctx.session.document();
-    let (pdf, sheet_label, width_pt, height_pt, page_count) = if let Some(ids) = params.sheet_ids {
-        if ids.len() > MAX_PDF_PAGES {
-            return Err(EngineError::with_code(ErrorCode::ResourceLimit, format!("PDF page count {} exceeds maximum {MAX_PDF_PAGES}", ids.len()))
-                .with_remediation("Export fewer pages or split into multiple PDF files.")
-                .with_details(json!({ "page_count": ids.len(), "max_pages": MAX_PDF_PAGES })));
-        }
+    let (target, sheet_ids) = if let Some(ids) = params.sheet_ids {
         let mut parsed_ids = Vec::with_capacity(ids.len());
         for raw_id in ids {
             parsed_ids.push(parse_sheet_id(&raw_id)?);
         }
-        let mut compiled_by_id: BTreeMap<SheetId, ChartScene> = BTreeMap::new();
-        for sid in &parsed_ids {
-            check_not_cancelled(ctx, command_id)?;
-            if !compiled_by_id.contains_key(sid) {
-                compiled_by_id.insert(sid.clone(), compile_scene_for_sheet(doc, sid)?);
-            }
-        }
-        let mut page_refs: Vec<&ChartScene> = Vec::with_capacity(parsed_ids.len());
-        let mut total_primitives: usize = 0;
-        for sid in &parsed_ids {
-            let scene = compiled_by_id
-                .get(sid)
-                .ok_or_else(|| EngineError::with_code(ErrorCode::InternalError, format!("compiled scene missing for `{sid}`")))?;
-            total_primitives = total_primitives.saturating_add(scene.primitives.len());
-            if total_primitives > MAX_PDF_TOTAL_PRIMITIVES {
-                return Err(EngineError::with_code(
-                    ErrorCode::ResourceLimit,
-                    format!("PDF primitive count {total_primitives} exceeds maximum {MAX_PDF_TOTAL_PRIMITIVES}"),
-                )
-                .with_remediation("Reduce chart complexity or split the PDF export into fewer pages.")
-                .with_details(json!({
-                    "primitive_count": total_primitives,
-                    "max_primitives": MAX_PDF_TOTAL_PRIMITIVES,
-                    "page_count": parsed_ids.len(),
-                })));
-            }
-            page_refs.push(scene);
-        }
-        let w = page_refs.first().map_or(0.0, |s| s.width_pt);
-        let h = page_refs.first().map_or(0.0, |s| s.height_pt);
-        let pages = page_refs.len();
-        let bytes = render_pdf_page_refs(&page_refs, &opts)?;
-        (bytes, String::from("multi-page"), w, h, pages)
+        (ExportTarget::AutoOrExplicit(None), Some(parsed_ids))
     } else {
         let raw_id = params.sheet_id.ok_or_else(|| {
             EngineError::with_code(ErrorCode::BadInput, "missing required parameter `sheet_id` or `sheet_ids`")
                 .with_remediation("Pass `sheet_id` for a single page or `sheet_ids` for a multi-page PDF.")
                 .with_details(json!({ "pointer": "/sheet_id" }))
         })?;
-        let id = parse_sheet_id(&raw_id)?;
-        let scene = compile_scene_for_sheet(doc, &id)?;
-        let bytes = render_pdf(&scene, &opts)?;
-        (bytes, id.as_str().to_owned(), scene.width_pt, scene.height_pt, 1_usize)
+        (ExportTarget::Explicit(parse_sheet_id(&raw_id)?), None)
     };
 
-    if let Some(ref p) = params.path {
-        write_output_with_policy(&ctx.session.path_policy, p, &pdf)?;
-    }
+    let req = ExportArtifactRequest { target, format: ExportArtifactFormat::Pdf { options: opts, all_graphs: false, sheet_ids } };
+    let artifact = export_document_artifact(ctx.session.document(), &req, Some(ctx.cancelled), command_id)?;
+    artifact.write_if_requested(&ctx.session.path_policy, params.path.as_deref())?;
 
     Ok(CommandOutcome::read_only(
         command_id,
         "exported PDF figure",
         json!({
-            "sheet_id": sheet_label,
-            "byte_len": pdf.len(),
-            "page_count": page_count,
-            "width_pt": width_pt,
-            "height_pt": height_pt,
-            "color_space": opts.color_space,
+            "sheet_id": artifact.target_id,
+            "byte_len": artifact.bytes.len(),
+            "page_count": artifact.page_count,
+            "width_pt": artifact.width_pt.unwrap_or(0.0),
+            "height_pt": artifact.height_pt.unwrap_or(0.0),
+            "color_space": color_space,
             "path": params.path,
-            "base64": encode_base64(&pdf),
+            "base64": encode_base64(&artifact.bytes),
         }),
     ))
-}
-
-fn check_raster_dim_bounds(w_f: f64, h_f: f64, dpi_val: u16, max_dim: u32) -> Result<(u32, u32), EngineError> {
-    if !w_f.is_finite() || !h_f.is_finite() {
-        return Err(EngineError::with_code(ErrorCode::ResourceLimit, format!("raster dimensions at {dpi_val} DPI overflow numeric bounds"))
-            .with_remediation("Reduce `dpi`, `width_px`, or `height_px`.")
-            .with_details(json!({ "dpi": dpi_val, "max_dim_px": max_dim })));
-    }
-    if w_f < 1.0 || h_f < 1.0 {
-        return Err(EngineError::with_code(
-            ErrorCode::BadInput,
-            format!("scaled raster dimensions ({w_f}x{h_f}) at {dpi_val} DPI are smaller than 1 pixel"),
-        )
-        .with_remediation("Increase `dpi` or specify explicit `width_px` and `height_px`.")
-        .with_details(json!({ "dpi": dpi_val, "width_px": w_f, "height_px": h_f })));
-    }
-    let max_dim_f = f64::from(max_dim);
-    if w_f > max_dim_f || h_f > max_dim_f {
-        return Err(EngineError::with_code(
-            ErrorCode::ResourceLimit,
-            format!("raster dimensions {w_f}x{h_f} at {dpi_val} DPI exceed maximum {max_dim}x{max_dim}"),
-        )
-        .with_remediation("Reduce `width_px`, `height_px`, or `dpi`.")
-        .with_details(json!({ "width_px": w_f, "height_px": h_f, "dpi": dpi_val, "max_dim_px": max_dim })));
-    }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    Ok((w_f as u32, h_f as u32))
-}
-
-fn resolve_raster_target(
-    scene: &ChartScene,
-    width_px: Option<u32>,
-    height_px: Option<u32>,
-    dpi: Option<u16>,
-) -> Result<RenderTargetSpec, EngineError> {
-    if !scene.width_pt.is_finite() || scene.width_pt <= 0.0 || !scene.height_pt.is_finite() || scene.height_pt <= 0.0 {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "scene canvas dimensions must be positive and finite"));
-    }
-    let dpi_val = dpi.unwrap_or(300);
-    if dpi_val == 0 {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "`dpi` must be greater than 0").with_details(json!({ "pointer": "/dpi" })));
-    }
-    let max_dim = MAX_RASTER_DIM_PX;
-    let (w, h) = match (width_px, height_px) {
-        (Some(w), Some(h)) => {
-            if w == 0 || h == 0 {
-                return Err(EngineError::with_code(ErrorCode::BadInput, "raster width and height must be greater than 0")
-                    .with_details(json!({ "pointer": if w == 0 { "/width_px" } else { "/height_px" } })));
-            }
-            if w > max_dim || h > max_dim {
-                return Err(EngineError::with_code(
-                    ErrorCode::ResourceLimit,
-                    format!("raster dimensions {w}x{h} exceed maximum {max_dim}x{max_dim}"),
-                )
-                .with_remediation("Reduce `width_px`, `height_px`, or `dpi`.")
-                .with_details(json!({ "width_px": w, "height_px": h, "max_dim_px": max_dim })));
-            }
-            (w, h)
-        }
-        (Some(w), None) => {
-            if w == 0 {
-                return Err(EngineError::with_code(ErrorCode::BadInput, "raster width and height must be greater than 0")
-                    .with_details(json!({ "pointer": "/width_px" })));
-            }
-            let w_f = f64::from(w);
-            let h_f = (w_f * (scene.height_pt / scene.width_pt)).round();
-            check_raster_dim_bounds(w_f, h_f, dpi_val, max_dim)?
-        }
-        (None, Some(h)) => {
-            if h == 0 {
-                return Err(EngineError::with_code(ErrorCode::BadInput, "raster width and height must be greater than 0")
-                    .with_details(json!({ "pointer": "/height_px" })));
-            }
-            let h_f = f64::from(h);
-            let w_f = (h_f * (scene.width_pt / scene.height_pt)).round();
-            check_raster_dim_bounds(w_f, h_f, dpi_val, max_dim)?
-        }
-        (None, None) => {
-            let scale = f64::from(dpi_val) / 72.0;
-            let w_f = (scene.width_pt * scale).round();
-            let h_f = (scene.height_pt * scale).round();
-            check_raster_dim_bounds(w_f, h_f, dpi_val, max_dim)?
-        }
-    };
-    let total_pixels = u64::from(w).saturating_mul(u64::from(h));
-    if total_pixels > MAX_RASTER_PIXELS {
-        return Err(EngineError::with_code(
-            ErrorCode::ResourceLimit,
-            format!("raster pixel count {total_pixels} ({w}x{h}) exceeds budget {MAX_RASTER_PIXELS}"),
-        )
-        .with_remediation("Reduce `width_px`, `height_px`, or `dpi`.")
-        .with_details(json!({ "total_pixels": total_pixels, "max_pixels": MAX_RASTER_PIXELS, "width_px": w, "height_px": h, "dpi": dpi_val })));
-    }
-    Ok(RenderTargetSpec { width_px: w, height_px: h, dpi: dpi_val })
 }
 
 fn run_export_png(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
@@ -696,28 +548,30 @@ fn run_png_with_id(ctx: &mut Ctx<'_>, command_id: &str, raw: Value) -> Result<Co
     let schema = schema_export_png();
     let params: ExportPngParams = parse_params(&schema, raw)?;
     let id = parse_sheet_id(&params.sheet_id)?;
-    let scene = compile_scene_for_sheet(ctx.session.document(), &id)?;
-    check_not_cancelled(ctx, command_id)?;
-
-    let target = resolve_raster_target(&scene, params.width_px, params.height_px, params.dpi)?;
-    let img = render_scene(&scene, target)?;
-    let png = encode_png(&img)?;
-
-    if let Some(ref p) = params.path {
-        write_output_with_policy(&ctx.session.path_policy, p, &png)?;
-    }
+    let req = ExportArtifactRequest {
+        target: ExportTarget::Explicit(id.clone()),
+        format: ExportArtifactFormat::Png {
+            width_px: params.width_px,
+            height_px: params.height_px,
+            dpi: params.dpi,
+            sizing: RasterSizingPolicy::StrictLimits,
+        },
+    };
+    let artifact = export_document_artifact(ctx.session.document(), &req, Some(ctx.cancelled), command_id)?;
+    artifact.write_if_requested(&ctx.session.path_policy, params.path.as_deref())?;
+    let raster = artifact.raster.ok_or_else(|| EngineError::with_code(ErrorCode::InternalError, "PNG export missing raster metadata"))?;
 
     Ok(CommandOutcome::read_only(
         command_id,
         "exported PNG figure",
         json!({
             "sheet_id": id.as_str(),
-            "byte_len": png.len(),
-            "width_px": img.width_px,
-            "height_px": img.height_px,
-            "dpi": target.dpi,
+            "byte_len": artifact.bytes.len(),
+            "width_px": raster.width_px,
+            "height_px": raster.height_px,
+            "dpi": raster.dpi,
             "path": params.path,
-            "base64": encode_base64(&png),
+            "base64": encode_base64(&artifact.bytes),
         }),
     ))
 }
@@ -737,64 +591,59 @@ fn run_export_tiff(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
     let schema = schema_export_tiff();
     let params: ExportTiffParams = parse_params(&schema, raw)?;
     let id = parse_sheet_id(&params.sheet_id)?;
-    let scene = compile_scene_for_sheet(ctx.session.document(), &id)?;
-    check_not_cancelled(ctx, "export.tiff")?;
-
-    let target = resolve_raster_target(&scene, params.width_px, params.height_px, params.dpi)?;
     let (compression_label, compression) = parse_tiff_compression(params.compression.as_deref())?;
-    let img = render_scene(&scene, target)?;
-    let tiff = encode_tiff(&img, compression)?;
-
-    if let Some(ref p) = params.path {
-        write_output_with_policy(&ctx.session.path_policy, p, &tiff)?;
-    }
+    let req = ExportArtifactRequest {
+        target: ExportTarget::Explicit(id.clone()),
+        format: ExportArtifactFormat::Tiff {
+            width_px: params.width_px,
+            height_px: params.height_px,
+            dpi: params.dpi,
+            compression,
+            sizing: RasterSizingPolicy::StrictLimits,
+        },
+    };
+    let artifact = export_document_artifact(ctx.session.document(), &req, Some(ctx.cancelled), "export.tiff")?;
+    artifact.write_if_requested(&ctx.session.path_policy, params.path.as_deref())?;
+    let raster = artifact.raster.ok_or_else(|| EngineError::with_code(ErrorCode::InternalError, "TIFF export missing raster metadata"))?;
 
     Ok(CommandOutcome::read_only(
         "export.tiff",
         "exported TIFF figure",
         json!({
             "sheet_id": id.as_str(),
-            "byte_len": tiff.len(),
-            "width_px": img.width_px,
-            "height_px": img.height_px,
-            "dpi": target.dpi,
+            "byte_len": artifact.bytes.len(),
+            "width_px": raster.width_px,
+            "height_px": raster.height_px,
+            "dpi": raster.dpi,
             "compression": compression_label,
             "path": params.path,
-            "base64": encode_base64(&tiff),
+            "base64": encode_base64(&artifact.bytes),
         }),
     ))
 }
 
 fn run_graph_export_emf(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
-    run_emf_with_kind(ctx, "graph.exportEmf", false, raw)
+    run_emf_with_kind(ctx, "graph.exportEmf", EmfSheetKind::Graph, raw)
 }
 
 fn run_layout_export_emf(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
-    run_emf_with_kind(ctx, "layout.exportEmf", true, raw)
+    run_emf_with_kind(ctx, "layout.exportEmf", EmfSheetKind::Layout, raw)
 }
 
-fn run_emf_with_kind(ctx: &mut Ctx<'_>, command_id: &str, is_layout: bool, raw: Value) -> Result<CommandOutcome, EngineError> {
+fn run_emf_with_kind(ctx: &mut Ctx<'_>, command_id: &str, kind: EmfSheetKind, raw: Value) -> Result<CommandOutcome, EngineError> {
     let schema = schema_export_emf();
     let params: ExportEmfParams = parse_params(&schema, raw)?;
     let id = parse_sheet_id(&params.sheet_id)?;
-    let doc = ctx.session.document();
-    let scene = if is_layout {
-        let layout = require_layout_sheet(doc, &id)?;
-        compile_layout(layout, doc)?
-    } else {
-        let graph = require_graph_sheet(doc, &id)?;
-        compile_graph(graph, doc)?
-    };
-    check_not_cancelled(ctx, command_id)?;
-
-    let emf = encode_emf(&scene)?;
-    let bytes_written = if let Some(ref p) = params.path {
-        write_output_with_policy(&ctx.session.path_policy, p, &emf)?;
-        emf.len()
+    let req = ExportArtifactRequest { target: ExportTarget::Explicit(id.clone()), format: ExportArtifactFormat::Emf { require_kind: Some(kind) } };
+    let artifact = export_document_artifact(ctx.session.document(), &req, Some(ctx.cancelled), command_id)?;
+    let bytes_written = if params.path.is_some() {
+        artifact.write_if_requested(&ctx.session.path_policy, params.path.as_deref())?;
+        artifact.bytes.len()
     } else {
         0
     };
-    let magic = emf
+    let magic = artifact
+        .bytes
         .get(40..44)
         .and_then(|slice| <[u8; 4]>::try_from(slice).ok())
         .map_or_else(String::new, |bytes| format!("0x{:08X}", u32::from_le_bytes(bytes)));
@@ -804,13 +653,13 @@ fn run_emf_with_kind(ctx: &mut Ctx<'_>, command_id: &str, is_layout: bool, raw: 
         "exported EMF figure",
         json!({
             "sheet_id": id.as_str(),
-            "byte_len": emf.len(),
+            "byte_len": artifact.bytes.len(),
             "bytes_written": bytes_written,
             "header_magic": magic,
-            "width_pt": scene.width_pt,
-            "height_pt": scene.height_pt,
+            "width_pt": artifact.width_pt.unwrap_or(0.0),
+            "height_pt": artifact.height_pt.unwrap_or(0.0),
             "path": params.path,
-            "base64": encode_base64(&emf),
+            "base64": encode_base64(&artifact.bytes),
         }),
     ))
 }

@@ -14,10 +14,10 @@
 
 use std::collections::{HashMap, HashSet};
 
+use curvebook_doc::result_builder::{KvTabBuilder, TabBuilder, bool_cell, ci_cell, num_cell, opt_num_cell, p_cell, text_cell};
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, ChecklistItem, ChecklistStatus, CiBound, CurveSamplePoint, DataSheet, ErrorCode, FittedCurveOverlay,
-    LinearRegressionSpec, NonlinearFitSpec, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SourceCellId,
-    TableArchetype,
+    LinearRegressionSpec, NonlinearFitSpec, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTabKind, SourceCellId, TableArchetype,
 };
 use curvebook_math::PValueFormat;
 use curvebook_math::dist::norm_ppf;
@@ -38,15 +38,7 @@ use crate::types::{
     filter_datasets_by_range, per_dataset_parameter_key,
 };
 
-fn p_cell(fmt: PValueFormat, p: f64) -> ResultCell {
-    ResultCell::PValue { raw: p, formatted: fmt.format_p(p), stars: fmt.stars(p).to_owned() }
-}
-
-fn num_cell(v: f64) -> ResultCell {
-    if v.is_finite() { ResultCell::Number { value: v, prefix: None, units: None } } else { ResultCell::Empty }
-}
-
-fn ci_cell(lower: CiBound, upper: CiBound) -> ResultCell {
+fn ci_bounds_cell(lower: CiBound, upper: CiBound) -> ResultCell {
     let sanitize = |bound: CiBound| match bound {
         CiBound::Finite(v) if v.is_finite() => CiBound::Finite(v),
         _ => CiBound::Open,
@@ -174,117 +166,82 @@ pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionS
 
     // Main summary tab across datasets.
     let conf_pct = format_percent_label(options.confidence_level.percent());
-    let col_headers: Vec<String> = fits.iter().map(|(_, lbl, _)| lbl.clone()).collect();
-    let mut row_labels = vec![
-        "Slope".to_owned(),
-        "Y-intercept".to_owned(),
-        "SE of Slope".to_owned(),
-        "SE of Intercept".to_owned(),
-        format!("{conf_pct}% CI Slope"),
-        "R squared".to_owned(),
-        "Sy.x".to_owned(),
-        "F".to_owned(),
-        "P value".to_owned(),
-        "Runs test P value".to_owned(),
-    ];
-    let mut rows = vec![Vec::with_capacity(fits.len()); row_labels.len()];
-    for (_, _, f) in &fits {
-        rows[0].push(num_cell(f.slope));
-        rows[1].push(num_cell(f.intercept));
-        rows[2].push(num_cell(f.se_slope));
-        rows[3].push(num_cell(f.se_intercept));
-        rows[4].push(ResultCell::ConfidenceInterval { lower: CiBound::Finite(f.ci_slope.0), upper: CiBound::Finite(f.ci_slope.1) });
-        rows[5].push(num_cell(f.r_squared));
-        rows[6].push(num_cell(f.sy_x));
-        rows[7].push(num_cell(f.f_stat));
-        rows[8].push(p_cell(p_fmt, f.p_value));
-        rows[9].push(p_cell(p_fmt, f.runs_test.p_too_few_runs));
-    }
+    let mut summary_tab = TabBuilder::new("linear_summary", "Best-fit values", ResultTabKind::MainSummary)
+        .headers(fits.iter().map(|(_, lbl, _)| lbl.as_str()))
+        .row("Slope", fits.iter().map(|(_, _, f)| num_cell(f.slope)))
+        .row("Y-intercept", fits.iter().map(|(_, _, f)| num_cell(f.intercept)))
+        .row("SE of Slope", fits.iter().map(|(_, _, f)| num_cell(f.se_slope)))
+        .row("SE of Intercept", fits.iter().map(|(_, _, f)| num_cell(f.se_intercept)))
+        .row(format!("{conf_pct}% CI Slope"), fits.iter().map(|(_, _, f)| ci_cell(f.ci_slope.0, f.ci_slope.1)))
+        .row("R squared", fits.iter().map(|(_, _, f)| num_cell(f.r_squared)))
+        .row("Sy.x", fits.iter().map(|(_, _, f)| num_cell(f.sy_x)))
+        .row("F", fits.iter().map(|(_, _, f)| num_cell(f.f_stat)))
+        .row("P value", fits.iter().map(|(_, _, f)| p_cell(f.p_value, p_fmt)))
+        .row("Runs test P value", fits.iter().map(|(_, _, f)| p_cell(f.runs_test.p_too_few_runs, p_fmt)));
     if x_filter.is_some() {
-        append_linear_observation_counts(&mut row_labels, &mut rows, fits.iter().map(|(_, _, f)| [f.n, f.n_excluded_by_range, f.df_residual]));
+        append_linear_observation_counts(&mut summary_tab, fits.iter().map(|(_, _, f)| [f.n, f.n_excluded_by_range, f.df_residual]));
     }
-    result.tabs.push(ResultTab {
-        id: "linear_summary".to_owned(),
-        title: "Best-fit values".to_owned(),
-        kind: ResultTabKind::MainSummary,
-        column_headers: col_headers,
-        row_labels,
-        rows,
-        footnotes: Vec::new(),
-    });
+    result.tabs.push(summary_tab.build());
 
     // Multi-line ANCOVA comparison if >1 dataset.
     if datasets.len() >= 2 {
         let grouped_slices: Vec<&[crate::types::DataPoint]> = datasets.iter().map(|d| d.points.as_slice()).collect();
         if let Ok(cmp) = compare_linear_lines(&grouped_slices, lin_spec.force_through_origin) {
-            let mut cmp_rows = vec![vec![
-                num_cell(cmp.f_slopes),
-                ResultCell::Text(format!("{}, {}", cmp.df_slopes.0, cmp.df_slopes.1)),
-                p_cell(p_fmt, cmp.p_slopes),
-                ResultCell::Boolean(cmp.slopes_significantly_different),
-            ]];
-            let mut cmp_labels = vec!["Are slopes equal?".to_owned()];
+            let mut tab = TabBuilder::new("linear_comparison", "Comparison of Lines (ANCOVA)", ResultTabKind::ModelComparison)
+                .headers(["F", "DFn, DFd", "P value", "Significantly different?"])
+                .row(
+                    "Are slopes equal?",
+                    [
+                        num_cell(cmp.f_slopes),
+                        text_cell(format!("{}, {}", cmp.df_slopes.0, cmp.df_slopes.1)),
+                        p_cell(cmp.p_slopes, p_fmt),
+                        bool_cell(cmp.slopes_significantly_different),
+                    ],
+                )
+                .footnote(format!("Pooled slope = {:.6}", cmp.pooled_slope));
             if let (Some(fi), Some(dfi), Some(pi), Some(sig_i)) =
                 (cmp.f_intercepts, cmp.df_intercepts, cmp.p_intercepts, cmp.intercepts_significantly_different)
             {
-                cmp_labels.push("Are intercepts equal?".to_owned());
-                cmp_rows.push(vec![num_cell(fi), ResultCell::Text(format!("{}, {}", dfi.0, dfi.1)), p_cell(p_fmt, pi), ResultCell::Boolean(sig_i)]);
+                tab.push_row(
+                    "Are intercepts equal?",
+                    [num_cell(fi), text_cell(format!("{}, {}", dfi.0, dfi.1)), p_cell(pi, p_fmt), bool_cell(sig_i)],
+                );
             }
-            result.tabs.push(ResultTab {
-                id: "linear_comparison".to_owned(),
-                title: "Comparison of Lines (ANCOVA)".to_owned(),
-                kind: ResultTabKind::ModelComparison,
-                column_headers: vec!["F".to_owned(), "DFn, DFd".to_owned(), "P value".to_owned(), "Significantly different?".to_owned()],
-                row_labels: cmp_labels,
-                rows: cmp_rows,
-                footnotes: vec![format!("Pooled slope = {:.6}", cmp.pooled_slope)],
-            });
+            result.tabs.push(tab.build());
         }
     }
 
     // Interpolated unknowns tab.
     if lin_spec.interpolate_unknowns {
-        let mut interp_rows = Vec::new();
-        let mut interp_labels = Vec::new();
+        let mut tab = TabBuilder::new("linear_interpolated", "Interpolated unknowns", ResultTabKind::InterpolatedUnknowns).headers([
+            "Input",
+            "Interpolated",
+            "Mean-Response CI",
+            "Calibration / Prediction Interval",
+        ]);
+        let mut has_rows = false;
         let to_ci_bound = |v: Option<f64>| match v {
             Some(x) if x.is_finite() => CiBound::Finite(x),
             _ => CiBound::Open,
         };
         for (_, lbl, f) in &fits {
-            for item in &f.interpolated_x_from_y {
-                interp_labels.push(format!("{lbl} (X from Y={:.4})", item.input_value));
-                interp_rows.push(vec![
-                    num_cell(item.input_value),
-                    num_cell(item.estimate),
-                    ResultCell::ConfidenceInterval { lower: item.ci_lower, upper: item.ci_upper },
-                    ResultCell::ConfidenceInterval { lower: to_ci_bound(item.pred_lower), upper: to_ci_bound(item.pred_upper) },
-                ]);
-            }
-            for item in &f.interpolated_y_from_x {
-                interp_labels.push(format!("{lbl} (Y from X={:.4})", item.input_value));
-                interp_rows.push(vec![
-                    num_cell(item.input_value),
-                    num_cell(item.estimate),
-                    ResultCell::ConfidenceInterval { lower: item.ci_lower, upper: item.ci_upper },
-                    ResultCell::ConfidenceInterval { lower: to_ci_bound(item.pred_lower), upper: to_ci_bound(item.pred_upper) },
-                ]);
+            for (dir, items) in [("X from Y", &f.interpolated_x_from_y), ("Y from X", &f.interpolated_y_from_x)] {
+                for item in items {
+                    has_rows = true;
+                    tab.push_row(
+                        format!("{lbl} ({dir}={:.4})", item.input_value),
+                        [
+                            num_cell(item.input_value),
+                            num_cell(item.estimate),
+                            ResultCell::ConfidenceInterval { lower: item.ci_lower, upper: item.ci_upper },
+                            ResultCell::ConfidenceInterval { lower: to_ci_bound(item.pred_lower), upper: to_ci_bound(item.pred_upper) },
+                        ],
+                    );
+                }
             }
         }
-        if !interp_rows.is_empty() {
-            result.tabs.push(ResultTab {
-                id: "linear_interpolated".to_owned(),
-                title: "Interpolated unknowns".to_owned(),
-                kind: ResultTabKind::InterpolatedUnknowns,
-                column_headers: vec![
-                    "Input".to_owned(),
-                    "Interpolated".to_owned(),
-                    "Mean-Response CI".to_owned(),
-                    "Calibration / Prediction Interval".to_owned(),
-                ],
-                row_labels: interp_labels,
-                rows: interp_rows,
-                footnotes: Vec::new(),
-            });
+        if has_rows {
+            result.tabs.push(tab.build());
         }
     }
 
@@ -293,15 +250,16 @@ pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionS
     Ok(result)
 }
 
-fn append_linear_observation_counts(labels: &mut Vec<String>, rows: &mut Vec<Vec<ResultCell>>, counts: impl Iterator<Item = [usize; 3]>) {
+fn append_linear_observation_counts(tab: &mut TabBuilder, counts: impl Iterator<Item = [usize; 3]>) {
     let mut count_rows = [Vec::new(), Vec::new(), Vec::new()];
     for counts in counts {
         for (row, count) in count_rows.iter_mut().zip(counts) {
             row.push(num_cell(count as f64));
         }
     }
-    labels.extend(["Observations analyzed", "Excluded by X range", "Residual degrees of freedom"].map(str::to_owned));
-    rows.extend(count_rows);
+    for (label, row) in ["Observations analyzed", "Excluded by X range", "Residual degrees of freedom"].into_iter().zip(count_rows) {
+        tab.push_row(label, row);
+    }
 }
 
 fn build_deming_result_sheet(
@@ -314,31 +272,17 @@ fn build_deming_result_sheet(
     // `LinearRegressionSpec` currently does not carry a variance-ratio parameter, so orthogonal
     // Deming regression fixes `variance_ratio_lambda = 1.0` (equal measurement-error variances).
     let opts = DemingOptions { variance_ratio_lambda: 1.0, confidence_level: options.confidence_level };
-    let mut headers = Vec::with_capacity(datasets.len());
-    let mut counts = Vec::with_capacity(datasets.len());
+    let mut dems = Vec::with_capacity(datasets.len());
     let has_range = options.x_range_filter.is_some();
     let (plot_min, plot_max) = options.plot_x_range.unwrap_or_default();
     let emit_overlay = has_range || plot_min.is_some() || plot_max.is_some() || has_explicit_segments;
     let conf_pct = format_percent_label(options.confidence_level.percent());
-    let mut row_labels = vec![
-        "Slope".to_owned(),
-        "Y-intercept".to_owned(),
-        "SE Slope (Jackknife)".to_owned(),
-        "SE Intercept (Jackknife)".to_owned(),
-        format!("{conf_pct}% CI Slope"),
-        format!("{conf_pct}% CI Intercept"),
-        "Sy.x".to_owned(),
-    ];
-    let mut rows = vec![Vec::with_capacity(datasets.len()); row_labels.len()];
 
     for (ds, &n_excluded) in datasets.iter().zip(excluded) {
         if ds.is_pre_summarized {
             return Err(FitError::RequiresRawReplicates);
         }
         let dem = deming_regression(&ds.points, &opts)?;
-        if has_range {
-            counts.push([dem.n, n_excluded, dem.df]);
-        }
         if emit_overlay {
             result.fitted_curves.push(FittedCurveOverlay {
                 data_set_index: ds.data_set_index,
@@ -348,14 +292,6 @@ fn build_deming_result_sheet(
                 points: build_linear_overlay_points(&ds.points, dem.slope, dem.intercept, options)?,
             });
         }
-        headers.push(ds.label.clone());
-        rows[0].push(num_cell(dem.slope));
-        rows[1].push(num_cell(dem.intercept));
-        rows[2].push(num_cell(dem.se_slope));
-        rows[3].push(num_cell(dem.se_intercept));
-        rows[4].push(ci_cell(CiBound::Finite(dem.ci_slope.0), CiBound::Finite(dem.ci_slope.1)));
-        rows[5].push(ci_cell(CiBound::Finite(dem.ci_intercept.0), CiBound::Finite(dem.ci_intercept.1)));
-        rows[6].push(num_cell(dem.sy_x));
         result.scalars.push(ResultScalarEntry { key: "Slope".to_owned(), data_set_index: Some(ds.data_set_index), value: dem.slope, units: None });
         result.scalars.push(ResultScalarEntry {
             key: "YIntercept".to_owned(),
@@ -363,23 +299,26 @@ fn build_deming_result_sheet(
             value: dem.intercept,
             units: None,
         });
+        dems.push((ds.label.as_str(), dem, n_excluded));
     }
 
+    let mut tab = TabBuilder::new("deming_summary", "Deming (Model II) linear regression", ResultTabKind::MainSummary)
+        .headers(dems.iter().map(|(lbl, _, _)| *lbl))
+        .row("Slope", dems.iter().map(|(_, d, _)| num_cell(d.slope)))
+        .row("Y-intercept", dems.iter().map(|(_, d, _)| num_cell(d.intercept)))
+        .row("SE Slope (Jackknife)", dems.iter().map(|(_, d, _)| num_cell(d.se_slope)))
+        .row("SE Intercept (Jackknife)", dems.iter().map(|(_, d, _)| num_cell(d.se_intercept)))
+        .row(format!("{conf_pct}% CI Slope"), dems.iter().map(|(_, d, _)| ci_cell(d.ci_slope.0, d.ci_slope.1)))
+        .row(format!("{conf_pct}% CI Intercept"), dems.iter().map(|(_, d, _)| ci_cell(d.ci_intercept.0, d.ci_intercept.1)))
+        .row("Sy.x", dems.iter().map(|(_, d, _)| num_cell(d.sy_x)))
+        .footnotes([
+            "Standard errors computed by Leave-One-Out jackknife.",
+            "Orthogonal Deming regression uses fixed variance ratio lambda = 1.0 (equal X and Y error variances).",
+        ]);
     if has_range {
-        append_linear_observation_counts(&mut row_labels, &mut rows, counts.into_iter());
+        append_linear_observation_counts(&mut tab, dems.iter().map(|(_, d, n_excluded)| [d.n, *n_excluded, d.df]));
     }
-    result.tabs.push(ResultTab {
-        id: "deming_summary".to_owned(),
-        title: "Deming (Model II) linear regression".to_owned(),
-        kind: ResultTabKind::MainSummary,
-        column_headers: headers,
-        row_labels,
-        rows,
-        footnotes: vec![
-            "Standard errors computed by Leave-One-Out jackknife.".to_owned(),
-            "Orthogonal Deming regression uses fixed variance ratio lambda = 1.0 (equal X and Y error variances).".to_owned(),
-        ],
-    });
+    result.tabs.push(tab.build());
     append_auc_scalars_and_tab(&mut result, datasets, None);
     result.status = ResultStatus::UpToDate;
     Ok(result)
@@ -595,8 +534,8 @@ fn nonlinear_uses_weighted_objective(fit: &NonlinearFitResult, nl_spec: &Nonline
 }
 
 fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitResult, nl_spec: &NonlinearFitSpec) {
-    let mut param_rows = Vec::with_capacity(fit.parameters.len() + fit.fixed_constants.len());
-    let mut param_labels = Vec::with_capacity(param_rows.capacity());
+    let mut tab = TabBuilder::new("nonlinear_parameters", "Best-fit values & confidence intervals", ResultTabKind::ParametersAndConfidenceIntervals)
+        .headers(["Best-fit value", "Std. Error", "Confidence Interval", "Dependency", "Hougaard |g1|"]);
     let is_robust = fit.is_robust_cauchy() || nl_spec.method == curvebook_doc::FitMethod::RobustCauchy;
     let mut emitted_scalars: HashSet<(String, Option<usize>)> = HashSet::new();
     let ds_names = dataset_display_names(fit);
@@ -607,28 +546,29 @@ fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
         if unstable {
             label.push_str(" (Unstable)");
         }
-        param_labels.push(label);
         let prefix = (!unstable && p.notes.contains(&ParameterNote::Ambiguous)).then(|| "~".to_owned());
         let row = if is_robust || !p.inference_availability.is_available() {
-            let na = ResultCell::Text("Not applicable".to_owned());
-            vec![ResultCell::Number { value: p.estimate, prefix, units: None }, na.clone(), na.clone(), na.clone(), na]
+            let na = text_cell("Not applicable");
+            [ResultCell::Number { value: p.estimate, prefix, units: None }, na.clone(), na.clone(), na.clone(), na]
         } else {
-            vec![
+            [
                 ResultCell::Number { value: p.estimate, prefix, units: None },
                 num_cell(p.se),
-                ci_cell(p.ci_lower, p.ci_upper),
+                ci_bounds_cell(p.ci_lower, p.ci_upper),
                 num_cell(p.dependency),
                 num_cell(p.hougaard_g1),
             ]
         };
-        param_rows.push(row);
+        tab.push_row(label, row);
         emitted_scalars.insert((p.name.to_ascii_lowercase(), p.dataset_index));
         result.scalars.push(ResultScalarEntry { key: p.name.clone(), data_set_index: p.dataset_index, value: p.estimate, units: None });
     }
 
     for (name, val, _) in &fit.fixed_constants {
-        param_labels.push(format!("{} (Constant)", fixed_constant_display_label(fit, &ds_names, name)));
-        param_rows.push(vec![num_cell(*val), ResultCell::Empty, ResultCell::Text("Fixed".to_owned()), ResultCell::Empty, ResultCell::Empty]);
+        tab.push_row(
+            format!("{} (Constant)", fixed_constant_display_label(fit, &ds_names, name)),
+            [num_cell(*val), ResultCell::Empty, text_cell("Fixed"), ResultCell::Empty, ResultCell::Empty],
+        );
         emitted_scalars.insert((name.to_ascii_lowercase(), None));
         result.scalars.push(ResultScalarEntry { key: name.clone(), data_set_index: None, value: *val, units: None });
     }
@@ -669,21 +609,7 @@ fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
         param_footnote.push_str(&format!(", {obj_lbl} = {:.6}", fit.weighted_ss));
     }
 
-    result.tabs.push(ResultTab {
-        id: "nonlinear_parameters".to_owned(),
-        title: "Best-fit values & confidence intervals".to_owned(),
-        kind: ResultTabKind::ParametersAndConfidenceIntervals,
-        column_headers: vec![
-            "Best-fit value".to_owned(),
-            "Std. Error".to_owned(),
-            "Confidence Interval".to_owned(),
-            "Dependency".to_owned(),
-            "Hougaard |g1|".to_owned(),
-        ],
-        row_labels: param_labels,
-        rows: param_rows,
-        footnotes: vec![param_footnote],
-    });
+    result.tabs.push(tab.footnote(param_footnote).build());
 }
 
 /// Fill the nonlinear result tabs and checklist. Checklist thresholds are heuristics, not
@@ -697,72 +623,43 @@ fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitR
     let is_poisson = fit.fit_method == curvebook_doc::FitMethod::PoissonDeviance;
 
     // Goodness-of-fit summary tab.
-    let mut gof_labels = vec![
-        "Degrees of Freedom".to_owned(),
-        "R squared".to_owned(),
-        "Sum of Squares (RSS)".to_owned(),
-        "Sy.x".to_owned(),
-        "AICc".to_owned(),
-        "BIC".to_owned(),
-        "Number of points analyzed".to_owned(),
-    ];
-    let na_cell = || ResultCell::Text("Not applicable".to_owned());
-    let mut gof_vals = vec![
-        vec![num_cell(fit.df as f64)],
-        vec![num_cell(fit.r_squared)],
-        vec![num_cell(fit.rss)],
-        vec![if is_robust { na_cell() } else { num_cell(fit.rsd) }],
-        vec![if is_robust { na_cell() } else { fit.aic_c.map_or(ResultCell::Empty, num_cell) }],
-        vec![if is_robust { na_cell() } else { fit.bic.map_or(ResultCell::Empty, num_cell) }],
-        vec![num_cell(fit.n_obs as f64)],
-    ];
+    let na_cell = || text_cell("Not applicable");
+    let mut gof = KvTabBuilder::new("nonlinear_gof", "Goodness of Fit", ResultTabKind::MainSummary, fit.equation_name.as_str())
+        .num("Degrees of Freedom", fit.df as f64)
+        .num("R squared", fit.r_squared)
+        .num("Sum of Squares (RSS)", fit.rss)
+        .cell("Sy.x", if is_robust { na_cell() } else { num_cell(fit.rsd) });
     if is_robust && let Some(rsdr) = fit.rsdr.filter(|v| v.is_finite()) {
-        gof_labels.insert(4, "RSDR (Robust SD of residuals)".to_owned());
-        gof_vals.insert(4, vec![num_cell(rsdr)]);
+        gof.push_num("RSDR (Robust SD of residuals)", rsdr);
     }
-    let mut gof_footnotes = Vec::new();
+    gof.push_cell("AICc", if is_robust { na_cell() } else { opt_num_cell(fit.aic_c) })
+        .push_cell("BIC", if is_robust { na_cell() } else { opt_num_cell(fit.bic) })
+        .push_num("Number of points analyzed", fit.n_obs as f64);
     if weighted_obj {
-        gof_labels.push(if is_poisson { "Poisson Deviance".to_owned() } else { "Weighted Sum of Squares".to_owned() });
-        gof_vals.push(vec![num_cell(fit.weighted_ss)]);
-        gof_footnotes.push(String::from(
+        gof.push_num(if is_poisson { "Poisson Deviance" } else { "Weighted Sum of Squares" }, fit.weighted_ss).push_footnote(
             "R squared, Sum of Squares (RSS), and Sy.x are computed from unweighted residuals in original Y units; parameter SEs, confidence intervals, AICc/BIC, and model comparisons use the weighted / deviance objective; residual normality and homoscedasticity checks use weighted / deviance-standardized residuals.",
-        ));
+        );
     }
     if let Some(r) = &fit.runs_test {
-        gof_labels.push("Runs test P value".to_owned());
-        gof_vals.push(vec![p_cell(p_fmt, r.p_too_few_runs)]);
+        gof.push_cell("Runs test P value", p_cell(r.p_too_few_runs, p_fmt));
     }
     if fit.datasets.len() > 1 {
         for ds in &fit.datasets {
             if let Some(ds_runs) = &ds.runs_test {
-                gof_labels.push(format!("Runs test ({}) P value", ds.label));
-                gof_vals.push(vec![p_cell(p_fmt, ds_runs.p_too_few_runs)]);
+                gof.push_cell(format!("Runs test ({}) P value", ds.label), p_cell(ds_runs.p_too_few_runs, p_fmt));
             }
         }
     }
     for norm in [&fit.normality, &fit.normality_anderson_darling, &fit.normality_lilliefors_ks].into_iter().flatten() {
-        gof_labels.push(format!("Normality ({}) P value", norm.test_name));
-        gof_vals.push(vec![p_cell(p_fmt, norm.p_value)]);
+        gof.push_cell(format!("Normality ({}) P value", norm.test_name), p_cell(norm.p_value, p_fmt));
     }
     if let Some(homo) = &fit.homoscedasticity {
-        gof_labels.push("Homoscedasticity (Spearman rho)".to_owned());
-        gof_vals.push(vec![num_cell(homo.spearman_rho)]);
-        gof_labels.push("Homoscedasticity P value".to_owned());
-        gof_vals.push(vec![p_cell(p_fmt, homo.p_value)]);
+        gof.push_num("Homoscedasticity (Spearman rho)", homo.spearman_rho).push_cell("Homoscedasticity P value", p_cell(homo.p_value, p_fmt));
     }
     if fit.n_outliers_excluded > 0 {
-        gof_labels.push("ROUT outliers excluded".to_owned());
-        gof_vals.push(vec![num_cell(fit.n_outliers_excluded as f64)]);
+        gof.push_num("ROUT outliers excluded", fit.n_outliers_excluded as f64);
     }
-    result.tabs.push(ResultTab {
-        id: "nonlinear_gof".to_owned(),
-        title: "Goodness of Fit".to_owned(),
-        kind: ResultTabKind::MainSummary,
-        column_headers: vec![fit.equation_name.clone()],
-        row_labels: gof_labels,
-        rows: gof_vals,
-        footnotes: gof_footnotes,
-    });
+    result.tabs.push(gof.build());
 
     if nl_spec.emit_residuals_tab {
         append_nonlinear_residuals_tab(result, fit);
@@ -1052,96 +949,63 @@ fn append_comparison_tab(
     outcome: &ModelComparisonOutcome,
     p_fmt: PValueFormat,
 ) {
+    let swapped_note = || {
+        format!(
+            "Primary fit ({}) has fewer residual degrees of freedom ({}) than {} ({}); the simpler model serves as the null hypothesis and the primary model serves as the alternative.",
+            primary.equation_name, primary.df, alt.equation_name, alt.df
+        )
+    };
+    let preferred_label = |null_fit: &NonlinearFitResult, complex_fit: &NonlinearFitResult, prefer_complex: bool| {
+        if prefer_complex {
+            format!("{} (More complex model)", complex_fit.equation_name)
+        } else {
+            format!("{} (Simpler model)", null_fit.equation_name)
+        }
+    };
     match outcome {
         ModelComparisonOutcome::ExtraSumOfSquaresF(f) => {
             let (null_fit, complex_fit, swapped) = ordered_nested_roles(primary, alt);
-            let footnotes = if swapped {
-                vec![format!(
-                    "Primary fit ({}) has fewer residual degrees of freedom ({}) than {} ({}); the simpler model serves as the null hypothesis and the primary model serves as the alternative.",
-                    primary.equation_name, primary.df, alt.equation_name, alt.df
-                )]
-            } else {
-                Vec::new()
-            };
-            result.tabs.push(ResultTab {
-                id: "model_comparison_f".to_owned(),
-                title: "Comparison of Models (Extra sum-of-squares F test)".to_owned(),
-                kind: ResultTabKind::ModelComparison,
-                column_headers: vec!["Value".to_owned()],
-                row_labels: vec![
-                    "Null hypothesis model".to_owned(),
-                    "Alternative model".to_owned(),
-                    "F (DFn, DFd)".to_owned(),
-                    "P value".to_owned(),
-                    "Preferred model".to_owned(),
-                ],
-                rows: vec![
-                    vec![ResultCell::Text(null_fit.equation_name.clone())],
-                    vec![ResultCell::Text(complex_fit.equation_name.clone())],
-                    vec![ResultCell::Text(format!("{:.4} ({}, {})", f.f_stat, f.df_num, f.df_den))],
-                    vec![p_cell(p_fmt, f.p_value)],
-                    vec![ResultCell::Text(if f.preferred_complex_model {
-                        format!("{} (More complex model)", complex_fit.equation_name)
-                    } else {
-                        format!("{} (Simpler model)", null_fit.equation_name)
-                    })],
-                ],
-                footnotes,
-            });
+            let mut kv = KvTabBuilder::new(
+                "model_comparison_f",
+                "Comparison of Models (Extra sum-of-squares F test)",
+                ResultTabKind::ModelComparison,
+                "Value",
+            )
+            .text("Null hypothesis model", null_fit.equation_name.as_str())
+            .text("Alternative model", complex_fit.equation_name.as_str())
+            .text("F (DFn, DFd)", format!("{:.4} ({}, {})", f.f_stat, f.df_num, f.df_den))
+            .cell("P value", p_cell(f.p_value, p_fmt))
+            .text("Preferred model", preferred_label(null_fit, complex_fit, f.preferred_complex_model));
+            if swapped {
+                kv.push_footnote(swapped_note());
+            }
+            result.tabs.push(kv.build());
         }
         ModelComparisonOutcome::Aicc(a) => {
-            result.tabs.push(ResultTab {
-                id: "model_comparison_aicc".to_owned(),
-                title: "Comparison of Models (AICc)".to_owned(),
-                kind: ResultTabKind::ModelComparison,
-                column_headers: vec![primary.equation_name.clone(), alt.equation_name.clone()],
-                row_labels: vec!["AICc".to_owned(), "Akaike weight".to_owned(), "Difference in AICc".to_owned(), "Evidence ratio".to_owned()],
-                rows: vec![
-                    vec![num_cell(a.aicc_a), num_cell(a.aicc_b)],
-                    vec![num_cell(a.weight_a), num_cell(a.weight_b)],
-                    vec![num_cell(a.delta_aicc), ResultCell::Empty],
-                    vec![num_cell(a.evidence_ratio), ResultCell::Empty],
-                ],
-                footnotes: Vec::new(),
-            });
+            result.tabs.push(
+                TabBuilder::new("model_comparison_aicc", "Comparison of Models (AICc)", ResultTabKind::ModelComparison)
+                    .headers([primary.equation_name.as_str(), alt.equation_name.as_str()])
+                    .row("AICc", [num_cell(a.aicc_a), num_cell(a.aicc_b)])
+                    .row("Akaike weight", [num_cell(a.weight_a), num_cell(a.weight_b)])
+                    .row("Difference in AICc", [num_cell(a.delta_aicc), ResultCell::Empty])
+                    .row("Evidence ratio", [num_cell(a.evidence_ratio), ResultCell::Empty])
+                    .build(),
+            );
         }
         ModelComparisonOutcome::LikelihoodRatioTest(lrt) => {
             let (null_fit, complex_fit, swapped) = ordered_nested_roles(primary, alt);
-            let footnotes = if swapped {
-                vec![format!(
-                    "Primary fit ({}) has fewer residual degrees of freedom ({}) than {} ({}); the simpler model serves as the null hypothesis and the primary model serves as the alternative.",
-                    primary.equation_name, primary.df, alt.equation_name, alt.df
-                )]
-            } else {
-                Vec::new()
-            };
-            result.tabs.push(ResultTab {
-                id: "model_comparison_lrt".to_owned(),
-                title: "Comparison of Models (Likelihood Ratio Test)".to_owned(),
-                kind: ResultTabKind::ModelComparison,
-                column_headers: vec!["Value".to_owned()],
-                row_labels: vec![
-                    "Null hypothesis model".to_owned(),
-                    "Alternative model".to_owned(),
-                    "LR statistic D = 2*(ln L_alt - ln L_null)".to_owned(),
-                    "DF (diff)".to_owned(),
-                    "P value".to_owned(),
-                    "Preferred model".to_owned(),
-                ],
-                rows: vec![
-                    vec![ResultCell::Text(null_fit.equation_name.clone())],
-                    vec![ResultCell::Text(complex_fit.equation_name.clone())],
-                    vec![num_cell(lrt.lr_statistic)],
-                    vec![num_cell(lrt.df_diff as f64)],
-                    vec![p_cell(p_fmt, lrt.p_value)],
-                    vec![ResultCell::Text(if lrt.preferred_complex_model {
-                        format!("{} (More complex model)", complex_fit.equation_name)
-                    } else {
-                        format!("{} (Simpler model)", null_fit.equation_name)
-                    })],
-                ],
-                footnotes,
-            });
+            let mut kv =
+                KvTabBuilder::new("model_comparison_lrt", "Comparison of Models (Likelihood Ratio Test)", ResultTabKind::ModelComparison, "Value")
+                    .text("Null hypothesis model", null_fit.equation_name.as_str())
+                    .text("Alternative model", complex_fit.equation_name.as_str())
+                    .num("LR statistic D = 2*(ln L_alt - ln L_null)", lrt.lr_statistic)
+                    .num("DF (diff)", lrt.df_diff as f64)
+                    .cell("P value", p_cell(lrt.p_value, p_fmt))
+                    .text("Preferred model", preferred_label(null_fit, complex_fit, lrt.preferred_complex_model));
+            if swapped {
+                kv.push_footnote(swapped_note());
+            }
+            result.tabs.push(kv.build());
         }
         ModelComparisonOutcome::NotApplicableInRobustMode { requested_test, reason } => {
             let id = if requested_test.contains("AICc") {
@@ -1151,30 +1015,17 @@ fn append_comparison_tab(
             } else {
                 "model_comparison_f"
             };
-            let na = || ResultCell::Text("Not applicable".to_owned());
-            result.tabs.push(ResultTab {
-                id: id.to_owned(),
-                title: format!("Comparison of Models ({requested_test})"),
-                kind: ResultTabKind::ModelComparison,
-                column_headers: vec!["Value".to_owned()],
-                row_labels: vec![
-                    "Null hypothesis model".to_owned(),
-                    "Alternative model".to_owned(),
-                    "Test statistic".to_owned(),
-                    "P value".to_owned(),
-                    "Preferred model".to_owned(),
-                    "Inference availability".to_owned(),
-                ],
-                rows: vec![
-                    vec![ResultCell::Text(primary.equation_name.clone())],
-                    vec![ResultCell::Text(alt.equation_name.clone())],
-                    vec![na()],
-                    vec![na()],
-                    vec![na()],
-                    vec![ResultCell::Text("Not applicable (NotApplicableInRobustMode)".to_owned())],
-                ],
-                footnotes: vec![reason.clone()],
-            });
+            result.tabs.push(
+                KvTabBuilder::new(id, format!("Comparison of Models ({requested_test})"), ResultTabKind::ModelComparison, "Value")
+                    .text("Null hypothesis model", primary.equation_name.as_str())
+                    .text("Alternative model", alt.equation_name.as_str())
+                    .text("Test statistic", "Not applicable")
+                    .text("P value", "Not applicable")
+                    .text("Preferred model", "Not applicable")
+                    .text("Inference availability", "Not applicable (NotApplicableInRobustMode)")
+                    .footnote(reason.as_str())
+                    .build(),
+            );
         }
     }
 }
@@ -1203,42 +1054,31 @@ fn append_nonlinear_residuals_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
     }
 
     let multi_ds = fit.datasets.len() > 1;
-    let mut row_labels = Vec::with_capacity(total_pts);
-    let mut rows = Vec::with_capacity(total_pts);
+    let mut tab = TabBuilder::new("nonlinear_residuals", "Residuals", ResultTabKind::Residuals).headers([
+        "Predicted Y",
+        "Residual",
+        "Weighted Residual",
+        "Studentized Residual",
+        "Q-Q Normal Quantile",
+    ]);
     let mut flat_idx = 0_usize;
     for ds in &fit.datasets {
         for i in 0..ds.y_hat.len() {
             let lbl = if multi_ds { format!("{} #{}", ds.label, i + 1) } else { format!("Pt {}", i + 1) };
-            row_labels.push(lbl);
             let yh = ds.y_hat[i];
             let res = ds.residuals.get(i).copied().unwrap_or(f64::NAN);
             let w_res = ds.weighted_residuals.get(i).copied().unwrap_or(f64::NAN);
             let stud_cell = if fit.is_robust_cauchy() {
-                ResultCell::Text("Not applicable".to_owned())
+                text_cell("Not applicable")
             } else {
                 num_cell(ds.studentized_residuals.get(i).copied().unwrap_or(f64::NAN))
             };
             let qq = qq_quantiles[flat_idx];
-            rows.push(vec![num_cell(yh), num_cell(res), num_cell(w_res), stud_cell, num_cell(qq)]);
+            tab.push_row(lbl, [num_cell(yh), num_cell(res), num_cell(w_res), stud_cell, num_cell(qq)]);
             flat_idx += 1;
         }
     }
-
-    result.tabs.push(ResultTab {
-        id: "nonlinear_residuals".to_owned(),
-        title: "Residuals".to_owned(),
-        kind: ResultTabKind::Residuals,
-        column_headers: vec![
-            "Predicted Y".to_owned(),
-            "Residual".to_owned(),
-            "Weighted Residual".to_owned(),
-            "Studentized Residual".to_owned(),
-            "Q-Q Normal Quantile".to_owned(),
-        ],
-        row_labels,
-        rows,
-        footnotes: Vec::new(),
-    });
+    result.tabs.push(tab.build());
 }
 
 fn append_nonlinear_covariance_tab(result: &mut ResultSheet, fit: &NonlinearFitResult) {
@@ -1247,16 +1087,13 @@ fn append_nonlinear_covariance_tab(result: &mut ResultSheet, fit: &NonlinearFitR
     }
     let ds_names = dataset_display_names(fit);
     let labels: Vec<String> = fit.parameters.iter().map(|p| parameter_display_label(fit, &ds_names, &p.name, p.dataset_index)).collect();
-    let rows: Vec<Vec<ResultCell>> = fit.covariance.covariance_matrix.iter().map(|r| r.iter().map(|&v| num_cell(v)).collect()).collect();
-    result.tabs.push(ResultTab {
-        id: "nonlinear_covariance".to_owned(),
-        title: "Covariance Matrix".to_owned(),
-        kind: ResultTabKind::CovarianceMatrix,
-        column_headers: labels.clone(),
-        row_labels: labels,
-        rows,
-        footnotes: vec![format!("Numerical rank: {}/{}", fit.covariance.numerical_rank, fit.parameters.len())],
-    });
+    let mut tab = TabBuilder::new("nonlinear_covariance", "Covariance Matrix", ResultTabKind::CovarianceMatrix)
+        .headers(labels.iter().map(String::as_str))
+        .footnote(format!("Numerical rank: {}/{}", fit.covariance.numerical_rank, fit.parameters.len()));
+    for (label, row) in labels.into_iter().zip(&fit.covariance.covariance_matrix) {
+        tab.push_row(label, row.iter().map(|&v| num_cell(v)));
+    }
+    result.tabs.push(tab.build());
 }
 
 fn append_nonlinear_interpolated_tab(result: &mut ResultSheet, fit: &NonlinearFitResult) {
@@ -1293,12 +1130,19 @@ fn append_interpolated_tab<'a>(
     title: &str,
     rows: impl Iterator<Item = (&'a InterpolatedUnknown, &'static str)>,
 ) {
-    let mut interp_rows = Vec::new();
-    let mut interp_labels = Vec::new();
-    let mut footnotes = Vec::new();
-
+    let mut tab = TabBuilder::new(id, title, ResultTabKind::InterpolatedUnknowns).headers([
+        "Input",
+        "Interpolated",
+        "Mean-Response CI",
+        "Calibration / Prediction Interval",
+        "Direction",
+        "Dataset",
+    ]);
+    let mut has_rows = false;
     let mut has_robust_ci_suppression = false;
+
     for (item, direction) in rows {
+        has_rows = true;
         let lbl = fit
             .datasets
             .iter()
@@ -1311,56 +1155,34 @@ fn append_interpolated_tab<'a>(
         } else {
             format!("{direction}={:.4}", item.input_value)
         };
-        interp_labels.push(format!("{lbl} ({source})"));
         let suppress_ci = fit.is_robust_cauchy() || !item.inference_availability.is_available();
         if suppress_ci {
             has_robust_ci_suppression = true;
         }
-        let ci_rendered = if suppress_ci { ResultCell::Text("Not applicable".to_owned()) } else { ci_cell(item.ci_lower, item.ci_upper) };
-        let pred_rendered = if suppress_ci { ResultCell::Text("Not applicable".to_owned()) } else { ci_cell(item.pred_lower, item.pred_upper) };
-        interp_rows.push(vec![
-            num_cell(item.input_value),
-            num_cell(item.output_estimate),
-            ci_rendered,
-            pred_rendered,
-            ResultCell::Text(direction.to_owned()),
-            ResultCell::Text(lbl.clone()),
-        ]);
+        let ci_rendered = if suppress_ci { text_cell("Not applicable") } else { ci_bounds_cell(item.ci_lower, item.ci_upper) };
+        let pred_rendered = if suppress_ci { text_cell("Not applicable") } else { ci_bounds_cell(item.pred_lower, item.pred_upper) };
+        tab.push_row(
+            format!("{lbl} ({source})"),
+            [num_cell(item.input_value), num_cell(item.output_estimate), ci_rendered, pred_rendered, text_cell(direction), text_cell(lbl.as_str())],
+        );
         if let Some(note) = &item.note {
             let source = if item.replicate_subcolumn.is_some() || item.replicate_mean_count.is_some() {
                 source
             } else {
                 format!("row {}, {direction}", item.row + 1)
             };
-            footnotes.push(format!("{lbl} ({source}): {note}"));
+            tab.push_footnote(format!("{lbl} ({source}): {note}"));
         }
     }
-    if interp_rows.is_empty() {
+    if !has_rows {
         return;
     }
     if has_robust_ci_suppression {
-        footnotes.push(
-            "Confidence intervals for interpolated unknowns are not applicable under Robust (Cauchy) regression (NotApplicableInRobustMode)."
-                .to_owned(),
+        tab.push_footnote(
+            "Confidence intervals for interpolated unknowns are not applicable under Robust (Cauchy) regression (NotApplicableInRobustMode).",
         );
     }
-
-    result.tabs.push(ResultTab {
-        id: id.to_owned(),
-        title: title.to_owned(),
-        kind: ResultTabKind::InterpolatedUnknowns,
-        column_headers: vec![
-            "Input".to_owned(),
-            "Interpolated".to_owned(),
-            "Mean-Response CI".to_owned(),
-            "Calibration / Prediction Interval".to_owned(),
-            "Direction".to_owned(),
-            "Dataset".to_owned(),
-        ],
-        row_labels: interp_labels,
-        rows: interp_rows,
-        footnotes,
-    });
+    result.tabs.push(tab.build());
 }
 
 #[inline]
@@ -1625,18 +1447,18 @@ fn append_auc_scalars_and_tab(
         return;
     }
 
-    result.tabs.push(ResultTab {
-        id: "fit_auc".to_owned(),
-        title: "Area Under the Curve (AUC)".to_owned(),
-        kind: ResultTabKind::Diagnostics,
-        column_headers: col_headers,
-        row_labels: vec!["Trapezoidal AUC".to_owned(), "Fitted curve AUC".to_owned(), "X min".to_owned(), "X max".to_owned()],
-        rows: vec![row_emp, row_fit, row_xmin, row_xmax],
-        footnotes: vec![
-            "Trapezoidal AUC integrates replicate-averaged (X, Mean Y) across [X min, X max]; fitted curve AUC integrates the fitted curve across [X min, X max]."
-                .to_owned(),
-        ],
-    });
+    result.tabs.push(
+        TabBuilder::new("fit_auc", "Area Under the Curve (AUC)", ResultTabKind::Diagnostics)
+            .headers(col_headers)
+            .row("Trapezoidal AUC", row_emp)
+            .row("Fitted curve AUC", row_fit)
+            .row("X min", row_xmin)
+            .row("X max", row_xmax)
+            .footnote(
+                "Trapezoidal AUC integrates replicate-averaged (X, Mean Y) across [X min, X max]; fitted curve AUC integrates the fitted curve across [X min, X max].",
+            )
+            .build(),
+    );
 }
 
 #[cfg(test)]
