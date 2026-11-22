@@ -8,7 +8,7 @@ use curvebook_doc::{
 };
 use curvebook_engine::Session;
 use curvebook_ui_egui::UiApp;
-use curvebook_ui_egui::i18n::{LOCALES, w7_mv_ui};
+use curvebook_ui_egui::i18n::{CATALOG, LOCALES};
 use curvebook_ui_egui::interaction::{KeyModifiers, ViewportMetrics};
 use egui::{Key, Modifiers};
 use human_wf_common::{EguiWfHarness, assert_input_to_paint_budget, assert_zero_shortcut_compliance, default_viewport, ensure};
@@ -315,8 +315,9 @@ fn r10_18_b1_inspector_mv_channels_variable_defs_grouping_and_defaults() -> Resu
 
 #[test]
 fn r10_8_w7_staged_i18n_16_locales_and_rtl_parity() -> Result<(), String> {
-    assert!(!w7_mv_ui::STAGED_ENTRIES.is_empty());
-    for entry in w7_mv_ui::STAGED_ENTRIES {
+    let mv_entries: Vec<_> = CATALOG.iter().filter(|e| e.key.starts_with("w7.mv.")).collect();
+    assert!(!mv_entries.is_empty());
+    for entry in mv_entries {
         assert!(!entry.key.trim().is_empty());
         for (i, tr) in entry.translations.iter().enumerate() {
             assert!(!tr.trim().is_empty(), "empty staged translation for `{}` locale idx {i}", entry.key);

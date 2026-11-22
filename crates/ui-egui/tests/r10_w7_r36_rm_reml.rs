@@ -549,7 +549,7 @@ fn w7_r36_staged_i18n_16_locales_and_rtl_hidpi_parity() -> TestRes {
     ];
     for loc in locales {
         for key in keys {
-            let hit = curvebook_ui_egui::i18n::try_tr_in_slices(&[curvebook_ui_egui::i18n::w7_rm_reml::STAGED_ENTRIES], loc, key);
+            let hit = curvebook_ui_egui::i18n::try_tr(loc, key);
             if hit.is_none_or(str::is_empty) {
                 return Err(format!("missing staged translation for locale `{loc}` key `{key}`"));
             }
