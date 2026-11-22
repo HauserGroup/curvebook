@@ -86,9 +86,10 @@ fn r2_s05_03_schema_matches_runtime_checkpoints_errors_sheet_id_and_utf8_titles(
     assert_eq!(cp_props["id"]["minLength"], 1);
     assert_eq!(cp_props["id"]["pattern"], "\\S");
 
-    // SheetId enforces non-whitespace pattern matching SheetId::try_new.
+    // SheetId enforces bounded hook-safe pattern matching SheetId::try_new.
     assert_eq!(val["$defs"]["SheetId"]["minLength"], 1);
-    assert_eq!(val["$defs"]["SheetId"]["pattern"], "\\S");
+    assert_eq!(val["$defs"]["SheetId"]["maxLength"], curvebook_doc::error::MAX_SHEET_ID_BYTES);
+    assert_eq!(val["$defs"]["SheetId"]["pattern"], r"^(?!.*(?:\{\{|\}\}))[^\s:\x00-\x1f\x7f]{1,256}$");
 
     // ResultStatus::Failed accepts canonical $defs.ErrorCode and legacy error code strings,
     // while keeping $defs.ErrorCode.enum strictly aligned with ErrorCode::ALL.

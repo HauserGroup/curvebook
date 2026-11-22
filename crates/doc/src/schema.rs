@@ -8,8 +8,11 @@
 use std::collections::BTreeMap;
 
 use crate::TableKind;
-use crate::error::{CURRENT_SCHEMA_VERSION, MAX_TITLE_BYTES};
+use crate::analysis::PowerAnalysisSpec;
+use crate::error::{CURRENT_SCHEMA_VERSION, MAX_SHEET_ID_BYTES, MAX_SHEETS_PER_PROJECT, MAX_TITLE_BYTES};
 use crate::ids::SheetId;
+use crate::image::MAX_PROJECT_IMAGE_ASSETS;
+use crate::layout::MAX_LAYOUT_ITEMS;
 use crate::project::{NamedCheckpoint, ProjectDocument, SheetFolderKind};
 use crate::result::{ChecklistItem, ChecklistStatus, ErrorCategory, ErrorCode, RemediationKind, ResultStatus};
 
@@ -513,9 +516,10 @@ impl JsonSchema for SheetId {
     fn json_schema() -> SchemaNode {
         string_schema()
             .with_min_length(1)
-            .with_pattern(r"\S")
+            .with_max_length(MAX_SHEET_ID_BYTES as u64)
+            .with_pattern(r"^(?!.*(?:\{\{|\}\}))[^\s:\x00-\x1f\x7f]{1,256}$")
             .with_title("SheetId")
-            .with_description("Non-whitespace sheet identifier (trimmed non-empty).")
+            .with_description("Non-empty hook-safe sheet identifier (1..=256 bytes, no whitespace, control characters, `:`, `{{`, or `}}`).")
     }
 }
 
@@ -629,7 +633,7 @@ impl JsonSchema for NamedCheckpoint {
     fn json_schema() -> SchemaNode {
         object_schema(
             vec![
-                ("id", string_schema().with_min_length(1).with_pattern(r"\S")),
+                ("id", string_schema().with_min_length(1).with_max_length(MAX_SHEET_ID_BYTES as u64).with_pattern(r"\S")),
                 ("name", title_string_schema()),
                 ("note", title_string_schema()),
                 (
@@ -656,18 +660,339 @@ fn title_string_schema() -> SchemaNode {
         )
 }
 
+fn rgba8_schema() -> SchemaNode {
+    let channel = integer_schema().with_minimum_i64(0).with_maximum_i64(255);
+    object_schema(vec![("r", channel.clone()), ("g", channel.clone()), ("b", channel.clone()), ("a", channel)], &["r", "g", "b", "a"], false)
+        .with_title("Rgba8")
+}
+
+fn size_pt_schema() -> SchemaNode {
+    object_schema(
+        vec![("width", number_schema().with_minimum_f64(0.0)), ("height", number_schema().with_minimum_f64(0.0))],
+        &["width", "height"],
+        false,
+    )
+    .with_title("SizePt")
+}
+
+fn rect_pt_schema() -> SchemaNode {
+    object_schema(
+        vec![
+            ("x", number_schema()),
+            ("y", number_schema()),
+            ("width", number_schema().with_minimum_f64(0.0)),
+            ("height", number_schema().with_minimum_f64(0.0)),
+        ],
+        &["x", "y", "width", "height"],
+        false,
+    )
+    .with_title("RectPt")
+}
+
+fn floating_note_schema() -> SchemaNode {
+    object_schema(
+        vec![
+            ("id", string_schema().with_min_length(1).with_max_length(MAX_SHEET_ID_BYTES as u64).with_pattern(r"\S")),
+            ("fill_color", ref_schema("Rgba8")),
+            ("bounds_pt", ref_schema("RectPt")),
+            ("minimized", bool_schema()),
+            ("body_markdown", string_schema()),
+        ],
+        &["id", "fill_color", "bounds_pt", "minimized", "body_markdown"],
+        false,
+    )
+    .with_title("FloatingNote")
+}
+
+fn cell_coord_schema() -> SchemaNode {
+    let idx = integer_schema().with_minimum_i64(0);
+    object_schema(vec![("row", idx.clone()), ("col", idx.clone()), ("subcol", idx)], &["row", "col", "subcol"], false).with_title("CellCoord")
+}
+
+fn cell_exclusion_note_schema() -> SchemaNode {
+    object_schema(
+        vec![("coord", ref_schema("CellCoord")), ("reason_tag", string_schema()), ("note", string_schema()), ("timestamp_utc", string_schema())],
+        &["coord", "reason_tag", "note", "timestamp_utc"],
+        false,
+    )
+    .with_title("CellExclusionNote")
+}
+
+fn linked_data_region_schema() -> SchemaNode {
+    let range = object_schema(vec![("start", ref_schema("CellCoord")), ("end", ref_schema("CellCoord"))], &["start", "end"], false);
+    let link_spec = SchemaNode { schema_type: Some(SchemaTypeSpec::Single(SchemaType::Object)), ..SchemaNode::default() };
+    object_schema(
+        vec![("id", string_schema().with_min_length(1)), ("spec", link_spec), ("target_range", range), ("provenance_summary", string_schema())],
+        &["id", "spec", "target_range", "provenance_summary"],
+        false,
+    )
+    .with_title("LinkedDataRegion")
+}
+
+fn table_archetype_schema() -> SchemaNode {
+    let table_body = SchemaNode { schema_type: Some(SchemaTypeSpec::Single(SchemaType::Object)), ..SchemaNode::default() };
+    let variants = ["Xy", "Column", "Grouped", "Contingency", "Survival", "PartsOfWhole", "MultipleVariables", "Nested"]
+        .into_iter()
+        .map(|tag| object_schema(vec![(tag, table_body.clone())], &[tag], false))
+        .collect();
+    one_of_schema(variants).with_title("TableArchetype")
+}
+
+fn info_constant_schema() -> SchemaNode {
+    let value_schema = one_of_schema(vec![
+        const_string_schema("Empty"),
+        object_schema(vec![("Number", number_schema())], &["Number"], false),
+        object_schema(vec![("Text", string_schema())], &["Text"], false),
+        object_schema(vec![("Date", string_schema())], &["Date"], false),
+    ]);
+    object_schema(
+        vec![("name", title_string_schema().with_min_length(1)), ("value", value_schema), ("units", nullable_schema(title_string_schema()))],
+        &["name", "value", "units"],
+        false,
+    )
+    .with_title("InfoConstant")
+}
+
+fn analysis_spec_schema() -> SchemaNode {
+    let kind_obj = SchemaNode { schema_type: Some(SchemaTypeSpec::Single(SchemaType::Object)), ..SchemaNode::default() };
+    let power_variant = object_schema(vec![("PowerAnalysis", ref_schema(PowerAnalysisSpec::schema_name()))], &["PowerAnalysis"], false);
+    let other_kind = object_schema(
+        [
+            "Transform",
+            "DescriptiveStats",
+            "OutlierDetection",
+            "TwoGroupComparison",
+            "BlandAltman",
+            "MultipleRowTTests",
+            "PassingBablok",
+            "OneWayAnova",
+            "FactorialAnova",
+            "NestedComparison",
+            "Contingency",
+            "Survival",
+            "RocCurve",
+            "GeneralizedLinearModel",
+            "Multivariate",
+            "LinearRegression",
+            "NonlinearRegression",
+            "PValueStack",
+        ]
+        .into_iter()
+        .map(|tag| (tag, kind_obj.clone()))
+        .collect(),
+        &[],
+        false,
+    );
+    let kind_schema = any_of_schema(vec![power_variant, other_kind]);
+    let p_value_format = one_of_schema(vec![
+        const_string_schema("FourDecimal"),
+        const_string_schema("Apa"),
+        const_string_schema("Nejm"),
+        object_schema(
+            vec![(
+                "Custom",
+                object_schema(
+                    vec![
+                        ("decimals", integer_schema().with_minimum_i64(1).with_maximum_i64(15)),
+                        ("scientific_below", nullable_schema(number_schema().with_minimum_f64(0.0))),
+                    ],
+                    &["decimals", "scientific_below"],
+                    false,
+                ),
+            )],
+            &["Custom"],
+            false,
+        ),
+    ]);
+    object_schema(
+        vec![
+            ("id", ref_schema(SheetId::schema_name())),
+            ("source_sheet_id", ref_schema(SheetId::schema_name())),
+            ("selected_data_sets", array_schema(integer_schema().with_minimum_i64(0))),
+            ("auto_title", string_schema()),
+            ("custom_title", nullable_schema(title_string_schema())),
+            ("confidence_level", number_schema().with_minimum_f64(0.01).with_maximum_f64(99.99)),
+            ("p_value_format", p_value_format),
+            ("kind", kind_schema),
+        ],
+        &["id", "source_sheet_id", "selected_data_sets", "auto_title", "custom_title", "confidence_level", "p_value_format", "kind"],
+        false,
+    )
+    .with_title("AnalysisSpec")
+}
+
+fn result_tab_schema() -> SchemaNode {
+    let cell = SchemaNode { schema_type: Some(SchemaTypeSpec::Multiple(vec![SchemaType::String, SchemaType::Object])), ..SchemaNode::default() };
+    let tab_kind = enum_schema(&[
+        "MainSummary",
+        "AnovaTable",
+        "MultipleComparisons",
+        "ParametersAndConfidenceIntervals",
+        "ModelComparison",
+        "Residuals",
+        "DescriptiveSummary",
+        "InterpolatedUnknowns",
+        "CurveCoordinates",
+        "NumberAtRisk",
+        "Diagnostics",
+        "CovarianceMatrix",
+        "NormalQq",
+        "BaselineSurvival",
+        "LogMinusLog",
+    ]);
+    object_schema(
+        vec![
+            ("id", string_schema().with_min_length(1)),
+            ("title", title_string_schema()),
+            ("kind", tab_kind),
+            ("column_headers", array_schema(string_schema())),
+            ("row_labels", array_schema(string_schema())),
+            ("rows", array_schema(array_schema(cell))),
+            ("footnotes", array_schema(string_schema())),
+        ],
+        &["id", "title", "kind", "column_headers", "row_labels", "rows", "footnotes"],
+        false,
+    )
+    .with_title("ResultTab")
+}
+
+fn result_scalar_entry_schema() -> SchemaNode {
+    object_schema(
+        vec![
+            ("key", string_schema().with_min_length(1)),
+            ("data_set_index", nullable_schema(integer_schema().with_minimum_i64(0))),
+            ("value", number_schema()),
+            ("units", nullable_schema(string_schema())),
+        ],
+        &["key", "data_set_index", "value", "units"],
+        false,
+    )
+    .with_title("ResultScalarEntry")
+}
+
+fn pairwise_comparison_record_schema() -> SchemaNode {
+    object_schema(
+        vec![
+            ("group_a", integer_schema().with_minimum_i64(0)),
+            ("group_b", integer_schema().with_minimum_i64(0)),
+            ("label_a", string_schema()),
+            ("label_b", string_schema()),
+            ("estimate_diff", nullable_schema(number_schema())),
+            ("raw_p_or_q", number_schema().with_minimum_f64(0.0).with_maximum_f64(1.0)),
+            ("is_fdr_q", bool_schema()),
+            ("significant", bool_schema()),
+        ],
+        &["group_a", "group_b", "label_a", "label_b", "estimate_diff", "raw_p_or_q", "is_fdr_q", "significant"],
+        false,
+    )
+    .with_title("PairwiseComparisonRecord")
+}
+
+fn fitted_curve_overlay_schema() -> SchemaNode {
+    let pt = object_schema(
+        vec![
+            ("x", number_schema()),
+            ("y", number_schema()),
+            ("ci_lower", nullable_schema(number_schema())),
+            ("ci_upper", nullable_schema(number_schema())),
+            ("pred_lower", nullable_schema(number_schema())),
+            ("pred_upper", nullable_schema(number_schema())),
+        ],
+        &["x", "y", "ci_lower", "ci_upper", "pred_lower", "pred_upper"],
+        false,
+    );
+    object_schema(
+        vec![
+            ("data_set_index", integer_schema().with_minimum_i64(0)),
+            ("equation_id", string_schema()),
+            ("converged", bool_schema()),
+            ("ambiguous", bool_schema()),
+            ("points", array_schema(pt)),
+        ],
+        &["data_set_index", "equation_id", "converged", "ambiguous", "points"],
+        false,
+    )
+    .with_title("FittedCurveOverlay")
+}
+
+fn graph_spec_schema() -> SchemaNode {
+    let axis = object_schema(
+        vec![
+            ("title", title_string_schema()),
+            (
+                "segments",
+                SchemaNode {
+                    min_items: Some(1),
+                    max_items: Some(3),
+                    ..array_schema(SchemaNode { schema_type: Some(SchemaTypeSpec::Single(SchemaType::Object)), ..SchemaNode::default() })
+                },
+            ),
+            ("stroke_width_pt", number_schema().with_minimum_f64(0.0)),
+        ],
+        &["title", "segments", "stroke_width_pt"],
+        true,
+    );
+    object_schema(
+        vec![
+            ("primary_source_sheet_id", ref_schema(SheetId::schema_name())),
+            ("canvas_size_pt", ref_schema("SizePt")),
+            ("paper_fill", nullable_schema(ref_schema("Rgba8"))),
+            ("title", title_string_schema()),
+            ("x_axis", axis.clone()),
+            ("y_axis", axis.clone()),
+            ("y2_axis", nullable_schema(axis)),
+        ],
+        &[
+            "kind",
+            "primary_source_sheet_id",
+            "palette",
+            "canvas_size_pt",
+            "paper_fill",
+            "title",
+            "frame_preset",
+            "x_axis",
+            "y_axis",
+            "series",
+            "legend",
+        ],
+        true,
+    )
+    .with_title("GraphSpec")
+}
+
+fn layout_spec_schema() -> SchemaNode {
+    let item = SchemaNode { schema_type: Some(SchemaTypeSpec::Single(SchemaType::Object)), ..SchemaNode::default() };
+    let grid = SchemaNode { min_items: Some(2), max_items: Some(2), ..array_schema(integer_schema().with_minimum_i64(1).with_maximum_i64(255)) };
+    object_schema(
+        vec![
+            ("width", number_schema().with_minimum_f64(f64::MIN_POSITIVE)),
+            ("height", number_schema().with_minimum_f64(f64::MIN_POSITIVE)),
+            ("unit", enum_schema(&["Millimeters", "Centimeters", "Inches", "Points"])),
+            ("orientation", enum_schema(&["Portrait", "Landscape"])),
+            ("grid_template", nullable_schema(grid)),
+            ("align_plot_origins", bool_schema()),
+            ("panel_badges", enum_schema(&["UpperCaseLetters", "LowerCaseLetters", "None"])),
+            ("background_fill", nullable_schema(ref_schema("Rgba8"))),
+            ("items", SchemaNode { max_items: Some(MAX_LAYOUT_ITEMS as u64), ..array_schema(item) }),
+        ],
+        &["width", "height", "unit", "orientation", "grid_template", "align_plot_origins", "panel_badges", "background_fill", "items"],
+        false,
+    )
+    .with_title("LayoutSpec")
+}
+
 fn data_sheet_schema() -> SchemaNode {
     object_schema(
         vec![
             ("id", ref_schema(SheetId::schema_name())),
             ("title", title_string_schema()),
-            ("archetype", any_json_schema()),
+            ("archetype", ref_schema("TableArchetype")),
             ("frozen", bool_schema()),
             ("info_sheet_id", nullable_schema(ref_schema(SheetId::schema_name()))),
-            ("linked_regions", array_schema(any_json_schema())),
-            ("floating_notes", array_schema(any_json_schema())),
-            ("color_tag", nullable_schema(any_json_schema())),
-            ("exclusion_notes", array_schema(any_json_schema())),
+            ("linked_regions", array_schema(ref_schema("LinkedDataRegion"))),
+            ("floating_notes", array_schema(ref_schema("FloatingNote"))),
+            ("color_tag", nullable_schema(ref_schema("Rgba8"))),
+            ("exclusion_notes", array_schema(ref_schema("CellExclusionNote"))),
         ],
         &["id", "title", "archetype", "frozen", "info_sheet_id", "linked_regions", "floating_notes", "color_tag"],
         false,
@@ -681,10 +1006,10 @@ fn info_sheet_schema() -> SchemaNode {
             ("id", ref_schema(SheetId::schema_name())),
             ("title", title_string_schema()),
             ("linked_data_sheets", array_schema(ref_schema(SheetId::schema_name()))),
-            ("constants", array_schema(any_json_schema())),
+            ("constants", array_schema(ref_schema("InfoConstant"))),
             ("notes_markdown", string_schema()),
-            ("floating_notes", array_schema(any_json_schema())),
-            ("color_tag", nullable_schema(any_json_schema())),
+            ("floating_notes", array_schema(ref_schema("FloatingNote"))),
+            ("color_tag", nullable_schema(ref_schema("Rgba8"))),
         ],
         &["id", "title", "linked_data_sheets", "constants", "notes_markdown", "floating_notes", "color_tag"],
         false,
@@ -710,17 +1035,17 @@ fn result_sheet_schema() -> SchemaNode {
     object_schema(
         vec![
             ("id", ref_schema(SheetId::schema_name())),
-            ("analysis", any_json_schema()),
+            ("analysis", ref_schema("AnalysisSpec")),
             ("status", ref_schema(ResultStatus::schema_name())),
             ("analyzable_data", nullable_schema(ref_schema("DataSheet"))),
-            ("tabs", array_schema(any_json_schema())),
-            ("scalars", array_schema(any_json_schema())),
-            ("pairwise_comparisons", array_schema(any_json_schema())),
-            ("fitted_curves", array_schema(any_json_schema())),
+            ("tabs", array_schema(ref_schema("ResultTab"))),
+            ("scalars", array_schema(ref_schema("ResultScalarEntry"))),
+            ("pairwise_comparisons", array_schema(ref_schema("PairwiseComparisonRecord"))),
+            ("fitted_curves", array_schema(ref_schema("FittedCurveOverlay"))),
             ("eliminated_outliers", array_schema(ref_schema("SourceCellId"))),
             ("checklist", array_schema(ref_schema(ChecklistItem::schema_name()))),
-            ("floating_notes", array_schema(any_json_schema())),
-            ("color_tag", nullable_schema(any_json_schema())),
+            ("floating_notes", array_schema(ref_schema("FloatingNote"))),
+            ("color_tag", nullable_schema(ref_schema("Rgba8"))),
         ],
         &[
             "id",
@@ -746,9 +1071,9 @@ fn graph_sheet_schema() -> SchemaNode {
             ("id", ref_schema(SheetId::schema_name())),
             ("title", title_string_schema()),
             ("initialized", bool_schema()),
-            ("spec", any_json_schema()),
-            ("floating_notes", array_schema(any_json_schema())),
-            ("color_tag", nullable_schema(any_json_schema())),
+            ("spec", ref_schema("GraphSpec")),
+            ("floating_notes", array_schema(ref_schema("FloatingNote"))),
+            ("color_tag", nullable_schema(ref_schema("Rgba8"))),
         ],
         &["id", "title", "initialized", "spec", "floating_notes", "color_tag"],
         false,
@@ -761,9 +1086,9 @@ fn layout_sheet_schema() -> SchemaNode {
         vec![
             ("id", ref_schema(SheetId::schema_name())),
             ("title", title_string_schema()),
-            ("spec", any_json_schema()),
-            ("floating_notes", array_schema(any_json_schema())),
-            ("color_tag", nullable_schema(any_json_schema())),
+            ("spec", ref_schema("LayoutSpec")),
+            ("floating_notes", array_schema(ref_schema("FloatingNote"))),
+            ("color_tag", nullable_schema(ref_schema("Rgba8"))),
         ],
         &["id", "title", "spec", "floating_notes", "color_tag"],
         false,
@@ -775,7 +1100,7 @@ fn project_image_asset_schema() -> SchemaNode {
     let pixel_size_schema = SchemaNode { min_items: Some(2), max_items: Some(2), ..array_schema(integer_schema().with_minimum_i64(1)) };
     object_schema(
         vec![
-            ("asset_id", string_schema().with_min_length(4)),
+            ("asset_id", string_schema().with_min_length(4).with_pattern(r"^img-[0-9a-f]{16}$")),
             ("media_type", enum_schema(&["Png", "Jpeg", "Tiff"])),
             ("pixel_size", pixel_size_schema),
             ("bytes", string_schema()),
@@ -784,10 +1109,6 @@ fn project_image_asset_schema() -> SchemaNode {
         false,
     )
     .with_title("ProjectImageAsset")
-}
-
-fn any_json_schema() -> SchemaNode {
-    SchemaNode::default()
 }
 
 impl JsonSchema for ProjectDocument {
@@ -803,19 +1124,20 @@ impl JsonSchema for ProjectDocument {
 /// Construct the canonical JSON Schema (Draft 2020-12) for [`ProjectDocument`].
 #[must_use]
 pub fn project_document_schema() -> SchemaNode {
+    let max_sheets = Some(MAX_SHEETS_PER_PROJECT as u64);
     object_schema(
         vec![
             ("schema_version", integer_schema().with_minimum_i64(1).with_maximum_i64(i64::from(CURRENT_SCHEMA_VERSION))),
             ("title", title_string_schema()),
-            ("data_sheets", array_schema(ref_schema("DataSheet"))),
-            ("info_sheets", array_schema(ref_schema("InfoSheet"))),
-            ("result_sheets", array_schema(ref_schema("ResultSheet"))),
-            ("graph_sheets", array_schema(ref_schema("GraphSheet"))),
-            ("layout_sheets", array_schema(ref_schema("LayoutSheet"))),
+            ("data_sheets", SchemaNode { max_items: max_sheets, ..array_schema(ref_schema("DataSheet")) }),
+            ("info_sheets", SchemaNode { max_items: max_sheets, ..array_schema(ref_schema("InfoSheet")) }),
+            ("result_sheets", SchemaNode { max_items: max_sheets, ..array_schema(ref_schema("ResultSheet")) }),
+            ("graph_sheets", SchemaNode { max_items: max_sheets, ..array_schema(ref_schema("GraphSheet")) }),
+            ("layout_sheets", SchemaNode { max_items: max_sheets, ..array_schema(ref_schema("LayoutSheet")) }),
             ("active_sheet_id", nullable_schema(ref_schema(SheetId::schema_name()))),
             ("family_anchor_sheet_id", nullable_schema(ref_schema(SheetId::schema_name()))),
             ("checkpoints", array_schema(ref_schema(NamedCheckpoint::schema_name()))),
-            ("image_assets", array_schema(ref_schema("ProjectImageAsset"))),
+            ("image_assets", SchemaNode { max_items: Some(MAX_PROJECT_IMAGE_ASSETS as u64), ..array_schema(ref_schema("ProjectImageAsset")) }),
         ],
         &[
             "schema_version",
@@ -844,6 +1166,23 @@ pub fn project_document_schema() -> SchemaNode {
     .with_def(TableKind::schema_name(), TableKind::json_schema())
     .with_def(SheetFolderKind::schema_name(), SheetFolderKind::json_schema())
     .with_def(NamedCheckpoint::schema_name(), NamedCheckpoint::json_schema())
+    .with_def(PowerAnalysisSpec::schema_name(), PowerAnalysisSpec::json_schema())
+    .with_def("Rgba8", rgba8_schema())
+    .with_def("SizePt", size_pt_schema())
+    .with_def("RectPt", rect_pt_schema())
+    .with_def("FloatingNote", floating_note_schema())
+    .with_def("CellCoord", cell_coord_schema())
+    .with_def("CellExclusionNote", cell_exclusion_note_schema())
+    .with_def("LinkedDataRegion", linked_data_region_schema())
+    .with_def("TableArchetype", table_archetype_schema())
+    .with_def("InfoConstant", info_constant_schema())
+    .with_def("AnalysisSpec", analysis_spec_schema())
+    .with_def("ResultTab", result_tab_schema())
+    .with_def("ResultScalarEntry", result_scalar_entry_schema())
+    .with_def("PairwiseComparisonRecord", pairwise_comparison_record_schema())
+    .with_def("FittedCurveOverlay", fitted_curve_overlay_schema())
+    .with_def("GraphSpec", graph_spec_schema())
+    .with_def("LayoutSpec", layout_spec_schema())
     .with_def("DataSheet", data_sheet_schema())
     .with_def("InfoSheet", info_sheet_schema())
     .with_def("SourceCellId", source_cell_id_schema())

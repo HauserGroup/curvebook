@@ -486,7 +486,7 @@ pub struct ChecklistItem {
 }
 
 /// Complete output node produced by running an [`AnalysisSpec`].
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ResultSheet {
     /// Project-unique sheet identifier (matches `analysis.id`).
     pub id: SheetId,
@@ -517,11 +517,10 @@ pub struct ResultSheet {
 }
 
 impl ResultSheet {
-    /// Construct an initially [`ResultStatus::Dirty`] empty `ResultSheet` wrapping `analysis`, rejecting empty IDs.
+    /// Construct an initially [`ResultStatus::Dirty`] empty `ResultSheet` wrapping `analysis`, rejecting empty or oversized IDs and invalid specs.
     pub fn new(analysis: AnalysisSpec) -> Result<Self, DocError> {
-        if analysis.id.as_str().trim().is_empty() {
-            return Err(DocError::EmptyIdentifier);
-        }
+        analysis.id.validate_non_empty_bounded()?;
+        analysis.validate_structural()?;
         Ok(Self {
             id: analysis.id.clone(),
             analysis,
@@ -538,6 +537,91 @@ impl ResultSheet {
         })
     }
 
+    /// Validate result sheet identifier bounds, analysis spec, finite numeric outputs, and floating notes.
+    pub fn validate(&self) -> Result<(), DocError> {
+        self.id.validate_non_empty_bounded()?;
+        self.analysis.validate_structural()?;
+        if let Some(ds) = &self.analyzable_data {
+            ds.validate()?;
+        }
+        for s in &self.scalars {
+            if !s.value.is_finite() {
+                return Err(DocError::InvalidCellValue { archetype: crate::TableKind::Column, row: 0, col: 0, reason: "result.scalars.value" });
+            }
+        }
+        for tab in &self.tabs {
+            for row in &tab.rows {
+                for cell in row {
+                    match cell {
+                        ResultCell::Number { value, .. } if !value.is_finite() => {
+                            return Err(DocError::InvalidCellValue {
+                                archetype: crate::TableKind::Column,
+                                row: 0,
+                                col: 0,
+                                reason: "result.tabs.rows.number",
+                            });
+                        }
+                        ResultCell::ConfidenceInterval { lower, upper } => {
+                            if let CiBound::Finite(v) = lower
+                                && !v.is_finite()
+                            {
+                                return Err(DocError::InvalidCellValue {
+                                    archetype: crate::TableKind::Column,
+                                    row: 0,
+                                    col: 0,
+                                    reason: "result.tabs.rows.ci_lower",
+                                });
+                            }
+                            if let CiBound::Finite(v) = upper
+                                && !v.is_finite()
+                            {
+                                return Err(DocError::InvalidCellValue {
+                                    archetype: crate::TableKind::Column,
+                                    row: 0,
+                                    col: 0,
+                                    reason: "result.tabs.rows.ci_upper",
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        for pc in &self.pairwise_comparisons {
+            if !pc.raw_p_or_q.is_finite() || pc.estimate_diff.is_some_and(|v| !v.is_finite()) {
+                return Err(DocError::InvalidCellValue {
+                    archetype: crate::TableKind::Column,
+                    row: 0,
+                    col: 0,
+                    reason: "result.pairwise_comparisons",
+                });
+            }
+        }
+        for curve in &self.fitted_curves {
+            for pt in &curve.points {
+                if !pt.x.is_finite()
+                    || !pt.y.is_finite()
+                    || pt.ci_lower.is_some_and(|v| !v.is_finite())
+                    || pt.ci_upper.is_some_and(|v| !v.is_finite())
+                    || pt.pred_lower.is_some_and(|v| !v.is_finite())
+                    || pt.pred_upper.is_some_and(|v| !v.is_finite())
+                {
+                    return Err(DocError::InvalidCellValue {
+                        archetype: crate::TableKind::Column,
+                        row: 0,
+                        col: 0,
+                        reason: "result.fitted_curves.points",
+                    });
+                }
+            }
+        }
+        for note in &self.floating_notes {
+            note.validate()?;
+        }
+        Ok(())
+    }
+
     /// Effective navigator title delegated from `self.analysis`.
     #[must_use]
     pub fn title(&self) -> &str {
@@ -547,7 +631,7 @@ impl ResultSheet {
     /// Resolve a hooked scalar by case-insensitive parameter key and optional dataset index.
     #[must_use]
     pub fn lookup_scalar(&self, key: &str, data_set_index: Option<usize>) -> Option<f64> {
-        if matches!(self.status, ResultStatus::Failed { .. }) {
+        if !matches!(self.status, ResultStatus::UpToDate) {
             return None;
         }
         let needle = key.trim();
@@ -556,5 +640,47 @@ impl ResultSheet {
             .find(|s| s.key.trim().eq_ignore_ascii_case(needle) && (data_set_index.is_none() || s.data_set_index == data_set_index))
             .map(|s| s.value)
             .filter(|v| v.is_finite())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ResultSheet {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct RawResultSheet {
+            id: SheetId,
+            analysis: AnalysisSpec,
+            status: ResultStatus,
+            analyzable_data: Option<DataSheet>,
+            tabs: Vec<ResultTab>,
+            scalars: Vec<ResultScalarEntry>,
+            pairwise_comparisons: Vec<PairwiseComparisonRecord>,
+            fitted_curves: Vec<FittedCurveOverlay>,
+            #[serde(default)]
+            eliminated_outliers: Vec<crate::SourceCellId>,
+            checklist: Vec<ChecklistItem>,
+            floating_notes: Vec<FloatingNote>,
+            color_tag: Option<Rgba8>,
+        }
+
+        let raw = RawResultSheet::deserialize(deserializer)?;
+        let sheet = Self {
+            id: raw.id,
+            analysis: raw.analysis,
+            status: raw.status,
+            analyzable_data: raw.analyzable_data,
+            tabs: raw.tabs,
+            scalars: raw.scalars,
+            pairwise_comparisons: raw.pairwise_comparisons,
+            fitted_curves: raw.fitted_curves,
+            eliminated_outliers: raw.eliminated_outliers,
+            checklist: raw.checklist,
+            floating_notes: raw.floating_notes,
+            color_tag: raw.color_tag,
+        };
+        sheet.validate().map_err(serde::de::Error::custom)?;
+        Ok(sheet)
     }
 }

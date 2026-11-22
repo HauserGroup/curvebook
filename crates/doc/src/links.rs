@@ -271,6 +271,7 @@ impl<'de> serde::Deserialize<'de> for DataSheet {
             exclusion_notes: raw.exclusion_notes,
         };
         sheet.validate().map_err(serde::de::Error::custom)?;
+        sheet.validate_finite_metadata().map_err(serde::de::Error::custom)?;
         Ok(sheet)
     }
 }
@@ -295,13 +296,45 @@ impl DataSheet {
         Ok(sheet)
     }
 
-    /// Validate identifier, title, and underlying table rectangularity/subcolumn invariants.
+    /// Validate identifier bounds, title bounds, table archetype invariants, and floating notes.
     pub fn validate(&self) -> Result<(), DocError> {
-        if self.id.as_str().trim().is_empty() {
-            return Err(DocError::EmptyIdentifier);
-        }
+        self.id.validate_non_empty_bounded()?;
         validate_title(&self.title)?;
-        self.archetype.validate()
+        if let Some(info_id) = &self.info_sheet_id {
+            info_id.validate_non_empty_bounded()?;
+        }
+        for region in &self.linked_regions {
+            if let Some(src_id) = region.spec.source.upstream_sheet_id() {
+                src_id.validate_non_empty_bounded()?;
+            }
+        }
+        self.archetype.validate()?;
+        for note in &self.floating_notes {
+            note.validate_id()?;
+        }
+        Ok(())
+    }
+
+    /// Validate finite table metadata floats (`GeneratedSequence` `start`/`step`, `GroupedTable::row_numeric_spacing`,
+    /// and floating-note bounds).
+    pub fn validate_finite_metadata(&self) -> Result<(), DocError> {
+        match &self.archetype {
+            TableArchetype::Xy(xy) => xy.x_mode.validate()?,
+            TableArchetype::Grouped(g) => g.validate_finite()?,
+            _ => {}
+        }
+        for note in &self.floating_notes {
+            note.validate()?;
+        }
+        Ok(())
+    }
+
+    /// Strict validation additionally rejecting non-finite metadata floats (`GeneratedSequence`
+    /// `start`/`step`, `GroupedTable::row_numeric_spacing`) and enforcing hook-safe IDs (`<= 256` bytes).
+    pub fn validate_strict(&self) -> Result<(), DocError> {
+        self.id.validate()?;
+        self.validate()?;
+        self.validate_finite_metadata()
     }
 
     /// Return the [`TableKind`] discriminator of `self.archetype`.
@@ -421,13 +454,41 @@ impl DataSheet {
 
     /// Non-destructively set or clear the exclusion mask on an independent `X` (`Xy`) or
     /// elapsed-time (`Survival`, `subcol == 0`) cell.
+    ///
+    /// Lazily materializes row width `1` on [`XColumnMode::GeneratedSequence`] tables so generated `X`
+    /// points can still carry exclusion masks.
     pub fn set_x_or_time_excluded(&mut self, row: usize, subcol: usize, excluded: bool) -> Result<(), DocError> {
         self.ensure_mutable()?;
-        let Some(slot) = self.archetype.x_or_time_cell_mut(row, subcol) else {
-            return Err(DocError::CellOutOfBounds { row, col: 0, subcol });
-        };
-        slot.excluded = excluded;
-        Ok(())
+        if let Some(slot) = self.archetype.x_or_time_cell_mut(row, subcol) {
+            slot.excluded = excluded;
+            return Ok(());
+        }
+        if let TableArchetype::Xy(xy) = &mut self.archetype
+            && matches!(xy.x_mode, crate::archetypes::XColumnMode::GeneratedSequence { .. })
+            && subcol == 0
+            && row < xy.row_count()
+        {
+            let rows = xy.row_count();
+            if xy.x_cells.len() != rows {
+                xy.x_cells.resize_with(rows, Vec::new);
+            }
+            if xy.x_cells.iter().any(Vec::is_empty) {
+                let mut materialized = Vec::with_capacity(rows);
+                for r in 0..rows {
+                    if let Some(existing) = xy.x_cells.get(r).and_then(|v| v.first()).cloned() {
+                        materialized.push(vec![existing]);
+                    } else {
+                        materialized.push(vec![xy.materialized_x_cell_at(r)]);
+                    }
+                }
+                xy.x_cells = materialized;
+            }
+            if let Some(slot) = xy.x_cells.get_mut(row).and_then(|v| v.get_mut(0)) {
+                slot.excluded = excluded;
+                return Ok(());
+            }
+        }
+        Err(DocError::CellOutOfBounds { row, col: 0, subcol })
     }
 
     /// Attach a live [`LinkedDataRegion`] to this sheet (enforces freeze state).
@@ -435,6 +496,35 @@ impl DataSheet {
         self.ensure_mutable()?;
         self.linked_regions.push(region);
         Ok(())
+    }
+
+    /// Shift rows in `[start_row .. existing_rows)` down by `insert_rows` across both the table
+    /// archetype and sheet-level row-indexed metadata (`exclusion_notes` and `linked_regions`).
+    ///
+    /// Mirrors [`TableArchetype::shift_rows_down`] early-exit invariants and is a no-op when
+    /// `self.frozen` is `true`, `insert_rows == 0`, `start_row >= existing_rows`, or
+    /// `existing_rows + insert_rows` overflows `usize`.
+    pub fn shift_rows_down(&mut self, start_row: usize, insert_rows: usize, existing_rows: usize) {
+        if self.frozen || insert_rows == 0 || start_row >= existing_rows || existing_rows.checked_add(insert_rows).is_none() {
+            return;
+        }
+        self.archetype.shift_rows_down(start_row, insert_rows, existing_rows);
+        for note in &mut self.exclusion_notes {
+            if note.coord.row >= start_row {
+                note.coord.row = note.coord.row.saturating_add(insert_rows);
+            }
+        }
+        for region in &mut self.linked_regions {
+            if region.target_range.start.row >= start_row {
+                region.target_range.start.row = region.target_range.start.row.saturating_add(insert_rows);
+            }
+            if region.target_range.end.row >= start_row {
+                region.target_range.end.row = region.target_range.end.row.saturating_add(insert_rows);
+            }
+            if region.spec.placement.anchor.row >= start_row {
+                region.spec.placement.anchor.row = region.spec.placement.anchor.row.saturating_add(insert_rows);
+            }
+        }
     }
 
     /// Extract a 2D slice of cells `[row][flat_subcol]` across inclusive `range` (`start ..= end`),
@@ -664,7 +754,9 @@ fn apply_clone_options(arch: &mut TableArchetype, opts: &CloneDataSheetOptions) 
                     g.title = default_column_label(idx);
                 }
                 let units = opts.override_replicates.unwrap_or_else(|| g.biological_unit_count());
-                g.subcolumn_titles = (1..=units).map(|i| format!("{}:{i}", g.title)).collect();
+                if opts.clear_column_titles || opts.override_replicates.is_some() || g.subcolumn_titles.len() != units {
+                    g.subcolumn_titles = (1..=units).map(|i| format!("{}:{i}", g.title)).collect();
+                }
                 if opts.clear_y_values || opts.override_replicates.is_some() {
                     g.cells = vec![vec![Cell::empty(); units]; g.cells.len()];
                 }

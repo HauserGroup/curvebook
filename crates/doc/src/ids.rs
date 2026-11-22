@@ -9,7 +9,7 @@ use crate::error::{DocError, MAX_SHEET_ID_BYTES};
 
 /// Stable project-unique identifier for a `DataSheet`, `InfoSheet`, `ResultSheet`, `GraphSheet`,
 /// or `LayoutSheet`.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 #[serde(transparent)]
 pub struct SheetId(String);
 
@@ -22,7 +22,15 @@ impl SheetId {
 
     /// Construct a validated non-empty, hook-safe `SheetId`.
     pub fn try_new(id: impl Into<String>) -> Result<Self, DocError> {
-        let s = id.into();
+        let id = Self(id.into());
+        id.validate()?;
+        Ok(id)
+    }
+
+    /// Validate that this identifier is non-empty, at most [`MAX_SHEET_ID_BYTES`] UTF-8 bytes,
+    /// free of whitespace/control characters, and free of hook delimiters (`:`, `{{`, `}}`).
+    pub fn validate(&self) -> Result<(), DocError> {
+        let s = self.0.as_str();
         if s.trim().is_empty() {
             return Err(DocError::EmptyIdentifier);
         }
@@ -35,13 +43,56 @@ impl SheetId {
         if s.contains(':') || s.contains("{{") || s.contains("}}") {
             return Err(DocError::InvalidIdentifier { reason: "sheet_id must not contain hook delimiter sequences (`:`, `{{`, `}}`)" });
         }
-        Ok(Self(s))
+        Ok(())
+    }
+
+    /// Validate structural `SheetId` bounds during deserialization while permitting legacy `.prism`
+    /// delimiter tokens (`:`, ` `, `\t`, `{{`, `}}`) and long IDs up to `MAX_TITLE_BYTES`
+    /// awaiting format-level sanitization/hashing before strict [`Self::validate`].
+    pub fn validate_non_empty_bounded(&self) -> Result<(), DocError> {
+        let s = self.0.as_str();
+        if s.trim().is_empty() {
+            return Err(DocError::EmptyIdentifier);
+        }
+        if s.len() > crate::error::MAX_TITLE_BYTES {
+            return Err(DocError::InvalidIdentifier { reason: "sheet_id must be at most MAX_TITLE_BYTES (4096) UTF-8 bytes" });
+        }
+        if s.contains('\0') {
+            return Err(DocError::InvalidIdentifier { reason: "sheet_id must not contain NUL bytes" });
+        }
+        Ok(())
+    }
+
+    /// Validate insertion-time `SheetId` syntax (hook-safe, non-empty, no whitespace/control/`:`/`{{`/`}}`,
+    /// up to `MAX_TITLE_BYTES` to preserve long-ID portable export compatibility).
+    pub fn validate_hook_safe_bounded(&self) -> Result<(), DocError> {
+        self.validate_non_empty_bounded()?;
+        let s = self.0.as_str();
+        if s.chars().any(|ch| ch.is_whitespace() || ch.is_control()) {
+            return Err(DocError::InvalidIdentifier { reason: "sheet_id must not contain whitespace or control characters" });
+        }
+        if s.contains(':') || s.contains("{{") || s.contains("}}") {
+            return Err(DocError::InvalidIdentifier { reason: "sheet_id must not contain hook delimiter sequences (`:`, `{{`, `}}`)" });
+        }
+        Ok(())
     }
 
     /// Borrow the underlying identifier text.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SheetId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        let id = Self(raw);
+        id.validate_non_empty_bounded().map_err(serde::de::Error::custom)?;
+        Ok(id)
     }
 }
 
@@ -154,6 +205,31 @@ pub struct FloatingNote {
 }
 
 impl FloatingNote {
+    /// Validate identifier bounds on this floating note without inspecting numeric geometry.
+    pub fn validate_id(&self) -> Result<(), DocError> {
+        if self.id.as_str().trim().is_empty() {
+            return Err(DocError::EmptyIdentifier);
+        }
+        if self.id.as_str().len() > MAX_SHEET_ID_BYTES {
+            return Err(DocError::InvalidIdentifier { reason: "note_id must be at most 256 UTF-8 bytes" });
+        }
+        Ok(())
+    }
+
+    /// Validate identifier bounds and finite non-negative geometry on this floating note.
+    pub fn validate(&self) -> Result<(), DocError> {
+        self.validate_id()?;
+        if !self.bounds_pt.x.is_finite()
+            || !self.bounds_pt.y.is_finite()
+            || !self.bounds_pt.width.is_finite()
+            || !self.bounds_pt.height.is_finite()
+            || self.bounds_pt.width < 0.0
+            || self.bounds_pt.height < 0.0
+        {
+            return Err(DocError::InvalidIdentifier { reason: "floating note bounds_pt must be finite with width >= 0 and height >= 0" });
+        }
+        Ok(())
+    }
     /// Default warm pastel note fill with high black-text contrast.
     pub const DEFAULT_FILL: Rgba8 = Rgba8::rgb(0xFF, 0xF7, 0xCC);
 

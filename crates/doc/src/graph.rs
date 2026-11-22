@@ -485,22 +485,61 @@ impl AxisSpec {
         None
     }
 
-    /// Enforce that discontinuous axes carry `1`, `2`, or `3` segments (`docs/implementation/graphing-and-layouts.md` §3.2)
-    /// and validate axis labels, custom tick labels, and float finiteness.
-    pub fn validate(&self) -> Result<(), DocError> {
-        validate_title(&self.title)?;
+    /// Enforce axis segment counts (`1..=3`), stroke widths, segment shares/ranges, and float finiteness
+    /// without inspecting string title lengths.
+    pub fn validate_geometry_and_bounds(&self) -> Result<(), DocError> {
         if !(1..=3).contains(&self.segments.len()) {
             return Err(DocError::InvalidAxisSegments { count: self.segments.len() });
         }
+        if let Some(reason) = self.first_non_finite_float() {
+            return Err(DocError::InvalidCellValue { archetype: crate::TableKind::Xy, row: 0, col: 0, reason });
+        }
+        if self.stroke_width_pt < 0.0 {
+            return Err(DocError::InvalidCellValue { archetype: crate::TableKind::Xy, row: 0, col: 0, reason: "axis.stroke_width_pt must be >= 0" });
+        }
+        for seg in &self.segments {
+            if seg.length_share <= 0.0 {
+                return Err(DocError::InvalidCellValue {
+                    archetype: crate::TableKind::Xy,
+                    row: 0,
+                    col: 0,
+                    reason: "axis.segments.length_share must be > 0",
+                });
+            }
+            if let (Some(lo), Some(hi)) = (seg.min, seg.max)
+                && lo >= hi
+            {
+                return Err(DocError::InvalidCellValue {
+                    archetype: crate::TableKind::Xy,
+                    row: 0,
+                    col: 0,
+                    reason: "axis.segments.min must be < max",
+                });
+            }
+        }
+        for thr in &self.thresholds {
+            if thr.stroke_width_pt < 0.0 {
+                return Err(DocError::InvalidCellValue {
+                    archetype: crate::TableKind::Xy,
+                    row: 0,
+                    col: 0,
+                    reason: "axis.thresholds.stroke_width_pt must be >= 0",
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Enforce that discontinuous axes carry `1`, `2`, or `3` segments (`docs/implementation/graphing-and-layouts.md` §3.2)
+    /// and validate axis labels, custom tick labels, stroke widths, segment shares/ranges, and float finiteness.
+    pub fn validate(&self) -> Result<(), DocError> {
+        validate_title(&self.title)?;
         for tick in &self.additional_ticks {
             if let Some(label) = &tick.label {
                 validate_title(label)?;
             }
         }
-        if let Some(reason) = self.first_non_finite_float() {
-            return Err(DocError::InvalidCellValue { archetype: crate::TableKind::Xy, row: 0, col: 0, reason });
-        }
-        Ok(())
+        self.validate_geometry_and_bounds()
     }
 }
 
@@ -1213,7 +1252,7 @@ impl CompactLetterDisplaySpec {
 }
 
 /// Resolution-independent figure specification compiled by `curvebook-chart`.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct GraphSpec {
     /// Visual graph family (`Xy`, `Column`, `Grouped`, `Contingency`, `PartsOfWhole`, `Survival`, `MultipleVariables`, or `Diagnostic`).
     pub kind: GraphKind,
@@ -1565,33 +1604,65 @@ impl GraphSpec {
         None
     }
 
-    /// Validate axis segment counts, title byte ceilings, and float finiteness.
-    pub fn validate(&self) -> Result<(), DocError> {
-        validate_title(&self.title)?;
-        self.x_axis.validate()?;
-        self.y_axis.validate()?;
+    /// Validate axis segment counts, geometry bounds, and float finiteness without checking string title ceilings
+    /// (allowing `engine` command handlers to surface `TitleTooLong` with `ErrorCode::ResourceLimit`).
+    pub fn validate_geometry_and_bounds(&self) -> Result<(), DocError> {
+        self.primary_source_sheet_id.validate_non_empty_bounded()?;
+        self.x_axis.validate_geometry_and_bounds()?;
+        self.y_axis.validate_geometry_and_bounds()?;
         if let Some(y2) = &self.y2_axis {
-            y2.validate()?;
+            y2.validate_geometry_and_bounds()?;
         }
         if let Some(reason) = self.first_non_finite_float() {
             return Err(DocError::InvalidCellValue { archetype: crate::TableKind::Xy, row: 0, col: 0, reason });
         }
+        let geom_err = |reason: &'static str| DocError::InvalidCellValue { archetype: crate::TableKind::Xy, row: 0, col: 0, reason };
         if self.canvas_size_pt.width <= 0.0 || self.canvas_size_pt.height <= 0.0 {
-            return Err(DocError::InvalidCellValue {
-                archetype: crate::TableKind::Xy,
-                row: 0,
-                col: 0,
-                reason: "spec.canvas_size_pt width and height must be > 0",
-            });
+            return Err(geom_err("spec.canvas_size_pt width and height must be > 0"));
+        }
+        if !(0.0..=12.0).contains(&self.heatmap_labels.cell_gap_pt) {
+            return Err(geom_err("spec.heatmap_labels.cell_gap_pt must lie in [0, 12]"));
         }
         for series in &self.series {
+            series.source_sheet_id.validate_non_empty_bounded()?;
+            validate_gdo_bounds(&series.gdo)?;
             if series.bar_width_override_pt.is_some_and(|w| w <= 0.0) {
-                return Err(DocError::InvalidCellValue {
-                    archetype: crate::TableKind::Xy,
-                    row: 0,
-                    col: 0,
-                    reason: "spec.series.bar_width_override_pt must be finite and > 0",
-                });
+                return Err(geom_err("spec.series.bar_width_override_pt must be finite and > 0"));
+            }
+            for eb in series.y_error_bars.iter().chain(series.x_error_bars.iter()) {
+                if eb.stroke_width_pt < 0.0 || eb.cap_width_pt < 0.0 {
+                    return Err(geom_err("spec.series error_bars stroke_width_pt and cap_width_pt must be >= 0"));
+                }
+            }
+            if let Some(ro) = &series.regression_overlay {
+                ro.result_sheet_id.validate_non_empty_bounded()?;
+                if !(256..=1024).contains(&ro.sample_segments) {
+                    return Err(geom_err("spec.series.regression_overlay.sample_segments must be in [256, 1024]"));
+                }
+            }
+        }
+        for cmp in &self.comparisons {
+            if cmp.stroke_width_pt < 0.0 || cmp.font_size_pt <= 0.0 || cmp.bracket_step_pt < 0.0 {
+                return Err(geom_err("spec.comparisons stroke_width_pt/bracket_step_pt must be >= 0 and font_size_pt > 0"));
+            }
+        }
+        if let Some(mv) = &self.multivariate {
+            match mv.size {
+                SizeChannelMapping::Constant { radius_pt } if radius_pt <= 0.0 => {
+                    return Err(geom_err("spec.multivariate.size.radius_pt must be > 0"));
+                }
+                SizeChannelMapping::Variable { min_radius_pt, max_radius_pt, .. } if min_radius_pt <= 0.0 || max_radius_pt < min_radius_pt => {
+                    return Err(geom_err("spec.multivariate.size variable radii must satisfy 0 < min <= max"));
+                }
+                _ => {}
+            }
+            if let MultivariatePlotMode::CategoricalSummary { gdo, y_error_bars } = &mv.plot_mode {
+                validate_gdo_bounds(gdo)?;
+                if let Some(eb) = y_error_bars
+                    && (eb.stroke_width_pt < 0.0 || eb.cap_width_pt < 0.0)
+                {
+                    return Err(geom_err("spec.multivariate.plot_mode.y_error_bars widths must be >= 0"));
+                }
             }
         }
         for ann in &self.annotations {
@@ -1717,6 +1788,93 @@ impl GraphSpec {
         Ok(())
     }
 
+    /// Validate axis segment counts, title byte ceilings, geometry bounds, and float finiteness.
+    pub fn validate(&self) -> Result<(), DocError> {
+        validate_title(&self.title)?;
+        self.x_axis.validate()?;
+        self.y_axis.validate()?;
+        if let Some(y2) = &self.y2_axis {
+            y2.validate()?;
+        }
+        self.validate_geometry_and_bounds()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for GraphSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct RawGraphSpec {
+            kind: GraphKind,
+            primary_source_sheet_id: SheetId,
+            palette: PaletteId,
+            canvas_size_pt: SizePt,
+            paper_fill: Option<Rgba8>,
+            title: String,
+            frame_preset: FramePreset,
+            x_axis: AxisSpec,
+            y_axis: AxisSpec,
+            y2_axis: Option<AxisSpec>,
+            #[serde(default)]
+            grouped_arrangement: GroupedArrangement,
+            #[serde(default)]
+            survival_number_at_risk: bool,
+            series: Vec<SeriesSpec>,
+            #[serde(default)]
+            multivariate: Option<MultivariateGraphEncoding>,
+            #[serde(default)]
+            comparisons: Vec<PairwiseBracketSpec>,
+            #[serde(default)]
+            compact_letter_display: Option<CompactLetterDisplaySpec>,
+            #[serde(default)]
+            pairwise_display_mode: PairwiseDisplayMode,
+            #[serde(default)]
+            annotations: Vec<GraphAnnotation>,
+            #[serde(default)]
+            point_overrides: Vec<PointStyleOverride>,
+            legend: LegendSpec,
+            #[serde(default)]
+            orientation: CartesianOrientation,
+            #[serde(default)]
+            forest_show_pooled_diamond: bool,
+            #[serde(default)]
+            heatmap_labels: HeatmapLabelSpec,
+        }
+
+        let raw = RawGraphSpec::deserialize(deserializer)?;
+        let spec = Self {
+            kind: raw.kind,
+            primary_source_sheet_id: raw.primary_source_sheet_id,
+            palette: raw.palette,
+            canvas_size_pt: raw.canvas_size_pt,
+            paper_fill: raw.paper_fill,
+            title: raw.title,
+            frame_preset: raw.frame_preset,
+            x_axis: raw.x_axis,
+            y_axis: raw.y_axis,
+            y2_axis: raw.y2_axis,
+            grouped_arrangement: raw.grouped_arrangement,
+            survival_number_at_risk: raw.survival_number_at_risk,
+            series: raw.series,
+            multivariate: raw.multivariate,
+            comparisons: raw.comparisons,
+            compact_letter_display: raw.compact_letter_display,
+            pairwise_display_mode: raw.pairwise_display_mode,
+            annotations: raw.annotations,
+            point_overrides: raw.point_overrides,
+            legend: raw.legend,
+            orientation: raw.orientation,
+            forest_show_pooled_diamond: raw.forest_show_pooled_diamond,
+            heatmap_labels: raw.heatmap_labels,
+        };
+        spec.validate_geometry_and_bounds().map_err(serde::de::Error::custom)?;
+        Ok(spec)
+    }
+}
+
+impl GraphSpec {
     /// Collect all inline template hooks (`{{info:...}}`, `{{result:...}}`) referenced in titles and text annotations.
     #[must_use]
     pub fn inline_hooks(&self) -> Vec<HookSource> {
@@ -1852,6 +2010,59 @@ fn error_bars_non_finite(bars: &ErrorBarSpec) -> Option<&'static str> {
     None
 }
 
+fn validate_marker_bounds(marker: &MarkerStyle) -> Result<(), DocError> {
+    if marker.size_pt <= 0.0 || marker.stroke_width_pt < 0.0 {
+        return Err(DocError::InvalidCellValue {
+            archetype: crate::TableKind::Xy,
+            row: 0,
+            col: 0,
+            reason: "marker size_pt must be > 0 and stroke_width_pt >= 0",
+        });
+    }
+    Ok(())
+}
+
+fn validate_gdo_bounds(gdo: &GraphicalDataObject) -> Result<(), DocError> {
+    let invalid = |reason: &'static str| DocError::InvalidCellValue { archetype: crate::TableKind::Xy, row: 0, col: 0, reason };
+    match gdo {
+        GraphicalDataObject::ScatterAndLine { marker, line, .. } => {
+            if let Some(m) = marker {
+                validate_marker_bounds(m)?;
+            }
+            if let Some(l) = line
+                && l.stroke_width_pt < 0.0
+            {
+                return Err(invalid("spec.series.gdo connecting line stroke_width_pt must be >= 0"));
+            }
+        }
+        GraphicalDataObject::BarWithReplicates { border_width_pt, .. } if *border_width_pt < 0.0 => {
+            return Err(invalid("spec.series.gdo bar border_width_pt must be >= 0"));
+        }
+        GraphicalDataObject::AlignedDotPlot { marker, .. } => validate_marker_bounds(marker)?,
+        GraphicalDataObject::FloatingBar { border_width_pt, .. } if *border_width_pt < 0.0 => {
+            return Err(invalid("spec.series.gdo floating_bar border_width_pt must be >= 0"));
+        }
+        GraphicalDataObject::BeforeAfterLines { marker, stroke_width_pt, .. } => {
+            if let Some(m) = marker {
+                validate_marker_bounds(m)?;
+            }
+            if *stroke_width_pt < 0.0 {
+                return Err(invalid("spec.series.gdo before_after_lines stroke_width_pt must be >= 0"));
+            }
+        }
+        GraphicalDataObject::KaplanMeierStep { stroke_width_pt, .. } if *stroke_width_pt < 0.0 => {
+            return Err(invalid("spec.series.gdo kaplan_meier_step stroke_width_pt must be >= 0"));
+        }
+        GraphicalDataObject::BarWithReplicates { .. }
+        | GraphicalDataObject::BoxAndWhisker { .. }
+        | GraphicalDataObject::Violin { .. }
+        | GraphicalDataObject::FloatingBar { .. }
+        | GraphicalDataObject::KaplanMeierStep { .. }
+        | GraphicalDataObject::PartsOfWhole { .. } => {}
+    }
+    Ok(())
+}
+
 fn gdo_non_finite(gdo: &GraphicalDataObject) -> Option<&'static str> {
     match gdo {
         GraphicalDataObject::ScatterAndLine { marker, line, area_fill, .. } => {
@@ -1961,7 +2172,7 @@ fn annotation_non_finite(ann: &GraphAnnotation) -> Option<&'static str> {
 }
 
 /// Navigator sheet wrapping a [`GraphSpec`] and tracking first-visit gallery initialization.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct GraphSheet {
     /// Project-unique sheet identifier.
     pub id: SheetId,
@@ -1991,17 +2202,44 @@ impl GraphSheet {
         None
     }
 
-    /// Validate sheet identity, title, graph specification, and floating-note geometry.
+    /// Validate sheet identity, title, graph specification, and floating notes.
     pub fn validate(&self) -> Result<(), DocError> {
-        if self.id.as_str().trim().is_empty() {
-            return Err(DocError::EmptyIdentifier);
-        }
+        self.id.validate_non_empty_bounded()?;
         validate_title(&self.title)?;
         self.spec.validate()?;
-        if self.floating_notes.iter().any(|note| !rect_is_finite(note.bounds_pt)) {
-            return Err(DocError::InvalidCellValue { archetype: crate::TableKind::Xy, row: 0, col: 0, reason: "floating_notes.bounds_pt" });
+        for note in &self.floating_notes {
+            note.validate()?;
         }
         Ok(())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for GraphSheet {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct RawGraphSheet {
+            id: SheetId,
+            title: String,
+            initialized: bool,
+            spec: GraphSpec,
+            floating_notes: Vec<FloatingNote>,
+            color_tag: Option<Rgba8>,
+        }
+
+        let raw = RawGraphSheet::deserialize(deserializer)?;
+        let sheet = Self {
+            id: raw.id,
+            title: raw.title,
+            initialized: raw.initialized,
+            spec: raw.spec,
+            floating_notes: raw.floating_notes,
+            color_tag: raw.color_tag,
+        };
+        sheet.validate().map_err(serde::de::Error::custom)?;
+        Ok(sheet)
     }
 }
 
@@ -2009,9 +2247,7 @@ impl GraphSheet {
     /// Provision an uninitialized (`initialized = false`) `GraphSheet` populated with [`GraphSpec::default_for_data_sheet`].
     pub fn new_uninitialized_for_data(id: impl Into<SheetId>, data_sheet: &DataSheet) -> Result<Self, DocError> {
         let id = id.into();
-        if id.as_str().trim().is_empty() {
-            return Err(DocError::EmptyIdentifier);
-        }
+        id.validate_non_empty_bounded()?;
         Ok(Self {
             id,
             title: data_sheet.title.clone(),

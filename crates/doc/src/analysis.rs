@@ -109,7 +109,7 @@ pub enum MathTransformPreset {
     Square,
     /// Unit-proportion log-odds `ln(u / (1 - u))` for `u in (0, 1)`.
     Logit,
-    /// Inverse standard normal CDF `Phi^{-1}(u)` for unit proportions `u in (0, 1)`.
+    /// Finney's +5 probit `5 + Phi^{-1}(u)` (inverse standard normal CDF plus 5) for unit proportions `u in (0, 1)`.
     Probit,
     /// Angular variance-stabilizing Freeman–Tukey / Bliss transform `arcsin(sqrt(u))` in radians for proportions `u in [0, 1]` (Zar 2010).
     ArcsinSqrt,
@@ -1394,7 +1394,7 @@ pub enum PowerEffectSpec {
 
 /// First-class L1 document specification for statistical power, sample-size, and
 /// minimum-detectable-effect calculations.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct PowerAnalysisSpec {
     /// Target statistical hypothesis test family.
     pub family: PowerTestFamily,
@@ -1512,9 +1512,9 @@ impl PowerAnalysisSpec {
         }
     }
 
-    /// Validate domain constraints on this power specification (`alpha`, `target_power`,
-    /// sample sizes, allocation ratio, tail compatibility, and effect-size fields).
-    pub fn validate(&self) -> Result<(), DocError> {
+    /// Validate domain constraints that apply to every persisted [`PowerAnalysisSpec`],
+    /// including unconfigured draft specifications (`PowerAnalysisSpec::default()`).
+    pub fn validate_domain(&self) -> Result<(), DocError> {
         let invalid = |reason: &'static str| DocError::InvalidCellValue { archetype: TableKind::Column, row: 0, col: 0, reason };
         if let Some(reason) = self.first_non_finite_float() {
             return Err(invalid(reason));
@@ -1530,9 +1530,6 @@ impl PowerAnalysisSpec {
         {
             return Err(invalid("power.target_power must lie strictly in (0, 1)"));
         }
-        if self.solve_target != PowerSolveTarget::Power && self.target_power.is_none() {
-            return Err(invalid("power.target_power is required when solving SampleSize or DetectableEffect"));
-        }
         if let Some(n) = self.sample_size
             && n <= 0.0
         {
@@ -1542,9 +1539,6 @@ impl PowerAnalysisSpec {
             && n2 <= 0.0
         {
             return Err(invalid("power.sample_size_group2 must be > 0"));
-        }
-        if self.solve_target != PowerSolveTarget::SampleSize && self.sample_size.is_none() {
-            return Err(invalid("power.sample_size is required when solving Power or DetectableEffect"));
         }
         if self.allocation_ratio <= 0.0 {
             return Err(invalid("power.allocation_ratio must be > 0"));
@@ -1556,9 +1550,6 @@ impl PowerAnalysisSpec {
             && k < 2
         {
             return Err(invalid("power.num_groups must be >= 2"));
-        }
-        if self.solve_target != PowerSolveTarget::DetectableEffect && matches!(self.effect, PowerEffectSpec::Unspecified) {
-            return Err(invalid("power.effect must be specified unless solving DetectableEffect"));
         }
         match &self.effect {
             PowerEffectSpec::MeanDiffAndSd { sd, sd_group2, within_pair_correlation, .. } => {
@@ -1594,12 +1585,98 @@ impl PowerAnalysisSpec {
             }
             _ => {}
         }
-        if let Some(ref info_id) = self.info_sheet_id
-            && info_id.as_str().trim().is_empty()
-        {
-            return Err(DocError::EmptyIdentifier);
+        if let Some(ref info_id) = self.info_sheet_id {
+            info_id.validate_non_empty_bounded()?;
         }
         Ok(())
+    }
+
+    /// Validate domain constraints on this power specification (`alpha`, `target_power`,
+    /// sample sizes, allocation ratio, tail compatibility, and solver readiness).
+    pub fn validate(&self) -> Result<(), DocError> {
+        self.validate_domain()?;
+        let invalid = |reason: &'static str| DocError::InvalidCellValue { archetype: TableKind::Column, row: 0, col: 0, reason };
+        if self.solve_target != PowerSolveTarget::Power && self.target_power.is_none() {
+            return Err(invalid("power.target_power is required when solving SampleSize or DetectableEffect"));
+        }
+        if self.solve_target != PowerSolveTarget::SampleSize && self.sample_size.is_none() {
+            return Err(invalid("power.sample_size is required when solving Power or DetectableEffect"));
+        }
+        if self.solve_target != PowerSolveTarget::DetectableEffect && matches!(self.effect, PowerEffectSpec::Unspecified) {
+            return Err(invalid("power.effect must be specified unless solving DetectableEffect"));
+        }
+        Ok(())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for PowerAnalysisSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(default)]
+        struct RawPowerAnalysisSpec {
+            family: PowerTestFamily,
+            solve_target: PowerSolveTarget,
+            tail_mode: PowerTailMode,
+            alpha: f64,
+            target_power: Option<f64>,
+            sample_size: Option<f64>,
+            sample_size_group2: Option<f64>,
+            allocation_ratio: f64,
+            chi_square_df: f64,
+            num_groups: Option<usize>,
+            two_proportions_mode: TwoProportionsMethod,
+            continuity_correction: bool,
+            correlation_method: CorrelationPowerMethod,
+            effect: PowerEffectSpec,
+            info_sheet_id: Option<SheetId>,
+        }
+
+        impl Default for RawPowerAnalysisSpec {
+            fn default() -> Self {
+                let d = PowerAnalysisSpec::default();
+                Self {
+                    family: d.family,
+                    solve_target: d.solve_target,
+                    tail_mode: d.tail_mode,
+                    alpha: d.alpha,
+                    target_power: d.target_power,
+                    sample_size: d.sample_size,
+                    sample_size_group2: d.sample_size_group2,
+                    allocation_ratio: d.allocation_ratio,
+                    chi_square_df: d.chi_square_df,
+                    num_groups: d.num_groups,
+                    two_proportions_mode: d.two_proportions_mode,
+                    continuity_correction: d.continuity_correction,
+                    correlation_method: d.correlation_method,
+                    effect: d.effect,
+                    info_sheet_id: d.info_sheet_id,
+                }
+            }
+        }
+
+        let raw = RawPowerAnalysisSpec::deserialize(deserializer)?;
+        let spec = Self {
+            family: raw.family,
+            solve_target: raw.solve_target,
+            tail_mode: raw.tail_mode,
+            alpha: raw.alpha,
+            target_power: raw.target_power,
+            sample_size: raw.sample_size,
+            sample_size_group2: raw.sample_size_group2,
+            allocation_ratio: raw.allocation_ratio,
+            chi_square_df: raw.chi_square_df,
+            num_groups: raw.num_groups,
+            two_proportions_mode: raw.two_proportions_mode,
+            continuity_correction: raw.continuity_correction,
+            correlation_method: raw.correlation_method,
+            effect: raw.effect,
+            info_sheet_id: raw.info_sheet_id,
+        };
+        spec.validate_domain().map_err(serde::de::Error::custom)?;
+        Ok(spec)
     }
 }
 
@@ -1993,7 +2070,7 @@ impl AnalysisKind {
 
 /// Stateful, mutable analysis node linking an upstream `DataSheet` (or analyzable `ResultSheet`)
 /// to its [`crate::ResultSheet`].
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct AnalysisSpec {
     /// Project-unique identifier shared with the owning [`crate::ResultSheet`].
     pub id: SheetId,
@@ -2014,15 +2091,12 @@ pub struct AnalysisSpec {
 }
 
 impl AnalysisSpec {
-    /// Construct a validated `AnalysisSpec` at 95% confidence and `FourDecimal` *p*-value formatting, rejecting empty sheet IDs.
+    /// Construct a validated `AnalysisSpec` at 95% confidence and `FourDecimal` *p*-value formatting, rejecting empty/oversized sheet IDs or invalid analysis specs.
     pub fn new(id: impl Into<SheetId>, source_sheet_id: impl Into<SheetId>, kind: AnalysisKind) -> Result<Self, DocError> {
         let id = id.into();
         let source_sheet_id = source_sheet_id.into();
-        if id.as_str().trim().is_empty() || source_sheet_id.as_str().trim().is_empty() {
-            return Err(DocError::EmptyIdentifier);
-        }
         let auto_title = kind.derive_auto_title();
-        Ok(Self {
+        let spec = Self {
             id,
             source_sheet_id,
             selected_data_sets: Vec::new(),
@@ -2031,7 +2105,50 @@ impl AnalysisSpec {
             confidence_level: ConfidenceLevel::DEFAULT_95,
             p_value_format: PValueFormat::FourDecimal,
             kind,
-        })
+        };
+        spec.validate_structural()?;
+        Ok(spec)
+    }
+
+    /// Validate structural invariants (sheet identifier bounds, optional custom title, finite floats,
+    /// and [`PowerAnalysisSpec::validate_domain`] when configured for power analysis).
+    pub fn validate_structural(&self) -> Result<(), DocError> {
+        self.id.validate_non_empty_bounded()?;
+        self.source_sheet_id.validate_non_empty_bounded()?;
+        if let Some(custom) = &self.custom_title {
+            validate_title(custom)?;
+        }
+        if self.first_non_finite_float().is_some() {
+            return Err(DocError::InvalidCellValue {
+                archetype: TableKind::Column,
+                row: 0,
+                col: 0,
+                reason: "analysis specification contains a non-finite float",
+            });
+        }
+        if let AnalysisKind::PowerAnalysis(ref p) = self.kind {
+            p.validate_domain()?;
+        }
+        Ok(())
+    }
+
+    /// Perform full analysis validation, including strict [`PowerAnalysisSpec::validate`].
+    pub fn validate(&self) -> Result<(), DocError> {
+        self.validate_structural()?;
+        if let AnalysisKind::PowerAnalysis(ref p) = self.kind {
+            p.validate()?;
+        }
+        Ok(())
+    }
+
+    /// Mutate analysis parameters in-place while validating domain invariants (`try` counterpart to [`Self::update_kind`]).
+    pub fn try_update_kind(&mut self, new_kind: AnalysisKind) -> Result<(), DocError> {
+        let mut probe = self.clone();
+        probe.auto_title = new_kind.derive_auto_title();
+        probe.kind = new_kind;
+        probe.validate_structural()?;
+        *self = probe;
+        Ok(())
     }
 
     /// Displayed sheet title (`custom_title` when pinned by user, else dynamically derived `auto_title`).
@@ -2076,12 +2193,43 @@ impl AnalysisSpec {
             return Err(DocError::IncompatibleRetargetTable { analysis_title: self.effective_title().to_owned(), target_kind: target_table_kind });
         }
         let new_id = new_source_sheet_id.into();
-        if new_id.as_str().trim().is_empty() {
-            return Err(DocError::EmptyIdentifier);
-        }
+        new_id.validate_non_empty_bounded()?;
         self.source_sheet_id = new_id;
         self.selected_data_sets = selected_data_sets;
         Ok(())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for AnalysisSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct RawAnalysisSpec {
+            id: SheetId,
+            source_sheet_id: SheetId,
+            selected_data_sets: Vec<usize>,
+            auto_title: String,
+            custom_title: Option<String>,
+            confidence_level: ConfidenceLevel,
+            p_value_format: PValueFormat,
+            kind: AnalysisKind,
+        }
+
+        let raw = RawAnalysisSpec::deserialize(deserializer)?;
+        let spec = Self {
+            id: raw.id,
+            source_sheet_id: raw.source_sheet_id,
+            selected_data_sets: raw.selected_data_sets,
+            auto_title: raw.auto_title,
+            custom_title: raw.custom_title,
+            confidence_level: raw.confidence_level,
+            p_value_format: raw.p_value_format,
+            kind: raw.kind,
+        };
+        spec.validate_structural().map_err(serde::de::Error::custom)?;
+        Ok(spec)
     }
 }
 

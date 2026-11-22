@@ -325,9 +325,6 @@ impl SummarizedPoint {
         let Some(mean) = subcells.first().and_then(Cell::active_number) else {
             return Ok(None);
         };
-        if !mean.is_finite() {
-            return Err(SummaryPointError::MissingSpread);
-        }
         let spread = subcells.get(1).and_then(Cell::active_number).ok_or(SummaryPointError::MissingSpread)?;
         if !spread.is_finite() || spread < 0.0 {
             return Err(SummaryPointError::NegativeSpread { spread });

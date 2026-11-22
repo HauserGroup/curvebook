@@ -330,8 +330,9 @@ pub fn is_valid_asset_id(id: &str) -> bool {
 }
 
 mod serde_base64_bytes {
-    use serde::de::Error as _;
-    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::{Deserializer, Serializer};
+
+    use super::MAX_IMAGE_ASSET_BYTES;
 
     const ENC_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -350,9 +351,32 @@ mod serde_base64_bytes {
         serializer.serialize_str(&out)
     }
 
+    /// Decode a base64 JSON string under a hard decoded-byte cap (`MAX_IMAGE_ASSET_BYTES`).
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
-        let encoded = String::deserialize(deserializer)?;
-        decode_base64(&encoded).map_err(D::Error::custom)
+        struct Base64BytesVisitor;
+
+        impl serde::de::Visitor<'_> for Base64BytesVisitor {
+            type Value = Vec<u8>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a base64-encoded image byte string within MAX_IMAGE_ASSET_BYTES")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, encoded: &str) -> Result<Self::Value, E> {
+                let max_encoded_len = MAX_IMAGE_ASSET_BYTES.div_ceil(3).saturating_mul(4);
+                let trimmed = encoded.trim();
+                if trimmed.len() > max_encoded_len {
+                    return Err(E::custom("image asset payload exceeds MAX_IMAGE_ASSET_BYTES"));
+                }
+                decode_base64(trimmed).map_err(E::custom)
+            }
+
+            fn visit_string<E: serde::de::Error>(self, encoded: String) -> Result<Self::Value, E> {
+                self.visit_str(&encoded)
+            }
+        }
+
+        deserializer.deserialize_str(Base64BytesVisitor)
     }
 
     const fn decode_val(b: u8) -> Option<u8> {
@@ -375,7 +399,11 @@ mod serde_base64_bytes {
         if !raw.len().is_multiple_of(4) {
             return Err("invalid base64 length");
         }
-        let mut out = Vec::with_capacity((raw.len() / 4) * 3);
+        let max_encoded_len = MAX_IMAGE_ASSET_BYTES.div_ceil(3).saturating_mul(4);
+        if raw.len() > max_encoded_len {
+            return Err("image asset payload exceeds MAX_IMAGE_ASSET_BYTES");
+        }
+        let mut out = Vec::with_capacity((raw.len() / 4).saturating_mul(3));
         let chunk_count = raw.len() / 4;
         for (idx, quad) in raw.as_chunks::<4>().0.iter().enumerate() {
             let is_last = idx + 1 == chunk_count;
@@ -405,12 +433,15 @@ mod serde_base64_bytes {
                 out.push((triple & 0xFF) as u8);
             }
         }
+        if out.len() > MAX_IMAGE_ASSET_BYTES {
+            return Err("image asset payload exceeds MAX_IMAGE_ASSET_BYTES");
+        }
         Ok(out)
     }
 }
 
 /// Content-addressed raster image payload stored alongside a [`crate::ProjectDocument`].
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ProjectImageAsset {
     /// Content-addressed identifier (`img-<sha256-prefix16>`).
     pub asset_id: String,
@@ -422,6 +453,48 @@ pub struct ProjectImageAsset {
     /// persisted as `assets/<asset_id>.<ext>` inside native archives.
     #[serde(default, skip_serializing_if = "Vec::is_empty", with = "serde_base64_bytes")]
     pub bytes: Vec<u8>,
+}
+
+impl ProjectImageAsset {
+    /// Validate identifier syntax, non-zero pixel dimensions, and byte budget on this asset.
+    pub fn validate(&self) -> Result<(), crate::error::DocError> {
+        if !is_valid_asset_id(&self.asset_id) {
+            return Err(crate::error::DocError::InvalidIdentifier { reason: "asset_id must match `img-<16 lowercase hex>`" });
+        }
+        if self.pixel_size.0 == 0 || self.pixel_size.1 == 0 || self.pixel_size.0 > MAX_IMAGE_DIM_PX || self.pixel_size.1 > MAX_IMAGE_DIM_PX {
+            return Err(crate::error::DocError::InvalidIdentifier {
+                reason: "image asset pixel_size dimensions must lie in 1..=MAX_IMAGE_DIM_PX (16,384)",
+            });
+        }
+        if u64::from(self.pixel_size.0).saturating_mul(u64::from(self.pixel_size.1)) > MAX_IMAGE_PIXELS {
+            return Err(crate::error::DocError::InvalidIdentifier { reason: "image asset total pixel count exceeds MAX_IMAGE_PIXELS (67,108,864)" });
+        }
+        if self.bytes.len() > MAX_IMAGE_ASSET_BYTES {
+            return Err(crate::error::DocError::InvalidIdentifier { reason: "image asset byte payload exceeds MAX_IMAGE_ASSET_BYTES" });
+        }
+        Ok(())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ProjectImageAsset {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct RawProjectImageAsset {
+            asset_id: String,
+            media_type: ImageMimeKind,
+            pixel_size: (u32, u32),
+            #[serde(default, with = "serde_base64_bytes")]
+            bytes: Vec<u8>,
+        }
+
+        let raw = RawProjectImageAsset::deserialize(deserializer)?;
+        let asset = Self { asset_id: raw.asset_id, media_type: raw.media_type, pixel_size: raw.pixel_size, bytes: raw.bytes };
+        asset.validate().map_err(serde::de::Error::custom)?;
+        Ok(asset)
+    }
 }
 
 #[cfg(test)]
