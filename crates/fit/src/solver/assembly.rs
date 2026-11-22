@@ -159,10 +159,10 @@ pub(in crate::solver) fn assemble_dataset_results(
                     ds_stud_res.push(studentized_all.get(i).copied().unwrap_or(0.0));
                 }
                 ds_rss.add(w_rep * r * r);
-                ds_rss.add(rec.ss_within);
+                ds_rss.add(rec.raw_ss_within);
                 ds_n += rec.rep_n;
                 ds_y_sum.add(w_rep * rec.point.y);
-                ds_y_vals.push((rec.point.y, rec.rep_n, rec.ss_within));
+                ds_y_vals.push((rec.point.y, rec.rep_n, rec.raw_ss_within));
             }
         }
         let ds_ss = ds_rss.total();

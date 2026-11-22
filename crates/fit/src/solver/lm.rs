@@ -212,15 +212,25 @@ pub(in crate::solver) fn compute_jacobian(
             continue;
         }
 
-        // One-sided fallback with smaller step `eps_forward`.
+        // One-sided fallback with smaller step `eps_forward`, retrying the opposite sign if
+        // the preferred direction evaluates outside the model domain while staying inside bounds.
         let h_f = eps_forward * xj.abs().max(1.0);
-        let sign = if ub.is_some_and(|u| xj + h_f > u) { -1.0 } else { 1.0 };
-        work[slot] = xj + sign * h_f;
-        let ok = eval_predictions_for_slot_into(model, layout, obs, &work, &mut flat_params, info.ds_local_idx, &mut yp);
-        work[slot] = xj;
-        if !ok {
-            return None;
+        let signs = if (!can_plus && can_minus) || ub.is_some_and(|u| xj + h_f > u) { [-1.0_f64, 1.0_f64] } else { [1.0_f64, -1.0_f64] };
+        let mut found_sign = None;
+        for &sign in &signs {
+            let x_try = xj + sign * h_f;
+            if lb.is_some_and(|l| x_try < l) || ub.is_some_and(|u| x_try > u) {
+                continue;
+            }
+            work[slot] = x_try;
+            let ok = eval_predictions_for_slot_into(model, layout, obs, &work, &mut flat_params, info.ds_local_idx, &mut yp);
+            work[slot] = xj;
+            if ok {
+                found_sign = Some(sign);
+                break;
+            }
         }
+        let sign = found_sign?;
         let inv_h = sign / h_f;
         for (i, rec) in obs.iter().enumerate() {
             if info.ds_local_idx.is_none_or(|d| d == rec.ds_local_idx) {

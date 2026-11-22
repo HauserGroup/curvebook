@@ -116,25 +116,89 @@ pub(in crate::solver) fn fit_poisson_irls(
     let mut prev_dev = poisson_deviance(&work_obs, &last_out.y_hat).ok_or_else(|| FitError::ImpossibleWeights {
         reason: "Poisson deviance regression requires strictly positive fitted means (mu > 0)".to_owned(),
     })?;
+    let mut total_iters = last_out.iterations;
+    let bounds = layout.bounds();
+    let k_free = layout.k_free();
+    let mut outer_converged = k_free == 0 && last_out.status == FitStatus::Converged;
 
-    for _ in 0..12 {
-        theta = last_out.theta.clone();
-        assign_poisson_irls_weights(&mut work_obs, &last_out.y_hat)?;
-        let next = run_trust_region_lm_with_domain(model, layout, &work_obs, &theta, config.max_iters, 10.0, true)?;
-        let dev = poisson_deviance(&work_obs, &next.y_hat).ok_or_else(|| FitError::ImpossibleWeights {
-            reason: "Poisson deviance regression encountered non-positive fitted means (mu <= 0)".to_owned(),
-        })?;
-        let rel_change = (prev_dev - dev).abs() / prev_dev.max(1.0);
-        last_out = next;
-        prev_dev = dev;
-        if rel_change < 1e-10 {
-            break;
+    if k_free > 0 {
+        for _ in 0..12 {
+            theta = last_out.theta.clone();
+            assign_poisson_irls_weights(&mut work_obs, &last_out.y_hat)?;
+            let next = run_trust_region_lm_with_domain(model, layout, &work_obs, &theta, config.max_iters, 10.0, true)?;
+            total_iters = total_iters.saturating_add(next.iterations);
+
+            if let Some(dev) = poisson_deviance(&work_obs, &next.y_hat)
+                && dev <= prev_dev
+            {
+                let rel_change = (prev_dev - dev).abs() / prev_dev.max(1.0);
+                let max_step = max_rel_theta_step(&theta, &next.theta);
+                let next_status = next.status;
+                last_out = next;
+                prev_dev = dev;
+                if next_status == FitStatus::Converged && rel_change < 1e-10 {
+                    outer_converged = true;
+                    break;
+                }
+                if next_status == FitStatus::Diverged && max_step == 0.0 {
+                    break;
+                }
+                continue;
+            }
+
+            // Step-halving line search on IRLS step when linearization overshoots Poisson deviance
+            // or lands at non-positive fitted means (matching `solve_profile_subproblem_poisson`).
+            let mut improved = false;
+            let mut alpha = 0.5_f64;
+            for _ in 0..8 {
+                let mut blended: Vec<f64> = theta.iter().zip(next.theta.iter()).map(|(&a, &b)| a + alpha * (b - a)).collect();
+                project_theta(&mut blended, &bounds);
+                if let Some((w_res, blend_yh, ss)) = eval_residuals_with_domain(model, layout, &work_obs, &blended, true)
+                    && let Some(blend_dev) = poisson_deviance(&work_obs, &blend_yh)
+                    && blend_dev < prev_dev
+                {
+                    let rel_change = (prev_dev - blend_dev).abs() / prev_dev.max(1.0);
+                    let j_mat = compute_jacobian(model, layout, &work_obs, &blended, &blend_yh, &bounds).unwrap_or_else(|| next.j_mat.clone());
+                    last_out = LmRunOutput {
+                        theta: blended,
+                        weighted_res: w_res,
+                        y_hat: blend_yh,
+                        weighted_ss: ss,
+                        j_mat,
+                        status: next.status,
+                        iterations: next.iterations,
+                    };
+                    prev_dev = blend_dev;
+                    improved = true;
+                    if next.status == FitStatus::Converged && rel_change < 1e-10 {
+                        outer_converged = true;
+                    }
+                    break;
+                }
+                alpha *= 0.5;
+            }
+            if outer_converged {
+                break;
+            }
+            if !improved {
+                if next.status == FitStatus::Converged && max_rel_theta_step(&theta, &next.theta) < 1e-8 {
+                    outer_converged = true;
+                } else if next.status == FitStatus::Diverged {
+                    last_out.status = FitStatus::Diverged;
+                }
+                break;
+            }
         }
+    }
+
+    last_out.iterations = total_iters;
+    if !outer_converged && last_out.status != FitStatus::Diverged {
+        last_out.status = FitStatus::HitMaxIters;
     }
     assign_poisson_irls_weights(&mut work_obs, &last_out.y_hat)?;
     if let (Some((wr, _, _)), Some(jm)) = (
         eval_residuals_with_domain(model, layout, &work_obs, &last_out.theta, true),
-        compute_jacobian(model, layout, &work_obs, &last_out.theta, &last_out.y_hat, &layout.bounds()),
+        compute_jacobian(model, layout, &work_obs, &last_out.theta, &last_out.y_hat, &bounds),
     ) {
         last_out.weighted_res = wr;
         last_out.j_mat = jm;
@@ -143,6 +207,10 @@ pub(in crate::solver) fn fit_poisson_irls(
         reason: "Poisson deviance regression requires strictly positive fitted means (mu > 0)".to_owned(),
     })?;
     Ok(last_out)
+}
+
+fn max_rel_theta_step(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b.iter()).map(|(&va, &vb)| (va - vb).abs() / vb.abs().max(va.abs()).max(f64::MIN_POSITIVE)).fold(0.0_f64, f64::max)
 }
 
 /// Poisson deviance `D = 2 sum [ y ln(y / mu) - (y - mu) ]` (McCullagh & Nelder 1989), evaluated
@@ -195,8 +263,14 @@ pub(in crate::solver) fn run_cauchy_irls_loop(
     w_y_scale: f64,
 ) -> Result<LmRunOutput, FitError> {
     let k_free = layout.k_free();
+    if k_free == 0 {
+        return Ok(last_out);
+    }
     let mut work_obs = obs.to_vec();
-    for _ in 0..15 {
+    let mut total_iters = last_out.iterations;
+    let mut outer_converged = false;
+    let max_passes = config.max_iters.clamp(1, 60);
+    for _ in 0..max_passes {
         let prev_theta = last_out.theta.clone();
         let abs_res: Vec<f64> = obs.iter().zip(last_out.y_hat.iter()).map(|(o, yh)| ((o.point.y - yh) * o.sqrt_weight).abs()).collect();
         let rsdr = compute_rsdr(&abs_res, k_free).max(1e-12 * w_y_scale);
@@ -205,15 +279,21 @@ pub(in crate::solver) fn run_cauchy_irls_loop(
             let cauchy_w = 1.0 / (1.0 + z * z);
             rec.sqrt_weight = obs[i].sqrt_weight * cauchy_w.sqrt();
         }
-        last_out = run_trust_region_lm(model, layout, &work_obs, &prev_theta, config.max_iters, 10.0)?;
-        let max_step = prev_theta
-            .iter()
-            .zip(last_out.theta.iter())
-            .map(|(a, b)| (a - b).abs() / b.abs().max(a.abs()).max(f64::MIN_POSITIVE))
-            .fold(0.0_f64, f64::max);
-        if max_step < 1e-8 {
+        let next = run_trust_region_lm(model, layout, &work_obs, &prev_theta, config.max_iters, 10.0)?;
+        total_iters = total_iters.saturating_add(next.iterations);
+        let max_step = max_rel_theta_step(&prev_theta, &next.theta);
+        last_out = next;
+        if last_out.status == FitStatus::Diverged {
             break;
         }
+        if max_step < 1e-8 && last_out.status == FitStatus::Converged {
+            outer_converged = true;
+            break;
+        }
+    }
+    last_out.iterations = total_iters;
+    if !outer_converged && last_out.status != FitStatus::Diverged {
+        last_out.status = FitStatus::HitMaxIters;
     }
     Ok(last_out)
 }
@@ -252,7 +332,8 @@ pub(in crate::solver) fn fit_cauchy_irls(
             if let Ok(alt) = run_cauchy_irls_loop(model, layout, obs, seed_out, config, w_y_scale) {
                 let best_nll = cauchy_marginal_nll(obs, &best.y_hat, k_free, w_y_scale);
                 let alt_nll = cauchy_marginal_nll(obs, &alt.y_hat, k_free, w_y_scale);
-                if alt_nll + 1e-6 < best_nll {
+                let prefer_alt_status = alt.status == FitStatus::Converged && best.status != FitStatus::Converged && alt_nll <= best_nll + 1e-6;
+                if alt_nll + 1e-6 < best_nll || prefer_alt_status {
                     best = alt;
                 }
             }

@@ -289,10 +289,11 @@ pub(in crate::solver) struct ObsRecord {
     pub(in crate::solver) sqrt_weight: f64,
     pub(in crate::solver) rep_n: usize,
     pub(in crate::solver) ss_within: f64,
+    pub(in crate::solver) raw_ss_within: f64,
 }
 
 pub(in crate::solver) fn uses_replicate_summary_moments(config: &SolverConfig) -> bool {
-    config.method == FitMethod::LeastSquares && config.weighting == WeightingScheme::None
+    config.method == FitMethod::LeastSquares && config.weighting != WeightingScheme::ObservedSd
 }
 
 pub(in crate::solver) fn obs_replicate_count(obs: &[ObsRecord]) -> usize {
@@ -397,15 +398,22 @@ pub(in crate::solver) fn build_observations(
 ) -> Result<Vec<ObsRecord>, FitError> {
     let mut obs = Vec::new();
     for (ds_local_idx, ds) in datasets.iter().enumerate() {
+        let honor_ds_moments = honor_rep_moments && (scheme == WeightingScheme::None || ds.is_pre_summarized);
         for pt in &ds.points {
-            let (sqrt_weight, rep_n, ss_within) = if honor_rep_moments && pt.explicit_weight.is_none() {
+            let (sqrt_weight, rep_n, ss_within, raw_ss_within) = if honor_ds_moments && pt.explicit_weight.is_none() {
+                let w = compute_point_weight(pt, scheme)?;
                 let (n_f, n_u, ss_i) = validated_replicate_moments(pt)?;
-                (n_f.sqrt(), n_u, ss_i)
+                let weighted_n = w * n_f;
+                let weighted_ss_i = w * ss_i;
+                if !weighted_n.is_finite() || weighted_n <= 0.0 || !weighted_ss_i.is_finite() {
+                    return Err(FitError::ImpossibleWeights { reason: "Weighted replicate summary moments overflowed f64 range".to_owned() });
+                }
+                (weighted_n.sqrt(), n_u, weighted_ss_i, ss_i)
             } else {
                 let w = compute_point_weight(pt, scheme)?;
-                (w.sqrt(), 1, 0.0)
+                (w.sqrt(), 1, 0.0, 0.0)
             };
-            obs.push(ObsRecord { point: pt.clone(), ds_local_idx, sqrt_weight, rep_n, ss_within });
+            obs.push(ObsRecord { point: pt.clone(), ds_local_idx, sqrt_weight, rep_n, ss_within, raw_ss_within });
         }
     }
     if obs.is_empty() {

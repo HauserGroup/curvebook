@@ -7,7 +7,7 @@
 use curvebook_doc::{FitMethod, ModelComparisonSpec};
 
 use crate::diagnostics::{compare_models_aicc, compare_models_f_test, compare_models_lrt, compare_models_lrt_deviance};
-use crate::error::FitError;
+use crate::error::{FitError, FitStatus};
 use crate::library::ParametricModel;
 use crate::solver::fit::fit_nonlinear;
 use crate::solver::inference::compare_poisson_aicc;
@@ -70,6 +70,12 @@ pub fn compare_models(
     config: &SolverConfig,
     spec: &ModelComparisonSpec,
 ) -> Result<(NonlinearFitResult, ModelComparisonOutcome), FitError> {
+    if !matches!(primary.status, FitStatus::Converged | FitStatus::Ambiguous) {
+        return Err(FitError::InvalidParameter {
+            name: "comparison",
+            reason: format!("Cannot compare models when the primary fit did not converge ({:?})", primary.status),
+        });
+    }
     if primary.is_robust_cauchy() || config.method == FitMethod::RobustCauchy {
         return Err(FitError::InvalidParameter {
             name: "comparison",
@@ -92,6 +98,12 @@ pub fn compare_models(
     }
     let alt_config = filter_config_rules_for_alt_model(config, alt_model);
     let alt = fit_nonlinear(alt_model, datasets, hooks, &alt_config)?;
+    if !matches!(alt.status, FitStatus::Converged | FitStatus::Ambiguous) {
+        return Err(FitError::InvalidParameter {
+            name: "comparison",
+            reason: format!("Cannot compare models when the alternative fit did not converge ({:?})", alt.status),
+        });
+    }
     if alt.is_robust_cauchy() {
         return Err(FitError::InvalidParameter {
             name: "comparison",
@@ -128,6 +140,7 @@ pub fn compare_models(
     let outcome = match spec {
         ModelComparisonSpec::ExtraSumOfSquaresF { .. } => {
             let (null_fit, complex_fit, _) = ordered_nested_roles(primary, &alt);
+            ensure_nested_ss_order(null_fit, complex_fit)?;
             ModelComparisonOutcome::ExtraSumOfSquaresF(compare_models_f_test(
                 null_fit.weighted_ss,
                 null_fit.df,
@@ -147,6 +160,7 @@ pub fn compare_models(
         }
         ModelComparisonSpec::LikelihoodRatioTest { .. } => {
             let (null_fit, complex_fit, _) = ordered_nested_roles(primary, &alt);
+            ensure_nested_ss_order(null_fit, complex_fit)?;
             let res = if config.method == FitMethod::PoissonDeviance {
                 compare_models_lrt_deviance(null_fit.weighted_ss, null_fit.df, complex_fit.weighted_ss, complex_fit.df, config.confidence.alpha())?
             } else {
@@ -163,6 +177,19 @@ pub fn compare_models(
         }
     };
     Ok((alt, outcome))
+}
+
+fn ensure_nested_ss_order(null_fit: &NonlinearFitResult, complex_fit: &NonlinearFitResult) -> Result<(), FitError> {
+    if complex_fit.df < null_fit.df && complex_fit.weighted_ss > null_fit.weighted_ss + 1e-6 * null_fit.weighted_ss.abs().max(1.0) {
+        return Err(FitError::InvalidParameter {
+            name: "comparison",
+            reason: format!(
+                "Nested model comparison failed: complex model (df = {}, objective = {:.6}) fits worse than simpler model (df = {}, objective = {:.6})",
+                complex_fit.df, complex_fit.weighted_ss, null_fit.df, null_fit.weighted_ss
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Compare two models and return a typed [`ModelComparisonResult`] that cleanly carries

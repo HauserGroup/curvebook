@@ -230,9 +230,18 @@ pub fn format_model_equation_tex_for_dataset(
     let id = normalize_id(equation_id);
     let ctx = EqCtx { params, data_set_index, substituted, sig_figs };
 
-    let raw = format_pharma_equation_tex(&id, &ctx)
-        .or_else(|| format_curve_equation_tex(&id, &ctx))
-        .or_else(|| format_nist_equation_tex(&id, &ctx))
+    let lookup_builtin = |candidate: &str| {
+        format_pharma_equation_tex(candidate, &ctx)
+            .or_else(|| format_curve_equation_tex(candidate, &ctx))
+            .or_else(|| format_nist_equation_tex(candidate, &ctx))
+    };
+    let raw = lookup_builtin(&id)
+        .or_else(|| {
+            crate::library::get_builtin_model(equation_id).and_then(|model| {
+                let canonical = normalize_id(model.id());
+                lookup_builtin(&canonical)
+            })
+        })
         .unwrap_or_else(|| format_unknown_fallback(equation_id, params, substituted, sig_figs));
 
     normalize_tex_signs(&raw)
@@ -244,7 +253,7 @@ fn format_unknown_fallback(equation_id: &str, params: &[(String, f64)], substitu
         if id.is_empty() {
             return "Y = f(X)".to_string();
         }
-        let sub = if contains_tex_meta(&id) { format!("\\text{{{}}}", escape_tex_text(&id)) } else { id };
+        let sub = if contains_tex_meta(&id) || id.contains('_') { format!("\\text{{{}}}", escape_tex_text(&id)) } else { id };
         return format!("Y = f_{{{sub}}}(X)");
     }
     let mut parts = Vec::with_capacity(params.len());
@@ -937,16 +946,18 @@ fn format_line_poly_curve_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
         "polynomial_4" | "quartic" => format_polynomial_equation_tex(4, false, ctx.params, ctx.substituted, ctx.sig_figs),
         "polynomial_5" => format_polynomial_equation_tex(5, false, ctx.params, ctx.substituted, ctx.sig_figs),
         "polynomial_6" => format_polynomial_equation_tex(6, false, ctx.params, ctx.substituted, ctx.sig_figs),
-        "centered_poly_1" | "centered_linear" => format_centered_poly_tex(1, ctx),
-        "centered_poly_2" | "centered_quadratic" => format_centered_poly_tex(2, ctx),
-        "centered_poly_3" | "centered_cubic" => format_centered_poly_tex(3, ctx),
-        "centered_poly_4" | "centered_quartic" => format_centered_poly_tex(4, ctx),
-        "centered_poly_5" => format_centered_poly_tex(5, ctx),
-        "centered_poly_6" => format_centered_poly_tex(6, ctx),
+        "centered_poly_1" | "centered_linear" | "centered_polynomial_1" => format_centered_poly_tex(1, ctx),
+        "centered_poly_2" | "centered_quadratic" | "centered_polynomial_2" => format_centered_poly_tex(2, ctx),
+        "centered_poly_3" | "centered_cubic" | "centered_polynomial_3" => format_centered_poly_tex(3, ctx),
+        "centered_poly_4" | "centered_quartic" | "centered_polynomial_4" => format_centered_poly_tex(4, ctx),
+        "centered_poly_5" | "centered_polynomial_5" => format_centered_poly_tex(5, ctx),
+        "centered_poly_6" | "centered_polynomial_6" => format_centered_poly_tex(6, ctx),
         "power_law" | "power_series" => format!("Y = {} \\cdot X^{{{}}}", ctx.val("a", "a"), ctx.val("b", "b")),
         "logarithmic_curve" => format!("Y = {} \\cdot \\ln(X) + {}", ctx.val("a", "a"), ctx.val("b", "b")),
-        "semi_log_line" => format!("Y = {} \\cdot \\log(X) + {}", ctx.val("Slope", "\\text{Slope}"), ctx.val("YIntercept", "\\text{YIntercept}")),
-        "log_log_line" => {
+        "semi_log_line" | "semilog_line" => {
+            format!("Y = {} \\cdot \\log(X) + {}", ctx.val("Slope", "\\text{Slope}"), ctx.val("YIntercept", "\\text{YIntercept}"))
+        }
+        "log_log_line" | "loglog_line" => {
             format!("Y = 10^{{{} \\cdot \\log(X) + {}}}", ctx.val("Slope", "\\text{Slope}"), ctx.val("LogYIntercept", "\\text{LogYIntercept}"))
         }
         "probit_line" => {
@@ -1127,11 +1138,10 @@ enum DslRawStmt<'a> {
 }
 
 impl DslRawStmt<'_> {
-    fn is_output(&self, has_ode: bool) -> bool {
+    fn is_output(&self, _has_ode: bool) -> bool {
         match self {
             Self::OdeDerivative { .. } | Self::ExplicitY { .. } | Self::Implicit { .. } | Self::Bare { .. } => true,
-            Self::OdeInitialOrLocal { .. } => !has_ode && false,
-            Self::Local { .. } => false,
+            Self::OdeInitialOrLocal { .. } | Self::Local { .. } => false,
         }
     }
 }
@@ -1450,10 +1460,7 @@ fn render_lhs_rhs_dsl(
 }
 
 fn fallback_lhs_tex(lhs_src: &str, ctx: &EqCtx<'_>) -> String {
-    let mut s = escape_tex_fallback_braces(lhs_src.trim());
-    if ctx.substituted {
-        s = substitute_identifiers(&s, ctx.params, ctx.sig_figs);
-    }
+    let s = substitute_and_escape_fallback(lhs_src.trim(), ctx.params, ctx.substituted, ctx.sig_figs);
     s.replace('*', " \\cdot ")
 }
 
@@ -2120,47 +2127,47 @@ fn format_dsl_literal(raw: &str, sig_figs: usize) -> String {
     raw.to_string()
 }
 
-fn escape_tex_fallback_braces(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for ch in input.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '{' => out.push_str("\\{"),
-            '}' => out.push_str("\\}"),
-            '$' => out.push_str("\\$"),
-            '#' => out.push_str("\\#"),
-            '%' => out.push_str("\\%"),
-            '&' => out.push_str("\\&"),
-            _ => out.push(ch),
-        }
+fn escape_tex_fallback_char(ch: char, out: &mut String) {
+    match ch {
+        '\\' => out.push_str("\\\\"),
+        '{' => out.push_str("\\{"),
+        '}' => out.push_str("\\}"),
+        '$' => out.push_str("\\$"),
+        '#' => out.push_str("\\#"),
+        '%' => out.push_str("\\%"),
+        '&' => out.push_str("\\&"),
+        '_' => out.push_str("\\_"),
+        _ => out.push(ch),
     }
-    out
+}
+
+fn escape_tex_fallback_into(input: &str, out: &mut String) {
+    for ch in input.chars() {
+        escape_tex_fallback_char(ch, out);
+    }
 }
 
 fn fallback_custom_dsl_tex(lhs: &str, rhs_raw: &str, params: &[(String, f64)], substituted: bool, sig_figs: usize) -> String {
-    let mut s = escape_tex_fallback_braces(rhs_raw);
-    if substituted {
-        s = substitute_identifiers(&s, params, sig_figs);
-    }
+    let mut s = substitute_and_escape_fallback(rhs_raw, params, substituted, sig_figs);
     for (pat, rep) in [
         ("exp(", "\\exp("),
         ("log10(", "\\log("),
         ("log(", "\\log("),
         ("ln(", "\\ln("),
-        ("sqrt(", "\\sqrt{"),
+        ("sqrt(", "\\text{sqrt}("),
         ("sin(", "\\sin("),
         ("cos(", "\\cos("),
         ("tan(", "\\tan("),
         ("min(", "\\min("),
         ("max(", "\\max("),
     ] {
-        s = replace_ident_prefix(&s, pat, rep);
+        s = replace_ident_word_prefix(&s, pat, rep);
     }
     s = s.replace('*', " \\cdot ");
     format!("{lhs} = {}", s.trim())
 }
 
-fn substitute_identifiers(input: &str, params: &[(String, f64)], sig_figs: usize) -> String {
+fn substitute_and_escape_fallback(input: &str, params: &[(String, f64)], substituted: bool, sig_figs: usize) -> String {
     let chars: Vec<char> = input.chars().collect();
     let mut out = String::with_capacity(input.len());
     let mut i = 0;
@@ -2173,30 +2180,25 @@ fn substitute_identifiers(input: &str, params: &[(String, f64)], sig_figs: usize
             }
             let ident: String = chars[start..i].iter().collect();
             let norm = normalize_id(&ident);
-            if let Some((_, val)) = params.iter().find(|(k, _)| k == &ident).or_else(|| params.iter().find(|(k, _)| normalize_id(k) == norm)) {
+            if substituted
+                && let Some((_, val)) = params.iter().find(|(k, _)| k == &ident).or_else(|| params.iter().find(|(k, _)| normalize_id(k) == norm))
+            {
                 let mut num = format_number_sig_figs(*val, sig_figs);
                 let prev_non_space = out.chars().rev().find(|c| !c.is_whitespace());
-                let next_is_pow = chars.get(i) == Some(&'^');
+                let next_is_pow = chars[i..].iter().find(|c| !c.is_whitespace()).copied() == Some('^');
                 if (num.starts_with('-') || num.contains("\\times")) && (matches!(prev_non_space, Some('*' | '/')) || next_is_pow) {
                     num = format!("({num})");
                 }
                 out.push_str(&num);
             } else {
-                out.push_str(&ident);
+                escape_tex_fallback_into(&ident, &mut out);
             }
         } else {
-            out.push(chars[i]);
+            escape_tex_fallback_char(chars[i], &mut out);
             i += 1;
         }
     }
     out
-}
-
-fn replace_ident_prefix(input: &str, pat: &str, rep: &str) -> String {
-    if pat == "sqrt(" {
-        return replace_ident_word_prefix(input, "sqrt(", "\\text{sqrt}(");
-    }
-    replace_ident_word_prefix(input, pat, rep)
 }
 
 fn replace_ident_word_prefix(input: &str, pat: &str, rep: &str) -> String {
@@ -2612,7 +2614,7 @@ mod tests {
         assert_eq!(fb, "Y = f(X; \\text{k1} = 2.5, \\text{k2} = -1)");
 
         let fb_empty = format_model_equation_tex("totally_unknown_id", None, &[], false, 4);
-        assert_eq!(fb_empty, "Y = f_{totally_unknown_id}(X)");
+        assert_eq!(fb_empty, "Y = f_{\\text{totally\\_unknown\\_id}}(X)");
     }
 
     #[test]
