@@ -24,7 +24,7 @@ use crate::UiApp;
 use crate::control_io::{
     DEFAULT_SCREENSHOT_DPI, DEFAULT_SCREENSHOT_HEIGHT_PX, DEFAULT_SCREENSHOT_WIDTH_PX, MAX_SCREENSHOT_DIM_PX, MIN_DPI, MIN_SCREENSHOT_DIM_PX,
     dispatch_ui_command_as_ui, encode_base64, opt_bool_param, opt_finite_f64_param, opt_non_empty_str_param, opt_str_param, parse_bounded_u32,
-    require_params_object_or_null, write_host_file,
+    require_params_object_or_null,
 };
 use crate::dialogs_canvas::{ActiveDialog, AnalyzeDuplicateChoice, AxisTarget, ExportFigureFormat, equation_display_mode_str};
 use crate::inspect::{ScreenshotRegionTarget, inspect_ui_tree, inspect_ui_tree_for_metrics};
@@ -123,13 +123,17 @@ fn handle_ui_screenshot(app: &mut UiApp, params: &Value) -> Result<Value, Engine
         .with_remediation("Omit `path` and inspect the returned in-memory `data_base64` PNG instead."));
     }
     let opt_path = opt_str_param(params, &["path"]).map_err(bad_input)?.map(str::trim).filter(|s| !s.is_empty());
+    let validated_path = match opt_path {
+        Some(path) => Some((path, app.session().validate_host_write_path(path)?)),
+        None => None,
+    };
 
     let (png_bytes, out_w, out_h) = capture_screenshot_png(app, region, width_px, height_px, dpi)?;
 
-    let saved_path = match opt_path {
-        Some(path) => {
-            write_host_file(path, &png_bytes).map_err(|err| EngineError::with_code(ErrorCode::IoError, err))?;
-            Some(path.to_owned())
+    let saved_path = match validated_path {
+        Some((raw_path, resolved_path)) => {
+            app.session().write_host_file_atomic(raw_path, &png_bytes)?;
+            Some(resolved_path)
         }
         None => None,
     };
@@ -1794,43 +1798,6 @@ fn has_print_submit_to_os_true(val: &Value) -> bool {
     }
 }
 
-fn find_non_empty_path_key(val: &Value) -> Option<&'static str> {
-    const PATH_KEYS: [&str; 12] = [
-        "path",
-        "file_path",
-        "filePath",
-        "source_path",
-        "sourcePath",
-        "template_path",
-        "templatePath",
-        "ttf_font",
-        "ttfFont",
-        "font_path",
-        "fontPath",
-        "destination_path",
-    ];
-    match val {
-        Value::Object(map) => {
-            for &key in &PATH_KEYS {
-                if let Some(v) = map.get(key)
-                    && !v.is_null()
-                    && v.as_str().is_none_or(|s| !s.trim().is_empty())
-                {
-                    return Some(key);
-                }
-            }
-            for child in map.values() {
-                if let Some(found) = find_non_empty_path_key(child) {
-                    return Some(found);
-                }
-            }
-            None
-        }
-        Value::Array(arr) => arr.iter().find_map(find_non_empty_path_key),
-        _ => None,
-    }
-}
-
 fn enforce_gui_only_menu_command_policy(app: &UiApp, cmd_id: &str, extra_params: &Value) -> Result<(), EngineError> {
     if !app.is_gui_only() {
         return Ok(());
@@ -1843,14 +1810,8 @@ fn enforce_gui_only_menu_command_policy(app: &UiApp, cmd_id: &str, extra_params:
         return Err(EngineError::with_code(ErrorCode::GuiOnlyViolation, "OS print submission (`submit_to_os: true`) is blocked under --gui-only")
             .with_remediation("Preview or spool in-memory PDF output without submitting to an OS printer."));
     }
-    if !app.session().path_policy().is_constrained()
-        && let Some(path_key) = find_non_empty_path_key(extra_params)
-    {
-        return Err(EngineError::with_code(
-            ErrorCode::GuiOnlyViolation,
-            format!("unconstrained host filesystem `{path_key}` parameter via `ui.invoke_menu` is blocked under --gui-only without --workdir"),
-        )
-        .with_remediation("Configure `--workdir` confinement or use in-memory workflows without host path parameters."));
+    if !app.session().path_policy().is_constrained() {
+        curvebook_engine::enforce_unconstrained_gui_only_menu_params(Some(cmd_id), extra_params)?;
     }
     Ok(())
 }
@@ -1883,34 +1844,6 @@ fn handle_invoke_menu(app: &mut UiApp, params: &Value) -> Result<Value, EngineEr
         .with_remediation("Use visible interactive workspace controls and dialogs under --gui-only."));
     }
 
-    let matched_tip =
-        find_curated_menu_tooltip(&sections, explicit_cmd, norm_path.as_deref()).or_else(|| find_fallback_menu_tooltip(app, norm_path.as_deref()));
-
-    let cmd_id = if let Some(cid) = explicit_cmd
-        && app.is_gui_only()
-        && is_gui_only_blocked_menu_command(cid)
-    {
-        cid.to_owned()
-    } else if let Some(tip) = matched_tip {
-        if !tip.enabled {
-            return Err(disabled_err(format!("{} is disabled in the current workspace context.", tip.label)));
-        }
-        tip.command_id.to_owned()
-    } else if let Some(cid) = explicit_cmd {
-        if let Some(spec) = cmd::registry().get(cid) {
-            if !(spec.enabled)(app.session()) {
-                return Err(disabled_err(format!("menu command `{cid}` is disabled in the current workspace context.")));
-            }
-            cid.to_owned()
-        } else if UI_COMMANDS.iter().any(|u| u.id == cid) {
-            cid.to_owned()
-        } else {
-            return Err(EngineError::with_code(ErrorCode::NotFound, format!("menu command `{cid}` not found")));
-        }
-    } else {
-        return Err(EngineError::with_code(ErrorCode::NotFound, format!("menu item `{}` not found", path.as_deref().unwrap_or_default())));
-    };
-
     let extra_params = if app.is_human_path_only() {
         Value::Null
     } else {
@@ -1920,7 +1853,36 @@ fn handle_invoke_menu(app: &mut UiApp, params: &Value) -> Result<Value, EngineEr
             Some(_) => return Err(bad_input("ui.invoke_menu `params` must be a JSON object or null")),
         }
     };
+
+    let matched_tip =
+        find_curated_menu_tooltip(&sections, explicit_cmd, norm_path.as_deref()).or_else(|| find_fallback_menu_tooltip(app, norm_path.as_deref()));
+
+    let (cmd_id, disabled_reason) = if let Some(cid) = explicit_cmd
+        && app.is_gui_only()
+        && is_gui_only_blocked_menu_command(cid)
+    {
+        (cid.to_owned(), None)
+    } else if let Some(tip) = matched_tip {
+        let reason = (!tip.enabled).then(|| format!("{} is disabled in the current workspace context.", tip.label));
+        (tip.command_id.to_owned(), reason)
+    } else if let Some(cid) = explicit_cmd {
+        if let Some(spec) = cmd::registry().get(cid) {
+            let reason = (!(spec.enabled)(app.session())).then(|| format!("menu command `{cid}` is disabled in the current workspace context."));
+            (cid.to_owned(), reason)
+        } else if UI_COMMANDS.iter().any(|u| u.id == cid) {
+            (cid.to_owned(), None)
+        } else {
+            enforce_gui_only_menu_command_policy(app, cid, &extra_params)?;
+            return Err(EngineError::with_code(ErrorCode::NotFound, format!("menu command `{cid}` not found")));
+        }
+    } else {
+        return Err(EngineError::with_code(ErrorCode::NotFound, format!("menu item `{}` not found", path.as_deref().unwrap_or_default())));
+    };
+
     enforce_gui_only_menu_command_policy(app, &cmd_id, &extra_params)?;
+    if let Some(reason) = disabled_reason {
+        return Err(disabled_err(reason));
+    }
     if extra_params.is_null()
         && matches!(
             cmd_id.as_str(),

@@ -523,8 +523,13 @@ fn handle_ui_invoke_menu(state: &mut McpServerState, args: &Map<String, Value>) 
     if let Err(err) = formats::sanitize_command_params(state, &mut extra) {
         return Ok(errors::result_from_engine_error(&err));
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    let has_workdir = state.workdir_guard().is_some();
+    #[cfg(target_arch = "wasm32")]
+    let has_workdir = false;
+    let path_constrained = has_workdir || state.session().path_policy().is_constrained();
     if state.is_gui_only()
-        && let Some(blocked) = check_gui_only_menu_restriction(command_id.as_deref(), path.as_ref(), &extra)
+        && let Some(blocked) = check_gui_only_menu_restriction(command_id.as_deref(), path.as_ref(), &extra, path_constrained)
     {
         return Ok(blocked);
     }
@@ -573,7 +578,7 @@ fn handle_ui_answer_dialog(state: &mut McpServerState, args: &Map<String, Value>
 
     if state.is_gui_only() {
         for map_val in [&fields, &values, &patches].into_iter().flatten() {
-            if map_requests_os_print_submission(map_val) {
+            if has_print_submit_to_os_true(map_val) {
                 return Ok(gui_only_subprocess_blocked("ui_answer_dialog.submit_to_os", "OS print spooler subprocess submission (`submit_to_os`)"));
             }
         }
@@ -755,10 +760,57 @@ fn menu_path_matches_tokens(path: Option<&Value>, candidates: &[&str]) -> bool {
     candidates.iter().any(|c| normalized == *c)
 }
 
-fn map_requests_os_print_submission(val: &Value) -> bool {
-    val.as_object().is_some_and(|obj| {
-        obj.get("submit_to_os").and_then(Value::as_bool) == Some(true) || obj.get("print.submit_to_os").and_then(Value::as_bool) == Some(true)
-    })
+fn has_print_submit_to_os_true(val: &Value) -> bool {
+    match val {
+        Value::Object(map) => {
+            if map.get("submit_to_os").and_then(Value::as_bool) == Some(true)
+                || map.get("print.submit_to_os").and_then(Value::as_bool) == Some(true)
+                || map.get("print").and_then(|v| v.get("submit_to_os")).and_then(Value::as_bool) == Some(true)
+            {
+                return true;
+            }
+            map.values().any(has_print_submit_to_os_true)
+        }
+        Value::Array(arr) => arr.iter().any(has_print_submit_to_os_true),
+        _ => false,
+    }
+}
+
+fn canonical_menu_command_from_path(path: Option<&Value>) -> Option<&'static str> {
+    const TOKEN_TO_CMD: [(&str, &str); 21] = [
+        ("fileopen", "project.open"),
+        ("open", "project.open"),
+        ("fileopenproject", "project.open"),
+        ("fileopenunpackeddir", "file.open_unpacked_dir"),
+        ("filenewfromtemplate", "project.instantiateTemplate"),
+        ("newfromtemplate", "project.instantiateTemplate"),
+        ("fileimportexternalarchive", "table.importPrism"),
+        ("importexternalarchive", "table.importPrism"),
+        ("fileimportxmlproject", "table.importPzfx"),
+        ("importxmlproject", "table.importPzfx"),
+        ("fileimportcsvortsv", "table.importCsv"),
+        ("importcsvortsv", "table.importCsv"),
+        ("fileimporttidylongtable", "table.importTidyLong"),
+        ("importtidylongtable", "table.importTidyLong"),
+        ("editpastelink", "table.pasteLink"),
+        ("pastelink", "table.pasteLink"),
+        ("analyzerecalculateall", "project.recalculate"),
+        ("recalculateall", "project.recalculate"),
+        ("recalculate", "project.recalculate"),
+        ("filesave", "project.save"),
+        ("filesaveas", "project.saveAs"),
+    ];
+    let norm = normalized_menu_path(path)?;
+    TOKEN_TO_CMD.iter().find_map(|(token, cmd)| (norm == *token).then_some(*cmd))
+}
+
+fn normalized_menu_path(path: Option<&Value>) -> Option<String> {
+    let joined = match path? {
+        Value::String(s) => s.to_owned(),
+        Value::Array(items) => items.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("/"),
+        _ => return None,
+    };
+    Some(normalize_menu_token(&joined))
 }
 
 fn gui_only_subprocess_blocked(target: &str, helper_desc: &str) -> ToolCallResult {
@@ -768,7 +820,7 @@ fn gui_only_subprocess_blocked(target: &str, helper_desc: &str) -> ToolCallResul
     errors::result_from_payload(&payload)
 }
 
-fn check_gui_only_menu_restriction(command_id: Option<&str>, path: Option<&Value>, extra: &Value) -> Option<ToolCallResult> {
+fn check_gui_only_menu_restriction(command_id: Option<&str>, path: Option<&Value>, extra: &Value, path_constrained: bool) -> Option<ToolCallResult> {
     let is_copy_methods = command_id == Some("ui.result.copyMethodsReport")
         || menu_path_matches_tokens(path, &["analyzecopymethodsreport", "analyzecopymethodsstatisticalreporting", "copymethodsreport"]);
     if is_copy_methods {
@@ -779,8 +831,17 @@ fn check_gui_only_menu_restriction(command_id: Option<&str>, path: Option<&Value
         return Some(gui_only_subprocess_blocked("file.print", "OS print helper `file.print`"));
     }
 
+    if let Some(cid) = command_id
+        && matches!(cid, "table.setCell" | "ui.event.dispatch" | "ui.shortcut.set" | "ui.shortcut.reset" | "ui.brush.point" | "app.quit")
+    {
+        return Some(gui_only_subprocess_blocked(cid, &format!("menu command `{cid}`")));
+    }
+    if menu_path_matches_tokens(path, &["graphbrushpoint", "brushpoint"]) {
+        return Some(gui_only_subprocess_blocked("ui.brush.point", "menu path `Brush Point`"));
+    }
+
     let is_print_open = command_id == Some("ui.print.open") || menu_path_matches_tokens(path, &["fileprint", "print"]);
-    if is_print_open && map_requests_os_print_submission(extra) {
+    if is_print_open && has_print_submit_to_os_true(extra) {
         return Some(gui_only_subprocess_blocked("ui.print.open", "OS print spooler subprocess submission (`submit_to_os`)"));
     }
 
@@ -788,6 +849,16 @@ fn check_gui_only_menu_restriction(command_id: Option<&str>, path: Option<&Value
         return Some(gui_only_subprocess_blocked("ui.screenshot.path", "ui.screenshot disk `path` output via ui_invoke_menu"));
     }
 
+    if path_constrained {
+        return None;
+    }
+
+    let path_cmd = canonical_menu_command_from_path(path);
+    for candidate in [command_id, path_cmd] {
+        if let Err(err) = curvebook_engine::enforce_unconstrained_gui_only_menu_params(candidate, extra) {
+            return Some(errors::result_from_engine_error(&err));
+        }
+    }
     None
 }
 

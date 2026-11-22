@@ -2071,6 +2071,19 @@ fn handle_render_svg(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
 fn handle_render_pdf(app: &UiApp, params: &Value) -> Result<Value, ControlCallError> {
     reject_control_if_gui_only(app, "render.pdf")?;
     require_params_object_or_null(params, "render.pdf")?;
+    let opt_path = opt_str_param(params, &["path"])?.map(str::trim).filter(|p| !p.is_empty());
+    if let Some(path) = opt_path {
+        if app.is_gui_only() {
+            return Err(EngineError::with_code(
+                ErrorCode::GuiOnlyViolation,
+                "direct filesystem writes via `render.pdf` `path` are blocked under --gui-only",
+            )
+            .with_remediation("Inspect the returned base64 PDF payload or trigger Export through GUI dialogs.")
+            .into());
+        }
+        let _ = app.session().validate_host_write_path(path)?;
+    }
+
     let doc = app.document();
     let all = opt_bool_param(params, &["all"])?.unwrap_or(false);
     let sheet_ids = if all { collect_all_renderable_ids(doc)? } else { vec![resolve_renderable_sheet_id(doc, params)?] };
@@ -2088,16 +2101,8 @@ fn handle_render_pdf(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
         render_pdf_pages(&scenes, &opts).map_err(|err| format!("PDF render failed: {err}"))?
     };
 
-    if let Some(path) = opt_str_param(params, &["path"])?.map(str::trim).filter(|p| !p.is_empty()) {
-        if app.is_gui_only() {
-            return Err(EngineError::with_code(
-                ErrorCode::GuiOnlyViolation,
-                "direct filesystem writes via `render.pdf` `path` are blocked under --gui-only",
-            )
-            .with_remediation("Inspect the returned base64 PDF payload or trigger Export through GUI dialogs.")
-            .into());
-        }
-        write_host_file(path, &pdf_bytes)?;
+    if let Some(path) = opt_path {
+        app.session().write_host_file_atomic(path, &pdf_bytes)?;
     }
 
     let data_base64 = encode_base64(&pdf_bytes);
@@ -3676,16 +3681,6 @@ fn dispatch_ui_theme_set(app: &mut UiApp, params: &Value) -> Result<Value, Strin
         "mode": theme_mode_name(app.theme.mode),
         "wcag_aa": app.theme.meets_wcag_aa(),
     }))
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn write_host_file(path: &str, bytes: &[u8]) -> Result<(), String> {
-    curvebook_platform::fs::write_atomic(std::path::Path::new(path), bytes).map_err(|err| format!("failed to write file `{path}`: {err}"))
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(crate) fn write_host_file(path: &str, _bytes: &[u8]) -> Result<(), String> {
-    Err(format!("writing local filesystem path `{path}` is unsupported on wasm32"))
 }
 
 pub(crate) fn parse_bounded_u32(raw: Option<&Value>, default: u32, min: u32, max: u32, field: &str) -> Result<u32, String> {
