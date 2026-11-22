@@ -803,16 +803,16 @@ fn validate_distribution(col_idx: usize, dist: SimulatedDistribution) -> Result<
 
 #[allow(clippy::cast_precision_loss)]
 fn sample_distribution_value(rng: &mut DeterministicRng, dist: SimulatedDistribution) -> Result<f64, TransformError> {
-    match dist {
+    let val = match dist {
         SimulatedDistribution::Uniform { min, max } => {
             let u = rng.next_f64();
-            Ok((1.0 - u) * min + u * max)
+            (1.0 - u) * min + u * max
         }
         SimulatedDistribution::Gaussian { mean, sd } => {
             if sd == 0.0 {
-                Ok(mean)
+                mean
             } else {
-                Ok(rng.normal(mean, sd)?)
+                rng.normal(mean, sd)?
             }
         }
         SimulatedDistribution::LogNormal { mean_log, sd_log } => {
@@ -821,12 +821,16 @@ fn sample_distribution_value(rng: &mut DeterministicRng, dist: SimulatedDistribu
             if !exp_z.is_finite() {
                 return Err(TransformError::EvalError { message: format!("LogNormal sample exp({z}) overflowed finite f64 range") });
             }
-            Ok(exp_z)
+            exp_z
         }
-        SimulatedDistribution::Binomial { trials, p } => Ok(sample_binomial(rng, trials, p)? as f64),
-        SimulatedDistribution::Poisson { lambda } => Ok(rng.poisson(lambda)? as f64),
-        SimulatedDistribution::Exponential { rate } => Ok(-rng.next_open_f64().ln() / rate),
+        SimulatedDistribution::Binomial { trials, p } => sample_binomial(rng, trials, p)? as f64,
+        SimulatedDistribution::Poisson { lambda } => rng.poisson(lambda)? as f64,
+        SimulatedDistribution::Exponential { rate } => -rng.next_open_f64().ln() / rate,
+    };
+    if !val.is_finite() {
+        return Err(TransformError::EvalError { message: format!("simulated sample for {dist:?} overflowed finite f64 range") });
     }
+    Ok(val)
 }
 
 #[allow(clippy::cast_precision_loss)]

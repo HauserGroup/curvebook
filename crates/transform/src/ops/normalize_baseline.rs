@@ -46,6 +46,7 @@ pub fn execute_normalize(
     per_data_set: bool,
     ctx: &TransformContext<'_>,
 ) -> Result<TransformOutput, TransformError> {
+    source.archetype.validate()?;
     let col_count = source.archetype.column_count();
     if col_count == 0 {
         return Err(TransformError::InvalidInput { message: String::from("table has no data columns to normalize") });
@@ -67,10 +68,8 @@ pub fn execute_normalize(
         for &c in &selected {
             let z = resolve_anchor(source, zero_anchor, &[c], ctx)?;
             let h = resolve_anchor(source, hundred_anchor, &[c], ctx)?;
-            if (h - z).abs() == 0.0 {
-                return Err(TransformError::InvalidSpec { message: format!("normalization span is zero for column {c} (zero={z}, hundred={h})") });
-            }
-            let swapped = apply_linear_norm_column(&mut out.archetype, c, z, h, scale);
+            validate_anchor_span(z, h, Some(c))?;
+            let swapped = apply_linear_norm_column(&mut out.archetype, c, z, h, scale, &mut warnings);
             remap_swapped_error_notes(&mut out.exclusion_notes, &swapped, c);
             scalars.push(ResultScalarEntry { key: String::from("ZeroAnchor"), data_set_index: Some(c), value: z, units: None });
             scalars.push(ResultScalarEntry { key: String::from("HundredAnchor"), data_set_index: Some(c), value: h, units: None });
@@ -78,16 +77,19 @@ pub fn execute_normalize(
     } else {
         let z = resolve_anchor(source, zero_anchor, &selected, ctx)?;
         let h = resolve_anchor(source, hundred_anchor, &selected, ctx)?;
-        if (h - z).abs() == 0.0 {
-            return Err(TransformError::InvalidSpec { message: format!("global normalization span is zero (zero={z}, hundred={h})") });
-        }
+        validate_anchor_span(z, h, None)?;
         for &c in &selected {
-            let swapped = apply_linear_norm_column(&mut out.archetype, c, z, h, scale);
+            let swapped = apply_linear_norm_column(&mut out.archetype, c, z, h, scale, &mut warnings);
             remap_swapped_error_notes(&mut out.exclusion_notes, &swapped, c);
         }
         scalars.push(ResultScalarEntry { key: String::from("ZeroAnchor"), data_set_index: None, value: z, units: None });
         scalars.push(ResultScalarEntry { key: String::from("HundredAnchor"), data_set_index: None, value: h, units: None });
     }
+
+    if let TableArchetype::Contingency(t) = &out.archetype {
+        t.validate_counts()?;
+    }
+    out.archetype.validate()?;
 
     if selected.is_empty() {
         warnings.push(String::from("no columns selected for normalization"));
@@ -104,6 +106,17 @@ pub fn execute_normalize(
     );
 
     Ok(TransformOutput { data_sheet: out, summary_tab, scalars, warnings })
+}
+
+fn validate_anchor_span(z: f64, h: f64, col: Option<usize>) -> Result<(), TransformError> {
+    if !z.is_finite() || !h.is_finite() {
+        return Err(TransformError::InvalidSpec { message: format!("normalization anchors must be finite (zero={z}, hundred={h})") });
+    }
+    if z == h {
+        let scope = col.map_or_else(|| String::from("global"), |c| format!("for column {c}"));
+        return Err(TransformError::InvalidSpec { message: format!("normalization span is zero {scope} (zero={z}, hundred={h})") });
+    }
+    Ok(())
 }
 
 /// Remove baseline using `TransformAnalysisSpec::RemoveBaseline` parameters.
@@ -126,6 +139,7 @@ pub fn execute_remove_baseline_kind(
     operation: BaselineOperation,
     ctx: &TransformContext<'_>,
 ) -> Result<TransformOutput, TransformError> {
+    source.archetype.validate()?;
     let col_count = source.archetype.column_count();
     let row_count = source.archetype.row_count();
     let selected = ctx.active_columns(col_count)?;
@@ -145,6 +159,11 @@ pub fn execute_remove_baseline_kind(
         let swapped = apply_baseline_to_column(&mut out.archetype, col, base_rows, operation, &mut warnings);
         remap_swapped_error_notes(&mut out.exclusion_notes, &swapped, col);
     }
+
+    if let TableArchetype::Contingency(t) = &out.archetype {
+        t.validate_counts()?;
+    }
+    out.archetype.validate()?;
 
     let summary_tab = build_summary_tab(
         "Baseline removal summary",
@@ -266,24 +285,59 @@ fn collect_subcells(data_sets: &[DataSetColumn], col: usize, row: usize, mode: S
     }
 }
 
-fn apply_linear_norm_column(arch: &mut TableArchetype, col: usize, zero: f64, hundred: f64, scale: f64) -> Vec<usize> {
-    let factor = scale / (hundred - zero);
-    let reverses = factor < 0.0;
-    let map_val = |v: f64| (v - zero) * factor;
-    let map_spread = |s: f64| s * factor.abs();
+fn assign_norm_cell(cell: &mut Cell, out: f64, row: usize, col: usize, label: &str, warnings: &mut Vec<String>) {
+    if out.is_finite() {
+        cell.value = CellValue::Number(out);
+    } else {
+        cell.value = CellValue::Empty;
+        if !cell.excluded {
+            warnings.push(format!("row {row} col {col}: normalized {label} overflowed finite f64 range; cell blanked"));
+        }
+    }
+}
+
+fn apply_linear_norm_column(arch: &mut TableArchetype, col: usize, zero: f64, hundred: f64, scale: f64, warnings: &mut Vec<String>) -> Vec<usize> {
+    let span = hundred - zero;
+    let factor_opt = span.is_finite().then(|| scale / span).filter(|f| f.is_finite());
+    let half_span = 0.5 * hundred - 0.5 * zero;
+    let reverses = hundred < zero;
+    let map_val = |v: f64| -> f64 {
+        if let Some(factor) = factor_opt
+            && (v - zero).is_finite()
+        {
+            return (v - zero) * factor;
+        }
+        if span.is_finite() && (v - zero).is_finite() {
+            return ((v - zero) / span) * scale;
+        }
+        ((0.5 * v - 0.5 * zero) / half_span) * scale
+    };
+    let map_spread = |s: f64| -> f64 {
+        if let Some(factor) = factor_opt {
+            return s * factor.abs();
+        }
+        if span.is_finite() {
+            return (s / span.abs()) * scale;
+        }
+        ((0.5 * s) / half_span.abs()) * scale
+    };
 
     match arch {
-        TableArchetype::Xy(t) => normalize_dataset_col(&mut t.data_sets, col, t.y_subcolumn_mode, reverses, map_val, map_spread),
-        TableArchetype::Column(t) => normalize_dataset_col(&mut t.data_sets, col, t.subcolumn_mode, reverses, map_val, map_spread),
-        TableArchetype::Grouped(t) => normalize_dataset_col(&mut t.data_sets, col, t.subcolumn_mode, reverses, map_val, map_spread),
-        TableArchetype::Contingency(t) => normalize_dataset_col(&mut t.data_sets, col, SubcolumnMode::Single, reverses, map_val, map_spread),
-        TableArchetype::Survival(t) => normalize_dataset_col(&mut t.cohorts, col, SubcolumnMode::Single, reverses, map_val, map_spread),
-        TableArchetype::PartsOfWhole(t) => normalize_dataset_col(&mut t.data_sets, col, SubcolumnMode::Single, reverses, map_val, map_spread),
+        TableArchetype::Xy(t) => normalize_dataset_col(&mut t.data_sets, col, t.y_subcolumn_mode, reverses, map_val, map_spread, warnings),
+        TableArchetype::Column(t) => normalize_dataset_col(&mut t.data_sets, col, t.subcolumn_mode, reverses, map_val, map_spread, warnings),
+        TableArchetype::Grouped(t) => normalize_dataset_col(&mut t.data_sets, col, t.subcolumn_mode, reverses, map_val, map_spread, warnings),
+        TableArchetype::Contingency(t) => {
+            normalize_dataset_col(&mut t.data_sets, col, SubcolumnMode::Single, reverses, map_val, map_spread, warnings)
+        }
+        TableArchetype::Survival(t) => normalize_dataset_col(&mut t.cohorts, col, SubcolumnMode::Single, reverses, map_val, map_spread, warnings),
+        TableArchetype::PartsOfWhole(t) => {
+            normalize_dataset_col(&mut t.data_sets, col, SubcolumnMode::Single, reverses, map_val, map_spread, warnings)
+        }
         TableArchetype::MultipleVariables(mv) => {
             if let Some(var) = mv.variables.get_mut(col) {
-                for cell in &mut var.cells {
+                for (r, cell) in var.cells.iter_mut().enumerate() {
                     if let Some(v) = cell.value.finite_f64() {
-                        cell.value = CellValue::from_finite_or_empty(map_val(v));
+                        assign_norm_cell(cell, map_val(v), r, col, "cell", warnings);
                     }
                 }
             }
@@ -291,15 +345,48 @@ fn apply_linear_norm_column(arch: &mut TableArchetype, col: usize, zero: f64, hu
         }
         TableArchetype::Nested(t) => {
             if let Some(grp) = t.groups.get_mut(col) {
-                for row_cells in &mut grp.cells {
+                for (r, row_cells) in grp.cells.iter_mut().enumerate() {
                     for cell in row_cells {
                         if let Some(v) = cell.value.finite_f64() {
-                            cell.value = CellValue::from_finite_or_empty(map_val(v));
+                            assign_norm_cell(cell, map_val(v), r, col, "cell", warnings);
                         }
                     }
                 }
             }
             Vec::new()
+        }
+    }
+}
+
+fn normalize_mean_cv_row(
+    row_cells: &mut [Cell],
+    r: usize,
+    col: usize,
+    map_val: &impl Fn(f64) -> f64,
+    map_spread: &impl Fn(f64) -> f64,
+    warnings: &mut Vec<String>,
+) {
+    if let (Some(m), Some(cv)) = (row_cells.first().and_then(|c| c.value.finite_f64()), row_cells.get(1).and_then(|c| c.value.finite_f64())) {
+        let sd_in = (cv / 100.0) * m.abs();
+        let m_out = map_val(m);
+        let sd_out = map_spread(sd_in);
+        assign_norm_cell(&mut row_cells[0], m_out, r, col, "mean", warnings);
+        if m_out.is_finite() && m_out != 0.0 {
+            let cv_out = 100.0 * sd_out / m_out.abs();
+            if cv_out.is_finite() {
+                row_cells[1].value = CellValue::Number(cv_out);
+            } else {
+                row_cells[1].value = CellValue::Empty;
+                if !row_cells[1].excluded {
+                    warnings.push(format!("row {r} col {col}: normalized CV% overflowed; spread blanked"));
+                }
+            }
+        } else {
+            row_cells[1].value = CellValue::Empty;
+            if !row_cells[1].excluded {
+                let reason = if m_out == 0.0 { "normalized mean is zero" } else { "normalized mean overflowed" };
+                warnings.push(format!("row {r} col {col}: {reason}; CV% spread blanked"));
+            }
         }
     }
 }
@@ -311,6 +398,7 @@ fn normalize_dataset_col(
     reverses: bool,
     map_val: impl Fn(f64) -> f64,
     map_spread: impl Fn(f64) -> f64,
+    warnings: &mut Vec<String>,
 ) -> Vec<usize> {
     let Some(ds) = data_sets.get_mut(col) else {
         return Vec::new();
@@ -321,39 +409,31 @@ fn normalize_dataset_col(
             SubcolumnMode::Single | SubcolumnMode::RawReplicates(_) => {
                 for cell in row_cells {
                     if let Some(v) = cell.value.finite_f64() {
-                        cell.value = CellValue::from_finite_or_empty(map_val(v));
+                        assign_norm_cell(cell, map_val(v), r, col, "cell", warnings);
                     }
                 }
             }
             SubcolumnMode::MeanSdN | SubcolumnMode::MeanSemN => {
                 if let Some(m) = row_cells.first().and_then(|c| c.value.finite_f64()) {
-                    row_cells[0].value = CellValue::from_finite_or_empty(map_val(m));
+                    assign_norm_cell(&mut row_cells[0], map_val(m), r, col, "mean", warnings);
                 }
                 if let Some(s) = row_cells.get(1).and_then(|c| c.value.finite_f64()) {
-                    row_cells[1].value = CellValue::from_finite_or_empty(map_spread(s));
+                    assign_norm_cell(&mut row_cells[1], map_spread(s), r, col, "spread", warnings);
                 }
             }
             SubcolumnMode::MeanCvN => {
-                if let (Some(m), Some(cv)) =
-                    (row_cells.first().and_then(|c| c.value.finite_f64()), row_cells.get(1).and_then(|c| c.value.finite_f64()))
-                {
-                    let sd_in = (cv / 100.0) * m.abs();
-                    let m_out = map_val(m);
-                    let sd_out = map_spread(sd_in);
-                    row_cells[0].value = CellValue::from_finite_or_empty(m_out);
-                    row_cells[1].value = if m_out != 0.0 { CellValue::from_finite_or_empty(100.0 * sd_out / m_out.abs()) } else { CellValue::Empty };
-                }
+                normalize_mean_cv_row(row_cells, r, col, &map_val, &map_spread, warnings);
             }
             SubcolumnMode::MeanLowHigh => {
                 if let Some(m) = row_cells.first().and_then(|c| c.value.finite_f64()) {
-                    row_cells[0].value = CellValue::from_finite_or_empty(map_val(m));
+                    assign_norm_cell(&mut row_cells[0], map_val(m), r, col, "mean", warnings);
                 }
                 if row_cells.len() >= 3 {
                     if let Some(lo) = row_cells[1].value.finite_f64() {
-                        row_cells[1].value = CellValue::from_finite_or_empty(map_spread(lo));
+                        assign_norm_cell(&mut row_cells[1], map_spread(lo), r, col, "lower bound", warnings);
                     }
                     if let Some(hi) = row_cells[2].value.finite_f64() {
-                        row_cells[2].value = CellValue::from_finite_or_empty(map_spread(hi));
+                        assign_norm_cell(&mut row_cells[2], map_spread(hi), r, col, "upper bound", warnings);
                     }
                     // Decreasing linear normalization (zero > hundred) reverses -Error and +Error.
                     if reverses && swap_error_bound_cells(row_cells) {
@@ -363,14 +443,14 @@ fn normalize_dataset_col(
             }
             SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr => {
                 if let Some(m) = row_cells.first().and_then(|c| c.value.finite_f64()) {
-                    row_cells[0].value = CellValue::from_finite_or_empty(map_val(m));
+                    assign_norm_cell(&mut row_cells[0], map_val(m), r, col, "center", warnings);
                 }
                 if row_cells.len() >= 3 {
                     if let Some(v1) = row_cells[1].value.finite_f64() {
-                        row_cells[1].value = CellValue::from_finite_or_empty(map_val(v1));
+                        assign_norm_cell(&mut row_cells[1], map_val(v1), r, col, "lower limit", warnings);
                     }
                     if let Some(v2) = row_cells[2].value.finite_f64() {
-                        row_cells[2].value = CellValue::from_finite_or_empty(map_val(v2));
+                        assign_norm_cell(&mut row_cells[2], map_val(v2), r, col, "upper limit", warnings);
                     }
                     let should_swap = match (row_cells[1].value.finite_f64(), row_cells[2].value.finite_f64()) {
                         (Some(a), Some(b)) => a > b || (a == b && reverses),

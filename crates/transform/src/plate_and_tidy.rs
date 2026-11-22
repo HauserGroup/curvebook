@@ -411,6 +411,7 @@ struct TreatmentGrid {
     subcol_count: usize,
     /// `(row_idx, group_idx, sub_idx)` -> numeric value
     cells: BTreeMap<(usize, usize, usize), f64>,
+    collisions: usize,
 }
 
 fn build_treatment_grid(treatments: &[TreatmentPoint]) -> Result<TreatmentGrid, TransformError> {
@@ -445,6 +446,7 @@ fn build_treatment_grid(treatments: &[TreatmentPoint]) -> Result<TreatmentGrid, 
 
     let mut cells: BTreeMap<(usize, usize, usize), f64> = BTreeMap::new();
     let mut max_sub = 0_usize;
+    let mut collisions = 0_usize;
     for pt in sorted_pts {
         let Some(&g) = group_map.get(&pt.group_name) else { continue };
         let norm_x = normalize_zero(pt.dilution_x);
@@ -454,6 +456,9 @@ fn build_treatment_grid(treatments: &[TreatmentPoint]) -> Result<TreatmentGrid, 
 
         let mut slot = base_slot;
         while cells.contains_key(&(r, g, slot)) {
+            if slot == base_slot {
+                collisions += 1;
+            }
             slot += 1;
         }
         cells.insert((r, g, slot), val);
@@ -468,7 +473,7 @@ fn build_treatment_grid(treatments: &[TreatmentPoint]) -> Result<TreatmentGrid, 
     validate_subcolumns(subcol_count)?;
     validate_cell_budget(x_values.len(), groups.len(), subcol_count, 1, "plate treatment grid")?;
 
-    Ok(TreatmentGrid { groups, x_values, subcol_count, cells })
+    Ok(TreatmentGrid { groups, x_values, subcol_count, cells, collisions })
 }
 
 fn build_plate_xy_sheet(title: &str, template: &PlateMapTemplate, collected: &CollectedPlate) -> Result<DataSheet, TransformError> {
@@ -491,7 +496,7 @@ fn build_plate_xy_sheet(title: &str, template: &PlateMapTemplate, collected: &Co
     }
 
     let mut sheet = DataSheet::new(make_sheet_id("plate", title), title, TableArchetype::Xy(xy))?;
-    append_plate_floating_notes(&mut sheet, collected);
+    append_plate_floating_notes(&mut sheet, collected, grid.collisions);
     Ok(sheet)
 }
 
@@ -509,7 +514,7 @@ fn build_plate_grouped_sheet(title: &str, template: &PlateMapTemplate, collected
     }
 
     let mut sheet = DataSheet::new(make_sheet_id("plate", title), title, TableArchetype::Grouped(grouped))?;
-    append_plate_floating_notes(&mut sheet, collected);
+    append_plate_floating_notes(&mut sheet, collected, grid.collisions);
     Ok(sheet)
 }
 
@@ -578,7 +583,7 @@ fn build_plate_column_sheet(
     let mut sheet = DataSheet::new(make_sheet_id("plate", title), title, TableArchetype::Column(table))?;
     sheet.exclusion_notes = notes;
     sheet.exclusion_notes.sort_by_key(|n| n.coord);
-    append_plate_floating_notes(&mut sheet, collected);
+    append_plate_floating_notes(&mut sheet, collected, 0);
     Ok(sheet)
 }
 
@@ -724,11 +729,11 @@ fn build_plate_mv_sheet(
     let mut sheet = DataSheet::new(make_sheet_id("plate", title), title, TableArchetype::MultipleVariables(mv))?;
     sheet.exclusion_notes = notes;
     sheet.exclusion_notes.sort_by_key(|n| n.coord);
-    append_plate_floating_notes(&mut sheet, collected);
+    append_plate_floating_notes(&mut sheet, collected, 0);
     Ok(sheet)
 }
 
-fn append_plate_floating_notes(sheet: &mut DataSheet, collected: &CollectedPlate) {
+fn append_plate_floating_notes(sheet: &mut DataSheet, collected: &CollectedPlate, collisions: usize) {
     let mut lines = Vec::new();
     if let Some((mean, count)) = collected.blank_mean_applied {
         lines.push(format!("Blank mean subtracted: {} (n={count} Blank wells)", format_compact_f64(mean)));
@@ -742,6 +747,9 @@ fn append_plate_floating_notes(sheet: &mut DataSheet, collected: &CollectedPlate
         collected.positive_controls.iter().filter_map(|e| e.value.map(|v| format!("{}={}", e.label, format_compact_f64(v)))).collect();
     if !pos_vals.is_empty() {
         lines.push(format!("Positive controls: {}", pos_vals.join(", ")));
+    }
+    if collisions > 0 {
+        lines.push(format!("Warning: {collisions} replicate slot collision(s) shifted to adjacent subcolumns"));
     }
     if !lines.is_empty() {
         sheet.floating_notes.push(FloatingNote::new(
@@ -802,9 +810,9 @@ pub fn pivot_tidy_long_to_datasheet(
 
     match target_kind {
         TargetArchetypeKind::Column => pivot_tidy_to_column(title, &records),
-        TargetArchetypeKind::Xy => pivot_tidy_to_xy(title, headers, mapping, &records),
-        TargetArchetypeKind::Grouped => pivot_tidy_to_grouped(title, headers, mapping, &records),
-        TargetArchetypeKind::MultipleVariables => pivot_tidy_to_mv(title, headers, mapping, &records),
+        TargetArchetypeKind::Xy => pivot_tidy_to_xy(title, headers, mapping, &records, decimal_sep),
+        TargetArchetypeKind::Grouped => pivot_tidy_to_grouped(title, headers, mapping, &records, decimal_sep),
+        TargetArchetypeKind::MultipleVariables => pivot_tidy_to_mv(title, headers, mapping, &records, decimal_sep),
         TargetArchetypeKind::Contingency => {
             Err(TransformError::IncompatibleTable { operation: "pivot_tidy_long_to_datasheet", kind: TableKind::Contingency })
         }
@@ -870,7 +878,8 @@ fn collect_tidy_records(
                     if target_kind == TargetArchetypeKind::Xy && num_x.is_none() {
                         return Err(TransformError::InvalidInput { message: format!("non-numeric X value `{raw_x}` at tidy row {}", row_idx + 1) });
                     }
-                    (Some(raw_x.trim_end_matches('*').trim().to_owned()), num_x, parsed_x.excluded)
+                    let (core_x, _) = strip_tidy_asterisk(raw_x);
+                    (Some(core_x.to_owned()), num_x, parsed_x.excluded)
                 }
             }
         };
@@ -911,12 +920,27 @@ fn is_missing_token(raw: &str) -> bool {
         || raw.eq_ignore_ascii_case("nan")
 }
 
+fn strip_tidy_asterisk(raw: &str) -> (&str, bool) {
+    let t = raw.trim();
+    if let Some(rest) = t.strip_prefix('*') {
+        (rest.strip_suffix('*').unwrap_or(rest).trim(), true)
+    } else if let Some(rest) = t.strip_suffix('*') {
+        (rest.trim(), true)
+    } else {
+        (t, false)
+    }
+}
+
 fn parse_tidy_cell(raw: &str, decimal_sep: char) -> Cell {
-    let trimmed = raw.trim();
-    if is_missing_token(trimmed) {
+    let (core, excluded) = strip_tidy_asterisk(raw);
+    if is_missing_token(core) {
         return Cell::empty();
     }
-    Cell::parse_import_token(trimmed, decimal_sep, true)
+    let mut cell = Cell::parse_import_token(core, decimal_sep, false);
+    if excluded {
+        cell.excluded = true;
+    }
+    cell
 }
 
 fn parse_exclusion_flag(flag: &str, row_idx: usize) -> Option<String> {
@@ -993,7 +1017,32 @@ fn pivot_tidy_to_column(title: &str, records: &[TidyRecord]) -> Result<DataSheet
     Ok(sheet)
 }
 
-fn pivot_tidy_to_xy(title: &str, headers: &[String], mapping: &TidyColumnMapping, records: &[TidyRecord]) -> Result<DataSheet, TransformError> {
+fn parse_finite_with_decimal_sep(s: &str, decimal_sep: char) -> Option<f64> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let parsed = if decimal_sep == ',' { trimmed.replace(',', ".").parse::<f64>().ok() } else { trimmed.parse::<f64>().ok() };
+    parsed.filter(|v| v.is_finite()).map(normalize_zero)
+}
+
+fn append_tidy_collision_note(sheet: &mut DataSheet, collisions: usize) {
+    if collisions > 0 {
+        sheet.floating_notes.push(FloatingNote::new(
+            format!("{}-tidy-qc", sheet.id.as_str()),
+            RectPt::new(12.0, 12.0, 260.0, 64.0),
+            format!("Warning: {collisions} replicate slot collision(s) shifted to adjacent subcolumns"),
+        ));
+    }
+}
+
+fn pivot_tidy_to_xy(
+    title: &str,
+    headers: &[String],
+    mapping: &TidyColumnMapping,
+    records: &[TidyRecord],
+    decimal_sep: char,
+) -> Result<DataSheet, TransformError> {
     let mut group_names = Vec::new();
     let mut group_map = BTreeMap::new();
     let mut x_by_bits: BTreeMap<u64, f64> = BTreeMap::new();
@@ -1023,10 +1072,11 @@ fn pivot_tidy_to_xy(title: &str, headers: &[String], mapping: &TidyColumnMapping
     x_vals.sort_by(f64::total_cmp);
     let x_row_by_bits: BTreeMap<u64, usize> = x_vals.iter().enumerate().map(|(r, &x)| (normalize_zero(x).to_bits(), r)).collect();
 
-    let (use_named_reps, rep_slots) = build_replicate_slot_map(records, mapping.replicate_col.is_some());
+    let (use_named_reps, rep_slots) = build_replicate_slot_map(records, mapping.replicate_col.is_some(), decimal_sep);
     let mut placed: PlacedCellGrid = BTreeMap::new();
     let mut next_auto: BTreeMap<(usize, usize), usize> = BTreeMap::new();
     let mut max_sub = 0_usize;
+    let mut collisions = 0_usize;
 
     for rec in records {
         let Some(&g) = group_map.get(&rec.group) else { continue };
@@ -1035,8 +1085,12 @@ fn pivot_tidy_to_xy(title: &str, headers: &[String], mapping: &TidyColumnMapping
         let Some(&r) = x_row_by_bits.get(&bits) else { continue };
 
         let slot = if use_named_reps {
-            let mut s = *rep_slots.get(&rec.replicate).unwrap_or(&0);
+            let base = *rep_slots.get(&rec.replicate).unwrap_or(&0);
+            let mut s = base;
             while placed.contains_key(&(r, g, s)) {
+                if s == base {
+                    collisions += 1;
+                }
                 s += 1;
             }
             s
@@ -1093,10 +1147,29 @@ fn pivot_tidy_to_xy(title: &str, headers: &[String], mapping: &TidyColumnMapping
     let notes = fill_y_cells_and_notes(&mut xy.data_sets, placed);
     let mut sheet = DataSheet::new(make_sheet_id("tidy", title), title, TableArchetype::Xy(xy))?;
     sheet.exclusion_notes = notes;
+    append_tidy_collision_note(&mut sheet, collisions);
     Ok(sheet)
 }
 
-fn pivot_tidy_to_grouped(title: &str, headers: &[String], mapping: &TidyColumnMapping, records: &[TidyRecord]) -> Result<DataSheet, TransformError> {
+fn apply_tidy_x_exclusion(rec: &TidyRecord) -> PlacedCell {
+    let mut cell = rec.value.clone();
+    let mut note = rec.exclusion_note.clone();
+    if rec.x_excluded {
+        cell.excluded = true;
+        if note.is_none() {
+            note = Some((String::from("asterisk-excluded"), String::from("X coordinate marked excluded")));
+        }
+    }
+    (cell, note)
+}
+
+fn pivot_tidy_to_grouped(
+    title: &str,
+    headers: &[String],
+    mapping: &TidyColumnMapping,
+    records: &[TidyRecord],
+    decimal_sep: char,
+) -> Result<DataSheet, TransformError> {
     let mut group_names = Vec::new();
     let mut group_map = BTreeMap::new();
     for rec in records {
@@ -1105,21 +1178,27 @@ fn pivot_tidy_to_grouped(title: &str, headers: &[String], mapping: &TidyColumnMa
     }
 
     let (row_titles, row_lookup) = build_grouped_row_index(mapping.x_col.is_some(), records);
-    let (use_named_reps, rep_slots) = build_replicate_slot_map(records, mapping.replicate_col.is_some());
+    let (use_named_reps, rep_slots) = build_replicate_slot_map(records, mapping.replicate_col.is_some(), decimal_sep);
 
     let mut placed: PlacedCellGrid = BTreeMap::new();
     let mut next_row_or_sub: BTreeMap<(usize, usize), usize> = BTreeMap::new();
     let mut max_sub = 0_usize;
     let mut extra_rows = row_titles.len();
+    let mut collisions = 0_usize;
 
     for rec in records {
         let Some(&g) = group_map.get(&rec.group) else { continue };
+        let placed_cell = apply_tidy_x_exclusion(rec);
         if mapping.x_col.is_some() {
             let key = grouped_row_key(rec);
             let Some(&r) = row_lookup.get(&key) else { continue };
             let s = if use_named_reps {
-                let mut slot = *rep_slots.get(&rec.replicate).unwrap_or(&0);
+                let base = *rep_slots.get(&rec.replicate).unwrap_or(&0);
+                let mut slot = base;
                 while placed.contains_key(&(r, g, slot)) {
+                    if slot == base {
+                        collisions += 1;
+                    }
                     slot += 1;
                 }
                 slot
@@ -1129,7 +1208,7 @@ fn pivot_tidy_to_grouped(title: &str, headers: &[String], mapping: &TidyColumnMa
                 *cursor += 1;
                 slot
             };
-            placed.insert((r, g, s), (rec.value.clone(), rec.exclusion_note.clone()));
+            placed.insert((r, g, s), placed_cell);
             if s > max_sub {
                 max_sub = s;
             }
@@ -1144,7 +1223,7 @@ fn pivot_tidy_to_grouped(title: &str, headers: &[String], mapping: &TidyColumnMa
             if s > max_sub {
                 max_sub = s;
             }
-            placed.insert((r, g, s), (rec.value.clone(), rec.exclusion_note.clone()));
+            placed.insert((r, g, s), placed_cell);
         }
     }
 
@@ -1191,10 +1270,17 @@ fn pivot_tidy_to_grouped(title: &str, headers: &[String], mapping: &TidyColumnMa
     let notes = fill_y_cells_and_notes(&mut grouped.data_sets, placed);
     let mut sheet = DataSheet::new(make_sheet_id("tidy", title), title, TableArchetype::Grouped(grouped))?;
     sheet.exclusion_notes = notes;
+    append_tidy_collision_note(&mut sheet, collisions);
     Ok(sheet)
 }
 
-fn pivot_tidy_to_mv(title: &str, headers: &[String], mapping: &TidyColumnMapping, records: &[TidyRecord]) -> Result<DataSheet, TransformError> {
+fn pivot_tidy_to_mv(
+    title: &str,
+    headers: &[String],
+    mapping: &TidyColumnMapping,
+    records: &[TidyRecord],
+    decimal_sep: char,
+) -> Result<DataSheet, TransformError> {
     let rows = records.len();
     validate_rows(rows)?;
     let has_x = mapping.x_col.is_some();
@@ -1239,14 +1325,22 @@ fn pivot_tidy_to_mv(title: &str, headers: &[String], mapping: &TidyColumnMapping
                 (None, Some(tok)) => Cell { value: CellValue::Text(tok.clone()), excluded: rec.x_excluded },
                 (None, None) => Cell::empty(),
             };
+            if mv.variables[xi].cells[r].excluded {
+                notes.push(CellExclusionNote {
+                    coord: CellCoord::new(r, xi, 0),
+                    reason_tag: String::from("asterisk-excluded"),
+                    note: String::from("X coordinate marked with '*'"),
+                    timestamp_utc: String::new(),
+                });
+            }
         }
         mv.variables[grp_var].cells[r] = Cell::text(rec.group.clone());
         if let Some(ri) = rep_var
             && !rec.replicate.is_empty()
         {
-            mv.variables[ri].cells[r] = match rec.replicate.parse::<f64>() {
-                Ok(n) if n.is_finite() => Cell::number(n),
-                _ => Cell::text(rec.replicate.clone()),
+            mv.variables[ri].cells[r] = match parse_finite_with_decimal_sep(&rec.replicate, decimal_sep) {
+                Some(n) => Cell::number(n),
+                None => Cell::text(rec.replicate.clone()),
             };
         }
         mv.variables[val_var].cells[r] = rec.value.clone();
@@ -1295,7 +1389,7 @@ fn ensure_group_slot(name: &str, names: &mut Vec<String>, map: &mut BTreeMap<Str
     }
 }
 
-fn build_replicate_slot_map(records: &[TidyRecord], has_replicate_col: bool) -> (bool, BTreeMap<String, usize>) {
+fn build_replicate_slot_map(records: &[TidyRecord], has_replicate_col: bool, decimal_sep: char) -> (bool, BTreeMap<String, usize>) {
     if !has_replicate_col {
         return (false, BTreeMap::new());
     }
@@ -1304,8 +1398,8 @@ fn build_replicate_slot_map(records: &[TidyRecord], has_replicate_col: bool) -> 
         return (false, BTreeMap::new());
     }
     let mut ordered: Vec<String> = keys.into_iter().collect();
-    ordered.sort_by(|a, b| match (a.parse::<f64>(), b.parse::<f64>()) {
-        (Ok(na), Ok(nb)) if na.is_finite() && nb.is_finite() => na.total_cmp(&nb).then_with(|| a.cmp(b)),
+    ordered.sort_by(|a, b| match (parse_finite_with_decimal_sep(a, decimal_sep), parse_finite_with_decimal_sep(b, decimal_sep)) {
+        (Some(na), Some(nb)) => na.total_cmp(&nb).then_with(|| a.cmp(b)),
         _ => a.cmp(b),
     });
     let map = ordered.into_iter().enumerate().map(|(idx, k)| (k, idx)).collect();
@@ -1461,7 +1555,7 @@ mod json_codec {
     }
 
     pub(super) fn from_json_str<'de, T: Deserialize<'de>>(input: &'de str) -> Result<T, JsonCodecError> {
-        let mut parser = JsonParser { bytes: input.as_bytes(), pos: 0, depth: 0 };
+        let mut parser = JsonParser { input, bytes: input.as_bytes(), pos: 0, depth: 0 };
         let value = T::deserialize(&mut parser)?;
         parser.skip_ws();
         if parser.pos != parser.bytes.len() {
@@ -1801,6 +1895,7 @@ mod json_codec {
     }
 
     struct JsonParser<'de> {
+        input: &'de str,
         bytes: &'de [u8],
         pos: usize,
         depth: usize,
@@ -1969,8 +2064,11 @@ mod json_codec {
                     out.push(char::from(b));
                     self.pos += 1;
                 } else {
-                    let rest = std::str::from_utf8(&self.bytes[self.pos..]).map_err(|_| JsonCodecError::new("invalid UTF-8 in JSON"))?;
-                    let ch = rest.chars().next().ok_or_else(|| JsonCodecError::new("unexpected EOF"))?;
+                    let ch = self
+                        .input
+                        .get(self.pos..)
+                        .and_then(|s| s.chars().next())
+                        .ok_or_else(|| JsonCodecError::new("invalid UTF-8 boundary in JSON"))?;
                     out.push(ch);
                     self.pos += ch.len_utf8();
                 }

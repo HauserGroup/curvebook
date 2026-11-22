@@ -2,10 +2,10 @@
 //! (`TransformAnalysisSpec::Transpose`, `PruneRows`, `SelectAndTransform`,
 //! `docs/implementation/data-tables-and-transforms.md` §5.4).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use curvebook_doc::{
-    Cell, CellCoord, CellExclusionNote, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, DataSheet, DerivedColumnFormula,
+    Cell, CellCoord, CellExclusionNote, CellValue, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, DataSheet, DerivedColumnFormula,
     GroupedTable, InfoSheet, MultipleVariablesTable, NestedTable, PartsOfWholeTable, ResultCell, SheetId, SubcolumnMode, SummarizedPoint,
     SurvivalTable, TableArchetype, TableKind, VariableColumn, VariableRole, VariableSource, XColumnMode, XyTable, default_column_label,
     transpose_cell_grid, validate_data_sets, validate_rows, validate_title,
@@ -14,6 +14,7 @@ use curvebook_math::sum;
 
 use crate::error::TransformError;
 use crate::formula::{DependencyTarget, Expr, FormulaValue, TableEvalContext, eval_column_expr, extract_dependencies, parse_formula};
+use crate::import::validate_cell_budget;
 use crate::ops::{TransformContext, TransformOutput, build_summary_tab};
 
 /// Decimation strategy for [`execute_prune`].
@@ -61,7 +62,11 @@ pub enum SelectRule {
 pub fn execute_transpose(source: &DataSheet, swap_titles: bool, ctx: &TransformContext<'_>) -> Result<TransformOutput, TransformError> {
     let (id, title) = ctx.derived_ids(source, "transpose", "Transposed");
     let (archetype, warnings) = transpose_archetype(&source.archetype, swap_titles)?;
-    let out = DataSheet::new(id, title, archetype)?;
+    let mut out = DataSheet::new(id, title, archetype)?;
+    out.exclusion_notes = remap_transposed_exclusion_notes(source);
+    out.prune_stale_exclusion_notes();
+    out.archetype.validate()?;
+
     let summary_tab = build_summary_tab(
         "Transpose summary",
         vec![
@@ -69,13 +74,62 @@ pub fn execute_transpose(source: &DataSheet, swap_titles: bool, ctx: &TransformC
             ("Output columns", ResultCell::Number { value: out.archetype.column_count() as f64, prefix: None, units: None }),
             ("Swapped titles", ResultCell::Boolean(swap_titles)),
         ],
-        Vec::new(),
+        warnings.clone(),
     );
     Ok(TransformOutput { data_sheet: out, summary_tab, scalars: Vec::new(), warnings })
 }
 
+fn remap_transposed_exclusion_notes(source: &DataSheet) -> Vec<CellExclusionNote> {
+    if source.exclusion_notes.is_empty() {
+        return Vec::new();
+    }
+    let xy_rep_stride = match &source.archetype {
+        TableArchetype::Xy(t) => match t.y_subcolumn_mode {
+            SubcolumnMode::RawReplicates(n) if n >= 2 => Some(n),
+            _ => None,
+        },
+        _ => None,
+    };
+    let primary_only = matches!(
+        &source.archetype,
+        TableArchetype::Xy(t)
+            if matches!(t.y_subcolumn_mode, SubcolumnMode::MeanLowHigh | SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr)
+    );
+
+    let mut out: Vec<CellExclusionNote> = source
+        .exclusion_notes
+        .iter()
+        .filter_map(|note| {
+            let new_coord = if let Some(stride) = xy_rep_stride {
+                if note.coord.subcol >= stride {
+                    return None;
+                }
+                CellCoord::new(note.coord.col * stride + note.coord.subcol, note.coord.row, 0)
+            } else if primary_only {
+                if note.coord.subcol != 0 {
+                    return None;
+                }
+                CellCoord::new(note.coord.col, note.coord.row, 0)
+            } else {
+                CellCoord::new(note.coord.col, note.coord.row, note.coord.subcol)
+            };
+            Some(CellExclusionNote {
+                coord: new_coord,
+                reason_tag: note.reason_tag.clone(),
+                note: note.note.clone(),
+                timestamp_utc: note.timestamp_utc.clone(),
+            })
+        })
+        .collect();
+    out.sort_by_key(|n| n.coord);
+    out
+}
+
 fn transpose_archetype(arch: &TableArchetype, swap_titles: bool) -> Result<(TableArchetype, Vec<String>), TransformError> {
     arch.validate()?;
+    if arch.row_count() == 0 || arch.column_count() == 0 {
+        return Err(TransformError::InvalidInput { message: String::from("cannot transpose a table with 0 rows or 0 columns") });
+    }
     match arch {
         TableArchetype::Column(t) => {
             if t.subcolumn_mode != SubcolumnMode::Single {
@@ -154,6 +208,11 @@ fn transpose_subcolumn_datasets(
 ) -> Result<TransposedColumns, TransformError> {
     let rows = data_sets.first().map_or(row_titles.len(), DataSetColumn::row_count);
     let cols = data_sets.len();
+    let new_rows = cols;
+    let new_cols = rows;
+    validate_rows(new_rows)?;
+    validate_data_sets(new_cols)?;
+    validate_cell_budget(new_rows, new_cols, subs, 0, "transpose")?;
 
     let mut sub_grids = Vec::with_capacity(subs);
     for s in 0..subs {
@@ -170,14 +229,18 @@ fn transpose_subcolumn_datasets(
         sub_grids.push(transpose_cell_grid(&grid));
     }
 
-    let new_rows = cols;
-    let new_cols = rows;
     let new_col_titles: Vec<String> = if swap_titles {
         (0..new_cols).map(|c| row_titles.get(c).cloned().unwrap_or_else(|| default_column_label(c))).collect()
     } else {
         (0..new_cols).map(default_column_label).collect()
     };
-    let new_row_titles: Vec<String> = if swap_titles { data_sets.iter().map(|ds| ds.title.clone()).collect() } else { vec![String::new(); new_rows] };
+    let new_row_titles: Vec<String> = if new_cols == 0 {
+        Vec::new()
+    } else if swap_titles {
+        data_sets.iter().map(|ds| ds.title.clone()).collect()
+    } else {
+        vec![String::new(); new_rows]
+    };
 
     let mut out_sets = Vec::with_capacity(new_cols);
     for c in 0..new_cols {
@@ -203,6 +266,11 @@ fn transpose_single_columns(data_sets: &[DataSetColumn], row_titles: &[String], 
 fn transpose_multivariate(mv: &MultipleVariablesTable, swap_titles: bool) -> Result<TableArchetype, TransformError> {
     let rows = mv.row_count();
     let cols = mv.variables.len();
+    let new_rows = cols;
+    let new_cols = rows;
+    validate_rows(new_rows)?;
+    validate_data_sets(new_cols)?;
+    validate_cell_budget(new_rows, new_cols, 1, 0, "transpose")?;
     let mut grid = vec![vec![Cell::empty(); cols]; rows];
     for (c, var) in mv.variables.iter().enumerate() {
         for (r, cell) in var.cells.iter().enumerate() {
@@ -212,8 +280,6 @@ fn transpose_multivariate(mv: &MultipleVariablesTable, swap_titles: bool) -> Res
         }
     }
     let transposed = transpose_cell_grid(&grid);
-    let new_rows = cols;
-    let new_cols = rows;
     let mut out = MultipleVariablesTable::new(new_cols.max(1), new_rows)?;
     if new_cols == 0 {
         out.variables.clear();
@@ -257,19 +323,39 @@ fn transpose_grouped(t: &GroupedTable, swap_titles: bool) -> Result<TableArchety
 }
 
 fn transpose_xy(t: &XyTable, swap_titles: bool) -> Result<(TableArchetype, Vec<String>), TransformError> {
+    let mut has_x_data = false;
     let row_labels: Vec<String> = (0..t.row_count())
         .map(|r| {
+            let x_cell = t.materialized_x_cell_at(r);
+            let x_label = match &x_cell.value {
+                CellValue::Number(x) if x.is_finite() => {
+                    has_x_data = true;
+                    let norm = if *x == 0.0 { 0.0 } else { *x };
+                    Some(format!("{norm}"))
+                }
+                CellValue::Text(s) if !s.trim().is_empty() => {
+                    has_x_data = true;
+                    Some(s.trim().to_owned())
+                }
+                _ => None,
+            };
             let rt = t.row_titles.get(r).map(String::as_str).unwrap_or("");
             if !rt.is_empty() {
                 rt.to_owned()
-            } else if let Some(x) = t.x_value_at(r) {
-                format!("{x}")
+            } else if let Some(lbl) = x_label {
+                lbl
             } else {
                 default_column_label(r)
             }
         })
         .collect();
     let mut warnings = Vec::new();
+    if !swap_titles && has_x_data {
+        warnings.push(String::from("transposing XY table with swap_row_and_column_titles=false discarded source X values"));
+    }
+    if t.x_mode.subcolumn_count() > 1 {
+        warnings.push(String::from("Column tables do not support X error subcolumns; transpose omitted X error values"));
+    }
     match t.y_subcolumn_mode {
         SubcolumnMode::Single | SubcolumnMode::RawReplicates(1) => {
             let tc = transpose_single_columns(&t.data_sets, &row_labels, swap_titles)?;
@@ -309,6 +395,7 @@ fn transpose_xy(t: &XyTable, swap_titles: bool) -> Result<(TableArchetype, Vec<S
                 .ok_or_else(|| TransformError::InvalidSpec { message: String::from("transposed replicate row count overflow") })?;
             validate_rows(new_rows)?;
             validate_data_sets(rows)?;
+            validate_cell_budget(new_rows, rows, 1, 0, "transpose")?;
             let mut out = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, rows.max(1), new_rows)?;
             if rows == 0 {
                 out.data_sets.clear();
@@ -415,6 +502,8 @@ pub fn execute_prune(source: &DataSheet, method: PruneMethod, ctx: &TransformCon
         }
     };
 
+    out.archetype.validate()?;
+
     let summary_tab = build_summary_tab(
         "Prune summary",
         vec![
@@ -455,37 +544,34 @@ fn select_log_spaced_indices(arch: &TableArchetype, target_points: usize) -> Vec
         return vec![0];
     }
 
-    let mut out = Vec::new();
     if let TableArchetype::Xy(xy) = arch {
-        let xs: Vec<(usize, f64)> = (0..n).filter_map(|r| xy.x_value_at(r).filter(|&x| x > 0.0).map(|x| (r, x))).collect();
-        if let (Some(&(_, first_x)), Some(&(_, last_x))) = (xs.first(), xs.last())
+        let mut xs: Vec<(usize, f64)> = (0..n).filter_map(|r| xy.x_value_at(r).filter(|&x| x.is_finite() && x > 0.0).map(|x| (r, x))).collect();
+        xs.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+        if let (Some(&(_, min_x)), Some(&(_, max_x))) = (xs.first(), xs.last())
             && xs.len() >= 2
         {
-            let log_min = first_x.ln();
-            let log_max = last_x.ln();
+            let log_min = min_x.ln();
+            let log_max = max_x.ln();
             if log_max > log_min {
+                let mut selected = BTreeSet::new();
                 for step in 0..target_points {
                     let target_ln = log_min + ((step as f64) / ((target_points - 1) as f64)) * (log_max - log_min);
-                    if let Some((best_r, _)) = xs.iter().min_by(|a, b| (a.1.ln() - target_ln).abs().total_cmp(&(b.1.ln() - target_ln).abs()))
-                        && out.last().copied() != Some(*best_r)
-                    {
-                        out.push(*best_r);
+                    if let Some((best_r, _)) = xs.iter().min_by(|a, b| (a.1.ln() - target_ln).abs().total_cmp(&(b.1.ln() - target_ln).abs())) {
+                        selected.insert(*best_r);
                     }
                 }
-                return out;
+                return selected.into_iter().collect();
             }
         }
     }
 
+    let mut out = BTreeSet::new();
     for step in 0..target_points {
         let frac = (step as f64) / ((target_points - 1) as f64);
         let log_pos = ((n as f64).powf(frac) - 1.0).round() as usize;
-        let clamped = log_pos.min(n - 1);
-        if out.last().copied() != Some(clamped) {
-            out.push(clamped);
-        }
+        out.insert(log_pos.min(n - 1));
     }
-    out
+    out.into_iter().collect()
 }
 
 fn select_minmax_bin_indices(arch: &TableArchetype, bin_width: usize) -> Vec<usize> {
@@ -592,6 +678,7 @@ fn average_bins_archetype(arch: &mut TableArchetype, k: usize) -> Result<(usize,
             for ds in &mut t.data_sets {
                 ds.cells = average_cell_grid_bins_with_mode(&ds.cells, k, SubcolumnMode::Single, &ds.title, &mut warnings);
             }
+            t.validate_counts()?;
         }
         TableArchetype::PartsOfWhole(t) => {
             t.slice_labels = bin_titles(&t.slice_labels, k);
@@ -917,7 +1004,7 @@ pub fn execute_select_with_derived(
 
     if predicate_needs_derived {
         for (title, expr) in &parsed_derived {
-            let col_idx = apply_derived_column(&mut working, title, expr, ctx.info_sheet)?;
+            let col_idx = apply_derived_column(&mut working, title, expr, ctx.primary_info_sheet())?;
             if !output_cols.contains(&col_idx) {
                 output_cols.push(col_idx);
             }
@@ -940,7 +1027,7 @@ pub fn execute_select_with_derived(
         working.exclusion_notes = crate::randomize::remap_exclusion_notes(&working.exclusion_notes, &kept_indices);
         working.prune_stale_exclusion_notes();
         for (title, expr) in &parsed_derived {
-            let col_idx = apply_derived_column(&mut working, title, expr, ctx.info_sheet)?;
+            let col_idx = apply_derived_column(&mut working, title, expr, ctx.primary_info_sheet())?;
             if !output_cols.contains(&col_idx) {
                 output_cols.push(col_idx);
             }
@@ -984,8 +1071,14 @@ pub fn execute_select_with_derived(
         if has_external_axis && drops_axis_target {
             warnings.push(format!("source X / Time column omitted when projecting to {} (counts/proportions target)", target_archetype.label()));
         }
-        let col_shift = usize::from(include_axis && !matches!(target_archetype, TableKind::Xy | TableKind::Survival));
-        let remapped_notes = remap_projected_column_notes(&working.exclusion_notes, &output_cols, col_shift);
+        let axis_shift = if include_axis && !matches!(target_archetype, TableKind::Xy | TableKind::Survival) {
+            ProjectedAxisShift::PrependExternalAxis
+        } else if !has_external_axis && matches!(target_archetype, TableKind::Xy | TableKind::Survival) && output_cols.len() >= 2 {
+            ProjectedAxisShift::ConsumeFirstColumnAsAxis
+        } else {
+            ProjectedAxisShift::None
+        };
+        let remapped_notes = remap_projected_column_notes(&working.exclusion_notes, &output_cols, axis_shift, target_archetype, &mut warnings);
         (project_archetype(&working.archetype, target_archetype, &output_cols, include_axis)?, remapped_notes)
     };
     let mut out = DataSheet::new(id, title, projected)?;
@@ -1000,8 +1093,17 @@ pub fn execute_select_with_derived(
     if !parsed_derived.is_empty() {
         summary_rows.push(("Derived columns", ResultCell::Number { value: parsed_derived.len() as f64, prefix: None, units: None }));
     }
+    out.archetype.validate()?;
+
     let summary_tab = build_summary_tab("Select and transform summary", summary_rows, warnings.clone());
     Ok(TransformOutput { data_sheet: out, summary_tab, scalars: Vec::new(), warnings })
+}
+
+#[derive(Clone, Copy)]
+enum ProjectedAxisShift {
+    None,
+    PrependExternalAxis,
+    ConsumeFirstColumnAsAxis,
 }
 
 fn remap_selected_column_notes(notes: &[CellExclusionNote], selected_cols: &[usize], primary_only: bool) -> Vec<CellExclusionNote> {
@@ -1027,14 +1129,34 @@ fn remap_selected_column_notes(notes: &[CellExclusionNote], selected_cols: &[usi
     out
 }
 
-fn remap_projected_column_notes(notes: &[CellExclusionNote], selected_cols: &[usize], col_shift: usize) -> Vec<CellExclusionNote> {
-    let mut shifted = remap_selected_column_notes(notes, selected_cols, true);
-    if col_shift > 0 {
-        for note in &mut shifted {
-            note.coord.col += col_shift;
+fn remap_projected_column_notes(
+    notes: &[CellExclusionNote],
+    selected_cols: &[usize],
+    shift: ProjectedAxisShift,
+    target_archetype: TableKind,
+    warnings: &mut Vec<String>,
+) -> Vec<CellExclusionNote> {
+    match shift {
+        ProjectedAxisShift::None => remap_selected_column_notes(notes, selected_cols, true),
+        ProjectedAxisShift::PrependExternalAxis => {
+            let mut shifted = remap_selected_column_notes(notes, selected_cols, true);
+            for note in &mut shifted {
+                note.coord.col += 1;
+            }
+            shifted
+        }
+        ProjectedAxisShift::ConsumeFirstColumnAsAxis => {
+            if let Some(&axis_col) = selected_cols.first()
+                && notes.iter().any(|n| n.coord.col == axis_col && n.coord.subcol == 0)
+            {
+                warnings.push(format!(
+                    "exclusion note(s) on column {axis_col} moved to {} axis could not be retained as cell exclusion notes",
+                    target_archetype.label()
+                ));
+            }
+            remap_selected_column_notes(notes, selected_cols.get(1..).unwrap_or(&[]), true)
         }
     }
-    shifted
 }
 
 fn find_matching_column_title(titles: &[&str], target: &str) -> Option<usize> {
@@ -1161,7 +1283,7 @@ fn apply_select_rule(source: &DataSheet, rule: &SelectRule, mask: &mut [bool], c
         }
         SelectRule::Predicate(formula) => {
             let expr = parse_formula(formula)?;
-            let eval_ctx = TableEvalContext::new(source, ctx.info_sheet);
+            let eval_ctx = TableEvalContext::new(source, ctx.primary_info_sheet());
             let vals = eval_column_expr(&expr, &eval_ctx)?;
             for (r, flag) in mask.iter_mut().enumerate() {
                 if vals.get(r).and_then(|v| v.as_bool()) != Some(true) {

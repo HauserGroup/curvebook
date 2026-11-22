@@ -249,6 +249,14 @@ fn compute_auc_internal(raw: &[(f64, f64, Option<f64>)], opts: &AucOptions) -> R
     if !opts.baseline.is_finite() {
         return Err(TransformError::InvalidSpec { message: String::from("AUC baseline must be finite") });
     }
+    if !opts.min_peak_height.is_finite() || opts.min_peak_height < 0.0 {
+        return Err(TransformError::InvalidSpec { message: format!("AUC min_peak_height must be finite and >= 0, got {}", opts.min_peak_height) });
+    }
+    if !opts.min_area_fraction.is_finite() || !(0.0..=1.0).contains(&opts.min_area_fraction) {
+        return Err(TransformError::InvalidSpec {
+            message: format!("AUC min_area_fraction must be finite and in [0, 1], got {}", opts.min_area_fraction),
+        });
+    }
     let sorted = prepare_sorted_points(raw)?;
     let mut pts = collapse_tied_auc_points(&sorted)?;
     if pts.len() < 2 {
@@ -601,7 +609,7 @@ fn lowess_point(xs: &[f64], ys: &[f64], rob_weights: &[f64], i: usize, q: usize)
     dists.sort_by(|a, b| a.1.total_cmp(&b.1));
     let max_d = dists[q - 1].1;
     if max_d == 0.0 {
-        return ys[i];
+        return tied_lowess_mean(xs, ys, rob_weights, xi, ys[i]);
     }
 
     let mut data = Vec::with_capacity(q * 2);
@@ -618,6 +626,30 @@ fn lowess_point(xs: &[f64], ys: &[f64], rob_weights: &[f64], i: usize, q: usize)
         return ys[i];
     };
     solve_linear_least_squares(&a, &b).ok().and_then(|(s, _)| s.coefficients.first().copied()).filter(|v| v.is_finite()).unwrap_or(ys[i])
+}
+
+fn tied_lowess_mean(xs: &[f64], ys: &[f64], rob_weights: &[f64], xi: f64, fallback: f64) -> f64 {
+    let mut w_sum = sum::NeumaierSum::new();
+    let mut wy_sum = sum::NeumaierSum::new();
+    let mut tied_ys = Vec::new();
+    for (&xj, (&yj, &rw)) in xs.iter().zip(ys.iter().zip(rob_weights.iter())) {
+        if (xj - xi).abs() == 0.0 {
+            tied_ys.push(yj);
+            let w = rw.max(0.0);
+            if w > 0.0 {
+                w_sum.add(w);
+                wy_sum.add(w * yj);
+            }
+        }
+    }
+    let total_w = w_sum.total();
+    if total_w > 0.0 {
+        let weighted = wy_sum.total() / total_w;
+        if weighted.is_finite() {
+            return weighted;
+        }
+    }
+    sum::mean(&tied_ys).ok().filter(|v| v.is_finite()).unwrap_or(fallback)
 }
 
 fn update_lowess_robust_weights(ys: &[f64], fitted: &[f64], rob_weights: &mut [f64]) {

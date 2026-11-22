@@ -68,10 +68,10 @@ pub enum MathTransformOp {
     Logit,
     /// Arbitrary-base exponential `base^u` (`base > 0`, `base != 1`).
     Antilog {
-        /// Positive exponential base (`> 0`).
+        /// Positive exponential base (`> 0`, `!= 1`).
         base: f64,
     },
-    /// Inverse standard normal CDF `Phi^{-1}(u)` (`u in (0, 1)`).
+    /// Finney's probit transform `5 + Phi^{-1}(u)` (`u in (0, 1)`, Finney 1971; Zar 2010).
     Probit,
     /// Angular arcsine square-root transform `arcsin(sqrt(u))` in radians (`u in [0, 1]`).
     ArcsinSqrt,
@@ -128,8 +128,8 @@ impl CompiledOp {
             }
             MathTransformOp::Antilog { base } => {
                 check_finite(*base, "Antilog base")?;
-                if *base <= 0.0 {
-                    return Err(TransformError::InvalidSpec { message: format!("Antilog base must be > 0, got {base}") });
+                if *base <= 0.0 || *base == 1.0 {
+                    return Err(TransformError::InvalidSpec { message: format!("Antilog base must be > 0 and != 1, got {base}") });
                 }
                 Self::Antilog(*base)
             }
@@ -290,6 +290,7 @@ pub fn execute_math_transform(
     error_propagation: ErrorPropagationMode,
     ctx: &TransformContext<'_>,
 ) -> Result<TransformOutput, TransformError> {
+    source.archetype.validate()?;
     let compiled_x = x_op.map(CompiledOp::compile).transpose()?;
     let compiled_y = y_op.map(CompiledOp::compile).transpose()?;
 
@@ -302,6 +303,7 @@ pub fn execute_math_transform(
 
     let mut warnings = Vec::new();
     let mut transformed_cells = 0_usize;
+    let info = ctx.primary_info_sheet();
 
     let x_values_before: Vec<Option<f64>> = match &source.archetype {
         TableArchetype::Xy(xy) => (0..xy.row_count()).map(|r| xy.raw_x_value_at(r)).collect(),
@@ -311,7 +313,7 @@ pub fn execute_math_transform(
     if let Some(ref cx) = compiled_x
         && let TableArchetype::Xy(xy) = &mut out.archetype
     {
-        transform_xy_x_axis(xy, cx, error_propagation, ctx.info_sheet, &mut transformed_cells, &mut warnings);
+        transform_xy_x_axis(xy, cx, error_propagation, info, &mut transformed_cells, &mut warnings);
     }
 
     if let Some(ref cy) = compiled_y {
@@ -323,7 +325,7 @@ pub fn execute_math_transform(
             cy,
             error_propagation,
             &x_values_before,
-            ctx.info_sheet,
+            info,
             &mut transformed_cells,
             &mut warnings,
         )?;
@@ -332,6 +334,7 @@ pub fn execute_math_transform(
         }
     }
 
+    out.archetype.validate()?;
     let summary_tab = build_summary_tab(
         "Math transform summary",
         vec![
@@ -389,7 +392,9 @@ fn transform_archetype_y(
         TableArchetype::Column(t) => transform_dataset_vec(&mut t.data_sets, t.subcolumn_mode, selected, op, err_mode, x_ctx, info, count, warnings),
         TableArchetype::Grouped(t) => transform_dataset_vec(&mut t.data_sets, t.subcolumn_mode, selected, op, err_mode, x_ctx, info, count, warnings),
         TableArchetype::Contingency(t) => {
-            transform_dataset_vec(&mut t.data_sets, SubcolumnMode::Single, selected, op, err_mode, x_ctx, info, count, warnings)
+            let swapped = transform_dataset_vec(&mut t.data_sets, SubcolumnMode::Single, selected, op, err_mode, x_ctx, info, count, warnings);
+            t.validate_counts()?;
+            swapped
         }
         TableArchetype::Survival(t) => {
             transform_dataset_vec(&mut t.cohorts, SubcolumnMode::Single, selected, op, err_mode, x_ctx, info, count, warnings)

@@ -1022,6 +1022,9 @@ fn convert_grouped_reps_to_mv(
     let mut coord_map = BTreeMap::new();
     let mut preserved = 0_usize;
     for (out_r, (rf, cf, rep, val, old_coord)) in records.into_iter().enumerate() {
+        if let Some(title) = grp.row_titles.get(old_coord.row) {
+            mv.row_titles[out_r].clone_from(title);
+        }
         set_mv_cell(&mut mv, 0, out_r, rf);
         set_mv_cell(&mut mv, 1, out_r, cf);
         if let Some(rep_cell) = rep {
@@ -1033,17 +1036,9 @@ fn convert_grouped_reps_to_mv(
         set_mv_cell(&mut mv, val_col_idx, out_r, val);
         coord_map.insert(old_coord, CellCoord::new(out_r, val_col_idx, 0));
     }
+    mv.row_titles_expanded = mv.row_titles.iter().any(|s| !s.trim().is_empty());
     for var in mv.variables.iter_mut().skip(2) {
         var.refresh_inferred_role();
-    }
-
-    let schema_lossy = grp.subcolumn_mode.is_pre_summarized();
-    let mut warnings = Vec::new();
-    if schema_lossy {
-        warnings.push(format!(
-            "Pre-summarized {:?} subcolumns flattened into independent Continuous variables; summary moment semantics lost",
-            grp.subcolumn_mode
-        ));
     }
 
     Ok(BuiltArchetype {
@@ -1051,8 +1046,8 @@ fn convert_grouped_reps_to_mv(
         coord_map,
         preserved_cells: preserved,
         dropped_cells: 0,
-        warnings,
-        schema_lossy,
+        warnings: Vec::new(),
+        schema_lossy: false,
         keep_links: false,
     })
 }
@@ -1079,6 +1074,7 @@ fn convert_grouped_summary_to_mv(grp: &GroupedTable, rows: usize, row_title: Str
 
     let out_rows = row_entries.len();
     validate_rows(out_rows)?;
+    validate_cell_budget(out_rows, 2 + sub_count, 1, 0, "Grouped-to-MultipleVariables summary reshape")?;
     let mut mv = MultipleVariablesTable::new(2 + sub_count, out_rows)?;
     mv.variables[0].title = row_title;
     mv.variables[0].lock_role(VariableRole::Categorical);
@@ -1091,6 +1087,9 @@ fn convert_grouped_summary_to_mv(grp: &GroupedTable, rows: usize, row_title: Str
     let mut coord_map = BTreeMap::new();
     let mut preserved = 0_usize;
     for (out_r, (rf, cf, vals, old_r, old_c)) in row_entries.into_iter().enumerate() {
+        if let Some(title) = grp.row_titles.get(old_r) {
+            mv.row_titles[out_r].clone_from(title);
+        }
         set_mv_cell(&mut mv, 0, out_r, rf);
         set_mv_cell(&mut mv, 1, out_r, cf);
         for (s, val) in vals.into_iter().enumerate() {
@@ -1101,6 +1100,7 @@ fn convert_grouped_summary_to_mv(grp: &GroupedTable, rows: usize, row_title: Str
             coord_map.insert(CellCoord::new(old_r, old_c, s), CellCoord::new(out_r, 2 + s, 0));
         }
     }
+    mv.row_titles_expanded = mv.row_titles.iter().any(|s| !s.trim().is_empty());
     for var in mv.variables.iter_mut().skip(2) {
         var.refresh_inferred_role();
     }
@@ -1252,6 +1252,7 @@ fn pivot_mv_two_way_to_grouped(
     let mut col_index: BTreeMap<String, usize> = BTreeMap::new();
     let mut buckets: RepBucketMap = BTreeMap::new();
     let mut mapped_fac_cells = 0_usize;
+    let mut warned_rep_dropped = false;
 
     for r in 0..rows {
         let r_cell = mv.variables[row_fac_col].cells.get(r);
@@ -1285,8 +1286,15 @@ fn pivot_mv_two_way_to_grouped(
         let ci = intern_level(&mut col_levels, &mut col_index, ck);
         mapped_fac_cells += 2;
         let rep_order = rep_col.and_then(|rc| mv.variables[rc].cells.get(r).and_then(Cell::active_number));
-        if rep_col.is_some_and(|rc| mv.variables[rc].cells.get(r).is_some_and(is_occupied)) {
+        if rep_order.is_some() {
             mapped_fac_cells += 1;
+        } else if rep_col.is_some_and(|rc| mv.variables[rc].cells.get(r).is_some_and(is_occupied)) {
+            dropped_cells += 1;
+            schema_lossy = true;
+            if !warned_rep_dropped {
+                warned_rep_dropped = true;
+                warnings.push(String::from("Non-numeric or excluded replicate values cannot be mapped to explicit replicate slots and were ignored"));
+            }
         }
         buckets.entry((ri, ci)).or_default().push((rep_order, r, val_cell));
     }
@@ -1464,22 +1472,23 @@ fn pivot_mv_summary_to_grouped(
         entries.push((ri, ci, r, triplet));
     }
 
-    validate_data_sets(col_levels.len().max(1))?;
+    if col_levels.is_empty() || row_levels.is_empty() {
+        return Err(TransformError::InvalidInput {
+            message: String::from("MultipleVariables summary Grouped pivot requires at least one row factor level and one column factor level"),
+        });
+    }
+    validate_data_sets(col_levels.len())?;
     validate_rows(row_levels.len())?;
     validate_title_slice(&row_levels)?;
     validate_title_slice(&col_levels)?;
-    validate_cell_budget(row_levels.len(), col_levels.len().max(1), mode.subcolumn_count(), 0, "MultipleVariables summary Grouped pivot")?;
-    let mut grouped = GroupedTable::new(mode, col_levels.len().max(1), row_levels.len())?;
-    if col_levels.is_empty() {
-        grouped.data_sets.clear();
-    } else {
-        grouped.row_factor_title = mv.variables[row_fac_col].title.clone();
-        grouped.column_factor_title = mv.variables[col_fac_col].title.clone();
-        grouped.row_numeric_spacing = parse_numeric_row_spacing(&row_levels);
-        grouped.row_titles = row_levels;
-        for (ci, cl) in col_levels.iter().enumerate() {
-            grouped.data_sets[ci].title = cl.clone();
-        }
+    validate_cell_budget(row_levels.len(), col_levels.len(), mode.subcolumn_count(), 0, "MultipleVariables summary Grouped pivot")?;
+    let mut grouped = GroupedTable::new(mode, col_levels.len(), row_levels.len())?;
+    grouped.row_factor_title = mv.variables[row_fac_col].title.clone();
+    grouped.column_factor_title = mv.variables[col_fac_col].title.clone();
+    grouped.row_numeric_spacing = parse_numeric_row_spacing(&row_levels);
+    grouped.row_titles = row_levels;
+    for (ci, cl) in col_levels.iter().enumerate() {
+        grouped.data_sets[ci].title = cl.clone();
     }
 
     let mut coord_map = BTreeMap::new();
@@ -1667,6 +1676,7 @@ fn convert_xy_to_mv(xy: &XyTable) -> Result<BuiltArchetype, TransformError> {
 
 fn convert_xy_single_to_mv(xy: &XyTable, rows: usize) -> Result<BuiltArchetype, TransformError> {
     let var_count = 1 + xy.data_sets.len();
+    validate_cell_budget(rows, var_count, 1, 0, "XY-to-MultipleVariables reshape")?;
     let mut mv = MultipleVariablesTable::new(var_count, rows)?;
     mv.row_titles = resized_titles(&xy.row_titles, rows);
     mv.row_titles_expanded = xy.row_titles_expanded;
@@ -1779,6 +1789,9 @@ fn convert_xy_reps_to_mv(xy: &XyTable, rows: usize, n: usize) -> Result<BuiltArc
     let mut coord_map = BTreeMap::new();
     let mut preserved_y = 0_usize;
     for (out_r, (xc, gc, rc, yc, old_coord)) in records.into_iter().enumerate() {
+        if let Some(title) = xy.row_titles.get(old_coord.row) {
+            mv.row_titles[out_r].clone_from(title);
+        }
         set_mv_cell(&mut mv, 0, out_r, xc);
         set_mv_cell(&mut mv, 1, out_r, gc);
         set_mv_cell(&mut mv, 2, out_r, rc);
@@ -1788,6 +1801,7 @@ fn convert_xy_reps_to_mv(xy: &XyTable, rows: usize, n: usize) -> Result<BuiltArc
         }
         set_mv_cell(&mut mv, 3, out_r, yc);
     }
+    mv.row_titles_expanded = xy.row_titles_expanded || mv.row_titles.iter().any(|s| !s.trim().is_empty());
     for var in &mut mv.variables {
         var.refresh_inferred_role();
     }
@@ -1864,6 +1878,7 @@ fn convert_xy_wide_to_mv(xy: &XyTable, rows: usize, x_subs: usize) -> Result<Bui
         .checked_add(y_vars)
         .ok_or_else(|| TransformError::InvalidSpec { message: String::from("XY-to-MultipleVariables column count overflows") })?;
     validate_data_sets(total_vars)?;
+    validate_cell_budget(rows, total_vars, 1, 0, "XY-to-MultipleVariables wide reshape")?;
 
     let var_titles = collect_xy_wide_mv_titles(xy, x_subs, y_subs, total_vars)?;
     let mut mv = MultipleVariablesTable::new(total_vars, rows)?;
@@ -2077,6 +2092,7 @@ fn pivot_mv_grouped_xy(
     let mut x_any_active: BTreeSet<usize> = BTreeSet::new();
     let mut x_any_excluded: BTreeSet<usize> = BTreeSet::new();
     let mut mapped_aux_cells = 0_usize;
+    let mut warned_rep_dropped = false;
 
     for r in 0..rows {
         let x_cell = mv.variables[x_col].cells.get(r);
@@ -2127,8 +2143,15 @@ fn pivot_mv_grouped_xy(
         let gi = intern_level(&mut groups, &mut group_index, gk);
         mapped_aux_cells += 2;
         let rep_ord = rep_col.and_then(|rc| mv.variables[rc].cells.get(r).and_then(Cell::active_number));
-        if rep_col.is_some_and(|rc| mv.variables[rc].cells.get(r).is_some_and(is_occupied)) {
+        if rep_ord.is_some() {
             mapped_aux_cells += 1;
+        } else if rep_col.is_some_and(|rc| mv.variables[rc].cells.get(r).is_some_and(is_occupied)) {
+            dropped_cells += 1;
+            schema_lossy = true;
+            if !warned_rep_dropped {
+                warned_rep_dropped = true;
+                warnings.push(String::from("Non-numeric or excluded replicate values cannot be mapped to explicit replicate slots and were ignored"));
+            }
         }
         buckets.entry((xi, gi)).or_default().push(MvXyEntry { rep: rep_ord, old_row: r, cell: y_cell, x_excluded });
     }
@@ -2219,6 +2242,7 @@ fn convert_column_to_mv(col: &ColumnTable) -> Result<BuiltArchetype, TransformEr
         .checked_mul(subs)
         .ok_or_else(|| TransformError::InvalidSpec { message: String::from("Column-to-MultipleVariables column count overflows") })?;
     validate_data_sets(total_vars)?;
+    validate_cell_budget(rows, total_vars, 1, 0, "Column-to-MultipleVariables reshape")?;
 
     let labels = col.subcolumn_mode.subcolumn_labels();
     let mut var_titles = Vec::with_capacity(total_vars);
@@ -2456,7 +2480,10 @@ fn convert_xy_to_grouped(xy: &XyTable) -> Result<BuiltArchetype, TransformError>
         let rt = xy.row_titles.get(r).map(|s| s.trim()).filter(|s| !s.is_empty());
         let lbl = match (rt, x_val) {
             (Some(s), _) => s.to_owned(),
-            (None, Some(v)) => format!("{v}"),
+            (None, Some(v)) => {
+                let normalized = if v == 0.0 { 0.0 } else { v };
+                format!("{normalized}")
+            }
             (None, None) => String::new(),
         };
         validate_title(&lbl)?;
@@ -2617,7 +2644,8 @@ fn convert_xy_to_contingency(xy: &XyTable) -> Result<BuiltArchetype, TransformEr
             (Some(s), _) => s.to_owned(),
             (None, Some(v)) => {
                 x_used_as_label = true;
-                format!("{v}")
+                let normalized = if v == 0.0 { 0.0 } else { v };
+                format!("{normalized}")
             }
             (None, None) => String::new(),
         };

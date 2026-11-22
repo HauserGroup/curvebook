@@ -148,6 +148,7 @@ fn r1_x2_01_failed_recompute_clears_stale_outputs_and_consumers_reject_failed() 
     let failed_sheets = [stale_failed.clone()];
     let tr_ctx = TransformContext {
         info_sheet: None,
+        info_sheets: &[],
         result_sheets: &failed_sheets,
         data_sheets: std::slice::from_ref(&dummy_ds),
         selected_data_sets: Vec::new(),
@@ -292,4 +293,87 @@ fn r1_x2_02_mean_sd_n_regression_matches_raw_replicates() {
             }
         }
     }
+}
+
+#[test]
+fn sec03_03_dag_transform_multi_info_sheet_and_rejects_dirty_result_scalar() {
+    let mut ds = xy_single("d", &[1.0, 2.0], &[10.0, 20.0]);
+    ds.info_sheet_id = Some(SheetId::new("info-a"));
+
+    let mut info_a = curvebook_doc::InfoSheet::new_preseeded("info-a", "Info A").unwrap();
+    info_a.set_constant("Scale", curvebook_doc::ConstantValue::Number(10.0), None).unwrap();
+
+    let mut info_b = curvebook_doc::InfoSheet::new_preseeded("info-b", "Info B").unwrap();
+    info_b.set_constant("Scale", curvebook_doc::ConstantValue::Number(100.0), None).unwrap();
+
+    let mut doc = ProjectDocument::new("sec03-03").unwrap();
+    doc.add_info_sheet(info_a).unwrap();
+    doc.add_info_sheet(info_b).unwrap();
+    doc.add_data_sheet(ds.clone()).unwrap();
+
+    // Explicit info_sheet_id ("info-b") and default paired primary ("info-a") must BOTH resolve in DAG.
+    let explicit_spec = AnalysisSpec::new(
+        "tr-b",
+        "d",
+        AnalysisKind::Transform(TransformAnalysisSpec::Normalize {
+            zero_anchor: NormalizeAnchor::FixedValue(0.0),
+            hundred_anchor: NormalizeAnchor::Hooked(HookSource::InfoConstant {
+                info_sheet_id: Some(SheetId::new("info-b")),
+                constant_name: String::from("Scale"),
+            }),
+            output_percent: true,
+            per_data_set: true,
+        }),
+    )
+    .unwrap();
+    let default_spec = AnalysisSpec::new(
+        "tr-a",
+        "d",
+        AnalysisKind::Transform(TransformAnalysisSpec::Normalize {
+            zero_anchor: NormalizeAnchor::FixedValue(0.0),
+            hundred_anchor: NormalizeAnchor::Hooked(HookSource::InfoConstant { info_sheet_id: None, constant_name: String::from("Scale") }),
+            output_percent: true,
+            per_data_set: true,
+        }),
+    )
+    .unwrap();
+    doc.add_result_sheet(ResultSheet::new(explicit_spec).unwrap()).unwrap();
+    doc.add_result_sheet(ResultSheet::new(default_spec).unwrap()).unwrap();
+
+    recalculate_project_with_report(&mut doc).unwrap();
+
+    let tr_b = doc.result_sheet(&SheetId::new("tr-b")).unwrap().analyzable_data.as_ref().unwrap();
+    let TableArchetype::Xy(xy_b) = &tr_b.archetype else {
+        panic!("expected XY");
+    };
+    assert_approx_eq(xy_b.data_sets[0].cells[0][0].active_number().unwrap(), 10.0, 1e-12, 0.0, "explicit info-b Scale=100");
+
+    let tr_a = doc.result_sheet(&SheetId::new("tr-a")).unwrap().analyzable_data.as_ref().unwrap();
+    let TableArchetype::Xy(xy_a) = &tr_a.archetype else {
+        panic!("expected XY");
+    };
+    assert_approx_eq(xy_a.data_sets[0].cells[0][0].active_number().unwrap(), 100.0, 1e-12, 0.0, "primary info-a Scale=10");
+
+    // Stale Dirty upstream ResultSheet scalar hook must be rejected by TransformContext::resolve_hook.
+    let upstream_spec =
+        AnalysisSpec::new("up", "d", AnalysisKind::Transform(TransformAnalysisSpec::Transpose { swap_row_and_column_titles: false })).unwrap();
+    let mut dirty_res = ResultSheet::new(upstream_spec).unwrap();
+    dirty_res.status = ResultStatus::Dirty;
+    dirty_res.scalars.push(ResultScalarEntry { key: String::from("Peak"), value: 42.0, units: None, data_set_index: None });
+    let ctx = TransformContext { result_sheets: std::slice::from_ref(&dirty_res), ..TransformContext::default() };
+    let dirty_hook_spec = TransformAnalysisSpec::Normalize {
+        zero_anchor: NormalizeAnchor::FixedValue(0.0),
+        hundred_anchor: NormalizeAnchor::Hooked(HookSource::ResultScalar {
+            result_sheet_id: SheetId::new("up"),
+            parameter_key: String::from("Peak"),
+            data_set_index: None,
+        }),
+        output_percent: true,
+        per_data_set: true,
+    };
+    let err = curvebook_transform::execute_transform(&ds, &dirty_hook_spec, &ctx).unwrap_err();
+    assert!(
+        matches!(err, curvebook_transform::TransformError::MissingHook { .. }) && err.to_string().contains("dirty"),
+        "Dirty ResultScalar must reject: {err:?}"
+    );
 }
