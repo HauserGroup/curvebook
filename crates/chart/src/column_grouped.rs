@@ -6,12 +6,14 @@ use std::collections::BTreeMap;
 use curvebook_doc::{
     AnalysisKind, AxisSpec, BracketLabelMode, BracketStyle, CartesianOrientation, CategoricalTickSource, ColumnTable, ErrorBarDirection,
     ErrorBarMetric, ErrorBarSpec, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, GroupedTable, NestedTable, PairwiseBracketSpec,
-    PairwiseComparisonRecord, PairwiseDisplayMode, ProjectDocument, ReplicateOverlayStyle, ResultStatus, SheetId, SummaryMeasure, TableArchetype,
-    TickLabelFormat, WhiskerMethod,
+    PairwiseComparisonRecord, PairwiseDisplayMode, ProjectDocument, ReplicateOverlayStyle, ResultStatus, SheetId, SubcolumnMode, SummaryMeasure,
+    TableArchetype, TickLabelFormat, WhiskerMethod,
 };
+use curvebook_math::ConfidenceLevel;
 use curvebook_math::sum::SummaryMoments;
 use curvebook_palette::{LineDashStyle, MarkerShape, MarkerStyle, Rgba8};
 use curvebook_stats::cld::{CldOptions, compute_cld_from_result_sheet};
+use curvebook_stats::column::summarize_pre_summarized_points;
 use curvebook_stats::common::{quantile_sorted, quartiles_hinge, sorted_finite};
 use curvebook_text::{LocaleNumberPolicy, RichText, format_pvalue_label, measure_text_pt, parse_markup};
 
@@ -43,6 +45,7 @@ enum ExtractedKind {
 struct CategorySlotItem {
     group_key: usize,
     col_index: usize,
+    override_series_index: Option<usize>,
     row_index: Option<usize>,
     match_label: String,
     alt_label: String,
@@ -450,6 +453,7 @@ fn render_horizontal_bar_item(
         };
         let ctx = HorizontalDotCtx {
             spec: graph_spec,
+            override_series_index: item.override_series_index,
             cy,
             max_half_h: slot_h_pt * 0.40,
             x_axis,
@@ -488,6 +492,7 @@ fn render_horizontal_dot_item(
     };
     let ctx = HorizontalDotCtx {
         spec: graph_spec,
+        override_series_index: item.override_series_index,
         cy,
         max_half_h: slot_h_pt * 0.42,
         x_axis,
@@ -535,6 +540,7 @@ fn render_horizontal_dot_item(
 
 struct HorizontalDotCtx<'a> {
     spec: &'a GraphSpec,
+    override_series_index: Option<usize>,
     cy: f64,
     max_half_h: f64,
     x_axis: &'a SegmentedAxis,
@@ -549,9 +555,13 @@ fn emit_horizontal_replicate_dots(scene: &mut ChartScene, obs: &[RawObs], ctx: &
     let mut pts_x: Vec<f64> = Vec::with_capacity(obs.len());
     let mut max_dot_r = (ctx.marker.size_pt * 0.5).max(1.2);
     for o in obs {
-        let Some(resolved) = crate::resolve_overridden_marker_for_cell(ctx.spec, o.source.col, o.source.row, Some(o.source.subcol), *ctx.marker)
-        else {
-            continue;
+        let resolved = if let Some(series_index) = ctx.override_series_index {
+            let Some(m) = crate::resolve_overridden_marker_for_cell(ctx.spec, series_index, o.source.row, Some(o.source.subcol), *ctx.marker) else {
+                continue;
+            };
+            m
+        } else {
+            *ctx.marker
         };
         if let Some((_, px)) = ctx.x_axis.map_value(o.value) {
             max_dot_r = max_dot_r.max(resolved.size_pt * 0.5);
@@ -785,7 +795,7 @@ fn extract_column_items(
         let payload = if table.subcolumn_mode.is_pre_summarized() {
             let mut scratch = None;
             let eff_err = effective_presum_err_spec(&gdo, &y_error_bars, &mut scratch);
-            extract_column_presummarized(sheet_id, c, table.subcolumn_mode, &ds.cells, eff_err, warnings)
+            extract_column_presummarized(sheet_id, c, table, eff_err, warnings)
         } else {
             let mut obs = Vec::new();
             for (row, subcells) in ds.cells.iter().enumerate() {
@@ -801,6 +811,7 @@ fn extract_column_items(
         items.push(CategorySlotItem {
             group_key: c,
             col_index: c,
+            override_series_index: crate::override_series_index_for_col(&graph.spec, &graph.spec.primary_source_sheet_id, c),
             row_index: None,
             match_label: ds.title.clone(),
             alt_label: label,
@@ -820,12 +831,81 @@ fn extract_column_items(
 fn extract_column_presummarized(
     sheet_id: &SheetId,
     col: usize,
-    mode: curvebook_doc::SubcolumnMode,
-    rows: &[Vec<curvebook_doc::Cell>],
+    table: &ColumnTable,
     err_spec: Option<&ErrorBarSpec>,
     warnings: &mut Vec<ChartWarning>,
 ) -> ExtractedKind {
-    for (row, subcells) in rows.iter().enumerate() {
+    let Some(ds) = table.data_sets.get(col) else {
+        return ExtractedKind::Raw(Vec::new());
+    };
+    let mode = table.subcolumn_mode;
+    if mode.supports_parametric_moments() {
+        let mut points = Vec::new();
+        let mut first_row = None;
+        for row in 0..ds.cells.len() {
+            match table.summarized_point(row, col) {
+                Ok(Some(pt)) => {
+                    first_row.get_or_insert(row);
+                    points.push(pt);
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    warnings.push(ChartWarning::new("invalid_pre_summarized_point", err.to_string()));
+                }
+            }
+        }
+        let (Some(row0), Ok(pooled)) = (first_row, summarize_pre_summarized_points(&ds.title, &points, ConfidenceLevel::DEFAULT_95)) else {
+            return ExtractedKind::Raw(Vec::new());
+        };
+        if !pooled.mean.is_finite() {
+            return ExtractedKind::Raw(Vec::new());
+        }
+        let center = pooled.mean;
+        let (lower, upper) = if let Some(eb) = err_spec {
+            match eb.metric {
+                ErrorBarMetric::Sd => {
+                    let sd = pooled.sd.unwrap_or_else(|| if points.len() == 1 { points[0].sd } else { 0.0 });
+                    (center - sd, center + sd)
+                }
+                ErrorBarMetric::Sem => {
+                    let sem = pooled.sem.unwrap_or_else(|| if points.len() == 1 { points[0].sd / points[0].n.sqrt() } else { 0.0 });
+                    (center - sem, center + sem)
+                }
+                ErrorBarMetric::ConfidenceInterval95 => {
+                    if let Some((lo, hi)) = pooled.mean_ci {
+                        (lo, hi)
+                    } else {
+                        warnings.push(ChartWarning::new(
+                            "insufficient_sample_size_for_ci",
+                            format!("95% CI requires N >= 2 (got N = {}); error bar omitted", pooled.total_n),
+                        ));
+                        (center, center)
+                    }
+                }
+                ErrorBarMetric::ExplicitSubcolumns | ErrorBarMetric::InterquartileRange | ErrorBarMetric::Range => {
+                    if points.len() == 1
+                        && let Some(b) = ds.cells.get(row0).and_then(|subs| mode.explicit_bounds(subs))
+                    {
+                        (b.lower, b.upper)
+                    } else {
+                        let spread = match mode {
+                            SubcolumnMode::MeanSemN => pooled.sem.or(pooled.sd).unwrap_or(0.0),
+                            _ => pooled.sd.unwrap_or(0.0),
+                        };
+                        (center - spread, center + spread)
+                    }
+                }
+            }
+        } else {
+            (center, center)
+        };
+        if !lower.is_finite() || !upper.is_finite() {
+            return ExtractedKind::Raw(Vec::new());
+        }
+        return ExtractedKind::PreSummarized { center, lower, upper, source: SourceCellId { sheet_id: sheet_id.clone(), row: row0, col, subcol: 0 } };
+    }
+
+    for (row, subcells) in ds.cells.iter().enumerate() {
         if let Some((center, lower, upper)) = summarize_subcells(mode, subcells, SummaryMeasure::Mean, err_spec, warnings) {
             return ExtractedKind::PreSummarized { center, lower, upper, source: SourceCellId { sheet_id: sheet_id.clone(), row, col, subcol: 0 } };
         }
@@ -882,6 +962,7 @@ fn extract_nested_items(
         items.push(CategorySlotItem {
             group_key: g_idx,
             col_index: g_idx,
+            override_series_index: crate::override_series_index_for_col(&graph.spec, &graph.spec.primary_source_sheet_id, g_idx),
             row_index: None,
             match_label: group.title.clone(),
             alt_label: label,
@@ -1068,6 +1149,7 @@ fn push_grouped_cell(
     out.push(CategorySlotItem {
         group_key: idx,
         col_index: c,
+        override_series_index: crate::override_series_index_for_col(&graph.spec, &graph.spec.primary_source_sheet_id, c),
         row_index: Some(r),
         match_label: format!("{col_title}:{row_label}"),
         alt_label: col_title,
@@ -1280,8 +1362,13 @@ fn render_before_after_connectors_oriented(
             let Some(m) = item_marker else {
                 continue;
             };
-            let Some(resolved) = crate::resolve_overridden_marker_for_cell(graph_spec, data_col, row, Some(subcol), m) else {
-                continue;
+            let resolved = if let Some(series_index) = item.override_series_index {
+                let Some(m) = crate::resolve_overridden_marker_for_cell(graph_spec, series_index, row, Some(subcol), m) else {
+                    continue;
+                };
+                m
+            } else {
+                m
             };
             emit_marker(&mut scene.primitives, p, &resolved, Some(clip));
             scene.plotted_points.push(PlottedPointMeta {
@@ -1576,6 +1663,7 @@ fn render_bar_item(
         };
         let ctx = ReplicateDotCtx {
             spec: graph_spec,
+            override_series_index: item.override_series_index,
             cx,
             max_half_w: slot_w_pt * 0.40,
             y_axis,
@@ -1614,6 +1702,7 @@ fn render_aligned_dot_item(
     };
     let dot_ctx = ReplicateDotCtx {
         spec: graph_spec,
+        override_series_index: item.override_series_index,
         cx,
         max_half_w: slot_w_pt * 0.42,
         y_axis,
@@ -1696,6 +1785,7 @@ fn oriented_span_rect(cx: f64, is_horizontal: bool, half_cat_w: f64, v0_pt: f64,
 
 struct OrientedDotCfg<'a> {
     spec: &'a GraphSpec,
+    override_series_index: Option<usize>,
     cx: f64,
     max_half_w: f64,
     val_axis: &'a SegmentedAxis,
@@ -1708,6 +1798,7 @@ fn emit_oriented_dots(scene: &mut ChartScene, obs: &[RawObs], cfg: &OrientedDotC
     if cfg.is_horizontal {
         let ctx = HorizontalDotCtx {
             spec: cfg.spec,
+            override_series_index: cfg.override_series_index,
             cy: cfg.cx,
             max_half_h: cfg.max_half_w,
             x_axis: cfg.val_axis,
@@ -1719,6 +1810,7 @@ fn emit_oriented_dots(scene: &mut ChartScene, obs: &[RawObs], cfg: &OrientedDotC
     } else {
         let dot_ctx = ReplicateDotCtx {
             spec: cfg.spec,
+            override_series_index: cfg.override_series_index,
             cx: cfg.cx,
             max_half_w: cfg.max_half_w,
             y_axis: cfg.val_axis,
@@ -1828,6 +1920,7 @@ fn render_box_whisker_item_oriented(
     if show_all_points {
         let cfg = OrientedDotCfg {
             spec: graph_spec,
+            override_series_index: item.override_series_index,
             cx,
             max_half_w: box_w * 0.42,
             val_axis,
@@ -1841,10 +1934,14 @@ fn render_box_whisker_item_oriented(
     } else if show_outliers {
         for idx in outlier_indices {
             let obs = &sorted_obs[idx];
-            let Some(resolved) =
-                crate::resolve_overridden_marker_for_cell(graph_spec, obs.source.col, obs.source.row, Some(obs.source.subcol), dot_style)
-            else {
-                continue;
+            let resolved = if let Some(series_index) = item.override_series_index {
+                let Some(m) = crate::resolve_overridden_marker_for_cell(graph_spec, series_index, obs.source.row, Some(obs.source.subcol), dot_style)
+                else {
+                    continue;
+                };
+                m
+            } else {
+                dot_style
             };
             if let Some((_, p_val)) = val_axis.map_value(obs.value) {
                 let dot_pt = oriented_pt(cx, is_horizontal, 0.0, p_val);
@@ -1989,6 +2086,7 @@ fn render_violin_item_oriented(
         let half_center = cx - 0.52 * half_max_w;
         let cfg = OrientedDotCfg {
             spec: graph_spec,
+            override_series_index: item.override_series_index,
             cx: half_center,
             max_half_w: 0.40 * half_max_w,
             val_axis,
@@ -2132,6 +2230,7 @@ fn render_floating_bar_item_oriented(
 
 struct ReplicateDotCtx<'a> {
     spec: &'a GraphSpec,
+    override_series_index: Option<usize>,
     cx: f64,
     max_half_w: f64,
     y_axis: &'a SegmentedAxis,
@@ -2170,9 +2269,13 @@ fn emit_replicate_dots(scene: &mut ChartScene, obs: &[RawObs], ctx: &ReplicateDo
     let mut pts_y: Vec<f64> = Vec::with_capacity(obs.len());
     let mut max_dot_r = (ctx.marker.size_pt * 0.5).max(1.2);
     for o in obs {
-        let Some(resolved) = crate::resolve_overridden_marker_for_cell(ctx.spec, o.source.col, o.source.row, Some(o.source.subcol), *ctx.marker)
-        else {
-            continue;
+        let resolved = if let Some(series_index) = ctx.override_series_index {
+            let Some(m) = crate::resolve_overridden_marker_for_cell(ctx.spec, series_index, o.source.row, Some(o.source.subcol), *ctx.marker) else {
+                continue;
+            };
+            m
+        } else {
+            *ctx.marker
         };
         if let Some((_, py)) = ctx.y_axis.map_value(o.value) {
             max_dot_r = max_dot_r.max(resolved.size_pt * 0.5);

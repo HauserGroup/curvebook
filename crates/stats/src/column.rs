@@ -1843,7 +1843,7 @@ fn append_xy_trapezoidal_auc(res: &mut ResultSheet, sheet: &DataSheet, selected:
         let ds = &xy.data_sets[ds_idx];
         let mut raw_pts: Vec<(f64, f64, f64)> = Vec::new();
         for r in 0..xy.row_count() {
-            let Some(x_raw) = xy.x_value_at(r) else { continue };
+            let Some(x_raw) = xy.x_summary_at(r)? else { continue };
             if !x_raw.is_finite() {
                 continue;
             }

@@ -1755,16 +1755,25 @@ fn reconcile_point_overrides_on_series_change(doc: &ProjectDocument, old_series:
     }
     let retained_series = spec.series.clone();
     let spec_snapshot = spec.clone();
-    spec.point_overrides.retain(|ov| {
-        let Some(prev) = old_series.iter().find(|s| s.data_set_index == ov.series_index) else {
-            return false;
+    if old_series.is_empty() {
+        spec.point_overrides.retain(|ov| validate_point_override_in_bounds(doc, &spec_snapshot, ov.series_index, ov.point_index, ov.subcol).is_ok());
+        return;
+    }
+    let mut remapped = Vec::with_capacity(spec.point_overrides.len());
+    for mut ov in std::mem::take(&mut spec.point_overrides) {
+        let Some(prev) = old_series.get(ov.series_index) else {
+            continue;
         };
-        let still_present = retained_series.iter().any(|s| s.source_sheet_id == prev.source_sheet_id && s.data_set_index == prev.data_set_index);
-        if !still_present {
-            return false;
+        let Some(new_idx) = retained_series.iter().position(|s| s.source_sheet_id == prev.source_sheet_id && s.data_set_index == prev.data_set_index)
+        else {
+            continue;
+        };
+        ov.series_index = new_idx;
+        if validate_point_override_in_bounds(doc, &spec_snapshot, ov.series_index, ov.point_index, ov.subcol).is_ok() {
+            remapped.push(ov);
         }
-        validate_point_override_in_bounds(doc, &spec_snapshot, ov.series_index, ov.point_index, ov.subcol).is_ok()
-    });
+    }
+    spec.point_overrides = remapped;
 }
 
 fn run_graph_set_series(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {

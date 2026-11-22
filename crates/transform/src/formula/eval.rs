@@ -110,6 +110,10 @@ pub trait FormulaContext {
     fn resolve_x_column(&self) -> Option<Vec<FormulaValue>> {
         None
     }
+    /// Extract the independent *X* or elapsed-time vector, propagating summary reconstruction errors.
+    fn resolve_x_column_checked(&self) -> Result<Option<Vec<FormulaValue>>, TransformError> {
+        Ok(self.resolve_x_column())
+    }
     /// Look up a named constant from the paired [`InfoSheet`], if available.
     fn resolve_info_constant(&self, name: &str) -> Option<FormulaValue>;
     /// Look up a scalar variable binding (such as `"x"`, `"y"`, or parameter names in scalar expressions).
@@ -223,6 +227,10 @@ impl FormulaContext for TableEvalContext<'_> {
 
     fn resolve_x_column(&self) -> Option<Vec<FormulaValue>> {
         archetype_x_values(&self.sheet.archetype)
+    }
+
+    fn resolve_x_column_checked(&self) -> Result<Option<Vec<FormulaValue>>, TransformError> {
+        archetype_x_values_checked(&self.sheet.archetype)
     }
 
     fn resolve_info_constant(&self, name: &str) -> Option<FormulaValue> {
@@ -480,9 +488,26 @@ fn archetype_column_values(arch: &TableArchetype, col_idx: usize) -> Option<Vec<
 
 fn archetype_x_values(arch: &TableArchetype) -> Option<Vec<FormulaValue>> {
     match arch {
-        TableArchetype::Xy(t) => Some((0..t.row_count()).map(|r| t.x_value_at(r).map_or(FormulaValue::Missing, FormulaValue::from_f64)).collect()),
+        TableArchetype::Xy(t) => {
+            Some((0..t.row_count()).map(|r| t.x_summary_at(r).ok().flatten().map_or(FormulaValue::Missing, FormulaValue::from_f64)).collect())
+        }
         TableArchetype::Survival(t) => Some(t.times.iter().map(FormulaValue::from_cell).collect()),
         _ => None,
+    }
+}
+
+fn archetype_x_values_checked(arch: &TableArchetype) -> Result<Option<Vec<FormulaValue>>, TransformError> {
+    match arch {
+        TableArchetype::Xy(t) => {
+            let mut out = Vec::with_capacity(t.row_count());
+            for r in 0..t.row_count() {
+                let v = t.x_summary_at(r)?;
+                out.push(v.map_or(FormulaValue::Missing, FormulaValue::from_f64));
+            }
+            Ok(Some(out))
+        }
+        TableArchetype::Survival(t) => Ok(Some(t.times.iter().map(FormulaValue::from_cell).collect())),
+        _ => Ok(None),
     }
 }
 
@@ -587,7 +612,7 @@ fn eval_var_ref(vref: &VarRef, ctx: &dyn FormulaContext) -> Result<Vec<FormulaVa
         }
         VarRef::ColumnByName(name) => {
             if name.trim().eq_ignore_ascii_case("x")
-                && let Some(xs) = ctx.resolve_x_column()
+                && let Some(xs) = ctx.resolve_x_column_checked()?
             {
                 return Ok(normalize_col_len(xs, n));
             }
@@ -608,7 +633,7 @@ fn eval_var_ref(vref: &VarRef, ctx: &dyn FormulaContext) -> Result<Vec<FormulaVa
                 return Ok(normalize_col_len(vals, n));
             }
             if name.trim().eq_ignore_ascii_case("x")
-                && let Some(xs) = ctx.resolve_x_column()
+                && let Some(xs) = ctx.resolve_x_column_checked()?
             {
                 return Ok(normalize_col_len(xs, n));
             }
@@ -648,7 +673,7 @@ fn resolve_ident_var(name: &str, ctx: &dyn FormulaContext) -> Result<Vec<Formula
         return Err(TransformError::UnknownVariable { name: name.to_owned() });
     }
     if trimmed.eq_ignore_ascii_case("x")
-        && let Some(xs) = ctx.resolve_x_column()
+        && let Some(xs) = ctx.resolve_x_column_checked()?
     {
         return Ok(normalize_col_len(xs, n));
     }

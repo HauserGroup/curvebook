@@ -30,8 +30,9 @@ use super::{
 use crate::cmd::Ctx;
 use crate::cmd::helpers::{
     column_subcolumn_count, decode_base64, ensure_sheet_not_frozen, locate_target_and_info_indices, next_unique_sheet_id,
-    next_unique_sheet_id_excluding, parse_sheet_id, remap_analysis_hooks, remap_data_sheet_links, remap_graph_spec_references,
-    remap_layout_spec_references, remap_sheet_id, require_data_sheet, select_result_tab, sync_info_linked_data_sheets,
+    next_unique_sheet_id_excluding, parse_sheet_id, prune_shortened_series_overrides, remap_analysis_hooks, remap_data_sheet_links,
+    remap_graph_spec_references, remap_layout_spec_references, remap_sheet_id, require_data_sheet, select_result_tab,
+    shift_point_overrides_on_insert_rows, snapshot_active_series_lengths, sync_info_linked_data_sheets,
 };
 use crate::cmd::params::{
     any_json_schema, array_schema, bool_schema, deserialize_strict, int_schema, non_empty_str_schema, nullable_schema, num_schema,
@@ -50,7 +51,7 @@ fn check_inline_payload_len(len: usize, max_bytes: usize, label: &str) -> Result
 }
 
 pub(super) enum OwnedSourcePayload {
-    Data(Box<DataSheet>),
+    Data { sheet: Box<DataSheet>, propagate_titles: bool },
     Result(Box<ResultSheet>),
     Delimited { text: String, delimiter: char, decimal_separator: char },
 }
@@ -62,12 +63,13 @@ pub(super) fn resolve_initial_link_source_payload(
 ) -> Result<Option<OwnedSourcePayload>, EngineError> {
     match source {
         LinkSource::Clipboard => Ok(None),
-        LinkSource::InternalSheet { sheet_id, kind, .. } => match kind {
-            InternalLinkKind::DataSheet => Ok(doc.data_sheet(sheet_id).cloned().map(Box::new).map(OwnedSourcePayload::Data)),
-            InternalLinkKind::AnalyzableResultSheet | InternalLinkKind::TerminalResultSheet => {
-                Ok(doc.result_sheet(sheet_id).cloned().map(Box::new).map(OwnedSourcePayload::Result))
-            }
-        },
+        LinkSource::InternalSheet { sheet_id, kind, tab_id, .. } => Ok(dag::resolve_internal_link_source(doc, sheet_id, *kind, tab_id.as_deref())
+            .map(|resolved| match resolved {
+                dag::ResolvedInternalLinkSource::Data { sheet, propagate_titles } => {
+                    OwnedSourcePayload::Data { sheet: Box::new(sheet.clone()), propagate_titles }
+                }
+                dag::ResolvedInternalLinkSource::Result(rs) => OwnedSourcePayload::Result(Box::new(rs.clone())),
+            })),
         LinkSource::ExternalDelimitedFile { path, delimiter, decimal_separator } => {
             let text = policy.read_utf8_file(path, "linked file", MAX_CSV_FILE_BYTES)?;
             Ok(Some(OwnedSourcePayload::Delimited { text, delimiter: *delimiter, decimal_separator: *decimal_separator }))
@@ -83,7 +85,9 @@ pub(super) fn run_import_pipeline(
     info_sheet: Option<&mut InfoSheet>,
 ) -> Result<ImportPipelineReport, EngineError> {
     let report = match payload {
-        OwnedSourcePayload::Data(src) => apply_import_link_pipeline(target_ds, spec, ImportSourcePayload::InternalData(src), opts, info_sheet)?,
+        OwnedSourcePayload::Data { sheet: src, .. } => {
+            apply_import_link_pipeline(target_ds, spec, ImportSourcePayload::InternalData(src), opts, info_sheet)?
+        }
         OwnedSourcePayload::Result(src) => apply_import_link_pipeline(target_ds, spec, ImportSourcePayload::InternalResult(src), opts, info_sheet)?,
         OwnedSourcePayload::Delimited { text, delimiter, decimal_separator } => {
             let src = ImportSourcePayload::DelimitedText { text, delimiter: *delimiter, decimal_separator: *decimal_separator };
@@ -107,7 +111,7 @@ pub(super) fn apply_pipeline_with_split_info(
         data_sheets.get_mut(target_idx).ok_or_else(|| EngineError::with_code(ErrorCode::InternalError, "target data sheet index out of bounds"))?;
     let target_info = info_idx.and_then(|idx| info_sheets.get_mut(idx));
     let report = run_import_pipeline(target_ds, spec, payload, opts, target_info)?;
-    if let OwnedSourcePayload::Data(src) = payload {
+    if let OwnedSourcePayload::Data { sheet: src, propagate_titles: true } = payload {
         dag::propagate_internal_source_titles(target_ds, spec, report.target_range.start.col, src);
     }
     Ok(report)
@@ -234,18 +238,21 @@ pub(super) fn default_full_source_range(
     kind: InternalLinkKind,
     tab_id: Option<&str>,
 ) -> Result<SheetCellRange, EngineError> {
-    match kind {
-        InternalLinkKind::DataSheet => {
-            let ds = require_data_sheet(doc, src_id)?;
+    let resolved = dag::resolve_internal_link_source(doc, src_id, kind, tab_id).ok_or_else(|| {
+        let label = match kind {
+            InternalLinkKind::DataSheet => "source data sheet",
+            InternalLinkKind::AnalyzableResultSheet | InternalLinkKind::TerminalResultSheet => "source result sheet",
+        };
+        EngineError::with_code(ErrorCode::NotFound, format!("{label} `{src_id}` not found"))
+    })?;
+    match resolved {
+        dag::ResolvedInternalLinkSource::Data { sheet: ds, .. } => {
             let max_r = ds.archetype.row_count().saturating_sub(1);
             let max_c = ds.archetype.column_count().saturating_sub(1);
             let max_s = (0..ds.archetype.column_count()).map(|c| column_subcolumn_count(&ds.archetype, c)).max().unwrap_or(1).saturating_sub(1);
             Ok(SheetCellRange::new(CellCoord::new(0, 0, 0), CellCoord::new(max_r, max_c, max_s)))
         }
-        InternalLinkKind::AnalyzableResultSheet | InternalLinkKind::TerminalResultSheet => {
-            let res = doc
-                .result_sheet(src_id)
-                .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("source result sheet `{src_id}` not found")))?;
+        dag::ResolvedInternalLinkSource::Result(res) => {
             let tab = select_result_tab(res, tab_id)?;
             let max_r = tab.rows.len().saturating_sub(1);
             let max_c = tab.column_headers.len().max(tab.rows.first().map_or(0, Vec::len)).saturating_sub(1);
@@ -333,11 +340,12 @@ pub(super) fn run_paste_link(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOut
     let policy = ctx.session.path_policy.clone();
     let doc = &mut ctx.session.doc;
 
-    let info_id = {
+    let (info_id, existing_rows_before) = {
         let target_ds = require_data_sheet(doc, &target_id)?;
         ensure_sheet_not_frozen(target_ds)?;
-        target_ds.info_sheet_id.clone()
+        (target_ds.info_sheet_id.clone(), target_ds.archetype.row_count())
     };
+    let before_active = snapshot_active_series_lengths(doc, &target_id);
 
     let spec = build_paste_link_spec(doc, &target_id, &p, &policy)?;
     let payload = resolve_initial_link_source_payload(doc, &spec.source, &policy)?
@@ -393,11 +401,6 @@ pub(super) fn run_paste_link(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOut
                 ensure_range_outside_linked_regions(old_ds, shift_span, "insert linked rows into")?;
             }
         }
-        if let OwnedSourcePayload::Result(src_rs) = &payload
-            && let Some(target_ds) = doc.data_sheets.get_mut(target_idx)
-        {
-            dag::backfill_confidence_interval_cells(target_ds, src_rs, &spec, rep.target_range);
-        }
         if let (Some(old_ds), Some(new_ds)) = (prev_ds.as_ref(), doc.data_sheets.get(target_idx)) {
             ensure_mv_edit_preserves_calculated(old_ds, new_ds, rep.cols_placed, rep.target_range)?;
         }
@@ -419,6 +422,10 @@ pub(super) fn run_paste_link(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOut
         }
     };
 
+    if spec.placement.mode == PlacementMode::InsertRows && spec.placement.anchor.row < existing_rows_before && report.rows_placed > 0 {
+        shift_point_overrides_on_insert_rows(doc, &target_id, spec.placement.anchor.row, report.rows_placed);
+    }
+
     let mut dirty_seeds = vec![target_id.clone()];
     if info_idx.is_some()
         && let Some(ref iid) = info_id
@@ -426,6 +433,7 @@ pub(super) fn run_paste_link(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOut
         dirty_seeds.push(iid.clone());
     }
     let recalc = recalculate_dirty_with_links(doc, &dirty_seeds, false)?;
+    prune_shortened_series_overrides(doc, &target_id, &before_active);
     Ok(CommandOutcome::mutated(
         "table.pasteLink",
         "created live linked region",
@@ -544,10 +552,10 @@ pub(super) fn import_into_existing_sheet(
 ) -> Result<Option<SheetId>, EngineError> {
     let delimiter = csv_opts.delimiter;
     let decimal_separator = csv_opts.decimal_separator;
-    let (info_id, cur_title, cur_kind) = {
+    let (info_id, cur_title, cur_kind, existing_rows_before) = {
         let ds = require_data_sheet(doc, id)?;
         ensure_sheet_not_frozen(ds)?;
-        (ds.info_sheet_id.clone(), ds.title.clone(), ds.archetype.kind())
+        (ds.info_sheet_id.clone(), ds.title.clone(), ds.archetype.kind(), ds.archetype.row_count())
     };
     if p.replace.unwrap_or(false) {
         let title = p.title.as_deref().unwrap_or(&cur_title).to_owned();
@@ -632,6 +640,9 @@ pub(super) fn import_into_existing_sheet(
     if !keep_link && let Some(target_ds) = doc.data_sheets.get_mut(target_idx) {
         target_ds.linked_regions.truncate(link_before);
     }
+    if link_spec.placement.mode == PlacementMode::InsertRows && link_spec.placement.anchor.row < existing_rows_before && report.rows_placed > 0 {
+        shift_point_overrides_on_insert_rows(doc, id, link_spec.placement.anchor.row, report.rows_placed);
+    }
     Ok(info_idx.and(info_id))
 }
 
@@ -668,18 +679,24 @@ pub(super) fn run_import_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOut
     let subcolumn_mode = resolve_subcolumn_mode(p.subcolumn_mode.as_ref(), p.replicates.unwrap_or(1))?;
 
     let mut dirty_seeds = vec![id.clone()];
-    if doc.data_sheet(&id).is_some() {
+    let before_active = if doc.data_sheet(&id).is_some() {
+        let before = snapshot_active_series_lengths(doc, &id);
         if let Some(updated_info) = import_into_existing_sheet(doc, &id, &p, text, &csv_opts, subcolumn_mode, &policy)? {
             dirty_seeds.push(updated_info);
         }
+        Some(before)
     } else {
         let title = p.title.as_deref().unwrap_or("Imported CSV");
         let kind = parse_table_kind(p.archetype.as_deref().unwrap_or("xy"))?;
         let imported = import_csv_to_datasheet(id.clone(), title, &text, kind, subcolumn_mode, &csv_opts)?;
         doc.add_data_sheet(imported)?;
-    }
+        None
+    };
 
     let recalc = recalculate_dirty_with_links(doc, &dirty_seeds, false)?;
+    if let Some(before) = before_active.as_deref() {
+        prune_shortened_series_overrides(doc, &id, before);
+    }
     let message = match recalc.failure_note() {
         Some(note) => format!("imported CSV into data sheet{note}"),
         None => String::from("imported CSV into data sheet"),

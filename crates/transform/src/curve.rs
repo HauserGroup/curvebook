@@ -142,7 +142,7 @@ pub fn compute_sheet_auc(sheet: &DataSheet, data_set: usize, opts: &AucOptions) 
     } else if xy.y_subcolumn_mode.is_pre_summarized() {
         let mut central = Vec::new();
         for row in 0..xy.row_count() {
-            let Some(x_raw) = xy.x_value_at(row).filter(|v| v.is_finite()) else {
+            let Some(x_raw) = xy.x_summary_at(row)?.filter(|v| v.is_finite()) else {
                 continue;
             };
             let Some(subcells) = ds.cells.get(row) else {
@@ -163,7 +163,7 @@ pub fn compute_sheet_auc(sheet: &DataSheet, data_set: usize, opts: &AucOptions) 
 fn collect_parametric_auc_points(xy: &XyTable, data_set: usize) -> Result<Vec<(f64, f64, Option<f64>)>, TransformError> {
     let mut rows: Vec<(f64, SummarizedPoint)> = Vec::new();
     for row in 0..xy.row_count() {
-        let Some(x_raw) = xy.x_value_at(row).filter(|v| v.is_finite()) else {
+        let Some(x_raw) = xy.x_summary_at(row)?.filter(|v| v.is_finite()) else {
             continue;
         };
         if let Some(pt) = xy.summarized_y_point(row, data_set)?
@@ -215,7 +215,7 @@ fn collect_parametric_auc_points(xy: &XyTable, data_set: usize) -> Result<Vec<(f
 fn collect_replicate_auc_points(xy: &XyTable, ds: &curvebook_doc::DataSetColumn) -> Result<Vec<(f64, f64, Option<f64>)>, TransformError> {
     let mut obs: Vec<(f64, f64)> = Vec::new();
     for row in 0..xy.row_count() {
-        let Some(x_raw) = xy.x_value_at(row).filter(|v| v.is_finite()) else {
+        let Some(x_raw) = xy.x_summary_at(row)?.filter(|v| v.is_finite()) else {
             continue;
         };
         let Some(subcells) = ds.cells.get(row) else {
@@ -794,7 +794,7 @@ pub enum CurveSheetOp {
 }
 
 fn transform_dataset_curve(xy: &XyTable, ds_idx: usize, op: CurveSheetOp) -> Result<Vec<(usize, f64, f64)>, TransformError> {
-    let entries = extract_xy_mean_entries(xy, ds_idx);
+    let entries = extract_xy_mean_entries(xy, ds_idx)?;
     let pairs: Vec<(f64, f64)> = entries.iter().map(|&(_, x, y)| (x, y)).collect();
     let transformed = match op {
         CurveSheetOp::Smooth(m) => smooth_xy(&pairs, m)?,
@@ -821,13 +821,13 @@ fn build_aligned_x_grid(curves: &[Vec<(usize, f64, f64)>]) -> (Vec<(usize, f64)>
     (all_rows, row_map)
 }
 
-fn extract_xy_mean_entries(xy: &XyTable, ds_idx: usize) -> Vec<(usize, f64, f64)> {
+fn extract_xy_mean_entries(xy: &XyTable, ds_idx: usize) -> Result<Vec<(usize, f64, f64)>, TransformError> {
     let Some(ds) = xy.data_sets.get(ds_idx) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let mut entries = Vec::new();
     for (row, subcells) in ds.cells.iter().enumerate() {
-        let Some(x) = xy.x_value_at(row) else {
+        let Some(x) = xy.x_summary_at(row)? else {
             continue;
         };
         if xy.y_subcolumn_mode.is_pre_summarized() {
@@ -845,5 +845,5 @@ fn extract_xy_mean_entries(xy: &XyTable, ds_idx: usize) -> Vec<(usize, f64, f64)
     }
     // Match `prepare_sorted_points` ordering so `transformed` aligns 1:1 with `entries`.
     entries.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-    entries
+    Ok(entries)
 }

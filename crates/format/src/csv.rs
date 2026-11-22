@@ -517,10 +517,15 @@ fn export_xy_rows(t: &XyTable, opts: &CsvOptions) -> Vec<Vec<CsvExportField>> {
     if include_row_titles {
         header.push(CsvExportField::header("Row Title"));
     }
-    let x_subs = t.x_mode.subcolumn_count();
-    for s in 0..x_subs {
-        let raw = if s == 0 { t.x_title.clone() } else { format!("{}:{}", t.x_title, s + 1) };
-        header.push(CsvExportField::header(&raw));
+    let is_gen_seq = matches!(t.x_mode, XColumnMode::GeneratedSequence { .. });
+    if is_gen_seq {
+        header.push(CsvExportField::header(&t.x_title));
+    } else {
+        let x_subs = t.x_mode.subcolumn_count();
+        for s in 0..x_subs {
+            let raw = if s == 0 { t.x_title.clone() } else { format!("{}:{}", t.x_title, s + 1) };
+            header.push(CsvExportField::header(&raw));
+        }
     }
     push_dataset_headers(&mut header, &t.data_sets, t.y_subcolumn_mode);
     let mut rows = vec![header];
@@ -529,11 +534,17 @@ fn export_xy_rows(t: &XyTable, opts: &CsvOptions) -> Vec<Vec<CsvExportField>> {
         if include_row_titles {
             row.push(CsvExportField::label(t.row_titles.get(r).map(String::as_str).unwrap_or("")));
         }
-        for s in 0..x_subs {
-            let field = t.x_cells.get(r).and_then(|subs| subs.get(s)).map(|c| CsvExportField::cell(c, opts)).unwrap_or_else(|| {
-                t.x_value_at(r).map_or_else(|| CsvExportField::unquoted(String::new()), |v| CsvExportField::cell(&Cell::number(v), opts))
-            });
-            row.push(field);
+        if is_gen_seq {
+            let cell = t.materialized_x_cell_at(r);
+            row.push(CsvExportField::cell(&cell, opts));
+        } else {
+            let x_subs = t.x_mode.subcolumn_count();
+            for s in 0..x_subs {
+                let field = t.x_cells.get(r).and_then(|subs| subs.get(s)).map(|c| CsvExportField::cell(c, opts)).unwrap_or_else(|| {
+                    t.x_value_at(r).map_or_else(|| CsvExportField::unquoted(String::new()), |v| CsvExportField::cell(&Cell::number(v), opts))
+                });
+                row.push(field);
+            }
         }
         push_dataset_row(&mut row, &t.data_sets, r, opts);
         rows.push(row);

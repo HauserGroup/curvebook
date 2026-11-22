@@ -804,10 +804,10 @@ fn point_override_bounds_parts(
     };
 
     if !spec.series.is_empty() {
-        let Some(series) = spec.series.iter().find(|s| s.data_set_index == series_index) else {
+        let Some(series) = spec.series.get(series_index) else {
             return Err(EngineError::with_code(
                 ErrorCode::BadInput,
-                format!("`series_index` {series_index} is out of bounds for this graph's plotted series"),
+                format!("`series_index` {series_index} is out of bounds for this graph's plotted series (series_count={})", spec.series.len()),
             ));
         };
         if let Some(ds) = find_backing_data_sheet(data_sheets, result_sheets, &series.source_sheet_id) {
@@ -889,7 +889,7 @@ pub(super) fn validate_point_override_in_bounds(
 }
 
 /// Remove any `PointStyleOverride` entries whose `(series_index, point_index, subcol)` is now out of bounds.
-pub(super) fn prune_out_of_bounds_point_overrides(doc: &mut ProjectDocument) {
+pub(crate) fn prune_out_of_bounds_point_overrides(doc: &mut ProjectDocument) {
     let ProjectDocument { data_sheets, result_sheets, graph_sheets, .. } = doc;
     for gs in graph_sheets {
         if gs.spec.point_overrides.is_empty() {
@@ -926,7 +926,7 @@ fn active_series_row_len(ds: &DataSheet, col: usize) -> usize {
 }
 
 /// Record the active non-empty trailing length of each dataset column in `ds` prior to a cell edit.
-pub(super) fn snapshot_active_series_lengths(doc: &ProjectDocument, sheet_id: &SheetId) -> Vec<usize> {
+pub(crate) fn snapshot_active_series_lengths(doc: &ProjectDocument, sheet_id: &SheetId) -> Vec<usize> {
     let Some(ds) = doc.data_sheet(sheet_id) else {
         return Vec::new();
     };
@@ -934,7 +934,7 @@ pub(super) fn snapshot_active_series_lengths(doc: &ProjectDocument, sheet_id: &S
 }
 
 /// Prune point overrides targeting trailing rows of `sheet_id` when an edit shortened active data.
-pub(super) fn prune_shortened_series_overrides(doc: &mut ProjectDocument, sheet_id: &SheetId, before_active: &[usize]) {
+pub(crate) fn prune_shortened_series_overrides(doc: &mut ProjectDocument, sheet_id: &SheetId, before_active: &[usize]) {
     let Some(ds) = doc.data_sheet(sheet_id) else {
         return;
     };
@@ -953,15 +953,49 @@ pub(super) fn prune_shortened_series_overrides(doc: &mut ProjectDocument, sheet_
         if gs.spec.point_overrides.is_empty() {
             continue;
         }
-        let series_sources: HashMap<usize, &SheetId> = gs.spec.series.iter().map(|s| (s.data_set_index, &s.source_sheet_id)).collect();
+        let series_list = gs.spec.series.clone();
         let primary_is_sheet = &gs.spec.primary_source_sheet_id == sheet_id;
         gs.spec.point_overrides.retain(|ov| {
-            let targets_sheet = series_sources.get(&ov.series_index).map_or(primary_is_sheet && gs.spec.series.is_empty(), |src| *src == sheet_id);
-            if !targets_sheet {
+            let data_col = if !series_list.is_empty() {
+                let Some(series) = series_list.get(ov.series_index) else {
+                    return true;
+                };
+                if series.source_sheet_id != *sheet_id {
+                    return true;
+                }
+                series.data_set_index
+            } else if primary_is_sheet {
+                ov.series_index
+            } else {
                 return true;
-            }
-            shortened_limits.get(&ov.series_index).is_none_or(|&limit| ov.point_index < limit)
+            };
+            shortened_limits.get(&data_col).is_none_or(|&limit| ov.point_index < limit)
         });
+    }
+}
+
+/// Shift `PointStyleOverride::point_index` downward on all graphs targeting `sheet_id`
+/// after `InsertRows` moves existing rows `start_row..` down by `inserted_rows`.
+pub(super) fn shift_point_overrides_on_insert_rows(doc: &mut ProjectDocument, sheet_id: &SheetId, start_row: usize, inserted_rows: usize) {
+    if inserted_rows == 0 {
+        return;
+    }
+    for gs in &mut doc.graph_sheets {
+        if gs.spec.point_overrides.is_empty() {
+            continue;
+        }
+        let series_list = gs.spec.series.clone();
+        let primary_is_sheet = &gs.spec.primary_source_sheet_id == sheet_id;
+        for ov in &mut gs.spec.point_overrides {
+            let targets_sheet = if !series_list.is_empty() {
+                series_list.get(ov.series_index).is_some_and(|s| s.source_sheet_id == *sheet_id)
+            } else {
+                primary_is_sheet
+            };
+            if targets_sheet && ov.point_index >= start_row {
+                ov.point_index = ov.point_index.saturating_add(inserted_rows);
+            }
+        }
     }
 }
 
