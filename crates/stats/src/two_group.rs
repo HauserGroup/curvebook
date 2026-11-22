@@ -71,7 +71,7 @@
 use curvebook_doc::{
     AnalysisSpec, BlandAltmanSpec, Cell, CellValue, ChecklistItem, ChecklistStatus, CurveSamplePoint, DataSheet, FittedCurveOverlay,
     MultipleRowTestsSpec, MultipleVariablesTable, PValueFormat, PairwiseComparisonRecord, ResultCell, ResultSheet, ResultTabKind, TableArchetype,
-    TwoGroupMethod, TwoGroupSpec, VariableRole,
+    TwoGroupMethod, TwoGroupSpec, VariableRole, XColumnMode,
 };
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{f_sf, norm_sf, norm_two_sided_isf, student_t_cdf, student_t_sf, student_t_two_sided_p};
@@ -960,16 +960,21 @@ pub fn mann_whitney_u(a: &[f64], b: &[f64], two_tailed: bool, confidence: Confid
         (mann_whitney_exact_ties_p(&ranked.ranks, na, two_tailed), true)
     } else {
         let mean_u = 0.5 * naf * nbf;
-        let var_u = ((naf * nbf / 12.0) * (nf + 1.0 - ranked.tie_sum_t3_minus_t / (nf * (nf - 1.0)))).max(1e-30);
-        let sd_u = var_u.sqrt();
-        let p = if two_tailed {
-            let cc = (u_a - mean_u).abs() - 0.5;
-            if cc <= 0.0 { 1.0 } else { (2.0 * norm_sf(cc / sd_u)).min(1.0) }
+        let var_u = (naf * nbf / 12.0) * (nf + 1.0 - ranked.tie_sum_t3_minus_t / (nf * (nf - 1.0)));
+        if ranked.tie_counts.as_slice() == [na + nb] || var_u <= 0.0 {
+            let p = if (u_a - mean_u).abs() <= 1e-12 { 1.0 } else { 0.0 };
+            (p, false)
         } else {
-            let cc = ((u_a - mean_u).abs() - 0.5).max(0.0);
-            norm_sf(cc / sd_u).clamp(0.0, 1.0)
-        };
-        (p.clamp(0.0, 1.0), false)
+            let sd_u = var_u.sqrt();
+            let p = if two_tailed {
+                let cc = (u_a - mean_u).abs() - 0.5;
+                if cc <= 0.0 { 1.0 } else { (2.0 * norm_sf(cc / sd_u)).min(1.0) }
+            } else {
+                let cc = ((u_a - mean_u).abs() - 0.5).max(0.0);
+                norm_sf(cc / sd_u).clamp(0.0, 1.0)
+            };
+            (p.clamp(0.0, 1.0), false)
+        }
     };
 
     let (hodges_lehmann_diff, hodges_lehmann_ci, ci_actual_confidence_percent) = hodges_lehmann_two_sample(a, b, confidence)?;
@@ -1151,9 +1156,9 @@ pub struct WilcoxonMatchedResult {
     pub w_minus: f64,
     /// Wilcoxon test statistic (`W+ - W-` or `min(W+, W-)` depending on mode/tail reporting).
     pub w_stat: f64,
-    /// *P* value testing symmetric median difference around zero (`two_tailed` vs observed-direction one-tailed; exact DP when classic `n_effective <= 25` without ties, else tie-/continuity-corrected normal).
+    /// *P* value testing symmetric median difference around zero (`two_tailed` vs observed-direction one-tailed; exact DP when `(!use_pratt_zeros || n_zeros == 0)` with `n_effective <= 25` and no ties, else tie-/continuity-corrected normal).
     pub p_value: f64,
-    /// True if exact DP distribution was used; false for Pratt or asymptotic normal approximation.
+    /// True if exact DP distribution was used; false for asymptotic normal approximation.
     pub exact_p_used: bool,
     /// True for two-sided *P* value; false for directional one-sided test.
     pub two_tailed: bool,
@@ -1174,8 +1179,9 @@ pub struct WilcoxonMatchedResult {
 /// Signed-rank statistic `W+` (Wilcoxon 1945). Classic mode drops zero differences and uses the exact
 /// null distribution for `n <= 25` without ties, otherwise the normal approximation with tie
 /// correction and 0.5 continuity correction (Hollander, Wolfe & Chicken 2014, ch. 3). Pratt mode
-/// (Pratt 1959) ranks zeros with the nonzero `|d|`, discards their ranks, and always uses the normal
-/// approximation with mean `[n(n+1) - z(z+1)] / 4` and variance
+/// (Pratt 1959) ranks zeros with the nonzero `|d|` and discards their ranks: when `n_zeros == 0`,
+/// it is identical to classic mode (and uses the exact DP for `n <= 25` without ties); when
+/// `n_zeros > 0`, it uses the Pratt normal approximation with mean `[n(n+1) - z(z+1)] / 4` and variance
 /// `[n(n+1)(2n+1) - z(z+1)(2z+1) - sum_{nonzero}(t^3 - t)/2] / 24`, where the tie correction
 /// sum includes only **nonzero** tied groups so zeros are not double-counted. The pseudomedian is
 /// the Hodges & Lehmann (1963) Walsh-average estimator computed on **all** differences (zeros
@@ -1228,7 +1234,7 @@ pub fn wilcoxon_matched_pairs(
         }
     }
 
-    let (p_value, exact_p_used) = if !use_pratt_zeros && n_eff <= 25 && ranked.tie_counts.is_empty() {
+    let (p_value, exact_p_used) = if (!use_pratt_zeros || n_zeros == 0) && n_eff <= 25 && ranked.tie_counts.is_empty() {
         let max_sum = n_eff * (n_eff + 1) / 2;
         (wilcoxon_exact_p(n_eff, w_plus.round() as usize, max_sum, two_tailed), true)
     } else {
@@ -1496,7 +1502,7 @@ pub struct BlandAltmanResult {
 /// intervals use the approximate standard error `sd(d) * sqrt(1/n + z^2 / (2(n - 1)))` with a
 /// *t*(`n - 1`) multiplier (Bland & Altman 1999; the 1986 paper's `sqrt(3 sd^2 / n)` is the
 /// `z ≈ 2` simplification). The optional percent difference `100 (a - b) / mean(a, b)` is discussed in
-/// Bland & Altman (1999).
+/// Bland & Altman (1999) and requires strictly positive paired measurements (`a > 0` and `b > 0`).
 pub fn bland_altman(
     method_a: &[f64],
     method_b: &[f64],
@@ -1522,6 +1528,9 @@ pub fn bland_altman(
         let d = if percent_difference {
             if avg <= 0.0 {
                 return Err(StatsError::InvalidParameter { name: "average", value: avg });
+            }
+            if a <= 0.0 || b <= 0.0 {
+                return Err(StatsError::InvalidParameter { name: "percent_difference_measurement", value: a.min(b) });
             }
             if (a - b).is_finite() {
                 (100.0 / avg) * (a - b)
@@ -1878,7 +1887,7 @@ fn run_two_group_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, tg: &Two
         }
         TwoGroupMethod::WilcoxonSignedRank => {
             let report = extract_paired_values_with_report(sheet, ca.index, cb.index)?;
-            let out = wilcoxon_matched_pairs(&report.xs, &report.ys, tg.two_tailed, conf, false)?;
+            let out = wilcoxon_matched_pairs(&report.xs, &report.ys, tg.two_tailed, conf, true)?;
             populate_wilcoxon_paired_sheet(&mut res, ca.index, cb.index, &ca.label, &cb.label, &out, conf, p_fmt);
             report_paired_extraction(&mut res, "Wilcoxon signed-rank test", &ca.label, &cb.label, &report);
         }
@@ -2018,7 +2027,8 @@ pub fn run_multiple_row_t_tests_analysis(sheet: &DataSheet, spec: &AnalysisSpec,
     let proc_eff = MultiplicityProcedure::from(mr.multiplicity.method);
     validate_raw_p_multiplicity_procedure(proc_eff)?;
 
-    let (lbl_a, lbl_b, row_labels, group_a_rows, group_b_rows) = extract_multiple_row_inputs(sheet, spec, mr.paired)?;
+    let inputs = extract_multiple_row_inputs(sheet, spec, mr.paired)?;
+    let (lbl_a, lbl_b, row_labels, group_a_rows, group_b_rows) = (inputs.label_a, inputs.label_b, inputs.row_labels, inputs.rows_a, inputs.rows_b);
     let mut raw_p = Vec::new();
     let mut staged = Vec::new();
     let mut skipped_rows = 0_usize;
@@ -2134,14 +2144,18 @@ pub fn run_multiple_row_t_tests_analysis(sheet: &DataSheet, spec: &AnalysisSpec,
             significant: e.significant,
         });
     }
-    res.tabs.push(build_tab(
-        "multiple-row-comparisons",
-        "Multiple Row-Wise Comparisons",
-        ResultTabKind::MultipleComparisons,
-        cmp_headers,
-        cmp_labels,
-        cmp_rows,
-    ));
+    let mut cmp_tab =
+        build_tab("multiple-row-comparisons", "Multiple Row-Wise Comparisons", ResultTabKind::MultipleComparisons, cmp_headers, cmp_labels, cmp_rows);
+    if mr.paired && mr.nonparametric {
+        cmp_tab.footnotes.push(String::from(
+            "Paired nonparametric rows use Wilcoxon matched-pairs signed-rank with Pratt (1959) zero-difference handling; df is omitted (not applicable) for rank tests.",
+        ));
+    } else if mr.nonparametric {
+        cmp_tab
+            .footnotes
+            .push(String::from("Unpaired nonparametric rows use the Mann-Whitney U test; df is omitted (not applicable) for rank tests."));
+    }
+    res.tabs.push(cmp_tab);
 
     push_scalar(&mut res, "RowsTested", None, entries.len() as f64);
     push_scalar(&mut res, "Discoveries", None, discoveries as f64);
@@ -2154,6 +2168,10 @@ pub fn run_multiple_row_t_tests_analysis(sheet: &DataSheet, spec: &AnalysisSpec,
         Some(format!("{discoveries} / {} rows significant at threshold {threshold}", entries.len())),
         "Per-row test statistics and multiplicity-adjusted P/q values are available for Volcano plotting.",
     ));
+    if mr.paired {
+        append_listwise_filtered_checklist_and_footnote(&mut res, "Multiple row paired t-tests", inputs.skipped_incomplete_pairs, inputs.kept_pairs);
+    }
+    append_ignored_text_checklist_and_footnote(&mut res, "Multiple row t-tests", &inputs.ignored_non_numeric);
     sanitize_result_sheet_floats(&mut res)?;
     Ok(res)
 }
@@ -2444,41 +2462,79 @@ fn extract_bland_altman_pairs(sheet: &DataSheet, ba: &BlandAltmanSpec) -> Result
                     return Err(StatsError::MissingColumn { index: ba.column_b });
                 }
                 let ds = xy.data_sets.first().ok_or(StatsError::EmptyInput)?;
-                let pairs = xy.active_xy_pairs(0);
-                if pairs.is_empty() {
+                let is_gen = matches!(xy.x_mode, XColumnMode::GeneratedSequence { .. });
+                let active_end = (0..xy.row_count()).rfind(|&r| {
+                    let x_cell = xy.materialized_x_cell_at(r);
+                    let x_active = if is_gen { x_cell.excluded } else { !x_cell.is_empty() || x_cell.excluded };
+                    x_active || ds.cells.get(r).is_some_and(|subs| subs.iter().any(|c| !c.is_empty() || c.excluded))
+                });
+                let Some(end_row) = active_end else {
+                    return Err(StatsError::EmptyInput);
+                };
+                let mut xs = Vec::new();
+                let mut ys = Vec::new();
+                let mut non_numeric_cells = 0_usize;
+                let mut skipped_incomplete_rows = 0_usize;
+                for r in 0..=end_row {
+                    let x_cell = xy.materialized_x_cell_at(r);
+                    if !is_gen && is_ignored_non_numeric_cell(&x_cell) {
+                        non_numeric_cells += 1;
+                    }
+                    let x_opt = xy.x_value_at(r);
+                    let x_has_entry = is_gen || !x_cell.is_empty() || x_cell.excluded;
+                    for cy in ds.cells.get(r).map(Vec::as_slice).unwrap_or(&[]) {
+                        if is_ignored_non_numeric_cell(cy) {
+                            non_numeric_cells += 1;
+                        }
+                        if let (Some(x), Some(y)) = (x_opt, cy.active_number()) {
+                            xs.push(x);
+                            ys.push(y);
+                        } else if x_has_entry || !cy.is_empty() || cy.excluded {
+                            skipped_incomplete_rows += 1;
+                        }
+                    }
+                }
+                if xs.is_empty() {
                     return Err(StatsError::EmptyInput);
                 }
-                let (xs, ys) = pairs.into_iter().unzip();
                 Ok(BlandAltmanExtractedPairs {
                     label_a: xy.x_title.clone(),
                     label_b: ds.title.clone(),
                     xs,
                     ys,
-                    skipped_incomplete_rows: 0,
-                    non_numeric_cells: 0,
+                    skipped_incomplete_rows,
+                    non_numeric_cells,
                 })
             } else {
                 let dsa = xy.data_sets.get(ba.column_a).ok_or(StatsError::MissingColumn { index: ba.column_a })?;
                 let dsb = xy.data_sets.get(ba.column_b).ok_or(StatsError::MissingColumn { index: ba.column_b })?;
+                if dsa.subcolumn_count() != dsb.subcolumn_count() {
+                    return Err(StatsError::DimensionMismatch { expected: dsa.subcolumn_count(), actual: dsb.subcolumn_count() });
+                }
                 let mut xs = Vec::new();
                 let mut ys = Vec::new();
                 let mut non_numeric_cells = 0_usize;
                 let mut skipped_incomplete_rows = 0_usize;
                 for r in 0..xy.row_count() {
-                    let ca = dsa.cells.get(r).and_then(|s| s.first());
-                    let cb = dsb.cells.get(r).and_then(|s| s.first());
-                    if ca.is_some_and(is_ignored_non_numeric_cell) {
-                        non_numeric_cells += 1;
+                    let sa = dsa.cells.get(r).map(Vec::as_slice).unwrap_or(&[]);
+                    let sb = dsb.cells.get(r).map(Vec::as_slice).unwrap_or(&[]);
+                    if sa.len() != sb.len() {
+                        return Err(StatsError::DimensionMismatch { expected: sa.len(), actual: sb.len() });
                     }
-                    if cb.is_some_and(is_ignored_non_numeric_cell) {
-                        non_numeric_cells += 1;
-                    }
-                    let has_entry = ca.is_some_and(|c| !c.is_empty() || c.excluded) || cb.is_some_and(|c| !c.is_empty() || c.excluded);
-                    if let (Some(a), Some(b)) = (ca.and_then(Cell::active_number), cb.and_then(Cell::active_number)) {
-                        xs.push(a);
-                        ys.push(b);
-                    } else if has_entry {
-                        skipped_incomplete_rows += 1;
+                    for (ca, cb) in sa.iter().zip(sb.iter()) {
+                        if is_ignored_non_numeric_cell(ca) {
+                            non_numeric_cells += 1;
+                        }
+                        if is_ignored_non_numeric_cell(cb) {
+                            non_numeric_cells += 1;
+                        }
+                        let has_entry = (!ca.is_empty() || ca.excluded) || (!cb.is_empty() || cb.excluded);
+                        if let (Some(a), Some(b)) = (ca.active_number(), cb.active_number()) {
+                            xs.push(a);
+                            ys.push(b);
+                        } else if has_entry {
+                            skipped_incomplete_rows += 1;
+                        }
                     }
                 }
                 if xs.is_empty() {
@@ -2498,7 +2554,16 @@ fn extract_bland_altman_pairs(sheet: &DataSheet, ba: &BlandAltmanSpec) -> Result
     }
 }
 
-type MultipleRowInputs = (String, String, Vec<String>, Vec<Vec<f64>>, Vec<Vec<f64>>);
+struct MultipleRowInputs {
+    label_a: String,
+    label_b: String,
+    row_labels: Vec<String>,
+    rows_a: Vec<Vec<f64>>,
+    rows_b: Vec<Vec<f64>>,
+    skipped_incomplete_pairs: usize,
+    kept_pairs: usize,
+    ignored_non_numeric: Vec<(String, usize)>,
+}
 
 fn extract_dataset_pair_multiple_row_inputs<F>(
     data_sets: &[curvebook_doc::DataSetColumn],
@@ -2529,6 +2594,10 @@ where
     let mut labels = Vec::with_capacity(n_rows);
     let mut rows_a = Vec::with_capacity(n_rows);
     let mut rows_b = Vec::with_capacity(n_rows);
+    let mut non_numeric_a = 0_usize;
+    let mut non_numeric_b = 0_usize;
+    let mut skipped_incomplete_pairs = 0_usize;
+    let mut kept_pairs = 0_usize;
     for r in 0..n_rows {
         let (ra, rb) = (dsa.cells.get(r), dsb.cells.get(r));
         if paired
@@ -2537,12 +2606,117 @@ where
         {
             return Err(StatsError::DimensionMismatch { expected: sa.len(), actual: sb.len() });
         }
-        let (va, vb) = extract_paired_or_unpaired_subcolumns(ra, rb, paired);
+        if let Some(sa) = ra {
+            non_numeric_a += sa.iter().filter(|c| is_ignored_non_numeric_cell(c)).count();
+        }
+        if let Some(sb) = rb {
+            non_numeric_b += sb.iter().filter(|c| is_ignored_non_numeric_cell(c)).count();
+        }
+        let (va, vb, skipped) = extract_paired_or_unpaired_subcolumns(ra, rb, paired);
+        if paired {
+            kept_pairs += va.len();
+            skipped_incomplete_pairs += skipped;
+        }
         labels.push(row_label(r));
         rows_a.push(va);
         rows_b.push(vb);
     }
-    Ok((dsa.title.clone(), dsb.title.clone(), labels, rows_a, rows_b))
+    let mut ignored_non_numeric = Vec::new();
+    if non_numeric_a > 0 {
+        ignored_non_numeric.push((dsa.title.clone(), non_numeric_a));
+    }
+    if non_numeric_b > 0 {
+        ignored_non_numeric.push((dsb.title.clone(), non_numeric_b));
+    }
+    Ok(MultipleRowInputs {
+        label_a: dsa.title.clone(),
+        label_b: dsb.title.clone(),
+        row_labels: labels,
+        rows_a,
+        rows_b,
+        skipped_incomplete_pairs,
+        kept_pairs,
+        ignored_non_numeric,
+    })
+}
+
+fn extract_split_column_multiple_row_inputs<'a, L, C, T>(
+    indices: &[usize],
+    paired: bool,
+    n_rows: usize,
+    row_label: L,
+    cell_at: C,
+    col_title: T,
+) -> MultipleRowInputs
+where
+    L: Fn(usize) -> String,
+    C: Fn(usize, usize) -> Option<&'a Cell>,
+    T: Fn(usize) -> String,
+{
+    let mid = indices.len() / 2;
+    let (left, right) = (&indices[..mid], &indices[mid..]);
+    let mut labels = Vec::with_capacity(n_rows);
+    let mut rows_a = Vec::with_capacity(n_rows);
+    let mut rows_b = Vec::with_capacity(n_rows);
+    let mut non_numeric_counts = vec![0_usize; indices.len()];
+    let mut skipped_incomplete_pairs = 0_usize;
+    let mut kept_pairs = 0_usize;
+    for r in 0..n_rows {
+        let (va, vb) = if paired {
+            let mut pa = Vec::new();
+            let mut pb = Vec::new();
+            for (pos, (&la, &rb_idx)) in left.iter().zip(right.iter()).enumerate() {
+                let ca = cell_at(la, r);
+                let cb = cell_at(rb_idx, r);
+                if ca.is_some_and(is_ignored_non_numeric_cell) {
+                    non_numeric_counts[pos] += 1;
+                }
+                if cb.is_some_and(is_ignored_non_numeric_cell) {
+                    non_numeric_counts[mid + pos] += 1;
+                }
+                if let (Some(a), Some(b)) = (ca.and_then(Cell::active_number), cb.and_then(Cell::active_number)) {
+                    pa.push(a);
+                    pb.push(b);
+                    kept_pairs += 1;
+                } else if ca.is_some_and(|c| !c.is_empty() || c.excluded) || cb.is_some_and(|c| !c.is_empty() || c.excluded) {
+                    skipped_incomplete_pairs += 1;
+                }
+            }
+            (pa, pb)
+        } else {
+            let mut va = Vec::new();
+            let mut vb = Vec::new();
+            for (pos, &col_idx) in indices.iter().enumerate() {
+                let cell = cell_at(col_idx, r);
+                if cell.is_some_and(is_ignored_non_numeric_cell) {
+                    non_numeric_counts[pos] += 1;
+                }
+                if let Some(v) = cell.and_then(Cell::active_number) {
+                    if pos < mid {
+                        va.push(v);
+                    } else {
+                        vb.push(v);
+                    }
+                }
+            }
+            (va, vb)
+        };
+        labels.push(row_label(r));
+        rows_a.push(va);
+        rows_b.push(vb);
+    }
+    let ignored_non_numeric =
+        indices.iter().zip(non_numeric_counts).filter(|(_, count)| *count > 0).map(|(&col_idx, count)| (col_title(col_idx), count)).collect();
+    MultipleRowInputs {
+        label_a: String::from("Group A"),
+        label_b: String::from("Group B"),
+        row_labels: labels,
+        rows_a,
+        rows_b,
+        skipped_incomplete_pairs,
+        kept_pairs,
+        ignored_non_numeric,
+    }
 }
 
 fn extract_multiple_row_inputs(sheet: &DataSheet, spec: &AnalysisSpec, paired: bool) -> Result<MultipleRowInputs, StatsError> {
@@ -2578,38 +2752,14 @@ fn extract_multiple_row_inputs(sheet: &DataSheet, spec: &AnalysisSpec, paired: b
                     actual: indices.len(),
                 });
             }
-            let mid = indices.len() / 2;
-            let (left, right) = (&indices[..mid], &indices[mid..]);
-            let n_rows = col.row_count();
-            let mut labels = Vec::with_capacity(n_rows);
-            let mut rows_a = Vec::with_capacity(n_rows);
-            let mut rows_b = Vec::with_capacity(n_rows);
-            for r in 0..n_rows {
-                let lbl = col.row_titles.get(r).filter(|s| !s.trim().is_empty()).cloned().unwrap_or_else(|| format!("Row {}", r + 1));
-                let (va, vb) = if paired {
-                    let mut pa = Vec::new();
-                    let mut pb = Vec::new();
-                    for (&la, &rb_idx) in left.iter().zip(right.iter()) {
-                        if let (Some(a), Some(b)) = (
-                            col.data_sets[la].cell(r, 0).and_then(Cell::active_number),
-                            col.data_sets[rb_idx].cell(r, 0).and_then(Cell::active_number),
-                        ) {
-                            pa.push(a);
-                            pb.push(b);
-                        }
-                    }
-                    (pa, pb)
-                } else {
-                    (
-                        left.iter().filter_map(|&c| col.data_sets[c].cell(r, 0).and_then(Cell::active_number)).collect(),
-                        right.iter().filter_map(|&c| col.data_sets[c].cell(r, 0).and_then(Cell::active_number)).collect(),
-                    )
-                };
-                labels.push(lbl);
-                rows_a.push(va);
-                rows_b.push(vb);
-            }
-            Ok((String::from("Group A"), String::from("Group B"), labels, rows_a, rows_b))
+            Ok(extract_split_column_multiple_row_inputs(
+                &indices,
+                paired,
+                col.row_count(),
+                |r| col.row_titles.get(r).filter(|s| !s.trim().is_empty()).cloned().unwrap_or_else(|| format!("Row {}", r + 1)),
+                |c, r| col.data_sets[c].cell(r, 0),
+                |c| col.data_sets[c].title.clone(),
+            ))
         }
         TableArchetype::MultipleVariables(mv) => {
             let indices: Vec<usize> = try_resolve_selected_indices(&spec.selected_data_sets, mv.variables.len())?
@@ -2626,63 +2776,42 @@ fn extract_multiple_row_inputs(sheet: &DataSheet, spec: &AnalysisSpec, paired: b
                     actual: indices.len(),
                 });
             }
-            let mid = indices.len() / 2;
-            let (left, right) = (&indices[..mid], &indices[mid..]);
             let label_col = mv
                 .variables
                 .iter()
                 .position(|v| v.role == VariableRole::Label)
                 .or_else(|| mv.variables.iter().position(|v| v.role == VariableRole::Categorical));
-            let n_rows = mv.row_count();
-            let mut labels = Vec::with_capacity(n_rows);
-            let mut rows_a = Vec::with_capacity(n_rows);
-            let mut rows_b = Vec::with_capacity(n_rows);
-            for r in 0..n_rows {
-                let lbl = label_col.and_then(|lc| mv.variables[lc].cells.get(r)).and_then(mv_cell_token).unwrap_or_else(|| format!("Row {}", r + 1));
-                let (va, vb) = if paired {
-                    let mut pa = Vec::new();
-                    let mut pb = Vec::new();
-                    for (&la, &rb_idx) in left.iter().zip(right.iter()) {
-                        if let (Some(a), Some(b)) = (
-                            mv.variables[la].cells.get(r).and_then(Cell::active_number),
-                            mv.variables[rb_idx].cells.get(r).and_then(Cell::active_number),
-                        ) {
-                            pa.push(a);
-                            pb.push(b);
-                        }
-                    }
-                    (pa, pb)
-                } else {
-                    (
-                        left.iter().filter_map(|&c| mv.variables[c].cells.get(r).and_then(Cell::active_number)).collect(),
-                        right.iter().filter_map(|&c| mv.variables[c].cells.get(r).and_then(Cell::active_number)).collect(),
-                    )
-                };
-                labels.push(lbl);
-                rows_a.push(va);
-                rows_b.push(vb);
-            }
-            Ok((String::from("Group A"), String::from("Group B"), labels, rows_a, rows_b))
+            Ok(extract_split_column_multiple_row_inputs(
+                &indices,
+                paired,
+                mv.row_count(),
+                |r| label_col.and_then(|lc| mv.variables[lc].cells.get(r)).and_then(mv_cell_token).unwrap_or_else(|| format!("Row {}", r + 1)),
+                |c, r| mv.variables[c].cells.get(r),
+                |c| mv.variables[c].title.clone(),
+            ))
         }
         other => Err(StatsError::IncompatibleTable { analysis: "Multiple row t-tests", actual: other.kind() }),
     }
 }
 
-fn extract_paired_or_unpaired_subcolumns(row_a: Option<&Vec<Cell>>, row_b: Option<&Vec<Cell>>, paired: bool) -> (Vec<f64>, Vec<f64>) {
+fn extract_paired_or_unpaired_subcolumns(row_a: Option<&Vec<Cell>>, row_b: Option<&Vec<Cell>>, paired: bool) -> (Vec<f64>, Vec<f64>, usize) {
     match (row_a, row_b) {
         (Some(sa), Some(sb)) if paired => {
             let mut va = Vec::new();
             let mut vb = Vec::new();
+            let mut skipped = 0_usize;
             for (ca, cb) in sa.iter().zip(sb.iter()) {
                 if let (Some(a), Some(b)) = (ca.active_number(), cb.active_number()) {
                     va.push(a);
                     vb.push(b);
+                } else if (!ca.is_empty() || ca.excluded) || (!cb.is_empty() || cb.excluded) {
+                    skipped += 1;
                 }
             }
-            (va, vb)
+            (va, vb, skipped)
         }
-        (Some(sa), Some(sb)) => (sa.iter().filter_map(Cell::active_number).collect(), sb.iter().filter_map(Cell::active_number).collect()),
-        _ => (Vec::new(), Vec::new()),
+        (Some(sa), Some(sb)) => (sa.iter().filter_map(Cell::active_number).collect(), sb.iter().filter_map(Cell::active_number).collect(), 0),
+        _ => (Vec::new(), Vec::new(), 0),
     }
 }
 
@@ -2690,10 +2819,10 @@ type SingleRowOutcome = (f64, f64, f64, f64, f64, f64);
 
 fn run_single_row_comparison(ra: &[f64], rb: &[f64], mr: &MultipleRowTestsSpec, conf: ConfidenceLevel) -> Result<SingleRowOutcome, StatsError> {
     if mr.paired && mr.nonparametric {
-        let out = wilcoxon_matched_pairs(ra, rb, true, conf, false)?;
+        let out = wilcoxon_matched_pairs(ra, rb, true, conf, true)?;
         let ma = SummaryMoments::from_slice(ra)?.mean;
         let mb = SummaryMoments::from_slice(rb)?.mean;
-        return Ok((ma, mb, out.hodges_lehmann_pseudomedian, out.w_stat, out.n_effective as f64, out.p_value));
+        return Ok((ma, mb, out.hodges_lehmann_pseudomedian, out.w_stat, f64::INFINITY, out.p_value));
     }
     if mr.paired {
         let out = paired_t_test(ra, rb, true, conf)?;
@@ -2705,7 +2834,7 @@ fn run_single_row_comparison(ra: &[f64], rb: &[f64], mr: &MultipleRowTestsSpec, 
         let out = mann_whitney_u(ra, rb, true, conf)?;
         let ma = SummaryMoments::from_slice(ra)?.mean;
         let mb = SummaryMoments::from_slice(rb)?.mean;
-        return Ok((ma, mb, out.hodges_lehmann_diff, out.u_min, (ra.len() + rb.len()) as f64 - 2.0, out.p_value));
+        return Ok((ma, mb, out.hodges_lehmann_diff, out.u_min, f64::INFINITY, out.p_value));
     }
     let out = if mr.assume_equal_sd { unpaired_t_test(ra, rb, true, conf)? } else { welch_t_test(ra, rb, true, conf)? };
     Ok((out.mean_a, out.mean_b, out.difference, out.t_statistic, out.df, out.p_value))
@@ -3196,6 +3325,9 @@ fn populate_wilcoxon_paired_sheet(
     if let Some(msg) = hl_warn {
         tab.footnotes.push(msg);
     }
+    tab.footnotes.push(String::from(
+        "Zero differences follow Pratt's (1959) method: all pairs (including exact zeros) are ranked by |d|, zero-difference ranks are excluded from W+ and W-, and exact small-sample P values are used when no zero differences or ties occur (n <= 25).",
+    ));
     res.tabs.push(tab);
     push_scalar(res, "PValue", None, out.p_value);
     res.pairwise_comparisons.push(PairwiseComparisonRecord {
@@ -3211,8 +3343,8 @@ fn populate_wilcoxon_paired_sheet(
     res.checklist.push(checklist_item(
         "Symmetry of paired differences",
         ChecklistStatus::Info,
-        Some(format!("effective pairs = {}", out.n_effective)),
-        "Wilcoxon signed-rank assumes paired differences are symmetrically distributed around the median.",
+        Some(format!("effective pairs = {} (Pratt zero handling)", out.n_effective)),
+        "Wilcoxon signed-rank assumes paired differences are symmetrically distributed around the median; exact zero differences use Pratt (1959) zero-inclusion ranking.",
     ));
 }
 

@@ -802,7 +802,7 @@ pub struct NormalityTestOutcome {
     pub statistic: f64,
     /// Test *P* value testing the null hypothesis of Gaussian (or lognormal when on log data) distribution.
     pub p_value: f64,
-    /// True when `p_value >= 0.05` (does not reject normality at the 5% level).
+    /// True when `p_value > alpha` at the caller-supplied significance level `alpha` (does not reject normality).
     pub passed: bool,
 }
 
@@ -827,7 +827,7 @@ pub struct NormalityBatteryResult {
     pub lognormal_anderson_darling: Option<NormalityTestOutcome>,
     /// Lilliefors KS *D* test evaluated on $\ln(x_i)$ (`None` when `n < 5` or any value `<= 0.0`).
     pub lognormal_kolmogorov_smirnov: Option<NormalityTestOutcome>,
-    /// `ln(L_normal / L_lognormal)`: positive favors normal, negative favors lognormal (`None` when `n < 2`, non-positive data, or degenerate variance).
+    /// `ln(L_normal / L_lognormal)`: positive favors normal, negative favors lognormal (`None` when `n < 3`, non-positive data, or degenerate variance).
     pub normal_vs_lognormal_log_lr: Option<f64>,
 }
 
@@ -1691,11 +1691,24 @@ pub(crate) fn hodges_lehmann_one_sample(values: &[f64], confidence: ConfidenceLe
     Ok((hl, ci))
 }
 
-/// Kolmogorov–Smirnov one-sample test against a known theoretical `Normal(mean, sd^2)`.
+/// Kolmogorov–Smirnov one-sample test against a known theoretical `Normal(mean, sd^2)` at `alpha = 0.05`.
+///
+/// See [`one_sample_ks_normal_at_alpha`] to specify a custom significance threshold `alpha`.
 pub fn one_sample_ks_normal(values: &[f64], mean: f64, sd: f64) -> Result<NormalityTestOutcome, StatsError> {
+    one_sample_ks_normal_at_alpha(values, mean, sd, 0.05)
+}
+
+/// Kolmogorov–Smirnov one-sample test against a known theoretical `Normal(mean, sd^2)` at threshold `alpha`.
+pub fn one_sample_ks_normal_at_alpha(values: &[f64], mean: f64, sd: f64, alpha: f64) -> Result<NormalityTestOutcome, StatsError> {
     validate_finite_slice(values)?;
-    if !mean.is_finite() || !sd.is_finite() || sd <= 0.0 {
+    if !mean.is_finite() {
+        return Err(StatsError::InvalidParameter { name: "mean", value: mean });
+    }
+    if !sd.is_finite() || sd <= 0.0 {
         return Err(StatsError::InvalidParameter { name: "sd", value: sd });
+    }
+    if !alpha.is_finite() || alpha <= 0.0 || alpha >= 1.0 {
+        return Err(StatsError::InvalidParameter { name: "alpha", value: alpha });
     }
     let sorted = sorted_finite(values);
     let n = sorted.len();
@@ -1706,7 +1719,7 @@ pub fn one_sample_ks_normal(values: &[f64], mean: f64, sd: f64) -> Result<Normal
         d = d.max(((i + 1) as f64) / nf - f_z).max(f_z - (i as f64) / nf);
     }
     let p_value = ks_asymptotic_p(d * nf.sqrt());
-    Ok(NormalityTestOutcome { test_name: String::from("One-sample KS (Normal)"), statistic: d, p_value, passed: p_value > 0.05 })
+    Ok(NormalityTestOutcome { test_name: String::from("One-sample KS (Normal)"), statistic: d, p_value, passed: p_value > alpha })
 }
 
 /// Asymptotic Kolmogorov–Smirnov survival probability `P(K >= lambda)`.

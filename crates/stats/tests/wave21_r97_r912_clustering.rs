@@ -320,7 +320,7 @@ fn pillar2_exact_binomial_all_table_inputs_p_methods_and_cis() {
     assert!(matches!(run_analysis(&non_bin, &spec), Err(StatsError::InvalidParameter { .. })));
 
     // Invalid null_proportion rejected
-    for bad_p in [0.0, 1.0, -0.2, 1.5, f64::NAN] {
+    for bad_p in [0.0, 1.0, -0.2, 1.5] {
         let bad_spec = AnalysisSpec::new(
             SheetId::new("r-badp"),
             SheetId::new("src"),
@@ -333,6 +333,18 @@ fn pillar2_exact_binomial_all_table_inputs_p_methods_and_cis() {
         .unwrap();
         assert!(matches!(run_analysis(&pow_sheet, &bad_spec), Err(StatsError::InvalidParameter { .. })));
     }
+    assert!(
+        AnalysisSpec::new(
+            SheetId::new("r-badp-nan"),
+            SheetId::new("src"),
+            AnalysisKind::Contingency(ContingencySpec {
+                method: ContingencyMethod::ExactBinomial,
+                null_proportion: Some(f64::NAN),
+                ..Default::default()
+            }),
+        )
+        .is_err()
+    );
 }
 
 #[test]
