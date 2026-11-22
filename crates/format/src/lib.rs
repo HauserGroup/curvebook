@@ -33,7 +33,10 @@ pub use csv::{
     rearrange_and_baseline_grid, write_delimited_records,
 };
 pub use error::{FormatError, ImportReport, ImportWarning, ImportWarningKind};
-pub use export::{ResultSheetExportJson, export_result_sheet_json, export_result_sheet_tidy_csv, export_result_tab_csv};
+pub use export::{
+    ResultSheetExportJson, ensure_result_sheet_csv_exportable, export_result_sheet_json, export_result_sheet_tidy_csv, export_result_tab_csv,
+    try_export_result_sheet_tidy_csv, try_export_result_tab_csv,
+};
 pub use image_asset::{ingest_image_asset, validate_image_asset};
 pub use prism::{import_prism_bytes, import_prism_bytes_with_limits};
 pub use pzfx::{import_pzfx_bytes, import_pzfx_str};

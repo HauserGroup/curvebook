@@ -5,10 +5,10 @@ use std::collections::BTreeMap;
 
 use curvebook_doc::{
     Cell, CellCoord, CellValue, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, DataSheet, DelimitedScanError, DelimitedScanOptions,
-    DelimitedVisitorError, GroupedTable, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, LinkedDataRegion, MAX_DATA_SETS, MAX_ROWS,
+    DelimitedVisitorError, DocError, GroupedTable, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, LinkedDataRegion, MAX_DATA_SETS, MAX_ROWS,
     MAX_SUBCOLUMNS, MultipleVariablesTable, NestedGroupColumn, NestedTable, PartsOfWholeTable, PlacementMode, SheetCellRange, SheetId, SubcolumnMode,
-    SurvivalTable, TableArchetype, TableKind, VariableColumn, XyTable, default_column_label, scan_delimited, transpose_cell_grid, validate_data_sets,
-    validate_rows, validate_subcolumns, validate_title,
+    SurvivalTable, TableArchetype, TableKind, VariableColumn, XColumnMode, XyTable, default_column_label, scan_delimited, transpose_cell_grid,
+    validate_cell_grid, validate_data_sets, validate_rows, validate_subcolumns, validate_title,
 };
 
 use crate::error::FormatError;
@@ -303,8 +303,38 @@ pub fn format_cell_token(cell: &Cell, opts: &CsvOptions) -> String {
     out
 }
 
+fn unwrap_quoted_excluded_text(text: &str, quote_char: char) -> Option<String> {
+    let inner = text.strip_suffix('*')?;
+    let inner = inner.strip_prefix(quote_char)?.strip_suffix(quote_char)?;
+    Some(inner.to_owned())
+}
+
 fn parse_csv_field_cell(field: &ParsedCsvField, opts: &CsvOptions) -> Cell {
-    if field.quoted { Cell::text(field.text.clone()) } else { parse_cell_token(&field.text, opts) }
+    if field.quoted {
+        if opts.parse_asterisk_exclusions
+            && let Some(inner) = unwrap_quoted_excluded_text(&field.text, opts.quote_char)
+        {
+            return Cell::excluded_text(inner);
+        }
+        Cell::text(field.text.clone())
+    } else {
+        parse_cell_token(&field.text, opts)
+    }
+}
+
+fn can_export_excluded_text_unquoted(safe: &str, opts: &CsvOptions) -> bool {
+    if safe.is_empty()
+        || safe != safe.trim()
+        || safe.contains(opts.delimiter)
+        || safe.contains(opts.quote_char)
+        || safe.contains('\n')
+        || safe.contains('\r')
+        || is_missing_sentinel(safe, &default_missing_sentinels())
+    {
+        return false;
+    }
+    let candidate = format!("{safe}*");
+    parse_cell_token(&candidate, opts) == Cell::excluded_text(safe.to_owned())
 }
 
 /// Neutralize spreadsheet formula-injection prefixes (`=`, `+`, `-`, `@`, `\t`, `\r`) on text
@@ -386,9 +416,14 @@ impl CsvExportField {
             CellValue::Text(raw) => {
                 let safe = neutralize_csv_formula_text(raw);
                 if cell.excluded && opts.parse_asterisk_exclusions {
-                    let mut text = safe;
-                    text.push('*');
-                    Self::unquoted(text)
+                    if can_export_excluded_text_unquoted(&safe, opts) {
+                        let mut text = safe;
+                        text.push('*');
+                        Self::unquoted(text)
+                    } else {
+                        let q = opts.quote_char;
+                        Self { text: format!("{q}{safe}{q}*"), force_quote: true }
+                    }
                 } else {
                     let force_quote = is_ambiguous_csv_text(&safe, opts);
                     Self { text: safe, force_quote }
@@ -590,6 +625,30 @@ fn export_multivar_rows(t: &MultipleVariablesTable, opts: &CsvOptions) -> Vec<Ve
     rows
 }
 
+fn format_nested_subcolumn_header(group_title: &str, sub_title: &str, s_idx: usize) -> CsvExportField {
+    let raw_prefix = format!("{group_title}:");
+    if let Some(rest) = sub_title.strip_prefix(&raw_prefix)
+        && !rest.trim().is_empty()
+    {
+        return CsvExportField::header(sub_title);
+    }
+    let trimmed_group = group_title.trim();
+    if trimmed_group.is_empty() {
+        return CsvExportField::header(sub_title);
+    }
+    let trimmed_prefix = format!("{trimmed_group}:");
+    let trimmed_sub = sub_title.trim();
+    if let Some(rest) = trimmed_sub.strip_prefix(&trimmed_prefix) {
+        return if rest.trim().is_empty() {
+            CsvExportField::header(&format!("{trimmed_prefix}{}", s_idx + 1))
+        } else {
+            CsvExportField::header(trimmed_sub)
+        };
+    }
+    let effective_sub = if trimmed_sub.is_empty() { format!("{}", s_idx + 1) } else { trimmed_sub.to_owned() };
+    CsvExportField::header(&format!("{trimmed_prefix}{effective_sub}"))
+}
+
 fn export_nested_rows(t: &NestedTable, opts: &CsvOptions) -> Vec<Vec<CsvExportField>> {
     let include_row_titles = t.row_titles_expanded || t.row_titles.iter().any(|s| !s.is_empty());
     let mut header = Vec::new();
@@ -597,8 +656,8 @@ fn export_nested_rows(t: &NestedTable, opts: &CsvOptions) -> Vec<Vec<CsvExportFi
         header.push(CsvExportField::header("Row Title"));
     }
     for g in &t.groups {
-        for sub_title in &g.subcolumn_titles {
-            header.push(CsvExportField::header(sub_title));
+        for (s_idx, sub_title) in g.subcolumn_titles.iter().enumerate() {
+            header.push(format_nested_subcolumn_header(&g.title, sub_title, s_idx));
         }
     }
     let mut rows = vec![header];
@@ -1319,6 +1378,8 @@ fn place_grid_in_datasheet(
     headers: Option<&[String]>,
     placement: &ImportPlacementSpec,
 ) -> Result<SheetCellRange, FormatError> {
+    target.ensure_mutable()?;
+    target.archetype.validate()?;
     if grid.is_empty() {
         return Ok(SheetCellRange::new(placement.anchor, placement.anchor));
     }
@@ -1337,44 +1398,220 @@ fn place_grid_in_datasheet(
         PlacementMode::Overwrite | PlacementMode::InsertRows | PlacementMode::AppendRows => placement.anchor.col,
         PlacementMode::AppendColumns => target.archetype.column_count(),
     };
+    let start_subcol = placement.anchor.subcol;
 
     let needed_rows = if placement.mode == PlacementMode::InsertRows {
         existing_rows.max(start_row).checked_add(grid_rows)
     } else {
-        start_row.checked_add(grid_rows)
+        start_row.checked_add(grid_rows).map(|n| n.max(existing_rows))
     }
     .ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("row offset overflow") })?;
     validate_rows(needed_rows)?;
 
-    ensure_sheet_capacity(target, needed_rows, start_col, placement.anchor.subcol, grid_cols)?;
+    preflight_sheet_capacity_and_headers(&target.archetype, needed_rows, start_row, start_col, start_subcol, grid_cols, headers)?;
+
+    ensure_sheet_capacity(target, needed_rows, start_row, start_col, start_subcol, grid_cols)?;
     if placement.mode == PlacementMode::InsertRows && start_row < existing_rows {
-        target.archetype.shift_rows_down(start_row, grid_rows, existing_rows);
+        target.shift_rows_down(start_row, grid_rows, existing_rows);
     }
     if let Some(hdrs) = headers {
-        apply_headers_to_sheet(target, start_col, placement.anchor.subcol, hdrs)?;
+        apply_headers_to_sheet(target, start_row, start_col, start_subcol, hdrs)?;
     }
 
-    let mut end_coord = CellCoord::new(start_row, start_col, placement.anchor.subcol);
+    let mut end_coord = CellCoord::new(start_row, start_col, start_subcol);
     for (r_off, row) in grid.iter().enumerate() {
         let r = start_row.checked_add(r_off).ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("row offset overflow") })?;
         for (c_off, cell) in row.iter().enumerate() {
-            let (col, subcol) = resolve_target_coord(&target.archetype, start_col, placement.anchor.subcol, c_off)?;
+            let (col, subcol) = resolve_target_coord(&target.archetype, start_row, start_col, start_subcol, c_off)?;
             let coord = CellCoord::new(r, col, subcol);
             target.set_cell(coord, cell.clone())?;
             end_coord = coord;
         }
     }
-    Ok(SheetCellRange::new(CellCoord::new(start_row, start_col, placement.anchor.subcol), end_coord))
+    Ok(SheetCellRange::new(CellCoord::new(start_row, start_col, start_subcol), end_coord))
 }
 
-fn compute_needed_cols_with_subs(start_col: usize, start_subcol: usize, grid_cols: usize, subs: usize) -> Result<usize, FormatError> {
+fn xy_x_cells_width(t: &XyTable) -> usize {
+    match &t.x_mode {
+        XColumnMode::GeneratedSequence { .. } => t.x_cells.first().map_or(0, Vec::len),
+        _ => t.x_mode.subcolumn_count(),
+    }
+}
+
+fn compute_needed_cols_with_subs(
+    start_row: usize,
+    start_col: usize,
+    start_subcol: usize,
+    grid_cols: usize,
+    subs: usize,
+) -> Result<usize, FormatError> {
     validate_subcolumns(subs)?;
     let total_flat = start_col
         .checked_mul(subs)
         .and_then(|v| v.checked_add(start_subcol))
         .and_then(|v| v.checked_add(grid_cols))
         .ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("column offset overflow") })?;
+    if start_subcol >= subs {
+        return Err(FormatError::Doc(DocError::CellOutOfBounds { row: start_row, col: start_col, subcol: start_subcol }));
+    }
     Ok(total_flat.div_ceil(subs))
+}
+
+fn resolve_nested_coord(
+    groups: &[NestedGroupColumn],
+    start_row: usize,
+    start_col: usize,
+    start_subcol: usize,
+    flat_offset: usize,
+) -> Result<(usize, usize), FormatError> {
+    if start_col >= groups.len() {
+        if start_subcol > 0 {
+            return Err(FormatError::Doc(DocError::CellOutOfBounds { row: start_row, col: start_col, subcol: start_subcol }));
+        }
+        let col = start_col
+            .checked_add(flat_offset)
+            .ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("target cell coordinate overflow") })?;
+        return Ok((col, 0));
+    }
+    let first_units = groups[start_col].biological_unit_count();
+    validate_subcolumns(first_units)?;
+    if start_subcol >= first_units {
+        return Err(FormatError::Doc(DocError::CellOutOfBounds { row: start_row, col: start_col, subcol: start_subcol }));
+    }
+    let mut col = start_col;
+    let mut subcol = start_subcol;
+    let mut remaining = flat_offset;
+    while col < groups.len() {
+        let units = groups[col].biological_unit_count();
+        validate_subcolumns(units)?;
+        let avail = units.saturating_sub(subcol);
+        if remaining < avail {
+            return Ok((col, subcol + remaining));
+        }
+        remaining -= avail;
+        col += 1;
+        subcol = 0;
+    }
+    let final_col =
+        col.checked_add(remaining).ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("target cell coordinate overflow") })?;
+    Ok((final_col, 0))
+}
+
+fn compute_nested_needed_cols(
+    groups: &[NestedGroupColumn],
+    start_row: usize,
+    start_col: usize,
+    start_subcol: usize,
+    grid_cols: usize,
+) -> Result<usize, FormatError> {
+    if grid_cols == 0 {
+        return Ok(groups.len());
+    }
+    let _ = start_subcol.checked_add(grid_cols).ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("column offset overflow") })?;
+    let (last_col, _) = resolve_nested_coord(groups, start_row, start_col, start_subcol, grid_cols - 1)?;
+    let needed_after_last = last_col.checked_add(1).ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("column offset overflow") })?;
+    Ok(groups.len().max(needed_after_last))
+}
+
+fn preflight_dataset_growth(data_sets: &[DataSetColumn], needed_cols: usize, needed_rows: usize, subs: usize) -> Result<(), FormatError> {
+    validate_subcolumns(subs)?;
+    if needed_cols > data_sets.len() {
+        validate_cell_grid(needed_rows, 1, subs, 0)?;
+    }
+    for ds in data_sets {
+        validate_cell_grid(needed_rows, 1, ds.subcolumn_count().max(subs), 0)?;
+    }
+    Ok(())
+}
+
+fn preflight_sheet_capacity_and_headers(
+    arch: &TableArchetype,
+    needed_rows: usize,
+    start_row: usize,
+    start_col: usize,
+    start_subcol: usize,
+    grid_cols: usize,
+    headers: Option<&[String]>,
+) -> Result<(), FormatError> {
+    match arch {
+        TableArchetype::Xy(t) => {
+            t.x_mode.validate()?;
+            t.y_subcolumn_mode.validate()?;
+            let subs = t.y_subcolumn_mode.subcolumn_count();
+            let needed_cols = compute_needed_cols_with_subs(start_row, start_col, start_subcol, grid_cols, subs)?;
+            validate_data_sets(needed_cols)?;
+            let x_width = xy_x_cells_width(t);
+            let x_cells = t.x_cells.len().max(needed_rows).checked_mul(x_width);
+            check_datasets_growth_budget(&t.data_sets, needed_cols, needed_rows, subs, x_cells)?;
+            preflight_dataset_growth(&t.data_sets, needed_cols, needed_rows, subs)?;
+        }
+        TableArchetype::Column(t) => {
+            t.subcolumn_mode.validate()?;
+            let subs = t.subcolumn_mode.subcolumn_count();
+            let needed_cols = compute_needed_cols_with_subs(start_row, start_col, start_subcol, grid_cols, subs)?;
+            validate_data_sets(needed_cols)?;
+            check_datasets_growth_budget(&t.data_sets, needed_cols, needed_rows, subs, Some(0))?;
+            preflight_dataset_growth(&t.data_sets, needed_cols, needed_rows, subs)?;
+        }
+        TableArchetype::Grouped(t) => {
+            t.subcolumn_mode.validate()?;
+            let subs = t.subcolumn_mode.subcolumn_count();
+            let needed_cols = compute_needed_cols_with_subs(start_row, start_col, start_subcol, grid_cols, subs)?;
+            validate_data_sets(needed_cols)?;
+            check_datasets_growth_budget(&t.data_sets, needed_cols, needed_rows, subs, Some(0))?;
+            preflight_dataset_growth(&t.data_sets, needed_cols, needed_rows, subs)?;
+        }
+        TableArchetype::Contingency(t) => {
+            let needed_cols = compute_needed_cols_with_subs(start_row, start_col, start_subcol, grid_cols, 1)?;
+            validate_data_sets(needed_cols)?;
+            check_datasets_growth_budget(&t.data_sets, needed_cols, needed_rows, 1, Some(0))?;
+            preflight_dataset_growth(&t.data_sets, needed_cols, needed_rows, 1)?;
+        }
+        TableArchetype::Survival(t) => {
+            let needed_cols = compute_needed_cols_with_subs(start_row, start_col, start_subcol, grid_cols, 1)?;
+            validate_data_sets(needed_cols)?;
+            let time_cells = t.times.len().max(needed_rows);
+            check_datasets_growth_budget(&t.cohorts, needed_cols, needed_rows, 1, Some(time_cells))?;
+            preflight_dataset_growth(&t.cohorts, needed_cols, needed_rows, 1)?;
+        }
+        TableArchetype::PartsOfWhole(t) => {
+            let needed_cols = compute_needed_cols_with_subs(start_row, start_col, start_subcol, grid_cols, 1)?;
+            validate_data_sets(needed_cols)?;
+            check_datasets_growth_budget(&t.data_sets, needed_cols, needed_rows, 1, Some(0))?;
+            preflight_dataset_growth(&t.data_sets, needed_cols, needed_rows, 1)?;
+        }
+        TableArchetype::MultipleVariables(t) => {
+            let needed_cols = compute_needed_cols_with_subs(start_row, start_col, start_subcol, grid_cols, 1)?;
+            validate_data_sets(needed_cols)?;
+            check_multivar_growth_budget(&t.variables, needed_cols, needed_rows)?;
+            for idx in t.variables.len()..needed_cols {
+                validate_title(&format!("Variable {}", default_column_label(idx)))?;
+            }
+        }
+        TableArchetype::Nested(t) => {
+            let needed_cols = compute_nested_needed_cols(&t.groups, start_row, start_col, start_subcol, grid_cols)?;
+            validate_data_sets(needed_cols)?;
+            check_nested_growth_budget(&t.groups, needed_cols, needed_rows)?;
+            for g in &t.groups {
+                let units = g.biological_unit_count();
+                validate_subcolumns(units)?;
+                validate_cell_grid(needed_rows, 1, units, 0)?;
+            }
+            if needed_cols > t.groups.len() {
+                validate_cell_grid(needed_rows, 1, 1, 0)?;
+            }
+        }
+    }
+
+    if let Some(hdrs) = headers {
+        for (idx, title) in hdrs.iter().enumerate() {
+            let (_, subcol) = resolve_target_coord(arch, start_row, start_col, start_subcol, idx)?;
+            if subcol == 0 && !title.trim().is_empty() {
+                validate_title(title)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn check_datasets_growth_budget(
@@ -1437,6 +1674,7 @@ fn check_nested_growth_budget(groups: &[NestedGroupColumn], needed_cols: usize, 
 fn ensure_sheet_capacity(
     target: &mut DataSheet,
     needed_rows: usize,
+    start_row: usize,
     start_col: usize,
     start_subcol: usize,
     grid_cols: usize,
@@ -1446,13 +1684,14 @@ fn ensure_sheet_capacity(
             t.x_mode.validate()?;
             t.y_subcolumn_mode.validate()?;
             let subs = t.y_subcolumn_mode.subcolumn_count();
-            let needed_cols = compute_needed_cols_with_subs(start_col, start_subcol, grid_cols, subs)?;
+            let needed_cols = compute_needed_cols_with_subs(start_row, start_col, start_subcol, grid_cols, subs)?;
             validate_data_sets(needed_cols)?;
-            let x_cells = t.x_cells.len().max(needed_rows).checked_mul(t.x_mode.subcolumn_count());
+            let x_width = xy_x_cells_width(t);
+            let x_cells = t.x_cells.len().max(needed_rows).checked_mul(x_width);
             check_datasets_growth_budget(&t.data_sets, needed_cols, needed_rows, subs, x_cells)?;
             grow_datasets(&mut t.data_sets, needed_cols, needed_rows, subs)?;
             if t.x_cells.len() < needed_rows {
-                t.x_cells.resize_with(needed_rows, || vec![Cell::empty(); t.x_mode.subcolumn_count()]);
+                t.x_cells.resize_with(needed_rows, || vec![Cell::empty(); x_width]);
             }
             if t.row_titles.len() < needed_rows {
                 t.row_titles.resize(needed_rows, String::new());
@@ -1461,7 +1700,7 @@ fn ensure_sheet_capacity(
         TableArchetype::Column(t) => {
             t.subcolumn_mode.validate()?;
             let subs = t.subcolumn_mode.subcolumn_count();
-            let needed_cols = compute_needed_cols_with_subs(start_col, start_subcol, grid_cols, subs)?;
+            let needed_cols = compute_needed_cols_with_subs(start_row, start_col, start_subcol, grid_cols, subs)?;
             validate_data_sets(needed_cols)?;
             check_datasets_growth_budget(&t.data_sets, needed_cols, needed_rows, subs, Some(0))?;
             grow_datasets(&mut t.data_sets, needed_cols, needed_rows, subs)?;
@@ -1472,7 +1711,7 @@ fn ensure_sheet_capacity(
         TableArchetype::Grouped(t) => {
             t.subcolumn_mode.validate()?;
             let subs = t.subcolumn_mode.subcolumn_count();
-            let needed_cols = compute_needed_cols_with_subs(start_col, start_subcol, grid_cols, subs)?;
+            let needed_cols = compute_needed_cols_with_subs(start_row, start_col, start_subcol, grid_cols, subs)?;
             validate_data_sets(needed_cols)?;
             check_datasets_growth_budget(&t.data_sets, needed_cols, needed_rows, subs, Some(0))?;
             grow_datasets(&mut t.data_sets, needed_cols, needed_rows, subs)?;
@@ -1486,7 +1725,7 @@ fn ensure_sheet_capacity(
             }
         }
         TableArchetype::Contingency(t) => {
-            let needed_cols = compute_needed_cols_with_subs(start_col, start_subcol, grid_cols, 1)?;
+            let needed_cols = compute_needed_cols_with_subs(start_row, start_col, start_subcol, grid_cols, 1)?;
             validate_data_sets(needed_cols)?;
             check_datasets_growth_budget(&t.data_sets, needed_cols, needed_rows, 1, Some(0))?;
             grow_datasets(&mut t.data_sets, needed_cols, needed_rows, 1)?;
@@ -1495,7 +1734,7 @@ fn ensure_sheet_capacity(
             }
         }
         TableArchetype::Survival(t) => {
-            let needed_cols = compute_needed_cols_with_subs(start_col, start_subcol, grid_cols, 1)?;
+            let needed_cols = compute_needed_cols_with_subs(start_row, start_col, start_subcol, grid_cols, 1)?;
             validate_data_sets(needed_cols)?;
             let time_cells = t.times.len().max(needed_rows);
             check_datasets_growth_budget(&t.cohorts, needed_cols, needed_rows, 1, Some(time_cells))?;
@@ -1508,7 +1747,7 @@ fn ensure_sheet_capacity(
             }
         }
         TableArchetype::PartsOfWhole(t) => {
-            let needed_cols = compute_needed_cols_with_subs(start_col, start_subcol, grid_cols, 1)?;
+            let needed_cols = compute_needed_cols_with_subs(start_row, start_col, start_subcol, grid_cols, 1)?;
             validate_data_sets(needed_cols)?;
             check_datasets_growth_budget(&t.data_sets, needed_cols, needed_rows, 1, Some(0))?;
             grow_datasets(&mut t.data_sets, needed_cols, needed_rows, 1)?;
@@ -1517,7 +1756,7 @@ fn ensure_sheet_capacity(
             }
         }
         TableArchetype::MultipleVariables(t) => {
-            let needed_cols = compute_needed_cols_with_subs(start_col, start_subcol, grid_cols, 1)?;
+            let needed_cols = compute_needed_cols_with_subs(start_row, start_col, start_subcol, grid_cols, 1)?;
             validate_data_sets(needed_cols)?;
             check_multivar_growth_budget(&t.variables, needed_cols, needed_rows)?;
             while t.variables.len() < needed_cols {
@@ -1534,7 +1773,7 @@ fn ensure_sheet_capacity(
             }
         }
         TableArchetype::Nested(t) => {
-            let needed_cols = compute_needed_cols_with_subs(start_col, start_subcol, grid_cols, 1)?;
+            let needed_cols = compute_nested_needed_cols(&t.groups, start_row, start_col, start_subcol, grid_cols)?;
             validate_data_sets(needed_cols)?;
             check_nested_growth_budget(&t.groups, needed_cols, needed_rows)?;
             while t.groups.len() < needed_cols {
@@ -1568,12 +1807,21 @@ fn grow_datasets(data_sets: &mut Vec<DataSetColumn>, needed_cols: usize, needed_
     Ok(())
 }
 
-fn resolve_target_coord(arch: &TableArchetype, start_col: usize, start_subcol: usize, flat_offset: usize) -> Result<(usize, usize), FormatError> {
+fn resolve_target_coord(
+    arch: &TableArchetype,
+    start_row: usize,
+    start_col: usize,
+    start_subcol: usize,
+    flat_offset: usize,
+) -> Result<(usize, usize), FormatError> {
     let subs = match arch {
         TableArchetype::Xy(t) => t.y_subcolumn_mode.subcolumn_count(),
         TableArchetype::Column(t) => t.subcolumn_mode.subcolumn_count(),
         TableArchetype::Grouped(t) => t.subcolumn_mode.subcolumn_count(),
-        _ => 1,
+        TableArchetype::Contingency(_) | TableArchetype::Survival(_) | TableArchetype::PartsOfWhole(_) | TableArchetype::MultipleVariables(_) => 1,
+        TableArchetype::Nested(t) => {
+            return resolve_nested_coord(&t.groups, start_row, start_col, start_subcol, flat_offset);
+        }
     };
     validate_subcolumns(subs)?;
     let flat = start_col
@@ -1581,12 +1829,21 @@ fn resolve_target_coord(arch: &TableArchetype, start_col: usize, start_subcol: u
         .and_then(|v| v.checked_add(start_subcol))
         .and_then(|v| v.checked_add(flat_offset))
         .ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("target cell coordinate overflow") })?;
+    if start_subcol >= subs {
+        return Err(FormatError::Doc(DocError::CellOutOfBounds { row: start_row, col: start_col, subcol: start_subcol }));
+    }
     Ok((flat / subs, flat % subs))
 }
 
-fn apply_headers_to_sheet(target: &mut DataSheet, start_col: usize, start_subcol: usize, headers: &[String]) -> Result<(), FormatError> {
+fn apply_headers_to_sheet(
+    target: &mut DataSheet,
+    start_row: usize,
+    start_col: usize,
+    start_subcol: usize,
+    headers: &[String],
+) -> Result<(), FormatError> {
     for (idx, title) in headers.iter().enumerate() {
-        let (col, subcol) = resolve_target_coord(&target.archetype, start_col, start_subcol, idx)?;
+        let (col, subcol) = resolve_target_coord(&target.archetype, start_row, start_col, start_subcol, idx)?;
         if subcol != 0 || title.trim().is_empty() {
             continue;
         }

@@ -10,11 +10,12 @@ use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 
 use curvebook_doc::{
-    AnalysisKind, CURRENT_SCHEMA_VERSION, Cell, CellValue, CiBound, CloneDataSheetOptions, ConstantValue, DataSetColumn, DataSheet, GraphAnnotation,
-    GraphSheet, HookSource, ImageMimeKind, InfoSheet, LayoutItem, LayoutSheet, MAX_DATA_SETS, MAX_IMAGE_ASSET_BYTES, MAX_PROJECT_IMAGE_ASSETS,
-    MAX_ROWS, MAX_SHEETS_PER_PROJECT, MAX_SUBCOLUMNS, NormalizeAnchor, ParameterScope, ProjectDocument, ResultCell, ResultSheet, ResultStatus,
-    SheetId, SheetSection, TableArchetype, TransformAnalysisSpec, extract_template_hooks, is_valid_asset_id, validate_data_sets, validate_rows,
-    validate_subcolumns, validate_title,
+    AnalysisKind, CURRENT_SCHEMA_VERSION, Cell, CellExclusionNote, CellValue, CiBound, CloneDataSheetOptions, ConstantValue, DataSetColumn,
+    DataSheet, DocError, FittedCurveOverlay, FloatingNote, GraphAnnotation, GraphSheet, HookSource, ImageMimeKind, InfoSheet, LayoutItem,
+    LayoutSheet, LinkedDataRegion, MAX_DATA_SETS, MAX_IMAGE_ASSET_BYTES, MAX_PROJECT_IMAGE_ASSETS, MAX_ROWS, MAX_SHEET_CELLS, MAX_SHEETS_PER_PROJECT,
+    MAX_SUBCOLUMNS, NormalizeAnchor, ParameterScope, ProjectDocument, ResultCell, ResultSheet, ResultStatus, ResultTab, SheetId, SheetSection,
+    SourceCellId, TableArchetype, TransformAnalysisSpec, extract_template_hooks, is_valid_asset_id, validate_data_sets, validate_project_cells,
+    validate_rows, validate_subcolumns, validate_title,
 };
 
 use crate::csv::{CsvOptions, export_datasheet_to_csv};
@@ -239,7 +240,7 @@ fn stage_unpacked_entry_file(
     Err(FormatError::Io(String::from("unpacked directory staging is not supported on wasm32")))
 }
 
-fn clamp_peek_schema_version(raw: u64) -> u32 {
+pub(crate) fn clamp_peek_schema_version(raw: u64) -> u32 {
     u32::try_from(raw).unwrap_or(u32::MAX)
 }
 
@@ -769,11 +770,934 @@ pub(crate) fn parse_bounded_json_outcome(doc_bytes: &[u8]) -> BoundedJsonOutcome
     }
 }
 
-pub(crate) fn parse_bounded_json_value(doc_bytes: &[u8]) -> Result<serde_json::Value, FormatError> {
-    match parse_bounded_json_outcome(doc_bytes) {
-        BoundedJsonOutcome::Value(val) => Ok(val),
-        BoundedJsonOutcome::BudgetExceeded(err) | BoundedJsonOutcome::SyntaxOrType(err) => Err(err),
+#[derive(Default)]
+pub(crate) struct StreamedResultHeavyParts {
+    pub(crate) analyzable_data: Option<DataSheet>,
+    pub(crate) has_tabs: bool,
+    pub(crate) tabs: Vec<ResultTab>,
+    pub(crate) has_fitted_curves: bool,
+    pub(crate) fitted_curves: Vec<FittedCurveOverlay>,
+    pub(crate) has_eliminated_outliers: bool,
+    pub(crate) eliminated_outliers: Vec<SourceCellId>,
+}
+
+pub(crate) struct StreamedHeavyParts {
+    pub(crate) data_sheets: Vec<DataSheet>,
+    pub(crate) result_heavy_parts: Vec<StreamedResultHeavyParts>,
+}
+
+pub(crate) struct StreamedProjectDocument {
+    pub(crate) meta_doc: serde_json::Value,
+    pub(crate) has_data_sheets_key: bool,
+    pub(crate) heavy: StreamedHeavyParts,
+}
+
+pub(crate) enum StreamedDocumentOutcome {
+    Parsed(Box<StreamedProjectDocument>),
+    NonObject,
+    BudgetExceeded(FormatError),
+    DataError(FormatError),
+    SyntaxOrType(FormatError),
+}
+
+struct StreamedDocContext {
+    dom_budget: JsonDomBudget,
+    seq_budget_exceeded: bool,
+    saw_data_sheets_key: bool,
+    used_project_cells: usize,
+}
+
+struct SeqBudget {
+    max_single_seq: usize,
+    remaining_total: usize,
+    exceeded: bool,
+}
+
+impl SeqBudget {
+    fn new(max_single_seq: usize, remaining_total: usize) -> Self {
+        Self { max_single_seq, remaining_total, exceeded: false }
     }
+
+    fn charge_item<E: serde::de::Error>(&mut self, seq_count: usize) -> Result<(), E> {
+        if seq_count > self.max_single_seq {
+            self.exceeded = true;
+            return Err(serde::de::Error::custom(format!("JSON array length exceeds limit {}", self.max_single_seq)));
+        }
+        if self.remaining_total == 0 {
+            self.exceeded = true;
+            return Err(serde::de::Error::custom("JSON table element count exceeds sheet migration limit"));
+        }
+        self.remaining_total -= 1;
+        Ok(())
+    }
+}
+
+struct BoundedSeqDeserializer<'a, D> {
+    inner: D,
+    budget: &'a mut SeqBudget,
+}
+
+struct BoundedSeqVisitor<'a, V> {
+    inner: V,
+    budget: &'a mut SeqBudget,
+}
+
+struct BoundedSeqAccess<'a, A> {
+    inner: A,
+    budget: &'a mut SeqBudget,
+    count: usize,
+}
+
+struct BoundedMapAccess<'a, A> {
+    inner: A,
+    budget: &'a mut SeqBudget,
+}
+
+struct BoundedSeed<'a, S> {
+    inner: S,
+    budget: &'a mut SeqBudget,
+}
+
+impl<'de, S> serde::de::DeserializeSeed<'de> for BoundedSeed<'_, S>
+where
+    S: serde::de::DeserializeSeed<'de>,
+{
+    type Value = S::Value;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        self.inner.deserialize(BoundedSeqDeserializer { inner: deserializer, budget: self.budget })
+    }
+}
+
+impl<'de, A> serde::de::SeqAccess<'de> for BoundedSeqAccess<'_, A>
+where
+    A: serde::de::SeqAccess<'de>,
+{
+    type Error = A::Error;
+
+    fn next_element_seed<T>(&mut self, seed: T) -> Result<Option<T::Value>, Self::Error>
+    where
+        T: serde::de::DeserializeSeed<'de>,
+    {
+        let next = self.inner.next_element_seed(BoundedSeed { inner: seed, budget: self.budget })?;
+        if next.is_some() {
+            self.count = self.count.saturating_add(1);
+            self.budget.charge_item(self.count)?;
+        }
+        Ok(next)
+    }
+
+    fn size_hint(&self) -> Option<usize> {
+        self.inner.size_hint()
+    }
+}
+
+impl<'de, A> serde::de::MapAccess<'de> for BoundedMapAccess<'_, A>
+where
+    A: serde::de::MapAccess<'de>,
+{
+    type Error = A::Error;
+
+    fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>, Self::Error>
+    where
+        K: serde::de::DeserializeSeed<'de>,
+    {
+        self.inner.next_key_seed(BoundedSeed { inner: seed, budget: self.budget })
+    }
+
+    fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value, Self::Error>
+    where
+        V: serde::de::DeserializeSeed<'de>,
+    {
+        self.inner.next_value_seed(BoundedSeed { inner: seed, budget: self.budget })
+    }
+
+    fn next_entry_seed<K, V>(&mut self, kseed: K, vseed: V) -> Result<Option<(K::Value, V::Value)>, Self::Error>
+    where
+        K: serde::de::DeserializeSeed<'de>,
+        V: serde::de::DeserializeSeed<'de>,
+    {
+        match self.next_key_seed(kseed)? {
+            Some(key) => Ok(Some((key, self.next_value_seed(vseed)?))),
+            None => Ok(None),
+        }
+    }
+
+    fn size_hint(&self) -> Option<usize> {
+        self.inner.size_hint()
+    }
+}
+
+impl<'de, 'a, V> serde::de::Visitor<'de> for BoundedSeqVisitor<'a, V>
+where
+    V: serde::de::Visitor<'de>,
+{
+    type Value = V::Value;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.inner.expecting(formatter)
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> {
+        self.inner.visit_bool(v)
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+        self.inner.visit_i64(v)
+    }
+
+    fn visit_i128<E: serde::de::Error>(self, v: i128) -> Result<Self::Value, E> {
+        self.inner.visit_i128(v)
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+        self.inner.visit_u64(v)
+    }
+
+    fn visit_u128<E: serde::de::Error>(self, v: u128) -> Result<Self::Value, E> {
+        self.inner.visit_u128(v)
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> {
+        self.inner.visit_f64(v)
+    }
+
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+        self.inner.visit_str(v)
+    }
+
+    fn visit_borrowed_str<E: serde::de::Error>(self, v: &'de str) -> Result<Self::Value, E> {
+        self.inner.visit_borrowed_str(v)
+    }
+
+    fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
+        self.inner.visit_string(v)
+    }
+
+    fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<Self::Value, E> {
+        self.inner.visit_bytes(v)
+    }
+
+    fn visit_borrowed_bytes<E: serde::de::Error>(self, v: &'de [u8]) -> Result<Self::Value, E> {
+        self.inner.visit_borrowed_bytes(v)
+    }
+
+    fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<Self::Value, E> {
+        self.inner.visit_byte_buf(v)
+    }
+
+    fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        self.inner.visit_none()
+    }
+
+    fn visit_some<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        self.inner.visit_some(BoundedSeqDeserializer { inner: deserializer, budget: self.budget })
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        self.inner.visit_unit()
+    }
+
+    fn visit_newtype_struct<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        self.inner.visit_newtype_struct(BoundedSeqDeserializer { inner: deserializer, budget: self.budget })
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, seq: A) -> Result<Self::Value, A::Error> {
+        self.inner.visit_seq(BoundedSeqAccess { inner: seq, budget: self.budget, count: 0 })
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+        self.inner.visit_map(BoundedMapAccess { inner: map, budget: self.budget })
+    }
+}
+
+struct BoundedEnumAccessRef<'a, E> {
+    inner: E,
+    budget: &'a mut SeqBudget,
+}
+
+struct BoundedVariantAccessRef<'a, V> {
+    inner: V,
+    budget: &'a mut SeqBudget,
+}
+
+impl<'de, 'a, E> serde::de::EnumAccess<'de> for BoundedEnumAccessRef<'a, E>
+where
+    E: serde::de::EnumAccess<'de>,
+{
+    type Error = E::Error;
+    type Variant = BoundedVariantAccessRef<'a, E::Variant>;
+
+    fn variant_seed<V>(self, seed: V) -> Result<(V::Value, Self::Variant), Self::Error>
+    where
+        V: serde::de::DeserializeSeed<'de>,
+    {
+        let (val, var) = self.inner.variant_seed(seed)?;
+        Ok((val, BoundedVariantAccessRef { inner: var, budget: self.budget }))
+    }
+}
+
+impl<'de, 'a, V> serde::de::VariantAccess<'de> for BoundedVariantAccessRef<'a, V>
+where
+    V: serde::de::VariantAccess<'de>,
+{
+    type Error = V::Error;
+
+    fn unit_variant(self) -> Result<(), Self::Error> {
+        self.inner.unit_variant()
+    }
+
+    fn newtype_variant_seed<T>(self, seed: T) -> Result<T::Value, Self::Error>
+    where
+        T: serde::de::DeserializeSeed<'de>,
+    {
+        self.inner.newtype_variant_seed(BoundedSeed { inner: seed, budget: self.budget })
+    }
+
+    fn tuple_variant<W>(self, len: usize, visitor: W) -> Result<W::Value, Self::Error>
+    where
+        W: serde::de::Visitor<'de>,
+    {
+        self.inner.tuple_variant(len, BoundedSeqVisitor { inner: visitor, budget: self.budget })
+    }
+
+    fn struct_variant<W>(self, fields: &'static [&'static str], visitor: W) -> Result<W::Value, Self::Error>
+    where
+        W: serde::de::Visitor<'de>,
+    {
+        self.inner.struct_variant(fields, BoundedSeqVisitor { inner: visitor, budget: self.budget })
+    }
+}
+
+impl<'de, 'a, D> serde::Deserializer<'de> for BoundedSeqDeserializer<'a, D>
+where
+    D: serde::Deserializer<'de>,
+{
+    type Error = D::Error;
+
+    fn deserialize_any<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        self.inner.deserialize_any(BoundedSeqVisitor { inner: visitor, budget: self.budget })
+    }
+
+    fn deserialize_bool<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        self.inner.deserialize_bool(visitor)
+    }
+
+    fn deserialize_i8<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        self.inner.deserialize_i8(visitor)
+    }
+
+    fn deserialize_i16<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        self.inner.deserialize_i16(visitor)
+    }
+
+    fn deserialize_i32<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        self.inner.deserialize_i32(visitor)
+    }
+
+    fn deserialize_i64<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        self.inner.deserialize_i64(visitor)
+    }
+
+    fn deserialize_u8<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        self.inner.deserialize_u8(visitor)
+    }
+
+    fn deserialize_u16<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        self.inner.deserialize_u16(visitor)
+    }
+
+    fn deserialize_u32<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        self.inner.deserialize_u32(visitor)
+    }
+
+    fn deserialize_u64<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        self.inner.deserialize_u64(visitor)
+    }
+
+    fn deserialize_f32<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        self.inner.deserialize_f32(visitor)
+    }
+
+    fn deserialize_f64<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        self.inner.deserialize_f64(visitor)
+    }
+
+    fn deserialize_char<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        self.inner.deserialize_char(visitor)
+    }
+
+    fn deserialize_str<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        self.inner.deserialize_str(visitor)
+    }
+
+    fn deserialize_string<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        self.inner.deserialize_string(visitor)
+    }
+
+    fn deserialize_bytes<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        self.inner.deserialize_bytes(visitor)
+    }
+
+    fn deserialize_byte_buf<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        self.inner.deserialize_byte_buf(visitor)
+    }
+
+    fn deserialize_option<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        self.inner.deserialize_option(BoundedSeqVisitor { inner: visitor, budget: self.budget })
+    }
+
+    fn deserialize_unit<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        self.inner.deserialize_unit(visitor)
+    }
+
+    fn deserialize_unit_struct<V: serde::de::Visitor<'de>>(self, name: &'static str, visitor: V) -> Result<V::Value, Self::Error> {
+        self.inner.deserialize_unit_struct(name, visitor)
+    }
+
+    fn deserialize_newtype_struct<V: serde::de::Visitor<'de>>(self, name: &'static str, visitor: V) -> Result<V::Value, Self::Error> {
+        self.inner.deserialize_newtype_struct(name, BoundedSeqVisitor { inner: visitor, budget: self.budget })
+    }
+
+    fn deserialize_seq<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        self.inner.deserialize_seq(BoundedSeqVisitor { inner: visitor, budget: self.budget })
+    }
+
+    fn deserialize_tuple<V: serde::de::Visitor<'de>>(self, len: usize, visitor: V) -> Result<V::Value, Self::Error> {
+        self.inner.deserialize_tuple(len, BoundedSeqVisitor { inner: visitor, budget: self.budget })
+    }
+
+    fn deserialize_tuple_struct<V: serde::de::Visitor<'de>>(self, name: &'static str, len: usize, visitor: V) -> Result<V::Value, Self::Error> {
+        self.inner.deserialize_tuple_struct(name, len, BoundedSeqVisitor { inner: visitor, budget: self.budget })
+    }
+
+    fn deserialize_map<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        self.inner.deserialize_map(BoundedSeqVisitor { inner: visitor, budget: self.budget })
+    }
+
+    fn deserialize_struct<V: serde::de::Visitor<'de>>(
+        self,
+        name: &'static str,
+        fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        self.inner.deserialize_struct(name, fields, BoundedSeqVisitor { inner: visitor, budget: self.budget })
+    }
+
+    fn deserialize_enum<V: serde::de::Visitor<'de>>(
+        self,
+        name: &'static str,
+        variants: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        struct EnumWrapperVisitor<'a, V> {
+            inner: V,
+            budget: &'a mut SeqBudget,
+        }
+        impl<'de, 'a, V> serde::de::Visitor<'de> for EnumWrapperVisitor<'a, V>
+        where
+            V: serde::de::Visitor<'de>,
+        {
+            type Value = V::Value;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                self.inner.expecting(formatter)
+            }
+
+            fn visit_enum<A: serde::de::EnumAccess<'de>>(self, data: A) -> Result<Self::Value, A::Error> {
+                self.inner.visit_enum(BoundedEnumAccessRef { inner: data, budget: self.budget })
+            }
+        }
+        self.inner.deserialize_enum(name, variants, EnumWrapperVisitor { inner: visitor, budget: self.budget })
+    }
+
+    fn deserialize_identifier<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        self.inner.deserialize_identifier(visitor)
+    }
+
+    fn deserialize_ignored_any<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        self.inner.deserialize_ignored_any(BoundedSeqVisitor { inner: visitor, budget: self.budget })
+    }
+}
+
+struct BoundedTypedSeed<'a, T> {
+    ctx: &'a mut StreamedDocContext,
+    max_single_seq: usize,
+    max_total_elems: usize,
+    _marker: std::marker::PhantomData<T>,
+}
+
+impl<'a, T> BoundedTypedSeed<'a, T> {
+    fn new(ctx: &'a mut StreamedDocContext, max_single_seq: usize, max_total_elems: usize) -> Self {
+        Self { ctx, max_single_seq, max_total_elems, _marker: std::marker::PhantomData }
+    }
+}
+
+impl<'de, T> serde::de::DeserializeSeed<'de> for BoundedTypedSeed<'_, T>
+where
+    T: serde::Deserialize<'de>,
+{
+    type Value = T;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut seq_budget = SeqBudget::new(self.max_single_seq, self.max_total_elems);
+        let res = T::deserialize(BoundedSeqDeserializer { inner: deserializer, budget: &mut seq_budget });
+        if seq_budget.exceeded {
+            self.ctx.seq_budget_exceeded = true;
+        }
+        res
+    }
+}
+
+struct LegacyDataSheetSeed<'a>(&'a mut StreamedDocContext);
+
+impl<'de> serde::de::DeserializeSeed<'de> for LegacyDataSheetSeed<'_> {
+    type Value = DataSheet;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct DataSheetVisitor<'a>(&'a mut StreamedDocContext);
+
+        impl<'de> serde::de::Visitor<'de> for DataSheetVisitor<'_> {
+            type Value = DataSheet;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a DataSheet JSON object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut id: Option<SheetId> = None;
+                let mut title: Option<String> = None;
+                let mut archetype: Option<TableArchetype> = None;
+                let mut frozen: Option<bool> = None;
+                let mut info_sheet_id: Option<Option<SheetId>> = None;
+                let mut linked_regions: Option<Vec<LinkedDataRegion>> = None;
+                let mut floating_notes: Option<Vec<FloatingNote>> = None;
+                let mut color_tag: Option<Option<curvebook_palette::Rgba8>> = None;
+                let mut exclusion_notes: Option<Vec<CellExclusionNote>> = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "id" => id = Some(map.next_value()?),
+                        "title" => title = Some(map.next_value()?),
+                        "archetype" => {
+                            let max_total = MAX_SHEET_CELLS.saturating_mul(4).saturating_add(MAX_ROWS.saturating_mul(4));
+                            archetype = Some(map.next_value_seed(BoundedTypedSeed::<TableArchetype>::new(self.0, MAX_ROWS, max_total))?);
+                        }
+                        "frozen" => frozen = Some(map.next_value()?),
+                        "info_sheet_id" => info_sheet_id = Some(map.next_value()?),
+                        "linked_regions" => {
+                            linked_regions = Some(map.next_value_seed(BoundedTypedSeed::<Vec<LinkedDataRegion>>::new(self.0, 10_000, 100_000))?);
+                        }
+                        "floating_notes" => {
+                            floating_notes = Some(map.next_value_seed(BoundedTypedSeed::<Vec<FloatingNote>>::new(self.0, 10_000, 100_000))?);
+                        }
+                        "color_tag" => color_tag = Some(map.next_value()?),
+                        "exclusion_notes" => {
+                            let max_total = MAX_SHEET_CELLS.saturating_mul(2);
+                            exclusion_notes =
+                                Some(map.next_value_seed(BoundedTypedSeed::<Vec<CellExclusionNote>>::new(self.0, MAX_SHEET_CELLS, max_total))?);
+                        }
+                        _ => {
+                            self.0.dom_budget.charge(0, key.len().saturating_add(64)).map_err(serde::de::Error::custom)?;
+                            let _ = map.next_value_seed(BoundedValueSeed(&mut self.0.dom_budget))?;
+                        }
+                    }
+                }
+
+                let sheet = DataSheet {
+                    id: id.ok_or_else(|| serde::de::Error::missing_field("id"))?,
+                    title: title.ok_or_else(|| serde::de::Error::missing_field("title"))?,
+                    archetype: archetype.ok_or_else(|| serde::de::Error::missing_field("archetype"))?,
+                    frozen: frozen.unwrap_or(false),
+                    info_sheet_id: info_sheet_id.unwrap_or(None),
+                    linked_regions: linked_regions.unwrap_or_default(),
+                    floating_notes: floating_notes.unwrap_or_default(),
+                    color_tag: color_tag.unwrap_or(None),
+                    exclusion_notes: exclusion_notes.unwrap_or_default(),
+                };
+                sheet.validate().map_err(serde::de::Error::custom)?;
+                sheet.validate_finite_metadata().map_err(serde::de::Error::custom)?;
+                self.0.used_project_cells =
+                    validate_project_cells(self.0.used_project_cells, sheet.archetype.allocated_cell_slots()).map_err(serde::de::Error::custom)?;
+                Ok(sheet)
+            }
+        }
+
+        deserializer.deserialize_map(DataSheetVisitor(self.0))
+    }
+}
+
+struct OptionLegacyDataSheetSeed<'a>(&'a mut StreamedDocContext);
+
+impl<'de> serde::de::DeserializeSeed<'de> for OptionLegacyDataSheetSeed<'_> {
+    type Value = Option<DataSheet>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct OptVisitor<'a>(&'a mut StreamedDocContext);
+        impl<'de> serde::de::Visitor<'de> for OptVisitor<'_> {
+            type Value = Option<DataSheet>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("null or a DataSheet JSON object")
+            }
+
+            fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+
+            fn visit_some<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+                serde::de::DeserializeSeed::deserialize(LegacyDataSheetSeed(self.0), deserializer).map(Some)
+            }
+        }
+        deserializer.deserialize_option(OptVisitor(self.0))
+    }
+}
+
+struct DataSheetsSeqSeed<'a>(&'a mut StreamedDocContext);
+
+impl<'de> serde::de::DeserializeSeed<'de> for DataSheetsSeqSeed<'_> {
+    type Value = Vec<DataSheet>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct SeqVisitor<'a>(&'a mut StreamedDocContext);
+        impl<'de> serde::de::Visitor<'de> for SeqVisitor<'_> {
+            type Value = Vec<DataSheet>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a sequence of DataSheet objects")
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let mut sheets = Vec::new();
+                loop {
+                    if sheets.len() >= MAX_SHEETS_PER_PROJECT {
+                        // Probe one more element ONLY to see if sequence ends cleanly; reject if > MAX_SHEETS_PER_PROJECT.
+                        let next_exists = seq.next_element::<serde::de::IgnoredAny>()?.is_some();
+                        if next_exists {
+                            return Err(serde::de::Error::custom(DocError::TooManySheets {
+                                count: MAX_SHEETS_PER_PROJECT + 1,
+                                max: MAX_SHEETS_PER_PROJECT,
+                            }));
+                        }
+                        break;
+                    }
+                    let Some(sheet) = seq.next_element_seed(LegacyDataSheetSeed(self.0))? else {
+                        break;
+                    };
+                    sheets.push(sheet);
+                }
+                Ok(sheets)
+            }
+        }
+        deserializer.deserialize_seq(SeqVisitor(self.0))
+    }
+}
+
+struct ResultSheetMigrationSeed<'a>(&'a mut StreamedDocContext);
+
+impl<'de> serde::de::DeserializeSeed<'de> for ResultSheetMigrationSeed<'_> {
+    type Value = (serde_json::Value, StreamedResultHeavyParts);
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ResultVisitor<'a>(&'a mut StreamedDocContext);
+
+        impl<'de> serde::de::Visitor<'de> for ResultVisitor<'_> {
+            type Value = (serde_json::Value, StreamedResultHeavyParts);
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a ResultSheet JSON object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                self.0.dom_budget.charge(1, std::mem::size_of::<serde_json::Value>()).map_err(serde::de::Error::custom)?;
+                let mut meta_obj = serde_json::Map::new();
+                let mut heavy = StreamedResultHeavyParts::default();
+                let max_tab_total = MAX_SHEET_CELLS.saturating_mul(4).saturating_add(MAX_ROWS.saturating_mul(4));
+
+                while let Some(key) = map.next_key::<String>()? {
+                    self.0.dom_budget.charge(0, key.len().saturating_add(64)).map_err(serde::de::Error::custom)?;
+                    match key.as_str() {
+                        "analyzable_data" => {
+                            heavy.analyzable_data = map.next_value_seed(OptionLegacyDataSheetSeed(self.0))?;
+                            meta_obj.insert(key, serde_json::Value::Null);
+                        }
+                        "tabs" => {
+                            heavy.tabs = map.next_value_seed(BoundedTypedSeed::<Vec<ResultTab>>::new(self.0, MAX_SHEET_CELLS, max_tab_total))?;
+                            heavy.has_tabs = true;
+                            meta_obj.insert(key, serde_json::Value::Array(Vec::new()));
+                        }
+                        "fitted_curves" => {
+                            heavy.fitted_curves =
+                                map.next_value_seed(BoundedTypedSeed::<Vec<FittedCurveOverlay>>::new(self.0, MAX_SHEET_CELLS, max_tab_total))?;
+                            heavy.has_fitted_curves = true;
+                            meta_obj.insert(key, serde_json::Value::Array(Vec::new()));
+                        }
+                        "eliminated_outliers" => {
+                            heavy.eliminated_outliers =
+                                map.next_value_seed(BoundedTypedSeed::<Vec<SourceCellId>>::new(self.0, MAX_SHEET_CELLS, max_tab_total))?;
+                            heavy.has_eliminated_outliers = true;
+                            meta_obj.insert(key, serde_json::Value::Array(Vec::new()));
+                        }
+                        _ => {
+                            let val = map.next_value_seed(BoundedValueSeed(&mut self.0.dom_budget))?;
+                            meta_obj.insert(key, val);
+                        }
+                    }
+                }
+                Ok((serde_json::Value::Object(meta_obj), heavy))
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> {
+                Ok((BoundedValueVisitor(&mut self.0.dom_budget).visit_bool(v)?, StreamedResultHeavyParts::default()))
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+                Ok((BoundedValueVisitor(&mut self.0.dom_budget).visit_i64(v)?, StreamedResultHeavyParts::default()))
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+                Ok((BoundedValueVisitor(&mut self.0.dom_budget).visit_u64(v)?, StreamedResultHeavyParts::default()))
+            }
+
+            fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> {
+                Ok((BoundedValueVisitor(&mut self.0.dom_budget).visit_f64(v)?, StreamedResultHeavyParts::default()))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                Ok((BoundedValueVisitor(&mut self.0.dom_budget).visit_str(v)?, StreamedResultHeavyParts::default()))
+            }
+
+            fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
+                Ok((BoundedValueVisitor(&mut self.0.dom_budget).visit_string(v)?, StreamedResultHeavyParts::default()))
+            }
+
+            fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok((BoundedValueVisitor(&mut self.0.dom_budget).visit_none()?, StreamedResultHeavyParts::default()))
+            }
+
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok((BoundedValueVisitor(&mut self.0.dom_budget).visit_unit()?, StreamedResultHeavyParts::default()))
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, seq: A) -> Result<Self::Value, A::Error> {
+                Ok((BoundedValueVisitor(&mut self.0.dom_budget).visit_seq(seq)?, StreamedResultHeavyParts::default()))
+            }
+        }
+
+        deserializer.deserialize_any(ResultVisitor(self.0))
+    }
+}
+
+struct ResultSheetsSeqSeed<'a>(&'a mut StreamedDocContext);
+
+impl<'de> serde::de::DeserializeSeed<'de> for ResultSheetsSeqSeed<'_> {
+    type Value = (Vec<serde_json::Value>, Vec<StreamedResultHeavyParts>);
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct SeqVisitor<'a>(&'a mut StreamedDocContext);
+        impl<'de> serde::de::Visitor<'de> for SeqVisitor<'_> {
+            type Value = (Vec<serde_json::Value>, Vec<StreamedResultHeavyParts>);
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a sequence of ResultSheet objects")
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                self.0.dom_budget.charge(1, std::mem::size_of::<serde_json::Value>()).map_err(serde::de::Error::custom)?;
+                let mut metas = Vec::new();
+                let mut heavies = Vec::new();
+                while let Some((meta, heavy)) = seq.next_element_seed(ResultSheetMigrationSeed(self.0))? {
+                    metas.push(meta);
+                    heavies.push(heavy);
+                    if metas.len() > MAX_SHEETS_PER_PROJECT {
+                        return Err(serde::de::Error::custom(DocError::TooManySheets { count: metas.len(), max: MAX_SHEETS_PER_PROJECT }));
+                    }
+                }
+                Ok((metas, heavies))
+            }
+        }
+        deserializer.deserialize_seq(SeqVisitor(self.0))
+    }
+}
+
+struct HybridDocumentSeed<'a>(&'a mut StreamedDocContext);
+
+impl<'de> serde::de::DeserializeSeed<'de> for HybridDocumentSeed<'_> {
+    type Value = Option<StreamedProjectDocument>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct RootVisitor<'a>(&'a mut StreamedDocContext);
+
+        impl<'de> serde::de::Visitor<'de> for RootVisitor<'_> {
+            type Value = Option<StreamedProjectDocument>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a ProjectDocument JSON object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                self.0.dom_budget.charge(1, std::mem::size_of::<serde_json::Value>()).map_err(serde::de::Error::custom)?;
+                let mut meta_obj = serde_json::Map::new();
+                let mut data_sheets = Vec::new();
+                let mut result_heavy_parts = Vec::new();
+                let mut has_data_sheets_key = false;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    self.0.dom_budget.charge(0, key.len().saturating_add(64)).map_err(serde::de::Error::custom)?;
+                    match key.as_str() {
+                        "data_sheets" => {
+                            has_data_sheets_key = true;
+                            self.0.saw_data_sheets_key = true;
+                            data_sheets = map.next_value_seed(DataSheetsSeqSeed(self.0))?;
+                            meta_obj.insert(key, serde_json::Value::Array(Vec::new()));
+                        }
+                        "result_sheets" => {
+                            let (metas, heavies) = map.next_value_seed(ResultSheetsSeqSeed(self.0))?;
+                            result_heavy_parts = heavies;
+                            meta_obj.insert(key, serde_json::Value::Array(metas));
+                        }
+                        _ => {
+                            let val = map.next_value_seed(BoundedValueSeed(&mut self.0.dom_budget))?;
+                            meta_obj.insert(key, val);
+                        }
+                    }
+                }
+
+                Ok(Some(StreamedProjectDocument {
+                    meta_doc: serde_json::Value::Object(meta_obj),
+                    has_data_sheets_key,
+                    heavy: StreamedHeavyParts { data_sheets, result_heavy_parts },
+                }))
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> {
+                let _ = BoundedValueVisitor(&mut self.0.dom_budget).visit_bool(v)?;
+                Ok(None)
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+                let _ = BoundedValueVisitor(&mut self.0.dom_budget).visit_i64(v)?;
+                Ok(None)
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+                let _ = BoundedValueVisitor(&mut self.0.dom_budget).visit_u64(v)?;
+                Ok(None)
+            }
+
+            fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> {
+                let _ = BoundedValueVisitor(&mut self.0.dom_budget).visit_f64(v)?;
+                Ok(None)
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                let _ = BoundedValueVisitor(&mut self.0.dom_budget).visit_str(v)?;
+                Ok(None)
+            }
+
+            fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
+                let _ = BoundedValueVisitor(&mut self.0.dom_budget).visit_string(v)?;
+                Ok(None)
+            }
+
+            fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                let _ = BoundedValueVisitor(&mut self.0.dom_budget).visit_none()?;
+                Ok(None)
+            }
+
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                let _ = BoundedValueVisitor(&mut self.0.dom_budget).visit_unit()?;
+                Ok(None)
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, seq: A) -> Result<Self::Value, A::Error> {
+                let _ = BoundedValueVisitor(&mut self.0.dom_budget).visit_seq(seq)?;
+                Ok(None)
+            }
+        }
+
+        deserializer.deserialize_any(RootVisitor(self.0))
+    }
+}
+
+pub(crate) fn parse_streamed_document_outcome(doc_bytes: &[u8]) -> StreamedDocumentOutcome {
+    let max_bytes = doc_bytes.len().saturating_mul(6).clamp(MIN_MIGRATION_JSON_BYTES, MAX_MIGRATION_JSON_BYTES);
+    let mut ctx = StreamedDocContext {
+        dom_budget: JsonDomBudget { remaining_nodes: MAX_MIGRATION_JSON_NODES, remaining_bytes: max_bytes, budget_exceeded: false },
+        seq_budget_exceeded: false,
+        saw_data_sheets_key: false,
+        used_project_cells: 0,
+    };
+    let mut de = serde_json::Deserializer::from_slice(doc_bytes);
+    match serde::de::DeserializeSeed::deserialize(HybridDocumentSeed(&mut ctx), &mut de) {
+        Ok(Some(doc)) => match de.end() {
+            Ok(()) => StreamedDocumentOutcome::Parsed(Box::new(doc)),
+            Err(err) => StreamedDocumentOutcome::SyntaxOrType(FormatError::from(err)),
+        },
+        Ok(None) => match de.end() {
+            Ok(()) => StreamedDocumentOutcome::NonObject,
+            Err(err) => StreamedDocumentOutcome::SyntaxOrType(FormatError::from(err)),
+        },
+        Err(err) => {
+            let is_data_err = err.is_data();
+            let formatted = FormatError::from(err);
+            if ctx.dom_budget.budget_exceeded || ctx.seq_budget_exceeded {
+                StreamedDocumentOutcome::BudgetExceeded(formatted)
+            } else if ctx.saw_data_sheets_key && is_data_err {
+                StreamedDocumentOutcome::DataError(formatted)
+            } else {
+                StreamedDocumentOutcome::SyntaxOrType(formatted)
+            }
+        }
+    }
+}
+
+pub(crate) fn finalize_migrated_document(migrated_meta: serde_json::Value, heavy: StreamedHeavyParts) -> Result<ProjectDocument, FormatError> {
+    let mut doc: ProjectDocument = serde_json::from_value(migrated_meta)?;
+    doc.data_sheets = heavy.data_sheets;
+    for (rs, parts) in doc.result_sheets.iter_mut().zip(heavy.result_heavy_parts) {
+        rs.analyzable_data = parts.analyzable_data;
+        if parts.has_tabs {
+            rs.tabs = parts.tabs;
+        }
+        if parts.has_fitted_curves {
+            rs.fitted_curves = parts.fitted_curves;
+        }
+        if parts.has_eliminated_outliers {
+            rs.eliminated_outliers = parts.eliminated_outliers;
+        }
+        rs.validate()?;
+    }
+    doc.validate_structural_limits()?;
+    Ok(doc)
 }
 
 fn parse_and_migrate_document(doc_bytes: &[u8], manifest_schema_version: u32) -> Result<ProjectDocument, FormatError> {
@@ -787,9 +1711,17 @@ fn parse_and_migrate_document(doc_bytes: &[u8], manifest_schema_version: u32) ->
         parsed.schema_version = CURRENT_SCHEMA_VERSION;
         Ok(parsed)
     } else {
-        let raw_value = parse_bounded_json_value(doc_bytes)?;
-        let migrated_value = migrate_document_json(raw_value, doc_version)?;
-        Ok(serde_json::from_value(migrated_value)?)
+        let streamed = match parse_streamed_document_outcome(doc_bytes) {
+            StreamedDocumentOutcome::Parsed(doc) => *doc,
+            StreamedDocumentOutcome::NonObject => {
+                return Err(FormatError::Json(String::from("expected ProjectDocument JSON object")));
+            }
+            StreamedDocumentOutcome::BudgetExceeded(err) | StreamedDocumentOutcome::DataError(err) | StreamedDocumentOutcome::SyntaxOrType(err) => {
+                return Err(err);
+            }
+        };
+        let migrated_value = migrate_document_json(streamed.meta_doc, doc_version)?;
+        finalize_migrated_document(migrated_value, streamed.heavy)
     }
 }
 

@@ -384,6 +384,9 @@ fn format_float_opt(val: Option<f64>, opts: &CsvOptions) -> String {
 }
 
 fn validate_result_floats(sheet: &ResultSheet) -> Result<(), FormatError> {
+    if let Some(field) = sheet.analysis.first_non_finite_float() {
+        return Err(FormatError::NonFiniteFloat { location: format!("{}.{field}", sheet.id) });
+    }
     for (idx, s) in sheet.scalars.iter().enumerate() {
         if !s.value.is_finite() {
             return Err(FormatError::NonFiniteFloat { location: format!("{}.scalars[{idx}]", sheet.id) });

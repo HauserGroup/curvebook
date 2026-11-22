@@ -7,11 +7,15 @@
 use std::collections::{BTreeMap, HashSet};
 
 use curvebook_doc::{
-    AnalysisKind, ConstantValue, DataSheet, GraphAnnotation, InfoConstant, InfoSheet, LayoutItem, LinkSource, MAX_IMAGE_ASSET_BYTES,
-    MAX_PROJECT_IMAGE_ASSETS, ProjectDocument, SheetId, SubcolumnMode, TableKind, is_valid_asset_id,
+    AnalysisKind, ConstantValue, DataSheet, FloatingNote, GraphAnnotation, HookSource, InfoConstant, InfoSheet, LayoutItem, LinkSource,
+    MAX_IMAGE_ASSET_BYTES, MAX_PROJECT_IMAGE_ASSETS, NormalizeAnchor, ParameterScope, ProjectDocument, SheetId, SubcolumnMode, TableKind,
+    TransformAnalysisSpec, extract_template_hooks, is_valid_asset_id,
 };
 
-use crate::archive::{BoundedJsonOutcome, migrate_document_json, parse_bounded_json_outcome, validate_project_document};
+use crate::archive::{
+    BoundedJsonOutcome, StreamedDocumentOutcome, clamp_peek_schema_version, finalize_migrated_document, migrate_document_json,
+    parse_bounded_json_outcome, parse_streamed_document_outcome, validate_project_document,
+};
 use crate::csv::{CsvOptions, import_csv_to_datasheet_with_budget, parse_delimited_records};
 use crate::error::{FormatError, ImportReport, ImportWarning, ImportWarningKind};
 use crate::image_asset::validate_image_asset_parts;
@@ -231,21 +235,26 @@ fn try_load_embedded_project_json(archive: &ZipArchive, warnings: &mut Vec<Impor
     let Some(doc_bytes) = archive.get("document.json") else {
         return Ok(None);
     };
-    let val = match parse_bounded_json_outcome(doc_bytes) {
-        BoundedJsonOutcome::Value(val) => val,
-        BoundedJsonOutcome::BudgetExceeded(err) => return Err(err),
-        BoundedJsonOutcome::SyntaxOrType(_) => return Ok(None),
+    let streamed = match parse_streamed_document_outcome(doc_bytes) {
+        StreamedDocumentOutcome::Parsed(doc) => *doc,
+        StreamedDocumentOutcome::BudgetExceeded(err) | StreamedDocumentOutcome::DataError(err) => return Err(err),
+        StreamedDocumentOutcome::NonObject | StreamedDocumentOutcome::SyntaxOrType(_) => return Ok(None),
     };
-    if val.get("data_sheets").is_none() {
+    if !streamed.has_data_sheets_key {
         return Ok(None);
     }
-    let version = match val.get("schema_version") {
+    let version = match streamed.meta_doc.get("schema_version") {
         None | Some(serde_json::Value::Null) => 0,
-        Some(v) => v.as_u64().and_then(|n| u32::try_from(n).ok()).unwrap_or(curvebook_doc::CURRENT_SCHEMA_VERSION),
+        Some(v) => match v.as_u64() {
+            Some(n) => clamp_peek_schema_version(n),
+            None => {
+                return Err(FormatError::Json(String::from("invalid `schema_version` in embedded `document.json`: expected unsigned integer")));
+            }
+        },
     };
-    let migrated = migrate_document_json(val, version)?;
+    let migrated = migrate_document_json(streamed.meta_doc, version)?;
     precheck_migrated_image_assets(&migrated)?;
-    let mut doc: ProjectDocument = serde_json::from_value(migrated)?;
+    let mut doc = finalize_migrated_document(migrated, streamed.heavy)?;
     doc.data_sheets.iter().try_fold(0_usize, accumulate_project_cells)?;
     hydrate_embedded_image_assets(archive, &mut doc)?;
     sanitize_invalid_document_sheet_ids(&mut doc, warnings);
@@ -690,6 +699,108 @@ fn apply_opt_sheet_remap(slot: &mut Option<SheetId>, remap: &BTreeMap<SheetId, S
     }
 }
 
+fn remap_hook_source(hook: &mut HookSource, remap: &BTreeMap<SheetId, SheetId>) {
+    match hook {
+        HookSource::InfoConstant { info_sheet_id, .. } => apply_opt_sheet_remap(info_sheet_id, remap),
+        HookSource::ResultScalar { result_sheet_id, .. } => apply_sheet_remap(result_sheet_id, remap),
+        HookSource::ColumnTitleValue { data_sheet_id, .. } => apply_sheet_remap(data_sheet_id, remap),
+    }
+}
+
+fn find_longest_remapped_prefix<'a>(after_kind: &'a str, remap: &'a BTreeMap<SheetId, SheetId>) -> Option<(&'a SheetId, &'a str)> {
+    remap
+        .iter()
+        .filter_map(|(old_id, new_id)| {
+            let rest = after_kind.strip_prefix(old_id.as_str())?;
+            let after_colon = rest.strip_prefix(':')?;
+            Some((old_id.as_str().len(), new_id, after_colon))
+        })
+        .max_by_key(|(len, _, _)| *len)
+        .map(|(_, new_id, rest)| (new_id, rest))
+}
+
+fn rewrite_hook_token(raw_inner: &str, remap: &BTreeMap<SheetId, SheetId>) -> Option<String> {
+    let wrapped = format!("{{{{{raw_inner}}}}}");
+    if let Some(hook) = extract_template_hooks(&wrapped).into_iter().next() {
+        return match hook {
+            HookSource::InfoConstant { info_sheet_id: Some(ref old_id), ref constant_name } => {
+                remap.get(old_id).map(|new_id| format!("{{{{info:{new_id}:{constant_name}}}}}"))
+            }
+            HookSource::ResultScalar { ref result_sheet_id, ref parameter_key, data_set_index } => remap.get(result_sheet_id).map(|new_id| {
+                if let Some(ds) = data_set_index {
+                    format!("{{{{result:{new_id}:{ds}:{parameter_key}}}}}")
+                } else {
+                    format!("{{{{result:{new_id}:{parameter_key}}}}}")
+                }
+            }),
+            _ => None,
+        };
+    }
+
+    let trimmed = raw_inner.trim();
+    if let Some(after_info) = trimmed.strip_prefix("info:") {
+        let after_info = after_info.trim_start();
+        if let Some((new_id, rest)) = find_longest_remapped_prefix(after_info, remap) {
+            let name = rest.trim();
+            if !name.is_empty() {
+                return Some(format!("{{{{info:{new_id}:{name}}}}}"));
+            }
+        }
+    } else if let Some(after_res) = trimmed.strip_prefix("result:") {
+        let after_res = after_res.trim_start();
+        if let Some((new_id, rest)) = find_longest_remapped_prefix(after_res, remap) {
+            if let Some((ds_str, param)) = rest.split_once(':')
+                && let Ok(ds) = ds_str.trim().parse::<usize>()
+                && !param.trim().is_empty()
+            {
+                return Some(format!("{{{{result:{new_id}:{ds}:{}}}}}", param.trim()));
+            }
+            let param = rest.trim();
+            if !param.is_empty() {
+                return Some(format!("{{{{result:{new_id}:{param}}}}}"));
+            }
+        }
+    }
+    None
+}
+
+fn remap_template_hooks_in_text(text: &mut String, remap: &BTreeMap<SheetId, SheetId>) {
+    if remap.is_empty() || !text.contains("{{") {
+        return;
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    let mut changed = false;
+
+    while let Some(open) = rest.find("{{") {
+        out.push_str(&rest[..open]);
+        let after_open = &rest[open + 2..];
+        let Some(close) = after_open.find("}}") else {
+            out.push_str(&rest[open..]);
+            rest = "";
+            break;
+        };
+        let raw_inner = &after_open[..close];
+        if let Some(rewritten) = rewrite_hook_token(raw_inner, remap) {
+            out.push_str(&rewritten);
+            changed = true;
+        } else {
+            out.push_str(&rest[open..open + 2 + close + 2]);
+        }
+        rest = &after_open[close + 2..];
+    }
+    out.push_str(rest);
+    if changed {
+        *text = out;
+    }
+}
+
+fn remap_floating_notes(notes: &mut [FloatingNote], remap: &BTreeMap<SheetId, SheetId>) {
+    for note in notes {
+        remap_template_hooks_in_text(&mut note.body_markdown, remap);
+    }
+}
+
 fn remap_document_sheet_references(doc: &mut ProjectDocument, remap: &BTreeMap<SheetId, SheetId>) {
     apply_opt_sheet_remap(&mut doc.active_sheet_id, remap);
     apply_opt_sheet_remap(&mut doc.family_anchor_sheet_id, remap);
@@ -697,6 +808,7 @@ fn remap_document_sheet_references(doc: &mut ProjectDocument, remap: &BTreeMap<S
         for linked in &mut info.linked_data_sheets {
             apply_sheet_remap(linked, remap);
         }
+        remap_floating_notes(&mut info.floating_notes, remap);
     }
     for ds in &mut doc.data_sheets {
         remap_datasheet_references(ds, remap);
@@ -704,12 +816,34 @@ fn remap_document_sheet_references(doc: &mut ProjectDocument, remap: &BTreeMap<S
     for rs in &mut doc.result_sheets {
         apply_sheet_remap(&mut rs.analysis.id, remap);
         apply_sheet_remap(&mut rs.analysis.source_sheet_id, remap);
-        if let AnalysisKind::PowerAnalysis(ref mut power) = rs.analysis.kind {
-            apply_opt_sheet_remap(&mut power.info_sheet_id, remap);
+        match &mut rs.analysis.kind {
+            AnalysisKind::PowerAnalysis(power) => {
+                apply_opt_sheet_remap(&mut power.info_sheet_id, remap);
+            }
+            AnalysisKind::Transform(TransformAnalysisSpec::Normalize { zero_anchor, hundred_anchor, .. }) => {
+                if let NormalizeAnchor::Hooked(hook) = zero_anchor {
+                    remap_hook_source(hook, remap);
+                }
+                if let NormalizeAnchor::Hooked(hook) = hundred_anchor {
+                    remap_hook_source(hook, remap);
+                }
+            }
+            AnalysisKind::NonlinearRegression(fit) => {
+                for rule in &mut fit.parameter_rules {
+                    if let ParameterScope::HookedConstant(hook) = &mut rule.scope {
+                        remap_hook_source(hook, remap);
+                    }
+                }
+            }
+            _ => {}
         }
         if let Some(ref mut derived) = rs.analyzable_data {
             remap_datasheet_references(derived, remap);
         }
+        for cell_id in &mut rs.eliminated_outliers {
+            apply_sheet_remap(&mut cell_id.sheet_id, remap);
+        }
+        remap_floating_notes(&mut rs.floating_notes, remap);
     }
     for gs in &mut doc.graph_sheets {
         remap_graph_references(gs, remap);
@@ -719,9 +853,11 @@ fn remap_document_sheet_references(doc: &mut ProjectDocument, remap: &BTreeMap<S
             match item {
                 LayoutItem::LiveGraph { graph_sheet_id, .. } => apply_sheet_remap(graph_sheet_id, remap),
                 LayoutItem::LiveTable { source_sheet_id, .. } => apply_sheet_remap(source_sheet_id, remap),
-                LayoutItem::TextCallout { .. } | LayoutItem::EmbeddedImage { .. } => {}
+                LayoutItem::TextCallout { markdown, .. } => remap_template_hooks_in_text(markdown, remap),
+                LayoutItem::EmbeddedImage { .. } => {}
             }
         }
+        remap_floating_notes(&mut ls.floating_notes, remap);
     }
 }
 
@@ -732,10 +868,17 @@ fn remap_datasheet_references(ds: &mut DataSheet, remap: &BTreeMap<SheetId, Shee
             apply_sheet_remap(sheet_id, remap);
         }
     }
+    remap_floating_notes(&mut ds.floating_notes, remap);
 }
 
 fn remap_graph_references(gs: &mut curvebook_doc::GraphSheet, remap: &BTreeMap<SheetId, SheetId>) {
     apply_sheet_remap(&mut gs.spec.primary_source_sheet_id, remap);
+    remap_template_hooks_in_text(&mut gs.spec.title, remap);
+    remap_template_hooks_in_text(&mut gs.spec.x_axis.title, remap);
+    remap_template_hooks_in_text(&mut gs.spec.y_axis.title, remap);
+    if let Some(ref mut y2) = gs.spec.y2_axis {
+        remap_template_hooks_in_text(&mut y2.title, remap);
+    }
     for series in &mut gs.spec.series {
         apply_sheet_remap(&mut series.source_sheet_id, remap);
         if let Some(ref mut ov) = series.regression_overlay {
@@ -749,8 +892,15 @@ fn remap_graph_references(gs: &mut curvebook_doc::GraphSheet, remap: &BTreeMap<S
         apply_sheet_remap(&mut cld.result_sheet_id, remap);
     }
     for ann in &mut gs.spec.annotations {
-        if let GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. } | GraphAnnotation::ModelEquation { result_sheet_id, .. } = ann {
-            apply_sheet_remap(result_sheet_id, remap);
+        match ann {
+            GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. } | GraphAnnotation::ModelEquation { result_sheet_id, .. } => {
+                apply_sheet_remap(result_sheet_id, remap);
+            }
+            GraphAnnotation::TextBox { markdown, .. } => {
+                remap_template_hooks_in_text(markdown, remap);
+            }
+            GraphAnnotation::LineOrArrow { .. } | GraphAnnotation::Shape { .. } | GraphAnnotation::EmbeddedImage { .. } => {}
         }
     }
+    remap_floating_notes(&mut gs.floating_notes, remap);
 }

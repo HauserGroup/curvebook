@@ -860,7 +860,7 @@ fn adversarial_prism_json_structural_cases_handled_cleanly() {
         Err(FormatError::UnsupportedSchemaVersion { .. })
     ));
 
-    // schema_version > u32::MAX inside document.json
+    // schema_version > u32::MAX inside document.json clamps via clamp_peek_schema_version -> UnsupportedSchemaVersion
     let u64_ver_doc = serde_json::json!({
         "schema_version": 9_999_999_999_999_u64,
         "title": "Huge Ver",
@@ -874,6 +874,23 @@ fn adversarial_prism_json_structural_cases_handled_cleanly() {
     });
     assert!(matches!(
         import_prism_bytes(&build_raw_zip(&[RawZipEntry::stored(b"document.json", &serde_json::to_vec(&u64_ver_doc).unwrap())], b"")),
+        Err(FormatError::UnsupportedSchemaVersion { version: u32::MAX, max_supported: CURRENT_SCHEMA_VERSION })
+    ));
+
+    // Non-u64 schema_version inside document.json still fails with FormatError::Json
+    let bad_type_ver_doc = serde_json::json!({
+        "schema_version": "not-an-int",
+        "title": "Bad Ver",
+        "data_sheets": [],
+        "info_sheets": [],
+        "result_sheets": [],
+        "graph_sheets": [],
+        "layout_sheets": [],
+        "active_sheet_id": null,
+        "family_anchor_sheet_id": null
+    });
+    assert!(matches!(
+        import_prism_bytes(&build_raw_zip(&[RawZipEntry::stored(b"document.json", &serde_json::to_vec(&bad_type_ver_doc).unwrap())], b"")),
         Err(FormatError::Json(_))
     ));
 

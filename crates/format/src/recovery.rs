@@ -1952,7 +1952,6 @@ fn build_cleaned_journal_bytes(seqs: &[u64], crcs: &[u32], commands: &[serde_jso
         let record = JournalOpRecord { format_version: CURRENT_JOURNAL_VERSION, seq, crc32, command_json: command_json.clone() };
         let line = record.to_ndjson_line()?;
         out.extend_from_slice(line.as_bytes());
-        out.push(b'\n');
     }
     Ok(out)
 }
