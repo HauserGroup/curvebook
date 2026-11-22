@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use curvebook_doc::{
     AnalysisKind, ClusterDistance, ClusterLinkage, ColorChannelMapping, DataSheet, DiagnosticPlotKind, ErrorBarDirection, ErrorBarMetric, GraphKind,
     GraphSheet, GraphSpec, GraphicalDataObject, HeatmapColumnLabelAngle, HeatmapColumnLabelMode, HeatmapRowLabelMode, LayoutItem, LayoutSheet,
-    LevelOrderSpec, MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec, ProjectDocument, ResultCell, ResultSheet, ResultStatus,
-    ResultTab, ResultTabKind, SheetId, SizeChannelMapping, SubcolumnMode, SummaryMeasure, TableArchetype, VariableColumn, VariableRole,
+    LevelOrderSpec, MAX_IMAGE_PIXELS, MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec, ProjectDocument, ResultCell, ResultSheet,
+    ResultStatus, ResultTab, ResultTabKind, SheetId, SizeChannelMapping, SubcolumnMode, SummaryMeasure, TableArchetype, VariableColumn, VariableRole,
     WhiskerMethod,
 };
 use curvebook_math::dist::{chi2_isf, norm_ppf, norm_two_sided_isf};
@@ -20,16 +20,14 @@ use curvebook_stats::roc::{RocCiMethod, roc_curve_analysis};
 use curvebook_stats::two_group::bland_altman;
 use curvebook_text::{RichText, parse_markup};
 
-use crate::scales::{AxisMapping, ResolvedSegment};
 use crate::scene::{
     ChartError, ChartScene, ChartWarning, FillPaint, Path2D, PathCmd, PlottedPointMeta, PointPt, PositionedText, RectPt, ScenePrimitive,
     SourceCellId, TextAnchor,
 };
 use crate::survival_cat::{
-    CartesianFrame, LegendEntry, PlotMarginConfig, alpha_fill, draw_cartesian_frame, draw_categorical_x_ticks, draw_colorbar, draw_empty_open_frame,
-    draw_graph_annotations, draw_legend_entries, emit_marker, nice_axis_ticks, nice_axis_ticks_with_warnings, path_close, path_line, path_move,
-    polygon_path, resolve_axis_domain, resolve_axis_domain_with_warnings, resolve_graph_text, sanitize_range, solid_stroke, text_metrics,
-    update_plot_rect_for_labels,
+    LegendEntry, PlotMarginConfig, SegmentedFrameSpec, alpha_fill, draw_colorbar, draw_empty_open_frame, draw_graph_annotations, draw_legend_entries,
+    emit_marker, layout_and_render_segmented_chrome, path_close, path_line, path_move, polygon_path, resolve_graph_text, sanitize_range,
+    solid_stroke, text_metrics, update_plot_rect_for_labels,
 };
 use crate::xy::{
     AxisErrorTarget, EmbeddedTableDrawSpec, SegmentedAxis, compute_central_tendency, compute_raw_error_bounds, emit_directional_error_bar,
@@ -72,7 +70,7 @@ pub fn compile_multivariate_or_diagnostic_graph(graph: &GraphSheet, doc: &Projec
         }
     }?;
 
-    draw_graph_annotations(scene, &graph.spec.annotations, doc, doc.paired_info_sheet_id(&graph.spec.primary_source_sheet_id));
+    draw_graph_annotations(scene, &graph.spec.annotations, doc, doc.paired_info_sheet_id(&graph.spec.primary_source_sheet_id))?;
     Ok(())
 }
 
@@ -191,37 +189,30 @@ fn compile_bubble_scatter(
     let (y_min, y_max) = points.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| (lo.min(p.y), hi.max(p.y)));
     let x_pad = if x_is_cat { 0.5 } else { (x_max - x_min).max(1.0) * 0.08 };
     let y_pad = (y_max - y_min).max(1.0) * 0.08;
-    let (x_lo, x_hi) = resolve_axis_domain(&graph.spec.x_axis, x_min - x_pad, x_max + x_pad);
-    let (y_lo, y_hi) = resolve_axis_domain(&graph.spec.y_axis, y_min - y_pad, y_max + y_pad);
-
-    let x_ticks = if x_is_cat { Vec::new() } else { nice_axis_ticks(&graph.spec.x_axis, x_lo, x_hi, 6) };
-    let y_ticks = nice_axis_ticks(&graph.spec.y_axis, y_lo, y_hi, 5);
     let has_colorbar = continuous_ramp.is_some();
-    let max_y_w = update_plot_rect_for_labels(
+    let x_cats_opt = x_is_cat.then(|| x_levels.iter().enumerate().map(|(i, lbl)| (i as f64, lbl.clone())).collect::<Vec<_>>());
+    let (x_axis, y_axis, _) = layout_and_render_segmented_chrome(
         scene,
-        &graph.spec,
-        &y_ticks,
-        PlotMarginConfig { has_legend: !cat_levels.is_empty(), has_colorbar, ..PlotMarginConfig::default() },
+        graph,
+        doc,
+        &SegmentedFrameSpec {
+            x_bounds: (x_min - x_pad, x_max + x_pad),
+            y_bounds: (y_min - y_pad, y_max + y_pad),
+            y2_bounds: None,
+            cat_x: x_cats_opt.as_deref(),
+            cat_y: None,
+            margins: PlotMarginConfig { has_legend: !cat_levels.is_empty(), has_colorbar, ..PlotMarginConfig::default() },
+        },
     );
 
     let r = scene.plot_rect_pt;
-    let x_map = AxisMapping { min: x_lo, max: x_hi, scale: graph.spec.x_axis.segments.first().map_or(AxisScale::Linear, |s| s.scale) };
-    let y_map = AxisMapping { min: y_lo, max: y_hi, scale: graph.spec.y_axis.segments.first().map_or(AxisScale::Linear, |s| s.scale) };
-    let frame = CartesianFrame { spec: &graph.spec, x_ticks: &x_ticks, y_ticks: &y_ticks, x_map, y_map, max_y_label_w: max_y_w, doc };
-    draw_cartesian_frame(scene, &frame);
-    if x_is_cat {
-        let cats: Vec<(f64, String)> =
-            x_levels.iter().enumerate().filter_map(|(i, lbl)| x_map.map_value(i as f64, r.x, r.right()).map(|xp| (xp, lbl.clone()))).collect();
-        draw_categorical_x_ticks(scene, &graph.spec, &cats, doc);
-    }
-
     let (col_lo, col_hi) = resolve_continuous_color_domain(&points, domain_clamp);
     let max_abs_s = points.iter().map(|p| p.size_scalar.abs()).fold(0.0_f64, f64::max);
 
     let mut grouped_screen: Vec<Vec<(f64, f64)>> = vec![Vec::new(); cat_levels.len().max(1)];
     let mut mapped_points = Vec::with_capacity(points.len());
     for pt in &points {
-        let (Some(px), Some(py)) = (x_map.map_value(pt.x, r.x, r.right()), y_map.map_value(pt.y, r.bottom(), r.y)) else {
+        let (Some((_, px)), Some((_, py))) = (x_axis.map_value(pt.x), y_axis.map_value(pt.y)) else {
             continue;
         };
         if let Some(slot) = grouped_screen.get_mut(pt.color_cat_idx) {
@@ -499,7 +490,6 @@ struct CatSlotDraw<'a> {
     cx: f64,
     box_w: f64,
     y_zero: f64,
-    y_map: AxisMapping,
     y_axis: &'a SegmentedAxis,
 }
 
@@ -509,7 +499,7 @@ struct CatDotCtx<'a> {
     level_label: &'a str,
     cx: f64,
     spread_w: f64,
-    y_map: AxisMapping,
+    y_axis: &'a SegmentedAxis,
     clip: RectPt,
     marker: MarkerStyle,
 }
@@ -549,7 +539,7 @@ fn draw_categorical_summary_slot(scene: &mut ChartScene, slot: &CatSlotComputed,
     let r = scene.plot_rect_pt;
     let cx = draw.cx;
     let box_w = draw.box_w;
-    let y_map = draw.y_map;
+    let y_axis = draw.y_axis;
     let color = draw.color;
     let sorted: Vec<f64> = slot.sorted_obs.iter().map(|o| o.value).collect();
     let default_dot = MarkerStyle {
@@ -565,7 +555,7 @@ fn draw_categorical_summary_slot(scene: &mut ChartScene, slot: &CatSlotComputed,
     match draw.gdo {
         GraphicalDataObject::BarWithReplicates { border_color, border_width_pt, replicate_overlay, .. } => {
             if let Some(center_y) = slot.center_opt
-                && let Some(y_top) = y_map.map_value(center_y, r.bottom(), r.y)
+                && let Some((_, y_top)) = y_axis.map_value(center_y)
             {
                 let rect = RectPt::new(cx - box_w * 0.5, y_top.min(draw.y_zero), box_w, (draw.y_zero - y_top).abs().max(0.5));
                 scene.primitives.push(ScenePrimitive::Path {
@@ -586,7 +576,7 @@ fn draw_categorical_summary_slot(scene: &mut ChartScene, slot: &CatSlotComputed,
                         level_label: draw.level_label,
                         cx,
                         spread_w: box_w * 0.6,
-                        y_map,
+                        y_axis,
                         clip: r,
                         marker: bar_dot,
                     },
@@ -612,7 +602,7 @@ fn draw_categorical_summary_slot(scene: &mut ChartScene, slot: &CatSlotComputed,
                     stroke_color: *stroke_color,
                     show_outliers: *show_outliers,
                     show_all: *show_all_points,
-                    y_map,
+                    y_axis,
                 },
             );
             if let Some(&max_v) = sorted.last() {
@@ -634,7 +624,7 @@ fn draw_categorical_summary_slot(scene: &mut ChartScene, slot: &CatSlotComputed,
                     stroke_color: *stroke_color,
                     show_med: *show_median_and_quartiles,
                     half_violin: *half_violin_with_points,
-                    y_map,
+                    y_axis,
                 },
             );
             if let Some(&max_v) = sorted.last() {
@@ -643,7 +633,7 @@ fn draw_categorical_summary_slot(scene: &mut ChartScene, slot: &CatSlotComputed,
         }
         GraphicalDataObject::FloatingBar { border_color, border_width_pt, summary, .. } => {
             if let (Some(&lo), Some(&hi)) = (sorted.first(), sorted.last())
-                && let (Some(y_lo_pt), Some(y_hi_pt)) = (y_map.map_value(lo, r.bottom(), r.y), y_map.map_value(hi, r.bottom(), r.y))
+                && let (Some((_, y_lo_pt)), Some((_, y_hi_pt))) = (y_axis.map_value(lo), y_axis.map_value(hi))
             {
                 top_data_val = hi;
                 let rect = RectPt::new(cx - box_w * 0.5, y_hi_pt.min(y_lo_pt), box_w, (y_lo_pt - y_hi_pt).abs().max(1.0));
@@ -655,7 +645,7 @@ fn draw_categorical_summary_slot(scene: &mut ChartScene, slot: &CatSlotComputed,
                 });
                 if summary.is_some()
                     && let Some(center_y) = slot.center_opt
-                    && let Some(ym) = y_map.map_value(center_y, r.bottom(), r.y)
+                    && let Some((_, ym)) = y_axis.map_value(center_y)
                 {
                     scene.primitives.push(ScenePrimitive::Path {
                         path: Path2D::line(PointPt::new(cx - box_w * 0.5, ym), PointPt::new(cx + box_w * 0.5, ym)),
@@ -676,7 +666,7 @@ fn draw_categorical_summary_slot(scene: &mut ChartScene, slot: &CatSlotComputed,
                     level_label: draw.level_label,
                     cx,
                     spread_w: box_w * 0.65,
-                    y_map,
+                    y_axis,
                     clip: r,
                     marker: *marker,
                 },
@@ -686,7 +676,7 @@ fn draw_categorical_summary_slot(scene: &mut ChartScene, slot: &CatSlotComputed,
             }
             if *show_crossbar
                 && let Some(center_y) = slot.center_opt
-                && let Some(ym) = y_map.map_value(center_y, r.bottom(), r.y)
+                && let Some((_, ym)) = y_axis.map_value(center_y)
             {
                 scene.primitives.push(ScenePrimitive::Path {
                     path: Path2D::line(PointPt::new(cx - box_w * 0.45, ym), PointPt::new(cx + box_w * 0.45, ym)),
@@ -707,7 +697,7 @@ fn draw_categorical_summary_slot(scene: &mut ChartScene, slot: &CatSlotComputed,
                         level_label: draw.level_label,
                         cx,
                         spread_w: box_w * 0.65,
-                        y_map,
+                        y_axis,
                         clip: r,
                         marker: m,
                     },
@@ -728,7 +718,7 @@ fn draw_categorical_summary_slot(scene: &mut ChartScene, slot: &CatSlotComputed,
                         level_label: draw.level_label,
                         cx,
                         spread_w: box_w * 0.65,
-                        y_map,
+                        y_axis,
                         clip: r,
                         marker: *m,
                     },
@@ -748,7 +738,7 @@ fn draw_categorical_summary_slot(scene: &mut ChartScene, slot: &CatSlotComputed,
                     level_label: draw.level_label,
                     cx,
                     spread_w: box_w * 0.65,
-                    y_map,
+                    y_axis,
                     clip: r,
                     marker: default_dot,
                 },
@@ -899,75 +889,43 @@ fn compile_categorical_summary(
         let y_hi_pad = if resolved_cld.is_some() { pad_base * 0.18 } else { y_pad };
         (data_lo - if matches!(gdo, GraphicalDataObject::BarWithReplicates { .. }) && data_lo >= 0.0 { 0.0 } else { y_pad }, data_hi + y_hi_pad)
     };
-    let (y_lo, y_hi) = resolve_axis_domain_with_warnings(&graph.spec.y_axis, dom_in_lo, dom_in_hi, &mut scene.warnings);
-    let y_ticks = nice_axis_ticks_with_warnings(&graph.spec.y_axis, y_lo, y_hi, 5, &mut scene.warnings);
-    let max_y_w =
-        update_plot_rect_for_labels(scene, &graph.spec, &y_ticks, PlotMarginConfig { extra_top_pt: cld_top_margin, ..PlotMarginConfig::default() });
+    let x_cats: Vec<(f64, String)> = levels.iter().enumerate().map(|(i, l)| ((i as f64) + 0.5, l.clone())).collect();
+    let (x_axis, y_axis, _) = layout_and_render_segmented_chrome(
+        scene,
+        graph,
+        doc,
+        &SegmentedFrameSpec {
+            x_bounds: (0.0, levels.len() as f64),
+            y_bounds: (dom_in_lo, dom_in_hi),
+            y2_bounds: None,
+            cat_x: Some(&x_cats),
+            cat_y: None,
+            margins: PlotMarginConfig { extra_top_pt: cld_top_margin, ..PlotMarginConfig::default() },
+        },
+    );
 
     let r = scene.plot_rect_pt;
-    let y_map = AxisMapping { min: y_lo, max: y_hi, scale: y_scale };
-    let y_segmented = SegmentedAxis {
-        segments: vec![ResolvedSegment {
-            segment_index: 0,
-            domain_min: y_lo,
-            domain_max: y_hi,
-            scale: y_scale,
-            length_fraction: 1.0,
-            span_start_pt: r.bottom(),
-            span_end_pt: r.y,
-            major_tick_interval: graph.spec.y_axis.segments.first().and_then(|s| s.major_tick_interval),
-            minor_ticks_per_interval: graph.spec.y_axis.segments.first().map_or(0, |s| s.minor_ticks_per_interval),
-        }],
-        break_ornament: graph.spec.y_axis.break_ornament,
-        tick_format: graph.spec.y_axis.tick_format,
-        tick_angle_deg: graph.spec.y_axis.tick_angle_deg,
-        tick_direction: graph.spec.y_axis.tick_direction,
-        show_tick_labels: graph.spec.y_axis.show_tick_labels,
-        stroke_width_pt: if graph.spec.y_axis.stroke_width_pt > 0.0 { graph.spec.y_axis.stroke_width_pt } else { 1.0 },
-        warnings: Vec::new(),
-    };
-    let slot_w = r.width / (levels.len() as f64);
-    let cats: Vec<(f64, String)> = levels.iter().enumerate().map(|(i, l)| (r.x + ((i as f64) + 0.5) * slot_w, l.clone())).collect();
-    let frame = CartesianFrame {
-        spec: &graph.spec,
-        x_ticks: &[],
-        y_ticks: &y_ticks,
-        x_map: AxisMapping { min: 0.0, max: levels.len() as f64, scale: AxisScale::Linear },
-        y_map,
-        max_y_label_w: max_y_w,
-        doc,
-    };
-    draw_cartesian_frame(scene, &frame);
-    draw_categorical_x_ticks(scene, &graph.spec, &cats, doc);
-
-    let y_zero = crate::clamp_f64_safe(y_map.map_value(0.0, r.bottom(), r.y).unwrap_or(r.bottom()), r.y, r.bottom());
+    let y_zero = y_axis.map_value(0.0).map_or(r.bottom(), |(_, py)| crate::clamp_f64_safe(py, r.y, r.bottom()));
     let mut line_centers = Vec::new();
     let mut slot_bounds = Vec::with_capacity(slots.len());
     for (idx, slot) in slots.iter().enumerate() {
         if slot.sorted_obs.is_empty() {
             continue;
         }
-        let cx = r.x + ((idx as f64) + 0.5) * slot_w;
+        let Some((_, cx)) = x_axis.map_value((idx as f64) + 0.5) else {
+            continue;
+        };
+        let slot_lo = x_axis.map_value(idx as f64).map_or(r.x, |(_, pt)| pt);
+        let slot_hi = x_axis.map_value((idx + 1) as f64).map_or(r.right(), |(_, pt)| pt);
+        let slot_w = (slot_hi - slot_lo).abs().max(8.0);
         let color = graph.spec.palette.color_at(idx);
         let box_w = (slot_w * 0.56).min(38.0);
         let top_data_val = draw_categorical_summary_slot(
             scene,
             slot,
-            &CatSlotDraw {
-                graph,
-                y_col_idx: enc.y_column,
-                level_label: &levels[idx],
-                gdo,
-                y_error_bars,
-                color,
-                cx,
-                box_w,
-                y_zero,
-                y_map,
-                y_axis: &y_segmented,
-            },
+            &CatSlotDraw { graph, y_col_idx: enc.y_column, level_label: &levels[idx], gdo, y_error_bars, color, cx, box_w, y_zero, y_axis: &y_axis },
         );
-        let top_y_pt = y_map.map_value(top_data_val, r.bottom(), r.y).map_or(r.y, |py| crate::clamp_f64_safe(py, r.y, r.bottom()));
+        let top_y_pt = y_axis.map_value(top_data_val).map_or(r.y, |(_, py)| crate::clamp_f64_safe(py, r.y, r.bottom()));
         slot_bounds.push(crate::column_grouped::RenderedSlotBound {
             group_key: idx,
             label: levels[idx].clone(),
@@ -976,7 +934,7 @@ fn compile_categorical_summary(
             top_y_pt,
         });
         if let Some(center_y) = slot.center_opt
-            && let Some(yc) = y_map.map_value(center_y, r.bottom(), r.y)
+            && let Some((_, yc)) = y_axis.map_value(center_y)
         {
             line_centers.push((cx, yc));
         }
@@ -1001,7 +959,7 @@ fn emit_categorical_dots(scene: &mut ChartScene, sorted_obs: &[CatObs], ctx: &Ca
         let Some(marker) = crate::resolve_overridden_marker_for_cell(&ctx.graph.spec, ctx.y_col_idx, obs.row, Some(0), ctx.marker) else {
             continue;
         };
-        let Some(py) = ctx.y_map.map_value(obs.value, ctx.clip.bottom(), ctx.clip.y) else { continue };
+        let Some((_, py)) = ctx.y_axis.map_value(obs.value) else { continue };
         let phase = ((i as f64) * 0.618_033_988_75).fract() - 0.5;
         let px = ctx.cx + phase * ctx.spread_w;
         let center_pt = PointPt::new(px, py);
@@ -1027,7 +985,7 @@ struct BoxSlotSpec<'a> {
     stroke_color: Rgba8,
     show_outliers: bool,
     show_all: bool,
-    y_map: AxisMapping,
+    y_axis: &'a SegmentedAxis,
 }
 
 fn draw_box_and_whisker_slot(scene: &mut ChartScene, sorted_obs: &[CatObs], sorted: &[f64], slot: &BoxSlotSpec<'_>) {
@@ -1035,7 +993,7 @@ fn draw_box_and_whisker_slot(scene: &mut ChartScene, sorted_obs: &[CatObs], sort
     let box_w = slot.box_w;
     let fill_color = slot.fill_color;
     let stroke_color = slot.stroke_color;
-    let y_map = slot.y_map;
+    let y_axis = slot.y_axis;
     let r = scene.plot_rect_pt;
     let Some((q1, med, q3)) = quartiles_hinge(sorted) else { return };
     let iqr = (q3 - q1).max(0.0);
@@ -1054,13 +1012,9 @@ fn draw_box_and_whisker_slot(scene: &mut ChartScene, sorted_obs: &[CatObs], sort
         }
     };
 
-    let (Some(yq1), Some(ymed), Some(yq3), Some(yw_lo), Some(yw_hi)) = (
-        y_map.map_value(q1, r.bottom(), r.y),
-        y_map.map_value(med, r.bottom(), r.y),
-        y_map.map_value(q3, r.bottom(), r.y),
-        y_map.map_value(w_lo, r.bottom(), r.y),
-        y_map.map_value(w_hi, r.bottom(), r.y),
-    ) else {
+    let (Some((_, yq1)), Some((_, ymed)), Some((_, yq3)), Some((_, yw_lo)), Some((_, yw_hi))) =
+        (y_axis.map_value(q1), y_axis.map_value(med), y_axis.map_value(q3), y_axis.map_value(w_lo), y_axis.map_value(w_hi))
+    else {
         return;
     };
 
@@ -1115,7 +1069,7 @@ fn draw_box_and_whisker_slot(scene: &mut ChartScene, sorted_obs: &[CatObs], sort
                 level_label: slot.level_label,
                 cx,
                 spread_w: box_w * 0.5,
-                y_map,
+                y_axis,
                 clip: r,
                 marker: dot_marker,
             },
@@ -1125,7 +1079,7 @@ fn draw_box_and_whisker_slot(scene: &mut ChartScene, sorted_obs: &[CatObs], sort
         for obs in sorted_obs {
             if (obs.value < w_lo || obs.value > w_hi)
                 && let Some(marker) = crate::resolve_overridden_marker_for_cell(&slot.graph.spec, slot.y_col_idx, obs.row, Some(0), base_outlier)
-                && let Some(py) = y_map.map_value(obs.value, r.bottom(), r.y)
+                && let Some((_, py)) = y_axis.map_value(obs.value)
             {
                 let center_pt = PointPt::new(cx, py);
                 emit_marker(scene, center_pt, marker, Some(r));
@@ -1156,7 +1110,7 @@ struct ViolinSlotSpec<'a> {
     stroke_color: Rgba8,
     show_med: bool,
     half_violin: bool,
-    y_map: AxisMapping,
+    y_axis: &'a SegmentedAxis,
 }
 
 fn draw_violin_slot(scene: &mut ChartScene, sorted_obs: &[CatObs], sorted: &[f64], slot: &ViolinSlotSpec<'_>) {
@@ -1164,7 +1118,7 @@ fn draw_violin_slot(scene: &mut ChartScene, sorted_obs: &[CatObs], sorted: &[f64
     let half_w = slot.half_w;
     let fill_color = slot.fill_color;
     let stroke_color = slot.stroke_color;
-    let y_map = slot.y_map;
+    let y_axis = slot.y_axis;
     let r = scene.plot_rect_pt;
     let (Some(&min_v), Some(&max_v)) = (sorted.first(), sorted.last()) else { return };
     let sd = sample_sd(sorted).unwrap_or(1.0).max((max_v - min_v) * 0.08).max(1e-6);
@@ -1188,7 +1142,7 @@ fn draw_violin_slot(scene: &mut ChartScene, sorted_obs: &[CatObs], sorted: &[f64
     let mut right_pts = Vec::with_capacity(steps + 1);
     let mut left_pts = Vec::with_capacity(steps + 1);
     for (&y, &d) in ys.iter().zip(densities.iter()) {
-        let Some(py) = y_map.map_value(y, r.bottom(), r.y) else { continue };
+        let Some((_, py)) = y_axis.map_value(y) else { continue };
         let w = (d / max_dens) * (half_w * 0.5);
         right_pts.push((cx + w, py));
         left_pts.push((if slot.half_violin { cx } else { cx - w }, py));
@@ -1212,8 +1166,7 @@ fn draw_violin_slot(scene: &mut ChartScene, sorted_obs: &[CatObs], sorted: &[f64
 
     if slot.show_med
         && let Some((q1, med, q3)) = quartiles_hinge(sorted)
-        && let (Some(yq1), Some(yq3), Some(ymed)) =
-            (y_map.map_value(q1, r.bottom(), r.y), y_map.map_value(q3, r.bottom(), r.y), y_map.map_value(med, r.bottom(), r.y))
+        && let (Some((_, yq1)), Some((_, yq3)), Some((_, ymed))) = (y_axis.map_value(q1), y_axis.map_value(q3), y_axis.map_value(med))
     {
         scene.primitives.push(ScenePrimitive::Path {
             path: Path2D::line(PointPt::new(cx, yq1), PointPt::new(cx, yq3)),
@@ -1246,7 +1199,7 @@ fn draw_violin_slot(scene: &mut ChartScene, sorted_obs: &[CatObs], sorted: &[f64
                 level_label: slot.level_label,
                 cx: cx - half_w * 0.25,
                 spread_w: half_w * 0.3,
-                y_map,
+                y_axis,
                 clip: r,
                 marker: dot_marker,
             },
@@ -1258,20 +1211,38 @@ fn draw_violin_slot(scene: &mut ChartScene, sorted_obs: &[CatObs], sorted: &[f64
 // 2. All 7 DiagnosticPlotKinds
 // ============================================================================
 
-fn find_matching_result<'a>(graph: &GraphSheet, doc: &'a ProjectDocument) -> Option<&'a ResultSheet> {
-    doc.result_sheet(&graph.spec.primary_source_sheet_id)
-        .or_else(|| doc.result_sheets.iter().find(|r| r.analysis.source_sheet_id == graph.spec.primary_source_sheet_id))
-}
-
-fn matching_results<'a>(graph: &GraphSheet, doc: &'a ProjectDocument) -> Vec<&'a ResultSheet> {
+fn raw_matching_results<'a>(graph: &GraphSheet, doc: &'a ProjectDocument) -> Vec<&'a ResultSheet> {
     if let Some(direct) = doc.result_sheet(&graph.spec.primary_source_sheet_id) {
         return vec![direct];
     }
     doc.result_sheets.iter().filter(|r| r.analysis.source_sheet_id == graph.spec.primary_source_sheet_id).collect()
 }
 
+fn matching_results<'a>(graph: &GraphSheet, doc: &'a ProjectDocument) -> Vec<&'a ResultSheet> {
+    raw_matching_results(graph, doc).into_iter().filter(|r| !matches!(r.status, ResultStatus::Failed { .. })).collect()
+}
+
 fn find_matching_result_where<'a>(graph: &GraphSheet, doc: &'a ProjectDocument, pred: impl Fn(&ResultSheet) -> bool) -> Option<&'a ResultSheet> {
     matching_results(graph, doc).into_iter().find(|r| pred(r))
+}
+
+fn find_matching_result_where_checked<'a>(
+    graph: &GraphSheet,
+    doc: &'a ProjectDocument,
+    warnings: &mut Vec<ChartWarning>,
+    pred: impl Fn(&ResultSheet) -> bool,
+) -> Option<&'a ResultSheet> {
+    let found = find_matching_result_where(graph, doc, &pred);
+    if found.is_none()
+        && let Some(failed) = raw_matching_results(graph, doc).into_iter().find(|r| matches!(r.status, ResultStatus::Failed { .. }) && pred(r))
+    {
+        warnings.push(ChartWarning::new("failed_result_sheet", format!("result sheet '{}' failed; omitted stale analysis results", failed.id)));
+    }
+    found
+}
+
+fn find_matching_result_checked<'a>(graph: &GraphSheet, doc: &'a ProjectDocument, warnings: &mut Vec<ChartWarning>) -> Option<&'a ResultSheet> {
+    find_matching_result_where_checked(graph, doc, warnings, |_| true)
 }
 
 #[derive(Debug, Clone)]
@@ -1464,8 +1435,11 @@ fn collect_ds_active_values_with_sources(ds: &DataSheet, col_idx: usize) -> (Vec
 }
 
 fn resolve_source_data_sheet<'a>(graph: &GraphSheet, doc: &'a ProjectDocument) -> Option<&'a DataSheet> {
-    doc.data_sheet(&graph.spec.primary_source_sheet_id)
-        .or_else(|| doc.result_sheet(&graph.spec.primary_source_sheet_id).and_then(|r| doc.data_sheet(&r.analysis.source_sheet_id)))
+    doc.data_sheet(&graph.spec.primary_source_sheet_id).or_else(|| {
+        doc.result_sheet(&graph.spec.primary_source_sheet_id)
+            .filter(|r| !matches!(r.status, ResultStatus::Failed { .. }))
+            .and_then(|r| doc.data_sheet(&r.analysis.source_sheet_id))
+    })
 }
 
 fn result_cell_num(cell: &ResultCell) -> Option<f64> {
@@ -1628,7 +1602,7 @@ fn cluster_metric_labels(distance: ClusterDistance, linkage: ClusterLinkage) -> 
 }
 
 fn compile_heatmap(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartScene) -> Result<(), ChartError> {
-    let Some(mut hm) = extract_heatmap_data(graph, doc) else {
+    let Some(mut hm) = extract_heatmap_data(graph, doc, &mut scene.warnings) else {
         scene.warnings.push(ChartWarning::new("empty_heatmap", "no numeric matrix available for heatmap"));
         draw_empty_open_frame(scene);
         return Ok(());
@@ -1872,12 +1846,13 @@ fn resolve_selected_heatmap_cols(selected: &[usize], len: usize) -> Vec<usize> {
     out
 }
 
-fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument) -> Option<HeatmapData> {
+fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut Vec<ChartWarning>) -> Option<HeatmapData> {
     let direct_res = doc.result_sheet(&graph.spec.primary_source_sheet_id);
     if let Some(res) = direct_res
         && matches!(res.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { .. }))
     {
         if matches!(res.status, ResultStatus::Failed { .. }) {
+            warnings.push(ChartWarning::new("failed_result_sheet", format!("result sheet '{}' failed; omitted stale heatmap matrix", res.id)));
             return None;
         }
         if let Some(tab) = res.tabs.iter().find(|t| t.kind == ResultTabKind::MainSummary) {
@@ -1885,16 +1860,16 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument) -> Option<Hea
         }
     }
 
-    let clustering_res = find_matching_result_where(graph, doc, |r| {
-        !matches!(r.status, ResultStatus::Failed { .. }) && matches!(r.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::Clustering { .. }))
+    let clustering_res = find_matching_result_where_checked(graph, doc, warnings, |r| {
+        matches!(r.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::Clustering { .. }))
     });
 
     if clustering_res.is_none()
         && direct_res.is_none()
-        && let Some(res) = find_matching_result(graph, doc)
-        && !matches!(res.status, ResultStatus::Failed { .. })
+        && let Some(res) = find_matching_result_where_checked(graph, doc, warnings, |r| {
+            matches!(r.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { .. }))
+        })
         && let Some(tab) = res.tabs.iter().find(|t| t.kind == ResultTabKind::MainSummary)
-        && matches!(res.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { .. }))
     {
         return Some(correlation_heatmap_data(res, tab));
     }
@@ -2423,7 +2398,7 @@ fn draw_left_dendrogram(scene: &mut ChartScene, box_rect: RectPt, merges: &[Dend
 // 2b. Volcano Plot (-log10(p) vs log2FC + Threshold Crosshairs)
 
 fn compile_volcano(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartScene) -> Result<(), ChartError> {
-    let pts = extract_volcano_points(graph, doc);
+    let pts = extract_volcano_points(graph, doc, &mut scene.warnings);
     if pts.is_empty() {
         scene.warnings.push(ChartWarning::new("empty_volcano", "no fold-change / p-value observations for volcano plot"));
         draw_empty_open_frame(scene);
@@ -2444,32 +2419,32 @@ fn compile_volcano(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
     let (x_min, x_max) = pts.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| (a.min(p.x), b.max(p.x)));
     let (y_min, y_max) = pts.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| (a.min(p.y), b.max(p.y)));
     let x_abs = x_min.abs().max(x_max.abs()).max(fc_pos).max(1.0) * 1.1;
-    let (x_lo, x_hi) = resolve_axis_domain(&graph.spec.x_axis, -x_abs, x_abs);
-    let (y_lo, y_hi) = resolve_axis_domain(&graph.spec.y_axis, 0.0_f64.min(y_min), (y_max.max(p_thresh + 0.5)) * 1.1);
 
-    let x_ticks = nice_axis_ticks(&graph.spec.x_axis, x_lo, x_hi, 6);
-    let y_ticks = nice_axis_ticks(&graph.spec.y_axis, y_lo, y_hi, 5);
-    let max_y_w = update_plot_rect_for_labels(scene, &graph.spec, &y_ticks, PlotMarginConfig { has_legend: true, ..PlotMarginConfig::default() });
+    let mut frame_graph = graph.clone();
+    if frame_graph.spec.x_axis.title.trim().is_empty() || frame_graph.spec.x_axis.title == "X" {
+        frame_graph.spec.x_axis.title = String::from(if mr_threshold.is_some() { "Difference (A - B)" } else { "log2 Fold Change" });
+    }
+    if frame_graph.spec.y_axis.title.trim().is_empty() || frame_graph.spec.y_axis.title == "Y" {
+        frame_graph.spec.y_axis.title = String::from("-log10(P)");
+    }
+    let (x_axis, y_axis, _) = layout_and_render_segmented_chrome(
+        scene,
+        &frame_graph,
+        doc,
+        &SegmentedFrameSpec {
+            x_bounds: (-x_abs, x_abs),
+            y_bounds: (0.0_f64.min(y_min), (y_max.max(p_thresh + 0.5)) * 1.1),
+            y2_bounds: None,
+            cat_x: None,
+            cat_y: None,
+            margins: PlotMarginConfig { has_legend: true, ..PlotMarginConfig::default() },
+        },
+    );
     let r = scene.plot_rect_pt;
-    let x_map = AxisMapping { min: x_lo, max: x_hi, scale: AxisScale::Linear };
-    let y_map = AxisMapping { min: y_lo, max: y_hi, scale: AxisScale::Linear };
-
-    let mut frame_spec = graph.spec.clone();
-    if frame_spec.x_axis.title.trim().is_empty() || frame_spec.x_axis.title == "X" {
-        frame_spec.x_axis.title = String::from(if mr_threshold.is_some() { "Difference (A - B)" } else { "log2 Fold Change" });
-    }
-    if frame_spec.y_axis.title.trim().is_empty() || frame_spec.y_axis.title == "Y" {
-        frame_spec.y_axis.title = String::from("-log10(P)");
-    }
-    let frame = CartesianFrame { spec: &frame_spec, x_ticks: &x_ticks, y_ticks: &y_ticks, x_map, y_map, max_y_label_w: max_y_w, doc };
-    draw_cartesian_frame(scene, &frame);
 
     let crosshair_stroke = solid_stroke(Rgba8::rgb(110, 118, 128), 1.0, LineDashStyle::Dashed);
     for xv in [fc_neg, fc_pos] {
-        if let Some(xp) = x_map.map_value(xv, r.x, r.right())
-            && xp >= r.x
-            && xp <= r.right()
-        {
+        if let Some((_, xp)) = x_axis.map_value(xv) {
             scene.primitives.push(ScenePrimitive::Path {
                 path: Path2D::line(PointPt::new(xp, r.y), PointPt::new(xp, r.bottom())),
                 fill: None,
@@ -2478,10 +2453,7 @@ fn compile_volcano(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
             });
         }
     }
-    if let Some(yp) = y_map.map_value(p_thresh, r.bottom(), r.y)
-        && yp >= r.y
-        && yp <= r.bottom()
-    {
+    if let Some((_, yp)) = y_axis.map_value(p_thresh) {
         scene.primitives.push(ScenePrimitive::Path {
             path: Path2D::line(PointPt::new(r.x, yp), PointPt::new(r.right(), yp)),
             fill: None,
@@ -2495,7 +2467,7 @@ fn compile_volcano(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
     let ns_col = Rgba8::rgb(145, 153, 163);
     for pt in &pts {
         let (fc, neg_log_p) = (pt.x, pt.y);
-        let (Some(px), Some(py)) = (x_map.map_value(fc, r.x, r.right()), y_map.map_value(neg_log_p, r.bottom(), r.y)) else {
+        let (Some((_, px)), Some((_, py))) = (x_axis.map_value(fc), y_axis.map_value(neg_log_p)) else {
             continue;
         };
         let is_sig = neg_log_p >= p_thresh;
@@ -2565,7 +2537,7 @@ fn compile_volcano(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
             is_line: false,
         },
     ];
-    draw_legend_entries(scene, &frame_spec, &entries, doc);
+    draw_legend_entries(scene, &frame_graph.spec, &entries, doc);
     Ok(())
 }
 
@@ -2606,9 +2578,9 @@ fn parse_source_row_hint(tab: &ResultTab, tab_idx: usize, ds_opt: Option<&DataSh
     tab_idx
 }
 
-fn extract_volcano_points(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<DiagPoint> {
-    if let Some(res) = find_matching_result_where(graph, doc, |r| matches!(r.analysis.kind, AnalysisKind::MultipleRowTTests(_)))
-        .or_else(|| doc.result_sheet(&graph.spec.primary_source_sheet_id))
+fn extract_volcano_points(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut Vec<ChartWarning>) -> Vec<DiagPoint> {
+    if let Some(res) = find_matching_result_where_checked(graph, doc, warnings, |r| matches!(r.analysis.kind, AnalysisKind::MultipleRowTTests(_)))
+        .or_else(|| find_matching_result_checked(graph, doc, warnings))
         && (matches!(res.analysis.kind, AnalysisKind::MultipleRowTTests(_)) || doc.result_sheet(&graph.spec.primary_source_sheet_id).is_some())
     {
         let ds_id = res.analysis.source_sheet_id.clone();
@@ -2733,7 +2705,7 @@ fn extract_volcano_points(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<Diag
 
 fn compile_bland_altman(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartScene) -> Result<(), ChartError> {
     let Some(BlandAltmanData { points: pts, bias, loa_lo, loa_hi, loa_lo_label, loa_hi_label, percent_difference }) =
-        extract_bland_altman_data(graph, doc)
+        extract_bland_altman_data(graph, doc, &mut scene.warnings)
     else {
         scene.warnings.push(ChartWarning::new("empty_bland_altman", "insufficient paired observations for Bland-Altman plot"));
         draw_empty_open_frame(scene);
@@ -2747,31 +2719,32 @@ fn compile_bland_altman(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut C
 
     let x_pad = (x_max - x_min).max(1.0) * 0.1;
     let y_pad = (y_max - y_min).max(1.0) * 0.14;
-    let (x_lo, x_hi) = resolve_axis_domain(&graph.spec.x_axis, x_min - x_pad, x_max + x_pad);
-    let (y_lo, y_hi) = resolve_axis_domain(&graph.spec.y_axis, y_min - y_pad, y_max + y_pad);
-
-    let x_ticks = nice_axis_ticks(&graph.spec.x_axis, x_lo, x_hi, 6);
-    let y_ticks = nice_axis_ticks(&graph.spec.y_axis, y_lo, y_hi, 5);
-    let max_y_w = update_plot_rect_for_labels(scene, &graph.spec, &y_ticks, PlotMarginConfig::default());
-
-    let mut frame_spec = graph.spec.clone();
-    if frame_spec.x_axis.title == "X" {
-        frame_spec.x_axis.title = String::from("Average of Methods");
+    let mut frame_graph = graph.clone();
+    if frame_graph.spec.x_axis.title == "X" {
+        frame_graph.spec.x_axis.title = String::from("Average of Methods");
     }
-    if frame_spec.y_axis.title == "Y" {
-        frame_spec.y_axis.title = String::from(if percent_difference { "Percent Difference (%)" } else { "Difference (A - B)" });
+    if frame_graph.spec.y_axis.title == "Y" {
+        frame_graph.spec.y_axis.title = String::from(if percent_difference { "Percent Difference (%)" } else { "Difference (A - B)" });
     }
+    let (x_axis, y_axis, _) = layout_and_render_segmented_chrome(
+        scene,
+        &frame_graph,
+        doc,
+        &SegmentedFrameSpec {
+            x_bounds: (x_min - x_pad, x_max + x_pad),
+            y_bounds: (y_min - y_pad, y_max + y_pad),
+            y2_bounds: None,
+            cat_x: None,
+            cat_y: None,
+            margins: PlotMarginConfig::default(),
+        },
+    );
 
     let r = scene.plot_rect_pt;
-    let x_map = AxisMapping { min: x_lo, max: x_hi, scale: AxisScale::Linear };
-    let y_map = AxisMapping { min: y_lo, max: y_hi, scale: AxisScale::Linear };
-    let frame = CartesianFrame { spec: &frame_spec, x_ticks: &x_ticks, y_ticks: &y_ticks, x_map, y_map, max_y_label_w: max_y_w, doc };
-    draw_cartesian_frame(scene, &frame);
-
     let color = graph.spec.palette.color_at(0);
     for pt in &pts {
         let (avg, diff) = (pt.x, pt.y);
-        if let (Some(px), Some(py)) = (x_map.map_value(avg, r.x, r.right()), y_map.map_value(diff, r.bottom(), r.y)) {
+        if let (Some((_, px)), Some((_, py))) = (x_axis.map_value(avg), y_axis.map_value(diff)) {
             let base_marker = MarkerStyle {
                 shape: MarkerShape::Circle,
                 fill_mode: MarkerFillMode::Filled,
@@ -2802,10 +2775,7 @@ fn compile_bland_altman(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut C
         (loa_lo, solid_stroke(Rgba8::rgb(213, 94, 0), 1.2, LineDashStyle::Dashed), loa_lo_label),
     ];
     for (val, stroke, label) in ref_specs {
-        if let Some(yp) = y_map.map_value(val, r.bottom(), r.y)
-            && yp >= r.y
-            && yp <= r.bottom()
-        {
+        if let Some((_, yp)) = y_axis.map_value(val) {
             scene.primitives.push(ScenePrimitive::Path {
                 path: Path2D::line(PointPt::new(r.x, yp), PointPt::new(r.right(), yp)),
                 fill: None,
@@ -3084,10 +3054,10 @@ fn extract_bland_altman_from_result(res: &ResultSheet, graph: &GraphSheet, doc: 
     Some(BlandAltmanData { points, bias, loa_lo, loa_hi, loa_lo_label, loa_hi_label, percent_difference: spec_pct })
 }
 
-fn extract_bland_altman_data(graph: &GraphSheet, doc: &ProjectDocument) -> Option<BlandAltmanData> {
+fn extract_bland_altman_data(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut Vec<ChartWarning>) -> Option<BlandAltmanData> {
     let title_pct_diff = graph.spec.y_axis.title.contains('%') || graph.spec.y_axis.title.to_ascii_lowercase().contains("percent");
 
-    if let Some(res) = find_matching_result_where(graph, doc, |r| matches!(r.analysis.kind, AnalysisKind::BlandAltman(_)))
+    if let Some(res) = find_matching_result_where_checked(graph, doc, warnings, |r| matches!(r.analysis.kind, AnalysisKind::BlandAltman(_)))
         && let Some(data) = extract_bland_altman_from_result(res, graph, doc, title_pct_diff)
     {
         return Some(data);
@@ -3134,35 +3104,38 @@ fn extract_bland_altman_data(graph: &GraphSheet, doc: &ProjectDocument) -> Optio
 // 2d. ROC Curve (Sensitivity vs 1-Specificity + Diagonal + AUC)
 
 fn compile_roc_curve(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartScene) -> Result<(), ChartError> {
-    let Some((points, auc)) = extract_roc_data(graph, doc) else {
+    let Some((points, auc)) = extract_roc_data(graph, doc, &mut scene.warnings) else {
         scene.warnings.push(ChartWarning::new("empty_roc", "no ROC operating points or controls/cases columns available"));
         draw_empty_open_frame(scene);
         return Ok(());
     };
 
-    let mut frame_spec = graph.spec.clone();
-    if frame_spec.x_axis.title == "X" {
-        frame_spec.x_axis.title = String::from("1 - Specificity (FPR)");
+    let mut frame_graph = graph.clone();
+    if frame_graph.spec.x_axis.title == "X" {
+        frame_graph.spec.x_axis.title = String::from("1 - Specificity (FPR)");
     }
-    if frame_spec.y_axis.title == "Y" {
-        frame_spec.y_axis.title = String::from("Sensitivity (TPR)");
+    if frame_graph.spec.y_axis.title == "Y" {
+        frame_graph.spec.y_axis.title = String::from("Sensitivity (TPR)");
     }
 
-    let x_ticks = nice_axis_ticks(&frame_spec.x_axis, 0.0, 1.0, 6);
-    let y_ticks = nice_axis_ticks(&frame_spec.y_axis, 0.0, 1.0, 6);
-    let max_y_w = update_plot_rect_for_labels(scene, &frame_spec, &y_ticks, PlotMarginConfig::default());
+    let (x_axis, y_axis, _) = layout_and_render_segmented_chrome(
+        scene,
+        &frame_graph,
+        doc,
+        &SegmentedFrameSpec {
+            x_bounds: (0.0, 1.0),
+            y_bounds: (0.0, 1.0),
+            y2_bounds: None,
+            cat_x: None,
+            cat_y: None,
+            margins: PlotMarginConfig::default(),
+        },
+    );
     let r = scene.plot_rect_pt;
-    let x_map = AxisMapping { min: 0.0, max: 1.0, scale: AxisScale::Linear };
-    let y_map = AxisMapping { min: 0.0, max: 1.0, scale: AxisScale::Linear };
-    let frame = CartesianFrame { spec: &frame_spec, x_ticks: &x_ticks, y_ticks: &y_ticks, x_map, y_map, max_y_label_w: max_y_w, doc };
-    draw_cartesian_frame(scene, &frame);
 
-    if let (Some(x0), Some(y0), Some(x1), Some(y1)) = (
-        x_map.map_value(0.0, r.x, r.right()),
-        y_map.map_value(0.0, r.bottom(), r.y),
-        x_map.map_value(1.0, r.x, r.right()),
-        y_map.map_value(1.0, r.bottom(), r.y),
-    ) {
+    if let (Some((_, x0)), Some((_, y0)), Some((_, x1)), Some((_, y1))) =
+        (x_axis.map_value(0.0), y_axis.map_value(0.0), x_axis.map_value(1.0), y_axis.map_value(1.0))
+    {
         scene.primitives.push(ScenePrimitive::Path {
             path: Path2D::line(PointPt::new(x0, y0), PointPt::new(x1, y1)),
             fill: None,
@@ -3176,10 +3149,9 @@ fn compile_roc_curve(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Char
     let mut area_p = Path2D::new();
     let mut started = false;
     for &(fpr, tpr) in &points {
-        let (Some(px), Some(py)) = (
-            x_map.map_value(crate::clamp_f64_safe(fpr, 0.0, 1.0), r.x, r.right()),
-            y_map.map_value(crate::clamp_f64_safe(tpr, 0.0, 1.0), r.bottom(), r.y),
-        ) else {
+        let (Some((_, px)), Some((_, py))) =
+            (x_axis.map_value(crate::clamp_f64_safe(fpr, 0.0, 1.0)), y_axis.map_value(crate::clamp_f64_safe(tpr, 0.0, 1.0)))
+        else {
             continue;
         };
         if !started {
@@ -3215,8 +3187,8 @@ fn compile_roc_curve(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Char
     Ok(())
 }
 
-fn extract_roc_data(graph: &GraphSheet, doc: &ProjectDocument) -> Option<(Vec<(f64, f64)>, f64)> {
-    if let Some(res) = find_matching_result(graph, doc)
+fn extract_roc_data(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut Vec<ChartWarning>) -> Option<(Vec<(f64, f64)>, f64)> {
+    if let Some(res) = find_matching_result_checked(graph, doc, warnings)
         && let Some(curve) = res.fitted_curves.iter().find(|fc| fc.equation_id.eq_ignore_ascii_case("ROC"))
     {
         let pts: Vec<(f64, f64)> = curve.points.iter().map(|p| (p.x, p.y)).collect();
@@ -3224,7 +3196,7 @@ fn extract_roc_data(graph: &GraphSheet, doc: &ProjectDocument) -> Option<(Vec<(f
         return Some((pts, auc));
     }
 
-    let ds = doc.data_sheet(&graph.spec.primary_source_sheet_id)?;
+    let ds = resolve_source_data_sheet(graph, doc)?;
     match &ds.archetype {
         TableArchetype::Column(col) if col.data_sets.len() >= 2 => {
             let controls: Vec<f64> = col.data_sets.first()?.cells.iter().filter_map(|s| s.first().and_then(|c| c.active_number())).collect();
@@ -3306,7 +3278,7 @@ fn compile_forest_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Ch
     let x_scale = graph.spec.x_axis.segments.first().map_or(AxisScale::Linear, |s| s.scale);
     let is_log = matches!(x_scale, AxisScale::Log10 | AxisScale::Log2 | AxisScale::Ln);
     let all_positive = entries.iter().all(|e| e.lower > 0.0 && e.estimate > 0.0 && e.upper > 0.0);
-    let ref_x = if is_log
+    let ref_x: f64 = if is_log
         || (all_positive
             && (graph.spec.x_axis.title.contains("OR") || graph.spec.x_axis.title.contains("HR") || graph.spec.x_axis.title.contains("Ratio")))
     {
@@ -3323,8 +3295,24 @@ fn compile_forest_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Ch
         entries.push(pooled);
     }
 
-    let mut x_min = entries.iter().map(|e| e.lower).fold(f64::INFINITY, f64::min).min(ref_x);
-    let mut x_max = entries.iter().map(|e| e.upper).fold(f64::NEG_INFINITY, f64::max).max(ref_x);
+    let mut x_min = f64::INFINITY;
+    let mut x_max = f64::NEG_INFINITY;
+    for e in &entries {
+        for v in [e.lower, e.estimate, e.upper] {
+            if v.is_finite() && (!is_log || v > 0.0) {
+                x_min = x_min.min(v);
+                x_max = x_max.max(v);
+            }
+        }
+    }
+    if ref_x.is_finite() && (!is_log || ref_x > 0.0) {
+        x_min = x_min.min(ref_x);
+        x_max = x_max.max(ref_x);
+    }
+    if !x_min.is_finite() || !x_max.is_finite() {
+        x_min = if is_log { 0.5 } else { -1.0 };
+        x_max = if is_log { 2.0 } else { 1.0 };
+    }
     for tick in &graph.spec.x_axis.additional_ticks {
         if tick.value.is_finite() && (!is_log || tick.value > 0.0) {
             x_min = x_min.min(tick.value);
@@ -3344,40 +3332,41 @@ fn compile_forest_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Ch
             x_max = x_max.max(end_v);
         }
     }
-    let (x_lo, x_hi) = if is_log {
-        resolve_axis_domain(&graph.spec.x_axis, x_min * 0.8, x_max * 1.25)
+    let x_bounds = if is_log {
+        (x_min * 0.8, x_max * 1.25)
     } else {
         let pad = (x_max - x_min).max(1.0) * 0.1;
-        resolve_axis_domain(&graph.spec.x_axis, x_min - pad, x_max + pad)
+        (x_min - pad, x_max + pad)
     };
 
-    let x_ticks = nice_axis_ticks(&graph.spec.x_axis, x_lo, x_hi, 5);
+    let ci_labels: Vec<String> = entries.iter().map(|e| format!("{:.2} [{:.2}, {:.2}]", e.estimate, e.lower, e.upper)).collect();
+    let max_ci_w = ci_labels.iter().map(|s| text_metrics(s, 7.5).width_pt).fold(0.0_f64, f64::max);
     let max_lbl_w = entries.iter().map(|e| text_metrics(&e.label, 8.0).width_pt).fold(0.0_f64, f64::max);
-    let _ = update_plot_rect_for_labels(
+    let empty_cat_y: [(f64, String); 0] = [];
+    let (x_axis, _, _) = layout_and_render_segmented_chrome(
         scene,
-        &graph.spec,
-        &[],
-        PlotMarginConfig {
-            extra_left_pt: crate::clamp_f64_safe(max_lbl_w + 10.0, 32.0, 96.0),
-            has_legend: true,
-            suppress_y_axis_labels: true,
-            ..PlotMarginConfig::default()
+        graph,
+        doc,
+        &SegmentedFrameSpec {
+            x_bounds,
+            y_bounds: (0.0, entries.len() as f64),
+            y2_bounds: None,
+            cat_x: None,
+            cat_y: Some(&empty_cat_y),
+            margins: PlotMarginConfig {
+                extra_left_pt: crate::clamp_f64_safe(max_lbl_w + 10.0, 32.0, 96.0),
+                extra_right_pt: if max_ci_w > 0.0 { crate::clamp_f64_safe(max_ci_w + 14.0, 56.0, 150.0) } else { 0.0 },
+                has_legend: false,
+                suppress_y_axis_labels: true,
+                ..PlotMarginConfig::default()
+            },
         },
     );
 
     let r = scene.plot_rect_pt;
-    let x_map = AxisMapping { min: x_lo, max: x_hi, scale: x_scale };
-    let y_map = AxisMapping { min: 0.0, max: entries.len() as f64, scale: AxisScale::Linear };
-    let frame = CartesianFrame { spec: &graph.spec, x_ticks: &x_ticks, y_ticks: &[], x_map, y_map, max_y_label_w: 0.0, doc };
-    draw_cartesian_frame(scene, &frame);
-
     let user_has_ref_line = graph.spec.x_axis.additional_ticks.iter().any(|t| t.draw_gridline && (t.value - ref_x).abs() <= 1e-9)
         || graph.spec.x_axis.thresholds.iter().any(|t| (t.value - ref_x).abs() <= 1e-9);
-    if !user_has_ref_line
-        && let Some(x_ref_pt) = x_map.map_value(ref_x, r.x, r.right())
-        && x_ref_pt >= r.x
-        && x_ref_pt <= r.right()
-    {
+    if !user_has_ref_line && let Some((_, x_ref_pt)) = x_axis.map_value(ref_x) {
         scene.primitives.push(ScenePrimitive::Path {
             path: Path2D::line(PointPt::new(x_ref_pt, r.y), PointPt::new(x_ref_pt, r.bottom())),
             fill: None,
@@ -3389,7 +3378,7 @@ fn compile_forest_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Ch
     let row_h = r.height / (entries.len() as f64);
     let primary_col = graph.spec.palette.color_at(0);
     let pooled_col = graph.spec.palette.color_at(1);
-    for (idx, entry) in entries.iter().enumerate() {
+    for (idx, (entry, ci_text)) in entries.iter().zip(ci_labels.iter()).enumerate() {
         let cy = r.y + ((idx as f64) + 0.5) * row_h;
         let lbl_markup = if entry.is_pooled { format!("<b>{}</b>", entry.label) } else { entry.label.clone() };
         scene.primitives.push(ScenePrimitive::Text(PositionedText {
@@ -3401,15 +3390,44 @@ fn compile_forest_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Ch
             color: Rgba8::BLACK,
         }));
 
-        let (Some(x_lo_pt), Some(x_est_pt), Some(x_hi_pt)) = (
-            x_map.map_value(entry.lower, r.x, r.right()),
-            x_map.map_value(entry.estimate, r.x, r.right()),
-            x_map.map_value(entry.upper, r.x, r.right()),
-        ) else {
-            continue;
-        };
+        scene.primitives.push(ScenePrimitive::Text(PositionedText {
+            rich: RichText::plain(ci_text.clone()),
+            anchor_pt: PointPt::new(r.right() + 6.0, cy + 3.0),
+            anchor: TextAnchor::Start,
+            font_size_pt: 7.5,
+            rotation_deg: 0.0,
+            color: Rgba8::rgb(35, 35, 35),
+        }));
+
+        let x_lo_opt = x_axis.map_value(entry.lower).map(|(_, p)| p);
+        let x_hi_opt = x_axis.map_value(entry.upper).map(|(_, p)| p);
+        let x_est_opt = x_axis.map_value(entry.estimate).map(|(_, p)| p);
+        let (x_lo_pt, clip_lo) = x_lo_opt.map_or_else(
+            || {
+                let (_, p, c) = x_axis.map_clamped_to_nearest(entry.lower);
+                (p, c)
+            },
+            |p| (p, false),
+        );
+        let (x_hi_pt, clip_hi) = x_hi_opt.map_or_else(
+            || {
+                let (_, p, c) = x_axis.map_clamped_to_nearest(entry.upper);
+                (p, c)
+            },
+            |p| (p, false),
+        );
+        if (clip_lo && is_log && entry.lower <= 0.0)
+            || (clip_hi && is_log && entry.upper <= 0.0)
+            || (x_est_opt.is_none() && is_log && entry.estimate <= 0.0)
+        {
+            scene.warnings.push(ChartWarning::new(
+                "log_axis_floor_clip",
+                format!("clipped non-positive forest interval for '{}' to log axis floor", entry.label),
+            ));
+        }
 
         if entry.is_pooled {
+            let x_est_pt = x_est_opt.unwrap_or_else(|| x_axis.map_clamped_to_nearest(entry.estimate).1);
             let dh = crate::clamp_f64_safe(row_h * 0.28, 3.5, 7.0);
             scene.primitives.push(ScenePrimitive::Path {
                 path: polygon_path(&[(x_lo_pt, cy), (x_est_pt, cy - dh), (x_hi_pt, cy), (x_est_pt, cy + dh)]),
@@ -3424,29 +3442,22 @@ fn compile_forest_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Ch
                 stroke: Some(solid_stroke(primary_col, 1.2, LineDashStyle::Solid)),
                 clip: Some(r),
             });
-            emit_marker(
-                scene,
-                PointPt::new(x_est_pt, cy),
-                MarkerStyle {
-                    shape: MarkerShape::Square,
-                    fill_mode: MarkerFillMode::Filled,
-                    size_pt: 5.5,
-                    fill_color: primary_col,
-                    stroke_color: Rgba8::BLACK,
-                    stroke_width_pt: 0.6,
-                },
-                Some(r),
-            );
+            if let Some(x_est_pt) = x_est_opt {
+                emit_marker(
+                    scene,
+                    PointPt::new(x_est_pt, cy),
+                    MarkerStyle {
+                        shape: MarkerShape::Square,
+                        fill_mode: MarkerFillMode::Filled,
+                        size_pt: 5.5,
+                        fill_color: primary_col,
+                        stroke_color: Rgba8::BLACK,
+                        stroke_width_pt: 0.6,
+                    },
+                    Some(r),
+                );
+            }
         }
-
-        scene.primitives.push(ScenePrimitive::Text(PositionedText {
-            rich: RichText::plain(format!("{:.2} [{:.2}, {:.2}]", entry.estimate, entry.lower, entry.upper)),
-            anchor_pt: PointPt::new(r.right() + 6.0, cy + 3.0),
-            anchor: TextAnchor::Start,
-            font_size_pt: 7.5,
-            rotation_deg: 0.0,
-            color: Rgba8::rgb(35, 35, 35),
-        }));
     }
     Ok(())
 }
@@ -3499,10 +3510,11 @@ fn extract_subcolumn_forest_entries(
 }
 
 fn extract_forest_entries(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut Vec<ChartWarning>) -> Vec<ForestEntry> {
-    if let Some(res) = find_matching_result(graph, doc)
+    if let Some(res) = find_matching_result_checked(graph, doc, warnings)
         && let Some(tab) = res.tabs.iter().find(|t| t.kind == ResultTabKind::ParametersAndConfidenceIntervals || t.kind == ResultTabKind::MainSummary)
     {
         let mut entries = Vec::new();
+        let is_log_x = is_log_like(graph.spec.x_axis.segments.first().map_or(AxisScale::Linear, |s| s.scale));
         let est_idx = tab
             .column_headers
             .iter()
@@ -3520,6 +3532,7 @@ fn extract_forest_entries(graph: &GraphSheet, doc: &ProjectDocument, warnings: &
             }) {
                 let est = match row.get(est_idx) {
                     Some(ResultCell::Number { value, .. }) if value.is_finite() => *value,
+                    _ if is_log_x && lo > 0.0 && hi > 0.0 => (lo * hi).sqrt(),
                     _ => 0.5 * (lo + hi),
                 };
                 let label = tab.row_labels.get(r).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("Study {}", r + 1));
@@ -3531,7 +3544,7 @@ fn extract_forest_entries(graph: &GraphSheet, doc: &ProjectDocument, warnings: &
         }
     }
 
-    let Some(ds) = doc.data_sheet(&graph.spec.primary_source_sheet_id) else { return Vec::new() };
+    let Some(ds) = resolve_source_data_sheet(graph, doc) else { return Vec::new() };
     match &ds.archetype {
         TableArchetype::MultipleVariables(mv) if mv.variables.len() >= 3 => {
             let num_cols: Vec<usize> = mv
@@ -3640,30 +3653,30 @@ fn compile_residual_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut 
     let (y_min, y_max) = pts.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| (a.min(p.y).min(0.0), b.max(p.y).max(0.0)));
     let x_pad = (x_max - x_min).max(1.0) * 0.08;
     let y_pad = (y_max - y_min).max(1.0) * 0.12;
-    let (x_lo, x_hi) = resolve_axis_domain(&graph.spec.x_axis, x_min - x_pad, x_max + x_pad);
-    let (y_lo, y_hi) = resolve_axis_domain(&graph.spec.y_axis, y_min - y_pad, y_max + y_pad);
-
-    let mut frame_spec = graph.spec.clone();
-    if frame_spec.x_axis.title == "X" {
-        frame_spec.x_axis.title = String::from("Fitted Value");
+    let mut frame_graph = graph.clone();
+    if frame_graph.spec.x_axis.title == "X" {
+        frame_graph.spec.x_axis.title = String::from("Fitted Value");
     }
-    if frame_spec.y_axis.title == "Y" {
-        frame_spec.y_axis.title = String::from("Residual");
+    if frame_graph.spec.y_axis.title == "Y" {
+        frame_graph.spec.y_axis.title = String::from("Residual");
     }
 
-    let x_ticks = nice_axis_ticks(&frame_spec.x_axis, x_lo, x_hi, 6);
-    let y_ticks = nice_axis_ticks(&frame_spec.y_axis, y_lo, y_hi, 5);
-    let max_y_w = update_plot_rect_for_labels(scene, &frame_spec, &y_ticks, PlotMarginConfig::default());
+    let (x_axis, y_axis, _) = layout_and_render_segmented_chrome(
+        scene,
+        &frame_graph,
+        doc,
+        &SegmentedFrameSpec {
+            x_bounds: (x_min - x_pad, x_max + x_pad),
+            y_bounds: (y_min - y_pad, y_max + y_pad),
+            y2_bounds: None,
+            cat_x: None,
+            cat_y: None,
+            margins: PlotMarginConfig::default(),
+        },
+    );
     let r = scene.plot_rect_pt;
-    let x_map = AxisMapping { min: x_lo, max: x_hi, scale: AxisScale::Linear };
-    let y_map = AxisMapping { min: y_lo, max: y_hi, scale: AxisScale::Linear };
-    let frame = CartesianFrame { spec: &frame_spec, x_ticks: &x_ticks, y_ticks: &y_ticks, x_map, y_map, max_y_label_w: max_y_w, doc };
-    draw_cartesian_frame(scene, &frame);
 
-    if let Some(y0) = y_map.map_value(0.0, r.bottom(), r.y)
-        && y0 >= r.y
-        && y0 <= r.bottom()
-    {
+    if let Some((_, y0)) = y_axis.map_value(0.0) {
         scene.primitives.push(ScenePrimitive::Path {
             path: Path2D::line(PointPt::new(r.x, y0), PointPt::new(r.right(), y0)),
             fill: None,
@@ -3675,7 +3688,7 @@ fn compile_residual_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut 
     let color = graph.spec.palette.color_at(0);
     for pt in &pts {
         let (xv, yv) = (pt.x, pt.y);
-        if let (Some(px), Some(py)) = (x_map.map_value(xv, r.x, r.right()), y_map.map_value(yv, r.bottom(), r.y)) {
+        if let (Some((_, px)), Some((_, py))) = (x_axis.map_value(xv), y_axis.map_value(yv)) {
             let base_marker = MarkerStyle {
                 shape: MarkerShape::Circle,
                 fill_mode: MarkerFillMode::Filled,
@@ -3703,7 +3716,7 @@ fn compile_residual_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut 
 }
 
 fn extract_residual_points(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut Vec<ChartWarning>) -> Vec<DiagPoint> {
-    if let Some(res) = find_matching_result_where(graph, doc, |r| {
+    if let Some(res) = find_matching_result_where_checked(graph, doc, warnings, |r| {
         !matches!(r.analysis.kind, AnalysisKind::BlandAltman(_)) && r.tabs.iter().any(|t| t.kind == ResultTabKind::Residuals)
     }) && let Some(tab) = res.tabs.iter().find(|t| t.kind == ResultTabKind::Residuals)
     {
@@ -3806,25 +3819,28 @@ fn compile_normal_qq_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut
     let (y_min, y_max) = pts.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| (a.min(p.y), b.max(p.y)));
     let x_pad = (x_max - x_min).max(1.0) * 0.1;
     let y_pad = (y_max - y_min).max(1.0) * 0.1;
-    let (x_lo, x_hi) = resolve_axis_domain(&graph.spec.x_axis, x_min - x_pad, x_max + x_pad);
-    let (y_lo, y_hi) = resolve_axis_domain(&graph.spec.y_axis, y_min - y_pad, y_max + y_pad);
-
-    let mut frame_spec = graph.spec.clone();
-    if frame_spec.x_axis.title == "X" {
-        frame_spec.x_axis.title = String::from("Theoretical Normal Quantiles");
+    let mut frame_graph = graph.clone();
+    if frame_graph.spec.x_axis.title == "X" {
+        frame_graph.spec.x_axis.title = String::from("Theoretical Normal Quantiles");
     }
-    if frame_spec.y_axis.title == "Y" {
-        frame_spec.y_axis.title = String::from("Sample Quantiles");
+    if frame_graph.spec.y_axis.title == "Y" {
+        frame_graph.spec.y_axis.title = String::from("Sample Quantiles");
     }
 
-    let x_ticks = nice_axis_ticks(&frame_spec.x_axis, x_lo, x_hi, 5);
-    let y_ticks = nice_axis_ticks(&frame_spec.y_axis, y_lo, y_hi, 5);
-    let max_y_w = update_plot_rect_for_labels(scene, &frame_spec, &y_ticks, PlotMarginConfig::default());
+    let (x_axis, y_axis, _) = layout_and_render_segmented_chrome(
+        scene,
+        &frame_graph,
+        doc,
+        &SegmentedFrameSpec {
+            x_bounds: (x_min - x_pad, x_max + x_pad),
+            y_bounds: (y_min - y_pad, y_max + y_pad),
+            y2_bounds: None,
+            cat_x: None,
+            cat_y: None,
+            margins: PlotMarginConfig::default(),
+        },
+    );
     let r = scene.plot_rect_pt;
-    let x_map = AxisMapping { min: x_lo, max: x_hi, scale: AxisScale::Linear };
-    let y_map = AxisMapping { min: y_lo, max: y_hi, scale: AxisScale::Linear };
-    let frame = CartesianFrame { spec: &frame_spec, x_ticks: &x_ticks, y_ticks: &y_ticks, x_map, y_map, max_y_label_w: max_y_w, doc };
-    draw_cartesian_frame(scene, &frame);
 
     let mut xs: Vec<f64> = pts.iter().map(|p| p.x).collect();
     let mut ys: Vec<f64> = pts.iter().map(|p| p.y).collect();
@@ -3835,25 +3851,39 @@ fn compile_normal_qq_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut
     {
         let slope = (qy3 - qy1) / (qx3 - qx1);
         let intercept = qy1 - slope * qx1;
-        if let (Some(x0), Some(y0), Some(x1), Some(y1)) = (
-            x_map.map_value(x_lo, r.x, r.right()),
-            y_map.map_value(intercept + slope * x_lo, r.bottom(), r.y),
-            x_map.map_value(x_hi, r.x, r.right()),
-            y_map.map_value(intercept + slope * x_hi, r.bottom(), r.y),
-        ) {
-            scene.primitives.push(ScenePrimitive::Path {
-                path: Path2D::line(PointPt::new(x0, y0), PointPt::new(x1, y1)),
-                fill: None,
-                stroke: Some(solid_stroke(Rgba8::rgb(120, 128, 138), 1.1, LineDashStyle::Dashed)),
-                clip: Some(r),
-            });
+        for seg_x in &x_axis.segments {
+            for seg_y in &y_axis.segments {
+                let sx0 = seg_x.domain_min.min(seg_x.domain_max);
+                let sx1 = seg_x.domain_min.max(seg_x.domain_max);
+                let sy0 = intercept + slope * sx0;
+                let sy1 = intercept + slope * sx1;
+                if let (Some(px0), Some(px1), Some(py0), Some(py1)) = (
+                    seg_x.mapping().map_value(sx0, seg_x.span_start_pt, seg_x.span_end_pt),
+                    seg_x.mapping().map_value(sx1, seg_x.span_start_pt, seg_x.span_end_pt),
+                    seg_y.mapping().map_value(sy0, seg_y.span_start_pt, seg_y.span_end_pt),
+                    seg_y.mapping().map_value(sy1, seg_y.span_start_pt, seg_y.span_end_pt),
+                ) {
+                    let cell_clip = RectPt::new(
+                        seg_x.span_start_pt.min(seg_x.span_end_pt),
+                        seg_y.span_start_pt.min(seg_y.span_end_pt),
+                        (seg_x.span_end_pt - seg_x.span_start_pt).abs(),
+                        (seg_y.span_end_pt - seg_y.span_start_pt).abs(),
+                    );
+                    scene.primitives.push(ScenePrimitive::Path {
+                        path: Path2D::line(PointPt::new(px0, py0), PointPt::new(px1, py1)),
+                        fill: None,
+                        stroke: Some(solid_stroke(Rgba8::rgb(120, 128, 138), 1.1, LineDashStyle::Dashed)),
+                        clip: Some(cell_clip),
+                    });
+                }
+            }
         }
     }
 
     let color = graph.spec.palette.color_at(0);
     for pt in &pts {
         let (z, y) = (pt.x, pt.y);
-        if let (Some(px), Some(py)) = (x_map.map_value(z, r.x, r.right()), y_map.map_value(y, r.bottom(), r.y)) {
+        if let (Some((_, px)), Some((_, py))) = (x_axis.map_value(z), y_axis.map_value(y)) {
             let base_marker = MarkerStyle {
                 shape: MarkerShape::Circle,
                 fill_mode: MarkerFillMode::Filled,
@@ -3932,7 +3962,7 @@ fn extract_qq_points(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut V
     let ds_idx = graph.spec.series.first().map_or(0, |s| s.data_set_index);
 
     // 1. Prefer explicit ResultTabKind::NormalQq (excluding BlandAltman).
-    if let Some(res) = find_matching_result_where(graph, doc, |r| {
+    if let Some(res) = find_matching_result_where_checked(graph, doc, warnings, |r| {
         !matches!(r.analysis.kind, AnalysisKind::BlandAltman(_)) && r.tabs.iter().any(|t| t.kind == ResultTabKind::NormalQq)
     }) && let Some(tab) = res.tabs.iter().find(|t| t.kind == ResultTabKind::NormalQq)
     {
@@ -4056,7 +4086,7 @@ fn extract_qq_points(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut V
     }
 
     // 2. Fallback to ResultTabKind::Residuals (excluding BlandAltman pair coordinate tabs).
-    if let Some(res) = find_matching_result_where(graph, doc, |r| {
+    if let Some(res) = find_matching_result_where_checked(graph, doc, warnings, |r| {
         !matches!(r.analysis.kind, AnalysisKind::BlandAltman(_)) && r.tabs.iter().any(|t| t.kind == ResultTabKind::Residuals)
     }) && let Some(tab) = res.tabs.iter().find(|t| t.kind == ResultTabKind::Residuals)
     {
@@ -4184,12 +4214,13 @@ pub fn compile_layout_scene(layout: &LayoutSheet, doc: &ProjectDocument) -> Resu
 
     let mut extra_table_work: usize = 0;
     let mut layout_image_pixels: u64 = 0;
+    let mut image_cache = crate::image_decode::DecodedImageCache::default();
     for entry in paint_order {
         match entry {
             LayoutPaintOrder::Panel(p_idx) => {
                 let panel = &panels[p_idx];
                 let sub = panel.cache_idx.and_then(|idx| compiled_graphs.get(idx)).and_then(|entry| entry.scene.as_ref());
-                emit_placed_panel(&mut scene, panel, sub)?;
+                emit_placed_panel(&mut scene, panel, sub, &mut layout_image_pixels)?;
             }
             LayoutPaintOrder::Other(LayoutItem::LiveTable { source_sheet_id, tab_id, bounds_pt, selected_rows, selected_cols, style, .. }) => {
                 render_styled_embedded_table(
@@ -4233,7 +4264,7 @@ pub fn compile_layout_scene(layout: &LayoutSheet, doc: &ProjectDocument) -> Resu
             }
             LayoutPaintOrder::Other(LayoutItem::EmbeddedImage { asset_id, bounds_pt, rotation_deg, crop, border, badge_override, .. }) => {
                 check_layout_primitive_budget(scene.primitives.len().saturating_add(extra_table_work), 3, "layout embedded image")?;
-                crate::image_decode::emit_embedded_image_primitive(
+                crate::image_decode::emit_embedded_image_primitive_cached(
                     &mut scene,
                     doc,
                     &crate::image_decode::EmbeddedImageDrawSpec {
@@ -4246,6 +4277,7 @@ pub fn compile_layout_scene(layout: &LayoutSheet, doc: &ProjectDocument) -> Resu
                         badge_override: badge_override.as_deref(),
                     },
                     Some(&mut layout_image_pixels),
+                    Some(&mut image_cache),
                 );
             }
             LayoutPaintOrder::Other(LayoutItem::LiveGraph { .. }) => {}
@@ -4307,7 +4339,7 @@ fn align_placed_panel_origins(panels: &mut [PlacedPanel], compiled_graphs: &[Com
     }
 }
 
-fn emit_placed_panel(scene: &mut ChartScene, panel: &PlacedPanel, sub_scene: Option<&ChartScene>) -> Result<(), ChartError> {
+fn emit_placed_panel(scene: &mut ChartScene, panel: &PlacedPanel, sub_scene: Option<&ChartScene>, image_pixels: &mut u64) -> Result<(), ChartError> {
     let badge_prims = usize::from(panel.badge.is_some());
     let content_prims = sub_scene.map_or(1, |sub| usize::from(sub.background.is_some()).saturating_add(sub.primitives.len()));
     let added_prims = 2_usize.saturating_add(content_prims).saturating_add(badge_prims);
@@ -4335,6 +4367,20 @@ fn emit_placed_panel(scene: &mut ChartScene, panel: &PlacedPanel, sub_scene: Opt
             });
         }
         for prim in &sub.primitives {
+            if let ScenePrimitive::RasterImage(img) = prim {
+                let declared_px = u64::from(img.pixel_size.0).saturating_mul(u64::from(img.pixel_size.1));
+                let buf_px = (img.rgba.len() / 4) as u64;
+                let px = declared_px.max(buf_px);
+                let next = image_pixels.saturating_add(px);
+                if next > MAX_IMAGE_PIXELS {
+                    scene.warnings.push(ChartWarning::new(
+                        "embedded_image_budget_exceeded",
+                        format!("panel {} embedded image `{}` exceeds cumulative pixel budget {MAX_IMAGE_PIXELS}", panel.panel_idx + 1, img.asset_id),
+                    ));
+                    continue;
+                }
+                *image_pixels = next;
+            }
             scene.primitives.push(transform_primitive(prim, panel.tx, panel.ty, panel.scale));
         }
         for p in &sub.plotted_points {

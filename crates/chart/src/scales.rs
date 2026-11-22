@@ -5,7 +5,7 @@ use std::fmt::Write as FmtWrite;
 
 use curvebook_doc::{
     AdditionalTick, AnnotationShapeKind, AxisSegment, AxisSpec, AxisThreshold, BreakOrnament, FramePreset, GraphAnnotation, GraphSpec, LegendSpec,
-    ProjectDocument, SheetId, SizePt, TableArchetype, TickDirection, TickLabelFormat,
+    ProjectDocument, ResultStatus, SheetId, SizePt, TableArchetype, TickDirection, TickLabelFormat,
 };
 use curvebook_math::dist::{norm_cdf, norm_ppf};
 use curvebook_math::{AxisScale, LogitDomain};
@@ -13,7 +13,8 @@ use curvebook_palette::{LineDashStyle, MarkerFillMode, MarkerShape, Rgba8};
 use curvebook_text::{LocaleNumberPolicy, RichText, expand_template_hooks, measure_text_pt, parse_markup};
 
 use crate::scene::{
-    ChartScene, ChartWarning, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor,
+    ChartError, ChartScene, ChartWarning, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive,
+    StrokePaint, TextAnchor,
 };
 
 /// Upper bound on ticks emitted per segment to prevent unbounded allocation on adversarial specs.
@@ -2624,28 +2625,59 @@ fn apply_locale_chars(raw: &str, policy: &LocaleNumberPolicy) -> String {
     out
 }
 
-/// Resolve `{{info:...}}` and `{{result:...}}` template hooks using `doc`.
+fn resolve_paired_info_id<'a>(doc: &'a ProjectDocument, primary_or_info_id: Option<&'a SheetId>) -> Option<&'a SheetId> {
+    primary_or_info_id.and_then(|id| doc.paired_info_sheet_id(id).or_else(|| doc.info_sheet(id).map(|s| &s.id)))
+}
+
+/// Resolve `{{info:...}}` and `{{result:...}}` template hooks using `doc` and an optional primary
+/// `DataSheet` (or direct `InfoSheet`) identifier.
 #[must_use]
 pub fn resolve_template_hooks(template: &str, doc: &ProjectDocument, primary_data_id: Option<&SheetId>) -> String {
-    let paired_info =
-        primary_data_id.and_then(|id| doc.paired_info_sheet_id(id)).and_then(|info_id| doc.info_sheet(info_id)).or_else(|| doc.info_sheets.first());
+    let paired_info_id = resolve_paired_info_id(doc, primary_data_id);
+    resolve_template_hooks_with_info(template, doc, paired_info_id)
+}
 
+/// Resolve `{{info:...}}` and `{{result:...}}` template hooks using `doc` and an already-resolved
+/// `paired_info_id` (`InfoSheet` identifier).
+pub(crate) fn resolve_template_hooks_with_info(template: &str, doc: &ProjectDocument, paired_info_id: Option<&SheetId>) -> String {
+    if !template.contains("{{") {
+        return template.to_owned();
+    }
+    let paired_info = paired_info_id.and_then(|id| doc.info_sheet(id)).or_else(|| doc.info_sheets.first());
     expand_template_hooks(template, |token| resolve_single_hook(token, doc, paired_info))
 }
 
 fn resolve_single_hook(token: &str, doc: &ProjectDocument, paired_info: Option<&curvebook_doc::InfoSheet>) -> Option<String> {
     let parts: Vec<&str> = token.split(':').map(str::trim).collect();
     match parts.as_slice() {
-        ["info", name] if !name.is_empty() => paired_info.and_then(|i| i.get_constant(name)).map(|c| c.value.display_text()),
+        ["info", name] if !name.is_empty() => {
+            let text = paired_info.and_then(|i| i.get_constant(name)).map(|c| c.value.display_text())?;
+            (!text.is_empty()).then_some(text)
+        }
         ["info", sheet, name] if !sheet.is_empty() && !name.is_empty() => {
-            doc.info_sheet(&SheetId::new(*sheet)).and_then(|i| i.get_constant(name)).map(|c| c.value.display_text())
+            let text = doc.info_sheet(&SheetId::new(*sheet)).and_then(|i| i.get_constant(name)).map(|c| c.value.display_text())?;
+            (!text.is_empty()).then_some(text)
         }
         ["result", sheet, param] if !sheet.is_empty() && !param.is_empty() => {
             doc.result_sheet(&SheetId::new(*sheet)).and_then(|r| r.lookup_scalar(param, None)).map(format_scalar_clean)
         }
         ["result", sheet, ds_str, param] if !sheet.is_empty() && !param.is_empty() => {
             let ds = ds_str.parse::<usize>().ok()?;
-            doc.result_sheet(&SheetId::new(*sheet)).and_then(|r| r.lookup_scalar(param, Some(ds))).map(format_scalar_clean)
+            let res = doc.result_sheet(&SheetId::new(*sheet))?;
+            if !matches!(res.status, ResultStatus::UpToDate) {
+                return None;
+            }
+            let needle = param.trim();
+            // Match the exact dataset index first; only fall back to sheet-global scalars
+            // (`data_set_index == None`), never to a different dataset's scalar.
+            let val = res.lookup_scalar(needle, Some(ds)).or_else(|| {
+                res.scalars
+                    .iter()
+                    .find(|s| s.data_set_index.is_none() && s.key.trim().eq_ignore_ascii_case(needle))
+                    .map(|s| s.value)
+                    .filter(|v| v.is_finite())
+            })?;
+            Some(format_scalar_clean(val))
         }
         _ => None,
     }
@@ -3599,6 +3631,29 @@ fn entry_from_gdo(label: String, gdo: &curvebook_doc::GraphicalDataObject, fallb
 
 /// Render a figure legend from `legend` and `entries` into `scene`.
 pub fn render_legend(legend: &LegendSpec, entries: &[LegendEntry], doc: &ProjectDocument, primary_id: Option<&SheetId>, scene: &mut ChartScene) {
+    let info_id = resolve_paired_info_id(doc, primary_id);
+    render_legend_with_placement(legend, entries, doc, info_id, false, scene);
+}
+
+fn auto_legend_origin(scene: &ChartScene, box_w: f64, place_outside_right_if_room: bool) -> (f64, f64) {
+    let r = scene.plot_rect_pt;
+    if place_outside_right_if_room && scene.width_pt - r.right() >= box_w + 10.0 {
+        (r.right() + 8.0, r.y)
+    } else if place_outside_right_if_room {
+        ((r.right() - box_w - 4.0).max(r.x + 2.0), r.y + 4.0)
+    } else {
+        ((r.right() - box_w - 6.0).max(r.x + 4.0), r.y + 6.0)
+    }
+}
+
+pub(crate) fn render_legend_with_placement(
+    legend: &LegendSpec,
+    entries: &[LegendEntry],
+    doc: &ProjectDocument,
+    info_id: Option<&SheetId>,
+    place_outside_right_if_room: bool,
+    scene: &mut ChartScene,
+) {
     if !legend.visible || entries.is_empty() {
         return;
     }
@@ -3610,7 +3665,7 @@ pub fn render_legend(legend: &LegendSpec, entries: &[LegendEntry], doc: &Project
     let mut parsed_labels = Vec::with_capacity(entries.len());
     let mut max_text_w = 12.0_f64;
     for entry in entries {
-        let expanded = resolve_template_hooks(&entry.label, doc, primary_id);
+        let expanded = resolve_template_hooks_with_info(&entry.label, doc, info_id);
         let rich = parse_markup(&expanded);
         max_text_w = max_text_w.max(measure_text_pt(&rich, font_size).width_pt);
         parsed_labels.push(rich);
@@ -3620,7 +3675,14 @@ pub fn render_legend(legend: &LegendSpec, entries: &[LegendEntry], doc: &Project
     let box_h = pad * 2.0 + (entries.len() as f64) * row_h;
     let (bx, by) = match legend.position_pt {
         Some((px, py)) if px.is_finite() && py.is_finite() => (px, py),
-        _ => ((scene.plot_rect_pt.right() - box_w - 6.0).max(scene.plot_rect_pt.x + 4.0), scene.plot_rect_pt.y + 6.0),
+        Some((px, py)) => {
+            scene.warnings.push(ChartWarning::new(
+                "non_finite_legend_position",
+                format!("ignored non-finite legend position ({px}, {py}); placed automatically"),
+            ));
+            auto_legend_origin(scene, box_w, place_outside_right_if_room)
+        }
+        None => auto_legend_origin(scene, box_w, place_outside_right_if_room),
     };
     let box_rect = RectPt::new(bx, by, box_w, box_h);
 
@@ -3717,13 +3779,41 @@ fn swatch_marker_path(c: PointPt, r: f64, shape: MarkerShape) -> Path2D {
     }
 }
 
+/// Shared per-scene resource budgets and decoded-image cache for graph annotations.
+#[derive(Debug, Default)]
+pub(crate) struct AnnotationBudget {
+    pub image_pixels: u64,
+    pub table_work: usize,
+    pub image_cache: crate::image_decode::DecodedImageCache,
+}
+
+fn rect_is_finite_nonneg(rect: RectPt) -> bool {
+    rect.x.is_finite() && rect.y.is_finite() && rect.width.is_finite() && rect.height.is_finite() && rect.width >= 0.0 && rect.height >= 0.0
+}
+
 /// Render all [`GraphAnnotation`] items (`TextBox`, `LineOrArrow`, `Shape`, `EmbeddedResultTable`,
-/// `ModelEquation`) onto `scene`.
+/// `ModelEquation`, `EmbeddedImage`) onto `scene`.
 pub fn render_annotations(annotations: &[GraphAnnotation], doc: &ProjectDocument, primary_id: Option<&SheetId>, scene: &mut ChartScene) {
+    let info_id = resolve_paired_info_id(doc, primary_id);
+    let mut budget = AnnotationBudget::default();
+    if let Err(err) = render_annotations_with_budget(annotations, doc, info_id, &mut budget, scene) {
+        scene.warnings.push(ChartWarning::new("embedded_table_budget_exceeded", err.to_string()));
+    }
+}
+
+/// Shared graph-annotation renderer enforcing cumulative pixel, table primitive, finite-geometry,
+/// and per-scene decoded-image caching budgets across all graph families.
+pub(crate) fn render_annotations_with_budget(
+    annotations: &[GraphAnnotation],
+    doc: &ProjectDocument,
+    info_id: Option<&SheetId>,
+    budget: &mut AnnotationBudget,
+    scene: &mut ChartScene,
+) -> Result<(), ChartError> {
     for ann in annotations {
         match ann {
             GraphAnnotation::TextBox { bounds_pt, markdown, bordered } => {
-                render_textbox_annotation(RectPt::from(*bounds_pt), markdown, *bordered, doc, primary_id, scene);
+                render_textbox_annotation(RectPt::from(*bounds_pt), markdown, *bordered, doc, info_id, scene);
             }
             GraphAnnotation::LineOrArrow { start_pt, end_pt, arrowhead, dash, color } => {
                 render_line_or_arrow_annotation(*start_pt, *end_pt, *arrowhead, *dash, *color, scene);
@@ -3732,22 +3822,32 @@ pub fn render_annotations(annotations: &[GraphAnnotation], doc: &ProjectDocument
                 render_shape_annotation(*kind, RectPt::from(*bounds_pt), *stroke_color, *stroke_width_pt, *dash, *fill_color, scene);
             }
             GraphAnnotation::EmbeddedResultTable { result_sheet_id, tab_id, bounds_pt, selected_rows, selected_cols, style } => {
-                let _ = crate::xy::render_styled_embedded_table(
+                let bounds = RectPt::from(*bounds_pt);
+                if !rect_is_finite_nonneg(bounds) {
+                    scene.warnings.push(ChartWarning::new("non_finite_annotation", "skipped EmbeddedResultTable annotation with invalid bounds"));
+                    continue;
+                }
+                crate::xy::render_styled_embedded_table(
                     scene,
                     doc,
                     &crate::xy::EmbeddedTableDrawSpec {
                         sheet_id: result_sheet_id,
                         tab_id: tab_id.as_deref(),
-                        bounds: RectPt::from(*bounds_pt),
+                        bounds,
                         selected_rows: selected_rows.as_deref(),
                         selected_cols: selected_cols.as_deref(),
                         style,
                         missing_warning_code: "missing_embedded_result_table",
                     },
-                    None,
-                );
+                    Some(&mut budget.table_work),
+                )?;
             }
             GraphAnnotation::ModelEquation { result_sheet_id, data_set_index, mode, bounds_pt, font_size_pt, bordered } => {
+                let bounds = RectPt::from(*bounds_pt);
+                if !rect_is_finite_nonneg(bounds) || !font_size_pt.is_finite() || *font_size_pt <= 0.0 {
+                    scene.warnings.push(ChartWarning::new("non_finite_annotation", "skipped ModelEquation annotation with non-finite geometry"));
+                    continue;
+                }
                 crate::equation_box::render_model_equation_annotation(
                     scene,
                     doc,
@@ -3762,7 +3862,12 @@ pub fn render_annotations(annotations: &[GraphAnnotation], doc: &ProjectDocument
                 );
             }
             GraphAnnotation::EmbeddedImage { asset_id, bounds_pt, rotation_deg, crop, border, .. } => {
-                crate::image_decode::emit_embedded_image_primitive(
+                let bounds = RectPt::from(*bounds_pt);
+                if !rect_is_finite_nonneg(bounds) || !rotation_deg.is_finite() {
+                    scene.warnings.push(ChartWarning::new("non_finite_annotation", "skipped EmbeddedImage annotation with non-finite geometry"));
+                    continue;
+                }
+                crate::image_decode::emit_embedded_image_primitive_cached(
                     scene,
                     doc,
                     &crate::image_decode::EmbeddedImageDrawSpec {
@@ -3774,22 +3879,22 @@ pub fn render_annotations(annotations: &[GraphAnnotation], doc: &ProjectDocument
                         clip: None,
                         badge_override: None,
                     },
-                    None,
+                    Some(&mut budget.image_pixels),
+                    Some(&mut budget.image_cache),
                 );
             }
         }
     }
+    Ok(())
 }
 
-fn render_textbox_annotation(
-    rect: RectPt,
-    markdown: &str,
-    bordered: bool,
-    doc: &ProjectDocument,
-    primary_id: Option<&SheetId>,
-    scene: &mut ChartScene,
-) {
-    if bordered {
+fn render_textbox_annotation(rect: RectPt, markdown: &str, bordered: bool, doc: &ProjectDocument, info_id: Option<&SheetId>, scene: &mut ChartScene) {
+    if !rect_is_finite_nonneg(rect) {
+        scene.warnings.push(ChartWarning::new("non_finite_annotation", "skipped TextBox annotation with non-finite bounds"));
+        return;
+    }
+    let has_box = rect.width > 0.0 && rect.height > 0.0;
+    if bordered && has_box {
         scene.primitives.push(ScenePrimitive::Path {
             path: Path2D::rect(rect),
             fill: Some(FillPaint::solid(Rgba8::rgba(255, 255, 255, 240))),
@@ -3797,13 +3902,15 @@ fn render_textbox_annotation(
             clip: None,
         });
     }
-    let expanded = resolve_template_hooks(markdown, doc, primary_id);
+    let expanded = resolve_template_hooks_with_info(markdown, doc, info_id);
     let font_size = 8.5_f64;
     let line_h = font_size * 1.3;
-    scene.primitives.push(ScenePrimitive::PushClip { rect });
+    if has_box {
+        scene.primitives.push(ScenePrimitive::PushClip { rect });
+    }
     for (idx, line) in expanded.lines().enumerate() {
         let y_pt = rect.y + 4.0 + font_size + (idx as f64) * line_h;
-        if y_pt > rect.bottom() + line_h {
+        if has_box && y_pt > rect.bottom() + line_h {
             break;
         }
         scene.primitives.push(ScenePrimitive::Text(PositionedText {
@@ -3815,7 +3922,9 @@ fn render_textbox_annotation(
             color: Rgba8::BLACK,
         }));
     }
-    scene.primitives.push(ScenePrimitive::PopClip);
+    if has_box {
+        scene.primitives.push(ScenePrimitive::PopClip);
+    }
 }
 
 fn render_line_or_arrow_annotation(
@@ -3870,6 +3979,10 @@ fn render_shape_annotation(
     fill_color: Option<Rgba8>,
     scene: &mut ChartScene,
 ) {
+    if !rect_is_finite_nonneg(rect) || !stroke_width_pt.is_finite() || stroke_width_pt < 0.0 {
+        scene.warnings.push(ChartWarning::new("non_finite_annotation", "skipped Shape annotation with non-finite geometry"));
+        return;
+    }
     if rect.width <= 0.0 || rect.height <= 0.0 {
         return;
     }

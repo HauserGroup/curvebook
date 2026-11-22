@@ -4,25 +4,21 @@
 use std::f64::consts::PI;
 
 use curvebook_doc::{
-    AnalysisKind, AxisSpec, AxisThreshold, CategoricalTickSource, DataSheet, ErrorBarMetric, FramePreset, GraphAnnotation, GraphKind, GraphSheet,
-    GraphSpec, GraphicalDataObject, GroupedArrangement, PartsOfWholeLayout, ProjectDocument, ResultCell, ResultSheet, ResultTab, ResultTabKind,
-    SeriesSpec, SheetId, SurvivalAnalysisSpec, SurvivalDisplayMetric, SurvivalObservation, SurvivalStatus, TableArchetype, TickLabelFormat,
+    AnalysisKind, CategoricalTickSource, DataSheet, ErrorBarMetric, GraphAnnotation, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject,
+    GroupedArrangement, PartsOfWholeLayout, ProjectDocument, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SeriesSpec, SheetId,
+    SurvivalAnalysisSpec, SurvivalDisplayMetric, SurvivalObservation, SurvivalStatus, TableArchetype, TickLabelFormat,
 };
 use curvebook_math::{AxisScale, ConfidenceLevel};
 use curvebook_palette::{ColorRamp, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, Rgba8};
 use curvebook_stats::survival::kaplan_meier_curve;
-use curvebook_text::{LocaleNumberPolicy, RichText, TextMetricsPt, expand_template_hooks, measure_text_pt, parse_markup};
+use curvebook_text::{LocaleNumberPolicy, RichText, TextMetricsPt, format_axis_tick, measure_text_pt, parse_markup};
 
-use crate::scales::{
-    AdditionalYTickLayout, AxisMapping, AxisRenderOptions, ResolvedAdditionalTick, ResolvedSegment, compute_additional_ticks_for_segments,
-    compute_segment_tick_values, emit_additional_tick_gridline_segments, emit_additional_x_tick_primitives, emit_additional_y_tick_primitives,
-    format_tick_markup, resolve_exact_domain_with_warnings, sanitize_linear_range, tick_span_offsets,
-};
+use crate::scales::{LegendEntry as ScaledLegendEntry, compute_segment_tick_values, format_tick_markup, sanitize_linear_range};
 use crate::scene::{
     ChartError, ChartScene, ChartWarning, FillPaint, Path2D, PathCmd, PlottedPointMeta, PointPt, PositionedText, RectPt, ScenePrimitive,
     SourceCellId, StrokePaint, TextAnchor,
 };
-use crate::xy::format_point_value;
+use crate::xy::{ChromeAxes, SegmentedAxis, format_point_value, render_cartesian_chrome_full};
 
 const CIRCLE_KAPPA: f64 = 0.552_284_749_830_793_6;
 const COLORBAR_STEPS: usize = 48;
@@ -33,6 +29,7 @@ pub(crate) struct PlotMarginConfig {
     pub extra_top_pt: f64,
     pub extra_bottom_pt: f64,
     pub extra_left_pt: f64,
+    pub extra_right_pt: f64,
     pub has_legend: bool,
     pub has_colorbar: bool,
     pub suppress_y_axis_labels: bool,
@@ -40,8 +37,27 @@ pub(crate) struct PlotMarginConfig {
 
 impl Default for PlotMarginConfig {
     fn default() -> Self {
-        Self { extra_top_pt: 0.0, extra_bottom_pt: 0.0, extra_left_pt: 0.0, has_legend: false, has_colorbar: false, suppress_y_axis_labels: false }
+        Self {
+            extra_top_pt: 0.0,
+            extra_bottom_pt: 0.0,
+            extra_left_pt: 0.0,
+            extra_right_pt: 0.0,
+            has_legend: false,
+            has_colorbar: false,
+            suppress_y_axis_labels: false,
+        }
     }
+}
+
+/// Shared axis domain + margin specification rendered through `xy::SegmentedAxis` and
+/// `xy::render_cartesian_chrome_full`.
+pub(crate) struct SegmentedFrameSpec<'a> {
+    pub x_bounds: (f64, f64),
+    pub y_bounds: (f64, f64),
+    pub y2_bounds: Option<(f64, f64)>,
+    pub cat_x: Option<&'a [(f64, String)]>,
+    pub cat_y: Option<&'a [(f64, String)]>,
+    pub margins: PlotMarginConfig,
 }
 
 /// Legend swatch entry rendered beside or over the plot area.
@@ -73,7 +89,7 @@ pub fn compile_survival_or_categorical_graph(graph: &GraphSheet, doc: &ProjectDo
         }
     }?;
 
-    draw_graph_annotations(scene, &graph.spec.annotations, doc, doc.paired_info_sheet_id(&graph.spec.primary_source_sheet_id));
+    draw_graph_annotations(scene, &graph.spec.annotations, doc, doc.paired_info_sheet_id(&graph.spec.primary_source_sheet_id))?;
     Ok(())
 }
 
@@ -110,115 +126,11 @@ pub(crate) fn draw_empty_open_frame(scene: &mut ChartScene) {
 
 /// Expand `{{info:...}}` and `{{result:...}}` template hooks using `doc`, preferring `primary_info_id`.
 pub(crate) fn resolve_graph_text(raw: &str, doc: &ProjectDocument, primary_info_id: Option<&SheetId>) -> String {
-    if !raw.contains("{{") {
-        return raw.to_owned();
-    }
-    expand_template_hooks(raw, |token| resolve_hook_token(token, doc, primary_info_id))
-}
-
-fn resolve_hook_token(token: &str, doc: &ProjectDocument, primary_info_id: Option<&SheetId>) -> Option<String> {
-    let parts: Vec<&str> = token.split(':').map(str::trim).collect();
-    match parts.as_slice() {
-        ["info", name] if !name.is_empty() => {
-            let info = primary_info_id.and_then(|id| doc.info_sheet(id)).or_else(|| doc.info_sheets.first())?;
-            let txt = info.get_constant(name)?.value.display_text();
-            if txt.is_empty() { None } else { Some(txt) }
-        }
-        ["info", sheet, name] => {
-            let info = doc.info_sheet(&SheetId::new(*sheet))?;
-            let constant = info.get_constant(name)?;
-            Some(constant.value.display_text())
-        }
-        ["result", sheet, param] => resolve_result_scalar(doc.result_sheet(&SheetId::new(*sheet))?, param, None),
-        ["result", sheet, ds_str, param] => {
-            let ds = ds_str.parse::<usize>().ok()?;
-            resolve_result_scalar(doc.result_sheet(&SheetId::new(*sheet))?, param, Some(ds))
-        }
-        _ => None,
-    }
-}
-
-fn resolve_result_scalar(res: &ResultSheet, key: &str, data_set_index: Option<usize>) -> Option<String> {
-    let needle = key.trim();
-    if let Some(entry) =
-        res.scalars.iter().find(|s| s.key.trim().eq_ignore_ascii_case(needle) && (data_set_index.is_none() || s.data_set_index == data_set_index))
-    {
-        if !entry.value.is_finite() {
-            return None;
-        }
-        let mut s = format!("{:.4}", entry.value);
-        trim_trailing_zeros(&mut s);
-        if let Some(u) = &entry.units
-            && !u.trim().is_empty()
-        {
-            s.push(' ');
-            s.push_str(u.trim());
-        }
-        return Some(s);
-    }
-    res.scalars.iter().find(|s| s.key.trim().eq_ignore_ascii_case(needle)).and_then(|entry| {
-        if !entry.value.is_finite() {
-            return None;
-        }
-        let mut s = format!("{:.4}", entry.value);
-        trim_trailing_zeros(&mut s);
-        Some(s)
-    })
-}
-
-fn trim_trailing_zeros(buf: &mut String) {
-    if buf.contains('.') {
-        while buf.ends_with('0') {
-            let _ = buf.pop();
-        }
-        if buf.ends_with('.') {
-            let _ = buf.pop();
-        }
-    }
+    crate::scales::resolve_template_hooks_with_info(raw, doc, primary_info_id)
 }
 
 pub(crate) fn sanitize_range(min_v: f64, max_v: f64, fallback: (f64, f64)) -> (f64, f64) {
     sanitize_linear_range(min_v, max_v, fallback)
-}
-
-pub(crate) fn resolve_axis_domain(axis: &AxisSpec, data_min: f64, data_max: f64) -> (f64, f64) {
-    let mut unused = Vec::new();
-    resolve_axis_domain_with_warnings(axis, data_min, data_max, &mut unused)
-}
-
-pub(crate) fn resolve_axis_domain_with_warnings(axis: &AxisSpec, data_min: f64, data_max: f64, warnings: &mut Vec<ChartWarning>) -> (f64, f64) {
-    resolve_exact_domain_with_warnings(axis, data_min, data_max, warnings)
-}
-
-pub(crate) fn nice_axis_ticks(axis: &AxisSpec, domain_min: f64, domain_max: f64, target_count: usize) -> Vec<(f64, String)> {
-    let mut unused = Vec::new();
-    nice_axis_ticks_with_warnings(axis, domain_min, domain_max, target_count, &mut unused)
-}
-
-pub(crate) fn nice_axis_ticks_with_warnings(
-    axis: &AxisSpec,
-    domain_min: f64,
-    domain_max: f64,
-    target_count: usize,
-    warnings: &mut Vec<ChartWarning>,
-) -> Vec<(f64, String)> {
-    let seg_spec = axis.segments.first();
-    let scale = seg_spec.map_or(AxisScale::Linear, |s| s.scale);
-    let step_override = seg_spec.and_then(|s| s.major_tick_interval).filter(|v| v.is_finite() && *v > 0.0);
-    let minor_sub = seg_spec.map_or(0, |s| s.minor_ticks_per_interval);
-    let seg = ResolvedSegment {
-        segment_index: 0,
-        domain_min,
-        domain_max,
-        scale,
-        length_fraction: 1.0,
-        span_start_pt: 0.0,
-        span_end_pt: 100.0,
-        major_tick_interval: step_override,
-        minor_ticks_per_interval: minor_sub,
-    };
-    let (vals, _) = compute_segment_tick_values(&seg, Some(target_count.clamp(2, 12)), false, warnings);
-    vals.into_iter().map(|v| (v, format_tick_value(v, scale, axis.tick_format))).collect()
 }
 
 pub(crate) fn format_tick_value(val: f64, scale: AxisScale, fmt: TickLabelFormat) -> String {
@@ -249,7 +161,8 @@ pub(crate) fn update_plot_rect_for_labels(scene: &mut ChartScene, spec: &GraphSp
     } else {
         18.0
     };
-    let right = right_legend.min(scene.width_pt * 0.34);
+    let max_right = if cfg.extra_right_pt > 0.0 { scene.width_pt * 0.44 } else { scene.width_pt * 0.34 };
+    let right = (right_legend + cfg.extra_right_pt.max(0.0)).min(max_right);
 
     let x_title_space = if !spec.x_axis.title.trim().is_empty() { 15.0 } else { 0.0 };
     let rotated_tick_extra = if spec.x_axis.tick_angle_deg.abs() > 10.0 { 16.0 } else { 0.0 };
@@ -261,310 +174,35 @@ pub(crate) fn update_plot_rect_for_labels(scene: &mut ChartScene, spec: &GraphSp
     max_y_w
 }
 
-/// Bundle for drawing axes cleanly within clippy argument count limits.
-pub(crate) struct CartesianFrame<'a> {
-    pub spec: &'a GraphSpec,
-    pub x_ticks: &'a [(f64, String)],
-    pub y_ticks: &'a [(f64, String)],
-    pub x_map: AxisMapping,
-    pub y_map: AxisMapping,
-    pub max_y_label_w: f64,
-    pub doc: &'a ProjectDocument,
-}
-
-pub(crate) fn draw_cartesian_frame(scene: &mut ChartScene, frame: &CartesianFrame<'_>) {
-    let r = scene.plot_rect_pt;
-    let axis_stroke = solid_stroke(Rgba8::BLACK, frame.spec.x_axis.stroke_width_pt.max(frame.spec.y_axis.stroke_width_pt), LineDashStyle::Solid);
-
-    draw_axis_thresholds(scene, frame);
-
-    match frame.spec.frame_preset {
-        FramePreset::PlainBoxed => {
-            scene.primitives.push(ScenePrimitive::Path { path: Path2D::rect(r), fill: None, stroke: Some(axis_stroke), clip: None });
-        }
-        FramePreset::OriginCrossing => {
-            let y0 = crate::clamp_f64_safe(frame.y_map.map_value(0.0, r.bottom(), r.y).unwrap_or(r.bottom()), r.y, r.bottom());
-            let x0 = crate::clamp_f64_safe(frame.x_map.map_value(0.0, r.x, r.right()).unwrap_or(r.x), r.x, r.right());
-            scene.primitives.push(ScenePrimitive::Path {
-                path: Path2D::line(PointPt::new(x0, r.y), PointPt::new(x0, r.bottom())),
-                fill: None,
-                stroke: Some(axis_stroke),
-                clip: None,
-            });
-            scene.primitives.push(ScenePrimitive::Path {
-                path: Path2D::line(PointPt::new(r.x, y0), PointPt::new(r.right(), y0)),
-                fill: None,
-                stroke: Some(axis_stroke),
-                clip: None,
-            });
-        }
-        FramePreset::OpenL | FramePreset::OffsetRangeTufte | FramePreset::DualYSecondaryRight => {
-            scene.primitives.push(ScenePrimitive::Path {
-                path: Path2D::line(PointPt::new(r.x, r.y), PointPt::new(r.x, r.bottom())),
-                fill: None,
-                stroke: Some(axis_stroke),
-                clip: None,
-            });
-            scene.primitives.push(ScenePrimitive::Path {
-                path: Path2D::line(PointPt::new(r.x, r.bottom()), PointPt::new(r.right(), r.bottom())),
-                fill: None,
-                stroke: Some(axis_stroke),
-                clip: None,
-            });
-        }
-    }
-
-    draw_x_numeric_ticks(scene, frame);
-    draw_y_numeric_ticks(scene, frame.spec, frame.y_ticks, frame.y_map, frame.max_y_label_w, frame.doc);
-}
-
-fn resolve_single_axis_additional(
-    axis: &AxisSpec,
-    map: AxisMapping,
-    span_start: f64,
-    span_end: f64,
-    doc: &ProjectDocument,
-    primary_id: &SheetId,
-) -> Vec<ResolvedAdditionalTick> {
-    if axis.additional_ticks.is_empty() {
-        return Vec::new();
-    }
-    let policy = LocaleNumberPolicy::default();
-    compute_additional_ticks_for_segments(
-        &[(0, map, span_start, span_end)],
-        &axis.additional_ticks,
-        axis.tick_format,
-        &policy,
-        Some(doc),
-        Some(primary_id),
-    )
-}
-
-fn draw_axis_thresholds(scene: &mut ChartScene, frame: &CartesianFrame<'_>) {
-    let r = scene.plot_rect_pt;
-    let grid_color = AxisRenderOptions::default().grid_color;
-    let x_add = resolve_single_axis_additional(&frame.spec.x_axis, frame.x_map, r.x, r.right(), frame.doc, &frame.spec.primary_source_sheet_id);
-    let y_add = resolve_single_axis_additional(&frame.spec.y_axis, frame.y_map, r.bottom(), r.y, frame.doc, &frame.spec.primary_source_sheet_id);
-    emit_additional_tick_gridline_segments(&x_add, true, &[(r.bottom(), r.y)], grid_color, &mut scene.primitives);
-    emit_additional_tick_gridline_segments(&y_add, false, &[(r.x, r.right())], grid_color, &mut scene.primitives);
-    for thr in &frame.spec.x_axis.thresholds {
-        if let Some(x_pt) = frame.x_map.map_value(thr.value, r.x, r.right()) {
-            emit_vertical_threshold(scene, r, x_pt, thr, frame.x_map);
-        }
-    }
-    for thr in &frame.spec.y_axis.thresholds {
-        if let Some(y_pt) = frame.y_map.map_value(thr.value, r.bottom(), r.y) {
-            emit_horizontal_threshold(scene, r, y_pt, thr, frame.y_map);
-        }
-    }
-}
-
-fn emit_vertical_threshold(scene: &mut ChartScene, r: RectPt, x_pt: f64, thr: &AxisThreshold, map: AxisMapping) {
-    if let Some(end_v) = thr.shade_to
-        && let Some(x_end) = map.map_value(end_v, r.x, r.right())
-    {
-        let lo = crate::clamp_f64_safe(x_pt.min(x_end), r.x, r.right());
-        let hi = crate::clamp_f64_safe(x_pt.max(x_end), r.x, r.right());
-        if hi > lo {
-            scene.primitives.push(ScenePrimitive::Path {
-                path: Path2D::rect(RectPt::new(lo, r.y, hi - lo, r.height)),
-                fill: Some(alpha_fill(thr.color, 28)),
-                stroke: None,
-                clip: Some(r),
-            });
-        }
-    }
-    if x_pt >= r.x - 0.5 && x_pt <= r.right() + 0.5 {
-        scene.primitives.push(ScenePrimitive::Path {
-            path: Path2D::line(PointPt::new(x_pt, r.y), PointPt::new(x_pt, r.bottom())),
-            fill: None,
-            stroke: Some(solid_stroke(thr.color, thr.stroke_width_pt, thr.dash_style)),
-            clip: Some(r),
-        });
-    }
-}
-
-fn emit_horizontal_threshold(scene: &mut ChartScene, r: RectPt, y_pt: f64, thr: &AxisThreshold, map: AxisMapping) {
-    if let Some(end_v) = thr.shade_to
-        && let Some(y_end) = map.map_value(end_v, r.bottom(), r.y)
-    {
-        let lo = crate::clamp_f64_safe(y_pt.min(y_end), r.y, r.bottom());
-        let hi = crate::clamp_f64_safe(y_pt.max(y_end), r.y, r.bottom());
-        if hi > lo {
-            scene.primitives.push(ScenePrimitive::Path {
-                path: Path2D::rect(RectPt::new(r.x, lo, r.width, hi - lo)),
-                fill: Some(alpha_fill(thr.color, 28)),
-                stroke: None,
-                clip: Some(r),
-            });
-        }
-    }
-    if y_pt >= r.y - 0.5 && y_pt <= r.bottom() + 0.5 {
-        scene.primitives.push(ScenePrimitive::Path {
-            path: Path2D::line(PointPt::new(r.x, y_pt), PointPt::new(r.right(), y_pt)),
-            fill: None,
-            stroke: Some(solid_stroke(thr.color, thr.stroke_width_pt, thr.dash_style)),
-            clip: Some(r),
-        });
-    }
-}
-
-fn draw_x_numeric_ticks(scene: &mut ChartScene, frame: &CartesianFrame<'_>) {
-    let r = scene.plot_rect_pt;
-    let tick_stroke = solid_stroke(Rgba8::BLACK, 0.85, LineDashStyle::Solid);
-    let angle = frame.spec.x_axis.tick_angle_deg;
-    let tick_span = tick_span_offsets(frame.spec.x_axis.tick_direction, 4.0, 1.0);
-    for (val, label) in frame.x_ticks {
-        let Some(x_pt) = frame.x_map.map_value(*val, r.x, r.right()) else { continue };
-        if x_pt < r.x - 1.0 || x_pt > r.right() + 1.0 {
-            continue;
-        }
-        if let Some((o0, o1)) = tick_span {
-            scene.primitives.push(ScenePrimitive::Path {
-                path: Path2D::line(PointPt::new(x_pt, r.bottom() + o0), PointPt::new(x_pt, r.bottom() + o1)),
-                fill: None,
-                stroke: Some(tick_stroke),
-                clip: None,
-            });
-        }
-        if frame.spec.x_axis.show_tick_labels {
-            scene.primitives.push(ScenePrimitive::Text(PositionedText {
-                rich: parse_markup(label),
-                anchor_pt: PointPt::new(x_pt, r.bottom() + 13.0),
-                anchor: if angle.abs() > 10.0 { TextAnchor::End } else { TextAnchor::Middle },
-                font_size_pt: 8.5,
-                rotation_deg: angle,
-                color: Rgba8::BLACK,
-            }));
-        }
-    }
-    let x_add = resolve_single_axis_additional(&frame.spec.x_axis, frame.x_map, r.x, r.right(), frame.doc, &frame.spec.primary_source_sheet_id);
-    if !x_add.is_empty() {
-        emit_additional_x_tick_primitives(&x_add, r.bottom(), angle, frame.spec.x_axis.tick_direction, tick_stroke, &mut scene.primitives);
-    }
-    emit_x_title(scene, frame.spec, frame.doc, angle.abs() > 10.0);
-}
-
-pub(crate) fn draw_categorical_x_ticks(scene: &mut ChartScene, spec: &GraphSpec, cats: &[(f64, String)], doc: &ProjectDocument) {
-    let r = scene.plot_rect_pt;
-    let tick_stroke = solid_stroke(Rgba8::BLACK, 0.85, LineDashStyle::Solid);
-    let angle = spec.x_axis.tick_angle_deg;
-    let tick_span = tick_span_offsets(spec.x_axis.tick_direction, 4.0, 1.0);
-    for (x_pt, label) in cats {
-        if *x_pt < r.x - 1.0 || *x_pt > r.right() + 1.0 {
-            continue;
-        }
-        if let Some((o0, o1)) = tick_span {
-            scene.primitives.push(ScenePrimitive::Path {
-                path: Path2D::line(PointPt::new(*x_pt, r.bottom() + o0), PointPt::new(*x_pt, r.bottom() + o1)),
-                fill: None,
-                stroke: Some(tick_stroke),
-                clip: None,
-            });
-        }
-        if spec.x_axis.show_tick_labels {
-            scene.primitives.push(ScenePrimitive::Text(PositionedText {
-                rich: parse_markup(label),
-                anchor_pt: PointPt::new(*x_pt, r.bottom() + 13.0),
-                anchor: if angle.abs() > 10.0 { TextAnchor::End } else { TextAnchor::Middle },
-                font_size_pt: 8.5,
-                rotation_deg: angle,
-                color: Rgba8::BLACK,
-            }));
-        }
-    }
-    emit_x_title(scene, spec, doc, angle.abs() > 10.0);
-}
-
-fn emit_x_title(scene: &mut ChartScene, spec: &GraphSpec, doc: &ProjectDocument, rotated_ticks: bool) {
-    let primary_info_id = doc.paired_info_sheet_id(&spec.primary_source_sheet_id);
-    let title = resolve_graph_text(&spec.x_axis.title, doc, primary_info_id);
-    if title.trim().is_empty() {
-        return;
-    }
-    let r = scene.plot_rect_pt;
-    let y = if rotated_ticks { r.bottom() + 36.0 } else { r.bottom() + 26.0 };
-    scene.primitives.push(ScenePrimitive::Text(PositionedText {
-        rich: parse_markup(&title),
-        anchor_pt: PointPt::new(r.x + r.width * 0.5, y),
-        anchor: TextAnchor::Middle,
-        font_size_pt: 9.5,
-        rotation_deg: 0.0,
-        color: Rgba8::BLACK,
-    }));
-}
-
-pub(crate) fn draw_y_numeric_ticks(
+/// Resolve segmented X/Y(/Y2) axes, adjust `scene.plot_rect_pt`, and emit full cartesian chrome.
+pub(crate) fn layout_and_render_segmented_chrome(
     scene: &mut ChartScene,
-    spec: &GraphSpec,
-    y_ticks: &[(f64, String)],
-    y_map: AxisMapping,
-    max_y_label_w: f64,
+    graph: &GraphSheet,
     doc: &ProjectDocument,
-) {
-    let r = scene.plot_rect_pt;
-    let tick_stroke = solid_stroke(Rgba8::BLACK, 0.85, LineDashStyle::Solid);
-    let tick_span = tick_span_offsets(spec.y_axis.tick_direction, 4.0, -1.0);
-    for (val, label) in y_ticks {
-        let Some(y_pt) = y_map.map_value(*val, r.bottom(), r.y) else { continue };
-        if y_pt < r.y - 1.0 || y_pt > r.bottom() + 1.0 {
-            continue;
-        }
-        if let Some((o0, o1)) = tick_span {
-            scene.primitives.push(ScenePrimitive::Path {
-                path: Path2D::line(PointPt::new(r.x + o0, y_pt), PointPt::new(r.x + o1, y_pt)),
-                fill: None,
-                stroke: Some(tick_stroke),
-                clip: None,
-            });
-        }
-        if spec.y_axis.show_tick_labels {
-            scene.primitives.push(ScenePrimitive::Text(PositionedText {
-                rich: parse_markup(label),
-                anchor_pt: PointPt::new(r.x - 6.0, y_pt + 3.0),
-                anchor: TextAnchor::End,
-                font_size_pt: 8.5,
-                rotation_deg: 0.0,
-                color: Rgba8::BLACK,
-            }));
-        }
-    }
-    let y_add = resolve_single_axis_additional(&spec.y_axis, y_map, r.bottom(), r.y, doc, &spec.primary_source_sheet_id);
-    if !y_add.is_empty() {
-        emit_additional_y_tick_primitives(
-            &y_add,
-            AdditionalYTickLayout {
-                spine_x: r.x,
-                is_left: true,
-                tick_angle_deg: 0.0,
-                label_offset_pt: 6.0,
-                tick_direction: spec.y_axis.tick_direction,
-            },
-            tick_stroke,
-            &mut scene.primitives,
-        );
-    }
-    emit_y_title(scene, spec, max_y_label_w, doc);
-}
+    frame: &SegmentedFrameSpec<'_>,
+) -> (SegmentedAxis, SegmentedAxis, Option<SegmentedAxis>) {
+    let policy = LocaleNumberPolicy::default();
+    let y_preview_axis = SegmentedAxis::build_exact(&graph.spec.y_axis, scene.height_pt - 40.0, 20.0, frame.y_bounds);
+    let y_preview_ticks: Vec<(f64, String)> = if frame.margins.suppress_y_axis_labels {
+        Vec::new()
+    } else if let Some(cy) = frame.cat_y {
+        cy.to_vec()
+    } else {
+        y_preview_axis.preview_tick_labels(&policy).into_iter().enumerate().map(|(idx, lbl)| (idx as f64, lbl)).collect()
+    };
+    let _ = update_plot_rect_for_labels(scene, &graph.spec, &y_preview_ticks, frame.margins);
 
-pub(crate) fn emit_y_title(scene: &mut ChartScene, spec: &GraphSpec, max_y_label_w: f64, doc: &ProjectDocument) {
-    let primary_info_id = doc.paired_info_sheet_id(&spec.primary_source_sheet_id);
-    let y_title = resolve_graph_text(&spec.y_axis.title, doc, primary_info_id);
-    if y_title.trim().is_empty() {
-        return;
-    }
     let r = scene.plot_rect_pt;
-    let max_x = (r.x - 8.0).max(0.0);
-    let min_x = 11.0_f64.min(max_x);
-    let x = crate::clamp_f64_safe(r.x - max_y_label_w - 14.0, min_x, max_x);
-    scene.primitives.push(ScenePrimitive::Text(PositionedText {
-        rich: parse_markup(&y_title),
-        anchor_pt: PointPt::new(x, r.y + r.height * 0.5),
-        anchor: TextAnchor::Middle,
-        font_size_pt: 9.5,
-        rotation_deg: -90.0,
-        color: Rgba8::BLACK,
-    }));
+    let x_axis = SegmentedAxis::build_exact(&graph.spec.x_axis, r.x, r.right(), frame.x_bounds);
+    let y_axis = SegmentedAxis::build_exact(&graph.spec.y_axis, r.bottom(), r.y, frame.y_bounds);
+    let y2_axis = frame.y2_bounds.and_then(|b| graph.spec.y2_axis.as_ref().map(|y2| SegmentedAxis::build_exact(y2, r.bottom(), r.y, b)));
+    render_cartesian_chrome_full(
+        scene,
+        graph,
+        doc,
+        &ChromeAxes { x: &x_axis, y: &y_axis, y2: y2_axis.as_ref(), cat_x: frame.cat_x, cat_y: frame.cat_y },
+    );
+    (x_axis, y_axis, y2_axis)
 }
 
 pub(crate) fn path_move(path: &mut Path2D, pt: PointPt) {
@@ -750,58 +388,44 @@ pub(crate) fn draw_legend_entries(scene: &mut ChartScene, spec: &GraphSpec, entr
     if !spec.legend.visible || entries.is_empty() {
         return;
     }
-    let r = scene.plot_rect_pt;
-    let max_label_w = entries.iter().map(|e| text_metrics(&e.label, 8.0).width_pt).fold(0.0_f64, f64::max);
-    let box_w = crate::clamp_f64_safe(max_label_w + 26.0, 54.0, (scene.width_pt - r.right() - 8.0).max(56.0));
-    let row_h = 13.0;
-    let box_h = (entries.len() as f64) * row_h + 8.0;
-    let (lx, ly) = if let Some((px, py)) = spec.legend.position_pt {
-        (px, py)
-    } else if scene.width_pt - r.right() >= box_w + 10.0 {
-        (r.right() + 8.0, r.y)
-    } else {
-        ((r.right() - box_w - 4.0).max(r.x + 2.0), r.y + 4.0)
-    };
-
-    if spec.legend.bordered {
-        scene.primitives.push(ScenePrimitive::Path {
-            path: Path2D::rect(RectPt::new(lx, ly, box_w, box_h)),
-            fill: Some(FillPaint::solid(Rgba8::rgba(255, 255, 255, 235))),
-            stroke: Some(solid_stroke(Rgba8::rgb(120, 120, 120), 0.75, LineDashStyle::Solid)),
-            clip: None,
-        });
-    }
-
-    for (idx, entry) in entries.iter().enumerate() {
-        let cy = ly + 10.0 + (idx as f64) * row_h;
-        if entry.is_line {
-            scene.primitives.push(ScenePrimitive::Path {
-                path: Path2D::line(PointPt::new(lx + 4.0, cy), PointPt::new(lx + 16.0, cy)),
-                fill: None,
-                stroke: Some(solid_stroke(entry.color, 1.5, entry.dash.unwrap_or(LineDashStyle::Solid))),
-                clip: None,
-            });
-        } else if let Some(mut marker) = entry.marker {
-            marker.size_pt = marker.size_pt.min(6.0);
-            emit_marker(scene, PointPt::new(lx + 10.0, cy), marker, None);
-        } else {
-            scene.primitives.push(ScenePrimitive::Path {
-                path: Path2D::rect(RectPt::new(lx + 5.0, cy - 4.0, 9.0, 8.0)),
-                fill: Some(FillPaint::solid(entry.color)),
-                stroke: Some(solid_stroke(Rgba8::rgb(40, 40, 40), 0.5, LineDashStyle::Solid)),
-                clip: None,
-            });
-        }
-        let resolved = resolve_graph_text(&entry.label, doc, doc.paired_info_sheet_id(&spec.primary_source_sheet_id));
-        scene.primitives.push(ScenePrimitive::Text(PositionedText {
-            rich: parse_markup(&resolved),
-            anchor_pt: PointPt::new(lx + 20.0, cy + 3.0),
-            anchor: TextAnchor::Start,
-            font_size_pt: 8.0,
-            rotation_deg: 0.0,
-            color: Rgba8::BLACK,
-        }));
-    }
+    let scaled: Vec<ScaledLegendEntry> = entries
+        .iter()
+        .map(|e| {
+            if e.is_line {
+                ScaledLegendEntry {
+                    label: e.label.clone(),
+                    swatch_color: e.color,
+                    stroke_color: Some(e.color),
+                    marker_shape: e.marker.map(|m| m.shape),
+                    marker_fill_mode: e.marker.map_or(MarkerFillMode::Filled, |m| m.fill_mode),
+                    dash_style: e.dash.or(Some(LineDashStyle::Solid)),
+                    is_box_swatch: false,
+                }
+            } else if let Some(m) = e.marker {
+                ScaledLegendEntry {
+                    label: e.label.clone(),
+                    swatch_color: m.fill_color,
+                    stroke_color: Some(m.stroke_color),
+                    marker_shape: Some(m.shape),
+                    marker_fill_mode: m.fill_mode,
+                    dash_style: None,
+                    is_box_swatch: false,
+                }
+            } else {
+                ScaledLegendEntry {
+                    label: e.label.clone(),
+                    swatch_color: e.color,
+                    stroke_color: Some(Rgba8::rgb(40, 40, 40)),
+                    marker_shape: None,
+                    marker_fill_mode: MarkerFillMode::Filled,
+                    dash_style: None,
+                    is_box_swatch: true,
+                }
+            }
+        })
+        .collect();
+    let info_id = doc.paired_info_sheet_id(&spec.primary_source_sheet_id);
+    crate::scales::render_legend_with_placement(&spec.legend, &scaled, doc, info_id, true, scene);
 }
 
 pub(crate) fn draw_colorbar(scene: &mut ChartScene, ramp: &ColorRamp, min_v: f64, max_v: f64, title: &str, bar_rect: RectPt) {
@@ -855,120 +479,9 @@ pub(crate) fn draw_graph_annotations(
     annotations: &[GraphAnnotation],
     doc: &ProjectDocument,
     primary_info_id: Option<&SheetId>,
-) {
-    for ann in annotations {
-        match ann {
-            GraphAnnotation::TextBox { bounds_pt, markdown, bordered } => {
-                let rect = RectPt::from(*bounds_pt);
-                if *bordered {
-                    scene.primitives.push(ScenePrimitive::Path {
-                        path: Path2D::rect(rect),
-                        fill: Some(FillPaint::solid(Rgba8::rgba(255, 255, 255, 230))),
-                        stroke: Some(solid_stroke(Rgba8::BLACK, 0.75, LineDashStyle::Solid)),
-                        clip: None,
-                    });
-                }
-                let expanded = resolve_graph_text(markdown, doc, primary_info_id);
-                scene.primitives.push(ScenePrimitive::Text(PositionedText {
-                    rich: parse_markup(&expanded),
-                    anchor_pt: PointPt::new(rect.x + 4.0, rect.y + 11.0),
-                    anchor: TextAnchor::Start,
-                    font_size_pt: 8.5,
-                    rotation_deg: 0.0,
-                    color: Rgba8::BLACK,
-                }));
-            }
-            GraphAnnotation::LineOrArrow { start_pt, end_pt, arrowhead, dash, color } => {
-                let p0 = PointPt::new(start_pt.0, start_pt.1);
-                let p1 = PointPt::new(end_pt.0, end_pt.1);
-                scene.primitives.push(ScenePrimitive::Path {
-                    path: Path2D::line(p0, p1),
-                    fill: None,
-                    stroke: Some(solid_stroke(*color, 1.2, *dash)),
-                    clip: None,
-                });
-                if *arrowhead {
-                    let dx = p1.x - p0.x;
-                    let dy = p1.y - p0.y;
-                    let len = (dx * dx + dy * dy).sqrt();
-                    if len > 1e-4 {
-                        let ux = dx / len;
-                        let uy = dy / len;
-                        let back = PointPt::new(p1.x - 6.0 * ux, p1.y - 6.0 * uy);
-                        let left = PointPt::new(back.x - 3.0 * uy, back.y + 3.0 * ux);
-                        let right = PointPt::new(back.x + 3.0 * uy, back.y - 3.0 * ux);
-                        scene.primitives.push(ScenePrimitive::Path {
-                            path: polygon_path(&[(p1.x, p1.y), (left.x, left.y), (right.x, right.y)]),
-                            fill: Some(FillPaint::solid(*color)),
-                            stroke: None,
-                            clip: None,
-                        });
-                    }
-                }
-            }
-            GraphAnnotation::Shape { kind, bounds_pt, stroke_color, stroke_width_pt, dash, fill_color } => {
-                let rect = RectPt::from(*bounds_pt);
-                let path = match kind {
-                    curvebook_doc::AnnotationShapeKind::Rectangle | curvebook_doc::AnnotationShapeKind::RoundedRectangle => Path2D::rect(rect),
-                    curvebook_doc::AnnotationShapeKind::Ellipse => {
-                        ellipse_path(rect.x + rect.width * 0.5, rect.y + rect.height * 0.5, rect.width * 0.5, rect.height * 0.5, 0.0)
-                    }
-                };
-                scene.primitives.push(ScenePrimitive::Path {
-                    path,
-                    fill: fill_color.map(FillPaint::solid),
-                    stroke: Some(solid_stroke(*stroke_color, *stroke_width_pt, *dash)),
-                    clip: None,
-                });
-            }
-            GraphAnnotation::EmbeddedResultTable { result_sheet_id, tab_id, bounds_pt, selected_rows, selected_cols, style } => {
-                let _ = crate::xy::render_styled_embedded_table(
-                    scene,
-                    doc,
-                    &crate::xy::EmbeddedTableDrawSpec {
-                        sheet_id: result_sheet_id,
-                        tab_id: tab_id.as_deref(),
-                        bounds: RectPt::from(*bounds_pt),
-                        selected_rows: selected_rows.as_deref(),
-                        selected_cols: selected_cols.as_deref(),
-                        style,
-                        missing_warning_code: "missing_embedded_result_table",
-                    },
-                    None,
-                );
-            }
-            GraphAnnotation::ModelEquation { result_sheet_id, data_set_index, mode, bounds_pt, font_size_pt, bordered } => {
-                crate::equation_box::render_model_equation_annotation(
-                    scene,
-                    doc,
-                    &crate::equation_box::ModelEquationParams {
-                        result_sheet_id,
-                        data_set_index: *data_set_index,
-                        mode: *mode,
-                        bounds_pt: *bounds_pt,
-                        font_size_pt: *font_size_pt,
-                        bordered: *bordered,
-                    },
-                );
-            }
-            GraphAnnotation::EmbeddedImage { asset_id, bounds_pt, rotation_deg, crop, border, .. } => {
-                crate::image_decode::emit_embedded_image_primitive(
-                    scene,
-                    doc,
-                    &crate::image_decode::EmbeddedImageDrawSpec {
-                        asset_id,
-                        bounds_pt: *bounds_pt,
-                        rotation_deg: *rotation_deg,
-                        crop: *crop,
-                        border: *border,
-                        clip: None,
-                        badge_override: None,
-                    },
-                    None,
-                );
-            }
-        }
-    }
+) -> Result<(), ChartError> {
+    let mut budget = crate::scales::AnnotationBudget::default();
+    crate::scales::render_annotations_with_budget(annotations, doc, primary_info_id, &mut budget, scene)
 }
 
 pub(crate) fn format_result_cell(cell: &ResultCell) -> String {
@@ -1015,15 +528,20 @@ pub(crate) struct SheetGrid {
 
 pub(crate) fn extract_sheet_grid(doc: &ProjectDocument, source_sheet_id: &SheetId, tab_id: Option<&str>) -> Option<SheetGrid> {
     if let Some(res) = doc.result_sheet(source_sheet_id) {
+        if matches!(res.status, ResultStatus::Failed { .. }) {
+            return None;
+        }
         let tab: Option<&ResultTab> = tab_id.and_then(|tid| res.tabs.iter().find(|t| t.id == tid)).or_else(|| res.tabs.first());
         if let Some(t) = tab {
             let rows = t.rows.iter().map(|r| r.iter().map(format_result_cell).collect()).collect();
             return Some(SheetGrid { headers: t.column_headers.clone(), row_labels: t.row_labels.clone(), rows });
         }
-        if !res.scalars.is_empty() {
+        let finite_scalars: Vec<_> = res.scalars.iter().filter(|s| s.value.is_finite()).collect();
+        if !finite_scalars.is_empty() {
+            let policy = LocaleNumberPolicy::default();
             let headers = vec![String::from("Value")];
-            let row_labels = res.scalars.iter().map(|s| s.key.clone()).collect();
-            let rows = res.scalars.iter().map(|s| vec![format!("{:.4}", s.value)]).collect();
+            let row_labels = finite_scalars.iter().map(|s| s.key.clone()).collect();
+            let rows = finite_scalars.iter().map(|s| vec![format_axis_tick(s.value, AxisScale::Linear, &policy)]).collect();
             return Some(SheetGrid { headers, row_labels, rows });
         }
     }
@@ -1037,6 +555,17 @@ pub(crate) fn extract_sheet_grid(doc: &ProjectDocument, source_sheet_id: &SheetI
         return Some(SheetGrid { headers, row_labels, rows });
     }
     None
+}
+
+fn trim_trailing_zeros(buf: &mut String) {
+    if buf.contains('.') {
+        while buf.ends_with('0') {
+            let _ = buf.pop();
+        }
+        if buf.ends_with('.') {
+            let _ = buf.pop();
+        }
+    }
 }
 
 fn extract_data_sheet_grid(ds: &DataSheet) -> SheetGrid {
@@ -1140,51 +669,50 @@ struct KmResolvedStyle {
 }
 
 fn compile_survival(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartScene) -> Result<(), ChartError> {
-    let cohorts = extract_km_cohorts(graph, doc);
+    let cohorts = extract_km_cohorts(graph, doc, &mut scene.warnings);
     if cohorts.is_empty() {
         scene.warnings.push(ChartWarning::new("empty_survival_data", "no survival cohort observations or result curves available"));
         draw_empty_open_frame(scene);
         return Ok(());
     }
 
-    let y_auto_max = cohorts.iter().map(|c| km_cohort_y_scale(&graph.spec, c.display_metric)).fold(0.0_f64, f64::max).max(1.0);
+    let y_auto_max =
+        cohorts.iter().map(|c| km_cohort_y_scale(&graph.spec, c.display_metric)).filter(|v| v.is_finite()).fold(0.0_f64, f64::max).max(1.0);
     let max_time = cohorts
         .iter()
         .flat_map(|c| c.steps.iter().map(|s| s.time).chain(c.censored_times.iter().map(|&(t, _, _)| t)))
+        .filter(|t| t.is_finite())
         .fold(1.0_f64, f64::max)
         .max(1.0);
-    let (x_lo, x_hi) = resolve_axis_domain_with_warnings(&graph.spec.x_axis, 0.0, max_time * 1.05, &mut scene.warnings);
-    let (y_lo, y_hi) = resolve_axis_domain_with_warnings(&graph.spec.y_axis, 0.0, y_auto_max, &mut scene.warnings);
 
-    let x_ticks = nice_axis_ticks_with_warnings(&graph.spec.x_axis, x_lo, x_hi, 6, &mut scene.warnings);
-    let y_ticks = nice_axis_ticks_with_warnings(&graph.spec.y_axis, y_lo, y_hi, 5, &mut scene.warnings);
     let show_nar = graph.spec.survival_number_at_risk && cohorts.iter().any(|c| c.n_total > 0 || !c.observations.is_empty());
     let extra_bottom = if show_nar { 20.0 + (cohorts.len() as f64) * 13.0 } else { 0.0 };
     let max_cohort_lbl_w = if show_nar { cohorts.iter().map(|c| text_metrics(&c.label, 8.0).width_pt + 10.0).fold(0.0_f64, f64::max) } else { 0.0 };
 
-    let max_y_w = update_plot_rect_for_labels(
+    let (x_axis, y_axis, _) = layout_and_render_segmented_chrome(
         scene,
-        &graph.spec,
-        &y_ticks,
-        PlotMarginConfig {
-            extra_bottom_pt: extra_bottom,
-            extra_left_pt: max_cohort_lbl_w.saturating_sub_nonneg(36.0),
-            has_legend: cohorts.len() > 1,
-            ..PlotMarginConfig::default()
+        graph,
+        doc,
+        &SegmentedFrameSpec {
+            x_bounds: (0.0, max_time * 1.05),
+            y_bounds: (0.0, y_auto_max),
+            y2_bounds: None,
+            cat_x: None,
+            cat_y: None,
+            margins: PlotMarginConfig {
+                extra_bottom_pt: extra_bottom,
+                extra_left_pt: max_cohort_lbl_w.saturating_sub_nonneg(36.0),
+                has_legend: cohorts.len() > 1,
+                ..PlotMarginConfig::default()
+            },
         },
     );
-
-    let x_map = AxisMapping { min: x_lo, max: x_hi, scale: graph.spec.x_axis.segments.first().map_or(AxisScale::Linear, |s| s.scale) };
-    let y_map = AxisMapping { min: y_lo, max: y_hi, scale: graph.spec.y_axis.segments.first().map_or(AxisScale::Linear, |s| s.scale) };
-
-    let frame = CartesianFrame { spec: &graph.spec, x_ticks: &x_ticks, y_ticks: &y_ticks, x_map, y_map, max_y_label_w: max_y_w, doc };
-    draw_cartesian_frame(scene, &frame);
 
     let r = scene.plot_rect_pt;
     let mut legend_entries = Vec::with_capacity(cohorts.len());
     for cohort in &cohorts {
         let cohort_scale = km_cohort_y_scale(&graph.spec, cohort.display_metric);
-        draw_single_km_cohort(scene, cohort, x_map, y_map, x_lo.max(x_hi), cohort_scale);
+        draw_single_km_cohort(scene, cohort, &x_axis, &y_axis, cohort_scale);
         legend_entries.push(LegendEntry {
             label: cohort.label.clone(),
             color: cohort.color,
@@ -1195,7 +723,7 @@ fn compile_survival(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Chart
     }
 
     if show_nar {
-        draw_number_at_risk_table(scene, r, &cohorts, &x_ticks, x_map);
+        draw_number_at_risk_table(scene, r, &cohorts, &x_axis);
     }
     draw_legend_entries(scene, &graph.spec, &legend_entries, doc);
     Ok(())
@@ -1238,22 +766,46 @@ fn transform_km_ci(ci_lo: f64, ci_hi: f64, metric: SurvivalDisplayMetric, scale_
     }
 }
 
-fn extract_km_cohorts(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<KmCurveData> {
+fn is_survival_result_for(res: &ResultSheet, primary: &SheetId) -> bool {
+    res.analysis.source_sheet_id == *primary
+        && (matches!(res.analysis.kind, AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { .. }))
+            || (matches!(res.analysis.kind, AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { .. }))
+                && !res.fitted_curves.is_empty()))
+}
+
+fn extract_km_cohorts(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut Vec<ChartWarning>) -> Vec<KmCurveData> {
     let primary = &graph.spec.primary_source_sheet_id;
-    let km_result = doc.result_sheet(primary).or_else(|| {
-        doc.result_sheets
-            .iter()
-            .find(|r| {
-                r.analysis.source_sheet_id == *primary && matches!(r.analysis.kind, AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { .. }))
+    if let Some(res) = doc.result_sheet(primary) {
+        if matches!(res.status, ResultStatus::Failed { .. }) {
+            warnings
+                .push(ChartWarning::new("failed_result_sheet", format!("survival result sheet '{}' failed; omitted failed result curves", res.id)));
+            return Vec::new();
+        }
+        return build_km_from_result_sheet(graph, res);
+    }
+
+    let km_result = doc
+        .result_sheets
+        .iter()
+        .find(|r| {
+            r.analysis.source_sheet_id == *primary
+                && !matches!(r.status, ResultStatus::Failed { .. })
+                && matches!(r.analysis.kind, AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { .. }))
+        })
+        .or_else(|| {
+            doc.result_sheets.iter().find(|r| {
+                r.analysis.source_sheet_id == *primary
+                    && !matches!(r.status, ResultStatus::Failed { .. })
+                    && matches!(r.analysis.kind, AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { .. }))
+                    && !r.fitted_curves.is_empty()
             })
-            .or_else(|| {
-                doc.result_sheets.iter().find(|r| {
-                    r.analysis.source_sheet_id == *primary
-                        && matches!(r.analysis.kind, AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { .. }))
-                        && !r.fitted_curves.is_empty()
-                })
-            })
-    });
+        });
+    if km_result.is_none()
+        && let Some(failed) = doc.result_sheets.iter().find(|r| is_survival_result_for(r, primary) && matches!(r.status, ResultStatus::Failed { .. }))
+    {
+        warnings
+            .push(ChartWarning::new("failed_result_sheet", format!("survival result sheet '{}' failed; fell back to raw survival table", failed.id)));
+    }
 
     if let Some(ds) = doc.data_sheet(&graph.spec.primary_source_sheet_id)
         && let TableArchetype::Survival(surv) = &ds.archetype
@@ -1264,6 +816,7 @@ fn extract_km_cohorts(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<KmCurveD
     if let Some(res) = km_result {
         return build_km_from_result_sheet(graph, res);
     }
+
     Vec::new()
 }
 
@@ -1471,18 +1024,15 @@ fn build_km_from_result_sheet(graph: &GraphSheet, res: &ResultSheet) -> Vec<KmCu
     let nar_tab = res.tabs.iter().find(|t| t.kind == ResultTabKind::NumberAtRisk);
     let mut out = Vec::with_capacity(res.fitted_curves.len());
     for (idx, fc) in res.fitted_curves.iter().enumerate() {
-        if fc.points.is_empty() {
-            continue;
-        }
         let style = km_series_style(graph, fc.data_set_index, idx);
         let label = style.legend_label.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| result_curve_label(res, fc, idx));
-        let has_ci = fc.points.iter().any(|p| p.ci_lower.is_some() && p.ci_upper.is_some());
         let steps: Vec<KmPointStep> = fc
             .points
             .iter()
+            .filter(|p| p.x.is_finite() && p.y.is_finite())
             .map(|p| {
-                let ci_lo = p.ci_lower.unwrap_or(p.y);
-                let ci_hi = p.ci_upper.unwrap_or(p.y);
+                let ci_lo = p.ci_lower.filter(|v| v.is_finite()).unwrap_or(p.y);
+                let ci_hi = p.ci_upper.filter(|v| v.is_finite()).unwrap_or(p.y);
                 let se = ((ci_hi - ci_lo) / (2.0 * 1.959_963_984_540_054)).max(0.0);
                 KmPointStep {
                     time: p.x,
@@ -1494,6 +1044,13 @@ fn build_km_from_result_sheet(graph: &GraphSheet, res: &ResultSheet) -> Vec<KmCu
                 }
             })
             .collect();
+        if steps.is_empty() {
+            continue;
+        }
+        let has_ci = fc
+            .points
+            .iter()
+            .any(|p| p.x.is_finite() && p.y.is_finite() && p.ci_lower.is_some_and(f64::is_finite) && p.ci_upper.is_some_and(f64::is_finite));
         let n_total = steps.first().map_or(0, |s| s.n_at_risk_before);
         let mut censored_times = Vec::new();
         if let Some(tab) = nar_tab {
@@ -1529,7 +1086,7 @@ fn nar_at_time_from_tab(nar_tab: Option<&ResultTab>, cohort_label: &str, t: f64)
         }
         let Some(ResultCell::Number { value: row_t, .. }) = row.get(1) else { continue };
         let Some(ResultCell::Number { value: risk, .. }) = row.get(2) else { continue };
-        if *row_t >= t - 1e-9 && risk.is_finite() && *risk >= 0.0 {
+        if row_t.is_finite() && *row_t >= t - 1e-9 && risk.is_finite() && *risk >= 0.0 {
             return Some(*risk as usize);
         }
     }
@@ -1546,20 +1103,21 @@ fn extract_censored_from_nar_tab(tab: &ResultTab, cohort_label: &str, col_idx: u
         let Some(ResultCell::Number { value: row_t, .. }) = row.get(1) else { continue };
         let Some(ResultCell::Number { value: risk, .. }) = row.get(2) else { continue };
         let Some(ResultCell::Number { value: events, .. }) = row.get(3) else { continue };
-        let r_now = (*risk).max(0.0) as usize;
-        let ev_now = (*events).max(0.0) as usize;
+        if !row_t.is_finite() || !risk.is_finite() || !events.is_finite() || *risk < 0.0 || *events < 0.0 {
+            continue;
+        }
+        let r_now = *risk as usize;
+        let ev_now = *events as usize;
         if let Some(prev) = prev_risk
             && prev > r_now + ev_now
         {
-            out.push((*row_t, None, col_idx));
-        } else if ev_now == 0 && r_now > 0 {
             out.push((*row_t, None, col_idx));
         }
         prev_risk = Some(r_now);
     }
 }
 
-fn draw_single_km_cohort(scene: &mut ChartScene, cohort: &KmCurveData, x_map: AxisMapping, y_map: AxisMapping, x_max: f64, scale_pct: f64) {
+fn draw_single_km_cohort(scene: &mut ChartScene, cohort: &KmCurveData, x_axis: &SegmentedAxis, y_axis: &SegmentedAxis, scale_pct: f64) {
     let r = scene.plot_rect_pt;
     if cohort.steps.is_empty() {
         return;
@@ -1567,36 +1125,65 @@ fn draw_single_km_cohort(scene: &mut ChartScene, cohort: &KmCurveData, x_map: Ax
 
     let show_ci_band = cohort.show_greenwood_ci || matches!(cohort.error_display, Some(ErrorBarMetric::ConfidenceInterval95));
     if show_ci_band {
-        draw_km_ci_band(scene, r, cohort, x_map, y_map, scale_pct);
+        draw_km_ci_band(scene, r, cohort, x_axis, y_axis, scale_pct);
     }
 
+    let max_cens = cohort.censored_times.iter().map(|&(t, _, _)| t).filter(|t| t.is_finite()).max_by(f64::total_cmp);
     let mut step_path = Path2D::new();
-    let Some(first) = cohort.steps.first() else { return };
-    let y0_val = transform_km_value(first.survival, cohort.display_metric, scale_pct);
-    if let (Some(x0), Some(y0)) = (x_map.map_value(first.time, r.x, r.right()), y_map.map_value(y0_val, r.bottom(), r.y)) {
-        path_move(&mut step_path, PointPt::new(x0, y0));
-    }
-    for win in cohort.steps.windows(2) {
-        let (Some(a), Some(b)) = (win.first(), win.get(1)) else { continue };
-        let ya_val = transform_km_value(a.survival, cohort.display_metric, scale_pct);
-        let yb_val = transform_km_value(b.survival, cohort.display_metric, scale_pct);
-        let (Some(xb), Some(ya), Some(yb)) =
-            (x_map.map_value(b.time, r.x, r.right()), y_map.map_value(ya_val, r.bottom(), r.y), y_map.map_value(yb_val, r.bottom(), r.y))
-        else {
+    for seg_x in &x_axis.segments {
+        let seg_lo = seg_x.domain_min.min(seg_x.domain_max);
+        let seg_hi = seg_x.domain_min.max(seg_x.domain_max);
+        let (Some(first_all), Some(last_all)) = (cohort.steps.first(), cohort.steps.last()) else {
             continue;
         };
-        if cohort.staircase {
-            path_line(&mut step_path, PointPt::new(xb, ya));
+        let tail_hi = max_cens.map_or(last_all.time, |mc| mc.max(last_all.time));
+        if tail_hi < seg_lo || first_all.time > seg_hi {
+            continue;
         }
-        path_line(&mut step_path, PointPt::new(xb, yb));
-    }
-    if let Some(last) = cohort.steps.last()
-        && let Some(max_cens) = cohort.censored_times.iter().map(|&(t, _, _)| t).max_by(|a, b| a.total_cmp(b))
-        && max_cens > last.time
-    {
-        let last_val = transform_km_value(last.survival, cohort.display_metric, scale_pct);
-        if let (Some(xe), Some(yl)) = (x_map.map_value(max_cens.min(x_max), r.x, r.right()), y_map.map_value(last_val, r.bottom(), r.y)) {
-            path_line(&mut step_path, PointPt::new(xe, yl));
+
+        let mut started = false;
+        let mut prev_ya: Option<f64> = None;
+        if first_all.time < seg_lo {
+            let y0_val = transform_km_value(eval_km_at(&cohort.steps, seg_lo, cohort.staircase), cohort.display_metric, scale_pct);
+            if let (Some(x0), Some((_, y0))) = (seg_x.map_strict(seg_lo), y_axis.map_value(y0_val)) {
+                path_move(&mut step_path, PointPt::new(x0, y0));
+                started = true;
+                prev_ya = Some(y0);
+            }
+        }
+        for st in &cohort.steps {
+            if st.time < seg_lo - 1e-12 || st.time > seg_hi + 1e-12 {
+                continue;
+            }
+            let y_val = transform_km_value(st.survival, cohort.display_metric, scale_pct);
+            let (Some(xb), Some((_, yb))) = (seg_x.map_strict(st.time), y_axis.map_value(y_val)) else {
+                prev_ya = None;
+                started = false;
+                continue;
+            };
+            if !started {
+                path_move(&mut step_path, PointPt::new(xb, yb));
+                started = true;
+            } else {
+                if cohort.staircase
+                    && let Some(ya) = prev_ya
+                {
+                    path_line(&mut step_path, PointPt::new(xb, ya));
+                }
+                path_line(&mut step_path, PointPt::new(xb, yb));
+            }
+            prev_ya = Some(yb);
+        }
+        if tail_hi > last_all.time && last_all.time <= seg_hi {
+            let last_val = transform_km_value(last_all.survival, cohort.display_metric, scale_pct);
+            if let (Some(xe), Some((_, yl))) = (seg_x.map_strict(tail_hi.min(seg_hi)), y_axis.map_value(last_val)) {
+                if started {
+                    path_line(&mut step_path, PointPt::new(xe, yl));
+                } else if let Some(xs) = seg_x.map_strict(seg_lo.max(last_all.time)) {
+                    path_move(&mut step_path, PointPt::new(xs, yl));
+                    path_line(&mut step_path, PointPt::new(xe, yl));
+                }
+            }
         }
     }
 
@@ -1616,9 +1203,7 @@ fn draw_single_km_cohort(scene: &mut ChartScene, cohort: &KmCurveData, x_map: Ax
             let lo_raw = (st.survival - st.greenwood_se).clamp(0.0, 1.0);
             let hi_raw = (st.survival + st.greenwood_se).clamp(0.0, 1.0);
             let (lo_v, hi_v) = transform_km_ci(lo_raw, hi_raw, cohort.display_metric, scale_pct);
-            if let (Some(xp), Some(yp_lo), Some(yp_hi)) =
-                (x_map.map_value(st.time, r.x, r.right()), y_map.map_value(lo_v, r.bottom(), r.y), y_map.map_value(hi_v, r.bottom(), r.y))
-            {
+            if let (Some((_, xp)), Some((_, yp_lo)), Some((_, yp_hi))) = (x_axis.map_value(st.time), y_axis.map_value(lo_v), y_axis.map_value(hi_v)) {
                 scene.primitives.push(ScenePrimitive::Path {
                     path: Path2D::line(PointPt::new(xp, yp_lo), PointPt::new(xp, yp_hi)),
                     fill: None,
@@ -1647,7 +1232,7 @@ fn draw_single_km_cohort(scene: &mut ChartScene, cohort: &KmCurveData, x_map: Ax
                 continue;
             }
             let s_val = transform_km_value(eval_km_at(&cohort.steps, obs.time, cohort.staircase), cohort.display_metric, scale_pct);
-            if let (Some(xe), Some(ye)) = (x_map.map_value(obs.time, r.x, r.right()), y_map.map_value(s_val, r.bottom(), r.y)) {
+            if let (Some((_, xe)), Some((_, ye))) = (x_axis.map_value(obs.time), y_axis.map_value(s_val)) {
                 scene.plotted_points.push(PlottedPointMeta {
                     center_pt: PointPt::new(xe, ye),
                     radius_pt: 4.0,
@@ -1663,7 +1248,7 @@ fn draw_single_km_cohort(scene: &mut ChartScene, cohort: &KmCurveData, x_map: Ax
         let censor_stroke = solid_stroke(cohort.color, (cohort.stroke_width_pt * 0.85).max(1.0), LineDashStyle::Solid);
         for &(tc, row_opt, col_idx) in &cohort.censored_times {
             let s_val = transform_km_value(eval_km_at(&cohort.steps, tc, cohort.staircase), cohort.display_metric, scale_pct);
-            if let (Some(xc), Some(yc)) = (x_map.map_value(tc, r.x, r.right()), y_map.map_value(s_val, r.bottom(), r.y)) {
+            if let (Some((_, xc)), Some((_, yc))) = (x_axis.map_value(tc), y_axis.map_value(s_val)) {
                 scene.primitives.push(ScenePrimitive::Path {
                     path: Path2D::line(PointPt::new(xc, yc - 3.5), PointPt::new(xc, yc + 3.5)),
                     fill: None,
@@ -1684,67 +1269,79 @@ fn draw_single_km_cohort(scene: &mut ChartScene, cohort: &KmCurveData, x_map: Ax
     }
 }
 
-fn draw_km_ci_band(scene: &mut ChartScene, r: RectPt, cohort: &KmCurveData, x_map: AxisMapping, y_map: AxisMapping, scale_pct: f64) {
-    let mut upper_pts = Vec::new();
-    let mut lower_pts = Vec::new();
-    if cohort.staircase {
-        for win in cohort.steps.windows(2) {
-            let (Some(a), Some(b)) = (win.first(), win.get(1)) else { continue };
-            let (Some(xa), Some(xb)) = (x_map.map_value(a.time, r.x, r.right()), x_map.map_value(b.time, r.x, r.right())) else {
-                continue;
-            };
-            let (lo_v, hi_v) = transform_km_ci(a.ci_lower, a.ci_upper, cohort.display_metric, scale_pct);
-            if let Some(y_hi) = y_map.map_value(hi_v, r.bottom(), r.y) {
-                upper_pts.push((xa, y_hi));
-                upper_pts.push((xb, y_hi));
+fn draw_km_ci_band(scene: &mut ChartScene, r: RectPt, cohort: &KmCurveData, x_axis: &SegmentedAxis, y_axis: &SegmentedAxis, scale_pct: f64) {
+    for seg_x in &x_axis.segments {
+        let seg_lo = seg_x.domain_min.min(seg_x.domain_max);
+        let seg_hi = seg_x.domain_min.max(seg_x.domain_max);
+        let mut upper_pts = Vec::new();
+        let mut lower_pts = Vec::new();
+        if cohort.staircase {
+            for win in cohort.steps.windows(2) {
+                let (Some(a), Some(b)) = (win.first(), win.get(1)) else { continue };
+                if b.time < seg_lo - 1e-12 || a.time > seg_hi + 1e-12 {
+                    continue;
+                }
+                let t0 = a.time.max(seg_lo);
+                let t1 = b.time.min(seg_hi);
+                let (Some(xa), Some(xb)) = (seg_x.map_strict(t0), seg_x.map_strict(t1)) else {
+                    continue;
+                };
+                let (lo_v, hi_v) = transform_km_ci(a.ci_lower, a.ci_upper, cohort.display_metric, scale_pct);
+                if let Some((_, y_hi)) = y_axis.map_value(hi_v) {
+                    upper_pts.push((xa, y_hi));
+                    upper_pts.push((xb, y_hi));
+                }
+                if let Some((_, y_lo)) = y_axis.map_value(lo_v) {
+                    lower_pts.push((xa, y_lo));
+                    lower_pts.push((xb, y_lo));
+                }
             }
-            if let Some(y_lo) = y_map.map_value(lo_v, r.bottom(), r.y) {
-                lower_pts.push((xa, y_lo));
-                lower_pts.push((xb, y_lo));
+        } else {
+            for st in &cohort.steps {
+                if st.time < seg_lo - 1e-12 || st.time > seg_hi + 1e-12 {
+                    continue;
+                }
+                let Some(xs) = seg_x.map_strict(st.time) else { continue };
+                let (lo_v, hi_v) = transform_km_ci(st.ci_lower, st.ci_upper, cohort.display_metric, scale_pct);
+                if let (Some((_, y_hi)), Some((_, y_lo))) = (y_axis.map_value(hi_v), y_axis.map_value(lo_v)) {
+                    upper_pts.push((xs, y_hi));
+                    lower_pts.push((xs, y_lo));
+                }
             }
         }
-    } else {
-        for st in &cohort.steps {
-            let Some(xs) = x_map.map_value(st.time, r.x, r.right()) else { continue };
-            let (lo_v, hi_v) = transform_km_ci(st.ci_lower, st.ci_upper, cohort.display_metric, scale_pct);
-            if let (Some(y_hi), Some(y_lo)) = (y_map.map_value(hi_v, r.bottom(), r.y), y_map.map_value(lo_v, r.bottom(), r.y)) {
-                upper_pts.push((xs, y_hi));
-                lower_pts.push((xs, y_lo));
-            }
+        if upper_pts.is_empty() || lower_pts.is_empty() {
+            continue;
         }
-    }
-    if upper_pts.is_empty() || lower_pts.is_empty() {
-        return;
-    }
 
-    if cohort.ci_dashed {
-        let mut up_p = Path2D::new();
-        if let Some(&(x0, y0)) = upper_pts.first() {
-            path_move(&mut up_p, PointPt::new(x0, y0));
-            for &(x, y) in upper_pts.iter().skip(1) {
-                path_line(&mut up_p, PointPt::new(x, y));
+        if cohort.ci_dashed {
+            let mut up_p = Path2D::new();
+            if let Some(&(x0, y0)) = upper_pts.first() {
+                path_move(&mut up_p, PointPt::new(x0, y0));
+                for &(x, y) in upper_pts.iter().skip(1) {
+                    path_line(&mut up_p, PointPt::new(x, y));
+                }
             }
-        }
-        let mut lo_p = Path2D::new();
-        if let Some(&(x0, y0)) = lower_pts.first() {
-            path_move(&mut lo_p, PointPt::new(x0, y0));
-            for &(x, y) in lower_pts.iter().skip(1) {
-                path_line(&mut lo_p, PointPt::new(x, y));
+            let mut lo_p = Path2D::new();
+            if let Some(&(x0, y0)) = lower_pts.first() {
+                path_move(&mut lo_p, PointPt::new(x0, y0));
+                for &(x, y) in lower_pts.iter().skip(1) {
+                    path_line(&mut lo_p, PointPt::new(x, y));
+                }
             }
+            let dash_stroke = solid_stroke(cohort.color, 1.0, LineDashStyle::Dashed);
+            scene.primitives.push(ScenePrimitive::Path { path: up_p, fill: None, stroke: Some(dash_stroke), clip: Some(r) });
+            scene.primitives.push(ScenePrimitive::Path { path: lo_p, fill: None, stroke: Some(dash_stroke), clip: Some(r) });
+        } else {
+            let mut poly = Vec::with_capacity(upper_pts.len() + lower_pts.len());
+            poly.extend(upper_pts);
+            poly.extend(lower_pts.into_iter().rev());
+            scene.primitives.push(ScenePrimitive::Path {
+                path: polygon_path(&poly),
+                fill: Some(alpha_fill(cohort.color, 46)),
+                stroke: None,
+                clip: Some(r),
+            });
         }
-        let dash_stroke = solid_stroke(cohort.color, 1.0, LineDashStyle::Dashed);
-        scene.primitives.push(ScenePrimitive::Path { path: up_p, fill: None, stroke: Some(dash_stroke), clip: Some(r) });
-        scene.primitives.push(ScenePrimitive::Path { path: lo_p, fill: None, stroke: Some(dash_stroke), clip: Some(r) });
-    } else {
-        let mut poly = Vec::with_capacity(upper_pts.len() + lower_pts.len());
-        poly.extend(upper_pts);
-        poly.extend(lower_pts.into_iter().rev());
-        scene.primitives.push(ScenePrimitive::Path {
-            path: polygon_path(&poly),
-            fill: Some(alpha_fill(cohort.color, 46)),
-            stroke: None,
-            clip: Some(r),
-        });
     }
 }
 
@@ -1777,7 +1374,7 @@ fn eval_km_at(steps: &[KmPointStep], t: f64, staircase: bool) -> f64 {
     current
 }
 
-fn draw_number_at_risk_table(scene: &mut ChartScene, r: RectPt, cohorts: &[KmCurveData], x_ticks: &[(f64, String)], x_map: AxisMapping) {
+fn draw_number_at_risk_table(scene: &mut ChartScene, r: RectPt, cohorts: &[KmCurveData], x_axis: &SegmentedAxis) {
     let top_y = r.bottom() + 40.0;
     scene.primitives.push(ScenePrimitive::Text(PositionedText {
         rich: parse_markup("<b>Number at risk</b>"),
@@ -1787,6 +1384,20 @@ fn draw_number_at_risk_table(scene: &mut ChartScene, r: RectPt, cohorts: &[KmCur
         rotation_deg: 0.0,
         color: Rgba8::BLACK,
     }));
+
+    let mut dummy_warnings = Vec::new();
+    let mut tick_points = Vec::new();
+    for seg in &x_axis.segments {
+        let (majors, _) = compute_segment_tick_values(seg, None, true, &mut dummy_warnings);
+        for t_val in majors {
+            if let Some(x_pt) = seg.map_strict(t_val)
+                && x_pt >= r.x - 2.0
+                && x_pt <= r.right() + 2.0
+            {
+                tick_points.push((t_val, x_pt));
+            }
+        }
+    }
 
     for (idx, cohort) in cohorts.iter().enumerate() {
         let row_y = top_y + 13.0 + (idx as f64) * 12.5;
@@ -1798,11 +1409,7 @@ fn draw_number_at_risk_table(scene: &mut ChartScene, r: RectPt, cohorts: &[KmCur
             rotation_deg: 0.0,
             color: cohort.color,
         }));
-        for &(t_val, _) in x_ticks {
-            let Some(x_pt) = x_map.map_value(t_val, r.x, r.right()) else { continue };
-            if x_pt < r.x - 2.0 || x_pt > r.right() + 2.0 {
-                continue;
-            }
+        for &(t_val, x_pt) in &tick_points {
             let n_risk = if !cohort.observations.is_empty() {
                 cohort.observations.iter().filter(|o| o.time >= t_val - 1e-9).count()
             } else if t_val <= 1e-9 {
@@ -1865,47 +1472,67 @@ fn compile_contingency(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Ch
         values.iter().flat_map(|r| r.iter()).copied().fold(0.0_f64, f64::max).max(1.0)
     };
 
-    let (y_lo, y_hi) = resolve_axis_domain_with_warnings(
-        &graph.spec.y_axis,
-        0.0,
-        if proportion_scale.is_some() && is_stacked { data_max } else { data_max * 1.1 },
-        &mut scene.warnings,
-    );
-    let y_ticks = nice_axis_ticks_with_warnings(&graph.spec.y_axis, y_lo, y_hi, 5, &mut scene.warnings);
-    let max_y_w = update_plot_rect_for_labels(
+    let y_hi_bound = if proportion_scale.is_some() && is_stacked { data_max } else { data_max * 1.1 };
+    let n_cats = mat.category_labels.len().max(1);
+    let x_cat_positions: Vec<(f64, String)> = mat.category_labels.iter().enumerate().map(|(idx, lbl)| ((idx as f64) + 0.5, lbl.clone())).collect();
+
+    let (x_axis, y_axis, _) = layout_and_render_segmented_chrome(
         scene,
-        &graph.spec,
-        &y_ticks,
-        PlotMarginConfig { has_legend: !mat.series_labels.is_empty(), ..PlotMarginConfig::default() },
+        graph,
+        doc,
+        &SegmentedFrameSpec {
+            x_bounds: (0.0, n_cats as f64),
+            y_bounds: (0.0, y_hi_bound),
+            y2_bounds: None,
+            cat_x: Some(&x_cat_positions),
+            cat_y: None,
+            margins: PlotMarginConfig { has_legend: !mat.series_labels.is_empty(), ..PlotMarginConfig::default() },
+        },
     );
 
     let r = scene.plot_rect_pt;
-    let y_map = AxisMapping { min: y_lo, max: y_hi, scale: graph.spec.y_axis.segments.first().map_or(AxisScale::Linear, |s| s.scale) };
-    let n_cats = mat.category_labels.len().max(1);
-    let slot_w = r.width / (n_cats as f64);
-    let mut x_cat_positions = Vec::with_capacity(n_cats);
-    for (idx, lbl) in mat.category_labels.iter().enumerate() {
-        x_cat_positions.push((r.x + ((idx as f64) + 0.5) * slot_w, lbl.clone()));
-    }
-
-    let x_map_dummy = AxisMapping { min: 0.0, max: n_cats as f64, scale: AxisScale::Linear };
-    let frame = CartesianFrame { spec: &graph.spec, x_ticks: &[], y_ticks: &y_ticks, x_map: x_map_dummy, y_map, max_y_label_w: max_y_w, doc };
-    draw_cartesian_frame(scene, &frame);
-    draw_categorical_x_ticks(scene, &graph.spec, &x_cat_positions, doc);
-
     let bar_border = solid_stroke(Rgba8::rgb(40, 40, 40), 0.75, LineDashStyle::Solid);
-    let y_base_pt = crate::clamp_f64_safe(y_map.map_value(0.0, r.bottom(), r.y).unwrap_or(r.bottom()), r.y, r.bottom());
+    let y_base_pt = y_axis.map_value(0.0).map_or(r.bottom(), |(_, pt)| crate::clamp_f64_safe(pt, r.y, r.bottom()));
+    let mut warned_log_clip = false;
 
     for (cat_idx, row_vals) in values.iter().enumerate() {
-        let center_x = r.x + ((cat_idx as f64) + 0.5) * slot_w;
+        let Some((_, center_x)) = x_axis.map_value((cat_idx as f64) + 0.5) else {
+            continue;
+        };
+        let slot_left = x_axis.map_value(cat_idx as f64).map_or(r.x, |(_, pt)| pt);
+        let slot_right = x_axis.map_value((cat_idx + 1) as f64).map_or(r.right(), |(_, pt)| pt);
+        let slot_w = (slot_right - slot_left).abs().max(8.0);
         if is_stacked {
             let bar_w = (slot_w * 0.62).min(48.0);
             let mut acc = 0.0;
             for (s_idx, &val) in row_vals.iter().enumerate() {
+                if !val.is_finite() || val <= 0.0 {
+                    if val.is_finite() {
+                        acc += val;
+                    }
+                    continue;
+                }
                 let top_val = acc + val;
-                let (Some(y_top), Some(y_bot)) = (y_map.map_value(top_val, r.bottom(), r.y), y_map.map_value(acc, r.bottom(), r.y)) else {
+                let Some((_, y_top)) = y_axis.map_value(top_val) else {
                     acc = top_val;
                     continue;
+                };
+                let y_bot = match y_axis.map_value(acc) {
+                    Some((_, yb)) => yb,
+                    None if acc <= 0.0 => {
+                        if !warned_log_clip {
+                            scene.warnings.push(ChartWarning::new(
+                                "log_axis_floor_clip",
+                                "clipped stacked contingency base count 0.0 to lower axis floor on positive-domain Y axis",
+                            ));
+                            warned_log_clip = true;
+                        }
+                        y_base_pt
+                    }
+                    None => {
+                        acc = top_val;
+                        continue;
+                    }
                 };
                 let rect = RectPt::new(center_x - bar_w * 0.5, y_top.min(y_bot), bar_w, (y_bot - y_top).abs().max(0.5));
                 let color = mat.series_colors.get(s_idx).copied().unwrap_or_else(|| graph.spec.palette.color_at(s_idx));
@@ -1922,7 +1549,7 @@ fn compile_contingency(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Ch
             let mut order: Vec<(usize, f64)> = row_vals.iter().copied().enumerate().collect();
             order.sort_by(|a, b| b.1.abs().total_cmp(&a.1.abs()).then_with(|| a.0.cmp(&b.0)));
             for (rank, &(s_idx, val)) in order.iter().enumerate() {
-                let Some(y_top) = y_map.map_value(val, r.bottom(), r.y) else { continue };
+                let Some((_, y_top)) = y_axis.map_value(val) else { continue };
                 let bar_w = (base_w * (1.0 - 0.12 * (rank as f64).min(4.0))).max(4.0);
                 let rect = RectPt::new(center_x - bar_w * 0.5, y_top.min(y_base_pt), bar_w, (y_base_pt - y_top).abs().max(0.5));
                 let color = mat.series_colors.get(s_idx).copied().unwrap_or_else(|| graph.spec.palette.color_at(s_idx));
@@ -1941,7 +1568,7 @@ fn compile_contingency(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Ch
             let total_w = bar_w * (n_s as f64);
             let start_x = center_x - total_w * 0.5;
             for (s_idx, &val) in row_vals.iter().enumerate() {
-                let Some(y_top) = y_map.map_value(val, r.bottom(), r.y) else { continue };
+                let Some((_, y_top)) = y_axis.map_value(val) else { continue };
                 let x_left = start_x + (s_idx as f64) * bar_w;
                 let rect = RectPt::new(x_left, y_top.min(y_base_pt), (bar_w - 1.0).max(2.0), (y_base_pt - y_top).abs().max(0.5));
                 let color = mat.series_colors.get(s_idx).copied().unwrap_or_else(|| graph.spec.palette.color_at(s_idx));

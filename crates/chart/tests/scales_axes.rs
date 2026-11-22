@@ -32,6 +32,7 @@ fn build_sample_doc_and_graph() -> (ProjectDocument, GraphSheet) {
         AnalysisSpec::new(SheetId::new("fit-1"), data.id.clone(), AnalysisKind::DescriptiveStats(DescriptiveSpec::default())).expect("analysis"),
     )
     .expect("result");
+    result.status = ResultStatus::UpToDate;
     result.scalars.push(ResultScalarEntry { key: String::from("IC50"), data_set_index: Some(0), value: 2.5, units: Some(String::from("nM")) });
     result.tabs.push(ResultTab {
         id: String::from("main"),

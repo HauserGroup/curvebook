@@ -773,7 +773,6 @@ dependencies = [
  "curvebook-stats",
  "curvebook-testkit",
  "curvebook-text",
- "curvebook-transform",
  "image",
  "proptest",
  "serde",
