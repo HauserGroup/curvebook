@@ -4,12 +4,13 @@
 use std::collections::BTreeMap;
 
 use curvebook_doc::{
-    AnalysisKind, ClusterDistance, ClusterLinkage, ColorChannelMapping, DataSheet, DiagnosticPlotKind, GraphKind, GraphSheet, GraphSpec,
-    GraphicalDataObject, HeatmapColumnLabelAngle, HeatmapColumnLabelMode, HeatmapRowLabelMode, LayoutItem, LayoutSheet, LevelOrderSpec,
-    MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec, ProjectDocument, ResultCell, ResultSheet, ResultStatus, ResultTab,
-    ResultTabKind, SheetId, SizeChannelMapping, SubcolumnMode, TableArchetype, VariableColumn, VariableRole, WhiskerMethod,
+    AnalysisKind, ClusterDistance, ClusterLinkage, ColorChannelMapping, DataSheet, DiagnosticPlotKind, ErrorBarDirection, ErrorBarMetric, GraphKind,
+    GraphSheet, GraphSpec, GraphicalDataObject, HeatmapColumnLabelAngle, HeatmapColumnLabelMode, HeatmapRowLabelMode, LayoutItem, LayoutSheet,
+    LevelOrderSpec, MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec, ProjectDocument, ResultCell, ResultSheet, ResultStatus,
+    ResultTab, ResultTabKind, SheetId, SizeChannelMapping, SubcolumnMode, SummaryMeasure, TableArchetype, VariableColumn, VariableRole,
+    WhiskerMethod,
 };
-use curvebook_math::dist::{chi2_isf, norm_ppf};
+use curvebook_math::dist::{chi2_isf, norm_ppf, norm_two_sided_isf};
 use curvebook_math::sum::{covariance, sample_sd};
 use curvebook_math::{AxisScale, ConfidenceLevel};
 use curvebook_palette::{ColorRamp, ColormapId, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8};
@@ -19,17 +20,21 @@ use curvebook_stats::roc::{RocCiMethod, roc_curve_analysis};
 use curvebook_stats::two_group::bland_altman;
 use curvebook_text::{RichText, parse_markup};
 
-use crate::scales::AxisMapping;
+use crate::scales::{AxisMapping, ResolvedSegment};
 use crate::scene::{
     ChartError, ChartScene, ChartWarning, FillPaint, Path2D, PathCmd, PlottedPointMeta, PointPt, PositionedText, RectPt, ScenePrimitive,
     SourceCellId, TextAnchor,
 };
 use crate::survival_cat::{
     CartesianFrame, LegendEntry, PlotMarginConfig, alpha_fill, draw_cartesian_frame, draw_categorical_x_ticks, draw_colorbar, draw_empty_open_frame,
-    draw_graph_annotations, draw_legend_entries, emit_marker, nice_axis_ticks, path_close, path_line, path_move, polygon_path, resolve_axis_domain,
-    resolve_graph_text, sanitize_range, solid_stroke, text_metrics, update_plot_rect_for_labels,
+    draw_graph_annotations, draw_legend_entries, emit_marker, nice_axis_ticks, nice_axis_ticks_with_warnings, path_close, path_line, path_move,
+    polygon_path, resolve_axis_domain, resolve_axis_domain_with_warnings, resolve_graph_text, sanitize_range, solid_stroke, text_metrics,
+    update_plot_rect_for_labels,
 };
-use crate::xy::{EmbeddedTableDrawSpec, format_point_value, render_styled_embedded_table};
+use crate::xy::{
+    AxisErrorTarget, EmbeddedTableDrawSpec, SegmentedAxis, compute_central_tendency, compute_raw_error_bounds, emit_directional_error_bar,
+    format_point_value, is_log_like, render_styled_embedded_table,
+};
 
 const GROUP_SHAPES: [MarkerShape; 9] = [
     MarkerShape::Circle,
@@ -472,40 +477,97 @@ fn emit_confidence_ellipse(scene: &mut ChartScene, pts: &[(f64, f64)], color: Rg
 
 // Categorical × Continuous Summary (Gap G7)
 
+#[derive(Debug, Clone, Copy)]
+struct CatObs {
+    value: f64,
+    row: usize,
+}
+
+struct CatSlotComputed {
+    sorted_obs: Vec<CatObs>,
+    center_opt: Option<f64>,
+    err_bounds: Option<(f64, f64)>,
+}
+
+struct CatSlotDraw<'a> {
+    graph: &'a GraphSheet,
+    y_col_idx: usize,
+    level_label: &'a str,
+    gdo: &'a GraphicalDataObject,
+    y_error_bars: Option<curvebook_doc::ErrorBarSpec>,
+    color: Rgba8,
+    cx: f64,
+    box_w: f64,
+    y_zero: f64,
+    y_map: AxisMapping,
+    y_axis: &'a SegmentedAxis,
+}
+
+struct CatDotCtx<'a> {
+    graph: &'a GraphSheet,
+    y_col_idx: usize,
+    level_label: &'a str,
+    cx: f64,
+    spread_w: f64,
+    y_map: AxisMapping,
+    clip: RectPt,
+    marker: MarkerStyle,
+}
+
 fn resolve_categorical_cld_overlay(
     graph: &GraphSheet,
     doc: &ProjectDocument,
     levels: &[String],
-    groups: &[Vec<f64>],
+    slots: &[CatSlotComputed],
     warnings: &mut Vec<ChartWarning>,
 ) -> Option<crate::column_grouped::ResolvedCldLabels> {
-    let level_means: Vec<Option<f64>> =
-        groups.iter().map(|vals| (!vals.is_empty()).then(|| vals.iter().sum::<f64>() / (vals.len() as f64))).collect();
+    let level_means: Vec<Option<f64>> = slots
+        .iter()
+        .map(|s| {
+            s.center_opt
+                .or_else(|| (!s.sorted_obs.is_empty()).then(|| s.sorted_obs.iter().map(|o| o.value).sum::<f64>() / (s.sorted_obs.len() as f64)))
+        })
+        .collect();
     let cld_slots: Vec<(usize, &str, &str, Option<f64>, f64)> =
         levels.iter().enumerate().map(|(i, lvl)| (i, lvl.as_str(), lvl.as_str(), level_means[i], i as f64)).collect();
     crate::column_grouped::resolve_cld_overlay(graph, doc, &cld_slots, warnings)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn draw_categorical_summary_slot(
-    scene: &mut ChartScene,
-    gdo: &GraphicalDataObject,
-    y_error_bars: Option<curvebook_doc::ErrorBarSpec>,
-    color: Rgba8,
-    r: RectPt,
-    cx: f64,
-    box_w: f64,
-    y_zero: f64,
-    values: &[f64],
-    sorted: &[f64],
-    center_y: f64,
-    y_map: AxisMapping,
-) -> f64 {
-    let mut top_data_val = center_y;
+fn gdo_summary_measure(gdo: &GraphicalDataObject) -> Option<SummaryMeasure> {
     match gdo {
+        GraphicalDataObject::BarWithReplicates { summary, .. } | GraphicalDataObject::AlignedDotPlot { summary, .. } => Some(*summary),
+        GraphicalDataObject::FloatingBar { summary, .. } => *summary,
+        GraphicalDataObject::ScatterAndLine { .. } | GraphicalDataObject::BeforeAfterLines { .. } => Some(SummaryMeasure::Mean),
+        GraphicalDataObject::BoxAndWhisker { .. }
+        | GraphicalDataObject::Violin { .. }
+        | GraphicalDataObject::KaplanMeierStep { .. }
+        | GraphicalDataObject::PartsOfWhole { .. } => None,
+    }
+}
+
+fn draw_categorical_summary_slot(scene: &mut ChartScene, slot: &CatSlotComputed, draw: &CatSlotDraw<'_>) -> f64 {
+    let r = scene.plot_rect_pt;
+    let cx = draw.cx;
+    let box_w = draw.box_w;
+    let y_map = draw.y_map;
+    let color = draw.color;
+    let sorted: Vec<f64> = slot.sorted_obs.iter().map(|o| o.value).collect();
+    let default_dot = MarkerStyle {
+        shape: MarkerShape::Circle,
+        fill_mode: MarkerFillMode::Filled,
+        size_pt: 4.5,
+        fill_color: color,
+        stroke_color: Rgba8::WHITE,
+        stroke_width_pt: 0.5,
+    };
+    let mut top_data_val = slot.center_opt.or_else(|| sorted.last().copied()).unwrap_or(0.0);
+
+    match draw.gdo {
         GraphicalDataObject::BarWithReplicates { border_color, border_width_pt, replicate_overlay, .. } => {
-            if let Some(y_top) = y_map.map_value(center_y, r.bottom(), r.y) {
-                let rect = RectPt::new(cx - box_w * 0.5, y_top.min(y_zero), box_w, (y_zero - y_top).abs().max(0.5));
+            if let Some(center_y) = slot.center_opt
+                && let Some(y_top) = y_map.map_value(center_y, r.bottom(), r.y)
+            {
+                let rect = RectPt::new(cx - box_w * 0.5, y_top.min(draw.y_zero), box_w, (draw.y_zero - y_top).abs().max(0.5));
                 scene.primitives.push(ScenePrimitive::Path {
                     path: Path2D::rect(rect),
                     fill: Some(alpha_fill(color, 185)),
@@ -514,7 +576,21 @@ fn draw_categorical_summary_slot(
                 });
             }
             if replicate_overlay.is_some() {
-                emit_replicate_dots(scene, cx, box_w * 0.6, sorted, y_map, r, Rgba8::rgb(35, 35, 35));
+                let bar_dot = MarkerStyle { fill_color: Rgba8::rgb(35, 35, 35), ..default_dot };
+                emit_categorical_dots(
+                    scene,
+                    &slot.sorted_obs,
+                    &CatDotCtx {
+                        graph: draw.graph,
+                        y_col_idx: draw.y_col_idx,
+                        level_label: draw.level_label,
+                        cx,
+                        spread_w: box_w * 0.6,
+                        y_map,
+                        clip: r,
+                        marker: bar_dot,
+                    },
+                );
                 if let Some(&max_v) = sorted.last() {
                     top_data_val = top_data_val.max(max_v);
                 }
@@ -523,8 +599,12 @@ fn draw_categorical_summary_slot(
         GraphicalDataObject::BoxAndWhisker { whiskers, stroke_color, show_outliers, show_all_points, .. } => {
             draw_box_and_whisker_slot(
                 scene,
-                sorted,
+                &slot.sorted_obs,
+                &sorted,
                 &BoxSlotSpec {
+                    graph: draw.graph,
+                    y_col_idx: draw.y_col_idx,
+                    level_label: draw.level_label,
                     cx,
                     box_w,
                     whiskers: *whiskers,
@@ -542,8 +622,12 @@ fn draw_categorical_summary_slot(
         GraphicalDataObject::Violin { stroke_color, show_median_and_quartiles, half_violin_with_points, .. } => {
             draw_violin_slot(
                 scene,
-                sorted,
+                &slot.sorted_obs,
+                &sorted,
                 &ViolinSlotSpec {
+                    graph: draw.graph,
+                    y_col_idx: draw.y_col_idx,
+                    level_label: draw.level_label,
                     cx,
                     half_w: box_w * 0.9,
                     fill_color: color,
@@ -569,8 +653,9 @@ fn draw_categorical_summary_slot(
                     stroke: Some(solid_stroke(*border_color, *border_width_pt, LineDashStyle::Solid)),
                     clip: Some(r),
                 });
-                if let Some(m) = summary
-                    && let Some(ym) = y_map.map_value(summary_center(values, sorted, *m), r.bottom(), r.y)
+                if summary.is_some()
+                    && let Some(center_y) = slot.center_opt
+                    && let Some(ym) = y_map.map_value(center_y, r.bottom(), r.y)
                 {
                     scene.primitives.push(ScenePrimitive::Path {
                         path: Path2D::line(PointPt::new(cx - box_w * 0.5, ym), PointPt::new(cx + box_w * 0.5, ym)),
@@ -581,12 +666,28 @@ fn draw_categorical_summary_slot(
                 }
             }
         }
-        GraphicalDataObject::AlignedDotPlot { show_crossbar, .. } => {
-            emit_replicate_dots(scene, cx, box_w * 0.65, sorted, y_map, r, color);
+        GraphicalDataObject::AlignedDotPlot { show_crossbar, marker, .. } => {
+            emit_categorical_dots(
+                scene,
+                &slot.sorted_obs,
+                &CatDotCtx {
+                    graph: draw.graph,
+                    y_col_idx: draw.y_col_idx,
+                    level_label: draw.level_label,
+                    cx,
+                    spread_w: box_w * 0.65,
+                    y_map,
+                    clip: r,
+                    marker: *marker,
+                },
+            );
             if let Some(&max_v) = sorted.last() {
                 top_data_val = top_data_val.max(max_v);
             }
-            if *show_crossbar && let Some(ym) = y_map.map_value(center_y, r.bottom(), r.y) {
+            if *show_crossbar
+                && let Some(center_y) = slot.center_opt
+                && let Some(ym) = y_map.map_value(center_y, r.bottom(), r.y)
+            {
                 scene.primitives.push(ScenePrimitive::Path {
                     path: Path2D::line(PointPt::new(cx - box_w * 0.45, ym), PointPt::new(cx + box_w * 0.45, ym)),
                     fill: None,
@@ -595,29 +696,151 @@ fn draw_categorical_summary_slot(
                 });
             }
         }
+        GraphicalDataObject::ScatterAndLine { marker, line, .. } => {
+            if let Some(m) = marker.or_else(|| line.is_none().then_some(default_dot)) {
+                emit_categorical_dots(
+                    scene,
+                    &slot.sorted_obs,
+                    &CatDotCtx {
+                        graph: draw.graph,
+                        y_col_idx: draw.y_col_idx,
+                        level_label: draw.level_label,
+                        cx,
+                        spread_w: box_w * 0.65,
+                        y_map,
+                        clip: r,
+                        marker: m,
+                    },
+                );
+            }
+            if let Some(&max_v) = sorted.last() {
+                top_data_val = top_data_val.max(max_v);
+            }
+        }
+        GraphicalDataObject::BeforeAfterLines { marker, .. } => {
+            if let Some(m) = marker {
+                emit_categorical_dots(
+                    scene,
+                    &slot.sorted_obs,
+                    &CatDotCtx {
+                        graph: draw.graph,
+                        y_col_idx: draw.y_col_idx,
+                        level_label: draw.level_label,
+                        cx,
+                        spread_w: box_w * 0.65,
+                        y_map,
+                        clip: r,
+                        marker: *m,
+                    },
+                );
+            }
+            if let Some(&max_v) = sorted.last() {
+                top_data_val = top_data_val.max(max_v);
+            }
+        }
         _ => {
-            emit_replicate_dots(scene, cx, box_w * 0.65, sorted, y_map, r, color);
+            emit_categorical_dots(
+                scene,
+                &slot.sorted_obs,
+                &CatDotCtx {
+                    graph: draw.graph,
+                    y_col_idx: draw.y_col_idx,
+                    level_label: draw.level_label,
+                    cx,
+                    spread_w: box_w * 0.65,
+                    y_map,
+                    clip: r,
+                    marker: default_dot,
+                },
+            );
             if let Some(&max_v) = sorted.last() {
                 top_data_val = top_data_val.max(max_v);
             }
         }
     }
 
-    if let Some(eb) = y_error_bars {
-        emit_error_bar(scene, cx, values, sorted, center_y, eb, y_map);
-        let sd = sample_sd(values).unwrap_or(0.0);
-        let err_top = match eb.metric {
-            curvebook_doc::ErrorBarMetric::Sd | curvebook_doc::ErrorBarMetric::ExplicitSubcolumns => center_y + sd,
-            curvebook_doc::ErrorBarMetric::Sem => center_y + sd / (values.len().max(1) as f64).sqrt(),
-            curvebook_doc::ErrorBarMetric::ConfidenceInterval95 => center_y + 1.96 * sd / (values.len().max(1) as f64).sqrt(),
-            curvebook_doc::ErrorBarMetric::InterquartileRange => quartiles_hinge(sorted).map_or(center_y, |(_, _, q3)| q3),
-            curvebook_doc::ErrorBarMetric::Range => sorted.last().copied().unwrap_or(center_y),
-        };
-        if !matches!(eb.direction, curvebook_doc::ErrorBarDirection::LowerOnly) {
-            top_data_val = top_data_val.max(err_top);
+    if let (Some(eb), Some(center_y), Some((err_lo, err_hi))) = (draw.y_error_bars, slot.center_opt, slot.err_bounds) {
+        emit_directional_error_bar(
+            scene,
+            cx,
+            center_y,
+            err_lo,
+            err_hi,
+            AxisErrorTarget { axis: draw.y_axis, is_vertical: true, spec: &eb, default_color: Rgba8::BLACK, clip: r },
+        );
+        if !matches!(eb.direction, ErrorBarDirection::LowerOnly) {
+            top_data_val = top_data_val.max(err_hi);
         }
     }
     top_data_val
+}
+
+fn build_categorical_slots(
+    groups: Vec<Vec<CatObs>>,
+    summary_for_center: Option<SummaryMeasure>,
+    y_error_bars: Option<curvebook_doc::ErrorBarSpec>,
+    is_log_y: bool,
+    warnings: &mut Vec<ChartWarning>,
+) -> (Vec<CatSlotComputed>, f64, f64) {
+    let mut data_lo = f64::INFINITY;
+    let mut data_hi = f64::NEG_INFINITY;
+    let mut slots = Vec::with_capacity(groups.len());
+    for mut obs in groups {
+        obs.sort_by(|a, b| a.value.total_cmp(&b.value).then_with(|| a.row.cmp(&b.row)));
+        let raw_vals: Vec<f64> = obs.iter().map(|o| o.value).collect();
+        for &v in &raw_vals {
+            data_lo = data_lo.min(v);
+            data_hi = data_hi.max(v);
+        }
+        let center_opt = summary_for_center.and_then(|s| compute_central_tendency(&raw_vals, s, warnings));
+        let err_bounds = if let (Some(center), Some(eb)) = (center_opt, y_error_bars) {
+            if eb.metric == ErrorBarMetric::ConfidenceInterval95 && raw_vals.len() < 2 {
+                warnings.push(ChartWarning::new(
+                    "insufficient_sample_size_for_ci",
+                    format!("95% CI requires N >= 2 (got N = {}); error bar omitted", raw_vals.len()),
+                ));
+                None
+            } else {
+                let (raw_lo, raw_hi) = compute_raw_error_bounds(&raw_vals, center, eb.metric, 0.05);
+                let eff_lo = if matches!(eb.direction, ErrorBarDirection::UpperOnly) { center } else { raw_lo.min(center) };
+                let eff_hi = if matches!(eb.direction, ErrorBarDirection::LowerOnly) { center } else { raw_hi.max(center) };
+                if !is_log_y || eff_lo > 0.0 {
+                    data_lo = data_lo.min(eff_lo);
+                }
+                if !is_log_y || eff_hi > 0.0 {
+                    data_hi = data_hi.max(eff_hi);
+                }
+                Some((eff_lo, eff_hi))
+            }
+        } else {
+            None
+        };
+        slots.push(CatSlotComputed { sorted_obs: obs, center_opt, err_bounds });
+    }
+    (slots, data_lo, data_hi)
+}
+
+fn emit_categorical_connecting_line(scene: &mut ChartScene, gdo: &GraphicalDataObject, line_centers: &[(f64, f64)], clip_rect: RectPt) {
+    let line_stroke_opt = match gdo {
+        GraphicalDataObject::ScatterAndLine { line: Some(ls), .. } if ls.stroke_width_pt.is_finite() && ls.stroke_width_pt > 0.0 => {
+            Some(solid_stroke(ls.color, ls.stroke_width_pt, ls.dash_style))
+        }
+        GraphicalDataObject::BeforeAfterLines { line_color, stroke_width_pt, .. } if stroke_width_pt.is_finite() && *stroke_width_pt > 0.0 => {
+            Some(solid_stroke(*line_color, *stroke_width_pt, LineDashStyle::Solid))
+        }
+        _ => None,
+    };
+    if let Some(stroke) = line_stroke_opt
+        && let Some(&(x0, y0)) = line_centers.first()
+        && line_centers.len() >= 2
+    {
+        let mut p = Path2D::new();
+        path_move(&mut p, PointPt::new(x0, y0));
+        for &(x, y) in line_centers.iter().skip(1) {
+            path_line(&mut p, PointPt::new(x, y));
+        }
+        scene.primitives.push(ScenePrimitive::Path { path: p, fill: None, stroke: Some(stroke), clip: Some(clip_rect) });
+    }
 }
 
 fn compile_categorical_summary(
@@ -641,48 +864,68 @@ fn compile_categorical_summary(
         return Ok(());
     }
 
-    let mut groups: Vec<Vec<f64>> = vec![Vec::new(); levels.len()];
+    let mut groups: Vec<Vec<CatObs>> = vec![Vec::new(); levels.len()];
     for row in 0..mv.row_count() {
         let Some(tok) = cell_token(x_col, row) else { continue };
-        let Some(yv) = y_col.cells.get(row).and_then(|c| c.active_number()) else { continue };
+        let Some(yv) = y_col.cells.get(row).and_then(|c| c.active_number()).filter(|v| v.is_finite()) else { continue };
         if let Some(pos) = levels.iter().position(|l| l == &tok)
             && let Some(bucket) = groups.get_mut(pos)
         {
-            bucket.push(yv);
+            bucket.push(CatObs { value: yv, row });
         }
     }
 
-    let mut data_lo = f64::INFINITY;
-    let mut data_hi = f64::NEG_INFINITY;
-    for g in &groups {
-        for &v in g {
-            data_lo = data_lo.min(v);
-            data_hi = data_hi.max(v);
-        }
-    }
+    let y_scale = graph.spec.y_axis.segments.first().map_or(AxisScale::Linear, |s| s.scale);
+    let is_log_y = is_log_like(y_scale);
+    let summary_for_center = gdo_summary_measure(gdo).or_else(|| y_error_bars.map(|_| SummaryMeasure::Mean));
+    let (slots, mut data_lo, mut data_hi) = build_categorical_slots(groups, summary_for_center, y_error_bars, is_log_y, &mut scene.warnings);
     if !data_lo.is_finite() {
         draw_empty_open_frame(scene);
         return Ok(());
     }
-    if matches!(gdo, GraphicalDataObject::BarWithReplicates { .. }) {
+    if matches!(gdo, GraphicalDataObject::BarWithReplicates { .. }) && !is_log_y {
         data_lo = data_lo.min(0.0);
         data_hi = data_hi.max(0.0);
     }
-    let y_pad = (data_hi - data_lo).max(1.0) * 0.12;
-    let resolved_cld = resolve_categorical_cld_overlay(graph, doc, &levels, &groups, &mut scene.warnings);
+
+    let resolved_cld = resolve_categorical_cld_overlay(graph, doc, &levels, &slots, &mut scene.warnings);
     let cld_top_margin = if resolved_cld.is_some() { crate::column_grouped::cld_reserved_top_margin_pt(&graph.spec) } else { 0.0 };
-    let y_hi_pad = if resolved_cld.is_some() { (data_hi - data_lo).max(1.0) * 0.18 } else { y_pad };
-    let (y_lo, y_hi) = resolve_axis_domain(
-        &graph.spec.y_axis,
-        data_lo - if matches!(gdo, GraphicalDataObject::BarWithReplicates { .. }) && data_lo >= 0.0 { 0.0 } else { y_pad },
-        data_hi + y_hi_pad,
-    );
-    let y_ticks = nice_axis_ticks(&graph.spec.y_axis, y_lo, y_hi, 5);
+    let (dom_in_lo, dom_in_hi) = if is_log_y {
+        (data_lo * 0.85, data_hi * if resolved_cld.is_some() { 1.35 } else { 1.15 })
+    } else {
+        let raw_span = (data_hi - data_lo).abs();
+        let pad_base = if raw_span > 0.0 { raw_span } else { data_hi.abs().max(1.0) };
+        let y_pad = pad_base * 0.12;
+        let y_hi_pad = if resolved_cld.is_some() { pad_base * 0.18 } else { y_pad };
+        (data_lo - if matches!(gdo, GraphicalDataObject::BarWithReplicates { .. }) && data_lo >= 0.0 { 0.0 } else { y_pad }, data_hi + y_hi_pad)
+    };
+    let (y_lo, y_hi) = resolve_axis_domain_with_warnings(&graph.spec.y_axis, dom_in_lo, dom_in_hi, &mut scene.warnings);
+    let y_ticks = nice_axis_ticks_with_warnings(&graph.spec.y_axis, y_lo, y_hi, 5, &mut scene.warnings);
     let max_y_w =
         update_plot_rect_for_labels(scene, &graph.spec, &y_ticks, PlotMarginConfig { extra_top_pt: cld_top_margin, ..PlotMarginConfig::default() });
 
     let r = scene.plot_rect_pt;
-    let y_map = AxisMapping { min: y_lo, max: y_hi, scale: graph.spec.y_axis.segments.first().map_or(AxisScale::Linear, |s| s.scale) };
+    let y_map = AxisMapping { min: y_lo, max: y_hi, scale: y_scale };
+    let y_segmented = SegmentedAxis {
+        segments: vec![ResolvedSegment {
+            segment_index: 0,
+            domain_min: y_lo,
+            domain_max: y_hi,
+            scale: y_scale,
+            length_fraction: 1.0,
+            span_start_pt: r.bottom(),
+            span_end_pt: r.y,
+            major_tick_interval: graph.spec.y_axis.segments.first().and_then(|s| s.major_tick_interval),
+            minor_ticks_per_interval: graph.spec.y_axis.segments.first().map_or(0, |s| s.minor_ticks_per_interval),
+        }],
+        break_ornament: graph.spec.y_axis.break_ornament,
+        tick_format: graph.spec.y_axis.tick_format,
+        tick_angle_deg: graph.spec.y_axis.tick_angle_deg,
+        tick_direction: graph.spec.y_axis.tick_direction,
+        show_tick_labels: graph.spec.y_axis.show_tick_labels,
+        stroke_width_pt: if graph.spec.y_axis.stroke_width_pt > 0.0 { graph.spec.y_axis.stroke_width_pt } else { 1.0 },
+        warnings: Vec::new(),
+    };
     let slot_w = r.width / (levels.len() as f64);
     let cats: Vec<(f64, String)> = levels.iter().enumerate().map(|(i, l)| (r.x + ((i as f64) + 0.5) * slot_w, l.clone())).collect();
     let frame = CartesianFrame {
@@ -699,18 +942,31 @@ fn compile_categorical_summary(
 
     let y_zero = crate::clamp_f64_safe(y_map.map_value(0.0, r.bottom(), r.y).unwrap_or(r.bottom()), r.y, r.bottom());
     let mut line_centers = Vec::new();
-    let mut slot_bounds = Vec::with_capacity(groups.len());
-    for (idx, values) in groups.iter().enumerate() {
-        if values.is_empty() {
+    let mut slot_bounds = Vec::with_capacity(slots.len());
+    for (idx, slot) in slots.iter().enumerate() {
+        if slot.sorted_obs.is_empty() {
             continue;
         }
         let cx = r.x + ((idx as f64) + 0.5) * slot_w;
         let color = graph.spec.palette.color_at(idx);
         let box_w = (slot_w * 0.56).min(38.0);
-        let mut sorted = values.clone();
-        sorted.sort_by(f64::total_cmp);
-        let center_y = summary_center(values, &sorted, summary_measure_from_gdo(gdo));
-        let top_data_val = draw_categorical_summary_slot(scene, gdo, y_error_bars, color, r, cx, box_w, y_zero, values, &sorted, center_y, y_map);
+        let top_data_val = draw_categorical_summary_slot(
+            scene,
+            slot,
+            &CatSlotDraw {
+                graph,
+                y_col_idx: enc.y_column,
+                level_label: &levels[idx],
+                gdo,
+                y_error_bars,
+                color,
+                cx,
+                box_w,
+                y_zero,
+                y_map,
+                y_axis: &y_segmented,
+            },
+        );
         let top_y_pt = y_map.map_value(top_data_val, r.bottom(), r.y).map_or(r.y, |py| crate::clamp_f64_safe(py, r.y, r.bottom()));
         slot_bounds.push(crate::column_grouped::RenderedSlotBound {
             group_key: idx,
@@ -719,7 +975,9 @@ fn compile_categorical_summary(
             x_pt: cx,
             top_y_pt,
         });
-        if let Some(yc) = y_map.map_value(center_y, r.bottom(), r.y) {
+        if let Some(center_y) = slot.center_opt
+            && let Some(yc) = y_map.map_value(center_y, r.bottom(), r.y)
+        {
             line_centers.push((cx, yc));
         }
     }
@@ -727,48 +985,9 @@ fn compile_categorical_summary(
     if let Some(cld) = &resolved_cld {
         crate::column_grouped::render_cld_labels(scene, graph, cld, &mut slot_bounds);
     }
-
-    if matches!(gdo, GraphicalDataObject::ScatterAndLine { line: Some(_), .. } | GraphicalDataObject::BeforeAfterLines { .. })
-        && line_centers.len() >= 2
-    {
-        let mut p = Path2D::new();
-        if let Some(&(x0, y0)) = line_centers.first() {
-            path_move(&mut p, PointPt::new(x0, y0));
-            for &(x, y) in line_centers.iter().skip(1) {
-                path_line(&mut p, PointPt::new(x, y));
-            }
-        }
-        scene.primitives.push(ScenePrimitive::Path {
-            path: p,
-            fill: None,
-            stroke: Some(solid_stroke(graph.spec.palette.color_at(0), 1.5, LineDashStyle::Solid)),
-            clip: Some(r),
-        });
-    }
+    emit_categorical_connecting_line(scene, gdo, &line_centers, r);
 
     Ok(())
-}
-
-fn summary_measure_from_gdo(gdo: &GraphicalDataObject) -> curvebook_doc::SummaryMeasure {
-    match gdo {
-        GraphicalDataObject::BarWithReplicates { summary, .. } | GraphicalDataObject::AlignedDotPlot { summary, .. } => *summary,
-        GraphicalDataObject::FloatingBar { summary: Some(s), .. } => *s,
-        _ => curvebook_doc::SummaryMeasure::Mean,
-    }
-}
-
-fn summary_center(values: &[f64], sorted: &[f64], measure: curvebook_doc::SummaryMeasure) -> f64 {
-    match measure {
-        curvebook_doc::SummaryMeasure::Mean => values.iter().sum::<f64>() / (values.len().max(1) as f64),
-        curvebook_doc::SummaryMeasure::Median => percentile_linear(sorted, 0.5),
-        curvebook_doc::SummaryMeasure::GeometricMean => {
-            if values.iter().all(|&v| v > 0.0) {
-                (values.iter().map(|v| v.ln()).sum::<f64>() / (values.len() as f64)).exp()
-            } else {
-                values.iter().sum::<f64>() / (values.len().max(1) as f64)
-            }
-        }
-    }
 }
 
 fn percentile_linear(sorted: &[f64], q: f64) -> f64 {
@@ -776,28 +995,31 @@ fn percentile_linear(sorted: &[f64], q: f64) -> f64 {
     curvebook_math::quantile_type7_sorted(sorted, qc).unwrap_or(0.0)
 }
 
-fn emit_replicate_dots(scene: &mut ChartScene, cx: f64, spread_w: f64, sorted: &[f64], y_map: AxisMapping, clip: RectPt, color: Rgba8) {
-    for (i, &val) in sorted.iter().enumerate() {
-        let Some(py) = y_map.map_value(val, clip.bottom(), clip.y) else { continue };
+fn emit_categorical_dots(scene: &mut ChartScene, sorted_obs: &[CatObs], ctx: &CatDotCtx<'_>) {
+    let sheet_id = &ctx.graph.spec.primary_source_sheet_id;
+    for (i, obs) in sorted_obs.iter().enumerate() {
+        let Some(marker) = crate::resolve_overridden_marker_for_cell(&ctx.graph.spec, ctx.y_col_idx, obs.row, Some(0), ctx.marker) else {
+            continue;
+        };
+        let Some(py) = ctx.y_map.map_value(obs.value, ctx.clip.bottom(), ctx.clip.y) else { continue };
         let phase = ((i as f64) * 0.618_033_988_75).fract() - 0.5;
-        let px = cx + phase * spread_w;
-        emit_marker(
-            scene,
-            PointPt::new(px, py),
-            MarkerStyle {
-                shape: MarkerShape::Circle,
-                fill_mode: MarkerFillMode::Filled,
-                size_pt: 4.5,
-                fill_color: color,
-                stroke_color: Rgba8::WHITE,
-                stroke_width_pt: 0.5,
-            },
-            Some(clip),
-        );
+        let px = ctx.cx + phase * ctx.spread_w;
+        let center_pt = PointPt::new(px, py);
+        emit_marker(scene, center_pt, marker, Some(ctx.clip));
+        scene.plotted_points.push(PlottedPointMeta {
+            center_pt,
+            radius_pt: (marker.size_pt * 0.5).max(3.0),
+            source_cell: SourceCellId { sheet_id: sheet_id.clone(), row: obs.row, col: ctx.y_col_idx, subcol: 0 },
+            series_label: ctx.level_label.to_owned(),
+            value_summary: format!("{}: Y={}", ctx.level_label, format_point_value(obs.value)),
+        });
     }
 }
 
-struct BoxSlotSpec {
+struct BoxSlotSpec<'a> {
+    graph: &'a GraphSheet,
+    y_col_idx: usize,
+    level_label: &'a str,
     cx: f64,
     box_w: f64,
     whiskers: WhiskerMethod,
@@ -808,7 +1030,7 @@ struct BoxSlotSpec {
     y_map: AxisMapping,
 }
 
-fn draw_box_and_whisker_slot(scene: &mut ChartScene, sorted: &[f64], slot: &BoxSlotSpec) {
+fn draw_box_and_whisker_slot(scene: &mut ChartScene, sorted_obs: &[CatObs], sorted: &[f64], slot: &BoxSlotSpec<'_>) {
     let cx = slot.cx;
     let box_w = slot.box_w;
     let fill_color = slot.fill_color;
@@ -876,19 +1098,58 @@ fn draw_box_and_whisker_slot(scene: &mut ChartScene, sorted: &[f64], slot: &BoxS
         });
     }
     if slot.show_all {
-        emit_replicate_dots(scene, cx, box_w * 0.5, sorted, y_map, r, stroke_color);
+        let dot_marker = MarkerStyle {
+            shape: MarkerShape::Circle,
+            fill_mode: MarkerFillMode::Filled,
+            size_pt: 4.5,
+            fill_color: stroke_color,
+            stroke_color: Rgba8::WHITE,
+            stroke_width_pt: 0.5,
+        };
+        emit_categorical_dots(
+            scene,
+            sorted_obs,
+            &CatDotCtx {
+                graph: slot.graph,
+                y_col_idx: slot.y_col_idx,
+                level_label: slot.level_label,
+                cx,
+                spread_w: box_w * 0.5,
+                y_map,
+                clip: r,
+                marker: dot_marker,
+            },
+        );
     } else if slot.show_outliers {
-        for &v in sorted {
-            if (v < w_lo || v > w_hi)
-                && let Some(py) = y_map.map_value(v, r.bottom(), r.y)
+        let base_outlier = MarkerStyle { size_pt: 4.5, fill_color, stroke_color, ..MarkerStyle::default() };
+        for obs in sorted_obs {
+            if (obs.value < w_lo || obs.value > w_hi)
+                && let Some(marker) = crate::resolve_overridden_marker_for_cell(&slot.graph.spec, slot.y_col_idx, obs.row, Some(0), base_outlier)
+                && let Some(py) = y_map.map_value(obs.value, r.bottom(), r.y)
             {
-                emit_marker(scene, PointPt::new(cx, py), MarkerStyle { size_pt: 4.5, fill_color, stroke_color, ..MarkerStyle::default() }, Some(r));
+                let center_pt = PointPt::new(cx, py);
+                emit_marker(scene, center_pt, marker, Some(r));
+                scene.plotted_points.push(PlottedPointMeta {
+                    center_pt,
+                    radius_pt: (marker.size_pt * 0.5).max(3.0),
+                    source_cell: SourceCellId {
+                        sheet_id: slot.graph.spec.primary_source_sheet_id.clone(),
+                        row: obs.row,
+                        col: slot.y_col_idx,
+                        subcol: 0,
+                    },
+                    series_label: slot.level_label.to_owned(),
+                    value_summary: format!("{}: Y={}", slot.level_label, format_point_value(obs.value)),
+                });
             }
         }
     }
 }
 
-struct ViolinSlotSpec {
+struct ViolinSlotSpec<'a> {
+    graph: &'a GraphSheet,
+    y_col_idx: usize,
+    level_label: &'a str,
     cx: f64,
     half_w: f64,
     fill_color: Rgba8,
@@ -898,7 +1159,7 @@ struct ViolinSlotSpec {
     y_map: AxisMapping,
 }
 
-fn draw_violin_slot(scene: &mut ChartScene, sorted: &[f64], slot: &ViolinSlotSpec) {
+fn draw_violin_slot(scene: &mut ChartScene, sorted_obs: &[CatObs], sorted: &[f64], slot: &ViolinSlotSpec<'_>) {
     let cx = slot.cx;
     let half_w = slot.half_w;
     let fill_color = slot.fill_color;
@@ -968,57 +1229,28 @@ fn draw_violin_slot(scene: &mut ChartScene, sorted: &[f64], slot: &ViolinSlotSpe
         );
     }
     if slot.half_violin {
-        emit_replicate_dots(scene, cx - half_w * 0.25, half_w * 0.3, sorted, y_map, r, stroke_color);
-    }
-}
-
-fn emit_error_bar(scene: &mut ChartScene, cx: f64, values: &[f64], sorted: &[f64], center: f64, eb: curvebook_doc::ErrorBarSpec, y_map: AxisMapping) {
-    let clip = scene.plot_rect_pt;
-    let n = values.len();
-    if n == 0 {
-        return;
-    }
-    let sd = sample_sd(values).unwrap_or(0.0);
-    let (lo, hi) = match eb.metric {
-        curvebook_doc::ErrorBarMetric::Sd => (center - sd, center + sd),
-        curvebook_doc::ErrorBarMetric::Sem => {
-            let sem = sd / (n as f64).sqrt();
-            (center - sem, center + sem)
-        }
-        curvebook_doc::ErrorBarMetric::ConfidenceInterval95 => {
-            let half = 1.96 * sd / (n as f64).sqrt();
-            (center - half, center + half)
-        }
-        curvebook_doc::ErrorBarMetric::InterquartileRange => {
-            if let Some((q1, _, q3)) = quartiles_hinge(sorted) {
-                (q1, q3)
-            } else {
-                (center, center)
-            }
-        }
-        curvebook_doc::ErrorBarMetric::Range => (sorted.first().copied().unwrap_or(center), sorted.last().copied().unwrap_or(center)),
-        curvebook_doc::ErrorBarMetric::ExplicitSubcolumns => (center - sd, center + sd),
-    };
-    let y_lo_val = if matches!(eb.direction, curvebook_doc::ErrorBarDirection::UpperOnly) { center } else { lo };
-    let y_hi_val = if matches!(eb.direction, curvebook_doc::ErrorBarDirection::LowerOnly) { center } else { hi };
-    let (Some(y_lo), Some(y_hi)) = (y_map.map_value(y_lo_val, clip.bottom(), clip.y), y_map.map_value(y_hi_val, clip.bottom(), clip.y)) else {
-        return;
-    };
-    let stroke = solid_stroke(eb.color.unwrap_or(Rgba8::BLACK), eb.stroke_width_pt, eb.dash_style);
-    scene.primitives.push(ScenePrimitive::Path {
-        path: Path2D::line(PointPt::new(cx, y_lo), PointPt::new(cx, y_hi)),
-        fill: None,
-        stroke: Some(stroke),
-        clip: Some(clip),
-    });
-    let half_cap = eb.cap_width_pt * 0.5;
-    for y_cap in [y_lo, y_hi] {
-        scene.primitives.push(ScenePrimitive::Path {
-            path: Path2D::line(PointPt::new(cx - half_cap, y_cap), PointPt::new(cx + half_cap, y_cap)),
-            fill: None,
-            stroke: Some(solid_stroke(eb.color.unwrap_or(Rgba8::BLACK), eb.stroke_width_pt, LineDashStyle::Solid)),
-            clip: Some(clip),
-        });
+        let dot_marker = MarkerStyle {
+            shape: MarkerShape::Circle,
+            fill_mode: MarkerFillMode::Filled,
+            size_pt: 4.5,
+            fill_color: stroke_color,
+            stroke_color: Rgba8::WHITE,
+            stroke_width_pt: 0.5,
+        };
+        emit_categorical_dots(
+            scene,
+            sorted_obs,
+            &CatDotCtx {
+                graph: slot.graph,
+                y_col_idx: slot.y_col_idx,
+                level_label: slot.level_label,
+                cx: cx - half_w * 0.25,
+                spread_w: half_w * 0.3,
+                y_map,
+                clip: r,
+                marker: dot_marker,
+            },
+        );
     }
 }
 
@@ -1108,25 +1340,10 @@ fn collect_ds_active_point_sources(ds: &DataSheet, col_idx: usize, include_repli
             (out, label)
         }
         TableArchetype::Column(col) => {
-            let c = col_idx.min(col.data_sets.len().saturating_sub(1));
-            let label = col.data_sets.get(c).map_or_else(|| format!("Group {}", c + 1), |d| d.title.clone());
-            if let Some(d) = col.data_sets.get(c) {
-                for r in 0..col.row_count() {
-                    let Some(row_cells) = d.cells.get(r) else {
-                        continue;
-                    };
-                    if include_replicates {
-                        for (subcol, cell) in row_cells.iter().enumerate() {
-                            if cell.active_number().is_some_and(f64::is_finite) {
-                                out.push(SourceCellId { sheet_id: ds.id.clone(), row: r, col: c, subcol });
-                            }
-                        }
-                    } else if row_cells.first().and_then(|cell| cell.active_number()).is_some_and(f64::is_finite) {
-                        out.push(SourceCellId { sheet_id: ds.id.clone(), row: r, col: c, subcol: 0 });
-                    }
-                }
-            }
-            (out, label)
+            collect_grid_point_sources(&ds.id, &col.data_sets, col.row_count(), col_idx, col.subcolumn_mode.is_pre_summarized(), include_replicates)
+        }
+        TableArchetype::Grouped(g) => {
+            collect_grid_point_sources(&ds.id, &g.data_sets, g.row_count(), col_idx, g.subcolumn_mode.is_pre_summarized(), include_replicates)
         }
         TableArchetype::MultipleVariables(mv) => {
             let c = col_idx.min(mv.variables.len().saturating_sub(1));
@@ -1144,24 +1361,84 @@ fn collect_ds_active_point_sources(ds: &DataSheet, col_idx: usize, include_repli
     }
 }
 
+fn collect_grid_point_sources(
+    sheet_id: &SheetId,
+    data_sets: &[curvebook_doc::DataSetColumn],
+    row_count: usize,
+    col_idx: usize,
+    is_pre_summarized: bool,
+    include_replicates: bool,
+) -> (Vec<SourceCellId>, String) {
+    let mut out = Vec::new();
+    let c = col_idx.min(data_sets.len().saturating_sub(1));
+    let label = data_sets.get(c).map_or_else(|| format!("Group {}", c + 1), |d| d.title.clone());
+    if let Some(d) = data_sets.get(c) {
+        for r in 0..row_count {
+            let Some(row_cells) = d.cells.get(r) else {
+                continue;
+            };
+            if include_replicates && !is_pre_summarized {
+                for (subcol, cell) in row_cells.iter().enumerate() {
+                    if cell.active_number().is_some_and(f64::is_finite) {
+                        out.push(SourceCellId { sheet_id: sheet_id.clone(), row: r, col: c, subcol });
+                    }
+                }
+            } else if row_cells.first().and_then(|cell| cell.active_number()).is_some_and(f64::is_finite) {
+                out.push(SourceCellId { sheet_id: sheet_id.clone(), row: r, col: c, subcol: 0 });
+            }
+        }
+    }
+    (out, label)
+}
+
+fn collect_grid_values_with_sources(
+    sheet_id: &SheetId,
+    data_sets: &[curvebook_doc::DataSetColumn],
+    row_count: usize,
+    col_idx: usize,
+    is_pre_summarized: bool,
+) -> (Vec<(f64, SourceCellId)>, String) {
+    let mut out = Vec::new();
+    let c = col_idx.min(data_sets.len().saturating_sub(1));
+    let label = data_sets.get(c).map_or_else(|| format!("Group {}", c + 1), |d| d.title.clone());
+    if let Some(d) = data_sets.get(c) {
+        for r in 0..row_count {
+            let Some(row_cells) = d.cells.get(r) else {
+                continue;
+            };
+            if is_pre_summarized {
+                if let Some(v) = row_cells.first().and_then(|cell| cell.active_number()).filter(|x| x.is_finite()) {
+                    out.push((v, SourceCellId { sheet_id: sheet_id.clone(), row: r, col: c, subcol: 0 }));
+                }
+            } else {
+                for (subcol, cell) in row_cells.iter().enumerate() {
+                    if let Some(v) = cell.active_number().filter(|x| x.is_finite()) {
+                        out.push((v, SourceCellId { sheet_id: sheet_id.clone(), row: r, col: c, subcol }));
+                    }
+                }
+            }
+        }
+    }
+    (out, label)
+}
+
+fn is_ds_pre_summarized(ds: &DataSheet) -> bool {
+    match &ds.archetype {
+        TableArchetype::Column(col) => col.subcolumn_mode.is_pre_summarized(),
+        TableArchetype::Grouped(g) => g.subcolumn_mode.is_pre_summarized(),
+        TableArchetype::Xy(xy) => xy.y_subcolumn_mode.is_pre_summarized(),
+        _ => false,
+    }
+}
+
 fn collect_ds_active_values_with_sources(ds: &DataSheet, col_idx: usize) -> (Vec<(f64, SourceCellId)>, String) {
     let mut out = Vec::new();
     match &ds.archetype {
         TableArchetype::Column(col) => {
-            let c = col_idx.min(col.data_sets.len().saturating_sub(1));
-            let label = col.data_sets.get(c).map_or_else(|| format!("Group {}", c + 1), |d| d.title.clone());
-            if let Some(d) = col.data_sets.get(c) {
-                for r in 0..col.row_count() {
-                    if let Some(row_cells) = d.cells.get(r) {
-                        for (subcol, cell) in row_cells.iter().enumerate() {
-                            if let Some(v) = cell.active_number().filter(|x| x.is_finite()) {
-                                out.push((v, SourceCellId { sheet_id: ds.id.clone(), row: r, col: c, subcol }));
-                            }
-                        }
-                    }
-                }
-            }
-            (out, label)
+            collect_grid_values_with_sources(&ds.id, &col.data_sets, col.row_count(), col_idx, col.subcolumn_mode.is_pre_summarized())
+        }
+        TableArchetype::Grouped(g) => {
+            collect_grid_values_with_sources(&ds.id, &g.data_sets, g.row_count(), col_idx, g.subcolumn_mode.is_pre_summarized())
         }
         TableArchetype::MultipleVariables(mv) => {
             let c = col_idx.min(mv.variables.len().saturating_sub(1));
@@ -1740,12 +2017,16 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument) -> Option<Hea
                     col_indices
                         .iter()
                         .map(|&c| {
-                            let reps: Vec<f64> = g.active_replicates(r, c).into_iter().filter(|x| x.is_finite()).collect();
-                            if reps.is_empty() {
-                                None
+                            if g.subcolumn_mode.is_pre_summarized() {
+                                g.observation(r, c, 0).and_then(curvebook_doc::Cell::active_number).filter(|x| x.is_finite())
                             } else {
-                                let mean = reps.iter().sum::<f64>() / (reps.len() as f64);
-                                mean.is_finite().then_some(mean)
+                                let reps: Vec<f64> = g.active_replicates(r, c).into_iter().filter(|x| x.is_finite()).collect();
+                                if reps.is_empty() {
+                                    None
+                                } else {
+                                    let mean = reps.iter().sum::<f64>() / (reps.len() as f64);
+                                    mean.is_finite().then_some(mean)
+                                }
                             }
                         })
                         .collect()
@@ -2451,7 +2732,9 @@ fn extract_volcano_points(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<Diag
 // 2c. Bland-Altman Agreement Plot (Difference vs Average + Bias ± 1.96*SD LoA)
 
 fn compile_bland_altman(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartScene) -> Result<(), ChartError> {
-    let Some(BlandAltmanData { points: pts, bias, loa_lo, loa_hi, percent_difference }) = extract_bland_altman_data(graph, doc) else {
+    let Some(BlandAltmanData { points: pts, bias, loa_lo, loa_hi, loa_lo_label, loa_hi_label, percent_difference }) =
+        extract_bland_altman_data(graph, doc)
+    else {
         scene.warnings.push(ChartWarning::new("empty_bland_altman", "insufficient paired observations for Bland-Altman plot"));
         draw_empty_open_frame(scene);
         return Ok(());
@@ -2515,8 +2798,8 @@ fn compile_bland_altman(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut C
 
     let ref_specs = [
         (bias, solid_stroke(Rgba8::rgb(0, 114, 178), 1.4, LineDashStyle::Solid), format!("Bias: {bias:.2}")),
-        (loa_hi, solid_stroke(Rgba8::rgb(213, 94, 0), 1.2, LineDashStyle::Dashed), format!("+1.96 SD: {loa_hi:.2}")),
-        (loa_lo, solid_stroke(Rgba8::rgb(213, 94, 0), 1.2, LineDashStyle::Dashed), format!("-1.96 SD: {loa_lo:.2}")),
+        (loa_hi, solid_stroke(Rgba8::rgb(213, 94, 0), 1.2, LineDashStyle::Dashed), loa_hi_label),
+        (loa_lo, solid_stroke(Rgba8::rgb(213, 94, 0), 1.2, LineDashStyle::Dashed), loa_lo_label),
     ];
     for (val, stroke, label) in ref_specs {
         if let Some(yp) = y_map.map_value(val, r.bottom(), r.y)
@@ -2547,6 +2830,8 @@ struct BlandAltmanData {
     bias: f64,
     loa_lo: f64,
     loa_hi: f64,
+    loa_lo_label: String,
+    loa_hi_label: String,
     percent_difference: bool,
 }
 
@@ -2574,9 +2859,55 @@ struct BlandAltmanExtractedPairs {
     series_label: String,
 }
 
-fn extract_bland_altman_pairs_from_ds(ds: &DataSheet, col_a: usize, col_b: usize, graph: &GraphSheet) -> Option<BlandAltmanExtractedPairs> {
+fn format_bland_altman_loa_labels(
+    bias: f64,
+    loa_lo: f64,
+    loa_hi: f64,
+    sd_bias_opt: Option<f64>,
+    z_expected: f64,
+    force_nonparametric: bool,
+) -> (String, String) {
+    if !force_nonparametric {
+        if let Some(sd) = sd_bias_opt.filter(|s| s.is_finite() && *s > 1e-12) {
+            let k_hi = (loa_hi - bias) / sd;
+            let k_lo = (bias - loa_lo) / sd;
+            if k_hi.is_finite() && k_lo.is_finite() && k_hi > 0.0 && k_lo > 0.0 && (k_hi - k_lo).abs() <= 1e-2 {
+                let k = 0.5 * (k_hi + k_lo);
+                return (format!("+{k:.2} SD: {loa_hi:.2}"), format!("-{k:.2} SD: {loa_lo:.2}"));
+            }
+        } else {
+            let d_hi = loa_hi - bias;
+            let d_lo = bias - loa_lo;
+            if d_hi.is_finite() && d_lo.is_finite() && d_hi > 0.0 && d_lo > 0.0 && (d_hi - d_lo).abs() <= 1e-6 * bias.abs().max(d_hi).max(1.0) {
+                return (format!("+{z_expected:.2} SD: {loa_hi:.2}"), format!("-{z_expected:.2} SD: {loa_lo:.2}"));
+            }
+        }
+    }
+    (format!("Upper LoA: {loa_hi:.2}"), format!("Lower LoA: {loa_lo:.2}"))
+}
+
+fn is_nonparametric_bland_altman(res: &ResultSheet) -> bool {
+    let is_np_text = |text: &str| {
+        let lower = text.to_ascii_lowercase();
+        lower.contains("quantile") || lower.contains("percentile") || lower.contains("nonparametric") || lower.contains("non-parametric")
+    };
+    res.scalars.iter().any(|s| is_np_text(&s.key))
+        || res.tabs.iter().any(|tab| is_np_text(&tab.title) || tab.row_labels.iter().any(|lbl| is_np_text(lbl)))
+}
+
+fn extract_bland_altman_pairs_from_ds(
+    ds: &DataSheet,
+    col_a: usize,
+    col_b: usize,
+    xy_compare_x_vs_y: Option<bool>,
+    from_analysis: bool,
+    graph: &GraphSheet,
+) -> Option<BlandAltmanExtractedPairs> {
     match &ds.archetype {
         TableArchetype::Column(col) if col.data_sets.len() >= 2 => {
+            if col_a == col_b {
+                return None;
+            }
             let mut sources = Vec::new();
             let mut va = Vec::new();
             let mut vb = Vec::new();
@@ -2594,8 +2925,14 @@ fn extract_bland_altman_pairs_from_ds(ds: &DataSheet, col_a: usize, col_b: usize
             Some(BlandAltmanExtractedPairs { sources, a: va, b: vb, series_label: label })
         }
         TableArchetype::MultipleVariables(mv) if mv.variables.len() >= 2 => {
-            let xi = graph.spec.multivariate.as_ref().map_or(col_a, |m| m.x_column);
-            let yi = graph.spec.multivariate.as_ref().map_or(col_b, |m| m.y_column);
+            let (xi, yi) = if from_analysis {
+                (col_a, col_b)
+            } else {
+                (graph.spec.multivariate.as_ref().map_or(col_a, |m| m.x_column), graph.spec.multivariate.as_ref().map_or(col_b, |m| m.y_column))
+            };
+            if xi == yi {
+                return None;
+            }
             let label = mv.variables.get(xi).map_or_else(|| String::from("Method A"), |v| v.title.clone());
             let mut sources = Vec::new();
             let mut va = Vec::new();
@@ -2613,134 +2950,185 @@ fn extract_bland_altman_pairs_from_ds(ds: &DataSheet, col_a: usize, col_b: usize
             Some(BlandAltmanExtractedPairs { sources, a: va, b: vb, series_label: label })
         }
         TableArchetype::Xy(xy) => {
-            let pairs = active_xy_pairs_with_sources(&ds.id, xy, col_a);
-            let label = xy.data_sets.get(col_a).map_or_else(|| String::from("Method A"), |d| d.title.clone());
-            let mut sources = Vec::with_capacity(pairs.len());
-            let mut va = Vec::with_capacity(pairs.len());
-            let mut vb = Vec::with_capacity(pairs.len());
-            for (x, y, src, _) in pairs {
-                sources.push(src);
-                va.push(x);
-                vb.push(y);
+            let compare_x_vs_y = xy_compare_x_vs_y.unwrap_or(xy.data_sets.len() == 1);
+            if compare_x_vs_y {
+                let target_col = if col_a < xy.data_sets.len() { col_a } else { 0 };
+                let pairs = active_xy_pairs_with_sources(&ds.id, xy, target_col);
+                let label = xy.data_sets.get(target_col).map_or_else(|| String::from("Method A"), |d| d.title.clone());
+                let mut sources = Vec::with_capacity(pairs.len());
+                let mut va = Vec::with_capacity(pairs.len());
+                let mut vb = Vec::with_capacity(pairs.len());
+                for (x, y, src, _) in pairs {
+                    sources.push(src);
+                    va.push(x);
+                    vb.push(y);
+                }
+                Some(BlandAltmanExtractedPairs { sources, a: va, b: vb, series_label: label })
+            } else {
+                if col_a == col_b {
+                    return None;
+                }
+                let ds_a = xy.data_sets.get(col_a)?;
+                let ds_b = xy.data_sets.get(col_b)?;
+                let mut sources = Vec::new();
+                let mut va = Vec::new();
+                let mut vb = Vec::new();
+                for r in 0..xy.row_count() {
+                    if let (Some(x), Some(y)) = (
+                        ds_a.cells.get(r).and_then(|s| s.first()).and_then(|c| c.active_number()).filter(|v| v.is_finite()),
+                        ds_b.cells.get(r).and_then(|s| s.first()).and_then(|c| c.active_number()).filter(|v| v.is_finite()),
+                    ) {
+                        sources.push(SourceCellId { sheet_id: ds.id.clone(), row: r, col: col_a, subcol: 0 });
+                        va.push(x);
+                        vb.push(y);
+                    }
+                }
+                Some(BlandAltmanExtractedPairs { sources, a: va, b: vb, series_label: ds_a.title.clone() })
             }
-            Some(BlandAltmanExtractedPairs { sources, a: va, b: vb, series_label: label })
         }
         _ => None,
     }
+}
+
+fn extract_bland_altman_from_result(res: &ResultSheet, graph: &GraphSheet, doc: &ProjectDocument, title_pct_diff: bool) -> Option<BlandAltmanData> {
+    let AnalysisKind::BlandAltman(ba_spec) = &res.analysis.kind else {
+        return None;
+    };
+    let (col_a, col_b, spec_pct, xy_compare_x_vs_y) = (ba_spec.column_a, ba_spec.column_b, ba_spec.percent_difference, ba_spec.xy_compare_x_vs_y);
+    let mut raw_pts: Vec<(f64, f64)> = res
+        .fitted_curves
+        .iter()
+        .find(|c| c.equation_id == "BlandAltman")
+        .map(|c| c.points.iter().filter(|p| p.x.is_finite() && p.y.is_finite()).map(|p| (p.x, p.y)).collect())
+        .unwrap_or_default();
+
+    if raw_pts.is_empty()
+        && let Some(tab) = res
+            .tabs
+            .iter()
+            .find(|t| t.id.contains("bland-altman") && t.kind == ResultTabKind::Residuals)
+            .or_else(|| res.tabs.iter().find(|t| t.kind == ResultTabKind::Residuals))
+    {
+        let x_col = find_header_col(&tab.column_headers, |h| h.contains("average") || h.contains("mean")).unwrap_or(0);
+        let y_col = find_header_col(&tab.column_headers, |h| h.contains("difference") || h.contains("diff")).unwrap_or(1);
+        raw_pts = tab.rows.iter().filter_map(|row| Some((result_cell_num(row.get(x_col)?)?, result_cell_num(row.get(y_col)?)?))).collect();
+    }
+
+    let mut bias_opt = find_scalar_ci(res, |k| k == "bias").or_else(|| find_tab_row_value(res, |l| l == "bias"));
+    let mut loa_lo_opt = find_scalar_ci(res, |k| k == "loalower" || k == "loa_lower")
+        .or_else(|| find_tab_row_value(res, |l| l.contains("lower") && l.contains("loa")));
+    let mut loa_hi_opt = find_scalar_ci(res, |k| k == "loaupper" || k == "loa_upper")
+        .or_else(|| find_tab_row_value(res, |l| l.contains("upper") && l.contains("loa")));
+    let mut sd_bias_opt = find_scalar_ci(res, |k| k == "sdbias" || k == "sd_bias").or_else(|| find_tab_row_value(res, |l| l.contains("sd of bias")));
+
+    let ds_opt = doc.data_sheet(&res.analysis.source_sheet_id).or_else(|| resolve_source_data_sheet(graph, doc));
+    let ds_pairs = ds_opt.and_then(|ds| extract_bland_altman_pairs_from_ds(ds, col_a, col_b, xy_compare_x_vs_y, true, graph));
+    if (raw_pts.is_empty() || bias_opt.is_none() || loa_lo_opt.is_none() || loa_hi_opt.is_none())
+        && let Some(ref extracted) = ds_pairs
+        && let Ok(ba) = bland_altman(&extracted.a, &extracted.b, spec_pct, res.analysis.confidence_level)
+    {
+        if raw_pts.is_empty() {
+            raw_pts = ba.points;
+        }
+        bias_opt = bias_opt.or(Some(ba.bias));
+        loa_lo_opt = loa_lo_opt.or(Some(ba.loa_lower));
+        loa_hi_opt = loa_hi_opt.or(Some(ba.loa_upper));
+        sd_bias_opt = sd_bias_opt.or(Some(ba.sd_bias));
+    }
+
+    if raw_pts.len() < 2 {
+        let _ = title_pct_diff;
+        return None;
+    }
+
+    let diffs: Vec<f64> = raw_pts.iter().map(|p| p.1).collect();
+    let bias = bias_opt.unwrap_or_else(|| diffs.iter().sum::<f64>() / (diffs.len() as f64));
+    let sd_fallback = sample_sd(&diffs).unwrap_or(0.0);
+    let sd_bias = sd_bias_opt.unwrap_or(sd_fallback);
+    let z_expected = norm_two_sided_isf(res.analysis.confidence_level.alpha()).unwrap_or(1.959_963_984_540_054);
+    let loa_lo = loa_lo_opt.unwrap_or(bias - z_expected * sd_bias);
+    let loa_hi = loa_hi_opt.unwrap_or(bias + z_expected * sd_bias);
+    let force_nonparametric = is_nonparametric_bland_altman(res);
+    let (loa_hi_label, loa_lo_label) =
+        format_bland_altman_loa_labels(bias, loa_lo, loa_hi, sd_bias_opt.or(Some(sd_fallback)), z_expected, force_nonparametric);
+    let fallback_id = res.analysis.source_sheet_id.clone();
+    let points: Vec<DiagPoint> = match ds_pairs {
+        Some(extracted) if extracted.sources.len() == raw_pts.len() => raw_pts
+            .into_iter()
+            .zip(extracted.sources)
+            .map(|((x, y), source)| DiagPoint { x, y, label: None, source, series_label: extracted.series_label.clone() })
+            .collect(),
+        Some(extracted) => raw_pts
+            .into_iter()
+            .enumerate()
+            .map(|(idx, (x, y))| DiagPoint {
+                x,
+                y,
+                label: None,
+                source: SourceCellId { sheet_id: fallback_id.clone(), row: idx, col: col_a, subcol: 0 },
+                series_label: extracted.series_label.clone(),
+            })
+            .collect(),
+        None => raw_pts
+            .into_iter()
+            .enumerate()
+            .map(|(idx, (x, y))| DiagPoint {
+                x,
+                y,
+                label: None,
+                source: SourceCellId { sheet_id: fallback_id.clone(), row: idx, col: col_a, subcol: 0 },
+                series_label: graph.spec.title.clone(),
+            })
+            .collect(),
+    };
+    Some(BlandAltmanData { points, bias, loa_lo, loa_hi, loa_lo_label, loa_hi_label, percent_difference: spec_pct })
 }
 
 fn extract_bland_altman_data(graph: &GraphSheet, doc: &ProjectDocument) -> Option<BlandAltmanData> {
     let title_pct_diff = graph.spec.y_axis.title.contains('%') || graph.spec.y_axis.title.to_ascii_lowercase().contains("percent");
 
     if let Some(res) = find_matching_result_where(graph, doc, |r| matches!(r.analysis.kind, AnalysisKind::BlandAltman(_)))
-        && matches!(res.analysis.kind, AnalysisKind::BlandAltman(_))
+        && let Some(data) = extract_bland_altman_from_result(res, graph, doc, title_pct_diff)
     {
-        let (col_a, col_b, spec_pct) = match &res.analysis.kind {
-            AnalysisKind::BlandAltman(ba) => (ba.column_a, ba.column_b, ba.percent_difference),
-            _ => (0, 1, title_pct_diff),
-        };
-        let mut raw_pts: Vec<(f64, f64)> = res
-            .fitted_curves
-            .iter()
-            .find(|c| c.equation_id == "BlandAltman")
-            .map(|c| c.points.iter().filter(|p| p.x.is_finite() && p.y.is_finite()).map(|p| (p.x, p.y)).collect())
-            .unwrap_or_default();
-
-        if raw_pts.is_empty()
-            && let Some(tab) = res
-                .tabs
-                .iter()
-                .find(|t| t.id.contains("bland-altman") && t.kind == ResultTabKind::Residuals)
-                .or_else(|| res.tabs.iter().find(|t| t.kind == ResultTabKind::Residuals))
-        {
-            let x_col = find_header_col(&tab.column_headers, |h| h.contains("average") || h.contains("mean")).unwrap_or(0);
-            let y_col = find_header_col(&tab.column_headers, |h| h.contains("difference") || h.contains("diff")).unwrap_or(1);
-            raw_pts = tab.rows.iter().filter_map(|row| Some((result_cell_num(row.get(x_col)?)?, result_cell_num(row.get(y_col)?)?))).collect();
-        }
-
-        let mut bias_opt = find_scalar_ci(res, |k| k == "bias").or_else(|| find_tab_row_value(res, |l| l == "bias"));
-        let mut loa_lo_opt = find_scalar_ci(res, |k| k == "loalower" || k == "loa_lower")
-            .or_else(|| find_tab_row_value(res, |l| l.contains("lower") && l.contains("loa")));
-        let mut loa_hi_opt = find_scalar_ci(res, |k| k == "loaupper" || k == "loa_upper")
-            .or_else(|| find_tab_row_value(res, |l| l.contains("upper") && l.contains("loa")));
-
-        let ds_opt = doc.data_sheet(&res.analysis.source_sheet_id).or_else(|| resolve_source_data_sheet(graph, doc));
-        let ds_pairs = ds_opt.and_then(|ds| extract_bland_altman_pairs_from_ds(ds, col_a, col_b, graph));
-        if (raw_pts.is_empty() || bias_opt.is_none() || loa_lo_opt.is_none() || loa_hi_opt.is_none())
-            && let Some(ref extracted) = ds_pairs
-            && let Ok(ba) = bland_altman(&extracted.a, &extracted.b, spec_pct, res.analysis.confidence_level)
-        {
-            if raw_pts.is_empty() {
-                raw_pts = ba.points;
-            }
-            bias_opt = bias_opt.or(Some(ba.bias));
-            loa_lo_opt = loa_lo_opt.or(Some(ba.loa_lower));
-            loa_hi_opt = loa_hi_opt.or(Some(ba.loa_upper));
-        }
-
-        if raw_pts.len() >= 2 {
-            let diffs: Vec<f64> = raw_pts.iter().map(|p| p.1).collect();
-            let bias = bias_opt.unwrap_or_else(|| diffs.iter().sum::<f64>() / (diffs.len() as f64));
-            let sd_fallback = sample_sd(&diffs).unwrap_or(0.0);
-            let sd_bias = find_scalar_ci(res, |k| k == "sdbias" || k == "sd_bias")
-                .or_else(|| find_tab_row_value(res, |l| l.contains("sd of bias")))
-                .unwrap_or(sd_fallback);
-            let loa_lo = loa_lo_opt.unwrap_or(bias - 1.96 * sd_bias);
-            let loa_hi = loa_hi_opt.unwrap_or(bias + 1.96 * sd_bias);
-            let fallback_id = res.analysis.source_sheet_id.clone();
-            let points: Vec<DiagPoint> = match ds_pairs {
-                Some(extracted) if extracted.sources.len() == raw_pts.len() => raw_pts
-                    .into_iter()
-                    .zip(extracted.sources)
-                    .map(|((x, y), source)| DiagPoint { x, y, label: None, source, series_label: extracted.series_label.clone() })
-                    .collect(),
-                Some(extracted) => raw_pts
-                    .into_iter()
-                    .enumerate()
-                    .map(|(idx, (x, y))| DiagPoint {
-                        x,
-                        y,
-                        label: None,
-                        source: SourceCellId { sheet_id: fallback_id.clone(), row: idx, col: col_a, subcol: 0 },
-                        series_label: extracted.series_label.clone(),
-                    })
-                    .collect(),
-                None => raw_pts
-                    .into_iter()
-                    .enumerate()
-                    .map(|(idx, (x, y))| DiagPoint {
-                        x,
-                        y,
-                        label: None,
-                        source: SourceCellId { sheet_id: fallback_id.clone(), row: idx, col: col_a, subcol: 0 },
-                        series_label: graph.spec.title.clone(),
-                    })
-                    .collect(),
-            };
-            return Some(BlandAltmanData { points, bias, loa_lo, loa_hi, percent_difference: spec_pct });
-        }
+        return Some(data);
     }
 
+    let z_default = norm_two_sided_isf(ConfidenceLevel::DEFAULT_95.alpha()).unwrap_or(1.959_963_984_540_054);
     let ds = resolve_source_data_sheet(graph, doc)?;
-    if let TableArchetype::Xy(xy) = &ds.archetype {
+    if let TableArchetype::Xy(xy) = &ds.archetype
+        && xy.data_sets.len() == 1
+        && graph.spec.y_axis.title.to_ascii_lowercase().contains("diff")
+    {
         let pairs = active_xy_pairs_with_sources(&ds.id, xy, 0);
-        if graph.spec.y_axis.title.to_ascii_lowercase().contains("diff") && pairs.len() >= 2 {
+        if pairs.len() >= 2 {
             let diffs: Vec<f64> = pairs.iter().map(|p| p.1).collect();
             let bias = diffs.iter().sum::<f64>() / (diffs.len() as f64);
             let sd = sample_sd(&diffs).unwrap_or(0.0);
+            let loa_lo = bias - z_default * sd;
+            let loa_hi = bias + z_default * sd;
+            let (loa_hi_label, loa_lo_label) = format_bland_altman_loa_labels(bias, loa_lo, loa_hi, Some(sd), z_default, false);
             let points = pairs.into_iter().map(|(x, y, source, series_label)| DiagPoint { x, y, label: None, source, series_label }).collect();
-            return Some(BlandAltmanData { points, bias, loa_lo: bias - 1.96 * sd, loa_hi: bias + 1.96 * sd, percent_difference: title_pct_diff });
+            return Some(BlandAltmanData { points, bias, loa_lo, loa_hi, loa_lo_label, loa_hi_label, percent_difference: title_pct_diff });
         }
     }
-    let extracted = extract_bland_altman_pairs_from_ds(ds, 0, 1, graph)?;
+    let extracted = extract_bland_altman_pairs_from_ds(ds, 0, 1, None, false, graph)?;
     let ba = bland_altman(&extracted.a, &extracted.b, title_pct_diff, ConfidenceLevel::DEFAULT_95).ok()?;
+    let (loa_hi_label, loa_lo_label) = format_bland_altman_loa_labels(ba.bias, ba.loa_lower, ba.loa_upper, Some(ba.sd_bias), z_default, false);
     let points = ba
         .points
         .into_iter()
         .zip(extracted.sources)
         .map(|((x, y), source)| DiagPoint { x, y, label: None, source, series_label: extracted.series_label.clone() })
         .collect();
-    Some(BlandAltmanData { points, bias: ba.bias, loa_lo: ba.loa_lower, loa_hi: ba.loa_upper, percent_difference: title_pct_diff })
+    Some(BlandAltmanData {
+        points,
+        bias: ba.bias,
+        loa_lo: ba.loa_lower,
+        loa_hi: ba.loa_upper,
+        loa_lo_label,
+        loa_hi_label,
+        percent_difference: title_pct_diff,
+    })
 }
 
 // 2d. ROC Curve (Sensitivity vs 1-Specificity + Diagonal + AUC)
@@ -3241,7 +3629,7 @@ fn compute_pooled_forest_entry(entries: &[ForestEntry], on_log_scale: bool) -> O
 // 2f. Residual Plot (Fitted vs Residual + Zero Baseline)
 
 fn compile_residual_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartScene) -> Result<(), ChartError> {
-    let pts = extract_residual_points(graph, doc);
+    let pts = extract_residual_points(graph, doc, &mut scene.warnings);
     if pts.is_empty() {
         scene.warnings.push(ChartWarning::new("empty_residuals", "no fitted/residual pairs available"));
         draw_empty_open_frame(scene);
@@ -3314,7 +3702,7 @@ fn compile_residual_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut 
     Ok(())
 }
 
-fn extract_residual_points(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<DiagPoint> {
+fn extract_residual_points(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut Vec<ChartWarning>) -> Vec<DiagPoint> {
     if let Some(res) = find_matching_result_where(graph, doc, |r| {
         !matches!(r.analysis.kind, AnalysisKind::BlandAltman(_)) && r.tabs.iter().any(|t| t.kind == ResultTabKind::Residuals)
     }) && let Some(tab) = res.tabs.iter().find(|t| t.kind == ResultTabKind::Residuals)
@@ -3328,7 +3716,16 @@ fn extract_residual_points(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<Dia
     let Some(ds) = resolve_source_data_sheet(graph, doc) else { return Vec::new() };
     let ds_idx = graph.spec.series.first().map_or(0, |s| s.data_set_index);
     let pairs_with_sources: Vec<(f64, f64, SourceCellId, String)> = match &ds.archetype {
-        TableArchetype::Xy(xy) => active_xy_pairs_with_sources(&ds.id, xy, ds_idx),
+        TableArchetype::Xy(xy) => {
+            let pairs = active_xy_pairs_with_sources(&ds.id, xy, ds_idx);
+            if !pairs.is_empty() && xy.y_subcolumn_mode.is_pre_summarized() {
+                warnings.push(ChartWarning::new(
+                    "pre_summarized_summary_only",
+                    "pre-summarized table uses only the primary summary value (subcolumn 0) without replicate dispersion",
+                ));
+            }
+            pairs
+        }
         TableArchetype::MultipleVariables(mv) if mv.variables.len() >= 2 => {
             let xi = graph.spec.multivariate.as_ref().map_or(0, |m| m.x_column);
             let yi = graph.spec.multivariate.as_ref().map_or(1, |m| m.y_column);
@@ -3346,11 +3743,16 @@ fn extract_residual_points(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<Dia
             }
             raw
         }
-        TableArchetype::Column(col) => {
+        TableArchetype::Column(_) | TableArchetype::Grouped(_) => {
             let (val_sources, lbl) = collect_ds_active_values_with_sources(ds, ds_idx);
+            if !val_sources.is_empty() && is_ds_pre_summarized(ds) {
+                warnings.push(ChartWarning::new(
+                    "pre_summarized_summary_only",
+                    "pre-summarized table uses only the primary summary value (subcolumn 0) without replicate dispersion",
+                ));
+            }
             let vals: Vec<f64> = val_sources.iter().map(|(v, _)| *v).collect();
             let mean = if vals.is_empty() { 0.0 } else { vals.iter().sum::<f64>() / (vals.len() as f64) };
-            let _ = col;
             return val_sources
                 .into_iter()
                 .enumerate()
@@ -3391,7 +3793,7 @@ fn ols_residuals(pairs: &[(f64, f64)]) -> Vec<(f64, f64)> {
 // 2g. Normal Q-Q Plot (Theoretical Normal Quantiles vs Sorted Observations)
 
 fn compile_normal_qq_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartScene) -> Result<(), ChartError> {
-    let mut pts = extract_qq_points(graph, doc);
+    let mut pts = extract_qq_points(graph, doc, &mut scene.warnings);
     pts.retain(|pt| pt.x.is_finite() && pt.y.is_finite());
     if pts.len() < 3 {
         scene.warnings.push(ChartWarning::new("insufficient_qq_sample", "at least 3 finite observations required for Normal Q-Q plot"));
@@ -3526,7 +3928,7 @@ fn values_to_qq_diag_points(mut vals: Vec<(f64, SourceCellId, String)>) -> Vec<D
         .collect()
 }
 
-fn extract_qq_points(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<DiagPoint> {
+fn extract_qq_points(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut Vec<ChartWarning>) -> Vec<DiagPoint> {
     let ds_idx = graph.spec.series.first().map_or(0, |s| s.data_set_index);
 
     // 1. Prefer explicit ResultTabKind::NormalQq (excluding BlandAltman).
@@ -3673,6 +4075,12 @@ fn extract_qq_points(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<DiagPoint
         _ => ds_idx,
     };
     let (val_sources, label) = collect_ds_active_values_with_sources(ds, target_col);
+    if !val_sources.is_empty() && is_ds_pre_summarized(ds) {
+        warnings.push(ChartWarning::new(
+            "pre_summarized_summary_only",
+            "pre-summarized table uses only the primary summary value (subcolumn 0) without replicate dispersion",
+        ));
+    }
     let series_label = if label.is_empty() { graph.spec.title.clone() } else { label };
     let tagged = val_sources.into_iter().map(|(v, src)| (v, src, series_label.clone())).collect();
     values_to_qq_diag_points(tagged)

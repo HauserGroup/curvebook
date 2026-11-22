@@ -679,6 +679,7 @@ fn parse_math_slice(input: &str, text_mode: bool, depth: usize) -> Vec<MathNode>
     let mut nodes = Vec::new();
     let mut pos = 0usize;
     while pos < input.len() {
+        let prev_pos = pos;
         let Some(rest) = input.get(pos..) else {
             break;
         };
@@ -707,6 +708,10 @@ fn parse_math_slice(input: &str, text_mode: bool, depth: usize) -> Vec<MathNode>
                     }
                 }
             }
+        }
+        if pos <= prev_pos {
+            // Invariant guard: every loop iteration must strictly advance `pos` so malformed tokens never hang.
+            pos = prev_pos + ch.len_utf8();
         }
     }
     nodes
@@ -756,10 +761,14 @@ fn parse_next_step(input: &str, pos: &mut usize, text_mode: bool, depth: usize) 
         }
     }
     if ch == '^' || ch == '_' {
-        // Standalone script marker without a preceding nucleus: attach to an empty nucleus.
+        // Standalone script marker without a preceding nucleus: attach to an empty nucleus
+        // only when a valid script argument follows; otherwise consume the orphan marker literally.
+        let start_pos = *pos;
         let empty = MathNode::Group(Vec::new());
         let attached = attach_scripts_if_any(empty, input, pos, text_mode, depth);
-        return Some(ParsedStep::Raw(attached));
+        if *pos > start_pos {
+            return Some(ParsedStep::Raw(attached));
+        }
     }
     Some(parse_literal_atom(input, pos, text_mode))
 }
@@ -1062,6 +1071,9 @@ fn parse_script_arg(s: &str, text_mode: bool, depth: usize) -> Option<(Vec<MathN
     let trimmed = s.trim_start_matches([' ', '\t']);
     let ws = s.len() - trimmed.len();
     let first = trimmed.chars().next()?;
+    if first == '}' {
+        return None;
+    }
     if first == '{' {
         let (inner, consumed) = extract_braced(trimmed)?;
         let mut nodes = parse_math_slice(inner, text_mode, depth + 1);
@@ -2024,7 +2036,8 @@ fn unreachable_zero_box() -> (f64, Path2D, LineCap, LineJoin) {
 
 /// Lay out superscript and/or subscript attached to `nucleus` per Knuth Appendix G Rules 18a–18f (p. 445).
 fn layout_scripted(nucleus: &MathNode, sup: Option<&[MathNode]>, sub: Option<&[MathNode]>, ctx: LayoutCtx) -> LayoutBox {
-    let nuc_box = layout_single_node(nucleus, ctx);
+    let nuc_ctx = if matches!(nucleus, MathNode::Scripted { .. }) { ctx.with_style(ctx.style) } else { ctx };
+    let nuc_box = layout_single_node(nucleus, nuc_ctx);
     if sup.is_none() && sub.is_none() {
         return nuc_box;
     }
@@ -2591,5 +2604,32 @@ mod tests {
         let joined = collect_text_strings(&scene).join("");
         assert!(!joined.contains("textless") && !joined.contains("textgreater") && !joined.contains("textbackslash"), "joined={joined}");
         assert!(joined.contains('<') && joined.contains('>') && joined.contains('\\') && joined.contains('*'), "joined={joined}");
+    }
+
+    #[test]
+    fn malformed_tex_scripts_and_max_depth_never_hang_or_oom() {
+        for sample in ["^", "_", "^ ", "_ ", "^{unclosed", "_{unclosed", "^}", "_}"] {
+            let mut pos = 0usize;
+            let step = parse_next_step(sample, &mut pos, false, 0);
+            assert!(step.is_some(), "expected progress step for {sample:?}");
+            assert!(pos > 0, "expected strict forward progress for {sample:?}, got pos={pos}");
+
+            let mut max_depth_pos = 0usize;
+            let step_depth = parse_next_step(sample, &mut max_depth_pos, false, MAX_TEX_DEPTH);
+            assert!(step_depth.is_some(), "expected fallback atom at MAX_TEX_DEPTH for {sample:?}");
+            assert!(max_depth_pos > 0, "expected forward progress at MAX_TEX_DEPTH for {sample:?}");
+        }
+
+        let chained = format!("x{}", "^2".repeat(120));
+        let nested = format!("{}x^2{}", "{".repeat(120), "}".repeat(120));
+        let cases = ["x^", "x_ ", "y = ^", "y = ^{unclosed", "^}", "x^1^2^3^4", chained.as_str(), nested.as_str()];
+        for input in cases {
+            let nodes = parse_math_slice(input, false, 0);
+            assert!(!nodes.is_empty(), "expected parsed AST nodes for {input:?}");
+            let mut scene = empty_scene();
+            render_tex_equation_box(&mut scene, DocRectPt::new(10.0, 10.0, 220.0, 40.0), input, 10.0, false);
+            assert!(!scene.primitives.is_empty(), "expected rendered primitives for {input:?}");
+            assert!(scene.primitives.len() < 5_000, "unexpected primitive explosion for {input:?}: {}", scene.primitives.len());
+        }
     }
 }

@@ -171,6 +171,55 @@ pub fn scale_inverse(scale: AxisScale, transformed: f64) -> Option<f64> {
     }
 }
 
+/// Compute `(t_val - t_min) / (t_max - t_min)` without overflowing intermediate differences
+/// when endpoints span extreme finite magnitudes (e.g. `[-1e308, 1e308]`).
+fn transformed_fraction(t_val: f64, t_min: f64, t_max: f64) -> Option<f64> {
+    if !t_val.is_finite() || !t_min.is_finite() || !t_max.is_finite() {
+        return None;
+    }
+    let denom = t_max - t_min;
+    let num = t_val - t_min;
+    if denom.is_finite() && num.is_finite() {
+        if denom.abs() <= MIN_FINITE_AXIS_SPAN {
+            return None;
+        }
+        let u = num / denom;
+        return u.is_finite().then_some(u);
+    }
+    let half_denom = 0.5 * t_max - 0.5 * t_min;
+    if !half_denom.is_finite() || half_denom.abs() <= MIN_FINITE_AXIS_SPAN {
+        return None;
+    }
+    let half_num = 0.5 * t_val - 0.5 * t_min;
+    if !half_num.is_finite() {
+        return None;
+    }
+    let u = half_num / half_denom;
+    u.is_finite().then_some(u)
+}
+
+/// Interpolate `t_min + u * (t_max - t_min)` without intermediate overflow on extreme spans.
+fn interpolate_transformed(u: f64, t_min: f64, t_max: f64) -> Option<f64> {
+    if !u.is_finite() || !t_min.is_finite() || !t_max.is_finite() {
+        return None;
+    }
+    let denom = t_max - t_min;
+    if denom.is_finite() {
+        if denom.abs() <= MIN_FINITE_AXIS_SPAN {
+            return None;
+        }
+        let t_val = t_min + u * denom;
+        return t_val.is_finite().then_some(t_val);
+    }
+    let half_denom = 0.5 * t_max - 0.5 * t_min;
+    if !half_denom.is_finite() || half_denom.abs() <= MIN_FINITE_AXIS_SPAN {
+        return None;
+    }
+    let half_t = 0.5 * t_min + u * half_denom;
+    let t_val = 2.0 * half_t;
+    t_val.is_finite().then_some(t_val)
+}
+
 /// Continuous mapping of a single axis domain `[min, max]` under [`AxisScale`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AxisMapping {
@@ -189,11 +238,7 @@ impl AxisMapping {
         let t_min = scale_transform(self.scale, self.min)?;
         let t_max = scale_transform(self.scale, self.max)?;
         let t_val = scale_transform(self.scale, value)?;
-        let denom = t_max - t_min;
-        if !denom.is_finite() || denom.abs() <= MIN_FINITE_AXIS_SPAN {
-            return None;
-        }
-        let u = (t_val - t_min) / denom;
+        let u = transformed_fraction(t_val, t_min, t_max)?;
         let pt = span_start + u * (span_end - span_start);
         pt.is_finite().then_some(pt)
     }
@@ -210,12 +255,8 @@ impl AxisMapping {
         }
         let t_min = scale_transform(self.scale, self.min)?;
         let t_max = scale_transform(self.scale, self.max)?;
-        let denom = t_max - t_min;
-        if !denom.is_finite() || denom.abs() <= MIN_FINITE_AXIS_SPAN {
-            return None;
-        }
         let u = (coord_pt - span_start) / span;
-        let t_val = t_min + u * denom;
+        let t_val = interpolate_transformed(u, t_min, t_max)?;
         scale_inverse(self.scale, t_val)
     }
 
@@ -404,7 +445,8 @@ impl ResolvedSegment {
         }
         let lo = self.domain_min.min(self.domain_max);
         let hi = self.domain_min.max(self.domain_max);
-        let tol = 1e-12 * (hi - lo).abs().max(lo.abs()).max(hi.abs());
+        let half_span = (0.5 * hi - 0.5 * lo).abs();
+        let tol = 2e-12 * half_span.max(lo.abs()).max(hi.abs());
         value >= lo - tol && value <= hi + tol
     }
 
@@ -434,18 +476,17 @@ impl ResolvedSegment {
         let g_min = scale_transform(self.scale, self.domain_min)?;
         let g_max = scale_transform(self.scale, self.domain_max)?;
         let g_u = scale_transform(self.scale, value)?;
-        let denom = g_max - g_min;
-        if !denom.is_finite() || denom.abs() <= MIN_FINITE_AXIS_SPAN {
+        let half_span = (0.5 * g_max - 0.5 * g_min).abs();
+        if !half_span.is_finite() || half_span <= 0.5 * MIN_FINITE_AXIS_SPAN {
             return None;
         }
-        let g_span = denom.abs();
-        let tol = 1e-9 * g_span.max(g_min.abs().max(g_max.abs()) * f64::EPSILON);
+        let tol = 2e-9 * half_span.max(g_min.abs().max(g_max.abs()) * f64::EPSILON);
         let lo = g_min.min(g_max) - tol;
         let hi = g_min.max(g_max) + tol;
         if g_u < lo || g_u > hi {
             return None;
         }
-        let s = ((g_u - g_min) / denom).clamp(0.0, 1.0);
+        let s = transformed_fraction(g_u, g_min, g_max)?.clamp(0.0, 1.0);
         let pt = self.span_start_pt + s * (self.span_end_pt - self.span_start_pt);
         pt.is_finite().then_some(pt)
     }
@@ -469,8 +510,7 @@ impl ResolvedSegment {
                 return if value.is_finite() {
                     let safe = self.mapping().reciprocal_zero_clamp_bound(anchor);
                     let g_safe = scale_transform(self.scale, safe).unwrap_or(g_num_lo);
-                    let denom = g_max - g_min;
-                    let s = if denom.abs() > 0.0 { ((g_safe.clamp(lo, hi) - g_min) / denom).clamp(0.0, 1.0) } else { 0.0 };
+                    let s = transformed_fraction(g_safe.clamp(lo, hi), g_min, g_max).unwrap_or(0.0).clamp(0.0, 1.0);
                     (self.span_start_pt + s * (self.span_end_pt - self.span_start_pt), true)
                 } else {
                     (self.span_start_pt, true)
@@ -484,14 +524,12 @@ impl ResolvedSegment {
             Some(v) if v.is_finite() => v,
             _ => {
                 let fallback = if effective_val.is_finite() && effective_val >= num_hi { g_num_hi } else { g_num_lo };
-                let denom = g_max - g_min;
-                let s = if denom.abs() > 0.0 { ((fallback - g_min) / denom).clamp(0.0, 1.0) } else { 0.0 };
+                let s = transformed_fraction(fallback, g_min, g_max).unwrap_or(0.0).clamp(0.0, 1.0);
                 return (self.span_start_pt + s * (self.span_end_pt - self.span_start_pt), true);
             }
         };
         let clipped = g_val < lo || g_val > hi;
-        let denom = g_max - g_min;
-        let s = if denom.abs() > 0.0 { ((g_val.clamp(lo, hi) - g_min) / denom).clamp(0.0, 1.0) } else { 0.0 };
+        let s = transformed_fraction(g_val.clamp(lo, hi), g_min, g_max).unwrap_or(0.0).clamp(0.0, 1.0);
         (self.span_start_pt + s * (self.span_end_pt - self.span_start_pt), clipped)
     }
 
@@ -871,11 +909,7 @@ fn liang_barsky_clip(p0: (f64, f64), p1: (f64, f64), b_min: (f64, f64), b_max: (
 }
 
 fn map_transformed_to_span(t_val: f64, t_min: f64, t_max: f64, span_start: f64, span_end: f64) -> Option<f64> {
-    let denom = t_max - t_min;
-    if !denom.is_finite() || denom.abs() <= MIN_FINITE_AXIS_SPAN {
-        return None;
-    }
-    let u = (t_val - t_min) / denom;
+    let u = transformed_fraction(t_val, t_min, t_max)?;
     let out = span_start + u * (span_end - span_start);
     out.is_finite().then_some(out)
 }
@@ -1010,10 +1044,20 @@ fn is_degenerate_domain(dmin: f64, dmax: f64, scale: AxisScale) -> bool {
     }
     if matches!(scale, AxisScale::Linear) {
         let span = dmax - dmin;
-        !span.is_finite() || span.abs() <= MIN_FINITE_AXIS_SPAN
+        // Overflow of `dmax - dmin` only happens for huge opposite-sign finite bounds.
+        span.is_finite() && span.abs() <= MIN_FINITE_AXIS_SPAN
     } else {
         match (scale_transform(scale, dmin), scale_transform(scale, dmax)) {
-            (Some(t_min), Some(t_max)) => (t_max - t_min).abs() < 1e-12,
+            (Some(t_min), Some(t_max)) => {
+                let t_span = t_max - t_min;
+                if t_span.is_finite() {
+                    let thresh =
+                        if matches!(scale, AxisScale::Reciprocal) { (1e-12 * t_min.abs().max(t_max.abs())).max(MIN_FINITE_AXIS_SPAN) } else { 1e-12 };
+                    t_span.abs() < thresh
+                } else {
+                    false
+                }
+            }
             _ => true,
         }
     }
@@ -1049,7 +1093,9 @@ fn expand_degenerate_domain(center: f64, scale: AxisScale) -> (f64, f64) {
         AxisScale::Linear => {
             let safe_center = if center.is_finite() { center } else { 0.0 };
             let pad = linear_constant_pad(safe_center);
-            (safe_center - pad, safe_center + pad)
+            let lo = if (safe_center - pad).is_finite() { safe_center - pad } else { -f64::MAX };
+            let hi = if (safe_center + pad).is_finite() { safe_center + pad } else { f64::MAX };
+            (lo, hi)
         }
         AxisScale::Log10 => expand_log_degenerate(center, 0.1, 10.0, scale),
         AxisScale::Log2 | AxisScale::Ln => expand_log_degenerate(center, 0.5, 2.0, scale),
@@ -1144,8 +1190,7 @@ fn resolve_segment_domain(
 
     let valid_lo = scale_transform(seg.scale, lo).is_some();
     let valid_hi = scale_transform(seg.scale, hi).is_some();
-    let span = hi - lo;
-    let valid_span = span.is_finite() && span.abs() > MIN_FINITE_AXIS_SPAN;
+    let valid_span = !is_degenerate_domain(lo, hi, seg.scale);
     let valid_reciprocal = !matches!(seg.scale, AxisScale::Reciprocal) || (lo != 0.0 && hi != 0.0 && lo.signum() == hi.signum());
 
     if valid_lo && valid_hi && valid_span && valid_reciprocal {
@@ -1182,12 +1227,10 @@ pub(crate) fn resolve_sample_segment_domain(
     if explicit_max.is_none() && matches!(scale, AxisScale::Linear) && include_zero_if_linear && dmax < 0.0 && dmin <= dmax {
         dmax = 0.0;
     }
-    if seg_valid.is_empty() {
-        if explicit_min.is_some() && explicit_max.is_none() && dmax <= dmin {
-            dmax = extend_upper_bound(dmin, scale);
-        } else if explicit_max.is_some() && explicit_min.is_none() && dmin >= dmax {
-            dmin = extend_lower_bound(dmax, scale);
-        }
+    if explicit_min.is_some() && explicit_max.is_none() && dmax <= dmin {
+        dmax = extend_upper_bound(dmin, scale);
+    } else if explicit_max.is_some() && explicit_min.is_none() && dmin >= dmax {
+        dmin = extend_lower_bound(dmax, scale);
     }
     if is_degenerate_domain(dmin, dmax, scale) {
         if explicit_min.is_some() && explicit_max.is_some() {
@@ -1245,9 +1288,11 @@ pub(crate) fn sanitize_linear_range(min_v: f64, max_v: f64, fallback: (f64, f64)
     }
     let (lo, hi) = if min_v <= max_v { (min_v, max_v) } else { (max_v, min_v) };
     let span = hi - lo;
-    if !span.is_finite() || span.abs() <= MIN_FINITE_AXIS_SPAN {
+    if span.is_finite() && span.abs() <= MIN_FINITE_AXIS_SPAN {
         let pad = linear_constant_pad(lo);
-        (lo - pad, hi + pad)
+        let new_lo = if (lo - pad).is_finite() { lo - pad } else { -f64::MAX };
+        let new_hi = if (hi + pad).is_finite() { hi + pad } else { f64::MAX };
+        if new_lo < new_hi { (new_lo, new_hi) } else { fallback }
     } else {
         (lo, hi)
     }
@@ -1273,6 +1318,113 @@ fn repair_prob_bound(
     }
     let edge = 0.01 * (upper / 100.0);
     if is_min { edge } else { upper - edge }
+}
+
+fn repair_log_lower_from_upper(hi: f64, scale: AxisScale) -> f64 {
+    for factor in [0.01, 0.1, 0.5] {
+        let cand = hi * factor;
+        if cand.is_finite() && cand > 0.0 && cand < hi && scale_transform(scale, cand).is_some() {
+            return cand;
+        }
+    }
+    hi
+}
+
+fn repair_log_exact_domain(
+    mut lo: f64,
+    mut hi: f64,
+    raw_lo: f64,
+    raw_hi: f64,
+    has_explicit: bool,
+    scale: AxisScale,
+    warnings: &mut Vec<ChartWarning>,
+) -> (f64, f64) {
+    let lo_ok = lo > 0.0 && scale_transform(scale, lo).is_some();
+    let hi_ok = hi > 0.0 && scale_transform(scale, hi).is_some();
+    if lo_ok && hi_ok {
+        return (lo, hi);
+    }
+    if has_explicit {
+        warnings.push(ChartWarning::new("invalid_axis_domain", format!("repaired non-positive domain [{lo}, {hi}] for {scale:?} axis")));
+    }
+    if !lo_ok {
+        if hi_ok {
+            lo =
+                if raw_lo > 0.0 && raw_lo < hi && scale_transform(scale, raw_lo).is_some() { raw_lo } else { repair_log_lower_from_upper(hi, scale) };
+        } else if raw_lo > 0.0 && scale_transform(scale, raw_lo).is_some() {
+            lo = raw_lo;
+        } else {
+            return sample_default_domain(scale);
+        }
+    }
+    if !hi_ok {
+        hi = if raw_hi > lo && scale_transform(scale, raw_hi).is_some() { raw_hi } else { extend_upper_bound(lo, scale) };
+    }
+    if scale_transform(scale, lo).is_some() && scale_transform(scale, hi).is_some() { (lo, hi) } else { sample_default_domain(scale) }
+}
+
+fn repair_reciprocal_exact_domain(
+    mut lo: f64,
+    mut hi: f64,
+    raw_lo: f64,
+    raw_hi: f64,
+    explicit_min: Option<f64>,
+    explicit_max: Option<f64>,
+    warnings: &mut Vec<ChartWarning>,
+) -> (f64, f64) {
+    let valid_explicit_min = explicit_min.is_some_and(|v| v.is_finite() && v != 0.0);
+    let valid_explicit_max = explicit_max.is_some_and(|v| v.is_finite() && v != 0.0);
+    if valid_explicit_min && !valid_explicit_max && (hi == 0.0 || !hi.is_finite() || hi.signum() != lo.signum()) {
+        hi = extend_upper_bound(lo, AxisScale::Reciprocal);
+    } else if valid_explicit_max && !valid_explicit_min && (lo == 0.0 || !lo.is_finite() || lo.signum() != hi.signum()) {
+        lo = extend_lower_bound(hi, AxisScale::Reciprocal);
+    }
+    if lo.is_finite() && hi.is_finite() && lo != 0.0 && hi != 0.0 && lo.signum() == hi.signum() {
+        return (lo, hi);
+    }
+    if explicit_min.is_some() || explicit_max.is_some() || (lo < 0.0 && hi > 0.0) || (lo > 0.0 && hi < 0.0) {
+        warnings.push(ChartWarning::new("invalid_axis_domain", format!("repaired zero-crossing or invalid domain [{lo}, {hi}] for Reciprocal axis")));
+    }
+    if hi > 0.0 && lo <= 0.0 {
+        lo = if raw_lo > 0.0 && raw_lo < hi {
+            raw_lo
+        } else if hi * 0.01 > 0.0 {
+            hi * 0.01
+        } else {
+            hi * 0.5
+        };
+    } else if lo > 0.0 && hi <= 0.0 {
+        hi = if raw_hi > 0.0 && raw_hi < lo {
+            raw_hi
+        } else if lo * 0.01 > 0.0 {
+            lo * 0.01
+        } else {
+            lo * 0.5
+        };
+    } else if lo < 0.0 && hi >= 0.0 {
+        hi = if raw_hi < 0.0 && raw_hi > lo {
+            raw_hi
+        } else if lo * 0.01 < 0.0 {
+            lo * 0.01
+        } else {
+            lo * 0.5
+        };
+    } else if hi < 0.0 && lo >= 0.0 {
+        lo = if raw_lo < 0.0 && raw_lo > hi {
+            raw_lo
+        } else if hi * 0.01 < 0.0 {
+            hi * 0.01
+        } else {
+            hi * 0.5
+        };
+    } else {
+        return sample_default_domain(AxisScale::Reciprocal);
+    }
+    if lo.is_finite() && hi.is_finite() && lo != 0.0 && hi != 0.0 && lo.signum() == hi.signum() {
+        (lo, hi)
+    } else {
+        sample_default_domain(AxisScale::Reciprocal)
+    }
 }
 
 /// Resolve a single-segment axis domain using pre-padded `(data_min, data_max)` while honoring
@@ -1302,35 +1454,10 @@ pub(crate) fn resolve_exact_domain_with_warnings(axis: &AxisSpec, data_min: f64,
 
     let mut lo = explicit_min.unwrap_or(raw_lo);
     let mut hi = explicit_max.unwrap_or(raw_hi);
-    let init_span = hi - lo;
-    let is_init_degen = if matches!(scale, AxisScale::Linear) {
-        !init_span.is_finite() || init_span.abs() <= MIN_FINITE_AXIS_SPAN
-    } else {
-        !init_span.is_finite() || init_span.abs() <= 1e-12
-    };
-    if is_init_degen {
-        if explicit_min.is_some() && explicit_max.is_some() {
-            warnings.push(ChartWarning::new("invalid_axis_domain", format!("expanded degenerate explicit domain [{lo}, {hi}] for {scale:?} axis")));
-        }
-        (lo, hi) = sanitize_linear_range(lo, hi, (0.0, 1.0));
-    }
 
     match scale {
         AxisScale::Log10 | AxisScale::Log2 | AxisScale::Ln => {
-            if lo <= 0.0 || hi <= 0.0 || scale_transform(scale, lo).is_none() || scale_transform(scale, hi).is_none() {
-                if explicit_min.is_some() || explicit_max.is_some() {
-                    warnings.push(ChartWarning::new("invalid_axis_domain", format!("repaired non-positive domain [{lo}, {hi}] for {scale:?} axis")));
-                }
-                if lo <= 0.0 {
-                    lo = if raw_lo > 0.0 && scale_transform(scale, raw_lo).is_some() { raw_lo } else { 0.1 };
-                }
-                if hi <= 0.0 {
-                    hi = if raw_hi > 0.0 && scale_transform(scale, raw_hi).is_some() { raw_hi } else { lo * 10.0 };
-                }
-                if (hi - lo).abs() <= 1e-12 || scale_transform(scale, lo).is_none() || scale_transform(scale, hi).is_none() {
-                    return sample_default_domain(scale);
-                }
-            }
+            (lo, hi) = repair_log_exact_domain(lo, hi, raw_lo, raw_hi, explicit_min.is_some() || explicit_max.is_some(), scale, warnings);
         }
         AxisScale::Logit(domain) => {
             let upper = match domain {
@@ -1339,45 +1466,33 @@ pub(crate) fn resolve_exact_domain_with_warnings(axis: &AxisSpec, data_min: f64,
             };
             lo = repair_prob_bound(lo, true, explicit_min.is_some(), raw_lo, upper, scale, warnings);
             hi = repair_prob_bound(hi, false, explicit_max.is_some(), raw_hi, upper, scale, warnings);
-            if (hi - lo).abs() <= 1e-12 {
-                let edge = 0.01 * (upper / 100.0);
-                lo = edge;
-                hi = upper - edge;
-            }
         }
         AxisScale::Probit => {
             lo = repair_prob_bound(lo, true, explicit_min.is_some(), raw_lo, 100.0, scale, warnings);
             hi = repair_prob_bound(hi, false, explicit_max.is_some(), raw_hi, 100.0, scale, warnings);
-            if (hi - lo).abs() <= 1e-12 {
-                lo = 0.01;
-                hi = 99.99;
-            }
         }
         AxisScale::Reciprocal => {
-            if !lo.is_finite() || !hi.is_finite() || lo == 0.0 || hi == 0.0 || lo.signum() != hi.signum() || (hi - lo).abs() <= 1e-12 {
-                if explicit_min.is_some() || explicit_max.is_some() || (lo < 0.0 && hi > 0.0) || (lo > 0.0 && hi < 0.0) {
-                    warnings.push(ChartWarning::new(
-                        "invalid_axis_domain",
-                        format!("repaired zero-crossing or invalid domain [{lo}, {hi}] for Reciprocal axis"),
-                    ));
-                }
-                if hi > 0.0 && lo <= 0.0 {
-                    lo = if raw_lo > 0.0 && raw_lo < hi { raw_lo } else { (hi * 0.01).clamp(1e-6, hi * 0.5) };
-                } else if lo > 0.0 && hi <= 0.0 {
-                    hi = if raw_hi > 0.0 && raw_hi < lo { raw_hi } else { (lo * 0.01).clamp(1e-6, lo * 0.5) };
-                } else if lo < 0.0 && hi >= 0.0 {
-                    hi = if raw_hi < 0.0 && raw_hi > lo { raw_hi } else { (lo * 0.01).clamp(lo * 0.5, -1e-6) };
-                } else if hi < 0.0 && lo >= 0.0 {
-                    lo = if raw_lo < 0.0 && raw_lo > hi { raw_lo } else { (hi * 0.01).clamp(hi * 0.5, -1e-6) };
-                } else {
-                    return (1.0, 100.0);
-                }
-                if !lo.is_finite() || !hi.is_finite() || lo == 0.0 || hi == 0.0 || lo.signum() != hi.signum() || (hi - lo).abs() <= 1e-12 {
-                    return (1.0, 100.0);
-                }
-            }
+            (lo, hi) = repair_reciprocal_exact_domain(lo, hi, raw_lo, raw_hi, explicit_min, explicit_max, warnings);
         }
         AxisScale::Linear => {}
+    }
+
+    let valid_explicit_min = explicit_min.is_some_and(|v| scale_transform(scale, v).is_some());
+    let valid_explicit_max = explicit_max.is_some_and(|v| scale_transform(scale, v).is_some());
+    if valid_explicit_min && !valid_explicit_max && hi <= lo {
+        hi = extend_upper_bound(lo, scale);
+    } else if valid_explicit_max && !valid_explicit_min && lo >= hi {
+        lo = extend_lower_bound(hi, scale);
+    }
+
+    if is_degenerate_domain(lo, hi, scale) {
+        if explicit_min.is_some() && explicit_max.is_some() {
+            warnings.push(ChartWarning::new("invalid_axis_domain", format!("expanded degenerate explicit domain [{lo}, {hi}] for {scale:?} axis")));
+        }
+        (lo, hi) = expand_degenerate_domain(lo, scale);
+        if is_degenerate_domain(lo, hi, scale) {
+            return sample_default_domain(scale);
+        }
     }
     (lo, hi)
 }
@@ -1418,14 +1533,32 @@ fn sample_auto_domain_min(valid: &[f64], scale: AxisScale, include_zero_if_linea
     }
     match scale {
         AxisScale::Linear => {
-            let mut base = if include_zero_if_linear && raw_min > 0.0 { 0.0 } else { raw_min };
-            let raw_span = (raw_max - base).max(base.abs() * 0.1);
-            let span = if raw_span.is_finite() && raw_span > MIN_FINITE_AXIS_SPAN { raw_span } else { 1.0 };
-            if !include_zero_if_linear || base < 0.0 {
-                base -= 0.06 * span;
-            }
-            let step = nice_linear_step(span / 5.0);
-            clean_zero((base / step).floor() * step)
+            let base = if include_zero_if_linear && raw_min > 0.0 { 0.0 } else { raw_min };
+            let raw_span = raw_max - base;
+            let (step, padded_base) = if raw_span.is_finite() {
+                let span = raw_span.max(base.abs() * 0.1);
+                let safe_span = if span.is_finite() && span > MIN_FINITE_AXIS_SPAN { span } else { 1.0 };
+                let adj = if !include_zero_if_linear || base < 0.0 {
+                    let b = base - 0.06 * safe_span;
+                    if b.is_finite() { b } else { base }
+                } else {
+                    base
+                };
+                (nice_linear_step(safe_span / 5.0), adj)
+            } else {
+                let half_span = (0.5 * raw_max - 0.5 * base).max(MIN_FINITE_AXIS_SPAN);
+                let half_step = nice_linear_step(half_span / 5.0);
+                let full_step = if (2.0 * half_step).is_finite() { 2.0 * half_step } else { half_span };
+                let adj = if !include_zero_if_linear || base < 0.0 {
+                    let b = base - 0.12 * half_span;
+                    if b.is_finite() { b } else { base }
+                } else {
+                    base
+                };
+                (full_step, adj)
+            };
+            let snapped = (padded_base / step).floor() * step;
+            clean_zero(if snapped.is_finite() { snapped } else { base })
         }
         AxisScale::Log10 | AxisScale::Log2 | AxisScale::Ln => log_auto_domain_min(raw_min, scale),
         AxisScale::Logit(LogitDomain::Percent) | AxisScale::Probit => prob_auto_domain_min(raw_min, 100.0, scale),
@@ -1448,11 +1581,22 @@ fn sample_auto_domain_max(valid: &[f64], scale: AxisScale, top_headroom_frac: f6
     }
     match scale {
         AxisScale::Linear => {
-            let raw_span = (raw_max - raw_min).max(raw_max.abs() * 0.1);
-            let span = if raw_span.is_finite() && raw_span > MIN_FINITE_AXIS_SPAN { raw_span } else { 1.0 };
-            let padded = raw_max + span * (0.08 + top_headroom_frac.max(0.0));
-            let step = nice_linear_step(span / 5.0);
-            clean_zero((padded / step).ceil() * step)
+            let raw_span = raw_max - raw_min;
+            let headroom = 0.08 + top_headroom_frac.max(0.0);
+            let (step, padded) = if raw_span.is_finite() {
+                let span = raw_span.max(raw_max.abs() * 0.1);
+                let safe_span = if span.is_finite() && span > MIN_FINITE_AXIS_SPAN { span } else { 1.0 };
+                let p = raw_max + safe_span * headroom;
+                (nice_linear_step(safe_span / 5.0), if p.is_finite() { p } else { raw_max })
+            } else {
+                let half_span = (0.5 * raw_max - 0.5 * raw_min).max(MIN_FINITE_AXIS_SPAN);
+                let half_step = nice_linear_step(half_span / 5.0);
+                let full_step = if (2.0 * half_step).is_finite() { 2.0 * half_step } else { half_span };
+                let p = raw_max + 2.0 * half_span * headroom;
+                (full_step, if p.is_finite() { p } else { raw_max })
+            };
+            let snapped = (padded / step).ceil() * step;
+            clean_zero(if snapped.is_finite() { snapped } else { raw_max })
         }
         AxisScale::Log10 | AxisScale::Log2 | AxisScale::Ln => log_auto_domain_max(raw_max, scale, top_headroom_frac),
         AxisScale::Logit(LogitDomain::Percent) | AxisScale::Probit => prob_auto_domain_max(raw_max, 100.0, scale),
@@ -1505,16 +1649,29 @@ fn compute_nice_bounds_for_scale(lo: f64, hi: f64, scale: AxisScale) -> (f64, f6
 
 fn nice_linear_bounds(lo: f64, hi: f64) -> (f64, f64) {
     let span = hi - lo;
-    if !span.is_finite() || span.abs() <= MIN_FINITE_AXIS_SPAN {
-        let pad = linear_constant_pad(lo);
-        return (lo - pad, hi + pad);
+    if span.is_finite() {
+        if span.abs() <= MIN_FINITE_AXIS_SPAN {
+            let pad = linear_constant_pad(lo);
+            let new_lo = if (lo - pad).is_finite() { lo - pad } else { -f64::MAX };
+            let new_hi = if (hi + pad).is_finite() { hi + pad } else { f64::MAX };
+            return (new_lo, new_hi);
+        }
+        let step = nice_linear_step(span / 5.0);
+        let nice_lo = if lo >= 0.0 && lo <= step { 0.0 } else { (lo / step).floor() * step };
+        let nice_hi = (hi / step).ceil() * step;
+        let out_hi = if nice_hi.is_finite() { nice_hi } else { hi };
+        let out_lo = if nice_lo.is_finite() { nice_lo } else { lo };
+        (clean_zero(out_lo), clean_zero(out_hi))
+    } else {
+        let half_span = 0.5 * hi - 0.5 * lo;
+        let half_step = nice_linear_step(half_span / 5.0);
+        let step = if (2.0 * half_step).is_finite() { 2.0 * half_step } else { half_span };
+        let nice_lo = (lo / step).floor() * step;
+        let nice_hi = (hi / step).ceil() * step;
+        let out_lo = if nice_lo.is_finite() { nice_lo } else { lo };
+        let out_hi = if nice_hi.is_finite() { nice_hi } else { hi };
+        (clean_zero(out_lo), clean_zero(out_hi))
     }
-    let step = nice_linear_step(span / 5.0);
-    let nice_lo = if lo >= 0.0 && lo <= step { 0.0 } else { (lo / step).floor() * step };
-    let nice_hi = (hi / step).ceil() * step;
-    let out_hi = if nice_hi.is_finite() { nice_hi } else { hi };
-    let out_lo = if nice_lo.is_finite() { nice_lo } else { lo };
-    (clean_zero(out_lo), clean_zero(out_hi))
 }
 
 fn nice_log_bounds(lo: f64, hi: f64, base: f64, scale: AxisScale) -> (f64, f64) {
@@ -1534,17 +1691,30 @@ fn nice_log_bounds(lo: f64, hi: f64, base: f64, scale: AxisScale) -> (f64, f64) 
 fn extend_upper_bound(lo: f64, scale: AxisScale) -> f64 {
     match scale {
         AxisScale::Log10 | AxisScale::Log2 | AxisScale::Ln => {
-            let scaled = lo.max(LOG_POSITIVE_FLOOR_DEFAULT) * 10.0;
-            if scaled.is_finite() && scaled > lo { scaled } else { f64::MAX }
+            if lo > 0.0 && lo.is_finite() {
+                let mult = if matches!(scale, AxisScale::Log10) { 10.0 } else { 2.0 };
+                let scaled = lo * mult;
+                if scaled.is_finite() && scaled > lo {
+                    return scaled;
+                }
+                let fallback = lo * 2.0;
+                if fallback.is_finite() && fallback > lo { fallback } else { f64::MAX }
+            } else {
+                LOG_POSITIVE_FLOOR_DEFAULT * 10.0
+            }
         }
         AxisScale::Logit(LogitDomain::Proportion) => prob_auto_domain_max(lo, 1.0, scale),
         AxisScale::Logit(LogitDomain::Percent) | AxisScale::Probit => prob_auto_domain_max(lo, 100.0, scale),
-        AxisScale::Linear => lo + linear_constant_pad(lo),
+        AxisScale::Linear => {
+            let cand = lo + linear_constant_pad(lo);
+            if cand.is_finite() { cand } else { f64::MAX }
+        }
         AxisScale::Reciprocal => {
             if lo < 0.0 {
                 lo * 0.5
             } else {
-                lo + lo.abs().max(1.0)
+                let cand = lo + lo.abs().max(1.0);
+                if cand.is_finite() { cand } else { f64::MAX }
             }
         }
     }
@@ -1552,15 +1722,33 @@ fn extend_upper_bound(lo: f64, scale: AxisScale) -> f64 {
 
 fn extend_lower_bound(hi: f64, scale: AxisScale) -> f64 {
     match scale {
-        AxisScale::Log10 | AxisScale::Log2 | AxisScale::Ln => (hi * 0.1).max(LOG_POSITIVE_FLOOR_DEFAULT),
+        AxisScale::Log10 | AxisScale::Log2 | AxisScale::Ln => {
+            if hi > 0.0 && hi.is_finite() {
+                let factor = if matches!(scale, AxisScale::Log10) { 0.1 } else { 0.5 };
+                for mult in [factor, 0.5] {
+                    let cand = hi * mult;
+                    if cand > 0.0 && cand < hi && scale_transform(scale, cand).is_some() {
+                        return cand;
+                    }
+                }
+                hi
+            } else {
+                LOG_POSITIVE_FLOOR_DEFAULT
+            }
+        }
         AxisScale::Logit(LogitDomain::Proportion) => prob_auto_domain_min(hi, 1.0, scale),
         AxisScale::Logit(LogitDomain::Percent) | AxisScale::Probit => prob_auto_domain_min(hi, 100.0, scale),
-        AxisScale::Linear => hi - linear_constant_pad(hi),
+        AxisScale::Linear => {
+            let cand = hi - linear_constant_pad(hi);
+            if cand.is_finite() { cand } else { -f64::MAX }
+        }
         AxisScale::Reciprocal => {
             if hi < 0.0 {
-                hi * 2.0
+                let cand = hi * 2.0;
+                if cand.is_finite() { cand } else { -f64::MAX }
             } else {
-                (hi * 0.5).max(LOG_POSITIVE_FLOOR_DEFAULT)
+                let cand = hi * 0.5;
+                if cand > 0.0 && cand < hi && scale_transform(scale, cand).is_some() { cand } else { hi }
             }
         }
     }
@@ -1736,7 +1924,8 @@ fn additional_segment_contains_value(min: f64, max: f64, value: f64) -> bool {
     }
     let lo = min.min(max);
     let hi = min.max(max);
-    let tol = 1e-12 * (hi - lo).abs().max(lo.abs()).max(hi.abs());
+    let half_span = (0.5 * hi - 0.5 * lo).abs();
+    let tol = 2e-12 * half_span.max(lo.abs()).max(hi.abs());
     value >= lo - tol && value <= hi + tol
 }
 
@@ -1947,26 +2136,46 @@ pub(crate) fn compute_safe_linear_ticks(
 ) -> (Vec<f64>, f64, usize) {
     let lo = min_v.min(max_v);
     let hi = min_v.max(max_v);
-    let span = hi - lo;
-    if !lo.is_finite() || !hi.is_finite() || !span.is_finite() || span <= 0.0 {
+    if !lo.is_finite() || !hi.is_finite() || hi <= lo {
         let pt = if lo.is_finite() { vec![clean_zero(lo)] } else { Vec::new() };
         return (pt, 1.0, 0);
     }
+    let span = hi - lo;
+    let half_span = 0.5 * hi - 0.5 * lo;
+    if !half_span.is_finite() || half_span <= 0.0 {
+        return (vec![clean_zero(lo)], 1.0, 0);
+    }
 
     let max_intervals = (MAX_TICKS_PER_SEGMENT.saturating_sub(1)).max(1) as f64;
+    let fallback_step = || {
+        if span.is_finite() {
+            nice_linear_step(span / 8.0)
+        } else {
+            let hs = nice_linear_step(half_span / 8.0);
+            if (2.0 * hs).is_finite() { 2.0 * hs } else { half_span }
+        }
+    };
     let mut step = match requested_step {
         Some(s) if s.is_finite() && s > 0.0 => s,
-        _ => nice_linear_step(span / (target_ticks.max(2) as f64)),
+        _ if span.is_finite() => nice_linear_step(span / (target_ticks.max(2) as f64)),
+        _ => {
+            let hs = nice_linear_step(half_span / (target_ticks.max(2) as f64));
+            if (2.0 * hs).is_finite() { 2.0 * hs } else { half_span }
+        }
     };
-    let min_safe_step = (span / max_intervals).max(lo.abs().max(hi.abs()) * 1e-13);
-    let raw_intervals = span / step;
+    let min_safe_step = if span.is_finite() {
+        (span / max_intervals).max(lo.abs().max(hi.abs()) * 1e-13)
+    } else {
+        (2.0 * (half_span / max_intervals)).max(lo.abs().max(hi.abs()) * 1e-13)
+    };
+    let raw_intervals = if span.is_finite() { span / step } else { 2.0 * (half_span / step) };
     if !raw_intervals.is_finite() || raw_intervals > max_intervals || step < min_safe_step {
         let stride = (raw_intervals / max_intervals).ceil();
         let eff_step = if raw_intervals.is_finite() && stride.is_finite() && stride <= 1_000_000.0 {
             let scaled = step * stride;
-            if scaled.is_finite() && scaled >= min_safe_step { scaled } else { nice_linear_step(span / 8.0).max(min_safe_step) }
+            if scaled.is_finite() && scaled >= min_safe_step { scaled } else { fallback_step().max(min_safe_step) }
         } else {
-            nice_linear_step(span / 8.0).max(min_safe_step)
+            fallback_step().max(min_safe_step)
         };
         if let Some(req) = requested_step
             && req.is_finite()
@@ -1988,7 +2197,7 @@ pub(crate) fn compute_safe_linear_ticks(
         || end_k_f.abs() > 4.5e15
         || (end_k_f - start_k_f) > max_intervals + 2.0
     {
-        step = nice_linear_step(span / 8.0).max(min_safe_step);
+        step = fallback_step().max(min_safe_step);
         start_k_f = (lo / step - 1e-9).ceil();
         end_k_f = (hi / step + 1e-9).floor();
     }
@@ -1997,7 +2206,7 @@ pub(crate) fn compute_safe_linear_ticks(
     }
 
     let count = ((end_k_f - start_k_f).round().max(0.0) as usize).saturating_add(1).min(MAX_TICKS_PER_SEGMENT);
-    let tol = 1e-9 * span.max(step);
+    let tol = 1e-9 * (if span.is_finite() { span } else { half_span }).max(step);
     let mut majors = Vec::with_capacity(count);
     for dk in 0..count {
         let mut v = clean_tick_residual((start_k_f + (dk as f64)) * step, step);
@@ -3757,7 +3966,9 @@ mod tests {
     use curvebook_text::{LocaleNumberPolicy, SpanScript};
 
     use super::{
-        AxisMapping, AxisOrientation, ResolvedAxis, format_tick_rich, nice_linear_bounds, resolve_sample_segment_domain, sanitize_linear_range,
+        AxisMapping, AxisOrientation, ResolvedAxis, ResolvedSegment, TickComputeConfig, TickKind, compute_safe_linear_ticks,
+        compute_segment_ticks_with_warnings, format_tick_rich, nice_linear_bounds, resolve_exact_domain_with_warnings, resolve_sample_segment_domain,
+        sanitize_linear_range,
     };
     use crate::scene::RectPt;
 
@@ -3847,5 +4058,98 @@ mod tests {
         assert_eq!(pos_si_mega.plain_text(), "1 M");
         let neg_si_mega = format_tick_rich(-999_999.6, AxisScale::Linear, TickLabelFormat::EngineeringSi, &policy);
         assert_eq!(neg_si_mega.plain_text(), "\u{2212}1 M");
+    }
+
+    #[test]
+    fn sec09_s1_log_explicit_and_extreme_domain_regressions() {
+        let make_log_axis = |title: &str| {
+            let mut axis = AxisSpec::linear(title);
+            axis.segments[0].scale = AxisScale::Log10;
+            axis
+        };
+        // 1. Sub-picomolar log10 domain `[1e-14, 1e-12]` is preserved without false degeneracy fallback.
+        let mut log_axis = make_log_axis("Conc");
+        let mut w_sub = Vec::new();
+        let (lo_sub, hi_sub) = resolve_exact_domain_with_warnings(&log_axis, 1e-14, 1e-12, &mut w_sub);
+        assert!(w_sub.is_empty(), "sub-picomolar log10 domain should not warn: {w_sub:?}");
+        assert!((lo_sub - 1e-14).abs() < 1e-28 && (hi_sub - 1e-12).abs() < 1e-26);
+
+        let mut w_samp_sub = Vec::new();
+        let (slo_sub, shi_sub) = resolve_sample_segment_domain(&log_axis.segments[0], &[1e-14, 1e-12], false, 0.0, &mut w_samp_sub);
+        assert!(w_samp_sub.is_empty(), "sub-picomolar log sample should not warn: {w_samp_sub:?}");
+        assert!(slo_sub > 0.0 && slo_sub <= 1e-14 && (1e-12..=1e-11).contains(&shi_sub), "got [{slo_sub:e}, {shi_sub:e}]");
+
+        let sub_seg = ResolvedSegment {
+            segment_index: 0,
+            domain_min: 1e-14,
+            domain_max: 1e-12,
+            scale: AxisScale::Log10,
+            length_fraction: 1.0,
+            span_start_pt: 0.0,
+            span_end_pt: 200.0,
+            major_tick_interval: None,
+            minor_ticks_per_interval: 0,
+        };
+        let policy = LocaleNumberPolicy::publication();
+        let tick_cfg =
+            TickComputeConfig { tick_format: TickLabelFormat::default(), policy: &policy, auto_log_minor_ticks: false, categorical_ticks: None };
+        let mut w_ticks = Vec::new();
+        let sub_ticks = compute_segment_ticks_with_warnings(&sub_seg, tick_cfg, &mut w_ticks);
+        let major_vals: Vec<f64> = sub_ticks.iter().filter(|t| t.kind == TickKind::Major).map(|t| t.value).collect();
+        assert!(major_vals.len() >= 3, "expected log10 ticks for [1e-14, 1e-12], got {major_vals:?}");
+        assert!((major_vals[0] - 1e-14).abs() < 1e-26 && (major_vals[major_vals.len() - 1] - 1e-12).abs() < 1e-24);
+
+        // 2. Non-positive lower log bound repairs relative to `hi` (never hardcoded `0.1` that inverts `[0, 0.05]` or `[0, 1e-12]`).
+        let mut w_tiny_log = Vec::new();
+        let (lo_t, hi_t) = resolve_exact_domain_with_warnings(&log_axis, 0.0, 1e-12, &mut w_tiny_log);
+        assert!(lo_t > 0.0 && lo_t < hi_t && (hi_t - 1e-12).abs() < 1e-26, "got [{lo_t:e}, {hi_t:e}]");
+        let (lo_s, hi_s) = resolve_exact_domain_with_warnings(&log_axis, 0.0, 0.05, &mut w_tiny_log);
+        assert!(lo_s > 0.0 && lo_s < hi_s && (hi_s - 0.05).abs() < 1e-12, "got [{lo_s:e}, {hi_s:e}]");
+
+        // 3. Single-sided explicit bounds extend non-degenerately, while two-sided reversed explicit bounds stay preserved.
+        let mut lin_one_lo = AxisSpec::linear("X");
+        lin_one_lo.segments[0].min = Some(100.0);
+        let mut w_one = Vec::new();
+        let (ol_lo, ol_hi) = resolve_exact_domain_with_warnings(&lin_one_lo, 1.0, 5.0, &mut w_one);
+        assert!(ol_lo == 100.0 && ol_hi > ol_lo, "single-sided min=100 must extend max > 100, got [{ol_lo}, {ol_hi}]");
+        let (sl_lo, sl_hi) = resolve_sample_segment_domain(&lin_one_lo.segments[0], &[1.0, 5.0], false, 0.0, &mut w_one);
+        assert!(sl_lo == 100.0 && sl_hi > sl_lo, "sample single-sided min=100 must extend max > 100, got [{sl_lo}, {sl_hi}]");
+
+        log_axis.segments[0].min = None;
+        log_axis.segments[0].max = Some(1.0);
+        let (lm_lo, lm_hi) = resolve_sample_segment_domain(&log_axis.segments[0], &[10.0, 100.0], false, 0.0, &mut w_one);
+        assert!(lm_lo > 0.0 && lm_lo < 1.0 && (lm_hi - 1.0).abs() < 1e-12, "single-sided log max=1 must drop lo < 1, got [{lm_lo}, {lm_hi}]");
+
+        let mut rev_lin = AxisSpec::linear("RevLin");
+        rev_lin.segments[0].min = Some(100.0);
+        rev_lin.segments[0].max = Some(0.0);
+        assert_eq!(resolve_exact_domain_with_warnings(&rev_lin, 10.0, 50.0, &mut w_one), (100.0, 0.0));
+
+        let mut rev_log = make_log_axis("RevLog");
+        rev_log.segments[0].min = Some(100.0);
+        rev_log.segments[0].max = Some(1.0);
+        assert_eq!(resolve_exact_domain_with_warnings(&rev_log, 2.0, 50.0, &mut w_one), (100.0, 1.0));
+
+        // 4. Extreme opposite-sign linear range `[-1e308, 1e308]` maps, unmaps, resolves, and ticks without `f64` overflow.
+        let extreme_lin = AxisSpec::linear("Extreme");
+        let mut w_ext = Vec::new();
+        let (ex_lo, ex_hi) = resolve_exact_domain_with_warnings(&extreme_lin, -1e308, 1e308, &mut w_ext);
+        assert!(ex_lo.is_finite() && ex_hi.is_finite() && ex_lo <= -1e308 && ex_hi >= 1e308);
+        let (exs_lo, exs_hi) = resolve_sample_segment_domain(&extreme_lin.segments[0], &[-1e308, 1e308], false, 0.0, &mut w_ext);
+        assert!(exs_lo.is_finite() && exs_hi.is_finite() && exs_lo <= -1e308 && exs_hi >= 1e308);
+
+        let ex_map = AxisMapping { min: -1e308, max: 1e308, scale: AxisScale::Linear };
+        let px_mid = ex_map.map_value(0.0, 0.0, 200.0).expect("map 0 on [-1e308, 1e308]");
+        assert!((px_mid - 100.0).abs() < 1e-9, "px_mid={px_mid}");
+        let px_lo = ex_map.map_value(-1e308, 0.0, 200.0).expect("map -1e308");
+        let px_hi = ex_map.map_value(1e308, 0.0, 200.0).expect("map +1e308");
+        assert!((px_lo - 0.0).abs() < 1e-9 && (px_hi - 200.0).abs() < 1e-9);
+        let un_q1 = ex_map.unmap_coord(50.0, 0.0, 200.0).expect("unmap quarter coord");
+        assert!((un_q1 - (-5e307)).abs() / 5e307 < 1e-9, "un_q1={un_q1:e}");
+
+        let (ext_ticks, ext_step, _) = compute_safe_linear_ticks(-1e308, 1e308, None, 6, &mut w_ext);
+        assert!(ext_step.is_finite() && ext_step > 0.0 && ext_ticks.len() >= 2);
+        assert!(ext_ticks.iter().all(|v| v.is_finite()));
+        assert!(ext_ticks.iter().any(|&v| v < 0.0) && ext_ticks.iter().any(|&v| v > 0.0));
     }
 }
