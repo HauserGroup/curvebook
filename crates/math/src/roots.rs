@@ -58,14 +58,16 @@ where
     let max_iters = options.max_iters.clamp(1, MAX_BRENT_ITERS);
     let mut x_c = x_a;
     let mut f_c = f_a;
-    let mut step = x_b - x_a;
+    let init_span = x_b - x_a;
+    let mut step = if init_span.is_finite() { init_span } else { 0.5 * x_b - 0.5 * x_a };
     let mut prev_step = step;
 
     for _ in 0..max_iters {
         if (f_b > 0.0) == (f_c > 0.0) {
             x_c = x_a;
             f_c = f_a;
-            step = x_b - x_a;
+            let span = x_b - x_a;
+            step = if span.is_finite() { span } else { 0.5 * x_b - 0.5 * x_a };
             prev_step = step;
         }
         if f_c.abs() < f_b.abs() {
@@ -78,17 +80,28 @@ where
         }
 
         let tol = 2.0 * options.rel_tol * x_b.abs() + 0.5 * options.abs_tol;
-        let mid = 0.5 * (x_c - x_b);
+        let mid = 0.5 * x_c - 0.5 * x_b;
         if mid.abs() <= tol || f_b == 0.0 {
             return Ok(x_b);
         }
 
-        if prev_step.abs() >= tol && f_a.abs() > f_b.abs() {
+        let can_interp =
+            (x_c - x_b).is_finite() && (x_b - x_a).is_finite() && (x_a - x_c).is_finite() && prev_step.abs() >= tol && f_a.abs() > f_b.abs();
+        if can_interp {
             let (p, q) = interp_numerator_denominator(x_a, x_b, x_c, f_a, f_b, f_c);
-            let limit = (3.0 * mid * q - (tol * q).abs()).min((prev_step * q).abs());
-            if 2.0 * p < limit {
-                prev_step = step;
-                step = p / q;
+            let two_p = 2.0 * p;
+            let three_mq = 3.0 * mid * q;
+            let prev_q = prev_step * q;
+            let tol_q = tol * q;
+            if p.is_finite() && q.is_finite() && two_p.is_finite() && three_mq.is_finite() && prev_q.is_finite() && tol_q.is_finite() {
+                let limit = (three_mq - tol_q.abs()).min(prev_q.abs());
+                if two_p < limit {
+                    prev_step = step;
+                    step = p / q;
+                } else {
+                    step = mid;
+                    prev_step = mid;
+                }
             } else {
                 step = mid;
                 prev_step = mid;
@@ -100,7 +113,7 @@ where
 
         x_a = x_b;
         f_a = f_b;
-        if step.abs() > tol {
+        if step.is_finite() && step.abs() > tol {
             x_b += step;
         } else if mid > 0.0 {
             x_b += tol;
@@ -118,14 +131,15 @@ where
 
 fn interp_numerator_denominator(x_a: f64, x_b: f64, x_c: f64, f_a: f64, f_b: f64, f_c: f64) -> (f64, f64) {
     let s = f_b / f_a;
+    let half_cb = 0.5 * x_c - 0.5 * x_b;
     let (mut p, mut q) = if (x_a - x_c).abs() <= f64::EPSILON * x_c.abs().max(1.0) {
         // Linear / secant interpolation.
-        (2.0 * (0.5 * (x_c - x_b)) * s, 1.0 - s)
+        (2.0 * half_cb * s, 1.0 - s)
     } else {
         // Inverse quadratic interpolation.
         let q0 = f_a / f_c;
         let r = f_b / f_c;
-        (s * (2.0 * (0.5 * (x_c - x_b)) * q0 * (q0 - r) - (x_b - x_a) * (r - 1.0)), (q0 - 1.0) * (r - 1.0) * (s - 1.0))
+        (s * (2.0 * half_cb * q0 * (q0 - r) - (x_b - x_a) * (r - 1.0)), (q0 - 1.0) * (r - 1.0) * (s - 1.0))
     };
     if p > 0.0 {
         q = -q;
@@ -143,15 +157,17 @@ pub fn safeguarded_halley_step(x: f64, fx: f64, dfx: f64, d2_over_d1: f64, lo: f
         let newton = fx / dfx;
         let denom = (1.0 - 0.5 * newton * d2_over_d1).clamp(0.2, 5.0);
         let step = newton / denom;
-        if step.abs() <= 2.0 * f64::EPSILON * x.abs().max(f64::MIN_POSITIVE) {
-            return (x - step).clamp(lo, hi);
-        }
         let candidate = x - step;
-        if candidate.is_finite() && candidate > lo && candidate < hi {
-            return candidate;
+        if step.is_finite() && candidate.is_finite() {
+            if step.abs() <= 2.0 * f64::EPSILON * x.abs().max(f64::MIN_POSITIVE) {
+                return candidate.clamp(lo, hi);
+            }
+            if candidate > lo && candidate < hi {
+                return candidate;
+            }
         }
     }
-    0.5 * (lo + hi)
+    0.5 * lo + 0.5 * hi
 }
 
 #[cfg(test)]

@@ -11,5 +11,4 @@ description = "CurveBook platform abstractions: atomic file writes, bounded subp
 workspace = true
 
 [dependencies]
-serde = { workspace = true }
 serde_json = { workspace = true }

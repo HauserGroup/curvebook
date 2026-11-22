@@ -13,7 +13,7 @@
 //! - Golub, G. H., & Van Loan, C. F. (2013). *Matrix Computations* (4th ed., §8.6).
 
 use crate::error::MathError;
-use crate::linalg::matrix::DenseMatrix;
+use crate::linalg::matrix::{DenseMatrix, pow2_exp_for_max_abs, scale_pow2};
 use crate::linalg::qr::qr_col_pivoted;
 use crate::sum::{NeumaierSum, dot};
 
@@ -59,6 +59,22 @@ pub fn svd(a: &DenseMatrix) -> Result<Svd, MathError> {
 }
 
 fn svd_tall_or_square(a: &DenseMatrix) -> Result<Svd, MathError> {
+    let scale_exp = pow2_exp_for_max_abs(a.max_abs());
+    if scale_exp == 0 {
+        return svd_tall_or_square_scaled(a);
+    }
+    let a_scaled = DenseMatrix::from_fn(a.nrows(), a.ncols(), |r, c| scale_pow2(a.entry(r, c), -scale_exp))?;
+    let mut res = svd_tall_or_square_scaled(&a_scaled)?;
+    for s in &mut res.singular_values {
+        *s = scale_pow2(*s, scale_exp);
+        if !s.is_finite() {
+            return Err(MathError::DomainError { name: "singular_value", value: *s });
+        }
+    }
+    Ok(res)
+}
+
+fn svd_tall_or_square_scaled(a: &DenseMatrix) -> Result<Svd, MathError> {
     let m = a.nrows();
     let n = a.ncols();
     // When m >= 2 * n, precondition by pivoted Householder QR `A P = Q_1 R` (R is n x n),
@@ -122,9 +138,11 @@ fn one_sided_jacobi_svd(a: &DenseMatrix) -> Result<Svd, MathError> {
             v_sorted.set_in_bounds(r, out_col, v.entry(r, src_col));
         }
         if sigma > 0.0 {
-            let inv = 1.0 / sigma;
+            let subnormal = sigma < f64::MIN_POSITIVE;
+            let inv = if subnormal { 0.0 } else { 1.0 / sigma };
             for r in 0..m {
-                u.set_in_bounds(r, out_col, w.entry(r, src_col) * inv);
+                let val = w.entry(r, src_col);
+                u.set_in_bounds(r, out_col, if subnormal { val / sigma } else { val * inv });
             }
         }
     }

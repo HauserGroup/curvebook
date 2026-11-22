@@ -192,7 +192,7 @@ impl PValueFormat {
             Self::Apa => {
                 if p < 0.001 {
                     String::from("< .001")
-                } else if p > 0.999 {
+                } else if p > 0.999 && p < 1.0 {
                     String::from("> .999")
                 } else {
                     let s = format!("{p:.3}");

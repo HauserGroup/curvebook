@@ -109,21 +109,28 @@ pub fn deviance_bd0(x: f64, np: f64) -> f64 {
     if x == 0.0 {
         return np;
     }
-    if (x - np).abs() < 0.1 * (x + np) {
-        let v = (x - np) / (x + np);
+    let m = x.max(np);
+    if !m.is_finite() {
+        return (x * (x / np).ln() + np - x).max(0.0);
+    }
+    let diff_s = (x - np) / m;
+    let x_s = x / m;
+    let sum_s = x_s + np / m;
+    if diff_s.abs() < 0.1 * sum_s {
+        let v = diff_s / sum_s;
         let v2 = v * v;
-        let mut s = (x - np) * v;
-        let mut ej = 2.0 * x * v * v2;
+        let mut s = diff_s * v;
+        let mut ej = 2.0 * x_s * v * v2;
         for j in 1..40_u32 {
             let term = ej / f64::from(2 * j + 1);
             let next = s + term;
             if (next - s).abs() <= 0.5 * f64::EPSILON * s.abs() {
-                return next.max(0.0);
+                return (m * next).max(0.0);
             }
             s = next;
             ej *= v2;
         }
-        return s.max(0.0);
+        return (m * s).max(0.0);
     }
     (x * (x / np).ln() + np - x).max(0.0)
 }
@@ -225,6 +232,9 @@ pub fn gamma(x: f64) -> Result<f64, MathError> {
             return Err(MathError::DomainError { name: "x", value: x });
         }
         let lg = ln_gamma(1.0 - x)?;
+        if lg > 700.0 {
+            return Ok((std::f64::consts::PI.ln() - lg - sin_pix.abs().ln()).exp().copysign(sin_pix));
+        }
         return Ok(std::f64::consts::PI / (sin_pix * lg.exp()));
     }
     if x <= 171.0 && x.fract() == 0.0 {

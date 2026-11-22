@@ -15,6 +15,7 @@
 //!   `doi:10.1016/0167-6687(93)90997-4`.
 
 use crate::error::MathError;
+use crate::special::gamma::{deviance_bd0, stirling_err};
 
 /// Deterministic 256-bit `xoshiro256**` pseudo-random number generator.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -171,9 +172,13 @@ impl DeterministicRng {
             if us < 0.013 && v > us {
                 continue;
             }
+            if k_f > (u64::MAX as f64) {
+                continue;
+            }
             let k = k_f as u64;
             let ln_accept = (v * inv_alpha / (a / (us * us) + b)).ln();
-            let ln_pmf = (k_f * lambda.ln()) - lambda - ln_factorial_approx(k);
+            let ln_pmf =
+                if k == 0 { -lambda } else { -deviance_bd0(k_f, lambda) - 0.5 * std::f64::consts::TAU.ln() - 0.5 * k_f.ln() - stirling_err(k_f) };
             if ln_accept <= ln_pmf {
                 return Ok(k);
             }
@@ -188,23 +193,6 @@ const fn splitmix64_step(state: &mut u64) -> u64 {
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^ (z >> 31)
-}
-
-fn ln_factorial_approx(k: u64) -> f64 {
-    if k <= 1 {
-        return 0.0;
-    }
-    if k <= 20 {
-        let mut prod = 1.0_f64;
-        for i in 2..=k {
-            prod *= i as f64;
-        }
-        return prod.ln();
-    }
-    let kf = k as f64;
-    let inv = 1.0 / kf;
-    let inv2 = inv * inv;
-    (kf + 0.5) * kf.ln() - kf + 0.5 * std::f64::consts::TAU.ln() + inv * (1.0 / 12.0 - inv2 * (1.0 / 360.0 - inv2 / 1260.0))
 }
 
 #[cfg(test)]

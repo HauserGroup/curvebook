@@ -136,7 +136,7 @@ impl AxisScale {
                 if !(u > 0.0 && u < 100.0) {
                     return None;
                 }
-                (u / (100.0 - u)).ln()
+                if (25.0..=75.0).contains(&u) { ((2.0 * u - 100.0) / (100.0 - u)).ln_1p() } else { u.ln() - (100.0 - u).ln() }
             }
             Self::Logit(LogitDomain::Proportion) => {
                 if !(u > 0.0 && u < 1.0) {
@@ -195,7 +195,14 @@ impl AxisScale {
                 1.0 / t
             }
         };
-        out.is_finite().then_some(out)
+        let in_domain = match self {
+            Self::Linear => out.is_finite(),
+            Self::Log10 | Self::Log2 | Self::Ln => out.is_finite() && out > 0.0,
+            Self::Logit(LogitDomain::Percent) | Self::Probit => out.is_finite() && out > 0.0 && out < 100.0,
+            Self::Logit(LogitDomain::Proportion) => out.is_finite() && out > 0.0 && out < 1.0,
+            Self::Reciprocal => out.is_finite() && out != 0.0,
+        };
+        in_domain.then_some(out)
     }
 
     /// Map domain coordinate `u` into normalized segment coordinate `[0, 1]` over `[min, max]`.

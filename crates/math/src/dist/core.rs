@@ -29,9 +29,12 @@
 
 use crate::error::MathError;
 use crate::special::erf::exp_neg_sq;
+use crate::special::gamma::deviance_bd0;
+use crate::special::gamma::stirling_err;
+use crate::special::inc_beta::ln_beta_kernel;
 use crate::special::{
-    erfc, erfcx, ln_beta, ln_gamma, ln_reg_beta_xy, ln_reg_gamma_q, norm_isf_raw, norm_ppf_raw, reg_beta_inv_pair, reg_beta_xy, reg_gamma_p,
-    reg_gamma_p_inv, reg_gamma_q, reg_gamma_q_inv,
+    erfc, erfcx, ln_beta, ln_gamma, ln_reg_beta_xy, ln_reg_gamma_p, ln_reg_gamma_q, norm_isf_raw, norm_ppf_raw, reg_beta_inv_pair, reg_beta_xy,
+    reg_gamma_p, reg_gamma_p_inv, reg_gamma_q, reg_gamma_q_inv,
 };
 
 const HALF_LN_2PI: f64 = 0.918_938_533_204_672_7;
@@ -49,6 +52,57 @@ fn check_prob(name: &'static str, p: f64) -> Result<(), MathError> {
         return Err(MathError::DomainError { name, value: p });
     }
     Ok(())
+}
+
+/// Split finite `v > 0.0` into `(m, e)` such that `v == m * 2^e` and `m in [0.5, 1.0)`.
+fn split_pow2(mut v: f64) -> (f64, i32) {
+    let mut exp_adj = 0_i32;
+    if v < f64::MIN_POSITIVE {
+        // Exact multiplication by 2^64 normalizes all positive subnormals without rounding.
+        v *= f64::from_bits(0x43f0_0000_0000_0000);
+        exp_adj = -64;
+    }
+    let bits = v.to_bits();
+    let exp_bits = ((bits >> 52) & 0x7ff) as i32;
+    let mant = f64::from_bits((bits & 0x000f_ffff_ffff_ffff) | 0x3fe0_0000_0000_0000);
+    (mant, exp_bits - 1022 + exp_adj)
+}
+
+/// Reconstruct `m * 2^exp` for positive normal `m`, clamping cleanly to `0.0` / `+inf`.
+fn ldexp_pos(mut m: f64, mut exp: i32) -> f64 {
+    while exp > 1023 {
+        m *= f64::from_bits(0x7fe0_0000_0000_0000);
+        exp -= 1023;
+        if !m.is_finite() {
+            return f64::INFINITY;
+        }
+    }
+    while exp < -1022 {
+        m *= f64::from_bits(0x0010_0000_0000_0000);
+        exp += 1022;
+        if m == 0.0 {
+            return 0.0;
+        }
+    }
+    let scale = f64::from_bits(((1023 + exp) as u64) << 52);
+    m * scale
+}
+
+/// Compute `(a * b) / c` for finite `a, b, c > 0.0` without intermediate overflow or underflow.
+pub(crate) fn mul_div3(a: f64, b: f64, c: f64) -> f64 {
+    let (ma, ea) = split_pow2(a);
+    let (mb, eb) = split_pow2(b);
+    let (mc, ec) = split_pow2(c);
+    ldexp_pos((ma * mb) / mc, ea + eb - ec)
+}
+
+/// Compute `(a * b) / (c * d)` for finite `a, b, c, d > 0.0` without intermediate overflow/underflow.
+fn mul_div4(a: f64, b: f64, c: f64, d: f64) -> f64 {
+    let (ma, ea) = split_pow2(a);
+    let (mb, eb) = split_pow2(b);
+    let (mc, ec) = split_pow2(c);
+    let (md, ed) = split_pow2(d);
+    ldexp_pos((ma * mb) / (mc * md), ea + eb - ec - ed)
 }
 
 // ============================================================================
@@ -149,6 +203,9 @@ pub fn norm_isf(q: f64) -> Result<f64, MathError> {
 /// Returns [`MathError::DomainError`] if `alpha` is outside `[0, 1]` or `NaN`.
 pub fn norm_two_sided_isf(alpha: f64) -> Result<f64, MathError> {
     check_prob("alpha", alpha)?;
+    if alpha > 0.0 && alpha < 1e-300 {
+        return Ok(crate::special::erf::invert_normal_upper_tail_ln(alpha.ln() - std::f64::consts::LN_2));
+    }
     norm_isf_raw(0.5 * alpha)
 }
 
@@ -208,8 +265,12 @@ pub fn student_t_two_sided_p(t: f64, df: f64) -> Result<f64, MathError> {
         reg_beta_xy(1.0, r * r, 0.5 * df, 0.5)
     } else {
         let inv_r2 = 1.0 / (r * r);
-        if inv_r2 == 0.0 {
-            return Ok(0.0);
+        if inv_r2 < f64::MIN_POSITIVE {
+            // Asymptotic power tail when r^2 overflows or inv_r2 enters subnormals:
+            // I_x(a, 0.5) ~ x^a / (a B(a, 0.5)), x = df / t^2.
+            let a = 0.5 * df;
+            let log_r = t.abs().ln() - 0.5 * df.ln();
+            return Ok((-df * log_r - a.ln() - ln_beta(a, 0.5)?).exp());
         }
         reg_beta_xy(inv_r2, 1.0, 0.5 * df, 0.5)
     }
@@ -238,12 +299,14 @@ pub fn student_t_ln_two_sided_p(t: f64, df: f64) -> Result<f64, MathError> {
         ln_reg_beta_xy(1.0, r * r, 0.5 * df, 0.5)
     } else {
         let inv_r2 = 1.0 / (r * r);
-        if inv_r2 > 0.0 {
+        if inv_r2 >= f64::MIN_POSITIVE {
             ln_reg_beta_xy(inv_r2, 1.0, 0.5 * df, 0.5)
         } else {
-            // Asymptotic power tail when r^2 overflows f64: I_x(a, 0.5) ~ x^a / (a B(a, 0.5)), x = 1 / r^2.
+            // Asymptotic power tail when r^2 overflows or inv_r2 enters subnormals:
+            // I_x(a, 0.5) ~ x^a / (a B(a, 0.5)), x = df / t^2.
             let a = 0.5 * df;
-            Ok(-df * r.ln() - a.ln() - ln_beta(a, 0.5)?)
+            let log_r = t.abs().ln() - 0.5 * df.ln();
+            Ok(-df * log_r - a.ln() - ln_beta(a, 0.5)?)
         }
     }
 }
@@ -294,8 +357,33 @@ pub fn student_t_two_sided_isf(alpha: f64, df: f64) -> Result<f64, MathError> {
     if df.is_infinite() || df >= HUGE_DF_NORMAL_CUTOFF {
         return norm_two_sided_isf(alpha);
     }
-    let (x, y) = reg_beta_inv_pair(0.5 * df, 0.5, alpha, 1.0 - alpha)?;
-    Ok((df * (y / x)).sqrt())
+    // Exact Cauchy identity for df == 1: P(|T| >= t) = (2/pi) * atan(1 / t) = alpha.
+    if (df - 1.0).abs() == 0.0 {
+        return Ok(if alpha < 1e-8 {
+            (2.0 / std::f64::consts::PI) / alpha
+        } else if alpha <= 0.5 {
+            1.0 / (0.5 * std::f64::consts::PI * alpha).tan()
+        } else {
+            (0.5 * std::f64::consts::PI * (1.0 - alpha)).tan()
+        });
+    }
+    let a = 0.5 * df;
+    if alpha < 1e-80 && df < 2.0 {
+        let ln_x = (alpha.ln() + a.ln() + ln_beta(a, 0.5)?) / a;
+        if ln_x < -690.0 {
+            let ln_t = 0.5 * (df.ln() - ln_x);
+            return Ok(if ln_t > 709.78 { f64::INFINITY } else { ln_t.exp() });
+        }
+    }
+    match reg_beta_inv_pair(a, 0.5, alpha, 1.0 - alpha) {
+        Ok((x, y)) => Ok(df.sqrt() * (y.sqrt() / x.sqrt())),
+        Err(MathError::NotConverged { .. }) if alpha < 1e-80 => {
+            let ln_x = (alpha.ln() + a.ln() + ln_beta(a, 0.5)?) / a;
+            let ln_t = 0.5 * (df.ln() - ln_x);
+            Ok(if ln_t > 709.78 { f64::INFINITY } else { ln_t.exp() })
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Student `t` upper-tail quantile `S^{-1}(q)` solving `P(T > t) = q` directly from `q in [0, 1]`.
@@ -330,7 +418,7 @@ pub fn student_t_ppf(p: f64, df: f64) -> Result<f64, MathError> {
 // Snedecor's F Distribution (df1 > 0, df2 > 0)
 // ============================================================================
 
-/// Natural logarithm of the Snedecor `F(df1, df2)` density at `f >= 0`.
+/// Natural logarithm of the Snedecor `F(df1, df2)` probability density at `f >= 0`.
 ///
 /// # Errors
 /// Returns an error if `df1 <= 0`, `df2 <= 0`, or `f < 0` / `NaN`.
@@ -339,6 +427,9 @@ pub fn f_ln_pdf(f: f64, df1: f64, df2: f64) -> Result<f64, MathError> {
     check_pos_param("df2", df2)?;
     if f.is_nan() || f < 0.0 {
         return Err(MathError::DomainError { name: "f", value: f });
+    }
+    if df1.is_infinite() && df2.is_infinite() {
+        return Ok(if f == 1.0 { f64::INFINITY } else { f64::NEG_INFINITY });
     }
     if f == 0.0 {
         return if df1 < 2.0 {
@@ -352,11 +443,86 @@ pub fn f_ln_pdf(f: f64, df1: f64, df2: f64) -> Result<f64, MathError> {
     if f.is_infinite() {
         return Ok(f64::NEG_INFINITY);
     }
+    if df2.is_infinite() {
+        let a = 0.5 * df1;
+        let ax = mul_div3(a, f, 1.0);
+        if a >= 12.0 {
+            return Ok(if ax.is_finite() && ax > 0.0 {
+                -deviance_bd0(a, ax) - f.ln() + 0.5 * a.ln() - HALF_LN_2PI - stirling_err(a)
+            } else {
+                f64::NEG_INFINITY
+            });
+        }
+        return Ok(a * a.ln() + (a - 1.0) * f.ln() - ax - ln_gamma(a)?);
+    }
+    if df1.is_infinite() {
+        let b = 0.5 * df2;
+        let bx = mul_div3(b, 1.0, f);
+        if b >= 12.0 {
+            return Ok(if bx.is_finite() && bx > 0.0 {
+                -deviance_bd0(b, bx) - f.ln() + 0.5 * b.ln() - HALF_LN_2PI - stirling_err(b)
+            } else {
+                f64::NEG_INFINITY
+            });
+        }
+        return Ok(b * b.ln() - (b + 1.0) * f.ln() - bx - ln_gamma(b)?);
+    }
+    f_ln_pdf_finite(f, df1, df2)
+}
+
+fn f_ln_pdf_finite(f: f64, df1: f64, df2: f64) -> Result<f64, MathError> {
     let a = 0.5 * df1;
     let b = 0.5 * df2;
-    let ratio = (df1 / df2) * f;
-    let ln_one_plus = if ratio <= 1.0 { ratio.ln_1p() } else { ratio.ln() + (1.0 / ratio).ln_1p() };
-    Ok(a * (df1 / df2).ln() + (a - 1.0) * f.ln() - (a + b) * ln_one_plus - ln_beta(a, b)?)
+    let ratio = mul_div3(df1, f, df2);
+    if (1e-100..=1e100).contains(&ratio) {
+        let (x, y) = if ratio <= 1.0 {
+            (ratio / (1.0 + ratio), 1.0 / (1.0 + ratio))
+        } else {
+            let inv = 1.0 / ratio;
+            (1.0 / (1.0 + inv), inv / (1.0 + inv))
+        };
+        return Ok(ln_beta_kernel(x, y, a, b)? - f.ln());
+    }
+    let ln_ratio = df1.ln() - df2.ln() + f.ln();
+    if a >= 1e250 && b >= 1e250 {
+        let half_a = 0.5 * a;
+        let half_b = 0.5 * b;
+        let half_s = half_a + half_b;
+        let ln_s = std::f64::consts::LN_2 + half_s.ln();
+        let scale = 0.5 * (a.ln() + b.ln() - ln_s - std::f64::consts::TAU.ln());
+        let corr = -stirling_err(a) - stirling_err(b);
+        let (half_sx, half_sy) = if ratio <= 1.0 {
+            let sx_ln = half_s.ln() + ln_ratio - if ratio > 0.0 { ratio.ln_1p() } else { 0.0 };
+            let hsx = if sx_ln < -700.0 { 0.0 } else { sx_ln.exp() };
+            (hsx, half_s - hsx)
+        } else {
+            let sy_ln = half_s.ln() - ln_ratio - if ratio.is_finite() { (1.0 / ratio).ln_1p() } else { 0.0 };
+            let hsy = if sy_ln < -700.0 { 0.0 } else { sy_ln.exp() };
+            (half_s - hsy, hsy)
+        };
+        let dev_a = if half_sx == 0.0 { f64::NEG_INFINITY } else { -2.0 * deviance_bd0(half_a, half_sx) };
+        let dev_b = if half_sy == 0.0 { f64::NEG_INFINITY } else { -2.0 * deviance_bd0(half_b, half_sy) };
+        return Ok(dev_a + dev_b + scale + corr - f.ln());
+    }
+    let s = a + b;
+    if ratio <= 1.0 {
+        let ab_ln_1p = if ratio >= f64::MIN_POSITIVE {
+            s * ratio.ln_1p()
+        } else {
+            let prod_ln = s.ln() + ln_ratio;
+            if prod_ln < -745.0 { 0.0 } else { prod_ln.exp() }
+        };
+        Ok(a * ln_ratio - f.ln() - ab_ln_1p - ln_beta(a, b)?)
+    } else {
+        let inv = mul_div4(df2, 1.0, df1, f);
+        let ab_ln_1p_inv = if inv >= f64::MIN_POSITIVE {
+            s * inv.ln_1p()
+        } else {
+            let prod_ln = s.ln() - ln_ratio;
+            if prod_ln < -745.0 { 0.0 } else { prod_ln.exp() }
+        };
+        Ok(-b * ln_ratio - f.ln() - ab_ln_1p_inv - ln_beta(a, b)?)
+    }
 }
 
 /// Snedecor `F(df1, df2)` probability density at `f >= 0`.
@@ -380,14 +546,49 @@ pub fn f_cdf(f: f64, df1: f64, df2: f64) -> Result<f64, MathError> {
     if f == 0.0 {
         return Ok(0.0);
     }
+    if df1.is_infinite() && df2.is_infinite() {
+        return Ok(if f < 1.0 { 0.0 } else { 1.0 });
+    }
     if f.is_infinite() {
         return Ok(1.0);
     }
     if df2.is_infinite() {
-        return chi2_cdf(df1 * f, df1);
+        let a = 0.5 * df1;
+        let x = mul_div3(a, f, 1.0);
+        if x == 0.0 {
+            let ln_p = (a * (a.ln() + f.ln()) - ln_gamma(a + 1.0)?).min(0.0);
+            return Ok(ln_p.exp().clamp(0.0, 1.0));
+        }
+        return reg_gamma_p(a, x);
     }
-    let ratio = (df1 / df2) * f;
-    if ratio <= 1.0 { reg_beta_xy(ratio, 1.0, 0.5 * df1, 0.5 * df2) } else { reg_beta_xy(1.0, 1.0 / ratio, 0.5 * df1, 0.5 * df2) }
+    if df1.is_infinite() {
+        let b = 0.5 * df2;
+        let x = mul_div3(b, 1.0, f);
+        if x == 0.0 {
+            if b < 1e-3 {
+                let ln_p = (b * (b.ln() - f.ln()) - ln_gamma(b + 1.0)?).min(0.0);
+                return Ok((-ln_p.exp_m1()).clamp(0.0, 1.0));
+            }
+            return Ok(1.0);
+        }
+        return reg_gamma_q(b, x);
+    }
+    let ratio = mul_div3(df1, f, df2);
+    if ratio == 0.0 {
+        let a = 0.5 * df1;
+        let ln_r = df1.ln() - df2.ln() + f.ln();
+        let ln_c = (a * ln_r - a.ln() - ln_beta(a, 0.5 * df2)?).min(0.0);
+        return Ok(ln_c.exp().clamp(0.0, 1.0));
+    }
+    if ratio <= 1.0 {
+        reg_beta_xy(ratio, 1.0, 0.5 * df1, 0.5 * df2)
+    } else {
+        let inv = mul_div4(df2, 1.0, df1, f);
+        if inv == 0.0 {
+            return Ok(1.0);
+        }
+        reg_beta_xy(1.0, inv, 0.5 * df1, 0.5 * df2)
+    }
 }
 
 /// Snedecor `F(df1, df2)` upper-tail survival probability `P(F > f) = I_{df2 / (df2 + df1 f)}(df2 / 2, df1 / 2)`
@@ -404,14 +605,46 @@ pub fn f_sf(f: f64, df1: f64, df2: f64) -> Result<f64, MathError> {
     if f == 0.0 {
         return Ok(1.0);
     }
+    if df1.is_infinite() && df2.is_infinite() {
+        return Ok(if f < 1.0 { 1.0 } else { 0.0 });
+    }
     if f.is_infinite() {
         return Ok(0.0);
     }
     if df2.is_infinite() {
-        return chi2_sf(df1 * f, df1);
+        let a = 0.5 * df1;
+        let x = mul_div3(a, f, 1.0);
+        if x == 0.0 {
+            if a < 1e-3 {
+                let ln_p = (a * (a.ln() + f.ln()) - ln_gamma(a + 1.0)?).min(0.0);
+                return Ok((-ln_p.exp_m1()).clamp(0.0, 1.0));
+            }
+            return Ok(1.0);
+        }
+        return reg_gamma_q(a, x);
     }
-    let ratio = (df1 / df2) * f;
-    if ratio <= 1.0 { reg_beta_xy(1.0, ratio, 0.5 * df2, 0.5 * df1) } else { reg_beta_xy(1.0 / ratio, 1.0, 0.5 * df2, 0.5 * df1) }
+    if df1.is_infinite() {
+        let b = 0.5 * df2;
+        let x = mul_div3(b, 1.0, f);
+        if x == 0.0 {
+            let ln_p = (b * (b.ln() - f.ln()) - ln_gamma(b + 1.0)?).min(0.0);
+            return Ok(ln_p.exp().clamp(0.0, 1.0));
+        }
+        return reg_gamma_p(b, x);
+    }
+    let ratio = mul_div3(df1, f, df2);
+    if ratio <= 1.0 {
+        reg_beta_xy(1.0, ratio, 0.5 * df2, 0.5 * df1)
+    } else {
+        let inv = mul_div4(df2, 1.0, df1, f);
+        if inv == 0.0 {
+            let b = 0.5 * df2;
+            let ln_inv = df2.ln() - df1.ln() - f.ln();
+            let ln_s = (b * ln_inv - b.ln() - ln_beta(b, 0.5 * df1)?).min(0.0);
+            return Ok(ln_s.exp().clamp(0.0, 1.0));
+        }
+        reg_beta_xy(inv, 1.0, 0.5 * df2, 0.5 * df1)
+    }
 }
 
 /// Natural logarithm of the Snedecor `F` upper-tail probability `ln P(F > f)`.
@@ -427,22 +660,49 @@ pub fn f_ln_sf(f: f64, df1: f64, df2: f64) -> Result<f64, MathError> {
     if f == 0.0 {
         return Ok(0.0);
     }
+    if df1.is_infinite() && df2.is_infinite() {
+        return Ok(if f < 1.0 { 0.0 } else { f64::NEG_INFINITY });
+    }
     if f.is_infinite() {
         return Ok(f64::NEG_INFINITY);
     }
     if df2.is_infinite() {
-        return chi2_ln_sf(df1 * f, df1);
+        let a = 0.5 * df1;
+        let x = mul_div3(a, f, 1.0);
+        if x == 0.0 {
+            if a < 1e-3 {
+                let ln_p = (a * (a.ln() + f.ln()) - ln_gamma(a + 1.0)?).min(0.0);
+                return Ok(if ln_p >= 0.0 {
+                    f64::NEG_INFINITY
+                } else if ln_p > -std::f64::consts::LN_2 {
+                    (-ln_p.exp_m1()).ln()
+                } else {
+                    (-ln_p.exp()).ln_1p()
+                });
+            }
+            return Ok(0.0);
+        }
+        return ln_reg_gamma_q(a, x);
     }
-    let ratio = (df1 / df2) * f;
+    if df1.is_infinite() {
+        let b = 0.5 * df2;
+        let x = mul_div3(b, 1.0, f);
+        if x == 0.0 {
+            return Ok((b * (b.ln() - f.ln()) - ln_gamma(b + 1.0)?).min(0.0));
+        }
+        return ln_reg_gamma_p(b, x);
+    }
+    let ratio = mul_div3(df1, f, df2);
     if ratio <= 1.0 {
         ln_reg_beta_xy(1.0, ratio, 0.5 * df2, 0.5 * df1)
     } else {
-        let inv = 1.0 / ratio;
-        if inv > 0.0 {
+        let inv = mul_div4(df2, 1.0, df1, f);
+        if inv >= f64::MIN_POSITIVE {
             ln_reg_beta_xy(inv, 1.0, 0.5 * df2, 0.5 * df1)
         } else {
             let b = 0.5 * df2;
-            Ok(-b * ratio.ln() - b.ln() - ln_beta(b, 0.5 * df1)?)
+            let ln_inv = df2.ln() - df1.ln() - f.ln();
+            Ok((b * ln_inv - b.ln() - ln_beta(b, 0.5 * df1)?).min(0.0))
         }
     }
 }
@@ -461,11 +721,35 @@ pub fn f_isf(q: f64, df1: f64, df2: f64) -> Result<f64, MathError> {
     if q == 1.0 {
         return Ok(0.0);
     }
-    if df2.is_infinite() {
-        return Ok(chi2_isf(q, df1)? / df1);
+    if df1.is_infinite() && df2.is_infinite() {
+        return Ok(1.0);
     }
-    let (x, y) = reg_beta_inv_pair(0.5 * df2, 0.5 * df1, q, 1.0 - q)?;
-    Ok((df2 / df1) * (y / x))
+    if df2.is_infinite() {
+        let a = 0.5 * df1;
+        return Ok(reg_gamma_q_inv(a, q)? / a);
+    }
+    if df1.is_infinite() {
+        let b = 0.5 * df2;
+        return Ok(b / reg_gamma_p_inv(b, q)?);
+    }
+    let b = 0.5 * df2;
+    let a = 0.5 * df1;
+    if q < 1e-80 && df2 < 2.0 {
+        let ln_x = (q.ln() + b.ln() + ln_beta(b, a)?) / b;
+        if ln_x < -690.0 && a.ln() + ln_x < -40.0 {
+            let ln_f = df2.ln() - df1.ln() - ln_x;
+            return Ok(if ln_f > 709.78 { f64::INFINITY } else { ln_f.exp() });
+        }
+    }
+    match reg_beta_inv_pair(b, a, q, 1.0 - q) {
+        Ok((x, y)) => Ok(mul_div4(df2, y, df1, x)),
+        Err(MathError::NotConverged { .. }) if q < 1e-80 => {
+            let ln_x = (q.ln() + b.ln() + ln_beta(b, a)?) / b;
+            let ln_f = df2.ln() - df1.ln() - ln_x;
+            Ok(if ln_f > 709.78 { f64::INFINITY } else { ln_f.exp() })
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Snedecor `F(df1, df2)` lower-tail quantile solving `P(F <= f) = p`.
@@ -482,11 +766,35 @@ pub fn f_ppf(p: f64, df1: f64, df2: f64) -> Result<f64, MathError> {
     if p == 1.0 {
         return Ok(f64::INFINITY);
     }
-    if df2.is_infinite() {
-        return Ok(chi2_ppf(p, df1)? / df1);
+    if df1.is_infinite() && df2.is_infinite() {
+        return Ok(1.0);
     }
-    let (x, y) = reg_beta_inv_pair(0.5 * df1, 0.5 * df2, p, 1.0 - p)?;
-    Ok((df2 / df1) * (x / y))
+    if df2.is_infinite() {
+        let a = 0.5 * df1;
+        return Ok(reg_gamma_p_inv(a, p)? / a);
+    }
+    if df1.is_infinite() {
+        let b = 0.5 * df2;
+        return Ok(b / reg_gamma_q_inv(b, p)?);
+    }
+    let a = 0.5 * df1;
+    let b = 0.5 * df2;
+    if p < 1e-80 && df1 < 2.0 {
+        let ln_x = (p.ln() + a.ln() + ln_beta(a, b)?) / a;
+        if ln_x < -690.0 && b.ln() + ln_x < -40.0 {
+            let ln_f = df2.ln() - df1.ln() + ln_x;
+            return Ok(if ln_f < -745.0 { 0.0 } else { ln_f.exp() });
+        }
+    }
+    match reg_beta_inv_pair(a, b, p, 1.0 - p) {
+        Ok((x, y)) => Ok(mul_div4(df2, x, df1, y)),
+        Err(MathError::NotConverged { .. }) if p < 1e-80 => {
+            let ln_x = (p.ln() + a.ln() + ln_beta(a, b)?) / a;
+            let ln_f = df2.ln() - df1.ln() + ln_x;
+            Ok(if ln_f < -745.0 { 0.0 } else { ln_f.exp() })
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ============================================================================

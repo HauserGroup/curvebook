@@ -18,7 +18,7 @@
 //!   University Press (Cholesky factorization; symmetric Jacobi methods).
 
 use crate::error::MathError;
-use crate::linalg::matrix::DenseMatrix;
+use crate::linalg::matrix::{DenseMatrix, pow2_exp_for_max_abs, scale_pow2};
 use crate::sum::NeumaierSum;
 
 const MAX_SYM_JACOBI_SWEEPS: usize = 64;
@@ -189,27 +189,20 @@ pub fn sym_eigen(a: &DenseMatrix) -> Result<SymEigen, MathError> {
         return Err(MathError::DomainError { name: "matrix", value: f64::NAN });
     }
     let n = a.nrows();
-    let frob = a.frobenius_norm();
-    let scale = if frob > 0.0 {
-        frob
-    } else {
-        let mut max_abs = 0.0_f64;
-        for i in 0..n {
-            for j in 0..n {
-                max_abs = max_abs.max(a.entry(i, j).abs());
-            }
-        }
-        max_abs
-    };
+    let max_abs = a.max_abs();
+    let scale_exp = pow2_exp_for_max_abs(max_abs);
+    let mut d = DenseMatrix::from_fn(n, n, |i, j| 0.5 * (scale_pow2(a.entry(i, j), -scale_exp) + scale_pow2(a.entry(j, i), -scale_exp)))?;
+    let frob = d.frobenius_norm();
+    let scale = if frob > 0.0 { frob } else { scale_pow2(max_abs, -scale_exp) };
     for i in 0..n {
         for j in (i + 1)..n {
-            if (a.entry(i, j) - a.entry(j, i)).abs() > 1e-11 * scale {
+            let diff = (scale_pow2(a.entry(i, j), -scale_exp) - scale_pow2(a.entry(j, i), -scale_exp)).abs();
+            if !diff.is_finite() || diff > 1e-11 * scale {
                 return Err(MathError::DomainError { name: "symmetry", value: (a.entry(i, j) - a.entry(j, i)).abs() });
             }
         }
     }
 
-    let mut d = DenseMatrix::from_fn(n, n, |i, j| 0.5 * (a.entry(i, j) + a.entry(j, i)))?;
     let mut q_mat = DenseMatrix::identity(n)?;
 
     let mut converged = n <= 1;
@@ -239,7 +232,11 @@ pub fn sym_eigen(a: &DenseMatrix) -> Result<SymEigen, MathError> {
     pairs.sort_by(|x, y| y.1.total_cmp(&x.1));
     let mut eigenvalues = Vec::with_capacity(n);
     let mut eigenvectors = DenseMatrix::zeros(n, n)?;
-    for (out_c, &(src_c, eval)) in pairs.iter().enumerate() {
+    for (out_c, &(src_c, eval_scaled)) in pairs.iter().enumerate() {
+        let eval = scale_pow2(eval_scaled, scale_exp);
+        if !eval.is_finite() {
+            return Err(MathError::DomainError { name: "eigenvalue", value: eval });
+        }
         eigenvalues.push(eval);
         for r in 0..n {
             eigenvectors.set_in_bounds(r, out_c, q_mat.entry(r, src_c));

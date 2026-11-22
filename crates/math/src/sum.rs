@@ -149,7 +149,7 @@ pub struct SummaryMoments {
     /// Exact power-of-two rescaled `(scale, css_scaled)` when `|x_i - mean|` lies in the extreme
     /// exponent tails, preserving full FMA compensation and finite `sample_sd` / `sem` when
     /// `css = scale^2 * css_scaled` overflows `f64::MAX`.
-    #[serde(skip)]
+    #[serde(default)]
     scaled_css: Option<(f64, f64)>,
 }
 
@@ -355,8 +355,10 @@ pub fn pearson_r(x: &[f64], y: &[f64]) -> Result<f64, MathError> {
     }
     let (sx, sy, cross_s) = scaled_cross_sum(x, mx.mean, y, my.mean);
     let scale_ratio = (sx / smx) * (sy / smy);
-    let denom = (css_x * css_y).sqrt();
-    Ok(((cross_s * scale_ratio) / denom).clamp(-1.0, 1.0))
+    let sd_x = css_x.sqrt();
+    let sd_y = css_y.sqrt();
+    let r = if sd_x >= sd_y { ((cross_s / sd_x) / sd_y) * scale_ratio } else { ((cross_s / sd_y) / sd_x) * scale_ratio };
+    Ok(r.clamp(-1.0, 1.0))
 }
 
 /// Sample lag-1 autocorrelation coefficient matching the NIST StRD univariate definition:

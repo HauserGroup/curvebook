@@ -208,12 +208,43 @@ pub fn erfc_inv(q: f64) -> Result<f64, MathError> {
     if q == 1.0 {
         return Ok(0.0);
     }
+    if q < 1e-300 {
+        return Ok(invert_normal_upper_tail_ln(q.ln() - std::f64::consts::LN_2) * std::f64::consts::FRAC_1_SQRT_2);
+    }
     let (half_tail, sign) = if q < 1.0 { (0.5 * q, 1.0) } else { (0.5 * (2.0 - q), -1.0) };
     Ok(sign * invert_normal_upper_tail(half_tail) * std::f64::consts::FRAC_1_SQRT_2)
 }
 
+/// Solve `ln(0.5 * erfc(z / sqrt(2))) = target_ln` for deep tails (`target_ln <= -27.6`),
+/// avoiding subnormal `0.5 * q` underflow down to `f64::MIN_SUBNORMAL`.
+pub(crate) fn invert_normal_upper_tail_ln(target_ln: f64) -> f64 {
+    let t = -2.0 * target_ln;
+    let mut z = (t - (std::f64::consts::TAU * t).ln()).max(0.1).sqrt();
+    let ln_half = -std::f64::consts::LN_2;
+    for _ in 0..5 {
+        let w = z * std::f64::consts::FRAC_1_SQRT_2;
+        let ex = erfcx(w);
+        let ln_sf = ln_half - 0.5 * z * z + ex.ln();
+        let g = ln_sf - target_ln;
+        let g1 = -SQRT_2_OVER_PI / ex;
+        let newton = g / g1;
+        // Since g'(z) = g1 = -phi(z)/S(z) and g''(z) = -g1 * (z + g1), g''(z)/g'(z) = -(z + g1),
+        // so the Halley denominator 1 - 0.5 * newton * (g''/g') equals 1 + 0.5 * newton * (z + g1).
+        let denom = (1.0 + 0.5 * newton * (z + g1)).clamp(0.25, 4.0);
+        let step = newton / denom;
+        z = (z - step).max(0.0);
+        if step.abs() <= 0.5 * f64::EPSILON * z {
+            break;
+        }
+    }
+    z
+}
+
 /// Solve `0.5 * erfc(z / sqrt(2)) = r` for `r in (0, 0.5)` to full 53-bit `f64` precision.
 fn invert_normal_upper_tail(r: f64) -> f64 {
+    if r < 1e-12 {
+        return invert_normal_upper_tail_ln(r.ln());
+    }
     let mut z = if r < 0.05 {
         let t = -2.0 * r.ln();
         (t - (std::f64::consts::TAU * t).ln()).max(0.1).sqrt()
@@ -223,37 +254,15 @@ fn invert_normal_upper_tail(r: f64) -> f64 {
         (std::f64::consts::TAU).sqrt() * d * (1.0 + d2 * (std::f64::consts::PI / 3.0 + d2 * 1.4))
     };
 
-    if r >= 1e-12 {
-        // Direct probability Halley steps: f(z) = 0.5 * erfc(z / sqrt(2)) - r.
-        for _ in 0..4 {
-            let sf = 0.5 * erfc(z * std::f64::consts::FRAC_1_SQRT_2);
-            let pdf = (-HALF_LN_2PI).exp() * exp_neg_sq(z * std::f64::consts::FRAC_1_SQRT_2);
-            let delta = (sf - r) / pdf;
-            let step = delta / (1.0 - 0.5 * z * delta).clamp(0.25, 4.0);
-            z = (z + step).max(0.0);
-            if step.abs() <= 0.5 * f64::EPSILON * z {
-                break;
-            }
-        }
-    } else {
-        // Log-probability Halley steps via erfcx (never underflows down to r = 2.2e-308).
-        let target_ln = r.ln();
-        let ln_half = -std::f64::consts::LN_2;
-        for _ in 0..5 {
-            let w = z * std::f64::consts::FRAC_1_SQRT_2;
-            let ex = erfcx(w);
-            let ln_sf = ln_half - 0.5 * z * z + ex.ln();
-            let g = ln_sf - target_ln;
-            let g1 = -SQRT_2_OVER_PI / ex;
-            let newton = g / g1;
-            // Since g'(z) = g1 = -phi(z)/S(z) and g''(z) = -g1 * (z + g1), g''(z)/g'(z) = -(z + g1),
-            // so the Halley denominator 1 - 0.5 * newton * (g''/g') equals 1 + 0.5 * newton * (z + g1).
-            let denom = (1.0 + 0.5 * newton * (z + g1)).clamp(0.25, 4.0);
-            let step = newton / denom;
-            z = (z - step).max(0.0);
-            if step.abs() <= 0.5 * f64::EPSILON * z {
-                break;
-            }
+    // Direct probability Halley steps: f(z) = 0.5 * erfc(z / sqrt(2)) - r.
+    for _ in 0..4 {
+        let sf = 0.5 * erfc(z * std::f64::consts::FRAC_1_SQRT_2);
+        let pdf = (-HALF_LN_2PI).exp() * exp_neg_sq(z * std::f64::consts::FRAC_1_SQRT_2);
+        let delta = (sf - r) / pdf;
+        let step = delta / (1.0 - 0.5 * z * delta).clamp(0.25, 4.0);
+        z = (z + step).max(0.0);
+        if step.abs() <= 0.5 * f64::EPSILON * z {
+            break;
         }
     }
     z

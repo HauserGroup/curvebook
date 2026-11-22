@@ -1155,6 +1155,24 @@ mod platform_impl {
         })
     }
 
+    struct WaitRegistrationGuard<'a> {
+        core: &'a SyncCore,
+        tid: ThreadId,
+        mode: LockMode,
+        active: bool,
+    }
+
+    impl Drop for WaitRegistrationGuard<'_> {
+        fn drop(&mut self) {
+            if self.active {
+                let notify_readers = with_graph(|g| g.cancel_wait(self.tid, self.core.slot.id, self.mode));
+                if notify_readers {
+                    self.core.bump_seq_and_notify_all();
+                }
+            }
+        }
+    }
+
     pub(super) fn acquire<G>(core: &SyncCore, opts: AcquireOptions, mut try_raw: impl FnMut() -> RawTryResult<G>) -> Result<G, LockError> {
         let (tid, thread_label) = current_thread_identity();
         match try_fast_acquire(core, opts, tid, &thread_label, &mut try_raw) {
@@ -1166,15 +1184,23 @@ mod platform_impl {
         let wait_started = Instant::now();
         let mut non_long_job_since: Option<Instant> = None;
         let mut warned = false;
+        let mut wait_guard = WaitRegistrationGuard { core, tid, mode: opts.mode, active: false };
 
         loop {
             let snapshot = prepare_wait_iteration(core, opts, tid, &thread_label, warned)?;
+            wait_guard.active = true;
             let observed_seq = core.wait_seq();
 
             if !snapshot.writer_blocking_shared {
                 match try_acquire_from_wait(core, opts, tid, &thread_label, &mut try_raw) {
-                    FastAttempt::Acquired(guard) => return Ok(guard),
-                    FastAttempt::Err(err) => return Err(err),
+                    FastAttempt::Acquired(guard) => {
+                        wait_guard.active = false;
+                        return Ok(guard);
+                    }
+                    FastAttempt::Err(err) => {
+                        wait_guard.active = false;
+                        return Err(err);
+                    }
                     FastAttempt::WouldBlock => {}
                 }
             }
@@ -1194,10 +1220,12 @@ mod platform_impl {
                 core.emit_contention_report(elapsed, &thread_label, snapshot.holder_labels);
             }
             if elapsed >= core.limits.wait_timeout {
-                return handle_timeout(core, opts, tid, &thread_label, snapshot.writer_blocking_shared, wait_started, now, &mut try_raw);
+                let res = handle_timeout(core, opts, tid, &thread_label, snapshot.writer_blocking_shared, wait_started, now, &mut try_raw);
+                wait_guard.active = false;
+                return res;
             }
 
-            let next_deadline = if warned { core.limits.wait_timeout } else { core.limits.warn_limit };
+            let next_deadline = if warned { core.limits.wait_timeout } else { core.limits.warn_limit.min(core.limits.wait_timeout) };
             let step = next_deadline.saturating_sub(elapsed);
             if !step.is_zero() {
                 core.wait_for_seq_change(observed_seq, step);
