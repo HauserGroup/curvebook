@@ -8,8 +8,8 @@ use curvebook_doc::{
     GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, HeatmapColumnLabelAngle, HeatmapColumnLabelMode,
     HeatmapLabelSpec, HeatmapRowLabelMode, LineConnectionKind, MAX_SHEETS_PER_PROJECT, MultivariateGraphEncoding, MultivariatePlotMode,
     PairwiseBracketSpec, PairwiseComparisonRecord, PairwiseDisplayMode, PartsOfWholeLayout, PointStyleOverride, ProjectDocument, RectPt,
-    RegressionOverlaySpec, ReplicateLineMode, ReplicateOverlayStyle, SeriesOffsetSpec, SeriesSpec, SizeChannelMapping, SizePt, SummaryMeasure,
-    SurvivalDisplayMetric, TickDirection, TickLabelFormat, WhiskerMethod,
+    RegressionOverlaySpec, ReplicateLineMode, ReplicateOverlayStyle, SeriesSpec, SizeChannelMapping, SizePt, SummaryMeasure, SurvivalDisplayMetric,
+    TickDirection, TickLabelFormat, WhiskerMethod,
 };
 use curvebook_math::LogitDomain;
 use curvebook_palette::{ColorRamp, ColormapId, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8};
@@ -23,8 +23,8 @@ use super::helpers::{
     sheet_id_exists, validate_point_override_in_bounds,
 };
 use super::params::{
-    any_json_schema, array_schema, bool_schema, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema,
-    obj_schema_with_aliases, parse_params, str_schema,
+    any_json_schema, array_schema, bool_schema, deserialize_strict, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema,
+    obj_schema, obj_schema_with_aliases, parse_params, str_schema,
 };
 use super::spellings::{self, first_present};
 use super::{CommandGroup, CommandSpec, Ctx, Effects};
@@ -1559,15 +1559,38 @@ fn run_graph_set_spec(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, E
     let id = parse_sheet_id(&params.sheet_id)?;
     let current_spec = require_graph_sheet(ctx.session.document(), &id)?.spec.clone();
 
+    if params.spec.is_some() && (!params.patch_fields.is_empty() || params.multivariate.is_some() || params.survival_number_at_risk.is_some()) {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "cannot combine `spec` with top-level spec shorthand fields in `graph.setSpec`")
+            .with_remediation("Pass fields inside `spec` OR as top-level shorthand parameters, not both.")
+            .with_details(json!({ "pointer": "/spec" })));
+    }
+
+    let base_ptr = if params.spec.is_some() { "/spec" } else { "" };
     let patch =
         params.spec.clone().unwrap_or_else(|| strip_keys(&Value::Object(params.patch_fields.clone()), &["sheet_id", "id", "title", "initialized"]));
     let patch_clean = strip_keys(&patch, &["multivariate", "paper_fill", "orientation", "forest_show_pooled_diamond", "heatmap_labels"]);
-    let merged = merge_json_struct(&current_spec, &patch_clean)?;
-    let mut new_spec: GraphSpec =
-        serde_json::from_value(merged).map_err(|err| EngineError::with_code(ErrorCode::BadInput, format!("invalid graph spec on `{id}`: {err}")))?;
+    let mut merged = merge_json_struct(&current_spec, &patch_clean)?;
+    if let Some(cld_val) = merged.get_mut("compact_letter_display")
+        && let Some(cld_obj) = cld_val.as_object_mut()
+        && let Some(enabled_val) = cld_obj.remove("enabled")
+    {
+        let enabled = enabled_val.as_bool().ok_or_else(|| {
+            EngineError::with_code(ErrorCode::BadInput, "`compact_letter_display.enabled` must be a boolean")
+                .with_details(json!({ "pointer": format!("{base_ptr}/compact_letter_display/enabled") }))
+        })?;
+        if !enabled {
+            *cld_val = Value::Null;
+        }
+    }
+    let mut new_spec: GraphSpec = deserialize_strict(&merged, base_ptr).map_err(|mut err| {
+        if err.remediation.is_none() {
+            err.remediation = Some(String::from("Supply valid GraphSpec fields or shorthand parameters matching the schema."));
+        }
+        err
+    })?;
 
     if let Some(mv_val) = patch.get("multivariate").or(params.multivariate.as_ref()) {
-        new_spec.multivariate = Some(parse_multivariate_encoding(mv_val, current_spec.multivariate.as_ref())?);
+        new_spec.multivariate = if mv_val.is_null() { None } else { Some(parse_multivariate_encoding(mv_val, current_spec.multivariate.as_ref())?) };
     }
     if let Some(pf_val) = patch.get("paper_fill").or_else(|| params.patch_fields.get("paper_fill")) {
         new_spec.paper_fill = if pf_val.is_null() { None } else { Some(parse_rgba8(pf_val)?) };
@@ -1655,6 +1678,12 @@ fn run_graph_set_axes(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, E
                     .with_details(json!({ "pointer": "/axis" })));
             }
         }
+    } else if !params.axis_fields.is_empty() {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "missing `axis` (`x`, `y`, or `y2`) when supplying top-level axis properties")
+            .with_remediation(
+                "Pass `axis: \"x\" | \"y\" | \"y2\"` alongside top-level axis fields, or nest them under `x_axis` / `y_axis` / `y2_axis`.",
+            )
+            .with_details(json!({ "pointer": "/axis" })));
     }
 
     validate_graph_spec_in_doc(ctx.session.document(), &id, &spec)?;
@@ -1760,25 +1789,34 @@ fn run_graph_set_series(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
     }
 
     if let Some(ref series_list) = params.series {
+        if !params.patch_fields.is_empty() {
+            reject_unknown_keys(&params.patch_fields, &[], "graph.setSeries")?;
+        }
         apply_series_array_update(&mut spec, series_list, replace_mode)?;
     } else if all_series {
+        if !params.patch_fields.is_empty() {
+            reject_unknown_keys(&params.patch_fields, SERIES_TOP_LEVEL_PATCH_KEYS, "series patch")?;
+        }
         if spec.series.is_empty() {
             return Err(EngineError::with_code(ErrorCode::Conflict, format!("graph `{id}` has no series configured")));
         }
         let patch_val = Value::Object(params.patch_fields);
         for s in &mut spec.series {
-            apply_single_series_patch(s, &patch_val)?;
+            apply_single_series_patch(s, &patch_val, false)?;
         }
-    } else if params.series_index.is_some() || params.data_set_index.is_some() || has_series_patch_keys(&params.patch_fields) {
-        let target_idx = resolve_series_target_index(&spec, params.series_index, params.data_set_index)?;
-        let patch_val = Value::Object(params.patch_fields);
-        if let Some(s) = spec.series.get_mut(target_idx) {
-            apply_single_series_patch(s, &patch_val)?;
+    } else {
+        reject_unknown_keys(&params.patch_fields, SERIES_TOP_LEVEL_PATCH_KEYS, "series patch")?;
+        if params.series_index.is_some() || params.data_set_index.is_some() || has_series_patch_keys(&params.patch_fields) {
+            let target_idx = resolve_series_target_index(&spec, params.series_index, params.data_set_index)?;
+            let patch_val = Value::Object(params.patch_fields);
+            if let Some(s) = spec.series.get_mut(target_idx) {
+                apply_single_series_patch(s, &patch_val, false)?;
+            }
         }
     }
 
     if let Some(ref mv_val) = params.multivariate {
-        spec.multivariate = Some(parse_multivariate_encoding(mv_val, spec.multivariate.as_ref())?);
+        spec.multivariate = if mv_val.is_null() { None } else { Some(parse_multivariate_encoding(mv_val, spec.multivariate.as_ref())?) };
     }
 
     reconcile_point_overrides_on_series_change(ctx.session.document(), &old_series, &mut spec);
@@ -1836,7 +1874,7 @@ fn apply_series_array_update(spec: &mut GraphSpec, series_list: &[Value], replac
             }
             let src_idx = parse_item_usize_index(item, "series_index", pos)?.unwrap_or(pos);
             let mut base = spec.series.get(src_idx).cloned().unwrap_or_else(|| default_series_like(spec, src_idx));
-            apply_single_series_patch(&mut base, item)?;
+            apply_single_series_patch(&mut base, item, true)?;
             updated_vec.push(base);
         }
         spec.series = updated_vec;
@@ -1883,7 +1921,7 @@ fn apply_series_array_update(spec: &mut GraphSpec, series_list: &[Value], replac
             pos
         };
         if let Some(slot) = spec.series.get_mut(target_idx) {
-            apply_single_series_patch(slot, item)?;
+            apply_single_series_patch(slot, item, true)?;
         }
     }
     Ok(())
@@ -2560,33 +2598,173 @@ fn default_gdo_for_kind(kind: GraphKind, color: Rgba8) -> GraphicalDataObject {
     }
 }
 
+const AXIS_UPDATE_KEYS: &[&str] = &[
+    "title",
+    "gap_width_pt",
+    "break_ornament",
+    "stroke_width_pt",
+    "tick_angle_deg",
+    "tick_format",
+    "tick_direction",
+    "show_tick_labels",
+    "segments",
+    "thresholds",
+    "additional_ticks",
+    "scale",
+    "min",
+    "max",
+    "length_share",
+    "major_tick_interval",
+    "minor_ticks_per_interval",
+];
+
+const SEGMENT_UPDATE_KEYS: &[&str] = &["scale", "min", "max", "length_share", "major_tick_interval", "minor_ticks_per_interval"];
+
+const SERIES_TOP_LEVEL_PATCH_KEYS: &[&str] = &[
+    "source_sheet_id",
+    "source_sheet",
+    "data_sheet_id",
+    "regression_overlay",
+    "legend_label",
+    "label",
+    "bind_to_right_y2",
+    "color",
+    "fill_color",
+    "marker",
+    "markers",
+    "connecting_line",
+    "line",
+    "error_bars",
+    "y_error_bars",
+    "x_error_bars",
+    "gdo",
+    "graphical_object",
+    "offset",
+    "offset_x_data",
+    "offset_x_pt",
+    "offset_y_pt",
+    "bar_width_pt",
+    "bar_width_override_pt",
+    "show_raw_data",
+    "border_width_pt",
+    "replicate_lines",
+    "display_metric",
+    "staircase",
+    "error_display",
+    "show_greenwood_ci",
+    "show_censored_ticks",
+    "ci_dashed",
+    "alpha",
+];
+
+const SERIES_ITEM_PATCH_KEYS: &[&str] = &[
+    "series_index",
+    "data_set_index",
+    "source_sheet_id",
+    "source_sheet",
+    "data_sheet_id",
+    "regression_overlay",
+    "legend_label",
+    "label",
+    "bind_to_right_y2",
+    "color",
+    "fill_color",
+    "marker",
+    "markers",
+    "connecting_line",
+    "line",
+    "error_bars",
+    "y_error_bars",
+    "x_error_bars",
+    "gdo",
+    "graphical_object",
+    "offset",
+    "offset_x_data",
+    "offset_x_pt",
+    "offset_y_pt",
+    "bar_width_pt",
+    "bar_width_override_pt",
+    "show_raw_data",
+    "border_width_pt",
+    "replicate_lines",
+    "display_metric",
+    "staircase",
+    "error_display",
+    "show_greenwood_ci",
+    "show_censored_ticks",
+    "ci_dashed",
+    "alpha",
+];
+
+fn require_object<'a>(val: &'a Value, context: &str) -> Result<&'a serde_json::Map<String, Value>, EngineError> {
+    val.as_object().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("{context} must be a JSON object")))
+}
+
+fn reject_unknown_keys(obj: &serde_json::Map<String, Value>, allowed: &[&str], context: &str) -> Result<(), EngineError> {
+    for key in obj.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(EngineError::with_code(ErrorCode::BadInput, format!("unknown field `{key}` in {context}")));
+        }
+    }
+    Ok(())
+}
+
+fn parse_bool_field(val: &Value, field: &str) -> Result<bool, EngineError> {
+    val.as_bool().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("`{field}` must be a boolean")))
+}
+
+fn parse_string_field<'a>(val: &'a Value, field: &str) -> Result<&'a str, EngineError> {
+    val.as_str().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("`{field}` must be a string")))
+}
+
+fn parse_u8_field(val: &Value, field: &str) -> Result<u8, EngineError> {
+    let raw = val.as_u64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("`{field}` must be a non-negative integer")))?;
+    u8::try_from(raw).map_err(|_| EngineError::with_code(ErrorCode::BadInput, format!("`{field}` must be in 0..=255")))
+}
+
+fn parse_usize_field(val: &Value, field: &str) -> Result<usize, EngineError> {
+    let raw = val.as_u64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("`{field}` must be a non-negative integer")))?;
+    usize::try_from(raw).map_err(|_| EngineError::with_code(ErrorCode::BadInput, format!("`{field}` is out of range")))
+}
+
 fn apply_axis_updates(axis: &mut AxisSpec, val: &Value) -> Result<(), EngineError> {
-    if let Some(title) = opt_str(val, &["title"]) {
-        axis.title = title.to_owned();
+    let obj = require_object(val, "axis patch")?;
+    reject_unknown_keys(obj, AXIS_UPDATE_KEYS, "axis patch")?;
+    if let Some(title_val) = obj.get("title") {
+        axis.title = parse_string_field(title_val, "title")?.to_owned();
     }
-    if let Some(gap) = val.get("gap_width_pt").and_then(Value::as_f64) {
-        axis.gap_width_pt = gap;
+    if let Some(gap) = obj.get("gap_width_pt") {
+        axis.gap_width_pt = parse_finite_f64(gap, "`gap_width_pt`")?;
     }
-    if let Some(orn_val) = val.get("break_ornament") {
+    if let Some(orn_val) = obj.get("break_ornament") {
         axis.break_ornament = parse_break_ornament(orn_val)?;
     }
-    if let Some(sw) = val.get("stroke_width_pt").and_then(Value::as_f64) {
-        axis.stroke_width_pt = sw;
+    if let Some(sw) = obj.get("stroke_width_pt") {
+        axis.stroke_width_pt = parse_finite_f64(sw, "`stroke_width_pt`")?;
     }
-    if let Some(tick_angle) = val.get("tick_angle_deg").and_then(Value::as_f64) {
-        axis.tick_angle_deg = tick_angle;
+    if let Some(tick_angle) = obj.get("tick_angle_deg") {
+        axis.tick_angle_deg = parse_finite_f64(tick_angle, "`tick_angle_deg`")?;
     }
-    if let Some(tf_val) = val.get("tick_format") {
+    if let Some(tf_val) = obj.get("tick_format") {
         axis.tick_format = parse_tick_format(tf_val)?;
     }
-    if let Some(td_val) = val.get("tick_direction") {
+    if let Some(td_val) = obj.get("tick_direction") {
         axis.tick_direction = parse_tick_direction(td_val)?;
     }
-    if let Some(stl_val) = val.get("show_tick_labels") {
-        axis.show_tick_labels =
-            stl_val.as_bool().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`show_tick_labels` must be a boolean"))?;
+    if let Some(stl_val) = obj.get("show_tick_labels") {
+        axis.show_tick_labels = parse_bool_field(stl_val, "show_tick_labels")?;
     }
-    if let Some(segs_val) = val.get("segments").and_then(Value::as_array) {
+    if let Some(raw_segs) = obj.get("segments") {
+        if SEGMENT_UPDATE_KEYS.iter().any(|k| obj.contains_key(*k)) {
+            return Err(EngineError::with_code(
+                ErrorCode::BadInput,
+                "cannot combine `segments` with top-level segment fields (`scale`, `min`, `max`, `length_share`, `major_tick_interval`, `minor_ticks_per_interval`)",
+            )
+            .with_details(json!({ "pointer": "/segments" })));
+        }
+        let segs_val = raw_segs.as_array().ok_or_else(|| {
+            EngineError::with_code(ErrorCode::BadInput, "axis `segments` must be an array").with_details(json!({ "pointer": "/segments" }))
+        })?;
         if !(1..=3).contains(&segs_val.len()) {
             return Err(EngineError::with_code(ErrorCode::BadInput, "axis `segments` must contain 1 to 3 segments")
                 .with_details(json!({ "pointer": "/segments" })));
@@ -2594,6 +2772,8 @@ fn apply_axis_updates(axis: &mut AxisSpec, val: &Value) -> Result<(), EngineErro
         let template = axis.segments.first().cloned().unwrap_or_default();
         let mut parsed = Vec::with_capacity(segs_val.len());
         for s in segs_val {
+            let seg_obj = require_object(s, "axis segment")?;
+            reject_unknown_keys(seg_obj, SEGMENT_UPDATE_KEYS, "axis segment")?;
             let mut seg = template.clone();
             apply_segment_updates(&mut seg, s)?;
             parsed.push(seg);
@@ -2602,14 +2782,17 @@ fn apply_axis_updates(axis: &mut AxisSpec, val: &Value) -> Result<(), EngineErro
     } else if let Some(first_seg) = axis.segments.first_mut() {
         apply_segment_updates(first_seg, val)?;
     }
-    if let Some(thresh_val) = val.get("thresholds").and_then(Value::as_array) {
+    if let Some(raw_thresh) = obj.get("thresholds") {
+        let thresh_val = raw_thresh.as_array().ok_or_else(|| {
+            EngineError::with_code(ErrorCode::BadInput, "axis `thresholds` must be an array").with_details(json!({ "pointer": "/thresholds" }))
+        })?;
         let mut out = Vec::with_capacity(thresh_val.len());
         for item in thresh_val {
             out.push(parse_axis_threshold(item)?);
         }
         axis.thresholds = out;
     }
-    if let Some(add_val) = val.get("additional_ticks") {
+    if let Some(add_val) = obj.get("additional_ticks") {
         axis.additional_ticks = parse_additional_ticks(add_val)?;
     }
     axis.validate()?;
@@ -2617,67 +2800,64 @@ fn apply_axis_updates(axis: &mut AxisSpec, val: &Value) -> Result<(), EngineErro
 }
 
 fn apply_segment_updates(seg: &mut AxisSegment, val: &Value) -> Result<(), EngineError> {
-    if let Some(scale_val) = val.get("scale") {
+    let obj = require_object(val, "axis segment")?;
+    if let Some(scale_val) = obj.get("scale") {
         seg.scale = parse_axis_scale(scale_val)?;
     }
-    if let Some(min_v) = val.get("min") {
-        seg.min = if min_v.is_null() {
-            None
-        } else {
-            Some(min_v.as_f64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`min` must be numeric or null"))?)
-        };
+    if let Some(min_v) = obj.get("min") {
+        seg.min = if min_v.is_null() { None } else { Some(parse_finite_f64(min_v, "`min`")?) };
     }
-    if let Some(max_v) = val.get("max") {
-        seg.max = if max_v.is_null() {
-            None
-        } else {
-            Some(max_v.as_f64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`max` must be numeric or null"))?)
-        };
+    if let Some(max_v) = obj.get("max") {
+        seg.max = if max_v.is_null() { None } else { Some(parse_finite_f64(max_v, "`max`")?) };
     }
-    if let Some(share) = val.get("length_share").and_then(Value::as_f64) {
-        seg.length_share = share;
+    if let Some(share) = obj.get("length_share") {
+        seg.length_share = parse_finite_f64(share, "`length_share`")?;
     }
-    if let Some(major) = val.get("major_tick_interval") {
-        seg.major_tick_interval = if major.is_null() {
-            None
-        } else {
-            Some(major.as_f64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`major_tick_interval` must be numeric or null"))?)
-        };
+    if let Some(major) = obj.get("major_tick_interval") {
+        seg.major_tick_interval = if major.is_null() { None } else { Some(parse_finite_f64(major, "`major_tick_interval`")?) };
     }
-    if let Some(minor) = val.get("minor_ticks_per_interval").and_then(Value::as_u64).and_then(|v| u8::try_from(v).ok()) {
-        seg.minor_ticks_per_interval = minor;
+    if let Some(minor) = obj.get("minor_ticks_per_interval") {
+        seg.minor_ticks_per_interval = parse_u8_field(minor, "minor_ticks_per_interval")?;
     }
     Ok(())
 }
 
-fn apply_single_series_patch(series: &mut SeriesSpec, val: &Value) -> Result<(), EngineError> {
-    if let Some(src) = opt_str(val, &["source_sheet_id", "source_sheet", "data_sheet_id"]) {
+fn apply_single_series_patch(series: &mut SeriesSpec, val: &Value, allow_slot_keys: bool) -> Result<(), EngineError> {
+    let obj = require_object(val, "series patch")?;
+    let allowed = if allow_slot_keys { SERIES_ITEM_PATCH_KEYS } else { SERIES_TOP_LEVEL_PATCH_KEYS };
+    reject_unknown_keys(obj, allowed, "series patch")?;
+
+    if let Some(src_val) = first_present(obj, &["source_sheet_id", "source_sheet", "data_sheet_id"]) {
+        let src = parse_string_field(src_val, "source_sheet_id")?;
         series.source_sheet_id = parse_sheet_id(src)?;
     }
-    if let Some(ds_val) = val.get("data_set_index") {
-        let ds_u64 = ds_val.as_u64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`data_set_index` must be a non-negative integer"))?;
-        series.data_set_index =
-            usize::try_from(ds_u64).map_err(|_| EngineError::with_code(ErrorCode::BadInput, "`data_set_index` is out of range"))?;
+    if let Some(ds_val) = obj.get("data_set_index")
+        && !ds_val.is_null()
+    {
+        series.data_set_index = parse_usize_field(ds_val, "data_set_index")?;
     }
-    if let Some(overlay_val) = val.get("regression_overlay") {
+    if let Some(overlay_val) = obj.get("regression_overlay") {
         series.regression_overlay = if overlay_val.is_null() {
             None
         } else {
             Some(
-                serde_json::from_value(overlay_val.clone())
+                deserialize_strict(overlay_val, "/regression_overlay")
                     .map_err(|err| EngineError::with_code(ErrorCode::BadInput, format!("invalid `regression_overlay`: {err}")))?,
             )
         };
     }
-    if let Some(label) = opt_str(val, &["legend_label", "label"]) {
-        series.legend_label = Some(label.to_owned());
+    if let Some(label_val) = first_present(obj, &["legend_label", "label"]) {
+        series.legend_label = if label_val.is_null() { None } else { Some(parse_string_field(label_val, "legend_label")?.to_owned()) };
     }
-    if let Some(y2) = val.get("bind_to_right_y2").and_then(Value::as_bool) {
-        series.bind_to_right_y2 = y2;
+    if let Some(y2_val) = obj.get("bind_to_right_y2") {
+        series.bind_to_right_y2 = parse_bool_field(y2_val, "bind_to_right_y2")?;
     }
     if let Some(gdo_val) = first_present(val, spellings::SERIES_GRAPHICAL_OBJECT) {
-        series.gdo =
-            serde_json::from_value(gdo_val.clone()).map_err(|err| EngineError::with_code(ErrorCode::BadInput, format!("invalid `gdo`: {err}")))?;
+        series.gdo = deserialize_strict(gdo_val, "/gdo").map_err(|err| {
+            let msg = err.to_string();
+            let detail = msg.strip_prefix("invalid command parameters: ").unwrap_or(&msg);
+            EngineError::with_code(ErrorCode::BadInput, format!("invalid `gdo`: {detail}"))
+        })?;
     }
     if let Some(color_val) = first_present(val, spellings::SERIES_COLOR) {
         let rgba = parse_rgba8(color_val)?;
@@ -2692,41 +2872,37 @@ fn apply_single_series_patch(series: &mut SeriesSpec, val: &Value) -> Result<(),
     if let Some(eb_val) = first_present(val, spellings::SERIES_Y_ERROR_BARS) {
         series.y_error_bars = patch_error_bars(series.y_error_bars, eb_val)?;
     }
-    if let Some(xeb_val) = val.get("x_error_bars") {
+    if let Some(xeb_val) = obj.get("x_error_bars") {
         series.x_error_bars = patch_error_bars(series.x_error_bars, xeb_val)?;
     }
-    apply_extended_series_fields(series, val)?;
+    apply_extended_series_fields(series, obj)?;
     Ok(())
 }
 
-fn apply_extended_series_fields(series: &mut SeriesSpec, val: &Value) -> Result<(), EngineError> {
-    if let Some(off_val) = val.get("offset") {
-        if let Some(obj) = off_val.as_object() {
-            if let Some(v) = obj.get("x_data") {
-                series.offset.x_data = parse_finite_f64(v, "`offset.x_data`")?;
-            }
-            if let Some(v) = obj.get("x_pt") {
-                series.offset.x_pt = parse_finite_f64(v, "`offset.x_pt`")?;
-            }
-            if let Some(v) = obj.get("y_pt") {
-                series.offset.y_pt = parse_finite_f64(v, "`offset.y_pt`")?;
-            }
-        } else if let Ok(parsed) = serde_json::from_value::<SeriesOffsetSpec>(off_val.clone()) {
-            series.offset = parsed;
-        } else {
-            return Err(EngineError::with_code(ErrorCode::BadInput, "`offset` must be an object `{ x_data, x_pt, y_pt }`"));
+fn apply_extended_series_fields(series: &mut SeriesSpec, obj: &serde_json::Map<String, Value>) -> Result<(), EngineError> {
+    if let Some(off_val) = obj.get("offset") {
+        let off_obj = require_object(off_val, "`offset`")?;
+        reject_unknown_keys(off_obj, &["x_data", "x_pt", "y_pt"], "`offset`")?;
+        if let Some(v) = off_obj.get("x_data") {
+            series.offset.x_data = parse_finite_f64(v, "`offset.x_data`")?;
+        }
+        if let Some(v) = off_obj.get("x_pt") {
+            series.offset.x_pt = parse_finite_f64(v, "`offset.x_pt`")?;
+        }
+        if let Some(v) = off_obj.get("y_pt") {
+            series.offset.y_pt = parse_finite_f64(v, "`offset.y_pt`")?;
         }
     }
-    if let Some(v) = val.get("offset_x_data") {
+    if let Some(v) = obj.get("offset_x_data") {
         series.offset.x_data = parse_finite_f64(v, "`offset_x_data`")?;
     }
-    if let Some(v) = val.get("offset_x_pt") {
+    if let Some(v) = obj.get("offset_x_pt") {
         series.offset.x_pt = parse_finite_f64(v, "`offset_x_pt`")?;
     }
-    if let Some(v) = val.get("offset_y_pt") {
+    if let Some(v) = obj.get("offset_y_pt") {
         series.offset.y_pt = parse_finite_f64(v, "`offset_y_pt`")?;
     }
-    if let Some(bw_val) = val.get("bar_width_pt").or_else(|| val.get("bar_width_override_pt")) {
+    if let Some(bw_val) = obj.get("bar_width_pt").or_else(|| obj.get("bar_width_override_pt")) {
         series.bar_width_override_pt = if bw_val.is_null() {
             None
         } else {
@@ -2737,10 +2913,10 @@ fn apply_extended_series_fields(series: &mut SeriesSpec, val: &Value) -> Result<
             Some(w)
         };
     }
-    if let Some(raw_val) = val.get("show_raw_data") {
-        series.show_raw_data = raw_val.as_bool().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`show_raw_data` must be boolean"))?;
+    if let Some(raw_val) = obj.get("show_raw_data") {
+        series.show_raw_data = parse_bool_field(raw_val, "show_raw_data")?;
     }
-    if let Some(bw_pt) = val.get("border_width_pt") {
+    if let Some(bw_pt) = obj.get("border_width_pt") {
         let w = parse_finite_f64(bw_pt, "`border_width_pt`")?;
         if w < 0.0 {
             return Err(EngineError::with_code(ErrorCode::BadInput, "`border_width_pt` must be >= 0.0"));
@@ -2751,40 +2927,52 @@ fn apply_extended_series_fields(series: &mut SeriesSpec, val: &Value) -> Result<
             *border_width_pt = w;
         }
     }
-    if let Some(rl_val) = val.get("replicate_lines") {
+    if let Some(rl_val) = obj.get("replicate_lines") {
         let mode = parse_replicate_line_mode(rl_val)?;
         if let GraphicalDataObject::ScatterAndLine { replicate_lines, .. } = &mut series.gdo {
             *replicate_lines = mode;
         }
     }
+    let parsed_dm = obj.get("display_metric").map(parse_survival_display_metric).transpose()?;
+    let parsed_stair = obj.get("staircase").map(|v| parse_bool_field(v, "staircase")).transpose()?;
+    let parsed_err = obj
+        .get("error_display")
+        .map(|v| {
+            if v.is_null() || v.as_str().is_some_and(|s| s.trim().eq_ignore_ascii_case("none")) {
+                Ok(None)
+            } else {
+                parse_error_bar_metric(v).map(Some)
+            }
+        })
+        .transpose()?;
+    let parsed_ci = obj.get("show_greenwood_ci").map(|v| parse_bool_field(v, "show_greenwood_ci")).transpose()?;
+    let parsed_cens = obj.get("show_censored_ticks").map(|v| parse_bool_field(v, "show_censored_ticks")).transpose()?;
+    let parsed_dashed = obj.get("ci_dashed").map(|v| parse_bool_field(v, "ci_dashed")).transpose()?;
+
     if let GraphicalDataObject::KaplanMeierStep {
         show_censored_ticks, show_greenwood_ci, ci_dashed, display_metric, staircase, error_display, ..
     } = &mut series.gdo
     {
-        if let Some(v) = val.get("display_metric") {
-            *display_metric = parse_survival_display_metric(v)?;
+        if let Some(dm) = parsed_dm {
+            *display_metric = dm;
         }
-        if let Some(v) = val.get("staircase") {
-            *staircase = v.as_bool().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`staircase` must be boolean"))?;
+        if let Some(st) = parsed_stair {
+            *staircase = st;
         }
-        if let Some(v) = val.get("error_display") {
-            *error_display = if v.is_null() || v.as_str().is_some_and(|s| s.trim().eq_ignore_ascii_case("none")) {
-                None
-            } else {
-                Some(parse_error_bar_metric(v)?)
-            };
+        if let Some(ed) = parsed_err {
+            *error_display = ed;
         }
-        if let Some(v) = val.get("show_greenwood_ci") {
-            *show_greenwood_ci = v.as_bool().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`show_greenwood_ci` must be boolean"))?;
+        if let Some(ci) = parsed_ci {
+            *show_greenwood_ci = ci;
         }
-        if let Some(v) = val.get("show_censored_ticks") {
-            *show_censored_ticks = v.as_bool().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`show_censored_ticks` must be boolean"))?;
+        if let Some(cens) = parsed_cens {
+            *show_censored_ticks = cens;
         }
-        if let Some(v) = val.get("ci_dashed") {
-            *ci_dashed = v.as_bool().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`ci_dashed` must be boolean"))?;
+        if let Some(dashed) = parsed_dashed {
+            *ci_dashed = dashed;
         }
     }
-    if let Some(alpha_val) = val.get("alpha") {
+    if let Some(alpha_val) = obj.get("alpha") {
         let a = parse_alpha_byte(alpha_val)?;
         apply_alpha_to_gdo(&mut series.gdo, a);
     }
@@ -2836,7 +3024,10 @@ fn apply_marker_to_gdo(gdo: &mut GraphicalDataObject, val: &Value) -> Result<(),
             *marker = Some(style);
         }
         GraphicalDataObject::AlignedDotPlot { marker, .. } => apply_marker_patch(marker, val)?,
-        _ => {}
+        _ => {
+            let mut dummy = MarkerStyle::default();
+            apply_marker_patch(&mut dummy, val)?;
+        }
     }
     Ok(())
 }
@@ -2848,8 +3039,23 @@ fn apply_line_to_gdo(gdo: &mut GraphicalDataObject, val: &Value) -> Result<(), E
         }
         return Ok(());
     }
+    let obj = require_object(val, "`connecting_line`")?;
+    reject_unknown_keys(obj, &["kind", "dash_style", "dash", "stroke_width_pt", "width_pt", "color"], "`connecting_line`")?;
+    let mut is_none_kind = false;
+    let mut parsed_kind = None;
+    if let Some(k) = obj.get("kind") {
+        if k.as_str().is_some_and(|s| s.eq_ignore_ascii_case("none")) {
+            is_none_kind = true;
+        } else {
+            parsed_kind = Some(parse_line_connection_kind(k)?);
+        }
+    }
+    let parsed_dash = first_present(val, spellings::LINE_DASH_STYLE).map(parse_line_dash_style).transpose()?;
+    let parsed_width = first_present(val, spellings::LINE_STROKE_WIDTH).map(|v| parse_finite_f64(v, "`stroke_width_pt`")).transpose()?;
+    let parsed_color = obj.get("color").map(parse_rgba8).transpose()?;
+
     if let GraphicalDataObject::ScatterAndLine { line, .. } = gdo {
-        if opt_str(val, &["kind"]).is_some_and(|k| k.eq_ignore_ascii_case("none")) {
+        if is_none_kind {
             *line = None;
             return Ok(());
         }
@@ -2859,24 +3065,26 @@ fn apply_line_to_gdo(gdo: &mut GraphicalDataObject, val: &Value) -> Result<(), E
             stroke_width_pt: 1.5,
             color: Rgba8::BLACK,
         });
-        if let Some(k) = val.get("kind") {
-            style.kind = parse_line_connection_kind(k)?;
+        if let Some(k) = parsed_kind {
+            style.kind = k;
         }
-        if let Some(d) = first_present(val, spellings::LINE_DASH_STYLE) {
-            style.dash_style = parse_line_dash_style(d)?;
+        if let Some(d) = parsed_dash {
+            style.dash_style = d;
         }
-        if let Some(w) = first_present(val, spellings::LINE_STROKE_WIDTH).and_then(Value::as_f64) {
+        if let Some(w) = parsed_width {
             style.stroke_width_pt = w;
         }
-        if let Some(c) = val.get("color") {
-            style.color = parse_rgba8(c)?;
+        if let Some(c) = parsed_color {
+            style.color = c;
         }
         *line = Some(style);
-    } else if let GraphicalDataObject::KaplanMeierStep { line_color, stroke_width_pt, .. } = gdo {
-        if let Some(c) = val.get("color") {
-            *line_color = parse_rgba8(c)?;
+    } else if let GraphicalDataObject::KaplanMeierStep { line_color, stroke_width_pt, .. } = gdo
+        && !is_none_kind
+    {
+        if let Some(c) = parsed_color {
+            *line_color = c;
         }
-        if let Some(w) = val.get("stroke_width_pt").and_then(Value::as_f64) {
+        if let Some(w) = parsed_width {
             *stroke_width_pt = w;
         }
     }
@@ -2884,51 +3092,60 @@ fn apply_line_to_gdo(gdo: &mut GraphicalDataObject, val: &Value) -> Result<(), E
 }
 
 fn apply_marker_patch(marker: &mut MarkerStyle, val: &Value) -> Result<(), EngineError> {
-    if let Some(shape) = val.get("shape") {
+    let obj = require_object(val, "`marker`")?;
+    reject_unknown_keys(obj, &["shape", "fill_mode", "size_pt", "fill_color", "color", "stroke_color", "stroke_width_pt"], "`marker`")?;
+    if let Some(shape) = obj.get("shape") {
         marker.shape = parse_marker_shape(shape)?;
     }
-    if let Some(fill_mode) = val.get("fill_mode") {
+    if let Some(fill_mode) = obj.get("fill_mode") {
         marker.fill_mode = parse_marker_fill_mode(fill_mode)?;
     }
-    if let Some(size) = val.get("size_pt").and_then(Value::as_f64) {
-        marker.size_pt = size;
+    if let Some(size) = obj.get("size_pt") {
+        marker.size_pt = parse_finite_f64(size, "`size_pt`")?;
     }
     if let Some(fc) = first_present(val, spellings::MARKER_FILL_COLOR) {
         marker.fill_color = parse_rgba8(fc)?;
     }
-    if let Some(sc) = val.get("stroke_color") {
+    if let Some(sc) = obj.get("stroke_color") {
         marker.stroke_color = parse_rgba8(sc)?;
     }
-    if let Some(sw) = val.get("stroke_width_pt").and_then(Value::as_f64) {
-        marker.stroke_width_pt = sw;
+    if let Some(sw) = obj.get("stroke_width_pt") {
+        marker.stroke_width_pt = parse_finite_f64(sw, "`stroke_width_pt`")?;
     }
     Ok(())
 }
 
 fn patch_error_bars(current: Option<ErrorBarSpec>, val: &Value) -> Result<Option<ErrorBarSpec>, EngineError> {
-    if val.is_null() || opt_str(val, &["metric"]).is_some_and(|m| m.eq_ignore_ascii_case("none")) {
+    if val.is_null() {
         return Ok(None);
     }
+    let obj = require_object(val, "`error_bars`")?;
+    reject_unknown_keys(obj, &["metric", "direction", "dash_style", "stroke_width_pt", "cap_width_pt", "color"], "`error_bars`")?;
+    let mut clear_bars = false;
     let mut eb = current.unwrap_or_default();
-    if let Some(m) = val.get("metric") {
-        eb.metric = parse_error_bar_metric(m)?;
+    if let Some(m) = obj.get("metric") {
+        if m.as_str().is_some_and(|s| s.trim().eq_ignore_ascii_case("none")) {
+            clear_bars = true;
+        } else {
+            eb.metric = parse_error_bar_metric(m)?;
+        }
     }
-    if let Some(d) = val.get("direction") {
+    if let Some(d) = obj.get("direction") {
         eb.direction = parse_error_bar_direction(d)?;
     }
-    if let Some(dash) = val.get("dash_style") {
+    if let Some(dash) = obj.get("dash_style") {
         eb.dash_style = parse_line_dash_style(dash)?;
     }
-    if let Some(w) = val.get("stroke_width_pt").and_then(Value::as_f64) {
-        eb.stroke_width_pt = w;
+    if let Some(w) = obj.get("stroke_width_pt") {
+        eb.stroke_width_pt = parse_finite_f64(w, "`stroke_width_pt`")?;
     }
-    if let Some(cw) = val.get("cap_width_pt").and_then(Value::as_f64) {
-        eb.cap_width_pt = cw;
+    if let Some(cw) = obj.get("cap_width_pt") {
+        eb.cap_width_pt = parse_finite_f64(cw, "`cap_width_pt`")?;
     }
-    if let Some(c) = val.get("color") {
+    if let Some(c) = obj.get("color") {
         eb.color = if c.is_null() { None } else { Some(parse_rgba8(c)?) };
     }
-    Ok(Some(eb))
+    if clear_bars { Ok(None) } else { Ok(Some(eb)) }
 }
 
 fn default_series_like(spec: &GraphSpec, data_set_index: usize) -> SeriesSpec {
@@ -2969,49 +3186,29 @@ fn resolve_series_target_index(spec: &GraphSpec, series_index: Option<usize>, da
 }
 
 fn has_series_patch_keys(map: &Map<String, Value>) -> bool {
-    const KEYS: &[&str] = &[
-        "source_sheet_id",
-        "source_sheet",
-        "data_sheet_id",
-        "regression_overlay",
-        "legend_label",
-        "label",
-        "bind_to_right_y2",
-        "color",
-        "fill_color",
-        "marker",
-        "markers",
-        "connecting_line",
-        "line",
-        "error_bars",
-        "y_error_bars",
-        "x_error_bars",
-        "gdo",
-        "graphical_object",
-        "offset",
-        "offset_x_data",
-        "offset_x_pt",
-        "offset_y_pt",
-        "bar_width_pt",
-        "bar_width_override_pt",
-        "show_raw_data",
-        "border_width_pt",
-        "replicate_lines",
-        "display_metric",
-        "staircase",
-        "error_display",
-        "show_greenwood_ci",
-        "show_censored_ticks",
-        "ci_dashed",
-        "alpha",
-    ];
-    KEYS.iter().any(|k| map.contains_key(*k))
+    SERIES_TOP_LEVEL_PATCH_KEYS.iter().any(|k| map.contains_key(*k))
 }
 
 fn parse_multivariate_encoding(val: &Value, current: Option<&MultivariateGraphEncoding>) -> Result<MultivariateGraphEncoding, EngineError> {
-    if let Ok(full) = serde_json::from_value::<MultivariateGraphEncoding>(val.clone()) {
+    if let Ok(full) = deserialize_strict::<MultivariateGraphEncoding>(val, "/multivariate") {
         return Ok(full);
     }
+    let obj = require_object(val, "`multivariate`")?;
+    reject_unknown_keys(
+        obj,
+        &[
+            "plot_mode",
+            "x_column",
+            "y_column",
+            "color",
+            "size",
+            "label_column",
+            "x_level_order_override",
+            "show_convex_hulls",
+            "show_confidence_ellipses",
+        ],
+        "`multivariate`",
+    )?;
     let mut base = current.cloned().unwrap_or(MultivariateGraphEncoding {
         plot_mode: MultivariatePlotMode::BubbleScatter,
         x_column: 0,
@@ -3023,43 +3220,56 @@ fn parse_multivariate_encoding(val: &Value, current: Option<&MultivariateGraphEn
         show_convex_hulls: false,
         show_confidence_ellipses: false,
     });
-    if let Some(xc) = val.get("x_column").and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok()) {
-        base.x_column = xc;
+    if let Some(pm) = obj.get("plot_mode") {
+        base.plot_mode = deserialize_strict(pm, "/multivariate/plot_mode")?;
     }
-    if let Some(yc) = val.get("y_column").and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok()) {
-        base.y_column = yc;
+    if let Some(xc) = obj.get("x_column") {
+        base.x_column = parse_usize_field(xc, "multivariate.x_column")?;
     }
-    if let Some(lc) = val.get("label_column").and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok()) {
-        base.label_column = Some(lc);
+    if let Some(yc) = obj.get("y_column") {
+        base.y_column = parse_usize_field(yc, "multivariate.y_column")?;
     }
-    if let Some(hull) = val.get("show_convex_hulls").and_then(Value::as_bool) {
-        base.show_convex_hulls = hull;
+    if let Some(lc) = obj.get("label_column") {
+        base.label_column = if lc.is_null() { None } else { Some(parse_usize_field(lc, "multivariate.label_column")?) };
     }
-    if let Some(ell) = val.get("show_confidence_ellipses").and_then(Value::as_bool) {
-        base.show_confidence_ellipses = ell;
+    if let Some(lo) = obj.get("x_level_order_override") {
+        base.x_level_order_override = deserialize_strict(lo, "/multivariate/x_level_order_override")?;
     }
-    if let Some(color_v) = val.get("color") {
+    if let Some(hull) = obj.get("show_convex_hulls") {
+        base.show_convex_hulls = parse_bool_field(hull, "multivariate.show_convex_hulls")?;
+    }
+    if let Some(ell) = obj.get("show_confidence_ellipses") {
+        base.show_confidence_ellipses = parse_bool_field(ell, "multivariate.show_confidence_ellipses")?;
+    }
+    if let Some(color_v) = obj.get("color") {
         base.color = parse_color_channel(color_v)?;
     }
-    if let Some(size_v) = val.get("size") {
+    if let Some(size_v) = obj.get("size") {
         base.size = parse_size_channel(size_v)?;
     }
     Ok(base)
 }
 
 fn parse_color_channel(val: &Value) -> Result<ColorChannelMapping, EngineError> {
-    if let Ok(typed) = serde_json::from_value::<ColorChannelMapping>(val.clone()) {
+    if let Ok(typed) = deserialize_strict::<ColorChannelMapping>(val, "/multivariate/color") {
         return Ok(typed);
     }
-    if let Some(col) = val.as_u64().and_then(|v| usize::try_from(v).ok()) {
+    if let Some(col) = val.as_u64() {
+        let column = usize::try_from(col).map_err(|_| EngineError::with_code(ErrorCode::BadInput, "`multivariate.color` column out of range"))?;
         return Ok(ColorChannelMapping::Continuous {
-            column: col,
+            column,
             ramp: ColorRamp::Named { id: ColormapId::Viridis, reversed: false },
             domain_clamp: None,
         });
     }
-    if let Some(col) = val.get("column").and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok()) {
-        if val.get("categorical").and_then(Value::as_bool).unwrap_or(false) {
+    if let Some(obj) = val.as_object()
+        && (obj.contains_key("column") || obj.contains_key("categorical"))
+    {
+        reject_unknown_keys(obj, &["column", "categorical"], "`multivariate.color`")?;
+        let col_val = obj.get("column").ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`multivariate.color` missing `column`"))?;
+        let col = parse_usize_field(col_val, "multivariate.color.column")?;
+        let is_cat = obj.get("categorical").map(|v| parse_bool_field(v, "multivariate.color.categorical")).transpose()?.unwrap_or(false);
+        if is_cat {
             return Ok(ColorChannelMapping::Categorical { column: col, palette: PaletteId::OkabeIto, level_order_override: None });
         }
         return Ok(ColorChannelMapping::Continuous {
@@ -3072,15 +3282,32 @@ fn parse_color_channel(val: &Value) -> Result<ColorChannelMapping, EngineError> 
 }
 
 fn parse_size_channel(val: &Value) -> Result<SizeChannelMapping, EngineError> {
-    if let Ok(typed) = serde_json::from_value::<SizeChannelMapping>(val.clone()) {
+    if let Ok(typed) = deserialize_strict::<SizeChannelMapping>(val, "/multivariate/size") {
         return Ok(typed);
     }
-    if let Some(col) = val.get("column").and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok()) {
-        let min_r = val.get("min_radius_pt").and_then(Value::as_f64).unwrap_or(3.0);
-        let max_r = val.get("max_radius_pt").and_then(Value::as_f64).unwrap_or(14.0);
-        return Ok(SizeChannelMapping::Variable { column: col, min_radius_pt: min_r, max_radius_pt: max_r });
+    if let Some(obj) = val.as_object() {
+        if let Some(col_val) = obj.get("column") {
+            reject_unknown_keys(obj, &["column", "min_radius_pt", "max_radius_pt"], "`multivariate.size`")?;
+            let col = parse_usize_field(col_val, "multivariate.size.column")?;
+            let min_r = match obj.get("min_radius_pt") {
+                None => 3.0,
+                Some(v) => parse_finite_f64(v, "`multivariate.size.min_radius_pt`")?,
+            };
+            let max_r = match obj.get("max_radius_pt") {
+                None => 14.0,
+                Some(v) => parse_finite_f64(v, "`multivariate.size.max_radius_pt`")?,
+            };
+            return Ok(SizeChannelMapping::Variable { column: col, min_radius_pt: min_r, max_radius_pt: max_r });
+        }
+        reject_unknown_keys(obj, &["radius_pt"], "`multivariate.size`")?;
+        if let Some(r_val) = obj.get("radius_pt") {
+            let r = parse_finite_f64(r_val, "`multivariate.size.radius_pt`")?;
+            return Ok(SizeChannelMapping::Constant { radius_pt: r });
+        }
+        return Err(EngineError::with_code(ErrorCode::BadInput, "invalid multivariate `size` mapping"));
     }
-    if let Some(r) = val.get("radius_pt").and_then(Value::as_f64).or_else(|| val.as_f64()) {
+    if val.is_number() {
+        let r = parse_finite_f64(val, "`multivariate.size`")?;
         return Ok(SizeChannelMapping::Constant { radius_pt: r });
     }
     Err(EngineError::with_code(ErrorCode::BadInput, "invalid multivariate `size` mapping"))
@@ -3327,6 +3554,11 @@ fn parse_heatmap_label_spec(val: &Value, current: HeatmapLabelSpec) -> Result<He
     let Some(obj) = val.as_object() else {
         return Err(EngineError::with_code(ErrorCode::BadInput, "`heatmap_labels` must be an object"));
     };
+    reject_unknown_keys(
+        obj,
+        &["annotate_cells", "cell_gap_pt", "row_labels", "row_mode", "column_labels", "column_mode", "column_angle"],
+        "`heatmap_labels`",
+    )?;
     let mut out = current;
     if let Some(ann_val) = obj.get("annotate_cells") {
         out.annotate_cells =
@@ -3464,16 +3696,30 @@ fn parse_break_ornament(val: &Value) -> Result<BreakOrnament, EngineError> {
 }
 
 fn parse_axis_threshold(val: &Value) -> Result<AxisThreshold, EngineError> {
-    if let Ok(t) = serde_json::from_value::<AxisThreshold>(val.clone()) {
-        return Ok(t);
-    }
-    let value =
-        val.get("value").and_then(Value::as_f64).ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "threshold missing numeric `value`"))?;
-    let shade_to = val.get("shade_to").and_then(Value::as_f64);
-    let label = opt_str(val, &["label"]).map(str::to_owned);
-    let color = val.get("color").map(parse_rgba8).transpose()?.unwrap_or(Rgba8::rgb(120, 120, 120));
-    let dash_style = val.get("dash_style").map(parse_line_dash_style).transpose()?.unwrap_or(LineDashStyle::Dashed);
-    let stroke_width_pt = val.get("stroke_width_pt").and_then(Value::as_f64).unwrap_or(1.0);
+    let obj = require_object(val, "threshold")?;
+    reject_unknown_keys(obj, &["value", "shade_to", "label", "color", "dash_style", "stroke_width_pt"], "threshold")?;
+    let raw_val = obj.get("value").ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "threshold missing numeric `value`"))?;
+    let value = parse_finite_f64(raw_val, "threshold `value`")?;
+    let shade_to = match obj.get("shade_to") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(parse_finite_f64(v, "threshold `shade_to`")?),
+    };
+    let label = match obj.get("label") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(parse_string_field(v, "label")?.to_owned()),
+    };
+    let color = match obj.get("color") {
+        None => Rgba8::rgb(120, 120, 120),
+        Some(v) => parse_rgba8(v)?,
+    };
+    let dash_style = match obj.get("dash_style") {
+        None => LineDashStyle::Dashed,
+        Some(v) => parse_line_dash_style(v)?,
+    };
+    let stroke_width_pt = match obj.get("stroke_width_pt") {
+        None => 1.0,
+        Some(v) => parse_finite_f64(v, "threshold `stroke_width_pt`")?,
+    };
     Ok(AxisThreshold { value, shade_to, color, dash_style, stroke_width_pt, label })
 }
 
@@ -3481,20 +3727,17 @@ fn parse_additional_ticks(val: &Value) -> Result<Vec<AdditionalTick>, EngineErro
     let arr = val.as_array().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`ticks` must be an array"))?;
     let mut out = Vec::with_capacity(arr.len());
     for item in arr {
-        let value = item
-            .get("value")
-            .and_then(Value::as_f64)
-            .filter(|v| v.is_finite())
-            .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "additional tick missing finite numeric `value`"))?;
-        let label = match item.get("label") {
+        let obj = require_object(item, "additional tick")?;
+        reject_unknown_keys(obj, &["value", "label", "draw_gridline"], "additional tick")?;
+        let raw_val = obj.get("value").ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "additional tick missing numeric `value`"))?;
+        let value = parse_finite_f64(raw_val, "additional tick `value`")?;
+        let label = match obj.get("label") {
             None | Some(Value::Null) => None,
-            Some(v) => Some(
-                v.as_str().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "additional tick `label` must be string or null"))?.to_owned(),
-            ),
+            Some(v) => Some(parse_string_field(v, "label")?.to_owned()),
         };
-        let draw_gridline = match item.get("draw_gridline") {
+        let draw_gridline = match obj.get("draw_gridline") {
             None => false,
-            Some(v) => v.as_bool().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "additional tick `draw_gridline` must be boolean"))?,
+            Some(v) => parse_bool_field(v, "draw_gridline")?,
         };
         out.push(AdditionalTick { value, label, draw_gridline });
     }

@@ -185,8 +185,8 @@ fn r1_s07_01b_append_columns_and_grouped_subcol_shrink_refresh_in_place() -> Tes
             "target_sheet_id": "g-dst",
             "source_sheet_id": "g-src",
             "mode": "overwrite",
-            "anchor_row": 0,
-            "anchor_col": 0,
+            "start_row": 0,
+            "start_col": 0,
         }),
     )?;
     assert_eq!(subcol_nums(&gs, "g-dst", 1, 2)?[1], Some(16.0));
