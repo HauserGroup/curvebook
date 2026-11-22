@@ -364,15 +364,20 @@ pub fn render_center_stage(
         );
     }
 
-    if let Some(sheet_id) = active_sheet_id.as_ref().filter(|_| !matches!(mode, CenterStageMode::Welcome | CenterStageMode::Gallery)) {
-        let notes = active_sheet_floating_notes(doc, sheet_id);
+    if mode != CenterStageMode::CanvasViewport {
+        views.canvas_view.last_active_paper_sheet_id = None;
+        views.canvas_view.last_paper_rect_pt = None;
+        views.canvas_view.last_scene_size_pt = None;
+    }
+
+    if !matches!(mode, CenterStageMode::Welcome | CenterStageMode::Gallery) {
+        let notes = collect_visible_floating_notes(doc, active_sheet_id.as_ref(), &views.center_stage.note_pinned);
         if !notes.is_empty() {
             render_floating_notes_overlay(
                 ui,
                 app,
                 views,
                 FloatingNotesSpec {
-                    sheet_id,
                     notes,
                     stage_bounds: work_rect,
                     tokens: ctx_in.tokens,
@@ -955,7 +960,13 @@ fn render_split_column_sheet_preview(
                     .small()
                     .color(tokens.text_muted),
             );
-            if row.add_enabled(enabled, egui::Button::new(RichText::new("Focus in Grid").small())).clicked() {
+            let focus_resp = row.add_enabled(enabled, egui::Button::new(RichText::new("Focus in Grid").small()));
+            meta.record_response(
+                row,
+                &focus_resp,
+                inspect_input("split.focus_in_grid", "button", "Focus in Grid", Some("sheet.select"), None, enabled, ZLayer::Workspace),
+            );
+            if focus_resp.clicked() && enabled {
                 intents.push_engine("sheet.select", json!({ "sheet_id": ds.id.as_str() }));
             }
         });
@@ -968,23 +979,52 @@ fn render_split_column_sheet_preview(
     let mut body_ui = ui.new_child(egui::UiBuilder::new().max_rect(body_rect).layout(egui::Layout::top_down(egui::Align::Min)));
     body_ui.set_clip_rect(body_rect);
 
-    let scroll =
-        egui::ScrollArea::both().id_salt(("split_col_preview", slot, ds.id.as_str())).auto_shrink([false, false]).show(&mut body_ui, |grid_ui| {
-            let row_h = 22.0;
-            let col_w = 88.0;
-            let max_cols = col_table.data_sets.len().min(64);
-            let max_rows = col_table.row_count().min(500);
-            grid_ui.horizontal(|hdr| {
-                hdr.add_sized([44.0, row_h], egui::Label::new(RichText::new("#").small().strong().color(tokens.text_muted)));
-                for (c_idx, col) in col_table.data_sets.iter().take(max_cols).enumerate() {
-                    let lbl = if col.title.is_empty() { format!("Col {}", c_idx + 1) } else { col.title.clone() };
-                    hdr.add_sized([col_w, row_h], egui::Label::new(RichText::new(lbl).small().strong()).truncate());
+    let row_h = 22.0;
+    let col_w = 88.0;
+    let idx_w = 44.0;
+    let max_cols = col_table.data_sets.len().min(64);
+    let total_rows = col_table.row_count();
+    let scroll = egui::ScrollArea::both().id_salt(("split_col_preview", slot, ds.id.as_str())).auto_shrink([false, false]).show_rows(
+        &mut body_ui,
+        row_h,
+        total_rows + 1,
+        |grid_ui, row_range| {
+            let item_sp = grid_ui.spacing().item_spacing.x;
+            let col_step = col_w + item_sp;
+            let clip = grid_ui.clip_rect();
+            let cells_x = grid_ui.cursor().left() + idx_w + item_sp;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let first_col = (((clip.left() - cells_x) / col_step).floor().max(0.0) as usize).min(max_cols);
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let last_col = ((((clip.right() - cells_x) / col_step).ceil().max(0.0) as usize) + 1).min(max_cols);
+            let leading_w = f32::from(u16::try_from(first_col).unwrap_or(u16::MAX)) * col_step;
+            let trailing_w = f32::from(u16::try_from(max_cols.saturating_sub(last_col)).unwrap_or(u16::MAX)) * col_step;
+
+            for vis_row in row_range {
+                if vis_row == 0 {
+                    grid_ui.horizontal(|hdr| {
+                        hdr.add_sized([idx_w, row_h], egui::Label::new(RichText::new("#").small().strong().color(tokens.text_muted)));
+                        if leading_w > 0.0 {
+                            hdr.add_space(leading_w);
+                        }
+                        for c_idx in first_col..last_col {
+                            let col = &col_table.data_sets[c_idx];
+                            let lbl = if col.title.is_empty() { format!("Col {}", c_idx + 1) } else { col.title.clone() };
+                            hdr.add_sized([col_w, row_h], egui::Label::new(RichText::new(lbl).small().strong()).truncate());
+                        }
+                        if trailing_w > 0.0 {
+                            hdr.add_space(trailing_w);
+                        }
+                    });
+                    continue;
                 }
-            });
-            for r_idx in 0..max_rows {
+                let r_idx = vis_row - 1;
                 grid_ui.horizontal(|row_ui| {
-                    row_ui.add_sized([44.0, row_h], egui::Label::new(RichText::new(format!("{}", r_idx + 1)).small().color(tokens.text_muted)));
-                    for c_idx in 0..max_cols {
+                    row_ui.add_sized([idx_w, row_h], egui::Label::new(RichText::new(format!("{}", r_idx + 1)).small().color(tokens.text_muted)));
+                    if leading_w > 0.0 {
+                        row_ui.add_space(leading_w);
+                    }
+                    for c_idx in first_col..last_col {
                         let is_brushed = app.brushed_points.iter().any(|b| b.sheet_id == ds.id && b.row == r_idx && b.col == c_idx)
                             || app.brushed_cell.as_ref().is_some_and(|b| b.sheet_id == ds.id && b.row == r_idx && b.col == c_idx);
                         let cell_txt = col_table
@@ -1020,9 +1060,13 @@ fn render_split_column_sheet_preview(
                             meta.record_response(row_ui, &resp, inspect_input(&wid, "button", &lbl, None, None, enabled, ZLayer::Workspace));
                         }
                     }
+                    if trailing_w > 0.0 {
+                        row_ui.add_space(trailing_w);
+                    }
                 });
             }
-        });
+        },
+    );
 
     if report.scrollbar_rect_pt.is_none() && scroll.content_size.y > scroll.inner_rect.height() + 0.5 {
         let bar_w = body_ui.spacing().scroll.bar_width.max(10.0);
@@ -1794,9 +1838,51 @@ fn render_bottom_banner(
     }
 }
 
+struct VisibleFloatingNote<'a> {
+    sheet_id: SheetId,
+    note: &'a FloatingNote,
+    pinned: bool,
+}
+
+fn collect_visible_floating_notes<'a>(
+    doc: &'a curvebook_doc::ProjectDocument,
+    active_sheet_id: Option<&SheetId>,
+    note_pinned: &BTreeMap<(SheetId, String), bool>,
+) -> Vec<VisibleFloatingNote<'a>> {
+    let mut visible = Vec::new();
+    if let Some(active_id) = active_sheet_id {
+        for note in active_sheet_floating_notes(doc, active_id) {
+            let key = (active_id.clone(), note.id.as_str().to_owned());
+            let pinned = note_pinned.get(&key).copied().unwrap_or(false);
+            visible.push(VisibleFloatingNote { sheet_id: active_id.clone(), note, pinned });
+        }
+    }
+    let all_sheets = doc
+        .data_sheets
+        .iter()
+        .map(|s| (&s.id, s.floating_notes.as_slice()))
+        .chain(doc.info_sheets.iter().map(|s| (&s.id, s.floating_notes.as_slice())))
+        .chain(doc.result_sheets.iter().map(|s| (&s.id, s.floating_notes.as_slice())))
+        .chain(doc.graph_sheets.iter().map(|s| (&s.id, s.floating_notes.as_slice())))
+        .chain(doc.layout_sheets.iter().map(|s| (&s.id, s.floating_notes.as_slice())));
+    for (owner_id, notes) in all_sheets {
+        if active_sheet_id == Some(owner_id) {
+            continue;
+        }
+        for note in notes {
+            let key = (owner_id.clone(), note.id.as_str().to_owned());
+            if note_pinned.get(&key).copied().unwrap_or(false) {
+                visible.push(VisibleFloatingNote { sheet_id: owner_id.clone(), note, pinned: true });
+            }
+        }
+    }
+    // Render unpinned notes first so pinned notes stack cleanly above them inside Order::Middle.
+    visible.sort_by_key(|item| item.pinned);
+    visible
+}
+
 struct FloatingNotesSpec<'a> {
-    sheet_id: &'a SheetId,
-    notes: &'a [FloatingNote],
+    notes: Vec<VisibleFloatingNote<'a>>,
     stage_bounds: Rect,
     tokens: &'a Tokens,
     enabled: bool,
@@ -1811,18 +1897,20 @@ fn render_floating_notes_overlay(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
-    let FloatingNotesSpec { sheet_id, notes, stage_bounds, tokens, enabled, notes_pane_focused } = spec;
+    let FloatingNotesSpec { notes, stage_bounds, tokens, enabled, notes_pane_focused } = spec;
     if stage_bounds.width() < 180.0 || stage_bounds.height() < 60.0 {
         return;
     }
     let doc = app.document();
     let shard = &app.view_shards.nav_notes;
-    let first_id = notes.first().map(|n| n.id.as_str().to_owned());
+    let first_id = notes.first().map(|n| n.note.id.as_str().to_owned());
     if views.center_stage.focused_floating_note_id.is_none() {
         views.center_stage.focused_floating_note_id = first_id;
     }
 
-    for (idx, note) in notes.iter().enumerate() {
+    for (idx, item) in notes.iter().enumerate() {
+        let sheet_id = &item.sheet_id;
+        let note = item.note;
         let note_id = note.id.as_str().to_owned();
         let key = (sheet_id.clone(), note_id.clone());
         let shard_key = format!("{}:{}", sheet_id.as_str(), note_id);
@@ -1834,7 +1922,7 @@ fn render_floating_notes_overlay(
             .copied()
             .or_else(|| app.nav.floating_notes_collapsed.get(&note_id).copied())
             .unwrap_or(note.minimized);
-        let pinned = views.center_stage.note_pinned.get(&key).copied().unwrap_or(false);
+        let pinned = item.pinned;
 
         let [raw_w, raw_h] =
             views.center_stage.note_sizes_pt.get(&key).copied().unwrap_or([note.bounds_pt.width as f32, note.bounds_pt.height as f32]);
@@ -1865,7 +1953,7 @@ fn render_floating_notes_overlay(
         let is_focused = notes_pane_focused && views.center_stage.focused_floating_note_id.as_deref() == Some(note_id.as_str());
 
         let order = if enabled { Order::Middle } else { Order::Background };
-        egui::Area::new(Id::unique(("center_stage_floating_note", sheet_id.as_str(), note_id.as_str())))
+        let area_resp = egui::Area::new(Id::unique(("center_stage_floating_note", sheet_id.as_str(), note_id.as_str())))
             .order(order)
             .fixed_pos(card_rect.min)
             .interactable(enabled)
@@ -2044,6 +2132,9 @@ fn render_floating_notes_overlay(
                     inspect_input(&pin_wid, "button", "Pin Floating Note", None, None, enabled, ZLayer::FloatingOverlay),
                 );
             });
+        if enabled && pinned {
+            ui.ctx().move_to_top(area_resp.response.layer_id);
+        }
     }
 }
 

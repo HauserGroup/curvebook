@@ -701,6 +701,20 @@ fn short_preview_filter_badge(filter: CanvasPreviewFilter) -> &'static str {
 #[must_use]
 fn center_stage_cursor_coords(ui: &egui::Ui, app: &UiApp, views: &EguiShellViewState, layout: ResponsiveShellLayout) -> Option<(f64, f64)> {
     let pos = ui.ctx().pointer_latest_pos()?;
+    let doc = app.document();
+    if let Some(active_id) = doc.active_sheet_id.as_ref()
+        && views.canvas_view.last_active_paper_sheet_id.as_ref() == Some(active_id)
+        && (doc.graph_sheet(active_id).is_some() || doc.layout_sheet(active_id).is_some())
+        && let (Some(paper), Some([scene_w, scene_h])) = (views.canvas_view.last_paper_rect_pt, views.canvas_view.last_scene_size_pt)
+    {
+        if !paper.contains(pos) {
+            return None;
+        }
+        let rel_x = f64::from(pos.x - paper.left()) / f64::from(paper.width().max(1.0)) * scene_w;
+        let rel_y = f64::from(pos.y - paper.top()) / f64::from(paper.height().max(1.0)) * scene_h;
+        return Some((rel_x, rel_y));
+    }
+
     let stage_x = if layout.rtl_mirrored { layout.trailing_dock_w_pt } else { layout.leading_dock_w_pt };
     let stage_rect = Rect::from_min_size(
         Pos2::new(stage_x, layout.top_chrome_h_pt),
@@ -890,12 +904,12 @@ struct FooterPopupSpec<'a> {
     max_width: f32,
 }
 
-fn show_footer_popup<F>(ctx: &egui::Context, tokens: &Tokens, spec: FooterPopupSpec<'_>, add_contents: F)
+fn show_footer_popup<F>(ctx: &egui::Context, tokens: &Tokens, spec: FooterPopupSpec<'_>, add_contents: F) -> Rect
 where
     F: FnOnce(&mut egui::Ui),
 {
     let est_x = spec.anchor.min.x.clamp(spec.viewport.min.x + 4.0, (spec.viewport.max.x - spec.min_width - 4.0).max(spec.viewport.min.x + 4.0));
-    egui::Area::new(egui::Id::unique(spec.popup_id))
+    let area_resp = egui::Area::new(egui::Id::unique(spec.popup_id))
         .order(egui::Order::Foreground)
         .fixed_pos(Pos2::new(est_x, (spec.anchor.min.y - 4.0).max(spec.viewport.min.y + 4.0)))
         .pivot(egui::Align2::LEFT_BOTTOM)
@@ -911,6 +925,7 @@ where
                 add_contents(ui);
             });
         });
+    area_resp.response.rect
 }
 
 struct PopupMenuItemSpec<'a> {
@@ -1422,6 +1437,13 @@ fn render_footer_trailing_controls(
     preview_anchor
 }
 
+fn close_all_footer_popovers(state: &mut StatusFooterEguiState) {
+    state.filter_popup_open = false;
+    state.sheet_switcher_open = false;
+    state.link_popover_open = false;
+    state.stats_popover_open = false;
+}
+
 fn render_footer_popovers(
     ui: &mut egui::Ui,
     app: &UiApp,
@@ -1435,6 +1457,7 @@ fn render_footer_popovers(
     let doc = app.document();
     let gallery_open = app.nav.gallery.open;
     let locale = &tokens.locale;
+    let mut popup_rects: Vec<Rect> = Vec::new();
 
     if views.status_footer.filter_popup_open
         && let Some(anchor) = anchors.preview
@@ -1447,7 +1470,7 @@ fn render_footer_popovers(
             (CanvasPreviewFilter::Tritanopia, "status.preview_filter.tritanopia"),
             (CanvasPreviewFilter::GrayscalePrint, "status.preview_filter.grayscale"),
         ];
-        show_footer_popup(
+        let popup_rect = show_footer_popup(
             ui.ctx(),
             tokens,
             FooterPopupSpec { viewport: meta.viewport_rect, anchor, popup_id: "egui_shell.footer.cvd_popup", min_width: 148.0, max_width: 200.0 },
@@ -1472,16 +1495,19 @@ fn render_footer_popovers(
                 }
             },
         );
+        popup_rects.push(popup_rect);
         if close_all {
             views.status_footer.filter_popup_open = false;
         }
+    } else {
+        views.status_footer.filter_popup_open = false;
     }
 
     if views.status_footer.sheet_switcher_open
         && let Some(anchor) = anchors.sheet
     {
         let mut chosen_sheet: Option<SheetId> = None;
-        show_footer_popup(
+        let popup_rect = show_footer_popup(
             ui.ctx(),
             tokens,
             FooterPopupSpec {
@@ -1518,6 +1544,7 @@ fn render_footer_popovers(
                 });
             },
         );
+        popup_rects.push(popup_rect);
         if let Some(sid) = chosen_sheet {
             if gallery_open {
                 intents.push_ui("ui.gallery.toggle", json!({ "open": false }));
@@ -1525,6 +1552,8 @@ fn render_footer_popovers(
             intents.push_engine("sheet.select", json!({ "sheet_id": sid.as_str() }));
             views.status_footer.sheet_switcher_open = false;
         }
+    } else {
+        views.status_footer.sheet_switcher_open = false;
     }
 
     if views.status_footer.link_popover_open
@@ -1533,7 +1562,7 @@ fn render_footer_popovers(
     {
         let mut jump_target: Option<SheetId> = None;
         let mut close_link = false;
-        show_footer_popup(
+        let popup_rect = show_footer_popup(
             ui.ctx(),
             tokens,
             FooterPopupSpec { viewport: meta.viewport_rect, anchor, popup_id: "egui_shell.footer.link_popover", min_width: 210.0, max_width: 290.0 },
@@ -1559,19 +1588,22 @@ fn render_footer_popovers(
                 }
             },
         );
+        popup_rects.push(popup_rect);
         if let Some(sid) = jump_target {
             intents.push_engine("sheet.select", json!({ "sheet_id": sid.as_str() }));
         }
         if close_link {
             views.status_footer.link_popover_open = false;
         }
+    } else {
+        views.status_footer.link_popover_open = false;
     }
 
     if views.status_footer.stats_popover_open
         && let Some(anchor) = anchors.stats
         && let Some(stats) = data.active_stats
     {
-        show_footer_popup(
+        let popup_rect = show_footer_popup(
             ui.ctx(),
             tokens,
             FooterPopupSpec { viewport: meta.viewport_rect, anchor, popup_id: "egui_shell.footer.stats_popover", min_width: 200.0, max_width: 260.0 },
@@ -1599,6 +1631,24 @@ fn render_footer_popovers(
                 }
             },
         );
+        popup_rects.push(popup_rect);
+    } else {
+        views.status_footer.stats_popover_open = false;
+    }
+
+    if !popup_rects.is_empty() {
+        let esc_dismiss = ui.ctx().input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        let click_outside = ui.ctx().input(|i| {
+            i.pointer.primary_clicked()
+                && i.pointer.interact_pos().or_else(|| i.pointer.latest_pos()).is_some_and(|p| {
+                    let in_popup = popup_rects.iter().any(|r| r.contains(p));
+                    let in_anchor = [anchors.preview, anchors.sheet, anchors.link, anchors.stats].into_iter().flatten().any(|r| r.contains(p));
+                    !in_popup && !in_anchor
+                })
+        });
+        if esc_dismiss || click_outside {
+            close_all_footer_popovers(&mut views.status_footer);
+        }
     }
 }
 
@@ -1686,19 +1736,23 @@ pub fn render_status_footer(
                 anchors.preview =
                     render_footer_trailing_controls(ui, app, views, ctx_in, FooterTrailingFlags { compact, show_zoom, show_rulers }, meta, intents);
 
-                render_footer_popovers(
-                    ui,
-                    app,
-                    views,
-                    FooterPopoverData {
-                        tokens: ctx_in.tokens,
-                        anchors: &anchors,
-                        link_summary: link_summary.as_ref(),
-                        active_stats: active_stats.as_ref(),
-                    },
-                    meta,
-                    intents,
-                );
+                if !ctx_in.enabled {
+                    close_all_footer_popovers(&mut views.status_footer);
+                } else {
+                    render_footer_popovers(
+                        ui,
+                        app,
+                        views,
+                        FooterPopoverData {
+                            tokens: ctx_in.tokens,
+                            anchors: &anchors,
+                            link_summary: link_summary.as_ref(),
+                            active_stats: active_stats.as_ref(),
+                        },
+                        meta,
+                        intents,
+                    );
+                }
             });
         })
         .response

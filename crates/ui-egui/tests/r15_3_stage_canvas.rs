@@ -194,6 +194,7 @@ fn make_stage_driver<'a>(state: StageHarness, metrics: ViewportMetrics, tokens: 
                 leading_width_override_pt: None,
                 trailing_width_override_pt: None,
                 host_draws_menu_bar: false,
+                is_rtl: curvebook_ui_egui::i18n::is_rtl_locale(&st.app.locale),
             })
         });
         let tokens = Tokens::for_mode(st.app.theme.mode);

@@ -1877,9 +1877,10 @@ impl DesktopHostRuntime {
             }
             "graph.insertImage" | "layout.insertImage" => {
                 let target_kind = if command_id == "graph.insertImage" { NativeExportTargetKind::Graph } else { NativeExportTargetKind::Layout };
+                let sheet_hint = params.get("sheet_id").and_then(Value::as_str);
                 let target_sheet_id = {
                     let win = self.window(window_id)?;
-                    resolve_native_export_sheet_id(win.app().document(), target_kind)
+                    resolve_native_export_sheet_id_with_hint(win.app().document(), target_kind, sheet_hint)
                         .ok_or_else(|| format!("no matching target sheet available for `{command_id}`"))?
                 };
                 let req = NativeFileDialogRequest {

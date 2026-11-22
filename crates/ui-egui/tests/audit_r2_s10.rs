@@ -798,6 +798,7 @@ fn r2_s10_09_split_pane_preserves_primary_singleton_geometry() -> TestRes {
                 leading_width_override_pt: None,
                 trailing_width_override_pt: None,
                 host_draws_menu_bar: false,
+                is_rtl: false,
             });
             let ctx = CenterStageContext {
                 tokens: &tokens,

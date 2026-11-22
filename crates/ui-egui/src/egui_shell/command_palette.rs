@@ -136,7 +136,9 @@ pub fn render_command_palette(
     report.match_count = rows.len();
     clamp_palette_selection(state, &rows);
 
-    let key_nav = consume_palette_keys(ctx, app, state, &rows, intents);
+    let query_widget_id = Id::unique("egui_shell.palette.query");
+    let query_focused = ctx.memory(|m| m.focused()) == Some(query_widget_id);
+    let key_nav = consume_palette_keys(ctx, app, state, &rows, query_focused, intents);
 
     let top_offset = (screen_rect.height() * 0.10).clamp(16.0, 56.0);
     let card_w = (screen_rect.width() - 32.0).clamp(240.0, 560.0);
@@ -161,7 +163,7 @@ pub fn render_command_palette(
             let prev_query = state.query.clone();
             let plat_shortcut = format_shortcut_for_platform(app.shortcuts.active_combo("ui.palette.open").unwrap_or("Cmd+K"));
             let hint = format!("Search commands, analyses & sheets ({plat_shortcut})");
-            let query_resp = ui.add(egui::TextEdit::singleline(&mut state.query).hint_text(hint).desired_width(f32::INFINITY));
+            let query_resp = ui.add(egui::TextEdit::singleline(&mut state.query).id(query_widget_id).hint_text(hint).desired_width(f32::INFINITY));
             if state.just_opened {
                 query_resp.request_focus();
                 state.just_opened = false;
@@ -264,6 +266,7 @@ fn consume_palette_keys(
     app: &UiApp,
     state: &mut CommandPaletteEguiState,
     rows: &[CommandPaletteRow],
+    query_focused: bool,
     intents: &mut PendingUiIntents,
 ) -> PaletteKeyNavResult {
     let mut moved = false;
@@ -271,6 +274,7 @@ fn consume_palette_keys(
         intents.push_set_palette_open(false);
         return PaletteKeyNavResult { moved };
     }
+    let home_end_nav_allowed = !query_focused || state.query.is_empty();
     if !rows.is_empty() {
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowDown)) {
             state.selected_index = (state.selected_index + 1) % rows.len();
@@ -278,10 +282,10 @@ fn consume_palette_keys(
         } else if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowUp)) {
             state.selected_index = if state.selected_index == 0 { rows.len() - 1 } else { state.selected_index - 1 };
             moved = true;
-        } else if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Home)) {
+        } else if home_end_nav_allowed && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Home)) {
             state.selected_index = 0;
             moved = true;
-        } else if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::End)) {
+        } else if home_end_nav_allowed && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::End)) {
             state.selected_index = rows.len() - 1;
             moved = true;
         }
@@ -590,7 +594,7 @@ fn resolve_palette_ui_route(app: &UiApp, command_id: &str) -> Option<PaletteComm
         "ui.clonePipeline.open" | "ui.print.open" => {
             Some(PaletteCommandRoute::UiCommand { command_id: command_id.to_owned(), params: sheet_id_param(resolve_any_sheet_id(doc)) })
         }
-        "ui.canvas.preflight" | "ui.export.open" | "ui.embeddedTable.format.open" | "ui.image.format.open" => {
+        "ui.canvas.preflight" | "ui.export.figure.open" | "ui.embeddedTable.format.open" | "ui.image.format.open" => {
             Some(PaletteCommandRoute::UiCommand { command_id: command_id.to_owned(), params: sheet_id_param(resolve_renderable_sheet_id(doc)) })
         }
         _ => Some(PaletteCommandRoute::UiCommand { command_id: command_id.to_owned(), params: json!({}) }),

@@ -403,7 +403,9 @@ pub fn check_accesskit_scrollbar_non_overlap_with_meta(nodes: &[(AccessKitNodeId
         } else if let Some(entry) = meta.find_by_accesskit_id(*id) {
             matches!(entry.z_layer, ZLayer::ModalBackdrop | ZLayer::ModalDialog | ZLayer::ModalDropdown)
         } else {
-            item.role != AccessKitRole::Label && !node.is_disabled() && dialog_rects.iter().any(|r| r.expand(2.0).contains(rect.center()))
+            !matches!(item.role, AccessKitRole::Label | AccessKitRole::ScrollBar)
+                && !node.is_disabled()
+                && dialog_rects.iter().any(|r| r.expand(2.0).contains(rect.center()))
         };
         if in_modal {
             modal_items.push(item);
@@ -832,7 +834,7 @@ impl<'a, State> EguiHumanPathDriver<'a, State> {
         }
     }
 
-    /// Run a single `egui` frame with `events`, advancing simulation time by `dt_sec`, and settle follow-ups.
+    /// Run a single `egui` frame with `events`, advancing simulation time by `1/60s`, and settle follow-ups.
     pub fn dispatch_events(&mut self, events: Vec<Event>) {
         let t0 = std::time::Instant::now();
         self.step_events(events, 1.0 / 60.0);
