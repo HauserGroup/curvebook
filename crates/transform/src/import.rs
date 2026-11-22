@@ -206,9 +206,12 @@ pub fn apply_import_link_pipeline(
     let provenance_summary = opts.provenance_summary.clone().unwrap_or_else(|| format_provenance(spec, rows_placed, cols_placed));
     if !matches!(spec.source, LinkSource::Clipboard) {
         let link_id = opts.link_id.clone().unwrap_or_else(|| format!("link-{}", target.linked_regions.len() + 1));
+        let mut persisted_spec = spec.clone();
+        persisted_spec.filter.baseline = opts.baseline.or(spec.filter.baseline);
+        persisted_spec.filter.exclude_row_predicate = opts.exclude_row_predicate.clone().or_else(|| spec.filter.exclude_row_predicate.clone());
         target.add_linked_region(LinkedDataRegion {
             id: link_id,
-            spec: spec.clone(),
+            spec: persisted_spec,
             target_range,
             provenance_summary: provenance_summary.clone(),
         })?;
@@ -383,11 +386,11 @@ fn apply_stage2_filter(
         *header_row = hdr;
     }
 
-    if let Some((base_col, op)) = opts.baseline {
+    if let Some((base_col, op)) = opts.baseline.or(filter.baseline) {
         apply_grid_baseline(&mut grid, base_col, op)?;
     }
 
-    if let Some(ref pred) = opts.exclude_row_predicate {
+    if let Some(pred) = opts.exclude_row_predicate.as_deref().or(filter.exclude_row_predicate.as_deref()) {
         apply_row_exclusion_predicate(&mut grid, header_row, pred)?;
     }
 

@@ -835,6 +835,8 @@ fn build_filter_spec(state: &ImportPasteViewState) -> ImportFilterSpec {
         decimate_every_k: (state.decimate_every_k > 1).then_some(state.decimate_every_k),
         unstack_group_column: state.unstack_enabled.then_some(state.unstack_group_col),
         parse_asterisk_exclusions: state.parse_asterisk_exclusions,
+        baseline: None,
+        exclude_row_predicate: None,
     }
 }
 

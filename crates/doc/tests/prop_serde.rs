@@ -181,6 +181,8 @@ fn full_project_document_covers_all_eight_archetypes_specs_results_graphs_layout
                     decimate_every_k: Some(2),
                     unstack_group_column: None,
                     parse_asterisk_exclusions: true,
+                    baseline: None,
+                    exclude_row_predicate: None,
                 },
                 placement: ImportPlacementSpec {
                     mode: PlacementMode::Overwrite,
@@ -1105,4 +1107,93 @@ fn r63_select_and_transform_derived_columns_serde_and_legacy() {
     let alias_dc: DerivedColumnFormula = serde_json::from_str(alias_json).unwrap();
     assert_eq!(alias_dc.title, "Delta");
     assert_eq!(alias_dc.formula, "Response - minif(Response, Role == \"Ctrl\")");
+}
+
+#[test]
+fn fa_x2_01_import_filter_spec_baseline_and_predicate_serde_and_legacy_compat() {
+    use curvebook_doc::{BaselineOperation, InternalLinkKind};
+
+    // 1. Legacy ImportFilterSpec JSON without `baseline` or `exclude_row_predicate` keys deserializes cleanly.
+    let legacy_filter_json = r#"{
+        "row_window": [0, 9],
+        "col_window": null,
+        "decimate_every_k": 2,
+        "unstack_group_column": null,
+        "parse_asterisk_exclusions": true
+    }"#;
+    let legacy_filter: ImportFilterSpec = serde_json::from_str(legacy_filter_json).unwrap();
+    assert_eq!(legacy_filter.row_window, Some((0, 9)));
+    assert_eq!(legacy_filter.decimate_every_k, Some(2));
+    assert_eq!(legacy_filter.baseline, None);
+    assert_eq!(legacy_filter.exclude_row_predicate, None);
+
+    // Re-serializing `None` fields omits them cleanly for wire compatibility.
+    let reserialized_filter = serde_json::to_value(&legacy_filter).unwrap();
+    assert!(reserialized_filter.get("baseline").is_none());
+    assert!(reserialized_filter.get("exclude_row_predicate").is_none());
+
+    // 2. Explicit `null` values also deserialize cleanly to `None`.
+    let null_fields_json = r#"{
+        "row_window": null,
+        "col_window": null,
+        "decimate_every_k": null,
+        "unstack_group_column": null,
+        "parse_asterisk_exclusions": false,
+        "baseline": null,
+        "exclude_row_predicate": null
+    }"#;
+    let null_decoded: ImportFilterSpec = serde_json::from_str(null_fields_json).unwrap();
+    assert!(!null_decoded.parse_asterisk_exclusions);
+    assert_eq!(null_decoded.baseline, None);
+    assert_eq!(null_decoded.exclude_row_predicate, None);
+
+    // 3. Round-trip all BaselineOperation variants + exclude_row_predicate on ImportLinkSpec and ProjectDocument.
+    for op in [BaselineOperation::Difference, BaselineOperation::Ratio, BaselineOperation::PercentChange, BaselineOperation::FractionalChange] {
+        let spec = ImportLinkSpec {
+            source: LinkSource::InternalSheet {
+                sheet_id: SheetId::new("src-1"),
+                kind: InternalLinkKind::DataSheet,
+                tab_id: None,
+                range: SheetCellRange::new(CellCoord::new(0, 0, 0), CellCoord::new(5, 2, 0)),
+            },
+            filter: ImportFilterSpec {
+                baseline: Some((0, op)),
+                exclude_row_predicate: Some(String::from("B > 25.0")),
+                ..ImportFilterSpec::default()
+            },
+            placement: ImportPlacementSpec::default(),
+        };
+        assert_json_roundtrip(&spec);
+    }
+
+    // 4. Full ProjectDocument with legacy LinkedDataRegion missing `baseline`/`exclude_row_predicate` deserializes cleanly.
+    let mut doc = ProjectDocument::new("Legacy Link Compat").unwrap();
+    let mut dst =
+        DataSheet::new("dst-1", "Dest", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 2).unwrap())).unwrap();
+    dst.add_linked_region(LinkedDataRegion {
+        id: String::from("lnk-1"),
+        spec: ImportLinkSpec {
+            source: LinkSource::ExternalDelimitedFile { path: String::from("plate.csv"), delimiter: ',', decimal_separator: '.' },
+            filter: ImportFilterSpec {
+                baseline: Some((0, BaselineOperation::PercentChange)),
+                exclude_row_predicate: Some(String::from("A < 0")),
+                ..ImportFilterSpec::default()
+            },
+            placement: ImportPlacementSpec::default(),
+        },
+        target_range: SheetCellRange::new(CellCoord::new(0, 0, 0), CellCoord::new(1, 1, 0)),
+        provenance_summary: String::from("CSV link"),
+    })
+    .unwrap();
+    doc.add_data_sheet(dst).unwrap();
+    assert_json_roundtrip(&doc);
+
+    let mut legacy_doc_val = serde_json::to_value(&doc).unwrap();
+    let filter_obj = legacy_doc_val["data_sheets"][0]["linked_regions"][0]["spec"]["filter"].as_object_mut().unwrap();
+    assert!(filter_obj.remove("baseline").is_some());
+    assert!(filter_obj.remove("exclude_row_predicate").is_some());
+    let legacy_doc: ProjectDocument = serde_json::from_value(legacy_doc_val).unwrap();
+    let restored_filter = &legacy_doc.data_sheets[0].linked_regions[0].spec.filter;
+    assert_eq!(restored_filter.baseline, None);
+    assert_eq!(restored_filter.exclude_row_predicate, None);
 }

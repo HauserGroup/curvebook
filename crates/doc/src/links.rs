@@ -4,6 +4,7 @@
 use curvebook_palette::Rgba8;
 
 use crate::TableKind;
+use crate::analysis::BaselineOperation;
 use crate::archetypes::{CellCoord, TableArchetype, default_column_label};
 use crate::cell::{Cell, SubcolumnMode};
 use crate::error::{DocError, MAX_SUBCOLUMNS, validate_cell_grid, validate_subcolumns, validate_title};
@@ -101,7 +102,8 @@ impl LinkSource {
     }
 }
 
-/// Stage 2 of [`ImportLinkSpec`]: slicing, periodic decimation, unstacking, and `*` exclusion parsing.
+/// Stage 2 of [`ImportLinkSpec`]: slicing, periodic decimation, unstacking, `*` exclusion parsing,
+/// baseline normalization, and row-exclusion predicates.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ImportFilterSpec {
     /// Optional inclusive `(start_row, end_row)` zero-based row slice applied to the source grid; `None` keeps all rows.
@@ -114,11 +116,25 @@ pub struct ImportFilterSpec {
     pub unstack_group_column: Option<usize>,
     /// When `true` (default), leading or trailing `*` markers (`45.6*`) import as numeric cells with `excluded = true`.
     pub parse_asterisk_exclusions: bool,
+    /// Optional baseline adjustment `(baseline_col, operation)` applied against `baseline_col` in the filtered grid; `None` leaves values unadjusted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline: Option<(usize, BaselineOperation)>,
+    /// Optional row-level exclusion predicate formula (rows evaluating true have all cells marked `excluded = true`); `None` applies no predicate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude_row_predicate: Option<String>,
 }
 
 impl Default for ImportFilterSpec {
     fn default() -> Self {
-        Self { row_window: None, col_window: None, decimate_every_k: None, unstack_group_column: None, parse_asterisk_exclusions: true }
+        Self {
+            row_window: None,
+            col_window: None,
+            decimate_every_k: None,
+            unstack_group_column: None,
+            parse_asterisk_exclusions: true,
+            baseline: None,
+            exclude_row_predicate: None,
+        }
     }
 }
 

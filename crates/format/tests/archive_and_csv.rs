@@ -415,6 +415,8 @@ fn multi_stage_import_link_pipeline_filter_transpose_baseline_and_freeze() {
         decimate_every_k: Some(2),
         unstack_group_column: None,
         parse_asterisk_exclusions: true,
+        baseline: None,
+        exclude_row_predicate: None,
     };
     let filtered = filter_delimited_text(raw_csv, ',', '.', true, &filter).unwrap();
     // Rows 0 and 2 kept: [[10, 20], [20, 30]]

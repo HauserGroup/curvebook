@@ -598,6 +598,8 @@ fn import_link_pipeline_four_stages_and_cycle_detection() {
             decimate_every_k: None,
             unstack_group_column: Some(0),
             parse_asterisk_exclusions: true,
+            baseline: None,
+            exclude_row_predicate: None,
         },
         placement: ImportPlacementSpec {
             mode: PlacementMode::Overwrite,

@@ -1422,6 +1422,8 @@ proptest! {
                 decimate_every_k: Some(1),
                 unstack_group_column: None,
                 parse_asterisk_exclusions: true,
+                baseline: None,
+                exclude_row_predicate: None,
             };
             if let Ok(filtered) = filter_delimited_text(&text, delim, decimal, header_rows > 0, &filter) {
                 let _ = rearrange_and_baseline_grid(
