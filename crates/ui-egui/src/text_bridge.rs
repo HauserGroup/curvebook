@@ -704,33 +704,6 @@ fn match_signed_number_span(text: &str, start: usize) -> Option<usize> {
     Some(p)
 }
 
-/// Measure `text` and append `'…'` if it exceeds `max_width_px`, returning `(display_text, ellipsized)`.
-#[must_use]
-pub fn ellipsize_text(measurer: &dyn TextMeasurer, text: &str, style: &UiTextStyle, locale: &str, max_width_px: f64) -> (String, bool) {
-    if !max_width_px.is_finite() || max_width_px <= 0.0 || text.is_empty() {
-        return (String::new(), !text.is_empty());
-    }
-    if measurer.measure(text, style, locale).width_px <= max_width_px {
-        return (text.to_owned(), false);
-    }
-    let ellipsis = "…";
-    let ell_w = measurer.measure(ellipsis, style, locale).width_px;
-    if ell_w >= max_width_px {
-        return (String::from(ellipsis), true);
-    }
-    let mut candidate = String::new();
-    for ch in text.chars() {
-        candidate.push(ch);
-        let probe = format!("{candidate}{ellipsis}");
-        if measurer.measure(&probe, style, locale).width_px > max_width_px {
-            candidate.pop();
-            break;
-        }
-    }
-    candidate.push('…');
-    (candidate, true)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{DesktopTextMeasurer, TextMeasurer, UiTextStyle};
