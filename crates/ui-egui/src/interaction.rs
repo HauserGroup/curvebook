@@ -609,6 +609,13 @@ impl TextFieldEditState {
         Some(self.text[sb..eb].to_owned())
     }
 
+    /// Cut the active selection (when non-empty), returning the removed text.
+    pub fn cut_selection(&mut self) -> Option<String> {
+        let copied = self.copy_selection()?;
+        self.delete_selection_internal();
+        Some(copied)
+    }
+
     pub fn set_preedit(&mut self, preedit: Option<String>) {
         self.preedit = preedit.filter(|s| !s.is_empty());
     }
@@ -836,14 +843,25 @@ pub(crate) fn clear_inspector_axis_buffers(app: &mut UiApp) {
 
 /// Clear transient modal textbox buffers so stale values never bleed across separate dialog sessions.
 pub fn clear_modal_text_buffers(app: &mut UiApp) {
+    for &id in crate::inspect::TEXTBOX_WIDGET_IDS {
+        if id != "formula_bar.input" {
+            app.interaction.text_field_buffers.remove(id);
+        }
+    }
     for id in [
-        "axes.title",
-        "axes.y_thresholds",
-        "axes.x_thresholds",
-        "edit.transform.formula",
-        "edit.transform.filter_formula",
-        "edit.transform.selected_data_sets",
-        "edit.transform.baseline_columns",
+        "exclude.note_input",
+        "page_layout.callout_input",
+        "rand_groups.arms_input",
+        "rand_groups.title_input",
+        "fit.eq.custom_dsl",
+        "fit.dsl.input",
+        "fit.eq.search",
+        "navigator.search_input",
+        "hook.search_input",
+        "feedback.title",
+        "feedback.summary",
+        "feedback.details",
+        "feedback.extra",
     ] {
         app.interaction.text_field_buffers.remove(id);
     }
@@ -989,12 +1007,116 @@ impl UiApp {
     }
 }
 
-fn ensure_text_field_buffer(app: &mut UiApp, wid: &str, initial: &str) {
-    let multiline = matches!(
+fn is_multiline_text_widget_id(wid: &str) -> bool {
+    matches!(
         wid,
-        "info.notes" | "info.secondary.notes" | "import_paste.input.csv" | "import_paste.input.notes" | "import_paste.input.plate_values"
-    );
-    app.interaction.text_field_buffers.entry(wid.to_owned()).or_insert_with(|| TextFieldEditState::new(initial, multiline));
+        "info.notes"
+            | "info.secondary.notes"
+            | "info.notes_editor"
+            | "secondary.info.notes_editor"
+            | "import_paste.input.csv"
+            | "import_paste.input.notes"
+            | "import_paste.input.plate_values"
+            | "import.tidy_csv"
+            | "page_layout.callout_input"
+            | "exclude.note_input"
+            | "exclude.note"
+            | "checkpoints.note"
+            | "fit.eq.custom_dsl"
+            | "fit.dsl.input"
+            | "edit.fit.custom_dsl"
+            | "analyze.fit.custom_dsl"
+            | "feedback.summary"
+            | "feedback.details"
+            | "feedback.extra"
+    )
+}
+
+fn is_info_notes_widget_id(wid: &str) -> bool {
+    matches!(wid, "info.notes" | "info.secondary.notes" | "info.notes_editor" | "secondary.info.notes_editor")
+}
+
+fn resolve_info_sheet_for_textbox(app: &UiApp, wid: &str) -> Option<SheetId> {
+    let doc = app.document();
+    let is_secondary = wid == "info.secondary.notes" || wid == "secondary.info.notes_editor";
+    let candidate = if app.split.enabled {
+        let (prim, sec) = app.split.resolve_sheets(doc);
+        if is_secondary { sec } else { prim }
+    } else if is_secondary {
+        None
+    } else {
+        doc.active_sheet_id.clone()
+    };
+    candidate.filter(|id| doc.info_sheet(id).is_some())
+}
+
+fn initial_text_for_widget(app: &UiApp, wid: &str) -> String {
+    if is_info_notes_widget_id(wid) {
+        if let Some(info_id) = resolve_info_sheet_for_textbox(app, wid) {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let view = if wid == "info.secondary.notes" || wid == "secondary.info.notes_editor" {
+                    &app.egui_views.center_stage.secondary_info_view
+                } else {
+                    &app.egui_views.info_view
+                };
+                if let Some((draft_id, draft)) = &view.notes_draft
+                    && draft_id == &info_id
+                {
+                    return draft.clone();
+                }
+            }
+            if let Some(info) = app.document().info_sheet(&info_id) {
+                return info.notes_markdown.clone();
+            }
+        }
+        return String::new();
+    }
+    match wid {
+        "formula_bar.input" => app.grid.formula_bar.input.clone(),
+        "palette.query" => app.canvas_dialogs.command_palette.query.clone(),
+        "navigator.search_input" => app.nav.search_query.clone(),
+        "welcome.title.input" => app.nav.welcome.table_draft.title.clone(),
+        "welcome.clone.title.input" => app.nav.welcome.clone_draft.options.title.clone(),
+        "analyze.search" => app.canvas_dialogs.analyze.search_query.clone(),
+        "hook.search_query" | "hook.search_input" => app.canvas_dialogs.hook_picker.search_query.clone(),
+        "exclude.note" | "exclude.note_input" => app.canvas_dialogs.exclude_with_reason.note.clone(),
+        "checkpoints.name" => app.canvas_dialogs.checkpoints.name_draft.clone(),
+        "checkpoints.note" => app.canvas_dialogs.checkpoints.note_draft.clone(),
+        "feedback.title" => app.canvas_dialogs.feedback.title.clone(),
+        "feedback.summary" => app.canvas_dialogs.feedback.summary.clone(),
+        "feedback.details" => app.canvas_dialogs.feedback.details.clone(),
+        "feedback.extra" => app.canvas_dialogs.feedback.extra.clone(),
+        "import.title" => app.grid.import_reshape.title.clone(),
+        "import.x_title" => app.grid.import_reshape.x_title.clone(),
+        "import.tidy_csv" => app.grid.import_reshape.tidy_csv.clone(),
+        "import.group_col" => app.grid.import_reshape.group_col.clone(),
+        "import.value_col" => app.grid.import_reshape.value_col.clone(),
+        "import.x_col" => app.grid.import_reshape.x_col.clone().unwrap_or_default(),
+        "import.replicate_col" => app.grid.import_reshape.replicate_col.clone().unwrap_or_default(),
+        "axes.title" => app.canvas_dialogs.format_axes.axis_draft.title.clone(),
+        "create_graph.title" => app.canvas_dialogs.create_graph.graph_title.clone(),
+        "create_graph.y_axis_title" => app.canvas_dialogs.create_graph.y_axis_title.clone(),
+        "randomize.title" => app.canvas_dialogs.randomize_groups.title.clone(),
+        "sample.title" => app.canvas_dialogs.random_sample_rows.title.clone(),
+        "simulate.title" => app.canvas_dialogs.simulate_distributions.title.clone(),
+        _ => String::new(),
+    }
+}
+
+fn ensure_text_field_buffer(app: &mut UiApp, wid: &str, initial: &str) {
+    if app.interaction.text_field_buffers.contains_key(wid) {
+        return;
+    }
+    let multiline = is_multiline_text_widget_id(wid);
+    let seed = if !initial.is_empty() {
+        initial.to_owned()
+    } else if is_info_notes_widget_id(wid) {
+        initial_text_for_widget(app, wid)
+    } else {
+        String::new()
+    };
+    app.interaction.text_field_buffers.insert(wid.to_owned(), TextFieldEditState::new(&seed, multiline));
 }
 
 fn sync_power_pilot_text_field(app: &mut UiApp, fid: &str, text: &str) {
@@ -1031,21 +1153,79 @@ fn parse_usize_list_text(raw: &str) -> Option<Vec<usize>> {
     Some(out)
 }
 
+fn parse_f64_list_text(raw: &str, preset: &crate::i18n::LocalePreset) -> Option<Vec<f64>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Some(Vec::new());
+    }
+    if trimmed.starts_with('[') {
+        let parsed = serde_json::from_str::<Vec<f64>>(trimmed).ok()?;
+        return parsed.iter().all(|v| v.is_finite()).then_some(parsed);
+    }
+    let sep = if preset.decimal_separator == ',' { ';' } else { ',' };
+    let mut out = Vec::new();
+    for tok in trimmed.split(|c: char| c == sep || c.is_whitespace()).filter(|s| !s.is_empty()) {
+        let val = parse_localized_number_input(tok, preset).filter(|v| v.is_finite())?;
+        out.push(val);
+    }
+    Some(out)
+}
+
+fn sync_active_dialog_value(app: &mut UiApp, key: &str, val: Value) {
+    let mut map = serde_json::Map::new();
+    map.insert(key.to_owned(), val);
+    let _ = crate::gui_actions::patch_active_dialog(app, &map);
+}
+
+fn sync_info_notes_text_field(app: &mut UiApp, fid: &str, text: &str) {
+    let Some(info_id) = resolve_info_sheet_for_textbox(app, fid) else {
+        return;
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let view = if fid == "info.secondary.notes" || fid == "secondary.info.notes_editor" {
+            &mut app.egui_views.center_stage.secondary_info_view
+        } else {
+            &mut app.egui_views.info_view
+        };
+        view.notes_draft = Some((info_id.clone(), text.to_owned()));
+        view.notes_dirty = false;
+    }
+    if app.document().info_sheet(&info_id).is_some_and(|s| s.notes_markdown != text) {
+        let intent = crate::workspace_nav::build_set_info_notes_command(&info_id, text, false);
+        let _ = app.execute_command(&intent.command_id, intent.params);
+    }
+}
+
 fn sync_edit_params_text_field(app: &mut UiApp, fid: &str, text: &str) {
     let mut map = serde_json::Map::new();
     match fid {
-        "edit.transform.formula" | "edit.transform.filter_formula" => {
+        "edit.custom_title" => {
+            let val = if text.is_empty() { Value::Null } else { Value::String(text.to_owned()) };
+            map.insert(String::from("edit.custom_title"), val);
+        }
+        "edit.transform.formula" | "edit.transform.filter_formula" | "edit.fit.model_id" | "edit.fit.custom_dsl" => {
             map.insert(fid.to_owned(), Value::String(text.to_owned()));
         }
-        "edit.transform.selected_data_sets" | "edit.transform.baseline_columns" => {
+        "edit.transform.selected_data_sets" | "edit.transform.baseline_columns" | "edit.glm.predictor_columns" | "edit.cox.predictor_columns" => {
             let Some(cols) = parse_usize_list_text(text) else {
                 return;
             };
             map.insert(fid.to_owned(), serde_json::json!(cols));
         }
+        "edit.contingency.expected_proportions" => {
+            if text.trim().is_empty() {
+                map.insert(fid.to_owned(), Value::Null);
+            } else {
+                let Some(vals) = parse_f64_list_text(text, &app.locale_preset) else {
+                    return;
+                };
+                map.insert(fid.to_owned(), serde_json::json!(vals));
+            }
+        }
         _ => return,
     }
-    let _ = app.canvas_dialogs.edit_params.apply_field_patch(&map);
+    let _ = app.canvas_dialogs.edit_params.apply_field_patch_localized(&map, &app.locale_preset);
 }
 
 fn sync_format_axes_text_field(app: &mut UiApp, fid: &str, text: &str) {
@@ -1055,7 +1235,7 @@ fn sync_format_axes_text_field(app: &mut UiApp, fid: &str, text: &str) {
         "axes.title" => {
             map.insert(String::from("axes.title"), Value::String(text.to_owned()));
         }
-        "axes.y_thresholds" | "axes.x_thresholds" => {
+        "axes.thresholds" | "axes.y_thresholds" | "axes.x_thresholds" => {
             let trimmed = text.trim();
             let val = if trimmed.is_empty() {
                 Value::Array(Vec::new())
@@ -1074,22 +1254,117 @@ fn sync_format_axes_text_field(app: &mut UiApp, fid: &str, text: &str) {
     let _ = app.canvas_dialogs.format_axes.apply_field_patch(&map, Some(&doc));
 }
 
-/// Flush any buffered `FormatAxes` textbox edits (`axes.title`, `axes.y_thresholds`, `axes.x_thresholds`) into `format_axes`.
+/// Flush any buffered `FormatAxes` textbox edits (`axes.title`, `axes.thresholds`, `axes.y_thresholds`, `axes.x_thresholds`) into `format_axes`.
 pub fn sync_format_axes_text_buffers(app: &mut UiApp) {
-    for fid in ["axes.title", "axes.y_thresholds", "axes.x_thresholds"] {
+    for fid in ["axes.title", "axes.thresholds", "axes.y_thresholds", "axes.x_thresholds"] {
         if let Some(text) = app.interaction.text_field_buffers.get(fid).map(|b| b.text.clone()) {
             sync_format_axes_text_field(app, fid, &text);
         }
     }
 }
 
-/// Flush any buffered `EditAnalysisParameters` transform textbox edits into `edit_params`.
+/// Flush any buffered `EditAnalysisParameters` textbox edits into `edit_params`.
 pub fn sync_edit_params_text_buffers(app: &mut UiApp) {
-    for fid in ["edit.transform.formula", "edit.transform.filter_formula", "edit.transform.selected_data_sets", "edit.transform.baseline_columns"] {
+    for fid in [
+        "edit.custom_title",
+        "edit.transform.formula",
+        "edit.transform.filter_formula",
+        "edit.transform.selected_data_sets",
+        "edit.transform.baseline_columns",
+        "edit.contingency.expected_proportions",
+        "edit.glm.predictor_columns",
+        "edit.cox.predictor_columns",
+        "edit.fit.model_id",
+        "edit.fit.custom_dsl",
+    ] {
         if let Some(text) = app.interaction.text_field_buffers.get(fid).map(|b| b.text.clone()) {
             sync_edit_params_text_field(app, fid, &text);
         }
     }
+}
+
+fn sync_power_or_format_points_text_field(app: &mut UiApp, fid: &str, text: &str) -> bool {
+    match fid {
+        "power.standardized_effect" | "power.within_pair_correlation" | "power.alpha" | "power.target_power" => {
+            if let Some(val) = parse_localized_number_input(text.trim(), &app.locale_preset).filter(|v| v.is_finite()) {
+                sync_active_dialog_value(app, fid, serde_json::json!(val));
+            }
+            true
+        }
+        "format_points.color" => {
+            let v = if text.trim().is_empty() { Value::Null } else { Value::String(text.to_owned()) };
+            sync_active_dialog_value(app, fid, v);
+            true
+        }
+        "format_points.size_pt" => {
+            if text.trim().is_empty() {
+                sync_active_dialog_value(app, fid, Value::Null);
+            } else if let Some(val) = parse_localized_number_input(text.trim(), &app.locale_preset).filter(|v| v.is_finite()) {
+                sync_active_dialog_value(app, fid, serde_json::json!(val));
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn sync_modal_text_field(app: &mut UiApp, fid: &str, text: &str) -> bool {
+    if sync_power_or_format_points_text_field(app, fid, text) {
+        return true;
+    }
+    match fid {
+        "analyze.transform.formula" | "analyze.transform.filter_formula" | "analyze.fit.custom_dsl" => {
+            sync_active_dialog_value(app, fid, Value::String(text.to_owned()));
+        }
+        "analyze.fit.equation_id" => sync_active_dialog_value(app, "equation_id", Value::String(text.to_owned())),
+        "analyze.transform.selected_data_sets" | "analyze.transform.baseline_columns" => {
+            if let Some(cols) = parse_usize_list_text(text) {
+                sync_active_dialog_value(app, fid, serde_json::json!(cols));
+            }
+        }
+        "analyze.expected_proportions" => {
+            if let Some(vals) = parse_f64_list_text(text, &app.locale_preset).filter(|v| !v.is_empty()) {
+                sync_active_dialog_value(app, fid, serde_json::json!(vals));
+            }
+        }
+        "edit.custom_title"
+        | "edit.transform.formula"
+        | "edit.transform.filter_formula"
+        | "edit.transform.selected_data_sets"
+        | "edit.transform.baseline_columns"
+        | "edit.contingency.expected_proportions"
+        | "edit.glm.predictor_columns"
+        | "edit.cox.predictor_columns"
+        | "edit.fit.model_id"
+        | "edit.fit.custom_dsl" => sync_edit_params_text_field(app, fid, text),
+        "import.title" | "import.x_title" | "import.tidy_csv" | "import.group_col" | "import.value_col" => {
+            sync_active_dialog_value(app, fid, Value::String(text.to_owned()));
+        }
+        "import.x_col" | "import.replicate_col" => {
+            let v = if text.trim().is_empty() { Value::Null } else { Value::String(text.to_owned()) };
+            sync_active_dialog_value(app, fid, v);
+        }
+        "axes.title" | "axes.thresholds" | "axes.y_thresholds" | "axes.x_thresholds" => sync_format_axes_text_field(app, fid, text),
+        "create_graph.y_axis_title" | "create_graph.title" | "simulate.title" | "simulate.column_name" | "sample.title" => {
+            sync_active_dialog_value(app, fid, Value::String(text.to_owned()));
+        }
+        "randomize.groups" => {
+            let _ = app.canvas_dialogs.randomize_groups.set_groups_from_str(text);
+        }
+        "randomize.block_sizes" => {
+            if let Some(cols) = parse_usize_list_text(text).filter(|c| !c.is_empty()) {
+                sync_active_dialog_value(app, fid, serde_json::json!(cols));
+            }
+        }
+        "randomize.title" => app.canvas_dialogs.randomize_groups.title = text.to_owned(),
+        "change_data.selected_data_sets" => {
+            if let Some(cols) = parse_usize_list_text(text) {
+                sync_active_dialog_value(app, fid, serde_json::json!(cols));
+            }
+        }
+        _ => return false,
+    }
+    true
 }
 
 fn sync_focused_text_field(app: &mut UiApp, fid: &str) {
@@ -1100,6 +1375,13 @@ fn sync_focused_text_field(app: &mut UiApp, fid: &str) {
     }
     if fid.starts_with("power.pilot.") && fid.ends_with(".input") {
         sync_power_pilot_text_field(app, fid, &text);
+        return;
+    }
+    if is_info_notes_widget_id(fid) {
+        sync_info_notes_text_field(app, fid, &text);
+        return;
+    }
+    if sync_modal_text_field(app, fid, &text) {
         return;
     }
     match fid {
@@ -1116,8 +1398,14 @@ fn sync_focused_text_field(app: &mut UiApp, fid: &str) {
         "navigator.search_input" => app.nav.search_query = text,
         "welcome.title.input" => app.nav.welcome.table_draft.title = text,
         "welcome.clone.title.input" => app.nav.welcome.clone_draft.options.title = text,
-        "hook.search_input" => app.canvas_dialogs.hook_picker.search_query = text,
-        "exclude.note_input" => app.canvas_dialogs.exclude_with_reason.note = text,
+        "hook.search_query" | "hook.search_input" => app.canvas_dialogs.hook_picker.search_query = text,
+        "exclude.note" | "exclude.note_input" => app.canvas_dialogs.exclude_with_reason.note = text,
+        "checkpoints.name" => app.canvas_dialogs.checkpoints.name_draft = text,
+        "checkpoints.note" => app.canvas_dialogs.checkpoints.note_draft = text,
+        "feedback.title" => app.canvas_dialogs.feedback.title = text,
+        "feedback.summary" => app.canvas_dialogs.feedback.summary = text,
+        "feedback.details" => app.canvas_dialogs.feedback.details = text,
+        "feedback.extra" => app.canvas_dialogs.feedback.extra = text,
         "page_layout.callout_input" => app.canvas_dialogs.page_layout.new_callout_markdown = text,
         "rand_groups.arms_input" => {
             let _ = app.canvas_dialogs.randomize_groups.set_groups_from_str(&text);
@@ -1131,10 +1419,6 @@ fn sync_focused_text_field(app: &mut UiApp, fid: &str) {
         "mv_formula.vars.recode_from.input" => app.view_shards.mv_formula.recode_from = text,
         "mv_formula.vars.recode_to.input" => app.view_shards.mv_formula.recode_to = text,
         "fit.eq.search" => app.view_shards.fit_params.model_search = text,
-        "edit.transform.formula" | "edit.transform.filter_formula" | "edit.transform.selected_data_sets" | "edit.transform.baseline_columns" => {
-            sync_edit_params_text_field(app, fid, &text)
-        }
-        "axes.title" | "axes.y_thresholds" | "axes.x_thresholds" => sync_format_axes_text_field(app, fid, &text),
         "inspector.axes.title.input" | "inspector.mv.color_clamp_min.input" | "inspector.mv.color_clamp_max.input" => {}
         _ => {}
     }
@@ -1180,20 +1464,43 @@ fn handle_text_input(app: &mut UiApp, metrics: ViewportMetrics, text: &str) -> U
 }
 
 fn is_text_widget_id(wid: &str) -> bool {
-    matches!(
-        wid,
-        "palette.query"
-            | "formula_bar.input"
-            | "info.notes"
-            | "info.secondary.notes"
-            | "edit.transform.formula"
-            | "edit.transform.filter_formula"
-            | "edit.transform.selected_data_sets"
-            | "edit.transform.baseline_columns"
-            | "axes.y_thresholds"
-            | "axes.x_thresholds"
-            | "axes.title"
-    ) || wid.contains("search")
+    crate::inspect::is_textbox_widget_id(wid)
+        || is_multiline_text_widget_id(wid)
+        || matches!(
+            wid,
+            "palette.query"
+                | "formula_bar.input"
+                | "info.notes"
+                | "info.secondary.notes"
+                | "info.notes_editor"
+                | "secondary.info.notes_editor"
+                | "info.const.editor_value"
+                | "edit.transform.constant_k"
+                | "edit.transform.formula"
+                | "edit.transform.filter_formula"
+                | "edit.transform.selected_data_sets"
+                | "edit.transform.baseline_columns"
+                | "edit.transform.simulate.x_min"
+                | "edit.transform.simulate.x_max"
+                | "edit.transform.simulate.row_count"
+                | "edit.transform.simulate.seed"
+                | "edit.transform.simulate.params"
+                | "edit.transform.random_sample.seed"
+                | "exclude.reason_tag"
+                | "axes.y_thresholds"
+                | "axes.x_thresholds"
+                | "axes.thresholds"
+                | "axes.title"
+                | "feedback.title"
+                | "feedback.summary"
+                | "feedback.details"
+                | "feedback.extra"
+                | "fit.wr.x_min"
+                | "fit.wr.x_max"
+        )
+        || wid.starts_with("fit.con.")
+        || wid.starts_with("fit.init.")
+        || wid.contains("search")
         || wid.contains("input")
 }
 
@@ -1335,6 +1642,16 @@ fn try_handle_workspace_paste_shortcut(app: &mut UiApp) -> Result<Option<UiEvent
     let Some(clip) = read_clipboard_text_for_paste(app) else {
         return Ok(None);
     };
+    if let Some((x_row, x_subcol)) = app.grid.active_x_cell {
+        let res = crate::gui_actions::paste_text_into_active_x_cell(app, &ds_id, x_row, x_subcol, &clip).map_err(|e| e.to_string())?;
+        app.grid.refresh_selection_stats(app.session.document());
+        return Ok(Some(UiEventOutcome {
+            handled: true,
+            action: String::from("shortcut:table.paste"),
+            command_id: Some(String::from("table.paste")),
+            command_result: Some(res),
+        }));
+    }
     let anchor = app.grid.tool.active.unwrap_or(GridCellCoord::new(0, 0, 0));
     let res = execute_engine_value(
         app,
@@ -1462,20 +1779,6 @@ fn handle_key_down(app: &mut UiApp, metrics: ViewportMetrics, key: &str, modifie
 
     if modal_open {
         return handle_modal_key_down(app, metrics, key, trimmed, is_space, modifiers);
-    }
-
-    if trimmed.eq_ignore_ascii_case("tab") && !modifiers.ctrl && !modifiers.meta && !modifiers.alt {
-        if app.grid.formula_bar.active {
-            let doc = app.document().clone();
-            let accepted = app.grid.formula_bar.accept_completion(&doc);
-            return Ok(UiEventOutcome {
-                handled: true,
-                action: String::from("formula_bar.tab_complete"),
-                command_result: Some(json!({ "completion_accepted": accepted, "input": app.grid.formula_bar.input })),
-                ..Default::default()
-            });
-        }
-        let _ = modifiers;
     }
 
     // `Cmd/Ctrl+T` is context-scoped (`ui.editParams.open` vs `sheet.createData`) via `ShortcutRegistry` (`RV-75`).
@@ -1628,7 +1931,7 @@ fn handle_modal_key_down(
         return Ok(out);
     }
 
-    if !modifiers.ctrl && !modifiers.meta && !modifiers.alt && matches!(trimmed, "Enter" | "Return") {
+    if !modifiers.alt && matches!(trimmed, "Enter" | "Return") {
         let res = crate::gui_actions::submit_active_dialog_ok(app).map_err(|e| e.to_string())?;
         if app.canvas_dialogs.active_dialog == ActiveDialog::None {
             clear_context_menu_state(app);
@@ -1685,6 +1988,22 @@ fn handle_textbox_key(
         }
     }
     ensure_text_field_buffer(app, fid, "");
+    if !modifiers.ctrl && !modifiers.meta && !modifiers.alt && matches!(key, "Enter" | "Return") && is_multiline_text_widget_id(fid) {
+        if let Some(b) = app.interaction.text_field_buffers.get_mut(fid) {
+            b.insert_text("\n");
+        }
+        sync_focused_text_field(app, fid);
+        return Ok(Some(UiEventOutcome { handled: true, action: format!("textbox.newline:{fid}"), ..Default::default() }));
+    }
+    if (modifiers.ctrl || modifiers.meta)
+        && !modifiers.alt
+        && matches!(key, "Enter" | "Return")
+        && app.canvas_dialogs.active_dialog == ActiveDialog::None
+        && is_info_notes_widget_id(fid)
+    {
+        sync_focused_text_field(app, fid);
+        return Ok(Some(UiEventOutcome { handled: true, action: String::from("info_notes.committed"), ..Default::default() }));
+    }
     if (modifiers.ctrl || modifiers.meta) && key.eq_ignore_ascii_case("a") {
         if let Some(b) = app.interaction.text_field_buffers.get_mut(fid) {
             b.select_all();
@@ -1693,9 +2012,18 @@ fn handle_textbox_key(
     }
     if (modifiers.ctrl || modifiers.meta) && key.eq_ignore_ascii_case("c") {
         if let Some(sel) = app.interaction.text_field_buffers.get(fid).and_then(TextFieldEditState::copy_selection) {
-            app.interaction.last_clipboard_text = Some(sel);
+            app.interaction.last_clipboard_text = Some(sel.clone());
+            let _ = app.write_clipboard_text(&sel);
         }
         return Ok(Some(UiEventOutcome { handled: true, action: String::from("textbox.copy"), ..Default::default() }));
+    }
+    if (modifiers.ctrl || modifiers.meta) && key.eq_ignore_ascii_case("x") {
+        if let Some(sel) = app.interaction.text_field_buffers.get_mut(fid).and_then(TextFieldEditState::cut_selection) {
+            app.interaction.last_clipboard_text = Some(sel.clone());
+            let _ = app.write_clipboard_text(&sel);
+            sync_focused_text_field(app, fid);
+        }
+        return Ok(Some(UiEventOutcome { handled: true, action: String::from("textbox.cut"), ..Default::default() }));
     }
     if (modifiers.ctrl || modifiers.meta) && key.eq_ignore_ascii_case("v") {
         if let Some(clip) = read_clipboard_text_for_paste(app) {

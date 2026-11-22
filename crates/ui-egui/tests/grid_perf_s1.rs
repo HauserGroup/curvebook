@@ -393,8 +393,16 @@ fn navigator_five_folders_nesting_transitive_bold_badges_and_family_anchor() {
     let lay = LayoutSheet::new("lay-1", "Figure 1", layout_spec).expect("lay-1");
     doc.add_layout_sheet(lay).expect("add lay-1");
 
+    let mut session = Session::from_document(doc);
     let mut nav = WorkspaceNavState::default();
-    nav.click_navigator_entry(&mut doc, &SheetId::from("lay-1")).expect("select lay-1");
+    let drain_nav = |nav: &mut WorkspaceNavState, session: &mut Session| {
+        for intent in nav.pending_intents.drain(..) {
+            session.execute(&intent.command_id, intent.params).expect("execute nav intent");
+        }
+        nav.sync_from_document(session.document());
+    };
+    nav.click_navigator_entry(session.document(), &SheetId::from("lay-1")).expect("select lay-1");
+    drain_nav(&mut nav, &mut session);
 
     // Verify all 5 canonical folders exist and transitive dependency bold highlighting ignores unrelated d2.
     assert_eq!(nav.folders.len(), 5);
@@ -420,7 +428,7 @@ fn navigator_five_folders_nesting_transitive_bold_badges_and_family_anchor() {
     assert!(desc_entry.badges.iter().any(|b| b.kind == NavigatorBadgeKind::Dirty && b.color == NavigatorBadgeColor::Red));
 
     // Verify NestedResultsUnderData mode moves r-norm (depth 1) & r-desc (depth 2) into Data Tables folder.
-    nav.set_nesting_mode(NavigatorNestingMode::NestedResultsUnderData, &doc);
+    nav.set_nesting_mode(NavigatorNestingMode::NestedResultsUnderData, session.document());
     let data_folder = nav.folders.iter().find(|f| f.section == SheetSection::Data).expect("data folder");
     let results_folder = nav.folders.iter().find(|f| f.section == SheetSection::Analyses).expect("results folder");
     assert!(results_folder.entries.is_empty());
@@ -430,44 +438,49 @@ fn navigator_five_folders_nesting_transitive_bold_badges_and_family_anchor() {
     assert_eq!(nested_desc.nesting_depth, 2);
 
     // Search filter narrows entries cleanly.
-    nav.set_search_query("Normalized", &doc);
+    nav.set_search_query("Normalized", session.document());
     let filtered = nav.filtered_entries();
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].sheet_id, SheetId::from("g1"));
-    nav.set_search_query("", &doc);
+    nav.set_search_query("", session.document());
 
     // Stable-anchor Family pane behavior: anchor on d1, single-click r-desc/g1 keeps anchor = d1.
-    nav.click_navigator_entry(&mut doc, &SheetId::from("d1")).expect("anchor on d1");
+    nav.click_navigator_entry(session.document(), &SheetId::from("d1")).expect("anchor on d1");
+    drain_nav(&mut nav, &mut session);
     assert_eq!(nav.family_anchor_sheet_id, Some(SheetId::from("d1")));
     assert!(nav.family_nodes.iter().any(|n| n.sheet_id == SheetId::from("d1") && n.relation == FamilyRelation::Anchor));
     assert!(nav.family_nodes.iter().any(|n| n.sheet_id == SheetId::from("lay-1") && n.relation == FamilyRelation::Downstream));
 
-    nav.click_family_entry(&mut doc, &SheetId::from("r-desc"), false).expect("single-click result");
-    assert_eq!(doc.active_sheet_id, Some(SheetId::from("r-desc")));
+    nav.click_family_entry(session.document(), &SheetId::from("r-desc"), false).expect("single-click result");
+    drain_nav(&mut nav, &mut session);
+    assert_eq!(session.document().active_sheet_id, Some(SheetId::from("r-desc")));
     assert_eq!(nav.family_anchor_sheet_id, Some(SheetId::from("d1")), "anchor must remain stable on single-click");
     assert!(nav.family_nodes.iter().any(|n| n.sheet_id == SheetId::from("lay-1")));
 
-    nav.click_family_entry(&mut doc, &SheetId::from("g1"), false).expect("single-click graph");
-    assert_eq!(doc.active_sheet_id, Some(SheetId::from("g1")));
+    nav.click_family_entry(session.document(), &SheetId::from("g1"), false).expect("single-click graph");
+    drain_nav(&mut nav, &mut session);
+    assert_eq!(session.document().active_sheet_id, Some(SheetId::from("g1")));
     assert_eq!(nav.family_anchor_sheet_id, Some(SheetId::from("d1")), "anchor must remain stable on graph click");
 
     // Double-clicking a downstream node shifts the Family anchor!
-    nav.click_family_entry(&mut doc, &SheetId::from("r-norm"), true).expect("double-click result");
+    nav.click_family_entry(session.document(), &SheetId::from("r-norm"), true).expect("double-click result");
+    drain_nav(&mut nav, &mut session);
     assert_eq!(nav.family_anchor_sheet_id, Some(SheetId::from("r-norm")));
     assert!(nav.family_nodes.iter().any(|n| n.sheet_id == SheetId::from("d1") && n.relation == FamilyRelation::Upstream));
 }
 
 #[test]
 fn welcome_wizard_all_archetypes_fixtures_and_clone_pipeline() {
-    let mut doc = curvebook_doc::ProjectDocument::default();
+    let mut session = Session::new();
     let mut wizard = WelcomeWizardState::default();
 
     for (idx, kind) in TableKind::ALL.iter().enumerate() {
         wizard.select_archetype(*kind);
         wizard.set_replicates(4);
         wizard.table_draft.sheet_id = format!("tbl-kind-{idx}");
-        let id = wizard.table_draft.clone().create_into_document(&mut doc).expect("create typed table");
-        let ds = doc.data_sheet(&id).expect("sheet inserted");
+        let intent = wizard.table_draft.to_command_intent();
+        session.execute(&intent.command_id, intent.params).expect("create typed table");
+        let ds = session.document().data_sheet(&SheetId::from(format!("tbl-kind-{idx}"))).expect("sheet inserted");
         assert_eq!(ds.kind(), *kind);
         if idx + 1 < TableKind::ALL.len() {
             wizard.focus_next_archetype();
@@ -489,6 +502,7 @@ fn welcome_wizard_all_archetypes_fixtures_and_clone_pipeline() {
     }
 
     // Clone Pipeline duplicates source sheet + downstream result graph via engine command.
+    let mut doc = session.document().clone();
     let src_sheet = instantiate_sample_fixture("dose-response-4pl", "src-xy").expect("src-xy");
     doc.add_data_sheet(src_sheet).expect("add src-xy");
     let src_res = AnalysisSpec::new(
@@ -510,15 +524,18 @@ fn welcome_wizard_all_archetypes_fixtures_and_clone_pipeline() {
         clear_row_titles: false,
         override_replicates: None,
     };
+    let mut app = UiApp::from_session(Session::from_document(doc));
     let draft_only = ClonePipelineDraft {
         source_sheet_id: Some(SheetId::from("src-xy")),
         new_sheet_id: String::from("cloned-draft"),
         options: clone_opts.clone(),
-        ..ClonePipelineDraft::default()
+        clone_downstream_analyses: false,
+        clone_downstream_graphs: false,
+        clone_downstream_layouts: false,
     };
-    assert_eq!(draft_only.execute_in_document(&mut doc).expect("local draft clone"), SheetId::from("cloned-draft"));
-
-    let mut app = UiApp::from_session(Session::from_document(doc));
+    let draft_intent = draft_only.to_command_intent().expect("draft clone intent");
+    app.execute_command(&draft_intent.command_id, draft_intent.params).expect("execute table-only clone");
+    assert!(app.document().data_sheet(&SheetId::from("cloned-draft")).is_some());
     let cmd_draft = ClonePipelineDraft {
         source_sheet_id: Some(SheetId::from("src-xy")),
         new_sheet_id: String::from("cloned-xy"),
@@ -661,28 +678,27 @@ fn emitted_intents_round_trip_through_ui_app_execute_command() {
     app.execute_command(&col_intent.command_id, col_intent.params).expect("sheet.createData column");
 
     // 2. sheet.select mode preservation vs re-anchoring via WorkspaceNavState.
-    let mut scratch_doc = app.document().clone();
     let mut scratch_nav = WorkspaceNavState::default();
     let xy_id = SheetId::from("assay-xy");
-    scratch_nav.click_navigator_entry(&mut scratch_doc, &xy_id).expect("nav select");
+    scratch_nav.click_navigator_entry(app.document(), &xy_id).expect("nav select");
     let nav_select = scratch_nav.pending_intents.pop().expect("nav intent");
     app.execute_command(&nav_select.command_id, nav_select.params).expect("exec nav select");
     assert_eq!(app.document().family_anchor_sheet_id, Some(xy_id.clone()));
 
     let graph_id = app.document().graph_sheets[0].id.clone();
-    scratch_nav.click_family_entry(&mut scratch_doc, &graph_id, false).expect("family single-click");
+    scratch_nav.click_family_entry(app.document(), &graph_id, false).expect("family single-click");
     let fam_click = scratch_nav.pending_intents.pop().expect("family intent");
     app.execute_command(&fam_click.command_id, fam_click.params).expect("exec family click");
     assert_eq!(app.document().active_sheet_id.as_ref(), Some(&graph_id));
     assert_eq!(app.document().family_anchor_sheet_id, Some(xy_id.clone()), "family click must keep anchor");
 
     let info_id = app.document().data_sheet(&xy_id).expect("xy").info_sheet_id.clone().expect("info id");
-    scratch_nav.click_family_entry(&mut scratch_doc, &info_id, true).expect("family double-click");
+    scratch_nav.click_family_entry(app.document(), &info_id, true).expect("family double-click");
     let dbl_click = scratch_nav.pending_intents.pop().expect("double-click intent");
     app.execute_command(&dbl_click.command_id, dbl_click.params).expect("exec double-click");
     assert_eq!(app.document().family_anchor_sheet_id, Some(info_id), "double-click must shift anchor");
 
-    scratch_nav.click_navigator_entry(&mut scratch_doc, &xy_id).expect("re-anchor back");
+    scratch_nav.click_navigator_entry(app.document(), &xy_id).expect("re-anchor back");
     let back_intent = scratch_nav.pending_intents.pop().expect("back intent");
     app.execute_command(&back_intent.command_id, back_intent.params).expect("exec back");
 }

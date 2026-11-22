@@ -13,7 +13,7 @@ use curvebook_doc::{
     ResultSheet, SheetFolderKind, SheetId, SheetSection, TableArchetype,
 };
 use curvebook_engine::{EngineError, Session, cmd};
-use curvebook_format::{CsvOptions, export_datasheet_to_csv, export_result_sheet_json, export_result_sheet_tidy_csv, export_result_tab_csv};
+use curvebook_format::{CsvOptions, export_datasheet_to_csv, export_result_sheet_json, try_export_result_sheet_tidy_csv, try_export_result_tab_csv};
 use curvebook_palette::{CanvasPreviewFilter, Rgba8};
 use curvebook_pdf::{PdfColorSpace, PdfExportOptions, render_pdf, render_pdf_pages};
 use curvebook_render::{MAX_CAPPED_RASTER_DIM_PX, RenderTargetSpec, TiffCompression, encode_png, encode_tiff, render_scene};
@@ -1396,7 +1396,11 @@ fn dispatch_request_inner(
     }
 
     let result = if is_gui_action_method(method.as_str()) {
-        dispatch_gui_action_and_record(app, &method, params, recorded)
+        if let Some(hook_res) = try_invoke_egui_dispatch_hook(app, &method, &params, recorded.as_deref_mut()) {
+            hook_res
+        } else {
+            dispatch_gui_action_and_record(app, &method, params, recorded)
+        }
     } else {
         match method.as_str() {
             "ping" => Ok(json!({
@@ -1427,6 +1431,45 @@ fn dispatch_request_inner(
         Err(err) => ControlResponse::err_with_detail(id, err),
     };
     (response, ControlLoopAction::Continue)
+}
+
+fn try_invoke_egui_dispatch_hook(
+    app: &mut UiApp,
+    command_id: &str,
+    params: &Value,
+    recorded: Option<&mut Vec<ControlRecordedStep>>,
+) -> Option<Result<Value, ControlCallError>> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let hook = app.egui_dispatch_hook.0.clone()?;
+        let seq_before = app.mutation_seq();
+        let undo_before = app.session().undo_depth();
+        let redo_before = app.session().redo_depth();
+        let dirty_before = app.session().is_dirty();
+        let res = hook(app, command_id, params)?;
+        app.sync_views();
+        Some(match res {
+            Ok(value) => {
+                if let Some(steps) = recorded {
+                    let mutated = app.mutation_seq() != seq_before
+                        || app.session().undo_depth() != undo_before
+                        || app.session().redo_depth() != redo_before
+                        || (!dirty_before && app.session().is_dirty())
+                        || value.get("mutated").and_then(Value::as_bool).unwrap_or(false);
+                    if mutated {
+                        steps.push(ControlRecordedStep { command_id: command_id.to_owned(), params: params.clone(), mutated: true });
+                    }
+                }
+                Ok(value)
+            }
+            Err(err) => Err(ControlCallError::from(err)),
+        })
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (app, command_id, params, recorded);
+        None
+    }
 }
 
 fn dispatch_gui_action_and_record(
@@ -1472,8 +1515,11 @@ fn dispatch_command_by_id(
     app: &mut UiApp,
     command_id: &str,
     params: Value,
-    recorded: Option<&mut Vec<ControlRecordedStep>>,
+    mut recorded: Option<&mut Vec<ControlRecordedStep>>,
 ) -> Result<Value, ControlCallError> {
+    if let Some(hook_res) = try_invoke_egui_dispatch_hook(app, command_id, &params, recorded.as_deref_mut()) {
+        return hook_res;
+    }
     if is_gui_action_method(command_id) {
         return dispatch_gui_action_and_record(app, command_id, params, recorded);
     }
@@ -1664,8 +1710,9 @@ fn rollback_or_commit_partial_batch(
     recorded: Option<&mut Vec<ControlRecordedStep>>,
     batch_steps: Vec<ControlRecordedStep>,
     rolled_back: Option<&mut bool>,
-) {
+) -> bool {
     if rollback.active {
+        let mut rollback_ok = true;
         let child_tracker = app.batch_undo_log.take();
         app.batch_undo_log = rollback.prev_tracker;
         if let Some(tracker) = child_tracker {
@@ -1674,14 +1721,22 @@ fn rollback_or_commit_partial_batch(
             } else {
                 if tracker.net_batch_depth > 0 {
                     for _ in 0..tracker.net_batch_depth {
-                        let _ = app.session.undo();
+                        if !matches!(app.session.undo(), Ok(true)) {
+                            rollback_ok = false;
+                            break;
+                        }
                     }
                 } else if tracker.net_batch_depth < 0 {
                     for _ in 0..(-tracker.net_batch_depth) {
-                        let _ = app.session.redo();
+                        if !matches!(app.session.redo(), Ok(true)) {
+                            rollback_ok = false;
+                            break;
+                        }
                     }
                 }
-                app.session.set_file_path(tracker.baseline_file_path, !tracker.baseline_dirty);
+                if rollback_ok {
+                    app.session.set_file_path(tracker.baseline_file_path, !tracker.baseline_dirty);
+                }
             }
         }
         if let Some(ui_snap) = rollback.ui_shell {
@@ -1690,10 +1745,14 @@ fn rollback_or_commit_partial_batch(
             app.sync_views();
         }
         if let Some(flag) = rolled_back {
-            *flag = true;
+            *flag = rollback_ok;
         }
-    } else if let Some(out_steps) = recorded {
-        out_steps.extend(batch_steps);
+        rollback_ok
+    } else {
+        if let Some(out_steps) = recorded {
+            out_steps.extend(batch_steps);
+        }
+        false
     }
 }
 
@@ -1741,7 +1800,7 @@ fn handle_command_batch(
         let cmd_id = match extract_command_id(item) {
             Ok(id) => id,
             Err(err) => {
-                rollback_or_commit_partial_batch(app, rollback, recorded, batch_steps, rolled_back);
+                let _ = rollback_or_commit_partial_batch(app, rollback, recorded, batch_steps, rolled_back);
                 return Err(ControlCallError::from(format!("batch step {idx}: {err}")));
             }
         };
@@ -1756,17 +1815,17 @@ fn handle_command_batch(
                 let entry_bytes = serde_json::to_string(&entry).map(|s| s.len().saturating_add(1)).unwrap_or(MAX_CONTROL_LINE_BYTES);
                 accumulated_bytes = accumulated_bytes.saturating_add(entry_bytes);
                 if accumulated_bytes > max_payload_bytes {
-                    rollback_or_commit_partial_batch(app, rollback, recorded, batch_steps, rolled_back);
+                    let did_rollback = rollback_or_commit_partial_batch(app, rollback, recorded, batch_steps, rolled_back);
                     return Err(ControlCallError::from(format!(
-                        "command.batch serialized payload exceeds maximum control line size of {MAX_CONTROL_LINE_BYTES} bytes"
+                        "command.batch serialized payload exceeds maximum control line size of {MAX_CONTROL_LINE_BYTES} bytes (rolled_back={did_rollback})"
                     )));
                 }
                 results.push(entry);
             }
             Err(err) => {
-                rollback_or_commit_partial_batch(app, rollback, recorded, batch_steps, rolled_back);
+                let did_rollback = rollback_or_commit_partial_batch(app, rollback, recorded, batch_steps, rolled_back);
                 return Err(ControlCallError {
-                    message: format!("batch step {idx} ({cmd_id}) failed (rolled_back={atomic}): {}", err.message),
+                    message: format!("batch step {idx} ({cmd_id}) failed (rolled_back={did_rollback}): {}", err.message),
                     detail: err.detail,
                 });
             }
@@ -2352,20 +2411,21 @@ fn handle_doc_export(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
             let text = if let Some(ds) = ds_opt {
                 export_datasheet_to_csv(ds, &csv_opts).map_err(|err| format!("CSV export failed: {err}"))?
             } else if let Some(rs) = rs_opt {
-                if tidy {
-                    export_result_sheet_tidy_csv(rs, &csv_opts)
+                let csv_res = if tidy {
+                    try_export_result_sheet_tidy_csv(rs, &csv_opts)
                 } else if let Some(tid) = tab_id {
                     let tab = rs
                         .tabs
                         .iter()
                         .find(|t| t.id == tid)
                         .ok_or_else(|| ControlCallError::from(format!("tab '{tid}' not found on result sheet '{}'", rs.id)))?;
-                    export_result_tab_csv(tab, &csv_opts)
+                    try_export_result_tab_csv(rs, tab, &csv_opts)
                 } else if let Some(first_tab) = rs.tabs.first() {
-                    export_result_tab_csv(first_tab, &csv_opts)
+                    try_export_result_tab_csv(rs, first_tab, &csv_opts)
                 } else {
-                    export_result_sheet_tidy_csv(rs, &csv_opts)
-                }
+                    try_export_result_sheet_tidy_csv(rs, &csv_opts)
+                };
+                csv_res.map_err(|err| ControlCallError::from(format!("CSV export failed: {err}")))?
             } else {
                 return Err(ControlCallError::from("no tabular sheet available to export"));
             };
@@ -2628,22 +2688,17 @@ fn dispatch_ui_result_copy_methods_report(app: &mut UiApp, params: &Value) -> Re
     if let Some(fmt) = opt_non_empty_str_param(params, &["format"])? {
         app.canvas_dialogs.result_view.report_format = fmt.to_owned();
     }
-    let skip_os_clipboard = app.is_gui_only() || opt_bool_param(params, &["skip_os_clipboard"])? == Some(true);
+    let skip_os_clipboard = opt_bool_param(params, &["skip_os_clipboard"])? == Some(true);
     let intent = app.canvas_dialogs.result_view.generate_report_intent(&rs_id);
     let outcome = app.execute_command(&intent.command_id, intent.params)?;
     let report = outcome.payload.get("report").and_then(Value::as_str).unwrap_or_default().to_owned();
     app.canvas_dialogs.result_view.last_methods_report = Some(report.clone());
 
-    #[cfg(not(target_arch = "wasm32"))]
-    let clipboard_status = if !skip_os_clipboard && let Ok(status) = write_os_pasteboard(&report) {
-        serde_json::to_value(status).unwrap_or(Value::Null)
+    let clipboard_status = if skip_os_clipboard {
+        Value::Null
     } else {
-        Value::Null
-    };
-    #[cfg(target_arch = "wasm32")]
-    let clipboard_status = {
-        let _ = skip_os_clipboard;
-        Value::Null
+        let status = app.write_clipboard_text(&report).map_err(|err| ControlCallError::from(format!("clipboard write failed: {err}")))?;
+        serde_json::to_value(status).map_err(|err| ControlCallError::from(format!("failed to serialize clipboard status: {err}")))?
     };
 
     Ok(json!({
