@@ -57,8 +57,8 @@ use curvebook_math::sum::NeumaierSum;
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
-    build_tab, checklist_item, ci_cell, init_result_sheet, num_cell, opt_ci_cell, opt_num_cell, p_cell, push_scalar, resolve_selected_indices,
-    sanitize_result_sheet_floats,
+    build_tab, checklist_item, ci_cell, init_result_sheet, num_cell, opt_ci_cell, opt_num_cell, p_cell, push_scalar, sanitize_result_sheet_floats,
+    try_resolve_selected_indices,
 };
 use crate::error::StatsError;
 
@@ -675,7 +675,7 @@ fn maximize_nuisance_pi(f_s: &[f64], ln_fact: &[f64], total: usize, pi_hint: f64
     }
     let sym_pi = (1.0 - best_pi).clamp(0.0, 1.0);
     let sym_val = eval(sym_pi);
-    if (best_p - sym_val).abs() <= 1.0e-12 * best_p.max(1.0) && (sym_pi - pi_hint).abs() < (best_pi - pi_hint).abs() {
+    if (best_p - sym_val).abs() <= 1.0e-12 * best_p && (sym_pi - pi_hint).abs() < (best_pi - pi_hint).abs() {
         best_p = best_p.max(sym_val);
         best_pi = sym_pi;
     }
@@ -753,42 +753,55 @@ fn accumulate_wald_region(a: usize, n1: usize, c: usize, n2: usize, ln_fact: &[f
     f_s
 }
 
+const BOSCHLOO_LOG_REL_TOL: f64 = 1.0e-10;
+
+fn boschloo_fisher_slice(s: usize, n1: usize, n2: usize, total: usize, ln_fact: &[f64]) -> Vec<(usize, f64, f64)> {
+    let lo = s.saturating_sub(n2);
+    let hi = n1.min(s);
+    let log_const = ln_fact[n1] + ln_fact[n2] + ln_fact[s] + ln_fact[total - s] - ln_fact[total];
+    let mut entries: Vec<(usize, f64, f64)> = Vec::with_capacity(hi - lo + 1);
+    for x in lo..=hi {
+        let lp = log_const - (ln_fact[x] + ln_fact[n1 - x] + ln_fact[s - x] + ln_fact[n2 - (s - x)]);
+        entries.push((x, lp, lp.exp()));
+    }
+    let mut sorted = entries.clone();
+    sorted.sort_by(|u, v| u.1.total_cmp(&v.1));
+
+    let mut out = Vec::with_capacity(entries.len());
+    for (x, lpx, px) in entries {
+        let cutoff = lpx + BOSCHLOO_LOG_REL_TOL;
+        let end = sorted.partition_point(|&(_, lpv, _)| lpv <= cutoff);
+        let ln_pf = if end == 0 {
+            0.0
+        } else {
+            let max_lp = sorted[end - 1].1;
+            let mut sum = NeumaierSum::new();
+            for &(_, lpv, _) in &sorted[..end] {
+                sum.add((lpv - max_lp).exp());
+            }
+            (max_lp + sum.total().ln()).min(0.0)
+        };
+        out.push((x, px, ln_pf));
+    }
+    out
+}
+
 fn accumulate_boschloo_region(a: usize, n1: usize, c: usize, n2: usize, ln_fact: &[f64]) -> Vec<f64> {
     let total = n1 + n2;
     let s_obs = a + c;
-    let ln_n1 = ln_fact[n1];
-    let ln_n2 = ln_fact[n2];
-    let ln_total = ln_fact[total];
-
-    let fisher_slice = |s: usize| -> Vec<(usize, f64, f64)> {
-        let lo = s.saturating_sub(n2);
-        let hi = n1.min(s);
-        let log_const = ln_n1 + ln_n2 + ln_fact[s] + ln_fact[total - s] - ln_total;
-        let mut probs: Vec<(usize, f64)> = Vec::with_capacity(hi - lo + 1);
-        for x in lo..=hi {
-            let lp = log_const - (ln_fact[x] + ln_fact[n1 - x] + ln_fact[s - x] + ln_fact[n2 - (s - x)]);
-            probs.push((x, lp.exp()));
-        }
-        let mut sorted = probs.clone();
-        sorted.sort_by(|u, v| u.1.total_cmp(&v.1));
-        let mut out = Vec::with_capacity(probs.len());
-        for (x, px) in probs {
-            let p_fisher: f64 = sorted.iter().take_while(|(_, pv)| *pv <= px + 1e-12).map(|(_, pv)| *pv).sum();
-            out.push((x, px, p_fisher.clamp(0.0, 1.0)));
-        }
-        out
-    };
-
-    let obs_slice = fisher_slice(s_obs);
-    let p_obs = obs_slice.iter().find(|&&(x, _, _)| x == a).map_or(1.0, |&(_, _, pf)| pf);
+    let obs_slice = boschloo_fisher_slice(s_obs, n1, n2, total, ln_fact);
+    let ln_p_obs = obs_slice.iter().find(|&&(x, _, _)| x == a).map_or(0.0, |&(_, _, ln_pf)| ln_pf);
+    let ln_thresh = ln_p_obs + BOSCHLOO_LOG_REL_TOL;
 
     let mut f_s = vec![0.0_f64; total + 1];
     for (s, slot) in f_s.iter_mut().enumerate() {
-        for (_, hg_p, pf) in fisher_slice(s) {
-            if pf <= p_obs + 1e-12 {
-                *slot += hg_p;
+        let mut slice_sum = NeumaierSum::new();
+        for (_, hg_p, ln_pf) in boschloo_fisher_slice(s, n1, n2, total, ln_fact) {
+            if ln_pf <= ln_thresh {
+                slice_sum.add(hg_p);
             }
         }
+        *slot = slice_sum.total();
     }
     f_s
 }
@@ -865,8 +878,9 @@ fn accumulate_csm_region(a: usize, n1: usize, c: usize, n2: usize, ln_fact: &[f6
                 f_s[i + j] = prev[idx];
             }
         }
+        let val_thresh = best_val * (1.0 + 1.0e-12);
         for (pair, &val) in candidates.iter().zip(scores.iter()) {
-            if val <= best_val + 1e-12 {
+            if val <= val_thresh {
                 for &(i, j) in pair {
                     if !in_region[i][j] {
                         in_region[i][j] = true;
@@ -1411,35 +1425,38 @@ fn noncentral_hypergeom_p_and_mean_log_or(
     }
     let mut log_weights = Vec::with_capacity(span_usize);
     let mut max_lw = f64::NEG_INFINITY;
+    let mut max_abs_lw = 0.0_f64;
+    let mut obs_lw = f64::NEG_INFINITY;
     for x in lo..=hi {
         let bx = r1 - x;
         let cx = c1 - x;
         let dx = r2 - cx;
         let lw = (x as f64) * log_or - (ln_factorial(x) + ln_factorial(bx) + ln_factorial(cx) + ln_factorial(dx));
         max_lw = max_lw.max(lw);
+        max_abs_lw = max_abs_lw.max(lw.abs());
+        if x == a_obs {
+            obs_lw = lw;
+        }
         log_weights.push((x, lw));
     }
-    let mut norm = 0.0_f64;
-    let mut mean_num = 0.0_f64;
-    let mut probs = Vec::with_capacity(log_weights.len());
+    let log_rel_tol = (1.0e-12_f64).max(16.0 * max_abs_lw * f64::EPSILON);
+    let thresh = obs_lw + log_rel_tol;
+    let mut norm = NeumaierSum::new();
+    let mut mean_num = NeumaierSum::new();
+    let mut tail_sum = NeumaierSum::new();
     for (x, lw) in log_weights {
         let w = (lw - max_lw).exp();
-        norm += w;
-        mean_num += (x as f64) * w;
-        probs.push((x, w));
-    }
-    if !norm.is_finite() || norm <= 0.0 {
-        return Err(StatsError::InvalidParameter { name: "noncentral_hypergeom_norm", value: norm });
-    }
-    let mut obs_p = 0.0_f64;
-    for &(x, w) in &probs {
-        if x == a_obs {
-            obs_p = w / norm;
-            break;
+        norm.add(w);
+        mean_num.add((x as f64) * w);
+        if lw <= thresh {
+            tail_sum.add(w);
         }
     }
-    let p_sum: f64 = probs.iter().map(|(_, w)| w / norm).filter(|&p| p <= obs_p + 1e-12).sum();
-    Ok((p_sum.clamp(0.0, 1.0), mean_num / norm))
+    let norm_total = norm.total();
+    if !norm_total.is_finite() || norm_total <= 0.0 {
+        return Err(StatsError::InvalidParameter { name: "noncentral_hypergeom_norm", value: norm_total });
+    }
+    Ok(((tail_sum.total() / norm_total).clamp(0.0, 1.0), mean_num.total() / norm_total))
 }
 
 #[inline]
@@ -2610,14 +2627,27 @@ fn run_contingency_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, cont_s
     }
 
     if let TableArchetype::PartsOfWhole(pow) = &sheet.archetype {
-        return run_parts_of_whole_gof(pow, spec, cont_spec, &mut out, p_fmt);
+        let incompat = |analysis: &'static str| Err(StatsError::IncompatibleTable { analysis, actual: sheet.archetype.kind() });
+        return match cont_spec.method {
+            ContingencyMethod::ExactBinomial => run_exact_binomial_analysis(sheet, spec, cont_spec, out, confidence, p_fmt),
+            ContingencyMethod::PearsonChiSquare { yates_continuity: false } | ContingencyMethod::LikelihoodRatioG2 => {
+                run_parts_of_whole_gof(pow, spec, cont_spec, &mut out, p_fmt)
+            }
+            ContingencyMethod::PearsonChiSquare { yates_continuity: true } => incompat("Yates' continuity-corrected chi-square"),
+            ContingencyMethod::FisherExact => incompat("Fisher's exact test"),
+            ContingencyMethod::BarnardExact => incompat("Barnard's exact test"),
+            ContingencyMethod::CochranArmitageTrend => incompat("Cochran-Armitage trend test"),
+            ContingencyMethod::McNemarPaired => incompat("McNemar's paired test"),
+            ContingencyMethod::CohenKappa { .. } => incompat("Cohen's kappa"),
+            ContingencyMethod::FleissKappa => incompat("Fleiss' kappa"),
+        };
     }
 
     let TableArchetype::Contingency(table) = &sheet.archetype else {
         return Err(StatsError::IncompatibleTable { analysis: "contingency analysis", actual: sheet.archetype.kind() });
     };
     table.validate_counts()?;
-    let selected_cols = resolve_selected_indices(&spec.selected_data_sets, table.data_sets.len());
+    let selected_cols = try_resolve_selected_indices(&spec.selected_data_sets, table.data_sets.len())?;
     if selected_cols.is_empty() {
         return Err(StatsError::EmptyInput);
     }
@@ -2902,7 +2932,10 @@ fn extract_exact_binomial_counts(sheet: &DataSheet, spec: &AnalysisSpec) -> Resu
         }
         TableArchetype::Contingency(table) => {
             table.validate_counts()?;
-            let selected_cols = resolve_selected_indices(&spec.selected_data_sets, table.data_sets.len());
+            let selected_cols = try_resolve_selected_indices(&spec.selected_data_sets, table.data_sets.len())?;
+            if selected_cols.is_empty() {
+                return Err(StatsError::EmptyInput);
+            }
             let n_rows = table.row_count();
             let n_cols = selected_cols.len();
             let (k, f) = match (n_rows, n_cols) {
@@ -2920,15 +2953,15 @@ fn extract_exact_binomial_counts(sheet: &DataSheet, spec: &AnalysisSpec) -> Resu
             if !matches!(col_table.subcolumn_mode, SubcolumnMode::Single | SubcolumnMode::RawReplicates(1)) {
                 return Err(StatsError::RequiresRawReplicates);
             }
-            let col_idx = spec.selected_data_sets.first().copied().unwrap_or(0);
-            let Some(ds) = col_table.data_sets.get(col_idx) else {
-                return Err(StatsError::MissingColumn { index: col_idx });
-            };
+            let indices = try_resolve_selected_indices(&spec.selected_data_sets, col_table.data_sets.len())?;
+            if !spec.selected_data_sets.is_empty() && indices.len() != 1 {
+                return Err(StatsError::InvalidParameter { name: "selected_data_sets", value: indices.len() as f64 });
+            }
+            let &col_idx = indices.first().ok_or(StatsError::EmptyInput)?;
             let values = col_table.active_column_values(col_idx);
             if values.is_empty() {
                 return Err(StatsError::EmptyInput);
             }
-            let _ = ds;
             let mut k = 0_u64;
             for v in &values {
                 if *v == 1.0 {
@@ -3126,6 +3159,7 @@ fn run_parts_of_whole_gof(
     if active_categories < 2 {
         return Err(StatsError::InsufficientSampleSize { context: "parts-of-whole goodness-of-fit", required: 2, actual: active_categories });
     }
+    let is_g2 = matches!(cont_spec.method, ContingencyMethod::LikelihoodRatioG2);
     let chi2 = if chi2 <= 0.0 { 0.0 } else { chi2 };
     let g2 = if g2 <= 0.0 { 0.0 } else { g2 };
     let df = (active_categories - 1) as f64;
@@ -3133,20 +3167,25 @@ fn run_parts_of_whole_gof(
     let g2_p = chi2_sf(g2, df)?;
     push_scalar(out, "Goodness-of-fit chi-square", None, chi2);
     push_scalar(out, "Likelihood-ratio G-squared", None, g2);
-    push_scalar(out, "P value", None, p_val);
+    push_scalar(out, "P value", None, if is_g2 { g2_p } else { p_val });
+    push_scalar(out, "Chi-square P value", None, p_val);
     push_scalar(out, "G-squared P value", None, g2_p);
 
-    let title = if is_custom { "Chi-square goodness of fit (custom expected proportions)" } else { "Chi-square goodness of fit (uniform expected)" };
+    let title = match (is_g2, is_custom) {
+        (true, true) => "Likelihood-ratio G2 goodness of fit (custom expected proportions)",
+        (true, false) => "Likelihood-ratio G2 goodness of fit (uniform expected)",
+        (false, true) => "Chi-square goodness of fit (custom expected proportions)",
+        (false, false) => "Chi-square goodness of fit (uniform expected)",
+    };
     let headers = vec![String::from("Statistic"), String::from("df"), String::from("P value")];
-    let rows = vec![vec![num_cell(chi2), num_cell(df), p_cell(p_val, p_fmt)], vec![num_cell(g2), num_cell(df), p_cell(g2_p, p_fmt)]];
-    out.tabs.push(build_tab(
-        "parts-gof",
-        title,
-        ResultTabKind::MainSummary,
-        headers,
-        vec![String::from("Pearson chi-square"), String::from("Likelihood-ratio G2")],
-        rows,
-    ));
+    let chi2_row = vec![num_cell(chi2), num_cell(df), p_cell(p_val, p_fmt)];
+    let g2_row = vec![num_cell(g2), num_cell(df), p_cell(g2_p, p_fmt)];
+    let (row_labels, rows) = if is_g2 {
+        (vec![String::from("Likelihood-ratio G2"), String::from("Pearson chi-square")], vec![g2_row, chi2_row])
+    } else {
+        (vec![String::from("Pearson chi-square"), String::from("Likelihood-ratio G2")], vec![chi2_row, g2_row])
+    };
+    out.tabs.push(build_tab("parts-gof", title, ResultTabKind::MainSummary, headers, row_labels, rows));
 
     out.tabs.push(build_tab(
         "parts-gof-categories",
@@ -3522,5 +3561,45 @@ mod tests {
         assert!(hi_z0.is_finite() && hi_z0 > 0.0);
         let (lo_zb, hi_zb) = baptista_pike_or_ci(5, 0, 10_000_000, 10_000_000, ConfidenceLevel::DEFAULT_95).unwrap();
         assert!(lo_zb > 0.0 && lo_zb.is_finite() && hi_zb.is_infinite());
+    }
+
+    #[test]
+    fn noncentral_hypergeom_extreme_tail_uses_relative_log_space_tolerance() {
+        use super::{noncentral_hypergeom_p_and_mean_log_or, noncentral_hypergeom_p_and_mean_windowed};
+
+        // D1 Python exact rational / Decimal(prec=60) references for Fisher's noncentral hypergeometric two-sided tail P:
+        // - (40, 40, 40, 40, OR=1.0): 2 / C(80, 40) = 1.8603403656036264e-23
+        // - (35, 35, 35, 35, OR=0.5): 1.6644787521087209e-26
+        // - (30, 30, 30, 30, OR=2.0): 1.2510776526992096e-13
+        // - (40, 40, 40, 40, OR=0.5): 2.644451551880381e-30 (beyond windowed -65.0 log cutoff; unwindowed stays exact)
+        let windowed_cases = [
+            (40_u64, 40_u64, 40_u64, 40_u64, 1.0_f64, 1.860_340_365_603_626_4e-23_f64),
+            (35, 35, 35, 35, 0.5, 1.664_478_752_108_721e-26),
+            (30, 30, 30, 30, 2.0, 1.251_077_652_699_209_6e-13),
+        ];
+        for (a, r1, r2, c1, or_val, expected_p) in windowed_cases {
+            let p_pub = noncentral_hypergeom_p(a, r1, r2, c1, or_val).unwrap();
+            let lo = c1.saturating_sub(r2);
+            let hi = r1.min(c1);
+            let span_usize = usize::try_from(hi - lo + 1).unwrap();
+            let (p_log, m_log) = noncentral_hypergeom_p_and_mean_log_or(a, r1, r2, c1, lo, hi, span_usize, or_val.ln()).unwrap();
+            let (p_win, m_win) = noncentral_hypergeom_p_and_mean_windowed(a, r1, r2, c1, lo, hi, or_val.ln(), true).unwrap();
+
+            assert!((p_pub - expected_p).abs() <= 1e-11 * expected_p, "p_pub={p_pub} expected={expected_p}");
+            assert!((p_log - expected_p).abs() <= 1e-11 * expected_p, "p_log={p_log} expected={expected_p}");
+            assert!((p_win - expected_p).abs() <= 1e-10 * expected_p, "p_win={p_win} expected={expected_p}");
+            assert!((m_log - m_win).abs() < 1e-11, "mean mismatch: {m_log} vs {m_win}");
+        }
+
+        let p_40_half = noncentral_hypergeom_p(40, 40, 40, 40, 0.5).unwrap();
+        let (p_40_half_log, _) = noncentral_hypergeom_p_and_mean_log_or(40, 40, 40, 40, 0, 40, 41, 0.5_f64.ln()).unwrap();
+        let expected_40_half = 2.644_451_551_880_381e-30_f64;
+        assert!((p_40_half - expected_40_half).abs() <= 1e-11 * expected_40_half, "p_40_half={p_40_half}");
+        assert!((p_40_half_log - expected_40_half).abs() <= 1e-11 * expected_40_half, "p_40_half_log={p_40_half_log}");
+
+        // Exact unit-OR parity against Fisher's exact test even far below 1e-12.
+        let p_fisher_40 = fisher_exact_2x2(40, 0, 0, 40).unwrap();
+        let p_nchg_40 = noncentral_hypergeom_p(40, 40, 40, 40, 1.0).unwrap();
+        assert!((p_nchg_40 - p_fisher_40).abs() <= 1e-11 * p_fisher_40, "nchg={p_nchg_40} fisher={p_fisher_40}");
     }
 }

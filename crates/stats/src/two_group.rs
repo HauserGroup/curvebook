@@ -1727,6 +1727,9 @@ fn run_two_group_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, tg: &Two
         match tg.method {
             TwoGroupMethod::OneSampleT { hypothetical } => {
                 let indices = try_resolve_selected_indices(&spec.selected_data_sets, col_tab.data_sets.len())?;
+                if !spec.selected_data_sets.is_empty() && indices.len() != 1 {
+                    return Err(StatsError::InvalidParameter { name: "selected_data_sets", value: indices.len() as f64 });
+                }
                 let &first_idx = indices.first().ok_or(StatsError::EmptyInput)?;
                 let (label, mean, sd, n) = extract_pre_summarized_group(col_tab, first_idx, conf)?;
                 let out = one_sample_t_test_from_summary(mean, sd, n, hypothetical, tg.two_tailed, conf)?;
@@ -1735,6 +1738,9 @@ fn run_two_group_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, tg: &Two
             }
             TwoGroupMethod::UnpairedT | TwoGroupMethod::WelchT => {
                 let indices = try_resolve_selected_indices(&spec.selected_data_sets, col_tab.data_sets.len())?;
+                if !spec.selected_data_sets.is_empty() && indices.len() != 2 {
+                    return Err(StatsError::InvalidParameter { name: "selected_data_sets", value: indices.len() as f64 });
+                }
                 if indices.len() < 2 {
                     return Err(StatsError::InsufficientSampleSize { context: "two-group comparison columns", required: 2, actual: indices.len() });
                 }
@@ -1823,15 +1829,7 @@ fn run_two_group_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, tg: &Two
         return Ok(res);
     }
 
-    let cols = if spec.selected_data_sets.is_empty() {
-        extract_numeric_columns(sheet, &[])?
-    } else {
-        let indices = try_resolve_selected_indices(&spec.selected_data_sets, sheet.archetype.column_count())?;
-        if indices.len() < 2 {
-            return Err(StatsError::InsufficientSampleSize { context: "two-group comparison columns", required: 2, actual: indices.len() });
-        }
-        extract_numeric_columns(sheet, &indices[..2])?
-    };
+    let cols = extract_two_group_wide_columns(sheet, &spec.selected_data_sets)?;
     if cols.len() < 2 {
         return Err(StatsError::InsufficientSampleSize { context: "two-group comparison columns", required: 2, actual: cols.len() });
     }
@@ -2174,16 +2172,66 @@ struct MvTwoGroupExtraction {
 }
 
 fn resolve_mv_one_sample_selection(sheet: &DataSheet, selected: &[usize], mv_response: Option<usize>) -> Result<Vec<usize>, StatsError> {
-    if let TableArchetype::MultipleVariables(mv) = &sheet.archetype {
-        let _ = try_resolve_selected_indices(selected, mv.variables.len())?;
-        if let Some(r_col) = mv_response {
-            if r_col >= mv.variables.len() {
-                return Err(StatsError::MissingColumn { index: r_col });
+    match &sheet.archetype {
+        TableArchetype::Column(col_tab) => {
+            let indices = try_resolve_selected_indices(selected, col_tab.data_sets.len())?;
+            if !selected.is_empty() && indices.len() != 1 {
+                return Err(StatsError::InvalidParameter { name: "selected_data_sets", value: indices.len() as f64 });
             }
-            return Ok(vec![r_col]);
+            let &first_idx = indices.first().ok_or(StatsError::EmptyInput)?;
+            Ok(vec![first_idx])
         }
+        TableArchetype::MultipleVariables(mv) => {
+            let indices = try_resolve_selected_indices(selected, mv.variables.len())?;
+            if let Some(r_col) = mv_response {
+                if r_col >= mv.variables.len() {
+                    return Err(StatsError::MissingColumn { index: r_col });
+                }
+                return Ok(vec![r_col]);
+            }
+            let numeric_indices: Vec<usize> = indices.into_iter().filter(|&i| is_mv_numeric_response_candidate(&mv.variables[i])).collect();
+            if !selected.is_empty() && numeric_indices.len() != 1 {
+                return Err(StatsError::InvalidParameter { name: "selected_data_sets", value: numeric_indices.len() as f64 });
+            }
+            let &first_idx = numeric_indices.first().ok_or(StatsError::EmptyInput)?;
+            Ok(vec![first_idx])
+        }
+        _ => Ok(selected.to_vec()),
     }
-    Ok(selected.to_vec())
+}
+
+fn extract_two_group_wide_columns(sheet: &DataSheet, selected: &[usize]) -> Result<Vec<crate::common::ExtractedColumn>, StatsError> {
+    match &sheet.archetype {
+        TableArchetype::Column(col_tab) => {
+            if col_tab.subcolumn_mode.is_pre_summarized() {
+                return Err(StatsError::RequiresRawReplicates);
+            }
+            let indices = try_resolve_selected_indices(selected, col_tab.data_sets.len())?;
+            if !selected.is_empty() && indices.len() != 2 {
+                return Err(StatsError::InvalidParameter { name: "selected_data_sets", value: indices.len() as f64 });
+            }
+            if indices.len() < 2 {
+                return Err(StatsError::InsufficientSampleSize { context: "two-group comparison columns", required: 2, actual: indices.len() });
+            }
+            extract_numeric_columns(sheet, &indices[..2])
+        }
+        TableArchetype::MultipleVariables(mv) => {
+            let indices = try_resolve_selected_indices(selected, mv.variables.len())?;
+            let numeric_indices: Vec<usize> = indices.into_iter().filter(|&i| is_mv_numeric_response_candidate(&mv.variables[i])).collect();
+            if !selected.is_empty() && numeric_indices.len() != 2 {
+                return Err(StatsError::InvalidParameter { name: "selected_data_sets", value: numeric_indices.len() as f64 });
+            }
+            if numeric_indices.len() < 2 {
+                return Err(StatsError::InsufficientSampleSize {
+                    context: "two-group comparison columns",
+                    required: 2,
+                    actual: numeric_indices.len(),
+                });
+            }
+            extract_numeric_columns(sheet, &numeric_indices[..2])
+        }
+        _ => extract_numeric_columns(sheet, selected),
+    }
 }
 
 fn mv_cell_token(cell: &Cell) -> Option<String> {
@@ -2263,9 +2311,12 @@ fn resolve_mv_two_group_inputs(sheet: &DataSheet, spec: &AnalysisSpec, tg: &TwoG
     } else {
         let cat_cols: Vec<usize> = selected.iter().copied().filter(|&i| mv.variables[i].role == VariableRole::Categorical).collect();
         let num_cols: Vec<usize> = selected.iter().copied().filter(|&i| mv.variables.get(i).is_some_and(is_mv_numeric_response_candidate)).collect();
-        if cat_cols.len() == 1
-            && let Some(r_col) = select_default_mv_response_column(mv, &num_cols)
-        {
+        if cat_cols.len() >= 2 {
+            return Err(StatsError::InvalidParameter { name: "mv_group_column", value: cat_cols.len() as f64 });
+        }
+        if cat_cols.len() == 1 {
+            let r_col = select_default_mv_response_column(mv, &num_cols)
+                .ok_or(StatsError::InvalidParameter { name: "mv_response_column", value: num_cols.len() as f64 })?;
             (cat_cols[0], r_col)
         } else {
             return Ok(None);
@@ -2563,15 +2614,7 @@ fn extract_multiple_row_inputs(sheet: &DataSheet, spec: &AnalysisSpec, paired: b
         TableArchetype::MultipleVariables(mv) => {
             let indices: Vec<usize> = try_resolve_selected_indices(&spec.selected_data_sets, mv.variables.len())?
                 .into_iter()
-                .filter(|&i| {
-                    mv.variables.get(i).is_some_and(|v| {
-                        if spec.selected_data_sets.is_empty() {
-                            !matches!(v.role, VariableRole::Categorical | VariableRole::Label)
-                        } else {
-                            v.role != VariableRole::Categorical
-                        }
-                    })
-                })
+                .filter(|&i| mv.variables.get(i).is_some_and(is_mv_numeric_response_candidate))
                 .collect();
             if paired && !indices.len().is_multiple_of(2) {
                 return Err(StatsError::InvalidParameter { name: "paired_selected_columns", value: indices.len() as f64 });
