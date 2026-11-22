@@ -43,9 +43,10 @@
       "type": "string"
     },
     "SheetId": {
-      "description": "Non-whitespace sheet identifier (trimmed non-empty).",
+      "description": "Non-empty hook-safe sheet identifier (1..=256 bytes, no whitespace, control characters, `:`, `{{`, or `}}`).",
+      "maxLength": 256,
       "minLength": 1,
-      "pattern": "\\S",
+      "pattern": "^(?!.*(?:\\{\\{|\\}\\}))[^\\s:\\x00-\\x1f\\x7f]{1,256}$",
       "title": "SheetId",
       "type": "string"
     },

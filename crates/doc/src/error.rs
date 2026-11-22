@@ -121,7 +121,7 @@ pub enum SummaryPointError {
     MissingSpread,
     /// Mean value was entered, but sample size `N` is missing or non-numeric.
     MissingSampleSize,
-    /// Sample size `N` is `< 1.0` or non-integer.
+    /// Sample size `N` is `< 1.0`, non-finite, or non-integer.
     SampleSizeBelowOne {
         /// Invalid sample size `N` read from the third subcolumn.
         n: f64,
@@ -141,7 +141,7 @@ impl fmt::Display for SummaryPointError {
             }
             Self::MissingSpread => f.write_str("pre-summarized point is missing its SD/SEM/%CV spread value"),
             Self::MissingSampleSize => f.write_str("pre-summarized point is missing sample size N"),
-            Self::SampleSizeBelowOne { n } => write!(f, "pre-summarized sample size N must be >= 1, got {n}"),
+            Self::SampleSizeBelowOne { n } => write!(f, "pre-summarized sample size N must be an integer >= 1, got {n}"),
             Self::NegativeSpread { spread } => write!(f, "pre-summarized spread must be >= 0, got {spread}"),
         }
     }
@@ -298,7 +298,13 @@ impl fmt::Display for DocError {
             Self::TooManyRows { count, max } => write!(f, "row count {count} exceeds maximum {max}"),
             Self::TooManyDataSets { count, max } => write!(f, "column count {count} exceeds maximum {max}"),
             Self::TooManySubcolumns { count, max } => write!(f, "subcolumn count {count} exceeds maximum {max}"),
-            Self::TooManyCells { count, max } => write!(f, "sheet cell count {count} exceeds maximum {max}"),
+            Self::TooManyCells { count, max } => {
+                if *max == MAX_PROJECT_CELLS {
+                    write!(f, "project cell count {count} exceeds maximum {max}")
+                } else {
+                    write!(f, "sheet cell count {count} exceeds maximum {max}")
+                }
+            }
             Self::TooManyLayoutItems { count, max } => write!(f, "layout item count {count} exceeds maximum {max}"),
             Self::TooManySheets { count, max } => write!(f, "project sheet count {count} exceeds maximum {max}"),
             Self::TooManyImageAssets { count, max } => write!(f, "project image asset count {count} exceeds maximum {max}"),

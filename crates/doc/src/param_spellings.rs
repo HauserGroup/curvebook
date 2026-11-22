@@ -459,24 +459,47 @@ fn lookup_tables(tables: &[&[&'static str]], key: &str) -> Option<&'static str> 
 
 fn analysis_shorthand_alias(kind: Option<&str>, key: &str) -> Option<&'static str> {
     let norm_kind = kind.map(|k| k.trim().to_ascii_lowercase());
-    let is_pvalue_stack = norm_kind.as_deref() == Some("pvalue_stack");
-    let is_cox = matches!(norm_kind.as_deref(), Some("cox" | "cox_ph" | "cox_proportional_hazards"));
-    let is_simulate = matches!(norm_kind.as_deref(), Some("simulate" | "simulate_xy" | "transform.simulate"));
-    let is_glm_or_mv_model = matches!(
-        norm_kind.as_deref(),
-        Some(
-            "glm"
-                | "multiple_regression"
-                | "multiple_linear_regression"
-                | "logistic_regression"
-                | "poisson_regression"
-                | "pls"
-                | "pls_regression"
-                | "pca"
-                | "principal_component_analysis"
-                | "multiple_imputation"
-        )
-    );
+    let desc_id = norm_kind.as_deref().and_then(crate::analysis::resolve_analysis_descriptor).map(|d| d.id);
+    let is_pvalue_stack = desc_id == Some(crate::analysis::AnalysisKindId::PValueStack)
+        || matches!(
+            norm_kind.as_deref(),
+            Some("pvalue_stack" | "p_value_stack" | "pvaluestack" | "pvalues" | "stats.pvalue_stack" | "stats.pvaluestack")
+        );
+    let is_cox = matches!(norm_kind.as_deref(), Some("cox" | "cox_ph" | "cox_proportional_hazards" | "coxph" | "cox_regression" | "survival.cox"));
+    let is_simulate = matches!(norm_kind.as_deref(), Some("simulate" | "simulate_xy" | "transform.simulate" | "simulate_data"));
+    let is_glm_or_mv_model =
+        matches!(desc_id, Some(crate::analysis::AnalysisKindId::GeneralizedLinearModel | crate::analysis::AnalysisKindId::Multivariate))
+            || matches!(
+                norm_kind.as_deref(),
+                Some(
+                    "glm"
+                        | "generalized_linear_model"
+                        | "linear_glm"
+                        | "multiple_linear"
+                        | "logistic_glm"
+                        | "multiple_logistic"
+                        | "poisson_glm"
+                        | "multiple_poisson"
+                        | "multiple_regression"
+                        | "multiple_linear_regression"
+                        | "logistic_regression"
+                        | "poisson_regression"
+                        | "multivariate"
+                        | "pls"
+                        | "pls_regression"
+                        | "pca"
+                        | "principal_components"
+                        | "principal_component_analysis"
+                        | "correlation"
+                        | "correlation_matrix"
+                        | "clustering"
+                        | "kmeans"
+                        | "k_means"
+                        | "hierarchical_clustering"
+                        | "multiple_imputation"
+                        | "mice"
+                )
+            );
 
     if is_pvalue_stack {
         if let Some(c) = lookup_tables(&[PVALUE_STACK_METHOD, PVALUE_STACK_THRESHOLD, PVALUE_STACK_COLUMN], key) {
@@ -515,13 +538,15 @@ fn analysis_shorthand_alias(kind: Option<&str>, key: &str) -> Option<&'static st
         return Some("parameters");
     }
 
-    if matches!(norm_kind.as_deref(), Some("outliers" | "outlier_detection" | "identify_outliers" | "rout"))
+    if (desc_id == Some(crate::analysis::AnalysisKindId::OutlierDetection)
+        || matches!(norm_kind.as_deref(), Some("outliers" | "outlier" | "outlier_detection" | "identify_outliers" | "rout" | "grubbs")))
         && let Some(c) = lookup_tables(&[OUTLIER_Q_PERCENT], key)
     {
         return Some(c);
     }
 
-    let is_km_survival = matches!(norm_kind.as_deref(), Some("kaplan_meier" | "survival" | "log_rank"));
+    let is_km_survival = (desc_id == Some(crate::analysis::AnalysisKindId::Survival) && !is_cox)
+        || matches!(norm_kind.as_deref(), Some("kaplan_meier" | "survival" | "log_rank" | "logrank" | "km"));
     if is_km_survival && let Some(c) = lookup_tables(&[MV_TIME_COLUMN, MV_STATUS_COLUMN, MV_GROUP_COLUMN], key) {
         return Some(c);
     }

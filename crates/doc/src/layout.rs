@@ -564,7 +564,7 @@ impl<'de> serde::Deserialize<'de> for LayoutSpec {
             background_fill: raw.background_fill,
             items: raw.items,
         };
-        spec.validate_item_count().map_err(serde::de::Error::custom)?;
+        spec.validate().map_err(serde::de::Error::custom)?;
         Ok(spec)
     }
 }
@@ -576,7 +576,7 @@ impl Default for LayoutSpec {
 }
 
 /// Navigator sheet wrapping a [`LayoutSpec`].
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct LayoutSheet {
     /// Project-unique sheet identifier.
     pub id: SheetId,
@@ -598,9 +598,7 @@ impl LayoutSheet {
     /// Construct a validated `LayoutSheet`, rejecting empty IDs, oversized titles, or invalid [`LayoutSpec`] geometry.
     pub fn new(id: impl Into<SheetId>, title: impl Into<String>, spec: LayoutSpec) -> Result<Self, DocError> {
         let id = id.into();
-        if id.as_str().trim().is_empty() {
-            return Err(DocError::EmptyIdentifier);
-        }
+        id.validate_non_empty_bounded()?;
         let title = title.into();
         validate_title(&title)?;
         spec.validate()?;
@@ -621,15 +619,34 @@ impl LayoutSheet {
 
     /// Validate sheet identity, title, layout specification, and floating-note geometry.
     pub fn validate(&self) -> Result<(), DocError> {
-        if self.id.as_str().trim().is_empty() {
-            return Err(DocError::EmptyIdentifier);
-        }
+        self.id.validate_non_empty_bounded()?;
         validate_title(&self.title)?;
         self.spec.validate()?;
-        if self.floating_notes.iter().any(|note| !rect_is_finite(note.bounds_pt)) {
-            return Err(DocError::InvalidCellValue { archetype: crate::TableKind::Column, row: 0, col: 0, reason: "floating_notes.bounds_pt" });
+        for note in &self.floating_notes {
+            note.validate()?;
         }
         Ok(())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for LayoutSheet {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct RawLayoutSheet {
+            id: SheetId,
+            title: String,
+            spec: LayoutSpec,
+            floating_notes: Vec<FloatingNote>,
+            color_tag: Option<Rgba8>,
+        }
+
+        let raw = RawLayoutSheet::deserialize(deserializer)?;
+        let sheet = Self { id: raw.id, title: raw.title, spec: raw.spec, floating_notes: raw.floating_notes, color_tag: raw.color_tag };
+        sheet.validate().map_err(serde::de::Error::custom)?;
+        Ok(sheet)
     }
 }
 

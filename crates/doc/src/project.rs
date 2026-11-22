@@ -57,7 +57,7 @@ pub struct NamedCheckpoint {
 }
 
 /// Complete serializable CurveBook project model (`L1`).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ProjectDocument {
     /// Persisted `.curvebook` document schema version (defaults to [`CURRENT_SCHEMA_VERSION`]).
     pub schema_version: u32,
@@ -136,10 +136,102 @@ impl ProjectDocument {
         }
     }
 
-    fn ensure_can_insert(&self, id: &SheetId) -> Result<(), DocError> {
-        if id.as_str().trim().is_empty() {
-            return Err(DocError::EmptyIdentifier);
+    /// Total allocated cell slots summed across all data sheets (and cached analyzable result tables),
+    /// enforced against [`crate::MAX_PROJECT_CELLS`].
+    pub fn total_allocated_cells(&self) -> Result<usize, DocError> {
+        let mut total = 0usize;
+        for ds in &self.data_sheets {
+            total = crate::error::validate_project_cells(total, ds.archetype.allocated_cell_slots())?;
         }
+        for rs in &self.result_sheets {
+            if let Some(ds) = &rs.analyzable_data {
+                total = crate::error::validate_project_cells(total, ds.archetype.allocated_cell_slots())?;
+            }
+        }
+        Ok(total)
+    }
+
+    /// Validate structural project limits during deserialization while permitting legacy `.prism`
+    /// sheet IDs awaiting format-level sanitization before full [`Self::validate`].
+    pub fn validate_structural_limits(&self) -> Result<(), DocError> {
+        validate_title(&self.title)?;
+        let total_sheets = self.total_sheet_count();
+        if total_sheets > MAX_SHEETS_PER_PROJECT {
+            return Err(DocError::TooManySheets { count: total_sheets, max: MAX_SHEETS_PER_PROJECT });
+        }
+        self.total_allocated_cells()?;
+        if self.image_assets.len() > crate::image::MAX_PROJECT_IMAGE_ASSETS {
+            return Err(DocError::TooManyImageAssets { count: self.image_assets.len(), max: crate::image::MAX_PROJECT_IMAGE_ASSETS });
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for id in self
+            .data_sheets
+            .iter()
+            .map(|s| &s.id)
+            .chain(self.info_sheets.iter().map(|s| &s.id))
+            .chain(self.result_sheets.iter().map(|s| &s.id))
+            .chain(self.graph_sheets.iter().map(|s| &s.id))
+            .chain(self.layout_sheets.iter().map(|s| &s.id))
+        {
+            id.validate_non_empty_bounded()?;
+            if !seen.insert(id.clone()) {
+                return Err(DocError::DuplicateSheetId { sheet_id: id.clone() });
+            }
+        }
+        Ok(())
+    }
+
+    /// Perform full strict validation across sheet IDs, folder limits, project cell budget, image assets,
+    /// and every child sheet specification.
+    pub fn validate(&self) -> Result<(), DocError> {
+        self.validate_structural_limits()?;
+        if let Some(active) = &self.active_sheet_id {
+            active.validate()?;
+        }
+        if let Some(anchor) = &self.family_anchor_sheet_id {
+            anchor.validate()?;
+        }
+        for ds in &self.data_sheets {
+            ds.id.validate()?;
+            ds.validate_strict()?;
+            for region in &ds.linked_regions {
+                if let Some(src_id) = region.spec.source.upstream_sheet_id() {
+                    src_id.validate()?;
+                }
+            }
+        }
+        for info in &self.info_sheets {
+            info.id.validate()?;
+            for ds_id in &info.linked_data_sheets {
+                ds_id.validate()?;
+            }
+            info.validate()?;
+        }
+        for rs in &self.result_sheets {
+            rs.id.validate()?;
+            rs.analysis.source_sheet_id.validate()?;
+            for up in rs.analysis.kind.upstream_sheet_ids() {
+                up.validate()?;
+            }
+            rs.validate()?;
+        }
+        for gs in &self.graph_sheets {
+            gs.id.validate()?;
+            gs.spec.primary_source_sheet_id.validate()?;
+            gs.validate()?;
+        }
+        for ls in &self.layout_sheets {
+            ls.id.validate()?;
+            ls.validate()?;
+        }
+        for asset in &self.image_assets {
+            asset.validate()?;
+        }
+        Ok(())
+    }
+
+    fn ensure_can_insert(&self, id: &SheetId) -> Result<(), DocError> {
+        id.validate_hook_safe_bounded()?;
         if self.sheet_section(id).is_some() {
             return Err(DocError::DuplicateSheetId { sheet_id: id.clone() });
         }
@@ -153,6 +245,8 @@ impl ProjectDocument {
     /// Append a [`DataSheet`] to the `Data` folder, selecting it as active/family-anchor if none is set yet.
     pub fn add_data_sheet(&mut self, sheet: DataSheet) -> Result<(), DocError> {
         self.ensure_can_insert(&sheet.id)?;
+        let existing_cells = self.total_allocated_cells()?;
+        crate::error::validate_project_cells(existing_cells, sheet.archetype.allocated_cell_slots())?;
         if self.active_sheet_id.is_none() {
             self.active_sheet_id = Some(sheet.id.clone());
             self.family_anchor_sheet_id = Some(sheet.id.clone());
@@ -403,10 +497,50 @@ impl ProjectDocument {
             }
         }
 
-        deps.retain(|d| d != id);
         deps.sort();
         deps.dedup();
         deps
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ProjectDocument {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct RawProjectDocument {
+            schema_version: u32,
+            title: String,
+            data_sheets: Vec<DataSheet>,
+            info_sheets: Vec<InfoSheet>,
+            result_sheets: Vec<ResultSheet>,
+            graph_sheets: Vec<GraphSheet>,
+            layout_sheets: Vec<LayoutSheet>,
+            active_sheet_id: Option<SheetId>,
+            family_anchor_sheet_id: Option<SheetId>,
+            #[serde(default)]
+            checkpoints: Vec<NamedCheckpoint>,
+            #[serde(default)]
+            image_assets: Vec<ProjectImageAsset>,
+        }
+
+        let raw = RawProjectDocument::deserialize(deserializer)?;
+        let doc = Self {
+            schema_version: raw.schema_version,
+            title: raw.title,
+            data_sheets: raw.data_sheets,
+            info_sheets: raw.info_sheets,
+            result_sheets: raw.result_sheets,
+            graph_sheets: raw.graph_sheets,
+            layout_sheets: raw.layout_sheets,
+            active_sheet_id: raw.active_sheet_id,
+            family_anchor_sheet_id: raw.family_anchor_sheet_id,
+            checkpoints: raw.checkpoints,
+            image_assets: raw.image_assets,
+        };
+        doc.validate_structural_limits().map_err(serde::de::Error::custom)?;
+        Ok(doc)
     }
 }
 

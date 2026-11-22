@@ -232,13 +232,27 @@ impl XColumnMode {
         }
     }
 
-    /// Validate X-column mode constraints (`MAX_SUBCOLUMNS`, non-zero raw replicates, unit label length).
-    pub fn validate(&self) -> Result<(), DocError> {
+    /// Validate X-column mode constraints (`MAX_SUBCOLUMNS`, non-zero raw replicates, unit label length)
+    /// without checking numeric sequence finiteness (used by `XyTable::validate` so higher-level
+    /// non-finite float sweeps can report `NonFiniteFloat` directly).
+    pub fn validate_subcolumn_only(&self) -> Result<(), DocError> {
         match self {
             Self::Numbers { subcolumn_mode } => subcolumn_mode.validate(),
             Self::DateOrElapsedTime { unit_label } => validate_title(unit_label),
             Self::GeneratedSequence { .. } => Ok(()),
         }
+    }
+
+    /// Validate X-column mode constraints (`MAX_SUBCOLUMNS`, non-zero raw replicates, unit label length,
+    /// and finite `GeneratedSequence` `start`/`step`).
+    pub fn validate(&self) -> Result<(), DocError> {
+        self.validate_subcolumn_only()?;
+        if let Self::GeneratedSequence { start, step, .. } = self
+            && (!start.is_finite() || !step.is_finite())
+        {
+            return Err(DocError::InvalidCellValue { archetype: TableKind::Xy, row: 0, col: 0, reason: "x_mode.generated_sequence" });
+        }
+        Ok(())
     }
 }
 
@@ -458,7 +472,7 @@ impl XyTable {
     /// Validate rectangular row/subcolumn invariants, X-column mode, and dimension caps.
     pub fn validate(&self) -> Result<(), DocError> {
         validate_title(&self.x_title)?;
-        self.x_mode.validate()?;
+        self.x_mode.validate_subcolumn_only()?;
         validate_table_subcolumn_mode(TableKind::Xy, self.y_subcolumn_mode)?;
         let row_count = self.row_count();
         validate_rows(row_count)?;
@@ -884,6 +898,16 @@ impl GroupedTable {
             });
         }
         validate_dataset_column_grid(TableKind::Grouped, &self.data_sets, row_count, subs)
+    }
+
+    /// Reject non-finite values in `row_numeric_spacing` (enforced on deserialization and strict validation).
+    pub fn validate_finite(&self) -> Result<(), DocError> {
+        if let Some(ref spacing) = self.row_numeric_spacing
+            && spacing.iter().any(|v| v.is_some_and(|x| !x.is_finite()))
+        {
+            return Err(DocError::InvalidCellValue { archetype: TableKind::Grouped, row: 0, col: 0, reason: "row_numeric_spacing" });
+        }
+        Ok(())
     }
 }
 
@@ -1455,8 +1479,10 @@ impl VariableColumn {
                 continue;
             };
             for (from, to) in mappings {
-                if current == *from && from != to {
-                    cell.value = CellValue::Text(to.clone());
+                let from_trimmed = from.trim();
+                let to_trimmed = to.trim();
+                if current == from_trimmed && from_trimmed != to_trimmed {
+                    cell.value = CellValue::Text(to_trimmed.to_string());
                     changed += 1;
                     break;
                 }
@@ -1514,7 +1540,7 @@ impl VariableColumn {
             LevelOrderKind::Explicit(order_list) => {
                 let mut rank_by_level: std::collections::HashMap<&str, usize> = std::collections::HashMap::with_capacity(order_list.len());
                 for (pos, level) in order_list.iter().enumerate() {
-                    rank_by_level.entry(level.as_str()).or_insert(pos);
+                    rank_by_level.entry(level.trim()).or_insert(pos);
                 }
                 entries.sort_by(|(ra, a), (rb, b)| {
                     let pa = rank_by_level.get(a.level.as_str()).copied();
@@ -1980,6 +2006,11 @@ impl TableArchetype {
     /// Callers must grow the archetype's row storage to at least `existing_rows + insert_rows`
     /// before invoking this method. Any slice shorter than `existing_rows + insert_rows` is left
     /// untouched; if `insert_rows == 0` or `start_row >= existing_rows`, this is a no-op.
+    /// Shift existing rows starting at `start_row` down by `insert_rows` when inserting into `existing_rows`.
+    ///
+    /// Note: this only shifts cells and row metadata owned directly by [`TableArchetype`]. Callers
+    /// holding a [`crate::DataSheet`] should call [`crate::DataSheet::shift_rows_down`] so
+    /// sheet-level `exclusion_notes` and `linked_regions` stay aligned with moved rows.
     pub fn shift_rows_down(&mut self, start_row: usize, insert_rows: usize, existing_rows: usize) {
         if insert_rows == 0 || start_row >= existing_rows {
             return;

@@ -425,6 +425,7 @@ mod tests {
         });
         let analysis = AnalysisSpec::new("fit-1", "data-xy", AnalysisKind::NonlinearRegression(fit_spec)).unwrap();
         let mut res = ResultSheet::new(analysis).unwrap();
+        res.status = super::ResultStatus::UpToDate;
         res.scalars.push(ResultScalarEntry { key: String::from("Ki"), data_set_index: Some(0), value: 4.2e-9, units: Some(String::from("M")) });
         let _ci_cell = ResultCell::ConfidenceInterval { lower: CiBound::Finite(2.1e-9), upper: CiBound::Open };
         assert_eq!(res.lookup_scalar("ki", Some(0)), Some(4.2e-9));

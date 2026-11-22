@@ -1,5 +1,223 @@
 {
   "$defs": {
+    "AnalysisSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "auto_title": {
+          "type": "string"
+        },
+        "confidence_level": {
+          "maximum": 99.99,
+          "minimum": 0.01,
+          "type": "number"
+        },
+        "custom_title": {
+          "description": "Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).",
+          "maxLength": 4096,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/SheetId"
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "PowerAnalysis": {
+                  "$ref": "#/$defs/PowerAnalysisSpec"
+                }
+              },
+              "required": [
+                "PowerAnalysis"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "BlandAltman": {
+                  "type": "object"
+                },
+                "Contingency": {
+                  "type": "object"
+                },
+                "DescriptiveStats": {
+                  "type": "object"
+                },
+                "FactorialAnova": {
+                  "type": "object"
+                },
+                "GeneralizedLinearModel": {
+                  "type": "object"
+                },
+                "LinearRegression": {
+                  "type": "object"
+                },
+                "MultipleRowTTests": {
+                  "type": "object"
+                },
+                "Multivariate": {
+                  "type": "object"
+                },
+                "NestedComparison": {
+                  "type": "object"
+                },
+                "NonlinearRegression": {
+                  "type": "object"
+                },
+                "OneWayAnova": {
+                  "type": "object"
+                },
+                "OutlierDetection": {
+                  "type": "object"
+                },
+                "PValueStack": {
+                  "type": "object"
+                },
+                "PassingBablok": {
+                  "type": "object"
+                },
+                "RocCurve": {
+                  "type": "object"
+                },
+                "Survival": {
+                  "type": "object"
+                },
+                "Transform": {
+                  "type": "object"
+                },
+                "TwoGroupComparison": {
+                  "type": "object"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "p_value_format": {
+          "oneOf": [
+            {
+              "const": "FourDecimal",
+              "type": "string"
+            },
+            {
+              "const": "Apa",
+              "type": "string"
+            },
+            {
+              "const": "Nejm",
+              "type": "string"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "Custom": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "decimals": {
+                      "maximum": 15,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "scientific_below": {
+                      "minimum": 0.0,
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "decimals",
+                    "scientific_below"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "Custom"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "selected_data_sets": {
+          "items": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "source_sheet_id": {
+          "$ref": "#/$defs/SheetId"
+        }
+      },
+      "required": [
+        "id",
+        "source_sheet_id",
+        "selected_data_sets",
+        "auto_title",
+        "custom_title",
+        "confidence_level",
+        "p_value_format",
+        "kind"
+      ],
+      "title": "AnalysisSpec",
+      "type": "object"
+    },
+    "CellCoord": {
+      "additionalProperties": false,
+      "properties": {
+        "col": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "row": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "subcol": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "row",
+        "col",
+        "subcol"
+      ],
+      "title": "CellCoord",
+      "type": "object"
+    },
+    "CellExclusionNote": {
+      "additionalProperties": false,
+      "properties": {
+        "coord": {
+          "$ref": "#/$defs/CellCoord"
+        },
+        "note": {
+          "type": "string"
+        },
+        "reason_tag": {
+          "type": "string"
+        },
+        "timestamp_utc": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "coord",
+        "reason_tag",
+        "note",
+        "timestamp_utc"
+      ],
+      "title": "CellExclusionNote",
+      "type": "object"
+    },
     "ChecklistItem": {
       "additionalProperties": false,
       "properties": {
@@ -51,21 +269,29 @@
     "DataSheet": {
       "additionalProperties": false,
       "properties": {
-        "archetype": {},
+        "archetype": {
+          "$ref": "#/$defs/TableArchetype"
+        },
         "color_tag": {
           "anyOf": [
-            {},
+            {
+              "$ref": "#/$defs/Rgba8"
+            },
             {
               "type": "null"
             }
           ]
         },
         "exclusion_notes": {
-          "items": {},
+          "items": {
+            "$ref": "#/$defs/CellExclusionNote"
+          },
           "type": "array"
         },
         "floating_notes": {
-          "items": {},
+          "items": {
+            "$ref": "#/$defs/FloatingNote"
+          },
           "type": "array"
         },
         "frozen": {
@@ -85,7 +311,9 @@
           ]
         },
         "linked_regions": {
-          "items": {},
+          "items": {
+            "$ref": "#/$defs/LinkedDataRegion"
+          },
           "type": "array"
         },
         "title": {
@@ -144,19 +372,129 @@
       "title": "ErrorCode",
       "type": "string"
     },
+    "FittedCurveOverlay": {
+      "additionalProperties": false,
+      "properties": {
+        "ambiguous": {
+          "type": "boolean"
+        },
+        "converged": {
+          "type": "boolean"
+        },
+        "data_set_index": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "equation_id": {
+          "type": "string"
+        },
+        "points": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "ci_lower": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "ci_upper": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "pred_lower": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "pred_upper": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "x",
+              "y",
+              "ci_lower",
+              "ci_upper",
+              "pred_lower",
+              "pred_upper"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "data_set_index",
+        "equation_id",
+        "converged",
+        "ambiguous",
+        "points"
+      ],
+      "title": "FittedCurveOverlay",
+      "type": "object"
+    },
+    "FloatingNote": {
+      "additionalProperties": false,
+      "properties": {
+        "body_markdown": {
+          "type": "string"
+        },
+        "bounds_pt": {
+          "$ref": "#/$defs/RectPt"
+        },
+        "fill_color": {
+          "$ref": "#/$defs/Rgba8"
+        },
+        "id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "minimized": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "fill_color",
+        "bounds_pt",
+        "minimized",
+        "body_markdown"
+      ],
+      "title": "FloatingNote",
+      "type": "object"
+    },
     "GraphSheet": {
       "additionalProperties": false,
       "properties": {
         "color_tag": {
           "anyOf": [
-            {},
+            {
+              "$ref": "#/$defs/Rgba8"
+            },
             {
               "type": "null"
             }
           ]
         },
         "floating_notes": {
-          "items": {},
+          "items": {
+            "$ref": "#/$defs/FloatingNote"
+          },
           "type": "array"
         },
         "id": {
@@ -165,7 +503,9 @@
         "initialized": {
           "type": "boolean"
         },
-        "spec": {},
+        "spec": {
+          "$ref": "#/$defs/GraphSpec"
+        },
         "title": {
           "description": "Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).",
           "maxLength": 4096,
@@ -183,23 +523,227 @@
       "title": "GraphSheet",
       "type": "object"
     },
+    "GraphSpec": {
+      "additionalProperties": true,
+      "properties": {
+        "canvas_size_pt": {
+          "$ref": "#/$defs/SizePt"
+        },
+        "paper_fill": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Rgba8"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "primary_source_sheet_id": {
+          "$ref": "#/$defs/SheetId"
+        },
+        "title": {
+          "description": "Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).",
+          "maxLength": 4096,
+          "type": "string"
+        },
+        "x_axis": {
+          "additionalProperties": true,
+          "properties": {
+            "segments": {
+              "items": {
+                "type": "object"
+              },
+              "maxItems": 3,
+              "minItems": 1,
+              "type": "array"
+            },
+            "stroke_width_pt": {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            "title": {
+              "description": "Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).",
+              "maxLength": 4096,
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "segments",
+            "stroke_width_pt"
+          ],
+          "type": "object"
+        },
+        "y2_axis": {
+          "additionalProperties": true,
+          "properties": {
+            "segments": {
+              "items": {
+                "type": "object"
+              },
+              "maxItems": 3,
+              "minItems": 1,
+              "type": "array"
+            },
+            "stroke_width_pt": {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            "title": {
+              "description": "Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).",
+              "maxLength": 4096,
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "segments",
+            "stroke_width_pt"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "y_axis": {
+          "additionalProperties": true,
+          "properties": {
+            "segments": {
+              "items": {
+                "type": "object"
+              },
+              "maxItems": 3,
+              "minItems": 1,
+              "type": "array"
+            },
+            "stroke_width_pt": {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            "title": {
+              "description": "Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).",
+              "maxLength": 4096,
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "segments",
+            "stroke_width_pt"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "primary_source_sheet_id",
+        "palette",
+        "canvas_size_pt",
+        "paper_fill",
+        "title",
+        "frame_preset",
+        "x_axis",
+        "y_axis",
+        "series",
+        "legend"
+      ],
+      "title": "GraphSpec",
+      "type": "object"
+    },
+    "InfoConstant": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).",
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "units": {
+          "description": "Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).",
+          "maxLength": 4096,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "oneOf": [
+            {
+              "const": "Empty",
+              "type": "string"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "Number": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "Number"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "Text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "Text"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "Date": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "Date"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "value",
+        "units"
+      ],
+      "title": "InfoConstant",
+      "type": "object"
+    },
     "InfoSheet": {
       "additionalProperties": false,
       "properties": {
         "color_tag": {
           "anyOf": [
-            {},
+            {
+              "$ref": "#/$defs/Rgba8"
+            },
             {
               "type": "null"
             }
           ]
         },
         "constants": {
-          "items": {},
+          "items": {
+            "$ref": "#/$defs/InfoConstant"
+          },
           "type": "array"
         },
         "floating_notes": {
-          "items": {},
+          "items": {
+            "$ref": "#/$defs/FloatingNote"
+          },
           "type": "array"
         },
         "id": {
@@ -237,20 +781,26 @@
       "properties": {
         "color_tag": {
           "anyOf": [
-            {},
+            {
+              "$ref": "#/$defs/Rgba8"
+            },
             {
               "type": "null"
             }
           ]
         },
         "floating_notes": {
-          "items": {},
+          "items": {
+            "$ref": "#/$defs/FloatingNote"
+          },
           "type": "array"
         },
         "id": {
           "$ref": "#/$defs/SheetId"
         },
-        "spec": {},
+        "spec": {
+          "$ref": "#/$defs/LayoutSpec"
+        },
         "title": {
           "description": "Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).",
           "maxLength": 4096,
@@ -267,6 +817,128 @@
       "title": "LayoutSheet",
       "type": "object"
     },
+    "LayoutSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "align_plot_origins": {
+          "type": "boolean"
+        },
+        "background_fill": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Rgba8"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "grid_template": {
+          "items": {
+            "maximum": 255,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "height": {
+          "minimum": 2.2250738585072014e-308,
+          "type": "number"
+        },
+        "items": {
+          "items": {
+            "type": "object"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "orientation": {
+          "enum": [
+            "Portrait",
+            "Landscape"
+          ],
+          "type": "string"
+        },
+        "panel_badges": {
+          "enum": [
+            "UpperCaseLetters",
+            "LowerCaseLetters",
+            "None"
+          ],
+          "type": "string"
+        },
+        "unit": {
+          "enum": [
+            "Millimeters",
+            "Centimeters",
+            "Inches",
+            "Points"
+          ],
+          "type": "string"
+        },
+        "width": {
+          "minimum": 2.2250738585072014e-308,
+          "type": "number"
+        }
+      },
+      "required": [
+        "width",
+        "height",
+        "unit",
+        "orientation",
+        "grid_template",
+        "align_plot_origins",
+        "panel_badges",
+        "background_fill",
+        "items"
+      ],
+      "title": "LayoutSpec",
+      "type": "object"
+    },
+    "LinkedDataRegion": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "provenance_summary": {
+          "type": "string"
+        },
+        "spec": {
+          "type": "object"
+        },
+        "target_range": {
+          "additionalProperties": false,
+          "properties": {
+            "end": {
+              "$ref": "#/$defs/CellCoord"
+            },
+            "start": {
+              "$ref": "#/$defs/CellCoord"
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "spec",
+        "target_range",
+        "provenance_summary"
+      ],
+      "title": "LinkedDataRegion",
+      "type": "object"
+    },
     "NamedCheckpoint": {
       "additionalProperties": false,
       "properties": {
@@ -277,6 +949,7 @@
           "type": "string"
         },
         "id": {
+          "maxLength": 256,
           "minLength": 1,
           "pattern": "\\S",
           "type": "string"
@@ -306,11 +979,410 @@
       "title": "NamedCheckpoint",
       "type": "object"
     },
+    "PairwiseComparisonRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "estimate_diff": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "group_a": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "group_b": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "is_fdr_q": {
+          "type": "boolean"
+        },
+        "label_a": {
+          "type": "string"
+        },
+        "label_b": {
+          "type": "string"
+        },
+        "raw_p_or_q": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        "significant": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "group_a",
+        "group_b",
+        "label_a",
+        "label_b",
+        "estimate_diff",
+        "raw_p_or_q",
+        "is_fdr_q",
+        "significant"
+      ],
+      "title": "PairwiseComparisonRecord",
+      "type": "object"
+    },
+    "PowerAnalysisSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "allocation_ratio": {
+          "minimum": 2.2250738585072014e-308,
+          "type": "number"
+        },
+        "alpha": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        "chi_square_df": {
+          "minimum": 2.2250738585072014e-308,
+          "type": "number"
+        },
+        "continuity_correction": {
+          "type": "boolean"
+        },
+        "correlation_method": {
+          "enum": [
+            "FisherZ",
+            "FisherZWithTCrit",
+            "ExactTTransform",
+            "ConditionalSlopeT"
+          ],
+          "title": "CorrelationPowerMethod",
+          "type": "string"
+        },
+        "effect": {
+          "oneOf": [
+            {
+              "const": "Unspecified",
+              "type": "string"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "Standardized": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "Standardized"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "MeanDiffAndSd": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "mean_diff": {
+                      "type": "number"
+                    },
+                    "sd": {
+                      "minimum": 2.2250738585072014e-308,
+                      "type": "number"
+                    },
+                    "sd_group2": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "within_pair_correlation": {
+                      "maximum": 1.0,
+                      "minimum": -1.0,
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "mean_diff",
+                    "sd"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "MeanDiffAndSd"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "PairedDiff": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "mean_diff": {
+                      "type": "number"
+                    },
+                    "sd_diff": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "mean_diff",
+                    "sd_diff"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "PairedDiff"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "GroupMeansAndSd": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "means": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "type": "array"
+                    },
+                    "within_sd": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "means",
+                    "within_sd"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "GroupMeansAndSd"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "TwoProportions": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "p1": {
+                      "maximum": 1.0,
+                      "minimum": 0.0,
+                      "type": "number"
+                    },
+                    "p2": {
+                      "maximum": 1.0,
+                      "minimum": 0.0,
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "p1",
+                    "p2"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "TwoProportions"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "BaselineProportion": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "p1": {
+                      "maximum": 1.0,
+                      "minimum": 0.0,
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "p1"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "BaselineProportion"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "RSquared": {
+                  "maximum": 1.0,
+                  "minimum": 0.0,
+                  "type": "number"
+                }
+              },
+              "required": [
+                "RSquared"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "RegressionSlope": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "beta1": {
+                      "type": "number"
+                    },
+                    "sigma_eps": {
+                      "type": "number"
+                    },
+                    "sigma_x": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "beta1",
+                    "sigma_x",
+                    "sigma_eps"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "RegressionSlope"
+              ],
+              "type": "object"
+            }
+          ],
+          "title": "PowerEffectSpec"
+        },
+        "family": {
+          "enum": [
+            "TwoSampleUnpairedT",
+            "TwoSamplePairedT",
+            "OneSampleT",
+            "OneWayAnova",
+            "TwoProportions",
+            "Correlation",
+            "ChiSquare",
+            "SimpleLinearRegression"
+          ],
+          "title": "PowerTestFamily",
+          "type": "string"
+        },
+        "info_sheet_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SheetId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "num_groups": {
+          "minimum": 2,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sample_size": {
+          "minimum": 0.0,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "sample_size_group2": {
+          "minimum": 0.0,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "solve_target": {
+          "enum": [
+            "SampleSize",
+            "Power",
+            "DetectableEffect"
+          ],
+          "title": "PowerSolveTarget",
+          "type": "string"
+        },
+        "tail_mode": {
+          "oneOf": [
+            {
+              "const": "TwoSided",
+              "type": "string"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "OneSided": {
+                  "enum": [
+                    "Greater",
+                    "Less"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "OneSided"
+              ],
+              "type": "object"
+            }
+          ],
+          "title": "PowerTailMode"
+        },
+        "target_power": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "two_proportions_mode": {
+          "enum": [
+            "PooledNullUnpooledAlt",
+            "Unpooled",
+            "CohensH"
+          ],
+          "title": "TwoProportionsMethod",
+          "type": "string"
+        }
+      },
+      "required": [
+        "family",
+        "solve_target",
+        "tail_mode",
+        "alpha",
+        "allocation_ratio",
+        "effect",
+        "chi_square_df",
+        "two_proportions_mode",
+        "continuity_correction",
+        "correlation_method"
+      ],
+      "title": "PowerAnalysisSpec",
+      "type": "object"
+    },
     "ProjectImageAsset": {
       "additionalProperties": false,
       "properties": {
         "asset_id": {
           "minLength": 4,
+          "pattern": "^img-[0-9a-f]{16}$",
           "type": "string"
         },
         "bytes": {
@@ -342,6 +1414,33 @@
       "title": "ProjectImageAsset",
       "type": "object"
     },
+    "RectPt": {
+      "additionalProperties": false,
+      "properties": {
+        "height": {
+          "minimum": 0.0,
+          "type": "number"
+        },
+        "width": {
+          "minimum": 0.0,
+          "type": "number"
+        },
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ],
+      "title": "RectPt",
+      "type": "object"
+    },
     "RemediationKind": {
       "enum": [
         "WelchT",
@@ -355,10 +1454,45 @@
       "title": "RemediationKind",
       "type": "string"
     },
+    "ResultScalarEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "data_set_index": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "key": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "units": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "key",
+        "data_set_index",
+        "value",
+        "units"
+      ],
+      "title": "ResultScalarEntry",
+      "type": "object"
+    },
     "ResultSheet": {
       "additionalProperties": false,
       "properties": {
-        "analysis": {},
+        "analysis": {
+          "$ref": "#/$defs/AnalysisSpec"
+        },
         "analyzable_data": {
           "anyOf": [
             {
@@ -377,7 +1511,9 @@
         },
         "color_tag": {
           "anyOf": [
-            {},
+            {
+              "$ref": "#/$defs/Rgba8"
+            },
             {
               "type": "null"
             }
@@ -390,29 +1526,39 @@
           "type": "array"
         },
         "fitted_curves": {
-          "items": {},
+          "items": {
+            "$ref": "#/$defs/FittedCurveOverlay"
+          },
           "type": "array"
         },
         "floating_notes": {
-          "items": {},
+          "items": {
+            "$ref": "#/$defs/FloatingNote"
+          },
           "type": "array"
         },
         "id": {
           "$ref": "#/$defs/SheetId"
         },
         "pairwise_comparisons": {
-          "items": {},
+          "items": {
+            "$ref": "#/$defs/PairwiseComparisonRecord"
+          },
           "type": "array"
         },
         "scalars": {
-          "items": {},
+          "items": {
+            "$ref": "#/$defs/ResultScalarEntry"
+          },
           "type": "array"
         },
         "status": {
           "$ref": "#/$defs/ResultStatus"
         },
         "tabs": {
-          "items": {},
+          "items": {
+            "$ref": "#/$defs/ResultTab"
+          },
           "type": "array"
         }
       },
@@ -478,6 +1624,114 @@
       ],
       "title": "ResultStatus"
     },
+    "ResultTab": {
+      "additionalProperties": false,
+      "properties": {
+        "column_headers": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "footnotes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "MainSummary",
+            "AnovaTable",
+            "MultipleComparisons",
+            "ParametersAndConfidenceIntervals",
+            "ModelComparison",
+            "Residuals",
+            "DescriptiveSummary",
+            "InterpolatedUnknowns",
+            "CurveCoordinates",
+            "NumberAtRisk",
+            "Diagnostics",
+            "CovarianceMatrix",
+            "NormalQq",
+            "BaselineSurvival",
+            "LogMinusLog"
+          ],
+          "type": "string"
+        },
+        "row_labels": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "rows": {
+          "items": {
+            "items": {
+              "type": [
+                "string",
+                "object"
+              ]
+            },
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "title": {
+          "description": "Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).",
+          "maxLength": 4096,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "kind",
+        "column_headers",
+        "row_labels",
+        "rows",
+        "footnotes"
+      ],
+      "title": "ResultTab",
+      "type": "object"
+    },
+    "Rgba8": {
+      "additionalProperties": false,
+      "properties": {
+        "a": {
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "b": {
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "g": {
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "r": {
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "r",
+        "g",
+        "b",
+        "a"
+      ],
+      "title": "Rgba8",
+      "type": "object"
+    },
     "SheetFolderKind": {
       "enum": [
         "Data",
@@ -490,11 +1744,31 @@
       "type": "string"
     },
     "SheetId": {
-      "description": "Non-whitespace sheet identifier (trimmed non-empty).",
+      "description": "Non-empty hook-safe sheet identifier (1..=256 bytes, no whitespace, control characters, `:`, `{{`, or `}}`).",
+      "maxLength": 256,
       "minLength": 1,
-      "pattern": "\\S",
+      "pattern": "^(?!.*(?:\\{\\{|\\}\\}))[^\\s:\\x00-\\x1f\\x7f]{1,256}$",
       "title": "SheetId",
       "type": "string"
+    },
+    "SizePt": {
+      "additionalProperties": false,
+      "properties": {
+        "height": {
+          "minimum": 0.0,
+          "type": "number"
+        },
+        "width": {
+          "minimum": 0.0,
+          "type": "number"
+        }
+      },
+      "required": [
+        "width",
+        "height"
+      ],
+      "title": "SizePt",
+      "type": "object"
     },
     "SourceCellId": {
       "additionalProperties": false,
@@ -523,6 +1797,107 @@
       ],
       "title": "SourceCellId",
       "type": "object"
+    },
+    "TableArchetype": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Xy": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "Xy"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Column": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "Column"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Grouped": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "Grouped"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Contingency": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "Contingency"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Survival": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "Survival"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "PartsOfWhole": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "PartsOfWhole"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "MultipleVariables": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "MultipleVariables"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Nested": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "Nested"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "TableArchetype"
     },
     "TableKind": {
       "enum": [
@@ -564,6 +1939,7 @@
       "items": {
         "$ref": "#/$defs/DataSheet"
       },
+      "maxItems": 500,
       "type": "array"
     },
     "family_anchor_sheet_id": {
@@ -580,30 +1956,35 @@
       "items": {
         "$ref": "#/$defs/GraphSheet"
       },
+      "maxItems": 500,
       "type": "array"
     },
     "image_assets": {
       "items": {
         "$ref": "#/$defs/ProjectImageAsset"
       },
+      "maxItems": 256,
       "type": "array"
     },
     "info_sheets": {
       "items": {
         "$ref": "#/$defs/InfoSheet"
       },
+      "maxItems": 500,
       "type": "array"
     },
     "layout_sheets": {
       "items": {
         "$ref": "#/$defs/LayoutSheet"
       },
+      "maxItems": 500,
       "type": "array"
     },
     "result_sheets": {
       "items": {
         "$ref": "#/$defs/ResultSheet"
       },
+      "maxItems": 500,
       "type": "array"
     },
     "schema_version": {
