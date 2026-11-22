@@ -17,7 +17,7 @@ use super::graph::{
 use super::helpers::{next_unique_sheet_id, parse_sheet_id, require_graph_sheet, require_layout_sheet, require_layout_sheet_mut};
 use super::params::{
     any_json_schema, array_schema, bool_schema, deserialize_strict, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema,
-    obj_schema, obj_schema_with_aliases, parse_params, str_schema,
+    obj_schema, parse_params, str_schema,
 };
 use super::{CommandGroup, CommandSpec, Ctx, Effects};
 use crate::{CommandOutcome, EngineError, Session};
@@ -193,7 +193,6 @@ impl LayoutSpecFieldsParams {
 
 #[derive(Debug, Deserialize)]
 struct LayoutCreateParams {
-    #[serde(alias = "id")]
     sheet_id: Option<String>,
     title: Option<String>,
     #[serde(flatten)]
@@ -228,12 +227,11 @@ fn schema_layout_create() -> Value {
         ("title", nullable_schema(str_schema("Optional layout sheet title (defaults to `Layout 1`)"))),
     ];
     props.extend(layout_spec_field_properties());
-    obj_schema_with_aliases(props, &[], vec![("sheet_id", &["id"])], false)
+    obj_schema(props, &[], false)
 }
 
 #[derive(Debug, Deserialize)]
 struct LayoutSetSpecParams {
-    #[serde(alias = "id")]
     sheet_id: String,
     spec: Option<Value>,
     title: Option<String>,
@@ -248,22 +246,17 @@ fn schema_layout_set_spec() -> Value {
         ("title", nullable_schema(str_schema("Optional updated layout sheet title"))),
     ];
     props.extend(layout_spec_field_properties());
-    obj_schema_with_aliases(props, &["sheet_id"], vec![("sheet_id", &["id"])], false)
+    obj_schema(props, &["sheet_id"], false)
 }
 
 #[derive(Debug, Deserialize)]
 struct LayoutAddPanelParams {
-    #[serde(alias = "id")]
     sheet_id: String,
-    #[serde(alias = "type")]
     kind: Option<String>,
     panel_id: Option<String>,
-    #[serde(alias = "graph_sheet")]
     graph_sheet_id: Option<String>,
-    #[serde(alias = "source_sheet")]
     source_sheet_id: Option<String>,
     tab_id: Option<String>,
-    #[serde(alias = "text")]
     markdown: Option<String>,
     bounds_pt: Option<Value>,
     margin_pt: Option<f64>,
@@ -273,13 +266,12 @@ struct LayoutAddPanelParams {
     #[serde(default, deserialize_with = "de_opt_usize")]
     col: Option<usize>,
     scale_percent: Option<f64>,
-    #[serde(alias = "badge")]
     badge_override: Option<String>,
     font_size_pt: Option<f64>,
 }
 
 fn schema_layout_add_panel() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Target layout sheet ID")),
             ("kind", nullable_schema(non_empty_str_schema("Panel kind (`graph`, `table`, or `text`)"))),
@@ -298,46 +290,33 @@ fn schema_layout_add_panel() -> Value {
             ("font_size_pt", nullable_schema(num_schema("Text callout font size in points (default 10.0)", Some(0.5), None))),
         ],
         &["sheet_id"],
-        vec![
-            ("sheet_id", &["id"]),
-            ("kind", &["type"]),
-            ("graph_sheet_id", &["graph_sheet"]),
-            ("source_sheet_id", &["source_sheet"]),
-            ("markdown", &["text"]),
-            ("badge_override", &["badge"]),
-        ],
         false,
     )
 }
 
 #[derive(Debug, Deserialize)]
 struct LayoutAlignOriginsParams {
-    #[serde(alias = "id")]
     sheet_id: String,
-    #[serde(alias = "align_plot_origins")]
     align: Option<bool>,
     normalize_bounds: Option<bool>,
 }
 
 fn schema_layout_align_origins() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Target layout sheet ID")),
             ("align", nullable_schema(bool_schema("Enable or disable plot-origin alignment (default true)"))),
             ("normalize_bounds", nullable_schema(bool_schema("Snap nearby live graph panel X/Y bounds into shared row/column bands (default true)"))),
         ],
         &["sheet_id"],
-        vec![("sheet_id", &["id"]), ("align", &["align_plot_origins"])],
         false,
     )
 }
 
 #[derive(Debug, Deserialize)]
 struct LayoutApplyCanvasPresetParams {
-    #[serde(alias = "id")]
     sheet_id: String,
     preset: String,
-    #[serde(alias = "mode")]
     resize_mode: Option<String>,
 }
 
@@ -1552,7 +1531,7 @@ mod tests {
         .unwrap();
         s.execute("layout.addPanel", json!({ "sheet_id": "lay1", "graph_sheet_id": "g1", "row": 0, "col": 0 })).unwrap();
         s.execute("layout.addPanel", json!({ "sheet_id": "lay1", "graph_sheet_id": "g2", "bounds_pt": [260.0, 22.0, 200.0, 140.0] })).unwrap();
-        s.execute("layout.addPanel", json!({ "sheet_id": "lay1", "kind": "text", "text": "Summary note" })).unwrap();
+        s.execute("layout.addPanel", json!({ "sheet_id": "lay1", "kind": "text", "markdown": "Summary note" })).unwrap();
         let aligned = s.execute("layout.alignOrigins", json!({ "sheet_id": "lay1", "align": true, "normalize_bounds": true })).unwrap();
         assert_eq!(aligned.payload["aligned_panels"], json!(2));
 

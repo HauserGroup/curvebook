@@ -134,7 +134,7 @@ fn seed_session_with_graphs_and_layout() -> Session {
         "table.setCells",
         json!({
             "sheet_id": "xy-1",
-            "cells": [
+            "edits": [
                 { "row": 0, "col": 0, "value": 10.0 },
                 { "row": 1, "col": 0, "value": 25.0 },
                 { "row": 2, "col": 0, "value": 40.0 }

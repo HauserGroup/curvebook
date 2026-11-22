@@ -77,7 +77,7 @@ fn seed_rich_fixture() -> Result<Session, String> {
             "table.setXCells",
             json!({
                 "sheet_id": "xy-1",
-                "cells": [
+                "edits": [
                     { "row": 0, "value": 0.1 },
                     { "row": 1, "value": 1.0 },
                     { "row": 2, "value": 10.0 },
@@ -91,7 +91,7 @@ fn seed_rich_fixture() -> Result<Session, String> {
             "table.setCells",
             json!({
                 "sheet_id": "xy-1",
-                "cells": [
+                "edits": [
                     { "row": 0, "col": 0, "value": 98.0 },
                     { "row": 1, "col": 0, "value": 85.0 },
                     { "row": 2, "col": 0, "value": 52.0 },
@@ -121,7 +121,7 @@ fn seed_rich_fixture() -> Result<Session, String> {
             "table.setCells",
             json!({
                 "sheet_id": "col-1",
-                "cells": [
+                "edits": [
                     { "row": 0, "col": 0, "value": 10.0 },
                     { "row": 1, "col": 0, "value": 12.0 },
                     { "row": 2, "col": 0, "value": 11.0 },
@@ -151,7 +151,7 @@ fn seed_rich_fixture() -> Result<Session, String> {
             "table.setCells",
             json!({
                 "sheet_id": "col-2",
-                "cells": [
+                "edits": [
                     { "row": 0, "col": 0, "value": 5.0 },
                     { "row": 1, "col": 0, "value": 6.0 },
                     { "row": 2, "col": 0, "value": 7.0 },
@@ -194,7 +194,7 @@ fn seed_rich_fixture() -> Result<Session, String> {
             "table.setCells",
             json!({
                 "sheet_id": "mv-1",
-                "cells": [
+                "edits": [
                     { "row": 0, "col": 0, "value": "Low" },
                     { "row": 1, "col": 0, "value": "High" },
                     { "row": 2, "col": 0, "value": "Low" },
@@ -218,7 +218,7 @@ fn seed_rich_fixture() -> Result<Session, String> {
             "transform.run",
             json!({
                 "sheet_id": "res-xform-seed",
-                "source_sheet": "xy-1",
+                "source_sheet_id": "xy-1",
                 "kind": "normalize"
             }),
         ),
@@ -226,7 +226,7 @@ fn seed_rich_fixture() -> Result<Session, String> {
             "stats.run",
             json!({
                 "sheet_id": "res-anova-seed",
-                "source_sheet": "col-1",
+                "source_sheet_id": "col-1",
                 "kind": "one_way_anova"
             }),
         ),
@@ -234,7 +234,7 @@ fn seed_rich_fixture() -> Result<Session, String> {
             "fit.run",
             json!({
                 "sheet_id": "res-fit-seed",
-                "source_sheet": "xy-1",
+                "source_sheet_id": "xy-1",
                 "kind": "linear_regression"
             }),
         ),
@@ -317,7 +317,7 @@ fn sweep_valid_table_commands(s: &mut Session, covered: &mut BTreeSet<&'static s
         "table.setCells",
         json!({
             "sheet_id": "xy-extra",
-            "cells": [{ "row": 1, "col": 0, "value": 84.0 }]
+            "edits": [{ "row": 1, "col": 0, "value": 84.0 }]
         }),
     )?;
     run_valid(
@@ -326,12 +326,12 @@ fn sweep_valid_table_commands(s: &mut Session, covered: &mut BTreeSet<&'static s
         "table.setXCells",
         json!({
             "sheet_id": "xy-extra",
-            "cells": [{ "row": 0, "value": 1.0 }, { "row": 1, "value": 2.0 }]
+            "edits": [{ "row": 0, "value": 1.0 }, { "row": 1, "value": 2.0 }]
         }),
     )?;
     run_valid(s, covered, "table.setRowTitles", json!({ "sheet_id": "xy-extra", "titles": ["Row A", "Row B"] }))?;
     run_valid(s, covered, "table.setGroupTitles", json!({ "sheet_id": "xy-extra", "titles": ["Series One"] }))?;
-    run_valid(s, covered, "table.setTitles", json!({ "sheet_id": "xy-extra", "x_title": "Time", "y_titles": ["Signal"] }))?;
+    run_valid(s, covered, "table.setTitles", json!({ "sheet_id": "xy-extra", "x_title": "Time", "titles": ["Signal"] }))?;
     run_valid(s, covered, "table.setSubcolumnTitles", json!({ "sheet_id": "nested-1", "col": 0, "titles": ["Rep 1", "Rep 2"] }))?;
     run_valid(s, covered, "table.excludeCells", json!({ "sheet_id": "xy-extra", "cells": [{ "row": 1, "col": 0 }], "excluded": true }))?;
     run_valid(
@@ -372,8 +372,8 @@ fn sweep_valid_table_commands(s: &mut Session, covered: &mut BTreeSet<&'static s
             "target_sheet_id": "xy-dest",
             "source_sheet_id": "xy-1",
             "source_range": { "start": { "row": 0, "col": 0 }, "end": { "row": 1, "col": 0 } },
-            "target_row": 2,
-            "target_col": 0
+            "start_row": 2,
+            "start_col": 0
         }),
     )?;
     run_valid(
@@ -389,7 +389,7 @@ fn sweep_valid_table_commands(s: &mut Session, covered: &mut BTreeSet<&'static s
     )?;
     run_valid(s, covered, "table.exportCsv", json!({ "sheet_id": "xy-1" }))?;
     run_valid(s, covered, "table.setVariableRole", json!({ "sheet_id": "mv-1", "col": 0, "role": "Categorical" }))?;
-    run_valid(s, covered, "table.recodeLevels", json!({ "sheet_id": "mv-1", "col": 0, "mapping": { "Low": "Control" } }))?;
+    run_valid(s, covered, "table.recodeLevels", json!({ "sheet_id": "mv-1", "col": 0, "mappings": { "Low": "Control" } }))?;
     run_valid(s, covered, "table.setCategoricalOrder", json!({ "sheet_id": "mv-1", "col": 0, "order": ["Control", "High"] }))?;
     run_valid(
         s,
@@ -412,7 +412,7 @@ fn sweep_valid_table_commands(s: &mut Session, covered: &mut BTreeSet<&'static s
             "replicates": 1,
             "x_min": 0.0,
             "x_max": 5.0,
-            "equation": "linear",
+            "equation_id": "linear",
             "parameters": { "slope": 2.0, "intercept": 1.0 },
             "seed": 7
         }),
@@ -502,13 +502,13 @@ fn sweep_valid_table_commands(s: &mut Session, covered: &mut BTreeSet<&'static s
 
 fn sweep_valid_info_and_analysis_commands(s: &mut Session, covered: &mut BTreeSet<&'static str>) -> Result<(), String> {
     let info_id = s.document().info_sheets[0].id.as_str().to_string();
-    run_valid(s, covered, "info.setNote", json!({ "sheet_id": info_id, "note": "Baseline experimental log" }))?;
+    run_valid(s, covered, "info.setNote", json!({ "sheet_id": info_id, "text": "Baseline experimental log" }))?;
     run_valid(s, covered, "info.setConstant", json!({ "sheet_id": info_id, "name": "TempC", "value": 37.0 }))?;
     run_valid(s, covered, "info.removeConstant", json!({ "sheet_id": info_id, "name": "TempC" }))?;
 
-    run_valid(s, covered, "analyze.run", json!({ "sheet_id": "res-desc", "source_sheet": "col-1", "kind": "descriptive_stats" }))?;
-    run_valid(s, covered, "transform.run", json!({ "sheet_id": "res-xform", "source_sheet": "xy-1", "kind": "normalize" }))?;
-    run_valid(s, covered, "stats.run", json!({ "sheet_id": "res-anova", "source_sheet": "col-1", "kind": "one_way_anova" }))?;
+    run_valid(s, covered, "analyze.run", json!({ "sheet_id": "res-desc", "source_sheet_id": "col-1", "kind": "descriptive_stats" }))?;
+    run_valid(s, covered, "transform.run", json!({ "sheet_id": "res-xform", "source_sheet_id": "xy-1", "kind": "normalize" }))?;
+    run_valid(s, covered, "stats.run", json!({ "sheet_id": "res-anova", "source_sheet_id": "col-1", "kind": "one_way_anova" }))?;
     execute_checked(s, "sheet.createData", json!({ "sheet_id": "pval-1", "title": "P Stack", "archetype": "column", "cols": 1, "rows": 4 }))
         .map_err(|e| e.to_string())?;
     execute_checked(
@@ -516,7 +516,7 @@ fn sweep_valid_info_and_analysis_commands(s: &mut Session, covered: &mut BTreeSe
         "table.setCells",
         json!({
             "sheet_id": "pval-1",
-            "cells": [
+            "edits": [
                 { "row": 0, "col": 0, "value": 0.001 },
                 { "row": 1, "col": 0, "value": 0.02 },
                 { "row": 2, "col": 0, "value": 0.04 },
@@ -529,13 +529,13 @@ fn sweep_valid_info_and_analysis_commands(s: &mut Session, covered: &mut BTreeSe
         s,
         covered,
         "stats.pvalueStack",
-        json!({ "sheet_id": "res-pstack", "source_sheet": "pval-1", "method": "benjamini_hochberg", "threshold": 0.05 }),
+        json!({ "sheet_id": "res-pstack", "source_sheet_id": "pval-1", "method": "benjamini_hochberg", "alpha": 0.05 }),
     )?;
-    run_valid(s, covered, "fit.run", json!({ "sheet_id": "res-fit", "source_sheet": "xy-1", "kind": "linear_regression" }))?;
-    run_valid(s, covered, "analysis.add", json!({ "sheet_id": "res-ba", "source_sheet": "col-1", "kind": "stats.bland_altman" }))?;
-    run_valid(s, covered, "analysis.run", json!({ "sheet_id": "res-col", "source_sheet": "col-1", "kind": "descriptive_stats" }))?;
+    run_valid(s, covered, "fit.run", json!({ "sheet_id": "res-fit", "source_sheet_id": "xy-1", "kind": "linear_regression" }))?;
+    run_valid(s, covered, "analysis.add", json!({ "sheet_id": "res-ba", "source_sheet_id": "col-1", "kind": "stats.bland_altman" }))?;
+    run_valid(s, covered, "analysis.run", json!({ "sheet_id": "res-col", "source_sheet_id": "col-1", "kind": "descriptive_stats" }))?;
     run_valid(s, covered, "analysis.updateParams", json!({ "sheet_id": "res-anova", "confidence_percent": 99.0 }))?;
-    run_valid(s, covered, "analysis.retargetData", json!({ "sheet_id": "res-anova", "source_sheet": "col-2" }))?;
+    run_valid(s, covered, "analysis.retargetData", json!({ "sheet_id": "res-anova", "source_sheet_id": "col-2" }))?;
     run_valid(s, covered, "analysis.exportJson", json!({ "sheet_id": "res-anova" }))?;
     run_valid(s, covered, "analysis.exportCsv", json!({ "sheet_id": "res-anova" }))?;
     run_valid(s, covered, "result.generateReport", json!({ "result_sheet_id": "res-anova", "format": "markdown" }))?;
@@ -630,7 +630,7 @@ fn sweep_valid_graph_and_layout_commands(s: &mut Session, covered: &mut BTreeSet
         "layout.addPanel",
         json!({ "sheet_id": "lay-1", "kind": "graph", "graph_sheet_id": "gr-col", "bounds_pt": [260.0, 20.0, 220.0, 140.0] }),
     )?;
-    run_valid(s, covered, "layout.alignOrigins", json!({ "sheet_id": "lay-1", "align_plot_origins": true }))?;
+    run_valid(s, covered, "layout.alignOrigins", json!({ "sheet_id": "lay-1", "align": true }))?;
     run_valid(
         s,
         covered,
@@ -749,20 +749,19 @@ fn sweep_valid_export_and_project_commands(s: &mut Session, covered: &mut BTreeS
     run_valid(s, covered, "edit.redo", json!({}))?;
 
     let proj_path = next_temp_file("saved", "cbproj");
-    let saved = run_valid(s, covered, "project.save", json!({ "path": proj_path, "include_bytes": true }))?;
+    let saved = run_valid(s, covered, "project.save", json!({ "path": proj_path, "return_bytes": true }))?;
     let saved_b64 =
         saved.payload.get("bytes_base64").and_then(Value::as_str).ok_or_else(|| String::from("missing project bytes_base64"))?.to_string();
-    let tpl_saved = run_valid(s, covered, "project.saveTemplate", json!({ "include_bytes": true }))?;
+    let tpl_saved = run_valid(s, covered, "project.saveTemplate", json!({ "return_bytes": true }))?;
     let tpl_b64 =
         tpl_saved.payload.get("bytes_base64").and_then(Value::as_str).ok_or_else(|| String::from("missing template bytes_base64"))?.to_string();
 
-    run_valid(s, covered, "table.importPrism", json!({ "bytes_base64": saved_b64, "sheet_id": "imported-arch" }))?;
+    run_valid(s, covered, "table.importPrism", json!({ "bytes_base64": saved_b64 }))?;
     run_valid(
         s,
         covered,
         "table.importPzfx",
         json!({
-            "sheet_id": "pzfx-1",
             "xml": "<PrismFile><Table ID=\"T1\" TableType=\"XY\"><Title>Imported XY</Title><XColumn><Title>X</Title><Subcolumn><d>1</d><d>2</d></Subcolumn></XColumn><YColumn><Title>Y</Title><Subcolumn><d>10</d><d>20</d></Subcolumn></YColumn></Table></PrismFile>"
         }),
     )?;
@@ -854,7 +853,7 @@ fn run_targeted_hostile_cases(base: &Session, command_id: &str) {
         "table.setCell" | "table.setCells" => vec![
             json!({ "sheet_id": "xy-1", "row": u64::MAX, "col": 0, "value": 1.0 }),
             json!({ "sheet_id": "xy-1", "row": 0, "col": u64::MAX, "value": "NaN" }),
-            json!({ "sheet_id": "xy-1", "cells": [{ "row": u64::MAX, "col": 0, "value": "Infinity" }] }),
+            json!({ "sheet_id": "xy-1", "edits": [{ "row": u64::MAX, "col": 0, "value": "Infinity" }] }),
         ],
         "table.excludeCells" | "table.clearCells" => vec![
             json!({ "sheet_id": "xy-1", "range": { "start": { "row": 0, "col": 0 }, "end": { "row": u64::MAX, "col": 0 } } }),
@@ -879,17 +878,17 @@ fn run_targeted_hostile_cases(base: &Session, command_id: &str) {
             vec![json!({ "xml": "<PrismFile><Broken" }), json!({ "bytes_base64": "AA=A" }), json!({ "bytes": [0, 1, 2, 3] })]
         }
         "transform.run" | "stats.run" | "fit.run" | "analyze.run" | "analysis.run" => vec![
-            json!({ "source_sheet": "missing", "kind": "normalize" }),
-            json!({ "source_sheet": "xy-1", "kind": "unknown_analysis_kind" }),
-            json!({ "source_sheet": "col-1", "kind": "one_way_anova", "confidence_percent": 150.0 }),
+            json!({ "source_sheet_id": "missing", "kind": "normalize" }),
+            json!({ "source_sheet_id": "xy-1", "kind": "unknown_analysis_kind" }),
+            json!({ "source_sheet_id": "col-1", "kind": "one_way_anova", "confidence_percent": 150.0 }),
         ],
         "stats.pvalueStack" => vec![
             json!({}),
-            json!({ "source_sheet": "missing" }),
-            json!({ "source_sheet": "col-1", "threshold": 0.05 }),
-            json!({ "source_sheet": "col-1", "method": "not_a_method", "threshold": 0.05 }),
-            json!({ "source_sheet": "col-1", "method": "bonferroni", "threshold": 1.5 }),
-            json!({ "source_sheet": "col-1", "method": "bonferroni", "threshold": 0.0 }),
+            json!({ "source_sheet_id": "missing" }),
+            json!({ "source_sheet_id": "col-1", "threshold": 0.05 }),
+            json!({ "source_sheet_id": "col-1", "method": "not_a_method", "threshold": 0.05 }),
+            json!({ "source_sheet_id": "col-1", "method": "bonferroni", "threshold": 1.5 }),
+            json!({ "source_sheet_id": "col-1", "method": "bonferroni", "threshold": 0.0 }),
         ],
         "graph.setAxes" => vec![
             json!({ "sheet_id": "gr-seed", "x_axis": { "min": 100.0, "max": 10.0 } }),
@@ -982,8 +981,8 @@ fn verify_cyclic_and_frozen_protections() -> Result<(), String> {
             "target_sheet_id": "link-b",
             "source_sheet_id": "link-a",
             "source_range": { "start": { "row": 0, "col": 0 }, "end": { "row": 1, "col": 0 } },
-            "target_row": 0,
-            "target_col": 0
+            "start_row": 0,
+            "start_col": 0
         }),
     )
     .map_err(|e| e.to_string())?;
@@ -994,8 +993,8 @@ fn verify_cyclic_and_frozen_protections() -> Result<(), String> {
             "target_sheet_id": "link-c",
             "source_sheet_id": "link-b",
             "source_range": { "start": { "row": 0, "col": 0 }, "end": { "row": 1, "col": 0 } },
-            "target_row": 0,
-            "target_col": 0
+            "start_row": 0,
+            "start_col": 0
         }),
     )
     .map_err(|e| e.to_string())?;
@@ -1009,8 +1008,8 @@ fn verify_cyclic_and_frozen_protections() -> Result<(), String> {
                 "target_sheet_id": "link-a",
                 "source_sheet_id": src,
                 "source_range": { "start": { "row": 0, "col": 0 }, "end": { "row": 1, "col": 0 } },
-                "target_row": 0,
-                "target_col": 0
+                "start_row": 0,
+                "start_col": 0
             }),
         );
         assert!(res.is_err(), "closing cycle link-a <- {src} must fail");
@@ -1030,8 +1029,8 @@ fn verify_cyclic_and_frozen_protections() -> Result<(), String> {
                 "target_sheet_id": "link-b",
                 "source_sheet_id": "link-a",
                 "source_range": { "start": { "row": 0, "col": 0 }, "end": { "row": 0, "col": 0 } },
-                "target_row": 1,
-                "target_col": 0
+                "start_row": 1,
+                "start_col": 0
             }),
         ),
     ];
@@ -1330,7 +1329,7 @@ fn build_step_command(doc: &ProjectDocument, step: &SweepStep, step_num: usize) 
                 _ => json!([1, 2]),
             };
             let r = if *val_kind == 5 { json!(u64::MAX) } else { json!(*row) };
-            ("table.setCells", json!({ "sheet_id": sid, "cells": [{ "row": r, "col": *col, "value": val }] }))
+            ("table.setCells", json!({ "sheet_id": sid, "edits": [{ "row": r, "col": *col, "value": val }] }))
         }
         SweepStep::ExcludeCells { target_idx, row, col, excluded, huge } => {
             let sid = pick_data_id(doc, *target_idx);
@@ -1350,8 +1349,8 @@ fn build_step_command(doc: &ProjectDocument, step: &SweepStep, step_num: usize) 
                     "target_sheet_id": dst,
                     "source_sheet_id": src,
                     "source_range": { "start": { "row": 0, "col": 0 }, "end": { "row": 1, "col": 0 } },
-                    "target_row": 0,
-                    "target_col": 0
+                    "start_row": 0,
+                    "start_col": 0
                 }),
             )
         }
@@ -1369,17 +1368,17 @@ fn build_step_command(doc: &ProjectDocument, step: &SweepStep, step_num: usize) 
         SweepStep::TransformRun { src_idx, kind_idx } => {
             let src = if *kind_idx == 3 { String::from("missing-src") } else { pick_data_id(doc, *src_idx) };
             let kind = ["normalize", "log10", "baseline_subtract", "bogus_xform"][kind_idx % 4];
-            ("transform.run", json!({ "sheet_id": format!("rx-{step_num}"), "source_sheet": src, "kind": kind }))
+            ("transform.run", json!({ "sheet_id": format!("rx-{step_num}"), "source_sheet_id": src, "kind": kind }))
         }
         SweepStep::StatsRun { src_idx, kind_idx } => {
             let src = if *kind_idx == 3 { String::from("missing-src") } else { pick_data_id(doc, *src_idx) };
             let kind = ["descriptive_stats", "one_way_anova", "unpaired_t_test", "bogus_stat"][kind_idx % 4];
-            ("stats.run", json!({ "sheet_id": format!("rs-{step_num}"), "source_sheet": src, "kind": kind }))
+            ("stats.run", json!({ "sheet_id": format!("rs-{step_num}"), "source_sheet_id": src, "kind": kind }))
         }
         SweepStep::FitRun { src_idx, kind_idx } => {
             let src = if *kind_idx == 3 { String::from("missing-src") } else { pick_data_id(doc, *src_idx) };
             let kind = ["linear_regression", "nonlinear_4pl", "exponential_one_phase_decay", "bogus_fit"][kind_idx % 4];
-            ("fit.run", json!({ "sheet_id": format!("rf-{step_num}"), "source_sheet": src, "kind": kind }))
+            ("fit.run", json!({ "sheet_id": format!("rf-{step_num}"), "source_sheet_id": src, "kind": kind }))
         }
         SweepStep::GraphInitialize { src_idx, kind_idx } => {
             let uninit = doc.graph_sheets.iter().find(|g| !g.initialized).map(|g| g.id.as_str().to_string());

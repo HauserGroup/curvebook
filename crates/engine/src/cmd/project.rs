@@ -13,9 +13,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::cmd::helpers::{decode_base64_capped, encode_base64, parse_sheet_id, prune_out_of_bounds_point_overrides};
-use crate::cmd::params::{
-    bool_schema, empty_object_schema, non_empty_str_schema, nullable_schema, obj_schema_with_aliases, parse_params, str_schema,
-};
+use crate::cmd::params::{bool_schema, empty_object_schema, non_empty_str_schema, nullable_schema, obj_schema, parse_params, str_schema};
 use crate::cmd::{CommandGroup, CommandSpec, Ctx, Effects};
 use crate::{CommandOutcome, EngineError, ExternalPathPolicy, Session, dag};
 
@@ -88,17 +86,11 @@ pub(super) fn current_utc_timestamp() -> String {
 
 #[derive(Debug, Deserialize)]
 struct NewProjectParams {
-    #[serde(alias = "name")]
     title: Option<String>,
 }
 
 fn new_project_schema() -> Value {
-    obj_schema_with_aliases(
-        vec![("title", nullable_schema(str_schema("Title for the new project (defaults to `Untitled Project`)")))],
-        &[],
-        vec![("title", &["name"])],
-        false,
-    )
+    obj_schema(vec![("title", nullable_schema(str_schema("Title for the new project (defaults to `Untitled Project`)")))], &[], false)
 }
 
 fn run_file_new(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
@@ -121,27 +113,19 @@ fn run_new_project_with_id(ctx: &mut Ctx<'_>, command_id: &str, params: Value) -
 
 #[derive(Debug, Deserialize)]
 struct OpenProjectParams {
-    #[serde(alias = "file_path", alias = "filePath")]
     path: Option<String>,
-    #[serde(alias = "bytesBase64", alias = "archive_base64")]
     bytes_base64: Option<String>,
-    #[serde(alias = "unpacked_dir", alias = "unpackedDir")]
     unpacked: Option<bool>,
 }
 
 fn open_project_schema() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("path", nullable_schema(str_schema("Filesystem path to `.curvebook` archive or `.curvebook.d/` directory"))),
             ("bytes_base64", nullable_schema(str_schema("Base64-encoded `.curvebook` zip archive bytes"))),
             ("unpacked", nullable_schema(bool_schema("Treat `path` as an unpacked `.curvebook.d/` project directory"))),
         ],
         &[],
-        vec![
-            ("path", &["file_path", "filePath"]),
-            ("bytes_base64", &["bytesBase64", "archive_base64"]),
-            ("unpacked", &["unpacked_dir", "unpackedDir"]),
-        ],
         false,
     )
 }
@@ -185,16 +169,13 @@ fn run_project_open(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
 
 #[derive(Debug, Deserialize)]
 struct SaveProjectParams {
-    #[serde(alias = "file_path", alias = "filePath")]
     path: Option<String>,
-    #[serde(alias = "returnBytes", alias = "include_bytes", alias = "includeBytes")]
     return_bytes: Option<bool>,
-    #[serde(alias = "unpacked_dir", alias = "unpackedDir")]
     unpacked: Option<bool>,
 }
 
 fn save_project_schema() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("path", nullable_schema(str_schema("Destination `.curvebook` archive path or `.curvebook.d/` directory"))),
             (
@@ -204,11 +185,6 @@ fn save_project_schema() -> Value {
             ("unpacked", nullable_schema(bool_schema("Save as an unpacked `.curvebook.d/` project directory"))),
         ],
         &[],
-        vec![
-            ("path", &["file_path", "filePath"]),
-            ("return_bytes", &["returnBytes", "include_bytes", "includeBytes"]),
-            ("unpacked", &["unpacked_dir", "unpackedDir"]),
-        ],
         false,
     )
 }
@@ -262,14 +238,12 @@ fn run_project_save(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
 
 #[derive(Debug, Deserialize)]
 struct SaveTemplateParams {
-    #[serde(alias = "file_path", alias = "filePath")]
     path: Option<String>,
-    #[serde(alias = "returnBytes", alias = "include_bytes", alias = "includeBytes")]
     return_bytes: Option<bool>,
 }
 
 fn save_template_schema() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("path", nullable_schema(str_schema("Destination `.cbtemplate` file path"))),
             (
@@ -278,7 +252,6 @@ fn save_template_schema() -> Value {
             ),
         ],
         &[],
-        vec![("path", &["file_path", "filePath"]), ("return_bytes", &["returnBytes", "include_bytes", "includeBytes"])],
         false,
     )
 }
@@ -305,27 +278,19 @@ fn run_project_save_template(ctx: &mut Ctx<'_>, params: Value) -> Result<Command
 
 #[derive(Debug, Deserialize)]
 struct InstantiateTemplateParams {
-    #[serde(alias = "file_path", alias = "filePath", alias = "template_path", alias = "templatePath")]
     path: Option<String>,
-    #[serde(alias = "bytesBase64", alias = "archive_base64")]
     bytes_base64: Option<String>,
-    #[serde(alias = "project_title", alias = "projectTitle")]
     title: Option<String>,
 }
 
 fn instantiate_template_schema() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("path", nullable_schema(str_schema("Path to `.cbtemplate` archive file"))),
             ("bytes_base64", nullable_schema(str_schema("Base64-encoded `.cbtemplate` archive bytes"))),
             ("title", nullable_schema(str_schema("Optional title override for the instantiated project"))),
         ],
         &[],
-        vec![
-            ("path", &["file_path", "filePath", "template_path", "templatePath"]),
-            ("bytes_base64", &["bytesBase64", "archive_base64"]),
-            ("title", &["project_title", "projectTitle"]),
-        ],
         false,
     )
 }
@@ -360,17 +325,11 @@ fn run_project_instantiate_template(ctx: &mut Ctx<'_>, params: Value) -> Result<
 
 #[derive(Debug, Deserialize)]
 struct InspectProjectParams {
-    #[serde(alias = "sheetId", alias = "id")]
     sheet_id: Option<String>,
 }
 
 fn inspect_project_schema() -> Value {
-    obj_schema_with_aliases(
-        vec![("sheet_id", nullable_schema(str_schema("Optional sheet ID to focus dependency and section inspection on")))],
-        &[],
-        vec![("sheet_id", &["sheetId", "id"])],
-        false,
-    )
+    obj_schema(vec![("sheet_id", nullable_schema(str_schema("Optional sheet ID to focus dependency and section inspection on")))], &[], false)
 }
 
 fn run_project_inspect(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
@@ -382,18 +341,16 @@ fn run_project_inspect(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcom
 
 #[derive(Debug, Deserialize)]
 struct RecalculateParams {
-    #[serde(alias = "includeExternalLinks")]
     include_external_links: Option<bool>,
 }
 
 fn recalculate_schema() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![(
             "include_external_links",
             nullable_schema(bool_schema("Refresh external delimited-file links before recalculating downstream analyses (default true)")),
         )],
         &[],
-        vec![("include_external_links", &["includeExternalLinks"])],
         false,
     )
 }
@@ -421,18 +378,14 @@ fn run_project_recalculate(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOu
 
 #[derive(Debug, Deserialize)]
 struct CreateCheckpointParams {
-    #[serde(alias = "label", alias = "title")]
     name: String,
-    #[serde(alias = "checkpoint_id", alias = "checkpointId")]
     id: Option<String>,
-    #[serde(alias = "description")]
     note: Option<String>,
-    #[serde(alias = "timestampUtc", alias = "created_utc", alias = "createdUtc")]
     timestamp_utc: Option<String>,
 }
 
 fn create_checkpoint_schema() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("name", non_empty_str_schema("Human-readable checkpoint name")),
             ("id", nullable_schema(non_empty_str_schema("Optional unique checkpoint ID (auto-generated if omitted)"))),
@@ -440,12 +393,6 @@ fn create_checkpoint_schema() -> Value {
             ("timestamp_utc", nullable_schema(str_schema("Optional explicit ISO-8601 UTC timestamp"))),
         ],
         &["name"],
-        vec![
-            ("name", &["label", "title"]),
-            ("id", &["checkpoint_id", "checkpointId"]),
-            ("note", &["description"]),
-            ("timestamp_utc", &["timestampUtc", "created_utc", "createdUtc"]),
-        ],
         false,
     )
 }
@@ -647,17 +594,14 @@ fn run_project_list_checkpoints(ctx: &mut Ctx<'_>, params: Value) -> Result<Comm
 
 #[derive(Debug, Deserialize)]
 struct CheckpointRefParams {
-    #[serde(alias = "checkpoint_id", alias = "checkpointId")]
     id: Option<String>,
-    #[serde(alias = "checkpoint_name", alias = "checkpointName", alias = "title")]
     name: Option<String>,
 }
 
 fn checkpoint_ref_schema() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![("id", nullable_schema(str_schema("Checkpoint ID to locate"))), ("name", nullable_schema(str_schema("Checkpoint name to locate")))],
         &[],
-        vec![("id", &["checkpoint_id", "checkpointId"]), ("name", &["checkpoint_name", "checkpointName", "title"])],
         false,
     )
 }
@@ -934,7 +878,7 @@ mod tests {
     fn new_inspect_save_open_template_and_recalculate_round_trip() {
         let mut session = new_session("Initial");
 
-        let r1 = exec_cmd(&mut session, "file.new", Caller::Ui, json!({ "name": "Created Via File" })).unwrap();
+        let r1 = exec_cmd(&mut session, "file.new", Caller::Ui, json!({ "title": "Created Via File" })).unwrap();
         assert!(r1.mutated);
         assert_eq!(session.document().title, "Created Via File");
 
@@ -963,7 +907,7 @@ mod tests {
         let tpl_path = dir.join("nested").join("study.cbtemplate");
 
         let saved =
-            exec_cmd(&mut session, "project.save", Caller::Cli, json!({ "path": save_path.display().to_string(), "include_bytes": true })).unwrap();
+            exec_cmd(&mut session, "project.save", Caller::Cli, json!({ "path": save_path.display().to_string(), "return_bytes": true })).unwrap();
         assert!(!saved.mutated);
         assert!(save_path.exists());
         let b64 = saved.payload["bytes_base64"].as_str().unwrap().to_owned();

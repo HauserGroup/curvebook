@@ -36,7 +36,11 @@ fn seed_three_group_column_session() -> Result<Session, Box<dyn Error>> {
     let ds = DataSheet::new("col-1", "Groups", TableArchetype::Column(col))?;
     doc.add_data_sheet(ds)?;
     let mut session = Session::from_document(doc);
-    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "anova-1", "source_sheet": "col-1", "kind": "one_way_anova", "multiplicity": "tukey" }))?;
+    ok_cmd(
+        &mut session,
+        "stats.run",
+        json!({ "sheet_id": "anova-1", "source_sheet_id": "col-1", "kind": "one_way_anova", "multiplicity": "tukey" }),
+    )?;
     ok_cmd(&mut session, "graph.create", json!({ "sheet_id": "g-col", "data_sheet_id": "col-1", "kind": "column" }))?;
     Ok(session)
 }
@@ -325,7 +329,7 @@ fn rv86_cascade_delete_preserves_info_used_by_surviving_power_graph_or_layout() 
         "stats.run",
         json!({
             "sheet_id": "pwr-1",
-            "source_sheet": "d2",
+            "source_sheet_id": "d2",
             "kind": "power",
             "alpha": 0.05,
             "target_power": 0.8,
@@ -409,21 +413,21 @@ fn rv88_shorthand_analysis_params_reject_wrong_json_types() -> TestResult {
     }
 
     for (cmd, payload) in [
-        ("stats.run", json!({ "source_sheet": "d-col", "kind": "grubbs", "alpha": "0.01" })),
-        ("stats.run", json!({ "source_sheet": "d-col", "kind": "grubbs", "iterative": "true" })),
-        ("stats.run", json!({ "source_sheet": "d-col", "kind": "rout", "q_percent": "5" })),
-        ("stats.run", json!({ "source_sheet": "d-col", "kind": "one_sample_t", "hypothetical": "10" })),
-        ("stats.run", json!({ "source_sheet": "d-col", "kind": "power", "alpha": "0.05", "target_power": 0.8, "effect_size": 0.5 })),
-        ("transform.run", json!({ "source_sheet": "d-xy", "kind": "prune_rows", "every_k_rows": "2" })),
-        ("transform.run", json!({ "source_sheet": "d-xy", "kind": "prune_rows", "average_window": "yes" })),
-        ("transform.run", json!({ "source_sheet": "d-xy", "kind": "simulate", "x_min": "-9" })),
+        ("stats.run", json!({ "source_sheet_id": "d-col", "kind": "grubbs", "alpha": "0.01" })),
+        ("stats.run", json!({ "source_sheet_id": "d-col", "kind": "grubbs", "iterative": "true" })),
+        ("stats.run", json!({ "source_sheet_id": "d-col", "kind": "rout", "q_percent": "5" })),
+        ("stats.run", json!({ "source_sheet_id": "d-col", "kind": "one_sample_t", "hypothetical": "10" })),
+        ("stats.run", json!({ "source_sheet_id": "d-col", "kind": "power", "alpha": "0.05", "target_power": 0.8, "effect_size": 0.5 })),
+        ("transform.run", json!({ "source_sheet_id": "d-xy", "kind": "prune_rows", "every_k_rows": "2" })),
+        ("transform.run", json!({ "source_sheet_id": "d-xy", "kind": "prune_rows", "average_window": "yes" })),
+        ("transform.run", json!({ "source_sheet_id": "d-xy", "kind": "simulate", "x_min": "-9" })),
     ] {
         let err = err_cmd(&mut session, cmd, payload.clone())?;
         assert_eq!(err.code, ErrorCode::BadInput, "expected BadInput for {payload}");
     }
 
     // Valid numeric types take effect rather than defaulting.
-    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "g-ok", "source_sheet": "d-col", "kind": "grubbs", "alpha": 0.01 }))?;
+    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "g-ok", "source_sheet_id": "d-col", "kind": "grubbs", "alpha": 0.01 }))?;
     let res = session.document().result_sheet(&SheetId::new("g-ok")).ok_or("missing g-ok")?;
     assert!(matches!(
         res.analysis.kind,
@@ -489,7 +493,7 @@ fn s4_checkpoint_timestamp_and_overlay_and_keep_typography_floor() -> TestResult
     ok_cmd(&mut session, "sheet.createData", json!({ "sheet_id": "d-xy", "kind": "xy", "rows": 4, "cols": 1 }))?;
     ok_cmd(&mut session, "table.setXCells", json!({ "sheet_id": "d-xy", "values": [1.0, 2.0, 3.0, 4.0] }))?;
     ok_cmd(&mut session, "table.setCells", json!({ "sheet_id": "d-xy", "rows": [[2.0], [4.0], [6.0], [8.0]] }))?;
-    ok_cmd(&mut session, "fit.run", json!({ "sheet_id": "fit-lin", "source_sheet": "d-xy", "kind": "linear" }))?;
+    ok_cmd(&mut session, "fit.run", json!({ "sheet_id": "fit-lin", "source_sheet_id": "d-xy", "kind": "linear" }))?;
     ok_cmd(&mut session, "graph.create", json!({ "sheet_id": "g-xy", "data_sheet_id": "d-xy", "kind": "xy" }))?;
 
     // Checkpoint timestamp_utc rejects non-ISO / invalid calendar timestamps while accepting UTC ISO-8601 & unix:<secs>.

@@ -388,7 +388,7 @@ fn fa_sec12_06_set_spec_rejects_shorthand_conflict_and_unknown_nested_keys() -> 
     let mut doc = ProjectDocument::new("SEC12-06")?;
     doc.add_data_sheet(seed_xy_sheet("xy1", "XY", 1, SubcolumnMode::Single, 4)?)?;
     let mut session = Session::from_document(doc);
-    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "desc1", "source_sheet": "xy1", "kind": "descriptive_stats" }))?;
+    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "desc1", "source_sheet_id": "xy1", "kind": "descriptive_stats" }))?;
     ok_cmd(&mut session, "graph.create", json!({ "sheet_id": "g1", "data_sheet_id": "xy1", "kind": "xy" }))?;
     ok_cmd(&mut session, "layout.create", json!({ "sheet_id": "l1" }))?;
 
@@ -606,7 +606,7 @@ fn fa_sec12_10_simulate_transform_rejects_non_object_parameters_without_breaking
         json!({
             "source_sheet_id": "xy1",
             "kind": base_kind,
-            "params": "bad"
+            "parameters": "bad"
         }),
     )?;
     assert_eq!(err_str.code, ErrorCode::BadInput);

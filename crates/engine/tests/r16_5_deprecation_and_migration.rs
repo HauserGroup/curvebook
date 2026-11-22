@@ -1,56 +1,18 @@
-//! Integration tests for R16.5: parameter deprecation warnings, schema `x-deprecated-aliases`,
+//! Integration tests for canonical command schemas, Stage-4-retained deprecation aliases,
 //! `ops.journal` v1 -> v2 raw-CRC-first migration + clean `Caller::Replay`, and `curvebook.batch.v1` normalization.
 
 use std::sync::atomic::AtomicBool;
 
-use curvebook_doc::param_spellings::canonical_command_param_alias;
 use curvebook_engine::cmd::registry;
-use curvebook_engine::{Caller, GuiOnlyPolicy, Session};
+use curvebook_engine::{Caller, ErrorCode, Session};
 use curvebook_format::{
     BATCH_SCHEMA_V1, CURRENT_JOURNAL_VERSION, JournalBackend, JournalOpRecord, MemoryJournalBackend, compute_record_crc32,
     normalize_batch_manifest_v1, normalize_batch_manifest_v1_with_warnings, normalize_command_params_in_place,
 };
 use serde_json::{Value, json};
 
-fn collect_schema_deprecated_aliases(node: &Value, path: &[String], out: &mut Vec<(Vec<String>, String, String)>) {
-    let Some(obj) = node.as_object() else {
-        return;
-    };
-    if let Some(Value::Object(alias_map)) = obj.get("x-deprecated-aliases") {
-        let props = obj.get("properties").and_then(Value::as_object);
-        for (canonical, aliases_val) in alias_map {
-            let Some(alias_list) = aliases_val.as_array() else {
-                continue;
-            };
-            for alias in alias_list.iter().filter_map(Value::as_str) {
-                let is_declared_prop = props.is_some_and(|p| p.contains_key(alias));
-                if alias != canonical && !is_declared_prop {
-                    out.push((path.to_vec(), alias.to_owned(), canonical.clone()));
-                }
-            }
-        }
-    }
-    if let Some(Value::Object(props)) = obj.get("properties") {
-        for (prop_name, child) in props {
-            let mut next = path.to_vec();
-            next.push(prop_name.clone());
-            collect_schema_deprecated_aliases(child, &next, out);
-        }
-    }
-    if let Some(items) = obj.get("items") {
-        collect_schema_deprecated_aliases(items, path, out);
-    }
-    for kw in ["anyOf", "oneOf", "allOf"] {
-        if let Some(Value::Array(arr)) = obj.get(kw) {
-            for sub in arr {
-                collect_schema_deprecated_aliases(sub, path, out);
-            }
-        }
-    }
-}
-
 #[test]
-fn all_registry_schemas_use_x_deprecated_aliases_and_match_doc_migration_tables() {
+fn only_stage4_retained_aliases_remain_in_registry_schemas() {
     fn assert_no_legacy_x_aliases(val: &Value, command_id: &str) {
         match val {
             Value::Object(map) => {
@@ -68,33 +30,37 @@ fn all_registry_schemas_use_x_deprecated_aliases_and_match_doc_migration_tables(
         }
     }
 
-    let mut total_checked = 0usize;
-    let mut mismatches = Vec::new();
+    let mut alias_commands = Vec::new();
     for spec in registry().specs() {
         let schema = (spec.input_schema)();
         assert_no_legacy_x_aliases(&schema, spec.id);
-
-        let mut aliases = Vec::new();
-        collect_schema_deprecated_aliases(&schema, &[], &mut aliases);
-        for (path, deprecated, canonical) in aliases {
-            let path_refs: Vec<&str> = path.iter().map(String::as_str).collect();
-            let resolved = canonical_command_param_alias(spec.id, &path_refs, None, &deprecated);
-            if resolved != Some(canonical.as_str()) {
-                mismatches.push(format!("`{}` at {:?}: `{deprecated}` -> expected `{canonical}`, got `{resolved:?}`", spec.id, path_refs));
-            }
-            total_checked += 1;
+        if let Some(alias_map) = schema.get("x-deprecated-aliases") {
+            alias_commands.push((spec.id, alias_map.clone()));
         }
     }
-    assert!(mismatches.is_empty(), "doc param_spellings drifted from schema:\n{}", mismatches.join("\n"));
-    assert!(total_checked > 100, "expected full command alias coverage, checked only {total_checked}");
+    assert_eq!(
+        alias_commands,
+        vec![("sheet.createData", json!({ "kind": ["archetype"] })), ("sheet.rename", json!({ "sheet_id": ["id"], "title": ["new_title"] })),],
+        "only the two Stage-4-retained CLI-test aliases may emit x-deprecated-aliases"
+    );
+
+    // Retired aliases outside the two Stage-4-retained entries must now fail with BadInput.
+    let mut session = Session::new();
+    session.execute("sheet.createData", json!({ "sheet_id": "d1", "kind": "xy", "rows": 3, "cols": 1 })).expect("create d1");
+    let bad_graph =
+        session.execute("graph.create", json!({ "sheet_id": "g1", "source_sheet_id": "d1", "kind": "xy" })).expect_err("retired alias rejected");
+    assert_eq!(bad_graph.code, ErrorCode::BadInput);
+    let bad_preview = session
+        .execute("table.convertArchetype", json!({ "sheet_id": "d1", "target_kind": "column", "previewOnly": true }))
+        .expect_err("retired previewOnly alias rejected");
+    assert_eq!(bad_preview.code, ErrorCode::BadInput);
 }
 
 #[test]
-fn command_outcome_warnings_emit_across_live_callers_and_stay_empty_for_canonical_and_replay() {
+fn canonical_calls_emit_zero_warnings_and_retained_aliases_warn_only_live_callers() {
     let mut session = Session::new();
     let cancel = AtomicBool::new(false);
 
-    // 1. Canonical invocation emits zero warnings across callers.
     let clean = session
         .execute_with_caller(
             "sheet.createData",
@@ -105,60 +71,22 @@ fn command_outcome_warnings_emit_across_live_callers_and_stay_empty_for_canonica
         .expect("canonical createData");
     assert!(clean.warnings.is_empty(), "expected zero warnings for canonical params: {:?}", clean.warnings);
 
-    // 2. Deprecated aliases emit warnings naming deprecated key, canonical key, and command id across Ui/Cli/Mcp/Control.
+    // Retained Stage-4 alias on `sheet.rename` warns live callers across Ui/Cli/Mcp/Control.
     for (idx, caller) in [Caller::Ui, Caller::Cli, Caller::Mcp, Caller::Control].iter().copied().enumerate() {
         let out = session
             .execute_with_caller("sheet.rename", json!({ "id": "d1", "new_title": format!("Renamed {idx}") }), caller, &cancel)
-            .expect("deprecated sheet.rename should still succeed during deprecation window");
+            .expect("Stage-4-retained sheet.rename aliases still succeed");
         assert!(out.mutated);
         assert_eq!(out.warnings.len(), 2, "expected 2 warnings for {caller:?}, got {:?}", out.warnings);
         assert!(out.warnings.iter().any(|w| w.contains("`id`") && w.contains("`sheet_id`") && w.contains("sheet.rename")));
         assert!(out.warnings.iter().any(|w| w.contains("`new_title`") && w.contains("`title`") && w.contains("sheet.rename")));
     }
 
-    // 3. Read-only / preview commands (including Strict GuiOnlyPolicy) preserve warnings.
-    let mut strict = Session::new();
-    strict.execute("sheet.createData", json!({ "sheet_id": "xy", "kind": "xy", "rows": 3, "cols": 1 })).expect("create xy");
-    strict.set_gui_only(GuiOnlyPolicy::Strict);
-    let preview_out = strict
-        .execute_with_caller(
-            "table.convertArchetype",
-            json!({ "sheet_id": "xy", "target_kind": "column", "previewOnly": true }),
-            Caller::Mcp,
-            &cancel,
-        )
-        .expect("previewOnly allowed in Strict mode");
-    assert!(!preview_out.mutated);
-    assert!(
-        preview_out.warnings.iter().any(|w| w.contains("`previewOnly`") && w.contains("`preview_only`") && w.contains("table.convertArchetype")),
-        "expected deprecation warning on previewOnly: {:?}",
-        preview_out.warnings
-    );
-
-    // 4. Caller::Replay emits zero deprecation warnings even if legacy spellings reach it directly.
+    // Caller::Replay suppresses deprecation warnings.
     let replay_out = session
         .execute_with_caller("sheet.rename", json!({ "id": "d1", "new_title": "Replayed" }), Caller::Replay, &cancel)
         .expect("replay succeeds");
     assert!(replay_out.warnings.is_empty(), "Replay caller must suppress deprecation warnings, got {:?}", replay_out.warnings);
-
-    // 5. Nested schema & serde aliases also emit deprecation warnings.
-    session
-        .execute_with_caller("graph.create", json!({ "sheet_id": "g1", "source_sheet_id": "d1", "kind": "xy" }), Caller::Cli, &cancel)
-        .expect("graph.create with deprecated source_sheet_id");
-    let pts_out = session
-        .execute_with_caller(
-            "graph.formatSelectedPoints",
-            json!({
-                "sheet_id": "g1",
-                "overrides": [{ "series_index": 0, "point_index": 0, "subcolumn": 0, "shape": "square", "stroke_width_pt": 2.0 }]
-            }),
-            Caller::Cli,
-            &cancel,
-        )
-        .expect("graph.formatSelectedPoints nested aliases");
-    assert!(pts_out.warnings.iter().any(|w| w.contains("`subcolumn`") && w.contains("`subcol`")));
-    assert!(pts_out.warnings.iter().any(|w| w.contains("`shape`") && w.contains("`symbol`")));
-    assert!(pts_out.warnings.iter().any(|w| w.contains("`stroke_width_pt`") && w.contains("`border_width_pt`")));
 }
 
 #[test]
@@ -205,10 +133,10 @@ fn ops_journal_v1_migrates_to_v2_crc_first_replays_cleanly_and_new_appends_write
     assert_eq!(session.document().data_sheets[0].title, "Migrated XY");
     assert_eq!(session.document().graph_sheets.len(), 1);
 
-    // 3. New append using a deprecated alias still warns live caller AND writes format_version=2 with canonical params.
+    // 3. New append using Stage-4-retained alias warns live caller AND writes format_version=2 with canonical params.
     let cancel = AtomicBool::new(false);
     let live_out = session
-        .execute_with_caller_and_record(&mut journal, "sheet.rename", json!({ "sheetId": "xy1", "new_title": "Updated XY" }), Caller::Cli, &cancel)
+        .execute_with_caller_and_record(&mut journal, "sheet.rename", json!({ "id": "xy1", "new_title": "Updated XY" }), Caller::Cli, &cancel)
         .expect("live execute_and_record");
     assert_eq!(live_out.warnings.len(), 2);
 

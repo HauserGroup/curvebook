@@ -146,11 +146,11 @@ fn bad_params_emit_structured_bad_input_with_rfc6901_pointer() {
     session
         .execute(
             "table.setCells",
-            json!({ "sheet_id": "d1", "cells": [{ "row": 0, "col": 0, "value": 10.0 }, { "row": 1, "col": 0, "value": 20.0 }] }),
+            json!({ "sheet_id": "d1", "edits": [{ "row": 0, "col": 0, "value": 10.0 }, { "row": 1, "col": 0, "value": 20.0 }] }),
         )
         .expect("seed data cells");
     session.execute("layout.create", json!({ "sheet_id": "l1", "title": "Layout" })).expect("seed layout");
-    session.execute("stats.run", json!({ "sheet_id": "r1", "source_sheet": "d1", "kind": "descriptive" })).expect("seed result");
+    session.execute("stats.run", json!({ "sheet_id": "r1", "source_sheet_id": "d1", "kind": "descriptive" })).expect("seed result");
 
     assert_cmd_bad_pointer(&mut session, "sheet.createData", json!({ "title": 123 }), "/title");
     assert_cmd_bad_pointer(&mut session, "sheet.rename", json!({ "new_title": "Renamed" }), "/sheet_id");
@@ -159,7 +159,7 @@ fn bad_params_emit_structured_bad_input_with_rfc6901_pointer() {
     assert_cmd_bad_pointer(
         &mut session,
         "table.setCells",
-        json!({ "sheet_id": "d1", "cells": [{ "row": "bad", "col": 0, "value": 1.0 }] }),
+        json!({ "sheet_id": "d1", "edits": [{ "row": "bad", "col": 0, "value": 1.0 }] }),
         "/edits/0/row",
     );
     assert_cmd_bad_pointer(&mut session, "table.setCell", json!({ "sheet_id": "d1", "row": -1, "col": 0, "value": 1.0 }), "/row");
@@ -517,7 +517,7 @@ fn deterministic_replay_parity_between_live_wal_and_batch_v1() {
                 "cmd": "table.setCells",
                 "params": {
                     "sheet_id": "d1",
-                    "cells": [
+                    "edits": [
                         { "row": 0, "col": 0, "value": 10.0 },
                         { "row": 1, "col": 0, "value": 20.0 },
                         { "row": 2, "col": 0, "value": 30.0 },
@@ -528,7 +528,7 @@ fn deterministic_replay_parity_between_live_wal_and_batch_v1() {
                 }
             },
             { "cmd": "table.setGroupTitles", "params": { "sheet_id": "d1", "titles": ["Control", "Treated"] } },
-            { "cmd": "stats.run", "params": { "sheet_id": "r1", "source_sheet": "d1", "kind": "unpaired_t" } },
+            { "cmd": "stats.run", "params": { "sheet_id": "r1", "source_sheet_id": "d1", "kind": "unpaired_t" } },
             { "cmd": "graph.create", "params": { "sheet_id": "g1", "data_sheet_id": "d1", "kind": "column" } },
             {
                 "cmd": "graph.setAdditionalTicks",

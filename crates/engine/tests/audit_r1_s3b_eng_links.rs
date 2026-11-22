@@ -229,7 +229,7 @@ fn r1_s07_03_external_delimited_link_clears_stale_rows_on_shrink_and_append() ->
         "table.pasteLink",
         json!({
             "target_sheet_id": "d",
-            "path": plate_path.to_string_lossy(),
+            "source_path": plate_path.to_string_lossy(),
             "delimiter": ",",
         }),
     )?;

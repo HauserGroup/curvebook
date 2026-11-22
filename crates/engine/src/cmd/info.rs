@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::cmd::helpers::{require_info_sheet_mut, resolve_target_info_sheet_id};
-use crate::cmd::params::{any_json_schema, bool_schema, non_empty_str_schema, nullable_schema, obj_schema_with_aliases, parse_params, str_schema};
+use crate::cmd::params::{any_json_schema, bool_schema, non_empty_str_schema, nullable_schema, obj_schema, parse_params, str_schema};
 use crate::cmd::project::recalculate_dirty_with_links;
 use crate::cmd::{CommandGroup, CommandSpec, Ctx, Effects};
 use crate::{CommandOutcome, EngineError, Session};
@@ -16,22 +16,19 @@ fn always_enabled(_session: &Session) -> bool {
 
 #[derive(Debug, Deserialize)]
 struct SetNoteParams {
-    #[serde(alias = "sheetId", alias = "id")]
     sheet_id: String,
-    #[serde(alias = "note", alias = "notes", alias = "notes_markdown", alias = "notesMarkdown", alias = "markdown")]
     text: String,
     append: Option<bool>,
 }
 
 fn set_note_schema() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Target InfoSheet ID or paired DataSheet ID")),
             ("text", str_schema("Markdown note content to set or append")),
             ("append", nullable_schema(bool_schema("When true, append to existing notes instead of overwriting"))),
         ],
         &["sheet_id", "text"],
-        vec![("sheet_id", &["sheetId", "id"]), ("text", &["note", "notes", "notes_markdown", "notesMarkdown", "markdown"])],
         false,
     )
 }
@@ -61,9 +58,7 @@ fn run_info_set_note(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome,
 
 #[derive(Debug, Deserialize)]
 struct SetConstantParams {
-    #[serde(alias = "sheetId", alias = "id")]
     sheet_id: String,
-    #[serde(alias = "key")]
     name: String,
     value: Value,
     #[serde(default, deserialize_with = "super::analysis::de_present_opt")]
@@ -72,7 +67,7 @@ struct SetConstantParams {
 }
 
 fn set_constant_schema() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Target InfoSheet ID or paired DataSheet ID")),
             ("name", non_empty_str_schema("Hookable constant name")),
@@ -81,7 +76,6 @@ fn set_constant_schema() -> Value {
             ("kind", nullable_schema(str_schema("Optional value kind hint (`number`, `text`, or `date`)"))),
         ],
         &["sheet_id", "name", "value"],
-        vec![("sheet_id", &["sheetId", "id"]), ("name", &["key"])],
         false,
     )
 }
@@ -152,23 +146,20 @@ fn run_info_set_constant(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutc
 
 #[derive(Debug, Deserialize)]
 struct RemoveConstantParams {
-    #[serde(alias = "sheetId", alias = "id")]
     sheet_id: String,
-    #[serde(alias = "key", alias = "constant")]
     name: String,
-    #[serde(default, alias = "ifExists")]
+    #[serde(default)]
     if_exists: Option<bool>,
 }
 
 fn remove_constant_schema() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Target InfoSheet ID or paired DataSheet ID")),
             ("name", non_empty_str_schema("Constant name to remove")),
             ("if_exists", nullable_schema(bool_schema("Allow removing a non-existent constant without failing (default: false)"))),
         ],
         &["sheet_id", "name"],
-        vec![("sheet_id", &["sheetId", "id"]), ("name", &["key", "constant"]), ("if_exists", &["ifExists"])],
         false,
     )
 }
@@ -302,7 +293,7 @@ mod tests {
         ds.info_sheet_id = Some(SheetId::new("info-1"));
         session.doc.add_data_sheet(ds).unwrap();
 
-        let note_out = exec_cmd(&mut session, "info.setNote", Caller::Ui, json!({ "sheet_id": "data-1", "note": "Line 1" })).unwrap();
+        let note_out = exec_cmd(&mut session, "info.setNote", Caller::Ui, json!({ "sheet_id": "data-1", "text": "Line 1" })).unwrap();
         assert!(note_out.mutated);
         assert_eq!(note_out.payload["sheet_id"], json!("info-1"));
 

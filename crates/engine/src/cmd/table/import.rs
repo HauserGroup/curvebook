@@ -35,8 +35,8 @@ use crate::cmd::helpers::{
     shift_point_overrides_on_insert_rows, snapshot_active_series_lengths, sync_info_linked_data_sheets,
 };
 use crate::cmd::params::{
-    any_json_schema, array_schema, bool_schema, deserialize_strict, int_schema, non_empty_str_schema, nullable_schema, num_schema,
-    obj_schema_with_aliases, parse_params, record_deprecated_object_aliases, str_schema,
+    any_json_schema, array_schema, bool_schema, deserialize_strict, int_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema,
+    parse_params, str_schema,
 };
 use crate::cmd::project::recalculate_dirty_with_links;
 
@@ -143,7 +143,7 @@ pub(super) struct PasteLinkParams {
 }
 
 pub(super) fn schema_paste_link() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("target_sheet_id", non_empty_str_schema("Destination data sheet identifier")),
             ("link_spec", nullable_schema(json!({ "type": "object", "description": "Direct ImportLinkSpec payload" }))),
@@ -170,28 +170,6 @@ pub(super) fn schema_paste_link() -> Value {
             ("transpose", bool_schema("Transpose source matrix")),
         ],
         &["target_sheet_id"],
-        vec![
-            ("target_sheet_id", &["targetSheetId", "sheet_id", "sheetId"]),
-            ("link_spec", &["linkSpec"]),
-            ("source_sheet_id", &["sourceSheetId"]),
-            ("source_kind", &["sourceKind"]),
-            ("tab_id", &["tabId", "source_tab_id", "sourceTabId"]),
-            ("source_range", &["sourceRange", "range"]),
-            ("source_path", &["sourcePath", "path", "file_path", "filePath"]),
-            ("decimal_separator", &["decimalSeparator", "decimal"]),
-            ("normalize_decimal", &["normalizeDecimal"]),
-            ("filter", &["slice"]),
-            ("exclude_row_predicate", &["excludeRowPredicate"]),
-            ("link_id", &["linkId"]),
-            ("provenance", &["provenance_summary"]),
-            ("anchor", &["start"]),
-            ("start_row", &["startRow", "target_row", "targetRow", "row"]),
-            ("start_col", &["startCol", "target_col", "targetCol", "col", "data_set", "dataSet"]),
-            ("start_subcol", &["startSubcol", "target_subcol", "targetSubcol", "subcol", "subcolumn"]),
-            ("mode", &["placement_mode", "placementMode"]),
-            ("propagate_title_header", &["propagateTitleHeader"]),
-            ("skip_contiguous_blanks", &["skipContiguousBlanks"]),
-        ],
         false,
     )
 }
@@ -475,7 +453,7 @@ pub(super) struct ImportCsvParams {
 }
 
 pub(super) fn schema_import_csv() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", nullable_schema(non_empty_str_schema("Optional target sheet ID (auto-generated if omitted)"))),
             ("csv", nullable_schema(str_schema("Inline CSV/TSV content"))),
@@ -505,27 +483,6 @@ pub(super) fn schema_import_csv() -> Value {
             ("transpose", bool_schema("Transpose imported table")),
         ],
         &[],
-        vec![
-            ("sheet_id", &["sheetId"]),
-            ("csv", &["tsv", "text", "content"]),
-            ("path", &["file_path", "filePath"]),
-            ("decimal_separator", &["decimalSeparator", "decimal"]),
-            ("normalize_decimal", &["normalizeDecimal"]),
-            ("has_header", &["hasHeader", "first_row_titles", "firstRowTitles"]),
-            ("has_row_titles", &["hasRowTitles"]),
-            ("replicates", &["k"]),
-            ("subcolumn_mode", &["subcolumnMode"]),
-            ("archetype", &["kind", "table_kind", "tableKind"]),
-            ("filter", &["slice"]),
-            ("link", &["live_link", "liveLink"]),
-            ("anchor", &["start"]),
-            ("start_row", &["startRow", "target_row", "targetRow", "row"]),
-            ("start_col", &["startCol", "target_col", "targetCol", "col", "data_set", "dataSet"]),
-            ("start_subcol", &["startSubcol", "target_subcol", "targetSubcol", "subcol", "subcolumn"]),
-            ("mode", &["placement_mode", "placementMode"]),
-            ("propagate_title_header", &["propagateTitleHeader"]),
-            ("skip_contiguous_blanks", &["skipContiguousBlanks"]),
-        ],
         false,
     )
 }
@@ -727,7 +684,7 @@ pub(super) struct ImportPrismParams {
 }
 
 pub(super) fn schema_import_prism() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("path", nullable_schema(non_empty_str_schema("Filesystem path to external archive"))),
             ("bytes_base64", nullable_schema(non_empty_str_schema("Base64-encoded external archive bytes"))),
@@ -735,7 +692,6 @@ pub(super) fn schema_import_prism() -> Value {
             ("merge", bool_schema("Merge imported sheets into existing document instead of replacing (default false)")),
         ],
         &[],
-        vec![("path", &["file_path", "filePath"]), ("bytes_base64", &["bytesBase64", "archive_base64"])],
         false,
     )
 }
@@ -906,7 +862,7 @@ pub(super) struct ImportPzfxParams {
 }
 
 pub(super) fn schema_import_pzfx() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("xml", nullable_schema(str_schema("Inline XML project string"))),
             ("path", nullable_schema(non_empty_str_schema("Filesystem path to XML project file"))),
@@ -914,7 +870,6 @@ pub(super) fn schema_import_pzfx() -> Value {
             ("merge", bool_schema("Merge imported sheets into existing document instead of replacing (default false)")),
         ],
         &[],
-        vec![("xml", &["text", "content"]), ("path", &["file_path", "filePath"]), ("bytes_base64", &["bytesBase64"])],
         false,
     )
 }
@@ -1070,7 +1025,7 @@ pub(super) fn schema_import_plate_map() -> Value {
             )
         ]
     });
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", nullable_schema(non_empty_str_schema("Optional target sheet ID"))),
             ("title", nullable_schema(str_schema("Imported sheet title (default `Plate Data`)"))),
@@ -1084,18 +1039,6 @@ pub(super) fn schema_import_plate_map() -> Value {
             ("subtract_blank_mean", bool_schema("Subtract mean of Blank wells from Treatment readings")),
         ],
         &["values"],
-        vec![
-            ("sheet_id", &["sheetId", "id"]),
-            ("title", &["name"]),
-            ("geometry", &["plate_geometry", "plateGeometry"]),
-            ("values", &["readings", "well_values"]),
-            ("template", &["plate_template", "plateTemplate"]),
-            ("roles", &["wells"]),
-            ("template_name", &["templateName"]),
-            ("x_title", &["xTitle"]),
-            ("target_kind", &["targetKind", "kind"]),
-            ("subtract_blank_mean", &["subtractBlankMean"]),
-        ],
         false,
     )
 }
@@ -1113,29 +1056,13 @@ pub(super) fn parse_plate_well_role(val: &Value) -> Result<PlateWellRole, Engine
         return Ok(role);
     }
     #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct RoleObj {
-        #[serde(alias = "type", alias = "kind")]
         role: Option<String>,
-        #[serde(alias = "groupName", alias = "group")]
         group_name: Option<String>,
-        #[serde(alias = "dilutionX", alias = "x", alias = "concentration")]
         dilution_x: Option<f64>,
-        #[serde(alias = "rep")]
         replicate: Option<usize>,
     }
-    record_deprecated_object_aliases(
-        val,
-        &[
-            ("type", "role"),
-            ("kind", "role"),
-            ("groupName", "group_name"),
-            ("group", "group_name"),
-            ("dilutionX", "dilution_x"),
-            ("x", "dilution_x"),
-            ("concentration", "dilution_x"),
-            ("rep", "replicate"),
-        ],
-    );
     let obj: RoleObj =
         serde_json::from_value(val.clone()).map_err(|_| EngineError::with_code(ErrorCode::BadInput, "plate well role must be a string or object"))?;
     if let Some(kind) = obj.role.as_deref() {
@@ -1163,20 +1090,13 @@ pub(super) fn parse_plate_template_obj(val: &Value, default_name: &str) -> Resul
         return Ok(tpl);
     }
     #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct TplObj {
-        #[serde(alias = "plate_geometry", alias = "plateGeometry")]
         geometry: PlateGeometryInput,
-        #[serde(alias = "title")]
         name: Option<String>,
-        #[serde(alias = "xTitle")]
         x_title: Option<String>,
-        #[serde(alias = "roles")]
         wells: Vec<Value>,
     }
-    record_deprecated_object_aliases(
-        val,
-        &[("plate_geometry", "geometry"), ("plateGeometry", "geometry"), ("title", "name"), ("xTitle", "x_title"), ("roles", "wells")],
-    );
     let obj: TplObj = serde_json::from_value(val.clone())
         .map_err(|err| EngineError::with_code(ErrorCode::BadInput, format!("invalid plate `template` object: {err}")))?;
     let geometry = obj.geometry.resolve()?;
@@ -1287,15 +1207,10 @@ impl TidyColRef {
 
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct TidyMappingInput {
-    #[serde(alias = "xCol")]
     pub(super) x_col: Option<TidyColRef>,
-    #[serde(alias = "groupCol")]
     pub(super) group_col: Option<TidyColRef>,
-    #[serde(alias = "replicateCol")]
     pub(super) replicate_col: Option<TidyColRef>,
-    #[serde(alias = "valueCol")]
     pub(super) value_col: Option<TidyColRef>,
-    #[serde(alias = "excludedCol")]
     pub(super) excluded_col: Option<TidyColRef>,
 }
 
@@ -1318,7 +1233,7 @@ pub(super) struct ImportTidyLongParams {
 
 pub(super) fn schema_import_tidy_long() -> Value {
     let tidy_col_schema = nullable_schema(col_ref_schema("Zero-based header index or header name"));
-    let mapping_schema = obj_schema_with_aliases(
+    let mapping_schema = obj_schema(
         vec![
             ("x_col", tidy_col_schema.clone()),
             ("group_col", tidy_col_schema.clone()),
@@ -1327,16 +1242,9 @@ pub(super) fn schema_import_tidy_long() -> Value {
             ("excluded_col", tidy_col_schema.clone()),
         ],
         &[],
-        vec![
-            ("x_col", &["xCol"]),
-            ("group_col", &["groupCol"]),
-            ("replicate_col", &["replicateCol"]),
-            ("value_col", &["valueCol"]),
-            ("excluded_col", &["excludedCol"]),
-        ],
         false,
     );
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", nullable_schema(non_empty_str_schema("Optional target sheet ID"))),
             ("title", nullable_schema(str_schema("Imported sheet title (default `Tidy Import`)"))),
@@ -1364,21 +1272,6 @@ pub(super) fn schema_import_tidy_long() -> Value {
             ("excluded_col", tidy_col_schema),
         ],
         &[],
-        vec![
-            ("sheet_id", &["sheetId", "id"]),
-            ("title", &["name"]),
-            ("target_kind", &["targetKind", "kind"]),
-            ("csv", &["text", "tsv", "source"]),
-            ("path", &["file_path", "filePath"]),
-            ("decimal_sep", &["decimalSep", "decimal_separator", "decimalSeparator"]),
-            ("normalize_decimal", &["normalizeDecimal"]),
-            ("mapping", &["column_mapping", "columnMapping"]),
-            ("x_col", &["xCol"]),
-            ("group_col", &["groupCol"]),
-            ("replicate_col", &["replicateCol"]),
-            ("value_col", &["valueCol"]),
-            ("excluded_col", &["excludedCol"]),
-        ],
         false,
     )
 }

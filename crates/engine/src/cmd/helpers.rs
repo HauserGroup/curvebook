@@ -933,51 +933,6 @@ pub(super) fn parse_serde_enum_str<T: DeserializeOwned>(raw: &str, field_desc: &
     parse_serde_enum(&Value::String(raw.to_owned()), field_desc)
 }
 
-/// Rewrite legacy parameter spelling aliases in `val` onto explicit `target_field` names
-/// (recording deprecation warnings against each table's canonical `table[0]` via
-/// [`super::spellings::first_present_with_key`]) and strip all other spelling keys in the table.
-pub(super) fn canonicalize_spellings_to_fields(val: &Value, mappings: &[(&str, &[&str])]) -> Value {
-    let Some(orig) = val.as_object() else {
-        return val.clone();
-    };
-    let mut out = orig.clone();
-    for &(target_field, table) in mappings {
-        if let Some((_, resolved)) = super::spellings::first_present_with_key(orig, table) {
-            for &key in table {
-                if key != target_field {
-                    out.remove(key);
-                }
-            }
-            out.insert(target_field.to_owned(), resolved.clone());
-        }
-    }
-    Value::Object(out)
-}
-
-/// Rewrite legacy parameter spelling aliases in `val` onto their canonical keys (`table[0]`,
-/// recording deprecation warnings via [`super::spellings::first_present_with_key`]) and strip
-/// retired alias keys so `#[serde(deny_unknown_fields)]` patch structs see only canonical names.
-pub(super) fn canonicalize_spellings(val: &Value, tables: &[&[&str]]) -> Value {
-    let Some(orig) = val.as_object() else {
-        return val.clone();
-    };
-    let mut out = orig.clone();
-    for &table in tables {
-        let Some(&canonical) = table.first() else {
-            continue;
-        };
-        if let Some((_, resolved)) = super::spellings::first_present_with_key(orig, table) {
-            for &alias in &table[1..] {
-                if alias != canonical {
-                    out.remove(alias);
-                }
-            }
-            out.insert(canonical.to_owned(), resolved.clone());
-        }
-    }
-    Value::Object(out)
-}
-
 /// Deserialize a present patch field that rejects JSON `null` while allowing field omission via
 /// `#[serde(default, deserialize_with = "de_some")]`.
 pub(super) fn de_some<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
