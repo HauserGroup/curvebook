@@ -14,6 +14,7 @@ workspace = true
 curvebook-math = { workspace = true }
 curvebook-doc = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 curvebook-testkit = { workspace = true }
