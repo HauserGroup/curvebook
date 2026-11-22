@@ -3393,22 +3393,23 @@ impl WebBridgeSession {
     }
 
     fn handle_execute_command(&mut self, command_id: &str, params: Value) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
-        if self.access_mode.is_read_only() && !is_command_read_only(command_id, Some(&params)) {
-            return Err(self.read_only_err(command_id));
+        let trimmed_id = command_id.trim();
+        if self.access_mode.is_read_only() && !is_command_read_only(trimmed_id, Some(&params)) {
+            return Err(self.read_only_err(trimmed_id));
         }
 
         let before = self.capture_pref_fingerprint();
-        let replaces = command_replaces_project(command_id, &params);
-        if cmd::registry().get(command_id).is_some() {
-            let result = self.host.execute_command(command_id, params).map_err(WebAdapterError::Workspace)?;
+        let replaces = command_replaces_project(trimmed_id, &params);
+        if cmd::registry().get(trimmed_id).is_some() {
+            let result = self.host.execute_command(trimmed_id, params).map_err(WebAdapterError::Workspace)?;
             let extra = if replaces { self.apply_project_replacement_state(true) } else { Vec::new() };
-            let mut cmds = vec![self.render_frame_command(self.render_dpi, Some(command_id.to_owned()), Some(result))?];
+            let mut cmds = vec![self.render_frame_command(self.render_dpi, Some(trimmed_id.to_owned()), Some(result))?];
             cmds.extend(extra);
             self.maybe_append_preferences_persist(&before, &mut cmds);
             return Ok(cmds);
         }
 
-        let line = json!({ "id": "bridge", "method": command_id, "params": params }).to_string();
+        let line = json!({ "id": "bridge", "method": trimmed_id, "params": params }).to_string();
         let reply_raw = self.host.dispatch_control_line(&line);
         let reply: Value = serde_json::from_str(&reply_raw).map_err(|err| WebAdapterError::Workspace(err.to_string()))?;
         if reply.get("ok").and_then(Value::as_bool) != Some(true) {
@@ -3416,7 +3417,7 @@ impl WebBridgeSession {
             return Err(WebAdapterError::Workspace(err_msg.to_owned()));
         }
         let extra = if replaces { self.apply_project_replacement_state(true) } else { Vec::new() };
-        let mut cmds = vec![self.render_frame_command(self.render_dpi, Some(command_id.to_owned()), reply.get("result").cloned())?];
+        let mut cmds = vec![self.render_frame_command(self.render_dpi, Some(trimmed_id.to_owned()), reply.get("result").cloned())?];
         cmds.extend(extra);
         self.maybe_append_preferences_persist(&before, &mut cmds);
         Ok(cmds)
@@ -3424,19 +3425,22 @@ impl WebBridgeSession {
 
     fn handle_control_line(&mut self, line: &str) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
         let req: Value = serde_json::from_str(line).map_err(|err| WebAdapterError::Serialization(err.to_string()))?;
-        let method = req
+        let obj = require_object(&req, "control request")?;
+        let method = obj
             .get("method")
-            .or_else(|| req.get("op"))
+            .or_else(|| obj.get("op"))
             .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
             .ok_or_else(|| WebAdapterError::Serialization(String::from("control request missing `method` or `op`")))?;
-        let params = req.get("params").or(Some(&req));
+        let normalized_params = normalize_control_request_params(method, obj);
 
-        if self.access_mode.is_read_only() && !is_command_read_only(method, params) {
+        if self.access_mode.is_read_only() && !is_command_read_only(method, Some(&normalized_params)) {
             return Err(self.read_only_err(method));
         }
 
         let before = self.capture_pref_fingerprint();
-        let replaces = command_replaces_project(method, params.unwrap_or(&Value::Null));
+        let replaces = command_replaces_project(method, &normalized_params);
         let reply_raw = self.host.dispatch_control_line(line);
         let reply: Value = serde_json::from_str(&reply_raw).map_err(|err| WebAdapterError::Workspace(err.to_string()))?;
         if reply.get("ok").and_then(Value::as_bool) != Some(true) {
@@ -3858,29 +3862,105 @@ fn next_untitled_doc_id(tab_id: &str) -> String {
     format!("untitled-{tab}-{seq}")
 }
 
-fn extract_nested_control_params<'a>(command_id: &str, params: Option<&'a Value>) -> Option<(&'a str, Option<&'a Value>)> {
-    if !matches!(command_id, "command.run" | "engine.execute") {
-        return None;
+fn normalize_control_request_params(method: &str, obj: &Map<String, Value>) -> Value {
+    if method == "command.run" && (obj.contains_key("command") || obj.contains_key("command_id")) {
+        let mut out = Map::new();
+        if let Some(cmd) = obj.get("command") {
+            out.insert(String::from("command"), cmd.clone());
+        }
+        if let Some(cmd_id) = obj.get("command_id") {
+            out.insert(String::from("command_id"), cmd_id.clone());
+        }
+        if let Some(inner) = obj.get("params") {
+            out.insert(String::from("params"), inner.clone());
+        } else {
+            let mut inner = Map::new();
+            for (key, value) in obj {
+                if !matches!(key.as_str(), "id" | "method" | "op" | "command" | "command_id" | "params" | "token" | "auth_token") {
+                    inner.insert(key.clone(), value.clone());
+                }
+            }
+            if !inner.is_empty() {
+                out.insert(String::from("params"), Value::Object(inner));
+            }
+        }
+        return Value::Object(out);
     }
-    let obj = params?;
-    let inner = obj.get("command_id").or_else(|| obj.get("command")).or_else(|| obj.get("op")).and_then(Value::as_str)?;
-    Some((inner, obj.get("params").or(Some(obj))))
+
+    let mut base = match obj.get("params") {
+        Some(Value::Object(map)) => map.clone(),
+        Some(other) if !other.is_null() => return other.clone(),
+        _ => Map::new(),
+    };
+    for (key, value) in obj {
+        if matches!(key.as_str(), "id" | "method" | "op" | "params" | "token" | "auth_token") {
+            continue;
+        }
+        base.entry(key.clone()).or_insert_with(|| value.clone());
+    }
+    Value::Object(base)
+}
+
+fn first_present_trimmed_str<'a>(obj: &'a Map<String, Value>, fields: &[&str]) -> Option<&'a str> {
+    for &field in fields {
+        if let Some(val) = obj.get(field)
+            && !val.is_null()
+        {
+            return val.as_str().map(str::trim).filter(|s| !s.is_empty());
+        }
+    }
+    None
+}
+
+fn extract_nested_params_like_control_io(obj: &Map<String, Value>) -> Value {
+    if let Some(explicit) = obj.get("params") {
+        return explicit.clone();
+    }
+    let mut stripped = obj.clone();
+    stripped.remove("command");
+    stripped.remove("command_id");
+    if stripped.is_empty() { Value::Null } else { Value::Object(stripped) }
+}
+
+fn extract_control_subcommand(command_id: &str, params: Option<&Value>) -> Option<(String, Value)> {
+    let obj = params?.as_object()?;
+    match command_id {
+        "command.run" => {
+            let inner = first_present_trimmed_str(obj, &["command", "command_id"])?.to_owned();
+            Some((inner, extract_nested_params_like_control_io(obj)))
+        }
+        "engine.execute" => {
+            let inner = first_present_trimmed_str(obj, &["command_id", "command"])?.to_owned();
+            let nested = obj.get("params").cloned().unwrap_or(Value::Null);
+            Some((inner, nested))
+        }
+        _ => None,
+    }
+}
+
+fn extract_batch_item_command(entry: &Value) -> Option<(String, Value)> {
+    let obj = entry.as_object()?;
+    let inner = first_present_trimmed_str(obj, &["command", "command_id"])?.to_owned();
+    Some((inner, extract_nested_params_like_control_io(obj)))
 }
 
 fn command_replaces_project(command_id: &str, params: &Value) -> bool {
-    match command_id {
+    command_replaces_project_depth(command_id, params, 0)
+}
+
+fn command_replaces_project_depth(command_id: &str, params: &Value, depth: usize) -> bool {
+    if depth > MAX_READ_ONLY_NESTING_DEPTH {
+        return false;
+    }
+    let trimmed = command_id.trim();
+    match trimmed {
         "project.new" | "file.new" | "project.open" | "project.instantiateTemplate" => true,
-        "command.run" | "engine.execute" => extract_nested_control_params(command_id, Some(params))
-            .is_some_and(|(inner, inner_params)| command_replaces_project(inner, inner_params.unwrap_or(&Value::Null))),
+        "command.run" | "engine.execute" => extract_control_subcommand(trimmed, Some(params))
+            .is_some_and(|(inner, inner_params)| command_replaces_project_depth(&inner, &inner_params, depth + 1)),
         "command.batch" => params.get("commands").and_then(Value::as_array).is_some_and(|cmds| {
             cmds.iter().any(|entry| {
-                entry
-                    .get("command")
-                    .or_else(|| entry.get("command_id"))
-                    .or_else(|| entry.get("method"))
-                    .or_else(|| entry.get("op"))
-                    .and_then(Value::as_str)
-                    .is_some_and(|inner| command_replaces_project(inner, entry.get("params").unwrap_or(entry)))
+                extract_batch_item_command(entry)
+                    .is_some_and(|(inner, inner_params)| command_replaces_project_depth(&inner, &inner_params, depth + 1))
             })
         }),
         _ => false,
@@ -3895,6 +3975,7 @@ fn is_command_read_only_depth(command_id: &str, params: Option<&Value>, depth: u
     if depth > MAX_READ_ONLY_NESTING_DEPTH {
         return false;
     }
+    let command_id = command_id.trim();
     let has_path = params.is_some_and(chrome_bridge::has_non_null_path_param);
     if matches!(
         command_id,
@@ -3915,20 +3996,13 @@ fn is_command_read_only_depth(command_id: &str, params: Option<&Value>, depth: u
     if let Some(spec) = cmd::registry().get(command_id) {
         return spec.effects.read_only_hint();
     }
-    if let Some((inner, inner_params)) = extract_nested_control_params(command_id, params) {
-        return is_command_read_only_depth(inner, inner_params, depth + 1);
+    if matches!(command_id, "command.run" | "engine.execute") {
+        return extract_control_subcommand(command_id, params)
+            .is_some_and(|(inner, inner_params)| is_command_read_only_depth(&inner, Some(&inner_params), depth + 1));
     }
     if command_id == "command.batch" {
         return params.and_then(|p| p.get("commands")).and_then(Value::as_array).is_some_and(|cmds| {
-            cmds.iter().all(|entry| {
-                entry
-                    .get("command")
-                    .or_else(|| entry.get("command_id"))
-                    .or_else(|| entry.get("method"))
-                    .or_else(|| entry.get("op"))
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| is_command_read_only_depth(id, entry.get("params").or(Some(entry)), depth + 1))
-            })
+            cmds.iter().all(|entry| extract_batch_item_command(entry).is_some_and(|(id, p)| is_command_read_only_depth(&id, Some(&p), depth + 1)))
         });
     }
     let base = command_id.split(':').next().unwrap_or(command_id);

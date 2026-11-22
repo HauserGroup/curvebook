@@ -492,7 +492,7 @@
       function emitEvent(eventObj) {
         if (typeof dispatchFn !== "function") {
           pendingEvents.push(eventObj);
-          return;
+          return null;
         }
         try {
           const reply = dispatchFn(JSON.stringify(eventObj));
@@ -510,11 +510,13 @@
               for (const cmd of cmds) {
                 void applyBridgeCommand(cmd);
               }
+              return cmds;
             }
           }
         } catch (err) {
           console.error("CurveBook bridge dispatch error:", err);
         }
+        return null;
       }
 
       function drawClippedTextOp(ctx, op) {
@@ -1169,7 +1171,8 @@
         const width = Math.max(1, rect.width || window.innerWidth || 1280);
         const height = Math.max(1, rect.height || window.innerHeight || 800);
         const maxTex = (glState && glState.maxTextureSize) ? glState.maxTextureSize : 8192;
-        const maxPixels = 16777216;
+        // Reserve >= 50% of MAX_FRAME_RGBA_BYTES (64 MiB) + popup overlay so modals never overflow budget on HiDPI screens.
+        const maxPixels = 8000000;
         const maxDprW = maxTex / width;
         const maxDprH = maxTex / height;
         const maxDprPixels = Math.sqrt(maxPixels / (width * height));
@@ -1504,8 +1507,14 @@
           const dirHandle = await window.showDirectoryPicker({ mode: "readwrite" });
           const entries = [];
           await readDirectoryHandleEntries(dirHandle, "", entries);
-          activeDirectoryHandle = dirHandle;
-          emitEvent({ kind: "import_directory_entries", root_name: dirHandle.name, entries });
+          const cmds = emitEvent({ kind: "import_directory_entries", root_name: dirHandle.name, entries });
+          if (
+            Array.isArray(cmds) &&
+            cmds.some((c) => c && c.kind === "set_document_lock") &&
+            !cmds.some((c) => c && c.kind === "notify_status" && c.level === "error")
+          ) {
+            activeDirectoryHandle = dirHandle;
+          }
           return true;
         } catch (err) {
           if (err && err.name === "AbortError") {

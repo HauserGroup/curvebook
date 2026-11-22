@@ -112,6 +112,24 @@ fn fa_sec20_01_project_replacement_commands_clear_virtual_workspace_and_director
 }
 
 #[test]
+fn fa_sec20_01_control_line_flattened_and_padded_project_replacements_clear_dir_state() {
+    let variants = [
+        json!({ "id": "c3", "method": "command.run", "command": "project.new", "params": {} }),
+        json!({ "id": "c4a", "method": "engine.execute", "params": { "command_id": "project.new", "params": {} } }),
+        json!({ "id": "c4b", "method": "engine.execute", "command_id": "project.new", "params": { "params": {} } }),
+        json!({ "id": "c5", "method": "command.batch", "params": {}, "commands": [{ "command": "project.new", "params": {} }] }),
+        json!({ "id": "c6", "method": " project.new ", "params": {} }),
+    ];
+    for req in variants {
+        let (mut session, _alpha_tree) = seed_directory_session("alpha.curvebook.d", "tab-dir-norm").expect("seed dir session");
+        let prev_doc_id = session.doc_id().to_owned();
+        let cmds = session.handle_event(WebBridgeEvent::DispatchControlLine { line: req.to_string() }).expect("replacement control line succeeds");
+        assert_dir_state_cleared(&session, &cmds);
+        assert_ne!(session.doc_id(), prev_doc_id, "project replacement `{req}` must rotate doc_id");
+    }
+}
+
+#[test]
 fn fa_sec20_01_distinct_files_and_projects_isolate_locks_and_autosaves_across_tabs() {
     let mut coord = WebLockCoordinator::new(15_000);
     let (mut src_a, _, _) = build_session_with_data_and_graph("seed-a", "tab-a").expect("src-a");
@@ -247,6 +265,29 @@ fn fa_sec20_02_contended_read_only_blocks_ui_mutations_command_batch_run_and_pre
             "path": "/tmp/flat-evil.svg"
         }),
         json!({
+            "id": "r-precedence",
+            "method": "command.run",
+            "command": "table.paste",
+            "params": { "command": "graph.preflightCheck", "sheet_id": data_id, "text": "999" }
+        }),
+        json!({
+            "id": "e-flat-path",
+            "method": "export.svg",
+            "path": "/tmp/top-evil.svg",
+            "params": { "sheet_id": graph_id }
+        }),
+        json!({
+            "id": "m-padded",
+            "method": " sheet.rename ",
+            "params": { "sheet_id": data_id, "title": "Padded Bypass" }
+        }),
+        json!({
+            "id": "m-batch-top",
+            "method": "command.batch",
+            "params": {},
+            "commands": [{ "command": "sheet.rename", "params": { "sheet_id": data_id, "title": "Batch Sibling Bypass" } }]
+        }),
+        json!({
             "id": "b-flat-path",
             "method": "command.batch",
             "params": { "commands": [{ "command": "export.svg", "sheet_id": graph_id, "path": "/tmp/batch-evil.svg" }] }
@@ -372,4 +413,14 @@ fn fa_sec20_03_bounded_rgba_allocation_and_checked_json_integer_conversions() {
         })),
         Err(WebAdapterError::Validation(_))
     ));
+
+    let html = include_str!("../index.html");
+    assert!(html.contains("const maxPixels = 8000000;"), "HiDPI pixel clamp must reserve modal+popup headroom under MAX_FRAME_RGBA_BYTES");
+    let picker_pos = html.find("async function openDirectoryPickerTree()").expect("openDirectoryPickerTree present");
+    let picker_end = html[picker_pos..].find("async function collectDroppedEntry").expect("collectDroppedEntry present");
+    let picker_slice = &html[picker_pos..picker_pos + picker_end];
+    assert!(
+        picker_slice.contains("set_document_lock") && picker_slice.contains("activeDirectoryHandle = dirHandle;"),
+        "openDirectoryPickerTree must bind activeDirectoryHandle only after import_directory_entries succeeds"
+    );
 }
