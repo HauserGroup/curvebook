@@ -210,6 +210,15 @@ pub struct AdditionalTickDraft {
 }
 
 /// Persistent transient UI state for `graph_modals`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct HeatmapColorSnapshot {
+    pub(super) colormap: ColormapId,
+    pub(super) reversed: bool,
+    pub(super) auto_range: bool,
+    pub(super) min_draft: String,
+    pub(super) max_draft: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct GraphModalEguiState {
     pub format_graph_tab: FormatGraphTab,
@@ -234,6 +243,10 @@ pub struct GraphModalEguiState {
     pub heatmap_annotate_cells: bool,
     pub heatmap_cell_gap_pt: f64,
     pub heatmap_tick_angle_deg: f64,
+    pub heatmap_color_dirty: bool,
+    pub heatmap_tick_angle_dirty: bool,
+    pub(super) heatmap_synced_color_snapshot: Option<HeatmapColorSnapshot>,
+    pub(super) heatmap_synced_tick_angle_deg: f64,
     pub heatmap_gap_spinner: ScrubUnitFieldState,
     pub mv_min_radius_spinner: ScrubUnitFieldState,
     pub mv_max_radius_spinner: ScrubUnitFieldState,
@@ -294,6 +307,10 @@ impl Default for GraphModalEguiState {
             heatmap_annotate_cells: true,
             heatmap_cell_gap_pt: 1.5,
             heatmap_tick_angle_deg: 0.0,
+            heatmap_color_dirty: false,
+            heatmap_tick_angle_dirty: false,
+            heatmap_synced_color_snapshot: None,
+            heatmap_synced_tick_angle_deg: 0.0,
             heatmap_gap_spinner: ScrubUnitFieldState::new(ScrubUnitKind::Points),
             mv_min_radius_spinner: ScrubUnitFieldState::new(ScrubUnitKind::Points),
             mv_max_radius_spinner: ScrubUnitFieldState::new(ScrubUnitKind::Points),

@@ -1,7 +1,7 @@
 //! Shared UI recording helpers, length spinners, draft validation, and 14-locale labels
 //! for `graph_modals`.
 
-use curvebook_palette::Rgba8;
+use curvebook_palette::{ColormapId, Rgba8};
 use egui::{Color32, FontId, Response, Stroke, Ui};
 use serde_json::{Value, json};
 
@@ -68,6 +68,26 @@ pub(super) fn reset_format_axes_session_state(state: &mut GraphModalEguiState) {
     state.additional_ticks.open = false;
     state.additional_tick_status = None;
     state.axis_bounds_error = None;
+}
+
+pub(super) fn reset_format_graph_local_drafts(state: &mut GraphModalEguiState) {
+    state.format_graph_session_synced = false;
+    state.format_graph_last_sheet_id = None;
+    state.mv_clamp_min_draft.clear();
+    state.mv_clamp_max_draft.clear();
+    state.heatmap_colormap = ColormapId::Viridis;
+    state.heatmap_reversed = false;
+    state.heatmap_auto_range = true;
+    state.heatmap_min_draft = String::from("-1.0");
+    state.heatmap_max_draft = String::from("1.0");
+    state.heatmap_range_error = None;
+    state.heatmap_annotate_cells = true;
+    state.heatmap_cell_gap_pt = 1.5;
+    state.heatmap_tick_angle_deg = 0.0;
+    state.heatmap_color_dirty = false;
+    state.heatmap_tick_angle_dirty = false;
+    state.heatmap_synced_color_snapshot = None;
+    state.heatmap_synced_tick_angle_deg = 0.0;
 }
 
 pub(super) fn rgba_to_color32(c: Rgba8) -> Color32 {
