@@ -288,16 +288,6 @@ impl TableCreationDraft {
             }),
         }
     }
-
-    /// Instantiate this draft directly inside `doc` and select the newly created sheet.
-    pub fn create_into_document(&self, doc: &mut ProjectDocument) -> Result<SheetId, DocError> {
-        let arch = self.build_archetype()?;
-        let sheet = DataSheet::new(self.sheet_id.clone(), self.title.clone(), arch)?;
-        let id = sheet.id.clone();
-        doc.add_data_sheet(sheet)?;
-        doc.select_in_navigator(&id)?;
-        Ok(id)
-    }
 }
 
 /// Curated self-guided tutorial / sample dataset descriptor (`docs/evidence/user-interface.md`).
@@ -471,21 +461,6 @@ impl ClonePipelineDraft {
                 "clone_layouts": self.clone_downstream_layouts,
             }),
         })
-    }
-
-    /// Execute the table structure clone into `doc` and re-anchor to the cloned sheet.
-    pub fn execute_in_document(&self, doc: &mut ProjectDocument) -> Result<SheetId, DocError> {
-        let Some(src_id) = &self.source_sheet_id else {
-            return Err(DocError::EmptyIdentifier);
-        };
-        let Some(src) = doc.data_sheet(src_id).cloned() else {
-            return Err(DocError::SheetNotFound { sheet_id: src_id.clone() });
-        };
-        let cloned = src.clone_structure(self.new_sheet_id.clone(), &self.options)?;
-        let new_id = cloned.id.clone();
-        doc.add_data_sheet(cloned)?;
-        doc.select_in_navigator(&new_id)?;
-        Ok(new_id)
     }
 }
 
@@ -949,36 +924,29 @@ impl WorkspaceNavState {
         }
     }
 
-    /// Handle a click in the main Project Navigator (always re-anchors `family_anchor_sheet_id`).
-    pub fn click_navigator_entry(&mut self, doc: &mut ProjectDocument, sheet_id: &SheetId) -> Result<(), DocError> {
-        doc.select_in_navigator(sheet_id)?;
+    /// Enqueue a `sheet.select` intent for a click in the main Project Navigator without mutating `doc`.
+    pub fn click_navigator_entry(&mut self, doc: &ProjectDocument, sheet_id: &SheetId) -> Result<(), DocError> {
+        if doc.sheet_section(sheet_id).is_none() {
+            return Err(DocError::SheetNotFound { sheet_id: sheet_id.clone() });
+        }
         self.pending_intents.push(ToolCommandIntent {
             command_id: String::from("sheet.select"),
             params: json!({ "sheet_id": sheet_id.as_str(), "mode": "navigator" }),
         });
-        self.sync_from_document(doc);
         Ok(())
     }
 
-    /// Handle a click or double-click inside the Family pane:
+    /// Enqueue a `sheet.select` intent for a click or double-click inside the Family pane without mutating `doc`:
     /// - Single-clicking a `Result`, `Graph`, `Layout`, or `Info` keeps `family_anchor_sheet_id` stable.
     /// - Double-clicking OR choosing a `Data` sheet shifts `family_anchor_sheet_id`.
-    pub fn click_family_entry(&mut self, doc: &mut ProjectDocument, sheet_id: &SheetId, double_click: bool) -> Result<(), DocError> {
-        let is_data = doc.sheet_section(sheet_id) == Some(SheetSection::Data);
-        if double_click || is_data {
-            doc.select_in_navigator(sheet_id)?;
-            self.pending_intents.push(ToolCommandIntent {
-                command_id: String::from("sheet.select"),
-                params: json!({ "sheet_id": sheet_id.as_str(), "mode": "navigator" }),
-            });
-        } else {
-            doc.select_in_family_pane(sheet_id)?;
-            self.pending_intents.push(ToolCommandIntent {
-                command_id: String::from("sheet.select"),
-                params: json!({ "sheet_id": sheet_id.as_str(), "mode": "family" }),
-            });
-        }
-        self.sync_from_document(doc);
+    pub fn click_family_entry(&mut self, doc: &ProjectDocument, sheet_id: &SheetId, double_click: bool) -> Result<(), DocError> {
+        let Some(section) = doc.sheet_section(sheet_id) else {
+            return Err(DocError::SheetNotFound { sheet_id: sheet_id.clone() });
+        };
+        let is_data = section == SheetSection::Data;
+        let mode = if double_click || is_data { "navigator" } else { "family" };
+        self.pending_intents
+            .push(ToolCommandIntent { command_id: String::from("sheet.select"), params: json!({ "sheet_id": sheet_id.as_str(), "mode": mode }) });
         Ok(())
     }
 

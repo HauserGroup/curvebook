@@ -36,7 +36,7 @@ use crate::menus::tooltips::{CommandTooltip, command_tooltip};
 use crate::menus::ui_commands::UI_COMMANDS;
 use crate::menus::{CuratedMenuNode, CuratedMenuSection, curated_menu_bar};
 use crate::modal_predicates::{
-    ControlEnablement, evaluate_dialog_button, evaluate_edit_params_tab, is_reml_mixed_effects_active, r1_paired_or_matched_allowed,
+    ControlEnablement, evaluate_dialog_button_for_app, evaluate_edit_params_tab, is_reml_mixed_effects_active, r1_paired_or_matched_allowed,
     r1b_post_hoc_option_enabled, r1b_sphericity_correction, r2_assume_gaussian_allowed,
 };
 use crate::power_wizard::PowerWizardStage;
@@ -88,11 +88,16 @@ fn disabled_err(reason: impl Into<String>) -> EngineError {
 }
 
 fn handle_ui_inspect(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
-    app.sync_views();
     let metrics = parse_metrics(params)?;
     let scope = opt_str_param(params, &["scope"]).map_err(bad_input)?;
     let include_bounds = opt_bool_param(params, &["include_bounds"]).map_err(bad_input)?.unwrap_or(true);
-    let snap = inspect_ui_tree_for_metrics(app, metrics, scope, include_bounds);
+    #[cfg(not(target_arch = "wasm32"))]
+    let snap = app.inspect_egui_shell_snapshot(metrics, scope, include_bounds);
+    #[cfg(target_arch = "wasm32")]
+    let snap = {
+        app.sync_views();
+        inspect_ui_tree_for_metrics(app, metrics, scope, include_bounds)
+    };
     serde_json::to_value(snap).map_err(|err| EngineError::with_code(ErrorCode::InternalError, format!("failed to serialize ui tree: {err}")))
 }
 
@@ -208,10 +213,32 @@ fn parse_modifiers(val: Option<&Value>) -> Result<KeyModifiers, EngineError> {
 }
 
 fn parse_metrics(params: &Value) -> Result<ViewportMetrics, EngineError> {
-    match params.get("metrics") {
-        None | Some(Value::Null) => Ok(ViewportMetrics::default()),
-        Some(m) => serde_json::from_value(m.clone()).map_err(|err| bad_input(format!("invalid viewport metrics: {err}"))),
+    let Some(m) = params.get("metrics").filter(|v| !v.is_null()) else {
+        return Ok(ViewportMetrics::default());
+    };
+    if !m.is_object() {
+        return Err(bad_input("`metrics` must be a JSON object"));
     }
+    let mut metrics = ViewportMetrics::default();
+    if let Some(w) = opt_finite_f64_param(m, &["logical_width", "width_pt"]).map_err(bad_input)? {
+        if !(160.0..=16_384.0).contains(&w) {
+            return Err(bad_input("`metrics.logical_width` out of range [160, 16384]"));
+        }
+        metrics.logical_width = w;
+    }
+    if let Some(h) = opt_finite_f64_param(m, &["logical_height", "height_pt"]).map_err(bad_input)? {
+        if !(120.0..=16_384.0).contains(&h) {
+            return Err(bad_input("`metrics.logical_height` out of range [120, 16384]"));
+        }
+        metrics.logical_height = h;
+    }
+    if let Some(s) = opt_finite_f64_param(m, &["scale_factor", "dpi_scale"]).map_err(bad_input)? {
+        if !(0.5..=8.0).contains(&s) {
+            return Err(bad_input("`metrics.scale_factor` out of range [0.5, 8.0]"));
+        }
+        metrics.scale_factor = s;
+    }
+    Ok(metrics)
 }
 
 fn handle_pointer_gesture(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
@@ -1459,6 +1486,18 @@ fn apply_type_text_to_grid(
     }))
 }
 
+/// Paste delimited/scalar text starting at `(x_row, x_subcol)` in the active X/Time column,
+/// spilling multi-column TSV into Y columns atomically on failure.
+pub(crate) fn paste_text_into_active_x_cell(
+    app: &mut UiApp,
+    sheet_id: &SheetId,
+    x_row: usize,
+    x_subcol: usize,
+    text: &str,
+) -> Result<Value, EngineError> {
+    apply_type_text_to_x_cell(app, sheet_id, None, x_row, x_subcol, text, true, false)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn apply_type_text_to_x_cell(
     app: &mut UiApp,
@@ -1518,6 +1557,10 @@ fn apply_type_text_to_x_cell(
             }
         }
 
+        // Snapshot session & batch log before Y-spill paste so any downstream X-write error rolls
+        // back cleanly without leaving half-pasted Y columns (`FA-SEC13-14`).
+        let rollback_snapshot = has_y_cols.then(|| (app.session.clone(), app.mutation_seq, app.batch_undo_log.clone()));
+
         if has_y_cols {
             let dec = if preset.decimal_separator == ',' { "," } else { "." };
             let _ = app.execute_command(
@@ -1534,7 +1577,7 @@ fn apply_type_text_to_x_cell(
             )?;
         }
 
-        let out = if x_edits.is_empty() {
+        let x_res = if x_edits.is_empty() {
             app.execute_command(
                 "table.setXCells",
                 json!({
@@ -1543,7 +1586,7 @@ fn apply_type_text_to_x_cell(
                     "subcol": x_subcol,
                     "values": [],
                 }),
-            )?
+            )
         } else {
             app.execute_command(
                 "table.setXCells",
@@ -1551,7 +1594,19 @@ fn apply_type_text_to_x_cell(
                     "sheet_id": sheet_id.as_str(),
                     "edits": x_edits,
                 }),
-            )?
+            )
+        };
+        let out = match x_res {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                if let Some((prev_session, prev_seq, prev_tracker)) = rollback_snapshot {
+                    app.session = prev_session;
+                    app.mutation_seq = prev_seq;
+                    app.batch_undo_log = prev_tracker;
+                    app.sync_views();
+                }
+                return Err(err);
+            }
         };
         app.grid.select_x_cell_sync(x_row, x_subcol);
         app.grid.refresh_selection_stats(app.session.document());
@@ -2099,7 +2154,8 @@ pub(crate) fn execute_dialog_button_action(app: &mut UiApp, action: &str) -> Res
         close_active_modal(app);
         return Ok(json!({ "action": "cancel", "closed": true, "previous_dialog": prev }));
     }
-    let check = evaluate_dialog_button(&app.canvas_dialogs, app.document(), action).unwrap_or_else(ControlEnablement::enabled);
+    sync_format_points_fallback_targets(app);
+    let check = evaluate_dialog_button_for_app(app, action).unwrap_or_else(ControlEnablement::enabled);
     if !check.enabled {
         return Err(disabled_err(check.disabled_reason.unwrap_or_else(|| format!("dialog button `{action}` is currently disabled"))));
     }
@@ -2155,7 +2211,8 @@ fn handle_answer_dialog(app: &mut UiApp, params: &Value) -> Result<Value, Engine
         return Ok(json!({ "action": "cancel", "closed": true, "previous_dialog": prev }));
     }
 
-    let check = evaluate_dialog_button(&app.canvas_dialogs, app.document(), &action).unwrap_or_else(ControlEnablement::enabled);
+    sync_format_points_fallback_targets(app);
+    let check = evaluate_dialog_button_for_app(app, &action).unwrap_or_else(ControlEnablement::enabled);
     if !check.enabled {
         return Err(disabled_err(check.disabled_reason.unwrap_or_else(|| format!("dialog button `{action}` is currently disabled"))));
     }
@@ -2637,14 +2694,49 @@ fn commit_power_wizard_action(app: &mut UiApp, action: &str) -> Result<Value, En
     }
 }
 
-fn commit_format_points_action(app: &mut UiApp) -> Result<Value, EngineError> {
-    if app.canvas_dialogs.format_points.selected_points.is_empty()
-        && let Some(active_ds_id) = app.brushed_points.first().map(|p| p.sheet_id.clone())
-        && let Some(ds) = app.document().data_sheet(&active_ds_id)
+pub(crate) fn resolve_format_points_fallback_targets(app: &UiApp) -> Vec<(usize, usize, Option<usize>)> {
+    let doc = app.document();
+    if let Some(active_ds_id) = app.brushed_points.first().map(|p| p.sheet_id.clone())
+        && let Some(ds) = doc.data_sheet(&active_ds_id)
     {
-        let targets = app.grid.selected_graph_point_targets(ds, usize::MAX);
-        app.canvas_dialogs.format_points.set_selected_targets(targets);
+        let grid_targets = app.grid.selected_graph_point_targets(ds, usize::MAX);
+        if !grid_targets.is_empty() {
+            return grid_targets;
+        }
+        let mut brushed: Vec<(usize, usize, Option<usize>)> = app
+            .brushed_points
+            .iter()
+            .map(|pt| {
+                let subcols = doc.data_sheet(&pt.sheet_id).map_or(1, |d| crate::grid_view::data_set_subcolumn_count(&d.archetype, pt.col));
+                (pt.col, pt.row, (subcols > 1).then_some(pt.subcol))
+            })
+            .collect();
+        brushed.sort_unstable();
+        brushed.dedup();
+        return brushed;
     }
+    if let ActiveDialog::FormatSelectedPoints { graph_sheet_id } = &app.canvas_dialogs.active_dialog
+        && let Some(graph) = doc.graph_sheet(graph_sheet_id)
+        && let Some(ds) = doc.data_sheet(&graph.spec.primary_source_sheet_id)
+    {
+        return app.grid.selected_graph_point_targets(ds, graph.spec.series.len().max(1));
+    }
+    Vec::new()
+}
+
+fn sync_format_points_fallback_targets(app: &mut UiApp) {
+    if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::FormatSelectedPoints { .. })
+        && app.canvas_dialogs.format_points.selected_points.is_empty()
+    {
+        let targets = resolve_format_points_fallback_targets(app);
+        if !targets.is_empty() {
+            app.canvas_dialogs.format_points.set_selected_targets(targets);
+        }
+    }
+}
+
+fn commit_format_points_action(app: &mut UiApp) -> Result<Value, EngineError> {
+    sync_format_points_fallback_targets(app);
     let mut outcomes = Vec::new();
     if let Some(intent) = app.canvas_dialogs.format_points.build_commit_intent() {
         let out = app.execute_command(&intent.command_id, intent.params)?;

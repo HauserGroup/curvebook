@@ -305,11 +305,15 @@ impl BatchUndoTracker {
         let mut snap = session.clone();
         if self.net_batch_depth < 0 {
             for _ in 0..(-self.net_batch_depth) {
-                let _ = snap.redo();
+                if !matches!(snap.redo(), Ok(true)) {
+                    return;
+                }
             }
         } else if self.net_batch_depth > 0 {
             for _ in 0..self.net_batch_depth {
-                let _ = snap.undo();
+                if !matches!(snap.undo(), Ok(true)) {
+                    return;
+                }
             }
         }
         snap.set_file_path(self.baseline_file_path.clone(), !self.baseline_dirty);
@@ -508,7 +512,14 @@ impl UiApp {
     ) -> Result<CommandOutcome, EngineError> {
         if let Some(t) = tracker.as_deref_mut() {
             let is_undo_or_redo = matches!(command_id, "edit.undo" | "edit.redo");
-            let force_fallback = (t.baseline_dirty && command_id == "project.save") || (t.net_batch_depth < 0 && !is_undo_or_redo);
+            let may_mutate = is_undo_or_redo
+                || curvebook_engine::cmd::registry()
+                    .get(command_id)
+                    .is_some_and(|spec| spec.effects.contains(curvebook_engine::cmd::Effects::MUTATES_DOCUMENT));
+            let force_fallback = may_mutate
+                || (t.baseline_dirty && command_id == "project.save")
+                || (t.net_batch_depth < 0 && !is_undo_or_redo)
+                || session.undo_depth() >= curvebook_engine::MAX_UNDO_ENTRIES;
             t.capture_fallback_baseline_before(session, force_fallback);
         }
         let outcome = op(session)?;
@@ -920,16 +931,6 @@ impl UiApp {
     /// Process a single JSON-lines control request and return `(json_reply, loop_action)`.
     #[must_use]
     pub fn dispatch_control_line_with_action(&mut self, line: &str) -> (String, ControlLoopAction) {
-        #[cfg(not(target_arch = "wasm32"))]
-        if line.len() <= MAX_CONTROL_LINE_BYTES
-            && let Ok(req) = serde_json::from_str::<ControlRequest>(line.trim())
-            && let Some(res) = self.try_dispatch_egui_backend(&req.method, &req.params)
-        {
-            let reply = encode_egui_control_response(req.id, res);
-            if let Ok(json_line) = serde_json::to_string(&reply) {
-                return (json_line, ControlLoopAction::Continue);
-            }
-        }
         handle_control_line_with_action(self, line)
     }
 
@@ -1046,21 +1047,11 @@ impl UiApp {
         rasterizer.render_egui_screenshot_png(&ctx, &mut output, target, region, regions, clear_color)
     }
 
-    /// Intercept control actions via custom [`EguiDispatchHook`] or the built-in `egui` shell
-    /// backend (`ui.inspect` / `ui.screenshot`).
+    /// Legacy pre-`control_io` backend hook retained as a compatibility no-op (`None`) so all
+    /// control requests route through `control_io` (`catch_unwind` + per-request token check).
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn try_dispatch_egui_backend(&mut self, method: &str, params: &serde_json::Value) -> Option<Result<serde_json::Value, EngineError>> {
-        if let Some(hook) = self.egui_dispatch_hook.0.clone()
-            && let Some(res) = hook(self, method, params)
-        {
-            self.sync_views();
-            return Some(res);
-        }
-        match method {
-            "ui.inspect" => Some(dispatch_egui_inspect_action(self, params)),
-            "ui.screenshot" => Some(dispatch_egui_screenshot_action(self, params)),
-            _ => None,
-        }
+    pub fn try_dispatch_egui_backend(&mut self, _method: &str, _params: &serde_json::Value) -> Option<Result<serde_json::Value, EngineError>> {
+        None
     }
 
     /// Dispatch a HiDPI interactive [`UiInputEvent`] through the interaction controller (`G6`, `M7`).
@@ -1347,130 +1338,6 @@ pub fn encode_egui_control_response(id: serde_json::Value, res: Result<serde_jso
             ControlResponse { id, ok: false, result: serde_json::Value::Null, error: Some(err.to_string()), error_detail: Some(detail) }
         }
     }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn egui_bad_input(msg: impl Into<String>) -> EngineError {
-    EngineError::with_code(curvebook_doc::ErrorCode::BadInput, msg)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn parse_egui_inspect_metrics(params: &serde_json::Value) -> Result<ViewportMetrics, EngineError> {
-    let Some(m) = params.get("metrics").filter(|v| !v.is_null()) else {
-        return Ok(ViewportMetrics::default());
-    };
-    if !m.is_object() {
-        return Err(egui_bad_input("`metrics` must be a JSON object"));
-    }
-    let mut metrics = ViewportMetrics::default();
-    if let Some(w) = control_io::opt_finite_f64_param(m, &["logical_width", "width_pt"]).map_err(egui_bad_input)? {
-        if w < 160.0 || w > 16_384.0 {
-            return Err(egui_bad_input("`metrics.logical_width` out of range [160, 16384]"));
-        }
-        metrics.logical_width = w;
-    }
-    if let Some(h) = control_io::opt_finite_f64_param(m, &["logical_height", "height_pt"]).map_err(egui_bad_input)? {
-        if h < 120.0 || h > 16_384.0 {
-            return Err(egui_bad_input("`metrics.logical_height` out of range [120, 16384]"));
-        }
-        metrics.logical_height = h;
-    }
-    if let Some(s) = control_io::opt_finite_f64_param(m, &["scale_factor", "dpi_scale"]).map_err(egui_bad_input)? {
-        if !(0.5..=8.0).contains(&s) {
-            return Err(egui_bad_input("`metrics.scale_factor` out of range [0.5, 8.0]"));
-        }
-        metrics.scale_factor = s;
-    }
-    Ok(metrics)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn dispatch_egui_inspect_action(app: &mut UiApp, params: &serde_json::Value) -> Result<serde_json::Value, EngineError> {
-    control_io::require_params_object_or_null(params, "ui.inspect").map_err(egui_bad_input)?;
-    let metrics = parse_egui_inspect_metrics(params)?;
-    let scope = control_io::opt_str_param(params, &["scope"]).map_err(egui_bad_input)?;
-    let include_bounds = control_io::opt_bool_param(params, &["include_bounds"]).map_err(egui_bad_input)?.unwrap_or(true);
-    let snap = app.inspect_egui_shell_snapshot(metrics, scope, include_bounds);
-    serde_json::to_value(snap)
-        .map_err(|err| EngineError::with_code(curvebook_doc::ErrorCode::InternalError, format!("failed to serialize egui inspect tree: {err}")))
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn dispatch_egui_screenshot_action(app: &mut UiApp, params: &serde_json::Value) -> Result<serde_json::Value, EngineError> {
-    control_io::require_params_object_or_null(params, "ui.screenshot").map_err(egui_bad_input)?;
-    let target_raw = control_io::opt_str_param(params, &["target"]).map_err(egui_bad_input)?.unwrap_or("full_window").trim().to_ascii_lowercase();
-    let region = match target_raw.as_str() {
-        "" | "full_window" | "full" | "window" | "workspace" | "viewport" => inspect::ScreenshotRegionTarget::FullWindow,
-        "canvas" | "main" => inspect::ScreenshotRegionTarget::Canvas,
-        "dialog" | "modal" => inspect::ScreenshotRegionTarget::Dialog,
-        other => {
-            return Err(egui_bad_input(format!(
-                "unsupported screenshot target `{other}`; expected full_window, workspace, viewport, canvas, or dialog"
-            )));
-        }
-    };
-
-    let width_px = control_io::parse_bounded_u32(
-        params.get("width_px"),
-        control_io::DEFAULT_SCREENSHOT_WIDTH_PX,
-        control_io::MIN_SCREENSHOT_DIM_PX,
-        control_io::MAX_SCREENSHOT_DIM_PX,
-        "width_px",
-    )
-    .map_err(egui_bad_input)?;
-    let height_px = control_io::parse_bounded_u32(
-        params.get("height_px"),
-        control_io::DEFAULT_SCREENSHOT_HEIGHT_PX,
-        control_io::MIN_SCREENSHOT_DIM_PX,
-        control_io::MAX_SCREENSHOT_DIM_PX,
-        "height_px",
-    )
-    .map_err(egui_bad_input)?;
-    let dpi_u32 =
-        control_io::parse_bounded_u32(params.get("dpi"), u32::from(control_io::DEFAULT_SCREENSHOT_DPI), u32::from(control_io::MIN_DPI), 600, "dpi")
-            .map_err(egui_bad_input)?;
-    let dpi = u16::try_from(dpi_u32).map_err(|_| egui_bad_input("dpi out of range"))?;
-
-    if app.is_gui_only() && params.get("path").is_some_and(|v| !v.is_null() && v.as_str().is_none_or(|s| !s.trim().is_empty())) {
-        return Err(EngineError::with_code(
-            curvebook_doc::ErrorCode::GuiOnlyViolation,
-            "direct filesystem writes via `ui.screenshot` `path` are blocked under --gui-only",
-        )
-        .with_remediation("Omit `path` and inspect the returned in-memory `data_base64` PNG instead."));
-    }
-    let opt_path = control_io::opt_str_param(params, &["path"]).map_err(egui_bad_input)?.map(str::trim).filter(|s| !s.is_empty());
-    let validated_path = match opt_path {
-        Some(path) => Some((path, app.session().validate_host_write_path(path)?)),
-        None => None,
-    };
-
-    let (png_bytes, out_w, out_h) = app
-        .render_egui_shell_screenshot_png(RenderTargetSpec { width_px, height_px, dpi }, region)
-        .map_err(|err| EngineError::with_code(curvebook_doc::ErrorCode::Conflict, format!("screenshot capture failed: {err}")))?;
-
-    let saved_path = match validated_path {
-        Some((raw_path, resolved_path)) => {
-            app.session().write_host_file_atomic(raw_path, &png_bytes)?;
-            Some(resolved_path)
-        }
-        None => None,
-    };
-    let target_label = match region {
-        inspect::ScreenshotRegionTarget::FullWindow => "full_window",
-        inspect::ScreenshotRegionTarget::Canvas => "canvas",
-        inspect::ScreenshotRegionTarget::Dialog => "dialog",
-    };
-
-    Ok(serde_json::json!({
-        "format": "png",
-        "target": target_label,
-        "width_px": out_w,
-        "height_px": out_h,
-        "dpi": dpi,
-        "bytes_len": png_bytes.len(),
-        "data_base64": control_io::encode_base64(&png_bytes),
-        "path": saved_path,
-    }))
 }
 
 /// Accessible label/value snapshot recorded for a single rendered `egui_shell` widget.
