@@ -210,16 +210,20 @@ fn web_bridge_read_only_contended_rejects_mutations_but_allows_pan_zoom_and_expo
     let mut coord = WebLockCoordinator::new(15_000);
     let (mut tab_a, data_id, _graph_id) = build_populated_xy_session("study-shared", "tab-a").expect("populated session");
 
+    let archive_bytes = tab_a.export_curvebook_bytes().expect("export archive from tab-a");
+    tab_a
+        .handle_event(WebBridgeEvent::OpenFileBytes { file_name: String::from("study.curvebook"), bytes: archive_bytes.clone() })
+        .expect("tab-a opens shared file");
+
     let (acq_a, cmds_a) = tab_a.acquire_lock_with(&mut coord, 1_000).expect("tab-a acquire");
     assert_eq!(acq_a.mode, TabAccessMode::ExclusiveReadWrite);
     assert!(matches!(cmds_a.first(), Some(WebBridgeCommand::SetReadOnlyBanner { read_only: false, .. })));
 
-    let archive_bytes = tab_a.export_curvebook_bytes().expect("export archive from tab-a");
-
-    let mut tab_b = WebBridgeSession::with_ids("study-shared", "tab-b");
+    let mut tab_b = WebBridgeSession::with_ids("untitled-tab-b", "tab-b");
     tab_b
         .handle_event(WebBridgeEvent::OpenFileBytes { file_name: String::from("study.curvebook"), bytes: archive_bytes })
         .expect("tab-b loads initial file before joining lock");
+    assert_eq!(tab_b.doc_id(), tab_a.doc_id(), "opening identical file must converge on the same derived doc_id");
 
     let (acq_b, cmds_b) = tab_b.acquire_lock_with(&mut coord, 1_200).expect("tab-b acquire");
     assert_eq!(acq_b.mode, TabAccessMode::ReadOnlyContended { holder_tab_id: String::from("tab-a") });
