@@ -458,7 +458,7 @@ pub fn handle_custom_action(app: &mut UiApp, state: &mut FitParamsViewState, pay
     };
 
     let handled = match &mut spec.kind {
-        AnalysisKind::NonlinearRegression(nl) => handle_nonlinear_action(app, state, nl, &mut spec.confidence_level, payload),
+        AnalysisKind::NonlinearRegression(nl) => handle_nonlinear_action(app, state, nl, &mut spec.confidence_level, payload)?,
         AnalysisKind::LinearRegression(lr) => handle_linear_action(lr, &mut spec.confidence_level, payload),
         AnalysisKind::PassingBablok(pb) => handle_passing_bablok_action(pb, &mut spec.confidence_level, payload),
         _ => return Ok(UiEventOutcome::default()),
@@ -480,19 +480,33 @@ fn handled_outcome(payload: &str) -> UiEventOutcome {
     UiEventOutcome { handled: true, action: format!("{DOMAIN}:{payload}"), command_id: None, command_result: None }
 }
 
+fn parse_finite_input(app: &UiApp, label: &str, raw: &str) -> Result<f64, String> {
+    parse_localized_number_input(raw, &app.locale_preset).ok_or_else(|| format!("Enter a finite number for “{label}”."))
+}
+
 fn handle_nonlinear_action(
     app: &mut UiApp,
     state: &mut FitParamsViewState,
     nl: &mut NonlinearFitSpec,
     confidence_level: &mut ConfidenceLevel,
     payload: &str,
-) -> bool {
-    handle_equation_action(app, state, nl, payload)
-        || handle_constraints_action(app, state, nl, payload)
-        || handle_initial_values_action(app, state, nl, payload)
-        || handle_confidence_action(app, nl, confidence_level, payload)
-        || handle_compare_action(app, nl, payload)
-        || handle_weights_range_action(app, nl, payload)
+) -> Result<bool, String> {
+    if handle_equation_action(app, state, nl, payload) {
+        return Ok(true);
+    }
+    if handle_constraints_action(app, state, nl, payload)? {
+        return Ok(true);
+    }
+    if handle_initial_values_action(app, state, nl, payload)? {
+        return Ok(true);
+    }
+    if handle_confidence_action(app, nl, confidence_level, payload)? {
+        return Ok(true);
+    }
+    if handle_compare_action(app, nl, payload) {
+        return Ok(true);
+    }
+    handle_weights_range_action(app, nl, payload)
 }
 
 fn ensure_tree_expanded_baseline(state: &mut FitParamsViewState, active_eq_id: &str) {
@@ -659,13 +673,13 @@ fn apply_dsl_source(app: &mut UiApp, state: &mut FitParamsViewState, nl: &mut No
     }
 }
 
-fn handle_constraints_action(app: &mut UiApp, state: &mut FitParamsViewState, nl: &mut NonlinearFitSpec, payload: &str) -> bool {
+fn handle_constraints_action(app: &mut UiApp, state: &mut FitParamsViewState, nl: &mut NonlinearFitSpec, payload: &str) -> Result<bool, String> {
     let params = model_param_names(nl);
     if handle_constraints_row_action(app, state, nl, &params, payload) {
-        return true;
+        return Ok(true);
     }
     let Some(selected_name) = params.get(state.selected_param_idx.min(params.len().saturating_sub(1))).cloned() else {
-        return false;
+        return Ok(false);
     };
     handle_constraints_selected_action(app, state, nl, &selected_name, payload)
 }
@@ -737,7 +751,7 @@ fn handle_constraints_selected_action(
     nl: &mut NonlinearFitSpec,
     selected_name: &str,
     payload: &str,
-) -> bool {
+) -> Result<bool, String> {
     if let Some(scope_tag) = payload.strip_prefix("set_scope:") {
         let points = draft_points(app);
         let default_c = model_initial_guesses(nl, &points).get(state.selected_param_idx).copied().filter(|v| v.is_finite()).unwrap_or(1.0);
@@ -749,11 +763,11 @@ fn handle_constraints_selected_action(
             _ => ParameterScope::Local,
         };
         clear_param_text_buffers(app);
-        return true;
+        return Ok(true);
     }
     if payload == "apply_param_rule" {
-        apply_selected_param_rule_inputs(app, nl, selected_name);
-        return true;
+        apply_selected_param_rule_inputs(app, nl, selected_name)?;
+        return Ok(true);
     }
     if payload == "clear_param_bounds" {
         let rule = ensure_rule_mut(nl, selected_name);
@@ -763,57 +777,63 @@ fn handle_constraints_selected_action(
             app.interaction.text_field_buffers.remove("fit.con.lo.input");
             app.interaction.text_field_buffers.remove("fit.con.hi.input");
         }
-        return true;
+        return Ok(true);
     }
     if let Some(preset) = payload.strip_prefix("bound_preset:") {
         apply_bound_preset(app, nl, selected_name, preset);
-        return true;
+        return Ok(true);
     }
     if let Some(delta_spec) = payload.strip_prefix("step_bound:") {
-        return handle_bound_stepper(app, nl, selected_name, delta_spec);
+        return Ok(handle_bound_stepper(app, nl, selected_name, delta_spec));
     }
-    false
+    Ok(false)
 }
 
-fn apply_selected_param_rule_inputs(app: &UiApp, nl: &mut NonlinearFitSpec, selected_name: &str) {
-    let rule = ensure_rule_mut(nl, selected_name);
-    if matches!(rule.scope, ParameterScope::Constant(_)) {
-        if let Some(buf) = app.interaction.text_field_buffers.get("fit.con.const.input")
-            && let Ok(val) = buf.text.trim().parse::<f64>()
-            && val.is_finite()
-        {
-            rule.scope = ParameterScope::Constant(val);
+fn apply_selected_param_rule_inputs(app: &UiApp, nl: &mut NonlinearFitSpec, selected_name: &str) -> Result<(), String> {
+    let existing_scope = nl.parameter_rules.iter().find(|r| r.name == selected_name).map(|r| r.scope.clone());
+    if matches!(existing_scope, Some(ParameterScope::Constant(_))) {
+        if let Some(buf) = app.interaction.text_field_buffers.get("fit.con.const.input") {
+            let val = parse_finite_input(app, "Constant value", buf.text.trim())?;
+            ensure_rule_mut(nl, selected_name).scope = ParameterScope::Constant(val);
         }
-        return;
+        return Ok(());
     }
-    if is_fixed_scope(&rule.scope) {
-        return;
+    if existing_scope.as_ref().is_some_and(is_fixed_scope) {
+        return Ok(());
     }
-    if let Some(buf) = app.interaction.text_field_buffers.get("fit.con.lo.input") {
+    let next_lo = if let Some(buf) = app.interaction.text_field_buffers.get("fit.con.lo.input") {
         let txt = buf.text.trim();
         if txt.is_empty() || txt.eq_ignore_ascii_case("-inf") || txt.eq_ignore_ascii_case("none") {
-            rule.lower_bound = None;
-        } else if let Ok(v) = txt.parse::<f64>()
-            && v.is_finite()
-        {
-            rule.lower_bound = Some(v);
+            Some(None)
+        } else {
+            Some(Some(parse_finite_input(app, "Lower bound", txt)?))
         }
-    }
-    if let Some(buf) = app.interaction.text_field_buffers.get("fit.con.hi.input") {
+    } else {
+        None
+    };
+    let next_hi = if let Some(buf) = app.interaction.text_field_buffers.get("fit.con.hi.input") {
         let txt = buf.text.trim();
         if txt.is_empty() || txt.eq_ignore_ascii_case("+inf") || txt.eq_ignore_ascii_case("inf") || txt.eq_ignore_ascii_case("none") {
-            rule.upper_bound = None;
-        } else if let Ok(v) = txt.parse::<f64>()
-            && v.is_finite()
-        {
-            rule.upper_bound = Some(v);
+            Some(None)
+        } else {
+            Some(Some(parse_finite_input(app, "Upper bound", txt)?))
         }
+    } else {
+        None
+    };
+    let rule = ensure_rule_mut(nl, selected_name);
+    if let Some(lo) = next_lo {
+        rule.lower_bound = lo;
+    }
+    if let Some(hi) = next_hi {
+        rule.upper_bound = hi;
     }
     if let (Some(lo), Some(hi)) = (rule.lower_bound, rule.upper_bound)
         && lo > hi
     {
         rule.upper_bound = Some(lo);
     }
+    Ok(())
 }
 
 fn apply_bound_preset(app: &mut UiApp, nl: &mut NonlinearFitSpec, selected_name: &str, preset: &str) {
@@ -872,7 +892,7 @@ fn handle_bound_stepper(app: &mut UiApp, nl: &mut NonlinearFitSpec, selected_nam
     true
 }
 
-fn handle_initial_values_action(app: &mut UiApp, state: &mut FitParamsViewState, nl: &mut NonlinearFitSpec, payload: &str) -> bool {
+fn handle_initial_values_action(app: &mut UiApp, state: &mut FitParamsViewState, nl: &mut NonlinearFitSpec, payload: &str) -> Result<bool, String> {
     let params = model_param_names(nl);
     if payload == "compute_auto_initials" {
         let points = draft_points(app);
@@ -890,14 +910,14 @@ fn handle_initial_values_action(app: &mut UiApp, state: &mut FitParamsViewState,
             }
         }
         clear_param_text_buffers(app);
-        return true;
+        return Ok(true);
     }
     if payload == "clear_initial_overrides" {
         for name in &params {
             ensure_rule_mut(nl, name).initial_override = None;
         }
         app.interaction.text_field_buffers.remove("fit.init.val.input");
-        return true;
+        return Ok(true);
     }
     if let Some(idx_str) = payload.strip_prefix("init_clear_one:") {
         if let Ok(idx) = idx_str.parse::<usize>()
@@ -907,31 +927,25 @@ fn handle_initial_values_action(app: &mut UiApp, state: &mut FitParamsViewState,
             state.selected_param_idx = idx;
             app.interaction.text_field_buffers.remove("fit.init.val.input");
         }
-        return true;
+        return Ok(true);
     }
     if let Some(rest) = payload.strip_prefix("step_init:") {
-        return step_initial_value(app, state, nl, &params, rest);
+        return Ok(step_initial_value(app, state, nl, &params, rest));
     }
     if payload == "apply_init_input" {
         let Some(name) = params.get(state.selected_param_idx.min(params.len().saturating_sub(1))).cloned() else {
-            return false;
+            return Ok(false);
         };
-        let rule = ensure_rule_mut(nl, &name);
-        if !is_fixed_scope(&rule.scope)
-            && let Some(buf) = app.interaction.text_field_buffers.get("fit.init.val.input")
-        {
+        let is_fixed = nl.parameter_rules.iter().find(|r| r.name == name).is_some_and(|r| is_fixed_scope(&r.scope));
+        if !is_fixed && let Some(buf) = app.interaction.text_field_buffers.get("fit.init.val.input") {
             let txt = buf.text.trim();
-            if txt.is_empty() || txt.eq_ignore_ascii_case("auto") {
-                rule.initial_override = None;
-            } else if let Ok(val) = txt.parse::<f64>()
-                && val.is_finite()
-            {
-                rule.initial_override = Some(val);
-            }
+            let next_val =
+                if txt.is_empty() || txt.eq_ignore_ascii_case("auto") { None } else { Some(parse_finite_input(app, "Initial value", txt)?) };
+            ensure_rule_mut(nl, &name).initial_override = next_val;
         }
-        return true;
+        return Ok(true);
     }
-    false
+    Ok(false)
 }
 
 fn step_initial_value(app: &mut UiApp, state: &mut FitParamsViewState, nl: &mut NonlinearFitSpec, params: &[String], rest: &str) -> bool {
@@ -957,13 +971,18 @@ fn step_initial_value(app: &mut UiApp, state: &mut FitParamsViewState, nl: &mut 
     true
 }
 
-fn handle_confidence_action(app: &mut UiApp, nl: &mut NonlinearFitSpec, confidence_level: &mut ConfidenceLevel, payload: &str) -> bool {
+fn handle_confidence_action(
+    app: &mut UiApp,
+    nl: &mut NonlinearFitSpec,
+    confidence_level: &mut ConfidenceLevel,
+    payload: &str,
+) -> Result<bool, String> {
     if let Some(mode) = payload.strip_prefix("ci_method:") {
         if mode == "profile" && robust_or_rout(nl.method) {
-            return false;
+            return Err(crate::i18n::tr(&app.locale, "fit_params.dis.robust_profile_ci").to_owned());
         }
         nl.profile_likelihood_ci = mode == "profile";
-        return true;
+        return Ok(true);
     }
     if let Some(lvl_str) = payload.strip_prefix("ci_level:") {
         if let Ok(pct) = lvl_str.parse::<f64>()
@@ -974,7 +993,7 @@ fn handle_confidence_action(app: &mut UiApp, nl: &mut NonlinearFitSpec, confiden
                 .text_field_buffers
                 .insert(String::from("fit.ci.lvl.input"), TextFieldEditState::new(format_compact_num(confidence_level.percent()), false));
         }
-        return true;
+        return Ok(true);
     }
     if let Some(delta_str) = payload.strip_prefix("step_ci_level:") {
         if let Ok(delta_pct) = delta_str.parse::<f64>() {
@@ -984,36 +1003,34 @@ fn handle_confidence_action(app: &mut UiApp, nl: &mut NonlinearFitSpec, confiden
                 .text_field_buffers
                 .insert(String::from("fit.ci.lvl.input"), TextFieldEditState::new(format_compact_num(confidence_level.percent()), false));
         }
-        return true;
+        return Ok(true);
     }
     if payload == "apply_ci_level" {
-        if let Some(buf) = app.interaction.text_field_buffers.get("fit.ci.lvl.input")
-            && let Ok(pct) = buf.text.trim().parse::<f64>()
-            && pct.is_finite()
-        {
+        if let Some(buf) = app.interaction.text_field_buffers.get("fit.ci.lvl.input") {
+            let pct = parse_finite_input(app, "Confidence level", buf.text.trim())?;
             set_percent_clamped(confidence_level, pct);
         }
-        return true;
+        return Ok(true);
     }
     match payload {
         "toggle_conf_bands" => {
             nl.confidence_bands = !nl.confidence_bands;
-            return true;
+            return Ok(true);
         }
         "toggle_pred_bands" => {
             nl.prediction_bands = !nl.prediction_bands;
-            return true;
+            return Ok(true);
         }
         "toggle_emit_cov" => {
             if matches!(nl.method, FitMethod::RobustCauchy) {
-                return false;
+                return Err(String::from("Covariance matrix is unavailable for Robust nonlinear regression."));
             }
             nl.emit_covariance_tab = !nl.emit_covariance_tab;
-            return true;
+            return Ok(true);
         }
         "toggle_flag_unstable" => {
             nl.identify_unstable_parameters = !nl.identify_unstable_parameters;
-            return true;
+            return Ok(true);
         }
         _ => {}
     }
@@ -1021,16 +1038,16 @@ fn handle_confidence_action(app: &mut UiApp, nl: &mut NonlinearFitSpec, confiden
         if let Ok(iters) = iters_str.parse::<usize>() {
             nl.max_iters = iters.clamp(10, 10_000);
         }
-        return true;
+        return Ok(true);
     }
     if let Some(delta_str) = payload.strip_prefix("step_max_iters:") {
         if let Ok(delta) = delta_str.parse::<i32>() {
             let next = (nl.max_iters as i32).saturating_add(delta).clamp(10, 10_000);
             nl.max_iters = next as usize;
         }
-        return true;
+        return Ok(true);
     }
-    false
+    Ok(false)
 }
 
 fn default_alternative_equation(primary: &str) -> String {
@@ -1085,9 +1102,9 @@ fn handle_compare_action(app: &mut UiApp, nl: &mut NonlinearFitSpec, payload: &s
     false
 }
 
-fn handle_weights_range_action(app: &mut UiApp, nl: &mut NonlinearFitSpec, payload: &str) -> bool {
+fn handle_weights_range_action(app: &mut UiApp, nl: &mut NonlinearFitSpec, payload: &str) -> Result<bool, String> {
     if handle_method_and_weight_action(nl, payload) {
-        return true;
+        return Ok(true);
     }
     match payload {
         "toggle_interpolate" => nl.interpolate_unknowns = !nl.interpolate_unknowns,
@@ -1097,8 +1114,11 @@ fn handle_weights_range_action(app: &mut UiApp, nl: &mut NonlinearFitSpec, paylo
         "toggle_residuals_tab" => nl.emit_residuals_tab = !nl.emit_residuals_tab,
         "toggle_plot_only" => nl.plot_function_only = !nl.plot_function_only,
         "apply_range" => {
-            let xmin = parse_optional_bound(app, "fit.wr.xmin.input");
-            let xmax = parse_optional_bound(app, "fit.wr.xmax.input");
+            let xmin = parse_optional_bound(app, "X range min", "fit.wr.xmin.input")?;
+            let xmax = parse_optional_bound(app, "X range max", "fit.wr.xmax.input")?;
+            if matches!((xmin, xmax), (Some(lo), Some(hi)) if lo > hi) {
+                return Err(String::from("The lower X range bound must be at or below the upper bound."));
+            }
             nl.x_range_filter = if xmin.is_none() && xmax.is_none() { None } else { Some((xmin, xmax)) };
             if nl.plot_function_only {
                 nl.plot_x_min = xmin;
@@ -1113,9 +1133,9 @@ fn handle_weights_range_action(app: &mut UiApp, nl: &mut NonlinearFitSpec, paylo
             app.interaction.text_field_buffers.remove("fit.wr.xmin.input");
             app.interaction.text_field_buffers.remove("fit.wr.xmax.input");
         }
-        _ => return false,
+        _ => return Ok(false),
     }
-    true
+    Ok(true)
 }
 
 fn handle_method_and_weight_action(nl: &mut NonlinearFitSpec, payload: &str) -> bool {
@@ -1175,9 +1195,12 @@ fn handle_method_and_weight_action(nl: &mut NonlinearFitSpec, payload: &str) -> 
     false
 }
 
-fn parse_optional_bound(app: &UiApp, id: &str) -> Option<f64> {
-    let txt = app.interaction.text_field_buffers.get(id)?.text.trim();
-    if txt.is_empty() { None } else { txt.parse::<f64>().ok().filter(|v| v.is_finite()) }
+fn parse_optional_bound(app: &UiApp, label: &str, id: &str) -> Result<Option<f64>, String> {
+    let Some(buf) = app.interaction.text_field_buffers.get(id) else {
+        return Ok(None);
+    };
+    let txt = buf.text.trim();
+    if txt.is_empty() { Ok(None) } else { parse_finite_input(app, label, txt).map(Some) }
 }
 
 fn linear_range_field_text<'a>(app: &'a UiApp, field: &str) -> Option<&'a str> {

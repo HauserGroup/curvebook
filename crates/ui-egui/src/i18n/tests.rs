@@ -57,8 +57,8 @@ fn untranslated_report() {
     let expected = ["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr", "ar", "he"];
     assert_eq!(LOCALES, &expected);
     assert_eq!(LOCALES.len(), 16);
-    assert_eq!(catalog_len(), 867);
-    assert_eq!(LOCALES.len() * catalog_len(), 13_872);
+    assert_eq!(catalog_len(), 795);
+    assert_eq!(LOCALES.len() * catalog_len(), 12_720);
     assert!(!CATALOG.is_empty());
 
     let mut seen_keys = HashSet::new();
@@ -411,7 +411,7 @@ fn verify_tr_keys_exist(calls: &[(String, String)]) -> Result<(), String> {
 
 #[test]
 fn shard_catalog_aggregation_searches_extra_slices_cleanly() {
-    assert_eq!(EXTRA_SHARD_CATALOGS.len(), 20);
+    assert_eq!(EXTRA_SHARD_CATALOGS.len(), 18);
     let eu_slice = &[entry!("shard.test.key" => [
         en: "Test Key",
         de: "Testschlüssel",

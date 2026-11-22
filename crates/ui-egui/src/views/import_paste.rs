@@ -888,6 +888,95 @@ pub fn commit_convert_archetype_dialog(app: &mut UiApp) -> Result<Value, String>
     Ok(json!({ "mutated": out.mutated, "payload": out.payload }))
 }
 
+fn is_fast_path_tidy_pivot(app: &UiApp, state: &ImportPasteViewState) -> bool {
+    let st = &app.grid.import_reshape;
+    state.row_wrap_width == 0
+        && state.row_start.is_empty()
+        && state.row_end.is_empty()
+        && state.col_start.is_empty()
+        && state.col_end.is_empty()
+        && state.decimate_every_k <= 1
+        && state.filter_pattern.trim().is_empty()
+        && state.exclude_predicate.trim().is_empty()
+        && !state.transpose
+        && !state.unstack_enabled
+        && !state.has_row_titles
+        && !state.skip_contiguous_blanks
+        && state.has_header_row
+        && state.parse_asterisk_exclusions
+        && state.encoding.eq_ignore_ascii_case("utf-8")
+        && state.target_mode == "new_sheet"
+        && effective_source_text(app, state) == st.tidy_csv
+        && effective_text(app, WID_GROUP_COL, &st.group_col) == st.group_col
+        && effective_text(app, WID_VALUE_COL, &st.value_col) == st.value_col
+}
+
+fn commit_external_csv_path(app: &mut UiApp, state: &ImportPasteViewState, path: &str) -> Result<Value, String> {
+    let target_id = resolve_existing_target_sheet(app, state)?;
+    let filter = build_filter_spec(state);
+    let placement = build_placement_spec(state);
+    let mut params = serde_json::Map::new();
+    params.insert(String::from("target_sheet_id"), json!(target_id.as_str()));
+    params.insert(String::from("filter"), json!(filter));
+    params.insert(String::from("anchor"), json!(placement.anchor));
+    params.insert(String::from("mode"), json!(state.placement_mode));
+    params.insert(String::from("transpose"), json!(placement.transpose));
+    params.insert(String::from("propagate_title_header"), json!(placement.propagate_title_header));
+    params.insert(String::from("skip_contiguous_blanks"), json!(placement.skip_contiguous_blanks));
+    if !state.link_id.trim().is_empty() {
+        params.insert(String::from("link_id"), json!(state.link_id.trim()));
+    }
+    if !state.provenance_notes.trim().is_empty() {
+        params.insert(String::from("provenance"), json!(state.provenance_notes.trim()));
+    }
+    if !state.exclude_predicate.trim().is_empty() {
+        params.insert(String::from("exclude_row_predicate"), json!(state.exclude_predicate.trim()));
+    }
+    params.insert(String::from("source_path"), json!(path.trim()));
+    params.insert(String::from("delimiter"), json!(app.grid.import_reshape.tidy_delimiter.to_string()));
+    params.insert(String::from("decimal_separator"), json!(app.grid.import_reshape.decimal_separator.to_string()));
+    let out = app.execute_command("table.pasteLink", Value::Object(params)).map_err(|e| e.to_string())?;
+    maybe_append_provenance_to_info(app, state, Some(target_id.as_str()));
+    Ok(out.payload)
+}
+
+fn commit_external_csv_non_live(app: &mut UiApp, state: &ImportPasteViewState, path: &str) -> Result<Value, String> {
+    let mut params = serde_json::Map::new();
+    params.insert(String::from("path"), json!(path.trim()));
+    params.insert(String::from("link"), json!(false));
+    params.insert(String::from("delimiter"), json!(app.grid.import_reshape.tidy_delimiter.to_string()));
+    params.insert(String::from("decimal_separator"), json!(app.grid.import_reshape.decimal_separator.to_string()));
+    params.insert(String::from("has_header"), json!(state.has_header_row));
+    params.insert(String::from("has_row_titles"), json!(state.has_row_titles));
+    let target_id_opt = if state.target_mode == "existing_sheet" {
+        let target_id = resolve_existing_target_sheet(app, state)?;
+        let filter = build_filter_spec(state);
+        let placement = build_placement_spec(state);
+        params.insert(String::from("sheet_id"), json!(target_id.as_str()));
+        params.insert(String::from("filter"), json!(filter));
+        params.insert(String::from("anchor"), json!(placement.anchor));
+        params.insert(String::from("mode"), json!(state.placement_mode));
+        params.insert(String::from("propagate_title_header"), json!(placement.propagate_title_header));
+        params.insert(String::from("skip_contiguous_blanks"), json!(placement.skip_contiguous_blanks));
+        params.insert(String::from("transpose"), json!(placement.transpose));
+        Some(target_id)
+    } else {
+        let raw_title = app.grid.import_reshape.title.trim();
+        let title = if raw_title.is_empty() { "Imported Table" } else { raw_title };
+        let target_kind = app.grid.import_reshape.target_kind;
+        let subcol_wire = if matches!(target_kind, TableKind::Grouped | TableKind::Nested) { "raw_replicates" } else { "single" };
+        params.insert(String::from("title"), json!(title));
+        params.insert(String::from("archetype"), json!(table_kind_wire_name(target_kind)));
+        params.insert(String::from("subcolumn_mode"), json!(subcol_wire));
+        params.insert(String::from("replicates"), json!(1));
+        None
+    };
+    let out = app.execute_command("table.importCsv", Value::Object(params)).map_err(|e| e.to_string())?;
+    let resolved_sid = target_id_opt.as_ref().map_or_else(|| out.payload.get("sheet_id").and_then(Value::as_str), |id| Some(id.as_str()));
+    maybe_append_provenance_to_info(app, state, resolved_sid);
+    Ok(out.payload)
+}
+
 fn execute_import_paste_commit(app: &mut UiApp, state: &mut ImportPasteViewState) -> Result<Value, String> {
     if state.source_origin == "reshape" {
         if matches!(app.grid.import_reshape.mode, ImportReshapeMode::Plate96 | ImportReshapeMode::Plate384) {
@@ -896,23 +985,29 @@ fn execute_import_paste_commit(app: &mut UiApp, state: &mut ImportPasteViewState
             maybe_append_provenance_to_info(app, state, out.payload.get("sheet_id").and_then(Value::as_str));
             return Ok(out.payload);
         }
-        // TidyLongPivot: honor extra slicing/row-wrap if enabled, else standard importTidyLong intent.
-        if state.row_wrap_width == 0
-            && state.row_start.is_empty()
-            && state.row_end.is_empty()
-            && state.col_start.is_empty()
-            && state.col_end.is_empty()
-            && state.decimate_every_k <= 1
-            && state.filter_pattern.trim().is_empty()
-            && state.exclude_predicate.trim().is_empty()
-            && !state.transpose
-            && state.target_mode == "new_sheet"
-        {
+        // TidyLongPivot: honor extra slicing/row-wrap/header/exclusion/row-title options via preview pipeline,
+        // else take standard table.importTidyLong fast path.
+        if is_fast_path_tidy_pivot(app, state) {
             let intent = app.grid.import_reshape.build_import_intent()?;
             let out = app.execute_command(&intent.command_id, intent.params).map_err(|e| e.to_string())?;
             maybe_append_provenance_to_info(app, state, out.payload.get("sheet_id").and_then(Value::as_str));
             return Ok(out.payload);
         }
+    }
+
+    if state.source_origin == "external_csv" && effective_source_text(app, state).trim().is_empty() {
+        let path = effective_text(app, WID_PATH, &state.external_path);
+        if path.trim().is_empty() {
+            return Err(String::from(if state.paste_as_live_link {
+                "live external CSV link requires a file path"
+            } else {
+                "external CSV import requires a file path or CSV text"
+            }));
+        }
+        if state.paste_as_live_link {
+            return commit_external_csv_path(app, state, &path);
+        }
+        return commit_external_csv_non_live(app, state, &path);
     }
 
     let preview = compute_import_preview(app, state);
@@ -982,6 +1077,48 @@ fn execute_import_paste_commit(app: &mut UiApp, state: &mut ImportPasteViewState
                 }),
             )
             .map_err(|e| e.to_string())?;
+        let placed_start_row =
+            out.payload.pointer("/target_range/start/row").and_then(Value::as_u64).and_then(|r| usize::try_from(r).ok()).unwrap_or(state.anchor_row);
+        if !state.parse_asterisk_exclusions {
+            let placed_start_col = out
+                .payload
+                .pointer("/target_range/start/col")
+                .and_then(Value::as_u64)
+                .and_then(|c| usize::try_from(c).ok())
+                .unwrap_or(state.anchor_col);
+            let placed_start_sub = out
+                .payload
+                .pointer("/target_range/start/subcol")
+                .and_then(Value::as_u64)
+                .and_then(|s| usize::try_from(s).ok())
+                .unwrap_or(state.anchor_subcol);
+            restore_unexcluded_asterisk_cells(app, target_id.as_str(), &preview.rows, placed_start_row, placed_start_col, placed_start_sub, false)?;
+        }
+        if (state.has_row_titles || state.transpose || state.source_origin == "internal_sheet")
+            && !preview.row_labels.is_empty()
+            && !preview.rows.is_empty()
+        {
+            let titles: Vec<Option<String>> = preview
+                .row_labels
+                .iter()
+                .take(preview.rows.len())
+                .map(|lbl| {
+                    let trimmed = lbl.trim();
+                    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+                })
+                .collect();
+            if titles.iter().any(Option::is_some) {
+                app.execute_command(
+                    "table.setRowTitles",
+                    json!({
+                        "sheet_id": target_id.as_str(),
+                        "start_row": placed_start_row,
+                        "titles": titles,
+                    }),
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
         maybe_append_provenance_to_info(app, state, Some(target_id.as_str()));
         return Ok(out.payload);
     }
@@ -1009,12 +1146,67 @@ fn execute_import_paste_commit(app: &mut UiApp, state: &mut ImportPasteViewState
                 "delimiter": "\t",
                 "decimal_separator": ".",
                 "has_header": true,
-                "has_row_titles": state.has_row_titles && !preview.row_labels.is_empty(),
+                "has_row_titles": !preview.row_labels.is_empty(),
             }),
         )
         .map_err(|e| e.to_string())?;
-    maybe_append_provenance_to_info(app, state, out.payload.get("sheet_id").and_then(Value::as_str));
+    let new_sid = out.payload.get("sheet_id").and_then(Value::as_str);
+    if !state.parse_asterisk_exclusions
+        && let Some(sid) = new_sid
+    {
+        restore_unexcluded_asterisk_cells(app, sid, &preview.rows, 0, 0, 0, target_kind == TableKind::Xy)?;
+    }
+    maybe_append_provenance_to_info(app, state, new_sid);
     Ok(out.payload)
+}
+
+fn restore_unexcluded_asterisk_cells(
+    app: &mut UiApp,
+    sheet_id: &str,
+    rows: &[Vec<Cell>],
+    start_row: usize,
+    start_col: usize,
+    start_subcol: usize,
+    first_col_is_x: bool,
+) -> Result<(), String> {
+    let mut cell_edits = Vec::new();
+    let mut x_edits = Vec::new();
+    for (r_off, row) in rows.iter().enumerate() {
+        for (c_off, cell) in row.iter().enumerate() {
+            if !cell.excluded
+                && let curvebook_doc::CellValue::Text(s) = &cell.value
+                && (s.starts_with('*') || s.ends_with('*'))
+            {
+                let target_row = start_row + r_off;
+                if first_col_is_x && c_off == 0 {
+                    x_edits.push(json!({
+                        "row": target_row,
+                        "subcol": 0,
+                        "value": s,
+                        "excluded": false,
+                        "parse_asterisk_exclusion": false,
+                    }));
+                } else {
+                    let target_col = if first_col_is_x { start_col + c_off - 1 } else { start_col + c_off };
+                    cell_edits.push(json!({
+                        "row": target_row,
+                        "col": target_col,
+                        "subcol": start_subcol,
+                        "value": s,
+                        "excluded": false,
+                        "parse_asterisk_exclusion": false,
+                    }));
+                }
+            }
+        }
+    }
+    if !x_edits.is_empty() {
+        app.execute_command("table.setXCells", json!({ "sheet_id": sheet_id, "edits": x_edits })).map_err(|e| e.to_string())?;
+    }
+    if !cell_edits.is_empty() {
+        app.execute_command("table.setCells", json!({ "sheet_id": sheet_id, "edits": cell_edits })).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn resolve_existing_target_sheet(app: &UiApp, state: &ImportPasteViewState) -> Result<SheetId, String> {
@@ -1069,15 +1261,25 @@ fn serialize_preview_as_tsv(preview: &ImportPreviewGrid, include_headers: bool) 
 
 fn serialize_preview_as_csv_with_headers(preview: &ImportPreviewGrid) -> String {
     let mut lines = Vec::new();
+    let has_rows_col = !preview.row_labels.is_empty();
     if !preview.headers.is_empty() {
-        lines.push(preview.headers.join("\t"));
+        let mut hdr_toks = Vec::with_capacity(preview.headers.len() + usize::from(has_rows_col));
+        if has_rows_col {
+            hdr_toks.push(String::from("Row"));
+        }
+        hdr_toks.extend(preview.headers.iter().cloned());
+        lines.push(hdr_toks.join("\t"));
     } else if let Some(first) = preview.rows.first() {
-        let hdrs: Vec<String> = (0..first.len()).map(curvebook_doc::default_column_label).collect();
-        lines.push(hdrs.join("\t"));
+        let mut hdr_toks = Vec::with_capacity(first.len() + usize::from(has_rows_col));
+        if has_rows_col {
+            hdr_toks.push(String::from("Row"));
+        }
+        hdr_toks.extend((0..first.len()).map(curvebook_doc::default_column_label));
+        lines.push(hdr_toks.join("\t"));
     }
     for (r_idx, row) in preview.rows.iter().enumerate() {
         let mut toks = Vec::new();
-        if !preview.row_labels.is_empty() {
+        if has_rows_col {
             toks.push(preview.row_labels.get(r_idx).cloned().unwrap_or_default());
         }
         toks.extend(row.iter().map(format_linked_paste_tsv_cell));
@@ -1258,17 +1460,67 @@ fn parse_ui_plate_role(val: &Value) -> Result<PlateWellRole, String> {
     Ok(PlateWellRole::Treatment { group_name: group_name.to_owned(), dilution_x, replicate })
 }
 
+const TIDY_LITERAL_STAR_PREFIX: &str = "\u{E000}cb_star_";
+const TIDY_LITERAL_STAR_SUFFIX: &str = "\u{E000}";
+
+fn sanitize_tidy_asterisk_tokens(rows: &mut [Vec<String>], value_col: usize, x_col: Option<usize>) -> Vec<String> {
+    let mut originals = Vec::new();
+    for row in rows {
+        for col_idx in std::iter::once(value_col).chain(x_col) {
+            if let Some(tok) = row.get_mut(col_idx) {
+                let trimmed = tok.trim();
+                if (trimmed.starts_with('*') || trimmed.ends_with('*')) && trimmed.len() > 1 {
+                    let marker = format!("{TIDY_LITERAL_STAR_PREFIX}{}{TIDY_LITERAL_STAR_SUFFIX}", originals.len());
+                    originals.push(trimmed.to_owned());
+                    *tok = marker;
+                }
+            }
+        }
+    }
+    originals
+}
+
+fn restore_tidy_asterisk_cells(grid: &mut [Vec<Cell>], originals: &[String]) {
+    if originals.is_empty() {
+        return;
+    }
+    for row in grid {
+        for cell in row {
+            if let curvebook_doc::CellValue::Text(s) = &cell.value
+                && let Some(inner) = s.strip_prefix(TIDY_LITERAL_STAR_PREFIX).and_then(|rest| rest.strip_suffix(TIDY_LITERAL_STAR_SUFFIX))
+                && let Ok(idx) = inner.parse::<usize>()
+                && let Some(orig) = originals.get(idx)
+            {
+                cell.value = curvebook_doc::CellValue::Text(orig.clone());
+            }
+        }
+    }
+}
+
 fn compute_tidy_pivot_preview(app: &UiApp, state: &ImportPasteViewState, mut records: Vec<Vec<String>>) -> ImportPreviewGrid {
     let st = &app.grid.import_reshape;
-    if records.len() < 2 {
-        return ImportPreviewGrid {
-            headers: records.first().cloned().unwrap_or_default(),
-            row_labels: Vec::new(),
-            rows: Vec::new(),
-            validation_error: Some(String::from("Tidy CSV needs a header row and at least 1 data row.")),
-        };
-    }
-    let headers = records.remove(0);
+    let headers = if state.has_header_row {
+        if records.len() < 2 {
+            return ImportPreviewGrid {
+                headers: records.first().cloned().unwrap_or_default(),
+                row_labels: Vec::new(),
+                rows: Vec::new(),
+                validation_error: Some(String::from("Tidy CSV needs a header row and at least 1 data row.")),
+            };
+        }
+        records.remove(0)
+    } else {
+        let col_count = records.iter().map(Vec::len).max().unwrap_or(0);
+        if records.is_empty() || col_count == 0 {
+            return ImportPreviewGrid {
+                headers: Vec::new(),
+                row_labels: Vec::new(),
+                rows: Vec::new(),
+                validation_error: Some(String::from("Tidy CSV needs at least 1 data row.")),
+            };
+        }
+        (0..col_count).map(curvebook_doc::default_column_label).collect()
+    };
     let find_col = |name: &str| -> Option<usize> {
         let needle = name.trim().to_ascii_lowercase();
         headers.iter().position(|h| h.trim().to_ascii_lowercase() == needle)
@@ -1301,7 +1553,9 @@ fn compute_tidy_pivot_preview(app: &UiApp, state: &ImportPasteViewState, mut rec
         TableKind::MultipleVariables => TargetArchetypeKind::MultipleVariables,
         _ => TargetArchetypeKind::Grouped,
     };
-    let sliced_rows = slice_raw_records(records, state);
+    let mut sliced_rows = slice_raw_records(records, state);
+    let asterisk_originals =
+        if state.parse_asterisk_exclusions { Vec::new() } else { sanitize_tidy_asterisk_tokens(&mut sliced_rows, mapping.value_col, mapping.x_col) };
     match pivot_tidy_long_to_datasheet(
         if st.title.trim().is_empty() { "Tidy Import" } else { st.title.trim() },
         &headers,
@@ -1311,7 +1565,8 @@ fn compute_tidy_pivot_preview(app: &UiApp, state: &ImportPasteViewState, mut rec
         st.decimal_separator,
     ) {
         Ok(ds) => {
-            let (hdrs, r_labels, grid, _) = extract_datasheet_preview_grid(&ds, &app.locale_preset);
+            let (hdrs, r_labels, mut grid, _) = extract_datasheet_preview_grid(&ds, &app.locale_preset);
+            restore_tidy_asterisk_cells(&mut grid, &asterisk_originals);
             let mut post_state = state.clone();
             // Slicing was already applied to raw tidy rows before pivoting; only apply placement/markers below.
             post_state.row_start.clear();
