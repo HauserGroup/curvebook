@@ -57,8 +57,8 @@ use curvebook_math::sum::NeumaierSum;
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
-    build_tab, checklist_item, ci_cell, init_result_sheet, num_cell, opt_ci_cell, opt_num_cell, p_cell, push_scalar, sanitize_result_sheet_floats,
-    try_resolve_selected_indices,
+    build_tab, checklist_item, ci_cell, init_result_sheet, num_cell, opt_ci_cell, opt_num_cell, p_cell_at_alpha, push_scalar,
+    sanitize_result_sheet_floats, try_resolve_selected_indices,
 };
 use crate::error::StatsError;
 
@@ -242,7 +242,7 @@ pub enum BarnardOrdering {
 /// Complete output of Barnard's exact unconditional `2 x 2` binomial test (`[[a, b], [c, d]]`; Barnard 1945/1947).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BarnardExactResult {
-    /// Observed test statistic under the selected `BarnardOrdering` rule (`|Z|` or `-p_fisher`).
+    /// Observed signed *Z* statistic (`z_wald` for `BarnardOrdering::WaldUnpooled`, or pooled score `z_pooled` for `ScorePooled`, `Boschloo`, and `Csm`; `0.0` on degenerate zero margins or equal proportions).
     pub statistic: f64,
     /// Exact unconditional two-sided *P* value maximized over nuisance parameter $\pi \in [0, 1]$.
     pub p_value: f64,
@@ -2553,7 +2553,7 @@ fn append_mcnemar_outputs(out: &mut ResultSheet, b: u64, c: u64, confidence: Con
             vec![or_cell, opt_ci_cell(mc.discordant_or_ci)],
             vec![disc_prop_cell, ci_cell(mc.discordant_p_ci.0, mc.discordant_p_ci.1)],
             vec![num_cell(mc.chi_square_yates), ResultCell::Empty],
-            vec![p_cell(mc.exact_p_value, p_fmt), ResultCell::Empty],
+            vec![p_cell_at_alpha(mc.exact_p_value, p_fmt, confidence.alpha()), ResultCell::Empty],
         ],
     ));
     Ok(())
@@ -2631,7 +2631,7 @@ fn run_contingency_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, cont_s
         return match cont_spec.method {
             ContingencyMethod::ExactBinomial => run_exact_binomial_analysis(sheet, spec, cont_spec, out, confidence, p_fmt),
             ContingencyMethod::PearsonChiSquare { yates_continuity: false } | ContingencyMethod::LikelihoodRatioG2 => {
-                run_parts_of_whole_gof(pow, spec, cont_spec, &mut out, p_fmt)
+                run_parts_of_whole_gof(pow, spec, cont_spec, &mut out, confidence, p_fmt)
             }
             ContingencyMethod::PearsonChiSquare { yates_continuity: true } => incompat("Yates' continuity-corrected chi-square"),
             ContingencyMethod::FisherExact => incompat("Fisher's exact test"),
@@ -2695,7 +2695,7 @@ fn run_contingency_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, cont_s
         headers.push(String::from("Cramer's V / Phi"));
         headers.push(format!("{}% CI", confidence.percent()));
     }
-    let mut row_main = vec![opt_num_cell(primary.stat), opt_num_cell(primary.df), p_cell(primary.p_value, p_fmt)];
+    let mut row_main = vec![opt_num_cell(primary.stat), opt_num_cell(primary.df), p_cell_at_alpha(primary.p_value, p_fmt, confidence.alpha())];
     if cont_spec.compute_phi_and_cramers_v {
         row_main.push(num_cell(res.phi.unwrap_or(res.cramers_v)));
         row_main.push(opt_ci_cell(res.cramers_v_ci));
@@ -2776,7 +2776,13 @@ fn push_kappa_outputs(
         ResultTabKind::MainSummary,
         vec![String::from("Kappa"), String::from("ASE (SE)"), format!("{}% CI", confidence.percent()), String::from("Z"), String::from("P value")],
         vec![row_label.to_owned()],
-        vec![vec![num_cell(res.kappa), num_cell(res.se), ci_cell(res.ci.0, res.ci.1), num_cell(res.z_statistic), p_cell(res.p_value, p_fmt)]],
+        vec![vec![
+            num_cell(res.kappa),
+            num_cell(res.se),
+            ci_cell(res.ci.0, res.ci.1),
+            num_cell(res.z_statistic),
+            p_cell_at_alpha(res.p_value, p_fmt, confidence.alpha()),
+        ]],
     ));
 
     out.tabs.push(build_tab(
@@ -3023,10 +3029,10 @@ fn run_exact_binomial_analysis(
             num_cell(res.total as f64),
             num_cell(res.proportion),
             num_cell(res.null_proportion),
-            p_cell(res.p_value_sterne, p_fmt),
-            p_cell(res.p_value_doubled_tail, p_fmt),
-            p_cell(res.p_value_lower, p_fmt),
-            p_cell(res.p_value_upper, p_fmt),
+            p_cell_at_alpha(res.p_value_sterne, p_fmt, confidence.alpha()),
+            p_cell_at_alpha(res.p_value_doubled_tail, p_fmt, confidence.alpha()),
+            p_cell_at_alpha(res.p_value_lower, p_fmt, confidence.alpha()),
+            p_cell_at_alpha(res.p_value_upper, p_fmt, confidence.alpha()),
         ]],
     ));
 
@@ -3088,6 +3094,7 @@ fn run_parts_of_whole_gof(
     spec: &AnalysisSpec,
     cont_spec: &ContingencySpec,
     out: &mut ResultSheet,
+    confidence: ConfidenceLevel,
     p_fmt: PValueFormat,
 ) -> Result<ResultSheet, StatsError> {
     let series_idx = resolve_parts_of_whole_series_index(pow, &spec.selected_data_sets)?;
@@ -3178,8 +3185,9 @@ fn run_parts_of_whole_gof(
         (false, false) => "Chi-square goodness of fit (uniform expected)",
     };
     let headers = vec![String::from("Statistic"), String::from("df"), String::from("P value")];
-    let chi2_row = vec![num_cell(chi2), num_cell(df), p_cell(p_val, p_fmt)];
-    let g2_row = vec![num_cell(g2), num_cell(df), p_cell(g2_p, p_fmt)];
+    let alpha = confidence.alpha();
+    let chi2_row = vec![num_cell(chi2), num_cell(df), p_cell_at_alpha(p_val, p_fmt, alpha)];
+    let g2_row = vec![num_cell(g2), num_cell(df), p_cell_at_alpha(g2_p, p_fmt, alpha)];
     let (row_labels, rows) = if is_g2 {
         (vec![String::from("Likelihood-ratio G2"), String::from("Pearson chi-square")], vec![g2_row, chi2_row])
     } else {

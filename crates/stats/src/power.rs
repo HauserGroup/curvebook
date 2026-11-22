@@ -1773,24 +1773,37 @@ fn solve_t_delta(df: f64, alpha: f64, tail_mode: TailMode, target_power: f64) ->
     };
 
     let eval = |delta: f64| -> f64 { t_power(df, delta, alpha, tail_mode, None).map_or(f64::NAN, |e| e.power - target_power) };
+    let f_zero = p_zero - target_power;
     if search_positive {
         let mut lo = 0.0_f64;
+        let mut f_lo = f_zero;
         let mut hi = 2.0_f64;
         for _ in 0..48 {
-            if eval(hi) >= 0.0 {
+            let f_hi = eval(hi);
+            if !f_hi.is_finite() {
+                break;
+            }
+            if f_lo * f_hi <= 0.0 {
                 return Ok(brent_root(eval, lo, hi, ROOT_TOL)?);
             }
             lo = hi;
+            f_lo = f_hi;
             hi *= 2.0;
         }
     } else {
         let mut hi = 0.0_f64;
+        let mut f_hi = f_zero;
         let mut lo = -2.0_f64;
         for _ in 0..48 {
-            if eval(lo) >= 0.0 {
+            let f_lo = eval(lo);
+            if !f_lo.is_finite() {
+                break;
+            }
+            if f_lo * f_hi <= 0.0 {
                 return Ok(brent_root(eval, lo, hi, ROOT_TOL)?);
             }
             hi = lo;
+            f_hi = f_lo;
             lo *= 2.0;
         }
     }
@@ -1825,6 +1838,9 @@ fn solve_anova_f(k: usize, n_per_group: f64, alpha: f64, target_power: f64) -> R
 
 fn solve_correlation_r(ctx: &ResolvedContext, n: f64, target_power: f64) -> Result<f64, StatsError> {
     let p_zero = correlation_power(ctx.correlation_method, n, 0.0, ctx.alpha, ctx.tail_mode)?.power;
+    if (target_power - p_zero).abs() <= 1e-13 && matches!(ctx.tail_mode, TailMode::OneSided(_)) {
+        return Ok(0.0);
+    }
     if matches!(ctx.tail_mode, TailMode::TwoSided) && target_power <= p_zero {
         return Err(StatsError::InvalidParameter { name: "target_power", value: target_power });
     }
@@ -1835,17 +1851,13 @@ fn solve_correlation_r(ctx: &ResolvedContext, n: f64, target_power: f64) -> Resu
     let eval =
         |r: f64| -> f64 { correlation_power(ctx.correlation_method, n, r, ctx.alpha, ctx.tail_mode).map_or(f64::NAN, |e| e.power - target_power) };
     let max_r = 1.0 - 1e-12;
-    if search_positive {
-        if eval(max_r) < 0.0 {
-            return Err(StatsError::InvalidParameter { name: "target_power", value: target_power });
-        }
-        Ok(brent_root(eval, 0.0, max_r, ROOT_TOL)?)
-    } else {
-        if eval(-max_r) < 0.0 {
-            return Err(StatsError::InvalidParameter { name: "target_power", value: target_power });
-        }
-        Ok(brent_root(eval, -max_r, 0.0, ROOT_TOL)?)
+    let (lo, hi) = if search_positive { (0.0, max_r) } else { (-max_r, 0.0) };
+    let f_lo = eval(lo);
+    let f_hi = eval(hi);
+    if !f_lo.is_finite() || !f_hi.is_finite() || f_lo * f_hi > 0.0 {
+        return Err(StatsError::InvalidParameter { name: "target_power", value: target_power });
     }
+    Ok(brent_root(eval, lo, hi, ROOT_TOL)?)
 }
 
 fn solve_two_proportions_p2(
@@ -1857,22 +1869,38 @@ fn solve_two_proportions_p2(
     target_power: f64,
 ) -> Result<(f64, f64), StatsError> {
     let eps = 1e-9;
+    let p_zero = two_proportions_p_power(ctx, n1, n2, p1, p1)?.power;
+    if (target_power - p_zero).abs() <= 1e-13 && matches!(ctx.tail_mode, TailMode::OneSided(_)) {
+        return Ok((p1, 0.0));
+    }
+    if matches!(ctx.tail_mode, TailMode::TwoSided) && target_power <= p_zero {
+        return Err(StatsError::InvalidParameter { name: "target_power", value: target_power });
+    }
     let eval_p2 = |p2: f64| -> f64 { two_proportions_p_power(ctx, n1, n2, p1, p2).map_or(f64::NAN, |e| e.power - target_power) };
 
-    let solve_lower = || -> Option<f64> {
-        let f_lo = eval_p2(eps);
-        let f_hi = eval_p2(p1);
-        if f_lo.is_finite() && f_hi.is_finite() && f_lo >= 0.0 && f_hi <= 0.0 { brent_root(eval_p2, eps, p1, ROOT_TOL).ok() } else { None }
+    let solve_bracket = |lo: f64, hi: f64| -> Option<f64> {
+        let f_lo = eval_p2(lo);
+        let f_hi = eval_p2(hi);
+        if f_lo.is_finite() && f_hi.is_finite() && f_lo * f_hi <= 0.0 { brent_root(eval_p2, lo, hi, ROOT_TOL).ok() } else { None }
     };
-    let solve_upper = || -> Option<f64> {
-        let f_lo = eval_p2(p1);
-        let f_hi = eval_p2(1.0 - eps);
-        if f_lo.is_finite() && f_hi.is_finite() && f_lo <= 0.0 && f_hi >= 0.0 { brent_root(eval_p2, p1, 1.0 - eps, ROOT_TOL).ok() } else { None }
-    };
+    let solve_lower = || solve_bracket(eps, p1);
+    let solve_upper = || solve_bracket(p1, 1.0 - eps);
 
     let p2 = match ctx.tail_mode {
-        TailMode::OneSided(OneSidedDirection::Greater) => solve_lower(),
-        TailMode::OneSided(OneSidedDirection::Less) => solve_upper(),
+        TailMode::OneSided(OneSidedDirection::Greater) => {
+            if target_power >= p_zero {
+                solve_lower()
+            } else {
+                solve_upper()
+            }
+        }
+        TailMode::OneSided(OneSidedDirection::Less) => {
+            if target_power >= p_zero {
+                solve_upper()
+            } else {
+                solve_lower()
+            }
+        }
         TailMode::TwoSided => match hint_p2 {
             Some(h2) if h2 < p1 => solve_lower().or_else(solve_upper),
             Some(h2) if h2 > p1 => solve_upper().or_else(solve_lower),

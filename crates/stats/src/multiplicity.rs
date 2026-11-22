@@ -238,8 +238,11 @@ pub fn linear_trend_test(groups: &[GroupComparisonInput], mse: f64, df_error: f6
     let mut total_n = NeumaierSum::new();
     let mut weighted_mean_sum = NeumaierSum::new();
     for (i, g) in groups.iter().enumerate() {
-        if g.n <= 0.0 {
+        if !g.n.is_finite() || g.n <= 0.0 {
             return Err(StatsError::InvalidParameter { name: "group_n", value: g.n });
+        }
+        if !g.mean.is_finite() {
+            return Err(StatsError::InvalidParameter { name: "group_mean", value: g.mean });
         }
         let c = (i as f64) - center;
         num.add(c * g.mean);
@@ -458,8 +461,13 @@ pub fn adjust_two_stage_bky(raw_p: &[f64], fdr_q: f64) -> Vec<f64> {
     })
 }
 
-/// Apply any p-value-only multiplicity procedure (`None`, `Bonferroni`, `Sidak`, `HolmBonferroni`,
-/// `HolmSidak`, `BenjaminiHochbergFdr`, `BenjaminiYekutieliFdr`, `TwoStageBkyFdr`) directly to raw *p*-values.
+/// Apply a multiplicity procedure to a family of raw *p*-values (`None` / `FisherLsd` leave values
+/// clamped unadjusted; `Bonferroni`, `Sidak`, `HolmBonferroni`, `HolmSidak`, `BenjaminiHochbergFdr`,
+/// `BenjaminiYekutieliFdr`, and `TwoStageBkyFdr` apply their respective adjustments; ANOVA-only
+/// variants map conservatively to standalone FWER adjustments — `TamhaneT2` to Šídák, and
+/// `TukeyKramer`, `NewmanKeuls`, `Dunnett`, `DunnettT3`, `GamesHowell`, `DunnRankSum`, and
+/// `LinearTrend` to Bonferroni). Prefer [`try_adjust_p_values`] when ANOVA-only variants should be
+/// rejected with [`StatsError::IncompatibleAnalysisSpec`].
 #[must_use]
 pub fn adjust_p_values(raw_p: &[f64], procedure: MultiplicityProcedure, threshold: f64) -> (Vec<f64>, bool) {
     match procedure {
@@ -585,6 +593,32 @@ fn compare_groups_impl(
     }
     if report_ci && (!ci_alpha.is_finite() || ci_alpha <= 0.0 || ci_alpha >= 1.0) {
         return Err(StatsError::InvalidParameter { name: "ci_alpha", value: ci_alpha });
+    }
+    for g in groups {
+        if !g.n.is_finite() || g.n <= 0.0 {
+            return Err(StatsError::InvalidParameter { name: "group_n", value: g.n });
+        }
+        if !g.mean.is_finite() {
+            return Err(StatsError::InvalidParameter { name: "group_mean", value: g.mean });
+        }
+        if !g.sd.is_finite() || g.sd < 0.0 {
+            return Err(StatsError::InvalidParameter { name: "group_sd", value: g.sd });
+        }
+    }
+    if !matches!(
+        procedure,
+        MultiplicityProcedure::GamesHowell
+            | MultiplicityProcedure::TamhaneT2
+            | MultiplicityProcedure::DunnettT3
+            | MultiplicityProcedure::DunnRankSum
+            | MultiplicityProcedure::LinearTrend
+    ) {
+        if !mse.is_finite() || mse < 0.0 {
+            return Err(StatsError::InvalidParameter { name: "mse", value: mse });
+        }
+        if !df_error.is_finite() || df_error <= 0.0 {
+            return Err(StatsError::InvalidParameter { name: "df_error", value: df_error });
+        }
     }
     match procedure {
         MultiplicityProcedure::Dunnett { control_column } => compare_dunnett(groups, mse, df_error, control_column, threshold, ci_alpha, report_ci),
@@ -1086,6 +1120,23 @@ pub fn compare_dunn_ranks(
     if k < 2 || total_n < 2 {
         return Ok(Vec::new());
     }
+    if group_n.len() != k || mean_ranks.len() != k {
+        return Err(StatsError::DimensionMismatch { expected: k, actual: group_n.len().min(mean_ranks.len()) });
+    }
+    if !spec.threshold.is_finite() || spec.threshold <= 0.0 || spec.threshold >= 1.0 {
+        return Err(StatsError::InvalidParameter { name: "threshold", value: spec.threshold });
+    }
+    if !tie_sum_t3_minus_t.is_finite() || tie_sum_t3_minus_t < 0.0 {
+        return Err(StatsError::InvalidParameter { name: "tie_sum_t3_minus_t", value: tie_sum_t3_minus_t });
+    }
+    for (&n_i, &mr) in group_n.iter().zip(mean_ranks.iter()) {
+        if n_i == 0 {
+            return Err(StatsError::InvalidParameter { name: "group_n", value: 0.0 });
+        }
+        if !mr.is_finite() {
+            return Err(StatsError::InvalidParameter { name: "mean_rank", value: mr });
+        }
+    }
     let proc_req = MultiplicityProcedure::from(spec.method);
     let pair_indices: Vec<(usize, usize)> = if let MultiplicityProcedure::Dunnett { control_column } = proc_req {
         let ctrl_pos = group_labels
@@ -1191,13 +1242,21 @@ pub fn build_multiplicity_tab(
             Some((lo, hi)) => crate::common::ci_cell(lo, hi),
             None => ResultCell::Empty,
         };
+        let mut adj_cell = crate::common::p_cell_at_alpha(d.adjusted_p_or_q, p_fmt, confidence.alpha());
+        if let ResultCell::PValue { stars, .. } = &mut adj_cell {
+            if !d.significant {
+                *stars = String::from("ns");
+            } else if stars == "ns" {
+                *stars = String::from("*");
+            }
+        }
         rows.push(vec![
             crate::common::num_cell(d.mean_diff),
             crate::common::num_cell(d.se_diff),
             crate::common::num_cell(d.statistic),
             crate::common::num_cell(d.df),
-            crate::common::p_cell(d.raw_p, p_fmt),
-            crate::common::p_cell(d.adjusted_p_or_q, p_fmt),
+            crate::common::p_cell_at_alpha(d.raw_p, p_fmt, confidence.alpha()),
+            adj_cell,
             ci_cell_val,
             ResultCell::Boolean(d.significant),
         ]);

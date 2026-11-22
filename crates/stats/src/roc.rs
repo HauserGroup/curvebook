@@ -15,15 +15,15 @@
 
 pub use curvebook_doc::RocCiMethod;
 use curvebook_doc::{
-    AnalysisSpec, ChecklistStatus, CurveSamplePoint, DataSheet, FittedCurveOverlay, ResultSheet, ResultTabKind, RocSpec, TableArchetype,
+    AnalysisSpec, ChecklistStatus, CurveSamplePoint, DataSheet, FittedCurveOverlay, ResultSheet, ResultTabKind, RocSpec, TableArchetype, VariableRole,
 };
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{norm_two_sided_isf, norm_two_sided_p};
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
-    build_tab, checklist_item, ci_cell, extract_numeric_columns, init_result_sheet, num_cell, opt_num_cell, p_cell, push_scalar,
-    validate_finite_slice,
+    append_ignored_text_checklist_and_footnote, build_tab, checklist_item, ci_cell, extract_numeric_columns, init_result_sheet, num_cell,
+    opt_num_cell, p_cell_at_alpha, push_scalar, sanitize_result_sheet_floats, try_resolve_selected_indices, validate_finite_slice,
 };
 use crate::error::StatsError;
 
@@ -342,7 +342,25 @@ pub fn run_roc_analysis(sheet: &DataSheet, spec: &AnalysisSpec, roc_spec: &RocSp
     let p_fmt = spec.p_value_format;
 
     let cols = match &sheet.archetype {
-        TableArchetype::Column(_) | TableArchetype::MultipleVariables(_) => extract_numeric_columns(sheet, &spec.selected_data_sets)?,
+        TableArchetype::Column(_) => {
+            let extracted = extract_numeric_columns(sheet, &spec.selected_data_sets)?;
+            if !spec.selected_data_sets.is_empty() && extracted.len() != 2 {
+                return Err(StatsError::InvalidParameter { name: "selected_data_sets", value: extracted.len() as f64 });
+            }
+            extracted
+        }
+        TableArchetype::MultipleVariables(mv) => {
+            let indices = try_resolve_selected_indices(&spec.selected_data_sets, mv.variables.len())?;
+            let numeric_indices: Vec<usize> =
+                indices.into_iter().filter(|&i| !matches!(mv.variables[i].role, VariableRole::Categorical | VariableRole::Label)).collect();
+            if !spec.selected_data_sets.is_empty() && numeric_indices.len() != 2 {
+                return Err(StatsError::InvalidParameter { name: "selected_data_sets", value: numeric_indices.len() as f64 });
+            }
+            if numeric_indices.len() < 2 {
+                return Err(StatsError::InsufficientSampleSize { context: "ROC groups", required: 2, actual: numeric_indices.len() });
+            }
+            extract_numeric_columns(sheet, &numeric_indices[..2])?
+        }
         other => return Err(StatsError::IncompatibleTable { analysis: "ROC curve", actual: other.kind() }),
     };
     if cols.len() < 2 {
@@ -372,7 +390,7 @@ pub fn run_roc_analysis(sheet: &DataSheet, spec: &AnalysisSpec, roc_spec: &RocSp
         num_cell(res.auc),
         num_cell(res.se),
         ci_cell(res.ci.0, res.ci.1),
-        p_cell(res.p_value_vs_05, p_fmt),
+        p_cell_at_alpha(res.p_value_vs_05, p_fmt, confidence.alpha()),
         num_cell(res.optimal_cutoff.cutoff),
         num_cell(res.optimal_cutoff.sensitivity),
         num_cell(res.optimal_cutoff.specificity),
@@ -456,5 +474,9 @@ pub fn run_roc_analysis(sheet: &DataSheet, spec: &AnalysisSpec, roc_spec: &RocSp
         ));
     }
 
+    let ignored: Vec<(String, usize)> =
+        [controls, cases].into_iter().filter(|c| c.non_numeric_count > 0).map(|c| (c.label.clone(), c.non_numeric_count)).collect();
+    append_ignored_text_checklist_and_footnote(&mut out, "ROC curve", &ignored);
+    sanitize_result_sheet_floats(&mut out)?;
     Ok(out)
 }

@@ -38,7 +38,7 @@ use curvebook_math::MathError;
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
-    append_ignored_text_checklist_and_footnote, build_tab, checklist_item, init_result_sheet, num_cell, p_cell, push_scalar,
+    append_ignored_text_checklist_and_footnote, build_tab, checklist_item, init_result_sheet, num_cell, p_cell_at_alpha, push_scalar,
     sanitize_result_sheet_floats,
 };
 use crate::error::StatsError;
@@ -560,10 +560,10 @@ pub fn run_pvalue_stack_analysis(sheet: &DataSheet, spec: &AnalysisSpec, ps: &PV
             r.push(num_cell(col.skipped_excluded_or_empty as f64));
         }
         if let Some(r) = sum_rows.get_mut(8) {
-            r.push(p_cell(col.min_raw_p, p_fmt));
+            r.push(p_cell_at_alpha(col.min_raw_p, p_fmt, col.threshold));
         }
         if let Some(r) = sum_rows.get_mut(9) {
-            r.push(p_cell(col.min_adjusted, p_fmt));
+            r.push(p_cell_at_alpha(col.min_adjusted, p_fmt, col.threshold));
         }
 
         let ds_idx = Some(col.data_set_index);
@@ -606,8 +606,8 @@ pub fn run_pvalue_stack_analysis(sheet: &DataSheet, spec: &AnalysisSpec, ps: &PV
                 ResultCell::Text(col.column_label.clone()),
                 num_cell((r.table_row_index + 1) as f64),
                 num_cell(r.rank as f64),
-                p_cell(r.raw_p, p_fmt),
-                p_cell(r.adjusted_p_or_q, p_fmt),
+                p_cell_at_alpha(r.raw_p, p_fmt, col.threshold),
+                p_cell_at_alpha(r.adjusted_p_or_q, p_fmt, col.threshold),
                 ResultCell::Boolean(r.discovery),
             ]);
         }
