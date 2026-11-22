@@ -1495,7 +1495,7 @@ impl Session {
     pub fn collapse_atomic_group(&mut self, mut baseline: Self) -> bool {
         let mut mutated = self.doc != baseline.doc || self.file_path != baseline.file_path;
         if mutated {
-            let pre_doc = std::mem::replace(&mut baseline.doc, ProjectDocument::default());
+            let pre_doc = std::mem::take(&mut baseline.doc);
             let pre_path = baseline.file_path.take();
             self.undo_stack = baseline.undo_stack;
             self.push_undo_snapshot(pre_doc, pre_path);
