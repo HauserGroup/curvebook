@@ -58,7 +58,7 @@
 //!   tight-binding inhibitors. *Biochimica et Biophysica Acta* 185:269–286.
 
 use crate::library::{
-    BuiltinEquationSpec, ParametricModel, data_x_min_max, data_y_min_max, estimate_x_at_ymid, resolve_from_specs, safe_exp, spec_ids,
+    BuiltinEquationSpec, ModelMeta, ParametricModel, data_x_min_max, data_y_min_max, estimate_x_at_ymid, resolve_from_specs, safe_exp, spec_ids,
 };
 use crate::types::{DataPoint, DerivedScalar, EquationCategory};
 use curvebook_doc::{ParameterRule, ParameterScope};
@@ -66,432 +66,287 @@ use curvebook_doc::{ParameterRule, ParameterScope};
 /// Ordered single-source-of-truth registrations for the pharmacology / biochemistry equation family.
 pub(crate) const PHARMA_SPECS: &[BuiltinEquationSpec] = &[
     // Dose-Response Stimulation
-    BuiltinEquationSpec {
-        id: "log_agonist_vs_response_3pl",
-        aliases: &["log_agonist_vs_response", "ec50_3pl"],
-        build: || {
-            Box::new(LogDoseResponse {
-                id: "log_agonist_vs_response_3pl",
-                name: "log(agonist) vs. response (three parameters)",
-                category: EquationCategory::DoseResponseStimulation,
-                variable_slope: false,
-                is_inhibition: false,
-                normalized: false,
-                params: names(&["Bottom", "Top", "LogEC50"]),
-            })
-        },
-    },
-    BuiltinEquationSpec {
-        id: "log_agonist_vs_response_4pl",
-        aliases: &["log_agonist_vs_response_variable_slope", "4pl"],
-        build: || {
-            Box::new(LogDoseResponse {
-                id: "log_agonist_vs_response_4pl",
-                name: "log(agonist) vs. response, variable Hill slope (four parameters)",
-                category: EquationCategory::DoseResponseStimulation,
-                variable_slope: true,
-                is_inhibition: false,
-                normalized: false,
-                params: names(&["Bottom", "Top", "LogEC50", "HillSlope"]),
-            })
-        },
-    },
-    BuiltinEquationSpec {
-        id: "log_agonist_vs_response_normalized",
-        aliases: &[],
-        build: || {
-            Box::new(LogDoseResponse {
-                id: "log_agonist_vs_response_normalized",
-                name: "log(agonist) vs. normalized response",
-                category: EquationCategory::DoseResponseStimulation,
-                variable_slope: false,
-                is_inhibition: false,
-                normalized: true,
-                params: names(&["LogEC50"]),
-            })
-        },
-    },
-    BuiltinEquationSpec {
-        id: "log_agonist_vs_response_normalized_var",
-        aliases: &[],
-        build: || {
-            Box::new(LogDoseResponse {
-                id: "log_agonist_vs_response_normalized_var",
-                name: "log(agonist) vs. normalized response, variable Hill slope",
-                category: EquationCategory::DoseResponseStimulation,
-                variable_slope: true,
-                is_inhibition: false,
-                normalized: true,
-                params: names(&["LogEC50", "HillSlope"]),
-            })
-        },
-    },
-    BuiltinEquationSpec {
-        id: "agonist_vs_response_3pl",
-        aliases: &["agonist_vs_response"],
-        build: || {
-            Box::new(LinearDoseResponse {
-                id: "agonist_vs_response_3pl",
-                name: "[Agonist] vs. response (three parameters)",
-                category: EquationCategory::DoseResponseStimulation,
-                variable_slope: false,
-                is_inhibition: false,
-                params: names(&["Bottom", "Top", "EC50"]),
-            })
-        },
-    },
-    BuiltinEquationSpec {
-        id: "agonist_vs_response_4pl",
-        aliases: &[],
-        build: || {
-            Box::new(LinearDoseResponse {
-                id: "agonist_vs_response_4pl",
-                name: "[Agonist] vs. response, variable Hill slope (four parameters)",
-                category: EquationCategory::DoseResponseStimulation,
-                variable_slope: true,
-                is_inhibition: false,
-                params: names(&["Bottom", "Top", "EC50", "HillSlope"]),
-            })
-        },
-    },
-    BuiltinEquationSpec {
-        id: "log_agonist_vs_response_5pl",
-        aliases: &["5pl"],
-        build: || Box::new(RichardsFivePl { params: names(&["Bottom", "Top", "LogXb", "HillSlope", "S"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "bell_shaped_dose_response",
-        aliases: &[],
-        build: || Box::new(BellShapedDoseResponse { params: names(&["Plateau1", "Plateau2", "Dip", "LogEC50_1", "LogEC50_2", "nH1", "nH2"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "biphasic_dose_response",
-        aliases: &[],
-        build: || Box::new(BiphasicDoseResponse { params: names(&["Bottom", "Top", "Frac", "LogEC50_1", "LogEC50_2", "nH1", "nH2"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "log_agonist_vs_response_ecf",
-        aliases: &["ecf"],
-        build: || Box::new(DoseResponseEcF { params: names(&["Bottom", "Top", "LogECF", "HillSlope", "F"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "ec50_shift_gaddum_schild",
-        aliases: &["gaddum_schild"],
-        build: || Box::new(GaddumSchild { params: names(&["Bottom", "Top", "LogEC50", "HillSlope", "pA2", "SchildSlope", "AntagConc"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "allosteric_ec50_shift",
-        aliases: &[],
-        build: || Box::new(AllostericEc50Shift { params: names(&["Bottom", "Top", "LogEC50", "HillSlope", "Kb", "alpha", "ModConc"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "operational_model_agonist",
-        aliases: &[],
-        build: || Box::new(OperationalAgonism { params: names(&["Basal", "Emax", "LogKA", "LogTau", "n"]) }),
-    },
+    BuiltinEquationSpec::new("log_agonist_vs_response_3pl", &["log_agonist_vs_response", "ec50_3pl"], || {
+        Box::new(LogDoseResponse {
+            meta: ModelMeta::new(
+                "log_agonist_vs_response_3pl",
+                "log(agonist) vs. response (three parameters)",
+                EquationCategory::DoseResponseStimulation,
+                &["Bottom", "Top", "LogEC50"],
+            ),
+            variable_slope: false,
+            is_inhibition: false,
+            normalized: false,
+        })
+    }),
+    BuiltinEquationSpec::new("log_agonist_vs_response_4pl", &["log_agonist_vs_response_variable_slope", "4pl"], || {
+        Box::new(LogDoseResponse {
+            meta: ModelMeta::new(
+                "log_agonist_vs_response_4pl",
+                "log(agonist) vs. response, variable Hill slope (four parameters)",
+                EquationCategory::DoseResponseStimulation,
+                &["Bottom", "Top", "LogEC50", "HillSlope"],
+            ),
+            variable_slope: true,
+            is_inhibition: false,
+            normalized: false,
+        })
+    }),
+    BuiltinEquationSpec::new("log_agonist_vs_response_normalized", &[], || {
+        Box::new(LogDoseResponse {
+            meta: ModelMeta::new(
+                "log_agonist_vs_response_normalized",
+                "log(agonist) vs. normalized response",
+                EquationCategory::DoseResponseStimulation,
+                &["LogEC50"],
+            ),
+            variable_slope: false,
+            is_inhibition: false,
+            normalized: true,
+        })
+    }),
+    BuiltinEquationSpec::new("log_agonist_vs_response_normalized_var", &[], || {
+        Box::new(LogDoseResponse {
+            meta: ModelMeta::new(
+                "log_agonist_vs_response_normalized_var",
+                "log(agonist) vs. normalized response, variable Hill slope",
+                EquationCategory::DoseResponseStimulation,
+                &["LogEC50", "HillSlope"],
+            ),
+            variable_slope: true,
+            is_inhibition: false,
+            normalized: true,
+        })
+    }),
+    BuiltinEquationSpec::new("agonist_vs_response_3pl", &["agonist_vs_response"], || {
+        Box::new(LinearDoseResponse {
+            meta: ModelMeta::new(
+                "agonist_vs_response_3pl",
+                "[Agonist] vs. response (three parameters)",
+                EquationCategory::DoseResponseStimulation,
+                &["Bottom", "Top", "EC50"],
+            ),
+            variable_slope: false,
+            is_inhibition: false,
+        })
+    }),
+    BuiltinEquationSpec::new("agonist_vs_response_4pl", &[], || {
+        Box::new(LinearDoseResponse {
+            meta: ModelMeta::new(
+                "agonist_vs_response_4pl",
+                "[Agonist] vs. response, variable Hill slope (four parameters)",
+                EquationCategory::DoseResponseStimulation,
+                &["Bottom", "Top", "EC50", "HillSlope"],
+            ),
+            variable_slope: true,
+            is_inhibition: false,
+        })
+    }),
+    BuiltinEquationSpec::new("log_agonist_vs_response_5pl", &["5pl"], || Box::new(RichardsFivePl)),
+    BuiltinEquationSpec::new("bell_shaped_dose_response", &[], || Box::new(BellShapedDoseResponse)),
+    BuiltinEquationSpec::new("biphasic_dose_response", &[], || Box::new(BiphasicDoseResponse)),
+    BuiltinEquationSpec::new("log_agonist_vs_response_ecf", &["ecf"], || Box::new(DoseResponseEcF)),
+    BuiltinEquationSpec::new("ec50_shift_gaddum_schild", &["gaddum_schild"], || Box::new(GaddumSchild)),
+    BuiltinEquationSpec::new("allosteric_ec50_shift", &[], || Box::new(AllostericEc50Shift)),
+    BuiltinEquationSpec::new("operational_model_agonist", &[], || Box::new(OperationalAgonism)),
     // Dose-Response Inhibition
-    BuiltinEquationSpec {
-        id: "log_inhibitor_vs_response_3pl",
-        aliases: &["log_inhibitor_vs_response", "ic50_3pl"],
-        build: || {
-            Box::new(LogDoseResponse {
-                id: "log_inhibitor_vs_response_3pl",
-                name: "log(inhibitor) vs. response (three parameters)",
-                category: EquationCategory::DoseResponseInhibition,
-                variable_slope: false,
-                is_inhibition: true,
-                normalized: false,
-                params: names(&["Bottom", "Top", "LogIC50"]),
-            })
-        },
-    },
-    BuiltinEquationSpec {
-        id: "log_inhibitor_vs_response_4pl",
-        aliases: &["log_inhibitor_vs_response_variable_slope"],
-        build: || {
-            Box::new(LogDoseResponse {
-                id: "log_inhibitor_vs_response_4pl",
-                name: "log(inhibitor) vs. response, variable Hill slope (four parameters)",
-                category: EquationCategory::DoseResponseInhibition,
-                variable_slope: true,
-                is_inhibition: true,
-                normalized: false,
-                params: names(&["Bottom", "Top", "LogIC50", "HillSlope"]),
-            })
-        },
-    },
-    BuiltinEquationSpec {
-        id: "log_inhibitor_vs_response_normalized",
-        aliases: &[],
-        build: || {
-            Box::new(LogDoseResponse {
-                id: "log_inhibitor_vs_response_normalized",
-                name: "log(inhibitor) vs. normalized response",
-                category: EquationCategory::DoseResponseInhibition,
-                variable_slope: false,
-                is_inhibition: true,
-                normalized: true,
-                params: names(&["LogIC50"]),
-            })
-        },
-    },
-    BuiltinEquationSpec {
-        id: "log_inhibitor_vs_response_normalized_var",
-        aliases: &[],
-        build: || {
-            Box::new(LogDoseResponse {
-                id: "log_inhibitor_vs_response_normalized_var",
-                name: "log(inhibitor) vs. normalized response, variable Hill slope",
-                category: EquationCategory::DoseResponseInhibition,
-                variable_slope: true,
-                is_inhibition: true,
-                normalized: true,
-                params: names(&["LogIC50", "HillSlope"]),
-            })
-        },
-    },
-    BuiltinEquationSpec {
-        id: "inhibitor_vs_response_3pl",
-        aliases: &["inhibitor_vs_response"],
-        build: || {
-            Box::new(LinearDoseResponse {
-                id: "inhibitor_vs_response_3pl",
-                name: "[Inhibitor] vs. response (three parameters)",
-                category: EquationCategory::DoseResponseInhibition,
-                variable_slope: false,
-                is_inhibition: true,
-                params: names(&["Bottom", "Top", "IC50"]),
-            })
-        },
-    },
-    BuiltinEquationSpec {
-        id: "inhibitor_vs_response_4pl",
-        aliases: &[],
-        build: || {
-            Box::new(LinearDoseResponse {
-                id: "inhibitor_vs_response_4pl",
-                name: "[Inhibitor] vs. response, variable Hill slope (four parameters)",
-                category: EquationCategory::DoseResponseInhibition,
-                variable_slope: true,
-                is_inhibition: true,
-                params: names(&["Bottom", "Top", "IC50", "HillSlope"]),
-            })
-        },
-    },
-    BuiltinEquationSpec {
-        id: "absolute_ic50_4pl",
-        aliases: &[],
-        build: || Box::new(AbsoluteIc50 { params: names(&["Bottom", "Top", "LogIC50", "HillSlope", "Control0", "Control100"]) }),
-    },
+    BuiltinEquationSpec::new("log_inhibitor_vs_response_3pl", &["log_inhibitor_vs_response", "ic50_3pl"], || {
+        Box::new(LogDoseResponse {
+            meta: ModelMeta::new(
+                "log_inhibitor_vs_response_3pl",
+                "log(inhibitor) vs. response (three parameters)",
+                EquationCategory::DoseResponseInhibition,
+                &["Bottom", "Top", "LogIC50"],
+            ),
+            variable_slope: false,
+            is_inhibition: true,
+            normalized: false,
+        })
+    }),
+    BuiltinEquationSpec::new("log_inhibitor_vs_response_4pl", &["log_inhibitor_vs_response_variable_slope"], || {
+        Box::new(LogDoseResponse {
+            meta: ModelMeta::new(
+                "log_inhibitor_vs_response_4pl",
+                "log(inhibitor) vs. response, variable Hill slope (four parameters)",
+                EquationCategory::DoseResponseInhibition,
+                &["Bottom", "Top", "LogIC50", "HillSlope"],
+            ),
+            variable_slope: true,
+            is_inhibition: true,
+            normalized: false,
+        })
+    }),
+    BuiltinEquationSpec::new("log_inhibitor_vs_response_normalized", &[], || {
+        Box::new(LogDoseResponse {
+            meta: ModelMeta::new(
+                "log_inhibitor_vs_response_normalized",
+                "log(inhibitor) vs. normalized response",
+                EquationCategory::DoseResponseInhibition,
+                &["LogIC50"],
+            ),
+            variable_slope: false,
+            is_inhibition: true,
+            normalized: true,
+        })
+    }),
+    BuiltinEquationSpec::new("log_inhibitor_vs_response_normalized_var", &[], || {
+        Box::new(LogDoseResponse {
+            meta: ModelMeta::new(
+                "log_inhibitor_vs_response_normalized_var",
+                "log(inhibitor) vs. normalized response, variable Hill slope",
+                EquationCategory::DoseResponseInhibition,
+                &["LogIC50", "HillSlope"],
+            ),
+            variable_slope: true,
+            is_inhibition: true,
+            normalized: true,
+        })
+    }),
+    BuiltinEquationSpec::new("inhibitor_vs_response_3pl", &["inhibitor_vs_response"], || {
+        Box::new(LinearDoseResponse {
+            meta: ModelMeta::new(
+                "inhibitor_vs_response_3pl",
+                "[Inhibitor] vs. response (three parameters)",
+                EquationCategory::DoseResponseInhibition,
+                &["Bottom", "Top", "IC50"],
+            ),
+            variable_slope: false,
+            is_inhibition: true,
+        })
+    }),
+    BuiltinEquationSpec::new("inhibitor_vs_response_4pl", &[], || {
+        Box::new(LinearDoseResponse {
+            meta: ModelMeta::new(
+                "inhibitor_vs_response_4pl",
+                "[Inhibitor] vs. response, variable Hill slope (four parameters)",
+                EquationCategory::DoseResponseInhibition,
+                &["Bottom", "Top", "IC50", "HillSlope"],
+            ),
+            variable_slope: true,
+            is_inhibition: true,
+        })
+    }),
+    BuiltinEquationSpec::new("absolute_ic50_4pl", &[], || Box::new(AbsoluteIc50)),
     // Receptor Binding
-    BuiltinEquationSpec {
-        id: "one_site_specific_binding",
-        aliases: &[],
-        build: || {
-            Box::new(OneSiteBinding {
-                id: "one_site_specific_binding",
-                name: "One-site specific binding",
-                with_hill: false,
-                with_ns: false,
-                params: names(&["Bmax", "Kd"]),
-            })
-        },
-    },
-    BuiltinEquationSpec {
-        id: "one_site_specific_hill",
-        aliases: &[],
-        build: || {
-            Box::new(OneSiteBinding {
-                id: "one_site_specific_hill",
-                name: "One-site specific binding with Hill slope",
-                with_hill: true,
-                with_ns: false,
-                params: names(&["Bmax", "Kd", "h"]),
-            })
-        },
-    },
-    BuiltinEquationSpec {
-        id: "one_site_total_and_ns",
-        aliases: &[],
-        build: || {
-            Box::new(OneSiteBinding {
-                id: "one_site_total_and_ns",
-                name: "One-site total and nonspecific binding",
-                with_hill: false,
-                with_ns: true,
-                params: names(&["Bmax", "Kd", "NS", "Background"]),
-            })
-        },
-    },
-    BuiltinEquationSpec {
-        id: "one_site_total_and_ns_global",
-        aliases: &[],
-        build: || Box::new(OneSiteTotalAndNsGlobal { params: names(&["Bmax", "Kd", "NS", "Background"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "two_site_total_and_ns_global",
-        aliases: &[],
-        build: || Box::new(TwoSiteTotalAndNsGlobal { params: names(&["BmaxHi", "KdHi", "BmaxLo", "KdLo", "NS", "Background"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "one_site_specific_ligand_depletion",
-        aliases: &[],
-        build: || Box::new(OneSiteSpecificLigandDepletion { params: names(&["Rt", "Kd", "NS"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "one_site_competition_ligand_depletion",
-        aliases: &[],
-        build: || Box::new(OneSiteCompetitionLigandDepletion { params: names(&["Rt", "HotNM", "KdNM", "LogKi", "NS"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "allosteric_modulator_saturation",
-        aliases: &[],
-        build: || Box::new(AllostericModulatorSaturation { params: names(&["Bmax", "Kd", "alpha", "Kb", "ModConc"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "homologous_one_site_competition",
-        aliases: &[],
-        build: || Box::new(HomologousOneSiteCompetition { params: names(&["Bmax", "Kd", "NS", "HotConc"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "two_sites_specific_binding",
-        aliases: &[],
-        build: || Box::new(TwoSiteBinding { params: names(&["BmaxHi", "KdHi", "BmaxLo", "KdLo"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "one_site_fit_ki",
-        aliases: &[],
-        build: || Box::new(CompetitionOneSiteKi { params: names(&["Top", "Bottom", "LogKi", "HotConc_nM", "HotKd_nM"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "one_site_fit_logic50",
-        aliases: &[],
-        build: || {
-            Box::new(LogDoseResponse {
-                id: "one_site_fit_logic50",
-                name: "One-site competitive binding (logIC50)",
-                category: EquationCategory::ReceptorBinding,
-                variable_slope: false,
-                is_inhibition: true,
-                normalized: false,
-                params: names(&["Bottom", "Top", "LogIC50"]),
-            })
-        },
-    },
-    BuiltinEquationSpec {
-        id: "two_sites_fit_ki",
-        aliases: &[],
-        build: || Box::new(CompetitionTwoSiteKi { params: names(&["Top", "Bottom", "FractionHi", "LogKi_1", "LogKi_2", "HotConc_nM", "HotKd_nM"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "dissociation_one_phase",
-        aliases: &[],
-        build: || Box::new(DissociationOnePhase { params: names(&["Y0", "NS", "Koff"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "association_kinetics_one_conc",
-        aliases: &[],
-        build: || Box::new(AssociationOneConc { params: names(&["Ymax", "Kobs"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "association_kinetics_two_conc",
-        aliases: &[],
-        build: || Box::new(AssociationTwoConc { params: names(&["Bmax", "Kon", "Koff", "LigandConc"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "assoc_then_dissoc",
-        aliases: &[],
-        build: || Box::new(AssocThenDissoc { params: names(&["Bmax", "Kon", "Koff", "LigandConc", "Time0"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "motulsky_mahan_kinetics",
-        aliases: &[],
-        build: || Box::new(MotulskyMahanKinetics { params: names(&["Bmax", "kon1", "koff1", "kon2", "koff2", "L", "I"]) }),
-    },
+    BuiltinEquationSpec::new("one_site_specific_binding", &[], || {
+        Box::new(OneSiteBinding {
+            meta: ModelMeta::new("one_site_specific_binding", "One-site specific binding", EquationCategory::ReceptorBinding, &["Bmax", "Kd"]),
+            with_hill: false,
+            with_ns: false,
+        })
+    }),
+    BuiltinEquationSpec::new("one_site_specific_hill", &[], || {
+        Box::new(OneSiteBinding {
+            meta: ModelMeta::new(
+                "one_site_specific_hill",
+                "One-site specific binding with Hill slope",
+                EquationCategory::ReceptorBinding,
+                &["Bmax", "Kd", "h"],
+            ),
+            with_hill: true,
+            with_ns: false,
+        })
+    }),
+    BuiltinEquationSpec::new("one_site_total_and_ns", &[], || {
+        Box::new(OneSiteBinding {
+            meta: ModelMeta::new(
+                "one_site_total_and_ns",
+                "One-site total and nonspecific binding",
+                EquationCategory::ReceptorBinding,
+                &["Bmax", "Kd", "NS", "Background"],
+            ),
+            with_hill: false,
+            with_ns: true,
+        })
+    }),
+    BuiltinEquationSpec::new("one_site_total_and_ns_global", &[], || Box::new(OneSiteTotalAndNsGlobal)),
+    BuiltinEquationSpec::new("two_site_total_and_ns_global", &[], || Box::new(TwoSiteTotalAndNsGlobal)),
+    BuiltinEquationSpec::new("one_site_specific_ligand_depletion", &[], || Box::new(OneSiteSpecificLigandDepletion)),
+    BuiltinEquationSpec::new("one_site_competition_ligand_depletion", &[], || Box::new(OneSiteCompetitionLigandDepletion)),
+    BuiltinEquationSpec::new("allosteric_modulator_saturation", &[], || Box::new(AllostericModulatorSaturation)),
+    BuiltinEquationSpec::new("homologous_one_site_competition", &[], || Box::new(HomologousOneSiteCompetition)),
+    BuiltinEquationSpec::new("two_sites_specific_binding", &[], || Box::new(TwoSiteBinding)),
+    BuiltinEquationSpec::new("one_site_fit_ki", &[], || Box::new(CompetitionOneSiteKi)),
+    BuiltinEquationSpec::new("one_site_fit_logic50", &[], || {
+        Box::new(LogDoseResponse {
+            meta: ModelMeta::new(
+                "one_site_fit_logic50",
+                "One-site competitive binding (logIC50)",
+                EquationCategory::ReceptorBinding,
+                &["Bottom", "Top", "LogIC50"],
+            ),
+            variable_slope: false,
+            is_inhibition: true,
+            normalized: false,
+        })
+    }),
+    BuiltinEquationSpec::new("two_sites_fit_ki", &[], || Box::new(CompetitionTwoSiteKi)),
+    BuiltinEquationSpec::new("dissociation_one_phase", &[], || Box::new(DissociationOnePhase)),
+    BuiltinEquationSpec::new("association_kinetics_one_conc", &[], || Box::new(AssociationOneConc)),
+    BuiltinEquationSpec::new("association_kinetics_two_conc", &[], || Box::new(AssociationTwoConc)),
+    BuiltinEquationSpec::new("assoc_then_dissoc", &[], || Box::new(AssocThenDissoc)),
+    BuiltinEquationSpec::new("motulsky_mahan_kinetics", &[], || Box::new(MotulskyMahanKinetics)),
     // Enzyme Kinetics
-    BuiltinEquationSpec {
-        id: "michaelis_menten",
-        aliases: &[],
-        build: || Box::new(MichaelisMenten { kcat_mode: false, params: names(&["Vmax", "Km"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "kcat_enzyme_kinetics",
-        aliases: &["kcat"],
-        build: || Box::new(MichaelisMenten { kcat_mode: true, params: names(&["kcat", "Km", "Et"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "allosteric_sigmoidal_kinetics",
-        aliases: &["allosteric_sigmoidal"],
-        build: || Box::new(AllostericSigmoidal { params: names(&["Vmax", "Khalf", "h"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "substrate_inhibition",
-        aliases: &[],
-        build: || Box::new(SubstrateInhibition { params: names(&["Vmax", "Km", "Ki"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "competitive_inhibition",
-        aliases: &[],
-        build: || {
-            Box::new(EnzymeInhibition {
-                id: "competitive_inhibition",
-                name: "Competitive inhibition",
-                mode: EnzymeInhibMode::Competitive,
-                params: names(&["Vmax", "Km", "Ki", "I"]),
-            })
-        },
-    },
-    BuiltinEquationSpec {
-        id: "noncompetitive_inhibition",
-        aliases: &[],
-        build: || {
-            Box::new(EnzymeInhibition {
-                id: "noncompetitive_inhibition",
-                name: "Noncompetitive inhibition",
-                mode: EnzymeInhibMode::Noncompetitive,
-                params: names(&["Vmax", "Km", "Ki", "I"]),
-            })
-        },
-    },
-    BuiltinEquationSpec {
-        id: "uncompetitive_inhibition",
-        aliases: &[],
-        build: || {
-            Box::new(EnzymeInhibition {
-                id: "uncompetitive_inhibition",
-                name: "Uncompetitive inhibition",
-                mode: EnzymeInhibMode::Uncompetitive,
-                params: names(&["Vmax", "Km", "alphaKi", "I"]),
-            })
-        },
-    },
-    BuiltinEquationSpec {
-        id: "mixed_model_inhibition",
-        aliases: &[],
-        build: || {
-            Box::new(EnzymeInhibition {
-                id: "mixed_model_inhibition",
-                name: "Mixed model inhibition",
-                mode: EnzymeInhibMode::Mixed,
-                params: names(&["Vmax", "Km", "Ki", "Alpha", "I"]),
-            })
-        },
-    },
-    BuiltinEquationSpec {
-        id: "morrison_tight_binding_ki",
-        aliases: &["morrison"],
-        build: || Box::new(MorrisonKi { params: names(&["Vo", "Et", "Ki", "S", "Km"]) }),
-    },
+    BuiltinEquationSpec::new("michaelis_menten", &[], || {
+        Box::new(MichaelisMenten {
+            meta: ModelMeta::new("michaelis_menten", "Michaelis-Menten", EquationCategory::EnzymeKinetics, &["Vmax", "Km"]),
+            kcat_mode: false,
+        })
+    }),
+    BuiltinEquationSpec::new("kcat_enzyme_kinetics", &["kcat"], || {
+        Box::new(MichaelisMenten {
+            meta: ModelMeta::new("kcat_enzyme_kinetics", "kcat", EquationCategory::EnzymeKinetics, &["kcat", "Km", "Et"]),
+            kcat_mode: true,
+        })
+    }),
+    BuiltinEquationSpec::new("allosteric_sigmoidal_kinetics", &["allosteric_sigmoidal"], || Box::new(AllostericSigmoidal)),
+    BuiltinEquationSpec::new("substrate_inhibition", &[], || Box::new(SubstrateInhibition)),
+    BuiltinEquationSpec::new("competitive_inhibition", &[], || {
+        Box::new(EnzymeInhibition {
+            meta: ModelMeta::new("competitive_inhibition", "Competitive inhibition", EquationCategory::EnzymeKinetics, &["Vmax", "Km", "Ki", "I"]),
+            mode: EnzymeInhibMode::Competitive,
+        })
+    }),
+    BuiltinEquationSpec::new("noncompetitive_inhibition", &[], || {
+        Box::new(EnzymeInhibition {
+            meta: ModelMeta::new(
+                "noncompetitive_inhibition",
+                "Noncompetitive inhibition",
+                EquationCategory::EnzymeKinetics,
+                &["Vmax", "Km", "Ki", "I"],
+            ),
+            mode: EnzymeInhibMode::Noncompetitive,
+        })
+    }),
+    BuiltinEquationSpec::new("uncompetitive_inhibition", &[], || {
+        Box::new(EnzymeInhibition {
+            meta: ModelMeta::new(
+                "uncompetitive_inhibition",
+                "Uncompetitive inhibition",
+                EquationCategory::EnzymeKinetics,
+                &["Vmax", "Km", "alphaKi", "I"],
+            ),
+            mode: EnzymeInhibMode::Uncompetitive,
+        })
+    }),
+    BuiltinEquationSpec::new("mixed_model_inhibition", &[], || {
+        Box::new(EnzymeInhibition {
+            meta: ModelMeta::new(
+                "mixed_model_inhibition",
+                "Mixed model inhibition",
+                EquationCategory::EnzymeKinetics,
+                &["Vmax", "Km", "Ki", "Alpha", "I"],
+            ),
+            mode: EnzymeInhibMode::Mixed,
+        })
+    }),
+    BuiltinEquationSpec::new("morrison_tight_binding_ki", &["morrison"], || Box::new(MorrisonKi)),
 ];
 
 const PHARMA_EQUATION_ID_ARRAY: [&str; PHARMA_SPECS.len()] = spec_ids::<{ PHARMA_SPECS.len() }>(PHARMA_SPECS);
 
 /// Canonical IDs exposed by the pharmacology / biochemistry equation catalog.
 pub const PHARMA_EQUATION_IDS: &[&str] = &PHARMA_EQUATION_ID_ARRAY;
-
-fn names(slice: &[&str]) -> Vec<String> {
-    slice.iter().map(|s| (*s).to_owned()).collect()
-}
 
 #[inline]
 fn safe_pow10(exp: f64) -> Option<f64> {
@@ -532,28 +387,14 @@ pub fn resolve_pharma_model(norm_id: &str) -> Option<Box<dyn ParametricModel>> {
 /// Reference: Hill (1910) equation; this log-X `Bottom` / `Top` / `LogEC50` / `HillSlope`
 /// parameterisation follows Motulsky & Christopoulos (2004).
 struct LogDoseResponse {
-    id: &'static str,
-    name: &'static str,
-    category: EquationCategory,
+    meta: ModelMeta,
     variable_slope: bool,
     is_inhibition: bool,
     normalized: bool,
-    params: Vec<String>,
 }
 
 impl ParametricModel for LogDoseResponse {
-    fn id(&self) -> &str {
-        self.id
-    }
-    fn name(&self) -> &str {
-        self.name
-    }
-    fn category(&self) -> EquationCategory {
-        self.category
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_meta_methods!();
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
         let (bottom, top, log_c50, hill) = match (self.normalized, self.variable_slope) {
@@ -645,27 +486,13 @@ impl ParametricModel for LogDoseResponse {
 /// `Y = Bottom + (Top - Bottom) * X^h / (EC50^h + X^h)` (inhibitor form uses `EC50^h / (EC50^h + X^h)`).
 /// Reference: Hill (1910); parameterisation per Motulsky & Christopoulos (2004).
 struct LinearDoseResponse {
-    id: &'static str,
-    name: &'static str,
-    category: EquationCategory,
+    meta: ModelMeta,
     variable_slope: bool,
     is_inhibition: bool,
-    params: Vec<String>,
 }
 
 impl ParametricModel for LinearDoseResponse {
-    fn id(&self) -> &str {
-        self.id
-    }
-    fn name(&self) -> &str {
-        self.name
-    }
-    fn category(&self) -> EquationCategory {
-        self.category
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_meta_methods!();
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let c = x.first().copied()?;
         if c < 0.0 || !c.is_finite() {
@@ -693,7 +520,7 @@ impl ParametricModel for LinearDoseResponse {
         let Some(&c) = x.first() else {
             return false;
         };
-        if !c.is_finite() || c < 0.0 || params.len() < self.params.len() || out.len() < self.params.len() {
+        if !c.is_finite() || c < 0.0 || params.len() < self.meta.params.len() || out.len() < self.meta.params.len() {
             return false;
         }
         let bottom = params[0];
@@ -737,7 +564,7 @@ impl ParametricModel for LinearDoseResponse {
         if self.variable_slope {
             out[3] = span * sign * du_d_ln * (c / c50).ln();
         }
-        out[..self.params.len()].iter().all(|v| v.is_finite())
+        out[..self.meta.params.len()].iter().all(|v| v.is_finite())
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
@@ -758,23 +585,15 @@ impl ParametricModel for LinearDoseResponse {
 /// Derived `LogEC50 = LogXb - log10(2^(1/S) - 1) / HillSlope` (the X giving half the span).
 /// Reference: Richards (1959) generalised logistic; the asymmetry-exponent form used for
 /// dose-response is that of Gottschalk & Dunn (2005), here with log10 X.
-struct RichardsFivePl {
-    params: Vec<String>,
-}
+struct RichardsFivePl;
 
 impl ParametricModel for RichardsFivePl {
-    fn id(&self) -> &str {
-        "log_agonist_vs_response_5pl"
-    }
-    fn name(&self) -> &str {
-        "Asymmetric (five parameters) log(agonist) vs. response"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::DoseResponseStimulation
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!(
+        "log_agonist_vs_response_5pl",
+        "Asymmetric (five parameters) log(agonist) vs. response",
+        EquationCategory::DoseResponseStimulation,
+        ["Bottom", "Top", "LogXb", "HillSlope", "S"]
+    );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
         let (bottom, top, log_xb, hill, s) = (params[0], params[1], params[2], params[3], params[4]);
@@ -822,23 +641,15 @@ impl ParametricModel for RichardsFivePl {
 /// `Y = Dip + (Plateau1 - Dip) * s1 + (Plateau2 - Dip) * (1 - s2)`, `si = 1 / (1 + 10^((X - LogEC50_i) * nHi))`.
 /// Reference: built from two Hill (1910) log-logistic terms; no single primary source for this
 /// composite.
-struct BellShapedDoseResponse {
-    params: Vec<String>,
-}
+struct BellShapedDoseResponse;
 
 impl ParametricModel for BellShapedDoseResponse {
-    fn id(&self) -> &str {
-        "bell_shaped_dose_response"
-    }
-    fn name(&self) -> &str {
-        "Bell-shaped dose-response"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::DoseResponseStimulation
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!(
+        "bell_shaped_dose_response",
+        "Bell-shaped dose-response",
+        EquationCategory::DoseResponseStimulation,
+        ["Plateau1", "Plateau2", "Dip", "LogEC50_1", "LogEC50_2", "nH1", "nH2"]
+    );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
         let (p1, p2, dip, l1, l2, n1, n2) = (params[0], params[1], params[2], params[3], params[4], params[5], params[6]);
@@ -892,23 +703,15 @@ fn estimate_curve_is_falling(points: &[DataPoint]) -> bool {
 /// positive `nHi` gives a rising curve with `X`, negative `nHi` a falling curve.
 /// Reference: built from two Hill (1910) log-logistic terms (two-site analogue); no single
 /// primary source for this composite.
-struct BiphasicDoseResponse {
-    params: Vec<String>,
-}
+struct BiphasicDoseResponse;
 
 impl ParametricModel for BiphasicDoseResponse {
-    fn id(&self) -> &str {
-        "biphasic_dose_response"
-    }
-    fn name(&self) -> &str {
-        "Biphasic dose-response"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::DoseResponseStimulation
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!(
+        "biphasic_dose_response",
+        "Biphasic dose-response",
+        EquationCategory::DoseResponseStimulation,
+        ["Bottom", "Top", "Frac", "LogEC50_1", "LogEC50_2", "nH1", "nH2"]
+    );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
         let (bottom, top, frac, l1, l2, n1, n2) = (params[0], params[1], params[2], params[3], params[4], params[5], params[6]);
@@ -932,23 +735,15 @@ impl ParametricModel for BiphasicDoseResponse {
 /// `LogEC50 = LogECF + log10((100 - F) / F) / HillSlope`.
 /// Reference: algebraic reparameterisation of the Hill (1910) log-logistic in the
 /// Motulsky & Christopoulos (2004) parameterisation.
-struct DoseResponseEcF {
-    params: Vec<String>,
-}
+struct DoseResponseEcF;
 
 impl ParametricModel for DoseResponseEcF {
-    fn id(&self) -> &str {
-        "log_agonist_vs_response_ecf"
-    }
-    fn name(&self) -> &str {
-        "ECanything (log(agonist) vs. response)"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::DoseResponseStimulation
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!(
+        "log_agonist_vs_response_ecf",
+        "ECanything (log(agonist) vs. response)",
+        EquationCategory::DoseResponseStimulation,
+        ["Bottom", "Top", "LogECF", "HillSlope", "F"]
+    );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
         let (bottom, top, log_ecf, hill, f_pct) = (params[0], params[1], params[2], params[3], params[4]);
@@ -971,23 +766,15 @@ impl ParametricModel for DoseResponseEcF {
 /// `LogIC50 = LogAbsIC50 - log10((Top - Y50) / (Y50 - Bottom)) / HillSlope`,
 /// where `Y50 = (Control0 + Control100) / 2`.
 /// Reference: absolute vs relative IC50, Sebaugh (2011); curve form per Hill (1910).
-struct AbsoluteIc50 {
-    params: Vec<String>,
-}
+struct AbsoluteIc50;
 
 impl ParametricModel for AbsoluteIc50 {
-    fn id(&self) -> &str {
-        "absolute_ic50_4pl"
-    }
-    fn name(&self) -> &str {
-        "Absolute IC50, four parameter"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::DoseResponseInhibition
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!(
+        "absolute_ic50_4pl",
+        "Absolute IC50, four parameter",
+        EquationCategory::DoseResponseInhibition,
+        ["Bottom", "Top", "LogIC50", "HillSlope", "Control0", "Control100"]
+    );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
         let (bottom, top, log_abs_ic50, hill, control0, control100) = (params[0], params[1], params[2], params[3], params[4], params[5]);
@@ -1029,23 +816,15 @@ impl ParametricModel for AbsoluteIc50 {
 /// Reference: Schild equation, Arunlakshana & Schild (1959); global nonlinear-regression form
 /// per Lew & Angus (1995). `pA2` is `-log10` of the antagonist concentration giving a dose ratio
 /// of 2; it equals `pKB` only when `SchildSlope = 1`.
-struct GaddumSchild {
-    params: Vec<String>,
-}
+struct GaddumSchild;
 
 impl ParametricModel for GaddumSchild {
-    fn id(&self) -> &str {
-        "ec50_shift_gaddum_schild"
-    }
-    fn name(&self) -> &str {
-        "Gaddum/Schild EC50 shift"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::DoseResponseStimulation
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!(
+        "ec50_shift_gaddum_schild",
+        "Gaddum/Schild EC50 shift",
+        EquationCategory::DoseResponseStimulation,
+        ["Bottom", "Top", "LogEC50", "HillSlope", "pA2", "SchildSlope", "AntagConc"]
+    );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
         let (bottom, top, log_ec50, hill, pa2, schild_slope, antag) = (params[0], params[1], params[2], params[3], params[4], params[5], params[6]);
@@ -1063,23 +842,15 @@ impl ParametricModel for GaddumSchild {
 /// Agonist 4PL whose EC50 is shifted by an allosteric modulator (affinity cooperativity `alpha`,
 /// modulator dissociation constant `Kb`): `EC50' = EC50 * (1 + B/Kb) / (1 + alpha * B/Kb)`.
 /// Reference: allosteric ternary complex model, Ehlert (1988).
-struct AllostericEc50Shift {
-    params: Vec<String>,
-}
+struct AllostericEc50Shift;
 
 impl ParametricModel for AllostericEc50Shift {
-    fn id(&self) -> &str {
-        "allosteric_ec50_shift"
-    }
-    fn name(&self) -> &str {
-        "Allosteric EC50 shift"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::DoseResponseStimulation
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!(
+        "allosteric_ec50_shift",
+        "Allosteric EC50 shift",
+        EquationCategory::DoseResponseStimulation,
+        ["Bottom", "Top", "LogEC50", "HillSlope", "Kb", "alpha", "ModConc"]
+    );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
         let (bottom, top, log_ec50, hill, kb, alpha, mod_conc) = (params[0], params[1], params[2], params[3], params[4], params[5], params[6]);
@@ -1101,23 +872,15 @@ impl ParametricModel for AllostericEc50Shift {
 /// `E = Basal + (Emax - Basal) * tau^n [A]^n / (([A] + KA)^n + tau^n [A]^n)`.
 /// Reference: Black & Leff (1983); the slope-`n` form is Black, Leff, Shankley & Wood (1985).
 /// `Emax` is the system maximum (`Em`), not the agonist's observed maximum.
-struct OperationalAgonism {
-    params: Vec<String>,
-}
+struct OperationalAgonism;
 
 impl ParametricModel for OperationalAgonism {
-    fn id(&self) -> &str {
-        "operational_model_agonist"
-    }
-    fn name(&self) -> &str {
-        "Black–Leff operational model, partial agonist"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::DoseResponseStimulation
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!(
+        "operational_model_agonist",
+        "Black–Leff operational model, partial agonist",
+        EquationCategory::DoseResponseStimulation,
+        ["Basal", "Emax", "LogKA", "LogTau", "n"]
+    );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
         let (basal, emax, log_ka, log_tau, n) = (params[0], params[1], params[2], params[3], params[4]);
@@ -1148,11 +911,9 @@ impl ParametricModel for OperationalAgonism {
 /// Reference: Langmuir (1918) isotherm / mass-action binding; Hill (1910) for the Hill variant;
 /// see Hulme & Trevethick (2010) and Motulsky & Christopoulos (2004).
 struct OneSiteBinding {
-    id: &'static str,
-    name: &'static str,
+    meta: ModelMeta,
     with_hill: bool,
     with_ns: bool,
-    params: Vec<String>,
 }
 
 fn eval_hill_binding(c: f64, scale: f64, kd: f64, h: f64) -> Option<f64> {
@@ -1189,18 +950,7 @@ fn eval_hill_binding(c: f64, scale: f64, kd: f64, h: f64) -> Option<f64> {
 }
 
 impl ParametricModel for OneSiteBinding {
-    fn id(&self) -> &str {
-        self.id
-    }
-    fn name(&self) -> &str {
-        self.name
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::ReceptorBinding
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_meta_methods!();
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let c = x.first().copied()?;
         if c < 0.0 || !c.is_finite() {
@@ -1288,23 +1038,15 @@ impl ParametricModel for OneSiteBinding {
 
 /// Two independent classes of sites: sum of two `Bmax * X / (Kd + X)` hyperbolas.
 /// Reference: Langmuir (1918) isotherm summed over two site classes; Hulme & Trevethick (2010).
-struct TwoSiteBinding {
-    params: Vec<String>,
-}
+struct TwoSiteBinding;
 
 impl ParametricModel for TwoSiteBinding {
-    fn id(&self) -> &str {
-        "two_sites_specific_binding"
-    }
-    fn name(&self) -> &str {
-        "Two-site specific binding"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::ReceptorBinding
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!(
+        "two_sites_specific_binding",
+        "Two-site specific binding",
+        EquationCategory::ReceptorBinding,
+        ["BmaxHi", "KdHi", "BmaxLo", "KdLo"]
+    );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let c = x.first().copied()?;
         let (b1, kd1, b2, kd2) = (params[0], params[1], params[2], params[3]);
@@ -1322,23 +1064,15 @@ impl ParametricModel for TwoSiteBinding {
 
 /// One-site competition (Hill slope 1) with `LogIC50 = LogKi + log10(1 + [hot] / Kd_hot)`.
 /// Reference: Cheng & Prusoff (1973); log-X form per Motulsky & Christopoulos (2004).
-struct CompetitionOneSiteKi {
-    params: Vec<String>,
-}
+struct CompetitionOneSiteKi;
 
 impl ParametricModel for CompetitionOneSiteKi {
-    fn id(&self) -> &str {
-        "one_site_fit_ki"
-    }
-    fn name(&self) -> &str {
-        "One-site competitive binding, Ki by Cheng–Prusoff"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::ReceptorBinding
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!(
+        "one_site_fit_ki",
+        "One-site competitive binding, Ki by Cheng–Prusoff",
+        EquationCategory::ReceptorBinding,
+        ["Top", "Bottom", "LogKi", "HotConc_nM", "HotKd_nM"]
+    );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
         let (top, bottom, log_ki, hot_conc, hot_kd) = (params[0], params[1], params[2], params[3], params[4]);
@@ -1358,23 +1092,15 @@ impl ParametricModel for CompetitionOneSiteKi {
 /// Two-site competition: `FractionHi`-weighted sum of two one-site curves, each IC50 converted to
 /// Ki with the Cheng & Prusoff (1973) correction (assumes the radioligand has the same `Kd` at
 /// both sites). Reference: Motulsky & Christopoulos (2004).
-struct CompetitionTwoSiteKi {
-    params: Vec<String>,
-}
+struct CompetitionTwoSiteKi;
 
 impl ParametricModel for CompetitionTwoSiteKi {
-    fn id(&self) -> &str {
-        "two_sites_fit_ki"
-    }
-    fn name(&self) -> &str {
-        "Two-site competitive binding (Ki)"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::ReceptorBinding
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!(
+        "two_sites_fit_ki",
+        "Two-site competitive binding (Ki)",
+        EquationCategory::ReceptorBinding,
+        ["Top", "Bottom", "FractionHi", "LogKi_1", "LogKi_2", "HotConc_nM", "HotKd_nM"]
+    );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
         let (top, bottom, f_hi, log_ki1, log_ki2, hot_conc, hot_kd) = (params[0], params[1], params[2], params[3], params[4], params[5], params[6]);
@@ -1395,23 +1121,10 @@ impl ParametricModel for CompetitionTwoSiteKi {
 
 /// Single-exponential dissociation `Y = (Y0 - NS) * exp(-Koff * t) + NS`.
 /// Reference: mass-action binding kinetics, Motulsky & Christopoulos (2004).
-struct DissociationOnePhase {
-    params: Vec<String>,
-}
+struct DissociationOnePhase;
 
 impl ParametricModel for DissociationOnePhase {
-    fn id(&self) -> &str {
-        "dissociation_one_phase"
-    }
-    fn name(&self) -> &str {
-        "One-phase exponential dissociation"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::ReceptorBinding
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!("dissociation_one_phase", "One-phase exponential dissociation", EquationCategory::ReceptorBinding, ["Y0", "NS", "Koff"]);
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let t = x.first().copied()?;
         let (y0, ns, koff) = (params[0], params[1], params[2]);
@@ -1432,23 +1145,15 @@ impl ParametricModel for DissociationOnePhase {
 
 /// Single-exponential association `Y = Ymax * (1 - exp(-Kobs * t))`.
 /// Reference: mass-action binding kinetics, Motulsky & Christopoulos (2004).
-struct AssociationOneConc {
-    params: Vec<String>,
-}
+struct AssociationOneConc;
 
 impl ParametricModel for AssociationOneConc {
-    fn id(&self) -> &str {
-        "association_kinetics_one_conc"
-    }
-    fn name(&self) -> &str {
-        "One phase association (one concentration of hot)"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::ReceptorBinding
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!(
+        "association_kinetics_one_conc",
+        "One phase association (one concentration of hot)",
+        EquationCategory::ReceptorBinding,
+        ["Ymax", "Kobs"]
+    );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let t = x.first().copied()?;
         let (ymax, kobs) = (params[0], params[1]);
@@ -1470,23 +1175,15 @@ impl ParametricModel for AssociationOneConc {
 /// `Bmax * L / (L + Koff / Kon)`.
 /// Reference: mass-action binding kinetics, Motulsky & Christopoulos (2004); this is the
 /// competitor-free special case of Motulsky & Mahan (1984).
-struct AssociationTwoConc {
-    params: Vec<String>,
-}
+struct AssociationTwoConc;
 
 impl ParametricModel for AssociationTwoConc {
-    fn id(&self) -> &str {
-        "association_kinetics_two_conc"
-    }
-    fn name(&self) -> &str {
-        "Association kinetics at multiple radioligand concentrations"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::ReceptorBinding
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!(
+        "association_kinetics_two_conc",
+        "Association kinetics at multiple radioligand concentrations",
+        EquationCategory::ReceptorBinding,
+        ["Bmax", "Kon", "Koff", "LigandConc"]
+    );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let t = x.first().copied()?;
         let (bmax, kon, koff, conc) = (params[0], params[1], params[2], params[3]);
@@ -1511,23 +1208,15 @@ impl ParametricModel for AssociationTwoConc {
 /// Association (as `association_kinetics_two_conc`) until `Time0`, then dissociation at `Koff`
 /// from the level reached at `Time0`.
 /// Reference: mass-action binding kinetics, Motulsky & Christopoulos (2004).
-struct AssocThenDissoc {
-    params: Vec<String>,
-}
+struct AssocThenDissoc;
 
 impl ParametricModel for AssocThenDissoc {
-    fn id(&self) -> &str {
-        "assoc_then_dissoc"
-    }
-    fn name(&self) -> &str {
-        "Association then dissociation"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::ReceptorBinding
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!(
+        "assoc_then_dissoc",
+        "Association then dissociation",
+        EquationCategory::ReceptorBinding,
+        ["Bmax", "Kon", "Koff", "LigandConc", "Time0"]
+    );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let t = x.first().copied()?;
         let (bmax, kon, koff, conc, t0) = (params[0], params[1], params[2], params[3], params[4]);
@@ -1563,23 +1252,12 @@ impl ParametricModel for AssocThenDissoc {
 /// Michaelis–Menten `v = Vmax * S / (Km + S)`; the `kcat` variant uses `Vmax = kcat * Et`.
 /// Reference: Michaelis & Menten (1913); Segel (1975).
 struct MichaelisMenten {
+    meta: ModelMeta,
     kcat_mode: bool,
-    params: Vec<String>,
 }
 
 impl ParametricModel for MichaelisMenten {
-    fn id(&self) -> &str {
-        if self.kcat_mode { "kcat_enzyme_kinetics" } else { "michaelis_menten" }
-    }
-    fn name(&self) -> &str {
-        if self.kcat_mode { "kcat" } else { "Michaelis-Menten" }
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::EnzymeKinetics
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_meta_methods!();
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let s = x.first().copied()?;
         if s < 0.0 || !s.is_finite() {
@@ -1639,23 +1317,10 @@ impl ParametricModel for MichaelisMenten {
 
 /// Sigmoidal (Hill-type) kinetics `v = Vmax * S^h / (Khalf^h + S^h)`.
 /// Reference: Hill (1910); Segel (1975).
-struct AllostericSigmoidal {
-    params: Vec<String>,
-}
+struct AllostericSigmoidal;
 
 impl ParametricModel for AllostericSigmoidal {
-    fn id(&self) -> &str {
-        "allosteric_sigmoidal_kinetics"
-    }
-    fn name(&self) -> &str {
-        "Allosteric sigmoidal"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::EnzymeKinetics
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!("allosteric_sigmoidal_kinetics", "Allosteric sigmoidal", EquationCategory::EnzymeKinetics, ["Vmax", "Khalf", "h"]);
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let s = x.first().copied()?;
         let (vmax, khalf, h) = (params[0], params[1], params[2]);
@@ -1669,23 +1334,10 @@ impl ParametricModel for AllostericSigmoidal {
 
 /// Uncompetitive substrate inhibition `v = Vmax * S / (Km + S * (1 + S / Ki))`.
 /// Reference: Haldane (1930); Segel (1975).
-struct SubstrateInhibition {
-    params: Vec<String>,
-}
+struct SubstrateInhibition;
 
 impl ParametricModel for SubstrateInhibition {
-    fn id(&self) -> &str {
-        "substrate_inhibition"
-    }
-    fn name(&self) -> &str {
-        "Substrate inhibition"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::EnzymeKinetics
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!("substrate_inhibition", "Substrate inhibition", EquationCategory::EnzymeKinetics, ["Vmax", "Km", "Ki"]);
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let s = x.first().copied()?;
         let (vmax, km, ki) = (params[0], params[1], params[2]);
@@ -1715,25 +1367,12 @@ enum EnzymeInhibMode {
 /// (`Vmax_app = Vmax / (1 + I/(alpha Ki))`, `Km_app = Km (1 + I/Ki) / (1 + I/(alpha Ki))`).
 /// Reference: Segel (1975).
 struct EnzymeInhibition {
-    id: &'static str,
-    name: &'static str,
+    meta: ModelMeta,
     mode: EnzymeInhibMode,
-    params: Vec<String>,
 }
 
 impl ParametricModel for EnzymeInhibition {
-    fn id(&self) -> &str {
-        self.id
-    }
-    fn name(&self) -> &str {
-        self.name
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::EnzymeKinetics
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_meta_methods!();
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let s = x.first().copied()?;
         if s < 0.0 {
@@ -1789,23 +1428,10 @@ impl ParametricModel for EnzymeInhibition {
 /// `v = Vo * (1 - ((Et + I + Ki_app) - sqrt((Et + I + Ki_app)^2 - 4 Et I)) / (2 Et))`, with
 /// `Ki_app = Ki * (1 + S / Km)` (competitive inhibitor).
 /// Reference: Morrison (1969).
-struct MorrisonKi {
-    params: Vec<String>,
-}
+struct MorrisonKi;
 
 impl ParametricModel for MorrisonKi {
-    fn id(&self) -> &str {
-        "morrison_tight_binding_ki"
-    }
-    fn name(&self) -> &str {
-        "Morrison tight-binding Ki"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::EnzymeKinetics
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!("morrison_tight_binding_ki", "Morrison tight-binding Ki", EquationCategory::EnzymeKinetics, ["Vo", "Et", "Ki", "S", "Km"]);
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let i_conc = x.first().copied()?;
         let (vo, et, ki, s_conc, km) = (params[0], params[1], params[2], params[3], params[4]);
@@ -1889,26 +1515,15 @@ fn estimate_global_ns_and_bg(primary: &[DataPoint], ds1: &[DataPoint]) -> (f64, 
 /// Global one-site total and nonspecific binding (`dataset 0` = Total, `dataset >= 1` = Nonspecific).
 /// Reference: Langmuir (1918) specific term plus linear nonspecific binding; shared-parameter
 /// global fit per Motulsky & Christopoulos (2004).
-struct OneSiteTotalAndNsGlobal {
-    params: Vec<String>,
-}
+struct OneSiteTotalAndNsGlobal;
 
 impl ParametricModel for OneSiteTotalAndNsGlobal {
-    fn id(&self) -> &str {
-        "one_site_total_and_ns_global"
-    }
-
-    fn name(&self) -> &str {
-        "One-site total and nonspecific binding (global)"
-    }
-
-    fn category(&self) -> EquationCategory {
-        EquationCategory::ReceptorBinding
-    }
-
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!(
+        "one_site_total_and_ns_global",
+        "One-site total and nonspecific binding (global)",
+        EquationCategory::ReceptorBinding,
+        ["Bmax", "Kd", "NS", "Background"]
+    );
 
     fn eval(&self, x: &[f64], params: &[f64], dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
@@ -1973,26 +1588,15 @@ impl ParametricModel for OneSiteTotalAndNsGlobal {
 /// Global two-site total and nonspecific binding (`dataset 0` = Total, `dataset >= 1` = Nonspecific).
 /// Reference: two-site Langmuir (1918) specific term plus linear nonspecific binding; global fit
 /// per Motulsky & Christopoulos (2004).
-struct TwoSiteTotalAndNsGlobal {
-    params: Vec<String>,
-}
+struct TwoSiteTotalAndNsGlobal;
 
 impl ParametricModel for TwoSiteTotalAndNsGlobal {
-    fn id(&self) -> &str {
-        "two_site_total_and_ns_global"
-    }
-
-    fn name(&self) -> &str {
-        "Two-site total and nonspecific binding (global)"
-    }
-
-    fn category(&self) -> EquationCategory {
-        EquationCategory::ReceptorBinding
-    }
-
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!(
+        "two_site_total_and_ns_global",
+        "Two-site total and nonspecific binding (global)",
+        EquationCategory::ReceptorBinding,
+        ["BmaxHi", "KdHi", "BmaxLo", "KdLo", "NS", "Background"]
+    );
 
     fn eval(&self, x: &[f64], params: &[f64], dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
@@ -2074,9 +1678,7 @@ impl ParametricModel for TwoSiteTotalAndNsGlobal {
 /// Specific saturation binding with ligand depletion (Swillens 1995 / Morrison quadratic root).
 /// Free ligand solves `Total = Free * (1 + NS) + Rt * Free / (Kd + Free)`.
 /// Reference: Swillens (1995); quadratic-root treatment as in Morrison (1969).
-struct OneSiteSpecificLigandDepletion {
-    params: Vec<String>,
-}
+struct OneSiteSpecificLigandDepletion;
 
 impl OneSiteSpecificLigandDepletion {
     fn solve_free_ligand(hot_tot: f64, rt: f64, kd: f64, ns: f64) -> Option<(f64, f64)> {
@@ -2098,21 +1700,12 @@ impl OneSiteSpecificLigandDepletion {
 }
 
 impl ParametricModel for OneSiteSpecificLigandDepletion {
-    fn id(&self) -> &str {
-        "one_site_specific_ligand_depletion"
-    }
-
-    fn name(&self) -> &str {
-        "One-site specific binding with ligand depletion"
-    }
-
-    fn category(&self) -> EquationCategory {
-        EquationCategory::ReceptorBinding
-    }
-
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!(
+        "one_site_specific_ligand_depletion",
+        "One-site specific binding with ligand depletion",
+        EquationCategory::ReceptorBinding,
+        ["Rt", "Kd", "NS"]
+    );
 
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let hot_tot = x.first().copied()?;
@@ -2224,9 +1817,7 @@ fn tighten_competition_bracket(rt: f64, hot_nm: f64, kd: f64, i_tot: f64, ki: f6
 /// `Hot * (R + NS * Kd) / (Kd * (1 + NS) + R)`, where `FreeHot = Hot * Kd / (Kd * (1 + NS) + R)`.
 /// Reference: exact two-ligand competition with depletion and nonspecific binding, Swillens (1995);
 /// see also Wang (1995).
-struct OneSiteCompetitionLigandDepletion {
-    params: Vec<String>,
-}
+struct OneSiteCompetitionLigandDepletion;
 
 impl OneSiteCompetitionLigandDepletion {
     fn solve_free_receptor(x0: f64, params: &[f64]) -> Option<CompetitionDepletionState> {
@@ -2294,21 +1885,12 @@ impl OneSiteCompetitionLigandDepletion {
 }
 
 impl ParametricModel for OneSiteCompetitionLigandDepletion {
-    fn id(&self) -> &str {
-        "one_site_competition_ligand_depletion"
-    }
-
-    fn name(&self) -> &str {
-        "One-site competitive binding with ligand depletion"
-    }
-
-    fn category(&self) -> EquationCategory {
-        EquationCategory::ReceptorBinding
-    }
-
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!(
+        "one_site_competition_ligand_depletion",
+        "One-site competitive binding with ligand depletion",
+        EquationCategory::ReceptorBinding,
+        ["Rt", "HotNM", "KdNM", "LogKi", "NS"]
+    );
 
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
@@ -2365,26 +1947,15 @@ impl ParametricModel for OneSiteCompetitionLigandDepletion {
 /// Allosteric ternary-complex saturation binding with modulator concentration `ModConc`:
 /// `B = Bmax * X / (X + Kd * (1 + ModConc/Kb) / (1 + alpha * ModConc/Kb))`.
 /// Reference: Ehlert (1988).
-struct AllostericModulatorSaturation {
-    params: Vec<String>,
-}
+struct AllostericModulatorSaturation;
 
 impl ParametricModel for AllostericModulatorSaturation {
-    fn id(&self) -> &str {
-        "allosteric_modulator_saturation"
-    }
-
-    fn name(&self) -> &str {
-        "Allosteric modulator saturation binding"
-    }
-
-    fn category(&self) -> EquationCategory {
-        EquationCategory::ReceptorBinding
-    }
-
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!(
+        "allosteric_modulator_saturation",
+        "Allosteric modulator saturation binding",
+        EquationCategory::ReceptorBinding,
+        ["Bmax", "Kd", "alpha", "Kb", "ModConc"]
+    );
 
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
@@ -2447,26 +2018,15 @@ impl ParametricModel for AllostericModulatorSaturation {
 /// Homologous one-site competitive binding (`Kd_cold == Kd_hot`, `X = log10[Cold]`):
 /// `B = Bmax * Hot / (Hot + Cold + Kd) + NS`.
 /// Reference: DeBlasi, O'Reilly & Motulsky (1989).
-struct HomologousOneSiteCompetition {
-    params: Vec<String>,
-}
+struct HomologousOneSiteCompetition;
 
 impl ParametricModel for HomologousOneSiteCompetition {
-    fn id(&self) -> &str {
-        "homologous_one_site_competition"
-    }
-
-    fn name(&self) -> &str {
-        "Homologous one-site competitive binding"
-    }
-
-    fn category(&self) -> EquationCategory {
-        EquationCategory::ReceptorBinding
-    }
-
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!(
+        "homologous_one_site_competition",
+        "Homologous one-site competitive binding",
+        EquationCategory::ReceptorBinding,
+        ["Bmax", "Kd", "NS", "HotConc"]
+    );
 
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
@@ -2524,26 +2084,15 @@ impl ParametricModel for HomologousOneSiteCompetition {
 /// Motulsky-Mahan (1984) closed-form competitive binding kinetics vs time `t = X`.
 /// Reference: Motulsky & Mahan (1984), eq. for radioligand binding in the presence of an unlabeled
 /// competitor (`kon1`/`koff1` radioligand, `kon2`/`koff2` competitor).
-struct MotulskyMahanKinetics {
-    params: Vec<String>,
-}
+struct MotulskyMahanKinetics;
 
 impl ParametricModel for MotulskyMahanKinetics {
-    fn id(&self) -> &str {
-        "motulsky_mahan_kinetics"
-    }
-
-    fn name(&self) -> &str {
-        "Motulsky-Mahan competitive binding kinetics"
-    }
-
-    fn category(&self) -> EquationCategory {
-        EquationCategory::ReceptorBinding
-    }
-
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!(
+        "motulsky_mahan_kinetics",
+        "Motulsky-Mahan competitive binding kinetics",
+        EquationCategory::ReceptorBinding,
+        ["Bmax", "kon1", "koff1", "kon2", "koff2", "L", "I"]
+    );
 
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let t = x.first().copied()?;

@@ -63,7 +63,7 @@ pub(in crate::dsl) struct Token {
     pub(in crate::dsl) col: usize,
 }
 
-pub(in crate::dsl) enum Expr {
+pub(crate) enum Expr {
     Num(f64),
     Ident(String),
     Unary { op: UnaryOp, rhs: Box<Expr> },
@@ -255,13 +255,13 @@ impl Drop for Expr {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(in crate::dsl) enum UnaryOp {
+pub(crate) enum UnaryOp {
     Neg,
     Not,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(in crate::dsl) enum BinaryOp {
+pub(crate) enum BinaryOp {
     Add,
     Sub,
     Mul,

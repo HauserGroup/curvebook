@@ -52,7 +52,7 @@ pub(in crate::dsl) fn strip_comment<'a>(line: &'a str, line_no: usize, hints: &m
     Ok(trimmed)
 }
 
-pub(in crate::dsl) fn parse_dataset_prefix(line: &str, line_no: usize) -> Result<(DatasetFilter, &str), FitError> {
+pub(crate) fn parse_dataset_prefix(line: &str, line_no: usize) -> Result<(DatasetFilter, &str), FitError> {
     if !line.starts_with('<') {
         return Ok((DatasetFilter::Any, line));
     }
@@ -164,7 +164,7 @@ pub(in crate::dsl) fn parse_statement_with_locs(
     Ok(ParsedStatement::BareExpr(parse_expr_collecting_locs(rest, line_no, col_offset, ident_locs)?))
 }
 
-pub(in crate::dsl) fn split_top_level_assignment(s: &str) -> Option<(&str, &str)> {
+pub(crate) fn split_top_level_assignment(s: &str) -> Option<(&str, &str)> {
     let bytes = s.as_bytes();
     let mut depth = 0_i32;
     let mut i = 0;
@@ -189,7 +189,7 @@ pub(in crate::dsl) fn split_top_level_assignment(s: &str) -> Option<(&str, &str)
     None
 }
 
-pub(in crate::dsl) fn is_valid_ident(s: &str) -> bool {
+pub(crate) fn is_valid_ident(s: &str) -> bool {
     let mut chars = s.chars();
     let Some(first) = chars.next() else {
         return false;
