@@ -938,7 +938,7 @@ struct EvictionLockGuard {
 #[cfg(not(target_arch = "wasm32"))]
 impl Drop for EvictionLockGuard {
     fn drop(&mut self) {
-        if let Ok(current) = std::fs::read(&self.path)
+        if let Ok(BoundedLockRead::Bytes(current)) = read_bounded_lock_bytes(&self.path, MAX_LOCKFILE_BYTES)
             && current == self.expected_bytes
         {
             let _ = std::fs::remove_file(&self.path);
@@ -962,19 +962,83 @@ enum BoundedLockRead {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+enum ExpectedEvictionState<'a> {
+    Bytes(&'a [u8]),
+    Oversized,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn current_wall_epoch_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn ensure_missing_or_non_symlink_regular_file(path: &Path) -> Result<bool, FormatError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            if !meta.file_type().is_file() {
+                return Err(FormatError::Io(format!("journal path `{}` must be a regular non-symlink file", path.display())));
+            }
+            Ok(true)
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(FormatError::from(err)),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_non_symlink_regular_file_if_exists(path: &Path, max_bytes: usize) -> Result<Option<Vec<u8>>, FormatError> {
+    if !ensure_missing_or_non_symlink_regular_file(path)? {
+        return Ok(None);
+    }
+    Ok(curvebook_platform::fs::read_regular_file_bytes_if_exists(path, max_bytes)?)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn is_eviction_guard_reclaimable(bytes: &[u8]) -> bool {
+    match serde_json::from_slice::<EvictionLockRecord>(bytes) {
+        Ok(existing) => {
+            existing.owner_id.trim().is_empty()
+                || is_dead_same_host_owner(&existing.owner_id, existing.host_id.as_deref())
+                || current_wall_epoch_ms() >= existing.acquired_wall_ms.saturating_add(existing.ttl_ms)
+        }
+        Err(_) => true,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn write_non_symlink_atomic(path: &Path, bytes: &[u8]) -> Result<(), FormatError> {
+    let _ = ensure_missing_or_non_symlink_regular_file(path)?;
+    curvebook_platform::fs::write_atomic(path, bytes)?;
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn read_bounded_lock_bytes(path: &Path, max_bytes: usize) -> Result<BoundedLockRead, FormatError> {
+    let pre_meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(BoundedLockRead::Missing),
+        Err(err) => return Err(FormatError::from(err)),
+    };
+    if !pre_meta.file_type().is_file() {
+        return Err(FormatError::Io(format!("journal lock path `{}` must be a regular non-symlink file", path.display())));
+    }
+    let max_bytes_u64 = u64::try_from(max_bytes).unwrap_or(u64::MAX);
+    let pre_len = pre_meta.len();
+    if pre_len > max_bytes_u64 {
+        return Ok(BoundedLockRead::Oversized(pre_len));
+    }
+
     let file = match File::open(path) {
         Ok(f) => f,
         Err(err) if err.kind() == ErrorKind::NotFound => return Ok(BoundedLockRead::Missing),
         Err(err) => return Err(FormatError::from(err)),
     };
-    let file_len = file.metadata()?.len();
-    let max_bytes_u64 = u64::try_from(max_bytes).unwrap_or(u64::MAX);
+    let fd_meta = file.metadata()?;
+    if !fd_meta.file_type().is_file() {
+        return Err(FormatError::Io(format!("journal lock path `{}` must be a regular non-symlink file", path.display())));
+    }
+    let file_len = fd_meta.len();
     if file_len > max_bytes_u64 {
         return Ok(BoundedLockRead::Oversized(file_len));
     }
@@ -1034,10 +1098,8 @@ impl DirectoryJournalBackend {
     }
 
     fn read_matching_snapshot_meta(&self, meta_path: &Path, actual_crc: u32, actual_len: u64) -> Result<Option<u64>, FormatError> {
-        let meta_bytes = match std::fs::read(meta_path) {
-            Ok(bytes) => bytes,
-            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
-            Err(err) => return Err(FormatError::from(err)),
+        let Some(meta_bytes) = read_non_symlink_regular_file_if_exists(meta_path, MAX_LOCKFILE_BYTES)? else {
+            return Ok(None);
         };
         let Ok(meta) = serde_json::from_slice::<SnapshotMeta>(&meta_bytes) else {
             return Ok(None);
@@ -1118,7 +1180,7 @@ impl DirectoryJournalBackend {
         }
     }
 
-    fn reclaim_stale_eviction_lock(&self, evict_path: &Path, observed_bytes: &[u8]) -> Result<(), FormatError> {
+    fn reclaim_stale_eviction_lock(&self, evict_path: &Path, expected: ExpectedEvictionState<'_>) -> Result<(), FormatError> {
         let reclaim_path = self.next_unique_sibling_path("curvebook.lock.evict.reclaim");
         match std::fs::rename(evict_path, &reclaim_path) {
             Ok(()) => {}
@@ -1126,12 +1188,13 @@ impl DirectoryJournalBackend {
             Err(err) => return Err(FormatError::from(err)),
         }
         let mut reclaim_guard = TempFileUnlinkGuard::new(reclaim_path.clone());
-        let actual_bytes = match std::fs::read(&reclaim_path) {
-            Ok(bytes) => bytes,
-            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
-            Err(err) => return Err(FormatError::from(err)),
+        let actual = read_bounded_lock_bytes(&reclaim_path, MAX_LOCKFILE_BYTES)?;
+        let should_restore = match (expected, actual) {
+            (ExpectedEvictionState::Bytes(observed_bytes), BoundedLockRead::Bytes(actual_bytes)) => actual_bytes != observed_bytes,
+            (ExpectedEvictionState::Oversized, BoundedLockRead::Bytes(actual_bytes)) => !is_eviction_guard_reclaimable(&actual_bytes),
+            (_, BoundedLockRead::Oversized(_) | BoundedLockRead::Missing) => false,
         };
-        if actual_bytes != observed_bytes {
+        if should_restore {
             // Another contender installed a fresh guard just before rename; restore best-effort without clobbering.
             let _ = std::fs::hard_link(&reclaim_path, evict_path);
         }
@@ -1159,22 +1222,14 @@ impl DirectoryJournalBackend {
         let observed_bytes = match read_bounded_lock_bytes(&evict_path, MAX_LOCKFILE_BYTES)? {
             BoundedLockRead::Missing => return Ok(None),
             BoundedLockRead::Oversized(_) => {
-                let raw = Vec::new();
-                self.reclaim_stale_eviction_lock(&evict_path, &raw)?;
+                self.reclaim_stale_eviction_lock(&evict_path, ExpectedEvictionState::Oversized)?;
                 return Ok(None);
             }
             BoundedLockRead::Bytes(bytes) => bytes,
         };
 
-        let is_reclaimable_guard = match serde_json::from_slice::<EvictionLockRecord>(&observed_bytes) {
-            Ok(existing) => {
-                is_dead_same_host_owner(&existing.owner_id, existing.host_id.as_deref())
-                    || current_wall_epoch_ms() >= existing.acquired_wall_ms.saturating_add(existing.ttl_ms)
-            }
-            Err(_) => true,
-        };
-        if is_reclaimable_guard {
-            self.reclaim_stale_eviction_lock(&evict_path, &observed_bytes)?;
+        if is_eviction_guard_reclaimable(&observed_bytes) {
+            self.reclaim_stale_eviction_lock(&evict_path, ExpectedEvictionState::Bytes(&observed_bytes))?;
         }
         Ok(None)
     }
@@ -1208,11 +1263,11 @@ impl DirectoryJournalBackend {
                         current.expires_epoch_ms()
                     )));
                 }
-                curvebook_platform::fs::write_atomic(&self.lock_path(), lease_bytes)?;
+                write_non_symlink_atomic(&self.lock_path(), lease_bytes)?;
                 Ok(Some(Some(current)))
             }
             LockfileState::Corrupt(err_msg) => {
-                curvebook_platform::fs::write_atomic(&self.lock_path(), lease_bytes)?;
+                write_non_symlink_atomic(&self.lock_path(), lease_bytes)?;
                 self.pending_warnings.push(JournalRecoveryWarning {
                     line: 0,
                     kind: String::from("corrupt_lockfile"),
@@ -1229,6 +1284,9 @@ fn is_fresh_corrupt_lockfile(path: &Path) -> bool {
     let Ok(meta) = std::fs::symlink_metadata(path) else {
         return false;
     };
+    if !meta.file_type().is_file() {
+        return false;
+    }
     let Ok(modified) = meta.modified() else {
         return false;
     };
@@ -1300,7 +1358,7 @@ impl JournalBackend for DirectoryJournalBackend {
         let mut refreshed = lease.clone();
         refreshed.acquired_epoch_ms = now_epoch_ms;
         let bytes = serde_json::to_vec(&refreshed)?;
-        curvebook_platform::fs::write_atomic(&self.lock_path(), &bytes)?;
+        write_non_symlink_atomic(&self.lock_path(), &bytes)?;
         Ok(())
     }
 
@@ -1334,7 +1392,7 @@ impl JournalBackend for DirectoryJournalBackend {
 
     fn write_snapshot_atomic(&mut self, bytes: &[u8]) -> Result<(), FormatError> {
         self.clear_snapshot_covered_seq()?;
-        curvebook_platform::fs::write_atomic(&self.snapshot_path(), bytes)?;
+        write_non_symlink_atomic(&self.snapshot_path(), bytes)?;
         Ok(())
     }
 
@@ -1344,19 +1402,16 @@ impl JournalBackend for DirectoryJournalBackend {
         let meta_bytes = serde_json::to_vec(&meta)?;
         let pending_path = self.pending_snapshot_meta_path();
         let meta_path = self.snapshot_meta_path();
-        curvebook_platform::fs::write_atomic(&pending_path, &meta_bytes)?;
-        curvebook_platform::fs::write_atomic(&self.snapshot_path(), bytes)?;
+        let _ = ensure_missing_or_non_symlink_regular_file(&meta_path)?;
+        write_non_symlink_atomic(&pending_path, &meta_bytes)?;
+        write_non_symlink_atomic(&self.snapshot_path(), bytes)?;
         std::fs::rename(&pending_path, &meta_path)?;
         curvebook_platform::fs::sync_dir(&self.dir)?;
         Ok(())
     }
 
     fn read_snapshot(&self) -> Result<Option<Vec<u8>>, FormatError> {
-        match std::fs::read(self.snapshot_path()) {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(FormatError::from(err)),
-        }
+        read_non_symlink_regular_file_if_exists(&self.snapshot_path(), crate::archive::MAX_ARCHIVE_FILE_BYTES)
     }
 
     fn read_snapshot_covered_seq(&self) -> Result<Option<u64>, FormatError> {
@@ -1391,8 +1446,14 @@ impl JournalBackend for DirectoryJournalBackend {
     }
 
     fn append_journal_line(&mut self, ndjson_line: &str) -> Result<(), FormatError> {
-        let mut file = OpenOptions::new().create(true).read(true).append(true).open(self.journal_path())?;
-        let pre_len = file.metadata()?.len();
+        let journal_path = self.journal_path();
+        let _ = ensure_missing_or_non_symlink_regular_file(&journal_path)?;
+        let mut file = OpenOptions::new().create(true).read(true).append(true).open(&journal_path)?;
+        let fd_meta = file.metadata()?;
+        if !fd_meta.file_type().is_file() {
+            return Err(FormatError::Io(format!("journal path `{}` must be a regular non-symlink file", journal_path.display())));
+        }
+        let pre_len = fd_meta.len();
         let needs_leading_newline = if pre_len > 0 {
             file.seek(SeekFrom::Start(pre_len - 1))?;
             let mut last = [0u8; 1];
@@ -1421,16 +1482,11 @@ impl JournalBackend for DirectoryJournalBackend {
     }
 
     fn read_journal_bytes(&self) -> Result<Vec<u8>, FormatError> {
-        match std::fs::read(self.journal_path()) {
-            Ok(bytes) => Ok(bytes),
-            Err(err) if err.kind() == ErrorKind::NotFound => Ok(Vec::new()),
-            Err(err) => Err(FormatError::from(err)),
-        }
+        Ok(read_non_symlink_regular_file_if_exists(&self.journal_path(), MAX_JOURNAL_BYTES)?.unwrap_or_default())
     }
 
     fn replace_journal_bytes_atomic(&mut self, bytes: &[u8]) -> Result<(), FormatError> {
-        curvebook_platform::fs::write_atomic(&self.journal_path(), bytes)?;
-        Ok(())
+        write_non_symlink_atomic(&self.journal_path(), bytes)
     }
 
     fn clear_journal(&mut self) -> Result<(), FormatError> {
@@ -1449,13 +1505,32 @@ impl JournalBackend for DirectoryJournalBackend {
     }
 
     fn open_journal_stream(&self, max_bytes: usize) -> Result<Option<Box<dyn std::io::BufRead + '_>>, FormatError> {
-        let file = match std::fs::File::open(self.journal_path()) {
+        let journal_path = self.journal_path();
+        let pre_meta = match std::fs::symlink_metadata(&journal_path) {
+            Ok(meta) => meta,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Some(Box::new(std::io::empty()))),
+            Err(err) => return Err(FormatError::from(err)),
+        };
+        if !pre_meta.file_type().is_file() {
+            return Err(FormatError::Io(format!("journal path `{}` must be a regular non-symlink file", journal_path.display())));
+        }
+        let max_bytes_u64 = u64::try_from(max_bytes).unwrap_or(u64::MAX);
+        let pre_len = pre_meta.len();
+        if pre_len > max_bytes_u64 {
+            return Err(FormatError::Io(format!(
+                "journal `{JOURNAL_FILE_NAME}` size ({pre_len} bytes) exceeds maximum replay limit ({max_bytes} bytes)"
+            )));
+        }
+        let file = match std::fs::File::open(&journal_path) {
             Ok(file) => file,
             Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Some(Box::new(std::io::empty()))),
             Err(err) => return Err(FormatError::from(err)),
         };
-        let file_len = file.metadata()?.len();
-        let max_bytes_u64 = u64::try_from(max_bytes).unwrap_or(u64::MAX);
+        let fd_meta = file.metadata()?;
+        if !fd_meta.file_type().is_file() {
+            return Err(FormatError::Io(format!("journal path `{}` must be a regular non-symlink file", journal_path.display())));
+        }
+        let file_len = fd_meta.len();
         if file_len > max_bytes_u64 {
             return Err(FormatError::Io(format!(
                 "journal `{JOURNAL_FILE_NAME}` size ({file_len} bytes) exceeds maximum replay limit ({max_bytes} bytes)"

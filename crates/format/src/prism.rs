@@ -7,13 +7,14 @@
 use std::collections::{BTreeMap, HashSet};
 
 use curvebook_doc::{
-    AnalysisKind, ConstantValue, DataSheet, GraphAnnotation, InfoConstant, InfoSheet, LayoutItem, LinkSource, ProjectDocument, SheetId,
-    SubcolumnMode, TableKind,
+    AnalysisKind, ConstantValue, DataSheet, GraphAnnotation, InfoConstant, InfoSheet, LayoutItem, LinkSource, MAX_IMAGE_ASSET_BYTES,
+    MAX_PROJECT_IMAGE_ASSETS, ProjectDocument, SheetId, SubcolumnMode, TableKind, is_valid_asset_id,
 };
 
 use crate::archive::{BoundedJsonOutcome, migrate_document_json, parse_bounded_json_outcome, validate_project_document};
 use crate::csv::{CsvOptions, import_csv_to_datasheet_with_budget, parse_delimited_records};
 use crate::error::{FormatError, ImportReport, ImportWarning, ImportWarningKind};
+use crate::image_asset::validate_image_asset_parts;
 use crate::pzfx::{allocate_valid_unique_sheet_id, import_pzfx_bytes_with_used_cells};
 use crate::zip::{ZipArchive, ZipLimits};
 
@@ -243,16 +244,10 @@ fn try_load_embedded_project_json(archive: &ZipArchive, warnings: &mut Vec<Impor
         Some(v) => v.as_u64().and_then(|n| u32::try_from(n).ok()).unwrap_or(curvebook_doc::CURRENT_SCHEMA_VERSION),
     };
     let migrated = migrate_document_json(val, version)?;
+    precheck_migrated_image_assets(&migrated)?;
     let mut doc: ProjectDocument = serde_json::from_value(migrated)?;
-    for asset in &mut doc.image_assets {
-        if asset.bytes.is_empty() {
-            let expected_path = format!("assets/{}.{}", asset.asset_id, asset.media_type.extension());
-            if let Some(bytes) = archive.get(&expected_path) {
-                asset.bytes = bytes.to_vec();
-            }
-        }
-    }
     doc.data_sheets.iter().try_fold(0_usize, accumulate_project_cells)?;
+    hydrate_embedded_image_assets(archive, &mut doc)?;
     sanitize_invalid_document_sheet_ids(&mut doc, warnings);
     validate_project_document(&doc)?;
 
@@ -266,6 +261,86 @@ fn try_load_embedded_project_json(archive: &ZipArchive, warnings: &mut Vec<Impor
         }
     }
     Ok(Some(ImportReport { document: doc, warnings: std::mem::take(warnings) }))
+}
+
+fn precheck_migrated_image_assets(migrated: &serde_json::Value) -> Result<(), FormatError> {
+    let Some(raw_assets) = migrated.get("image_assets").and_then(serde_json::Value::as_array) else {
+        return Ok(());
+    };
+    if raw_assets.len() > MAX_PROJECT_IMAGE_ASSETS {
+        return Err(FormatError::Doc(curvebook_doc::DocError::TooManyImageAssets { count: raw_assets.len(), max: MAX_PROJECT_IMAGE_ASSETS }));
+    }
+    let mut seen_ids = HashSet::with_capacity(raw_assets.len());
+    for entry in raw_assets {
+        if let Some(asset_id) = entry.get("asset_id").and_then(serde_json::Value::as_str)
+            && !seen_ids.insert(asset_id)
+        {
+            return Err(FormatError::DuplicateEntry { path: asset_id.to_owned() });
+        }
+        if let Some(encoded) = entry.get("bytes").and_then(serde_json::Value::as_str) {
+            let clean = encoded.trim();
+            if !clean.is_empty() && clean.len().is_multiple_of(4) {
+                let pad = if clean.ends_with("==") {
+                    2
+                } else if clean.ends_with('=') {
+                    1
+                } else {
+                    0
+                };
+                let decoded_len = (clean.len() / 4).saturating_mul(3).saturating_sub(pad);
+                if decoded_len > MAX_IMAGE_ASSET_BYTES {
+                    let asset_id = entry.get("asset_id").and_then(serde_json::Value::as_str).unwrap_or("<image>");
+                    return Err(FormatError::FileTooLarge {
+                        path: format!("assets/{asset_id}"),
+                        actual_bytes: Some(decoded_len as u64),
+                        limit_bytes: MAX_IMAGE_ASSET_BYTES,
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn hydrate_embedded_image_assets(archive: &ZipArchive, doc: &mut ProjectDocument) -> Result<(), FormatError> {
+    if doc.image_assets.len() > MAX_PROJECT_IMAGE_ASSETS {
+        return Err(FormatError::Doc(curvebook_doc::DocError::TooManyImageAssets { count: doc.image_assets.len(), max: MAX_PROJECT_IMAGE_ASSETS }));
+    }
+    let mut seen_ids = HashSet::with_capacity(doc.image_assets.len());
+    for asset in &mut doc.image_assets {
+        if !is_valid_asset_id(&asset.asset_id) {
+            return Err(FormatError::UnsupportedFormat { reason: format!("invalid image asset identifier `{}`", asset.asset_id) });
+        }
+        if !seen_ids.insert(asset.asset_id.clone()) {
+            return Err(FormatError::DuplicateEntry { path: asset.asset_id.clone() });
+        }
+        let expected_path = format!("assets/{}.{}", asset.asset_id, asset.media_type.extension());
+        if asset.bytes.is_empty() {
+            let Some(bytes) = archive.get(&expected_path) else {
+                return Err(FormatError::MissingArchiveEntry { path: expected_path });
+            };
+            if bytes.len() > MAX_IMAGE_ASSET_BYTES {
+                return Err(FormatError::FileTooLarge {
+                    path: expected_path,
+                    actual_bytes: Some(bytes.len() as u64),
+                    limit_bytes: MAX_IMAGE_ASSET_BYTES,
+                });
+            }
+            validate_image_asset_parts(&asset.asset_id, asset.media_type, asset.pixel_size, bytes)?;
+            asset.bytes = bytes.to_vec();
+        } else {
+            validate_image_asset_parts(&asset.asset_id, asset.media_type, asset.pixel_size, &asset.bytes)?;
+            if let Some(archived) = archive.get(&expected_path)
+                && archived != asset.bytes.as_slice()
+            {
+                return Err(FormatError::Json(format!(
+                    "image asset `{}` inline bytes in document.json disagree with archive payload",
+                    asset.asset_id
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn is_info_json_path(path: &str) -> bool {
