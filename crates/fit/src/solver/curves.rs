@@ -144,6 +144,7 @@ pub(in crate::solver) fn build_curve_overlay(ctx: &CurveOverlayContext<'_>) -> F
                     ctx.ds_local_idx,
                     ctx.ds.data_set_index,
                     x,
+                    Some(y),
                     &mut work_theta,
                     &mut work_params,
                     &mut g,
@@ -188,6 +189,7 @@ pub(in crate::solver) fn delta_grad_at_x_into(
     ds_local_idx: usize,
     ds_data_idx: usize,
     x: f64,
+    y0: Option<f64>,
     work: &mut [f64],
     work_params: &mut [f64],
     g_out: &mut [f64],
@@ -195,6 +197,7 @@ pub(in crate::solver) fn delta_grad_at_x_into(
     let k = layout.k_free();
     g_out.fill(0.0);
     work.copy_from_slice(theta);
+    let mut cached_y0 = y0.filter(|v| v.is_finite());
     for slot in 0..k {
         let info = &layout.free_slots[slot];
         if let Some(local_d) = info.ds_local_idx
@@ -202,16 +205,69 @@ pub(in crate::solver) fn delta_grad_at_x_into(
         {
             continue;
         }
-        let h = 1e-6 * theta[slot].abs().max(1.0);
-        work[slot] = theta[slot] + h;
-        layout.expand_params_into(work, ds_local_idx, work_params);
-        let fp = model.eval(&[x], work_params, ds_data_idx);
-        work[slot] = theta[slot] - h;
-        layout.expand_params_into(work, ds_local_idx, work_params);
-        let fm = model.eval(&[x], work_params, ds_data_idx);
-        work[slot] = theta[slot];
+        let xj = theta[slot];
+        let h_c = 1e-6 * xj.abs().max(1.0);
+        let (lb, ub) = (info.lower, info.upper);
+        let in_ub_c = ub.is_none_or(|u| xj + h_c <= u);
+        let in_lb_c = lb.is_none_or(|l| xj - h_c >= l);
+
+        let fp = if in_ub_c {
+            work[slot] = xj + h_c;
+            layout.expand_params_into(work, ds_local_idx, work_params);
+            model.eval(&[x], work_params, ds_data_idx).filter(|v| v.is_finite())
+        } else {
+            None
+        };
+        let fm = if in_lb_c {
+            work[slot] = xj - h_c;
+            layout.expand_params_into(work, ds_local_idx, work_params);
+            model.eval(&[x], work_params, ds_data_idx).filter(|v| v.is_finite())
+        } else {
+            None
+        };
+        work[slot] = xj;
+
         if let (Some(p), Some(m)) = (fp, fm) {
-            g_out[slot] = (p - m) / (2.0 * h);
+            g_out[slot] = (p - m) / (2.0 * h_c);
+            continue;
+        }
+
+        let base_y = match cached_y0 {
+            Some(v) => v,
+            None => {
+                layout.expand_params_into(theta, ds_local_idx, work_params);
+                let Some(v) = model.eval(&[x], work_params, ds_data_idx).filter(|v| v.is_finite()) else {
+                    continue;
+                };
+                cached_y0 = Some(v);
+                v
+            }
+        };
+
+        let h_f = 1.5e-8 * xj.abs().max(1.0);
+        let signs = if (fp.is_none() && fm.is_some()) || ub.is_some_and(|u| xj + h_f > u) { [-1.0_f64, 1.0_f64] } else { [1.0_f64, -1.0_f64] };
+        let mut set = false;
+        for &sign in &signs {
+            let x_try = xj + sign * h_f;
+            if lb.is_some_and(|l| x_try < l) || ub.is_some_and(|u| x_try > u) {
+                continue;
+            }
+            work[slot] = x_try;
+            layout.expand_params_into(work, ds_local_idx, work_params);
+            let f_try = model.eval(&[x], work_params, ds_data_idx).filter(|v| v.is_finite());
+            work[slot] = xj;
+            if let Some(val) = f_try {
+                g_out[slot] = (val - base_y) * (sign / h_f);
+                set = true;
+                break;
+            }
+        }
+        if !set {
+            if let Some(p) = fp {
+                g_out[slot] = (p - base_y) / h_c;
+            } else if let Some(m) = fm {
+                g_out[slot] = (base_y - m) / h_c;
+            }
         }
     }
 }
@@ -239,7 +295,7 @@ pub(in crate::solver) fn delta_grad_at_x(
     }
     let mut work = theta.to_vec();
     let mut work_params = vec![0.0_f64; p_m];
-    delta_grad_at_x_into(model, layout, theta, ds_local_idx, ds.data_set_index, x, &mut work, &mut work_params, &mut g);
+    delta_grad_at_x_into(model, layout, theta, ds_local_idx, ds.data_set_index, x, None, &mut work, &mut work_params, &mut g);
     g
 }
 

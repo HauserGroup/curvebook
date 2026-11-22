@@ -336,12 +336,30 @@ pub fn filter_datasets_by_range(
     datasets.retain(|ds| !ds.points.is_empty());
 }
 
-fn resolve_selected_indices(total: usize, selected: &[usize]) -> Vec<usize> {
-    if selected.is_empty() { (0..total).collect() } else { selected.iter().copied().filter(|&i| i < total).collect() }
+fn resolve_selected_indices(total: usize, selected: &[usize]) -> Result<Vec<usize>, FitError> {
+    if selected.is_empty() {
+        return Ok((0..total).collect());
+    }
+    let mut seen = HashSet::with_capacity(selected.len());
+    for &idx in selected {
+        if idx >= total {
+            return Err(FitError::InvalidParameter {
+                name: "selected_data_sets",
+                reason: format!("selected dataset index {idx} out of range (expected < {total})"),
+            });
+        }
+        if !seen.insert(idx) {
+            return Err(FitError::InvalidParameter {
+                name: "selected_data_sets",
+                reason: format!("duplicate dataset index {idx} in `selected_data_sets`"),
+            });
+        }
+    }
+    Ok(selected.to_vec())
 }
 
 fn extract_from_xy(xy: &curvebook_doc::XyTable, selected_data_sets: &[usize]) -> Result<Vec<DatasetSeries>, FitError> {
-    let indices = resolve_selected_indices(xy.data_sets.len(), selected_data_sets);
+    let indices = resolve_selected_indices(xy.data_sets.len(), selected_data_sets)?;
     let mut series_list = Vec::with_capacity(indices.len());
     for ds_idx in indices {
         let Some(ds) = xy.data_sets.get(ds_idx) else {
@@ -381,17 +399,6 @@ fn y_cells_are_blank_unknown(subcells: &[Cell]) -> bool {
 }
 
 fn populate_xy_column(xy: &curvebook_doc::XyTable, ds: &DataSetColumn, ds_idx: usize, series: &mut DatasetSeries) -> Result<(), FitError> {
-    let x_sd = |row: usize| -> Option<f64> {
-        let curvebook_doc::XColumnMode::Numbers { subcolumn_mode } = xy.x_mode else {
-            return None;
-        };
-        if !subcolumn_mode.supports_parametric_moments() {
-            return None;
-        }
-        xy.summarized_x_point(row).ok().flatten().map(|pt| pt.sd)
-    };
-    let _ = x_sd;
-
     for (row, subcells) in ds.cells.iter().enumerate() {
         let x_opt = xy.x_value_at(row);
         let x_blank = x_opt.is_none() && x_row_is_blank_unknown(xy, row);
@@ -422,17 +429,22 @@ fn populate_xy_column(xy: &curvebook_doc::XyTable, ds: &DataSetColumn, ds_idx: u
                 _ => {}
             }
         } else if xy.y_subcolumn_mode.is_pre_summarized() {
-            if let (Some(x), Some(y)) = (x_opt, subcells.first().and_then(Cell::active_number)) {
-                series.points.push(DataPoint {
-                    x: vec![x],
-                    y,
-                    sd: None,
-                    n: None,
-                    explicit_weight: None,
-                    source_subcolumn: 0,
-                    data_set_index: ds_idx,
-                    row,
-                });
+            match (x_opt, subcells.first().and_then(Cell::active_number)) {
+                (Some(x), Some(y)) => {
+                    series.points.push(DataPoint {
+                        x: vec![x],
+                        y,
+                        sd: None,
+                        n: None,
+                        explicit_weight: None,
+                        source_subcolumn: 0,
+                        data_set_index: ds_idx,
+                        row,
+                    });
+                }
+                (None, Some(y)) if x_blank => series.unknowns_y.push((row, y).into()),
+                (Some(x), None) if y_cells_are_blank_unknown(subcells) => series.unknowns_x.push((row, x)),
+                _ => {}
             }
         } else {
             let mut had_y = false;
@@ -473,7 +485,7 @@ fn populate_xy_column(xy: &curvebook_doc::XyTable, ds: &DataSetColumn, ds_idx: u
 }
 
 fn extract_from_grouped(g: &curvebook_doc::GroupedTable, selected_data_sets: &[usize]) -> Result<Vec<DatasetSeries>, FitError> {
-    let indices = resolve_selected_indices(g.data_sets.len(), selected_data_sets);
+    let indices = resolve_selected_indices(g.data_sets.len(), selected_data_sets)?;
     let mut series_list = Vec::with_capacity(indices.len());
     for ds_idx in indices {
         let Some(ds) = g.data_sets.get(ds_idx) else {
@@ -594,38 +606,79 @@ pub(crate) fn resolve_mv_columns(
     mv_spec: &MultivarExtractionSpec<'_>,
 ) -> Result<(Vec<usize>, usize, Vec<usize>), FitError> {
     let n_vars = mv.variables.len();
+    let mut group_set = HashSet::with_capacity(mv_spec.group_columns.len());
     for &gc in mv_spec.group_columns {
         if gc >= n_vars {
             return Err(FitError::InvalidParameter { name: "mv_group_columns", reason: format!("Column index {gc} >= {n_vars}") });
         }
+        if !group_set.insert(gc) {
+            return Err(FitError::InvalidParameter { name: "mv_group_columns", reason: format!("Duplicate column index {gc}") });
+        }
     }
+    let mut x_set = HashSet::with_capacity(mv_spec.x_columns.len());
     for &xc in mv_spec.x_columns {
         if xc >= n_vars {
             return Err(FitError::InvalidParameter { name: "mv_x_columns", reason: format!("Column index {xc} >= {n_vars}") });
         }
+        if !x_set.insert(xc) {
+            return Err(FitError::InvalidParameter { name: "mv_x_columns", reason: format!("Duplicate column index {xc}") });
+        }
+        if group_set.contains(&xc) {
+            return Err(FitError::InvalidParameter {
+                name: "mv_x_columns",
+                reason: format!("Column {xc} cannot be both predictor (X) and grouping column"),
+            });
+        }
+        if !is_mv_numeric_role(&mv.variables[xc]) {
+            return Err(FitError::InvalidParameter {
+                name: "mv_x_columns",
+                reason: format!("Predictor column {xc} must be numeric (got {:?})", mv.variables[xc].role),
+            });
+        }
     }
-    if let Some(yc) = mv_spec.y_column
-        && yc >= n_vars
-    {
-        return Err(FitError::InvalidParameter { name: "mv_y_column", reason: format!("Column index {yc} >= {n_vars}") });
+    if let Some(yc) = mv_spec.y_column {
+        if yc >= n_vars {
+            return Err(FitError::InvalidParameter { name: "mv_y_column", reason: format!("Column index {yc} >= {n_vars}") });
+        }
+        if group_set.contains(&yc) {
+            return Err(FitError::InvalidParameter {
+                name: "mv_y_column",
+                reason: format!("Column {yc} cannot be both response (Y) and grouping column"),
+            });
+        }
+        if x_set.contains(&yc) {
+            return Err(FitError::InvalidParameter {
+                name: "mv_y_column",
+                reason: format!("Column {yc} cannot be both predictor (X) and response (Y)"),
+            });
+        }
+        if !is_mv_numeric_role(&mv.variables[yc]) {
+            return Err(FitError::InvalidParameter {
+                name: "mv_y_column",
+                reason: format!("Response column {yc} must be numeric (got {:?})", mv.variables[yc].role),
+            });
+        }
     }
 
-    let group_set: HashSet<usize> = mv_spec.group_columns.iter().copied().collect();
-    let x_set: HashSet<usize> = mv_spec.x_columns.iter().copied().collect();
+    if mv_spec.x_columns.is_empty() || mv_spec.y_column.is_none() {
+        let _ = resolve_selected_indices(n_vars, selected_data_sets)?;
+    }
+
     let selected_numeric: Vec<usize> = selected_data_sets
         .iter()
         .copied()
-        .filter(|&idx| idx < n_vars && !group_set.contains(&idx) && mv.variables.get(idx).is_some_and(is_mv_numeric_role))
+        .filter(|&idx| idx < n_vars && !group_set.contains(&idx) && is_mv_numeric_role(&mv.variables[idx]))
         .collect();
 
     let y_col = if let Some(yc) = mv_spec.y_column {
         yc
     } else if let Some(&sel) = selected_numeric.iter().rev().find(|idx| !x_set.contains(idx)) {
         sel
+    } else if let Some(def) = pick_default_mv_numeric_col(mv, (0..n_vars).rev().filter(|idx| !x_set.contains(idx) && !group_set.contains(idx))) {
+        def
     } else {
-        pick_default_mv_numeric_col(mv, (0..n_vars).rev().filter(|idx| !x_set.contains(idx) && !group_set.contains(idx)))
-            .or_else(|| (0..n_vars).rev().find(|idx| !x_set.contains(idx) && !group_set.contains(idx)))
-            .unwrap_or_else(|| selected_data_sets.first().copied().unwrap_or(1))
+        let numeric_avail = mv.variables.iter().filter(|v| is_mv_numeric_role(v)).count();
+        return Err(FitError::InsufficientData { required: 2, actual: numeric_avail });
     };
 
     let selected_x: Vec<usize> = selected_numeric.iter().copied().filter(|&idx| idx != y_col).collect();
@@ -633,11 +686,11 @@ pub(crate) fn resolve_mv_columns(
         mv_spec.x_columns.to_vec()
     } else if !selected_x.is_empty() {
         selected_x
+    } else if let Some(def) = pick_default_mv_numeric_col(mv, (0..n_vars).filter(|&idx| idx != y_col && !group_set.contains(&idx))) {
+        vec![def]
     } else {
-        let fallback = pick_default_mv_numeric_col(mv, (0..n_vars).filter(|&idx| idx != y_col && !group_set.contains(&idx)))
-            .or_else(|| (0..n_vars).find(|&idx| idx != y_col && !group_set.contains(&idx)))
-            .unwrap_or(usize::from(y_col == 0));
-        vec![fallback]
+        let numeric_avail = mv.variables.iter().filter(|v| is_mv_numeric_role(v)).count();
+        return Err(FitError::InsufficientData { required: 2, actual: numeric_avail });
     };
 
     let x_used: HashSet<usize> = x_cols.iter().copied().collect();
@@ -745,8 +798,11 @@ fn extract_from_multivar(
     }
 
     let explicit_column_mapping = !mv_spec.x_columns.is_empty() && mv_spec.y_column.is_some();
+    if explicit_column_mapping && group_cols.is_empty() && !selected_data_sets.is_empty() {
+        let _ = resolve_selected_indices(mv.variables.len(), selected_data_sets)?;
+    }
     let keep_indices = if explicit_column_mapping && !group_cols.is_empty() && !selected_data_sets.is_empty() {
-        resolve_selected_indices(entries.len(), selected_data_sets)
+        resolve_selected_indices(entries.len(), selected_data_sets)?
     } else {
         (0..entries.len()).collect()
     };

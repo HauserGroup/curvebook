@@ -4,11 +4,11 @@
 //! - Motulsky, H. & Christopoulos, A. (2004). *Fitting Models to Biological Data Using Linear and Nonlinear Regression*. Oxford University Press.
 //! - Seber, G. A. F. & Wild, C. J. (1989). *Nonlinear Regression*. Wiley.
 
-use curvebook_doc::{CiBound, FitMethod, ParameterRule};
+use curvebook_doc::{CiBound, FitMethod, ParameterRule, ParameterScope};
 use curvebook_math::sum::NeumaierSum;
 
 use crate::diagnostics::{CovarianceDiagnostics, RoutDetectionResult, compute_information_criteria, compute_rsdr};
-use crate::error::{FitError, FitIdentifiability, FitStatus};
+use crate::error::{FitError, FitIdentifiability, FitStatus, ParameterNote};
 use crate::library::ParametricModel;
 use crate::solver::assembly::{DatasetAssemblyConfig, assemble_dataset_results, build_fitted_parameter_summaries};
 use crate::solver::fit::{finalize_fit_uncertainty, solve_lm_by_method};
@@ -25,7 +25,7 @@ use crate::solver::layout::{
 };
 use crate::solver::lm::solve_with_warm_start;
 use crate::solver::results::{FittedDatasetResult, InferenceAvailability, InterpolatedUnknown, NonlinearFitResult, SolverConfig};
-use crate::types::{DatasetSeries, DerivedScalar, HookContext};
+use crate::types::{DatasetSeries, DerivedScalar, HookContext, per_dataset_parameter_key};
 
 pub(in crate::solver) fn fit_single_or_shared(
     model: &dyn ParametricModel,
@@ -63,7 +63,7 @@ pub(in crate::solver) fn fit_single_or_shared(
         let diff = rec.point.y - yh;
         let w_rep = rec.rep_n as f64;
         raw_rss_acc.add(w_rep * diff * diff);
-        raw_rss_acc.add(rec.ss_within);
+        raw_rss_acc.add(rec.raw_ss_within);
         y_mean_acc.add(w_rep * rec.point.y);
     }
     let raw_rss = raw_rss_acc.total();
@@ -72,7 +72,7 @@ pub(in crate::solver) fn fit_single_or_shared(
     for rec in &obs {
         let d = rec.point.y - y_mean;
         tss_acc.add((rec.rep_n as f64) * d * d);
-        tss_acc.add(rec.ss_within);
+        tss_acc.add(rec.raw_ss_within);
     }
     let tss = tss_acc.total();
     let is_robust = config.method == FitMethod::RobustCauchy;
@@ -169,7 +169,7 @@ pub(in crate::solver) struct SingleDatasetOutcome {
     pub(in crate::solver) derived_scalars: Vec<DerivedScalar>,
     pub(in crate::solver) interpolated_x: Vec<InterpolatedUnknown>,
     pub(in crate::solver) interpolated_y: Vec<InterpolatedUnknown>,
-    pub(in crate::solver) obs_moments: Vec<(f64, usize, f64)>,
+    pub(in crate::solver) obs_moments: Vec<(f64, usize, f64, f64)>,
     pub(in crate::solver) poisson_ll: Option<f64>,
 }
 
@@ -209,7 +209,7 @@ pub(in crate::solver) fn solve_single_dataset_unit(
     for (rec, &yh) in ds_obs.iter().zip(lm_out.y_hat.iter()) {
         let diff = rec.point.y - yh;
         raw_rss_d.add((rec.rep_n as f64) * diff * diff);
-        raw_rss_d.add(rec.ss_within);
+        raw_rss_d.add(rec.raw_ss_within);
     }
     let rsd_d = if df_d > 0 && config.method != FitMethod::RobustCauchy { (raw_rss_d.total() / (df_d as f64)).sqrt() } else { f64::NAN };
     let stud_d = if config.method == FitMethod::RobustCauchy {
@@ -238,7 +238,7 @@ pub(in crate::solver) fn solve_single_dataset_unit(
     let ds_result = assembled.ds_results.into_iter().next().ok_or(FitError::EmptyInput)?;
     let derived = assembled.derived_scalars.into_iter().next().unwrap_or_default();
     let poisson_ll = if config.method == FitMethod::PoissonDeviance { poisson_log_likelihood_from_obs(&ds_obs, &lm_out.y_hat) } else { None };
-    let obs_moments = ds_obs.iter().map(|o| (o.sqrt_weight, o.rep_n, o.ss_within)).collect();
+    let obs_moments = ds_obs.iter().map(|o| (o.sqrt_weight, o.rep_n, o.ss_within, o.raw_ss_within)).collect();
 
     Ok(SingleDatasetOutcome {
         layout: ds_layout,
@@ -269,68 +269,8 @@ pub(in crate::solver) fn fit_independent_datasets(
 ) -> Result<NonlinearFitResult, FitError> {
     let k_free = global_layout.k_free();
     let (clean_storage, cauchy_seeds, rout_result, n_outliers_excluded) = if let FitMethod::RoutOutlierElimination { fdr_q_percent } = config.method {
-        let mut cauchy_cfg = config.clone();
-        cauchy_cfg.method = FitMethod::RobustCauchy;
-        cauchy_cfg.compute_hougaard = false;
-        cauchy_cfg.compute_profile_ci = false;
-        cauchy_cfg.compute_bands = false;
-        cauchy_cfg.interpolate_unknowns = false;
-
-        let mut cleaned = Vec::with_capacity(datasets.len());
-        let mut seeds = Vec::with_capacity(datasets.len());
-        let mut combined_outliers = Vec::new();
-        let mut combined_audit = Vec::new();
-        let mut rsdr_weighted_sq = 0.0_f64;
-        let mut total_rout_df = 0_usize;
-        let mut remaining_obs = 0_usize;
-        let mut total_pts = 0_usize;
-        let mut pt_offset = 0_usize;
-
-        for ds in datasets {
-            let ds_rules = rules_for_dataset(&config.parameter_rules, ds.data_set_index);
-            let sub = solve_single_dataset_unit(model, ds, hooks, &ds_rules, &cauchy_cfg, None)?;
-            let p_d = sub.layout.k_free();
-            let sqrt_w_d: Vec<f64> = sub.obs_moments.iter().map(|&(sw, _, _)| sw).collect();
-            let w_res_d: Vec<f64> = sub.ds_result.residuals.iter().zip(sqrt_w_d.iter()).map(|(&r, &sw)| r * sw).collect();
-            let rout_d = rout_detect_outliers_mb2006(&ds.points, &w_res_d, &sqrt_w_d, p_d, fdr_q_percent)?;
-
-            let mut is_out = vec![false; ds.points.len()];
-            for &local_idx in &rout_d.outlier_indices {
-                is_out[local_idx] = true;
-                combined_outliers.push(pt_offset + local_idx);
-            }
-            for mut entry in rout_d.audit {
-                entry.index += pt_offset;
-                combined_audit.push(entry);
-            }
-            if rout_d.df > 0 && rout_d.rsdr.is_finite() {
-                rsdr_weighted_sq += (rout_d.df as f64) * rout_d.rsdr * rout_d.rsdr;
-                total_rout_df += rout_d.df;
-            }
-
-            let mut ds_c = ds.clone();
-            let mut idx_iter = is_out.iter().copied();
-            ds_c.points.retain(|_| !idx_iter.next().unwrap_or(false));
-            if ds_c.points.len() <= p_d {
-                return Err(FitError::InsufficientData { required: p_d + 1, actual: ds_c.points.len() });
-            }
-            total_pts += ds.points.len();
-            remaining_obs += ds_c.points.len();
-            pt_offset += ds.points.len();
-            cleaned.push(ds_c);
-            seeds.push(sub.theta);
-        }
-
-        let combined_rsdr = if total_rout_df > 0 { (rsdr_weighted_sq / (total_rout_df as f64)).sqrt() } else { 0.0 };
-        let rout = RoutDetectionResult {
-            rsdr: combined_rsdr,
-            df: total_rout_df,
-            q_threshold_percent: fdr_q_percent,
-            outlier_indices: combined_outliers,
-            audit: combined_audit,
-        };
-        let excluded = total_pts - remaining_obs;
-        (Some(cleaned), Some(seeds), Some(rout), excluded)
+        let pre = run_independent_rout_prefilter(model, datasets, hooks, config, fdr_q_percent)?;
+        (Some(pre.cleaned), Some(pre.seeds), Some(pre.rout), pre.excluded)
     } else {
         (None, None, None, 0)
     };
@@ -360,6 +300,7 @@ pub(in crate::solver) fn fit_independent_datasets(
     let mut any_diverged = false;
     let mut any_ambiguous = false;
     let mut any_max_iters = false;
+    let mut any_unassessed_free = false;
     let mut max_iterations = 0_usize;
     let mut total_weighted_ss = NeumaierSum::new();
     let mut total_raw_rss = NeumaierSum::new();
@@ -377,8 +318,13 @@ pub(in crate::solver) fn fit_independent_datasets(
     let mut all_raw_residuals = Vec::new();
     let mut all_poisson_ll: Option<f64> = Some(0.0);
 
+    let fixed_constants = collect_independent_fixed_constants(model, active_datasets, &sub_fits, config);
+
     for (d_idx, (sub, ds)) in sub_fits.into_iter().zip(active_datasets.iter()).enumerate() {
         let p_d = sub.layout.k_free();
+        if p_d > 0 && matches!(sub.identifiability.fit, FitIdentifiability::NotAssessed) {
+            any_unassessed_free = true;
+        }
         let mut l2g = vec![0_usize; p_d];
         for p_idx in 0..global_layout.p_model {
             if let (ParamBinding::Free(g_slot), ParamBinding::Free(l_slot)) = (&global_layout.bindings[d_idx][p_idx], &sub.layout.bindings[0][p_idx])
@@ -416,11 +362,18 @@ pub(in crate::solver) fn fit_independent_datasets(
         for (((pt, &yh), &res), &obs_mom) in
             ds.points.iter().zip(sub.ds_result.y_hat.iter()).zip(sub.ds_result.residuals.iter()).zip(sub.obs_moments.iter())
         {
-            all_obs.push(ObsRecord { point: pt.clone(), ds_local_idx: d_idx, sqrt_weight: obs_mom.0, rep_n: obs_mom.1, ss_within: obs_mom.2 });
+            all_obs.push(ObsRecord {
+                point: pt.clone(),
+                ds_local_idx: d_idx,
+                sqrt_weight: obs_mom.0,
+                rep_n: obs_mom.1,
+                ss_within: obs_mom.2,
+                raw_ss_within: obs_mom.3,
+            });
             all_points.push(pt.clone());
             all_y_hat.push(yh);
             all_raw_residuals.push(res);
-            all_moments.push((obs_mom.1, obs_mom.2));
+            all_moments.push((obs_mom.1, obs_mom.3));
             total_y_sum.add((obs_mom.1 as f64) * pt.y);
             n_obs += obs_mom.1;
         }
@@ -431,12 +384,15 @@ pub(in crate::solver) fn fit_independent_datasets(
         interpolated_y.extend(sub.interpolated_y);
     }
 
+    if any_unassessed_free && matches!(identifiability, FitIdentifiability::Identifiable) {
+        identifiability = FitIdentifiability::NotAssessed;
+    }
     let status = if any_diverged {
         FitStatus::Diverged
-    } else if any_ambiguous {
-        FitStatus::Ambiguous
     } else if any_max_iters {
         FitStatus::HitMaxIters
+    } else if any_ambiguous {
+        FitStatus::Ambiguous
     } else {
         FitStatus::Converged
     };
@@ -515,7 +471,7 @@ pub(in crate::solver) fn fit_independent_datasets(
         aic_c: ic.as_ref().map(|x| x.aicc),
         bic: ic.as_ref().map(|x| x.bic),
         parameters,
-        fixed_constants: global_layout.fixed_constants,
+        fixed_constants,
         covariance: cov,
         datasets: ds_results,
         derived_scalars,
@@ -529,4 +485,125 @@ pub(in crate::solver) fn fit_independent_datasets(
         interpolated_x,
         interpolated_y,
     })
+}
+
+fn collect_independent_fixed_constants(
+    model: &dyn ParametricModel,
+    active_datasets: &[DatasetSeries],
+    sub_fits: &[SingleDatasetOutcome],
+    config: &SolverConfig,
+) -> Vec<(String, f64, Vec<ParameterNote>)> {
+    if active_datasets.len() <= 1 {
+        return sub_fits.first().map(|s| s.layout.fixed_constants.clone()).unwrap_or_default();
+    }
+    let default_bounds = model.default_bounds();
+    let mut fixed_constants = Vec::new();
+    for (p_idx, pname) in model.param_names().iter().enumerate() {
+        let mut entries: Vec<(usize, f64, Vec<ParameterNote>)> = Vec::new();
+        for (ds, sub) in active_datasets.iter().zip(sub_fits.iter()) {
+            if let Some((_, val, notes)) = sub.layout.fixed_constants.iter().find(|(n, _, _)| n == pname) {
+                entries.push((ds.data_set_index, *val, notes.clone()));
+            }
+        }
+        if entries.is_empty() {
+            continue;
+        }
+        let explicit_rule = config.parameter_rules.iter().find(|r| r.name.eq_ignore_ascii_case(pname));
+        let is_global_constant_rule = match explicit_rule.map(|r| &r.scope) {
+            Some(ParameterScope::Constant(_) | ParameterScope::HookedConstant(_)) => true,
+            Some(ParameterScope::PerDatasetConstant(_) | ParameterScope::ColumnTitleConstant) => false,
+            None | Some(ParameterScope::Local | ParameterScope::SharedGlobal) => {
+                let def_b = default_bounds.get(p_idx).copied().unwrap_or((None, None));
+                let lb = explicit_rule.and_then(|r| r.lower_bound).or(def_b.0);
+                let ub = explicit_rule.and_then(|r| r.upper_bound).or(def_b.1);
+                matches!((lb, ub), (Some(l), Some(u)) if l == u)
+            }
+        };
+        if is_global_constant_rule {
+            fixed_constants.push((pname.clone(), entries[0].1, entries[0].2.clone()));
+        } else {
+            for (ds_ext_idx, val, notes) in entries {
+                fixed_constants.push((per_dataset_parameter_key(pname, ds_ext_idx), val, notes));
+            }
+        }
+    }
+    fixed_constants
+}
+
+struct IndependentRoutPrefilter {
+    cleaned: Vec<DatasetSeries>,
+    seeds: Vec<Vec<f64>>,
+    rout: RoutDetectionResult,
+    excluded: usize,
+}
+
+fn run_independent_rout_prefilter(
+    model: &dyn ParametricModel,
+    datasets: &[DatasetSeries],
+    hooks: &HookContext,
+    config: &SolverConfig,
+    fdr_q_percent: f64,
+) -> Result<IndependentRoutPrefilter, FitError> {
+    let mut cauchy_cfg = config.clone();
+    cauchy_cfg.method = FitMethod::RobustCauchy;
+    cauchy_cfg.compute_hougaard = false;
+    cauchy_cfg.compute_profile_ci = false;
+    cauchy_cfg.compute_bands = false;
+    cauchy_cfg.interpolate_unknowns = false;
+
+    let mut cleaned = Vec::with_capacity(datasets.len());
+    let mut seeds = Vec::with_capacity(datasets.len());
+    let mut combined_outliers = Vec::new();
+    let mut combined_audit = Vec::new();
+    let mut rsdr_weighted_sq = 0.0_f64;
+    let mut total_rout_df = 0_usize;
+    let mut remaining_obs = 0_usize;
+    let mut total_pts = 0_usize;
+    let mut pt_offset = 0_usize;
+
+    for ds in datasets {
+        let ds_rules = rules_for_dataset(&config.parameter_rules, ds.data_set_index);
+        let sub = solve_single_dataset_unit(model, ds, hooks, &ds_rules, &cauchy_cfg, None)?;
+        let p_d = sub.layout.k_free();
+        let sqrt_w_d: Vec<f64> = sub.obs_moments.iter().map(|&(sw, _, _, _)| sw).collect();
+        let w_res_d: Vec<f64> = sub.ds_result.residuals.iter().zip(sqrt_w_d.iter()).map(|(&r, &sw)| r * sw).collect();
+        let rout_d = rout_detect_outliers_mb2006(&ds.points, &w_res_d, &sqrt_w_d, p_d, fdr_q_percent)?;
+
+        let mut is_out = vec![false; ds.points.len()];
+        for &local_idx in &rout_d.outlier_indices {
+            is_out[local_idx] = true;
+            combined_outliers.push(pt_offset + local_idx);
+        }
+        for mut entry in rout_d.audit {
+            entry.index += pt_offset;
+            combined_audit.push(entry);
+        }
+        if rout_d.df > 0 && rout_d.rsdr.is_finite() {
+            rsdr_weighted_sq += (rout_d.df as f64) * rout_d.rsdr * rout_d.rsdr;
+            total_rout_df += rout_d.df;
+        }
+
+        let mut ds_c = ds.clone();
+        let mut idx_iter = is_out.iter().copied();
+        ds_c.points.retain(|_| !idx_iter.next().unwrap_or(false));
+        if ds_c.points.len() <= p_d {
+            return Err(FitError::InsufficientData { required: p_d + 1, actual: ds_c.points.len() });
+        }
+        total_pts += ds.points.len();
+        remaining_obs += ds_c.points.len();
+        pt_offset += ds.points.len();
+        cleaned.push(ds_c);
+        seeds.push(sub.theta);
+    }
+
+    let combined_rsdr = if total_rout_df > 0 { (rsdr_weighted_sq / (total_rout_df as f64)).sqrt() } else { 0.0 };
+    let rout = RoutDetectionResult {
+        rsdr: combined_rsdr,
+        df: total_rout_df,
+        q_threshold_percent: fdr_q_percent,
+        outlier_indices: combined_outliers,
+        audit: combined_audit,
+    };
+    let excluded = total_pts - remaining_obs;
+    Ok(IndependentRoutPrefilter { cleaned, seeds, rout, excluded })
 }

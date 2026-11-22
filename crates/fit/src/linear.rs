@@ -520,7 +520,11 @@ pub(crate) fn fit_linear_points(
         if opts.force_through_origin { (0.0, 0.0) } else { (fit.intercept - t_crit * fit.se_intercept, fit.intercept + t_crit * fit.se_intercept) };
 
     let r_squared = if fit.s_yy > 0.0 { (1.0 - fit.rss / fit.s_yy).clamp(0.0, 1.0) } else { 1.0 };
-    let r = if fit.s_xx > 0.0 && fit.s_yy > 0.0 { (fit.s_xy / (fit.s_xx * fit.s_yy).sqrt()).clamp(-1.0, 1.0) } else { 0.0 };
+    let r = if !opts.force_through_origin && fit.s_xx > 0.0 && fit.s_yy > 0.0 {
+        (fit.s_xy / (fit.s_xx * fit.s_yy).sqrt()).clamp(-1.0, 1.0)
+    } else {
+        f64::NAN
+    };
     let ms_res = fit.rss / (fit.df_res as f64);
     let ss_reg = (fit.s_yy - fit.rss).max(0.0);
     let f_stat = if ms_res > 0.0 {
@@ -582,7 +586,7 @@ pub(crate) fn fit_linear_points(
         ss_total: fit.s_yy,
         f_stat,
         p_value,
-        x_intercept: if fit.slope != 0.0 { Some(-fit.intercept / fit.slope) } else { None },
+        x_intercept: if !opts.force_through_origin && fit.slope != 0.0 { Some(-fit.intercept / fit.slope) } else { None },
         one_over_slope: if fit.slope != 0.0 { Some(1.0 / fit.slope) } else { None },
         runs_test: runs,
         lack_of_fit,
@@ -1056,14 +1060,15 @@ pub fn compare_linear_lines(datasets: &[&[DataPoint]], force_through_origin: boo
         0.0
     };
     let p_slopes = if f_slopes.is_infinite() { 0.0 } else { f_sf(f_slopes, df_num_s as f64, df_den_s as f64)? };
+    let slopes_diff = p_slopes < 0.05;
 
-    if force_through_origin {
+    if force_through_origin || slopes_diff {
         return Ok(LinearComparisonResult {
             dataset_count: k,
             f_slopes,
             df_slopes: (df_num_s, df_den_s),
             p_slopes,
-            slopes_significantly_different: p_slopes < 0.05,
+            slopes_significantly_different: slopes_diff,
             pooled_slope,
             f_intercepts: None,
             df_intercepts: None,
@@ -1093,7 +1098,7 @@ pub fn compare_linear_lines(datasets: &[&[DataPoint]], force_through_origin: boo
         f_slopes,
         df_slopes: (df_num_s, df_den_s),
         p_slopes,
-        slopes_significantly_different: p_slopes < 0.05,
+        slopes_significantly_different: slopes_diff,
         pooled_slope,
         f_intercepts: Some(f_int),
         df_intercepts: Some((df_num_s, df_den_i)),
@@ -1117,6 +1122,9 @@ pub fn deming_regression(points: &[DataPoint], opts: &DemingOptions) -> Result<D
     if points.is_empty() {
         return Err(FitError::EmptyInput);
     }
+    if points.iter().any(|p| p.sd.is_some() || p.n.is_some()) {
+        return Err(FitError::RequiresRawReplicates);
+    }
     if points.len() < 3 {
         return Err(FitError::InsufficientData { required: 3, actual: points.len() });
     }
@@ -1132,11 +1140,14 @@ pub fn deming_regression(points: &[DataPoint], opts: &DemingOptions) -> Result<D
     let n = points.len();
     let (slope, intercept, sy_x) = fit_deming_core(&xs, &ys, opts.variance_ratio_lambda)?;
 
-    // Leave-One-Out Jackknife SEs for slope & intercept.
+    // Leave-One-Out Jackknife SEs for slope & intercept. If any leave-one-out subset is
+    // collinear/degenerate (e.g. n = 3 with replicate points), degrade SEs & CIs to NaN cleanly
+    // rather than aborting a well-defined full-sample fit.
     let mut jack_slopes = Vec::with_capacity(n);
     let mut jack_ints = Vec::with_capacity(n);
     let mut sub_x = Vec::with_capacity(n - 1);
     let mut sub_y = Vec::with_capacity(n - 1);
+    let mut jack_valid = true;
     for skip in 0..n {
         sub_x.clear();
         sub_y.clear();
@@ -1146,17 +1157,24 @@ pub fn deming_regression(points: &[DataPoint], opts: &DemingOptions) -> Result<D
                 sub_y.push(ys[i]);
             }
         }
-        let (js, ji, _) = fit_deming_core(&sub_x, &sub_y, opts.variance_ratio_lambda)?;
-        jack_slopes.push(js);
-        jack_ints.push(ji);
+        if let Ok((js, ji, _)) = fit_deming_core(&sub_x, &sub_y, opts.variance_ratio_lambda) {
+            jack_slopes.push(js);
+            jack_ints.push(ji);
+        } else {
+            jack_valid = false;
+            break;
+        }
     }
 
-    let se_slope = jackknife_se(&jack_slopes);
-    let se_intercept = jackknife_se(&jack_ints);
     let df = n - 2;
     let t_crit = student_t_two_sided_isf(opts.confidence_level.alpha(), df as f64)?;
-    let ci_slope = (slope - t_crit * se_slope, slope + t_crit * se_slope);
-    let ci_intercept = (intercept - t_crit * se_intercept, intercept + t_crit * se_intercept);
+    let (se_slope, se_intercept, ci_slope, ci_intercept) = if jack_valid {
+        let se_s = jackknife_se(&jack_slopes);
+        let se_i = jackknife_se(&jack_ints);
+        (se_s, se_i, (slope - t_crit * se_s, slope + t_crit * se_s), (intercept - t_crit * se_i, intercept + t_crit * se_i))
+    } else {
+        (f64::NAN, f64::NAN, (f64::NAN, f64::NAN), (f64::NAN, f64::NAN))
+    };
 
     let residuals = xs
         .iter()

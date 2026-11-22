@@ -15,8 +15,9 @@
 use std::collections::{HashMap, HashSet};
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, ChecklistItem, ChecklistStatus, CiBound, CurveSamplePoint, DataSheet, FittedCurveOverlay, LinearRegressionSpec,
-    NonlinearFitSpec, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SourceCellId, TableArchetype,
+    AnalysisKind, AnalysisSpec, ChecklistItem, ChecklistStatus, CiBound, CurveSamplePoint, DataSheet, ErrorCode, FittedCurveOverlay,
+    LinearRegressionSpec, NonlinearFitSpec, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SourceCellId,
+    TableArchetype,
 };
 use curvebook_math::PValueFormat;
 use curvebook_math::dist::norm_ppf;
@@ -331,6 +332,9 @@ fn build_deming_result_sheet(
     let mut rows = vec![Vec::with_capacity(datasets.len()); row_labels.len()];
 
     for (ds, &n_excluded) in datasets.iter().zip(excluded) {
+        if ds.is_pre_summarized {
+            return Err(FitError::RequiresRawReplicates);
+        }
         let dem = deming_regression(&ds.points, &opts)?;
         if has_range {
             counts.push([dem.n, n_excluded, dem.df]);
@@ -349,8 +353,8 @@ fn build_deming_result_sheet(
         rows[1].push(num_cell(dem.intercept));
         rows[2].push(num_cell(dem.se_slope));
         rows[3].push(num_cell(dem.se_intercept));
-        rows[4].push(ResultCell::ConfidenceInterval { lower: CiBound::Finite(dem.ci_slope.0), upper: CiBound::Finite(dem.ci_slope.1) });
-        rows[5].push(ResultCell::ConfidenceInterval { lower: CiBound::Finite(dem.ci_intercept.0), upper: CiBound::Finite(dem.ci_intercept.1) });
+        rows[4].push(ci_cell(CiBound::Finite(dem.ci_slope.0), CiBound::Finite(dem.ci_slope.1)));
+        rows[5].push(ci_cell(CiBound::Finite(dem.ci_intercept.0), CiBound::Finite(dem.ci_intercept.1)));
         rows[6].push(num_cell(dem.sy_x));
         result.scalars.push(ResultScalarEntry { key: "Slope".to_owned(), data_set_index: Some(ds.data_set_index), value: dem.slope, units: None });
         result.scalars.push(ResultScalarEntry {
@@ -472,14 +476,24 @@ pub fn execute_nonlinear_analysis(
     }
 
     if let Some(comp_spec) = &nl_spec.comparison {
-        let alt_id = match comp_spec {
-            curvebook_doc::ModelComparisonSpec::ExtraSumOfSquaresF { alternative_equation_id }
-            | curvebook_doc::ModelComparisonSpec::Aicc { alternative_equation_id }
-            | curvebook_doc::ModelComparisonSpec::LikelihoodRatioTest { alternative_equation_id } => alternative_equation_id,
-        };
-        let alt_model = get_builtin_model(alt_id).ok_or_else(|| FitError::UnknownEquation { id: alt_id.clone() })?;
-        let comp = compare_models_checked(&fit, alt_model.as_ref(), &datasets, hooks, &config, comp_spec)?;
-        append_comparison_tab(&mut result, &fit, &comp.alternative_fit, &comp.outcome, spec.p_value_format);
+        if matches!(fit.status, FitStatus::Converged | FitStatus::Ambiguous) {
+            let alt_id = match comp_spec {
+                curvebook_doc::ModelComparisonSpec::ExtraSumOfSquaresF { alternative_equation_id }
+                | curvebook_doc::ModelComparisonSpec::Aicc { alternative_equation_id }
+                | curvebook_doc::ModelComparisonSpec::LikelihoodRatioTest { alternative_equation_id } => alternative_equation_id,
+            };
+            let alt_model = get_builtin_model(alt_id).ok_or_else(|| FitError::UnknownEquation { id: alt_id.clone() })?;
+            let comp = compare_models_checked(&fit, alt_model.as_ref(), &datasets, hooks, &config, comp_spec)?;
+            append_comparison_tab(&mut result, &fit, &comp.alternative_fit, &comp.outcome, spec.p_value_format);
+        } else {
+            result.checklist.push(ChecklistItem {
+                assumption: "Model comparison".to_owned(),
+                status: ChecklistStatus::Violated,
+                diagnostic_metric: None,
+                explanation: "Skipped model comparison because the primary nonlinear fit did not converge.".to_owned(),
+                remediation: None,
+            });
+        }
     }
 
     let mut filtered_datasets: Option<Vec<DatasetSeries>> = None;
@@ -492,7 +506,25 @@ pub fn execute_nonlinear_analysis(
     let has_custom_plot_bounds = nl_spec.plot_x_min.is_some() || nl_spec.plot_x_max.is_some();
     append_auc_scalars_and_tab(&mut result, auc_datasets, Some((model.as_ref(), &fit, has_custom_plot_bounds)));
 
-    result.status = ResultStatus::UpToDate;
+    result.status = match fit.status {
+        FitStatus::Converged | FitStatus::Ambiguous => ResultStatus::UpToDate,
+        FitStatus::HitMaxIters => ResultStatus::Failed {
+            code: ErrorCode::SolverFailed,
+            message: format!("Nonlinear regression reached the maximum iteration limit ({}) without converging", fit.iterations),
+        },
+        FitStatus::Diverged => ResultStatus::Failed {
+            code: ErrorCode::SolverFailed,
+            message: "Nonlinear regression diverged or stalled before reaching convergence".to_owned(),
+        },
+        FitStatus::BadInitialValues => ResultStatus::Failed {
+            code: ErrorCode::SolverFailed,
+            message: "Nonlinear regression failed due to invalid initial parameter values".to_owned(),
+        },
+        FitStatus::ImpossibleWeights => ResultStatus::Failed {
+            code: ErrorCode::SolverFailed,
+            message: "Nonlinear regression failed due to invalid or non-finite observation weights".to_owned(),
+        },
+    };
     Ok(result)
 }
 
@@ -554,6 +586,9 @@ fn fixed_constant_display_label(fit: &NonlinearFitResult, ds_names: &HashMap<usi
 }
 
 fn nonlinear_uses_weighted_objective(fit: &NonlinearFitResult, nl_spec: &NonlinearFitSpec) -> bool {
+    if fit.is_robust_cauchy() || nl_spec.method == curvebook_doc::FitMethod::RobustCauchy {
+        return false;
+    }
     nl_spec.weighting != curvebook_doc::WeightingScheme::None
         || fit.fit_method == curvebook_doc::FitMethod::PoissonDeviance
         || (fit.weighted_ss - fit.rss).abs() > 1e-12 * fit.rss.abs().max(1.0)
@@ -810,51 +845,101 @@ fn append_midpoint_extrapolation_checks(result: &mut ResultSheet, fit: &Nonlinea
     }
 }
 
-fn append_nonlinear_checklist(result: &mut ResultSheet, fit: &NonlinearFitResult, is_robust: bool) {
-    // Diagnostics checklist items.
+fn solver_convergence_item(fit: &NonlinearFitResult) -> Option<ChecklistItem> {
+    let explanation = match fit.status {
+        FitStatus::HitMaxIters => format!(
+            "The nonlinear solver stopped after reaching the maximum iteration limit ({}) before satisfying convergence tolerances.",
+            fit.iterations
+        ),
+        FitStatus::Diverged => "The nonlinear solver diverged or stalled before reaching a stationary minimum.".to_owned(),
+        FitStatus::BadInitialValues => "Initial parameter values failed to evaluate inside the valid model domain.".to_owned(),
+        FitStatus::ImpossibleWeights => "Observation weights were non-finite, zero, or incompatible with the data.".to_owned(),
+        FitStatus::Converged | FitStatus::Ambiguous => return None,
+    };
+    Some(ChecklistItem {
+        assumption: "Solver convergence".to_owned(),
+        status: ChecklistStatus::Violated,
+        diagnostic_metric: Some(format!("{:?} (iterations: {})", fit.status, fit.iterations)),
+        explanation,
+        remediation: None,
+    })
+}
+
+fn parameter_identifiability_checklist_items(fit: &NonlinearFitResult, is_robust: bool) -> Vec<ChecklistItem> {
     if is_robust {
-        result.checklist.push(ChecklistItem {
+        return vec![ChecklistItem {
             assumption: "Parameter identifiability & asymptotic SEs".to_owned(),
             status: ChecklistStatus::Info,
             diagnostic_metric: Some("NotApplicableInRobustMode".to_owned()),
             explanation: "Asymptotic standard errors, confidence intervals, covariance matrices, confidence bands, and F/AICc comparisons are omitted in Robust (Cauchy) regression.".to_owned(),
             remediation: None,
-        });
-    } else if let FitIdentifiability::Ambiguous { reasons } = &fit.identifiability {
-        for reason in reasons {
-            result.checklist.push(ChecklistItem {
+        }];
+    }
+    if let FitIdentifiability::Ambiguous { reasons } = &fit.identifiability {
+        return reasons
+            .iter()
+            .map(|reason| ChecklistItem {
                 assumption: "Parameter identifiability (Ambiguous)".to_owned(),
                 status: ChecklistStatus::Violated,
                 diagnostic_metric: None,
                 explanation: reason.clone(),
                 remediation: None,
-            });
-        }
-    } else if fit.status == FitStatus::Ambiguous || fit.covariance.ambiguous {
-        result.checklist.push(ChecklistItem {
+            })
+            .collect();
+    }
+    let item = if fit.status == FitStatus::Ambiguous || fit.covariance.ambiguous {
+        ChecklistItem {
             assumption: "Parameter identifiability".to_owned(),
             status: ChecklistStatus::Violated,
             diagnostic_metric: Some("Dependency > 0.9999 or rank-deficient Jacobian".to_owned()),
             explanation: "Fit is ambiguous; one or more parameters are redundant or unidentifiable.".to_owned(),
             remediation: None,
-        });
+        }
+    } else if !matches!(fit.status, FitStatus::Converged | FitStatus::Ambiguous) {
+        ChecklistItem {
+            assumption: "Parameter identifiability".to_owned(),
+            status: ChecklistStatus::Warn,
+            diagnostic_metric: Some("Not assessed (unconverged)".to_owned()),
+            explanation: "Parameter identifiability was not assessed because the nonlinear solver did not converge.".to_owned(),
+            remediation: None,
+        }
     } else if fit.parameters.iter().any(|p| p.dependency > 0.99) {
-        result.checklist.push(ChecklistItem {
+        ChecklistItem {
             assumption: "Multicollinearity (Dependency)".to_owned(),
             status: ChecklistStatus::Warn,
             diagnostic_metric: Some("Dependency > 0.99".to_owned()),
             explanation: "Strong correlation among parameters may widen confidence intervals.".to_owned(),
             remediation: None,
-        });
-    } else {
-        result.checklist.push(ChecklistItem {
+        }
+    } else if fit.identifiability == FitIdentifiability::Identifiable && fit.status == FitStatus::Converged {
+        ChecklistItem {
             assumption: "Parameter identifiability".to_owned(),
             status: ChecklistStatus::Pass,
             diagnostic_metric: None,
             explanation: "All free parameters are cleanly identifiable.".to_owned(),
             remediation: None,
-        });
+        }
+    } else {
+        ChecklistItem {
+            assumption: "Parameter identifiability".to_owned(),
+            status: ChecklistStatus::Info,
+            diagnostic_metric: Some("Not assessed".to_owned()),
+            explanation: if fit.parameters.is_empty() {
+                "No free parameters were fitted; identifiability diagnostics are not applicable.".to_owned()
+            } else {
+                "Parameter identifiability checks were not run for this fit (enable identify_unstable_parameters to assess).".to_owned()
+            },
+            remediation: None,
+        }
+    };
+    vec![item]
+}
+
+fn append_nonlinear_checklist(result: &mut ResultSheet, fit: &NonlinearFitResult, is_robust: bool) {
+    if let Some(conv_item) = solver_convergence_item(fit) {
+        result.checklist.push(conv_item);
     }
+    result.checklist.extend(parameter_identifiability_checklist_items(fit, is_robust));
 
     if !is_robust
         && let Some(max_g1) = fit.parameters.iter().map(|p| p.hougaard_g1.abs()).filter(|v| v.is_finite()).reduce(f64::max)
@@ -1649,7 +1734,10 @@ mod tests {
         assert!(saturated.fitted_curves.iter().all(|overlay| overlay.ambiguous));
 
         nl.flag_r_squared_below = Some(f64::NAN);
-        assert!(run(nl).is_err());
+        assert!(AnalysisSpec::new("fit", "xy", AnalysisKind::NonlinearRegression(nl.clone())).is_err());
+        let mut mutated_spec = AnalysisSpec::new("fit", "xy", AnalysisKind::NonlinearRegression(NonlinearFitSpec::new("straight_line"))).unwrap();
+        mutated_spec.kind = AnalysisKind::NonlinearRegression(nl);
+        assert!(execute_analysis(&mutated_spec, &sheet, &HookContext::default()).is_err());
     }
 
     #[test]

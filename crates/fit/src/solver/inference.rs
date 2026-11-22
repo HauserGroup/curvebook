@@ -9,15 +9,15 @@
 //! - Motulsky, H. J. & Brown, R. E. (2006). Detecting outliers when fitting data with nonlinear regression – a new method based on robust nonlinear regression and the false discovery rate. *BMC Bioinformatics* 7, 123.
 
 use curvebook_doc::{CiBound, FitMethod};
-use curvebook_math::dist::{f_sf, student_t_two_sided_p};
+use curvebook_math::dist::f_sf;
 use curvebook_math::linalg::DenseMatrix;
 use curvebook_math::special::{deviance_bd0, ln_gamma};
 use curvebook_math::sum::NeumaierSum;
 
 use crate::diagnostics::{
     AiccComparisonResult, CovarianceDiagnostics, HomoscedasticityResult, InformationCriteria, LackOfFitResult, NormalityTestResult,
-    RoutDetectionResult, RoutPointAudit, RunsTestResult, anderson_darling_test, combine_runs_tests, compute_rsdr, dagostino_pearson_test,
-    homoscedasticity_spearman_test, lilliefors_ks_test, shapiro_wilk_test,
+    RoutDetectionResult, RunsTestResult, anderson_darling_test, combine_runs_tests, dagostino_pearson_test, homoscedasticity_spearman_test,
+    lilliefors_ks_test, rout_detect_outliers_core, shapiro_wilk_test,
 };
 use crate::error::FitError;
 use crate::solver::irls::compute_unscaled_cov;
@@ -282,90 +282,7 @@ pub(in crate::solver) fn rout_detect_outliers_mb2006(
     k_free: usize,
     fdr_q_percent: f64,
 ) -> Result<RoutDetectionResult, FitError> {
-    let n = points.len();
-    if weighted_residuals.len() != n || sqrt_weights.len() != n {
-        return Err(FitError::InvalidParameter {
-            name: "weighted_residuals",
-            reason: format!("expected {n} weighted residuals and weights, got {} / {}", weighted_residuals.len(), sqrt_weights.len()),
-        });
-    }
-    if n <= k_free {
-        return Err(FitError::InsufficientData { required: k_free + 1, actual: n });
-    }
-    if !fdr_q_percent.is_finite() || fdr_q_percent <= 0.0 || fdr_q_percent > 50.0 {
-        return Err(FitError::InvalidParameter { name: "fdr_q_percent", reason: format!("FDR Q% must lie in (0, 50], got {fdr_q_percent}") });
-    }
-
-    let df = n - k_free;
-    let abs_res: Vec<f64> = weighted_residuals.iter().map(|r| r.abs()).collect();
-    let w_y_scale = points.iter().zip(sqrt_weights.iter()).map(|(p, &sw)| (p.y * sw).abs()).fold(0.0_f64, f64::max).max(f64::MIN_POSITIVE);
-    let rsdr = compute_rsdr(&abs_res, k_free).max(1e-10 * w_y_scale);
-    let zero_floor = (1e-30 * w_y_scale).max(f64::MIN_POSITIVE);
-    let mut p_values = Vec::with_capacity(n);
-    for &r in weighted_residuals {
-        if !r.is_finite() {
-            return Err(FitError::InvalidParameter { name: "weighted_residuals", reason: "ROUT residuals must all be finite".to_owned() });
-        }
-        let p = if rsdr <= zero_floor { if r.abs() <= zero_floor { 1.0 } else { 0.0 } } else { student_t_two_sided_p((r / rsdr).abs(), df as f64)? };
-        p_values.push(p);
-    }
-
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| {
-        p_values[a].total_cmp(&p_values[b]).then_with(|| weighted_residuals[b].abs().total_cmp(&weighted_residuals[a].abs())).then_with(|| a.cmp(&b))
-    });
-
-    // Motulsky & Brown (2006): test only top ~30% furthest points (ranks 1..=m_test out of N).
-    let start = ((0.70 * (n as f64)).floor() as usize).min(n - 1);
-    let m_test = n - start;
-    let q_alpha = fdr_q_percent / 100.0;
-
-    let mut q_values = vec![1.0_f64; n];
-    let mut running_min = 1.0_f64;
-    for j in (0..m_test).rev() {
-        let rank = (j + 1) as f64;
-        let raw_q = ((n as f64) / rank * p_values[order[j]]).min(1.0);
-        running_min = running_min.min(raw_q);
-        q_values[order[j]] = running_min;
-    }
-
-    let mut last_rejected: Option<usize> = None;
-    for j in 0..m_test {
-        let rank = (j + 1) as f64;
-        let threshold = q_alpha * rank / (n as f64);
-        if p_values[order[j]] <= threshold {
-            last_rejected = Some(j);
-        }
-    }
-
-    let mut is_outlier = vec![false; n];
-    if let Some(j_max) = last_rejected {
-        for &idx in &order[..=j_max] {
-            is_outlier[idx] = true;
-        }
-    }
-
-    let mut outlier_indices = Vec::new();
-    let mut audit = Vec::with_capacity(n);
-    for (idx, pt) in points.iter().enumerate() {
-        if is_outlier[idx] {
-            outlier_indices.push(idx);
-        }
-        audit.push(RoutPointAudit {
-            index: idx,
-            data_set_index: pt.data_set_index,
-            row: pt.row,
-            source_subcolumn: pt.source_subcolumn,
-            x0: pt.x0(),
-            y: pt.y,
-            residual: weighted_residuals[idx],
-            p_value: p_values[idx],
-            q_value: q_values[idx],
-            is_outlier: is_outlier[idx],
-        });
-    }
-
-    Ok(RoutDetectionResult { rsdr, df, q_threshold_percent: fdr_q_percent, outlier_indices, audit })
+    rout_detect_outliers_core(points, weighted_residuals, sqrt_weights, k_free, fdr_q_percent, "weighted_residuals", "fdr_q_percent")
 }
 
 pub(in crate::solver) struct ResidualDiagnosticsBundle {

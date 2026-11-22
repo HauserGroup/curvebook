@@ -24,7 +24,8 @@ use crate::solver::identifiability::Assessment;
 use crate::solver::inference::{rout_detect_outliers_mb2006, unscaled_cov_from_diag_or_j, wald_ci_bounds};
 use crate::solver::irls::{fit_cauchy_irls, fit_poisson_irls};
 use crate::solver::layout::{
-    ObsRecord, ParameterLayout, build_observations, obs_replicate_count, ode_budget_error, uses_replicate_summary_moments, uses_shared_global,
+    ObsRecord, ParamBinding, ParameterLayout, build_observations, obs_replicate_count, ode_budget_error, uses_replicate_summary_moments,
+    uses_shared_global,
 };
 use crate::solver::lm::{LmRunOutput, eval_predictions_into, solve_with_warm_start};
 use crate::solver::profile::{solve_profile_subproblem, solve_profile_subproblem_poisson};
@@ -135,7 +136,22 @@ pub(in crate::solver) fn fit_plot_function_only(
         });
     }
 
+    let mut slot_ds_count = vec![0_usize; k_free];
+    for row in &layout.bindings {
+        let mut seen = vec![false; k_free];
+        for b in row {
+            if let ParamBinding::Free(slot) = *b
+                && let Some(flag) = seen.get_mut(slot)
+                && !*flag
+            {
+                *flag = true;
+                slot_ds_count[slot] += 1;
+            }
+        }
+    }
+
     let mut ds_results = Vec::with_capacity(datasets.len());
+    let mut ds_dfs = Vec::with_capacity(datasets.len());
     let mut derived_scalars = Vec::with_capacity(datasets.len());
     let mut total_obs = 0_usize;
     let mut raw_rss_acc = NeumaierSum::new();
@@ -146,6 +162,7 @@ pub(in crate::solver) fn fit_plot_function_only(
         derived_scalars.push(model.derived_transforms(&ds_params));
         let mut ds_yh = Vec::with_capacity(ds.points.len());
         let mut ds_res = Vec::with_capacity(ds.points.len());
+        let mut ds_y_vals = Vec::with_capacity(ds.points.len());
         let mut ds_rss = NeumaierSum::new();
         for pt in &ds.points {
             let Some(yh) = model.eval(&pt.x, &ds_params, ds.data_set_index) else {
@@ -158,6 +175,7 @@ pub(in crate::solver) fn fit_plot_function_only(
                 let r = pt.y - yh;
                 ds_yh.push(yh);
                 ds_res.push(r);
+                ds_y_vals.push(pt.y);
                 ds_rss.add(r * r);
                 raw_rss_acc.add(r * r);
                 y_vals_all.push(pt.y);
@@ -165,6 +183,28 @@ pub(in crate::solver) fn fit_plot_function_only(
             }
         }
         let ds_ss = ds_rss.total();
+        let ds_r2 = if ds_y_vals.len() > 1 {
+            let ym = ds_y_vals.iter().sum::<f64>() / (ds_y_vals.len() as f64);
+            let dtss: f64 = ds_y_vals.iter().map(|v| (v - ym) * (v - ym)).sum();
+            if dtss > 0.0 { 1.0 - ds_ss / dtss } else { 1.0 }
+        } else {
+            1.0
+        };
+        let mut k_eff_d = 0.0_f64;
+        let mut seen_d = vec![false; k_free];
+        if let Some(row) = layout.bindings.get(ds_local_idx) {
+            for b in row {
+                if let ParamBinding::Free(slot) = *b
+                    && let Some(flag) = seen_d.get_mut(slot)
+                    && !*flag
+                {
+                    *flag = true;
+                    let share_count = slot_ds_count.get(slot).copied().unwrap_or(1).max(1) as f64;
+                    k_eff_d += 1.0 / share_count;
+                }
+            }
+        }
+        ds_dfs.push((ds_ss, (ds_y_vals.len() as f64) - k_eff_d));
         let overlay = build_curve_overlay(&CurveOverlayContext {
             model,
             layout: &layout,
@@ -190,17 +230,32 @@ pub(in crate::solver) fn fit_plot_function_only(
             weighted_residuals: ds_res.clone(),
             studentized_residuals: if is_robust { Vec::new() } else { vec![0.0; ds_res.len()] },
             ss_residual: ds_ss,
-            r_squared: 1.0,
-            sy_x: if is_robust { f64::NAN } else { 0.0 },
+            r_squared: ds_r2,
+            sy_x: f64::NAN,
             rsdr: None,
             runs_test: None,
             curve_overlay: Some(overlay),
         });
     }
 
+    if total_obs == 0 && datasets.iter().any(|d| !d.points.is_empty()) {
+        return Err(FitError::BadInitialValues {
+            reason: "Initial/fixed parameters failed to evaluate finite predictions at any observed point".to_owned(),
+        });
+    }
+
     let raw_rss = raw_rss_acc.total();
     let df = total_obs.saturating_sub(k_free);
     let rsd = if df > 0 && !is_robust { (raw_rss / (df as f64)).sqrt() } else { f64::NAN };
+    for (ds_res, &(ds_ss, ds_df)) in ds_results.iter_mut().zip(ds_dfs.iter()) {
+        ds_res.sy_x = if is_robust {
+            f64::NAN
+        } else if ds_df > 1e-9 {
+            (ds_ss / ds_df).sqrt()
+        } else {
+            rsd
+        };
+    }
     let r_squared = if y_vals_all.len() > 1 {
         let ym = y_vals_all.iter().sum::<f64>() / (y_vals_all.len() as f64);
         let tss: f64 = y_vals_all.iter().map(|v| (v - ym) * (v - ym)).sum();
@@ -429,10 +484,13 @@ pub(in crate::solver) fn finalize_fit_uncertainty(
         }
     };
 
-    let identifiability = if config.identify_unstable_parameters && k_free > 0 && lm_out.status != FitStatus::Diverged {
+    let mut identifiability = if config.identify_unstable_parameters && k_free > 0 && lm_out.status != FitStatus::Diverged {
         identifiability::assess(layout, obs, &lm_out.j_mat, df, &cov.dependencies, profile_computed.then_some(profile_cis.as_slice()))?
     } else {
         Assessment::default()
     };
+    if !matches!(lm_out.status, FitStatus::Converged | FitStatus::Ambiguous) && matches!(identifiability.fit, FitIdentifiability::Identifiable) {
+        identifiability.fit = FitIdentifiability::NotAssessed;
+    }
     Ok(FinalizedUncertainty { cov, identifiability, cov_unscaled, hougaard, profile_cis, t_crit, sigma_w })
 }

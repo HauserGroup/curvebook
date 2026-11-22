@@ -1106,8 +1106,12 @@ pub(crate) fn compare_models_lrt_deviance(
 /// residual sum of squares.
 ///
 /// # Errors
-/// Returns [`FitError::InsufficientData`] if `n_obs <= k_free + 2` (so $N - K - 1 \le 0$).
+/// Returns [`FitError::InvalidParameter`] if `ss` is negative or non-finite, or
+/// [`FitError::InsufficientData`] if `n_obs <= p_free + 2` (so $N - K - 1 \le 0$).
 pub fn compute_information_criteria(ss: f64, n_obs: usize, p_free: usize) -> Result<InformationCriteria, FitError> {
+    if !ss.is_finite() || ss < 0.0 {
+        return Err(FitError::InvalidParameter { name: "ss", reason: String::from("SS must be finite and non-negative") });
+    }
     let k = p_free + 1;
     if n_obs <= k + 1 {
         return Err(FitError::InsufficientData { required: k + 2, actual: n_obs });
@@ -1815,89 +1819,103 @@ pub fn compute_rsdr(abs_residuals: &[f64], k_free: usize) -> f64 {
 /// Returns [`FitError::InsufficientData`] if `points.len() <= k_free`, or
 /// [`FitError::InvalidParameter`] if `residuals` length/finiteness or `q_percent` is invalid.
 pub fn rout_detect_outliers(points: &[DataPoint], residuals: &[f64], k_free: usize, q_percent: f64) -> Result<RoutDetectionResult, FitError> {
+    let unit_weights = vec![1.0_f64; points.len()];
+    rout_detect_outliers_core(points, residuals, &unit_weights, k_free, q_percent, "residuals", "q_percent")
+}
+
+/// Shared Motulsky & Brown (2006) top-30% Benjamini–Hochberg ROUT implementation used by both
+/// [`rout_detect_outliers`] (unit weights) and the weighted nonlinear solver path.
+pub(crate) fn rout_detect_outliers_core(
+    points: &[DataPoint],
+    weighted_residuals: &[f64],
+    sqrt_weights: &[f64],
+    k_free: usize,
+    fdr_q_percent: f64,
+    residuals_param_name: &'static str,
+    q_param_name: &'static str,
+) -> Result<RoutDetectionResult, FitError> {
     let n = points.len();
+    if weighted_residuals.len() != n || sqrt_weights.len() != n {
+        return Err(FitError::InvalidParameter {
+            name: residuals_param_name,
+            reason: format!("expected {n} residuals and weights, got {} / {}", weighted_residuals.len(), sqrt_weights.len()),
+        });
+    }
     if n <= k_free {
         return Err(FitError::InsufficientData { required: k_free + 1, actual: n });
     }
-    if residuals.len() != n {
-        return Err(FitError::InvalidParameter { name: "residuals", reason: String::from("length mismatch") });
+    if !fdr_q_percent.is_finite() || fdr_q_percent <= 0.0 || fdr_q_percent > 50.0 {
+        return Err(FitError::InvalidParameter { name: q_param_name, reason: format!("FDR Q% must lie in (0, 50], got {fdr_q_percent}") });
     }
-    if !q_percent.is_finite() || q_percent <= 0.0 || q_percent > 50.0 {
-        return Err(FitError::InvalidParameter { name: "q_percent", reason: format!("FDR Q% must lie in (0, 50], got {q_percent}") });
-    }
-    if residuals.iter().any(|r| !r.is_finite()) {
-        return Err(FitError::InvalidParameter { name: "residuals", reason: String::from("ROUT residuals must all be finite") });
-    }
-    let df = n - k_free;
-    let abs_res: Vec<f64> = residuals.iter().map(|r| r.abs()).collect();
-    let y_scale = points.iter().map(|p| p.y.abs()).fold(0.0_f64, f64::max).max(1e-12);
-    let rsdr = compute_rsdr(&abs_res, k_free).max(1e-10 * y_scale);
-    let q_fdr = q_percent / 100.0;
 
-    let mut p_vals = Vec::with_capacity(n);
-    for &ar in &abs_res {
-        let p = if rsdr <= 1e-30 {
-            if ar <= 1e-30 { 1.0 } else { 0.0 }
-        } else {
-            let t = ar / rsdr;
-            student_t_two_sided_p(t, df as f64).unwrap_or(1.0)
-        };
-        p_vals.push(p);
+    let df = n - k_free;
+    let abs_res: Vec<f64> = weighted_residuals.iter().map(|r| r.abs()).collect();
+    let w_y_scale = points.iter().zip(sqrt_weights.iter()).map(|(p, &sw)| (p.y * sw).abs()).fold(0.0_f64, f64::max).max(f64::MIN_POSITIVE);
+    let rsdr = compute_rsdr(&abs_res, k_free).max(1e-10 * w_y_scale);
+    let zero_floor = (1e-30 * w_y_scale).max(f64::MIN_POSITIVE);
+    let mut p_values = Vec::with_capacity(n);
+    for &r in weighted_residuals {
+        if !r.is_finite() {
+            return Err(FitError::InvalidParameter { name: residuals_param_name, reason: String::from("ROUT residuals must all be finite") });
+        }
+        let p = if rsdr <= zero_floor { if r.abs() <= zero_floor { 1.0 } else { 0.0 } } else { student_t_two_sided_p((r / rsdr).abs(), df as f64)? };
+        p_values.push(p);
     }
 
     let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| p_vals[a].total_cmp(&p_vals[b]).then_with(|| abs_res[b].total_cmp(&abs_res[a])).then_with(|| a.cmp(&b)));
+    order.sort_by(|&a, &b| p_values[a].total_cmp(&p_values[b]).then_with(|| abs_res[b].total_cmp(&abs_res[a])).then_with(|| a.cmp(&b)));
 
     // Motulsky & Brown (2006): test only the top ~30% furthest points (`m_test = N - floor(0.70 * N)`).
     let start = ((0.70 * (n as f64)).floor() as usize).min(n - 1);
     let m_test = n - start;
+    let q_alpha = fdr_q_percent / 100.0;
 
-    let mut bh_q = vec![1.0_f64; n];
+    let mut q_values = vec![1.0_f64; n];
     let mut running_min = 1.0_f64;
-    for rank_rev in (0..m_test).rev() {
-        let idx = order[rank_rev];
-        let rank_1 = (rank_rev + 1) as f64;
-        let raw_q = (p_vals[idx] * (n as f64) / rank_1).min(1.0);
+    for j in (0..m_test).rev() {
+        let rank = (j + 1) as f64;
+        let raw_q = ((n as f64) / rank * p_values[order[j]]).min(1.0);
         running_min = running_min.min(raw_q);
-        bh_q[idx] = running_min;
+        q_values[order[j]] = running_min;
     }
 
-    let mut max_reject_rank: Option<usize> = None;
-    for (rank0, &idx) in order.iter().take(m_test).enumerate() {
-        let threshold = ((rank0 + 1) as f64) / (n as f64) * q_fdr;
-        if p_vals[idx] <= threshold {
-            max_reject_rank = Some(rank0);
+    let mut last_rejected: Option<usize> = None;
+    for j in 0..m_test {
+        let rank = (j + 1) as f64;
+        let threshold = q_alpha * rank / (n as f64);
+        if p_values[order[j]] <= threshold {
+            last_rejected = Some(j);
         }
     }
 
     let mut is_outlier = vec![false; n];
-    if let Some(m) = max_reject_rank {
-        for &idx in &order[..=m] {
+    if let Some(j_max) = last_rejected {
+        for &idx in &order[..=j_max] {
             is_outlier[idx] = true;
         }
     }
 
     let mut outlier_indices = Vec::new();
     let mut audit = Vec::with_capacity(n);
-    for i in 0..n {
-        if is_outlier[i] {
-            outlier_indices.push(i);
+    for (idx, pt) in points.iter().enumerate() {
+        if is_outlier[idx] {
+            outlier_indices.push(idx);
         }
         audit.push(RoutPointAudit {
-            index: i,
-            data_set_index: points[i].data_set_index,
-            row: points[i].row,
-            source_subcolumn: points[i].source_subcolumn,
-            x0: points[i].x0(),
-            y: points[i].y,
-            residual: residuals[i],
-            p_value: p_vals[i],
-            q_value: bh_q[i],
-            is_outlier: is_outlier[i],
+            index: idx,
+            data_set_index: pt.data_set_index,
+            row: pt.row,
+            source_subcolumn: pt.source_subcolumn,
+            x0: pt.x0(),
+            y: pt.y,
+            residual: weighted_residuals[idx],
+            p_value: p_values[idx],
+            q_value: q_values[idx],
+            is_outlier: is_outlier[idx],
         });
     }
 
-    Ok(RoutDetectionResult { rsdr, df, q_threshold_percent: q_percent, outlier_indices, audit })
+    Ok(RoutDetectionResult { rsdr, df, q_threshold_percent: fdr_q_percent, outlier_indices, audit })
 }
 
 #[cfg(test)]
