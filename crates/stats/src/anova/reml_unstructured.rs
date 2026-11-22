@@ -193,6 +193,14 @@ pub(in crate::anova) type ReducedDesignOut = (DenseMatrix, Vec<(String, usize, u
 pub(in crate::anova) fn unstructured_reduce_design(x: &DenseMatrix, terms: &[(&str, usize, usize)]) -> Result<ReducedDesignOut, StatsError> {
     let n = x.nrows();
     let p = x.ncols();
+    for &(_, start, len) in terms {
+        if start > p || start.checked_add(len).is_none_or(|end| end > p) {
+            return Err(StatsError::InvalidParameter { name: "terms", value: start as f64 });
+        }
+    }
+    if n == 0 || p == 0 {
+        return Err(StatsError::EmptyInput);
+    }
     let qr = qr_col_pivoted(x)?;
     if qr.rank() == p {
         let kept_terms = terms.iter().map(|&(name, s, l)| (name.to_owned(), s, l)).collect();
@@ -252,8 +260,9 @@ pub(in crate::anova) fn unstructured_reduce_design(x: &DenseMatrix, terms: &[(&s
     let x_red = DenseMatrix::from_row_major(n, p_eff, x_data)?;
     let mut reduced_terms = Vec::with_capacity(terms.len());
     for &(name, start, len) in terms {
-        let end = start.saturating_add(len).min(p);
-        let mapped: Vec<usize> = col_map[start..end].iter().filter_map(|&m| m).collect();
+        let s = start.min(p);
+        let end = s.saturating_add(len).min(p);
+        let mapped: Vec<usize> = col_map[s..end].iter().filter_map(|&m| m).collect();
         let new_start = mapped.first().copied().unwrap_or(0);
         reduced_terms.push((name.to_owned(), new_start, mapped.len()));
     }

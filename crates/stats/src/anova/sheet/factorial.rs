@@ -22,7 +22,7 @@ use crate::anova::sheet::one_way::{
     RemlEffectDesign, build_reml_effect_design, emit_multi_vc_rm_reml, emit_random_intercept_reml, emit_unstructured_rm_reml,
 };
 use crate::common::{
-    build_tab, checklist_item, init_result_sheet, num_cell, opt_num_cell, p_cell, push_scalar, sanitize_result_sheet_floats,
+    build_tab, checklist_item, init_result_sheet, num_cell, opt_num_cell, p_cell_at_alpha, push_scalar, sanitize_result_sheet_floats,
     try_resolve_selected_indices,
 };
 use crate::error::StatsError;
@@ -36,7 +36,7 @@ pub fn run_factorial_anova(sheet: &DataSheet, spec: &AnalysisSpec, fac_spec: &Fa
 
     let (mut result, obs, post_hoc, aux_tabs, estimator_note) = match &sheet.archetype {
         TableArchetype::Grouped(grouped) => {
-            let outcome = run_grouped_factorial(grouped, &mut out, &spec.selected_data_sets, fac_spec, p_fmt)?;
+            let outcome = run_grouped_factorial(grouped, &mut out, &spec.selected_data_sets, fac_spec, p_fmt, confidence.alpha())?;
             (outcome.result, outcome.observations, outcome.post_hoc, outcome.aux_tabs, outcome.estimator_note)
         }
         TableArchetype::MultipleVariables(mv) => {
@@ -77,7 +77,7 @@ pub fn run_factorial_anova(sheet: &DataSheet, spec: &AnalysisSpec, fac_spec: &Fa
             num_cell(t.df),
             num_cell(t.ms),
             opt_num_cell(t.f_statistic),
-            t.p_value.map_or(ResultCell::Empty, |p| p_cell(p, p_fmt)),
+            t.p_value.map_or(ResultCell::Empty, |p| p_cell_at_alpha(p, p_fmt, confidence.alpha())),
         ];
         if fac_spec.compute_effect_sizes {
             r.push(opt_num_cell(t.partial_eta_squared));
@@ -138,6 +138,7 @@ pub(in crate::anova) fn build_rm_sphericity_tab(
     col_name: &str,
     rm_res: &RmTwoWayAnovaResult,
     p_fmt: PValueFormat,
+    alpha: f64,
 ) -> Result<Option<ResultTab>, StatsError> {
     let design = rm_res.design;
     let res = &rm_res.anova;
@@ -180,11 +181,11 @@ pub(in crate::anova) fn build_rm_sphericity_tab(
             num_cell(s.mauchly_w),
             num_cell(s.mauchly_chi2),
             num_cell(s.mauchly_df),
-            p_cell(s.mauchly_p, p_fmt),
+            p_cell_at_alpha(s.mauchly_p, p_fmt, alpha),
             num_cell(s.greenhouse_geisser_eps),
             num_cell(s.huynh_feldt_eps),
-            p_cell(p_gg, p_fmt),
-            p_cell(p_hf, p_fmt),
+            p_cell_at_alpha(p_gg, p_fmt, alpha),
+            p_cell_at_alpha(p_hf, p_fmt, alpha),
         ]);
     }
     if rows.is_empty() {
@@ -199,6 +200,7 @@ pub(in crate::anova) fn push_rm_sphericity_outputs(
     col_name: &str,
     rm_res: &RmTwoWayAnovaResult,
     p_fmt: PValueFormat,
+    alpha: f64,
 ) -> Result<Option<ResultTab>, StatsError> {
     let sph = &rm_res.sphericities;
     let inter_name = format!("{row_name} × {col_name}");
@@ -224,7 +226,7 @@ pub(in crate::anova) fn push_rm_sphericity_outputs(
             "Greenhouse-Geisser and Huynh-Feldt epsilons summarize covariance sphericity across within-subject factors.",
         ));
     }
-    build_rm_sphericity_tab(row_name, col_name, rm_res, p_fmt)
+    build_rm_sphericity_tab(row_name, col_name, rm_res, p_fmt, alpha)
 }
 
 fn active_grouped_rows(grouped: &curvebook_doc::GroupedTable, selected_cols: &[usize]) -> Vec<usize> {
@@ -273,6 +275,7 @@ pub(in crate::anova) fn run_grouped_factorial(
     selected: &[usize],
     fac_spec: &FactorialAnovaSpec,
     p_fmt: PValueFormat,
+    alpha: f64,
 ) -> Result<GroupedFactorialOutcome, StatsError> {
     if grouped.subcolumn_mode.is_pre_summarized() {
         return Err(StatsError::RequiresRawReplicates);
@@ -314,7 +317,7 @@ pub(in crate::anova) fn run_grouped_factorial(
                     actual: observed_cells,
                 });
             }
-            return run_rm_grouped_reml(grouped, out, &selected_cols, &active_rows, &active_subs, fac_spec, has_missing_selected, &[], p_fmt);
+            return run_rm_grouped_reml(grouped, out, &selected_cols, &active_rows, &active_subs, fac_spec, has_missing_selected, &[], p_fmt, alpha);
         }
         let grouping = grouped.three_way_grouping.as_ref();
         let f1_name = grouping.map_or_else(|| String::from("Factor A"), |g| g.factor_1_name.clone());
@@ -408,6 +411,7 @@ pub(in crate::anova) fn run_grouped_factorial(
                 has_missing_selected,
                 &dropped_tp_labels,
                 p_fmt,
+                alpha,
             );
         }
 
@@ -439,7 +443,7 @@ pub(in crate::anova) fn run_grouped_factorial(
             fac_spec.repeated_measures,
             RmSphericityCorrection::None,
         )?;
-        let sph_tab = push_rm_sphericity_outputs(out, &grouped.row_factor_title, &grouped.column_factor_title, &rm_res, p_fmt)?;
+        let sph_tab = push_rm_sphericity_outputs(out, &grouped.row_factor_title, &grouped.column_factor_title, &rm_res, p_fmt, alpha)?;
         let estimator_desc = "Classical balanced repeated-measures ANOVA (OLS)";
         out.checklist.push(checklist_item(
             "Repeated-measures estimator",
@@ -526,6 +530,7 @@ pub(in crate::anova) fn run_rm_grouped_reml(
     has_missing: bool,
     dropped_tp_labels: &[String],
     p_fmt: PValueFormat,
+    alpha: f64,
 ) -> Result<GroupedFactorialOutcome, StatsError> {
     let n_rows = active_rows.len();
     let n_cols = active_cols.len();
@@ -636,9 +641,6 @@ pub(in crate::anova) fn run_rm_grouped_reml(
     let RemlEffectDesign { x_mat, subsets, factor_basis, terms: term_ranges, observed_cells } =
         build_reml_effect_design(&obs_cells, &factor_names, &factor_levels, max_order)?;
     let p_total = x_mat.ncols();
-    if fac_spec.residual_covariance == ResidualCovariance::CompoundSymmetry && n_obs <= p_total {
-        return Err(StatsError::InsufficientSampleSize { context: "RM REML observations", required: p_total + 1, actual: n_obs });
-    }
     let term_slices: Vec<(&str, usize, usize)> = term_ranges.iter().map(|(n, s, l)| (n.as_str(), *s, *l)).collect();
 
     let (fixed_terms, sigma2_e, df_residual, reml_core, estimator_desc) = if fac_spec.residual_covariance == ResidualCovariance::Unstructured {
@@ -738,7 +740,7 @@ pub(in crate::anova) fn run_rm_grouped_reml(
                     emit_multi_vc_rm_reml(out, &x_mat, &y_vec, &strata, &term_slices, fac_spec.df_method)?
                 }
                 RepeatedMeasuresDesign::RowFactorMatched => {
-                    emit_random_intercept_reml(out, &x_mat, &y_vec, &id_sab, &term_slices, fac_spec.df_method, p_fmt)?
+                    emit_random_intercept_reml(out, &x_mat, &y_vec, &id_sab, &term_slices, fac_spec.df_method, p_fmt, alpha)?
                 }
                 RepeatedMeasuresDesign::None => return Err(StatsError::EmptyInput),
             }
@@ -757,10 +759,10 @@ pub(in crate::anova) fn run_rm_grouped_reml(
                     emit_multi_vc_rm_reml(out, &x_mat, &y_vec, &strata, &term_slices, fac_spec.df_method)?
                 }
                 RepeatedMeasuresDesign::ColumnFactorMatched => {
-                    emit_random_intercept_reml(out, &x_mat, &y_vec, &subj_row_ids, &term_slices, fac_spec.df_method, p_fmt)?
+                    emit_random_intercept_reml(out, &x_mat, &y_vec, &subj_row_ids, &term_slices, fac_spec.df_method, p_fmt, alpha)?
                 }
                 RepeatedMeasuresDesign::RowFactorMatched => {
-                    emit_random_intercept_reml(out, &x_mat, &y_vec, &subj_col_ids, &term_slices, fac_spec.df_method, p_fmt)?
+                    emit_random_intercept_reml(out, &x_mat, &y_vec, &subj_col_ids, &term_slices, fac_spec.df_method, p_fmt, alpha)?
                 }
                 RepeatedMeasuresDesign::None => return Err(StatsError::EmptyInput),
             }
@@ -795,7 +797,8 @@ pub(in crate::anova) fn run_rm_grouped_reml(
             Some(desc.clone()),
             format!("Fitted compound-symmetry linear mixed-effects REML with {df_lbl} degrees of freedom."),
         ));
-        (fixed_terms, sigma2_e, (n_obs - p_total) as f64, core, desc)
+        let df_res = core.n_minus_p;
+        (fixed_terms, sigma2_e, df_res, core, desc)
     };
 
     let ym = SummaryMoments::from_slice(&y_vec)?;

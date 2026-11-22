@@ -18,7 +18,7 @@
 
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, ChecklistStatus, CurveSamplePoint, DataSheet, FittedCurveOverlay, GlmFamily, GlmSpec, PValueFormat,
-    PassingBablokSpec, ResultCell, ResultSheet, ResultTabKind, SheetId, TableArchetype, VariableColumn, VariableRole,
+    PassingBablokSpec, ResultCell, ResultSheet, ResultTabKind, SheetId, SubcolumnMode, TableArchetype, VariableColumn, VariableRole, XColumnMode,
 };
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{chi2_sf, f_sf, norm_two_sided_isf, norm_two_sided_p, student_t_two_sided_isf, student_t_two_sided_p};
@@ -27,7 +27,9 @@ use curvebook_math::sum::{NeumaierSum, SummaryMoments};
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
-    build_tab, checklist_item, ci_cell, finite_ci_cell, init_result_sheet, num_cell, opt_num_cell, p_cell, push_scalar, validate_finite_slice,
+    append_ignored_text_checklist_and_footnote, append_listwise_filtered_checklist_and_footnote, build_tab, checklist_item, ci_cell, finite_ci_cell,
+    init_result_sheet, is_ignored_non_numeric_cell, num_cell, opt_num_cell, p_cell_at_alpha, push_scalar, sanitize_result_sheet_floats,
+    validate_finite_slice,
 };
 use crate::error::StatsError;
 use crate::roc::{RocCiMethod, roc_curve_analysis};
@@ -517,14 +519,19 @@ fn compute_vifs_from_matrix(x: &DenseMatrix, has_intercept: bool, aliased: &[boo
         if retained_cols.len() <= start {
             continue;
         }
-        let mut pred_cols = Vec::with_capacity(n * retained_cols.len());
+        let extra_intercept = usize::from(!has_intercept);
+        let xm_ncols = retained_cols.len() + extra_intercept;
+        let mut pred_cols = Vec::with_capacity(n * xm_ncols);
         for r in 0..n {
             target.push(x.get(r, j).unwrap_or(0.0));
+            if !has_intercept {
+                pred_cols.push(1.0);
+            }
             for &c in &retained_cols {
                 pred_cols.push(x.get(r, c).unwrap_or(0.0));
             }
         }
-        let Ok(xm) = DenseMatrix::from_row_major(n, retained_cols.len(), pred_cols) else { continue };
+        let Ok(xm) = DenseMatrix::from_row_major(n, xm_ncols, pred_cols) else { continue };
         let Ok(tm) = SummaryMoments::from_slice(&target) else { continue };
         if tm.css <= 0.0 {
             continue;
@@ -1305,11 +1312,158 @@ struct GlmDesignMatrix {
     row_labels: Vec<String>,
     term_names: Vec<String>,
     factor_spans: Vec<GlmFactorSpan>,
+    skipped_rows: usize,
+    ignored_non_numeric: Vec<(String, usize)>,
+}
+
+fn cell_has_entry(cell: Option<&Cell>) -> bool {
+    cell.is_some_and(|c| !c.is_empty() || c.excluded)
+}
+
+struct MvGlmRows {
+    retained_rows: Vec<(usize, f64, Vec<RetainedGlmPred>)>,
+    skipped_rows: usize,
+    ignored_non_numeric: Vec<(String, usize)>,
+}
+
+fn extract_mv_glm_pred(var: &VariableColumn, row: usize, n_rows: usize, is_cat: bool) -> Result<Option<RetainedGlmPred>, StatsError> {
+    let cell = var.cells.get(row).ok_or(StatsError::DimensionMismatch { expected: n_rows, actual: var.cells.len() })?;
+    if cell.excluded {
+        return Ok(None);
+    }
+    if !is_cat {
+        return Ok(cell.active_number().map(RetainedGlmPred::Numeric));
+    }
+    let tok = match &cell.value {
+        curvebook_doc::CellValue::Text(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            trimmed.to_owned()
+        }
+        curvebook_doc::CellValue::Number(v) if v.is_finite() => format!("{v}"),
+        _ => return Ok(None),
+    };
+    Ok(Some(RetainedGlmPred::Categorical(tok)))
+}
+
+fn collect_mv_glm_rows(mv: &curvebook_doc::MultipleVariablesTable, glm_spec: &GlmSpec, is_cat: &[bool]) -> Result<MvGlmRows, StatsError> {
+    let resp_var = &mv.variables[glm_spec.response_column];
+    let Some(end_row) = (0..mv.row_count()).rfind(|&r| {
+        cell_has_entry(resp_var.cells.get(r)) || glm_spec.predictor_columns.iter().any(|&pc| cell_has_entry(mv.variables[pc].cells.get(r)))
+    }) else {
+        return Ok(MvGlmRows { retained_rows: Vec::new(), skipped_rows: 0, ignored_non_numeric: Vec::new() });
+    };
+
+    let mut retained_rows = Vec::new();
+    let mut skipped_rows = 0_usize;
+    let mut resp_non_num = 0_usize;
+    let mut pred_non_num = vec![0_usize; glm_spec.predictor_columns.len()];
+
+    for r in 0..=end_row {
+        let rc = resp_var.cells.get(r);
+        let has_entry = cell_has_entry(rc) || glm_spec.predictor_columns.iter().any(|&pc| cell_has_entry(mv.variables[pc].cells.get(r)));
+        if !has_entry {
+            continue;
+        }
+        if rc.is_some_and(is_ignored_non_numeric_cell) {
+            resp_non_num += 1;
+        }
+        for (pos, &pc) in glm_spec.predictor_columns.iter().enumerate() {
+            if !is_cat[pos] && mv.variables[pc].cells.get(r).is_some_and(is_ignored_non_numeric_cell) {
+                pred_non_num[pos] += 1;
+            }
+        }
+        let Some(yv) = rc.and_then(|c| c.active_number()) else {
+            skipped_rows += 1;
+            continue;
+        };
+        let mut row_preds = Vec::with_capacity(glm_spec.predictor_columns.len());
+        let mut ok = true;
+        for (pos, &pc) in glm_spec.predictor_columns.iter().enumerate() {
+            let pred_var = mv.variables.get(pc).ok_or(StatsError::MissingColumn { index: pc })?;
+            let Some(pred) = extract_mv_glm_pred(pred_var, r, mv.row_count(), is_cat[pos])? else {
+                ok = false;
+                break;
+            };
+            row_preds.push(pred);
+        }
+        if ok {
+            retained_rows.push((r + 1, yv, row_preds));
+        } else {
+            skipped_rows += 1;
+        }
+    }
+
+    let mut ignored_non_numeric = Vec::new();
+    if resp_non_num > 0 {
+        ignored_non_numeric.push((resp_var.title.clone(), resp_non_num));
+    }
+    for (pos, &pc) in glm_spec.predictor_columns.iter().enumerate() {
+        if pred_non_num[pos] > 0 {
+            ignored_non_numeric.push((mv.variables[pc].title.clone(), pred_non_num[pos]));
+        }
+    }
+    Ok(MvGlmRows { retained_rows, skipped_rows, ignored_non_numeric })
+}
+
+type GlmCatLevel = Option<(String, Vec<String>)>;
+
+fn resolve_glm_categorical_levels(
+    mv: &curvebook_doc::MultipleVariablesTable,
+    glm_spec: &GlmSpec,
+    is_cat: &[bool],
+    retained_rows: &[(usize, f64, Vec<RetainedGlmPred>)],
+) -> Result<Vec<GlmCatLevel>, StatsError> {
+    let mut cat_levels = Vec::with_capacity(glm_spec.predictor_columns.len());
+    for (pos, &pc) in glm_spec.predictor_columns.iter().enumerate() {
+        if !is_cat[pos] {
+            cat_levels.push(None);
+            continue;
+        }
+        let var = &mv.variables[pc];
+        let cells: Vec<Cell> = retained_rows
+            .iter()
+            .filter_map(|(_, _, preds)| match &preds[pos] {
+                RetainedGlmPred::Categorical(tok) => Some(Cell::text(tok.as_str())),
+                RetainedGlmPred::Numeric(_) => None,
+            })
+            .collect();
+        let retained_col = VariableColumn {
+            title: var.title.clone(),
+            role: var.role,
+            role_inferred: var.role_inferred,
+            source: var.source.clone(),
+            level_order: var.level_order.clone(),
+            cells,
+        };
+        let mut lvls: Vec<String> = retained_col.ordered_levels_with(&var.level_order).into_iter().map(|s| s.level).collect();
+        let explicit_ref = glm_spec.reference_levels.iter().rev().find(|(idx, _)| *idx == pc).map(|(_, l)| l.clone());
+        let ref_lvl = match explicit_ref {
+            Some(req) => {
+                if !lvls.iter().any(|existing| existing == &req) {
+                    return Err(StatsError::InvalidParameter { name: "reference_levels", value: pc as f64 });
+                }
+                Some(req)
+            }
+            None => lvls.first().cloned(),
+        };
+        if let Some(rl) = ref_lvl {
+            lvls.retain(|l| l != &rl);
+            cat_levels.push(Some((rl, lvls)));
+        } else {
+            cat_levels.push(None);
+        }
+    }
+    Ok(cat_levels)
 }
 
 fn build_mv_glm_design(mv: &curvebook_doc::MultipleVariablesTable, selected: &[usize], glm_spec: &GlmSpec) -> Result<GlmDesignMatrix, StatsError> {
     validate_selected_data_sets(selected, mv.variables.len())?;
-    let resp_var = mv.variables.get(glm_spec.response_column).ok_or(StatsError::MissingColumn { index: glm_spec.response_column })?;
+    if glm_spec.response_column >= mv.variables.len() {
+        return Err(StatsError::MissingColumn { index: glm_spec.response_column });
+    }
     if glm_spec.predictor_columns.is_empty() {
         return Err(StatsError::InsufficientSampleSize { context: "GLM predictors", required: 1, actual: 0 });
     }
@@ -1324,87 +1478,8 @@ fn build_mv_glm_design(mv: &curvebook_doc::MultipleVariablesTable, selected: &[u
         is_cat.push(var.role == VariableRole::Categorical);
     }
 
-    let mut retained_rows: Vec<(usize, f64, Vec<RetainedGlmPred>)> = Vec::new();
-    for r in 0..mv.row_count() {
-        let Some(yv) = resp_var.cells.get(r).and_then(|c| c.active_number()) else { continue };
-        let mut row_preds = Vec::with_capacity(glm_spec.predictor_columns.len());
-        let mut ok = true;
-        for (pos, &pc) in glm_spec.predictor_columns.iter().enumerate() {
-            let pred_var = mv.variables.get(pc).ok_or(StatsError::MissingColumn { index: pc })?;
-            let cell = pred_var.cells.get(r).ok_or(StatsError::DimensionMismatch { expected: mv.row_count(), actual: pred_var.cells.len() })?;
-            if cell.excluded {
-                ok = false;
-                break;
-            }
-            if is_cat[pos] {
-                let tok = match &cell.value {
-                    curvebook_doc::CellValue::Text(s) => {
-                        let trimmed = s.trim();
-                        if trimmed.is_empty() {
-                            ok = false;
-                            break;
-                        }
-                        trimmed.to_owned()
-                    }
-                    curvebook_doc::CellValue::Number(v) if v.is_finite() => format!("{v}"),
-                    _ => {
-                        ok = false;
-                        break;
-                    }
-                };
-                row_preds.push(RetainedGlmPred::Categorical(tok));
-            } else if let Some(xv) = cell.active_number() {
-                row_preds.push(RetainedGlmPred::Numeric(xv));
-            } else {
-                ok = false;
-                break;
-            }
-        }
-        if ok {
-            retained_rows.push((r + 1, yv, row_preds));
-        }
-    }
-
-    let mut cat_levels: Vec<Option<(String, Vec<String>)>> = Vec::with_capacity(glm_spec.predictor_columns.len());
-    for (pos, &pc) in glm_spec.predictor_columns.iter().enumerate() {
-        let var = &mv.variables[pc];
-        if is_cat[pos] {
-            let cells: Vec<Cell> = retained_rows
-                .iter()
-                .filter_map(|(_, _, preds)| match &preds[pos] {
-                    RetainedGlmPred::Categorical(tok) => Some(Cell::text(tok.as_str())),
-                    RetainedGlmPred::Numeric(_) => None,
-                })
-                .collect();
-            let retained_col = VariableColumn {
-                title: var.title.clone(),
-                role: var.role,
-                role_inferred: var.role_inferred,
-                source: var.source.clone(),
-                level_order: var.level_order.clone(),
-                cells,
-            };
-            let mut lvls: Vec<String> = retained_col.ordered_levels_with(&var.level_order).into_iter().map(|s| s.level).collect();
-            let explicit_ref = glm_spec.reference_levels.iter().rev().find(|(idx, _)| *idx == pc).map(|(_, l)| l.clone());
-            let ref_lvl = match explicit_ref {
-                Some(req) => {
-                    if !lvls.iter().any(|existing| existing == &req) {
-                        return Err(StatsError::InvalidParameter { name: "reference_levels", value: pc as f64 });
-                    }
-                    Some(req)
-                }
-                None => lvls.first().cloned(),
-            };
-            if let Some(rl) = ref_lvl {
-                lvls.retain(|l| l != &rl);
-                cat_levels.push(Some((rl, lvls)));
-            } else {
-                cat_levels.push(None);
-            }
-        } else {
-            cat_levels.push(None);
-        }
-    }
+    let MvGlmRows { retained_rows, skipped_rows, ignored_non_numeric } = collect_mv_glm_rows(mv, glm_spec, &is_cat)?;
+    let cat_levels = resolve_glm_categorical_levels(mv, glm_spec, &is_cat, &retained_rows)?;
 
     let mut term_names = vec![String::from("Intercept")];
     let mut factor_spans = Vec::with_capacity(glm_spec.predictor_columns.len());
@@ -1455,11 +1530,12 @@ fn build_mv_glm_design(mv: &curvebook_doc::MultipleVariablesTable, selected: &[u
         }
     }
     let x_mat = DenseMatrix::from_row_major(n_obs, n_cols, x_rows)?;
-    Ok(GlmDesignMatrix { x_mat, y_vec, row_labels, term_names, factor_spans })
+    Ok(GlmDesignMatrix { x_mat, y_vec, row_labels, term_names, factor_spans, skipped_rows, ignored_non_numeric })
 }
 
 fn build_xy_glm_design(xy: &curvebook_doc::XyTable, selected: &[usize], glm_spec: &GlmSpec) -> Result<GlmDesignMatrix, StatsError> {
-    if xy.y_subcolumn_mode.is_pre_summarized() {
+    if xy.y_subcolumn_mode.is_pre_summarized() || matches!(&xy.x_mode, XColumnMode::Numbers { subcolumn_mode } if subcolumn_mode.is_pre_summarized())
+    {
         return Err(StatsError::RequiresRawReplicates);
     }
     if xy.data_sets.is_empty() {
@@ -1502,29 +1578,60 @@ fn build_xy_glm_design(xy: &curvebook_doc::XyTable, selected: &[usize], glm_spec
 
     let ds = xy.data_sets.get(y_idx).ok_or(StatsError::MissingColumn { index: y_idx })?;
     let n_subcols = xy.y_subcolumn_mode.subcolumn_count().max(1);
+    let is_gen_seq = matches!(xy.x_mode, XColumnMode::GeneratedSequence { .. });
+    let active_end = (0..xy.row_count()).rfind(|&r| {
+        (!is_gen_seq && cell_has_entry(xy.x_cells.get(r).and_then(|s| s.first())))
+            || ds.cells.get(r).is_some_and(|subs| subs.iter().any(|c| !c.is_empty() || c.excluded))
+    });
     let mut x_rows = Vec::new();
     let mut y_vec = Vec::new();
     let mut row_labels = Vec::new();
-    for r in 0..xy.row_count() {
-        let Some(xv) = xy.x_value_at(r) else { continue };
-        let row_len = ds.cells.get(r).map_or(0, Vec::len);
-        for sub in 0..row_len {
-            let Some(yv) = ds.cell(r, sub).and_then(|c| c.active_number()) else { continue };
-            let lbl = if n_subcols > 1 { format!("Row {} (rep {})", r + 1, sub + 1) } else { format!("Row {}", r + 1) };
-            row_labels.push(lbl);
-            x_rows.push(1.0);
-            x_rows.push(xv);
-            y_vec.push(yv);
+    let mut skipped_rows = 0_usize;
+    let mut x_non_num = 0_usize;
+    let mut y_non_num = 0_usize;
+
+    if let Some(end_row) = active_end {
+        for r in 0..=end_row {
+            let x_cell = if is_gen_seq { None } else { xy.x_cells.get(r).and_then(|s| s.first()) };
+            if x_cell.is_some_and(is_ignored_non_numeric_cell) {
+                x_non_num += 1;
+            }
+            let x_explicit = !is_gen_seq && cell_has_entry(x_cell);
+            let xv_opt = xy.x_value_at(r);
+            let row_len = ds.cells.get(r).map_or(0, Vec::len);
+            for sub in 0..row_len {
+                let yc = ds.cell(r, sub);
+                if yc.is_some_and(is_ignored_non_numeric_cell) {
+                    y_non_num += 1;
+                }
+                let y_explicit = cell_has_entry(yc);
+                if let (Some(xv), Some(yv)) = (xv_opt, yc.and_then(Cell::active_number)) {
+                    let lbl = if n_subcols > 1 { format!("Row {} (rep {})", r + 1, sub + 1) } else { format!("Row {}", r + 1) };
+                    row_labels.push(lbl);
+                    x_rows.push(1.0);
+                    x_rows.push(xv);
+                    y_vec.push(yv);
+                } else if y_explicit || (sub == 0 && x_explicit) {
+                    skipped_rows += 1;
+                }
+            }
         }
     }
     let n_obs = y_vec.len();
     if n_obs < 3 {
         return Err(StatsError::InsufficientSampleSize { context: "GLM XY observations", required: 3, actual: n_obs });
     }
+    let mut ignored_non_numeric = Vec::new();
+    if x_non_num > 0 {
+        ignored_non_numeric.push((xy.x_title.clone(), x_non_num));
+    }
+    if y_non_num > 0 {
+        ignored_non_numeric.push((ds.title.clone(), y_non_num));
+    }
     let x_mat = DenseMatrix::from_row_major(n_obs, 2, x_rows)?;
     let term_names = vec![String::from("Intercept"), xy.x_title.clone()];
     let factor_spans = vec![GlmFactorSpan { label: xy.x_title.clone(), col_start: 1, col_end: 2 }];
-    Ok(GlmDesignMatrix { x_mat, y_vec, row_labels, term_names, factor_spans })
+    Ok(GlmDesignMatrix { x_mat, y_vec, row_labels, term_names, factor_spans, skipped_rows, ignored_non_numeric })
 }
 
 /// Assemble `(X, y, row_labels, term_names, factor_spans)` from a `MultipleVariablesTable`
@@ -1561,7 +1668,7 @@ pub struct PassingBablokResult {
     pub cusum_statistic: f64,
     /// Two-sided asymptotic Kolmogorov CUSUM linearity *p*-value.
     pub cusum_p_value: f64,
-    /// True when `cusum_p_value >= 0.05` (no significant departure from linearity detected by CUSUM test).
+    /// True when `cusum_p_value >= confidence.alpha()` (no significant departure from linearity detected by CUSUM test at configured confidence level).
     pub linearity_passed: bool,
     /// True if asymptotic CI index offset `C_gamma` exceeded the bounds of ordered slopes and endpoints were clamped to extreme observed slopes.
     pub slope_ci_clamped: bool,
@@ -1772,13 +1879,152 @@ pub fn passing_bablok_regression(x: &[f64], y: &[f64], conf: ConfidenceLevel) ->
     })
 }
 
-type PassingBablokInput = (Vec<f64>, Vec<f64>, Vec<usize>, String, String);
+struct PassingBablokInput {
+    xs: Vec<f64>,
+    ys: Vec<f64>,
+    row_labels: Vec<String>,
+    x_label: String,
+    y_label: String,
+    skipped_rows: usize,
+    ignored_non_numeric: Vec<(String, usize)>,
+}
+
+#[derive(Default)]
+struct PbRawAccumulator {
+    xs: Vec<f64>,
+    ys: Vec<f64>,
+    row_labels: Vec<String>,
+    skipped_rows: usize,
+    x_non_num: usize,
+    y_non_num: usize,
+}
+
+impl PbRawAccumulator {
+    fn into_input(self, x_label: String, y_label: String, same_column: bool) -> Result<PassingBablokInput, StatsError> {
+        if self.xs.is_empty() {
+            return Err(StatsError::EmptyInput);
+        }
+        let mut ignored_non_numeric = Vec::new();
+        if self.x_non_num > 0 {
+            ignored_non_numeric.push((x_label.clone(), self.x_non_num));
+        }
+        if self.y_non_num > 0 && !same_column {
+            ignored_non_numeric.push((y_label.clone(), self.y_non_num));
+        }
+        Ok(PassingBablokInput {
+            xs: self.xs,
+            ys: self.ys,
+            row_labels: self.row_labels,
+            x_label,
+            y_label,
+            skipped_rows: self.skipped_rows,
+            ignored_non_numeric,
+        })
+    }
+}
+
+fn extract_pb_single_col_pairs<'a>(
+    n_rows: usize,
+    x_at: impl Fn(usize) -> Option<&'a Cell>,
+    y_at: impl Fn(usize) -> Option<&'a Cell>,
+    x_label: String,
+    y_label: String,
+    same_column: bool,
+) -> Result<PassingBablokInput, StatsError> {
+    let mut acc = PbRawAccumulator::default();
+    if let Some(end_row) = (0..n_rows).rfind(|&r| cell_has_entry(x_at(r)) || cell_has_entry(y_at(r))) {
+        for r in 0..=end_row {
+            let ca = x_at(r);
+            let cb = y_at(r);
+            if !cell_has_entry(ca) && !cell_has_entry(cb) {
+                continue;
+            }
+            if ca.is_some_and(is_ignored_non_numeric_cell) {
+                acc.x_non_num += 1;
+            }
+            if cb.is_some_and(is_ignored_non_numeric_cell) {
+                acc.y_non_num += 1;
+            }
+            if let (Some(xv), Some(yv)) = (ca.and_then(Cell::active_number), cb.and_then(Cell::active_number)) {
+                acc.xs.push(xv);
+                acc.ys.push(yv);
+                acc.row_labels.push(format!("Row {}", r + 1));
+            } else {
+                acc.skipped_rows += 1;
+            }
+        }
+    }
+    acc.into_input(x_label, y_label, same_column)
+}
+
+fn extract_pb_xy_pairs(t: &curvebook_doc::XyTable, selected: &[usize], x_col: usize, y_col: usize) -> Result<PassingBablokInput, StatsError> {
+    if t.y_subcolumn_mode.is_pre_summarized() {
+        return Err(StatsError::RequiresRawReplicates);
+    }
+    validate_selected_data_sets(selected, t.data_sets.len())?;
+    let total_cols = 1 + t.data_sets.len();
+    if x_col >= total_cols {
+        return Err(StatsError::MissingColumn { index: x_col });
+    }
+    if y_col >= total_cols {
+        return Err(StatsError::MissingColumn { index: y_col });
+    }
+    let x_is_presum = matches!(&t.x_mode, XColumnMode::Numbers { subcolumn_mode } if subcolumn_mode.is_pre_summarized());
+    if (x_col == 0 || y_col == 0) && x_is_presum {
+        return Err(StatsError::RequiresRawReplicates);
+    }
+    let x_raw_subs = match &t.x_mode {
+        XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::RawReplicates(k) } if *k > 1 => *k,
+        _ => 1,
+    };
+    let y_subs = t.y_subcolumn_mode.subcolumn_count().max(1);
+    let n_subs = if x_col > 0 && y_col > 0 { y_subs } else { y_subs.max(x_raw_subs) };
+    let is_gen_seq = matches!(t.x_mode, XColumnMode::GeneratedSequence { .. });
+
+    let cell_for = |row: usize, sub: usize, col: usize| -> Option<&Cell> {
+        if col == 0 { if x_raw_subs > 1 { t.x_cells.get(row).and_then(|s| s.get(sub)) } else { None } } else { t.data_sets[col - 1].cell(row, sub) }
+    };
+    let col_has_entry_row = |row: usize, col: usize| -> bool {
+        if col == 0 {
+            !is_gen_seq && t.x_cells.get(row).is_some_and(|subs| subs.iter().any(|c| !c.is_empty() || c.excluded))
+        } else {
+            t.data_sets[col - 1].cells.get(row).is_some_and(|subs| subs.iter().any(|c| !c.is_empty() || c.excluded))
+        }
+    };
+
+    let mut acc = PbRawAccumulator::default();
+    if let Some(end_row) = (0..t.row_count()).rfind(|&r| col_has_entry_row(r, x_col) || col_has_entry_row(r, y_col)) {
+        for r in 0..=end_row {
+            let shared_x_non_num =
+                x_raw_subs == 1 && !is_gen_seq && t.x_cells.get(r).and_then(|s| s.first()).is_some_and(is_ignored_non_numeric_cell);
+            acc.x_non_num += usize::from(x_col == 0 && shared_x_non_num);
+            acc.y_non_num += usize::from(y_col == 0 && x_col != 0 && shared_x_non_num);
+            for sub in 0..n_subs {
+                let cx = cell_for(r, sub, x_col);
+                let cy = cell_for(r, sub, y_col);
+                acc.x_non_num += usize::from(cx.is_some_and(is_ignored_non_numeric_cell));
+                acc.y_non_num += usize::from(cy.is_some_and(is_ignored_non_numeric_cell) && !(x_col == y_col && x_col > 0));
+                let xv = if x_col == 0 && x_raw_subs == 1 { t.x_value_at(r) } else { cx.and_then(Cell::active_number) };
+                let yv = if y_col == 0 && x_raw_subs == 1 { t.x_value_at(r) } else { cy.and_then(Cell::active_number) };
+                if let (Some(x_val), Some(y_val)) = (xv, yv) {
+                    acc.xs.push(x_val);
+                    acc.ys.push(y_val);
+                    acc.row_labels.push(if n_subs > 1 { format!("Row {} (rep {})", r + 1, sub + 1) } else { format!("Row {}", r + 1) });
+                } else {
+                    let shared_x_entry = !is_gen_seq && sub == 0 && cell_has_entry(t.x_cells.get(r).and_then(|s| s.first()));
+                    let x_entry = if x_col == 0 && x_raw_subs == 1 { shared_x_entry } else { cell_has_entry(cx) };
+                    let y_entry = if y_col == 0 && x_raw_subs == 1 { shared_x_entry } else { cell_has_entry(cy) };
+                    acc.skipped_rows += usize::from(x_entry || y_entry);
+                }
+            }
+        }
+    }
+    let label_for = |col: usize| -> String { if col == 0 { t.x_title.clone() } else { t.data_sets[col - 1].title.clone() } };
+    acc.into_input(label_for(x_col), label_for(y_col), x_col == y_col)
+}
 
 fn extract_passing_bablok_pairs(sheet: &DataSheet, selected: &[usize], x_col: usize, y_col: usize) -> Result<PassingBablokInput, StatsError> {
-    let mut xs = Vec::new();
-    let mut ys = Vec::new();
-    let mut source_rows = Vec::new();
-    let (x_label, y_label) = match &sheet.archetype {
+    match &sheet.archetype {
         TableArchetype::Column(t) => {
             if t.subcolumn_mode.is_pre_summarized() {
                 return Err(StatsError::RequiresRawReplicates);
@@ -1786,60 +2032,17 @@ fn extract_passing_bablok_pairs(sheet: &DataSheet, selected: &[usize], x_col: us
             validate_selected_data_sets(selected, t.data_sets.len())?;
             let cx = t.data_sets.get(x_col).ok_or(StatsError::MissingColumn { index: x_col })?;
             let cy = t.data_sets.get(y_col).ok_or(StatsError::MissingColumn { index: y_col })?;
-            for r in 0..t.row_count() {
-                if let (Some(xv), Some(yv)) = (cx.cell(r, 0).and_then(Cell::active_number), cy.cell(r, 0).and_then(Cell::active_number)) {
-                    xs.push(xv);
-                    ys.push(yv);
-                    source_rows.push(r + 1);
-                }
-            }
-            (cx.title.clone(), cy.title.clone())
+            extract_pb_single_col_pairs(t.row_count(), |r| cx.cell(r, 0), |r| cy.cell(r, 0), cx.title.clone(), cy.title.clone(), x_col == y_col)
         }
         TableArchetype::MultipleVariables(t) => {
             validate_selected_data_sets(selected, t.variables.len())?;
             let vx = t.variables.get(x_col).ok_or(StatsError::MissingColumn { index: x_col })?;
             let vy = t.variables.get(y_col).ok_or(StatsError::MissingColumn { index: y_col })?;
-            for r in 0..t.row_count() {
-                if let (Some(xv), Some(yv)) = (vx.cells.get(r).and_then(Cell::active_number), vy.cells.get(r).and_then(Cell::active_number)) {
-                    xs.push(xv);
-                    ys.push(yv);
-                    source_rows.push(r + 1);
-                }
-            }
-            (vx.title.clone(), vy.title.clone())
+            extract_pb_single_col_pairs(t.row_count(), |r| vx.cells.get(r), |r| vy.cells.get(r), vx.title.clone(), vy.title.clone(), x_col == y_col)
         }
-        TableArchetype::Xy(t) => {
-            if t.y_subcolumn_mode.is_pre_summarized() {
-                return Err(StatsError::RequiresRawReplicates);
-            }
-            validate_selected_data_sets(selected, t.data_sets.len())?;
-            let total_cols = 1 + t.data_sets.len();
-            if x_col >= total_cols {
-                return Err(StatsError::MissingColumn { index: x_col });
-            }
-            if y_col >= total_cols {
-                return Err(StatsError::MissingColumn { index: y_col });
-            }
-            let label_for = |col: usize| -> String { if col == 0 { t.x_title.clone() } else { t.data_sets[col - 1].title.clone() } };
-            let val_for = |row: usize, col: usize| -> Option<f64> {
-                if col == 0 { t.x_value_at(row) } else { t.data_sets[col - 1].cell(row, 0).and_then(Cell::active_number) }
-            };
-            for r in 0..t.row_count() {
-                if let (Some(xv), Some(yv)) = (val_for(r, x_col), val_for(r, y_col)) {
-                    xs.push(xv);
-                    ys.push(yv);
-                    source_rows.push(r + 1);
-                }
-            }
-            (label_for(x_col), label_for(y_col))
-        }
-        other => return Err(StatsError::IncompatibleTable { analysis: "Passing-Bablok regression", actual: other.kind() }),
-    };
-
-    if xs.is_empty() {
-        return Err(StatsError::EmptyInput);
+        TableArchetype::Xy(t) => extract_pb_xy_pairs(t, selected, x_col, y_col),
+        other => Err(StatsError::IncompatibleTable { analysis: "Passing-Bablok regression", actual: other.kind() }),
     }
-    Ok((xs, ys, source_rows, x_label, y_label))
 }
 
 /// Execute a [`PassingBablokSpec`] against a `Column`, `Xy`, or `MultipleVariables` [`DataSheet`]
@@ -1848,7 +2051,8 @@ pub fn run_passing_bablok_analysis(sheet: &DataSheet, spec: &AnalysisSpec, pb_sp
     let mut out = init_result_sheet(spec)?;
     let conf = spec.confidence_level;
     let p_fmt = spec.p_value_format;
-    let (xs, ys, source_rows, x_label, y_label) = extract_passing_bablok_pairs(sheet, &spec.selected_data_sets, pb_spec.x_column, pb_spec.y_column)?;
+    let PassingBablokInput { xs, ys, row_labels: resid_labels, x_label, y_label, skipped_rows, ignored_non_numeric } =
+        extract_passing_bablok_pairs(sheet, &spec.selected_data_sets, pb_spec.x_column, pb_spec.y_column)?;
     let res = passing_bablok_regression(&xs, &ys, conf)?;
 
     push_scalar(&mut out, "Slope", None, res.slope);
@@ -1895,7 +2099,7 @@ pub fn run_passing_bablok_analysis(sheet: &DataSheet, spec: &AnalysisSpec, pb_sp
         vec![num_cell(res.k_offset as f64)],
         vec![num_cell(res.cusum_h)],
         vec![num_cell(res.cusum_statistic)],
-        vec![p_cell(res.cusum_p_value, p_fmt)],
+        vec![p_cell_at_alpha(res.cusum_p_value, p_fmt, conf.alpha())],
     ];
     out.tabs.push(build_tab(
         "pb-summary",
@@ -1913,7 +2117,6 @@ pub fn run_passing_bablok_analysis(sheet: &DataSheet, spec: &AnalysisSpec, pb_sp
         summary_rows,
     ));
 
-    let resid_labels: Vec<String> = source_rows.iter().map(|r| format!("Row {r}")).collect();
     let resid_rows: Vec<Vec<ResultCell>> = xs
         .iter()
         .zip(ys.iter())
@@ -1988,6 +2191,9 @@ pub fn run_passing_bablok_analysis(sheet: &DataSheet, spec: &AnalysisSpec, pb_sp
         ));
     }
 
+    append_listwise_filtered_checklist_and_footnote(&mut out, "Passing-Bablok regression", skipped_rows, xs.len());
+    append_ignored_text_checklist_and_footnote(&mut out, "Passing-Bablok regression", &ignored_non_numeric);
+    sanitize_result_sheet_floats(&mut out)?;
     Ok(out)
 }
 
@@ -2005,6 +2211,7 @@ fn append_linear_type_iii_tab(
     y_vec: &[f64],
     factor_spans: &[GlmFactorSpan],
     p_fmt: PValueFormat,
+    alpha: f64,
 ) -> Result<(), StatsError> {
     let mut type_iii_labels = Vec::new();
     let mut type_iii_rows = Vec::new();
@@ -2019,7 +2226,7 @@ fn append_linear_type_iii_tab(
                 && let (Some(ss), Some(f_val), Some(p_val)) = (t.type_iii_ss, t.type_iii_f, t.type_iii_p)
             {
                 type_iii_labels.push(span.label.clone());
-                type_iii_rows.push(vec![num_cell(ss), num_cell(1.0), num_cell(ss), num_cell(f_val), p_cell(p_val, p_fmt)]);
+                type_iii_rows.push(vec![num_cell(ss), num_cell(1.0), num_cell(ss), num_cell(f_val), p_cell_at_alpha(p_val, p_fmt, alpha)]);
             }
             continue;
         }
@@ -2040,7 +2247,13 @@ fn append_linear_type_iii_tab(
             };
             let p_drop = f_sf(f_drop, df_factor, res.df_residual).unwrap_or(1.0);
             type_iii_labels.push(span.label.clone());
-            type_iii_rows.push(vec![num_cell(ss_drop), num_cell(df_factor), num_cell(ms_drop), num_cell(f_drop), p_cell(p_drop, p_fmt)]);
+            type_iii_rows.push(vec![
+                num_cell(ss_drop),
+                num_cell(df_factor),
+                num_cell(ms_drop),
+                num_cell(f_drop),
+                p_cell_at_alpha(p_drop, p_fmt, alpha),
+            ]);
         }
     }
     if !type_iii_rows.is_empty() {
@@ -2091,7 +2304,13 @@ fn populate_linear_glm_sheet(
             if !t.t_statistic.is_finite() {
                 exact_fit_terms = true;
             }
-            vec![num_cell(t.estimate), num_cell(t.se), num_cell(t.t_statistic), p_cell(t.p_value, p_fmt), finite_ci_cell(t.ci.0, t.ci.1)]
+            vec![
+                num_cell(t.estimate),
+                num_cell(t.se),
+                num_cell(t.t_statistic),
+                p_cell_at_alpha(t.p_value, p_fmt, confidence.alpha()),
+                finite_ci_cell(t.ci.0, t.ci.1),
+            ]
         };
         if glm_spec.compute_vif {
             r.push(opt_num_cell(t.vif));
@@ -2124,7 +2343,7 @@ fn populate_linear_glm_sheet(
             num_cell(res.df_model),
             num_cell(res.ss_regression / res.df_model.max(1.0)),
             num_cell(res.f_statistic),
-            p_cell(res.f_p_value, p_fmt),
+            p_cell_at_alpha(res.f_p_value, p_fmt, confidence.alpha()),
         ],
         vec![num_cell(res.rss), num_cell(res.df_residual), num_cell(res.residual_sd * res.residual_sd), ResultCell::Empty, ResultCell::Empty],
         vec![num_cell(res.ss_total), num_cell((res.n - 1) as f64), ResultCell::Empty, ResultCell::Empty, ResultCell::Empty],
@@ -2138,7 +2357,7 @@ fn populate_linear_glm_sheet(
         anova_rows,
     ));
 
-    append_linear_type_iii_tab(out, &res, &design.x_mat, &design.y_vec, &design.factor_spans, p_fmt)?;
+    append_linear_type_iii_tab(out, &res, &design.x_mat, &design.y_vec, &design.factor_spans, p_fmt, confidence.alpha())?;
 
     let cov_rows: Vec<Vec<ResultCell>> = res.cov_beta.iter().map(|r| r.iter().map(|&v| num_cell(v)).collect()).collect();
     out.tabs.push(build_tab(
@@ -2256,7 +2475,7 @@ fn populate_logistic_glm_sheet(
             num_cell(t.beta),
             num_cell(t.se),
             num_cell(t.z_statistic),
-            p_cell(t.p_value, p_fmt),
+            p_cell_at_alpha(t.p_value, p_fmt, confidence.alpha()),
             num_cell(t.exp_beta),
             finite_ci_cell(t.exp_beta_ci.0, t.exp_beta_ci.1),
         ];
@@ -2358,7 +2577,7 @@ fn populate_poisson_glm_sheet(
             num_cell(t.beta),
             num_cell(t.se),
             num_cell(t.z_statistic),
-            p_cell(t.p_value, p_fmt),
+            p_cell_at_alpha(t.p_value, p_fmt, confidence.alpha()),
             num_cell(t.exp_beta),
             finite_ci_cell(t.exp_beta_ci.0, t.exp_beta_ci.1),
         ];
@@ -2427,7 +2646,10 @@ pub fn run_glm_analysis(sheet: &DataSheet, spec: &AnalysisSpec, glm_spec: &GlmSp
     let mut out = init_result_sheet(spec)?;
     let confidence = spec.confidence_level;
     let p_fmt = spec.p_value_format;
-    let design = build_glm_design_with_factors(sheet, spec, glm_spec)?;
+    let mut design = build_glm_design_with_factors(sheet, spec, glm_spec)?;
+    let skipped_rows = design.skipped_rows;
+    let kept_rows = design.y_vec.len();
+    let ignored_non_numeric = std::mem::take(&mut design.ignored_non_numeric);
 
     match glm_spec.family {
         GlmFamily::Linear => populate_linear_glm_sheet(&mut out, design, glm_spec, confidence, p_fmt)?,
@@ -2435,6 +2657,9 @@ pub fn run_glm_analysis(sheet: &DataSheet, spec: &AnalysisSpec, glm_spec: &GlmSp
         GlmFamily::Poisson => populate_poisson_glm_sheet(&mut out, design, glm_spec, confidence, p_fmt)?,
     }
 
+    append_listwise_filtered_checklist_and_footnote(&mut out, "GLM regression", skipped_rows, kept_rows);
+    append_ignored_text_checklist_and_footnote(&mut out, "GLM regression", &ignored_non_numeric);
+    sanitize_result_sheet_floats(&mut out)?;
     Ok(out)
 }
 

@@ -26,6 +26,7 @@ use curvebook_math::dist::{chi2_sf, f_sf};
 use curvebook_math::linalg::{DenseMatrix, cholesky, solve_linear_least_squares, sym_eigen};
 use curvebook_math::sum::{NeumaierSum, SummaryMoments};
 
+use crate::anova::reml_unstructured::unstructured_reduce_design;
 use crate::anova::results::{FactorialAnovaTerm, MixedRemlResult, MultiVcRemlResult};
 use crate::common::validate_finite_slice;
 use crate::error::StatsError;
@@ -585,7 +586,7 @@ pub(in crate::anova) fn eval_reml_wald_terms_for_df(
     let mut satt_dfs = Vec::with_capacity(terms.len());
     let mut kr_dfs = Vec::with_capacity(terms.len());
     for &(name, start, len) in terms {
-        if len == 0 || start + len > p {
+        if len == 0 || start.checked_add(len).is_none_or(|end| end > p) {
             continue;
         }
         let pair = if len == 1 { kr_single_term_df1(&ctx, name, start)? } else { kr_multi_term_df(&ctx, name, start, len)? };
@@ -649,20 +650,29 @@ pub(in crate::anova) fn fit_random_intercept_reml_with_method_and_core(
     if cluster_ids.len() != n {
         return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: n, actual: cluster_ids.len() }));
     }
-    if n <= p {
-        return Err(StatsError::InsufficientSampleSize { context: "REML mixed model", required: p + 1, actual: n });
+    if !x.all_finite() {
+        return Err(StatsError::Math(curvebook_math::MathError::DomainError { name: "x", value: f64::NAN }));
     }
     validate_finite_slice(y)?;
-    let n_minus_p = (n - p) as f64;
+    for &(_, start, len) in terms {
+        if start > p || start.checked_add(len).is_none_or(|end| end > p) {
+            return Err(StatsError::InvalidParameter { name: "terms", value: start as f64 });
+        }
+    }
+    let (x_red, reduced_terms, col_map, p_eff) = unstructured_reduce_design(x, terms)?;
+    if n <= p_eff {
+        return Err(StatsError::InsufficientSampleSize { context: "REML mixed model", required: p_eff + 1, actual: n });
+    }
+    let n_minus_p = (n - p_eff) as f64;
     let y_moments = SummaryMoments::from_slice(y)?;
     let y_scale_raw = (y_moments.css / (n as f64)).sqrt();
     let y_scale = if y_scale_raw.is_finite() && y_scale_raw > 0.0 { y_scale_raw } else { 1.0 };
     let y_scaled: Vec<f64> = y.iter().map(|&v| v / y_scale).collect();
 
-    let clusters = ri_precompute_clusters(x, &y_scaled, cluster_ids);
+    let clusters = ri_precompute_clusters(&x_red, &y_scaled, cluster_ids);
     let eval_u = |u: f64| -> Result<(f64, RiProfileEval), StatsError> {
         let tau = u.exp_m1().max(0.0);
-        let ev = ri_eval_profile(&clusters, p, n_minus_p, tau)?;
+        let ev = ri_eval_profile(&clusters, p_eff, n_minus_p, tau)?;
         Ok((tau, ev))
     };
 
@@ -740,9 +750,11 @@ pub(in crate::anova) fn fit_random_intercept_reml_with_method_and_core(
     let beta: Vec<f64> = beta_scaled.into_iter().map(|b| b * y_scale).collect();
     let phi = scale_dense(&xtvx_rel_inv, sigma2_e)?;
 
-    let fisher = ri_build_fisher_mats(&clusters, p, n, tau_hat, sigma2_e, &xtvx_rel_inv)?;
-    let ((fixed_terms, satterthwaite_df, kenward_roger_df), core) =
-        eval_reml_wald_terms_for_df(&phi, &beta, sigma2_e, &fisher, terms, n_minus_p, df_method)?;
+    let fisher = ri_build_fisher_mats(&clusters, p_eff, n, tau_hat, sigma2_e, &xtvx_rel_inv)?;
+    let term_refs: Vec<(&str, usize, usize)> = reduced_terms.iter().map(|(n_str, s, l)| (n_str.as_str(), *s, *l)).collect();
+    let ((fixed_terms, satterthwaite_df, kenward_roger_df), mut core) =
+        eval_reml_wald_terms_for_df(&phi, &beta, sigma2_e, &fisher, &term_refs, n_minus_p, df_method)?;
+    core.col_map = col_map;
 
     let res = MixedRemlResult {
         sigma2_random: sigma2_u,
@@ -969,11 +981,20 @@ pub(in crate::anova) fn fit_multi_vc_reml_with_method_and_core(
     if y.len() != n {
         return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: n, actual: y.len() }));
     }
-    if n <= p {
-        return Err(StatsError::InsufficientSampleSize { context: "multi-VC REML model", required: p + 1, actual: n });
+    if !x.all_finite() {
+        return Err(StatsError::Math(curvebook_math::MathError::DomainError { name: "x", value: f64::NAN }));
     }
     validate_finite_slice(y)?;
-    let n_minus_p = (n - p) as f64;
+    for &(_, start, len) in terms {
+        if start > p || start.checked_add(len).is_none_or(|end| end > p) {
+            return Err(StatsError::InvalidParameter { name: "terms", value: start as f64 });
+        }
+    }
+    let (x_red, reduced_terms, col_map, p_eff) = unstructured_reduce_design(x, terms)?;
+    if n <= p_eff {
+        return Err(StatsError::InsufficientSampleSize { context: "multi-VC REML model", required: p_eff + 1, actual: n });
+    }
+    let n_minus_p = (n - p_eff) as f64;
     let y_moments = SummaryMoments::from_slice(y)?;
     let y_scale_raw = (y_moments.css / (n as f64)).sqrt();
     let y_scale = if y_scale_raw.is_finite() && y_scale_raw > 0.0 { y_scale_raw } else { 1.0 };
@@ -989,32 +1010,49 @@ pub(in crate::anova) fn fit_multi_vc_reml_with_method_and_core(
         if g_mat.nrows() != n || g_mat.ncols() != n {
             return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: n, actual: g_mat.nrows().min(g_mat.ncols()) }));
         }
+        if !g_mat.all_finite() {
+            return Err(StatsError::Math(curvebook_math::MathError::DomainError { name: "random_effects", value: f64::NAN }));
+        }
         gs.push(g_mat.clone());
         dofs.push((*rank_c).max(1) as f64);
         names.push((*name).to_owned());
     }
 
-    let var0 = solve_linear_least_squares(x, &y_scaled).map_or(1.0, |(sol, _)| (sol.rss / n_minus_p).max(1e-6));
+    let var0 = solve_linear_least_squares(&x_red, &y_scaled).map_or(1.0, |(sol, _)| (sol.rss / n_minus_p).max(1e-6));
     let mut theta = vec![(var0 / (n_vc as f64)).max(1e-8); n_vc];
     for _ in 0..25 {
-        if let Ok(st) = multi_vc_eval_state(x, &y_scaled, &gs, &theta) {
+        if let Ok(st) = multi_vc_eval_state(&x_red, &y_scaled, &gs, &theta) {
             theta = multi_vc_em_step(&st, &gs, &dofs, &theta, true);
         } else {
             break;
         }
     }
+    let mut loop_converged = false;
     for _ in 0..80 {
-        let (converged, _) = multi_vc_ai_step(x, &y_scaled, &gs, &dofs, &mut theta, n_minus_p)?;
-        if converged {
-            break;
+        let (step_conv, used_ai) = multi_vc_ai_step(&x_red, &y_scaled, &gs, &dofs, &mut theta, n_minus_p)?;
+        if step_conv {
+            if used_ai {
+                loop_converged = true;
+                break;
+            }
+            let st_chk = multi_vc_eval_state(&x_red, &y_scaled, &gs, &theta)?;
+            let max_g = (0..n_vc).filter(|&k| theta[k] > 1e-11 || st_chk.score[k] > 1e-9).map(|k| st_chk.score[k].abs()).fold(0.0_f64, f64::max);
+            if max_g.is_finite() && max_g < 1e-5 {
+                loop_converged = true;
+                break;
+            }
         }
     }
 
-    let st = multi_vc_eval_state(x, &y_scaled, &gs, &theta)?;
+    let st = multi_vc_eval_state(&x_red, &y_scaled, &gs, &theta)?;
+    let max_active_grad = (0..n_vc).filter(|&k| theta[k] > 1e-11 || st.score[k] > 1e-9).map(|k| st.score[k].abs()).fold(0.0_f64, f64::max);
+    let converged = st.ll.is_finite() && max_active_grad.is_finite() && (loop_converged || max_active_grad < 1e-9);
+    let at_boundary = theta.iter().any(|&v| v <= 1e-11);
+
     let mut ie_data = vec![0.0_f64; n_vc * n_vc];
     let mut m_mats = Vec::with_capacity(n_vc);
-    let xt_vi = x.transpose().matmul(&st.vi)?;
-    let vi_x = st.vi.matmul(x)?;
+    let xt_vi = x_red.transpose().matmul(&st.vi)?;
+    let vi_x = st.vi.matmul(&x_red)?;
     for g in &gs {
         m_mats.push(symmetrize_dense(&xt_vi.matmul(g)?.matmul(&vi_x)?)?);
     }
@@ -1036,9 +1074,11 @@ pub(in crate::anova) fn fit_multi_vc_reml_with_method_and_core(
     }
     let fisher = OwnedRemlFisherMats { info_e: DenseMatrix::from_row_major(n_vc, n_vc, ie_data)?, m_mats, q_mats };
     let sigma2_error = theta[0] * y_scale * y_scale;
+    let term_refs: Vec<(&str, usize, usize)> = reduced_terms.iter().map(|(n_str, s, l)| (n_str.as_str(), *s, *l)).collect();
     let ((mut fixed_terms, satterthwaite_df, kenward_roger_df), mut core) =
-        eval_reml_wald_terms_for_df(&st.phi, &st.beta, theta[0], &fisher, terms, n_minus_p, df_method)?;
+        eval_reml_wald_terms_for_df(&st.phi, &st.beta, theta[0], &fisher, &term_refs, n_minus_p, df_method)?;
     core.y_scale = y_scale;
+    core.col_map = col_map;
     for term in &mut fixed_terms {
         if let Some(f_val) = term.f_statistic {
             let ms = f_val * sigma2_error;
@@ -1049,6 +1089,15 @@ pub(in crate::anova) fn fit_multi_vc_reml_with_method_and_core(
     let variance_components = names.into_iter().zip(theta.iter().skip(1).map(|&v| v * y_scale * y_scale)).collect();
     let reml_log_lik = st.ll - n_minus_p * y_scale.ln();
 
-    let res = MultiVcRemlResult { variance_components, sigma2_error, reml_log_lik, fixed_terms, satterthwaite_df, kenward_roger_df };
+    let res = MultiVcRemlResult {
+        variance_components,
+        sigma2_error,
+        reml_log_lik,
+        fixed_terms,
+        satterthwaite_df,
+        kenward_roger_df,
+        converged,
+        at_boundary,
+    };
     Ok((res, core))
 }

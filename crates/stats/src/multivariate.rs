@@ -36,7 +36,8 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
 use curvebook_doc::{
-    AnalysisSpec, ChecklistStatus, DataSheet, MultivariateSpec, ResultCell, ResultSheet, ResultTabKind, TableArchetype, VariableRole,
+    AnalysisSpec, ChecklistStatus, DataSheet, MultivariateSpec, ResultCell, ResultSheet, ResultTabKind, SubcolumnMode, TableArchetype, VariableRole,
+    XColumnMode,
 };
 pub use curvebook_doc::{ClusterDistance, ClusterLinkage};
 use curvebook_math::ConfidenceLevel;
@@ -47,8 +48,8 @@ use curvebook_math::sum::{NeumaierSum, SummaryMoments, pearson_r};
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
-    build_tab, checklist_item, ci_cell, extract_numeric_columns, finite_ci_cell, init_result_sheet, num_cell, opt_num_cell, p_cell, push_scalar,
-    quantile_sorted, rank_with_ties, resolve_selected_indices, t_crit_two_sided, validate_finite_slice,
+    build_tab, checklist_item, ci_cell, extract_numeric_columns, finite_ci_cell, init_result_sheet, num_cell, opt_num_cell, p_cell_at_alpha,
+    push_scalar, quantile_sorted, rank_with_ties, resolve_selected_indices, sanitize_result_sheet_floats, t_crit_two_sided, validate_finite_slice,
 };
 use crate::error::StatsError;
 use crate::multiplicity::adjust_benjamini_hochberg;
@@ -295,7 +296,7 @@ pub fn spearman_correlation(x: &[f64], y: &[f64]) -> Result<CorrelationPairResul
     }
     let n = x.len();
     if n < 3 {
-        return Err(StatsError::InsufficientSampleSize { context: "Pearson correlation", required: 3, actual: n });
+        return Err(StatsError::InsufficientSampleSize { context: "Spearman correlation", required: 3, actual: n });
     }
     let rx = rank_with_ties(x)?.ranks;
     let ry = rank_with_ties(y)?.ranks;
@@ -321,7 +322,7 @@ pub fn kendall_tau_b(x: &[f64], y: &[f64]) -> Result<CorrelationPairResult, Stat
     validate_finite_slice(y)?;
     let n = x.len();
     if n < 3 {
-        return Err(StatsError::InsufficientSampleSize { context: "Pearson correlation", required: 3, actual: n });
+        return Err(StatsError::InsufficientSampleSize { context: "Kendall tau-b correlation", required: 3, actual: n });
     }
     let mut conc = 0.0_f64;
     let mut disc = 0.0_f64;
@@ -1481,7 +1482,7 @@ pub fn run_multivariate_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mv_spec
                 ResultTabKind::ParametersAndConfidenceIntervals,
                 res.labels.clone(),
                 res.labels.clone(),
-                res.p_matrix.iter().map(|row| row.iter().map(|&v| p_cell(v, p_fmt)).collect()).collect(),
+                res.p_matrix.iter().map(|row| row.iter().map(|&v| p_cell_at_alpha(v, p_fmt, spec.confidence_level.alpha())).collect()).collect(),
             );
             let mut tab_q = build_tab(
                 "corr-matrix-fdr",
@@ -1489,7 +1490,7 @@ pub fn run_multivariate_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mv_spec
                 ResultTabKind::MultipleComparisons,
                 res.labels.clone(),
                 res.labels.clone(),
-                res.fdr_q_matrix.iter().map(|row| row.iter().map(|&v| p_cell(v, p_fmt)).collect()).collect(),
+                res.fdr_q_matrix.iter().map(|row| row.iter().map(|&v| p_cell_at_alpha(v, p_fmt, spec.confidence_level.alpha())).collect()).collect(),
             );
             let p_vars = res.labels.len();
             let mut undefined_pairs = 0_usize;
@@ -1826,6 +1827,7 @@ pub fn run_multivariate_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mv_spec
         }
     }
 
+    sanitize_result_sheet_floats(&mut out)?;
     Ok(out)
 }
 
@@ -2369,6 +2371,21 @@ struct ExtractedMiData {
     model_predictor_cols: Vec<usize>,
 }
 
+const fn xy_x_is_pre_summarized(xy: &curvebook_doc::XyTable) -> bool {
+    matches!(&xy.x_mode, XColumnMode::Numbers { subcolumn_mode } if subcolumn_mode.is_pre_summarized())
+}
+
+const fn xy_x_raw_subcols(xy: &curvebook_doc::XyTable) -> usize {
+    match &xy.x_mode {
+        XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::RawReplicates(k) } if *k > 1 => *k,
+        _ => 1,
+    }
+}
+
+fn xy_x_active_at(xy: &curvebook_doc::XyTable, row: usize, sub: usize, x_subs: usize) -> Option<f64> {
+    if x_subs > 1 { xy.x_cells.get(row).and_then(|subs| subs.get(sub)).and_then(curvebook_doc::Cell::active_number) } else { xy.x_value_at(row) }
+}
+
 struct RawOptionalColumns {
     labels: Vec<String>,
     cols: Vec<Vec<Option<f64>>>,
@@ -2389,6 +2406,12 @@ fn extract_raw_optional_columns(sheet: &DataSheet) -> Result<RawOptionalColumns,
             Ok(RawOptionalColumns { labels, cols, is_label })
         }
         TableArchetype::Column(col_tab) => {
+            if col_tab.subcolumn_mode.is_pre_summarized() {
+                return Err(StatsError::RequiresRawReplicates);
+            }
+            if matches!(col_tab.subcolumn_mode, SubcolumnMode::RawReplicates(k) if k > 1) {
+                return Err(StatsError::IncompatibleTable { analysis: "multiple imputation", actual: curvebook_doc::TableKind::Column });
+            }
             let labels = col_tab.data_sets.iter().map(|ds| ds.title.clone()).collect();
             let cols =
                 col_tab.data_sets.iter().map(|ds| ds.cells.iter().map(|subs| subs.first().and_then(|c| c.active_number())).collect()).collect();
@@ -2396,11 +2419,32 @@ fn extract_raw_optional_columns(sheet: &DataSheet) -> Result<RawOptionalColumns,
             Ok(RawOptionalColumns { labels, cols, is_label })
         }
         TableArchetype::Xy(xy) => {
-            let mut labels = vec![xy.x_title.clone()];
-            let mut cols = vec![xy.x_cells.iter().map(|subs| subs.first().and_then(|c| c.active_number())).collect()];
+            if xy.y_subcolumn_mode.is_pre_summarized() {
+                return Err(StatsError::RequiresRawReplicates);
+            }
+            let x_subs = xy_x_raw_subcols(xy);
+            let y_subs = xy.y_subcolumn_mode.subcolumn_count().max(1);
+            let n_subs = x_subs.max(y_subs);
+            let mut labels = Vec::with_capacity(1 + xy.data_sets.len());
+            labels.push(xy.x_title.clone());
             for ds in &xy.data_sets {
                 labels.push(ds.title.clone());
-                cols.push(ds.cells.iter().map(|subs| subs.first().and_then(|c| c.active_number())).collect());
+            }
+            let mut cols = vec![Vec::new(); 1 + xy.data_sets.len()];
+            for r in 0..xy.row_count() {
+                for sub in 0..n_subs {
+                    if n_subs > 1 && sub > 0 {
+                        let any_y_entry = xy.data_sets.iter().any(|ds| ds.cell(r, sub).is_some_and(|c| !c.is_empty() || c.excluded));
+                        let any_x_entry = x_subs > 1 && xy.x_cells.get(r).and_then(|s| s.get(sub)).is_some_and(|c| !c.is_empty() || c.excluded);
+                        if !any_y_entry && !any_x_entry {
+                            continue;
+                        }
+                    }
+                    cols[0].push(xy_x_active_at(xy, r, sub, x_subs));
+                    for (d_idx, ds) in xy.data_sets.iter().enumerate() {
+                        cols[1 + d_idx].push(ds.cell(r, sub).and_then(curvebook_doc::Cell::active_number));
+                    }
+                }
             }
             let is_label = vec![false; labels.len()];
             Ok(RawOptionalColumns { labels, cols, is_label })
@@ -2491,6 +2535,12 @@ fn extract_mi_columns(
     let chosen_orig = collect_mi_column_indices(&raw_cols, &is_label, selected, response_column, predictor_columns);
     if chosen_orig.is_empty() {
         return Err(StatsError::EmptyInput);
+    }
+    if let TableArchetype::Xy(xy) = &sheet.archetype
+        && chosen_orig.contains(&0)
+        && xy_x_is_pre_summarized(xy)
+    {
+        return Err(StatsError::RequiresRawReplicates);
     }
 
     let max_len = chosen_orig.iter().map(|&idx| raw_cols[idx].len()).max().unwrap_or(0);
@@ -2623,7 +2673,7 @@ fn populate_mi_result_sheet(out: &mut ResultSheet, res: &MultipleImputationResul
                     finite_ci_cell(term.ci.0, term.ci.1),
                     num_cell(term.t_statistic),
                     num_cell(term.df),
-                    p_cell(term.p_value, p_fmt),
+                    p_cell_at_alpha(term.p_value, p_fmt, confidence.alpha()),
                     num_cell(term.within_variance),
                     num_cell(term.between_variance),
                     num_cell(term.total_variance),
@@ -2733,7 +2783,15 @@ fn validate_selected_data_sets(selected: &[usize], total: usize) -> Result<(), S
 
 type OptionalColumnsPair = (Vec<String>, Vec<Vec<Option<f64>>>);
 
-fn extract_optional_columns(sheet: &DataSheet, selected: &[usize]) -> Result<OptionalColumnsPair, StatsError> {
+type OptionalColumnsWithRowLabels = (Vec<String>, Vec<Vec<Option<f64>>>, Vec<String>);
+
+fn format_obs_row_labels(row_titles: &[String], n_rows: usize) -> Vec<String> {
+    (0..n_rows)
+        .map(|r| row_titles.get(r).map(|s| s.trim()).filter(|s| !s.is_empty()).map_or_else(|| format!("Obs {}", r + 1), ToOwned::to_owned))
+        .collect()
+}
+
+fn extract_optional_columns_with_row_labels(sheet: &DataSheet, selected: &[usize]) -> Result<OptionalColumnsWithRowLabels, StatsError> {
     match &sheet.archetype {
         TableArchetype::MultipleVariables(mv) => {
             validate_selected_data_sets(selected, mv.variables.len())?;
@@ -2749,9 +2807,16 @@ fn extract_optional_columns(sheet: &DataSheet, selected: &[usize]) -> Result<Opt
                 labels.push(v.title.clone());
                 cols.push(v.cells.iter().map(|c| c.active_number()).collect());
             }
-            Ok((labels, cols))
+            let row_labels = format_obs_row_labels(&mv.row_titles, mv.row_count());
+            Ok((labels, cols, row_labels))
         }
         TableArchetype::Column(col_tab) => {
+            if col_tab.subcolumn_mode.is_pre_summarized() {
+                return Err(StatsError::RequiresRawReplicates);
+            }
+            if matches!(col_tab.subcolumn_mode, SubcolumnMode::RawReplicates(k) if k > 1) {
+                return Err(StatsError::IncompatibleTable { analysis: "multivariate correlation", actual: curvebook_doc::TableKind::Column });
+            }
             validate_selected_data_sets(selected, col_tab.data_sets.len())?;
             let indices = resolve_selected_indices(selected, col_tab.data_sets.len());
             let mut labels = Vec::with_capacity(indices.len());
@@ -2761,43 +2826,86 @@ fn extract_optional_columns(sheet: &DataSheet, selected: &[usize]) -> Result<Opt
                 labels.push(ds.title.clone());
                 cols.push(ds.cells.iter().map(|subs| subs.first().and_then(|c| c.active_number())).collect());
             }
-            Ok((labels, cols))
+            let row_labels = format_obs_row_labels(&col_tab.row_titles, col_tab.row_count());
+            Ok((labels, cols, row_labels))
         }
         TableArchetype::Xy(xy) => {
+            if xy.y_subcolumn_mode.is_pre_summarized() {
+                return Err(StatsError::RequiresRawReplicates);
+            }
             let total_cols = 1 + xy.data_sets.len();
             validate_selected_data_sets(selected, total_cols)?;
             let indices = resolve_selected_indices(selected, total_cols);
+            if indices.contains(&0) && xy_x_is_pre_summarized(xy) {
+                return Err(StatsError::RequiresRawReplicates);
+            }
+            let x_subs = xy_x_raw_subcols(xy);
+            let y_subs = xy.y_subcolumn_mode.subcolumn_count().max(1);
+            let uses_y = indices.iter().any(|&i| i > 0);
+            let uses_x = indices.contains(&0);
+            let n_subs = if uses_y && uses_x {
+                y_subs.max(x_subs)
+            } else if uses_y {
+                y_subs
+            } else {
+                x_subs
+            };
+
             let mut labels = Vec::with_capacity(indices.len());
-            let mut cols = Vec::with_capacity(indices.len());
-            for idx in indices {
+            for &idx in &indices {
                 if idx == 0 {
                     labels.push(xy.x_title.clone());
-                    cols.push(xy.x_cells.iter().map(|subs| subs.first().and_then(|c| c.active_number())).collect());
                 } else {
-                    let ds = &xy.data_sets[idx - 1];
-                    labels.push(ds.title.clone());
-                    cols.push(ds.cells.iter().map(|subs| subs.first().and_then(|c| c.active_number())).collect());
+                    labels.push(xy.data_sets[idx - 1].title.clone());
                 }
             }
-            Ok((labels, cols))
+            let mut cols = vec![Vec::new(); indices.len()];
+            let mut row_labels = Vec::new();
+            for r in 0..xy.row_count() {
+                let base_lbl =
+                    xy.row_titles.get(r).map(|s| s.trim()).filter(|s| !s.is_empty()).map_or_else(|| format!("Obs {}", r + 1), ToOwned::to_owned);
+                for sub in 0..n_subs {
+                    if n_subs > 1 && sub > 0 {
+                        let any_selected_entry = indices.iter().any(|&idx| {
+                            if idx == 0 {
+                                x_subs > 1 && xy.x_cells.get(r).and_then(|s| s.get(sub)).is_some_and(|c| !c.is_empty() || c.excluded)
+                            } else {
+                                xy.data_sets[idx - 1].cell(r, sub).is_some_and(|c| !c.is_empty() || c.excluded)
+                            }
+                        });
+                        if !any_selected_entry {
+                            continue;
+                        }
+                    }
+                    for (pos, &idx) in indices.iter().enumerate() {
+                        let val = if idx == 0 {
+                            xy_x_active_at(xy, r, sub, x_subs)
+                        } else {
+                            xy.data_sets[idx - 1].cell(r, sub).and_then(curvebook_doc::Cell::active_number)
+                        };
+                        cols[pos].push(val);
+                    }
+                    row_labels.push(if n_subs > 1 { format!("{base_lbl} (rep {})", sub + 1) } else { base_lbl.clone() });
+                }
+            }
+            Ok((labels, cols, row_labels))
         }
         other => Err(StatsError::IncompatibleTable { analysis: "multivariate correlation", actual: other.kind() }),
     }
 }
 
+fn extract_optional_columns(sheet: &DataSheet, selected: &[usize]) -> Result<OptionalColumnsPair, StatsError> {
+    let (labels, cols, _) = extract_optional_columns_with_row_labels(sheet, selected)?;
+    Ok((labels, cols))
+}
+
 type CompleteMatrixWithNames = (Vec<String>, Vec<String>, Vec<Vec<f64>>);
 
 fn extract_complete_matrix_rows_with_names(sheet: &DataSheet, selected: &[usize]) -> Result<CompleteMatrixWithNames, StatsError> {
-    let (labels, opt_cols) = extract_optional_columns(sheet, selected)?;
+    let (labels, opt_cols, all_row_labels) = extract_optional_columns_with_row_labels(sheet, selected)?;
     if labels.len() < 2 {
         return Err(StatsError::InsufficientSampleSize { context: "multivariate variables", required: 2, actual: labels.len() });
     }
-    let sheet_row_titles: Option<&[String]> = match &sheet.archetype {
-        TableArchetype::MultipleVariables(mv) => Some(&mv.row_titles),
-        TableArchetype::Column(col) => Some(&col.row_titles),
-        TableArchetype::Xy(xy) => Some(&xy.row_titles),
-        _ => None,
-    };
     let n_rows = opt_cols[0].len();
     let mut obs_labels = Vec::new();
     let mut rows = Vec::new();
@@ -2815,11 +2923,7 @@ fn extract_complete_matrix_rows_with_names(sheet: &DataSheet, selected: &[usize]
             }
         }
         if ok {
-            let r_label = sheet_row_titles
-                .and_then(|t| t.get(r))
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-                .map_or_else(|| format!("Obs {}", r + 1), ToOwned::to_owned);
+            let r_label = all_row_labels.get(r).cloned().unwrap_or_else(|| format!("Obs {}", r + 1));
             obs_labels.push(r_label);
             rows.push(row);
         }

@@ -35,7 +35,7 @@ use crate::anova::sheet::factorial::push_reml_df_scalars;
 use crate::column::shapiro_wilk;
 use crate::common::{
     append_ignored_text_checklist_and_footnote, append_listwise_filtered_checklist_and_footnote, build_tab, checklist_item, extract_numeric_columns,
-    init_result_sheet, num_cell, opt_ci_cell, opt_num_cell, p_cell, push_scalar, rank_with_ties, sanitize_result_sheet_floats,
+    init_result_sheet, num_cell, opt_ci_cell, opt_num_cell, p_cell_at_alpha, push_scalar, rank_with_ties, sanitize_result_sheet_floats,
     try_resolve_selected_indices, validate_finite_slice,
 };
 use crate::error::StatsError;
@@ -78,7 +78,7 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
                 }));
             }
             out.tabs.push(main_tab);
-            out.tabs.push(build_variance_homogeneity_tab(&res.variance_tests, is_summary, p_fmt));
+            out.tabs.push(build_variance_homogeneity_tab(&res.variance_tests, is_summary, p_fmt, confidence.alpha()));
             append_one_way_multiplicity(
                 &mut out,
                 &group_inputs,
@@ -106,9 +106,9 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
                     num_cell(uv.brown_forsythe_f_star),
                     num_cell(uv.brown_forsythe_df1),
                     num_cell(uv.brown_forsythe_df2),
-                    p_cell(uv.brown_forsythe_p, p_fmt),
+                    p_cell_at_alpha(uv.brown_forsythe_p, p_fmt, confidence.alpha()),
                 ],
-                vec![num_cell(uv.welch_w), num_cell(uv.welch_df1), num_cell(uv.welch_df2), p_cell(uv.welch_p, p_fmt)],
+                vec![num_cell(uv.welch_w), num_cell(uv.welch_df1), num_cell(uv.welch_df2), p_cell_at_alpha(uv.welch_p, p_fmt, confidence.alpha())],
             ];
             let mut uv_tab = build_tab("unequal-var-anova", "Brown-Forsythe and Welch ANOVA", ResultTabKind::AnovaTable, headers, labels, rows);
             if !base.variance_tests.available {
@@ -119,7 +119,7 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
                 }));
             }
             out.tabs.push(uv_tab);
-            out.tabs.push(build_variance_homogeneity_tab(&base.variance_tests, is_summary, p_fmt));
+            out.tabs.push(build_variance_homogeneity_tab(&base.variance_tests, is_summary, p_fmt, confidence.alpha()));
 
             append_welch_multiplicity(&mut out, &group_inputs, &base, &anova_spec.multiplicity, p_fmt, confidence)?;
             append_one_way_checklist(&mut out, &base, &group_inputs, &raw_slices_owned, true, confidence.alpha());
@@ -144,7 +144,7 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
             let rows = vec![vec![
                 num_cell(kw.h_statistic),
                 num_cell(kw.df),
-                p_cell(kw.p_value, p_fmt),
+                p_cell_at_alpha(kw.p_value, p_fmt, confidence.alpha()),
                 num_cell(kw.tie_correction),
                 num_cell(kw.epsilon_squared),
             ]];
@@ -288,6 +288,7 @@ pub(in crate::anova) fn scan_rm_one_way_column_table(col_tab: &curvebook_doc::Co
     RmOneWayScan { blocks, incomplete_rows, non_numeric_cells, y_vec, subj_ids, cond_ids, cond_counts }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::anova) fn emit_random_intercept_reml(
     out: &mut ResultSheet,
     x_mat: &DenseMatrix,
@@ -296,6 +297,7 @@ pub(in crate::anova) fn emit_random_intercept_reml(
     term_slices: &[(&str, usize, usize)],
     df_method: MixedModelDfMethod,
     p_fmt: PValueFormat,
+    alpha: f64,
 ) -> Result<(Vec<FactorialAnovaTerm>, f64, f64, f64, RemlContrastCore), StatsError> {
     let (reml, core) = fit_random_intercept_reml_with_method_and_core(x_mat, y_vec, cluster_ids, term_slices, df_method)?;
     push_scalar(out, "REML sigma^2 (subject)", None, reml.sigma2_random);
@@ -312,7 +314,7 @@ pub(in crate::anova) fn emit_random_intercept_reml(
             num_cell(reml.sigma2_random),
             num_cell(reml.icc),
             num_cell(reml.lrt_random_chi2),
-            p_cell(reml.lrt_random_p, p_fmt),
+            p_cell_at_alpha(reml.lrt_random_p, p_fmt, alpha),
         ],
         vec![ResultCell::Text(String::from("Residual")), num_cell(reml.sigma2_error), ResultCell::Empty, ResultCell::Empty, ResultCell::Empty],
     ];
@@ -403,14 +405,46 @@ pub(in crate::anova) fn emit_multi_vc_rm_reml(
         num_cell(mres.sigma2_error.sqrt()),
         num_cell(100.0 * mres.sigma2_error / tot),
     ]);
-    out.tabs.push(build_tab(
+    let mut vc_tab = build_tab(
         "mixed-reml",
         "Mixed-effects REML variance components",
         ResultTabKind::ParametersAndConfidenceIntervals,
         vc_headers,
         vc_labels,
         vc_rows,
-    ));
+    );
+    if !mres.converged {
+        vc_tab.footnotes.push(String::from(
+            "Warning: multi-variance-component REML optimization did not converge within the iteration budget; variance-component and df estimates may be approximate.",
+        ));
+    } else if mres.at_boundary {
+        vc_tab.footnotes.push(String::from("One or more random variance components converged at the zero constraint boundary (sigma^2 = 0)."));
+    }
+    out.tabs.push(vc_tab);
+    let metric = Some(format!("sum sigma^2_random = {sum_rand:.6}, sigma^2_error = {:.6}", mres.sigma2_error));
+    let vc_check = if !mres.converged {
+        checklist_item(
+            "REML convergence and variance boundaries",
+            ChecklistStatus::Warn,
+            metric,
+            "Multi-variance-component REML optimization did not reach stationary convergence within the iteration limit.",
+        )
+    } else if mres.at_boundary {
+        checklist_item(
+            "REML convergence and variance boundaries",
+            ChecklistStatus::Info,
+            metric,
+            "One or more random variance components converged on the zero non-negativity boundary (sigma^2 = 0).",
+        )
+    } else {
+        checklist_item(
+            "REML convergence and variance boundaries",
+            ChecklistStatus::Pass,
+            metric,
+            "Multi-variance-component REML variance optimization converged to an interior stationary point.",
+        )
+    };
+    out.checklist.push(vc_check);
     Ok((mres.fixed_terms, mres.sigma2_error, mres.reml_log_lik, icc_subj, core))
 }
 
@@ -591,7 +625,7 @@ pub(in crate::anova) fn run_rm_one_way_reml(
         }
         ResidualCovariance::CompoundSymmetry => {
             let (terms, ms_e, _, _, core) =
-                emit_random_intercept_reml(out, &x_mat, &scan.y_vec, &scan.subj_ids, &term_slices, anova_spec.df_method, p_fmt)?;
+                emit_random_intercept_reml(out, &x_mat, &scan.y_vec, &scan.subj_ids, &term_slices, anova_spec.df_method, p_fmt, confidence.alpha())?;
             (terms, ms_e, (n_obs - k) as f64, core, "random-intercept compound-symmetry REML")
         }
     };
@@ -616,8 +650,14 @@ pub(in crate::anova) fn run_rm_one_way_reml(
         headers.push(String::from("Partial eta squared"));
     }
     let ss_res = sigma2_e * denom_df;
-    let mut row_trt =
-        vec![num_cell(trt_term.ss), num_cell(trt_term.df), num_cell(trt_term.ms), num_cell(f_trt), p_cell(p_trt, p_fmt), num_cell(denom_df)];
+    let mut row_trt = vec![
+        num_cell(trt_term.ss),
+        num_cell(trt_term.df),
+        num_cell(trt_term.ms),
+        num_cell(f_trt),
+        p_cell_at_alpha(p_trt, p_fmt, confidence.alpha()),
+        num_cell(denom_df),
+    ];
     let mut row_res = vec![num_cell(ss_res), num_cell(denom_df), num_cell(sigma2_e), ResultCell::Empty, ResultCell::Empty, ResultCell::Empty];
     if anova_spec.compute_effect_sizes {
         row_trt.push(opt_num_cell(trt_term.partial_eta_squared));
@@ -678,7 +718,7 @@ pub(in crate::anova) fn run_rm_one_way_reml(
                     ResultTabKind::MultipleComparisons,
                     vec![String::from("Contrast"), String::from("SE"), String::from("F"), String::from("P value")],
                     vec![String::from("Linear trend")],
-                    vec![vec![num_cell(est.diff), num_cell(est.se), num_cell(f_tr), p_cell(p_tr, p_fmt)]],
+                    vec![vec![num_cell(est.diff), num_cell(est.se), num_cell(f_tr), p_cell_at_alpha(p_tr, p_fmt, confidence.alpha())]],
                 ));
             }
         } else {
@@ -749,6 +789,9 @@ pub(in crate::anova) fn run_rm_one_way_anova_sheet(
     let TableArchetype::Column(col_tab) = &sheet.archetype else {
         return Err(StatsError::IncompatibleTable { analysis: "RM one-way ANOVA", actual: sheet.archetype.kind() });
     };
+    if col_tab.subcolumn_mode.is_pre_summarized() {
+        return Err(StatsError::RequiresRawReplicates);
+    }
     let indices = try_resolve_selected_indices(&spec_selected_from_sheet(out), col_tab.data_sets.len())?;
     let scan = scan_rm_one_way_column_table(col_tab, &indices);
 
@@ -804,16 +847,16 @@ pub(in crate::anova) fn run_rm_one_way_anova_sheet(
                     num_cell(rm.df_treatment),
                     num_cell(rm.ms_treatment),
                     num_cell(rm.f_treatment),
-                    p_cell(rm.p_uncorrected, p_fmt),
-                    p_cell(rm.p_greenhouse_geisser, p_fmt),
-                    p_cell(rm.p_huynh_feldt, p_fmt),
+                    p_cell_at_alpha(rm.p_uncorrected, p_fmt, confidence.alpha()),
+                    p_cell_at_alpha(rm.p_greenhouse_geisser, p_fmt, confidence.alpha()),
+                    p_cell_at_alpha(rm.p_huynh_feldt, p_fmt, confidence.alpha()),
                 ],
                 vec![
                     num_cell(rm.ss_subjects),
                     num_cell(rm.df_subjects),
                     num_cell(rm.ms_subjects),
                     num_cell(rm.f_subjects),
-                    p_cell(rm.p_subjects, p_fmt),
+                    p_cell_at_alpha(rm.p_subjects, p_fmt, confidence.alpha()),
                     ResultCell::Empty,
                     ResultCell::Empty,
                 ],
@@ -906,7 +949,7 @@ pub(in crate::anova) fn run_rm_one_way_anova_sheet(
             let rows = vec![vec![
                 num_cell(fr.q_statistic),
                 num_cell(fr.df),
-                p_cell(fr.p_value, p_fmt),
+                p_cell_at_alpha(fr.p_value, p_fmt, confidence.alpha()),
                 num_cell(fr.kendalls_w),
                 num_cell(fr.n_blocks as f64),
             ]];
@@ -1036,7 +1079,12 @@ pub(in crate::anova) fn extract_one_way_inputs(
     Ok((inputs, Some(res), raw_slices, ignored_non_numeric))
 }
 
-pub(in crate::anova) fn build_variance_homogeneity_tab(vt: &VarianceHomogeneityResult, is_summary: bool, p_fmt: PValueFormat) -> ResultTab {
+pub(in crate::anova) fn build_variance_homogeneity_tab(
+    vt: &VarianceHomogeneityResult,
+    is_summary: bool,
+    p_fmt: PValueFormat,
+    alpha: f64,
+) -> ResultTab {
     let headers = vec![String::from("Statistic"), String::from("DFn / df"), String::from("DFd"), String::from("P value"), String::from("Status")];
     let labels = vec![String::from("Brown-Forsythe"), String::from("Bartlett")];
     let mut tab = if vt.available && vt.brown_forsythe_p.is_finite() {
@@ -1045,8 +1093,8 @@ pub(in crate::anova) fn build_variance_homogeneity_tab(vt: &VarianceHomogeneityR
                 num_cell(vt.brown_forsythe_f),
                 num_cell(vt.brown_forsythe_df1),
                 num_cell(vt.brown_forsythe_df2),
-                p_cell(vt.brown_forsythe_p, p_fmt),
-                ResultCell::Text(if vt.brown_forsythe_p >= 0.05 {
+                p_cell_at_alpha(vt.brown_forsythe_p, p_fmt, alpha),
+                ResultCell::Text(if vt.brown_forsythe_p >= alpha {
                     String::from("Equal variances not rejected")
                 } else {
                     String::from("Variances differ")
@@ -1056,8 +1104,12 @@ pub(in crate::anova) fn build_variance_homogeneity_tab(vt: &VarianceHomogeneityR
                 num_cell(vt.bartlett_chi2),
                 num_cell(vt.bartlett_df),
                 ResultCell::Empty,
-                p_cell(vt.bartlett_p, p_fmt),
-                ResultCell::Text(if vt.bartlett_p >= 0.05 { String::from("Equal variances not rejected") } else { String::from("Variances differ") }),
+                p_cell_at_alpha(vt.bartlett_p, p_fmt, alpha),
+                ResultCell::Text(if vt.bartlett_p >= alpha {
+                    String::from("Equal variances not rejected")
+                } else {
+                    String::from("Variances differ")
+                }),
             ],
         ];
         build_tab("variance-homogeneity", "Test for homogeneity of variances", ResultTabKind::Diagnostics, headers, labels, rows)
@@ -1101,8 +1153,13 @@ pub(in crate::anova) fn build_one_way_tab(
         headers.push(String::from("Cohen's f"));
     }
     let labels = vec![String::from("Treatment (between columns)"), String::from("Residual (within columns)"), String::from("Total")];
-    let mut row_treat =
-        vec![num_cell(res.ss_between), num_cell(res.df_between), num_cell(res.ms_between), num_cell(res.f_statistic), p_cell(res.p_value, p_fmt)];
+    let mut row_treat = vec![
+        num_cell(res.ss_between),
+        num_cell(res.df_between),
+        num_cell(res.ms_between),
+        num_cell(res.f_statistic),
+        p_cell_at_alpha(res.p_value, p_fmt, confidence.alpha()),
+    ];
     if include_effect {
         row_treat.push(num_cell(res.effect_sizes.eta_squared));
         row_treat.push(opt_ci_cell(res.effect_sizes.partial_eta_squared_ci));
@@ -1135,7 +1192,12 @@ pub(in crate::anova) fn append_one_way_multiplicity(
         push_scalar(out, "Linear trend F", None, trend.f_statistic);
         push_scalar(out, "Linear trend P", None, trend.p_value);
         let headers = vec![String::from("Slope"), String::from("R squared"), String::from("F"), String::from("P value")];
-        let rows = vec![vec![num_cell(trend.slope_estimate), num_cell(r_squared), num_cell(trend.f_statistic), p_cell(trend.p_value, p_fmt)]];
+        let rows = vec![vec![
+            num_cell(trend.slope_estimate),
+            num_cell(r_squared),
+            num_cell(trend.f_statistic),
+            p_cell_at_alpha(trend.p_value, p_fmt, confidence.alpha()),
+        ]];
         out.tabs.push(build_tab(
             "linear-trend",
             "Test for linear trend",
@@ -1250,7 +1312,7 @@ fn append_welch_dunnett_vs_control(
 }
 
 /// Heteroscedastic polynomial linear-trend contrast with Welch–Satterthwaite denominator df.
-fn append_welch_linear_trend(out: &mut ResultSheet, inputs: &[GroupComparisonInput], p_fmt: PValueFormat) -> Result<(), StatsError> {
+fn append_welch_linear_trend(out: &mut ResultSheet, inputs: &[GroupComparisonInput], p_fmt: PValueFormat, alpha: f64) -> Result<(), StatsError> {
     let k = inputs.len();
     if k < 2 {
         return Err(StatsError::InsufficientSampleSize { context: "linear trend groups", required: 2, actual: k });
@@ -1285,7 +1347,7 @@ fn append_welch_linear_trend(out: &mut ResultSheet, inputs: &[GroupComparisonInp
         ResultTabKind::MultipleComparisons,
         vec![String::from("Contrast"), String::from("SE"), String::from("DFd"), String::from("F"), String::from("P value")],
         vec![String::from("Linear trend")],
-        vec![vec![num_cell(est), num_cell(se), num_cell(df), num_cell(f_stat), p_cell(p_val, p_fmt)]],
+        vec![vec![num_cell(est), num_cell(se), num_cell(df), num_cell(f_stat), p_cell_at_alpha(p_val, p_fmt, alpha)]],
     );
     tab.footnotes.push(String::from("Heteroscedastic linear-trend contrast using per-group variances and Welch-Satterthwaite denominator df."));
     out.tabs.push(tab);
@@ -1355,7 +1417,7 @@ fn append_welch_multiplicity(
             Ok(())
         }
         MultiplicityProcedure::Dunnett { control_column } => append_welch_dunnett_vs_control(out, inputs, control_column, mult, p_fmt, confidence),
-        MultiplicityProcedure::LinearTrend => append_welch_linear_trend(out, inputs, p_fmt),
+        MultiplicityProcedure::LinearTrend => append_welch_linear_trend(out, inputs, p_fmt, confidence.alpha()),
         MultiplicityProcedure::Bonferroni
         | MultiplicityProcedure::Sidak
         | MultiplicityProcedure::HolmBonferroni
@@ -1633,13 +1695,19 @@ pub(in crate::anova) fn append_one_way_checklist(
     alpha: f64,
 ) {
     if res.variance_tests.available && res.variance_tests.brown_forsythe_p.is_finite() {
-        let equal_var_ok = res.variance_tests.brown_forsythe_p >= 0.05;
+        let equal_var_ok = res.variance_tests.brown_forsythe_p >= alpha;
         let (var_status, var_explanation) = if equal_var_ok {
-            (ChecklistStatus::Pass, "Group variances do not differ significantly; ordinary pooled-variance ANOVA is appropriate.")
+            (ChecklistStatus::Pass, String::from("Group variances do not differ significantly; ordinary pooled-variance ANOVA is appropriate."))
         } else if is_welch {
-            (ChecklistStatus::Info, "Variances appear unequal (P < 0.05); Brown-Forsythe & Welch ANOVA does not assume equal variances.")
+            (
+                ChecklistStatus::Info,
+                format!("Variances appear unequal (P < {alpha:.2}); Brown-Forsythe & Welch ANOVA does not assume equal variances."),
+            )
         } else {
-            (ChecklistStatus::Warn, "Variances appear unequal (Brown-Forsythe P < 0.05), violating the pooled equal-variance assumption.")
+            (
+                ChecklistStatus::Warn,
+                format!("Variances appear unequal (Brown-Forsythe P < {alpha:.2}), violating the pooled equal-variance assumption."),
+            )
         };
         out.checklist.push(checklist_item(
             "Homogeneity of variances (Brown-Forsythe)",
