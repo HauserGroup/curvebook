@@ -69,10 +69,8 @@ mod core_inspector;
 mod core_menus;
 mod core_nav_tables;
 
-pub mod cjk_rtl;
 pub mod eu;
 pub mod r13_8_ui;
-pub mod shard_extra;
 pub mod w5_analyze_picker;
 pub mod w5_dialogs_graph_misc;
 pub mod w5_fit_params;
@@ -92,9 +90,7 @@ pub mod w8_rv_ui;
 
 /// Additional translation catalog shard slices merged with [`CATALOG`] during lookup and reporting.
 pub const EXTRA_SHARD_CATALOGS: &[&[CatalogEntry]] = &[
-    shard_extra::ENTRIES,
     eu::ENTRIES,
-    cjk_rtl::ENTRIES,
     w5_welcome::ENTRIES,
     w5_nav_notes::ENTRIES,
     w5_toolbar_menus::ENTRIES,

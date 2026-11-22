@@ -760,53 +760,20 @@ fn build_segments_for_count(axis: &AxisSpec, count: usize) -> Vec<AxisSegment> {
             length_share: 1.0,
         }];
     }
-    if count == 2 {
-        vec![
-            AxisSegment {
-                min: Some(a),
-                max: Some(a + span * 0.35),
-                scale: base.scale,
-                major_tick_interval: None,
-                minor_ticks_per_interval: base.minor_ticks_per_interval,
-                length_share: 0.48,
-            },
-            AxisSegment {
-                min: Some(a + span * 0.65),
-                max: Some(b),
-                scale: base.scale,
-                major_tick_interval: None,
-                minor_ticks_per_interval: base.minor_ticks_per_interval,
-                length_share: 0.48,
-            },
-        ]
-    } else {
-        vec![
-            AxisSegment {
-                min: Some(a),
-                max: Some(a + span * 0.25),
-                scale: base.scale,
-                major_tick_interval: None,
-                minor_ticks_per_interval: base.minor_ticks_per_interval,
-                length_share: 0.32,
-            },
-            AxisSegment {
-                min: Some(a + span * 0.40),
-                max: Some(a + span * 0.62),
-                scale: base.scale,
-                major_tick_interval: None,
-                minor_ticks_per_interval: base.minor_ticks_per_interval,
-                length_share: 0.32,
-            },
-            AxisSegment {
-                min: Some(a + span * 0.78),
-                max: Some(b),
-                scale: base.scale,
-                major_tick_interval: None,
-                minor_ticks_per_interval: base.minor_ticks_per_interval,
-                length_share: 0.32,
-            },
-        ]
-    }
+    let specs: &[(f64, f64, f64)] =
+        if count == 2 { &[(0.0, 0.35, 0.48), (0.65, 1.0, 0.48)] } else { &[(0.0, 0.25, 0.32), (0.40, 0.62, 0.32), (0.78, 1.0, 0.32)] };
+    specs
+        .iter()
+        .enumerate()
+        .map(|(idx, &(f_lo, f_hi, share))| AxisSegment {
+            min: Some(if idx == 0 { a } else { a + span * f_lo }),
+            max: Some(if idx + 1 == specs.len() { b } else { a + span * f_hi }),
+            scale: base.scale,
+            major_tick_interval: base.major_tick_interval,
+            minor_ticks_per_interval: base.minor_ticks_per_interval,
+            length_share: share,
+        })
+        .collect()
 }
 
 fn commit_axis_update(app: &mut UiApp, gs: &GraphSheet, which: AxisWhich, next_axis: AxisSpec) -> Result<(), String> {
@@ -942,7 +909,7 @@ fn dispatch_axes_action(app: &mut UiApp, state: &mut InspectorViewState, sub: &s
         if let (Some(lo), Some(hi)) = (next_min, next_max)
             && hi <= lo
         {
-            return Ok(UiEventOutcome::default());
+            return Err(format!("axis range max ({hi}) must be greater than min ({lo})"));
         }
         seg.min = next_min;
         seg.max = next_max;
@@ -1085,7 +1052,7 @@ fn dispatch_multivariable_action(app: &mut UiApp, state: &mut InspectorViewState
         let next_m = match m_raw {
             "Mean" => SummaryMeasure::Mean,
             "Median" => SummaryMeasure::Median,
-            "Count" => SummaryMeasure::GeometricMean,
+            "GeometricMean" | "GeomMean" => SummaryMeasure::GeometricMean,
             _ => return Ok(UiEventOutcome::default()),
         };
         match &mut enc.plot_mode {
@@ -1288,8 +1255,9 @@ fn dispatch_pairwise_action(app: &mut UiApp, state: &mut InspectorViewState, sub
                     }),
                 )
                 .map_err(|e| e.to_string())?;
+                return Ok(outcome_ok(sub, Some("graph.addComparisonBrackets")));
             }
-            return Ok(outcome_ok(sub, Some("graph.addComparisonBrackets")));
+            return Ok(outcome_ok(sub, None));
         }
         "cld_toggle" => {
             let next_enabled = !is_cld_active(&gs);
@@ -1460,20 +1428,24 @@ fn layout_size_pt(spec: &LayoutSpec) -> (f64, f64) {
 }
 
 fn rearrange_layout_grid(spec: &mut LayoutSpec, rows: u8, cols: u8, margin_pt: f64, gutter_pt: f64) {
-    let rows = rows.max(1);
+    let min_rows = rows.max(1);
     let cols = cols.max(1);
-    spec.grid_template = Some((rows, cols));
+    let cols_usize = usize::from(cols);
+    let panel_count = spec.items.iter().filter(|it| matches!(it, LayoutItem::LiveGraph { .. })).count();
+    let effective_rows = panel_count.div_ceil(cols_usize).max(usize::from(min_rows));
+    let effective_rows_u8 = u8::try_from(effective_rows).unwrap_or(u8::MAX);
+    spec.grid_template = Some((effective_rows_u8, cols));
     let (page_w_pt, page_h_pt) = layout_size_pt(spec);
     let usable_w = (page_w_pt - 2.0 * margin_pt - f64::from(cols.saturating_sub(1)) * gutter_pt).max(36.0);
-    let usable_h = (page_h_pt - 2.0 * margin_pt - f64::from(rows.saturating_sub(1)) * gutter_pt).max(36.0);
+    let usable_h = (page_h_pt - 2.0 * margin_pt - (effective_rows.saturating_sub(1) as f64) * gutter_pt).max(36.0);
     let cell_w = usable_w / f64::from(cols);
-    let cell_h = usable_h / f64::from(rows);
+    let cell_h = usable_h / (effective_rows as f64);
 
     let mut panel_idx = 0usize;
     for item in &mut spec.items {
         if let LayoutItem::LiveGraph { bounds_pt, .. } = item {
-            let r = (panel_idx / usize::from(cols)) % usize::from(rows);
-            let c = panel_idx % usize::from(cols);
+            let r = panel_idx / cols_usize;
+            let c = panel_idx % cols_usize;
             *bounds_pt =
                 RectPt::new(margin_pt + (c as f64) * (cell_w + gutter_pt), margin_pt + (r as f64) * (cell_h + gutter_pt), cell_w, cell_h).into();
             panel_idx += 1;
@@ -1504,7 +1476,6 @@ fn commit_layout_spec(app: &mut UiApp, ls: &LayoutSheet, spec: &LayoutSpec) -> R
         "layout.setSpec",
         json!({
             "sheet_id": ls.id.as_str(),
-            "align_plot_origins": spec.align_plot_origins,
             "spec": spec,
         }),
     )

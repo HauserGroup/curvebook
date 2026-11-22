@@ -1,13 +1,13 @@
 //! Graph/layout canvas view, rulers, command palette, and descriptor-driven modal helpers (`R10.3`, `R10.6`, `R10.15`).
 
 use curvebook_chart::PointPt;
-use curvebook_doc::{ErrorBarMetric, GraphKind, JournalWidthPreset, LayoutItem, PageOrientation, PanelBadgeStyle, RectPt, SheetId, SummaryMeasure};
+use curvebook_doc::{ErrorBarMetric, JournalWidthPreset, LayoutItem, PageOrientation, PanelBadgeStyle, RectPt, SheetId, SummaryMeasure};
 use curvebook_render::TiffCompression;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::UiApp;
-use crate::dialogs_canvas::{ExportFigureFormat, GRAPH_TYPE_OPTIONS};
+use crate::dialogs_canvas::{CommandOrigin, ExportFigureFormat};
 use crate::dialogs_r9::RandomizationSchemeKind;
 use crate::interaction::UiEventOutcome;
 
@@ -100,7 +100,9 @@ pub fn handle_custom_action(app: &mut UiApp, state: &mut DialogsGraphMiscViewSta
 }
 
 fn apply_zoom_and_pan(app: &mut UiApp, zoom: Option<f64>, reset_pan: bool, pan_delta: Option<[f64; 2]>) {
-    if let Some(z) = zoom {
+    if let Some(z) = zoom
+        && z.is_finite()
+    {
         let clamped = z.clamp(0.25, 4.0);
         app.canvas_dialogs.canvas.zoom = clamped;
         app.canvas_dialogs.pan_zoom.zoom = clamped;
@@ -108,9 +110,14 @@ fn apply_zoom_and_pan(app: &mut UiApp, zoom: Option<f64>, reset_pan: bool, pan_d
     if reset_pan {
         app.canvas_dialogs.canvas.pan_pt = PointPt::new(0.0, 0.0);
         app.canvas_dialogs.pan_zoom.pan_pt = [0.0, 0.0];
-    } else if let Some([dx, dy]) = pan_delta {
-        let nx = (app.canvas_dialogs.canvas.pan_pt.x + dx).clamp(-1200.0, 1200.0);
-        let ny = (app.canvas_dialogs.canvas.pan_pt.y + dy).clamp(-1200.0, 1200.0);
+    } else if let Some([dx, dy]) = pan_delta
+        && dx.is_finite()
+        && dy.is_finite()
+    {
+        let cur_x = if app.canvas_dialogs.canvas.pan_pt.x.is_finite() { app.canvas_dialogs.canvas.pan_pt.x } else { 0.0 };
+        let cur_y = if app.canvas_dialogs.canvas.pan_pt.y.is_finite() { app.canvas_dialogs.canvas.pan_pt.y } else { 0.0 };
+        let nx = (cur_x + dx).clamp(-1200.0, 1200.0);
+        let ny = (cur_y + dy).clamp(-1200.0, 1200.0);
         app.canvas_dialogs.canvas.pan_pt = PointPt::new(nx, ny);
         app.canvas_dialogs.pan_zoom.pan_pt = [nx, ny];
     }
@@ -129,17 +136,22 @@ fn handle_zoom_pan_action(app: &mut UiApp, state: &mut DialogsGraphMiscViewState
             apply_zoom_and_pan(app, Some(1.0), true, None);
             return Some(handled_outcome(true));
         }
-        if let Ok(pct) = preset.parse::<f64>() {
+        if let Ok(pct) = preset.parse::<f64>()
+            && pct.is_finite()
+            && pct > 0.0
+        {
             apply_zoom_and_pan(app, Some(pct / 100.0), false, None);
             return Some(handled_outcome(true));
         }
+        return Some(Err(format!("invalid zoom preset `{preset}`")));
     }
     if let Some(rest) = payload.strip_prefix("zoom:step:")
         && let Some((_, dir)) = rest.split_once(':')
     {
         state.zoom_menu_slot = None;
         let delta = if dir == "in" { 0.25 } else { -0.25 };
-        let next = app.canvas_dialogs.canvas.zoom + delta;
+        let base_zoom = if app.canvas_dialogs.canvas.zoom.is_finite() { app.canvas_dialogs.canvas.zoom } else { 1.0 };
+        let next = base_zoom + delta;
         apply_zoom_and_pan(app, Some(next), false, None);
         return Some(handled_outcome(true));
     }
@@ -153,10 +165,13 @@ fn handle_zoom_pan_action(app: &mut UiApp, state: &mut DialogsGraphMiscViewState
         let _slot = parts.next();
         if let (Some(dx_s), Some(dy_s)) = (parts.next(), parts.next())
             && let (Ok(dx), Ok(dy)) = (dx_s.parse::<f64>(), dy_s.parse::<f64>())
+            && dx.is_finite()
+            && dy.is_finite()
         {
             apply_zoom_and_pan(app, None, false, Some([dx, dy]));
             return Some(handled_outcome(true));
         }
+        return Some(Err(format!("invalid pan delta `{rest}`")));
     }
     if payload.starts_with("pan:scroll_h:") {
         let delta = if payload.ends_with(":dec") { -48.0 } else { 48.0 };
@@ -201,20 +216,30 @@ fn handle_palette_action(app: &mut UiApp, payload: &str) -> Option<Result<UiEven
         }
         "palette:run" => {
             let idx = app.canvas_dialogs.command_palette.selected_index;
-            let chosen = matches.get(idx).or_else(|| matches.first()).map(|e| e.id.to_owned());
-            if let Some(cmd_id) = chosen {
+            let chosen = matches.get(idx).or_else(|| matches.first()).map(|e| (e.id.to_owned(), e.origin));
+            if let Some((cmd_id, origin)) = chosen {
                 app.canvas_dialogs.close_dialog();
                 app.focus_widget_id = None;
-                return Some(
-                    app.execute_command(&cmd_id, json!({}))
-                        .map(|_| UiEventOutcome {
+                let res = match origin {
+                    CommandOrigin::Ui => crate::control_io::dispatch_ui_command(app, &cmd_id, &json!({}))
+                        .map(|payload_val| UiEventOutcome {
                             handled: true,
                             action: format!("palette.run:{cmd_id}"),
                             command_id: Some(cmd_id),
-                            ..UiEventOutcome::default()
+                            command_result: payload_val,
                         })
                         .map_err(|err| err.to_string()),
-                );
+                    CommandOrigin::Engine => app
+                        .execute_command(&cmd_id, json!({}))
+                        .map(|out| UiEventOutcome {
+                            handled: true,
+                            action: format!("palette.run:{cmd_id}"),
+                            command_id: Some(cmd_id),
+                            command_result: Some(out.payload),
+                        })
+                        .map_err(|err| err.to_string()),
+                };
+                return Some(res);
             }
             Some(handled_outcome(false))
         }
@@ -255,16 +280,27 @@ fn handle_graph_hook_export_action(app: &mut UiApp, state: &mut DialogsGraphMisc
         return Some(handled_outcome(true));
     }
     if payload == "graph_type:apply" {
-        if let Some(gid) = app.canvas_dialogs.change_graph_type.graph_sheet_id.clone() {
-            let opt_id = app.canvas_dialogs.change_graph_type.selected_option_id.clone();
-            let graph_kind = GRAPH_TYPE_OPTIONS.iter().find(|o| o.id == opt_id).map_or(GraphKind::Xy, |o| o.graph_kind);
-            let res = app.execute_command("graph.setKind", json!({ "sheet_id": gid.as_str(), "kind": graph_kind }));
-            return Some(match res {
-                Ok(_) => handled_outcome(true),
-                Err(err) => Err(err.to_string()),
-            });
+        let intents = app.canvas_dialogs.change_graph_type.commit_intents(app.document());
+        if intents.is_empty() {
+            return Some(handled_outcome(false));
         }
-        return Some(handled_outcome(false));
+        let mut last_cmd = None;
+        let mut last_payload = None;
+        for intent in intents {
+            match app.execute_command(&intent.command_id, intent.params) {
+                Ok(out) => {
+                    last_cmd = Some(out.command_id);
+                    last_payload = Some(out.payload);
+                }
+                Err(err) => return Some(Err(err.to_string())),
+            }
+        }
+        return Some(Ok(UiEventOutcome {
+            handled: true,
+            action: String::from("dialogs_graph_misc.updated"),
+            command_id: last_cmd,
+            command_result: last_payload,
+        }));
     }
     if let Some(cat) = payload.strip_prefix("hook:toggle_cat:") {
         match cat {
@@ -751,7 +787,7 @@ fn apply_sim_dist_param_step(app: &mut UiApp, state: &DialogsGraphMiscViewState,
         let s = if p_op.ends_with("inc") { 1.0 } else { -1.0 };
         if p_op.starts_with("p1_") {
             match col.distribution {
-                crate::dialogs_r9::SimDistKind::Uniform => col.min += s,
+                crate::dialogs_r9::SimDistKind::Uniform => col.min = (col.min + s).min(col.max - 0.5),
                 crate::dialogs_r9::SimDistKind::Gaussian => col.mean += s,
                 crate::dialogs_r9::SimDistKind::LogNormal => col.mean_log += s * 0.25,
                 crate::dialogs_r9::SimDistKind::Binomial => {

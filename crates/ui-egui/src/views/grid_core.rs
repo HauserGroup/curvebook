@@ -11,13 +11,13 @@
 
 use std::collections::BTreeMap;
 
-use curvebook_doc::{DataSheet, LinkedDataRegion, SheetId, TableArchetype};
+use curvebook_doc::{CellCoord, DataSheet, LinkedDataRegion, SheetCellRange, SheetId, TableArchetype};
 use curvebook_tools::GridCellCoord;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::UiApp;
-use crate::grid_view::{MoveDirection, data_set_subcolumn_count, format_cell_display, resolve_flat_coord, total_flat_data_subcolumns};
+use crate::grid_view::{GridClipboardTarget, MoveDirection, data_set_subcolumn_count, format_cell_display};
 use crate::i18n::{LocalePreset, normalize_locale, try_tr};
 use crate::interaction::{KeyModifiers, TextFieldEditState, UiEventOutcome};
 
@@ -298,15 +298,24 @@ fn apply_grid_nav_event(app: &mut UiApp, state: &mut GridCoreViewState, event: G
                 outcome.action = String::from("grid_core.frozen_read_only");
                 state.last_nav_summary = Some(String::from("edit:clear_blocked_frozen"));
             }
-            ClearSelectionPlan::LinkBlocked | ClearSelectionPlan::NothingToClear => {
+            ClearSelectionPlan::LinkBlocked => {
                 outcome.action = String::from("grid_core.link_read_only_prompt");
                 state.last_nav_summary = Some(String::from("edit:clear"));
             }
-            ClearSelectionPlan::Execute { sheet_id, cells_json } => {
-                let out = app.execute_command("table.clearCells", json!({ "sheet_id": sheet_id, "cells": cells_json })).map_err(|e| e.to_string())?;
+            ClearSelectionPlan::NothingToClear => {
+                outcome.action = String::from("grid_core.clear_selection_empty");
+                state.last_nav_summary = Some(String::from("edit:clear"));
+            }
+            ClearSelectionPlan::Execute { requests } => {
+                let mut last_out = None;
+                for req in requests {
+                    last_out = Some(app.execute_command("table.clearCells", req).map_err(|e| e.to_string())?);
+                }
                 outcome.action = String::from("grid_core.clear_selection");
-                outcome.command_id = Some(out.command_id);
-                outcome.command_result = Some(out.payload);
+                if let Some(out) = last_out {
+                    outcome.command_id = Some(out.command_id);
+                    outcome.command_result = Some(out.payload);
+                }
                 state.last_nav_summary = Some(String::from("edit:clear"));
             }
         }
@@ -325,7 +334,7 @@ fn apply_grid_nav_event(app: &mut UiApp, state: &mut GridCoreViewState, event: G
                 app.grid.navigate(ds, dir, extend, jump);
                 let cur = app.grid.tool.active.unwrap_or_default();
                 if extend {
-                    sync_extended_selection(&mut app.grid, ds);
+                    app.grid.extend_shift_range(ds, cur);
                 } else {
                     app.grid.select_single_sync(cur);
                 }
@@ -362,61 +371,67 @@ enum ClearSelectionPlan {
     Frozen,
     LinkBlocked,
     NothingToClear,
-    Execute { sheet_id: String, cells_json: Vec<serde_json::Value> },
+    Execute { requests: Vec<serde_json::Value> },
+}
+
+fn first_overlapping_linked_cell(ds: &DataSheet, range: SheetCellRange) -> Option<(usize, usize, usize, &LinkedDataRegion)> {
+    let r_lo = range.start.row.min(range.end.row);
+    let r_hi = range.start.row.max(range.end.row);
+    let cs_lo = (range.start.col, range.start.subcol).min((range.end.col, range.end.subcol));
+    let cs_hi = (range.start.col, range.start.subcol).max((range.end.col, range.end.subcol));
+    for region in &ds.linked_regions {
+        let rr_lo = region.target_range.start.row.min(region.target_range.end.row);
+        let rr_hi = region.target_range.start.row.max(region.target_range.end.row);
+        let rcs_lo =
+            (region.target_range.start.col, region.target_range.start.subcol).min((region.target_range.end.col, region.target_range.end.subcol));
+        let rcs_hi =
+            (region.target_range.start.col, region.target_range.start.subcol).max((region.target_range.end.col, region.target_range.end.subcol));
+        if r_lo <= rr_hi && rr_lo <= r_hi && cs_lo <= rcs_hi && rcs_lo <= cs_hi {
+            let hit_row = r_lo.max(rr_lo);
+            let hit_cs = cs_lo.max(rcs_lo);
+            return Some((hit_row, hit_cs.0, hit_cs.1, region));
+        }
+    }
+    None
 }
 
 fn prepare_clear_selected_cells(ds: &DataSheet, grid: &crate::grid_view::GridViewState, state: &mut GridCoreViewState) -> ClearSelectionPlan {
     if ds.frozen {
         return ClearSelectionPlan::Frozen;
     }
-    let mut coords = grid.all_selected_coords(ds);
-    if coords.is_empty()
-        && let Some(active) = grid.tool.active
-    {
-        coords.push(active);
-    }
-    if coords.is_empty() {
-        return ClearSelectionPlan::NothingToClear;
-    }
-    for coord in &coords {
-        if check_edit_blocked_by_link(ds, state, coord.row, coord.col, coord.subcol) {
-            return ClearSelectionPlan::LinkBlocked;
-        }
-    }
-    let cells_json: Vec<serde_json::Value> = coords
-        .iter()
-        .map(|c| {
-            json!({
-                "row": c.row,
-                "col": c.col,
-                "subcol": c.subcol,
-            })
-        })
-        .collect();
-    ClearSelectionPlan::Execute { sheet_id: ds.id.to_string(), cells_json }
-}
-
-fn sync_extended_selection(grid: &mut crate::grid_view::GridViewState, ds: &DataSheet) {
-    let Some((min_c, max_c)) = grid.tool.selection_bounds() else {
-        return;
+    let target = match grid.clipboard_target(ds) {
+        GridClipboardTarget::WholeSheetFallback => match grid.tool.active {
+            Some(c) if c.row < ds.archetype.row_count() && c.col < ds.archetype.column_count() => {
+                GridClipboardTarget::Cells(vec![CellCoord::new(c.row, c.col, c.subcol)])
+            }
+            _ => return ClearSelectionPlan::NothingToClear,
+        },
+        other => other,
     };
-    let total_flat = total_flat_data_subcolumns(&ds.archetype);
-    let max_row = max_c.row.min(ds.archetype.row_count().saturating_sub(1));
-    let mut coords = Vec::new();
-    let mut rows = Vec::new();
-    for row in min_c.row..=max_row {
-        rows.push(row);
-        for flat in 0..total_flat {
-            if let Some((col, subcol)) = resolve_flat_coord(&ds.archetype, flat)
-                && (col, subcol) >= (min_c.col, min_c.subcol)
-                && (col, subcol) <= (max_c.col, max_c.subcol)
-            {
-                coords.push(GridCellCoord::new(row, col, subcol));
+    match &target {
+        GridClipboardTarget::Range(range) => {
+            if let Some((hit_row, hit_col, hit_subcol, region)) = first_overlapping_linked_cell(ds, *range) {
+                let sheet_id = ds.id.to_string();
+                state.active_link_popover = Some(GridLinkPopoverState { sheet_id: sheet_id.clone(), region_id: region.id.clone() });
+                state.link_edit_warning =
+                    Some(GridLinkBlockPrompt { sheet_id, region_id: region.id.clone(), row: hit_row, col: hit_col, subcol: hit_subcol });
+                return ClearSelectionPlan::LinkBlocked;
             }
         }
+        GridClipboardTarget::Cells(coords) => {
+            for coord in coords {
+                if check_edit_blocked_by_link(ds, state, coord.row, coord.col, coord.subcol) {
+                    return ClearSelectionPlan::LinkBlocked;
+                }
+            }
+        }
+        GridClipboardTarget::WholeSheetFallback => return ClearSelectionPlan::NothingToClear,
     }
-    grid.selected_coords = coords;
-    grid.selected_rows = rows;
+    let requests = target.clear_cells_requests(ds);
+    if requests.is_empty() {
+        return ClearSelectionPlan::NothingToClear;
+    }
+    ClearSelectionPlan::Execute { requests }
 }
 
 fn step_tab_cell(grid: &mut crate::grid_view::GridViewState, ds: &DataSheet, backward: bool) {
@@ -764,7 +779,6 @@ fn handle_link_action(app: &mut UiApp, state: &mut GridCoreViewState, payload: &
             return Ok(Some(UiEventOutcome::default()));
         };
         let sid = ds.id.to_string();
-        let _ = region_id;
         let out = app
             .execute_command(
                 "table.clearCells",
@@ -772,6 +786,7 @@ fn handle_link_action(app: &mut UiApp, state: &mut GridCoreViewState, payload: &
                     "sheet_id": sid,
                     "cells": [],
                     "unlink": true,
+                    "region_id": region_id,
                 }),
             )
             .map_err(|e| e.to_string())?;

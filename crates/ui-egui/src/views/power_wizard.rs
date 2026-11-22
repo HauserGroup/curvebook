@@ -145,7 +145,7 @@ pub fn handle_custom_action(app: &mut UiApp, state: &mut PowerWizardViewState, p
 
 fn handle_stage_action(app: &mut UiApp, state: &mut PowerWizardViewState, raw_stage: &str) -> Result<UiEventOutcome, String> {
     let idx: usize = raw_stage.trim().parse().map_err(|_| format!("invalid power stage `{raw_stage}`"))?;
-    let target = PowerWizardStage::from_index(idx.saturating_sub(1)).ok_or_else(|| format!("unknown power stage `{idx}`"))?;
+    let target = idx.checked_sub(1).and_then(PowerWizardStage::from_index).ok_or_else(|| format!("unknown power stage `{idx}`"))?;
     match app.canvas_dialogs.power_wizard.step_to_stage(target) {
         Ok(()) => {
             state.last_error = None;

@@ -1100,6 +1100,7 @@ fn table_command_alias(command_id: &str, path: &[&str], key: &str) -> Option<&'s
                 ("colEnd", "col_end"),
                 ("subcolStart", "subcol_start"),
                 ("subcolEnd", "subcol_end"),
+                ("regionId", "region_id"),
             ],
             key,
         ),
