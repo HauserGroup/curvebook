@@ -40,118 +40,38 @@
 
 use std::f64::consts::PI;
 
-use super::{BuiltinEquationSpec, ParametricModel, data_x_min_max, data_y_min_max, resolve_from_specs, spec_ids};
+use super::{BuiltinEquationSpec, ModelMeta, ParametricModel, data_x_min_max, data_y_min_max, resolve_from_specs, safe_exp, spec_ids};
 use crate::types::{DataPoint, EquationCategory};
 
 /// Ordered single-source-of-truth registrations for all 27 NIST StRD nonlinear models.
 pub(crate) const NIST_SPECS: &[BuiltinEquationSpec] = &[
-    BuiltinEquationSpec {
-        id: "nist_misra1a",
-        aliases: &["misra1a"],
-        build: || Box::new(NistModel::new("nist_misra1a", "NIST Misra1a", NistKind::Misra1a, 2)),
-    },
-    BuiltinEquationSpec {
-        id: "nist_chwirut2",
-        aliases: &["chwirut2"],
-        build: || Box::new(NistModel::new("nist_chwirut2", "NIST Chwirut2", NistKind::Chwirut, 3)),
-    },
-    BuiltinEquationSpec {
-        id: "nist_chwirut1",
-        aliases: &["chwirut1"],
-        build: || Box::new(NistModel::new("nist_chwirut1", "NIST Chwirut1", NistKind::Chwirut, 3)),
-    },
-    BuiltinEquationSpec {
-        id: "nist_lanczos3",
-        aliases: &["lanczos3"],
-        build: || Box::new(NistModel::new("nist_lanczos3", "NIST Lanczos3", NistKind::Lanczos, 6)),
-    },
-    BuiltinEquationSpec {
-        id: "nist_gauss1",
-        aliases: &["gauss1"],
-        build: || Box::new(NistModel::new("nist_gauss1", "NIST Gauss1", NistKind::Gauss, 8)),
-    },
-    BuiltinEquationSpec {
-        id: "nist_gauss2",
-        aliases: &["gauss2"],
-        build: || Box::new(NistModel::new("nist_gauss2", "NIST Gauss2", NistKind::Gauss, 8)),
-    },
-    BuiltinEquationSpec {
-        id: "nist_danwood",
-        aliases: &["danwood"],
-        build: || Box::new(NistModel::new("nist_danwood", "NIST DanWood", NistKind::DanWood, 2)),
-    },
-    BuiltinEquationSpec {
-        id: "nist_misra1b",
-        aliases: &["misra1b"],
-        build: || Box::new(NistModel::new("nist_misra1b", "NIST Misra1b", NistKind::Misra1b, 2)),
-    },
-    BuiltinEquationSpec {
-        id: "nist_kirby2",
-        aliases: &["kirby2"],
-        build: || Box::new(NistModel::new("nist_kirby2", "NIST Kirby2", NistKind::Kirby2, 5)),
-    },
-    BuiltinEquationSpec { id: "nist_hahn1", aliases: &["hahn1"], build: || Box::new(NistModel::new("nist_hahn1", "NIST Hahn1", NistKind::Hahn1, 7)) },
-    BuiltinEquationSpec {
-        id: "nist_nelson",
-        aliases: &["nelson"],
-        build: || Box::new(NistModel::new("nist_nelson", "NIST Nelson", NistKind::Nelson, 3)),
-    },
-    BuiltinEquationSpec { id: "nist_mgh17", aliases: &["mgh17"], build: || Box::new(NistModel::new("nist_mgh17", "NIST MGH17", NistKind::Mgh17, 5)) },
-    BuiltinEquationSpec {
-        id: "nist_lanczos1",
-        aliases: &["lanczos1"],
-        build: || Box::new(NistModel::new("nist_lanczos1", "NIST Lanczos1", NistKind::Lanczos, 6)),
-    },
-    BuiltinEquationSpec {
-        id: "nist_lanczos2",
-        aliases: &["lanczos2"],
-        build: || Box::new(NistModel::new("nist_lanczos2", "NIST Lanczos2", NistKind::Lanczos, 6)),
-    },
-    BuiltinEquationSpec {
-        id: "nist_gauss3",
-        aliases: &["gauss3"],
-        build: || Box::new(NistModel::new("nist_gauss3", "NIST Gauss3", NistKind::Gauss, 8)),
-    },
-    BuiltinEquationSpec {
-        id: "nist_misra1c",
-        aliases: &["misra1c"],
-        build: || Box::new(NistModel::new("nist_misra1c", "NIST Misra1c", NistKind::Misra1c, 2)),
-    },
-    BuiltinEquationSpec {
-        id: "nist_misra1d",
-        aliases: &["misra1d"],
-        build: || Box::new(NistModel::new("nist_misra1d", "NIST Misra1d", NistKind::Misra1d, 2)),
-    },
-    BuiltinEquationSpec {
-        id: "nist_roszman1",
-        aliases: &["roszman1"],
-        build: || Box::new(NistModel::new("nist_roszman1", "NIST Roszman1", NistKind::Roszman1, 4)),
-    },
-    BuiltinEquationSpec { id: "nist_enso", aliases: &["enso"], build: || Box::new(NistModel::new("nist_enso", "NIST ENSO", NistKind::Enso, 9)) },
-    BuiltinEquationSpec { id: "nist_mgh09", aliases: &["mgh09"], build: || Box::new(NistModel::new("nist_mgh09", "NIST MGH09", NistKind::Mgh09, 4)) },
-    BuiltinEquationSpec {
-        id: "nist_thurber",
-        aliases: &["thurber"],
-        build: || Box::new(NistModel::new("nist_thurber", "NIST Thurber", NistKind::Thurber, 7)),
-    },
-    BuiltinEquationSpec {
-        id: "nist_boxbod",
-        aliases: &["boxbod"],
-        build: || Box::new(NistModel::new("nist_boxbod", "NIST BoxBOD", NistKind::BoxBod, 2)),
-    },
-    BuiltinEquationSpec { id: "nist_rat42", aliases: &["rat42"], build: || Box::new(NistModel::new("nist_rat42", "NIST Rat42", NistKind::Rat42, 3)) },
-    BuiltinEquationSpec { id: "nist_mgh10", aliases: &["mgh10"], build: || Box::new(NistModel::new("nist_mgh10", "NIST MGH10", NistKind::Mgh10, 3)) },
-    BuiltinEquationSpec {
-        id: "nist_eckerle4",
-        aliases: &["eckerle4"],
-        build: || Box::new(NistModel::new("nist_eckerle4", "NIST Eckerle4", NistKind::Eckerle4, 3)),
-    },
-    BuiltinEquationSpec { id: "nist_rat43", aliases: &["rat43"], build: || Box::new(NistModel::new("nist_rat43", "NIST Rat43", NistKind::Rat43, 4)) },
-    BuiltinEquationSpec {
-        id: "nist_bennett5",
-        aliases: &["bennett5"],
-        build: || Box::new(NistModel::new("nist_bennett5", "NIST Bennett5", NistKind::Bennett5, 3)),
-    },
+    BuiltinEquationSpec::new("nist_misra1a", &["misra1a"], || Box::new(NistModel::new("nist_misra1a", "NIST Misra1a", NistKind::Misra1a, 2))),
+    BuiltinEquationSpec::new("nist_chwirut2", &["chwirut2"], || Box::new(NistModel::new("nist_chwirut2", "NIST Chwirut2", NistKind::Chwirut, 3))),
+    BuiltinEquationSpec::new("nist_chwirut1", &["chwirut1"], || Box::new(NistModel::new("nist_chwirut1", "NIST Chwirut1", NistKind::Chwirut, 3))),
+    BuiltinEquationSpec::new("nist_lanczos3", &["lanczos3"], || Box::new(NistModel::new("nist_lanczos3", "NIST Lanczos3", NistKind::Lanczos, 6))),
+    BuiltinEquationSpec::new("nist_gauss1", &["gauss1"], || Box::new(NistModel::new("nist_gauss1", "NIST Gauss1", NistKind::Gauss, 8))),
+    BuiltinEquationSpec::new("nist_gauss2", &["gauss2"], || Box::new(NistModel::new("nist_gauss2", "NIST Gauss2", NistKind::Gauss, 8))),
+    BuiltinEquationSpec::new("nist_danwood", &["danwood"], || Box::new(NistModel::new("nist_danwood", "NIST DanWood", NistKind::DanWood, 2))),
+    BuiltinEquationSpec::new("nist_misra1b", &["misra1b"], || Box::new(NistModel::new("nist_misra1b", "NIST Misra1b", NistKind::Misra1b, 2))),
+    BuiltinEquationSpec::new("nist_kirby2", &["kirby2"], || Box::new(NistModel::new("nist_kirby2", "NIST Kirby2", NistKind::Kirby2, 5))),
+    BuiltinEquationSpec::new("nist_hahn1", &["hahn1"], || Box::new(NistModel::new("nist_hahn1", "NIST Hahn1", NistKind::Hahn1, 7))),
+    BuiltinEquationSpec::new("nist_nelson", &["nelson"], || Box::new(NistModel::new("nist_nelson", "NIST Nelson", NistKind::Nelson, 3))),
+    BuiltinEquationSpec::new("nist_mgh17", &["mgh17"], || Box::new(NistModel::new("nist_mgh17", "NIST MGH17", NistKind::Mgh17, 5))),
+    BuiltinEquationSpec::new("nist_lanczos1", &["lanczos1"], || Box::new(NistModel::new("nist_lanczos1", "NIST Lanczos1", NistKind::Lanczos, 6))),
+    BuiltinEquationSpec::new("nist_lanczos2", &["lanczos2"], || Box::new(NistModel::new("nist_lanczos2", "NIST Lanczos2", NistKind::Lanczos, 6))),
+    BuiltinEquationSpec::new("nist_gauss3", &["gauss3"], || Box::new(NistModel::new("nist_gauss3", "NIST Gauss3", NistKind::Gauss, 8))),
+    BuiltinEquationSpec::new("nist_misra1c", &["misra1c"], || Box::new(NistModel::new("nist_misra1c", "NIST Misra1c", NistKind::Misra1c, 2))),
+    BuiltinEquationSpec::new("nist_misra1d", &["misra1d"], || Box::new(NistModel::new("nist_misra1d", "NIST Misra1d", NistKind::Misra1d, 2))),
+    BuiltinEquationSpec::new("nist_roszman1", &["roszman1"], || Box::new(NistModel::new("nist_roszman1", "NIST Roszman1", NistKind::Roszman1, 4))),
+    BuiltinEquationSpec::new("nist_enso", &["enso"], || Box::new(NistModel::new("nist_enso", "NIST ENSO", NistKind::Enso, 9))),
+    BuiltinEquationSpec::new("nist_mgh09", &["mgh09"], || Box::new(NistModel::new("nist_mgh09", "NIST MGH09", NistKind::Mgh09, 4))),
+    BuiltinEquationSpec::new("nist_thurber", &["thurber"], || Box::new(NistModel::new("nist_thurber", "NIST Thurber", NistKind::Thurber, 7))),
+    BuiltinEquationSpec::new("nist_boxbod", &["boxbod"], || Box::new(NistModel::new("nist_boxbod", "NIST BoxBOD", NistKind::BoxBod, 2))),
+    BuiltinEquationSpec::new("nist_rat42", &["rat42"], || Box::new(NistModel::new("nist_rat42", "NIST Rat42", NistKind::Rat42, 3))),
+    BuiltinEquationSpec::new("nist_mgh10", &["mgh10"], || Box::new(NistModel::new("nist_mgh10", "NIST MGH10", NistKind::Mgh10, 3))),
+    BuiltinEquationSpec::new("nist_eckerle4", &["eckerle4"], || Box::new(NistModel::new("nist_eckerle4", "NIST Eckerle4", NistKind::Eckerle4, 3))),
+    BuiltinEquationSpec::new("nist_rat43", &["rat43"], || Box::new(NistModel::new("nist_rat43", "NIST Rat43", NistKind::Rat43, 4))),
+    BuiltinEquationSpec::new("nist_bennett5", &["bennett5"], || Box::new(NistModel::new("nist_bennett5", "NIST Bennett5", NistKind::Bennett5, 3))),
 ];
 
 const NIST_EQUATION_ID_ARRAY: [&str; NIST_SPECS.len()] = spec_ids::<{ NIST_SPECS.len() }>(NIST_SPECS);
@@ -211,16 +131,14 @@ pub enum NistKind {
 /// Parametric model wrapper for a NIST StRD nonlinear regression benchmark dataset equation.
 #[derive(Debug, Clone)]
 pub struct NistModel {
-    id: String,
-    name: String,
+    meta: ModelMeta,
     kind: NistKind,
-    param_names: Vec<String>,
 }
 
 impl NistModel {
-    fn new(id: &str, name: &str, kind: NistKind, count: usize) -> Self {
-        let param_names = (1..=count).map(|i| format!("b{i}")).collect();
-        Self { id: id.to_owned(), name: name.to_owned(), kind, param_names }
+    fn new(id: &'static str, name: &'static str, kind: NistKind, count: usize) -> Self {
+        let params = (1..=count).map(|i| format!("b{i}")).collect();
+        Self { meta: ModelMeta { id, name, category: EquationCategory::NistBenchmark, params }, kind }
     }
 }
 
@@ -230,30 +148,8 @@ pub fn resolve_nist_model(norm_id: &str) -> Option<Box<dyn ParametricModel>> {
     resolve_from_specs(NIST_SPECS, norm_id)
 }
 
-fn safe_exp(arg: f64) -> Option<f64> {
-    if !arg.is_finite() || arg > 700.0 {
-        return None;
-    }
-    let val = arg.exp();
-    val.is_finite().then_some(val)
-}
-
 impl ParametricModel for NistModel {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn category(&self) -> EquationCategory {
-        EquationCategory::NistBenchmark
-    }
-
-    fn param_names(&self) -> &[String] {
-        &self.param_names
-    }
+    impl_meta_methods!();
 
     fn eval(&self, x_vec: &[f64], b: &[f64], _dataset_index: usize) -> Option<f64> {
         let x = *x_vec.first()?;
