@@ -432,6 +432,41 @@ impl XyTable {
         SummarizedPoint::reconstruct(subcolumn_mode, subcells)
     }
 
+    /// Resolve the canonical scalar summary `X` value at `row` across every [`XColumnMode`].
+    ///
+    /// - `GeneratedSequence` / `DateOrElapsedTime`: delegates to [`Self::x_value_at`].
+    /// - `Numbers` with `Single`: reads subcolumn `0` active numeric value.
+    /// - `RawReplicates(_)`: compensated mean over all active finite replicates in `x_cells[row]` (`None` if none).
+    /// - `MeanSdN | MeanSemN | MeanCvN`: validates and reconstructs [`SummarizedPoint`] via [`Self::summarized_x_point`],
+    ///   returning `Ok(Some(pt.mean))` (or propagating [`SummaryPointError`]).
+    /// - `MeanLowHigh | UpperLowerLimits | MedianIqr`: returns subcolumn `0` active numeric center.
+    pub fn x_summary_at(&self, row: usize) -> Result<Option<f64>, SummaryPointError> {
+        if row >= self.row_count() {
+            return Ok(None);
+        }
+        match &self.x_mode {
+            XColumnMode::GeneratedSequence { .. } | XColumnMode::DateOrElapsedTime { .. } => Ok(self.x_value_at(row)),
+            XColumnMode::Numbers { subcolumn_mode } => match subcolumn_mode {
+                SubcolumnMode::Single | SubcolumnMode::MeanLowHigh | SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr => {
+                    Ok(self.x_cells.get(row).and_then(|subs| subs.first()).and_then(Cell::active_number))
+                }
+                SubcolumnMode::RawReplicates(_) => {
+                    let Some(subs) = self.x_cells.get(row) else {
+                        return Ok(None);
+                    };
+                    let vals: Vec<f64> = subs.iter().filter_map(Cell::active_number).collect();
+                    if vals.is_empty() {
+                        return Ok(None);
+                    }
+                    Ok(curvebook_math::sum::mean(&vals).ok())
+                }
+                SubcolumnMode::MeanSdN | SubcolumnMode::MeanSemN | SubcolumnMode::MeanCvN => {
+                    self.summarized_x_point(row).map(|opt| opt.map(|pt| pt.mean))
+                }
+            },
+        }
+    }
+
     /// Reconstruct parametric `(Mean, SD, N, SS_within)` for pre-summarized Y rows.
     pub fn summarized_y_point(&self, row: usize, data_set: usize) -> Result<Option<SummarizedPoint>, SummaryPointError> {
         let Some(ds) = self.data_sets.get(data_set) else {
@@ -451,7 +486,7 @@ impl XyTable {
         };
         let mut pairs = Vec::new();
         for (row, subcells) in ds.cells.iter().enumerate() {
-            let Some(x) = self.x_value_at(row) else {
+            let Some(x) = self.x_summary_at(row).ok().flatten() else {
                 continue;
             };
             if self.y_subcolumn_mode.is_pre_summarized() {

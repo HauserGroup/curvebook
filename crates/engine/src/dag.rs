@@ -535,6 +535,7 @@ fn recalculate_project_scoped(
     }
 
     *doc = working;
+    crate::cmd::helpers::prune_out_of_bounds_point_overrides(doc);
     Ok((report, refreshed_links))
 }
 
@@ -616,6 +617,7 @@ fn evaluate_data_sheet_node(
         return Ok(0);
     }
 
+    let before_active = crate::cmd::helpers::snapshot_active_series_lengths(working, &sheet_id);
     let had_links = !working.data_sheets[ds_idx].linked_regions.is_empty();
     let refreshed = refresh_data_sheet_links(working, ds_idx, external_policy)?;
 
@@ -626,6 +628,7 @@ fn evaluate_data_sheet_node(
         .map_err(|err| EngineError::new(format!("calculated variables on sheet `{sheet_id}` failed: {err}")))?;
 
     if had_links || !eval_cols.is_empty() {
+        crate::cmd::helpers::prune_shortened_series_overrides(working, &sheet_id, &before_active);
         report.updated_data_sheets.push(sheet_id);
     }
     Ok(refreshed)
@@ -749,6 +752,40 @@ fn assign_ds_title(sets: &mut [DataSetColumn], col: usize, title: &str) {
     }
 }
 
+pub(crate) enum ResolvedInternalLinkSource<'a> {
+    Data { sheet: &'a DataSheet, propagate_titles: bool },
+    Result(&'a ResultSheet),
+}
+
+pub(crate) fn resolve_internal_link_source<'a>(
+    doc: &'a ProjectDocument,
+    sheet_id: &SheetId,
+    kind: InternalLinkKind,
+    tab_id: Option<&str>,
+) -> Option<ResolvedInternalLinkSource<'a>> {
+    match kind {
+        InternalLinkKind::DataSheet => doc.data_sheet(sheet_id).map(|sheet| ResolvedInternalLinkSource::Data { sheet, propagate_titles: true }),
+        InternalLinkKind::AnalyzableResultSheet => {
+            if let Some(sheet) = doc.data_sheet(sheet_id) {
+                return Some(ResolvedInternalLinkSource::Data { sheet, propagate_titles: true });
+            }
+            let src_rs = doc.result_sheet(sheet_id)?;
+            if tab_id.is_none()
+                && let Some(analyzable) = src_rs.analyzable_data.as_ref()
+            {
+                return Some(ResolvedInternalLinkSource::Data { sheet: analyzable, propagate_titles: false });
+            }
+            Some(ResolvedInternalLinkSource::Result(src_rs))
+        }
+        InternalLinkKind::TerminalResultSheet => {
+            if let Some(sheet) = doc.data_sheet(sheet_id) {
+                return Some(ResolvedInternalLinkSource::Data { sheet, propagate_titles: true });
+            }
+            doc.result_sheet(sheet_id).map(ResolvedInternalLinkSource::Result)
+        }
+    }
+}
+
 enum ResolvedRefreshSource<'a> {
     InternalData { sheet: &'a DataSheet, propagate_titles: bool },
     InternalResult(&'a ResultSheet),
@@ -765,22 +802,16 @@ fn resolve_refresh_source<'a>(
     match source {
         LinkSource::Clipboard => Ok(None),
         LinkSource::InternalSheet { sheet_id, kind, tab_id, .. } => {
-            if let Some(src_ds) = working.data_sheet(sheet_id) {
-                return Ok(Some(ResolvedRefreshSource::InternalData { sheet: src_ds, propagate_titles: true }));
-            }
-            let Some(src_rs) = working.result_sheet(sheet_id) else {
-                return Ok(None);
-            };
-            if let Err((_, detail)) = check_upstream_result_status(src_rs, sheet_id) {
+            if working.data_sheet(sheet_id).is_none()
+                && let Some(src_rs) = working.result_sheet(sheet_id)
+                && let Err((_, detail)) = check_upstream_result_status(src_rs, sheet_id)
+            {
                 return Err(EngineError::new(format!("linked region `{region_id}` refresh on sheet `{target_id}` failed: {detail}")));
             }
-            if *kind == InternalLinkKind::AnalyzableResultSheet
-                && tab_id.is_none()
-                && let Some(analyzable) = src_rs.analyzable_data.as_ref()
-            {
-                return Ok(Some(ResolvedRefreshSource::InternalData { sheet: analyzable, propagate_titles: false }));
-            }
-            Ok(Some(ResolvedRefreshSource::InternalResult(src_rs)))
+            Ok(resolve_internal_link_source(working, sheet_id, *kind, tab_id.as_deref()).map(|resolved| match resolved {
+                ResolvedInternalLinkSource::Data { sheet, propagate_titles } => ResolvedRefreshSource::InternalData { sheet, propagate_titles },
+                ResolvedInternalLinkSource::Result(src_rs) => ResolvedRefreshSource::InternalResult(src_rs),
+            }))
         }
         LinkSource::ExternalDelimitedFile { path, delimiter, decimal_separator } => {
             let Some(policy) = external_policy else {
@@ -789,58 +820,6 @@ fn resolve_refresh_source<'a>(
             let text = policy.read_utf8_file(path, "linked file", MAX_CSV_FILE_BYTES)?;
             Ok(Some(ResolvedRefreshSource::Delimited { text, delimiter: *delimiter, decimal_separator: *decimal_separator }))
         }
-    }
-}
-
-fn format_ci_bound_text(bound: CiBound, is_lower: bool) -> String {
-    match bound {
-        CiBound::Finite(v) => {
-            let clean = if v == 0.0 { 0.0 } else { v };
-            if clean.fract() == 0.0 && clean.abs() < 1e12 { format!("{clean:.0}") } else { clean.to_string() }
-        }
-        CiBound::Open => String::from(if is_lower { "-inf" } else { "+inf" }),
-    }
-}
-
-/// Format `ResultCell::ConfidenceInterval` cells into readable `[lo, hi]` strings after importing
-/// or refreshing a `ResultTab` (whose L2 transform importer emits empty cells for intervals).
-pub(crate) fn backfill_confidence_interval_cells(target: &mut DataSheet, src_rs: &ResultSheet, spec: &ImportLinkSpec, target_range: SheetCellRange) {
-    let LinkSource::InternalSheet { tab_id, range, .. } = &spec.source else {
-        return;
-    };
-    let Some(tab) = (if let Some(tid) = tab_id { src_rs.tabs.iter().find(|t| &t.id == tid) } else { src_rs.tabs.first() }) else {
-        return;
-    };
-    if tab.rows.is_empty() || spec.placement.transpose {
-        return;
-    }
-    let end_r = range.end.row.min(tab.rows.len().saturating_sub(1));
-    if range.start.row > end_r {
-        return;
-    }
-    let mut grid_row = 0usize;
-    for r in range.start.row..=end_r {
-        let row = &tab.rows[r];
-        let end_c = range.end.col.min(row.len().saturating_sub(1));
-        if row.is_empty() || range.start.col > end_c {
-            continue;
-        }
-        let target_r = target_range.start.row.saturating_add(grid_row);
-        if target_r > target_range.end.row {
-            break;
-        }
-        for (grid_col, c) in (range.start.col..=end_c).enumerate() {
-            if let Some(ResultCell::ConfidenceInterval { lower, upper }) = row.get(c) {
-                let target_c = target_range.start.col.saturating_add(grid_col);
-                if target_c > target_range.end.col {
-                    continue;
-                }
-                let subcol = if grid_col == 0 { target_range.start.subcol } else { 0 };
-                let text = format!("[{}, {}]", format_ci_bound_text(*lower, true), format_ci_bound_text(*upper, false));
-                let _ = target.set_cell(CellCoord::new(target_r, target_c, subcol), Cell::text(text));
-            }
-        }
-        grid_row = grid_row.saturating_add(1);
     }
 }
 
@@ -885,14 +864,12 @@ fn refresh_single_region(
     target.prune_stale_exclusion_notes();
     if let ResolvedRefreshSource::InternalData { sheet, propagate_titles: true } = resolved {
         propagate_internal_source_titles(target, &refresh_spec, report.target_range.start.col, sheet);
-    } else if let ResolvedRefreshSource::InternalResult(src_rs) = resolved {
-        backfill_confidence_interval_cells(target, src_rs, &refresh_spec, report.target_range);
-        if region.id.starts_with("result-tab-")
-            && let LinkSource::InternalSheet { tab_id, .. } = &refresh_spec.source
-            && let Some(tab) = tab_id.as_ref().and_then(|tid| src_rs.tabs.iter().find(|t| &t.id == tid)).or_else(|| src_rs.tabs.first())
-        {
-            crate::cmd::helpers::apply_result_tab_metadata_to_sheet(target, tab);
-        }
+    } else if let ResolvedRefreshSource::InternalResult(src_rs) = resolved
+        && region.id.starts_with("result-tab-")
+        && let LinkSource::InternalSheet { tab_id, .. } = &refresh_spec.source
+        && let Some(tab) = tab_id.as_ref().and_then(|tid| src_rs.tabs.iter().find(|t| &t.id == tid)).or_else(|| src_rs.tabs.first())
+    {
+        crate::cmd::helpers::apply_result_tab_metadata_to_sheet(target, tab);
     }
     target.linked_regions[reg_idx].target_range = report.target_range;
     target.linked_regions[reg_idx].provenance_summary = report.provenance_summary;

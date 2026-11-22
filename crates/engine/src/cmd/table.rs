@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 use super::helpers::{
     column_subcolumn_count, ensure_sheet_not_frozen, link_data_sheet_to_info, next_unique_sheet_id, parse_sheet_id, prune_shortened_series_overrides,
     require_analyzable_data_sheet, require_data_sheet, require_info_sheet_mut, require_unfrozen_data_sheet_mut, sheet_id_exists,
-    snapshot_active_series_lengths, x_subcolumn_count,
+    shift_point_overrides_on_insert_rows, snapshot_active_series_lengths, x_subcolumn_count,
 };
 use super::params::{
     array_schema, bool_schema, deserialize_strict, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema,
@@ -2673,6 +2673,8 @@ fn run_paste(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineErro
     let spec = ImportLinkSpec { source: LinkSource::Clipboard, filter, placement };
 
     let doc = &mut ctx.session.doc;
+    let before_active = snapshot_active_series_lengths(doc, &id);
+    let existing_rows_before = doc.data_sheet(&id).map_or(0, |d| d.archetype.row_count());
     let other_project_cells = doc.total_allocated_cells()?.saturating_sub(doc.data_sheet(&id).map_or(0, |d| d.archetype.allocated_cell_slots()));
     let ds = require_unfrozen_data_sheet_mut(doc, &id)?;
     let old_cols = ds.archetype.column_count();
@@ -2710,7 +2712,11 @@ fn run_paste(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineErro
             }
         }
     }
+    if spec.placement.mode == PlacementMode::InsertRows && spec.placement.anchor.row < existing_rows_before && report.rows_placed > 0 {
+        shift_point_overrides_on_insert_rows(doc, &id, spec.placement.anchor.row, report.rows_placed);
+    }
     let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
+    prune_shortened_series_overrides(doc, &id, &before_active);
     Ok(CommandOutcome::mutated(
         "table.paste",
         "pasted table data",
@@ -4684,19 +4690,26 @@ fn remap_graph_spec_for_conversion(
 ) {
     let old_series = spec.series.clone();
     let mut kept_series = Vec::with_capacity(spec.series.len());
+    let mut slot_targets: Vec<Vec<usize>> = Vec::with_capacity(old_series.len());
     for mut s in std::mem::take(&mut spec.series) {
         if s.source_sheet_id == *target_sheet_id {
             match plan.cols.get(s.data_set_index) {
                 Some(ColMapTarget::Exact(new_col)) => {
+                    let slot = kept_series.len();
                     s.data_set_index = *new_col;
                     kept_series.push(s);
+                    slot_targets.push(vec![slot]);
                 }
                 Some(ColMapTarget::Expanded(cols)) if !cols.is_empty() => {
+                    let mut slots = Vec::with_capacity(cols.len());
                     for &new_col in cols {
+                        let slot = kept_series.len();
                         let mut expanded = s.clone();
                         expanded.data_set_index = new_col;
                         kept_series.push(expanded);
+                        slots.push(slot);
                     }
+                    slot_targets.push(slots);
                 }
                 _ => {
                     let reason = plan
@@ -4704,31 +4717,50 @@ fn remap_graph_spec_for_conversion(
                         .err()
                         .unwrap_or_else(|| format!("column {} has no target after conversion", s.data_set_index));
                     warnings.push(format!("Graph `{graph_id}` dropped series binding: {reason}"));
+                    slot_targets.push(Vec::new());
                 }
             }
         } else {
+            let slot = kept_series.len();
             kept_series.push(s);
+            slot_targets.push(vec![slot]);
         }
     }
     spec.series = kept_series;
 
     if !spec.point_overrides.is_empty() {
         let mut kept_overrides = Vec::with_capacity(spec.point_overrides.len());
-        for ov in std::mem::take(&mut spec.point_overrides) {
+        for mut ov in std::mem::take(&mut spec.point_overrides) {
             if !old_series.is_empty() {
-                let Some(prev_series) = old_series.iter().find(|s| s.data_set_index == ov.series_index) else {
-                    warnings.push(format!("Graph `{graph_id}` dropped orphaned point override on series {}", ov.series_index));
+                let old_slot = ov.series_index;
+                let Some(prev_series) = old_series.get(old_slot) else {
+                    warnings.push(format!("Graph `{graph_id}` dropped orphaned point override on series {old_slot}"));
                     continue;
                 };
+                let target_slots = slot_targets.get(old_slot).map(Vec::as_slice).unwrap_or(&[]);
                 if prev_series.source_sheet_id != *target_sheet_id {
-                    kept_overrides.push(ov);
+                    if let Some(&new_slot) = target_slots.first() {
+                        ov.series_index = new_slot;
+                        kept_overrides.push(ov);
+                    }
                     continue;
+                }
+                if target_slots.is_empty() {
+                    warnings.push(format!("Graph `{graph_id}` dropped point override for removed series {old_slot}"));
+                    continue;
+                }
+                ov.series_index = prev_series.data_set_index;
+                for mut mapped in remap_point_override_for_conversion(ov, plan, converted_ds, warnings, graph_id) {
+                    if let Some(&new_slot) = target_slots.iter().find(|&&slot| spec.series[slot].data_set_index == mapped.series_index) {
+                        mapped.series_index = new_slot;
+                        kept_overrides.push(mapped);
+                    }
                 }
             } else if spec.primary_source_sheet_id != *target_sheet_id {
                 kept_overrides.push(ov);
-                continue;
+            } else {
+                kept_overrides.extend(remap_point_override_for_conversion(ov, plan, converted_ds, warnings, graph_id));
             }
-            kept_overrides.extend(remap_point_override_for_conversion(ov, plan, converted_ds, warnings, graph_id));
         }
         spec.point_overrides = kept_overrides;
     }

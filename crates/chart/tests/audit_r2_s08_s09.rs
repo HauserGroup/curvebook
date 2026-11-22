@@ -327,9 +327,9 @@ fn r2_s08_03_bubble_and_diagnostic_plots_honor_point_overrides_brushing_and_subc
         "Normal Q-Q hit_test_point must resolve brushed cell"
     );
 
-    // Hiding (series=1, row=2) hides ONLY the y=10.0 point (`lowest_y_pt`), NOT row=0 or rank=2!
+    // Hiding (spec.series[0] backed by data_set=1, row=2) hides ONLY the y=10.0 point (`lowest_y_pt`), NOT row=0 or rank=2!
     let mut g_qq_hide = g_qq;
-    g_qq_hide.spec.point_overrides.push(PointStyleOverride { series_index: 1, point_index: 2, hidden: true, ..Default::default() });
+    g_qq_hide.spec.point_overrides.push(PointStyleOverride { series_index: 0, point_index: 2, hidden: true, ..Default::default() });
     let sc_qq_hide = compile_graph(&g_qq_hide, &doc_qq)?;
     assert_eq!(sc_qq_hide.plotted_points.len(), 2);
     assert!(!sc_qq_hide.plotted_points.iter().any(|p| p.source_cell.row == 2));

@@ -244,7 +244,9 @@ fn compile_bubble_scatter(
             stroke_color: Rgba8::rgba(25, 25, 25, 210),
             stroke_width_pt: 0.75,
         };
-        let Some(marker) = crate::resolve_overridden_marker_for_cell(&graph.spec, enc.y_column, pt.row, Some(0), base_marker) else {
+        let Some(marker) =
+            crate::resolve_overridden_marker_for_col(&graph.spec, &graph.spec.primary_source_sheet_id, enc.y_column, pt.row, Some(0), base_marker)
+        else {
             continue;
         };
         let center_pt = PointPt::new(px, py);
@@ -956,7 +958,14 @@ fn percentile_linear(sorted: &[f64], q: f64) -> f64 {
 fn emit_categorical_dots(scene: &mut ChartScene, sorted_obs: &[CatObs], ctx: &CatDotCtx<'_>) {
     let sheet_id = &ctx.graph.spec.primary_source_sheet_id;
     for (i, obs) in sorted_obs.iter().enumerate() {
-        let Some(marker) = crate::resolve_overridden_marker_for_cell(&ctx.graph.spec, ctx.y_col_idx, obs.row, Some(0), ctx.marker) else {
+        let Some(marker) = crate::resolve_overridden_marker_for_col(
+            &ctx.graph.spec,
+            &ctx.graph.spec.primary_source_sheet_id,
+            ctx.y_col_idx,
+            obs.row,
+            Some(0),
+            ctx.marker,
+        ) else {
             continue;
         };
         let Some((_, py)) = ctx.y_axis.map_value(obs.value) else { continue };
@@ -1078,7 +1087,14 @@ fn draw_box_and_whisker_slot(scene: &mut ChartScene, sorted_obs: &[CatObs], sort
         let base_outlier = MarkerStyle { size_pt: 4.5, fill_color, stroke_color, ..MarkerStyle::default() };
         for obs in sorted_obs {
             if (obs.value < w_lo || obs.value > w_hi)
-                && let Some(marker) = crate::resolve_overridden_marker_for_cell(&slot.graph.spec, slot.y_col_idx, obs.row, Some(0), base_outlier)
+                && let Some(marker) = crate::resolve_overridden_marker_for_col(
+                    &slot.graph.spec,
+                    &slot.graph.spec.primary_source_sheet_id,
+                    slot.y_col_idx,
+                    obs.row,
+                    Some(0),
+                    base_outlier,
+                )
                 && let Some((_, py)) = y_axis.map_value(obs.value)
             {
                 let center_pt = PointPt::new(cx, py);
@@ -1261,7 +1277,7 @@ fn active_xy_pairs_with_sources(sheet_id: &SheetId, xy: &curvebook_doc::XyTable,
     let label = ds.title.clone();
     let mut out = Vec::new();
     for (row, subcells) in ds.cells.iter().enumerate() {
-        let Some(x) = xy.x_value_at(row).filter(|v| v.is_finite()) else {
+        let Some(x) = xy.x_summary_at(row).ok().flatten().filter(|v| v.is_finite()) else {
             continue;
         };
         if xy.y_subcolumn_mode.is_pre_summarized() {
@@ -1287,7 +1303,7 @@ fn collect_ds_active_point_sources(ds: &DataSheet, col_idx: usize, include_repli
             let label = xy.data_sets.get(c).map_or_else(|| String::from("Y"), |d| d.title.clone());
             if let Some(d) = xy.data_sets.get(c) {
                 for r in 0..xy.row_count() {
-                    if !xy.x_value_at(r).is_some_and(f64::is_finite) {
+                    if !xy.x_summary_at(r).ok().flatten().is_some_and(f64::is_finite) {
                         continue;
                     }
                     let Some(row_cells) = d.cells.get(r) else {
@@ -2486,8 +2502,14 @@ fn compile_volcano(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
             stroke_color: Rgba8::WHITE,
             stroke_width_pt: 0.4,
         };
-        let Some(marker) = crate::resolve_overridden_marker_for_cell(&graph.spec, pt.source.col, pt.source.row, Some(pt.source.subcol), base_marker)
-        else {
+        let Some(marker) = crate::resolve_overridden_marker_for_col(
+            &graph.spec,
+            &pt.source.sheet_id,
+            pt.source.col,
+            pt.source.row,
+            Some(pt.source.subcol),
+            base_marker,
+        ) else {
             continue;
         };
         let center_pt = PointPt::new(px, py);
@@ -2753,9 +2775,14 @@ fn compile_bland_altman(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut C
                 stroke_color: Rgba8::WHITE,
                 stroke_width_pt: 0.6,
             };
-            if let Some(marker) =
-                crate::resolve_overridden_marker_for_cell(&graph.spec, pt.source.col, pt.source.row, Some(pt.source.subcol), base_marker)
-            {
+            if let Some(marker) = crate::resolve_overridden_marker_for_col(
+                &graph.spec,
+                &pt.source.sheet_id,
+                pt.source.col,
+                pt.source.row,
+                Some(pt.source.subcol),
+                base_marker,
+            ) {
                 let center_pt = PointPt::new(px, py);
                 emit_marker(scene, center_pt, marker, Some(r));
                 scene.plotted_points.push(PlottedPointMeta {
@@ -3697,9 +3724,14 @@ fn compile_residual_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut 
                 stroke_color: Rgba8::WHITE,
                 stroke_width_pt: 0.5,
             };
-            if let Some(marker) =
-                crate::resolve_overridden_marker_for_cell(&graph.spec, pt.source.col, pt.source.row, Some(pt.source.subcol), base_marker)
-            {
+            if let Some(marker) = crate::resolve_overridden_marker_for_col(
+                &graph.spec,
+                &pt.source.sheet_id,
+                pt.source.col,
+                pt.source.row,
+                Some(pt.source.subcol),
+                base_marker,
+            ) {
                 let center_pt = PointPt::new(px, py);
                 emit_marker(scene, center_pt, marker, Some(r));
                 scene.plotted_points.push(PlottedPointMeta {
@@ -3892,9 +3924,14 @@ fn compile_normal_qq_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut
                 stroke_color: Rgba8::WHITE,
                 stroke_width_pt: 0.5,
             };
-            if let Some(marker) =
-                crate::resolve_overridden_marker_for_cell(&graph.spec, pt.source.col, pt.source.row, Some(pt.source.subcol), base_marker)
-            {
+            if let Some(marker) = crate::resolve_overridden_marker_for_col(
+                &graph.spec,
+                &pt.source.sheet_id,
+                pt.source.col,
+                pt.source.row,
+                Some(pt.source.subcol),
+                base_marker,
+            ) {
                 let center_pt = PointPt::new(px, py);
                 emit_marker(scene, center_pt, marker, Some(r));
                 scene.plotted_points.push(PlottedPointMeta {

@@ -2025,7 +2025,6 @@ fn run_sheet_extract_result_tab(ctx: &mut Ctx<'_>, params: Value) -> Result<Comm
     };
     let report = apply_import_link_pipeline(&mut sheet, &link_spec, ImportSourcePayload::InternalResult(&res), &opts, None)?;
     sheet.prune_stale_exclusion_notes();
-    crate::dag::backfill_confidence_interval_cells(&mut sheet, &res, &link_spec, report.target_range);
     apply_result_tab_metadata_to_sheet(&mut sheet, &tab);
 
     let mut reserved = HashSet::new();

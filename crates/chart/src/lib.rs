@@ -98,6 +98,32 @@ pub(crate) fn resolve_overridden_marker_for_cell(
     apply_point_override(ov, base)
 }
 
+/// Resolve the canonical `PointStyleOverride::series_index` for `(sheet_id, col)` on `spec`.
+///
+/// When `spec.series` is non-empty, returns the zero-based slot index of the matching entry in
+/// `spec.series` (`None` when no slot binds `(sheet_id, col)`). Falls back to `Some(col)` ONLY
+/// when `spec.series.is_empty()` (e.g., `MultipleVariables` or unseeded `Diagnostic` plots).
+#[must_use]
+pub(crate) fn override_series_index_for_col(spec: &GraphSpec, sheet_id: &curvebook_doc::SheetId, col: usize) -> Option<usize> {
+    if spec.series.is_empty() { Some(col) } else { spec.series.iter().position(|s| s.source_sheet_id == *sheet_id && s.data_set_index == col) }
+}
+
+/// Resolve marker style overrides for a plotted point identified by `(sheet_id, col, row, subcol)`.
+#[must_use]
+pub(crate) fn resolve_overridden_marker_for_col(
+    spec: &GraphSpec,
+    sheet_id: &curvebook_doc::SheetId,
+    col: usize,
+    point_index: usize,
+    subcol: Option<usize>,
+    base: MarkerStyle,
+) -> Option<MarkerStyle> {
+    let Some(series_index) = override_series_index_for_col(spec, sheet_id, col) else {
+        return Some(base);
+    };
+    resolve_overridden_marker_for_cell(spec, series_index, point_index, subcol, base)
+}
+
 /// High-level graph families corresponding to typed scientific data tables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum GraphFamily {

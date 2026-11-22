@@ -1533,6 +1533,7 @@ struct XyDatum {
 
 #[derive(Debug, Clone)]
 struct ExtractedXySeries {
+    series_index: usize,
     sheet_id: SheetId,
     col_index: usize,
     active_x_rows: Vec<(usize, f64)>,
@@ -1680,6 +1681,7 @@ fn extract_all_xy_series(graph: &GraphSheet, doc: &ProjectDocument, warnings: &m
             None => (None, Vec::new()),
         };
         out.push(ExtractedXySeries {
+            series_index: idx,
             sheet_id,
             col_index: series_spec.data_set_index,
             active_x_rows,
@@ -1825,7 +1827,7 @@ fn resolve_rout_outliers(sheet: &DataSheet, col: usize, outliers: &[SourceCellId
         .iter()
         .filter(|source| source.sheet_id == sheet.id && source.col == col)
         .filter_map(|source| {
-            let x = xy.x_value_at(source.row)?;
+            let x = xy.x_summary_at(source.row).ok().flatten()?;
             let y = ds.cells.get(source.row)?.get(source.subcol)?.active_number()?;
             Some(RoutOutlier { source: source.clone(), x, y })
         })
@@ -2140,7 +2142,7 @@ fn render_xy_bars(
             mapped.map(|px| PointPt::new(px, py + dy_pt))
         };
         for &(rx, ry, row, subcol) in &data.replicates {
-            let Some(marker) = crate::resolve_overridden_marker_for_cell(graph_spec, data.col_index, row, Some(subcol), dot_style) else {
+            let Some(marker) = crate::resolve_overridden_marker_for_cell(graph_spec, data.series_index, row, Some(subcol), dot_style) else {
                 continue;
             };
             let pt = if let Some(p) = x_ax_pt(rx, ry) {
@@ -2345,7 +2347,7 @@ fn emit_xy_markers(scene: &mut ChartScene, data: &ExtractedXySeries, summary_mar
     let mut warned_y = ctx.warned_y_domain;
     if ctx.use_replicates {
         for &(rx, ry, row, subcol) in &data.replicates {
-            let Some(marker) = crate::resolve_overridden_marker_for_cell(ctx.spec, data.col_index, row, Some(subcol), ctx.marker) else {
+            let Some(marker) = crate::resolve_overridden_marker_for_cell(ctx.spec, data.series_index, row, Some(subcol), ctx.marker) else {
                 continue;
             };
             let shifted_x = rx + ctx.dx_data;
@@ -2369,7 +2371,7 @@ fn emit_xy_markers(scene: &mut ChartScene, data: &ExtractedXySeries, summary_mar
         }
     } else {
         for &(pt, row, vx, vy) in summary_markers {
-            let Some(marker) = crate::resolve_overridden_marker_for_cell(ctx.spec, data.col_index, row, Some(0), ctx.marker) else {
+            let Some(marker) = crate::resolve_overridden_marker_for_cell(ctx.spec, data.series_index, row, Some(0), ctx.marker) else {
                 continue;
             };
             emit_marker(&mut scene.primitives, pt, &marker, Some(ctx.clip));

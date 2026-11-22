@@ -142,23 +142,23 @@ fn fa_sec12_01_convert_archetype_remaps_point_overrides_and_propagates_multivari
     let g1 = session.document().graph_sheet(&SheetId::new("g1")).ok_or("missing g1")?;
     assert_eq!(g1.spec.series.iter().map(|s| s.data_set_index).collect::<Vec<_>>(), vec![1]);
     assert_eq!(g1.spec.point_overrides.len(), 1);
-    assert_eq!(g1.spec.point_overrides[0].series_index, 1);
+    assert_eq!(g1.spec.point_overrides[0].series_index, 0);
     assert_eq!(g1.spec.point_overrides[0].point_index, 2);
     assert!(g1.spec.point_overrides[0].hidden);
 
     let g2 = session.document().graph_sheet(&SheetId::new("g2")).ok_or("missing g2")?;
     assert_eq!(g2.spec.series.iter().map(|s| s.data_set_index).collect::<Vec<_>>(), vec![1, 2]);
     assert_eq!(g2.spec.point_overrides.len(), 2);
-    assert_eq!(g2.spec.point_overrides[0].series_index, 1);
+    assert_eq!(g2.spec.point_overrides[0].series_index, 0);
     assert_eq!(g2.spec.point_overrides[0].point_index, 1);
-    assert_eq!(g2.spec.point_overrides[1].series_index, 2);
+    assert_eq!(g2.spec.point_overrides[1].series_index, 1);
     assert_eq!(g2.spec.point_overrides[1].point_index, 2);
     assert!(g2.spec.point_overrides[1].hidden);
 
     let grep = session.document().graph_sheet(&SheetId::new("grep")).ok_or("missing grep")?;
     assert_eq!(grep.spec.series.iter().map(|s| s.data_set_index).collect::<Vec<_>>(), vec![1, 2]);
     assert_eq!(grep.spec.point_overrides.len(), 1);
-    assert_eq!(grep.spec.point_overrides[0].series_index, 2);
+    assert_eq!(grep.spec.point_overrides[0].series_index, 1);
     assert_eq!(grep.spec.point_overrides[0].point_index, 1);
     assert_eq!(grep.spec.point_overrides[0].subcol, None);
 

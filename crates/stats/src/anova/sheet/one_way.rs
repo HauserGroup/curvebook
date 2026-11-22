@@ -9,8 +9,8 @@
 use std::collections::BTreeSet;
 
 use curvebook_doc::{
-    AnalysisSpec, ChecklistItem, ChecklistStatus, DataSheet, MixedModelDfMethod, MultiplicityMethod, MultiplicitySpec, OneWayAnovaSpec, OneWayMethod,
-    PValueFormat, ResidualCovariance, ResultCell, ResultSheet, ResultTab, ResultTabKind, SubcolumnMode, TableArchetype,
+    AnalysisSpec, CellValue, ChecklistItem, ChecklistStatus, DataSheet, MixedModelDfMethod, MultiplicityMethod, MultiplicitySpec, OneWayAnovaSpec,
+    OneWayMethod, PValueFormat, ResidualCovariance, ResultCell, ResultSheet, ResultTab, ResultTabKind, SummaryPointError, TableArchetype,
 };
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{
@@ -1000,43 +1000,38 @@ pub(in crate::anova) fn extract_one_way_inputs(
         let mut inputs = Vec::with_capacity(indices.len());
         for idx in indices {
             let ds = &col_tab.data_sets[idx];
-            let mut mean_val = None;
-            let mut err_val = None;
-            let mut n_val = None;
-            for subs in &ds.cells {
+            let mut points = Vec::new();
+            for (r, subs) in ds.cells.iter().enumerate() {
                 if let (Some(c0), Some(c1), Some(c2)) = (subs.first(), subs.get(1), subs.get(2))
                     && !c0.excluded
                     && !c1.excluded
                     && !c2.excluded
-                    && let curvebook_doc::CellValue::Number(raw_n) = c2.value
+                    && c0.active_number().is_some()
+                    && let CellValue::Number(raw_n) = c2.value
                     && !raw_n.is_finite()
                 {
                     return Err(StatsError::InvalidParameter { name: "group_n", value: raw_n });
                 }
-                if let (Some(m), Some(e), Some(n)) = (
-                    subs.first().and_then(|c| c.active_number()),
-                    subs.get(1).and_then(|c| c.active_number()),
-                    subs.get(2).and_then(|c| c.active_number()),
-                ) {
-                    mean_val = Some(m);
-                    err_val = Some(e);
-                    n_val = Some(n);
-                    break;
+                match col_tab.summarized_point(r, idx) {
+                    Ok(Some(pt)) => points.push(pt),
+                    Ok(None) => {}
+                    Err(SummaryPointError::SampleSizeBelowOne { n }) => {
+                        return Err(StatsError::InvalidParameter { name: "group_n", value: n });
+                    }
+                    Err(err) => return Err(StatsError::SummaryPoint(err)),
                 }
             }
-            let (Some(mean), Some(err), Some(n)) = (mean_val, err_val, n_val) else {
+            if points.is_empty() {
                 return Err(StatsError::InsufficientSampleSize { context: "pre-summarized group", required: 2, actual: 0 });
-            };
-            if !n.is_finite() || n < 1.0 || n.fract() != 0.0 {
-                return Err(StatsError::InvalidParameter { name: "group_n", value: n });
             }
-            let sd = match col_tab.subcolumn_mode {
-                SubcolumnMode::MeanSdN => err,
-                SubcolumnMode::MeanSemN => err * n.sqrt(),
-                SubcolumnMode::MeanCvN => (err / 100.0) * mean.abs(),
-                _ => err,
-            };
-            inputs.push(GroupComparisonInput { index: idx, label: ds.title.clone(), n, mean, sd });
+            let pooled = crate::column::summarize_pre_summarized_points(&ds.title, &points, ConfidenceLevel::DEFAULT_95)?;
+            inputs.push(GroupComparisonInput {
+                index: idx,
+                label: ds.title.clone(),
+                n: pooled.total_n,
+                mean: pooled.mean,
+                sd: pooled.sd.unwrap_or(0.0),
+            });
         }
         return Ok((inputs, None, Vec::new(), Vec::new()));
     }

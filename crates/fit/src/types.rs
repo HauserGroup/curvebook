@@ -388,7 +388,7 @@ fn extract_from_xy(xy: &curvebook_doc::XyTable, selected_data_sets: &[usize]) ->
 fn x_row_is_blank_unknown(xy: &curvebook_doc::XyTable, row: usize) -> bool {
     match &xy.x_mode {
         curvebook_doc::XColumnMode::Numbers { .. } | curvebook_doc::XColumnMode::DateOrElapsedTime { .. } => {
-            xy.x_cells.get(row).and_then(|subs| subs.first()).is_some_and(|cell| !cell.excluded && cell.is_empty())
+            xy.x_cells.get(row).is_some_and(|subs| !subs.is_empty() && subs.iter().all(|cell| !cell.excluded && cell.is_empty()))
         }
         curvebook_doc::XColumnMode::GeneratedSequence { .. } => false,
     }
@@ -400,7 +400,7 @@ fn y_cells_are_blank_unknown(subcells: &[Cell]) -> bool {
 
 fn populate_xy_column(xy: &curvebook_doc::XyTable, ds: &DataSetColumn, ds_idx: usize, series: &mut DatasetSeries) -> Result<(), FitError> {
     for (row, subcells) in ds.cells.iter().enumerate() {
-        let x_opt = xy.x_value_at(row);
+        let x_opt = xy.x_summary_at(row).map_err(|e| FitError::InvalidParameter { name: "pre_summarized_x", reason: e.to_string() })?;
         let x_blank = x_opt.is_none() && x_row_is_blank_unknown(xy, row);
         // Excluded (or non-blank non-numeric) X rows must be dropped outright rather than
         // masquerading as blank X cells queued for inverse interpolation.
@@ -409,6 +409,12 @@ fn populate_xy_column(xy: &curvebook_doc::XyTable, ds: &DataSetColumn, ds_idx: u
         }
 
         if xy.y_subcolumn_mode.supports_parametric_moments() {
+            if x_blank {
+                if let Some(y) = subcells.first().and_then(Cell::active_number) {
+                    series.unknowns_y.push((row, y).into());
+                }
+                continue;
+            }
             let pt_opt =
                 xy.summarized_y_point(row, ds_idx).map_err(|e| FitError::InvalidParameter { name: "pre_summarized_y", reason: e.to_string() })?;
             match (x_opt, pt_opt) {
@@ -424,7 +430,6 @@ fn populate_xy_column(xy: &curvebook_doc::XyTable, ds: &DataSetColumn, ds_idx: u
                         row,
                     });
                 }
-                (None, Some(pt)) if x_blank => series.unknowns_y.push((row, pt.mean).into()),
                 (Some(x), None) if y_cells_are_blank_unknown(subcells) => series.unknowns_x.push((row, x)),
                 _ => {}
             }

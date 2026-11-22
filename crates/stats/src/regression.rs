@@ -1580,7 +1580,7 @@ fn build_xy_glm_design(xy: &curvebook_doc::XyTable, selected: &[usize], glm_spec
     let n_subcols = xy.y_subcolumn_mode.subcolumn_count().max(1);
     let is_gen_seq = matches!(xy.x_mode, XColumnMode::GeneratedSequence { .. });
     let active_end = (0..xy.row_count()).rfind(|&r| {
-        (!is_gen_seq && cell_has_entry(xy.x_cells.get(r).and_then(|s| s.first())))
+        (!is_gen_seq && xy.x_cells.get(r).is_some_and(|s| s.iter().any(|c| cell_has_entry(Some(c)))))
             || ds.cells.get(r).is_some_and(|subs| subs.iter().any(|c| !c.is_empty() || c.excluded))
     });
     let mut x_rows = Vec::new();
@@ -1592,12 +1592,14 @@ fn build_xy_glm_design(xy: &curvebook_doc::XyTable, selected: &[usize], glm_spec
 
     if let Some(end_row) = active_end {
         for r in 0..=end_row {
-            let x_cell = if is_gen_seq { None } else { xy.x_cells.get(r).and_then(|s| s.first()) };
-            if x_cell.is_some_and(is_ignored_non_numeric_cell) {
-                x_non_num += 1;
+            let x_subs = if is_gen_seq { &[][..] } else { xy.x_cells.get(r).map(Vec::as_slice).unwrap_or(&[]) };
+            for xc in x_subs {
+                if is_ignored_non_numeric_cell(xc) {
+                    x_non_num += 1;
+                }
             }
-            let x_explicit = !is_gen_seq && cell_has_entry(x_cell);
-            let xv_opt = xy.x_value_at(r);
+            let x_explicit = !is_gen_seq && x_subs.iter().any(|c| cell_has_entry(Some(c)));
+            let xv_opt = xy.x_summary_at(r)?;
             let row_len = ds.cells.get(r).map_or(0, Vec::len);
             for sub in 0..row_len {
                 let yc = ds.cell(r, sub);
@@ -2004,8 +2006,8 @@ fn extract_pb_xy_pairs(t: &curvebook_doc::XyTable, selected: &[usize], x_col: us
                 let cy = cell_for(r, sub, y_col);
                 acc.x_non_num += usize::from(cx.is_some_and(is_ignored_non_numeric_cell));
                 acc.y_non_num += usize::from(cy.is_some_and(is_ignored_non_numeric_cell) && !(x_col == y_col && x_col > 0));
-                let xv = if x_col == 0 && x_raw_subs == 1 { t.x_value_at(r) } else { cx.and_then(Cell::active_number) };
-                let yv = if y_col == 0 && x_raw_subs == 1 { t.x_value_at(r) } else { cy.and_then(Cell::active_number) };
+                let xv = if x_col == 0 && x_raw_subs == 1 { t.x_summary_at(r)? } else { cx.and_then(Cell::active_number) };
+                let yv = if y_col == 0 && x_raw_subs == 1 { t.x_summary_at(r)? } else { cy.and_then(Cell::active_number) };
                 if let (Some(x_val), Some(y_val)) = (xv, yv) {
                     acc.xs.push(x_val);
                     acc.ys.push(y_val);
