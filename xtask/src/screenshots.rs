@@ -1,8 +1,7 @@
 //! Deterministic workspace screenshot generation and offline PNG integrity check (`R0.14`).
 //!
 //! `cargo xtask screenshots` invokes the clean-room `curvebook-ui-egui` `doc_screenshots`
-//! example to regenerate `docs/images/workspace-split-fit.png` and
-//! `docs/images/workspace-layout-dark.png`.
+//! example to regenerate `docs/images/workspace-*.png` and `docs/images/specimen-*.png`.
 //! `cargo xtask screenshots --check` runs purely in-process (no nested Cargo build) and verifies:
 //! - both PNG files exist and start with the 8-byte PNG signature,
 //! - the leading `IHDR` chunk decodes to exact `1440x900` (`>= 1280x800`) RGBA output,
@@ -29,6 +28,7 @@ const MIN_IDAT_BYTES: usize = 1024;
 pub const SCREENSHOT_REL_PATHS: &[&str] = &[
     "docs/images/workspace-split-fit.png",
     "docs/images/workspace-layout-dark.png",
+    "docs/images/workspace-anova-results.png",
     "docs/images/specimen-light.png",
     "docs/images/specimen-dark.png",
     "docs/images/specimen-high-contrast.png",
