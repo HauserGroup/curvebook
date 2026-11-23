@@ -27,6 +27,20 @@ The additional detailed pixel-art variant is `curvebook-win95-2508.png` (2508 ×
 | `source/approved-seven-pane.png` | Untouched approved image (1536 × 1024 px) | Original artwork reference |
 | `source/approved-mole.png` | Archived former artwork (1254 × 1254 px) | Historical provenance only |
 
+## Microsoft Store listing images
+
+`store/` holds the optional Store display images, composed from `source/approved-seven-pane.png` by `packaging/store-art.sh` (ImageMagick 7):
+
+| File | Store slot |
+|---|---|
+| `store/poster-720x1080.png`, `store/poster-1440x2160.png` | 9:16 poster art (opaque dark background, artwork and wordmark) |
+| `store/box-1080x1080.png`, `store/box-2160x2160.png` | 1:1 box art (opaque dark background, artwork and wordmark) |
+| `store/hero-1920x1080.png`, `store/hero-3840x2160.png` | 16:9 super hero art (opaque, faint grid, no title as the Store requires; artwork kept clear of the bottom-left where the Store overlays the title) |
+| `store/tile-300x300.png` | 1:1 app tile icon (transparent) |
+| `store/tile-150x150.png`, `store/tile-71x71.png` | 1:1 Store display logos (transparent) |
+
+The 1x poster, box, and hero images are downsamples of the 2x masters. The wordmark is rasterised from a system font (Avenir Next on macOS by default; override with `CURVEBOOK_STORE_FONT`), so no font file is added to the repository. These images are uploaded in Partner Center; the package logos in `packaging/windows/AppxManifest.xml.in` are separate.
+
 ## Slack emoji
 
 - `slack/curvebook.png`: transparent 128 × 128 PNG; suggested name `:curvebook:`.
@@ -48,4 +62,5 @@ From the workspace root (with `resvg`, `rsvg-convert`, or ImageMagick (`magick`)
 
 ```sh
 packaging/icons.sh
+packaging/store-art.sh   # Microsoft Store listing images only
 ```
