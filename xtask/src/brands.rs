@@ -4224,9 +4224,41 @@ fn scan_dist_path_and_file(dist_dir: &Path, rel: &str, stats: &mut DistScanStats
     scan_dist_bytes(rel, &bytes, 0, stats, hits)
 }
 
+const MAX_MACOS_STAPLED_TICKET_BYTES: usize = 1024 * 1024;
+
 fn is_macos_stapled_ticket(display_path: &str, bytes: &[u8]) -> bool {
+    if bytes.len() < 12 || bytes.len() > MAX_MACOS_STAPLED_TICKET_BYTES || !bytes.starts_with(b"s8ch") {
+        return false;
+    }
+    let header_window = &bytes[8..bytes.len().min(64)];
+    let has_der_cms = header_window.windows(4).any(|w| w[0] == 0x30 && w[1] == 0x82 && (w[2] != 0 || w[3] != 0));
+    if !has_der_cms {
+        return false;
+    }
+
     let norm = display_path.replace('\\', "/");
-    norm.ends_with(".app/Contents/CodeResources") && bytes.starts_with(b"s8ch")
+    let inner_path = if let Some((outer, inner)) = norm.split_once('!') {
+        if inner.contains('!') {
+            return false;
+        }
+        let outer_lower = outer.to_ascii_lowercase();
+        if !outer_lower.ends_with(".dmg") || outer_lower == ".dmg" || outer_lower.ends_with("/.dmg") {
+            return false;
+        }
+        inner
+    } else {
+        norm.as_str()
+    };
+
+    let segs: Vec<&str> = inner_path.split('/').filter(|s| !s.is_empty()).collect();
+    if segs.len() < 3 || segs.contains(&"..") {
+        return false;
+    }
+    let n = segs.len();
+    if segs[n - 1] != "CodeResources" || segs[n - 2] != "Contents" {
+        return false;
+    }
+    segs[n - 3].strip_suffix(".app").is_some_and(|stem| !stem.is_empty() && stem != "." && stem != "..")
 }
 
 fn is_native_binary_blob(display_path: &str, bytes: &[u8]) -> bool {
@@ -5570,6 +5602,41 @@ it: "Copia Statistica report",
         std::fs::write(app_contents.join("Resources/bogus.txt"), ticket_bytes).unwrap();
         assert!(super::scan_dist_artefacts(&dir).is_err());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn da_03_02_macos_stapled_ticket_rejects_archives_empty_stem_oversized_and_missing_der() {
+        let valid_ticket = b"s8ch\x01\x00\x00\x00\x30\x82\x01\x02\xFF\xFEnotarization-ticket";
+        assert!(super::is_macos_stapled_ticket("CurveBook.app/Contents/CodeResources", valid_ticket));
+        assert!(super::is_macos_stapled_ticket("macos/CurveBook.app/Contents/CodeResources", valid_ticket));
+        assert!(super::is_macos_stapled_ticket("CurveBook.dmg!CurveBook.app/Contents/CodeResources", valid_ticket));
+
+        // Empty `.app` stem must be rejected.
+        assert!(!super::is_macos_stapled_ticket(".app/Contents/CodeResources", valid_ticket));
+        assert!(!super::is_macos_stapled_ticket("foo/.app/Contents/CodeResources", valid_ticket));
+
+        // Nested `.curvebook`, `.cbtemplate`, `.zip`, and multi-archive `!` contexts must be rejected.
+        assert!(!super::is_macos_stapled_ticket("project.curvebook!CurveBook.app/Contents/CodeResources", valid_ticket));
+        assert!(!super::is_macos_stapled_ticket("template.cbtemplate!CurveBook.app/Contents/CodeResources", valid_ticket));
+        assert!(!super::is_macos_stapled_ticket("archive.zip!CurveBook.app/Contents/CodeResources", valid_ticket));
+        assert!(!super::is_macos_stapled_ticket("a.dmg!b.zip!CurveBook.app/Contents/CodeResources", valid_ticket));
+
+        // `s8ch` without a DER CMS `0x30 0x82` envelope must be rejected.
+        let fake_payload = b"s8ch\xFFnot-a-der-cms-envelope";
+        assert!(!super::is_macos_stapled_ticket("CurveBook.app/Contents/CodeResources", fake_payload));
+
+        // Oversized (> 1 MiB) payloads must be rejected even with `s8ch` + DER prefix.
+        let mut oversized = valid_ticket.to_vec();
+        oversized.resize(super::MAX_MACOS_STAPLED_TICKET_BYTES + 1, 0xAB);
+        assert!(!super::is_macos_stapled_ticket("CurveBook.app/Contents/CodeResources", &oversized));
+
+        // End-to-end: a `.curvebook` archive containing a `CurveBook.app/Contents/CodeResources` binary entry must fail closed.
+        let dir = temp_dir("macos-ticket-zip-bypass");
+        let mut zip = curvebook_format::ZipWriter::new();
+        zip.add_file("CurveBook.app/Contents/CodeResources", valid_ticket.to_vec()).unwrap();
+        std::fs::write(dir.join("project.curvebook"), zip.finish().unwrap()).unwrap();
+        assert!(super::scan_dist_artefacts(&dir).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

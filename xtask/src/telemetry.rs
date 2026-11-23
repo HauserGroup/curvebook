@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::licenses::{extract_first_quoted, parse_cargo_lock, parse_section_header, strip_toml_comment, unquote_toml_str};
-use crate::rust_lex::{StrippedRust, is_ident_byte, prev_is_ident, strip_non_prod_rust_both as strip_non_prod_rust};
+use crate::rust_lex::{RustLexer, StrippedRust, is_ident_byte, strip_non_prod_rust_both as strip_non_prod_rust};
 
 const ALLOWED_LOOPBACK_NET_FILES: &[&str] = &["crates/ui-egui/src/control_io.rs", "crates/mcp/src/tools.rs", "apps/curvebook/src/main.rs"];
 
@@ -614,71 +614,24 @@ fn find_banned_js_network_in_literal(lower: &str) -> Option<&'static str> {
 }
 
 fn extract_rust_string_literals(src: &str) -> Vec<(usize, String)> {
-    let bytes = src.as_bytes();
+    let mut lex = RustLexer::new(src);
     let mut lits = Vec::new();
-    let mut i = 0usize;
-    let mut line = 1usize;
-    while i < bytes.len() {
-        if bytes[i] == b'\n' {
-            line += 1;
-            i += 1;
+    while !lex.is_eof() {
+        if lex.try_read_comment().is_some() {
             continue;
         }
-        if bytes[i] == b'r' && !prev_is_ident(bytes, i) {
-            let mut j = i + 1;
-            let mut hashes = 0usize;
-            while bytes.get(j) == Some(&b'#') {
-                hashes += 1;
-                j += 1;
-            }
-            if bytes.get(j) == Some(&b'"') {
-                let start_line = line;
-                j += 1;
-                let content_start = j;
-                while j < bytes.len() {
-                    if bytes[j] == b'\n' {
-                        line += 1;
-                    }
-                    if bytes[j] == b'"' && bytes[j + 1..].iter().take(hashes).filter(|&&b| b == b'#').count() == hashes {
-                        lits.push((start_line, String::from_utf8_lossy(&bytes[content_start..j]).into_owned()));
-                        i = j + 1 + hashes;
-                        break;
-                    }
-                    j += 1;
-                }
-                if j >= bytes.len() {
-                    i = bytes.len();
-                }
-                continue;
-            }
-        }
-        if bytes[i] == b'"' {
-            let start_line = line;
-            i += 1;
-            let mut val = String::new();
-            while i < bytes.len() {
-                if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                    val.push(char::from(bytes[i + 1]));
-                    if bytes[i + 1] == b'\n' {
-                        line += 1;
-                    }
-                    i += 2;
-                    continue;
-                }
-                if bytes[i] == b'\n' {
-                    line += 1;
-                }
-                if bytes[i] == b'"' {
-                    i += 1;
-                    break;
-                }
-                val.push(char::from(bytes[i]));
-                i += 1;
-            }
-            lits.push((start_line, val));
+        if let Some(lit) = lex.try_read_raw_string() {
+            lits.push((lit.start_line, lit.text));
             continue;
         }
-        i += 1;
+        if lex.try_skip_char_literal() {
+            continue;
+        }
+        if let Some(lit) = lex.try_read_quoted_string() {
+            lits.push((lit.start_line, lit.text));
+            continue;
+        }
+        lex.advance_one();
     }
     lits
 }
@@ -877,11 +830,9 @@ fn slice_has_loopback_guard(prod_code: &str, no_comments_code: &str) -> bool {
 }
 
 fn find_non_loopback_ip_literal(fn_lits: &str, base_line: usize) -> Option<(usize, String)> {
-    for (offset, line) in fn_lits.lines().enumerate() {
-        for (_, lit) in extract_rust_string_literals(line) {
-            if let Some(bad) = check_non_loopback_host_or_ip(&lit) {
-                return Some((base_line + offset, bad));
-            }
+    for (rel_line, lit) in extract_rust_string_literals(fn_lits) {
+        if let Some(bad) = check_non_loopback_host_or_ip(&lit) {
+            return Some((base_line + rel_line.saturating_sub(1), bad));
         }
     }
     None
@@ -2496,5 +2447,43 @@ mod tests {
         assert!(hits.iter().any(|v| v.check == 4 && v.path == ".github/workflows/ci.yml" && v.detail.contains("write")), "{hits:?}");
         assert!(hits.iter().any(|v| v.check == 4 && v.path == ".github/workflows/ci.yml" && v.detail.contains("sha256sum")), "{hits:?}");
         assert!(hits.iter().any(|v| v.check == 5 && v.path == "packaging/web/_headers" && v.detail.contains("https:")), "{hits:?}");
+    }
+
+    #[test]
+    fn da_03_07_rust_lexer_extracts_strings_past_char_quotes_raw_prefixes_and_escapes() {
+        let fx = create_clean_fixture("da-03-07-tel");
+        fx.write(
+            "crates/core/src/wasm_evasion.rs",
+            concat!(
+                "pub fn f() {\n",
+                "    let _ = js_sys::eval(\"ok\");\n",
+                "    let _q = '\"';\n",
+                "    let _a = \"fetch\";\n",
+                "    let _b = br#\"websocket\"#;\n",
+                "    let _c = cr#\"eventsource\"#;\n",
+                "    let _d = \"\\u{66}etch\";\n",
+                "    let _e = \"\\x66etch\";\n",
+                "    let _f = \"fe\\\n\n    tch\";\n",
+                "}\n",
+            ),
+        );
+        fx.write(
+            "crates/mcp/src/tools.rs",
+            concat!(
+                "use std::net::TcpStream;\n",
+                "pub fn conn() {\n",
+                "    let _ = LOCALHOST;\n",
+                "    let _q = '\"';\n",
+                "    let _ = TcpStream::connect(\"8.8.8.\\\n\n    8:80\");\n",
+                "}\n",
+            ),
+        );
+        let (_, hits) = run_checks(&fx.path).unwrap();
+        let wasm_hits: Vec<_> = hits.iter().filter(|v| v.path == "crates/core/src/wasm_evasion.rs").collect();
+        assert_eq!(wasm_hits.len(), 6, "expected all 6 obfuscated JS network strings caught, got {wasm_hits:?}");
+        assert!(
+            hits.iter().any(|v| v.path == "crates/mcp/src/tools.rs" && v.detail.contains("8.8.8.8:80")),
+            "expected char-quote + continuation IP literal caught, got {hits:?}"
+        );
     }
 }
