@@ -61,7 +61,7 @@ pub fn compute_rsdr(abs_residuals: &[f64], k_free: usize) -> f64 {
     sorted.sort_by(f64::total_cmp);
     let p68 = quantile_type7_sorted(&sorted, P68_NORMAL_PROB).unwrap_or(0.0);
     let df = n.saturating_sub(k_free).max(1);
-    p68 * (n as f64) / (df as f64)
+    p68 * ((n as f64) / (df as f64))
 }
 
 fn evaluate_rout_t_and_p(abs_res: &[f64], rsdr: f64, zero_floor: f64, df: usize) -> Result<(Vec<f64>, Vec<f64>), MathError> {
@@ -83,7 +83,43 @@ fn evaluate_rout_t_and_p(abs_res: &[f64], rsdr: f64, zero_floor: f64, df: usize)
     Ok((t_stats, p_values))
 }
 
-fn apply_bh_top_30(abs_res: &[f64], p_values: &[f64], fdr_q_percent: f64) -> (Vec<f64>, Vec<bool>, Vec<usize>) {
+fn extend_zero_rsdr_boundary_ties(
+    order: &[usize],
+    abs_res: &[f64],
+    p_values: &[f64],
+    q_values: &mut [f64],
+    j_max: usize,
+    m_test: usize,
+    zero_floor: f64,
+) -> usize {
+    if j_max + 1 != m_test {
+        return j_max;
+    }
+    let Some(&cut_idx) = order.get(j_max) else {
+        return j_max;
+    };
+    let cut_p = p_values.get(cut_idx).copied().unwrap_or(1.0);
+    let cut_r = abs_res.get(cut_idx).copied().unwrap_or(0.0);
+    if cut_p != 0.0 || cut_r <= zero_floor {
+        return j_max;
+    }
+    let mut extended = j_max;
+    while let Some(&next_idx) = order.get(extended + 1) {
+        let next_p = p_values.get(next_idx).copied().unwrap_or(1.0);
+        let next_r = abs_res.get(next_idx).copied().unwrap_or(0.0);
+        if next_p == 0.0 && next_r == cut_r {
+            extended += 1;
+            if let Some(slot) = q_values.get_mut(next_idx) {
+                *slot = 0.0;
+            }
+        } else {
+            break;
+        }
+    }
+    extended
+}
+
+fn apply_bh_top_30(abs_res: &[f64], p_values: &[f64], fdr_q_percent: f64, rsdr: f64, zero_floor: f64) -> (Vec<f64>, Vec<bool>, Vec<usize>) {
     let n = p_values.len();
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&a, &b| {
@@ -126,7 +162,10 @@ fn apply_bh_top_30(abs_res: &[f64], p_values: &[f64], fdr_q_percent: f64) -> (Ve
     }
 
     let mut is_outlier = vec![false; n];
-    if let Some(j_max) = last_rejected {
+    if let Some(mut j_max) = last_rejected {
+        if rsdr <= zero_floor {
+            j_max = extend_zero_rsdr_boundary_ties(&order, abs_res, p_values, &mut q_values, j_max, m_test, zero_floor);
+        }
         for &idx in order.iter().take(j_max + 1) {
             if let Some(slot) = is_outlier.get_mut(idx) {
                 *slot = true;
@@ -182,10 +221,13 @@ pub fn rout_detect_outliers_core(residuals: &[f64], k_free: usize, fdr_q_percent
     let df = n - k_free;
     let abs_res: Vec<f64> = residuals.iter().map(|r| r.abs()).collect();
     let rsdr = compute_rsdr(&abs_res, k_free).max(rsdr_floor);
+    if !rsdr.is_finite() {
+        return Err(MathError::DomainError { name: "rsdr", value: rsdr });
+    }
     let zero_floor = if rsdr_floor > 0.0 { (1e-20 * rsdr_floor).max(f64::MIN_POSITIVE) } else { 0.0 };
 
     let (t_stats, p_values) = evaluate_rout_t_and_p(&abs_res, rsdr, zero_floor, df)?;
-    let (q_values, is_outlier, outlier_indices) = apply_bh_top_30(&abs_res, &p_values, fdr_q_percent);
+    let (q_values, is_outlier, outlier_indices) = apply_bh_top_30(&abs_res, &p_values, fdr_q_percent, rsdr, zero_floor);
 
     Ok(RoutCoreResult { rsdr, df, t_stats, p_values, q_values, is_outlier, outlier_indices })
 }
@@ -291,5 +333,56 @@ mod tests {
         assert!(matches!(rout_detect_outliers_core(&[1.0, 2.0, 3.0], 1, 101.0, 0.0), Err(MathError::InvalidParameter { name: "fdr_q_percent", .. })));
         assert!(matches!(rout_detect_outliers_core(&[1.0, 2.0, 3.0], 1, 1.0, -1.0), Err(MathError::InvalidParameter { name: "rsdr_floor", .. })));
         assert!(matches!(rout_detect_outliers_core(&[1.0, f64::NAN, 3.0], 1, 1.0, 0.0), Err(MathError::DomainError { name: "residuals", .. })));
+    }
+
+    #[test]
+    fn compute_rsdr_and_rout_guard_large_scale_overflow() {
+        // DA-01-04 regression: p68 * (n / df) stays finite even when p68 * n overflows f64::MAX.
+        let mut huge = vec![2e306_f64; 100];
+        huge[99] = 1e308;
+        let rsdr = compute_rsdr(&huge, 1);
+        let expected_rsdr = 2e306_f64 * (100.0 / 99.0);
+        assert_close(rsdr, expected_rsdr, 0.0, 1e-14, "large-scale finite rsdr");
+
+        let out = rout_detect_outliers_core(&huge, 1, 1.0, 0.0).unwrap();
+        assert!(out.rsdr.is_finite());
+        assert_eq!(out.outlier_indices, vec![99]);
+
+        // When p68 * (n / df) genuinely exceeds f64::MAX, rout_detect_outliers_core returns DomainError
+        // instead of silently flagging 0 outliers via abs_r / +Inf = 0.0.
+        let overflow_res = vec![1e308_f64; 10];
+        assert!(matches!(rout_detect_outliers_core(&overflow_res, 8, 1.0, 0.0), Err(MathError::DomainError { name: "rsdr", .. })));
+    }
+
+    #[test]
+    fn rout_zero_rsdr_boundary_ties_are_permutation_invariant() {
+        // DA-01-05 regression: n = 100 with 69 zeros (rsdr == 0.0) and 31 tied 10.0 residuals.
+        // All 31 tied points must be flagged regardless of input permutation.
+        let mut forward = vec![0.0_f64; 69];
+        forward.extend(std::iter::repeat_n(10.0_f64, 31));
+        let out_fwd = rout_detect_outliers_core(&forward, 1, 1.0, 0.0).unwrap();
+        assert_eq!(out_fwd.rsdr, 0.0);
+        assert_eq!(out_fwd.outlier_indices.len(), 31);
+        for i in 69..100 {
+            assert!(out_fwd.is_outlier[i]);
+            assert_eq!(out_fwd.q_values[i], 0.0);
+        }
+
+        let mut reversed = vec![10.0_f64; 31];
+        reversed.extend(std::iter::repeat_n(0.0_f64, 69));
+        let out_rev = rout_detect_outliers_core(&reversed, 1, 1.0, 0.0).unwrap();
+        assert_eq!(out_rev.outlier_indices.len(), 31);
+        for i in 0..31 {
+            assert!(out_rev.is_outlier[i]);
+            assert_eq!(out_rev.q_values[i], 0.0);
+        }
+
+        // Distinct non-zero residual just outside top 30% is NOT pulled in by tie expansion.
+        let mut distinct = vec![0.0_f64; 69];
+        distinct.push(5.0);
+        distinct.extend(std::iter::repeat_n(10.0_f64, 30));
+        let out_dist = rout_detect_outliers_core(&distinct, 1, 1.0, 0.0).unwrap();
+        assert_eq!(out_dist.outlier_indices.len(), 30);
+        assert!(!out_dist.is_outlier[69]);
     }
 }

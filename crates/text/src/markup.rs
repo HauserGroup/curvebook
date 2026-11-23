@@ -641,7 +641,7 @@ fn scan_script_token(after: &str) -> Option<usize> {
 }
 
 /// Extract a balanced `{...}` group starting at index 0 of `s`, respecting `\` escapes and
-/// [`MAX_MARKUP_DEPTH`]. Returns `(inner_slice, bytes_consumed)`.
+/// `MAX_MARKUP_DEPTH`. Returns `(inner_slice, bytes_consumed)`.
 #[must_use]
 pub fn extract_braced(s: &str) -> Option<(&str, usize)> {
     if !s.starts_with('{') {

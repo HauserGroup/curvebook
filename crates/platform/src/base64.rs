@@ -106,6 +106,9 @@ fn decode_quad(quad: [u8; 4]) -> Result<([u8; 3], usize, bool), Base64Error> {
     let pad_len = usize::from(q2 == b'=') + usize::from(q3 == b'=');
     let s2 = if q2 == b'=' { 0 } else { u32::from(decode_sextet(q2)?) };
     let s3 = if q3 == b'=' { 0 } else { u32::from(decode_sextet(q3)?) };
+    if (pad_len == 2 && (s1 & 0x0F) != 0) || (pad_len == 1 && (s2 & 0x03) != 0) {
+        return Err(Base64Error::InvalidPadding);
+    }
     let word = (s0 << 18) | (s1 << 12) | (s2 << 6) | s3;
     let bytes = [((word >> 16) & 0xFF) as u8, ((word >> 8) & 0xFF) as u8, (word & 0xFF) as u8];
     Ok((bytes, 3 - pad_len, pad_len > 0))
@@ -262,6 +265,25 @@ mod tests {
         assert_eq!(decode("AA=A"), Err(Base64Error::InvalidPadding));
         assert_eq!(decode("Zg==Zm9v"), Err(Base64Error::InvalidPadding));
         assert_eq!(decode("Zm8=Zm9v"), Err(Base64Error::InvalidPadding));
+    }
+
+    #[test]
+    fn rejects_non_canonical_trailing_padding_bits() {
+        // DA-01-03 regression (RFC 4648 §3.5): unused bits before `=` / `==` must be zero.
+        assert_eq!(decode("Zg=="), Ok(b"f".to_vec()));
+        assert_eq!(decode("Zh=="), Err(Base64Error::InvalidPadding));
+        assert_eq!(decode("Zv=="), Err(Base64Error::InvalidPadding));
+        assert_eq!(decode("AA=="), Ok(vec![0]));
+        assert_eq!(decode("AB=="), Err(Base64Error::InvalidPadding));
+        assert_eq!(decode("AP=="), Err(Base64Error::InvalidPadding));
+
+        assert_eq!(decode("Zm8="), Ok(b"fo".to_vec()));
+        assert_eq!(decode("Zm9="), Err(Base64Error::InvalidPadding));
+        assert_eq!(decode("Zm+="), Err(Base64Error::InvalidPadding));
+        assert_eq!(decode("Zm/="), Err(Base64Error::InvalidPadding));
+        assert_eq!(decode("AAA="), Ok(vec![0, 0]));
+        assert_eq!(decode("AAB="), Err(Base64Error::InvalidPadding));
+        assert_eq!(decode("AAD="), Err(Base64Error::InvalidPadding));
     }
 
     #[test]
