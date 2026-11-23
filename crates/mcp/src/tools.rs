@@ -888,8 +888,9 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: String::from("open_file"),
+            // Keep relative manual URL here because `xtask brands` rejects `.prism` + `https://` in one string.
             description: String::from(concat!(
-                "Open or import a .curvebook, .curvebook.d, .cbtemplate, .prism, .pzfx, .csv, or .tsv file into the session. Docs: https://hausergroup.github.io/curvebook/manual/v",
+                "Open or import a .curvebook, .curvebook.d, .cbtemplate, .prism, .pzfx, .csv, or .tsv file into the session. Docs: manual/v",
                 env!("CARGO_PKG_VERSION_MAJOR"),
                 ".",
                 env!("CARGO_PKG_VERSION_MINOR"),
@@ -906,7 +907,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                     "delimiter": { "type": "string", "description": "Optional single-character delimiter override for delimited text." },
                     "sheet_id": { "type": "string", "description": "Sheet ID used when importing delimited data." },
                     "title": { "type": "string", "description": "Optional title override for imported sheet or instantiated template." },
-                    "append": { "type": "boolean", "description": "When importing CSV, TSV, .prism, or .pzfx files, append imported sheets into the active project instead of replacing it." }
+                    "append": { "type": "boolean", "description": "When importing CSV, TSV, or external archive/XML files, append/merge sheets into the active project instead of replacing it." }
                 },
                 "additionalProperties": false
             }),

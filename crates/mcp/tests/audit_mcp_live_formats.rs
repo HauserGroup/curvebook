@@ -296,15 +296,12 @@ fn build_minimal_test_ttf(ps_name: &str) -> Vec<u8> {
 fn schema_open_file_docs_url_append_and_export_parity() -> TestResult {
     let tools = list_tools();
     let open_file = tools.iter().find(|t| t.name == "open_file").ok_or("missing open_file tool")?;
-    assert!(
-        open_file.description.contains("https://hausergroup.github.io/curvebook/manual/v"),
-        "open_file must use full docs URL, got: {}",
-        open_file.description
-    );
-    assert!(!open_file.description.contains("Docs: manual/v"), "open_file must not contain truncated relative docs URL: {}", open_file.description);
+    let expected_open_docs =
+        format!("manual/v{}.{}/registry/mcp-tools.html#mcp-tool-open_file", env!("CARGO_PKG_VERSION_MAJOR"), env!("CARGO_PKG_VERSION_MINOR"));
+    assert!(open_file.description.contains(&expected_open_docs), "open_file must link to {expected_open_docs}, got: {}", open_file.description);
     let append_desc =
         open_file.input_schema.pointer("/properties/append/description").and_then(Value::as_str).ok_or("missing open_file.append description")?;
-    for needle in ["CSV", "TSV", ".prism", ".pzfx"] {
+    for needle in ["CSV", "TSV", "external archive/XML"] {
         assert!(append_desc.contains(needle), "open_file.append description missing '{needle}': {append_desc}");
     }
 
@@ -418,7 +415,7 @@ fn headless_open_file_append_prism_and_pzfx_preserves_sheets_file_path_and_undo(
     fs::write(&pzfx_path, pzfx_xml).map_err(|e| format!("write pzfx: {e}"))?;
 
     let mut zip = ZipWriter::new();
-    zip.add_file("prism_table.csv", b"X,Y\n5,50\n6,60\n".to_vec()).map_err(|e| format!("zip add: {e}"))?;
+    zip.add_file("imported_table.csv", b"X,Y\n5,50\n6,60\n".to_vec()).map_err(|e| format!("zip add: {e}"))?;
     let zip_bytes = zip.finish().map_err(|e| format!("zip finish: {e}"))?;
     fs::write(&prism_path, zip_bytes).map_err(|e| format!("write prism: {e}"))?;
 
@@ -446,7 +443,7 @@ fn headless_open_file_append_prism_and_pzfx_preserves_sheets_file_path_and_undo(
     assert!(state.session().is_dirty());
     assert_eq!(read_y_cell(&state, "base", 0, 0), Some(99.0));
 
-    // Append .prism -> keeps "base" + pzfx sheet + adds prism sheet, preserves file_path
+    // Append .prism -> keeps "base" + pzfx sheet + adds imported sheet, preserves file_path
     let prism_res = call_ok_json(&mut state, "open_file", json!({ "path": prism_path.display().to_string(), "append": true }))?;
     assert_eq!(prism_res["opened"], json!(true));
     assert_eq!(prism_res["format"], json!("prism"));
