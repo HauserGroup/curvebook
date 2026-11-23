@@ -329,7 +329,7 @@ fn r10_8_w7_staged_i18n_16_locales_and_rtl_parity() -> Result<(), String> {
             ("Score", VariableRole::Continuous),
             ("Size", VariableRole::Continuous),
         ])?;
-        let _ = app.set_locale(loc);
+        assert_eq!(app.set_locale(loc), *loc);
         let mut h = EguiWfHarness::from_app(app, ViewportMetrics::new(1280.0, 800.0, 1.0));
         h.click("mv_formula.role_badge.1")?;
         h.click("mv_formula.role_manage.1")?;

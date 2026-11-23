@@ -37,7 +37,7 @@ struct TestShellState {
 impl TestShellState {
     fn new(locale: &str, scroll_items: usize) -> Self {
         let mut app = UiApp::new();
-        let _ = app.set_locale(locale);
+        assert_eq!(app.set_locale(locale), locale);
         Self {
             app,
             intents: PendingUiIntents::new(),

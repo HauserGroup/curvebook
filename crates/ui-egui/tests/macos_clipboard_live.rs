@@ -4,6 +4,20 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 #[cfg(target_os = "macos")]
+fn clipboard_required() -> bool {
+    let truthy = |var: &str| std::env::var(var).is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"));
+    truthy("CI") || truthy("CURVEBOOK_REQUIRE_MACOS_CLIPBOARD")
+}
+
+#[cfg(target_os = "macos")]
+fn skip_or_fail_clipboard(reason: &str) {
+    if clipboard_required() {
+        panic!("macos_clipboard_live: FAIL-CLOSED under CI/CURVEBOOK_REQUIRE_MACOS_CLIPBOARD ({reason})");
+    }
+    println!("macos_clipboard_live: SKIPPED ({reason})");
+}
+
+#[cfg(target_os = "macos")]
 #[test]
 fn macos_live_pasteboard_de_de_tsv_formula_and_bundle_roundtrip() {
     use std::io::Write;
@@ -37,47 +51,47 @@ fn macos_live_pasteboard_de_de_tsv_formula_and_bundle_roundtrip() {
     let mut pbcopy = match Command::new("/usr/bin/pbcopy").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
         Ok(child) => child,
         Err(err) => {
-            println!("macos_clipboard_live: SKIPPED (failed to spawn /usr/bin/pbcopy: {err})");
+            skip_or_fail_clipboard(&format!("failed to spawn /usr/bin/pbcopy: {err}"));
             return;
         }
     };
     if let Some(mut stdin) = pbcopy.stdin.take()
         && let Err(err) = stdin.write_all(payload.as_bytes())
     {
-        println!("macos_clipboard_live: SKIPPED (failed writing to /usr/bin/pbcopy: {err})");
+        skip_or_fail_clipboard(&format!("failed writing to /usr/bin/pbcopy: {err}"));
         return;
     }
     let copy_out = match pbcopy.wait_with_output() {
         Ok(out) => out,
         Err(err) => {
-            println!("macos_clipboard_live: SKIPPED (/usr/bin/pbcopy wait error: {err})");
+            skip_or_fail_clipboard(&format!("/usr/bin/pbcopy wait error: {err}"));
             return;
         }
     };
     if !copy_out.status.success() {
         let stderr = String::from_utf8_lossy(&copy_out.stderr);
-        println!(
-            "macos_clipboard_live: SKIPPED (headless macOS pasteboard server unavailable on pbcopy: status={} stderr=`{}`)",
+        skip_or_fail_clipboard(&format!(
+            "headless macOS pasteboard server unavailable on pbcopy: status={} stderr=`{}`",
             copy_out.status,
             stderr.trim()
-        );
+        ));
         return;
     }
 
     let paste_out = match Command::new("/usr/bin/pbpaste").output() {
         Ok(out) => out,
         Err(err) => {
-            println!("macos_clipboard_live: SKIPPED (failed running /usr/bin/pbpaste: {err})");
+            skip_or_fail_clipboard(&format!("failed running /usr/bin/pbpaste: {err}"));
             return;
         }
     };
     if !paste_out.status.success() {
         let stderr = String::from_utf8_lossy(&paste_out.stderr);
-        println!(
-            "macos_clipboard_live: SKIPPED (headless macOS pasteboard server unavailable on pbpaste: status={} stderr=`{}`)",
+        skip_or_fail_clipboard(&format!(
+            "headless macOS pasteboard server unavailable on pbpaste: status={} stderr=`{}`",
             paste_out.status,
             stderr.trim()
-        );
+        ));
         return;
     }
 

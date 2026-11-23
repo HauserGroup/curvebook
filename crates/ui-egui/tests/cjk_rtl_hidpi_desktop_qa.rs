@@ -164,7 +164,7 @@ fn cjk_rtl_locales_render_mirror_panes_and_keep_hidpi_hit_test_parity() {
     let scales = [1.0_f64, 1.5, 2.0, 3.0];
 
     for locale in locales {
-        let _ = app.set_locale(locale);
+        assert_eq!(app.set_locale(locale), locale);
         app.nav.welcome.open = false;
         app.sync_views();
 
@@ -408,7 +408,7 @@ fn r13_rtl_ar_he_and_hidpi_pixel_to_hit_box_parity() {
         for metrics in [ViewportMetrics::new(1280.0, 800.0, 1.0), ViewportMetrics::new(1024.0, 640.0, 2.0)] {
             for (cmd_id, params) in &dialogs {
                 let mut app = base_app.clone();
-                let _ = app.set_locale(locale);
+                assert_eq!(app.set_locale(locale), locale);
                 let _ = dispatch_ui_command(&mut app, cmd_id, params).expect("open R13 modal").expect("handled");
                 app.sync_views();
                 let h = human_wf_common::EguiWfHarness::from_app(app, metrics);

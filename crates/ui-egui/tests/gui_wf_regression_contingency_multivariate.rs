@@ -11,8 +11,8 @@
 
 use curvebook_chart::{ChartScene, PathCmd, ScenePrimitive, compile_graph};
 use curvebook_doc::{
-    AnalysisKind, ContingencyMethod, GlmFamily, GraphKind, GroupedArrangement, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind,
-    SheetId,
+    AnalysisKind, ContingencyMethod, GlmFamily, GraphKind, GroupedArrangement, MultivariateSpec, ResultCell, ResultSheet, ResultStatus, ResultTab,
+    ResultTabKind, SheetId,
 };
 use curvebook_palette::Rgba8;
 use curvebook_ui_egui::{UiApp, dispatch_gui_action};
@@ -1164,6 +1164,36 @@ fn wf23_stacked_superimposed_z_order_pcr_r10_and_result_analyze_chaining() -> Te
     ensure(r10_leak.is_err(), "R10 must reject selecting a predictor column as PCR outcome")?;
     answer_dialog(&mut app, json!({ "pcr_outcome_column": 2 }), "ok")?;
     ensure(widget_enabled(&inspect_ui(&mut app)?, "analyze.entry").is_err(), "Analyze modal should close after ok")?;
+    let pcr_rs = app
+        .document()
+        .result_sheets
+        .iter()
+        .rfind(|r| r.analysis.source_sheet_id.as_str() == pcr_mv_id)
+        .ok_or_else(|| String::from("WF-23 missing created PCR ResultSheet"))?;
+    ensure(pcr_rs.status == ResultStatus::UpToDate, format!("WF-23 PCR ResultSheet expected UpToDate, got {:?}", pcr_rs.status))?;
+    ensure(
+        matches!(pcr_rs.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::Pca { pcr_outcome_column: Some(2), .. })),
+        format!("WF-23 expected PCR outcome col 2, got {:?}", pcr_rs.analysis.kind),
+    )?;
+    ensure(
+        pcr_rs.analysis.selected_data_sets == vec![0, 1],
+        format!("WF-23 expected predictors [0, 1], got {:?}", pcr_rs.analysis.selected_data_sets),
+    )?;
+    let pcr_r2 = scalar_val(pcr_rs, "PCR R squared", None)?;
+    ensure(pcr_r2.is_finite() && pcr_r2 > 0.99, format!("WF-23 expected PCR R squared > 0.99, got {pcr_r2}"))?;
+    let pcr_summary = require_tab_id(pcr_rs, "pcr-summary")?;
+    ensure(
+        pcr_summary.rows.first().and_then(|r| r.first()) == Some(&ResultCell::Text(String::from("Target"))),
+        format!("WF-23 pcr-summary outcome mismatch: {:?}", pcr_summary.rows.first()),
+    )?;
+    let pcr_coeffs = require_tab_id(pcr_rs, "pcr-predictors")?;
+    ensure(pcr_coeffs.rows.len() >= 3, format!("WF-23 expected intercept + 2 predictors, got {}", pcr_coeffs.rows.len()))?;
+    for (idx, row) in pcr_coeffs.rows.iter().enumerate() {
+        ensure(
+            matches!(row.first(), Some(ResultCell::Number { value, .. }) if value.is_finite()),
+            format!("WF-23 predictor row {idx} missing finite Estimate: {row:?}"),
+        )?;
+    }
     assert_screenshot_valid(&mut app, "workspace")?;
     Ok(())
 }

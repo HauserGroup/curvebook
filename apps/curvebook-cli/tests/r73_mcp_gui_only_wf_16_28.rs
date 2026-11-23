@@ -3,6 +3,7 @@ mod r73_common;
 use curvebook_svg::validate_svg_structure;
 use r73_common::{
     McpChild, TempWorkdir, assert_approx, decode_base64, find_node, read_result_json, result_scalar_f64, result_tab, save_and_verify_headless,
+    tab_cell_f64,
 };
 use serde_json::{Value, json};
 
@@ -301,16 +302,6 @@ fn r73_gui_only_wf21_to_wf25_multivariate_chaining_and_styled_graphs() -> Result
     gui.ui_switch_sheet("wf24-graph")?;
     gui.ui_invoke("ui.changeGraphType.open", json!({ "sheet_id": "wf24-graph" }))?;
     gui.ui_answer_ok(json!({ "option_id": "col.box_whisker" }))?;
-    let box_gdo = json!({
-        "BoxAndWhisker": {
-            "whiskers": "Tukey1_5Iqr",
-            "fill_color": { "r": 0, "g": 114, "b": 178, "a": 190 },
-            "stroke_color": { "r": 0, "g": 0, "b": 0, "a": 255 },
-            "show_outliers": true,
-            "show_all_points": false
-        }
-    });
-    gui.ui_invoke("graph.setSeries", json!({ "sheet_id": "wf24-graph", "series": [{ "gdo": box_gdo }, { "gdo": box_gdo }, { "gdo": box_gdo }] }))?;
     let box_png = gui.ui_screenshot("canvas", 720, 480)?;
     let box_svg_out = gui.ui_invoke("graph.exportSvg", json!({ "sheet_id": "wf24-graph" }))?;
     let box_svg = box_svg_out["payload"]["svg"].as_str().ok_or("WF-25 missing box SVG")?;
@@ -318,19 +309,12 @@ fn r73_gui_only_wf21_to_wf25_multivariate_chaining_and_styled_graphs() -> Result
 
     gui.ui_invoke("ui.changeGraphType.open", json!({ "sheet_id": "wf24-graph" }))?;
     gui.ui_answer_ok(json!({ "option_id": "col.violin" }))?;
-    let violin_gdo = json!({
-        "Violin": {
-            "fill_color": { "r": 0, "g": 114, "b": 178, "a": 190 },
-            "stroke_color": { "r": 0, "g": 114, "b": 178, "a": 255 },
-            "clip_to_observed_range": true,
-            "show_median_and_quartiles": true,
-            "half_violin_with_points": false
-        }
-    });
-    gui.ui_invoke(
-        "graph.setSeries",
-        json!({ "sheet_id": "wf24-graph", "series": [{ "gdo": violin_gdo }, { "gdo": violin_gdo }, { "gdo": violin_gdo }] }),
-    )?;
+    let violin_svg_out = gui.ui_invoke("graph.exportSvg", json!({ "sheet_id": "wf24-graph" }))?;
+    let violin_svg = violin_svg_out["payload"]["svg"].as_str().ok_or("WF-25 missing violin SVG")?;
+    validate_svg_structure(violin_svg).map_err(|e| format!("WF-25 invalid violin SVG: {e}"))?;
+    if box_svg == violin_svg {
+        return Err("WF-25 Box-and-Whisker and Violin SVGs should differ directly after ChangeGraphType".to_owned());
+    }
     let violin_png = gui.ui_screenshot("canvas", 720, 480)?;
     if box_png == violin_png {
         return Err("WF-25 Box-and-Whisker and Violin canvas screenshots should visually differ".to_owned());
@@ -348,8 +332,41 @@ fn r73_gui_only_wf21_to_wf25_multivariate_chaining_and_styled_graphs() -> Result
             return Err("WF-22 volcano tabs empty".to_owned());
         }
         let rs_pcr = read_result_json(headless, &pcr23)?;
-        if rs_pcr["tabs"].as_array().is_none_or(Vec::is_empty) {
-            return Err("WF-23 PCR tabs empty".to_owned());
+        if rs_pcr["status"] != json!("UpToDate") {
+            return Err(format!("WF-23 PCR expected UpToDate, got {}", rs_pcr["status"]));
+        }
+        if rs_pcr["analysis"]["kind"]["Multivariate"]["Pca"]["pcr_outcome_column"] != json!(2) {
+            return Err(format!("WF-23 PCR outcome column mismatch: {}", rs_pcr["analysis"]["kind"]));
+        }
+        if rs_pcr["analysis"]["selected_data_sets"] != json!([0, 1]) {
+            return Err(format!("WF-23 PCR predictors mismatch: {}", rs_pcr["analysis"]["selected_data_sets"]));
+        }
+        let pcr_r2 = result_scalar_f64(&rs_pcr, "PCR R squared")?;
+        if !pcr_r2.is_finite() || pcr_r2 <= 0.99 {
+            return Err(format!("WF-23 PCR expected R^2 > 0.99, got {pcr_r2}"));
+        }
+        let pcr_n_pred = result_scalar_f64(&rs_pcr, "PCR Predictor count")?;
+        assert_approx(pcr_n_pred, 2.0, 1e-9, "WF-23 PCR Predictor count")?;
+        let pcr_sum = result_tab(&rs_pcr, "pcr-summary")?;
+        if pcr_sum["rows"][0][0] != json!({ "Text": "Y" }) {
+            return Err(format!("WF-23 pcr-summary outcome mismatch: {}", pcr_sum["rows"][0][0]));
+        }
+        let pcr_coef = result_tab(&rs_pcr, "pcr-predictors")?;
+        if pcr_coef["rows"].as_array().is_none_or(|rows| rows.len() < 3) {
+            return Err("WF-23 pcr-predictors expected >= 3 coefficient rows".to_owned());
+        }
+        for pred_name in ["X1", "X2"] {
+            let est = tab_cell_f64(pcr_coef, pred_name, "Estimate")?;
+            if !est.is_finite() {
+                return Err(format!("WF-23 pcr-predictors non-finite Estimate for {pred_name}: {est}"));
+            }
+        }
+        let graph_resp = headless.request("resources/read", json!({ "uri": "sheet://wf24-graph" }))?;
+        let graph_text = graph_resp["result"]["contents"][0]["text"].as_str().ok_or("WF-25 missing sheet://wf24-graph text")?;
+        let graph_json: Value = serde_json::from_str(graph_text).map_err(|e| format!("parse wf24-graph JSON: {e}"))?;
+        let series = graph_json["spec"]["series"].as_array().ok_or("WF-25 missing spec.series")?;
+        if series.is_empty() || !series.iter().all(|s| s["gdo"].get("Violin").is_some()) {
+            return Err(format!("WF-25 expected Violin GDO persisted via ChangeGraphType, got: {series:?}"));
         }
         headless.call_tool_payload("export", json!({ "format": "svg", "sheet_id": "wf24-graph", "path": "wf25_violin.svg" }))?;
         let svg_str = std::fs::read_to_string(wd.dir.join("wf25_violin.svg")).map_err(|e| format!("read wf25_violin.svg: {e}"))?;

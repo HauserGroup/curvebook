@@ -56,10 +56,18 @@ impl Drop for ChildGuard {
     }
 }
 
+fn env_truthy(var: &str) -> bool {
+    std::env::var(var).is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
+fn loopback_required() -> bool {
+    env_truthy("CI") || env_truthy("CURVEBOOK_REQUIRE_LOOPBACK")
+}
+
 fn bind_loopback_probe_listener() -> Result<Option<(TcpListener, SocketAddr)>, Box<dyn std::error::Error>> {
     let listener = match bind_control_tcp_listener(SocketAddr::from(([127, 0, 0, 1], 0))) {
         Ok(l) => l,
-        Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(None),
+        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => return Ok(None),
         Err(err) => return Err(Box::new(err)),
     };
     let addr = listener.local_addr()?;
@@ -69,7 +77,7 @@ fn bind_loopback_probe_listener() -> Result<Option<(TcpListener, SocketAddr)>, B
             let _ = listener.accept();
             Ok(Some((listener, addr)))
         }
-        Err(err) if matches!(err.kind(), ErrorKind::PermissionDenied | ErrorKind::TimedOut) => Ok(None),
+        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => Ok(None),
         Err(err) => Err(Box::new(err)),
     }
 }
@@ -206,7 +214,7 @@ fn omitting_window_preserves_headless_control_behavior() -> Result<(), Box<dyn s
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let stream = match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
         Ok(s) => s,
-        Err(err) if matches!(err.kind(), ErrorKind::PermissionDenied | ErrorKind::TimedOut) => return Ok(()),
+        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => return Ok(()),
         Err(err) => return Err(Box::new(err)),
     };
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;

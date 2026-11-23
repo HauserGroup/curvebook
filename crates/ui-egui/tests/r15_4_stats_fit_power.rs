@@ -652,7 +652,7 @@ fn all_14_beta_locales_backdrop_capture_and_scrollbar_non_overlap_at_640x420_and
             // Alternate across all 4 main modal surfaces cleanly across all 14 locales & viewports
             for surface_kind in 0..4 {
                 let mut app = template_app.clone();
-                let _ = app.set_locale(locale);
+                assert_eq!(app.set_locale(locale), locale);
                 app.set_theme_mode(theme);
                 let d_snap = app.document().clone();
                 match surface_kind {

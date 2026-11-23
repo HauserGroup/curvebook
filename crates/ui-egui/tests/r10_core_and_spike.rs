@@ -224,10 +224,15 @@ fn r10_2_and_r10_16_parity_across_views_plus_textbox_ime_clipboard_dropdown_and_
     big_h2.assert_parity_and_layout("multi-row result sheet").expect("result sheet parity");
     let drawn_tabs = big_h2.driver.frame_meta().entries.iter().filter(|e| e.widget_id.starts_with("result.tab.")).count();
     assert!(drawn_tabs >= 6, "expected >4 tabs rendered without 4-tab cap, got {drawn_tabs}");
-    if let Some(sec_pos) = big_h2.driver.frame_meta().find_by_widget_id("result.section.0").map(|e| e.clipped_rect.center()) {
-        big_h2.driver.wheel_at(sec_pos, Vec2::new(0.0, -240.0)).expect("scroll result table");
-        assert!(big_h2.driver.verify_pixel_to_hit_box_parity().is_clean());
-    }
+    let sec_pos = big_h2
+        .driver
+        .frame_meta()
+        .find_by_widget_id("result.section.0")
+        .or_else(|| big_h2.driver.frame_meta().find_by_widget_id("result.cell.0.0"))
+        .map(|e| e.clipped_rect.center())
+        .expect("missing scrollable result.section.0 or result.cell.0.0 widget");
+    big_h2.driver.wheel_at(sec_pos, Vec2::new(0.0, -240.0)).expect("scroll result table");
+    assert!(big_h2.driver.verify_pixel_to_hit_box_parity().is_clean());
 
     // Analyze -> ANOVA -> Open EditAnalysisParameters -> switch to Multiple Comparisons & select Bonferroni.
     let mut an_h = human_wf_common::EguiWfHarness::from_app(build_three_group_column_app(), metrics);

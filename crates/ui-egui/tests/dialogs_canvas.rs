@@ -937,7 +937,7 @@ fn rtl_workspace_mirroring_and_font_diagnostics_behave_deterministically() {
 
     for rtl_locale in ["ar", "he"] {
         let mut rtl_app = UiApp::from_session(Session::from_document(doc.clone()));
-        let _ = rtl_app.set_locale(rtl_locale);
+        assert_eq!(rtl_app.set_locale(rtl_locale), rtl_locale);
         rtl_app.nav.navigator_open = true;
         rtl_app.nav.inspector_open = true;
         rtl_app.sync_views();

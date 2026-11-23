@@ -972,7 +972,7 @@ fn all_14_beta_locales_and_viewports_pass_parity_and_scrollbar_non_overlap() -> 
         for &target in &sheet_modes {
             for &vp in &viewports {
                 let mut app = make_full_project_app()?;
-                app.set_locale(locale);
+                assert_eq!(app.set_locale(locale), locale);
                 if target == "gallery" {
                     app.nav.gallery.open = true;
                     let doc_clone = app.document().clone();

@@ -14,7 +14,7 @@ use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::dispatch_gui_action;
 use curvebook_ui_egui::egui_shell::driver::{BETA_LOCALE_CODES, EguiHumanPathDriver, TextBleedPolicy, build_driver_font_definitions};
 use curvebook_ui_egui::egui_shell::inspect_bridge::render_egui_shell_frame;
-use curvebook_ui_egui::egui_shell::{EguiShellViewState, PendingUiIntents, Tokens, UiBackend};
+use curvebook_ui_egui::egui_shell::{EguiShellViewState, PendingUiIntents, Tokens, UiBackend, UiIntentOutcome};
 use curvebook_ui_egui::inspect::ScreenshotRegionTarget;
 use curvebook_ui_egui::interaction::{KeyModifiers, ViewportMetrics};
 use curvebook_ui_egui::os_integration::StubPlatformClipboardAdapter;
@@ -41,6 +41,7 @@ pub struct WfShellState {
     pub dialog_rect_pt: Option<egui::Rect>,
     pub last_intent_error: Option<String>,
     pub intent_errors: Vec<String>,
+    pub recorded_outcomes: Vec<UiIntentOutcome>,
 }
 
 impl WfShellState {
@@ -51,7 +52,15 @@ impl WfShellState {
         app.set_gui_only(true);
         app.set_human_path_only(true);
         let views = app.egui_views.clone();
-        Self { app, views, intents: PendingUiIntents::new(), dialog_rect_pt: None, last_intent_error: None, intent_errors: Vec::new() }
+        Self {
+            app,
+            views,
+            intents: PendingUiIntents::new(),
+            dialog_rect_pt: None,
+            last_intent_error: None,
+            intent_errors: Vec::new(),
+            recorded_outcomes: Vec::new(),
+        }
     }
 }
 
@@ -96,8 +105,9 @@ impl EguiWfHarness {
                 if !st.intents.is_empty() {
                     let batch = st.intents.commit_all_if_settled(&mut st.app, false);
                     for outcome in &batch.results {
-                        if let Err(err) = outcome {
-                            st.intent_errors.push(err.to_string());
+                        match outcome {
+                            Ok(out) => st.recorded_outcomes.push(out.clone()),
+                            Err(err) => st.intent_errors.push(err.to_string()),
                         }
                     }
                     st.last_intent_error = batch.first_error().map(ToString::to_string);
@@ -307,13 +317,13 @@ impl EguiWfHarness {
     pub fn verify_14_locales_section_9_4(&mut self, label: &str) -> TestRes {
         let saved_locale = self.app().locale.clone();
         for &loc in &BETA_LOCALE_CODES {
-            let _ = self.app_mut().set_locale(loc);
+            assert_eq!(self.app_mut().set_locale(loc), loc, "{label}: set_locale({loc}) fell back unexpectedly");
             self.driver.set_viewport(ViewportMetrics::new(1440.0, 600.0, 1.0));
             self.assert_parity_and_layout(&format!("{label} {loc} 1440x600"))?;
             self.driver.set_viewport(ViewportMetrics::new(640.0, 420.0, 1.5));
             self.assert_parity_and_layout(&format!("{label} {loc} 640x420@1.5x"))?;
         }
-        let _ = self.app_mut().set_locale(&saved_locale);
+        assert_eq!(self.app_mut().set_locale(&saved_locale), saved_locale, "{label}: restoring locale `{saved_locale}` fell back unexpectedly");
         self.driver.set_viewport(ViewportMetrics::new(1280.0, 800.0, 1.0));
         Ok(())
     }

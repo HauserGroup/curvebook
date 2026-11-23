@@ -525,7 +525,7 @@ fn wf48_mv_color_size_cycling_domain_clamp_and_bubble_controls() -> TestRes {
     exercise_wf48_format_graph_mv_clamping(&mut driver, &gid)?;
 
     // Verify localized comma bounds (`de`) and clearing when both inputs are empty.
-    let _ = driver.state_mut().app.set_locale("de");
+    assert_eq!(driver.state_mut().app.set_locale("de"), "de");
     open_format_graph_on(&mut driver, &gid)?;
     assert_eq!(driver.state().views.graph_modals.mv_clamp_min_draft, "2");
     assert_eq!(driver.state().views.graph_modals.mv_clamp_max_draft, "20");

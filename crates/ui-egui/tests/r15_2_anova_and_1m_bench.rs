@@ -480,16 +480,17 @@ fn run_egui_case_a_anova_modal_and_update(driver: &mut EguiHumanPathDriver<'_, E
     // and Ctrl+Tab advances across modal tabs cleanly.
     for _ in 0..6 {
         driver.press_key("Tab", KeyModifiers::default())?;
-        if let Some(ak_focus) = driver.accesskit_tree().map(|u| u.focus)
-            && let Some(focused_entry) = driver.frame_meta().find_by_accesskit_id(ak_focus)
-        {
-            assert!(
-                matches!(focused_entry.z_layer, ZLayer::ModalDialog | ZLayer::ModalBackdrop),
-                "Tab focus inside modal escaped backdrop to background `{}` ({:?})",
-                focused_entry.widget_id,
-                focused_entry.z_layer
-            );
-        }
+        let ak_focus = driver.accesskit_tree().map(|u| u.focus).ok_or("missing accesskit tree focus inside modal after Tab")?;
+        let focused_entry = driver
+            .frame_meta()
+            .find_by_accesskit_id(ak_focus)
+            .ok_or_else(|| format!("missing frame_meta entry for focused accesskit id {ak_focus:?}"))?;
+        assert!(
+            matches!(focused_entry.z_layer, ZLayer::ModalDialog | ZLayer::ModalBackdrop),
+            "Tab focus inside modal escaped backdrop to background `{}` ({:?})",
+            focused_entry.widget_id,
+            focused_entry.z_layer
+        );
     }
 
     // Verify Multiple Comparisons tab + R3 unlock flow while parametric (Tukey -> Dunnett).
@@ -537,9 +538,9 @@ fn r15_2_egui_1m_column_ci_smoke() {
     assert!(r1.visible_cells_last > 0 && r1.visible_cells_last < 2_000, "egui grid must virtualize: {}", r1.visible_cells_last);
     assert!(r2.visible_cells_last > 0 && r2.visible_cells_last < 2_000);
     if !cfg!(debug_assertions) {
-        // Note: full isolated steady + input-to-paint (<= 50 ms) Go/No-Go gate lives in
-        // `r15_2_gonogo_1m_column_matched_benchmark_release` (`#[ignore]`): cold-heap `ArrowDown`
-        // currently triggers `active_data_sheet(app).cloned()` in `views/grid_core.rs:323` (~38–55ms).
+        // Fast CI performance smoke runs in the serialized `performance` stage; the full `--release`
+        // Go/No-Go 1M-cell steady + input-to-paint gate is `r15_2_gonogo_1m_column_matched_benchmark_release`
+        // (`#[ignore]`, invoked with `-- --ignored` by release validation).
         assert!(r1.steady_frame.mean_ms <= EGUI_STEADY_BUDGET_MS);
         assert!(r2.steady_frame.mean_ms <= EGUI_STEADY_BUDGET_MS);
     }
@@ -591,8 +592,8 @@ fn r15_2_egui_r10_1_anova_human_path_cjk_inspect_and_journal() -> Result<(), Box
     for &locale in &BETA_LOCALE_CODES {
         let mut loc_app = UiApp::from_session(Session::from_document(driver.state().app.document().clone())).with_ui_backend(UiBackend::Egui);
         loc_app.nav.welcome.open = false;
-        let _ = loc_app.execute_command("sheet.select", json!({ "sheet_id": "col-spike" }));
-        let _ = loc_app.set_locale(locale);
+        loc_app.execute_command("sheet.select", json!({ "sheet_id": "col-spike" }))?;
+        assert_eq!(loc_app.set_locale(locale), locale);
         loc_app.sync_views();
         let snap = loc_app.inspect_egui_shell_snapshot(ViewportMetrics::new(1280.0, 800.0, 1.0), Some("grid"), true);
         assert!(snap.grid_cells.as_ref().is_some_and(|c| !c.is_empty()), "expected grid inspect for locale {locale}");

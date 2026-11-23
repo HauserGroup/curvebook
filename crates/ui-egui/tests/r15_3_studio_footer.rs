@@ -607,7 +607,7 @@ fn responsive_640x420_1440x600_scrollbar_non_overlap_themes_and_all_14_beta_loca
             _ => UiThemeMode::HighContrast,
         };
         let mut app = base_app.clone();
-        let _ = app.set_locale(locale);
+        assert_eq!(app.set_locale(locale), *locale);
         app.set_theme_mode(mode);
 
         // Long Info constant triggers ellipsizing inside Studio with AccessKit + hover tooltip fallback
