@@ -26,6 +26,12 @@ Supported built-in methods today are `"auth"`, `"ping"` (includes `"gui_only"`),
 - `color_space`: optional `"srgb"` | `"rgb"` | `"cmyk"` | `"grayscale"` | `"gray"` (default `"srgb"`).
 - `path`: optional host filesystem destination path; when non-empty outside `--gui-only`, writes the rendered PDF bytes to `path` in addition to returning `data_base64`, `sheet_id`, `sheet_ids`, `page_count`, and `bytes_len`. Under `--gui-only`, non-empty `path` is rejected with `ErrorCode::GuiOnlyViolation`.
 
+`doc.export` accepts:
+- `format`: required `"svg"` | `"pdf"` | `"emf"` | `"png"` | `"tiff"` | `"csv"` | `"tsv"` | `"json"`.
+- `sheet_id` / `sheetId`: optional `SheetId` (defaults to the active or first compatible sheet).
+- `path` / `output_path`: optional host filesystem destination path; when non-empty outside `--gui-only`, writes the exported bytes atomically to disk. Under `--gui-only`, `"doc.export"` (including any disk-writing `path`) is rejected with `ErrorCode::GuiOnlyViolation`.
+- Format-specific options: `pdf_color_space` / `color_space`, `pdf_version`, `ttf_font` (optional TrueType font path/embedding for PDF), `all_graphs` / `all`, `svg_precision`, `width_px`, `height_px`, `dpi`, `tiff_compression`, `pretty`, `tidy`, `tab_id` / `tabId`, and `csv_delimiter`.
+
 Each response (`ControlResponse`) is a single UTF-8 JSON object terminated by `\n`:
 
 ```json
@@ -53,8 +59,8 @@ Implemented in `crates/ui-egui/src/{control_io.rs, gui_actions.rs, inspect.rs}` 
 - **Direct domain commands (`Caller::Control`):** `command.run`, `command.batch`, `engine.execute`, and raw domain command IDs run through `app.execute_control_command` (`Caller::Control`). Under `GuiOnlyPolicy::Strict`, `Session::execute_with_caller` blocks any command called by `Caller::Control` (as well as `Caller::Mcp` or `Caller::Cli`) unless it is read-only without `Effects::READS_FILESYSTEM` (or `table.convertArchetype` with `preview_only` / `previewOnly` / `preview` / `dry_run` / `dryRun: true`), returning `ErrorCode::GuiOnlyViolation` (`"gui_only_violation"`, `ErrorCategory::Policy`).
 - **Direct `ui.*` / menu bypasses:** Under `--gui-only`, `dispatch_command_by_id` in `control_io.rs` rejects direct `ui.*` commands, `"app.about"`, and `"file.print"` with `ErrorCode::GuiOnlyViolation`, **except** the 8 interactive GUI JSON-lines actions below and the read-only `"ui.canvas.preflight"` check.
 - **Internal UI execution (`Caller::Ui`):** Visible menus, shortcuts, palette actions, and modal commit handlers inside `UiApp` execute via `Caller::Ui` (`app.execute_command` / `dispatch_ui_command_as_ui`), remaining permitted so human-equivalent UI actions drive the live `Session`.
-- **Allowed read-only RPCs under `--gui-only`:** `"ping"`, `"doc.inspect"`, `"ui.state"` (alias `"state.snapshot"`), `"command.list"`, `"ui.inspect"`, `"ui.canvas.preflight"`, and in-memory `"ui.screenshot"` (without `path`).
-- **Disk-write restriction (`ui.screenshot` & `render.pdf`):** Under `--gui-only`, `ui.screenshot` returns `data_base64` PNG bytes in memory (`path` is `null`); supplying a non-empty `path` to `"ui.screenshot"` or `"render.pdf"` fails with `ErrorCode::GuiOnlyViolation`.
+- **Allowed read-only RPCs under `--gui-only`:** `"ping"`, `"ui.state"` (alias `"state.snapshot"`), `"command.list"`, `"ui.inspect"`, `"ui.canvas.preflight"`, and in-memory `"ui.screenshot"` (without `path`). (`"doc.inspect"` is rejected with `ErrorCode::GuiOnlyViolation` under `--gui-only`.)
+- **Disk-write restriction (`ui.screenshot`, `render.pdf` & `doc.export`):** Under `--gui-only`, `ui.screenshot` returns `data_base64` PNG bytes in memory (`path` is `null`); supplying a non-empty `path` to `"ui.screenshot"`, `"render.pdf"`, or `"doc.export"` fails with `ErrorCode::GuiOnlyViolation` (`"render.pdf"` and `"doc.export"` are blocked under `--gui-only`).
 
 ### 2. The 8 `ui.*` Interactive GUI JSON-Lines Actions
 

@@ -360,14 +360,30 @@ fn render_mcp_tool_card(tool: &ToolDefinition, az_category: &str, az: &mut Vec<A
             "arguments": minimal_example_args(&tool.input_schema)
         }
     });
-    let resp_json = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "result": {
-            "content": [{ "type": "text", "text": "{...}" }],
-            "isError": false
-        }
-    });
+    let resp_json = if matches!(tool.name.as_str(), "render_preview" | "ui_screenshot") {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [
+                    { "type": "image", "data": "<base64-png>", "mimeType": "image/png" },
+                    { "type": "text", "text": "{...}" }
+                ],
+                "isError": false,
+                "structuredContent": {}
+            }
+        })
+    } else {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [{ "type": "text", "text": "{...}" }],
+                "isError": false,
+                "structuredContent": {}
+            }
+        })
+    };
     let schema_pretty = serde_json::to_string_pretty(&tool.input_schema).unwrap_or_else(|_| String::from("{}"));
     let req_str = serde_json::to_string(&req_json).unwrap_or_else(|_| String::from("{}"));
     let resp_str = serde_json::to_string(&resp_json).unwrap_or_else(|_| String::from("{}"));
