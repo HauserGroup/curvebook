@@ -1706,18 +1706,19 @@
           clearInterval(fallbackLockTimerId);
           fallbackLockTimerId = null;
         }
-        if (!window.localStorage) {
+        const storage = tryGetLocalStorage();
+        if (!storage) {
           return;
         }
         try {
           const key = LOCK_KEY_PREFIX + (docId || activeLockDocId || "default");
-          const raw = window.localStorage.getItem(key);
+          const raw = storage.getItem(key);
           if (!raw) {
             return;
           }
           const parsed = JSON.parse(raw);
           if (parsed && parsed.tabId === tabId) {
-            window.localStorage.removeItem(key);
+            storage.removeItem(key);
           }
         } catch (_err) {
           // Ignore storage read/remove errors.
@@ -1736,7 +1737,7 @@
           fallbackLockTimerId = null;
         }
         try {
-          const storage = window.localStorage;
+          const storage = tryGetLocalStorage();
           if (!storage) {
             throw new Error("localStorage unavailable");
           }
@@ -1763,11 +1764,12 @@
           }
           storage.setItem(key, JSON.stringify({ tabId, expiresAt: now + LOCK_LEASE_TTL_MS }));
           fallbackLockTimerId = setInterval(() => {
-            if (!holdsCurrentWebLock || !window.localStorage) {
+            const hbStorage = tryGetLocalStorage();
+            if (!holdsCurrentWebLock || !hbStorage) {
               return;
             }
             try {
-              window.localStorage.setItem(key, JSON.stringify({ tabId, expiresAt: Date.now() + LOCK_LEASE_TTL_MS }));
+              hbStorage.setItem(key, JSON.stringify({ tabId, expiresAt: Date.now() + LOCK_LEASE_TTL_MS }));
             } catch (_err) {
               // Ignore heartbeat write errors.
             }
@@ -1937,14 +1939,15 @@
 
       function collectLocalStorageSnapshot() {
         const entries = [];
-        if (!window.localStorage) {
+        const storage = tryGetLocalStorage();
+        if (!storage) {
           return entries;
         }
         try {
-          for (let i = 0; i < window.localStorage.length; i += 1) {
-            const key = window.localStorage.key(i);
+          for (let i = 0; i < storage.length; i += 1) {
+            const key = storage.key(i);
             if (key && (key === PREFERENCES_KEY || key.startsWith(AUTOSAVE_PREFIX))) {
-              const val = window.localStorage.getItem(key);
+              const val = storage.getItem(key);
               if (typeof val === "string") {
                 entries.push({ key, value: val });
               }

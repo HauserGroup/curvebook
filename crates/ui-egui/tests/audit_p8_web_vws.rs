@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
-use curvebook_doc::CURRENT_SCHEMA_VERSION;
-use curvebook_format::ZipLimits;
+use curvebook_doc::{CURRENT_SCHEMA_VERSION, InfoSheet, SheetId};
+use curvebook_format::{ZipArchive, ZipLimits, ingest_image_asset, save_project_bytes};
 use curvebook_ui_egui::serde_json::{self, Value, json};
 use curvebook_ui_egui::{UiApp, VirtualWorkspaceFolder};
 
@@ -112,6 +112,116 @@ fn vws_validates_manifest_crc_schema_and_declared_sheets() -> Result<(), Box<dyn
     let mut missing_csv = folder.clone();
     missing_csv.files.remove(&sheet_key);
     assert!(missing_csv.open_unpacked_snapshot().is_err());
+
+    Ok(())
+}
+
+#[test]
+fn vws_opens_archive_manifest_with_all_five_sections_and_hydrates_image_assets() -> Result<(), Box<dyn std::error::Error>> {
+    let mut app = UiApp::new();
+    let _ = app.execute_command("sheet.createData", json!({ "kind": "xy", "title": "Assay XY" }))?;
+    let ds_id = app.document().data_sheets.first().map(|s| s.id.clone()).ok_or("missing data sheet")?;
+    for (row, x, y) in [(0usize, 1.0_f64, 2.0_f64), (1, 2.0, 4.0), (2, 3.0, 6.0)] {
+        let _ = app.execute_command("table.setCell", json!({ "sheet_id": ds_id.as_str(), "row": row, "col": 0, "subcol": 0, "value": x }))?;
+        let _ = app.execute_command("table.setCell", json!({ "sheet_id": ds_id.as_str(), "row": row, "col": 1, "subcol": 0, "value": y }))?;
+    }
+
+    // Add InfoSheet, ResultSheet, GraphSheet, and LayoutSheet
+    let snap = app.document().clone();
+    assert!(app.canvas_dialogs.open_analyze_dialog(&snap, &ds_id));
+    app.canvas_dialogs.analyze.selected_entry_id = Some(String::from("stats.descriptive"));
+    let intent = app.canvas_dialogs.analyze.build_create_new_intent().ok_or("missing analysis intent")?;
+    let _ = app.execute_command(&intent.command_id, intent.params)?;
+    let _ = app.execute_command("graph.create", json!({ "data_sheet_id": ds_id.as_str(), "title": "Assay Graph" }))?;
+    let _ = app.execute_command("layout.create", json!({ "title": "Publication Layout" }))?;
+
+    let mut doc = app.document().clone();
+    doc.title = String::from("Full 5-Section Project");
+    if doc.info_sheets.is_empty() {
+        let mut info = InfoSheet::new_preseeded(SheetId::new("info-1"), "Study Protocol")?;
+        info.linked_data_sheets.push(ds_id);
+        doc.info_sheets.push(info);
+    }
+
+    // Encode valid 2x2 RGBA PNG asset and register it on ProjectDocument
+    let mut png_bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut png_bytes, 2, 2);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header()?;
+        writer.write_image_data(&[255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255])?;
+    }
+    let asset = ingest_image_asset(&png_bytes)?;
+    let _asset_id = doc.upsert_image_asset(asset)?;
+
+    assert!(!doc.data_sheets.is_empty());
+    assert!(!doc.info_sheets.is_empty());
+    assert!(!doc.result_sheets.is_empty());
+    assert!(!doc.graph_sheets.is_empty());
+    assert!(!doc.layout_sheets.is_empty());
+
+    let archive_bytes = save_project_bytes(&doc)?;
+    let archive = ZipArchive::from_bytes(&archive_bytes)?;
+    let mut folder = VirtualWorkspaceFolder::new("full.curvebook.d");
+    for (name, content) in archive.iter() {
+        folder.write_file(name, content.to_vec())?;
+    }
+
+    // Opens cleanly with all 5 sections (where non-Data sections have csv_path: null) and hydrated image asset bytes!
+    let reopened = folder.open_unpacked_snapshot()?;
+    assert_eq!(reopened.title, "Full 5-Section Project");
+    assert_eq!(reopened.data_sheets.len(), doc.data_sheets.len());
+    assert_eq!(reopened.info_sheets.len(), doc.info_sheets.len());
+    assert_eq!(reopened.result_sheets.len(), doc.result_sheets.len());
+    assert_eq!(reopened.graph_sheets.len(), doc.graph_sheets.len());
+    assert_eq!(reopened.layout_sheets.len(), doc.layout_sheets.len());
+    assert_eq!(reopened.image_assets.len(), 1);
+    assert_eq!(reopened.image_assets[0].bytes, png_bytes);
+
+    // Reject missing asset file
+    let mut missing_asset = folder.clone();
+    let asset_path = folder.list_files().into_iter().find(|p| p.starts_with("assets/")).ok_or("missing assets/ entry")?;
+    missing_asset.files.remove(&asset_path);
+    assert!(missing_asset.open_unpacked_snapshot().is_err());
+
+    // Reject tampered asset byte_len in manifest.json
+    let mut bad_asset_len = folder.clone();
+    let mut mval: Value = serde_json::from_slice(bad_asset_len.read_file("manifest.json").ok_or("missing manifest")?)?;
+    mval["assets"][0]["byte_len"] = json!(999_999);
+    bad_asset_len.write_file("manifest.json", serde_json::to_vec(&mval)?)?;
+    assert!(bad_asset_len.open_unpacked_snapshot().is_err());
+
+    // Reject template archive kind in unpacked project open
+    let mut wrong_kind = folder.clone();
+    let mut kind_val: Value = serde_json::from_slice(wrong_kind.read_file("manifest.json").ok_or("missing manifest")?)?;
+    kind_val["kind"] = json!("Template");
+    wrong_kind.write_file("manifest.json", serde_json::to_vec(&kind_val)?)?;
+    assert!(wrong_kind.open_unpacked_snapshot().is_err());
+
+    // Reject missing metadata section entry from manifest.json
+    let mut dropped_meta = folder.clone();
+    let mut meta_val: Value = serde_json::from_slice(dropped_meta.read_file("manifest.json").ok_or("missing manifest")?)?;
+    if let Some(arr) = meta_val.get_mut("sheets").and_then(Value::as_array_mut) {
+        arr.retain(|s| s.get("section").and_then(Value::as_str) != Some("Layouts"));
+    }
+    dropped_meta.write_file("manifest.json", serde_json::to_vec(&meta_val)?)?;
+    assert!(dropped_meta.open_unpacked_snapshot().is_err());
+
+    // Reject SheetSection::Data missing csv_path
+    let mut missing_data_csv = folder;
+    let mut data_val: Value = serde_json::from_slice(missing_data_csv.read_file("manifest.json").ok_or("missing manifest")?)?;
+    if let Some(arr) = data_val.get_mut("sheets").and_then(Value::as_array_mut) {
+        for item in arr {
+            if item.get("section").and_then(Value::as_str) == Some("Data")
+                && let Some(obj) = item.as_object_mut()
+            {
+                obj.insert(String::from("csv_path"), Value::Null);
+            }
+        }
+    }
+    missing_data_csv.write_file("manifest.json", serde_json::to_vec(&data_val)?)?;
+    assert!(missing_data_csv.open_unpacked_snapshot().is_err());
 
     Ok(())
 }

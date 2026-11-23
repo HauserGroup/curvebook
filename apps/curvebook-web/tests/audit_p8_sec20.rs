@@ -354,7 +354,10 @@ fn fa_sec20_08_atomic_shortcuts_now_ms_autosave_and_index_local_storage_guards()
 
     // 3. index.html checks: tryGetLocalStorage, now_ms: Date.now(), clearInterval(fallbackLockTimerId), fail-closed observe_external_lock
     let html = include_str!("../index.html");
+    assert!(html.contains("tryGetLocalStorage"));
     assert!(html.contains("tryReadLocalStorageItem"));
+    assert!(!html.contains("if (!window.localStorage)"), "bare window.localStorage check outside try/catch must not exist");
+    assert!(!html.contains("!holdsCurrentWebLock || !window.localStorage"), "heartbeat must use tryGetLocalStorage()");
     assert!(html.contains("emitEvent({ kind: \"hydrate_local_storage\", entries: stored, now_ms: Date.now() })"));
     let lock_start = html.find("function tryAcquireFallbackStorageLock").ok_or("missing tryAcquireFallbackStorageLock")?;
     let lock_slice = &html[lock_start..(lock_start + 4000).min(html.len())];
