@@ -1,5 +1,6 @@
 //! `Bubble Plot Channels` modal body (`gui-layout-spec.md` §8.11).
 
+use crate::egui_shell::UiIntent;
 use curvebook_doc::{ColorChannelMapping, GraphicalDataObject, MultivariatePlotMode, SizeChannelMapping, VariableRole, WhiskerMethod};
 use curvebook_palette::{ColormapId, PaletteId};
 use egui::Ui;
@@ -40,7 +41,7 @@ pub(super) fn render_bubble_plot_body(ui: &mut Ui, state: &mut GraphModalEguiSta
         {
             let mut next = bp.clone();
             next.plot_mode = MultivariatePlotMode::BubbleScatter;
-            gctx.intents.push_update_bubble_plot_state(next);
+            gctx.intents.push(UiIntent::UpdateBubblePlotState(Box::new(next)));
         }
         if record_button(
             ui,
@@ -69,7 +70,7 @@ pub(super) fn render_bubble_plot_body(ui: &mut Ui, state: &mut GraphModalEguiSta
                 },
                 y_error_bars: None,
             };
-            gctx.intents.push_update_bubble_plot_state(next);
+            gctx.intents.push(UiIntent::UpdateBubblePlotState(Box::new(next)));
         }
     });
 
@@ -100,7 +101,7 @@ pub(super) fn render_bubble_plot_body(ui: &mut Ui, state: &mut GraphModalEguiSta
         {
             let mut next = bp.clone();
             next.x_column = (next.x_column + 1) % n_cols;
-            gctx.intents.push_update_bubble_plot_state(next);
+            gctx.intents.push(UiIntent::UpdateBubblePlotState(Box::new(next)));
         }
         if record_button(
             ui,
@@ -119,7 +120,7 @@ pub(super) fn render_bubble_plot_body(ui: &mut Ui, state: &mut GraphModalEguiSta
         {
             let mut next = bp.clone();
             next.y_column = (next.y_column + 1) % n_cols;
-            gctx.intents.push_update_bubble_plot_state(next);
+            gctx.intents.push(UiIntent::UpdateBubblePlotState(Box::new(next)));
         }
     });
 
@@ -166,7 +167,7 @@ pub(super) fn render_bubble_plot_body(ui: &mut Ui, state: &mut GraphModalEguiSta
                         ColorChannelMapping::Continuous { column: (column + 1) % n_cols, ramp: ramp.clone(), domain_clamp: *domain_clamp };
                 }
             }
-            gctx.intents.push_update_bubble_plot_state(next);
+            gctx.intents.push(UiIntent::UpdateBubblePlotState(Box::new(next)));
         }
     });
 
@@ -195,7 +196,7 @@ pub(super) fn render_bubble_plot_body(ui: &mut Ui, state: &mut GraphModalEguiSta
             } else {
                 next.size_channel = SizeChannelMapping::Variable { column: bp.x_column.min(n_cols - 1), min_radius_pt: 2.5, max_radius_pt: 14.0 };
             }
-            gctx.intents.push_update_bubble_plot_state(next);
+            gctx.intents.push(UiIntent::UpdateBubblePlotState(Box::new(next)));
         }
         if let SizeChannelMapping::Variable { column, min_radius_pt, max_radius_pt } = bp.size_channel {
             ui.label(format!("Size: #{} ({})", column + 1, col_title(&bp, column)));
@@ -216,7 +217,7 @@ pub(super) fn render_bubble_plot_body(ui: &mut Ui, state: &mut GraphModalEguiSta
             {
                 let mut next = bp.clone();
                 next.set_size_variable((column + 1) % n_cols, min_radius_pt, max_radius_pt);
-                gctx.intents.push_update_bubble_plot_state(next);
+                gctx.intents.push(UiIntent::UpdateBubblePlotState(Box::new(next)));
             }
         }
     });
@@ -234,7 +235,7 @@ pub(super) fn render_bubble_plot_body(ui: &mut Ui, state: &mut GraphModalEguiSta
             if let Some(v) = out.committed_value {
                 let mut next = bp.clone();
                 next.size_channel = SizeChannelMapping::Constant { radius_pt: v.clamp(1.0, 24.0) };
-                gctx.intents.push_update_bubble_plot_state(next);
+                gctx.intents.push(UiIntent::UpdateBubblePlotState(Box::new(next)));
             }
         }
         SizeChannelMapping::Variable { column, min_radius_pt, max_radius_pt } => {
@@ -248,7 +249,7 @@ pub(super) fn render_bubble_plot_body(ui: &mut Ui, state: &mut GraphModalEguiSta
             if let Some(v) = min_out.committed_value {
                 let mut next = bp.clone();
                 next.set_size_variable(column, v, max_radius_pt);
-                gctx.intents.push_update_bubble_plot_state(next);
+                gctx.intents.push(UiIntent::UpdateBubblePlotState(Box::new(next)));
             }
 
             let max_cfg = ScrubUnitFieldConfig {
@@ -261,7 +262,7 @@ pub(super) fn render_bubble_plot_body(ui: &mut Ui, state: &mut GraphModalEguiSta
             if let Some(v) = max_out.committed_value {
                 let mut next = bp.clone();
                 next.set_size_variable(column, min_radius_pt, v);
-                gctx.intents.push_update_bubble_plot_state(next);
+                gctx.intents.push(UiIntent::UpdateBubblePlotState(Box::new(next)));
             }
         }
     }
@@ -271,13 +272,13 @@ pub(super) fn render_bubble_plot_body(ui: &mut Ui, state: &mut GraphModalEguiSta
     let h_chk = ui.checkbox(&mut hulls, "Show Convex Hulls");
     record_checkbox(ui, &h_chk, gctx.meta, "bubble.show_convex_hulls", "Show Convex Hulls", hulls);
     if h_chk.changed() {
-        gctx.intents.push_dialog_widget_click("bubble.show_convex_hulls");
+        gctx.intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("bubble.show_convex_hulls") });
     }
 
     let mut ellipses = bp.show_confidence_ellipses;
     let e_chk = ui.checkbox(&mut ellipses, "Show Confidence Ellipses");
     record_checkbox(ui, &e_chk, gctx.meta, "bubble.show_confidence_ellipses", "Show Confidence Ellipses", ellipses);
     if e_chk.changed() {
-        gctx.intents.push_dialog_widget_click("bubble.show_confidence_ellipses");
+        gctx.intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("bubble.show_confidence_ellipses") });
     }
 }

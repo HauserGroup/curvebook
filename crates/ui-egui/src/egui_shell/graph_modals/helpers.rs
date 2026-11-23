@@ -2,16 +2,14 @@
 //! for `graph_modals`.
 
 use curvebook_palette::{ColormapId, Rgba8};
-use egui::{Color32, FontId, Response, Stroke, Ui};
-use serde_json::{Value, json};
+use egui::{Color32, FontId, Response, Ui};
 
 use crate::UiApp;
 use crate::grid_view::parse_localized_number_input;
 use crate::i18n::LocalePreset;
-use crate::inspect::ZLayer;
 
 use super::super::unit_spinners::{ScrubUnitFieldConfig, ScrubUnitFieldState, ScrubUnitKind, render_scrub_unit_field};
-use super::super::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens};
+use super::super::{FrameInspectMeta, PendingUiIntents, Tokens};
 use super::state::GraphModalEguiState;
 
 pub(super) struct GraphModalCtx<'a> {
@@ -105,125 +103,37 @@ pub(super) fn layout_elided(
     color: Color32,
     font_size: f32,
 ) -> (std::sync::Arc<egui::Galley>, bool) {
-    let mut job = egui::text::LayoutJob::single_section(text.to_owned(), egui::TextFormat::simple(FontId::proportional(font_size), color));
-    job.wrap = egui::text::TextWrapping { max_width: max_width.max(8.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
-    let galley = painter.layout_job(job);
-    let elided = galley.elided;
-    (galley, elided)
-}
-
-pub(super) fn record_if_visible(ui: &Ui, resp: &Response, meta: &mut FrameInspectMeta, input: FrameInspectEntryInput<'_>) {
-    let clipped = resp.interact_rect.intersect(ui.clip_rect());
-    if clipped.width() > 0.0 && clipped.height() > 0.0 {
-        meta.record_response(ui, resp, input);
-    }
+    crate::egui_shell::ui_kit::elided_galley(painter, text, FontId::proportional(font_size), color, max_width, true)
 }
 
 pub(super) fn record_button(ui: &mut Ui, meta: &mut FrameInspectMeta, entry: ButtonEntry<'_>, tokens: &Tokens) -> Response {
-    let is_primary_footer = entry.selected && entry.widget_id == "modal.ok";
-    let btn = if is_primary_footer && entry.enabled {
-        egui::Button::new(egui::RichText::new(entry.label).color(tokens.on_accent))
-            .fill(tokens.accent_strong)
-            .stroke(Stroke::new(1.0, tokens.accent_strong))
-    } else if entry.selected {
-        egui::Button::new(entry.label).fill(tokens.active_bg).stroke(Stroke::new(1.0, tokens.accent_strong))
-    } else {
-        egui::Button::new(entry.label)
-    };
-    let mut resp = ui.add_enabled(entry.enabled, btn);
-    if let Some(reason) = entry.disabled_reason {
-        resp = resp.on_disabled_hover_text(reason);
-    }
-    let clipped = resp.interact_rect.intersect(ui.clip_rect());
-    if clipped.width() > 0.0 && clipped.height() > 0.0 {
-        let rank = if is_primary_footer { crate::egui_shell::ActionRank::Primary } else { crate::egui_shell::ActionRank::Secondary };
-        meta.record_ranked_response(
-            ui,
-            &resp,
-            FrameInspectEntryInput {
-                widget_id: entry.widget_id,
-                role: "button",
-                label: entry.label,
-                command_id: entry.command_id,
-                value: Some(json!({ "selected": entry.selected })),
-                enabled: entry.enabled,
-                disabled_reason: entry.disabled_reason,
-                z_layer: ZLayer::ModalDialog,
-                ellipsized: false,
-                full_label: None,
-            },
-            rank,
-        );
-    }
-    resp
+    crate::egui_shell::ui_kit::modal_button(
+        ui,
+        meta,
+        crate::egui_shell::ui_kit::ModalButtonSpec {
+            widget_id: entry.widget_id,
+            label: entry.label,
+            command_id: entry.command_id,
+            selected: entry.selected,
+            primary: entry.selected && entry.widget_id == "modal.ok",
+            enabled: entry.enabled,
+            disabled_reason: entry.disabled_reason,
+            ranked: true,
+        },
+        tokens,
+    )
 }
 
 pub(super) fn record_tab(ui: &mut Ui, meta: &mut FrameInspectMeta, widget_id: &str, label: &str, selected: bool, tokens: &Tokens) -> Response {
-    let btn = egui::Button::new(label)
-        .fill(if selected { tokens.active_bg } else { tokens.surface_bg })
-        .stroke(Stroke::new(if selected { 1.5 } else { 1.0 }, if selected { tokens.accent_strong } else { tokens.border }));
-    let resp = ui.add(btn);
-    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Tab, true, selected, label));
-    record_if_visible(
-        ui,
-        &resp,
-        meta,
-        FrameInspectEntryInput {
-            widget_id,
-            role: "tab",
-            label,
-            command_id: None,
-            value: Some(json!({ "selected": selected })),
-            enabled: true,
-            disabled_reason: None,
-            z_layer: ZLayer::ModalDialog,
-            ellipsized: false,
-            full_label: None,
-        },
-    );
-    resp
+    crate::egui_shell::ui_kit::modal_tab(ui, meta, widget_id, label, selected, tokens)
 }
 
 pub(super) fn record_checkbox(ui: &mut Ui, resp: &Response, meta: &mut FrameInspectMeta, widget_id: &str, label: &str, checked: bool) {
-    record_if_visible(
-        ui,
-        resp,
-        meta,
-        FrameInspectEntryInput {
-            widget_id,
-            role: "checkbox",
-            label,
-            command_id: None,
-            value: Some(Value::Bool(checked)),
-            enabled: true,
-            disabled_reason: None,
-            z_layer: ZLayer::ModalDialog,
-            ellipsized: false,
-            full_label: None,
-        },
-    );
+    crate::egui_shell::ui_kit::record_modal_checkbox(ui, resp, meta, widget_id, label, checked);
 }
 
 pub(super) fn record_input(ui: &mut Ui, resp: &Response, meta: &mut FrameInspectMeta, widget_id: &str, label: &str, text: &str, enabled: bool) {
-    let ak_lbl = label.to_owned();
-    resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::TextInput, enabled, ak_lbl.clone()));
-    record_if_visible(
-        ui,
-        resp,
-        meta,
-        FrameInspectEntryInput {
-            widget_id,
-            role: "textbox",
-            label,
-            command_id: None,
-            value: Some(Value::String(text.to_owned())),
-            enabled,
-            disabled_reason: None,
-            z_layer: ZLayer::ModalDialog,
-            ellipsized: false,
-            full_label: None,
-        },
-    );
+    crate::egui_shell::ui_kit::record_modal_input(ui, resp, meta, widget_id, label, text, enabled);
 }
 
 pub(in crate::egui_shell) struct LengthSpinnerSpec<'a> {
@@ -267,20 +177,5 @@ pub(in crate::egui_shell) fn render_length_spinner_pt(
 }
 
 pub(super) fn record_label(ui: &mut Ui, resp: &Response, meta: &mut FrameInspectMeta, widget_id: &str, text: &str) {
-    meta.record_response(
-        ui,
-        resp,
-        FrameInspectEntryInput {
-            widget_id,
-            role: "text",
-            label: text,
-            command_id: None,
-            value: None,
-            enabled: true,
-            disabled_reason: None,
-            z_layer: ZLayer::ModalDialog,
-            ellipsized: false,
-            full_label: None,
-        },
-    );
+    crate::egui_shell::ui_kit::record_modal_text(ui, resp, meta, widget_id, text);
 }

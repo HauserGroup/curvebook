@@ -1,11 +1,11 @@
 //! Shared widget primitives, localization titles, and collapsed-rail renderer for the Trailing Studio Dock.
 
 use curvebook_doc::SheetId;
-use egui::{Color32, CornerRadius, Pos2, Sense, Stroke, StrokeKind, Vec2};
+use egui::{Color32, Pos2, Sense, Stroke, StrokeKind, Vec2};
 use serde_json::json;
 
 use crate::UiApp;
-use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens, widgets};
+use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens, UiIntent, widgets};
 use crate::i18n::{is_rtl_locale, tr};
 use crate::inspect::ZLayer;
 
@@ -29,110 +29,43 @@ pub(super) struct StudioChipSpec<'a> {
 }
 
 pub(super) fn studio_chip(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInspectMeta, spec: &StudioChipSpec<'_>) -> bool {
-    let StudioChipSpec { label, tooltip, max_w, selected, enabled, border_override, widget_id, role, command_id, disabled_reason } = *spec;
-    let font_id = egui::FontId::proportional(11.5);
-    let tc = if !enabled {
-        tokens.text_disabled
-    } else if selected {
-        tokens.text_strong
-    } else {
-        tokens.text_primary
-    };
-    let max_text_w = (max_w - 14.0).max(12.0);
-    let mut job = egui::text::LayoutJob::simple_singleline(label.to_owned(), font_id.clone(), tc);
-    job.wrap = egui::text::TextWrapping { max_rows: 1, break_anywhere: true, overflow_character: Some('…'), ..Default::default() };
-    job.wrap.max_width = max_text_w;
-    let galley = ui.fonts_mut(|f| f.layout_job(job));
-    let w = (galley.size().x + 14.0).clamp(24.0_f32.min(max_w), max_w.max(24.0));
-    let rect = ui.allocate_space(Vec2::new(w, SECTION_BTN_H)).1;
-    let visible = rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect);
-    if !visible.is_positive() || visible.width() < 4.0 || visible.height() < 4.0 {
-        return false;
-    }
-
-    let resp =
-        ui.interact(visible, ui.make_persistent_id(("egui_shell.studio_chip", widget_id)), if enabled { Sense::click() } else { Sense::hover() });
-    let (galley, ellipsized) = if visible.width() < rect.width() - 0.5 {
-        let mut vis_job = egui::text::LayoutJob::simple_singleline(label.to_owned(), font_id, tc);
-        vis_job.wrap = egui::text::TextWrapping {
-            max_width: (visible.width() - 14.0).max(4.0),
-            max_rows: 1,
-            break_anywhere: true,
-            overflow_character: Some('…'),
-        };
-        let vg = ui.fonts_mut(|f| f.layout_job(vis_job));
-        let ve = vg.elided;
-        (vg, ve)
-    } else {
-        let e = galley.elided;
-        (galley, e)
-    };
-
-    let bg = if !enabled {
-        tokens.panel_bg
-    } else if selected {
-        tokens.active_bg
-    } else if resp.hovered() {
-        tokens.hover_bg
-    } else {
-        tokens.button_bg
-    };
-    let bc = if !enabled {
-        tokens.divider
-    } else if let Some(ov) = border_override {
-        ov
-    } else if selected {
-        tokens.accent
-    } else if resp.hovered() {
-        tokens.hover_border
-    } else {
-        tokens.button_border
-    };
-    let sw = if border_override.is_some() { 1.5 } else { 1.0 };
-
-    let painter = ui.painter().with_clip_rect(visible);
-    painter.rect(rect, CornerRadius::same(tokens.metrics.radius_md), bg, Stroke::new(sw, bc), StrokeKind::Inside);
-    if galley.size().x <= visible.width() - 8.0 || ellipsized {
-        let tp = Pos2::new(visible.min.x + 7.0, rect.center().y - galley.size().y * 0.5);
-        painter.galley(tp, galley, tc);
-    }
-
-    let acc_name = label.to_owned();
-    let ak_role = match role {
+    let ak_role = match spec.role {
         "tab" => egui::Role::Tab,
         "text" => egui::Role::Label,
         _ => egui::Role::Button,
     };
-    resp.widget_info(move || egui::WidgetInfo::labeled(ak_role, enabled, acc_name.clone()));
-
-    let resp = if !enabled {
-        if let Some(r) = disabled_reason { resp.on_disabled_hover_text(r) } else { resp }
-    } else if ellipsized {
-        resp.on_hover_text(label)
-    } else if !tooltip.is_empty() && tooltip != label {
-        resp.on_hover_text(tooltip)
-    } else {
-        resp
-    };
-
-    meta.record_response_with_unclipped(
+    let (_, clicked) = crate::egui_shell::ui_kit::styled_button(
         ui,
-        &resp,
-        rect,
-        FrameInspectEntryInput {
-            widget_id,
-            role,
-            label,
-            command_id,
+        tokens,
+        meta,
+        crate::egui_shell::ui_kit::StyledButtonSpec {
+            widget_id: spec.widget_id,
+            role: spec.role,
+            a11y_role: ak_role,
+            a11y_selectable: false,
+            label: spec.label,
+            tooltip: Some(spec.tooltip),
+            command_id: spec.command_id,
+            width: crate::egui_shell::ui_kit::ButtonWidth::FitText { min_w: 24.0_f32.min(spec.max_w), max_w: spec.max_w.max(24.0), pad_x: 14.0 },
+            height: SECTION_BTN_H,
+            font_size: 11.5,
+            radius: tokens.metrics.radius_md,
+            text_align: crate::egui_shell::ui_kit::ButtonTextAlign::Left(7.0),
+            break_anywhere: true,
+            primary: false,
+            selected: spec.selected,
+            enabled: spec.enabled,
+            accent_text_when_selected: false,
+            border_override: spec.border_override,
             value: None,
-            enabled,
-            disabled_reason: (!enabled).then_some(disabled_reason).flatten(),
+            disabled_reason: spec.disabled_reason,
             z_layer: ZLayer::Workspace,
-            ellipsized,
-            full_label: ellipsized.then_some(label),
+            skip_offscreen: false,
+            clip_interact_to_viewport: true,
+            tooltip_mode: crate::egui_shell::ui_kit::TooltipMode::Standard,
         },
     );
-    resp.clicked() && enabled
+    clicked
 }
 
 pub(super) struct StudioButtonSpec<'a> {
@@ -147,96 +80,38 @@ pub(super) struct StudioButtonSpec<'a> {
 }
 
 pub(super) fn studio_full_button(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInspectMeta, spec: &StudioButtonSpec<'_>) -> bool {
-    let StudioButtonSpec { label, tooltip, selected, enabled, primary, widget_id, command_id, disabled_reason } = *spec;
-    let w = ui.available_width().max(48.0);
-    let font_id = egui::FontId::proportional(11.5);
-    let tc = if !enabled {
-        tokens.text_disabled
-    } else if primary {
-        tokens.on_accent
-    } else if selected {
-        tokens.text_strong
-    } else {
-        tokens.text_primary
-    };
-    let rect = ui.allocate_space(Vec2::new(w, 24.0)).1;
-    let visible = rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect);
-    if !visible.is_positive() || visible.width() < 4.0 || visible.height() < 4.0 {
-        return false;
-    }
-
-    let mut job = egui::text::LayoutJob::simple_singleline(label.to_owned(), font_id, tc);
-    job.wrap = egui::text::TextWrapping { max_rows: 1, break_anywhere: true, overflow_character: Some('…'), ..Default::default() };
-    job.wrap.max_width = (visible.width() - 16.0).max(8.0);
-    let galley = ui.fonts_mut(|f| f.layout_job(job));
-    let ellipsized = galley.elided;
-    let resp = ui.interact(
-        visible,
-        ui.make_persistent_id(("egui_shell.studio_full_button", widget_id)),
-        if enabled { Sense::click() } else { Sense::hover() },
-    );
-
-    let bg = if !enabled {
-        tokens.panel_bg
-    } else if primary {
-        if resp.hovered() { tokens.accent_hover } else { tokens.accent_strong }
-    } else if selected {
-        tokens.active_bg
-    } else if resp.hovered() {
-        tokens.hover_bg
-    } else {
-        tokens.button_bg
-    };
-    let bc = if !enabled {
-        tokens.divider
-    } else if primary {
-        if resp.hovered() { tokens.hover_border } else { tokens.accent_strong }
-    } else if selected {
-        tokens.accent
-    } else if resp.hovered() {
-        tokens.hover_border
-    } else {
-        tokens.button_border
-    };
-
-    let painter = ui.painter().with_clip_rect(visible);
-    painter.rect(rect, CornerRadius::same(tokens.metrics.radius_md), bg, Stroke::new(1.0, bc), StrokeKind::Inside);
-    if galley.size().x <= visible.width() - 8.0 || ellipsized {
-        let tp = Pos2::new(visible.min.x + ((visible.width() - galley.size().x) * 0.5).max(8.0), rect.center().y - galley.size().y * 0.5);
-        painter.galley(tp, galley, tc);
-    }
-
-    let acc_name = label.to_owned();
-    resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, enabled, acc_name.clone()));
-
-    let resp = if !enabled {
-        if let Some(r) = disabled_reason { resp.on_disabled_hover_text(r) } else { resp }
-    } else if ellipsized {
-        resp.on_hover_text(label)
-    } else if !tooltip.is_empty() && tooltip != label {
-        resp.on_hover_text(tooltip)
-    } else {
-        resp
-    };
-
-    meta.record_response_with_unclipped(
+    let (_, clicked) = crate::egui_shell::ui_kit::styled_button(
         ui,
-        &resp,
-        rect,
-        FrameInspectEntryInput {
-            widget_id,
+        tokens,
+        meta,
+        crate::egui_shell::ui_kit::StyledButtonSpec {
+            widget_id: spec.widget_id,
             role: "button",
-            label,
-            command_id,
+            a11y_role: egui::Role::Button,
+            a11y_selectable: false,
+            label: spec.label,
+            tooltip: Some(spec.tooltip),
+            command_id: spec.command_id,
+            width: crate::egui_shell::ui_kit::ButtonWidth::Fixed(ui.available_width().max(48.0)),
+            height: SECTION_BTN_H,
+            font_size: 11.5,
+            radius: tokens.metrics.radius_md,
+            text_align: crate::egui_shell::ui_kit::ButtonTextAlign::Center,
+            break_anywhere: true,
+            primary: spec.primary,
+            selected: spec.selected,
+            enabled: spec.enabled,
+            accent_text_when_selected: false,
+            border_override: None,
             value: None,
-            enabled,
-            disabled_reason: (!enabled).then_some(disabled_reason).flatten(),
+            disabled_reason: spec.disabled_reason,
             z_layer: ZLayer::Workspace,
-            ellipsized,
-            full_label: ellipsized.then_some(label),
+            skip_offscreen: false,
+            clip_interact_to_viewport: true,
+            tooltip_mode: crate::egui_shell::ui_kit::TooltipMode::Standard,
         },
     );
-    resp.clicked() && enabled
+    clicked
 }
 
 pub(super) fn surface_localized_title(locale: &str, surface: StudioContextSurface) -> &'static str {
@@ -311,7 +186,7 @@ pub(super) fn render_collapsed_rail(
             },
         );
         if expand_resp && enabled {
-            intents.push_toggle_trailing_collapsed_rail();
+            intents.push(UiIntent::ToggleTrailingCollapsedRail);
         }
 
         widgets::divider(ui);
@@ -353,7 +228,7 @@ pub(super) fn render_collapsed_rail(
                 },
             );
             if r {
-                intents.push_toggle_trailing_collapsed_rail();
+                intents.push(UiIntent::ToggleTrailingCollapsedRail);
             }
         }
     });

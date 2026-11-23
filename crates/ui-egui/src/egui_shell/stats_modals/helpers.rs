@@ -185,76 +185,40 @@ pub(in crate::egui_shell) fn render_modal_action_button(
     selected: bool,
     enablement: &ControlEnablement,
 ) -> bool {
-    let enabled = enablement.enabled;
     let min_w: f32 = if primary { 92.0 } else { 66.0 };
     let max_w = (ui.available_width() - 4.0).max(48.0);
-    let fg_text = if !enabled {
-        tokens.text_disabled
-    } else if primary {
-        tokens.on_accent
-    } else {
-        tokens.text_strong
-    };
-    let mut job = egui::text::LayoutJob::single_section(label.to_owned(), egui::TextFormat::simple(FontId::proportional(11.5), fg_text));
-    job.wrap = egui::text::TextWrapping { max_width: (max_w - 16.0).max(24.0), max_rows: 1, break_anywhere: false, overflow_character: Some('…') };
-    let galley = ui.painter().layout_job(job);
-    let ellipsized = galley.elided;
-    let w = (galley.size().x + 18.0).clamp(min_w.min(max_w), max_w);
-    let vis_clip = if meta.viewport_rect.is_positive() { ui.clip_rect().intersect(meta.viewport_rect) } else { ui.clip_rect() };
-    let row_top = ui.cursor().top();
-    let row_bot = row_top + 25.0;
-    if row_top > vis_clip.bottom() || (!ui.layout().main_wrap() && row_bot < vis_clip.top()) {
-        ui.allocate_space(Vec2::new(w, 25.0));
-        return false;
-    }
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 25.0), Sense::click());
-    let resp = if enabled { resp } else { resp.on_hover_cursor(egui::CursorIcon::Default) };
-
-    let (bg, fg, border) = if !enabled {
-        (tokens.panel_bg, tokens.text_disabled, tokens.divider)
-    } else if primary {
-        (
-            if resp.hovered() { tokens.accent_hover } else { tokens.accent_strong },
-            tokens.on_accent,
-            if resp.hovered() { tokens.hover_border } else { tokens.accent_strong },
-        )
-    } else if selected {
-        (tokens.active_bg, tokens.text_strong, tokens.accent)
-    } else if resp.hovered() {
-        (tokens.hover_bg, tokens.text_strong, tokens.hover_border)
-    } else {
-        (tokens.button_bg, tokens.text_strong, tokens.button_border)
-    };
-    let r = CornerRadius::same(tokens.metrics.radius_md);
-    ui.painter().rect_filled(rect, r, bg);
-    ui.painter().rect_stroke(rect, r, Stroke::new(1.0, border), StrokeKind::Inside);
-    ui.painter().with_clip_rect(rect.shrink(3.0)).galley(
-        Pos2::new(rect.center().x - galley.size().x * 0.5, rect.center().y - galley.size().y * 0.5),
-        galley,
-        fg,
-    );
-
-    let a11y_label = label.to_owned();
-    resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, enabled, a11y_label.clone()));
-    let tip = enablement.disabled_reason.as_deref().filter(|s| !s.is_empty()).or(ellipsized.then_some(label)).unwrap_or("");
-    let resp = if tip.is_empty() { resp } else { resp.on_hover_text(tip) };
-
-    record_widget(
+    let (_, clicked) = crate::egui_shell::ui_kit::styled_button(
         ui,
+        tokens,
         meta,
-        &resp,
-        widget_id,
-        "button",
-        label,
-        None,
-        None,
-        enabled,
-        enablement.disabled_reason.as_deref(),
-        ZLayer::ModalDialog,
-        ellipsized,
-        ellipsized.then_some(label),
+        crate::egui_shell::ui_kit::StyledButtonSpec {
+            widget_id,
+            role: "button",
+            a11y_role: egui::Role::Button,
+            a11y_selectable: false,
+            label,
+            tooltip: None,
+            command_id: None,
+            width: crate::egui_shell::ui_kit::ButtonWidth::FitText { min_w, max_w, pad_x: 18.0 },
+            height: 25.0,
+            font_size: 11.5,
+            radius: tokens.metrics.radius_md,
+            text_align: crate::egui_shell::ui_kit::ButtonTextAlign::Center,
+            break_anywhere: false,
+            primary,
+            selected,
+            enabled: enablement.enabled,
+            accent_text_when_selected: false,
+            border_override: None,
+            value: None,
+            disabled_reason: enablement.disabled_reason.as_deref(),
+            z_layer: ZLayer::ModalDialog,
+            skip_offscreen: true,
+            clip_interact_to_viewport: false,
+            tooltip_mode: crate::egui_shell::ui_kit::TooltipMode::Standard,
+        },
     );
-    enabled && resp.clicked()
+    clicked
 }
 
 /// Draw a highlighted live symbolic formula bar (`widget_id`: e.g. `"edit.formula_bar"`).

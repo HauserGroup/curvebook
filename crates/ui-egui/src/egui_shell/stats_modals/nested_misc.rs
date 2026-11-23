@@ -12,7 +12,7 @@ use crate::modal_predicates::{
 use crate::egui_shell::stat_anova_modal::{
     StepperSpec, column_titles_for_draft, render_modal_checkbox, render_modal_radio, render_modal_seg_btn, render_section_title, render_stepper_row,
 };
-use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens};
+use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens, UiIntent};
 
 use super::helpers::{render_dataset_checklist, render_df_method_picker};
 
@@ -95,7 +95,7 @@ pub(super) fn render_contingency_design(
         ep.contingency_attributable_risk_checked,
         &two_by_two_en,
     ) {
-        intents.push_dialog_widget_click("edit.contingency.attributable_risk");
+        intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("edit.contingency.attributable_risk") });
     }
 
     ui.add_space(6.0);

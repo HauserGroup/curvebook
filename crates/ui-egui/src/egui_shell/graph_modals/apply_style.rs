@@ -1,5 +1,6 @@
 //! `Apply Style From` modal body (`gui-layout-spec.md` §8.11).
 
+use crate::egui_shell::UiIntent;
 use curvebook_doc::SheetId;
 use egui::Ui;
 use serde_json::{Map, Value};
@@ -70,7 +71,7 @@ pub(super) fn render_apply_style_body(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>)
                 }
                 next.target_graph_id = all_targets.first().cloned();
                 next.target_graph_ids = all_targets;
-                gctx.intents.push_update_apply_style_state(next);
+                gctx.intents.push(UiIntent::UpdateApplyStyleState(Box::new(next)));
             }
         });
         ui.horizontal_wrapped(|ui| {
@@ -94,7 +95,7 @@ pub(super) fn render_apply_style_body(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>)
                         next.target_graph_ids.retain(|t| t != id);
                     }
                     next.target_graph_id = next.target_graph_ids.first().cloned();
-                    gctx.intents.push_update_apply_style_state(next);
+                    gctx.intents.push(UiIntent::UpdateApplyStyleState(Box::new(next)));
                 }
             }
         });
@@ -110,7 +111,7 @@ pub(super) fn render_apply_style_body(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>)
         let chk = ui.checkbox(&mut cur, lbl);
         record_checkbox(ui, &chk, gctx.meta, wid, lbl, cur);
         if chk.changed() {
-            gctx.intents.push_dialog_widget_click(wid);
+            gctx.intents.push(UiIntent::DialogWidgetClick { widget_id: (wid).into() });
         }
     }
 }

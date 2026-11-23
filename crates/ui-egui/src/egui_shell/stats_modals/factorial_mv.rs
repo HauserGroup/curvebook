@@ -10,7 +10,7 @@ use crate::modal_predicates::{ControlEnablement, r1_paired_or_matched_allowed, r
 use crate::egui_shell::stat_anova_modal::{
     StepperSpec, render_modal_checkbox, render_modal_radio, render_modal_seg_btn, render_section_title, render_stepper_row,
 };
-use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens};
+use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens, UiIntent};
 
 use super::helpers::{render_dataset_checklist, render_mv_role_badge, resolve_source_data_sheet};
 
@@ -36,7 +36,7 @@ pub(super) fn render_factorial_anova_design(
         ep.paired_or_matched,
         &paired_en,
     ) {
-        intents.push_dialog_widget_click("edit.paired_or_matched");
+        intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("edit.paired_or_matched") });
     }
     ui.add_space(4.0);
     render_section_title(ui, tokens, "Factorial & Sum of Squares Structure");
@@ -320,7 +320,7 @@ pub(super) fn render_multivariate_design_controls(
                 k_means_k.is_none(),
                 &ControlEnablement::enabled(),
             ) {
-                intents.push_dialog_widget_click("edit.cluster.k_means_auto");
+                intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("edit.cluster.k_means_auto") });
             }
             let k_val = k_means_k.unwrap_or(0);
             let step = render_stepper_row(

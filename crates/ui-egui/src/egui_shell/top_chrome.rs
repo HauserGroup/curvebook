@@ -11,7 +11,8 @@ use crate::dialogs_canvas::{ActiveDialog, SplitWorkspaceState};
 use crate::egui_shell::inspect_bridge::HybridCoexistenceDecision;
 use crate::egui_shell::top_bar_fit::{MIN_SWITCHER_PT, RankedToolbarSlot, RightWidths, SearchVisibility, fit_ranked_toolbar, fit_right_group};
 use crate::egui_shell::{
-    ActionRank, FrameInspectEntryInput, FrameInspectMeta, FrameInspectNodeMeta, PendingUiIntents, ResponsiveShellLayout, Tokens, WorkspacePreset,
+    ActionRank, FrameInspectEntryInput, FrameInspectMeta, FrameInspectNodeMeta, PendingUiIntents, ResponsiveShellLayout, Tokens, UiIntent,
+    WorkspacePreset,
 };
 use crate::i18n::{LOCALES, locale_picker_label, normalize_locale};
 use crate::inspect::ZLayer;
@@ -422,7 +423,7 @@ fn render_tier1_bar(
         );
         if home_resp.clicked() && enabled {
             state.close_all_popups();
-            intents.push_set_launcher_open(!ctx_in.launcher_open);
+            intents.push(UiIntent::SetLauncherOpen { open: !ctx_in.launcher_open });
         }
 
         // Compute compact right-group budget before placing middle menus/title so right cluster never clips.
@@ -1132,7 +1133,7 @@ fn render_workspace_preset_popup(
                         PopupActionButtonSpec { widget_id: wid, label: &label, selected, enabled: true, disabled_reason: None },
                     );
                     if resp.clicked() {
-                        intents.push_apply_workspace_preset(preset);
+                        intents.push(UiIntent::ApplyWorkspacePreset { preset });
                         state.preset_menu_open = false;
                     }
                 }
@@ -1880,7 +1881,7 @@ fn make_ui_action(app: &UiApp, input: Tier2ActionInput<'_>) -> Tier2ActionSpec {
 
 fn emit_tier2_action_intent(act: &Tier2ActionSpec, intents: &mut PendingUiIntents) {
     if let Some(rs_id) = act.retarget_sheet_id.as_ref() {
-        intents.push_open_retarget_dialog(rs_id.clone(), None);
+        intents.push(UiIntent::OpenRetargetDialog { result_sheet_id: rs_id.clone(), target_data_sheet_id: None });
         return;
     }
     if act.is_engine {
@@ -1957,11 +1958,7 @@ const fn modal_reason(enabled: bool) -> Option<&'static str> {
 }
 
 fn layout_single_line_job(painter: &egui::Painter, text: &str, max_width: f32, color: Color32, font_size: f32) -> (Arc<egui::Galley>, bool) {
-    let mut job = egui::text::LayoutJob::single_section(text.to_owned(), egui::TextFormat::simple(FontId::proportional(font_size), color));
-    job.wrap = egui::text::TextWrapping { max_width: max_width.max(8.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
-    let galley = painter.layout_job(job);
-    let ellipsized = galley.elided;
-    (galley, ellipsized)
+    super::ui_kit::elided_galley(painter, text, FontId::proportional(font_size), color, max_width, true)
 }
 
 fn render_single_line_title_badge(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInspectMeta, title: &str, max_w: f32) {

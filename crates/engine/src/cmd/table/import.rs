@@ -1059,14 +1059,8 @@ pub(super) fn parse_plate_well_role(val: &Value) -> Result<PlateWellRole, Engine
     #[serde(deny_unknown_fields)]
     struct RoleObj {
         role: Option<String>,
-        // Retained until Stage 3 updates egui_shell/import_wizard.rs
-        #[serde(alias = "group")]
         group_name: Option<String>,
-        // Retained until Stage 3 updates egui_shell/import_wizard.rs
-        #[serde(alias = "x")]
         dilution_x: Option<f64>,
-        // Retained until Stage 3 updates egui_shell/import_wizard.rs
-        #[serde(alias = "rep")]
         replicate: Option<usize>,
     }
     let obj: RoleObj =

@@ -1,5 +1,6 @@
 //! `Page Layout Composer` modal body (`gui-layout-spec.md` §8.12).
 
+use crate::egui_shell::UiIntent;
 use curvebook_doc::{JournalWidthPreset, LayoutItem, PageOrientation, PanelBadgeStyle, RectPt, SheetId};
 use egui::Ui;
 
@@ -37,7 +38,7 @@ pub(super) fn render_page_layout_body(ui: &mut Ui, state: &mut GraphModalEguiSta
             {
                 let mut next = pl.clone();
                 next.apply_preset(preset);
-                gctx.intents.push_update_page_layout_state(next);
+                gctx.intents.push(UiIntent::UpdatePageLayoutState(Box::new(next)));
             }
         }
     });
@@ -64,7 +65,7 @@ pub(super) fn render_page_layout_body(ui: &mut Ui, state: &mut GraphModalEguiSta
             let mut next = pl.clone();
             let gids: Vec<SheetId> = gctx.app.document().graph_sheets.iter().map(|g| g.id.clone()).collect();
             next.arrange_grid(&gids, 24.0, 12.0);
-            gctx.intents.push_update_page_layout_state(next);
+            gctx.intents.push(UiIntent::UpdatePageLayoutState(Box::new(next)));
         }
         let orient_lbl = match pl.orientation {
             PageOrientation::Portrait => "Portrait",
@@ -90,7 +91,7 @@ pub(super) fn render_page_layout_body(ui: &mut Ui, state: &mut GraphModalEguiSta
                 PageOrientation::Portrait => PageOrientation::Landscape,
                 PageOrientation::Landscape => PageOrientation::Portrait,
             };
-            gctx.intents.push_update_page_layout_state(next);
+            gctx.intents.push(UiIntent::UpdatePageLayoutState(Box::new(next)));
         }
     });
 
@@ -101,7 +102,7 @@ pub(super) fn render_page_layout_body(ui: &mut Ui, state: &mut GraphModalEguiSta
     if chk.changed() {
         let mut next = pl.clone();
         next.align_plot_origins = align_origins;
-        gctx.intents.push_update_page_layout_state(next);
+        gctx.intents.push(UiIntent::UpdatePageLayoutState(Box::new(next)));
     }
 
     ui.horizontal_wrapped(|ui| {
@@ -127,7 +128,7 @@ pub(super) fn render_page_layout_body(ui: &mut Ui, state: &mut GraphModalEguiSta
             {
                 let mut next = pl.clone();
                 next.panel_badges = st;
-                gctx.intents.push_update_page_layout_state(next);
+                gctx.intents.push(UiIntent::UpdatePageLayoutState(Box::new(next)));
             }
         }
     });
@@ -160,7 +161,7 @@ pub(super) fn render_page_layout_body(ui: &mut Ui, state: &mut GraphModalEguiSta
                 font_size_pt: 11.0,
             });
             state.page_callout_draft.clear();
-            gctx.intents.push_update_page_layout_state(next);
+            gctx.intents.push(UiIntent::UpdatePageLayoutState(Box::new(next)));
         }
     });
     ui.label(format!("Layout items: {}", pl.items.len()));

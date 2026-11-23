@@ -1,6 +1,7 @@
 //! `Change Graph Type` modal body, graph-type option cards, thumbnail glyphs, and live
 //! dataset preview (`gui-layout-spec.md` §8.11B).
 
+use crate::egui_shell::UiIntent;
 use curvebook_chart::{ChartScene, PathCmd, PointPt, ScenePrimitive, compile_graph};
 use curvebook_doc::{
     ColumnDesignHint, ErrorBarMetric, GraphKind, GraphSheet, ProjectDocument, SheetId, SummaryMeasure, SurvivalDisplayMetric, TableKind,
@@ -74,7 +75,7 @@ pub(super) fn render_change_graph_type_body(ui: &mut Ui, state: &mut GraphModalE
                 if resp.clicked() {
                     let mut next = cgt.clone();
                     next.selected_option_id = opt.id.to_owned();
-                    gctx.intents.push_update_change_graph_type_state(next);
+                    gctx.intents.push(UiIntent::UpdateChangeGraphTypeState(Box::new(next)));
                 }
             }
         });
@@ -114,7 +115,7 @@ pub(super) fn render_change_graph_type_body(ui: &mut Ui, state: &mut GraphModalE
                 {
                     let mut next = cgt.clone();
                     next.summary_measure = val;
-                    gctx.intents.push_update_change_graph_type_state(next);
+                    gctx.intents.push(UiIntent::UpdateChangeGraphTypeState(Box::new(next)));
                 }
             }
         });
@@ -146,7 +147,7 @@ pub(super) fn render_change_graph_type_body(ui: &mut Ui, state: &mut GraphModalE
                 {
                     let mut next = cgt.clone();
                     next.error_bar_metric = metric;
-                    gctx.intents.push_update_change_graph_type_state(next);
+                    gctx.intents.push(UiIntent::UpdateChangeGraphTypeState(Box::new(next)));
                 }
             }
         });
@@ -200,7 +201,7 @@ fn render_cgt_survival_options(ui: &mut Ui, cgt: &crate::dialogs_canvas::ChangeG
             {
                 let mut next = cgt.clone();
                 next.survival_metric = metric;
-                gctx.intents.push_update_change_graph_type_state(next);
+                gctx.intents.push(UiIntent::UpdateChangeGraphTypeState(Box::new(next)));
             }
         }
     });
@@ -226,7 +227,7 @@ fn render_cgt_survival_options(ui: &mut Ui, cgt: &crate::dialogs_canvas::ChangeG
             {
                 let mut next = cgt.clone();
                 next.survival_staircase = stair;
-                gctx.intents.push_update_change_graph_type_state(next);
+                gctx.intents.push(UiIntent::UpdateChangeGraphTypeState(Box::new(next)));
             }
         }
         ui.label("Error:");
@@ -250,7 +251,7 @@ fn render_cgt_survival_options(ui: &mut Ui, cgt: &crate::dialogs_canvas::ChangeG
             {
                 let mut next = cgt.clone();
                 next.survival_error_display = err_opt;
-                gctx.intents.push_update_change_graph_type_state(next);
+                gctx.intents.push(UiIntent::UpdateChangeGraphTypeState(Box::new(next)));
             }
         }
     });

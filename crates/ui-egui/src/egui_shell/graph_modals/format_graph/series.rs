@@ -1,6 +1,7 @@
 //! Series-based `Format Graph` schema tabs: Appearance, Series & Arrangement, Graph Settings,
 //! and Value Annotations.
 
+use crate::egui_shell::UiIntent;
 use curvebook_doc::{
     AnalysisKind, EquationDisplayMode, ErrorBarDirection, ErrorBarMetric, GraphKind, GraphicalDataObject, GroupedArrangement, RegressionOverlaySpec,
 };
@@ -45,7 +46,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
             if let Some(gs) = fg.graph_sheet_id.as_ref().and_then(|id| gctx.app.document().graph_sheet(id)) {
                 next.sync_selected_series_from_spec(&gs.spec);
             }
-            gctx.intents.push_update_format_graph_state(next);
+            gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
         }
         ui.label(format!("{} / {}", fg.selected_series_index + 1, series_count));
         if record_button(
@@ -69,7 +70,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
             if let Some(gs) = fg.graph_sheet_id.as_ref().and_then(|id| gctx.app.document().graph_sheet(id)) {
                 next.sync_selected_series_from_spec(&gs.spec);
             }
-            gctx.intents.push_update_format_graph_state(next);
+            gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
         }
 
         let mut apply_all = fg.apply_all_data_sets;
@@ -80,7 +81,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
             state.format_graph_apply_globally = apply_all;
             let mut next = fg.clone();
             next.apply_all_data_sets = apply_all;
-            gctx.intents.push_update_format_graph_state(next);
+            gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
         }
     });
 
@@ -104,7 +105,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
     ) {
         let mut next = fg.clone();
         next.marker_size_pt = committed;
-        gctx.intents.push_update_format_graph_state(next);
+        gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
     }
 
     ui.add_space(4.0);
@@ -134,7 +135,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
             {
                 let mut next = fg.clone();
                 next.marker_fill_mode = mode;
-                gctx.intents.push_update_format_graph_state(next);
+                gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
             }
         }
     });
@@ -166,7 +167,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
             {
                 let mut next = fg.clone();
                 next.line_dash = dash;
-                gctx.intents.push_update_format_graph_state(next);
+                gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
             }
         }
     });
@@ -195,7 +196,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
                 let mut next = fg.clone();
                 next.series_alpha_pct = pct;
                 next.alpha_dirty = true;
-                gctx.intents.push_update_format_graph_state(next);
+                gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
             }
         }
     });
@@ -210,7 +211,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
         if raw_chk.changed() {
             let mut next = fg.clone();
             next.show_raw_data = raw_on;
-            gctx.intents.push_update_format_graph_state(next);
+            gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
         }
 
         let mut sym_on = fg.show_symbols;
@@ -221,7 +222,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
             let mut next = fg.clone();
             next.show_symbols = sym_on;
             next.show_symbols_dirty = true;
-            gctx.intents.push_update_format_graph_state(next);
+            gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
         }
 
         let mut fit_on = fg.show_fitted_curve;
@@ -232,7 +233,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
         if fit_chk.changed() && fit_enabled {
             let mut next = fg.clone();
             next.show_fitted_curve = fit_on;
-            gctx.intents.push_update_format_graph_state(next);
+            gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
         }
     });
 
@@ -279,7 +280,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
                         });
                         next.pending_overlay_result_id = Some(Some(rs.id.clone()));
                         next.show_fitted_curve = true;
-                        gctx.intents.push_update_format_graph_state(next);
+                        gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
                     }
                 }
                 if fg.cached_regression_overlay.is_some()
@@ -302,7 +303,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
                     next.cached_regression_overlay = None;
                     next.pending_overlay_result_id = Some(None);
                     next.show_fitted_curve = false;
-                    gctx.intents.push_update_format_graph_state(next);
+                    gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
                 }
             });
         }
@@ -338,7 +339,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
                     let mut next = fg.clone();
                     next.series_gdo_bar = target_bar;
                     next.series_gdo_dirty = true;
-                    gctx.intents.push_update_format_graph_state(next);
+                    gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
                 }
             }
         });
@@ -371,7 +372,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
                     let mut next = fg.clone();
                     next.replicate_lines = mode;
                     next.replicate_lines_dirty = true;
-                    gctx.intents.push_update_format_graph_state(next);
+                    gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
                 }
             }
         });
@@ -419,7 +420,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
             let mut next = fg.clone();
             next.bar_border_width_pt = w;
             next.bar_border_width_dirty = true;
-            gctx.intents.push_update_format_graph_state(next);
+            gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
         }
     }
 
@@ -433,7 +434,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
             let mut next = fg.clone();
             next.forest_show_pooled_diamond = pooled_on;
             next.forest_show_pooled_diamond_dirty = true;
-            gctx.intents.push_update_format_graph_state(next);
+            gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
         }
     }
 
@@ -449,7 +450,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
     if eb_chk.changed() {
         let mut next = fg.clone();
         next.error_bar_enabled = eb_enabled;
-        gctx.intents.push_update_format_graph_state(next);
+        gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
     }
 
     if eb_enabled {
@@ -479,7 +480,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
                 {
                     let mut next = fg.clone();
                     next.error_bar_spec.metric = metric;
-                    gctx.intents.push_update_format_graph_state(next);
+                    gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
                 }
             }
         });
@@ -507,7 +508,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
                 {
                     let mut next = fg.clone();
                     next.error_bar_spec.direction = dir;
-                    gctx.intents.push_update_format_graph_state(next);
+                    gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
                 }
             }
         });
@@ -523,7 +524,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
         if let Some(committed) = stroke_out.committed_value {
             let mut next = fg.clone();
             next.error_bar_spec.stroke_width_pt = committed.clamp(0.25, 6.0);
-            gctx.intents.push_update_format_graph_state(next);
+            gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
         }
     }
 
@@ -536,7 +537,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
         if chk.changed() {
             let mut next = fg;
             next.half_violin_with_points = half;
-            gctx.intents.push_update_format_graph_state(next);
+            gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
         }
     }
 }
@@ -569,7 +570,7 @@ pub(super) fn render_fg_series_arrangement(ui: &mut Ui, gctx: &mut GraphModalCtx
             {
                 let mut next = fg.clone();
                 next.grouped_arrangement = arr;
-                gctx.intents.push_update_format_graph_state(next);
+                gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
             }
         }
     });
@@ -601,7 +602,7 @@ pub(super) fn render_fg_series_arrangement(ui: &mut Ui, gctx: &mut GraphModalCtx
                     let mut next = fg.clone();
                     next.orientation = target;
                     next.orientation_dirty = true;
-                    gctx.intents.push_update_format_graph_state(next);
+                    gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
                 }
             }
         });
@@ -638,7 +639,7 @@ pub(super) fn render_fg_series_arrangement(ui: &mut Ui, gctx: &mut GraphModalCtx
                     let mut next = fg.clone();
                     next.selected_series_index = idx;
                     next.sync_selected_series_from_spec(&gs.spec);
-                    gctx.intents.push_update_format_graph_state(next);
+                    gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
                 }
             });
         }
@@ -667,7 +668,7 @@ pub(super) fn render_fg_series_arrangement(ui: &mut Ui, gctx: &mut GraphModalCtx
                         let mut next = fg.clone();
                         next.bind_to_right_y2 = y2_target;
                         next.bind_to_right_y2_dirty = true;
-                        gctx.intents.push_update_format_graph_state(next);
+                        gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
                     }
                 }
             });
@@ -696,7 +697,7 @@ pub(super) fn render_fg_series_arrangement(ui: &mut Ui, gctx: &mut GraphModalCtx
                 let mut next = fg.clone();
                 next.offset_x_data = x_val;
                 next.offset_x_data_dirty = true;
-                gctx.intents.push_update_format_graph_state(next);
+                gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
             }
         }
     }
@@ -725,7 +726,7 @@ pub(super) fn render_fg_settings(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>) {
             {
                 let mut next = fg.clone();
                 next.palette = pal;
-                gctx.intents.push_update_format_graph_state(next);
+                gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
             }
         }
     });
@@ -767,7 +768,7 @@ pub(super) fn render_fg_settings(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>) {
             {
                 let mut next = fg.clone();
                 next.cvd_preview = cvd;
-                gctx.intents.push_update_format_graph_state(next);
+                gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
             }
         }
     });
@@ -801,7 +802,7 @@ pub(super) fn render_fg_settings(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>) {
                 let mut next = fg.clone();
                 next.paper_fill = fill_opt;
                 next.paper_fill_dirty = true;
-                gctx.intents.push_update_format_graph_state(next);
+                gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
             }
         }
     });
@@ -839,7 +840,7 @@ pub(super) fn render_fg_annotations(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>) {
                 {
                     let mut next = fg.clone();
                     next.set_model_equation_mode(mode);
-                    gctx.intents.push_update_format_graph_state(next);
+                    gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
                 }
             }
         });

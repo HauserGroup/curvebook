@@ -1,6 +1,7 @@
 //! `Format Axes` modal dispatcher, draft synchronization, Frame & Origin tab, and
 //! Titles & Typography tab (`gui-layout-spec.md` §8.11D).
 
+use crate::egui_shell::UiIntent;
 mod additional_ticks;
 mod segments_ticks;
 mod single_axis;
@@ -143,7 +144,7 @@ fn render_axes_frame_origin_tab(ui: &mut Ui, state: &mut GraphModalEguiState, gc
                 if preset == FramePreset::DualYSecondaryRight && !fa.enable_y2 {
                     let mut next = fa.clone();
                     next.enable_y2 = true;
-                    gctx.intents.push_update_format_axes_state(next);
+                    gctx.intents.push(UiIntent::UpdateFormatAxesState(Box::new(next)));
                 }
             }
         }
@@ -161,7 +162,7 @@ fn render_axes_frame_origin_tab(ui: &mut Ui, state: &mut GraphModalEguiState, gc
             state.format_axes_frame_preset = FramePreset::DualYSecondaryRight;
             state.format_axes_frame_preset_dirty = true;
         }
-        gctx.intents.push_update_format_axes_state(next);
+        gctx.intents.push(UiIntent::UpdateFormatAxesState(Box::new(next)));
     }
 }
 
@@ -176,7 +177,7 @@ fn render_axes_titles_tab(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &m
         if title_edit.lost_focus() || title_edit.changed() {
             let mut next = fa.clone();
             next.axis_draft.title = state.format_axes_title_draft.clone();
-            gctx.intents.push_update_format_axes_state(next);
+            gctx.intents.push(UiIntent::UpdateFormatAxesState(Box::new(next)));
         }
     });
 
@@ -199,7 +200,7 @@ fn render_axes_titles_tab(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &m
     ) {
         let mut next = fa.clone();
         next.axis_draft.stroke_width_pt = val;
-        gctx.intents.push_update_format_axes_state(next);
+        gctx.intents.push(UiIntent::UpdateFormatAxesState(Box::new(next)));
     }
 
     ui.add_space(6.0);
@@ -225,7 +226,7 @@ fn render_axes_titles_tab(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &m
             {
                 let mut next = fa.clone();
                 next.axis_draft.tick_angle_deg = deg;
-                gctx.intents.push_update_format_axes_state(next);
+                gctx.intents.push(UiIntent::UpdateFormatAxesState(Box::new(next)));
             }
         }
     });

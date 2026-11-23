@@ -40,12 +40,8 @@ fn only_stage4_retained_aliases_remain_in_registry_schemas() {
     }
     assert_eq!(
         alias_commands,
-        vec![
-            ("sheet.createData", json!({ "kind": ["archetype"] })),
-            ("sheet.rename", json!({ "sheet_id": ["id"], "title": ["new_title"] })),
-            ("table.setCategoricalOrder", json!({ "col": ["column"] })),
-        ],
-        "only the R16.5 CLI deprecation-window and locked egui_shell aliases may emit x-deprecated-aliases"
+        vec![("sheet.createData", json!({ "kind": ["archetype"] })), ("sheet.rename", json!({ "sheet_id": ["id"], "title": ["new_title"] })),],
+        "only the R16.5 CLI deprecation-window aliases may emit x-deprecated-aliases"
     );
 
     // Retired aliases outside the remaining retained entries must now fail with BadInput.
@@ -67,6 +63,26 @@ fn only_stage4_retained_aliases_remain_in_registry_schemas() {
     let bad_import =
         session.execute("table.importCsv", json!({ "text": "x,y\n1,2\n", "kind": "xy" })).expect_err("retired importCsv text/kind rejected");
     assert_eq!(bad_import.code, ErrorCode::BadInput);
+    session.execute("sheet.createData", json!({ "sheet_id": "mv1", "kind": "multiple_variables", "rows": 2, "cols": 1 })).expect("create mv1");
+    let bad_cat_order = session
+        .execute("table.setCategoricalOrder", json!({ "sheet_id": "mv1", "column": 0, "order": ["A"] }))
+        .expect_err("retired setCategoricalOrder column rejected");
+    assert_eq!(bad_cat_order.code, ErrorCode::BadInput);
+    let bad_plate = session
+        .execute(
+            "table.importPlateMap",
+            json!({
+                "values": vec![1.0_f64; 96],
+                "template": {
+                    "name": "P96",
+                    "geometry": "96",
+                    "x_title": "Conc",
+                    "wells": [{ "kind": "treatment", "group": "Drug", "x": 1.0, "rep": 1 }]
+                }
+            }),
+        )
+        .expect_err("retired importPlateMap RoleObj aliases rejected");
+    assert_eq!(bad_plate.code, ErrorCode::BadInput);
 }
 
 #[test]

@@ -15,7 +15,7 @@ use crate::egui_shell::stat_anova_modal::{
     ClippedTextSpec, StepperSpec, column_titles_for_draft, record_widget, render_clipped_text, render_modal_checkbox, render_modal_radio,
     render_modal_seg_btn, render_section_title, render_stepper_row,
 };
-use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens};
+use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens, UiIntent};
 
 use super::helpers::{Wave4ModalShell, render_modal_action_button, render_mv_role_badge, show_wave4_modal};
 use super::{StatsModalFrameReport, StatsModalsEguiState};
@@ -94,7 +94,7 @@ pub fn render_analyze_sheet_modal(
                     }
                 }
                 if search_resp.changed() {
-                    intents.push_set_analyze_query(state.analyze_query_draft.clone());
+                    intents.push(UiIntent::SetAnalyzeQuery { query: state.analyze_query_draft.clone() });
                 }
                 record_widget(
                     ui,
@@ -224,7 +224,7 @@ fn render_analyze_entries_pane(
         let selected = app.canvas_dialogs.analyze.selected_entry_id.as_deref() == Some(item.id);
         let en = crate::modal_predicates::evaluate_dialog_widget(&app.canvas_dialogs, app.document(), &format!("analyze.entry.{}", item.id));
         if render_modal_radio(ui, tokens, meta, &format!("analyze.entry.{}", item.id), item.label, selected, &en) {
-            intents.push_select_analyze_entry(item.id, false);
+            intents.push(UiIntent::SelectAnalyzeEntry { entry_id: (item.id).into(), clear_duplicate_prompt: false });
         }
     }
 
@@ -341,12 +341,12 @@ fn render_analyze_datasets_pane(
         let titles = column_titles_for_draft(app.document(), Some(src_id));
         let all_selected = az.selected_data_sets.is_empty();
         if render_modal_checkbox(ui, tokens, meta, "analyze.dataset.all", "All Data Sets", all_selected, &ControlEnablement::enabled()) {
-            intents.push_set_analyze_selected_datasets(Vec::new());
+            intents.push(UiIntent::SetAnalyzeSelectedDatasets { cols: Vec::new() });
         }
         for (idx, col_title) in titles.iter().enumerate() {
             let checked = az.selected_data_sets.is_empty() || az.selected_data_sets.contains(&idx);
             if render_modal_checkbox(ui, tokens, meta, &format!("analyze.dataset.{idx}"), col_title, checked, &ControlEnablement::enabled()) {
-                intents.push_toggle_analyze_dataset(idx);
+                intents.push(UiIntent::ToggleAnalyzeDataset { col_index: idx });
             }
         }
     }
@@ -412,7 +412,7 @@ fn render_analyze_datasets_pane(
             az.correlation_all_pairs,
             &ControlEnablement::enabled(),
         ) {
-            intents.push_dialog_widget_click("analyze.correlation_all_pairs");
+            intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("analyze.correlation_all_pairs") });
         }
         let heat_en = r7_correlation_heatmap_toggle(az.correlation_all_pairs);
         if render_modal_checkbox(
@@ -424,7 +424,7 @@ fn render_analyze_datasets_pane(
             az.correlation_heatmap,
             &heat_en,
         ) {
-            intents.push_dialog_widget_click("analyze.correlation.heatmap");
+            intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("analyze.correlation.heatmap") });
         }
     }
 }
@@ -594,7 +594,7 @@ pub fn render_change_data_analyzed_modal(
                     let (rows, cols, _) = source_table_shape(doc, Some(&cand.sheet_id));
                     let lbl = format!("{} [{} — {}×{}]", cand.title, cand.table_kind.label(), rows, cols);
                     if render_modal_radio(ui, tokens, meta, &format!("change_data.candidate.{idx}"), &lbl, selected, &en) {
-                        intents.push_select_retarget_source(cand.sheet_id.clone());
+                        intents.push(UiIntent::SelectRetargetSource { target_data_sheet_id: cand.sheet_id.clone() });
                     }
                 }
             }

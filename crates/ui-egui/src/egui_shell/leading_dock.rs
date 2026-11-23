@@ -6,7 +6,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use curvebook_doc::{LayoutItem, ProjectDocument, ResultStatus, SheetId, SheetSection};
-use egui::text::TextWrapping;
 use egui::{Align, Color32, CornerRadius, FontId, Id, Key, Layout, Modifiers, Order, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Vec2};
 use serde_json::json;
 
@@ -14,7 +13,7 @@ use crate::UiApp;
 use crate::egui_shell::inspect_bridge::{
     ModalCaptureReport, ModalCaptureSpec, consume_matching_shortcut, finalize_egui_modal_response, has_registered_shortcut,
 };
-use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, ResponsiveShellLayout, Tokens, doc_sheet_title};
+use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, ResponsiveShellLayout, Tokens, UiIntent, doc_sheet_title};
 use crate::inspect::ZLayer;
 use crate::tr;
 use crate::workspace_nav::{
@@ -418,7 +417,7 @@ fn handle_leading_dock_shortcuts(
         _ => false,
     }) {
         match m.command_id.as_str() {
-            "ui.navigator.toggle" => intents.push_toggle_leading_collapsed_rail(),
+            "ui.navigator.toggle" => intents.push(UiIntent::ToggleLeadingCollapsedRail),
             "ui.family.toggle" => intents.push_ui("ui.family.toggle", json!({})),
             "sheet.rename" => {
                 if let Some(active_id) = app.document().active_sheet_id.clone() {
@@ -475,7 +474,7 @@ fn render_collapsed_icon_rail(
             meta,
         );
         if expand_resp.clicked() && enabled {
-            intents.push_toggle_leading_collapsed_rail();
+            intents.push(UiIntent::ToggleLeadingCollapsedRail);
         }
 
         for (chip, badge, wid) in [
@@ -494,7 +493,7 @@ fn render_collapsed_icon_rail(
             );
             if resp.clicked() && enabled {
                 state.kind_chip = chip;
-                intents.push_toggle_leading_collapsed_rail();
+                intents.push(UiIntent::ToggleLeadingCollapsedRail);
             }
         }
 
@@ -602,7 +601,7 @@ fn render_navigator_pane(
         );
         if view_resp.clicked() && enabled {
             let next = if is_nested { NavigatorNestingMode::SeparateFolders } else { NavigatorNestingMode::NestedResultsUnderData };
-            intents.push_set_navigator_nesting(next);
+            intents.push(UiIntent::SetNavigatorNesting { mode: next });
         }
 
         let collapse_glyph = if ctx_in.layout.rtl_mirrored { "»" } else { "«" };
@@ -613,7 +612,7 @@ fn render_navigator_pane(
             meta,
         );
         if col_resp.clicked() && enabled {
-            intents.push_toggle_leading_collapsed_rail();
+            intents.push(UiIntent::ToggleLeadingCollapsedRail);
         }
     });
     ui.add_space(4.0);
@@ -633,7 +632,7 @@ fn render_navigator_pane(
         );
         if search_resp.changed() && enabled {
             state.last_synced_query = state.search_draft.clone();
-            intents.push_set_navigator_search(state.search_draft.clone());
+            intents.push(UiIntent::SetNavigatorSearch { query: state.search_draft.clone() });
         }
         meta.record_response(
             ui,
@@ -661,7 +660,7 @@ fn render_navigator_pane(
             if clr_resp.clicked() && enabled {
                 state.search_draft.clear();
                 state.last_synced_query.clear();
-                intents.push_set_navigator_search(String::new());
+                intents.push(UiIntent::SetNavigatorSearch { query: String::new() });
             }
         }
     });
@@ -959,10 +958,8 @@ fn render_folder_header(ui: &mut egui::Ui, app: &UiApp, spec: FolderHeaderSpec<'
     }
     let arrow = if collapsed { "▸" } else { "▾" };
     let text = format!("{arrow} {label}");
-    let mut job = egui::text::LayoutJob::single_section(text.clone(), egui::TextFormat::simple(FontId::proportional(11.5), tokens.text_muted));
-    job.wrap = TextWrapping { max_width: (row_w - 8.0).max(16.0), max_rows: 1, break_anywhere: false, overflow_character: Some('…') };
-    let galley = ui.painter().layout_job(job);
-    let elided = galley.elided;
+    let (galley, elided) =
+        super::ui_kit::elided_galley(ui.painter(), &text, FontId::proportional(11.5), tokens.text_muted, (row_w - 8.0).max(16.0), false);
     ui.painter().with_clip_rect(rect.shrink(2.0)).galley(
         Pos2::new(rect.left() + 4.0, rect.center().y - galley.size().y * 0.5),
         galley,
@@ -973,7 +970,7 @@ fn render_folder_header(ui: &mut egui::Ui, app: &UiApp, spec: FolderHeaderSpec<'
         resp = resp.on_hover_text(&label);
     }
     if resp.clicked() && enabled {
-        intents.push_toggle_navigator_section(section);
+        intents.push(UiIntent::ToggleNavigatorSection { section });
     }
     let wid = section_header_widget_id(section);
     let a11y_lbl = label.clone();
@@ -1108,10 +1105,7 @@ fn render_navigator_row(
         tokens.text_primary
     };
     let font_size = if entry.is_active || entry.is_bold { 12.0 } else { 11.5 };
-    let mut job = egui::text::LayoutJob::single_section(title.to_owned(), egui::TextFormat::simple(FontId::proportional(font_size), fg));
-    job.wrap = TextWrapping { max_width: title_max_w, max_rows: 1, break_anywhere: false, overflow_character: Some('…') };
-    let galley = ui.painter().layout_job(job);
-    let ellipsized = galley.elided;
+    let (galley, ellipsized) = super::ui_kit::elided_galley(ui.painter(), title, FontId::proportional(font_size), fg, title_max_w, false);
     let title_clip = Rect::from_min_max(Pos2::new(x_cur, rect.top() + 2.0), Pos2::new(x_cur + title_max_w, rect.bottom() - 2.0));
     ui.painter().with_clip_rect(title_clip).galley(Pos2::new(x_cur, rect.center().y - galley.size().y * 0.5), galley, fg);
 
@@ -1297,11 +1291,8 @@ fn render_section_new_row(ui: &mut egui::Ui, app: &UiApp, spec: SectionNewRowSpe
     if row_enabled {
         super::widgets::paint_hover_row(ui, rect, CornerRadius::same(tokens.metrics.radius_md), resp.hovered(), false, tokens);
     }
-    let mut job =
-        egui::text::LayoutJob::single_section(text.clone(), egui::TextFormat::simple(FontId::proportional(tokens.metrics.font_ui_small_pt), fg));
-    job.wrap = TextWrapping { max_width: (row_w - 12.0).max(20.0), max_rows: 1, break_anywhere: false, overflow_character: Some('…') };
-    let galley = ui.painter().layout_job(job);
-    let elided = galley.elided;
+    let (galley, elided) =
+        super::ui_kit::elided_galley(ui.painter(), &text, FontId::proportional(tokens.metrics.font_ui_small_pt), fg, (row_w - 12.0).max(20.0), false);
     ui.painter().with_clip_rect(rect.shrink(2.0)).galley(Pos2::new(rect.left() + 8.0, rect.center().y - galley.size().y * 0.5), galley, fg);
 
     if let Some(reason) = disabled_reason
@@ -1453,13 +1444,14 @@ fn render_family_pane(
             let text_x = icon_rect.right() + 5.0;
             let max_text_w = (rect.right() - text_x - badge_reserve).max(16.0);
             let fg = if in_chain { tokens.text_strong } else { tokens.text_primary };
-            let mut job = egui::text::LayoutJob::single_section(
-                node.title.clone(),
-                egui::TextFormat::simple(FontId::proportional(if in_chain { 11.5 } else { 11.0 }), fg),
+            let (galley, elided) = super::ui_kit::elided_galley(
+                ui.painter(),
+                &node.title,
+                FontId::proportional(if in_chain { 11.5 } else { 11.0 }),
+                fg,
+                max_text_w,
+                false,
             );
-            job.wrap = TextWrapping { max_width: max_text_w, max_rows: 1, break_anywhere: false, overflow_character: Some('…') };
-            let galley = ui.painter().layout_job(job);
-            let elided = galley.elided;
             ui.painter()
                 .with_clip_rect(Rect::from_min_max(Pos2::new(text_x, rect.top()), Pos2::new(rect.right() - badge_reserve, rect.bottom())))
                 .galley(Pos2::new(text_x, rect.center().y - galley.size().y * 0.5), galley, fg);
@@ -1736,7 +1728,7 @@ fn finalize_drag_state(ui: &egui::Ui, app: &UiApp, state: &mut LeadingDockEguiSt
                 intents.push_engine("sheet.reorder", json!({ "sheet_id": sheet_id.as_str(), "index": target_index }));
             }
             DropCommitAction::Retarget { result_id, target_data_id } => {
-                intents.push_open_retarget_dialog(result_id.clone(), Some(target_data_id.clone()));
+                intents.push(UiIntent::OpenRetargetDialog { result_sheet_id: result_id.clone(), target_data_sheet_id: Some(target_data_id.clone()) });
             }
         }
     }
@@ -1883,86 +1875,59 @@ fn draw_sheet_vector_icon(painter: &egui::Painter, rect: Rect, section: SheetSec
 }
 
 fn render_compact_chip(ui: &mut egui::Ui, spec: CompactChipSpec<'_>, tokens: &Tokens, meta: &mut FrameInspectMeta) -> Response {
-    let CompactChipSpec { max_w, widget_id, label, selected, enabled } = spec;
-    let fg = if !enabled {
-        tokens.text_disabled
-    } else if selected {
-        tokens.accent_strong
-    } else {
-        tokens.text_primary
-    };
-    let mut job =
-        egui::text::LayoutJob::single_section(label.to_owned(), egui::TextFormat::simple(FontId::proportional(tokens.metrics.font_ui_small_pt), fg));
-    job.wrap = TextWrapping { max_width: (max_w - 8.0).max(12.0), max_rows: 1, break_anywhere: false, overflow_character: Some('…') };
-    let galley = ui.painter().layout_job(job);
-    let ellipsized = galley.elided;
-    let (rect, mut resp) = ui.allocate_exact_size(Vec2::new(max_w.max(20.0), 20.0), if enabled { Sense::click() } else { Sense::hover() });
-    super::widgets::paint_interactive_chrome(
+    super::ui_kit::styled_button(
         ui,
-        rect,
         tokens,
-        super::widgets::InteractiveChromeSpec {
-            radius: CornerRadius::same(tokens.metrics.radius_md),
-            base_bg: tokens.button_bg,
-            base_border: Some(tokens.button_border),
-            hovered: resp.hovered(),
-            selected,
-            pressed: resp.is_pointer_button_down_on(),
-            enabled,
-        },
-    );
-    ui.painter().with_clip_rect(rect.shrink(2.0)).galley(rect.center() - galley.size() * 0.5, galley, fg);
-    if ellipsized {
-        resp = resp.on_hover_text(label);
-    }
-    let a11y_lbl = label.to_owned();
-    resp.widget_info(move || egui::WidgetInfo::selected(egui::Role::Button, enabled, selected, a11y_lbl.clone()));
-    meta.record_response(
-        ui,
-        &resp,
-        FrameInspectEntryInput {
-            widget_id,
+        meta,
+        super::ui_kit::StyledButtonSpec {
+            widget_id: spec.widget_id,
             role: "button",
-            label,
+            a11y_role: egui::Role::Button,
+            a11y_selectable: true,
+            label: spec.label,
+            tooltip: None,
             command_id: None,
-            value: Some(json!({ "selected": selected })),
-            enabled,
+            width: super::ui_kit::ButtonWidth::Fixed(spec.max_w.max(20.0)),
+            height: 20.0,
+            font_size: tokens.metrics.font_ui_small_pt,
+            radius: tokens.metrics.radius_md,
+            text_align: super::ui_kit::ButtonTextAlign::Center,
+            break_anywhere: false,
+            primary: false,
+            selected: spec.selected,
+            enabled: spec.enabled,
+            accent_text_when_selected: true,
+            border_override: None,
+            value: Some(json!({ "selected": spec.selected })),
             disabled_reason: None,
             z_layer: ZLayer::Workspace,
-            ellipsized,
-            full_label: ellipsized.then_some(label),
+            skip_offscreen: false,
+            clip_interact_to_viewport: false,
+            tooltip_mode: super::ui_kit::TooltipMode::Standard,
         },
-    );
-    resp
+    )
+    .0
+    .unwrap_or_else(|| ui.allocate_exact_size(Vec2::ZERO, Sense::hover()).1)
 }
 
 fn render_clipped_label(ui: &mut egui::Ui, widget_id: &str, label: &str, max_w: f32, font: FontId, color: Color32, meta: &mut FrameInspectMeta) {
-    let mut job = egui::text::LayoutJob::single_section(label.to_owned(), egui::TextFormat::simple(font, color));
-    job.wrap = TextWrapping { max_width: max_w.max(16.0), max_rows: 1, break_anywhere: false, overflow_character: Some('…') };
-    let galley = ui.painter().layout_job(job);
-    let ellipsized = galley.elided;
-    let (rect, mut resp) = ui.allocate_exact_size(Vec2::new(max_w.max(16.0), 20.0), Sense::hover());
-    ui.painter().with_clip_rect(rect).galley(Pos2::new(rect.left(), rect.center().y - galley.size().y * 0.5), galley, color);
-    if ellipsized {
-        resp = resp.on_hover_text(label);
-    }
-    let full = label.to_owned();
-    let enabled = ui.is_enabled();
-    resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Label, enabled, full.clone()));
-    meta.record_response(
+    let _ = super::ui_kit::clipped_label(
         ui,
-        &resp,
-        FrameInspectEntryInput {
+        meta,
+        super::ui_kit::ClippedLabelSpec {
             widget_id,
             role: "label",
-            label,
-            command_id: None,
-            value: None,
-            enabled,
-            disabled_reason: None,
+            text: label,
+            max_w: max_w.max(16.0),
+            fixed_width: true,
+            min_h: 20.0,
+            font,
+            color,
             z_layer: ZLayer::Workspace,
-            ellipsized,
-            full_label: ellipsized.then_some(label),
+            tooltip: None,
+            record_meta: true,
+            record_value: false,
+            skip_offscreen: false,
         },
     );
 }
@@ -2021,7 +1986,7 @@ fn render_leading_dock_splitter(
         if enabled {
             if resp.double_clicked() {
                 let default_w = app.egui_views.workspace_preset.default_dock_config().leading_width_pt;
-                intents.push_sync_leading_width(default_w);
+                intents.push(UiIntent::SyncLeadingWidth { width_pt: default_w });
             } else if resp.dragged() {
                 let dx = if ctx_in.layout.rtl_mirrored { -resp.drag_delta().x } else { resp.drag_delta().x };
                 if dx.abs() > 0.01 {
@@ -2041,7 +2006,7 @@ fn render_leading_dock_splitter(
                         - target_center_min)
                         .max(metrics.navigator_min_w);
                     let new_w = (ctx_in.layout.leading_dock_w_pt + dx).clamp(metrics.navigator_min_w, metrics.navigator_max_w.min(max_for_center));
-                    intents.push_sync_leading_width(new_w);
+                    intents.push(UiIntent::SyncLeadingWidth { width_pt: new_w });
                 }
             }
         }
@@ -2210,7 +2175,7 @@ fn render_nav_section_ctx_items(
                     tokens,
                 },
             ) {
-                intents.push_open_retarget_dialog(menu.sheet_id.clone(), None);
+                intents.push(UiIntent::OpenRetargetDialog { result_sheet_id: menu.sheet_id.clone(), target_data_sheet_id: None });
                 return true;
             }
         }
