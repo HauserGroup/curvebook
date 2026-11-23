@@ -183,7 +183,7 @@ fn render_version_banner(spec: &PageSpec<'_>, out: &mut String) {
         push_html_escaped(date, out);
     }
     if let Some(sha) = &spec.meta.commit_sha {
-        let short = &sha[..sha.len().min(10)];
+        let short = sha.char_indices().nth(10).and_then(|(idx, _)| sha.get(..idx)).unwrap_or(sha);
         out.push_str(" (commit <code>");
         push_html_escaped(short, out);
         out.push_str("</code>)");

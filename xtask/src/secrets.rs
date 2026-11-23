@@ -346,8 +346,8 @@ fn parse_diff_plus_path(raw_line: &str) -> Option<String> {
     if let Some(unquoted) = rest.strip_prefix("b/") {
         return Some(unquoted.to_owned());
     }
-    if rest.starts_with('"') && rest.ends_with('"') && rest.len() >= 2 {
-        let decoded = unescape_git_quoted_path(&rest[1..rest.len() - 1]);
+    if let Some(inner) = rest.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+        let decoded = unescape_git_quoted_path(inner);
         return Some(decoded.strip_prefix("b/").unwrap_or(&decoded).to_owned());
     }
     Some(rest.to_owned())
@@ -422,8 +422,8 @@ fn unescape_git_quoted_path(escaped: &str) -> String {
 
 fn parse_hunk_ranges(line: &str) -> Option<(usize, usize, usize)> {
     let rest = line.strip_prefix("@@ ")?;
-    let end = rest.find(" @@")?;
-    let mut parts = rest[..end].split_whitespace();
+    let (ranges, _) = rest.split_once(" @@")?;
+    let mut parts = ranges.split_whitespace();
     let old_part = parts.next()?.strip_prefix('-')?;
     let new_part = parts.next()?.strip_prefix('+')?;
     let old_cnt = match old_part.split_once(',') {
@@ -460,14 +460,12 @@ fn scan_line(location: &str, line_no: usize, line: &str, out: &mut Vec<SecretHit
 }
 
 fn contains_pem_private_key(line: &str) -> bool {
-    let Some(start) = line.find(PEM_BEGIN_PREFIX) else {
+    let Some((_, after)) = line.split_once(PEM_BEGIN_PREFIX) else {
         return false;
     };
-    let after = &line[start + PEM_BEGIN_PREFIX.len()..];
-    let Some(end) = after.find(PEM_PRIVATE_KEY_SUFFIX) else {
+    let Some((header_kind, _)) = after.split_once(PEM_PRIVATE_KEY_SUFFIX) else {
         return false;
     };
-    let header_kind = &after[..end];
     header_kind.len() <= 40 && header_kind.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b' ' || b == b'-')
 }
 
@@ -498,7 +496,7 @@ fn detect_api_token(line: &str) -> Option<&'static str> {
 fn has_prefixed_token(line: &str, prefix: &str, reject_hyphen_left: bool, min_tail: usize, body_pred: fn(u8) -> bool) -> bool {
     let bytes = line.as_bytes();
     let mut start = 0;
-    while let Some(rel) = line[start..].find(prefix) {
+    while let Some(rel) = line.get(start..).and_then(|s| s.find(prefix)) {
         let pos = start + rel;
         let left_ok = if pos == 0 {
             true
@@ -513,7 +511,7 @@ fn has_prefixed_token(line: &str, prefix: &str, reject_hyphen_left: bool, min_ta
                 return true;
             }
         }
-        start = pos + 1;
+        start = pos + line.get(pos..).and_then(|s| s.chars().next()).map_or(1, char::len_utf8);
     }
     false
 }
@@ -522,7 +520,7 @@ fn has_aws_access_key(line: &str) -> bool {
     let bytes = line.as_bytes();
     for prefix in ["AKIA", "ASIA"] {
         let mut start = 0;
-        while let Some(rel) = line[start..].find(prefix) {
+        while let Some(rel) = line.get(start..).and_then(|s| s.find(prefix)) {
             let pos = start + rel;
             let left_ok = pos == 0 || (!bytes[pos - 1].is_ascii_alphanumeric() && bytes[pos - 1] != b'_');
             let tail_start = pos + 4;
@@ -552,7 +550,7 @@ impl AsciiUpperAlnum for u8 {
 fn has_slack_token(line: &str) -> bool {
     let bytes = line.as_bytes();
     let mut start = 0;
-    while let Some(rel) = line[start..].find("xox") {
+    while let Some(rel) = line.get(start..).and_then(|s| s.find("xox")) {
         let pos = start + rel;
         let left_ok = pos == 0 || (!bytes[pos - 1].is_ascii_alphanumeric() && bytes[pos - 1] != b'_' && bytes[pos - 1] != b'-');
         if left_ok
@@ -620,12 +618,7 @@ fn strip_rust_pub_prefix(s: &str) -> Option<&str> {
     if let Some(rest) = s.strip_prefix("pub ") {
         return Some(rest);
     }
-    if let Some(after_pub) = s.strip_prefix("pub(")
-        && let Some(close) = after_pub.find(')')
-    {
-        return Some(after_pub[close + 1..].trim_start());
-    }
-    None
+    s.strip_prefix("pub(").and_then(|after| after.split_once(')')).map(|(_, tail)| tail.trim_start())
 }
 
 fn rhs_starts_with_string_literal(trimmed_rhs: &str) -> bool {
@@ -633,18 +626,15 @@ fn rhs_starts_with_string_literal(trimmed_rhs: &str) -> bool {
 }
 
 fn split_assignment(s: &str, eq_only: bool) -> Option<(&str, &str)> {
-    let eq_pos = s.find('=');
     if eq_only {
-        return eq_pos.map(|idx| (&s[..idx], &s[idx + 1..]));
+        return s.split_once('=');
     }
-    let colon_pos = s.find(':');
-    let idx = match (eq_pos, colon_pos) {
-        (Some(e), Some(c)) => e.min(c),
-        (Some(e), None) => e,
-        (None, Some(c)) => c,
-        (None, None) => return None,
-    };
-    Some((&s[..idx], &s[idx + 1..]))
+    match (s.find('='), s.find(':')) {
+        (Some(e), Some(c)) => s.split_once(if e <= c { '=' } else { ':' }),
+        (Some(_), None) => s.split_once('='),
+        (None, Some(_)) => s.split_once(':'),
+        (None, None) => None,
+    }
 }
 
 fn is_secret_env_key(key: &str) -> bool {
@@ -727,13 +717,13 @@ fn matches_non_placeholder_home_user(tail: &[u8], sep: u8) -> bool {
 fn has_unix_home_prefix(line: &str, prefix: &str) -> bool {
     let bytes = line.as_bytes();
     let mut start = 0;
-    while let Some(rel) = line[start..].find(prefix) {
+    while let Some(rel) = line.get(start..).and_then(|s| s.find(prefix)) {
         let pos = start + rel;
         let left_ok = pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric();
         if left_ok && matches_non_placeholder_home_user(&bytes[pos + prefix.len()..], b'/') {
             return true;
         }
-        start = pos + 1;
+        start = pos + line.get(pos..).and_then(|s| s.chars().next()).map_or(1, char::len_utf8);
     }
     false
 }

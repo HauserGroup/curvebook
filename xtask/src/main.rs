@@ -1,5 +1,6 @@
 //! Workspace quality gates, packaging helpers, and architectural checks for CurveBook.
 #![forbid(unsafe_code)]
+#![allow(clippy::indexing_slicing)] // Build/policy CLI scanners with heavy tabular/parser slicing (FA-SEC23-03); string_slice remains denied and all 14 I/O/boundary/app crates enforce workspace indexing_slicing = "deny".
 
 mod assets;
 mod brands;

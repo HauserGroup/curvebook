@@ -115,11 +115,8 @@ fn collect_rel_files_recursive(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) 
 }
 
 fn parse_table_row_asset_path(line: &str) -> Option<(&str, &str)> {
-    let trimmed = line.trim();
-    if !trimmed.starts_with('|') || !trimmed.ends_with('|') {
-        return None;
-    }
-    let cells: Vec<&str> = trimmed[1..trimmed.len() - 1].split('|').map(str::trim).collect();
+    let inner = line.trim().strip_prefix('|')?.strip_suffix('|')?;
+    let cells: Vec<&str> = inner.split('|').map(str::trim).collect();
     let [asset_cell, _, source_cell, ..] = cells.as_slice() else {
         return None;
     };
@@ -133,16 +130,15 @@ fn parse_table_row_asset_path(line: &str) -> Option<(&str, &str)> {
 fn extract_backticked_paths(source: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut rest = source;
-    while let Some(start) = rest.find('`') {
-        let after = &rest[start + 1..];
-        let Some(end) = after.find('`') else {
+    while let Some((_, after)) = rest.split_once('`') {
+        let Some((token_raw, tail)) = after.split_once('`') else {
             break;
         };
-        let token = after[..end].trim();
+        let token = token_raw.trim();
         if token.contains('/') {
             out.push(token);
         }
-        rest = &after[end + 1..];
+        rest = tail;
     }
     out
 }

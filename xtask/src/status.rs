@@ -272,7 +272,7 @@ fn split_balanced_attr(input: &str) -> Option<(&str, &str)> {
                 depth -= 1;
                 if depth == 0 {
                     let split = idx + ch.len_utf8();
-                    return Some((&input[..split], &input[split..]));
+                    return input.split_at_checked(split);
                 }
             }
             _ => {}
@@ -310,14 +310,14 @@ fn is_ignore_attribute(attr: &str) -> bool {
 }
 
 fn extract_fn_name(trimmed: &str) -> Option<&str> {
-    let idx = trimmed.find("fn ")?;
-    let prefix = trimmed[..idx].trim();
+    let (prefix_raw, after_fn_raw) = trimmed.split_once("fn ")?;
+    let prefix = prefix_raw.trim();
     let valid_prefix =
         prefix.is_empty() || prefix.split_whitespace().all(|kw| kw == "async" || kw == "unsafe" || kw == "const" || kw.starts_with("pub"));
     if !valid_prefix {
         return None;
     }
-    let after_fn = trimmed[idx + 3..].trim_start();
+    let after_fn = after_fn_raw.trim_start();
     let name = after_fn.split(['(', '<', ' ']).next()?;
     if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') { Some(name) } else { None }
 }
@@ -489,13 +489,8 @@ fn is_checked_markdown_item(trimmed: &str) -> bool {
 
     let after_marker = if let Some(rest) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* ")).or_else(|| trimmed.strip_prefix("+ ")) {
         Some(rest.trim_start())
-    } else if let Some(dot_pos) = trimmed.find(['.', ')']) {
-        let prefix = &trimmed[..dot_pos];
-        if !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()) {
-            trimmed[dot_pos + 1..].strip_prefix(' ').map(str::trim_start)
-        } else {
-            None
-        }
+    } else if let Some((prefix, rest)) = trimmed.split_once(['.', ')']) {
+        if !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()) { rest.strip_prefix(' ').map(str::trim_start) } else { None }
     } else {
         None
     };
@@ -552,13 +547,13 @@ fn parse_workflow_fractions(text: &str) -> Vec<(usize, usize, Option<&str>)> {
             continue;
         }
 
-        let Ok(num) = text[left_start..left_end].parse::<usize>() else {
+        let Some(num) = text.get(left_start..left_end).and_then(|s| s.parse::<usize>().ok()) else {
             continue;
         };
-        let Ok(den) = text[right_start..right_end].parse::<usize>() else {
+        let Some(den) = text.get(right_start..right_end).and_then(|s| s.parse::<usize>().ok()) else {
             continue;
         };
-        let trailing = text[right_end..].trim_start().split(|c: char| !c.is_ascii_alphanumeric()).next().unwrap_or("");
+        let trailing = text.get(right_end..).unwrap_or("").trim_start().split(|c: char| !c.is_ascii_alphanumeric()).next().unwrap_or("");
         let backend = KNOWN_BACKENDS.iter().copied().find(|&b_name| trailing.eq_ignore_ascii_case(b_name));
         out.push((num, den, backend));
     }
@@ -576,15 +571,15 @@ pub struct BackendWorkflowTelemetry {
 
 fn parse_backend_wf_index(fn_name: &str) -> Option<(&'static str, u8)> {
     let rest = fn_name.strip_prefix("wf")?;
-    let digits_len = rest.chars().take_while(char::is_ascii_digit).count();
-    if digits_len == 0 {
+    let suffix = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+    let digits = rest.strip_suffix(suffix)?;
+    if digits.is_empty() {
         return None;
     }
-    let idx: u8 = rest[..digits_len].parse().ok()?;
+    let idx: u8 = digits.parse().ok()?;
     if !(1..=TOTAL_WORKFLOWS_U8).contains(&idx) {
         return None;
     }
-    let suffix = &rest[digits_len..];
     if suffix == "_human" || suffix.starts_with("_human_") || suffix == "_egui_human" || suffix.starts_with("_egui_human_") {
         Some(("egui", idx))
     } else {
@@ -758,13 +753,12 @@ fn extract_candidate_tokens(text: &str) -> Vec<String> {
     let mut out = Vec::new();
 
     let mut rest = text;
-    while let Some(start) = rest.find('`') {
-        let after_start = &rest[start + 1..];
-        let Some(end) = after_start.find('`') else {
+    while let Some((_, after_start)) = rest.split_once('`') {
+        let Some((code, tail)) = after_start.split_once('`') else {
             break;
         };
-        push_clean_tokens(&after_start[..end], &mut seen, &mut out);
-        rest = &after_start[end + 1..];
+        push_clean_tokens(code, &mut seen, &mut out);
+        rest = tail;
     }
     push_clean_tokens(text, &mut seen, &mut out);
     out
@@ -813,9 +807,8 @@ fn is_wf_harness_fn(seg: &str) -> bool {
     let Some(rest) = seg.strip_prefix("wf") else {
         return false;
     };
-    let digit_count = rest.chars().take_while(char::is_ascii_digit).count();
-    let suffix = &rest[digit_count..];
-    digit_count > 0
+    let suffix = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+    suffix.len() < rest.len()
         && suffix.starts_with('_')
         && !suffix.starts_with("_human_")
         && suffix != "_human"
@@ -861,9 +854,9 @@ fn has_recorded_manual_run(text: &str) -> bool {
         "computer use walkthrough:",
         "computer use qa:",
     ] {
-        if let Some(pos) = lower.find(prefix)
-            && !is_negated_prefix(&lower[..pos])
-            && has_concrete_manual_detail(&lower[pos + prefix.len()..])
+        if let Some((before, after)) = lower.split_once(prefix)
+            && !is_negated_prefix(before)
+            && has_concrete_manual_detail(after)
         {
             return true;
         }
@@ -881,9 +874,9 @@ fn has_recorded_manual_run(text: &str) -> bool {
     ]
     .iter()
     .any(|marker| {
-        lower.find(marker).is_some_and(|pos| {
-            !is_negated_prefix(&lower[..pos])
-                && lower[pos + marker.len()..].split_once(')').is_some_and(|(inside, _)| {
+        lower.split_once(marker).is_some_and(|(before, after)| {
+            !is_negated_prefix(before)
+                && after.split_once(')').is_some_and(|(inside, _)| {
                     let clean = inside.trim();
                     clean.contains("202")
                         && !clean.contains("todo")
@@ -1020,20 +1013,20 @@ fn lex_rust_segments(src: &str) -> Vec<(LexSegment, usize, &str)> {
     while i < n {
         if i + 1 < n && b[i] == b'/' && b[i + 1] == b'/' {
             if i > code_start {
-                out.push((LexSegment::Code, code_start, &src[code_start..i]));
+                out.push((LexSegment::Code, code_start, src.get(code_start..i).unwrap_or("")));
             }
             let start = i;
             i += 2;
             while i < n && b[i] != b'\n' {
                 i += 1;
             }
-            out.push((LexSegment::Comment, start, &src[start..i]));
+            out.push((LexSegment::Comment, start, src.get(start..i).unwrap_or("")));
             code_start = i;
             continue;
         }
         if i + 1 < n && b[i] == b'/' && b[i + 1] == b'*' {
             if i > code_start {
-                out.push((LexSegment::Code, code_start, &src[code_start..i]));
+                out.push((LexSegment::Code, code_start, src.get(code_start..i).unwrap_or("")));
             }
             let start = i;
             i += 2;
@@ -1052,28 +1045,29 @@ fn lex_rust_segments(src: &str) -> Vec<(LexSegment, usize, &str)> {
             if depth > 0 {
                 i = n;
             }
-            out.push((LexSegment::Comment, start, &src[start..i]));
+            out.push((LexSegment::Comment, start, src.get(start..i).unwrap_or("")));
             code_start = i;
             continue;
         }
         if let Some(raw_end) = try_skip_raw_string(b, i) {
             if i > code_start {
-                out.push((LexSegment::Code, code_start, &src[code_start..i]));
+                out.push((LexSegment::Code, code_start, src.get(code_start..i).unwrap_or("")));
             }
-            out.push((LexSegment::StringOrChar, i, &src[i..raw_end]));
+            out.push((LexSegment::StringOrChar, i, src.get(i..raw_end).unwrap_or("")));
             i = raw_end;
             code_start = i;
             continue;
         }
         if b[i] == b'"' {
             if i > code_start {
-                out.push((LexSegment::Code, code_start, &src[code_start..i]));
+                out.push((LexSegment::Code, code_start, src.get(code_start..i).unwrap_or("")));
             }
             let start = i;
             i += 1;
             while i < n {
                 if b[i] == b'\\' {
-                    i = (i + 2).min(n);
+                    let esc_len = src.get(i + 1..).and_then(|s| s.chars().next()).map_or(0, char::len_utf8);
+                    i = (i + 1 + esc_len).min(n);
                 } else if b[i] == b'"' {
                     i += 1;
                     break;
@@ -1081,7 +1075,7 @@ fn lex_rust_segments(src: &str) -> Vec<(LexSegment, usize, &str)> {
                     i += 1;
                 }
             }
-            out.push((LexSegment::StringOrChar, start, &src[start..i]));
+            out.push((LexSegment::StringOrChar, start, src.get(start..i).unwrap_or("")));
             code_start = i;
             continue;
         }
@@ -1089,9 +1083,9 @@ fn lex_rust_segments(src: &str) -> Vec<(LexSegment, usize, &str)> {
             && let Some(char_end) = try_skip_char_literal(src, i)
         {
             if i > code_start {
-                out.push((LexSegment::Code, code_start, &src[code_start..i]));
+                out.push((LexSegment::Code, code_start, src.get(code_start..i).unwrap_or("")));
             }
-            out.push((LexSegment::StringOrChar, i, &src[i..char_end]));
+            out.push((LexSegment::StringOrChar, i, src.get(i..char_end).unwrap_or("")));
             i = char_end;
             code_start = i;
             continue;
@@ -1099,7 +1093,7 @@ fn lex_rust_segments(src: &str) -> Vec<(LexSegment, usize, &str)> {
         i += 1;
     }
     if code_start < n {
-        out.push((LexSegment::Code, code_start, &src[code_start..n]));
+        out.push((LexSegment::Code, code_start, src.get(code_start..n).unwrap_or("")));
     }
     out
 }
@@ -1138,7 +1132,7 @@ fn try_skip_raw_string(b: &[u8], idx: usize) -> Option<usize> {
 }
 
 fn try_skip_char_literal(src: &str, idx: usize) -> Option<usize> {
-    let tail = &src[idx + 1..];
+    let tail = src.get(idx + 1..)?;
     let mut chars = tail.char_indices();
     let (_, first) = chars.next()?;
     if first == '\\' {
@@ -1201,19 +1195,20 @@ fn extract_rust_functions(src: &str) -> Vec<ScannedRustFn> {
         if i + 1 < n
             && bytes[i] == b'#'
             && bytes[i + 1] == b'['
-            && let Some((attr, tail)) = split_balanced_attr(&code_only[i..])
+            && let Some(code_rest) = code_only.get(i..)
+            && let Some((attr, tail)) = split_balanced_attr(code_rest)
         {
             pending_test |= is_test_attribute(attr);
             pending_ignored |= is_ignore_attribute(attr);
-            let consumed = code_only[i..].len() - tail.len();
-            line_no += code_only[i..i + consumed].bytes().filter(|&b| b == b'\n').count();
+            let consumed = code_rest.len() - tail.len();
+            line_no += code_rest.get(..consumed).unwrap_or("").bytes().filter(|&b| b == b'\n').count();
             i += consumed;
             continue;
         }
-        if is_word_at(&code_only, i, "fn") && can_start_item_before(&code_only[..i]) {
+        if is_word_at(&code_only, i, "fn") && code_only.get(..i).is_some_and(can_start_item_before) {
             let fn_start = i;
             let fn_line = line_no;
-            let after_fn = code_only[i + 2..].trim_start();
+            let after_fn = code_only.get(i + 2..).unwrap_or("").trim_start();
             let name: String = after_fn.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
             if !name.is_empty()
                 && let Some((body_open, body_close)) = find_fn_body_braces(bytes, i + 2)
@@ -1223,11 +1218,11 @@ fn extract_rust_functions(src: &str) -> Vec<ScannedRustFn> {
                     is_ignored: pending_ignored,
                     name,
                     line: fn_line,
-                    header_and_body_code: code_only[fn_start..=body_close].to_owned(),
-                    body_with_strings: with_strings[body_open..=body_close].to_owned(),
-                    body_code_only: code_only[body_open..=body_close].to_owned(),
+                    header_and_body_code: code_only.get(fn_start..=body_close).unwrap_or("").to_owned(),
+                    body_with_strings: with_strings.get(body_open..=body_close).unwrap_or("").to_owned(),
+                    body_code_only: code_only.get(body_open..=body_close).unwrap_or("").to_owned(),
                 });
-                line_no += code_only[i..=body_close].bytes().filter(|&b| b == b'\n').count();
+                line_no += code_only.get(i..=body_close).unwrap_or("").bytes().filter(|&b| b == b'\n').count();
                 i = body_close + 1;
                 pending_test = false;
                 pending_ignored = false;
@@ -1239,7 +1234,7 @@ fn extract_rust_functions(src: &str) -> Vec<ScannedRustFn> {
             pending_ignored = false;
         }
 
-        let step = code_only[i..].chars().next().map_or(1, char::len_utf8);
+        let step = code_only.get(i..).and_then(|s| s.chars().next()).map_or(1, char::len_utf8);
         if bytes[i] == b'\n' {
             line_no += 1;
         }
@@ -1298,7 +1293,7 @@ fn find_fn_body_braces(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
 }
 
 fn is_word_at(text: &str, pos: usize, word: &str) -> bool {
-    if !text[pos..].starts_with(word) {
+    if !text.get(pos..).is_some_and(|s| s.starts_with(word)) {
         return false;
     }
     let left_ok = pos == 0 || !text.as_bytes()[pos - 1].is_ascii_alphanumeric() && text.as_bytes()[pos - 1] != b'_';
@@ -1309,11 +1304,12 @@ fn is_word_at(text: &str, pos: usize, word: &str) -> bool {
 
 fn parse_wf_fn_prefix(fn_name: &str) -> Option<u8> {
     let rest = fn_name.strip_prefix("wf")?;
-    let digits_len = rest.chars().take_while(char::is_ascii_digit).count();
-    if digits_len == 0 || !rest[digits_len..].starts_with('_') {
+    let suffix = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+    let digits = rest.strip_suffix(suffix)?;
+    if digits.is_empty() || !suffix.starts_with('_') {
         return None;
     }
-    let idx: u8 = rest[..digits_len].parse().ok()?;
+    let idx: u8 = digits.parse().ok()?;
     (1..=TOTAL_WORKFLOWS_U8).contains(&idx).then_some(idx)
 }
 
@@ -1353,7 +1349,7 @@ fn find_workflow_run_binding(code: &str) -> Option<String> {
                 j += 1;
             }
             if j > ident_start {
-                let ident = &code[ident_start..j];
+                let ident = code.get(ident_start..j).unwrap_or("");
                 while j < n && bytes[j] != b';' && bytes[j] != b'=' {
                     j += 1;
                 }
@@ -1362,39 +1358,41 @@ fn find_workflow_run_binding(code: &str) -> Option<String> {
                     while j < n && bytes[j].is_ascii_whitespace() {
                         j += 1;
                     }
-                    let rest: String = code[j..].chars().take(64).filter(|c| !c.is_ascii_whitespace()).collect();
+                    let rest: String = code.get(j..).unwrap_or("").chars().take(64).filter(|c| !c.is_ascii_whitespace()).collect();
                     if rest.starts_with("WorkflowRun::start") {
                         return Some(ident.to_owned());
                     }
                 }
             }
         }
-        i += code[i..].chars().next().map_or(1, char::len_utf8);
+        i += code.get(i..).and_then(|s| s.chars().next()).map_or(1, char::len_utf8);
     }
     None
 }
 
 fn has_chained_workflow_run_finish(compact: &str) -> bool {
     let mut start = 0usize;
-    while let Some(rel) = compact[start..].find("WorkflowRun::start") {
-        let open_paren_rel = compact[start + rel..].find('(');
+    while let Some(rel) = compact.get(start..).and_then(|s| s.find("WorkflowRun::start")) {
+        let open_paren_rel = compact.get(start + rel..).and_then(|s| s.find('('));
         if let Some(open_rel) = open_paren_rel {
             let open_idx = start + rel + open_rel;
             let mut depth = 0usize;
-            for (offset, b) in compact[open_idx..].bytes().enumerate() {
-                match b {
-                    b'(' => depth += 1,
-                    b')' => {
-                        depth = depth.saturating_sub(1);
-                        if depth == 0 {
-                            let after = &compact[open_idx + offset + 1..];
-                            if after.starts_with(".finish()") || after.starts_with("?.finish()") {
-                                return true;
+            if let Some(paren_slice) = compact.get(open_idx..) {
+                for (offset, b) in paren_slice.bytes().enumerate() {
+                    match b {
+                        b'(' => depth += 1,
+                        b')' => {
+                            depth = depth.saturating_sub(1);
+                            if depth == 0 {
+                                let after = paren_slice.get(offset + 1..).unwrap_or("");
+                                if after.starts_with(".finish()") || after.starts_with("?.finish()") {
+                                    return true;
+                                }
+                                break;
                             }
-                            break;
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
         }
@@ -1405,12 +1403,12 @@ fn has_chained_workflow_run_finish(compact: &str) -> bool {
 
 fn contains_word_token(haystack: &str, needle: &str) -> bool {
     let mut start = 0usize;
-    while let Some(rel) = haystack[start..].find(needle) {
+    while let Some(rel) = haystack.get(start..).and_then(|s| s.find(needle)) {
         let pos = start + rel;
         if is_word_at(haystack, pos, needle) {
             return true;
         }
-        start = pos + 1;
+        start = pos + haystack.get(pos..).and_then(|s| s.chars().next()).map_or(1, char::len_utf8);
     }
     false
 }
@@ -1428,7 +1426,7 @@ fn has_guarded_find_by_widget_id(code: &str) -> bool {
 
 fn branch_header_contains_find(code: &str, after_kw: usize, allow_let: bool) -> bool {
     let bytes = code.as_bytes();
-    let trimmed = code[after_kw..].trim_start();
+    let trimmed = code.get(after_kw..).unwrap_or("").trim_start();
     let start = code.len() - trimmed.len();
     let is_let_binding = allow_let && is_word_at(code, start, "let");
     let mut past_eq = !is_let_binding;
@@ -1436,9 +1434,9 @@ fn branch_header_contains_find(code: &str, after_kw: usize, allow_let: bool) -> 
     let mut bracket = 0usize;
     let mut pat_brace = 0usize;
 
-    for (rel, ch) in code[start..].char_indices() {
+    for (rel, ch) in trimmed.char_indices() {
         let j = start + rel;
-        if code[j..].starts_with("find_by_widget_id(") {
+        if trimmed.get(rel..).is_some_and(|s| s.starts_with("find_by_widget_id(")) {
             return true;
         }
         match ch {
@@ -1501,7 +1499,7 @@ fn parse_shard_wf_range(shard_cell: &str) -> Option<(u8, u8)> {
             end += 1;
         }
         if end > i + 3
-            && let Ok(val) = lower[i + 3..end].parse::<u8>()
+            && let Some(val) = lower.get(i + 3..end).and_then(|s| s.parse::<u8>().ok())
             && (1..=TOTAL_WORKFLOWS_U8).contains(&val)
         {
             nums.push(val);
@@ -1539,7 +1537,7 @@ fn parse_labeled_fraction(text: &str, label: &str) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut search_from = 0usize;
 
-    while let Some(rel) = lower[search_from..].find(label) {
+    while let Some(rel) = lower.get(search_from..).and_then(|s| s.find(label)) {
         let pos = search_from + rel;
         let left_ok = pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric();
         let after_label = pos + label.len();
@@ -1558,7 +1556,7 @@ fn parse_labeled_fraction(text: &str, label: &str) -> Vec<(usize, usize)> {
         if cur == num_start {
             continue;
         }
-        let Ok(num) = lower[num_start..cur].parse::<usize>() else {
+        let Some(num) = lower.get(num_start..cur).and_then(|s| s.parse::<usize>().ok()) else {
             continue;
         };
         while cur < bytes.len() && bytes[cur].is_ascii_whitespace() {
@@ -1576,7 +1574,7 @@ fn parse_labeled_fraction(text: &str, label: &str) -> Vec<(usize, usize)> {
             cur += 1;
         }
         if cur > den_start
-            && let Ok(den) = lower[den_start..cur].parse::<usize>()
+            && let Some(den) = lower.get(den_start..cur).and_then(|s| s.parse::<usize>().ok())
         {
             out.push((num, den));
         }
@@ -2235,12 +2233,10 @@ fn count_live_ui_commands(root: &Path) -> Option<usize> {
     let rel = "crates/ui-egui/src/menus/ui_commands.rs";
     let src = fs::read_to_string(root.join(rel)).ok()?;
     let (_with_strings, code_only) = build_stripped_views(&src);
-    let slice_start = code_only.find("pub const UI_COMMANDS:")?;
-    let after_decl = &code_only[slice_start..];
-    let eq_rel = after_decl.find('=')?;
-    let after_eq = &after_decl[eq_rel + 1..];
+    let (_, after_decl) = code_only.split_once("pub const UI_COMMANDS:")?;
+    let (_, after_eq) = after_decl.split_once('=')?;
     let open_rel = after_eq.find('[')?;
-    let slice = &after_eq[open_rel..];
+    let slice = after_eq.get(open_rel..)?;
     let mut depth = 0usize;
     let mut slice_end = None;
     for (idx, b) in slice.bytes().enumerate() {
@@ -2257,7 +2253,7 @@ fn count_live_ui_commands(root: &Path) -> Option<usize> {
         }
     }
     let slice_end = slice_end?;
-    Some(slice[..slice_end].matches("UiCommandSpec {").count())
+    Some(slice.get(..slice_end)?.matches("UiCommandSpec {").count())
 }
 
 fn check_status_structural_headings(status_md: &str, violations: &mut Vec<EvidenceViolation>) {
@@ -2350,7 +2346,7 @@ fn cell_contains_number(row: &str, needle: &str) -> bool {
     let second_cell = row.split('|').nth(2).unwrap_or(row);
     let bytes = second_cell.as_bytes();
     let mut start = 0usize;
-    while let Some(rel) = second_cell[start..].find(needle) {
+    while let Some(rel) = second_cell.get(start..).and_then(|s| s.find(needle)) {
         let pos = start + rel;
         let end = pos + needle.len();
         let left_ok = pos == 0 || !bytes[pos - 1].is_ascii_digit();

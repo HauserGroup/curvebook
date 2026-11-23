@@ -413,8 +413,8 @@ pub fn scan_patch_sections(cargo_toml: &str) -> Vec<Violation> {
         if line.is_empty() {
             continue;
         }
-        if line.starts_with('[') && line.ends_with(']') {
-            let sec = line[1..line.len() - 1].trim();
+        if let Some(inner) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            let sec = inner.trim();
             let segs = split_toml_table_segments(sec);
             in_patch_or_replace = sec == "replace" || segs.first().is_some_and(|s| s == "patch");
             in_patch_crate_subtable = false;
@@ -700,7 +700,7 @@ pub(crate) fn collapse_colon_whitespace(src: &str) -> (String, Vec<usize>) {
                 continue;
             }
         }
-        let ch = src[i..].chars().next().unwrap_or(' ');
+        let ch = src.get(i..).and_then(|s| s.chars().next()).unwrap_or(' ');
         let ch_len = ch.len_utf8();
         out.push(ch);
         for _ in 0..ch_len {
@@ -733,7 +733,7 @@ fn next_pattern_match(line: &str, from: usize, patterns: &[&'static str]) -> Opt
     let mut best: Option<(usize, &'static str)> = None;
     for &pat in patterns {
         let mut search = from;
-        while let Some(rel) = line[search..].find(pat) {
+        while let Some(rel) = line.get(search..).and_then(|s| s.find(pat)) {
             let pos = search + rel;
             let end = pos + pat.len();
             let left_ok = pos == 0 || !is_ident_byte(bytes[pos - 1]);
@@ -748,7 +748,7 @@ fn next_pattern_match(line: &str, from: usize, patterns: &[&'static str]) -> Opt
                 }
                 break;
             }
-            search = pos + 1;
+            search = pos + line.get(pos..).and_then(|s| s.chars().next()).map_or(1, char::len_utf8);
         }
     }
     best
@@ -1039,7 +1039,7 @@ fn strip_cfg_call<'a>(s: &'a str, name: &str) -> Option<&'a str> {
             b')' if !in_quotes => {
                 depth -= 1;
                 if depth == 0 {
-                    return (i + 1 == bytes.len()).then_some(&rest[..i]);
+                    return if i + 1 == bytes.len() { rest.strip_suffix(')') } else { None };
                 }
             }
             _ => {}
@@ -1051,26 +1051,29 @@ fn strip_cfg_call<'a>(s: &'a str, name: &str) -> Option<&'a str> {
 
 fn split_cfg_args(s: &str) -> Vec<&str> {
     let mut args = Vec::new();
-    let bytes = s.as_bytes();
     let mut depth = 0usize;
     let mut in_quotes = false;
     let mut start = 0usize;
-    for (i, &b) in bytes.iter().enumerate() {
-        match b {
-            b'"' => in_quotes = !in_quotes,
-            b'(' if !in_quotes => depth += 1,
-            b')' if !in_quotes => depth = depth.saturating_sub(1),
-            b',' if !in_quotes && depth == 0 => {
-                if !s[start..i].is_empty() {
-                    args.push(&s[start..i]);
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            '(' if !in_quotes => depth += 1,
+            ')' if !in_quotes => depth = depth.saturating_sub(1),
+            ',' if !in_quotes && depth == 0 => {
+                if let Some(arg) = s.get(start..i)
+                    && !arg.is_empty()
+                {
+                    args.push(arg);
                 }
                 start = i + 1;
             }
             _ => {}
         }
     }
-    if !s[start..].is_empty() {
-        args.push(&s[start..]);
+    if let Some(arg) = s.get(start..)
+        && !arg.is_empty()
+    {
+        args.push(arg);
     }
     args
 }
@@ -1156,12 +1159,11 @@ pub(crate) fn expand_use_tree_items(prefix: &str, tree: &str, out: &mut Vec<UseB
     if trimmed.is_empty() {
         return;
     }
-    if let Some(open) = trimmed.find('{')
-        && trimmed.ends_with('}')
+    if let Some((head, inner_with_brace)) = trimmed.split_once('{')
+        && let Some(inner) = inner_with_brace.strip_suffix('}')
     {
-        let sub_prefix: String = trimmed[..open].chars().filter(|c| !c.is_whitespace()).collect();
+        let sub_prefix: String = head.chars().filter(|c| !c.is_whitespace()).collect();
         let next_prefix = join_use_path(prefix, sub_prefix.trim_end_matches("::"));
-        let inner = &trimmed[open + 1..trimmed.len() - 1];
         for part in split_brace_items(inner) {
             expand_use_tree_items(&next_prefix, part, out);
         }
@@ -1185,9 +1187,13 @@ fn split_use_alias(item: &str) -> (&str, Option<&str>) {
         if &bytes[i..i + 2] == b"as" {
             let left_ok = i > 0 && bytes[i - 1].is_ascii_whitespace();
             let right_ok = bytes.get(i + 2).is_some_and(u8::is_ascii_whitespace);
-            if left_ok && right_ok {
-                let alias = item[i + 2..].trim();
-                return (item[..i].trim(), (!alias.is_empty()).then_some(alias));
+            if left_ok
+                && right_ok
+                && let Some((head, after_as)) = item.split_at_checked(i)
+                && let Some(tail) = after_as.strip_prefix("as")
+            {
+                let alias = tail.trim();
+                return (head.trim(), (!alias.is_empty()).then_some(alias));
             }
         }
         i += 1;
@@ -1207,18 +1213,18 @@ fn split_brace_items(s: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut depth = 0usize;
     let mut start = 0usize;
-    for (i, b) in s.bytes().enumerate() {
-        match b {
-            b'{' => depth += 1,
-            b'}' => depth = depth.saturating_sub(1),
-            b',' if depth == 0 => {
-                parts.push(&s[start..i]);
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(s.get(start..i).unwrap_or(""));
                 start = i + 1;
             }
             _ => {}
         }
     }
-    parts.push(&s[start..]);
+    parts.push(s.get(start..).unwrap_or(""));
     parts
 }
 

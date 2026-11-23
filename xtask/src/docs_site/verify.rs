@@ -75,27 +75,24 @@ fn audit_single_html(rel_path: &str, html: &str) -> Result<PageFacts, String> {
 }
 
 fn scan_html_tags(rel_path: &str, html: &str, facts: &mut PageFacts) -> Result<(), String> {
-    let bytes = html.as_bytes();
-    let mut i = 0usize;
+    let mut rest = html;
     let mut inside_code_or_pre = 0usize;
 
-    while i < bytes.len() {
-        if bytes[i] != b'<' {
-            i += 1;
-            continue;
-        }
-        if html[i..].starts_with("<!--") {
-            let Some(end) = html[i + 4..].find("-->") else {
+    while let Some((_, after_lt)) = rest.split_once('<') {
+        if let Some(after_comment) = after_lt.strip_prefix("!--") {
+            let Some((_, after_close)) = after_comment.split_once("-->") else {
                 return Err(format!("{rel_path}: unclosed HTML comment `<!--`"));
             };
-            i = i + 4 + end + 3;
+            rest = after_close;
             continue;
         }
-        let Some(tag_end_rel) = find_tag_close(&html[i + 1..]) else {
+        let Some(tag_end_rel) = find_tag_close(after_lt) else {
             return Err(format!("{rel_path}: unclosed HTML tag or attribute quote"));
         };
-        let tag_body = &html[i + 1..i + 1 + tag_end_rel];
-        i = i + 1 + tag_end_rel + 1;
+        let Some((tag_body, after_tag)) = after_lt.split_at_checked(tag_end_rel) else {
+            return Err(format!("{rel_path}: unclosed HTML tag or attribute quote"));
+        };
+        rest = after_tag.strip_prefix('>').unwrap_or(after_tag);
 
         let trimmed = tag_body.trim();
         let is_closing = trimmed.starts_with('/');
@@ -182,7 +179,7 @@ fn parse_tag_attributes(trimmed_tag: &str) -> Vec<(String, String)> {
         while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'=' && bytes[i] != b'/' {
             i += 1;
         }
-        let key = trimmed_tag[k_start..i].to_owned();
+        let key = trimmed_tag.get(k_start..i).unwrap_or("").to_owned();
         while i < bytes.len() && bytes[i].is_ascii_whitespace() {
             i += 1;
         }
@@ -203,7 +200,7 @@ fn parse_tag_attributes(trimmed_tag: &str) -> Vec<(String, String)> {
             while i < bytes.len() && bytes[i] != q {
                 i += 1;
             }
-            let raw = trimmed_tag[v_start..i].to_owned();
+            let raw = trimmed_tag.get(v_start..i).unwrap_or("").to_owned();
             if i < bytes.len() {
                 i += 1;
             }
@@ -213,7 +210,7 @@ fn parse_tag_attributes(trimmed_tag: &str) -> Vec<(String, String)> {
             while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
                 i += 1;
             }
-            unescape_attr(&trimmed_tag[v_start..i])
+            unescape_attr(trimmed_tag.get(v_start..i).unwrap_or(""))
         };
         attrs.push((key, val));
     }

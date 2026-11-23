@@ -315,9 +315,9 @@ fn extract_banned_web_sys_features(rhs: &str) -> Vec<String> {
     while pos < bytes.len() {
         let q = bytes[pos];
         if (q == b'"' || q == b'\'')
-            && let Some(end) = rhs[pos + 1..].find(char::from(q))
+            && let Some(end) = rhs.get(pos + 1..).and_then(|s| s.find(char::from(q)))
         {
-            let val = &rhs[pos + 1..pos + 1 + end];
+            let val = rhs.get(pos + 1..pos + 1 + end).unwrap_or("");
             let lower = val.trim().to_ascii_lowercase();
             if BANNED_WEB_SYS_NET_FEATURES.contains(&lower.as_str()) {
                 hits.push(val.trim().to_owned());
@@ -411,10 +411,10 @@ fn extract_inline_package_name(rhs: &str, inside_inline: bool) -> Option<String>
         return None;
     }
     let mut pos = 0;
-    while let Some(rel) = rhs[pos..].find("package") {
+    while let Some(rel) = rhs.get(pos..).and_then(|s| s.find("package")) {
         let hit = pos + rel;
         let left_ok = hit == 0 || !is_ident_byte(rhs.as_bytes()[hit - 1]);
-        let after = &rhs[hit + "package".len()..];
+        let after = rhs.get(hit + "package".len()..).unwrap_or("");
         let right_ok = after.starts_with(|c: char| c.is_ascii_whitespace() || c == '=');
         if left_ok
             && right_ok
@@ -598,7 +598,7 @@ fn find_banned_js_network_in_literal(lower: &str) -> Option<&'static str> {
         ("xmlhttprequest", true),
     ] {
         let mut pos = 0usize;
-        while let Some(rel) = lower[pos..].find(needle) {
+        while let Some(rel) = lower.get(pos..).and_then(|s| s.find(needle)) {
             let hit = pos + rel;
             let end = hit + needle.len();
             let left_ok = !need_boundary || hit == 0 || !is_ident_byte(lower.as_bytes()[hit - 1]);
@@ -688,7 +688,9 @@ fn check_allowlisted_net_file(rel: &str, stripped: &StrippedRust, scoped_hits: &
     let fn_spans = collect_rust_fn_spans(&stripped.prod_code);
     let mut checked_fn_sockets = 0usize;
     for (start, end, line_no) in fn_spans {
-        let fn_prod = &stripped.prod_code[start..end];
+        let Some(fn_prod) = stripped.prod_code.get(start..end) else {
+            continue;
+        };
         if !fn_opens_socket(fn_prod) {
             continue;
         }
@@ -1061,8 +1063,10 @@ fn normalize_js_member_syntax(lower_line: &str) -> String {
                 while j < bytes.len() && bytes[j] != q && bytes[j] != b'\n' {
                     j += 1;
                 }
-                if bytes.get(j) == Some(&q) {
-                    let ident = lower_line[ident_start..j].trim();
+                if bytes.get(j) == Some(&q)
+                    && let Some(raw_ident) = lower_line.get(ident_start..j)
+                {
+                    let ident = raw_ident.trim();
                     let mut k = j + 1;
                     while k < bytes.len() && bytes[k].is_ascii_whitespace() {
                         k += 1;
@@ -1076,7 +1080,7 @@ fn normalize_js_member_syntax(lower_line: &str) -> String {
                 }
             }
         }
-        let ch = lower_line[i..].chars().next().unwrap_or(' ');
+        let ch = lower_line.get(i..).and_then(|s| s.chars().next()).unwrap_or(' ');
         out.push(ch);
         i += ch.len_utf8();
     }
@@ -1112,7 +1116,7 @@ fn scan_text_for_web_telemetry(rel: &str, text: &str, violations: &mut Vec<Telem
 fn contains_telemetry_term(lower_line: &str, term: &str) -> bool {
     let bytes = lower_line.as_bytes();
     let mut start = 0usize;
-    while let Some(rel) = lower_line[start..].find(term) {
+    while let Some(rel) = lower_line.get(start..).and_then(|s| s.find(term)) {
         let pos = start + rel;
         let end = pos + term.len();
         let left_ok = pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric();
@@ -1121,7 +1125,7 @@ fn contains_telemetry_term(lower_line: &str, term: &str) -> bool {
         if left_ok && right_ok {
             return true;
         }
-        start = pos + 1;
+        start = pos + lower_line.get(pos..).and_then(|s| s.chars().next()).map_or(1, char::len_utf8);
     }
     false
 }
@@ -1130,13 +1134,13 @@ fn contains_browser_fetch_call(lower_line: &str) -> bool {
     let bytes = lower_line.as_bytes();
     let needle = "fetch";
     let mut start = 0usize;
-    while let Some(rel) = lower_line[start..].find(needle) {
+    while let Some(rel) = lower_line.get(start..).and_then(|s| s.find(needle)) {
         let pos = start + rel;
-        let after_ws = lower_line[pos + needle.len()..].trim_start();
+        let after_ws = lower_line.get(pos + needle.len()..).unwrap_or("").trim_start();
         let followed_by_paren = after_ws.starts_with('(');
         let left_is_ok = pos == 0
             || (bytes[pos - 1] != b'.' && !is_ident_byte(bytes[pos - 1]))
-            || (bytes[pos - 1] == b'.' && is_global_fetch_receiver(&lower_line[..pos]));
+            || (bytes[pos - 1] == b'.' && lower_line.get(..pos).is_some_and(is_global_fetch_receiver));
         if followed_by_paren && left_is_ok {
             return true;
         }
@@ -1160,11 +1164,11 @@ fn scan_web_asset_external_urls_and_apis(rel: &str, content: &str, violations: &
         let norm_lower = normalize_js_member_syntax(&decoded_lower);
         for scheme in ["https://", "http://", "wss://", "ws://"] {
             let mut start = 0usize;
-            while let Some(offset) = decoded_lower[start..].find(scheme) {
+            while let Some(offset) = decoded_lower.get(start..).and_then(|s| s.find(scheme)) {
                 let pos = start + offset;
-                let rest = &decoded[pos..];
+                let rest = decoded.get(pos..).unwrap_or("");
                 let end = rest.find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | ')' | ';' | '`' | ',')).unwrap_or(rest.len());
-                let url = &rest[..end];
+                let url = rest.get(..end).unwrap_or(rest);
                 if !ALLOWED_HTML_EXTERNAL_URLS.iter().any(|allowed| url.eq_ignore_ascii_case(allowed)) {
                     violations.push(TelemetryViolation {
                         check: 3,
@@ -1186,12 +1190,12 @@ fn scan_web_asset_external_urls_and_apis(rel: &str, content: &str, violations: &
 fn scan_protocol_relative_urls(rel: &str, line_no: usize, line: &str, violations: &mut Vec<TelemetryViolation>) {
     let bytes = line.as_bytes();
     let mut pos = 0usize;
-    while let Some(offset) = line[pos..].find("//") {
+    while let Some(offset) = line.get(pos..).and_then(|s| s.find("//")) {
         let hit = pos + offset;
         let prev_ok = hit > 0 && matches!(bytes[hit - 1], b'=' | b'"' | b'\'' | b'`' | b'(');
-        let after = &line[hit + 2..];
+        let after = line.get(hit + 2..).unwrap_or("");
         let end = after.find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | ')' | ';' | '`' | ',')).unwrap_or(after.len());
-        let target = &after[..end];
+        let target = after.get(..end).unwrap_or(after);
         let host = target.split('/').next().unwrap_or(target);
         let looks_like_host = !host.is_empty()
             && host.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':'))
@@ -1211,7 +1215,7 @@ fn scan_protocol_relative_urls(rel: &str, line_no: usize, line: &str, violations
 fn scan_web_network_api_tokens(rel: &str, line_no: usize, lower: &str, violations: &mut Vec<TelemetryViolation>) {
     for api in ["websocket", "eventsource", "sharedworker", "serviceworker"] {
         let mut start = 0usize;
-        while let Some(offset) = lower[start..].find(api) {
+        while let Some(offset) = lower.get(start..).and_then(|s| s.find(api)) {
             let pos = start + offset;
             let bytes = lower.as_bytes();
             let left_ok = pos == 0 || !is_ident_byte(bytes[pos - 1]);
@@ -1229,10 +1233,10 @@ fn scan_web_network_api_tokens(rel: &str, line_no: usize, lower: &str, violation
         }
     }
     let mut pos = 0usize;
-    while let Some(offset) = lower[pos..].find("worker") {
+    while let Some(offset) = lower.get(pos..).and_then(|s| s.find("worker")) {
         let hit = pos + offset;
         let left_ok = hit == 0 || !is_ident_byte(lower.as_bytes()[hit - 1]);
-        let after_ws = lower[hit + "worker".len()..].trim_start();
+        let after_ws = lower.get(hit + "worker".len()..).unwrap_or("").trim_start();
         if left_ok && after_ws.starts_with('(') {
             violations.push(TelemetryViolation {
                 check: 3,
@@ -1302,8 +1306,9 @@ fn split_yaml_unquoted_key(trimmed: &str) -> Option<(&str, &str)> {
         } else if b == b'"' || b == b'\'' {
             quote = Some(b);
         } else if b == b':' && bytes.get(i + 1).is_none_or(|n| n.is_ascii_whitespace()) {
-            let key = unquote_yaml_scalar(trimmed[..i].trim());
-            let rhs = trimmed[i + 1..].trim();
+            let (raw_key, after_colon) = trimmed.split_at_checked(i)?;
+            let key = unquote_yaml_scalar(raw_key.trim());
+            let rhs = after_colon.strip_prefix(':').unwrap_or(after_colon).trim();
             return Some((key, rhs));
         }
         i += 1;
@@ -1445,8 +1450,7 @@ fn handle_permissions_line(
             });
             return true;
         }
-        if rhs.starts_with('{') && rhs.ends_with('}') {
-            let inner = &rhs[1..rhs.len() - 1];
+        if let Some(inner) = rhs.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {
             for entry in inner.split(',') {
                 if let Some((scope, level)) = split_yaml_unquoted_key(entry.trim()) {
                     validate_permission_entry(rel, line_no, scope, level, is_top, state, violations);
@@ -1552,14 +1556,15 @@ fn check_run_directive(line_no: usize, code: &str, state: &mut WorkflowParseStat
 }
 
 fn split_yaml_script_key(code: &str) -> Option<(usize, &str)> {
-    let indent = leading_spaces(code);
-    let after_indent = &code[indent..];
+    let after_indent = code.trim_start_matches(' ');
+    let indent = code.len() - after_indent.len();
     let (key_col, after_dash) = if let Some(rest) = after_indent.strip_prefix('-') {
         if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
             return None;
         }
-        let extra = leading_spaces(rest);
-        (indent + 1 + extra, &rest[extra..])
+        let after_extra = rest.trim_start_matches(' ');
+        let extra = rest.len() - after_extra.len();
+        (indent + 1 + extra, after_extra)
     } else {
         (indent, after_indent)
     };
@@ -1572,19 +1577,22 @@ fn split_yaml_script_key(code: &str) -> Option<(usize, &str)> {
 }
 
 fn is_yaml_block_scalar(rhs: &str) -> bool {
-    let Some(first) = rhs.chars().next() else {
+    let Some(rest) = rhs.strip_prefix('|').or_else(|| rhs.strip_prefix('>')) else {
         return false;
     };
-    (first == '|' || first == '>') && rhs[1..].chars().all(|c| matches!(c, '-' | '+' | '0'..='9'))
+    rest.chars().all(|c| matches!(c, '-' | '+' | '0'..='9'))
 }
 
 fn flag_untrusted_event_expr_spans(rel: &str, text: &str, offset_lines: &[usize], violations: &mut Vec<TelemetryViolation>) {
     let mut pos = 0usize;
-    while let Some(start_rel) = text[pos..].find("${{") {
+    while let Some(start_rel) = text.get(pos..).and_then(|s| s.find("${{")) {
         let expr_line = offset_lines.get(pos + start_rel).copied().unwrap_or(1);
         let expr_start = pos + start_rel + 3;
-        let expr_end = text[expr_start..].find("}}").map_or(text.len(), |end_rel| expr_start + end_rel);
-        let expr = &text[expr_start..expr_end];
+        let after_open = text.get(expr_start..).unwrap_or("");
+        let (expr, next_pos) = match after_open.split_once("}}") {
+            Some((inner, _)) => (inner, expr_start + inner.len() + 2),
+            None => (after_open, text.len()),
+        };
         let lower_compact: String = expr.chars().filter(|c| !c.is_whitespace()).map(|c| c.to_ascii_lowercase()).collect();
         if let Some(ref_kind) = untrusted_expr_kind(&lower_compact) {
             violations.push(TelemetryViolation {
@@ -1594,7 +1602,7 @@ fn flag_untrusted_event_expr_spans(rel: &str, text: &str, offset_lines: &[usize]
                 detail: format!("untrusted `${{{{ {ref_kind} }}}}` interpolated directly in workflow script block (use `env:` instead)"),
             });
         }
-        pos = (expr_end + 2).min(text.len());
+        pos = next_pos;
     }
 }
 
@@ -1615,7 +1623,7 @@ fn untrusted_expr_kind(lower_compact: &str) -> Option<&'static str> {
 fn has_expr_token(lower_compact: &str, needle: &str, needs_right_boundary: bool) -> bool {
     let bytes = lower_compact.as_bytes();
     let mut pos = 0usize;
-    while let Some(rel) = lower_compact[pos..].find(needle) {
+    while let Some(rel) = lower_compact.get(pos..).and_then(|s| s.find(needle)) {
         let hit = pos + rel;
         let end = hit + needle.len();
         let left_ok = hit == 0 || !is_ident_byte(bytes[hit - 1]);
@@ -1767,18 +1775,18 @@ fn next_ws_token(s: &str) -> Option<(&str, &str)> {
     if trimmed.is_empty() {
         return None;
     }
-    match trimmed.find(char::is_whitespace) {
-        Some(idx) => Some((&trimmed[..idx], &trimmed[idx..])),
+    match trimmed.find(char::is_whitespace).and_then(|idx| trimmed.split_at_checked(idx)) {
+        Some((tok, rest)) => Some((tok, rest)),
         None => Some((trimmed, "")),
     }
 }
 
 fn unquote_apache_value(val: &str) -> String {
-    if val.len() >= 2 && ((val.starts_with('"') && val.ends_with('"')) || (val.starts_with('\'') && val.ends_with('\''))) {
-        val[1..val.len() - 1].to_owned()
-    } else {
-        val.to_owned()
-    }
+    val.strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .or_else(|| val.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+        .unwrap_or(val)
+        .to_owned()
 }
 
 fn validate_required_web_headers(
@@ -1999,7 +2007,7 @@ fn next_ident_pattern_match(line: &str, from: usize, patterns: &[&'static str]) 
     let mut best: Option<(usize, &'static str)> = None;
     for &pat in patterns {
         let mut search = from;
-        while let Some(rel) = line[search..].find(pat) {
+        while let Some(rel) = line.get(search..).and_then(|s| s.find(pat)) {
             let pos = search + rel;
             let end = pos + pat.len();
             let left_ok = pos == 0 || !is_ident_byte(bytes[pos - 1]);
@@ -2014,7 +2022,7 @@ fn next_ident_pattern_match(line: &str, from: usize, patterns: &[&'static str]) 
                 }
                 break;
             }
-            search = pos + 1;
+            search = pos + line.get(pos..).and_then(|s| s.chars().next()).map_or(1, char::len_utf8);
         }
     }
     best
@@ -2032,67 +2040,85 @@ fn strip_yaml_comment(line: &str) -> &str {
     let bytes = line.as_bytes();
     let mut in_dq = false;
     let mut in_sq = false;
-    let mut i = 0usize;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\\' if in_dq => {
-                i += 2;
-                continue;
+    let mut escaped = false;
+    for (i, ch) in line.char_indices() {
+        if in_dq {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_dq = false;
             }
-            b'"' if !in_sq => in_dq = !in_dq,
-            b'\'' if !in_dq => in_sq = !in_sq,
-            b'#' if !in_dq && !in_sq && (i == 0 || bytes[i - 1].is_ascii_whitespace()) => return &line[..i],
-            _ => {}
+        } else if in_sq {
+            if ch == '\'' {
+                in_sq = false;
+            }
+        } else {
+            match ch {
+                '"' => in_dq = true,
+                '\'' => in_sq = true,
+                '#' if i == 0 || bytes[i - 1].is_ascii_whitespace() => return line.get(..i).unwrap_or(line),
+                _ => {}
+            }
         }
-        i += 1;
     }
     line
 }
 
 fn unquote_yaml_scalar(s: &str) -> &str {
     let t = s.trim();
-    if t.len() >= 2 && ((t.starts_with('"') && t.ends_with('"')) || (t.starts_with('\'') && t.ends_with('\''))) { &t[1..t.len() - 1] } else { t }
+    t.strip_prefix('"').and_then(|r| r.strip_suffix('"')).or_else(|| t.strip_prefix('\'').and_then(|r| r.strip_suffix('\''))).unwrap_or(t)
 }
 
 fn strip_toml_comment(line: &str) -> &str {
-    let bytes = line.as_bytes();
     let mut in_dq = false;
     let mut in_sq = false;
-    let mut i = 0usize;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\\' if in_dq => {
-                i += 2;
-                continue;
+    let mut escaped = false;
+    for (i, ch) in line.char_indices() {
+        if in_dq {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_dq = false;
             }
-            b'"' if !in_sq => in_dq = !in_dq,
-            b'\'' if !in_dq => in_sq = !in_sq,
-            b'#' if !in_dq && !in_sq => return &line[..i],
-            _ => {}
+        } else if in_sq {
+            if ch == '\'' {
+                in_sq = false;
+            }
+        } else {
+            match ch {
+                '"' => in_dq = true,
+                '\'' => in_sq = true,
+                '#' => return line.get(..i).unwrap_or(line),
+                _ => {}
+            }
         }
-        i += 1;
     }
     line
 }
 
 fn parse_section_header(line: &str) -> Option<&str> {
-    if line.starts_with('[') && !line.starts_with("[[") && line.ends_with(']') { Some(line[1..line.len() - 1].trim()) } else { None }
+    if line.starts_with("[[") {
+        return None;
+    }
+    line.strip_prefix('[')?.strip_suffix(']').map(str::trim)
 }
 
 fn unquote_toml_str(s: &str) -> String {
     let t = s.trim();
-    if t.len() >= 2 && ((t.starts_with('"') && t.ends_with('"')) || (t.starts_with('\'') && t.ends_with('\''))) {
-        t[1..t.len() - 1].to_owned()
-    } else {
-        t.to_owned()
-    }
+    t.strip_prefix('"').and_then(|r| r.strip_suffix('"')).or_else(|| t.strip_prefix('\'').and_then(|r| r.strip_suffix('\''))).unwrap_or(t).to_owned()
 }
 
 fn extract_first_quoted(s: &str) -> String {
-    let Some(quote) = s.chars().next().filter(|&c| c == '"' || c == '\'') else {
-        return String::new();
-    };
-    s[1..].split(quote).next().unwrap_or("").to_owned()
+    for quote in ['"', '\''] {
+        if let Some(rest) = s.strip_prefix(quote) {
+            return rest.split(quote).next().unwrap_or("").to_owned();
+        }
+    }
+    String::new()
 }
 
 struct StrippedRust {

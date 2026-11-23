@@ -186,7 +186,7 @@ fn strip_toml_comment(line: &str) -> &str {
             match ch {
                 '"' => in_double = true,
                 '\'' => in_single = true,
-                '#' => return &line[..idx],
+                '#' => return line.get(..idx).unwrap_or(line),
                 _ => {}
             }
         }

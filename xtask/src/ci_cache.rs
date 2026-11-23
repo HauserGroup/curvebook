@@ -546,12 +546,13 @@ pub fn extract_unit_hash(name: &str) -> Option<&str> {
         if b != b'-' {
             continue;
         }
-        let after = &name[idx + 1..];
-        if after.len() < 16 {
+        let Some(after) = name.get(idx + 1..) else {
             continue;
-        }
-        let cand = &after[..16];
-        let boundary_ok = after.len() == 16 || after.as_bytes()[16] == b'.';
+        };
+        let Some(cand) = after.get(..16) else {
+            continue;
+        };
+        let boundary_ok = after.len() == 16 || after.as_bytes().get(16) == Some(&b'.');
         if boundary_ok && cand.bytes().all(|ch| matches!(ch, b'0'..=b'9' | b'a'..=b'f')) {
             return Some(cand);
         }

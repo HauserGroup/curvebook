@@ -184,7 +184,7 @@ fn fa_sec23_06_07_09_15_16_packaging_and_manifest_contracts_hold() -> Result<(),
     assert!(linux_pkg.contains("--proto-redir '=https'"));
     let verify_line = linux_pkg.find("verify_sha256 \"$APPIMAGETOOL_SHA256\" \"$TOOL\"").ok_or("missing APPIMAGETOOL verify_sha256")?;
     let if_start = linux_pkg.find("if [[ -z \"$TOOL\" ]]").ok_or("missing TOOL download guard")?;
-    let if_block_end = linux_pkg[if_start..].find("\nfi\n").ok_or("missing fi for TOOL download")? + if_start;
+    let if_block_end = linux_pkg.get(if_start..).and_then(|s| s.find("\nfi\n")).ok_or("missing fi for TOOL download")? + if_start;
     assert!(verify_line > if_block_end, "APPIMAGETOOL SHA256 verification must run unconditionally outside `if [[ -z \"$TOOL\" ]]`");
 
     let import_cert = fs::read_to_string(root.join("packaging/macos/import-cert.sh")).map_err(|e| e.to_string())?;
