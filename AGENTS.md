@@ -98,6 +98,7 @@ Read these before editing code:
 4. The relevant domain/reference guide (`docs/architecture.md`, `docs/development.md`, `docs/command-ids.md`, `docs/file-formats.md`, `docs/licences.md`, or `docs/ROADMAP.md`).
 
 ### Git Workflow
+- **Branch & worktree isolation:** Never make code changes directly on `main` unless explicitly directed. Create a dedicated branch and `git worktree` under `/Users/skn506/Documents/projSpectrum/.lc-worktrees/<task-name>` for implementation work, and remove the worktree once merged/integrated. If the current checkout is already a task-specific feature branch/worktree, continue working there instead of creating a nested worktree. Only the user or a designated integrator merges into `main`.
 - **Branch naming:** Use `<prefix>/<R<m>.<n>-short-slug>` with one of these prefixes:
   `feature/`, `bugfix/`, `hotfix/`, `refactor/`, `docs/`, `test/`, `chore/`, `audit/`
   Example: `feature/R0.10-platform-atomic-write`, `bugfix/R2.3-anova-unequal-n`.
