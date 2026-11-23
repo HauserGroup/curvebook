@@ -441,7 +441,6 @@ pub fn render_duplicate_analysis_modal(
     let ActiveDialog::DuplicateAnalysisPrompt { existing_result_ids, .. } = &app.canvas_dialogs.active_dialog else {
         return StatsModalFrameReport::default();
     };
-    let _ = &state.active_tab;
     let locale = normalize_locale(&app.locale);
     let shard = &app.view_shards.analyze_picker;
     let doc = app.document();
@@ -539,7 +538,6 @@ pub fn render_change_data_analyzed_modal(
     let ActiveDialog::ChangeDataAnalyzed { result_sheet_id } = &app.canvas_dialogs.active_dialog else {
         return StatsModalFrameReport::default();
     };
-    let _ = &state.active_tab;
     let cd = &app.canvas_dialogs.change_data;
     let doc = app.document();
     let rs_title = doc.result_sheet(result_sheet_id).map_or("Result", |rs| rs.title());

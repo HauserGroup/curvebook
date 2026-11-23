@@ -64,10 +64,14 @@ pub(super) fn validate_heatmap_range(state: &GraphModalEguiState, preset: &Local
 
 pub(super) fn reset_format_axes_session_state(state: &mut GraphModalEguiState) {
     state.format_axes_session_synced = false;
+    state.format_axes_last_target = None;
+    state.format_axes_pending_tab = None;
+    state.format_axes_per_axis_cache = [None, None, None];
     state.format_axes_frame_preset_dirty = false;
     state.additional_ticks.open = false;
     state.additional_tick_status = None;
     state.axis_bounds_error = None;
+    state.axis_ticks_error = None;
 }
 
 pub(super) fn reset_format_graph_local_drafts(state: &mut GraphModalEguiState) {
@@ -275,109 +279,4 @@ pub(super) fn record_label(ui: &mut Ui, resp: &Response, meta: &mut FrameInspect
             full_label: None,
         },
     );
-}
-
-pub(super) fn gtr(locale: &str, key: &str) -> &'static str {
-    match (key, locale) {
-        ("modal.apply", "de") => "Anwenden",
-        ("modal.apply", "es") => "Aplicar",
-        ("modal.apply", "fr") => "Appliquer",
-        ("modal.apply", "ja") => "適用",
-        ("modal.apply", "ko") => "적용",
-        ("modal.apply", "pt-BR") => "Aplicar",
-        ("modal.apply", "zh-CN") => "应用",
-        ("modal.apply", "zh-TW") => "套用",
-        ("modal.apply", "it") => "Applica",
-        ("modal.apply", "nl") => "Toepassen",
-        ("modal.apply", "pl") => "Zastosuj",
-        ("modal.apply", "ru") => "Применить",
-        ("modal.apply", "tr") => "Uygula",
-        ("modal.apply", _) => "Apply",
-
-        ("cgt.show_all", "de") => "Alle Typen anzeigen",
-        ("cgt.show_all", "es") => "Mostrar todos",
-        ("cgt.show_all", "fr") => "Tout afficher",
-        ("cgt.show_all", "ja") => "すべて表示",
-        ("cgt.show_all", "ko") => "모두 표시",
-        ("cgt.show_all", "pt-BR") => "Mostrar todos",
-        ("cgt.show_all", "zh-CN") => "显示全部",
-        ("cgt.show_all", "zh-TW") => "顯示全部",
-        ("cgt.show_all", _) => "Show All Types",
-
-        ("cgt.hint.compatible", "de") => "Kompatibel mit aktiver Datentabelle.",
-        ("cgt.hint.compatible", "ja") => "選択したデータテーブルと互換性があります。",
-        ("cgt.hint.compatible", _) => "Compatible with active dataset table structure.",
-
-        ("cgt.hint.paired", _) => "Paired/Repeated Measures detected: Before-After Paired Lines prioritized.",
-        ("cgt.hint.cross_table", _) => "Cross-table option: check variable roles before applying",
-        ("cgt.preview.empty", _) => "Live preview renders once dataset contains finite points.",
-
-        ("fg.jump.change_graph_type", "de") => "Diagrammtyp ändern…",
-        ("fg.jump.change_graph_type", "ja") => "グラフ種類の変更…",
-        ("fg.jump.change_graph_type", _) => "Change Graph Type…",
-
-        ("fg.jump.format_axes", "de") => "Achsen formatieren…",
-        ("fg.jump.format_axes", "ja") => "軸の書式設定…",
-        ("fg.jump.format_axes", _) => "Format Axes…",
-
-        ("fg.tab.appearance", "de") => "Darstellung",
-        ("fg.tab.appearance", "ja") => "外観",
-        ("fg.tab.appearance", _) => "Appearance",
-        ("fg.tab.series", _) => "Series & Arrangement",
-        ("fg.tab.settings", _) => "Graph Settings",
-        ("fg.tab.annotations", _) => "Value Annotations",
-        ("fg.tab.axis_variables", _) => "Axis Variables",
-        ("fg.tab.data_objects", _) => "Data Objects",
-        ("fg.tab.legends", _) => "Legends",
-        ("fg.tab.color_mapping", _) => "Color Mapping",
-        ("fg.tab.heatmap_labels", _) => "Labels & Ticks",
-        ("fg.tab.heatmap_borders", _) => "Gaps & Borders",
-
-        ("fg.scope.series", _) => "Active Series:",
-        ("fg.apply_globally", _) => "Apply Globally",
-        ("fg.symbol_size", _) => "Symbol Size",
-        ("fg.symbol_fill", _) => "Fill Mode:",
-        ("fg.line_dash", _) => "Connecting Line:",
-        ("fg.error_stroke", _) => "Error Bar Stroke",
-        ("fg.grouped_arrangement", _) => "Grouped Arrangement",
-        ("fg.active_series_list", _) => "Plotted Series",
-        ("fg.annotations.heading", _) => "Annotations & Model Equations",
-        ("fg.equation_mode", _) => "Equation Mode:",
-        ("fg.annotations.empty", _) => "No model equations on this graph yet (Insert via Equation tool).",
-
-        ("axes.tab.frame", _) => "Frame & Origin",
-        ("axes.tab.x", _) => "X Axis",
-        ("axes.tab.y", _) => "Left Y Axis",
-        ("axes.tab.y2", _) => "Right Y2 Axis",
-        ("axes.tab.titles", _) => "Titles & Typography",
-        ("axes.frame.heading", _) => "Frame Preset",
-        ("axes.scale.heading", _) => "Scale Bijection",
-        ("axes.categorical.heading", _) => "Categorical Ticks",
-        ("axes.categorical.switch_btn", _) => "Switch to Continuous Scale…",
-        ("axes.guard.warning", _) => {
-            "Categorical Axis Guard: Switching a categorical axis to a continuous/logarithmic scale replaces discrete group labels with numeric tick coordinates."
-        }
-        ("axes.guard.confirm_chk", _) => "I confirm converting this categorical axis to numeric coordinates",
-        ("axes.guard.confirm_btn", _) => "Confirm Switch",
-        ("axes.guard.cancel_btn", _) => "Keep Categorical",
-        ("axes.min", _) => "Min",
-        ("axes.max", _) => "Max",
-        ("axes.ticks.heading", _) => "Tick Numbering & Additional Ticks",
-        ("axes.add_tick.open", _) => "Additional Ticks / Thresholds…",
-        ("axes.add_tick.submodal_title", _) => "Additional Ticks & Reference Thresholds",
-        ("axes.add_tick.save", _) => "Add / Save Tick or Threshold",
-        ("axes.add_tick.done", _) => "Done",
-
-        ("fg.palette", "de") => "Farbpalette",
-        ("fg.palette", "ja") => "カラーパレット",
-        ("fg.palette", _) => "Palette",
-        ("fg.legend", "de") => "Legende anzeigen",
-        ("fg.legend", "ja") => "凡例を表示",
-        ("fg.legend", _) => "Show Legend",
-        ("axes.title_label", "de") => "Achsentitel:",
-        ("axes.title_label", "ja") => "軸タイトル:",
-        ("axes.title_label", _) => "Title:",
-
-        _ => "",
-    }
 }

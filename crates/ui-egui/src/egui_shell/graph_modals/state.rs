@@ -219,6 +219,24 @@ pub(super) struct HeatmapColorSnapshot {
     pub(super) max_draft: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct AxisDraftCache {
+    pub(super) min_draft: String,
+    pub(super) max_draft: String,
+    pub(super) bounds_error: Option<String>,
+    pub(super) major_interval_draft: String,
+    pub(super) minor_ticks_draft: u8,
+    pub(super) ticks_error: Option<String>,
+}
+
+pub(super) const fn axis_target_slot(target: AxisTarget) -> usize {
+    match target {
+        AxisTarget::X => 0,
+        AxisTarget::Y => 1,
+        AxisTarget::Y2 => 2,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct GraphModalEguiState {
     pub format_graph_tab: FormatGraphTab,
@@ -259,6 +277,8 @@ pub struct GraphModalEguiState {
     pub format_axes_synced_generation: Option<u64>,
     pub format_axes_last_sheet_id: Option<String>,
     pub format_axes_last_target: Option<AxisTarget>,
+    pub(super) format_axes_pending_tab: Option<FormatAxesTab>,
+    pub(super) format_axes_per_axis_cache: [Option<AxisDraftCache>; 3],
     pub format_axes_frame_preset: FramePreset,
     pub format_axes_frame_preset_dirty: bool,
     pub format_axes_title_draft: String,
@@ -323,6 +343,8 @@ impl Default for GraphModalEguiState {
             format_axes_synced_generation: None,
             format_axes_last_sheet_id: None,
             format_axes_last_target: None,
+            format_axes_pending_tab: None,
+            format_axes_per_axis_cache: [None, None, None],
             format_axes_frame_preset: FramePreset::OpenL,
             format_axes_frame_preset_dirty: false,
             format_axes_title_draft: String::new(),
@@ -345,6 +367,16 @@ impl Default for GraphModalEguiState {
             pts_border_spinner: ScrubUnitFieldState::new(ScrubUnitKind::Points),
             page_callout_draft: String::new(),
         }
+    }
+}
+
+impl GraphModalEguiState {
+    #[must_use]
+    pub(super) fn has_any_axis_errors(&self) -> bool {
+        if self.axis_bounds_error.is_some() || self.axis_ticks_error.is_some() {
+            return true;
+        }
+        self.format_axes_per_axis_cache.iter().flatten().any(|c| c.bounds_error.is_some() || c.ticks_error.is_some())
     }
 }
 

@@ -8,8 +8,8 @@
 //! `ZLayer::ModalBackdrop` outside click/wheel capture.
 
 use curvebook_doc::{
-    AnalysisKind, MixedModelDfMethod, MultiplicityMethod, OneWayAnovaSpec, OneWayMethod, PValueFormat, ProjectDocument, ResidualCovariance, SheetId,
-    TableArchetype,
+    AnalysisKind, AnalysisSpec, MixedModelDfMethod, MultiplicityMethod, OneWayAnovaSpec, OneWayMethod, PValueFormat, ProjectDocument,
+    ResidualCovariance, SheetId, TableArchetype,
 };
 use egui::{Align2, Color32, Context, CornerRadius, FontId, Id, Key, Modifiers, Order, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2};
 use serde_json::json;
@@ -90,6 +90,8 @@ pub struct AnovaModalEguiState {
     pub show_method_reference: bool,
     pub last_resolved_banner: String,
     pub method_saved_as_default: bool,
+    pub saved_default_spec: Option<AnalysisSpec>,
+    pub open_session_sheet_id: Option<String>,
 }
 
 impl Default for AnovaModalEguiState {
@@ -101,6 +103,8 @@ impl Default for AnovaModalEguiState {
             show_method_reference: false,
             last_resolved_banner: String::new(),
             method_saved_as_default: false,
+            saved_default_spec: None,
+            open_session_sheet_id: None,
         }
     }
 }
@@ -194,16 +198,19 @@ pub fn render_one_way_anova_modal(
     state.last_resolved_banner.clone_from(&banner);
 
     let ActiveDialog::EditAnalysisParameters { result_sheet_id } = &app.canvas_dialogs.active_dialog else {
+        state.open_session_sheet_id = None;
         return AnovaModalFrameReport { resolved_test_banner: banner, ..AnovaModalFrameReport::default() };
     };
     let Some(spec) = app.canvas_dialogs.edit_params.draft.as_ref() else {
+        state.open_session_sheet_id = None;
         return AnovaModalFrameReport { resolved_test_banner: banner, ..AnovaModalFrameReport::default() };
     };
     let AnalysisKind::OneWayAnova(anova) = &spec.kind else {
+        state.open_session_sheet_id = None;
         return AnovaModalFrameReport { resolved_test_banner: banner, ..AnovaModalFrameReport::default() };
     };
 
-    sync_modal_state_from_app(ctx, app, state, result_sheet_id, spec.confidence_level.percent());
+    sync_modal_state_from_app(ctx, app, state, result_sheet_id, spec, intents);
 
     let locale = normalize_locale(&app.locale);
     let screen_rect = ctx.content_rect();
@@ -307,7 +314,7 @@ pub fn render_one_way_anova_modal(
                         ui.add_space(6.0);
                         render_modal_footer(
                             ui,
-                            ModalFooterCtx { locale, tokens, apply_enabled: !is_create_mode && doc.result_sheet(result_sheet_id).is_some() },
+                            ModalFooterCtx { locale, tokens, spec, apply_enabled: !is_create_mode && doc.result_sheet(result_sheet_id).is_some() },
                             state,
                             meta,
                             intents,
@@ -368,21 +375,45 @@ pub(super) fn compute_modal_dimensions(screen_rect: Rect) -> (f32, f32) {
     (target_w, target_h)
 }
 
-fn sync_modal_state_from_app(ctx: &Context, app: &UiApp, state: &mut AnovaModalEguiState, result_sheet_id: &SheetId, conf_pct: f64) {
+fn sync_modal_state_from_app(
+    ctx: &Context,
+    app: &UiApp,
+    state: &mut AnovaModalEguiState,
+    result_sheet_id: &SheetId,
+    spec: &AnalysisSpec,
+    intents: &mut PendingUiIntents,
+) {
     let ep = &app.canvas_dialogs.edit_params;
+    let conf_pct = spec.confidence_level.percent();
     let key_last_ep_tab = Id::unique("anova_modal.last_ep_tab");
-    let key_last_sheet = Id::unique("anova_modal.last_sheet");
+    let is_create_mode = app.document().result_sheet(result_sheet_id).is_none();
 
-    let prev_sheet: Option<String> = ctx.data(|d| d.get_temp(key_last_sheet));
-    if prev_sheet.as_deref() != Some(result_sheet_id.as_str()) {
-        ctx.data_mut(|d| d.insert_temp(key_last_sheet, result_sheet_id.as_str().to_owned()));
+    if state.open_session_sheet_id.as_deref() != Some(result_sheet_id.as_str()) {
+        state.open_session_sheet_id = Some(result_sheet_id.as_str().to_owned());
         state.confidence_percent_draft = conf_pct;
         state.show_method_reference = false;
-        state.method_saved_as_default = false;
+        if is_create_mode && let Some(saved) = &state.saved_default_spec {
+            let mut applied = saved.clone();
+            applied.source_sheet_id = spec.source_sheet_id.clone();
+            applied.selected_data_sets.clone_from(&spec.selected_data_sets);
+            applied.custom_title.clone_from(&spec.custom_title);
+            if applied != *spec {
+                intents.push_set_edit_params_draft(applied);
+            }
+            state.method_saved_as_default = true;
+        } else {
+            state.method_saved_as_default = state.saved_default_spec.as_ref().is_some_and(|saved| {
+                saved.kind == spec.kind && saved.confidence_level == spec.confidence_level && saved.p_value_format == spec.p_value_format
+            });
+        }
         if let Some(tab) = AnovaModalTab::from_slug(&ep.active_tab) {
             state.active_tab =
                 if !ep.paired_or_matched && tab == AnovaModalTab::AssumptionsAndTest { AnovaModalTab::ExperimentalDesign } else { tab };
         }
+    } else {
+        state.method_saved_as_default = state.saved_default_spec.as_ref().is_some_and(|saved| {
+            saved.kind == spec.kind && saved.confidence_level == spec.confidence_level && saved.p_value_format == spec.p_value_format
+        });
     }
 
     let prev_ep_tab: Option<String> = ctx.data(|d| d.get_temp(key_last_ep_tab));
@@ -512,7 +543,7 @@ fn render_modal_header_and_banner(
     });
 
     ui.add_space(4.0);
-    let prefix = tr_anova(locale, "anova.resolved_prefix");
+    let prefix = tr(locale, "anova.resolved_prefix");
     let full_banner = format!("{prefix}: {banner}");
     let banner_frame = egui::Frame::NONE
         .fill(tokens.active_bg)
@@ -850,11 +881,11 @@ fn draw_experimental_design_schematic(
     ui.painter().rect_stroke(rect, CornerRadius::same(6), Stroke::new(1.0, rc.tokens.border), StrokeKind::Inside);
 
     let caption = if rc.ep.paired_or_matched && reml_active {
-        tr_anova(rc.locale, "anova.schematic.reml")
+        tr(rc.locale, "anova.schematic.reml")
     } else if rc.ep.paired_or_matched {
-        tr_anova(rc.locale, "anova.schematic.paired")
+        tr(rc.locale, "anova.schematic.paired")
     } else {
-        tr_anova(rc.locale, "anova.schematic.independent")
+        tr(rc.locale, "anova.schematic.independent")
     };
     let mut job = egui::text::LayoutJob::single_section(
         caption.to_owned(),
@@ -944,6 +975,7 @@ fn render_tab_repeated_measures(ui: &mut Ui, rc: TabRenderCtx<'_>, meta: &mut Fr
         intents.push_dialog_widget_click("edit.sphericity.geisser_greenhouse");
     }
     if render_modal_radio(ui, rc.tokens, meta, "edit.rm.assume_sphericity", "Assume sphericity (unadjusted df)", !gg_checked && !reml_active, &sph_en)
+        && gg_checked
     {
         intents.push_custom_view_action("stat_params", "toggle_geisser_greenhouse");
     }
@@ -1264,6 +1296,12 @@ fn render_tab_options(
 fn render_tab_residuals(ui: &mut Ui, rc: TabRenderCtx<'_>, meta: &mut FrameInspectMeta, intents: &mut PendingUiIntents) {
     let st = &rc.app.view_shards.stat_params;
     render_section_title(ui, rc.tokens, "Residual, Q-Q & Assumption Diagnostics");
+    ui.label(
+        egui::RichText::new("Client preview toggles: ResultSheet diagnostics tabs are generated automatically by the engine.")
+            .small()
+            .color(rc.tokens.text_muted),
+    );
+    ui.add_space(4.0);
 
     for (wid, payload, lbl, checked) in [
         ("edit.diag.qq_plot", "toggle_diag:qq", tr(rc.locale, "stat_params.label.qq_diagnostics"), st.diag_qq_plot),
@@ -1350,7 +1388,7 @@ fn render_method_reference_card(
         .inner_margin(egui::Margin::same(8));
     card_frame.show(ui, |ui| {
         ui.horizontal(|ui| {
-            let ref_hdr = tr_anova(locale, "anova.method_ref");
+            let ref_hdr = tr(locale, "anova.method_ref");
             render_clipped_text(
                 ui,
                 meta,
@@ -1400,6 +1438,7 @@ fn render_method_reference_card(
 struct ModalFooterCtx<'a> {
     locale: &'a str,
     tokens: &'a Tokens,
+    spec: &'a AnalysisSpec,
     apply_enabled: bool,
 }
 
@@ -1421,10 +1460,9 @@ fn render_modal_footer(
     ui.separator();
     ui.add_space(4.0);
     let is_create_mode = !fc.apply_enabled;
-    let primary_label = if is_create_mode { tr_anova(fc.locale, "anova.run_analysis") } else { tr_anova(fc.locale, "anova.update_analysis") };
-    let method_ref_label = tr_anova(fc.locale, "anova.method_ref");
-    let save_default_label =
-        if state.method_saved_as_default { tr_anova(fc.locale, "anova.saved_default") } else { tr_anova(fc.locale, "anova.save_default") };
+    let primary_label = if is_create_mode { tr(fc.locale, "anova.run_analysis") } else { tr(fc.locale, "anova.update_analysis") };
+    let method_ref_label = tr(fc.locale, "anova.method_ref");
+    let save_default_label = if state.method_saved_as_default { tr(fc.locale, "anova.saved_default") } else { tr(fc.locale, "anova.save_default") };
     let cancel_label = tr(fc.locale, "btn.cancel");
 
     let compact = ui.available_width() < 640.0;
@@ -1456,7 +1494,9 @@ fn render_modal_footer(
                     enabled: true,
                 },
             ) {
+                state.saved_default_spec = Some(fc.spec.clone());
                 state.method_saved_as_default = true;
+                intents.push_save_edit_params_as_default();
             }
             if render_footer_button(
                 ui,
@@ -1471,13 +1511,7 @@ fn render_modal_footer(
                     ui,
                     fc.tokens,
                     meta,
-                    FooterBtnSpec {
-                        widget_id: "modal.apply",
-                        label: tr_anova(fc.locale, "anova.apply"),
-                        primary: false,
-                        selected: false,
-                        enabled: true,
-                    },
+                    FooterBtnSpec { widget_id: "modal.apply", label: tr(fc.locale, "btn.apply"), primary: false, selected: false, enabled: true },
                 )
             {
                 intents.push_dialog_button("apply");
@@ -1519,7 +1553,9 @@ fn render_modal_footer(
                     enabled: true,
                 },
             ) {
+                state.saved_default_spec = Some(fc.spec.clone());
                 state.method_saved_as_default = true;
+                intents.push_save_edit_params_as_default();
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if render_footer_button(
@@ -1535,13 +1571,7 @@ fn render_modal_footer(
                         ui,
                         fc.tokens,
                         meta,
-                        FooterBtnSpec {
-                            widget_id: "modal.apply",
-                            label: tr_anova(fc.locale, "anova.apply"),
-                            primary: false,
-                            selected: false,
-                            enabled: true,
-                        },
+                        FooterBtnSpec { widget_id: "modal.apply", label: tr(fc.locale, "btn.apply"), primary: false, selected: false, enabled: true },
                     )
                 {
                     intents.push_dialog_button("apply");
@@ -2149,185 +2179,9 @@ fn tab_label(locale: &str, tab: AnovaModalTab) -> &str {
 }
 
 fn localized_modal_title(locale: &str) -> String {
-    let params = tr_anova(locale, "anova.parameters_prefix");
+    let params = tr(locale, "anova.parameters_prefix");
     let family = tr(locale, "analysis.one_way_anova");
     format!("{params}: {family}")
-}
-
-fn tr_anova(locale: &str, key: &str) -> &'static str {
-    let norm = normalize_locale(locale);
-    match (key, norm) {
-        ("anova.parameters_prefix", "de") => "Parameter",
-        ("anova.parameters_prefix", "es") => "Parámetros",
-        ("anova.parameters_prefix", "fr") => "Paramètres",
-        ("anova.parameters_prefix", "ja") => "パラメーター",
-        ("anova.parameters_prefix", "ko") => "매개변수",
-        ("anova.parameters_prefix", "pt-BR") => "Parâmetros",
-        ("anova.parameters_prefix", "zh-CN") => "参数",
-        ("anova.parameters_prefix", "zh-TW") => "參數",
-        ("anova.parameters_prefix", "it") => "Parametri",
-        ("anova.parameters_prefix", "nl") => "Parameters",
-        ("anova.parameters_prefix", "pl") => "Parametry",
-        ("anova.parameters_prefix", "ru") => "Параметры",
-        ("anova.parameters_prefix", "tr") => "Parametreler",
-        ("anova.parameters_prefix", "ar") => "المعاملات",
-        ("anova.parameters_prefix", "he") => "פרמטרים",
-        ("anova.parameters_prefix", _) => "Parameters",
-
-        ("anova.resolved_prefix", "de") => "Aufgelöster Test",
-        ("anova.resolved_prefix", "es") => "Prueba resuelta",
-        ("anova.resolved_prefix", "fr") => "Test retenu",
-        ("anova.resolved_prefix", "ja") => "適用検定",
-        ("anova.resolved_prefix", "ko") => "선택된 검정",
-        ("anova.resolved_prefix", "pt-BR") => "Teste selecionado",
-        ("anova.resolved_prefix", "zh-CN") => "当前解析检验",
-        ("anova.resolved_prefix", "zh-TW") => "目前解析檢定",
-        ("anova.resolved_prefix", "it") => "Test risolto",
-        ("anova.resolved_prefix", "nl") => "Gekozen test",
-        ("anova.resolved_prefix", "pl") => "Wybrany test",
-        ("anova.resolved_prefix", "ru") => "Выбранный тест",
-        ("anova.resolved_prefix", "tr") => "Çözümlenen test",
-        ("anova.resolved_prefix", "ar") => "الاختبار المحدد",
-        ("anova.resolved_prefix", "he") => "בדיקה שנבחרה",
-        ("anova.resolved_prefix", _) => "Resolved test",
-
-        ("anova.method_ref", "de") => "Methodenreferenz",
-        ("anova.method_ref", "es") => "Referencia del método",
-        ("anova.method_ref", "fr") => "Référence méthode",
-        ("anova.method_ref", "ja") => "手法リファレンス",
-        ("anova.method_ref", "ko") => "방법 참고",
-        ("anova.method_ref", "pt-BR") => "Referência do método",
-        ("anova.method_ref", "zh-CN") => "方法参考",
-        ("anova.method_ref", "zh-TW") => "方法參考",
-        ("anova.method_ref", "it") => "Riferimento metodo",
-        ("anova.method_ref", "nl") => "Methodereferentie",
-        ("anova.method_ref", "pl") => "Opis metody",
-        ("anova.method_ref", "ru") => "Справка по методу",
-        ("anova.method_ref", "tr") => "Yöntem Başvurusu",
-        ("anova.method_ref", _) => "Method Reference",
-
-        ("anova.save_default", "de") => "Als Standard",
-        ("anova.save_default", "es") => "Guardar predeterminado",
-        ("anova.save_default", "fr") => "Par défaut",
-        ("anova.save_default", "ja") => "既定として保存",
-        ("anova.save_default", "ko") => "기본값으로 저장",
-        ("anova.save_default", "pt-BR") => "Salvar padrão",
-        ("anova.save_default", "zh-CN") => "设为默认",
-        ("anova.save_default", "zh-TW") => "設為預設",
-        ("anova.save_default", "it") => "Salva predefinito",
-        ("anova.save_default", "nl") => "Als standaard",
-        ("anova.save_default", "pl") => "Zapisz domyślne",
-        ("anova.save_default", "ru") => "По умолчанию",
-        ("anova.save_default", "tr") => "Varsayılan Kaydet",
-        ("anova.save_default", _) => "Save as Default",
-
-        ("anova.saved_default", "de") => "Standard gespeichert ✓",
-        ("anova.saved_default", "es") => "Predeterminado ✓",
-        ("anova.saved_default", "fr") => "Enregistré ✓",
-        ("anova.saved_default", "ja") => "保存済み ✓",
-        ("anova.saved_default", "ko") => "저장됨 ✓",
-        ("anova.saved_default", "pt-BR") => "Padrão salvo ✓",
-        ("anova.saved_default", "zh-CN") => "已设为默认 ✓",
-        ("anova.saved_default", "zh-TW") => "已設為預設 ✓",
-        ("anova.saved_default", "it") => "Salvato ✓",
-        ("anova.saved_default", "nl") => "Opgeslagen ✓",
-        ("anova.saved_default", "pl") => "Zapisano ✓",
-        ("anova.saved_default", "ru") => "Сохранено ✓",
-        ("anova.saved_default", "tr") => "Kaydedildi ✓",
-        ("anova.saved_default", _) => "Saved as Default ✓",
-
-        ("anova.run_analysis", "de") => "Analyse starten",
-        ("anova.run_analysis", "es") => "Ejecutar análisis",
-        ("anova.run_analysis", "fr") => "Lancer l'analyse",
-        ("anova.run_analysis", "ja") => "解析を実行",
-        ("anova.run_analysis", "ko") => "분석 실행",
-        ("anova.run_analysis", "pt-BR") => "Executar análise",
-        ("anova.run_analysis", "zh-CN") => "运行分析",
-        ("anova.run_analysis", "zh-TW") => "執行分析",
-        ("anova.run_analysis", "it") => "Esegui analisi",
-        ("anova.run_analysis", "nl") => "Analyse uitvoeren",
-        ("anova.run_analysis", "pl") => "Uruchom analizę",
-        ("anova.run_analysis", "ru") => "Запустить анализ",
-        ("anova.run_analysis", "tr") => "Analizi Çalıştır",
-        ("anova.run_analysis", _) => "Run Analysis",
-
-        ("anova.update_analysis", "de") => "Analyse aktualisieren",
-        ("anova.update_analysis", "es") => "Actualizar análisis",
-        ("anova.update_analysis", "fr") => "Mettre à jour l'analyse",
-        ("anova.update_analysis", "ja") => "解析を更新",
-        ("anova.update_analysis", "ko") => "분석 업데이트",
-        ("anova.update_analysis", "pt-BR") => "Atualizar análise",
-        ("anova.update_analysis", "zh-CN") => "更新分析",
-        ("anova.update_analysis", "zh-TW") => "更新分析",
-        ("anova.update_analysis", "it") => "Aggiorna analisi",
-        ("anova.update_analysis", "nl") => "Analyse bijwerken",
-        ("anova.update_analysis", "pl") => "Zaktualizuj analizę",
-        ("anova.update_analysis", "ru") => "Обновить анализ",
-        ("anova.update_analysis", "tr") => "Analizi Güncelle",
-        ("anova.update_analysis", _) => "Update Analysis",
-
-        ("anova.apply", "de") => "Anwenden",
-        ("anova.apply", "es") => "Aplicar",
-        ("anova.apply", "fr") => "Appliquer",
-        ("anova.apply", "ja") => "適用",
-        ("anova.apply", "ko") => "적용",
-        ("anova.apply", "pt-BR") => "Aplicar",
-        ("anova.apply", "zh-CN") => "应用",
-        ("anova.apply", "zh-TW") => "套用",
-        ("anova.apply", "it") => "Applica",
-        ("anova.apply", "nl") => "Toepassen",
-        ("anova.apply", "pl") => "Zastosuj",
-        ("anova.apply", "ru") => "Применить",
-        ("anova.apply", "tr") => "Uygula",
-        ("anova.apply", _) => "Apply",
-
-        ("anova.schematic.independent", "de") => "Unabhängige Gruppen (ungepaart)",
-        ("anova.schematic.independent", "es") => "Grupos independientes (no pareados)",
-        ("anova.schematic.independent", "fr") => "Groupes indépendants (non appariés)",
-        ("anova.schematic.independent", "ja") => "独立群 (対応なし)",
-        ("anova.schematic.independent", "ko") => "독립 집단 (대응 없음)",
-        ("anova.schematic.independent", "pt-BR") => "Grupos independentes (não pareados)",
-        ("anova.schematic.independent", "zh-CN") => "独立分组 (非配对设计)",
-        ("anova.schematic.independent", "zh-TW") => "獨立分組 (非配對設計)",
-        ("anova.schematic.independent", "it") => "Gruppi indipendenti (non appaiati)",
-        ("anova.schematic.independent", "nl") => "Onafhankelijke groepen",
-        ("anova.schematic.independent", "pl") => "Grupy niezależne",
-        ("anova.schematic.independent", "ru") => "Независимые группы",
-        ("anova.schematic.independent", "tr") => "Bağımsız gruplar",
-        ("anova.schematic.independent", _) => "Independent / Unpaired Groups",
-
-        ("anova.schematic.paired", "de") => "Gepaarte / Messwiederholungs-Blöcke",
-        ("anova.schematic.paired", "es") => "Medidas repetidas / bloques pareados",
-        ("anova.schematic.paired", "fr") => "Mesures répétées / blocs appariés",
-        ("anova.schematic.paired", "ja") => "反復測定・対応あり個体ブロック",
-        ("anova.schematic.paired", "ko") => "반복 측정 / 대응 피험자 블록",
-        ("anova.schematic.paired", "pt-BR") => "Medidas repetidas / blocos pareados",
-        ("anova.schematic.paired", "zh-CN") => "重复测量 / 配对受试者区组",
-        ("anova.schematic.paired", "zh-TW") => "重複測量 / 配對受試者區組",
-        ("anova.schematic.paired", "it") => "Misure ripetute / blocchi appaiati",
-        ("anova.schematic.paired", "nl") => "Herhaalde metingen",
-        ("anova.schematic.paired", "pl") => "Pomiary powtarzane",
-        ("anova.schematic.paired", "ru") => "Повторные измерения",
-        ("anova.schematic.paired", "tr") => "Tekrarlı ölçümler",
-        ("anova.schematic.paired", _) => "Repeated-Measures / Matched Blocks",
-
-        ("anova.schematic.reml", "de") => "Gemischtes REML-Modell (fehlende Zellen)",
-        ("anova.schematic.reml", "es") => "Modelo mixto REML (celdas faltantes)",
-        ("anova.schematic.reml", "fr") => "Modèle mixte REML (données manquantes)",
-        ("anova.schematic.reml", "ja") => "混合効果 REML (欠測セル対応)",
-        ("anova.schematic.reml", "ko") => "혼합 효과 REML (결측 셀 허용)",
-        ("anova.schematic.reml", "pt-BR") => "Modelo misto REML (células ausentes)",
-        ("anova.schematic.reml", "zh-CN") => "混合效应 REML (支持缺失单元格)",
-        ("anova.schematic.reml", "zh-TW") => "混合效應 REML (支援缺失儲存格)",
-        ("anova.schematic.reml", "it") => "Modello misto REML (celle mancanti)",
-        ("anova.schematic.reml", "nl") => "REML gemengd model",
-        ("anova.schematic.reml", "pl") => "Model mieszany REML",
-        ("anova.schematic.reml", "ru") => "Смешанная модель REML",
-        ("anova.schematic.reml", "tr") => "REML karma modeli",
-        ("anova.schematic.reml", _) => "Mixed-Effects REML (Missing Cells)",
-
-        _ => "",
-    }
 }
 
 #[cfg(test)]

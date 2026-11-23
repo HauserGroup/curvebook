@@ -15,6 +15,7 @@ mod two_group;
 #[cfg(test)]
 mod tests;
 
+use curvebook_doc::AnalysisSpec;
 use egui::Rect;
 
 use super::inspect_bridge::ModalCaptureReport;
@@ -34,6 +35,7 @@ pub struct StatsModalsEguiState {
     pub mv_var_search: String,
     pub show_method_reference: bool,
     pub method_saved_as_default: bool,
+    pub saved_defaults: Vec<AnalysisSpec>,
     pub last_resolved_banner: String,
     pub open_session_sheet_id: Option<String>,
     pub lin_x_min_draft: String,

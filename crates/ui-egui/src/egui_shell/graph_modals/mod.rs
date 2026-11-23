@@ -24,7 +24,7 @@ use egui::{Context, Ui};
 use serde_json::{Map, Value, json};
 
 use crate::UiApp;
-use crate::dialogs_canvas::ActiveDialog;
+use crate::dialogs_canvas::{ActiveDialog, AxisTarget};
 use crate::i18n::{normalize_locale, tr};
 use crate::inspect::ZLayer;
 
@@ -37,8 +37,7 @@ use change_graph_type::render_change_graph_type_body;
 use format_axes::render_format_axes_body;
 use format_graph::render_format_graph_body;
 use helpers::{
-    ButtonEntry, GraphModalCtx, gtr, record_button, record_tab, reset_format_axes_session_state, reset_format_graph_local_drafts,
-    validate_heatmap_range,
+    ButtonEntry, GraphModalCtx, record_button, record_tab, reset_format_axes_session_state, reset_format_graph_local_drafts, validate_heatmap_range,
 };
 use insert_equation::render_insert_equation_body;
 use page_layout::render_page_layout_body;
@@ -95,6 +94,19 @@ pub fn render_graph_modal(
     let inner_w = max_w.min(preferred_w).max(260.0);
     let body_w = (inner_w - 28.0).max(200.0);
 
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::FormatAxes { .. }) && state.additional_ticks.open {
+            state.additional_ticks.open = false;
+        } else if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::FormatAxes { .. }) && state.categorical_guard_pending_axis.is_some() {
+            state.categorical_guard_confirmed = false;
+            state.categorical_guard_pending_axis = None;
+        } else {
+            reset_format_axes_session_state(state);
+            reset_format_graph_local_drafts(state);
+            intents.push_dialog_button("cancel");
+        }
+    }
+
     let modal_resp = egui::Modal::new(egui::Id::unique(("egui_shell_graph_modal", widget_id))).backdrop_color(tokens.scrim).show(ctx, |ui| {
         ui.set_min_width(inner_w);
         ui.set_max_width(inner_w);
@@ -147,7 +159,7 @@ fn render_dialog_top_strip(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &
             state.format_graph_tab = active_tab;
             ui.horizontal_wrapped(|ui| {
                 ui.set_max_width(gctx.body_w);
-                let cgt_lbl = gtr(gctx.locale, "fg.jump.change_graph_type");
+                let cgt_lbl = tr(gctx.locale, "fg.jump.change_graph_type");
                 if record_button(
                     ui,
                     gctx.meta,
@@ -165,7 +177,7 @@ fn render_dialog_top_strip(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &
                 {
                     gctx.intents.push_ui("ui.changeGraphType.open", json!({}));
                 }
-                let axes_lbl = gtr(gctx.locale, "fg.jump.format_axes");
+                let axes_lbl = tr(gctx.locale, "fg.jump.format_axes");
                 if record_button(
                     ui,
                     gctx.meta,
@@ -188,7 +200,7 @@ fn render_dialog_top_strip(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &
             ui.horizontal_wrapped(|ui| {
                 ui.set_max_width(gctx.body_w);
                 for &tab in schema.tabs() {
-                    let lbl = gtr(gctx.locale, tab.label_key());
+                    let lbl = tr(gctx.locale, tab.label_key());
                     if record_tab(ui, gctx.meta, tab.widget_id(), lbl, tab == active_tab, gctx.tokens).clicked() {
                         state.format_graph_tab = tab;
                     }
@@ -201,7 +213,7 @@ fn render_dialog_top_strip(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &
             if state.additional_ticks.open {
                 ui.horizontal_wrapped(|ui| {
                     ui.set_max_width(gctx.body_w);
-                    ui.label(egui::RichText::new(gtr(gctx.locale, "axes.add_tick.submodal_title")).strong());
+                    ui.label(egui::RichText::new(tr(gctx.locale, "axes.add_tick.submodal_title")).strong());
                 });
                 ui.add_space(4.0);
                 return 28.0;
@@ -209,19 +221,28 @@ fn render_dialog_top_strip(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &
             ui.horizontal_wrapped(|ui| {
                 ui.set_max_width(gctx.body_w);
                 for &tab in &FormatAxesTab::ALL {
-                    let lbl = gtr(gctx.locale, tab.label_key());
-                    if record_tab(ui, gctx.meta, tab.widget_id(), lbl, tab == state.format_axes_tab, gctx.tokens).clicked() {
-                        state.format_axes_tab = tab;
-                        let target_slug = match tab {
-                            FormatAxesTab::XAxis => Some("x"),
-                            FormatAxesTab::LeftYAxis => Some("y"),
-                            FormatAxesTab::RightYAxis => Some("y2"),
+                    let lbl = tr(gctx.locale, tab.label_key());
+                    let is_active = state.format_axes_pending_tab.unwrap_or(state.format_axes_tab) == tab;
+                    if record_tab(ui, gctx.meta, tab.widget_id(), lbl, is_active, gctx.tokens).clicked() {
+                        let target_pair = match tab {
+                            FormatAxesTab::XAxis => Some((AxisTarget::X, "x")),
+                            FormatAxesTab::LeftYAxis => Some((AxisTarget::Y, "y")),
+                            FormatAxesTab::RightYAxis => Some((AxisTarget::Y2, "y2")),
                             FormatAxesTab::FrameAndOrigin | FormatAxesTab::TitlesAndTypography => None,
                         };
-                        if let Some(slug) = target_slug {
-                            let mut patch = Map::new();
-                            patch.insert(String::from("axes.target_axis"), Value::String(slug.to_owned()));
-                            gctx.intents.push_patch_active_dialog(patch);
+                        if let Some((target_axis, slug)) = target_pair {
+                            if gctx.app.canvas_dialogs.format_axes.target_axis == target_axis {
+                                state.format_axes_tab = tab;
+                                state.format_axes_pending_tab = None;
+                            } else {
+                                state.format_axes_pending_tab = Some(tab);
+                                let mut patch = Map::new();
+                                patch.insert(String::from("axes.target_axis"), Value::String(slug.to_owned()));
+                                gctx.intents.push_patch_active_dialog(patch);
+                            }
+                        } else {
+                            state.format_axes_tab = tab;
+                            state.format_axes_pending_tab = None;
                         }
                     }
                 }
@@ -257,7 +278,7 @@ fn render_dialog_footer(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &mut
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(gctx.body_w);
         if matches!(active, ActiveDialog::FormatAxes { .. }) && state.additional_ticks.open {
-            let close_lbl = gtr(gctx.locale, "axes.add_tick.done");
+            let close_lbl = tr(gctx.locale, "axes.add_tick.done");
             if record_button(
                 ui,
                 gctx.meta,
@@ -303,7 +324,7 @@ fn render_dialog_footer(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &mut
                 | ActiveDialog::FormatImage { .. }
         );
         if supports_apply {
-            let apply_lbl = gtr(gctx.locale, "modal.apply");
+            let apply_lbl = tr(gctx.locale, "btn.apply");
             let apply_wid = if matches!(active, ActiveDialog::ChangeGraphType { .. }) { "graph_type.apply" } else { "modal.apply" };
             if record_button(
                 ui,
@@ -351,7 +372,7 @@ fn sync_format_graph_local_drafts(app: &UiApp, state: &mut GraphModalEguiState, 
     } else {
         state.mv_clamp_min_draft.clear();
         state.mv_clamp_max_draft.clear();
-        state.mv_out_of_range = MvOutOfRangePolicy::ClampToBounds;
+        state.mv_out_of_range = MvOutOfRangePolicy::Omit;
     }
 
     if let Some(enc) = enc_opt
@@ -501,7 +522,7 @@ fn commit_graph_modal_action(gctx: &mut GraphModalCtx<'_>, state: &mut GraphModa
     match &gctx.app.canvas_dialogs.active_dialog {
         ActiveDialog::FormatGraph { .. } => commit_format_graph_heatmap(gctx, state, action),
         ActiveDialog::FormatAxes { .. } => {
-            if state.axis_bounds_error.is_some() || state.axis_ticks_error.is_some() {
+            if state.has_any_axis_errors() {
                 return;
             }
             let fa = &gctx.app.canvas_dialogs.format_axes;

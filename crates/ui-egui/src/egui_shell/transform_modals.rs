@@ -7,13 +7,13 @@ use curvebook_doc::{
     MathTransformPreset, NormalizeAnchor, SheetId, SimulationNoise, TableArchetype, TableKind, TransformAnalysisSpec,
 };
 use curvebook_transform::formula::parser::parse_formula;
-use egui::{Align, Context, Layout, Rect, RichText, Stroke, Ui, vec2};
+use egui::{Align, Context, Key, Layout, Modifiers, Rect, RichText, Stroke, Ui, vec2};
 use serde_json::{Map, Value, json};
 
 use crate::UiApp;
 use crate::dialogs_canvas::{ActiveDialog, ExcludeWithReasonDialogState};
 use crate::grid_view::parse_localized_number_input;
-use crate::i18n::tr_or_fallback;
+use crate::i18n::{normalize_locale, tr};
 use crate::inspect::ZLayer;
 
 use super::inspect_bridge::{ModalCaptureSpec, finalize_egui_modal_response};
@@ -239,7 +239,18 @@ pub fn render_transform_modal(
     }
     if !from_edit && state.open_kind.is_none() {
         state.synced_standalone_key = None;
+        state.hook_picker_open = false;
+        state.validation_error = None;
         return TransformModalFrameReport::default();
+    }
+    if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        if state.hook_picker_open {
+            state.hook_picker_open = false;
+        } else if from_edit {
+            intents.push_dialog_button("cancel");
+        } else {
+            intents.push_close_transform_modal();
+        }
     }
     if from_edit {
         sync_transform_edit_state(app, state);
@@ -338,16 +349,17 @@ fn resolve_effective_modal_kind(draft_kind: Option<&AnalysisKind>, open_kind: Op
 }
 
 fn modal_title_for(kind: TransformModalKind, locale: &str) -> &'static str {
+    let norm = normalize_locale(locale);
     match kind {
-        TransformModalKind::TransformValues => "Transform Values & Concentrations",
-        TransformModalKind::Normalize => "Normalize Data",
-        TransformModalKind::RemoveBaseline => tr_or_fallback(locale, "analysis.remove_baseline", "Remove Baseline & Column Math"),
-        TransformModalKind::MvFilterAndTransform => "Multiple Variables: Filter & Transform",
-        TransformModalKind::ExtractAndRearrange => "Extract & Rearrange Table",
-        TransformModalKind::Transpose => "Transpose Table",
-        TransformModalKind::PruneRows => "Prune Rows",
-        TransformModalKind::Simulate => "Simulate XY Curve",
-        TransformModalKind::RandomSample => "Random Sample Rows",
+        TransformModalKind::TransformValues => tr(norm, "transform.title.values"),
+        TransformModalKind::Normalize => tr(norm, "transform.title.normalize"),
+        TransformModalKind::RemoveBaseline => tr(norm, "analysis.remove_baseline"),
+        TransformModalKind::MvFilterAndTransform => tr(norm, "transform.title.mv_filter"),
+        TransformModalKind::ExtractAndRearrange => tr(norm, "transform.title.extract"),
+        TransformModalKind::Transpose => tr(norm, "transform.title.transpose"),
+        TransformModalKind::PruneRows => tr(norm, "transform.title.prune"),
+        TransformModalKind::Simulate => tr(norm, "transform.title.simulate"),
+        TransformModalKind::RandomSample => tr(norm, "transform.title.random_sample"),
     }
 }
 
@@ -374,6 +386,15 @@ fn sync_standalone_transform_state(kind: TransformModalKind, state: &mut Transfo
     state.formula_draft.clear();
     state.filter_formula_draft.clear();
     state.filter_rows.clear();
+    state.constant_k_draft.clear();
+    state.selected_k_op = None;
+    state.hook_picker_open = false;
+    state.standalone_x_preset = None;
+    state.standalone_y_preset = None;
+    state.standalone_error_propagation = ErrorPropagationMode::default();
+    state.pharmacology_mode = false;
+    state.baseline_cols = vec![0];
+    state.baseline_op = 0;
     state.derived_title_draft.clear();
     state.derived_cols.clear();
     state.extract_target_kind = None;
@@ -419,6 +440,14 @@ fn sync_transform_edit_state(app: &UiApp, state: &mut TransformModalsEguiState) 
     let spec = app.canvas_dialogs.edit_params.draft.as_ref().or_else(|| app.document().result_sheet(result_sheet_id).map(|rs| &rs.analysis));
     state.standalone_selected_cols = spec.map(|s| s.selected_data_sets.clone()).unwrap_or_default();
     state.selected_k_op = None;
+    state.constant_k_draft.clear();
+    state.hook_picker_open = false;
+    state.pharmacology_mode = false;
+    state.baseline_cols = vec![0];
+    state.baseline_op = 0;
+    state.derived_title_draft.clear();
+    state.formula_draft.clear();
+    state.filter_rows.clear();
     state.transpose_swap_titles = true;
     state.prune_every_k_rows = 2;
     state.prune_every_k_draft = String::from("2");
@@ -453,6 +482,15 @@ fn sync_transform_edit_state(app: &UiApp, state: &mut TransformModalsEguiState) 
                 state.selected_k_op = Some(op);
                 state.constant_k_draft = format!("{k}");
             }
+        }
+        Some(AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns, operation })) => {
+            state.baseline_cols = if baseline_columns.is_empty() { vec![0] } else { baseline_columns.clone() };
+            state.baseline_op = match operation {
+                BaselineOperation::Ratio => 1,
+                BaselineOperation::PercentChange => 2,
+                BaselineOperation::FractionalChange => 3,
+                BaselineOperation::Difference => 0,
+            };
         }
         Some(AnalysisKind::Transform(TransformAnalysisSpec::Normalize { zero_anchor, hundred_anchor, output_percent, per_data_set })) => {
             state.norm_zero_idx = match zero_anchor {
@@ -978,7 +1016,7 @@ fn render_remove_baseline_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
     };
 
     ui.label(RichText::new("Baseline Columns (row-wise mean when multiple selected):").strong().color(tokens.text_primary));
-    let col_count = ds.map_or(2, |s| s.archetype.column_count().min(16));
+    let col_count = ds.map_or(2, |s| s.archetype.column_count());
     ui.horizontal_wrapped(|row| {
         for c in 0..col_count {
             let selected = cur_cols.contains(&c);
@@ -1133,20 +1171,28 @@ fn render_mv_filter_transform_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) 
                 if add_resp.clicked() {
                     let t = state.derived_title_draft.trim().to_owned();
                     let f = state.formula_draft.trim().to_owned();
-                    if from_edit && let Some(spec) = draft_spec.as_mut() {
-                        let mut next_d = derived.clone();
-                        next_d.push(DerivedColumnFormula::new(t, f));
-                        spec.kind = AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform {
-                            filter_formula: (!filter_formula.trim().is_empty()).then_some(filter_formula.clone()),
-                            target_archetype: target_arch,
-                            derived_columns: next_d,
-                        });
-                        intents.push_set_edit_params_draft(spec.clone());
-                    } else {
-                        state.derived_cols.push((t, f));
+                    match parse_formula(&f) {
+                        Ok(_) => {
+                            if from_edit && let Some(spec) = draft_spec.as_mut() {
+                                let mut next_d = derived.clone();
+                                next_d.push(DerivedColumnFormula::new(t, f));
+                                spec.kind = AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform {
+                                    filter_formula: (!filter_formula.trim().is_empty()).then_some(filter_formula.clone()),
+                                    target_archetype: target_arch,
+                                    derived_columns: next_d,
+                                });
+                                intents.push_set_edit_params_draft(spec.clone());
+                            } else {
+                                state.derived_cols.push((t, f));
+                            }
+                            state.derived_title_draft.clear();
+                            state.formula_draft.clear();
+                            state.validation_error = None;
+                        }
+                        Err(err) => {
+                            state.validation_error = Some(format!("Formula error: {err}"));
+                        }
                     }
-                    state.derived_title_draft.clear();
-                    state.formula_draft.clear();
                 }
             });
             if !derived.is_empty() {
@@ -1215,9 +1261,6 @@ fn render_mv_filter_transform_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) 
                         compare_variable: false,
                     });
                 }
-                if widgets::secondary_button(row, "Hook Constant").clicked() {
-                    state.hook_picker_open = !state.hook_picker_open;
-                }
             });
             let mut rebuild_synth = false;
             for pred in &mut state.filter_rows {
@@ -1277,7 +1320,7 @@ fn render_mv_filter_transform_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) 
                     state.standalone_selected_cols.clone()
                 };
                 ui.horizontal_wrapped(|row| {
-                    for c in 0..s.archetype.column_count().min(20) {
+                    for c in 0..s.archetype.column_count() {
                         let active = selected.contains(&c);
                         let cname = s.title_at(c);
                         let r = choice_pill(row, tokens, &cname, active, true);
@@ -2075,7 +2118,7 @@ fn render_transform_footer(ui: &mut Ui, cx: &mut TransformModalCtx<'_>, kind: Tr
     let meta = &mut *cx.meta;
     let intents = &mut *cx.intents;
     ui.horizontal(|footer| {
-        let cancel_lbl = tr_or_fallback(tokens.locale, "btn.cancel", "Cancel");
+        let cancel_lbl = tr(tokens.locale, "btn.cancel");
         let cancel_resp = widgets::secondary_button(footer, cancel_lbl);
         meta.record_modal_response(footer, &cancel_resp, FrameInspectEntryInput::modal("modal.cancel", "button", cancel_lbl, None, true));
         if cancel_resp.clicked() {
@@ -2087,7 +2130,7 @@ fn render_transform_footer(ui: &mut Ui, cx: &mut TransformModalCtx<'_>, kind: Tr
         }
 
         footer.with_layout(Layout::right_to_left(Align::Center), |rhs| {
-            let ok_lbl = tr_or_fallback(tokens.locale, "btn.ok", "OK");
+            let ok_lbl = tr(tokens.locale, "btn.ok");
             let can_ok = state.validation_error.is_none();
             let ok_resp = widgets::primary_button_enabled(rhs, ok_lbl, can_ok);
             meta.record_modal_response(rhs, &ok_resp, FrameInspectEntryInput::modal("modal.ok", "button", ok_lbl, None, can_ok));
@@ -2115,7 +2158,7 @@ fn render_transform_footer(ui: &mut Ui, cx: &mut TransformModalCtx<'_>, kind: Tr
             }
 
             if from_edit {
-                let apply_lbl = tr_or_fallback(tokens.locale, "btn.apply", "Apply");
+                let apply_lbl = tr(tokens.locale, "btn.apply");
                 let apply_resp = rhs.add_enabled(can_ok, egui::Button::new(apply_lbl));
                 meta.record_modal_response(rhs, &apply_resp, FrameInspectEntryInput::modal("modal.apply", "button", apply_lbl, None, can_ok));
                 if apply_resp.clicked() && commit_edit_transform_draft_if_needed(app, ds, kind, state, intents) {
@@ -2427,6 +2470,9 @@ pub fn render_exclude_with_reason_modal(
         state.synced_exclude_tag.clear();
         return TransformModalFrameReport::default();
     }
+    if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        intents.push_dialog_button("cancel");
+    }
 
     if state.synced_exclude_tag.is_empty() {
         state.synced_exclude_tag = app.canvas_dialogs.exclude_with_reason.reason_tag.clone();
@@ -2434,7 +2480,7 @@ pub fn render_exclude_with_reason_modal(
         state.exclude_note_draft = app.canvas_dialogs.exclude_with_reason.note.clone();
     }
 
-    let title = tr_or_fallback(tokens.locale, "w6.view.modal.exclude_with_reason", "Exclude with Reason");
+    let title = tr(tokens.locale, "w6.view.modal.exclude_with_reason");
     let vp = ctx.content_rect();
     let dlg_w = (vp.width() - 24.0).clamp(280.0, 460.0);
 
@@ -2502,14 +2548,14 @@ pub fn render_exclude_with_reason_modal(
 
         ui.add_space(8.0);
         ui.horizontal(|footer| {
-            let cancel_lbl = tr_or_fallback(tokens.locale, "btn.cancel", "Cancel");
+            let cancel_lbl = tr(tokens.locale, "btn.cancel");
             let cancel_resp = widgets::secondary_button(footer, cancel_lbl);
             meta.record_modal_response(footer, &cancel_resp, FrameInspectEntryInput::modal("modal.cancel", "button", cancel_lbl, None, true));
             if cancel_resp.clicked() {
                 intents.push_dialog_button("cancel");
             }
             footer.with_layout(Layout::right_to_left(Align::Center), |rhs| {
-                let ok_lbl = tr_or_fallback(tokens.locale, "btn.ok", "OK");
+                let ok_lbl = tr(tokens.locale, "btn.ok");
                 let can_ok = !state.exclude_reason_draft.trim().is_empty() && !app.canvas_dialogs.exclude_with_reason.coords.is_empty();
                 let ok_resp = widgets::primary_button_enabled(rhs, ok_lbl, can_ok);
                 meta.record_modal_response(rhs, &ok_resp, FrameInspectEntryInput::modal("modal.ok", "button", ok_lbl, None, can_ok));

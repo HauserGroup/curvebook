@@ -344,8 +344,9 @@ fn r15_gui_31_checkpoints_modal_creates_restores_and_deletes_checkpoints() -> Re
     driver.click_widget_id("menu.project.listCheckpoints")?;
     assert_eq!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::Checkpoints);
 
-    // 4. Restore checkpoint -> cell (0,0,0) reverts from 999.0 to 10.0.
+    // 4. Restore checkpoint (2-step inline confirm per FA-SEC18-11) -> cell (0,0,0) reverts from 999.0 to 10.0.
     driver.click_widget_id("checkpoints.restore.0")?;
+    driver.click_widget_id("checkpoints.restore.confirm.0")?;
     assert_eq!(driver.state().last_err, None);
     let ds = driver.state().app.document().data_sheet(&"ds-xy".into()).ok_or("missing ds-xy")?;
     let val = ds.cell(CellCoord::new(0, 0, 0)).map(|c| &c.value);

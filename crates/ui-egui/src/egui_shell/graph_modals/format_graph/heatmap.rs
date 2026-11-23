@@ -61,13 +61,15 @@ pub(super) fn render_fg_heatmap_color_mapping(ui: &mut Ui, state: &mut GraphModa
     ui.painter().rect_stroke(ramp_rect, CornerRadius::same(2), Stroke::new(1.0, gctx.tokens.border), StrokeKind::Inside);
 
     ui.add_space(6.0);
-    let rev_chk = ui.checkbox(&mut state.heatmap_reversed, "Reverse Colormap");
-    record_checkbox(ui, &rev_chk, gctx.meta, "format_graph.heatmap.reversed", "Reverse Colormap", state.heatmap_reversed);
+    let rev_lbl = tr(gctx.locale, "fg.heatmap.reverse");
+    let rev_chk = ui.checkbox(&mut state.heatmap_reversed, rev_lbl);
+    record_checkbox(ui, &rev_chk, gctx.meta, "format_graph.heatmap.reversed", rev_lbl, state.heatmap_reversed);
     if rev_chk.changed() {
         state.heatmap_color_dirty = true;
     }
-    let auto_chk = ui.checkbox(&mut state.heatmap_auto_range, "Automatic Domain Bounds");
-    record_checkbox(ui, &auto_chk, gctx.meta, "format_graph.heatmap.auto_range", "Automatic Domain Bounds", state.heatmap_auto_range);
+    let auto_lbl = tr(gctx.locale, "fg.heatmap.auto_bounds");
+    let auto_chk = ui.checkbox(&mut state.heatmap_auto_range, auto_lbl);
+    record_checkbox(ui, &auto_chk, gctx.meta, "format_graph.heatmap.auto_range", auto_lbl, state.heatmap_auto_range);
     if auto_chk.changed() {
         state.heatmap_color_dirty = true;
         if state.heatmap_auto_range {
@@ -110,8 +112,9 @@ pub(super) fn render_fg_heatmap_labels(ui: &mut Ui, state: &mut GraphModalEguiSt
     let mut next_fg = gctx.app.canvas_dialogs.format_graph.clone();
     let mut fg_dirty = false;
     let mut annotate = next_fg.heatmap_labels.annotate_cells;
-    let ann_chk = ui.checkbox(&mut annotate, "Show Numeric Cell Annotations");
-    record_checkbox(ui, &ann_chk, gctx.meta, "format_graph.heatmap.annotate_cells", "Show Numeric Cell Annotations", annotate);
+    let ann_lbl = tr(gctx.locale, "fg.heatmap.annotate_cells");
+    let ann_chk = ui.checkbox(&mut annotate, ann_lbl);
+    record_checkbox(ui, &ann_chk, gctx.meta, "format_graph.heatmap.annotate_cells", ann_lbl, annotate);
     if ann_chk.changed() {
         state.heatmap_annotate_cells = annotate;
         next_fg.heatmap_labels.annotate_cells = annotate;
@@ -186,7 +189,7 @@ pub(super) fn render_fg_heatmap_labels(ui: &mut Ui, state: &mut GraphModalEguiSt
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(gctx.body_w);
-        ui.label("Tick Angle:");
+        ui.label(tr(gctx.locale, "fg.heatmap.tick_angle"));
         for (lbl, deg, angle_variant) in [
             ("0 deg", 0.0_f64, HeatmapColumnLabelAngle::Horizontal0),
             ("45 deg", 45.0_f64, HeatmapColumnLabelAngle::Angled45),
