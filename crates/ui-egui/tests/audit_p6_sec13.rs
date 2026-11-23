@@ -829,14 +829,22 @@ fn fa_sec13_11_newcombe_wilson_enabled_for_reopened_2x2_contingency_with_odds_ra
 
     let mut app = UiApp::from_session(Session::from_document(doc));
     app.canvas_dialogs.open_edit_parameters(&app.document().clone(), &SheetId::from("res-cont"));
-    // Even after explicitly unchecking `attributable_risk` in the draft, `compute_odds_and_risk_ratios=true`
-    // must keep Newcombe-Wilson enabled (`FA-SEC13-11`).
+    // Reopening a 2x2 Contingency analysis with `compute_odds_and_risk_ratios=true` must initialize
+    // `contingency_attributable_risk_checked=true` and keep Newcombe-Wilson enabled immediately (`FA-SEC13-11`).
+    if !app.canvas_dialogs.edit_params.contingency_attributable_risk_checked {
+        return Err(String::from("expected attributable_risk initialized true on reopen when compute_odds_and_risk_ratios=true"));
+    }
+    let pred_reopen = evaluate_dialog_widget(&app.canvas_dialogs, app.document(), "edit.contingency.ci.newcombe_wilson");
+    if !pred_reopen.enabled {
+        return Err(format!("expected Newcombe-Wilson enabled on reopen when compute_odds_and_risk_ratios=true: pred={pred_reopen:?}"));
+    }
+
+    // Explicitly unchecking `attributable_risk` must disable Newcombe-Wilson (even while `odds_ratio` stays true).
     let _ = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "fields": { "edit.contingency.attributable_risk": false } }))
         .map_err(|e| format!("patch attributable_risk off: {e}"))?;
-
-    let pred = evaluate_dialog_widget(&app.canvas_dialogs, app.document(), "edit.contingency.ci.newcombe_wilson");
-    if !pred.enabled {
-        return Err(format!("expected Newcombe-Wilson enabled when odds_ratio=true on 2x2 table: pred={pred:?}"));
+    let pred_uncheck = evaluate_dialog_widget(&app.canvas_dialogs, app.document(), "edit.contingency.ci.newcombe_wilson");
+    if pred_uncheck.enabled {
+        return Err(format!("expected Newcombe-Wilson disabled after unchecking attributable_risk: pred={pred_uncheck:?}"));
     }
 
     // Disabling compute_odds_and_risk_ratios with attributable_risk=false disables Newcombe-Wilson.

@@ -121,18 +121,29 @@ fn fa_sec13_11_live_egui_shell_enables_newcombe_wilson_when_odds_ratio_active() 
 
     let mut app = UiApp::from_session(Session::from_document(doc));
     app.canvas_dialogs.open_edit_parameters(&app.document().clone(), &SheetId::from("res-cont"));
-    let _ = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "fields": { "edit.contingency.attributable_risk": false } }))
-        .map_err(|e| format!("patch attributable_risk off: {e}"))?;
 
+    // Immediately on reopen (`compute_odds_and_risk_ratios=true`), live `egui_shell` and
+    // `views/stat_params` must enable Newcombe-Wilson (`FA-SEC13-11` + `edit_params.rs:206`).
     let tree = inspect_ui_tree(&app, Some("dialog"), false);
     let node = find_widget(&tree, "edit.contingency.ci.newcombe_wilson")
         .ok_or_else(|| String::from("missing edit.contingency.ci.newcombe_wilson in live egui dialog tree"))?;
-    assert!(node.enabled, "live egui_shell must keep Newcombe-Wilson enabled when odds_ratio=true on 2x2 table: {node:?}");
+    assert!(node.enabled, "live egui_shell must enable Newcombe-Wilson on reopen when compute_odds_and_risk_ratios=true: {node:?}");
 
-    // Verify views/stat_params custom action matches parity too.
     let mut shards = ViewShardStates::default();
     let cycle = dispatch_custom_view_action(&mut app, &mut shards, "stat_params", "cycle_contingency_ci:arr")
         .map_err(|e| format!("stat_params cycle_contingency_ci:arr: {e}"))?;
     assert!(cycle.handled);
+
+    // Explicitly unchecking `attributable_risk` disables Newcombe-Wilson consistently across both surfaces (`R6`).
+    let _ = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "fields": { "edit.contingency.attributable_risk": false } }))
+        .map_err(|e| format!("patch attributable_risk off: {e}"))?;
+    let tree_off = inspect_ui_tree(&app, Some("dialog"), false);
+    let node_off = find_widget(&tree_off, "edit.contingency.ci.newcombe_wilson")
+        .ok_or_else(|| String::from("missing edit.contingency.ci.newcombe_wilson after uncheck"))?;
+    assert!(!node_off.enabled, "live egui_shell must disable Newcombe-Wilson when attributable_risk=false: {node_off:?}");
+    assert!(
+        dispatch_custom_view_action(&mut app, &mut shards, "stat_params", "cycle_contingency_ci:arr").is_err(),
+        "stat_params must disable Newcombe-Wilson when attributable_risk=false"
+    );
     Ok(())
 }

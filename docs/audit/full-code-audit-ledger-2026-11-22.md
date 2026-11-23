@@ -541,10 +541,10 @@ Every `S1` finding is release-blocking across security isolation, runtime stabil
 | Severity | Open | In Progress | Fixed & Verified | Total |
 |---|---:|---:|---:|---:|
 | `S1` (Release Blockers) | `0` | `0` | `24` | `24` |
-| `S2` (High-Impact Contracts, Solvers, UI & Gates) | `61` | `24` | `65` | `150` |
-| `S3` (Robustness, Schemas, Edge Cases & Hygiene) | `39` | `15` | `72` | `126` |
-| `S4` (Code Cleanliness, Docs & Test Hygiene) | `9` | `1` | `24` | `34` |
-| **Total** | **`109`** | **`40`** | **`185`** | **`334`** |
+| `S2` (High-Impact Contracts, Solvers, UI & Gates) | `58` | `3` | `89` | `150` |
+| `S3` (Robustness, Schemas, Edge Cases & Hygiene) | `33` | `6` | `87` | `126` |
+| `S4` (Code Cleanliness, Docs & Test Hygiene) | `7` | `2` | `25` | `34` |
+| **Total** | **`98`** | **`11`** | **`225`** | **`334`** |
 
 > **Pre-Wave-1 Audit Hygiene Pass (`FA-X3-06` Partial Unblock):** Relative-link conversion across `docs/audit/full-2026-11-22/*.md` cleared local home-path URIs so `cargo xtask secrets` unblocks on the working tree; `FA-X3-06` stays `OPEN` (`S2`) until Phase 9 addresses `xtask/src/{brands,cleanroom,ci}.rs` directory/policy parity.
 
@@ -559,11 +559,11 @@ Every `S1` finding is release-blocking across security isolation, runtime stabil
 | **Phase 3** | `SEC-04` (`04..14`), `SEC-05` (`05..13`), `SEC-06` (`01..11`), `SEC-07` (`01..16`), `SEC-08` (`01..12`) | `30 S2 / 21 S3 / 8 S4` | `0` | `0` | `59` | `59` | `FIXED_VERIFIED` | `664c3f1` (`stats-a`), `0474dd6` (`stats-b`), `942bf17` (`format`), `30dc153` (`fit-b`), `e85412f` (`fit-a`), `aeb6d3a` integrated `727/0` — `59/59` complete (`137/334` cumulative) |
 | **Phase 4** | `SEC-09` (`06..13`), `SEC-10` (`01..11`), `FA-X1-03` (Chart, Text, Publication & Raster DoS) | `12 S2 / 5 S3 / 3 S4` | `0` | `0` | `20` | `20` | `FIXED_VERIFIED` | `250977d` (`output`), `88304a7` (`chart`), integrated `356/0` across 62 runs + `schemas`/`brands`/`cleanroom`/`secrets` = 0 — `20/20` complete (`157/334` cumulative) |
 | **Phase 5** | `SEC-11` (`01..10`), `SEC-12` (`01..11`), `FA-X2-02..08` (Engine & Data-Fidelity Seams) | `11 S2 / 15 S3 / 2 S4` | `0` | `0` | `28` | `28` | `FIXED_VERIFIED` | `8813cfa` (`eng-core`), `3609fab` (`eng-cmd`), `c312d34`+`812f8b5` (`x2`), integrated `1404/0` across `187` runs + `commands`/`schemas`/`brands`/`cleanroom`/`secrets` = 0 — `28/28` complete (`185/334` cumulative) |
-| **Phase 6** | `SEC-13` (`02..14`), `SEC-14` (`01..05,07..13`), `SEC-15` (`01..15`) (UI Core, Dialogs, Views & i18n) | `24 S2 / 15 S3 / 1 S4` | `0` | `40` | `0` | `40` | `IN_PROGRESS` | `fix-p6-ui-core` (`SEC-13` + `control_io` `FA-SEC04-04`), `fix-p6-ui-dlg` (`SEC-14`), `fix-p6-ui-views` (`SEC-15`) |
-| **Phase 7** | `SEC-16` (`02..12`), `SEC-17` (`01..11`), `SEC-18` (`05..20`) (Egui Shell Chrome, Studio & Modals) | `16 S2 / 18 S3 / 4 S4` | `38` | `0` | `0` | `38` | `OPEN` | `L6` shell focus/shortcuts, RTL mirroring, studio & modal drafts |
+| **Phase 6** | `SEC-13` (`02..14`), `SEC-14` (`01..05,07..13`), `SEC-15` (`01..15`) (UI Core, Dialogs, Views & i18n) | `24 S2 / 15 S3 / 1 S4` | `0` | `0` | `40` | `40` | `FIXED_VERIFIED` | `45fb7e8` (`ui-core`), `f5c5c85` (`ui-dlg`), `d700163` (`ui-views`), integrated `601e67d` (`1379/0` across `174` runs + `ui-commands`/`commands`/`schemas`/`brands`/`cleanroom`/`secrets` = 0) — `40/40` complete (`225/334` cumulative) |
+| **Phase 7** | `SEC-16` (`02..12`), `SEC-17` (`01..11`), `SEC-18` (`05..20`) (Egui Shell Chrome, Studio & Modals) | `16 S2 / 18 S3 / 4 S4` | `27` | `11` | `0` | `38` | `IN_PROGRESS` | Stage 7.1 active: `fix-p7-shell-chrome` (`FA-SEC16-02..12`); Stage 7.2 (`SEC-17`, `SEC-18`) queued |
 | **Phase 8** | `SEC-19` (`01,04..11`), `SEC-20` (`04..10`), `SEC-21` (`01..07`), `FA-X1-02,05,06` | `16 S2 / 9 S3 / 1 S4` | `26` | `0` | `0` | `26` | `OPEN` | `L6`–`L7` tools, desktop/web/CLI/MCP parity & trust boundary seams |
 | **Phase 9** | `SEC-22` (`01..19`), `SEC-23` (`01..16`), `FA-X3-01..10` (Xtask Gates, Packaging & Test Integrity) | `29 S2 / 12 S3 / 4 S4` | `45` | `0` | `0` | `45` | `OPEN` | CI cache, scanners, packaging scripts, fail-closed tests (`FA-X3-06` full closure) |
-| **Total** | **All `26` Sections (`334` Unique Confirmed Findings)** | **`24 S1 / 150 S2 / 126 S3 / 34 S4`** | **`109`** | **`40`** | **`185`** | **`334`** | **`IN_PROGRESS`** | Integrated `812f8b5` (Phase 5 complete; Phase 6 active) |
+| **Total** | **All `26` Sections (`334` Unique Confirmed Findings)** | **`24 S1 / 150 S2 / 126 S3 / 34 S4`** | **`98`** | **`11`** | **`225`** | **`334`** | **`IN_PROGRESS`** | Integrated `601e67d` (Phase 6 complete; Phase 7 Stage 7.1 active) |
 
 ### 9.4 Wave 1.1 Worker Dispatch (`13 / 13` `FIXED_VERIFIED`)
 
@@ -616,15 +616,21 @@ Every `S1` finding is release-blocking across security isolation, runtime stabil
 | `fix-p5-eng-cmd` | `audit/fix-p5-eng-cmd` | `ver-p5-a` | `crates/engine/src/cmd/{table.rs,table/import.rs,graph.rs,layout.rs,analysis.rs}`, `crates/engine/tests/audit_p5_sec12.rs` (+ `#292`/`#295` test updates, `FA-SEC04-04` Engine CSV migration) | `FA-SEC12-01`..`FA-SEC12-11` (`11`: `2 S2 / 8 S3 / 1 S4`) | `FIXED_VERIFIED` | `3609fab` (author `20ea609b`) | `ver-p5-a` (`#298`): `288/0` `curvebook-engine` (`59` unit + `229` integration incl. `12/12` `audit_p5_sec12`) + Stage 5.1 integrated `3609fab`: `299/0` across `39` runs (`docs/commands.md` regenerated); `commands`/`schemas`/`brands`/`cleanroom`/`secrets` ok |
 | `fix-p5-x2` | `audit/fix-p5-x2` | `ver-p5-b` | `crates/{doc,transform,format,stats,fit,chart,engine}/**` + `crates/engine/tests/audit_p5_x2.rs` | `FA-X2-02`..`FA-X2-08` (`7`: `6 S2 / 1 S3`) | `FIXED_VERIFIED` | `c312d34` (author `3809cb1`) + `812f8b5` | `ver-p5-b` (`#308`): `1404/0` across `7` crates (`176` runs incl. `7/7` `audit_p5_x2`) + Phase 5 integrated `812f8b5`: `1404/0` across `187` runs; workspace `clippy` `0`, `commands`/`schemas`/`brands`/`cleanroom`/`secrets` ok |
 
-### 9.10 Active Phase 6 Worker Dispatch (`40` Findings — `IN_PROGRESS`)
+### 9.10 Phase 6 Worker Dispatch (`40 / 40` `FIXED_VERIFIED`)
 
 | Worker | Branch | Verifier | Owned Scope | Assigned IDs | Status | Merge Commit | Verified Tests |
 |---|---|---|---|---|---|---|---|
-| `fix-p6-ui-core` | `audit/fix-p6-ui-core` | `ver-p6-a` | `crates/ui-egui/src/{control_io,gui_actions,inspect,interaction,lib,modal_predicates,workspace_nav}.rs`, `crates/ui-egui/tests/audit_p6_sec13.rs` (+ `FA-SEC04-04` `control_io.rs` CSV export) | `FA-SEC13-02`..`FA-SEC13-14` (`13`: `8 S2 / 5 S3`) | `IN_PROGRESS` | - | - |
-| `fix-p6-ui-dlg` | `audit/fix-p6-ui-dlg` | `ver-p6-a` | `crates/ui-egui/src/{grid_view,dialogs_r9,power_wizard}.rs`, `crates/ui-egui/src/{menus,dialogs_canvas}/**`, `crates/ui-egui/src/egui_shell/stats_modals/{stat_params,factorial_mv}.rs`, `crates/doc/src/analysis.rs`, `crates/stats/src/multivariate.rs`, `crates/engine/src/{cmd/analysis,methods_report}.rs`, `crates/ui-egui/tests/audit_p6_sec14.rs` | `FA-SEC14-01`..`FA-SEC14-05`, `FA-SEC14-07`..`FA-SEC14-13` (`12`: `9 S2 / 3 S3`; `FA-SEC14-06` closed as duplicate of Wave 1 `FA-SEC19-02`) | `IN_PROGRESS` | - | - |
-| `fix-p6-ui-views` | `audit/fix-p6-ui-views` | `ver-p6-b` | `crates/ui-egui/src/{views,i18n}/**`, `crates/engine/src/cmd/table.rs` (`FA-SEC15-10` `region_id` unlink), `crates/ui-egui/tests/audit_p6_sec15.rs` | `FA-SEC15-01`..`FA-SEC15-15` (`15`: `7 S2 / 7 S3 / 1 S4`) | `IN_PROGRESS` | - | - |
+| `fix-p6-ui-core` | `audit/fix-p6-ui-core` | `ver-p6-a` | `crates/ui-egui/src/{control_io,gui_actions,inspect,interaction,lib,modal_predicates,workspace_nav}.rs`, `crates/ui-egui/tests/{grid_perf_s1,audit_p6_sec13}.rs` (+ `FA-SEC04-04` `control_io.rs` CSV export) | `FA-SEC13-02`..`FA-SEC13-14` (`13`: `8 S2 / 5 S3`) | `FIXED_VERIFIED` | `45fb7e8` (author `21fd614`) + `5b48f1a` + `601e67d` | `ver-p6-a` (`#336`/`#339`): `audit_p6_sec13` `14/0`, `--lib` `124/0` + integrated `601e67d` `1379/0` across `174` runs (`Session::execute_atomic_group` + `FA-SEC13-11` parity); `fmt`/`clippy`/`xtask` ok |
+| `fix-p6-ui-dlg` | `audit/fix-p6-ui-dlg` | `ver-p6-a` | `crates/ui-egui/src/{grid_view,dialogs_r9,power_wizard}.rs`, `crates/ui-egui/src/{menus,dialogs_canvas}/**`, `crates/ui-egui/src/egui_shell/stats_modals/{stat_params,factorial_mv}.rs`, `crates/doc/src/analysis.rs`, `crates/stats/src/multivariate.rs`, `crates/engine/src/{cmd/analysis,methods_report}.rs`, `crates/ui-egui/tests/audit_p6_sec14.rs` | `FA-SEC14-01`..`FA-SEC14-05`, `FA-SEC14-07`..`FA-SEC14-13` (`12`: `9 S2 / 3 S3`; `FA-SEC14-06` closed as duplicate of Wave 1 `FA-SEC19-02`) | `FIXED_VERIFIED` | `f5c5c85` (author `7cac965`) + `5b48f1a` | `ver-p6-a` (`#339`): `719/0` (`doc`/`stats`/`engine` `90` runs) + `audit_p6_sec14` `12/0`, `--lib` `122/0` + integrated `601e67d` `1379/0` across `174` runs; `fmt`/`clippy`/`xtask` ok |
+| `fix-p6-ui-views` | `audit/fix-p6-ui-views` | `ver-p6-b` | `crates/ui-egui/src/{views,i18n}/**`, `crates/doc/src/param_spellings.rs`, `crates/engine/src/cmd/table.rs` (`FA-SEC15-10` `region_id` unlink), `crates/ui-egui/tests/{audit_p6_sec15,i18n_theme,r10_human_wf_scaffold_smoke,rv_ledger_third_pass_ui}.rs` | `FA-SEC15-01`..`FA-SEC15-15` (`15`: `7 S2 / 7 S3 / 1 S4`) | `FIXED_VERIFIED` | `d700163` (author `abc0eba`) + `5b48f1a` + `83b7a52` + `cc87e27` | `ver-p6-b` (`#335`): `94/0` `doc`, `307/0` `engine`, `audit_p6_sec15` `15/0`, `152/0` across 5 targeted UI suites + integrated `601e67d` `1379/0` across `174` runs (`1128` files `xtask` ok) |
 
-### 9.11 Complete Finding-Level Remediation Tracker (`334 / 334` Unique Confirmed IDs)
+### 9.11 Active Phase 7 Stage 7.1 Worker Dispatch (`11` Findings — `IN_PROGRESS`)
+
+| Worker | Branch | Verifier | Owned Scope | Assigned IDs | Status | Merge Commit | Verified Tests |
+|---|---|---|---|---|---|---|---|
+| `fix-p7-shell-chrome` | `audit/fix-p7-shell-chrome` | `ver-p7-a` | `crates/ui-egui/src/egui_shell/{mod,brand,canvas_view,center_stage,command_palette,driver,fonts,inspect_bridge,leading_dock,rasterizer,status_footer,top_bar_fit,top_chrome,widgets}.rs`, `apps/curvebook/src/desktop_host.rs` (`insertImage` `sheet_id`), `crates/ui-egui/tests/audit_p7_sec16.rs` | `FA-SEC16-02`..`FA-SEC16-12` (`11`: `3 S2 / 6 S3 / 2 S4`; `FA-SEC16-01` closed as duplicate of Wave 1 `FA-SEC19-02`) | `IN_PROGRESS` | - | - |
+
+### 9.12 Complete Finding-Level Remediation Tracker (`334 / 334` Unique Confirmed IDs)
 
 | Finding ID | Sev | Section | Wave / Phase | Status | Worker / Branch | Merge Commit | Verified Tests & Notes |
 |---|---|---|---|---|---|---|---|
@@ -706,7 +712,7 @@ Every `S1` finding is release-blocking across security isolation, runtime stabil
 | `FA-SEC03-14` | `S4` | `SEC-03` | `Phase 2` | `FIXED_VERIFIED` | `fix-p2-transform` (`audit/fix-p2-transform`) | `089ae6f` (author `78043df8`) | `ver-p2-b` (`#241`): `423/0` (`transform` `147+1` + `engine` `275`); `fmt`/`clippy`/`check` + `xtask brands/cleanroom/secrets` ok |
 | `FA-SEC03-15` | `S4` | `SEC-03` | `Phase 2` | `FIXED_VERIFIED` | `fix-p2-transform` (`audit/fix-p2-transform`) | `089ae6f` (author `78043df8`) | `ver-p2-b` (`#241`): `423/0` (`transform` `147+1` + `engine` `275`); `fmt`/`clippy`/`check` + `xtask brands/cleanroom/secrets` ok |
 | `FA-SEC03-16` | `S4` | `SEC-03` | `Phase 2` | `FIXED_VERIFIED` | `fix-p2-transform` (`audit/fix-p2-transform`) | `089ae6f` (author `78043df8`) | `ver-p2-b` (`#241`): `423/0` (`transform` `147+1` + `engine` `275`); `fmt`/`clippy`/`check` + `xtask brands/cleanroom/secrets` ok |
-| `FA-SEC04-04` | `S2` | `SEC-04` | `Phase 3` | `FIXED_VERIFIED` | `fix-p3-format` (`audit/fix-p3-format`) | `942bf17` (`c89f3dce` + `aeb6d3a`) | `ver-p3-a` (`#274`): `152/0` `format` + `aeb6d3a` integrated `727/0` + Stage 5.1 Engine CSV `cmd/{analysis,table}` migrated to `try_export_result_*` (`3609fab`; remaining callers Phases 6/8) |
+| `FA-SEC04-04` | `S2` | `SEC-04` | `Phase 3` | `FIXED_VERIFIED` | `fix-p3-format` (`audit/fix-p3-format`) | `942bf17` (`c89f3dce` + `aeb6d3a`) | `ver-p3-a` (`#274`): `152/0` `format` + `aeb6d3a` integrated `727/0` + Stage 5.1 Engine CSV (`3609fab`) + Phase 6 UI `control_io.rs` (`45fb7e8`) migrated to `try_export_result_*` (remaining callers Phase 8) |
 | `FA-SEC04-05` | `S2` | `SEC-04` | `Phase 3` | `FIXED_VERIFIED` | `fix-p3-format` (`audit/fix-p3-format`) | `942bf17` (`c89f3dce` + `aeb6d3a`) | `ver-p3-a` (`#274`): `152/0` `format` + `aeb6d3a` integrated `727/0` (downstream CSV callers migrate Phases 5/6/8) |
 | `FA-SEC04-06` | `S2` | `SEC-04` | `Phase 3` | `FIXED_VERIFIED` | `fix-p3-format` (`audit/fix-p3-format`) | `942bf17` (`c89f3dce` + `aeb6d3a`) | `ver-p3-a` (`#274`): `152/0` `format` + `aeb6d3a` integrated `727/0` (downstream CSV callers migrate Phases 5/6/8) |
 | `FA-SEC04-07` | `S2` | `SEC-04` | `Phase 3` | `FIXED_VERIFIED` | `fix-p3-format` (`audit/fix-p3-format`) | `942bf17` (`c89f3dce` + `aeb6d3a`) | `ver-p3-a` (`#274`): `152/0` `format` + `aeb6d3a` integrated `727/0` (downstream CSV callers migrate Phases 5/6/8) |
@@ -813,49 +819,49 @@ Every `S1` finding is release-blocking across security isolation, runtime stabil
 | `FA-X2-08` | `S3` | `SEC-X2` | `Phase 5` | `FIXED_VERIFIED` | `fix-p5-x2` (`audit/fix-p5-x2`) | `c312d34` (author `3809cb1`) + `812f8b5` | `ver-p5-b` (`#308`): `1404/0` across `7` crates (`7/7` `audit_p5_x2`) + integrated `812f8b5` `1404/0` (`187` runs); `commands`/`schemas`/`brands`/`cleanroom`/`secrets` ok |
 | `FA-SEC11-10` | `S4` | `SEC-11` | `Phase 5` | `FIXED_VERIFIED` | `fix-p5-eng-core` (`audit/fix-p5-eng-core`) | `8813cfa` (author `4e9837c5`) | `ver-p5-a` (`#296`): `286/0` `engine` (`audit_p5_sec11`) + integrated `3609fab` `299/0`; `commands`/`schemas`/`brands`/`cleanroom`/`secrets` ok |
 | `FA-SEC12-11` | `S4` | `SEC-12` | `Phase 5` | `FIXED_VERIFIED` | `fix-p5-eng-cmd` (`audit/fix-p5-eng-cmd`) | `3609fab` (author `20ea609b`) | `ver-p5-a` (`#298`): `288/0` `engine` (`audit_p5_sec12`) + integrated `3609fab` `299/0` (`+ FA-SEC04-04` Engine CSV guard); `commands`/`schemas`/`brands`/`cleanroom`/`secrets` ok |
-| `FA-SEC13-02` | `S2` | `SEC-13` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-core` (`audit/fix-p6-ui-core`) | `-` | Phase 6 active fix (`+ FA-SEC04-04` `control_io.rs` CSV export) |
-| `FA-SEC13-03` | `S2` | `SEC-13` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-core` (`audit/fix-p6-ui-core`) | `-` | Phase 6 active fix (`+ FA-SEC04-04` `control_io.rs` CSV export) |
-| `FA-SEC13-06` | `S2` | `SEC-13` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-core` (`audit/fix-p6-ui-core`) | `-` | Phase 6 active fix (`+ FA-SEC04-04` `control_io.rs` CSV export) |
-| `FA-SEC13-07` | `S2` | `SEC-13` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-core` (`audit/fix-p6-ui-core`) | `-` | Phase 6 active fix (`+ FA-SEC04-04` `control_io.rs` CSV export) |
-| `FA-SEC13-08` | `S2` | `SEC-13` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-core` (`audit/fix-p6-ui-core`) | `-` | Phase 6 active fix (`+ FA-SEC04-04` `control_io.rs` CSV export) |
-| `FA-SEC13-09` | `S2` | `SEC-13` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-core` (`audit/fix-p6-ui-core`) | `-` | Phase 6 active fix (`+ FA-SEC04-04` `control_io.rs` CSV export) |
-| `FA-SEC13-13` | `S2` | `SEC-13` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-core` (`audit/fix-p6-ui-core`) | `-` | Phase 6 active fix (`+ FA-SEC04-04` `control_io.rs` CSV export) |
-| `FA-SEC13-14` | `S2` | `SEC-13` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-core` (`audit/fix-p6-ui-core`) | `-` | Phase 6 active fix (`+ FA-SEC04-04` `control_io.rs` CSV export) |
-| `FA-SEC14-01` | `S2` | `SEC-14` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-dlg` (`audit/fix-p6-ui-dlg`) | `-` | Phase 6 active fix |
-| `FA-SEC14-02` | `S2` | `SEC-14` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-dlg` (`audit/fix-p6-ui-dlg`) | `-` | Phase 6 active fix |
-| `FA-SEC14-03` | `S2` | `SEC-14` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-dlg` (`audit/fix-p6-ui-dlg`) | `-` | Phase 6 active fix |
-| `FA-SEC14-04` | `S2` | `SEC-14` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-dlg` (`audit/fix-p6-ui-dlg`) | `-` | Phase 6 active fix |
-| `FA-SEC14-05` | `S2` | `SEC-14` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-dlg` (`audit/fix-p6-ui-dlg`) | `-` | Phase 6 active fix |
-| `FA-SEC14-07` | `S2` | `SEC-14` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-dlg` (`audit/fix-p6-ui-dlg`) | `-` | Phase 6 active fix |
-| `FA-SEC14-09` | `S2` | `SEC-14` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-dlg` (`audit/fix-p6-ui-dlg`) | `-` | Phase 6 active fix |
-| `FA-SEC14-10` | `S2` | `SEC-14` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-dlg` (`audit/fix-p6-ui-dlg`) | `-` | Phase 6 active fix |
-| `FA-SEC14-13` | `S2` | `SEC-14` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-dlg` (`audit/fix-p6-ui-dlg`) | `-` | Phase 6 active fix |
-| `FA-SEC15-01` | `S2` | `SEC-15` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `-` | Phase 6 active fix |
-| `FA-SEC15-02` | `S2` | `SEC-15` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `-` | Phase 6 active fix |
-| `FA-SEC15-03` | `S2` | `SEC-15` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `-` | Phase 6 active fix |
-| `FA-SEC15-04` | `S2` | `SEC-15` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `-` | Phase 6 active fix |
-| `FA-SEC15-05` | `S2` | `SEC-15` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `-` | Phase 6 active fix |
-| `FA-SEC15-10` | `S2` | `SEC-15` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `-` | Phase 6 active fix |
-| `FA-SEC15-13` | `S2` | `SEC-15` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `-` | Phase 6 active fix |
-| `FA-SEC13-04` | `S3` | `SEC-13` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-core` (`audit/fix-p6-ui-core`) | `-` | Phase 6 active fix (`+ FA-SEC04-04` `control_io.rs` CSV export) |
-| `FA-SEC13-05` | `S3` | `SEC-13` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-core` (`audit/fix-p6-ui-core`) | `-` | Phase 6 active fix (`+ FA-SEC04-04` `control_io.rs` CSV export) |
-| `FA-SEC13-10` | `S3` | `SEC-13` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-core` (`audit/fix-p6-ui-core`) | `-` | Phase 6 active fix (`+ FA-SEC04-04` `control_io.rs` CSV export) |
-| `FA-SEC13-11` | `S3` | `SEC-13` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-core` (`audit/fix-p6-ui-core`) | `-` | Phase 6 active fix (`+ FA-SEC04-04` `control_io.rs` CSV export) |
-| `FA-SEC13-12` | `S3` | `SEC-13` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-core` (`audit/fix-p6-ui-core`) | `-` | Phase 6 active fix (`+ FA-SEC04-04` `control_io.rs` CSV export) |
-| `FA-SEC14-08` | `S3` | `SEC-14` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-dlg` (`audit/fix-p6-ui-dlg`) | `-` | Phase 6 active fix |
-| `FA-SEC14-11` | `S3` | `SEC-14` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-dlg` (`audit/fix-p6-ui-dlg`) | `-` | Phase 6 active fix |
-| `FA-SEC14-12` | `S3` | `SEC-14` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-dlg` (`audit/fix-p6-ui-dlg`) | `-` | Phase 6 active fix |
-| `FA-SEC15-06` | `S3` | `SEC-15` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `-` | Phase 6 active fix |
-| `FA-SEC15-07` | `S3` | `SEC-15` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `-` | Phase 6 active fix |
-| `FA-SEC15-08` | `S3` | `SEC-15` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `-` | Phase 6 active fix |
-| `FA-SEC15-09` | `S3` | `SEC-15` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `-` | Phase 6 active fix |
-| `FA-SEC15-11` | `S3` | `SEC-15` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `-` | Phase 6 active fix |
-| `FA-SEC15-12` | `S3` | `SEC-15` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `-` | Phase 6 active fix |
-| `FA-SEC15-14` | `S3` | `SEC-15` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `-` | Phase 6 active fix |
-| `FA-SEC15-15` | `S4` | `SEC-15` | `Phase 6` | `IN_PROGRESS` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `-` | Phase 6 active fix |
-| `FA-SEC16-02` | `S2` | `SEC-16` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC16-03` | `S2` | `SEC-16` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC16-04` | `S2` | `SEC-16` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
+| `FA-SEC13-02` | `S2` | `SEC-13` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-core` (`audit/fix-p6-ui-core`) | `45fb7e8` (author `21fd614`) + `5b48f1a` + `601e67d` | `ver-p6-a` (`#336`/`#339`): `audit_p6_sec13` `14/0`, `--lib` `124/0` + integrated `601e67d` `1379/0` (`174` runs, `+ FA-SEC04-04` CSV) |
+| `FA-SEC13-03` | `S2` | `SEC-13` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-core` (`audit/fix-p6-ui-core`) | `45fb7e8` (author `21fd614`) + `5b48f1a` + `601e67d` | `ver-p6-a` (`#336`/`#339`): `audit_p6_sec13` `14/0`, `--lib` `124/0` + integrated `601e67d` `1379/0` (`174` runs, `+ FA-SEC04-04` CSV) |
+| `FA-SEC13-06` | `S2` | `SEC-13` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-core` (`audit/fix-p6-ui-core`) | `45fb7e8` (author `21fd614`) + `5b48f1a` + `601e67d` | `ver-p6-a` (`#336`/`#339`): `audit_p6_sec13` `14/0`, `--lib` `124/0` + integrated `601e67d` `1379/0` (`174` runs, `+ FA-SEC04-04` CSV) |
+| `FA-SEC13-07` | `S2` | `SEC-13` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-core` (`audit/fix-p6-ui-core`) | `45fb7e8` (author `21fd614`) + `5b48f1a` + `601e67d` | `ver-p6-a` (`#336`/`#339`): `audit_p6_sec13` `14/0`, `--lib` `124/0` + integrated `601e67d` `1379/0` (`174` runs, `+ FA-SEC04-04` CSV) |
+| `FA-SEC13-08` | `S2` | `SEC-13` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-core` (`audit/fix-p6-ui-core`) | `45fb7e8` (author `21fd614`) + `5b48f1a` + `601e67d` | `ver-p6-a` (`#336`/`#339`): `audit_p6_sec13` `14/0`, `--lib` `124/0` + integrated `601e67d` `1379/0` (`174` runs, `+ FA-SEC04-04` CSV) |
+| `FA-SEC13-09` | `S2` | `SEC-13` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-core` (`audit/fix-p6-ui-core`) | `45fb7e8` (author `21fd614`) + `5b48f1a` + `601e67d` | `ver-p6-a` (`#336`/`#339`): `audit_p6_sec13` `14/0`, `--lib` `124/0` + integrated `601e67d` `1379/0` (`174` runs, `+ FA-SEC04-04` CSV) |
+| `FA-SEC13-13` | `S2` | `SEC-13` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-core` (`audit/fix-p6-ui-core`) | `45fb7e8` (author `21fd614`) + `5b48f1a` + `601e67d` | `ver-p6-a` (`#336`/`#339`): `audit_p6_sec13` `14/0`, `--lib` `124/0` + integrated `601e67d` `1379/0` (`174` runs, `+ FA-SEC04-04` CSV) |
+| `FA-SEC13-14` | `S2` | `SEC-13` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-core` (`audit/fix-p6-ui-core`) | `45fb7e8` (author `21fd614`) + `5b48f1a` + `601e67d` | `ver-p6-a` (`#336`/`#339`): `audit_p6_sec13` `14/0`, `--lib` `124/0` + integrated `601e67d` `1379/0` (`174` runs, `+ FA-SEC04-04` CSV) |
+| `FA-SEC14-01` | `S2` | `SEC-14` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-dlg` (`audit/fix-p6-ui-dlg`) | `f5c5c85` (author `7cac965`) + `5b48f1a` | `ver-p6-a` (`#339`): `719/0` `doc`/`stats`/`engine`, `audit_p6_sec14` `12/0` + integrated `601e67d` `1379/0` (`174` runs) |
+| `FA-SEC14-02` | `S2` | `SEC-14` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-dlg` (`audit/fix-p6-ui-dlg`) | `f5c5c85` (author `7cac965`) + `5b48f1a` | `ver-p6-a` (`#339`): `719/0` `doc`/`stats`/`engine`, `audit_p6_sec14` `12/0` + integrated `601e67d` `1379/0` (`174` runs) |
+| `FA-SEC14-03` | `S2` | `SEC-14` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-dlg` (`audit/fix-p6-ui-dlg`) | `f5c5c85` (author `7cac965`) + `5b48f1a` | `ver-p6-a` (`#339`): `719/0` `doc`/`stats`/`engine`, `audit_p6_sec14` `12/0` + integrated `601e67d` `1379/0` (`174` runs) |
+| `FA-SEC14-04` | `S2` | `SEC-14` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-dlg` (`audit/fix-p6-ui-dlg`) | `f5c5c85` (author `7cac965`) + `5b48f1a` | `ver-p6-a` (`#339`): `719/0` `doc`/`stats`/`engine`, `audit_p6_sec14` `12/0` + integrated `601e67d` `1379/0` (`174` runs) |
+| `FA-SEC14-05` | `S2` | `SEC-14` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-dlg` (`audit/fix-p6-ui-dlg`) | `f5c5c85` (author `7cac965`) + `5b48f1a` | `ver-p6-a` (`#339`): `719/0` `doc`/`stats`/`engine`, `audit_p6_sec14` `12/0` + integrated `601e67d` `1379/0` (`174` runs) |
+| `FA-SEC14-07` | `S2` | `SEC-14` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-dlg` (`audit/fix-p6-ui-dlg`) | `f5c5c85` (author `7cac965`) + `5b48f1a` | `ver-p6-a` (`#339`): `719/0` `doc`/`stats`/`engine`, `audit_p6_sec14` `12/0` + integrated `601e67d` `1379/0` (`174` runs) |
+| `FA-SEC14-09` | `S2` | `SEC-14` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-dlg` (`audit/fix-p6-ui-dlg`) | `f5c5c85` (author `7cac965`) + `5b48f1a` | `ver-p6-a` (`#339`): `719/0` `doc`/`stats`/`engine`, `audit_p6_sec14` `12/0` + integrated `601e67d` `1379/0` (`174` runs) |
+| `FA-SEC14-10` | `S2` | `SEC-14` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-dlg` (`audit/fix-p6-ui-dlg`) | `f5c5c85` (author `7cac965`) + `5b48f1a` | `ver-p6-a` (`#339`): `719/0` `doc`/`stats`/`engine`, `audit_p6_sec14` `12/0` + integrated `601e67d` `1379/0` (`174` runs) |
+| `FA-SEC14-13` | `S2` | `SEC-14` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-dlg` (`audit/fix-p6-ui-dlg`) | `f5c5c85` (author `7cac965`) + `5b48f1a` | `ver-p6-a` (`#339`): `719/0` `doc`/`stats`/`engine`, `audit_p6_sec14` `12/0` + integrated `601e67d` `1379/0` (`174` runs) |
+| `FA-SEC15-01` | `S2` | `SEC-15` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `d700163` (author `abc0eba`) + `5b48f1a`/`83b7a52`/`cc87e27` | `ver-p6-b` (`#335`): `audit_p6_sec15` `15/0`, `152/0` 5 UI suites + integrated `601e67d` `1379/0` (`174` runs) |
+| `FA-SEC15-02` | `S2` | `SEC-15` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `d700163` (author `abc0eba`) + `5b48f1a`/`83b7a52`/`cc87e27` | `ver-p6-b` (`#335`): `audit_p6_sec15` `15/0`, `152/0` 5 UI suites + integrated `601e67d` `1379/0` (`174` runs) |
+| `FA-SEC15-03` | `S2` | `SEC-15` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `d700163` (author `abc0eba`) + `5b48f1a`/`83b7a52`/`cc87e27` | `ver-p6-b` (`#335`): `audit_p6_sec15` `15/0`, `152/0` 5 UI suites + integrated `601e67d` `1379/0` (`174` runs) |
+| `FA-SEC15-04` | `S2` | `SEC-15` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `d700163` (author `abc0eba`) + `5b48f1a`/`83b7a52`/`cc87e27` | `ver-p6-b` (`#335`): `audit_p6_sec15` `15/0`, `152/0` 5 UI suites + integrated `601e67d` `1379/0` (`174` runs) |
+| `FA-SEC15-05` | `S2` | `SEC-15` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `d700163` (author `abc0eba`) + `5b48f1a`/`83b7a52`/`cc87e27` | `ver-p6-b` (`#335`): `audit_p6_sec15` `15/0`, `152/0` 5 UI suites + integrated `601e67d` `1379/0` (`174` runs) |
+| `FA-SEC15-10` | `S2` | `SEC-15` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `d700163` (author `abc0eba`) + `5b48f1a`/`83b7a52`/`cc87e27` | `ver-p6-b` (`#335`): `audit_p6_sec15` `15/0`, `152/0` 5 UI suites + integrated `601e67d` `1379/0` (`174` runs) |
+| `FA-SEC15-13` | `S2` | `SEC-15` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `d700163` (author `abc0eba`) + `5b48f1a`/`83b7a52`/`cc87e27` | `ver-p6-b` (`#335`): `audit_p6_sec15` `15/0`, `152/0` 5 UI suites + integrated `601e67d` `1379/0` (`174` runs) |
+| `FA-SEC13-04` | `S3` | `SEC-13` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-core` (`audit/fix-p6-ui-core`) | `45fb7e8` (author `21fd614`) + `5b48f1a` + `601e67d` | `ver-p6-a` (`#336`/`#339`): `audit_p6_sec13` `14/0`, `--lib` `124/0` + integrated `601e67d` `1379/0` (`174` runs, `+ FA-SEC04-04` CSV) |
+| `FA-SEC13-05` | `S3` | `SEC-13` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-core` (`audit/fix-p6-ui-core`) | `45fb7e8` (author `21fd614`) + `5b48f1a` + `601e67d` | `ver-p6-a` (`#336`/`#339`): `audit_p6_sec13` `14/0`, `--lib` `124/0` + integrated `601e67d` `1379/0` (`174` runs, `+ FA-SEC04-04` CSV) |
+| `FA-SEC13-10` | `S3` | `SEC-13` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-core` (`audit/fix-p6-ui-core`) | `45fb7e8` (author `21fd614`) + `5b48f1a` + `601e67d` | `ver-p6-a` (`#336`/`#339`): `audit_p6_sec13` `14/0`, `--lib` `124/0` + integrated `601e67d` `1379/0` (`174` runs, `+ FA-SEC04-04` CSV) |
+| `FA-SEC13-11` | `S3` | `SEC-13` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-core` (`audit/fix-p6-ui-core`) | `45fb7e8` (author `21fd614`) + `5b48f1a` + `601e67d` | `ver-p6-a` (`#336`/`#339`): `audit_p6_sec13` `14/0`, `--lib` `124/0` + integrated `601e67d` `1379/0` (`174` runs, `+ FA-SEC04-04` CSV) |
+| `FA-SEC13-12` | `S3` | `SEC-13` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-core` (`audit/fix-p6-ui-core`) | `45fb7e8` (author `21fd614`) + `5b48f1a` + `601e67d` | `ver-p6-a` (`#336`/`#339`): `audit_p6_sec13` `14/0`, `--lib` `124/0` + integrated `601e67d` `1379/0` (`174` runs, `+ FA-SEC04-04` CSV) |
+| `FA-SEC14-08` | `S3` | `SEC-14` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-dlg` (`audit/fix-p6-ui-dlg`) | `f5c5c85` (author `7cac965`) + `5b48f1a` | `ver-p6-a` (`#339`): `719/0` `doc`/`stats`/`engine`, `audit_p6_sec14` `12/0` + integrated `601e67d` `1379/0` (`174` runs) |
+| `FA-SEC14-11` | `S3` | `SEC-14` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-dlg` (`audit/fix-p6-ui-dlg`) | `f5c5c85` (author `7cac965`) + `5b48f1a` | `ver-p6-a` (`#339`): `719/0` `doc`/`stats`/`engine`, `audit_p6_sec14` `12/0` + integrated `601e67d` `1379/0` (`174` runs) |
+| `FA-SEC14-12` | `S3` | `SEC-14` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-dlg` (`audit/fix-p6-ui-dlg`) | `f5c5c85` (author `7cac965`) + `5b48f1a` | `ver-p6-a` (`#339`): `719/0` `doc`/`stats`/`engine`, `audit_p6_sec14` `12/0` + integrated `601e67d` `1379/0` (`174` runs) |
+| `FA-SEC15-06` | `S3` | `SEC-15` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `d700163` (author `abc0eba`) + `5b48f1a`/`83b7a52`/`cc87e27` | `ver-p6-b` (`#335`): `audit_p6_sec15` `15/0`, `152/0` 5 UI suites + integrated `601e67d` `1379/0` (`174` runs) |
+| `FA-SEC15-07` | `S3` | `SEC-15` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `d700163` (author `abc0eba`) + `5b48f1a`/`83b7a52`/`cc87e27` | `ver-p6-b` (`#335`): `audit_p6_sec15` `15/0`, `152/0` 5 UI suites + integrated `601e67d` `1379/0` (`174` runs) |
+| `FA-SEC15-08` | `S3` | `SEC-15` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `d700163` (author `abc0eba`) + `5b48f1a`/`83b7a52`/`cc87e27` | `ver-p6-b` (`#335`): `audit_p6_sec15` `15/0`, `152/0` 5 UI suites + integrated `601e67d` `1379/0` (`174` runs) |
+| `FA-SEC15-09` | `S3` | `SEC-15` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `d700163` (author `abc0eba`) + `5b48f1a`/`83b7a52`/`cc87e27` | `ver-p6-b` (`#335`): `audit_p6_sec15` `15/0`, `152/0` 5 UI suites + integrated `601e67d` `1379/0` (`174` runs) |
+| `FA-SEC15-11` | `S3` | `SEC-15` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `d700163` (author `abc0eba`) + `5b48f1a`/`83b7a52`/`cc87e27` | `ver-p6-b` (`#335`): `audit_p6_sec15` `15/0`, `152/0` 5 UI suites + integrated `601e67d` `1379/0` (`174` runs) |
+| `FA-SEC15-12` | `S3` | `SEC-15` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `d700163` (author `abc0eba`) + `5b48f1a`/`83b7a52`/`cc87e27` | `ver-p6-b` (`#335`): `audit_p6_sec15` `15/0`, `152/0` 5 UI suites + integrated `601e67d` `1379/0` (`174` runs) |
+| `FA-SEC15-14` | `S3` | `SEC-15` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `d700163` (author `abc0eba`) + `5b48f1a`/`83b7a52`/`cc87e27` | `ver-p6-b` (`#335`): `audit_p6_sec15` `15/0`, `152/0` 5 UI suites + integrated `601e67d` `1379/0` (`174` runs) |
+| `FA-SEC15-15` | `S4` | `SEC-15` | `Phase 6` | `FIXED_VERIFIED` | `fix-p6-ui-views` (`audit/fix-p6-ui-views`) | `d700163` (author `abc0eba`) + `5b48f1a`/`83b7a52`/`cc87e27` | `ver-p6-b` (`#335`): `audit_p6_sec15` `15/0`, `152/0` 5 UI suites + integrated `601e67d` `1379/0` (`174` runs) |
+| `FA-SEC16-02` | `S2` | `SEC-16` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `-` | Phase 7 Stage 7.1 active fix |
+| `FA-SEC16-03` | `S2` | `SEC-16` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `-` | Phase 7 Stage 7.1 active fix |
+| `FA-SEC16-04` | `S2` | `SEC-16` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `-` | Phase 7 Stage 7.1 active fix |
 | `FA-SEC17-01` | `S2` | `SEC-17` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
 | `FA-SEC17-02` | `S2` | `SEC-17` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
 | `FA-SEC17-03` | `S2` | `SEC-17` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
@@ -869,12 +875,12 @@ Every `S1` finding is release-blocking across security isolation, runtime stabil
 | `FA-SEC18-11` | `S2` | `SEC-18` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
 | `FA-SEC18-12` | `S2` | `SEC-18` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
 | `FA-SEC18-13` | `S2` | `SEC-18` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC16-05` | `S3` | `SEC-16` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC16-06` | `S3` | `SEC-16` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC16-07` | `S3` | `SEC-16` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC16-08` | `S3` | `SEC-16` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC16-09` | `S3` | `SEC-16` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC16-10` | `S3` | `SEC-16` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
+| `FA-SEC16-05` | `S3` | `SEC-16` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `-` | Phase 7 Stage 7.1 active fix |
+| `FA-SEC16-06` | `S3` | `SEC-16` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `-` | Phase 7 Stage 7.1 active fix |
+| `FA-SEC16-07` | `S3` | `SEC-16` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `-` | Phase 7 Stage 7.1 active fix |
+| `FA-SEC16-08` | `S3` | `SEC-16` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `-` | Phase 7 Stage 7.1 active fix |
+| `FA-SEC16-09` | `S3` | `SEC-16` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `-` | Phase 7 Stage 7.1 active fix |
+| `FA-SEC16-10` | `S3` | `SEC-16` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `-` | Phase 7 Stage 7.1 active fix |
 | `FA-SEC17-05` | `S3` | `SEC-17` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
 | `FA-SEC17-06` | `S3` | `SEC-17` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
 | `FA-SEC17-07` | `S3` | `SEC-17` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
@@ -887,8 +893,8 @@ Every `S1` finding is release-blocking across security isolation, runtime stabil
 | `FA-SEC18-17` | `S3` | `SEC-18` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
 | `FA-SEC18-18` | `S3` | `SEC-18` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
 | `FA-SEC18-19` | `S3` | `SEC-18` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC16-11` | `S4` | `SEC-16` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
-| `FA-SEC16-12` | `S4` | `SEC-16` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
+| `FA-SEC16-11` | `S4` | `SEC-16` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `-` | Phase 7 Stage 7.1 active fix |
+| `FA-SEC16-12` | `S4` | `SEC-16` | `Phase 7` | `IN_PROGRESS` | `fix-p7-shell-chrome` (`audit/fix-p7-shell-chrome`) | `-` | Phase 7 Stage 7.1 active fix |
 | `FA-SEC17-11` | `S4` | `SEC-17` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
 | `FA-SEC18-20` | `S4` | `SEC-18` | `Phase 7` | `OPEN` | - | `-` | Queued for Phase 7 |
 | `FA-SEC19-01` | `S2` | `SEC-19` | `Phase 8` | `OPEN` | - | `-` | Queued for Phase 8 |
