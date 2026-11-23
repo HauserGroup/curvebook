@@ -21,7 +21,7 @@ use std::time::Duration;
 use curvebook_platform::write_atomic;
 
 use sitemap::{GeneratedSite, assemble_site};
-use template::{SiteMeta, render_release_redirect_index};
+use template::{SiteMeta, render_release_redirect_index, render_root_redirect_shim};
 use verify::{parse_minor_dir_version, verify_site};
 
 const USAGE: &str = "usage: cargo xtask docs-site [--check] [--output <dir>] [--release <ver>]";
@@ -174,9 +174,29 @@ fn run_release_snapshot(root: &Path, version_raw: &str, check_after: bool) -> Re
     write_atomic(&manifest_path, format!("{manifest_str}\n").as_bytes()).map_err(|e| format!("write {}: {e}", manifest_path.display()))?;
 
     let versions = collect_snapshot_dirs(&root.join("docs/manual"))?;
-    let redirect_html = render_release_redirect_index(&minor_dir, &format!("v{clean_ver}"), &versions);
+    let ver_label = format!("v{clean_ver}");
+    let redirect_html = render_release_redirect_index(&minor_dir, &ver_label, &versions);
     let redirect_path = root.join("docs/manual/index.html");
     write_atomic(&redirect_path, redirect_html.as_bytes()).map_err(|e| format!("write docs/manual/index.html: {e}"))?;
+
+    let get_started_target = format!("manual/{minor_dir}/get-started.html");
+    let get_started_shim = render_root_redirect_shim(
+        "Get Started & Installation",
+        "Redirecting to CurveBook Get Started & Installation in the versioned reference manual.",
+        &get_started_target,
+        &ver_label,
+    );
+    write_atomic(&root.join("docs/get-started.html"), get_started_shim.as_bytes()).map_err(|e| format!("write docs/get-started.html: {e}"))?;
+
+    let troubleshooting_target = format!("manual/{minor_dir}/troubleshooting.html#known-issues");
+    let troubleshooting_shim = render_root_redirect_shim(
+        "Troubleshooting & Known Issues",
+        "Redirecting to CurveBook Troubleshooting & Known Issues in the versioned reference manual.",
+        &troubleshooting_target,
+        &ver_label,
+    );
+    write_atomic(&root.join("docs/troubleshooting.html"), troubleshooting_shim.as_bytes())
+        .map_err(|e| format!("write docs/troubleshooting.html: {e}"))?;
 
     if check_after {
         verify_site(root, &snap_dir, &site)?;

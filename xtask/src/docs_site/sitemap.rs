@@ -135,6 +135,11 @@ const CONTRIBUTOR_GITHUB_GUIDES: &[(&str, &str, &str)] = &[
     ),
     ("Licences & Third-Party Policy", "docs/licences.md", "Dual-licence policy, cargo-deny rules, and asset attribution gates."),
     ("Localization Architecture", "docs/localization.md", "Translation catalog conventions, ICU/number formatting, and locale testing."),
+    (
+        "CurveBook Design Language",
+        "docs/design-language.md",
+        "OKLab/OKLCH perceptual colour tokens, fixed scales, ActionRank priority hierarchy, and UI gates.",
+    ),
     ("CI Stages & Gates", "docs/ci.md", "Repository cargo xtask ci stage matrix, budgets, and compliance scanners."),
     (
         "Releasing & Snapshot Publication",
@@ -792,24 +797,39 @@ fn collect_glossary_az_entries(root: &Path) -> Vec<AzEntry> {
         .collect()
 }
 
+const HOME_SECTION_GROUPS: &[(&str, &str, &[&str])] = &[
+    ("group-start-here", "Start Here", &["get-started", "concepts"]),
+    ("group-scientific-reference", "Scientific & Graphing Reference", &["tables", "analyses", "fitting", "graphs", "qol"]),
+    ("group-files-automation-settings", "Files, Automation & Settings", &["files", "automation", "settings"]),
+    ("group-support-contribute", "Support & Contribute", &["privacy-security", "troubleshooting", "glossary", "contribute"]),
+];
+
 fn build_home_page(pages: &[PageItem]) -> PageItem {
     let mut body = String::with_capacity(8192);
     body.push_str("<p class=\"lead\">Complete static reference manual for CurveBook scientific tables, statistical methods, nonlinear regression, publication graphics, MCP/CLI automation, and contributor guides on GitHub.</p>\n");
-    body.push_str("<div class=\"section-grid\">\n");
-    for sec in BETA_SECTIONS {
-        let badge = if sec.id == "contribute" {
-            format!("{} GitHub guides", CONTRIBUTOR_GITHUB_GUIDES.len())
-        } else {
-            let count = pages.iter().filter(|p| p.section_id == sec.id).count();
-            format!("{count} pages")
-        };
-        let _ = writeln!(body, "  <section class=\"section-card\">");
-        let _ = writeln!(body, "    <h2><a href=\"{}\">{}</a></h2>", escape_html(sec.index_rel_path), escape_html(sec.title));
-        let _ = writeln!(body, "    <p>{}</p>", escape_html(sec.summary));
-        let _ = writeln!(body, "    <p><span class=\"badge\">{badge}</span></p>");
-        let _ = writeln!(body, "  </section>");
+    for &(group_id, group_title, section_ids) in HOME_SECTION_GROUPS {
+        let _ = writeln!(body, "<section class=\"section-group\" aria-labelledby=\"{group_id}\">");
+        let _ = writeln!(body, "  <h2 id=\"{group_id}\" tabindex=\"-1\">{}</h2>", escape_html(group_title));
+        body.push_str("  <div class=\"section-grid\">\n");
+        for &sec_id in section_ids {
+            let Some(sec) = section_by_id(sec_id) else {
+                continue;
+            };
+            let badge = if sec.id == "contribute" {
+                format!("{} GitHub guides", CONTRIBUTOR_GITHUB_GUIDES.len())
+            } else {
+                let count = pages.iter().filter(|p| p.section_id == sec.id).count();
+                format!("{count} pages")
+            };
+            let _ = writeln!(body, "    <section class=\"section-card\">");
+            let _ = writeln!(body, "      <h3><a href=\"{}\">{}</a></h3>", escape_html(sec.index_rel_path), escape_html(sec.title));
+            let _ = writeln!(body, "      <p>{}</p>", escape_html(sec.summary));
+            let _ = writeln!(body, "      <p><span class=\"badge\">{badge}</span></p>");
+            let _ = writeln!(body, "    </section>");
+        }
+        body.push_str("  </div>\n");
+        body.push_str("</section>\n");
     }
-    body.push_str("</div>\n");
 
     PageItem {
         rel_path: String::from("index.html"),

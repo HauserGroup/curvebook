@@ -30,7 +30,7 @@ use curvebook_ui_egui::dialogs_canvas::{ANALYSIS_CATALOG, GRAPH_TYPE_OPTIONS};
 use curvebook_ui_egui::i18n::LOCALES;
 use curvebook_ui_egui::menus::UI_COMMANDS;
 
-use super::markdown::{TocHeading, escape_html, github_slug};
+use super::markdown::{TocHeading, escape_html, github_slug, render_math_html};
 
 #[path = "../../../apps/curvebook-cli/src/cli_catalog.rs"]
 #[allow(dead_code)]
@@ -610,7 +610,7 @@ fn build_equations_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) 
         let heading = format!("{cat_title} ({})", cat_items.len());
         push_heading(&mut toc, &mut body, 2, cat_id, &heading);
 
-        body.push_str("<div class=\"table-wrap\"><table>\n<thead><tr><th>Equation ID</th><th>Name</th><th>Formula (TeX)</th><th>Parameters &amp; Default Bounds</th><th>Analytical Gradient &amp; Initial Guess</th></tr></thead>\n<tbody>\n");
+        body.push_str("<div class=\"table-wrap\"><table>\n<thead><tr><th>Equation ID</th><th>Name</th><th>Formula</th><th>TeX</th><th>Parameters &amp; Default Bounds</th><th>Analytical Gradient &amp; Initial Guess</th></tr></thead>\n<tbody>\n");
         for entry in cat_items {
             let anchor = format!("eq-{}", entry.id);
             expected.fit_equations.push(anchor.clone());
@@ -626,6 +626,7 @@ fn build_equations_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) 
             });
 
             let tex = format_model_equation_tex(&entry.id, None, &[], false, 4);
+            let rendered_formula = render_math_html(&tex);
             let mut param_summary = String::new();
             let mut grad_initial = String::from("central finite differences");
 
@@ -665,7 +666,7 @@ fn build_equations_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) 
 
             let _ = writeln!(
                 body,
-                "<tr id=\"{anchor}\" tabindex=\"-1\"><td><code>{}</code></td><td>{}</td><td><code>{}</code></td><td>{}</td><td>{}</td></tr>",
+                "<tr id=\"{anchor}\" tabindex=\"-1\"><td><code>{}</code></td><td>{}</td><td>{rendered_formula}</td><td><code>{}</code></td><td>{}</td><td>{}</td></tr>",
                 escape_html(&entry.id),
                 escape_html(&entry.name),
                 escape_html(&tex),
@@ -924,34 +925,46 @@ fn graph_kind_entries() -> Vec<(&'static str, &'static str, &'static str)> {
     kinds
         .into_iter()
         .map(|k| match k {
-            GraphKind::Xy => {
-                ("xy", "XY Scatter / Line / Fitted Curve", "Continuous X vs Y scatter, connected line, spline, area, and fitted curves.")
-            }
+            GraphKind::Xy => (
+                "xy",
+                "XY Scatter / Line / Fitted Curve",
+                "Continuous X vs Y scatter, connected lines, splines, area fills, spaghetti replicate trajectories, composite XY bars with series nudging, and decoupled subset-fit overlays.",
+            ),
             GraphKind::Column => (
                 "column",
                 "Column Bar / Box / Violin / Dot",
-                "One-way categorical comparisons with bar, box, violin, beeswarm, or paired before-after lines.",
+                "One-way vertical or horizontal categorical comparisons with bar, box, violin, raincloud, beeswarm, or paired before-after lines.",
             ),
-            GraphKind::Grouped => {
-                ("grouped", "Grouped Multi-Factor Figure", "Clustered, stacked, or superimposed two-factor/three-factor bar and point figures.")
-            }
-            GraphKind::Contingency => {
-                ("contingency", "Contingency Bar / Stacked Proportions", "Categorical count or percentage bars from contingency tables.")
-            }
-            GraphKind::PartsOfWhole => {
-                ("parts-of-whole", "Parts of Whole (Pie / Donut / Waffle)", "Pie, donut, stacked fraction bar, or 10x10 waffle chart.")
-            }
-            GraphKind::Survival => {
-                ("survival", "Kaplan–Meier Survival Curve", "Staircase survival trajectories with censoring ticks, CI bands, and risk tables.")
-            }
+            GraphKind::Grouped => (
+                "grouped",
+                "Grouped Multi-Factor Figure",
+                "Clustered, separated, stacked, or superimposed multi-factor vertical or horizontal (population pyramid) bar and point figures.",
+            ),
+            GraphKind::Contingency => (
+                "contingency",
+                "Contingency Bar / Stacked Proportions",
+                "Categorical count or percentage bars from contingency tables.",
+            ),
+            GraphKind::PartsOfWhole => (
+                "parts-of-whole",
+                "Parts of Whole (Pie / Donut / Waffle)",
+                "Pie, donut, stacked fraction bar, or 10x10 waffle chart.",
+            ),
+            GraphKind::Survival => (
+                "survival",
+                "Kaplan–Meier Survival Curve",
+                "Kaplan–Meier staircase or direct trajectories (survival % / cumulative event % / fraction) with censoring ticks, Greenwood SEM/95% CI bands, and risk tables.",
+            ),
             GraphKind::MultipleVariables => (
                 "multiple-variables",
                 "Multiple Variables Bubble / Matrix",
-                "Multivariate bubble scatter mapping continuous/categorical axes, colour, and size.",
+                "Multivariate bubble scatter or categorical summary mapping continuous/categorical axes, colour, size, hulls, and confidence ellipses.",
             ),
-            GraphKind::Diagnostic(DiagnosticPlotKind::Heatmap) => {
-                ("diagnostic-heatmap", "Diagnostic: Heatmap", "Color-mapped 2D matrix of correlations, expression values, or grouped means.")
-            }
+            GraphKind::Diagnostic(DiagnosticPlotKind::Heatmap) => (
+                "diagnostic-heatmap",
+                "Diagnostic: Heatmap",
+                "Color-mapped 2D matrix with configurable row/column label sources, 0°/45°/90° rotated column headers, cell annotations, and tile gaps.",
+            ),
             GraphKind::Diagnostic(DiagnosticPlotKind::Volcano) => {
                 ("diagnostic-volcano", "Diagnostic: Volcano Plot", "Effect fold-change or difference vs -log10(p) / -log10(q) significance.")
             }
@@ -963,9 +976,11 @@ fn graph_kind_entries() -> Vec<(&'static str, &'static str, &'static str)> {
             GraphKind::Diagnostic(DiagnosticPlotKind::RocCurve) => {
                 ("diagnostic-roc-curve", "Diagnostic: ROC Curve", "Sensitivity vs 1 - Specificity receiver operating characteristic curve.")
             }
-            GraphKind::Diagnostic(DiagnosticPlotKind::ForestPlot) => {
-                ("diagnostic-forest-plot", "Diagnostic: Forest Plot", "Horizontal confidence-interval effect-size, odds-ratio, or hazard-ratio plot.")
-            }
+            GraphKind::Diagnostic(DiagnosticPlotKind::ForestPlot) => (
+                "diagnostic-forest-plot",
+                "Diagnostic: Forest Plot",
+                "Horizontal effect-size, odds-ratio, or hazard-ratio plot from summary or study bounds with optional pooled summary diamond.",
+            ),
             GraphKind::Diagnostic(DiagnosticPlotKind::ResidualPlot) => {
                 ("diagnostic-residual-plot", "Diagnostic: Residual Plot", "Regression residuals vs predicted Y or X scatter diagnostic.")
             }
@@ -1082,6 +1097,45 @@ fn build_graphs_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) -> 
         );
     }
     body.push_str("</tbody>\n</table></div>\n");
+
+    push_heading(&mut toc, &mut body, 2, "graph-layout-features", "Graphing, Annotation & Page Layout Capabilities");
+    body.push_str(
+        "<p>See <a href=\"../graphs.html\">Graphs &amp; Page Layouts</a> for full engine command and workflow guidance across the features below:</p>\n",
+    );
+    body.push_str("<ul>\n");
+    for (title, detail) in [
+        (
+            "Composite XY, series nudging &amp; spaghetti trajectories",
+            "Mix <code>ScatterAndLine</code> and <code>BarWithReplicates</code> series on <code>Xy</code> graphs, shift series via <code>SeriesOffsetSpec</code> (<code>x_data</code>, <code>x_pt</code>, <code>y_pt</code>), trace longitudinal <code>IndividualReplicateTrajectories</code>, or set <code>show_raw_data: false</code> for decoupled subset-fit curve overlays.",
+        ),
+        (
+            "Horizontal orientation &amp; population pyramids",
+            "Set <code>CartesianOrientation::Horizontal</code> on <code>Column</code> and <code>Grouped</code> plots paired with <code>TickLabelFormat::AbsoluteDecimal</code> (<code>|x|</code>) for symmetric diverging pyramids.",
+        ),
+        (
+            "Kaplan–Meier modes &amp; Greenwood intervals",
+            "Select <code>SurvivalDisplayMetric</code> (<code>PercentSurvival</code>, <code>PercentCumulativeEvent</code>, <code>FractionSurvival</code>), toggle staircase vs. direct segments, and choose Greenwood <code>Sem</code> or <code>ConfidenceInterval95</code> error displays.",
+        ),
+        (
+            "Forest study bounds &amp; vertical-label heatmaps",
+            "Plot Forest study confidence intervals with optional pooled summary diamonds (<code>forest_show_pooled_diamond</code>), and configure <code>HeatmapLabelSpec</code> row/column label sources, <code>Horizontal0</code> / <code>Angled45</code> / <code>Vertical90</code> column rotation, cell annotations, and <code>cell_gap_pt</code>.",
+        ),
+        (
+            "Batch per-dataset creation &amp; selective style cloning",
+            "Create one graph sheet per dataset in one undo step (<code>one_per_data_set</code> on <code>graph.create</code>), and selectively clone palette, frame/axes, or error-bar/legend settings via <code>graph.applyStyleFrom</code>.",
+        ),
+        (
+            "Live rectangular tables, TeX equations &amp; embedded raster images",
+            "Place transposable row/column slices via <code>EmbeddedResultTable</code> and <code>LiveTable</code> (<code>selected_rows</code>, <code>selected_cols</code>, <code>EmbeddedTableStyle</code>), live <code>ModelEquation</code> TeX boxes, and content-addressed <code>EmbeddedImage</code> assets (<code>graph.insertImage</code>, <code>layout.insertImage</code>, <code>edit.pasteImage</code>).",
+        ),
+        (
+            "Page Layout scale equalization, Z-order &amp; inset layers",
+            "Equalize inner plot scaling across panels with <code>layout.equalizeScaling</code> (<code>MatchSmallest</code>, <code>MatchLargest</code>, <code>ExplicitPercent</code>), adjust panel depth with <code>layout.reorderPanel</code>, and layer transparent axis-free inset graphs.",
+        ),
+    ] {
+        let _ = writeln!(body, "  <li><strong>{title}:</strong> {detail}</li>");
+    }
+    body.push_str("</ul>\n");
 
     RegistryPageSpec {
         title: String::from("Graphs, Scales & Palettes Registry"),
