@@ -767,8 +767,7 @@ fn skip_leading_ascii_whitespace<R: BufRead>(reader: &mut R) -> io::Result<Optio
         if avail.is_empty() {
             return Ok(None);
         }
-        if let Some(pos) = avail.iter().position(|b| !b.is_ascii_whitespace()) {
-            let first = avail[pos];
+        if let Some((pos, &first)) = avail.iter().enumerate().find(|(_, b)| !b.is_ascii_whitespace()) {
             reader.consume(pos);
             return Ok(Some(first));
         }
@@ -912,7 +911,8 @@ fn read_exact_body<R: BufRead>(reader: &mut R, len: usize) -> io::Result<NextFra
             });
         }
         let take = avail.len().min(remaining).min(READ_CHUNK_BYTES);
-        body.extend_from_slice(&avail[..take]);
+        let chunk = avail.get(..take).ok_or_else(|| io::Error::other("short fill_buf slice"))?;
+        body.extend_from_slice(chunk);
         reader.consume(take);
     }
 
@@ -938,7 +938,9 @@ fn drain_oversized_content_length_frame<R: BufRead>(reader: &mut R, content_leng
         let take = avail.len().min(remaining).min(READ_CHUNK_BYTES);
         if sniff_prefix.len() < sniff_cap {
             let keep = take.min(sniff_cap - sniff_prefix.len());
-            sniff_prefix.extend_from_slice(&avail[..keep]);
+            if let Some(chunk) = avail.get(..keep) {
+                sniff_prefix.extend_from_slice(chunk);
+            }
         }
         reader.consume(take);
         drained += take;
@@ -967,12 +969,15 @@ fn read_line_bytes<R: BufRead>(reader: &mut R, max_bytes: usize) -> io::Result<R
             if buf.len().saturating_add(take) > max_bytes {
                 if buf.len() < sniff_cap {
                     let keep = take.min(sniff_cap - buf.len());
-                    buf.extend_from_slice(&avail[..keep]);
+                    if let Some(chunk) = avail.get(..keep) {
+                        buf.extend_from_slice(chunk);
+                    }
                 }
                 reader.consume(take);
                 return Ok(ReadLineOutcome::TooLong { id: extract_jsonrpc_id_prefix(&buf), looks_like_header: has_header_name_prefix(&buf) });
             }
-            buf.extend_from_slice(&avail[..take]);
+            let chunk = avail.get(..take).ok_or_else(|| io::Error::other("short fill_buf line slice"))?;
+            buf.extend_from_slice(chunk);
             reader.consume(take);
             return Ok(ReadLineOutcome::Line(buf));
         }
@@ -981,7 +986,9 @@ fn read_line_bytes<R: BufRead>(reader: &mut R, max_bytes: usize) -> io::Result<R
             let avail_len = avail.len();
             if buf.len() < sniff_cap {
                 let keep = avail_len.min(sniff_cap - buf.len());
-                buf.extend_from_slice(&avail[..keep]);
+                if let Some(chunk) = avail.get(..keep) {
+                    buf.extend_from_slice(chunk);
+                }
             }
             reader.consume(avail_len);
             if !drain_until_newline_bounded(reader, MAX_DRAIN_BYTES)? {
@@ -1072,7 +1079,10 @@ fn parse_jsonrpc_id_at(bytes: &[u8], start: usize) -> Value {
             if end == bytes.len() {
                 return Value::Null;
             }
-            match serde_json::from_slice::<Value>(&bytes[start..end]) {
+            let Some(num_bytes) = bytes.get(start..end) else {
+                return Value::Null;
+            };
+            match serde_json::from_slice::<Value>(num_bytes) {
                 Ok(v @ Value::Number(_)) => v,
                 _ => Value::Null,
             }
@@ -1093,7 +1103,8 @@ fn scan_json_string(bytes: &[u8], start: usize) -> Option<(String, usize)> {
         return None;
     }
     let end = scan_json_string_end(bytes, start)?;
-    let s: String = serde_json::from_slice(&bytes[start..end]).ok()?;
+    let slice = bytes.get(start..end)?;
+    let s: String = serde_json::from_slice(slice).ok()?;
     Some((s, end))
 }
 
@@ -1163,7 +1174,7 @@ fn has_header_name_prefix(bytes: &[u8]) -> bool {
     let Some(colon_pos) = trimmed.iter().position(|&b| b == b':') else {
         return false;
     };
-    colon_pos > 0 && trimmed[..colon_pos].iter().copied().all(is_http_token_byte)
+    colon_pos > 0 && trimmed.get(..colon_pos).is_some_and(|name| name.iter().copied().all(is_http_token_byte))
 }
 
 fn looks_like_header_line(bytes: &[u8]) -> bool {
@@ -1174,7 +1185,9 @@ fn looks_like_header_line(bytes: &[u8]) -> bool {
     if colon_pos == 0 {
         return false;
     }
-    let name = &trimmed[..colon_pos];
+    let Some(name) = trimmed.get(..colon_pos) else {
+        return false;
+    };
     if !name.iter().copied().all(is_http_token_byte) {
         return false;
     }
@@ -1189,10 +1202,22 @@ fn is_ascii_blank(bytes: &[u8]) -> bool {
     bytes.iter().all(u8::is_ascii_whitespace)
 }
 
-fn trim_ascii_whitespace(bytes: &[u8]) -> &[u8] {
-    let start = bytes.iter().position(|b| !b.is_ascii_whitespace()).unwrap_or(bytes.len());
-    let end = bytes.iter().rposition(|b| !b.is_ascii_whitespace()).map_or(start, |idx| idx + 1);
-    &bytes[start..end]
+fn trim_ascii_whitespace(mut bytes: &[u8]) -> &[u8] {
+    while let Some((&b, rest)) = bytes.split_first() {
+        if b.is_ascii_whitespace() {
+            bytes = rest;
+        } else {
+            break;
+        }
+    }
+    while let Some((&b, rest)) = bytes.split_last() {
+        if b.is_ascii_whitespace() {
+            bytes = rest;
+        } else {
+            break;
+        }
+    }
+    bytes
 }
 
 const fn is_http_token_byte(b: u8) -> bool {

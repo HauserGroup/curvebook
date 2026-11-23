@@ -83,19 +83,20 @@ fn call_tool_json(state: &mut McpServerState, id: u64, name: &str, args: Value) 
 }
 
 fn structured_error_code(resp: &Value) -> Option<String> {
-    if resp["result"]["isError"] != json!(true) {
+    if resp.pointer("/result/isError") != Some(&json!(true)) {
         return None;
     }
-    resp["result"]["structuredContent"]["code"].as_str().map(str::to_owned)
+    resp.pointer("/result/structuredContent/code").and_then(Value::as_str).map(str::to_owned)
 }
 
 fn result_payload_json(resp: &Value) -> Value {
-    assert_ne!(resp["result"]["isError"], json!(true), "unexpected error tool response: {resp}");
-    let sc = &resp["result"]["structuredContent"];
-    if !sc.is_null() {
+    assert_ne!(resp.pointer("/result/isError"), Some(&json!(true)), "unexpected error tool response: {resp}");
+    if let Some(sc) = resp.pointer("/result/structuredContent")
+        && !sc.is_null()
+    {
         return sc.clone();
     }
-    let text = resp["result"]["content"][0]["text"].as_str().expect("tool text content");
+    let text = resp.pointer("/result/content/0/text").and_then(Value::as_str).expect("tool text content");
     serde_json::from_str(text).expect("tool JSON content")
 }
 

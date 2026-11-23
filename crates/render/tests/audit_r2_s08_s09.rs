@@ -17,11 +17,15 @@ const EMR_CLOSEFIGURE: u32 = 61;
 const EMR_EXTTEXTOUTW: u32 = 84;
 
 fn read_u32_le(bytes: &[u8], off: usize) -> u32 {
-    u32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]])
+    let arr: Option<[u8; 4]> = bytes.get(off..off + 4).and_then(|s| s.try_into().ok());
+    assert!(arr.is_some(), "u32_le offset {off} out of bounds");
+    u32::from_le_bytes(arr.unwrap_or([0; 4]))
 }
 
 fn read_i32_le(bytes: &[u8], off: usize) -> i32 {
-    i32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]])
+    let arr: Option<[u8; 4]> = bytes.get(off..off + 4).and_then(|s| s.try_into().ok());
+    assert!(arr.is_some(), "i32_le offset {off} out of bounds");
+    i32::from_le_bytes(arr.unwrap_or([0; 4]))
 }
 
 fn collect_records(emf: &[u8]) -> Vec<(u32, usize)> {

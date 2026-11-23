@@ -252,20 +252,25 @@ pub fn sha256_bytes(data: &[u8]) -> [u8; 32] {
 
     let mut compress = |block: &[u8; 64]| {
         let mut w = [0u32; 64];
-        for i in 0..16 {
-            let base = i * 4;
-            w[i] = u32::from_be_bytes([block[base], block[base + 1], block[base + 2], block[base + 3]]);
+        let (word_chunks, _) = block.as_chunks::<4>();
+        for (slot, word) in w.iter_mut().zip(word_chunks) {
+            *slot = u32::from_be_bytes(*word);
         }
         for i in 16..64 {
-            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
+            let (Some(&w15), Some(&w2), Some(&w16), Some(&w7)) = (w.get(i - 15), w.get(i - 2), w.get(i - 16), w.get(i - 7)) else {
+                continue;
+            };
+            let s0 = w15.rotate_right(7) ^ w15.rotate_right(18) ^ (w15 >> 3);
+            let s1 = w2.rotate_right(17) ^ w2.rotate_right(19) ^ (w2 >> 10);
+            if let Some(slot) = w.get_mut(i) {
+                *slot = w16.wrapping_add(s0).wrapping_add(w7).wrapping_add(s1);
+            }
         }
         let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = state;
-        for i in 0..64 {
+        for (&ki, &wi) in K.iter().zip(w.iter()) {
             let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
             let ch = (e & f) ^ ((!e) & g);
-            let temp1 = h.wrapping_add(s1).wrapping_add(ch).wrapping_add(K[i]).wrapping_add(w[i]);
+            let temp1 = h.wrapping_add(s1).wrapping_add(ch).wrapping_add(ki).wrapping_add(wi);
             let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
             let maj = (a & b) ^ (a & c) ^ (b & c);
             let temp2 = s0.wrapping_add(maj);
@@ -290,23 +295,27 @@ pub fn sha256_bytes(data: &[u8]) -> [u8; 32] {
     }
     let bit_len = (data.len() as u64).wrapping_mul(8);
     let mut tail = [0u8; 128];
-    tail[..rem.len()].copy_from_slice(rem);
-    tail[rem.len()] = 0x80;
+    if let Some(dst) = tail.get_mut(..rem.len()) {
+        dst.copy_from_slice(rem);
+    }
+    if let Some(pad_byte) = tail.get_mut(rem.len()) {
+        *pad_byte = 0x80;
+    }
     let total_tail = if rem.len() < 56 { 64 } else { 128 };
-    tail[total_tail - 8..total_tail].copy_from_slice(&bit_len.to_be_bytes());
+    if let Some(len_slot) = tail.get_mut(total_tail - 8..total_tail) {
+        len_slot.copy_from_slice(&bit_len.to_be_bytes());
+    }
 
-    let mut b0 = [0u8; 64];
-    b0.copy_from_slice(&tail[..64]);
-    compress(&b0);
-    if total_tail == 128 {
-        let mut b1 = [0u8; 64];
-        b1.copy_from_slice(&tail[64..128]);
-        compress(&b1);
+    let (tail_blocks, _) = tail.as_chunks::<64>();
+    let tail_count = if total_tail == 128 { 2 } else { 1 };
+    for block in tail_blocks.iter().take(tail_count) {
+        compress(block);
     }
 
     let mut digest = [0u8; 32];
-    for (idx, word) in state.into_iter().enumerate() {
-        digest[idx * 4..idx * 4 + 4].copy_from_slice(&word.to_be_bytes());
+    let (digest_words, _) = digest.as_chunks_mut::<4>();
+    for (dst, word) in digest_words.iter_mut().zip(state) {
+        dst.copy_from_slice(&word.to_be_bytes());
     }
     digest
 }
@@ -337,16 +346,17 @@ mod serde_base64_bytes {
     const ENC_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        let enc = |idx: u32| -> char { ENC_TABLE.get((idx & 0x3F) as usize).copied().map(char::from).unwrap_or('=') };
         let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
         for chunk in bytes.chunks(3) {
             let b0 = chunk.first().copied().unwrap_or(0);
             let b1 = chunk.get(1).copied().unwrap_or(0);
             let b2 = chunk.get(2).copied().unwrap_or(0);
             let triple = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
-            out.push(char::from(ENC_TABLE[((triple >> 18) & 0x3F) as usize]));
-            out.push(char::from(ENC_TABLE[((triple >> 12) & 0x3F) as usize]));
-            out.push(if chunk.len() > 1 { char::from(ENC_TABLE[((triple >> 6) & 0x3F) as usize]) } else { '=' });
-            out.push(if chunk.len() > 2 { char::from(ENC_TABLE[(triple & 0x3F) as usize]) } else { '=' });
+            out.push(enc(triple >> 18));
+            out.push(enc(triple >> 12));
+            out.push(if chunk.len() > 1 { enc(triple >> 6) } else { '=' });
+            out.push(if chunk.len() > 2 { enc(triple) } else { '=' });
         }
         serializer.serialize_str(&out)
     }

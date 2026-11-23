@@ -448,8 +448,8 @@ fn lookup_pairs(pairs: &[AliasPair], key: &str) -> Option<&'static str> {
 
 fn lookup_tables(tables: &[&[&'static str]], key: &str) -> Option<&'static str> {
     for &table in tables {
-        if let Some(&canonical) = table.first()
-            && table[1..].contains(&key)
+        if let Some((&canonical, aliases)) = table.split_first()
+            && aliases.contains(&key)
         {
             return Some(canonical);
         }

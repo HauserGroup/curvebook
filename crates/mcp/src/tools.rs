@@ -1950,22 +1950,23 @@ pub(crate) fn optional_u32_bounded(args: &Map<String, Value>, key: &str, min: u3
 #[must_use]
 pub(crate) fn encode_base64(input: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let enc = |idx: u32| -> char { TABLE.get((idx & 0x3F) as usize).copied().map(char::from).unwrap_or('=') };
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
-        let b0 = chunk[0];
+        let b0 = chunk.first().copied().unwrap_or(0);
         let b1 = chunk.get(1).copied().unwrap_or(0);
         let b2 = chunk.get(2).copied().unwrap_or(0);
         let triple = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
 
-        out.push(char::from(TABLE[((triple >> 18) & 0x3F) as usize]));
-        out.push(char::from(TABLE[((triple >> 12) & 0x3F) as usize]));
+        out.push(enc(triple >> 18));
+        out.push(enc(triple >> 12));
         if chunk.len() > 1 {
-            out.push(char::from(TABLE[((triple >> 6) & 0x3F) as usize]));
+            out.push(enc(triple >> 6));
         } else {
             out.push('=');
         }
         if chunk.len() > 2 {
-            out.push(char::from(TABLE[(triple & 0x3F) as usize]));
+            out.push(enc(triple));
         } else {
             out.push('=');
         }
@@ -2591,7 +2592,8 @@ mod live_control {
                 if buf.len().saturating_add(take) > max_bytes {
                     return Err(format!("control response exceeds {max_bytes} bytes"));
                 }
-                buf.extend_from_slice(&avail[..take]);
+                let chunk = avail.get(..take).ok_or_else(|| String::from("short control read buffer"))?;
+                buf.extend_from_slice(chunk);
                 reader.consume(take);
                 return Ok(buf);
             }

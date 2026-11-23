@@ -19,6 +19,7 @@
 //! assert_eq!(sha256_hex(b"abc").len(), 64);
 //! ```
 #![forbid(unsafe_code)]
+#![allow(clippy::indexing_slicing)] // Dev-only test helper crate (FA-SEC23-03); string_slice remains denied.
 
 pub mod dd;
 pub mod metrics;

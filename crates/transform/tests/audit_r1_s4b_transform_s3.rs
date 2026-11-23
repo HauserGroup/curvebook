@@ -93,7 +93,10 @@ fn r1_s04_13_non_ascii_unexpected_char_reports_exact_span() {
         assert!(message.contains("unexpected character"), "expected unexpected-character message for `{formula}`, got: {message}");
         assert!(message.contains(expected_ch), "message `{message}` missing char `{expected_ch}` for `{formula}`");
         assert_eq!(position, expected_pos, "wrong byte span for `{formula}`");
-        assert!(formula[position..].starts_with(expected_ch), "span {position} does not point to `{expected_ch}` in `{formula}`");
+        assert!(
+            formula.get(position..).is_some_and(|tail| tail.starts_with(expected_ch)),
+            "span {position} does not point to `{expected_ch}` in `{formula}`"
+        );
     }
 
     let dollar_err = parse_formula("  = $€  ").unwrap_err();

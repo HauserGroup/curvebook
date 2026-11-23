@@ -212,7 +212,8 @@ fn truncate_csv_bytes(mut csv: String, max_bytes: usize) -> (String, bool) {
     while end > 0 && !csv.is_char_boundary(end) {
         end -= 1;
     }
-    if let Some(nl) = csv[..end].rfind('\n')
+    if let Some(prefix) = csv.get(..end)
+        && let Some(nl) = prefix.rfind('\n')
         && nl > 0
     {
         end = nl + 1;
@@ -265,7 +266,9 @@ pub(crate) fn slice_result_tabs_preview(tabs: &[ResultTab]) -> (Vec<ResultTab>, 
                 break;
             }
             remaining_cells -= take_cols;
-            out_rows.push(row[..take_cols].to_vec());
+            if let Some(row_slice) = row.get(..take_cols) {
+                out_rows.push(row_slice.to_vec());
+            }
             if let Some(lbl) = tab.row_labels.get(r_idx) {
                 out_row_labels.push(lbl.clone());
             }

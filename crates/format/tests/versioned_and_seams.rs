@@ -325,8 +325,9 @@ fn persisted_schemas_cover_all_five_draft_2020_12_formats() {
 }
 
 fn synthesize_legacy_archive_zip(doc: &ProjectDocument, kind: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let ds0 = doc.data_sheets.first().ok_or("missing primary data sheet")?;
     let doc_bytes = serde_json::to_vec_pretty(doc)?;
-    let csv_bytes = export_datasheet_to_csv(&doc.data_sheets[0], &CsvOptions::csv())?.into_bytes();
+    let csv_bytes = export_datasheet_to_csv(ds0, &CsvOptions::csv())?.into_bytes();
     let manifest = serde_json::json!({
         "format": "lumencraft-archive",
         "schema_version": CURRENT_SCHEMA_VERSION,
@@ -334,9 +335,9 @@ fn synthesize_legacy_archive_zip(doc: &ProjectDocument, kind: &str) -> Result<Ve
         "title": doc.title,
         "document_crc32": crc32fast::hash(&doc_bytes),
         "sheets": [{
-            "id": doc.data_sheets[0].id,
+            "id": ds0.id,
             "section": "Data",
-            "title": doc.data_sheets[0].title,
+            "title": ds0.title,
             "csv_path": "sheets/data-1.csv",
             "crc32": crc32fast::hash(&csv_bytes),
         }]

@@ -240,7 +240,9 @@ fn complete_orthonormal_columns(u: &mut DenseMatrix) {
         let mut best_rem_norm = -1.0_f64;
         for cand in 0..m {
             let mut vec_c = vec![0.0_f64; m];
-            vec_c[cand] = 1.0;
+            if let Some(slot) = vec_c.get_mut(cand) {
+                *slot = 1.0;
+            }
             orthogonalize_vec_against_prefix(u, col, &mut vec_c);
             let nrm = vec_norm2(&vec_c);
             if nrm > best_rem_norm {
@@ -252,8 +254,8 @@ fn complete_orthonormal_columns(u: &mut DenseMatrix) {
             }
         }
         let mut vec_c = vec![0.0_f64; m];
-        if best_basis < m {
-            vec_c[best_basis] = 1.0;
+        if let Some(slot) = vec_c.get_mut(best_basis) {
+            *slot = 1.0;
         }
         orthogonalize_vec_against_prefix(u, col, &mut vec_c);
         orthogonalize_vec_against_prefix(u, col, &mut vec_c);
@@ -338,8 +340,7 @@ impl Svd {
         let thresh = tol.unwrap_or_else(|| self.default_tol());
         let k = self.singular_values.len();
         let mut v_scaled = DenseMatrix::zeros(self.ncols, k)?;
-        for j in 0..k {
-            let s = self.singular_values[j];
+        for (j, &s) in self.singular_values.iter().enumerate() {
             if s > thresh {
                 let inv_s = 1.0 / s;
                 for r in 0..self.ncols {
@@ -361,9 +362,9 @@ impl Svd {
         let thresh = tol.unwrap_or_else(|| self.default_tol());
         let ut_b = self.u.t_matvec(b)?;
         let mut coeff = vec![0.0_f64; ut_b.len()];
-        for (j, (&s, &ub)) in self.singular_values.iter().zip(ut_b.iter()).enumerate() {
+        for (slot, (&s, &ub)) in coeff.iter_mut().zip(self.singular_values.iter().zip(ut_b.iter())) {
             if s > thresh {
-                coeff[j] = ub / s;
+                *slot = ub / s;
             }
         }
         let mut x = Vec::with_capacity(self.ncols);
@@ -382,8 +383,7 @@ impl Svd {
         let thresh = tol.unwrap_or_else(|| self.default_tol());
         let k = self.singular_values.len();
         let mut v_scaled = DenseMatrix::zeros(self.ncols, k)?;
-        for j in 0..k {
-            let s = self.singular_values[j];
+        for (j, &s) in self.singular_values.iter().enumerate() {
             if s > thresh {
                 let inv_s = 1.0 / s;
                 for r in 0..self.ncols {

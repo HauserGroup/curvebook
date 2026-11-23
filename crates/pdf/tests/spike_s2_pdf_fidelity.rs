@@ -31,29 +31,33 @@ fn parse_and_verify_pdf(bytes: &[u8]) -> Result<ParsedPdf, String> {
     assert!(bytes.ends_with(b"%%EOF\n"), "missing %%EOF\\n footer");
 
     let startxref_pos = rfind_subslice(bytes, b"startxref\n").ok_or("missing startxref")?;
-    let after_startxref = std::str::from_utf8(&bytes[startxref_pos + b"startxref\n".len()..]).map_err(|e| format!("ASCII startxref: {e}"))?;
+    let after_startxref = std::str::from_utf8(bytes.get(startxref_pos + b"startxref\n".len()..).ok_or("startxref tail")?)
+        .map_err(|e| format!("ASCII startxref: {e}"))?;
     let xref_offset_str = after_startxref.lines().next().ok_or("missing xref offset line")?.trim();
     let xref_offset: usize = xref_offset_str.parse().map_err(|e| format!("invalid xref offset: {e}"))?;
 
     assert!(xref_offset < startxref_pos, "xref offset out of bounds");
-    assert!(bytes[xref_offset..].starts_with(b"xref\n"), "xref offset does not point to xref\\n");
+    assert!(bytes.get(xref_offset..).is_some_and(|s| s.starts_with(b"xref\n")), "xref offset does not point to xref\\n");
 
-    let trailer_rel = find_subslice(&bytes[xref_offset..startxref_pos], b"trailer\n").ok_or("missing trailer after xref")?;
-    let xref_section = std::str::from_utf8(&bytes[xref_offset..xref_offset + trailer_rel]).map_err(|e| format!("ASCII xref table: {e}"))?;
-    let trailer_section = std::str::from_utf8(&bytes[xref_offset + trailer_rel..startxref_pos]).map_err(|e| format!("ASCII trailer: {e}"))?;
+    let xref_to_start = bytes.get(xref_offset..startxref_pos).ok_or("xref slice")?;
+    let trailer_rel = find_subslice(xref_to_start, b"trailer\n").ok_or("missing trailer after xref")?;
+    let xref_section = std::str::from_utf8(xref_to_start.get(..trailer_rel).ok_or("xref utf8")?).map_err(|e| format!("ASCII xref table: {e}"))?;
+    let trailer_section = std::str::from_utf8(xref_to_start.get(trailer_rel..).ok_or("trailer utf8")?).map_err(|e| format!("ASCII trailer: {e}"))?;
 
     let mut xref_lines = xref_section.lines();
     assert_eq!(xref_lines.next(), Some("xref"));
     let header_parts: Vec<&str> = xref_lines.next().ok_or("missing xref range line")?.split_whitespace().collect();
-    assert_eq!(header_parts.len(), 2);
-    assert_eq!(header_parts[0], "0");
-    let total_entries: usize = header_parts[1].parse().map_err(|e| format!("invalid xref count: {e}"))?;
+    let [zero, count_str] = header_parts.as_slice() else {
+        return Err(format!("unexpected xref range line: {header_parts:?}"));
+    };
+    assert_eq!(*zero, "0");
+    let total_entries: usize = count_str.parse().map_err(|e| format!("invalid xref count: {e}"))?;
 
     let mut xref_offsets = Vec::with_capacity(total_entries);
     for (idx, line) in xref_lines.enumerate() {
         assert_eq!(line.len(), 20 - 1, "each xref entry line before \\n must be 19 chars: `{line}`");
-        let off: usize = line[0..10].parse().map_err(|e| format!("10-digit xref offset: {e}"))?;
-        let generation: usize = line[11..16].parse().map_err(|e| format!("5-digit xref generation: {e}"))?;
+        let off: usize = line.get(0..10).ok_or("xref off slice")?.parse().map_err(|e| format!("10-digit xref offset: {e}"))?;
+        let generation: usize = line.get(11..16).ok_or("xref gen slice")?.parse().map_err(|e| format!("5-digit xref generation: {e}"))?;
         let kind = line.chars().nth(17).ok_or("xref f/n flag")?;
         if idx == 0 {
             assert_eq!((off, generation, kind), (0, 65535, 'f'));
@@ -73,18 +77,20 @@ fn parse_and_verify_pdf(bytes: &[u8]) -> Result<ParsedPdf, String> {
             continue;
         }
         let expected_prefix = format!("{obj_id} 0 obj\n");
-        assert!(bytes[off..].starts_with(expected_prefix.as_bytes()), "object {obj_id} missing `{expected_prefix}` at offset {off}");
-        let body_start = off + expected_prefix.len();
-        let endobj_rel = find_subslice(&bytes[body_start..xref_offset], b"endobj\n").ok_or("missing endobj\\n")?;
-        let body = &bytes[body_start..body_start + endobj_rel];
+        let obj_tail = bytes.get(off..xref_offset).ok_or("object range")?;
+        assert!(obj_tail.starts_with(expected_prefix.as_bytes()), "object {obj_id} missing `{expected_prefix}` at offset {off}");
+        let after_prefix = obj_tail.get(expected_prefix.len()..).ok_or("obj body range")?;
+        let endobj_rel = find_subslice(after_prefix, b"endobj\n").ok_or("missing endobj\\n")?;
+        let body = after_prefix.get(..endobj_rel).ok_or("obj body slice")?;
         objects.insert(obj_id, body.to_vec());
 
         if let Some(stream_rel) = find_subslice(body, b"\nstream\n") {
-            let dict_bytes = &body[..stream_rel];
+            let dict_bytes = body.get(..stream_rel).ok_or("dict slice")?;
             let dict_str = String::from_utf8_lossy(dict_bytes);
             let data_start = stream_rel + b"\nstream\n".len();
-            let endstream_rel = find_subslice(&body[data_start..], b"\nendstream").ok_or("missing \\nendstream")?;
-            let raw_stream = &body[data_start..data_start + endstream_rel];
+            let stream_tail = body.get(data_start..).ok_or("stream tail")?;
+            let endstream_rel = find_subslice(stream_tail, b"\nendstream").ok_or("missing \\nendstream")?;
+            let raw_stream = stream_tail.get(..endstream_rel).ok_or("raw stream slice")?;
 
             let declared_len = extract_pdf_int(&dict_str, "/Length ").ok_or("stream missing /Length")?;
             assert_eq!(raw_stream.len(), declared_len, "object {obj_id} /Length mismatch");
@@ -109,8 +115,7 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 fn extract_pdf_int(dict: &str, key: &str) -> Option<usize> {
-    let idx = dict.find(key)?;
-    let rest = &dict[idx + key.len()..];
+    let (_, rest) = dict.split_once(key)?;
     let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
     digits.parse().ok()
 }
@@ -244,20 +249,21 @@ fn verify_document_objects(parsed: &ParsedPdf) {
     assert!(parsed.trailer.contains("/Root 1 0 R"));
     assert!(parsed.trailer.contains("/Info 8 0 R"));
 
-    let catalog = String::from_utf8_lossy(&parsed.objects[&1]);
+    let obj_text = |id: usize| String::from_utf8_lossy(parsed.objects.get(&id).map(Vec::as_slice).unwrap_or(&[])).into_owned();
+    let catalog = obj_text(1);
     assert!(catalog.contains("/Type /Catalog"));
     assert!(catalog.contains("/Pages 2 0 R"));
 
-    let pages_obj = String::from_utf8_lossy(&parsed.objects[&2]);
+    let pages_obj = obj_text(2);
     assert!(pages_obj.contains("/Count 2"));
 
-    assert!(String::from_utf8_lossy(&parsed.objects[&3]).contains("/BaseFont /Helvetica /Encoding /WinAnsiEncoding"));
-    assert!(String::from_utf8_lossy(&parsed.objects[&4]).contains("/BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding"));
-    assert!(String::from_utf8_lossy(&parsed.objects[&5]).contains("/BaseFont /Helvetica-Oblique /Encoding /WinAnsiEncoding"));
-    assert!(String::from_utf8_lossy(&parsed.objects[&6]).contains("/BaseFont /Symbol >>"));
-    assert!(String::from_utf8_lossy(&parsed.objects[&7]).contains("/BaseFont /Helvetica-BoldOblique /Encoding /WinAnsiEncoding"));
+    assert!(obj_text(3).contains("/BaseFont /Helvetica /Encoding /WinAnsiEncoding"));
+    assert!(obj_text(4).contains("/BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding"));
+    assert!(obj_text(5).contains("/BaseFont /Helvetica-Oblique /Encoding /WinAnsiEncoding"));
+    assert!(obj_text(6).contains("/BaseFont /Symbol >>"));
+    assert!(obj_text(7).contains("/BaseFont /Helvetica-BoldOblique /Encoding /WinAnsiEncoding"));
 
-    let info = String::from_utf8_lossy(&parsed.objects[&8]);
+    let info = obj_text(8);
     assert!(info.contains("/Title <FEFF"));
     assert!(info.contains("/Creator (CurveBook Spike S2)"));
 

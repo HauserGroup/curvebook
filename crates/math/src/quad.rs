@@ -118,15 +118,17 @@ pub fn gauss_kronrod_15_panel<F: FnMut(f64) -> f64>(f: &mut F, a: f64, b: f64) -
     let mut res_kronrod = WGK_15[7] * f_center;
     let mut res_abs = WGK_15[7] * f_center.abs();
 
-    for j in 0..7 {
-        let absc = half * XGK_15[j];
+    for (j, (&xgk, &wgk)) in XGK_15.iter().zip(WGK_15.iter()).take(7).enumerate() {
+        let absc = half * xgk;
         let f1 = f(center - absc);
         let f2 = f(center + absc);
         let fsum = f1 + f2;
-        res_kronrod += WGK_15[j] * fsum;
-        res_abs += WGK_15[j] * (f1.abs() + f2.abs());
-        if j % 2 == 1 {
-            res_gauss += WG_7[j / 2] * fsum;
+        res_kronrod += wgk * fsum;
+        res_abs += wgk * (f1.abs() + f2.abs());
+        if j % 2 == 1
+            && let Some(&wg) = WG_7.get(j / 2)
+        {
+            res_gauss += wg * fsum;
         }
     }
 

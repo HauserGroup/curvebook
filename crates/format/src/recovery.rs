@@ -1857,7 +1857,8 @@ fn read_line_bytes_bounded(
         if line_buf.len().saturating_add(consume_len) > raw_line_cap {
             return Err(FormatError::Io(format!("journal `{JOURNAL_FILE_NAME}` line exceeds maximum line limit ({max_line_bytes} bytes)")));
         }
-        line_buf.extend_from_slice(&available[..consume_len]);
+        let chunk = available.get(..consume_len).ok_or_else(|| FormatError::Io(String::from("journal replay read exceeded buffer")))?;
+        line_buf.extend_from_slice(chunk);
         reader.consume(consume_len);
         if found_newline {
             break;
