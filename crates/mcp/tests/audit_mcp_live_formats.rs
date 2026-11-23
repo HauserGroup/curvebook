@@ -869,3 +869,73 @@ fn live_attach_export_writes_directly_without_base64_and_inline_decodes_base64()
     assert!(calls[2].get("path").is_none());
     Ok(())
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn da_06_02_live_attach_absolutizes_relative_paths_against_mcp_cwd() -> TestResult {
+    let cwd = std::env::current_dir().map_err(|err| format!("current_dir: {err}"))?;
+    let expected_save = cwd.join("relative_dir/out_project.curvebook");
+    let expected_export = cwd.join("relative_dir/out_figure.pdf");
+    let expected_font = cwd.join("relative_dir/custom_font.ttf");
+    let expected_shot = cwd.join("relative_dir/screen.png");
+
+    let captured: Arc<Mutex<Vec<(String, Value)>>> = Arc::new(Mutex::named("test.da_06_02.captured", Vec::new()));
+    let captured_clone = Arc::clone(&captured);
+
+    let mut state = McpServerState::with_control_port(49304)?.with_control_handler(move |method, params| {
+        if let Ok(mut guard) = captured_clone.lock_or_recover() {
+            guard.push((method.to_owned(), params.clone()));
+        }
+        match method {
+            "ping" => Ok(json!({ "pong": true, "gui_only": false })),
+            "engine.execute" => Ok(json!({ "mutated": false, "payload": {} })),
+            "doc.inspect" => Ok(json!({ "schema_version": 2, "counts": { "total": 1 } })),
+            "doc.export" => Ok(json!({
+                "exported": true,
+                "format": "pdf",
+                "sheet_id": "g-1",
+                "path": params.get("path").cloned().unwrap_or(Value::Null),
+                "bytes_written": 16,
+            })),
+            "ui.screenshot" => Ok(json!({
+                "format": "png",
+                "path": params.get("path").cloned().unwrap_or(Value::Null),
+                "data_base64": curvebook_platform::base64::encode(b"\x89PNG\r\n\x1a\n"),
+            })),
+            other => Err(format!("unexpected method {other}")),
+        }
+    });
+
+    // 1. save_file with relative path forwards cwd-absolutized path to desktop engine.execute.
+    let save_res = call_ok_json(&mut state, "save_file", json!({ "path": "relative_dir/out_project.curvebook" }))?;
+    assert_eq!(save_res.get("path").and_then(Value::as_str), Some(expected_save.to_string_lossy().as_ref()));
+
+    // 2. export with relative output_path & ttf_font forwards cwd-absolutized paths to desktop doc.export.
+    let export_res = call_ok_json(
+        &mut state,
+        "export",
+        json!({
+            "format": "pdf",
+            "sheet_id": "g-1",
+            "output_path": "relative_dir/out_figure.pdf",
+            "ttf_font": "relative_dir/custom_font.ttf"
+        }),
+    )?;
+    assert_eq!(export_res.get("path").and_then(Value::as_str), Some(expected_export.to_string_lossy().as_ref()));
+
+    // 3. ui_screenshot with relative path forwards cwd-absolutized path to desktop ui.screenshot.
+    let shot_res = call_ok_json(&mut state, "ui_screenshot", json!({ "path": "relative_dir/screen.png" }))?;
+    assert_eq!(shot_res.get("path").and_then(Value::as_str), Some(expected_shot.to_string_lossy().as_ref()));
+
+    let calls = captured.lock_or_recover().map_err(|err| format!("lock: {err}"))?;
+    let engine_exec = calls.iter().find(|(m, _)| m == "engine.execute").ok_or_else(|| String::from("missing engine.execute call"))?;
+    assert_eq!(engine_exec.1.pointer("/params/path").and_then(Value::as_str), Some(expected_save.to_string_lossy().as_ref()));
+
+    let doc_export = calls.iter().find(|(m, _)| m == "doc.export").ok_or_else(|| String::from("missing doc.export call"))?;
+    assert_eq!(doc_export.1.get("path").and_then(Value::as_str), Some(expected_export.to_string_lossy().as_ref()));
+    assert_eq!(doc_export.1.get("ttf_font").and_then(Value::as_str), Some(expected_font.to_string_lossy().as_ref()));
+
+    let shot_call = calls.iter().find(|(m, _)| m == "ui.screenshot").ok_or_else(|| String::from("missing ui.screenshot call"))?;
+    assert_eq!(shot_call.1.get("path").and_then(Value::as_str), Some(expected_shot.to_string_lossy().as_ref()));
+    Ok(())
+}

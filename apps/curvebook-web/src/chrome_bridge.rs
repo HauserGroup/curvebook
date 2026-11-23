@@ -1902,6 +1902,7 @@ impl WebCommandRoute {
                             && !has_non_null_path_param(params))
                 } else {
                     is_read_only_control_method(command_id)
+                        || (matches!(command_id.as_str(), "doc.export" | "render.pdf") && !has_non_null_path_param(params))
                 }
             }
         }
