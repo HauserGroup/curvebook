@@ -18,7 +18,8 @@ use super::inline_edit::{InlineTextEditSpec, begin_inline_edit, render_inline_te
 use super::mv_roles::render_mv_tier3_role_chip;
 use super::shared::{
     AuxInlineTarget, CORNER_TRIGGER_HEIGHT_PT, CellTextStyle, GridRenderCtx, MultiGridCtx, MultiGridFrameState, archetype_badge,
-    compute_visible_range, is_multi_click_edit, pressed_key_event_modifiers, record_meta_if_enabled, render_ellipsized_text, set_grid_focus_active,
+    compute_visible_range, is_multi_click_edit, pressed_key_event_modifiers, record_meta_if_enabled, record_meta_with_unclipped_if_enabled,
+    render_ellipsized_text, set_grid_focus_active,
 };
 use super::{ColumnGridEguiState, GridInlineEditTarget};
 
@@ -534,11 +535,12 @@ pub(super) fn render_column_headers_3tier(
                             ui.ctx().request_repaint();
                         }
                     }
-                    record_meta_if_enabled(
+                    record_meta_with_unclipped_if_enabled(
                         ui,
                         meta,
                         state.record_inspect_meta,
                         &r2_resp,
+                        r2_raw,
                         FrameInspectEntryInput {
                             widget_id: &format!("grid.col_title.{col}"),
                             role: "button",
@@ -969,7 +971,8 @@ fn render_multi_x_headers(hdr_ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut
         let sx_x0 = x_x0 + (sx as f32) * geom.subcol_w;
         let sx_x1 = sx_x0 + geom.subcol_w;
 
-        let t2_r = Rect::from_min_max(pos2(sx_x0, y2), pos2(sx_x1, y3)).intersect(hdr_rect);
+        let t2_raw = Rect::from_min_max(pos2(sx_x0, y2), pos2(sx_x1, y3));
+        let t2_r = t2_raw.intersect(hdr_rect);
         let x_title = x_column_title(&ds.archetype, sx);
         if t2_r.width() > 2.0 {
             let wid = format!("grid.x_title.{sx}");
@@ -986,11 +989,12 @@ fn render_multi_x_headers(hdr_ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut
             );
             let acc = format!("X Title: {x_title}");
             resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, x_title_editable, acc.clone()));
-            record_meta_if_enabled(
+            record_meta_with_unclipped_if_enabled(
                 hdr_ui,
                 fstate.meta,
                 fstate.state.record_inspect_meta,
                 &resp,
+                t2_raw,
                 FrameInspectEntryInput {
                     widget_id: &wid,
                     role: "button",
@@ -1088,7 +1092,8 @@ fn render_multi_data_col_headers(
             hdr_ui.painter().rect_filled(highlight_r, 0.0, tokens.accent.linear_multiply(0.14));
         }
 
-        let t1_r = Rect::from_min_max(pos2(cx0, y1), pos2(cx1, y2)).intersect(hdr_rect);
+        let t1_raw = Rect::from_min_max(pos2(cx0, y1), pos2(cx1, y2));
+        let t1_r = t1_raw.intersect(hdr_rect);
         let super_lbl = data_super_column_label(&ds.archetype, col);
         let col_factor = current_col_factor_title(&ds.archetype).map(str::to_owned);
         let col_factor_editable = !blocked && !ds.frozen && col_factor.is_some();
@@ -1119,11 +1124,12 @@ fn render_multi_data_col_headers(
                 let has_col_factor = col_factor.is_some();
                 let s_role = if has_col_factor { egui::Role::Button } else { egui::Role::Label };
                 s_resp.widget_info(move || WidgetInfo::labeled(s_role, !has_col_factor || col_factor_editable, acc_s.clone()));
-                record_meta_if_enabled(
+                record_meta_with_unclipped_if_enabled(
                     hdr_ui,
                     fstate.meta,
                     fstate.state.record_inspect_meta,
                     &s_resp,
+                    t1_raw,
                     FrameInspectEntryInput {
                         widget_id: &super_wid,
                         role: if has_col_factor { "button" } else { "label" },
@@ -1146,7 +1152,8 @@ fn render_multi_data_col_headers(
             }
         }
 
-        let t2_r = Rect::from_min_max(pos2(cx0, y2), pos2(cx1, y3)).intersect(hdr_rect);
+        let t2_raw = Rect::from_min_max(pos2(cx0, y2), pos2(cx1, y3));
+        let t2_r = t2_raw.intersect(hdr_rect);
         let col_title = data_column_title(&ds.archetype, col);
         if t2_r.width() > 4.0 && fstate.state.inline_edit.as_ref().is_none_or(|e| e.target != GridInlineEditTarget::ColumnTitle { col }) {
             let wid = format!("grid.col_title.{col}");
@@ -1166,11 +1173,12 @@ fn render_multi_data_col_headers(
             }
             let acc = col_title.clone();
             resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, col_editable, acc.clone()));
-            record_meta_if_enabled(
+            record_meta_with_unclipped_if_enabled(
                 hdr_ui,
                 fstate.meta,
                 fstate.state.record_inspect_meta,
                 &resp,
+                t2_raw,
                 FrameInspectEntryInput {
                     widget_id: &wid,
                     role: "button",
@@ -1198,9 +1206,10 @@ fn render_multi_data_col_headers(
 
         if let TableArchetype::MultipleVariables(mv) = &ds.archetype {
             if let Some(var) = mv.variables.get(col) {
-                let chip_r = Rect::from_min_max(pos2(cx0 + 2.0, y3 + 2.0), pos2(cx1 - 2.0, y4 - 2.0)).intersect(hdr_rect);
+                let chip_raw = Rect::from_min_max(pos2(cx0, y3), pos2(cx1, y4));
+                let chip_r = chip_raw.intersect(hdr_rect);
                 if chip_r.width() > 6.0 {
-                    render_mv_tier3_role_chip(hdr_ui, mctx, fstate, col, var, chip_r);
+                    render_mv_tier3_role_chip(hdr_ui, mctx, fstate, col, var, chip_r, chip_raw);
                 }
             }
         } else {
@@ -1231,7 +1240,8 @@ fn render_subcolumn_tier3_cells(
         #[allow(clippy::cast_precision_loss)]
         let sx0 = cx0 + (subcol as f32) * geom.subcol_w;
         let sx1 = sx0 + geom.subcol_w;
-        let t3_r = Rect::from_min_max(pos2(sx0, y3), pos2(sx1, y4)).intersect(hdr_rect);
+        let t3_raw = Rect::from_min_max(pos2(sx0, y3), pos2(sx1, y4));
+        let t3_r = t3_raw.intersect(hdr_rect);
         if t3_r.width() <= 2.0 {
             continue;
         }
@@ -1254,11 +1264,12 @@ fn render_subcolumn_tier3_cells(
         let role = if is_nested { egui::Role::Button } else { egui::Role::ColumnHeader };
         let role_str = if is_nested { "button" } else { "columnheader" };
         sresp.widget_info(move || WidgetInfo::labeled(role, !is_nested || sub_editable, acc_s.clone()));
-        record_meta_if_enabled(
+        record_meta_with_unclipped_if_enabled(
             hdr_ui,
             fstate.meta,
             fstate.state.record_inspect_meta,
             &sresp,
+            t3_raw,
             FrameInspectEntryInput {
                 widget_id: &swid,
                 role: role_str,

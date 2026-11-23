@@ -4,8 +4,8 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::{
-    assets, brands, citations, cleanroom, cmd_i18n_report, cmd_layers, cmd_test, cmd_wasm, cursors, has_cargo_nextest, licenses, pending, run_cargo,
-    run_cargo_strs, schemas, screenshots, secrets, status, telemetry, ui_commands, web_fonts, workflows,
+    assets, brands, citations, cleanroom, cmd_i18n_report, cmd_layers, cmd_test, cmd_wasm, cursors, design_tokens, has_cargo_nextest, licenses,
+    pending, run_cargo, run_cargo_strs, schemas, screenshots, secrets, status, telemetry, ui_commands, web_fonts, workflows,
 };
 #[cfg(feature = "full-gates")]
 use crate::{commands, docs_site};
@@ -148,6 +148,7 @@ pub(crate) fn policy(root: &Path, include_i18n: bool) -> Result<(), String> {
     brands::run(root)?;
     cleanroom::run(root)?;
     cursors::run(root)?;
+    design_tokens::run(root, &[])?;
     if include_i18n {
         cmd_i18n_report(root)?;
     }

@@ -1570,13 +1570,17 @@ fn render_layout_hud_overlays(
         }
 
         let wid = format!("canvas.layout_panel.{idx}");
+        let panel_label = format!("Layout Panel {badge}");
+        let panel_ak = panel_label.clone();
+        let panel_enabled = ctx_in.enabled;
+        p_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, panel_enabled, panel_ak.clone()));
         meta.record_response(
             ui,
             &p_resp,
             FrameInspectEntryInput {
                 widget_id: &wid,
                 role: "button",
-                label: &format!("Layout Panel {badge}"),
+                label: &panel_label,
                 command_id: None,
                 value: Some(json!({ "selected": selected, "x": bounds.x, "y": bounds.y })),
                 enabled: ctx_in.enabled,
@@ -1695,7 +1699,7 @@ fn render_layout_hud_overlays(
     let guides_to_draw = if !state.active_snap_guides.is_empty() { &state.active_snap_guides } else { &app.canvas_dialogs.canvas.active_snap_guides };
     report.snap_guide_count = guides_to_draw.len();
     for guide in guides_to_draw {
-        let col = if guide.source == SnapSource::PlotOrigin { Color32::from_rgb(220, 38, 38) } else { tokens.accent };
+        let col = if guide.source == SnapSource::PlotOrigin { tokens.error } else { tokens.accent };
         match guide.orientation {
             SnapOrientation::Vertical => {
                 let x = paper_rect.left() + (guide.position_pt as f32) * sx;
@@ -1982,7 +1986,7 @@ fn paint_canvas_grid_overlay(
     let spacing = spacing_pt.clamp(4.0, 200.0) as f32;
     let step_x = (spacing * paper_rect.width() / scene_w_pt.max(1.0)).max(6.0);
     let step_y = (spacing * paper_rect.height() / scene_h_pt.max(1.0)).max(6.0);
-    let col = Color32::from_rgba_unmultiplied(tokens.accent.r(), tokens.accent.g(), tokens.accent.b(), 48);
+    let col = crate::egui_shell::rgba8_to_color32(crate::egui_shell::color32_to_rgba8(tokens.accent).with_alpha(48));
     let stroke = Stroke::new(0.75, col);
 
     let mut x = paper_rect.left() + step_x;

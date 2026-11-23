@@ -1,17 +1,300 @@
-//! Interface color palette, polarity presets (`Light`, `Dark`, `HighContrast`), WCAG 2.1 AA
-//! contrast validation, and font registration hooks for the desktop and browser UI shell.
+//! Seed-derived OKLab/OKLCH interface colour palette (`ThemeSeeds`, `DerivedUiPalette`), polarity
+//! presets (`Light`, `Dark`, `HighContrast`), WCAG 2.2 AA/AAA contrast validation, and font
+//! registration hooks for the desktop and browser UI shell (`docs/design-language.md`).
 
-use curvebook_palette::Rgba8;
+use curvebook_palette::{Oklch, Rgba8, lerp_oklab, oklab_even_steps};
 use serde::{Deserialize, Serialize};
 
-/// Minimum WCAG 2.1 AA contrast ratio for normal-sized UI and grid text (`4.5:1`).
+/// Minimum WCAG 2.2 AA contrast ratio for normal-sized UI and grid text (`4.5:1`).
 pub const WCAG_AA_TEXT_MIN_RATIO: f64 = 4.5;
 
-/// Minimum WCAG 2.1 AA contrast ratio for non-text borders, focus rings, and UI controls (`3.0:1`).
+/// Minimum WCAG 2.2 AA contrast ratio for non-text borders, focus rings, and UI controls (`3.0:1`).
 pub const WCAG_AA_UI_MIN_RATIO: f64 = 3.0;
 
-/// Minimum WCAG 2.1 AAA contrast ratio for primary text (`7.0:1`).
+/// Minimum WCAG 2.2 AAA contrast ratio for primary text (`7.0:1`).
 pub const WCAG_AAA_TEXT_MIN_RATIO: f64 = 7.0;
+
+/// Canonical perceptual seeds from which all UI chrome, surface, state, and semantic tokens are
+/// generated as deterministic OKLab/OKLCH steps (`docs/design-language.md` §1–§2).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ThemeSeeds {
+    /// Cool-slate neutral seed (`c <= 0.01`) keeping chrome neutral so colour belongs to the data.
+    pub neutral: Oklch,
+    /// Restrained slate-indigo accent distinct from Okabe-Ito categorical series and Viridis ramps.
+    pub accent: Oklch,
+    /// Crimson seed for validation errors and broken external/internal data links.
+    pub error: Oklch,
+    /// Deep amber seed for assumption and clipping warnings.
+    pub warning: Oklch,
+    /// Olive-ochre seed for out-of-date/stale downstream results.
+    pub stale: Oklch,
+    /// Emerald hue (`deg`) for live-linked provenance borders and `FX=` formula badges.
+    pub provenance_green_hue_deg: f64,
+    /// Warm copper hue (`deg`) for categorical (`CAT`) variable-role badges.
+    pub role_cat_hue_deg: f64,
+}
+
+impl ThemeSeeds {
+    /// Canonical seed specification used across `Light`, `Dark`, and `HighContrast`.
+    pub const CANONICAL: Self = Self {
+        neutral: Oklch { l: 0.50, c: 0.008, h_deg: 255.0, alpha: 1.0 },
+        accent: Oklch { l: 0.45, c: 0.130, h_deg: 268.0, alpha: 1.0 },
+        error: Oklch { l: 0.46, c: 0.175, h_deg: 26.0, alpha: 1.0 },
+        warning: Oklch { l: 0.45, c: 0.115, h_deg: 62.0, alpha: 1.0 },
+        stale: Oklch { l: 0.45, c: 0.100, h_deg: 88.0, alpha: 1.0 },
+        provenance_green_hue_deg: 152.0,
+        role_cat_hue_deg: 46.0,
+    };
+}
+
+impl Default for ThemeSeeds {
+    fn default() -> Self {
+        Self::CANONICAL
+    }
+}
+
+/// Complete derived UI colour table generated in OKLab/OKLCH from [`ThemeSeeds`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DerivedUiPalette {
+    pub mode: UiThemeMode,
+    pub app_bar: Rgba8,
+    pub panel_bg: Rgba8,
+    pub surface_bg: Rgba8,
+    pub canvas_mat: Rgba8,
+    pub header_bg: Rgba8,
+    pub border: Rgba8,
+    pub divider: Rgba8,
+    pub hover_bg: Rgba8,
+    pub hover_border: Rgba8,
+    pub active_bg: Rgba8,
+    pub focus_ring: Rgba8,
+    pub input_bg: Rgba8,
+    pub input_border: Rgba8,
+    pub button_bg: Rgba8,
+    pub button_border: Rgba8,
+    pub text_primary: Rgba8,
+    pub text_strong: Rgba8,
+    pub text_muted: Rgba8,
+    pub text_disabled: Rgba8,
+    pub icon: Rgba8,
+    pub accent: Rgba8,
+    pub accent_strong: Rgba8,
+    pub accent_hover: Rgba8,
+    pub on_accent: Rgba8,
+    pub paper_white: Rgba8,
+    pub scrim: Rgba8,
+    pub error: Rgba8,
+    pub warning: Rgba8,
+    pub stale: Rgba8,
+    pub role_num: Rgba8,
+    pub role_cat: Rgba8,
+    pub role_lbl: Rgba8,
+    pub role_fx: Rgba8,
+    pub link_blue: Rgba8,
+    pub link_green: Rgba8,
+    pub link_red: Rgba8,
+    pub excluded_cell_text: Rgba8,
+}
+
+impl DerivedUiPalette {
+    /// Derive the full UI palette for `mode` from [`ThemeSeeds::CANONICAL`].
+    #[must_use]
+    pub fn for_mode(mode: UiThemeMode) -> Self {
+        Self::from_seeds(mode, ThemeSeeds::CANONICAL)
+    }
+
+    /// Derive the full UI palette for `mode` as deterministic OKLab/OKLCH steps from `seeds`.
+    #[must_use]
+    pub fn from_seeds(mode: UiThemeMode, seeds: ThemeSeeds) -> Self {
+        let nh = seeds.neutral.h_deg;
+        let nc = seeds.neutral.c;
+        let ah = seeds.accent.h_deg;
+        let ac = seeds.accent.c;
+
+        match mode {
+            UiThemeMode::Light => {
+                let dark_ink = Oklch::new(0.18, nc * 1.25, nh).to_rgba8_gamut_mapped();
+                let n = oklab_even_steps(dark_ink, Rgba8::WHITE, 17);
+                let panel_bg = lerp_oklab(n[15], n[16], 0.42);
+                let surface_bg = n[16];
+                let button_bg = lerp_oklab(n[15], n[16], 0.15);
+                let app_bar = n[15];
+                let accent = Oklch::new(0.45, ac, ah).to_rgba8_gamut_mapped();
+                let accent_strong = Oklch::new(0.42, ac * 1.05, ah).to_rgba8_gamut_mapped();
+                let accent_hover = Oklch::new(0.37, ac * 1.05, ah).to_rgba8_gamut_mapped();
+                let accent_wash = Oklch::new(0.83, ac * 0.48, ah).to_rgba8_gamut_mapped();
+                let hover_bg = lerp_oklab(n[13], accent_wash, 0.36);
+                let active_bg = lerp_oklab(n[12], accent_wash, 0.46);
+                let border = n[8];
+                let error = Oklch::new(0.45, seeds.error.c, seeds.error.h_deg).to_rgba8_gamut_mapped();
+                let warning = Oklch::new(0.45, seeds.warning.c, seeds.warning.h_deg).to_rgba8_gamut_mapped();
+                let stale = Oklch::new(0.45, seeds.stale.c, seeds.stale.h_deg).to_rgba8_gamut_mapped();
+                let link_green = Oklch::new(0.46, 0.125, seeds.provenance_green_hue_deg).to_rgba8_gamut_mapped();
+
+                Self {
+                    mode,
+                    app_bar,
+                    panel_bg,
+                    surface_bg,
+                    canvas_mat: app_bar,
+                    header_bg: app_bar,
+                    border,
+                    divider: n[14],
+                    hover_bg,
+                    hover_border: accent,
+                    active_bg,
+                    focus_ring: accent,
+                    input_bg: surface_bg,
+                    input_border: border,
+                    button_bg,
+                    button_border: n[7],
+                    text_primary: n[1],
+                    text_strong: n[0],
+                    text_muted: n[3],
+                    text_disabled: n[8],
+                    icon: n[2],
+                    accent,
+                    accent_strong,
+                    accent_hover,
+                    on_accent: Rgba8::WHITE,
+                    paper_white: Rgba8::WHITE,
+                    scrim: n[0].with_alpha(128),
+                    error,
+                    warning,
+                    stale,
+                    role_num: accent,
+                    role_cat: Oklch::new(0.48, 0.135, seeds.role_cat_hue_deg).to_rgba8_gamut_mapped(),
+                    role_lbl: n[4],
+                    role_fx: link_green,
+                    link_blue: accent,
+                    link_green,
+                    link_red: error,
+                    excluded_cell_text: accent,
+                }
+            }
+            UiThemeMode::Dark => {
+                let dark_base = Oklch::new(0.20, nc * 1.25, nh).to_rgba8_gamut_mapped();
+                let light_top = Oklch::new(0.97, nc * 0.50, nh).to_rgba8_gamut_mapped();
+                let n = oklab_even_steps(dark_base, light_top, 17);
+                let app_bar = n[0];
+                let panel_bg = n[1];
+                let surface_bg = n[2];
+                let header_bg = n[3];
+                let border = n[8];
+                let accent = Oklch::new(0.76, ac * 0.92, ah).to_rgba8_gamut_mapped();
+                let accent_strong = Oklch::new(0.45, ac * 1.05, ah).to_rgba8_gamut_mapped();
+                let accent_hover = Oklch::new(0.40, ac * 1.05, ah).to_rgba8_gamut_mapped();
+                let hover_tint = Oklch::new(0.44, ac * 0.55, ah).to_rgba8_gamut_mapped();
+                let active_tint = Oklch::new(0.41, ac * 0.65, ah).to_rgba8_gamut_mapped();
+                let hover_bg = lerp_oklab(n[5], hover_tint, 0.35);
+                let active_bg = lerp_oklab(n[4], active_tint, 0.45);
+                let error = Oklch::new(0.74, seeds.error.c * 0.85, seeds.error.h_deg).to_rgba8_gamut_mapped();
+                let warning = Oklch::new(0.78, seeds.warning.c * 1.05, seeds.warning.h_deg).to_rgba8_gamut_mapped();
+                let stale = Oklch::new(0.79, seeds.stale.c * 1.05, seeds.stale.h_deg).to_rgba8_gamut_mapped();
+                let link_green = Oklch::new(0.79, 0.135, seeds.provenance_green_hue_deg).to_rgba8_gamut_mapped();
+
+                Self {
+                    mode,
+                    app_bar,
+                    panel_bg,
+                    surface_bg,
+                    canvas_mat: lerp_oklab(n[0], n[1], 0.30),
+                    header_bg,
+                    border,
+                    divider: n[4],
+                    hover_bg,
+                    hover_border: accent,
+                    active_bg,
+                    focus_ring: accent,
+                    input_bg: app_bar,
+                    input_border: border,
+                    button_bg: header_bg,
+                    button_border: n[9],
+                    text_primary: n[15],
+                    text_strong: n[16],
+                    text_muted: n[14],
+                    text_disabled: n[8],
+                    icon: n[14],
+                    accent,
+                    accent_strong,
+                    accent_hover,
+                    on_accent: Rgba8::WHITE,
+                    paper_white: Rgba8::WHITE,
+                    scrim: n[0].with_alpha(148),
+                    error,
+                    warning,
+                    stale,
+                    role_num: accent,
+                    role_cat: Oklch::new(0.77, 0.135, seeds.role_cat_hue_deg).to_rgba8_gamut_mapped(),
+                    role_lbl: n[12],
+                    role_fx: link_green,
+                    link_blue: accent,
+                    link_green,
+                    link_red: error,
+                    excluded_cell_text: Oklch::new(0.81, ac * 0.78, ah).to_rgba8_gamut_mapped(),
+                }
+            }
+            UiThemeMode::HighContrast => {
+                let n = oklab_even_steps(Rgba8::BLACK, Rgba8::WHITE, 17);
+                let panel_bg = n[0];
+                let surface_bg = lerp_oklab(n[1], n[2], 0.35);
+                let border = n[14];
+                let accent = Oklch::new(0.85, ac * 0.85, ah).to_rgba8_gamut_mapped();
+                let accent_strong = Oklch::new(0.41, ac, ah).to_rgba8_gamut_mapped();
+                let accent_hover = Oklch::new(0.35, ac, ah).to_rgba8_gamut_mapped();
+                let hover_tint = Oklch::new(0.38, ac * 0.65, ah).to_rgba8_gamut_mapped();
+                let active_tint = Oklch::new(0.42, ac * 0.75, ah).to_rgba8_gamut_mapped();
+                let hover_bg = lerp_oklab(n[5], hover_tint, 0.40);
+                let active_bg = lerp_oklab(n[6], active_tint, 0.50);
+                let error = Oklch::new(0.83, seeds.error.c * 0.75, seeds.error.h_deg).to_rgba8_gamut_mapped();
+                let warning = Oklch::new(0.86, seeds.warning.c, seeds.warning.h_deg).to_rgba8_gamut_mapped();
+                let stale = Oklch::new(0.87, seeds.stale.c, seeds.stale.h_deg).to_rgba8_gamut_mapped();
+                let link_green = Oklch::new(0.86, 0.130, seeds.provenance_green_hue_deg).to_rgba8_gamut_mapped();
+
+                Self {
+                    mode,
+                    app_bar: panel_bg,
+                    panel_bg,
+                    surface_bg,
+                    canvas_mat: n[1],
+                    header_bg: n[3],
+                    border,
+                    divider: n[12],
+                    hover_bg,
+                    hover_border: accent,
+                    active_bg,
+                    focus_ring: accent,
+                    input_bg: panel_bg,
+                    input_border: border,
+                    button_bg: n[3],
+                    button_border: border,
+                    text_primary: Rgba8::WHITE,
+                    text_strong: Rgba8::WHITE,
+                    text_muted: n[15],
+                    text_disabled: n[12],
+                    icon: Rgba8::WHITE,
+                    accent,
+                    accent_strong,
+                    accent_hover,
+                    on_accent: Rgba8::WHITE,
+                    paper_white: Rgba8::WHITE,
+                    scrim: Rgba8::BLACK.with_alpha(176),
+                    error,
+                    warning,
+                    stale,
+                    role_num: accent,
+                    role_cat: Oklch::new(0.85, 0.125, seeds.role_cat_hue_deg).to_rgba8_gamut_mapped(),
+                    role_lbl: n[14],
+                    role_fx: link_green,
+                    link_blue: accent,
+                    link_green,
+                    link_red: error,
+                    excluded_cell_text: Oklch::new(0.88, ac * 0.70, ah).to_rgba8_gamut_mapped(),
+                }
+            }
+        }
+    }
+}
 
 /// Surface polarity preset for the CurveBook application shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -28,7 +311,7 @@ impl UiThemeMode {
 
     /// Construct the corresponding [`UiThemeSpec`] token palette for this mode.
     #[must_use]
-    pub const fn spec(self) -> UiThemeSpec {
+    pub fn spec(self) -> UiThemeSpec {
         UiThemeSpec::for_mode(self)
     }
 
@@ -41,6 +324,18 @@ impl UiThemeMode {
             Self::HighContrast => "theme.high_contrast",
         }
     }
+}
+
+fn default_light_error() -> Rgba8 {
+    DerivedUiPalette::for_mode(UiThemeMode::Light).error
+}
+
+fn default_light_warning() -> Rgba8 {
+    DerivedUiPalette::for_mode(UiThemeMode::Light).warning
+}
+
+fn default_light_stale() -> Rgba8 {
+    DerivedUiPalette::for_mode(UiThemeMode::Light).stale
 }
 
 /// Complete interface chrome, canvas paper, and sheet highlight color specification.
@@ -60,97 +355,65 @@ pub struct UiThemeSpec {
     pub accent: Rgba8,
     /// Crisp publication figure canvas background (kept white by default across all UI themes).
     pub paper_white: Rgba8,
-    /// Subtle structural border meeting WCAG 2.1 AA UI boundary contrast (`>= 3.0:1`).
+    /// Subtle structural border meeting WCAG 2.2 AA UI boundary contrast (`>= 3.0:1`).
     pub border: Rgba8,
     pub excluded_cell_text: Rgba8,
     pub link_blue: Rgba8,
     pub link_green: Rgba8,
     pub link_red: Rgba8,
+    #[serde(default = "default_light_error")]
+    pub error: Rgba8,
+    #[serde(default = "default_light_warning")]
+    pub warning: Rgba8,
+    #[serde(default = "default_light_stale")]
+    pub stale: Rgba8,
     pub ui_scale: f32,
 }
 
 impl UiThemeSpec {
-    /// Construct the canonical [`UiThemeSpec`] preset for `mode`.
+    /// Construct the canonical [`UiThemeSpec`] preset for `mode` from [`DerivedUiPalette`].
     #[must_use]
-    pub const fn for_mode(mode: UiThemeMode) -> Self {
-        match mode {
-            UiThemeMode::Light => Self::light(),
-            UiThemeMode::Dark => Self::dark(),
-            UiThemeMode::HighContrast => Self::high_contrast(),
+    pub fn for_mode(mode: UiThemeMode) -> Self {
+        let p = DerivedUiPalette::for_mode(mode);
+        Self {
+            mode,
+            bg: p.panel_bg,
+            surface: p.surface_bg,
+            panel_bg: p.panel_bg,
+            surface_bg: p.surface_bg,
+            text_primary: p.text_primary,
+            text_muted: p.text_muted,
+            accent: p.accent,
+            paper_white: p.paper_white,
+            border: p.border,
+            excluded_cell_text: p.excluded_cell_text,
+            link_blue: p.link_blue,
+            link_green: p.link_green,
+            link_red: p.link_red,
+            error: p.error,
+            warning: p.warning,
+            stale: p.stale,
+            ui_scale: 1.0,
         }
     }
 
     /// Light publication studio preset (`WCAG AA` compliant chrome and crisp paper canvas).
     #[must_use]
-    pub const fn light() -> Self {
-        let bg = Rgba8::rgb(245, 246, 248);
-        let surface = Rgba8::WHITE;
-        Self {
-            mode: UiThemeMode::Light,
-            bg,
-            surface,
-            panel_bg: bg,
-            surface_bg: surface,
-            text_primary: Rgba8::rgb(24, 28, 36),
-            text_muted: Rgba8::rgb(70, 78, 92),
-            accent: Rgba8::rgb(29, 78, 216),
-            paper_white: Rgba8::WHITE,
-            border: Rgba8::rgb(132, 140, 154),
-            excluded_cell_text: Rgba8::rgb(29, 78, 216),
-            link_blue: Rgba8::rgb(29, 78, 216),
-            link_green: Rgba8::rgb(21, 128, 61),
-            link_red: Rgba8::rgb(185, 28, 28),
-            ui_scale: 1.0,
-        }
+    pub fn light() -> Self {
+        Self::for_mode(UiThemeMode::Light)
     }
 
     /// Dark laboratory workspace preset keeping `paper_white` crisp for publication figures.
     #[must_use]
-    pub const fn dark() -> Self {
-        let bg = Rgba8::rgb(24, 27, 33);
-        let surface = Rgba8::rgb(31, 35, 43);
-        Self {
-            mode: UiThemeMode::Dark,
-            bg,
-            surface,
-            panel_bg: bg,
-            surface_bg: surface,
-            text_primary: Rgba8::rgb(236, 240, 245),
-            text_muted: Rgba8::rgb(176, 186, 200),
-            accent: Rgba8::rgb(96, 165, 250),
-            paper_white: Rgba8::WHITE,
-            border: Rgba8::rgb(108, 118, 134),
-            excluded_cell_text: Rgba8::rgb(147, 197, 253),
-            link_blue: Rgba8::rgb(96, 165, 250),
-            link_green: Rgba8::rgb(74, 222, 128),
-            link_red: Rgba8::rgb(248, 113, 113),
-            ui_scale: 1.0,
-        }
+    pub fn dark() -> Self {
+        Self::for_mode(UiThemeMode::Dark)
     }
 
     /// High-contrast accessibility preset exceeding WCAG AAA primary text contrast (`>= 18:1`)
     /// while keeping `paper_white` crisp white for publication graph previews.
     #[must_use]
-    pub const fn high_contrast() -> Self {
-        let bg = Rgba8::BLACK;
-        let surface = Rgba8::rgb(12, 14, 18);
-        Self {
-            mode: UiThemeMode::HighContrast,
-            bg,
-            surface,
-            panel_bg: bg,
-            surface_bg: surface,
-            text_primary: Rgba8::WHITE,
-            text_muted: Rgba8::rgb(220, 228, 238),
-            accent: Rgba8::rgb(125, 211, 252),
-            paper_white: Rgba8::WHITE,
-            border: Rgba8::rgb(210, 218, 230),
-            excluded_cell_text: Rgba8::rgb(165, 243, 252),
-            link_blue: Rgba8::rgb(125, 211, 252),
-            link_green: Rgba8::rgb(134, 239, 172),
-            link_red: Rgba8::rgb(252, 165, 165),
-            ui_scale: 1.0,
-        }
+    pub fn high_contrast() -> Self {
+        Self::for_mode(UiThemeMode::HighContrast)
     }
 
     /// Contrast ratio of [`Self::text_primary`] against [`Self::surface`].
@@ -177,22 +440,27 @@ impl UiThemeSpec {
         wcag_contrast_ratio(self.accent, self.surface)
     }
 
-    /// Whether primary text, muted text, and accent colors meet WCAG 2.1 AA (`>= 4.5:1`) on both
-    /// [`Self::surface`] and [`Self::bg`].
+    /// Whether primary text, muted text, accent, and semantic status colors meet WCAG 2.2 AA
+    /// (`>= 4.5:1`) on both [`Self::surface`] and [`Self::bg`].
     #[must_use]
     pub fn meets_wcag_aa(&self) -> bool {
-        wcag_contrast_ratio(self.text_primary, self.surface) >= WCAG_AA_TEXT_MIN_RATIO
-            && wcag_contrast_ratio(self.text_primary, self.bg) >= WCAG_AA_TEXT_MIN_RATIO
-            && wcag_contrast_ratio(self.text_muted, self.surface) >= WCAG_AA_TEXT_MIN_RATIO
-            && wcag_contrast_ratio(self.text_muted, self.bg) >= WCAG_AA_TEXT_MIN_RATIO
-            && wcag_contrast_ratio(self.accent, self.surface) >= WCAG_AA_TEXT_MIN_RATIO
-            && wcag_contrast_ratio(self.accent, self.bg) >= WCAG_AA_TEXT_MIN_RATIO
+        [self.text_primary, self.text_muted, self.accent, self.error, self.warning, self.stale, self.link_blue, self.link_green, self.link_red]
+            .into_iter()
+            .all(|fg| fg.meets_wcag_aa(self.surface) && fg.meets_wcag_aa(self.bg))
     }
 
-    /// Whether structural UI borders meet WCAG 2.1 AA graphical contrast (`>= 3.0:1`).
+    /// Whether primary text, muted text, accent, and semantic status colors meet WCAG 2.2 AAA (`>= 7.0:1`).
+    #[must_use]
+    pub fn meets_wcag_aaa(&self) -> bool {
+        [self.text_primary, self.text_muted, self.accent, self.error, self.warning, self.stale]
+            .into_iter()
+            .all(|fg| fg.meets_wcag_aaa(self.surface) && fg.meets_wcag_aaa(self.bg))
+    }
+
+    /// Whether structural UI borders meet WCAG 2.2 AA graphical contrast (`>= 3.0:1`).
     #[must_use]
     pub fn meets_wcag_aa_borders(&self) -> bool {
-        wcag_contrast_ratio(self.border, self.surface) >= WCAG_AA_UI_MIN_RATIO && wcag_contrast_ratio(self.border, self.bg) >= WCAG_AA_UI_MIN_RATIO
+        self.border.meets_wcag_aa_large(self.surface) && self.border.meets_wcag_aa_large(self.bg)
     }
 
     /// Scale a base point size by a finite clamped `ui_scale` (`0.75..=3.0`).
@@ -210,7 +478,7 @@ impl Default for UiThemeSpec {
     }
 }
 
-/// Compute the WCAG 2.1 contrast ratio (`1.0..=21.0`) between two sRGB colors.
+/// Compute the WCAG 2.2 contrast ratio (`1.0..=21.0`) between two sRGB colors.
 #[must_use]
 pub fn wcag_contrast_ratio(foreground: Rgba8, background: Rgba8) -> f64 {
     foreground.contrast_ratio(background)
@@ -578,7 +846,7 @@ fn glyph_cmds_to_path(cmds: &[curvebook_text::GlyphOutlineCmd]) -> curvebook_cha
 mod tests {
     use curvebook_palette::Rgba8;
 
-    use super::{UiThemeMode, UiThemeSpec, WCAG_AA_TEXT_MIN_RATIO, WCAG_AAA_TEXT_MIN_RATIO, font_diagnostics, install_fonts, wcag_contrast_ratio};
+    use super::{UiThemeMode, UiThemeSpec, WCAG_AA_TEXT_MIN_RATIO, font_diagnostics, install_fonts, wcag_contrast_ratio};
 
     #[test]
     fn all_theme_presets_meet_wcag_aa_and_keep_paper_white() {
@@ -592,7 +860,24 @@ mod tests {
             assert!(spec.meets_wcag_aa(), "{mode:?} failed AA check");
             assert!(spec.meets_wcag_aa_borders(), "{mode:?} failed border AA check");
         }
-        assert!(UiThemeSpec::high_contrast().primary_text_contrast() >= WCAG_AAA_TEXT_MIN_RATIO);
+        let hc = UiThemeSpec::high_contrast();
+        assert!(hc.primary_text_contrast() >= 18.0, "HighContrast primary contrast {} < 18.0", hc.primary_text_contrast());
+        assert!(hc.meets_wcag_aaa(), "HighContrast failed AAA check");
+    }
+
+    #[test]
+    fn derived_palette_keeps_chrome_neutral_and_accent_distinct_from_okabe_ito_series() {
+        for mode in UiThemeMode::ALL {
+            let p = super::DerivedUiPalette::for_mode(mode);
+            for neutral in [p.panel_bg, p.surface_bg, p.app_bar, p.header_bg, p.divider, p.border] {
+                assert!(neutral.to_oklch().c <= 0.02, "{mode:?} chrome neutral {neutral:?} exceeded low-chroma cap");
+            }
+        }
+        let light_accent = super::DerivedUiPalette::for_mode(UiThemeMode::Light).accent.to_oklab();
+        for &series_color in curvebook_palette::OKABE_ITO {
+            let dist = light_accent.distance(series_color.to_oklab());
+            assert!(dist >= 0.05, "UI accent {light_accent:?} too close to Okabe-Ito series {series_color:?} (DeltaE_OK={dist:.4})");
+        }
     }
 
     #[test]

@@ -468,7 +468,7 @@ Prepended as Tab 1 whenever a classical analysis (`t`-Test, Multifactor ANOVA, K
 
 ```text
 +------------------------------------------------------------------------------------+
-| [Edit Params (Cmd+T)] | [= Tabular Results] [= Multiple Comparisons] [= Residuals] [< >]|
+| [Edit Params (Cmd+T)] | [= Tabular Results] [= Multiple Comparisons] [= Residuals] [⋯ +N]|
 +------------------------------------------------------------------------------------+
 | [!] Diagnostic Note: Group B has n=4; normality test has low power. [Open Interpret]|
 +------------------------------------------------------------------------------------+
@@ -479,7 +479,7 @@ Prepended as Tab 1 whenever a classical analysis (`t`-Test, Multifactor ANOVA, K
 +------------------------------------------------------------------------------------+
 ```
 
-- **Top Bar (`32 pt`):** Leading **`Edit Parameters (Cmd/Ctrl+T)`** pill + horizontal scrollable **Sub-Sheet Tab Strip** with `<` `>` overflow steppers and keyboard tab switching (`Ctrl+PageUp/PageDown`).
+- **Top Bar (`32 pt`):** Leading **`Edit Parameters (Cmd/Ctrl+T)`** pill + horizontal scrollable **Sub-Sheet Tab Strip** with a trailing **`⋯ +N` overflow menu** (shown only when tabs exceed available width) and keyboard tab switching (`Ctrl+PageUp/PageDown`).
 - **Two Semantic Sub-Tab Kinds (`ResultTabKind`):**
   1. *Inferential Report Tabs (`Tabular Results`, `ANOVA`, `Multiple Comparisons`, `Model Comparison`, `Diagnostics`):* Multi-column sectioned grids with bold collapsible section headers, exact $P$-values alongside summary stars, explicit `??? (ambiguous / wide)` markers with inline explanation callouts when profile-likelihood bounds do not close, and blank cells (never `0` or `NaN` text) when a survival curve has not reached median (`50%`) survival.
   2. *Plot-Ready Derived Data Matrix Tabs (`Residuals`, `Row Predictions`, `Interpolated Unknowns`, `PC Scores`, `Loadings`, `Distance Matrix`, `Clustered Data` with appended cluster-membership columns, `Number at Risk`):* Directly selectable as upstream sources for **`New Graph from Tab…`** or **`Chain Analysis…`** without copying data manually (rectangular range `Copy` -> live `EmbeddedResultTable` pasting joins on the **1.0** gate per `R13.4`).
@@ -590,7 +590,7 @@ Includes cross-jump buttons (`Change Graph Type…`, `Format Axes…`) plus `Can
 | `dock.navigator_w` | `240 pt` (`180–380 pt`) | Collapses to `36 pt` icon rail; auto-collapses below `760 pt` window width |
 | `dock.inspector_w` | `280 pt` (`220–420 pt`) | Collapses to `36 pt` icon rail; auto-collapses below `960 pt` window width |
 | `dock.splitter_w` | `4 pt` (`8 pt` hit slop) | Visual `1 pt` border line centered inside an `8 pt` pointer grab zone |
-| `grid.row_h` / `header_h` | `24 pt` / `20+24+20 pt` | Minimum interactive target `24 × 24 pt` (`>= 28 × 28 pt` on toolbar buttons) |
+| `grid.row_h` / `header_h` | `24 pt` / `24+24+24 pt` | Target size per WCAG 2.2 SC 2.5.8 (`24 × 24 pt`, or `24 pt` spacing circle on compact strips; `>= 28 × 28 pt` on toolbar buttons) |
 | `scroll.bar_thickness` | `10 pt` (`12 pt` hover) | Reserved gutter alongside content—**scrollbars must never overlap controls or row badges** |
 | `font.ui_body` / `ui_small` | `13 pt` / `11.5 pt` | System SFNT proportional family discovered via `fontdb` (`memmap` off) + CJK/deterministic SFNT symbol fallback chain (**Beta:** `14` LTR/CJK locales; **1.0:** + `4` RTL locales); zero bundled font binaries |
 | `font.grid_numeral` | `12.5 pt` tabular | Proportional tabular-lining or monospace SFNT so decimal points align vertically |
@@ -623,7 +623,7 @@ Per [`../../AGENTS.md`](../../AGENTS.md) (*Attributed VectorCraft GUI source reu
 Every desktop layout change in `crates/ui-egui` and `apps/curvebook` must pass (and browser `apps/curvebook-web` aligns post-Beta in [`R11.11`](../ROADMAP.md#r1111-migrate-browser-host-to-eframe-webrunner-10-gate) on **1.0**):
 
 1. **Pixel-to-Hit-Box & Phantom-Widget Gate (`verify_pixel_to_hit_box_parity`):** Every interactive node in AccessKit-backed `ui.inspect` (`FrameInspectMeta`) and `EguiHumanPathDriver` / `egui_kittest` has non-zero visible bounds matching CPU-rasterized `ui.screenshot` pixels across `Light`/`Dark`/`HighContrast` and `1.0x`–`3.0x` HiDPI scales (**1.0** adds `RTL` and Web ARIA), with `100%` `ZLayer::ModalBackdrop` outside click/wheel capture and zero click-through.
-2. **Scrollbar & Clip Non-Overlap Gate:** Zero `Role::ScrollBar` intersections with clickable/focusable child controls at `640 × 420 pt` and `1440 × 600 pt`.
+2. **Scrollbar, Interactive Non-Overlap & WCAG 2.5.8 Target-Size Gate:** Zero `Role::ScrollBar` intersections with clickable/focusable child controls, zero partial overlaps between enabled clickable chrome controls on the same `ZLayer` (nesting and user-positioned `ZLayer::FloatingOverlay` WYSIWYG canvas panels/annotations permitted), and WCAG 2.2 SC 2.5.8 target-size compliance (`>= 24 × 24 pt` or `24 pt`-diameter spacing clearance; spreadsheet `gridcell`s, `Role::Splitter` sashes, and canvas corner/rotation grips exempt) across workspace views, dialogs, and menus (`640 × 420 pt` through `1920 × 1080 pt`).
 3. **14-Locale Beta Text Fitting, Symbol Coverage & Ellipsis Gate (`R10.9` / `R15.1`):** Zero unclipped text bleed across all `14` Beta-active LTR/CJK locales (extending to all `16` incl. the `4` RTL locales at **1.0**); mandatory non-missing glyph coverage across UI and scientific symbols (`→ ▾ ● ✓ ± ≤ ≥ μ χ²`); and any ellipsized label sets `state.ellipsized = true` and exposes its full un-truncated label via hover tooltip and accessibility name.
 4. **1,000,000-Cell 60-FPS Virtualization Gate (`R10.22` / `R15.2`):** Matched `1,000,000`-cell `Column` scrolling, selection, and exclusion benchmarks stay strictly inside `<= 16.67 ms` steady-state frame time and `<= 50 ms` input-to-paint latency (`1.0x`/`2.0x` DPI).
 5. **Clean-Room & Brand Gate (`cargo xtask brands && cargo xtask cleanroom && cargo xtask assets`):** Zero competitor trademarks, zero external suite identifiers, zero unattributed assets, and zero bundled font binaries.
@@ -632,7 +632,7 @@ Every desktop layout change in `crates/ui-egui` and `apps/curvebook` must pass (
 
 ## 10. Visual Design Rules
 
-> **Status:** Accepted. These rules apply across the structure set by §1–9. The §10.1–10.6 design tokens, spacing/type/radius scales, bold system UI face (`type.section` with `14 pt` regular fallback when no bold face is present), 150 ms motion cap, hover contrast (`>= 3:1` border + elevated fill delta), modal footer button ordering, and §10.5 broken-link glyph/pattern live in `LayoutMetrics`, `Tokens` (`crates/ui-egui/src/egui_shell/mod.rs`), `UiThemeSpec` (`crates/ui-egui/src/theme.rs`), and `crates/ui-egui/src/egui_shell/fonts.rs`. Token names below map directly to `LayoutMetrics` and `Tokens` fields; all sizes are logical points at `1.0x`.
+> **Status:** Accepted. See [`../design-language.md`](../design-language.md) for the high-level design language, seed-derived OKLab/OKLCH colour system, action-hierarchy (`ActionRank`) rules, and `xtask` / specimen enforcement gates. These rules apply across the structure set by §1–9. The §10.1–10.6 design tokens, spacing/type/radius scales, bold system UI face (`type.section` with `14 pt` regular fallback when no bold face is present), 150 ms motion cap, hover contrast (`>= 3:1` border + elevated fill delta), modal footer button ordering, and §10.5 broken-link glyph/pattern live in `LayoutMetrics`, `Tokens` (`crates/ui-egui/src/egui_shell/mod.rs`), `UiThemeSpec` (`crates/ui-egui/src/theme.rs`), and `crates/ui-egui/src/egui_shell/fonts.rs`. Token names below map directly to `LayoutMetrics` and `Tokens` fields; all sizes are logical points at `1.0x`.
 
 ### 10.1 Spacing Scale
 

@@ -517,12 +517,9 @@ pub(super) fn any_pointer_click_in(ui: &Ui, rect: Rect) -> bool {
     ui.input(|i| i.events.iter().any(|ev| matches!(ev, egui::Event::PointerButton { pos, pressed: false, .. } if rect.contains(*pos))))
 }
 
-const fn blend_row_channel(a: u8, b: u8) -> u8 {
-    ((a as u16 * 3 + b as u16) / 4) as u8
-}
-
-pub(super) const fn alt_row_fill(surface: Color32, panel: Color32) -> Color32 {
-    Color32::from_rgb(blend_row_channel(surface.r(), panel.r()), blend_row_channel(surface.g(), panel.g()), blend_row_channel(surface.b(), panel.b()))
+pub(super) fn alt_row_fill(surface: Color32, panel: Color32) -> Color32 {
+    let mixed = curvebook_palette::lerp_oklab(super::super::color32_to_rgba8(surface), super::super::color32_to_rgba8(panel), 0.25);
+    super::super::rgba8_to_color32(mixed)
 }
 
 pub(super) const fn link_border_color32(color: Option<LinkBorderColor>, tokens: &Tokens) -> Color32 {
@@ -716,6 +713,17 @@ pub(super) fn parse_inline_cell_input(app: &UiApp, draft: &str) -> serde_json::V
 }
 
 pub(super) fn record_meta_if_enabled(ui: &Ui, meta: &mut FrameInspectMeta, enabled: bool, resp: &Response, input: FrameInspectEntryInput<'_>) {
+    record_meta_with_unclipped_if_enabled(ui, meta, enabled, resp, resp.rect, input);
+}
+
+pub(super) fn record_meta_with_unclipped_if_enabled(
+    ui: &Ui,
+    meta: &mut FrameInspectMeta,
+    enabled: bool,
+    resp: &Response,
+    unclipped_rect: Rect,
+    input: FrameInspectEntryInput<'_>,
+) {
     if !enabled {
         return;
     }
@@ -723,7 +731,7 @@ pub(super) fn record_meta_if_enabled(ui: &Ui, meta: &mut FrameInspectMeta, enabl
     if clipped.width() <= 0.5 || clipped.height() <= 0.5 {
         return;
     }
-    meta.record_response(ui, resp, input);
+    meta.record_response_with_unclipped(ui, resp, unclipped_rect, input);
 }
 
 pub(super) struct LinkedEdgePaint<'a> {

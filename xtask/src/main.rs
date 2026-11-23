@@ -16,6 +16,7 @@ mod contributors;
 mod corpus;
 mod coverage;
 mod cursors;
+mod design_tokens;
 #[cfg(feature = "full-gates")]
 mod docs_site;
 mod ico;
@@ -63,6 +64,8 @@ commands:
   cleanroom             verify no vendor copyright headers or vendor-created fixtures exist
   citations             verify D1 literature citations across math, stats, fit, and transform
   cursors               verify Cursor variants match crates/tools/src/cursors.toml
+  design-tokens [--verbose]
+                        verify raw UI colours and sizes in crates/ui-egui/src stay within ratcheted ceilings
   i18n-report           report untranslated locale keys in curvebook-ui-egui
   ui-commands [--check] sync (or verify) crates/mcp/src/ui_catalog.rs from crates/ui-egui
   commands [--check]    regenerate (or verify) docs/commands.md from curvebook-engine
@@ -122,6 +125,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         "cleanroom" => cleanroom::run(&root),
         "citations" => citations::run(&root, rest),
         "cursors" => cursors::run(&root),
+        "design-tokens" => design_tokens::run(&root, rest),
         "i18n-report" => cmd_i18n_report(&root),
         "ui-commands" => ui_commands::run(&root, rest.iter().any(|a| a == "--check")),
         "commands" => cmd_commands(&root, rest),
