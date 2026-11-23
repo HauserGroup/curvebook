@@ -4,7 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-publish = false
+repository.workspace = true
+publish.workspace = true
 description = "CurveBook command line: MCP server (stdio), headless statistical runs and figure export"
 
 [[bin]]
@@ -19,13 +20,13 @@ curvebook-chart = { workspace = true }
 curvebook-doc = { workspace = true }
 curvebook-engine = { workspace = true, features = ["bundled-fonts"] }
 curvebook-format = { workspace = true }
-curvebook-mcp = { workspace = true }
+curvebook-mcp = { workspace = true, features = ["bundled-fonts"] }
 curvebook-pdf = { workspace = true }
 curvebook-platform = { workspace = true }
 curvebook-render = { workspace = true }
 curvebook-svg = { workspace = true }
 curvebook-text = { workspace = true }
-curvebook-ui-egui = { workspace = true }
+curvebook-ui-egui = { workspace = true, features = ["bundled-fonts"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

@@ -22,6 +22,7 @@ use curvebook_ui_egui::{
     ActiveDialog, CONTROL_HTTP_FORBIDDEN_RESPONSE, ControlAuth, MAX_CONTROL_LINE_BYTES, ViewportMetrics, bind_control_tcp_listener,
     validate_loopback_addr,
 };
+use eframe::egui;
 use serde_json::{Value, json};
 
 static R73_TEST_SEQ: AtomicU64 = AtomicU64::new(1);

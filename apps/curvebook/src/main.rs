@@ -1198,6 +1198,7 @@ mod tests {
 
     use curvebook_doc::{DataSheet, ProjectDocument, SubcolumnMode, TableArchetype, XyTable};
     use curvebook_format::save_project_file;
+    use eframe::egui;
 
     use super::{
         CURRENT_PREFERENCES_VERSION, CliAction, LaunchConfig, UiApp, UiBackend, UiThemeMode, load_startup_session, parse_args, parse_port, run,

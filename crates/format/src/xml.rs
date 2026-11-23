@@ -165,9 +165,8 @@ impl XmlTreeBuilder {
         }
         self.bump_node_count(offset, "element")?;
 
-        let name_bytes = start.name();
-        let name = std::str::from_utf8(name_bytes.as_ref())
-            .map_err(|err| FormatError::XmlParse { offset, reason: format!("invalid UTF-8 in XML tag name: {err}") })?;
+        let name_qname = start.name();
+        let name: &str = name_qname.as_ref();
         if name.is_empty() {
             return Err(FormatError::XmlParse { offset, reason: String::from("empty XML tag name") });
         }
@@ -183,16 +182,14 @@ impl XmlTreeBuilder {
         for attr_res in start.attributes().with_checks(false) {
             let attr = attr_res.map_err(|err| FormatError::XmlParse { offset, reason: format!("malformed XML attribute: {err}") })?;
             self.bump_node_count(offset, "attribute")?;
-            let key = std::str::from_utf8(attr.key.as_ref())
-                .map_err(|err| FormatError::XmlParse { offset, reason: format!("invalid UTF-8 in attribute name: {err}") })?;
+            let key: &str = attr.key.as_ref();
             if key.is_empty() {
                 return Err(FormatError::XmlParse { offset, reason: String::from("expected attribute name") });
             }
             if is_duplicate_attr(&attrs, &mut seen, key) {
                 return Err(FormatError::XmlParse { offset, reason: format!("duplicate attribute `{key}`") });
             }
-            let raw_val = std::str::from_utf8(attr.value.as_ref())
-                .map_err(|err| FormatError::XmlParse { offset, reason: format!("invalid UTF-8 in attribute value: {err}") })?;
+            let raw_val: &str = attr.value.as_ref();
             let decoded = decode_xml_entities(raw_val, offset)?;
             attrs.push((key.to_owned(), decoded));
         }
@@ -208,8 +205,7 @@ impl XmlTreeBuilder {
         }
     }
 
-    fn handle_text_bytes(&mut self, raw_bytes: &[u8], offset: usize) -> Result<(), FormatError> {
-        let raw = std::str::from_utf8(raw_bytes).map_err(|err| FormatError::XmlParse { offset, reason: format!("invalid UTF-8 in text: {err}") })?;
+    fn handle_text(&mut self, raw: &str, offset: usize) -> Result<(), FormatError> {
         if self.stack.is_empty() {
             if !raw.trim().is_empty() {
                 return Err(FormatError::XmlParse { offset, reason: String::from("unexpected character data outside root element") });
@@ -221,24 +217,20 @@ impl XmlTreeBuilder {
         Ok(())
     }
 
-    fn handle_general_ref(&mut self, raw_bytes: &[u8], offset: usize) -> Result<(), FormatError> {
+    fn handle_general_ref(&mut self, entity: &str, offset: usize) -> Result<(), FormatError> {
         if self.stack.is_empty() {
             return Err(FormatError::XmlParse { offset, reason: String::from("unexpected character data outside root element") });
         }
-        let entity =
-            std::str::from_utf8(raw_bytes).map_err(|err| FormatError::XmlParse { offset, reason: format!("invalid UTF-8 in entity: {err}") })?;
         let ch = decode_xml_entity_name(entity, offset)?;
         self.pending_text.push(ch);
         Ok(())
     }
 
-    fn handle_cdata(&mut self, raw_bytes: &[u8], offset: usize) -> Result<(), FormatError> {
+    fn handle_cdata(&mut self, cdata: &str, offset: usize) -> Result<(), FormatError> {
         if self.stack.is_empty() {
             return Err(FormatError::XmlParse { offset, reason: String::from("unexpected CDATA outside root element") });
         }
         self.flush_pending_text(offset)?;
-        let cdata =
-            std::str::from_utf8(raw_bytes).map_err(|err| FormatError::XmlParse { offset, reason: format!("invalid UTF-8 in CDATA: {err}") })?;
         if !cdata.is_empty() {
             self.bump_node_count(offset, "CDATA node")?;
             if let Some(parent) = self.stack.last_mut() {
@@ -263,8 +255,7 @@ impl XmlTreeBuilder {
             Event::End(end) => {
                 self.flush_pending_text(offset)?;
                 let close_qname = end.name();
-                let close_name = std::str::from_utf8(close_qname.as_ref())
-                    .map_err(|err| FormatError::XmlParse { offset, reason: format!("invalid UTF-8 in closing tag: {err}") })?;
+                let close_name: &str = close_qname.as_ref();
                 let Some(el) = self.stack.pop() else {
                     return Err(FormatError::XmlParse { offset, reason: format!("unexpected closing tag `</{close_name}>`") });
                 };
@@ -276,7 +267,7 @@ impl XmlTreeBuilder {
                 }
                 self.attach_completed_element(el);
             }
-            Event::Text(text) => self.handle_text_bytes(text.as_ref(), offset)?,
+            Event::Text(text) => self.handle_text(text.as_ref(), offset)?,
             Event::GeneralRef(entity) => self.handle_general_ref(entity.as_ref(), offset)?,
             Event::CData(cdata) => self.handle_cdata(cdata.as_ref(), offset)?,
             Event::Comment(_) | Event::PI(_) | Event::Decl(_) => {

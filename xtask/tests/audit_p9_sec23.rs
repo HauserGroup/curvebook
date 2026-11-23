@@ -385,3 +385,58 @@ fn fa_sec23_12_14_stats_exact_and_remediated_xtask_platform_hygiene() -> Result<
 
     Ok(())
 }
+
+#[test]
+fn workspace_manifest_dependency_hygiene_holds() -> Result<(), String> {
+    let root = workspace_root()?;
+
+    // 1. `egui_extras` must not appear in root Cargo.toml, crates/ui-egui/Cargo.toml, or Cargo.lock.
+    for rel in ["Cargo.toml", "crates/ui-egui/Cargo.toml", "Cargo.lock"] {
+        let content = fs::read_to_string(root.join(rel)).map_err(|e| format!("read {rel}: {e}"))?;
+        assert!(!content.contains("egui_extras"), "{rel} must not reference removed dependency `egui_extras`");
+    }
+
+    // 2. `crates/mcp/Cargo.toml` must not depend on `curvebook-chart`.
+    let mcp_cargo = fs::read_to_string(root.join("crates/mcp/Cargo.toml")).map_err(|e| format!("read crates/mcp/Cargo.toml: {e}"))?;
+    assert!(!mcp_cargo.contains("curvebook-chart"), "crates/mcp/Cargo.toml must not depend on unused `curvebook-chart`");
+
+    // 3. `apps/curvebook/Cargo.toml` must not declare direct `egui =`, `curvebook-pdf`, or `curvebook-svg`.
+    let app_cargo = fs::read_to_string(root.join("apps/curvebook/Cargo.toml")).map_err(|e| format!("read apps/curvebook/Cargo.toml: {e}"))?;
+    assert!(!app_cargo.contains("curvebook-pdf"), "apps/curvebook/Cargo.toml must not declare direct `curvebook-pdf` dependency");
+    assert!(!app_cargo.contains("curvebook-svg"), "apps/curvebook/Cargo.toml must not declare direct `curvebook-svg` dependency");
+    for line in app_cargo.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        assert!(
+            !trimmed.starts_with("egui =") && !trimmed.starts_with("egui."),
+            "apps/curvebook/Cargo.toml must not declare direct `egui` dependency: {trimmed}"
+        );
+    }
+
+    // 4. `crates/platform/Cargo.toml` must gate `serde_json` strictly under `cfg(not(target_arch = "wasm32"))`.
+    let platform_cargo = fs::read_to_string(root.join("crates/platform/Cargo.toml")).map_err(|e| format!("read crates/platform/Cargo.toml: {e}"))?;
+    let mut section = "";
+    let mut saw_gated_serde_json = false;
+    for line in platform_cargo.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed.starts_with('[') {
+            section = trimmed;
+            continue;
+        }
+        if trimmed.starts_with("serde_json") {
+            assert!(
+                section.contains("cfg(not(target_arch = \"wasm32\"))") && section.ends_with(".dependencies]"),
+                "crates/platform/Cargo.toml must gate `serde_json` under cfg(not(target_arch = \"wasm32\")), found under `{section}`"
+            );
+            saw_gated_serde_json = true;
+        }
+    }
+    assert!(saw_gated_serde_json, "crates/platform/Cargo.toml must declare `serde_json` under cfg(not(target_arch = \"wasm32\"))");
+
+    Ok(())
+}

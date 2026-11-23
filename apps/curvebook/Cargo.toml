@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
-publish = false
+publish.workspace = true
 default-run = "curvebook"
 description = "CurveBook native desktop biostatistics, curve-fitting and scientific graphing application"
 
@@ -18,14 +18,13 @@ wgpu = ["eframe/wgpu"]
 accessibility = ["eframe/accesskit"]
 
 [dependencies]
-egui = { workspace = true }
 curvebook-doc = { workspace = true }
 curvebook-engine = { workspace = true, features = ["bundled-fonts"] }
 curvebook-format = { workspace = true }
 curvebook-platform = { workspace = true }
 curvebook-render = { workspace = true }
 curvebook-text = { workspace = true }
-curvebook-ui-egui = { workspace = true }
+curvebook-ui-egui = { workspace = true, features = ["bundled-fonts"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

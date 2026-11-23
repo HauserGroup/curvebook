@@ -20,9 +20,8 @@ curvebook-doc = { path = "crates/doc" }
 curvebook-transform = { path = "crates/transform" }
 curvebook-stats = { path = "crates/stats" }
 curvebook-fit = { path = "crates/fit" }
-# Without its default `bundled-fonts`: a crate that wants the fonts asks for them (the apps and
-# curvebook-testkit through the engine's `bundled-fonts`), so a library crate never forces them on
-# an embedder that supplies its fonts at run time.
+# Without their default `bundled-fonts`: binaries opt in via `features = ["bundled-fonts"]`,
+# so library crates and tooling never force bundled fonts on embedders that supply fonts at run time.
 curvebook-text = { path = "crates/text", default-features = false }
 curvebook-chart = { path = "crates/chart" }
 curvebook-render = { path = "crates/render" }
@@ -31,8 +30,8 @@ curvebook-svg = { path = "crates/svg" }
 curvebook-pdf = { path = "crates/pdf" }
 curvebook-tools = { path = "crates/tools" }
 curvebook-engine = { path = "crates/engine", default-features = false }
-curvebook-ui-egui = { path = "crates/ui-egui" }
-curvebook-mcp = { path = "crates/mcp" }
+curvebook-ui-egui = { path = "crates/ui-egui", default-features = false }
+curvebook-mcp = { path = "crates/mcp", default-features = false }
 curvebook-testkit = { path = "crates/testkit" }
 
 # serialization, archive compression, raster image decoding & property testing
@@ -40,11 +39,11 @@ crc32fast = "1.5"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff"] }
 proptest = "1"
-quick-xml = { version = "0.41", default-features = false }
+quick-xml = { version = "0.42", default-features = false }
 semver = "1.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
-weezl = { version = "0.1", default-features = false, features = ["std"] }
+weezl = { version = "0.2", default-features = false, features = ["std"] }
 
 # native GPU desktop windowing (without default_fonts to keep only permissive licenses) & wasm bridge
 eframe = { version = "0.37", default-features = false }

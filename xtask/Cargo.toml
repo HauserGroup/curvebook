@@ -4,7 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-publish = false
+repository.workspace = true
+publish.workspace = true
 
 [features]
 default = ["full-gates"]
@@ -28,7 +29,7 @@ curvebook-doc = { workspace = true, optional = true }
 curvebook-engine = { workspace = true, optional = true }
 curvebook-fit = { workspace = true, optional = true }
 curvebook-format = { workspace = true }
-curvebook-mcp = { workspace = true, default-features = false, optional = true }
+curvebook-mcp = { workspace = true, optional = true }
 curvebook-palette = { workspace = true, optional = true }
 curvebook-pdf = { workspace = true, optional = true }
 curvebook-platform = { workspace = true }
@@ -36,7 +37,7 @@ image = { workspace = true }
 curvebook-stats = { workspace = true, optional = true }
 curvebook-svg = { workspace = true, optional = true }
 curvebook-testkit = { workspace = true }
-curvebook-ui-egui = { workspace = true, default-features = false, optional = true }
+curvebook-ui-egui = { workspace = true, optional = true }
 flate2 = { workspace = true }
 semver = { workspace = true }
 serde_json = { workspace = true }
