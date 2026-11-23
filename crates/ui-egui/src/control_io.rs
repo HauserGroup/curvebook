@@ -1992,31 +1992,30 @@ fn handle_doc_inspect(doc: &ProjectDocument, dirty: bool, file_path: Option<&std
 fn inspect_single_sheet(doc: &ProjectDocument, sheet_id: &SheetId, include_cells: bool) -> Result<Value, String> {
     let deps = include_cells.then(|| doc.upstream_dependencies(sheet_id));
     match doc.sheet_section(sheet_id) {
-        Some(SheetSection::Data) => doc
-            .data_sheet(sheet_id)
-            .map(|s| {
-                let mut val = json!({
-                    "section": "Data",
-                    "id": s.id.as_str(),
-                    "title": s.title,
-                    "kind": s.kind().label(),
-                    "rows": s.archetype.row_count(),
-                    "cols": s.archetype.column_count(),
-                    "frozen": s.frozen,
-                    "linked_regions": s.linked_regions.len(),
-                });
-                if include_cells && let Some(obj) = val.as_object_mut() {
-                    obj.insert(String::from("columns"), json!(s.archetype.column_count()));
-                    obj.insert(String::from("info_sheet_id"), serde_json::to_value(&s.info_sheet_id).unwrap_or(Value::Null));
-                    if let Some(ref upstream) = deps {
-                        obj.insert(String::from("upstream_dependencies"), serde_json::to_value(upstream).unwrap_or(Value::Null));
-                    }
-                    let csv = export_datasheet_to_csv(s, &CsvOptions::csv()).unwrap_or_default();
-                    obj.insert(String::from("csv_preview"), Value::String(csv));
+        Some(SheetSection::Data) => {
+            let s = doc.data_sheet(sheet_id).ok_or_else(|| format!("data sheet `{}` not found", sheet_id.as_str()))?;
+            let mut val = json!({
+                "section": "Data",
+                "id": s.id.as_str(),
+                "title": s.title,
+                "kind": s.kind().label(),
+                "rows": s.archetype.row_count(),
+                "cols": s.archetype.column_count(),
+                "frozen": s.frozen,
+                "linked_regions": s.linked_regions.len(),
+            });
+            if include_cells && let Some(obj) = val.as_object_mut() {
+                obj.insert(String::from("columns"), json!(s.archetype.column_count()));
+                obj.insert(String::from("info_sheet_id"), serde_json::to_value(&s.info_sheet_id).unwrap_or(Value::Null));
+                if let Some(ref upstream) = deps {
+                    obj.insert(String::from("upstream_dependencies"), serde_json::to_value(upstream).unwrap_or(Value::Null));
                 }
-                val
-            })
-            .ok_or_else(|| format!("data sheet `{}` not found", sheet_id.as_str())),
+                let (csv_preview, csv_preview_truncated) = inspect_preview_bounds::build_csv_preview(s)?;
+                obj.insert(String::from("csv_preview"), Value::String(csv_preview));
+                obj.insert(String::from("csv_preview_truncated"), Value::Bool(csv_preview_truncated));
+            }
+            Ok(val)
+        }
         Some(SheetSection::Info) => doc
             .info_sheet(sheet_id)
             .map(|s| {
@@ -2051,9 +2050,17 @@ fn inspect_single_sheet(doc: &ProjectDocument, sheet_id: &SheetId, include_cells
                     "checklist": s.checklist.len(),
                 });
                 if include_cells && let Some(obj) = val.as_object_mut() {
-                    obj.insert(String::from("tabs_data"), serde_json::to_value(&s.tabs).unwrap_or(Value::Null));
-                    obj.insert(String::from("scalars_data"), serde_json::to_value(&s.scalars).unwrap_or(Value::Null));
-                    obj.insert(String::from("checklist_entries"), serde_json::to_value(&s.checklist).unwrap_or(Value::Null));
+                    let (tabs_preview, tabs_truncated) = inspect_preview_bounds::slice_result_tabs_preview(&s.tabs);
+                    let (scalars_preview, scalars_truncated) =
+                        inspect_preview_bounds::slice_preview_vec(&s.scalars, inspect_preview_bounds::MAX_RESULT_PREVIEW_SCALARS);
+                    let (checklist_preview, checklist_truncated) =
+                        inspect_preview_bounds::slice_preview_vec(&s.checklist, inspect_preview_bounds::MAX_RESULT_PREVIEW_CHECKLIST);
+                    obj.insert(String::from("tabs_data"), serde_json::to_value(&tabs_preview).unwrap_or(Value::Null));
+                    obj.insert(String::from("tabs_truncated"), Value::Bool(tabs_truncated));
+                    obj.insert(String::from("scalars_data"), serde_json::to_value(&scalars_preview).unwrap_or(Value::Null));
+                    obj.insert(String::from("scalars_truncated"), Value::Bool(scalars_truncated));
+                    obj.insert(String::from("checklist_entries"), serde_json::to_value(&checklist_preview).unwrap_or(Value::Null));
+                    obj.insert(String::from("checklist_truncated"), Value::Bool(checklist_truncated));
                     if let Some(ref upstream) = deps {
                         obj.insert(String::from("upstream_dependencies"), serde_json::to_value(upstream).unwrap_or(Value::Null));
                     }
@@ -2104,6 +2111,190 @@ fn inspect_single_sheet(doc: &ProjectDocument, sheet_id: &SheetId, include_cells
             })
             .ok_or_else(|| format!("layout sheet `{}` not found", sheet_id.as_str())),
         None => Err(format!("sheet `{}` not found", sheet_id.as_str())),
+    }
+}
+
+mod inspect_preview_bounds {
+    use curvebook_doc::{
+        ColumnTable, ContingencyTable, DataSetColumn, DataSheet, GroupedTable, MultipleVariablesTable, NestedGroupColumn, NestedTable,
+        PartsOfWholeTable, ResultTab, SurvivalTable, TableArchetype, VariableColumn, XyTable,
+    };
+    use curvebook_format::{CsvOptions, export_datasheet_to_csv};
+
+    pub(super) const MAX_CSV_PREVIEW_ROWS: usize = 100;
+    pub(super) const MAX_CSV_PREVIEW_BYTES: usize = 65_536;
+    pub(super) const MAX_RESULT_PREVIEW_TABS: usize = 32;
+    pub(super) const MAX_RESULT_PREVIEW_ROWS: usize = 100;
+    pub(super) const MAX_RESULT_PREVIEW_COLS: usize = 64;
+    pub(super) const MAX_RESULT_PREVIEW_TOTAL_CELLS: usize = 4_096;
+    pub(super) const MAX_RESULT_PREVIEW_FOOTNOTES: usize = 64;
+    pub(super) const MAX_RESULT_PREVIEW_CHECKLIST: usize = 128;
+    pub(super) const MAX_RESULT_PREVIEW_SCALARS: usize = 2_048;
+
+    fn slice_dataset_columns(cols: &[DataSetColumn], max_rows: usize) -> Vec<DataSetColumn> {
+        cols.iter().map(|c| DataSetColumn { title: c.title.clone(), cells: c.cells.iter().take(max_rows).cloned().collect() }).collect()
+    }
+
+    fn slice_archetype_rows(archetype: &TableArchetype, max_rows: usize) -> TableArchetype {
+        match archetype {
+            TableArchetype::Xy(t) => TableArchetype::Xy(XyTable {
+                x_title: t.x_title.clone(),
+                x_mode: t.x_mode.clone(),
+                x_cells: t.x_cells.iter().take(max_rows).cloned().collect(),
+                row_titles: t.row_titles.iter().take(max_rows).cloned().collect(),
+                row_titles_expanded: t.row_titles_expanded,
+                y_subcolumn_mode: t.y_subcolumn_mode,
+                data_sets: slice_dataset_columns(&t.data_sets, max_rows),
+            }),
+            TableArchetype::Column(t) => TableArchetype::Column(ColumnTable {
+                design_hint: t.design_hint,
+                subcolumn_mode: t.subcolumn_mode,
+                row_titles: t.row_titles.iter().take(max_rows).cloned().collect(),
+                row_titles_expanded: t.row_titles_expanded,
+                data_sets: slice_dataset_columns(&t.data_sets, max_rows),
+            }),
+            TableArchetype::Grouped(t) => TableArchetype::Grouped(GroupedTable {
+                row_factor_title: t.row_factor_title.clone(),
+                column_factor_title: t.column_factor_title.clone(),
+                row_titles: t.row_titles.iter().take(max_rows).cloned().collect(),
+                row_numeric_spacing: t.row_numeric_spacing.as_ref().map(|v| v.iter().take(max_rows).copied().collect()),
+                subcolumn_mode: t.subcolumn_mode,
+                replicate_stacking: t.replicate_stacking,
+                three_way_grouping: t.three_way_grouping.clone(),
+                data_sets: slice_dataset_columns(&t.data_sets, max_rows),
+            }),
+            TableArchetype::Contingency(t) => TableArchetype::Contingency(ContingencyTable {
+                row_factor_title: t.row_factor_title.clone(),
+                column_factor_title: t.column_factor_title.clone(),
+                row_titles: t.row_titles.iter().take(max_rows).cloned().collect(),
+                data_sets: slice_dataset_columns(&t.data_sets, max_rows),
+            }),
+            TableArchetype::Survival(t) => TableArchetype::Survival(SurvivalTable {
+                time_title: t.time_title.clone(),
+                times: t.times.iter().take(max_rows).cloned().collect(),
+                event_code: t.event_code,
+                censored_code: t.censored_code,
+                row_titles: t.row_titles.iter().take(max_rows).cloned().collect(),
+                row_titles_expanded: t.row_titles_expanded,
+                cohorts: slice_dataset_columns(&t.cohorts, max_rows),
+            }),
+            TableArchetype::PartsOfWhole(t) => TableArchetype::PartsOfWhole(PartsOfWholeTable {
+                slice_labels: t.slice_labels.iter().take(max_rows).cloned().collect(),
+                data_sets: slice_dataset_columns(&t.data_sets, max_rows),
+            }),
+            TableArchetype::MultipleVariables(t) => TableArchetype::MultipleVariables(MultipleVariablesTable {
+                row_titles: t.row_titles.iter().take(max_rows).cloned().collect(),
+                row_titles_expanded: t.row_titles_expanded,
+                variables: t
+                    .variables
+                    .iter()
+                    .map(|v| VariableColumn {
+                        title: v.title.clone(),
+                        role: v.role,
+                        role_inferred: v.role_inferred,
+                        source: v.source.clone(),
+                        level_order: v.level_order.clone(),
+                        cells: v.cells.iter().take(max_rows).cloned().collect(),
+                    })
+                    .collect(),
+            }),
+            TableArchetype::Nested(t) => TableArchetype::Nested(NestedTable {
+                row_titles: t.row_titles.iter().take(max_rows).cloned().collect(),
+                row_titles_expanded: t.row_titles_expanded,
+                groups: t
+                    .groups
+                    .iter()
+                    .map(|g| NestedGroupColumn {
+                        title: g.title.clone(),
+                        subcolumn_titles: g.subcolumn_titles.clone(),
+                        cells: g.cells.iter().take(max_rows).cloned().collect(),
+                    })
+                    .collect(),
+            }),
+        }
+    }
+
+    fn truncate_csv_bytes(mut csv: String, max_bytes: usize) -> (String, bool) {
+        if csv.len() <= max_bytes {
+            return (csv, false);
+        }
+        let mut end = max_bytes;
+        while end > 0 && !csv.is_char_boundary(end) {
+            end -= 1;
+        }
+        if let Some(nl) = csv[..end].rfind('\n')
+            && nl > 0
+        {
+            end = nl + 1;
+        }
+        csv.truncate(end);
+        (csv, true)
+    }
+
+    pub(super) fn build_csv_preview(ds: &DataSheet) -> Result<(String, bool), String> {
+        ds.archetype.validate().map_err(|err| format!("CSV preview export failed: {err}"))?;
+        let row_count = ds.archetype.row_count();
+        let row_truncated = row_count > MAX_CSV_PREVIEW_ROWS;
+        let raw_csv = if row_truncated {
+            let sliced = slice_archetype_rows(&ds.archetype, MAX_CSV_PREVIEW_ROWS);
+            let preview_ds = DataSheet::new(ds.id.clone(), ds.title.clone(), sliced).map_err(|err| format!("CSV preview export failed: {err}"))?;
+            export_datasheet_to_csv(&preview_ds, &CsvOptions::csv())
+        } else {
+            export_datasheet_to_csv(ds, &CsvOptions::csv())
+        }
+        .map_err(|err| format!("CSV preview export failed: {err}"))?;
+        let (capped, byte_truncated) = truncate_csv_bytes(raw_csv, MAX_CSV_PREVIEW_BYTES);
+        Ok((capped, row_truncated || byte_truncated))
+    }
+
+    pub(super) fn slice_preview_vec<T: Clone>(items: &[T], limit: usize) -> (Vec<T>, bool) {
+        let truncated = items.len() > limit;
+        (items.iter().take(limit).cloned().collect(), truncated)
+    }
+
+    pub(super) fn slice_result_tabs_preview(tabs: &[ResultTab]) -> (Vec<ResultTab>, bool) {
+        let mut truncated = tabs.len() > MAX_RESULT_PREVIEW_TABS;
+        let mut remaining_cells = MAX_RESULT_PREVIEW_TOTAL_CELLS;
+        let mut out = Vec::with_capacity(tabs.len().min(MAX_RESULT_PREVIEW_TABS));
+
+        for tab in tabs.iter().take(MAX_RESULT_PREVIEW_TABS) {
+            if tab.column_headers.len() > MAX_RESULT_PREVIEW_COLS || tab.rows.len() > MAX_RESULT_PREVIEW_ROWS {
+                truncated = true;
+            }
+            let column_headers: Vec<String> = tab.column_headers.iter().take(MAX_RESULT_PREVIEW_COLS).cloned().collect();
+            let mut out_rows = Vec::new();
+            let mut out_row_labels = Vec::new();
+            for (r_idx, row) in tab.rows.iter().take(MAX_RESULT_PREVIEW_ROWS).enumerate() {
+                if row.len() > MAX_RESULT_PREVIEW_COLS {
+                    truncated = true;
+                }
+                let take_cols = row.len().min(MAX_RESULT_PREVIEW_COLS);
+                if take_cols > remaining_cells {
+                    truncated = true;
+                    break;
+                }
+                remaining_cells -= take_cols;
+                out_rows.push(row[..take_cols].to_vec());
+                if let Some(lbl) = tab.row_labels.get(r_idx) {
+                    out_row_labels.push(lbl.clone());
+                }
+            }
+            if tab.row_labels.len() > out_rows.len() || tab.footnotes.len() > MAX_RESULT_PREVIEW_FOOTNOTES {
+                truncated = true;
+            }
+            let footnotes = tab.footnotes.iter().take(MAX_RESULT_PREVIEW_FOOTNOTES).cloned().collect();
+            out.push(ResultTab {
+                id: tab.id.clone(),
+                title: tab.title.clone(),
+                kind: tab.kind,
+                column_headers,
+                row_labels: out_row_labels,
+                rows: out_rows,
+                footnotes,
+            });
+        }
+
+        (out, truncated)
     }
 }
 

@@ -139,7 +139,8 @@ pub fn group_enum_json() -> Value {
 }
 
 /// Build the structured response for the `list_toolsets` MCP tool.
-pub fn handle_list_toolsets(state: &McpServerState) -> Result<ToolCallResult, ToolCallError> {
+pub fn handle_list_toolsets(state: &McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
+    crate::gui_tools::reject_unknown_args("list_toolsets", args, &[])?;
     let reg = registry();
     let enabled = state.enabled_toolsets();
     let mut toolsets = Vec::with_capacity(CommandGroup::all().len());
@@ -200,6 +201,7 @@ pub fn handle_list_toolsets(state: &McpServerState) -> Result<ToolCallResult, To
 /// Handle the `enable_toolset` MCP tool, emitting `notifications/tools/list_changed` when enabled
 /// groups change.
 pub fn handle_enable_toolset(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
+    crate::gui_tools::reject_unknown_args("enable_toolset", args, &["group", "groups", "enabled"])?;
     let enable_flag = crate::tools::optional_bool(args, "enabled")?.unwrap_or(true);
     let requested = collect_requested_groups(args)?;
 
@@ -306,7 +308,7 @@ mod tests {
     #[test]
     fn list_toolsets_exposes_accurate_worst_case_gui_tool_annotations() {
         let state = McpServerState::new();
-        let res = handle_list_toolsets(&state).expect("list_toolsets");
+        let res = handle_list_toolsets(&state, &Map::new()).expect("list_toolsets");
         let text = match res.content.first() {
             Some(crate::tools::ContentBlock::Text { text }) => text,
             other => panic!("unexpected list_toolsets content: {other:?}"),

@@ -24,7 +24,6 @@ const PERF_MV_BUDGET_MS: f64 = 250.0;
 const PERF_BATCH_CURVES: usize = 96;
 const PERF_96_CURVE_BUDGET_MS: f64 = 50.0;
 const PERF_RASTER_DPI: u16 = 300;
-const MAX_RASTER_EDGE_PX: f64 = 16_384.0;
 
 struct SingleFlagArgs {
     file: Option<String>,
@@ -414,16 +413,9 @@ fn compile_project_scenes(doc: &ProjectDocument) -> Result<Vec<ChartScene>, CliE
 }
 
 fn rasterize_and_encode_png(scene: &ChartScene, dpi: u16) -> Result<Vec<u8>, CliError> {
-    let scale = f64::from(dpi) / 72.0;
-    let width_px = clamped_px(scene.width_pt.max(1.0) * scale);
-    let height_px = clamped_px(scene.height_pt.max(1.0) * scale);
-    let img = render_scene(scene, RenderTargetSpec { width_px, height_px, dpi })?;
+    let target = RenderTargetSpec::from_scene_dpi(scene, dpi)?;
+    let img = render_scene(scene, target)?;
     Ok(encode_png(&img)?)
-}
-
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn clamped_px(raw: f64) -> u32 {
-    raw.round().clamp(1.0, MAX_RASTER_EDGE_PX) as u32
 }
 
 #[allow(clippy::cast_precision_loss)]

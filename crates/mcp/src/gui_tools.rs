@@ -77,6 +77,21 @@ pub fn list_gui_tools() -> Vec<ToolDefinition> {
     ]
 }
 
+fn metrics_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "logical_width": { "type": "number", "exclusiveMinimum": 0.0, "description": "Logical viewport width in points (160..=16384)." },
+            "logical_height": { "type": "number", "exclusiveMinimum": 0.0, "description": "Logical viewport height in points (120..=16384)." },
+            "scale_factor": { "type": "number", "exclusiveMinimum": 0.0, "description": "HiDPI display scale factor (0.5..=8.0, default 1.0)." },
+            "width_px": { "type": "number", "exclusiveMinimum": 0.0, "description": "Alias for logical_width." },
+            "height_px": { "type": "number", "exclusiveMinimum": 0.0, "description": "Alias for logical_height." }
+        },
+        "additionalProperties": false,
+        "description": "Optional ViewportMetrics ({logical_width, logical_height, scale_factor}; also accepts width_px/height_px aliases) for HiDPI layout/dispatch."
+    })
+}
+
 fn def_ui_inspect() -> ToolDefinition {
     ToolDefinition {
         name: String::from("ui_inspect"),
@@ -94,7 +109,8 @@ fn def_ui_inspect() -> ToolDefinition {
                 "include_bounds": {
                     "type": "boolean",
                     "description": "Include widget/hit-target bounding boxes in the snapshot."
-                }
+                },
+                "metrics": metrics_schema()
             },
             "additionalProperties": false
         }),
@@ -191,7 +207,7 @@ fn def_ui_pointer_gesture() -> ToolDefinition {
                 "delta_y": { "type": "number", "description": "Vertical scroll delta for 'wheel' gestures." },
                 "hover_fraction_x": { "type": "number", "description": "Optional fractional X coordinate [0.0, 1.0] for power curve hover." },
                 "hover_n": { "type": "number", "description": "Optional sample-size N coordinate for power curve hover." },
-                "metrics": { "type": "object", "description": "Optional ViewportMetrics ({width_px, height_px, scale_factor}) for pointer dispatch." }
+                "metrics": metrics_schema()
             },
             "required": ["action"],
             "additionalProperties": false
@@ -336,7 +352,7 @@ fn dispatch_json_result(state: &mut McpServerState, method: &str, params: Value)
 }
 
 fn handle_ui_inspect(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
-    reject_unknown_args("ui_inspect", args, &["scope", "include_bounds"])?;
+    reject_unknown_args("ui_inspect", args, &["scope", "include_bounds", "metrics"])?;
     let mut params = Map::new();
     if let Some(raw_scope) = optional_non_empty_str(args, "scope")? {
         let scope = raw_scope.to_ascii_lowercase();
@@ -350,10 +366,14 @@ fn handle_ui_inspect(state: &mut McpServerState, args: &Map<String, Value>) -> R
     if let Some(include_bounds) = optional_bool(args, "include_bounds")? {
         params.insert(String::from("include_bounds"), Value::Bool(include_bounds));
     }
+    if let Some(m) = optional_normalized_metrics(args, "ui_inspect")? {
+        params.insert(String::from("metrics"), m);
+    }
     dispatch_json_result(state, "ui.inspect", Value::Object(params))
 }
 
 fn handle_ui_screenshot(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
+    reject_unknown_args("ui_screenshot", args, &["target", "width_px", "height_px", "dpi", "path"])?;
     let mut params = Map::new();
     if let Some(raw_target) = optional_non_empty_str(args, "target")? {
         let target = raw_target.to_ascii_lowercase();
@@ -434,6 +454,25 @@ fn format_screenshot_result(raw: Value) -> Result<ToolCallResult, ToolCallError>
 }
 
 fn handle_ui_pointer_gesture(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
+    reject_unknown_args(
+        "ui_pointer_gesture",
+        args,
+        &[
+            "action",
+            "widget_id",
+            "target_id",
+            "x",
+            "y",
+            "to_widget_id",
+            "to_x",
+            "to_y",
+            "modifiers",
+            "delta_y",
+            "hover_fraction_x",
+            "hover_n",
+            "metrics",
+        ],
+    )?;
     let raw_action = required_non_empty_str(args, "action")?;
     let action = normalize_pointer_action(&raw_action)?;
     let widget_id = optional_non_empty_str(args, "widget_id")?.or(optional_non_empty_str(args, "target_id")?);
@@ -461,7 +500,7 @@ fn handle_ui_pointer_gesture(state: &mut McpServerState, args: &Map<String, Valu
     let delta_y = optional_finite_f64(args, "delta_y")?;
     let hover_fraction_x = optional_finite_f64(args, "hover_fraction_x")?;
     let hover_n = optional_finite_f64(args, "hover_n")?;
-    let metrics = optional_object(args, "metrics")?;
+    let metrics = optional_normalized_metrics(args, "ui_pointer_gesture")?;
     let modifiers = optional_modifiers(args, "modifiers")?;
 
     let mut params = Map::new();
@@ -486,6 +525,7 @@ fn handle_ui_pointer_gesture(state: &mut McpServerState, args: &Map<String, Valu
 }
 
 fn handle_ui_type_text(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
+    reject_unknown_args("ui_type_text", args, &["text", "widget_id", "clear_existing", "commit_enter"])?;
     let Some(text) = args.get("text").and_then(Value::as_str) else {
         return Err(ToolCallError::InvalidParams(String::from("ui_type_text requires a string parameter \"text\"")));
     };
@@ -502,6 +542,7 @@ fn handle_ui_type_text(state: &mut McpServerState, args: &Map<String, Value>) ->
 }
 
 fn handle_ui_press_key(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
+    reject_unknown_args("ui_press_key", args, &["key", "modifiers"])?;
     let key = required_non_empty_str(args, "key")?;
     let mut params = Map::new();
     params.insert(String::from("key"), Value::String(key));
@@ -512,6 +553,7 @@ fn handle_ui_press_key(state: &mut McpServerState, args: &Map<String, Value>) ->
 }
 
 fn handle_ui_invoke_menu(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
+    reject_unknown_args("ui_invoke_menu", args, &["path", "command_id", "params"])?;
     let path = optional_menu_path(args, "path")?;
     let command_id = optional_non_empty_str(args, "command_id")?;
     let extra_params = optional_object(args, "params")?;
@@ -546,6 +588,7 @@ fn handle_ui_invoke_menu(state: &mut McpServerState, args: &Map<String, Value>) 
 }
 
 fn handle_ui_switch_tab(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
+    reject_unknown_args("ui_switch_tab", args, &["tab", "tab_id", "sheet_id", "widget_id"])?;
     let tab = optional_tab_target(args, "tab")?.or(optional_tab_target(args, "tab_id")?);
     let sheet_id = optional_non_empty_str(args, "sheet_id")?;
     let widget_id = optional_non_empty_str(args, "widget_id")?;
@@ -706,6 +749,7 @@ fn optional_modifiers(args: &Map<String, Value>, key: &str) -> Result<Option<Val
     }
     let (mut shift, mut ctrl, mut alt, mut meta) = (false, false, false, false);
     if let Some(obj) = val.as_object() {
+        reject_unknown_args("modifiers", obj, &["shift", "ctrl", "alt", "meta", "cmd"])?;
         shift = optional_bool(obj, "shift")?.unwrap_or(false);
         ctrl = optional_bool(obj, "ctrl")?.unwrap_or(false);
         alt = optional_bool(obj, "alt")?.unwrap_or(false);
@@ -728,13 +772,71 @@ fn optional_modifiers(args: &Map<String, Value>, key: &str) -> Result<Option<Val
     Err(ToolCallError::InvalidParams(format!("parameter \"{key}\" must be an object or string array")))
 }
 
+fn optional_positive_finite_f64(args: &Map<String, Value>, key: &str, context: &str) -> Result<Option<f64>, ToolCallError> {
+    let Some(num) = optional_finite_f64(args, key)? else {
+        return Ok(None);
+    };
+    if num <= 0.0 {
+        return Err(ToolCallError::InvalidParams(format!("{context} parameter \"{key}\" must be positive (> 0)")));
+    }
+    Ok(Some(num))
+}
+
+fn resolve_metric_dimension(obj: &Map<String, Value>, canonical_key: &str, alias_key: &str, context: &str) -> Result<Option<f64>, ToolCallError> {
+    let canonical = optional_positive_finite_f64(obj, canonical_key, context)?;
+    let alias = optional_positive_finite_f64(obj, alias_key, context)?;
+    match (canonical, alias) {
+        (Some(c), Some(a)) if (c - a).abs() > 1e-9 => {
+            Err(ToolCallError::InvalidParams(format!("{context} cannot specify conflicting \"{canonical_key}\" ({c}) and \"{alias_key}\" ({a})")))
+        }
+        (Some(c), _) => Ok(Some(c)),
+        (None, Some(a)) => Ok(Some(a)),
+        (None, None) => Ok(None),
+    }
+}
+
+fn optional_normalized_metrics(args: &Map<String, Value>, tool_name: &str) -> Result<Option<Value>, ToolCallError> {
+    let Some(val) = args.get("metrics") else {
+        return Ok(None);
+    };
+    if val.is_null() {
+        return Ok(None);
+    }
+    let Some(obj) = val.as_object() else {
+        return Err(ToolCallError::InvalidParams(String::from("parameter \"metrics\" must be a JSON object")));
+    };
+    let context = format!("{tool_name}.metrics");
+    reject_unknown_args(&context, obj, &["logical_width", "logical_height", "scale_factor", "width_px", "height_px"])?;
+
+    let logical_width = resolve_metric_dimension(obj, "logical_width", "width_px", &context)?;
+    let logical_height = resolve_metric_dimension(obj, "logical_height", "height_px", &context)?;
+    let scale_factor = optional_positive_finite_f64(obj, "scale_factor", &context)?;
+    if logical_width.is_none() && logical_height.is_none() && scale_factor.is_none() {
+        return Err(ToolCallError::InvalidParams(format!(
+            "{tool_name} \"metrics\" must specify at least one of logical_width, logical_height, or scale_factor"
+        )));
+    }
+
+    let mut normalized = Map::new();
+    if let Some(w) = logical_width {
+        normalized.insert(String::from("logical_width"), json!(w));
+    }
+    if let Some(h) = logical_height {
+        normalized.insert(String::from("logical_height"), json!(h));
+    }
+    if let Some(s) = scale_factor {
+        normalized.insert(String::from("scale_factor"), json!(s));
+    }
+    Ok(Some(Value::Object(normalized)))
+}
+
 fn insert_opt_str(map: &mut Map<String, Value>, key: &str, value: Option<String>) {
     if let Some(v) = value {
         map.insert(key.to_owned(), Value::String(v));
     }
 }
 
-fn reject_unknown_args(tool_name: &str, args: &Map<String, Value>, allowed: &[&str]) -> Result<(), ToolCallError> {
+pub(crate) fn reject_unknown_args(tool_name: &str, args: &Map<String, Value>, allowed: &[&str]) -> Result<(), ToolCallError> {
     for key in args.keys() {
         if !allowed.contains(&key.as_str()) {
             return Err(ToolCallError::InvalidParams(format!("unsupported parameter \"{key}\" for {tool_name}")));

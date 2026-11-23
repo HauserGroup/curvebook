@@ -2,14 +2,21 @@
 
 use curvebook_doc::{
     ColumnTable, ContingencyTable, DataSetColumn, DataSheet, GroupedTable, MultipleVariablesTable, NestedGroupColumn, NestedTable, PartsOfWholeTable,
-    ProjectDocument, SheetId, SheetSection, SurvivalTable, TableArchetype, VariableColumn, XyTable,
+    ProjectDocument, ResultTab, SheetId, SheetSection, SurvivalTable, TableArchetype, VariableColumn, XyTable,
 };
 use curvebook_format::{CsvOptions, export_datasheet_to_csv, export_result_sheet_json};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-const MAX_CSV_PREVIEW_ROWS: usize = 100;
-const MAX_CSV_PREVIEW_BYTES: usize = 65_536;
+pub(crate) const MAX_CSV_PREVIEW_ROWS: usize = 100;
+pub(crate) const MAX_CSV_PREVIEW_BYTES: usize = 65_536;
+pub(crate) const MAX_RESULT_PREVIEW_TABS: usize = 32;
+pub(crate) const MAX_RESULT_PREVIEW_ROWS: usize = 100;
+pub(crate) const MAX_RESULT_PREVIEW_COLS: usize = 64;
+pub(crate) const MAX_RESULT_PREVIEW_TOTAL_CELLS: usize = 4_096;
+pub(crate) const MAX_RESULT_PREVIEW_FOOTNOTES: usize = 64;
+pub(crate) const MAX_RESULT_PREVIEW_CHECKLIST: usize = 128;
+pub(crate) const MAX_RESULT_PREVIEW_SCALARS: usize = 2_048;
 
 /// Resource entry returned inside MCP `resources/list`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -214,7 +221,7 @@ fn truncate_csv_bytes(mut csv: String, max_bytes: usize) -> (String, bool) {
     (csv, true)
 }
 
-fn build_csv_preview(ds: &DataSheet) -> Result<(String, bool), ResourceError> {
+pub(crate) fn build_csv_preview(ds: &DataSheet) -> Result<(String, bool), ResourceError> {
     ds.archetype.validate().map_err(|err| ResourceError::Internal(format!("CSV preview export failed: {err}")))?;
     let row_count = ds.archetype.row_count();
     let row_truncated = row_count > MAX_CSV_PREVIEW_ROWS;
@@ -229,6 +236,56 @@ fn build_csv_preview(ds: &DataSheet) -> Result<(String, bool), ResourceError> {
     .map_err(|err| ResourceError::Internal(format!("CSV preview export failed: {err}")))?;
     let (capped, byte_truncated) = truncate_csv_bytes(raw_csv, MAX_CSV_PREVIEW_BYTES);
     Ok((capped, row_truncated || byte_truncated))
+}
+
+pub(crate) fn slice_preview_vec<T: Clone>(items: &[T], limit: usize) -> (Vec<T>, bool) {
+    let truncated = items.len() > limit;
+    (items.iter().take(limit).cloned().collect(), truncated)
+}
+
+pub(crate) fn slice_result_tabs_preview(tabs: &[ResultTab]) -> (Vec<ResultTab>, bool) {
+    let mut truncated = tabs.len() > MAX_RESULT_PREVIEW_TABS;
+    let mut remaining_cells = MAX_RESULT_PREVIEW_TOTAL_CELLS;
+    let mut out = Vec::with_capacity(tabs.len().min(MAX_RESULT_PREVIEW_TABS));
+
+    for tab in tabs.iter().take(MAX_RESULT_PREVIEW_TABS) {
+        if tab.column_headers.len() > MAX_RESULT_PREVIEW_COLS || tab.rows.len() > MAX_RESULT_PREVIEW_ROWS {
+            truncated = true;
+        }
+        let column_headers: Vec<String> = tab.column_headers.iter().take(MAX_RESULT_PREVIEW_COLS).cloned().collect();
+        let mut out_rows = Vec::new();
+        let mut out_row_labels = Vec::new();
+        for (r_idx, row) in tab.rows.iter().take(MAX_RESULT_PREVIEW_ROWS).enumerate() {
+            if row.len() > MAX_RESULT_PREVIEW_COLS {
+                truncated = true;
+            }
+            let take_cols = row.len().min(MAX_RESULT_PREVIEW_COLS);
+            if take_cols > remaining_cells {
+                truncated = true;
+                break;
+            }
+            remaining_cells -= take_cols;
+            out_rows.push(row[..take_cols].to_vec());
+            if let Some(lbl) = tab.row_labels.get(r_idx) {
+                out_row_labels.push(lbl.clone());
+            }
+        }
+        if tab.row_labels.len() > out_rows.len() || tab.footnotes.len() > MAX_RESULT_PREVIEW_FOOTNOTES {
+            truncated = true;
+        }
+        let footnotes = tab.footnotes.iter().take(MAX_RESULT_PREVIEW_FOOTNOTES).cloned().collect();
+        out.push(ResultTab {
+            id: tab.id.clone(),
+            title: tab.title.clone(),
+            kind: tab.kind,
+            column_headers,
+            row_labels: out_row_labels,
+            rows: out_rows,
+            footnotes,
+        });
+    }
+
+    (out, truncated)
 }
 
 fn read_sheet_resource(doc: &ProjectDocument, uri: &str, id_str: &str) -> Result<Vec<ResourceContent>, ResourceError> {
@@ -273,6 +330,9 @@ fn read_sheet_resource(doc: &ProjectDocument, uri: &str, id_str: &str) -> Result
             })
         }),
         SheetSection::Analyses => doc.result_sheet(&target).map(|rs| {
+            let (tabs_preview, tabs_truncated) = slice_result_tabs_preview(&rs.tabs);
+            let (scalars_preview, scalars_truncated) = slice_preview_vec(&rs.scalars, MAX_RESULT_PREVIEW_SCALARS);
+            let (checklist_preview, checklist_truncated) = slice_preview_vec(&rs.checklist, MAX_RESULT_PREVIEW_CHECKLIST);
             let mut payload = json!({
                 "uri": uri,
                 "section": "analyses",
@@ -282,11 +342,14 @@ fn read_sheet_resource(doc: &ProjectDocument, uri: &str, id_str: &str) -> Result
                 "selected_data_sets": rs.analysis.selected_data_sets,
                 "status": rs.status,
                 "has_analyzable_data": rs.analyzable_data.is_some(),
-                "tabs": rs.tabs,
-                "scalars": rs.scalars,
+                "tabs": tabs_preview,
+                "tabs_truncated": tabs_truncated,
+                "scalars": scalars_preview,
+                "scalars_truncated": scalars_truncated,
                 "pairwise_comparisons": rs.pairwise_comparisons,
                 "fitted_curves": rs.fitted_curves,
-                "checklist": rs.checklist,
+                "checklist": checklist_preview,
+                "checklist_truncated": checklist_truncated,
                 "upstream_dependencies": deps,
             });
             if matches!(&rs.analysis.kind, curvebook_doc::AnalysisKind::NonlinearRegression(nl) if nl.method == curvebook_doc::FitMethod::RobustCauchy)
