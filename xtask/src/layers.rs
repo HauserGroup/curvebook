@@ -353,12 +353,13 @@ fn collect_resolved_transitive_deps(
         let Some(&pname) = pkg_name_by_id.get(pid) else {
             continue;
         };
-        let is_ws = member_id_set.contains(pid) || classify(pname).is_some();
+        let is_ws = member_id_set.contains(pid);
         out.insert((pname.to_owned(), root_kind, is_ws));
 
-        // Do not walk past Testkit or Exempt boundaries: a lower layer dev-depending on testkit
-        // does not inherit testkit's own dependencies on higher layers.
-        if matches!(classify(pname), Some(Class::Testkit | Class::Exempt)) {
+        // Do not walk past Testkit or Exempt boundaries for actual workspace crates:
+        // a lower layer dev-depending on testkit does not inherit testkit's own dependencies on
+        // higher layers, while non-workspace crates named like a workspace crate are still walked.
+        if is_ws && matches!(classify(pname), Some(Class::Testkit | Class::Exempt)) {
             continue;
         }
         if let Some(&sub_node) = node_by_id.get(pid) {
@@ -406,6 +407,7 @@ pub fn check_manifest_patches(root: &Path) -> Vec<Violation> {
 pub fn scan_patch_sections(cargo_toml: &str) -> Vec<Violation> {
     let mut violations = Vec::new();
     let mut in_patch_or_replace = false;
+    let mut in_patch_crate_subtable = false;
     for raw in cargo_toml.lines() {
         let line = raw.split('#').next().unwrap_or_default().trim();
         if line.is_empty() {
@@ -413,21 +415,70 @@ pub fn scan_patch_sections(cargo_toml: &str) -> Vec<Violation> {
         }
         if line.starts_with('[') && line.ends_with(']') {
             let sec = line[1..line.len() - 1].trim();
-            in_patch_or_replace = sec == "replace" || sec.starts_with("patch.");
+            let segs = split_toml_table_segments(sec);
+            in_patch_or_replace = sec == "replace" || segs.first().is_some_and(|s| s == "patch");
+            in_patch_crate_subtable = false;
+            if segs.first().is_some_and(|s| s == "patch")
+                && let Some(crate_name) = segs.get(2)
+            {
+                in_patch_crate_subtable = true;
+                if is_suite_crate(crate_name) {
+                    violations.push(Violation::SuiteCrate { krate: String::from("Cargo.toml[patch/replace]"), dep: crate_name.clone() });
+                }
+            }
             continue;
         }
         if !in_patch_or_replace {
             continue;
         }
-        if let Some((lhs, _)) = line.split_once('=') {
-            let pkg_spec = lhs.trim().trim_matches('"').trim_matches('\'');
-            let pkg_name = pkg_spec.split(':').next().unwrap_or(pkg_spec).trim();
-            if is_suite_crate(pkg_name) {
-                violations.push(Violation::SuiteCrate { krate: String::from("Cargo.toml[patch/replace]"), dep: pkg_name.to_owned() });
+        if let Some((lhs, rhs)) = line.split_once('=') {
+            let lhs_clean = lhs.trim().trim_matches('"').trim_matches('\'');
+            if in_patch_crate_subtable && lhs_clean == "package" {
+                let pkg_name = rhs.trim().trim_matches('"').trim_matches('\'');
+                if is_suite_crate(pkg_name) {
+                    violations.push(Violation::SuiteCrate { krate: String::from("Cargo.toml[patch/replace]"), dep: pkg_name.to_owned() });
+                }
+                continue;
+            }
+            if !in_patch_crate_subtable {
+                let pkg_name = lhs_clean.split(':').next().unwrap_or(lhs_clean).trim();
+                if is_suite_crate(pkg_name) {
+                    violations.push(Violation::SuiteCrate { krate: String::from("Cargo.toml[patch/replace]"), dep: pkg_name.to_owned() });
+                }
             }
         }
     }
     violations
+}
+
+fn split_toml_table_segments(sec: &str) -> Vec<String> {
+    let mut segs = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    for ch in sec.chars() {
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            } else {
+                cur.push(ch);
+            }
+        } else if ch == '"' || ch == '\'' {
+            quote = Some(ch);
+        } else if ch == '.' {
+            let trimmed = cur.trim();
+            if !trimmed.is_empty() {
+                segs.push(trimmed.to_owned());
+            }
+            cur.clear();
+        } else {
+            cur.push(ch);
+        }
+    }
+    let trimmed = cur.trim();
+    if !trimmed.is_empty() {
+        segs.push(trimmed.to_owned());
+    }
+    segs
 }
 
 #[must_use]
@@ -461,6 +512,25 @@ const UI_IO_PATTERNS: &[&str] = &[
     "File::create",
     "std::fs::remove_file",
     "fs::remove_file",
+    "std::fs::remove_dir_all",
+    "fs::remove_dir_all",
+    "std::fs::remove_dir",
+    "fs::remove_dir",
+    "std::fs::create_dir_all",
+    "fs::create_dir_all",
+    "std::fs::create_dir",
+    "fs::create_dir",
+    "std::fs::set_permissions",
+    "fs::set_permissions",
+    "std::fs::hard_link",
+    "fs::hard_link",
+    "std::os::unix::fs::symlink",
+    "os::unix::fs::symlink",
+    "unix::fs::symlink",
+    "std::os::windows::fs::symlink_file",
+    "std::os::windows::fs::symlink_dir",
+    "windows::fs::symlink_file",
+    "windows::fs::symlink_dir",
     "std::fs::copy",
     "fs::copy",
     "std::fs::rename",
@@ -507,7 +577,14 @@ pub fn check_source_hygiene(root: &Path) -> Vec<HygieneViolation> {
         let prod = strip_non_prod_rust(&src);
         if !exempt_process && !ALLOWED_RAW_PROCESS_BASELINE.contains(&rel.as_str()) {
             scan_patterns(&rel, &prod, "raw-process", RAW_PROCESS_PATTERNS, &mut violations);
-            scan_use_statements(&rel, &prod, "raw-process", &["std::process::Command", "process::Command", "std::process::*"], &mut violations);
+            scan_use_statements(
+                &rel,
+                &prod,
+                "raw-process",
+                &["std::process::Command", "process::Command", "std::process::*"],
+                &["std::process", "process"],
+                &mut violations,
+            );
         }
         if in_ui_src && !ALLOWED_UI_IO_BASELINE.contains(&rel.as_str()) {
             scan_patterns(&rel, &prod, "ui-raw-io", UI_IO_PATTERNS, &mut violations);
@@ -524,6 +601,25 @@ pub fn check_source_hygiene(root: &Path) -> Vec<HygieneViolation> {
                     "fs::OpenOptions",
                     "std::fs::remove_file",
                     "fs::remove_file",
+                    "std::fs::remove_dir_all",
+                    "fs::remove_dir_all",
+                    "std::fs::remove_dir",
+                    "fs::remove_dir",
+                    "std::fs::create_dir_all",
+                    "fs::create_dir_all",
+                    "std::fs::create_dir",
+                    "fs::create_dir",
+                    "std::fs::set_permissions",
+                    "fs::set_permissions",
+                    "std::fs::hard_link",
+                    "fs::hard_link",
+                    "std::os::unix::fs::symlink",
+                    "os::unix::fs::symlink",
+                    "unix::fs::symlink",
+                    "std::os::windows::fs::symlink_file",
+                    "std::os::windows::fs::symlink_dir",
+                    "windows::fs::symlink_file",
+                    "windows::fs::symlink_dir",
                     "std::fs::copy",
                     "fs::copy",
                     "std::fs::rename",
@@ -533,6 +629,7 @@ pub fn check_source_hygiene(root: &Path) -> Vec<HygieneViolation> {
                     "process::Command",
                     "std::process::*",
                 ],
+                &["std::fs", "fs", "std::os::unix::fs", "os::unix::fs", "unix::fs", "std::os::windows::fs", "std::process", "process"],
                 &mut violations,
             );
         }
@@ -549,15 +646,19 @@ fn collect_rs_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
         return;
     };
     for entry in entries.flatten() {
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
         let path = entry.path();
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        if path.is_dir() {
+        if ft.is_dir() {
             if name_str == "target" || name_str == "dist" || name_str == "corpus" || name_str.starts_with('.') {
                 continue;
             }
             collect_rs_files(root, &path, out);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("rs")
+        } else if ft.is_file()
+            && path.extension().and_then(|e| e.to_str()) == Some("rs")
             && let Ok(rel) = path.strip_prefix(root)
         {
             out.push(rel.to_string_lossy().replace('\\', "/"));
@@ -577,16 +678,52 @@ fn is_ui_egui_prod_path(rel: &str) -> bool {
     rel.starts_with("crates/ui-egui/src/") && !rel.contains("/tests/") && !rel.ends_with("_test.rs")
 }
 
-fn scan_patterns(rel: &str, prod_src: &str, rule: &'static str, patterns: &[&'static str], out: &mut Vec<HygieneViolation>) {
-    for (idx, line) in prod_src.lines().enumerate() {
-        let mut pos = 0usize;
-        while pos < line.len() {
-            if let Some((hit_pos, pat)) = next_pattern_match(line, pos, patterns) {
-                out.push(HygieneViolation { path: rel.to_owned(), line: idx + 1, rule, pattern: pat });
-                pos = hit_pos + pat.len();
-            } else {
-                break;
+pub(crate) fn collapse_colon_whitespace(src: &str) -> (String, Vec<usize>) {
+    let bytes = src.as_bytes();
+    let mut out = String::with_capacity(bytes.len());
+    let mut lines = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    let mut line = 1usize;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_whitespace() {
+            let mut j = i;
+            let mut skipped_lines = 0usize;
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                if bytes[j] == b'\n' {
+                    skipped_lines += 1;
+                }
+                j += 1;
             }
+            if bytes[j..].starts_with(b"::") || out.ends_with("::") {
+                line += skipped_lines;
+                i = j;
+                continue;
+            }
+        }
+        let ch = src[i..].chars().next().unwrap_or(' ');
+        let ch_len = ch.len_utf8();
+        out.push(ch);
+        for _ in 0..ch_len {
+            lines.push(line);
+        }
+        if ch == '\n' {
+            line += 1;
+        }
+        i += ch_len;
+    }
+    (out, lines)
+}
+
+fn scan_patterns(rel: &str, prod_src: &str, rule: &'static str, patterns: &[&'static str], out: &mut Vec<HygieneViolation>) {
+    let (compact, line_of_byte) = collapse_colon_whitespace(prod_src);
+    let mut pos = 0usize;
+    while pos < compact.len() {
+        if let Some((hit_pos, pat)) = next_pattern_match(&compact, pos, patterns) {
+            let line = line_of_byte.get(hit_pos).copied().unwrap_or(1);
+            out.push(HygieneViolation { path: rel.to_owned(), line, rule, pattern: pat });
+            pos = hit_pos + pat.len();
+        } else {
+            break;
         }
     }
 }
@@ -938,21 +1075,42 @@ fn split_cfg_args(s: &str) -> Vec<&str> {
     args
 }
 
-fn scan_use_statements(rel: &str, prod_src: &str, rule: &'static str, banned_paths: &[&'static str], out: &mut Vec<HygieneViolation>) {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UseBinding {
+    pub(crate) path: String,
+    pub(crate) alias: Option<String>,
+}
+
+fn scan_use_statements(
+    rel: &str,
+    prod_src: &str,
+    rule: &'static str,
+    banned_paths: &[&'static str],
+    banned_module_aliases: &[&'static str],
+    out: &mut Vec<HygieneViolation>,
+) {
     for (line, stmt) in collect_use_statements(prod_src) {
         let mut expanded = Vec::new();
-        expand_use_tree("", &stmt, &mut expanded);
+        expand_use_tree_items("", &stmt, &mut expanded);
         for item in expanded {
+            let norm = item.path.strip_prefix("::").unwrap_or(&item.path);
             for &pat in banned_paths {
-                if item == pat || item.strip_prefix("::") == Some(pat) {
+                if norm == pat {
                     out.push(HygieneViolation { path: rel.to_owned(), line, rule, pattern: pat });
+                }
+            }
+            if item.alias.is_some() {
+                for &mod_pat in banned_module_aliases {
+                    if norm == mod_pat {
+                        out.push(HygieneViolation { path: rel.to_owned(), line, rule, pattern: mod_pat });
+                    }
                 }
             }
         }
     }
 }
 
-fn collect_use_statements(prod_src: &str) -> Vec<(usize, String)> {
+pub(crate) fn collect_use_statements(prod_src: &str) -> Vec<(usize, String)> {
     let bytes = prod_src.as_bytes();
     let mut stmts = Vec::new();
     let mut i = 0usize;
@@ -993,7 +1151,7 @@ fn collect_use_statements(prod_src: &str) -> Vec<(usize, String)> {
     stmts
 }
 
-fn expand_use_tree(prefix: &str, tree: &str, out: &mut Vec<String>) {
+pub(crate) fn expand_use_tree_items(prefix: &str, tree: &str, out: &mut Vec<UseBinding>) {
     let trimmed = tree.trim();
     if trimmed.is_empty() {
         return;
@@ -1005,22 +1163,22 @@ fn expand_use_tree(prefix: &str, tree: &str, out: &mut Vec<String>) {
         let next_prefix = join_use_path(prefix, sub_prefix.trim_end_matches("::"));
         let inner = &trimmed[open + 1..trimmed.len() - 1];
         for part in split_brace_items(inner) {
-            expand_use_tree(&next_prefix, part, out);
+            expand_use_tree_items(&next_prefix, part, out);
         }
         return;
     }
-    let without_alias = strip_use_alias(trimmed);
-    let compact: String = without_alias.chars().filter(|c| !c.is_whitespace()).collect();
+    let (item_path, alias) = split_use_alias(trimmed);
+    let compact: String = item_path.chars().filter(|c| !c.is_whitespace()).collect();
     if compact.is_empty() {
         return;
     }
     let resolved = if compact == "self" { prefix.to_owned() } else { join_use_path(prefix, &compact) };
     if !resolved.is_empty() {
-        out.push(resolved);
+        out.push(UseBinding { path: resolved, alias: alias.map(str::to_owned) });
     }
 }
 
-fn strip_use_alias(item: &str) -> &str {
+fn split_use_alias(item: &str) -> (&str, Option<&str>) {
     let bytes = item.as_bytes();
     let mut i = 0usize;
     while i + 2 <= bytes.len() {
@@ -1028,12 +1186,13 @@ fn strip_use_alias(item: &str) -> &str {
             let left_ok = i > 0 && bytes[i - 1].is_ascii_whitespace();
             let right_ok = bytes.get(i + 2).is_some_and(u8::is_ascii_whitespace);
             if left_ok && right_ok {
-                return item[..i].trim();
+                let alias = item[i + 2..].trim();
+                return (item[..i].trim(), (!alias.is_empty()).then_some(alias));
             }
         }
         i += 1;
     }
-    item.trim()
+    (item.trim(), None)
 }
 
 fn join_use_path(prefix: &str, seg: &str) -> String {
@@ -1385,5 +1544,59 @@ serde = "1"
         assert!(hits.iter().any(|h| h.path == "crates/ui-egui/src/extra_io.rs" && h.pattern == "std::fs::remove_file"), "{hits:?}");
         assert!(hits.iter().any(|h| h.path == "crates/ui-egui/src/extra_io.rs" && h.pattern == "std::fs::write"), "{hits:?}");
         assert!(!hits.iter().any(|h| h.path == "crates/engine/src/real_test_only.rs"), "{hits:?}");
+    }
+
+    #[test]
+    fn sec22_catches_patch_subtable_aliases_multiline_paths_and_dir_perm_link_ops() {
+        let patch_sub =
+            scan_patch_sections("[patch.crates-io.craft-ui]\npath = \"../x\"\n[patch.\"https://example.com\".alias]\npackage = \"craft-update\"\n");
+        assert_eq!(patch_sub.len(), 2, "{patch_sub:?}");
+
+        let meta = parse(
+            r#"{
+                "packages": [
+                    {"id": "engine 0.1.0", "name": "curvebook-engine", "dependencies": []},
+                    {"id": "ext-tk 1.0.0", "name": "curvebook-testkit", "dependencies": []},
+                    {"id": "egui 0.31.0", "name": "egui", "dependencies": []}
+                ],
+                "workspace_members": ["engine 0.1.0"],
+                "resolve": {
+                    "nodes": [
+                        {"id": "engine 0.1.0", "deps": [{"pkg": "ext-tk 1.0.0", "dep_kinds": [{"kind": null}]}]},
+                        {"id": "ext-tk 1.0.0", "deps": [{"pkg": "egui 0.31.0", "dep_kinds": [{"kind": null}]}]},
+                        {"id": "egui 0.31.0", "deps": []}
+                    ]
+                }
+            }"#,
+        )
+        .unwrap();
+        let g = from_metadata(&meta).unwrap();
+        let dep_hits = check(&g);
+        assert!(dep_hits.iter().any(|v| matches!(v, Violation::UiBelowL6 { dep, .. } if dep == "egui")), "{dep_hits:?}");
+
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let root = std::env::temp_dir().join(format!("cb-xtask-sec22-layers-{}-{nanos}", std::process::id()));
+        let write_rel = |rel: &str, content: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, content).unwrap();
+        };
+        write_rel(
+            "crates/engine/src/mod_alias.rs",
+            "use std::process as proc;\npub fn f() { let _ = std\n    ::process\n    ::Command::new(\"ls\"); }\n",
+        );
+        write_rel(
+            "crates/ui-egui/src/dir_ops.rs",
+            "use std::fs as disk;\npub fn f(p: &std::path::Path) {\n    let _ = std\n        ::fs\n        ::create_dir_all(p);\n    let _ = fs::remove_dir(p);\n    let _ = std::fs::remove_dir_all(p);\n    let _ = std::fs::hard_link(p, p);\n    let _ = std::os::unix::fs::symlink(p, p);\n}\n",
+        );
+        let hits = check_source_hygiene(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(hits.iter().any(|h| h.path.ends_with("mod_alias.rs") && h.pattern == "std::process"), "{hits:?}");
+        assert!(hits.iter().any(|h| h.path.ends_with("mod_alias.rs") && h.pattern == "std::process::Command::new"), "{hits:?}");
+        for expected in
+            ["std::fs", "std::fs::create_dir_all", "fs::remove_dir", "std::fs::remove_dir_all", "std::fs::hard_link", "std::os::unix::fs::symlink"]
+        {
+            assert!(hits.iter().any(|h| h.path.ends_with("dir_ops.rs") && h.pattern == expected), "missing `{expected}` in {hits:?}");
+        }
     }
 }

@@ -732,7 +732,7 @@ fn cleanup_stale_stage_dirs(base: &std::path::Path, prefix: &str) {
             && let Ok(age) = now.duration_since(modified)
             && age.as_secs() >= STALE_PREVIEW_MAX_AGE_SECS
         {
-            let _ = std::fs::remove_dir_all(&path);
+            let _ = curvebook_platform::fs::remove_dir_all_if_not_symlink(&path);
         }
     }
 }
@@ -799,7 +799,7 @@ impl StageDirGuard {
 impl Drop for StageDirGuard {
     fn drop(&mut self) {
         if !self.disarmed {
-            let _ = std::fs::remove_dir_all(&self.path);
+            let _ = curvebook_platform::fs::remove_dir_all_if_not_symlink(&self.path);
         }
     }
 }

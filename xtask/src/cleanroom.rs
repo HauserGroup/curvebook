@@ -100,6 +100,13 @@ pub fn run(root: &Path) -> Result<(), String> {
     Err(format!("{} clean-room violation(s) found:\n  {}", hits.len(), formatted.join("\n  ")))
 }
 
+const MAX_DIST_SCAN_BYTES: usize = 256 * 1024 * 1024;
+
+fn is_reference_plan_prism_path(path: &str) -> bool {
+    let norm = path.replace('\\', "/");
+    norm == "plan/prism" || norm.starts_with("plan/prism/") || norm.contains("/plan/prism/") || norm.ends_with("/plan/prism")
+}
+
 #[must_use]
 pub fn scan(root: &Path, files: &[String]) -> Vec<CleanroomHit> {
     let mut hits = Vec::new();
@@ -108,8 +115,7 @@ pub fn scan(root: &Path, files: &[String]) -> Vec<CleanroomHit> {
         if should_skip(path) {
             continue;
         }
-        let norm = path.replace('\\', "/");
-        if norm == "plan/prism" || norm.starts_with("plan/prism/") {
+        if is_reference_plan_prism_path(path) {
             hits.push(CleanroomHit { path: path.clone(), line: 1, signature: "committed plan/prism reference directory" });
             continue;
         }
@@ -151,13 +157,12 @@ pub fn scan_dist_artefacts_with_stats(dist_dir: &Path) -> Result<(usize, usize, 
     let mut archive_entries = 0usize;
     let mut hits = Vec::new();
     for rel in rel_files {
-        let norm = rel.replace('\\', "/");
-        if norm == "plan/prism" || norm.starts_with("plan/prism/") {
+        if is_reference_plan_prism_path(&rel) {
             hits.push(CleanroomHit { path: rel, line: 1, signature: "bundled plan/prism reference directory" });
             continue;
         }
-        let Ok(bytes) = std::fs::read(dist_dir.join(&rel)) else {
-            hits.push(CleanroomHit { path: rel, line: 1, signature: "unreadable file" });
+        let Ok(bytes) = curvebook_platform::fs::read_regular_file_bytes(&dist_dir.join(&rel), MAX_DIST_SCAN_BYTES) else {
+            hits.push(CleanroomHit { path: rel, line: 1, signature: "unreadable or oversized file" });
             continue;
         };
         scan_bytes_recursive(&rel, &bytes, 0, true, &mut archive_entries, &mut hits);
@@ -188,6 +193,9 @@ fn collect_dist_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<
     Ok(())
 }
 
+// Intentional historical audit-archive waiver: committed/untracked audit reports under
+// `docs/audit/` and `docs/history/audit/` document prior findings verbatim and are skipped only
+// during working-tree scans (`scan`), never during `dist/` bundle scans.
 fn should_skip(path: &str) -> bool {
     let norm = path.replace('\\', "/");
     let trimmed = norm.strip_prefix("./").unwrap_or(&norm);
@@ -218,9 +226,7 @@ fn scan_bytes_recursive(
 
     if is_vendor_archive || is_zip {
         if depth >= MAX_ARCHIVE_DEPTH {
-            if is_vendor_archive {
-                hits.push(CleanroomHit { path: display_path.to_owned(), line: 1, signature: "nested archive depth exceeded" });
-            }
+            hits.push(CleanroomHit { path: display_path.to_owned(), line: 1, signature: "nested archive depth exceeded" });
             return;
         }
         if let Ok(archive) = ZipArchive::from_bytes_with_limits(bytes, CLEANROOM_ZIP_LIMITS) {
@@ -235,8 +241,8 @@ fn scan_bytes_recursive(
         }
         let before = hits.len();
         scan_text_bytes(display_path, bytes, allow_packaged, hits);
-        if is_vendor_archive && hits.len() == before {
-            hits.push(CleanroomHit { path: display_path.to_owned(), line: 1, signature: "uninspectable .prism/.pzf archive" });
+        if hits.len() == before {
+            hits.push(CleanroomHit { path: display_path.to_owned(), line: 1, signature: "uninspectable or corrupt archive" });
         }
         return;
     }
@@ -264,6 +270,7 @@ fn scan_text_bytes(display_path: &str, bytes: &[u8], allow_packaged: bool, hits:
     if let Some(little_endian) = detect_bomless_utf16(bytes) {
         let decoded = decode_utf16(bytes, little_endian);
         scan_text(display_path, &decoded, allow_packaged, hits, &mut seen_lines);
+        return;
     }
     let text = String::from_utf8_lossy(bytes);
     scan_text(display_path, &text, allow_packaged, hits, &mut seen_lines);
@@ -707,5 +714,31 @@ Copyright (c) 2026 VectorCraft contributors.
         assert!(bad_hits[2].signature.contains("storytold"));
         assert!(bad_hits[3].signature.contains("storytold"));
         assert!(bad_hits[4].signature.contains("storytold"));
+    }
+
+    #[test]
+    fn sec22_fails_closed_on_nested_plan_prism_depth_exceeded_and_corrupt_zip() {
+        let dir = temp_dir("sec22-cr");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("dist/sub/plan/prism")).unwrap();
+        std::fs::write(dir.join("dist/sub/plan/prism/frame.txt"), b"x").unwrap();
+
+        let mut inner = ZipWriter::new();
+        inner.add_file("leaf.txt", b"ok".to_vec()).unwrap();
+        let mut mid = ZipWriter::new();
+        mid.add_file("inner.zip", inner.finish().unwrap()).unwrap();
+        let mut top = ZipWriter::new();
+        top.add_file("mid.zip", mid.finish().unwrap()).unwrap();
+        std::fs::write(dir.join("dist/deep.zip"), top.finish().unwrap()).unwrap();
+        std::fs::write(dir.join("dist/corrupt.zip"), b"PK\x03\x04\x00\x00broken").unwrap();
+
+        let nested_hits = scan(&dir, &[String::from("vendor/plan/prism/ref.txt")]);
+        assert!(nested_hits.iter().any(|h| h.signature.contains("plan/prism")), "{nested_hits:?}");
+
+        let dist_hits = super::scan_dist_artefacts(&dir.join("dist")).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(dist_hits.iter().any(|h| h.signature.contains("plan/prism")), "{dist_hits:?}");
+        assert!(dist_hits.iter().any(|h| h.signature == "nested archive depth exceeded"), "{dist_hits:?}");
+        assert!(dist_hits.iter().any(|h| h.signature == "uninspectable or corrupt archive"), "{dist_hits:?}");
     }
 }

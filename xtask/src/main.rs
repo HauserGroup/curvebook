@@ -214,11 +214,19 @@ fn run_cargo_metadata(root: &Path, args: &[&str]) -> Result<serde_json::Value, S
 }
 
 pub(crate) fn cargo_metadata(root: &Path) -> Result<serde_json::Value, String> {
-    run_cargo_metadata(root, &["metadata", "--format-version", "1", "--no-deps"])
+    if root.join("Cargo.lock").is_file() {
+        run_cargo_metadata(root, &["metadata", "--locked", "--format-version", "1", "--no-deps"])
+    } else {
+        run_cargo_metadata(root, &["metadata", "--format-version", "1", "--no-deps"])
+    }
 }
 
 pub(crate) fn cargo_metadata_resolved(root: &Path) -> Result<serde_json::Value, String> {
-    run_cargo_metadata(root, &["metadata", "--format-version", "1"])
+    if root.join("Cargo.lock").is_file() {
+        run_cargo_metadata(root, &["metadata", "--locked", "--format-version", "1"])
+    } else {
+        run_cargo_metadata(root, &["metadata", "--format-version", "1"])
+    }
 }
 
 fn cmd_layers(root: &Path) -> Result<(), String> {
@@ -324,7 +332,7 @@ fn run_trunk_web_release_if_available(root: &Path) -> Result<(), String> {
         return Ok(());
     }
 
-    let target_dir = std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| root.join("target"), PathBuf::from);
+    let target_dir = ci_cache::resolve_target_dir_from_env(root);
     let dist_dir = target_dir.join("wasm-trunk-dist");
     std::fs::create_dir_all(&dist_dir).map_err(|e| format!("mkdir {}: {e}", dist_dir.display()))?;
     let dist_arg = dist_dir.to_string_lossy().into_owned();

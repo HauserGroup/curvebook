@@ -175,11 +175,22 @@ fn resolve_input_path(root: &Path, raw: &str) -> PathBuf {
     if p.is_absolute() { p.to_path_buf() } else { root.join(p) }
 }
 
+pub(crate) fn resolve_target_dir_from_env(root: &Path) -> PathBuf {
+    match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(val) if !val.is_empty() => resolve_path_from_root(root, Path::new(&val)),
+        _ => root.join("target"),
+    }
+}
+
+fn resolve_path_from_root(root: &Path, p: &Path) -> PathBuf {
+    if p.is_absolute() { p.to_path_buf() } else { root.join(p) }
+}
+
 fn resolve_target_dir(root: &Path, explicit: Option<&Path>) -> PathBuf {
     if let Some(dir) = explicit {
-        return dir.to_path_buf();
+        return resolve_path_from_root(root, dir);
     }
-    std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| root.join("target"), PathBuf::from)
+    resolve_target_dir_from_env(root)
 }
 
 fn load_or_record_messages(root: &Path, target_dir: &Path, message_files: &[PathBuf]) -> Result<String, String> {
@@ -350,13 +361,17 @@ fn collect_build_script_units(val: &Value, profile_dir: &Path, canonical_profile
 fn record_top_level_file(top_name: &str, pkg_hint: Option<&str>, active: &mut ActiveUnits) {
     active.top_files.insert(top_name.to_owned());
     let stem = top_name.strip_suffix(".exe").unwrap_or(top_name);
-    active.top_files.insert(format!("{stem}.d"));
-    active.top_files.insert(format!("{stem}.pdb"));
-    active.top_files.insert(format!("{stem}.dSYM"));
+    let stem_norm = stem.replace('-', "_");
+    for base in [stem, stem_norm.as_str()] {
+        active.top_files.insert(format!("{base}.d"));
+        active.top_files.insert(format!("{base}.pdb"));
+        active.top_files.insert(format!("{base}.dSYM"));
+    }
     if let Some(raw_stem) =
         stem.strip_prefix("lib").and_then(|s| s.strip_suffix(".rlib").or_else(|| s.strip_suffix(".dylib")).or_else(|| s.strip_suffix(".so")))
     {
         active.top_files.insert(format!("{raw_stem}.d"));
+        active.top_files.insert(format!("{}.d", raw_stem.replace('-', "_")));
     }
     active.top_targets.push((pkg_hint.map(str::to_owned), top_name.to_owned()));
 }
@@ -406,10 +421,11 @@ fn find_matching_top_fingerprint(
         let Some(hash) = extract_unit_hash(fp_name) else {
             continue;
         };
-        if let Some(pkg) = pkg_hint
-            && !fp_name.starts_with(&format!("{pkg}-"))
-        {
-            continue;
+        if let Some(pkg) = pkg_hint {
+            let pkg_norm = pkg.replace('-', "_");
+            if !fp_name.starts_with(&format!("{pkg}-")) && !fp_name.starts_with(&format!("{pkg_norm}-")) {
+                continue;
+            }
         }
         let fp_dir = fp_root.join(fp_name);
         let has_marker = fingerprint_matches_target(&fp_dir, stem, &stem_norm);
@@ -452,22 +468,33 @@ fn fingerprint_matches_target(fp_dir: &Path, stem: &str, stem_norm: &str) -> boo
 }
 
 fn dep_artifact_for_top(deps_dir: &Path, top_name: &str, stem: &str, hash: &str) -> Option<PathBuf> {
+    let stem_norm = stem.replace('-', "_");
     if top_name.ends_with(".exe") {
-        let p = deps_dir.join(format!("{stem}-{hash}.exe"));
-        if p.exists() {
-            return Some(p);
+        for base in [stem, stem_norm.as_str()] {
+            let p = deps_dir.join(format!("{base}-{hash}.exe"));
+            if p.exists() {
+                return Some(p);
+            }
         }
     }
     if let Some((base, ext)) = top_name.rsplit_once('.')
         && matches!(ext, "rlib" | "dylib" | "so" | "dll" | "a" | "lib")
     {
-        let p = deps_dir.join(format!("{base}-{hash}.{ext}"));
+        let base_norm = base.replace('-', "_");
+        for cand in [base, base_norm.as_str()] {
+            let p = deps_dir.join(format!("{cand}-{hash}.{ext}"));
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+    for base in [stem, stem_norm.as_str()] {
+        let p = deps_dir.join(format!("{base}-{hash}"));
         if p.exists() {
             return Some(p);
         }
     }
-    let p = deps_dir.join(format!("{stem}-{hash}"));
-    p.exists().then_some(p)
+    None
 }
 
 fn same_artifact_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
@@ -493,10 +520,19 @@ fn relative_to_profile(path: &Path, profile_dir: &Path, canonical_profile: &Path
 }
 
 fn extract_pkg_name_from_id(pkg_id: &str) -> Option<String> {
-    if let Some((_, tail)) = pkg_id.rsplit_once('#') {
-        let name_part = tail.split('@').next().unwrap_or(tail);
-        if !name_part.is_empty() {
-            return Some(name_part.to_owned());
+    if let Some((before_hash, tail)) = pkg_id.rsplit_once('#') {
+        if let Some((name_part, _)) = tail.split_once('@') {
+            if !name_part.is_empty() {
+                return Some(name_part.to_owned());
+            }
+        } else if tail.bytes().next().is_some_and(|b| b.is_ascii_digit()) {
+            let uri = before_hash.split('?').next().unwrap_or(before_hash).trim_end_matches('/');
+            let uri = if before_hash.starts_with("git+") { uri.strip_suffix(".git").unwrap_or(uri) } else { uri };
+            if let Some(dir_name) = uri.rsplit('/').next().filter(|s| !s.is_empty()) {
+                return Some(dir_name.to_owned());
+            }
+        } else if !tail.is_empty() {
+            return Some(tail.to_owned());
         }
     }
     pkg_id.split_whitespace().next().filter(|s| !s.is_empty()).map(str::to_owned)
@@ -1195,5 +1231,42 @@ mod tests {
         }
         assert_eq!(fresh_by_name.get("crate_a"), Some(&true), "unchanged crate_a must stay fresh: {fresh_by_name:?}");
         assert_eq!(fresh_by_name.get("crate_b"), Some(&false), "modified crate_b must recompile: {fresh_by_name:?}");
+    }
+
+    #[test]
+    fn extract_pkg_name_and_relative_target_dir_handle_cargo_177_and_hyphen_bins() {
+        assert_eq!(super::extract_pkg_name_from_id("path+file:///repo/xtask#0.1.0-alpha.2").as_deref(), Some("xtask"));
+        assert_eq!(super::extract_pkg_name_from_id("path+file:///repo/apps/curvebook#0.1.0-alpha.2").as_deref(), Some("curvebook"));
+        assert_eq!(super::extract_pkg_name_from_id("path+file:///repo/crates/cli#curvebook-cli@0.1.0-alpha.2").as_deref(), Some("curvebook-cli"));
+        assert_eq!(super::extract_pkg_name_from_id("curvebook-cli 0.1.0 (path+file:///repo/crates/cli)").as_deref(), Some("curvebook-cli"));
+
+        let fx = TempDirGuard::new("pkgid-hyphen");
+        let root = fx.path.join("ws");
+        let target = root.join("rel-target");
+        let debug = target.join("debug");
+        let deps = debug.join("deps");
+        let fp_dir = debug.join(".fingerprint").join("curvebook-cli-0123456789abcdef");
+        fs::create_dir_all(&deps).unwrap();
+        fs::create_dir_all(&fp_dir).unwrap();
+        fs::write(fp_dir.join("bin-curvebook-cli"), b"").unwrap();
+        let top_bin = debug.join("curvebook-cli");
+        let dep_bin = deps.join("curvebook_cli-0123456789abcdef");
+        fs::write(&dep_bin, b"bin").unwrap();
+        fs::hard_link(&dep_bin, &top_bin).unwrap();
+
+        let rel_resolved = super::resolve_target_dir(&root, Some(Path::new("rel-target")));
+        assert_eq!(rel_resolved, target);
+
+        let msgs = format!(
+            "{{\"reason\":\"compiler-artifact\",\"package_id\":\"path+file:///repo/crates/cli#0.1.0-alpha.2\",\"filenames\":[{}],\"executable\":{}}}\n",
+            serde_json::Value::String(top_bin.to_string_lossy().into_owned()),
+            serde_json::Value::String(top_bin.to_string_lossy().into_owned()),
+        );
+        // Also test Cargo 1.77+ `@`-less ID where dir matches crate name.
+        let msgs = msgs.replace("crates/cli#0.1.0-alpha.2", "crates/curvebook-cli#0.1.0-alpha.2");
+        trim_target_dir(&root, &rel_resolved, "debug", &msgs, "deadbeef").unwrap();
+        assert!(top_bin.exists(), "active hyphenated top binary must be retained");
+        assert!(dep_bin.exists(), "underscore-normalized deps artifact must be retained");
+        assert!(fp_dir.exists(), "matching fingerprint dir must be retained");
     }
 }

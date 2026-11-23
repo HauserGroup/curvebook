@@ -395,6 +395,24 @@ fn io_err(context: &str, err: &std::io::Error) -> PlatformError {
     PlatformError::Io { context: context.to_owned(), message: err.to_string() }
 }
 
+/// Recursively remove `path` after verifying via `symlink_metadata` that it is a regular,
+/// non-symlink directory.
+///
+/// # Errors
+/// Returns [`PlatformError::InvalidPath`] when `path` is empty, a symlink, or not a directory, or
+/// [`PlatformError::Io`] if metadata inspection or recursive removal fails.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn remove_dir_all_if_not_symlink(path: &Path) -> Result<(), PlatformError> {
+    if path.as_os_str().is_empty() {
+        return Err(PlatformError::InvalidPath { reason: String::from("directory path must not be empty") });
+    }
+    let meta = std::fs::symlink_metadata(path).map_err(|err| io_err(&format!("inspect directory `{}`", path.display()), &err))?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(PlatformError::InvalidPath { reason: format!("path `{}` must be a regular non-symlink directory", path.display()) });
+    }
+    std::fs::remove_dir_all(path).map_err(|err| io_err(&format!("remove directory `{}`", path.display()), &err))
+}
+
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
@@ -624,5 +642,35 @@ mod tests {
         assert_eq!(std::fs::read(&handed_off).unwrap(), b"handed-off");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_dir_all_if_not_symlink_removes_regular_dirs_and_rejects_symlinks_and_files() {
+        use super::remove_dir_all_if_not_symlink;
+
+        let dir = temp_dir("remove-dir");
+        let regular_sub = dir.join("nested/child");
+        std::fs::create_dir_all(&regular_sub).unwrap();
+        std::fs::write(regular_sub.join("data.txt"), b"ok").unwrap();
+
+        let regular_file = dir.join("file.txt");
+        std::fs::write(&regular_file, b"not a dir").unwrap();
+        assert!(matches!(remove_dir_all_if_not_symlink(&regular_file), Err(PlatformError::InvalidPath { .. })));
+
+        #[cfg(unix)]
+        {
+            let target_dir = dir.join("kept-target");
+            std::fs::create_dir_all(&target_dir).unwrap();
+            std::fs::write(target_dir.join("keep.txt"), b"stay").unwrap();
+            let symlink_dir = dir.join("link-dir");
+            std::os::unix::fs::symlink(&target_dir, &symlink_dir).unwrap();
+            assert!(matches!(remove_dir_all_if_not_symlink(&symlink_dir), Err(PlatformError::InvalidPath { .. })));
+            assert!(target_dir.join("keep.txt").is_file(), "symlink target must not be deleted");
+        }
+
+        remove_dir_all_if_not_symlink(&dir.join("nested")).unwrap();
+        assert!(!dir.join("nested").exists());
+        remove_dir_all_if_not_symlink(&dir).unwrap();
+        assert!(!dir.exists());
     }
 }

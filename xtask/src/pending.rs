@@ -83,7 +83,8 @@ pub fn collect_pending(md: &str) -> Vec<PendingItem> {
 }
 
 fn extract_roadmap_id(heading: &str) -> Option<&str> {
-    let token = heading.split_whitespace().next()?;
+    let raw = heading.split_whitespace().next()?;
+    let token = raw.trim_start_matches(['`', '(']).trim_end_matches(['`', ')', ':', '.', ',', ';', '-']);
     let body = token.strip_prefix('R')?;
     let (major, minor) = body.split_once('.')?;
     if !major.is_empty() && major.bytes().all(|b| b.is_ascii_digit()) && !minor.is_empty() && minor.bytes().all(|b| b.is_ascii_digit()) {
@@ -104,11 +105,14 @@ mod tests {
 - [x] Hook added
 - [ ] Implement secrets command
 
-### R5.4 Native clipboard
+### `R5.4`: Native clipboard
 - [ ] Implement NSPasteboard adapter
 ```markdown
 - [ ] Not a real roadmap checkbox
 ```
+
+### R6.1, Windows installer
+- [ ] Sign MSI
 
 ## Parked
 - [ ] Deferred outside R headings
@@ -119,7 +123,8 @@ mod tests {
             vec![
                 PendingItem { item_id: String::from("R0.3"), line: 3, text: String::from("Implement secrets command") },
                 PendingItem { item_id: String::from("R5.4"), line: 6, text: String::from("Implement NSPasteboard adapter") },
-                PendingItem { item_id: String::from("unscoped"), line: 12, text: String::from("Deferred outside R headings") },
+                PendingItem { item_id: String::from("R6.1"), line: 12, text: String::from("Sign MSI") },
+                PendingItem { item_id: String::from("unscoped"), line: 15, text: String::from("Deferred outside R headings") },
             ]
         );
     }
