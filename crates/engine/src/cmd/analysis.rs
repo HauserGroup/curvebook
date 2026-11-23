@@ -1722,7 +1722,7 @@ fn persist_mv_two_group_defaults(mv: &MultipleVariablesTable, selected: &mut Vec
     let pool: Vec<usize> = if selected.is_empty() { (0..n_vars).collect() } else { selected.iter().copied().filter(|&i| i < n_vars).collect() };
     if matches!(tg.method, TwoGroupMethod::OneSampleT { .. } | TwoGroupMethod::OneSampleWilcoxon { .. }) {
         if tg.mv_response_column.is_none() && selected.is_empty() {
-            let num_cols: Vec<usize> = pool.into_iter().filter(|&i| is_mv_numeric_var(&mv.variables[i])).collect();
+            let num_cols: Vec<usize> = pool.into_iter().filter(|&i| mv.variables.get(i).is_some_and(is_mv_numeric_var)).collect();
             if !num_cols.is_empty() {
                 *selected = num_cols;
             }
@@ -1734,8 +1734,11 @@ fn persist_mv_two_group_defaults(mv: &MultipleVariablesTable, selected: &mut Vec
             return;
         }
         if tg.mv_group_column.is_none() {
-            let cat_cands: Vec<usize> =
-                pool.iter().copied().filter(|&i| Some(i) != tg.mv_response_column && mv.variables[i].role == VariableRole::Categorical).collect();
+            let cat_cands: Vec<usize> = pool
+                .iter()
+                .copied()
+                .filter(|&i| Some(i) != tg.mv_response_column && mv.variables.get(i).is_some_and(|v| v.role == VariableRole::Categorical))
+                .collect();
             if let [only] = cat_cands.as_slice() {
                 tg.mv_group_column = Some(*only);
             }
@@ -1743,17 +1746,17 @@ fn persist_mv_two_group_defaults(mv: &MultipleVariablesTable, selected: &mut Vec
         if tg.mv_response_column.is_none()
             && let Some(g_col) = tg.mv_group_column
         {
-            let num_cands: Vec<usize> = pool.into_iter().filter(|&i| i != g_col && is_mv_numeric_var(&mv.variables[i])).collect();
+            let num_cands: Vec<usize> = pool.into_iter().filter(|&i| i != g_col && mv.variables.get(i).is_some_and(is_mv_numeric_var)).collect();
             tg.mv_response_column = select_default_mv_response_col(mv, &num_cands);
         }
         return;
     }
-    let cat_cols: Vec<usize> = pool.iter().copied().filter(|&i| mv.variables[i].role == VariableRole::Categorical).collect();
-    let num_cols: Vec<usize> = pool.iter().copied().filter(|&i| is_mv_numeric_var(&mv.variables[i])).collect();
-    if cat_cols.len() == 1
+    let cat_cols: Vec<usize> = pool.iter().copied().filter(|&i| mv.variables.get(i).is_some_and(|v| v.role == VariableRole::Categorical)).collect();
+    let num_cols: Vec<usize> = pool.iter().copied().filter(|&i| mv.variables.get(i).is_some_and(is_mv_numeric_var)).collect();
+    if let [only_cat] = cat_cols.as_slice()
         && let Some(r_col) = select_default_mv_response_col(mv, &num_cols)
     {
-        tg.mv_group_column = Some(cat_cols[0]);
+        tg.mv_group_column = Some(*only_cat);
         tg.mv_response_column = Some(r_col);
     } else if selected.is_empty() && !num_cols.is_empty() {
         *selected = num_cols;
@@ -1791,7 +1794,7 @@ fn resolve_mv_fit_columns_default(
     let group_set: HashSet<usize> = group_cols_in.iter().copied().collect();
     let x_set: HashSet<usize> = x_cols_in.iter().copied().collect();
     let selected_numeric: Vec<usize> =
-        selected.iter().copied().filter(|&i| i < n_vars && !group_set.contains(&i) && is_mv_numeric_var(&mv.variables[i])).collect();
+        selected.iter().copied().filter(|&i| !group_set.contains(&i) && mv.variables.get(i).is_some_and(is_mv_numeric_var)).collect();
 
     let y_col = if let Some(yc) = y_col_in {
         yc
@@ -1819,7 +1822,7 @@ fn resolve_mv_fit_columns_default(
     let selected_categorical: Vec<usize> = selected
         .iter()
         .copied()
-        .filter(|&i| i < n_vars && i != y_col && !x_used.contains(&i) && mv.variables[i].role == VariableRole::Categorical)
+        .filter(|&i| i != y_col && !x_used.contains(&i) && mv.variables.get(i).is_some_and(|v| v.role == VariableRole::Categorical))
         .collect();
     let group_cols = if !group_cols_in.is_empty() {
         group_cols_in.to_vec()
@@ -1875,7 +1878,10 @@ fn persist_mv_linear_defaults(mv: &MultipleVariablesTable, selected: &mut Vec<us
     let Some((x_cols, y_col, group_cols)) = resolve_mv_fit_columns_default(mv, &[], &[], &[], None) else {
         return;
     };
-    if !is_mv_numeric_var(&mv.variables[y_col]) || x_cols.is_empty() || x_cols.iter().any(|&c| !is_mv_numeric_var(&mv.variables[c])) {
+    if !mv.variables.get(y_col).is_some_and(is_mv_numeric_var)
+        || x_cols.is_empty()
+        || x_cols.iter().any(|&c| !mv.variables.get(c).is_some_and(is_mv_numeric_var))
+    {
         return;
     }
     let mut pinned = Vec::new();
@@ -1932,8 +1938,10 @@ fn persist_mv_km_defaults(
             let candidates: Vec<usize> =
                 pool.iter().copied().filter(|&i| Some(i) != *mv_time_column && Some(i) != *mv_group_column && is_binary_status_col(mv, i)).collect();
             let preferred = candidates.iter().copied().find(|&i| {
-                let lower = mv.variables[i].title.to_ascii_lowercase();
-                ["status", "event", "censor", "death"].iter().any(|h| lower.contains(h))
+                mv.variables.get(i).is_some_and(|v| {
+                    let lower = v.title.to_ascii_lowercase();
+                    ["status", "event", "censor", "death"].iter().any(|h| lower.contains(h))
+                })
             });
             let Some(chosen) = preferred.or_else(|| candidates.first().copied()) else { return };
             *mv_status_column = Some(chosen);
@@ -1955,8 +1963,10 @@ fn persist_mv_km_defaults(
                 })
                 .collect();
             let preferred = candidates.iter().copied().find(|&i| {
-                let lower = mv.variables[i].title.to_ascii_lowercase();
-                ["time", "surv", "follow", "dur", "day", "month", "year"].iter().any(|h| lower.contains(h))
+                mv.variables.get(i).is_some_and(|v| {
+                    let lower = v.title.to_ascii_lowercase();
+                    ["time", "surv", "follow", "dur", "day", "month", "year"].iter().any(|h| lower.contains(h))
+                })
             });
             let Some(chosen) = preferred.or_else(|| candidates.first().copied()) else { return };
             *mv_time_column = Some(chosen);
@@ -1967,7 +1977,10 @@ fn persist_mv_km_defaults(
         return;
     }
     if mv_group_column.is_none() && (was_time_none || was_status_none || !selected.is_empty()) {
-        *mv_group_column = pool.iter().copied().find(|&i| i != time_col && i != status_col && mv.variables[i].role == VariableRole::Categorical);
+        *mv_group_column = pool
+            .iter()
+            .copied()
+            .find(|&i| i != time_col && i != status_col && mv.variables.get(i).is_some_and(|v| v.role == VariableRole::Categorical));
     }
 }
 
@@ -2273,10 +2286,13 @@ fn validate_xy_glm_params(xy: &XyTable, selected_data_sets: &[usize], glm: &GlmS
             format!("GLM `response_column` {} out of range for XY table with {} Y data sets", glm.response_column, xy.data_sets.len()),
         ));
     }
-    if selected_data_sets.len() == 1 && glm.response_column != 0 && glm.response_column != selected_data_sets[0] {
+    if let [only_ds] = selected_data_sets
+        && glm.response_column != 0
+        && glm.response_column != *only_ds
+    {
         return Err(EngineError::with_code(
             ErrorCode::BadInput,
-            format!("GLM `response_column` {} does not match selected XY dataset {}", glm.response_column, selected_data_sets[0]),
+            format!("GLM `response_column` {} does not match selected XY dataset {}", glm.response_column, only_ds),
         ));
     }
     if selected_data_sets.len() > 1 && !selected_data_sets.contains(&glm.response_column) {
@@ -2294,7 +2310,7 @@ fn validate_xy_glm_params(xy: &XyTable, selected_data_sets: &[usize], glm: &GlmS
             return Err(EngineError::with_code(ErrorCode::BadInput, format!("GLM predictor column {pc} out of range for XY table")));
         }
     }
-    if glm.predictor_columns.len() != 1 || glm.predictor_columns[0] >= 2 {
+    if !matches!(glm.predictor_columns.as_slice(), &[pc] if pc < 2) {
         return Err(EngineError::with_code(ErrorCode::BadInput, "XY GLM supports a single X predictor (`predictor_columns: [0]` or `[1]`)"));
     }
     Ok(())
@@ -3569,11 +3585,11 @@ fn parse_reference_levels(val: &Value) -> Result<Vec<(usize, String)>, EngineErr
     let mut out = Vec::with_capacity(arr.len());
     for (idx, item) in arr.iter().enumerate() {
         if let Some(pair) = item.as_array() {
-            if pair.len() != 2 {
+            let [col_val, lvl_val] = pair.as_slice() else {
                 return Err(EngineError::with_code(ErrorCode::BadInput, format!("`reference_levels[{idx}]` must be a `[column_index, level]` pair")));
-            }
-            let col = parse_usize_json_value(&pair[0], "reference_levels column")?;
-            let lvl = pair[1]
+            };
+            let col = parse_usize_json_value(col_val, "reference_levels column")?;
+            let lvl = lvl_val
                 .as_str()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
@@ -3956,7 +3972,8 @@ fn opt_usize_checked(params: &Value, keys: &[&str]) -> Result<Option<(usize, boo
 fn apply_usize_field(params: &Value, keys: &[&str], target: &mut usize) -> Result<(), EngineError> {
     if let Some((idx, is_null)) = opt_usize_checked(params, keys)? {
         if is_null {
-            return Err(EngineError::with_code(ErrorCode::BadInput, format!("`{}` must be a non-negative integer", keys[0])));
+            let key_name = keys.first().copied().unwrap_or("value");
+            return Err(EngineError::with_code(ErrorCode::BadInput, format!("`{key_name}` must be a non-negative integer")));
         }
         *target = idx;
     }
@@ -3993,11 +4010,11 @@ fn parse_opt_range_filter(val: &Value, key: &str) -> Result<Option<AxisRangeFilt
         return Ok(None);
     }
     if let Some(arr) = val.as_array() {
-        if arr.len() != 2 {
+        let [min_raw, max_raw] = arr.as_slice() else {
             return Err(EngineError::with_code(ErrorCode::BadInput, format!("`{key}` array must have [min, max] entries")));
-        }
-        let min_v = parse_nullable_finite_f64(&arr[0], key)?;
-        let max_v = parse_nullable_finite_f64(&arr[1], key)?;
+        };
+        let min_v = parse_nullable_finite_f64(min_raw, key)?;
+        let max_v = parse_nullable_finite_f64(max_raw, key)?;
         return Ok(Some((min_v, max_v)));
     }
     if let Some(obj) = val.as_object() {
@@ -4169,11 +4186,11 @@ fn parse_per_dataset_constants(val: &Value) -> Result<Vec<(usize, f64)>, EngineE
         let mut out = Vec::with_capacity(pairs.len());
         for (idx, entry) in pairs.iter().enumerate() {
             if let Some(pair) = entry.as_array() {
-                if pair.len() != 2 {
+                let [ds_raw, num_raw] = pair.as_slice() else {
                     return Err(EngineError::with_code(ErrorCode::BadInput, "per-dataset constant pair must have [dataset_index, value]"));
-                }
-                let ds = parse_usize_json_value(&pair[0], "dataset_index")?;
-                let num = pair[1]
+                };
+                let ds = parse_usize_json_value(ds_raw, "dataset_index")?;
+                let num = num_raw
                     .as_f64()
                     .filter(|v| v.is_finite())
                     .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "per-dataset constant value must be finite number"))?;

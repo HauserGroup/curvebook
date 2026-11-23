@@ -36,7 +36,7 @@ fn next_unique_id_with_reserved(doc: &ProjectDocument, base: &str, reserved: &Ha
         base.trim().chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c.to_ascii_lowercase() } else { '-' }).collect();
     let clean_base = sanitized.trim_matches('-');
     let prefix = if clean_base.is_empty() { "sheet" } else { clean_base };
-    let truncated = if prefix.len() > 40 { &prefix[..40] } else { prefix };
+    let truncated = if prefix.len() > 40 { prefix.get(..40).unwrap_or(prefix) } else { prefix };
 
     for n in 1..10_000_usize {
         let candidate_str = format!("{truncated}-{n}");
@@ -1498,12 +1498,11 @@ fn text_hooks_any_sheet(text: &str, id_map: &HashMap<SheetId, SheetId>) -> bool 
         return true;
     }
     let mut rest = text;
-    while let Some(open) = rest.find("{{") {
-        let after_open = &rest[open + 2..];
-        let Some(close) = after_open.find("}}") else {
+    while let Some((_, after_open)) = rest.split_once("{{") {
+        let Some((inner, tail)) = after_open.split_once("}}") else {
             break;
         };
-        let parts: Vec<&str> = after_open[..close].trim().split(':').map(str::trim).collect();
+        let parts: Vec<&str> = inner.trim().split(':').map(str::trim).collect();
         if let ["scalar", sheet, rest_parts @ ..] = parts.as_slice()
             && !sheet.is_empty()
             && !rest_parts.is_empty()
@@ -1511,7 +1510,7 @@ fn text_hooks_any_sheet(text: &str, id_map: &HashMap<SheetId, SheetId>) -> bool 
         {
             return true;
         }
-        rest = &after_open[close + 2..];
+        rest = tail;
     }
     false
 }

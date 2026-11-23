@@ -67,7 +67,7 @@ impl QuitOnFailure {
         let mut response = String::new();
         BufReader::new(stream).read_line(&mut response)?;
         let response: Value = serde_json::from_str(&response)?;
-        if response["result"]["quit"] != json!(true) {
+        if response.get("result").and_then(|r| r.get("quit")) != Some(&json!(true)) {
             return Err("TCP fixture cleanup did not acknowledge app.quit".into());
         }
         Ok(())

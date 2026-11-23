@@ -60,14 +60,18 @@ fn err_cmd(session: &mut Session, id: &str, params: Value) -> Result<EngineError
 fn build_xy_sheet(id: &str, x_title: &str, y_titles: &[&str]) -> Result<DataSheet, Box<dyn Error>> {
     let mut xy = XyTable::new(SubcolumnMode::Single, y_titles.len(), 4)?;
     xy.x_title = x_title.to_owned();
-    for (c, title) in y_titles.iter().enumerate() {
-        xy.data_sets[c].title = (*title).to_owned();
+    for (ds, title) in xy.data_sets.iter_mut().zip(y_titles.iter()) {
+        ds.title = (*title).to_owned();
     }
     for r in 0..4 {
         let xv = (r + 1) as f64;
-        xy.x_cells[r][0] = Cell::number(xv);
-        for c in 0..y_titles.len() {
-            xy.data_sets[c].cells[r][0] = Cell::number(xv + (c as f64 + 1.0) * 0.5 + (r % 2) as f64 * 0.1);
+        if let Some(x_cell) = xy.x_cells.get_mut(r).and_then(|row| row.first_mut()) {
+            *x_cell = Cell::number(xv);
+        }
+        for (c, ds) in xy.data_sets.iter_mut().enumerate().take(y_titles.len()) {
+            if let Some(cell) = ds.cells.get_mut(r).and_then(|row| row.first_mut()) {
+                *cell = Cell::number(xv + (c as f64 + 1.0) * 0.5 + (r % 2) as f64 * 0.1);
+            }
         }
     }
     Ok(DataSheet::new(id, "Method XY", TableArchetype::Xy(xy))?)
@@ -191,7 +195,8 @@ fn fa_sec11_02_decode_base64_bounded_non_empty_and_raw_guard() -> TestResult {
     assert_eq!(over_err.details.as_ref().and_then(|d| d.get("pointer")), Some(&json!("/bytes_base64")));
 
     // Line-wrapped MIME whitespace + trailing whitespace after padding succeeds; data after padding fails.
-    let wrapped = format!("  {} \n {}  \n", &encode_base64(b"hello ")[..4], &encode_base64(b"world")[..]);
+    let head_prefix: String = encode_base64(b"hello ").chars().take(4).collect();
+    let wrapped = format!("  {head_prefix} \n {}  \n", encode_base64(b"world"));
     let joined = format!("{}\n{}", encode_base64(b"hello"), encode_base64(b"world"));
     assert!(decode_base64_capped(&joined, 64, "/p").is_err(), "data after padding must fail");
     let _ = wrapped;

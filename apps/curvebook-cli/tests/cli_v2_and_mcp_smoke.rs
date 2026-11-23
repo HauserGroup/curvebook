@@ -102,7 +102,8 @@ fn parse_content_length_frames(mut raw: &[u8]) -> Result<Vec<Value>, String> {
         let Some(header_end) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
             return Err(format!("truncated Content-Length header in remaining {} byte(s)", raw.len()));
         };
-        let header = std::str::from_utf8(&raw[..header_end]).map_err(|e| format!("header UTF-8: {e}"))?;
+        let (header_bytes, rest) = raw.split_at_checked(header_end).ok_or_else(|| String::from("truncated Content-Length header"))?;
+        let header = std::str::from_utf8(header_bytes).map_err(|e| format!("header UTF-8: {e}"))?;
         let mut content_len: Option<usize> = None;
         for line in header.split("\r\n") {
             if let Some((k, v)) = line.split_once(':')
@@ -112,14 +113,13 @@ fn parse_content_length_frames(mut raw: &[u8]) -> Result<Vec<Value>, String> {
             }
         }
         let len = content_len.ok_or_else(|| format!("missing Content-Length header in `{header}`"))?;
-        let body_start = header_end + 4;
-        let body_end = body_start + len;
-        if raw.len() < body_end {
-            return Err(format!("truncated Content-Length body: expected {len} bytes, got {}", raw.len() - body_start));
-        }
-        let val: Value = serde_json::from_slice(&raw[body_start..body_end]).map_err(|e| format!("parse framed JSON: {e}"))?;
+        let body_and_tail = rest.get(4..).ok_or_else(|| format!("truncated Content-Length header in remaining {} byte(s)", raw.len()))?;
+        let (body, next_raw) = body_and_tail
+            .split_at_checked(len)
+            .ok_or_else(|| format!("truncated Content-Length body: expected {len} bytes, got {}", body_and_tail.len()))?;
+        let val: Value = serde_json::from_slice(body).map_err(|e| format!("parse framed JSON: {e}"))?;
         frames.push(val);
-        raw = &raw[body_end..];
+        raw = next_raw;
     }
     Ok(frames)
 }

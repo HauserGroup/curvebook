@@ -501,7 +501,7 @@ fn sweep_valid_table_commands(s: &mut Session, covered: &mut BTreeSet<&'static s
 }
 
 fn sweep_valid_info_and_analysis_commands(s: &mut Session, covered: &mut BTreeSet<&'static str>) -> Result<(), String> {
-    let info_id = s.document().info_sheets[0].id.as_str().to_string();
+    let info_id = s.document().info_sheets.first().ok_or_else(|| String::from("missing info sheet"))?.id.as_str().to_string();
     run_valid(s, covered, "info.setNote", json!({ "sheet_id": info_id, "note": "Baseline experimental log" }))?;
     run_valid(s, covered, "info.setConstant", json!({ "sheet_id": info_id, "name": "TempC", "value": 37.0 }))?;
     run_valid(s, covered, "info.removeConstant", json!({ "sheet_id": info_id, "name": "TempC" }))?;
@@ -1244,37 +1244,54 @@ fn sweep_step_strategy() -> BoxedStrategy<SweepStep> {
 }
 
 fn pick_data_id(doc: &ProjectDocument, idx: usize) -> String {
-    if doc.data_sheets.is_empty() { String::from("missing-data") } else { doc.data_sheets[idx % doc.data_sheets.len()].id.as_str().to_string() }
+    if doc.data_sheets.is_empty() {
+        String::from("missing-data")
+    } else {
+        doc.data_sheets.get(idx % doc.data_sheets.len()).map_or_else(|| String::from("missing-data"), |d| d.id.as_str().to_string())
+    }
 }
 
 fn pick_mv_or_any_id(doc: &ProjectDocument, idx: usize) -> String {
     let mv: Vec<&str> = doc.data_sheets.iter().filter(|d| d.archetype.kind() == TableKind::MultipleVariables).map(|d| d.id.as_str()).collect();
-    if idx % 4 != 3 && !mv.is_empty() { mv[idx % mv.len()].to_string() } else { pick_data_id(doc, idx) }
+    if idx % 4 != 3
+        && !mv.is_empty()
+        && let Some(&id) = mv.get(idx % mv.len())
+    {
+        id.to_string()
+    } else {
+        pick_data_id(doc, idx)
+    }
 }
 
 fn pick_result_id(doc: &ProjectDocument, idx: usize, prefer_pairwise: bool) -> String {
     if prefer_pairwise {
         let with_pw: Vec<&str> = doc.result_sheets.iter().filter(|r| !r.pairwise_comparisons.is_empty()).map(|r| r.id.as_str()).collect();
-        if !with_pw.is_empty() {
-            return with_pw[idx % with_pw.len()].to_string();
+        if !with_pw.is_empty()
+            && let Some(&id) = with_pw.get(idx % with_pw.len())
+        {
+            return id.to_string();
         }
     }
     if doc.result_sheets.is_empty() {
         String::from("missing-result")
     } else {
-        doc.result_sheets[idx % doc.result_sheets.len()].id.as_str().to_string()
+        doc.result_sheets.get(idx % doc.result_sheets.len()).map_or_else(|| String::from("missing-result"), |r| r.id.as_str().to_string())
     }
 }
 
 fn pick_graph_id(doc: &ProjectDocument, idx: usize) -> String {
-    if doc.graph_sheets.is_empty() { String::from("missing-graph") } else { doc.graph_sheets[idx % doc.graph_sheets.len()].id.as_str().to_string() }
+    if doc.graph_sheets.is_empty() {
+        String::from("missing-graph")
+    } else {
+        doc.graph_sheets.get(idx % doc.graph_sheets.len()).map_or_else(|| String::from("missing-graph"), |g| g.id.as_str().to_string())
+    }
 }
 
 fn pick_layout_id(doc: &ProjectDocument, idx: usize) -> String {
     if doc.layout_sheets.is_empty() {
         String::from("missing-layout")
     } else {
-        doc.layout_sheets[idx % doc.layout_sheets.len()].id.as_str().to_string()
+        doc.layout_sheets.get(idx % doc.layout_sheets.len()).map_or_else(|| String::from("missing-layout"), |l| l.id.as_str().to_string())
     }
 }
 
@@ -1284,7 +1301,7 @@ fn pick_any_sheet_id(doc: &ProjectDocument, idx: usize) -> String {
     all.extend(doc.result_sheets.iter().map(|s| s.id.as_str()));
     all.extend(doc.graph_sheets.iter().map(|s| s.id.as_str()));
     all.extend(doc.layout_sheets.iter().map(|s| s.id.as_str()));
-    if all.is_empty() { String::from("missing-any") } else { all[idx % all.len()].to_string() }
+    if all.is_empty() { String::from("missing-any") } else { all.get(idx % all.len()).copied().unwrap_or("missing-any").to_string() }
 }
 
 fn build_step_command(doc: &ProjectDocument, step: &SweepStep, step_num: usize) -> (&'static str, Value) {
@@ -1298,7 +1315,7 @@ fn build_step_command(doc: &ProjectDocument, step: &SweepStep, step_num: usize) 
                 };
                 return ("sheet.createData", p);
             }
-            let arch = ["xy", "column", "grouped", "multiple_variables", "nested"][arch_idx % 5];
+            let arch = ["xy", "column", "grouped", "multiple_variables", "nested"].get(arch_idx % 5).copied().unwrap_or("xy");
             let sid = format!("d-{step_num}-{id_tag}");
             if arch == "multiple_variables" {
                 (
@@ -1368,22 +1385,26 @@ fn build_step_command(doc: &ProjectDocument, step: &SweepStep, step_num: usize) 
         }
         SweepStep::TransformRun { src_idx, kind_idx } => {
             let src = if *kind_idx == 3 { String::from("missing-src") } else { pick_data_id(doc, *src_idx) };
-            let kind = ["normalize", "log10", "baseline_subtract", "bogus_xform"][kind_idx % 4];
+            let kind = ["normalize", "log10", "baseline_subtract", "bogus_xform"].get(kind_idx % 4).copied().unwrap_or("normalize");
             ("transform.run", json!({ "sheet_id": format!("rx-{step_num}"), "source_sheet": src, "kind": kind }))
         }
         SweepStep::StatsRun { src_idx, kind_idx } => {
             let src = if *kind_idx == 3 { String::from("missing-src") } else { pick_data_id(doc, *src_idx) };
-            let kind = ["descriptive_stats", "one_way_anova", "unpaired_t_test", "bogus_stat"][kind_idx % 4];
+            let kind =
+                ["descriptive_stats", "one_way_anova", "unpaired_t_test", "bogus_stat"].get(kind_idx % 4).copied().unwrap_or("descriptive_stats");
             ("stats.run", json!({ "sheet_id": format!("rs-{step_num}"), "source_sheet": src, "kind": kind }))
         }
         SweepStep::FitRun { src_idx, kind_idx } => {
             let src = if *kind_idx == 3 { String::from("missing-src") } else { pick_data_id(doc, *src_idx) };
-            let kind = ["linear_regression", "nonlinear_4pl", "exponential_one_phase_decay", "bogus_fit"][kind_idx % 4];
+            let kind = ["linear_regression", "nonlinear_4pl", "exponential_one_phase_decay", "bogus_fit"]
+                .get(kind_idx % 4)
+                .copied()
+                .unwrap_or("linear_regression");
             ("fit.run", json!({ "sheet_id": format!("rf-{step_num}"), "source_sheet": src, "kind": kind }))
         }
         SweepStep::GraphInitialize { src_idx, kind_idx } => {
             let uninit = doc.graph_sheets.iter().find(|g| !g.initialized).map(|g| g.id.as_str().to_string());
-            let kind = ["xy", "column", "grouped", "multiple_variables", "bad_graph_kind"][kind_idx % 5];
+            let kind = ["xy", "column", "grouped", "multiple_variables", "bad_graph_kind"].get(kind_idx % 5).copied().unwrap_or("xy");
             if let Some(gid) = uninit
                 && *kind_idx != 4
             {

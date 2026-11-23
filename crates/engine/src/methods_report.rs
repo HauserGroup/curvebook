@@ -2486,7 +2486,8 @@ fn escape_latex_math_mode(input: &str) -> String {
 fn guard_latex_leading_bracket(cell: &str) -> String {
     let trimmed = cell.trim_start();
     if let Some(rest) = trimmed.strip_prefix('[') {
-        let prefix = &cell[..cell.len() - trimmed.len()];
+        let prefix_len = cell.len().saturating_sub(trimmed.len());
+        let prefix = cell.get(..prefix_len).unwrap_or("");
         format!("{prefix}{{[}}{rest}")
     } else {
         cell.to_owned()

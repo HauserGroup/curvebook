@@ -42,13 +42,20 @@ fn count_dotted_gridlines(scene: &ChartScene) -> usize {
 fn build_column_pair_sheet(id: &str, title_a: &str, a: &[f64], title_b: &str, b: &[f64]) -> TestRes<DataSheet> {
     let rows = a.len().max(b.len());
     let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, rows).map_err(|e| e.to_string())?;
-    col.data_sets[0].title = title_a.to_owned();
-    col.data_sets[1].title = title_b.to_owned();
-    for (r, &v) in a.iter().enumerate() {
-        col.data_sets[0].cells[r][0] = Cell::number(v);
+    let [ds0, ds1] = col.data_sets.as_mut_slice() else {
+        return Err(String::from("expected 2 column datasets"));
+    };
+    ds0.title = title_a.to_owned();
+    ds1.title = title_b.to_owned();
+    for (row, &v) in ds0.cells.iter_mut().zip(a.iter()) {
+        if let Some(cell) = row.first_mut() {
+            *cell = Cell::number(v);
+        }
     }
-    for (r, &v) in b.iter().enumerate() {
-        col.data_sets[1].cells[r][0] = Cell::number(v);
+    for (row, &v) in ds1.cells.iter_mut().zip(b.iter()) {
+        if let Some(cell) = row.first_mut() {
+            *cell = Cell::number(v);
+        }
     }
     DataSheet::new(SheetId::new(id), "Comparison Data", TableArchetype::Column(col)).map_err(|e| e.to_string())
 }
@@ -56,10 +63,12 @@ fn build_column_pair_sheet(id: &str, title_a: &str, a: &[f64], title_b: &str, b:
 fn build_three_group_column_sheet(id: &str) -> TestRes<DataSheet> {
     let groups = [("Vehicle", [10.2, 10.9, 9.8, 10.5, 10.1]), ("Low", [14.5, 15.1, 13.9, 14.8, 15.2]), ("High", [22.4, 23.0, 21.9, 22.8, 23.1])];
     let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 3, 5).map_err(|e| e.to_string())?;
-    for (c, (name, vals)) in groups.iter().enumerate() {
-        col.data_sets[c].title = (*name).to_owned();
-        for (r, &v) in vals.iter().enumerate() {
-            col.data_sets[c].cells[r][0] = Cell::number(v);
+    for (ds, (name, vals)) in col.data_sets.iter_mut().zip(groups.iter()) {
+        ds.title = (*name).to_owned();
+        for (row, &v) in ds.cells.iter_mut().zip(vals.iter()) {
+            if let Some(cell) = row.first_mut() {
+                *cell = Cell::number(v);
+            }
         }
     }
     DataSheet::new(SheetId::new(id), "ANOVA Groups", TableArchetype::Column(col)).map_err(|e| e.to_string())
@@ -68,14 +77,19 @@ fn build_three_group_column_sheet(id: &str) -> TestRes<DataSheet> {
 fn build_grouped_multiple_row_sheet(id: &str) -> TestRes<DataSheet> {
     let mut grp = GroupedTable::new(SubcolumnMode::RawReplicates(3), 2, 4).map_err(|e| e.to_string())?;
     grp.row_titles = vec![String::from("Gene A"), String::from("Gene B"), String::from("Gene C"), String::from("Gene D")];
-    grp.data_sets[0].title = String::from("Control");
-    grp.data_sets[1].title = String::from("Treated");
+    let [ds0, ds1] = grp.data_sets.as_mut_slice() else {
+        return Err(String::from("expected 2 grouped datasets"));
+    };
+    ds0.title = String::from("Control");
+    ds1.title = String::from("Treated");
     let ctrl = [[10.0, 10.5, 9.8], [20.1, 19.9, 20.4], [5.0, 5.2, 4.9], [15.0, 15.2, 14.8]];
     let trt = [[18.5, 19.2, 18.9], [20.2, 20.0, 20.3], [12.1, 12.6, 12.4], [15.1, 14.9, 15.3]];
-    for r in 0..4 {
-        for s in 0..3 {
-            grp.data_sets[0].cells[r][s] = Cell::number(ctrl[r][s]);
-            grp.data_sets[1].cells[r][s] = Cell::number(trt[r][s]);
+    for ((row0, ctrl_vals), (row1, trt_vals)) in ds0.cells.iter_mut().zip(ctrl.iter()).zip(ds1.cells.iter_mut().zip(trt.iter())) {
+        for (cell, &v) in row0.iter_mut().zip(ctrl_vals.iter()) {
+            *cell = Cell::number(v);
+        }
+        for (cell, &v) in row1.iter_mut().zip(trt_vals.iter()) {
+            *cell = Cell::number(v);
         }
     }
     DataSheet::new(SheetId::new(id), "Multiple Row Expression", TableArchetype::Grouped(grp)).map_err(|e| e.to_string())
@@ -83,12 +97,15 @@ fn build_grouped_multiple_row_sheet(id: &str) -> TestRes<DataSheet> {
 
 fn build_multivariate_clinical_sheet(id: &str, with_missing: bool) -> TestRes<DataSheet> {
     let mut mv = MultipleVariablesTable::new(4, 10).map_err(|e| e.to_string())?;
-    mv.variables[0].title = String::from("Response");
-    mv.variables[1].title = String::from("Age");
-    mv.variables[2].title = String::from("Status");
-    mv.variables[3].title = String::from("Cohort");
-    mv.variables[3].role = VariableRole::Categorical;
-    mv.variables[3].role_inferred = false;
+    let [v0, v1, v2, v3] = mv.variables.as_mut_slice() else {
+        return Err(String::from("expected 4 MV variables"));
+    };
+    v0.title = String::from("Response");
+    v1.title = String::from("Age");
+    v2.title = String::from("Status");
+    v3.title = String::from("Cohort");
+    v3.role = VariableRole::Categorical;
+    v3.role_inferred = false;
 
     let rows = [
         (12.0, 35.0, 1.0, "Ctrl"),
@@ -103,11 +120,21 @@ fn build_multivariate_clinical_sheet(id: &str, with_missing: bool) -> TestRes<Da
         (23.5, 50.0, 0.0, "Treat"),
     ];
     for (r, &(resp, age, status, grp)) in rows.iter().enumerate() {
-        mv.row_titles[r] = format!("P{}", r + 1);
-        mv.variables[0].cells[r] = if with_missing && r == 2 { Cell::empty() } else { Cell::number(resp) };
-        mv.variables[1].cells[r] = if with_missing && r == 7 { Cell::empty() } else { Cell::number(age) };
-        mv.variables[2].cells[r] = Cell::number(status);
-        mv.variables[3].cells[r] = Cell::text(grp);
+        if let Some(rt) = mv.row_titles.get_mut(r) {
+            *rt = format!("P{}", r + 1);
+        }
+        if let Some(c) = v0.cells.get_mut(r) {
+            *c = if with_missing && r == 2 { Cell::empty() } else { Cell::number(resp) };
+        }
+        if let Some(c) = v1.cells.get_mut(r) {
+            *c = if with_missing && r == 7 { Cell::empty() } else { Cell::number(age) };
+        }
+        if let Some(c) = v2.cells.get_mut(r) {
+            *c = Cell::number(status);
+        }
+        if let Some(c) = v3.cells.get_mut(r) {
+            *c = Cell::text(grp);
+        }
     }
     DataSheet::new(SheetId::new(id), "Clinical Cohort", TableArchetype::MultipleVariables(mv)).map_err(|e| e.to_string())
 }
@@ -116,17 +143,26 @@ fn build_dose_response_two_dataset_xy(id: &str) -> TestRes<DataSheet> {
     let xs = [-9.0, -8.5, -8.0, -7.5, -7.0, -6.5, -6.0, -5.5, -5.0, -4.5];
     let mut xy = XyTable::new(SubcolumnMode::RawReplicates(2), 2, xs.len()).map_err(|e| e.to_string())?;
     xy.x_title = String::from("Log10 [Agonist] (M)");
-    xy.data_sets[0].title = String::from("10.0");
-    xy.data_sets[1].title = String::from("20.0");
+    let [ds0, ds1] = xy.data_sets.as_mut_slice() else {
+        return Err(String::from("expected 2 XY datasets"));
+    };
+    ds0.title = String::from("10.0");
+    ds1.title = String::from("20.0");
 
-    for (r, &x) in xs.iter().enumerate() {
-        xy.x_cells[r][0] = Cell::number(x);
+    for ((&x, x_row), (row0, row1)) in xs.iter().zip(xy.x_cells.iter_mut()).zip(ds0.cells.iter_mut().zip(ds1.cells.iter_mut())) {
+        if let Some(x_cell) = x_row.first_mut() {
+            *x_cell = Cell::number(x);
+        }
         let y0 = 10.0 + 90.0 / (1.0 + 10.0_f64.powf((-6.5 - x) * 1.2));
         let y1 = 20.0 + 80.0 / (1.0 + 10.0_f64.powf((-7.0 - x) * 1.1));
-        xy.data_sets[0].cells[r][0] = Cell::number(y0 - 0.5);
-        xy.data_sets[0].cells[r][1] = Cell::number(y0 + 0.5);
-        xy.data_sets[1].cells[r][0] = Cell::number(y1 - 0.6);
-        xy.data_sets[1].cells[r][1] = Cell::number(y1 + 0.6);
+        if let [c0, c1] = row0.as_mut_slice() {
+            *c0 = Cell::number(y0 - 0.5);
+            *c1 = Cell::number(y0 + 0.5);
+        }
+        if let [c0, c1] = row1.as_mut_slice() {
+            *c0 = Cell::number(y1 - 0.6);
+            *c1 = Cell::number(y1 + 0.6);
+        }
     }
     DataSheet::new(SheetId::new(id), "Dual Dose Response", TableArchetype::Xy(xy)).map_err(|e| e.to_string())
 }

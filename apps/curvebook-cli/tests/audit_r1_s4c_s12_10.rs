@@ -85,17 +85,20 @@ fn assert_json_cli_error(
         return Err(format!("expected exit {expected_exit} for {args:?}, got {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}", out.status.code()).into());
     }
     let parsed: Value = serde_json::from_str(&stdout)?;
-    assert_eq!(parsed["error"]["code"].as_str(), Some(expected_code), "unexpected error.code in {parsed}");
-    assert_eq!(parsed["error"]["category"].as_str(), Some(expected_category), "unexpected error.category in {parsed}");
+    assert_eq!(parsed.get("error").and_then(|e| e.get("code")).and_then(Value::as_str), Some(expected_code), "unexpected error.code in {parsed}");
+    assert_eq!(
+        parsed.get("error").and_then(|e| e.get("category")).and_then(Value::as_str),
+        Some(expected_category),
+        "unexpected error.category in {parsed}"
+    );
     Ok(parsed)
 }
 
 fn extract_first_json_code_block(markdown: &str) -> Result<&str, Box<dyn std::error::Error>> {
     let marker = "```json\n";
-    let start = markdown.find(marker).ok_or("missing ```json fenced block in docs/implementation/scripting-and-automation.md")? + marker.len();
-    let rest = &markdown[start..];
-    let end = rest.find("```").ok_or("unclosed ```json fenced block in docs/implementation/scripting-and-automation.md")?;
-    Ok(&rest[..end])
+    let (_, rest) = markdown.split_once(marker).ok_or("missing ```json fenced block in docs/implementation/scripting-and-automation.md")?;
+    let (block, _) = rest.split_once("```").ok_or("unclosed ```json fenced block in docs/implementation/scripting-and-automation.md")?;
+    Ok(block)
 }
 
 fn object_property_keys(schema_node: &Value) -> Result<BTreeSet<String>, Box<dyn std::error::Error>> {

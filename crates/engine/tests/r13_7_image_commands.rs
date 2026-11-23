@@ -44,14 +44,15 @@ fn encode_base64(input: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
-        let b0 = u32::from(chunk[0]);
+        let b0 = u32::from(*chunk.first().unwrap_or(&0));
         let b1 = u32::from(*chunk.get(1).unwrap_or(&0));
         let b2 = u32::from(*chunk.get(2).unwrap_or(&0));
         let n = (b0 << 16) | (b1 << 8) | b2;
-        out.push(TABLE[((n >> 18) & 0x3F) as usize] as char);
-        out.push(TABLE[((n >> 12) & 0x3F) as usize] as char);
-        out.push(if chunk.len() > 1 { TABLE[((n >> 6) & 0x3F) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { TABLE[(n & 0x3F) as usize] as char } else { '=' });
+        let encode = |shift: usize| TABLE.get(((n >> shift) & 0x3F) as usize).copied().unwrap_or(b'A') as char;
+        out.push(encode(18));
+        out.push(encode(12));
+        out.push(if chunk.len() > 1 { encode(6) } else { '=' });
+        out.push(if chunk.len() > 2 { encode(0) } else { '=' });
     }
     out
 }
@@ -378,10 +379,19 @@ fn image_commands_reject_urls_svg_unknown_fields_and_workdir_escapes() {
 
 fn find_emf_record(emf: &[u8], expected_record_type: u32) -> bool {
     let mut offset = 0usize;
-    while offset + 8 <= emf.len() {
-        let rec_type = u32::from_le_bytes(emf[offset..offset + 4].try_into().unwrap());
-        let rec_size = u32::from_le_bytes(emf[offset + 4..offset + 8].try_into().unwrap()) as usize;
-        if rec_size < 8 || offset + rec_size > emf.len() {
+    while let Some(header) = emf.get(offset..offset.saturating_add(8)) {
+        let Some((type_bytes, size_bytes)) = header.split_at_checked(4) else {
+            return false;
+        };
+        let Ok(type_arr) = <[u8; 4]>::try_from(type_bytes) else {
+            return false;
+        };
+        let Ok(size_arr) = <[u8; 4]>::try_from(size_bytes) else {
+            return false;
+        };
+        let rec_type = u32::from_le_bytes(type_arr);
+        let rec_size = u32::from_le_bytes(size_arr) as usize;
+        if rec_size < 8 || offset.checked_add(rec_size).is_none_or(|end| end > emf.len()) {
             return false;
         }
         if rec_type == expected_record_type {

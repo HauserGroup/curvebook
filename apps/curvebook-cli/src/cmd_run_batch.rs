@@ -619,8 +619,8 @@ fn apply_command_convenience_defaults(doc: &ProjectDocument, cmd: &str, params: 
         && let Some(obj) = params.as_object_mut()
     {
         let has_sheet = obj.contains_key("sheet_id") || obj.contains_key("sheetId") || obj.contains_key("info_sheet_id") || obj.contains_key("id");
-        if !has_sheet && doc.info_sheets.len() == 1 {
-            obj.insert(String::from("sheet_id"), Value::String(doc.info_sheets[0].id.as_str().to_owned()));
+        if !has_sheet && let [only_info] = doc.info_sheets.as_slice() {
+            obj.insert(String::from("sheet_id"), Value::String(only_info.id.as_str().to_owned()));
         }
     }
 }
@@ -670,7 +670,9 @@ fn parse_runner_args(args: &[String], usage: &str) -> Result<RunnerArgs, CliErro
     let mut idx = 0;
 
     while idx < args.len() {
-        let arg = &args[idx];
+        let Some(arg) = args.get(idx) else {
+            break;
+        };
         if arg == "--json" {
             json = true;
             idx += 1;

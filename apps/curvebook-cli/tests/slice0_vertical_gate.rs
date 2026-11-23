@@ -100,31 +100,49 @@ fn grad_4pl(x: f64, bottom: f64, top: f64, log_ec50: f64, hill: f64) -> [f64; 4]
     [1.0 - sig, sig, common * hill, common * (log_ec50 - x)]
 }
 
+fn mat_get(m: &[[f64; 4]; 4], r: usize, c: usize) -> f64 {
+    m.get(r).and_then(|row| row.get(c)).copied().unwrap_or(0.0)
+}
+
+fn mat_set(m: &mut [[f64; 4]; 4], r: usize, c: usize, val: f64) {
+    if let Some(cell) = m.get_mut(r).and_then(|row| row.get_mut(c)) {
+        *cell = val;
+    }
+}
+
 fn invert_4x4(mut a: [[f64; 4]; 4]) -> [[f64; 4]; 4] {
     let mut inv = [[0.0_f64; 4]; 4];
     for (i, row) in inv.iter_mut().enumerate() {
-        row[i] = 1.0;
+        if let Some(cell) = row.get_mut(i) {
+            *cell = 1.0;
+        }
     }
     for col in 0..4 {
         let mut pivot_row = col;
         for r in (col + 1)..4 {
-            if a[r][col].abs() > a[pivot_row][col].abs() {
+            if mat_get(&a, r, col).abs() > mat_get(&a, pivot_row, col).abs() {
                 pivot_row = r;
             }
         }
         a.swap(col, pivot_row);
         inv.swap(col, pivot_row);
-        let div = a[col][col];
+        let div = mat_get(&a, col, col);
         for j in 0..4 {
-            a[col][j] /= div;
-            inv[col][j] /= div;
+            let a_col_j = mat_get(&a, col, j) / div;
+            let inv_col_j = mat_get(&inv, col, j) / div;
+            mat_set(&mut a, col, j, a_col_j);
+            mat_set(&mut inv, col, j, inv_col_j);
         }
         for r in 0..4 {
             if r != col {
-                let factor = a[r][col];
+                let factor = mat_get(&a, r, col);
                 for j in 0..4 {
-                    a[r][j] -= factor * a[col][j];
-                    inv[r][j] -= factor * inv[col][j];
+                    let a_cj = mat_get(&a, col, j);
+                    let inv_cj = mat_get(&inv, col, j);
+                    let a_rj = mat_get(&a, r, j) - factor * a_cj;
+                    let inv_rj = mat_get(&inv, r, j) - factor * inv_cj;
+                    mat_set(&mut a, r, j, a_rj);
+                    mat_set(&mut inv, r, j, inv_rj);
                 }
             }
         }
@@ -133,39 +151,43 @@ fn invert_4x4(mut a: [[f64; 4]; 4]) -> [[f64; 4]; 4] {
 }
 
 fn extract_result_scalar(doc: &Value, key: &str) -> Result<f64, String> {
-    doc["scalars"]
-        .as_array()
+    doc.get("scalars")
+        .and_then(Value::as_array)
         .ok_or_else(|| String::from("result missing scalars array"))?
         .iter()
-        .find(|entry| entry["key"].as_str() == Some(key))
-        .and_then(|entry| entry["value"].as_f64())
+        .find(|entry| entry.get("key").and_then(Value::as_str) == Some(key))
+        .and_then(|entry| entry.get("value").and_then(Value::as_f64))
         .ok_or_else(|| format!("missing scalar `{key}` in result JSON"))
 }
 
 fn extract_tab<'a>(doc: &'a Value, id: &str) -> Result<&'a Value, String> {
-    doc["tabs"]
-        .as_array()
+    doc.get("tabs")
+        .and_then(Value::as_array)
         .ok_or_else(|| String::from("result missing tabs array"))?
         .iter()
-        .find(|tab| tab["id"].as_str() == Some(id))
+        .find(|tab| tab.get("id").and_then(Value::as_str) == Some(id))
         .ok_or_else(|| format!("missing tab `{id}` in result JSON"))
 }
 
 fn extract_cell_number(cell: &Value) -> Result<f64, String> {
-    cell["Number"]["value"].as_f64().or_else(|| cell["value"].as_f64()).ok_or_else(|| format!("expected numeric ResultCell, got {cell}"))
+    cell.get("Number")
+        .and_then(|n| n.get("value"))
+        .and_then(Value::as_f64)
+        .or_else(|| cell.get("value").and_then(Value::as_f64))
+        .ok_or_else(|| format!("expected numeric ResultCell, got {cell}"))
 }
 
 fn extract_cell_ci(cell: &Value) -> Result<(f64, f64), String> {
     let ci = cell.get("ConfidenceInterval").ok_or_else(|| format!("expected ConfidenceInterval cell, got {cell}"))?;
-    let lo = ci["lower"]["Finite"].as_f64().ok_or_else(|| format!("expected Finite lower CI in {cell}"))?;
-    let hi = ci["upper"]["Finite"].as_f64().ok_or_else(|| format!("expected Finite upper CI in {cell}"))?;
+    let lo = ci.get("lower").and_then(|v| v.get("Finite")).and_then(Value::as_f64).ok_or_else(|| format!("expected Finite lower CI in {cell}"))?;
+    let hi = ci.get("upper").and_then(|v| v.get("Finite")).and_then(Value::as_f64).ok_or_else(|| format!("expected Finite upper CI in {cell}"))?;
     Ok((lo, hi))
 }
 
 fn tab_row_index(tab: &Value, label: &str) -> Result<usize, String> {
-    tab["row_labels"]
-        .as_array()
-        .ok_or_else(|| format!("tab {} missing row_labels", tab["id"]))?
+    tab.get("row_labels")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("tab {} missing row_labels", tab.get("id").unwrap_or(&Value::Null)))?
         .iter()
         .position(|v| v.as_str() == Some(label))
         .ok_or_else(|| format!("missing row label `{label}` in tab {}", tab["id"]))

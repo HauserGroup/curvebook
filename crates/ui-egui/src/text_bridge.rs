@@ -520,8 +520,8 @@ fn isolate_rtl_scientific_spans(text: &str) -> (String, bool) {
     let mut i = 0usize;
     let mut lri_depth = 0usize;
 
-    while i < text.len() {
-        let Some(ch) = text[i..].chars().next() else {
+    while let Some(tail) = text.get(i..) {
+        let Some(ch) = tail.chars().next() else {
             break;
         };
         if ch == '\u{2066}' {
@@ -538,9 +538,10 @@ fn isolate_rtl_scientific_spans(text: &str) -> (String, bool) {
         }
         if lri_depth == 0
             && let Some(end) = match_bracketed_interval(text, i).or_else(|| match_formula_span(text, i)).or_else(|| match_signed_number_span(text, i))
+            && let Some(span) = text.get(i..end)
         {
             out.push('\u{2066}');
-            out.push_str(&text[i..end]);
+            out.push_str(span);
             out.push('\u{2069}');
             added = true;
             i = end;
@@ -575,7 +576,8 @@ fn has_sign_before_digit(s: &str) -> bool {
 }
 
 fn match_bracketed_interval(text: &str, start: usize) -> Option<usize> {
-    let open = text[start..].chars().next()?;
+    let slice = text.get(start..)?;
+    let open = slice.chars().next()?;
     let close = match open {
         '[' => ']',
         '(' => ')',
@@ -583,7 +585,7 @@ fn match_bracketed_interval(text: &str, start: usize) -> Option<usize> {
     };
     let mut depth = 0usize;
     let mut end_idx = None;
-    for (rel, ch) in text[start..].char_indices() {
+    for (rel, ch) in slice.char_indices() {
         if matches!(ch, '\n' | '\r') || is_rtl_codepoint(ch) || is_bidi_format_char(ch) {
             return None;
         }
@@ -598,31 +600,29 @@ fn match_bracketed_interval(text: &str, start: usize) -> Option<usize> {
         }
     }
     let end = end_idx?;
-    let inner = &text[start + open.len_utf8()..end - close.len_utf8()];
+    let inner = text.get(start + open.len_utf8()..end - close.len_utf8())?;
     let has_digit = inner.bytes().any(|b| b.is_ascii_digit());
     let has_sep = inner.contains(',') || inner.contains(';');
     if has_digit && (has_sep || has_sign_before_digit(inner)) { Some(end) } else { None }
 }
 
 fn match_formula_span(text: &str, start: usize) -> Option<usize> {
-    if !text[start..].starts_with('=') {
-        return None;
-    }
-    let prev = text[..start].chars().next_back();
+    let after_eq = text.get(start..)?.strip_prefix('=')?;
+    let prev = text.get(..start).and_then(|s| s.chars().next_back());
     if let Some(p) = prev
         && !p.is_whitespace()
         && !matches!(p, ':' | '(' | '[' | '"' | '\'')
     {
         return None;
     }
-    let first = text[start + 1..].chars().next()?;
+    let first = after_eq.chars().next()?;
     if !(first.is_ascii_alphanumeric() || matches!(first, '_' | '(' | '-' | '+' | '\u{2212}' | '.' | '$')) {
         return None;
     }
     let mut depth = 0usize;
     let mut end = start + 1;
     let mut has_alnum = false;
-    for (rel, ch) in text[start + 1..].char_indices() {
+    for (rel, ch) in after_eq.char_indices() {
         if ch.is_control() || is_rtl_codepoint(ch) || is_bidi_format_char(ch) {
             break;
         }
@@ -643,7 +643,7 @@ fn match_formula_span(text: &str, start: usize) -> Option<usize> {
         end = start + 1 + rel + ch.len_utf8();
     }
     while end > start + 1 {
-        let last = text[start + 1..end].chars().next_back()?;
+        let last = text.get(start + 1..end)?.chars().next_back()?;
         if matches!(last, ',' | ';' | ':' | '.' | '!' | '?') {
             end -= last.len_utf8();
         } else {
@@ -654,25 +654,25 @@ fn match_formula_span(text: &str, start: usize) -> Option<usize> {
 }
 
 fn match_signed_number_span(text: &str, start: usize) -> Option<usize> {
-    let sign = text[start..].chars().next()?;
+    let sign = text.get(start..)?.chars().next()?;
     if !matches!(sign, '-' | '+' | '\u{2212}' | '\u{00B1}') {
         return None;
     }
-    if let Some(prev) = text[..start].chars().next_back()
+    if let Some(prev) = text.get(..start).and_then(|s| s.chars().next_back())
         && prev.is_alphanumeric()
     {
         return None;
     }
     let mut p = start + sign.len_utf8();
     let mut saw_digit = false;
-    if text[p..].starts_with('.') {
+    if text.get(p..).is_some_and(|s| s.starts_with('.')) {
         p += 1;
     }
-    while let Some(ch) = text[p..].chars().next() {
+    while let Some(ch) = text.get(p..).and_then(|s| s.chars().next()) {
         if ch.is_ascii_digit() {
             saw_digit = true;
             p += 1;
-        } else if matches!(ch, '.' | ',') && text[p + 1..].chars().next().is_some_and(|d| d.is_ascii_digit()) {
+        } else if matches!(ch, '.' | ',') && text.get(p + 1..).and_then(|s| s.chars().next()).is_some_and(|d| d.is_ascii_digit()) {
             p += 1;
         } else {
             break;
@@ -681,15 +681,15 @@ fn match_signed_number_span(text: &str, start: usize) -> Option<usize> {
     if !saw_digit {
         return None;
     }
-    if text[p..].starts_with(['e', 'E']) {
+    if text.get(p..).is_some_and(|s| s.starts_with(['e', 'E'])) {
         let mut exp_p = p + 1;
-        if let Some(es) = text[exp_p..].chars().next()
+        if let Some(es) = text.get(exp_p..).and_then(|s| s.chars().next())
             && matches!(es, '+' | '-' | '\u{2212}')
         {
             exp_p += es.len_utf8();
         }
         let mut exp_digits = false;
-        while let Some(d) = text[exp_p..].chars().next() {
+        while let Some(d) = text.get(exp_p..).and_then(|s| s.chars().next()) {
             if d.is_ascii_digit() {
                 exp_digits = true;
                 exp_p += 1;

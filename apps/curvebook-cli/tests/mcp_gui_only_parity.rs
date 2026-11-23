@@ -390,15 +390,15 @@ fn verify_live_attach_end_to_end(state: &mut McpServerState, workdir: &std::path
 
     let res_list = curvebook_mcp::dispatch_json_value(json!({"jsonrpc": "2.0", "id": 101, "method": "resources/list", "params": {}}), state)
         .ok_or("unexpected None from resources/list")?;
-    let resources = res_list["result"]["resources"].as_array().ok_or("missing resources array")?;
-    assert!(resources.iter().any(|r| r["uri"] == json!("sheet://live-data")), "missing live sheet resource: {res_list}");
+    let resources = res_list.pointer("/result/resources").and_then(Value::as_array).ok_or("missing resources array")?;
+    assert!(resources.iter().any(|r| r.get("uri") == Some(&json!("sheet://live-data"))), "missing live sheet resource: {res_list}");
 
     let res_read = curvebook_mcp::dispatch_json_value(
         json!({"jsonrpc": "2.0", "id": 102, "method": "resources/read", "params": {"uri": "sheet://live-data"}}),
         state,
     )
     .ok_or("unexpected None from resources/read")?;
-    let res_text = res_read["result"]["contents"][0]["text"].as_str().ok_or("missing resource text")?;
+    let res_text = res_read.pointer("/result/contents/0/text").and_then(Value::as_str).ok_or("missing resource text")?;
     assert!(res_text.contains("GroupA") && res_text.contains("25"), "unexpected live resource content: {res_text}");
 
     let preview = call(state, "render_preview", json!({ "sheet_id": "live-graph", "width_px": 256, "height_px": 160 }))?;

@@ -2222,7 +2222,7 @@ mod inspect_preview_bounds {
         while end > 0 && !csv.is_char_boundary(end) {
             end -= 1;
         }
-        if let Some(nl) = csv[..end].rfind('\n')
+        if let Some(nl) = csv.get(..end).and_then(|s| s.rfind('\n'))
             && nl > 0
         {
             end = nl + 1;

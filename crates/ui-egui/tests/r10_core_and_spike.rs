@@ -115,8 +115,9 @@ fn r10_1_spike_analyze_and_edit_params_one_way_anova_human_path() {
     let expected_reason = tukey.disabled_reason.clone().expect("disabled reason present");
     harness.driver.hover_widget_id("edit.post_hoc.tukey").expect("hover disabled tukey control");
     let tooltips = harness.driver.visible_tooltip_texts();
+    let expected_prefix: String = expected_reason.chars().take(12).collect();
     assert!(
-        tooltips.iter().any(|t| t.contains("disabled") || t.contains(&expected_reason[..expected_reason.len().min(12)])),
+        tooltips.iter().any(|t| t.contains("disabled") || t.contains(&expected_prefix)),
         "expected hover tooltip text for disabled Tukey reason `{expected_reason}`, got {tooltips:?}"
     );
 

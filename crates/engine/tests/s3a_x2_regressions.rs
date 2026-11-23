@@ -23,7 +23,9 @@ fn xy_single(id: &str, xs: &[f64], ys: &[f64]) -> DataSheet {
         XyTable::new_with_x_mode(XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single }, SubcolumnMode::Single, 1, xs.len()).unwrap();
     for (r, (&x, &y)) in xs.iter().zip(ys).enumerate() {
         xy.set_x_cell(r, Cell::number(x)).unwrap();
-        xy.data_sets[0].cells[r][0] = Cell::number(y);
+        if let Some(cell) = xy.data_sets.first_mut().and_then(|ds| ds.cells.get_mut(r)).and_then(|row| row.first_mut()) {
+            *cell = Cell::number(y);
+        }
     }
     DataSheet::new(id, id, TableArchetype::Xy(xy)).unwrap()
 }

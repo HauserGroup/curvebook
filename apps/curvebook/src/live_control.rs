@@ -423,7 +423,10 @@ pub fn read_bounded_control_line_with_deadlines<R: BufRead>(
                     if line.len().saturating_add(take) > max_bytes {
                         return Ok(LiveReadStatus::Oversized);
                     }
-                    line.extend_from_slice(&avail[..take]);
+                    let Some(slice) = avail.get(..take) else {
+                        return Err(io::Error::new(io::ErrorKind::InvalidData, "line take slice out of bounds"));
+                    };
+                    line.extend_from_slice(slice);
                     reader.consume(take);
                     return Ok(LiveReadStatus::Line(line));
                 }

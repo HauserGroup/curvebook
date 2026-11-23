@@ -197,10 +197,10 @@ pub fn parse_muda_accelerator(shortcut: &str) -> Option<muda::accelerator::Accel
     let (mod_tokens, key_token) = if primary.ends_with('+') && !primary.ends_with("++") {
         return None;
     } else if primary.contains('+') {
-        let idx = parts.len().saturating_sub(1);
-        (&parts[..idx], parts[idx])
+        let (&last_tok, head_toks) = parts.split_last()?;
+        (head_toks, last_tok)
     } else {
-        (&[][..], parts[0])
+        (&[][..], *parts.first()?)
     };
 
     for &tok in mod_tokens {

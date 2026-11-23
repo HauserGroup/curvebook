@@ -21,12 +21,18 @@ fn sample_4pl_xy_sheet(id: &str) -> DataSheet {
     let xs = [-9.5_f64, -8.5, -8.0, -7.5, -7.0, -6.5, -6.0, -5.5, -5.0, -4.0];
     let mut table = XyTable::new(SubcolumnMode::RawReplicates(2), 1, xs.len()).unwrap();
     table.x_title = String::from("Log10 Concentration (M)");
-    table.data_sets[0].title = String::from("Compound A");
-    for (r, &x) in xs.iter().enumerate() {
-        table.x_cells[r][0] = Cell::number(x);
-        let y_true = 10.0 + 90.0 / (1.0 + 10.0_f64.powf((-6.5 - x) * 1.1));
-        table.data_sets[0].cells[r][0] = Cell::number(y_true - 0.8);
-        table.data_sets[0].cells[r][1] = Cell::number(y_true + 0.8);
+    if let Some(ds0) = table.data_sets.first_mut() {
+        ds0.title = String::from("Compound A");
+        for ((&x, x_row), row) in xs.iter().zip(table.x_cells.iter_mut()).zip(ds0.cells.iter_mut()) {
+            if let Some(x_cell) = x_row.first_mut() {
+                *x_cell = Cell::number(x);
+            }
+            let y_true = 10.0 + 90.0 / (1.0 + 10.0_f64.powf((-6.5 - x) * 1.1));
+            if let [c0, c1] = row.as_mut_slice() {
+                *c0 = Cell::number(y_true - 0.8);
+                *c1 = Cell::number(y_true + 0.8);
+            }
+        }
     }
     DataSheet::new(SheetId::new(id), "Dose Response", TableArchetype::Xy(table)).unwrap()
 }
@@ -35,10 +41,12 @@ fn sample_anova_column_sheet(id: &str, offset: f64) -> DataSheet {
     let groups =
         [("Vehicle", [10.2_f64, 11.0, 9.8, 10.5, 10.1]), ("Low Dose", [14.5, 15.2, 13.9, 14.8, 15.1]), ("High Dose", [22.4, 23.1, 21.8, 22.9, 23.0])];
     let mut table = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, groups.len(), 5).unwrap();
-    for (c, (name, vals)) in groups.iter().enumerate() {
-        table.data_sets[c].title = (*name).to_owned();
-        for (r, &v) in vals.iter().enumerate() {
-            table.data_sets[c].cells[r][0] = Cell::number(v + offset);
+    for (ds, (name, vals)) in table.data_sets.iter_mut().zip(groups.iter()) {
+        ds.title = (*name).to_owned();
+        for (row, &v) in ds.cells.iter_mut().zip(vals.iter()) {
+            if let Some(cell) = row.first_mut() {
+                *cell = Cell::number(v + offset);
+            }
         }
     }
     DataSheet::new(SheetId::new(id), "Treatment Response", TableArchetype::Column(table)).unwrap()
@@ -58,15 +66,21 @@ fn sample_survival_sheet(id: &str) -> DataSheet {
         (28.0, None, Some(1.0)),
     ];
     let mut table = SurvivalTable::new(2, rows.len()).unwrap();
-    table.cohorts[0].title = String::from("Control");
-    table.cohorts[1].title = String::from("Treated");
-    for (r, &(t, c0, c1)) in rows.iter().enumerate() {
-        table.times[r] = Cell::number(t);
-        if let Some(ev) = c0 {
-            table.cohorts[0].cells[r][0] = Cell::number(ev);
-        }
-        if let Some(ev) = c1 {
-            table.cohorts[1].cells[r][0] = Cell::number(ev);
+    if let [ch0, ch1] = table.cohorts.as_mut_slice() {
+        ch0.title = String::from("Control");
+        ch1.title = String::from("Treated");
+        for ((&(t, c0, c1), time_cell), (row0, row1)) in rows.iter().zip(table.times.iter_mut()).zip(ch0.cells.iter_mut().zip(ch1.cells.iter_mut())) {
+            *time_cell = Cell::number(t);
+            if let Some(ev) = c0
+                && let Some(cell) = row0.first_mut()
+            {
+                *cell = Cell::number(ev);
+            }
+            if let Some(ev) = c1
+                && let Some(cell) = row1.first_mut()
+            {
+                *cell = Cell::number(ev);
+            }
         }
     }
     DataSheet::new(SheetId::new(id), "Survival Cohort", TableArchetype::Survival(table)).unwrap()
@@ -83,20 +97,36 @@ fn sample_multivariate_sheet(id: &str) -> DataSheet {
     ];
     let mut table = MultipleVariablesTable::new(6, rows.len()).unwrap();
     let titles = ["Marker X", "Marker Y", "Marker Z", "Weight", "Status", "Group"];
-    for (c, title) in titles.iter().enumerate() {
-        table.variables[c].title = (*title).to_owned();
+    for (var, title) in table.variables.iter_mut().zip(titles.iter()) {
+        var.title = (*title).to_owned();
     }
-    table.variables[5].role = VariableRole::Categorical;
-    table.variables[5].role_inferred = false;
+    if let [v0, v1, v2, v3, v4, v5] = table.variables.as_mut_slice() {
+        v5.role = VariableRole::Categorical;
+        v5.role_inferred = false;
 
-    for (r, &(label, x, y, z, w, st, grp)) in rows.iter().enumerate() {
-        table.row_titles[r] = label.to_owned();
-        table.variables[0].cells[r] = Cell::number(x);
-        table.variables[1].cells[r] = Cell::number(y);
-        table.variables[2].cells[r] = Cell::number(z);
-        table.variables[3].cells[r] = Cell::number(w);
-        table.variables[4].cells[r] = Cell::number(st);
-        table.variables[5].cells[r] = Cell::text(grp);
+        for (r, &(label, x, y, z, w, st, grp)) in rows.iter().enumerate() {
+            if let Some(rt) = table.row_titles.get_mut(r) {
+                *rt = label.to_owned();
+            }
+            if let Some(c) = v0.cells.get_mut(r) {
+                *c = Cell::number(x);
+            }
+            if let Some(c) = v1.cells.get_mut(r) {
+                *c = Cell::number(y);
+            }
+            if let Some(c) = v2.cells.get_mut(r) {
+                *c = Cell::number(z);
+            }
+            if let Some(c) = v3.cells.get_mut(r) {
+                *c = Cell::number(w);
+            }
+            if let Some(c) = v4.cells.get_mut(r) {
+                *c = Cell::number(st);
+            }
+            if let Some(c) = v5.cells.get_mut(r) {
+                *c = Cell::text(grp);
+            }
+        }
     }
     DataSheet::new(SheetId::new(id), "Multivariate Assay", TableArchetype::MultipleVariables(table)).unwrap()
 }

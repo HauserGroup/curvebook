@@ -1045,8 +1045,9 @@ impl FileSystemAccessBridge {
             return Err(WebAdapterError::Validation(String::from("no dropped files supplied")));
         }
         validate_byte_batch_budget(files.len(), files.iter().map(|(_, bytes)| bytes.len()), "dropped files")?;
-        if files.len() == 1 && !looks_like_directory_entry(&files[0].0) {
-            let (name, bytes) = &files[0];
+        if let [(name, bytes)] = files.as_slice()
+            && !looks_like_directory_entry(name)
+        {
             return self.import_file_bytes(host, name, bytes);
         }
 
@@ -3974,8 +3975,10 @@ fn derive_directory_doc_id(root_name: &str, entries: &BTreeMap<String, Vec<u8>>)
 }
 
 fn derive_dropped_files_doc_id(files: &[(String, Vec<u8>)]) -> String {
-    if files.len() == 1 && !looks_like_directory_entry(&files[0].0) {
-        return derive_file_doc_id(&files[0].0, &files[0].1);
+    if let [(name, bytes)] = files
+        && !looks_like_directory_entry(name)
+    {
+        return derive_file_doc_id(name, bytes);
     }
     let root = detect_dropped_directory_root(files).unwrap_or_else(|| String::from("dropped.curvebook.d"));
     let mut sorted: Vec<(&str, &[u8])> = files.iter().map(|(p, b)| (p.as_str(), b.as_slice())).collect();
@@ -4424,11 +4427,11 @@ fn parse_pan_pt(value: Option<&Value>) -> Result<[f64; 2], WebAdapterError> {
     let Some(arr) = value.and_then(Value::as_array) else {
         return Ok([0.0, 0.0]);
     };
-    if arr.len() != 2 {
+    let [x_val, y_val] = arr.as_slice() else {
         return Err(WebAdapterError::Serialization(String::from("`pan_pt` must contain exactly 2 elements")));
-    }
-    let x = arr[0].as_f64().filter(|v| v.is_finite()).ok_or_else(|| WebAdapterError::Serialization(String::from("invalid `pan_pt[0]`")))?;
-    let y = arr[1].as_f64().filter(|v| v.is_finite()).ok_or_else(|| WebAdapterError::Serialization(String::from("invalid `pan_pt[1]`")))?;
+    };
+    let x = x_val.as_f64().filter(|v| v.is_finite()).ok_or_else(|| WebAdapterError::Serialization(String::from("invalid `pan_pt[0]`")))?;
+    let y = y_val.as_f64().filter(|v| v.is_finite()).ok_or_else(|| WebAdapterError::Serialization(String::from("invalid `pan_pt[1]`")))?;
     Ok([x, y])
 }
 
@@ -4439,11 +4442,11 @@ fn parse_page_sizes(value: Option<&Value>) -> Result<Vec<(f64, f64)>, WebAdapter
     let mut sizes = Vec::with_capacity(arr.len());
     for pair in arr {
         let pair_arr = pair.as_array().ok_or_else(|| WebAdapterError::Serialization(String::from("page size must be [w, h]")))?;
-        if pair_arr.len() != 2 {
+        let [w_val, h_val] = pair_arr.as_slice() else {
             return Err(WebAdapterError::Serialization(String::from("page size pair must have length 2")));
-        }
-        let w = pair_arr[0].as_f64().filter(|v| v.is_finite()).ok_or_else(|| WebAdapterError::Serialization(String::from("invalid page width")))?;
-        let h = pair_arr[1].as_f64().filter(|v| v.is_finite()).ok_or_else(|| WebAdapterError::Serialization(String::from("invalid page height")))?;
+        };
+        let w = w_val.as_f64().filter(|v| v.is_finite()).ok_or_else(|| WebAdapterError::Serialization(String::from("invalid page width")))?;
+        let h = h_val.as_f64().filter(|v| v.is_finite()).ok_or_else(|| WebAdapterError::Serialization(String::from("invalid page height")))?;
         sizes.push((w, h));
     }
     Ok(sizes)
@@ -4525,25 +4528,29 @@ fn encode_base64(input: &[u8]) -> String {
     if input.is_empty() {
         return String::new();
     }
+    let b64_char = |idx: usize| -> char { B64_ALPHABET.get(idx & 0x3f).copied().map_or('A', char::from) };
     let mut out = String::new();
     if out.try_reserve_exact(input.len().div_ceil(3).saturating_mul(4)).is_err() {
         return String::new();
     }
     for chunk in input.chunks(3) {
-        let b0 = usize::from(chunk[0]);
+        let Some(&b0_u8) = chunk.first() else {
+            continue;
+        };
+        let b0 = usize::from(b0_u8);
         let b1 = usize::from(chunk.get(1).copied().unwrap_or(0));
         let b2 = usize::from(chunk.get(2).copied().unwrap_or(0));
         let triple = (b0 << 16) | (b1 << 8) | b2;
 
-        out.push(char::from(B64_ALPHABET[(triple >> 18) & 0x3f]));
-        out.push(char::from(B64_ALPHABET[(triple >> 12) & 0x3f]));
+        out.push(b64_char(triple >> 18));
+        out.push(b64_char(triple >> 12));
         if chunk.len() > 1 {
-            out.push(char::from(B64_ALPHABET[(triple >> 6) & 0x3f]));
+            out.push(b64_char(triple >> 6));
         } else {
             out.push('=');
         }
         if chunk.len() > 2 {
-            out.push(char::from(B64_ALPHABET[triple & 0x3f]));
+            out.push(b64_char(triple));
         } else {
             out.push('=');
         }
@@ -4569,7 +4576,10 @@ fn decode_base64(input: &str) -> Result<Vec<u8>, WebAdapterError> {
         return Err(WebAdapterError::Serialization(String::from("base64 length must be a multiple of 4")));
     }
 
-    let pad_bytes = usize::from(compact[compact.len() - 1] == b'=') + usize::from(compact[compact.len() - 2] == b'=');
+    let pad_bytes = match compact.as_slice() {
+        [.., a, b] => usize::from(*b == b'=') + usize::from(*a == b'='),
+        _ => 0,
+    };
     let exact_decoded = (compact.len() / 4).saturating_mul(3).saturating_sub(pad_bytes);
     if exact_decoded > MAX_ARCHIVE_FILE_BYTES {
         return Err(WebAdapterError::Validation(format!(

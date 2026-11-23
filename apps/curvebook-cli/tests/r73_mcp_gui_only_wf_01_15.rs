@@ -4,15 +4,18 @@ use r73_common::{McpChild, TempWorkdir, assert_approx, find_node, read_result_js
 use serde_json::json;
 
 fn assert_widget_enabled(snap: &serde_json::Value, wid: &str, expected: bool) -> Result<(), String> {
-    let node = find_node(&snap["dialog"]["controls"], wid)
-        .or_else(|| find_node(&snap["dialog"]["tabs"], wid))
-        .or_else(|| find_node(&snap["dialog"]["buttons"], wid))
+    let dialog = snap.get("dialog");
+    let node = dialog
+        .and_then(|d| d.get("controls"))
+        .and_then(|v| find_node(v, wid))
+        .or_else(|| dialog.and_then(|d| d.get("tabs")).and_then(|v| find_node(v, wid)))
+        .or_else(|| dialog.and_then(|d| d.get("buttons")).and_then(|v| find_node(v, wid)))
         .ok_or_else(|| format!("missing dialog widget `{wid}` in {snap}"))?;
-    let actual = node["enabled"].as_bool().unwrap_or(false);
+    let actual = node.get("enabled").and_then(serde_json::Value::as_bool).unwrap_or(false);
     if actual != expected {
         return Err(format!("widget `{wid}` expected enabled={expected}, got {node}"));
     }
-    if !expected && node["disabled_reason"].as_str().is_none_or(str::is_empty) {
+    if !expected && node.get("disabled_reason").and_then(serde_json::Value::as_str).is_none_or(str::is_empty) {
         return Err(format!("disabled widget `{wid}` missing disabled_reason: {node}"));
     }
     Ok(())

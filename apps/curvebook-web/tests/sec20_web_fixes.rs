@@ -416,9 +416,8 @@ fn fa_sec20_03_bounded_rgba_allocation_and_checked_json_integer_conversions() {
 
     let html = include_str!("../index.html");
     assert!(html.contains("const maxPixels = 8000000;"), "HiDPI pixel clamp must reserve modal+popup headroom under MAX_FRAME_RGBA_BYTES");
-    let picker_pos = html.find("async function openDirectoryPickerTree()").expect("openDirectoryPickerTree present");
-    let picker_end = html[picker_pos..].find("async function collectDroppedEntry").expect("collectDroppedEntry present");
-    let picker_slice = &html[picker_pos..picker_pos + picker_end];
+    let (_, after_picker) = html.split_once("async function openDirectoryPickerTree()").expect("openDirectoryPickerTree present");
+    let (picker_slice, _) = after_picker.split_once("async function collectDroppedEntry").expect("collectDroppedEntry present");
     assert!(
         picker_slice.contains("set_document_lock") && picker_slice.contains("activeDirectoryHandle = dirHandle;"),
         "openDirectoryPickerTree must bind activeDirectoryHandle only after import_directory_entries succeeds"

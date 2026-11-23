@@ -201,7 +201,9 @@ fn parse_list_commands_args(args: &[String]) -> Result<ListCommandsArgs, CliErro
     let mut idx = 0usize;
 
     while idx < args.len() {
-        let arg = args[idx].as_str();
+        let Some(arg) = args.get(idx).map(String::as_str) else {
+            break;
+        };
         if arg == "--json" {
             json = true;
         } else if arg == "--help" || arg == "-h" {
@@ -272,7 +274,9 @@ fn parse_direct_command_args(spec: &CommandSpec, schema: &Value, args: &[String]
 
     let mut idx = 0usize;
     while idx < args.len() {
-        let arg = args[idx].as_str();
+        let Some(arg) = args.get(idx).map(String::as_str) else {
+            break;
+        };
         if handle_wrapper_flag(args, &mut idx, &mut in_path, &mut out_path, &mut workdir, &mut json, &mut help)? {
             idx += 1;
             continue;
@@ -315,7 +319,9 @@ fn handle_wrapper_flag(
     json: &mut bool,
     help: &mut bool,
 ) -> Result<bool, CliError> {
-    let arg = args[*idx].as_str();
+    let Some(arg) = args.get(*idx).map(String::as_str) else {
+        return Ok(false);
+    };
     match arg {
         "--json" => *json = true,
         "--help" | "-h" => *help = true,

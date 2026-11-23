@@ -1659,7 +1659,7 @@ fn propagate_mv_variable_renames(doc: &mut ProjectDocument, sheet_id: &SheetId, 
         let mut pairs = Vec::new();
         for (idx, old_title) in old_titles.iter().enumerate() {
             let old_t = old_title.trim();
-            if old_t.is_empty() || old_titles[..idx].iter().any(|prev| prev.trim() == old_t) {
+            if old_t.is_empty() || old_titles.get(..idx).is_some_and(|prevs| prevs.iter().any(|prev| prev.trim() == old_t)) {
                 continue;
             }
             if let Some(var) = mv.variables.get(idx) {
@@ -2079,12 +2079,11 @@ enum TupleOrObjCoord {
 impl TupleOrObjCoord {
     fn resolve(&self) -> Result<CellCoord, EngineError> {
         match self {
-            Self::Tuple(arr) => {
-                if arr.len() != 2 && arr.len() != 3 {
-                    return Err(EngineError::with_code(ErrorCode::BadInput, "coordinate tuple must be `[row, col]` or `[row, col, subcol]`"));
-                }
-                Ok(CellCoord::new(arr[0], arr[1], arr.get(2).copied().unwrap_or(0)))
-            }
+            Self::Tuple(arr) => match arr.as_slice() {
+                [row, col] => Ok(CellCoord::new(*row, *col, 0)),
+                [row, col, subcol] => Ok(CellCoord::new(*row, *col, *subcol)),
+                _ => Err(EngineError::with_code(ErrorCode::BadInput, "coordinate tuple must be `[row, col]` or `[row, col, subcol]`")),
+            },
             Self::Obj(obj) => obj.resolve(),
         }
     }
@@ -2722,7 +2721,7 @@ fn run_paste(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineErro
             if g.spec.primary_source_sheet_id == id
                 && matches!(g.spec.kind, GraphKind::Xy | GraphKind::Column | GraphKind::Grouped | GraphKind::Survival)
                 && g.spec.series.len() == old_cols
-                && (0..old_cols).all(|i| g.spec.series[i].data_set_index == i)
+                && g.spec.series.iter().enumerate().all(|(i, s)| s.data_set_index == i)
                 && let Some(new_series) = default_spec.series.get(old_cols..new_cols)
             {
                 g.spec.series.extend(new_series.iter().cloned());
@@ -3427,20 +3426,30 @@ fn run_set_calculated_variable(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandO
     if col_idx >= mv.variables.len() {
         return Err(EngineError::with_code(ErrorCode::BadInput, format!("variable column {col_idx} out of range")));
     }
-    let prev_title = p.title.as_ref().map(|title| {
-        let old = mv.variables[col_idx].title.clone();
-        mv.variables[col_idx].title = title.clone();
-        old
-    });
+    let prev_title = if let Some(title) = &p.title {
+        let var = mv
+            .variables
+            .get_mut(col_idx)
+            .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("variable column {col_idx} out of range")))?;
+        let old = var.title.clone();
+        var.title = title.clone();
+        Some(old)
+    } else {
+        None
+    };
     if let Err(err) = validate_no_formula_cycle(mv, col_idx, &p.formula) {
         if created_new {
             mv.variables.pop();
-        } else if let Some(old) = prev_title {
-            mv.variables[col_idx].title = old;
+        } else if let Some(old) = prev_title
+            && let Some(var) = mv.variables.get_mut(col_idx)
+        {
+            var.title = old;
         }
         return Err(err.into());
     }
-    mv.variables[col_idx].set_calculated_formula(&p.formula);
+    if let Some(var) = mv.variables.get_mut(col_idx) {
+        var.set_calculated_formula(&p.formula);
+    }
 
     evaluate_data_sheet_calculated_variables(ds, info_snapshot.as_ref())?;
     let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
@@ -3722,9 +3731,13 @@ fn run_convert_archetype(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome
         .position(|ds| ds.id == sheet_id)
         .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("data sheet `{}` not found", sheet_id.as_str())))?;
 
+    let target_ds = doc
+        .data_sheets
+        .get(idx)
+        .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("data sheet `{}` not found", sheet_id.as_str())))?;
     if preview_only {
-        let base_preview = preview_datasheet_conversion(&doc.data_sheets[idx], target_kind)?;
-        let impact = plan_conversion_impacts(doc, &doc.data_sheets[idx], target_kind);
+        let base_preview = preview_datasheet_conversion(target_ds, target_kind)?;
+        let impact = plan_conversion_impacts(doc, target_ds, target_kind);
         let preview_val = build_enriched_conversion_preview(&base_preview, &impact);
         return Ok(CommandOutcome::read_only(
             "table.convertArchetype",
@@ -3737,8 +3750,8 @@ fn run_convert_archetype(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome
         ));
     }
 
-    ensure_sheet_not_frozen(&doc.data_sheets[idx])?;
-    let old_ds = doc.data_sheets[idx].clone();
+    ensure_sheet_not_frozen(target_ds)?;
+    let old_ds = target_ds.clone();
     let impact = plan_conversion_impacts(doc, &old_ds, target_kind);
     let (mut converted, base_preview) = convert_datasheet_archetype(&old_ds, target_kind, allow_lossy)?;
     if impact.incoming_links_lost && !allow_lossy {
@@ -3755,7 +3768,9 @@ fn run_convert_archetype(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome
     validate_project_cell_budget_after_change(doc, Some(&sheet_id), converted.archetype.allocated_cell_slots())?;
     preserve_mappable_incoming_links(&old_ds, &mut converted, &impact.col_plan);
     converted.prune_stale_exclusion_notes();
-    doc.data_sheets[idx] = converted;
+    if let Some(slot) = doc.data_sheets.get_mut(idx) {
+        *slot = converted;
+    }
     apply_conversion_dependents(doc, &sheet_id, &impact);
     let mut recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&sheet_id), false)?;
     finalize_broken_dependents(doc, &impact, &mut recalc);
@@ -4146,8 +4161,10 @@ impl ConversionColPlan {
             };
         }
         let mut cols = vec![ColMapTarget::Unmappable; old_cols];
-        if num_cols.len() == 1 {
-            cols[num_cols[0]] = ColMapTarget::Exact(0);
+        if let [only_num] = num_cols.as_slice() {
+            if let Some(slot) = cols.get_mut(*only_num) {
+                *slot = ColMapTarget::Exact(0);
+            }
             return Self {
                 cols,
                 x_injected_at_col0: false,
@@ -4157,10 +4174,16 @@ impl ConversionColPlan {
                 converted_col_count: 1,
             };
         }
-        if num_cols.len() >= 2 {
-            cols[num_cols[0]] = ColMapTarget::MovedToX;
-            for (yi, &nc) in num_cols[1..].iter().enumerate() {
-                cols[nc] = ColMapTarget::Exact(yi);
+        if let Some((&first_num, rest_nums)) = num_cols.split_first()
+            && !rest_nums.is_empty()
+        {
+            if let Some(slot) = cols.get_mut(first_num) {
+                *slot = ColMapTarget::MovedToX;
+            }
+            for (yi, &nc) in rest_nums.iter().enumerate() {
+                if let Some(slot) = cols.get_mut(nc) {
+                    *slot = ColMapTarget::Exact(yi);
+                }
             }
             return Self {
                 cols,
@@ -4168,7 +4191,7 @@ impl ConversionColPlan {
                 preserves_cell_shape: cat_cols.is_empty() && label_cols.is_empty(),
                 transposes_row_subcol: false,
                 target_table_kind,
-                converted_col_count: num_cols.len() - 1,
+                converted_col_count: rest_nums.len(),
             };
         }
         Self { cols, x_injected_at_col0: false, preserves_cell_shape: false, transposes_row_subcol: false, target_table_kind, converted_col_count: 1 }
@@ -4201,10 +4224,12 @@ impl ConversionColPlan {
     fn from_mv_to_contingency(mv: &MultipleVariablesTable, target_table_kind: TableKind) -> Self {
         let old_cols = mv.variables.len();
         let (cat_cols, label_cols, num_cols) = classify_mv_cols_for_plan(mv);
-        let is_cross_tab = cat_cols.len() == 2
-            && mv.variables[cat_cols[0]].role == VariableRole::Categorical
-            && mv.variables[cat_cols[1]].role == VariableRole::Categorical
-            && (num_cols.is_empty() || (num_cols.len() == 1 && old_cols == 3 + label_cols.len()));
+        let is_cross_tab = matches!(
+            cat_cols.as_slice(),
+            &[c0, c1]
+                if mv.variables.get(c0).is_some_and(|v| v.role == VariableRole::Categorical)
+                    && mv.variables.get(c1).is_some_and(|v| v.role == VariableRole::Categorical)
+        ) && (num_cols.is_empty() || (num_cols.len() == 1 && old_cols == 3 + label_cols.len()));
         if is_cross_tab {
             return Self {
                 cols: vec![ColMapTarget::Unmappable; old_cols],
@@ -4220,7 +4245,9 @@ impl ConversionColPlan {
         let data_indices: Vec<usize> = (0..old_cols).filter(|&i| Some(i) != label_col).collect();
         let mut cols = vec![ColMapTarget::Unmappable; old_cols];
         for (dst_c, &src_c) in data_indices.iter().enumerate() {
-            cols[src_c] = ColMapTarget::Exact(dst_c);
+            if let Some(slot) = cols.get_mut(src_c) {
+                *slot = ColMapTarget::Exact(dst_c);
+            }
         }
         Self {
             cols,
@@ -4780,7 +4807,9 @@ fn remap_graph_spec_for_conversion(
                 }
                 ov.series_index = prev_series.data_set_index;
                 for mut mapped in remap_point_override_for_conversion(ov, plan, converted_ds, warnings, graph_id) {
-                    if let Some(&new_slot) = target_slots.iter().find(|&&slot| spec.series[slot].data_set_index == mapped.series_index) {
+                    if let Some(&new_slot) =
+                        target_slots.iter().find(|&&slot| spec.series.get(slot).is_some_and(|s| s.data_set_index == mapped.series_index))
+                    {
                         mapped.series_index = new_slot;
                         kept_overrides.push(mapped);
                     }
@@ -4833,7 +4862,9 @@ fn remap_graph_spec_for_conversion(
                     Ok(nc) => *column = nc,
                     Err(reason) => {
                         warnings.push(format!("Graph `{graph_id}` reset multivariate color channel to constant: {reason}"));
-                        mv.color = ColorChannelMapping::Constant(curvebook_palette::PaletteId::OkabeIto.swatches()[0]);
+                        mv.color = ColorChannelMapping::Constant(
+                            curvebook_palette::PaletteId::OkabeIto.swatches().first().copied().unwrap_or(curvebook_palette::Rgba8::BLACK),
+                        );
                     }
                 }
             }

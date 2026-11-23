@@ -18,8 +18,9 @@ fn build_populated_xy_session(doc_id: &str, tab_id: &str) -> Result<(WebBridgeSe
             "auto_family": true,
         }),
     )?;
-    let data_id = created["payload"]["sheet_id"].as_str().ok_or("missing data sheet_id")?.to_owned();
-    let graph_id = created["payload"]["graph_sheet_id"].as_str().ok_or("missing auto graph_sheet_id")?.to_owned();
+    let data_id = created.get("payload").and_then(|p| p.get("sheet_id")).and_then(|v| v.as_str()).ok_or("missing data sheet_id")?.to_owned();
+    let graph_id =
+        created.get("payload").and_then(|p| p.get("graph_sheet_id")).and_then(|v| v.as_str()).ok_or("missing auto graph_sheet_id")?.to_owned();
 
     session.host.execute_command("table.setXCells", json!({ "sheet_id": data_id, "values": [1.0, 2.0, 4.0, 8.0] }))?;
     for (row, val) in [12.5, 24.0, 49.5, 96.0].into_iter().enumerate() {
@@ -593,8 +594,8 @@ fn rv80_autosave_writes_before_eviction_and_rolls_back_on_quota_failure() {
 
     // 3. index.html `applyLocalStorageCommand` executes writes BEFORE removals and restores backups on failure.
     let html = include_str!("../index.html");
-    let fn_start = html.find("function applyLocalStorageCommand(cmd)").expect("applyLocalStorageCommand exists");
-    let fn_slice = &html[fn_start..(fn_start + 2600).min(html.len())];
+    let (_, after_fn) = html.split_once("function applyLocalStorageCommand(cmd)").expect("applyLocalStorageCommand exists");
+    let fn_slice: String = after_fn.chars().take(2600).collect();
     assert!(fn_slice.contains("writeAll()"));
     assert!(fn_slice.contains("rollbackStorage()"));
     assert!(fn_slice.contains("removedDuringRetry"));
@@ -730,9 +731,8 @@ fn audit_123_1_browser_lock_grant_replaces_cached_lease_within_ttl_and_clears_ba
 
     // index.html enforces release-before-broadcast, waiting navigator.locks takeover, fallback retries, and stale holder guard.
     let html = include_str!("../index.html");
-    let rel_pos = html.find("releaseCurrentWebLock();").expect("release resolves web lock before broadcast");
-    let post_pos = html[rel_pos..].find("type: \"release\"").expect("broadcast release after lock release");
-    assert!(post_pos > 0);
+    let (_, after_rel) = html.split_once("releaseCurrentWebLock();").expect("release resolves web lock before broadcast");
+    assert!(after_rel.contains("type: \"release\""));
     assert!(html.contains("holdGrantedWebLock"));
     assert!(html.contains("navigator.locks.request(lockName, { signal: abortCtrl.signal }"));
     assert!(html.contains("if (!holdsCurrentWebLock)"));

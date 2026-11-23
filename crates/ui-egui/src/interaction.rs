@@ -213,7 +213,7 @@ impl InlineEditorState {
         }
         let end = self.caret_byte.min(self.buffer.len());
         let end = if self.buffer.is_char_boundary(end) { end } else { self.buffer.len() };
-        if let Some((prev_idx, _)) = self.buffer[..end].char_indices().last() {
+        if let Some((prev_idx, _)) = self.buffer.get(..end).and_then(|s| s.char_indices().last()) {
             self.buffer.drain(prev_idx..end);
             self.caret_byte = prev_idx;
         }
@@ -926,7 +926,7 @@ impl TextFieldEditState {
         }
         let sb = char_to_byte_idx(&self.text, lo);
         let eb = char_to_byte_idx(&self.text, hi);
-        Some(self.text[sb..eb].to_owned())
+        self.text.get(sb..eb).map(str::to_owned)
     }
 
     /// Cut the active selection (when non-empty), returning the removed text.

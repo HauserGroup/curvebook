@@ -5,6 +5,7 @@
 //! Layer L6 front-end crate: panels inspect engine state and mutate sessions solely by dispatching
 //! commands. Governing spec: `docs/evidence/user-interface.md`, `docs/control-protocol.md`, and `docs/development.md`.
 #![forbid(unsafe_code)]
+#![allow(clippy::indexing_slicing)] // Legacy dense layout/UI/lexer indexing (FA-SEC23-03); string_slice remains denied and all 14 I/O/boundary/app crates enforce workspace indexing_slicing = "deny".
 
 pub mod control_io;
 pub mod dialogs_canvas;

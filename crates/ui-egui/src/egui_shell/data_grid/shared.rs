@@ -664,7 +664,9 @@ pub(super) fn format_cell_into_with_decimals(cell: &Cell, preset: &LocalePreset,
             if let Some(dec) = decimals {
                 let d = usize::from(dec.min(12));
                 let _ = write!(out, "{normalized:.d$}");
-                if out.starts_with('-') && out[1..].bytes().all(|b| b == b'0' || b == b'.') {
+                if let Some(rest) = out.strip_prefix('-')
+                    && rest.bytes().all(|b| b == b'0' || b == b'.')
+                {
                     out.remove(0);
                 }
             } else {

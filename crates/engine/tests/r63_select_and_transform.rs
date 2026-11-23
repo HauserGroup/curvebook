@@ -19,24 +19,34 @@ fn ok_cmd(session: &mut Session, id: &str, params: Value) -> CommandOutcome {
 
 fn make_mv_session() -> Session {
     let mut mv = MultipleVariablesTable::new(4, 6).unwrap();
-    mv.variables[0].title = String::from("Group");
-    mv.variables[1].title = String::from("Role");
-    mv.variables[2].title = String::from("Time");
-    mv.variables[3].title = String::from("Response");
+    if let [v0, v1, v2, v3] = mv.variables.as_mut_slice() {
+        v0.title = String::from("Group");
+        v1.title = String::from("Role");
+        v2.title = String::from("Time");
+        v3.title = String::from("Response");
 
-    let rows = [
-        ("G1", "Ctrl", 1.0, 10.0),
-        ("G1", "Ctrl", 2.0, 20.0),
-        ("G1", "Trt", 3.0, 45.0),
-        ("G2", "Ctrl", 1.0, 100.0),
-        ("G2", "Trt", 2.0, 150.0),
-        ("G2", "Trt", 3.0, 250.0),
-    ];
-    for (r, (g, role, t, resp)) in rows.iter().enumerate() {
-        mv.variables[0].cells[r] = Cell::text(*g);
-        mv.variables[1].cells[r] = Cell::text(*role);
-        mv.variables[2].cells[r] = Cell::number(*t);
-        mv.variables[3].cells[r] = Cell::number(*resp);
+        let rows = [
+            ("G1", "Ctrl", 1.0, 10.0),
+            ("G1", "Ctrl", 2.0, 20.0),
+            ("G1", "Trt", 3.0, 45.0),
+            ("G2", "Ctrl", 1.0, 100.0),
+            ("G2", "Trt", 2.0, 150.0),
+            ("G2", "Trt", 3.0, 250.0),
+        ];
+        for (r, (g, role, t, resp)) in rows.iter().enumerate() {
+            if let Some(c0) = v0.cells.get_mut(r) {
+                *c0 = Cell::text(*g);
+            }
+            if let Some(c1) = v1.cells.get_mut(r) {
+                *c1 = Cell::text(*role);
+            }
+            if let Some(c2) = v2.cells.get_mut(r) {
+                *c2 = Cell::number(*t);
+            }
+            if let Some(c3) = v3.cells.get_mut(r) {
+                *c3 = Cell::number(*resp);
+            }
+        }
     }
 
     let mut doc = ProjectDocument::new("R6.3 SelectAndTransform").unwrap();

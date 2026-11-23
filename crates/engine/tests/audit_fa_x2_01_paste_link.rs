@@ -61,7 +61,13 @@ fn make_col_sheet(id: &str, title: &str, rows: &[&[f64]]) -> Result<DataSheet, B
     let mut tbl = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, cols, rows.len())?;
     for (r, row_vals) in rows.iter().enumerate() {
         for (c, &val) in row_vals.iter().enumerate() {
-            tbl.data_sets[c].cells[r][0] = Cell::number(val);
+            let cell = tbl
+                .data_sets
+                .get_mut(c)
+                .and_then(|ds| ds.cells.get_mut(r))
+                .and_then(|row| row.first_mut())
+                .ok_or_else(|| format!("missing cell ({r}, {c}) in make_col_sheet"))?;
+            *cell = Cell::number(val);
         }
     }
     Ok(DataSheet::new(id, title, TableArchetype::Column(tbl))?)

@@ -495,8 +495,7 @@ pub fn format_shortcut_for_os(combo: &str, is_macos: bool) -> String {
     let mut alt = false;
     let mut shift = false;
     let mut cmd = false;
-    while let Some(plus_idx) = rest.find('+') {
-        let mod_tok = &rest[..plus_idx];
+    while let Some((mod_tok, tail)) = rest.split_once('+') {
         if mod_tok.eq_ignore_ascii_case("cmd") || mod_tok.eq_ignore_ascii_case("meta") || mod_tok.eq_ignore_ascii_case("super") {
             cmd = true;
         } else if mod_tok.eq_ignore_ascii_case("ctrl") || mod_tok.eq_ignore_ascii_case("control") {
@@ -508,7 +507,7 @@ pub fn format_shortcut_for_os(combo: &str, is_macos: bool) -> String {
         } else {
             break;
         }
-        rest = &rest[plus_idx + 1..];
+        rest = tail;
     }
     if is_macos {
         let mut out = String::new();

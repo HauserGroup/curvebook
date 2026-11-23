@@ -829,7 +829,7 @@ fn run_layout_equalize_scaling(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandO
             let Some(idx) = candidate_spec.items.iter().position(|it| layout_item_id(it) == pid) else {
                 return Err(EngineError::with_code(ErrorCode::NotFound, format!("panel `{pid}` not found on layout `{id}`")));
             };
-            if !matches!(candidate_spec.items[idx], LayoutItem::LiveGraph { .. }) {
+            if !matches!(candidate_spec.items.get(idx), Some(LayoutItem::LiveGraph { .. })) {
                 return Err(EngineError::with_code(ErrorCode::BadInput, format!("panel `{pid}` is not a live graph panel")));
             }
             if !target_indices.contains(&idx) {
@@ -858,7 +858,7 @@ fn run_layout_equalize_scaling(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandO
     }
     let mut metrics: Vec<PanelMetric> = Vec::with_capacity(target_indices.len());
     for &idx in &target_indices {
-        let LayoutItem::LiveGraph { graph_sheet_id, bounds_pt, scale_percent, .. } = &candidate_spec.items[idx] else {
+        let Some(LayoutItem::LiveGraph { graph_sheet_id, bounds_pt, scale_percent, .. }) = candidate_spec.items.get(idx) else {
             continue;
         };
         let gs = require_graph_sheet(doc, graph_sheet_id)?;
@@ -877,7 +877,7 @@ fn run_layout_equalize_scaling(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandO
     let target_plot_w = match mode {
         EqualizeScaleMode::MatchSmallest => metrics.iter().map(|m| m.cur_plot_w).fold(f64::INFINITY, f64::min),
         EqualizeScaleMode::MatchLargest => metrics.iter().map(|m| m.cur_plot_w).fold(0.0_f64, f64::max),
-        EqualizeScaleMode::ExplicitPercent(p) => metrics[0].plot_w * (p / 100.0).max(0.05),
+        EqualizeScaleMode::ExplicitPercent(p) => metrics.first().map_or(1.0, |m| m.plot_w) * (p / 100.0).max(0.05),
     };
 
     let mut summary_panels = Vec::with_capacity(metrics.len());
@@ -979,7 +979,11 @@ fn run_layout_reorder_panel(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutc
         }
     };
 
-    let moved_id = layout_item_id(&candidate_spec.items[old_idx]).to_owned();
+    let moved_item = candidate_spec
+        .items
+        .get(old_idx)
+        .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("panel index {old_idx} out of bounds")))?;
+    let moved_id = layout_item_id(moved_item).to_owned();
     let mutated = old_idx != new_idx;
     if mutated {
         let item = candidate_spec.items.remove(old_idx);
@@ -1032,27 +1036,33 @@ fn align_live_graph_bounds(items: &mut [LayoutItem]) {
 fn align_axis_bands(rects: &mut [(usize, RectPt)], vertical_col: bool) {
     let mut done = vec![false; rects.len()];
     for i in 0..rects.len() {
-        if done[i] {
+        if done.get(i).copied().unwrap_or(true) {
             continue;
         }
-        let ref_r = rects[i].1;
+        let Some(&(_, ref_r)) = rects.get(i) else {
+            continue;
+        };
         let span = if vertical_col { ref_r.width } else { ref_r.height }.max(40.0) * 0.35;
         let ref_coord = if vertical_col { ref_r.x } else { ref_r.y };
         let mut target = ref_coord;
         let mut group = vec![i];
         for (j, (_, rj)) in rects.iter().enumerate().skip(i + 1) {
             let coord_j = if vertical_col { rj.x } else { rj.y };
-            if !done[j] && (coord_j - ref_coord).abs() <= span {
+            if !done.get(j).copied().unwrap_or(true) && (coord_j - ref_coord).abs() <= span {
                 target = target.max(coord_j);
                 group.push(j);
             }
         }
         for idx in group {
-            done[idx] = true;
-            if vertical_col {
-                rects[idx].1.x = target;
-            } else {
-                rects[idx].1.y = target;
+            if let Some(d) = done.get_mut(idx) {
+                *d = true;
+            }
+            if let Some((_, rect)) = rects.get_mut(idx) {
+                if vertical_col {
+                    rect.x = target;
+                } else {
+                    rect.y = target;
+                }
             }
         }
     }
@@ -1158,11 +1168,15 @@ fn resolve_panel_bounds(spec: &LayoutSpec, panel_index: usize, params: &LayoutAd
 }
 
 fn parse_grid_template(val: &Value) -> Result<(u8, u8), EngineError> {
-    let arr = val.as_array().filter(|a| a.len() == 2).ok_or_else(|| {
+    let [rows_v, cols_v] = val.as_array().map(Vec::as_slice).filter(|a| a.len() == 2).ok_or_else(|| {
         EngineError::with_code(ErrorCode::BadInput, "`grid_template` must be `[rows, cols]`").with_details(json!({ "pointer": "/grid_template" }))
-    })?;
-    let rows = parse_u8_count(&arr[0], "`grid_template[0]`", "/grid_template/0")?;
-    let cols = parse_u8_count(&arr[1], "`grid_template[1]`", "/grid_template/1")?;
+    })?
+    else {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "`grid_template` must be `[rows, cols]`")
+            .with_details(json!({ "pointer": "/grid_template" })));
+    };
+    let rows = parse_u8_count(rows_v, "`grid_template[0]`", "/grid_template/0")?;
+    let cols = parse_u8_count(cols_v, "`grid_template[1]`", "/grid_template/1")?;
     Ok((rows.max(1), cols.max(1)))
 }
 
@@ -1470,7 +1484,10 @@ fn run_layout_update_image(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutco
         }
     };
 
-    let item = &mut candidate_spec.items[target_idx];
+    let item = candidate_spec
+        .items
+        .get_mut(target_idx)
+        .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("layout item `{target_idx}` out of bounds on `{layout_id}`")))?;
     let LayoutItem::EmbeddedImage { id: item_id, asset_id, bounds_pt, rotation_deg, lock_aspect_ratio, crop, border, badge_override } = item else {
         return Err(EngineError::with_code(ErrorCode::BadInput, format!("layout item `{target_idx}` on `{layout_id}` is not an embedded image")));
     };
