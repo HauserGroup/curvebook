@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="CurveBook reference manual entry point. Release snapshots are generated at release time under docs/manual/v<major>.<minor>/ and previewed locally with cargo xtask docs-site.">
+  <meta name="description" content="CurveBook reference manual entry point. Frozen static HTML manual snapshots are generated under docs/manual/v<major>.<minor>/ and previewed locally with cargo xtask docs-site.">
   <meta name="referrer" content="no-referrer">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'">
   <meta name="color-scheme" content="light">
@@ -20,10 +20,11 @@
           <img src="../images/curvebook.png" width="64" height="64" alt="">
           <span>CurveBook · Documentation</span>
         </div>
-        <span class="window-status">Pre-release manual index</span>
+        <span class="window-status">Beta manual preview</span>
       </div>
       <nav aria-label="Main navigation">
         <a href="../index.html">Home</a>
+        <a href="index.html" aria-current="page">Documentation</a>
         <a href="../privacy.html">Privacy</a>
         <a href="https://github.com/HauserGroup/curvebook/tree/main/docs">Docs on GitHub <span aria-hidden="true">↗</span></a>
       </nav>
@@ -32,31 +33,125 @@
     <main id="main" tabindex="-1">
       <div class="overview doc-body">
         <p class="eyebrow">CurveBook Reference Manual</p>
-        <h1>Versioned documentation snapshots</h1>
-        <p class="lead">Released versions of the static HTML reference manual are published under <code>docs/manual/v&lt;major&gt;.&lt;minor&gt;/</code> when a release tag is cut, and this entry page redirects automatically to the latest release.</p>
+        <h1 id="manual-title" tabindex="-1">Documentation &amp; user guides</h1>
+        <p class="lead">Released versions of the generated static HTML reference manual are published under <code>docs/manual/v&lt;major&gt;.&lt;minor&gt;/</code> when a release snapshot is cut, and this entry page redirects automatically to the latest published version.</p>
 
-        <div class="callout">
-          <p><strong>Pre-release status:</strong> No frozen release snapshot has been published on this branch yet. Build and preview the full static manual locally from a checkout of the repository:</p>
-          <pre><code>cargo xtask docs-site</code></pre>
+        <div class="callout callout-note" role="note">
+          <p class="callout-title">Note</p>
+          <p>Until a frozen snapshot is published for the Beta release tag, open the source Markdown guides directly on GitHub below or build the full static manual locally from a repository checkout:</p>
+          <pre><code class="language-sh">cargo xtask docs-site</code></pre>
         </div>
 
-        <h2>Source documentation on GitHub</h2>
-        <p>While the first Beta release snapshot is in preparation, source Markdown guides and JSON Schemas remain readable directly in the repository:</p>
-        <ul>
-          <li><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/mcp-for-beginners.md">MCP setup for beginners</a> — configure an AI assistant to drive CurveBook.</li>
-          <li><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/reference/automation/mcp.md">MCP server reference</a> — transports, dynamic toolsets, and strict <code>--gui-only</code> mode.</li>
-          <li><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/reference/automation/cli.md">CLI reference (<code>curvebook-cli</code>)</a> — subcommands, flags, and exit codes.</li>
-          <li><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/reference/automation/control-and-batch.md">Control protocol &amp; batch format</a> — loopback <code>--control</code> JSON-lines and <code>curvebook.batch.v1</code>.</li>
-          <li><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/commands.md">Engine command catalog</a> — generated command IDs, schemas, and effects.</li>
-          <li><a href="https://github.com/HauserGroup/curvebook/tree/main/docs/schemas">JSON Schemas</a> — project, preferences, archive manifest, and batch schemas.</li>
-          <li><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/development.md">Contributor &amp; development guide</a> — building, testing, and clean-room rules.</li>
-        </ul>
+        <section id="start-here" class="section-group" aria-labelledby="start-here-title" tabindex="-1">
+          <h2 id="start-here-title">Start Here</h2>
+          <div class="section-grid">
+            <article class="section-card">
+              <h3><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/reference/get-started.md">Get Started &amp; Installation <span aria-hidden="true">↗</span></a></h3>
+              <p>Platform package matrix, macOS/Windows/Linux/FreeBSD installation, <code>SHA256SUMS.txt</code> and Sigstore verification, and custom font configuration.</p>
+            </article>
+            <article class="section-card">
+              <h3><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/reference/desktop-gui.md">Desktop GUI Overview <span aria-hidden="true">↗</span></a></h3>
+              <p>Welcome launcher, data entry, non-destructive exclusions, live split graph inspection, Page Layouts, and publication figure export.</p>
+            </article>
+            <article class="section-card">
+              <h3><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/mcp-for-beginners.md">MCP Setup for Beginners <span aria-hidden="true">↗</span></a></h3>
+              <p>Connect an AI assistant using the bundled <code>curvebook-cli</code> binary, run a first analysis, and open the saved project in the desktop app.</p>
+            </article>
+          </div>
+        </section>
+
+        <section id="scientific-reference" class="section-group" aria-labelledby="scientific-reference-title" tabindex="-1">
+          <h2 id="scientific-reference-title">Scientific &amp; Graphing Reference</h2>
+          <div class="section-grid">
+            <article class="section-card">
+              <h3><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/reference/concepts.md">Concepts &amp; Reactive Pipeline <span aria-hidden="true">↗</span></a></h3>
+              <p>Project structure, five sheet types, reactive DAG recalculation, non-destructive cell exclusions, bounded undo, and checkpoints.</p>
+            </article>
+            <article class="section-card">
+              <h3><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/reference/tables.md">Data Tables &amp; Formulas <span aria-hidden="true">↗</span></a></h3>
+              <p>Scientific table archetypes, replicate and summary subcolumns, <code>=</code> Calculated Variables, data transforms, microplate import, and randomization.</p>
+            </article>
+            <article class="section-card">
+              <h3><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/reference/analyses.md">Statistical Analyses Reference <span aria-hidden="true">↗</span></a></h3>
+              <p>Options, reported values, assumption diagnostics, edge cases, published literature citations, and oracle verification across statistical analyses.</p>
+            </article>
+            <article class="section-card">
+              <h3><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/reference/fitting.md">Curve Fitting Reference <span aria-hidden="true">↗</span></a></h3>
+              <p>Nonlinear solvers, weighting schemes, parameter sharing, profile-likelihood confidence intervals, ROUT outlier handling, and custom DSL/ODE models.</p>
+            </article>
+            <article class="section-card">
+              <h3><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/reference/graphs.md">Graphs &amp; Page Layouts <span aria-hidden="true">↗</span></a></h3>
+              <p>Plot families, nonlinear and broken axes, significance brackets and CLD, live TeX equations, perceptual palettes, Page Layouts, and export formats.</p>
+            </article>
+            <article class="section-card">
+              <h3><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/reference/qol.md">Calculators &amp; Quality-of-Life Tools <span aria-hidden="true">↗</span></a></h3>
+              <p>Live selection Quick Statistics, diagnostics-only assumption banners, methods reporting, CVD preview filters, and archetype conversions.</p>
+            </article>
+          </div>
+        </section>
+
+        <section id="files-automation-settings" class="section-group" aria-labelledby="files-automation-settings-title" tabindex="-1">
+          <h2 id="files-automation-settings-title">Files, Automation &amp; Settings</h2>
+          <div class="section-grid">
+            <article class="section-card">
+              <h3><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/reference/files.md">Files, Import &amp; Export <span aria-hidden="true">↗</span></a></h3>
+              <p>Self-contained <code>.curvebook</code> archives, Git-friendly <code>.curvebook.d/</code> directories, <code>.cbtemplate</code> templates, WAL crash recovery, and CSV/XML interchange.</p>
+            </article>
+            <article class="section-card">
+              <h3><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/reference/automation/mcp.md">MCP Server Reference <span aria-hidden="true">↗</span></a></h3>
+              <p>Stdio JSON-RPC framing, live-attach desktop control, dynamic toolsets, resource templates, and strict <code>--gui-only</code> confinement.</p>
+            </article>
+            <article class="section-card">
+              <h3><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/reference/automation/cli.md">CLI Reference (<code>curvebook-cli</code>) <span aria-hidden="true">↗</span></a></h3>
+              <p>Headless subcommands, schema-typed command flags, project inspection, batch runs, and SVG/PDF/raster export options.</p>
+            </article>
+            <article class="section-card">
+              <h3><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/reference/automation/control-and-batch.md">Control Protocol &amp; Batch Format <span aria-hidden="true">↗</span></a></h3>
+              <p>Loopback <code>127.0.0.1</code> JSON-lines <code>--control</code> channel, <code>curvebook.batch.v1</code> manifests, and canonical error codes.</p>
+            </article>
+            <article class="section-card">
+              <h3><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/commands.md">Engine Command Catalog <span aria-hidden="true">↗</span></a></h3>
+              <p>Generated catalog of canonical engine commands, parameter schemas, effects, and replay semantics.</p>
+            </article>
+            <article class="section-card">
+              <h3><a href="https://github.com/HauserGroup/curvebook/tree/main/docs/schemas">JSON Schemas <span aria-hidden="true">↗</span></a></h3>
+              <p>Persisted schemas for project documents, archive manifests, WAL journal records, user preferences, and batch manifests.</p>
+            </article>
+            <article class="section-card">
+              <h3><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/reference/settings.md">Settings, Shortcuts &amp; Languages <span aria-hidden="true">↗</span></a></h3>
+              <p>Preference keys, storage paths, custom shortcut scopes, Beta active interface locales, and locale number formatting.</p>
+            </article>
+          </div>
+        </section>
+
+        <section id="support-contribute" class="section-group" aria-labelledby="support-contribute-title" tabindex="-1">
+          <h2 id="support-contribute-title">Support &amp; Contribute</h2>
+          <div class="section-grid">
+            <article class="section-card">
+              <h3><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/reference/troubleshooting.md">Troubleshooting &amp; Known Issues <span aria-hidden="true">↗</span></a></h3>
+              <p>macOS Gatekeeper, Windows SmartScreen, Linux FUSE extraction, MCP connection diagnostics, structured error codes, and Beta scope limits.</p>
+            </article>
+            <article class="section-card">
+              <h3><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/reference/privacy-security.md">Privacy, Licences &amp; Security <span aria-hidden="true">↗</span></a></h3>
+              <p>Zero-telemetry local execution, <code>--workdir</code> containment, dual licensing, clean-room development, and security reporting (<a href="../privacy.html">Public Privacy Policy</a>).</p>
+            </article>
+            <article class="section-card">
+              <h3><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/reference/glossary.md">Glossary <span aria-hidden="true">↗</span></a></h3>
+              <p>Definitions of statistical, numerical fitting, graphing, and automation terms used throughout CurveBook.</p>
+            </article>
+            <article class="section-card">
+              <h3><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/development.md">Developer Setup &amp; Architecture <span aria-hidden="true">↗</span></a></h3>
+              <p>Source builds, CI gates, <a href="https://github.com/HauserGroup/curvebook/blob/main/docs/architecture.md">crate architecture <span aria-hidden="true">↗</span></a>, <a href="https://github.com/HauserGroup/curvebook/blob/main/docs/design-language.md">OKLab/OKLCH design language <span aria-hidden="true">↗</span></a>, and <a href="https://github.com/HauserGroup/curvebook/blob/main/docs/release/releasing.md">release procedures <span aria-hidden="true">↗</span></a>.</p>
+            </article>
+          </div>
+        </section>
       </div>
     </main>
 
     <footer class="site-footer">
       <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>
-      <p class="privacy"><a href="../index.html">Back to CurveBook home</a> · <a href="../privacy.html">Privacy Policy</a></p>
+      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
+      <p class="privacy"><a href="../index.html">Back to CurveBook home</a> · <a href="../privacy.html">Privacy Policy</a> · <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a></p>
     </footer>
   </div>
 </body>
