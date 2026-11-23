@@ -31,14 +31,14 @@ A `curvebook.batch.v1` manifest is a deterministic JSON document validated stric
 Single-call manifest structure (top-level keys):
 
 ```json
-{"schema":"curvebook.batch.v1","project":"in.curvebook","inputs":[{"csv":"assay.csv","sheet":"data-2","kind":"xy"}],"commands":[{"cmd":"fit.run","id":"step-1","params":{"source_sheet_id":"data-2","sheet_id":"fit-1","equation_id":"log_agonist_vs_response_4pl"}}],"exports":[{"out":"out.curvebook","format":"curvebook"},{"sheet_id":"graph-1","out":"out.svg","format":"svg"}]}
+{"schema":"curvebook.batch.v1","project":"in.curvebook","inputs":[{"csv":"assay.csv","sheet":"data-2","kind":"xy"}],"commands":[{"cmd":"fit.run","id":"step-1","params":{"source_sheet_id":"data-2","sheet_id":"fit-1","equation_id":"log_agonist_vs_response_4pl"}}],"exports":[{"out":"out.curvebook","format":"curvebook"},{"sheet":"graph-1","out":"out.svg","format":"svg"}]}
 ```
 
 - `schema`: Required constant `"curvebook.batch.v1"`.
 - `project` / `template`: Mutually exclusive optional source project path or `.cbtemplate` template path (omit both to start from a blank session).
-- `inputs`: Optional ordered list of delimited imports (`csv`, `tsv`, `path`, or `file`; optional `sheet`/`sheet_id`/`sheetId`, `kind`/`table_kind`/`tableKind`, `subcolumn_mode`/`subcolumnMode`, `delimiter`, and `decimal_separator`/`decimalSeparator`).
-- `commands`: Optional ordered list of command steps, each naming the command via `cmd`, `command`, or `method`, with optional `id` and `params` object.
-- `exports`: Optional ordered list of project saves or table/figure exports (`out`/`path`, optional `format`, `sheet`/`sheet_id`/`sheetId`, `dpi`, `pretty`, `tab_index`/`tabIndex`, `pdf_version`/`pdfVersion`, `ttf_font`/`ttfFont`). Pass `format: "curvebook"` or `"curvebook.d"` to write the resulting project archive or unpacked directory.
+- `inputs`: Optional ordered list of delimited imports using canonical keys (`path`/`file` or inline `csv`/`tsv`; optional `sheet`, `kind`, `subcolumn_mode`, `delimiter`, and `decimal_separator`).
+- `commands`: Optional ordered list of command steps, each naming the command via `cmd` (accepted aliases: `command`, `method`), with optional `id` and canonical `snake_case` `params` object.
+- `exports`: Optional ordered list of project saves or table/figure exports using canonical keys (`out`/`path`; optional `format`, `sheet`, `dpi`, `pretty`, `tab_index`, `pdf_version`, `ttf_font`). Pass `format: "curvebook"` or `"curvebook.d"` to write the resulting project archive or unpacked directory.
 
 ## `run` Script Format
 
@@ -50,4 +50,4 @@ Engine, MCP, and CLI errors carry stable machine-readable `ErrorCode` variants c
 
 ## Command ID Stability Rules
 
-Command IDs used in scripts, batch manifests, and MCP `command_run` calls remain stable across minor releases. See [Command IDs](../../command-ids.md) for naming, deprecation aliases, and parameter schema compatibility guarantees.
+Command IDs used in scripts, batch manifests, and MCP `command_run` calls remain stable across minor releases. See [Command IDs](../../command-ids.md) for naming, command aliases, and canonical `snake_case` parameter schema compatibility guarantees.

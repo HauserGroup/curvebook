@@ -4,10 +4,13 @@
 //! Clean-room deterministic workspace screenshot generator (`R0.14`).
 //!
 //! Renders `workspace-split-fit.png` (Light theme Split Workspace with XY dose-response
-//! data, 4PL nonlinear fit + 95% confidence band ribbon + SD error bars + embedded analysis
-//! result table) and `workspace-layout-dark.png` (Dark theme multi-panel `LayoutSheet`
-//! with linked panels `A` and `B`, physical millimeter rulers, visual scale bar, and
-//! page-layout inspector) into `<out_dir>`.
+//! data, 4PL nonlinear fit, 95% confidence band ribbon, SD error bars, live TeX model
+//! equation, and 2-column parameter slice), `workspace-layout-dark.png` (Dark theme
+//! multi-panel `LayoutSheet` with linked panels `A` and `B`, physical millimeter rulers,
+//! visual scale bar, and page-layout inspector), and `workspace-anova-results.png`
+//! (Light theme Split Workspace with multi-tab One-Way ANOVA `ResultSheet`, `QOL-7`
+//! diagnostic banner, and linked Column graph with Compact Letter Display and brackets)
+//! into `<out_dir>`.
 
 use std::error::Error;
 use std::fs;
@@ -32,6 +35,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let layout_png = build_layout_dark_png()?;
     write_png(&out_dir.join("workspace-layout-dark.png"), &layout_png)?;
+
+    let anova_png = build_anova_results_png()?;
+    write_png(&out_dir.join("workspace-anova-results.png"), &anova_png)?;
 
     let target = RenderTargetSpec { width_px: WIDTH_PX, height_px: HEIGHT_PX, dpi: DPI };
     for (mode, file_name) in [
@@ -125,7 +131,7 @@ fn style_dose_graph(app: &mut UiApp, graph_id: &str, result_id: &str, compact_fo
     let (canvas, legend_pos) = if compact_for_layout {
         (json!({ "width": 270.0, "height": 230.0 }), json!([62.0, 24.0]))
     } else {
-        (json!({ "width": 410.0, "height": 290.0 }), json!([58.0, 24.0]))
+        (json!({ "width": 440.0, "height": 304.0 }), json!([62.0, 36.0]))
     };
     app.execute_command(
         "graph.setSpec",
@@ -166,9 +172,30 @@ fn style_dose_graph(app: &mut UiApp, graph_id: &str, result_id: &str, compact_fo
             "graph.addAnnotation",
             json!({
                 "sheet_id": graph_id,
-                "kind": "embedded_result_table",
+                "kind": "model_equation",
                 "result_sheet_id": result_id,
-                "bounds_pt": [60.0, 74.0, 152.0, 56.0]
+                "data_set_index": 0,
+                "mode": "symbolic",
+                "bounds_pt": [62.0, 72.0, 0.0, 0.0],
+                "font_size_pt": 8.2,
+                "bordered": true
+            }),
+        )?;
+        app.execute_command(
+            "edit.pasteResultTable",
+            json!({
+                "source_sheet_id": result_id,
+                "target_sheet_id": graph_id,
+                "tab_id": "nonlinear_parameters",
+                "selected_rows": [4, 5, 6, 7],
+                "selected_cols": [0],
+                "bounds_pt": [62.0, 114.0, 170.0, 59.0],
+                "style": {
+                    "font_size_pt": 7.0,
+                    "bold_headers": true,
+                    "outer_border_width_pt": 0.75,
+                    "gridline_width_pt": 0.45
+                }
             }),
         )?;
     }
@@ -216,6 +243,119 @@ fn build_split_fit_png() -> Result<Vec<u8>, Box<dyn Error>> {
     app.split.primary_sheet_id = Some(SheetId::new("xy-dose"));
     app.split.secondary_sheet_id = Some(SheetId::new("g-dose"));
     app.canvas_dialogs.status_banner = Some(String::from("4PL Fit Ready | R2 = 0.996 | 95% CI Ribbon | SD Error Bars"));
+    app.sync_views();
+
+    Ok(render_png_bytes(&mut app)?)
+}
+
+fn build_synthetic_anova_sheet(id: &str) -> Result<DataSheet, Box<dyn Error>> {
+    // Clean-room synthetic treatment-response cohorts with heteroscedastic high-dose spread
+    // so Brown-Forsythe emits a real QOL-7 assumption warning alongside Tukey post-hoc groups.
+    let groups = [
+        ("Vehicle", [11.8_f64, 12.6, 11.2, 12.4, 13.0, 11.5]),
+        ("10 nM", [28.4, 30.8, 27.1, 29.5, 31.2, 28.0]),
+        ("100 nM", [61.2, 65.8, 59.4, 64.1, 66.5, 60.8]),
+        ("1 uM", [58.0, 86.4, 54.2, 88.9, 62.5, 81.0]),
+    ];
+    let mut table = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, groups.len(), 6)?;
+    for (col, (label, vals)) in groups.iter().enumerate() {
+        let ds = table.data_sets.get_mut(col).ok_or("missing ANOVA dataset")?;
+        ds.title = String::from(*label);
+        for (row, &val) in vals.iter().enumerate() {
+            let cell = ds.cells.get_mut(row).and_then(|r| r.first_mut()).ok_or("missing ANOVA cell")?;
+            *cell = Cell::number(val);
+        }
+    }
+    Ok(DataSheet::new(SheetId::new(id), "Treatment Cohorts", TableArchetype::Column(table))?)
+}
+
+fn build_anova_results_png() -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut doc = ProjectDocument::new("One-Way ANOVA & Post-Hoc Workspace")?;
+    doc.add_data_sheet(build_synthetic_anova_sheet("col-anova")?)?;
+
+    let mut app = UiApp::from_session(curvebook_engine::Session::from_document(doc));
+    app.set_theme_mode(UiThemeMode::Light);
+
+    app.execute_command(
+        "stats.run",
+        json!({
+            "sheet_id": "anova-oneway",
+            "source_sheet_id": "col-anova",
+            "kind": "one_way_anova",
+            "title": "One-Way ANOVA (Tukey)",
+            "multiplicity": "tukey",
+            "compute_effect_sizes": true
+        }),
+    )?;
+
+    app.execute_command(
+        "graph.create",
+        json!({
+            "sheet_id": "g-anova",
+            "data_sheet_id": "col-anova",
+            "kind": "column",
+            "title": "Treatment Response"
+        }),
+    )?;
+    app.execute_command(
+        "graph.setAxes",
+        json!({
+            "sheet_id": "g-anova",
+            "frame_preset": "open_l",
+            "x_axis": { "title": "Treatment Group" },
+            "y_axis": { "title": "Activation (%)", "min": 0.0, "max": 125.0, "major_tick_interval": 25.0 }
+        }),
+    )?;
+    app.execute_command(
+        "graph.setSpec",
+        json!({
+            "sheet_id": "g-anova",
+            "spec": {
+                "title": "Activation",
+                "canvas_size_pt": { "width": 336.0, "height": 296.0 },
+                "legend": { "visible": false }
+            }
+        }),
+    )?;
+    app.execute_command(
+        "graph.addComparisonBrackets",
+        json!({
+            "sheet_id": "g-anova",
+            "result_sheet_id": "anova-oneway",
+            "significant_only": true,
+            "style": "square",
+            "label_mode": "stars",
+            "font_size_pt": 8.0,
+            "bracket_step_pt": 15.0
+        }),
+    )?;
+    app.execute_command(
+        "graph.setCompactLetterDisplay",
+        json!({
+            "sheet_id": "g-anova",
+            "result_sheet_id": "anova-oneway",
+            "enabled": true,
+            "pairwise_display_mode": "brackets_and_compact_letter_display",
+            "font_size_pt": 9.0,
+            "offset_pt": 5.0
+        }),
+    )?;
+
+    let anova_id = SheetId::new("anova-oneway");
+    app.execute_command("sheet.select", json!({ "sheet_id": "anova-oneway" }))?;
+    let doc_snap = app.document().clone();
+    app.canvas_dialogs.on_sheet_selected(&doc_snap, &anova_id);
+    let posthoc_idx = doc_snap.result_sheet(&anova_id).and_then(|rs| rs.tabs.iter().position(|t| t.id == "multiple-comparisons")).unwrap_or(0);
+    app.canvas_dialogs.result_view.active_tab_index = posthoc_idx;
+
+    app.nav.navigator_open = true;
+    app.nav.inspector_open = true;
+    app.family_open = true;
+    app.split.enabled = true;
+    app.split.set_ratio(0.62);
+    app.split.primary_sheet_id = Some(anova_id);
+    app.split.secondary_sheet_id = Some(SheetId::new("g-anova"));
+    app.canvas_dialogs.status_banner = Some(String::from("One-Way ANOVA | Tukey Post-Hoc | CLD & Brackets | QOL-7 Diagnostics"));
     app.sync_views();
 
     Ok(render_png_bytes(&mut app)?)

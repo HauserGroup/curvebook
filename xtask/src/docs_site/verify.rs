@@ -13,6 +13,7 @@ struct PageFacts {
     ids: BTreeSet<String>,
     hrefs: Vec<String>,
     asset_srcs: Vec<String>,
+    meta_refresh_targets: Vec<String>,
 }
 
 /// Verify all generated pages, links, fragments, CSP/privacy invariants, registry coverage,
@@ -29,6 +30,7 @@ pub fn verify_site(root: &Path, out_dir: &Path, site: &GeneratedSite) -> Result<
     check_internal_links_and_fragments(root, out_dir, site, &facts)?;
     check_registry_coverage(&facts, site)?;
     check_committed_snapshots(root)?;
+    check_root_pages(root)?;
     run_hygiene_scanners(root, out_dir)?;
     Ok(())
 }
@@ -78,7 +80,10 @@ fn scan_html_tags(rel_path: &str, html: &str, facts: &mut PageFacts) -> Result<(
     let mut rest = html;
     let mut inside_code_or_pre = 0usize;
 
-    while let Some((_, after_lt)) = rest.split_once('<') {
+    while let Some((before_lt, after_lt)) = rest.split_once('<') {
+        if inside_code_or_pre == 0 {
+            check_unrendered_markup(rel_path, before_lt)?;
+        }
         if let Some(after_comment) = after_lt.strip_prefix("!--") {
             let Some((_, after_close)) = after_comment.split_once("-->") else {
                 return Err(format!("{rel_path}: unclosed HTML comment `<!--`"));
@@ -115,34 +120,87 @@ fn scan_html_tags(rel_path: &str, html: &str, facts: &mut PageFacts) -> Result<(
         }
 
         let attrs = parse_tag_attributes(trimmed);
-        for (k, v) in attrs {
-            let key_lower = k.to_ascii_lowercase();
-            if key_lower == "style" {
-                return Err(format!("{rel_path}: inline `style=` attribute forbidden under strict CSP (`<{tag_lower}>`)"));
+        process_tag_attrs(rel_path, &tag_lower, &attrs, facts)?;
+    }
+    if inside_code_or_pre == 0 {
+        check_unrendered_markup(rel_path, rest)?;
+    }
+    Ok(())
+}
+
+fn process_tag_attrs(rel_path: &str, tag_lower: &str, attrs: &[(String, String)], facts: &mut PageFacts) -> Result<(), String> {
+    let mut is_meta_refresh = false;
+    let mut meta_content: Option<&str> = None;
+
+    for (k, v) in attrs {
+        let key_lower = k.to_ascii_lowercase();
+        if key_lower == "style" {
+            return Err(format!("{rel_path}: inline `style=` attribute forbidden under strict CSP (`<{tag_lower}>`)"));
+        }
+        if key_lower.starts_with("on") && key_lower.len() > 2 {
+            return Err(format!("{rel_path}: inline event handler `{key_lower}=` forbidden (`<{tag_lower}>`)"));
+        }
+        if key_lower == "id" && !v.is_empty() && !facts.ids.insert(v.clone()) {
+            return Err(format!("{rel_path}: duplicate HTML id `#{v}`"));
+        }
+        if key_lower == "href" {
+            let lower_v = v.to_ascii_lowercase();
+            if lower_v.starts_with("javascript:") || lower_v.starts_with("data:") {
+                return Err(format!("{rel_path}: forbidden `href` URI `{v}`"));
             }
-            if key_lower.starts_with("on") && key_lower.len() > 2 {
-                return Err(format!("{rel_path}: inline event handler `{key_lower}=` forbidden (`<{tag_lower}>`)"));
+            if matches!(tag_lower, "link" | "base") && is_external_url(v) {
+                return Err(format!("{rel_path}: external asset URL forbidden in `<{tag_lower} href=\"{v}\">`"));
             }
-            if key_lower == "id" && !v.is_empty() && !facts.ids.insert(v.clone()) {
-                return Err(format!("{rel_path}: duplicate HTML id `#{v}`"));
+            facts.hrefs.push(v.clone());
+        } else if matches!(key_lower.as_str(), "src" | "poster" | "action") {
+            if is_external_url(v) || v.to_ascii_lowercase().starts_with("data:") {
+                return Err(format!("{rel_path}: external or inline `{key_lower}` asset forbidden (`{v}`)"));
             }
-            if key_lower == "href" {
-                let lower_v = v.to_ascii_lowercase();
-                if lower_v.starts_with("javascript:") || lower_v.starts_with("data:") {
-                    return Err(format!("{rel_path}: forbidden `href` URI `{v}`"));
-                }
-                if matches!(tag_lower.as_str(), "link" | "base") && is_external_url(&v) {
-                    return Err(format!("{rel_path}: external asset URL forbidden in `<{tag_lower} href=\"{v}\">`"));
-                }
-                facts.hrefs.push(v);
-            } else if matches!(key_lower.as_str(), "src" | "poster" | "action") {
-                if is_external_url(&v) || v.to_ascii_lowercase().starts_with("data:") {
-                    return Err(format!("{rel_path}: external or inline `{key_lower}` asset forbidden (`{v}`)"));
-                }
-                facts.asset_srcs.push(v);
+            facts.asset_srcs.push(v.clone());
+        } else if tag_lower == "meta" && key_lower == "http-equiv" && v.eq_ignore_ascii_case("refresh") {
+            is_meta_refresh = true;
+        } else if tag_lower == "meta" && key_lower == "content" {
+            meta_content = Some(v.as_str());
+        }
+    }
+
+    if is_meta_refresh
+        && let Some(content) = meta_content
+        && let Some(target) = parse_meta_refresh_url(content)
+    {
+        facts.meta_refresh_targets.push(target.to_owned());
+    }
+    Ok(())
+}
+
+fn parse_meta_refresh_url(content: &str) -> Option<&str> {
+    for part in content.split(';') {
+        let trimmed = part.trim();
+        if let Some((lhs, rhs)) = trimmed.split_once('=')
+            && lhs.trim().eq_ignore_ascii_case("url")
+        {
+            let target = rhs.trim().trim_matches('"').trim_matches('\'');
+            if !target.is_empty() {
+                return Some(target);
             }
         }
-        let _ = inside_code_or_pre;
+    }
+    None
+}
+
+fn check_unrendered_markup(rel_path: &str, text: &str) -> Result<(), String> {
+    const LEAKED_TEX_MACROS: &[&str] = &["\\frac{", "\\dfrac{", "\\tfrac{", "\\text{", "\\sqrt{", "\\chi", "\\Phi", "\\TeX", "\\ge ", "\\le "];
+    const LEAKED_CALLOUT_MARKERS: &[&str] = &["[!NOTE]", "[!TIP]", "[!IMPORTANT]", "[!WARNING]", "[!CAUTION]"];
+
+    for marker in LEAKED_TEX_MACROS {
+        if text.contains(marker) {
+            return Err(format!("{rel_path}: unrendered TeX macro `{marker}` leaked outside <code>/<pre>"));
+        }
+    }
+    for marker in LEAKED_CALLOUT_MARKERS {
+        if text.contains(marker) {
+            return Err(format!("{rel_path}: unrendered GitHub callout marker `{marker}` leaked outside <code>/<pre>"));
+        }
     }
     Ok(())
 }
@@ -463,6 +521,96 @@ pub fn check_committed_snapshots(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Audit root GitHub Pages HTML files (`docs/index.html`, `docs/privacy.html`, `docs/manual/index.html`,
+/// and any existing root redirect shims `docs/get-started.html`, `docs/troubleshooting.html`) for
+/// strict CSP, `no-referrer`, accessibility structure, zero scripts/forms/inline styles/external
+/// assets, and valid local relative targets under `docs/`.
+pub fn check_root_pages(root: &Path) -> Result<(), String> {
+    let docs_dir = root.join("docs");
+    let mut pages_to_audit: Vec<&str> = vec!["index.html", "privacy.html", "manual/index.html"];
+    for shim in ["get-started.html", "troubleshooting.html"] {
+        let path = docs_dir.join(shim);
+        if std::fs::symlink_metadata(&path).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_file()) {
+            pages_to_audit.push(shim);
+        }
+    }
+
+    let mut audited: BTreeMap<String, PageFacts> = BTreeMap::new();
+    for rel in pages_to_audit {
+        let full = docs_dir.join(rel);
+        let html = std::fs::read_to_string(&full).map_err(|e| format!("read docs/{rel}: {e}"))?;
+        let facts = audit_single_html(&format!("docs/{rel}"), &html)?;
+        audited.insert(rel.to_owned(), facts);
+    }
+
+    let mut extra_html_ids: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (rel, facts) in &audited {
+        for raw_ref in facts.hrefs.iter().chain(facts.asset_srcs.iter()).chain(facts.meta_refresh_targets.iter()) {
+            if is_external_url(raw_ref) || raw_ref.starts_with("mailto:") {
+                continue;
+            }
+            verify_docs_relative_target(&docs_dir, rel, raw_ref, facts, &audited, &mut extra_html_ids)?;
+        }
+    }
+    Ok(())
+}
+
+fn verify_docs_relative_target(
+    docs_dir: &Path,
+    from_rel: &str,
+    raw_ref: &str,
+    from_facts: &PageFacts,
+    audited: &BTreeMap<String, PageFacts>,
+    extra_html_ids: &mut BTreeMap<String, BTreeSet<String>>,
+) -> Result<(), String> {
+    let (target_part, frag_part) = match raw_ref.split_once('#') {
+        Some((t, f)) => (t, Some(f)),
+        None => (raw_ref, None),
+    };
+    if target_part.is_empty() {
+        if let Some(frag) = frag_part
+            && !frag.is_empty()
+            && !from_facts.ids.contains(frag)
+        {
+            return Err(format!("docs/{from_rel}: broken same-page anchor `#{frag}`"));
+        }
+        return Ok(());
+    }
+
+    let resolved = resolve_relative_segments(from_rel, target_part);
+    if resolved.starts_with("..") {
+        return Err(format!("docs/{from_rel}: relative target `{raw_ref}` escapes `docs/` root (`{resolved}`)"));
+    }
+    let target_path = docs_dir.join(&resolved);
+    if !std::fs::symlink_metadata(&target_path).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_file()) {
+        return Err(format!("docs/{from_rel}: broken relative target `{raw_ref}` (missing `docs/{resolved}`)"));
+    }
+
+    if let Some(frag) = frag_part
+        && !frag.is_empty()
+        && resolved.ends_with(".html")
+    {
+        if let Some(known) = audited.get(&resolved) {
+            if !known.ids.contains(frag) {
+                return Err(format!("docs/{from_rel}: broken fragment `{raw_ref}` (missing `#{frag}` in `docs/{resolved}`)"));
+            }
+            return Ok(());
+        }
+        if !extra_html_ids.contains_key(&resolved) {
+            let target_html = std::fs::read_to_string(&target_path).map_err(|e| format!("read docs/{resolved}: {e}"))?;
+            let mut target_facts = PageFacts::default();
+            scan_html_tags(&format!("docs/{resolved}"), &target_html, &mut target_facts)?;
+            extra_html_ids.insert(resolved.clone(), target_facts.ids);
+        }
+        if let Some(ids) = extra_html_ids.get(&resolved)
+            && !ids.contains(frag)
+        {
+            return Err(format!("docs/{from_rel}: broken fragment `{raw_ref}` (missing `#{frag}` in `docs/{resolved}`)"));
+        }
+    }
+    Ok(())
+}
+
 fn resolve_git_tag_commit(root: &Path, tag: &str) -> Result<Option<String>, String> {
     let refspec = format!("refs/tags/{tag}^{{commit}}");
     let out = crate::dev_tool_command("git")
@@ -538,8 +686,8 @@ fn scan_dir_secrets(base: &Path, dir: &Path, hits: &mut Vec<crate::secrets::Secr
 
 #[cfg(test)]
 mod tests {
-    use super::super::markdown::{IdentityResolver, render_markdown};
-    use super::super::template::{PageSpec, SiteMeta, render_page};
+    use super::super::markdown::{IdentityResolver, TocHeading, render_markdown, render_math_html};
+    use super::super::template::{PageSpec, SiteMeta, render_page, render_root_redirect_shim};
     use super::*;
 
     fn test_meta() -> SiteMeta {
@@ -681,5 +829,159 @@ mod tests {
         let err = check_committed_snapshots(&dir).unwrap_err();
         assert!(err.contains("v0.1"), "expected older corrupted v0.1 snapshot to fail, got {err}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn static_math_renderer_formats_tex_and_preserves_currency_shell_vars_and_code() {
+        let md = "\
+Inline $\\text{AIC}_c = N\\ln(\\text{SS}/N) + \\frac{2K_{\\text{eff}}(K_{\\text{eff}}+1)}{N - K_{\\text{eff}} - 1}$ and $\\sqrt{x}$, $\\bar{d} \\pm \\hat{\\varepsilon} + \\tilde{\\varepsilon}$.\n\n\
+Greek & ops: $\\alpha \\beta \\gamma \\varepsilon \\chi \\Phi \\kappa \\pi \\tau \\theta \\Delta \\Omega \\ge 5.0\\text{ pt} \\le 10 \\times 2 \\cdot 3 \\in \\ne \\infty \\propto \\approx \\arcsin\\exp\\log\\ln \\TeX \\,\\! \\left(x\\right)$.\n\n\
+Underscores in math: $K_{\\text{eff}} + x_{i} - y_{j}^{2}$.\n\n\
+Currency: \\$100 and \\$50, $100, $50, between $50 and $100, $50-$100, $100/$50.\n\n\
+Shell vars: $HOME, $XDG_CONFIG_HOME, $TMPDIR, $PATH, $HOME/$PATH, $row and $index, $row/$index, `$row`, `$HOME`, `$\\frac{a}{b}`.\n\n\
+$$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
+
+        let rendered = render_markdown(md, &IdentityResolver);
+        let html = &rendered.html;
+
+        assert!(html.contains("<span class=\"math\"><span class=\"math-text\">AIC</span><sub>c</sub>"), "AICc missing: {html}");
+        assert!(html.contains("<span class=\"math-frac\"><span class=\"math-num\">"), "fraction missing: {html}");
+        assert!(html.contains("√<span class=\"math-rad\">x</span>"), "sqrt missing: {html}");
+        assert!(html.contains("d\u{0304}") && html.contains("ε\u{0302}") && html.contains("ε\u{0303}"), "accents missing: {html}");
+        assert!(
+            html.contains("α")
+                && html.contains("χ")
+                && html.contains("Φ")
+                && html.contains("Ω")
+                && html.contains("≥")
+                && html.contains("≤")
+                && html.contains("±")
+                && html.contains("×")
+                && html.contains("·")
+                && html.contains("∈")
+                && html.contains("≠")
+                && html.contains("∞")
+                && html.contains("∝")
+                && html.contains("≈")
+                && html.contains("<span class=\"math-text\">arcsin</span>")
+                && html.contains("<span class=\"math-text\">TeX</span>"),
+            "symbols/functions missing: {html}"
+        );
+        assert!(!html.contains("<em>"), "underscores inside math must never produce <em>: {html}");
+        assert!(html.contains("<div class=\"math-block\"><span class=\"math\">χ<sup>2</sup>"), "block math missing: {html}");
+
+        // Currency, shell vars, and code spans must survive verbatim without becoming math spans.
+        for literal in [
+            "$100",
+            "$50",
+            "between $50 and $100",
+            "$50-$100",
+            "$100/$50",
+            "$HOME",
+            "$XDG_CONFIG_HOME",
+            "$TMPDIR",
+            "$PATH",
+            "$HOME/$PATH",
+            "$row and $index",
+            "$row/$index",
+            "<code>$row</code>",
+            "<code>$HOME</code>",
+            "<code>$\\frac{a}{b}</code>",
+        ] {
+            assert!(html.contains(literal), "expected `{literal}` preserved verbatim in: {html}");
+        }
+
+        let standalone = render_math_html("\\frac{\\text{Top} - \\text{Bottom}}{1 + 10^{(\\log\\text{EC}_{50} - X) \\cdot \\text{HillSlope}}}");
+        assert!(standalone.starts_with("<span class=\"math\">"));
+        assert!(standalone.contains("<span class=\"math-frac\">"));
+        assert!(!standalone.contains("\\frac"));
+        assert!(!standalone.contains("\\text"));
+    }
+
+    #[test]
+    fn markdown_callouts_figures_toc_and_audit_gates_work() {
+        let md = "\
+> [!NOTE]\n> First callout body.\n\n\
+> [!WARNING]\n> Watch out for $\\chi^2$.\n\n\
+![Workspace screenshot](images/workspace-split-fit.png)\n\n\
+> Regular blockquote.\n";
+
+        let rendered = render_markdown(md, &IdentityResolver);
+        assert!(rendered.html.contains("<div class=\"callout callout-note\" role=\"note\">\n<p class=\"callout-title\">Note</p>"));
+        assert!(rendered.html.contains("<div class=\"callout callout-warning\" role=\"note\">\n<p class=\"callout-title\">Warning</p>"));
+        assert!(rendered.html.contains("<blockquote>\n<p>Regular blockquote.</p>\n</blockquote>"));
+        assert!(rendered.html.contains(
+            "<figure class=\"doc-figure\"><img src=\"images/workspace-split-fit.png\" alt=\"Workspace screenshot\" loading=\"lazy\"><figcaption>Workspace screenshot</figcaption></figure>"
+        ));
+        assert!(!rendered.html.contains("[!NOTE]") && !rendered.html.contains("[!WARNING]"));
+
+        // Long TOC (> 8 headings) wraps in <details open class="toc">; short TOC uses <nav class="toc">.
+        let meta = test_meta();
+        let long_headings: Vec<TocHeading> = (1..=9).map(|n| TocHeading { level: 2, id: format!("h-{n}"), text: format!("Heading {n}") }).collect();
+        let long_page = render_page(&PageSpec {
+            title: "Long",
+            description: "Long",
+            rel_path: "analyses.html",
+            section_title: "Analyses",
+            section_rel_path: Some("section-analyses.html"),
+            h1: "Long",
+            toc_headings: &long_headings,
+            body_html: "<p>Body.</p>",
+            body_has_h1: false,
+            prev: None,
+            next: None,
+            meta: &meta,
+        });
+        assert!(long_page.contains("<details open class=\"toc\">\n          <summary class=\"toc-title\">On this page</summary>"));
+        assert!(long_page.contains("href=\"section-analyses.html\" aria-current=\"page\">Reference</a>"));
+        assert!(audit_single_html("analyses.html", &long_page).is_ok());
+
+        // Leaked TeX or raw [!NOTE] outside <code> must fail audit_single_html, while inside <code> is allowed.
+        let leaked_tex = long_page.replace("<p>Body.</p>", "<p>Raw \\frac{1}{2}</p>");
+        assert!(audit_single_html("analyses.html", &leaked_tex).unwrap_err().contains("unrendered TeX macro"));
+        let leaked_callout = long_page.replace("<p>Body.</p>", "<p>[!CAUTION] oops</p>");
+        assert!(audit_single_html("analyses.html", &leaked_callout).unwrap_err().contains("callout marker"));
+        let code_tex = long_page.replace("<p>Body.</p>", "<p><code>\\frac{1}{2}</code> and <code>[!NOTE]</code></p>");
+        assert!(audit_single_html("analyses.html", &code_tex).is_ok());
+
+        // Root redirect shim passes audit_single_html and check_root_pages.
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let root_dir = std::env::temp_dir().join(format!("cb-docs-root-pages-{}-{nanos}", std::process::id()));
+        let docs = root_dir.join("docs");
+        std::fs::create_dir_all(docs.join("images")).unwrap();
+        std::fs::create_dir_all(docs.join("manual/v0.1")).unwrap();
+        std::fs::write(docs.join("site.css"), "body {}\n").unwrap();
+        std::fs::write(docs.join("images/curvebook.png"), b"png").unwrap();
+
+        let shim_gs = render_root_redirect_shim("Get Started", "Desc", "manual/v0.1/get-started.html", "v0.1.0");
+        let shim_ts = render_root_redirect_shim("Troubleshooting", "Desc", "manual/v0.1/troubleshooting.html#known-issues", "v0.1.0");
+        assert!(audit_single_html("docs/get-started.html", &shim_gs).is_ok());
+        assert!(audit_single_html("docs/troubleshooting.html", &shim_ts).is_ok());
+
+        let base_root_html = |title: &str, nav: &str| {
+            format!(
+                "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"referrer\" content=\"no-referrer\"><meta http-equiv=\"Content-Security-Policy\" content=\"{STRICT_CSP}\"><title>{title}</title><link rel=\"icon\" href=\"images/curvebook.png\"><link rel=\"stylesheet\" href=\"site.css\"></head><body><a class=\"skip-link\" href=\"#main\">Skip</a><main id=\"main\"><h1>{title}</h1>{nav}</main></body></html>"
+            )
+        };
+        std::fs::write(docs.join("index.html"), base_root_html("Home", "<a href=\"privacy.html\">P</a><a href=\"manual/index.html\">M</a>")).unwrap();
+        std::fs::write(docs.join("privacy.html"), base_root_html("Privacy", "<a href=\"index.html\">H</a>")).unwrap();
+        std::fs::write(
+            docs.join("manual/index.html"),
+            format!(
+                "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"referrer\" content=\"no-referrer\"><meta http-equiv=\"Content-Security-Policy\" content=\"{STRICT_CSP}\"><meta http-equiv=\"refresh\" content=\"0; url=v0.1/index.html\"><title>Manual</title><link rel=\"stylesheet\" href=\"../site.css\"></head><body><a class=\"skip-link\" href=\"#main\">Skip</a><main id=\"main\"><h1>Manual</h1><a href=\"v0.1/index.html\">v0.1</a></main></body></html>"
+            ),
+        )
+        .unwrap();
+        std::fs::write(docs.join("manual/v0.1/index.html"), "<main id=\"main\"><h1>Manual</h1></main>").unwrap();
+        std::fs::write(docs.join("manual/v0.1/get-started.html"), "<main id=\"main\"><h1>GS</h1></main>").unwrap();
+        std::fs::write(docs.join("manual/v0.1/troubleshooting.html"), "<main id=\"main\"><h1>TS</h1><h2 id=\"known-issues\">KI</h2></main>").unwrap();
+        std::fs::write(docs.join("get-started.html"), &shim_gs).unwrap();
+        std::fs::write(docs.join("troubleshooting.html"), &shim_ts).unwrap();
+
+        assert!(check_root_pages(&root_dir).is_ok());
+        // Breaking a local link inside docs/index.html must fail check_root_pages.
+        std::fs::write(docs.join("index.html"), base_root_html("Home", "<a href=\"missing.html\">Broken</a>")).unwrap();
+        assert!(check_root_pages(&root_dir).unwrap_err().contains("missing.html"));
+        let _ = std::fs::remove_dir_all(&root_dir);
     }
 }

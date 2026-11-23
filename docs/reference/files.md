@@ -51,7 +51,7 @@ A `.curvebook` archive embeds all `DataSheet` values, exclusion notes, `InfoShee
 |---|---:|---|
 | Project / Template (`document.json`, `manifest.json`) | `CURRENT_SCHEMA_VERSION = 7` | Migrations (`migrate_document_json`, `VersionStep`) automatically upgrade schemas `0 -> 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7`. Files with `schema_version > CURRENT_SCHEMA_VERSION` fail on open with `UnsupportedSchemaVersion` (`unsupported_version`). |
 | User Preferences (`preferences.json`) | `CURRENT_PREFERENCES_VERSION = 1` | Unknown extension fields preserved via `additionalProperties`; `version > 1` triggers warning/refusal without silent overwrite. |
-| Recovery WAL (`ops.journal` & `curvebook.lock`) | `CURRENT_JOURNAL_VERSION = 1`<br>`CURRENT_LOCK_VERSION = 1` | Strict NDJSON line validation and per-record CRC-32 checking. |
+| Recovery WAL (`ops.journal` & `curvebook.lock`) | `CURRENT_JOURNAL_VERSION = 2`<br>`CURRENT_LOCK_VERSION = 1` | Strict NDJSON line validation, per-record CRC-32 checking, and CRC-verified `v1` to `v2` upgrade in memory before replay. |
 
 **Forward-Overwrite Guard:** Before writing to an existing `.curvebook`, `.cbtemplate`, or `.curvebook.d/` target (`save_project_file`, `save_template_file`, `save_project_unpacked_dir`), CurveBook inspects the existing target's metadata on disk and **refuses to overwrite** any file or directory carrying `schema_version > CURRENT_SCHEMA_VERSION`, leaving newer collaborator files intact byte-for-byte.
 
@@ -65,7 +65,7 @@ Desktop GUI sessions (`curvebook`, unless `CURVEBOOK_NO_PREFS=1` is set) attach 
 |---|---|---|
 | `curvebook.lock` | `JournalLockLease` (`owner_id`, `host_id`, `acquired_epoch_ms`, `ttl_ms`) preventing concurrent journal corruption across active processes. | Automatically detects expired leases and dead local PIDs on the same host for safe reclaim (`is_dead_same_host_owner`), or isolates parallel instances into separate directories. |
 | `snapshot.curvebook` | Full periodic baseline archive snapshot written on open and at structural/checkpoint commands (`command_requires_wal_checkpoint`, or bounded journal rotation). | Same CRC-32 & archive limits (`64 MiB` web storage JSON cap). |
-| `ops.journal` | Append-only NDJSON log of `JournalOpRecord { format_version, seq, crc32, command_json }` flushed after mutating engine commands. | `MAX_JOURNAL_BYTES = 32 MiB`, `MAX_JOURNAL_LINE_BYTES = 16 MiB`, `MAX_JOURNAL_RECORDS = 65,536`. Tail truncation or CRC-32 mismatch stops replay cleanly at the last valid record and emits `JournalRecoveryWarning` diagnostics. |
+| `ops.journal` | Append-only NDJSON log of `JournalOpRecord { format_version, seq, crc32, command_json }` (`CURRENT_JOURNAL_VERSION = 2`; `v1` records upgrade in memory after CRC-32 verification before replay) flushed after mutating engine commands. | `MAX_JOURNAL_BYTES = 32 MiB`, `MAX_JOURNAL_LINE_BYTES = 16 MiB`, `MAX_JOURNAL_RECORDS = 65,536`. Tail truncation or CRC-32 mismatch stops replay cleanly at the last valid record and emits `JournalRecoveryWarning` diagnostics. |
 
 ---
 

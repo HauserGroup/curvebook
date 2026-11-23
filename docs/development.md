@@ -52,6 +52,8 @@ cache behavior, per-test timeouts, and scoped `cargo xtask ci <stage>` commands.
 | Verify clean-room fixture/header rules | `cargo xtask cleanroom` |
 | Verify numerical `D1` literature citations | `cargo xtask citations` |
 | Verify tool cursor catalog sync (`cursors.toml`) | `cargo xtask cursors` |
+| Enforce OKLab/OKLCH design-token literal ratchet | `cargo xtask design-tokens` |
+| Build or verify the offline reference manual (`--check`) | `cargo xtask docs-site [--check]` |
 | Check translation coverage | `cargo xtask i18n-report` |
 | Sync desktop UI commands to MCP catalog | `cargo xtask ui-commands` |
 | Verify offline corpus & NIST StRD suites (`--fetch` to download) | `cargo xtask corpus` |
@@ -80,7 +82,7 @@ Font binaries never live inside this repository ([`AGENTS.md`](../AGENTS.md) ›
 
 ## Web build
 
-`apps/curvebook-web` shares the same pure-Rust `UiApp` + `curvebook-engine` codebase and presents the compositor's RGBA frame on a WebGL2 `<canvas>` (`R8.4`; `init_web_app()` tests also run on the host) using the `window.CurveBookHost` bridge (`curvebook.v1.*` storage namespaces). `cargo xtask wasm` type-checks `curvebook-web` and `curvebook-engine`, runs Clippy (`-D warnings`) on `curvebook-web` and `curvebook-ui-egui` for `wasm32-unknown-unknown`, runs `trunk build --cargo-profile web-release` into an isolated target staging directory when `trunk` is installed (`CURVEBOOK_REQUIRE_TRUNK=1` requires `trunk`), and verifies web bundle readiness (`cargo xtask web-bundle`). `./packaging/web/package.sh` produces `dist/release/curvebook-web-<version>.zip`; setting `CURVEBOOK_REQUIRE_WEB_BUNDLE=1` fails closed when that release archive is absent and enforces the `R10.22` compressed size budget (`verify_web_bundle_zip_bytes`). Menus, toolbar, dialogs, and context menus come from the shared layout tree (`R10.7`). The `curvebook-web` tests run natively; browser-run tests and the remaining browser gaps are tracked in [`R11`](ROADMAP.md#r11-usable-browser-app):
+`apps/curvebook-web` is currently trimmed to a minimal strict-CSP WebAssembly placeholder (`R15.5`), keeping `window.CurveBookHost` bridge helpers (`curvebook.v1.*` storage namespaces) intact while interactive browser UI work waits for post-Beta [`R11.11`](ROADMAP.md#r1111-migrate-browser-host-to-eframe-webrunner-10-gate) (`eframe::WebRunner`; browser assets are omitted from Beta releases per [`R0.28`](history/roadmap/r0.md#r028-rein-in-the-number-of-release-install-files)). `cargo xtask wasm` type-checks `curvebook-web` and `curvebook-engine`, runs Clippy (`-D warnings`) on `curvebook-web` and `curvebook-ui-egui` for `wasm32-unknown-unknown`, runs `trunk build --cargo-profile web-release` into an isolated target staging directory when `trunk` is installed (`CURVEBOOK_REQUIRE_TRUNK=1` requires `trunk`), and verifies web bundle readiness (`cargo xtask web-bundle`). `./packaging/web/package.sh` produces `dist/release/curvebook-web-<version>.zip`; setting `CURVEBOOK_REQUIRE_WEB_BUNDLE=1` fails closed when that release archive is absent and enforces the `R10.22` compressed size budget (`verify_web_bundle_zip_bytes`). Browser-run tests and interactive web work remain tracked in [`R11`](ROADMAP.md#r11-usable-browser-app):
 
 ```sh
 rustup target add wasm32-unknown-unknown

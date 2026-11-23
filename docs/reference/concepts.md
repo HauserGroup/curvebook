@@ -35,7 +35,7 @@ CurveBook organizes sheets into five canonical `SheetSection` navigator folders:
 | **Info** | `InfoSheet` | Free-form notes plus typed key/value experiment constants (`Text`, `Number`, `Boolean`), including standard metadata keys (`ExperimentDate`, `Experimenter`, `Protocol`, `ProjectCode`, `NotebookId`, `LotNumber`, `Instrument`, `Notes`). Can be linked upstream via `HookSource` parameters. |
 | **Analyses** | `ResultSheet` | Multi-tab statistical, transform, simulation, or curve-fitting output derived from an upstream `DataSheet` (or analyzable upstream `ResultSheet`), accompanied by diagnostic checklists (`QOL-7`), hookable scalars, curve overlays, and optional `floating_notes`. |
 | **Graphs** | `GraphSheet` | Publication graph specification (`GraphSpec`) referencing one or more upstream `DataSheet`s and optional `ResultSheet` overlays (fitted curves, comparison brackets, compact letter display, live $\TeX$ equation boxes). |
-| **Layouts** | `LayoutSheet` | Multi-panel physical page composition (`LayoutSpec`, up to `64` `LayoutItem` panels) arranging `GraphSheet`s and supporting text/badges with physical paper sizes and journal column-width presets. |
+| **Layouts** | `LayoutSheet` | Multi-panel physical page composition (`LayoutSpec`, up to `64` `LayoutItem` panels) arranging `GraphSheet`s, live `ResultSheet` tables, embedded raster images, and supporting text/badges with physical paper sizes and journal column-width presets. |
 
 ### Sheet Families (`family_anchor_sheet_id`) {#sheet-families}
 

@@ -24,7 +24,7 @@ Rerunning a version updates its existing draft and replaces matching assets. The
 **Signing posture & user documentation (`R8.10` / `R8.11`):**
 - **macOS (Beta+):** signed with Developer ID Application and notarized with stapled tickets on both `CurveBook.app` and the `.dmg`; historical Alpha prereleases were ad-hoc signed.
 - **Windows (Beta):** `x64` and `arm64` `.msi` installers ship **unsigned** until `R8.11` (`x86` and `-portable.zip` were retired in `R0.28`; see [`windows-signing.md`](windows-signing.md) and [`R8.9`](../ROADMAP.md#r89-windows-msix-packaging--microsoft-store-distribution)).
-- User-facing install steps, `PATH` setup for bundled CLI binaries, *"which file do I need?"*, and OS trust prompts live in [Get Started](https://hausergroup.github.io/curvebook/get-started.html) and [Troubleshooting](https://hausergroup.github.io/curvebook/troubleshooting.html#known-issues).
+- User-facing install steps, `PATH` setup for bundled CLI binaries, *"which file do I need?"*, and OS trust prompts live in [Get Started](https://hausergroup.github.io/curvebook/manual/v0.1/get-started.html) and [Troubleshooting](https://hausergroup.github.io/curvebook/manual/v0.1/troubleshooting.html#known-issues).
 
 ---
 
@@ -48,6 +48,11 @@ Before tagging or publishing a release, verify both source invariants and packag
      cargo xtask licenses
      ```
      This verifies crates offline against [docs/licences.md](../licences.md) (`deny.toml`), and runs `cargo deny check licenses` when installed (mandatory when `CI=true`); add `--html` to write `THIRD-PARTY-LICENSES.html`.
+   - Verify the offline documentation site (`docs-site`), and when cutting a release, generate and verify the versioned manual snapshot under `docs/manual/v<major>.<minor>/` (plus `docs/manual/index.html` redirect) for GitHub Pages publication:
+     ```sh
+     cargo xtask docs-site --check
+     cargo xtask docs-site --release <version> --check
+     ```
    - Run the default CI gate suite:
      ```sh
      cargo xtask ci
@@ -113,8 +118,8 @@ Use this template when editing a drafted Beta GitHub Release (`v<version>`) befo
 
 **Beta prerelease:** Intended for evaluation and workflow testing; back up important work before opening files.
 
-- **Install, "which file do I need?", and download verification:** [Get Started](https://hausergroup.github.io/curvebook/get-started.html)
-- **Known issues and platform status:** [Troubleshooting & Known Issues](https://hausergroup.github.io/curvebook/troubleshooting.html#known-issues)
+- **Install, "which file do I need?", and download verification:** [Get Started](https://hausergroup.github.io/curvebook/manual/v0.1/get-started.html)
+- **Known issues and platform status:** [Troubleshooting & Known Issues](https://hausergroup.github.io/curvebook/manual/v0.1/troubleshooting.html#known-issues)
 
 ### Highlights
 
@@ -130,7 +135,7 @@ Use this template when editing a drafted Beta GitHub Release (`v<version>`) befo
 
 ### Verifying Downloaded Release Artefacts
 
-User-facing verification steps live only in the [Get Started verification section](../reference/get-started.md#verifying-downloads), published as [Get Started](https://hausergroup.github.io/curvebook/get-started.html). The `publish` job runs `gh attestation verify` on every file in the `R0.28` Beta asset set before upload and stops the release if any file fails.
+User-facing verification steps live only in the [Get Started verification section](../reference/get-started.md#verifying-downloads), published as [Get Started](https://hausergroup.github.io/curvebook/manual/v0.1/get-started.html). The `publish` job runs `gh attestation verify` on every file in the `R0.28` Beta asset set before upload and stops the release if any file fails.
 
 1. **Verify Sigstore build provenance** with the GitHub CLI (`gh`):
    ```sh
@@ -185,7 +190,7 @@ gh api repos/HauserGroup/curvebook/rulesets --jq '.[] | select(.target == "tag")
 - **Full breaking cutover & separate install identity (`R0.20`):** CurveBook is a full breaking cutover with zero legacy file readers, executable/env aliases, settings/recovery migrations, or browser-storage migrations. Fresh CurveBook installers use a fresh Windows installer identity and never claim legacy associations or uninstall/upgrade earlier pre-cutover software. See [`file-formats.md` §4](../file-formats.md#4-breaking-cutover-legacy-rejection--residual-name-allowlist) for the narrow residual-name allowlist.
 - **Zero Telemetry & Web Privacy Headers:** CurveBook ships zero telemetry, analytics, crash uploaders, update-check pings, or external third-party cloud scanners (`cargo xtask telemetry`). Web deployments bundle `packaging/web/_headers` and `packaging/web/.htaccess` enforcing `default-src 'self'`, `connect-src 'self'` (same-origin `.wasm` streaming only, zero external origins), `Referrer-Policy: no-referrer`, `Permissions-Policy`, `Cross-Origin-Opener-Policy: same-origin`, and `Cross-Origin-Embedder-Policy: require-corp`.
 - **Zero bundled fonts:** Packages do **not** embed binary fonts by default (`cargo xtask assets` rejects tracked `.ttf`/`.otf`/`.woff`/`.woff2`). Desktop releases probe OS font paths at runtime (`--ttf-font <path>` adds a face); `CURVEBOOK_FONTS_DIR` is read at build time (and for runtime overrides), and web tests using `bundled-fonts` require explicit local font staging (`cargo xtask web-fonts`) with matching licence notice rules ([docs/licences.md](../licences.md)).
-- **macOS specifics:** `packaging/macos/Info.plist.in` registers UTIs/document handlers for `.curvebook`, `.cbtemplate`, `.pzfx`, and `.prism`; hardened runtime entitlements live in `packaging/macos/entitlements.plist`; [Get Started](https://hausergroup.github.io/curvebook/get-started.html) (`docs/reference/get-started.md`) covers installation and adding `CurveBook.app/Contents/MacOS/curvebook-cli` to `PATH`.
+- **macOS specifics:** `packaging/macos/Info.plist.in` registers UTIs/document handlers for `.curvebook`, `.cbtemplate`, `.pzfx`, and `.prism`; hardened runtime entitlements live in `packaging/macos/entitlements.plist`; [Get Started](https://hausergroup.github.io/curvebook/manual/v0.1/get-started.html) (`docs/reference/get-started.md`) covers installation and adding `CurveBook.app/Contents/MacOS/curvebook-cli` to `PATH`.
 - **Linux specifics:** `packaging/linux/package.sh` builds `.AppImage` (`x86_64`, `aarch64`) embedding `.desktop`, AppStream metainfo, hicolor icons, and MIME definitions (`org.curvebook.CurveBook`), verified via `desktop-file-validate`, `appstreamcli validate`, and `packaging/linux/apprun-test.sh`.
 - **Windows specifics:** WiX v5 dual-scope MSI supports unprivileged per-user installation by default and elevated per-machine deployment ([packaging/windows/INSTALLATION.md](../../packaging/windows/INSTALLATION.md)) on `x64` and `arm64`, linking the static CRT to avoid external redistributable prompts.
 - **Windows signing and Store distribution:** [`windows-signing.md`](windows-signing.md) explains why Beta `.msi` downloads ship unsigned until `R8.11`, self-signing for trusted test machines without Azure, and the unsigned x64 MSIX route built by the separate **Windows Store package** workflow (`R8.9`).

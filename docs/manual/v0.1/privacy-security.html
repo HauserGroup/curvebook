@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Zero-telemetry local execution, loopback control rules, dual licensing, and vulnerability reporting.">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'">
+  <meta name="color-scheme" content="light">
+  <title>Privacy, Security, Licensing &amp; Clean-Room Policy — CurveBook Documentation</title>
+  <link rel="icon" type="image/png" href="../../images/curvebook.png">
+  <link rel="stylesheet" href="../../site.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="desktop-window wrap">
+    <header class="site-header">
+      <div class="title-bar">
+        <div class="wordmark">
+          <img src="../../images/curvebook.png" width="64" height="64" alt="">
+          <span>CurveBook · Reference Manual</span>
+        </div>
+        <span class="window-status">Privacy, licences &amp; security</span>
+      </div>
+      <nav aria-label="Manual navigation">
+        <a href="index.html">Manual Home</a>
+        <a href="section-get-started.html">Get Started</a>
+        <a href="section-analyses.html" aria-current="page">Reference</a>
+        <a href="section-automation.html">Automation</a>
+        <a href="registry/commands.html">Commands &amp; Tools</a>
+        <a href="az-index.html">A–Z Index</a>
+        <a href="section-contribute.html">Contribute</a>
+        <a href="../../index.html">Product Home</a>
+        <a href="../../privacy.html">Privacy Policy</a>
+      </nav>
+    </header>
+    <div class="version-banner" role="note" aria-label="Documentation version">
+      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-23 (commit <code>4964288a03</code>)</span>
+      <span>No scripts · No telemetry · <a href="az-index.html">A–Z Index</a></span>
+    </div>
+    <main id="main" tabindex="-1">
+      <article class="overview doc-body">
+        <nav class="breadcrumbs" aria-label="Breadcrumb">
+          <a href="index.html">Manual</a>
+          <span aria-hidden="true">/</span>
+          <a href="section-privacy-security.html">Privacy, licences &amp; security</a>
+          <span aria-hidden="true">/</span>
+          <span aria-current="page">Privacy, Security, Licensing &amp; Clean-Room Policy</span>
+        </nav>
+        <nav class="toc" aria-label="On this page">
+          <p class="toc-title">On this page</p>
+          <ul>
+            <li><a href="#zero-egress">Zero Telemetry &amp; Zero Network Egress</a></li>
+            <li><a href="#local-security">Local IPC, MCP Confinement &amp; Trust Boundaries</a></li>
+            <li><a href="#workdir-confinement">— --workdir Filesystem Confinement (CLI &amp; MCP)</a></li>
+            <li><a href="#control-socket">— Loopback-Only --control Socket</a></li>
+            <li><a href="#pages-and-releases">GitHub Pages &amp; GitHub Releases Policies</a></li>
+            <li><a href="#licensing">Licensing, Dependencies &amp; Attributions</a></li>
+            <li><a href="#clean-room">Clean-Room Implementation Statement</a></li>
+            <li><a href="#security-reporting">Vulnerability Reporting</a></li>
+          </ul>
+        </nav>
+<h1 id="privacy-security-licensing--clean-room-policy" tabindex="-1">Privacy, Security, Licensing &amp; Clean-Room Policy</h1>
+<p>CurveBook is engineered for confidential laboratory and clinical research data: the desktop application, headless CLI, MCP server, and statistical libraries run offline on your machine with zero telemetry and zero network egress.</p>
+<p>See the public <a href="https://hausergroup.github.io/curvebook/privacy.html">Privacy Policy</a>, <a href="https://github.com/HauserGroup/curvebook/blob/main/SECURITY.md">Security Policy</a>, and <a href="https://github.com/HauserGroup/curvebook/blob/main/docs/licences.md">Licence &amp; Attribution Policy</a>.</p>
+<hr>
+<h2 id="zero-egress" tabindex="-1">Zero Telemetry &amp; Zero Network Egress</h2>
+<p>CurveBook&#39;s application binaries (<code>curvebook</code>, <code>curvebook-cli</code>) and core libraries contain <strong>no</strong> network clients, <strong>no</strong> crash reporters, <strong>no</strong> usage analytics, and <strong>no</strong> background update checks:</p>
+<ul>
+<li><strong>Offline enforcement:</strong> Enforced in CI via <code>cargo xtask telemetry</code>, checking source code and dependency trees for telemetry, HTTP client crates, or remote calls.</li>
+<li><strong>No external telemetry in documentation:</strong> The documentation site uses pure static HTML/CSS with strict Content-Security-Policy (<code>default-src &#39;none&#39;</code>), <code>Referrer-Policy: no-referrer</code>, zero <code>&lt;script&gt;</code> tags, zero <code>&lt;form&gt;</code> elements, zero cookies, and zero third-party web fonts.</li>
+<li><strong>Updates:</strong> Because shipped binaries make zero outbound HTTP requests, updates are installed manually from verified release downloads (<a href="get-started.html#updating">Get Started &amp; Installation</a>).</li>
+</ul>
+<hr>
+<h2 id="local-security" tabindex="-1">Local IPC, MCP Confinement &amp; Trust Boundaries</h2>
+<h3 id="workdir-confinement" tabindex="-1"><code>--workdir</code> Filesystem Confinement (CLI &amp; MCP)</h3>
+<ul>
+<li>Launching <code>curvebook-cli mcp --workdir &lt;dir&gt;</code> or <code>curvebook-cli ... --workdir &lt;dir&gt;</code> confines every file read, write, archive open, external import link, and figure export strictly inside the canonicalized <code>&lt;dir&gt;</code> boundary (<code>crates/engine/src/path_policy.rs</code>, <code>crates/mcp/src/formats.rs</code>).</li>
+<li>Relative escape segments (<code>..</code>), absolute paths outside <code>&lt;dir&gt;</code>, and symlinks resolving outside <code>&lt;dir&gt;</code> fail with <code>ErrorCode::PathEscape</code> (<code>path_escape</code>) without creating missing parent directories.</li>
+<li>Without <code>--workdir</code>, commands execute with your OS user account permissions (<code>Unconstrained local-user mode</code>); AI assistants and untrusted MCP prompts should always run with <code>--workdir &lt;dir&gt;</code> (see <a href="automation/mcp.html">Automation: MCP</a>).</li>
+</ul>
+<h3 id="control-socket" tabindex="-1">Loopback-Only <code>--control</code> Socket</h3>
+<p>When enabled via <code>--control &lt;port&gt;</code> (or <code>CURVEBOOK_CONTROL_PORT</code>, <code>port</code> in <code>1..=65535</code>):</p>
+<ul>
+<li>Binds strictly to <strong><code>127.0.0.1:&lt;port&gt;</code></strong> (loopback interface only — never <code>0.0.0.0</code> or external NICs).</li>
+<li>Authenticates JSON-lines commands with a constant-time bearer token (<code>CURVEBOOK_CONTROL_TOKEN</code> environment variable recommended; passing <code>--control-token</code> on the CLI exposes the secret in <code>ps</code> process listings and triggers a stderr warning).</li>
+<li>Combining <code>--gui-only</code> blocks direct non-GUI engine mutations (<code>ErrorCode::GuiOnlyViolation</code>) so external automation drives only interactive GUI actions.</li>
+</ul>
+<hr>
+<h2 id="pages-and-releases" tabindex="-1">GitHub Pages &amp; GitHub Releases Policies</h2>
+<ul>
+<li><strong>GitHub Pages:</strong> Serves static documentation (<code>docs/index.html</code>, <code>docs/privacy.html</code>, <code>docs/manual/</code>) directly via GitHub infrastructure with zero application tracking, zero analytics beacons, and strict zero-script rendering (<code>privacy.html</code> documents GitHub hosting metadata policies).</li>
+<li><strong>GitHub Releases &amp; Build Attestations:</strong> Every Beta release package and <code>SHA256SUMS.txt</code> is published through GitHub Actions (<code>release-scan</code> security gate) and receives a keyless OIDC/Sigstore build provenance attestation (<code>actions/attest-build-provenance</code>, documented in <a href="https://github.com/HauserGroup/curvebook/blob/main/docs/release/releasing.md">Releasing</a>). Attestation calls run strictly inside CI workflows (<code>id-token: write</code>, <code>attestations: write</code>), adding zero network behavior to compiled CurveBook binaries.</li>
+</ul>
+<hr>
+<h2 id="licensing" tabindex="-1">Licensing, Dependencies &amp; Attributions</h2>
+<ul>
+<li><strong>Dual Licence:</strong> CurveBook source code is dual-licensed under <strong><code>MIT OR Apache-2.0</code></strong> (<a href="https://github.com/HauserGroup/curvebook/blob/main/Cargo.toml">Cargo.toml</a>, <a href="https://github.com/HauserGroup/curvebook/blob/main/NOTICE">NOTICE</a>).</li>
+<li><strong>Permissive Dependency Allowlist:</strong> Checked continuously via <code>cargo deny check</code> (<code>deny.toml</code>) and <code>cargo xtask licenses</code>, allowing only permissive SPDX licences (<code>MIT</code>, <code>Apache-2.0</code>, <code>BSD-2-Clause</code>, <code>BSD-3-Clause</code>, <code>ISC</code>, <code>Zlib</code>, <code>Unicode-3.0</code>, <code>CC0-1.0</code>) and prohibiting all copyleft dependencies (<code>GPL-*</code>, <code>AGPL-*</code>, <code>LGPL-*</code>). See <a href="https://github.com/HauserGroup/curvebook/blob/main/docs/licences.md">Licence &amp; Attribution Policy</a>.</li>
+<li><strong>Release Notices:</strong> Every release includes <code>THIRD-PARTY-LICENSES.html</code> alongside <a href="https://github.com/HauserGroup/curvebook/blob/main/ATTRIBUTION.md"><code>ATTRIBUTION.md</code></a> and <a href="https://github.com/HauserGroup/curvebook/blob/main/NOTICE"><code>NOTICE</code></a>. CurveBook repositories and binaries contain <strong>zero bundled binary font files</strong> (<code>cargo xtask assets</code>); custom builds using <code>CURVEBOOK_FONTS_DIR</code> embed only explicitly supplied <code>OFL-1.1</code> font files.</li>
+</ul>
+<hr>
+<h2 id="clean-room" tabindex="-1">Clean-Room Implementation Statement</h2>
+<p>CurveBook is an original clean-room scientific software suite. Statistical methods, nonlinear least-squares solvers, distribution evaluators, vector graphics renderers, file container parsers, and user interface components are implemented independently in Rust from published peer-reviewed academic literature (<code>D1</code> citations documented in the numerical modules, <a href="registry/tables.html#analysis-kinds">Analysis Kinds Registry</a>, and <a href="registry/equations.html">Parametric Equations Registry</a>), validated against public NIST StRD and open-source reference oracles, and verified continuously via <code>cargo xtask brands</code>, <code>cargo xtask cleanroom</code>, and <code>cargo xtask citations</code>. Support for <code>.pzfx</code> and <code>.prism</code> files is implemented purely at the external file-format import boundary (<code>crates/format</code>).</p>
+<hr>
+<h2 id="security-reporting" tabindex="-1">Vulnerability Reporting</h2>
+<p>Security vulnerabilities, crash bugs, parser exploits, path-escape bypasses, or archive integrity defects should be reported following <a href="https://github.com/HauserGroup/curvebook/blob/main/SECURITY.md">SECURITY.md</a>. In-scope threat boundaries include:</p>
+<ul>
+<li>Untrusted <code>.curvebook</code>, <code>.cbtemplate</code>, <code>.csv</code>, <code>.pzfx</code>, or <code>.prism</code> archive/file parsing (bounded ZIP, XML, cell-count, and float-finite checks)</li>
+<li>Path traversal or symlink escape across <code>--workdir</code> or unpacked <code>.curvebook.d/</code> saves</li>
+<li>Loopback <code>--control</code> token validation and <code>--gui-only</code> enforcement</li>
+<li>PDF / SVG / PNG / TIFF / EMF export integer/pixel/memory resource limits.</li>
+</ul>
+        <nav class="pager" aria-label="Previous and next pages">
+          <a href="section-privacy-security.html">← Privacy, licences &amp; security</a>
+          <a href="section-troubleshooting.html">Troubleshooting &amp; known issues →</a>
+        </nav>
+      </article>
+    </main>
+    <footer class="site-footer">
+      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>
+      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
+      <p class="privacy">CurveBook runs locally and collects no telemetry. Read <a href="../../privacy.html">Privacy, Licences &amp; Security</a> · <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a></p>
+    </footer>
+  </div>
+</body>
+</html>

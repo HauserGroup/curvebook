@@ -8,18 +8,16 @@ Related: [extending.md](extending.md) (extension matrix), [evidence/localization
 
 ## 1. Where the strings live
 
-Interface translations use a static Rust catalog rooted in `crates/ui-egui/src/i18n.rs`:
+Interface translations are stored in an externalized TSV table at [`crates/ui-egui/locales/catalog.tsv`](../crates/ui-egui/locales/catalog.tsv) and compiled at build time by [`crates/ui-egui/build.rs`](../crates/ui-egui/build.rs) into a static binary-searched `CATALOG` inside [`crates/ui-egui/src/i18n.rs`](../crates/ui-egui/src/i18n.rs):
 
 - `LOCALES` is the ordered list of registered BCP-47 tags. English (`en`) is first and is the reference locale.
-- `CATALOG` and the slices registered in `EXTRA_SHARD_CATALOGS` contain `CatalogEntry { key, translations }` rows. `all_entries()` combines them for lookup and reporting. `translations` has one slot per registered locale, in `LOCALES` order. Read the registered shard modules before choosing where to add an entry; parallel UI work can add further shards.
-- Entries are written with the `entry!` macro, which names every locale explicitly (`en:`, `de:`, ... `he:`), so a missing locale is a compile error rather than a silent gap.
-
-There are no external catalog files (no `.po`, `.ftl`, or JSON): adding strings means editing Rust source.
+- `BETA_ACTIVE_LOCALES` is the Beta-active subset of LTR/CJK locales exposed in the desktop **View › Language** picker (non-English Beta entries are annotated with `[Draft]`; RTL locales are deferred to `1.0`).
+- Each data row in `catalog.tsv` carries a unique dotted key followed by one tab-separated translation column per registered locale in `LOCALES` order. `build.rs` validates column alignment, uniqueness, and non-empty cells at compile time and emits the static `CATALOG` slice (replacing legacy hand-written per-shard `entry!` Rust arrays).
 
 ## 2. Adding a key
 
-1. Choose a dotted, lowercase-ish key that groups by area. Follow the neighbouring entries: `menu.*` for menus, `table.*` for data-table archetypes, and `cmd.<command_id>` for command labels (the id after `cmd.` must be the engine `CommandSpec` or `UiCommandSpec` id, see [command-ids.md](command-ids.md)).
-2. Add an `entry!("your.key" => [ ... ])` to `CATALOG` or the appropriate registered shard with a non-empty string for **every** locale. Keys must be unique (a test fails on duplicates). Place it with related entries; do not reuse an existing key for a different meaning.
+1. Choose a dotted, lowercase-ish key that groups by area. Follow the neighbouring entries in `catalog.tsv`: `menu.*` for menus, `table.*` for data-table archetypes, and `cmd.<command_id>` for command labels (the id after `cmd.` must match the engine `CommandSpec` or `UiCommandSpec` id; see [command-ids.md](command-ids.md)).
+2. Add a row to [`crates/ui-egui/locales/catalog.tsv`](../crates/ui-egui/locales/catalog.tsv) in sorted key order (no unescaped tabs or newlines inside cells) with a non-empty string for **every** registered column. Keys must be unique (`build.rs` and tests fail on duplicates or missing columns).
 3. Use it from UI code:
    - `app.tr("your.key")` on `UiApp` (uses the app's current locale), or
    - `i18n::tr(locale, "your.key")` when you only have a locale tag.
@@ -28,7 +26,7 @@ There are no external catalog files (no `.po`, `.ftl`, or JSON): adding strings 
 4. Pass the key as a plain string literal. A unit test (`tr_string_literal_calls_all_exist_in_catalog`) scans `crates/ui-egui/src` for string-literal `tr` / `try_tr` / `tr_or` calls and fails when a literal key is not registered. Keys built at run time (for example with `format!`) are not checked by that scan, so prefer literals.
 5. Run the checks in section 8.
 
-Adding or changing a command also means updating its label entry; the report test cross-checks every engine and UI command against the catalog (see section 8).
+Adding or changing a command also means updating its label row in `catalog.tsv`; the report test cross-checks every engine and UI command against the catalog (see section 8).
 
 ## 3. Placeholders and interpolation
 
@@ -43,16 +41,15 @@ If a future change adds real placeholders, it must add validation to the report 
 
 ## 4. Adding a locale
 
-A locale is a new column in the catalog, so the change touches every entry. In `crates/ui-egui/src/i18n.rs`:
+A locale is a new column in `catalog.tsv` (`build.rs` reads its header row dynamically). In `crates/ui-egui/locales/catalog.tsv`, `crates/ui-egui/build.rs`, and `crates/ui-egui/src/i18n.rs`:
 
-1. Append the tag to `LOCALES` and widen the `translations` array length in `CatalogEntry` to match.
-2. Add the new field to the `entry!` macro pattern and its output array, in the same position as the new `LOCALES` slot.
-3. Add a translation for the new locale to **every** `entry!` in `CATALOG` and every registered shard (including every `cmd.*` entry).
-4. Add the tag to `exact_locale_index` (lower-cased, `-` separated) with the matching index, to `normalize_locale` (so regional variants resolve to it), and to `locale_display_name` (native autonym).
-5. If it is a right-to-left language, check `is_rtl_locale` (section 6). If it needs a different number or CSV convention, extend `LocalePreset::for_locale`.
-6. If it uses a script that no installed font may cover, add per-script handling in `curvebook-text` font selection (section 7) and, for CJK-style fallbacks, `system_cjk_font_candidates` in `crates/text/src/metrics.rs`.
-7. Update the hard-coded expectations in the `untranslated_report` test (it pins the expected locale list and totals) and in the locale-normalization tests. The test file is the authority on which assertions exist; read it before editing.
-8. Update [evidence/localization.md](evidence/localization.md) and the locale entry in [extending.md](extending.md#locale--ui-string) if the process changes. Do not add a count to prose.
+1. Append the tag to `LOCALES` in `i18n.rs` (and to `BETA_ACTIVE_LOCALES` if active in the Beta desktop picker).
+2. Add the new tag column to the `catalog.tsv` header row and supply a non-empty translation for **every** row (including every `cmd.*` entry).
+3. Wire the tag into `exact_locale_index` / `normalize_locale` (so regional variants resolve cleanly) and `locale_display_name` (native autonym).
+4. If it is a right-to-left language, check `is_rtl_locale` and the Beta vs. `1.0` RTL boundary (section 6). If it needs a different number or CSV convention, extend `LocalePreset::for_locale`.
+5. If it uses a script that no installed font may cover, add per-script handling in `curvebook-text` font selection (section 7) and, for CJK-style fallbacks, `system_cjk_font_candidates` in `crates/text/src/metrics.rs`.
+6. Update the hard-coded expectations in the `untranslated_report` test (it pins the expected locale list and totals) and in the locale-normalization tests. The test file is the authority on which assertions exist; read it before editing.
+7. Update [evidence/localization.md](evidence/localization.md) and the locale entry in [extending.md](extending.md#locale--ui-string) if the process changes. Do not add a count to prose.
 
 Fallback behaviour for an incomplete locale is described in section 5, but note that the `untranslated_report` test currently requires **zero** missing or empty entries in every registered locale, so a new locale cannot land partially translated.
 
@@ -74,15 +71,13 @@ Lookup is done by `tr(locale, key)`:
 
 Command labels follow the same order through `command_label(locale, command_id, fallback)`: locale entry, then `en`, then the caller-supplied fallback.
 
-The active locale is stored on `UiApp` and changed through the control/MCP operation `ui.locale.set`, which normalizes the tag. Example: `de-DE` selects `de`; `zh-Hant-TW` selects `zh-TW`; `unknown-XX` selects `en`.
+The active desktop locale is stored on `UiApp` and changed through **View › Language** or the control/MCP operation `ui.locale.set`. In **Beta**, the desktop shell normalizes through `normalize_beta_gui_locale(tag)` so active LTR/CJK locales select normally (`de-DE` -> `de`, `zh-Hant-TW` -> `zh-TW`, `unknown-XX` -> `en`), while RTL tags fall back to `en` until `1.0`.
 
-## 6. Right-to-left locales
+## 6. Right-to-left locales (Beta vs. 1.0)
 
-- `is_rtl_locale(tag)` is true for primary subtags `ar`, `he`, `iw`, `fa`, and `ur`, including regional forms such as `ar-EG`. Only `ar` and `he` have catalogs today. The direction helper recognizes `fa` and `ur`, but active-locale normalization maps these unsupported tags to `en`; that recognition does not provide a Persian or Urdu interface.
-- Layout mirroring uses `mirror_x_for_rtl(x, width, canvas_width, is_rtl)`, which uses saturating arithmetic. The grid hit-testing code in `crates/ui-egui/src/interaction.rs` applies it so columns and gutters mirror under an RTL locale.
-- Text shaping applies bidirectional reordering for RTL locales (`reorder_visual_bidi` / `TextDirection` in `curvebook-text`), used by `FontBook::rasterize_shaped_text` and the PDF/SVG export paths.
-- The control-protocol state response reports `is_rtl` for the active locale (`crates/ui-egui/src/control_io.rs`).
-- When you add UI, never hard-code left/right positions that bypass the mirroring helper, and test with `ar` and `he`.
+- **Beta vs. `1.0` desktop state:** `LOCALES` and `catalog.tsv` already contain complete `ar` and `he` translation columns, and `is_rtl_locale(tag)` is true for primary subtags `ar`, `he`, `iw`, `fa`, and `ur` (including regional forms such as `ar-EG`; `fa`/`ur` have no catalog and normalize to `en`). However, full desktop GUI RTL layout mirroring is **deferred to `1.0`** under `R12.5`: Beta hides RTL locales from the desktop **View › Language** picker (`BETA_ACTIVE_LOCALES`), and `normalize_beta_gui_locale` falls back cleanly to `"en"` when an RTL locale is loaded from `preferences.json` or passed to `ui.locale.set`.
+- **Active BiDi text reordering:** Unicode bidirectional visual run reordering (`reorder_visual_bidi` / `TextDirection` in `curvebook-text`) remains active for multi-script figure labels, SVG exports, and PDF exports (`FontBook::rasterize_shaped_text`).
+- **Mirroring primitives & telemetry:** `mirror_x_for_rtl(x, width, canvas_width, is_rtl)` and `control_io` `is_rtl` status reporting remain compiled in for `1.0` activation. When adding or updating UI code, avoid hard-coding assumptions that break mirroring or BiDi text flow.
 
 Rendering and human usability are separate from catalog coverage. Check the current implementation and [evidence/localization.md](evidence/localization.md), together with the `R10.9` typography and `R10.21` translation acceptance work. A complete catalog entry does not prove that a person sees correct glyphs, direction, clipping, or layout in a rendered screen.
 
@@ -93,7 +88,7 @@ CurveBook ships **zero font files** (enforced by `cargo xtask assets`; see [../A
 - `SystemFontSet` in `crates/text/src/shaping.rs` discovers faces in this order: (1) a directory named by the `CURVEBOOK_FONTS_DIR` environment variable, read at run time on native targets; (2) faces compiled in via the optional `bundled-fonts` feature, if any; (3) host OS font files on native platforms (not on `wasm32`); (4) built-in deterministic metrics and vector outlines, which are not a substitute for a real font covering CJK, Arabic, or Hebrew.
 - At build time `crates/text/build.rs` also reads `CURVEBOOK_FONTS_DIR` (expects `fonts/manifest.txt`) to embed external faces when `bundled-fonts` is enabled; `CURVEBOOK_FONTS_REQUIRED=1` makes a missing directory a build error. Those fonts stay outside the repository, and any OFL face you stage needs its licence text and attribution ([licences.md](licences.md)). [development.md](development.md) describes the build-time workflow.
 - `font_diagnostics(locale)` in `crates/ui-egui/src/theme.rs` reports how many bundled faces are active, the CJK family names the locale would look for (`system_cjk_font_candidates`), and whether the locale routes as RTL. It does not probe the filesystem.
-- Web: there is no host filesystem on `wasm32`, so system font discovery is skipped. The web host measures and draws interface text through the browser's own canvas text API and fonts (`BrowserCanvasTextMeasurer` in `apps/curvebook-web/src/text_bridge.rs`), and the page's own chrome uses the browser's `font-family`, so web glyph coverage depends on the viewer's browser and OS fonts. Optional faces listed in `crates/text/web-fonts.txt` can be staged beside the build with `cargo xtask web-fonts` when `CURVEBOOK_FONTS_DIR` is set; without it the command is a no-op. The web security policy forbids external font origins.
+- **Web (deferred to `1.0`):** `apps/curvebook-web` is currently trimmed to a minimal strict-CSP placeholder (`R15.5`) pending `eframe::WebRunner` migration (`R11.11`). Optional faces listed in `crates/text/web-fonts.txt` can still be staged beside web builds with `cargo xtask web-fonts` when `CURVEBOOK_FONTS_DIR` is set; the web security policy forbids external font origins.
 
 Practical limits to document for users: a locale whose script has no installed font may render with missing or substitute glyphs even though its catalog is complete. Before declaring a locale usable, confirm the target OS has a font for its script, or provide one through `CURVEBOOK_FONTS_DIR`.
 
