@@ -20,7 +20,7 @@ Single-call `initialize` request and response syntax:
 ```
 
 ```json
-{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{"listChanged":true},"resources":{"subscribe":false,"listChanged":false},"prompts":{"listChanged":false}},"serverInfo":{"name":"curvebook","version":"0.1.0-alpha.2"},"instructions":"..."}}
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{"listChanged":true},"resources":{"subscribe":false,"listChanged":false},"prompts":{"listChanged":false}},"serverInfo":{"name":"curvebook","version":"<version>"},"instructions":"..."}}
 ```
 
 ## Attachment Modes and Filesystem Policy
@@ -52,7 +52,7 @@ Single-call `tools/call` request and response syntax (`doc_inspect`):
 ```
 
 ```json
-{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"{\"title\":\"Untitled\",\"schema_version\":1,\"file_path\":null,\"dirty\":false,\"total_sheet_count\":0,\"active_sheet_id\":null,\"family_anchor_sheet_id\":null,\"sheets\":{\"data\":[],\"info\":[],\"analyses\":[],\"graphs\":[],\"layouts\":[]},\"variables\":[],\"hooks\":[],\"analyses\":[],\"graphs\":[],\"layouts\":[]}"}],"isError":false}}
+{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"{\"title\":\"Untitled\",\"schema_version\":7,\"file_path\":null,\"dirty\":false,\"total_sheet_count\":0,\"active_sheet_id\":null,\"family_anchor_sheet_id\":null,\"sheets\":{\"data\":[],\"info\":[],\"analyses\":[],\"graphs\":[],\"layouts\":[]},\"variables\":[],\"hooks\":[],\"analyses\":[],\"graphs\":[],\"layouts\":[]}"}],"isError":false}}
 ```
 
 Exact schemas, annotations, and single-call JSON request/response examples for every core tool, every dynamic `CommandGroup` toolset, and the `gui` toolset are published in the [MCP Tools & Surface Registry](../registry/mcp-tools.html).

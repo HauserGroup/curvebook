@@ -24,4 +24,4 @@ payloads and verifies scope guards, folder preservation, action sequencing, upgr
 identity, and the registry contract in `install-policy.json` using a read-only Windows Installer
 session.
 
-For user-facing Windows `.msi` installation (`x64` and `arm64`) and verification steps, see [Get Started](https://hausergroup.github.io/curvebook/get-started.html) (`docs/reference/get-started.md`).
+For user-facing Windows `.msi` installation (`x64` and `arm64`) and verification steps, see [Get Started](https://hausergroup.github.io/curvebook/manual/v0.1/get-started.html) (`docs/reference/get-started.md`).

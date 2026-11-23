@@ -1,6 +1,6 @@
 # CurveBook documentation
 
-Start with the [README](../README.md). People using CurveBook should read the [online documentation](https://hausergroup.github.io/curvebook/get-started.html), which is generated from the `reference/` pages below. Contributors should start with [Contributing](../CONTRIBUTING.md), the [agent and contributor rules](../AGENTS.md), and the [active roadmap](ROADMAP.md).
+Start with the [README](../README.md). People using CurveBook should read the [online documentation](https://hausergroup.github.io/curvebook/manual/v0.1/get-started.html), which is generated from the `reference/` pages below. Contributors should start with [Contributing](../CONTRIBUTING.md), the [agent and contributor rules](../AGENTS.md), and the [active roadmap](ROADMAP.md).
 
 ## Using CurveBook
 

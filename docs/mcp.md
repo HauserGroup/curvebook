@@ -17,7 +17,7 @@ Key terms in this guide:
 
 ### 1. Build or Run the Server
 
-If you installed a release package, `curvebook-cli` is included alongside the desktop app (see the [Get Started guide](https://hausergroup.github.io/curvebook/get-started.html) for per-platform paths).
+If you installed a release package, `curvebook-cli` is included alongside the desktop app (see the [Get Started guide](https://hausergroup.github.io/curvebook/manual/v0.1/get-started.html) for per-platform paths).
 
 To build the standalone release binary from a source checkout (recommended for MCP clients):
 
@@ -93,7 +93,7 @@ Framing, handshake, and protocol revisions are documented in the [MCP server ref
 
 ## Modes & Reach
 
-The desktop application (`curvebook`) provides the interactive `LayoutTree` GUI ([`evidence/user-interface.md`](evidence/user-interface.md); Beta scope and platform notes in [`Beta known issues`](https://hausergroup.github.io/curvebook/troubleshooting.html#known-issues)), while `curvebook-cli mcp` exposes the full programmatic and AI-assistant automation surface over stdio (the WebAssembly browser bundle `curvebook-web` is deferred to `1.0`, [`R11`](ROADMAP.md#r11-usable-browser-app)).
+The desktop application (`curvebook`) provides the interactive `LayoutTree` GUI ([`evidence/user-interface.md`](evidence/user-interface.md); Beta scope and platform notes in [`Beta known issues`](https://hausergroup.github.io/curvebook/manual/v0.1/troubleshooting.html#known-issues)), while `curvebook-cli mcp` exposes the full programmatic and AI-assistant automation surface over stdio (the WebAssembly browser bundle `curvebook-web` is deferred to `1.0`, [`R11`](ROADMAP.md#r11-usable-browser-app)).
 
 | Mode | Reach |
 |---|---|
@@ -104,7 +104,7 @@ The desktop application (`curvebook`) provides the interactive `LayoutTree` GUI 
 ## Status & Current Limitations
 
 - **Verified stdio parity (`R7.3`):** Interactive workflow parity (including standalone *P*-value stack adjustment `stats.pvalueStack` and Compact Letter Display `graph.setCompactLetterDisplay`) is verified end to end over spawned `curvebook-cli mcp --gui-only` stdio JSON-RPC subprocesses, alongside headless `command_run` / `command_batch` / `open_file` / `save_file` / `export` / `render_preview`, `WorkdirGuard` path containment, and opt-in `curvebook --control <port> --window` shared desktop sessions.
-- **Desktop GUI & live-attach (`R10`, [`Beta known issues`](https://hausergroup.github.io/curvebook/troubleshooting.html#known-issues)):** The `curvebook` desktop application renders the interactive `LayoutTree` workspace ([`evidence/user-interface.md`](evidence/user-interface.md)), and `curvebook --control <port> --window` attaches a visible desktop window synchronized with loopback control/MCP requests on the same live `UiApp` / `Session`. In parallel, the `gui` MCP toolset drives `UiApp` through the semantic harness (`crates/ui-egui/src/{inspect.rs, gui_actions.rs}`). Browser WebAssembly support (`curvebook-web`) is deferred to `1.0` ([`R0.28`](history/roadmap/r0.md#r028-rein-in-the-number-of-release-install-files), [`R11`](ROADMAP.md#r11-usable-browser-app)).
+- **Desktop GUI & live-attach (`R10`, [`Beta known issues`](https://hausergroup.github.io/curvebook/manual/v0.1/troubleshooting.html#known-issues)):** The `curvebook` desktop application renders the interactive `LayoutTree` workspace ([`evidence/user-interface.md`](evidence/user-interface.md)), and `curvebook --control <port> --window` attaches a visible desktop window synchronized with loopback control/MCP requests on the same live `UiApp` / `Session`. In parallel, the `gui` MCP toolset drives `UiApp` through the semantic harness (`crates/ui-egui/src/{inspect.rs, gui_actions.rs}`). Browser WebAssembly support (`curvebook-web`) is deferred to `1.0` ([`R0.28`](history/roadmap/r0.md#r028-rein-in-the-number-of-release-install-files), [`R11`](ROADMAP.md#r11-usable-browser-app)).
 - **Headless UI commands:** In default headless `curvebook-cli mcp`, desktop `ui.*` commands report `"available": false` and require `--control-port <port>` attached to a running `curvebook --control <port>` process.
 - **Live-attach `command_batch` rollback:** In headless mode, `command_batch` with `"atomic": true` restores an exact session snapshot on failure; in `--control-port` live-attach mode, rollback replays `edit.undo` for completed mutating steps (`ping` and read-only `ui.*` commands excluded), so remote rollback follows the desktop session's undo stack.
 - **Deferred QoL items:** `QOL-10`, `QOL-11`, `QOL-13`, and `QOL-15` remain deferred without scheduled milestones ([`qol-enhancements.md`](planning/qol-enhancements.md)).
