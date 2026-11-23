@@ -163,7 +163,7 @@ fn args_contain_cli_control_token(args: &[String]) -> bool {
         match arg.as_str() {
             "--" => return false,
             "--control-token" => return true,
-            "--control" | "--portable-dir" | "--ttf-font" | "--event-script" => i += 2,
+            "--control" | "--portable-dir" | "--ttf-font" | "--event-script" | "--ui-backend" => i += 2,
             _ => i += 1,
         }
     }
@@ -453,6 +453,7 @@ fn launch_application_with_env(cfg: &LaunchConfig, env_get: impl Fn(&str) -> Opt
         theme_override: None,
         recovery_root: recovery_root.clone(),
         initial_viewport,
+        ..DesktopHostConfig::default()
     };
     let mut runtime_guard = RuntimeShutdownGuard::new(DesktopHostRuntime::new(host_cfg));
 
@@ -697,7 +698,7 @@ fn run_authenticated_control_server(
     write_control_token_file(&token_path, &auth)?;
     let token_guard = ControlTokenFileGuard { path: token_path };
     if win.app().ui_backend() == UiBackend::Egui {
-        let (_guards, mut channel) = start_live_window_control_on_listener(listener, auth.clone(), app_paths, no_prefs, token_guard)?;
+        let (mut guards, mut channel) = start_live_window_control_on_listener(listener, auth.clone(), app_paths, no_prefs, token_guard)?;
         let mut post_hook = channel.post_hook.take();
         while let Ok(req) = channel.request_rx.recv() {
             let res: Result<LiveControlFrameOutput, String> =
@@ -714,6 +715,8 @@ fn run_authenticated_control_server(
                 break;
             }
         }
+        drop(channel);
+        guards._server_guard.stop();
         return Ok(());
     }
     let _token_guard = token_guard;
@@ -2155,6 +2158,7 @@ mod tests {
             theme_override: None,
             recovery_root: None,
             initial_viewport: ViewportMetrics::new(960.0, 640.0, 1.0),
+            ..DesktopHostConfig::default()
         });
         let win_id = rt.open_window(None, ViewportMetrics::new(960.0, 640.0, 1.0))?;
         let (guards, channel) = super::start_live_window_control_on_listener(listener, auth.clone(), &app_paths, false, token_guard)?;
@@ -2224,6 +2228,13 @@ mod tests {
             String::from("--control-token"),
             String::from("secret-tok"),
         ]));
+        assert!(super::args_contain_cli_control_token(&[
+            String::from("--ui-backend"),
+            String::from("egui"),
+            String::from("--control-token"),
+            String::from("secret-tok"),
+        ]));
+        assert!(!super::args_contain_cli_control_token(&[String::from("--ui-backend"), String::from("--control-token")]));
         assert!(!super::args_contain_cli_control_token(&[String::from("--control"), String::from("9125")]));
         assert!(!super::args_contain_cli_control_token(&[String::from("--headless-once"), String::from("--"), String::from("--control-token"),]));
 

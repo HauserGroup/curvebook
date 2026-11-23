@@ -260,6 +260,7 @@ fn run_live_control_column_scroll_inspect_click_screenshot() -> Result<(), Box<d
         theme_override: None,
         recovery_root: None,
         initial_viewport: initial,
+        ..DesktopHostConfig::default()
     });
     let win_id = rt.open_window(None, initial)?;
 

@@ -2,13 +2,16 @@
 //! pinned row-title geometry, block-edge navigation, rectangular quick statistics, and
 //! TSV clipboard / command-intent emitters.
 
+#[cfg(test)]
 use std::cmp::Ordering;
 use std::fmt;
 
 use curvebook_doc::{
-    Cell, CellCoord, CellValue, DataSheet, ImportLinkSpec, LinkBorderColor, LinkedDataRegion, MAX_DATA_SETS, MAX_ROWS, MAX_SUBCOLUMNS,
-    SheetCellRange, SheetId, SubcolumnMode, TableArchetype, XColumnMode,
+    Cell, CellCoord, CellValue, DataSheet, ImportLinkSpec, LinkBorderColor, LinkedDataRegion, MAX_SUBCOLUMNS, SheetCellRange, SheetId, SubcolumnMode,
+    TableArchetype, XColumnMode,
 };
+#[cfg(test)]
+use curvebook_doc::{MAX_DATA_SETS, MAX_ROWS};
 use curvebook_math::sum::SummaryMoments;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -20,7 +23,7 @@ const DEFAULT_ROW_HEIGHT_PX: f64 = 24.0;
 const DEFAULT_COL_WIDTH_PX: f64 = 96.0;
 const ROW_NUMBER_GUTTER_WIDTH_PX: f64 = 48.0;
 const ROW_TITLE_DEFAULT_WIDTH_PX: f64 = 112.0;
-const MAX_CLIPBOARD_CELLS: usize = MAX_ROWS;
+const MAX_CLIPBOARD_CELLS: usize = curvebook_doc::MAX_ROWS;
 
 const fn default_decimal_separator() -> char {
     '.'
@@ -956,17 +959,15 @@ impl GridToolState {
             return Err(GridToolError::EmptyClipboard);
         }
         let anchor = self.active.or(self.anchor).unwrap_or_default();
-        let serialized_rows = serde_json::to_value(&cells).unwrap_or(serde_json::Value::Null);
         let intent = ToolCommandIntent::new(
             "table.paste",
             json!({
                 "sheet_id": sheet_id.as_str(),
                 "anchor": { "row": anchor.row, "col": anchor.col, "subcol": anchor.subcol },
                 "tsv": raw_tsv,
-                "cells": serialized_rows,
                 "decimal_separator": self.decimal_separator.to_string(),
-                "parse_asterisk_exclusions": parse_asterisk_exclusions,
                 "transpose": transpose,
+                "filter": { "parse_asterisk_exclusions": parse_asterisk_exclusions },
             }),
         );
         self.pending_intents.push(intent.clone());
@@ -1016,13 +1017,12 @@ fn build_exclude_box_intent(sheet_id: &SheetId, start: GridCellCoord, end: GridC
 #[must_use]
 pub fn format_cell_tsv_token(cell: &Cell, decimal_separator: char) -> String {
     let base = format_cell_display(cell, decimal_separator);
-    if cell.excluded && !base.is_empty() {
-        format!("{base}*")
-    } else if base.contains(['\t', '\n', '\r', '"']) {
-        let escaped = base.replace('"', "\"\"");
+    let with_excl = if cell.excluded && !base.is_empty() { format!("{base}*") } else { base };
+    if with_excl.contains(['\t', '\n', '\r', '"']) {
+        let escaped = with_excl.replace('"', "\"\"");
         format!("\"{escaped}\"")
     } else {
-        base
+        with_excl
     }
 }
 
@@ -1038,15 +1038,7 @@ pub fn format_grid_tsv(grid: &[Vec<Cell>], decimal_separator: char) -> String {
             if c_idx > 0 {
                 out.push('\t');
             }
-            let tok = format_cell_tsv_token(cell, decimal_separator);
-            if tok.contains(['\t', '\n', '\r', '"']) && !(tok.starts_with('"') && tok.ends_with('"')) {
-                let escaped = tok.replace('"', "\"\"");
-                out.push('"');
-                out.push_str(&escaped);
-                out.push('"');
-            } else {
-                out.push_str(&tok);
-            }
+            out.push_str(&format_cell_tsv_token(cell, decimal_separator));
         }
     }
     out
@@ -1494,11 +1486,6 @@ fn finite_or_zero(v: f64) -> f64 {
     if v.is_finite() { v } else { 0.0 }
 }
 
-#[allow(dead_code)]
-const fn ensure_bounds_constants_used() -> usize {
-    MAX_DATA_SETS + MAX_ROWS + Ordering::Equal as usize
-}
-
 #[cfg(test)]
 mod tests {
     use curvebook_doc::{
@@ -1508,7 +1495,8 @@ mod tests {
     };
 
     use super::{
-        GridCellCoord, GridDirection, GridNavAction, GridToolError, GridToolState, SelectionQuickStats, format_selection_tsv, parse_tsv_clipboard,
+        GridCellCoord, GridDirection, GridNavAction, GridToolError, GridToolState, Ordering, SelectionQuickStats, format_cell_tsv_token,
+        format_grid_tsv, format_selection_tsv, parse_tsv_clipboard,
     };
     use crate::Cursor;
 
@@ -1676,6 +1664,9 @@ mod tests {
         assert_eq!(ex_intent.command_id, "table.excludeCells");
         let paste_intent = tool.emit_paste_intent(&sheet.id, "1,5\t2,5*", false, true).expect("paste intent");
         assert_eq!(paste_intent.command_id, "table.paste");
+        assert!(paste_intent.params.get("cells").is_none());
+        assert!(paste_intent.params.get("parse_asterisk_exclusions").is_none());
+        assert_eq!(paste_intent.params["filter"]["parse_asterisk_exclusions"], true);
         let set_intent = tool.emit_set_cells_intent(&sheet.id, &[(GridCellCoord::new(0, 0, 0), Cell::number(3.0))]);
         assert_eq!(set_intent.command_id, "table.setCells");
         let link_intent = tool.emit_paste_link_intent(&sheet.id, &sheet.linked_regions[0].spec);
@@ -1688,5 +1679,23 @@ mod tests {
 
         let huge = "\t".repeat(MAX_ROWS + 1);
         assert!(matches!(parse_tsv_clipboard(&huge, '.', true), Err(GridToolError::ClipboardTooLarge { .. })));
+    }
+
+    #[test]
+    fn excluded_cell_with_quotes_or_newlines_quotes_after_asterisk() {
+        let mut quoted = Cell::text("a\"b\nc");
+        quoted.excluded = true;
+        let tok = format_cell_tsv_token(&quoted, '.');
+        assert_eq!(tok, "\"a\"\"b\nc*\"");
+        let tsv = format_grid_tsv(&[vec![quoted]], '.');
+        assert_eq!(tsv, "\"a\"\"b\nc*\"");
+        let parsed = parse_tsv_clipboard(&tsv, '.', true).expect("roundtrip excluded quoted multiline token");
+        assert_eq!(parsed[0][0], Cell::excluded_text("a\"b\nc"));
+    }
+
+    #[test]
+    fn bounds_constants_and_ordering_smoke() {
+        assert_eq!(Ordering::Less.cmp(&Ordering::Equal), Ordering::Less);
+        const { assert!(super::MAX_DATA_SETS > 0 && super::MAX_ROWS > 0) };
     }
 }

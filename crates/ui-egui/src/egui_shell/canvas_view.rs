@@ -15,7 +15,7 @@ use curvebook_palette::{CanvasPreviewFilter, Rgba8};
 use curvebook_platform::sync::RwLock;
 use curvebook_render::{RasterImage, RenderTargetSpec, apply_canvas_preview_filter, render_scene};
 use curvebook_tools::GridCellCoord;
-use curvebook_tools::canvas::{PhysicalUnit, SnapGuide, SnapOrientation, SnapSource};
+use curvebook_tools::canvas::{MAX_ZOOM, MIN_ZOOM, PhysicalUnit, SnapGuide, SnapOrientation, SnapSource};
 use egui::{Color32, CornerRadius, FontId, Id, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::json;
 
@@ -486,7 +486,8 @@ pub fn render_canvas_view_for_sheet(
 
     // Reserve space below paper for KM Number-at-Risk alignment track when Survival graph enables it
     let km_reserve_h = if gs_opt.is_some_and(|g| should_show_km_track(g, doc)) { 64.0 } else { 0.0 };
-    let zoom = (app.canvas_dialogs.canvas.zoom as f32).clamp(0.1, 8.0);
+    #[allow(clippy::cast_possible_truncation)]
+    let zoom = (app.canvas_dialogs.canvas.zoom as f32).clamp(MIN_ZOOM as f32, MAX_ZOOM as f32);
     let fit_scale =
         ((mat_rect.width() - 28.0).max(40.0) / scene_w_pt).min((mat_rect.height() - 28.0 - km_reserve_h).max(40.0) / scene_h_pt).clamp(0.2, 4.0);
     let eff_scale = fit_scale * zoom;
