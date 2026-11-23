@@ -871,7 +871,7 @@ fn render_stage2_effect(
             role: "status",
             text: &format!("Derived Standardized {}: {eff:.3}", pw.family.default_effect_label()),
             font_size: 12.0,
-            color: tokens.accent_strong,
+            color: tokens.accent,
             z_layer: ZLayer::ModalDialog,
             tooltip: None,
             record_meta: true,
@@ -1071,7 +1071,7 @@ fn render_stage4_results(
                 .corner_radius(CornerRadius::same(tokens.metrics.radius_md))
                 .inner_margin(Vec2::new(10.0, 8.0))
                 .show(ui, |ui| {
-                    ui.label(egui::RichText::new("Methods & Sample Size Narrative").strong().color(tokens.accent_strong));
+                    ui.label(egui::RichText::new("Methods & Sample Size Narrative").strong().color(tokens.accent));
                     ui.add_space(4.0);
                     let resp = ui.label(egui::RichText::new(&narrative).color(tokens.text_primary));
                     record_widget(
@@ -1143,12 +1143,12 @@ fn render_power_curve_plot(ui: &mut Ui, res: &PowerAnalysisResult, state: &mut P
     // Power curve polyline
     if res.power_curve.len() >= 2 {
         let pts: Vec<Pos2> = res.power_curve.iter().map(|pt| to_screen(pt.n, pt.power)).collect();
-        ui.painter().add(egui::Shape::line(pts, Stroke::new(2.2, tokens.accent_strong)));
+        ui.painter().add(egui::Shape::line(pts, Stroke::new(2.2, tokens.accent)));
     }
 
     // Solved (n_per_group, achieved_power) focal dot
     let solved_pt = to_screen(res.n_per_group as f64, res.achieved_power);
-    ui.painter().circle_filled(solved_pt, 4.5, tokens.accent_strong);
+    ui.painter().circle_filled(solved_pt, 4.5, tokens.accent);
 
     // Interactive pointer crosshair hover
     let mut hover_desc = format!("Solved: N = {}, Power = {:.1}%", res.n_per_group, res.achieved_power * 100.0);

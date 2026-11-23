@@ -321,7 +321,7 @@ pub fn render_leading_dock(
             ui.painter().rect_filled(
                 handle_rect,
                 CornerRadius::same(1),
-                if split_resp.hovered() || split_resp.dragged() { tokens.accent_strong } else { tokens.border },
+                if split_resp.hovered() || split_resp.dragged() { tokens.accent } else { tokens.border },
             );
             if split_resp.dragged()
                 && ctx_in.enabled
@@ -536,7 +536,7 @@ fn render_rail_icon_button(ui: &mut egui::Ui, spec: RailIconButtonSpec<'_>, toke
     let fg = if !enabled {
         tokens.text_disabled
     } else if selected {
-        tokens.accent_strong
+        tokens.selected_accent_text()
     } else {
         tokens.text_strong
     };
@@ -1031,13 +1031,13 @@ fn render_navigator_row(
     }
     if entry.is_active {
         let bar = Rect::from_min_size(Pos2::new(rect.left() + 1.0, rect.top() + 3.0), Vec2::new(3.0, rect.height() - 6.0));
-        ui.painter().rect_filled(bar, CornerRadius::same(1), tokens.accent_strong);
+        ui.painter().rect_filled(bar, CornerRadius::same(1), tokens.accent);
     }
 
     if pointer_inside && state.dragging_sheet_id.is_some() {
         match drop_outcome {
             DragDropOutcome::ReorderCandidate { target_index, .. } => {
-                ui.painter().hline(rect.x_range(), rect.top() + 1.0, Stroke::new(2.0, tokens.accent_strong));
+                ui.painter().hline(rect.x_range(), rect.top() + 1.0, Stroke::new(2.0, tokens.accent));
                 if ui.ctx().input(|i| i.pointer.any_released())
                     && let Some(drag_id) = state.dragging_sheet_id.clone()
                 {
@@ -1090,7 +1090,7 @@ fn render_navigator_row(
         icon_rect,
         entry.section,
         entry.archetype_label.as_deref(),
-        if entry.is_active { tokens.accent_strong } else { tokens.icon },
+        if entry.is_active { tokens.accent } else { tokens.icon },
     );
     x_cur += 18.0;
 
@@ -1284,7 +1284,7 @@ fn render_section_new_row(ui: &mut egui::Ui, app: &UiApp, spec: SectionNewRowSpe
     };
 
     let text = if label.starts_with('+') { label.to_owned() } else { format!("+ {label}") };
-    let fg = if row_enabled { tokens.accent_strong } else { tokens.text_disabled };
+    let fg = if row_enabled { tokens.accent } else { tokens.text_disabled };
     let Some((rect, mut resp)) = allocate_visible_slot(ui, Vec2::new(row_w, 26.0), if row_enabled { Sense::click() } else { Sense::hover() }) else {
         return;
     };
@@ -1423,21 +1423,17 @@ fn render_family_pane(
             let indent = ((*depth).min(4) as f32) * 12.0;
             let spine_x = rect.left() + 6.0 + indent * 0.5;
             if *depth > 0 {
-                ui.painter().vline(
-                    spine_x,
-                    rect.top()..=rect.center().y,
-                    Stroke::new(1.0, if in_chain { tokens.accent_strong } else { tokens.divider }),
-                );
+                ui.painter().vline(spine_x, rect.top()..=rect.center().y, Stroke::new(1.0, if in_chain { tokens.accent } else { tokens.divider }));
                 ui.painter().hline(
                     spine_x..=(rect.left() + 10.0 + indent),
                     rect.center().y,
-                    Stroke::new(1.0, if in_chain { tokens.accent_strong } else { tokens.divider }),
+                    Stroke::new(1.0, if in_chain { tokens.accent } else { tokens.divider }),
                 );
             }
 
             let icon_x = rect.left() + 12.0 + indent;
             let icon_rect = Rect::from_min_size(Pos2::new(icon_x, rect.center().y - 5.0), Vec2::new(12.0, 10.0));
-            draw_sheet_vector_icon(ui.painter(), icon_rect, node.section, None, if in_chain { tokens.accent_strong } else { tokens.icon });
+            draw_sheet_vector_icon(ui.painter(), icon_rect, node.section, None, if in_chain { tokens.accent } else { tokens.icon });
 
             let multi_dep = multi_dependency_badge(doc, &node.sheet_id);
             let badge_reserve = if multi_dep.is_some() { 28.0 } else { 4.0 };

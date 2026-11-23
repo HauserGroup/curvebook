@@ -46,7 +46,13 @@ fn put_styled_inline_text_edit(
         ui.set_clip_rect(inner);
         ui.add_sized(
             inner.size(),
-            TextEdit::singleline(draft).id(te_id).font(font_style).frame(egui::Frame::NONE).clip_text(true).desired_width(inner.width()),
+            TextEdit::singleline(draft)
+                .id(te_id)
+                .font(font_style)
+                .frame(egui::Frame::NONE)
+                .clip_text(true)
+                .lock_focus(true)
+                .desired_width(inner.width()),
         )
     })
     .inner
@@ -97,6 +103,13 @@ fn run_inline_editor_shell(
     }
     let enter = if spec.first_frame { None } else { pressed_key_event_modifiers(ui, Key::Enter) };
     let tab = if spec.first_frame { None } else { pressed_key_event_modifiers(ui, Key::Tab) };
+    if tab.is_some() {
+        // Consume Tab/Shift+Tab before `TextEdit` (with `lock_focus(true)`) so it never inserts `\t`.
+        ui.input_mut(|i| {
+            i.consume_key(Modifiers::NONE, Key::Tab);
+            i.consume_key(Modifiers::SHIFT, Key::Tab);
+        });
+    }
     let resp = put_styled_inline_text_edit(ui, mctx, spec.rect, spec.te_id, draft, spec.is_cell);
     if spec.first_frame {
         resp.request_focus();
@@ -182,10 +195,14 @@ fn render_standard_inline_editor(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &
                 {
                     let next_row = if mods.shift { coord.row.saturating_sub(1) } else { (coord.row + 1).min(mctx.geom.row_count - 1) };
                     fstate.intents.push_select_grid_cell(GridCellCoord::new(next_row, coord.col, coord.subcol));
-                } else if let Some(mods) = tab
-                    && let (false, Some(nc), _) = step_cell_horiz(mctx.geom, Some(coord), None, mods.shift)
-                {
-                    fstate.intents.push_select_grid_cell(nc);
+                } else if let Some(mods) = tab {
+                    let (is_x, nc_opt, nx_opt) = step_cell_horiz(mctx.geom, Some(coord), None, mods.shift);
+                    if is_x {
+                        fstate.aux.selected_x_cell = nx_opt;
+                    } else if let Some(nc) = nc_opt {
+                        fstate.aux.selected_x_cell = None;
+                        fstate.intents.push_select_grid_cell(nc);
+                    }
                 }
             }
             if retry_discard {

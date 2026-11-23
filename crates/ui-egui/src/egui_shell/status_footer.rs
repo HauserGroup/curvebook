@@ -1417,7 +1417,7 @@ fn render_footer_trailing_controls(
                 min_w: 44.0,
                 selected: filter_active || views.status_footer.filter_popup_open,
                 enabled: ctx_in.enabled,
-                accent_override: filter_active.then_some(ctx_in.tokens.accent_strong),
+                accent_override: filter_active.then_some(ctx_in.tokens.selected_accent_text()),
                 widget_id: "status.preview_filter",
                 role: "button",
                 command_id: Some("ui.previewFilter.set"),

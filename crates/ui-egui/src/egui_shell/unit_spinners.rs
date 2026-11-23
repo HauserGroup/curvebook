@@ -273,7 +273,7 @@ fn render_scrub_value_chip(
             Pos2::new(chip_rect.left() + 1.0, chip_rect.bottom() - 3.0),
             Pos2::new((chip_rect.left() + fill_w).min(chip_rect.right() - 1.0), chip_rect.bottom() - 1.0),
         );
-        ui.painter().rect_filled(bar, CornerRadius::same(1), tokens.accent_strong);
+        ui.painter().rect_filled(bar, CornerRadius::same(1), tokens.accent);
     }
 
     ui.painter().with_clip_rect(chip_rect.shrink(2.0)).text(
@@ -357,7 +357,7 @@ fn render_scrub_unit_badge(
             Align2::CENTER_CENTER,
             unit_lbl,
             FontId::proportional(tokens.metrics.font_ui_small_pt),
-            if cfg.enabled { tokens.accent_strong } else { tokens.text_disabled },
+            if cfg.enabled { tokens.accent } else { tokens.text_disabled },
         );
         if cfg.enabled && unit_btn.clicked() {
             let prev = state.unit;

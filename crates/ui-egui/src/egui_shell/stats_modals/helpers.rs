@@ -60,7 +60,7 @@ where
     let area = egui::Modal::default_area(Id::unique(("wave4_modal_area", cfg.widget_id))).constrain_to(screen);
     let frame = egui::Frame::window(&ctx.global_style())
         .fill(tokens.surface_bg)
-        .stroke(Stroke::new(1.5, tokens.accent_strong))
+        .stroke(Stroke::new(1.5, tokens.accent))
         .corner_radius(CornerRadius::same(tokens.metrics.radius_lg))
         .inner_margin(egui::Margin::same(12));
 
@@ -248,7 +248,7 @@ pub(in crate::egui_shell) fn render_formula_bar(
                     role: "status",
                     text: formula,
                     font_size: 11.5,
-                    color: tokens.accent_strong,
+                    color: tokens.accent,
                     z_layer: ZLayer::ModalDialog,
                     tooltip: Some(formula),
                     record_meta: true,

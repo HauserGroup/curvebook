@@ -30,8 +30,8 @@ use super::shared::{
     record_meta_with_unclipped_if_enabled, render_ellipsized_text, set_grid_focus_active, table_display_decimals,
 };
 use super::shortcuts::{
-    clear_x_clipboard_cache, copy_x_cell_to_clipboard, handle_multi_keyboard_shortcuts, push_x_cell_text_paste_intents,
-    read_clipboard_text_for_x_paste,
+    clear_x_clipboard_cache, copy_x_cell_to_clipboard, first_linked_region_in_bounds, handle_multi_keyboard_shortcuts, is_x_column_readonly,
+    push_x_cell_text_paste_intents, read_clipboard_text_for_x_paste,
 };
 use super::{DataGridEguiState, DataGridFrameReport, DataGridRenderContext, GridInlineEditTarget};
 
@@ -996,7 +996,8 @@ fn render_row_context_menu_popup(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &
     }
     let selected_x_cell = fstate.aux.selected_x_cell;
     let record_inspect_meta = fstate.state.record_inspect_meta;
-    let context_menu = &mut fstate.state.context_menu;
+    let mut close_menu = false;
+    let mut linked_guard_to_open: Option<LinkedDataRegion> = None;
     let meta = &mut *fstate.meta;
     let intents = &mut *fstate.intents;
 
@@ -1161,31 +1162,15 @@ fn render_row_context_menu_popup(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &
                             }
                         }
                         "grid.ctx.exclude" => {
-                            if let Some(tgt) = cell_ctx
-                                && tgt.is_x
-                            {
-                                let was_ex = ds.archetype.x_or_time_cell(tgt.row, tgt.subcol).is_some_and(|c| c.excluded);
-                                intents.push_engine(
-                                    "table.excludeCells",
-                                    json!({ "sheet_id": ds.id.as_str(), "target": "x", "row": tgt.row, "subcol": tgt.subcol, "excluded": !was_ex }),
-                                );
-                            } else {
-                                let c = cell_ctx
-                                    .filter(|t| !t.is_x)
-                                    .map(|t| GridCellCoord::new(t.row, t.col, t.subcol))
-                                    .or(app.grid.tool.active)
-                                    .unwrap_or(GridCellCoord::new(row, 0, 0));
-                                let was_ex = ds.archetype.data_cell(c.into()).is_some_and(|cell| cell.excluded);
-                                intents.push_engine(
-                                    "table.excludeCells",
-                                    json!({ "sheet_id": ds.id.as_str(), "row": c.row, "col": c.col, "subcol": c.subcol, "excluded": !was_ex }),
-                                );
+                            if let Some(reg) = handle_grid_ctx_exclude(app, ds, row, cell_ctx, selected_x_cell, intents) {
+                                linked_guard_to_open = Some(reg);
                             }
                         }
                         "grid.ctx.exclude_reason" => intents.push_ui("ui.grid.excludeWithReason", json!({ "sheet_id": ds.id.as_str() })),
                         "grid.ctx.cut" => {
-                            clear_x_clipboard_cache(list);
-                            intents.push_grid_cut_selection();
+                            if let Some(reg) = handle_grid_ctx_cut(list, app, ds, cell_ctx, selected_x_cell, intents) {
+                                linked_guard_to_open = Some(reg);
+                            }
                         }
                         "grid.ctx.copy" => {
                             if let Some(tgt) = cell_ctx
@@ -1267,14 +1252,103 @@ fn render_row_context_menu_popup(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &
                         }
                         _ => {}
                     }
-                    *context_menu = None;
+                    close_menu = true;
                 }
             }
         });
     });
     let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
     let outside_click = ui.input(|i| i.pointer.primary_clicked() && i.pointer.interact_pos().is_some_and(|p| !area_resp.response.rect.contains(p)));
-    if esc || outside_click {
-        *context_menu = None;
+    if close_menu || esc || outside_click {
+        fstate.state.context_menu = None;
     }
+    if let Some(reg) = linked_guard_to_open {
+        open_link_popover(fstate.state, &reg, mctx.locale);
+        ui.ctx().request_repaint();
+    }
+}
+
+fn handle_grid_ctx_exclude(
+    app: &UiApp,
+    ds: &DataSheet,
+    row: usize,
+    cell_ctx: Option<ContextCellTarget>,
+    selected_x_cell: Option<(usize, usize)>,
+    intents: &mut PendingUiIntents,
+) -> Option<LinkedDataRegion> {
+    if let Some(tgt) = cell_ctx
+        && tgt.is_x
+    {
+        let was_ex = ds.archetype.x_or_time_cell(tgt.row, tgt.subcol).is_some_and(|c| c.excluded);
+        intents.push_engine(
+            "table.excludeCells",
+            json!({ "sheet_id": ds.id.as_str(), "target": "x", "row": tgt.row, "subcol": tgt.subcol, "excluded": !was_ex }),
+        );
+        return None;
+    }
+    if cell_ctx.is_none()
+        && let Some((xr, xs)) = selected_x_cell
+    {
+        let was_ex = ds.archetype.x_or_time_cell(xr, xs).is_some_and(|c| c.excluded);
+        intents.push_engine("table.excludeCells", json!({ "sheet_id": ds.id.as_str(), "target": "x", "row": xr, "subcol": xs, "excluded": !was_ex }));
+        return None;
+    }
+    if let Some((start, end)) = app.grid.tool.selection_bounds().filter(|(s, e)| {
+        cell_ctx.is_none_or(|t| t.row >= s.row && t.row <= e.row && t.col >= s.col && t.col <= e.col && t.subcol >= s.subcol && t.subcol <= e.subcol)
+    }) {
+        if let Some(reg) = first_linked_region_in_bounds(ds, start, end) {
+            return Some(reg.clone());
+        }
+        let target_excluded = !ds.archetype.data_cell(CellCoord::from(start)).is_some_and(|c| c.excluded);
+        let doc_range = curvebook_doc::SheetCellRange::new(CellCoord::from(start), CellCoord::from(end));
+        intents.push_engine("table.excludeCells", json!({ "sheet_id": ds.id.as_str(), "range": doc_range, "excluded": target_excluded }));
+        return None;
+    }
+    let c = cell_ctx
+        .filter(|t| !t.is_x)
+        .map(|t| GridCellCoord::new(t.row, t.col, t.subcol))
+        .or(app.grid.tool.active)
+        .unwrap_or(GridCellCoord::new(row, 0, 0));
+    if let Some(reg) = linked_region_for_cell(ds, c.row, c.col) {
+        return Some(reg.clone());
+    }
+    let was_ex = ds.archetype.data_cell(c.into()).is_some_and(|cell| cell.excluded);
+    intents.push_engine(
+        "table.excludeCells",
+        json!({ "sheet_id": ds.id.as_str(), "row": c.row, "col": c.col, "subcol": c.subcol, "excluded": !was_ex }),
+    );
+    None
+}
+
+fn handle_grid_ctx_cut(
+    ui: &Ui,
+    app: &UiApp,
+    ds: &DataSheet,
+    cell_ctx: Option<ContextCellTarget>,
+    selected_x_cell: Option<(usize, usize)>,
+    intents: &mut PendingUiIntents,
+) -> Option<LinkedDataRegion> {
+    let x_target = cell_ctx.filter(|t| t.is_x).map(|t| (t.row, t.subcol)).or(selected_x_cell);
+    if let Some((xr, xs)) = x_target {
+        copy_x_cell_to_clipboard(ui, app, ds, xr, xs);
+        if !is_x_column_readonly(ds) {
+            intents.push_engine("table.setXCells", json!({ "sheet_id": ds.id.as_str(), "row": xr, "subcol": xs, "value": serde_json::Value::Null }));
+        }
+        return None;
+    }
+    if ds.frozen {
+        return None;
+    }
+    let linked = app
+        .grid
+        .tool
+        .selection_bounds()
+        .and_then(|(s, e)| first_linked_region_in_bounds(ds, s, e))
+        .or_else(|| app.grid.tool.active.and_then(|active| linked_region_for_cell(ds, active.row, active.col)));
+    if let Some(reg) = linked {
+        return Some(reg.clone());
+    }
+    clear_x_clipboard_cache(ui);
+    intents.push_grid_cut_selection();
+    None
 }

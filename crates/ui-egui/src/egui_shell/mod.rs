@@ -968,6 +968,16 @@ impl Tokens {
         ctx.set_zoom_factor(self.ui_scale.clamp(0.75, 3.0));
     }
 
+    /// Foreground color for accent-emphasized text/glyphs painted on [`Self::active_bg`].
+    ///
+    /// In light mode this uses [`Self::accent_strong`]; in dark and high-contrast modes
+    /// [`Self::accent_strong`] is reserved strictly for solid CTA fills behind [`Self::on_accent`],
+    /// so selected surfaces use [`Self::text_strong`] to guarantee WCAG 2.2 AA contrast.
+    #[must_use]
+    pub const fn selected_accent_text(&self) -> Color32 {
+        if self.dark { self.text_strong } else { self.accent_strong }
+    }
+
     /// Return detailed WCAG 2.2 contrast violations across all text-on-background and non-text UI
     /// boundary pairs (`text_disabled` is exempt per WCAG 2.2 SC 1.4.3).
     #[must_use]
@@ -986,6 +996,7 @@ impl Tokens {
             ("text_strong on panel_bg", self.text_strong, self.panel_bg),
             ("text_strong on hover_bg", self.text_strong, self.hover_bg),
             ("text_strong on active_bg", self.text_strong, self.active_bg),
+            ("selected_accent_text on active_bg", self.selected_accent_text(), self.active_bg),
             ("text_muted on surface_bg", self.text_muted, self.surface_bg),
             ("text_muted on panel_bg", self.text_muted, self.panel_bg),
             ("text_muted on app_bar", self.text_muted, self.app_bar),
@@ -998,6 +1009,8 @@ impl Tokens {
             ("on_accent on accent_hover", self.on_accent, self.accent_hover),
             ("accent on surface_bg", self.accent, self.surface_bg),
             ("accent on panel_bg", self.accent, self.panel_bg),
+            ("accent on button_bg", self.accent, self.button_bg),
+            ("accent on header_bg", self.accent, self.header_bg),
             ("error on surface_bg", self.error, self.surface_bg),
             ("error on panel_bg", self.error, self.panel_bg),
             ("warning on surface_bg", self.warning, self.surface_bg),
@@ -1021,6 +1034,10 @@ impl Tokens {
             ("hover_border on panel_bg", self.hover_border, self.panel_bg),
             ("hover_border on surface_bg", self.hover_border, self.surface_bg),
             ("hover_border on hover_bg", self.hover_border, self.hover_bg),
+            ("accent border on active_bg", self.accent, self.active_bg),
+            ("accent border on surface_bg", self.accent, self.surface_bg),
+            ("accent border on panel_bg", self.accent, self.panel_bg),
+            ("accent border on header_bg", self.accent, self.header_bg),
             ("icon on surface_bg", self.icon, self.surface_bg),
             ("icon on panel_bg", self.icon, self.panel_bg),
             ("role_num on surface_bg", self.role_num, self.surface_bg),

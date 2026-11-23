@@ -376,3 +376,40 @@ fn command_palette_keyboard_nav_fuzzy_search_backdrop_capture_and_discard_guard(
 
     Ok(())
 }
+
+#[test]
+fn da_05_06_top_chrome_popups_dismiss_on_escape() -> Result<(), String> {
+    let mut state = TopChromeHarnessState::new("en", true);
+    state
+        .app
+        .execute_command("sheet.createData", json!({ "sheet_id": "ds-esc", "title": "Assay", "kind": "xy", "cols": 2, "rows": 4 }))
+        .map_err(|e| e.to_string())?;
+    state
+        .app
+        .execute_command("graph.create", json!({ "sheet_id": "gs-esc", "data_sheet_id": "ds-esc", "title": "Curve" }))
+        .map_err(|e| e.to_string())?;
+
+    let mut driver = EguiHumanPathDriver::new(state, ViewportMetrics::new(1440.0, 600.0, 1.0), render_top_chrome_harness);
+    driver.set_bleed_policy(TextBleedPolicy::AllowVerticalScrollClip);
+
+    // 1. Split preset popup dismisses on Escape.
+    driver.click_widget_id("toolbar.split")?;
+    assert!(driver.frame_meta().find_by_widget_id("toolbar.split.preset.data_graph").is_some(), "split popup should be open");
+    driver.press_egui_key(Key::Escape, Modifiers::NONE);
+    assert!(driver.frame_meta().find_by_widget_id("toolbar.split.preset.data_graph").is_none(), "Escape must dismiss split preset popup");
+
+    // 2. Workspace preset popup dismisses on Escape.
+    driver.click_widget_id("toolbar.preset")?;
+    assert!(driver.frame_meta().find_by_widget_id("toolbar.preset.default").is_some(), "preset popup should be open");
+    driver.press_egui_key(Key::Escape, Modifiers::NONE);
+    assert!(driver.frame_meta().find_by_widget_id("toolbar.preset.default").is_none(), "Escape must dismiss workspace preset popup");
+
+    // 3. Tier2 overflow popup dismisses on Escape (narrow viewport forces overflow button).
+    driver.set_viewport(ViewportMetrics::new(640.0, 420.0, 1.0));
+    driver.click_widget_id("toolbar.overflow")?;
+    assert!(driver.frame_meta().find_by_widget_id("toolbar.overflow.item.0").is_some(), "tier2 overflow popup should be open");
+    driver.press_egui_key(Key::Escape, Modifiers::NONE);
+    assert!(driver.frame_meta().find_by_widget_id("toolbar.overflow.item.0").is_none(), "Escape must dismiss tier2 overflow popup");
+
+    Ok(())
+}

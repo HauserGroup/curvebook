@@ -391,7 +391,7 @@ pub fn render_stat_params_modal(
                     .corner_radius(CornerRadius::same(4))
                     .inner_margin(Vec2::new(8.0, 6.0))
                     .show(ui, |ui| {
-                        ui.label(egui::RichText::new("Method Reference & Citations").strong().color(tokens.accent_strong));
+                        ui.label(egui::RichText::new("Method Reference & Citations").strong().color(tokens.accent));
                         ui.label(egui::RichText::new(method_reference_text(spec)).small().color(tokens.text_primary));
                     });
                 ui.add_space(6.0);

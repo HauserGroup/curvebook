@@ -361,3 +361,23 @@ fn visual_review_renders_all_viewports_and_themes() {
     assert_ne!(find_png("modal_light_1280x800.png"), find_png("light_1280x800.png"), "light modal must visually overlay workspace");
     assert_ne!(find_png("modal_dark_1280x800.png"), find_png("dark_1280x800.png"), "dark modal must visually overlay workspace");
 }
+
+#[test]
+fn da_05_02_dark_hc_selected_accent_text_and_accent_border_contrast() {
+    for mode in UiThemeMode::ALL {
+        let t = Tokens::for_mode(mode);
+        let violations = t.contrast_violations();
+        assert!(violations.is_empty(), "{mode:?} contrast_violations must be empty, got: {violations:?}");
+
+        let sel_text_ratio = wcag_contrast_ratio(color32_to_rgba8(t.selected_accent_text()), color32_to_rgba8(t.active_bg));
+        assert!(sel_text_ratio >= 4.5, "{mode:?} selected_accent_text on active_bg {sel_text_ratio:.2}:1 < 4.5:1");
+
+        let accent_border_active = wcag_contrast_ratio(color32_to_rgba8(t.accent), color32_to_rgba8(t.active_bg));
+        assert!(accent_border_active >= 3.0, "{mode:?} accent border on active_bg {accent_border_active:.2}:1 < 3.0:1");
+
+        for (name, bg) in [("surface_bg", t.surface_bg), ("panel_bg", t.panel_bg), ("button_bg", t.button_bg), ("header_bg", t.header_bg)] {
+            let ratio = wcag_contrast_ratio(color32_to_rgba8(t.accent), color32_to_rgba8(bg));
+            assert!(ratio >= 4.5, "{mode:?} accent on {name} {ratio:.2}:1 < 4.5:1");
+        }
+    }
+}

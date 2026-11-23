@@ -173,7 +173,7 @@ fn render_categorical_guard_banner(
     let warn_text = tr(gctx.locale, "axes.guard.warning");
     egui::Frame::group(ui.style())
         .fill(gctx.tokens.header_bg)
-        .stroke(Stroke::new(1.5, gctx.tokens.accent_strong))
+        .stroke(Stroke::new(1.5, gctx.tokens.accent))
         .corner_radius(CornerRadius::same(6))
         .show(ui, |ui| {
             ui.set_max_width((gctx.body_w - 16.0).max(180.0));

@@ -305,7 +305,9 @@ impl Oklch {
             return candidate.to_rgba8();
         }
         let mut lo = 0.0_f64;
-        let mut hi = target_c;
+        // Maximum sRGB chroma in OkLCH is ~0.322 (blue primary), so 0.5 safely bounds the entire
+        // sRGB gamut and prevents huge finite chroma values from exhausting the 32 search steps.
+        let mut hi = target_c.min(0.5);
         for _ in 0..32 {
             let mid = 0.5 * (lo + hi);
             if (Self { l, c: mid, ..candidate }).in_srgb_gamut() {
