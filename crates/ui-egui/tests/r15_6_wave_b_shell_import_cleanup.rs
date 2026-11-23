@@ -299,7 +299,7 @@ fn b10_r15_gui_14_welcome_hub_open_pane_uses_curvebook_extension_wording() -> Re
 
     // Verify localized `.curvebook` wording across non-English locales as well.
     for locale in ["de", "ja"] {
-        driver.state_mut().app.set_locale(locale);
+        assert_eq!(driver.state_mut().app.set_locale(locale), locale);
         driver.run_settled();
         let sub = driver.frame_meta().find_by_widget_id("welcome.open.subtitle").ok_or("missing localized subtitle")?;
         assert!(sub.label.contains(".curvebook"), "locale `{locale}` subtitle must reference .curvebook, got: {:?}", sub.label);

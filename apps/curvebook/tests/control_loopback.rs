@@ -17,6 +17,14 @@ use curvebook_ui_egui::{
 };
 use serde_json::{Value, json};
 
+fn env_truthy(var: &str) -> bool {
+    std::env::var(var).is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
+fn loopback_required() -> bool {
+    env_truthy("CI") || env_truthy("CURVEBOOK_REQUIRE_LOOPBACK")
+}
+
 #[test]
 fn jsonl_control_protocol_end_to_end_over_in_memory_stream() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = UiApp::new();
@@ -249,8 +257,8 @@ fn loopback_validation_and_ephemeral_tcp_check_body() -> Result<(), Box<dyn std:
 
     let loopback_ephemeral = SocketAddr::from(([127, 0, 0, 1], 0));
     match bind_control_tcp_listener(loopback_ephemeral) {
-        Err(err) if err.kind() == ErrorKind::PermissionDenied => {
-            // Restricted sandboxes may deny TCP socket bind; in-memory stream test covers full protocol.
+        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => {
+            // Restricted local sandboxes may deny TCP socket bind; in-memory stream test covers full protocol.
         }
         Err(err) => return Err(Box::new(err)),
         Ok(listener) => {
@@ -260,7 +268,7 @@ fn loopback_validation_and_ephemeral_tcp_check_body() -> Result<(), Box<dyn std:
                     drop(probe);
                     let _ = listener.accept();
                 }
-                Err(err) if matches!(err.kind(), ErrorKind::PermissionDenied | ErrorKind::TimedOut) => {
+                Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => {
                     return Ok(());
                 }
                 Err(err) => return Err(Box::new(err)),
@@ -353,7 +361,7 @@ fn bad_control_connection_does_not_stop_the_server() -> Result<(), Box<dyn std::
 
 fn bad_control_connection_does_not_stop_the_server_body() -> Result<(), Box<dyn std::error::Error>> {
     let listener = match bind_control_tcp_listener(SocketAddr::from(([127, 0, 0, 1], 0))) {
-        Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
+        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => return Ok(()),
         other => other?,
     };
     let local_addr = listener.local_addr()?;
@@ -362,7 +370,7 @@ fn bad_control_connection_does_not_stop_the_server_body() -> Result<(), Box<dyn 
             drop(probe);
             let _ = listener.accept();
         }
-        Err(err) if matches!(err.kind(), ErrorKind::PermissionDenied | ErrorKind::TimedOut) => {
+        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => {
             return Ok(());
         }
         Err(err) => return Err(Box::new(err)),
@@ -420,7 +428,7 @@ fn tcp_control_socket_rejects_unauthenticated_and_browser_http_post_before_dispa
     use std::io::Read;
 
     let listener = match bind_control_tcp_listener(SocketAddr::from(([127, 0, 0, 1], 0))) {
-        Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
+        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => return Ok(()),
         other => other?,
     };
     let local_addr = listener.local_addr()?;
@@ -429,7 +437,7 @@ fn tcp_control_socket_rejects_unauthenticated_and_browser_http_post_before_dispa
             drop(probe);
             let _ = listener.accept();
         }
-        Err(err) if matches!(err.kind(), ErrorKind::PermissionDenied | ErrorKind::TimedOut) => {
+        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => {
             return Ok(());
         }
         Err(err) => return Err(Box::new(err)),
@@ -568,7 +576,7 @@ fn control_server_survives_small_viewport_dialog_screenshot_and_continues() -> R
 
 fn control_server_survives_small_viewport_dialog_screenshot_and_continues_body() -> Result<(), Box<dyn std::error::Error>> {
     let listener = match bind_control_tcp_listener(SocketAddr::from(([127, 0, 0, 1], 0))) {
-        Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
+        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => return Ok(()),
         other => other?,
     };
     let local_addr = listener.local_addr()?;
@@ -577,7 +585,7 @@ fn control_server_survives_small_viewport_dialog_screenshot_and_continues_body()
             drop(probe);
             let _ = listener.accept();
         }
-        Err(err) if matches!(err.kind(), ErrorKind::PermissionDenied | ErrorKind::TimedOut) => {
+        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => {
             return Ok(());
         }
         Err(err) => return Err(Box::new(err)),
@@ -624,7 +632,7 @@ fn control_server_survives_small_viewport_dialog_screenshot_and_continues_body()
 #[test]
 fn cli_control_token_file_created_0600_enforced_and_cleaned_up_on_quit() -> Result<(), Box<dyn std::error::Error>> {
     let probe = match bind_control_tcp_listener(SocketAddr::from(([127, 0, 0, 1], 0))) {
-        Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
+        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => return Ok(()),
         other => other?,
     };
     let port = probe.local_addr()?.port();
@@ -671,7 +679,7 @@ fn cli_control_token_file_created_0600_enforced_and_cleaned_up_on_quit() -> Resu
     // Restricted sandboxes may permit bind() in probe while denying outbound connect().
     let first_stream = match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
         Ok(stream) => stream,
-        Err(err) if matches!(err.kind(), ErrorKind::PermissionDenied | ErrorKind::TimedOut) => {
+        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => {
             let _ = guard.0.kill();
             let _ = guard.0.wait();
             let _ = std::fs::remove_dir_all(&temp_dir);
@@ -728,7 +736,7 @@ fn tcp_fixture_client_error_and_panic_both_stop_the_listener() -> control_fixtur
     control_fixture::run("tcp_fixture_client_error_and_panic_both_stop_the_listener", || {
         for panic_client in [false, true] {
             let listener = match bind_control_tcp_listener(SocketAddr::from(([127, 0, 0, 1], 0))) {
-                Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
+                Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => return Ok(()),
                 other => other?,
             };
             let address = listener.local_addr()?;
@@ -737,7 +745,7 @@ fn tcp_fixture_client_error_and_panic_both_stop_the_listener() -> control_fixtur
                     drop(probe);
                     let _ = listener.accept();
                 }
-                Err(err) if matches!(err.kind(), ErrorKind::PermissionDenied | ErrorKind::TimedOut) => {
+                Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => {
                     return Ok(());
                 }
                 Err(err) => return Err(Box::new(err)),

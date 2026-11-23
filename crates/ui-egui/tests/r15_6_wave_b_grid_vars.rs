@@ -127,7 +127,7 @@ fn r15_gui_11_multiline_x_inline_entry_populates_x_and_leaves_y_untouched() -> R
     // Also verify non-zero starting row + X subcolumn index + comma-decimal locale parsing.
     let doc2 = build_xy_doc(SubcolumnMode::RawReplicates(2));
     let mut driver2 = make_shell_driver(doc2, 1280.0, 800.0);
-    let _ = driver2.state_mut().app.set_locale("de-DE");
+    assert_eq!(driver2.state_mut().app.set_locale("de-DE"), "de");
     driver2.run_settled();
 
     let x11_pos = widget_center(&driver2, "grid.xcell.1.1")?;

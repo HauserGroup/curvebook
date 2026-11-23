@@ -16,6 +16,14 @@ use curvebook_mcp::{
 };
 use serde_json::{Value, json};
 
+fn env_truthy(var: &str) -> bool {
+    std::env::var(var).is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
+fn loopback_required() -> bool {
+    env_truthy("CI") || env_truthy("CURVEBOOK_REQUIRE_LOOPBACK")
+}
+
 #[derive(Default)]
 struct MockGuiHost {
     gui_only: bool,
@@ -360,6 +368,7 @@ fn gui_tools_return_conflict_when_unattached_and_route_over_control_port() {
     let listener = match TcpListener::bind("127.0.0.1:0") {
         Ok(l) => l,
         Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+            assert!(!loopback_required(), "FAIL-CLOSED loopback bind denied under CI/CURVEBOOK_REQUIRE_LOOPBACK: {err}");
             let mut attached = McpServerState::with_control_port_and_gui_only(59999, true).expect("control port state");
             let inspect = call_tool(&mut attached, "ui_inspect", json!({ "scope": "grid" })).expect("sandbox err");
             assert!(inspect.is_error);
@@ -375,6 +384,7 @@ fn gui_tools_return_conflict_when_unattached_and_route_over_control_port() {
             let _ = listener.accept();
         }
         Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+            assert!(!loopback_required(), "FAIL-CLOSED loopback connect denied under CI/CURVEBOOK_REQUIRE_LOOPBACK: {err}");
             let mut attached = McpServerState::with_control_port_and_gui_only(port, true).expect("control port state");
             let inspect = call_tool(&mut attached, "ui_inspect", json!({ "scope": "grid" })).expect("sandbox err");
             assert!(inspect.is_error);
@@ -637,6 +647,12 @@ fn gui_tools_worst_case_annotations_cover_all_eight_tools() {
 
     let gui_defs = curvebook_mcp::list_gui_tools();
     assert_eq!(gui_defs.len(), GUI_TOOL_NAMES.len());
+    // Confirm `ui_inspect` input schema uses canonical ViewportMetrics keys (`logical_width`, `logical_height`, `scale_factor`).
+    let ui_inspect_metrics =
+        gui_defs[0].input_schema.pointer("/properties/metrics/properties").and_then(Value::as_object).expect("ui_inspect metrics schema");
+    for key in ["logical_width", "logical_height", "scale_factor"] {
+        assert!(ui_inspect_metrics.contains_key(key), "ui_inspect schema missing canonical ViewportMetrics key `{key}`");
+    }
 
     let mut gui_only_state = McpServerState::new().with_gui_only(true);
     let gui_only_defs = list_tools_for_state(&gui_only_state);

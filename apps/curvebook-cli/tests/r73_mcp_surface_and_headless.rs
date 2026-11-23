@@ -17,6 +17,14 @@ use curvebook_ui_egui::UiApp;
 use r73_common::{McpChild, TempWorkdir, assert_approx, decode_base64, read_result_json, result_scalar_f64, result_tab, tab_cell_f64};
 use serde_json::{Value, json};
 
+fn env_truthy(var: &str) -> bool {
+    std::env::var(var).is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
+fn loopback_required() -> bool {
+    env_truthy("CI") || env_truthy("CURVEBOOK_REQUIRE_LOOPBACK")
+}
+
 fn assert_structured_error_shape(err_sc: &Value, expected_code: &str, context: &str) -> Result<(), String> {
     if err_sc["code"] != json!(expected_code) {
         return Err(format!("{context}: expected error code `{expected_code}`, got {err_sc}"));
@@ -595,13 +603,13 @@ fn r73_stdio_strict_gui_only_rejections_and_control_port_parity() -> Result<(), 
     // Loopback `--control-port <N> --gui-only` attaches cleanly and rejects L5 / disk bypasses.
     let listener = match TcpListener::bind("127.0.0.1:0") {
         Ok(l) => l,
-        Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
+        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => return Ok(()),
         Err(err) => return Err(format!("bind control TcpListener: {err}")),
     };
     let addr = listener.local_addr().map_err(|e| format!("local_addr: {e}"))?;
     let port = addr.port();
     if let Err(err) = TcpStream::connect_timeout(&addr, Duration::from_millis(200)) {
-        if err.kind() == ErrorKind::PermissionDenied {
+        if err.kind() == ErrorKind::PermissionDenied && !loopback_required() {
             return Ok(());
         }
         return Err(format!("probe control connect: {err}"));
@@ -646,7 +654,8 @@ fn r73_stdio_strict_gui_only_rejections_and_control_port_parity() -> Result<(), 
     let mut attached = McpChild::spawn(&["mcp", "--control-port", &port_str, "--gui-only"])?;
     attached.initialize()?;
     let insp_raw = attached.call_tool_raw("ui_inspect", json!({ "scope": "all", "include_bounds": true }))?;
-    if insp_raw["isError"] == json!(true)
+    if !loopback_required()
+        && insp_raw["isError"] == json!(true)
         && insp_raw["structuredContent"]["code"] == json!("io_error")
         && insp_raw["structuredContent"]["message"].as_str().is_some_and(|m| m.contains("Operation not permitted") || m.contains("Permission denied"))
     {

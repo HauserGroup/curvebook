@@ -509,7 +509,7 @@ fn all_14_beta_locales_pass_640x420_and_1440x600_non_overlap_and_backdrop_captur
         for [w_pt, h_pt] in [[640.0_f64, 420.0], [1440.0, 600.0]] {
             // Check Format Axes
             let mut app_ax = base_app.clone();
-            let _ = app_ax.set_locale(locale);
+            assert_eq!(app_ax.set_locale(locale), locale);
             let _ = dispatch_gui_action(
                 &mut app_ax,
                 "ui.invoke_menu",
@@ -533,7 +533,7 @@ fn all_14_beta_locales_pass_640x420_and_1440x600_non_overlap_and_backdrop_captur
             // Check Preferences over DataSheet -> full unfiltered `parity.is_clean()` must hold!
             let mut app_pr = base_app.clone();
             let _ = app_pr.execute_command("sheet.select", json!({ "sheet_id": col_id.as_str() }));
-            let _ = app_pr.set_locale(locale);
+            assert_eq!(app_pr.set_locale(locale), locale);
             app_pr.egui_views.app_modals.preferences_open = true;
             app_pr.sync_views();
             let drv_pr = make_driver(ModalTestState::new(app_pr), ViewportMetrics::new(w_pt, h_pt, 1.0));

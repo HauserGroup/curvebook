@@ -12,9 +12,9 @@ mod human_wf_common;
 use curvebook_chart::{ChartScene, compile_graph, compile_layout};
 use curvebook_doc::{
     BracketLabelMode, BracketStyle, ErrorBarMetric, FigureCanvasPreset, FramePreset, GraphAnnotation, GraphicalDataObject, JournalWidthPreset,
-    LayoutItem, MultivariatePlotMode, PanelBadgeStyle, ProjectDocument, ReplicateOverlayStyle, SheetId, SummaryMeasure, WhiskerMethod,
+    LayoutItem, MultivariatePlotMode, PanelBadgeStyle, ProjectDocument, SheetId, SummaryMeasure,
 };
-use curvebook_palette::{CanvasPreviewFilter, MarkerStyle, PaletteId, Rgba8};
+use curvebook_palette::{CanvasPreviewFilter, PaletteId};
 use curvebook_ui_egui::dialogs_canvas::{ActiveDialog, ActiveInspector};
 use curvebook_ui_egui::theme::UiThemeMode;
 use curvebook_ui_egui::{UiApp, ViewportMetrics, dispatch_gui_action};
@@ -180,6 +180,10 @@ fn select_sheet(app: &mut UiApp, sheet_id: &str) -> TestResult {
 }
 
 fn open_and_apply_graph_type(app: &mut UiApp, graph_id: &str, option_id: &str) -> TestResult {
+    open_and_apply_graph_type_with_fields(app, graph_id, option_id, &[])
+}
+
+fn open_and_apply_graph_type_with_fields(app: &mut UiApp, graph_id: &str, option_id: &str, extra_fields: &[(&str, Value)]) -> TestResult {
     select_sheet(app, graph_id)?;
     if !matches!(app.canvas_dialogs.active_dialog, ActiveDialog::ChangeGraphType { .. }) {
         gui(app, "ui.invoke_menu", json!({ "command_id": "ui.changeGraphType.open", "params": { "sheet_id": graph_id } }))?;
@@ -188,7 +192,18 @@ fn open_and_apply_graph_type(app: &mut UiApp, graph_id: &str, option_id: &str) -
     if inspect["active_dialog"] != json!("change_graph_type") {
         return Err(format!("expected active_dialog == change_graph_type, got {}", inspect["active_dialog"]));
     }
-    gui(app, "ui.answer_dialog", json!({ "fields": { "option_id": option_id }, "action": "ok" }))?;
+    let controls = inspect["dialog"]["controls"].as_array().ok_or("change_graph_type inspect missing dialog.controls")?;
+    for required_id in ["graph_type.selected", "graph_type.summary_measure", "graph_type.error_bar_metric"] {
+        if !controls.iter().any(|c| c["widget_id"] == json!(required_id)) {
+            return Err(format!("change_graph_type inspect missing `{required_id}` control"));
+        }
+    }
+    let mut fields = serde_json::Map::new();
+    fields.insert(String::from("option_id"), json!(option_id));
+    for (k, v) in extra_fields {
+        fields.insert((*k).to_owned(), v.clone());
+    }
+    gui(app, "ui.answer_dialog", json!({ "fields": Value::Object(fields), "action": "ok" }))?;
     Ok(())
 }
 
@@ -315,35 +330,16 @@ fn wf24_significance_brackets_auto_stars_and_axes_strict_gui_only() -> TestResul
     Ok(())
 }
 
-fn set_all_column_series_gdo(app: &mut UiApp, graph_id: &str, gdo: &GraphicalDataObject) -> TestResult {
-    let gdo_val = serde_json::to_value(gdo).map_err(|e| format!("serialize gdo: {e}"))?;
-    let sid = SheetId::try_new(graph_id).map_err(|e| e.to_string())?;
-    let n = app.document().graph_sheet(&sid).map_or(1, |g| g.spec.series.len().max(1));
-    let series_patches: Vec<Value> = (0..n).map(|_| json!({ "gdo": gdo_val.clone() })).collect();
-    gui(
-        app,
-        "ui.invoke_menu",
-        json!({
-            "command_id": "graph.setSeries",
-            "params": {
-                "sheet_id": graph_id,
-                "series": series_patches,
-            }
-        }),
-    )?;
-    Ok(())
-}
-
-/// WF-25: Violin / Box-and-Whisker / Bar-with-Replicates & Aligned Dot Plot via `ChangeGraphType`,
-/// scatter overlay & SD/SEM/95%-CI error bar metrics via `Format/Data on Graph...`, R1 ANOVA graying check,
+/// WF-25: Violin / Box-and-Whisker / Bar-with-Replicates & Aligned Dot Plot directly via
+/// `ChangeGraphType` (`ui.changeGraphType.open` -> `ui.answer_dialog`), SD/SEM/95%-CI error bar
+/// metrics via both `ChangeGraphType` and `Format/Data on Graph...`, R1 ANOVA graying check,
 /// plus SVG and screenshot PNG verification.
 ///
-/// Known `src/` gaps verified in codebase:
-/// - No `EstimationPlot` (`col.estimation`) variant exists in `GraphicalDataObject` (`crates/doc/src/graph.rs:235-289`)
-///   or `GRAPH_TYPE_OPTIONS` (`crates/ui-egui/src/dialogs_canvas.rs:1830-1965`).
-/// - `ChangeGraphType` exposes generic `ok`/`cancel` buttons and empty `controls: []` in `inspect.rs:943-966`, and
-///   `run_graph_set_kind` (`crates/engine/src/cmd/graph.rs:1087`) executes `let _ = params.option_id;` so column GDO
-///   switching (`col.box_whisker`, `col.violin`, `col.aligned_dot`) must also apply `gdo` via `Format/Data on Graph...` (`graph.setSeries`).
+/// Known `src/` scope note:
+/// - No `EstimationPlot` (`col.estimation`) variant exists in `GraphicalDataObject` (`crates/doc/src/graph.rs`);
+///   `ChangeGraphType` (`ui.inspect` controls `graph_type.selected`, `graph_type.summary_measure`,
+///   `graph_type.error_bar_metric`) applies column GDO switching (`col.box_whisker`, `col.violin`,
+///   `col.bar_replicates`, `col.aligned_dot`) directly via `ChangeGraphTypeState::commit_intents`.
 #[test]
 fn wf25_violin_boxplot_column_styles_error_bars_and_svg_strict_gui_only() -> TestResult {
     let mut app = new_strict_gui_app()?;
@@ -358,27 +354,15 @@ fn wf25_violin_boxplot_column_styles_error_bars_and_svg_strict_gui_only() -> Tes
 11.7\t18.0\t26.8";
     create_column_table(&mut app, "col-wf25", "graph-wf25", &["Vehicle", "Low", "High"], tsv)?;
 
-    // 1. Box-and-Whisker plot via ChangeGraphType dialog + Format/Data on Graph (`graph.setSeries`).
+    // 1. Box-and-Whisker plot directly via ChangeGraphType dialog.
     open_and_apply_graph_type(&mut app, "graph-wf25", "col.box_whisker")?;
-    let box_color = PaletteId::OkabeIto.color_at(0);
-    set_all_column_series_gdo(
-        &mut app,
-        "graph-wf25",
-        &GraphicalDataObject::BoxAndWhisker {
-            whiskers: WhiskerMethod::Tukey1_5Iqr,
-            fill_color: box_color.with_alpha(190),
-            stroke_color: Rgba8::BLACK,
-            show_outliers: true,
-            show_all_points: false,
-        },
-    )?;
     let box_sid = SheetId::try_new("graph-wf25").map_err(|e| e.to_string())?;
     let is_box = app
         .document()
         .graph_sheet(&box_sid)
-        .is_some_and(|g| matches!(g.spec.series.first().map(|s| &s.gdo), Some(GraphicalDataObject::BoxAndWhisker { .. })));
+        .is_some_and(|g| !g.spec.series.is_empty() && g.spec.series.iter().all(|s| matches!(&s.gdo, GraphicalDataObject::BoxAndWhisker { .. })));
     if !is_box {
-        return Err(String::from("expected BoxAndWhisker GDO after selecting `col.box_whisker` + `graph.setSeries`"));
+        return Err(String::from("expected BoxAndWhisker GDO directly after ChangeGraphType `col.box_whisker`"));
     }
     let box_svg = gui(&mut app, "ui.invoke_menu", json!({ "command_id": "graph.exportSvg", "params": { "sheet_id": "graph-wf25" } }))?;
     let box_svg_str = box_svg["payload"]["svg"].as_str().ok_or("missing box svg")?;
@@ -387,25 +371,14 @@ fn wf25_violin_boxplot_column_styles_error_bars_and_svg_strict_gui_only() -> Tes
     }
     let box_png = assert_screenshot_png(&mut app, "canvas", 840, 560)?;
 
-    // 2. Violin KDE plot via ChangeGraphType dialog + Format/Data on Graph (`graph.setSeries`).
+    // 2. Violin KDE plot directly via ChangeGraphType dialog.
     open_and_apply_graph_type(&mut app, "graph-wf25", "col.violin")?;
-    set_all_column_series_gdo(
-        &mut app,
-        "graph-wf25",
-        &GraphicalDataObject::Violin {
-            fill_color: box_color.with_alpha(190),
-            stroke_color: box_color,
-            clip_to_observed_range: true,
-            show_median_and_quartiles: true,
-            half_violin_with_points: false,
-        },
-    )?;
     let is_violin = app
         .document()
         .graph_sheet(&box_sid)
-        .is_some_and(|g| matches!(g.spec.series.first().map(|s| &s.gdo), Some(GraphicalDataObject::Violin { .. })));
+        .is_some_and(|g| !g.spec.series.is_empty() && g.spec.series.iter().all(|s| matches!(&s.gdo, GraphicalDataObject::Violin { .. })));
     if !is_violin {
-        return Err(String::from("expected Violin GDO after selecting `col.violin` + `graph.setSeries`"));
+        return Err(String::from("expected Violin GDO directly after ChangeGraphType `col.violin`"));
     }
     let violin_svg = gui(&mut app, "ui.invoke_menu", json!({ "command_id": "graph.exportSvg", "params": { "sheet_id": "graph-wf25" } }))?;
     let violin_svg_str = violin_svg["payload"]["svg"].as_str().ok_or("missing violin svg")?;
@@ -417,19 +390,16 @@ fn wf25_violin_boxplot_column_styles_error_bars_and_svg_strict_gui_only() -> Tes
         return Err(String::from("expected distinct raster canvas PNG between BoxAndWhisker and Violin"));
     }
 
-    // 3. Switch to Bar with Replicates overlay + Aligned Dot, cycling SD -> SEM -> 95% CI error bars.
-    open_and_apply_graph_type(&mut app, "graph-wf25", "col.bar_replicates")?;
-    set_all_column_series_gdo(
-        &mut app,
-        "graph-wf25",
-        &GraphicalDataObject::BarWithReplicates {
-            summary: SummaryMeasure::Mean,
-            fill_color: box_color.with_alpha(200),
-            border_color: box_color,
-            border_width_pt: 1.0,
-            replicate_overlay: Some(ReplicateOverlayStyle::DeterministicBeeswarm),
-        },
-    )?;
+    // 3. Switch directly to Bar with Replicates overlay + Aligned Dot, checking ChangeGraphType error_bar_metric & Format/Data cycling.
+    open_and_apply_graph_type_with_fields(&mut app, "graph-wf25", "col.bar_replicates", &[("error_bar_metric", json!("sem"))])?;
+    let bar_ok = app.document().graph_sheet(&box_sid).is_some_and(|g| {
+        !g.spec.series.is_empty()
+            && g.spec.series.iter().all(|s| matches!(&s.gdo, GraphicalDataObject::BarWithReplicates { replicate_overlay: Some(_), .. }))
+            && g.spec.series.first().and_then(|s| s.y_error_bars.map(|eb| eb.metric)) == Some(ErrorBarMetric::Sem)
+    });
+    if !bar_ok {
+        return Err(String::from("expected BarWithReplicates with Sem error bar directly after ChangeGraphType `col.bar_replicates`"));
+    }
     for (metric_key, expected_metric) in [("sd", ErrorBarMetric::Sd), ("sem", ErrorBarMetric::Sem), ("ci95", ErrorBarMetric::ConfidenceInterval95)] {
         gui(
             &mut app,
@@ -448,12 +418,17 @@ fn wf25_violin_boxplot_column_styles_error_bars_and_svg_strict_gui_only() -> Tes
             return Err(format!("expected y_error_bars metric {expected_metric:?}, got {actual:?}"));
         }
     }
-    open_and_apply_graph_type(&mut app, "graph-wf25", "col.aligned_dot")?;
-    set_all_column_series_gdo(
-        &mut app,
-        "graph-wf25",
-        &GraphicalDataObject::AlignedDotPlot { summary: SummaryMeasure::Median, marker: MarkerStyle::default(), show_crossbar: true },
-    )?;
+    open_and_apply_graph_type_with_fields(&mut app, "graph-wf25", "col.aligned_dot", &[("summary_measure", json!("median"))])?;
+    let aligned_ok = app.document().graph_sheet(&box_sid).is_some_and(|g| {
+        !g.spec.series.is_empty()
+            && g.spec
+                .series
+                .iter()
+                .all(|s| matches!(&s.gdo, GraphicalDataObject::AlignedDotPlot { summary: SummaryMeasure::Median, show_crossbar: true, .. }))
+    });
+    if !aligned_ok {
+        return Err(String::from("expected AlignedDotPlot (Median) directly after ChangeGraphType `col.aligned_dot`"));
+    }
     assert_scene_compiles_cleanly(app.document(), "graph-wf25")?;
 
     // 4. Verify R1 graying predicate via EditAnalysisParameters on ANOVA over the same data.

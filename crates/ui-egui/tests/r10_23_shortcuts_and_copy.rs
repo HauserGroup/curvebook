@@ -238,7 +238,7 @@ fn r10_23_pane_toggle_shortcuts_navigator_inspector_family_human_path() -> Resul
     assert!(harness.app().family_open, "Ctrl+Shift+F must restore Family pane");
 
     // Arabic (`ar`) @ 1.5x HiDPI toggle parity.
-    let _ = harness.app_mut().set_locale("ar");
+    assert_eq!(harness.app_mut().set_locale("ar"), "ar");
     harness.driver.set_viewport(ViewportMetrics::new(1440.0, 900.0, 1.5));
     harness.driver.press_egui_key(Key::N, cmd_shift);
     harness.driver.press_egui_key(Key::I, cmd_shift);
@@ -433,7 +433,7 @@ fn r10_23_fontless_embedded_fallback_scenarios_pass_without_host_fonts() -> Resu
 
     for (locale, mode, scale) in [("en", UiThemeMode::Light, 1.0), ("de", UiThemeMode::Dark, 2.0), ("ar", UiThemeMode::HighContrast, 3.0)] {
         let mut app = build_r10_23_workspace()?;
-        let _ = app.set_locale(locale);
+        assert_eq!(app.set_locale(locale), locale);
         app.set_theme_mode(mode);
         let tokens = Tokens::from_theme_spec(&app.theme, &app.locale);
         let mut driver = EguiHumanPathDriver::with_tokens_and_fonts(

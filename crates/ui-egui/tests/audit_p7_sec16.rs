@@ -291,7 +291,7 @@ fn fa_sec16_04_delete_confirm_coexists_with_arbiter_and_dialog_snapshot_unifies_
 #[test]
 fn fa_sec16_05_rtl_mirrors_leading_trailing_docks_and_splitters() -> TestRes {
     let mut app = make_xy_project()?;
-    let _ = app.set_locale("ar");
+    assert_eq!(app.set_locale("ar"), "ar");
     app.sync_views();
 
     let mut driver = make_shell_driver(app, 1280.0, 760.0);
@@ -631,7 +631,7 @@ fn fa_sec16_11_split_preview_focus_recorded_and_note_pinned_persists_across_shee
 fn fa_sec16_12_leading_dock_i18n_frozen_convert_and_drag_title() -> TestRes {
     let mut app = make_xy_project()?;
     app.execute_command("sheet.freeze", json!({ "sheet_id": "ds-xy" }))?;
-    let _ = app.set_locale("de");
+    assert_eq!(app.set_locale("de"), "de");
     app.sync_views();
 
     let mut driver = make_shell_driver(app, 1280.0, 760.0);

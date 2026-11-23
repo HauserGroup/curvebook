@@ -402,7 +402,7 @@ fn r10_9_unicode_16_locales_3_themes_4_hidpi_glyph_coverage_gate() -> Result<(),
         let metrics = desktop_metrics(scale);
         let tokens = Tokens::from_theme_spec(&UiThemeSpec::for_mode(mode), locale);
 
-        let _ = welcome_app.set_locale(locale);
+        assert_eq!(welcome_app.set_locale(locale), locale);
         welcome_app.set_theme_mode(mode);
         welcome_driver.state_mut().app = welcome_app.clone();
         welcome_driver.state_mut().views = welcome_app.egui_views.clone();
@@ -410,7 +410,7 @@ fn r10_9_unicode_16_locales_3_themes_4_hidpi_glyph_coverage_gate() -> Result<(),
         welcome_driver.set_tokens(tokens);
         verify_driver_parity(&welcome_driver, &format!("welcome `{locale}` ({mode:?} @ {scale}x)"))?;
 
-        let _ = sheet_driver.state_mut().app.set_locale(locale);
+        assert_eq!(sheet_driver.state_mut().app.set_locale(locale), locale);
         sheet_driver.state_mut().app.set_theme_mode(mode);
         sheet_driver.set_viewport(metrics);
         sheet_driver.set_tokens(tokens);
@@ -426,7 +426,7 @@ fn r10_9_unicode_16_locales_3_themes_4_hidpi_glyph_coverage_gate() -> Result<(),
     let mut theme_driver = make_gate_driver(build_rich_five_sheet_app()?, desktop_metrics(1.0), shared_fonts);
     for mode in UiThemeMode::ALL {
         theme_driver.state_mut().app.set_theme_mode(mode);
-        let _ = theme_driver.state_mut().app.set_locale("en");
+        assert_eq!(theme_driver.state_mut().app.set_locale("en"), "en");
         let tokens = Tokens::from_theme_spec(&UiThemeSpec::for_mode(mode), "en");
         theme_driver.set_tokens(tokens);
         for &scale in &scales {

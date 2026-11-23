@@ -16,6 +16,7 @@ use curvebook_fit::diagnostics::{compare_models_aicc, compare_models_f_test};
 use curvebook_fit::dsl::CompiledDslModel;
 use curvebook_fit::error::{FitError, FitStatus, ParameterNote};
 use curvebook_fit::library::get_builtin_model;
+use curvebook_fit::linear::{DemingOptions, SimpleLinearOptions, deming_regression, simple_linear_regression};
 use curvebook_fit::solver::{FittedParameterSummary, ModelComparisonOutcome, NonlinearFitResult, SolverConfig, compare_models, fit_nonlinear};
 use curvebook_fit::types::{DataPoint, DatasetSeries, HookContext};
 use curvebook_testkit::metrics::{assert_approx_eq, assert_lre_at_least};
@@ -421,4 +422,60 @@ fn edge_04b_end_to_end_compare_models_f_and_aicc_nested_discrimination() {
     )
     .unwrap();
     assert!(matches!(cmp_aicc_mono, ModelComparisonOutcome::Aicc(a) if a.preferred_index == 0));
+}
+
+#[test]
+fn edge_05_tied_predictors_replicates_and_n3_deming_duplicate_points() {
+    // 1. n = 3 Deming regression with a duplicated (X, Y) pair: full-sample fit succeeds cleanly while
+    //    leave-one-out jackknife degrades SEs & CIs to NaN instead of failing or panicking.
+    let dem_n3_dup = deming_regression(&series_from_xy(0, "DemDup3", &[1.0, 1.0, 3.0], &[2.0, 2.0, 6.0]).points, &DemingOptions::default())
+        .expect("n=3 Deming with one duplicate pair should succeed");
+    assert_approx_eq(dem_n3_dup.slope, 2.0, 1e-12, 1e-12, "n=3 dup Deming slope");
+    assert_approx_eq(dem_n3_dup.intercept, 0.0, 1e-12, 1e-12, "n=3 dup Deming intercept");
+    assert_approx_eq(dem_n3_dup.sy_x, 0.0, 1e-12, 1e-12, "n=3 dup Deming sy_x");
+    assert!(dem_n3_dup.se_slope.is_nan() && dem_n3_dup.se_intercept.is_nan());
+    assert!(dem_n3_dup.ci_slope.0.is_nan() && dem_n3_dup.ci_slope.1.is_nan());
+    assert!(dem_n3_dup.ci_intercept.0.is_nan() && dem_n3_dup.ci_intercept.1.is_nan());
+
+    // All-identical Deming points have zero covariance and must return InvalidParameter rather than NaN slope.
+    let dem_all_tie = deming_regression(&series_from_xy(0, "DemAllTie", &[2.0, 2.0, 2.0], &[4.0, 4.0, 4.0]).points, &DemingOptions::default());
+    assert!(matches!(dem_all_tie, Err(FitError::InvalidParameter { .. })));
+
+    // n = 4 duplicate pairs keep every LOO subset non-degenerate and yield finite jackknife SEs/CIs.
+    let dem_n4_dup = deming_regression(&series_from_xy(0, "DemDup4", &[1.0, 1.0, 3.0, 3.0], &[2.0, 2.0, 6.0, 6.0]).points, &DemingOptions::default())
+        .expect("n=4 Deming duplicate pairs");
+    assert_approx_eq(dem_n4_dup.slope, 2.0, 1e-12, 1e-12, "n=4 dup Deming slope");
+    assert_approx_eq(dem_n4_dup.se_slope, 0.0, 1e-12, 1e-12, "n=4 dup Deming SE");
+
+    // 2. Simple linear regression with tied predictor replicates matches exact analytical OLS + pure error,
+    //    while all-tied X rejects cleanly.
+    let lin_rep = simple_linear_regression(
+        &series_from_xy(0, "LinTies", &[1.0, 1.0, 2.0, 2.0, 3.0, 3.0], &[2.0, 4.0, 4.0, 6.0, 6.0, 8.0]).points,
+        &SimpleLinearOptions::default(),
+    )
+    .expect("OLS with replicate X");
+    // Means at X={1,2,3} are {3,5,7} => slope=2, intercept=1; SS_res = 6*(1^2) = 6, df=4, sy_x=sqrt(1.5).
+    assert_approx_eq(lin_rep.slope, 2.0, 1e-12, 1e-12, "tied OLS slope");
+    assert_approx_eq(lin_rep.intercept, 1.0, 1e-12, 1e-12, "tied OLS intercept");
+    assert_approx_eq(lin_rep.rss, 6.0, 1e-12, 1e-12, "tied OLS RSS");
+    assert_approx_eq(lin_rep.sy_x, 1.5_f64.sqrt(), 1e-12, 1e-12, "tied OLS sy_x");
+    assert!(lin_rep.lack_of_fit.is_some(), "replicate X should populate lack-of-fit diagnostics");
+
+    let lin_all_tie =
+        simple_linear_regression(&series_from_xy(0, "LinAllTie", &[2.0, 2.0, 2.0], &[1.0, 3.0, 5.0]).points, &SimpleLinearOptions::default());
+    assert!(matches!(lin_all_tie, Err(FitError::InvalidParameter { .. })));
+
+    // 3. Nonlinear regression with replicate tied predictors converges cleanly to exact replicate-mean parameters.
+    let decay = get_builtin_model("one_phase_decay").unwrap();
+    let hooks = HookContext::default();
+    let rep_xs = [0.0_f64, 0.0, 1.0, 1.0, 2.0, 2.0, 4.0, 4.0];
+    let rep_ys: Vec<f64> = rep_xs.iter().enumerate().map(|(i, &x)| 5.0 + 95.0 * (-0.5 * x).exp() + if i % 2 == 0 { 0.5 } else { -0.5 }).collect();
+    let nl_cfg = SolverConfig { compute_lack_of_fit: true, ..SolverConfig::default() };
+    let nl_rep = fit_nonlinear(decay.as_ref(), &[series_from_xy(0, "NlTies", &rep_xs, &rep_ys)], &hooks, &nl_cfg)
+        .expect("nonlinear fit with tied replicate X");
+    assert_eq!(nl_rep.status, FitStatus::Converged);
+    assert_approx_eq(find_param(&nl_rep, "Y0").estimate, 100.0, 1e-6, 1e-6, "nl replicate Y0");
+    assert_approx_eq(find_param(&nl_rep, "Plateau").estimate, 5.0, 1e-6, 1e-6, "nl replicate Plateau");
+    assert_approx_eq(find_param(&nl_rep, "K").estimate, 0.5, 1e-6, 1e-6, "nl replicate K");
+    assert!(nl_rep.lack_of_fit.is_some(), "nonlinear replicate X should report lack-of-fit diagnostics");
 }

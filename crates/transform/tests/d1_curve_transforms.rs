@@ -5,7 +5,10 @@
 
 use curvebook_doc::{Cell, CellCoord, DataSheet, SubcolumnMode, TableArchetype, XyTable};
 use curvebook_testkit::assert_approx_eq;
-use curvebook_transform::{AucOptions, AucResult, SmoothMethod, TransformError, compute_auc, compute_auc_with_se, compute_sheet_auc, smooth_xy};
+use curvebook_transform::{
+    AucOptions, AucResult, DerivativeOrder, SmoothMethod, TransformError, compute_auc, compute_auc_with_se, compute_sheet_auc, differentiate_xy,
+    integrate_xy, smooth_xy,
+};
 
 // Geometry is exact for piecewise-linear curves. The allowance covers binary64 rounding of
 // crossing coordinates and sums over a few short segments.
@@ -258,5 +261,56 @@ fn savitzky_golay_nanoscale_non_uniform_uses_relative_grid_tolerance() {
             assert_approx_eq(*sx, *x, 1e-24, 0.0, "nanoscale x preserved");
             assert_approx_eq(*sy, *y_exp, 1e-9, 1e-11, &format!("{method:?} nanoscale linear exactness"));
         }
+    }
+}
+
+#[test]
+fn curve_transforms_reject_non_finite_inf_and_nan_inputs() {
+    for bad in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+        // Non-finite X or Y coordinates must reject cleanly across AUC, smoothing, derivative, and integral.
+        for pts in [vec![(0.0, 1.0), (bad, 2.0), (3.0, 4.0)], vec![(0.0, 1.0), (1.0, bad), (3.0, 4.0)]] {
+            assert!(matches!(compute_auc(&pts, &AucOptions::default()), Err(TransformError::InvalidInput { .. })), "AUC bad={bad:?}");
+            for method in
+                [SmoothMethod::SavitzkyGolay5, SmoothMethod::MovingAverage { window: 3 }, SmoothMethod::Lowess { span: 0.7, robustness_iters: 1 }]
+            {
+                assert!(matches!(smooth_xy(&pts, method), Err(TransformError::InvalidInput { .. })), "{method:?} bad={bad:?}");
+            }
+            assert!(
+                matches!(differentiate_xy(&pts, DerivativeOrder::First), Err(TransformError::InvalidInput { .. })),
+                "differentiate_xy bad={bad:?}"
+            );
+            assert!(matches!(integrate_xy(&pts, 0.0), Err(TransformError::InvalidInput { .. })), "integrate_xy bad={bad:?}");
+        }
+
+        // Non-finite SE in compute_auc_with_se and non-finite options in AUC / integration must reject cleanly.
+        assert!(
+            matches!(
+                compute_auc_with_se(&[(0.0, 1.0, 0.1), (1.0, 2.0, bad), (2.0, 3.0, 0.2)], &AucOptions::default()),
+                Err(TransformError::InvalidInput { .. })
+            ),
+            "AUC SE bad={bad:?}"
+        );
+        assert!(
+            matches!(
+                compute_auc(&[(0.0, 1.0), (2.0, 3.0)], &AucOptions { baseline: bad, ..AucOptions::default() }),
+                Err(TransformError::InvalidSpec { .. })
+            ),
+            "AUC baseline bad={bad:?}"
+        );
+        assert!(
+            matches!(
+                compute_auc(&[(0.0, 1.0), (2.0, 3.0)], &AucOptions { min_peak_height: bad, ..AucOptions::default() }),
+                Err(TransformError::InvalidSpec { .. })
+            ),
+            "AUC min_peak_height bad={bad:?}"
+        );
+        assert!(
+            matches!(
+                compute_auc(&[(0.0, 1.0), (2.0, 3.0)], &AucOptions { min_area_fraction: bad, ..AucOptions::default() }),
+                Err(TransformError::InvalidSpec { .. })
+            ),
+            "AUC min_area_fraction bad={bad:?}"
+        );
+        assert!(matches!(integrate_xy(&[(0.0, 1.0), (2.0, 3.0)], bad), Err(TransformError::InvalidSpec { .. })), "integrate_xy baseline bad={bad:?}");
     }
 }

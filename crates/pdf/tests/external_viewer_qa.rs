@@ -77,12 +77,28 @@ fn find_existing_path(candidates: &[&str]) -> Option<PathBuf> {
     candidates.iter().map(PathBuf::from).find(|p| p.is_file())
 }
 
+fn env_truthy(var: &str) -> bool {
+    std::env::var(var).is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
+fn require_external_viewers() -> bool {
+    env_truthy("CI") || env_truthy("CURVEBOOK_REQUIRE_EXTERNAL_VIEWERS")
+}
+
+fn require_cjk_rtl_fonts() -> bool {
+    env_truthy("CURVEBOOK_REQUIRE_CJK_RTL_FONTS")
+}
+
 fn discover_engines_or_skip(test_name: &str) -> Option<(PathBuf, PathBuf)> {
     let pdftoppm = find_binary("pdftoppm", &["/opt/homebrew/bin/pdftoppm", "/usr/local/bin/pdftoppm", "/usr/bin/pdftoppm"]);
     let gs = find_binary("gs", &["/opt/homebrew/bin/gs", "/usr/local/bin/gs", "/usr/bin/gs"]);
     match (pdftoppm, gs) {
         (Some(p), Some(g)) => Some((p, g)),
         (p, g) => {
+            assert!(
+                !require_external_viewers(),
+                "FAIL-CLOSED {test_name}: external viewer binary missing under CI/CURVEBOOK_REQUIRE_EXTERNAL_VIEWERS (pdftoppm={p:?}, gs={g:?})"
+            );
             eprintln!("SKIP {test_name}: external viewer binary missing (pdftoppm={p:?}, gs={g:?})");
             None
         }
@@ -299,6 +315,10 @@ fn external_qa_scientific_chart_pdf17_alpha_fontfile2_and_crop_marks() {
     };
     let Some(arial_path) = find_existing_path(&["/System/Library/Fonts/Supplemental/Arial.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"])
     else {
+        assert!(
+            !require_external_viewers(),
+            "FAIL-CLOSED external_qa_scientific_chart: host TrueType font (Arial.ttf/DejaVuSans.ttf) absent under CI/CURVEBOOK_REQUIRE_EXTERNAL_VIEWERS"
+        );
         eprintln!("SKIP external_qa_scientific_chart: host TrueType font absent");
         return;
     };
@@ -446,7 +466,10 @@ fn external_qa_cjk_labels_embedded_single_face_ttf() {
     let Some((pdftoppm, gs)) = discover_engines_or_skip("external_qa_cjk") else {
         return;
     };
-    let Some(cjk_path) = find_existing_path(&["/System/Library/Fonts/Supplemental/Arial Unicode.ttf"]) else {
+    let Some(cjk_path) =
+        find_existing_path(&["/System/Library/Fonts/Supplemental/Arial Unicode.ttf", "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf"])
+    else {
+        assert!(!require_cjk_rtl_fonts(), "FAIL-CLOSED external_qa_cjk: host single-face CJK .ttf absent under CURVEBOOK_REQUIRE_CJK_RTL_FONTS");
         eprintln!("SKIP external_qa_cjk: host single-face CJK .ttf absent");
         return;
     };
@@ -521,9 +544,15 @@ fn external_qa_rtl_arabic_and_hebrew_bidi_visual_order() {
     let Some((pdftoppm, gs)) = discover_engines_or_skip("external_qa_rtl") else {
         return;
     };
-    let Some(ttf_path) =
-        find_existing_path(&["/System/Library/Fonts/Supplemental/Arial.ttf", "/System/Library/Fonts/Supplemental/Arial Unicode.ttf"])
-    else {
+    let Some(ttf_path) = find_existing_path(&[
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]) else {
+        assert!(
+            !require_cjk_rtl_fonts(),
+            "FAIL-CLOSED external_qa_rtl: host TrueType font with Hebrew/Arabic absent under CURVEBOOK_REQUIRE_CJK_RTL_FONTS"
+        );
         eprintln!("SKIP external_qa_rtl: host TrueType font with Hebrew/Arabic absent");
         return;
     };

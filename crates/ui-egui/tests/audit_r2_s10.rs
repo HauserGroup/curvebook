@@ -187,9 +187,38 @@ fn r2_s10_02_19_exhaustive_modal_contract_and_fail_closed() -> TestRes {
                 ));
             }
             let mut map = serde_json::Map::new();
-            map.insert(wid.to_owned(), val);
+            map.insert(wid.to_owned(), val.clone());
             dispatch_gui_action(app, "ui.answer_dialog", json!({ "dialog_id": expected_slug, "fields": Value::Object(map) }))
                 .map_err(|e| format!("failed patching `{wid}` on `{expected_slug}`: {e}"))?;
+            let after_dlg = inspect_ui_tree(app, Some("dialog"), false)
+                .dialog
+                .ok_or_else(|| format!("expected `{expected_slug}` to remain open after field patch `{wid}`"))?;
+            let after_ctrl = after_dlg
+                .controls
+                .iter()
+                .find(|c| c.widget_id == wid)
+                .ok_or_else(|| format!("widget `{wid}` missing in post-patch ui.inspect on `{expected_slug}`"))?;
+            let actual_val =
+                after_ctrl.value.as_ref().ok_or_else(|| format!("widget `{wid}` had value=None in post-patch ui.inspect on `{expected_slug}`"))?;
+            let inner_val = actual_val.as_object().and_then(|obj| obj.get("value")).unwrap_or(actual_val);
+            let matches_val = *actual_val == val
+                || *inner_val == val
+                || match (inner_val.as_f64(), val.as_f64()) {
+                    (Some(a), Some(b)) => (a - b).abs() < 1e-9,
+                    _ => false,
+                }
+                || match (inner_val.as_bool(), val.as_bool()) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => false,
+                }
+                || matches!((inner_val.as_str(), val.as_bool()), (Some("true"), Some(true)) | (Some("false"), Some(false)))
+                || match (inner_val.as_str(), val.as_str()) {
+                    (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+                    _ => false,
+                };
+            if !matches_val {
+                return Err(format!("post-patch ui.inspect readback mismatch on `{expected_slug}` `{wid}`: expected {val}, got {actual_val}"));
+            }
         }
         app.canvas_dialogs.close_dialog();
         Ok(())
@@ -473,7 +502,7 @@ fn r2_s10_05_06_07_08_inspect_predicates_and_format_graph() -> TestRes {
 
 #[test]
 fn r2_s10_10_13_14_15_17_18_line_arrow_formula_discontig_print_wizard_row_labels() -> TestRes {
-    let (mut app, ds_id, _, gs_id, _) = ok_doc_and_app()?;
+    let (mut app, _ds_id, _, gs_id, _) = ok_doc_and_app()?;
 
     // R2-S10-10: LineOrArrow preserves negative-slope / reverse direction endpoints across hit-test & translation.
     app.execute_command(
@@ -510,11 +539,30 @@ fn r2_s10_10_13_14_15_17_18_line_arrow_formula_discontig_print_wizard_row_labels
         }
     }
 
-    app.execute_command("sheet.select", json!({ "sheet_id": ds_id.as_str() })).map_err(|e| format!("{e}"))?;
+    app.execute_command(
+        "sheet.createData",
+        json!({
+            "sheet_id": "mv-fb",
+            "title": "MV Formula",
+            "kind": "multiple_variables",
+            "rows": 4,
+            "cols": 2,
+            "variables": [
+                { "title": "A", "role": "continuous" },
+                { "title": "B", "role": "continuous" }
+            ],
+            "auto_graph": false
+        }),
+    )
+    .map_err(|e| format!("create mv-fb sheet: {e}"))?;
+    app.execute_command("table.paste", json!({ "sheet_id": "mv-fb", "start_row": 0, "start_col": 0, "text": "1\t2\n3\t4\n5\t6\n7\t8" }))
+        .map_err(|e| format!("paste mv-fb: {e}"))?;
+    let mv_fb_id = SheetId::try_new("mv-fb").map_err(|e| format!("{e}"))?;
+    app.execute_command("sheet.select", json!({ "sheet_id": mv_fb_id.as_str() })).map_err(|e| format!("{e}"))?;
 
     // R2-S10-13: select_row_click does not reset active formula bar; inspect & native egui enable commit with target_title.
     let doc_mv = app.document().clone();
-    let ds = doc_mv.data_sheet(&ds_id).ok_or_else(|| String::from("ds-1"))?;
+    let ds = doc_mv.data_sheet(&mv_fb_id).ok_or_else(|| String::from("mv-fb"))?;
     app.grid.formula_bar.open_for_new_column(ds, "Ratio", Some(&doc_mv));
     app.grid.formula_bar.set_input("=A + 1", None, &doc_mv);
     app.grid.select_row_click(ds, 0, false, false);
@@ -522,20 +570,25 @@ fn r2_s10_10_13_14_15_17_18_line_arrow_formula_discontig_print_wizard_row_labels
         return Err(String::from("select_row_click reset active formula bar"));
     }
     let fb_snap = inspect_ui_tree(&app, Some("grid"), false);
-    if let Some(nodes) = fb_snap.grid_cells.as_ref()
-        && let Some(commit_node) = nodes.iter().find(|n| n.widget_id == "formula_bar.commit")
-        && !commit_node.enabled
-    {
+    let nodes = fb_snap.grid_cells.as_ref().ok_or_else(|| String::from("expected grid_cells in ui.inspect snapshot"))?;
+    let commit_node = nodes
+        .iter()
+        .find(|n| n.widget_id == "formula_bar.commit")
+        .ok_or_else(|| String::from("expected `formula_bar.commit` node in inspect snapshot"))?;
+    if !commit_node.enabled {
         return Err(format!("formula_bar.commit unexpectedly disabled for new named formula column: {:?}", commit_node.disabled_reason));
     }
     {
         let mut fb_app = app.clone();
         fb_app.nav.welcome.open = false;
         let fb_h = human_wf_common::EguiWfHarness::from_app(fb_app, ViewportMetrics::default());
-        if let Some(commit_entry) = fb_h.driver.frame_meta().find_by_widget_id("formula_bar.commit")
-            && !commit_entry.enabled
-        {
-            return Err(format!("R2-S10-13 native formula_bar.commit disabled: {:?}", commit_entry.disabled_reason));
+        let toolbar_fb = fb_h
+            .driver
+            .frame_meta()
+            .find_by_widget_id("toolbar.formula_bar")
+            .ok_or_else(|| String::from("R2-S10-13 missing native `toolbar.formula_bar` widget"))?;
+        if !toolbar_fb.enabled {
+            return Err(format!("R2-S10-13 native toolbar.formula_bar disabled: {:?}", toolbar_fb.disabled_reason));
         }
     }
     app.grid.formula_bar.active = false;
@@ -544,12 +597,10 @@ fn r2_s10_10_13_14_15_17_18_line_arrow_formula_discontig_print_wizard_row_labels
     app.grid.select_single_sync(GridCellCoord::new(0, 0, 0));
     app.grid.toggle_cmd_selection(ds, GridCellCoord::new(2, 1, 0));
     app.grid.refresh_selection_stats(&doc_mv);
-    if let Some(frame) = app.grid.visible_frame(app.document()) {
-        let sel_coords: Vec<GridCellCoord> =
-            frame.rows.iter().flat_map(|r| r.cells.iter()).filter(|c| c.visual.is_selected).map(|c| c.coord).collect();
-        if sel_coords != vec![GridCellCoord::new(0, 0, 0), GridCellCoord::new(2, 1, 0)] {
-            return Err(format!("expected ONLY 2 discontiguous cells selected in visible_frame, got {sel_coords:?}"));
-        }
+    let frame = app.grid.visible_frame(app.document()).ok_or_else(|| String::from("expected visible_frame for MV discontiguous selection"))?;
+    let sel_coords: Vec<GridCellCoord> = frame.rows.iter().flat_map(|r| r.cells.iter()).filter(|c| c.visual.is_selected).map(|c| c.coord).collect();
+    if sel_coords != vec![GridCellCoord::new(0, 0, 0), GridCellCoord::new(2, 1, 0)] {
+        return Err(format!("expected ONLY 2 discontiguous cells selected in visible_frame, got {sel_coords:?}"));
     }
     if app.grid.quick_stats.map(|q| q.selected_cells) != Some(2) {
         return Err(format!("expected quick_stats.selected_cells == 2, got {:?}", app.grid.quick_stats));
@@ -680,7 +731,11 @@ fn interaction_gui_actions_items_1_3_4_5_new1() -> TestRes {
     }
 
     // Item 5: ui.type_text respects de-DE decimal separator for cell, pasted block, and X cell.
-    let _ = handle_control_line(&mut app, &json!({ "id": 1, "method": "ui.locale.set", "params": { "locale": "de-DE" } }).to_string());
+    let locale_reply_raw = handle_control_line(&mut app, &json!({ "id": 1, "method": "ui.locale.set", "params": { "locale": "de-DE" } }).to_string());
+    let locale_reply: Value = serde_json::from_str(&locale_reply_raw).map_err(|e| format!("parse locale reply JSON: {e}"))?;
+    if locale_reply["ok"].as_bool() != Some(true) || app.locale != "de" {
+        return Err(format!("expected ui.locale.set de-DE -> ok:true and locale `de`, got reply={locale_reply}, locale=`{}`", app.locale));
+    }
     dispatch_gui_action(&mut app, "ui.type_text", json!({ "widget_id": "grid.cell.0.0.0", "text": "3,75" }))
         .map_err(|e| format!("de-DE single cell type_text failed: {e}"))?;
     dispatch_gui_action(&mut app, "ui.type_text", json!({ "widget_id": "grid.xcell.0.0", "text": "1,25" }))
@@ -853,9 +908,8 @@ fn r2_s10_09_split_pane_preserves_primary_singleton_geometry() -> TestRes {
     let (mp, ms, m_entries) = render_split_pair(ds_id, gs_id)?;
     let m_cell = m_entries.iter().find(|(id, _)| id == "grid.cell.0.0.0").ok_or("missing mixed primary grid.cell.0.0.0")?;
     assert_rect_inside(mp, m_cell.1, "mixed primary grid.cell.0.0.0")?;
-    if let Some((_, m_zoom)) = m_entries.iter().find(|(id, _)| id.starts_with("canvas.")) {
-        assert_rect_inside(ms, *m_zoom, "mixed secondary canvas control")?;
-    }
+    let (_, m_zoom) = m_entries.iter().find(|(id, _)| id.starts_with("canvas.")).ok_or("missing mixed secondary canvas.* control")?;
+    assert_rect_inside(ms, *m_zoom, "mixed secondary canvas control")?;
 
     Ok(())
 }

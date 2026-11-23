@@ -13,9 +13,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use curvebook_doc::{
-    AnalysisKind, Cell, CellCoord, ClusterLinkage, ContingencyMethod, CoxTieMethod, GlmFamily, GraphKind, MathTransformPreset, MultiplicityMethod,
-    MultivariateSpec, OneWayMethod, PValueFormat, RepeatedMeasuresDesign, ResidualCovariance, ResultTabKind, SheetId, SurvivalAnalysisSpec,
-    TableKind, TransformAnalysisSpec, TwoGroupMethod,
+    AnalysisKind, Cell, CellCoord, ClusterLinkage, ContingencyMethod, CoxTieMethod, GlmFamily, GraphAnnotation, GraphKind, GraphicalDataObject,
+    LayoutItem, MathTransformPreset, MultiplicityMethod, MultivariateSpec, OneWayMethod, PValueFormat, RepeatedMeasuresDesign, ResidualCovariance,
+    ResultCell, ResultStatus, ResultTabKind, SheetId, SurvivalAnalysisSpec, TableKind, TransformAnalysisSpec, TwoGroupMethod,
 };
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::egui_shell::UiBackend;
@@ -236,6 +236,48 @@ fn verify_egui_inspect_and_shot(c: &mut EguiGuiClient, expected_sheet: &str) -> 
     let png = c.screenshot_png("full_window")?;
     let _canvas_png = c.screenshot_png("canvas")?;
     Ok(png)
+}
+
+fn require_result<'a>(c: &'a EguiGuiClient, id: &str) -> Result<&'a curvebook_doc::ResultSheet, String> {
+    let rs = c.app.document().result_sheet(&SheetId::from(id)).ok_or_else(|| format!("missing ResultSheet `{id}`"))?;
+    ensure(matches!(rs.status, ResultStatus::UpToDate), format!("ResultSheet `{id}` expected UpToDate, got {:?}", rs.status))?;
+    Ok(rs)
+}
+
+fn require_scalar(rs: &curvebook_doc::ResultSheet, key: &str) -> Result<f64, String> {
+    rs.lookup_scalar(key, None).filter(|v| v.is_finite()).ok_or_else(|| {
+        let keys: Vec<&str> = rs.scalars.iter().map(|s| s.key.as_str()).collect();
+        format!("ResultSheet `{}` missing finite scalar `{key}` (available: {keys:?})", rs.id)
+    })
+}
+
+fn require_scalar_for(rs: &curvebook_doc::ResultSheet, key: &str, ds_idx: usize) -> Result<f64, String> {
+    rs.scalars
+        .iter()
+        .find(|s| s.key == key && s.data_set_index == Some(ds_idx) && s.value.is_finite())
+        .map(|s| s.value)
+        .ok_or_else(|| format!("ResultSheet `{}` missing finite scalar `{key}` for ds {ds_idx}", rs.id))
+}
+
+fn require_tab<'a>(rs: &'a curvebook_doc::ResultSheet, tab_id: &str) -> Result<&'a curvebook_doc::ResultTab, String> {
+    rs.tabs.iter().find(|t| t.id == tab_id).ok_or_else(|| format!("ResultSheet `{}` missing tab `{tab_id}`", rs.id))
+}
+
+fn require_graph<'a>(c: &'a EguiGuiClient, id: &str) -> Result<&'a curvebook_doc::GraphSheet, String> {
+    c.app.document().graph_sheet(&SheetId::from(id)).ok_or_else(|| format!("missing GraphSheet `{id}`"))
+}
+
+fn assert_svg_valid(svg: &str, label: &str) -> TestRes {
+    ensure(
+        svg.len() > 200 && svg.contains("<svg") && svg.contains("</svg>"),
+        format!("{label}: expected non-trivial valid SVG, got len={}", svg.len()),
+    )?;
+    curvebook_svg::validate_svg_structure(svg).map_err(|e| format!("{label}: invalid SVG structure: {e}"))
+}
+
+fn assert_tab_has_finite_number(tab: &curvebook_doc::ResultTab, label: &str) -> TestRes {
+    let has_num = tab.rows.iter().flatten().any(|cell| matches!(cell, ResultCell::Number { value, .. } if value.is_finite()));
+    ensure(has_num, format!("{label}: tab `{}` has no finite ResultCell::Number", tab.id))
 }
 
 #[test]
@@ -587,7 +629,17 @@ fn wf16_egui_gui_only_linear_passing_bablok_and_predicates() -> TestRes {
     c.paste_tsv(0, 0, 0, "2.1\t3.0\n4.1\t5.9\n6.0\t8.8\n8.2\t11.9\n10.1\t14.8")?;
     let lin = c.run_analyze(&sid, json!({ "entry_id": "fit.linear" }))?;
     let pb = c.run_analyze(&sid, json!({ "entry_id": "stats.passing_bablok" }))?;
-    ensure(c.app.document().result_sheet(&SheetId::from(lin.as_str())).is_some(), "missing linear fit")?;
+    let lin_rs = require_result(&c, &lin)?;
+    ensure(matches!(lin_rs.analysis.kind, AnalysisKind::LinearRegression(_)), "wf16 expected Linear regression ResultSheet")?;
+    ensure(lin_rs.fitted_curves.len() == 2 && lin_rs.fitted_curves.iter().all(|fc| !fc.points.is_empty()), "wf16 expected 2 linear fitted curves")?;
+    ensure(!lin_rs.tabs.is_empty(), "wf16 missing linear fit tabs")?;
+    assert_tab_has_finite_number(&lin_rs.tabs[0], "wf16 lin")?;
+    let pb_rs = require_result(&c, &pb)?;
+    ensure(matches!(pb_rs.analysis.kind, AnalysisKind::PassingBablok(_)), "wf16 expected Passing-Bablok ResultSheet")?;
+    let pb_slope = require_scalar(pb_rs, "Slope")?;
+    ensure(pb_slope > 1.8 && pb_slope < 2.2, format!("wf16 unexpected Passing-Bablok slope {pb_slope}"))?;
+    let _pb_int = require_scalar(pb_rs, "Intercept")?;
+    ensure((require_scalar(pb_rs, "N")? - 5.0).abs() < 1e-9, "wf16 expected Passing-Bablok N=5")?;
     verify_egui_inspect_and_shot(&mut c, &pb)?;
     Ok(())
 }
@@ -618,6 +670,16 @@ fn wf18_egui_gui_only_enzyme_kinetics_michaelis_menten() -> TestRes {
     }
     c.paste_tsv(0, 0, 0, "10\t12\n18\t21\n32\t36\n45\t50\n56\t62")?;
     let fit_id = c.run_analyze(&sid, json!({ "entry_id": "fit.nonlinear", "equation_id": "michaelis_menten" }))?;
+    let rs = require_result(&c, &fit_id)?;
+    ensure(
+        matches!(rs.analysis.kind, AnalysisKind::NonlinearRegression(ref nl) if nl.equation_id == "michaelis_menten"),
+        "wf18 expected Michaelis-Menten nonlinear regression",
+    )?;
+    ensure(rs.fitted_curves.len() == 2 && rs.fitted_curves.iter().all(|fc| !fc.points.is_empty()), "wf18 expected 2 fitted MM curves")?;
+    let r2 = require_scalar(rs, "R2")?;
+    ensure(r2 > 0.98, format!("wf18 expected Michaelis-Menten R2 > 0.98, got {r2}"))?;
+    ensure(!rs.tabs.is_empty(), "wf18 missing Michaelis-Menten tabs")?;
+    assert_tab_has_finite_number(&rs.tabs[0], "wf18 mm")?;
     verify_egui_inspect_and_shot(&mut c, &fit_id)?;
     Ok(())
 }
@@ -643,6 +705,11 @@ fn wf20_egui_gui_only_roc_curve_and_trend() -> TestRes {
     let sid = c.create_table(json!({ "sheet_id": "col-20", "kind": "column", "cols": 2, "rows": 5 }))?;
     c.paste_tsv(0, 0, 0, "1.1\t3.2\n1.5\t4.0\n2.0\t4.8\n2.4\t5.5\n2.9\t6.1")?;
     let roc_id = c.run_analyze(&sid, json!({ "entry_id": "stats.roc" }))?;
+    let rs = require_result(&c, &roc_id)?;
+    let auc = require_scalar(rs, "Area under ROC curve (AUC)")?;
+    ensure((auc - 1.0).abs() < 1e-6, format!("wf20 expected AUC=1.0 for separated groups, got {auc}"))?;
+    ensure(!rs.tabs.is_empty(), "wf20 missing ROC tabs")?;
+    assert_tab_has_finite_number(&rs.tabs[0], "wf20 roc")?;
     verify_egui_inspect_and_shot(&mut c, &roc_id)?;
     Ok(())
 }
@@ -656,6 +723,12 @@ fn wf21_egui_gui_only_kaplan_meier_survival() -> TestRes {
         c.paste_tsv(r, col, 0, v)?;
     }
     let km_id = c.run_analyze(&sid, json!({ "entry_id": "stats.survival_km" }))?;
+    let rs = require_result(&c, &km_id)?;
+    ensure(matches!(rs.analysis.kind, AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { .. })), "wf21 expected KaplanMeier analysis")?;
+    let nar = require_tab(rs, "number-at-risk")?;
+    ensure(!nar.rows.is_empty(), "wf21 expected non-empty number-at-risk rows")?;
+    let _lr_chi2 = require_scalar(rs, "Log-rank chi-square")?;
+    let _lr_p = require_scalar(rs, "Log-rank P value")?;
     verify_egui_inspect_and_shot(&mut c, &km_id)?;
     Ok(())
 }
@@ -666,10 +739,19 @@ fn wf22_egui_gui_only_mv_pca_clustering_and_row_t_tests() -> TestRes {
     let sid = c.create_table(json!({ "sheet_id": "mv-22", "kind": "multiple_variables", "cols": 3, "rows": 5 }))?;
     c.paste_tsv(0, 0, 0, "1\t2\t4\n2\t4\t7\n3\t6\t9\n4\t9\t11\n5\t11\t14")?;
     let pca = c.run_analyze(&sid, json!({ "entry_id": "stats.pca", "pca_predictors": [0, 1, 2] }))?;
+    let pca_rs = require_result(&c, &pca)?;
+    let loadings = require_tab(pca_rs, "pca-loadings")?;
+    ensure(loadings.rows.len() == 3, format!("wf22 expected 3 PCA loadings rows, got {}", loadings.rows.len()))?;
+    let ev1 = require_scalar(pca_rs, "PC1 eigenvalue")?;
+    ensure(ev1 > 2.5, format!("wf22 expected PC1 eigenvalue > 2.5, got {ev1}"))?;
+
     let grp = c.create_table(json!({ "sheet_id": "grp-22", "kind": "grouped", "cols": 2, "rows": 3, "replicates": 3 }))?;
     c.paste_tsv(0, 0, 0, "1\t2\t1.5\t8\t9\t8.5\n2\t3\t2.5\t12\t13\t12.5\n3\t4\t3.5\t15\t16\t15.5")?;
     let rt = c.run_analyze(&grp, json!({ "entry_id": "stats.multiple_row_t_tests" }))?;
-    ensure(c.app.document().result_sheet(&SheetId::from(pca.as_str())).is_some(), "missing pca")?;
+    let rt_rs = require_result(&c, &rt)?;
+    ensure((require_scalar(rt_rs, "RowsTested")? - 3.0).abs() < 1e-9, "wf22 expected RowsTested=3")?;
+    let min_p = require_scalar(rt_rs, "MinRawP")?;
+    ensure(min_p < 0.01, format!("wf22 expected row t-tests MinRawP < 0.01, got {min_p}"))?;
     verify_egui_inspect_and_shot(&mut c, &rt)?;
     Ok(())
 }
@@ -680,6 +762,28 @@ fn wf23_egui_gui_only_pcr_r10_and_result_chaining() -> TestRes {
     let mv = c.create_table(json!({ "sheet_id": "mv-23", "kind": "multiple_variables", "cols": 3, "rows": 5 }))?;
     c.paste_tsv(0, 0, 0, "1\t2\t3\n2\t3.9\t5.1\n3\t6.1\t7.2\n4\t8.0\t9.3\n5\t9.9\t11.1")?;
     let pcr = c.run_analyze(&mv, json!({ "entry_id": "stats.pcr", "pca_predictors": [0, 1], "pcr_outcome_column": 2 }))?;
+    let rs = require_result(&c, &pcr)?;
+    ensure(
+        matches!(rs.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::Pca { pcr_outcome_column: Some(2), .. })),
+        format!("wf23 expected PCA PCR outcome column 2, got {:?}", rs.analysis.kind),
+    )?;
+    ensure(rs.analysis.selected_data_sets == vec![0, 1], format!("wf23 expected predictors [0, 1], got {:?}", rs.analysis.selected_data_sets))?;
+    let r2 = require_scalar(rs, "PCR R squared")?;
+    ensure(r2 > 0.99, format!("wf23 expected PCR R squared > 0.99, got {r2}"))?;
+    ensure((require_scalar(rs, "PCR Predictor count")? - 2.0).abs() < 1e-9, "wf23 expected 2 PCR predictors")?;
+    let sum_tab = require_tab(rs, "pcr-summary")?;
+    ensure(
+        sum_tab.rows.first().and_then(|r| r.first()) == Some(&ResultCell::Text(String::from("Variable C"))),
+        format!("wf23 pcr-summary outcome row mismatch: {:?}", sum_tab.rows.first()),
+    )?;
+    let coef_tab = require_tab(rs, "pcr-predictors")?;
+    ensure(coef_tab.rows.len() >= 3, format!("wf23 expected >= 3 PCR predictor rows, got {}", coef_tab.rows.len()))?;
+    for (idx, row) in coef_tab.rows.iter().enumerate() {
+        ensure(
+            matches!(row.first(), Some(ResultCell::Number { value, .. }) if value.is_finite()),
+            format!("wf23 pcr-predictors row {idx} missing finite Estimate: {row:?}"),
+        )?;
+    }
     verify_egui_inspect_and_shot(&mut c, &pcr)?;
     Ok(())
 }
@@ -690,10 +794,20 @@ fn wf24_egui_gui_only_significance_brackets_and_axes() -> TestRes {
     let sid =
         c.create_table(json!({ "sheet_id": "col-24", "kind": "column", "cols": 3, "rows": 4, "auto_graph": true, "graph_sheet_id": "g-24" }))?;
     c.paste_tsv(0, 0, 0, "10\t20\t35\n11\t21\t37\n9\t19\t34\n12\t22\t38")?;
-    let _res = c.run_analyze(&sid, json!({ "entry_id": "stats.one_way_anova" }))?;
+    let res_id = c.run_analyze(&sid, json!({ "entry_id": "stats.one_way_anova" }))?;
+    let rs = require_result(&c, &res_id)?;
+    let f_val = require_scalar(rs, "F")?;
+    let p_val = require_scalar(rs, "P value")?;
+    ensure(f_val > 50.0 && p_val < 0.001, format!("wf24 unexpected ANOVA F={f_val}, P={p_val}"))?;
     c.select_sheet("g-24")?;
     c.menu_cmd("ui.graph.axes.open", json!({ "sheet_id": "g-24" }))?;
     c.gui("ui.answer_dialog", json!({ "action": "ok", "fields": { "target_axis": "y", "title": "Signal (AU)" } }))?;
+    let gs = require_graph(&c, "g-24")?;
+    ensure(gs.spec.y_axis.title == "Signal (AU)", format!("wf24 expected y_axis title `Signal (AU)`, got `{}`", gs.spec.y_axis.title))?;
+    let svg_out = c.menu_cmd("graph.exportSvg", json!({ "sheet_id": "g-24" }))?;
+    let svg = svg_out.pointer("/payload/svg").and_then(Value::as_str).ok_or("wf24 missing SVG payload")?;
+    assert_svg_valid(svg, "wf24")?;
+    ensure(svg.contains("Signal (AU)"), "wf24 SVG missing updated y-axis title `Signal (AU)`")?;
     verify_egui_inspect_and_shot(&mut c, "g-24")?;
     Ok(())
 }
@@ -706,8 +820,19 @@ fn wf25_egui_gui_only_violin_boxplot_and_svg() -> TestRes {
     c.paste_tsv(0, 0, 0, "10\t15\t25\n12\t17\t27\n14\t19\t29\n11\t16\t26")?;
     c.menu_cmd("ui.changeGraphType.open", json!({ "sheet_id": "g-25" }))?;
     c.gui("ui.answer_dialog", json!({ "action": "ok", "fields": { "selected_option_id": "col.box_whisker" } }))?;
-    let _ = c.run_analyze(&sid, json!({ "entry_id": "stats.one_way_anova" }))?;
+    let gs = require_graph(&c, "g-25")?;
+    ensure(
+        !gs.spec.series.is_empty() && gs.spec.series.iter().all(|s| matches!(s.gdo, GraphicalDataObject::BoxAndWhisker { .. })),
+        "wf25 expected BoxAndWhisker GDO directly after ChangeGraphType",
+    )?;
+    let anova_id = c.run_analyze(&sid, json!({ "entry_id": "stats.one_way_anova" }))?;
+    let anova_rs = require_result(&c, &anova_id)?;
+    ensure(require_scalar(anova_rs, "F")? > 20.0 && require_scalar(anova_rs, "P value")? < 0.01, "wf25 ANOVA F/P check")?;
     c.select_sheet("g-25")?;
+    c.menu_cmd("ui.export.figure.open", json!({ "sheet_id": "g-25" }))?;
+    let exp = c.gui("ui.answer_dialog", json!({ "action": "ok", "fields": { "format": "svg" } }))?;
+    let svg = exp.pointer("/payload/svg").and_then(Value::as_str).ok_or("wf25 ExportFigure missing svg payload")?;
+    assert_svg_valid(svg, "wf25")?;
     verify_egui_inspect_and_shot(&mut c, "g-25")?;
     Ok(())
 }
@@ -718,8 +843,14 @@ fn wf26_egui_gui_only_corr_heatmap_volcano_and_descriptive() -> TestRes {
     let mv = c.create_table(json!({ "sheet_id": "mv-26", "kind": "multiple_variables", "cols": 3, "rows": 5 }))?;
     c.paste_tsv(0, 0, 0, "1\t2\t5\n2\t4\t8\n3\t6\t11\n4\t8\t14\n5\t10\t17")?;
     let desc = c.run_analyze(&mv, json!({ "entry_id": "stats.descriptive" }))?;
+    let desc_rs = require_result(&c, &desc)?;
+    ensure((require_scalar_for(desc_rs, "Mean", 0)? - 3.0).abs() < 1e-9, "wf26 expected Mean[0]=3.0")?;
+    ensure((require_scalar_for(desc_rs, "Mean", 1)? - 6.0).abs() < 1e-9, "wf26 expected Mean[1]=6.0")?;
+    ensure((require_scalar_for(desc_rs, "Mean", 2)? - 11.0).abs() < 1e-9, "wf26 expected Mean[2]=11.0")?;
     let corr = c.run_analyze(&mv, json!({ "entry_id": "stats.corr_matrix", "correlation_all_pairs": true }))?;
-    ensure(c.app.document().result_sheet(&SheetId::from(desc.as_str())).is_some(), "missing desc")?;
+    let corr_rs = require_result(&c, &corr)?;
+    ensure(!corr_rs.tabs.is_empty(), "wf26 missing correlation matrix tabs")?;
+    assert_tab_has_finite_number(&corr_rs.tabs[0], "wf26 corr")?;
     verify_egui_inspect_and_shot(&mut c, &corr)?;
     Ok(())
 }
@@ -736,6 +867,13 @@ fn wf27_egui_gui_only_multi_panel_layout_and_composer() -> TestRes {
     c.select_sheet("lay-27")?;
     c.menu_cmd("ui.layout.composer.open", json!({ "sheet_id": "lay-27" }))?;
     c.gui("ui.answer_dialog", json!({ "action": "ok" }))?;
+    let lay = c.app.document().layout_sheet(&SheetId::from("lay-27")).ok_or("wf27 missing LayoutSheet lay-27")?;
+    ensure(
+        lay.spec.items.iter().any(|item| matches!(item, LayoutItem::LiveGraph { graph_sheet_id, .. } if graph_sheet_id.as_str() == "g-27")),
+        format!("wf27 lay-27 missing g-27 LiveGraph item: {:?}", lay.spec.items),
+    )?;
+    let scene = curvebook_chart::compile_layout(lay, c.app.document()).map_err(|e| format!("wf27 compile_layout: {e}"))?;
+    ensure(!scene.primitives.is_empty(), "wf27 compiled layout scene has no primitives")?;
     verify_egui_inspect_and_shot(&mut c, "lay-27")?;
     Ok(())
 }
@@ -747,8 +885,17 @@ fn wf28_egui_gui_only_canvas_preset_cvd_export_and_themes() -> TestRes {
     c.paste_tsv(0, 0, 0, "10\n20\n30\n40")?;
     c.select_sheet("g-28")?;
     c.menu_cmd("ui.canvas.applyPreset", json!({ "sheet_id": "g-28", "preset": "SingleColumn88mm" }))?;
+    let gs = require_graph(&c, "g-28")?;
+    ensure(
+        (gs.spec.canvas_size_pt.width - 88.0 * 72.0 / 25.4).abs() < 1.0,
+        format!("wf28 expected ~88mm width_pt, got {}", gs.spec.canvas_size_pt.width),
+    )?;
     c.menu_cmd("ui.export.figure.open", json!({ "sheet_id": "g-28" }))?;
-    c.gui("ui.answer_dialog", json!({ "action": "ok", "fields": { "format": "svg" } }))?;
+    let exp = c.gui("ui.answer_dialog", json!({ "action": "ok", "fields": { "format": "svg" } }))?;
+    let svg = exp.pointer("/payload/svg").and_then(Value::as_str).ok_or("wf28 ExportFigure missing svg payload")?;
+    assert_svg_valid(svg, "wf28 ExportFigure")?;
+    let byte_len = exp.pointer("/payload/byte_len").and_then(Value::as_u64).ok_or("wf28 ExportFigure missing byte_len")?;
+    ensure(byte_len == svg.len() as u64, format!("wf28 byte_len {byte_len} != svg.len() {}", svg.len()))?;
     let light_png = verify_egui_inspect_and_shot(&mut c, "g-28")?;
     c.app.set_theme_mode(UiThemeMode::Dark);
     let dark_png = c.screenshot_png("full_window")?;
@@ -772,8 +919,14 @@ fn wf29_egui_gui_only_mv_select_math_row_stats_and_baseline() -> TestRes {
     }))?;
     c.paste_tsv(0, 0, 0, "Ctrl\t0.1\t100\nCtrl\t1.0\t102\nTreated\t0.1\t120\nTreated\t10.0\t180")?;
     let sel = c.run_analyze(&sid, json!({ "entry_id": "transform.select", "selected_data_sets": [1, 2], "target_archetype": "MultipleVariables", "filter_formula": "[Cond] == \"Treated\"" }))?;
-    let rs = c.app.document().result_sheet(&SheetId::from(sel.as_str())).ok_or("missing select")?;
-    ensure(rs.analyzable_data.as_ref().is_some_and(|d| d.archetype.row_count() == 2), "expected 2 filtered rows")?;
+    let rs = require_result(&c, &sel)?;
+    let ds_out = rs.analyzable_data.as_ref().ok_or("wf29 missing analyzable_data")?;
+    ensure(ds_out.archetype.row_count() == 2, "expected 2 filtered rows")?;
+    ensure(
+        ds_out.cell(CellCoord::new(0, 1, 0)).and_then(Cell::active_number).is_some_and(|v| (v - 120.0).abs() < 1e-9)
+            && ds_out.cell(CellCoord::new(1, 1, 0)).and_then(Cell::active_number).is_some_and(|v| (v - 180.0).abs() < 1e-9),
+        "wf29 expected filtered Signal values [120, 180]",
+    )?;
     verify_egui_inspect_and_shot(&mut c, &sel)?;
     Ok(())
 }
@@ -784,7 +937,28 @@ fn wf30_egui_gui_only_calculated_variables_formula_bar() -> TestRes {
     let sid = c.create_table(json!({ "sheet_id": "mv-30", "kind": "multiple_variables", "cols": 3, "rows": 4 }))?;
     c.paste_tsv(0, 0, 0, "10\t2\t0\n20\t4\t0\n30\t6\t0\n40\t8\t0")?;
     c.menu_cmd("ui.table.openFormulaBar", json!({ "column": 2 }))?;
-    let _ = c.gui("ui.answer_dialog", json!({ "action": "ok", "fields": { "formula": "[Col1] / [Col2]" } }));
+    ensure(c.app.grid.formula_bar.active, "wf30 expected formula bar active after ui.table.openFormulaBar")?;
+    let typed = c.gui(
+        "ui.type_text",
+        json!({ "widget_id": "formula_bar.input", "text": "= [Variable A] / [Variable B]", "clear_existing": true, "commit_enter": false }),
+    )?;
+    ensure(typed["is_valid"] == json!(true), format!("wf30 expected valid formula_bar input, got {typed}"))?;
+    c.press_key("Enter", false, false)?;
+    ensure(!c.app.grid.formula_bar.active, "wf30 expected Enter to commit and close formula bar")?;
+    let ds = c.app.document().data_sheet(&SheetId::from(sid.as_str())).ok_or("wf30 missing mv-30 DataSheet")?;
+    for r in 0..4 {
+        ensure(
+            ds.cell(CellCoord::new(r, 2, 0)).and_then(Cell::active_number).is_some_and(|v| (v - 5.0).abs() < 1e-12),
+            format!("wf30 row {r} expected calculated column value 5.0, got {:?}", ds.cell(CellCoord::new(r, 2, 0))),
+        )?;
+    }
+    let grid_snap = c.inspect("grid")?;
+    let cells = grid_snap["grid_cells"].as_array().ok_or("wf30 missing grid_cells in inspect")?;
+    for r in 0..4 {
+        let wid = format!("grid.cell.{r}.2.0");
+        let node = cells.iter().find(|n| n["widget_id"] == json!(wid)).ok_or_else(|| format!("wf30 missing inspect cell {wid}"))?;
+        ensure(node["value"]["text"] == json!("5"), format!("wf30 inspect cell {wid} expected `5`, got {}", node["value"]))?;
+    }
     verify_egui_inspect_and_shot(&mut c, &sid)?;
     Ok(())
 }
@@ -798,6 +972,13 @@ fn wf31_egui_gui_only_extract_and_convert_cross_schema() -> TestRes {
     }
     c.paste_tsv(0, 0, 0, "94\t96\t95\t95\n79\t81\t80\t82\n49\t51\t50\t52\n19\t21\t20\t18\n4\t6\t5\t5")?;
     let fit = c.run_analyze(&sid, json!({ "entry_id": "fit.nonlinear", "equation_id": "log_inhibitor_vs_response_4pl" }))?;
+    let rs = require_result(&c, &fit)?;
+    ensure(
+        matches!(rs.analysis.kind, AnalysisKind::NonlinearRegression(ref nl) if nl.equation_id == "log_inhibitor_vs_response_4pl"),
+        "wf31 expected 4PL inhibitor nonlinear fit",
+    )?;
+    ensure(require_scalar(rs, "R2")? > 0.99, "wf31 expected 4PL R2 > 0.99")?;
+    ensure(!rs.fitted_curves.is_empty() && !rs.tabs.is_empty(), "wf31 expected non-empty fitted_curves and tabs")?;
     verify_egui_inspect_and_shot(&mut c, &fit)?;
     Ok(())
 }
@@ -820,6 +1001,13 @@ fn wf32_egui_gui_only_direct_mv_welch_t_and_bubble() -> TestRes {
     }))?;
     c.paste_tsv(0, 0, 0, "A\t10\t2\nA\t11\t3\nA\t12\t4\nB\t20\t5\nB\t24\t6\nB\t28\t7")?;
     let res = c.run_analyze(&sid, json!({ "entry_id": "stats.two_group", "two_group_method": "welch_t" }))?;
+    let rs = require_result(&c, &res)?;
+    ensure(matches!(rs.analysis.kind, AnalysisKind::TwoGroupComparison(ref tg) if tg.method == TwoGroupMethod::WelchT), "wf32 expected WelchT")?;
+    let p_val = require_scalar(rs, "PValue")?;
+    let t_val = require_scalar(rs, "t")?;
+    ensure(p_val < 0.05 && t_val.abs() > 3.0, format!("wf32 expected significant Welch t, got t={t_val}, P={p_val}"))?;
+    let gs = require_graph(&c, "g-32")?;
+    ensure(gs.spec.kind == GraphKind::MultipleVariables, "wf32 expected MultipleVariables GraphSheet g-32")?;
     verify_egui_inspect_and_shot(&mut c, &res)?;
     Ok(())
 }
@@ -840,6 +1028,12 @@ fn wf33_egui_gui_only_direct_mv_multifactor_anova() -> TestRes {
     }))?;
     c.paste_tsv(0, 0, 0, "WT\tLo\t10\nWT\tLo\t11\nWT\tHi\t15\nWT\tHi\t16\nKO\tLo\t20\nKO\tLo\t21\nKO\tHi\t35\nKO\tHi\t36")?;
     let res = c.run_analyze(&sid, json!({ "entry_id": "stats.factorial_anova" }))?;
+    let rs = require_result(&c, &res)?;
+    ensure(!rs.tabs.is_empty(), "wf33 missing factorial ANOVA tabs")?;
+    assert_tab_has_finite_number(&rs.tabs[0], "wf33 anova")?;
+    let _ms_res = require_scalar(rs, "MS residual")?;
+    ensure(rs.scalars.iter().any(|s| s.key.ends_with(": F") && s.value.is_finite()), "wf33 missing factorial term F statistic")?;
+    ensure(rs.scalars.iter().any(|s| s.key.ends_with(": P") && s.value < 0.01), "wf33 expected significant factorial term P < 0.01")?;
     verify_egui_inspect_and_shot(&mut c, &res)?;
     Ok(())
 }
@@ -859,7 +1053,11 @@ fn wf34_egui_gui_only_qpcr_ddct_calculated_and_welch() -> TestRes {
         ]
     }))?;
     c.paste_tsv(0, 0, 0, "Ctrl\t22\t18\nCtrl\t22.2\t18.1\nCtrl\t21.9\t18\nDrug\t19\t18\nDrug\t19.2\t18.1\nDrug\t18.8\t17.9")?;
-    let res = c.run_analyze(&sid, json!({ "entry_id": "stats.two_group", "two_group_method": "welch_t" }))?;
+    let res =
+        c.run_analyze(&sid, json!({ "entry_id": "stats.two_group", "two_group_method": "welch_t", "mv_group_column": 0, "mv_response_column": 1 }))?;
+    let rs = require_result(&c, &res)?;
+    ensure(matches!(rs.analysis.kind, AnalysisKind::TwoGroupComparison(ref tg) if tg.method == TwoGroupMethod::WelchT), "wf34 expected WelchT")?;
+    ensure(require_scalar(rs, "PValue")? < 0.01 && require_scalar(rs, "t")?.abs() > 5.0, "wf34 expected highly significant Ct shift")?;
     verify_egui_inspect_and_shot(&mut c, &res)?;
     Ok(())
 }
@@ -880,6 +1078,10 @@ fn wf35_egui_gui_only_direct_mv_kaplan_meier() -> TestRes {
     }))?;
     c.paste_tsv(0, 0, 0, "2\t1\tCtrl\n4\t1\tCtrl\n6\t0\tCtrl\n8\t1\tDrug\n12\t1\tDrug\n14\t0\tDrug")?;
     let res = c.run_analyze(&sid, json!({ "entry_id": "stats.survival_km" }))?;
+    let rs = require_result(&c, &res)?;
+    ensure(matches!(rs.analysis.kind, AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { .. })), "wf35 expected KaplanMeier ResultSheet")?;
+    let _nar = require_tab(rs, "number-at-risk")?;
+    let _lr = require_scalar(rs, "Log-rank chi-square")?;
     verify_egui_inspect_and_shot(&mut c, &res)?;
     Ok(())
 }
@@ -924,6 +1126,16 @@ fn wf38_egui_gui_only_kmeans_clustering_and_silhouette() -> TestRes {
     let sid = c.create_table(json!({ "sheet_id": "mv-38", "kind": "multiple_variables", "cols": 3, "rows": 6 }))?;
     c.paste_tsv(0, 0, 0, "1\t1\t1\n1.2\t1.1\t0.9\n1.1\t0.9\t1.1\n10\t10\t1.0\n10.2\t9.9\t1.1\n9.8\t10.1\t0.9")?;
     let res = c.run_analyze(&sid, json!({ "entry_id": "stats.clustering", "selected_data_sets": [0, 1, 2], "distance": "euclidean", "linkage": "ward", "k_means_k": 2, "k_sweep_max": 4 }))?;
+    let rs = require_result(&c, &res)?;
+    ensure(
+        matches!(rs.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::Clustering { k_means_k: Some(2), .. })),
+        "wf38 expected K-means clustering with k=2",
+    )?;
+    ensure((require_scalar(rs, "Clusters (k)")? - 2.0).abs() < 1e-9, "wf38 expected Clusters (k)=2")?;
+    let sil = require_scalar(rs, "Mean silhouette")?;
+    ensure(sil > 0.7, format!("wf38 expected strong cluster separation silhouette > 0.7, got {sil}"))?;
+    let wcss = require_scalar(rs, "Total WCSS")?;
+    ensure((0.0..2.0).contains(&wcss), format!("wf38 unexpected Total WCSS={wcss}"))?;
     verify_egui_inspect_and_shot(&mut c, &res)?;
     Ok(())
 }
@@ -1027,9 +1239,26 @@ fn wf43_egui_gui_only_serial_dilution_4pl_and_auc() -> TestRes {
     }
     c.paste_tsv(0, 0, 0, "95\t97\t96\t94\n81\t83\t82\t80\n49\t51\t50\t52\n17\t19\t18\t16\n3\t5\t4\t4")?;
     let log_rs = c.run_analyze(&sid, json!({ "entry_id": "transform.math", "x_transform": "log10" }))?;
+    let log_sheet = require_result(&c, &log_rs)?;
+    let log_ds = log_sheet.analyzable_data.as_ref().ok_or("wf43 missing transformed analyzable_data")?;
+    ensure(
+        log_ds.x_or_time_cell(0, 0).and_then(Cell::active_number).is_some_and(|v| (v + 2.0).abs() < 1e-9)
+            && log_ds.x_or_time_cell(4, 0).and_then(Cell::active_number).is_some_and(|v| (v - 2.0).abs() < 1e-9),
+        "wf43 expected log10(X) range [-2, 2]",
+    )?;
     let desc = c.run_analyze(&log_rs, json!({ "entry_id": "stats.descriptive" }))?;
+    let desc_rs = require_result(&c, &desc)?;
+    ensure((require_scalar_for(desc_rs, "N", 0)? - 5.0).abs() < 1e-9, "wf43 expected N=5")?;
+    let mean0 = require_scalar_for(desc_rs, "Mean", 0)?;
+    let med0 = require_scalar_for(desc_rs, "Median", 0)?;
+    let auc0 = require_scalar_for(desc_rs, "Trapezoidal AUC", 0)?;
+    ensure((mean0 - 1.4862953616361976).abs() < 1e-9, format!("wf43 expected transformed Mean=1.4862953616, got {mean0}"))?;
+    ensure((med0 - 1.703184901024317).abs() < 1e-9, format!("wf43 expected transformed Median=1.7031849010, got {med0}"))?;
+    ensure((auc0 - 6.143963599692742).abs() < 1e-9, format!("wf43 expected transformed Trapezoidal AUC=6.1439635997, got {auc0}"))?;
     let fit = c.run_analyze(&log_rs, json!({ "entry_id": "fit.nonlinear", "equation_id": "log_inhibitor_vs_response_4pl" }))?;
-    ensure(c.app.document().result_sheet(&SheetId::from(desc.as_str())).is_some(), "missing desc")?;
+    let fit_rs = require_result(&c, &fit)?;
+    ensure(require_scalar(fit_rs, "R2")? > 0.99, "wf43 expected 4PL R2 > 0.99")?;
+    ensure(!fit_rs.fitted_curves.is_empty(), "wf43 missing fitted curves")?;
     verify_egui_inspect_and_shot(&mut c, &fit)?;
     Ok(())
 }
@@ -1050,6 +1279,11 @@ fn wf44_egui_gui_only_confidence_ellipses_and_hulls() -> TestRes {
     c.select_sheet("g-44")?;
     c.menu_cmd("ui.graph.bubblePlot.open", json!({ "sheet_id": "g-44" }))?;
     c.gui("ui.answer_dialog", json!({ "action": "ok" }))?;
+    let gs = require_graph(&c, "g-44")?;
+    ensure(gs.spec.kind == GraphKind::MultipleVariables && gs.spec.multivariate.is_some(), "wf44 expected MultipleVariables encoding on g-44")?;
+    let svg_out = c.menu_cmd("graph.exportSvg", json!({ "sheet_id": "g-44" }))?;
+    let svg = svg_out.pointer("/payload/svg").and_then(Value::as_str).ok_or("wf44 missing SVG payload")?;
+    assert_svg_valid(svg, "wf44")?;
     verify_egui_inspect_and_shot(&mut c, "g-44")?;
     Ok(())
 }
@@ -1060,6 +1294,9 @@ fn wf45_egui_gui_only_summary_heatmap() -> TestRes {
     let mv = c.create_table(json!({ "sheet_id": "mv-45", "kind": "multiple_variables", "cols": 3, "rows": 5 }))?;
     c.paste_tsv(0, 0, 0, "1\t2\t3\n2\t4\t5\n3\t6\t7\n4\t8\t9\n5\t10\t11")?;
     let corr = c.run_analyze(&mv, json!({ "entry_id": "stats.corr_matrix", "correlation_all_pairs": true, "correlation_heatmap": true }))?;
+    let rs = require_result(&c, &corr)?;
+    ensure(!rs.tabs.is_empty(), "wf45 missing correlation heatmap tabs")?;
+    assert_tab_has_finite_number(&rs.tabs[0], "wf45 heatmap corr")?;
     verify_egui_inspect_and_shot(&mut c, &corr)?;
     Ok(())
 }
@@ -1079,6 +1316,11 @@ fn wf46_egui_gui_only_mv_graph_variable_swapping() -> TestRes {
     c.select_sheet("g-46")?;
     c.menu_cmd("ui.graph.bubblePlot.open", json!({ "sheet_id": "g-46" }))?;
     c.gui("ui.answer_dialog", json!({ "action": "ok", "fields": { "x_column": 1, "y_column": 2 } }))?;
+    let gs = require_graph(&c, "g-46")?;
+    ensure(
+        gs.spec.multivariate.as_ref().is_some_and(|m| m.x_column == 1 && m.y_column == 2),
+        format!("wf46 expected swapped (x_column=1, y_column=2), got {:?}", gs.spec.multivariate),
+    )?;
     verify_egui_inspect_and_shot(&mut c, "g-46")?;
     Ok(())
 }
@@ -1098,7 +1340,24 @@ fn wf47_egui_gui_only_km_number_at_risk_and_pairwise() -> TestRes {
     c.select_sheet("g-47")?;
     c.menu_cmd("ui.changeGraphType.open", json!({ "sheet_id": "g-47" }))?;
     c.gui("ui.answer_dialog", json!({ "action": "ok", "fields": { "selected_option_id": "survival.km" } }))?;
-    ensure(c.app.document().result_sheet(&SheetId::from(km.as_str())).is_some(), "missing wf47 km")?;
+    let rs = require_result(&c, &km)?;
+    ensure(
+        matches!(
+            rs.analysis.kind,
+            AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier {
+                trend_test: true,
+                ref multiplicity,
+                ..
+            }) if multiplicity.method == MultiplicityMethod::HolmSidak
+        ),
+        format!("wf47 expected trend_test=true and HolmSidak multiplicity, got {:?}", rs.analysis.kind),
+    )?;
+    let _nar = require_tab(rs, "number-at-risk")?;
+    let gs = require_graph(&c, "g-47")?;
+    ensure(
+        gs.spec.kind == GraphKind::Survival && gs.spec.series.iter().any(|s| matches!(s.gdo, GraphicalDataObject::KaplanMeierStep { .. })),
+        "wf47 expected KaplanMeierStep GraphSheet g-47",
+    )?;
     verify_egui_inspect_and_shot(&mut c, "g-47")?;
     Ok(())
 }
@@ -1113,6 +1372,11 @@ fn wf48_egui_gui_only_mv_bubble_and_layout_export() -> TestRes {
     c.select_sheet("g-48")?;
     c.menu_cmd("ui.graph.bubblePlot.open", json!({ "sheet_id": "g-48" }))?;
     c.gui("ui.answer_dialog", json!({ "action": "ok" }))?;
+    let gs = require_graph(&c, "g-48")?;
+    ensure(gs.spec.kind == GraphKind::MultipleVariables && gs.spec.multivariate.is_some(), "wf48 expected MultipleVariables GraphSheet g-48")?;
+    let svg_out = c.menu_cmd("graph.exportSvg", json!({ "sheet_id": "g-48" }))?;
+    let svg = svg_out.pointer("/payload/svg").and_then(Value::as_str).ok_or("wf48 missing SVG payload")?;
+    assert_svg_valid(svg, "wf48")?;
     verify_egui_inspect_and_shot(&mut c, "g-48")?;
     Ok(())
 }
@@ -1128,9 +1392,20 @@ fn wf49_egui_gui_only_live_tex_model_equation_annotation() -> TestRes {
     }
     c.paste_tsv(0, 0, 0, "99\t100\t101\n64\t65\t66\n41\t42\t43\n19\t20\t21\n10\t11\t12")?;
     let fit = c.run_analyze(&sid, json!({ "entry_id": "fit.nonlinear", "equation_id": "one_phase_decay" }))?;
+    let fit_rs = require_result(&c, &fit)?;
+    ensure(require_scalar(fit_rs, "R2")? > 0.99, "wf49 expected one-phase decay R2 > 0.99")?;
     c.select_sheet("g-49")?;
     c.menu_cmd("graph.setRegressionOverlay", json!({ "sheet_id": "g-49", "result_sheet_id": fit }))?;
     c.menu_cmd("ui.graph.insertModelEquation", json!({ "sheet_id": "g-49" }))?;
+    c.gui("ui.answer_dialog", json!({ "action": "ok", "fields": { "result_sheet_id": fit, "mode": "substituted" } }))?;
+    let gs = require_graph(&c, "g-49")?;
+    ensure(
+        gs.spec.annotations.iter().any(|ann| matches!(ann, GraphAnnotation::ModelEquation { .. })),
+        format!("wf49 g-49 missing ModelEquation annotation: {:?}", gs.spec.annotations),
+    )?;
+    let svg_out = c.menu_cmd("graph.exportSvg", json!({ "sheet_id": "g-49" }))?;
+    let svg = svg_out.pointer("/payload/svg").and_then(Value::as_str).ok_or("wf49 missing SVG payload")?;
+    assert_svg_valid(svg, "wf49")?;
     verify_egui_inspect_and_shot(&mut c, "g-49")?;
     Ok(())
 }

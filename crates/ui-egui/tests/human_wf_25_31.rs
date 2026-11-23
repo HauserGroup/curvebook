@@ -522,6 +522,25 @@ fn wf28_human_canvas_preset_cvd_print_export_and_themes() -> TestRes {
     run.open_menu_and_click("menu.file", &["menu.file.export"], "menu.ui.export.figure.open")?;
     run.click("export.fmt.svg")?;
     run.commit_modal_ok()?;
+    ensure(
+        !matches!(run.active_dialog(), curvebook_ui_egui::dialogs_canvas::ActiveDialog::ExportFigure { .. }),
+        "WF-28 ExportFigure must close after ok",
+    )?;
+    {
+        let svg_out = run.last_engine_outcome("graph.exportSvg").ok_or("WF-28 ExportFigure commit did not emit graph.exportSvg")?;
+        ensure(
+            svg_out.payload["sheet_id"].as_str() == Some(graph_id.as_str()),
+            format!("WF-28 ExportFigure sheet_id mismatch: {}", svg_out.payload),
+        )?;
+        let svg = svg_out.payload["svg"].as_str().ok_or("WF-28 ExportFigure missing SVG string payload")?;
+        let byte_len = svg_out.payload["byte_len"].as_u64().ok_or("WF-28 ExportFigure missing byte_len")?;
+        ensure(byte_len > 200 && svg.len() as u64 == byte_len, format!("WF-28 SVG byte_len={byte_len}, len={}", svg.len()))?;
+        ensure(
+            svg.contains("<svg") && svg.contains("</svg>") && (svg.contains("<path") || svg.contains("<rect") || svg.contains("<line")),
+            "WF-28 exported SVG missing root or vector drawing elements",
+        )?;
+        curvebook_svg::validate_svg_structure(svg).map_err(|e| format!("WF-28 exported SVG validation failed: {e}"))?;
+    }
 
     // 4. Switch Dark / Light / HighContrast via View > Theme + Edit > Preferences...
     run.open_menu_and_click("menu.view", &["menu.ui.theme.set"], "popup.menu.ui.theme.set.opt.light")?;

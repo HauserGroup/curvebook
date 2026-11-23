@@ -893,7 +893,7 @@ fn fa_sec18_18_all_16_locales_modal_translations_and_partial_helpers_removed() -
     for loc in ["de", "ja", "ar"] {
         let (doc, _, _, _, _, _) = build_rich_project_doc()?;
         let mut driver = make_driver(doc);
-        let _ = driver.state_mut().app.set_locale(loc);
+        assert_eq!(driver.state_mut().app.set_locale(loc), loc);
         driver.state_mut().intents.push_open_preferences(Some(PreferencesCategory::General));
         commit_intents(&mut driver);
         let tab = driver.frame_meta().find_by_widget_id("edit.tab.prefs.keyboard_shortcuts");

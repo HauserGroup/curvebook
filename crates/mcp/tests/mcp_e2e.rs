@@ -9,6 +9,14 @@ use curvebook_mcp::{McpServerState, serve};
 use curvebook_svg::validate_svg_structure;
 use serde_json::{Value, json};
 
+fn env_truthy(var: &str) -> bool {
+    std::env::var(var).is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
+fn loopback_required() -> bool {
+    env_truthy("CI") || env_truthy("CURVEBOOK_REQUIRE_LOOPBACK")
+}
+
 struct TempDirGuard {
     path: PathBuf,
 }
@@ -605,6 +613,7 @@ fn live_control_port_attach_dispatches_ui_and_engine_and_atomic_undo() {
     let listener = match TcpListener::bind("127.0.0.1:0") {
         Ok(l) => l,
         Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+            assert!(!loopback_required(), "FAIL-CLOSED loopback bind denied under CI/CURVEBOOK_REQUIRE_LOOPBACK: {err}");
             let mut state = McpServerState::with_control_port(59999).expect("valid port");
             let res = call_tool_rpc(&mut state, 1, "doc_inspect", json!({})).expect("rpc reply");
             assert_eq!(res["isError"], json!(true));
@@ -622,6 +631,7 @@ fn live_control_port_attach_dispatches_ui_and_engine_and_atomic_undo() {
             let _ = listener.accept();
         }
         Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+            assert!(!loopback_required(), "FAIL-CLOSED loopback connect denied under CI/CURVEBOOK_REQUIRE_LOOPBACK: {err}");
             let mut state = McpServerState::with_control_port(port).expect("valid port");
             let res = call_tool_rpc(&mut state, 1, "doc_inspect", json!({})).expect("rpc reply");
             assert_eq!(res["isError"], json!(true));
