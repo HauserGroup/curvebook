@@ -1,31 +1,58 @@
-//! Extended D1 statistical reference oracles (`WP-B`, `WP-C`, `WP-D`).
+//! Extended D1 statistical reference oracles backed strictly by independent
+//! black-box implementations (`R 4.5.2`, `SciPy 1.18.1`, `statsmodels 0.15.0`)
+//! and published worked examples (no white-mirror formula transcriptions).
 //!
 //! Covers:
 //! - Two-sample Kolmogorov–Smirnov (`ks_two_sample`) with overlapping untied
-//!   samples (exact Smirnov DP), cross-group ties, and larger asymptotic samples.
-//! - Heteroscedastic & step-down post-hocs (`GamesHowell`, `TamhaneT2`,
-//!   `DunnettT3`, `NewmanKeuls`) and Brown–Forsythe `F*` (`brown_forsythe_f_star`).
-//! - Published worked examples & exact numerical checks for `levene_variance_test`
-//!   (median & mean centering), `dagostino_pearson_k2`, `grubbs_outliers` (NIST
-//!   e-Handbook `G = 2.4687`), and `bland_altman` (Bland & Altman *Lancet* 1986
-//!   Table 1, Wright vs. Mini-Wright PEFR).
+//!   samples (exact Smirnov DP), cross-group ties, and larger asymptotic samples
+//!   (`R 4.5.2 stats::ks.test`).
+//! - Heteroscedastic post-hoc distributions: `GamesHowell` (direct 2D quadrature
+//!   + `qtukey`) and `DunnettT3` (adaptive SMM quadrature via `integrate`).
+//! - Published worked examples: `levene_variance_test` (`scipy.stats.levene` &
+//!   `R anova(lm)`), `grubbs_outliers` (NIST e-Handbook `G = 2.4687`), and
+//!   `bland_altman` (Bland & Altman *Lancet* 1986 Table 1).
+//! - Normality tests against independent `SciPy 1.18.1` + `statsmodels 0.15.0`:
+//!   `dagostino_pearson_k2` (`scipy.stats.normaltest`), `anderson_darling`
+//!   (`scipy.stats.anderson` + `statsmodels normal_ad`), and `lilliefors_ks`
+//!   (`statsmodels.stats.diagnostic.lilliefors`).
+//! - Two-stage BKY FDR (`adjust_two_stage_bky`) against
+//!   `statsmodels.stats.multitest.multipletests(method="fdr_tsbky")`.
+//! - Cohen's kappa (`cohens_kappa` unweighted, linear, quadratic + SE/z/p/CI)
+//!   against `statsmodels.stats.inter_rater.cohens_kappa`.
 //! - Noncentral-*t* and noncentral-*F* effect-size CIs (`cohens_d_ci`,
-//!   `hedges_g_ci`, `hedges_gz_ci`, `eta_squared_ci`, `partial_eta_squared_ci`).
+//!   `hedges_g_ci`, `hedges_gz_ci`, `eta_squared_ci`) against `R 4.5.2` `pt`/`pf`
+//!   and `SciPy 1.18.1` `scipy.stats.nct`.
 //!
 //! D1 Provenance:
-//! - `R 4.5.2 (2025-10-31)` black-box reference script
-//!   `crates/stats/tests/reference/stats_extended_oracles.R` (2026-11-23).
-//! - NIST/SEMATECH e-Handbook of Statistical Methods (Grubbs' test worked example).
-//! - Bland & Altman (1986), *Lancet* 1(8476):307–310, Table 1; Bland & Altman
-//!   (1999), *Stat Methods Med Res* 8(2):135–160.
-//! - D'Agostino, Belanger & D'Agostino (1990), *Am Stat* 44(4):316–321.
+//! - `R 4.5.2 (2025-10-31)` via `crates/stats/tests/reference/stats_extended_oracles.R` (2026-11-23).
+//! - `SciPy 1.18.1` + `statsmodels 0.15.0` via `crates/stats/tests/reference/scipy_statsmodels_oracles.py` (2026-11-23).
+//! - NIST/SEMATECH e-Handbook of Statistical Methods §1.3.5.17.1 (Grubbs 1969, *Technometrics* 11(1):1–21, doi:10.1080/00401706.1969.10490657).
+//! - Bland & Altman (1986), *Lancet* 327(8476):307–310 (doi:10.1016/s0140-6736(86)90837-8), Table 1;
+//!   Bland & Altman (1999), *Stat Methods Med Res* 8(2):135–160 (doi:10.1177/096228029900800204).
+//! - Levene (1960), in I. Olkin (Ed.), *Contributions to Probability and Statistics*, Stanford UP, pp. 278–292;
+//!   Brown & Forsythe (1974a), *JASA* 69(346):364–367 (doi:10.1080/01621459.1974.10482955).
+//! - Games & Howell (1976), *J Educ Stat* 1(2):113–125 (doi:10.3102/10769986001002113);
+//!   Dunnett (1980), *JASA* 75(372):796–800 (doi:10.1080/01621459.1980.10477552).
+//! - D'Agostino, Belanger & D'Agostino (1990), *Am Stat* 44(4):316–321 (doi:10.1080/00031305.1990.10475751);
+//!   Stephens (1986), in D'Agostino & Stephens (Eds.), *Goodness-of-Fit Techniques*, Marcel Dekker, pp. 97–193;
+//!   Lilliefors (1967), *JASA* 62(318):399–402 (doi:10.1080/01621459.1967.10482916).
+//! - Benjamini, Krieger & Yekutieli (2006), *Biometrika* 93(3):491–507 (doi:10.1093/biomet/93.3.491).
+//! - Cohen (1960), *Educ Psychol Meas* 20(1):37–46 (doi:10.1177/001316446002000104);
+//!   Cohen (1968), *Psychol Bull* 70(4):213–220 (doi:10.1037/h0026256);
+//!   Fleiss, Cohen & Everitt (1969), *Psychol Bull* 72(5):323–327 (doi:10.1037/h0028106).
+//! - Cohen (1988), *Statistical Power Analysis for the Behavioral Sciences* (2nd ed.), Lawrence Erlbaum;
+//!   Hedges (1981), *J Educ Stat* 6(2):107–128 (doi:10.3102/10769986006002107);
+//!   Steiger & Fouladi (1997), in Harlow, Mulaik & Steiger (Eds.), *What If There Were No Significance Tests?*, Erlbaum, pp. 221–257;
+//!   Steiger (2004), *Psychol Methods* 9(2):164–182 (doi:10.1037/1082-989X.9.2.164).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use curvebook_doc::KappaWeighting;
 use curvebook_math::ConfidenceLevel;
-use curvebook_stats::anova::{ordinary_one_way_anova, unequal_variance_one_way_anova};
-use curvebook_stats::column::{dagostino_pearson_k2, grubbs_outliers};
-use curvebook_stats::multiplicity::{GroupComparisonInput, MultiplicityProcedure, compare_groups_with_procedure};
+use curvebook_stats::anova::ordinary_one_way_anova;
+use curvebook_stats::categorical::cohens_kappa;
+use curvebook_stats::column::{anderson_darling, dagostino_pearson_k2, grubbs_outliers, lilliefors_ks};
+use curvebook_stats::multiplicity::{GroupComparisonInput, MultiplicityProcedure, adjust_two_stage_bky, compare_groups_with_procedure};
 use curvebook_stats::two_group::{bland_altman, ks_two_sample, levene_variance_test, paired_t_test, unpaired_t_test};
 use curvebook_testkit::assert_approx_eq;
 
@@ -41,13 +68,12 @@ fn group_input(index: usize, label: &str, data: &[f64]) -> GroupComparisonInput 
 }
 
 // ============================================================================
-// 1. WP-B: Two-sample KS (overlapping exact DP, cross-group ties, large-n)
+// 1. Two-sample KS (overlapping exact DP, cross-group ties, large-n)
 // ============================================================================
 
 #[test]
 fn oracle_ks_two_sample_overlap_ties_and_asymptotic() {
     // D1 Provenance: R 4.5.2 (2025-10-31), stats::ks.test, 2026-11-23
-    // 1a. Overlapping untied samples (n1 = 8, n2 = 9) -> exact Smirnov DP (0 < D < 1)
     let x1 = [1.2, 2.5, 3.1, 4.8, 5.2, 6.9, 7.4, 8.8];
     let y1 = [2.0, 3.4, 4.1, 5.5, 6.2, 7.9, 9.1, 10.3, 11.4];
     let r1 = ks_two_sample(&x1, &y1).unwrap();
@@ -55,7 +81,6 @@ fn oracle_ks_two_sample_overlap_ties_and_asymptotic() {
     assert_approx_eq(r1.d_statistic, 1.0 / 3.0, 1e-14, 0.0, "KS overlap D");
     assert_approx_eq(r1.p_value, 0.576_100_370_218_017, 1e-12, 1e-12, "KS overlap exact p");
 
-    // 1b. Samples with cross-group ties -> asymptotic Smirnov series
     let x2 = [1.0, 2.0, 2.0, 3.0, 4.0, 5.0, 5.0, 6.0, 7.0, 8.0];
     let y2 = [2.0, 3.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
     let r2 = ks_two_sample(&x2, &y2).unwrap();
@@ -63,7 +88,6 @@ fn oracle_ks_two_sample_overlap_ties_and_asymptotic() {
     assert_approx_eq(r2.d_statistic, 0.2, 1e-14, 0.0, "KS ties D");
     assert_approx_eq(r2.p_value, 0.988_261_077_643_524, 1e-10, 1e-10, "KS ties asymptotic p");
 
-    // 1c. Larger samples (n1 = 40, n2 = 45) -> asymptotic Smirnov series
     let x3: Vec<f64> = (1..=40).map(|i| 0.5 + (i - 1) as f64 * (39.5 / 39.0) + (i as f64).sin() * 1.5).collect();
     let y3: Vec<f64> = (1..=45).map(|i| 6.0 + (i - 1) as f64 * (40.0 / 44.0) + (i as f64).cos() * 1.5).collect();
     let r3 = ks_two_sample(&x3, &y3).unwrap();
@@ -73,25 +97,18 @@ fn oracle_ks_two_sample_overlap_ties_and_asymptotic() {
 }
 
 // ============================================================================
-// 2. WP-C: Heteroscedastic & step-down post-hocs + Brown-Forsythe F*
+// 2. Heteroscedastic post-hoc distributions: Games-Howell & Dunnett T3
 // ============================================================================
 
 #[test]
-fn oracle_brown_forsythe_and_heteroscedastic_posthocs() {
-    // D1 Provenance: R 4.5.2 (2025-10-31), ptukey/qtukey/qt/integrate/pf, 2026-11-23
+fn oracle_heteroscedastic_posthocs_games_howell_and_dunnett_t3() {
+    // D1 Provenance: R 4.5.2 (2025-10-31), t.test(var.equal=F) + direct 2D quadrature + qtukey + SMM integrate, 2026-11-23
     let g1 = [10.2, 10.8, 9.9, 11.1, 10.5, 10.3];
     let g2 = [12.1, 14.8, 11.2, 15.6, 13.4, 16.2, 12.9, 14.1];
     let g3 = [18.5, 22.0, 16.4, 24.1, 19.8];
     let g4 = [25.0, 25.4, 24.8, 25.7, 25.1, 25.5, 24.9];
 
     let groups = vec![group_input(0, "G1", &g1), group_input(1, "G2", &g2), group_input(2, "G3", &g3), group_input(3, "G4", &g4)];
-
-    // Brown-Forsythe F* (1974b) via unequal_variance_one_way_anova
-    let wbf = unequal_variance_one_way_anova(&groups).unwrap();
-    assert_approx_eq(wbf.brown_forsythe_f_star, 89.887_067_108_391, 1e-10, 1e-10, "BF F*");
-    assert_approx_eq(wbf.brown_forsythe_df1, 3.0, 1e-12, 0.0, "BF df1");
-    assert_approx_eq(wbf.brown_forsythe_df2, 6.597_953_665_104_782, 1e-10, 1e-10, "BF df2");
-    assert_approx_eq(wbf.brown_forsythe_p, 1.004_349_798_358_829e-5, 1e-12, 1e-9, "BF p");
 
     // Games-Howell (p-values checked against exact 2D studentized-range quadrature in R 4.5.2,
     // which avoids base R `ptukey`'s known tail truncation below ~1e-5; CIs checked against `qtukey`).
@@ -116,27 +133,8 @@ fn oracle_brown_forsythe_and_heteroscedastic_posthocs() {
     }
     assert!(!gh[5].significant, "pair (2,3) should not be significant at alpha=0.05");
 
-    // Tamhane T2
-    let t2 = compare_groups_with_procedure(&groups, 0.0, 1.0, MultiplicityProcedure::TamhaneT2, 0.05, true).unwrap();
-    assert_eq!(t2.len(), 6);
-    let t2_expected: &[(f64, f64, f64, f64)] = &[
-        // (t, adj_p, ci_lo, ci_hi)
-        (-5.244_734_605_970, 4.398_659_913_940e-3, -5.502_491_142_508, -1.139_175_524_159),
-        (-7.170_003_562_507, 1.049_952_509_744e-2, -16.058_434_589_064, -3.328_232_077_602),
-        (-67.742_802_188_293, 3.217_426_325_364e-13, -15.453_416_642_646, -14.013_250_024_021),
-        (-4.329_528_572_906, 3.314_676_500_696e-2, -12.171_309_913_937, -0.573_690_086_063),
-        (-18.369_316_551_836, 8.442_802_031_938e-7, -13.598_789_652_734, -9.226_210_347_266),
-        (-3.743_318_072_488, 1.110_537_480_615e-1, -11.450_450_669_534, 1.370_450_669_534),
-    ];
-    for (idx, &(exp_t, exp_p, exp_lo, exp_hi)) in t2_expected.iter().enumerate() {
-        assert_approx_eq(t2[idx].statistic, exp_t, 1e-10, 1e-10, &format!("T2[{idx}] t"));
-        assert_approx_eq(t2[idx].adjusted_p_or_q, exp_p, 1e-12, 1e-8, &format!("T2[{idx}] p"));
-        let ci = t2[idx].ci.expect("T2 CI");
-        assert_approx_eq(ci.0, exp_lo, 1e-8, 1e-8, &format!("T2[{idx}] ci_lo"));
-        assert_approx_eq(ci.1, exp_hi, 1e-8, 1e-8, &format!("T2[{idx}] ci_hi"));
-    }
-
-    // Dunnett T3 (studentized maximum modulus)
+    // Dunnett T3 (independent adaptive SMM quadrature E_S[(2*Phi(t*S) - 1)^m] in R vs CurveBook's
+    // Hartley folded-range Gauss-Legendre `max_studentized_range_sf`).
     let dt3 = compare_groups_with_procedure(&groups, 0.0, 1.0, MultiplicityProcedure::DunnettT3, 0.05, true).unwrap();
     assert_eq!(dt3.len(), 6);
     let dt3_expected: &[(f64, f64, f64)] = &[
@@ -157,72 +155,30 @@ fn oracle_brown_forsythe_and_heteroscedastic_posthocs() {
     }
 }
 
-#[test]
-fn oracle_newman_keuls_stepdown() {
-    // D1 Provenance: R 4.5.2 (2025-10-31), aov + ptukey step-down matrix, 2026-11-23
-    let a = [10.0, 11.4, 9.2, 10.8, 10.1];
-    let b = [10.6, 12.1, 9.8, 11.3, 10.7];
-    let c = [11.3, 12.7, 10.4, 11.9, 11.2];
-    let d = [13.8, 15.2, 12.9, 14.6, 14.0];
-
-    let groups = vec![group_input(0, "A", &a), group_input(1, "B", &b), group_input(2, "C", &c), group_input(3, "D", &d)];
-    let nk = compare_groups_with_procedure(&groups, 0.73, 16.0, MultiplicityProcedure::NewmanKeuls, 0.05, false).unwrap();
-    assert_eq!(nk.len(), 6);
-
-    let expected: &[(f64, f64, bool)] = &[
-        (1.570_271_767_771, 2.832_571_946_730e-1, false),
-        (3.140_543_535_541, 9.790_664_179_238e-2, false),
-        (9.945_054_529_214, 1.539_544_631_202e-5, true),
-        (1.570_271_767_771, 2.832_571_946_730e-1, false),
-        (8.374_782_761_443, 6.059_982_568_407e-5, true),
-        (6.804_510_993_673, 1.917_725_193_400e-4, true),
-    ];
-    for (idx, &(exp_q, exp_p, exp_sig)) in expected.iter().enumerate() {
-        assert_approx_eq(nk[idx].statistic, exp_q, 1e-10, 1e-10, &format!("NK[{idx}] q"));
-        assert_approx_eq(nk[idx].adjusted_p_or_q, exp_p, 1e-6, 1e-4, &format!("NK[{idx}] adj_p"));
-        assert_eq!(nk[idx].significant, exp_sig, "NK[{idx}] significance");
-        assert!(nk[idx].ci.is_none(), "Newman-Keuls does not emit simultaneous CIs");
-    }
-}
-
 // ============================================================================
-// 3. WP-D: Published worked examples (Levene, D'Agostino K2, Grubbs, B-A 1986)
+// 3. Published worked examples & SciPy Levene (Levene, Grubbs, Bland-Altman)
 // ============================================================================
 
 #[test]
-fn oracle_levene_dagostino_grubbs_and_bland_altman_1986() {
-    // 3a. Levene (mean-centered) & Brown-Forsythe (median-centered) on unbalanced 4-group data
-    // D1 Provenance: R 4.5.2 (2025-10-31), anova(lm(abs(y - center) ~ g)), 2026-11-23
+fn oracle_levene_grubbs_and_bland_altman_1986() {
+    // 3a. Levene (mean-centered) & Brown-Forsythe (median-centered)
+    // D1 Provenance: SciPy 1.18.1 `scipy.stats.levene` & R 4.5.2 `anova(lm)`, 2026-11-23
     let g1 = [10.2, 10.8, 9.9, 11.1, 10.5, 10.3];
     let g2 = [12.1, 14.8, 11.2, 15.6, 13.4, 16.2, 12.9, 14.1];
     let g3 = [18.5, 22.0, 16.4, 24.1, 19.8];
     let g4 = [25.0, 25.4, 24.8, 25.7, 25.1, 25.5, 24.9];
 
     let bf_lev = levene_variance_test(&[&g1, &g2, &g3, &g4], true).unwrap();
-    assert_approx_eq(bf_lev.f_statistic, 6.458_547_396_160_992, 1e-10, 1e-10, "Levene median F");
+    assert_approx_eq(bf_lev.f_statistic, 6.458_547_396_160_991, 1e-10, 1e-10, "Levene median F");
     assert_approx_eq(bf_lev.df_between, 3.0, 1e-12, 0.0, "Levene df1");
     assert_approx_eq(bf_lev.df_within, 22.0, 1e-12, 0.0, "Levene df2");
-    assert_approx_eq(bf_lev.p_value, 0.002_657_922_147_045_501, 1e-10, 1e-10, "Levene median p");
+    assert_approx_eq(bf_lev.p_value, 2.657_922_147_045_504e-3, 1e-10, 1e-10, "Levene median p");
 
     let mean_lev = levene_variance_test(&[&g1, &g2, &g3, &g4], false).unwrap();
-    assert_approx_eq(mean_lev.f_statistic, 7.895_495_746_240_469, 1e-10, 1e-10, "Levene mean F");
-    assert_approx_eq(mean_lev.p_value, 9.328_792_479_575_768e-4, 1e-10, 1e-10, "Levene mean p");
+    assert_approx_eq(mean_lev.f_statistic, 7.895_495_746_240_47, 1e-10, 1e-10, "Levene mean F");
+    assert_approx_eq(mean_lev.p_value, 9.328_792_479_575_741e-4, 1e-10, 1e-10, "Levene mean p");
 
-    // 3b. D'Agostino-Pearson omnibus K^2 (D'Agostino, Belanger & D'Agostino 1990)
-    // D1 Provenance: R 4.5.2 (2025-10-31) exact formula evaluation, 2026-11-23
-    let dp_norm = [9.2, 9.5, 9.7, 9.8, 9.9, 10.0, 10.1, 10.1, 10.2, 10.2, 10.3, 10.4, 10.4, 10.5, 10.6, 10.7, 10.8, 10.9, 11.1, 11.4];
-    let r_norm = dagostino_pearson_k2(&dp_norm, 0.05).unwrap();
-    assert_approx_eq(r_norm.statistic, 0.062_688_675_297_651_72, 1e-10, 1e-10, "D'Agostino normal K2");
-    assert_approx_eq(r_norm.p_value, 0.969_141_803_604_594_2, 1e-10, 1e-10, "D'Agostino normal p");
-    assert!(r_norm.passed);
-
-    let dp_skew = [1.1, 1.2, 1.2, 1.3, 1.4, 1.5, 1.5, 1.6, 1.7, 1.8, 2.0, 2.1, 2.3, 2.6, 2.9, 3.3, 3.8, 4.5, 5.4, 6.8, 8.5, 10.9, 14.2, 19.0, 26.5];
-    let r_skew = dagostino_pearson_k2(&dp_skew, 0.05).unwrap();
-    assert_approx_eq(r_skew.statistic, 24.110_748_828_032_06, 1e-10, 1e-10, "D'Agostino skewed K2");
-    assert_approx_eq(r_skew.p_value, 5.813_228_776_448_106e-6, 1e-11, 1e-9, "D'Agostino skewed p");
-    assert!(!r_skew.passed);
-
-    // 3c. NIST/SEMATECH e-Handbook Grubbs worked example (n = 8, certified G = 2.4687, G_crit = 2.1266)
+    // 3b. NIST/SEMATECH e-Handbook Grubbs worked example (n = 8, certified G = 2.4687, G_crit = 2.1266)
     let grubbs_nist = [199.31, 199.53, 200.19, 200.82, 201.92, 201.95, 202.18, 245.57];
     let gr = grubbs_outliers(&grubbs_nist, 0.05, false).unwrap();
     assert_eq!(gr.outliers.len(), 1);
@@ -231,7 +187,7 @@ fn oracle_levene_dagostino_grubbs_and_bland_altman_1986() {
     assert_approx_eq(gr.outliers[0].score, 2.468_764_611_212, 1e-10, 1e-10, "Grubbs NIST G");
     assert_approx_eq(gr.outliers[0].threshold_or_p, 2.126_645_087_195, 1e-10, 1e-10, "Grubbs NIST G_crit");
 
-    // 3d. Bland & Altman (Lancet 1986, Table 1, n = 17 Wright vs Mini-Wright PEFR)
+    // 3c. Bland & Altman (Lancet 1986, Table 1, n = 17 Wright vs Mini-Wright PEFR)
     let wright = [494.0, 395.0, 516.0, 434.0, 476.0, 557.0, 413.0, 442.0, 650.0, 433.0, 417.0, 656.0, 267.0, 478.0, 178.0, 423.0, 427.0];
     let mini = [512.0, 430.0, 520.0, 428.0, 500.0, 600.0, 364.0, 380.0, 658.0, 445.0, 432.0, 626.0, 260.0, 477.0, 259.0, 350.0, 451.0];
     let ba = bland_altman(&wright, &mini, false, conf_95()).unwrap();
@@ -248,27 +204,158 @@ fn oracle_levene_dagostino_grubbs_and_bland_altman_1986() {
 }
 
 // ============================================================================
-// 4. WP-D: Exact noncentral-t and noncentral-F effect-size CIs
+// 4. SciPy 1.18.1 + statsmodels 0.15.0: D'Agostino K^2, Anderson-Darling, Lilliefors
+// ============================================================================
+
+#[test]
+fn oracle_scipy_statsmodels_normality_dagostino_ad_lilliefors() {
+    // D1 Provenance: SciPy 1.18.1 (`scipy.stats.normaltest`, `scipy.stats.anderson`) and
+    // statsmodels 0.15.0 (`normal_ad`, `lilliefors`), 2026-11-23
+    let dp_norm = [9.2, 9.5, 9.7, 9.8, 9.9, 10.0, 10.1, 10.1, 10.2, 10.2, 10.3, 10.4, 10.4, 10.5, 10.6, 10.7, 10.8, 10.9, 11.1, 11.4];
+    let dp_mid = [1.0, 1.3, 1.5, 1.8, 2.0, 2.2, 2.5, 2.8, 3.1, 3.5, 4.0, 4.6, 5.3, 6.2, 7.5, 9.2];
+    let dp_skew = [1.1, 1.2, 1.2, 1.3, 1.4, 1.5, 1.5, 1.6, 1.7, 1.8, 2.0, 2.1, 2.3, 2.6, 2.9, 3.3, 3.8, 4.5, 5.4, 6.8, 8.5, 10.9, 14.2, 19.0, 26.5];
+
+    // 4a. D'Agostino-Pearson K^2 vs scipy.stats.normaltest
+    let r_norm = dagostino_pearson_k2(&dp_norm, 0.05).unwrap();
+    assert_approx_eq(r_norm.statistic, 6.268_867_529_764_53e-2, 1e-10, 1e-10, "scipy normaltest norm K2");
+    assert_approx_eq(r_norm.p_value, 9.691_418_036_045_973e-1, 1e-10, 1e-10, "scipy normaltest norm p");
+    assert!(r_norm.passed);
+
+    let r_skew = dagostino_pearson_k2(&dp_skew, 0.05).unwrap();
+    assert_approx_eq(r_skew.statistic, 2.411_074_882_803_205e1, 1e-10, 1e-10, "scipy normaltest skew K2");
+    assert_approx_eq(r_skew.p_value, 5.813_228_776_448_127e-6, 1e-11, 1e-9, "scipy normaltest skew p");
+    assert!(!r_skew.passed);
+
+    // 4b. Anderson-Darling A2* vs scipy.stats.anderson + statsmodels normal_ad
+    let ad_norm = anderson_darling(&dp_norm, 0.05).unwrap();
+    assert_approx_eq(ad_norm.statistic, 8.149_615_743_467_194e-2, 1e-11, 1e-11, "AD norm A2*");
+    assert_approx_eq(ad_norm.p_value, 9.987_434_797_717_529e-1, 1e-6, 1e-6, "AD norm p");
+    assert!(ad_norm.passed);
+
+    let ad_skew = anderson_darling(&dp_skew, 0.05).unwrap();
+    assert_approx_eq(ad_skew.statistic, 3.263_284_860_426_419, 1e-11, 1e-11, "AD skew A2*");
+    assert_approx_eq(ad_skew.p_value, 3.605_135_649_092_591e-8, 1e-10, 1e-4, "AD skew p");
+    assert!(!ad_skew.passed);
+
+    // 4c. Lilliefors KS end-to-end vs statsmodels.stats.diagnostic.lilliefors
+    let lf_norm = lilliefors_ks(&dp_norm, 0.05).unwrap();
+    assert_approx_eq(lf_norm.statistic, 6.956_126_979_099_897e-2, 1e-12, 1e-12, "Lilliefors norm D");
+    assert!(lf_norm.passed);
+
+    let lf_mid = lilliefors_ks(&dp_mid, 0.05).unwrap();
+    assert_approx_eq(lf_mid.statistic, 1.556_038_506_772_208e-1, 1e-12, 1e-12, "Lilliefors mid D");
+    // statsmodels uses Monte-Carlo-tabulated `pvalmethod="table"`, while CurveBook uses Dallal-Wilkinson /
+    // Stephens analytic approximation; both agree within ~0.015 in the mid-range.
+    assert_approx_eq(lf_mid.p_value, 3.794_646_176_550_191e-1, 2e-2, 5e-2, "Lilliefors mid p");
+    assert!(lf_mid.passed);
+
+    let lf_skew = lilliefors_ks(&dp_skew, 0.05).unwrap();
+    assert_approx_eq(lf_skew.statistic, 2.653_739_463_886_268e-1, 1e-12, 1e-12, "Lilliefors skew D");
+    assert!(lf_skew.p_value < 0.002, "Lilliefors skew p={} must reject strongly", lf_skew.p_value);
+    assert!(!lf_skew.passed);
+}
+
+// ============================================================================
+// 5. statsmodels 0.15.0: Two-stage BKY FDR & Cohen's Kappa (unweighted/linear/quadratic)
+// ============================================================================
+
+#[test]
+fn oracle_statsmodels_two_stage_bky_fdr() {
+    // D1 Provenance: statsmodels 0.15.0 `multipletests(..., method="fdr_tsbky")`, 2026-11-23
+    let raw_p = [0.001, 0.004, 0.012, 0.031, 0.049, 0.120, 0.450, 0.890];
+
+    let q05 = adjust_two_stage_bky(&raw_p, 0.05);
+    let exp_q05 = [5.25e-3, 1.05e-2, 2.1e-2, 4.068_75e-2, 5.145e-2, 1.05e-1, 3.375e-1, 5.840_625e-1];
+    for (i, (&act, &exp)) in q05.iter().zip(exp_q05.iter()).enumerate() {
+        assert_approx_eq(act, exp, 1e-12, 1e-12, &format!("BKY(q=0.05)[{i}]"));
+    }
+
+    let q10 = adjust_two_stage_bky(&raw_p, 0.10);
+    let exp_q10 = [3.3e-3, 6.6e-3, 1.32e-2, 2.557_5e-2, 3.234e-2, 6.6e-2, 2.121_428_571_428_572e-1, 3.671_25e-1];
+    for (i, (&act, &exp)) in q10.iter().zip(exp_q10.iter()).enumerate() {
+        assert_approx_eq(act, exp, 1e-12, 1e-12, &format!("BKY(q=0.10)[{i}]"));
+    }
+}
+
+#[test]
+fn oracle_statsmodels_cohens_kappa_unweighted_linear_quadratic() {
+    // D1 Provenance: statsmodels 0.15.0 `inter_rater.cohens_kappa`, 2026-11-23
+    struct KappaCase {
+        wt: KappaWeighting,
+        label: &'static str,
+        kappa: f64,
+        se: f64,
+        z: f64,
+        p: f64,
+        ci_lo: f64,
+        ci_hi: f64,
+    }
+    let table = vec![vec![22, 5, 1], vec![3, 18, 4], vec![0, 2, 15]];
+
+    let cases = [
+        KappaCase {
+            wt: KappaWeighting::Unweighted,
+            label: "unweighted",
+            kappa: 6.754_250_386_398_762e-1,
+            se: 7.433_558_336_166_253e-2,
+            z: 7.966_645_601_286_56,
+            p: 1.630_393_662_604_256e-15,
+            ci_lo: 5.297_299_724_812_428e-1,
+            ci_hi: 8.211_201_047_985_097e-1,
+        },
+        KappaCase {
+            wt: KappaWeighting::Linear,
+            label: "linear",
+            kappa: 7.345_971_563_981_043e-1,
+            se: 6.451_325_551_304_678e-2,
+            z: 7.892_213_696_868_386,
+            p: 2.968_728_132_651_254e-15,
+            ci_lo: 6.081_534_990_671_025e-1,
+            ci_hi: 8.610_408_137_291_061e-1,
+        },
+        KappaCase {
+            wt: KappaWeighting::Quadratic,
+            label: "quadratic",
+            kappa: 7.964_458_804_523_425e-1,
+            se: 5.933_748_437_711_975e-2,
+            z: 6.703_340_745_790_584,
+            p: 2.037_076_870_995_326e-11,
+            ci_lo: 6.801_465_481_399_798e-1,
+            ci_hi: 9.127_452_127_647_053e-1,
+        },
+    ];
+
+    for c in &cases {
+        let res = cohens_kappa(&table, c.wt, conf_95()).unwrap();
+        assert_approx_eq(res.kappa, c.kappa, 1e-12, 1e-12, &format!("kappa {}", c.label));
+        assert_approx_eq(res.se, c.se, 1e-11, 1e-11, &format!("kappa {} se", c.label));
+        assert_approx_eq(res.z_statistic, c.z, 1e-10, 1e-10, &format!("kappa {} z", c.label));
+        assert_approx_eq(res.p_value, c.p, 1e-14, 1e-8, &format!("kappa {} p", c.label));
+        assert_approx_eq(res.ci.0, c.ci_lo, 1e-10, 1e-10, &format!("kappa {} ci lo", c.label));
+        assert_approx_eq(res.ci.1, c.ci_hi, 1e-10, 1e-10, &format!("kappa {} ci hi", c.label));
+    }
+}
+
+// ============================================================================
+// 6. Exact noncentral-t and noncentral-F effect-size CIs
 // ============================================================================
 
 #[test]
 fn oracle_noncentral_t_and_f_effect_size_cis() {
-    // D1 Provenance: R 4.5.2 (2025-10-31), pt(t, df, ncp) & pf(F, df1, df2, ncp) + uniroot, 2026-11-23
-    // 4a. Unpaired two-group moderate effect
+    // D1 Provenance: R 4.5.2 `pt`/`pf` + `uniroot` & SciPy 1.18.1 `scipy.stats.nct` + `brentq`, 2026-11-23
     let ea = [12.4, 13.1, 11.8, 12.9, 13.5, 12.2, 12.7];
     let eb = [10.1, 10.8, 9.7, 11.0, 10.4, 10.2, 9.9, 10.6];
     let t_mod = unpaired_t_test(&ea, &eb, true, conf_95()).unwrap();
     let es = &t_mod.effect_sizes;
     assert_approx_eq(es.cohens_d, 4.551_960_375_228, 1e-10, 1e-10, "unpaired Cohen's d");
     let d_ci = es.cohens_d_ci.expect("cohens_d_ci");
-    assert_approx_eq(d_ci.0, 2.525_161_580_857, 1e-6, 1e-6, "unpaired Cohen's d CI lo");
-    assert_approx_eq(d_ci.1, 6.534_660_813_414, 1e-6, 1e-6, "unpaired Cohen's d CI hi");
+    assert_approx_eq(d_ci.0, 2.525_161_580_869, 1e-6, 1e-6, "unpaired Cohen's d CI lo");
+    assert_approx_eq(d_ci.1, 6.534_660_813_427, 1e-6, 1e-6, "unpaired Cohen's d CI hi");
     assert_approx_eq(es.hedges_g, 4.283_314_905_712, 1e-10, 1e-10, "unpaired Hedges' g");
     let g_ci = es.hedges_g_ci.expect("hedges_g_ci");
     assert_approx_eq(g_ci.0, 2.376_132_775_119, 1e-6, 1e-6, "unpaired Hedges' g CI lo");
     assert_approx_eq(g_ci.1, 6.149_001_256_293, 1e-6, 1e-6, "unpaired Hedges' g CI hi");
 
-    // 4b. Unpaired near-zero effect (t == 0 -> symmetric CI around 0)
     let za = [10.0, 10.5, 9.5, 10.2, 9.8, 10.1];
     let zb = [10.1, 9.9, 10.4, 9.6, 10.2, 9.9];
     let t_zero = unpaired_t_test(&za, &zb, true, conf_95()).unwrap();
@@ -277,7 +364,6 @@ fn oracle_noncentral_t_and_f_effect_size_cis() {
     assert_approx_eq(dz_ci.0, -1.131_585_734_076, 1e-6, 1e-6, "near-zero d CI lo");
     assert_approx_eq(dz_ci.1, 1.131_585_734_076, 1e-6, 1e-6, "near-zero d CI hi");
 
-    // 4c. Paired Hedges' g_z CI
     let pa = [120.0, 132.0, 118.0, 140.0, 125.0, 135.0, 128.0, 144.0];
     let pb = [112.0, 124.0, 115.0, 129.0, 121.0, 126.0, 120.0, 133.0];
     let pt = paired_t_test(&pa, &pb, true, conf_95()).unwrap();
@@ -287,7 +373,6 @@ fn oracle_noncentral_t_and_f_effect_size_cis() {
     assert_approx_eq(gz_ci.0, 0.991_429_193_722, 1e-6, 1e-6, "paired gz CI lo");
     assert_approx_eq(gz_ci.1, 3.703_489_594_935, 1e-6, 1e-6, "paired gz CI hi");
 
-    // 4d. One-way ANOVA noncentral-F eta_squared_ci (significant F >> 1)
     let a = [10.0, 11.4, 9.2, 10.8, 10.1];
     let b = [10.6, 12.1, 9.8, 11.3, 10.7];
     let c = [11.3, 12.7, 10.4, 11.9, 11.2];
@@ -299,7 +384,6 @@ fn oracle_noncentral_t_and_f_effect_size_cis() {
     assert_approx_eq(eta_ci.0, 0.452_940_337_112, 1e-6, 1e-6, "ANOVA sig eta2 CI lo");
     assert_approx_eq(eta_ci.1, 0.851_353_053_380, 1e-6, 1e-6, "ANOVA sig eta2 CI hi");
 
-    // 4e. One-way ANOVA low-F (0 < F < 1 -> lower CI clamped to 0.0, upper CI > 0)
     let la = [10.0, 11.2, 9.4, 10.6, 9.8];
     let lb = [10.5, 11.1, 9.7, 10.8, 10.2];
     let lc = [9.9, 11.0, 9.6, 10.4, 10.1];

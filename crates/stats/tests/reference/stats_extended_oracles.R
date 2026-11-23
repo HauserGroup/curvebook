@@ -1,8 +1,13 @@
-# Reference generator for `d1_extended_stats_oracles.rs` and tightened
-# `levene_variance_test` checks in `d1_reference_oracles.rs`.
+# Independent R 4.5.2 (2025-10-31) black-box reference generator for
+# `d1_extended_stats_oracles.rs` and tightened `levene_variance_test` checks
+# in `d1_reference_oracles.rs`.
 #
 # Run under R 4.5.2 (2025-10-31):
 #   Rscript crates/stats/tests/reference/stats_extended_oracles.R
+#
+# Note: Normality (D'Agostino-Pearson K^2, Anderson-Darling, Lilliefors),
+# two-stage BKY FDR, and Cohen's kappa are generated separately by independent
+# black-box SciPy 1.18.1 + statsmodels 0.15.0 in `scipy_statsmodels_oracles.py`.
 
 options(digits = 16)
 
@@ -10,7 +15,6 @@ cat("=== 0. Existing d1_reference_oracles g_a vs g_b Brown-Forsythe Levene ===\n
 g_a <- c(23.1, 25.4, 21.8, 24.0, 26.2, 22.7)
 g_b <- c(18.5, 20.1, 17.9, 21.3, 19.2, 18.8, 20.6)
 levene_calc <- function(groups, use_median = TRUE) {
-  y <- unlist(groups)
   g <- factor(rep(seq_along(groups), lengths(groups)))
   z <- unlist(lapply(groups, function(v) abs(v - if (use_median) median(v) else mean(v))))
   fit <- anova(lm(z ~ g))
@@ -19,7 +23,7 @@ levene_calc <- function(groups, use_median = TRUE) {
 print(levene_calc(list(g_a, g_b), TRUE))
 print(levene_calc(list(g_a, g_b), FALSE))
 
-cat("\n=== 1. WP-B: Two-sample KS (overlap exact, ties asymptotic, large-n asymptotic) ===\n")
+cat("\n=== 1. Two-sample KS (overlap exact, ties asymptotic, large-n asymptotic) ===\n")
 ks_x1 <- c(1.2, 2.5, 3.1, 4.8, 5.2, 6.9, 7.4, 8.8)
 ks_y1 <- c(2.0, 3.4, 4.1, 5.5, 6.2, 7.9, 9.1, 10.3, 11.4)
 r_ks1 <- ks.test(ks_x1, ks_y1, exact = TRUE)
@@ -35,7 +39,7 @@ ks_y3 <- seq(6.0, 46.0, length.out = 45) + cos(1:45) * 1.5
 r_ks3 <- ks.test(ks_x3, ks_y3, exact = FALSE)
 cat(sprintf("large_asymp: D=%.15f p=%.15f\n", r_ks3$statistic, r_ks3$p.value))
 
-cat("\n=== 2. WP-C: Heteroscedastic & step-down post-hocs + Brown-Forsythe F* ===\n")
+cat("\n=== 2. Games-Howell (2D quadrature + qtukey) & Dunnett T3 (SMM quadrature) ===\n")
 het <- list(
   G1 = c(10.2, 10.8, 9.9, 11.1, 10.5, 10.3),
   G2 = c(12.1, 14.8, 11.2, 15.6, 13.4, 16.2, 12.9, 14.1),
@@ -47,25 +51,11 @@ m <- k * (k - 1) / 2
 ns <- sapply(het, length)
 ms <- sapply(het, mean)
 vs <- sapply(het, var)
-sds <- sapply(het, sd)
-N <- sum(ns)
-grand <- sum(ns * ms) / N
 
-# Brown-Forsythe F* (1974b)
-bf_num <- sum(ns * (ms - grand)^2)
-bf_den <- sum((1 - ns / N) * vs)
-bf_f <- bf_num / bf_den
-bf_c <- ((1 - ns / N) * vs) / bf_den
-bf_df1 <- k - 1
-bf_df2 <- 1 / sum(bf_c^2 / (ns - 1))
-bf_p <- pf(bf_f, bf_df1, bf_df2, lower.tail = FALSE)
-cat(sprintf("BF_F*: F=%.15f df1=%.1f df2=%.15f p=%.15e\n", bf_f, bf_df1, bf_df2, bf_p))
-
-# Studentized maximum modulus CDF via numerical quadrature:
+# Studentized maximum modulus CDF via independent adaptive quadrature:
 # P(max_{1..m} |T_l| <= t) = E_S[ (2*Phi(t*S) - 1)^m ], where S = sqrt(chi2_df / df).
 smm_cdf <- function(t_abs, m_pairs, df) {
   integrand <- function(u) {
-    # u = s^2 * df ~ chi2(df); change variable s = sqrt(u / df)
     s <- sqrt(u / df)
     exp(dchisq(u, df = df, log = TRUE) + m_pairs * log(pmax(2 * pnorm(t_abs * s) - 1, 0)))
   }
@@ -77,8 +67,6 @@ smm_crit <- function(alpha, m_pairs, df) {
 }
 
 # Exact 2D Studentized range survival probability P(Q_{k,df} > q) via R integrate().
-# Base R's ptukey() (Copenhaver-Holland) loses accuracy in the tail (< 1e-5) and at low df;
-# direct 2D quadrature gives >= 11 digits across all regimes.
 q_sf_exact <- function(q, k_means, df) {
   range_sf <- function(w) {
     sapply(w, function(wi) {
@@ -93,16 +81,13 @@ q_sf_exact <- function(q, k_means, df) {
 }
 
 alpha <- 0.05
-alpha_sidak <- 1 - (1 - alpha)^(1 / m)
 for (i in 1:(k - 1)) {
   for (j in (i + 1):k) {
+    wt <- t.test(het[[i]], het[[j]], var.equal = FALSE)
     diff <- ms[i] - ms[j]
-    va <- vs[i] / ns[i]
-    vb <- vs[j] / ns[j]
-    se <- sqrt(va + vb)
-    df <- (va + vb)^2 / (va^2 / (ns[i] - 1) + vb^2 / (ns[j] - 1))
-    t_stat <- diff / se
-    raw_p <- 2 * pt(-abs(t_stat), df)
+    se <- abs(diff / unname(wt$statistic))
+    df <- unname(wt$parameter)
+    t_stat <- unname(wt$statistic)
 
     # Games-Howell
     se_q <- se / sqrt(2)
@@ -111,111 +96,30 @@ for (i in 1:(k - 1)) {
     gh_qc <- qtukey(1 - alpha, k, df)
     gh_ci <- c(diff - gh_qc * se_q, diff + gh_qc * se_q)
 
-    # Tamhane T2
-    t2_p <- 1 - (1 - raw_p)^m
-    t2_tc <- qt(1 - alpha_sidak / 2, df)
-    t2_ci <- c(diff - t2_tc * se, diff + t2_tc * se)
-
     # Dunnett T3
     dt3_p <- smm_sf(abs(t_stat), m, df)
     dt3_tc <- smm_crit(alpha, m, df)
     dt3_ci <- c(diff - dt3_tc * se, diff + dt3_tc * se)
 
-    cat(sprintf("Pair (%d,%d) diff=%.12f se=%.12f df=%.12f t=%.12f raw_p=%.12e\n",
-                i - 1, j - 1, diff, se, df, t_stat, raw_p))
+    cat(sprintf("Pair (%d,%d) diff=%.12f se=%.12f df=%.12f t=%.12f\n",
+                i - 1, j - 1, diff, se, df, t_stat))
     cat(sprintf("  GH:  q=%.12f p=%.12e ci=[%.12f, %.12f]\n", gh_q, gh_p, gh_ci[1], gh_ci[2]))
-    cat(sprintf("  T2:  p=%.12e ci=[%.12f, %.12f]\n", t2_p, t2_ci[1], t2_ci[2]))
     cat(sprintf("  DT3: p=%.12e ci=[%.12f, %.12f]\n", dt3_p, dt3_ci[1], dt3_ci[2]))
   }
 }
 
-# Newman-Keuls on a 4-group homoscedastic dataset with mixed significant/non-significant spans
-nk <- list(
-  A = c(10.0, 11.4, 9.2, 10.8, 10.1),
-  B = c(10.6, 12.1, 9.8, 11.3, 10.7),
-  C = c(11.3, 12.7, 10.4, 11.9, 11.2),
-  D = c(13.8, 15.2, 12.9, 14.6, 14.0)
-)
-nk_fit <- aov(y ~ g, data = data.frame(y = unlist(nk), g = factor(rep(names(nk), lengths(nk)))))
-nk_tab <- summary(nk_fit)[[1]]
-nk_mse <- nk_tab$`Mean Sq`[2]
-nk_df <- nk_tab$Df[2]
-nk_means <- sapply(nk, mean)
-nk_ns <- sapply(nk, length)
-cat(sprintf("\nNewman-Keuls MSE=%.15f df=%.1f\n", nk_mse, nk_df))
-ord <- order(nk_means)
-pmat <- matrix(1, 4, 4)
-for (sp in 4:2) {
-  for (lo in 1:(4 - sp + 1)) {
-    hi <- lo + sp - 1
-    ia <- ord[lo]; ib <- ord[hi]
-    se_q <- sqrt(0.5 * nk_mse * (1 / nk_ns[ia] + 1 / nk_ns[ib]))
-    q <- abs(nk_means[ib] - nk_means[ia]) / se_q
-    rp <- ptukey(q, sp, nk_df, lower.tail = FALSE)
-    adj <- rp
-    if (lo > 1) adj <- max(adj, pmat[lo - 1, hi])
-    if (hi < 4) adj <- max(adj, pmat[lo, hi + 1])
-    pmat[lo, hi] <- adj
-  }
-}
-for (i in 1:3) {
-  for (j in (i + 1):4) {
-    se_q <- sqrt(0.5 * nk_mse * (1 / nk_ns[i] + 1 / nk_ns[j]))
-    q <- abs(nk_means[i] - nk_means[j]) / se_q
-    cat(sprintf("  NK (%d,%d) q=%.12f adj_p=%.12e\n", i - 1, j - 1, q, pmat[i, j]))
-  }
-}
-
-cat("\n=== 3. WP-D: Worked examples (Levene, D'Agostino-Pearson K2, Grubbs, Bland-Altman) ===\n")
+cat("\n=== 3. Published worked examples (Levene, NIST Grubbs, Bland-Altman 1986) ===\n")
 cat("Levene on het (median / mean):\n")
 print(levene_calc(het, TRUE))
 print(levene_calc(het, FALSE))
 
-# D'Agostino, Belanger & D'Agostino (1990) K^2
-dagostino_k2 <- function(x) {
-  n <- length(x)
-  m <- mean(x)
-  d <- x - m
-  m2 <- mean(d^2); m3 <- mean(d^3); m4 <- mean(d^4)
-  g1 <- m3 / m2^(3 / 2)
-  b2 <- m4 / m2^2
-  # Skewness Z1
-  Y <- g1 * sqrt((n + 1) * (n + 3) / (6 * (n - 2)))
-  beta2 <- 3 * (n^2 + 27 * n - 70) * (n + 1) * (n + 3) / ((n - 2) * (n + 5) * (n + 7) * (n + 9))
-  W2 <- -1 + sqrt(2 * (beta2 - 1))
-  delta <- 1 / sqrt(log(sqrt(W2)))
-  alpha_s <- sqrt(2 / (W2 - 1))
-  Z1 <- delta * log(Y / alpha_s + sqrt((Y / alpha_s)^2 + 1))
-  # Kurtosis Z2 (Anscombe & Glynn 1983)
-  Eb2 <- 3 * (n - 1) / (n + 1)
-  var_b2 <- 24 * n * (n - 2) * (n - 3) / ((n + 1)^2 * (n + 3) * (n + 5))
-  x_k <- (b2 - Eb2) / sqrt(var_b2)
-  sqrt_beta1 <- 6 * (n^2 - 5 * n + 2) / ((n + 7) * (n + 9)) *
-    sqrt(6 * (n + 3) * (n + 5) / (n * (n - 2) * (n - 3)))
-  A <- 6 + 8 / sqrt_beta1 * (2 / sqrt_beta1 + sqrt(1 + 4 / sqrt_beta1^2))
-  Z2 <- ((1 - 2 / (9 * A)) - ((1 - 2 / A) / (1 + x_k * sqrt(2 / (A - 4))))^(1 / 3)) / sqrt(2 / (9 * A))
-  K2 <- Z1^2 + Z2^2
-  p <- pchisq(K2, df = 2, lower.tail = FALSE)
-  c(Z1 = Z1, Z2 = Z2, K2 = K2, p = p)
-}
-dp_norm <- c(9.2, 9.5, 9.7, 9.8, 9.9, 10.0, 10.1, 10.1, 10.2, 10.2,
-             10.3, 10.4, 10.4, 10.5, 10.6, 10.7, 10.8, 10.9, 11.1, 11.4)
-dp_skew <- c(1.1, 1.2, 1.2, 1.3, 1.4, 1.5, 1.5, 1.6, 1.7, 1.8,
-             2.0, 2.1, 2.3, 2.6, 2.9, 3.3, 3.8, 4.5, 5.4, 6.8,
-             8.5, 10.9, 14.2, 19.0, 26.5)
-cat("D'Agostino K2 (near-normal n=20):\n"); print(dagostino_k2(dp_norm))
-cat("D'Agostino K2 (skewed n=25):\n"); print(dagostino_k2(dp_skew))
-
-# NIST/SEMATECH e-Handbook Grubbs worked example (n = 8, G = 2.4687)
+# NIST/SEMATECH e-Handbook Grubbs worked example (n = 8, certified G = 2.4687)
 grubbs_nist <- c(199.31, 199.53, 200.19, 200.82, 201.92, 201.95, 202.18, 245.57)
 gn <- length(grubbs_nist)
 G_val <- max(abs(grubbs_nist - mean(grubbs_nist))) / sd(grubbs_nist)
 t_crit_g <- qt(1 - 0.05 / (2 * gn), df = gn - 2)
 G_crit <- ((gn - 1) / sqrt(gn)) * sqrt(t_crit_g^2 / (gn - 2 + t_crit_g^2))
-# Exact two-sided Bonferroni-bound p-value inverted from Grubbs statistic
-t2_obs <- G_val^2 * (gn - 2) / ((gn - 1)^2 / gn - G_val^2)
-G_p <- min(1, 2 * gn * pt(-sqrt(t2_obs), df = gn - 2))
-cat(sprintf("Grubbs NIST (n=8): G=%.12f G_crit=%.12f p=%.12e\n", G_val, G_crit, G_p))
+cat(sprintf("Grubbs NIST (n=8): G=%.12f G_crit=%.12f\n", G_val, G_crit))
 
 # Bland & Altman (Lancet 1986, Table 1, n = 17 Wright vs Mini-Wright PEFR)
 ba_wright <- c(494, 395, 516, 434, 476, 557, 413, 442, 650, 433, 417, 656, 267, 478, 178, 423, 427)
@@ -237,14 +141,13 @@ cat(sprintf("  bias_ci=[%.12f, %.12f] loa_lo_ci=[%.12f, %.12f] loa_hi_ci=[%.12f,
             ba_loa_lo - t95 * ba_se_loa, ba_loa_lo + t95 * ba_se_loa,
             ba_loa_hi - t95 * ba_se_loa, ba_loa_hi + t95 * ba_se_loa))
 
-cat("\n=== 4. WP-D: Noncentral-t and Noncentral-F effect-size CIs ===\n")
+cat("\n=== 4. Noncentral-t and Noncentral-F effect-size CIs ===\n")
 nct_ci <- function(t_obs, df, conf = 0.95) {
   a <- (1 - conf) / 2
   lo <- uniroot(function(ncp) pt(t_obs, df, ncp = ncp) - (1 - a), c(t_obs - 25, t_obs + 25), tol = 1e-12)$root
   hi <- uniroot(function(ncp) pt(t_obs, df, ncp = ncp) - a, c(t_obs - 25, t_obs + 25), tol = 1e-12)$root
   c(lo, hi)
 }
-# Two-group unpaired (moderate effect)
 ea <- c(12.4, 13.1, 11.8, 12.9, 13.5, 12.2, 12.7)
 eb <- c(10.1, 10.8, 9.7, 11.0, 10.4, 10.2, 9.9, 10.6)
 na <- length(ea); nb <- length(eb); df_ab <- na + nb - 2
@@ -257,7 +160,6 @@ J_ab <- exp(lgamma(df_ab / 2) - 0.5 * log(df_ab / 2) - lgamma((df_ab - 1) / 2))
 cat(sprintf("Unpaired moderate: d=%.12f d_ci=[%.12f, %.12f] g=%.12f g_ci=[%.12f, %.12f]\n",
             d_ab, d_ci[1], d_ci[2], J_ab * d_ab, J_ab * d_ci[1], J_ab * d_ci[2]))
 
-# Two-group unpaired (near-zero effect, t ~ 0)
 za <- c(10.0, 10.5, 9.5, 10.2, 9.8, 10.1)
 zb <- c(10.1, 9.9, 10.4, 9.6, 10.2, 9.9)
 nza <- length(za); nzb <- length(zb); df_z <- nza + nzb - 2
@@ -267,7 +169,6 @@ t_z <- (mean(za) - mean(zb)) / (sp_z * sqrt(1 / nza + 1 / nzb))
 d_z_ci <- nct_ci(t_z, df_z) * sqrt(1 / nza + 1 / nzb)
 cat(sprintf("Unpaired near-zero: d=%.12f d_ci=[%.12f, %.12f]\n", d_z, d_z_ci[1], d_z_ci[2]))
 
-# Paired hedges_gz_ci
 pa <- c(120, 132, 118, 140, 125, 135, 128, 144)
 pb <- c(112, 124, 115, 129, 121, 126, 120, 133)
 pd <- pa - pb; np <- length(pd); df_p <- np - 1
@@ -276,7 +177,6 @@ J_p <- exp(lgamma(df_p / 2) - 0.5 * log(df_p / 2) - lgamma((df_p - 1) / 2))
 gz_ci <- J_p * nct_ci(t_p, df_p) / sqrt(np)
 cat(sprintf("Paired moderate: dz=%.12f gz=%.12f gz_ci=[%.12f, %.12f]\n", dz, J_p * dz, gz_ci[1], gz_ci[2]))
 
-# One-way ANOVA noncentral-F eta_squared_ci (significant + low-F clamped to 0)
 ncf_eta2_ci <- function(f_obs, df1, df2, conf = 0.95) {
   a <- (1 - conf) / 2
   lo_ncp <- if (pf(f_obs, df1, df2, ncp = 0) <= 1 - a) 0 else {
@@ -288,6 +188,12 @@ ncf_eta2_ci <- function(f_obs, df1, df2, conf = 0.95) {
   n_tot <- df1 + df2 + 1
   c(lo_ncp / (lo_ncp + n_tot), hi_ncp / (hi_ncp + n_tot))
 }
+nk <- list(
+  A = c(10.0, 11.4, 9.2, 10.8, 10.1),
+  B = c(10.6, 12.1, 9.8, 11.3, 10.7),
+  C = c(11.3, 12.7, 10.4, 11.9, 11.2),
+  D = c(13.8, 15.2, 12.9, 14.6, 14.0)
+)
 aov_sig <- summary(aov(y ~ g, data = data.frame(y = unlist(nk), g = factor(rep(names(nk), lengths(nk))))))[[1]]
 f_sig <- aov_sig$`F value`[1]; df1_s <- aov_sig$Df[1]; df2_s <- aov_sig$Df[2]
 eta2_sig <- aov_sig$`Sum Sq`[1] / sum(aov_sig$`Sum Sq`)
