@@ -17,6 +17,5 @@ curvebook-platform = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
-curvebook-testkit = { workspace = true }
 proptest = { workspace = true }
 serde_json = { workspace = true }

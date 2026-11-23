@@ -35,13 +35,11 @@ serde_json = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 egui = { workspace = true }
-egui_extras = { workspace = true }
 fontdb = { workspace = true }
 png = { workspace = true }
 
 [dev-dependencies]
 curvebook-testkit = { workspace = true }
-proptest = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 egui_kittest = { workspace = true }

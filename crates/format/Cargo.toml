@@ -15,7 +15,6 @@ crc32fast = { workspace = true }
 flate2 = { workspace = true }
 image = { workspace = true }
 quick-xml = { workspace = true }
-curvebook-math = { workspace = true }
 curvebook-palette = { workspace = true }
 curvebook-platform = { workspace = true }
 curvebook-doc = { workspace = true }
@@ -23,5 +22,4 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-curvebook-testkit = { workspace = true }
 proptest = { workspace = true }
