@@ -30,10 +30,15 @@
 
 <table>
   <tr>
-    <td align="center">
-      <img src="docs/images/workspace-layout-dark.png" alt="CurveBook Dark theme LayoutSheet composer assembling linked scatter, distribution, and survival panels" width="100%" />
+    <td align="center" width="50%">
+      <img src="docs/images/workspace-layout-dark.png" alt="CurveBook Dark theme LayoutSheet composer assembling two linked figure panels with significance brackets, embedded summary data table, and physical millimeter rulers" width="100%" />
       <br />
       <sub><em>Dark theme multi-panel <code>LayoutSheet</code> composer arranging linked figures and result annotations at publication page dimensions.</em></sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/images/workspace-anova-results.png" alt="CurveBook Light theme split workspace showing multi-tab One-Way ANOVA results, QOL-7 assumption diagnostic banner and Interpret inspector, and linked Column graph with Compact Letter Display and significance brackets" width="100%" />
+      <br />
+      <sub><em>One-Way ANOVA workbench: multiple comparisons, non-blocking <code>QOL-7</code> assumption diagnostics, and linked graph with Compact Letter Display and significance brackets.</em></sub>
     </td>
   </tr>
 </table>

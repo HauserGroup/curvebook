@@ -44,6 +44,8 @@ Run a statistical test, curve fit, or table transform from **Analyze › Analyze
 
 ![CurveBook light theme egui split workspace showing Project Navigator, Family tree, XY data table, live 4PL nonlinear dose–response curve fit with confidence bands, and Graph Inspector](../images/workspace-split-fit.png)
 
+![CurveBook light theme egui split workspace showing multi-tab One-Way ANOVA multiple comparisons, QOL-7 assumption diagnostic banner and Interpret inspector, and linked Column graph with Compact Letter Display and significance brackets](../images/workspace-anova-results.png)
+
 ---
 
 ## 4. Composing Multi-Panel Page Layouts & Embedded Images {#page-layouts}
