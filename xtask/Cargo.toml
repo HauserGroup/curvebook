@@ -19,6 +19,7 @@ full-gates = [
     "dep:curvebook-stats",
     "dep:curvebook-svg",
     "dep:curvebook-ui-egui",
+    "curvebook-ui-egui/test-support",
 ]
 
 [dependencies]

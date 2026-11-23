@@ -1,5 +1,6 @@
 //! Native `egui` human-path driver (`EguiHumanPathDriver`), IME preedit/commit checks,
 //! AccessKit/`Role::ScrollBar` parity verification, and 14-locale ellipsis verification (`R15.1`).
+#![cfg(any(test, feature = "test-support"))]
 
 use std::ops::Range;
 use std::time::Duration;

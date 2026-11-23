@@ -13,6 +13,7 @@ workspace = true
 [features]
 default = ["bundled-fonts"]
 bundled-fonts = ["curvebook-engine/bundled-fonts", "curvebook-text/bundled-fonts"]
+test-support = []
 
 [dependencies]
 curvebook-chart = { workspace = true }
@@ -40,6 +41,7 @@ png = { workspace = true }
 
 [dev-dependencies]
 curvebook-testkit = { workspace = true }
+curvebook-ui-egui = { path = ".", features = ["test-support"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 egui_kittest = { workspace = true }
