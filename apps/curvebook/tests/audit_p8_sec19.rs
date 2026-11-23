@@ -71,7 +71,7 @@ fn build_anova_bracket_session() -> Result<Session, Box<dyn std::error::Error>> 
             "sheet_id": "res-anova",
             "confidence_percent": 95.0,
             "multiplicity": "tukey",
-            "threshold": 0.05,
+            "alpha": 0.05,
             "report_confidence_intervals": false
         }),
     )?;
