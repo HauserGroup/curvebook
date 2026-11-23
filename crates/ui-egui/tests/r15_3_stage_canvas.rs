@@ -1071,3 +1071,56 @@ fn result_sheet_wide_tabs_many_sections_and_clipped_columns_pass_parity() -> Res
     }
     Ok(())
 }
+
+#[test]
+fn da_05_06_result_tabs_overflow_escape_disabled_reset_and_scroll() -> Result<(), Box<dyn std::error::Error>> {
+    let mut app = make_full_project_app()?;
+    let many_tabs: Vec<ResultTab> = (0..18)
+        .map(|i| ResultTab {
+            id: format!("ov-tab-{i}"),
+            title: format!("Result Analysis Summary Tab Number {i}"),
+            kind: ResultTabKind::MainSummary,
+            column_headers: vec![String::from("Metric"), String::from("Value")],
+            row_labels: vec![String::from("Row 1")],
+            rows: vec![vec![ResultCell::Text(format!("m{i}")), num_result_cell(i as f64)]],
+            footnotes: Vec::new(),
+        })
+        .collect();
+    let mut doc = app.document().clone();
+    if let Some(rs) = doc.result_sheet_mut(&SheetId::new("res-1")) {
+        rs.tabs = many_tabs;
+    }
+    *app.session_mut() = Session::from_document(doc);
+    app.execute_command("sheet.select", json!({ "sheet_id": "res-1" }))?;
+    app.sync_views();
+
+    let mut driver = make_stage_driver(StageHarness::new(app), ViewportMetrics::new(640.0, 420.0, 1.0), Tokens::default());
+
+    // Open overflow popup and verify ScrollArea caps popup height cleanly instead of overflowing viewport.
+    driver.click_widget_id("result.tabs.overflow")?;
+    let popup = driver.frame_meta().find_by_widget_id("popup.result.tabs.overflow").expect("overflow popup should open");
+    assert!(
+        popup.unclipped_rect.height() <= 270.0,
+        "overflow popup with 18 tabs must be scroll-capped (~240px + padding), got height {}",
+        popup.unclipped_rect.height()
+    );
+
+    // Escape dismisses overflow popup cleanly.
+    driver.press_egui_key(Key::Escape, Modifiers::NONE);
+    assert!(driver.frame_meta().find_by_widget_id("popup.result.tabs.overflow").is_none(), "Escape must dismiss result tabs overflow popup");
+    assert!(!driver.state().views.results_view.tab_overflow_open);
+
+    // Reopen, then open a blocking modal (`!enabled`) and verify `tab_overflow_open` resets cleanly.
+    driver.click_widget_id("result.tabs.overflow")?;
+    assert!(driver.state().views.results_view.tab_overflow_open);
+    driver.state_mut().app.canvas_dialogs.active_dialog = curvebook_ui_egui::dialogs_canvas::ActiveDialog::Feedback;
+    driver.run_settled();
+    assert!(!driver.state().views.results_view.tab_overflow_open, "tab_overflow_open must reset to false when !enabled");
+    driver.state_mut().app.canvas_dialogs.active_dialog = curvebook_ui_egui::dialogs_canvas::ActiveDialog::None;
+    driver.run_settled();
+    assert!(
+        driver.frame_meta().find_by_widget_id("popup.result.tabs.overflow").is_none(),
+        "stale overflow popup must not reappear after modal closes"
+    );
+    Ok(())
+}

@@ -755,7 +755,7 @@ fn render_prefs_shortcuts(
                 let row_lbl = format!("{} [{}] — {combo_txt}{custom_tag}", binding.label, binding.command_id);
                 let btn = egui::Button::new(egui::RichText::new(&row_lbl).small())
                     .fill(if selected { tokens.active_bg } else { tokens.surface_bg })
-                    .stroke(Stroke::new(1.0, if selected { tokens.accent_strong } else { tokens.border }));
+                    .stroke(Stroke::new(1.0, if selected { tokens.accent } else { tokens.border }));
                 let resp = ui.add_sized([list_w, 22.0], btn);
                 app_record_visible(
                     ui,
@@ -2333,7 +2333,7 @@ fn render_feedback_footer(ui: &mut Ui, input: &FeedbackFooterInput<'_>, meta: &m
     };
     ui.add(egui::Label::new(egui::RichText::new(length_note).color(tokens.text_muted).small()).wrap());
     if let Some(status) = draft.status_message.as_deref() {
-        ui.add(egui::Label::new(egui::RichText::new(status).color(tokens.accent_strong).small()).wrap());
+        ui.add(egui::Label::new(egui::RichText::new(status).color(tokens.accent).small()).wrap());
     }
     ui.add_space(4.0);
     ui.separator();

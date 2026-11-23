@@ -1098,7 +1098,7 @@ fn render_split_preset_popup(
             });
     });
 
-    if !input.enabled || (popup_outside_clicked(ctx, area.response.rect, anchor)) {
+    if !input.enabled || popup_dismissed(ctx, area.response.rect, anchor) {
         state.split_menu_open = false;
     }
 }
@@ -1140,7 +1140,7 @@ fn render_workspace_preset_popup(
             });
     });
 
-    if !input.enabled || popup_outside_clicked(ctx, area.response.rect, anchor) {
+    if !input.enabled || popup_dismissed(ctx, area.response.rect, anchor) {
         state.preset_menu_open = false;
     }
 }
@@ -1188,7 +1188,7 @@ fn render_tier2_overflow_popup(
             });
     });
 
-    if !input.enabled || popup_outside_clicked(ctx, area.response.rect, anchor) {
+    if !input.enabled || popup_dismissed(ctx, area.response.rect, anchor) {
         state.overflow_menu_open = false;
     }
 }
@@ -1932,6 +1932,11 @@ fn clamp_popup_pos(ctx: &egui::Context, desired: Pos2, w: f32, h: f32) -> Pos2 {
 
 fn popup_outside_clicked(ctx: &egui::Context, popup_rect: Rect, anchor_rect: Rect) -> bool {
     ctx.input(|i| i.pointer.any_released() && i.pointer.interact_pos().is_some_and(|p| !popup_rect.contains(p) && !anchor_rect.contains(p)))
+}
+
+fn popup_dismissed(ctx: &egui::Context, popup_rect: Rect, anchor_rect: Rect) -> bool {
+    let esc = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+    esc || popup_outside_clicked(ctx, popup_rect, anchor_rect)
 }
 
 fn localized_home_label(locale: &str) -> &'static str {

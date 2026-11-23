@@ -16,7 +16,7 @@ use super::{ResultsStudioTab, TrailingStudioContext, TrailingStudioEguiState};
 fn checklist_badge(status: ChecklistStatus, tokens: &Tokens) -> (&'static str, Color32) {
     match status {
         ChecklistStatus::Pass => ("PASS", tokens.link_green),
-        ChecklistStatus::Warn => ("WARN", tokens.accent_strong),
+        ChecklistStatus::Warn => ("WARN", tokens.warning),
         ChecklistStatus::Violated => ("VIOL", tokens.link_red),
         ChecklistStatus::Info => ("INFO", tokens.link_blue),
     }
@@ -62,7 +62,7 @@ pub(super) fn render_results_interpret_studio(
     let small = tokens.metrics.font_ui_small_pt;
     let (status_lbl, status_clr) = match &rs.status {
         ResultStatus::UpToDate => ("Up to date", tokens.link_green),
-        ResultStatus::Dirty => ("Recalculating", tokens.accent_strong),
+        ResultStatus::Dirty => ("Recalculating", tokens.stale),
         ResultStatus::Failed { message, .. } => {
             ui.add(egui::Label::new(egui::RichText::new(format!("Failed: {message}")).size(small).color(tokens.link_red)).wrap());
             ("Failed", tokens.link_red)

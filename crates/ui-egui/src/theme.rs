@@ -77,7 +77,9 @@ pub struct DerivedUiPalette {
     pub text_muted: Rgba8,
     pub text_disabled: Rgba8,
     pub icon: Rgba8,
+    /// Foreground accent color for labels, selected borders, focus/active indicators, and icons on `surface_bg`/`panel_bg`.
     pub accent: Rgba8,
+    /// Solid primary CTA fill color reserved strictly for fills behind [`Self::on_accent`] (never dark-surface foreground text/borders).
     pub accent_strong: Rgba8,
     pub accent_hover: Rgba8,
     pub on_accent: Rgba8,

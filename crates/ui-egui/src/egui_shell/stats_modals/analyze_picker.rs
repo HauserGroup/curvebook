@@ -241,7 +241,7 @@ fn render_analyze_entries_pane(
                 role: "status",
                 text: &msg,
                 font_size: tokens.metrics.font_ui_small_pt,
-                color: tokens.accent_strong,
+                color: tokens.accent,
                 z_layer: ZLayer::ModalDialog,
                 tooltip: Some(&msg),
                 record_meta: true,

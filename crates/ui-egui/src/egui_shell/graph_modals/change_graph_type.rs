@@ -285,7 +285,7 @@ fn render_graph_type_card(
 ) -> Response {
     let card_h = 56.0_f32;
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(card_w, card_h), Sense::click());
-    let stroke_color = if selected { gctx.tokens.accent_strong } else { gctx.tokens.border };
+    let stroke_color = if selected { gctx.tokens.accent } else { gctx.tokens.border };
     let fill_color = if selected {
         gctx.tokens.active_bg
     } else if resp.hovered() {
@@ -333,7 +333,7 @@ fn render_graph_type_card(
 fn paint_thumbnail_glyph(painter: &egui::Painter, rect: Rect, kind: ThumbnailGlyphKind, tokens: &Tokens) {
     painter.rect(rect, CornerRadius::same(4), tokens.panel_bg, Stroke::new(1.0, tokens.border), StrokeKind::Inside);
     let inner = rect.shrink(5.0);
-    let c0 = tokens.accent_strong;
+    let c0 = tokens.accent;
     let c1 = tokens.text_primary;
     let st = Stroke::new(1.5, c0);
     let axis_st = Stroke::new(1.0, tokens.text_muted);

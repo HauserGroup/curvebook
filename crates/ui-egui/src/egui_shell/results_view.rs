@@ -413,7 +413,9 @@ pub fn render_results_view_for_sheet(
                 if ov_resp.clicked() && enabled {
                     state.tab_overflow_open = !state.tab_overflow_open;
                 }
-                if state.tab_overflow_open && enabled {
+                if !enabled {
+                    state.tab_overflow_open = false;
+                } else if state.tab_overflow_open {
                     render_result_tabs_overflow_popup(
                         ui.ctx(),
                         rs.id.as_str(),
@@ -623,36 +625,43 @@ fn render_result_tabs_overflow_popup(
             .show(ui, |ui| {
                 ui.set_min_width((popup_w - 12.0).max(96.0));
                 ui.spacing_mut().item_spacing.y = tokens.metrics.space_xs;
-                for (idx, tab_id, title, x0, w) in hidden_tabs {
-                    let selected = *idx == active_idx;
-                    let item_resp = ui.add_sized(
-                        vec2(ui.available_width().max(80.0), tokens.metrics.min_hit_target_pt),
-                        egui::Button::selectable(selected, title.as_str()),
-                    );
-                    let wid = format!("result.tab.overflow.{tab_id}");
-                    meta.record_response(
-                        ui,
-                        &item_resp,
-                        FrameInspectEntryInput {
-                            widget_id: &wid,
-                            role: "menuitem",
-                            label: title,
-                            command_id: None,
-                            value: Some(json!({ "selected": selected, "index": *idx, "tab_id": tab_id })),
-                            enabled: true,
-                            disabled_reason: None,
-                            z_layer: ZLayer::DropdownMenu,
-                            ellipsized: false,
-                            full_label: None,
-                        },
-                    );
-                    if item_resp.clicked() {
-                        intents.push_select_result_tab(*idx);
-                        let x1 = *x0 + *w;
-                        state.tab_strip_scroll_x = (x1 - strip_w).max(*x0).clamp(0.0, max_scroll_x);
-                        state.tab_overflow_open = false;
-                    }
-                }
+                egui::ScrollArea::vertical().id_salt(("result_tabs_overflow_scroll", sheet_id)).max_height(240.0).auto_shrink([false, true]).show(
+                    ui,
+                    |ui| {
+                        for (idx, tab_id, title, x0, w) in hidden_tabs {
+                            let selected = *idx == active_idx;
+                            let item_resp = ui.add_sized(
+                                vec2(ui.available_width().max(80.0), tokens.metrics.min_hit_target_pt),
+                                egui::Button::selectable(selected, title.as_str()),
+                            );
+                            if item_resp.rect.intersect(ui.clip_rect()).is_positive() {
+                                let wid = format!("result.tab.overflow.{tab_id}");
+                                meta.record_response(
+                                    ui,
+                                    &item_resp,
+                                    FrameInspectEntryInput {
+                                        widget_id: &wid,
+                                        role: "menuitem",
+                                        label: title,
+                                        command_id: None,
+                                        value: Some(json!({ "selected": selected, "index": *idx, "tab_id": tab_id })),
+                                        enabled: true,
+                                        disabled_reason: None,
+                                        z_layer: ZLayer::DropdownMenu,
+                                        ellipsized: false,
+                                        full_label: None,
+                                    },
+                                );
+                            }
+                            if item_resp.clicked() {
+                                intents.push_select_result_tab(*idx);
+                                let x1 = *x0 + *w;
+                                state.tab_strip_scroll_x = (x1 - strip_w).max(*x0).clamp(0.0, max_scroll_x);
+                                state.tab_overflow_open = false;
+                            }
+                        }
+                    },
+                );
             });
     });
 
@@ -678,9 +687,10 @@ fn render_result_tabs_overflow_popup(
         });
     }
 
+    let esc_pressed = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
     let outside_clicked =
         ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !area.response.rect.contains(p) && !anchor.contains(p)));
-    if outside_clicked {
+    if esc_pressed || outside_clicked {
         state.tab_overflow_open = false;
     }
 }
@@ -1399,7 +1409,7 @@ fn paint_result_tab_chip(ui: &mut egui::Ui, spec: &ResultTabChipSpec<'_>, meta: 
     let border = if !spec.enabled {
         tokens.divider
     } else if spec.selected {
-        tokens.accent_strong
+        tokens.accent
     } else {
         tokens.border
     };

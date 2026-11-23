@@ -240,7 +240,7 @@ pub fn render_one_way_anova_modal(
 
     let frame = egui::Frame::window(&ctx.global_style())
         .fill(tokens.surface_bg)
-        .stroke(Stroke::new(1.5, tokens.accent_strong))
+        .stroke(Stroke::new(1.5, tokens.accent))
         .corner_radius(CornerRadius::same(tokens.metrics.radius_lg))
         .inner_margin(egui::Margin::same(12));
 
@@ -611,7 +611,7 @@ fn render_modal_tab_strip(
             let border = if !enablement.enabled {
                 tokens.divider
             } else if selected {
-                tokens.accent_strong
+                tokens.accent
             } else {
                 tokens.button_border
             };
@@ -898,7 +898,7 @@ fn draw_experimental_design_schematic(
 
     let plot = Rect::from_min_max(Pos2::new(rect.left() + 14.0, rect.top() + 26.0), Pos2::new(rect.right() - 14.0, rect.bottom() - 10.0));
     let cols_x = [plot.left() + plot.width() * 0.18, plot.center().x, plot.right() - plot.width() * 0.18];
-    let palette = [rc.tokens.accent_strong, rc.tokens.role_fx, rc.tokens.role_cat];
+    let palette = [rc.tokens.accent, rc.tokens.role_fx, rc.tokens.role_cat];
     let subject_offsets = [[0.22_f32, 0.35, 0.25], [0.52, 0.48, 0.62], [0.80, 0.72, 0.85]];
 
     if rc.ep.paired_or_matched {
@@ -1366,7 +1366,7 @@ fn draw_residual_qq_schematic(ui: &mut Ui, rc: &TabRenderCtx<'_>, meta: &mut Fra
         let px = plot.left() + plot.width() * *frac;
         let jitter = if idx % 2 == 0 { -2.5 } else { 2.5 };
         let py = plot.bottom() - plot.height() * *frac + jitter;
-        ui.painter().circle_filled(Pos2::new(px, py.clamp(plot.top() + 3.0, plot.bottom() - 3.0)), 2.8, rc.tokens.accent_strong);
+        ui.painter().circle_filled(Pos2::new(px, py.clamp(plot.top() + 3.0, plot.bottom() - 3.0)), 2.8, rc.tokens.accent);
     }
     let ak_title = title.to_owned();
     resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Image, true, ak_title.clone()));

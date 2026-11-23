@@ -2318,7 +2318,7 @@ fn draw_vector_plot_preview(painter: &egui::Painter, rect: Rect, arch: WelcomeAr
     painter.vline(plot.left(), plot.y_range(), Stroke::new(1.0, tokens.text_muted));
     painter.hline(plot.x_range(), plot.bottom(), Stroke::new(1.0, tokens.text_muted));
 
-    let c1 = tokens.accent_strong;
+    let c1 = tokens.accent;
     let c2 = tokens.link_green;
     match arch {
         WelcomeArchetypeChoice::Xy => {
@@ -2451,7 +2451,7 @@ fn render_arch_rail_button(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameI
     let fg = if !enabled {
         tokens.text_disabled
     } else if selected {
-        tokens.accent_strong
+        tokens.selected_accent_text()
     } else {
         tokens.text_primary
     };
@@ -2469,7 +2469,7 @@ fn render_arch_rail_button(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameI
         ui.painter().rect_filled(rect, CornerRadius::same(4), bg);
     }
     if selected {
-        ui.painter().rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, tokens.accent_strong), StrokeKind::Inside);
+        ui.painter().rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, tokens.accent), StrokeKind::Inside);
     }
 
     let glyph_rect = Rect::from_min_size(Pos2::new(rect.left() + 6.0, rect.center().y - 5.0), Vec2::new(12.0, 10.0));

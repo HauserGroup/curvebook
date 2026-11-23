@@ -57,7 +57,7 @@ pub(super) fn render_table_selection_studio(
             .color(tokens.text_strong),
     );
     if ds.frozen {
-        ui.label(egui::RichText::new("Frozen (read-only)").size(tokens.metrics.font_ui_small_pt).color(tokens.accent_strong));
+        ui.label(egui::RichText::new("Frozen (read-only)").size(tokens.metrics.font_ui_small_pt).color(tokens.accent));
     }
 
     ui.add_space(4.0);

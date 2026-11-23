@@ -26,7 +26,7 @@ fn x_subcolumn_count(arch: &TableArchetype) -> usize {
     }
 }
 
-fn is_x_column_readonly(ds: &DataSheet) -> bool {
+pub(super) fn is_x_column_readonly(ds: &DataSheet) -> bool {
     ds.frozen || matches!(&ds.archetype, TableArchetype::Xy(xy) if matches!(xy.x_mode, XColumnMode::GeneratedSequence { .. }))
 }
 
@@ -260,7 +260,7 @@ fn handle_multi_clipboard_shortcuts(ui: &Ui, mctx: &MultiGridCtx<'_>, fstate: &m
     false
 }
 
-fn first_linked_region_in_bounds(ds: &DataSheet, s: GridCellCoord, e: GridCellCoord) -> Option<&curvebook_doc::LinkedDataRegion> {
+pub(super) fn first_linked_region_in_bounds(ds: &DataSheet, s: GridCellCoord, e: GridCellCoord) -> Option<&curvebook_doc::LinkedDataRegion> {
     (s.row..=e.row).find_map(|r| (s.col..=e.col).find_map(|c| linked_region_for_cell(ds, r, c)))
 }
 

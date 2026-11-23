@@ -888,7 +888,7 @@ fn render_fit_model_tab(
                 ui.label(
                     egui::RichText::new(format!("Compiled OK ({kind_str}): params [{}]", compiled.param_names().join(", ")))
                         .small()
-                        .color(tokens.accent_strong),
+                        .color(tokens.accent),
                 );
             }
             Err(err) => {
@@ -1156,7 +1156,7 @@ fn render_fit_constrain_tab(
                     }
                 });
             } else if let ParameterScope::HookedConstant(ref src) = rule.scope {
-                ui.label(egui::RichText::new(format!("Linked hook: {}", format_hook_source_short(src))).small().color(tokens.accent_strong));
+                ui.label(egui::RichText::new(format!("Linked hook: {}", format_hook_source_short(src))).small().color(tokens.accent));
             }
 
             render_param_bound_inputs(ui, tab_ctx, p, &rule, state, meta, intents);
@@ -1167,7 +1167,7 @@ fn render_fit_constrain_tab(
         ui.add_space(6.0);
         egui::Frame::NONE
             .fill(tokens.panel_bg)
-            .stroke(Stroke::new(1.2, tokens.accent_strong))
+            .stroke(Stroke::new(1.2, tokens.accent))
             .corner_radius(egui::CornerRadius::same(tokens.metrics.radius_md))
             .inner_margin(Vec2::new(8.0, 6.0))
             .show(ui, |ui| {
@@ -1935,7 +1935,7 @@ pub fn render_hook_constant_modal(
                                 role: "status",
                                 text: &format!("Selected: {}  →  {}", sel.label, sel.preview_value),
                                 font_size: 11.5,
-                                color: tokens.accent_strong,
+                                color: tokens.accent,
                                 z_layer: ZLayer::ModalDialog,
                                 tooltip: None,
                                 record_meta: true,

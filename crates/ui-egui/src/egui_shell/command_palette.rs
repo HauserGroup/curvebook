@@ -344,7 +344,7 @@ fn render_palette_rows(
         } else {
             tokens.surface_bg
         };
-        let border = if is_selected { Stroke::new(1.0, tokens.accent_strong) } else { Stroke::NONE };
+        let border = if is_selected { Stroke::new(1.0, tokens.accent) } else { Stroke::NONE };
         let row_clip = rect.intersect(ui.clip_rect());
         ui.painter().with_clip_rect(row_clip).rect_filled(rect, CornerRadius::same(4), bg);
         if border != Stroke::NONE {

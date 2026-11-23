@@ -19,7 +19,9 @@ use curvebook_doc::{
 use curvebook_engine::Session;
 use curvebook_ui_egui::UiApp;
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
-use curvebook_ui_egui::egui_shell::data_grid::{ColumnGridEguiState, ColumnGridFrameReport, ColumnGridRenderContext, render_column_grid};
+use curvebook_ui_egui::egui_shell::data_grid::{
+    ColumnGridEguiState, ColumnGridFrameReport, ColumnGridRenderContext, render_column_grid, render_data_grid,
+};
 use curvebook_ui_egui::egui_shell::driver::{
     AccessKitRoleBounds, BETA_LOCALE_CODES, EguiHumanPathDriver, TextBleedPolicy, accesskit_accessible_name, build_driver_font_definitions,
     check_role_bounds_scrollbar_non_overlap, collect_tooltip_texts_from_accesskit,
@@ -624,5 +626,159 @@ fn column_grid_cmd_ctrl_cut_and_paste_roundtrip() -> Result<(), String> {
         .and_then(|ds| ds.cell(CellCoord::new(1, 1, 0)))
         .and_then(|c| c.value.finite_f64());
     assert_eq!(pasted, Some(src_val), "Ctrl+V must paste cut value into active ColumnGrid cell");
+    Ok(())
+}
+
+fn render_multi_grid_harness(ui: &mut egui::Ui, meta: &mut FrameInspectMeta, state: &mut GridHarnessState) {
+    let tokens = Tokens::from_theme_spec(&state.app.theme, &state.app.locale);
+    tokens.apply_to_ctx(ui.ctx());
+    let modal_blocked = state.app.canvas_dialogs.active_dialog != ActiveDialog::None;
+    let mut intents = PendingUiIntents::new();
+    egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
+        state.last_report =
+            render_data_grid(ui, &state.app, &mut state.grid, ColumnGridRenderContext::new(&tokens, modal_blocked), meta, &mut intents);
+    });
+    let will_discard = ui.ctx().will_discard();
+    intents.commit_if_settled(&mut state.app, will_discard).expect("commit settled intents");
+}
+
+#[test]
+fn da_05_03_right_click_x_cut_and_multi_y_exclude_with_linked_guard() -> Result<(), String> {
+    let mut app = UiApp::new();
+    app.execute_command(
+        "sheet.createData",
+        json!({ "sheet_id": "xy-ctx", "title": "XY Context", "kind": "xy", "cols": 2, "rows": 4, "auto_graph": false }),
+    )
+    .map_err(|e| e.to_string())?;
+    app.execute_command("table.setXCells", json!({ "sheet_id": "xy-ctx", "values": [10.0, 20.0, 30.0, 40.0] })).map_err(|e| e.to_string())?;
+    app.execute_command("table.setCells", json!({ "sheet_id": "xy-ctx", "rows": [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]] }))
+        .map_err(|e| e.to_string())?;
+    app.execute_command("sheet.select", json!({ "sheet_id": "xy-ctx" })).map_err(|e| e.to_string())?;
+    app.sync_views();
+
+    let mut driver = EguiHumanPathDriver::with_tokens_and_fonts(
+        GridHarnessState::new(app),
+        ViewportMetrics::new(1024.0, 640.0, 1.0),
+        Tokens::default(),
+        build_driver_font_definitions(),
+        render_multi_grid_harness,
+    );
+    driver.set_bleed_policy(TextBleedPolicy::AllowVerticalScrollClip);
+
+    // 1. Select Y cell (0, 0, 0), then right-click X cell (1, 0) and choose Cut Selection.
+    // Must clear X[1] WITHOUT cutting the stale Y cell (0, 0, 0).
+    driver.click_widget_id("grid.cell.0.0.0")?;
+    let x1_center = widget_center(&driver, "grid.xcell.1.0", false)?;
+    driver.click_at_button(x1_center, curvebook_ui_egui::PointerButton::Secondary, KeyModifiers::default())?;
+    driver.click_widget_id("grid.ctx.cut")?;
+
+    let ds = driver.state().app.document().data_sheet(&SheetId::from("xy-ctx")).ok_or("missing xy-ctx")?;
+    assert!(ds.archetype.x_or_time_cell(1, 0).is_some_and(|c| c.value.is_empty()), "right-click Cut on X cell must clear X[1]");
+    assert_eq!(ds.cell(CellCoord::new(0, 0, 0)).and_then(|c| c.value.finite_f64()), Some(1.0), "stale Y cell (0,0,0) must remain intact");
+
+    // 2. Multi-cell Y selection (0,0,0)..=(1,1,0): right-click inside selection -> Exclude Selected must exclude all 4 cells.
+    let c00 = widget_center(&driver, "grid.cell.0.0.0", false)?;
+    let c11 = widget_center(&driver, "grid.cell.1.1.0", false)?;
+    driver.drag(c00, c11)?;
+    driver.click_at_button(c11, curvebook_ui_egui::PointerButton::Secondary, KeyModifiers::default())?;
+    driver.click_widget_id("grid.ctx.exclude")?;
+
+    let ds2 = driver.state().app.document().data_sheet(&SheetId::from("xy-ctx")).ok_or("missing xy-ctx")?;
+    for (r, c) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+        assert!(ds2.cell(CellCoord::new(r, c, 0)).is_some_and(|cell| cell.excluded), "multi-cell right-click Exclude must mark ({r},{c},0) excluded");
+    }
+
+    // 3. Linked-region guard on multi-cell Exclude and Cut: add linked region covering (2,0)..=(3,0), select (2,0)..=(3,1),
+    // right-click Exclude and Cut must open the linked-region guard popover instead of mutating.
+    {
+        let mut doc = driver.state().app.document().clone();
+        doc.data_sheet_mut(&SheetId::from("xy-ctx"))
+            .unwrap()
+            .add_linked_region(LinkedDataRegion {
+                id: String::from("link-xy"),
+                spec: ImportLinkSpec {
+                    source: LinkSource::InternalSheet {
+                        sheet_id: SheetId::from("xy-ctx"),
+                        kind: InternalLinkKind::DataSheet,
+                        tab_id: None,
+                        range: SheetCellRange::new(CellCoord::new(0, 0, 0), CellCoord::new(1, 0, 0)),
+                    },
+                    filter: ImportFilterSpec::default(),
+                    placement: ImportPlacementSpec::default(),
+                },
+                target_range: SheetCellRange::new(CellCoord::new(2, 0, 0), CellCoord::new(3, 0, 0)),
+                provenance_summary: String::from("Linked Source › A3:A4"),
+            })
+            .map_err(|e| e.to_string())?;
+        *driver.state_mut().app.session_mut() = Session::from_document(doc);
+        driver.state_mut().app.sync_views();
+        driver.run_settled();
+    }
+    let c20 = widget_center(&driver, "grid.cell.2.0.0", false)?;
+    let c31 = widget_center(&driver, "grid.cell.3.1.0", false)?;
+    driver.drag(c20, c31)?;
+    driver.click_at_button(c31, curvebook_ui_egui::PointerButton::Secondary, KeyModifiers::default())?;
+    driver.click_widget_id("grid.ctx.exclude")?;
+    assert!(driver.state().grid.active_link_popover.is_some(), "right-click Exclude over linked region must open guard popover");
+    let ds3 = driver.state().app.document().data_sheet(&SheetId::from("xy-ctx")).ok_or("missing xy-ctx")?;
+    assert!(!ds3.cell(CellCoord::new(2, 0, 0)).is_some_and(|cell| cell.excluded), "linked cell (2,0,0) must not be excluded");
+
+    driver.state_mut().grid.active_link_popover = None;
+    driver.run_settled();
+    driver.click_at_button(c31, curvebook_ui_egui::PointerButton::Secondary, KeyModifiers::default())?;
+    driver.click_widget_id("grid.ctx.cut")?;
+    assert!(driver.state().grid.active_link_popover.is_some(), "right-click Cut over linked region must open guard popover");
+    let ds4 = driver.state().app.document().data_sheet(&SheetId::from("xy-ctx")).ok_or("missing xy-ctx")?;
+    assert_eq!(ds4.cell(CellCoord::new(2, 0, 0)).and_then(|c| c.value.finite_f64()), Some(5.0), "linked cell (2,0,0) must not be cut");
+    Ok(())
+}
+
+#[test]
+fn da_05_04_shift_tab_from_y_col0_inline_editor_focuses_x_cell() -> Result<(), String> {
+    let mut app = UiApp::new();
+    app.execute_command(
+        "sheet.createData",
+        json!({ "sheet_id": "xy-tab", "title": "XY Tab", "kind": "xy", "cols": 2, "rows": 3, "auto_graph": false }),
+    )
+    .map_err(|e| e.to_string())?;
+    app.execute_command("table.setXCells", json!({ "sheet_id": "xy-tab", "values": [1.0, 2.0, 3.0] })).map_err(|e| e.to_string())?;
+    app.execute_command("table.setCells", json!({ "sheet_id": "xy-tab", "rows": [[10.0, 20.0], [30.0, 40.0], [50.0, 60.0]] }))
+        .map_err(|e| e.to_string())?;
+    app.execute_command("sheet.select", json!({ "sheet_id": "xy-tab" })).map_err(|e| e.to_string())?;
+    app.sync_views();
+
+    let mut driver = EguiHumanPathDriver::with_tokens_and_fonts(
+        GridHarnessState::new(app),
+        ViewportMetrics::new(1024.0, 640.0, 1.0),
+        Tokens::default(),
+        build_driver_font_definitions(),
+        render_multi_grid_harness,
+    );
+    driver.set_bleed_policy(TextBleedPolicy::AllowVerticalScrollClip);
+
+    // Double-click Y cell (1, 0, 0) to start inline edit, type new value, and commit with Shift+Tab.
+    let c10 = widget_center(&driver, "grid.cell.1.0.0", false)?;
+    driver.click_at(c10)?;
+    driver.click_at(c10)?;
+    assert!(driver.state().grid.inline_edit.is_some(), "double-click must open inline editor on Y cell (1,0,0)");
+    driver.state_mut().grid.inline_edit.as_mut().unwrap().draft = String::from("35.5");
+    driver.run_settled();
+    driver.press_egui_key(egui::Key::Tab, egui::Modifiers::SHIFT);
+
+    let ds = driver.state().app.document().data_sheet(&SheetId::from("xy-tab")).ok_or("missing xy-tab")?;
+    assert_eq!(ds.cell(CellCoord::new(1, 0, 0)).and_then(|c| c.value.finite_f64()), Some(35.5), "Shift+Tab must commit inline edit");
+
+    // Verify focus landed on X cell (1, 0) by pressing Delete (which clears selected_x_cell without touching Y).
+    driver.press_egui_key(egui::Key::Delete, egui::Modifiers::NONE);
+    let ds_after = driver.state().app.document().data_sheet(&SheetId::from("xy-tab")).ok_or("missing xy-tab")?;
+    assert!(
+        ds_after.archetype.x_or_time_cell(1, 0).is_some_and(|c| c.value.is_empty()),
+        "Shift+Tab from Y col 0 subcol 0 must transition focus to X cell (1, 0); x1={:?}, y10={:?}, active={:?}, inline_edit={:?}",
+        ds_after.archetype.x_or_time_cell(1, 0),
+        ds_after.cell(CellCoord::new(1, 0, 0)),
+        driver.state().app.grid.tool.active,
+        driver.state().grid.inline_edit,
+    );
+    assert_eq!(ds_after.cell(CellCoord::new(1, 0, 0)).and_then(|c| c.value.finite_f64()), Some(35.5), "Y cell must remain committed");
     Ok(())
 }

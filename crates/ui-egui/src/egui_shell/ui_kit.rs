@@ -150,7 +150,7 @@ pub(super) enum ButtonTextAlign {
 /// Tooltip presentation mode for [`styled_button`] and [`choice_row`].
 #[derive(Debug, Clone, Copy)]
 pub(super) enum TooltipMode {
-    /// Standard `resp.on_hover_text` (or `on_disabled_hover_text` when disabled).
+    /// Standard `resp.on_hover_text` (or `on_disabled_hover_text` when the parent `Ui` is disabled).
     Standard,
     /// Immediate modal-safe `Tooltip::always_open` (avoids outer `ScrollArea` hover swallowing).
     ModalAlwaysOpen,
@@ -192,7 +192,7 @@ pub(super) fn styled_button(ui: &mut Ui, tokens: &Tokens, meta: &mut FrameInspec
     } else if spec.primary {
         tokens.on_accent
     } else if spec.selected {
-        if spec.accent_text_when_selected { tokens.accent_strong } else { tokens.text_strong }
+        if spec.accent_text_when_selected { tokens.selected_accent_text() } else { tokens.text_strong }
     } else {
         tokens.text_primary
     };
@@ -207,9 +207,10 @@ pub(super) fn styled_button(ui: &mut Ui, tokens: &Tokens, meta: &mut FrameInspec
             (clamped, (clamped - pad).max(12.0))
         }
         ButtonWidth::FitText { min_w, max_w, pad_x } => {
+            let max_w = max_w.max(12.0);
             let (probe, _) =
                 elided_galley(ui.painter(), spec.label, FontId::proportional(spec.font_size), fg, (max_w - pad_x).max(12.0), spec.break_anywhere);
-            let computed = (probe.size().x + pad_x).clamp(min_w.min(max_w), max_w.max(min_w));
+            let computed = (probe.size().x + pad_x).clamp(min_w.min(max_w), max_w);
             (computed, (computed - pad_x).max(12.0))
         }
     };
@@ -239,7 +240,7 @@ pub(super) fn styled_button(ui: &mut Ui, tokens: &Tokens, meta: &mut FrameInspec
         );
         (rect, visible, resp)
     } else {
-        let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+        let (rect, resp) = ui.allocate_exact_size(size, if spec.enabled { Sense::click() } else { Sense::hover() });
         let resp = if spec.enabled { resp } else { resp.on_hover_cursor(egui::CursorIcon::Default) };
         (rect, rect.intersect(ui.clip_rect()), resp)
     };
@@ -280,7 +281,7 @@ pub(super) fn styled_button(ui: &mut Ui, tokens: &Tokens, meta: &mut FrameInspec
     }
 
     let tip = resolve_tooltip(spec.enabled, spec.disabled_reason, ellipsized, spec.label, spec.tooltip);
-    resp = apply_tooltip(ui, resp, spec.enabled, tip, spec.tooltip_mode);
+    resp = apply_tooltip(ui, resp, tip, spec.tooltip_mode);
 
     let entry = FrameInspectEntryInput {
         widget_id: spec.widget_id,
@@ -329,7 +330,7 @@ fn button_colors(
     } else if primary {
         if hovered { tokens.hover_border } else { tokens.accent_strong }
     } else if selected {
-        tokens.accent_strong
+        tokens.accent
     } else if hovered {
         tokens.hover_border
     } else {
@@ -354,13 +355,13 @@ fn resolve_tooltip<'a>(
     custom_tip.filter(|t| !t.is_empty() && *t != label)
 }
 
-fn apply_tooltip(ui: &Ui, resp: Response, enabled: bool, tip: Option<&str>, mode: TooltipMode) -> Response {
+fn apply_tooltip(ui: &Ui, resp: Response, tip: Option<&str>, mode: TooltipMode) -> Response {
     let Some(tip) = tip else {
         return resp;
     };
     match mode {
         TooltipMode::Standard => {
-            if enabled {
+            if resp.enabled() {
                 resp.on_hover_text(tip)
             } else {
                 resp.on_disabled_hover_text(tip)
@@ -414,7 +415,7 @@ pub(super) fn choice_row(ui: &mut Ui, tokens: &Tokens, meta: &mut FrameInspectMe
         return false;
     }
 
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(row_w, spec.row_height), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(row_w, spec.row_height), if spec.enabled { Sense::click() } else { Sense::hover() });
     let resp = if spec.enabled { resp } else { resp.on_hover_cursor(egui::CursorIcon::Default) };
     let bx = Rect::from_min_size(Pos2::new(rect.left() + 1.0, rect.center().y - 6.5), Vec2::splat(13.0));
     let border = if !spec.enabled {
@@ -459,7 +460,7 @@ pub(super) fn choice_row(ui: &mut Ui, tokens: &Tokens, meta: &mut FrameInspectMe
     resp.widget_info(move || WidgetInfo::selected(ak_role, enabled, checked, ak_name.clone()));
 
     let tip = resolve_tooltip(spec.enabled, spec.disabled_reason, ellipsized, spec.label, None);
-    let resp = apply_tooltip(ui, resp, spec.enabled, tip, spec.tooltip_mode);
+    let resp = apply_tooltip(ui, resp, tip, spec.tooltip_mode);
 
     record_visible_viewport(
         ui,
@@ -529,7 +530,7 @@ pub(super) fn modal_button(ui: &mut Ui, meta: &mut FrameInspectMeta, spec: Modal
             .fill(tokens.accent_strong)
             .stroke(Stroke::new(1.0, tokens.accent_strong))
     } else if spec.selected {
-        egui::Button::new(spec.label).fill(tokens.active_bg).stroke(Stroke::new(1.0, tokens.accent_strong))
+        egui::Button::new(spec.label).fill(tokens.active_bg).stroke(Stroke::new(1.0, tokens.accent))
     } else {
         egui::Button::new(spec.label)
     };
@@ -565,7 +566,7 @@ pub(super) fn modal_button(ui: &mut Ui, meta: &mut FrameInspectMeta, spec: Modal
 pub(super) fn modal_tab(ui: &mut Ui, meta: &mut FrameInspectMeta, widget_id: &str, label: &str, selected: bool, tokens: &Tokens) -> Response {
     let btn = egui::Button::new(label)
         .fill(if selected { tokens.active_bg } else { tokens.surface_bg })
-        .stroke(Stroke::new(if selected { 1.5 } else { 1.0 }, if selected { tokens.accent_strong } else { tokens.border }));
+        .stroke(Stroke::new(if selected { 1.5 } else { 1.0 }, if selected { tokens.accent } else { tokens.border }));
     let resp = ui.add(btn);
     resp.widget_info(|| WidgetInfo::selected(Role::Tab, true, selected, label));
     record_if_visible(
@@ -720,4 +721,230 @@ where
         ModalCaptureSpec { widget_id: cfg.widget_id, title: cfg.title, z_dialog: ZLayer::ModalDialog },
         meta,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::UiThemeMode;
+
+    fn collect_shape_texts(shapes: &[egui::epaint::ClippedShape], out: &mut Vec<String>) {
+        fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(t) => out.push(t.galley.text().to_owned()),
+                egui::Shape::Vec(v) => {
+                    for s in v {
+                        walk(s, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for cs in shapes {
+            walk(&cs.shape, out);
+        }
+    }
+
+    #[test]
+    fn da_05_01_disabled_styled_button_and_choice_row_show_standard_tooltip_with_hover_sense() {
+        let ctx = egui::Context::default();
+        let tokens = Tokens::for_mode(UiThemeMode::Light);
+        let mut btn_rect = Rect::NOTHING;
+        let mut row_rect = Rect::NOTHING;
+        let mut btn_sense = Sense::click();
+        let mut btn_clicked = false;
+        let mut row_clicked = false;
+
+        let run_frame = |pointer: Option<Pos2>,
+                         time: f64,
+                         btn_rect: &mut Rect,
+                         row_rect: &mut Rect,
+                         btn_sense: &mut Sense,
+                         btn_clicked: &mut bool,
+                         row_clicked: &mut bool| {
+            let mut raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 400.0))),
+                time: Some(time),
+                ..Default::default()
+            };
+            if let Some(p) = pointer {
+                raw.events.push(egui::Event::PointerMoved(p));
+            }
+            let mut out = ctx.run_ui(raw, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let mut meta = FrameInspectMeta::new();
+                    let (resp, clicked) = styled_button(
+                        ui,
+                        &tokens,
+                        &mut meta,
+                        StyledButtonSpec {
+                            widget_id: "test.disabled_btn",
+                            role: "button",
+                            a11y_role: Role::Button,
+                            a11y_selectable: false,
+                            label: "Run Analysis",
+                            tooltip: None,
+                            command_id: None,
+                            width: ButtonWidth::Fixed(120.0),
+                            height: 24.0,
+                            font_size: 12.0,
+                            radius: 4,
+                            text_align: ButtonTextAlign::Center,
+                            break_anywhere: false,
+                            primary: false,
+                            selected: false,
+                            enabled: false,
+                            accent_text_when_selected: false,
+                            border_override: None,
+                            value: None,
+                            disabled_reason: Some("Frozen datasheet cannot be modified"),
+                            z_layer: ZLayer::ModalDialog,
+                            skip_offscreen: false,
+                            clip_interact_to_viewport: false,
+                            tooltip_mode: TooltipMode::Standard,
+                        },
+                    );
+                    let resp = resp.expect("styled_button response");
+                    *btn_rect = resp.rect;
+                    *btn_sense = resp.sense;
+                    *btn_clicked = clicked;
+
+                    *row_clicked = choice_row(
+                        ui,
+                        &tokens,
+                        &mut meta,
+                        ChoiceRowSpec {
+                            widget_id: "test.disabled_choice",
+                            label: "One-sided test",
+                            checked: false,
+                            is_radio: true,
+                            enabled: false,
+                            disabled_reason: Some("Requires two-group comparison"),
+                            font_size: 12.0,
+                            row_height: 22.0,
+                            z_layer: ZLayer::ModalDialog,
+                            value: json!(false),
+                            tooltip_mode: TooltipMode::Standard,
+                        },
+                    );
+                    if let Some(entry) = meta.find_by_widget_id("test.disabled_choice") {
+                        *row_rect = entry.clipped_rect;
+                    }
+                });
+            });
+            out.textures_delta.clear();
+            out
+        };
+
+        // Frame 0: lay out widgets.
+        let _ = run_frame(None, 0.0, &mut btn_rect, &mut row_rect, &mut btn_sense, &mut btn_clicked, &mut row_clicked);
+        assert_eq!(btn_sense, Sense::hover(), "disabled styled_button must use Sense::hover()");
+        assert!(!btn_clicked && !row_clicked);
+
+        // Hover disabled styled_button: move pointer, then dwell without moving past tooltip_delay.
+        let _ = run_frame(Some(btn_rect.center()), 0.1, &mut btn_rect, &mut row_rect, &mut btn_sense, &mut btn_clicked, &mut row_clicked);
+        let _ = run_frame(None, 1.5, &mut btn_rect, &mut row_rect, &mut btn_sense, &mut btn_clicked, &mut row_clicked);
+        let out_btn = run_frame(None, 1.55, &mut btn_rect, &mut row_rect, &mut btn_sense, &mut btn_clicked, &mut row_clicked);
+        let mut texts_btn = Vec::new();
+        collect_shape_texts(&out_btn.shapes, &mut texts_btn);
+        assert!(
+            texts_btn.iter().any(|t| t.contains("Frozen datasheet cannot be modified")),
+            "disabled styled_button must render TooltipMode::Standard tooltip, got {texts_btn:?}"
+        );
+
+        // Hover disabled choice_row: move pointer, then dwell without moving past tooltip_delay.
+        let _ = run_frame(Some(row_rect.center()), 2.0, &mut btn_rect, &mut row_rect, &mut btn_sense, &mut btn_clicked, &mut row_clicked);
+        let _ = run_frame(None, 3.5, &mut btn_rect, &mut row_rect, &mut btn_sense, &mut btn_clicked, &mut row_clicked);
+        let out_row = run_frame(None, 3.55, &mut btn_rect, &mut row_rect, &mut btn_sense, &mut btn_clicked, &mut row_clicked);
+        let mut texts_row = Vec::new();
+        collect_shape_texts(&out_row.shapes, &mut texts_row);
+        assert!(
+            texts_row.iter().any(|t| t.contains("Requires two-group comparison")),
+            "disabled choice_row must render TooltipMode::Standard tooltip, got {texts_row:?}"
+        );
+    }
+
+    #[test]
+    fn da_05_07_fit_text_respects_narrow_max_w_below_min_w() {
+        let ctx = egui::Context::default();
+        let tokens = Tokens::for_mode(UiThemeMode::Light);
+        let mut narrow_w = 0.0_f32;
+        let mut tiny_w = 0.0_f32;
+
+        let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 400.0))), ..Default::default() };
+        let mut out = ctx.run_ui(raw, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                let mut meta = FrameInspectMeta::new();
+                let (r1, _) = styled_button(
+                    ui,
+                    &tokens,
+                    &mut meta,
+                    StyledButtonSpec {
+                        widget_id: "test.fit_narrow",
+                        role: "button",
+                        a11y_role: Role::Button,
+                        a11y_selectable: false,
+                        label: "Very Long Action Button Label",
+                        tooltip: None,
+                        command_id: None,
+                        width: ButtonWidth::FitText { min_w: 96.0, max_w: 44.0, pad_x: 16.0 },
+                        height: 24.0,
+                        font_size: 12.0,
+                        radius: 4,
+                        text_align: ButtonTextAlign::Center,
+                        break_anywhere: false,
+                        primary: false,
+                        selected: false,
+                        enabled: true,
+                        accent_text_when_selected: false,
+                        border_override: None,
+                        value: None,
+                        disabled_reason: None,
+                        z_layer: ZLayer::ModalDialog,
+                        skip_offscreen: false,
+                        clip_interact_to_viewport: false,
+                        tooltip_mode: TooltipMode::Standard,
+                    },
+                );
+                narrow_w = r1.expect("r1").rect.width();
+
+                let (r2, _) = styled_button(
+                    ui,
+                    &tokens,
+                    &mut meta,
+                    StyledButtonSpec {
+                        widget_id: "test.fit_tiny",
+                        role: "button",
+                        a11y_role: Role::Button,
+                        a11y_selectable: false,
+                        label: "OK",
+                        tooltip: None,
+                        command_id: None,
+                        width: ButtonWidth::FitText { min_w: 66.0, max_w: 4.0, pad_x: 16.0 },
+                        height: 24.0,
+                        font_size: 12.0,
+                        radius: 4,
+                        text_align: ButtonTextAlign::Center,
+                        break_anywhere: false,
+                        primary: false,
+                        selected: false,
+                        enabled: true,
+                        accent_text_when_selected: false,
+                        border_override: None,
+                        value: None,
+                        disabled_reason: None,
+                        z_layer: ZLayer::ModalDialog,
+                        skip_offscreen: false,
+                        clip_interact_to_viewport: false,
+                        tooltip_mode: TooltipMode::Standard,
+                    },
+                );
+                tiny_w = r2.expect("r2").rect.width();
+            });
+        });
+        out.textures_delta.clear();
+
+        assert!(narrow_w <= 44.0 + 1e-3, "FitText must clamp to max_w (44.0) even when min_w (96.0) is larger; got {narrow_w}");
+        assert!((tiny_w - 12.0).abs() <= 1e-3, "FitText with max_w < 12.0 must guard to 12.0 without panicking; got {tiny_w}");
+    }
 }
