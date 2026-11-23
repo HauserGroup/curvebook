@@ -2445,7 +2445,7 @@ mod tests {
             let mut seed = UiApp::new();
             let _ = seed.execute_command(
                 "sheet.createData",
-                serde_json::json!({ "sheet_id": "ds-saved", "title": "Saved Assay", "kind": "xy", "data_sets": 1, "rows": 3, "auto_graph": false }),
+                serde_json::json!({ "sheet_id": "ds-saved", "title": "Saved Assay", "kind": "xy", "cols": 1, "rows": 3, "auto_graph": false }),
             )?;
             let _ = seed.execute_command("table.setXCells", serde_json::json!({ "sheet_id": "ds-saved", "values": [1.0, 2.0, 3.0] }))?;
             let _ = seed.execute_command("table.setCells", serde_json::json!({ "sheet_id": "ds-saved", "rows": [[5.0], [10.0], [15.0]] }))?;

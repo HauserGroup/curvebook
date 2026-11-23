@@ -1350,6 +1350,137 @@ pub fn hierarchical_clustering_with_metrics(
     hierarchical_clustering_from_dist(&dist_mat, linkage)
 }
 
+fn pairwise_complete_row_distance(a: &[Option<f64>], b: &[Option<f64>], n_cols: usize, metric: ClusterDistance) -> Option<f64> {
+    match metric {
+        ClusterDistance::Euclidean | ClusterDistance::Manhattan => {
+            let mut count = 0_usize;
+            let mut sum = 0.0_f64;
+            for c in 0..n_cols {
+                let Some(va) = a.get(c).copied().flatten().filter(|x| x.is_finite()) else {
+                    continue;
+                };
+                let Some(vb) = b.get(c).copied().flatten().filter(|x| x.is_finite()) else {
+                    continue;
+                };
+                let diff = (va - vb).abs();
+                sum += if matches!(metric, ClusterDistance::Euclidean) { diff * diff } else { diff };
+                count += 1;
+            }
+            if count == 0 {
+                return None;
+            }
+            let scaled = sum * ((n_cols as f64) / (count as f64));
+            let dist = if matches!(metric, ClusterDistance::Euclidean) { scaled.sqrt() } else { scaled };
+            dist.is_finite().then_some(dist)
+        }
+        ClusterDistance::Cosine => {
+            let (mut count, mut dot, mut norm_a, mut norm_b) = (0_usize, 0.0_f64, 0.0_f64, 0.0_f64);
+            for c in 0..n_cols {
+                let Some(va) = a.get(c).copied().flatten().filter(|x| x.is_finite()) else {
+                    continue;
+                };
+                let Some(vb) = b.get(c).copied().flatten().filter(|x| x.is_finite()) else {
+                    continue;
+                };
+                dot += va * vb;
+                norm_a += va * va;
+                norm_b += vb * vb;
+                count += 1;
+            }
+            if count == 0 {
+                return None;
+            }
+            let dist = if norm_a <= 1e-30 && norm_b <= 1e-30 {
+                0.0
+            } else if norm_a <= 1e-30 || norm_b <= 1e-30 {
+                1.0
+            } else {
+                let cos = (dot / (norm_a * norm_b).sqrt()).clamp(-1.0, 1.0);
+                (1.0 - cos).clamp(0.0, 2.0)
+            };
+            dist.is_finite().then_some(dist)
+        }
+        ClusterDistance::Pearson => {
+            let (mut count, mut sum_a, mut sum_b) = (0_usize, 0.0_f64, 0.0_f64);
+            for c in 0..n_cols {
+                let Some(va) = a.get(c).copied().flatten().filter(|x| x.is_finite()) else {
+                    continue;
+                };
+                let Some(vb) = b.get(c).copied().flatten().filter(|x| x.is_finite()) else {
+                    continue;
+                };
+                sum_a += va;
+                sum_b += vb;
+                count += 1;
+            }
+            if count < 2 {
+                return None;
+            }
+            let mean_a = sum_a / (count as f64);
+            let mean_b = sum_b / (count as f64);
+            let (mut num, mut da, mut db, mut max_diff) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
+            for c in 0..n_cols {
+                let Some(va) = a.get(c).copied().flatten().filter(|x| x.is_finite()) else {
+                    continue;
+                };
+                let Some(vb) = b.get(c).copied().flatten().filter(|x| x.is_finite()) else {
+                    continue;
+                };
+                let xa = va - mean_a;
+                let xb = vb - mean_b;
+                num += xa * xb;
+                da += xa * xa;
+                db += xb * xb;
+                max_diff = max_diff.max((va - vb).abs());
+            }
+            let denom = (da * db).sqrt();
+            let dist = if !denom.is_finite() || denom <= 1e-30 {
+                if max_diff < 1e-12 { 0.0 } else { 1.0 }
+            } else {
+                let r = (num / denom).clamp(-1.0, 1.0);
+                (1.0 - r).clamp(0.0, 2.0)
+            };
+            dist.is_finite().then_some(dist)
+        }
+    }
+}
+
+/// Pairwise-complete agglomerative hierarchical clustering for matrices with missing (`None`)
+/// or non-finite entries.
+///
+/// Computes pairwise distances over overlapping finite coordinates (scaling Euclidean/Manhattan
+/// distances by `n_cols / overlap_count` per Dixon 1979) and applies Lance–Williams linkage
+/// (`Lance & Williams 1967`; `Murtagh 1983`). Returns `Ok(None)` when fewer than 2 rows or
+/// columns exist or when any row pair lacks sufficient overlapping finite entries.
+///
+/// # Errors
+/// Returns [`StatsError::InvalidParameter`] if `rows.len() > MAX_CLUSTERING_N`.
+pub fn hierarchical_clustering_pairwise_complete(
+    rows: &[Vec<Option<f64>>],
+    n_cols: usize,
+    distance: ClusterDistance,
+    linkage: ClusterLinkage,
+) -> Result<Option<Vec<DendrogramMerge>>, StatsError> {
+    let n = rows.len();
+    if n < 2 || n_cols < 2 {
+        return Ok(None);
+    }
+    if n > MAX_CLUSTERING_N {
+        return Err(StatsError::InvalidParameter { name: "clustering_n", value: n as f64 });
+    }
+    let mut dist_mat = vec![vec![0.0_f64; n]; n];
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let Some(d) = pairwise_complete_row_distance(&rows[i], &rows[j], n_cols, distance) else {
+                return Ok(None);
+            };
+            dist_mat[i][j] = d;
+            dist_mat[j][i] = d;
+        }
+    }
+    hierarchical_clustering_from_dist(&dist_mat, linkage).map(Some)
+}
+
 fn resolve_node_members(node_id: isize, leaf_n: usize, merged_members: &[Vec<usize>]) -> Result<&[usize], StatsError> {
     if node_id < 0 {
         let leaf = (-node_id - 1) as usize;

@@ -959,7 +959,7 @@ fn escape_html(input: &str) -> String {
     out
 }
 
-fn strip_toml_comment(line: &str) -> &str {
+pub(crate) fn strip_toml_comment(line: &str) -> &str {
     let mut in_dq = false;
     let mut in_sq = false;
     let mut escaped = false;
@@ -988,19 +988,19 @@ fn strip_toml_comment(line: &str) -> &str {
     line
 }
 
-fn parse_section_header(line: &str) -> Option<&str> {
+pub(crate) fn parse_section_header(line: &str) -> Option<&str> {
     if line.starts_with("[[") {
         return None;
     }
     line.strip_prefix('[')?.strip_suffix(']').map(str::trim)
 }
 
-fn unquote_toml_str(s: &str) -> String {
+pub(crate) fn unquote_toml_str(s: &str) -> String {
     let t = s.trim();
     t.strip_prefix('"').and_then(|r| r.strip_suffix('"')).or_else(|| t.strip_prefix('\'').and_then(|r| r.strip_suffix('\''))).unwrap_or(t).to_owned()
 }
 
-fn extract_first_quoted(s: &str) -> String {
+pub(crate) fn extract_first_quoted(s: &str) -> String {
     for quote in ['"', '\''] {
         if let Some(rest) = s.strip_prefix(quote) {
             return rest.split(quote).next().unwrap_or("").to_owned();

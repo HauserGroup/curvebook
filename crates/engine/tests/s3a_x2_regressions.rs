@@ -59,7 +59,7 @@ fn r1_x2_01_failed_recompute_clears_stale_outputs_and_consumers_reject_failed() 
     let nl_spec = AnalysisSpec::new("nl", "tr", AnalysisKind::NonlinearRegression(NonlinearFitSpec::new("straight_line"))).unwrap();
 
     let mut s = Session::from_document(doc);
-    s.execute("analysis.add", json!({"source_sheet": "d", "sheet_id": "lin", "kind": "linear"})).unwrap();
+    s.execute("analysis.add", json!({"source_sheet_id": "d", "sheet_id": "lin", "kind": "linear"})).unwrap();
 
     // Attach pre-populated checklist/notes/comparisons onto `lin` and add downstream `tr` and `nl`,
     // then recalculate cleanly first.
@@ -267,8 +267,8 @@ fn r1_x2_02_mean_sd_n_regression_matches_raw_replicates() {
     doc.add_data_sheet(DataSheet::new("sum", "sum", TableArchetype::Xy(sum)).unwrap()).unwrap();
     let mut s = Session::from_document(doc);
 
-    s.execute("analysis.add", json!({"source_sheet": "raw", "sheet_id": "lraw", "kind": "linear"})).unwrap();
-    s.execute("analysis.add", json!({"source_sheet": "sum", "sheet_id": "lsum", "kind": "linear"})).unwrap();
+    s.execute("analysis.add", json!({"source_sheet_id": "raw", "sheet_id": "lraw", "kind": "linear"})).unwrap();
+    s.execute("analysis.add", json!({"source_sheet_id": "sum", "sheet_id": "lsum", "kind": "linear"})).unwrap();
 
     for key in ["Slope", "YIntercept", "R2"] {
         let a = scalar(&s, "lraw", key).unwrap();

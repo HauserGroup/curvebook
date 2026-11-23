@@ -12,8 +12,8 @@ use crate::UiApp;
 use crate::grid_view::parse_localized_number_input;
 use crate::i18n::tr;
 
-use super::super::super::PendingUiIntents;
 use super::super::super::unit_spinners::{ScrubUnitFieldConfig, render_scrub_unit_field};
+use super::super::super::{PendingUiIntents, UiIntent};
 use super::super::helpers::{ButtonEntry, GraphModalCtx, record_button, record_checkbox, record_input};
 use super::super::state::{GraphModalEguiState, MvOutOfRangePolicy};
 use super::series::render_fg_settings;
@@ -257,7 +257,7 @@ pub(super) fn render_fg_mv_axis_variables(ui: &mut Ui, gctx: &mut GraphModalCtx<
                     } else {
                         let _ = next.reorder_mv_level(op);
                     }
-                    gctx.intents.push_update_format_graph_state(next);
+                    gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
                 }
             }
         });
@@ -536,5 +536,5 @@ fn apply_mv_color_clamp_drafts(state: &mut GraphModalEguiState, enc: &mut Multiv
 fn push_mv_encoding(intents: &mut PendingUiIntents, mut fg: crate::dialogs_canvas::FormatGraphState, enc: MultivariateGraphEncoding) {
     fg.mv_encoding = Some(enc);
     fg.mv_levels_dirty = true;
-    intents.push_update_format_graph_state(fg);
+    intents.push(UiIntent::UpdateFormatGraphState(Box::new(fg)));
 }

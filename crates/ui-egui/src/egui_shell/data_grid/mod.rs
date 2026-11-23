@@ -5,7 +5,6 @@
 //! `1,000,000` cells), exclusion styling + tooltips, `LinkedDataRegion` guard popovers, and
 //! buffered single-commit inline editing through [`PendingUiIntents`].
 
-mod column;
 mod headers;
 mod inline_edit;
 mod linked_regions;
@@ -18,7 +17,7 @@ mod tests;
 
 use std::ops::Range;
 
-use curvebook_doc::SheetId;
+use curvebook_doc::{SheetId, TableArchetype};
 use curvebook_tools::GridCellCoord;
 use egui::{Rect, Ui, Vec2};
 
@@ -26,7 +25,6 @@ use crate::UiApp;
 
 use super::{FrameInspectMeta, LayoutMetrics, PendingUiIntents, Tokens};
 
-pub use column::render_column_grid;
 pub(in crate::egui_shell) use shared::is_linked_region_broken;
 
 /// Target inside the `Column` grid currently undergoing buffered inline text editing.
@@ -134,6 +132,38 @@ pub type DataGridRenderContext<'a> = ColumnGridRenderContext<'a>;
 /// Canonical alias for unified multi-archetype grid frame report (`R15.4`).
 pub type DataGridFrameReport = ColumnGridFrameReport;
 
+/// Render the active `Column` `DataSheet` virtualized grid into `ui` without mutating `Session`.
+///
+/// Delegates to the unified multi-archetype grid renderer (`x_subcols == 0`), returning an empty
+/// report if the active sheet is not a `Column` table.
+pub fn render_column_grid(
+    ui: &mut Ui,
+    app: &UiApp,
+    state: &mut ColumnGridEguiState,
+    render_ctx: ColumnGridRenderContext<'_>,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) -> ColumnGridFrameReport {
+    let is_column = app
+        .document()
+        .active_sheet_id
+        .as_ref()
+        .and_then(|id| app.document().data_sheet(id))
+        .is_some_and(|ds| matches!(ds.archetype, TableArchetype::Column(_)));
+    if !is_column {
+        let available = ui.available_rect_before_wrap();
+        state.ellipsized_headers = 0;
+        state.last_visible_rows = 0..0;
+        state.last_visible_subcols = 0..0;
+        return ColumnGridFrameReport {
+            grid_rect_pt: available,
+            rendered_modal_guard_open: state.active_link_popover.is_some(),
+            ..ColumnGridFrameReport::default()
+        };
+    }
+    multi_archetype::render_multi_archetype_grid(ui, app, state, render_ctx, meta, intents)
+}
+
 /// Render the active `DataSheet` natively for all 8 table archetypes (`Column`, `XY`, `Grouped`,
 /// `Contingency`, `Survival`, `PartsOfWhole`, `MultipleVariables`, `Nested`) without mutating
 /// `Session` during layout (`R15.4`, `gui-layout-spec.md` §8.2).
@@ -145,8 +175,5 @@ pub fn render_data_grid(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) -> DataGridFrameReport {
-    if shared::active_column_sheet(app).is_some() {
-        return render_column_grid(ui, app, state, render_ctx, meta, intents);
-    }
     multi_archetype::render_multi_archetype_grid(ui, app, state, render_ctx, meta, intents)
 }

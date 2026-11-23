@@ -80,7 +80,7 @@ fn fa_x2_01_internal_paste_link_preserves_baseline_and_exclude_row_predicate_acr
     doc.add_data_sheet(make_col_sheet("dst", "Normalized Target", &[&[0.0, 0.0, 0.0], &[0.0, 0.0, 0.0], &[0.0, 0.0, 0.0], &[0.0, 0.0, 0.0]])?)?;
 
     let mut s = Session::from_document(doc);
-    s.execute("analysis.add", json!({ "source_sheet": "dst", "sheet_id": "res-desc", "kind": "descriptive" }))?;
+    s.execute("analysis.add", json!({ "source_sheet_id": "dst", "sheet_id": "res-desc", "kind": "descriptive" }))?;
 
     // Baseline subtraction against col 0 plus predicate excluding rows whose adjusted B exceeds 20.
     s.execute(

@@ -41,8 +41,7 @@ use curvebook_doc::{
     ResultTabKind, SubcolumnAggregation, SummarizedPoint, TableArchetype, VariableRole,
 };
 use curvebook_math::dist::{
-    chi2_isf, chi2_ppf, chi2_sf, lilliefors_d_from_sorted, lilliefors_p_value, norm_cdf, norm_ppf, norm_sf, student_t_cdf, student_t_sf,
-    student_t_two_sided_p,
+    chi2_isf, chi2_ppf, lilliefors_d_from_sorted, lilliefors_p_value, norm_cdf, norm_ppf, norm_sf, student_t_cdf, student_t_sf, student_t_two_sided_p,
 };
 use curvebook_math::noncentral_t_ci;
 use curvebook_math::special::{gamma::gamma, inc_beta::reg_beta};
@@ -51,9 +50,9 @@ use curvebook_math::{ConfidenceLevel, MathError};
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
-    append_ignored_text_checklist_and_footnote, build_tab, checklist_item, init_result_sheet, is_ignored_non_numeric_cell, num_cell, opt_ci_cell,
+    TabBuilder, append_ignored_text_checklist_and_footnote, checklist_item, init_result_sheet, is_ignored_non_numeric_cell, num_cell, opt_ci_cell,
     opt_num_cell, p_cell_at_alpha, push_scalar, quantile_sorted, quantile_type6_sorted, quartiles_hinge, rank_with_ties,
-    sanitize_result_sheet_floats, select_kth_upper_triangle_half_sum, sorted_finite, t_crit_two_sided, try_resolve_selected_indices,
+    sanitize_result_sheet_floats, select_kth_upper_triangle_half_sum, sorted_finite, t_crit_two_sided, text_cell, try_resolve_selected_indices,
     validate_finite_slice,
 };
 use crate::error::StatsError;
@@ -842,46 +841,16 @@ pub fn dagostino_pearson_k2(values: &[f64], alpha: f64) -> Result<NormalityTestO
     if n < 8 {
         return Err(StatsError::InsufficientSampleSize { context: "D'Agostino-Pearson K^2", required: 8, actual: n });
     }
-    let moments = SummaryMoments::from_slice(values)?;
-    if moments.css == 0.0 {
-        return Err(StatsError::ZeroVariance { context: "D'Agostino-Pearson K^2" });
-    }
-    let nf = n as f64;
-    let m2 = moments.css / nf;
-    let mut s3 = NeumaierSum::new();
-    let mut s4 = NeumaierSum::new();
-    for &x in values {
-        let d = x - moments.mean;
-        let d2 = d * d;
-        s3.add(d2 * d);
-        s4.add(d2 * d2);
-    }
-    let m3 = s3.total() / nf;
-    let m4 = s4.total() / nf;
-    let sqrt_b1 = m3 / (m2 * m2.sqrt());
-    let b2 = m4 / (m2 * m2);
-
-    // Skewness normal transform (D'Agostino 1970).
-    let y = sqrt_b1 * (((nf + 1.0) * (nf + 3.0)) / (6.0 * (nf - 2.0))).sqrt();
-    let beta2 = (3.0 * (nf * nf + 27.0 * nf - 70.0) * (nf + 1.0) * (nf + 3.0)) / ((nf - 2.0) * (nf + 5.0) * (nf + 7.0) * (nf + 9.0));
-    let w2 = -1.0 + (2.0 * (beta2 - 1.0)).sqrt();
-    let delta = 1.0 / (0.5 * w2.ln()).sqrt();
-    let alpha_skew = (2.0 / (w2 - 1.0)).sqrt();
-    let z1 = delta * (y / alpha_skew).asinh();
-
-    // Kurtosis normal transform (Anscombe & Glynn 1983).
-    let e_b2 = 3.0 * (nf - 1.0) / (nf + 1.0);
-    let var_b2 = (24.0 * nf * (nf - 2.0) * (nf - 3.0)) / ((nf + 1.0).powi(2) * (nf + 3.0) * (nf + 5.0));
-    let x_k = (b2 - e_b2) / var_b2.sqrt();
-    let sqrt_beta1 =
-        (6.0 * (nf * nf - 5.0 * nf + 2.0) / ((nf + 7.0) * (nf + 9.0))) * ((6.0 * (nf + 3.0) * (nf + 5.0)) / (nf * (nf - 2.0) * (nf - 3.0))).sqrt();
-    let a = 6.0 + (8.0 / sqrt_beta1) * (2.0 / sqrt_beta1 + (1.0 + 4.0 / (sqrt_beta1 * sqrt_beta1)).sqrt());
-    let term = (1.0 - 2.0 / a) / (1.0 + x_k * (2.0 / (a - 4.0)).sqrt());
-    let z2 = ((1.0 - 2.0 / (9.0 * a)) - term.cbrt()) / (2.0 / (9.0 * a)).sqrt();
-
-    let k2 = (z1 * z1 + z2 * z2).max(0.0);
-    let p_value = chi2_sf(k2, 2.0)?.clamp(0.0, 1.0);
-    Ok(NormalityTestOutcome { test_name: String::from("D'Agostino-Pearson K2"), statistic: k2, p_value, passed: p_value > alpha })
+    let res = curvebook_math::normality::dagostino_pearson(values).map_err(|err| match err {
+        MathError::DomainError { name: "variance", .. } => StatsError::ZeroVariance { context: "D'Agostino-Pearson K^2" },
+        other => StatsError::Math(other),
+    })?;
+    Ok(NormalityTestOutcome {
+        test_name: String::from("D'Agostino-Pearson K2"),
+        statistic: res.statistic,
+        p_value: res.p_value,
+        passed: res.p_value > alpha,
+    })
 }
 
 /// Shapiro–Wilk `W` normality test (`3 <= n <= 5000`) using Shapiro & Wilk (1965) and
@@ -895,106 +864,16 @@ pub fn shapiro_wilk(values: &[f64], alpha: f64) -> Result<NormalityTestOutcome, 
     if n > 5000 {
         return Err(StatsError::InvalidParameter { name: "n", value: n as f64 });
     }
-    let sorted = sorted_finite(values);
-    let moments = SummaryMoments::from_slice(&sorted)?;
-    if moments.css == 0.0 {
-        return Err(StatsError::ZeroVariance { context: "Shapiro-Wilk" });
-    }
-
-    let weights = shapiro_wilk_weights(n)?;
-    let mut num_acc = NeumaierSum::new();
-    for i in 0..(n / 2) {
-        let w_i = weights[n - 1 - i];
-        num_acc.add(w_i * (sorted[n - 1 - i] - sorted[i]));
-    }
-    let num = num_acc.total();
-    let w = ((num * num) / moments.css).clamp(0.0, 1.0);
-    let p_value = shapiro_wilk_p_value(w, n);
-    Ok(NormalityTestOutcome { test_name: String::from("Shapiro-Wilk W"), statistic: w, p_value, passed: p_value > alpha })
-}
-
-fn poly_eval(coeffs: &[f64], x: f64) -> f64 {
-    let mut acc = 0.0_f64;
-    for &c in coeffs.iter().rev() {
-        acc = acc * x + c;
-    }
-    acc
-}
-
-fn shapiro_wilk_weights(n: usize) -> Result<Vec<f64>, StatsError> {
-    if n == 3 {
-        let s = std::f64::consts::FRAC_1_SQRT_2;
-        return Ok(vec![-s, 0.0, s]);
-    }
-    let nf = n as f64;
-    let mut m = Vec::with_capacity(n);
-    let mut m_sq_sum = 0.0_f64;
-    for i in 1..=n {
-        let p = ((i as f64) - 0.375) / (nf + 0.25);
-        let mi = norm_ppf(p)?;
-        m_sq_sum += mi * mi;
-        m.push(mi);
-    }
-    let m_norm = m_sq_sum.sqrt();
-    let mut c: Vec<f64> = m.iter().map(|&mi| mi / m_norm).collect();
-    let u = 1.0 / nf.sqrt();
-
-    let c1 = [0.0, 0.221_157, -0.147_981, -2.071_19, 4.434_685, -2.706_056];
-    let a_n = c[n - 1] + poly_eval(&c1, u);
-
-    let mut a = vec![0.0_f64; n];
-    a[n - 1] = a_n;
-    a[0] = -a_n;
-
-    if n <= 5 {
-        let phi = (m_sq_sum - 2.0 * m[n - 1] * m[n - 1]) / (1.0 - 2.0 * a_n * a_n);
-        let scale = 1.0 / phi.sqrt();
-        for i in 1..(n - 1) {
-            a[i] = m[i] * scale;
-        }
-    } else {
-        let c2 = [0.0, 0.042_981, -0.293_762, -1.752_461, 5.682_633, -3.582_633];
-        let a_nm1 = c[n - 2] + poly_eval(&c2, u);
-        a[n - 2] = a_nm1;
-        a[1] = -a_nm1;
-        let phi = (m_sq_sum - 2.0 * m[n - 1] * m[n - 1] - 2.0 * m[n - 2] * m[n - 2]) / (1.0 - 2.0 * a_n * a_n - 2.0 * a_nm1 * a_nm1);
-        let scale = 1.0 / phi.sqrt();
-        for i in 2..(n - 2) {
-            a[i] = m[i] * scale;
-        }
-    }
-    c.clear();
-    Ok(a)
-}
-
-fn shapiro_wilk_p_value(w: f64, n: usize) -> f64 {
-    if w >= 1.0 {
-        return 1.0;
-    }
-    if n == 3 {
-        // Shapiro & Wilk (1965) / Royston (1995 AS R94): exact null CDF on [3/4, 1].
-        let p = (6.0 / std::f64::consts::PI) * (w.max(0.0).sqrt().clamp(0.0, 1.0).asin() - std::f64::consts::FRAC_PI_3);
-        return p.clamp(0.0, 1.0);
-    }
-    let one_minus_w = (1.0 - w).max(1e-16);
-    if n <= 11 {
-        let nf = n as f64;
-        let gamma_val = 0.459 * nf - 2.273;
-        let lw = one_minus_w.ln();
-        if lw >= gamma_val {
-            return 0.0;
-        }
-        let y = -(gamma_val - lw).ln();
-        let mu = -0.000_671_4 * nf.powi(3) + 0.025_054 * nf.powi(2) - 0.399_78 * nf + 0.5440;
-        let sigma = (-0.002_032_2 * nf.powi(3) + 0.062_767 * nf.powi(2) - 0.778_57 * nf + 1.3822).exp();
-        norm_sf((y - mu) / sigma).clamp(0.0, 1.0)
-    } else {
-        let x = (n as f64).ln();
-        let y = one_minus_w.ln();
-        let mu = 0.003_891_5 * x.powi(3) - 0.083_751 * x.powi(2) - 0.310_82 * x - 1.5861;
-        let sigma = (0.003_030_2 * x.powi(2) - 0.082_676 * x - 0.4803).exp();
-        norm_sf((y - mu) / sigma).clamp(0.0, 1.0)
-    }
+    let res = curvebook_math::normality::shapiro_wilk(values).map_err(|err| match err {
+        MathError::DomainError { name: "variance", .. } => StatsError::ZeroVariance { context: "Shapiro-Wilk" },
+        other => StatsError::Math(other),
+    })?;
+    Ok(NormalityTestOutcome {
+        test_name: String::from("Shapiro-Wilk W"),
+        statistic: res.statistic,
+        p_value: res.p_value,
+        passed: res.p_value > alpha,
+    })
 }
 
 /// Anderson–Darling normality test (`n >= 8`) with Stephens small-sample modification `A^{*2}`.
@@ -1004,40 +883,16 @@ pub fn anderson_darling(values: &[f64], alpha: f64) -> Result<NormalityTestOutco
     if n < 8 {
         return Err(StatsError::InsufficientSampleSize { context: "Anderson-Darling", required: 8, actual: n });
     }
-    let sorted = sorted_finite(values);
-    let moments = SummaryMoments::from_slice(&sorted)?;
-    let sd = moments.sample_sd()?;
-    if sd == 0.0 {
-        return Err(StatsError::ZeroVariance { context: "Anderson-Darling" });
-    }
-    let nf = n as f64;
-    let mut sum_acc = NeumaierSum::new();
-    for i in 0..n {
-        let z_lo = (sorted[i] - moments.mean) / sd;
-        let z_hi = (sorted[n - 1 - i] - moments.mean) / sd;
-        let p_lo = norm_cdf(z_lo).clamp(1e-16, 1.0 - 1e-16);
-        let q_hi = norm_sf(z_hi).clamp(1e-16, 1.0 - 1e-16);
-        sum_acc.add(((2 * i + 1) as f64) * (p_lo.ln() + q_hi.ln()));
-    }
-    let a2 = (-nf - sum_acc.total() / nf).max(0.0);
-    let a2_star = a2 * (1.0 + 0.75 / nf + 2.25 / (nf * nf));
-
-    // Stephens (1986) Case 3 approximation; clamp `a2*` at the upper quadratic's vertex
-    // `5.709 / (2 * 0.0186) ~ 153.4677` (`P ~ 2.02e-190`) so P stays non-increasing for large A*.
-    const AD_QUADRATIC_VERTEX: f64 = 5.709 / (2.0 * 0.0186);
-    let p_value = if a2_star >= 0.6 {
-        let a_eff = a2_star.min(AD_QUADRATIC_VERTEX);
-        (1.2937 - 5.709 * a_eff + 0.0186 * a_eff * a_eff).exp()
-    } else if a2_star > 0.34 {
-        (0.9177 - 4.279 * a2_star - 1.38 * a2_star * a2_star).exp()
-    } else if a2_star > 0.20 {
-        1.0 - (-8.318 + 42.796 * a2_star - 59.938 * a2_star * a2_star).exp()
-    } else {
-        1.0 - (-13.436 + 101.14 * a2_star - 223.73 * a2_star * a2_star).exp()
-    }
-    .clamp(0.0, 1.0);
-
-    Ok(NormalityTestOutcome { test_name: String::from("Anderson-Darling A2*"), statistic: a2_star, p_value, passed: p_value > alpha })
+    let res = curvebook_math::normality::anderson_darling(values).map_err(|err| match err {
+        MathError::DomainError { name: "sd", .. } => StatsError::ZeroVariance { context: "Anderson-Darling" },
+        other => StatsError::Math(other),
+    })?;
+    Ok(NormalityTestOutcome {
+        test_name: String::from("Anderson-Darling A2*"),
+        statistic: res.statistic,
+        p_value: res.p_value,
+        passed: res.p_value > alpha,
+    })
 }
 
 /// Kolmogorov–Smirnov normality test (`n >= 5`) using the clean-room Lilliefors (1967) /
@@ -1251,8 +1106,8 @@ pub fn rout_outliers(values: &[f64], fdr_q_percent: f64) -> Result<RoutResult, S
     }
     let sorted = sorted_finite(values);
     let mut center = quantile_type6_sorted(&sorted, 0.5).or_else(|| sorted.first().copied()).ok_or(StatsError::EmptyInput)?;
-    let init_abs: Vec<f64> = sorted_finite(&values.iter().map(|v| (v - center).abs()).collect::<Vec<_>>());
-    let init_scale = quantile_sorted(&init_abs, 0.6827).unwrap_or(0.0) * (n as f64) / ((n - 1) as f64);
+    let abs_from_center = |c: f64| -> Vec<f64> { values.iter().map(|&v| (v - c).abs()).collect() };
+    let init_scale = curvebook_math::rout::compute_rsdr(&abs_from_center(center), 1);
 
     if init_scale > 0.0 {
         // Cauchy/Lorentzian IRLS refinement of location M (`K = 1`).
@@ -1273,8 +1128,7 @@ pub fn rout_outliers(values: &[f64], fdr_q_percent: f64) -> Result<RoutResult, S
             let next_center = num.total() / d;
             let shift = (next_center - center).abs();
             center = next_center;
-            let res_abs = sorted_finite(&values.iter().map(|v| (v - center).abs()).collect::<Vec<_>>());
-            let next_rsdr = quantile_sorted(&res_abs, 0.6827).unwrap_or(0.0) * (n as f64) / ((n - 1) as f64);
+            let next_rsdr = curvebook_math::rout::compute_rsdr(&abs_from_center(center), 1);
             if next_rsdr > 0.0 {
                 scale = next_rsdr;
             }
@@ -1284,52 +1138,21 @@ pub fn rout_outliers(values: &[f64], fdr_q_percent: f64) -> Result<RoutResult, S
         }
     }
 
-    let mut abs_res: Vec<(usize, f64)> = values.iter().enumerate().map(|(i, &v)| (i, (v - center).abs())).collect();
-    abs_res.sort_by(|a, b| a.1.total_cmp(&b.1));
-    let only_abs: Vec<f64> = abs_res.iter().map(|&(_, r)| r).collect();
-    let rsdr = quantile_sorted(&only_abs, 0.6827).unwrap_or(0.0) * (n as f64) / ((n - 1) as f64);
-
-    let mut outlier_mask = vec![false; n];
-    let mut outliers = Vec::new();
-    let q = fdr_q_percent / 100.0;
-    let df = (n - 1) as f64;
-    let start = ((0.70 * (n as f64)).floor() as usize).min(n - 1);
-    let rout_stat_p = |r: f64| -> Result<(f64, f64), StatsError> {
-        if rsdr > 0.0 {
-            let t_stat = r / rsdr;
-            Ok((t_stat, student_t_two_sided_p(t_stat, df)?))
-        } else if r > 0.0 {
-            // Bulk (>=68.27%) residuals are zero so RSDR == 0: any non-zero residual
-            // is infinitely many robust SDs from the bulk center with P = 0.
-            Ok((f64::INFINITY, 0.0))
-        } else {
-            Ok((0.0, 1.0))
-        }
-    };
-    let mut first_outlier_pos = None;
-    for (pos, &(_, r)) in abs_res.iter().enumerate().skip(start) {
-        let (_, p_val) = rout_stat_p(r)?;
-        let bh_thresh = q * ((n - pos) as f64) / (n as f64);
-        if p_val <= bh_thresh {
-            first_outlier_pos = Some(pos);
-            break;
-        }
-    }
-    if let Some(mut cut) = first_outlier_pos {
-        if rsdr == 0.0 && abs_res[cut].1 > 0.0 {
-            while cut > 0 && abs_res[cut - 1].1 == abs_res[cut].1 {
-                cut -= 1;
-            }
-        }
-        for &(orig_idx, r) in &abs_res[cut..] {
-            outlier_mask[orig_idx] = true;
-            let (t_stat, p_val) = rout_stat_p(r)?;
-            outliers.push(OutlierFlag { index: orig_idx, value: values[orig_idx], score: t_stat, threshold_or_p: p_val });
-        }
-    }
-
-    let cleaned_values = values.iter().enumerate().filter_map(|(i, &v)| (!outlier_mask[i]).then_some(v)).collect();
-    Ok(RoutResult { n, fdr_q_percent, robust_center: center, rsdr, outliers, cleaned_values })
+    let residuals: Vec<f64> = values.iter().map(|&v| v - center).collect();
+    let core = curvebook_math::rout::rout_detect_outliers_core(&residuals, 1, fdr_q_percent, 0.0)?;
+    let mut flagged = core.outlier_indices;
+    flagged.sort_by(|&a, &b| residuals[a].abs().total_cmp(&residuals[b].abs()));
+    let outliers = flagged
+        .into_iter()
+        .map(|orig_idx| OutlierFlag {
+            index: orig_idx,
+            value: values[orig_idx],
+            score: core.t_stats[orig_idx],
+            threshold_or_p: core.p_values[orig_idx],
+        })
+        .collect();
+    let cleaned_values = values.iter().enumerate().filter_map(|(i, &v)| (!core.is_outlier[i]).then_some(v)).collect();
+    Ok(RoutResult { n, fdr_q_percent, robust_center: center, rsdr: core.rsdr, outliers, cleaned_values })
 }
 
 // ============================================================================
@@ -1951,8 +1774,9 @@ fn append_row_descriptive_stats(
         _ => return Ok(()),
     };
 
-    let mut row_labels = Vec::new();
-    let mut rows = Vec::new();
+    let mut tab = TabBuilder::new("row-descriptive-stats", "Row-wise descriptive statistics", ResultTabKind::Diagnostics)
+        .headers(["N", "Mean", "SD", "Min", "Max"]);
+    let mut row_count = 0_usize;
     for (label, vals) in row_entries {
         if vals.is_empty() {
             continue;
@@ -1961,19 +1785,12 @@ fn append_row_descriptive_stats(
         let sd = if vals.len() >= 2 { moments.sample_sd().ok() } else { None };
         let min_v = vals.iter().copied().fold(f64::INFINITY, f64::min);
         let max_v = vals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        row_labels.push(label);
-        rows.push(vec![num_cell(vals.len() as f64), num_cell(moments.mean), opt_num_cell(sd), num_cell(min_v), num_cell(max_v)]);
+        tab.push_row(label, [num_cell(vals.len() as f64), num_cell(moments.mean), opt_num_cell(sd), num_cell(min_v), num_cell(max_v)]);
+        row_count += 1;
     }
 
-    if !rows.is_empty() {
-        res.tabs.push(build_tab(
-            "row-descriptive-stats",
-            "Row-wise descriptive statistics",
-            ResultTabKind::Diagnostics,
-            vec![String::from("N"), String::from("Mean"), String::from("SD"), String::from("Min"), String::from("Max")],
-            row_labels,
-            rows,
-        ));
+    if row_count > 0 {
+        res.tabs.push(tab.build());
     }
     Ok(())
 }
@@ -2016,17 +1833,15 @@ fn build_normal_qq_tab(raw_series: &[IndexedRawSeries]) -> Result<Option<ResultT
     if raw_series.is_empty() {
         return Ok(None);
     }
-    let headers = vec![
-        String::from("Data Set"),
-        String::from("Order Index"),
-        String::from("Normal Expected"),
-        String::from("Normal Observed"),
-        String::from("Lognormal Expected (ln)"),
-        String::from("Lognormal Observed ln(Y)"),
-    ];
-    let mut row_labels = Vec::new();
-    let mut rows = Vec::new();
-    let mut footnotes = Vec::new();
+    let mut tab = TabBuilder::new("normal-qq", "Normal & Lognormal Q-Q Quantiles", ResultTabKind::NormalQq).headers([
+        "Data Set",
+        "Order Index",
+        "Normal Expected",
+        "Normal Observed",
+        "Lognormal Expected (ln)",
+        "Lognormal Observed ln(Y)",
+    ]);
+    let mut row_count = 0_usize;
 
     for series in raw_series {
         let label = &series.label;
@@ -2037,62 +1852,46 @@ fn build_normal_qq_tab(raw_series: &[IndexedRawSeries]) -> Result<Option<ResultT
         let normal_pairs = qq_expected_quantiles(vals, false)?;
         let lognormal_pairs = qq_expected_quantiles(vals, true).ok();
         if lognormal_pairs.is_none() {
-            footnotes.push(format!("{label}: lognormal Q-Q coordinates omitted because one or more values are <= 0."));
+            tab.push_footnote(format!("{label}: lognormal Q-Q coordinates omitted because one or more values are <= 0."));
         }
         for (idx, &(exp_n, obs_n)) in normal_pairs.iter().enumerate() {
             let (exp_ln, obs_ln) = match lognormal_pairs.as_ref().and_then(|v| v.get(idx)) {
                 Some(&(e, o)) => (Some(e), Some(o)),
                 None => (None, None),
             };
-            row_labels.push(format!("{label} #{}", idx + 1));
-            rows.push(vec![
-                ResultCell::Text(label.clone()),
-                num_cell((idx + 1) as f64),
-                num_cell(exp_n),
-                num_cell(obs_n),
-                opt_num_cell(exp_ln),
-                opt_num_cell(obs_ln),
-            ]);
+            tab.push_row(
+                format!("{label} #{}", idx + 1),
+                [text_cell(label.clone()), num_cell((idx + 1) as f64), num_cell(exp_n), num_cell(obs_n), opt_num_cell(exp_ln), opt_num_cell(obs_ln)],
+            );
+            row_count += 1;
         }
     }
 
-    if rows.is_empty() {
-        return Ok(None);
-    }
-    let mut tab = build_tab("normal-qq", "Normal & Lognormal Q-Q Quantiles", ResultTabKind::NormalQq, headers, row_labels, rows);
-    tab.footnotes = footnotes;
-    Ok(Some(tab))
+    Ok((row_count > 0).then(|| tab.build()))
 }
 
 fn populate_pooled_descriptive_sheet(res: &mut ResultSheet, pooled_series: &[IndexedPooledSeries], conf: ConfidenceLevel) -> Result<(), StatsError> {
     let mut pooled = Vec::with_capacity(pooled_series.len());
     for ps in pooled_series {
-        pooled.push(summarize_pre_summarized_points(&ps.label, &ps.points, conf)?);
-    }
-    let headers: Vec<String> = pooled.iter().map(|p| p.label.clone()).collect();
-    let row_labels = vec![
-        String::from("Entered summary rows"),
-        String::from("Total N"),
-        String::from("Pooled Mean"),
-        String::from("Pooled SD"),
-        String::from("Pooled SEM"),
-        format!("{}% CI of Mean", conf.percent()),
-    ];
-    let mut rows = vec![Vec::with_capacity(pooled.len()); row_labels.len()];
-    for (ps, p) in pooled_series.iter().zip(&pooled) {
-        rows[0].push(num_cell(p.point_count as f64));
-        rows[1].push(num_cell(p.total_n));
-        rows[2].push(num_cell(p.mean));
-        rows[3].push(opt_num_cell(p.sd));
-        rows[4].push(opt_num_cell(p.sem));
-        rows[5].push(opt_ci_cell(p.mean_ci));
+        let p = summarize_pre_summarized_points(&ps.label, &ps.points, conf)?;
         let ds_idx = Some(ps.data_set_index);
         push_scalar(res, "Mean", ds_idx, p.mean);
         if let Some(sd) = p.sd {
             push_scalar(res, "SD", ds_idx, sd);
         }
+        pooled.push(p);
     }
-    res.tabs.push(build_tab("desc-pooled", "Descriptive Statistics (Pooled)", ResultTabKind::DescriptiveSummary, headers, row_labels, rows));
+    res.tabs.push(
+        TabBuilder::new("desc-pooled", "Descriptive Statistics (Pooled)", ResultTabKind::DescriptiveSummary)
+            .headers(pooled.iter().map(|p| p.label.as_str()))
+            .row("Entered summary rows", pooled.iter().map(|p| num_cell(p.point_count as f64)))
+            .row("Total N", pooled.iter().map(|p| num_cell(p.total_n)))
+            .row("Pooled Mean", pooled.iter().map(|p| num_cell(p.mean)))
+            .row("Pooled SD", pooled.iter().map(|p| opt_num_cell(p.sd)))
+            .row("Pooled SEM", pooled.iter().map(|p| opt_num_cell(p.sem)))
+            .row(format!("{}% CI of Mean", conf.percent()), pooled.iter().map(|p| opt_ci_cell(p.mean_ci)))
+            .build(),
+    );
     res.checklist.push(checklist_item(
         "Pre-summarized input mode",
         ChecklistStatus::Info,
@@ -2103,122 +1902,69 @@ fn populate_pooled_descriptive_sheet(res: &mut ResultSheet, pooled_series: &[Ind
 }
 
 fn build_descriptive_tab(summaries: &[DescriptiveSummary], conf: ConfidenceLevel) -> ResultTab {
-    let headers: Vec<String> = summaries.iter().map(|s| s.label.clone()).collect();
     let custom_pair = summaries.iter().find_map(|s| match (s.custom_lower_percentile, s.custom_upper_percentile) {
         (Some((p_lo, _)), Some((p_hi, _))) => Some((p_lo, p_hi)),
         _ => None,
     });
-    let mut row_labels = vec![
-        String::from("Number of values"),
-        String::from("Excluded values"),
-        String::from("Minimum"),
-        String::from("25% Percentile"),
-        String::from("Median"),
-        String::from("75% Percentile"),
-        String::from("Maximum"),
-        String::from("Range"),
-        String::from("IQR"),
-        String::from("Mean"),
-        String::from("Std. Deviation"),
-        String::from("CI of SD"),
-        String::from("Std. Error of Mean"),
-        format!("{}% CI of Mean", conf.percent()),
-        format!("{}% CI of Median", conf.percent()),
-        String::from("Median CI actual confidence (%)"),
-        String::from("Coefficient of variation (%)"),
-        String::from("Geometric mean"),
-        String::from("Geometric SD factor"),
-        String::from("Harmonic mean"),
-        String::from("Quadratic mean (RMS)"),
-        String::from("Skewness"),
-        String::from("Excess kurtosis"),
-        String::from("Sum"),
-    ];
+    let pct = conf.percent();
+    let mut tab = TabBuilder::new("desc-summary", "Descriptive Statistics", ResultTabKind::DescriptiveSummary)
+        .headers(summaries.iter().map(|s| s.label.as_str()))
+        .row("Number of values", summaries.iter().map(|s| num_cell(s.n as f64)))
+        .row("Excluded values", summaries.iter().map(|s| num_cell(s.excluded_count as f64)))
+        .row("Minimum", summaries.iter().map(|s| num_cell(s.min)))
+        .row("25% Percentile", summaries.iter().map(|s| num_cell(s.q1)))
+        .row("Median", summaries.iter().map(|s| num_cell(s.median)))
+        .row("75% Percentile", summaries.iter().map(|s| num_cell(s.q3)))
+        .row("Maximum", summaries.iter().map(|s| num_cell(s.max)))
+        .row("Range", summaries.iter().map(|s| num_cell(s.range)))
+        .row("IQR", summaries.iter().map(|s| num_cell(s.iqr)))
+        .row("Mean", summaries.iter().map(|s| num_cell(s.mean)))
+        .row("Std. Deviation", summaries.iter().map(|s| opt_num_cell(s.sd)))
+        .row("CI of SD", summaries.iter().map(|s| opt_ci_cell(s.sd_ci)))
+        .row("Std. Error of Mean", summaries.iter().map(|s| opt_num_cell(s.sem)))
+        .row(format!("{pct}% CI of Mean"), summaries.iter().map(|s| opt_ci_cell(s.mean_ci)))
+        .row(format!("{pct}% CI of Median"), summaries.iter().map(|s| opt_ci_cell(s.median_ci.map(|m| (m.lower, m.upper)))))
+        .row("Median CI actual confidence (%)", summaries.iter().map(|s| opt_num_cell(s.median_ci.map(|m| m.actual_confidence_percent))))
+        .row("Coefficient of variation (%)", summaries.iter().map(|s| opt_num_cell(s.cv_percent)))
+        .row("Geometric mean", summaries.iter().map(|s| opt_num_cell(s.geometric_mean)))
+        .row("Geometric SD factor", summaries.iter().map(|s| opt_num_cell(s.geometric_sd_factor)))
+        .row("Harmonic mean", summaries.iter().map(|s| opt_num_cell(s.harmonic_mean)))
+        .row("Quadratic mean (RMS)", summaries.iter().map(|s| num_cell(s.quadratic_mean)))
+        .row("Skewness", summaries.iter().map(|s| opt_num_cell(s.skewness)))
+        .row("Excess kurtosis", summaries.iter().map(|s| opt_num_cell(s.excess_kurtosis)))
+        .row("Sum", summaries.iter().map(|s| num_cell(s.sum)));
     if let Some((p_lo, p_hi)) = custom_pair {
-        row_labels.push(format!("{p_lo}% Percentile (Type 7)"));
-        row_labels.push(format!("{p_hi}% Percentile (Type 7)"));
+        tab.push_row(format!("{p_lo}% Percentile (Type 7)"), summaries.iter().map(|s| opt_num_cell(s.custom_lower_percentile.map(|(_, v)| v))))
+            .push_row(format!("{p_hi}% Percentile (Type 7)"), summaries.iter().map(|s| opt_num_cell(s.custom_upper_percentile.map(|(_, v)| v))))
+            .push_footnote(format!(
+                "Standard quartiles (25%, Median, 75%) use Hyndman & Fan (1996) Type 6; custom percentiles ({p_lo}%, {p_hi}%) use Hyndman & Fan (1996) Type 7 continuous linear interpolation."
+            ));
     }
-    let mut rows = vec![Vec::with_capacity(summaries.len()); row_labels.len()];
-    for s in summaries {
-        rows[0].push(num_cell(s.n as f64));
-        rows[1].push(num_cell(s.excluded_count as f64));
-        rows[2].push(num_cell(s.min));
-        rows[3].push(num_cell(s.q1));
-        rows[4].push(num_cell(s.median));
-        rows[5].push(num_cell(s.q3));
-        rows[6].push(num_cell(s.max));
-        rows[7].push(num_cell(s.range));
-        rows[8].push(num_cell(s.iqr));
-        rows[9].push(num_cell(s.mean));
-        rows[10].push(opt_num_cell(s.sd));
-        rows[11].push(opt_ci_cell(s.sd_ci));
-        rows[12].push(opt_num_cell(s.sem));
-        rows[13].push(opt_ci_cell(s.mean_ci));
-        rows[14].push(opt_ci_cell(s.median_ci.map(|m| (m.lower, m.upper))));
-        rows[15].push(opt_num_cell(s.median_ci.map(|m| m.actual_confidence_percent)));
-        rows[16].push(opt_num_cell(s.cv_percent));
-        rows[17].push(opt_num_cell(s.geometric_mean));
-        rows[18].push(opt_num_cell(s.geometric_sd_factor));
-        rows[19].push(opt_num_cell(s.harmonic_mean));
-        rows[20].push(num_cell(s.quadratic_mean));
-        rows[21].push(opt_num_cell(s.skewness));
-        rows[22].push(opt_num_cell(s.excess_kurtosis));
-        rows[23].push(num_cell(s.sum));
-        if custom_pair.is_some() {
-            rows[24].push(opt_num_cell(s.custom_lower_percentile.map(|(_, v)| v)));
-            rows[25].push(opt_num_cell(s.custom_upper_percentile.map(|(_, v)| v)));
-        }
-    }
-    let mut tab = build_tab("desc-summary", "Descriptive Statistics", ResultTabKind::DescriptiveSummary, headers, row_labels, rows);
-    if let Some((p_lo, p_hi)) = custom_pair {
-        tab.footnotes.push(format!(
-            "Standard quartiles (25%, Median, 75%) use Hyndman & Fan (1996) Type 6; custom percentiles ({p_lo}%, {p_hi}%) use Hyndman & Fan (1996) Type 7 continuous linear interpolation."
-        ));
-    }
-    tab.footnotes.push(format!(
-        "{}% CI of SD uses exact chi-square variance bounds under a normal-theory Gaussian assumption; skewed or heavy-tailed distributions are sensitive to non-normality.",
-        conf.percent()
-    ));
-    tab
+    tab.footnote(format!(
+        "{pct}% CI of SD uses exact chi-square variance bounds under a normal-theory Gaussian assumption; skewed or heavy-tailed distributions are sensitive to non-normality."
+    ))
+    .build()
 }
 
 fn build_normality_tab(summaries: &[DescriptiveSummary], batteries: &[NormalityBatteryResult], p_fmt: PValueFormat, alpha: f64) -> ResultTab {
-    let headers: Vec<String> = summaries.iter().map(|s| s.label.clone()).collect();
-    let row_labels = vec![
-        String::from("D'Agostino-Pearson K2"),
-        String::from("D'Agostino-Pearson P"),
-        String::from("Shapiro-Wilk W"),
-        String::from("Shapiro-Wilk P"),
-        String::from("Anderson-Darling A2*"),
-        String::from("Anderson-Darling P"),
-        String::from("Kolmogorov-Smirnov D"),
-        String::from("Kolmogorov-Smirnov P"),
-        String::from("Normal vs. Lognormal log-LR"),
-    ];
-    let mut rows = vec![Vec::with_capacity(batteries.len()); row_labels.len()];
-    if let [r0, r1, r2, r3, r4, r5, r6, r7, r8] = rows.as_mut_slice() {
-        for b in batteries {
-            push_norm_pair(r0, r1, b.dagostino_pearson.as_ref(), p_fmt, alpha);
-            push_norm_pair(r2, r3, b.shapiro_wilk.as_ref(), p_fmt, alpha);
-            push_norm_pair(r4, r5, b.anderson_darling.as_ref(), p_fmt, alpha);
-            push_norm_pair(r6, r7, b.kolmogorov_smirnov.as_ref(), p_fmt, alpha);
-            r8.push(opt_num_cell(b.normal_vs_lognormal_log_lr));
-        }
-    }
-    build_tab("normality", "Normality & Lognormality Tests", ResultTabKind::Diagnostics, headers, row_labels, rows)
-}
-
-fn push_norm_pair(stat_row: &mut Vec<ResultCell>, p_row: &mut Vec<ResultCell>, out: Option<&NormalityTestOutcome>, p_fmt: PValueFormat, alpha: f64) {
-    match out {
-        Some(o) => {
-            stat_row.push(num_cell(o.statistic));
-            p_row.push(p_cell_at_alpha(o.p_value, p_fmt, alpha));
-        }
-        None => {
-            stat_row.push(ResultCell::Empty);
-            p_row.push(ResultCell::Empty);
-        }
-    }
+    let stat_cells = |f: fn(&NormalityBatteryResult) -> Option<&NormalityTestOutcome>| {
+        batteries.iter().map(move |b| f(b).map_or(ResultCell::Empty, |o| num_cell(o.statistic)))
+    };
+    let p_cells = |f: fn(&NormalityBatteryResult) -> Option<&NormalityTestOutcome>| {
+        batteries.iter().map(move |b| f(b).map_or(ResultCell::Empty, |o| p_cell_at_alpha(o.p_value, p_fmt, alpha)))
+    };
+    TabBuilder::new("normality", "Normality & Lognormality Tests", ResultTabKind::Diagnostics)
+        .headers(summaries.iter().map(|s| s.label.as_str()))
+        .row("D'Agostino-Pearson K2", stat_cells(|b| b.dagostino_pearson.as_ref()))
+        .row("D'Agostino-Pearson P", p_cells(|b| b.dagostino_pearson.as_ref()))
+        .row("Shapiro-Wilk W", stat_cells(|b| b.shapiro_wilk.as_ref()))
+        .row("Shapiro-Wilk P", p_cells(|b| b.shapiro_wilk.as_ref()))
+        .row("Anderson-Darling A2*", stat_cells(|b| b.anderson_darling.as_ref()))
+        .row("Anderson-Darling P", p_cells(|b| b.anderson_darling.as_ref()))
+        .row("Kolmogorov-Smirnov D", stat_cells(|b| b.kolmogorov_smirnov.as_ref()))
+        .row("Kolmogorov-Smirnov P", p_cells(|b| b.kolmogorov_smirnov.as_ref()))
+        .row("Normal vs. Lognormal log-LR", batteries.iter().map(|b| opt_num_cell(b.normal_vs_lognormal_log_lr)))
+        .build()
 }
 
 fn append_normality_checklist(
@@ -2258,37 +2004,20 @@ fn append_one_sample_tab(
     conf: ConfidenceLevel,
     p_fmt: PValueFormat,
 ) -> Result<(), StatsError> {
-    let headers: Vec<String> = raw_series.iter().map(|s| s.label.clone()).collect();
-    let row_labels = vec![
-        String::from("Hypothetical value"),
-        String::from("t statistic"),
-        String::from("df"),
-        String::from("One-sample t P"),
-        String::from("Wilcoxon signed-rank W"),
-        String::from("Wilcoxon P"),
-    ];
-    let mut rows = vec![Vec::with_capacity(raw_series.len()); row_labels.len()];
-    for series in raw_series {
-        let vals = &series.values;
-        rows[0].push(num_cell(mu0));
-        if let Ok(t_res) = one_sample_t_test(vals, mu0, true, conf) {
-            rows[1].push(num_cell(t_res.t_statistic));
-            rows[2].push(num_cell(t_res.df));
-            rows[3].push(p_cell_at_alpha(t_res.p_value, p_fmt, conf.alpha()));
-        } else {
-            rows[1].push(ResultCell::Empty);
-            rows[2].push(ResultCell::Empty);
-            rows[3].push(ResultCell::Empty);
-        }
-        if let Ok(w_res) = one_sample_wilcoxon(vals, mu0, true, conf) {
-            rows[4].push(num_cell(w_res.w_stat));
-            rows[5].push(p_cell_at_alpha(w_res.p_value, p_fmt, conf.alpha()));
-        } else {
-            rows[4].push(ResultCell::Empty);
-            rows[5].push(ResultCell::Empty);
-        }
-    }
-    res.tabs.push(build_tab("one-sample", "One-Sample Tests", ResultTabKind::MainSummary, headers, row_labels, rows));
+    let t_results: Vec<_> = raw_series.iter().map(|s| one_sample_t_test(&s.values, mu0, true, conf).ok()).collect();
+    let w_results: Vec<_> = raw_series.iter().map(|s| one_sample_wilcoxon(&s.values, mu0, true, conf).ok()).collect();
+    let alpha = conf.alpha();
+    res.tabs.push(
+        TabBuilder::new("one-sample", "One-Sample Tests", ResultTabKind::MainSummary)
+            .headers(raw_series.iter().map(|s| s.label.as_str()))
+            .row("Hypothetical value", raw_series.iter().map(|_| num_cell(mu0)))
+            .row("t statistic", t_results.iter().map(|r| r.as_ref().map_or(ResultCell::Empty, |t| num_cell(t.t_statistic))))
+            .row("df", t_results.iter().map(|r| r.as_ref().map_or(ResultCell::Empty, |t| num_cell(t.df))))
+            .row("One-sample t P", t_results.iter().map(|r| r.as_ref().map_or(ResultCell::Empty, |t| p_cell_at_alpha(t.p_value, p_fmt, alpha))))
+            .row("Wilcoxon signed-rank W", w_results.iter().map(|r| r.as_ref().map_or(ResultCell::Empty, |w| num_cell(w.w_stat))))
+            .row("Wilcoxon P", w_results.iter().map(|r| r.as_ref().map_or(ResultCell::Empty, |w| p_cell_at_alpha(w.p_value, p_fmt, alpha))))
+            .build(),
+    );
     Ok(())
 }
 
@@ -2300,15 +2029,13 @@ pub fn run_outlier_analysis(sheet: &DataSheet, spec: &AnalysisSpec, outlier_spec
     if raw_series.is_empty() {
         return Err(StatsError::EmptyInput);
     }
-    let headers = vec![
-        String::from("Column"),
-        String::from("Row Index (1-based)"),
-        String::from("Value"),
-        String::from("Statistic"),
-        String::from("Threshold / P"),
-    ];
-    let mut row_labels = Vec::new();
-    let mut rows = Vec::new();
+    let mut tab = TabBuilder::new("outliers", "Identified Outliers", ResultTabKind::MainSummary).headers([
+        "Column",
+        "Row Index (1-based)",
+        "Value",
+        "Statistic",
+        "Threshold / P",
+    ]);
     let mut total_flagged = 0_usize;
 
     for series in &raw_series {
@@ -2324,22 +2051,18 @@ pub fn run_outlier_analysis(sheet: &DataSheet, spec: &AnalysisSpec, outlier_spec
             }
         };
         push_scalar(&mut res, "OutlierCount", ds_idx, flags.len() as f64);
-        total_flagged += flags.len();
         for f in flags {
+            total_flagged += 1;
             let table_row_1based = series.row_indices.get(f.index).copied().unwrap_or(f.index) + 1;
-            let stat_cell = if f.score.is_infinite() { ResultCell::Text(String::from("∞")) } else { num_cell(f.score) };
-            row_labels.push(format!("Outlier {}", rows.len() + 1));
-            rows.push(vec![
-                ResultCell::Text(series.label.clone()),
-                num_cell(table_row_1based as f64),
-                num_cell(f.value),
-                stat_cell,
-                num_cell(f.threshold_or_p),
-            ]);
+            let stat_cell = if f.score.is_infinite() { text_cell("∞") } else { num_cell(f.score) };
+            tab.push_row(
+                format!("Outlier {total_flagged}"),
+                [text_cell(series.label.clone()), num_cell(table_row_1based as f64), num_cell(f.value), stat_cell, num_cell(f.threshold_or_p)],
+            );
         }
     }
 
-    res.tabs.push(build_tab("outliers", "Identified Outliers", ResultTabKind::MainSummary, headers, row_labels, rows));
+    res.tabs.push(tab.build());
     res.checklist.push(checklist_item(
         "Outlier scan",
         if total_flagged > 0 { ChecklistStatus::Info } else { ChecklistStatus::Pass },

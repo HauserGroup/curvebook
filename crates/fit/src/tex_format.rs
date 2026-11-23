@@ -7,8 +7,12 @@
 //! `\min`, `\max`, `\cdot`, `\times`, `\text{}`, uppercase and lowercase Greek
 //! escapes, fractional powers, and braced `^{}`/`_{}`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+use crate::dsl::{
+    BinaryOp, DatasetFilter, Expr, MAX_DSL_LINES, MAX_DSL_SOURCE_BYTES, UnaryOp, is_valid_ident, parse_dataset_prefix, parse_expr_collecting_locs,
+    split_top_level_assignment,
+};
 use crate::library::normalize_id;
 use crate::types::per_dataset_parameter_key;
 
@@ -1062,60 +1066,10 @@ fn format_nist_part2(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Custom DSL formula parser & TeX formatter (iterative arena AST, zero recursion)
+// Custom DSL TeX formatter backed by `crate::dsl`'s parser/AST (zero recursion)
 // ---------------------------------------------------------------------------
 
-const MAX_DSL_TEX_SOURCE_BYTES: usize = 1_048_576;
-const MAX_DSL_TEX_LINES: usize = 16_384;
-const MAX_DSL_TEX_TOKENS: usize = 16_384;
-const MAX_DSL_TEX_NODES: usize = 16_384;
-const MAX_DSL_TEX_DEPTH: usize = 128;
 const MAX_DSL_INLINED_NODES: usize = 512;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TexDsSpan {
-    Single(usize),
-    Range(usize, usize),
-}
-
-impl TexDsSpan {
-    fn contains(self, ds_idx: usize) -> bool {
-        match self {
-            Self::Single(i) => i == ds_idx,
-            Self::Range(s, e) => s <= ds_idx && ds_idx <= e,
-        }
-    }
-
-    fn first_index(self) -> usize {
-        match self {
-            Self::Single(i) | Self::Range(i, _) => i,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum TexDatasetSelector {
-    Any,
-    Include(Vec<TexDsSpan>),
-    Exclude(Vec<TexDsSpan>),
-}
-
-impl TexDatasetSelector {
-    fn matches(&self, ds_idx: usize) -> bool {
-        match self {
-            Self::Any => true,
-            Self::Include(spans) => spans.iter().any(|s| s.contains(ds_idx)),
-            Self::Exclude(spans) => !spans.iter().any(|s| s.contains(ds_idx)),
-        }
-    }
-
-    fn first_included(&self) -> Option<usize> {
-        match self {
-            Self::Include(spans) => spans.first().map(|s| s.first_index()),
-            Self::Any | Self::Exclude(_) => None,
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OdeLhsKind {
@@ -1145,16 +1099,13 @@ enum DslRawStmt<'a> {
 }
 
 impl DslRawStmt<'_> {
-    fn is_output(&self, _has_ode: bool) -> bool {
-        match self {
-            Self::OdeDerivative { .. } | Self::ExplicitY { .. } | Self::Implicit { .. } | Self::Bare { .. } => true,
-            Self::OdeInitialOrLocal { .. } | Self::Local { .. } => false,
-        }
+    fn is_output(&self) -> bool {
+        matches!(self, Self::OdeDerivative { .. } | Self::ExplicitY { .. } | Self::Implicit { .. } | Self::Bare { .. })
     }
 }
 
 fn format_custom_dsl_tex(src: &str, params: &[(String, f64)], data_set_index: Option<usize>, substituted: bool, sig_figs: usize) -> String {
-    if src.len() > MAX_DSL_TEX_SOURCE_BYTES {
+    if src.len() > MAX_DSL_SOURCE_BYTES {
         return "Y = f_{\\text{custom}}(X)".to_string();
     }
 
@@ -1173,9 +1124,9 @@ struct SelectedDslScript<'a> {
 }
 
 fn select_dsl_script(src: &str, data_set_index: Option<usize>) -> Option<SelectedDslScript<'_>> {
-    let mut parsed: Vec<(TexDatasetSelector, DslRawStmt<'_>)> = Vec::new();
+    let mut parsed: Vec<(DatasetFilter, DslRawStmt<'_>)> = Vec::new();
     for (idx, raw_line) in src.lines().enumerate() {
-        if idx >= MAX_DSL_TEX_LINES {
+        if idx >= MAX_DSL_LINES {
             break;
         }
         let stripped = strip_dsl_comment(raw_line).trim();
@@ -1203,7 +1154,7 @@ fn select_dsl_script(src: &str, data_set_index: Option<usize>) -> Option<Selecte
             }
             continue;
         }
-        let (filter, body) = parse_tex_dataset_prefix(stripped);
+        let (filter, body) = parse_dataset_prefix(stripped, idx + 1).unwrap_or((DatasetFilter::Any, stripped));
         let body = body.trim();
         if !body.is_empty() {
             parsed.push((filter, classify_dsl_line(body)));
@@ -1217,22 +1168,28 @@ fn select_dsl_script(src: &str, data_set_index: Option<usize>) -> Option<Selecte
     let has_ode = parsed.iter().any(|(_, st)| matches!(st, DslRawStmt::OdeDerivative { .. }));
     let target_ds = data_set_index.unwrap_or(0);
 
-    let chosen_idx = pick_target_stmt_index(&parsed, target_ds, has_ode)?;
+    let chosen_idx = pick_target_stmt_index(&parsed, target_ds)?;
     let chosen_filter = &parsed[chosen_idx].0;
-    let active_ds = if chosen_filter.matches(target_ds) { Some(target_ds) } else { chosen_filter.first_included() };
+    let active_ds = if chosen_filter.matches(target_ds) {
+        Some(target_ds)
+    } else if let DatasetFilter::Include(indices) = chosen_filter {
+        indices.first().copied()
+    } else {
+        None
+    };
 
     let mut locals = Vec::new();
     for (filter, stmt) in &parsed[..chosen_idx] {
         let filter_ok = match active_ds {
             Some(ds) => filter.matches(ds),
-            None => *filter == TexDatasetSelector::Any,
+            None => *filter == DatasetFilter::Any,
         };
         if !filter_ok {
             continue;
         }
         match stmt {
             DslRawStmt::Local { name, rhs } => locals.push((*name, *rhs)),
-            DslRawStmt::OdeInitialOrLocal { lhs_trim, rhs } if !has_ode && is_valid_dsl_ident(lhs_trim) => {
+            DslRawStmt::OdeInitialOrLocal { lhs_trim, rhs } if !has_ode && is_valid_ident(lhs_trim) => {
                 locals.push((*lhs_trim, *rhs));
             }
             _ => {}
@@ -1242,20 +1199,20 @@ fn select_dsl_script(src: &str, data_set_index: Option<usize>) -> Option<Selecte
     Some(SelectedDslScript { locals, target: parsed[chosen_idx].1.clone() })
 }
 
-fn pick_target_stmt_index(parsed: &[(TexDatasetSelector, DslRawStmt<'_>)], target_ds: usize, has_ode: bool) -> Option<usize> {
-    let scoped_match = parsed.iter().rposition(|(f, st)| st.is_output(has_ode) && *f != TexDatasetSelector::Any && f.matches(target_ds));
+fn pick_target_stmt_index(parsed: &[(DatasetFilter, DslRawStmt<'_>)], target_ds: usize) -> Option<usize> {
+    let scoped_match = parsed.iter().rposition(|(f, st)| st.is_output() && *f != DatasetFilter::Any && f.matches(target_ds));
     if scoped_match.is_some() {
         return scoped_match;
     }
-    let default_match = parsed.iter().rposition(|(f, st)| st.is_output(has_ode) && f.matches(target_ds));
+    let default_match = parsed.iter().rposition(|(f, st)| st.is_output() && f.matches(target_ds));
     if default_match.is_some() {
         return default_match;
     }
-    parsed.iter().rposition(|(_, st)| st.is_output(has_ode)).or_else(|| parsed.len().checked_sub(1))
+    parsed.iter().rposition(|(_, st)| st.is_output()).or_else(|| parsed.len().checked_sub(1))
 }
 
 fn classify_dsl_line(line: &str) -> DslRawStmt<'_> {
-    let Some((lhs_raw, rhs_raw)) = split_top_assignment(line) else {
+    let Some((lhs_raw, rhs_raw)) = split_top_level_assignment(line) else {
         return DslRawStmt::Bare { expr: line.trim() };
     };
     let lhs_trim = lhs_raw.trim();
@@ -1269,17 +1226,9 @@ fn classify_dsl_line(line: &str) -> DslRawStmt<'_> {
         "Y" => DslRawStmt::ExplicitY { rhs: rhs_trim },
         "Y0" => DslRawStmt::OdeInitialOrLocal { lhs_trim, rhs: rhs_trim },
         _ if lhs_upper.starts_with("Y(") && lhs_upper.ends_with(')') => DslRawStmt::OdeInitialOrLocal { lhs_trim, rhs: rhs_trim },
-        _ if is_valid_dsl_ident(lhs_trim) => DslRawStmt::Local { name: lhs_trim, rhs: rhs_trim },
+        _ if is_valid_ident(lhs_trim) => DslRawStmt::Local { name: lhs_trim, rhs: rhs_trim },
         _ => DslRawStmt::Implicit { lhs: lhs_trim, rhs: rhs_trim },
     }
-}
-
-fn is_valid_dsl_ident(s: &str) -> bool {
-    let mut chars = s.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first.is_ascii_alphabetic() || first == '_') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn strip_dsl_comment(line: &str) -> &str {
@@ -1294,178 +1243,91 @@ fn strip_dsl_comment(line: &str) -> &str {
     best
 }
 
-fn parse_tex_ds_token(tok: &str) -> Option<usize> {
-    if let Ok(idx) = tok.parse::<usize>() {
-        return Some(idx);
-    }
-    let upper = tok.to_ascii_uppercase();
-    if upper.len() == 1 {
-        let b = upper.as_bytes()[0];
-        if b.is_ascii_uppercase() {
-            return Some((b - b'A') as usize);
-        }
-    }
-    None
-}
-
-fn parse_tex_dataset_prefix(line: &str) -> (TexDatasetSelector, &str) {
-    let Some(after_open) = line.strip_prefix('<') else {
-        return (TexDatasetSelector::Any, line);
-    };
-    let Some((inside_raw, rest)) = after_open.split_once('>') else {
-        return (TexDatasetSelector::Any, line);
-    };
-    let inside = inside_raw.trim();
-    let (negated, body) = if let Some(s) = inside.strip_prefix('~') { (true, s.trim()) } else { (false, inside) };
-    let mut spans = Vec::new();
-    for part in body.split(',') {
-        let p = part.trim();
-        if p.is_empty() {
-            continue;
-        }
-        if let Some((start_s, end_s)) = p.split_once(':') {
-            let (Some(s_idx), Some(e_idx)) = (parse_tex_ds_token(start_s.trim()), parse_tex_ds_token(end_s.trim())) else {
-                return (TexDatasetSelector::Any, line);
-            };
-            if s_idx <= e_idx {
-                spans.push(TexDsSpan::Range(s_idx, e_idx));
-            }
-        } else {
-            let Some(idx) = parse_tex_ds_token(p) else {
-                return (TexDatasetSelector::Any, line);
-            };
-            spans.push(TexDsSpan::Single(idx));
-        }
-    }
-    let selector = if negated { TexDatasetSelector::Exclude(spans) } else { TexDatasetSelector::Include(spans) };
-    (selector, rest)
-}
-
-fn split_top_assignment(line: &str) -> Option<(&str, &str)> {
-    let bytes = line.as_bytes();
-    let mut depth = 0usize;
-    for (i, &b) in bytes.iter().enumerate() {
-        match b {
-            b'(' | b'[' | b'{' => depth += 1,
-            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
-            b'=' if depth == 0 => {
-                let prev = i.checked_sub(1).and_then(|j| bytes.get(j).copied());
-                let next = bytes.get(i + 1).copied();
-                if !matches!(prev, Some(b'<' | b'>' | b'!' | b'='))
-                    && next != Some(b'=')
-                    && let Some((lhs, after_eq)) = line.split_at_checked(i)
-                    && let Some(rhs) = after_eq.strip_prefix('=')
-                {
-                    return Some((lhs, rhs));
-                }
-            }
-            _ => {}
-        }
-    }
-    None
+struct DslRenderEnv<'a> {
+    env: HashMap<String, (Expr, usize)>,
+    shadowed: HashSet<&'a str>,
+    parsed_locals: Vec<(&'a str, &'a str, Option<Expr>)>,
+    can_inline: bool,
 }
 
 fn render_selected_dsl_script(script: &SelectedDslScript<'_>, ctx: &EqCtx<'_>) -> String {
-    let mut ast = DslAst::default();
-    let mut env: HashMap<String, usize> = HashMap::new();
-    let mut parsed_locals: Vec<(&str, &str, Option<usize>)> = Vec::with_capacity(script.locals.len());
+    let mut env: HashMap<String, (Expr, usize)> = HashMap::new();
+    let mut shadowed: HashSet<&str> = HashSet::new();
+    let mut parsed_locals: Vec<(&str, &str, Option<Expr>)> = Vec::with_capacity(script.locals.len());
     let mut all_locals_parsed = true;
 
     for &(name, rhs_src) in &script.locals {
-        if let Some(raw_idx) = parse_expr_into_ast(rhs_src, &mut ast) {
-            let resolved_idx = if env.is_empty() { Some(raw_idx) } else { inline_locals_iterative(&mut ast, raw_idx, &env) };
-            if let Some(res_idx) = resolved_idx {
-                env.insert(name.to_string(), res_idx);
+        if let Some(raw_expr) = parse_algebraic_expr(rhs_src) {
+            if let Some(resolved) = inline_locals_iterative(&raw_expr, &env, MAX_DSL_INLINED_NODES) {
+                env.insert(name.to_string(), resolved);
+                shadowed.insert(name);
             } else {
                 all_locals_parsed = false;
             }
-            parsed_locals.push((name, rhs_src, Some(raw_idx)));
+            parsed_locals.push((name, rhs_src, Some(raw_expr)));
         } else {
             all_locals_parsed = false;
             parsed_locals.push((name, rhs_src, None));
         }
     }
 
-    let can_inline = all_locals_parsed && !env.is_empty();
-    let inline_budget = MAX_DSL_INLINED_NODES;
+    let render_env = DslRenderEnv { can_inline: all_locals_parsed && !env.is_empty(), env, shadowed, parsed_locals };
 
     match &script.target {
-        DslRawStmt::ExplicitY { rhs } => render_lhs_rhs_dsl("Y", None, rhs, &mut ast, &env, &parsed_locals, can_inline, inline_budget, ctx),
-        DslRawStmt::OdeDerivative { lhs, rhs } => {
-            render_lhs_rhs_dsl(lhs.to_tex(), None, rhs, &mut ast, &env, &parsed_locals, can_inline, inline_budget, ctx)
-        }
-        DslRawStmt::OdeInitialOrLocal { lhs_trim, rhs } => {
-            render_lhs_rhs_dsl(&tex_ident(lhs_trim), None, rhs, &mut ast, &env, &parsed_locals, can_inline, inline_budget, ctx)
-        }
-        DslRawStmt::Local { name, rhs } => {
-            render_lhs_rhs_dsl(&tex_ident(name), None, rhs, &mut ast, &env, &parsed_locals, can_inline, inline_budget, ctx)
-        }
-        DslRawStmt::Implicit { lhs, rhs } => render_lhs_rhs_dsl("", Some(lhs), rhs, &mut ast, &env, &parsed_locals, can_inline, inline_budget, ctx),
+        DslRawStmt::ExplicitY { rhs } => render_lhs_rhs_dsl("Y", None, rhs, &render_env, ctx),
+        DslRawStmt::OdeDerivative { lhs, rhs } => render_lhs_rhs_dsl(lhs.to_tex(), None, rhs, &render_env, ctx),
+        DslRawStmt::OdeInitialOrLocal { lhs_trim, rhs } => render_lhs_rhs_dsl(&tex_ident(lhs_trim), None, rhs, &render_env, ctx),
+        DslRawStmt::Local { name, rhs } => render_lhs_rhs_dsl(&tex_ident(name), None, rhs, &render_env, ctx),
+        DslRawStmt::Implicit { lhs, rhs } => render_lhs_rhs_dsl("", Some(lhs), rhs, &render_env, ctx),
         DslRawStmt::Bare { expr } => {
-            if let Some(raw_rhs) = parse_expr_into_ast(expr, &mut ast) {
-                let inlined_rhs = if can_inline {
-                    inline_locals_iterative(&mut ast, raw_rhs, &env).filter(|&id| count_tree_nodes_bounded(&ast, id, inline_budget))
-                } else {
-                    None
-                };
-                if let Some(rhs_id) = inlined_rhs {
-                    let rhs_tex = render_dsl_tex_iterative(&ast, rhs_id, ctx, None);
-                    return if ast_references_y(&ast, rhs_id) { format!("{rhs_tex} = 0") } else { format!("Y = {rhs_tex}") };
+            if let Some(raw_rhs) = parse_algebraic_expr(expr) {
+                if render_env.can_inline
+                    && let Some((inlined_rhs, _)) = inline_locals_iterative(&raw_rhs, &render_env.env, MAX_DSL_INLINED_NODES)
+                {
+                    let rhs_tex = render_dsl_tex_iterative(&inlined_rhs, ctx, None);
+                    return if expr_references_y(&inlined_rhs) { format!("{rhs_tex} = 0") } else { format!("Y = {rhs_tex}") };
                 }
-                let rhs_tex = render_dsl_tex_iterative(&ast, raw_rhs, ctx, Some(&env));
-                let core = if ast_references_y(&ast, raw_rhs) { format!("{rhs_tex} = 0") } else { format!("Y = {rhs_tex}") };
-                return append_helper_locals(core, &parsed_locals, &ast, ctx);
+                let rhs_tex = render_dsl_tex_iterative(&raw_rhs, ctx, Some(&render_env.shadowed));
+                let core = if expr_references_y(&raw_rhs) { format!("{rhs_tex} = 0") } else { format!("Y = {rhs_tex}") };
+                return append_helper_locals(core, &render_env.parsed_locals, ctx);
             }
             let fb = fallback_custom_dsl_tex("Y", expr, ctx.params, ctx.substituted, ctx.sig_figs);
-            append_helper_locals(fb, &parsed_locals, &ast, ctx)
+            append_helper_locals(fb, &render_env.parsed_locals, ctx)
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_lhs_rhs_dsl(
-    fixed_lhs_tex: &str,
-    lhs_expr_src: Option<&str>,
-    rhs_src: &str,
-    ast: &mut DslAst,
-    env: &HashMap<String, usize>,
-    parsed_locals: &[(&str, &str, Option<usize>)],
-    can_inline: bool,
-    inline_budget: usize,
-    ctx: &EqCtx<'_>,
-) -> String {
-    let raw_lhs = lhs_expr_src.and_then(|s| parse_expr_into_ast(s, ast));
-    let raw_rhs = parse_expr_into_ast(rhs_src, ast);
+fn render_lhs_rhs_dsl(fixed_lhs_tex: &str, lhs_expr_src: Option<&str>, rhs_src: &str, render_env: &DslRenderEnv<'_>, ctx: &EqCtx<'_>) -> String {
+    let raw_lhs = lhs_expr_src.and_then(parse_algebraic_expr);
+    let raw_rhs = parse_algebraic_expr(rhs_src);
 
-    if let Some(rhs_id) = raw_rhs
+    if let Some(rhs_expr) = raw_rhs.as_ref()
         && (lhs_expr_src.is_none() || raw_lhs.is_some())
     {
-        if can_inline {
-            let inlined_rhs = inline_locals_iterative(ast, rhs_id, env).filter(|&id| count_tree_nodes_bounded(ast, id, inline_budget));
-            let inlined_lhs = match raw_lhs {
-                Some(lid) => inline_locals_iterative(ast, lid, env).filter(|&id| count_tree_nodes_bounded(ast, id, inline_budget)),
-                None => None,
-            };
-            if let Some(r_id) = inlined_rhs
+        if render_env.can_inline {
+            let inlined_rhs = inline_locals_iterative(rhs_expr, &render_env.env, MAX_DSL_INLINED_NODES);
+            let inlined_lhs = raw_lhs.as_ref().and_then(|l| inline_locals_iterative(l, &render_env.env, MAX_DSL_INLINED_NODES));
+            if let Some((r_expr, _)) = inlined_rhs
                 && (raw_lhs.is_none() || inlined_lhs.is_some())
             {
-                let lhs_tex = inlined_lhs.map_or_else(|| fixed_lhs_tex.to_string(), |l_id| render_dsl_tex_iterative(ast, l_id, ctx, None));
-                let rhs_tex = render_dsl_tex_iterative(ast, r_id, ctx, None);
+                let lhs_tex = inlined_lhs.map_or_else(|| fixed_lhs_tex.to_string(), |(l_expr, _)| render_dsl_tex_iterative(&l_expr, ctx, None));
+                let rhs_tex = render_dsl_tex_iterative(&r_expr, ctx, None);
                 return format!("{lhs_tex} = {rhs_tex}");
             }
         }
-        let lhs_tex = raw_lhs.map_or_else(|| fixed_lhs_tex.to_string(), |l_id| render_dsl_tex_iterative(ast, l_id, ctx, Some(env)));
-        let rhs_tex = render_dsl_tex_iterative(ast, rhs_id, ctx, Some(env));
-        return append_helper_locals(format!("{lhs_tex} = {rhs_tex}"), parsed_locals, ast, ctx);
+        let lhs_tex =
+            raw_lhs.as_ref().map_or_else(|| fixed_lhs_tex.to_string(), |l_expr| render_dsl_tex_iterative(l_expr, ctx, Some(&render_env.shadowed)));
+        let rhs_tex = render_dsl_tex_iterative(rhs_expr, ctx, Some(&render_env.shadowed));
+        return append_helper_locals(format!("{lhs_tex} = {rhs_tex}"), &render_env.parsed_locals, ctx);
     }
 
     let lhs_tex = if let Some(l_src) = lhs_expr_src {
-        raw_lhs.map_or_else(|| fallback_lhs_tex(l_src, ctx), |l_id| render_dsl_tex_iterative(ast, l_id, ctx, Some(env)))
+        raw_lhs.as_ref().map_or_else(|| fallback_lhs_tex(l_src, ctx), |l_expr| render_dsl_tex_iterative(l_expr, ctx, Some(&render_env.shadowed)))
     } else {
         fixed_lhs_tex.to_string()
     };
     let core = fallback_custom_dsl_tex(&lhs_tex, rhs_src, ctx.params, ctx.substituted, ctx.sig_figs);
-    append_helper_locals(core, parsed_locals, ast, ctx)
+    append_helper_locals(core, &render_env.parsed_locals, ctx)
 }
 
 fn fallback_lhs_tex(lhs_src: &str, ctx: &EqCtx<'_>) -> String {
@@ -1473,463 +1335,187 @@ fn fallback_lhs_tex(lhs_src: &str, ctx: &EqCtx<'_>) -> String {
     s.replace('*', " \\cdot ")
 }
 
-fn append_helper_locals(core: String, parsed_locals: &[(&str, &str, Option<usize>)], ast: &DslAst, ctx: &EqCtx<'_>) -> String {
+fn append_helper_locals(core: String, parsed_locals: &[(&str, &str, Option<Expr>)], ctx: &EqCtx<'_>) -> String {
     if parsed_locals.is_empty() {
         return core;
     }
-    let mut env_names: HashMap<String, usize> = HashMap::new();
+    let mut env_names: HashSet<&str> = HashSet::new();
     let mut parts = Vec::with_capacity(parsed_locals.len() + 1);
     parts.push(core);
-    for &(name, rhs_src, opt_id) in parsed_locals {
+    for &(name, rhs_src, ref opt_expr) in parsed_locals {
         let lhs_tex = tex_ident(name);
-        let stmt = if let Some(id) = opt_id {
-            let rhs_tex = render_dsl_tex_iterative(ast, id, ctx, Some(&env_names));
+        let stmt = if let Some(expr) = opt_expr {
+            let rhs_tex = render_dsl_tex_iterative(expr, ctx, Some(&env_names));
             format!("{lhs_tex} = {rhs_tex}")
         } else {
             fallback_custom_dsl_tex(&lhs_tex, rhs_src, ctx.params, ctx.substituted, ctx.sig_figs)
         };
-        env_names.insert(name.to_string(), 0);
+        env_names.insert(name);
         parts.push(stmt);
     }
     parts.join("; \\quad ")
 }
 
-fn parse_expr_into_ast(src: &str, ast: &mut DslAst) -> Option<usize> {
-    let tokens = tokenize_dsl(src)?;
-    parse_dsl_expr_iterative(&tokens, ast)
+fn parse_algebraic_expr(src: &str) -> Option<Expr> {
+    let expr = parse_expr_collecting_locs(src, 1, 0, None).ok()?;
+    is_algebraic_tex_expr(&expr).then_some(expr)
 }
 
-#[derive(Clone, Debug, PartialEq)]
-enum DslTok {
-    Ident(String),
-    Number(String),
-    Plus,
-    Minus,
-    Star,
-    Slash,
-    Caret,
-    Comma,
-    LParen,
-    RParen,
-}
-
-fn tokenize_dsl(input: &str) -> Option<Vec<DslTok>> {
-    let chars: Vec<char> = input.chars().collect();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        if out.len() >= MAX_DSL_TEX_TOKENS {
-            return None;
-        }
-        let ch = chars[i];
-        if ch.is_whitespace() {
-            i += 1;
-            continue;
-        }
-        if ch.is_ascii_alphabetic() || ch == '_' {
-            let start = i;
-            i += 1;
-            while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
-                i += 1;
+fn is_algebraic_tex_expr(root: &Expr) -> bool {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        match node {
+            Expr::Num(_) | Expr::Ident(_) => {}
+            Expr::Unary { op: UnaryOp::Neg, rhs } => stack.push(rhs),
+            Expr::Binary { op: BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Pow, lhs, rhs } => {
+                stack.push(rhs);
+                stack.push(lhs);
             }
-            out.push(DslTok::Ident(chars[start..i].iter().collect()));
-            continue;
-        }
-        if ch.is_ascii_digit() || (ch == '.' && chars.get(i + 1).is_some_and(char::is_ascii_digit)) {
-            let start = i;
-            i += 1;
-            while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
-                i += 1;
-            }
-            if i < chars.len() && matches!(chars[i], 'e' | 'E') {
-                let save = i;
-                i += 1;
-                if i < chars.len() && matches!(chars[i], '+' | '-') {
-                    i += 1;
-                }
-                let dstart = i;
-                while i < chars.len() && chars[i].is_ascii_digit() {
-                    i += 1;
-                }
-                if i == dstart {
-                    i = save;
-                }
-            }
-            out.push(DslTok::Number(chars[start..i].iter().collect()));
-            continue;
-        }
-        match ch {
-            '+' => out.push(DslTok::Plus),
-            '-' => out.push(DslTok::Minus),
-            '*' if chars.get(i + 1) == Some(&'*') => {
-                out.push(DslTok::Caret);
-                i += 1;
-            }
-            '*' => out.push(DslTok::Star),
-            '/' => out.push(DslTok::Slash),
-            '^' => out.push(DslTok::Caret),
-            ',' => out.push(DslTok::Comma),
-            '(' | '[' => out.push(DslTok::LParen),
-            ')' | ']' => out.push(DslTok::RParen),
-            _ => return None,
-        }
-        i += 1;
-    }
-    if out.is_empty() { None } else { Some(out) }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DslBinOp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Pow,
-}
-
-#[derive(Clone, Debug)]
-enum DslNode {
-    Num(String),
-    Ident(String),
-    Neg(usize),
-    Bin(DslBinOp, usize, usize),
-    Call(String, Vec<usize>),
-}
-
-#[derive(Clone, Debug, Default)]
-struct DslAst {
-    nodes: Vec<DslNode>,
-}
-
-impl DslAst {
-    fn push(&mut self, node: DslNode) -> Option<usize> {
-        if self.nodes.len() >= MAX_DSL_TEX_NODES {
-            return None;
-        }
-        let idx = self.nodes.len();
-        self.nodes.push(node);
-        Some(idx)
-    }
-}
-
-#[derive(Clone, Debug)]
-enum ParseOp {
-    UnaryNeg,
-    Bin(DslBinOp),
-    Paren,
-    CallStart { name: String, arg_count: usize },
-}
-
-impl ParseOp {
-    fn precedence(&self) -> Option<(u8, bool)> {
-        match self {
-            Self::Bin(DslBinOp::Add | DslBinOp::Sub) => Some((1, true)),
-            Self::Bin(DslBinOp::Mul | DslBinOp::Div) => Some((2, true)),
-            Self::UnaryNeg => Some((3, false)),
-            Self::Bin(DslBinOp::Pow) => Some((4, false)),
-            Self::Paren | Self::CallStart { .. } => None,
+            Expr::Call { args, .. } => stack.extend(args.iter()),
+            Expr::Unary { op: UnaryOp::Not, .. } | Expr::Binary { .. } | Expr::If { .. } => return false,
         }
     }
+    true
 }
 
-fn pop_parse_op(op: ParseOp, vals: &mut Vec<usize>, ast: &mut DslAst) -> Option<()> {
-    match op {
-        ParseOp::UnaryNeg => {
-            let rhs = vals.pop()?;
-            vals.push(ast.push(DslNode::Neg(rhs))?);
-        }
-        ParseOp::Bin(bin_op) => {
-            let rhs = vals.pop()?;
-            let lhs = vals.pop()?;
-            vals.push(ast.push(DslNode::Bin(bin_op, lhs, rhs))?);
-        }
-        ParseOp::Paren | ParseOp::CallStart { .. } => return None,
-    }
-    Some(())
-}
-
-fn pop_ops_above(min_prec: u8, left_assoc: bool, ops: &mut Vec<ParseOp>, vals: &mut Vec<usize>, ast: &mut DslAst) -> Option<()> {
-    while let Some((top_prec, _)) = ops.last().and_then(ParseOp::precedence) {
-        if top_prec > min_prec || (left_assoc && top_prec == min_prec) {
-            let op = ops.pop()?;
-            pop_parse_op(op, vals, ast)?;
-        } else {
-            break;
-        }
-    }
-    Some(())
-}
-
-fn parse_dsl_expr_iterative(tokens: &[DslTok], ast: &mut DslAst) -> Option<usize> {
-    if tokens.is_empty() {
-        return None;
-    }
-    let mut ops: Vec<ParseOp> = Vec::new();
-    let mut vals: Vec<usize> = Vec::new();
-    let mut expect_prefix = true;
-    let mut nest_depth = 0usize;
-    let mut unary_run = 0usize;
-    let mut pos = 0usize;
-
-    while pos < tokens.len() {
-        if expect_prefix {
-            match &tokens[pos] {
-                DslTok::Plus => {
-                    unary_run += 1;
-                    if nest_depth + unary_run > MAX_DSL_TEX_DEPTH {
-                        return None;
-                    }
-                    pos += 1;
-                }
-                DslTok::Minus => {
-                    unary_run += 1;
-                    if nest_depth + unary_run > MAX_DSL_TEX_DEPTH {
-                        return None;
-                    }
-                    ops.push(ParseOp::UnaryNeg);
-                    pos += 1;
-                }
-                DslTok::LParen => {
-                    nest_depth += 1;
-                    if nest_depth + unary_run > MAX_DSL_TEX_DEPTH {
-                        return None;
-                    }
-                    unary_run = 0;
-                    ops.push(ParseOp::Paren);
-                    pos += 1;
-                }
-                DslTok::Number(s) => {
-                    unary_run = 0;
-                    vals.push(ast.push(DslNode::Num(s.clone()))?);
-                    expect_prefix = false;
-                    pos += 1;
-                }
-                DslTok::Ident(name) => {
-                    unary_run = 0;
-                    if matches!(tokens.get(pos + 1), Some(DslTok::LParen)) {
-                        if matches!(tokens.get(pos + 2), Some(DslTok::RParen)) {
-                            vals.push(ast.push(DslNode::Call(name.clone(), Vec::new()))?);
-                            expect_prefix = false;
-                            pos += 3;
-                        } else {
-                            nest_depth += 1;
-                            if nest_depth > MAX_DSL_TEX_DEPTH {
-                                return None;
-                            }
-                            ops.push(ParseOp::CallStart { name: name.clone(), arg_count: 1 });
-                            pos += 2;
-                        }
-                    } else {
-                        vals.push(ast.push(DslNode::Ident(name.clone()))?);
-                        expect_prefix = false;
-                        pos += 1;
-                    }
-                }
-                _ => return None,
-            }
-        } else {
-            match &tokens[pos] {
-                DslTok::Plus => {
-                    pop_ops_above(1, true, &mut ops, &mut vals, ast)?;
-                    ops.push(ParseOp::Bin(DslBinOp::Add));
-                    expect_prefix = true;
-                }
-                DslTok::Minus => {
-                    pop_ops_above(1, true, &mut ops, &mut vals, ast)?;
-                    ops.push(ParseOp::Bin(DslBinOp::Sub));
-                    expect_prefix = true;
-                }
-                DslTok::Star => {
-                    pop_ops_above(2, true, &mut ops, &mut vals, ast)?;
-                    ops.push(ParseOp::Bin(DslBinOp::Mul));
-                    expect_prefix = true;
-                }
-                DslTok::Slash => {
-                    pop_ops_above(2, true, &mut ops, &mut vals, ast)?;
-                    ops.push(ParseOp::Bin(DslBinOp::Div));
-                    expect_prefix = true;
-                }
-                DslTok::Caret => {
-                    pop_ops_above(4, false, &mut ops, &mut vals, ast)?;
-                    ops.push(ParseOp::Bin(DslBinOp::Pow));
-                    expect_prefix = true;
-                }
-                DslTok::Comma => {
-                    pop_ops_above(1, true, &mut ops, &mut vals, ast)?;
-                    match ops.last_mut() {
-                        Some(ParseOp::CallStart { arg_count, .. }) => *arg_count += 1,
-                        _ => return None,
-                    }
-                    expect_prefix = true;
-                }
-                DslTok::RParen => {
-                    pop_ops_above(1, true, &mut ops, &mut vals, ast)?;
-                    match ops.pop()? {
-                        ParseOp::Paren => nest_depth = nest_depth.saturating_sub(1),
-                        ParseOp::CallStart { name, arg_count } => {
-                            nest_depth = nest_depth.saturating_sub(1);
-                            if vals.len() < arg_count {
-                                return None;
-                            }
-                            let args = vals.split_off(vals.len() - arg_count);
-                            vals.push(ast.push(DslNode::Call(name, args))?);
-                        }
-                        _ => return None,
-                    }
-                }
-                _ => return None,
-            }
-            pos += 1;
-        }
-    }
-
-    if expect_prefix {
-        return None;
-    }
-    while let Some(op) = ops.pop() {
-        pop_parse_op(op, &mut vals, ast)?;
-    }
-    if vals.len() == 1 { vals.pop() } else { None }
-}
-
-fn inline_locals_iterative(ast: &mut DslAst, root: usize, env: &HashMap<String, usize>) -> Option<usize> {
-    enum InlineTask {
-        Visit(usize),
+fn inline_locals_iterative(root: &Expr, env: &HashMap<String, (Expr, usize)>, max_nodes: usize) -> Option<(Expr, usize)> {
+    enum InlineTask<'a> {
+        Visit(&'a Expr),
         BuildNeg,
-        BuildBin(DslBinOp),
-        BuildCall(String, usize),
+        BuildBin(BinaryOp),
+        BuildCall(&'a str, usize),
     }
 
     let mut tasks = vec![InlineTask::Visit(root)];
-    let mut results: Vec<usize> = Vec::new();
+    let mut results: Vec<Expr> = Vec::new();
+    let mut count = 0usize;
+
     while let Some(task) = tasks.pop() {
         match task {
-            InlineTask::Visit(idx) => {
-                let node = ast.nodes.get(idx)?.clone();
-                match node {
-                    DslNode::Num(_) => results.push(idx),
-                    DslNode::Ident(name) => {
-                        if let Some(&local_id) = env.get(&name) {
-                            results.push(local_id);
-                        } else {
-                            results.push(idx);
+            InlineTask::Visit(node) => match node {
+                Expr::Num(v) => {
+                    count += 1;
+                    if count > max_nodes {
+                        return None;
+                    }
+                    results.push(Expr::Num(*v));
+                }
+                Expr::Ident(name) => {
+                    if let Some((local_expr, local_nodes)) = env.get(name) {
+                        count = count.checked_add(*local_nodes)?;
+                        if count > max_nodes {
+                            return None;
                         }
-                    }
-                    DslNode::Neg(inner) => {
-                        tasks.push(InlineTask::BuildNeg);
-                        tasks.push(InlineTask::Visit(inner));
-                    }
-                    DslNode::Bin(op, lhs, rhs) => {
-                        tasks.push(InlineTask::BuildBin(op));
-                        tasks.push(InlineTask::Visit(rhs));
-                        tasks.push(InlineTask::Visit(lhs));
-                    }
-                    DslNode::Call(name, args) => {
-                        tasks.push(InlineTask::BuildCall(name, args.len()));
-                        for &a in args.iter().rev() {
-                            tasks.push(InlineTask::Visit(a));
+                        results.push(local_expr.clone());
+                    } else {
+                        count += 1;
+                        if count > max_nodes {
+                            return None;
                         }
+                        results.push(Expr::Ident(name.clone()));
                     }
                 }
-            }
+                Expr::Unary { op: UnaryOp::Neg, rhs } => {
+                    count += 1;
+                    if count > max_nodes {
+                        return None;
+                    }
+                    tasks.push(InlineTask::BuildNeg);
+                    tasks.push(InlineTask::Visit(rhs));
+                }
+                Expr::Binary { op, lhs, rhs } => {
+                    count += 1;
+                    if count > max_nodes {
+                        return None;
+                    }
+                    tasks.push(InlineTask::BuildBin(*op));
+                    tasks.push(InlineTask::Visit(rhs));
+                    tasks.push(InlineTask::Visit(lhs));
+                }
+                Expr::Call { name, args } => {
+                    count += 1;
+                    if count > max_nodes {
+                        return None;
+                    }
+                    tasks.push(InlineTask::BuildCall(name.as_str(), args.len()));
+                    for arg in args.iter().rev() {
+                        tasks.push(InlineTask::Visit(arg));
+                    }
+                }
+                Expr::Unary { op: UnaryOp::Not, .. } | Expr::If { .. } => return None,
+            },
             InlineTask::BuildNeg => {
                 let inner = results.pop()?;
-                results.push(ast.push(DslNode::Neg(inner))?);
+                results.push(Expr::Unary { op: UnaryOp::Neg, rhs: Box::new(inner) });
             }
             InlineTask::BuildBin(op) => {
                 let rhs = results.pop()?;
                 let lhs = results.pop()?;
-                results.push(ast.push(DslNode::Bin(op, lhs, rhs))?);
+                results.push(Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) });
             }
             InlineTask::BuildCall(name, arity) => {
                 if results.len() < arity {
                     return None;
                 }
                 let args = results.split_off(results.len() - arity);
-                results.push(ast.push(DslNode::Call(name, args))?);
+                results.push(Expr::Call { name: name.to_owned(), args });
             }
         }
     }
-    if results.len() == 1 { results.pop() } else { None }
+    if results.len() == 1 { results.pop().map(|e| (e, count)) } else { None }
 }
 
-fn count_tree_nodes_bounded(ast: &DslAst, root: usize, limit: usize) -> bool {
+fn expr_references_y(root: &Expr) -> bool {
     let mut stack = vec![root];
-    let mut count = 0usize;
-    while let Some(idx) = stack.pop() {
-        count += 1;
-        if count > limit {
-            return false;
-        }
-        match ast.nodes.get(idx) {
-            Some(DslNode::Num(_) | DslNode::Ident(_)) => {}
-            Some(DslNode::Neg(inner)) => stack.push(*inner),
-            Some(DslNode::Bin(_, lhs, rhs)) => {
-                stack.push(*rhs);
-                stack.push(*lhs);
+    while let Some(node) = stack.pop() {
+        match node {
+            Expr::Ident(name) if name.eq_ignore_ascii_case("Y") => return true,
+            Expr::Num(_) | Expr::Ident(_) => {}
+            Expr::Unary { rhs, .. } => stack.push(rhs),
+            Expr::Binary { lhs, rhs, .. } => {
+                stack.push(rhs);
+                stack.push(lhs);
             }
-            Some(DslNode::Call(_, args)) => {
-                for &a in args.iter().rev() {
-                    stack.push(a);
-                }
+            Expr::Call { args, .. } => stack.extend(args.iter()),
+            Expr::If { cond, then_br, else_br } => {
+                stack.push(else_br);
+                stack.push(then_br);
+                stack.push(cond);
             }
-            None => return false,
-        }
-    }
-    true
-}
-
-fn ast_references_y(ast: &DslAst, root: usize) -> bool {
-    let mut stack = vec![root];
-    while let Some(idx) = stack.pop() {
-        match ast.nodes.get(idx) {
-            Some(DslNode::Ident(name)) if name.eq_ignore_ascii_case("Y") => return true,
-            Some(DslNode::Num(_) | DslNode::Ident(_)) => {}
-            Some(DslNode::Neg(inner)) => stack.push(*inner),
-            Some(DslNode::Bin(_, lhs, rhs)) => {
-                stack.push(*rhs);
-                stack.push(*lhs);
-            }
-            Some(DslNode::Call(_, args)) => {
-                for &a in args.iter().rev() {
-                    stack.push(a);
-                }
-            }
-            None => return false,
         }
     }
     false
 }
 
-fn has_leading_dsl_neg(ast: &DslAst, mut idx: usize) -> bool {
+fn has_leading_dsl_neg(mut expr: &Expr) -> bool {
     loop {
-        match ast.nodes.get(idx) {
-            Some(DslNode::Neg(_)) => return true,
-            Some(DslNode::Bin(DslBinOp::Mul, l, _)) => idx = *l,
+        match expr {
+            Expr::Unary { op: UnaryOp::Neg, .. } => return true,
+            Expr::Binary { op: BinaryOp::Mul, lhs, .. } => expr = lhs,
             _ => return false,
         }
     }
 }
 
-enum RenderTask {
-    Visit { idx: usize, parent_prec: u8, strip_left_neg: bool },
+enum RenderTask<'a> {
+    Visit { expr: &'a Expr, parent_prec: u8, strip_left_neg: bool },
     FinishNeg { parent_prec: u8, need_paren: bool },
     FinishAdd { parent_prec: u8 },
     FinishSub { parent_prec: u8, r_paren: bool },
     FinishMul { parent_prec: u8 },
     FinishDiv { parent_prec: u8, strip_neg_active: bool, inner_is_add_sub: bool },
     FinishPow { lhs_is_bin_or_neg: bool },
-    FinishCall { name: String, arg_count: usize, first_is_atom: bool },
+    FinishCall { name: &'a str, arg_count: usize, first_is_atom: bool },
 }
 
-fn render_dsl_tex_iterative(ast: &DslAst, root: usize, ctx: &EqCtx<'_>, shadowed_locals: Option<&HashMap<String, usize>>) -> String {
-    let mut tasks = vec![RenderTask::Visit { idx: root, parent_prec: 0, strip_left_neg: false }];
+fn render_dsl_tex_iterative(root: &Expr, ctx: &EqCtx<'_>, shadowed_locals: Option<&HashSet<&str>>) -> String {
+    let mut tasks = vec![RenderTask::Visit { expr: root, parent_prec: 0, strip_left_neg: false }];
     let mut results: Vec<String> = Vec::new();
 
     while let Some(task) = tasks.pop() {
         match task {
-            RenderTask::Visit { idx, parent_prec, strip_left_neg } => {
-                push_visit_tasks(ast, idx, parent_prec, strip_left_neg, ctx, shadowed_locals, &mut tasks, &mut results);
+            RenderTask::Visit { expr, parent_prec, strip_left_neg } => {
+                push_visit_tasks(expr, parent_prec, strip_left_neg, ctx, shadowed_locals, &mut tasks, &mut results);
             }
             RenderTask::FinishNeg { parent_prec, need_paren } => {
                 let body = results.pop().unwrap_or_default();
@@ -1992,7 +1578,7 @@ fn render_dsl_tex_iterative(ast: &DslAst, root: usize, ctx: &EqCtx<'_>, shadowed
             RenderTask::FinishCall { name, arg_count, first_is_atom } => {
                 let start = results.len().saturating_sub(arg_count);
                 let args = results.split_off(start);
-                results.push(render_dsl_call_strings(&name, &args, first_is_atom));
+                results.push(render_dsl_call_strings(name, &args, first_is_atom));
             }
         }
     }
@@ -2000,29 +1586,24 @@ fn render_dsl_tex_iterative(ast: &DslAst, root: usize, ctx: &EqCtx<'_>, shadowed
     results.pop().unwrap_or_default()
 }
 
-#[allow(clippy::too_many_arguments)]
-fn push_visit_tasks(
-    ast: &DslAst,
-    idx: usize,
+fn push_visit_tasks<'a>(
+    expr: &'a Expr,
     parent_prec: u8,
     strip_left_neg: bool,
     ctx: &EqCtx<'_>,
-    shadowed_locals: Option<&HashMap<String, usize>>,
-    tasks: &mut Vec<RenderTask>,
+    shadowed_locals: Option<&HashSet<&str>>,
+    tasks: &mut Vec<RenderTask<'a>>,
     results: &mut Vec<String>,
 ) {
-    let Some(node) = ast.nodes.get(idx) else {
-        return;
-    };
-    match node {
-        DslNode::Num(s) => {
-            let formatted = format_dsl_literal(s, ctx.sig_figs);
+    match expr {
+        Expr::Num(v) => {
+            let formatted = format_dsl_num(*v, ctx.sig_figs);
             let out =
                 if parent_prec >= 3 && (formatted.starts_with('-') || formatted.contains("\\times")) { format!("({formatted})") } else { formatted };
             results.push(out);
         }
-        DslNode::Ident(name) => {
-            let is_shadowed = shadowed_locals.is_some_and(|env| env.contains_key(name));
+        Expr::Ident(name) => {
+            let is_shadowed = shadowed_locals.is_some_and(|env| env.contains(name.as_str()));
             let rendered = if ctx.substituted
                 && !is_shadowed
                 && let Some(v) = ctx.find(name)
@@ -2038,54 +1619,56 @@ fn push_visit_tasks(
             };
             results.push(rendered);
         }
-        DslNode::Neg(inner) => {
+        Expr::Unary { op: UnaryOp::Neg, rhs } => {
             if strip_left_neg {
-                tasks.push(RenderTask::Visit { idx: *inner, parent_prec, strip_left_neg: false });
+                tasks.push(RenderTask::Visit { expr: rhs, parent_prec, strip_left_neg: false });
             } else {
-                let need_paren = matches!(ast.nodes.get(*inner), Some(DslNode::Bin(DslBinOp::Add | DslBinOp::Sub, _, _)));
+                let need_paren = matches!(rhs.as_ref(), Expr::Binary { op: BinaryOp::Add | BinaryOp::Sub, .. });
                 tasks.push(RenderTask::FinishNeg { parent_prec, need_paren });
-                tasks.push(RenderTask::Visit { idx: *inner, parent_prec: 2, strip_left_neg: false });
+                tasks.push(RenderTask::Visit { expr: rhs, parent_prec: 2, strip_left_neg: false });
             }
         }
-        DslNode::Bin(DslBinOp::Add, lhs, rhs) => {
+        Expr::Binary { op: BinaryOp::Add, lhs, rhs } => {
             tasks.push(RenderTask::FinishAdd { parent_prec });
-            tasks.push(RenderTask::Visit { idx: *rhs, parent_prec: 1, strip_left_neg: false });
-            tasks.push(RenderTask::Visit { idx: *lhs, parent_prec: 1, strip_left_neg: false });
+            tasks.push(RenderTask::Visit { expr: rhs, parent_prec: 1, strip_left_neg: false });
+            tasks.push(RenderTask::Visit { expr: lhs, parent_prec: 1, strip_left_neg: false });
         }
-        DslNode::Bin(DslBinOp::Sub, lhs, rhs) => {
-            let r_paren = matches!(ast.nodes.get(*rhs), Some(DslNode::Bin(DslBinOp::Add | DslBinOp::Sub, _, _)));
+        Expr::Binary { op: BinaryOp::Sub, lhs, rhs } => {
+            let r_paren = matches!(rhs.as_ref(), Expr::Binary { op: BinaryOp::Add | BinaryOp::Sub, .. });
             tasks.push(RenderTask::FinishSub { parent_prec, r_paren });
-            tasks.push(RenderTask::Visit { idx: *rhs, parent_prec: 2, strip_left_neg: false });
-            tasks.push(RenderTask::Visit { idx: *lhs, parent_prec: 1, strip_left_neg: false });
+            tasks.push(RenderTask::Visit { expr: rhs, parent_prec: 2, strip_left_neg: false });
+            tasks.push(RenderTask::Visit { expr: lhs, parent_prec: 1, strip_left_neg: false });
         }
-        DslNode::Bin(DslBinOp::Mul, lhs, rhs) => {
+        Expr::Binary { op: BinaryOp::Mul, lhs, rhs } => {
             tasks.push(RenderTask::FinishMul { parent_prec });
-            tasks.push(RenderTask::Visit { idx: *rhs, parent_prec: 3, strip_left_neg: false });
-            tasks.push(RenderTask::Visit { idx: *lhs, parent_prec: 2, strip_left_neg });
+            tasks.push(RenderTask::Visit { expr: rhs, parent_prec: 3, strip_left_neg: false });
+            tasks.push(RenderTask::Visit { expr: lhs, parent_prec: 2, strip_left_neg });
         }
-        DslNode::Bin(DslBinOp::Div, lhs, rhs) => {
-            let strip_neg_active = has_leading_dsl_neg(ast, *lhs);
-            let inner_is_add_sub = if let Some(DslNode::Neg(inner)) = ast.nodes.get(*lhs) {
-                matches!(ast.nodes.get(*inner), Some(DslNode::Bin(DslBinOp::Add | DslBinOp::Sub, _, _)))
-            } else {
-                false
-            };
+        Expr::Binary { op: BinaryOp::Div, lhs, rhs } => {
+            let strip_neg_active = has_leading_dsl_neg(lhs);
+            let inner_is_add_sub = matches!(
+                lhs.as_ref(),
+                Expr::Unary { op: UnaryOp::Neg, rhs: inner } if matches!(inner.as_ref(), Expr::Binary { op: BinaryOp::Add | BinaryOp::Sub, .. })
+            );
             tasks.push(RenderTask::FinishDiv { parent_prec, strip_neg_active, inner_is_add_sub });
-            tasks.push(RenderTask::Visit { idx: *rhs, parent_prec: 0, strip_left_neg: false });
-            tasks.push(RenderTask::Visit { idx: *lhs, parent_prec: 0, strip_left_neg: strip_neg_active });
+            tasks.push(RenderTask::Visit { expr: rhs, parent_prec: 0, strip_left_neg: false });
+            tasks.push(RenderTask::Visit { expr: lhs, parent_prec: 0, strip_left_neg: strip_neg_active });
         }
-        DslNode::Bin(DslBinOp::Pow, lhs, rhs) => {
-            let lhs_is_bin_or_neg = matches!(ast.nodes.get(*lhs), Some(DslNode::Bin(_, _, _) | DslNode::Neg(_)));
+        Expr::Binary { op: BinaryOp::Pow, lhs, rhs } => {
+            let lhs_is_bin_or_neg = matches!(lhs.as_ref(), Expr::Binary { .. } | Expr::Unary { op: UnaryOp::Neg, .. });
             tasks.push(RenderTask::FinishPow { lhs_is_bin_or_neg });
-            tasks.push(RenderTask::Visit { idx: *rhs, parent_prec: 0, strip_left_neg: false });
-            tasks.push(RenderTask::Visit { idx: *lhs, parent_prec: 4, strip_left_neg: false });
+            tasks.push(RenderTask::Visit { expr: rhs, parent_prec: 0, strip_left_neg: false });
+            tasks.push(RenderTask::Visit { expr: lhs, parent_prec: 4, strip_left_neg: false });
         }
-        DslNode::Call(name, args) => {
-            let first_is_atom = matches!(args.first().and_then(|&id| ast.nodes.get(id)), Some(DslNode::Ident(_) | DslNode::Num(_)));
-            tasks.push(RenderTask::FinishCall { name: name.clone(), arg_count: args.len(), first_is_atom });
-            for &arg in args.iter().rev() {
-                tasks.push(RenderTask::Visit { idx: arg, parent_prec: 0, strip_left_neg: false });
+        Expr::Call { name, args } => {
+            let first_is_atom = matches!(args.first(), Some(Expr::Ident(_) | Expr::Num(_)));
+            tasks.push(RenderTask::FinishCall { name: name.as_str(), arg_count: args.len(), first_is_atom });
+            for arg in args.iter().rev() {
+                tasks.push(RenderTask::Visit { expr: arg, parent_prec: 0, strip_left_neg: false });
             }
+        }
+        Expr::Unary { op: UnaryOp::Not, .. } | Expr::Binary { .. } | Expr::If { .. } => {
+            results.push(String::new());
         }
     }
 }
@@ -2127,13 +1710,13 @@ fn render_dsl_call_strings(name: &str, rendered_args: &[String], first_is_atom: 
     }
 }
 
-fn format_dsl_literal(raw: &str, sig_figs: usize) -> String {
-    if raw.contains(['e', 'E'])
-        && let Ok(v) = raw.parse::<f64>()
-    {
-        return format_number_sig_figs(v, sig_figs);
+fn format_dsl_num(value: f64, sig_figs: usize) -> String {
+    let abs = value.abs();
+    if value != 0.0 && value.is_finite() && !(1e-4..1e6).contains(&abs) {
+        format_number_sig_figs(value, sig_figs)
+    } else {
+        format_number_sig_figs(value, 15)
     }
-    raw.to_string()
 }
 
 fn escape_tex_fallback_char(ch: char, out: &mut String) {
@@ -2665,5 +2248,13 @@ mod tests {
         assert_eq!(normalize_tex_signs(r"a \cdot +X"), r"a \cdot X");
         assert_eq!(normalize_tex_signs(r"t - 3"), r"t - 3");
         assert_eq!(normalize_tex_signs(r"s - 3"), r"s - 3");
+    }
+
+    #[test]
+    fn custom_dsl_ode_sci_literals_and_unary_pow_precedence_match_dsl_parser() {
+        assert_eq!(format_model_equation_tex("custom_dsl", Some("Y0 = A0\ndY/dt = -k * Y"), &[], false, 4), "\\frac{dY}{dt} = -k \\cdot Y");
+        assert_eq!(format_model_equation_tex("custom_dsl", Some("Y' = -k * Y"), &[("k".into(), 0.25)], true, 4), "Y' = -0.25 \\cdot Y");
+        assert_eq!(format_model_equation_tex("custom_dsl", Some("Y = 1.25e-5 * X + 0.5"), &[], false, 4), "Y = 1.25 \\times 10^{-5} \\cdot X + 0.5");
+        assert_eq!(format_model_equation_tex("custom_dsl", Some("Y = 2^-3^2 + X^-2"), &[], false, 4), "Y = 2^{-3^{2}} + X^{-2}");
     }
 }

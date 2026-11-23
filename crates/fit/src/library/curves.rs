@@ -38,185 +38,106 @@
 //!   two-regime straight-line data. *Technometrics* 16.
 //! - Huxley, J. S. (1932). *Problems of Relative Growth*. London: Methuen.
 
-use crate::library::{BuiltinEquationSpec, ParametricModel, data_x_min_max, data_y_min_max, resolve_from_specs, safe_exp, spec_ids};
+use crate::library::{BuiltinEquationSpec, ModelMeta, ParametricModel, data_x_min_max, data_y_min_max, resolve_from_specs, safe_exp, spec_ids};
 use crate::types::{DataPoint, DerivedScalar, EquationCategory};
 use curvebook_doc::{ParameterRule, ParameterScope};
 
 /// Ordered single-source-of-truth registrations for the general curve equation family.
 pub(crate) const CURVE_SPECS: &[BuiltinEquationSpec] = &[
     // Exponential
-    BuiltinEquationSpec { id: "one_phase_decay", aliases: &[], build: || Box::new(OnePhaseDecay { params: names(&["Y0", "Plateau", "K"]) }) },
-    BuiltinEquationSpec {
-        id: "two_phase_decay",
-        aliases: &[],
-        build: || Box::new(TwoPhaseDecay { params: names(&["Y0", "Plateau", "PercentFast", "KFast", "KSlow"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "three_phase_decay",
-        aliases: &[],
-        build: || Box::new(ThreePhaseDecay { params: names(&["Y0", "Plateau", "PercentFast", "PercentSlow", "KFast", "KSlow", "KVerySlow"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "plateau_followed_by_one_phase_decay",
-        aliases: &[],
-        build: || Box::new(PlateauThenDecay { params: names(&["Y0", "X0", "Plateau", "K"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "one_phase_association",
-        aliases: &[],
-        build: || Box::new(OnePhaseAssociation { params: names(&["Y0", "Plateau", "K"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "plateau_followed_by_one_phase_association",
-        aliases: &[],
-        build: || Box::new(PlateauThenAssoc { params: names(&["Y0", "X0", "Plateau", "K"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "exponential_growth",
-        aliases: &[],
-        build: || {
-            Box::new(ExponentialGrowth {
-                id: "exponential_growth",
-                name: "Exponential growth",
-                category: EquationCategory::Exponential,
-                params: names(&["Y0", "k"]),
-            })
-        },
-    },
+    BuiltinEquationSpec::new("one_phase_decay", &[], || Box::new(OnePhaseDecay)),
+    BuiltinEquationSpec::new("two_phase_decay", &[], || Box::new(TwoPhaseDecay)),
+    BuiltinEquationSpec::new("three_phase_decay", &[], || Box::new(ThreePhaseDecay)),
+    BuiltinEquationSpec::new("plateau_followed_by_one_phase_decay", &[], || Box::new(PlateauThenDecay)),
+    BuiltinEquationSpec::new("one_phase_association", &[], || Box::new(OnePhaseAssociation)),
+    BuiltinEquationSpec::new("plateau_followed_by_one_phase_association", &[], || Box::new(PlateauThenAssoc)),
+    BuiltinEquationSpec::new("exponential_growth", &[], || {
+        Box::new(ExponentialGrowth { meta: ModelMeta::new("exponential_growth", "Exponential growth", EquationCategory::Exponential, &["Y0", "k"]) })
+    }),
     // Growth
-    BuiltinEquationSpec { id: "exponential_plateau", aliases: &[], build: || Box::new(ExponentialPlateau { params: names(&["YM", "Y0", "k"]) }) },
-    BuiltinEquationSpec { id: "logistic_growth", aliases: &[], build: || Box::new(LogisticGrowth { params: names(&["YM", "Y0", "k"]) }) },
-    BuiltinEquationSpec { id: "gompertz_growth", aliases: &[], build: || Box::new(GompertzGrowth { params: names(&["YM", "Y0", "k"]) }) },
-    BuiltinEquationSpec { id: "beta_growth_then_decay", aliases: &[], build: || Box::new(BetaGrowthDecay { params: names(&["Ym", "te", "tm"]) }) },
-    BuiltinEquationSpec {
-        id: "malthusian_growth",
-        aliases: &[],
-        build: || {
-            Box::new(ExponentialGrowth {
-                id: "malthusian_growth",
-                name: "Malthusian growth",
-                category: EquationCategory::Growth,
-                params: names(&["Y0", "k"]),
-            })
-        },
-    },
+    BuiltinEquationSpec::new("exponential_plateau", &[], || Box::new(ExponentialPlateau)),
+    BuiltinEquationSpec::new("logistic_growth", &[], || Box::new(LogisticGrowth)),
+    BuiltinEquationSpec::new("gompertz_growth", &[], || Box::new(GompertzGrowth)),
+    BuiltinEquationSpec::new("beta_growth_then_decay", &[], || Box::new(BetaGrowthDecay)),
+    BuiltinEquationSpec::new("malthusian_growth", &[], || {
+        Box::new(ExponentialGrowth { meta: ModelMeta::new("malthusian_growth", "Malthusian growth", EquationCategory::Growth, &["Y0", "k"]) })
+    }),
     // Radiobiology
-    BuiltinEquationSpec {
-        id: "linear_quadratic_survival",
-        aliases: &[],
-        build: || Box::new(LinearQuadraticSurvival { params: names(&["Alpha", "Beta"]) }),
-    },
+    BuiltinEquationSpec::new("linear_quadratic_survival", &[], || Box::new(LinearQuadraticSurvival)),
     // Peak
-    BuiltinEquationSpec {
-        id: "gaussian",
-        aliases: &[],
-        build: || Box::new(GaussianCurve { with_baseline: false, params: names(&["Amplitude", "Mean", "SD"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "gaussian_baseline",
-        aliases: &[],
-        build: || Box::new(GaussianCurve { with_baseline: true, params: names(&["Baseline", "Amplitude", "Mean", "SD"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "sum_of_two_gaussians",
-        aliases: &[],
-        build: || Box::new(TwoGaussians { params: names(&["Amp1", "Mean1", "SD1", "Amp2", "Mean2", "SD2"]) }),
-    },
-    BuiltinEquationSpec { id: "log_gaussian", aliases: &[], build: || Box::new(LogGaussian { params: names(&["Amplitude", "GeoMean", "GeoSD"]) }) },
-    BuiltinEquationSpec {
-        id: "cumulative_gaussian",
-        aliases: &[],
-        build: || Box::new(CumulativeGaussian { params: names(&["Bottom", "Top", "Mean", "SD"]) }),
-    },
-    BuiltinEquationSpec { id: "lorentzian", aliases: &[], build: || Box::new(LorentzianPeak { params: names(&["Amplitude", "Center", "Width"]) }) },
-    BuiltinEquationSpec { id: "weibull_peak", aliases: &[], build: || Box::new(WeibullPeak { params: names(&["Amplitude", "Scale", "Shape"]) }) },
+    BuiltinEquationSpec::new("gaussian", &[], || {
+        Box::new(GaussianCurve {
+            meta: ModelMeta::new("gaussian", "Gaussian", EquationCategory::Gaussian, &["Amplitude", "Mean", "SD"]),
+            with_baseline: false,
+        })
+    }),
+    BuiltinEquationSpec::new("gaussian_baseline", &[], || {
+        Box::new(GaussianCurve {
+            meta: ModelMeta::new("gaussian_baseline", "Gaussian with baseline", EquationCategory::Gaussian, &["Baseline", "Amplitude", "Mean", "SD"]),
+            with_baseline: true,
+        })
+    }),
+    BuiltinEquationSpec::new("sum_of_two_gaussians", &[], || Box::new(TwoGaussians)),
+    BuiltinEquationSpec::new("log_gaussian", &[], || Box::new(LogGaussian)),
+    BuiltinEquationSpec::new("cumulative_gaussian", &[], || Box::new(CumulativeGaussian)),
+    BuiltinEquationSpec::new("lorentzian", &[], || Box::new(LorentzianPeak)),
+    BuiltinEquationSpec::new("weibull_peak", &[], || Box::new(WeibullPeak)),
     // Wave
-    BuiltinEquationSpec {
-        id: "sine_wave",
-        aliases: &[],
-        build: || Box::new(SineWave { damped: false, params: names(&["Amplitude", "Frequency", "PhaseShift", "Baseline"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "damped_sine_wave",
-        aliases: &[],
-        build: || Box::new(SineWave { damped: true, params: names(&["Amplitude", "Frequency", "PhaseShift", "K", "Baseline"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "sinc_wave",
-        aliases: &[],
-        build: || Box::new(SincWave { params: names(&["Amplitude", "Center", "Width", "Baseline"]) }),
-    },
+    BuiltinEquationSpec::new("sine_wave", &[], || {
+        Box::new(SineWave {
+            meta: ModelMeta::new("sine_wave", "Sine wave", EquationCategory::SineWave, &["Amplitude", "Frequency", "PhaseShift", "Baseline"]),
+            damped: false,
+        })
+    }),
+    BuiltinEquationSpec::new("damped_sine_wave", &[], || {
+        Box::new(SineWave {
+            meta: ModelMeta::new(
+                "damped_sine_wave",
+                "Damped sine wave",
+                EquationCategory::SineWave,
+                &["Amplitude", "Frequency", "PhaseShift", "K", "Baseline"],
+            ),
+            damped: true,
+        })
+    }),
+    BuiltinEquationSpec::new("sinc_wave", &[], || Box::new(SincWave)),
     // Standard Curves & Polynomials
-    BuiltinEquationSpec {
-        id: "straight_line",
-        aliases: &[],
-        build: || Box::new(StraightLine { through_origin: false, params: names(&["Slope", "YIntercept"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "line_through_origin",
-        aliases: &[],
-        build: || Box::new(StraightLine { through_origin: true, params: names(&["Slope"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "segmental_linear",
-        aliases: &[],
-        build: || Box::new(SegmentalLinear { params: names(&["Intercept1", "Slope1", "X0", "Slope2"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "hinge_smooth_hyperbolic",
-        aliases: &[],
-        build: || Box::new(SmoothHinge { params: names(&["Y0", "X0", "Slope1", "Slope2", "Delta"]) }),
-    },
-    BuiltinEquationSpec { id: "polynomial_2", aliases: &["quadratic"], build: || Box::new(Polynomial { degree: 2 }) },
-    BuiltinEquationSpec { id: "polynomial_3", aliases: &["cubic"], build: || Box::new(Polynomial { degree: 3 }) },
-    BuiltinEquationSpec { id: "polynomial_4", aliases: &["quartic"], build: || Box::new(Polynomial { degree: 4 }) },
-    BuiltinEquationSpec { id: "polynomial_5", aliases: &[], build: || Box::new(Polynomial { degree: 5 }) },
-    BuiltinEquationSpec { id: "polynomial_6", aliases: &[], build: || Box::new(Polynomial { degree: 6 }) },
-    BuiltinEquationSpec { id: "power_law", aliases: &["power_series"], build: || Box::new(PowerCurve { params: names(&["a", "b"]) }) },
-    BuiltinEquationSpec { id: "logarithmic_curve", aliases: &[], build: || Box::new(LogarithmicCurve { params: names(&["a", "b"]) }) },
-    BuiltinEquationSpec {
-        id: "centered_poly_1",
-        aliases: &["centered_linear", "centered_polynomial_1"],
-        build: || Box::new(CenteredPolynomial::new(1)),
-    },
-    BuiltinEquationSpec {
-        id: "centered_poly_2",
-        aliases: &["centered_quadratic", "centered_polynomial_2"],
-        build: || Box::new(CenteredPolynomial::new(2)),
-    },
-    BuiltinEquationSpec {
-        id: "centered_poly_3",
-        aliases: &["centered_cubic", "centered_polynomial_3"],
-        build: || Box::new(CenteredPolynomial::new(3)),
-    },
-    BuiltinEquationSpec {
-        id: "centered_poly_4",
-        aliases: &["centered_quartic", "centered_polynomial_4"],
-        build: || Box::new(CenteredPolynomial::new(4)),
-    },
-    BuiltinEquationSpec { id: "centered_poly_5", aliases: &["centered_polynomial_5"], build: || Box::new(CenteredPolynomial::new(5)) },
-    BuiltinEquationSpec { id: "centered_poly_6", aliases: &["centered_polynomial_6"], build: || Box::new(CenteredPolynomial::new(6)) },
-    BuiltinEquationSpec {
-        id: "semi_log_line",
-        aliases: &["semilog_line"],
-        build: || Box::new(SemiLogLine { params: names(&["Slope", "YIntercept"]) }),
-    },
-    BuiltinEquationSpec {
-        id: "log_log_line",
-        aliases: &["loglog_line"],
-        build: || Box::new(LogLogLine { params: names(&["Slope", "LogYIntercept"]) }),
-    },
-    BuiltinEquationSpec { id: "probit_line", aliases: &[], build: || Box::new(ProbitLine { params: names(&["Slope", "Intercept"]) }) },
+    BuiltinEquationSpec::new("straight_line", &[], || {
+        Box::new(StraightLine {
+            meta: ModelMeta::new("straight_line", "Straight line", EquationCategory::StandardCurve, &["Slope", "YIntercept"]),
+            through_origin: false,
+        })
+    }),
+    BuiltinEquationSpec::new("line_through_origin", &[], || {
+        Box::new(StraightLine {
+            meta: ModelMeta::new("line_through_origin", "Line through origin", EquationCategory::StandardCurve, &["Slope"]),
+            through_origin: true,
+        })
+    }),
+    BuiltinEquationSpec::new("segmental_linear", &[], || Box::new(SegmentalLinear)),
+    BuiltinEquationSpec::new("hinge_smooth_hyperbolic", &[], || Box::new(SmoothHinge)),
+    BuiltinEquationSpec::new("polynomial_2", &["quadratic"], || Box::new(Polynomial::new(2))),
+    BuiltinEquationSpec::new("polynomial_3", &["cubic"], || Box::new(Polynomial::new(3))),
+    BuiltinEquationSpec::new("polynomial_4", &["quartic"], || Box::new(Polynomial::new(4))),
+    BuiltinEquationSpec::new("polynomial_5", &[], || Box::new(Polynomial::new(5))),
+    BuiltinEquationSpec::new("polynomial_6", &[], || Box::new(Polynomial::new(6))),
+    BuiltinEquationSpec::new("power_law", &["power_series"], || Box::new(PowerCurve)),
+    BuiltinEquationSpec::new("logarithmic_curve", &[], || Box::new(LogarithmicCurve)),
+    BuiltinEquationSpec::new("centered_poly_1", &["centered_linear", "centered_polynomial_1"], || Box::new(CenteredPolynomial::new(1))),
+    BuiltinEquationSpec::new("centered_poly_2", &["centered_quadratic", "centered_polynomial_2"], || Box::new(CenteredPolynomial::new(2))),
+    BuiltinEquationSpec::new("centered_poly_3", &["centered_cubic", "centered_polynomial_3"], || Box::new(CenteredPolynomial::new(3))),
+    BuiltinEquationSpec::new("centered_poly_4", &["centered_quartic", "centered_polynomial_4"], || Box::new(CenteredPolynomial::new(4))),
+    BuiltinEquationSpec::new("centered_poly_5", &["centered_polynomial_5"], || Box::new(CenteredPolynomial::new(5))),
+    BuiltinEquationSpec::new("centered_poly_6", &["centered_polynomial_6"], || Box::new(CenteredPolynomial::new(6))),
+    BuiltinEquationSpec::new("semi_log_line", &["semilog_line"], || Box::new(SemiLogLine)),
+    BuiltinEquationSpec::new("log_log_line", &["loglog_line"], || Box::new(LogLogLine)),
+    BuiltinEquationSpec::new("probit_line", &[], || Box::new(ProbitLine)),
 ];
 
 const CURVE_EQUATION_ID_ARRAY: [&str; CURVE_SPECS.len()] = spec_ids::<{ CURVE_SPECS.len() }>(CURVE_SPECS);
 
 /// Canonical IDs exposed by the general curve equation catalog.
 pub const CURVE_EQUATION_IDS: &[&str] = &CURVE_EQUATION_ID_ARRAY;
-
-fn names(slice: &[&str]) -> Vec<String> {
-    slice.iter().map(|s| (*s).to_owned()).collect()
-}
 
 /// Resolve any non-pharmacology, non-NIST built-in equation ID into a [`ParametricModel`].
 #[must_use]
@@ -228,23 +149,10 @@ pub fn resolve_curve_model(norm_id: &str) -> Option<Box<dyn ParametricModel>> {
 /// `HalfLife = ln 2 / K`, `Tau = 1 / K`.
 /// Reference: first-order (single-compartment) kinetics, Seber & Wild (1989) ch. 8; this
 /// `Y0` / `Plateau` / `K` parameterisation follows Motulsky & Christopoulos (2004).
-struct OnePhaseDecay {
-    params: Vec<String>,
-}
+struct OnePhaseDecay;
 
 impl ParametricModel for OnePhaseDecay {
-    fn id(&self) -> &str {
-        "one_phase_decay"
-    }
-    fn name(&self) -> &str {
-        "One phase decay"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::Exponential
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!("one_phase_decay", "One phase decay", EquationCategory::Exponential, ["Y0", "Plateau", "K"]);
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let t = x.first().copied()?;
         let (y0, plateau, k) = (params[0], params[1], params[2]);
@@ -285,23 +193,10 @@ impl ParametricModel for OnePhaseDecay {
 /// Two-phase (bi-exponential) decay with `PercentFast` of the span decaying at `KFast`.
 /// Reference: sum-of-exponentials (two-compartment) model, Seber & Wild (1989) ch. 8; the
 /// `Plateau` / `PercentFast` parameterisation follows Motulsky & Christopoulos (2004).
-struct TwoPhaseDecay {
-    params: Vec<String>,
-}
+struct TwoPhaseDecay;
 
 impl ParametricModel for TwoPhaseDecay {
-    fn id(&self) -> &str {
-        "two_phase_decay"
-    }
-    fn name(&self) -> &str {
-        "Two phase decay"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::Exponential
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!("two_phase_decay", "Two phase decay", EquationCategory::Exponential, ["Y0", "Plateau", "PercentFast", "KFast", "KSlow"]);
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let t = x.first().copied()?;
         let (y0, plateau, pct_fast, k_fast, k_slow) = (params[0], params[1], params[2], params[3], params[4]);
@@ -324,23 +219,15 @@ impl ParametricModel for TwoPhaseDecay {
 
 /// Three-phase (tri-exponential) decay; the very-slow fraction is `1 - PercentFast - PercentSlow`.
 /// Reference: sum-of-exponentials (compartmental) model, Seber & Wild (1989) ch. 8.
-struct ThreePhaseDecay {
-    params: Vec<String>,
-}
+struct ThreePhaseDecay;
 
 impl ParametricModel for ThreePhaseDecay {
-    fn id(&self) -> &str {
-        "three_phase_decay"
-    }
-    fn name(&self) -> &str {
-        "Three phase decay"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::Exponential
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!(
+        "three_phase_decay",
+        "Three phase decay",
+        EquationCategory::Exponential,
+        ["Y0", "Plateau", "PercentFast", "PercentSlow", "KFast", "KSlow", "KVerySlow"]
+    );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let t = x.first().copied()?;
         let (y0, plateau, pf, ps, kf, ks, kvs) = (params[0], params[1], params[2], params[3], params[4], params[5], params[6]);
@@ -367,23 +254,15 @@ impl ParametricModel for ThreePhaseDecay {
 /// Constant `Y0` until `X0`, then one-phase decay toward `Plateau` (piecewise composite).
 /// Reference: the decay segment is the first-order form of Seber & Wild (1989) ch. 8; the hold
 /// segment is a piecewise join (Seber & Wild 1989, ch. 9). No single primary source for the composite.
-struct PlateauThenDecay {
-    params: Vec<String>,
-}
+struct PlateauThenDecay;
 
 impl ParametricModel for PlateauThenDecay {
-    fn id(&self) -> &str {
-        "plateau_followed_by_one_phase_decay"
-    }
-    fn name(&self) -> &str {
-        "Plateau followed by one phase decay"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::Exponential
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!(
+        "plateau_followed_by_one_phase_decay",
+        "Plateau followed by one phase decay",
+        EquationCategory::Exponential,
+        ["Y0", "X0", "Plateau", "K"]
+    );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let t = x.first().copied()?;
         let (y0, x0, plateau, k) = (params[0], params[1], params[2], params[3]);
@@ -406,23 +285,10 @@ impl ParametricModel for PlateauThenDecay {
 /// Reference: monomolecular (first-order approach to an asymptote) form, Seber & Wild (1989)
 /// ch. 7; this kinetics parameterisation `(Y0, Plateau, K)` follows Motulsky & Christopoulos
 /// (2004). See [`ExponentialPlateau`] for the `Growth`-category `(YM, Y0, k)` parameterisation.
-struct OnePhaseAssociation {
-    params: Vec<String>,
-}
+struct OnePhaseAssociation;
 
 impl ParametricModel for OnePhaseAssociation {
-    fn id(&self) -> &str {
-        "one_phase_association"
-    }
-    fn name(&self) -> &str {
-        "One phase association"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::Exponential
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!("one_phase_association", "One phase association", EquationCategory::Exponential, ["Y0", "Plateau", "K"]);
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let t = x.first().copied()?;
         let (y0, plateau, k) = (params[0], params[1], params[2]);
@@ -463,23 +329,15 @@ impl ParametricModel for OnePhaseAssociation {
 /// Constant `Y0` until `X0`, then one-phase association toward `Plateau` (piecewise composite).
 /// Reference: monomolecular segment per Seber & Wild (1989) ch. 7, joined piecewise (ch. 9).
 /// No single primary source for the composite.
-struct PlateauThenAssoc {
-    params: Vec<String>,
-}
+struct PlateauThenAssoc;
 
 impl ParametricModel for PlateauThenAssoc {
-    fn id(&self) -> &str {
-        "plateau_followed_by_one_phase_association"
-    }
-    fn name(&self) -> &str {
-        "Plateau followed by one phase association"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::Exponential
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!(
+        "plateau_followed_by_one_phase_association",
+        "Plateau followed by one phase association",
+        EquationCategory::Exponential,
+        ["Y0", "X0", "Plateau", "K"]
+    );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let t = x.first().copied()?;
         let (y0, x0, plateau, k) = (params[0], params[1], params[2], params[3]);
@@ -501,25 +359,11 @@ impl ParametricModel for PlateauThenAssoc {
 /// Unbounded exponential (Malthusian) growth `Y = Y0 * exp(k * X)`.
 /// Reference: Malthus (1798); see also Seber & Wild (1989) ch. 7.
 struct ExponentialGrowth {
-    id: &'static str,
-    name: &'static str,
-    category: EquationCategory,
-    params: Vec<String>,
+    meta: ModelMeta,
 }
 
 impl ParametricModel for ExponentialGrowth {
-    fn id(&self) -> &str {
-        self.id
-    }
-    fn name(&self) -> &str {
-        self.name
-    }
-    fn category(&self) -> EquationCategory {
-        self.category
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_meta_methods!();
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let t = x.first().copied()?;
         let (y0, k) = (params[0], params[1]);
@@ -550,23 +394,10 @@ impl ParametricModel for ExponentialGrowth {
 /// `logistic_growth` and `gompertz_growth` (Seber & Wild 1989 ch. 7), distinct from
 /// `one_phase_association` (`Exponential` kinetics parameterisation `(Y0, Plateau, K)`).
 /// Reference: Seber & Wild (1989) ch. 7.
-struct ExponentialPlateau {
-    params: Vec<String>,
-}
+struct ExponentialPlateau;
 
 impl ParametricModel for ExponentialPlateau {
-    fn id(&self) -> &str {
-        "exponential_plateau"
-    }
-    fn name(&self) -> &str {
-        "Exponential plateau"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::Growth
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!("exponential_plateau", "Exponential plateau", EquationCategory::Growth, ["YM", "Y0", "k"]);
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let t = x.first().copied()?;
         let (ym, y0, k) = (params[0], params[1], params[2]);
@@ -606,23 +437,10 @@ impl ParametricModel for ExponentialPlateau {
 /// Logistic growth `Y = YM * Y0 / (Y0 + (YM - Y0) * exp(-k * X))` (so `Y(0) = Y0`).
 /// Reference: Verhulst (1838); the `YM` / `Y0` / `k` parameterisation is the logistic of
 /// Seber & Wild (1989) ch. 7 written in terms of the initial value.
-struct LogisticGrowth {
-    params: Vec<String>,
-}
+struct LogisticGrowth;
 
 impl ParametricModel for LogisticGrowth {
-    fn id(&self) -> &str {
-        "logistic_growth"
-    }
-    fn name(&self) -> &str {
-        "Logistic growth"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::Growth
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!("logistic_growth", "Logistic growth", EquationCategory::Growth, ["YM", "Y0", "k"]);
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let t = x.first().copied()?;
         let (ym, y0, k) = (params[0], params[1], params[2]);
@@ -646,23 +464,10 @@ impl ParametricModel for LogisticGrowth {
 /// Gompertz growth `Y = YM * exp(-ln(YM / Y0) * exp(-k * X))` (so `Y(0) = Y0`).
 /// Reference: Gompertz (1825); the initial-value parameterisation is one of the equivalent
 /// Gompertz forms in Seber & Wild (1989) ch. 7.
-struct GompertzGrowth {
-    params: Vec<String>,
-}
+struct GompertzGrowth;
 
 impl ParametricModel for GompertzGrowth {
-    fn id(&self) -> &str {
-        "gompertz_growth"
-    }
-    fn name(&self) -> &str {
-        "Gompertz growth"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::Growth
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!("gompertz_growth", "Gompertz growth", EquationCategory::Growth, ["YM", "Y0", "k"]);
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let t = x.first().copied()?;
         let (ym, y0, k) = (params[0], params[1], params[2]);
@@ -685,23 +490,10 @@ impl ParametricModel for GompertzGrowth {
 /// for `0 <= X <= te` (with `0 <= tm < te`), holding `Y = Ym` for `X > te` (determinate
 /// growth ceiling) and `Y = 0` for `X <= 0`.
 /// Reference: Yin, Goudriaan, Lantinga, Vos & Spiertz (2003), Eqs. (5)-(6) (`tb = 0`, `wb = 0`).
-struct BetaGrowthDecay {
-    params: Vec<String>,
-}
+struct BetaGrowthDecay;
 
 impl ParametricModel for BetaGrowthDecay {
-    fn id(&self) -> &str {
-        "beta_growth_then_decay"
-    }
-    fn name(&self) -> &str {
-        "Beta growth then decay"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::Growth
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!("beta_growth_then_decay", "Beta growth then decay", EquationCategory::Growth, ["Ym", "te", "tm"]);
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let t = x.first().copied()?;
         let (ym, te, tm) = (params[0], params[1], params[2]);
@@ -736,23 +528,10 @@ impl ParametricModel for BetaGrowthDecay {
 
 /// Linear-quadratic cell survival `S = exp(-(alpha * D + beta * D^2))` (surviving fraction).
 /// Reference: Fowler (1989).
-struct LinearQuadraticSurvival {
-    params: Vec<String>,
-}
+struct LinearQuadraticSurvival;
 
 impl ParametricModel for LinearQuadraticSurvival {
-    fn id(&self) -> &str {
-        "linear_quadratic_survival"
-    }
-    fn name(&self) -> &str {
-        "Linear-quadratic radiation survival"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::Radiobiology
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!("linear_quadratic_survival", "Linear-quadratic radiation survival", EquationCategory::Radiobiology, ["Alpha", "Beta"]);
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let d = x.first().copied()?;
         let (alpha, beta) = (params[0], params[1]);
@@ -767,23 +546,12 @@ impl ParametricModel for LinearQuadraticSurvival {
 /// `Amplitude` is the peak height, not an area).
 /// Reference: Gaussian line shape, Bevington & Robinson (2003) ch. 2.
 struct GaussianCurve {
+    meta: ModelMeta,
     with_baseline: bool,
-    params: Vec<String>,
 }
 
 impl ParametricModel for GaussianCurve {
-    fn id(&self) -> &str {
-        if self.with_baseline { "gaussian_baseline" } else { "gaussian" }
-    }
-    fn name(&self) -> &str {
-        if self.with_baseline { "Gaussian with baseline" } else { "Gaussian" }
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::Gaussian
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_meta_methods!();
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
         let (base, amp, mean, sd) =
@@ -809,23 +577,10 @@ impl ParametricModel for GaussianCurve {
 
 /// Sum of two unnormalised Gaussian peaks (no baseline).
 /// Reference: Gaussian line shape, Bevington & Robinson (2003) ch. 2.
-struct TwoGaussians {
-    params: Vec<String>,
-}
+struct TwoGaussians;
 
 impl ParametricModel for TwoGaussians {
-    fn id(&self) -> &str {
-        "sum_of_two_gaussians"
-    }
-    fn name(&self) -> &str {
-        "Sum of two Gaussians"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::Peak
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!("sum_of_two_gaussians", "Sum of two Gaussians", EquationCategory::Peak, ["Amp1", "Mean1", "SD1", "Amp2", "Mean2", "SD2"]);
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
         let (a1, m1, s1, a2, m2, s2) = (params[0], params[1], params[2], params[3], params[4], params[5]);
@@ -847,23 +602,10 @@ impl ParametricModel for TwoGaussians {
 /// Log-normal-shaped peak `Y = Amplitude * exp(-0.5 * (ln(X / GeoMean) / ln(GeoSD))^2)`,
 /// parameterised by the geometric mean and the multiplicative (geometric) standard deviation.
 /// Reference: Limpert, Stahel & Abbt (2001) (median `mu*` and multiplicative SD `sigma*` form).
-struct LogGaussian {
-    params: Vec<String>,
-}
+struct LogGaussian;
 
 impl ParametricModel for LogGaussian {
-    fn id(&self) -> &str {
-        "log_gaussian"
-    }
-    fn name(&self) -> &str {
-        "Log Gaussian"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::Peak
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!("log_gaussian", "Log Gaussian", EquationCategory::Peak, ["Amplitude", "GeoMean", "GeoSD"]);
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
         let (amp, gmean, gsd) = (params[0], params[1], params[2]);
@@ -882,23 +624,10 @@ impl ParametricModel for LogGaussian {
 
 /// Cumulative Gaussian `Y = Bottom + (Top - Bottom) * Phi((X - Mean) / SD)`.
 /// Reference: normal-sigmoid (probit) response curve, Finney (1971).
-struct CumulativeGaussian {
-    params: Vec<String>,
-}
+struct CumulativeGaussian;
 
 impl ParametricModel for CumulativeGaussian {
-    fn id(&self) -> &str {
-        "cumulative_gaussian"
-    }
-    fn name(&self) -> &str {
-        "Cumulative Gaussian"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::Gaussian
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!("cumulative_gaussian", "Cumulative Gaussian", EquationCategory::Gaussian, ["Bottom", "Top", "Mean", "SD"]);
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
         let (bottom, top, mean, sd) = (params[0], params[1], params[2], params[3]);
@@ -919,23 +648,10 @@ impl ParametricModel for CumulativeGaussian {
 /// Lorentzian (Cauchy) peak `Y = Amplitude / (1 + ((X - Center) / (Width / 2))^2)`, where
 /// `Width` is the full width at half maximum.
 /// Reference: Lorentzian distribution, Bevington & Robinson (2003) ch. 2.
-struct LorentzianPeak {
-    params: Vec<String>,
-}
+struct LorentzianPeak;
 
 impl ParametricModel for LorentzianPeak {
-    fn id(&self) -> &str {
-        "lorentzian"
-    }
-    fn name(&self) -> &str {
-        "Lorentzian"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::Peak
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!("lorentzian", "Lorentzian", EquationCategory::Peak, ["Amplitude", "Center", "Width"]);
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
         let (amp, center, width) = (params[0], params[1], params[2]);
@@ -955,23 +671,10 @@ impl ParametricModel for LorentzianPeak {
 /// Scaled Weibull density `Y = Amplitude * (k / lambda) * (X / lambda)^(k - 1) * exp(-(X / lambda)^k)`
 /// with `Scale = lambda`, `Shape = k` (`Amplitude` is the area under the curve).
 /// Reference: Weibull (1951).
-struct WeibullPeak {
-    params: Vec<String>,
-}
+struct WeibullPeak;
 
 impl ParametricModel for WeibullPeak {
-    fn id(&self) -> &str {
-        "weibull_peak"
-    }
-    fn name(&self) -> &str {
-        "Weibull density curve"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::Peak
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!("weibull_peak", "Weibull density curve", EquationCategory::Peak, ["Amplitude", "Scale", "Shape"]);
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
         let (amp, scale, shape) = (params[0], params[1], params[2]);
@@ -1005,23 +708,12 @@ impl ParametricModel for WeibullPeak {
 /// Reference: sinusoid fitting, Bloomfield (2000). The damped variant is the under-damped
 /// linear-oscillator form; no single statistical primary source is cited for it.
 struct SineWave {
+    meta: ModelMeta,
     damped: bool,
-    params: Vec<String>,
 }
 
 impl ParametricModel for SineWave {
-    fn id(&self) -> &str {
-        if self.damped { "damped_sine_wave" } else { "sine_wave" }
-    }
-    fn name(&self) -> &str {
-        if self.damped { "Damped sine wave" } else { "Sine wave" }
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::SineWave
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_meta_methods!();
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let t = x.first().copied()?;
         if self.damped {
@@ -1046,23 +738,10 @@ impl ParametricModel for SineWave {
 /// Sinc peak `Y = Baseline + Amplitude * sin(u) / u` with `u = (X - Center) / Width`.
 /// Reference: Bracewell (2000), who defines the normalised `sinc x = sin(pi x) / (pi x)`; here the
 /// factor `pi` is absorbed into `Width` (unnormalised sinc).
-struct SincWave {
-    params: Vec<String>,
-}
+struct SincWave;
 
 impl ParametricModel for SincWave {
-    fn id(&self) -> &str {
-        "sinc_wave"
-    }
-    fn name(&self) -> &str {
-        "Sinc function"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::SineWave
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!("sinc_wave", "Sinc function", EquationCategory::SineWave, ["Amplitude", "Center", "Width", "Baseline"]);
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
         let (amp, center, width, base) = (params[0], params[1], params[2], params[3]);
@@ -1083,23 +762,12 @@ impl ParametricModel for SincWave {
 /// Straight line `Y = Slope * X + YIntercept` (or through the origin).
 /// Reference: Draper & Smith (1998).
 struct StraightLine {
+    meta: ModelMeta,
     through_origin: bool,
-    params: Vec<String>,
 }
 
 impl ParametricModel for StraightLine {
-    fn id(&self) -> &str {
-        if self.through_origin { "line_through_origin" } else { "straight_line" }
-    }
-    fn name(&self) -> &str {
-        if self.through_origin { "Line through origin" } else { "Straight line" }
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::StandardCurve
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_meta_methods!();
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
         if self.through_origin { Some(params[0] * x0) } else { Some(params[0] * x0 + params[1]) }
@@ -1124,23 +792,10 @@ impl ParametricModel for StraightLine {
 
 /// Two-segment continuous linear regression with join point `X0`.
 /// Reference: Hudson (1966); Seber & Wild (1989) ch. 9.
-struct SegmentalLinear {
-    params: Vec<String>,
-}
+struct SegmentalLinear;
 
 impl ParametricModel for SegmentalLinear {
-    fn id(&self) -> &str {
-        "segmental_linear"
-    }
-    fn name(&self) -> &str {
-        "Segmental linear regression"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::StandardCurve
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!("segmental_linear", "Segmental linear regression", EquationCategory::StandardCurve, ["Intercept1", "Slope1", "X0", "Slope2"]);
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
         let (b1, s1, x_join, s2) = (params[0], params[1], params[2], params[3]);
@@ -1158,23 +813,15 @@ impl ParametricModel for SegmentalLinear {
 /// `dx = X - X0`, so `Y(X0) = Y0` and `Delta -> 0` recovers the sharp hinge.
 /// Reference: Watts & Bacon (1974) hyperbola transition model, reparameterised so that `Y0` is the
 /// value at the join; see also Seber & Wild (1989) ch. 9.
-struct SmoothHinge {
-    params: Vec<String>,
-}
+struct SmoothHinge;
 
 impl ParametricModel for SmoothHinge {
-    fn id(&self) -> &str {
-        "hinge_smooth_hyperbolic"
-    }
-    fn name(&self) -> &str {
-        "Hinge (smooth hyperbolic transition)"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::StandardCurve
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!(
+        "hinge_smooth_hyperbolic",
+        "Hinge (smooth hyperbolic transition)",
+        EquationCategory::StandardCurve,
+        ["Y0", "X0", "Slope1", "Slope2", "Delta"]
+    );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
         let (y0, x_join, s1, s2, delta) = (params[0], params[1], params[2], params[3], params[4]);
@@ -1192,45 +839,26 @@ impl ParametricModel for SmoothHinge {
 /// Polynomial `Y = B0 + B1 * X + ... + Bd * X^d` (degree 2–6), linear in its parameters.
 /// Reference: polynomial regression, Draper & Smith (1998).
 struct Polynomial {
+    meta: ModelMeta,
     degree: usize,
 }
 
+impl Polynomial {
+    fn new(degree: usize) -> Self {
+        let (id, name) = match degree {
+            2 => ("polynomial_2", "Second order polynomial (quadratic)"),
+            3 => ("polynomial_3", "Third order polynomial (cubic)"),
+            4 => ("polynomial_4", "Fourth order polynomial"),
+            5 => ("polynomial_5", "Fifth order polynomial"),
+            _ => ("polynomial_6", "Sixth order polynomial"),
+        };
+        let params = (0..=degree).map(|k| format!("B{k}")).collect();
+        Self { meta: ModelMeta { id, name, category: EquationCategory::Polynomial, params }, degree }
+    }
+}
+
 impl ParametricModel for Polynomial {
-    fn id(&self) -> &str {
-        match self.degree {
-            2 => "polynomial_2",
-            3 => "polynomial_3",
-            4 => "polynomial_4",
-            5 => "polynomial_5",
-            _ => "polynomial_6",
-        }
-    }
-    fn name(&self) -> &str {
-        match self.degree {
-            2 => "Second order polynomial (quadratic)",
-            3 => "Third order polynomial (cubic)",
-            4 => "Fourth order polynomial",
-            5 => "Fifth order polynomial",
-            _ => "Sixth order polynomial",
-        }
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::Polynomial
-    }
-    fn param_names(&self) -> &[String] {
-        static P2: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| names(&["B0", "B1", "B2"]));
-        static P3: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| names(&["B0", "B1", "B2", "B3"]));
-        static P4: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| names(&["B0", "B1", "B2", "B3", "B4"]));
-        static P5: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| names(&["B0", "B1", "B2", "B3", "B4", "B5"]));
-        static P6: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| names(&["B0", "B1", "B2", "B3", "B4", "B5", "B6"]));
-        match self.degree {
-            2 => &P2,
-            3 => &P3,
-            4 => &P4,
-            5 => &P5,
-            _ => &P6,
-        }
-    }
+    impl_meta_methods!();
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
         let mut acc = 0.0;
@@ -1261,23 +889,10 @@ impl ParametricModel for Polynomial {
 /// Power law `Y = a * X^b` (allometric form; `"power_series"` is retained as a backwards-compatible
 /// lookup alias for persisted workspaces).
 /// Reference: Huxley (1932).
-struct PowerCurve {
-    params: Vec<String>,
-}
+struct PowerCurve;
 
 impl ParametricModel for PowerCurve {
-    fn id(&self) -> &str {
-        "power_law"
-    }
-    fn name(&self) -> &str {
-        "Power law (Y = a * X^b)"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::StandardCurve
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!("power_law", "Power law (Y = a * X^b)", EquationCategory::StandardCurve, ["a", "b"]);
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
         if x0 < 0.0 {
@@ -1294,23 +909,10 @@ impl ParametricModel for PowerCurve {
 
 /// Logarithmic curve `Y = a * ln(X) + b` (linear regression on transformed `X`).
 /// Reference: Draper & Smith (1998).
-struct LogarithmicCurve {
-    params: Vec<String>,
-}
+struct LogarithmicCurve;
 
 impl ParametricModel for LogarithmicCurve {
-    fn id(&self) -> &str {
-        "logarithmic_curve"
-    }
-    fn name(&self) -> &str {
-        "Logarithmic curve (Y = a * ln(X) + b)"
-    }
-    fn category(&self) -> EquationCategory {
-        EquationCategory::StandardCurve
-    }
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!("logarithmic_curve", "Logarithmic curve (Y = a * ln(X) + b)", EquationCategory::StandardCurve, ["a", "b"]);
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
         if x0 <= 0.0 {
@@ -1360,10 +962,8 @@ fn estimate_centered_linear_seed(points: &[DataPoint]) -> (f64, f64, f64) {
 /// fixed: with `XCenter` free the model is over-parameterised (same function space as the
 /// uncentred polynomial of the same degree).
 struct CenteredPolynomial {
+    meta: ModelMeta,
     degree: usize,
-    id: &'static str,
-    name: &'static str,
-    params: Vec<String>,
 }
 
 impl CenteredPolynomial {
@@ -1379,26 +979,12 @@ impl CenteredPolynomial {
         };
         let mut params: Vec<String> = (0..=clamped).map(|k| format!("B{k}")).collect();
         params.push("XCenter".to_owned());
-        Self { degree: clamped, id, name, params }
+        Self { meta: ModelMeta { id, name, category: EquationCategory::StandardCurve, params }, degree: clamped }
     }
 }
 
 impl ParametricModel for CenteredPolynomial {
-    fn id(&self) -> &str {
-        self.id
-    }
-
-    fn name(&self) -> &str {
-        self.name
-    }
-
-    fn category(&self) -> EquationCategory {
-        EquationCategory::StandardCurve
-    }
-
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_meta_methods!();
 
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
@@ -1462,26 +1048,10 @@ impl ParametricModel for CenteredPolynomial {
 
 /// Semi-logarithmic standard curve: `Y = Slope * log10(X) + YIntercept`.
 /// Reference: linear regression on transformed `X`, Draper & Smith (1998).
-struct SemiLogLine {
-    params: Vec<String>,
-}
+struct SemiLogLine;
 
 impl ParametricModel for SemiLogLine {
-    fn id(&self) -> &str {
-        "semi_log_line"
-    }
-
-    fn name(&self) -> &str {
-        "Semi-log line (Y vs log10(X))"
-    }
-
-    fn category(&self) -> EquationCategory {
-        EquationCategory::StandardCurve
-    }
-
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!("semi_log_line", "Semi-log line (Y vs log10(X))", EquationCategory::StandardCurve, ["Slope", "YIntercept"]);
 
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
@@ -1515,26 +1085,10 @@ impl ParametricModel for SemiLogLine {
 
 /// Power-law standard curve in log10-log10 form: `Y = 10^(Slope * log10(X) + LogYIntercept)`.
 /// Reference: the allometric power law of Huxley (1932) written in log-log form.
-struct LogLogLine {
-    params: Vec<String>,
-}
+struct LogLogLine;
 
 impl ParametricModel for LogLogLine {
-    fn id(&self) -> &str {
-        "log_log_line"
-    }
-
-    fn name(&self) -> &str {
-        "Log-log regression line"
-    }
-
-    fn category(&self) -> EquationCategory {
-        EquationCategory::StandardCurve
-    }
-
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!("log_log_line", "Log-log regression line", EquationCategory::StandardCurve, ["Slope", "LogYIntercept"]);
 
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
@@ -1575,26 +1129,10 @@ impl ParametricModel for LogLogLine {
 /// Probit percentage curve: `Y = NormalCdf(Slope * X + Intercept) * 100`.
 /// Reference: Finney (1971). Uses the modern normal-equivalent-deviate scale (no classical `+5`
 /// probit offset).
-struct ProbitLine {
-    params: Vec<String>,
-}
+struct ProbitLine;
 
 impl ParametricModel for ProbitLine {
-    fn id(&self) -> &str {
-        "probit_line"
-    }
-
-    fn name(&self) -> &str {
-        "Probit curve"
-    }
-
-    fn category(&self) -> EquationCategory {
-        EquationCategory::StandardCurve
-    }
-
-    fn param_names(&self) -> &[String] {
-        &self.params
-    }
+    impl_static_meta!("probit_line", "Probit curve", EquationCategory::StandardCurve, ["Slope", "Intercept"]);
 
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;

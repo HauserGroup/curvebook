@@ -143,7 +143,7 @@ fn test_4pl_fit_graph_overlay_styling_and_all_exports() {
         "fit.run",
         json!({
             "sheet_id": "fit-4pl",
-            "source_sheet": "data-4pl",
+            "source_sheet_id": "data-4pl",
             "kind": "four_parameter_logistic",
             "confidence_bands": true,
             "title": "Compound A 4PL"
@@ -224,7 +224,7 @@ fn test_4pl_fit_graph_overlay_styling_and_all_exports() {
             "legend_label": "Compound A (n=2)",
             "color": "#1F77B4",
             "marker": { "shape": "diamond", "fill_mode": "open", "size_pt": 6.0 },
-            "error_bars": { "metric": "sem", "direction": "both", "cap_width_pt": 5.0 },
+            "y_error_bars": { "metric": "sem", "direction": "both", "cap_width_pt": 5.0 },
             "connecting_line": { "kind": "none" }
         }),
     );
@@ -312,7 +312,7 @@ fn test_stats_anova_auto_brackets_update_params_and_retarget() {
         "stats.run",
         json!({
             "sheet_id": "stat-anova",
-            "source_sheet": "col-1",
+            "source_sheet_id": "col-1",
             "kind": "one_way_anova",
             "multiplicity": "tukey"
         }),
@@ -360,10 +360,10 @@ fn test_stats_anova_auto_brackets_update_params_and_retarget() {
     assert!(matches!(session.document().result_sheet(&SheetId::new("stat-anova")).unwrap().analysis.kind, AnalysisKind::OneWayAnova(_)));
 
     // Retarget to compatible Column table succeeds; incompatible Survival table rolls back cleanly.
-    ok_cmd(&mut session, "analysis.retargetData", json!({ "sheet_id": "stat-anova", "source_sheet": "col-2" }));
+    ok_cmd(&mut session, "analysis.retargetData", json!({ "sheet_id": "stat-anova", "source_sheet_id": "col-2" }));
     assert_eq!(session.document().result_sheet(&SheetId::new("stat-anova")).unwrap().analysis.source_sheet_id.as_str(), "col-2");
 
-    assert!(session.execute("analysis.retargetData", json!({ "sheet_id": "stat-anova", "source_sheet": "surv-incompatible" })).is_err());
+    assert!(session.execute("analysis.retargetData", json!({ "sheet_id": "stat-anova", "source_sheet_id": "surv-incompatible" })).is_err());
     assert_eq!(session.document().result_sheet(&SheetId::new("stat-anova")).unwrap().analysis.source_sheet_id.as_str(), "col-2");
 }
 
@@ -375,7 +375,7 @@ fn test_survival_km_and_cox_with_number_at_risk_graph() {
     let mut session = Session::from_document(doc);
 
     // Run Kaplan-Meier.
-    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "stat-km", "source_sheet": "surv-1", "kind": "kaplan_meier" }));
+    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "stat-km", "source_sheet_id": "surv-1", "kind": "kaplan_meier" }));
     let km = session.document().result_sheet(&SheetId::new("stat-km")).unwrap();
     assert!(!km.fitted_curves.is_empty());
     assert!(km.tabs.iter().any(|t| t.kind == ResultTabKind::NumberAtRisk));
@@ -386,7 +386,7 @@ fn test_survival_km_and_cox_with_number_at_risk_graph() {
         "stats.run",
         json!({
             "sheet_id": "stat-cox",
-            "source_sheet": "mv-cox",
+            "source_sheet_id": "mv-cox",
             "kind": "cox_ph",
             "time_column": 3,
             "status_column": 4,
@@ -414,10 +414,10 @@ fn test_multivariate_pca_bubble_and_transform() {
     let mut session = Session::from_document(doc);
 
     // Run transform + PCA.
-    ok_cmd(&mut session, "transform.run", json!({ "sheet_id": "tr-log", "source_sheet": "xy-1", "kind": "math", "y_transform": "log10" }));
+    ok_cmd(&mut session, "transform.run", json!({ "sheet_id": "tr-log", "source_sheet_id": "xy-1", "kind": "math", "y_transform": "log10" }));
     assert_eq!(session.document().result_sheet(&SheetId::new("tr-log")).unwrap().status, ResultStatus::UpToDate);
 
-    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "stat-pca", "source_sheet": "mv-1", "kind": "pca", "standardize": true }));
+    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "stat-pca", "source_sheet_id": "mv-1", "kind": "pca", "standardize": true }));
     assert_eq!(session.document().result_sheet(&SheetId::new("stat-pca")).unwrap().status, ResultStatus::UpToDate);
 
     // Configure 5-channel Multivariate Bubble plot via graph.create + graph.setKind + graph.setSeries.
@@ -454,7 +454,7 @@ fn test_aligned_layout_scene_compilation_and_exports() {
     doc.add_data_sheet(sample_anova_column_sheet("col-1", 0.0)).unwrap();
     let mut session = Session::from_document(doc);
 
-    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "stat-1", "source_sheet": "col-1", "kind": "one_way_anova" }));
+    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "stat-1", "source_sheet_id": "col-1", "kind": "one_way_anova" }));
     ok_cmd(&mut session, "graph.create", json!({ "sheet_id": "g-xy", "data_sheet_id": "xy-1", "kind": "xy" }));
     ok_cmd(&mut session, "graph.create", json!({ "sheet_id": "g-col", "data_sheet_id": "col-1", "kind": "column" }));
 

@@ -129,7 +129,7 @@ fn sheet_create_all_eight_archetypes_auto_family_and_inspect() {
         .expect("create multiple variables");
 
     session
-        .execute("sheet.createData", json!({ "sheet_id": "nest-1", "archetype": "nested", "cols": 2, "biological_units": 4, "rows": 5 }))
+        .execute("sheet.createData", json!({ "sheet_id": "nest-1", "kind": "nested", "cols": 2, "replicates": 4, "rows": 5 }))
         .expect("create nested");
 
     let kinds: Vec<TableKind> = session.document().data_sheets.iter().map(|s| s.archetype.kind()).collect();
@@ -181,7 +181,7 @@ fn project_new_save_open_and_template_round_trip() {
             }),
         )
         .expect("set y");
-    session.execute("info.setNote", json!({ "sheet_id": "info-1", "note": "Protocol v2" })).expect("set note");
+    session.execute("info.setNote", json!({ "sheet_id": "info-1", "text": "Protocol v2" })).expect("set note");
     session.execute("info.setConstant", json!({ "sheet_id": "info-1", "name": "TempC", "value": 37.0, "units": "C" })).expect("set const");
 
     let save_res = session.execute("project.save", json!({ "path": proj_path.to_str() })).expect("project.save");
@@ -347,8 +347,8 @@ fn sheet_clone_pipeline_and_duplicate_family_for_fresh_assay_run() {
                 "sheet_id": "data-base",
                 "new_sheet_id": "data-run2",
                 "title": "Run 2 Fresh Assay",
-                "keepXValues": true,
-                "clearYValues": true
+                "keep_x_values": true,
+                "clear_y_values": true
             }),
         )
         .expect("clonePipeline");
@@ -416,7 +416,7 @@ fn table_cells_titles_exclude_clear_undo_and_err_rollback() {
     let mut session = Session::new();
     session.execute("sheet.createData", json!({ "sheet_id": "xy-1", "archetype": "xy", "replicates": 2, "cols": 2, "rows": 4 })).expect("create xy");
     session
-        .execute("sheet.createData", json!({ "sheet_id": "nest-1", "archetype": "nested", "cols": 2, "biological_units": 3, "rows": 3 }))
+        .execute("sheet.createData", json!({ "sheet_id": "nest-1", "kind": "nested", "cols": 2, "replicates": 3, "rows": 3 }))
         .expect("create nested");
 
     session.execute("table.setRowTitles", json!({ "sheet_id": "xy-1", "titles": ["Baseline", "Low", "Mid", "High"] })).expect("row titles");
@@ -500,7 +500,7 @@ fn table_paste_decimal_normalization_slice_and_transpose() {
                 "text": "9,9;8,8\n1,5;2,75*\n3,25;4,5\n7,7;6,6",
                 "delimiter": ";",
                 "decimal_separator": ",",
-                "slice": { "row_start": 1, "row_end": 2, "col_start": 0, "col_end": 1 },
+                "filter": { "row_start": 1, "row_end": 2, "col_start": 0, "col_end": 1 },
                 "transpose": true,
                 "anchor": { "row": 0, "col": 0, "subcol": 0 }
             }),
@@ -542,9 +542,9 @@ fn table_paste_link_reactive_transpose_freeze_unfreeze_and_cycle_guard() {
         .execute(
             "table.pasteLink",
             json!({
-                "targetSheetId": "col-1",
+                "target_sheet_id": "col-1",
                 "source_sheet_id": "grp-1",
-                "range": { "start": { "row": 0, "col": 0, "subcol": 0 }, "end": { "row": 0, "col": 0, "subcol": 2 } },
+                "source_range": { "start": { "row": 0, "col": 0, "subcol": 0 }, "end": { "row": 0, "col": 0, "subcol": 2 } },
                 "anchor": { "row": 0, "col": 0, "subcol": 0 },
                 "transpose": true
             }),
@@ -694,7 +694,7 @@ fn table_multiple_variables_and_simulate_xy_commands() {
         .expect("populate mv");
 
     let recode = session
-        .execute("table.recodeLevels", json!({ "sheet_id": "mv-1", "column": "Arm", "mappings": { "veh": "Vehicle", "high": "High" } }))
+        .execute("table.recodeLevels", json!({ "sheet_id": "mv-1", "col": "Arm", "mappings": { "veh": "Vehicle", "high": "High" } }))
         .expect("recode");
     assert_eq!(recode.payload.get("recoded_count").and_then(Value::as_u64), Some(2));
     assert_eq!(data_cell(&session, "mv-1", 0, 0, 0).map(|c| c.value), Some(CellValue::Text(String::from("Vehicle"))));
@@ -702,7 +702,7 @@ fn table_multiple_variables_and_simulate_xy_commands() {
     session
         .execute(
             "table.setCategoricalOrder",
-            json!({ "sheet_id": "mv-1", "column": 0, "order": "explicit", "levels": ["Vehicle", "low", "High"], "reversed": true }),
+            json!({ "sheet_id": "mv-1", "col": 0, "order": "explicit", "levels": ["Vehicle", "low", "High"], "reversed": true }),
         )
         .expect("cat order");
     if let TableArchetype::MultipleVariables(mv) = &session.document().data_sheet(&SheetId::new("mv-1")).expect("mv").archetype {
@@ -711,7 +711,7 @@ fn table_multiple_variables_and_simulate_xy_commands() {
         panic!("expected MultipleVariables");
     }
 
-    session.execute("table.setVariableRole", json!({ "sheet_id": "mv-1", "column": "Dose", "role": "Identifier" })).expect("lock role");
+    session.execute("table.setVariableRole", json!({ "sheet_id": "mv-1", "col": "Dose", "role": "Identifier" })).expect("lock role");
     if let TableArchetype::MultipleVariables(mv) = &session.document().data_sheet(&SheetId::new("mv-1")).expect("mv").archetype {
         assert_eq!(mv.variables[1].role, VariableRole::Label);
         assert!(!mv.variables[1].role_inferred);
@@ -733,7 +733,7 @@ fn table_multiple_variables_and_simulate_xy_commands() {
                 "sheet_id": "sim-1",
                 "title": "Simulated Curve",
                 "seed": 42,
-                "rows": 6,
+                "row_count": 6,
                 "replicates": 2,
                 "x_min": -9.0,
                 "x_max": -4.0,
@@ -766,8 +766,8 @@ fn info_notes_constants_and_hooked_recalculation() {
 
     let mut session = Session::from_document(doc);
 
-    session.execute("info.setNote", json!({ "sheet_id": "info-1", "note": "Line 1" })).expect("note 1");
-    session.execute("info.setNote", json!({ "sheet_id": "mv-1", "note": "Line 2", "append": true })).expect("note append via paired data id");
+    session.execute("info.setNote", json!({ "sheet_id": "info-1", "text": "Line 1" })).expect("note 1");
+    session.execute("info.setNote", json!({ "sheet_id": "mv-1", "text": "Line 2", "append": true })).expect("note append via paired data id");
     assert_eq!(session.document().info_sheet(&SheetId::new("info-1")).map(|i| i.notes_markdown.as_str()), Some("Line 1\nLine 2"));
 
     session.execute("info.setConstant", json!({ "sheet_id": "info-1", "name": "ScaleFactor", "value": 3.0, "units": "x" })).expect("set constant");
@@ -790,7 +790,7 @@ fn safety_guards_oversized_inputs_bad_base64_and_catalog_aliases() {
     session
         .execute(
             "table.setCells",
-            json!({ "sheet_id": "d1", "cells": [{ "row": 0, "col": 0, "value": 11.0 }, { "row": 1, "col": 0, "value": 22.0 }] }),
+            json!({ "sheet_id": "d1", "edits": [{ "row": 0, "col": 0, "value": 11.0 }, { "row": 1, "col": 0, "value": 22.0 }] }),
         )
         .expect("cells");
 
@@ -823,10 +823,10 @@ fn safety_guards_oversized_inputs_bad_base64_and_catalog_aliases() {
         );
     }
 
-    // 4. Catalog params_doc alias coverage: include_bytes, target_row/target_col, prefix + clear_data, top-level clear box, mapping.
-    let saved = session.execute("project.save", json!({ "include_bytes": true })).expect("save include_bytes");
+    // 4. Canonical parameter coverage: return_bytes, start_row/start_col, prefix + clear_data, top-level clear box, mappings.
+    let saved = session.execute("project.save", json!({ "return_bytes": true })).expect("save return_bytes");
     assert!(saved.payload.get("bytes_base64").and_then(Value::as_str).is_some());
-    let tpl_saved = session.execute("project.saveTemplate", json!({ "include_bytes": true })).expect("saveTemplate include_bytes");
+    let tpl_saved = session.execute("project.saveTemplate", json!({ "return_bytes": true })).expect("saveTemplate return_bytes");
     assert!(tpl_saved.payload.get("bytes_base64").and_then(Value::as_str).is_some());
 
     session
@@ -836,11 +836,11 @@ fn safety_guards_oversized_inputs_bad_base64_and_catalog_aliases() {
                 "target_sheet_id": "d2",
                 "source_sheet_id": "d1",
                 "source_range": { "start": { "row": 0, "col": 0 }, "end": { "row": 1, "col": 0 } },
-                "target_row": 2,
-                "target_col": 1
+                "start_row": 2,
+                "start_col": 1
             }),
         )
-        .expect("pasteLink target_row/target_col");
+        .expect("pasteLink start_row/start_col");
     assert_eq!(data_cell(&session, "d2", 2, 1, 0).and_then(|c| cell_num(&c)), Some(11.0));
     assert_eq!(data_cell(&session, "d2", 3, 1, 0).and_then(|c| cell_num(&c)), Some(22.0));
 
@@ -862,14 +862,14 @@ fn safety_guards_oversized_inputs_bad_base64_and_catalog_aliases() {
             "sheet.createData",
             json!({
                 "sheet_id": "mv-alias",
-                "archetype": "multiple_variables",
+                "kind": "multiple_variables",
                 "cols": 1,
                 "rows": 2,
                 "variables": [{ "title": "Grp", "role": "Categorical" }]
             }),
         )
         .expect("create mv-alias");
-    session.execute("table.setCells", json!({ "sheet_id": "mv-alias", "cells": [{ "row": 0, "col": 0, "value": "old" }] })).expect("mv cells");
-    session.execute("table.recodeLevels", json!({ "sheet_id": "mv-alias", "col": 0, "mapping": { "old": "new" } })).expect("recode mapping alias");
+    session.execute("table.setCells", json!({ "sheet_id": "mv-alias", "edits": [{ "row": 0, "col": 0, "value": "old" }] })).expect("mv cells");
+    session.execute("table.recodeLevels", json!({ "sheet_id": "mv-alias", "col": 0, "mappings": { "old": "new" } })).expect("recode mappings");
     assert_eq!(data_cell(&session, "mv-alias", 0, 0, 0).map(|c| c.value), Some(CellValue::Text(String::from("new"))));
 }

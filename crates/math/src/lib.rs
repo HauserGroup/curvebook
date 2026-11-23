@@ -33,11 +33,13 @@
 pub mod dist;
 pub mod error;
 pub mod linalg;
+pub mod normality;
 pub mod pvalue;
 pub mod quad;
 pub mod quantile;
 pub mod rng;
 pub mod roots;
+pub mod rout;
 pub mod special;
 pub mod sum;
 
@@ -47,9 +49,11 @@ pub use linalg::{
     Cholesky, DenseMatrix, LeastSquaresSolution, PivotedQr, Svd, SymEigen, cholesky, parameter_dependencies, qr, qr_col_pivoted,
     solve_linear_least_squares, svd, sym_eigen,
 };
+pub use normality::{NormalityResult, anderson_darling, average_ranks, dagostino_pearson, shapiro_wilk};
 pub use pvalue::{ConfidenceLevel, PValueFormat};
 pub use quantile::quantile_type7_sorted;
 pub use rng::DeterministicRng;
+pub use rout::{RoutCoreResult, compute_rsdr, rout_detect_outliers_core};
 
 /// Percentage vs unit-proportion domain for [`AxisScale::Logit`] (`docs/implementation/graphing-and-layouts.md` §3.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]

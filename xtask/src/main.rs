@@ -25,6 +25,7 @@ mod licenses;
 mod msix;
 mod pending;
 mod release_scan;
+mod rust_lex;
 mod schemas;
 mod screenshots;
 mod secrets;

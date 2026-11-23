@@ -1,6 +1,7 @@
 //! Axis range bounds, discontinuous break segments (1..=3), and tick numbering controls
 //! inside `Format Axes`.
 
+use crate::egui_shell::UiIntent;
 use curvebook_doc::{BreakOrnament, GraphAxisScale, TickDirection, TickLabelFormat};
 use egui::Ui;
 
@@ -69,7 +70,7 @@ pub(super) fn render_axis_segments_section(
             state.axis_bounds_error = None;
             let mut next = fa.clone();
             if next.set_segment_bounds(0, None, None).is_ok() {
-                gctx.intents.push_update_format_axes_state(next);
+                gctx.intents.push(UiIntent::UpdateFormatAxesState(Box::new(next)));
             }
         }
     });
@@ -88,7 +89,7 @@ pub(super) fn render_axis_segments_section(
                     Ok(()) => {
                         state.axis_bounds_error = None;
                         if seg0.min != lo_opt || seg0.max != hi_opt {
-                            gctx.intents.push_update_format_axes_state(next);
+                            gctx.intents.push(UiIntent::UpdateFormatAxesState(Box::new(next)));
                         }
                     }
                     Err(err) => {
@@ -125,7 +126,7 @@ pub(super) fn render_axis_segments_section(
         {
             let mut next = fa.clone();
             if next.add_segment() {
-                gctx.intents.push_update_format_axes_state(next);
+                gctx.intents.push(UiIntent::UpdateFormatAxesState(Box::new(next)));
             }
         }
         if record_button(
@@ -146,7 +147,7 @@ pub(super) fn render_axis_segments_section(
             let mut next = fa.clone();
             let last = next.axis_draft.segments.len().saturating_sub(1);
             if next.remove_segment(last) {
-                gctx.intents.push_update_format_axes_state(next);
+                gctx.intents.push(UiIntent::UpdateFormatAxesState(Box::new(next)));
             }
         }
     });
@@ -178,7 +179,7 @@ pub(super) fn render_axis_segments_section(
                 {
                     let mut next = fa.clone();
                     next.axis_draft.break_ornament = orn;
-                    gctx.intents.push_update_format_axes_state(next);
+                    gctx.intents.push(UiIntent::UpdateFormatAxesState(Box::new(next)));
                 }
             }
         });
@@ -200,7 +201,7 @@ pub(super) fn render_axis_segments_section(
         ) {
             let mut next = fa.clone();
             next.axis_draft.gap_width_pt = val;
-            gctx.intents.push_update_format_axes_state(next);
+            gctx.intents.push(UiIntent::UpdateFormatAxesState(Box::new(next)));
         }
     }
 }
@@ -246,7 +247,7 @@ pub(super) fn render_axis_ticks_section(
                 } else {
                     let mut next = fa.clone();
                     next.axis_draft.tick_format = fmt;
-                    gctx.intents.push_update_format_axes_state(next);
+                    gctx.intents.push(UiIntent::UpdateFormatAxesState(Box::new(next)));
                 }
             }
         }
@@ -280,7 +281,7 @@ pub(super) fn render_axis_ticks_section(
             {
                 let mut next = fa.clone();
                 next.axis_draft.tick_direction = dir;
-                gctx.intents.push_update_format_axes_state(next);
+                gctx.intents.push(UiIntent::UpdateFormatAxesState(Box::new(next)));
             }
         }
     });
@@ -293,7 +294,7 @@ pub(super) fn render_axis_ticks_section(
     if show_chk.changed() {
         let mut next = fa.clone();
         next.axis_draft.show_tick_labels = show_labels;
-        gctx.intents.push_update_format_axes_state(next);
+        gctx.intents.push(UiIntent::UpdateFormatAxesState(Box::new(next)));
     }
 
     ui.add_space(4.0);
@@ -357,7 +358,7 @@ fn render_major_tick_interval_row(
                 if let Some(seg0) = next.axis_draft.segments.first_mut() {
                     seg0.major_tick_interval = None;
                 }
-                gctx.intents.push_update_format_axes_state(next);
+                gctx.intents.push(UiIntent::UpdateFormatAxesState(Box::new(next)));
             }
         } else if let Some(val) = parse_localized_number_input(trimmed, &gctx.app.locale_preset).filter(|v| v.is_finite() && *v > 0.0) {
             state.axis_ticks_error = None;
@@ -366,7 +367,7 @@ fn render_major_tick_interval_row(
                 if let Some(seg0) = next.axis_draft.segments.first_mut() {
                     seg0.major_tick_interval = Some(val);
                 }
-                gctx.intents.push_update_format_axes_state(next);
+                gctx.intents.push(UiIntent::UpdateFormatAxesState(Box::new(next)));
             }
         } else {
             state.axis_ticks_error = Some(format!("Invalid major tick interval `{trimmed}` (must be > 0)"));
@@ -381,7 +382,7 @@ fn push_minor_ticks_update(gctx: &mut GraphModalCtx<'_>, fa: &crate::dialogs_can
         if let Some(seg0) = next.axis_draft.segments.first_mut() {
             seg0.minor_ticks_per_interval = minor_ticks;
         }
-        gctx.intents.push_update_format_axes_state(next);
+        gctx.intents.push(UiIntent::UpdateFormatAxesState(Box::new(next)));
     }
 }
 

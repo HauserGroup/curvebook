@@ -52,7 +52,7 @@ fn build_anova_bracket_session() -> Result<Session, Box<dyn std::error::Error>> 
             "sheet_id": "col-1",
             "title": "Groups",
             "kind": "column",
-            "data_sets": 3,
+            "cols": 3,
             "rows": 4,
             "auto_graph": false
         }),
@@ -67,9 +67,9 @@ fn build_anova_bracket_session() -> Result<Session, Box<dyn std::error::Error>> 
         "stats.run",
         json!({
             "kind": "one_way_anova",
-            "source_sheet": "col-1",
+            "source_sheet_id": "col-1",
             "sheet_id": "res-anova",
-            "confidence_level": 95.0,
+            "confidence_percent": 95.0,
             "multiplicity": "tukey",
             "threshold": 0.05,
             "report_confidence_intervals": false
@@ -339,7 +339,7 @@ fn fa_sec19_06_paste_intent_executes_cleanly_via_session() -> Result<(), Box<dyn
     let mut session = Session::new();
     session.execute(
         "sheet.createData",
-        json!({ "sheet_id": "ds-paste", "title": "Paste", "kind": "column", "data_sets": 2, "rows": 4, "auto_graph": false }),
+        json!({ "sheet_id": "ds-paste", "title": "Paste", "kind": "column", "cols": 2, "rows": 4, "auto_graph": false }),
     )?;
     let mut app = UiApp::from_session(session.clone());
     app.grid.tool.decimal_separator = ',';

@@ -300,7 +300,7 @@ fn analysis_add_new_biostatistics_and_multiple_imputation_kinds() -> TestRes {
         "analysis.add",
         json!({
             "sheet_id": "res-mr",
-            "source_sheet": "grp-mr",
+            "source_sheet_id": "grp-mr",
             "kind": "stats.multiple_row_t_tests",
             "paired": false,
             "multiplicity": "benjamini_hochberg"
@@ -316,7 +316,7 @@ fn analysis_add_new_biostatistics_and_multiple_imputation_kinds() -> TestRes {
         "analysis.add",
         json!({
             "sheet_id": "res-ba",
-            "source_sheet": "col-pair",
+            "source_sheet_id": "col-pair",
             "kind": "stats.bland_altman",
             "column_a": 0,
             "column_b": 1,
@@ -333,7 +333,7 @@ fn analysis_add_new_biostatistics_and_multiple_imputation_kinds() -> TestRes {
         "analysis.add",
         json!({
             "sheet_id": "res-pb",
-            "source_sheet": "col-pair",
+            "source_sheet_id": "col-pair",
             "kind": "stats.passing_bablok",
             "x_column": 0,
             "y_column": 1
@@ -349,7 +349,7 @@ fn analysis_add_new_biostatistics_and_multiple_imputation_kinds() -> TestRes {
         "analysis.add",
         json!({
             "sheet_id": "res-mi",
-            "source_sheet": "mv-miss",
+            "source_sheet_id": "mv-miss",
             "kind": "stats.multiple_imputation",
             "imputations_m": 3,
             "max_iters": 5,
@@ -395,20 +395,20 @@ fn multiplicity_barnard_and_multivariate_two_group_km_parity() -> TestRes {
     exec(
         &mut session,
         "stats.run",
-        json!({ "sheet_id": "res-snk", "source_sheet": "col-anova", "kind": "one_way_anova", "multiplicity": "newman_keuls" }),
+        json!({ "sheet_id": "res-snk", "source_sheet_id": "col-anova", "kind": "one_way_anova", "multiplicity": "newman_keuls" }),
     )?;
     exec(
         &mut session,
         "stats.run",
-        json!({ "sheet_id": "res-lsd", "source_sheet": "col-anova", "kind": "one_way_anova", "multiplicity": "fisher_lsd" }),
+        json!({ "sheet_id": "res-lsd", "source_sheet_id": "col-anova", "kind": "one_way_anova", "multiplicity": "fisher_lsd" }),
     )?;
-    exec(&mut session, "stats.run", json!({ "sheet_id": "res-barnard", "source_sheet": "ct-1", "kind": "stats.barnard_exact" }))?;
+    exec(&mut session, "stats.run", json!({ "sheet_id": "res-barnard", "source_sheet_id": "ct-1", "kind": "stats.barnard_exact" }))?;
     exec(
         &mut session,
         "stats.run",
         json!({
             "sheet_id": "res-mv-t",
-            "source_sheet": "mv-surv",
+            "source_sheet_id": "mv-surv",
             "kind": "unpaired_t",
             "mv_group_column": 3,
             "mv_response_column": 0
@@ -419,7 +419,7 @@ fn multiplicity_barnard_and_multivariate_two_group_km_parity() -> TestRes {
         "stats.run",
         json!({
             "sheet_id": "res-mv-km",
-            "source_sheet": "mv-surv",
+            "source_sheet_id": "mv-surv",
             "kind": "kaplan_meier",
             "mv_time_column": 1,
             "mv_status_column": 2,
@@ -471,13 +471,13 @@ fn nonlinear_fit_overrides_parameter_scopes_and_lrt_parity() -> TestRes {
         "fit.run",
         json!({
             "sheet_id": "fit-parity",
-            "source_sheet": "xy-dose",
+            "source_sheet_id": "xy-dose",
             "equation_id": "log_agonist_vs_response_4pl",
             "parameter_rules": [
                 { "name": "Top", "scope": "per_dataset_constant", "values": [[0, 100.0], [1, 100.0]] },
                 { "name": "Bottom", "scope": "column_title_constant" }
             ],
-            "model_comparison": { "method": "likelihood_ratio_test", "alternative_equation_id": "log_agonist_vs_response_3pl" },
+            "comparison": { "method": "likelihood_ratio_test", "alternative_equation_id": "log_agonist_vs_response_3pl" },
             "x_range_filter": [-9.5, -4.0],
             "y_range_filter": [0.0, 120.0],
             "plot_x_min": -10.0,
@@ -485,7 +485,7 @@ fn nonlinear_fit_overrides_parameter_scopes_and_lrt_parity() -> TestRes {
             "emit_residuals_tab": true,
             "emit_covariance_tab": true,
             "homoscedasticity_test": true,
-            "normality_tests": true,
+            "normality_of_residuals": true,
             "band_log_spacing": false
         }),
     )?;
@@ -519,7 +519,7 @@ fn nonlinear_fit_overrides_parameter_scopes_and_lrt_parity() -> TestRes {
         "fit.run",
         json!({
             "sheet_id": "fit-fn-only",
-            "source_sheet": "xy-empty",
+            "source_sheet_id": "xy-empty",
             "equation_id": "log_agonist_vs_response_4pl",
             "plot_function_only": true,
             "plot_x_min": -9.0,
@@ -644,7 +644,7 @@ fn crash_recovery_journal_torn_tail_replay_into_session() -> TestRes {
     s1.execute_and_record(
         &mut j1,
         "table.setCells",
-        json!({ "sheet_id": "d1", "cells": [{ "row": 0, "col": 0, "value": 42.5 }, { "row": 0, "col": 1, "value": 84.0 }] }),
+        json!({ "sheet_id": "d1", "edits": [{ "row": 0, "col": 0, "value": 42.5 }, { "row": 0, "col": 1, "value": 84.0 }] }),
     )
     .map_err(|e| e.to_string())?;
     s1.execute_and_record(&mut j1, "graph.create", json!({ "sheet_id": "g1", "data_sheet_id": "d1", "kind": "column" }))
@@ -746,7 +746,7 @@ fn restricted_linear_fit_uses_the_same_domain_for_analysis_and_overlay() -> Test
         &mut session,
         "fit.run",
         json!({
-            "sheet_id": "terminal", "source_sheet": "xy-terminal", "kind": "linear",
+            "sheet_id": "terminal", "source_sheet_id": "xy-terminal", "kind": "linear",
             "x_range_filter": [10, 16], "plot_segments": 3, "confidence_bands": false
         }),
     )?;
@@ -766,7 +766,7 @@ fn restricted_linear_fit_uses_the_same_domain_for_analysis_and_overlay() -> Test
         assert!(matches!(row.as_slice(), [curvebook_doc::ResultCell::Number { value, .. }] if *value == expected));
     }
 
-    exec(&mut session, "graph.create", json!({ "sheet_id": "terminal-graph", "source_sheet_id": "xy-terminal", "kind": "xy" }))?;
+    exec(&mut session, "graph.create", json!({ "sheet_id": "terminal-graph", "data_sheet_id": "xy-terminal", "kind": "xy" }))?;
     exec(
         &mut session,
         "graph.setAxes",
@@ -796,7 +796,7 @@ fn restricted_linear_fit_uses_the_same_domain_for_analysis_and_overlay() -> Test
     exec(
         &mut session,
         "fit.run",
-        json!({ "sheet_id": "terminal-deming", "source_sheet": "xy-terminal", "kind": "deming", "x_range_filter": [10, 16] }),
+        json!({ "sheet_id": "terminal-deming", "source_sheet_id": "xy-terminal", "kind": "deming", "x_range_filter": [10, 16] }),
     )?;
     let deming = result_sheet_by_id(&session, "terminal-deming")?;
     let expected = (64.0 + 10_496.0_f64.sqrt()) / 80.0;
@@ -837,7 +837,7 @@ fn nonlinear_diagnostic_settings_run_and_update_through_commands() -> TestRes {
         &mut session,
         "fit.run",
         json!({
-            "sheet_id": "fit", "source_sheet": "xy", "kind": "nonlinear", "equation_id": "straight_line",
+            "sheet_id": "fit", "source_sheet_id": "xy", "kind": "nonlinear", "equation_id": "straight_line",
             "identify_unstable_parameters": true, "flag_r_squared_below": 0.96
         }),
     )?;

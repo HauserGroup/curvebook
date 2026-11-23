@@ -14,8 +14,9 @@ use curvebook_text::{
 };
 use curvebook_ui_egui::RasterImage;
 use curvebook_ui_egui::ZLayer as TreeZLayer;
-use curvebook_ui_egui::serde_json::{Map, Value, json};
 use curvebook_ui_egui::text_bridge::{FontFamilyKind as TreeFontFamilyKind, UiTextStyle as TreeUiTextStyle};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::{Map, Value, json};
 
 use crate::chrome_bridge::{WebChromeLayout, WebChromeRole};
 use crate::host_adapters::{WebAdapterError, decode_base64_str, encode_base64_slice};
@@ -30,13 +31,21 @@ pub const CSS_REFERENCE_DPI: u16 = 96;
 pub const MAX_FRAME_RGBA_BYTES: usize = 64 * 1024 * 1024;
 
 /// Font family classification matching `curvebook-text` shaping categories (`#248` §2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FontFamilyKind {
     #[default]
     UiSans,
     UiMono,
     GridTabular,
     ScientificSerif,
+}
+
+impl<'de> Deserialize<'de> for FontFamilyKind {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Ok(Self::from_name(&raw).unwrap_or(Self::UiSans))
+    }
 }
 
 impl FontFamilyKind {
@@ -74,12 +83,62 @@ impl FontFamilyKind {
     }
 }
 
+const fn default_style_size_px() -> f32 {
+    13.0
+}
+
+mod span_weight_wire {
+    use super::{Deserializer, Serialize, Serializer, SpanWeight};
+    use serde::Deserialize;
+
+    pub fn serialize<S: Serializer>(w: &SpanWeight, s: S) -> Result<S::Ok, S::Error> {
+        match w {
+            SpanWeight::Regular => "regular",
+            SpanWeight::Bold => "bold",
+        }
+        .serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<SpanWeight, D::Error> {
+        let raw = Option::<String>::deserialize(d)?;
+        Ok(match raw.as_deref() {
+            Some("bold" | "Bold") => SpanWeight::Bold,
+            _ => SpanWeight::Regular,
+        })
+    }
+}
+
+mod span_slope_wire {
+    use super::{Deserializer, Serialize, Serializer, SpanSlope};
+    use serde::Deserialize;
+
+    pub fn serialize<S: Serializer>(sl: &SpanSlope, s: S) -> Result<S::Ok, S::Error> {
+        match sl {
+            SpanSlope::Upright => "upright",
+            SpanSlope::Italic => "italic",
+        }
+        .serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<SpanSlope, D::Error> {
+        let raw = Option::<String>::deserialize(d)?;
+        Ok(match raw.as_deref() {
+            Some("italic" | "Italic") => SpanSlope::Italic,
+            _ => SpanSlope::Upright,
+        })
+    }
+}
+
 /// Text styling descriptor passed to [`WebTextMeasurer`] and [`WebTextDrawOp`] (`#248` §2).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct UiTextStyle {
     pub family: FontFamilyKind,
+    #[serde(default = "default_style_size_px")]
     pub size_px: f32,
+    #[serde(with = "span_weight_wire")]
     pub weight: SpanWeight,
+    #[serde(with = "span_slope_wire")]
     pub slope: SpanSlope,
     pub tabular_nums: bool,
     pub rich: bool,
@@ -140,14 +199,7 @@ impl UiTextStyle {
     /// Encode this style descriptor into JSON.
     #[must_use]
     pub fn to_json_value(&self) -> Value {
-        json!({
-            "family": self.family.as_str(),
-            "size_px": self.size_px,
-            "weight": match self.weight { SpanWeight::Regular => "regular", SpanWeight::Bold => "bold" },
-            "slope": match self.slope { SpanSlope::Upright => "upright", SpanSlope::Italic => "italic" },
-            "tabular_nums": self.tabular_nums,
-            "rich": self.rich,
-        })
+        serde_json::to_value(self).unwrap_or_else(|_| json!({}))
     }
 
     /// Decode [`UiTextStyle`] from JSON.
@@ -155,21 +207,10 @@ impl UiTextStyle {
     /// # Errors
     /// Returns [`WebAdapterError::Serialization`] when malformed.
     pub fn from_json_value(value: &Value) -> Result<Self, WebAdapterError> {
-        let obj = value.as_object().ok_or_else(|| WebAdapterError::Serialization(String::from("style must be an object")))?;
-        let family = obj.get("family").and_then(Value::as_str).and_then(FontFamilyKind::from_name).unwrap_or(FontFamilyKind::UiSans);
-        #[allow(clippy::cast_possible_truncation)]
-        let size_px = obj.get("size_px").and_then(Value::as_f64).unwrap_or(13.0) as f32;
-        let weight = match obj.get("weight").and_then(Value::as_str) {
-            Some("bold" | "Bold") => SpanWeight::Bold,
-            _ => SpanWeight::Regular,
-        };
-        let slope = match obj.get("slope").and_then(Value::as_str) {
-            Some("italic" | "Italic") => SpanSlope::Italic,
-            _ => SpanSlope::Upright,
-        };
-        let tabular_nums = obj.get("tabular_nums").and_then(Value::as_bool).unwrap_or(false);
-        let rich = obj.get("rich").and_then(Value::as_bool).unwrap_or(false);
-        Ok(Self { family, size_px, weight, slope, tabular_nums, rich })
+        if !value.is_object() {
+            return Err(WebAdapterError::Serialization(String::from("style must be an object")));
+        }
+        serde_json::from_value(value.clone()).map_err(|err| WebAdapterError::Serialization(err.to_string()))
     }
 }
 
@@ -648,7 +689,8 @@ impl<B: CanvasMeasureBackend> WebTextMeasurer for BrowserCanvasTextMeasurer<B> {
 }
 
 /// Z-order layers matching `crates/ui-egui/src/layout/mod.rs` (`#248` §1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
 #[repr(u8)]
 pub enum ZLayer {
     #[default]
@@ -661,6 +703,13 @@ pub enum ZLayer {
     ModalDropdown = 60,
     ContextMenu = 70,
     Tooltip = 80,
+}
+
+impl<'de> Deserialize<'de> for ZLayer {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Ok(Self::from_name(&raw).unwrap_or(Self::Workspace))
+    }
 }
 
 impl ZLayer {
@@ -732,7 +781,8 @@ impl From<TreeZLayer> for ZLayer {
 }
 
 /// Coarse Z-ordered compositing band interleaved between RGBA layers and `ctx.fillText` runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
 #[repr(u8)]
 pub enum ZLayerBand {
     #[default]
@@ -740,6 +790,13 @@ pub enum ZLayerBand {
     PopupDropdown = 1,
     ModalOverlay = 2,
     TopOverlay = 3,
+}
+
+impl<'de> Deserialize<'de> for ZLayerBand {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Self::from_name(&raw).ok_or_else(|| serde::de::Error::custom(format!("unknown z_band `{raw}`")))
+    }
 }
 
 impl ZLayerBand {
@@ -771,7 +828,7 @@ impl ZLayerBand {
 }
 
 /// Physical pixel rectangle matching `crates/ui-egui/src/layout/mod.rs::LayoutRectPx`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct LayoutRectPx {
     pub x: i32,
     pub y: i32,
@@ -789,7 +846,7 @@ impl LayoutRectPx {
     /// Encode this rectangle to JSON.
     #[must_use]
     pub fn to_json_value(self) -> Value {
-        json!({ "x": self.x, "y": self.y, "width": self.width, "height": self.height })
+        serde_json::to_value(self).unwrap_or_else(|_| json!({}))
     }
 
     /// Decode a [`LayoutRectPx`] from JSON with checked `i32`/`u32` bounds.
@@ -797,12 +854,7 @@ impl LayoutRectPx {
     /// # Errors
     /// Returns [`WebAdapterError::Serialization`] when integer fields are missing, invalid, or out of range.
     pub fn from_json_value(value: &Value) -> Result<Self, WebAdapterError> {
-        let obj = value.as_object().ok_or_else(|| WebAdapterError::Serialization(String::from("rect_px must be an object")))?;
-        let x = parse_required_i32_field(obj, "x")?;
-        let y = parse_required_i32_field(obj, "y")?;
-        let width = parse_required_u32_field(obj, "width")?;
-        let height = parse_required_u32_field(obj, "height")?;
-        Ok(Self { x, y, width, height })
+        serde_json::from_value(value.clone()).map_err(|err| WebAdapterError::Serialization(err.to_string()))
     }
 
     /// Right edge (`x + width`) saturating cleanly.
@@ -862,7 +914,8 @@ impl LayoutRectPx {
 }
 
 /// Horizontal text alignment inside [`WebTextDrawOp`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WebTextAlign {
     #[default]
     Start,
@@ -870,6 +923,13 @@ pub enum WebTextAlign {
     End,
     Left,
     Right,
+}
+
+impl<'de> Deserialize<'de> for WebTextAlign {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Ok(Self::from_name(&raw).unwrap_or(Self::Start))
+    }
 }
 
 impl WebTextAlign {
@@ -900,11 +960,19 @@ impl WebTextAlign {
 }
 
 /// Serialized BiDi direction token for [`WebTextDrawOp`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WebTextDirection {
     #[default]
     Ltr,
     Rtl,
+}
+
+impl<'de> Deserialize<'de> for WebTextDirection {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Ok(Self::from_name(&raw).unwrap_or(Self::Ltr))
+    }
 }
 
 impl From<TextDirection> for WebTextDirection {
@@ -937,8 +1005,13 @@ impl WebTextDirection {
     }
 }
 
+const fn default_opaque_black_rgba() -> [u8; 4] {
+    [0, 0, 0, 255]
+}
+
 /// Single Z-ordered browser `ctx.fillText(...)` draw instruction (`#248` §2).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct WebTextDrawOp {
     pub z_layer: ZLayer,
     pub z_band: ZLayerBand,
@@ -951,6 +1024,7 @@ pub struct WebTextDrawOp {
     pub text: String,
     pub style: UiTextStyle,
     pub font_css: String,
+    #[serde(default = "default_opaque_black_rgba")]
     pub color_rgba: [u8; 4],
     pub align: WebTextAlign,
     pub direction: WebTextDirection,
@@ -958,28 +1032,34 @@ pub struct WebTextDrawOp {
     pub node_id: Option<String>,
 }
 
+impl Default for WebTextDrawOp {
+    fn default() -> Self {
+        Self {
+            z_layer: ZLayer::Workspace,
+            z_band: ZLayerBand::Workspace,
+            paint_order: 0,
+            clip_px: None,
+            x_px: 0.0,
+            y_px: 0.0,
+            baseline_y_px: 0.0,
+            max_width_px: None,
+            text: String::new(),
+            style: UiTextStyle::default(),
+            font_css: String::new(),
+            color_rgba: default_opaque_black_rgba(),
+            align: WebTextAlign::Start,
+            direction: WebTextDirection::Ltr,
+            ellipsized: false,
+            node_id: None,
+        }
+    }
+}
+
 impl WebTextDrawOp {
     /// Encode this draw instruction as JSON for browser `ctx.fillText(...)` execution.
     #[must_use]
     pub fn to_json_value(&self) -> Value {
-        json!({
-            "z_layer": self.z_layer.as_str(),
-            "z_band": self.z_band.as_str(),
-            "paint_order": self.paint_order,
-            "clip_px": self.clip_px.map(LayoutRectPx::to_json_value),
-            "x_px": self.x_px,
-            "y_px": self.y_px,
-            "baseline_y_px": self.baseline_y_px,
-            "max_width_px": self.max_width_px,
-            "text": self.text,
-            "style": self.style.to_json_value(),
-            "font_css": self.font_css,
-            "color_rgba": self.color_rgba,
-            "align": self.align.as_css(),
-            "direction": self.direction.as_css(),
-            "ellipsized": self.ellipsized,
-            "node_id": self.node_id,
-        })
+        serde_json::to_value(self).unwrap_or_else(|_| json!({}))
     }
 
     /// Decode a [`WebTextDrawOp`] from JSON.
@@ -988,49 +1068,13 @@ impl WebTextDrawOp {
     /// Returns [`WebAdapterError::Serialization`] when fields are invalid.
     pub fn from_json_value(value: &Value) -> Result<Self, WebAdapterError> {
         let obj = value.as_object().ok_or_else(|| WebAdapterError::Serialization(String::from("text_op must be an object")))?;
-        let z_layer = obj.get("z_layer").and_then(Value::as_str).and_then(ZLayer::from_name).unwrap_or(ZLayer::Workspace);
-        let z_band = obj.get("z_band").and_then(Value::as_str).and_then(ZLayerBand::from_name).unwrap_or_else(|| z_layer.band());
-        let paint_order = parse_optional_u32_field(obj, "paint_order", 0)?;
-        let clip_px = obj.get("clip_px").filter(|v| !v.is_null()).map(LayoutRectPx::from_json_value).transpose()?;
-        let x_px = obj.get("x_px").and_then(Value::as_f64).unwrap_or(0.0);
-        let y_px = obj.get("y_px").and_then(Value::as_f64).unwrap_or(0.0);
-        let baseline_y_px = obj.get("baseline_y_px").and_then(Value::as_f64).unwrap_or(0.0);
-        let max_width_px = obj.get("max_width_px").and_then(Value::as_f64);
-        let text = obj.get("text").and_then(Value::as_str).unwrap_or_default().to_owned();
-        let style = obj.get("style").map(UiTextStyle::from_json_value).transpose()?.unwrap_or_default();
-        let font_css = obj.get("font_css").and_then(Value::as_str).unwrap_or_default().to_owned();
-        let color_rgba = parse_rgba_array(obj.get("color_rgba"));
-        let align = obj.get("align").and_then(Value::as_str).and_then(WebTextAlign::from_name).unwrap_or(WebTextAlign::Start);
-        let direction = obj.get("direction").and_then(Value::as_str).and_then(WebTextDirection::from_name).unwrap_or(WebTextDirection::Ltr);
-        let ellipsized = obj.get("ellipsized").and_then(Value::as_bool).unwrap_or(false);
-        let node_id = obj.get("node_id").and_then(Value::as_str).map(str::to_owned);
-        Ok(Self {
-            z_layer,
-            z_band,
-            paint_order,
-            clip_px,
-            x_px,
-            y_px,
-            baseline_y_px,
-            max_width_px,
-            text,
-            style,
-            font_css,
-            color_rgba,
-            align,
-            direction,
-            ellipsized,
-            node_id,
-        })
+        let has_explicit_band = obj.get("z_band").is_some_and(|v| !v.is_null());
+        let mut op: Self = serde_json::from_value(value.clone()).map_err(|err| WebAdapterError::Serialization(err.to_string()))?;
+        if !has_explicit_band {
+            op.z_band = op.z_layer.band();
+        }
+        Ok(op)
     }
-}
-
-fn parse_rgba_array(value: Option<&Value>) -> [u8; 4] {
-    let Some(arr) = value.and_then(Value::as_array) else {
-        return [0, 0, 0, 255];
-    };
-    let ch = |idx: usize, fallback: u8| -> u8 { arr.get(idx).and_then(Value::as_u64).and_then(|v| u8::try_from(v).ok()).unwrap_or(fallback) };
-    [ch(0, 0), ch(1, 0), ch(2, 0), ch(3, 255)]
 }
 
 /// Non-text RGBA surface slice belonging to a single [`ZLayerBand`].
@@ -1043,53 +1087,57 @@ pub struct WebRgbaLayer {
     pub rgba_bytes: Vec<u8>,
 }
 
+#[derive(Serialize, Deserialize)]
+struct WebRgbaLayerWire {
+    #[serde(default)]
+    z_band: ZLayerBand,
+    rect_px: LayoutRectPx,
+    #[serde(default)]
+    uses_base_frame: bool,
+    #[serde(default)]
+    opaque: bool,
+    #[serde(default)]
+    rgba_base64: String,
+}
+
 impl WebRgbaLayer {
     /// Encode this layer to JSON for `RenderRgbaFrame`.
     #[must_use]
     pub fn to_json_value(&self) -> Value {
-        json!({
-            "z_band": self.z_band.as_str(),
-            "rect_px": self.rect_px.to_json_value(),
-            "uses_base_frame": self.uses_base_frame,
-            "opaque": self.opaque,
-            "rgba_base64": if self.uses_base_frame { String::new() } else { encode_base64_slice(&self.rgba_bytes) },
-        })
+        let wire = WebRgbaLayerWire {
+            z_band: self.z_band,
+            rect_px: self.rect_px,
+            uses_base_frame: self.uses_base_frame,
+            opaque: self.opaque,
+            rgba_base64: if self.uses_base_frame { String::new() } else { encode_base64_slice(&self.rgba_bytes) },
+        };
+        serde_json::to_value(wire).unwrap_or_else(|_| json!({}))
     }
 
     /// Decode a [`WebRgbaLayer`] from JSON.
     ///
     /// # Errors
-    /// Returns [`WebAdapterError::Serialization`] when fields are invalid.
+    /// Returns [`WebAdapterError::Serialization`] when fields are invalid or [`WebAdapterError::Validation`] on oversized buffers.
     pub fn from_json_value(value: &Value) -> Result<Self, WebAdapterError> {
-        let obj = value.as_object().ok_or_else(|| WebAdapterError::Serialization(String::from("rgba_layer must be an object")))?;
-        let band_str = obj.get("z_band").and_then(Value::as_str).unwrap_or("workspace");
-        let z_band = ZLayerBand::from_name(band_str).ok_or_else(|| WebAdapterError::Serialization(format!("unknown z_band `{band_str}`")))?;
-        let rect_val = obj.get("rect_px").ok_or_else(|| WebAdapterError::Serialization(String::from("missing `rect_px`")))?;
-        let rect_px = LayoutRectPx::from_json_value(rect_val)?;
-        let uses_base_frame = obj.get("uses_base_frame").and_then(Value::as_bool).unwrap_or(false);
-        let opaque = obj.get("opaque").and_then(Value::as_bool).unwrap_or(false);
-        let rgba_bytes = if uses_base_frame {
+        let wire: WebRgbaLayerWire = serde_json::from_value(value.clone()).map_err(|err| WebAdapterError::Serialization(err.to_string()))?;
+        let rgba_bytes = if wire.uses_base_frame {
             Vec::new()
         } else {
-            if rect_px.width > 0 && rect_px.height > 0 {
-                let expected = checked_rgba_byte_len(rect_px.width, rect_px.height)?;
+            if wire.rect_px.width > 0 && wire.rect_px.height > 0 {
+                let expected = checked_rgba_byte_len(wire.rect_px.width, wire.rect_px.height)?;
                 if expected > MAX_FRAME_RGBA_BYTES {
                     return Err(WebAdapterError::Validation(format!(
                         "rgba_layer buffer size {expected} exceeds maximum {MAX_FRAME_RGBA_BYTES} bytes"
                     )));
                 }
             }
-            if let Some(b64) = obj.get("rgba_base64").and_then(Value::as_str) {
-                let max_b64_bytes = (MAX_FRAME_RGBA_BYTES / 3).saturating_add(2).saturating_mul(4);
-                if b64.len() > max_b64_bytes {
-                    return Err(WebAdapterError::Validation(format!("rgba_layer base64 length {} exceeds bounded frame budget", b64.len())));
-                }
-                decode_base64_str(b64)?
-            } else {
-                Vec::new()
+            let max_b64_bytes = (MAX_FRAME_RGBA_BYTES / 3).saturating_add(2).saturating_mul(4);
+            if wire.rgba_base64.len() > max_b64_bytes {
+                return Err(WebAdapterError::Validation(format!("rgba_layer base64 length {} exceeds bounded frame budget", wire.rgba_base64.len())));
             }
+            decode_base64_str(&wire.rgba_base64)?
         };
-        Ok(Self { z_band, rect_px, uses_base_frame, opaque, rgba_bytes })
+        Ok(Self { z_band: wire.z_band, rect_px: wire.rect_px, uses_base_frame: wire.uses_base_frame, opaque: wire.opaque, rgba_bytes })
     }
 }
 
@@ -1380,27 +1428,6 @@ impl WebTextBridge {
             }
         }
         Ok(())
-    }
-}
-
-fn parse_required_i32_field(obj: &Map<String, Value>, key: &str) -> Result<i32, WebAdapterError> {
-    let val = obj.get(key).and_then(Value::as_i64).ok_or_else(|| WebAdapterError::Serialization(format!("rect_px missing integer `{key}`")))?;
-    i32::try_from(val).map_err(|_| WebAdapterError::Serialization(format!("rect_px `{key}` value {val} out of i32 range")))
-}
-
-fn parse_required_u32_field(obj: &Map<String, Value>, key: &str) -> Result<u32, WebAdapterError> {
-    let val =
-        obj.get(key).and_then(Value::as_u64).ok_or_else(|| WebAdapterError::Serialization(format!("rect_px missing unsigned integer `{key}`")))?;
-    u32::try_from(val).map_err(|_| WebAdapterError::Serialization(format!("rect_px `{key}` value {val} out of u32 range")))
-}
-
-fn parse_optional_u32_field(obj: &Map<String, Value>, key: &str, default: u32) -> Result<u32, WebAdapterError> {
-    match obj.get(key) {
-        None | Some(Value::Null) => Ok(default),
-        Some(raw) => {
-            let val = raw.as_u64().ok_or_else(|| WebAdapterError::Serialization(format!("`{key}` must be an unsigned integer")))?;
-            u32::try_from(val).map_err(|_| WebAdapterError::Serialization(format!("`{key}` value {val} out of u32 range")))
-        }
     }
 }
 

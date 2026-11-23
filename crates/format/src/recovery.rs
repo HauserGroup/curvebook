@@ -491,105 +491,8 @@ pub trait JournalBackend {
     fn clear_journal(&mut self) -> Result<(), FormatError>;
 }
 
-const BASE64_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
 fn base64_encoded_len(raw_len: usize) -> usize {
     raw_len.div_ceil(3).saturating_mul(4)
-}
-
-fn encode_base64(bytes: &[u8]) -> String {
-    let mut out = Vec::with_capacity(base64_encoded_len(bytes.len()));
-    let (chunks, remainder) = bytes.as_chunks::<3>();
-    for &[b0, b1, b2] in chunks {
-        let triple = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
-        push_base64_char(&mut out, (triple >> 18) & 0x3F);
-        push_base64_char(&mut out, (triple >> 12) & 0x3F);
-        push_base64_char(&mut out, (triple >> 6) & 0x3F);
-        push_base64_char(&mut out, triple & 0x3F);
-    }
-    match remainder {
-        [b0] => {
-            let v = u32::from(*b0) << 16;
-            push_base64_char(&mut out, (v >> 18) & 0x3F);
-            push_base64_char(&mut out, (v >> 12) & 0x3F);
-            out.push(b'=');
-            out.push(b'=');
-        }
-        [b0, b1] => {
-            let v = (u32::from(*b0) << 16) | (u32::from(*b1) << 8);
-            push_base64_char(&mut out, (v >> 18) & 0x3F);
-            push_base64_char(&mut out, (v >> 12) & 0x3F);
-            push_base64_char(&mut out, (v >> 6) & 0x3F);
-            out.push(b'=');
-        }
-        _ => {}
-    }
-    String::from_utf8(out).unwrap_or_default()
-}
-
-fn push_base64_char(out: &mut Vec<u8>, idx: u32) {
-    if let Some(&ch) = BASE64_ALPHABET.get(idx as usize) {
-        out.push(ch);
-    }
-}
-
-fn decode_base64_char(byte: u8) -> Result<u8, &'static str> {
-    match byte {
-        b'A'..=b'Z' => Ok(byte - b'A'),
-        b'a'..=b'z' => Ok(byte - b'a' + 26),
-        b'0'..=b'9' => Ok(byte - b'0' + 52),
-        b'+' => Ok(62),
-        b'/' => Ok(63),
-        _ => Err("invalid base64 character"),
-    }
-}
-
-fn decode_base64(input: &str) -> Result<Vec<u8>, &'static str> {
-    let raw = input.as_bytes();
-    if raw.is_empty() {
-        return Ok(Vec::new());
-    }
-    if !raw.len().is_multiple_of(4) {
-        return Err("base64 length must be a multiple of 4");
-    }
-    let pad = if raw.ends_with(b"==") {
-        2usize
-    } else if raw.ends_with(b"=") {
-        1usize
-    } else {
-        0usize
-    };
-    let num_quads = raw.len() / 4;
-    let mut out = Vec::with_capacity(num_quads.saturating_mul(3).saturating_sub(pad));
-    let (quads, _) = raw.as_chunks::<4>();
-    for (quad_idx, &[q0, q1, q2, q3]) in quads.iter().enumerate() {
-        let is_last = quad_idx + 1 == num_quads;
-        let a = decode_base64_char(q0)?;
-        let b = decode_base64_char(q1)?;
-        if q2 == b'=' {
-            if !is_last || q3 != b'=' || (b & 0x0F) != 0 {
-                return Err("invalid base64 padding");
-            }
-            out.push((a << 2) | (b >> 4));
-        } else if q3 == b'=' {
-            if !is_last {
-                return Err("unexpected base64 padding");
-            }
-            let c = decode_base64_char(q2)?;
-            if (c & 0x03) != 0 {
-                return Err("non-canonical trailing base64 bits");
-            }
-            out.push((a << 2) | (b >> 4));
-            out.push((b << 4) | (c >> 2));
-        } else {
-            let c = decode_base64_char(q2)?;
-            let d = decode_base64_char(q3)?;
-            out.push((a << 2) | (b >> 4));
-            out.push((b << 4) | (c >> 2));
-            out.push((c << 6) | d);
-        }
-    }
-    Ok(out)
 }
 
 mod serde_compact_bytes {
@@ -598,10 +501,10 @@ mod serde_compact_bytes {
     use serde::de::{SeqAccess, Visitor};
     use serde::{Deserializer, Serializer};
 
-    use super::{MAX_WEB_STORAGE_JSON_BYTES, decode_base64, encode_base64};
+    use super::MAX_WEB_STORAGE_JSON_BYTES;
 
     pub(super) fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&encode_base64(bytes))
+        serializer.serialize_str(&curvebook_platform::base64::encode(bytes))
     }
 
     pub(super) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
@@ -615,7 +518,10 @@ mod serde_compact_bytes {
             }
 
             fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
-                decode_base64(value).map_err(serde::de::Error::custom)
+                if value.is_empty() {
+                    return Ok(Vec::new());
+                }
+                curvebook_platform::base64::decode_capped(value, MAX_WEB_STORAGE_JSON_BYTES).map_err(serde::de::Error::custom)
             }
 
             fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {

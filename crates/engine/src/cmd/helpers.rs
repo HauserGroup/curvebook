@@ -10,7 +10,9 @@ use curvebook_doc::{
 };
 use curvebook_format::MAX_ARCHIVE_FILE_BYTES;
 use curvebook_palette::Rgba8;
-use serde_json::json;
+use serde::Deserialize;
+use serde::de::{DeserializeOwned, Deserializer};
+use serde_json::{Value, json};
 
 use crate::{EngineError, ErrorCode, ExternalPathPolicy};
 
@@ -307,60 +309,7 @@ pub fn write_output_file(policy: &ExternalPathPolicy, path: &str, bytes: &[u8]) 
 /// Encode binary bytes into standard RFC 4648 base64 without line wrapping.
 #[must_use]
 pub fn encode_base64(input: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let table_char = |idx: usize| -> char { TABLE.get(idx & 0x3f).copied().map_or('A', char::from) };
-    let mut out = String::with_capacity(input.len().div_ceil(3).saturating_mul(4));
-    for chunk in input.chunks(3) {
-        let Some(&b0_u8) = chunk.first() else {
-            continue;
-        };
-        let b0 = usize::from(b0_u8);
-        let b1 = usize::from(chunk.get(1).copied().unwrap_or(0));
-        let b2 = usize::from(chunk.get(2).copied().unwrap_or(0));
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        out.push(table_char(triple >> 18));
-        out.push(table_char(triple >> 12));
-        if chunk.len() > 1 {
-            out.push(table_char(triple >> 6));
-        } else {
-            out.push('=');
-        }
-        if chunk.len() > 2 {
-            out.push(table_char(triple));
-        } else {
-            out.push('=');
-        }
-    }
-    out
-}
-
-fn decode_b64_sextet(byte: u8) -> Result<u8, EngineError> {
-    match byte {
-        b'A'..=b'Z' => Ok(byte - b'A'),
-        b'a'..=b'z' => Ok(byte - b'a' + 26),
-        b'0'..=b'9' => Ok(byte - b'0' + 52),
-        b'+' => Ok(62),
-        b'/' => Ok(63),
-        _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid base64 character `{}`", char::from(byte)))),
-    }
-}
-
-fn decode_base64_quad(quad: [u8; 4], pointer: &str) -> Result<([u8; 3], usize, bool), EngineError> {
-    let bad = |msg: &str| EngineError::with_code(ErrorCode::BadInput, msg).with_details(json!({ "pointer": pointer }));
-    if quad[0] == b'=' || quad[1] == b'=' {
-        return Err(bad("misplaced base64 `=` padding"));
-    }
-    if quad[2] == b'=' && quad[3] != b'=' {
-        return Err(bad("malformed base64 trailing padding"));
-    }
-    let s0 = u32::from(decode_b64_sextet(quad[0]).map_err(|err| err.with_details(json!({ "pointer": pointer })))?);
-    let s1 = u32::from(decode_b64_sextet(quad[1]).map_err(|err| err.with_details(json!({ "pointer": pointer })))?);
-    let pad_len = usize::from(quad[2] == b'=') + usize::from(quad[3] == b'=');
-    let s2 = if quad[2] == b'=' { 0 } else { u32::from(decode_b64_sextet(quad[2]).map_err(|err| err.with_details(json!({ "pointer": pointer })))?) };
-    let s3 = if quad[3] == b'=' { 0 } else { u32::from(decode_b64_sextet(quad[3]).map_err(|err| err.with_details(json!({ "pointer": pointer })))?) };
-    let word = (s0 << 18) | (s1 << 12) | (s2 << 6) | s3;
-    let bytes = [((word >> 16) & 0xff) as u8, ((word >> 8) & 0xff) as u8, (word & 0xff) as u8];
-    Ok((bytes, 3 - pad_len, pad_len > 0))
+    curvebook_platform::base64::encode(input)
 }
 
 /// Decode standard RFC 4648 base64 string (ignoring ASCII whitespace) up to `max_bytes` decoded bytes.
@@ -372,69 +321,17 @@ fn decode_base64_quad(quad: [u8; 4], pointer: &str) -> Result<([u8; 3], usize, b
 /// Returns [`EngineError`] with [`ErrorCode::BadInput`] if empty, length is invalid, or characters/padding
 /// are invalid, or [`ErrorCode::ResourceLimit`] if the payload exceeds `max_bytes`.
 pub fn decode_base64_capped(input: &str, max_bytes: usize, pointer: &str) -> Result<Vec<u8>, EngineError> {
-    let limit_err = || {
-        EngineError::with_code(ErrorCode::ResourceLimit, format!("base64 payload exceeds maximum allowed size ({max_bytes} bytes)"))
-            .with_details(json!({ "pointer": pointer, "max_bytes": max_bytes }))
-    };
-    let max_b64_len = max_bytes.div_ceil(3).saturating_mul(4);
-    // Allow modest MIME whitespace overhead while rejecting oversized raw payloads before scanning.
-    let max_raw_len = max_b64_len.saturating_add(max_b64_len / 4).saturating_add(1024);
-    if input.len() > max_raw_len {
-        return Err(limit_err());
-    }
-
-    let mut out = Vec::with_capacity((input.len().min(4096) / 4).saturating_mul(3).min(max_bytes));
-    let mut quad = [0_u8; 4];
-    let mut quad_len = 0_usize;
-    let mut non_ws_len = 0_usize;
-    let mut saw_padding = false;
-
-    for byte in input.bytes() {
-        if byte.is_ascii_whitespace() {
-            continue;
+    curvebook_platform::base64::decode_capped(input, max_bytes).map_err(|err| match err {
+        curvebook_platform::Base64Error::MaxSizeExceeded { max_bytes } => {
+            EngineError::with_code(ErrorCode::ResourceLimit, err.to_string()).with_details(json!({ "pointer": pointer, "max_bytes": max_bytes }))
         }
-        non_ws_len = non_ws_len.saturating_add(1);
-        if non_ws_len > max_b64_len {
-            return Err(limit_err());
+        curvebook_platform::Base64Error::Empty
+        | curvebook_platform::Base64Error::InvalidLength { .. }
+        | curvebook_platform::Base64Error::InvalidCharacter { .. }
+        | curvebook_platform::Base64Error::InvalidPadding => {
+            EngineError::with_code(ErrorCode::BadInput, err.to_string()).with_details(json!({ "pointer": pointer }))
         }
-        if saw_padding {
-            return Err(EngineError::with_code(ErrorCode::BadInput, "misplaced base64 `=` padding").with_details(json!({ "pointer": pointer })));
-        }
-        let Some(slot) = quad.get_mut(quad_len) else {
-            return Err(EngineError::with_code(ErrorCode::InternalError, "base64 quad state overflow").with_details(json!({ "pointer": pointer })));
-        };
-        *slot = byte;
-        quad_len += 1;
-        if quad_len < 4 {
-            continue;
-        }
-        quad_len = 0;
-        let (bytes, decoded_len, padded) = decode_base64_quad(quad, pointer)?;
-        saw_padding = padded;
-        if out.len().saturating_add(decoded_len) > max_bytes {
-            return Err(limit_err());
-        }
-        if out.capacity() - out.len() < decoded_len {
-            let grow = out.len().max(1024).min(max_bytes - out.len()).max(decoded_len);
-            out.reserve_exact(grow);
-        }
-        let Some(decoded_slice) = bytes.get(..decoded_len) else {
-            return Err(
-                EngineError::with_code(ErrorCode::InternalError, "base64 decoded slice out of bounds").with_details(json!({ "pointer": pointer }))
-            );
-        };
-        out.extend_from_slice(decoded_slice);
-    }
-
-    if non_ws_len == 0 {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "base64 payload must not be empty").with_details(json!({ "pointer": pointer })));
-    }
-    if quad_len != 0 {
-        return Err(
-            EngineError::with_code(ErrorCode::BadInput, "base64 payload length must be a multiple of 4").with_details(json!({ "pointer": pointer }))
-        );
-    }
-    Ok(out)
+    })
 }
 
 /// Decode standard non-empty RFC 4648 base64 string (ignoring ASCII whitespace), capped at [`MAX_ARCHIVE_FILE_BYTES`].
@@ -1009,6 +906,50 @@ pub(super) fn shift_point_overrides_on_insert_rows(doc: &mut ProjectDocument, sh
             }
         }
     }
+}
+
+/// Deserialize an enum from its canonical serde JSON form (PascalCase string or tagged object) or
+/// a case/separator-insensitive string alias (snake_case or stripped-alphanumeric lowercase).
+pub(super) fn parse_serde_enum<T: DeserializeOwned>(val: &Value, field_desc: &str) -> Result<T, EngineError> {
+    if let Ok(parsed) = serde_json::from_value::<T>(val.clone()) {
+        return Ok(parsed);
+    }
+    if let Some(raw) = val.as_str() {
+        let trimmed = raw.trim();
+        let snake = trimmed.to_ascii_lowercase().replace(['-', ' '], "_");
+        if let Ok(parsed) = serde_json::from_value::<T>(Value::String(snake)) {
+            return Ok(parsed);
+        }
+        let compact: String = trimmed.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+        if let Ok(parsed) = serde_json::from_value::<T>(Value::String(compact)) {
+            return Ok(parsed);
+        }
+    }
+    Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid {field_desc}: {val}")))
+}
+
+/// Convenience wrapper around [`parse_serde_enum`] for string slices.
+pub(super) fn parse_serde_enum_str<T: DeserializeOwned>(raw: &str, field_desc: &str) -> Result<T, EngineError> {
+    parse_serde_enum(&Value::String(raw.to_owned()), field_desc)
+}
+
+/// Deserialize a present patch field that rejects JSON `null` while allowing field omission via
+/// `#[serde(default, deserialize_with = "de_some")]`.
+pub(super) fn de_some<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+/// Deserialize a typed JSON patch object (typically `#[serde(deny_unknown_fields)]`) with a
+/// structured [`ErrorCode::BadInput`] diagnostic on type or unknown-field errors.
+pub(super) fn deserialize_patch<T: DeserializeOwned>(val: &Value, context: &str) -> Result<T, EngineError> {
+    if !val.is_object() {
+        return Err(EngineError::with_code(ErrorCode::BadInput, format!("{context} must be a JSON object")));
+    }
+    serde_json::from_value(val.clone()).map_err(|err| EngineError::with_code(ErrorCode::BadInput, format!("invalid {context}: {err}")))
 }
 
 #[cfg(test)]

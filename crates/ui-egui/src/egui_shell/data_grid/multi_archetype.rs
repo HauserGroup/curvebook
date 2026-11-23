@@ -1,39 +1,39 @@
-//! Unified multi-archetype data grid (`XY`, `Grouped`, `Contingency`, `Survival`, `PartsOfWhole`,
-//! `MultipleVariables`, `Nested`) body, gutter, cell rendering, and context menu (`R15.4`).
+//! Unified multi-archetype data grid (`Column`, `XY`, `Grouped`, `Contingency`, `Survival`,
+//! `PartsOfWhole`, `MultipleVariables`, `Nested`) body, gutter, cell rendering, and context menu (`R15.2`, `R15.4`).
 
 use std::fmt::Write as _;
 use std::ops::Range;
 
-use curvebook_doc::{Cell, CellCoord, CellValue, DataSheet, LinkedDataRegion, TableArchetype, VariableRole, VariableSource, XColumnMode};
+use curvebook_doc::{Cell, CellCoord, CellValue, DataSheet, LinkedDataRegion, SheetId, TableArchetype, VariableRole, VariableSource, XColumnMode};
 use curvebook_tools::GridCellCoord;
 use egui::scroll_area::{DragScroll, ScrollBarVisibility, ScrollSource};
-use egui::{Align, Color32, FontId, Id, Order, Rect, Response, Sense, Stroke, StrokeKind, Ui, UiBuilder, WidgetInfo, pos2, vec2};
+use egui::{Align, Color32, CornerRadius, FontId, Id, Order, Rect, Response, Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2, WidgetInfo, pos2, vec2};
 use serde_json::json;
 
 use crate::UiApp;
 use crate::grid_view::GridViewState;
 use crate::inspect::ZLayer;
-use crate::views::grid_core::linked_region_for_cell;
+use crate::views::grid_core::{grid_tr, linked_region_for_cell};
 
 use super::super::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens};
 use super::headers::{render_multi_column_headers, render_multi_corner, row_title_at};
 use super::inline_edit::{begin_inline_edit, render_multi_inline_editors};
-use super::linked_regions::{open_link_popover, render_multi_link_guard_popover, render_multi_link_strip};
+use super::linked_regions::{open_link_popover, render_link_provenance_strip, render_linked_region_guard_popover};
 use super::mv_roles::{active_mv_formula_operands, render_mv_role_menu_popup};
 use super::shared::LinkedEdgePaint;
 use super::shared::{
     AuxInlineTarget, CellTextStyle, ContextCellTarget, ContextMenuState, MultiGridAuxState, MultiGridCtx, MultiGridFrameState, MultiGridGeom,
-    alt_row_fill, any_pointer_click_in, clamp_multi_scroll, clear_grid_drag_anchor_if_released, compute_multi_geom, compute_multi_scrollbar_rects,
-    compute_visible_range, ensure_solid_scrollbar_style, format_cell_into_with_decimals, forward_frozen_wheel, handle_cell_pointer_drag_select,
-    initial_edit_text_for_cell, is_linked_region_broken, is_multi_click_edit, link_border_color32, multi_text_style, paint_exclusion_corner_marker,
-    paint_linked_perimeter_edges, record_meta_if_enabled, record_meta_with_unclipped_if_enabled, render_ellipsized_text, set_grid_focus_active,
-    table_display_decimals,
+    SelectionFastLookup, alt_row_fill, any_pointer_click_in, clamp_multi_scroll, clear_grid_drag_anchor_if_released, compute_multi_geom,
+    compute_multi_scrollbar_rects, compute_visible_range, ensure_solid_scrollbar_style, format_cell_into_with_decimals, forward_frozen_wheel,
+    handle_cell_pointer_drag_select, initial_edit_text_for_cell, is_linked_region_broken, is_multi_click_edit, link_border_color32, multi_text_style,
+    paint_exclusion_corner_marker, paint_linked_perimeter_edges, paint_scrollbar_corner_cap, record_meta_if_enabled,
+    record_meta_with_unclipped_if_enabled, render_ellipsized_text, set_grid_focus_active, table_display_decimals,
 };
 use super::shortcuts::{
     clear_x_clipboard_cache, copy_x_cell_to_clipboard, handle_multi_keyboard_shortcuts, push_x_cell_text_paste_intents,
     read_clipboard_text_for_x_paste,
 };
-use super::{ColumnGridEguiState, DataGridEguiState, DataGridFrameReport, DataGridRenderContext, GridInlineEditTarget};
+use super::{DataGridEguiState, DataGridFrameReport, DataGridRenderContext, GridInlineEditTarget};
 
 pub(super) fn render_multi_archetype_grid(
     ui: &mut Ui,
@@ -57,16 +57,28 @@ pub(super) fn render_multi_archetype_grid(
     };
 
     ensure_solid_scrollbar_style(ui, render_ctx.metrics);
+    if let Some(collapsed_override) = app.grid.row_titles_collapsed_override {
+        state.row_titles_collapsed = collapsed_override;
+    }
     if !available.is_positive() {
         return DataGridFrameReport { grid_rect_pt: available, ..DataGridFrameReport::default() };
     }
 
+    let last_sheet_key = Id::unique("r15_4_multi_grid_last_sheet");
+    let prev_sheet = ui.ctx().data_mut(|d| {
+        let prev = d.get_temp::<SheetId>(last_sheet_key);
+        d.insert_temp(last_sheet_key, ds.id.clone());
+        prev
+    });
     let aux_id = Id::unique(("r15_4_multi_grid_aux", ds.id.as_str()));
     let mut aux: MultiGridAuxState = ui.ctx().data_mut(|d| d.get_temp::<MultiGridAuxState>(aux_id).unwrap_or_default());
     if aux.sheet_id.as_ref() != Some(&ds.id) {
         aux = MultiGridAuxState { sheet_id: Some(ds.id.clone()), ..MultiGridAuxState::default() };
+    }
+    if prev_sheet.as_ref().is_some_and(|prev| prev != &ds.id) {
         state.inline_edit = None;
         state.active_link_popover = None;
+        state.context_menu = None;
     }
     let cur_app_y_sel = Some((app.grid.tool.active, app.grid.tool.anchor, app.grid.selected_coords.len()));
     if app.grid.active_x_cell != aux.last_app_x_cell {
@@ -80,7 +92,17 @@ pub(super) fn render_multi_archetype_grid(
         }
     }
 
-    let geom = compute_multi_geom(app, ds, state, render_ctx.metrics, available);
+    let scroll_allocated_w = ui.spacing().scroll.allocated_width();
+    let geom = compute_multi_geom(app, ds, state, render_ctx.metrics, scroll_allocated_w, available);
+    if geom.body_inner_clip.width() < 16.0 || geom.body_inner_clip.height() < 16.0 {
+        state.last_visible_rows = 0..0;
+        state.last_visible_subcols = 0..0;
+        return DataGridFrameReport {
+            grid_rect_pt: available,
+            rendered_modal_guard_open: state.active_link_popover.is_some(),
+            ..DataGridFrameReport::default()
+        };
+    }
     clamp_multi_scroll(state, &geom);
 
     let blocked = render_ctx.modal_blocked || state.active_link_popover.is_some();
@@ -91,51 +113,53 @@ pub(super) fn render_multi_archetype_grid(
     painter.rect_filled(geom.grid_outer_rect, 0.0, tokens.surface_bg);
     painter.rect_stroke(geom.grid_outer_rect, 0.0, Stroke::new(1.0, tokens.border), StrokeKind::Inside);
 
-    if let Some(strip_rect) = geom.link_strip_rect {
-        render_multi_link_strip(ui, app, ds, strip_rect, state, tokens, meta);
-    }
-    if !blocked {
-        forward_frozen_wheel(ui, &geom, state);
-    }
-
-    let mctx = MultiGridCtx { app, ds, geom: &geom, tokens, blocked };
-    let body_out = {
+    let mctx = MultiGridCtx { app, ds, geom: &geom, tokens, metrics: render_ctx.metrics, blocked, locale: tokens.locale };
+    let (body_out, link_outside_click) = {
         let mut fstate = MultiGridFrameState { state, aux: &mut aux, meta, intents };
+        if let Some(strip_rect) = geom.link_strip_rect {
+            render_link_provenance_strip(ui, &mctx, &mut fstate, strip_rect);
+        }
+        if !blocked {
+            forward_frozen_wheel(ui, &geom, fstate.state);
+        }
+        let prev_scroll = fstate.state.scroll_offset_pt;
+        let body_out = render_multi_body(ui, &mctx, &mut fstate);
         render_multi_corner(ui, &mctx, &mut fstate);
         let active_mv_operands = active_mv_formula_operands(app, ds);
-        render_multi_column_headers(ui, &mctx, &mut fstate, &active_mv_operands);
-        render_multi_gutter_body(ui, &mctx, &mut fstate);
-        let body_out = render_multi_body(ui, &mctx, &mut fstate);
+        render_multi_column_headers(ui, &mctx, &mut fstate, body_out.used_scroll_offset.x, &body_out.vis_all_flat, &active_mv_operands);
+        render_multi_gutter_body(ui, &mctx, &mut fstate, body_out.used_scroll_offset.y, &body_out.vis_rows);
+        paint_scrollbar_corner_cap(ui, &geom, tokens);
 
-        let cap_rect = Rect::from_min_max(
-            pos2(
-                (geom.body_rect.max.x - geom.bar_reserve).max(geom.body_rect.min.x),
-                (geom.body_rect.max.y - geom.bar_reserve).max(geom.body_rect.min.y),
-            ),
-            geom.body_rect.max,
-        );
-        if cap_rect.is_positive() {
-            ui.painter().rect_filled(cap_rect, 0.0, tokens.header_bg);
-        }
-
-        render_multi_inline_editors(ui, &mctx, &mut fstate);
+        let inline_handled = render_multi_inline_editors(ui, &mctx, &mut fstate, body_out.used_scroll_offset);
         render_mv_role_menu_popup(ui, &mctx, &mut fstate);
         render_row_context_menu_popup(ui, &mctx, &mut fstate);
-        if !blocked {
+        if !blocked && !inline_handled && !body_out.cell_clicked_or_edited {
             handle_multi_keyboard_shortcuts(ui, &mctx, &mut fstate);
         }
-        body_out
+
+        if !blocked {
+            fstate.state.scroll_offset_pt = body_out.new_scroll_offset;
+            clamp_multi_scroll(fstate.state, &geom);
+        }
+        let scrolled_this_frame = (fstate.state.scroll_offset_pt - prev_scroll).length_sq() > 0.01;
+        if scrolled_this_frame {
+            if fstate.intents.is_empty() && !ui.ctx().will_discard() {
+                ui.ctx().request_discard("data grid scroll offset updated");
+            } else {
+                ui.ctx().request_repaint();
+            }
+        }
+        let link_outside_click = render_linked_region_guard_popover(ui, &mctx, &mut fstate);
+        (body_out, link_outside_click)
     };
 
-    let link_outside_click = render_multi_link_guard_popover(ui, ds, state, tokens, meta, intents, geom.grid_outer_rect);
-
-    let (v_sb, h_sb) = compute_multi_scrollbar_rects(&geom);
+    let (v_sb, h_sb) = compute_multi_scrollbar_rects(ui, &geom, body_out.inner_rect);
     state.last_visible_rows = body_out.vis_rows.clone();
     state.last_visible_subcols = body_out.vis_all_flat.clone();
     ui.ctx().data_mut(|d| d.insert_temp(aux_id, aux));
 
     DataGridFrameReport {
-        grid_rect_pt: geom.grid_outer_rect,
+        grid_rect_pt: available,
         rendered_cells: body_out.rendered_cells,
         visible_rows: body_out.vis_rows,
         visible_subcols: body_out.vis_all_flat,
@@ -146,7 +170,7 @@ pub(super) fn render_multi_archetype_grid(
     }
 }
 
-fn render_multi_gutter_body(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut MultiGridFrameState<'_>) {
+fn render_multi_gutter_body(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut MultiGridFrameState<'_>, scroll_y: f32, vis_rows_hint: &Range<usize>) {
     let app = mctx.app;
     let ds = mctx.ds;
     let geom = mctx.geom;
@@ -156,11 +180,13 @@ fn render_multi_gutter_body(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut M
     if !g_rect.is_positive() {
         return;
     }
-    let scroll_y = fstate.state.scroll_offset_pt.y;
-    let vis_rows = compute_visible_range(scroll_y, g_rect.height(), geom.row_h, geom.row_count);
+    let vis_rows =
+        if vis_rows_hint.is_empty() { compute_visible_range(scroll_y, g_rect.height(), geom.row_h, geom.row_count) } else { vis_rows_hint.clone() };
     let x0 = g_rect.min.x;
     let x_mid = x0 + geom.row_num_w;
     let x1 = g_rect.max.x;
+    let last_col = geom.col_count.saturating_sub(1);
+    let last_sub = geom.col_span_flat(last_col).1.saturating_sub(1);
 
     ui.scope_builder(UiBuilder::new().max_rect(g_rect), |gui| {
         gui.set_clip_rect(g_rect);
@@ -205,15 +231,17 @@ fn render_multi_gutter_body(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut M
                     },
                 );
                 if resp.clicked() && !blocked && geom.col_count > 0 {
-                    let c = GridCellCoord::new(row, 0, 0);
                     fstate.aux.selected_x_cell = None;
-                    fstate.intents.push_select_grid_cell(c);
+                    fstate.intents.push_select_grid_cell(GridCellCoord::new(row, 0, 0));
+                    fstate.intents.push_extend_grid_selection(GridCellCoord::new(row, last_col, last_sub));
+                    set_grid_focus_active(gui, true);
+                    gui.ctx().request_repaint();
                 }
                 if resp.secondary_clicked()
                     && !blocked
                     && let Some(pos) = resp.interact_pointer_pos()
                 {
-                    fstate.aux.context_menu = Some(ContextMenuState { pos, row, cell: None });
+                    fstate.state.context_menu = Some(ContextMenuState { pos, row, cell: None });
                 }
             }
 
@@ -260,12 +288,15 @@ fn render_multi_gutter_body(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut M
                         if resp.hovered() && rt_editable {
                             gui.painter().rect_filled(rt_r, 0.0, tokens.hover_bg);
                         }
-                        render_ellipsized_text(
+                        let (rt_elided, _) = render_ellipsized_text(
                             gui,
                             rt_r.shrink2(vec2(5.0, 0.0)),
                             &row_title,
                             CellTextStyle::plain(FontId::proportional(12.0), tokens.text_primary, Align::LEFT),
                         );
+                        if rt_elided && resp.hovered() {
+                            let _ = resp.clone().on_hover_text(&row_title);
+                        }
                         let acc_rt = if row_title.is_empty() { format!("Row {} Title", row + 1) } else { row_title.clone() };
                         resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, rt_editable, acc_rt.clone()));
                         record_meta_with_unclipped_if_enabled(
@@ -289,13 +320,18 @@ fn render_multi_gutter_body(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut M
                                     None
                                 },
                                 z_layer: ZLayer::Workspace,
-                                ellipsized: false,
-                                full_label: None,
+                                ellipsized: rt_elided,
+                                full_label: rt_elided.then_some(row_title.as_str()),
                             },
                         );
                         if resp.clicked() && rt_editable {
                             fstate.aux.aux_edit = None;
                             begin_inline_edit(gui, fstate.state, GridInlineEditTarget::RowTitle { row }, row_title);
+                        } else if resp.secondary_clicked()
+                            && !blocked
+                            && let Some(pos) = resp.interact_pointer_pos()
+                        {
+                            fstate.state.context_menu = Some(ContextMenuState { pos, row, cell: None });
                         }
                     }
                 }
@@ -308,36 +344,21 @@ fn render_multi_gutter_body(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut M
 }
 
 struct MultiBodyOut {
+    inner_rect: Rect,
     rendered_cells: usize,
     vis_rows: Range<usize>,
     vis_all_flat: Range<usize>,
-}
-
-fn is_coord_selected(app: &UiApp, coord: GridCellCoord) -> (bool, bool) {
-    let is_active = app.grid.tool.active == Some(coord);
-    if is_active {
-        return (true, true);
-    }
-    if let Some((s, e)) = app.grid.tool.selection_bounds()
-        && coord.row >= s.row
-        && coord.row <= e.row
-        && coord.col >= s.col
-        && coord.col <= e.col
-        && coord.subcol >= s.subcol
-        && coord.subcol <= e.subcol
-    {
-        return (false, true);
-    }
-    if app.grid.selected_coords.contains(&coord) {
-        return (false, true);
-    }
-    (false, false)
+    used_scroll_offset: Vec2,
+    new_scroll_offset: Vec2,
+    cell_clicked_or_edited: bool,
 }
 
 struct MultiBodyDrawBuffers<'a> {
     text_buf: &'a mut String,
     id_buf: &'a mut String,
     acc_buf: &'a mut String,
+    sel: &'a SelectionFastLookup<'a>,
+    has_links: bool,
     record_meta: bool,
     table_decimals: Option<u8>,
     base_row_bg: Color32,
@@ -358,6 +379,7 @@ struct MultiXCellDraw {
 #[derive(Clone, Copy)]
 struct MultiDataCellDraw {
     coord: GridCellCoord,
+    flat_data_col: usize,
     raw_cell_r: Rect,
     clipped: Rect,
 }
@@ -369,31 +391,51 @@ fn render_multi_body(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut MultiGri
     let blocked = mctx.blocked;
     let table_decimals = table_display_decimals(ui.ctx());
     let b_rect = geom.body_rect;
-    if !b_rect.is_positive() {
-        return MultiBodyOut { rendered_cells: 0, vis_rows: 0..0, vis_all_flat: 0..0 };
-    }
-    let mut out = MultiBodyOut { rendered_cells: 0, vis_rows: 0..0, vis_all_flat: 0..0 };
     let scroll_offset = fstate.state.scroll_offset_pt;
+    if !b_rect.is_positive() {
+        return MultiBodyOut {
+            inner_rect: geom.body_inner_clip,
+            rendered_cells: 0,
+            vis_rows: 0..0,
+            vis_all_flat: 0..0,
+            used_scroll_offset: scroll_offset,
+            new_scroll_offset: scroll_offset,
+            cell_clicked_or_edited: false,
+        };
+    }
+    let mut out = MultiBodyOut {
+        inner_rect: geom.body_inner_clip,
+        rendered_cells: 0,
+        vis_rows: 0..0,
+        vis_all_flat: 0..0,
+        used_scroll_offset: scroll_offset,
+        new_scroll_offset: scroll_offset,
+        cell_clicked_or_edited: false,
+    };
 
     let scroll_out = ui.scope_builder(UiBuilder::new().max_rect(b_rect), |body_parent| {
         if blocked {
             body_parent.disable();
         }
-        egui::ScrollArea::both()
+        egui::ScrollArea::new([geom.need_h, geom.need_v])
             .id_salt(("r15_4_multi_grid_scroll", ds.id.as_str()))
             .scroll_offset(scroll_offset)
+            .animated(false)
             .scroll_bar_visibility(if blocked { ScrollBarVisibility::AlwaysHidden } else { ScrollBarVisibility::AlwaysVisible })
             .scroll_source(if blocked { ScrollSource::NONE } else { ScrollSource { scroll_bar: true, drag: DragScroll::Never, mouse_wheel: true } })
             .auto_shrink([false, false])
             .show_viewport(body_parent, |body_ui, viewport| {
                 let origin = body_ui.min_rect().min;
                 body_ui.allocate_space(vec2(geom.content_w.max(geom.body_inner_clip.width()), geom.content_h.max(geom.body_inner_clip.height())));
+                out.used_scroll_offset = viewport.min.to_vec2();
 
                 let vis_rows = compute_visible_range(viewport.min.y, geom.body_inner_clip.height(), geom.row_h, geom.row_count);
                 let vis_all_flat = compute_visible_range(viewport.min.x, geom.body_inner_clip.width(), geom.subcol_w, geom.total_flat_cols);
                 out.vis_rows = vis_rows.clone();
                 out.vis_all_flat = vis_all_flat.clone();
 
+                let sel = SelectionFastLookup::new(mctx.app, geom);
+                let has_links = !ds.linked_regions.is_empty();
                 let mut text_buf = String::with_capacity(32);
                 let mut id_buf = String::with_capacity(32);
                 let mut acc_buf = String::with_capacity(48);
@@ -406,6 +448,7 @@ fn render_multi_body(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut MultiGri
                 let is_cont = matches!(&ds.archetype, TableArchetype::Contingency(_));
                 let is_surv = matches!(&ds.archetype, TableArchetype::Survival(_));
                 let alt_fill = alt_row_fill(tokens.surface_bg, tokens.panel_bg);
+                let mut active_border_rect: Option<Rect> = None;
 
                 for row in vis_rows.clone() {
                     #[allow(clippy::cast_precision_loss)]
@@ -418,6 +461,8 @@ fn render_multi_body(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut MultiGri
                         text_buf: &mut text_buf,
                         id_buf: &mut id_buf,
                         acc_buf: &mut acc_buf,
+                        sel: &sel,
+                        has_links,
                         record_meta,
                         table_decimals,
                         base_row_bg: if row % 2 == 1 { alt_fill } else { tokens.surface_bg },
@@ -437,16 +482,24 @@ fn render_multi_body(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut MultiGri
                             continue;
                         }
                         if flat < geom.x_subcols {
-                            render_single_multi_x_cell(body_ui, mctx, fstate, MultiXCellDraw { row, subcol: flat, clipped }, &mut dbuf);
+                            if render_single_multi_x_cell(body_ui, mctx, fstate, MultiXCellDraw { row, subcol: flat, clipped }, &mut dbuf) {
+                                out.cell_clicked_or_edited = true;
+                            }
                             out.rendered_cells += 1;
                         } else if let Some((col, subcol)) = geom.flat_data_to_coord(flat - geom.x_subcols) {
-                            render_single_multi_data_cell(
+                            let coord = GridCellCoord::new(row, col, subcol);
+                            if fstate.aux.selected_x_cell.is_none() && sel.active == Some(coord) {
+                                active_border_rect = Some(clipped);
+                            }
+                            if render_single_multi_data_cell(
                                 body_ui,
                                 mctx,
                                 fstate,
-                                MultiDataCellDraw { coord: GridCellCoord::new(row, col, subcol), raw_cell_r, clipped },
+                                MultiDataCellDraw { coord, flat_data_col: flat - geom.x_subcols, raw_cell_r, clipped },
                                 &mut dbuf,
-                            );
+                            ) {
+                                out.cell_clicked_or_edited = true;
+                            }
                             out.rendered_cells += 1;
                         }
                     }
@@ -458,12 +511,13 @@ fn render_multi_body(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut MultiGri
 
                 paint_multi_vertical_hairlines(body_ui, origin.x, geom, &vis_all_flat, tokens);
                 clear_grid_drag_anchor_if_released(body_ui, &ds.id);
+                if let Some(active_rect) = active_border_rect {
+                    body_ui.painter().rect_stroke(active_rect, CornerRadius::ZERO, Stroke::new(2.0, tokens.focus_ring), StrokeKind::Inside);
+                }
             })
     });
-    if !blocked {
-        fstate.state.scroll_offset_pt = scroll_out.inner.state.clamped_offset();
-        clamp_multi_scroll(fstate.state, geom);
-    }
+    out.inner_rect = scroll_out.inner.inner_rect;
+    out.new_scroll_offset = scroll_out.inner.state.clamped_offset();
     out
 }
 
@@ -473,12 +527,16 @@ fn render_single_multi_x_cell(
     fstate: &mut MultiGridFrameState<'_>,
     cell: MultiXCellDraw,
     dbuf: &mut MultiBodyDrawBuffers<'_>,
-) {
+) -> bool {
     let app = mctx.app;
     let ds = mctx.ds;
     let geom = mctx.geom;
     let tokens = mctx.tokens;
     let MultiXCellDraw { row, subcol, clipped } = cell;
+    let editing_this = fstate.aux.aux_edit.as_ref().is_some_and(|(t, _, _)| *t == AuxInlineTarget::XCell { row, subcol });
+    if editing_this {
+        return true;
+    }
     let cell_opt = ds.archetype.x_or_time_cell(row, subcol);
     dbuf.text_buf.clear();
     if let Some(c) = cell_opt {
@@ -498,7 +556,6 @@ fn render_single_multi_x_cell(
     let excluded = cell_opt.is_some_and(|c| c.excluded);
     let editable = !dbuf.blocked && !ds.frozen && !dbuf.x_seq_readonly;
     let is_selected = fstate.aux.selected_x_cell == Some((row, subcol));
-    let editing_this = fstate.aux.aux_edit.as_ref().is_some_and(|(t, _, _)| *t == AuxInlineTarget::XCell { row, subcol });
 
     let fill = if is_selected {
         tokens.active_bg
@@ -512,7 +569,7 @@ fn render_single_multi_x_cell(
         body_ui.painter().rect_stroke(clipped, 0.0, Stroke::new(1.5, tokens.accent), StrokeKind::Inside);
     }
 
-    if !editing_this && !dbuf.text_buf.is_empty() {
+    if !dbuf.text_buf.is_empty() {
         let text_col = if excluded {
             tokens.excluded_cell_text
         } else if dbuf.x_seq_readonly {
@@ -574,10 +631,12 @@ fn render_single_multi_x_cell(
         );
     }
 
+    let mut interacted = false;
     if !dbuf.blocked && resp.clicked() {
+        interacted = true;
         fstate.aux.selected_x_cell = Some((row, subcol));
         fstate.aux.active_role_menu_col = None;
-        fstate.aux.context_menu = None;
+        fstate.state.context_menu = None;
         set_grid_focus_active(body_ui, true);
         body_ui.ctx().request_repaint();
         if is_multi_click_edit(&resp) && editable {
@@ -589,15 +648,18 @@ fn render_single_multi_x_cell(
         && resp.secondary_clicked()
         && let Some(pos) = resp.interact_pointer_pos()
     {
+        interacted = true;
         fstate.aux.selected_x_cell = Some((row, subcol));
         body_ui.ctx().request_repaint();
-        fstate.aux.context_menu = Some(ContextMenuState { pos, row, cell: Some(ContextCellTarget { is_x: true, row, col: 0, subcol }) });
+        fstate.state.context_menu = Some(ContextMenuState { pos, row, cell: Some(ContextCellTarget { is_x: true, row, col: 0, subcol }) });
     }
+    interacted
 }
 
 struct MultiCellFlags<'a> {
     cell_opt: Option<&'a Cell>,
     excluded: bool,
+    elided: bool,
     mv_is_cat_or_lbl: bool,
     mv_is_calc: bool,
     linked: Option<&'a LinkedDataRegion>,
@@ -613,10 +675,14 @@ fn render_single_multi_data_cell(
     fstate: &mut MultiGridFrameState<'_>,
     cell: MultiDataCellDraw,
     dbuf: &mut MultiBodyDrawBuffers<'_>,
-) {
+) -> bool {
     let app = mctx.app;
     let ds = mctx.ds;
     let coord = cell.coord;
+    let editing_this = fstate.state.inline_edit.as_ref().is_some_and(|e| e.target == GridInlineEditTarget::Cell(coord));
+    if editing_this {
+        return true;
+    }
     let cell_opt = ds.archetype.data_cell(CellCoord::from(coord));
     dbuf.text_buf.clear();
     if let Some(c) = cell_opt {
@@ -626,21 +692,23 @@ fn render_single_multi_data_cell(
         if dbuf.is_mv { if let TableArchetype::MultipleVariables(mv) = &ds.archetype { mv.variables.get(coord.col) } else { None } } else { None };
     let mv_is_calc = mv_var.is_some_and(|v| matches!(v.source, VariableSource::Calculated { .. }));
     let mv_is_cat_or_lbl = mv_var.is_some_and(|v| matches!(v.role, VariableRole::Categorical | VariableRole::Label));
-    let linked = linked_region_for_cell(ds, coord.row, coord.col);
-    let (is_active, is_selected) = if fstate.aux.selected_x_cell.is_some() { (false, false) } else { is_coord_selected(app, coord) };
-    let flags = MultiCellFlags {
+    let linked = if dbuf.has_links { linked_region_for_cell(ds, coord.row, coord.col) } else { None };
+    let is_active = fstate.aux.selected_x_cell.is_none() && dbuf.sel.active == Some(coord);
+    let is_selected = is_active || (fstate.aux.selected_x_cell.is_none() && dbuf.sel.contains(coord, cell.flat_data_col));
+    let mut flags = MultiCellFlags {
         cell_opt,
         excluded: cell_opt.is_some_and(|c| c.excluded),
+        elided: false,
         mv_is_cat_or_lbl,
         mv_is_calc,
         linked,
-        editable: !dbuf.blocked && !ds.frozen && !mv_is_calc && linked.is_none(),
+        editable: !dbuf.blocked && !ds.frozen && !mv_is_calc,
         is_active,
         is_selected,
         contingency_invalid: dbuf.is_cont && is_invalid_contingency_cell(cell_opt),
     };
 
-    paint_single_multi_data_cell(body_ui, mctx, fstate.state, cell, dbuf, &flags);
+    flags.elided = paint_single_multi_data_cell(body_ui, mctx, cell, dbuf, &flags);
 
     dbuf.id_buf.clear();
     let _ = write!(dbuf.id_buf, "grid.cell.{}.{}.{}", coord.row, coord.col, coord.subcol);
@@ -655,29 +723,28 @@ fn render_single_multi_data_cell(
     } else {
         let _ = write!(dbuf.acc_buf, "R{}C{} {}", coord.row + 1, coord.col + 1, dbuf.text_buf);
     }
-    let acc_owned = dbuf.acc_buf.clone();
+    let acc_owned = if flags.elided && !dbuf.text_buf.is_empty() { dbuf.text_buf.clone() } else { dbuf.acc_buf.clone() };
     let acc_enabled = flags.editable || flags.mv_is_calc;
     resp.widget_info(move || WidgetInfo::labeled(egui::Role::Cell, acc_enabled, acc_owned.clone()));
 
-    handle_multi_data_cell_interactions(body_ui, mctx, fstate, coord, dbuf, &flags, &resp);
+    handle_multi_data_cell_interactions(body_ui, mctx, fstate, coord, dbuf, &flags, &resp)
 }
 
 fn paint_single_multi_data_cell(
     body_ui: &Ui,
     mctx: &MultiGridCtx<'_>,
-    state: &ColumnGridEguiState,
     cell: MultiDataCellDraw,
     dbuf: &MultiBodyDrawBuffers<'_>,
     flags: &MultiCellFlags<'_>,
-) {
+) -> bool {
     let ds = mctx.ds;
     let geom = mctx.geom;
     let tokens = mctx.tokens;
-    let MultiDataCellDraw { coord, raw_cell_r, clipped } = cell;
+    let MultiDataCellDraw { coord, raw_cell_r, clipped, .. } = cell;
     let fill = if flags.is_active {
         tokens.active_bg
     } else if flags.is_selected {
-        tokens.hover_bg
+        tokens.active_bg.gamma_multiply(0.65)
     } else if flags.mv_is_calc {
         tokens.role_fx.linear_multiply(0.06)
     } else if flags.contingency_invalid {
@@ -686,20 +753,22 @@ fn paint_single_multi_data_cell(
         dbuf.base_row_bg
     };
     body_ui.painter().rect_filled(clipped, 0.0, fill);
-    if flags.is_active {
-        body_ui.painter().rect_stroke(clipped, 0.0, Stroke::new(1.5, tokens.accent), StrokeKind::Inside);
+    if flags.is_selected && !flags.is_active {
+        body_ui.painter().rect_stroke(clipped, 0.0, Stroke::new(1.0, tokens.accent), StrokeKind::Inside);
     }
     if let Some(reg) = flags.linked {
         let (_, span_subs) = geom.col_span_flat(coord.col);
         let broken = is_linked_region_broken(mctx.app.document(), reg);
         let lc = if broken { tokens.link_red } else { link_border_color32(reg.spec.source.border_color(), tokens) };
+        body_ui.painter().rect_filled(clipped, 0.0, lc.gamma_multiply(0.08));
         paint_linked_perimeter_edges(body_ui, raw_cell_r, clipped, &LinkedEdgePaint { reg, coord, subs_per_col: span_subs, color: lc, broken });
     }
     if flags.excluded {
         paint_exclusion_corner_marker(body_ui, raw_cell_r, clipped, ds, coord, tokens);
     }
 
-    if state.inline_edit.as_ref().is_none_or(|e| e.target != GridInlineEditTarget::Cell(coord)) && !dbuf.text_buf.is_empty() {
+    let mut elided = false;
+    if !dbuf.text_buf.is_empty() {
         let is_numeric = matches!(flags.cell_opt.map(|c| &c.value), Some(CellValue::Number(_))) && !flags.mv_is_cat_or_lbl;
         let align = if is_numeric { Align::RIGHT } else { Align::LEFT };
         let text_col = if flags.excluded {
@@ -713,7 +782,7 @@ fn paint_single_multi_data_cell(
         } else {
             tokens.text_primary
         };
-        render_ellipsized_text(
+        let (was_elided, _) = render_ellipsized_text(
             body_ui,
             clipped.shrink2(vec2(5.0, 1.0)),
             dbuf.text_buf,
@@ -726,7 +795,22 @@ fn paint_single_multi_data_cell(
                 flags.excluded,
             ),
         );
+        elided = was_elided;
+    } else if flags.excluded {
+        let _ = render_ellipsized_text(
+            body_ui,
+            clipped,
+            "×",
+            CellTextStyle {
+                font_id: FontId::proportional(geom.font_small_pt),
+                color: tokens.excluded_cell_text,
+                align: Align::Center,
+                italic: true,
+                strike: false,
+            },
+        );
     }
+    elided
 }
 
 fn handle_multi_data_cell_interactions(
@@ -737,16 +821,19 @@ fn handle_multi_data_cell_interactions(
     dbuf: &MultiBodyDrawBuffers<'_>,
     flags: &MultiCellFlags<'_>,
     resp: &Response,
-) {
+) -> bool {
     let app = mctx.app;
     let ds = mctx.ds;
     if !dbuf.blocked && resp.hovered() {
-        if flags.excluded
-            && let Some(tip) = GridViewState::cell_exclusion_tooltip(ds, coord)
-        {
-            resp.clone().on_hover_text(tip);
+        if flags.excluded {
+            let tip = GridViewState::cell_exclusion_tooltip(ds, coord)
+                .unwrap_or_else(|| grid_tr(mctx.locale, "w5.grid_core.excluded_cell", "Excluded cell").to_owned());
+            let full_tip = if flags.elided && !dbuf.text_buf.is_empty() { format!("{}\n{tip}", dbuf.text_buf) } else { tip };
+            let _ = resp.clone().on_hover_text(full_tip);
         } else if flags.contingency_invalid {
-            resp.clone().on_hover_text("Contingency counts should be non-negative integers");
+            let _ = resp.clone().on_hover_text("Contingency counts should be non-negative integers");
+        } else if flags.elided && !dbuf.text_buf.is_empty() {
+            let _ = resp.clone().on_hover_text(dbuf.text_buf.as_str());
         }
     }
 
@@ -773,26 +860,26 @@ fn handle_multi_data_cell_interactions(
                     Some("modal dialog is active")
                 } else if flags.mv_is_calc {
                     Some("Calculated variable cells are formula-derived (read-only).")
-                } else if flags.linked.is_some() {
-                    Some("cell is inside a read-only linked region")
                 } else if ds.frozen {
                     Some("sheet is frozen")
                 } else {
                     None
                 },
                 z_layer: ZLayer::Workspace,
-                ellipsized: false,
-                full_label: None,
+                ellipsized: flags.elided,
+                full_label: flags.elided.then_some(dbuf.text_buf.as_str()),
             },
         );
     }
 
+    let mut interacted = false;
     if !dbuf.blocked && resp.clicked() {
+        interacted = true;
         if fstate.aux.selected_x_cell.take().is_some() {
             body_ui.ctx().request_repaint();
         }
         fstate.aux.active_role_menu_col = None;
-        fstate.aux.context_menu = None;
+        fstate.state.context_menu = None;
         set_grid_focus_active(body_ui, true);
         if body_ui.input(|i| i.modifiers).shift {
             fstate.intents.push_extend_grid_selection(coord);
@@ -803,7 +890,8 @@ fn handle_multi_data_cell_interactions(
             if flags.mv_is_calc {
                 fstate.intents.push_ui("ui.table.openFormulaBar", json!({ "sheet_id": ds.id.as_str(), "col": coord.col }));
             } else if let Some(reg) = flags.linked {
-                open_link_popover(fstate.state, reg, &app.locale);
+                open_link_popover(fstate.state, reg, mctx.locale);
+                body_ui.ctx().request_repaint();
             } else if !ds.frozen {
                 fstate.aux.aux_edit = None;
                 begin_inline_edit(
@@ -816,30 +904,33 @@ fn handle_multi_data_cell_interactions(
         }
     } else if !dbuf.blocked
         && fstate.aux.active_role_menu_col.is_none()
-        && fstate.aux.context_menu.is_none()
+        && fstate.state.context_menu.is_none()
         && !is_multi_click_edit(resp)
         && !resp.secondary_clicked()
         && handle_cell_pointer_drag_select(body_ui, &ds.id, coord, resp, fstate.intents)
     {
+        interacted = true;
         fstate.aux.selected_x_cell = None;
         fstate.aux.active_role_menu_col = None;
-        fstate.aux.context_menu = None;
+        fstate.state.context_menu = None;
     }
     if !dbuf.blocked
         && resp.secondary_clicked()
         && let Some(pos) = resp.interact_pointer_pos()
     {
+        interacted = true;
         fstate.aux.selected_x_cell = None;
         let already_selected = app.grid.selected_coords.contains(&coord) || app.grid.tool.active == Some(coord);
         if !already_selected {
             fstate.intents.push_select_grid_cell(coord);
         }
-        fstate.aux.context_menu = Some(ContextMenuState {
+        fstate.state.context_menu = Some(ContextMenuState {
             pos,
             row: coord.row,
             cell: Some(ContextCellTarget { is_x: false, row: coord.row, col: coord.col, subcol: coord.subcol }),
         });
     }
+    interacted
 }
 
 fn paint_multi_vertical_hairlines(body_ui: &Ui, origin_x: f32, geom: &MultiGridGeom, vis_all_flat: &Range<usize>, tokens: &Tokens) {
@@ -893,31 +984,21 @@ fn row_title_or_default(ds: &DataSheet, row: usize) -> String {
     if raw.trim().is_empty() { format!("Row {}", row + 1) } else { raw }
 }
 
-pub(super) struct GridContextMenuHost<'a> {
-    pub(super) app: &'a UiApp,
-    pub(super) ds: &'a DataSheet,
-    pub(super) tokens: &'a Tokens,
-    pub(super) blocked: bool,
-    pub(super) record_inspect_meta: bool,
-    pub(super) selected_x_cell: Option<(usize, usize)>,
-}
-
-pub(super) fn render_grid_context_menu_popup(
-    ui: &mut Ui,
-    host: &GridContextMenuHost<'_>,
-    context_menu: &mut Option<ContextMenuState>,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
-    let app = host.app;
-    let ds = host.ds;
-    let tokens = host.tokens;
-    let Some(ctx_menu) = context_menu.clone() else { return };
+fn render_row_context_menu_popup(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut MultiGridFrameState<'_>) {
+    let app = mctx.app;
+    let ds = mctx.ds;
+    let tokens = mctx.tokens;
+    let Some(ctx_menu) = fstate.state.context_menu.clone() else { return };
     let (pos, row, cell_ctx) = (ctx_menu.pos, ctx_menu.row, ctx_menu.cell);
-    if host.blocked {
-        *context_menu = None;
+    if mctx.blocked {
+        fstate.state.context_menu = None;
         return;
     }
+    let selected_x_cell = fstate.aux.selected_x_cell;
+    let record_inspect_meta = fstate.state.record_inspect_meta;
+    let context_menu = &mut fstate.state.context_menu;
+    let meta = &mut *fstate.meta;
+    let intents = &mut *fstate.intents;
 
     let linked_graph = find_linked_graph_for_data_sheet(app, &ds.id);
     let has_graph = linked_graph.is_some();
@@ -1014,7 +1095,7 @@ pub(super) fn render_grid_context_menu_popup(
                 record_meta_if_enabled(
                     list,
                     meta,
-                    host.record_inspect_meta,
+                    record_inspect_meta,
                     &r,
                     FrameInspectEntryInput {
                         widget_id: wid,
@@ -1111,7 +1192,7 @@ pub(super) fn render_grid_context_menu_popup(
                                 && tgt.is_x
                             {
                                 copy_x_cell_to_clipboard(list, app, ds, tgt.row, tgt.subcol);
-                            } else if let Some((xr, xs)) = host.selected_x_cell {
+                            } else if let Some((xr, xs)) = selected_x_cell {
                                 copy_x_cell_to_clipboard(list, app, ds, xr, xs);
                             } else {
                                 clear_x_clipboard_cache(list);
@@ -1125,7 +1206,7 @@ pub(super) fn render_grid_context_menu_popup(
                                 if let Some(clip) = read_clipboard_text_for_x_paste(list, app) {
                                     push_x_cell_text_paste_intents(app, ds, tgt.row, tgt.subcol, &clip, intents);
                                 }
-                            } else if let Some((xr, xs)) = host.selected_x_cell {
+                            } else if let Some((xr, xs)) = selected_x_cell {
                                 if let Some(clip) = read_clipboard_text_for_x_paste(list, app) {
                                     push_x_cell_text_paste_intents(app, ds, xr, xs, &clip, intents);
                                 }
@@ -1196,16 +1277,4 @@ pub(super) fn render_grid_context_menu_popup(
     if esc || outside_click {
         *context_menu = None;
     }
-}
-
-fn render_row_context_menu_popup(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut MultiGridFrameState<'_>) {
-    let host = GridContextMenuHost {
-        app: mctx.app,
-        ds: mctx.ds,
-        tokens: mctx.tokens,
-        blocked: mctx.blocked,
-        record_inspect_meta: fstate.state.record_inspect_meta,
-        selected_x_cell: fstate.aux.selected_x_cell,
-    };
-    render_grid_context_menu_popup(ui, &host, &mut fstate.aux.context_menu, fstate.meta, fstate.intents);
 }

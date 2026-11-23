@@ -14,11 +14,11 @@ use curvebook_palette::{LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle,
 use curvebook_stats::common::{quantile_sorted, quartiles_hinge, sorted_finite};
 use curvebook_text::{LocaleNumberPolicy, RichText, SpanWeight, format_axis_tick, measure_text_pt, parse_markup};
 
+use crate::markers::emit_marker;
 use crate::scales::{
-    AdditionalYTickLayout, AxisOrientation, AxisRenderOptions, ResolvedAdditionalTick, ResolvedAxis, ResolvedSegment,
-    compute_additional_ticks_for_segments, compute_segment_tick_values, ellipse_path, emit_additional_tick_gridline_segments,
-    emit_additional_x_tick_primitives, emit_additional_y_tick_primitives, format_tick_rich, resolve_exact_domain_with_warnings, scale_inverse,
-    scale_transform, tick_span_offsets,
+    AdditionalYTickLayout, AxisOrientation, DEFAULT_GRID_COLOR, ResolvedAdditionalTick, ResolvedAxis, ResolvedSegment,
+    compute_additional_ticks_for_segments, compute_segment_tick_values, emit_additional_tick_gridline_segments, emit_additional_x_tick_primitives,
+    emit_additional_y_tick_primitives, format_tick_rich, resolve_exact_domain_with_warnings, scale_inverse, scale_transform, tick_span_offsets,
 };
 use crate::scene::{
     ChartError, ChartScene, ChartWarning, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PlottedPointMeta, PointPt, PositionedText, RectPt,
@@ -463,143 +463,6 @@ pub(crate) fn is_log_like(scale: AxisScale) -> bool {
     matches!(scale, AxisScale::Log10 | AxisScale::Log2 | AxisScale::Ln)
 }
 
-/// Emit any of the 11 `MarkerShape`s and 6 `MarkerFillMode`s at `center`.
-pub(crate) fn emit_marker(primitives: &mut Vec<ScenePrimitive>, center: PointPt, style: &MarkerStyle, clip: Option<RectPt>) {
-    let r = (style.size_pt * 0.5).max(0.5);
-    let path = build_marker_path(center, r, style.shape);
-    let stroke = (style.stroke_width_pt > 0.0).then(|| StrokePaint::solid(style.stroke_color, style.stroke_width_pt));
-
-    if is_open_stroke_shape(style.shape) {
-        let line_stroke = Some(StrokePaint::solid(style.stroke_color, style.stroke_width_pt.max(1.0)));
-        primitives.push(ScenePrimitive::Path { path, fill: None, stroke: line_stroke, clip });
-        return;
-    }
-
-    match style.fill_mode {
-        MarkerFillMode::Filled => {
-            primitives.push(ScenePrimitive::Path { path, fill: Some(FillPaint::solid(style.fill_color)), stroke, clip });
-        }
-        MarkerFillMode::Open => {
-            primitives.push(ScenePrimitive::Path {
-                path,
-                fill: None,
-                stroke: stroke.or_else(|| Some(StrokePaint::solid(style.stroke_color, 1.0))),
-                clip,
-            });
-        }
-        MarkerFillMode::SemiFilledTop | MarkerFillMode::SemiFilledBottom | MarkerFillMode::SemiFilledLeft | MarkerFillMode::SemiFilledRight => {
-            let half_rect = semi_fill_rect(center, r, style.fill_mode);
-            let combined_clip = clip.map_or(half_rect, |c| intersect_rects(c, half_rect));
-            primitives.push(ScenePrimitive::Path {
-                path: path.clone(),
-                fill: Some(FillPaint::solid(style.fill_color)),
-                stroke: None,
-                clip: Some(combined_clip),
-            });
-            primitives.push(ScenePrimitive::Path {
-                path,
-                fill: None,
-                stroke: stroke.or_else(|| Some(StrokePaint::solid(style.stroke_color, 1.0))),
-                clip,
-            });
-        }
-    }
-}
-
-fn is_open_stroke_shape(shape: MarkerShape) -> bool {
-    matches!(shape, MarkerShape::Cross | MarkerShape::Plus | MarkerShape::HorizontalBar | MarkerShape::VerticalBar)
-}
-
-fn semi_fill_rect(center: PointPt, r: f64, mode: MarkerFillMode) -> RectPt {
-    let pad = r + 1.0;
-    match mode {
-        MarkerFillMode::SemiFilledTop => RectPt::new(center.x - pad, center.y - pad, 2.0 * pad, pad),
-        MarkerFillMode::SemiFilledBottom => RectPt::new(center.x - pad, center.y, 2.0 * pad, pad),
-        MarkerFillMode::SemiFilledLeft => RectPt::new(center.x - pad, center.y - pad, pad, 2.0 * pad),
-        MarkerFillMode::SemiFilledRight => RectPt::new(center.x, center.y - pad, pad, 2.0 * pad),
-        MarkerFillMode::Filled | MarkerFillMode::Open => RectPt::new(center.x - pad, center.y - pad, 2.0 * pad, 2.0 * pad),
-    }
-}
-
-pub(crate) fn intersect_rects(a: RectPt, b: RectPt) -> RectPt {
-    let x0 = a.x.max(b.x);
-    let y0 = a.y.max(b.y);
-    let x1 = a.right().min(b.right());
-    let y1 = a.bottom().min(b.bottom());
-    RectPt::new(x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0))
-}
-
-fn build_marker_path(c: PointPt, r: f64, shape: MarkerShape) -> Path2D {
-    match shape {
-        MarkerShape::Circle => ellipse_path(RectPt::new(c.x - r, c.y - r, 2.0 * r, 2.0 * r)),
-        MarkerShape::Square => Path2D::rect(RectPt::new(c.x - r, c.y - r, 2.0 * r, 2.0 * r)),
-        MarkerShape::TriangleUp => polygon_path(&[
-            PointPt::new(c.x, c.y - r),
-            PointPt::new(c.x + 0.866_025 * r, c.y + 0.5 * r),
-            PointPt::new(c.x - 0.866_025 * r, c.y + 0.5 * r),
-        ]),
-        MarkerShape::TriangleDown => polygon_path(&[
-            PointPt::new(c.x, c.y + r),
-            PointPt::new(c.x + 0.866_025 * r, c.y - 0.5 * r),
-            PointPt::new(c.x - 0.866_025 * r, c.y - 0.5 * r),
-        ]),
-        MarkerShape::Diamond => {
-            polygon_path(&[PointPt::new(c.x, c.y - r), PointPt::new(c.x + r, c.y), PointPt::new(c.x, c.y + r), PointPt::new(c.x - r, c.y)])
-        }
-        MarkerShape::Hexagon => {
-            let mut pts = Vec::with_capacity(6);
-            for i in 0..6 {
-                let ang = (i as f64) * std::f64::consts::FRAC_PI_3 - std::f64::consts::FRAC_PI_6;
-                pts.push(PointPt::new(c.x + r * ang.cos(), c.y + r * ang.sin()));
-            }
-            polygon_path(&pts)
-        }
-        MarkerShape::Star => {
-            let mut pts = Vec::with_capacity(10);
-            for i in 0..10 {
-                let ang = (i as f64) * std::f64::consts::PI / 5.0 - std::f64::consts::FRAC_PI_2;
-                let rad = if i % 2 == 0 { r } else { r * 0.42 };
-                pts.push(PointPt::new(c.x + rad * ang.cos(), c.y + rad * ang.sin()));
-            }
-            polygon_path(&pts)
-        }
-        MarkerShape::Cross => {
-            let d = r * 0.72;
-            Path2D {
-                commands: vec![
-                    PathCmd::MoveTo(PointPt::new(c.x - d, c.y - d)),
-                    PathCmd::LineTo(PointPt::new(c.x + d, c.y + d)),
-                    PathCmd::MoveTo(PointPt::new(c.x - d, c.y + d)),
-                    PathCmd::LineTo(PointPt::new(c.x + d, c.y - d)),
-                ],
-            }
-        }
-        MarkerShape::Plus => Path2D {
-            commands: vec![
-                PathCmd::MoveTo(PointPt::new(c.x - r, c.y)),
-                PathCmd::LineTo(PointPt::new(c.x + r, c.y)),
-                PathCmd::MoveTo(PointPt::new(c.x, c.y - r)),
-                PathCmd::LineTo(PointPt::new(c.x, c.y + r)),
-            ],
-        },
-        MarkerShape::HorizontalBar => Path2D::line(PointPt::new(c.x - r, c.y), PointPt::new(c.x + r, c.y)),
-        MarkerShape::VerticalBar => Path2D::line(PointPt::new(c.x, c.y - r), PointPt::new(c.x, c.y + r)),
-    }
-}
-
-pub(crate) fn polygon_path(pts: &[PointPt]) -> Path2D {
-    let Some(&first) = pts.first() else {
-        return Path2D::new();
-    };
-    let mut commands = Vec::with_capacity(pts.len() + 1);
-    commands.push(PathCmd::MoveTo(first));
-    for &p in pts.iter().skip(1) {
-        commands.push(PathCmd::LineTo(p));
-    }
-    commands.push(PathCmd::Close);
-    Path2D { commands }
-}
-
 /// Axis bundle with optional categorical X or Y tick lists for shared cartesian chrome emission.
 pub(crate) struct ChromeAxes<'a> {
     pub x: &'a SegmentedAxis,
@@ -631,7 +494,7 @@ pub(crate) fn render_cartesian_chrome_full(scene: &mut ChartScene, graph: &Graph
     let info_id = primary_info_sheet_id(doc, &graph.spec.primary_source_sheet_id);
     let primary_opt = Some(&graph.spec.primary_source_sheet_id);
     let policy = LocaleNumberPolicy::default();
-    let grid_color = AxisRenderOptions::default().grid_color;
+    let grid_color = DEFAULT_GRID_COLOR;
 
     scene.warnings.extend(x_axis.warnings.iter().cloned());
     scene.warnings.extend(y_axis.warnings.iter().cloned());

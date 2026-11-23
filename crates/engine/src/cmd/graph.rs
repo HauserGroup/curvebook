@@ -2,14 +2,13 @@
 
 use curvebook_chart::preflight_check_scene;
 use curvebook_doc::{
-    AdditionalTick, AnnotationShapeKind, AxisSegment, AxisSpec, AxisThreshold, BracketLabelMode, BracketStyle, BreakOrnament, CanvasResizeMode,
-    CartesianOrientation, CategoricalTickSource, CldOrdering, ColorChannelMapping, CompactLetterDisplaySpec, ConnectingLineStyle, DiagnosticPlotKind,
-    DocError, EquationDisplayMode, ErrorBarDirection, ErrorBarMetric, ErrorBarSpec, ErrorCode, FigureCanvasPreset, FramePreset, GraphAnnotation,
-    GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, HeatmapColumnLabelAngle, HeatmapColumnLabelMode,
-    HeatmapLabelSpec, HeatmapRowLabelMode, LineConnectionKind, MAX_SHEETS_PER_PROJECT, MultivariateGraphEncoding, MultivariatePlotMode,
-    PairwiseBracketSpec, PairwiseComparisonRecord, PairwiseDisplayMode, PartsOfWholeLayout, PointStyleOverride, ProjectDocument, RectPt,
-    RegressionOverlaySpec, ReplicateLineMode, ReplicateOverlayStyle, SeriesSpec, SizeChannelMapping, SizePt, SummaryMeasure, SurvivalDisplayMetric,
-    TickDirection, TickLabelFormat, WhiskerMethod,
+    AdditionalTick, AnnotationShapeKind, AxisSegment, AxisSpec, AxisThreshold, BracketLabelMode, BracketStyle, CanvasResizeMode,
+    CategoricalTickSource, CldOrdering, ColorChannelMapping, CompactLetterDisplaySpec, ConnectingLineStyle, DiagnosticPlotKind, DocError,
+    EquationDisplayMode, ErrorBarSpec, ErrorCode, FigureCanvasPreset, GraphAnnotation, GraphAxisScale, GraphKind, GraphSheet, GraphSpec,
+    GraphicalDataObject, GroupedArrangement, HeatmapLabelSpec, LevelOrderSpec, LineConnectionKind, MAX_SHEETS_PER_PROJECT, MultivariateGraphEncoding,
+    MultivariatePlotMode, PairwiseBracketSpec, PairwiseComparisonRecord, PairwiseDisplayMode, PartsOfWholeLayout, PointStyleOverride,
+    ProjectDocument, RectPt, RegressionOverlaySpec, ReplicateLineMode, ReplicateOverlayStyle, SeriesSpec, SizeChannelMapping, SizePt, SummaryMeasure,
+    SurvivalDisplayMetric, TickLabelFormat, WhiskerMethod,
 };
 use curvebook_math::LogitDomain;
 use curvebook_palette::{ColorRamp, ColormapId, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8};
@@ -19,14 +18,13 @@ use serde_json::{Map, Value, json};
 use super::analysis::{de_present_opt, merge_json_struct, strip_keys};
 use super::export::{compile_scene_for_sheet, de_opt_u16, de_opt_usize};
 use super::helpers::{
-    next_unique_sheet_id, next_unique_sheet_id_excluding, parse_sheet_id, require_graph_sheet, require_graph_sheet_mut, require_result_sheet,
-    sheet_id_exists, validate_point_override_in_bounds,
+    de_some, deserialize_patch, next_unique_sheet_id, next_unique_sheet_id_excluding, parse_serde_enum, parse_serde_enum_str, parse_sheet_id,
+    require_graph_sheet, require_graph_sheet_mut, require_result_sheet, sheet_id_exists, validate_point_override_in_bounds,
 };
 use super::params::{
     any_json_schema, array_schema, bool_schema, deserialize_strict, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema,
-    obj_schema, obj_schema_with_aliases, parse_params, str_schema,
+    obj_schema, parse_params, str_schema,
 };
-use super::spellings::{self, first_present};
 use super::{CommandGroup, CommandSpec, Ctx, Effects};
 use crate::{CommandOutcome, EngineError, Session};
 
@@ -409,7 +407,7 @@ pub(super) fn scale_rect_pt(rect: RectPt, sx: f64, sy: f64) -> Result<RectPt, En
 
 /// Shared schema for `graph.applyCanvasPreset` and `layout.applyCanvasPreset`.
 pub(super) fn schema_apply_canvas_preset() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Target graph or layout sheet ID")),
             (
@@ -421,7 +419,6 @@ pub(super) fn schema_apply_canvas_preset() -> Value {
             ("resize_mode", nullable_schema(non_empty_str_schema("Resize mode (`KeepTypographyPt` or `ProportionalScale`)"))),
         ],
         &["sheet_id", "preset"],
-        vec![("sheet_id", &["id"]), ("resize_mode", &["mode"])],
         false,
     )
 }
@@ -432,9 +429,7 @@ pub(super) fn schema_apply_canvas_preset() -> Value {
 
 #[derive(Debug, Deserialize)]
 struct GraphCreateParams {
-    #[serde(alias = "source_sheet_id", alias = "source_sheet")]
     data_sheet_id: String,
-    #[serde(alias = "id")]
     sheet_id: Option<String>,
     title: Option<String>,
     kind: Option<Value>,
@@ -446,7 +441,7 @@ struct GraphCreateParams {
 }
 
 fn schema_graph_create() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("data_sheet_id", non_empty_str_schema("Source data sheet ID to plot")),
             ("sheet_id", nullable_schema(non_empty_str_schema("Optional explicit graph sheet ID (prefix when creating multiple graphs)"))),
@@ -457,35 +452,31 @@ fn schema_graph_create() -> Value {
             ("y_axis_title", nullable_schema(str_schema("Optional initial Y-axis title"))),
         ],
         &["data_sheet_id"],
-        vec![("data_sheet_id", &["source_sheet_id", "source_sheet"]), ("sheet_id", &["id"])],
         false,
     )
 }
 
 #[derive(Debug, Deserialize)]
 struct GraphInitializeParams {
-    #[serde(alias = "id")]
     sheet_id: String,
     kind: Option<Value>,
     title: Option<String>,
 }
 
 fn schema_graph_initialize() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Graph sheet ID to initialize")),
             ("kind", nullable_schema(any_json_schema("Optional graph kind string or GraphKind object"))),
             ("title", nullable_schema(str_schema("Optional graph title override"))),
         ],
         &["sheet_id"],
-        vec![("sheet_id", &["id"])],
         false,
     )
 }
 
 #[derive(Debug, Deserialize)]
 struct GraphSetKindParams {
-    #[serde(alias = "id")]
     sheet_id: String,
     kind: Value,
     reset_series_style: Option<bool>,
@@ -494,7 +485,7 @@ struct GraphSetKindParams {
 }
 
 fn schema_graph_set_kind() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Graph sheet ID to update")),
             ("kind", any_json_schema("Replacement graph kind string or typed GraphKind object")),
@@ -502,14 +493,12 @@ fn schema_graph_set_kind() -> Value {
             ("option_id", nullable_schema(str_schema("Optional UI graph type catalog identifier"))),
         ],
         &["sheet_id", "kind"],
-        vec![("sheet_id", &["id"])],
         false,
     )
 }
 
 #[derive(Debug, Deserialize)]
 struct GraphSetSpecParams {
-    #[serde(alias = "id")]
     sheet_id: String,
     spec: Option<Value>,
     title: Option<String>,
@@ -521,7 +510,7 @@ struct GraphSetSpecParams {
 }
 
 fn schema_graph_set_spec() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Graph sheet ID to update")),
             ("spec", nullable_schema(json!({ "type": "object", "description": "Partial or complete GraphSpec JSON patch" }))),
@@ -535,21 +524,18 @@ fn schema_graph_set_spec() -> Value {
             ("multivariate", nullable_schema(json!({ "type": "object", "description": "5-channel multivariate encoding specification" }))),
         ],
         &["sheet_id"],
-        vec![("sheet_id", &["id"])],
         true,
     )
 }
 
 #[derive(Debug, Deserialize)]
 struct GraphSetAxesParams {
-    #[serde(alias = "id")]
     sheet_id: String,
     frame_preset: Option<Value>,
     x_axis: Option<Value>,
     y_axis: Option<Value>,
     #[serde(default, deserialize_with = "de_present_opt")]
     y2_axis: Option<Option<Value>>,
-    #[serde(alias = "which")]
     axis: Option<String>,
     #[serde(flatten)]
     axis_fields: Map<String, Value>,
@@ -559,7 +545,7 @@ fn schema_graph_set_axes() -> Value {
     let axis_obj = nullable_schema(
         json!({ "type": "object", "description": "Axis specification fields (title, segments, scale, min, max, tick_format, additional_ticks, etc.)" }),
     );
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Graph sheet ID to update")),
             ("frame_preset", nullable_schema(any_json_schema("Axis frame preset (`open_l`, `offset`, `plain_boxed`, `dual_y`, `origin_crossing`)"))),
@@ -574,7 +560,6 @@ fn schema_graph_set_axes() -> Value {
             ("y2_axis", axis_obj),
         ],
         &["sheet_id"],
-        vec![("sheet_id", &["id"]), ("axis", &["which"])],
         true,
     )
 }
@@ -590,11 +575,8 @@ struct AdditionalTickParam {
 
 #[derive(Debug, Deserialize)]
 struct GraphSetAdditionalTicksParams {
-    #[serde(alias = "id", alias = "graph_sheet_id")]
     sheet_id: String,
-    #[serde(alias = "which")]
     axis: String,
-    #[serde(alias = "additional_ticks")]
     ticks: Vec<AdditionalTickParam>,
 }
 
@@ -609,21 +591,19 @@ fn schema_graph_set_additional_ticks() -> Value {
         "required": ["value"],
         "additionalProperties": false
     });
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Graph sheet ID to update")),
             ("axis", non_empty_str_schema("Target axis (`x`, `y`, or `y2`)")),
             ("ticks", array_schema("Ordered custom ticks along the target axis", tick_schema, None, None)),
         ],
         &["sheet_id", "axis", "ticks"],
-        vec![("sheet_id", &["id", "graph_sheet_id"]), ("axis", &["which"]), ("ticks", &["additional_ticks"])],
         false,
     )
 }
 
 #[derive(Debug, Deserialize)]
 struct GraphSetSeriesParams {
-    #[serde(alias = "id")]
     sheet_id: String,
     #[serde(default, deserialize_with = "de_opt_usize")]
     series_index: Option<usize>,
@@ -631,7 +611,7 @@ struct GraphSetSeriesParams {
     data_set_index: Option<usize>,
     series: Option<Vec<Value>>,
     mode: Option<String>,
-    #[serde(default, alias = "allSeries")]
+    #[serde(default)]
     all_series: Option<bool>,
     multivariate: Option<Value>,
     #[serde(flatten)]
@@ -648,7 +628,7 @@ fn schema_graph_set_series() -> Value {
         },
         "additionalProperties": true
     });
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Graph sheet ID to update")),
             ("series_index", nullable_schema(int_schema("Zero-based series slot index", Some(0), None))),
@@ -673,17 +653,14 @@ fn schema_graph_set_series() -> Value {
             ("multivariate", nullable_schema(json!({ "type": "object", "description": "Multivariate 5-channel bubble/scatter encoding" }))),
         ],
         &["sheet_id"],
-        vec![("sheet_id", &["id"]), ("all_series", &["allSeries"])],
         true,
     )
 }
 
 #[derive(Debug, Deserialize)]
 struct GraphSetRegressionOverlayParams {
-    #[serde(alias = "id")]
     sheet_id: String,
     clear: Option<bool>,
-    #[serde(alias = "result_sheet")]
     result_sheet_id: Option<String>,
     #[serde(default, deserialize_with = "de_opt_usize")]
     series_index: Option<usize>,
@@ -698,7 +675,7 @@ struct GraphSetRegressionOverlayParams {
 }
 
 fn schema_graph_set_regression_overlay() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Graph sheet ID to update")),
             ("clear", nullable_schema(bool_schema("Clear existing regression overlay instead of attaching one"))),
@@ -712,16 +689,13 @@ fn schema_graph_set_regression_overlay() -> Value {
             ("shaded_ribbon", nullable_schema(bool_schema("Fill confidence/prediction bands as translucent ribbons"))),
         ],
         &["sheet_id"],
-        vec![("sheet_id", &["id"]), ("result_sheet_id", &["result_sheet"])],
         false,
     )
 }
 
 #[derive(Debug, Deserialize)]
 struct GraphAddComparisonBracketsParams {
-    #[serde(alias = "id")]
     sheet_id: String,
-    #[serde(alias = "result_sheet")]
     result_sheet_id: String,
     group_a: Option<Value>,
     group_b: Option<Value>,
@@ -736,7 +710,7 @@ struct GraphAddComparisonBracketsParams {
 }
 
 fn schema_graph_add_comparison_brackets() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Graph sheet ID")),
             ("result_sheet_id", non_empty_str_schema("Result sheet ID with pairwise comparison records")),
@@ -752,14 +726,12 @@ fn schema_graph_add_comparison_brackets() -> Value {
             ("bracket_step_pt", nullable_schema(num_schema("Vertical step spacing between stacked brackets in points", Some(1.0), None))),
         ],
         &["sheet_id", "result_sheet_id"],
-        vec![("sheet_id", &["id"]), ("result_sheet_id", &["result_sheet"])],
         false,
     )
 }
 
 #[derive(Debug, Deserialize)]
 struct GraphAddAnnotationParams {
-    #[serde(alias = "id")]
     sheet_id: String,
     annotation: Option<Value>,
     #[serde(flatten)]
@@ -767,7 +739,7 @@ struct GraphAddAnnotationParams {
 }
 
 fn schema_graph_add_annotation() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Graph sheet ID")),
             ("annotation", nullable_schema(json!({ "type": "object", "description": "Full serialized GraphAnnotation object" }))),
@@ -798,18 +770,16 @@ fn schema_graph_add_annotation() -> Value {
             ("bordered", nullable_schema(bool_schema("Whether to draw a border around text box or model equation annotations"))),
         ],
         &["sheet_id"],
-        vec![("sheet_id", &["id"])],
         true,
     )
 }
 
 #[derive(Debug, Deserialize)]
 struct GraphApplyStyleFromParams {
-    #[serde(default, alias = "target_sheet_id", alias = "id")]
+    #[serde(default)]
     sheet_id: Option<String>,
     #[serde(default)]
     target_sheet_ids: Option<Vec<String>>,
-    #[serde(alias = "from_sheet_id", alias = "source_graph_id")]
     donor_sheet_id: String,
     #[serde(default)]
     clone_palette: Option<bool>,
@@ -820,7 +790,7 @@ struct GraphApplyStyleFromParams {
 }
 
 fn schema_graph_apply_style_from() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", nullable_schema(non_empty_str_schema("Target graph sheet ID"))),
             (
@@ -838,47 +808,37 @@ fn schema_graph_apply_style_from() -> Value {
             ("clone_error_bars_and_legend", nullable_schema(bool_schema("Copy error bar and legend settings"))),
         ],
         &["donor_sheet_id"],
-        vec![("sheet_id", &["target_sheet_id", "id"]), ("donor_sheet_id", &["from_sheet_id", "source_graph_id"])],
         false,
     )
 }
 
 #[derive(Debug, Deserialize)]
 struct ApplyCanvasPresetParams {
-    #[serde(alias = "id")]
     sheet_id: String,
     preset: String,
-    #[serde(alias = "mode")]
     resize_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct PreflightCheckParams {
-    #[serde(alias = "id")]
     sheet_id: String,
 }
 
 fn schema_graph_preflight_check() -> Value {
-    obj_schema_with_aliases(
-        vec![("sheet_id", non_empty_str_schema("Graph or layout sheet ID to audit"))],
-        &["sheet_id"],
-        vec![("sheet_id", &["id"])],
-        false,
-    )
+    obj_schema(vec![("sheet_id", non_empty_str_schema("Graph or layout sheet ID to audit"))], &["sheet_id"], false)
 }
 
 fn schema_graph_format_selected_points() -> Value {
-    let coord_schema = obj_schema_with_aliases(
+    let coord_schema = obj_schema(
         vec![
             ("series_index", int_schema("Zero-based series index", Some(0), None)),
             ("point_index", int_schema("Zero-based data point index within the series", Some(0), None)),
             ("subcol", nullable_schema(int_schema("Optional zero-based replicate subcolumn index", Some(0), None))),
         ],
         &["series_index", "point_index"],
-        vec![("subcol", &["subcolumn", "replicate"])],
         false,
     );
-    let override_item_schema = obj_schema_with_aliases(
+    let override_item_schema = obj_schema(
         vec![
             ("series_index", int_schema("Zero-based series index", Some(0), None)),
             ("point_index", int_schema("Zero-based data point index within the series", Some(0), None)),
@@ -900,11 +860,10 @@ fn schema_graph_format_selected_points() -> Value {
             ("hidden", bool_schema("True hides this point marker while leaving data intact")),
         ],
         &["series_index", "point_index"],
-        vec![("subcol", &["subcolumn", "replicate"]), ("symbol", &["shape"]), ("border_width_pt", &["stroke_width_pt"])],
         false,
     );
 
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Target graph sheet ID")),
             (
@@ -929,20 +888,16 @@ fn schema_graph_format_selected_points() -> Value {
             ("hidden", bool_schema("Shared hidden flag applied across batch `points`")),
         ],
         &["sheet_id"],
-        vec![("sheet_id", &["id", "graph_sheet_id"]), ("symbol", &["shape"]), ("border_width_pt", &["stroke_width_pt"])],
         false,
     )
 }
 
 #[derive(Debug, Deserialize)]
 struct GraphSetCompactLetterDisplayParams {
-    #[serde(alias = "id")]
     sheet_id: String,
     #[serde(default)]
     enabled: Option<bool>,
-    #[serde(alias = "result_sheet")]
     result_sheet_id: Option<String>,
-    #[serde(alias = "display_mode")]
     pairwise_display_mode: Option<String>,
     ordering: Option<String>,
     uppercase: Option<bool>,
@@ -954,7 +909,7 @@ struct GraphSetCompactLetterDisplayParams {
 }
 
 fn schema_graph_set_compact_letter_display() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Graph sheet ID")),
             ("enabled", nullable_schema(bool_schema("Enable (true) or clear (false) compact letter display annotation"))),
@@ -973,7 +928,6 @@ fn schema_graph_set_compact_letter_display() -> Value {
             ("color", nullable_schema(any_json_schema("Text color (`#RRGGBB`, `#RRGGBBAA`, color name, or `[r, g, b]` / `[r, g, b, a]`)"))),
         ],
         &["sheet_id"],
-        vec![("sheet_id", &["id"]), ("result_sheet_id", &["result_sheet"]), ("pairwise_display_mode", &["display_mode"])],
         false,
     )
 }
@@ -1244,10 +1198,10 @@ impl PointStylePatch {
 
 fn parse_optional_patch<T>(
     obj: &Map<String, Value>,
-    keys: &[&str],
+    key: &str,
     parser: fn(&Value) -> Result<T, EngineError>,
 ) -> Result<OptionalPatch<T>, EngineError> {
-    let Some((_, val)) = spellings::first_present_with_key(obj, keys) else {
+    let Some(val) = obj.get(key) else {
         return Ok(OptionalPatch::Keep);
     };
     if val.is_null() {
@@ -1274,18 +1228,18 @@ fn parse_non_negative_f64(val: &Value) -> Result<f64, EngineError> {
 
 fn parse_point_style_patch(obj: &Map<String, Value>) -> Result<PointStylePatch, EngineError> {
     Ok(PointStylePatch {
-        color: parse_optional_patch(obj, &["color"], parse_rgba8)?,
-        symbol: parse_optional_patch(obj, &["symbol", "shape"], parse_marker_shape)?,
-        size_pt: parse_optional_patch(obj, &["size_pt"], parse_positive_f64)?,
-        border_width_pt: parse_optional_patch(obj, &["border_width_pt", "stroke_width_pt"], parse_non_negative_f64)?,
-        fill_color: parse_optional_patch(obj, &["fill_color"], parse_rgba8)?,
-        fill_mode: parse_optional_patch(obj, &["fill_mode"], parse_marker_fill_mode)?,
+        color: parse_optional_patch(obj, "color", parse_rgba8)?,
+        symbol: parse_optional_patch(obj, "symbol", parse_marker_shape)?,
+        size_pt: parse_optional_patch(obj, "size_pt", parse_positive_f64)?,
+        border_width_pt: parse_optional_patch(obj, "border_width_pt", parse_non_negative_f64)?,
+        fill_color: parse_optional_patch(obj, "fill_color", parse_rgba8)?,
+        fill_mode: parse_optional_patch(obj, "fill_mode", parse_marker_fill_mode)?,
         hidden: obj.get("hidden").and_then(Value::as_bool),
     })
 }
 
 fn parse_opt_subcol(obj: &Map<String, Value>) -> Result<Option<usize>, EngineError> {
-    let Some(val) = first_present(obj, spellings::POINT_SUBCOLUMN) else {
+    let Some(val) = obj.get("subcol") else {
         return Ok(None);
     };
     if val.is_null() {
@@ -1596,7 +1550,7 @@ fn run_graph_set_spec(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, E
         new_spec.paper_fill = if pf_val.is_null() { None } else { Some(parse_rgba8(pf_val)?) };
     }
     if let Some(or_val) = patch.get("orientation").or_else(|| params.patch_fields.get("orientation")) {
-        new_spec.orientation = parse_cartesian_orientation(or_val)?;
+        new_spec.orientation = parse_serde_enum(or_val, "`orientation`")?;
     }
     if let Some(f_val) = patch.get("forest_show_pooled_diamond").or_else(|| params.patch_fields.get("forest_show_pooled_diamond")) {
         new_spec.forest_show_pooled_diamond =
@@ -1644,7 +1598,7 @@ fn run_graph_set_axes(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, E
     let mut spec = require_graph_sheet(ctx.session.document(), &id)?.spec.clone();
 
     if let Some(ref fp) = params.frame_preset {
-        spec.frame_preset = parse_frame_preset(fp)?;
+        spec.frame_preset = parse_serde_enum(fp, "`frame_preset`")?;
     }
     if let Some(ref x_val) = params.x_axis {
         apply_axis_updates(&mut spec.x_axis, x_val)?;
@@ -1798,28 +1752,27 @@ fn run_graph_set_series(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
     }
 
     if let Some(ref series_list) = params.series {
-        if !params.patch_fields.is_empty() {
-            reject_unknown_keys(&params.patch_fields, &[], "graph.setSeries")?;
+        if let Some(first_key) = params.patch_fields.keys().next() {
+            return Err(EngineError::with_code(ErrorCode::BadInput, format!("unknown field `{first_key}` in graph.setSeries")));
         }
         apply_series_array_update(&mut spec, series_list, replace_mode)?;
     } else if all_series {
-        if !params.patch_fields.is_empty() {
-            reject_unknown_keys(&params.patch_fields, SERIES_TOP_LEVEL_PATCH_KEYS, "series patch")?;
-        }
+        let patch_val = Value::Object(params.patch_fields);
+        let parsed_patch = parse_series_patch(&patch_val, false)?;
         if spec.series.is_empty() {
             return Err(EngineError::with_code(ErrorCode::Conflict, format!("graph `{id}` has no series configured")));
         }
-        let patch_val = Value::Object(params.patch_fields);
         for s in &mut spec.series {
-            apply_single_series_patch(s, &patch_val, false)?;
+            apply_parsed_series_patch(s, &parsed_patch)?;
         }
     } else {
-        reject_unknown_keys(&params.patch_fields, SERIES_TOP_LEVEL_PATCH_KEYS, "series patch")?;
-        if params.series_index.is_some() || params.data_set_index.is_some() || has_series_patch_keys(&params.patch_fields) {
+        let has_patch = !params.patch_fields.is_empty();
+        let patch_val = Value::Object(params.patch_fields);
+        let parsed_patch = parse_series_patch(&patch_val, false)?;
+        if params.series_index.is_some() || params.data_set_index.is_some() || has_patch {
             let target_idx = resolve_series_target_index(&spec, params.series_index, params.data_set_index)?;
-            let patch_val = Value::Object(params.patch_fields);
             if let Some(s) = spec.series.get_mut(target_idx) {
-                apply_single_series_patch(s, &patch_val, false)?;
+                apply_parsed_series_patch(s, &parsed_patch)?;
             }
         }
     }
@@ -2607,164 +2560,113 @@ fn default_gdo_for_kind(kind: GraphKind, color: Rgba8) -> GraphicalDataObject {
     }
 }
 
-const AXIS_UPDATE_KEYS: &[&str] = &[
-    "title",
-    "gap_width_pt",
-    "break_ornament",
-    "stroke_width_pt",
-    "tick_angle_deg",
-    "tick_format",
-    "tick_direction",
-    "show_tick_labels",
-    "segments",
-    "thresholds",
-    "additional_ticks",
-    "scale",
-    "min",
-    "max",
-    "length_share",
-    "major_tick_interval",
-    "minor_ticks_per_interval",
-];
-
-const SEGMENT_UPDATE_KEYS: &[&str] = &["scale", "min", "max", "length_share", "major_tick_interval", "minor_ticks_per_interval"];
-
-const SERIES_TOP_LEVEL_PATCH_KEYS: &[&str] = &[
-    "source_sheet_id",
-    "source_sheet",
-    "data_sheet_id",
-    "regression_overlay",
-    "legend_label",
-    "label",
-    "bind_to_right_y2",
-    "color",
-    "fill_color",
-    "marker",
-    "markers",
-    "connecting_line",
-    "line",
-    "error_bars",
-    "y_error_bars",
-    "x_error_bars",
-    "gdo",
-    "graphical_object",
-    "offset",
-    "offset_x_data",
-    "offset_x_pt",
-    "offset_y_pt",
-    "bar_width_pt",
-    "bar_width_override_pt",
-    "show_raw_data",
-    "border_width_pt",
-    "replicate_lines",
-    "display_metric",
-    "staircase",
-    "error_display",
-    "show_greenwood_ci",
-    "show_censored_ticks",
-    "ci_dashed",
-    "alpha",
-];
-
-const SERIES_ITEM_PATCH_KEYS: &[&str] = &[
-    "series_index",
-    "data_set_index",
-    "source_sheet_id",
-    "source_sheet",
-    "data_sheet_id",
-    "regression_overlay",
-    "legend_label",
-    "label",
-    "bind_to_right_y2",
-    "color",
-    "fill_color",
-    "marker",
-    "markers",
-    "connecting_line",
-    "line",
-    "error_bars",
-    "y_error_bars",
-    "x_error_bars",
-    "gdo",
-    "graphical_object",
-    "offset",
-    "offset_x_data",
-    "offset_x_pt",
-    "offset_y_pt",
-    "bar_width_pt",
-    "bar_width_override_pt",
-    "show_raw_data",
-    "border_width_pt",
-    "replicate_lines",
-    "display_metric",
-    "staircase",
-    "error_display",
-    "show_greenwood_ci",
-    "show_censored_ticks",
-    "ci_dashed",
-    "alpha",
-];
-
-fn require_object<'a>(val: &'a Value, context: &str) -> Result<&'a serde_json::Map<String, Value>, EngineError> {
-    val.as_object().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("{context} must be a JSON object")))
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SegmentPatch {
+    #[serde(default, deserialize_with = "de_some")]
+    scale: Option<Value>,
+    #[serde(default, deserialize_with = "de_present_opt")]
+    min: Option<Option<f64>>,
+    #[serde(default, deserialize_with = "de_present_opt")]
+    max: Option<Option<f64>>,
+    #[serde(default, deserialize_with = "de_some")]
+    length_share: Option<f64>,
+    #[serde(default, deserialize_with = "de_present_opt")]
+    major_tick_interval: Option<Option<f64>>,
+    #[serde(default, deserialize_with = "de_some")]
+    minor_ticks_per_interval: Option<u8>,
 }
 
-fn reject_unknown_keys(obj: &serde_json::Map<String, Value>, allowed: &[&str], context: &str) -> Result<(), EngineError> {
-    for key in obj.keys() {
-        if !allowed.contains(&key.as_str()) {
-            return Err(EngineError::with_code(ErrorCode::BadInput, format!("unknown field `{key}` in {context}")));
-        }
+impl SegmentPatch {
+    const fn any_present(&self) -> bool {
+        self.scale.is_some()
+            || self.min.is_some()
+            || self.max.is_some()
+            || self.length_share.is_some()
+            || self.major_tick_interval.is_some()
+            || self.minor_ticks_per_interval.is_some()
     }
-    Ok(())
+
+    fn apply(&self, seg: &mut AxisSegment) -> Result<(), EngineError> {
+        if let Some(ref s) = self.scale {
+            seg.scale = parse_axis_scale(s)?;
+        }
+        if let Some(v) = self.min {
+            seg.min = v;
+        }
+        if let Some(v) = self.max {
+            seg.max = v;
+        }
+        if let Some(share) = self.length_share {
+            seg.length_share = share;
+        }
+        if let Some(major) = self.major_tick_interval {
+            seg.major_tick_interval = major;
+        }
+        if let Some(minor) = self.minor_ticks_per_interval {
+            seg.minor_ticks_per_interval = minor;
+        }
+        Ok(())
+    }
 }
 
-fn parse_bool_field(val: &Value, field: &str) -> Result<bool, EngineError> {
-    val.as_bool().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("`{field}` must be a boolean")))
-}
-
-fn parse_string_field<'a>(val: &'a Value, field: &str) -> Result<&'a str, EngineError> {
-    val.as_str().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("`{field}` must be a string")))
-}
-
-fn parse_u8_field(val: &Value, field: &str) -> Result<u8, EngineError> {
-    let raw = val.as_u64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("`{field}` must be a non-negative integer")))?;
-    u8::try_from(raw).map_err(|_| EngineError::with_code(ErrorCode::BadInput, format!("`{field}` must be in 0..=255")))
-}
-
-fn parse_usize_field(val: &Value, field: &str) -> Result<usize, EngineError> {
-    let raw = val.as_u64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("`{field}` must be a non-negative integer")))?;
-    usize::try_from(raw).map_err(|_| EngineError::with_code(ErrorCode::BadInput, format!("`{field}` is out of range")))
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AxisPatch {
+    #[serde(default, deserialize_with = "de_some")]
+    title: Option<String>,
+    #[serde(default, deserialize_with = "de_some")]
+    gap_width_pt: Option<f64>,
+    #[serde(default, deserialize_with = "de_some")]
+    break_ornament: Option<Value>,
+    #[serde(default, deserialize_with = "de_some")]
+    stroke_width_pt: Option<f64>,
+    #[serde(default, deserialize_with = "de_some")]
+    tick_angle_deg: Option<f64>,
+    #[serde(default, deserialize_with = "de_some")]
+    tick_format: Option<Value>,
+    #[serde(default, deserialize_with = "de_some")]
+    tick_direction: Option<Value>,
+    #[serde(default, deserialize_with = "de_some")]
+    show_tick_labels: Option<bool>,
+    #[serde(default, deserialize_with = "de_some")]
+    segments: Option<Value>,
+    #[serde(default, deserialize_with = "de_some")]
+    thresholds: Option<Value>,
+    #[serde(default, deserialize_with = "de_some")]
+    additional_ticks: Option<Value>,
+    #[serde(flatten)]
+    segment: SegmentPatch,
 }
 
 fn apply_axis_updates(axis: &mut AxisSpec, val: &Value) -> Result<(), EngineError> {
-    let obj = require_object(val, "axis patch")?;
-    reject_unknown_keys(obj, AXIS_UPDATE_KEYS, "axis patch")?;
-    if let Some(title_val) = obj.get("title") {
-        axis.title = parse_string_field(title_val, "title")?.to_owned();
+    let patch: AxisPatch = deserialize_patch(val, "axis patch")?;
+    if let Some(title) = patch.title {
+        axis.title = title;
     }
-    if let Some(gap) = obj.get("gap_width_pt") {
-        axis.gap_width_pt = parse_finite_f64(gap, "`gap_width_pt`")?;
+    if let Some(gap) = patch.gap_width_pt {
+        axis.gap_width_pt = gap;
     }
-    if let Some(orn_val) = obj.get("break_ornament") {
-        axis.break_ornament = parse_break_ornament(orn_val)?;
+    if let Some(ref orn) = patch.break_ornament {
+        axis.break_ornament = parse_serde_enum(orn, "`break_ornament`")?;
     }
-    if let Some(sw) = obj.get("stroke_width_pt") {
-        axis.stroke_width_pt = parse_finite_f64(sw, "`stroke_width_pt`")?;
+    if let Some(sw) = patch.stroke_width_pt {
+        axis.stroke_width_pt = sw;
     }
-    if let Some(tick_angle) = obj.get("tick_angle_deg") {
-        axis.tick_angle_deg = parse_finite_f64(tick_angle, "`tick_angle_deg`")?;
+    if let Some(angle) = patch.tick_angle_deg {
+        axis.tick_angle_deg = angle;
     }
-    if let Some(tf_val) = obj.get("tick_format") {
-        axis.tick_format = parse_tick_format(tf_val)?;
+    if let Some(ref tf) = patch.tick_format {
+        axis.tick_format = parse_tick_format(tf)?;
     }
-    if let Some(td_val) = obj.get("tick_direction") {
-        axis.tick_direction = parse_tick_direction(td_val)?;
+    if let Some(ref td) = patch.tick_direction {
+        axis.tick_direction = parse_serde_enum(td, "`tick_direction`")?;
     }
-    if let Some(stl_val) = obj.get("show_tick_labels") {
-        axis.show_tick_labels = parse_bool_field(stl_val, "show_tick_labels")?;
+    if let Some(show) = patch.show_tick_labels {
+        axis.show_tick_labels = show;
     }
-    if let Some(raw_segs) = obj.get("segments") {
-        if SEGMENT_UPDATE_KEYS.iter().any(|k| obj.contains_key(*k)) {
+    if let Some(ref raw_segs) = patch.segments {
+        if patch.segment.any_present() {
             return Err(EngineError::with_code(
                 ErrorCode::BadInput,
                 "cannot combine `segments` with top-level segment fields (`scale`, `min`, `max`, `length_share`, `major_tick_interval`, `minor_ticks_per_interval`)",
@@ -2781,152 +2683,192 @@ fn apply_axis_updates(axis: &mut AxisSpec, val: &Value) -> Result<(), EngineErro
         let template = axis.segments.first().cloned().unwrap_or_default();
         let mut parsed = Vec::with_capacity(segs_val.len());
         for s in segs_val {
-            let seg_obj = require_object(s, "axis segment")?;
-            reject_unknown_keys(seg_obj, SEGMENT_UPDATE_KEYS, "axis segment")?;
+            let seg_patch: SegmentPatch = deserialize_patch(s, "axis segment")?;
             let mut seg = template.clone();
-            apply_segment_updates(&mut seg, s)?;
+            seg_patch.apply(&mut seg)?;
             parsed.push(seg);
         }
         axis.segments = parsed;
     } else if let Some(first_seg) = axis.segments.first_mut() {
-        apply_segment_updates(first_seg, val)?;
+        patch.segment.apply(first_seg)?;
     }
-    if let Some(raw_thresh) = obj.get("thresholds") {
+    if let Some(ref raw_thresh) = patch.thresholds {
         let thresh_val = raw_thresh.as_array().ok_or_else(|| {
             EngineError::with_code(ErrorCode::BadInput, "axis `thresholds` must be an array").with_details(json!({ "pointer": "/thresholds" }))
         })?;
-        let mut out = Vec::with_capacity(thresh_val.len());
-        for item in thresh_val {
-            out.push(parse_axis_threshold(item)?);
-        }
-        axis.thresholds = out;
+        axis.thresholds = thresh_val.iter().map(parse_axis_threshold).collect::<Result<Vec<_>, _>>()?;
     }
-    if let Some(add_val) = obj.get("additional_ticks") {
+    if let Some(ref add_val) = patch.additional_ticks {
         axis.additional_ticks = parse_additional_ticks(add_val)?;
     }
     axis.validate()?;
     Ok(())
 }
 
-fn apply_segment_updates(seg: &mut AxisSegment, val: &Value) -> Result<(), EngineError> {
-    let obj = require_object(val, "axis segment")?;
-    if let Some(scale_val) = obj.get("scale") {
-        seg.scale = parse_axis_scale(scale_val)?;
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SeriesOffsetPatch {
+    #[serde(default, deserialize_with = "de_some")]
+    x_data: Option<f64>,
+    #[serde(default, deserialize_with = "de_some")]
+    x_pt: Option<f64>,
+    #[serde(default, deserialize_with = "de_some")]
+    y_pt: Option<f64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SeriesPatch {
+    #[serde(default)]
+    series_index: Option<Value>,
+    #[serde(default)]
+    data_set_index: Option<usize>,
+    #[serde(default, deserialize_with = "de_some")]
+    source_sheet_id: Option<String>,
+    #[serde(default, deserialize_with = "de_present_opt")]
+    regression_overlay: Option<Option<Value>>,
+    #[serde(default, deserialize_with = "de_present_opt")]
+    legend_label: Option<Option<String>>,
+    #[serde(default, deserialize_with = "de_some")]
+    bind_to_right_y2: Option<bool>,
+    #[serde(default, deserialize_with = "de_some")]
+    gdo: Option<Value>,
+    #[serde(default, deserialize_with = "de_some")]
+    color: Option<Value>,
+    #[serde(default, deserialize_with = "de_present_opt")]
+    marker: Option<Option<Value>>,
+    #[serde(default, deserialize_with = "de_present_opt")]
+    connecting_line: Option<Option<Value>>,
+    #[serde(default, deserialize_with = "de_present_opt")]
+    y_error_bars: Option<Option<Value>>,
+    #[serde(default, deserialize_with = "de_present_opt")]
+    x_error_bars: Option<Option<Value>>,
+    #[serde(default, deserialize_with = "de_some")]
+    offset: Option<SeriesOffsetPatch>,
+    #[serde(default, deserialize_with = "de_some")]
+    offset_x_data: Option<f64>,
+    #[serde(default, deserialize_with = "de_some")]
+    offset_x_pt: Option<f64>,
+    #[serde(default, deserialize_with = "de_some")]
+    offset_y_pt: Option<f64>,
+    // Accept `bar_width_override_pt` so serialized `curvebook_doc::SeriesSpec` objects round-trip through `graph.setSeries`.
+    #[serde(default, alias = "bar_width_override_pt", deserialize_with = "de_present_opt")]
+    bar_width_pt: Option<Option<f64>>,
+    #[serde(default, deserialize_with = "de_some")]
+    show_raw_data: Option<bool>,
+    #[serde(default, deserialize_with = "de_some")]
+    border_width_pt: Option<f64>,
+    #[serde(default, deserialize_with = "de_some")]
+    replicate_lines: Option<Value>,
+    #[serde(default, deserialize_with = "de_some")]
+    display_metric: Option<Value>,
+    #[serde(default, deserialize_with = "de_some")]
+    staircase: Option<bool>,
+    #[serde(default, deserialize_with = "de_present_opt")]
+    error_display: Option<Option<Value>>,
+    #[serde(default, deserialize_with = "de_some")]
+    show_greenwood_ci: Option<bool>,
+    #[serde(default, deserialize_with = "de_some")]
+    show_censored_ticks: Option<bool>,
+    #[serde(default, deserialize_with = "de_some")]
+    ci_dashed: Option<bool>,
+    #[serde(default, deserialize_with = "de_some")]
+    alpha: Option<Value>,
+}
+
+fn parse_series_patch(val: &Value, allow_slot_keys: bool) -> Result<SeriesPatch, EngineError> {
+    let patch: SeriesPatch = deserialize_patch(val, "series patch")?;
+    if !allow_slot_keys && (patch.series_index.is_some() || patch.data_set_index.is_some()) {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "unknown slot index field in top-level series patch"));
     }
-    if let Some(min_v) = obj.get("min") {
-        seg.min = if min_v.is_null() { None } else { Some(parse_finite_f64(min_v, "`min`")?) };
-    }
-    if let Some(max_v) = obj.get("max") {
-        seg.max = if max_v.is_null() { None } else { Some(parse_finite_f64(max_v, "`max`")?) };
-    }
-    if let Some(share) = obj.get("length_share") {
-        seg.length_share = parse_finite_f64(share, "`length_share`")?;
-    }
-    if let Some(major) = obj.get("major_tick_interval") {
-        seg.major_tick_interval = if major.is_null() { None } else { Some(parse_finite_f64(major, "`major_tick_interval`")?) };
-    }
-    if let Some(minor) = obj.get("minor_ticks_per_interval") {
-        seg.minor_ticks_per_interval = parse_u8_field(minor, "minor_ticks_per_interval")?;
-    }
-    Ok(())
+    Ok(patch)
 }
 
 fn apply_single_series_patch(series: &mut SeriesSpec, val: &Value, allow_slot_keys: bool) -> Result<(), EngineError> {
-    let obj = require_object(val, "series patch")?;
-    let allowed = if allow_slot_keys { SERIES_ITEM_PATCH_KEYS } else { SERIES_TOP_LEVEL_PATCH_KEYS };
-    reject_unknown_keys(obj, allowed, "series patch")?;
+    let patch = parse_series_patch(val, allow_slot_keys)?;
+    apply_parsed_series_patch(series, &patch)
+}
 
-    if let Some(src_val) = first_present(obj, &["source_sheet_id", "source_sheet", "data_sheet_id"]) {
-        let src = parse_string_field(src_val, "source_sheet_id")?;
+fn apply_parsed_series_patch(series: &mut SeriesSpec, patch: &SeriesPatch) -> Result<(), EngineError> {
+    if let Some(ref src) = patch.source_sheet_id {
         series.source_sheet_id = parse_sheet_id(src)?;
     }
-    if let Some(ds_val) = obj.get("data_set_index")
-        && !ds_val.is_null()
-    {
-        series.data_set_index = parse_usize_field(ds_val, "data_set_index")?;
+    if let Some(ds_idx) = patch.data_set_index {
+        series.data_set_index = ds_idx;
     }
-    if let Some(overlay_val) = obj.get("regression_overlay") {
-        series.regression_overlay = if overlay_val.is_null() {
-            None
-        } else {
-            Some(
-                deserialize_strict(overlay_val, "/regression_overlay")
+    if let Some(ref overlay_opt) = patch.regression_overlay {
+        series.regression_overlay = match overlay_opt {
+            None => None,
+            Some(v) => Some(
+                deserialize_strict(v, "/regression_overlay")
                     .map_err(|err| EngineError::with_code(ErrorCode::BadInput, format!("invalid `regression_overlay`: {err}")))?,
-            )
+            ),
         };
     }
-    if let Some(label_val) = first_present(obj, &["legend_label", "label"]) {
-        series.legend_label = if label_val.is_null() { None } else { Some(parse_string_field(label_val, "legend_label")?.to_owned()) };
+    if let Some(ref label_opt) = patch.legend_label {
+        series.legend_label = label_opt.clone();
     }
-    if let Some(y2_val) = obj.get("bind_to_right_y2") {
-        series.bind_to_right_y2 = parse_bool_field(y2_val, "bind_to_right_y2")?;
+    if let Some(y2) = patch.bind_to_right_y2 {
+        series.bind_to_right_y2 = y2;
     }
-    if let Some(gdo_val) = first_present(val, spellings::SERIES_GRAPHICAL_OBJECT) {
+    if let Some(ref gdo_val) = patch.gdo {
         series.gdo = deserialize_strict(gdo_val, "/gdo").map_err(|err| {
             let msg = err.to_string();
             let detail = msg.strip_prefix("invalid command parameters: ").unwrap_or(&msg);
             EngineError::with_code(ErrorCode::BadInput, format!("invalid `gdo`: {detail}"))
         })?;
     }
-    if let Some(color_val) = first_present(val, spellings::SERIES_COLOR) {
-        let rgba = parse_rgba8(color_val)?;
-        recolor_gdo(&mut series.gdo, rgba);
+    if let Some(ref color_val) = patch.color {
+        recolor_gdo(&mut series.gdo, parse_rgba8(color_val)?);
     }
-    if let Some(m_val) = first_present(val, spellings::SERIES_MARKER) {
-        apply_marker_to_gdo(&mut series.gdo, m_val)?;
+    if let Some(ref m_opt) = patch.marker {
+        apply_marker_to_gdo(&mut series.gdo, m_opt.as_ref().unwrap_or(&Value::Null))?;
     }
-    if let Some(l_val) = first_present(val, spellings::SERIES_CONNECTING_LINE) {
-        apply_line_to_gdo(&mut series.gdo, l_val)?;
+    if let Some(ref l_opt) = patch.connecting_line {
+        apply_line_to_gdo(&mut series.gdo, l_opt.as_ref().unwrap_or(&Value::Null))?;
     }
-    if let Some(eb_val) = first_present(val, spellings::SERIES_Y_ERROR_BARS) {
-        series.y_error_bars = patch_error_bars(series.y_error_bars, eb_val)?;
+    if let Some(ref eb_opt) = patch.y_error_bars {
+        series.y_error_bars = patch_error_bars(series.y_error_bars, eb_opt.as_ref().unwrap_or(&Value::Null))?;
     }
-    if let Some(xeb_val) = obj.get("x_error_bars") {
-        series.x_error_bars = patch_error_bars(series.x_error_bars, xeb_val)?;
+    if let Some(ref xeb_opt) = patch.x_error_bars {
+        series.x_error_bars = patch_error_bars(series.x_error_bars, xeb_opt.as_ref().unwrap_or(&Value::Null))?;
     }
-    apply_extended_series_fields(series, obj)?;
-    Ok(())
+    apply_extended_series_fields(series, patch)
 }
 
-fn apply_extended_series_fields(series: &mut SeriesSpec, obj: &serde_json::Map<String, Value>) -> Result<(), EngineError> {
-    if let Some(off_val) = obj.get("offset") {
-        let off_obj = require_object(off_val, "`offset`")?;
-        reject_unknown_keys(off_obj, &["x_data", "x_pt", "y_pt"], "`offset`")?;
-        if let Some(v) = off_obj.get("x_data") {
-            series.offset.x_data = parse_finite_f64(v, "`offset.x_data`")?;
+fn apply_extended_series_fields(series: &mut SeriesSpec, patch: &SeriesPatch) -> Result<(), EngineError> {
+    if let Some(ref off) = patch.offset {
+        if let Some(v) = off.x_data {
+            series.offset.x_data = v;
         }
-        if let Some(v) = off_obj.get("x_pt") {
-            series.offset.x_pt = parse_finite_f64(v, "`offset.x_pt`")?;
+        if let Some(v) = off.x_pt {
+            series.offset.x_pt = v;
         }
-        if let Some(v) = off_obj.get("y_pt") {
-            series.offset.y_pt = parse_finite_f64(v, "`offset.y_pt`")?;
+        if let Some(v) = off.y_pt {
+            series.offset.y_pt = v;
         }
     }
-    if let Some(v) = obj.get("offset_x_data") {
-        series.offset.x_data = parse_finite_f64(v, "`offset_x_data`")?;
+    if let Some(v) = patch.offset_x_data {
+        series.offset.x_data = v;
     }
-    if let Some(v) = obj.get("offset_x_pt") {
-        series.offset.x_pt = parse_finite_f64(v, "`offset_x_pt`")?;
+    if let Some(v) = patch.offset_x_pt {
+        series.offset.x_pt = v;
     }
-    if let Some(v) = obj.get("offset_y_pt") {
-        series.offset.y_pt = parse_finite_f64(v, "`offset_y_pt`")?;
+    if let Some(v) = patch.offset_y_pt {
+        series.offset.y_pt = v;
     }
-    if let Some(bw_val) = obj.get("bar_width_pt").or_else(|| obj.get("bar_width_override_pt")) {
-        series.bar_width_override_pt = if bw_val.is_null() {
-            None
-        } else {
-            let w = parse_finite_f64(bw_val, "`bar_width_pt`")?;
-            if w <= 0.0 {
-                return Err(EngineError::with_code(ErrorCode::BadInput, "`bar_width_pt` must be > 0.0"));
-            }
-            Some(w)
-        };
+    if let Some(bw_opt) = patch.bar_width_pt {
+        if let Some(w) = bw_opt
+            && w <= 0.0
+        {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "`bar_width_pt` must be > 0.0"));
+        }
+        series.bar_width_override_pt = bw_opt;
     }
-    if let Some(raw_val) = obj.get("show_raw_data") {
-        series.show_raw_data = parse_bool_field(raw_val, "show_raw_data")?;
+    if let Some(raw) = patch.show_raw_data {
+        series.show_raw_data = raw;
     }
-    if let Some(bw_pt) = obj.get("border_width_pt") {
-        let w = parse_finite_f64(bw_pt, "`border_width_pt`")?;
+    if let Some(w) = patch.border_width_pt {
         if w < 0.0 {
             return Err(EngineError::with_code(ErrorCode::BadInput, "`border_width_pt` must be >= 0.0"));
         }
@@ -2936,27 +2878,22 @@ fn apply_extended_series_fields(series: &mut SeriesSpec, obj: &serde_json::Map<S
             *border_width_pt = w;
         }
     }
-    if let Some(rl_val) = obj.get("replicate_lines") {
-        let mode = parse_replicate_line_mode(rl_val)?;
+    if let Some(ref rl_val) = patch.replicate_lines {
+        let mode: ReplicateLineMode = parse_serde_enum(rl_val, "`replicate_lines`")?;
         if let GraphicalDataObject::ScatterAndLine { replicate_lines, .. } = &mut series.gdo {
             *replicate_lines = mode;
         }
     }
-    let parsed_dm = obj.get("display_metric").map(parse_survival_display_metric).transpose()?;
-    let parsed_stair = obj.get("staircase").map(|v| parse_bool_field(v, "staircase")).transpose()?;
-    let parsed_err = obj
-        .get("error_display")
-        .map(|v| {
-            if v.is_null() || v.as_str().is_some_and(|s| s.trim().eq_ignore_ascii_case("none")) {
-                Ok(None)
-            } else {
-                parse_error_bar_metric(v).map(Some)
-            }
+    let parsed_dm: Option<SurvivalDisplayMetric> = patch.display_metric.as_ref().map(|v| parse_serde_enum(v, "KM `display_metric`")).transpose()?;
+    let parsed_err = patch
+        .error_display
+        .as_ref()
+        .map(|opt| match opt {
+            None => Ok(None),
+            Some(v) if v.as_str().is_some_and(|s| s.trim().eq_ignore_ascii_case("none")) => Ok(None),
+            Some(v) => parse_serde_enum(v, "error bar `metric`").map(Some),
         })
         .transpose()?;
-    let parsed_ci = obj.get("show_greenwood_ci").map(|v| parse_bool_field(v, "show_greenwood_ci")).transpose()?;
-    let parsed_cens = obj.get("show_censored_ticks").map(|v| parse_bool_field(v, "show_censored_ticks")).transpose()?;
-    let parsed_dashed = obj.get("ci_dashed").map(|v| parse_bool_field(v, "ci_dashed")).transpose()?;
 
     if let GraphicalDataObject::KaplanMeierStep {
         show_censored_ticks, show_greenwood_ci, ci_dashed, display_metric, staircase, error_display, ..
@@ -2965,25 +2902,24 @@ fn apply_extended_series_fields(series: &mut SeriesSpec, obj: &serde_json::Map<S
         if let Some(dm) = parsed_dm {
             *display_metric = dm;
         }
-        if let Some(st) = parsed_stair {
+        if let Some(st) = patch.staircase {
             *staircase = st;
         }
         if let Some(ed) = parsed_err {
             *error_display = ed;
         }
-        if let Some(ci) = parsed_ci {
+        if let Some(ci) = patch.show_greenwood_ci {
             *show_greenwood_ci = ci;
         }
-        if let Some(cens) = parsed_cens {
+        if let Some(cens) = patch.show_censored_ticks {
             *show_censored_ticks = cens;
         }
-        if let Some(dashed) = parsed_dashed {
+        if let Some(dashed) = patch.ci_dashed {
             *ci_dashed = dashed;
         }
     }
-    if let Some(alpha_val) = obj.get("alpha") {
-        let a = parse_alpha_byte(alpha_val)?;
-        apply_alpha_to_gdo(&mut series.gdo, a);
+    if let Some(ref alpha_val) = patch.alpha {
+        apply_alpha_to_gdo(&mut series.gdo, parse_alpha_byte(alpha_val)?);
     }
     Ok(())
 }
@@ -3041,6 +2977,19 @@ fn apply_marker_to_gdo(gdo: &mut GraphicalDataObject, val: &Value) -> Result<(),
     Ok(())
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConnectingLinePatch {
+    #[serde(default, deserialize_with = "de_some")]
+    kind: Option<Value>,
+    #[serde(default, deserialize_with = "de_some")]
+    dash_style: Option<Value>,
+    #[serde(default, deserialize_with = "de_some")]
+    stroke_width_pt: Option<f64>,
+    #[serde(default, deserialize_with = "de_some")]
+    color: Option<Value>,
+}
+
 fn apply_line_to_gdo(gdo: &mut GraphicalDataObject, val: &Value) -> Result<(), EngineError> {
     if val.is_null() {
         if let GraphicalDataObject::ScatterAndLine { line, .. } = gdo {
@@ -3048,20 +2997,18 @@ fn apply_line_to_gdo(gdo: &mut GraphicalDataObject, val: &Value) -> Result<(), E
         }
         return Ok(());
     }
-    let obj = require_object(val, "`connecting_line`")?;
-    reject_unknown_keys(obj, &["kind", "dash_style", "dash", "stroke_width_pt", "width_pt", "color"], "`connecting_line`")?;
+    let patch: ConnectingLinePatch = deserialize_patch(val, "`connecting_line`")?;
     let mut is_none_kind = false;
-    let mut parsed_kind = None;
-    if let Some(k) = obj.get("kind") {
+    let mut parsed_kind: Option<LineConnectionKind> = None;
+    if let Some(ref k) = patch.kind {
         if k.as_str().is_some_and(|s| s.eq_ignore_ascii_case("none")) {
             is_none_kind = true;
         } else {
-            parsed_kind = Some(parse_line_connection_kind(k)?);
+            parsed_kind = Some(parse_serde_enum(k, "connecting line `kind`")?);
         }
     }
-    let parsed_dash = first_present(val, spellings::LINE_DASH_STYLE).map(parse_line_dash_style).transpose()?;
-    let parsed_width = first_present(val, spellings::LINE_STROKE_WIDTH).map(|v| parse_finite_f64(v, "`stroke_width_pt`")).transpose()?;
-    let parsed_color = obj.get("color").map(parse_rgba8).transpose()?;
+    let parsed_dash = patch.dash_style.as_ref().map(parse_line_dash_style).transpose()?;
+    let parsed_color = patch.color.as_ref().map(parse_rgba8).transpose()?;
 
     if let GraphicalDataObject::ScatterAndLine { line, .. } = gdo {
         if is_none_kind {
@@ -3080,7 +3027,7 @@ fn apply_line_to_gdo(gdo: &mut GraphicalDataObject, val: &Value) -> Result<(), E
         if let Some(d) = parsed_dash {
             style.dash_style = d;
         }
-        if let Some(w) = parsed_width {
+        if let Some(w) = patch.stroke_width_pt {
             style.stroke_width_pt = w;
         }
         if let Some(c) = parsed_color {
@@ -3093,66 +3040,98 @@ fn apply_line_to_gdo(gdo: &mut GraphicalDataObject, val: &Value) -> Result<(), E
         if let Some(c) = parsed_color {
             *line_color = c;
         }
-        if let Some(w) = parsed_width {
+        if let Some(w) = patch.stroke_width_pt {
             *stroke_width_pt = w;
         }
     }
     Ok(())
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MarkerPatch {
+    #[serde(default, deserialize_with = "de_some")]
+    shape: Option<Value>,
+    #[serde(default, deserialize_with = "de_some")]
+    fill_mode: Option<Value>,
+    #[serde(default, deserialize_with = "de_some")]
+    size_pt: Option<f64>,
+    #[serde(default, deserialize_with = "de_some")]
+    fill_color: Option<Value>,
+    #[serde(default, deserialize_with = "de_some")]
+    stroke_color: Option<Value>,
+    #[serde(default, deserialize_with = "de_some")]
+    stroke_width_pt: Option<f64>,
+}
+
 fn apply_marker_patch(marker: &mut MarkerStyle, val: &Value) -> Result<(), EngineError> {
-    let obj = require_object(val, "`marker`")?;
-    reject_unknown_keys(obj, &["shape", "fill_mode", "size_pt", "fill_color", "color", "stroke_color", "stroke_width_pt"], "`marker`")?;
-    if let Some(shape) = obj.get("shape") {
+    let patch: MarkerPatch = deserialize_patch(val, "`marker`")?;
+    if let Some(ref shape) = patch.shape {
         marker.shape = parse_marker_shape(shape)?;
     }
-    if let Some(fill_mode) = obj.get("fill_mode") {
+    if let Some(ref fill_mode) = patch.fill_mode {
         marker.fill_mode = parse_marker_fill_mode(fill_mode)?;
     }
-    if let Some(size) = obj.get("size_pt") {
-        marker.size_pt = parse_finite_f64(size, "`size_pt`")?;
+    if let Some(size) = patch.size_pt {
+        marker.size_pt = size;
     }
-    if let Some(fc) = first_present(val, spellings::MARKER_FILL_COLOR) {
+    if let Some(ref fc) = patch.fill_color {
         marker.fill_color = parse_rgba8(fc)?;
     }
-    if let Some(sc) = obj.get("stroke_color") {
+    if let Some(ref sc) = patch.stroke_color {
         marker.stroke_color = parse_rgba8(sc)?;
     }
-    if let Some(sw) = obj.get("stroke_width_pt") {
-        marker.stroke_width_pt = parse_finite_f64(sw, "`stroke_width_pt`")?;
+    if let Some(sw) = patch.stroke_width_pt {
+        marker.stroke_width_pt = sw;
     }
     Ok(())
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ErrorBarPatch {
+    #[serde(default, deserialize_with = "de_some")]
+    metric: Option<Value>,
+    #[serde(default, deserialize_with = "de_some")]
+    direction: Option<Value>,
+    #[serde(default, deserialize_with = "de_some")]
+    dash_style: Option<Value>,
+    #[serde(default, deserialize_with = "de_some")]
+    stroke_width_pt: Option<f64>,
+    #[serde(default, deserialize_with = "de_some")]
+    cap_width_pt: Option<f64>,
+    #[serde(default, deserialize_with = "de_present_opt")]
+    color: Option<Option<Value>>,
 }
 
 fn patch_error_bars(current: Option<ErrorBarSpec>, val: &Value) -> Result<Option<ErrorBarSpec>, EngineError> {
     if val.is_null() {
         return Ok(None);
     }
-    let obj = require_object(val, "`error_bars`")?;
-    reject_unknown_keys(obj, &["metric", "direction", "dash_style", "stroke_width_pt", "cap_width_pt", "color"], "`error_bars`")?;
+    let patch: ErrorBarPatch = deserialize_patch(val, "`error_bars`")?;
     let mut clear_bars = false;
     let mut eb = current.unwrap_or_default();
-    if let Some(m) = obj.get("metric") {
+    if let Some(ref m) = patch.metric {
         if m.as_str().is_some_and(|s| s.trim().eq_ignore_ascii_case("none")) {
             clear_bars = true;
         } else {
-            eb.metric = parse_error_bar_metric(m)?;
+            eb.metric = parse_serde_enum(m, "error bar `metric`")?;
         }
     }
-    if let Some(d) = obj.get("direction") {
-        eb.direction = parse_error_bar_direction(d)?;
+    if let Some(ref d) = patch.direction {
+        eb.direction = parse_serde_enum(d, "error bar `direction`")?;
     }
-    if let Some(dash) = obj.get("dash_style") {
+    if let Some(ref dash) = patch.dash_style {
         eb.dash_style = parse_line_dash_style(dash)?;
     }
-    if let Some(w) = obj.get("stroke_width_pt") {
-        eb.stroke_width_pt = parse_finite_f64(w, "`stroke_width_pt`")?;
+    if let Some(w) = patch.stroke_width_pt {
+        eb.stroke_width_pt = w;
     }
-    if let Some(cw) = obj.get("cap_width_pt") {
-        eb.cap_width_pt = parse_finite_f64(cw, "`cap_width_pt`")?;
+    if let Some(cw) = patch.cap_width_pt {
+        eb.cap_width_pt = cw;
     }
-    if let Some(c) = obj.get("color") {
-        eb.color = if c.is_null() { None } else { Some(parse_rgba8(c)?) };
+    if let Some(ref c_opt) = patch.color {
+        eb.color = c_opt.as_ref().map(parse_rgba8).transpose()?;
     }
     if clear_bars { Ok(None) } else { Ok(Some(eb)) }
 }
@@ -3194,30 +3173,34 @@ fn resolve_series_target_index(spec: &GraphSpec, series_index: Option<usize>, da
     Ok(0)
 }
 
-fn has_series_patch_keys(map: &Map<String, Value>) -> bool {
-    SERIES_TOP_LEVEL_PATCH_KEYS.iter().any(|k| map.contains_key(*k))
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MultivariateEncodingPatch {
+    #[serde(default, deserialize_with = "de_some")]
+    plot_mode: Option<MultivariatePlotMode>,
+    #[serde(default, deserialize_with = "de_some")]
+    x_column: Option<usize>,
+    #[serde(default, deserialize_with = "de_some")]
+    y_column: Option<usize>,
+    #[serde(default, deserialize_with = "de_some")]
+    color: Option<Value>,
+    #[serde(default, deserialize_with = "de_some")]
+    size: Option<Value>,
+    #[serde(default, deserialize_with = "de_present_opt")]
+    label_column: Option<Option<usize>>,
+    #[serde(default, deserialize_with = "de_present_opt")]
+    x_level_order_override: Option<Option<LevelOrderSpec>>,
+    #[serde(default, deserialize_with = "de_some")]
+    show_convex_hulls: Option<bool>,
+    #[serde(default, deserialize_with = "de_some")]
+    show_confidence_ellipses: Option<bool>,
 }
 
 fn parse_multivariate_encoding(val: &Value, current: Option<&MultivariateGraphEncoding>) -> Result<MultivariateGraphEncoding, EngineError> {
     if let Ok(full) = deserialize_strict::<MultivariateGraphEncoding>(val, "/multivariate") {
         return Ok(full);
     }
-    let obj = require_object(val, "`multivariate`")?;
-    reject_unknown_keys(
-        obj,
-        &[
-            "plot_mode",
-            "x_column",
-            "y_column",
-            "color",
-            "size",
-            "label_column",
-            "x_level_order_override",
-            "show_convex_hulls",
-            "show_confidence_ellipses",
-        ],
-        "`multivariate`",
-    )?;
+    let patch: MultivariateEncodingPatch = deserialize_patch(val, "`multivariate`")?;
     let mut base = current.cloned().unwrap_or(MultivariateGraphEncoding {
         plot_mode: MultivariatePlotMode::BubbleScatter,
         x_column: 0,
@@ -3229,34 +3212,42 @@ fn parse_multivariate_encoding(val: &Value, current: Option<&MultivariateGraphEn
         show_convex_hulls: false,
         show_confidence_ellipses: false,
     });
-    if let Some(pm) = obj.get("plot_mode") {
-        base.plot_mode = deserialize_strict(pm, "/multivariate/plot_mode")?;
+    if let Some(pm) = patch.plot_mode {
+        base.plot_mode = pm;
     }
-    if let Some(xc) = obj.get("x_column") {
-        base.x_column = parse_usize_field(xc, "multivariate.x_column")?;
+    if let Some(xc) = patch.x_column {
+        base.x_column = xc;
     }
-    if let Some(yc) = obj.get("y_column") {
-        base.y_column = parse_usize_field(yc, "multivariate.y_column")?;
+    if let Some(yc) = patch.y_column {
+        base.y_column = yc;
     }
-    if let Some(lc) = obj.get("label_column") {
-        base.label_column = if lc.is_null() { None } else { Some(parse_usize_field(lc, "multivariate.label_column")?) };
+    if let Some(lc) = patch.label_column {
+        base.label_column = lc;
     }
-    if let Some(lo) = obj.get("x_level_order_override") {
-        base.x_level_order_override = deserialize_strict(lo, "/multivariate/x_level_order_override")?;
+    if let Some(lo) = patch.x_level_order_override {
+        base.x_level_order_override = lo;
     }
-    if let Some(hull) = obj.get("show_convex_hulls") {
-        base.show_convex_hulls = parse_bool_field(hull, "multivariate.show_convex_hulls")?;
+    if let Some(hull) = patch.show_convex_hulls {
+        base.show_convex_hulls = hull;
     }
-    if let Some(ell) = obj.get("show_confidence_ellipses") {
-        base.show_confidence_ellipses = parse_bool_field(ell, "multivariate.show_confidence_ellipses")?;
+    if let Some(ell) = patch.show_confidence_ellipses {
+        base.show_confidence_ellipses = ell;
     }
-    if let Some(color_v) = obj.get("color") {
+    if let Some(ref color_v) = patch.color {
         base.color = parse_color_channel(color_v)?;
     }
-    if let Some(size_v) = obj.get("size") {
+    if let Some(ref size_v) = patch.size {
         base.size = parse_size_channel(size_v)?;
     }
     Ok(base)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ColorChannelShorthand {
+    column: usize,
+    #[serde(default)]
+    categorical: bool,
 }
 
 fn parse_color_channel(val: &Value) -> Result<ColorChannelMapping, EngineError> {
@@ -3271,18 +3262,13 @@ fn parse_color_channel(val: &Value) -> Result<ColorChannelMapping, EngineError> 
             domain_clamp: None,
         });
     }
-    if let Some(obj) = val.as_object()
-        && (obj.contains_key("column") || obj.contains_key("categorical"))
-    {
-        reject_unknown_keys(obj, &["column", "categorical"], "`multivariate.color`")?;
-        let col_val = obj.get("column").ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`multivariate.color` missing `column`"))?;
-        let col = parse_usize_field(col_val, "multivariate.color.column")?;
-        let is_cat = obj.get("categorical").map(|v| parse_bool_field(v, "multivariate.color.categorical")).transpose()?.unwrap_or(false);
-        if is_cat {
-            return Ok(ColorChannelMapping::Categorical { column: col, palette: PaletteId::OkabeIto, level_order_override: None });
+    if val.as_object().is_some_and(|o| o.contains_key("column") || o.contains_key("categorical")) {
+        let short: ColorChannelShorthand = deserialize_patch(val, "`multivariate.color`")?;
+        if short.categorical {
+            return Ok(ColorChannelMapping::Categorical { column: short.column, palette: PaletteId::OkabeIto, level_order_override: None });
         }
         return Ok(ColorChannelMapping::Continuous {
-            column: col,
+            column: short.column,
             ramp: ColorRamp::Named { id: ColormapId::Viridis, reversed: false },
             domain_clamp: None,
         });
@@ -3290,45 +3276,50 @@ fn parse_color_channel(val: &Value) -> Result<ColorChannelMapping, EngineError> 
     Ok(ColorChannelMapping::Constant(parse_rgba8(val)?))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SizeChannelVariableShorthand {
+    column: usize,
+    #[serde(default, deserialize_with = "de_some")]
+    min_radius_pt: Option<f64>,
+    #[serde(default, deserialize_with = "de_some")]
+    max_radius_pt: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SizeChannelConstShorthand {
+    radius_pt: f64,
+}
+
 fn parse_size_channel(val: &Value) -> Result<SizeChannelMapping, EngineError> {
     if let Ok(typed) = deserialize_strict::<SizeChannelMapping>(val, "/multivariate/size") {
         return Ok(typed);
     }
     if let Some(obj) = val.as_object() {
-        if let Some(col_val) = obj.get("column") {
-            reject_unknown_keys(obj, &["column", "min_radius_pt", "max_radius_pt"], "`multivariate.size`")?;
-            let col = parse_usize_field(col_val, "multivariate.size.column")?;
-            let min_r = match obj.get("min_radius_pt") {
-                None => 3.0,
-                Some(v) => parse_finite_f64(v, "`multivariate.size.min_radius_pt`")?,
-            };
-            let max_r = match obj.get("max_radius_pt") {
-                None => 14.0,
-                Some(v) => parse_finite_f64(v, "`multivariate.size.max_radius_pt`")?,
-            };
-            return Ok(SizeChannelMapping::Variable { column: col, min_radius_pt: min_r, max_radius_pt: max_r });
+        if obj.contains_key("column") {
+            let v: SizeChannelVariableShorthand = deserialize_patch(val, "`multivariate.size`")?;
+            return Ok(SizeChannelMapping::Variable {
+                column: v.column,
+                min_radius_pt: v.min_radius_pt.unwrap_or(3.0),
+                max_radius_pt: v.max_radius_pt.unwrap_or(14.0),
+            });
         }
-        reject_unknown_keys(obj, &["radius_pt"], "`multivariate.size`")?;
-        if let Some(r_val) = obj.get("radius_pt") {
-            let r = parse_finite_f64(r_val, "`multivariate.size.radius_pt`")?;
-            return Ok(SizeChannelMapping::Constant { radius_pt: r });
-        }
-        return Err(EngineError::with_code(ErrorCode::BadInput, "invalid multivariate `size` mapping"));
+        let c: SizeChannelConstShorthand = deserialize_patch(val, "`multivariate.size`")?;
+        return Ok(SizeChannelMapping::Constant { radius_pt: c.radius_pt });
     }
     if val.is_number() {
-        let r = parse_finite_f64(val, "`multivariate.size`")?;
-        return Ok(SizeChannelMapping::Constant { radius_pt: r });
+        return Ok(SizeChannelMapping::Constant { radius_pt: parse_finite_f64(val, "`multivariate.size`")? });
     }
     Err(EngineError::with_code(ErrorCode::BadInput, "invalid multivariate `size` mapping"))
 }
 
 fn parse_annotation_shorthand(doc: &ProjectDocument, params: &Value) -> Result<GraphAnnotation, EngineError> {
-    let kind = opt_str(params, &["kind", "type"]).unwrap_or("text").trim().to_ascii_lowercase();
+    let kind = params.get("kind").and_then(Value::as_str).unwrap_or("text").trim().to_ascii_lowercase();
     match kind.as_str() {
         "text" | "text_box" | "textbox" => {
-            let markdown = opt_str(params, &["text", "markdown"])
-                .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "missing `text` or `markdown`"))?
-                .to_owned();
+            let markdown =
+                params.get("text").and_then(Value::as_str).ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "missing `text`"))?.to_owned();
             let bounds_pt = parse_rect_pt(
                 params.get("bounds_pt"),
                 RectPt::new(
@@ -3338,38 +3329,45 @@ fn parse_annotation_shorthand(doc: &ProjectDocument, params: &Value) -> Result<G
                     params.get("height_pt").and_then(Value::as_f64).unwrap_or(28.0),
                 ),
             )?;
-            let bordered = first_present(params, spellings::ANNOTATION_BORDERED).and_then(Value::as_bool).unwrap_or(false);
+            let bordered = params.get("bordered").and_then(Value::as_bool).unwrap_or(false);
             Ok(GraphAnnotation::TextBox { bounds_pt, markdown, bordered })
         }
         "line" | "arrow" => {
             let start_pt = parse_pair_f64(params.get("start_pt"), (40.0, 40.0))?;
             let end_pt = parse_pair_f64(params.get("end_pt"), (140.0, 40.0))?;
             let arrowhead = params.get("arrowhead").and_then(Value::as_bool).unwrap_or(kind == "arrow");
-            let dash = first_present(params, spellings::ANNOTATION_DASH).map(parse_line_dash_style).transpose()?.unwrap_or(LineDashStyle::Solid);
+            let dash = params.get("dash").map(parse_line_dash_style).transpose()?.unwrap_or(LineDashStyle::Solid);
             let color = params.get("color").map(parse_rgba8).transpose()?.unwrap_or(Rgba8::BLACK);
             Ok(GraphAnnotation::LineOrArrow { start_pt, end_pt, arrowhead, dash, color })
         }
         "shape" | "rect" | "ellipse" => {
-            let shape_kind =
-                match opt_str(params, &["shape"]).unwrap_or(if kind == "ellipse" { "ellipse" } else { "rectangle" }).to_ascii_lowercase().as_str() {
-                    "ellipse" | "circle" => AnnotationShapeKind::Ellipse,
-                    "rounded_rectangle" | "rounded" => AnnotationShapeKind::RoundedRectangle,
-                    _ => AnnotationShapeKind::Rectangle,
-                };
-            let bounds_pt = parse_rect_pt(first_present(params, spellings::ANNOTATION_BOUNDS), RectPt::new(60.0, 60.0, 80.0, 40.0))?;
-            let stroke_color = first_present(params, spellings::ANNOTATION_STROKE_COLOR).map(parse_rgba8).transpose()?.unwrap_or(Rgba8::BLACK);
+            let shape_kind = match params
+                .get("shape")
+                .and_then(Value::as_str)
+                .unwrap_or(if kind == "ellipse" { "ellipse" } else { "rectangle" })
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "ellipse" | "circle" => AnnotationShapeKind::Ellipse,
+                "rounded_rectangle" | "rounded" => AnnotationShapeKind::RoundedRectangle,
+                _ => AnnotationShapeKind::Rectangle,
+            };
+            let bounds_pt = parse_rect_pt(params.get("bounds_pt"), RectPt::new(60.0, 60.0, 80.0, 40.0))?;
+            let stroke_color = params.get("stroke_color").map(parse_rgba8).transpose()?.unwrap_or(Rgba8::BLACK);
             let fill_color = params.get("fill_color").filter(|v| !v.is_null()).map(parse_rgba8).transpose()?;
             let stroke_width_pt = params.get("stroke_width_pt").and_then(Value::as_f64).unwrap_or(1.0);
-            let dash = first_present(params, spellings::ANNOTATION_DASH).map(parse_line_dash_style).transpose()?.unwrap_or(LineDashStyle::Solid);
+            let dash = params.get("dash").map(parse_line_dash_style).transpose()?.unwrap_or(LineDashStyle::Solid);
             Ok(GraphAnnotation::Shape { kind: shape_kind, bounds_pt, stroke_color, stroke_width_pt, dash, fill_color })
         }
         "table" | "embedded_result_table" | "result_table" => {
-            let raw_res = opt_str(params, &["result_sheet_id", "result_sheet"])
+            let raw_res = params
+                .get("result_sheet_id")
+                .and_then(Value::as_str)
                 .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "missing `result_sheet_id`"))?;
             let res_id = parse_sheet_id(raw_res)?;
             let _ = require_result_sheet(doc, &res_id)?;
             let bounds_pt = parse_rect_pt(params.get("bounds_pt"), RectPt::new(180.0, 40.0, 180.0, 90.0))?;
-            let tab_id = opt_str(params, &["tab_id"]).map(str::to_owned);
+            let tab_id = params.get("tab_id").and_then(Value::as_str).map(str::to_owned);
             Ok(GraphAnnotation::EmbeddedResultTable {
                 result_sheet_id: res_id,
                 tab_id,
@@ -3380,7 +3378,9 @@ fn parse_annotation_shorthand(doc: &ProjectDocument, params: &Value) -> Result<G
             })
         }
         "equation" | "model_equation" => {
-            let raw_res = opt_str(params, &["result_sheet_id", "result_sheet"])
+            let raw_res = params
+                .get("result_sheet_id")
+                .and_then(Value::as_str)
                 .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "missing `result_sheet_id`"))?;
             let res_id = parse_sheet_id(raw_res)?;
             let _ = require_result_sheet(doc, &res_id)?;
@@ -3392,7 +3392,7 @@ fn parse_annotation_shorthand(doc: &ProjectDocument, params: &Value) -> Result<G
                 }
                 _ => 0,
             };
-            let mode = match opt_str(params, &["mode"]).map(str::to_ascii_lowercase).as_deref() {
+            let mode = match params.get("mode").and_then(Value::as_str).map(str::to_ascii_lowercase).as_deref() {
                 None | Some("substituted") => EquationDisplayMode::Substituted,
                 Some("symbolic") => EquationDisplayMode::Symbolic,
                 Some(other) => {
@@ -3412,7 +3412,7 @@ fn parse_annotation_shorthand(doc: &ProjectDocument, params: &Value) -> Result<G
             if !font_size_pt.is_finite() || font_size_pt <= 0.0 {
                 return Err(EngineError::with_code(ErrorCode::BadInput, "`font_size_pt` must be positive and finite"));
             }
-            let bordered = first_present(params, spellings::ANNOTATION_BORDERED).and_then(Value::as_bool).unwrap_or(true);
+            let bordered = params.get("bordered").and_then(Value::as_bool).unwrap_or(true);
             Ok(GraphAnnotation::ModelEquation { result_sheet_id: res_id, data_set_index, mode, bounds_pt, font_size_pt, bordered })
         }
         other => Err(EngineError::with_code(ErrorCode::BadInput, format!("unknown annotation kind `{other}`"))),
@@ -3437,17 +3437,6 @@ fn resolve_group_index(val: &Value, comparisons: &[PairwiseComparisonRecord]) ->
     Err(EngineError::with_code(ErrorCode::BadInput, "group specifier must be integer index or group label"))
 }
 
-fn opt_str<'a>(params: &'a Value, keys: &[&str]) -> Option<&'a str> {
-    if let Some((&canonical, deprecated_list)) = keys.split_first() {
-        for &deprecated in deprecated_list {
-            if deprecated != canonical && params.get(deprecated).and_then(Value::as_str).is_some() {
-                super::params::record_deprecated_alias(deprecated, canonical);
-            }
-        }
-    }
-    keys.iter().find_map(|k| params.get(*k).and_then(Value::as_str))
-}
-
 fn parse_pair_f64(val: Option<&Value>, def: (f64, f64)) -> Result<(f64, f64), EngineError> {
     let Some(v) = val else {
         return Ok(def);
@@ -3466,41 +3455,8 @@ fn parse_pair_f64(val: Option<&Value>, def: (f64, f64)) -> Result<(f64, f64), En
 }
 
 fn parse_graph_kind(val: &Value) -> Result<GraphKind, EngineError> {
-    if let Ok(kind) = serde_json::from_value::<GraphKind>(val.clone()) {
-        return Ok(kind);
-    }
-    match val.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-        Some("xy" | "xy_scatter" | "scatter" | "xy_line" | "line" | "xy_mean_error") => Ok(GraphKind::Xy),
-        Some("column" | "column_bar" | "bar" | "column_box" | "column_violin" | "box" | "violin") => Ok(GraphKind::Column),
-        Some("grouped" | "grouped_bar" | "grouped_mean_error") => Ok(GraphKind::Grouped),
-        Some("contingency" | "contingency_stacked" | "contingency_grouped") => Ok(GraphKind::Contingency),
-        Some("survival" | "survival_kaplan_meier" | "kaplan_meier") => Ok(GraphKind::Survival),
-        Some("parts_of_whole" | "pie" | "donut") => Ok(GraphKind::PartsOfWhole),
-        Some("multiple_variables" | "multivariate" | "bubble") => Ok(GraphKind::MultipleVariables),
-        Some("heatmap") => Ok(GraphKind::Diagnostic(DiagnosticPlotKind::Heatmap)),
-        Some("volcano") => Ok(GraphKind::Diagnostic(DiagnosticPlotKind::Volcano)),
-        Some("bland_altman") => Ok(GraphKind::Diagnostic(DiagnosticPlotKind::BlandAltman)),
-        Some("roc") => Ok(GraphKind::Diagnostic(DiagnosticPlotKind::RocCurve)),
-        Some("forest") => Ok(GraphKind::Diagnostic(DiagnosticPlotKind::ForestPlot)),
-        Some("residuals" | "residual_plot") => Ok(GraphKind::Diagnostic(DiagnosticPlotKind::ResidualPlot)),
-        Some("qq" | "normal_qq") => Ok(GraphKind::Diagnostic(DiagnosticPlotKind::NormalQqPlot)),
-        Some(other) => Err(EngineError::with_code(ErrorCode::BadInput, format!("unknown graph kind `{other}`"))),
-        None => Err(EngineError::with_code(ErrorCode::BadInput, "graph `kind` must be a string or typed `GraphKind` object")),
-    }
-}
-
-fn parse_frame_preset(val: &Value) -> Result<FramePreset, EngineError> {
-    if let Ok(fp) = serde_json::from_value::<FramePreset>(val.clone()) {
-        return Ok(fp);
-    }
-    match val.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-        Some("open_l" | "bottom_left" | "classic" | "plain") => Ok(FramePreset::OpenL),
-        Some("offset" | "offset_range" | "tufte") => Ok(FramePreset::OffsetRangeTufte),
-        Some("plain_boxed" | "box" | "plain_box") => Ok(FramePreset::PlainBoxed),
-        Some("dual_y" | "dual_y_secondary_right") => Ok(FramePreset::DualYSecondaryRight),
-        Some("origin_crossing" | "origin_cross" | "cross") => Ok(FramePreset::OriginCrossing),
-        _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid `frame_preset`: {val}"))),
-    }
+    parse_serde_enum::<GraphKind>(val, "graph `kind`")
+        .or_else(|_| parse_serde_enum::<DiagnosticPlotKind>(val, "graph `kind`").map(GraphKind::Diagnostic))
 }
 
 fn parse_axis_scale(val: &Value) -> Result<GraphAxisScale, EngineError> {
@@ -3521,21 +3477,8 @@ fn parse_axis_scale(val: &Value) -> Result<GraphAxisScale, EngineError> {
 }
 
 fn parse_tick_format(val: &Value) -> Result<TickLabelFormat, EngineError> {
-    if let Ok(tf) = serde_json::from_value::<TickLabelFormat>(val.clone()) {
-        return Ok(tf);
-    }
-    match val.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-        Some("decimal") => Ok(TickLabelFormat::Decimal),
-        Some("absolute_decimal" | "absolute" | "abs_decimal") => Ok(TickLabelFormat::AbsoluteDecimal),
-        Some("power_of_ten" | "power_of_10" | "powers_of_10" | "superscript") => Ok(TickLabelFormat::PowerOfTenSuperscript),
-        Some("scientific" | "scientific_e") => Ok(TickLabelFormat::ScientificE),
-        Some("antilog") => Ok(TickLabelFormat::Antilog),
-        Some("engineering" | "si" | "engineering_si") => Ok(TickLabelFormat::EngineeringSi),
-        Some("categorical" | "row_titles") => Ok(TickLabelFormat::Categorical(CategoricalTickSource::RowTitles)),
-        Some("column_titles") => Ok(TickLabelFormat::Categorical(CategoricalTickSource::ColumnTitles)),
-        Some("row_numbers") => Ok(TickLabelFormat::Categorical(CategoricalTickSource::RowNumbers)),
-        _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid `tick_format`: {val}"))),
-    }
+    parse_serde_enum::<TickLabelFormat>(val, "`tick_format`")
+        .or_else(|_| parse_serde_enum::<CategoricalTickSource>(val, "`tick_format`").map(TickLabelFormat::Categorical))
 }
 
 fn parse_finite_f64(val: &Value, label: &str) -> Result<f64, EngineError> {
@@ -3546,108 +3489,39 @@ fn parse_finite_f64(val: &Value, label: &str) -> Result<f64, EngineError> {
     Ok(f)
 }
 
-fn parse_cartesian_orientation(val: &Value) -> Result<CartesianOrientation, EngineError> {
-    if let Ok(o) = serde_json::from_value::<CartesianOrientation>(val.clone()) {
-        return Ok(o);
-    }
-    match val.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-        Some("vertical") => Ok(CartesianOrientation::Vertical),
-        Some("horizontal") => Ok(CartesianOrientation::Horizontal),
-        _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid `orientation`: {val}"))),
-    }
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HeatmapLabelPatch {
+    #[serde(default, deserialize_with = "de_some")]
+    annotate_cells: Option<bool>,
+    #[serde(default, deserialize_with = "de_some")]
+    cell_gap_pt: Option<f64>,
+    #[serde(default, alias = "row_mode", deserialize_with = "de_some")]
+    row_labels: Option<Value>,
+    #[serde(default, alias = "column_mode", deserialize_with = "de_some")]
+    column_labels: Option<Value>,
+    #[serde(default, deserialize_with = "de_some")]
+    column_angle: Option<Value>,
 }
 
-fn parse_heatmap_label_spec(val: &Value, current: HeatmapLabelSpec) -> Result<HeatmapLabelSpec, EngineError> {
-    let Some(obj) = val.as_object() else {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "`heatmap_labels` must be an object"));
-    };
-    reject_unknown_keys(
-        obj,
-        &["annotate_cells", "cell_gap_pt", "row_labels", "row_mode", "column_labels", "column_mode", "column_angle"],
-        "`heatmap_labels`",
-    )?;
-    let mut out = current;
-    if let Some(ann_val) = obj.get("annotate_cells") {
-        out.annotate_cells =
-            ann_val.as_bool().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`heatmap_labels.annotate_cells` must be a boolean"))?;
+fn parse_heatmap_label_spec(val: &Value, mut out: HeatmapLabelSpec) -> Result<HeatmapLabelSpec, EngineError> {
+    let patch: HeatmapLabelPatch = deserialize_patch(val, "`heatmap_labels`")?;
+    if let Some(ann) = patch.annotate_cells {
+        out.annotate_cells = ann;
     }
-    if let Some(gap_val) = obj.get("cell_gap_pt") {
-        let gap = parse_finite_f64(gap_val, "heatmap_labels.cell_gap_pt")?;
+    if let Some(gap) = patch.cell_gap_pt {
         out.cell_gap_pt = gap.clamp(0.0, 12.0);
     }
-    if let Some(rv) = obj.get("row_labels").or_else(|| obj.get("row_mode")) {
-        if let Ok(m) = serde_json::from_value::<HeatmapRowLabelMode>(rv.clone()) {
-            out.row_labels = m;
-        } else {
-            out.row_labels = match rv.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-                Some("row_titles" | "titles") => HeatmapRowLabelMode::RowTitles,
-                Some("row_numbers" | "numbers") => HeatmapRowLabelMode::RowNumbers,
-                Some("none") => HeatmapRowLabelMode::None,
-                _ => return Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid heatmap `row_labels`: {rv}"))),
-            };
-        }
+    if let Some(ref rv) = patch.row_labels {
+        out.row_labels = parse_serde_enum(rv, "heatmap `row_labels`")?;
     }
-    if let Some(cv) = obj.get("column_labels").or_else(|| obj.get("column_mode")) {
-        if let Ok(m) = serde_json::from_value::<HeatmapColumnLabelMode>(cv.clone()) {
-            out.column_labels = m;
-        } else {
-            out.column_labels = match cv.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-                Some("column_titles" | "titles") => HeatmapColumnLabelMode::ColumnTitles,
-                Some("column_letters" | "letters") => HeatmapColumnLabelMode::ColumnLetters,
-                Some("none") => HeatmapColumnLabelMode::None,
-                _ => return Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid heatmap `column_labels`: {cv}"))),
-            };
-        }
+    if let Some(ref cv) = patch.column_labels {
+        out.column_labels = parse_serde_enum(cv, "heatmap `column_labels`")?;
     }
-    if let Some(av) = obj.get("column_angle") {
-        if let Ok(a) = serde_json::from_value::<HeatmapColumnLabelAngle>(av.clone()) {
-            out.column_angle = a;
-        } else {
-            out.column_angle = match av.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-                Some("horizontal_0" | "horizontal" | "0") => HeatmapColumnLabelAngle::Horizontal0,
-                Some("angled_45" | "angled" | "45") => HeatmapColumnLabelAngle::Angled45,
-                Some("vertical_90" | "vertical" | "90") => HeatmapColumnLabelAngle::Vertical90,
-                _ => return Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid heatmap `column_angle`: {av}"))),
-            };
-        }
+    if let Some(ref av) = patch.column_angle {
+        out.column_angle = parse_serde_enum(av, "heatmap `column_angle`")?;
     }
     Ok(out)
-}
-
-fn parse_tick_direction(val: &Value) -> Result<TickDirection, EngineError> {
-    if let Ok(d) = serde_json::from_value::<TickDirection>(val.clone()) {
-        return Ok(d);
-    }
-    match val.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-        Some("outside") => Ok(TickDirection::Outside),
-        Some("inside") => Ok(TickDirection::Inside),
-        Some("both") => Ok(TickDirection::Both),
-        Some("none") => Ok(TickDirection::None),
-        _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid `tick_direction`: {val}"))),
-    }
-}
-
-fn parse_replicate_line_mode(val: &Value) -> Result<ReplicateLineMode, EngineError> {
-    if let Ok(m) = serde_json::from_value::<ReplicateLineMode>(val.clone()) {
-        return Ok(m);
-    }
-    match val.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-        Some("summary_center" | "summary") => Ok(ReplicateLineMode::SummaryCenter),
-        Some("individual_replicate_trajectories" | "individual" | "spaghetti") => Ok(ReplicateLineMode::IndividualReplicateTrajectories),
-        _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid `replicate_lines`: {val}"))),
-    }
-}
-
-fn parse_survival_display_metric(val: &Value) -> Result<SurvivalDisplayMetric, EngineError> {
-    if let Ok(m) = serde_json::from_value::<SurvivalDisplayMetric>(val.clone()) {
-        return Ok(m);
-    }
-    match val.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-        Some("percent_survival" | "survival") => Ok(SurvivalDisplayMetric::PercentSurvival),
-        Some("percent_cumulative_event" | "cumulative_event" | "event") => Ok(SurvivalDisplayMetric::PercentCumulativeEvent),
-        Some("fraction_survival" | "fraction") => Ok(SurvivalDisplayMetric::FractionSurvival),
-        _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid KM `display_metric`: {val}"))),
-    }
 }
 
 fn parse_alpha_byte(val: &Value) -> Result<u8, EngineError> {
@@ -3690,65 +3564,52 @@ fn apply_alpha_to_gdo(gdo: &mut GraphicalDataObject, alpha: u8) {
     }
 }
 
-fn parse_break_ornament(val: &Value) -> Result<BreakOrnament, EngineError> {
-    if let Ok(b) = serde_json::from_value::<BreakOrnament>(val.clone()) {
-        return Ok(b);
-    }
-    match val.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-        Some("double_slash" | "double") => Ok(BreakOrnament::DoubleSlash),
-        Some("zigzag") => Ok(BreakOrnament::Zigzag),
-        Some("blank" | "blank_gap" | "none") => Ok(BreakOrnament::BlankGap),
-        _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid `break_ornament`: {val}"))),
-    }
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AxisThresholdPatch {
+    value: f64,
+    #[serde(default)]
+    shade_to: Option<f64>,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default, deserialize_with = "de_some")]
+    color: Option<Value>,
+    #[serde(default, deserialize_with = "de_some")]
+    dash_style: Option<Value>,
+    #[serde(default, deserialize_with = "de_some")]
+    stroke_width_pt: Option<f64>,
 }
 
 fn parse_axis_threshold(val: &Value) -> Result<AxisThreshold, EngineError> {
-    let obj = require_object(val, "threshold")?;
-    reject_unknown_keys(obj, &["value", "shade_to", "label", "color", "dash_style", "stroke_width_pt"], "threshold")?;
-    let raw_val = obj.get("value").ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "threshold missing numeric `value`"))?;
-    let value = parse_finite_f64(raw_val, "threshold `value`")?;
-    let shade_to = match obj.get("shade_to") {
-        None | Some(Value::Null) => None,
-        Some(v) => Some(parse_finite_f64(v, "threshold `shade_to`")?),
-    };
-    let label = match obj.get("label") {
-        None | Some(Value::Null) => None,
-        Some(v) => Some(parse_string_field(v, "label")?.to_owned()),
-    };
-    let color = match obj.get("color") {
-        None => Rgba8::rgb(120, 120, 120),
-        Some(v) => parse_rgba8(v)?,
-    };
-    let dash_style = match obj.get("dash_style") {
-        None => LineDashStyle::Dashed,
-        Some(v) => parse_line_dash_style(v)?,
-    };
-    let stroke_width_pt = match obj.get("stroke_width_pt") {
-        None => 1.0,
-        Some(v) => parse_finite_f64(v, "threshold `stroke_width_pt`")?,
-    };
-    Ok(AxisThreshold { value, shade_to, color, dash_style, stroke_width_pt, label })
+    let patch: AxisThresholdPatch = deserialize_patch(val, "threshold")?;
+    Ok(AxisThreshold {
+        value: patch.value,
+        shade_to: patch.shade_to,
+        color: patch.color.as_ref().map(parse_rgba8).transpose()?.unwrap_or_else(|| Rgba8::rgb(120, 120, 120)),
+        dash_style: patch.dash_style.as_ref().map(parse_line_dash_style).transpose()?.unwrap_or(LineDashStyle::Dashed),
+        stroke_width_pt: patch.stroke_width_pt.unwrap_or(1.0),
+        label: patch.label,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AdditionalTickPatch {
+    value: f64,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    draw_gridline: bool,
 }
 
 fn parse_additional_ticks(val: &Value) -> Result<Vec<AdditionalTick>, EngineError> {
     let arr = val.as_array().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`ticks` must be an array"))?;
-    let mut out = Vec::with_capacity(arr.len());
-    for item in arr {
-        let obj = require_object(item, "additional tick")?;
-        reject_unknown_keys(obj, &["value", "label", "draw_gridline"], "additional tick")?;
-        let raw_val = obj.get("value").ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "additional tick missing numeric `value`"))?;
-        let value = parse_finite_f64(raw_val, "additional tick `value`")?;
-        let label = match obj.get("label") {
-            None | Some(Value::Null) => None,
-            Some(v) => Some(parse_string_field(v, "label")?.to_owned()),
-        };
-        let draw_gridline = match obj.get("draw_gridline") {
-            None => false,
-            Some(v) => parse_bool_field(v, "draw_gridline")?,
-        };
-        out.push(AdditionalTick { value, label, draw_gridline });
-    }
-    Ok(out)
+    arr.iter()
+        .map(|item| {
+            let patch: AdditionalTickPatch = deserialize_patch(item, "additional tick")?;
+            Ok(AdditionalTick { value: patch.value, label: patch.label, draw_gridline: patch.draw_gridline })
+        })
+        .collect()
 }
 
 fn parse_marker_shape(val: &Value) -> Result<MarkerShape, EngineError> {
@@ -3784,19 +3645,6 @@ fn parse_marker_fill_mode(val: &Value) -> Result<MarkerFillMode, EngineError> {
     }
 }
 
-fn parse_line_connection_kind(val: &Value) -> Result<LineConnectionKind, EngineError> {
-    if let Ok(k) = serde_json::from_value::<LineConnectionKind>(val.clone()) {
-        return Ok(k);
-    }
-    match val.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-        Some("point_to_point" | "straight") => Ok(LineConnectionKind::PointToPoint),
-        Some("staircase" | "step" | "stepped") => Ok(LineConnectionKind::Staircase),
-        Some("spline" | "smooth" | "monotonic_cubic") => Ok(LineConnectionKind::MonotonicCubicSpline),
-        Some("akima") => Ok(LineConnectionKind::AkimaSpline),
-        _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid connecting line `kind`: {val}"))),
-    }
-}
-
 pub(super) fn parse_line_dash_style(val: &Value) -> Result<LineDashStyle, EngineError> {
     if let Ok(d) = serde_json::from_value::<LineDashStyle>(val.clone()) {
         return Ok(d);
@@ -3812,58 +3660,12 @@ pub(super) fn parse_line_dash_style(val: &Value) -> Result<LineDashStyle, Engine
     }
 }
 
-fn parse_error_bar_metric(val: &Value) -> Result<ErrorBarMetric, EngineError> {
-    if let Ok(m) = serde_json::from_value::<ErrorBarMetric>(val.clone()) {
-        return Ok(m);
-    }
-    match val.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-        Some("sd") => Ok(ErrorBarMetric::Sd),
-        Some("sem") => Ok(ErrorBarMetric::Sem),
-        Some("ci95" | "ci_95" | "95ci") => Ok(ErrorBarMetric::ConfidenceInterval95),
-        Some("iqr") => Ok(ErrorBarMetric::InterquartileRange),
-        Some("range") => Ok(ErrorBarMetric::Range),
-        Some("explicit") => Ok(ErrorBarMetric::ExplicitSubcolumns),
-        _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid error bar `metric`: {val}"))),
-    }
-}
-
-fn parse_error_bar_direction(val: &Value) -> Result<ErrorBarDirection, EngineError> {
-    if let Ok(d) = serde_json::from_value::<ErrorBarDirection>(val.clone()) {
-        return Ok(d);
-    }
-    match val.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-        Some("both") => Ok(ErrorBarDirection::Both),
-        Some("above" | "upper" | "upper_only") => Ok(ErrorBarDirection::UpperOnly),
-        Some("below" | "lower" | "lower_only") => Ok(ErrorBarDirection::LowerOnly),
-        _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid error bar `direction`: {val}"))),
-    }
-}
-
 fn parse_pairwise_display_mode(raw: &str) -> Result<PairwiseDisplayMode, EngineError> {
-    let norm: String = raw.trim().chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
-    match norm.as_str() {
-        "bracketsonly" | "brackets" => Ok(PairwiseDisplayMode::BracketsOnly),
-        "compactletterdisplayonly" | "cldonly" | "cld" | "lettersonly" | "letters" => Ok(PairwiseDisplayMode::CompactLetterDisplayOnly),
-        "bracketsandcompactletterdisplay" | "bracketsandcld" | "both" => Ok(PairwiseDisplayMode::BracketsAndCompactLetterDisplay),
-        _ => Err(EngineError::with_code(
-            ErrorCode::BadInput,
-            format!("invalid `pairwise_display_mode` `{raw}`; expected `brackets_only`, `compact_letter_display_only`, or `brackets_and_compact_letter_display`"),
-        )
-        .with_details(json!({ "pointer": "/pairwise_display_mode" }))),
-    }
+    parse_serde_enum_str(raw, "`pairwise_display_mode`").map_err(|err| err.with_details(json!({ "pointer": "/pairwise_display_mode" })))
 }
 
 fn parse_cld_ordering(raw: &str) -> Result<CldOrdering, EngineError> {
-    let norm: String = raw.trim().chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
-    match norm.as_str() {
-        "descendingmean" | "descending" | "desc" | "highestfirst" => Ok(CldOrdering::DescendingMean),
-        "ascendingmean" | "ascending" | "asc" | "lowestfirst" => Ok(CldOrdering::AscendingMean),
-        _ => Err(EngineError::with_code(
-            ErrorCode::BadInput,
-            format!("invalid CLD `ordering` `{raw}`; expected `descending_mean` or `ascending_mean`"),
-        )
-        .with_details(json!({ "pointer": "/ordering" }))),
-    }
+    parse_serde_enum_str(raw, "CLD `ordering`").map_err(|err| err.with_details(json!({ "pointer": "/ordering" })))
 }
 
 fn apply_cld_field_updates(cld: &mut CompactLetterDisplaySpec, params: &GraphSetCompactLetterDisplayParams) -> Result<(), EngineError> {
@@ -3975,13 +3777,7 @@ fn run_graph_set_compact_letter_display(ctx: &mut Ctx<'_>, raw: Value) -> Result
 }
 
 fn parse_bracket_style(raw: Option<&str>) -> Result<BracketStyle, EngineError> {
-    match raw.unwrap_or("square").trim().to_ascii_lowercase().as_str() {
-        "square" | "capped" | "ticks" => Ok(BracketStyle::Square),
-        "half_tick" => Ok(BracketStyle::HalfTick),
-        "flat" | "flat_line" | "plain" => Ok(BracketStyle::FlatLine),
-        "curly" | "curly_brace" => Ok(BracketStyle::CurlyBrace),
-        other => Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid bracket `style` `{other}`"))),
-    }
+    raw.map_or(Ok(BracketStyle::Square), |s| parse_serde_enum_str(s, "bracket `style`"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -4188,15 +3984,12 @@ fn parse_bracket_label_mode(val: Option<&Value>) -> Result<BracketLabelMode, Eng
     let Some(v) = val else {
         return Ok(BracketLabelMode::SummaryStars);
     };
-    if let Ok(mode) = serde_json::from_value::<BracketLabelMode>(v.clone()) {
+    if let Ok(mode) = parse_serde_enum::<BracketLabelMode>(v, "`label_mode`") {
         return Ok(mode);
     }
-    match v.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-        Some("stars" | "summary_stars" | "stars_only") => Ok(BracketLabelMode::SummaryStars),
-        Some("numeric" | "p_value" | "p_only" | "stars_and_p") => Ok(BracketLabelMode::NumericPOrQ),
-        Some(custom) => Ok(BracketLabelMode::Custom(custom.to_owned())),
-        None => Err(EngineError::with_code(ErrorCode::BadInput, "invalid `label_mode`")),
-    }
+    v.as_str()
+        .map(|s| BracketLabelMode::Custom(s.trim().to_ascii_lowercase()))
+        .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "invalid `label_mode`"))
 }
 
 #[cfg(test)]
@@ -4230,13 +4023,13 @@ mod tests {
     #[test]
     fn set_compact_letter_display_validates_and_roundtrips_undo_redo() {
         let mut session = Session::new();
-        session.execute("sheet.createData", json!({ "sheet_id": "col1", "archetype": "column", "cols": 3, "rows": 4 })).unwrap();
+        session.execute("sheet.createData", json!({ "sheet_id": "col1", "kind": "column", "cols": 3, "rows": 4 })).unwrap();
         session
             .execute(
                 "table.setCells",
                 json!({
                     "sheet_id": "col1",
-                    "cells": [
+                    "edits": [
                         { "row": 0, "col": 0, "value": 9.0 }, { "row": 1, "col": 0, "value": 10.0 }, { "row": 2, "col": 0, "value": 11.0 }, { "row": 3, "col": 0, "value": 10.0 },
                         { "row": 0, "col": 1, "value": 13.0 }, { "row": 1, "col": 1, "value": 14.0 }, { "row": 2, "col": 1, "value": 15.0 }, { "row": 3, "col": 1, "value": 14.0 },
                         { "row": 0, "col": 2, "value": 21.0 }, { "row": 1, "col": 2, "value": 22.0 }, { "row": 2, "col": 2, "value": 23.0 }, { "row": 3, "col": 2, "value": 22.0 }
@@ -4244,7 +4037,7 @@ mod tests {
                 }),
             )
             .unwrap();
-        session.execute("stats.run", json!({ "sheet_id": "res1", "source_sheet": "col1", "kind": "one_way_anova" })).unwrap();
+        session.execute("stats.run", json!({ "sheet_id": "res1", "source_sheet_id": "col1", "kind": "one_way_anova" })).unwrap();
         session.execute("graph.create", json!({ "sheet_id": "g1", "data_sheet_id": "col1", "kind": "column" })).unwrap();
 
         let bad_missing = session.execute("graph.setCompactLetterDisplay", json!({ "sheet_id": "g1", "enabled": true })).unwrap_err();

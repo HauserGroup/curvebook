@@ -1,6 +1,7 @@
 //! Single-axis (`X`, `Left Y`, `Right Y2`) tab controls, categorical tick source selectors,
 //! and the `Categorical Axis Guard` confirmation banner.
 
+use crate::egui_shell::UiIntent;
 use curvebook_doc::{CategoricalTickSource, FramePreset, GraphAxisScale, LogitDomain, TickLabelFormat};
 use egui::{CornerRadius, Stroke, Ui};
 
@@ -34,7 +35,7 @@ pub(super) fn render_axes_single_axis_tab(ui: &mut Ui, state: &mut GraphModalEgu
             next.enable_y2 = true;
             state.format_axes_frame_preset = FramePreset::DualYSecondaryRight;
             state.format_axes_frame_preset_dirty = true;
-            gctx.intents.push_update_format_axes_state(next);
+            gctx.intents.push(UiIntent::UpdateFormatAxesState(Box::new(next)));
         }
         return;
     }
@@ -87,7 +88,7 @@ pub(super) fn render_axes_single_axis_tab(ui: &mut Ui, state: &mut GraphModalEgu
                 } else {
                     let mut next = fa.clone();
                     let _ = next.set_segment_scale(0, scale);
-                    gctx.intents.push_update_format_axes_state(next);
+                    gctx.intents.push(UiIntent::UpdateFormatAxesState(Box::new(next)));
                 }
             }
         }
@@ -137,7 +138,7 @@ fn render_categorical_tick_controls(
             {
                 let mut next = fa.clone();
                 next.axis_draft.tick_format = TickLabelFormat::Categorical(src);
-                gctx.intents.push_update_format_axes_state(next);
+                gctx.intents.push(UiIntent::UpdateFormatAxesState(Box::new(next)));
             }
         }
         if record_button(
@@ -206,7 +207,7 @@ fn render_categorical_guard_banner(
                     if let Some(scale) = state.format_axes_guard_pending_scale {
                         let _ = next.set_segment_scale(0, scale);
                     }
-                    gctx.intents.push_update_format_axes_state(next);
+                    gctx.intents.push(UiIntent::UpdateFormatAxesState(Box::new(next)));
                     state.categorical_guard_confirmed = false;
                     state.categorical_guard_pending_axis = None;
                     state.format_axes_guard_pending_scale = None;

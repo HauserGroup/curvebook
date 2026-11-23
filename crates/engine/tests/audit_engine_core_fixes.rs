@@ -81,7 +81,7 @@ fn audit_71_recalculate_and_import_csv_surface_failed_result_sheets() -> TestRes
     }
     doc.add_data_sheet(DataSheet::new("d1", "Dose", TableArchetype::Xy(xy))?)?;
     let mut session = Session::from_document(doc);
-    ok_cmd(&mut session, "fit.run", json!({ "sheet_id": "fit_1", "source_sheet": "d1", "kind": "linear", "title": "Linear Fit" }))?;
+    ok_cmd(&mut session, "fit.run", json!({ "sheet_id": "fit_1", "source_sheet_id": "d1", "kind": "linear", "title": "Linear Fit" }))?;
 
     // Replacing Y values with blanks makes fit_1 fail, and table.importCsv surfaces the failure cleanly.
     let imp = session.execute("table.importCsv", json!({ "sheet_id": "d1", "archetype": "xy", "replace": true, "csv": "X,Y\n1,\n2,\n3,\n4,\n" }))?;
@@ -155,19 +155,19 @@ fn audit_74_convert_archetype_remaps_dependents_and_handles_links() -> TestResul
     ok_cmd(
         &mut session,
         "table.pasteLink",
-        json!({ "source_sheet_id": "xy", "target_sheet_id": "copy", "source_range": { "start": { "row": 0, "col": 0 }, "end": { "row": 3, "col": 0 } }, "row": 0, "col": 0 }),
+        json!({ "source_sheet_id": "xy", "target_sheet_id": "copy", "source_range": { "start": { "row": 0, "col": 0 }, "end": { "row": 3, "col": 0 } }, "start_row": 0, "start_col": 0 }),
     )?;
     ok_cmd(
         &mut session,
         "table.pasteLink",
-        json!({ "source_sheet_id": "up", "target_sheet_id": "xy", "source_range": { "start": { "row": 0, "col": 0 }, "end": { "row": 3, "col": 0 } }, "row": 0, "col": 0, "link_id": "in-up" }),
+        json!({ "source_sheet_id": "up", "target_sheet_id": "xy", "source_range": { "start": { "row": 0, "col": 0 }, "end": { "row": 3, "col": 0 } }, "start_row": 0, "start_col": 0, "link_id": "in-up" }),
     )?;
     ok_cmd(
         &mut session,
         "stats.run",
-        json!({ "sheet_id": "desc-explicit", "source_sheet": "xy", "kind": "descriptive_stats", "selected_data_sets": [0] }),
+        json!({ "sheet_id": "desc-explicit", "source_sheet_id": "xy", "kind": "descriptive_stats", "selected_data_sets": [0] }),
     )?;
-    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "desc-all", "source_sheet": "xy", "kind": "descriptive_stats" }))?;
+    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "desc-all", "source_sheet_id": "xy", "kind": "descriptive_stats" }))?;
     ok_cmd(&mut session, "graph.create", json!({ "sheet_id": "g-xy", "data_sheet_id": "xy", "kind": "xy" }))?;
 
     // Convert xy -> Column without allow_lossy (incoming link is mappable and preserved!).
@@ -214,9 +214,9 @@ fn audit_74_convert_archetype_remaps_dependents_and_handles_links() -> TestResul
     ok_cmd(
         &mut s2,
         "table.pasteLink",
-        json!({ "source_sheet_id": "up2", "target_sheet_id": "c2", "source_range": { "start": { "row": 0, "col": 0 }, "end": { "row": 2, "col": 0 } }, "row": 0, "col": 0, "link_id": "in-col0" }),
+        json!({ "source_sheet_id": "up2", "target_sheet_id": "c2", "source_range": { "start": { "row": 0, "col": 0 }, "end": { "row": 2, "col": 0 } }, "start_row": 0, "start_col": 0, "link_id": "in-col0" }),
     )?;
-    ok_cmd(&mut s2, "stats.run", json!({ "sheet_id": "d0", "source_sheet": "c2", "kind": "descriptive_stats", "selected_data_sets": [0] }))?;
+    ok_cmd(&mut s2, "stats.run", json!({ "sheet_id": "d0", "source_sheet_id": "c2", "kind": "descriptive_stats", "selected_data_sets": [0] }))?;
     let preview_unmap = ok_cmd(&mut s2, "table.convertArchetype", json!({ "sheet_id": "c2", "target_kind": "XY", "preview_only": true }))?;
     assert_eq!(preview_unmap["preview"]["lossy"], json!(true));
     let warnings = preview_unmap["preview"]["warnings"].as_array().ok_or("expected preview warnings")?;
@@ -266,7 +266,7 @@ fn audit_75_undo_open_restores_matching_file_path() -> TestResult {
     assert_eq!(missing_err.code, ErrorCode::IoError);
     assert!(session.is_dirty(), "failed project.open must preserve is_dirty()");
 
-    ok_cmd(&mut session, "project.open", json!({ "filePath": path_b.to_string_lossy() }))?;
+    ok_cmd(&mut session, "project.open", json!({ "path": path_b.to_string_lossy() }))?;
     assert!(!session.is_dirty(), "successful project.open clears is_dirty()");
     assert_eq!(session.document().title, "Project B");
     assert_eq!(session.file_path().map(|p| p.to_path_buf()), Some(path_b.clone()));
@@ -342,8 +342,8 @@ fn audit_76_duplicate_family_remaps_overlays_cld_hooks_anchors_and_power_info() 
     doc.add_result_sheet(ResultSheet::new(pow_spec)?)?;
 
     let mut session = Session::from_document(doc);
-    ok_cmd(&mut session, "fit.run", json!({ "sheet_id": "fit-1", "source_sheet": "xy-1", "kind": "linear" }))?;
-    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "desc-1", "source_sheet": "xy-1", "kind": "descriptive_stats" }))?;
+    ok_cmd(&mut session, "fit.run", json!({ "sheet_id": "fit-1", "source_sheet_id": "xy-1", "kind": "linear" }))?;
+    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "desc-1", "source_sheet_id": "xy-1", "kind": "descriptive_stats" }))?;
     ok_cmd(&mut session, "graph.create", json!({ "sheet_id": "g-1", "data_sheet_id": "xy-1", "kind": "xy" }))?;
     ok_cmd(&mut session, "graph.setRegressionOverlay", json!({ "sheet_id": "g-1", "result_sheet_id": "fit-1", "series_index": 0 }))?;
     ok_cmd(
@@ -371,7 +371,7 @@ fn audit_76_duplicate_family_remaps_overlays_cld_hooks_anchors_and_power_info() 
     ok_cmd(
         &mut session,
         "layout.addPanel",
-        json!({ "sheet_id": "lay-1", "kind": "text", "text": "Val={{info:info-1:NormAnchor}}", "bounds_pt": [10.0, 95.0, 100.0, 20.0] }),
+        json!({ "sheet_id": "lay-1", "kind": "text", "markdown": "Val={{info:info-1:NormAnchor}}", "bounds_pt": [10.0, 95.0, 100.0, 20.0] }),
     )?;
 
     let cloned = ok_cmd(&mut session, "sheet.duplicateFamily", json!({ "sheet_id": "xy-1", "new_sheet_id": "xy-2" }))?;
@@ -433,12 +433,12 @@ fn audit_95_randomization_and_row_sample_use_dedicated_info_sheets() -> TestResu
     let r1 = ok_cmd(
         &mut session,
         "table.randomizeGroups",
-        json!({ "sheet_id": "rand-1", "subject_count": 4, "groups": [{ "name": "Ctrl", "weight": 1 }, { "name": "Trt", "weight": 1 }], "seed": 111 }),
+        json!({ "sheet_id": "rand-1", "subject_count": 4, "groups": [{ "label": "Ctrl", "weight": 1 }, { "label": "Trt", "weight": 1 }], "seed": 111 }),
     )?;
     let r2 = ok_cmd(
         &mut session,
         "table.randomizeGroups",
-        json!({ "sheet_id": "rand-2", "subject_count": 6, "groups": [{ "name": "Ctrl", "weight": 1 }, { "name": "Trt", "weight": 2 }], "seed": 222 }),
+        json!({ "sheet_id": "rand-2", "subject_count": 6, "groups": [{ "label": "Ctrl", "weight": 1 }, { "label": "Trt", "weight": 2 }], "seed": 222 }),
     )?;
     let info1_id = r1["info_sheet_id"].as_str().ok_or("missing info1")?;
     let info2_id = r2["info_sheet_id"].as_str().ok_or("missing info2")?;
@@ -524,7 +524,7 @@ fn audit_96_recode_levels_remaps_glm_and_cox_reference_levels() -> TestResult {
         "stats.run",
         json!({
             "sheet_id": "glm-1",
-            "source_sheet": "mv",
+            "source_sheet_id": "mv",
             "kind": "glm",
             "family": "linear",
             "response_column": 0,
@@ -537,7 +537,7 @@ fn audit_96_recode_levels_remaps_glm_and_cox_reference_levels() -> TestResult {
         "stats.run",
         json!({
             "sheet_id": "cox-1",
-            "source_sheet": "mv",
+            "source_sheet_id": "mv",
             "kind": "cox_ph",
             "time_column": 2,
             "status_column": 3,
@@ -586,7 +586,7 @@ fn audit_97_extract_result_tab_refreshes_labels_and_grows_columns() -> TestResul
     doc.add_data_sheet(DataSheet::new("src", "Source", TableArchetype::Column(col))?)?;
     let mut session = Session::from_document(doc);
 
-    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "anova", "source_sheet": "src", "kind": "one_way_anova", "multiplicity": "tukey" }))?;
+    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "anova", "source_sheet_id": "src", "kind": "one_way_anova", "multiplicity": "tukey" }))?;
     ok_cmd(&mut session, "sheet.extractResultTab", json!({ "result_sheet_id": "anova", "tab_id": "multiple-comparisons", "sheet_id": "mc-ext" }))?;
     // Verify open column bound at extraction.
     let ext_ds = session.document().data_sheet(&SheetId::new("mc-ext")).ok_or("missing mc-ext")?;
@@ -628,7 +628,7 @@ fn audit_97_extract_result_tab_refreshes_labels_and_grows_columns() -> TestResul
     let mut doc2 = ProjectDocument::new("Tab Width")?;
     doc2.add_data_sheet(DataSheet::new("d2", "Data2", TableArchetype::Column(col2))?)?;
     let mut s2 = Session::from_document(doc2);
-    ok_cmd(&mut s2, "stats.run", json!({ "sheet_id": "desc-dyn", "source_sheet": "d2", "kind": "descriptive_stats" }))?;
+    ok_cmd(&mut s2, "stats.run", json!({ "sheet_id": "desc-dyn", "source_sheet_id": "d2", "kind": "descriptive_stats" }))?;
     ok_cmd(&mut s2, "sheet.extractResultTab", json!({ "result_sheet_id": "desc-dyn", "sheet_id": "ext-dyn", "archetype": "column" }))?;
     ok_cmd(
         &mut s2,
@@ -659,13 +659,17 @@ fn audit_98_paste_link_rejects_overlap_and_duplicate_link_ids() -> TestResult {
     doc.add_data_sheet(DataSheet::new("dst", "Dest", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 2)?))?)?;
     let mut session = Session::from_document(doc);
 
-    ok_cmd(&mut session, "table.pasteLink", json!({ "source_sheet_id": "src1", "target_sheet_id": "dst", "row": 0, "col": 0, "link_id": "link-1" }))?;
+    ok_cmd(
+        &mut session,
+        "table.pasteLink",
+        json!({ "source_sheet_id": "src1", "target_sheet_id": "dst", "start_row": 0, "start_col": 0, "link_id": "link-1" }),
+    )?;
 
     // Overlapping target fails with Conflict and leaves dst intact.
     let err_overlap = err_cmd(
         &mut session,
         "table.pasteLink",
-        json!({ "source_sheet_id": "src2", "target_sheet_id": "dst", "row": 0, "col": 0, "link_id": "link-2" }),
+        json!({ "source_sheet_id": "src2", "target_sheet_id": "dst", "start_row": 0, "start_col": 0, "link_id": "link-2" }),
     )?;
     assert_eq!(err_overlap.code, ErrorCode::Conflict);
 
@@ -673,12 +677,12 @@ fn audit_98_paste_link_rejects_overlap_and_duplicate_link_ids() -> TestResult {
     let err_dup = err_cmd(
         &mut session,
         "table.pasteLink",
-        json!({ "source_sheet_id": "src2", "target_sheet_id": "dst", "row": 0, "col": 1, "link_id": "link-1" }),
+        json!({ "source_sheet_id": "src2", "target_sheet_id": "dst", "start_row": 0, "start_col": 1, "link_id": "link-1" }),
     )?;
     assert_eq!(err_dup.code, ErrorCode::Conflict);
 
     // Non-overlapping with unique ID succeeds.
-    ok_cmd(&mut session, "table.pasteLink", json!({ "source_sheet_id": "src2", "target_sheet_id": "dst", "row": 0, "col": 1 }))?;
+    ok_cmd(&mut session, "table.pasteLink", json!({ "source_sheet_id": "src2", "target_sheet_id": "dst", "start_row": 0, "start_col": 1 }))?;
     assert_eq!(session.document().data_sheet(&SheetId::new("dst")).ok_or("missing dst")?.linked_regions.len(), 2);
 
     // InsertRows mode above a live link in the same column must also reject with Conflict.
@@ -692,9 +696,12 @@ fn audit_98_paste_link_rejects_overlap_and_duplicate_link_ids() -> TestResult {
     doc3.add_data_sheet(DataSheet::new("s2", "S2", TableArchetype::Column(c_s))?)?;
     doc3.add_data_sheet(DataSheet::new("dl", "DestLow", TableArchetype::Column(dst_low))?)?;
     let mut s3 = Session::from_document(doc3);
-    ok_cmd(&mut s3, "table.pasteLink", json!({ "source_sheet_id": "s1", "target_sheet_id": "dl", "row": 3, "col": 0 }))?;
-    let err_shift =
-        err_cmd(&mut s3, "table.pasteLink", json!({ "source_sheet_id": "s2", "target_sheet_id": "dl", "row": 0, "col": 0, "mode": "insert_rows" }))?;
+    ok_cmd(&mut s3, "table.pasteLink", json!({ "source_sheet_id": "s1", "target_sheet_id": "dl", "start_row": 3, "start_col": 0 }))?;
+    let err_shift = err_cmd(
+        &mut s3,
+        "table.pasteLink",
+        json!({ "source_sheet_id": "s2", "target_sheet_id": "dl", "start_row": 0, "start_col": 0, "mode": "insert_rows" }),
+    )?;
     assert_eq!(err_shift.code, ErrorCode::Conflict);
     Ok(())
 }
@@ -716,13 +723,13 @@ fn audit_99_standalone_power_analysis_ignores_source_info_sheet() -> TestResult 
     ok_cmd(
         &mut session,
         "stats.run",
-        json!({ "sheet_id": "pow-standalone", "source_sheet": "col-1", "kind": "power_analysis", "family": "unpaired_t", "alpha": 0.05, "target_power": 0.8, "effect_size": 0.5 }),
+        json!({ "sheet_id": "pow-standalone", "source_sheet_id": "col-1", "kind": "power_analysis", "family": "unpaired_t", "alpha": 0.05, "target_power": 0.8, "effect_size": 0.5 }),
     )?;
     // Explicitly linked to info-1 (alpha = 0.01) -> N per group = 96.
     ok_cmd(
         &mut session,
         "stats.run",
-        json!({ "sheet_id": "pow-linked", "source_sheet": "col-1", "kind": "power_analysis", "info_sheet_id": "info-1", "family": "unpaired_t", "alpha": 0.05, "target_power": 0.8, "effect_size": 0.5 }),
+        json!({ "sheet_id": "pow-linked", "source_sheet_id": "col-1", "kind": "power_analysis", "info_sheet_id": "info-1", "family": "unpaired_t", "alpha": 0.05, "target_power": 0.8, "effect_size": 0.5 }),
     )?;
     ok_cmd(&mut session, "project.recalculate", json!({}))?;
 
@@ -829,7 +836,7 @@ fn audit_74_identity_conversion_preserves_single_link_copy() -> TestResult {
     ok_cmd(
         &mut sess_id,
         "table.pasteLink",
-        json!({ "source_sheet_id": "up", "target_sheet_id": "dst", "source_range": { "start": { "row": 0, "col": 0 }, "end": { "row": 2, "col": 0 } }, "row": 0, "col": 0, "link_id": "id-link" }),
+        json!({ "source_sheet_id": "up", "target_sheet_id": "dst", "source_range": { "start": { "row": 0, "col": 0 }, "end": { "row": 2, "col": 0 } }, "start_row": 0, "start_col": 0, "link_id": "id-link" }),
     )?;
     let id_preview = ok_cmd(&mut sess_id, "table.convertArchetype", json!({ "sheet_id": "dst", "target_kind": "Column", "preview_only": true }))?;
     assert_eq!(id_preview["preview"]["lossy"], json!(false));
@@ -861,12 +868,12 @@ fn audit_74_grouped_replicates_expands_by_rows_and_detaches_transposed_link() ->
     ok_cmd(
         &mut sess_grp,
         "table.pasteLink",
-        json!({ "source_sheet_id": "grp", "target_sheet_id": "grp_copy", "source_range": { "start": { "row": 0, "col": 0 }, "end": { "row": 2, "col": 1 } }, "row": 0, "col": 0, "link_id": "grp-out" }),
+        json!({ "source_sheet_id": "grp", "target_sheet_id": "grp_copy", "source_range": { "start": { "row": 0, "col": 0 }, "end": { "row": 2, "col": 1 } }, "start_row": 0, "start_col": 0, "link_id": "grp-out" }),
     )?;
     ok_cmd(
         &mut sess_grp,
         "stats.run",
-        json!({ "sheet_id": "grp_desc", "source_sheet": "grp", "kind": "descriptive_stats", "selected_data_sets": [1] }),
+        json!({ "sheet_id": "grp_desc", "source_sheet_id": "grp", "kind": "descriptive_stats", "selected_data_sets": [1] }),
     )?;
     ok_cmd(&mut sess_grp, "table.convertArchetype", json!({ "sheet_id": "grp", "target_kind": "Column", "allow_lossy": true }))?;
     let grp_conv = sess_grp.document().data_sheet(&SheetId::new("grp")).ok_or("missing grp")?;
@@ -902,12 +909,12 @@ fn audit_74_xy_nonmatching_parametric_keeps_y_column_indices() -> TestResult {
     ok_cmd(
         &mut sess_xy,
         "table.pasteLink",
-        json!({ "source_sheet_id": "xyp", "target_sheet_id": "xyp_copy", "source_range": { "start": { "row": 0, "col": 1 }, "end": { "row": 2, "col": 1 } }, "row": 0, "col": 0, "link_id": "xyp-out" }),
+        json!({ "source_sheet_id": "xyp", "target_sheet_id": "xyp_copy", "source_range": { "start": { "row": 0, "col": 1 }, "end": { "row": 2, "col": 1 } }, "start_row": 0, "start_col": 0, "link_id": "xyp-out" }),
     )?;
     ok_cmd(
         &mut sess_xy,
         "stats.run",
-        json!({ "sheet_id": "xyp_desc", "source_sheet": "xyp", "kind": "descriptive_stats", "selected_data_sets": [1] }),
+        json!({ "sheet_id": "xyp_desc", "source_sheet_id": "xyp", "kind": "descriptive_stats", "selected_data_sets": [1] }),
     )?;
     ok_cmd(&mut sess_xy, "graph.create", json!({ "sheet_id": "g_xyp", "data_sheet_id": "xyp", "kind": "xy" }))?;
     ok_cmd(&mut sess_xy, "table.convertArchetype", json!({ "sheet_id": "xyp", "target_kind": "Column", "allow_lossy": true }))?;

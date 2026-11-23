@@ -3,21 +3,19 @@
 use std::fs;
 use std::path::Path;
 
-use curvebook_chart::{ChartScene, compile_graph, compile_layout};
 use curvebook_doc::{
-    DataSheet, GraphSheet, ProjectDocument, ResultSheet, SheetId, SubcolumnMode, TableArchetype, TableKind, XColumnMode, validate_project_cells,
-    validate_sheet_cells,
+    GraphSheet, ProjectDocument, SheetId, SubcolumnMode, TableArchetype, TableKind, XColumnMode, validate_project_cells, validate_sheet_cells,
 };
+use curvebook_engine::services::{ExportArtifactFormat, ExportArtifactRequest, ExportTarget, RasterSizingPolicy, export_document_artifact};
 use curvebook_format::registry::{ExportOptions, ExportSource, FormatKind, FormatRegistry, ImportOptions, ImportPayload};
 use curvebook_format::{
-    ArchiveKind, CsvOptions, ImportReport, MAX_ARCHIVE_FILE_BYTES, ensure_result_sheet_csv_exportable, import_prism_bytes, import_pzfx_bytes,
-    is_unpacked_project_dir, open_archive_bytes, try_export_result_tab_csv,
+    ArchiveKind, CsvOptions, ImportReport, MAX_ARCHIVE_FILE_BYTES, import_prism_bytes, import_pzfx_bytes, is_unpacked_project_dir, open_archive_bytes,
 };
-use curvebook_pdf::{PdfExportOptions, PdfVersion, render_pdf};
+use curvebook_pdf::{PdfExportOptions, PdfVersion};
 use curvebook_platform::PlatformError;
 use curvebook_platform::fs::write_atomic;
-use curvebook_render::{RenderTargetSpec, TiffCompression, encode_emf, encode_png, encode_tiff, render_scene};
-use curvebook_svg::{SvgExportOptions, render_svg};
+use curvebook_render::TiffCompression;
+use curvebook_svg::SvgExportOptions;
 use curvebook_text::parse_truetype_font_info;
 use serde_json::json;
 
@@ -108,16 +106,6 @@ struct ConvertArgs {
     pdf_version: PdfVersion,
     ttf_font: Option<String>,
     json: bool,
-}
-
-enum VisualTarget<'a> {
-    Graph(&'a GraphSheet),
-    Layout(&'a curvebook_doc::LayoutSheet),
-}
-
-enum TabularTarget<'a> {
-    Data(&'a DataSheet),
-    Result(&'a ResultSheet),
 }
 
 /// Execute `curvebook-cli convert <in> <out> [--sheet <id>] [--format <fmt>] [--dpi <u16>] [--pdf-version <1.4|1.7>] [--ttf-font <path>] [--json]`.
@@ -414,8 +402,8 @@ pub fn export_from_document(req: &ExportRequest<'_>) -> Result<ExportOutcomeSumm
             return Err(CliError::Usage(format!("--dpi must be in {MIN_RASTER_DPI}..={MAX_RASTER_DPI} (got {dpi})")));
         }
 
-        let registry = FormatRegistry::default_registry();
         if matches!(req.format, ExportFormat::CurveBook | ExportFormat::CurveBookDir) {
+            let registry = FormatRegistry::default_registry();
             let exporter = registry
                 .exporter_by_format(req.format.as_str())
                 .ok_or_else(|| CliError::Runtime(format!("missing `{}` exporter in FormatRegistry", req.format.as_str())))?;
@@ -435,42 +423,8 @@ pub fn export_from_document(req: &ExportRequest<'_>) -> Result<ExportOutcomeSumm
             });
         }
 
-        let (bytes, sheet_id) = match req.format {
-            ExportFormat::CurveBook | ExportFormat::CurveBookDir => (Vec::new(), None),
-            ExportFormat::Svg => {
-                let (id, scene) = compile_visual_target(req.doc, req.sheet)?;
-                let svg = render_svg(&scene, &SvgExportOptions::default())?;
-                (svg.into_bytes(), Some(id))
-            }
-            ExportFormat::Pdf => {
-                let (id, scene) = compile_visual_target(req.doc, req.sheet)?;
-                let pdf_opts = PdfExportOptions {
-                    version: req.pdf_version,
-                    embedded_truetype_font: req.embedded_truetype_font.map(<[u8]>::to_vec),
-                    ..PdfExportOptions::default()
-                };
-                let pdf = render_pdf(&scene, &pdf_opts)?;
-                (pdf, Some(id))
-            }
-            ExportFormat::Emf => {
-                let (id, scene) = compile_visual_target(req.doc, req.sheet)?;
-                let emf = encode_emf(&scene)?;
-                (emf, Some(id))
-            }
-            ExportFormat::Png => {
-                let (id, scene) = compile_visual_target(req.doc, req.sheet)?;
-                let img = rasterize_scene(&scene, req.dpi.unwrap_or(DEFAULT_RASTER_DPI))?;
-                (encode_png(&img)?, Some(id))
-            }
-            ExportFormat::Tiff => {
-                let (id, scene) = compile_visual_target(req.doc, req.sheet)?;
-                let img = rasterize_scene(&scene, req.dpi.unwrap_or(DEFAULT_RASTER_DPI))?;
-                (encode_tiff(&img, TiffCompression::Deflate)?, Some(id))
-            }
-            ExportFormat::Csv => export_tabular_csv(&registry, req.doc, req.sheet, req.tab_index, "csv", &CsvOptions::csv())?,
-            ExportFormat::Tsv => export_tabular_csv(&registry, req.doc, req.sheet, req.tab_index, "tsv", &CsvOptions::tsv())?,
-            ExportFormat::Json => export_json_target(&registry, req.doc, req.sheet, req.pretty)?,
-        };
+        let (artifact_req, sheet_id) = build_cli_export_request(req)?;
+        let artifact = export_document_artifact(req.doc, &artifact_req, None, "cli.export_from_document")?;
 
         if let Some(parent) = req.out_path.parent()
             && !parent.as_os_str().is_empty()
@@ -479,13 +433,13 @@ pub fn export_from_document(req: &ExportRequest<'_>) -> Result<ExportOutcomeSumm
             fs::create_dir_all(parent)
                 .map_err(|err| CliError::Runtime(format!("failed to create output directory `{}`: {err}", parent.display())))?;
         }
-        write_atomic(req.out_path, &bytes)?;
+        write_atomic(req.out_path, &artifact.bytes)?;
 
         Ok(ExportOutcomeSummary {
             out_path: req.out_path.to_string_lossy().into_owned(),
             format: req.format.as_str(),
             sheet_id,
-            bytes_written: bytes.len(),
+            bytes_written: artifact.bytes.len(),
         })
     })
 }
@@ -579,27 +533,23 @@ fn sniff_project_bytes(bytes: &[u8]) -> Result<LoadedProject, CliError> {
     }
 }
 
-fn compile_visual_target(doc: &ProjectDocument, sheet: Option<&str>) -> Result<(String, ChartScene), CliError> {
-    let target = resolve_visual_target(doc, sheet)?;
-    match target {
-        VisualTarget::Graph(graph) => {
-            let scene = compile_graph(graph, doc)?;
-            Ok((graph.id.as_str().to_owned(), scene))
-        }
-        VisualTarget::Layout(layout) => {
-            let scene = compile_layout(layout, doc)?;
-            Ok((layout.id.as_str().to_owned(), scene))
-        }
-    }
+fn find_sheet_id_by_name<T>(items: &[T], needle: &str, id_of: impl Fn(&T) -> &SheetId, title_of: impl Fn(&T) -> &str) -> Option<SheetId> {
+    items
+        .iter()
+        .find(|item| id_of(item).as_str() == needle)
+        .or_else(|| items.iter().find(|item| title_of(item) == needle))
+        .or_else(|| items.iter().find(|item| title_of(item).eq_ignore_ascii_case(needle)))
+        .map(id_of)
+        .cloned()
 }
 
-fn resolve_visual_target<'a>(doc: &'a ProjectDocument, sheet: Option<&str>) -> Result<VisualTarget<'a>, CliError> {
+fn resolve_visual_sheet_id(doc: &ProjectDocument, sheet: Option<&str>) -> Result<SheetId, CliError> {
     if let Some(needle) = sheet {
-        if let Some(g) = find_graph_sheet(doc, needle) {
-            return Ok(VisualTarget::Graph(g));
+        if let Some(id) = find_sheet_id_by_name(&doc.graph_sheets, needle, |g| &g.id, |g| &g.title) {
+            return Ok(id);
         }
-        if let Some(l) = find_layout_sheet(doc, needle) {
-            return Ok(VisualTarget::Layout(l));
+        if let Some(id) = find_sheet_id_by_name(&doc.layout_sheets, needle, |l| &l.id, |l| &l.title) {
+            return Ok(id);
         }
         return Err(CliError::Runtime(format!("visual sheet `{needle}` was not found among graphs or layouts")));
     }
@@ -607,129 +557,121 @@ fn resolve_visual_target<'a>(doc: &'a ProjectDocument, sheet: Option<&str>) -> R
     if doc.graph_sheets.is_empty()
         && let [only_layout] = doc.layout_sheets.as_slice()
     {
-        return Ok(VisualTarget::Layout(only_layout));
+        return Ok(only_layout.id.clone());
     }
     if let Some(g) = doc.graph_sheets.iter().find(|g| g.initialized).or_else(|| doc.graph_sheets.first()) {
-        return Ok(VisualTarget::Graph(g));
+        return Ok(g.id.clone());
     }
     if let Some(l) = doc.layout_sheets.first() {
-        return Ok(VisualTarget::Layout(l));
+        return Ok(l.id.clone());
     }
     Err(CliError::Runtime(String::from("project contains no graph or layout sheets to render")))
 }
 
-fn find_graph_sheet<'a>(doc: &'a ProjectDocument, needle: &str) -> Option<&'a GraphSheet> {
-    doc.graph_sheets
-        .iter()
-        .find(|g| g.id.as_str() == needle)
-        .or_else(|| doc.graph_sheets.iter().find(|g| g.title == needle))
-        .or_else(|| doc.graph_sheets.iter().find(|g| g.title.eq_ignore_ascii_case(needle)))
-}
-
-fn find_layout_sheet<'a>(doc: &'a ProjectDocument, needle: &str) -> Option<&'a curvebook_doc::LayoutSheet> {
-    doc.layout_sheets
-        .iter()
-        .find(|l| l.id.as_str() == needle)
-        .or_else(|| doc.layout_sheets.iter().find(|l| l.title == needle))
-        .or_else(|| doc.layout_sheets.iter().find(|l| l.title.eq_ignore_ascii_case(needle)))
-}
-
-fn resolve_tabular_target<'a>(doc: &'a ProjectDocument, sheet: Option<&str>) -> Result<TabularTarget<'a>, CliError> {
+fn resolve_tabular_sheet_id(doc: &ProjectDocument, sheet: Option<&str>) -> Result<SheetId, CliError> {
     if let Some(needle) = sheet {
-        if let Some(d) = find_data_sheet(doc, needle) {
-            return Ok(TabularTarget::Data(d));
+        if let Some(id) = find_sheet_id_by_name(&doc.data_sheets, needle, |d| &d.id, |d| &d.title) {
+            return Ok(id);
         }
-        if let Some(r) = find_result_sheet(doc, needle) {
-            return Ok(TabularTarget::Result(r));
+        if let Some(id) = find_sheet_id_by_name(&doc.result_sheets, needle, |r| &r.id, |r| r.title()) {
+            return Ok(id);
         }
         return Err(CliError::Runtime(format!("tabular sheet `{needle}` was not found")));
     }
     if let Some(d) = doc.data_sheets.first() {
-        return Ok(TabularTarget::Data(d));
+        return Ok(d.id.clone());
     }
     if let Some(r) = doc.result_sheets.first() {
-        return Ok(TabularTarget::Result(r));
+        return Ok(r.id.clone());
     }
     Err(CliError::Runtime(String::from("project contains no data or result sheets to export")))
 }
 
-fn find_data_sheet<'a>(doc: &'a ProjectDocument, needle: &str) -> Option<&'a DataSheet> {
-    doc.data_sheets
-        .iter()
-        .find(|d| d.id.as_str() == needle)
-        .or_else(|| doc.data_sheets.iter().find(|d| d.title == needle))
-        .or_else(|| doc.data_sheets.iter().find(|d| d.title.eq_ignore_ascii_case(needle)))
-}
-
-fn find_result_sheet<'a>(doc: &'a ProjectDocument, needle: &str) -> Option<&'a ResultSheet> {
-    doc.result_sheets
-        .iter()
-        .find(|r| r.id.as_str() == needle)
-        .or_else(|| doc.result_sheets.iter().find(|r| r.title() == needle))
-        .or_else(|| doc.result_sheets.iter().find(|r| r.title().eq_ignore_ascii_case(needle)))
-}
-
-fn export_tabular_csv(
-    registry: &FormatRegistry,
-    doc: &ProjectDocument,
-    sheet: Option<&str>,
-    tab_index: Option<usize>,
-    format_id: &str,
-    csv_opts: &CsvOptions,
-) -> Result<(Vec<u8>, Option<String>), CliError> {
-    let exporter =
-        registry.exporter_by_format(format_id).ok_or_else(|| CliError::Runtime(format!("missing `{format_id}` exporter in FormatRegistry")))?;
-    let opts = ExportOptions { csv: Some(csv_opts.clone()), ..ExportOptions::default() };
-    match resolve_tabular_target(doc, sheet)? {
-        TabularTarget::Data(ds) => Ok((exporter.export_bytes(ExportSource::DataSheet(ds), &opts)?, Some(ds.id.as_str().to_owned()))),
-        TabularTarget::Result(res) => match tab_index {
-            Some(idx) => {
-                ensure_result_sheet_csv_exportable(res)?;
-                let tab = res.tabs.get(idx).ok_or_else(|| CliError::Runtime(format!("result sheet `{}` has no tab at index {idx}", res.id)))?;
-                Ok((try_export_result_tab_csv(res, tab, csv_opts)?.into_bytes(), Some(res.id.as_str().to_owned())))
-            }
-            None => Ok((exporter.export_bytes(ExportSource::ResultSheet(res), &opts)?, Some(res.id.as_str().to_owned()))),
-        },
-    }
-}
-
-fn export_json_target(
-    registry: &FormatRegistry,
-    doc: &ProjectDocument,
-    sheet: Option<&str>,
-    pretty: bool,
-) -> Result<(Vec<u8>, Option<String>), CliError> {
-    let exporter = registry.exporter_by_format("json").ok_or_else(|| CliError::Runtime(String::from("missing `json` exporter in FormatRegistry")))?;
-    let opts = ExportOptions { pretty, ..ExportOptions::default() };
+fn resolve_json_target(doc: &ProjectDocument, sheet: Option<&str>) -> Result<(ExportTarget, Option<String>), CliError> {
     if let Some(needle) = sheet {
-        if let Some(res) = find_result_sheet(doc, needle) {
-            return Ok((exporter.export_bytes(ExportSource::ResultSheet(res), &opts)?, Some(res.id.as_str().to_owned())));
-        }
-        if let Some(ds) = find_data_sheet(doc, needle) {
-            return Ok((exporter.export_bytes(ExportSource::DataSheet(ds), &opts)?, Some(ds.id.as_str().to_owned())));
-        }
-        if let Some(info) = doc.info_sheets.iter().find(|s| s.id.as_str() == needle || s.title == needle) {
-            let json_text = if pretty { serde_json::to_string_pretty(info) } else { serde_json::to_string(info) }
-                .map_err(|err| CliError::Runtime(format!("JSON serialization failed: {err}")))?;
-            return Ok((json_text.into_bytes(), Some(info.id.as_str().to_owned())));
-        }
-        return Err(CliError::Runtime(format!("sheet `{needle}` not found for JSON export")));
+        let found = find_sheet_id_by_name(&doc.result_sheets, needle, |r| &r.id, |r| r.title())
+            .or_else(|| find_sheet_id_by_name(&doc.data_sheets, needle, |d| &d.id, |d| &d.title))
+            .or_else(|| find_sheet_id_by_name(&doc.info_sheets, needle, |s| &s.id, |s| &s.title));
+        let id = found.ok_or_else(|| CliError::Runtime(format!("sheet `{needle}` not found for JSON export")))?;
+        let label = id.as_str().to_owned();
+        return Ok((ExportTarget::Explicit(id), Some(label)));
     }
-
     if doc.data_sheets.is_empty()
         && doc.graph_sheets.is_empty()
         && doc.layout_sheets.is_empty()
         && let [res] = doc.result_sheets.as_slice()
     {
-        return Ok((exporter.export_bytes(ExportSource::ResultSheet(res), &opts)?, Some(res.id.as_str().to_owned())));
+        return Ok((ExportTarget::Explicit(res.id.clone()), Some(res.id.as_str().to_owned())));
     }
-
-    Ok((exporter.export_bytes(ExportSource::Document(doc), &opts)?, None))
+    Ok((ExportTarget::AutoOrExplicit(None), None))
 }
 
-fn rasterize_scene(scene: &ChartScene, dpi: u16) -> Result<curvebook_render::RasterImage, CliError> {
-    let target = RenderTargetSpec::from_scene_dpi(scene, dpi)?;
-    Ok(render_scene(scene, target)?)
+fn build_cli_export_request(req: &ExportRequest<'_>) -> Result<(ExportArtifactRequest, Option<String>), CliError> {
+    let dpi = Some(req.dpi.unwrap_or(DEFAULT_RASTER_DPI));
+    let (target, sheet_id, format) = match req.format {
+        ExportFormat::Svg => {
+            let id = resolve_visual_sheet_id(req.doc, req.sheet)?;
+            let label = id.as_str().to_owned();
+            (ExportTarget::Explicit(id), Some(label), ExportArtifactFormat::Svg { options: SvgExportOptions::default() })
+        }
+        ExportFormat::Pdf => {
+            let id = resolve_visual_sheet_id(req.doc, req.sheet)?;
+            let label = id.as_str().to_owned();
+            let options = PdfExportOptions {
+                version: req.pdf_version,
+                embedded_truetype_font: req.embedded_truetype_font.map(<[u8]>::to_vec),
+                ..PdfExportOptions::default()
+            };
+            (ExportTarget::Explicit(id), Some(label), ExportArtifactFormat::Pdf { options, all_graphs: false, sheet_ids: None })
+        }
+        ExportFormat::Emf => {
+            let id = resolve_visual_sheet_id(req.doc, req.sheet)?;
+            let label = id.as_str().to_owned();
+            (ExportTarget::Explicit(id), Some(label), ExportArtifactFormat::Emf { require_kind: None })
+        }
+        ExportFormat::Png => {
+            let id = resolve_visual_sheet_id(req.doc, req.sheet)?;
+            let label = id.as_str().to_owned();
+            (
+                ExportTarget::Explicit(id),
+                Some(label),
+                ExportArtifactFormat::Png { width_px: None, height_px: None, dpi, sizing: RasterSizingPolicy::StrictLimits },
+            )
+        }
+        ExportFormat::Tiff => {
+            let id = resolve_visual_sheet_id(req.doc, req.sheet)?;
+            let label = id.as_str().to_owned();
+            (
+                ExportTarget::Explicit(id),
+                Some(label),
+                ExportArtifactFormat::Tiff {
+                    width_px: None,
+                    height_px: None,
+                    dpi,
+                    compression: TiffCompression::Deflate,
+                    sizing: RasterSizingPolicy::StrictLimits,
+                },
+            )
+        }
+        ExportFormat::Csv | ExportFormat::Tsv => {
+            let id = resolve_tabular_sheet_id(req.doc, req.sheet)?;
+            let label = id.as_str().to_owned();
+            let options = if req.format == ExportFormat::Tsv { CsvOptions::tsv() } else { CsvOptions::csv() };
+            (
+                ExportTarget::Explicit(id),
+                Some(label),
+                ExportArtifactFormat::Csv { options, tab_id: None, tab_index: req.tab_index, tidy: req.tab_index.is_none() },
+            )
+        }
+        ExportFormat::Json => {
+            let (target, label) = resolve_json_target(req.doc, req.sheet)?;
+            (target, label, ExportArtifactFormat::Json { pretty: req.pretty })
+        }
+        ExportFormat::CurveBook | ExportFormat::CurveBookDir => {
+            return Err(CliError::Runtime(format!("format `{}` is exported via FormatRegistry", req.format.as_str())));
+        }
+    };
+    Ok((ExportArtifactRequest { target, format }, sheet_id))
 }
 
 #[cfg(test)]

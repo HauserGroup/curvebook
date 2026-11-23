@@ -13,12 +13,71 @@
 //! - NIST Statistical Reference Datasets, Nonlinear Regression:
 //!   <https://www.itl.nist.gov/div898/strd/nls/nls_main.shtml>.
 
+/// Implement [`ParametricModel`] metadata methods (`id`, `name`, `category`, `param_names`)
+/// from compile-time literals using a lazily initialized static parameter slice.
+macro_rules! impl_static_meta {
+    ($id:literal, $name:literal, $cat:expr, [$($param:literal),+ $(,)?]) => {
+        fn id(&self) -> &str {
+            $id
+        }
+        fn name(&self) -> &str {
+            $name
+        }
+        fn category(&self) -> EquationCategory {
+            $cat
+        }
+        fn param_names(&self) -> &[String] {
+            static PARAMS: std::sync::LazyLock<Vec<String>> =
+                std::sync::LazyLock::new(|| crate::library::param_names_vec(&[$($param),+]));
+            &PARAMS
+        }
+    };
+}
+
+/// Delegate [`ParametricModel`] metadata methods (`id`, `name`, `category`, `param_names`)
+/// to a `self.meta: ModelMeta` field.
+macro_rules! impl_meta_methods {
+    () => {
+        fn id(&self) -> &str {
+            self.meta.id
+        }
+        fn name(&self) -> &str {
+            self.meta.name
+        }
+        fn category(&self) -> EquationCategory {
+            self.meta.category
+        }
+        fn param_names(&self) -> &[String] {
+            &self.meta.params
+        }
+    };
+}
+
 pub mod curves;
 pub mod nist;
 pub mod pharma;
 
 use crate::types::{DataPoint, DerivedScalar, EquationCategory};
 use curvebook_doc::ParameterRule;
+
+/// Shared metadata descriptor for multi-variant [`ParametricModel`] implementations.
+#[derive(Debug, Clone)]
+pub(crate) struct ModelMeta {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub category: EquationCategory,
+    pub params: Vec<String>,
+}
+
+impl ModelMeta {
+    pub(crate) fn new(id: &'static str, name: &'static str, category: EquationCategory, params: &[&str]) -> Self {
+        Self { id, name, category, params: param_names_vec(params) }
+    }
+}
+
+pub(crate) fn param_names_vec(slice: &[&str]) -> Vec<String> {
+    slice.iter().map(|s| (*s).to_owned()).collect()
+}
 
 /// Trait implemented by every built-in or user-defined parametric curve model.
 pub trait ParametricModel: Send + Sync {
@@ -84,6 +143,11 @@ pub(crate) struct BuiltinEquationSpec {
 }
 
 impl BuiltinEquationSpec {
+    #[must_use]
+    pub(crate) const fn new(id: &'static str, aliases: &'static [&'static str], build: fn() -> Box<dyn ParametricModel>) -> Self {
+        Self { id, aliases, build }
+    }
+
     #[must_use]
     pub fn matches(&self, norm_id: &str) -> bool {
         self.id == norm_id || self.aliases.contains(&norm_id)

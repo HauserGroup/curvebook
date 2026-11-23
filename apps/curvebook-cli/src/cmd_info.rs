@@ -3,6 +3,9 @@
 use std::path::Path;
 
 use curvebook_doc::{ProjectDocument, ResultCell, ResultSheet, ResultStatus, TableArchetype};
+use curvebook_engine::services::{
+    DataSheetSummary, GraphSheetSummary, InfoSheetSummary, LayoutSheetSummary, ProjectInspectSummary, inspect_project_summary,
+};
 use serde_json::{Map, Value, json};
 
 use crate::cmd_convert::{LoadedProject, load_project_from_path};
@@ -32,24 +35,27 @@ pub fn run_info(args: &[String]) -> Result<(), CliError> {
 /// Build the structured JSON summary for a [`ProjectDocument`].
 pub fn build_info_json(file_label: &str, loaded: &LoadedProject) -> Value {
     let doc = &loaded.doc;
-    let tables: Vec<Value> = doc.data_sheets.iter().map(summarize_table_json).collect();
-    let info_sheets: Vec<Value> = doc.info_sheets.iter().map(summarize_info_sheet_json).collect();
+    let Ok(summary) = inspect_project_summary(doc, false, None, None) else {
+        return json!({});
+    };
+    let tables: Vec<Value> = summary.data_sheets.iter().zip(&doc.data_sheets).map(|(s, ds)| summarize_table_json(s, ds)).collect();
+    let info_sheets: Vec<Value> = summary.info_sheets.iter().map(summarize_info_sheet_json).collect();
     let analyses: Vec<Value> = doc.result_sheets.iter().map(summarize_result_sheet_json).collect();
-    let graphs: Vec<Value> = doc.graph_sheets.iter().map(summarize_graph_sheet_json).collect();
-    let layouts: Vec<Value> = doc.layout_sheets.iter().map(summarize_layout_sheet_json).collect();
+    let graphs: Vec<Value> = summary.graph_sheets.iter().zip(&doc.graph_sheets).map(|(s, g)| summarize_graph_sheet_json(s, g)).collect();
+    let layouts: Vec<Value> = summary.layout_sheets.iter().map(summarize_layout_sheet_json).collect();
 
     json!({
         "file": file_label,
         "format": loaded.format_tag,
-        "schema_version": doc.schema_version,
-        "title": doc.title,
+        "schema_version": summary.schema_version,
+        "title": summary.title,
         "counts": {
             "tables": tables.len(),
             "info_sheets": info_sheets.len(),
             "analyses": analyses.len(),
             "graphs": graphs.len(),
             "layouts": layouts.len(),
-            "total_sheets": doc.total_sheet_count(),
+            "total_sheets": summary.total_sheet_count,
         },
         "tables": tables,
         "info_sheets": info_sheets,
@@ -60,25 +66,25 @@ pub fn build_info_json(file_label: &str, loaded: &LoadedProject) -> Value {
     })
 }
 
-fn summarize_table_json(ds: &curvebook_doc::DataSheet) -> Value {
+fn summarize_table_json(summary: &DataSheetSummary, ds: &curvebook_doc::DataSheet) -> Value {
     let subcolumn_mode = match &ds.archetype {
         TableArchetype::Xy(xy) => format!("{:?}", xy.y_subcolumn_mode),
         TableArchetype::Grouped(g) => format!("{:?}", g.subcolumn_mode),
         _ => String::from("None"),
     };
     json!({
-        "id": ds.id.as_str(),
-        "title": ds.title,
-        "kind": ds.kind().label(),
-        "rows": ds.archetype.row_count(),
-        "cols": ds.archetype.column_count(),
+        "id": summary.id,
+        "title": summary.title,
+        "kind": summary.kind_label,
+        "rows": summary.rows,
+        "cols": summary.cols,
         "subcolumn_mode": subcolumn_mode,
-        "frozen": ds.frozen,
-        "info_sheet_id": ds.info_sheet_id.as_ref().map(curvebook_doc::SheetId::as_str),
+        "frozen": summary.frozen,
+        "info_sheet_id": summary.info_sheet_id,
     })
 }
 
-fn summarize_info_sheet_json(info: &curvebook_doc::InfoSheet) -> Value {
+fn summarize_info_sheet_json(info: &InfoSheetSummary) -> Value {
     let constants: Vec<Value> = info
         .constants
         .iter()
@@ -92,12 +98,12 @@ fn summarize_info_sheet_json(info: &curvebook_doc::InfoSheet) -> Value {
         })
         .collect();
     json!({
-        "id": info.id.as_str(),
+        "id": info.id,
         "title": info.title,
         "constants_count": info.constants.len(),
         "constants": constants,
-        "linked_data_sheets": info.linked_data_sheets.iter().map(curvebook_doc::SheetId::as_str).collect::<Vec<_>>(),
-        "notes_bytes": info.notes_markdown.len(),
+        "linked_data_sheets": info.linked_data_sheets,
+        "notes_bytes": info.notes_len,
     })
 }
 
@@ -210,29 +216,28 @@ fn format_ci_bound(bound: curvebook_doc::CiBound) -> Value {
     }
 }
 
-fn summarize_graph_sheet_json(g: &curvebook_doc::GraphSheet) -> Value {
+fn summarize_graph_sheet_json(summary: &GraphSheetSummary, g: &curvebook_doc::GraphSheet) -> Value {
     json!({
-        "id": g.id.as_str(),
-        "title": g.title,
-        "initialized": g.initialized,
-        "kind": format!("{:?}", g.spec.kind),
-        "primary_source_sheet_id": g.spec.primary_source_sheet_id.as_str(),
-        "series_count": g.spec.series.len(),
+        "id": summary.id,
+        "title": summary.title,
+        "initialized": summary.initialized,
+        "kind": summary.kind_debug,
+        "primary_source_sheet_id": summary.primary_source_sheet_id,
+        "series_count": summary.series_count,
         "x_title": g.spec.x_axis.title,
         "y_title": g.spec.y_axis.title,
-        "canvas_width_pt": g.spec.canvas_size_pt.width,
-        "canvas_height_pt": g.spec.canvas_size_pt.height,
+        "canvas_width_pt": summary.width_pt,
+        "canvas_height_pt": summary.height_pt,
     })
 }
 
-fn summarize_layout_sheet_json(l: &curvebook_doc::LayoutSheet) -> Value {
-    let page = l.spec.page_size_pt();
+fn summarize_layout_sheet_json(summary: &LayoutSheetSummary) -> Value {
     json!({
-        "id": l.id.as_str(),
-        "title": l.title,
-        "items_count": l.spec.items.len(),
-        "page_width_pt": page.width,
-        "page_height_pt": page.height,
+        "id": summary.id,
+        "title": summary.title,
+        "items_count": summary.item_count,
+        "page_width_pt": summary.width_pt,
+        "page_height_pt": summary.height_pt,
     })
 }
 
@@ -252,18 +257,21 @@ fn sanitize_terminal_text(text: &str) -> String {
 
 fn print_info_human(file_label: &str, loaded: &LoadedProject) {
     let doc = &loaded.doc;
-    println!("File: {} ({}, schema v{})", sanitize_terminal_text(file_label), loaded.format_tag, doc.schema_version);
-    println!("Title: {}", sanitize_terminal_text(&doc.title));
+    let Ok(summary) = inspect_project_summary(doc, false, None, None) else {
+        return;
+    };
+    println!("File: {} ({}, schema v{})", sanitize_terminal_text(file_label), loaded.format_tag, summary.schema_version);
+    println!("Title: {}", sanitize_terminal_text(&summary.title));
     println!(
         "Sheets ({} total): {} tables, {} info sheets, {} analyses, {} graphs, {} layouts",
-        doc.total_sheet_count(),
-        doc.data_sheets.len(),
-        doc.info_sheets.len(),
-        doc.result_sheets.len(),
-        doc.graph_sheets.len(),
-        doc.layout_sheets.len()
+        summary.total_sheet_count,
+        summary.data_sheets.len(),
+        summary.info_sheets.len(),
+        summary.result_sheets.len(),
+        summary.graph_sheets.len(),
+        summary.layout_sheets.len()
     );
-    print_human_sections(doc);
+    print_human_sections(&summary, doc);
     if !loaded.warnings.is_empty() {
         println!("Warnings ({}):", loaded.warnings.len());
         for w in &loaded.warnings {
@@ -272,34 +280,22 @@ fn print_info_human(file_label: &str, loaded: &LoadedProject) {
     }
 }
 
-fn print_human_sections(doc: &ProjectDocument) {
-    if !doc.data_sheets.is_empty() {
+fn print_human_sections(summary: &ProjectInspectSummary, doc: &ProjectDocument) {
+    if !summary.data_sheets.is_empty() {
         println!("Tables:");
-        for ds in &doc.data_sheets {
-            println!(
-                "  - {} [{}] `{}` ({}x{})",
-                sanitize_terminal_text(ds.id.as_str()),
-                ds.kind().label(),
-                sanitize_terminal_text(&ds.title),
-                ds.archetype.row_count(),
-                ds.archetype.column_count()
-            );
+        for ds in &summary.data_sheets {
+            println!("  - {} [{}] `{}` ({}x{})", sanitize_terminal_text(&ds.id), ds.kind_label, sanitize_terminal_text(&ds.title), ds.rows, ds.cols);
         }
     }
-    if !doc.info_sheets.is_empty() {
+    if !summary.info_sheets.is_empty() {
         println!("Info Sheets:");
-        for info in &doc.info_sheets {
-            println!(
-                "  - {} `{}` ({} constants)",
-                sanitize_terminal_text(info.id.as_str()),
-                sanitize_terminal_text(&info.title),
-                info.constants.len()
-            );
+        for info in &summary.info_sheets {
+            println!("  - {} `{}` ({} constants)", sanitize_terminal_text(&info.id), sanitize_terminal_text(&info.title), info.constants.len());
         }
     }
     if !doc.result_sheets.is_empty() {
         println!("Analyses:");
-        for res in &doc.result_sheets {
+        for (res_sum, res) in summary.result_sheets.iter().zip(&doc.result_sheets) {
             let inference_note = if matches!(
                 &res.analysis.kind,
                 curvebook_doc::AnalysisKind::NonlinearRegression(nl) if nl.method == curvebook_doc::FitMethod::RobustCauchy
@@ -310,33 +306,33 @@ fn print_human_sections(doc: &ProjectDocument) {
             };
             println!(
                 "  - {} `{}` (source: {}, tabs: {}, scalars: {}, curves: {}{})",
-                sanitize_terminal_text(res.id.as_str()),
-                sanitize_terminal_text(res.title()),
-                sanitize_terminal_text(res.analysis.source_sheet_id.as_str()),
-                res.tabs.len(),
-                res.scalars.len(),
+                sanitize_terminal_text(&res_sum.id),
+                sanitize_terminal_text(&res_sum.title),
+                sanitize_terminal_text(&res_sum.source_sheet_id),
+                res_sum.tabs,
+                res_sum.scalars,
                 res.fitted_curves.len(),
                 inference_note
             );
         }
     }
-    if !doc.graph_sheets.is_empty() {
+    if !summary.graph_sheets.is_empty() {
         println!("Graphs:");
-        for g in &doc.graph_sheets {
+        for g in &summary.graph_sheets {
             println!(
-                "  - {} [{:?}] `{}` (initialized: {}, series: {})",
-                sanitize_terminal_text(g.id.as_str()),
-                g.spec.kind,
+                "  - {} [{}] `{}` (initialized: {}, series: {})",
+                sanitize_terminal_text(&g.id),
+                g.kind_debug,
                 sanitize_terminal_text(&g.title),
                 g.initialized,
-                g.spec.series.len()
+                g.series_count
             );
         }
     }
-    if !doc.layout_sheets.is_empty() {
+    if !summary.layout_sheets.is_empty() {
         println!("Layouts:");
-        for l in &doc.layout_sheets {
-            println!("  - {} `{}` ({} items)", sanitize_terminal_text(l.id.as_str()), sanitize_terminal_text(&l.title), l.spec.items.len());
+        for l in &summary.layout_sheets {
+            println!("  - {} `{}` ({} items)", sanitize_terminal_text(&l.id), sanitize_terminal_text(&l.title), l.item_count);
         }
     }
 }

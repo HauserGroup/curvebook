@@ -117,7 +117,7 @@ fn audit_105_108_latex_structural_and_unicode_infinity_compile() {
     doc.add_data_sheet(DataSheet::new("ct-nnt", "NNT Infinity", TableArchetype::Contingency(ct)).unwrap()).unwrap();
 
     let mut session = Session::from_document(doc);
-    ok_cmd(&mut session, "stats.run", json!({ "source_sheet": "col-3", "sheet_id": "res-aov", "kind": "one_way_anova", "multiplicity": "tukey" }));
+    ok_cmd(&mut session, "stats.run", json!({ "source_sheet_id": "col-3", "sheet_id": "res-aov", "kind": "one_way_anova", "multiplicity": "tukey" }));
     ok_cmd(
         &mut session,
         "analysis.run",
@@ -225,7 +225,7 @@ fn audit_106_107_markdown_latex_escaping_newlines_and_bold_labels() {
     doc.add_data_sheet(DataSheet::new("col-xss", "Data `ticks` ~tilde~ [link](url)\nSecondLine", TableArchetype::Column(col)).unwrap()).unwrap();
 
     let mut session = Session::from_document(doc);
-    ok_cmd(&mut session, "stats.run", json!({ "source_sheet": "col-xss", "sheet_id": "res-xss", "kind": "unpaired_t" }));
+    ok_cmd(&mut session, "stats.run", json!({ "source_sheet_id": "col-xss", "sheet_id": "res-xss", "kind": "unpaired_t" }));
 
     // Rename the ResultSheet title to inject newlines, HTML, and Markdown heading/setext syntax (#106).
     let mut dirty_doc = session.document().clone();
@@ -481,7 +481,7 @@ fn audit_81_83_nested_welch_friedman_and_row_t_plans() {
     }
 
     // 4. Friedman with DunnRankSum executes Dunn within-block rank tests (#83 / Wave 2 alignment).
-    ok_cmd(&mut session, "stats.run", json!({ "source_sheet": "rm-3", "sheet_id": "fr-dunn", "kind": "friedman", "multiplicity": "dunn" }));
+    ok_cmd(&mut session, "stats.run", json!({ "source_sheet_id": "rm-3", "sheet_id": "fr-dunn", "kind": "friedman", "multiplicity": "dunn" }));
     let fr_dunn_rep = generate_methods_report(session.document(), &SheetId::new("fr-dunn"), ReportFormat::PlainText).unwrap();
     assert!(fr_dunn_rep.contains("within-block mean rank pairwise z-tests") && fr_dunn_rep.contains("Bonferroni"), "{fr_dunn_rep}");
 

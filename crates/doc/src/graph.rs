@@ -16,18 +16,25 @@ use crate::links::DataSheet;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum DiagnosticPlotKind {
     /// Color-mapped 2D matrix of correlation coefficients, expression values, or grouped means.
+    #[serde(alias = "heatmap")]
     Heatmap,
     /// Differential effect (`log2` fold change or difference on *X*) vs `-log10(p)` or `-log10(q)` significance on *Y*.
+    #[serde(alias = "volcano")]
     Volcano,
     /// Method-comparison difference (or ratio) vs average plot with bias and 95% limits of agreement (Bland & Altman 1986).
+    #[serde(alias = "bland_altman")]
     BlandAltman,
     /// Sensitivity (`TPR`) vs `1 - Specificity` (`FPR`) receiver operating characteristic curve with diagonal chance line.
+    #[serde(alias = "roc")]
     RocCurve,
     /// Horizontal confidence-interval effect-size / odds-ratio / hazard-ratio plot with null reference line.
+    #[serde(alias = "forest")]
     ForestPlot,
     /// Regression residuals vs predicted *Y* or *X* diagnostic scatter plot.
+    #[serde(alias = "residuals", alias = "residual_plot")]
     ResidualPlot,
     /// Theoretical normal quantiles vs observed/residual quantiles Q–Q plot with reference line.
+    #[serde(alias = "qq", alias = "normal_qq")]
     NormalQqPlot,
 }
 
@@ -35,18 +42,25 @@ pub enum DiagnosticPlotKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum GraphKind {
     /// Continuous *X* vs *Y* scatter, connected line, spline, area, and fitted curve figure.
+    #[serde(alias = "xy", alias = "xy_scatter", alias = "scatter", alias = "xy_line", alias = "line", alias = "xy_mean_error")]
     Xy,
     /// One-way categorical group comparison figure (bars, box-and-whiskers, violins, dot plots, before–after lines).
+    #[serde(alias = "column", alias = "column_bar", alias = "bar", alias = "column_box", alias = "column_violin", alias = "box", alias = "violin")]
     Column,
     /// Two-way or three-way clustered/stacked/superimposed group figure.
+    #[serde(alias = "grouped", alias = "grouped_bar", alias = "grouped_mean_error")]
     Grouped,
     /// Categorical count/proportion bar or stacked bar figure.
+    #[serde(alias = "contingency", alias = "contingency_stacked", alias = "contingency_grouped")]
     Contingency,
     /// Pie, donut, stacked fraction bar, or `10 × 10` waffle chart.
+    #[serde(alias = "parts_of_whole", alias = "pie", alias = "donut")]
     PartsOfWhole,
     /// Kaplan–Meier staircase survival curve with censoring ticks, optional Greenwood CIs, and optional number-at-risk table.
+    #[serde(alias = "survival", alias = "survival_kaplan_meier", alias = "kaplan_meier")]
     Survival,
     /// Five-channel multivariate bubble scatter or categorical × continuous summary figure.
+    #[serde(alias = "multiple_variables", alias = "multivariate", alias = "bubble")]
     MultipleVariables,
     /// Specialized statistical or regression diagnostic plot ([`DiagnosticPlotKind`]).
     Diagnostic(DiagnosticPlotKind),
@@ -57,14 +71,19 @@ pub enum GraphKind {
 pub enum FramePreset {
     /// Classic open L-shaped left *Y* and bottom *X* axes meeting at the bottom-left corner.
     #[default]
+    #[serde(alias = "open_l", alias = "bottom_left", alias = "classic", alias = "plain")]
     OpenL,
     /// Tufte range-frame style offsetting left *Y* and bottom *X* spines slightly away from the corner and trimming to data range.
+    #[serde(alias = "offset", alias = "offset_range", alias = "tufte")]
     OffsetRangeTufte,
     /// Four-sided enclosed rectangular frame (left, bottom, top, and right spines).
+    #[serde(alias = "plain_boxed", alias = "box", alias = "plain_box")]
     PlainBoxed,
     /// Left primary *Y* axis paired with an independent right secondary `y2_axis` spine.
+    #[serde(alias = "dual_y", alias = "dual_y_secondary_right")]
     DualYSecondaryRight,
     /// Axes intersecting directly at data coordinate `(0, 0)`.
+    #[serde(alias = "origin_crossing", alias = "origin_cross", alias = "cross")]
     OriginCrossing,
 }
 
@@ -76,10 +95,13 @@ pub type GraphAxisScale = AxisScale;
 pub enum BreakOrnament {
     /// Parallel slanted slash ticks (`//`) straddling the segment gap.
     #[default]
+    #[serde(alias = "double_slash", alias = "double")]
     DoubleSlash,
     /// Sawtooth zigzag wave bridging the segment gap.
+    #[serde(alias = "zigzag")]
     Zigzag,
     /// Clean whitespace gap with no drawn ornament.
+    #[serde(alias = "blank", alias = "blank_gap", alias = "none")]
     BlankGap,
 }
 
@@ -88,10 +110,13 @@ pub enum BreakOrnament {
 pub enum CategoricalTickSource {
     /// Read category tick labels from the source table's `row_titles`.
     #[default]
+    #[serde(alias = "categorical", alias = "row_titles")]
     RowTitles,
     /// Read category tick labels from the source table's data-set / group `column` titles.
+    #[serde(alias = "column_titles")]
     ColumnTitles,
     /// Display 1-based row numbers (`"1"`, `"2"`, `"3"`, ...).
+    #[serde(alias = "row_numbers")]
     RowNumbers,
 }
 
@@ -100,16 +125,22 @@ pub enum CategoricalTickSource {
 pub enum TickLabelFormat {
     /// Standard fixed/trimmed decimal numerals (`0.1`, `1`, `10`, `100`).
     #[default]
+    #[serde(alias = "decimal")]
     Decimal,
     /// Base-10 superscript powers (`10⁻⁶`, `10⁻³`, `10⁰`, `10³`).
+    #[serde(alias = "power_of_ten", alias = "power_of_10", alias = "powers_of_10", alias = "superscript")]
     PowerOfTenSuperscript,
     /// Exponential scientific notation (`1e-6`, `1e-3`, `1e3`).
+    #[serde(alias = "scientific", alias = "scientific_e")]
     ScientificE,
     /// Antilogarithm `10^x` display for pre-logged *X* concentrations (for example `-6` labeled as `1e-6` or `0.000001`).
+    #[serde(alias = "antilog")]
     Antilog,
     /// SI metric prefix scaling (`p`, `n`, `µ`, `m`, `k`, `M`, `G`).
+    #[serde(alias = "engineering", alias = "si", alias = "engineering_si")]
     EngineeringSi,
     /// Unsigned decimal magnitude (`|x|`) for symmetric diverging axes such as population pyramids.
+    #[serde(alias = "absolute_decimal", alias = "absolute", alias = "abs_decimal")]
     AbsoluteDecimal,
     /// Discrete text category labels sourced via [`CategoricalTickSource`].
     Categorical(CategoricalTickSource),
@@ -120,12 +151,16 @@ pub enum TickLabelFormat {
 pub enum TickDirection {
     /// Ticks protrude outward from the plot frame (default).
     #[default]
+    #[serde(alias = "outside")]
     Outside,
     /// Ticks protrude inward into the plot frame.
+    #[serde(alias = "inside")]
     Inside,
     /// Ticks straddle the axis spine on both inside and outside edges.
+    #[serde(alias = "both")]
     Both,
     /// Suppress major and minor tick marks completely.
+    #[serde(alias = "none")]
     None,
 }
 
@@ -134,8 +169,10 @@ pub enum TickDirection {
 pub enum CartesianOrientation {
     /// Vertical bars/plots: categories along horizontal *X* and values along vertical *Y* (default).
     #[default]
+    #[serde(alias = "vertical")]
     Vertical,
     /// Horizontal bars/plots: categories along vertical *Y* and values along horizontal *X* (for example population pyramids).
+    #[serde(alias = "horizontal")]
     Horizontal,
 }
 
@@ -144,10 +181,13 @@ pub enum CartesianOrientation {
 pub enum HeatmapRowLabelMode {
     /// Display row titles from the source table or clustering labels (default).
     #[default]
+    #[serde(alias = "row_titles", alias = "titles")]
     RowTitles,
     /// Display 1-based row indices (`"1"`, `"2"`, ...).
+    #[serde(alias = "row_numbers", alias = "numbers")]
     RowNumbers,
     /// Omit row labels.
+    #[serde(alias = "none")]
     None,
 }
 
@@ -156,10 +196,13 @@ pub enum HeatmapRowLabelMode {
 pub enum HeatmapColumnLabelMode {
     /// Display data-set / variable titles from the source table (default).
     #[default]
+    #[serde(alias = "column_titles", alias = "titles")]
     ColumnTitles,
     /// Display spreadsheet column letters (`"A"`, `"B"`, ...).
+    #[serde(alias = "column_letters", alias = "letters")]
     ColumnLetters,
     /// Omit column labels.
+    #[serde(alias = "none")]
     None,
 }
 
@@ -168,10 +211,13 @@ pub enum HeatmapColumnLabelMode {
 pub enum HeatmapColumnLabelAngle {
     /// Horizontal (`0°`) labels below columns (default).
     #[default]
+    #[serde(alias = "horizontal_0", alias = "horizontal", alias = "0")]
     Horizontal0,
     /// Angled (`45°`) diagonal labels below columns.
+    #[serde(alias = "angled_45", alias = "angled", alias = "45")]
     Angled45,
     /// Vertical (`90°`) rotated labels below columns with dynamic margin reservation.
+    #[serde(alias = "vertical_90", alias = "vertical", alias = "90")]
     Vertical90,
 }
 
@@ -200,10 +246,13 @@ pub struct HeatmapLabelSpec {
 pub enum SurvivalDisplayMetric {
     /// Descending survival percentage (`100%` down toward `0%`; default).
     #[default]
+    #[serde(alias = "percent_survival", alias = "survival")]
     PercentSurvival,
     /// Ascending cumulative failure/event percentage (`0%` up toward `100%`, equal to `100 - %Survival`).
+    #[serde(alias = "percent_cumulative_event", alias = "cumulative_event", alias = "event")]
     PercentCumulativeEvent,
     /// Descending survival proportion (`1.0` down toward `0.0`).
+    #[serde(alias = "fraction_survival", alias = "fraction")]
     FractionSurvival,
 }
 
@@ -212,8 +261,10 @@ pub enum SurvivalDisplayMetric {
 pub enum ReplicateLineMode {
     /// Connect row summary centers (`Mean` or `Median`) with one polyline per series (default).
     #[default]
+    #[serde(alias = "summary_center", alias = "summary")]
     SummaryCenter,
     /// Trace an independent longitudinal polyline for each replicate subcolumn across rows (spaghetti plot).
+    #[serde(alias = "individual_replicate_trajectories", alias = "individual", alias = "spaghetti")]
     IndividualReplicateTrajectories,
 }
 
@@ -588,12 +639,16 @@ pub enum ReplicateOverlayStyle {
 pub enum LineConnectionKind {
     /// Piecewise linear segments connecting consecutive points.
     #[default]
+    #[serde(alias = "point_to_point", alias = "straight")]
     PointToPoint,
     /// Horizontal-then-vertical right-continuous step function.
+    #[serde(alias = "staircase", alias = "step", alias = "stepped")]
     Staircase,
     /// Shape-preserving Fritsch–Carlson (1980) / Steffen (1990) monotonic piecewise cubic Hermite spline (prevents overshoot between monotone points).
+    #[serde(alias = "spline", alias = "smooth", alias = "monotonic_cubic")]
     MonotonicCubicSpline,
     /// Akima (1970) local five-point cubic spline resistant to oscillations near outlier slopes.
+    #[serde(alias = "akima")]
     AkimaSpline,
 }
 
@@ -752,16 +807,22 @@ pub enum GraphicalDataObject {
 pub enum ErrorBarMetric {
     /// Sample standard deviation (`±1 SD`, `n - 1` denominator).
     #[default]
+    #[serde(alias = "sd")]
     Sd,
     /// Standard error of the mean (`±1 SEM = SD / sqrt(n)`).
+    #[serde(alias = "sem")]
     Sem,
     /// Two-sided 95% Student-*t* confidence interval around the sample mean (`mean ± t_{0.025, n-1} * SEM`).
+    #[serde(alias = "ci95", alias = "ci_95", alias = "95ci")]
     ConfidenceInterval95,
     /// Asymmetric interquartile span from `Q1` (25th percentile) to `Q3` (75th percentile).
+    #[serde(alias = "iqr")]
     InterquartileRange,
     /// Full observed span from sample minimum to sample maximum.
+    #[serde(alias = "range")]
     Range,
     /// Pre-summarized bounds read directly from [`crate::SubcolumnMode::explicit_bounds`].
+    #[serde(alias = "explicit")]
     ExplicitSubcolumns,
 }
 
@@ -770,10 +831,13 @@ pub enum ErrorBarMetric {
 pub enum ErrorBarDirection {
     /// Symmetric/two-sided upper and lower whiskers.
     #[default]
+    #[serde(alias = "both")]
     Both,
     /// Positive/upper whisker only (common above upward bars).
+    #[serde(alias = "above", alias = "upper", alias = "upper_only")]
     UpperOnly,
     /// Negative/lower whisker only.
+    #[serde(alias = "below", alias = "lower", alias = "lower_only")]
     LowerOnly,
 }
 
@@ -987,12 +1051,16 @@ pub struct MultivariateGraphEncoding {
 pub enum BracketStyle {
     /// Classic inverted-U bracket with vertical downward legs at `group_a` and `group_b`.
     #[default]
+    #[serde(alias = "square", alias = "capped", alias = "ticks")]
     Square,
     /// Horizontal bar with short downward end ticks.
+    #[serde(alias = "half_tick")]
     HalfTick,
     /// Plain horizontal line segment with no vertical end ticks.
+    #[serde(alias = "flat", alias = "flat_line", alias = "plain")]
     FlatLine,
     /// Smooth typographic curly brace pointing upward toward the significance label.
+    #[serde(alias = "curly", alias = "curly_brace")]
     CurlyBrace,
 }
 
@@ -1001,8 +1069,10 @@ pub enum BracketStyle {
 pub enum BracketLabelMode {
     /// Display asterisk significance tiers (`"*"`, `"**"`, `"***"`, `"****"`, or `"ns"`) formatted via the upstream analysis's [`crate::PValueFormat`].
     #[default]
+    #[serde(alias = "stars", alias = "summary_stars", alias = "stars_only")]
     SummaryStars,
     /// Display exact formatted numeric `p = ...` (or `q = ...` when [`crate::PairwiseComparisonRecord::is_fdr_q`] is `true`).
+    #[serde(alias = "numeric", alias = "p_value", alias = "p_only", alias = "stars_and_p")]
     NumericPOrQ,
     /// Display an explicit caller-supplied text string.
     Custom(String),
@@ -1036,10 +1106,13 @@ pub struct PairwiseBracketSpec {
 pub enum AnnotationShapeKind {
     /// Sharp-cornered axis-aligned rectangle.
     #[default]
+    #[serde(alias = "rectangle", alias = "rect")]
     Rectangle,
     /// Axis-aligned rectangle with rounded corner arcs.
+    #[serde(alias = "rounded_rectangle", alias = "rounded")]
     RoundedRectangle,
     /// Axis-aligned ellipse inscribed in `bounds_pt`.
+    #[serde(alias = "ellipse", alias = "circle")]
     Ellipse,
 }
 
@@ -1048,8 +1121,10 @@ pub enum AnnotationShapeKind {
 pub enum EquationDisplayMode {
     /// Substitute converged numeric parameter estimates (for example `Y = 100.0 * X / (2.50 + X)`).
     #[default]
+    #[serde(alias = "substituted")]
     Substituted,
     /// Render symbolic parameter names without numeric substitution (for example `Y = Vmax * X / (Km + X)`).
+    #[serde(alias = "symbolic")]
     Symbolic,
 }
 
@@ -1177,8 +1252,10 @@ impl Default for LegendSpec {
 pub enum CldOrdering {
     /// Highest group mean/rank receives `'a'`; lower groups progress monotonically toward `'b'`, `'c'`, ....
     #[default]
+    #[serde(alias = "descendingmean", alias = "descending", alias = "desc", alias = "highestfirst")]
     DescendingMean,
     /// Lowest group mean/rank receives `'a'`; higher groups progress monotonically toward `'b'`, `'c'`, ....
+    #[serde(alias = "ascendingmean", alias = "ascending", alias = "asc", alias = "lowestfirst")]
     AscendingMean,
 }
 
@@ -1187,10 +1264,13 @@ pub enum CldOrdering {
 pub enum PairwiseDisplayMode {
     /// Render pairwise significance brackets only (`comparisons`).
     #[default]
+    #[serde(alias = "bracketsonly", alias = "brackets")]
     BracketsOnly,
     /// Render Piepho (2004) compact letter display annotations above plotted groups only.
+    #[serde(alias = "compactletterdisplayonly", alias = "cldonly", alias = "cld", alias = "lettersonly", alias = "letters")]
     CompactLetterDisplayOnly,
     /// Render both compact letter display letters and non-overlapping significance brackets.
+    #[serde(alias = "bracketsandcompactletterdisplay", alias = "bracketsandcld", alias = "both")]
     BracketsAndCompactLetterDisplay,
 }
 

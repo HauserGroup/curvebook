@@ -17,7 +17,7 @@ use crate::i18n::tr;
 use crate::inspect::ZLayer;
 
 use super::inspect_bridge::{ModalCaptureSpec, finalize_egui_modal_response};
-use super::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens, widgets};
+use super::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens, UiIntent, widgets};
 
 /// Five pipeline steps of the `Import & Paste Special` wizard (`gui-layout-spec.md` §8.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -173,7 +173,7 @@ pub fn render_import_or_convert_modal(
     }
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
         if is_wizard {
-            intents.push_close_import_wizard();
+            intents.push(UiIntent::CloseImportWizard);
         } else {
             intents.push_dialog_button("cancel");
         }
@@ -225,7 +225,7 @@ pub fn render_import_or_convert_modal(
         render_wizard_footer(ui, &mut modal_cx, is_wizard, is_reshape);
         wiz_dirty = modal_cx.wiz_dirty;
         if wiz_dirty && is_wizard {
-            modal_cx.intents.push_update_import_wizard(modal_cx.wiz);
+            modal_cx.intents.push(UiIntent::UpdateImportWizard(Box::new(modal_cx.wiz)));
         }
     });
 
@@ -1057,7 +1057,7 @@ fn render_paste_clipboard_button(ui: &mut Ui, meta: &mut FrameInspectMeta, inten
     let pb = widgets::secondary_button(ui, "Paste Clipboard");
     meta.record_modal_response(ui, &pb, FrameInspectEntryInput::modal("import_paste.btn.paste_clipboard", "button", "Paste Clipboard", None, true));
     if pb.clicked() {
-        intents.push_paste_clipboard_into_import_reshape();
+        intents.push(UiIntent::PasteClipboardIntoImportReshape);
     }
 }
 
@@ -1164,7 +1164,7 @@ fn render_import_reshape_body(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w:
                 FrameInspectEntryInput::modal("import.subtract_blank_mean", "checkbox", "Subtract Blank Mean", Some(sub_blank.to_string()), true),
             );
             if sb_resp.changed() {
-                intents.push_dialog_widget_click("import.subtract_blank_mean");
+                intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("import.subtract_blank_mean") });
                 let is_384 = ir.mode == ImportReshapeMode::Plate384;
                 let expected = if is_384 { 384 } else { 96 };
                 if sub_blank && (ir.plate_roles.len() != expected || !ir.plate_roles.iter().any(|r| r.as_str() == Some("Blank"))) {
@@ -1310,7 +1310,7 @@ fn render_convert_archetype_body(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, body_
             FrameInspectEntryInput::modal("convert.allow_lossy", "checkbox", "Allow Lossy Conversion", Some(lossy.to_string()), true),
         );
         if lr.changed() {
-            intents.push_dialog_widget_click("convert.allow_lossy");
+            intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("convert.allow_lossy") });
         }
 
         let mut prev_only = ca.preview_only;
@@ -1321,7 +1321,7 @@ fn render_convert_archetype_body(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, body_
             FrameInspectEntryInput::modal("convert.preview_only", "checkbox", "Preview Only", Some(prev_only.to_string()), true),
         );
         if pr.changed() {
-            intents.push_dialog_widget_click("convert.preview_only");
+            intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("convert.preview_only") });
         }
 
         if ca.preview_ready {
@@ -1355,7 +1355,7 @@ fn render_wizard_footer(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, is_wizard: boo
         cx.meta.record_modal_response(footer, &cancel_resp, FrameInspectEntryInput::modal("modal.cancel", "button", cancel_lbl, None, true));
         if cancel_resp.clicked() {
             if is_wizard {
-                cx.intents.push_close_import_wizard();
+                cx.intents.push(UiIntent::CloseImportWizard);
                 cx.wiz_dirty = false;
             } else {
                 cx.intents.push_dialog_button("cancel");
@@ -1491,8 +1491,8 @@ fn commit_wizard_import(cx: &mut ImportModalCtx<'_>) {
         commit_wiz.placement.skip_contiguous_blanks = false;
     }
 
-    cx.intents.push_update_import_wizard(commit_wiz);
-    cx.intents.push_commit_import_wizard(true);
+    cx.intents.push(UiIntent::UpdateImportWizard(Box::new(commit_wiz)));
+    cx.intents.push(UiIntent::CommitImportWizard { close_after: true });
     cx.wiz_dirty = false;
 
     let target_ds_id = cx
@@ -1931,16 +1931,12 @@ pub(super) fn default_plate_roles(is_384: bool, blank_row_a: bool) -> Vec<Value>
             } else {
                 #[allow(clippy::cast_precision_loss)]
                 let x = (c + 1) as f64;
-                json!({ "role": "treatment", "group": "Sample", "x": x, "rep": r + 1 })
+                json!({ "role": "treatment", "group_name": "Sample", "dilution_x": x, "replicate": r + 1 })
             }
         })
         .collect()
 }
 
 fn choice_pill(ui: &mut Ui, tokens: &Tokens, label: &str, selected: bool, enabled: bool) -> egui::Response {
-    let mut text = RichText::new(label);
-    if selected {
-        text = text.color(tokens.accent).strong();
-    }
-    ui.add_enabled(enabled, egui::Button::new(text).selected(selected))
+    super::ui_kit::choice_pill(ui, tokens, label, selected, enabled)
 }

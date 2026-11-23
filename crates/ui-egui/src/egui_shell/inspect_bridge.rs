@@ -13,6 +13,8 @@ use serde_json::json;
 
 use crate::UiApp;
 use crate::dialogs_canvas::ActiveDialog;
+#[cfg(any(test, feature = "test-support"))]
+use crate::egui_shell::FrameInspectEntryInput;
 use crate::egui_shell::app_modals::render_app_modal;
 use crate::egui_shell::center_stage::{CenterStageContext, render_center_stage};
 use crate::egui_shell::command_palette::render_command_palette;
@@ -32,9 +34,7 @@ use crate::egui_shell::status_footer::{StatusFooterContext, render_status_footer
 use crate::egui_shell::top_chrome::{TopChromeContext, render_top_chrome};
 use crate::egui_shell::trailing_studio::{TrailingStudioContext, render_trailing_studio};
 use crate::egui_shell::transform_modals::{is_transform_edit_dialog_active, render_exclude_with_reason_modal, render_transform_modal};
-use crate::egui_shell::{
-    EguiShellViewState, FrameInspectEntryInput, FrameInspectMeta, FrameInspectNodeMeta, PendingUiIntents, ShellLayoutInput, Tokens, UiIntentOutcome,
-};
+use crate::egui_shell::{EguiShellViewState, FrameInspectMeta, FrameInspectNodeMeta, PendingUiIntents, ShellLayoutInput, Tokens, UiIntentOutcome};
 use crate::inspect::{
     GridSelectionSnapshot, UiDialogSnapshot, UiMenuSnapshot, UiNavigatorSheetNode, UiTreeSnapshot, UiWidgetNode, ZLayer, active_dialog_slug,
     inspect_semantic_snapshot,
@@ -251,6 +251,7 @@ impl HybridCoexistenceArbiter {
     }
 
     /// Return `true` when `Cmd/Ctrl+T` is eligible to open `EditAnalysisParameters` on an active `ResultSheet`.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn allows_cmd_t_edit_params(app: &UiApp, decision: &HybridCoexistenceDecision, egui_wants_keyboard: bool) -> bool {
         !decision.modal_backdrop_active && !egui_wants_keyboard && crate::interaction::resolve_result_sheet_for_shortcut(app, true).is_some()
@@ -294,7 +295,7 @@ fn classify_active_dialog_surface(app: &UiApp) -> HybridModalSurface {
     }
 }
 
-/// Result emitted by [`render_minimal_shell_and_about`] and [`render_egui_shell_frame`] for
+/// Result emitted by `render_minimal_shell_and_about` and [`render_egui_shell_frame`] for
 /// testing, `ui.inspect`, `ui.screenshot`, and `apps/curvebook` viewport sync.
 #[derive(Debug, Clone, Default)]
 pub struct ShellAboutFrameReport {
@@ -314,6 +315,14 @@ pub struct ShellAboutFrameReport {
     pub grid_overlay_shown: bool,
 }
 
+impl ShellAboutFrameReport {
+    const fn apply_modal_capture(&mut self, dialog_rect_pt: Option<egui::Rect>, outside_click_captured: bool, outside_wheel_captured: bool) {
+        self.regions.dialog_rect_pt = dialog_rect_pt;
+        self.outside_click_captured = outside_click_captured;
+        self.outside_wheel_captured = outside_wheel_captured;
+    }
+}
+
 /// Convert a logical coordinate `[x_pt, y_pt]` to physical pixels using `pixels_per_point`.
 #[must_use]
 pub fn logical_pt_to_physical_px(pt: [f64; 2], pixels_per_point: f32) -> [f64; 2] {
@@ -322,6 +331,7 @@ pub fn logical_pt_to_physical_px(pt: [f64; 2], pixels_per_point: f32) -> [f64; 2
 }
 
 /// Convert a physical pixel coordinate `[x_px, y_px]` to logical points using `pixels_per_point`.
+#[cfg(any(test, feature = "test-support"))]
 #[must_use]
 pub fn physical_px_to_logical_pt(px: [f64; 2], pixels_per_point: f32) -> [f64; 2] {
     let scale = if pixels_per_point.is_finite() && pixels_per_point > 0.0 { f64::from(pixels_per_point) } else { 1.0 };
@@ -918,6 +928,7 @@ fn build_egui_grid_cells_snapshot(
 /// Render a minimal `egui_shell` workspace + `About` modal view (`R15.1` b4/b5) using canonical
 /// [`Tokens`], non-overlapping solid scrollbars, `100%` `ZLayer::ModalBackdrop` outside input
 /// capture, [`FrameInspectMeta`], and [`PendingUiIntents`].
+#[cfg(any(test, feature = "test-support"))]
 pub fn render_minimal_shell_and_about(
     ui: &mut egui::Ui,
     app: &UiApp,
@@ -1125,121 +1136,84 @@ pub fn render_egui_shell_frame_with_host(
         views.fit_modal.open_session_sheet_id = None;
     }
 
+    macro_rules! record_modal {
+        ($rep:expr) => {{
+            let r = $rep;
+            report.apply_modal_capture(r.dialog_rect_pt, r.outside_click_captured, r.outside_wheel_captured);
+            r
+        }};
+    }
+
     match decision.modal_surface {
         HybridModalSurface::EguiAbout
         | HybridModalSurface::EguiAppModal
         | HybridModalSurface::HostUnsavedClose
         | HybridModalSurface::EguiPreferences
         | HybridModalSurface::EguiFindReplace => {
-            let app_rep = render_app_modal(&ctx, app, &mut views.app_modals, host_close_dialog_open, &tokens, meta, intents);
-            report.regions.dialog_rect_pt = app_rep.dialog_rect_pt;
-            report.outside_click_captured = app_rep.outside_click_captured;
-            report.outside_wheel_captured = app_rep.outside_wheel_captured;
+            record_modal!(render_app_modal(&ctx, app, &mut views.app_modals, host_close_dialog_open, &tokens, meta, intents));
         }
         HybridModalSurface::EguiOneWayAnova => {
-            let anova_rep = render_one_way_anova_modal(&ctx, app, &mut views.anova_modal, &tokens, meta, intents);
-            report.regions.dialog_rect_pt = anova_rep.dialog_rect_pt;
-            report.outside_click_captured = anova_rep.outside_click_captured;
-            report.outside_wheel_captured = anova_rep.outside_wheel_captured;
+            let anova_rep = record_modal!(render_one_way_anova_modal(&ctx, app, &mut views.anova_modal, &tokens, meta, intents));
             report.resolved_test_banner = anova_rep.resolved_test_banner;
         }
         HybridModalSurface::EguiCommandPalette => {
-            let pal_rep = render_command_palette(&ctx, app, &mut views.command_palette, &tokens, meta, intents);
-            report.regions.dialog_rect_pt = pal_rep.dialog_rect_pt;
-            report.outside_click_captured = pal_rep.outside_click_captured;
-            report.outside_wheel_captured = pal_rep.outside_wheel_captured;
+            record_modal!(render_command_palette(&ctx, app, &mut views.command_palette, &tokens, meta, intents));
         }
         HybridModalSurface::EguiManageVariables => {
-            let mv_rep = render_manage_vars_modal(&ctx, app, &mut views.manage_vars_modal, &tokens, meta, intents);
-            report.regions.dialog_rect_pt = mv_rep.dialog_rect_pt;
-            report.outside_click_captured = mv_rep.outside_click_captured;
-            report.outside_wheel_captured = mv_rep.outside_wheel_captured;
+            record_modal!(render_manage_vars_modal(&ctx, app, &mut views.manage_vars_modal, &tokens, meta, intents));
         }
         HybridModalSurface::EguiImportWizard => {
-            let imp_rep = render_import_or_convert_modal(&ctx, app, &mut views.import_wizard, &tokens, meta, intents);
-            report.regions.dialog_rect_pt = imp_rep.dialog_rect_pt;
-            report.outside_click_captured = imp_rep.outside_click_captured;
-            report.outside_wheel_captured = imp_rep.outside_wheel_captured;
+            record_modal!(render_import_or_convert_modal(&ctx, app, &mut views.import_wizard, &tokens, meta, intents));
         }
         HybridModalSurface::EguiTransformModal => {
-            let tr_rep = if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::ExcludeWithReason { .. }) {
-                render_exclude_with_reason_modal(&ctx, app, &mut views.transform_modals, &tokens, meta, intents)
+            if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::ExcludeWithReason { .. }) {
+                record_modal!(render_exclude_with_reason_modal(&ctx, app, &mut views.transform_modals, &tokens, meta, intents));
             } else {
-                render_transform_modal(&ctx, app, &mut views.transform_modals, &tokens, meta, intents)
-            };
-            report.regions.dialog_rect_pt = tr_rep.dialog_rect_pt;
-            report.outside_click_captured = tr_rep.outside_click_captured;
-            report.outside_wheel_captured = tr_rep.outside_wheel_captured;
+                record_modal!(render_transform_modal(&ctx, app, &mut views.transform_modals, &tokens, meta, intents));
+            }
         }
         HybridModalSurface::EguiAnalyzeSheet => {
-            let st_rep = render_analyze_sheet_modal(&ctx, app, &mut views.stats_modals, &tokens, meta, intents);
-            report.regions.dialog_rect_pt = st_rep.dialog_rect_pt;
-            report.outside_click_captured = st_rep.outside_click_captured;
-            report.outside_wheel_captured = st_rep.outside_wheel_captured;
+            record_modal!(render_analyze_sheet_modal(&ctx, app, &mut views.stats_modals, &tokens, meta, intents));
         }
         HybridModalSurface::EguiDuplicateAnalysis => {
-            let st_rep = render_duplicate_analysis_modal(&ctx, app, &mut views.stats_modals, &tokens, meta, intents);
-            report.regions.dialog_rect_pt = st_rep.dialog_rect_pt;
-            report.outside_click_captured = st_rep.outside_click_captured;
-            report.outside_wheel_captured = st_rep.outside_wheel_captured;
+            record_modal!(render_duplicate_analysis_modal(&ctx, app, &mut views.stats_modals, &tokens, meta, intents));
         }
         HybridModalSurface::EguiChangeDataAnalyzed => {
-            let st_rep = render_change_data_analyzed_modal(&ctx, app, &mut views.stats_modals, &tokens, meta, intents);
-            report.regions.dialog_rect_pt = st_rep.dialog_rect_pt;
-            report.outside_click_captured = st_rep.outside_click_captured;
-            report.outside_wheel_captured = st_rep.outside_wheel_captured;
+            record_modal!(render_change_data_analyzed_modal(&ctx, app, &mut views.stats_modals, &tokens, meta, intents));
         }
         HybridModalSurface::EguiStatParams => {
             let st_rep = match &app.canvas_dialogs.active_dialog {
                 ActiveDialog::RandomizeGroups | ActiveDialog::RandomSampleRows { .. } | ActiveDialog::SimulateDistributions => {
-                    render_dialogs_r9_modal(&ctx, app, &mut views.stats_modals, &tokens, meta, intents)
+                    record_modal!(render_dialogs_r9_modal(&ctx, app, &mut views.stats_modals, &tokens, meta, intents))
                 }
-                ActiveDialog::ResultViewer { .. } => render_result_viewer_modal(&ctx, app, &tokens, meta, intents),
-                _ => render_stat_params_modal(&ctx, app, &mut views.stats_modals, &tokens, meta, intents),
+                ActiveDialog::ResultViewer { .. } => record_modal!(render_result_viewer_modal(&ctx, app, &tokens, meta, intents)),
+                _ => record_modal!(render_stat_params_modal(&ctx, app, &mut views.stats_modals, &tokens, meta, intents)),
             };
-            report.regions.dialog_rect_pt = st_rep.dialog_rect_pt;
-            report.outside_click_captured = st_rep.outside_click_captured;
-            report.outside_wheel_captured = st_rep.outside_wheel_captured;
             if !st_rep.resolved_test_banner.is_empty() {
                 report.resolved_test_banner = st_rep.resolved_test_banner;
             }
         }
         HybridModalSurface::EguiFitModal => {
-            let fit_rep = render_fit_modal(&ctx, app, &mut views.fit_modal, &tokens, meta, intents);
-            report.regions.dialog_rect_pt = fit_rep.dialog_rect_pt;
-            report.outside_click_captured = fit_rep.outside_click_captured;
-            report.outside_wheel_captured = fit_rep.outside_wheel_captured;
+            record_modal!(render_fit_modal(&ctx, app, &mut views.fit_modal, &tokens, meta, intents));
         }
         HybridModalSurface::EguiHookPicker => {
-            let fit_rep = render_hook_constant_modal(&ctx, app, &mut views.fit_modal, &tokens, meta, intents);
-            report.regions.dialog_rect_pt = fit_rep.dialog_rect_pt;
-            report.outside_click_captured = fit_rep.outside_click_captured;
-            report.outside_wheel_captured = fit_rep.outside_wheel_captured;
+            record_modal!(render_hook_constant_modal(&ctx, app, &mut views.fit_modal, &tokens, meta, intents));
         }
         HybridModalSurface::EguiPowerStudio => {
-            let pow_rep = render_power_studio_modal(&ctx, app, &mut views.power_studio, &tokens, meta, intents);
-            report.regions.dialog_rect_pt = pow_rep.dialog_rect_pt;
-            report.outside_click_captured = pow_rep.outside_click_captured;
-            report.outside_wheel_captured = pow_rep.outside_wheel_captured;
+            record_modal!(render_power_studio_modal(&ctx, app, &mut views.power_studio, &tokens, meta, intents));
         }
         HybridModalSurface::EguiGraphModal => {
-            let gr_rep = render_graph_modal(&ctx, app, &mut views.graph_modals, &tokens, meta, intents);
-            report.regions.dialog_rect_pt = gr_rep.dialog_rect_pt;
-            report.outside_click_captured = gr_rep.outside_click_captured;
-            report.outside_wheel_captured = gr_rep.outside_wheel_captured;
+            record_modal!(render_graph_modal(&ctx, app, &mut views.graph_modals, &tokens, meta, intents));
         }
         HybridModalSurface::EguiNavDeleteConfirm => {
-            let del_rep = crate::egui_shell::leading_dock::render_navigator_delete_confirm_modal(
+            record_modal!(crate::egui_shell::leading_dock::render_navigator_delete_confirm_modal(
                 &ctx,
                 &app.locale,
                 &mut views.leading_dock,
                 &tokens,
                 meta,
                 intents,
-            );
-            report.regions.dialog_rect_pt = del_rep.dialog_rect_pt;
-            report.outside_click_captured = del_rep.outside_click_captured;
-            report.outside_wheel_captured = del_rep.outside_wheel_captured;
+            ));
         }
         HybridModalSurface::None => {}
     }
@@ -1485,6 +1459,7 @@ fn handle_shell_global_shortcuts(
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn render_top_about_only_bar(ui: &mut egui::Ui, app: &UiApp, modal_open: bool, meta: &mut FrameInspectMeta, intents: &mut PendingUiIntents) {
     let about_label = tr(&app.locale, "menu.help.about");
     egui::Panel::top("egui_shell_minimal_top_bar").show(ui, |ui| {
@@ -1513,6 +1488,7 @@ fn render_top_about_only_bar(ui: &mut egui::Ui, app: &UiApp, modal_open: bool, m
     });
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn render_about_modal(
     ctx: &egui::Context,
     app: &UiApp,
@@ -1523,17 +1499,17 @@ fn render_about_modal(
 ) {
     let app_state = crate::egui_shell::app_modals::AppModalsEguiState::default();
     let app_rep = crate::egui_shell::app_modals::render_about_modal(ctx, app, &app_state, tokens, meta, intents);
-    report.regions.dialog_rect_pt = app_rep.dialog_rect_pt;
-    report.outside_click_captured = app_rep.outside_click_captured;
-    report.outside_wheel_captured = app_rep.outside_wheel_captured;
+    report.apply_modal_capture(app_rep.dialog_rect_pt, app_rep.outside_click_captured, app_rep.outside_wheel_captured);
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn rects_overlap_significantly(a: egui::accesskit::Rect, b: egui::accesskit::Rect, tol: f64) -> bool {
     let x_overlap = a.x1.min(b.x1) - a.x0.max(b.x0);
     let y_overlap = a.y1.min(b.y1) - a.y0.max(b.y0);
     x_overlap > tol && y_overlap > tol
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn is_interactive_child_role(role: egui::accesskit::Role) -> bool {
     use egui::accesskit::Role;
     matches!(
@@ -1558,6 +1534,7 @@ fn is_interactive_child_role(role: egui::accesskit::Role) -> bool {
 ///
 /// # Errors
 /// Returns a descriptive error naming the overlapping `ScrollBar` and child node on overlap.
+#[cfg(any(test, feature = "test-support"))]
 pub fn check_accesskit_scrollbar_non_overlap(update: &egui::accesskit::TreeUpdate) -> Result<(), String> {
     let mut scrollbars = Vec::new();
     let mut interactive = Vec::new();

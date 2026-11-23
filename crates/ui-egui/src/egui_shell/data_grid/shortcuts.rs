@@ -1,5 +1,5 @@
-//! Keyboard navigation, exclusion, typing-to-edit, and clipboard shortcuts for `Column` and
-//! multi-archetype data grids.
+//! Unified keyboard navigation, exclusion, typing-to-edit, and clipboard shortcuts for all 8 data
+//! grid archetypes.
 
 use curvebook_doc::{CellCoord, DataSheet, SheetCellRange, TableArchetype, VariableSource, XColumnMode};
 use curvebook_tools::GridCellCoord;
@@ -10,156 +10,13 @@ use crate::UiApp;
 use crate::views::grid_core::linked_region_for_cell;
 
 use super::super::{PendingUiIntents, UiIntent};
+use super::GridInlineEditTarget;
 use super::inline_edit::begin_inline_edit;
 use super::linked_regions::open_link_popover;
 use super::shared::{
-    AuxInlineTarget, GridRenderCtx, MultiGridAuxState, MultiGridCtx, MultiGridFrameState, MultiGridGeom, format_cell_into,
-    initial_edit_text_for_cell, is_grid_focus_active, parse_inline_cell_input, pressed_key_event_modifiers,
+    AuxInlineTarget, MultiGridCtx, MultiGridFrameState, MultiGridGeom, format_cell_into, initial_edit_text_for_cell, is_grid_focus_active,
+    parse_inline_cell_input, pressed_key_event_modifiers,
 };
-use super::{ColumnGridEguiState, GridInlineEditTarget};
-
-pub(super) fn handle_grid_keyboard_shortcuts(ui: &mut Ui, rctx: &GridRenderCtx<'_>, state: &mut ColumnGridEguiState, intents: &mut PendingUiIntents) {
-    if rctx.input_blocked(state) || state.inline_edit.is_some() || ui.ctx().egui_wants_keyboard_input() {
-        return;
-    }
-    if !is_grid_focus_active(ui, rctx.app, &rctx.ds.id) {
-        return;
-    }
-
-    let Some(active) = rctx.app.grid.tool.active else {
-        return;
-    };
-    let modifiers = ui.input(|i| i.modifiers);
-
-    // Check `Cmd/Ctrl + E` (exclude/include) & `Cmd/Ctrl + Shift + E` (exclude with reason)
-    if let Some(e_mods) = pressed_key_event_modifiers(ui, Key::E)
-        && (e_mods.command || e_mods.mac_cmd || e_mods.ctrl)
-    {
-        if !rctx.ds.frozen {
-            if let Some(reg) = linked_region_for_cell(rctx.ds, active.row, active.col) {
-                open_link_popover(state, reg, rctx.locale);
-                ui.ctx().request_repaint();
-                return;
-            }
-            if e_mods.shift {
-                intents.push_ui("ui.grid.excludeWithReason", json!({ "sheet_id": rctx.ds.id.as_str() }));
-            } else {
-                let cur_excl = rctx.ds.cell(CellCoord::from(active)).is_some_and(|c| c.excluded);
-                intents.push_engine(
-                    "table.excludeCells",
-                    json!({
-                        "sheet_id": rctx.ds.id.as_str(),
-                        "excluded": !cur_excl,
-                        "row": active.row,
-                        "col": active.col,
-                        "subcol": active.subcol,
-                    }),
-                );
-            }
-        }
-        ui.ctx().request_repaint();
-        return;
-    }
-
-    // Clipboard Cut & Paste (`Cmd/Ctrl + X`, `Cmd/Ctrl + V`)
-    let cut_requested = ui.input(|i| i.events.iter().any(|ev| matches!(ev, egui::Event::Cut)))
-        || pressed_key_event_modifiers(ui, Key::X).is_some_and(|m| m.command || m.mac_cmd || m.ctrl);
-    if cut_requested {
-        if !rctx.ds.frozen {
-            if let Some(reg) = linked_region_for_cell(rctx.ds, active.row, active.col) {
-                open_link_popover(state, reg, rctx.locale);
-                ui.ctx().request_repaint();
-                return;
-            }
-            intents.push_grid_cut_selection();
-        }
-        ui.ctx().request_repaint();
-        return;
-    }
-
-    let paste_requested = ui.input(|i| i.events.iter().any(|ev| matches!(ev, egui::Event::Paste(_))))
-        || pressed_key_event_modifiers(ui, Key::V).is_some_and(|m| m.command || m.mac_cmd || m.ctrl);
-    if paste_requested {
-        if !rctx.ds.frozen {
-            if let Some(reg) = linked_region_for_cell(rctx.ds, active.row, active.col) {
-                open_link_popover(state, reg, rctx.locale);
-                ui.ctx().request_repaint();
-                return;
-            }
-            intents.push_grid_paste_from_clipboard(Some(active));
-        }
-        ui.ctx().request_repaint();
-        return;
-    }
-
-    // Navigation & Clear keys
-    let nav_payload = if let Some(m) = pressed_key_event_modifiers(ui, Key::ArrowUp) {
-        Some(if m.shift { "nav:shift_up" } else { "nav:up" })
-    } else if let Some(m) = pressed_key_event_modifiers(ui, Key::ArrowDown) {
-        Some(if m.shift { "nav:shift_down" } else { "nav:down" })
-    } else if let Some(m) = pressed_key_event_modifiers(ui, Key::ArrowLeft) {
-        Some(if m.shift { "nav:shift_left" } else { "nav:left" })
-    } else if let Some(m) = pressed_key_event_modifiers(ui, Key::ArrowRight) {
-        Some(if m.shift { "nav:shift_right" } else { "nav:right" })
-    } else if let Some(m) = pressed_key_event_modifiers(ui, Key::Tab) {
-        Some(if m.shift { "nav:shift_tab" } else { "nav:tab" })
-    } else if let Some(m) = pressed_key_event_modifiers(ui, Key::Enter) {
-        Some(if m.shift { "nav:shift_enter" } else { "nav:enter" })
-    } else if ui.input(|i| i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace)) {
-        if let Some(reg) = linked_region_for_cell(rctx.ds, active.row, active.col) {
-            open_link_popover(state, reg, rctx.locale);
-            ui.ctx().request_repaint();
-            return;
-        }
-        Some("edit:clear")
-    } else {
-        None
-    };
-
-    if let Some(payload) = nav_payload {
-        intents.push_custom_view_action("grid_core", payload);
-        ui.ctx().request_repaint();
-        return;
-    }
-
-    // `F2` or direct text/IME typing begins buffered inline edit on active cell (or triggers linked guard)
-    if ui.input(|i| i.key_pressed(Key::F2)) {
-        if !rctx.ds.frozen {
-            if let Some(reg) = linked_region_for_cell(rctx.ds, active.row, active.col) {
-                open_link_popover(state, reg, rctx.locale);
-                ui.ctx().request_repaint();
-            } else {
-                let cell = rctx.ds.cell(CellCoord::from(active));
-                let initial = initial_edit_text_for_cell(cell, &rctx.app.locale_preset);
-                begin_inline_edit(ui, state, GridInlineEditTarget::Cell(active), initial);
-            }
-        }
-        return;
-    }
-
-    if !modifiers.command && !modifiers.ctrl && !modifiers.alt {
-        let typed = ui.input(|i| {
-            i.events.iter().find_map(|ev| match ev {
-                egui::Event::Text(t) if !t.is_empty() && !t.chars().all(char::is_control) => Some(t.clone()),
-                egui::Event::Ime(egui::ImeEvent::Commit(t)) if !t.is_empty() => Some(t.clone()),
-                _ => None,
-            })
-        });
-        if let Some(text) = typed {
-            ui.input_mut(|i| {
-                i.events.retain(|ev| !matches!(ev, egui::Event::Text(_) | egui::Event::Ime(egui::ImeEvent::Commit(_))));
-            });
-            if !rctx.ds.frozen {
-                if let Some(reg) = linked_region_for_cell(rctx.ds, active.row, active.col) {
-                    open_link_popover(state, reg, rctx.locale);
-                    ui.ctx().request_repaint();
-                } else {
-                    begin_inline_edit(ui, state, GridInlineEditTarget::Cell(active), text);
-                }
-            }
-        }
-    }
-}
 
 fn x_subcolumn_count(arch: &TableArchetype) -> usize {
     match arch {
@@ -309,19 +166,21 @@ fn take_workspace_copy_intent(intents: &mut PendingUiIntents) -> bool {
     true
 }
 
-fn handle_multi_clipboard_shortcuts(ui: &Ui, app: &UiApp, ds: &DataSheet, aux: &MultiGridAuxState, intents: &mut PendingUiIntents) -> bool {
-    let has_workspace_copy = intents.intents().iter().any(|it| matches!(it, UiIntent::WorkspaceCopy { .. }));
+fn handle_multi_clipboard_shortcuts(ui: &Ui, mctx: &MultiGridCtx<'_>, fstate: &mut MultiGridFrameState<'_>) -> bool {
+    let app = mctx.app;
+    let ds = mctx.ds;
+    let has_workspace_copy = fstate.intents.intents().iter().any(|it| matches!(it, UiIntent::WorkspaceCopy { .. }));
     let copy_key = ui.input(|i| i.events.iter().any(|ev| matches!(ev, egui::Event::Copy)))
         || pressed_key_event_modifiers(ui, Key::C).is_some_and(|m| m.command || m.mac_cmd || m.ctrl);
     if has_workspace_copy || copy_key {
-        if let Some((xr, xs)) = aux.selected_x_cell {
-            let _ = take_workspace_copy_intent(intents);
+        if let Some((xr, xs)) = fstate.aux.selected_x_cell {
+            let _ = take_workspace_copy_intent(fstate.intents);
             copy_x_cell_to_clipboard(ui, app, ds, xr, xs);
             return true;
         }
         clear_x_clipboard_cache(ui);
         if !has_workspace_copy {
-            intents.push_grid_copy_selection();
+            fstate.intents.push_grid_copy_selection();
         }
         return true;
     }
@@ -329,16 +188,26 @@ fn handle_multi_clipboard_shortcuts(ui: &Ui, app: &UiApp, ds: &DataSheet, aux: &
     let cut_key = ui.input(|i| i.events.iter().any(|ev| matches!(ev, egui::Event::Cut)))
         || pressed_key_event_modifiers(ui, Key::X).is_some_and(|m| m.command || m.mac_cmd || m.ctrl);
     if cut_key {
-        if let Some((xr, xs)) = aux.selected_x_cell {
+        if let Some((xr, xs)) = fstate.aux.selected_x_cell {
             copy_x_cell_to_clipboard(ui, app, ds, xr, xs);
             if !is_x_column_readonly(ds) {
-                intents
+                fstate
+                    .intents
                     .push_engine("table.setXCells", json!({ "sheet_id": ds.id.as_str(), "row": xr, "subcol": xs, "value": serde_json::Value::Null }));
             }
             return true;
         }
-        clear_x_clipboard_cache(ui);
-        intents.push_grid_cut_selection();
+        if !ds.frozen {
+            if let Some(active) = app.grid.tool.active
+                && let Some(reg) = linked_region_for_cell(ds, active.row, active.col)
+            {
+                open_link_popover(fstate.state, reg, mctx.locale);
+                ui.ctx().request_repaint();
+                return true;
+            }
+            clear_x_clipboard_cache(ui);
+            fstate.intents.push_grid_cut_selection();
+        }
         return true;
     }
 
@@ -350,10 +219,20 @@ fn handle_multi_clipboard_shortcuts(ui: &Ui, app: &UiApp, ds: &DataSheet, aux: &
     });
     let paste_key = paste_event_text.is_some() || pressed_key_event_modifiers(ui, Key::V).is_some_and(|m| m.command || m.mac_cmd || m.ctrl);
     if paste_key {
-        if let Some((xr, xs)) = aux.selected_x_cell {
+        if let Some((xr, xs)) = fstate.aux.selected_x_cell {
             if let Some(clip) = paste_event_text.or_else(|| read_clipboard_text_for_x_paste(ui, app)) {
-                push_x_cell_text_paste_intents(app, ds, xr, xs, &clip, intents);
+                push_x_cell_text_paste_intents(app, ds, xr, xs, &clip, fstate.intents);
             }
+            return true;
+        }
+        if ds.frozen {
+            return true;
+        }
+        if let Some(active) = app.grid.tool.active
+            && let Some(reg) = linked_region_for_cell(ds, active.row, active.col)
+        {
+            open_link_popover(fstate.state, reg, mctx.locale);
+            ui.ctx().request_repaint();
             return true;
         }
         let x_fallback = paste_event_text.or_else(|| {
@@ -362,7 +241,7 @@ fn handle_multi_clipboard_shortcuts(ui: &Ui, app: &UiApp, ds: &DataSheet, aux: &
         });
         if let Some(clip) = x_fallback {
             let anchor = app.grid.tool.active.unwrap_or(GridCellCoord::new(0, 0, 0));
-            intents.push_engine(
+            fstate.intents.push_engine(
                 "table.paste",
                 json!({
                     "sheet_id": ds.id.as_str(),
@@ -375,7 +254,7 @@ fn handle_multi_clipboard_shortcuts(ui: &Ui, app: &UiApp, ds: &DataSheet, aux: &
             );
             return true;
         }
-        intents.push_grid_paste_from_clipboard(app.grid.tool.active);
+        fstate.intents.push_grid_paste_from_clipboard(app.grid.tool.active);
         return true;
     }
     false
@@ -482,17 +361,21 @@ fn handle_multi_clear_and_edit_shortcuts(ui: &Ui, mctx: &MultiGridCtx<'_>, fstat
         }
     }
     let mods = ui.input(|i| i.modifiers);
-    if !(mods.command || mods.mac_cmd || mods.ctrl) {
+    if !(mods.command || mods.mac_cmd || mods.ctrl || mods.alt) {
         let typed: String = ui.input(|i| {
             i.events
                 .iter()
                 .filter_map(|ev| match ev {
-                    egui::Event::Text(t) if !t.is_empty() && t.chars().all(|c| !c.is_control()) => Some(t.as_str()),
+                    egui::Event::Text(t) if !t.is_empty() && !t.chars().all(char::is_control) => Some(t.as_str()),
+                    egui::Event::Ime(egui::ImeEvent::Commit(t)) if !t.is_empty() => Some(t.as_str()),
                     _ => None,
                 })
                 .collect()
         });
         if !typed.is_empty() {
+            ui.input_mut(|i| {
+                i.events.retain(|ev| !matches!(ev, egui::Event::Text(_) | egui::Event::Ime(egui::ImeEvent::Commit(_))));
+            });
             if let Some((xr, xs)) = fstate.aux.selected_x_cell {
                 if !is_x_column_readonly(ds) {
                     fstate.aux.aux_edit = Some((AuxInlineTarget::XCell { row: xr, subcol: xs }, typed, true));
@@ -500,8 +383,13 @@ fn handle_multi_clear_and_edit_shortcuts(ui: &Ui, mctx: &MultiGridCtx<'_>, fstat
                 return true;
             }
             if let Some(c) = app.grid.tool.active {
+                if let Some(reg) = linked_region_for_cell(ds, c.row, c.col) {
+                    open_link_popover(fstate.state, reg, mctx.locale);
+                    ui.ctx().request_repaint();
+                    return true;
+                }
                 let is_calc = matches!(&ds.archetype, TableArchetype::MultipleVariables(mv) if mv.variables.get(c.col).is_some_and(|v| matches!(v.source, VariableSource::Calculated { .. })));
-                if !is_calc && linked_region_for_cell(ds, c.row, c.col).is_none() {
+                if !is_calc {
                     begin_inline_edit(ui, fstate.state, GridInlineEditTarget::Cell(c), typed);
                 }
                 return true;
@@ -521,7 +409,7 @@ pub(super) fn handle_multi_keyboard_shortcuts(ui: &mut Ui, mctx: &MultiGridCtx<'
     if !is_grid_focus_active(ui, app, &ds.id) && fstate.aux.selected_x_cell.is_none() && app.grid.tool.active.is_none() {
         return;
     }
-    if handle_multi_exclude_shortcut(ui, mctx, fstate) || handle_multi_clipboard_shortcuts(ui, app, ds, fstate.aux, fstate.intents) {
+    if handle_multi_exclude_shortcut(ui, mctx, fstate) || handle_multi_clipboard_shortcuts(ui, mctx, fstate) {
         return;
     }
     if handle_multi_clear_and_edit_shortcuts(ui, mctx, fstate) {
@@ -556,6 +444,23 @@ pub(super) fn handle_multi_keyboard_shortcuts(ui: &mut Ui, mctx: &MultiGridCtx<'
             }
             return;
         }
+    }
+
+    if let Some(km) = pressed_key_event_modifiers(ui, Key::Enter) {
+        if geom.row_count == 0 {
+            return;
+        }
+        let dy: isize = if km.shift { -1 } else { 1 };
+        if let Some((xr, xs)) = fstate.aux.selected_x_cell {
+            let next_row = xr.saturating_add_signed(dy).min(geom.row_count - 1);
+            fstate.aux.selected_x_cell = Some((next_row, xs));
+            ui.ctx().request_repaint();
+        } else if let Some(c) = app.grid.tool.active {
+            let next_row = c.row.saturating_add_signed(dy).min(geom.row_count - 1);
+            fstate.intents.push_select_grid_cell(GridCellCoord::new(next_row, c.col, c.subcol));
+            ui.ctx().request_repaint();
+        }
+        return;
     }
 
     if let Some(km) = pressed_key_event_modifiers(ui, Key::Tab) {

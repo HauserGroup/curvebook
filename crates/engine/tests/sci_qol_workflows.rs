@@ -182,8 +182,8 @@ fn qol6_result_generate_report_renders_plain_markdown_and_latex_read_only() {
     doc.add_data_sheet(sample_anova_column_sheet("col-1")).unwrap();
     let mut session = Session::from_document(doc);
 
-    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "res-anova", "source_sheet": "col-1", "kind": "one_way_anova" }));
-    ok_cmd(&mut session, "fit.run", json!({ "sheet_id": "res-4pl", "source_sheet": "xy-1", "kind": "four_parameter_logistic" }));
+    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "res-anova", "source_sheet_id": "col-1", "kind": "one_way_anova" }));
+    ok_cmd(&mut session, "fit.run", json!({ "sheet_id": "res-4pl", "source_sheet_id": "xy-1", "kind": "four_parameter_logistic" }));
 
     let undo_before = session.undo_depth();
     let redo_before = session.redo_depth();
@@ -195,7 +195,7 @@ fn qol6_result_generate_report_renders_plain_markdown_and_latex_read_only() {
     assert!(!md_report.trim().is_empty());
     assert!(md_report.contains('#') || md_report.contains("**"));
 
-    let plain_rep = ok_cmd(&mut session, "result.generateReport", json!({ "sheet_id": "res-anova", "format": "plain" }));
+    let plain_rep = ok_cmd(&mut session, "result.generateReport", json!({ "result_sheet_id": "res-anova", "format": "plain" }));
     assert_eq!(plain_rep.payload["format"], json!("plain"));
     let plain_report = plain_rep.payload["report"].as_str().unwrap();
     assert!(!plain_report.trim().is_empty());
@@ -219,7 +219,7 @@ fn qol8_graph_canvas_presets_keep_typography_vs_proportional_and_undo_redo() {
     let mut session = seeded_sci_session();
 
     // Seed a large graph (PosterPanel = 864x648 pt) with sub-1pt strokes, bracket typography, and an inside annotation.
-    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "res-anova", "source_sheet": "col-1", "kind": "one_way_anova" }));
+    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "res-anova", "source_sheet_id": "col-1", "kind": "one_way_anova" }));
     ok_cmd(
         &mut session,
         "graph.setSpec",
@@ -239,7 +239,7 @@ fn qol8_graph_canvas_presets_keep_typography_vs_proportional_and_undo_redo() {
             "sheet_id": "g-xy",
             "series_index": 0,
             "marker": { "size_pt": 8.0, "stroke_width_pt": 0.4 },
-            "line": { "stroke_width_pt": 0.5 }
+            "connecting_line": { "stroke_width_pt": 0.5 }
         }),
     );
     ok_cmd(

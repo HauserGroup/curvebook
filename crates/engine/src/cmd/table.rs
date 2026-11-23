@@ -26,11 +26,10 @@ use super::helpers::{
     shift_point_overrides_on_insert_rows, snapshot_active_series_lengths, x_subcolumn_count,
 };
 use super::params::{
-    array_schema, bool_schema, deserialize_strict, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema,
-    obj_schema_with_aliases, parse_params, record_deprecated_object_aliases, str_schema,
+    array_schema, bool_schema, deserialize_strict, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema,
+    parse_params, str_schema,
 };
 use super::project::recalculate_dirty_with_links;
-use super::spellings::{self, first_present};
 use super::{CommandGroup, CommandSpec, Ctx, Effects};
 use crate::{CommandOutcome, EngineError, ErrorCode, Session, dag};
 
@@ -445,12 +444,9 @@ fn has_multivar_sheet(session: &Session) -> bool {
 
 #[derive(Debug, Clone, Deserialize)]
 struct CoordInput {
-    #[serde(alias = "coordinate")]
     coord: Option<Box<CoordInput>>,
     row: Option<usize>,
-    #[serde(alias = "data_set", alias = "dataSet", alias = "column")]
     col: Option<usize>,
-    #[serde(alias = "subcolumn", alias = "replicate")]
     subcol: Option<usize>,
 }
 
@@ -473,11 +469,8 @@ impl CoordInput {
 
 #[derive(Debug, Clone, Deserialize)]
 struct FlexibleCoordInput {
-    #[serde(alias = "target_row", alias = "targetRow")]
     row: Option<usize>,
-    #[serde(alias = "target_col", alias = "targetCol", alias = "data_set", alias = "dataSet", alias = "column")]
     col: Option<usize>,
-    #[serde(alias = "target_subcol", alias = "targetSubcol", alias = "subcolumn", alias = "replicate")]
     subcol: Option<usize>,
 }
 
@@ -489,9 +482,7 @@ impl FlexibleCoordInput {
 
 #[derive(Debug, Clone, Deserialize)]
 struct CellRangeInput {
-    #[serde(alias = "from")]
     start: Option<CoordInput>,
-    #[serde(alias = "to")]
     end: Option<CoordInput>,
 }
 
@@ -521,9 +512,7 @@ enum ColRef {
 struct CellPayloadFields {
     #[serde(default)]
     value: Value,
-    #[serde(alias = "decimalSeparator", alias = "decimal")]
     decimal_separator: Option<String>,
-    #[serde(alias = "parseAsteriskExclusion")]
     parse_asterisk_exclusion: Option<bool>,
     excluded: Option<bool>,
 }
@@ -742,19 +731,12 @@ fn parse_import_filter_val(val: Option<&Value>) -> Result<ImportFilterSpec, Engi
     }
     #[derive(Deserialize)]
     struct FilterObj {
-        #[serde(alias = "rowStart")]
         row_start: Option<usize>,
-        #[serde(alias = "rowEnd")]
         row_end: Option<usize>,
-        #[serde(alias = "colStart")]
         col_start: Option<usize>,
-        #[serde(alias = "colEnd")]
         col_end: Option<usize>,
-        #[serde(alias = "decimateEveryK", alias = "every_nth_row", alias = "everyNthRow")]
         decimate_every_k: Option<usize>,
-        #[serde(alias = "unstackGroupColumn")]
         unstack_group_column: Option<usize>,
-        #[serde(alias = "parseAsteriskExclusions", alias = "parse_asterisk_exclusion", alias = "parseAsteriskExclusion")]
         parse_asterisk_exclusions: Option<bool>,
     }
     let obj: FilterObj = deserialize_strict(v, "/filter")?;
@@ -775,9 +757,7 @@ fn parse_import_filter_val(val: Option<&Value>) -> Result<ImportFilterSpec, Engi
 
 #[derive(Debug, Clone, Deserialize)]
 struct BaselineInput {
-    #[serde(alias = "column", alias = "reference_col", alias = "referenceCol")]
     col: Option<usize>,
-    #[serde(alias = "operation", alias = "mode")]
     op: Option<String>,
 }
 
@@ -807,17 +787,16 @@ fn resolve_baseline_adjustment(baseline: Option<BaselineInput>) -> Result<Option
 // ---------------------------------------------------------------------------
 
 fn coord_object_schema() -> Value {
-    let inner_coord = obj_schema_with_aliases(
+    let inner_coord = obj_schema(
         vec![
             ("row", int_schema("Zero-based row index", Some(0), None)),
             ("col", int_schema("Zero-based dataset/column index", Some(0), None)),
             ("subcol", int_schema("Zero-based replicate subcolumn index (default 0)", Some(0), None)),
         ],
         &[],
-        vec![("col", &["data_set", "dataSet", "column"]), ("subcol", &["subcolumn", "replicate"])],
         false,
     );
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("coord", inner_coord),
             ("row", int_schema("Zero-based row index", Some(0), None)),
@@ -825,14 +804,13 @@ fn coord_object_schema() -> Value {
             ("subcol", int_schema("Zero-based replicate subcolumn index (default 0)", Some(0), None)),
         ],
         &[],
-        vec![("coord", &["coordinate"]), ("col", &["data_set", "dataSet", "column"]), ("subcol", &["subcolumn", "replicate"])],
         false,
     )
 }
 
 fn cell_range_schema() -> Value {
     let endpoint = coord_object_schema();
-    obj_schema_with_aliases(vec![("start", endpoint.clone()), ("end", endpoint)], &["start"], vec![("start", &["from"]), ("end", &["to"])], false)
+    obj_schema(vec![("start", endpoint.clone()), ("end", endpoint)], &["start"], false)
 }
 
 fn cell_value_schema() -> Value {
@@ -844,10 +822,7 @@ fn cell_value_schema() -> Value {
             "value": { "description": "Cell scalar value: finite number, text/numeric string, boolean, or null" },
             "excluded": bool_schema("Optional explicit exclusion flag"),
             "decimal_separator": dec_schema,
-            "decimalSeparator": dec_schema,
-            "decimal": dec_schema,
-            "parse_asterisk_exclusion": ast_schema,
-            "parseAsteriskExclusion": ast_schema
+            "parse_asterisk_exclusion": ast_schema
         },
         "additionalProperties": false
     });
@@ -864,24 +839,19 @@ fn cell_value_schema() -> Value {
 }
 
 fn anchor_schema() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("row", int_schema("Anchor row index", Some(0), None)),
             ("col", int_schema("Anchor column index", Some(0), None)),
             ("subcol", int_schema("Anchor subcolumn index", Some(0), None)),
         ],
         &[],
-        vec![
-            ("row", &["target_row", "targetRow"]),
-            ("col", &["target_col", "targetCol", "data_set", "dataSet", "column"]),
-            ("subcol", &["target_subcol", "targetSubcol", "subcolumn", "replicate"]),
-        ],
         false,
     )
 }
 
 pub(super) fn import_filter_schema() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("row_start", nullable_schema(int_schema("First zero-based source row to include", Some(0), None))),
             ("row_end", nullable_schema(int_schema("Last zero-based source row to include", Some(0), None))),
@@ -912,27 +882,17 @@ pub(super) fn import_filter_schema() -> Value {
             ("exclude_row_predicate", nullable_schema(str_schema("Optional row-level exclusion predicate formula"))),
         ],
         &[],
-        vec![
-            ("row_start", &["rowStart"]),
-            ("row_end", &["rowEnd"]),
-            ("col_start", &["colStart"]),
-            ("col_end", &["colEnd"]),
-            ("decimate_every_k", &["decimateEveryK", "every_nth_row", "everyNthRow"]),
-            ("unstack_group_column", &["unstackGroupColumn"]),
-            ("parse_asterisk_exclusions", &["parseAsteriskExclusions", "parse_asterisk_exclusion", "parseAsteriskExclusion"]),
-        ],
         false,
     )
 }
 
 pub(super) fn baseline_schema() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("col", nullable_schema(int_schema("Zero-based reference baseline column index (default 0)", Some(0), None))),
             ("op", nullable_schema(str_schema("Baseline operation: difference, ratio, percent_change, or fractional_change"))),
         ],
         &[],
-        vec![("col", &["column", "reference_col", "referenceCol"]), ("op", &["operation", "mode"])],
         false,
     )
 }
@@ -1189,7 +1149,7 @@ struct SetCellParams {
 }
 
 fn schema_set_cell() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Target data sheet identifier")),
             ("coord", coord_object_schema()),
@@ -1202,14 +1162,6 @@ fn schema_set_cell() -> Value {
             ("parse_asterisk_exclusion", bool_schema("Interpret trailing `*` in string tokens as excluded (default true)")),
         ],
         &["sheet_id"],
-        vec![
-            ("sheet_id", &["sheetId"]),
-            ("coord", &["coordinate"]),
-            ("col", &["data_set", "dataSet", "column"]),
-            ("subcol", &["subcolumn", "replicate"]),
-            ("decimal_separator", &["decimalSeparator", "decimal"]),
-            ("parse_asterisk_exclusion", &["parseAsteriskExclusion"]),
-        ],
         false,
     )
 }
@@ -1314,7 +1266,7 @@ struct SetCellsParams {
 }
 
 fn schema_set_cells() -> Value {
-    let edit_item = obj_schema_with_aliases(
+    let edit_item = obj_schema(
         vec![
             ("coord", coord_object_schema()),
             ("row", int_schema("Zero-based row index", Some(0), None)),
@@ -1326,16 +1278,9 @@ fn schema_set_cells() -> Value {
             ("parse_asterisk_exclusion", bool_schema("Parse trailing `*` exclusion marker")),
         ],
         &[],
-        vec![
-            ("coord", &["coordinate"]),
-            ("col", &["data_set", "dataSet", "column"]),
-            ("subcol", &["subcolumn", "replicate"]),
-            ("decimal_separator", &["decimalSeparator", "decimal"]),
-            ("parse_asterisk_exclusion", &["parseAsteriskExclusion"]),
-        ],
         false,
     );
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Target data sheet identifier")),
             ("edits", array_schema("List of explicit cell edits", edit_item, None, None)),
@@ -1345,14 +1290,6 @@ fn schema_set_cells() -> Value {
             ("start_subcol", int_schema("Subcolumn index for `rows` grid (default 0)", Some(0), None)),
         ],
         &["sheet_id"],
-        vec![
-            ("sheet_id", &["sheetId"]),
-            ("edits", &["cells"]),
-            ("rows", &["grid"]),
-            ("start_row", &["startRow"]),
-            ("start_col", &["startCol"]),
-            ("start_subcol", &["startSubcol"]),
-        ],
         false,
     )
 }
@@ -1416,7 +1353,6 @@ fn run_set_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engine
 #[derive(Debug, Deserialize)]
 struct XCellEditItem {
     row: usize,
-    #[serde(alias = "subcolumn", alias = "replicate")]
     subcol: Option<usize>,
     #[serde(flatten)]
     cell: CellPayloadFields,
@@ -1435,7 +1371,7 @@ struct SetXCellsParams {
 }
 
 fn schema_set_x_cells() -> Value {
-    let x_edit = obj_schema_with_aliases(
+    let x_edit = obj_schema(
         vec![
             ("row", int_schema("Zero-based row index", Some(0), None)),
             ("subcol", int_schema("Zero-based X subcolumn index (default 0)", Some(0), None)),
@@ -1445,14 +1381,9 @@ fn schema_set_x_cells() -> Value {
             ("parse_asterisk_exclusion", bool_schema("Parse trailing `*` exclusion marker")),
         ],
         &["row"],
-        vec![
-            ("subcol", &["subcolumn", "replicate"]),
-            ("decimal_separator", &["decimalSeparator", "decimal"]),
-            ("parse_asterisk_exclusion", &["parseAsteriskExclusion"]),
-        ],
         false,
     );
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Target XY or Survival sheet identifier")),
             ("edits", array_schema("List of X/time cell edits", x_edit, None, None)),
@@ -1466,15 +1397,6 @@ fn schema_set_x_cells() -> Value {
             ("parse_asterisk_exclusion", bool_schema("Parse trailing `*` exclusion marker")),
         ],
         &["sheet_id"],
-        vec![
-            ("sheet_id", &["sheetId"]),
-            ("edits", &["cells"]),
-            ("values", &["x"]),
-            ("start_row", &["startRow"]),
-            ("subcol", &["subcolumn", "replicate"]),
-            ("decimal_separator", &["decimalSeparator", "decimal"]),
-            ("parse_asterisk_exclusion", &["parseAsteriskExclusion"]),
-        ],
         false,
     )
 }
@@ -1542,7 +1464,7 @@ struct SetRowTitlesParams {
 }
 
 fn schema_set_row_titles() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Target data sheet identifier")),
             ("titles", array_schema("Batch of row titles (null clears a title)", nullable_schema(str_schema("Row title")), None, None)),
@@ -1551,7 +1473,6 @@ fn schema_set_row_titles() -> Value {
             ("title", nullable_schema(str_schema("Single row title (omit or null to clear)"))),
         ],
         &["sheet_id"],
-        vec![("sheet_id", &["sheetId"]), ("titles", &["row_titles", "rowTitles"]), ("start_row", &["startRow"])],
         false,
     )
 }
@@ -1613,7 +1534,7 @@ struct SetTitlesParams {
 }
 
 fn schema_set_titles() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Target data sheet identifier")),
             ("x_title", nullable_schema(str_schema("X or Survival time axis title"))),
@@ -1626,16 +1547,6 @@ fn schema_set_titles() -> Value {
             ("row_titles", array_schema("Batch of row titles starting at row 0", nullable_schema(str_schema("Row title")), None, None)),
         ],
         &["sheet_id"],
-        vec![
-            ("sheet_id", &["sheetId"]),
-            ("x_title", &["xTitle", "time_title", "timeTitle"]),
-            ("row_factor_title", &["rowFactorTitle"]),
-            ("column_factor_title", &["columnFactorTitle"]),
-            ("titles", &["group_titles", "groupTitles", "column_titles", "columnTitles", "data_set_titles", "dataSetTitles"]),
-            ("start_col", &["startCol"]),
-            ("col", &["group", "data_set", "dataSet", "column", "index"]),
-            ("row_titles", &["rowTitles"]),
-        ],
         false,
     )
 }
@@ -1824,7 +1735,7 @@ struct SetSubcolumnTitlesParams {
 }
 
 fn schema_set_subcolumn_titles() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Target Nested data sheet identifier")),
             ("col", nullable_schema(int_schema("Optional group index (omit to update all groups)", Some(0), None))),
@@ -1834,13 +1745,6 @@ fn schema_set_subcolumn_titles() -> Value {
             ("title", str_schema("Single subcolumn title")),
         ],
         &["sheet_id"],
-        vec![
-            ("sheet_id", &["sheetId"]),
-            ("col", &["group", "data_set", "dataSet", "column"]),
-            ("titles", &["subcolumn_titles", "subcolumnTitles"]),
-            ("start_subcol", &["startSubcol"]),
-            ("subcol", &["subcolumn", "replicate", "index"]),
-        ],
         false,
     )
 }
@@ -1949,7 +1853,7 @@ struct ExcludeCellsParams {
 }
 
 fn schema_exclude_cells() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Target data sheet identifier")),
             ("excluded", bool_schema("Whether to exclude (true) or include (false); default true")),
@@ -1968,20 +1872,6 @@ fn schema_exclude_cells() -> Value {
             ("subcol_end", int_schema("Range end subcolumn", Some(0), None)),
         ],
         &["sheet_id"],
-        vec![
-            ("sheet_id", &["sheetId"]),
-            ("range", &["selection"]),
-            ("cells", &["coords"]),
-            ("coord", &["coordinate"]),
-            ("col", &["data_set", "dataSet", "column"]),
-            ("subcol", &["subcolumn", "replicate"]),
-            ("row_start", &["rowStart"]),
-            ("row_end", &["rowEnd"]),
-            ("col_start", &["colStart"]),
-            ("col_end", &["colEnd"]),
-            ("subcol_start", &["subcolStart"]),
-            ("subcol_end", &["subcolEnd"]),
-        ],
         false,
     )
 }
@@ -2109,7 +1999,7 @@ fn schema_exclude_cells_with_reason() -> Value {
             coord_object_schema()
         ]
     });
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Target data sheet identifier")),
             ("reason_tag", non_empty_str_schema("Short non-empty audit reason tag")),
@@ -2123,16 +2013,6 @@ fn schema_exclude_cells_with_reason() -> Value {
             ("subcol", int_schema("Single cell subcolumn index", Some(0), None)),
         ],
         &["sheet_id", "reason_tag"],
-        vec![
-            ("sheet_id", &["sheetId", "id"]),
-            ("reason_tag", &["reasonTag", "reason"]),
-            ("note", &["comment"]),
-            ("timestamp_utc", &["timestampUtc", "created_utc", "createdUtc"]),
-            ("coords", &["cells"]),
-            ("coord", &["coordinate"]),
-            ("col", &["data_set", "dataSet", "column"]),
-            ("subcol", &["subcolumn", "replicate"]),
-        ],
         false,
     )
 }
@@ -2244,12 +2124,7 @@ struct ExclusionAuditReportParams {
 }
 
 fn schema_exclusion_audit_report() -> Value {
-    obj_schema_with_aliases(
-        vec![("sheet_id", nullable_schema(non_empty_str_schema("Optional sheet ID to filter report")))],
-        &[],
-        vec![("sheet_id", &["sheetId", "id"])],
-        false,
-    )
+    obj_schema(vec![("sheet_id", nullable_schema(non_empty_str_schema("Optional sheet ID to filter report")))], &[], false)
 }
 
 fn collect_sheet_exclusions(ds: &DataSheet, entries: &mut Vec<Value>, annotated_count: &mut usize) {
@@ -2376,7 +2251,7 @@ struct ClearCellsParams {
 }
 
 fn schema_clear_cells() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Target data sheet identifier")),
             ("all", bool_schema("Clear all data cells across the sheet")),
@@ -2397,23 +2272,6 @@ fn schema_clear_cells() -> Value {
             ("subcol_end", int_schema("Range end subcolumn", Some(0), None)),
         ],
         &["sheet_id"],
-        vec![
-            ("sheet_id", &["sheetId"]),
-            ("clear_x", &["clearX", "include_x", "includeX"]),
-            ("unlink", &["break_links", "breakLinks"]),
-            ("region_id", &["regionId"]),
-            ("range", &["selection"]),
-            ("cells", &["coords"]),
-            ("coord", &["coordinate"]),
-            ("col", &["data_set", "dataSet", "column"]),
-            ("subcol", &["subcolumn", "replicate"]),
-            ("row_start", &["rowStart"]),
-            ("row_end", &["rowEnd"]),
-            ("col_start", &["colStart"]),
-            ("col_end", &["colEnd"]),
-            ("subcol_start", &["subcolStart"]),
-            ("subcol_end", &["subcolEnd"]),
-        ],
         false,
     )
 }
@@ -2543,17 +2401,11 @@ fn run_clear_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
 #[derive(Debug, Deserialize)]
 struct PlacementFields {
     anchor: Option<FlexibleCoordInput>,
-    #[serde(alias = "startRow", alias = "target_row", alias = "targetRow", alias = "row")]
     start_row: Option<usize>,
-    #[serde(alias = "startCol", alias = "target_col", alias = "targetCol", alias = "col", alias = "data_set", alias = "dataSet")]
     start_col: Option<usize>,
-    #[serde(alias = "startSubcol", alias = "target_subcol", alias = "targetSubcol", alias = "subcol", alias = "subcolumn")]
     start_subcol: Option<usize>,
-    #[serde(alias = "placement_mode", alias = "placementMode")]
     mode: Option<String>,
-    #[serde(alias = "propagateTitleHeader")]
     propagate_title_header: Option<bool>,
-    #[serde(alias = "skipContiguousBlanks")]
     skip_contiguous_blanks: Option<bool>,
     transpose: Option<bool>,
 }
@@ -2592,7 +2444,7 @@ struct PasteParams {
 }
 
 fn schema_paste() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Target data sheet identifier")),
             ("text", str_schema("Delimited clipboard text (TSV/CSV)")),
@@ -2611,21 +2463,6 @@ fn schema_paste() -> Value {
             ("transpose", bool_schema("Transpose pasted rows and columns")),
         ],
         &["sheet_id"],
-        vec![
-            ("sheet_id", &["sheetId", "target_sheet_id", "targetSheetId"]),
-            ("text", &["tsv", "csv", "clipboard"]),
-            ("rows", &["grid"]),
-            ("decimal_separator", &["decimalSeparator", "decimal"]),
-            ("normalize_decimal", &["normalizeDecimal"]),
-            ("filter", &["slice"]),
-            ("anchor", &["start"]),
-            ("start_row", &["startRow", "target_row", "targetRow", "row"]),
-            ("start_col", &["startCol", "target_col", "targetCol", "col", "data_set", "dataSet"]),
-            ("start_subcol", &["startSubcol", "target_subcol", "targetSubcol", "subcol", "subcolumn"]),
-            ("mode", &["placement_mode", "placementMode"]),
-            ("propagate_title_header", &["propagateTitleHeader"]),
-            ("skip_contiguous_blanks", &["skipContiguousBlanks"]),
-        ],
         false,
     )
 }
@@ -2760,7 +2597,7 @@ struct ExportCsvParams {
 }
 
 fn schema_export_csv() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Data or Result sheet identifier to export")),
             ("path", nullable_schema(non_empty_str_schema("Optional output file path"))),
@@ -2768,7 +2605,6 @@ fn schema_export_csv() -> Value {
             ("decimal_separator", explicit_decimal_sep_schema()),
         ],
         &["sheet_id"],
-        vec![("sheet_id", &["sheetId"]), ("path", &["file_path", "filePath"]), ("decimal_separator", &["decimalSeparator", "decimal"])],
         false,
     )
 }
@@ -2851,7 +2687,7 @@ struct SetVariableRoleParams {
 }
 
 fn schema_set_variable_role() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Target MultipleVariables sheet identifier")),
             ("col", col_ref_schema("Zero-based variable index or column title")),
@@ -2859,7 +2695,6 @@ fn schema_set_variable_role() -> Value {
             ("role", non_empty_str_schema("Role: continuous, categorical, label, calculated, or auto")),
         ],
         &["sheet_id", "role"],
-        vec![("sheet_id", &["sheetId"]), ("col", &["column", "column_index", "columnIndex", "index", "variable"])],
         false,
     )
 }
@@ -2928,9 +2763,7 @@ fn run_set_variable_role(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome
 
 #[derive(Debug, Deserialize)]
 struct RecodeEntryInput {
-    #[serde(alias = "old", alias = "source")]
     from: String,
-    #[serde(alias = "new", alias = "target")]
     to: String,
 }
 
@@ -2959,12 +2792,8 @@ struct RecodeLevelsParams {
 }
 
 fn schema_recode_levels() -> Value {
-    let pair_item = obj_schema_with_aliases(
-        vec![("from", str_schema("Existing level text")), ("to", str_schema("Replacement level text"))],
-        &["from", "to"],
-        vec![("from", &["old", "source"]), ("to", &["new", "target"])],
-        false,
-    );
+    let pair_item =
+        obj_schema(vec![("from", str_schema("Existing level text")), ("to", str_schema("Replacement level text"))], &["from", "to"], false);
     let mappings_schema = json!({
         "description": "Recode mapping: object `{ old: new }` or array of `{ from, to }`",
         "anyOf": [
@@ -2972,7 +2801,7 @@ fn schema_recode_levels() -> Value {
             { "type": "object", "additionalProperties": { "type": "string" } }
         ]
     });
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Target MultipleVariables sheet identifier")),
             ("col", col_ref_schema("Zero-based variable index or column title")),
@@ -2980,11 +2809,6 @@ fn schema_recode_levels() -> Value {
             ("mappings", mappings_schema),
         ],
         &["sheet_id", "mappings"],
-        vec![
-            ("sheet_id", &["sheetId"]),
-            ("col", &["column", "column_index", "columnIndex", "index", "variable"]),
-            ("mappings", &["mapping", "map", "recode"]),
-        ],
         false,
     )
 }
@@ -3185,7 +3009,7 @@ struct SetCategoricalOrderParams {
 }
 
 fn schema_set_categorical_order() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Target MultipleVariables sheet identifier")),
             ("col", col_ref_schema("Zero-based variable index or column title")),
@@ -3206,13 +3030,6 @@ fn schema_set_categorical_order() -> Value {
             ("reference_level", nullable_schema(str_schema("Optional reference category label"))),
         ],
         &["sheet_id"],
-        vec![
-            ("sheet_id", &["sheetId"]),
-            ("col", &["column", "column_index", "columnIndex", "index", "variable"]),
-            ("order_spec", &["orderSpec"]),
-            ("levels", &["explicit"]),
-            ("order", &["kind", "mode"]),
-        ],
         false,
     )
 }
@@ -3223,13 +3040,12 @@ fn parse_level_order_from_params(p: &SetCategoricalOrderParams) -> Result<LevelO
             return Ok(parsed);
         }
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct NestedOrderSpec {
             levels: Option<Vec<String>>,
-            #[serde(alias = "kind", alias = "mode")]
             order: Option<OrderParamValue>,
             reversed: Option<bool>,
         }
-        record_deprecated_object_aliases(spec_val, &[("kind", "order"), ("mode", "order")]);
         let nested: NestedOrderSpec = serde_json::from_value(spec_val.clone())
             .map_err(|err| EngineError::with_code(ErrorCode::BadInput, format!("invalid `order_spec`: {err}")))?;
         return resolve_level_order_fields(nested.levels.as_deref(), nested.order.as_ref(), nested.reversed.unwrap_or(false));
@@ -3353,7 +3169,7 @@ struct SetCalculatedVariableParams {
 }
 
 fn schema_set_calculated_variable() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Target MultipleVariables sheet identifier")),
             ("col", col_ref_schema("Existing variable index or name (optional when `title` creates or matches a column)")),
@@ -3361,12 +3177,6 @@ fn schema_set_calculated_variable() -> Value {
             ("formula", str_schema("Formula expression, e.g. `= log10([Dose])` or `log10(ConcRaw)`")),
         ],
         &["sheet_id", "formula"],
-        vec![
-            ("sheet_id", &["sheetId"]),
-            ("col", &["column", "column_index", "columnIndex", "index", "variable"]),
-            ("title", &["name"]),
-            ("formula", &["expression"]),
-        ],
         false,
     )
 }
@@ -3471,7 +3281,6 @@ fn run_set_calculated_variable(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandO
 
 #[derive(Debug, Deserialize)]
 struct SimParamObj {
-    #[serde(alias = "key")]
     name: String,
     value: f64,
 }
@@ -3517,7 +3326,7 @@ fn schema_simulate_xy() -> Value {
             { "type": "array" }
         ]
     });
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", nullable_schema(non_empty_str_schema("Optional destination data sheet ID"))),
             ("title", nullable_schema(str_schema("Simulated sheet title (default `Simulated XY`)"))),
@@ -3535,21 +3344,6 @@ fn schema_simulate_xy() -> Value {
             ("graph_sheet_id", nullable_schema(non_empty_str_schema("Optional GraphSheet ID to create for new simulated table"))),
         ],
         &[],
-        vec![
-            ("sheet_id", &["sheetId"]),
-            ("title", &["name"]),
-            ("row_count", &["rows", "rowCount"]),
-            ("replicates", &["k", "subcolumns"]),
-            ("x_min", &["xMin"]),
-            ("x_max", &["xMax"]),
-            ("equation_id", &["equationId", "equation"]),
-            ("parameters", &["params"]),
-            ("noise_kind", &["noiseKind", "noise"]),
-            ("noise_sd", &["noiseSd", "sd"]),
-            ("cv_percent", &["cvPercent"]),
-            ("auto_info", &["autoInfo"]),
-            ("graph_sheet_id", &["graphSheetId"]),
-        ],
         false,
     )
 }
@@ -3593,11 +3387,6 @@ fn resolve_simulation_noise(noise_kind: Option<&str>, noise_sd: Option<f64>, cv_
 }
 
 fn run_simulate_xy(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
-    if let Some(arr) = raw.get("parameters").or_else(|| raw.get("params")).and_then(Value::as_array) {
-        for item in arr {
-            record_deprecated_object_aliases(item, &[("key", "name")]);
-        }
-    }
     let p: SimulateXyParams = parse_params(&schema_simulate_xy(), raw)?;
     let sim_params = resolve_simulation_parameters(p.parameters)?;
     let noise = resolve_simulation_noise(p.noise_kind.as_deref(), p.noise_sd, p.cv_percent)?;
@@ -3672,7 +3461,7 @@ struct ConvertArchetypeParams {
 }
 
 fn schema_convert_archetype() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Target data sheet identifier")),
             (
@@ -3701,23 +3490,11 @@ fn schema_convert_archetype() -> Value {
             ("preview_only", bool_schema("Return conversion preview without mutating document (default false)")),
         ],
         &["sheet_id", "target_kind"],
-        vec![
-            ("sheet_id", &["sheetId", "id"]),
-            ("target_kind", &["targetKind", "kind"]),
-            ("allow_lossy", &["allowLossy"]),
-            ("preview_only", &["previewOnly", "preview", "dry_run", "dryRun"]),
-        ],
         false,
     )
 }
 
 fn run_convert_archetype(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
-    if crate::has_conflicting_convert_preview_aliases(&raw) {
-        return Err(EngineError::with_code(
-            ErrorCode::BadInput,
-            "conflicting or non-boolean `preview_only` alias values supplied for `table.convertArchetype`",
-        ));
-    }
     let p: ConvertArchetypeParams = parse_params(&schema_convert_archetype(), raw)?;
     let sheet_id = parse_sheet_id(&p.sheet_id)?;
     let target_kind = parse_target_archetype_kind(&p.target_kind)?;
@@ -5085,7 +4862,6 @@ const fn default_weight_one() -> usize {
 enum GroupSpecInput {
     Name(String),
     Weighted {
-        #[serde(alias = "name")]
         label: String,
         #[serde(default = "default_weight_one")]
         weight: usize,
@@ -5097,7 +4873,7 @@ struct RandomizeGroupsParams {
     groups: Vec<GroupSpecInput>,
     #[serde(default)]
     subject_ids: Option<Vec<String>>,
-    #[serde(default, alias = "n_subjects", alias = "count")]
+    #[serde(default)]
     subject_count: Option<usize>,
     #[serde(default)]
     scheme: Option<String>,
@@ -5105,19 +4881,18 @@ struct RandomizeGroupsParams {
     block_sizes: Option<Vec<usize>>,
     #[serde(default)]
     seed: Option<u64>,
-    #[serde(default, alias = "sheetId", alias = "id")]
+    #[serde(default)]
     sheet_id: Option<String>,
-    #[serde(default, alias = "name")]
+    #[serde(default)]
     title: Option<String>,
-    #[serde(default, alias = "info_sheet")]
+    #[serde(default)]
     info_sheet_id: Option<String>,
 }
 
 fn schema_randomize_groups() -> Value {
-    let group_obj = obj_schema_with_aliases(
+    let group_obj = obj_schema(
         vec![("label", non_empty_str_schema("Treatment arm label")), ("weight", int_schema("Allocation weight", Some(1), None))],
         &["label"],
-        vec![("label", &["name"])],
         false,
     );
     let group_item = json!({
@@ -5126,7 +4901,7 @@ fn schema_randomize_groups() -> Value {
             group_obj
         ]
     });
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("groups", array_schema("Treatment arm names or `{label, weight}` allocation objects", group_item, Some(1), None)),
             ("subject_ids", nullable_schema(array_schema("Explicit subject ID list", non_empty_str_schema("Subject ID"), Some(1), None))),
@@ -5153,7 +4928,6 @@ fn schema_randomize_groups() -> Value {
             ("info_sheet_id", nullable_schema(non_empty_str_schema("Optional target InfoSheet ID for ARRIVE randomization constants"))),
         ],
         &["groups"],
-        vec![("sheet_id", &["sheetId", "id"]), ("title", &["name"]), ("subject_count", &["n_subjects", "count"]), ("info_sheet_id", &["info_sheet"])],
         false,
     )
 }
@@ -5240,26 +5014,24 @@ fn run_randomize_groups(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
 
 #[derive(Debug, Deserialize)]
 struct RandomSampleRowsParams {
-    #[serde(alias = "source_sheet", alias = "data_sheet_id")]
     source_sheet_id: String,
-    #[serde(alias = "n_samples", alias = "count")]
     sample_size: usize,
     #[serde(default)]
     seed: Option<u64>,
-    #[serde(default, alias = "stratify_col")]
+    #[serde(default)]
     stratify_column: Option<usize>,
     #[serde(default)]
     proportional_allocation: Option<bool>,
-    #[serde(default, alias = "sheetId", alias = "id")]
+    #[serde(default)]
     sheet_id: Option<String>,
-    #[serde(default, alias = "name")]
+    #[serde(default)]
     title: Option<String>,
-    #[serde(default, alias = "info_sheet")]
+    #[serde(default)]
     info_sheet_id: Option<String>,
 }
 
 fn schema_random_sample_rows() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("source_sheet_id", non_empty_str_schema("Source DataSheet or analyzable ResultSheet ID")),
             ("sample_size", int_schema("Number of rows to draw without replacement", Some(1), None)),
@@ -5271,14 +5043,6 @@ fn schema_random_sample_rows() -> Value {
             ("info_sheet_id", nullable_schema(non_empty_str_schema("Optional InfoSheet ID for recording sampling provenance constants"))),
         ],
         &["source_sheet_id", "sample_size"],
-        vec![
-            ("source_sheet_id", &["source_sheet", "data_sheet_id"]),
-            ("sample_size", &["n_samples", "count"]),
-            ("stratify_column", &["stratify_col"]),
-            ("sheet_id", &["sheetId", "id"]),
-            ("title", &["name"]),
-            ("info_sheet_id", &["info_sheet"]),
-        ],
         false,
     )
 }
@@ -5359,21 +5123,20 @@ fn run_random_sample_rows(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcom
 #[derive(Debug, Deserialize)]
 struct SimulateDistributionsParams {
     columns: Vec<Value>,
-    #[serde(alias = "row_count", alias = "rows")]
     n_rows: usize,
     #[serde(default)]
     seed: Option<u64>,
-    #[serde(default, alias = "multiple_variables")]
+    #[serde(default)]
     use_multiple_variables: Option<bool>,
-    #[serde(default, alias = "sheetId", alias = "id")]
+    #[serde(default)]
     sheet_id: Option<String>,
-    #[serde(default, alias = "name")]
+    #[serde(default)]
     title: Option<String>,
 }
 
-fn find_dist_f64(sources: &[&serde_json::Map<String, Value>], keys: &[&str], field_name: &str, idx: usize) -> Result<f64, EngineError> {
+fn find_dist_f64(sources: &[&serde_json::Map<String, Value>], field_name: &str, idx: usize) -> Result<f64, EngineError> {
     for src in sources {
-        if let Some((_, val)) = super::spellings::first_present_with_key(*src, keys) {
+        if let Some(val) = src.get(field_name) {
             return val
                 .as_f64()
                 .filter(|v| v.is_finite())
@@ -5383,9 +5146,9 @@ fn find_dist_f64(sources: &[&serde_json::Map<String, Value>], keys: &[&str], fie
     Err(EngineError::with_code(ErrorCode::BadInput, format!("columns[{idx}] missing numeric parameter `{field_name}`")))
 }
 
-fn find_dist_u64(sources: &[&serde_json::Map<String, Value>], keys: &[&str], field_name: &str, idx: usize) -> Result<u64, EngineError> {
+fn find_dist_u64(sources: &[&serde_json::Map<String, Value>], field_name: &str, idx: usize) -> Result<u64, EngineError> {
     for src in sources {
-        if let Some((_, val)) = super::spellings::first_present_with_key(*src, keys) {
+        if let Some(val) = src.get(field_name) {
             return val
                 .as_u64()
                 .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("columns[{idx}].{field_name} must be a non-negative integer")));
@@ -5399,7 +5162,8 @@ fn parse_simulated_column_spec(item: &Value, idx: usize) -> Result<SimulatedColu
         return Ok(direct);
     }
     let obj = item.as_object().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("columns[{idx}] must be an object")))?;
-    let name = first_present(obj, spellings::SIMULATED_COLUMN_NAME)
+    let name = obj
+        .get("name")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -5424,7 +5188,8 @@ fn parse_simulated_column_spec(item: &Value, idx: usize) -> Result<SimulatedColu
         if let Some(inner_params) = dist_obj.get("params").and_then(Value::as_object) {
             sources.push(inner_params);
         }
-        first_present(dist_obj, spellings::SIMULATED_COLUMN_KIND)
+        dist_obj
+            .get("kind")
             .and_then(Value::as_str)
             .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("columns[{idx}].distribution object must specify `kind`")))?
     } else {
@@ -5434,24 +5199,16 @@ fn parse_simulated_column_spec(item: &Value, idx: usize) -> Result<SimulatedColu
 
     let kind_key: String = kind_raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
     let distribution = match kind_key.as_str() {
-        "uniform" => SimulatedDistribution::Uniform {
-            min: find_dist_f64(&sources, &["min"], "min", idx)?,
-            max: find_dist_f64(&sources, &["max"], "max", idx)?,
-        },
-        "gaussian" | "normal" => SimulatedDistribution::Gaussian {
-            mean: find_dist_f64(&sources, &["mean", "mu"], "mean", idx)?,
-            sd: find_dist_f64(&sources, &["sd", "std", "sigma"], "sd", idx)?,
-        },
-        "lognormal" => SimulatedDistribution::LogNormal {
-            mean_log: find_dist_f64(&sources, &["mean_log", "meanlog", "mu"], "mean_log", idx)?,
-            sd_log: find_dist_f64(&sources, &["sd_log", "sdlog", "sigma"], "sd_log", idx)?,
-        },
-        "binomial" => SimulatedDistribution::Binomial {
-            trials: find_dist_u64(&sources, &["trials", "n"], "trials", idx)?,
-            p: find_dist_f64(&sources, &["p", "prob", "probability"], "p", idx)?,
-        },
-        "poisson" => SimulatedDistribution::Poisson { lambda: find_dist_f64(&sources, &["lambda", "rate", "mean"], "lambda", idx)? },
-        "exponential" | "exp" => SimulatedDistribution::Exponential { rate: find_dist_f64(&sources, &["rate", "lambda"], "rate", idx)? },
+        "uniform" => SimulatedDistribution::Uniform { min: find_dist_f64(&sources, "min", idx)?, max: find_dist_f64(&sources, "max", idx)? },
+        "gaussian" | "normal" => {
+            SimulatedDistribution::Gaussian { mean: find_dist_f64(&sources, "mean", idx)?, sd: find_dist_f64(&sources, "sd", idx)? }
+        }
+        "lognormal" => {
+            SimulatedDistribution::LogNormal { mean_log: find_dist_f64(&sources, "mean_log", idx)?, sd_log: find_dist_f64(&sources, "sd_log", idx)? }
+        }
+        "binomial" => SimulatedDistribution::Binomial { trials: find_dist_u64(&sources, "trials", idx)?, p: find_dist_f64(&sources, "p", idx)? },
+        "poisson" => SimulatedDistribution::Poisson { lambda: find_dist_f64(&sources, "lambda", idx)? },
+        "exponential" | "exp" => SimulatedDistribution::Exponential { rate: find_dist_f64(&sources, "rate", idx)? },
         other => {
             return Err(EngineError::with_code(
                 ErrorCode::BadInput,
@@ -5464,44 +5221,33 @@ fn parse_simulated_column_spec(item: &Value, idx: usize) -> Result<SimulatedColu
 }
 
 fn schema_simulate_distributions() -> Value {
-    let col_schema = super::params::with_aliases(
-        json!({
-            "type": "object",
-            "description": "Column distribution specification `{ name, distribution, ... }` supporting uniform (`min`, `max`), gaussian (`mean`, `sd`), log_normal (`mean_log`, `sd_log`), binomial (`trials`, `p`), poisson (`lambda`), exponential (`rate`)",
-            "properties": {
-                "name": { "type": "string", "minLength": 1 },
-                "distribution": {
-                    "anyOf": [
-                        { "type": "string", "enum": ["uniform", "gaussian", "log_normal", "binomial", "poisson", "exponential"] },
-                        { "type": "object" }
-                    ]
-                },
-                "params": { "type": "object" },
-                "min": num_schema("Minimum bound for uniform distribution", None, None),
-                "max": num_schema("Maximum bound for uniform distribution", None, None),
-                "mean": num_schema("Mean for gaussian/poisson distribution", None, None),
-                "mu": num_schema("Mean alias for gaussian/log_normal distribution", None, None),
-                "sd": num_schema("Standard deviation for gaussian distribution", None, None),
-                "std": num_schema("Standard deviation alias", None, None),
-                "sigma": num_schema("Standard deviation alias", None, None),
-                "mean_log": num_schema("Log-space mean for log_normal distribution", None, None),
-                "meanlog": num_schema("Log-space mean alias", None, None),
-                "sd_log": num_schema("Log-space standard deviation for log_normal distribution", None, None),
-                "sdlog": num_schema("Log-space standard deviation alias", None, None),
-                "trials": int_schema("Number of trials for binomial distribution", Some(0), None),
-                "n": int_schema("Number of trials alias", Some(0), None),
-                "p": num_schema("Success probability for binomial distribution", None, None),
-                "prob": num_schema("Success probability alias", None, None),
-                "probability": num_schema("Success probability alias", None, None),
-                "lambda": num_schema("Rate/mean parameter for poisson/exponential distribution", None, None),
-                "rate": num_schema("Rate parameter for exponential/poisson distribution", None, None)
+    let col_schema = json!({
+        "type": "object",
+        "description": "Column distribution specification `{ name, distribution, ... }` supporting uniform (`min`, `max`), gaussian (`mean`, `sd`), log_normal (`mean_log`, `sd_log`), binomial (`trials`, `p`), poisson (`lambda`), exponential (`rate`)",
+        "properties": {
+            "name": { "type": "string", "minLength": 1 },
+            "distribution": {
+                "anyOf": [
+                    { "type": "string", "enum": ["uniform", "gaussian", "log_normal", "binomial", "poisson", "exponential"] },
+                    { "type": "object" }
+                ]
             },
-            "required": ["name", "distribution"],
-            "additionalProperties": false
-        }),
-        vec![("name", &["title"])],
-    );
-    obj_schema_with_aliases(
+            "params": { "type": "object" },
+            "min": num_schema("Minimum bound for uniform distribution", None, None),
+            "max": num_schema("Maximum bound for uniform distribution", None, None),
+            "mean": num_schema("Mean for gaussian distribution", None, None),
+            "sd": num_schema("Standard deviation for gaussian distribution", None, None),
+            "mean_log": num_schema("Log-space mean for log_normal distribution", None, None),
+            "sd_log": num_schema("Log-space standard deviation for log_normal distribution", None, None),
+            "trials": int_schema("Number of trials for binomial distribution", Some(0), None),
+            "p": num_schema("Success probability for binomial distribution", None, None),
+            "lambda": num_schema("Rate/mean parameter for poisson distribution", None, None),
+            "rate": num_schema("Rate parameter for exponential distribution", None, None)
+        },
+        "required": ["name", "distribution"],
+        "additionalProperties": false
+    });
+    obj_schema(
         vec![
             ("columns", array_schema("Simulated column distribution specifications", col_schema, Some(1), None)),
             ("n_rows", int_schema("Number of rows to simulate per column", Some(1), None)),
@@ -5511,12 +5257,6 @@ fn schema_simulate_distributions() -> Value {
             ("title", nullable_schema(str_schema("Optional destination sheet title (default `Simulated Distributions`)"))),
         ],
         &["columns", "n_rows"],
-        vec![
-            ("n_rows", &["row_count", "rows"]),
-            ("use_multiple_variables", &["multiple_variables"]),
-            ("sheet_id", &["sheetId", "id"]),
-            ("title", &["name"]),
-        ],
         false,
     )
 }
@@ -5676,9 +5416,9 @@ mod tests {
     #[test]
     fn cell_title_exclusion_paste_export_and_multivar_round_trip() {
         let mut s = seeded_session();
-        let alias_out =
-            s.execute("table.setCell", json!({ "sheetId": "xy-1", "coord": { "row": 0, "column": 0 }, "value": 12.5 })).expect("setCell alias");
-        assert!(!alias_out.warnings.is_empty(), "deprecated aliases should emit warnings");
+        let cell_out =
+            s.execute("table.setCell", json!({ "sheet_id": "xy-1", "coord": { "row": 0, "col": 0 }, "value": 12.5 })).expect("setCell canonical");
+        assert!(cell_out.warnings.is_empty(), "canonical params should emit zero warnings");
         s.execute("table.setCells", json!({ "sheet_id": "col-1", "rows": [[1.0, 2.0], [3.0, 4.0]] })).expect("setCells rows");
         s.execute("table.setXCells", json!({ "sheet_id": "xy-1", "values": [1.0, 2.0, 3.0] })).expect("setXCells");
         s.execute("table.setRowTitles", json!({ "sheet_id": "col-1", "titles": ["R1", null] })).expect("setRowTitles");
@@ -5882,7 +5622,7 @@ mod tests {
 
         // Unknown region_id must fail with NotFound before clearing any cells or detaching existing regions.
         let missing_err = s
-            .execute("table.clearCells", json!({ "sheet_id": "dst", "row": 0, "col": 0, "unlink": true, "regionId": "missing-region" }))
+            .execute("table.clearCells", json!({ "sheet_id": "dst", "row": 0, "col": 0, "unlink": true, "region_id": "missing-region" }))
             .expect_err("unknown region_id must fail");
         assert_eq!(missing_err.code, ErrorCode::NotFound);
         let dst_after_miss = s.document().data_sheet(&SheetId::new("dst")).ok_or_else(|| String::from("missing dst"))?;

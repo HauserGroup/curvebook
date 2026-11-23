@@ -1,6 +1,8 @@
 //! Local JSON-lines control channel and publication clipboard/print payload builders
 //! (`docs/control-protocol.md`, `docs/evidence/platforms.md`).
 
+pub mod host_routing;
+
 use std::fmt;
 use std::io::{self, BufRead, Write};
 #[cfg(not(target_arch = "wasm32"))]
@@ -9,15 +11,19 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use curvebook_chart::{ChartScene, Path2D, PathCmd, PointPt, RectPt, ScenePrimitive, StrokePaint};
 use curvebook_doc::{
-    AnalysisKind, CanvasResizeMode, DataSheet, ErrorCode, FigureCanvasPreset, MultipleVariablesTable, MultivariateSpec, ProjectDocument, ResultCell,
+    AnalysisKind, CanvasResizeMode, ErrorCode, FigureCanvasPreset, MultipleVariablesTable, MultivariateSpec, ProjectDocument, ResultCell,
     ResultSheet, SheetFolderKind, SheetId, SheetSection, TableArchetype,
 };
-use curvebook_engine::{EngineError, Session, cmd};
-use curvebook_format::{CsvOptions, export_datasheet_to_csv, export_result_sheet_json, try_export_result_sheet_tidy_csv, try_export_result_tab_csv};
+use curvebook_engine::services::{
+    ExportArtifactFormat, ExportArtifactRequest, ExportTarget, RasterSizingPolicy, compile_visual_scene_for_sheet, export_document_artifact,
+    inspect_project_summary, inspect_sheet_detail,
+};
+use curvebook_engine::{BatchCommandStep, Caller, EngineError, Session, cmd};
+use curvebook_format::CsvOptions;
 use curvebook_palette::{CanvasPreviewFilter, Rgba8};
-use curvebook_pdf::{PdfColorSpace, PdfExportOptions, render_pdf, render_pdf_pages};
-use curvebook_render::{MAX_CAPPED_RASTER_DIM_PX, RenderTargetSpec, TiffCompression, encode_png, encode_tiff, render_scene};
-use curvebook_svg::{SvgExportOptions, render_svg};
+use curvebook_pdf::{PdfColorSpace, PdfExportOptions, PdfVersion, render_pdf_pages};
+use curvebook_render::{MAX_CAPPED_RASTER_DIM_PX, TiffCompression};
+use curvebook_svg::SvgExportOptions;
 use curvebook_tools::{GridCellCoord, PhysicalUnit};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -308,8 +314,8 @@ fn engine_error_detail(err: &EngineError) -> Value {
     })
 }
 
-fn map_ui_result(res: Result<Value, String>) -> Result<Option<Value>, ControlCallError> {
-    res.map(Some).map_err(ControlCallError::from)
+fn map_ui_err(res: Result<Value, String>) -> Result<Value, ControlCallError> {
+    res.map_err(ControlCallError::from)
 }
 
 /// Physical-size print spool specification (`docs/evidence/platforms.md` `G10`).
@@ -1177,173 +1183,113 @@ pub(crate) fn parse_selected_points_with_subcols(val: &Value, field: &str) -> Re
     Ok(pts)
 }
 
-fn dispatch_ui_command_detailed(app: &mut UiApp, command_id: &str, params: &Value) -> Result<Option<Value>, ControlCallError> {
-    if command_id == "analysis.updateParams" && (params.is_null() || params.as_object().is_some_and(serde_json::Map::is_empty)) {
-        return map_ui_result(dispatch_ui_edit_params_open(app, params));
-    }
-    if !matches!(
-        command_id,
-        "ui.navigator.toggle"
-            | "ui.inspector.toggle"
-            | "ui.family.toggle"
-            | "ui.palette.open"
-            | "ui.analyze.open"
-            | "ui.editParams.open"
-            | "ui.powerWizard.open"
-            | "ui.formatPoints.open"
-            | "ui.changeGraphType.open"
-            | "ui.clonePipeline.open"
-            | "ui.zoom.fitSheet"
-            | "ui.gallery.toggle"
-            | "ui.pane.cycle"
-            | "ui.rulers.toggle"
-            | "ui.shortcut.set"
-            | "ui.shortcut.reset"
-            | "ui.locale.set"
-            | "ui.theme.set"
-            | "ui.screenshot"
-            | "ui.event.dispatch"
-            | "ui.split.toggle"
-            | "ui.brush.point"
-            | "ui.result.copyMethodsReport"
-            | "ui.result.applyRemediation"
-            | "ui.result.inspectDiagnostics"
-            | "ui.canvas.applyPreset"
-            | "ui.canvas.preflight"
-            | "ui.previewFilter.set"
-            | "ui.grid.excludeWithReason"
-            | "ui.table.convertArchetype.open"
-            | "ui.table.randomizeGroups"
-            | "ui.table.randomSampleRows"
-            | "ui.table.simulateDistributions"
-            | "ui.table.openFormulaBar"
-            | "ui.result.appendClusterColumn"
-            | "ui.graph.insertModelEquation"
-            | "ui.graph.bubblePlot.open"
-            | "ui.graph.format.open"
-            | "ui.graph.axes.open"
-            | "ui.graph.pairwise.open"
-            | "ui.applyStyleFrom.open"
-            | "ui.layout.composer.open"
-            | "ui.export.figure.open"
-            | "ui.import.reshape.open"
-            | "ui.print.open"
-            | "file.print"
-            | "app.about"
-            | "app.feedback"
-            | "ui.view.rowTitles.toggle"
-            | "ui.graph.create.open"
-            | "ui.layout.equalizeScaling.open"
-            | "ui.gridOverlay.toggle"
-            | "ui.embeddedTable.format.open"
-            | "ui.image.format.open"
-    ) {
-        return Ok(None);
-    }
-    require_params_object_or_null(params, command_id).map_err(ControlCallError::from)?;
+type UiCommandHandler = fn(&mut UiApp, &Value) -> Result<Value, ControlCallError>;
+
+fn lookup_ui_command_handler(command_id: &str) -> Option<UiCommandHandler> {
     match command_id {
-        "ui.navigator.toggle" => {
-            let open = app.toggle_navigator_pane();
-            Ok(Some(json!({ "navigator_open": open })))
-        }
-        "ui.inspector.toggle" => {
-            let open = app.toggle_inspector_pane();
-            Ok(Some(json!({ "inspector_open": open })))
-        }
-        "ui.family.toggle" => {
-            let open = app.toggle_family_pane();
-            Ok(Some(json!({ "family_open": open })))
-        }
-        "ui.palette.open" => {
+        "ui.navigator.toggle" => Some(|app, _| Ok(json!({ "navigator_open": app.toggle_navigator_pane() }))),
+        "ui.inspector.toggle" => Some(|app, _| Ok(json!({ "inspector_open": app.toggle_inspector_pane() }))),
+        "ui.family.toggle" => Some(|app, _| Ok(json!({ "family_open": app.toggle_family_pane() }))),
+        "ui.palette.open" => Some(|app, _| {
             app.canvas_dialogs.open_command_palette();
             app.canvas_dialogs.command_palette.sync_shortcuts(&app.shortcuts);
-            Ok(Some(json!({
+            Ok(json!({
                 "palette_open": matches!(app.canvas_dialogs.active_dialog, ActiveDialog::CommandPalette),
                 "dialog": "CommandPalette",
-            })))
-        }
-        "ui.analyze.open" => map_ui_result(dispatch_ui_analyze_open(app, params)),
-        "ui.editParams.open" => map_ui_result(dispatch_ui_edit_params_open(app, params)),
-        "ui.powerWizard.open" => map_ui_result(dispatch_ui_power_wizard_open(app, params)),
-        "ui.formatPoints.open" => map_ui_result(dispatch_ui_format_points_open(app, params)),
-        "ui.changeGraphType.open" => map_ui_result(dispatch_ui_change_graph_type_open(app, params)),
-        "ui.clonePipeline.open" => map_ui_result(dispatch_ui_clone_pipeline_open(app, params)),
-        "ui.zoom.fitSheet" => {
+            }))
+        }),
+        "ui.analyze.open" => Some(|app, p| map_ui_err(dispatch_ui_analyze_open(app, p))),
+        "ui.editParams.open" => Some(|app, p| map_ui_err(dispatch_ui_edit_params_open(app, p))),
+        "ui.powerWizard.open" => Some(|app, p| map_ui_err(dispatch_ui_power_wizard_open(app, p))),
+        "ui.formatPoints.open" => Some(|app, p| map_ui_err(dispatch_ui_format_points_open(app, p))),
+        "ui.changeGraphType.open" => Some(|app, p| map_ui_err(dispatch_ui_change_graph_type_open(app, p))),
+        "ui.clonePipeline.open" => Some(|app, p| map_ui_err(dispatch_ui_clone_pipeline_open(app, p))),
+        "ui.zoom.fitSheet" => Some(|app, _| {
             app.canvas_dialogs.reset_zoom_to_fit();
-            Ok(Some(json!({ "zoom": app.canvas_dialogs.canvas.zoom })))
-        }
-        "ui.gallery.toggle" => map_ui_result(dispatch_ui_gallery_toggle(app, params)),
-        "ui.pane.cycle" => map_ui_result(dispatch_ui_pane_cycle(app, params)),
-        "ui.rulers.toggle" => map_ui_result(dispatch_ui_rulers_toggle(app, params)),
-        "ui.shortcut.set" => map_ui_result(dispatch_ui_shortcut_set(app, params)),
-        "ui.shortcut.reset" => map_ui_result(dispatch_ui_shortcut_reset(app, params)),
-        "ui.locale.set" => map_ui_result(dispatch_ui_locale_set(app, params)),
-        "ui.theme.set" => map_ui_result(dispatch_ui_theme_set(app, params)),
-        "ui.screenshot" => dispatch_gui_action(app, "ui.screenshot", params.clone()).map(Some).map_err(ControlCallError::from),
-        "ui.event.dispatch" => map_ui_result(dispatch_ui_event_cmd(app, params)),
-        "ui.split.toggle" => map_ui_result(dispatch_ui_split_toggle(app, params)),
-        "ui.brush.point" => map_ui_result(dispatch_ui_brush_point(app, params)),
-        "ui.result.copyMethodsReport" => dispatch_ui_result_copy_methods_report(app, params).map(Some),
-        "ui.result.applyRemediation" => dispatch_ui_result_apply_remediation(app, params).map(Some),
-        "ui.result.inspectDiagnostics" => map_ui_result(dispatch_ui_result_inspect_diagnostics(app, params)),
-        "ui.canvas.applyPreset" => dispatch_ui_canvas_apply_preset(app, params).map(Some),
-        "ui.canvas.preflight" => dispatch_ui_canvas_preflight(app, params).map(Some),
-        "ui.previewFilter.set" => map_ui_result(dispatch_ui_preview_filter_set(app, params)),
-        "ui.grid.excludeWithReason" => dispatch_ui_grid_exclude_with_reason(app, params).map(Some),
-        "ui.table.convertArchetype.open" => map_ui_result(dispatch_ui_table_convert_archetype_open(app, params)),
-        "ui.table.randomizeGroups" => map_ui_result(dispatch_ui_randomize_groups_open(app, params)),
-        "ui.table.randomSampleRows" => map_ui_result(dispatch_ui_random_sample_rows_open(app, params)),
-        "ui.table.simulateDistributions" => map_ui_result(dispatch_ui_simulate_distributions_open(app, params)),
-        "ui.table.openFormulaBar" => map_ui_result(dispatch_ui_open_formula_bar(app, params)),
-        "ui.result.appendClusterColumn" => dispatch_ui_append_cluster_column(app, params).map(Some),
-        "ui.graph.insertModelEquation" => map_ui_result(dispatch_ui_insert_model_equation_open(app, params)),
-        "ui.graph.bubblePlot.open" => map_ui_result(dispatch_ui_bubble_plot_open(app, params)),
-        "ui.graph.format.open" => map_ui_result(dispatch_ui_format_graph_open(app, params)),
-        "ui.graph.axes.open" => map_ui_result(dispatch_ui_format_axes_open(app, params)),
-        "ui.graph.pairwise.open" => map_ui_result(dispatch_ui_pairwise_open(app, params)),
-        "ui.applyStyleFrom.open" => map_ui_result(dispatch_ui_apply_style_from_open(app, params)),
-        "ui.layout.composer.open" => map_ui_result(dispatch_ui_layout_composer_open(app, params)),
-        "ui.export.figure.open" => map_ui_result(dispatch_ui_export_figure_open(app, params)),
-        "ui.import.reshape.open" => map_ui_result(dispatch_ui_import_reshape_open(app, params)),
-        "ui.print.open" | "file.print" => map_ui_result(dispatch_ui_print_open(app, params)),
-        "app.about" => {
+            Ok(json!({ "zoom": app.canvas_dialogs.canvas.zoom }))
+        }),
+        "ui.gallery.toggle" => Some(|app, p| map_ui_err(dispatch_ui_gallery_toggle(app, p))),
+        "ui.pane.cycle" => Some(|app, p| map_ui_err(dispatch_ui_pane_cycle(app, p))),
+        "ui.rulers.toggle" => Some(|app, p| map_ui_err(dispatch_ui_rulers_toggle(app, p))),
+        "ui.shortcut.set" => Some(|app, p| map_ui_err(dispatch_ui_shortcut_set(app, p))),
+        "ui.shortcut.reset" => Some(|app, p| map_ui_err(dispatch_ui_shortcut_reset(app, p))),
+        "ui.locale.set" => Some(|app, p| map_ui_err(dispatch_ui_locale_set(app, p))),
+        "ui.theme.set" => Some(|app, p| map_ui_err(dispatch_ui_theme_set(app, p))),
+        "ui.screenshot" => Some(|app, p| dispatch_gui_action(app, "ui.screenshot", p.clone()).map_err(ControlCallError::from)),
+        "ui.event.dispatch" => Some(|app, p| map_ui_err(dispatch_ui_event_cmd(app, p))),
+        "ui.split.toggle" => Some(|app, p| map_ui_err(dispatch_ui_split_toggle(app, p))),
+        "ui.brush.point" => Some(|app, p| map_ui_err(dispatch_ui_brush_point(app, p))),
+        "ui.result.copyMethodsReport" => Some(dispatch_ui_result_copy_methods_report),
+        "ui.result.applyRemediation" => Some(|app, p| dispatch_ui_result_apply_remediation(app, p)),
+        "ui.result.inspectDiagnostics" => Some(|app, p| map_ui_err(dispatch_ui_result_inspect_diagnostics(app, p))),
+        "ui.canvas.applyPreset" => Some(dispatch_ui_canvas_apply_preset),
+        "ui.canvas.preflight" => Some(dispatch_ui_canvas_preflight),
+        "ui.previewFilter.set" => Some(|app, p| map_ui_err(dispatch_ui_preview_filter_set(app, p))),
+        "ui.grid.excludeWithReason" => Some(dispatch_ui_grid_exclude_with_reason),
+        "ui.table.convertArchetype.open" => Some(|app, p| map_ui_err(dispatch_ui_table_convert_archetype_open(app, p))),
+        "ui.table.randomizeGroups" => Some(|app, p| map_ui_err(dispatch_ui_randomize_groups_open(app, p))),
+        "ui.table.randomSampleRows" => Some(|app, p| map_ui_err(dispatch_ui_random_sample_rows_open(app, p))),
+        "ui.table.simulateDistributions" => Some(|app, p| map_ui_err(dispatch_ui_simulate_distributions_open(app, p))),
+        "ui.table.openFormulaBar" => Some(|app, p| map_ui_err(dispatch_ui_open_formula_bar(app, p))),
+        "ui.result.appendClusterColumn" => Some(dispatch_ui_append_cluster_column),
+        "ui.graph.insertModelEquation" => Some(|app, p| map_ui_err(dispatch_ui_insert_model_equation_open(app, p))),
+        "ui.graph.bubblePlot.open" => Some(|app, p| map_ui_err(dispatch_ui_bubble_plot_open(app, p))),
+        "ui.graph.format.open" => Some(|app, p| map_ui_err(dispatch_ui_format_graph_open(app, p))),
+        "ui.graph.axes.open" => Some(|app, p| map_ui_err(dispatch_ui_format_axes_open(app, p))),
+        "ui.graph.pairwise.open" => Some(|app, p| map_ui_err(dispatch_ui_pairwise_open(app, p))),
+        "ui.applyStyleFrom.open" => Some(|app, p| map_ui_err(dispatch_ui_apply_style_from_open(app, p))),
+        "ui.layout.composer.open" => Some(|app, p| map_ui_err(dispatch_ui_layout_composer_open(app, p))),
+        "ui.export.figure.open" => Some(|app, p| map_ui_err(dispatch_ui_export_figure_open(app, p))),
+        "ui.import.reshape.open" => Some(|app, p| map_ui_err(dispatch_ui_import_reshape_open(app, p))),
+        "ui.print.open" | "file.print" => Some(|app, p| map_ui_err(dispatch_ui_print_open(app, p))),
+        "app.about" => Some(|app, _| {
             app.canvas_dialogs.active_dialog = ActiveDialog::About;
-            Ok(Some(json!({
-                "dialog": "About",
-                "version": env!("CARGO_PKG_VERSION"),
-            })))
-        }
-        "app.feedback" => {
-            if let Some(raw_cat) = params.get("category").and_then(Value::as_str) {
-                let Some(parsed) = crate::feedback::FeedbackCategory::parse(raw_cat) else {
-                    return Err(EngineError::with_code(
-                        ErrorCode::BadInput,
-                        format!("unknown feedback category `{raw_cat}` (expected `bug`, `feature`, or `numerical`)"),
-                    )
-                    .into());
-                };
-                app.canvas_dialogs.feedback.category = parsed;
-            }
-            app.canvas_dialogs.feedback.status_message = None;
-            app.canvas_dialogs.feedback.copied_markdown = false;
-            app.canvas_dialogs.active_dialog = ActiveDialog::Feedback;
-            let preview = app.build_feedback_issue_url();
-            Ok(Some(json!({
-                "dialog": "Feedback",
-                "category": app.canvas_dialogs.feedback.category.slug(),
-                "template": app.canvas_dialogs.feedback.category.template_filename(),
-                "preview_url": preview.url,
-                "truncated": preview.truncated,
-            })))
-        }
-        "ui.view.rowTitles.toggle" => map_ui_result(dispatch_ui_row_titles_toggle(app, params)),
-        "ui.graph.create.open" => map_ui_result(dispatch_ui_create_graph_open(app, params)),
-        "ui.layout.equalizeScaling.open" => map_ui_result(dispatch_ui_equalize_scaling_open(app, params)),
-        "ui.gridOverlay.toggle" => map_ui_result(dispatch_ui_grid_overlay_toggle(app, params)),
-        "ui.embeddedTable.format.open" => map_ui_result(dispatch_ui_embedded_table_format_open(app, params)),
-        "ui.image.format.open" => map_ui_result(dispatch_ui_image_format_open(app, params)),
-        _ => Ok(None),
+            Ok(json!({ "dialog": "About", "version": env!("CARGO_PKG_VERSION") }))
+        }),
+        "app.feedback" => Some(dispatch_ui_app_feedback),
+        "ui.view.rowTitles.toggle" => Some(|app, p| map_ui_err(dispatch_ui_row_titles_toggle(app, p))),
+        "ui.graph.create.open" => Some(|app, p| map_ui_err(dispatch_ui_create_graph_open(app, p))),
+        "ui.layout.equalizeScaling.open" => Some(|app, p| map_ui_err(dispatch_ui_equalize_scaling_open(app, p))),
+        "ui.gridOverlay.toggle" => Some(|app, p| map_ui_err(dispatch_ui_grid_overlay_toggle(app, p))),
+        "ui.embeddedTable.format.open" => Some(|app, p| map_ui_err(dispatch_ui_embedded_object_format_open(app, p, false))),
+        "ui.image.format.open" => Some(|app, p| map_ui_err(dispatch_ui_embedded_object_format_open(app, p, true))),
+        _ => None,
     }
+}
+
+fn dispatch_ui_app_feedback(app: &mut UiApp, params: &Value) -> Result<Value, ControlCallError> {
+    if let Some(raw_cat) = params.get("category").and_then(Value::as_str) {
+        let Some(parsed) = crate::feedback::FeedbackCategory::parse(raw_cat) else {
+            return Err(EngineError::with_code(
+                ErrorCode::BadInput,
+                format!("unknown feedback category `{raw_cat}` (expected `bug`, `feature`, or `numerical`)"),
+            )
+            .into());
+        };
+        app.canvas_dialogs.feedback.category = parsed;
+    }
+    app.canvas_dialogs.feedback.status_message = None;
+    app.canvas_dialogs.feedback.copied_markdown = false;
+    app.canvas_dialogs.active_dialog = ActiveDialog::Feedback;
+    let preview = app.build_feedback_issue_url();
+    Ok(json!({
+        "dialog": "Feedback",
+        "category": app.canvas_dialogs.feedback.category.slug(),
+        "template": app.canvas_dialogs.feedback.category.template_filename(),
+        "preview_url": preview.url,
+        "truncated": preview.truncated,
+    }))
+}
+
+fn dispatch_ui_command_detailed(app: &mut UiApp, command_id: &str, params: &Value) -> Result<Option<Value>, ControlCallError> {
+    if command_id == "analysis.updateParams" && (params.is_null() || params.as_object().is_some_and(Map::is_empty)) {
+        return map_ui_err(dispatch_ui_edit_params_open(app, params)).map(Some);
+    }
+    let Some(handler) = lookup_ui_command_handler(command_id) else {
+        return Ok(None);
+    };
+    require_params_object_or_null(params, command_id).map_err(ControlCallError::from)?;
+    handler(app, params).map(Some)
 }
 
 fn dispatch_request(app: &mut UiApp, req: ControlRequest) -> (ControlResponse, ControlLoopAction) {
@@ -1681,6 +1627,7 @@ fn handle_command_run(app: &mut UiApp, params: &Value, recorded: Option<&mut Vec
 struct AtomicBatchRollbackState {
     active: bool,
     prev_tracker: Option<crate::BatchUndoTracker>,
+    baseline_session: Option<Session>,
     ui_shell: Option<crate::UiShellSnapshot>,
 }
 
@@ -1704,6 +1651,14 @@ fn is_batch_readonly_step(cmd_id: &str) -> bool {
     )
 }
 
+fn is_pure_engine_batch_step(cmd_id: &str) -> bool {
+    !is_gui_action_method(cmd_id)
+        && lookup_ui_command_handler(cmd_id).is_none()
+        && !cmd_id.starts_with("ui.")
+        && !matches!(cmd_id, "app.about" | "app.feedback" | "file.print" | "app.quit")
+        && cmd_id != "analysis.updateParams"
+}
+
 fn rollback_or_commit_partial_batch(
     app: &mut UiApp,
     rollback: AtomicBatchRollbackState,
@@ -1712,32 +1667,10 @@ fn rollback_or_commit_partial_batch(
     rolled_back: Option<&mut bool>,
 ) -> bool {
     if rollback.active {
-        let mut rollback_ok = true;
-        let child_tracker = app.batch_undo_log.take();
+        let _child_tracker = app.batch_undo_log.take();
         app.batch_undo_log = rollback.prev_tracker;
-        if let Some(tracker) = child_tracker {
-            if let Some(fallback) = tracker.fallback_session {
-                app.session = fallback;
-            } else {
-                if tracker.net_batch_depth > 0 {
-                    for _ in 0..tracker.net_batch_depth {
-                        if !matches!(app.session.undo(), Ok(true)) {
-                            rollback_ok = false;
-                            break;
-                        }
-                    }
-                } else if tracker.net_batch_depth < 0 {
-                    for _ in 0..(-tracker.net_batch_depth) {
-                        if !matches!(app.session.redo(), Ok(true)) {
-                            rollback_ok = false;
-                            break;
-                        }
-                    }
-                }
-                if rollback_ok {
-                    app.session.set_file_path(tracker.baseline_file_path, !tracker.baseline_dirty);
-                }
-            }
+        if let Some(baseline) = rollback.baseline_session {
+            app.session = baseline;
         }
         if let Some(ui_snap) = rollback.ui_shell {
             app.restore_ui_shell(ui_snap);
@@ -1745,9 +1678,9 @@ fn rollback_or_commit_partial_batch(
             app.sync_views();
         }
         if let Some(flag) = rolled_back {
-            *flag = rollback_ok;
+            *flag = true;
         }
-        rollback_ok
+        true
     } else {
         if let Some(out_steps) = recorded {
             out_steps.extend(batch_steps);
@@ -1767,11 +1700,92 @@ fn finish_committed_atomic_batch(app: &mut UiApp, rollback: AtomicBatchRollbackS
     }
 }
 
+fn try_execute_pure_engine_atomic_batch(
+    app: &mut UiApp,
+    items: &[Value],
+    recorded: Option<&mut Vec<ControlRecordedStep>>,
+    rolled_back: Option<&mut bool>,
+) -> Option<Result<Value, ControlCallError>> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if app.egui_dispatch_hook.0.is_some() {
+        return None;
+    }
+    if app.batch_undo_log.is_some() {
+        return None;
+    }
+    let mut steps = Vec::with_capacity(items.len());
+    for item in items {
+        let cmd_id = extract_command_id(item).ok()?;
+        if !is_pure_engine_batch_step(&cmd_id) {
+            return None;
+        }
+        steps.push(BatchCommandStep::new(cmd_id, extract_nested_params(item)));
+    }
+    let baseline_for_frame_overflow = app.session.clone();
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    match app.session.execute_batch_atomic(&steps, Caller::Control, &cancelled) {
+        Ok(outcomes) => {
+            let max_payload_bytes = MAX_CONTROL_LINE_BYTES.saturating_sub(512);
+            let mut accumulated_bytes: usize = 64;
+            let mut results = Vec::with_capacity(outcomes.len());
+            let mut any_mutated = false;
+            for (idx, (step, outcome)) in steps.iter().zip(outcomes.iter()).enumerate() {
+                any_mutated |= outcome.mutated;
+                let val = match serde_json::to_value(outcome) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        app.session = baseline_for_frame_overflow;
+                        app.sync_views();
+                        if let Some(flag) = rolled_back {
+                            *flag = true;
+                        }
+                        return Some(Err(ControlCallError::from(format!("failed to serialize command outcome: {err}"))));
+                    }
+                };
+                let entry = json!({ "index": idx, "command": step.command_id, "result": val });
+                let entry_bytes = serde_json::to_string(&entry).map(|s| s.len().saturating_add(1)).unwrap_or(MAX_CONTROL_LINE_BYTES);
+                accumulated_bytes = accumulated_bytes.saturating_add(entry_bytes);
+                if accumulated_bytes > max_payload_bytes {
+                    app.session = baseline_for_frame_overflow;
+                    app.sync_views();
+                    if let Some(flag) = rolled_back {
+                        *flag = true;
+                    }
+                    return Some(Err(ControlCallError::from(format!(
+                        "command.batch serialized payload exceeds maximum control line size of {MAX_CONTROL_LINE_BYTES} bytes (rolled_back=true)"
+                    ))));
+                }
+                results.push(entry);
+            }
+            if any_mutated {
+                app.mutation_seq.0 = app.mutation_seq.0.wrapping_add(1);
+            }
+            app.sync_views();
+            if let Some(out_steps) = recorded {
+                for (step, outcome) in steps.into_iter().zip(outcomes) {
+                    out_steps.push(ControlRecordedStep { command_id: step.command_id, params: step.params, mutated: outcome.mutated });
+                }
+            }
+            Some(Ok(json!({ "atomic": true, "count": results.len(), "results": results })))
+        }
+        Err(failure) => {
+            app.sync_views();
+            if let Some(flag) = rolled_back {
+                *flag = true;
+            }
+            Some(Err(ControlCallError {
+                message: format!("batch step {} ({}) failed (rolled_back=true): {}", failure.failed_index, failure.failed_command_id, failure.error),
+                detail: Some(engine_error_detail(&failure.error)),
+            }))
+        }
+    }
+}
+
 fn handle_command_batch(
     app: &mut UiApp,
     params: &Value,
-    recorded: Option<&mut Vec<ControlRecordedStep>>,
-    rolled_back: Option<&mut bool>,
+    mut recorded: Option<&mut Vec<ControlRecordedStep>>,
+    mut rolled_back: Option<&mut bool>,
 ) -> Result<Value, ControlCallError> {
     let Some(items) = params.get("commands").and_then(Value::as_array) else {
         return Err(ControlCallError::from("command.batch requires a 'commands' array"));
@@ -1779,17 +1793,18 @@ fn handle_command_batch(
     if items.len() > MAX_CONTROL_BATCH_STEPS {
         return Err(ControlCallError::from(format!("command.batch exceeds maximum step limit of {MAX_CONTROL_BATCH_STEPS} (got {})", items.len())));
     }
-    let atomic = match params.get("atomic") {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(b)) => *b,
-        Some(_) => return Err(ControlCallError::from("command.batch 'atomic' must be a boolean")),
-    };
+    let atomic =
+        opt_bool_param(params, &["atomic"]).map_err(|_| ControlCallError::from("command.batch 'atomic' must be a boolean"))?.unwrap_or(false);
+    if atomic && let Some(res) = try_execute_pure_engine_atomic_batch(app, items, recorded.as_deref_mut(), rolled_back.as_deref_mut()) {
+        return res;
+    }
+
     let mut rollback = if atomic {
         let prev_tracker = app.batch_undo_log.take();
         app.batch_undo_log = Some(crate::BatchUndoTracker::for_session(app.session()));
-        AtomicBatchRollbackState { active: true, prev_tracker, ui_shell: None }
+        AtomicBatchRollbackState { active: true, prev_tracker, baseline_session: None, ui_shell: None }
     } else {
-        AtomicBatchRollbackState { active: false, prev_tracker: None, ui_shell: None }
+        AtomicBatchRollbackState { active: false, prev_tracker: None, baseline_session: None, ui_shell: None }
     };
     let mut batch_steps: Vec<ControlRecordedStep> = Vec::new();
     let max_payload_bytes = MAX_CONTROL_LINE_BYTES.saturating_sub(512);
@@ -1804,8 +1819,13 @@ fn handle_command_batch(
                 return Err(ControlCallError::from(format!("batch step {idx}: {err}")));
             }
         };
-        if rollback.active && rollback.ui_shell.is_none() && !is_batch_readonly_step(&cmd_id) {
-            rollback.ui_shell = Some(app.snapshot_ui_shell());
+        if rollback.active && !is_batch_readonly_step(&cmd_id) {
+            if rollback.baseline_session.is_none() {
+                rollback.baseline_session = Some(app.session.clone());
+            }
+            if rollback.ui_shell.is_none() {
+                rollback.ui_shell = Some(app.snapshot_ui_shell());
+            }
         }
         let cmd_params = extract_nested_params(item);
         let step_sink = recorded.as_ref().map(|_| &mut batch_steps);
@@ -1837,11 +1857,7 @@ fn handle_command_batch(
         out_steps.extend(batch_steps);
     }
 
-    Ok(json!({
-        "atomic": atomic,
-        "count": results.len(),
-        "results": results,
-    }))
+    Ok(json!({ "atomic": atomic, "count": results.len(), "results": results }))
 }
 
 fn handle_engine_execute(app: &mut UiApp, params: &Value, recorded: Option<&mut Vec<ControlRecordedStep>>) -> Result<Value, ControlCallError> {
@@ -1903,83 +1919,65 @@ fn handle_doc_inspect(doc: &ProjectDocument, dirty: bool, file_path: Option<&std
     require_params_object_or_null(params, "doc.inspect")?;
     let include_cells = opt_bool_param(params, &["include_cells"])?.unwrap_or(false);
     if let Some(sheet_id) = resolve_sheet_id_param(params)? {
-        return inspect_single_sheet(doc, &sheet_id, include_cells);
+        return inspect_sheet_detail(doc, &sheet_id, include_cells).map_err(|err| err.to_string());
     }
-
-    let data_sheets: Vec<Value> = doc
+    let summary = inspect_project_summary(doc, dirty, file_path, None).map_err(|err| err.to_string())?;
+    let data_sheets: Vec<Value> = summary
         .data_sheets
         .iter()
-        .map(|s| {
-            json!({
-                "id": s.id.as_str(),
-                "title": s.title,
-                "kind": s.kind().label(),
-                "rows": s.archetype.row_count(),
-                "cols": s.archetype.column_count(),
-                "frozen": s.frozen,
-            })
-        })
+        .map(|s| json!({ "id": s.id, "title": s.title, "kind": s.kind_label, "rows": s.rows, "cols": s.cols, "frozen": s.frozen }))
         .collect();
     let info_sheets: Vec<Value> =
-        doc.info_sheets.iter().map(|s| json!({ "id": s.id.as_str(), "title": s.title, "constants": s.constants.len() })).collect();
-    let result_sheets: Vec<Value> = doc
+        summary.info_sheets.iter().map(|s| json!({ "id": s.id, "title": s.title, "constants": s.constants.len() })).collect();
+    let result_sheets: Vec<Value> = summary
         .result_sheets
         .iter()
         .map(|s| {
             json!({
-                "id": s.id.as_str(),
-                "title": s.analysis.effective_title(),
-                "status": format!("{:?}", s.status),
-                "tabs": s.tabs.len(),
-                "scalars": s.scalars.len(),
-                "checklist": s.checklist.len(),
-                "has_analyzable_data": s.analyzable_data.is_some(),
+                "id": s.id,
+                "title": s.title,
+                "status": s.status,
+                "tabs": s.tabs,
+                "scalars": s.scalars,
+                "checklist": s.checklist,
+                "has_analyzable_data": s.analyzable,
             })
         })
         .collect();
-    let graph_sheets: Vec<Value> = doc
+    let graph_sheets: Vec<Value> = summary
         .graph_sheets
         .iter()
         .map(|s| {
             json!({
-                "id": s.id.as_str(),
+                "id": s.id,
                 "title": s.title,
                 "initialized": s.initialized,
-                "kind": format!("{:?}", s.spec.kind),
-                "width_pt": s.spec.canvas_size_pt.width,
-                "height_pt": s.spec.canvas_size_pt.height,
+                "kind": s.kind_debug,
+                "width_pt": s.width_pt,
+                "height_pt": s.height_pt,
             })
         })
         .collect();
-    let layout_sheets: Vec<Value> = doc
+    let layout_sheets: Vec<Value> = summary
         .layout_sheets
         .iter()
-        .map(|s| {
-            let size = s.spec.page_size_pt();
-            json!({
-                "id": s.id.as_str(),
-                "title": s.title,
-                "items": s.spec.items.len(),
-                "width_pt": size.width,
-                "height_pt": size.height,
-            })
-        })
+        .map(|s| json!({ "id": s.id, "title": s.title, "items": s.item_count, "width_pt": s.width_pt, "height_pt": s.height_pt }))
         .collect();
 
     Ok(json!({
-        "title": doc.title,
-        "schema_version": doc.schema_version,
-        "dirty": dirty,
-        "file_path": file_path.map(|p| p.display().to_string()),
-        "active_sheet_id": doc.active_sheet_id.as_ref().map(SheetId::as_str),
-        "family_anchor_sheet_id": doc.family_anchor_sheet_id.as_ref().map(SheetId::as_str),
+        "title": summary.title,
+        "schema_version": summary.schema_version,
+        "dirty": summary.dirty,
+        "file_path": summary.file_path,
+        "active_sheet_id": summary.active_sheet_id,
+        "family_anchor_sheet_id": summary.family_anchor_sheet_id,
         "counts": {
-            "total": doc.total_sheet_count(),
-            "data": doc.data_sheets.len(),
-            "info": doc.info_sheets.len(),
-            "results": doc.result_sheets.len(),
-            "graphs": doc.graph_sheets.len(),
-            "layouts": doc.layout_sheets.len(),
+            "total": summary.total_sheet_count,
+            "data": data_sheets.len(),
+            "info": info_sheets.len(),
+            "results": result_sheets.len(),
+            "graphs": graph_sheets.len(),
+            "layouts": layout_sheets.len(),
         },
         "data_sheets": data_sheets,
         "info_sheets": info_sheets,
@@ -1989,333 +1987,33 @@ fn handle_doc_inspect(doc: &ProjectDocument, dirty: bool, file_path: Option<&std
     }))
 }
 
-fn inspect_single_sheet(doc: &ProjectDocument, sheet_id: &SheetId, include_cells: bool) -> Result<Value, String> {
-    let deps = include_cells.then(|| doc.upstream_dependencies(sheet_id));
-    match doc.sheet_section(sheet_id) {
-        Some(SheetSection::Data) => {
-            let s = doc.data_sheet(sheet_id).ok_or_else(|| format!("data sheet `{}` not found", sheet_id.as_str()))?;
-            let mut val = json!({
-                "section": "Data",
-                "id": s.id.as_str(),
-                "title": s.title,
-                "kind": s.kind().label(),
-                "rows": s.archetype.row_count(),
-                "cols": s.archetype.column_count(),
-                "frozen": s.frozen,
-                "linked_regions": s.linked_regions.len(),
-            });
-            if include_cells && let Some(obj) = val.as_object_mut() {
-                obj.insert(String::from("columns"), json!(s.archetype.column_count()));
-                obj.insert(String::from("info_sheet_id"), serde_json::to_value(&s.info_sheet_id).unwrap_or(Value::Null));
-                if let Some(ref upstream) = deps {
-                    obj.insert(String::from("upstream_dependencies"), serde_json::to_value(upstream).unwrap_or(Value::Null));
-                }
-                let (csv_preview, csv_preview_truncated) = inspect_preview_bounds::build_csv_preview(s)?;
-                obj.insert(String::from("csv_preview"), Value::String(csv_preview));
-                obj.insert(String::from("csv_preview_truncated"), Value::Bool(csv_preview_truncated));
-            }
-            Ok(val)
-        }
-        Some(SheetSection::Info) => doc
-            .info_sheet(sheet_id)
-            .map(|s| {
-                let mut val = json!({
-                    "section": "Info",
-                    "id": s.id.as_str(),
-                    "title": s.title,
-                    "constants": s.constants.len(),
-                    "linked_data_sheets": s.linked_data_sheets.iter().map(SheetId::as_str).collect::<Vec<_>>(),
-                });
-                if include_cells && let Some(obj) = val.as_object_mut() {
-                    obj.insert(String::from("constants_entries"), serde_json::to_value(&s.constants).unwrap_or(Value::Null));
-                    obj.insert(String::from("notes_markdown"), serde_json::to_value(&s.notes_markdown).unwrap_or(Value::Null));
-                    if let Some(ref upstream) = deps {
-                        obj.insert(String::from("upstream_dependencies"), serde_json::to_value(upstream).unwrap_or(Value::Null));
-                    }
-                }
-                val
-            })
-            .ok_or_else(|| format!("info sheet `{}` not found", sheet_id.as_str())),
-        Some(SheetSection::Analyses) => doc
-            .result_sheet(sheet_id)
-            .map(|s| {
-                let mut val = json!({
-                    "section": "Results",
-                    "id": s.id.as_str(),
-                    "title": s.analysis.effective_title(),
-                    "source_sheet_id": s.analysis.source_sheet_id.as_str(),
-                    "status": format!("{:?}", s.status),
-                    "tabs": s.tabs.len(),
-                    "scalars": s.scalars.len(),
-                    "checklist": s.checklist.len(),
-                });
-                if include_cells && let Some(obj) = val.as_object_mut() {
-                    let (tabs_preview, tabs_truncated) = inspect_preview_bounds::slice_result_tabs_preview(&s.tabs);
-                    let (scalars_preview, scalars_truncated) =
-                        inspect_preview_bounds::slice_preview_vec(&s.scalars, inspect_preview_bounds::MAX_RESULT_PREVIEW_SCALARS);
-                    let (checklist_preview, checklist_truncated) =
-                        inspect_preview_bounds::slice_preview_vec(&s.checklist, inspect_preview_bounds::MAX_RESULT_PREVIEW_CHECKLIST);
-                    obj.insert(String::from("tabs_data"), serde_json::to_value(&tabs_preview).unwrap_or(Value::Null));
-                    obj.insert(String::from("tabs_truncated"), Value::Bool(tabs_truncated));
-                    obj.insert(String::from("scalars_data"), serde_json::to_value(&scalars_preview).unwrap_or(Value::Null));
-                    obj.insert(String::from("scalars_truncated"), Value::Bool(scalars_truncated));
-                    obj.insert(String::from("checklist_entries"), serde_json::to_value(&checklist_preview).unwrap_or(Value::Null));
-                    obj.insert(String::from("checklist_truncated"), Value::Bool(checklist_truncated));
-                    if let Some(ref upstream) = deps {
-                        obj.insert(String::from("upstream_dependencies"), serde_json::to_value(upstream).unwrap_or(Value::Null));
-                    }
-                }
-                val
-            })
-            .ok_or_else(|| format!("result sheet `{}` not found", sheet_id.as_str())),
-        Some(SheetSection::Graphs) => doc
-            .graph_sheet(sheet_id)
-            .map(|s| {
-                let mut val = json!({
-                    "section": "Graphs",
-                    "id": s.id.as_str(),
-                    "title": s.title,
-                    "initialized": s.initialized,
-                    "kind": format!("{:?}", s.spec.kind),
-                    "width_pt": s.spec.canvas_size_pt.width,
-                    "height_pt": s.spec.canvas_size_pt.height,
-                });
-                if include_cells && let Some(obj) = val.as_object_mut() {
-                    obj.insert(String::from("spec"), serde_json::to_value(&s.spec).unwrap_or(Value::Null));
-                    if let Some(ref upstream) = deps {
-                        obj.insert(String::from("upstream_dependencies"), serde_json::to_value(upstream).unwrap_or(Value::Null));
-                    }
-                }
-                val
-            })
-            .ok_or_else(|| format!("graph sheet `{}` not found", sheet_id.as_str())),
-        Some(SheetSection::Layouts) => doc
-            .layout_sheet(sheet_id)
-            .map(|s| {
-                let size = s.spec.page_size_pt();
-                let mut val = json!({
-                    "section": "Layouts",
-                    "id": s.id.as_str(),
-                    "title": s.title,
-                    "items": s.spec.items.len(),
-                    "width_pt": size.width,
-                    "height_pt": size.height,
-                });
-                if include_cells && let Some(obj) = val.as_object_mut() {
-                    obj.insert(String::from("spec"), serde_json::to_value(&s.spec).unwrap_or(Value::Null));
-                    if let Some(ref upstream) = deps {
-                        obj.insert(String::from("upstream_dependencies"), serde_json::to_value(upstream).unwrap_or(Value::Null));
-                    }
-                }
-                val
-            })
-            .ok_or_else(|| format!("layout sheet `{}` not found", sheet_id.as_str())),
-        None => Err(format!("sheet `{}` not found", sheet_id.as_str())),
+fn visual_sheet_title(doc: &ProjectDocument, sheet_id: &SheetId) -> String {
+    if let Some(graph) = doc.graph_sheet(sheet_id) {
+        return if graph.spec.title.is_empty() { graph.title.clone() } else { graph.spec.title.clone() };
     }
-}
-
-mod inspect_preview_bounds {
-    use curvebook_doc::{
-        ColumnTable, ContingencyTable, DataSetColumn, DataSheet, GroupedTable, MultipleVariablesTable, NestedGroupColumn, NestedTable,
-        PartsOfWholeTable, ResultTab, SurvivalTable, TableArchetype, VariableColumn, XyTable,
-    };
-    use curvebook_format::{CsvOptions, export_datasheet_to_csv};
-
-    pub(super) const MAX_CSV_PREVIEW_ROWS: usize = 100;
-    pub(super) const MAX_CSV_PREVIEW_BYTES: usize = 65_536;
-    pub(super) const MAX_RESULT_PREVIEW_TABS: usize = 32;
-    pub(super) const MAX_RESULT_PREVIEW_ROWS: usize = 100;
-    pub(super) const MAX_RESULT_PREVIEW_COLS: usize = 64;
-    pub(super) const MAX_RESULT_PREVIEW_TOTAL_CELLS: usize = 4_096;
-    pub(super) const MAX_RESULT_PREVIEW_FOOTNOTES: usize = 64;
-    pub(super) const MAX_RESULT_PREVIEW_CHECKLIST: usize = 128;
-    pub(super) const MAX_RESULT_PREVIEW_SCALARS: usize = 2_048;
-
-    fn slice_dataset_columns(cols: &[DataSetColumn], max_rows: usize) -> Vec<DataSetColumn> {
-        cols.iter().map(|c| DataSetColumn { title: c.title.clone(), cells: c.cells.iter().take(max_rows).cloned().collect() }).collect()
-    }
-
-    fn slice_archetype_rows(archetype: &TableArchetype, max_rows: usize) -> TableArchetype {
-        match archetype {
-            TableArchetype::Xy(t) => TableArchetype::Xy(XyTable {
-                x_title: t.x_title.clone(),
-                x_mode: t.x_mode.clone(),
-                x_cells: t.x_cells.iter().take(max_rows).cloned().collect(),
-                row_titles: t.row_titles.iter().take(max_rows).cloned().collect(),
-                row_titles_expanded: t.row_titles_expanded,
-                y_subcolumn_mode: t.y_subcolumn_mode,
-                data_sets: slice_dataset_columns(&t.data_sets, max_rows),
-            }),
-            TableArchetype::Column(t) => TableArchetype::Column(ColumnTable {
-                design_hint: t.design_hint,
-                subcolumn_mode: t.subcolumn_mode,
-                row_titles: t.row_titles.iter().take(max_rows).cloned().collect(),
-                row_titles_expanded: t.row_titles_expanded,
-                data_sets: slice_dataset_columns(&t.data_sets, max_rows),
-            }),
-            TableArchetype::Grouped(t) => TableArchetype::Grouped(GroupedTable {
-                row_factor_title: t.row_factor_title.clone(),
-                column_factor_title: t.column_factor_title.clone(),
-                row_titles: t.row_titles.iter().take(max_rows).cloned().collect(),
-                row_numeric_spacing: t.row_numeric_spacing.as_ref().map(|v| v.iter().take(max_rows).copied().collect()),
-                subcolumn_mode: t.subcolumn_mode,
-                replicate_stacking: t.replicate_stacking,
-                three_way_grouping: t.three_way_grouping.clone(),
-                data_sets: slice_dataset_columns(&t.data_sets, max_rows),
-            }),
-            TableArchetype::Contingency(t) => TableArchetype::Contingency(ContingencyTable {
-                row_factor_title: t.row_factor_title.clone(),
-                column_factor_title: t.column_factor_title.clone(),
-                row_titles: t.row_titles.iter().take(max_rows).cloned().collect(),
-                data_sets: slice_dataset_columns(&t.data_sets, max_rows),
-            }),
-            TableArchetype::Survival(t) => TableArchetype::Survival(SurvivalTable {
-                time_title: t.time_title.clone(),
-                times: t.times.iter().take(max_rows).cloned().collect(),
-                event_code: t.event_code,
-                censored_code: t.censored_code,
-                row_titles: t.row_titles.iter().take(max_rows).cloned().collect(),
-                row_titles_expanded: t.row_titles_expanded,
-                cohorts: slice_dataset_columns(&t.cohorts, max_rows),
-            }),
-            TableArchetype::PartsOfWhole(t) => TableArchetype::PartsOfWhole(PartsOfWholeTable {
-                slice_labels: t.slice_labels.iter().take(max_rows).cloned().collect(),
-                data_sets: slice_dataset_columns(&t.data_sets, max_rows),
-            }),
-            TableArchetype::MultipleVariables(t) => TableArchetype::MultipleVariables(MultipleVariablesTable {
-                row_titles: t.row_titles.iter().take(max_rows).cloned().collect(),
-                row_titles_expanded: t.row_titles_expanded,
-                variables: t
-                    .variables
-                    .iter()
-                    .map(|v| VariableColumn {
-                        title: v.title.clone(),
-                        role: v.role,
-                        role_inferred: v.role_inferred,
-                        source: v.source.clone(),
-                        level_order: v.level_order.clone(),
-                        cells: v.cells.iter().take(max_rows).cloned().collect(),
-                    })
-                    .collect(),
-            }),
-            TableArchetype::Nested(t) => TableArchetype::Nested(NestedTable {
-                row_titles: t.row_titles.iter().take(max_rows).cloned().collect(),
-                row_titles_expanded: t.row_titles_expanded,
-                groups: t
-                    .groups
-                    .iter()
-                    .map(|g| NestedGroupColumn {
-                        title: g.title.clone(),
-                        subcolumn_titles: g.subcolumn_titles.clone(),
-                        cells: g.cells.iter().take(max_rows).cloned().collect(),
-                    })
-                    .collect(),
-            }),
-        }
-    }
-
-    fn truncate_csv_bytes(mut csv: String, max_bytes: usize) -> (String, bool) {
-        if csv.len() <= max_bytes {
-            return (csv, false);
-        }
-        let mut end = max_bytes;
-        while end > 0 && !csv.is_char_boundary(end) {
-            end -= 1;
-        }
-        if let Some(nl) = csv.get(..end).and_then(|s| s.rfind('\n'))
-            && nl > 0
-        {
-            end = nl + 1;
-        }
-        csv.truncate(end);
-        (csv, true)
-    }
-
-    pub(super) fn build_csv_preview(ds: &DataSheet) -> Result<(String, bool), String> {
-        ds.archetype.validate().map_err(|err| format!("CSV preview export failed: {err}"))?;
-        let row_count = ds.archetype.row_count();
-        let row_truncated = row_count > MAX_CSV_PREVIEW_ROWS;
-        let raw_csv = if row_truncated {
-            let sliced = slice_archetype_rows(&ds.archetype, MAX_CSV_PREVIEW_ROWS);
-            let preview_ds = DataSheet::new(ds.id.clone(), ds.title.clone(), sliced).map_err(|err| format!("CSV preview export failed: {err}"))?;
-            export_datasheet_to_csv(&preview_ds, &CsvOptions::csv())
-        } else {
-            export_datasheet_to_csv(ds, &CsvOptions::csv())
-        }
-        .map_err(|err| format!("CSV preview export failed: {err}"))?;
-        let (capped, byte_truncated) = truncate_csv_bytes(raw_csv, MAX_CSV_PREVIEW_BYTES);
-        Ok((capped, row_truncated || byte_truncated))
-    }
-
-    pub(super) fn slice_preview_vec<T: Clone>(items: &[T], limit: usize) -> (Vec<T>, bool) {
-        let truncated = items.len() > limit;
-        (items.iter().take(limit).cloned().collect(), truncated)
-    }
-
-    pub(super) fn slice_result_tabs_preview(tabs: &[ResultTab]) -> (Vec<ResultTab>, bool) {
-        let mut truncated = tabs.len() > MAX_RESULT_PREVIEW_TABS;
-        let mut remaining_cells = MAX_RESULT_PREVIEW_TOTAL_CELLS;
-        let mut out = Vec::with_capacity(tabs.len().min(MAX_RESULT_PREVIEW_TABS));
-
-        for tab in tabs.iter().take(MAX_RESULT_PREVIEW_TABS) {
-            if tab.column_headers.len() > MAX_RESULT_PREVIEW_COLS || tab.rows.len() > MAX_RESULT_PREVIEW_ROWS {
-                truncated = true;
-            }
-            let column_headers: Vec<String> = tab.column_headers.iter().take(MAX_RESULT_PREVIEW_COLS).cloned().collect();
-            let mut out_rows = Vec::new();
-            let mut out_row_labels = Vec::new();
-            for (r_idx, row) in tab.rows.iter().take(MAX_RESULT_PREVIEW_ROWS).enumerate() {
-                if row.len() > MAX_RESULT_PREVIEW_COLS {
-                    truncated = true;
-                }
-                let take_cols = row.len().min(MAX_RESULT_PREVIEW_COLS);
-                if take_cols > remaining_cells {
-                    truncated = true;
-                    break;
-                }
-                remaining_cells -= take_cols;
-                out_rows.push(row[..take_cols].to_vec());
-                if let Some(lbl) = tab.row_labels.get(r_idx) {
-                    out_row_labels.push(lbl.clone());
-                }
-            }
-            if tab.row_labels.len() > out_rows.len() || tab.footnotes.len() > MAX_RESULT_PREVIEW_FOOTNOTES {
-                truncated = true;
-            }
-            let footnotes = tab.footnotes.iter().take(MAX_RESULT_PREVIEW_FOOTNOTES).cloned().collect();
-            out.push(ResultTab {
-                id: tab.id.clone(),
-                title: tab.title.clone(),
-                kind: tab.kind,
-                column_headers,
-                row_labels: out_row_labels,
-                rows: out_rows,
-                footnotes,
-            });
-        }
-
-        (out, truncated)
-    }
+    doc.layout_sheet(sheet_id).map(|layout| layout.title.clone()).unwrap_or_default()
 }
 
 fn handle_render_svg(app: &UiApp, params: &Value) -> Result<Value, ControlCallError> {
     reject_control_if_gui_only(app, "render.svg")?;
     require_params_object_or_null(params, "render.svg")?;
     let sheet_id = resolve_renderable_sheet_id(app.document(), params)?;
-    let scene = app.session().render_sheet_scene(&sheet_id)?;
-    let opts = SvgExportOptions {
+    let options = SvgExportOptions {
         pretty: opt_bool_param(params, &["pretty"])?.unwrap_or(true),
         outline_text: opt_bool_param(params, &["outline_text"])?.unwrap_or(false),
         ..SvgExportOptions::default()
     };
-    let svg = render_svg(&scene, &opts).map_err(|err| format!("SVG render failed: {err}"))?;
-    Ok(json!({
-        "sheet_id": sheet_id.as_str(),
-        "title": scene.title,
-        "width_pt": scene.width_pt,
-        "height_pt": scene.height_pt,
-        "svg": svg,
-    }))
+    let artifact = export_document_artifact(
+        app.document(),
+        &ExportArtifactRequest { target: ExportTarget::Explicit(sheet_id.clone()), format: ExportArtifactFormat::Svg { options } },
+        None,
+        "render.svg",
+    )?;
+    let title = visual_sheet_title(app.document(), &sheet_id);
+    let width_pt = artifact.width_pt.unwrap_or(0.0);
+    let height_pt = artifact.height_pt.unwrap_or(0.0);
+    let svg = artifact.into_utf8_string()?;
+    Ok(json!({ "sheet_id": sheet_id.as_str(), "title": title, "width_pt": width_pt, "height_pt": height_pt, "svg": svg }))
 }
 
 fn handle_render_pdf(app: &UiApp, params: &Value) -> Result<Value, ControlCallError> {
@@ -2323,47 +2021,31 @@ fn handle_render_pdf(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
     require_params_object_or_null(params, "render.pdf")?;
     let opt_path = opt_str_param(params, &["path"])?.map(str::trim).filter(|p| !p.is_empty());
     if let Some(path) = opt_path {
-        if app.is_gui_only() {
-            return Err(EngineError::with_code(
-                ErrorCode::GuiOnlyViolation,
-                "direct filesystem writes via `render.pdf` `path` are blocked under --gui-only",
-            )
-            .with_remediation("Inspect the returned base64 PDF payload or trigger Export through GUI dialogs.")
-            .into());
-        }
         let _ = app.session().validate_host_write_path(path)?;
     }
 
     let doc = app.document();
     let all = opt_bool_param(params, &["all"])?.unwrap_or(false);
     let sheet_ids = if all { collect_all_renderable_ids(doc)? } else { vec![resolve_renderable_sheet_id(doc, params)?] };
-
-    let color_space = parse_pdf_color_space(params)?;
-    let mut scenes = Vec::with_capacity(sheet_ids.len());
-    for sheet_id in &sheet_ids {
-        scenes.push(app.session().render_sheet_scene(sheet_id)?);
-    }
-
-    let opts = PdfExportOptions { color_space, title: Some(doc.title.clone()), ..PdfExportOptions::default() };
-    let pdf_bytes = if scenes.len() == 1 {
-        render_pdf(&scenes[0], &opts).map_err(|err| format!("PDF render failed: {err}"))?
-    } else {
-        render_pdf_pages(&scenes, &opts).map_err(|err| format!("PDF render failed: {err}"))?
+    let color_space = parse_pdf_color_space_fields(params, &["color_space"])?;
+    let options = PdfExportOptions { color_space, title: Some(doc.title.clone()), ..PdfExportOptions::default() };
+    let request = ExportArtifactRequest {
+        target: if sheet_ids.len() == 1 { ExportTarget::Explicit(sheet_ids[0].clone()) } else { ExportTarget::AutoOrExplicit(None) },
+        format: ExportArtifactFormat::Pdf { options, all_graphs: false, sheet_ids: (sheet_ids.len() > 1).then(|| sheet_ids.clone()) },
     };
-
+    let artifact = export_document_artifact(doc, &request, None, "render.pdf")?;
     if let Some(path) = opt_path {
-        app.session().write_host_file_atomic(path, &pdf_bytes)?;
+        app.session().write_host_file_atomic(path, &artifact.bytes)?;
     }
 
-    let data_base64 = encode_base64(&pdf_bytes);
     let id_strings: Vec<&str> = sheet_ids.iter().map(SheetId::as_str).collect();
     Ok(json!({
         "sheet_id": id_strings.first().copied(),
         "sheet_ids": id_strings,
-        "page_count": scenes.len(),
+        "page_count": artifact.page_count,
         "encoding": "base64",
-        "bytes_len": pdf_bytes.len(),
-        "data_base64": data_base64,
+        "bytes_len": artifact.bytes.len(),
+        "data_base64": encode_base64(&artifact.bytes),
     }))
 }
 
@@ -2406,19 +2088,26 @@ fn enforce_control_payload_budget(bytes_len: usize) -> Result<(), ControlCallErr
 
 fn handle_render_preview(app: &UiApp, params: &Value) -> Result<Value, ControlCallError> {
     reject_control_if_gui_only(app, "render.preview")?;
-    require_params_object_or_null(params, "render.preview").map_err(ControlCallError::from)?;
+    require_params_object_or_null(params, "render.preview")?;
     let doc = app.document();
-    let sheet_id = resolve_renderable_sheet_id(doc, params).map_err(ControlCallError::from)?;
-    let dpi = opt_u16_bounded_param(params, "dpi", 18, 2400).map_err(ControlCallError::from)?.unwrap_or(144);
-    let width_px = opt_u32_bounded_param(params, "width_px", 1, MAX_CAPPED_RASTER_DIM_PX).map_err(ControlCallError::from)?;
-    let height_px = opt_u32_bounded_param(params, "height_px", 1, MAX_CAPPED_RASTER_DIM_PX).map_err(ControlCallError::from)?;
+    let sheet_id = resolve_renderable_sheet_id(doc, params)?;
+    let dpi = opt_u16_bounded_param(params, "dpi", 18, 2400)?.unwrap_or(144);
+    let width_px = opt_u32_bounded_param(params, "width_px", 1, MAX_CAPPED_RASTER_DIM_PX)?;
+    let height_px = opt_u32_bounded_param(params, "height_px", 1, MAX_CAPPED_RASTER_DIM_PX)?;
 
     let sheet_kind = if doc.graph_sheet(&sheet_id).is_some() { "graph" } else { "layout" };
-    let scene = app.session().render_sheet_scene(&sheet_id)?;
-    let spec = RenderTargetSpec::from_scene_capped(&scene, width_px, height_px, dpi);
-    let raster = render_scene(&scene, spec).map_err(|err| format!("preview rasterization failed: {err}"))?;
-    let png_bytes = encode_png(&raster).map_err(|err| format!("PNG encode failed: {err}"))?;
-    enforce_control_payload_budget(png_bytes.len())?;
+    let scene = compile_visual_scene_for_sheet(doc, &sheet_id)?;
+    let artifact = export_document_artifact(
+        doc,
+        &ExportArtifactRequest {
+            target: ExportTarget::Explicit(sheet_id.clone()),
+            format: ExportArtifactFormat::Png { width_px, height_px, dpi: Some(dpi), sizing: RasterSizingPolicy::CapToLimits { default_dpi: 144 } },
+        },
+        None,
+        "render.preview",
+    )?;
+    enforce_control_payload_budget(artifact.bytes.len())?;
+    let raster = artifact.raster.ok_or_else(|| ControlCallError::from("missing raster metadata for preview"))?;
 
     Ok(json!({
         "sheet_id": sheet_id.as_str(),
@@ -2429,104 +2118,114 @@ fn handle_render_preview(app: &UiApp, params: &Value) -> Result<Value, ControlCa
         "dpi": raster.dpi,
         "width_pt": scene.width_pt,
         "height_pt": scene.height_pt,
-        "png_bytes": png_bytes.len(),
+        "png_bytes": artifact.bytes.len(),
         "primitives_count": scene.primitives.len(),
         "warnings": scene.warnings,
         "encoding": "base64",
-        "data_base64": encode_base64(&png_bytes),
+        "data_base64": encode_base64(&artifact.bytes),
     }))
 }
 
-fn resolve_tabular_export_target<'a>(
-    doc: &'a ProjectDocument,
-    sheet_id: Option<&str>,
-    tab_id: Option<&str>,
-) -> Result<(&'a str, Option<&'a DataSheet>, Option<&'a ResultSheet>), String> {
-    if let Some(id_str) = sheet_id {
-        let id = SheetId::new(id_str);
-        if let Some(rs) = doc.result_sheet(&id) {
-            return Ok((rs.id.as_str(), None, Some(rs)));
-        }
-        if let Some(ds) = doc.data_sheet(&id) {
-            if let Some(tid) = tab_id {
-                return Err(format!("tab '{tid}' requires a ResultSheet, but '{id_str}' is a DataSheet"));
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_CONTROL_FONT_FILE_BYTES: usize = 64 * 1024 * 1024;
+
+fn parse_doc_export_csv_options(params: &Value, format: &str) -> Result<CsvOptions, ControlCallError> {
+    let Some(delim) = opt_non_empty_str_param(params, &["csv_delimiter"])? else {
+        return Ok(if format == "tsv" { CsvOptions::tsv() } else { CsvOptions::csv() });
+    };
+    let mut chars = delim.chars();
+    let Some(ch) = chars.next() else {
+        return Err(ControlCallError::from("csv_delimiter must not be empty"));
+    };
+    if chars.next().is_some() {
+        return Err(ControlCallError::from("csv_delimiter must be a single character"));
+    }
+    let mut opts = CsvOptions::csv();
+    opts.delimiter = ch;
+    Ok(opts)
+}
+
+fn parse_doc_export_pdf_version(params: &Value) -> Result<PdfVersion, ControlCallError> {
+    match opt_non_empty_str_param(params, &["pdf_version"])? {
+        None => Ok(PdfVersion::Pdf17),
+        Some("1.4") => Ok(PdfVersion::Pdf14),
+        Some("1.7") => Ok(PdfVersion::Pdf17),
+        Some(other) => Err(ControlCallError::from(format!("unsupported pdf_version '{other}' (expected '1.4' or '1.7')"))),
+    }
+}
+
+fn load_validated_control_ttf_font(path_str: &str) -> Result<Vec<u8>, ControlCallError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let path = std::path::Path::new(path_str);
+        let bytes = curvebook_platform::fs::read_regular_file_bytes(path, MAX_CONTROL_FONT_FILE_BYTES).map_err(|err| match err {
+            curvebook_platform::PlatformError::InvalidPath { reason } => {
+                ControlCallError::from(EngineError::with_code(ErrorCode::BadInput, format!("invalid TrueType font `{path_str}`: {reason}")))
             }
-            return Ok((ds.id.as_str(), Some(ds), None));
+            other => ControlCallError::from(EngineError::from(other)),
+        })?;
+        let _info = curvebook_text::parse_truetype_font_info(&bytes).map_err(|err| {
+            ControlCallError::from(EngineError::with_code(ErrorCode::BadInput, format!("invalid TrueType font `{path_str}`: {err}")))
+        })?;
+        if !matches!(bytes.get(0..4), Some([0x00, 0x01, 0x00, 0x00] | b"true")) {
+            return Err(ControlCallError::from(EngineError::with_code(
+                ErrorCode::BadInput,
+                format!("unsupported SFNT font `{path_str}`: expected TrueType outlines (`0x00010000` or `true`), not CFF/OTTO"),
+            )));
         }
-        return Err(format!("data or result sheet '{id_str}' not found"));
+        Ok(bytes)
     }
-    if let Some(tid) = tab_id {
-        if let Some(active) = &doc.active_sheet_id
-            && let Some(rs) = doc.result_sheet(active)
-            && rs.tabs.iter().any(|t| t.id == tid)
-        {
-            return Ok((rs.id.as_str(), None, Some(rs)));
-        }
-        if let Some(rs) = doc.result_sheets.iter().find(|rs| rs.tabs.iter().any(|t| t.id == tid)) {
-            return Ok((rs.id.as_str(), None, Some(rs)));
-        }
-        return Err(format!("tab '{tid}' not found on any result sheet"));
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = path_str;
+        Err(ControlCallError::from(EngineError::with_code(
+            ErrorCode::UnsupportedFormat,
+            "reading TrueType font from filesystem is unsupported on wasm32",
+        )))
     }
-    if let Some(active) = &doc.active_sheet_id {
-        if let Some(rs) = doc.result_sheet(active) {
-            return Ok((rs.id.as_str(), None, Some(rs)));
-        }
-        if let Some(ds) = doc.data_sheet(active) {
-            return Ok((ds.id.as_str(), Some(ds), None));
-        }
-    }
-    if let Some(rs) = doc.result_sheets.first() {
-        return Ok((rs.id.as_str(), None, Some(rs)));
-    }
-    if let Some(ds) = doc.data_sheets.first() {
-        return Ok((ds.id.as_str(), Some(ds), None));
-    }
-    Err(String::from("no DataSheet or ResultSheet exists in the current document"))
 }
 
 fn handle_doc_export(app: &UiApp, params: &Value) -> Result<Value, ControlCallError> {
     reject_control_if_gui_only(app, "doc.export")?;
-    require_params_object_or_null(params, "doc.export").map_err(ControlCallError::from)?;
-    let raw_fmt = opt_non_empty_str_param(params, &["format"])
-        .map_err(ControlCallError::from)?
-        .ok_or_else(|| ControlCallError::from("doc.export requires a non-empty string 'format'"))?;
-    let format = raw_fmt.to_ascii_lowercase();
-    if !matches!(format.as_str(), "svg" | "pdf" | "png" | "tiff" | "csv" | "json") {
+    require_params_object_or_null(params, "doc.export")?;
+    let format = opt_non_empty_str_param(params, &["format"])?
+        .ok_or_else(|| ControlCallError::from("doc.export requires a non-empty string 'format'"))?
+        .to_ascii_lowercase();
+    if !matches!(format.as_str(), "svg" | "pdf" | "emf" | "png" | "tiff" | "csv" | "tsv" | "json") {
         return Err(ControlCallError::from(format!("unsupported export format '{format}'")));
     }
 
-    let sheet_id_str = opt_non_empty_str_param(params, &["sheet_id", "sheetId"]).map_err(ControlCallError::from)?;
-    let pretty = opt_bool_param(params, &["pretty"]).map_err(ControlCallError::from)?.unwrap_or(true);
-    let explicit_tidy = opt_bool_param(params, &["tidy"]).map_err(ControlCallError::from)?;
-    let tab_id = opt_non_empty_str_param(params, &["tab_id", "tabId"]).map_err(ControlCallError::from)?;
+    let opt_out_path = opt_non_empty_str_param(params, &["path", "output_path"])?;
+    let validated_out_path = match opt_out_path {
+        Some(raw) => Some(app.session().validate_host_write_path(raw)?),
+        None => None,
+    };
+
+    let opt_ttf_font = opt_non_empty_str_param(params, &["ttf_font"])?;
+    let validated_ttf_font = match opt_ttf_font {
+        Some(raw) => Some(app.session().validate_host_write_path(raw)?),
+        None => None,
+    };
+
+    let sheet_id_str = opt_non_empty_str_param(params, &["sheet_id", "sheetId"])?;
+    let pretty = opt_bool_param(params, &["pretty"])?.unwrap_or(true);
+    let explicit_tidy = opt_bool_param(params, &["tidy"])?;
+    let tab_id = opt_non_empty_str_param(params, &["tab_id", "tabId"])?;
     if explicit_tidy == Some(true) && tab_id.is_some() {
         return Err(ControlCallError::from(
             "export `tidy: true` cannot be combined with `tab_id`; omit `tidy` or pass `tidy: false` to export a specific tab",
         ));
     }
     let tidy = explicit_tidy.unwrap_or(tab_id.is_none());
-    let csv_opts = match opt_non_empty_str_param(params, &["csv_delimiter"]).map_err(ControlCallError::from)? {
-        Some(delim) => {
-            let mut chars = delim.chars();
-            let Some(ch) = chars.next() else {
-                return Err(ControlCallError::from("csv_delimiter must not be empty"));
-            };
-            if chars.next().is_some() {
-                return Err(ControlCallError::from("csv_delimiter must be a single character"));
-            }
-            let mut opts = CsvOptions::csv();
-            opts.delimiter = ch;
-            opts
-        }
-        None => CsvOptions::csv(),
-    };
-    let svg_precision = opt_u16_bounded_param(params, "svg_precision", 1, 8).map_err(ControlCallError::from)?;
-    let pdf_color_space = parse_pdf_color_space_fields(params, &["pdf_color_space", "color_space"]).map_err(ControlCallError::from)?;
-    let all_graphs = opt_bool_param(params, &["all_graphs", "all"]).map_err(ControlCallError::from)?.unwrap_or(false);
-    let dpi = opt_u16_bounded_param(params, "dpi", 18, 2400).map_err(ControlCallError::from)?.unwrap_or(144);
-    let width_px = opt_u32_bounded_param(params, "width_px", 1, MAX_CAPPED_RASTER_DIM_PX).map_err(ControlCallError::from)?;
-    let height_px = opt_u32_bounded_param(params, "height_px", 1, MAX_CAPPED_RASTER_DIM_PX).map_err(ControlCallError::from)?;
-    let tiff_compression = match opt_non_empty_str_param(params, &["tiff_compression"]).map_err(ControlCallError::from)? {
+    let csv_opts = parse_doc_export_csv_options(params, &format)?;
+    let svg_precision = opt_u16_bounded_param(params, "svg_precision", 1, 8)?;
+    let pdf_color_space = parse_pdf_color_space_fields(params, &["pdf_color_space", "color_space"])?;
+    let pdf_version = parse_doc_export_pdf_version(params)?;
+    let all_graphs = opt_bool_param(params, &["all_graphs", "all"])?.unwrap_or(false);
+    let dpi = opt_u16_bounded_param(params, "dpi", 18, 2400)?.unwrap_or(144);
+    let width_px = opt_u32_bounded_param(params, "width_px", 1, MAX_CAPPED_RASTER_DIM_PX)?;
+    let height_px = opt_u32_bounded_param(params, "height_px", 1, MAX_CAPPED_RASTER_DIM_PX)?;
+    let tiff_compression = match opt_non_empty_str_param(params, &["tiff_compression"])? {
         Some(raw) => match raw.to_ascii_lowercase().as_str() {
             "none" => TiffCompression::None,
             "deflate" => TiffCompression::Deflate,
@@ -2536,150 +2235,252 @@ fn handle_doc_export(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
         None => TiffCompression::Lzw,
     };
 
+    let ttf_font_bytes = if format == "pdf" {
+        match validated_ttf_font.as_deref() {
+            Some(path_str) => Some(load_validated_control_ttf_font(path_str)?),
+            None => None,
+        }
+    } else {
+        None
+    };
+
     let doc = app.document();
-    let mut raster_meta: Option<(u32, u32, u16)> = None;
-    let (target_id, bytes): (String, Vec<u8>) = match format.as_str() {
+    let explicit_id = sheet_id_str.map(SheetId::new);
+    let target = if matches!(format.as_str(), "csv" | "tsv") && explicit_id.is_none() {
+        if let Some(tid) = tab_id {
+            let matched = doc
+                .active_sheet_id
+                .as_ref()
+                .and_then(|id| doc.result_sheet(id))
+                .filter(|rs| rs.tabs.iter().any(|t| t.id == tid))
+                .or_else(|| doc.result_sheets.iter().find(|rs| rs.tabs.iter().any(|t| t.id == tid)))
+                .ok_or_else(|| ControlCallError::from(format!("tab '{tid}' not found on any result sheet")))?;
+            ExportTarget::Explicit(matched.id.clone())
+        } else if doc.active_sheet_id.is_none()
+            && let Some(rs) = doc.result_sheets.first()
+        {
+            ExportTarget::Explicit(rs.id.clone())
+        } else {
+            ExportTarget::AutoOrExplicit(None)
+        }
+    } else {
+        ExportTarget::AutoOrExplicit(explicit_id)
+    };
+
+    let artifact_format = match format.as_str() {
         "svg" => {
-            let target_sheet = resolve_renderable_sheet_id(doc, params).map_err(ControlCallError::from)?;
-            let scene = app.session().render_sheet_scene(&target_sheet)?;
-            let mut opts = SvgExportOptions { pretty, ..SvgExportOptions::default() };
+            let mut options = SvgExportOptions { pretty, ..SvgExportOptions::default() };
             if let Some(p) = svg_precision {
-                opts.precision = u8::try_from(p).map_err(|_| ControlCallError::from("svg_precision out of range"))?;
+                options.precision = u8::try_from(p).map_err(|_| ControlCallError::from("svg_precision out of range"))?;
             }
-            let svg = render_svg(&scene, &opts).map_err(|err| format!("SVG export failed: {err}"))?;
-            (target_sheet.as_str().to_owned(), svg.into_bytes())
+            ExportArtifactFormat::Svg { options }
         }
-        "pdf" => {
-            let mut opts = PdfExportOptions { color_space: pdf_color_space, ..PdfExportOptions::default() };
-            if all_graphs && sheet_id_str.is_none() {
-                let sheet_ids = collect_all_renderable_ids(doc).map_err(ControlCallError::from)?;
-                if sheet_ids.len() > curvebook_pdf::MAX_PDF_PAGES {
-                    return Err(ControlCallError::from(format!(
-                        "PDF page count {} exceeds maximum {}",
-                        sheet_ids.len(),
-                        curvebook_pdf::MAX_PDF_PAGES
-                    )));
-                }
-                let mut scenes = Vec::with_capacity(sheet_ids.len());
-                let mut total_primitives: usize = 0;
-                for sid in &sheet_ids {
-                    let scene = app.session().render_sheet_scene(sid)?;
-                    total_primitives = total_primitives.saturating_add(scene.primitives.len());
-                    if total_primitives > curvebook_pdf::MAX_PDF_TOTAL_PRIMITIVES {
-                        return Err(ControlCallError::from(format!(
-                            "PDF primitive count {total_primitives} exceeds maximum {}",
-                            curvebook_pdf::MAX_PDF_TOTAL_PRIMITIVES
-                        )));
-                    }
-                    scenes.push(scene);
-                }
-                opts.title = Some(doc.title.clone());
-                let pdf = render_pdf_pages(&scenes, &opts).map_err(|err| format!("PDF export failed: {err}"))?;
-                (String::from("all"), pdf)
-            } else {
-                let target_sheet = resolve_renderable_sheet_id(doc, params).map_err(ControlCallError::from)?;
-                let scene = app.session().render_sheet_scene(&target_sheet)?;
-                opts.title = Some(scene.title.clone());
-                let pdf = render_pdf(&scene, &opts).map_err(|err| format!("PDF export failed: {err}"))?;
-                (target_sheet.as_str().to_owned(), pdf)
-            }
-        }
-        "png" | "tiff" => {
-            let target_sheet = resolve_renderable_sheet_id(doc, params).map_err(ControlCallError::from)?;
-            let scene = app.session().render_sheet_scene(&target_sheet)?;
-            let spec = RenderTargetSpec::from_scene_capped(&scene, width_px, height_px, dpi);
-            let raster = render_scene(&scene, spec).map_err(|err| format!("rasterization failed: {err}"))?;
-            raster_meta = Some((raster.width_px, raster.height_px, raster.dpi));
-            let encoded = if format == "png" {
-                encode_png(&raster).map_err(|err| format!("PNG encoding failed: {err}"))?
-            } else {
-                encode_tiff(&raster, tiff_compression).map_err(|err| format!("TIFF encoding failed: {err}"))?
-            };
-            (target_sheet.as_str().to_owned(), encoded)
-        }
-        "csv" => {
-            let (id_str, ds_opt, rs_opt) = resolve_tabular_export_target(doc, sheet_id_str, tab_id).map_err(ControlCallError::from)?;
-            let text = if let Some(ds) = ds_opt {
-                export_datasheet_to_csv(ds, &csv_opts).map_err(|err| format!("CSV export failed: {err}"))?
-            } else if let Some(rs) = rs_opt {
-                let csv_res = if tidy {
-                    try_export_result_sheet_tidy_csv(rs, &csv_opts)
-                } else if let Some(tid) = tab_id {
-                    let tab = rs
-                        .tabs
-                        .iter()
-                        .find(|t| t.id == tid)
-                        .ok_or_else(|| ControlCallError::from(format!("tab '{tid}' not found on result sheet '{}'", rs.id)))?;
-                    try_export_result_tab_csv(rs, tab, &csv_opts)
-                } else if let Some(first_tab) = rs.tabs.first() {
-                    try_export_result_tab_csv(rs, first_tab, &csv_opts)
-                } else {
-                    try_export_result_sheet_tidy_csv(rs, &csv_opts)
-                };
-                csv_res.map_err(|err| ControlCallError::from(format!("CSV export failed: {err}")))?
-            } else {
-                return Err(ControlCallError::from("no tabular sheet available to export"));
-            };
-            (id_str.to_owned(), text.into_bytes())
-        }
-        "json" => {
-            let serialize_val = |val_res: Result<String, serde_json::Error>| {
-                val_res.map(|s| s.into_bytes()).map_err(|err| ControlCallError::from(format!("JSON export failed: {err}")))
-            };
-            if let Some(id_str) = sheet_id_str {
-                let id = SheetId::new(id_str);
-                let json_bytes = if let Some(rs) = doc.result_sheet(&id) {
-                    export_result_sheet_json(rs, pretty).map(|s| s.into_bytes()).map_err(|err| ControlCallError::from(err.to_string()))?
-                } else if let Some(ds) = doc.data_sheet(&id) {
-                    serialize_val(if pretty { serde_json::to_string_pretty(ds) } else { serde_json::to_string(ds) })?
-                } else if let Some(info) = doc.info_sheet(&id) {
-                    serialize_val(if pretty { serde_json::to_string_pretty(info) } else { serde_json::to_string(info) })?
-                } else if let Some(gs) = doc.graph_sheet(&id) {
-                    serialize_val(if pretty { serde_json::to_string_pretty(gs) } else { serde_json::to_string(gs) })?
-                } else if let Some(ls) = doc.layout_sheet(&id) {
-                    serialize_val(if pretty { serde_json::to_string_pretty(ls) } else { serde_json::to_string(ls) })?
-                } else {
-                    return Err(ControlCallError::from(format!("sheet '{id_str}' not found")));
-                };
-                (id_str.to_owned(), json_bytes)
-            } else {
-                let json_bytes = serialize_val(if pretty { serde_json::to_string_pretty(doc) } else { serde_json::to_string(doc) })?;
-                (String::from("project"), json_bytes)
-            }
-        }
+        "pdf" => ExportArtifactFormat::Pdf {
+            options: PdfExportOptions {
+                color_space: pdf_color_space,
+                version: pdf_version,
+                embedded_truetype_font: ttf_font_bytes,
+                ..PdfExportOptions::default()
+            },
+            all_graphs,
+            sheet_ids: None,
+        },
+        "emf" => ExportArtifactFormat::Emf { require_kind: None },
+        "png" => ExportArtifactFormat::Png { width_px, height_px, dpi: Some(dpi), sizing: RasterSizingPolicy::CapToLimits { default_dpi: 144 } },
+        "tiff" => ExportArtifactFormat::Tiff {
+            width_px,
+            height_px,
+            dpi: Some(dpi),
+            compression: tiff_compression,
+            sizing: RasterSizingPolicy::CapToLimits { default_dpi: 144 },
+        },
+        "csv" | "tsv" => ExportArtifactFormat::Csv { options: csv_opts, tab_id: tab_id.map(str::to_owned), tab_index: None, tidy },
+        "json" => ExportArtifactFormat::Json { pretty },
         _ => return Err(ControlCallError::from(format!("unsupported export format '{format}'"))),
     };
 
-    enforce_control_payload_budget(bytes.len())?;
+    let artifact = export_document_artifact(doc, &ExportArtifactRequest { target, format: artifact_format }, None, "doc.export").map_err(|err| {
+        if matches!(format.as_str(), "csv" | "tsv") {
+            ControlCallError { message: format!("CSV export failed: {err}"), detail: Some(engine_error_detail(&err)) }
+        } else {
+            ControlCallError::from(err)
+        }
+    })?;
+
+    if let Some(dest_path) = validated_out_path {
+        app.session().write_host_file_atomic(&dest_path, &artifact.bytes)?;
+        return Ok(json!({
+            "exported": true,
+            "format": format,
+            "sheet_id": artifact.target_id,
+            "path": dest_path,
+            "bytes_written": artifact.bytes.len(),
+            "width_px": artifact.raster.map(|r| r.width_px),
+            "height_px": artifact.raster.map(|r| r.height_px),
+            "dpi": artifact.raster.map(|r| r.dpi),
+        }));
+    }
+
+    enforce_control_payload_budget(artifact.bytes.len())?;
     Ok(json!({
         "format": format,
-        "sheet_id": target_id,
-        "width_px": raster_meta.map(|(w, _, _)| w),
-        "height_px": raster_meta.map(|(_, h, _)| h),
-        "dpi": raster_meta.map(|(_, _, d)| d),
-        "bytes_len": bytes.len(),
+        "sheet_id": artifact.target_id,
+        "width_px": artifact.raster.map(|r| r.width_px),
+        "height_px": artifact.raster.map(|r| r.height_px),
+        "dpi": artifact.raster.map(|r| r.dpi),
+        "bytes_len": artifact.bytes.len(),
         "encoding": "base64",
-        "data_base64": encode_base64(&bytes),
+        "data_base64": encode_base64(&artifact.bytes),
     }))
+}
+
+const SHEET_ID_KEYS: &[&str] = &["sheet_id", "sheetId"];
+const EMBEDDED_OPEN_IGNORE_KEYS: &[&str] = &["sheet_id", "sheetId", "annotation_index", "panel_index", "item_index"];
+
+fn resolve_target_sheet_matching(
+    doc: &ProjectDocument,
+    params: &Value,
+    extra_keys: &[&str],
+    kind_label: &str,
+    validate_explicit: bool,
+    matches_kind: impl Fn(&ProjectDocument, &SheetId) -> bool,
+    first_fallback: impl Fn(&ProjectDocument) -> Option<SheetId>,
+) -> Result<SheetId, String> {
+    let explicit = if let Some(raw) = opt_non_empty_str_param(params, extra_keys)? {
+        Some(SheetId::try_new(raw).map_err(|e| e.to_string())?)
+    } else {
+        resolve_sheet_id_param(params)?
+    };
+    if let Some(id) = explicit {
+        if !validate_explicit || matches_kind(doc, &id) {
+            return Ok(id);
+        }
+        return Err(format!("{kind_label} `{}` not found", id.as_str()));
+    }
+    if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| matches_kind(doc, id)) {
+        return Ok(active.clone());
+    }
+    first_fallback(doc).ok_or_else(|| format!("no {kind_label} available"))
+}
+
+fn resolve_target_data_id(doc: &ProjectDocument, params: &Value) -> Result<SheetId, String> {
+    resolve_target_sheet_matching(
+        doc,
+        params,
+        &["source_sheet_id"],
+        "data sheet",
+        true,
+        |d, id| d.data_sheet(id).is_some(),
+        |d| d.data_sheets.first().map(|s| s.id.clone()),
+    )
+}
+
+fn resolve_target_graph_id(doc: &ProjectDocument, params: &Value) -> Result<SheetId, String> {
+    resolve_target_sheet_matching(
+        doc,
+        params,
+        &[],
+        "graph sheet",
+        true,
+        |d, id| d.graph_sheet(id).is_some(),
+        |d| d.graph_sheets.first().map(|g| g.id.clone()),
+    )
+}
+
+fn resolve_target_layout_id(doc: &ProjectDocument, params: &Value) -> Result<SheetId, String> {
+    resolve_target_sheet_matching(
+        doc,
+        params,
+        &[],
+        "layout sheet",
+        true,
+        |d, id| d.layout_sheet(id).is_some(),
+        |d| d.layout_sheets.first().map(|l| l.id.clone()),
+    )
+}
+
+fn resolve_target_result_sheet_id(doc: &ProjectDocument, params: &Value) -> Result<SheetId, String> {
+    resolve_target_sheet_matching(
+        doc,
+        params,
+        &["result_sheet_id"],
+        "result sheet",
+        false,
+        |d, id| d.result_sheet(id).is_some(),
+        |d| d.result_sheets.first().map(|r| r.id.clone()),
+    )
+}
+
+fn resolve_renderable_sheet_id(doc: &ProjectDocument, params: &Value) -> Result<SheetId, String> {
+    resolve_target_sheet_matching(
+        doc,
+        params,
+        &[],
+        "graph or layout sheet",
+        false,
+        |d, id| matches!(d.sheet_section(id), Some(SheetSection::Graphs | SheetSection::Layouts)),
+        |d| d.graph_sheets.first().map(|g| g.id.clone()).or_else(|| d.layout_sheets.first().map(|l| l.id.clone())),
+    )
+}
+
+fn apply_open_patch(params: &Value, ignore_keys: &[&str], apply: impl FnOnce(&Map<String, Value>) -> Result<(), String>) -> Result<(), String> {
+    let Some(obj) = params.as_object() else {
+        return Ok(());
+    };
+    let fields: Map<String, Value> = obj.iter().filter(|(k, _)| !ignore_keys.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
+    if !fields.is_empty() {
+        apply(&fields)?;
+    }
+    Ok(())
+}
+
+fn open_graph_dialog_patched(
+    app: &mut UiApp,
+    params: &Value,
+    dialog_name: &str,
+    open: impl FnOnce(&mut UiApp, &ProjectDocument, &SheetId) -> bool,
+    patch: impl FnOnce(&mut UiApp, &ProjectDocument, &Map<String, Value>) -> Result<(), String>,
+) -> Result<Value, String> {
+    let doc = app.document().clone();
+    let graph_id = resolve_target_graph_id(&doc, params)?;
+    if !open(app, &doc, &graph_id) {
+        return Err(format!("graph sheet `{}` not found", graph_id.as_str()));
+    }
+    apply_open_patch(params, SHEET_ID_KEYS, |fields| patch(app, &doc, fields))?;
+    Ok(json!({ "dialog": dialog_name, "graph_sheet_id": graph_id.as_str() }))
+}
+
+fn open_layout_dialog_patched(
+    app: &mut UiApp,
+    params: &Value,
+    dialog_name: &str,
+    open: impl FnOnce(&mut UiApp, &ProjectDocument, &SheetId) -> bool,
+    patch: impl FnOnce(&mut UiApp, &ProjectDocument, &Map<String, Value>) -> Result<(), String>,
+) -> Result<Value, String> {
+    let doc = app.document().clone();
+    let layout_id = resolve_target_layout_id(&doc, params)?;
+    if !open(app, &doc, &layout_id) {
+        return Err(format!("layout sheet `{}` not found", layout_id.as_str()));
+    }
+    apply_open_patch(params, SHEET_ID_KEYS, |fields| patch(app, &doc, fields))?;
+    Ok(json!({ "dialog": dialog_name, "layout_sheet_id": layout_id.as_str() }))
 }
 
 fn dispatch_ui_analyze_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     let doc = app.session().document().clone();
-    let target_id = if let Some(explicit) = resolve_sheet_id_param(params)? {
-        explicit
-    } else if let Some(active) = &doc.active_sheet_id {
-        let is_analyzable_result = doc
-            .result_sheet(active)
-            .is_some_and(|rs| rs.analyzable_data.is_some() || rs.tabs.iter().any(|t| !t.column_headers.is_empty() && !t.rows.is_empty()));
-        if doc.data_sheet(active).is_some() || is_analyzable_result {
-            active.clone()
-        } else {
-            doc.data_sheets.first().map(|ds| ds.id.clone()).ok_or_else(|| String::from("no data or analyzable sheet available for Analyze dialog"))?
-        }
-    } else {
-        doc.data_sheets.first().map(|ds| ds.id.clone()).ok_or_else(|| String::from("no data or analyzable sheet available for Analyze dialog"))?
-    };
-
+    let target_id = resolve_target_sheet_matching(
+        &doc,
+        params,
+        &[],
+        "data or analyzable sheet",
+        false,
+        |d, id| {
+            d.data_sheet(id).is_some()
+                || d.result_sheet(id)
+                    .is_some_and(|rs| rs.analyzable_data.is_some() || rs.tabs.iter().any(|t| !t.column_headers.is_empty() && !t.rows.is_empty()))
+        },
+        |d| d.data_sheets.first().map(|ds| ds.id.clone()),
+    )?;
     if !app.canvas_dialogs.open_analyze_dialog(&doc, &target_id) {
         return Err(format!("sheet `{}` is not a data sheet or tabular result sheet", target_id.as_str()));
     }
@@ -2690,20 +2491,10 @@ fn dispatch_ui_analyze_open(app: &mut UiApp, params: &Value) -> Result<Value, St
     }))
 }
 
-fn filtered_open_patch_fields(params: &Value, ignore_keys: &[&str]) -> Map<String, Value> {
-    let Some(obj) = params.as_object() else {
-        return Map::new();
-    };
-    obj.iter().filter(|(k, _)| !ignore_keys.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect()
-}
-
 fn dispatch_ui_power_wizard_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     app.canvas_dialogs.open_power_wizard();
-    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId"]);
-    if !fields.is_empty() {
-        let preset = app.locale_preset.clone();
-        app.canvas_dialogs.power_wizard.apply_field_patch_localized(&fields, &preset)?;
-    }
+    let preset = app.locale_preset.clone();
+    apply_open_patch(params, SHEET_ID_KEYS, |f| app.canvas_dialogs.power_wizard.apply_field_patch_localized(f, &preset))?;
     Ok(json!({
         "dialog": "PowerAndSampleSize",
         "stage": app.canvas_dialogs.power_wizard.stage.label(),
@@ -2713,14 +2504,8 @@ fn dispatch_ui_power_wizard_open(app: &mut UiApp, params: &Value) -> Result<Valu
 
 fn dispatch_ui_format_points_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     let doc = app.document().clone();
-    let graph = if let Some(explicit) = resolve_sheet_id_param(params)? {
-        doc.graph_sheet(&explicit).ok_or_else(|| format!("graph sheet `{}` not found", explicit.as_str()))?
-    } else if let Some(active) = doc.active_sheet_id.as_ref().and_then(|id| doc.graph_sheet(id)) {
-        active
-    } else {
-        doc.graph_sheets.first().ok_or_else(|| String::from("no graph sheet available to format points"))?
-    };
-
+    let graph_id = resolve_target_graph_id(&doc, params)?;
+    let graph = doc.graph_sheet(&graph_id).ok_or_else(|| format!("graph sheet `{}` not found", graph_id.as_str()))?;
     let mut points: Vec<(usize, usize, Option<usize>)> = match params.get("points") {
         Some(v) if !v.is_null() => parse_selected_points_with_subcols(v, "points")?,
         _ if !app.brushed_points.is_empty() => app
@@ -2731,24 +2516,15 @@ fn dispatch_ui_format_points_open(app: &mut UiApp, params: &Value) -> Result<Val
                 (pt.col, pt.row, (subcols > 1).then_some(pt.subcol))
             })
             .collect(),
-        _ => {
-            if let Some(ds) = doc.data_sheet(&graph.spec.primary_source_sheet_id) {
-                app.grid.selected_graph_point_targets(ds, graph.spec.series.len().max(1))
-            } else {
-                Vec::new()
-            }
-        }
+        _ => doc
+            .data_sheet(&graph.spec.primary_source_sheet_id)
+            .map_or_else(Vec::new, |ds| app.grid.selected_graph_point_targets(ds, graph.spec.series.len().max(1))),
     };
     points.sort_unstable();
     points.dedup();
-
-    let graph_id = graph.id.clone();
     app.canvas_dialogs.open_format_selected_points_with_subcols(&doc, &graph_id, points);
-    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId", "points"]);
-    if !fields.is_empty() {
-        let preset = app.locale_preset.clone();
-        app.canvas_dialogs.format_points.apply_field_patch_localized(&fields, &preset)?;
-    }
+    let preset = app.locale_preset.clone();
+    apply_open_patch(params, &["sheet_id", "sheetId", "points"], |f| app.canvas_dialogs.format_points.apply_field_patch_localized(f, &preset))?;
     Ok(json!({
         "dialog": "FormatSelectedPoints",
         "graph_sheet_id": graph_id.as_str(),
@@ -2758,48 +2534,28 @@ fn dispatch_ui_format_points_open(app: &mut UiApp, params: &Value) -> Result<Val
 
 fn dispatch_ui_change_graph_type_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     let doc = app.session().document().clone();
-    let graph = if let Some(explicit) = resolve_sheet_id_param(params)? {
-        doc.graph_sheet(&explicit).ok_or_else(|| format!("graph sheet `{}` not found", explicit.as_str()))?
-    } else if let Some(active) = doc.active_sheet_id.as_ref().and_then(|id| doc.graph_sheet(id)) {
-        active
-    } else {
-        doc.graph_sheets.first().ok_or_else(|| String::from("no graph sheet available to change graph type"))?
-    };
-
+    let graph_id = resolve_target_graph_id(&doc, params)?;
+    let graph = doc.graph_sheet(&graph_id).ok_or_else(|| format!("graph sheet `{}` not found", graph_id.as_str()))?;
     app.canvas_dialogs.change_graph_type.open_for_graph(graph, &doc);
-    app.canvas_dialogs.active_dialog = ActiveDialog::ChangeGraphType { graph_sheet_id: graph.id.clone() };
-    Ok(json!({
-        "dialog": "ChangeGraphType",
-        "graph_sheet_id": graph.id.as_str(),
-    }))
+    app.canvas_dialogs.active_dialog = ActiveDialog::ChangeGraphType { graph_sheet_id: graph_id.clone() };
+    Ok(json!({ "dialog": "ChangeGraphType", "graph_sheet_id": graph_id.as_str() }))
 }
 
 fn dispatch_ui_clone_pipeline_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let explicit = resolve_sheet_id_param(params)?;
-    let target = if let Some(id) = explicit {
-        let ds = app.document().data_sheet(&id).ok_or_else(|| format!("data sheet `{}` not found for clone pipeline", id.as_str()))?;
+    let doc = app.document();
+    let target = if let Some(id) = resolve_sheet_id_param(params)? {
+        let ds = doc.data_sheet(&id).ok_or_else(|| format!("data sheet `{}` not found for clone pipeline", id.as_str()))?;
         Some((ds.id.clone(), ds.title.clone()))
-    } else if let Some(active_ds) = app.document().active_sheet_id.as_ref().and_then(|id| app.document().data_sheet(id)) {
-        Some((active_ds.id.clone(), active_ds.title.clone()))
     } else {
-        app.document().data_sheets.first().map(|ds| (ds.id.clone(), ds.title.clone()))
+        doc.active_sheet_id.as_ref().and_then(|id| doc.data_sheet(id)).or_else(|| doc.data_sheets.first()).map(|ds| (ds.id.clone(), ds.title.clone()))
     };
-
     if let Some((source_id, title)) = target {
         app.nav.welcome.trigger_clone_pipeline(source_id.clone(), title);
-        Ok(json!({
-            "dialog": "ClonePipeline",
-            "open": true,
-            "source_sheet_id": source_id.as_str(),
-        }))
+        Ok(json!({ "dialog": "ClonePipeline", "open": true, "source_sheet_id": source_id.as_str() }))
     } else {
         app.nav.welcome.open = true;
         app.nav.welcome.mode = WelcomeMode::ClonePipeline;
-        Ok(json!({
-            "dialog": "ClonePipeline",
-            "open": true,
-            "source_sheet_id": Value::Null,
-        }))
+        Ok(json!({ "dialog": "ClonePipeline", "open": true, "source_sheet_id": Value::Null }))
     }
 }
 
@@ -2821,11 +2577,7 @@ fn dispatch_ui_split_toggle(app: &mut UiApp, params: &Value) -> Result<Value, St
     let primary_opt = opt_non_empty_str_param(params, &["primary_sheet_id"])?.map(SheetId::try_new).transpose().map_err(|e| e.to_string())?;
     let secondary_opt = opt_non_empty_str_param(params, &["secondary_sheet_id"])?.map(SheetId::try_new).transpose().map_err(|e| e.to_string())?;
 
-    if let Some(enabled) = enabled_opt {
-        app.split.enabled = enabled;
-    } else {
-        app.split.enabled = !app.split.enabled;
-    }
+    app.split.enabled = enabled_opt.unwrap_or(!app.split.enabled);
     if let Some(ratio) = ratio_opt {
         app.split.set_ratio(ratio);
     }
@@ -2849,14 +2601,15 @@ fn dispatch_ui_brush_point(app: &mut UiApp, params: &Value) -> Result<Value, Str
         app.clear_brush();
         return Ok(json!({ "brushed_cell": Value::Null }));
     }
-    let doc = app.document();
-    let sheet_id = if let Some(id) = resolve_sheet_id_param(params)? {
-        id
-    } else if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()) {
-        active.clone()
-    } else {
-        doc.data_sheets.first().map(|d| d.id.clone()).ok_or_else(|| String::from("no data sheet available to brush"))?
-    };
+    let sheet_id = resolve_target_sheet_matching(
+        app.document(),
+        params,
+        &[],
+        "data sheet",
+        false,
+        |d, id| d.data_sheet(id).is_some(),
+        |d| d.data_sheets.first().map(|s| s.id.clone()),
+    )?;
     let row = opt_usize_param(params, &["row"])?.unwrap_or(0);
     let col = opt_usize_param(params, &["col"])?.unwrap_or(0);
     let subcol = opt_usize_param(params, &["subcol"])?.unwrap_or(0);
@@ -2865,17 +2618,7 @@ fn dispatch_ui_brush_point(app: &mut UiApp, params: &Value) -> Result<Value, Str
 }
 
 fn dispatch_ui_result_copy_methods_report(app: &mut UiApp, params: &Value) -> Result<Value, ControlCallError> {
-    let doc = app.document();
-    let rs_id = if let Some(raw) = opt_non_empty_str_param(params, &["result_sheet_id"])? {
-        SheetId::try_new(raw).map_err(|e| e.to_string())?
-    } else if let Some(explicit) = resolve_sheet_id_param(params)? {
-        explicit
-    } else if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.result_sheet(id).is_some()) {
-        active.clone()
-    } else {
-        doc.result_sheets.first().map(|r| r.id.clone()).ok_or_else(|| String::from("no result sheet available for methods report"))?
-    };
-
+    let rs_id = resolve_target_result_sheet_id(app.document(), params)?;
     if let Some(fmt) = opt_non_empty_str_param(params, &["format"])? {
         app.canvas_dialogs.result_view.report_format = fmt.to_owned();
     }
@@ -2891,26 +2634,12 @@ fn dispatch_ui_result_copy_methods_report(app: &mut UiApp, params: &Value) -> Re
         let status = app.write_clipboard_text(&report).map_err(|err| ControlCallError::from(format!("clipboard write failed: {err}")))?;
         serde_json::to_value(status).map_err(|err| ControlCallError::from(format!("failed to serialize clipboard status: {err}")))?
     };
-
     Ok(json!({
         "sheet_id": rs_id.as_str(),
         "format": app.canvas_dialogs.result_view.report_format,
         "report": report,
         "clipboard_status": clipboard_status,
     }))
-}
-
-fn resolve_target_result_sheet_id(doc: &ProjectDocument, params: &Value) -> Result<SheetId, String> {
-    if let Some(raw) = opt_non_empty_str_param(params, &["result_sheet_id"])? {
-        return SheetId::try_new(raw).map_err(|e| e.to_string());
-    }
-    if let Some(explicit) = resolve_sheet_id_param(params)? {
-        return Ok(explicit);
-    }
-    if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.result_sheet(id).is_some()) {
-        return Ok(active.clone());
-    }
-    doc.result_sheets.first().map(|r| r.id.clone()).ok_or_else(|| String::from("no result sheet available"))
 }
 
 fn dispatch_ui_edit_params_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
@@ -2926,11 +2655,7 @@ fn dispatch_ui_edit_params_open(app: &mut UiApp, params: &Value) -> Result<Value
     if !app.canvas_dialogs.open_edit_parameters(&doc, &rs_id) {
         return Err(format!("result sheet `{}` not found", rs_id.as_str()));
     }
-    Ok(json!({
-        "dialog": "EditAnalysisParameters",
-        "result_sheet_id": rs_id.as_str(),
-        "opened": true,
-    }))
+    Ok(json!({ "dialog": "EditAnalysisParameters", "result_sheet_id": rs_id.as_str(), "opened": true }))
 }
 
 fn dispatch_ui_result_apply_remediation(app: &UiApp, params: &Value) -> Result<Value, ControlCallError> {
@@ -3048,13 +2773,7 @@ fn dispatch_ui_preview_filter_set(app: &mut UiApp, params: &Value) -> Result<Val
 
 fn dispatch_ui_grid_exclude_with_reason(app: &mut UiApp, params: &Value) -> Result<Value, ControlCallError> {
     let doc = app.document();
-    let sheet_id = if let Some(id) = resolve_sheet_id_param(params)? {
-        id
-    } else if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()) {
-        active.clone()
-    } else {
-        doc.data_sheets.first().map(|d| d.id.clone()).ok_or_else(|| String::from("no data sheet available for exclusion"))?
-    };
+    let sheet_id = resolve_target_data_id(doc, params)?;
     let ds = doc.data_sheet(&sheet_id).ok_or_else(|| format!("data sheet `{}` not found", sheet_id.as_str()))?;
     let mut coords = app.grid.selection_coords(ds);
     if coords.is_empty()
@@ -3083,71 +2802,22 @@ fn dispatch_ui_grid_exclude_with_reason(app: &mut UiApp, params: &Value) -> Resu
             "count": coords.len(),
         }));
     }
-    Ok(json!({
-        "dialog": "ExcludeWithReason",
-        "sheet_id": sheet_id.as_str(),
-        "coords_count": app.canvas_dialogs.exclude_with_reason.coords.len(),
-    }))
+    Ok(json!({ "dialog": "ExcludeWithReason", "sheet_id": sheet_id.as_str(), "coords_count": app.canvas_dialogs.exclude_with_reason.coords.len() }))
 }
 
 fn dispatch_ui_table_convert_archetype_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     let doc = app.document().clone();
-    let sheet_id = if let Some(id) = resolve_sheet_id_param(params)? {
-        id
-    } else if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()) {
-        active.clone()
-    } else {
-        doc.data_sheets.first().map(|d| d.id.clone()).ok_or_else(|| String::from("no data sheet available to convert"))?
-    };
+    let sheet_id = resolve_target_data_id(&doc, params)?;
     if !app.canvas_dialogs.open_convert_archetype(&doc, &sheet_id) {
         return Err(format!("data sheet `{}` not found", sheet_id.as_str()));
     }
-    Ok(json!({
-        "dialog": "ConvertArchetype",
-        "sheet_id": sheet_id.as_str(),
-    }))
-}
-
-fn resolve_target_graph_id(doc: &ProjectDocument, params: &Value) -> Result<SheetId, String> {
-    if let Some(id) = resolve_sheet_id_param(params)? {
-        if doc.graph_sheet(&id).is_some() {
-            return Ok(id);
-        }
-        return Err(format!("graph sheet `{}` not found", id.as_str()));
-    }
-    if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.graph_sheet(id).is_some()) {
-        return Ok(active.clone());
-    }
-    doc.graph_sheets.first().map(|g| g.id.clone()).ok_or_else(|| String::from("no graph sheet available"))
-}
-
-fn resolve_target_data_id(doc: &ProjectDocument, params: &Value) -> Result<SheetId, String> {
-    if let Some(raw) = opt_non_empty_str_param(params, &["source_sheet_id"])? {
-        let id = SheetId::try_new(raw).map_err(|e| e.to_string())?;
-        if doc.data_sheet(&id).is_some() {
-            return Ok(id);
-        }
-        return Err(format!("data sheet `{}` not found", id.as_str()));
-    }
-    if let Some(id) = resolve_sheet_id_param(params)? {
-        if doc.data_sheet(&id).is_some() {
-            return Ok(id);
-        }
-        return Err(format!("data sheet `{}` not found", id.as_str()));
-    }
-    if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()) {
-        return Ok(active.clone());
-    }
-    doc.data_sheets.first().map(|d| d.id.clone()).ok_or_else(|| String::from("no data sheet available"))
+    Ok(json!({ "dialog": "ConvertArchetype", "sheet_id": sheet_id.as_str() }))
 }
 
 fn dispatch_ui_randomize_groups_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     let doc = app.document().clone();
     app.canvas_dialogs.open_randomize_groups(&doc);
-    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId"]);
-    if !fields.is_empty() {
-        app.canvas_dialogs.randomize_groups.apply_field_patch(&fields)?;
-    }
+    apply_open_patch(params, SHEET_ID_KEYS, |f| app.canvas_dialogs.randomize_groups.apply_field_patch(f))?;
     Ok(json!({
         "dialog": "RandomizeGroups",
         "groups": app.canvas_dialogs.randomize_groups.groups,
@@ -3161,10 +2831,7 @@ fn dispatch_ui_random_sample_rows_open(app: &mut UiApp, params: &Value) -> Resul
     if !app.canvas_dialogs.open_random_sample_rows(&doc, Some(&sheet_id)) {
         return Err(format!("data sheet `{}` not found", sheet_id.as_str()));
     }
-    let fields = filtered_open_patch_fields(params, &["source_sheet_id", "sheet_id", "sheetId"]);
-    if !fields.is_empty() {
-        app.canvas_dialogs.random_sample_rows.apply_field_patch(&fields)?;
-    }
+    apply_open_patch(params, &["source_sheet_id", "sheet_id", "sheetId"], |f| app.canvas_dialogs.random_sample_rows.apply_field_patch(f))?;
     Ok(json!({
         "dialog": "RandomSampleRows",
         "source_sheet_id": sheet_id.as_str(),
@@ -3174,11 +2841,8 @@ fn dispatch_ui_random_sample_rows_open(app: &mut UiApp, params: &Value) -> Resul
 
 fn dispatch_ui_simulate_distributions_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     app.canvas_dialogs.open_simulate_distributions();
-    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId"]);
-    if !fields.is_empty() {
-        let preset = app.locale_preset.clone();
-        app.canvas_dialogs.simulate_distributions.apply_field_patch_localized(&fields, &preset)?;
-    }
+    let preset = app.locale_preset.clone();
+    apply_open_patch(params, SHEET_ID_KEYS, |f| app.canvas_dialogs.simulate_distributions.apply_field_patch_localized(f, &preset))?;
     Ok(json!({
         "dialog": "SimulateDistributions",
         "n_rows": app.canvas_dialogs.simulate_distributions.n_rows,
@@ -3187,49 +2851,43 @@ fn dispatch_ui_simulate_distributions_open(app: &mut UiApp, params: &Value) -> R
 }
 
 fn dispatch_ui_insert_model_equation_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let doc = app.document().clone();
-    let graph_id = resolve_target_graph_id(&doc, params)?;
-    if !app.canvas_dialogs.open_insert_model_equation(&doc, &graph_id) {
-        return Err(format!("graph sheet `{}` not found", graph_id.as_str()));
+    let preset = app.locale_preset.clone();
+    let mut payload = open_graph_dialog_patched(
+        app,
+        params,
+        "InsertModelEquation",
+        |a, d, id| a.canvas_dialogs.open_insert_model_equation(d, id),
+        |a, _, f| a.canvas_dialogs.insert_model_equation.apply_field_patch_localized(f, &preset),
+    )?;
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert(
+            String::from("result_sheet_id"),
+            app.canvas_dialogs.insert_model_equation.result_sheet_id.as_ref().map_or(Value::Null, |id| Value::String(id.as_str().to_owned())),
+        );
+        obj.insert(String::from("mode"), json!(app.canvas_dialogs.insert_model_equation.mode));
     }
-    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId"]);
-    if !fields.is_empty() {
-        let preset = app.locale_preset.clone();
-        app.canvas_dialogs.insert_model_equation.apply_field_patch_localized(&fields, &preset)?;
-    }
-    Ok(json!({
-        "dialog": "InsertModelEquation",
-        "graph_sheet_id": graph_id.as_str(),
-        "result_sheet_id": app.canvas_dialogs.insert_model_equation.result_sheet_id.as_ref().map(SheetId::as_str),
-        "mode": app.canvas_dialogs.insert_model_equation.mode,
-    }))
+    Ok(payload)
 }
 
 fn dispatch_ui_bubble_plot_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let doc = app.document().clone();
-    let graph_id = resolve_target_graph_id(&doc, params)?;
-    if !app.canvas_dialogs.open_bubble_plot(&doc, &graph_id) {
-        return Err(format!("graph sheet `{}` not found", graph_id.as_str()));
-    }
-    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId"]);
-    if !fields.is_empty() {
-        app.canvas_dialogs.bubble_plot.apply_field_patch(&fields)?;
-    }
-    Ok(json!({ "dialog": "BubblePlotInspector", "graph_sheet_id": graph_id.as_str() }))
+    open_graph_dialog_patched(
+        app,
+        params,
+        "BubblePlotInspector",
+        |a, d, id| a.canvas_dialogs.open_bubble_plot(d, id),
+        |a, _, f| a.canvas_dialogs.bubble_plot.apply_field_patch(f),
+    )
 }
 
 fn dispatch_ui_format_graph_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let doc = app.document().clone();
-    let graph_id = resolve_target_graph_id(&doc, params)?;
-    if !app.canvas_dialogs.open_format_graph(&doc, &graph_id) {
-        return Err(format!("graph sheet `{}` not found", graph_id.as_str()));
-    }
-    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId"]);
-    if !fields.is_empty() {
-        let preset = app.locale_preset.clone();
-        app.canvas_dialogs.format_graph.apply_field_patch_localized(&fields, &preset)?;
-    }
-    Ok(json!({ "dialog": "FormatGraph", "graph_sheet_id": graph_id.as_str() }))
+    let preset = app.locale_preset.clone();
+    open_graph_dialog_patched(
+        app,
+        params,
+        "FormatGraph",
+        |a, d, id| a.canvas_dialogs.open_format_graph(d, id),
+        |a, _, f| a.canvas_dialogs.format_graph.apply_field_patch_localized(f, &preset),
+    )
 }
 
 fn dispatch_ui_apply_style_from_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
@@ -3254,14 +2912,7 @@ fn dispatch_ui_apply_style_from_open(app: &mut UiApp, params: &Value) -> Result<
             "target_sheet_ids": app.canvas_dialogs.apply_style.target_graph_ids.iter().map(SheetId::as_str).collect::<Vec<_>>(),
         }));
     }
-    let graph_id = resolve_target_graph_id(&doc, params)?;
-    if !app.canvas_dialogs.open_apply_style_from(&doc, &graph_id) {
-        return Err(format!("graph sheet `{}` not found", graph_id.as_str()));
-    }
-    Ok(json!({
-        "dialog": "ApplyStyleFrom",
-        "graph_sheet_id": graph_id.as_str(),
-    }))
+    open_graph_dialog_patched(app, params, "ApplyStyleFrom", |a, d, id| a.canvas_dialogs.open_apply_style_from(d, id), |_, _, _| Ok(()))
 }
 
 fn dispatch_ui_format_axes_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
@@ -3276,27 +2927,14 @@ fn dispatch_ui_format_axes_open(app: &mut UiApp, params: &Value) -> Result<Value
     };
     app.canvas_dialogs.format_axes.sync_from_graph(graph, initial_target);
     app.canvas_dialogs.active_dialog = ActiveDialog::FormatAxes { sheet_id: graph_id.clone() };
-    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId"]);
-    if !fields.is_empty() {
-        let preset = app.locale_preset.clone();
-        app.canvas_dialogs.format_axes.apply_field_patch_localized(&fields, Some(&doc), &preset)?;
-    }
-    Ok(json!({
-        "dialog": "FormatAxes",
-        "sheet_id": graph_id.as_str(),
-        "target_axis": format!("{:?}", app.canvas_dialogs.format_axes.target_axis),
-    }))
+    let preset = app.locale_preset.clone();
+    apply_open_patch(params, SHEET_ID_KEYS, |f| app.canvas_dialogs.format_axes.apply_field_patch_localized(f, Some(&doc), &preset))?;
+    Ok(json!({ "dialog": "FormatAxes", "sheet_id": graph_id.as_str(), "target_axis": format!("{:?}", app.canvas_dialogs.format_axes.target_axis) }))
 }
 
 fn dispatch_ui_open_formula_bar(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     let doc = app.document().clone();
-    let ds_id = if let Some(explicit) = resolve_sheet_id_param(params)? {
-        explicit
-    } else if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()) {
-        active.clone()
-    } else {
-        doc.data_sheets.first().map(|s| s.id.clone()).ok_or_else(|| String::from("no data sheet available"))?
-    };
+    let ds_id = resolve_target_data_id(&doc, params)?;
     let ds = doc.data_sheet(&ds_id).ok_or_else(|| format!("data sheet `{}` not found", ds_id.as_str()))?;
     let TableArchetype::MultipleVariables(mv) = &ds.archetype else {
         return Err(format!("formula bar requires a Multiple Variables sheet (`{}` is {:?})", ds_id.as_str(), ds.kind()));
@@ -3458,134 +3096,76 @@ fn map_cluster_row_label_to_mv_row(label: Option<&str>, fallback_idx: usize, mv:
 }
 
 fn dispatch_ui_pairwise_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let doc = app.document().clone();
-    let graph_id = resolve_target_graph_id(&doc, params)?;
-    if !app.canvas_dialogs.open_pairwise_comparisons(&doc, &graph_id) {
-        return Err(format!("graph sheet `{}` not found", graph_id.as_str()));
-    }
-    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId"]);
-    if !fields.is_empty() {
-        let preset = app.locale_preset.clone();
-        app.canvas_dialogs.pairwise.apply_field_patch_localized(&fields, Some(&doc), &preset)?;
-    }
-    Ok(json!({ "dialog": "PairwiseComparisons", "graph_sheet_id": graph_id.as_str() }))
+    let preset = app.locale_preset.clone();
+    open_graph_dialog_patched(
+        app,
+        params,
+        "PairwiseComparisons",
+        |a, d, id| a.canvas_dialogs.open_pairwise_comparisons(d, id),
+        |a, d, f| a.canvas_dialogs.pairwise.apply_field_patch_localized(f, Some(d), &preset),
+    )
 }
 
 fn dispatch_ui_layout_composer_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let doc = app.document().clone();
-    let layout_id = resolve_target_layout_id(&doc, params)?;
-    let _ = app.canvas_dialogs.open_page_layout_composer(&doc, &layout_id);
-    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId"]);
-    if !fields.is_empty() {
-        app.canvas_dialogs.page_layout.apply_field_patch(&fields, Some(&doc))?;
-    }
-    Ok(json!({ "dialog": "PageLayoutComposer", "layout_sheet_id": layout_id.as_str() }))
-}
-
-fn resolve_target_layout_id(doc: &curvebook_doc::ProjectDocument, params: &Value) -> Result<SheetId, String> {
-    if let Some(id) = resolve_sheet_id_param(params)? {
-        if doc.layout_sheet(&id).is_none() {
-            return Err(format!("layout sheet `{}` not found", id.as_str()));
-        }
-        return Ok(id);
-    }
-    if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.layout_sheet(id).is_some()) {
-        return Ok(active.clone());
-    }
-    doc.layout_sheets.first().map(|l| l.id.clone()).ok_or_else(|| String::from("no layout sheet available"))
+    open_layout_dialog_patched(
+        app,
+        params,
+        "PageLayoutComposer",
+        |a, d, id| {
+            let _ = a.canvas_dialogs.open_page_layout_composer(d, id);
+            true
+        },
+        |a, d, f| a.canvas_dialogs.page_layout.apply_field_patch(f, Some(d)),
+    )
 }
 
 fn dispatch_ui_equalize_scaling_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let doc = app.document().clone();
-    let layout_id = resolve_target_layout_id(&doc, params)?;
-    if !app.canvas_dialogs.open_equalize_scaling(&doc, &layout_id) {
-        return Err(format!("layout sheet `{}` not found", layout_id.as_str()));
-    }
-    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId"]);
-    if !fields.is_empty() {
-        app.canvas_dialogs.equalize_scaling.apply_field_patch(&fields)?;
-    }
-    Ok(json!({ "dialog": "EqualizeScaling", "layout_sheet_id": layout_id.as_str() }))
+    open_layout_dialog_patched(
+        app,
+        params,
+        "EqualizeScaling",
+        |a, d, id| a.canvas_dialogs.open_equalize_scaling(d, id),
+        |a, _, f| a.canvas_dialogs.equalize_scaling.apply_field_patch(f),
+    )
 }
 
 fn dispatch_ui_create_graph_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     let doc = app.document().clone();
-    let preferred = opt_non_empty_str_param(params, &["data_sheet_id", "source_sheet_id", "sheet_id", "sheetId"])?.map(SheetId::new);
+    const KEYS: &[&str] = &["data_sheet_id", "source_sheet_id", "sheet_id", "sheetId"];
+    let preferred = opt_non_empty_str_param(params, KEYS)?.map(SheetId::new);
     if !app.canvas_dialogs.open_create_graph(&doc, preferred.as_ref()) {
         return Err(String::from("no source data sheet available to create a graph"));
     }
-    let fields = filtered_open_patch_fields(params, &["data_sheet_id", "source_sheet_id", "sheet_id", "sheetId"]);
-    if !fields.is_empty() {
-        app.canvas_dialogs.create_graph.apply_field_patch(&fields)?;
-    }
-    Ok(json!({
-        "dialog": "CreateGraph",
-        "source_sheet_id": app.canvas_dialogs.create_graph.source_sheet_id.as_ref().map(SheetId::as_str),
-    }))
+    apply_open_patch(params, KEYS, |f| app.canvas_dialogs.create_graph.apply_field_patch(f))?;
+    Ok(json!({ "dialog": "CreateGraph", "source_sheet_id": app.canvas_dialogs.create_graph.source_sheet_id.as_ref().map(SheetId::as_str) }))
 }
 
-fn resolve_canvas_sheet_for_object(doc: &curvebook_doc::ProjectDocument, params: &Value) -> Result<SheetId, String> {
-    if let Some(id) = resolve_sheet_id_param(params)? {
-        if doc.graph_sheet(&id).is_some() || doc.layout_sheet(&id).is_some() {
-            return Ok(id);
+fn resolve_target_embedded_index(doc: &ProjectDocument, sheet_id: &SheetId, explicit_idx: Option<usize>, want_image: bool) -> Option<usize> {
+    let match_ann = |a: &curvebook_doc::GraphAnnotation| {
+        if want_image {
+            matches!(a, curvebook_doc::GraphAnnotation::EmbeddedImage { .. })
+        } else {
+            matches!(a, curvebook_doc::GraphAnnotation::EmbeddedResultTable { .. })
         }
-        return Err(format!("graph or layout sheet `{}` not found", id.as_str()));
-    }
-    if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.graph_sheet(id).is_some() || doc.layout_sheet(id).is_some()) {
-        return Ok(active.clone());
-    }
-    doc.graph_sheets
-        .first()
-        .map(|g| g.id.clone())
-        .or_else(|| doc.layout_sheets.first().map(|l| l.id.clone()))
-        .ok_or_else(|| String::from("no graph or layout sheet available"))
-}
-
-fn resolve_target_embedded_index(
-    doc: &curvebook_doc::ProjectDocument,
-    sheet_id: &SheetId,
-    explicit_idx: Option<usize>,
-    want_image: bool,
-) -> Option<usize> {
+    };
+    let match_item = |it: &curvebook_doc::LayoutItem| {
+        if want_image {
+            matches!(it, curvebook_doc::LayoutItem::EmbeddedImage { .. })
+        } else {
+            matches!(it, curvebook_doc::LayoutItem::LiveTable { .. })
+        }
+    };
     if let Some(gs) = doc.graph_sheet(sheet_id) {
-        if let Some(idx) = explicit_idx {
-            let ok = gs.spec.annotations.get(idx).is_some_and(|a| {
-                if want_image {
-                    matches!(a, curvebook_doc::GraphAnnotation::EmbeddedImage { .. })
-                } else {
-                    matches!(a, curvebook_doc::GraphAnnotation::EmbeddedResultTable { .. })
-                }
-            });
-            return ok.then_some(idx);
-        }
-        return gs.spec.annotations.iter().rposition(|a| {
-            if want_image {
-                matches!(a, curvebook_doc::GraphAnnotation::EmbeddedImage { .. })
-            } else {
-                matches!(a, curvebook_doc::GraphAnnotation::EmbeddedResultTable { .. })
-            }
-        });
+        return match explicit_idx {
+            Some(idx) => gs.spec.annotations.get(idx).is_some_and(match_ann).then_some(idx),
+            None => gs.spec.annotations.iter().rposition(match_ann),
+        };
     }
-    if let Some(ls) = doc.layout_sheet(sheet_id) {
-        if let Some(idx) = explicit_idx {
-            let ok = ls.spec.items.get(idx).is_some_and(|it| {
-                if want_image {
-                    matches!(it, curvebook_doc::LayoutItem::EmbeddedImage { .. })
-                } else {
-                    matches!(it, curvebook_doc::LayoutItem::LiveTable { .. })
-                }
-            });
-            return ok.then_some(idx);
-        }
-        return ls.spec.items.iter().rposition(|it| {
-            if want_image {
-                matches!(it, curvebook_doc::LayoutItem::EmbeddedImage { .. })
-            } else {
-                matches!(it, curvebook_doc::LayoutItem::LiveTable { .. })
-            }
-        });
+    let ls = doc.layout_sheet(sheet_id)?;
+    match explicit_idx {
+        Some(idx) => ls.spec.items.get(idx).is_some_and(match_item).then_some(idx),
+        None => ls.spec.items.iter().rposition(match_item),
     }
-    None
 }
 
 fn dispatch_ui_grid_overlay_toggle(app: &mut UiApp, params: &Value) -> Result<Value, String> {
@@ -3595,57 +3175,41 @@ fn dispatch_ui_grid_overlay_toggle(app: &mut UiApp, params: &Value) -> Result<Va
         }
         app.canvas_dialogs.grid_overlay_spacing_pt = spacing;
     }
-    if let Some(visible) = opt_bool_param(params, &["visible"])? {
-        app.canvas_dialogs.grid_overlay_visible = visible;
-    } else {
-        app.canvas_dialogs.grid_overlay_visible = !app.canvas_dialogs.grid_overlay_visible;
-    }
+    app.canvas_dialogs.grid_overlay_visible = opt_bool_param(params, &["visible"])?.unwrap_or(!app.canvas_dialogs.grid_overlay_visible);
     Ok(json!({
         "grid_overlay_visible": app.canvas_dialogs.grid_overlay_visible,
         "spacing_pt": app.canvas_dialogs.grid_overlay_spacing_pt,
     }))
 }
 
-fn dispatch_ui_embedded_table_format_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+fn dispatch_ui_embedded_object_format_open(app: &mut UiApp, params: &Value, want_image: bool) -> Result<Value, String> {
     let doc = app.document().clone();
-    let sheet_id = resolve_canvas_sheet_for_object(&doc, params)?;
+    let sheet_id = resolve_target_sheet_matching(
+        &doc,
+        params,
+        &[],
+        "graph or layout sheet",
+        true,
+        |d, id| d.graph_sheet(id).is_some() || d.layout_sheet(id).is_some(),
+        |d| d.graph_sheets.first().map(|g| g.id.clone()).or_else(|| d.layout_sheets.first().map(|l| l.id.clone())),
+    )?;
     let explicit_idx = opt_usize_param(params, &["annotation_index", "panel_index", "item_index"])?;
-    let idx = resolve_target_embedded_index(&doc, &sheet_id, explicit_idx, false)
-        .ok_or_else(|| format!("no embedded result table found on `{}`", sheet_id.as_str()))?;
-    if !app.canvas_dialogs.open_format_embedded_table(&doc, &sheet_id, idx) {
-        return Err(format!("failed opening Format Embedded Table on `{}` index {idx}", sheet_id.as_str()));
+    let (label, dialog_name) = if want_image { ("embedded image", "FormatImage") } else { ("embedded result table", "FormatEmbeddedTable") };
+    let idx = resolve_target_embedded_index(&doc, &sheet_id, explicit_idx, want_image)
+        .ok_or_else(|| format!("no {label} found on `{}`", sheet_id.as_str()))?;
+    let opened = if want_image {
+        app.canvas_dialogs.open_format_image(&doc, &sheet_id, idx)
+    } else {
+        app.canvas_dialogs.open_format_embedded_table(&doc, &sheet_id, idx)
+    };
+    if !opened {
+        return Err(format!("failed opening {dialog_name} on `{}` index {idx}", sheet_id.as_str()));
     }
-    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId", "annotation_index", "panel_index", "item_index"]);
-    if !fields.is_empty() {
-        app.canvas_dialogs.format_embedded_table.apply_field_patch(&fields)?;
-    }
-    Ok(json!({
-        "dialog": "FormatEmbeddedTable",
-        "sheet_id": sheet_id.as_str(),
-        "target_index": idx,
-        "is_layout": app.canvas_dialogs.format_embedded_table.is_layout,
-    }))
-}
-
-fn dispatch_ui_image_format_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let doc = app.document().clone();
-    let sheet_id = resolve_canvas_sheet_for_object(&doc, params)?;
-    let explicit_idx = opt_usize_param(params, &["annotation_index", "panel_index", "item_index"])?;
-    let idx = resolve_target_embedded_index(&doc, &sheet_id, explicit_idx, true)
-        .ok_or_else(|| format!("no embedded image found on `{}`", sheet_id.as_str()))?;
-    if !app.canvas_dialogs.open_format_image(&doc, &sheet_id, idx) {
-        return Err(format!("failed opening Format Image on `{}` index {idx}", sheet_id.as_str()));
-    }
-    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId", "annotation_index", "panel_index", "item_index"]);
-    if !fields.is_empty() {
-        app.canvas_dialogs.format_image.apply_field_patch(&fields)?;
-    }
-    Ok(json!({
-        "dialog": "FormatImage",
-        "sheet_id": sheet_id.as_str(),
-        "target_index": idx,
-        "is_layout": app.canvas_dialogs.format_image.is_layout,
-    }))
+    apply_open_patch(params, EMBEDDED_OPEN_IGNORE_KEYS, |f| {
+        if want_image { app.canvas_dialogs.format_image.apply_field_patch(f) } else { app.canvas_dialogs.format_embedded_table.apply_field_patch(f) }
+    })?;
+    let is_layout = if want_image { app.canvas_dialogs.format_image.is_layout } else { app.canvas_dialogs.format_embedded_table.is_layout };
+    Ok(json!({ "dialog": dialog_name, "sheet_id": sheet_id.as_str(), "target_index": idx, "is_layout": is_layout }))
 }
 
 fn dispatch_ui_row_titles_toggle(app: &mut UiApp, params: &Value) -> Result<Value, String> {
@@ -3654,32 +3218,21 @@ fn dispatch_ui_row_titles_toggle(app: &mut UiApp, params: &Value) -> Result<Valu
     let fallback_collapsed = app.egui_views.column_grid.row_titles_collapsed;
     #[cfg(target_arch = "wasm32")]
     let fallback_collapsed = app.view_shards.grid_core.row_titles_collapsed;
-    let current_collapsed = app.grid.row_titles_collapsed_override.unwrap_or(fallback_collapsed);
-    let next_collapsed = explicit_collapsed.unwrap_or(!current_collapsed);
+    let next_collapsed = explicit_collapsed.unwrap_or(!app.grid.row_titles_collapsed_override.unwrap_or(fallback_collapsed));
     app.grid.row_titles_collapsed_override = Some(next_collapsed);
     app.view_shards.grid_core.row_titles_collapsed = next_collapsed;
     #[cfg(not(target_arch = "wasm32"))]
     {
         app.egui_views.column_grid.row_titles_collapsed = next_collapsed;
     }
-    Ok(json!({
-        "row_titles_collapsed": next_collapsed,
-        "row_titles_expanded": !next_collapsed,
-    }))
+    Ok(json!({ "row_titles_collapsed": next_collapsed, "row_titles_expanded": !next_collapsed }))
 }
 
 fn dispatch_ui_export_figure_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     let sheet_id = resolve_renderable_sheet_id(app.document(), params)?;
     app.canvas_dialogs.open_export_figure(&sheet_id);
-    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId"]);
-    if !fields.is_empty() {
-        app.canvas_dialogs.export_figure.apply_field_patch(&fields)?;
-    }
-    Ok(json!({
-        "dialog": "ExportFigure",
-        "sheet_id": sheet_id.as_str(),
-        "format": app.canvas_dialogs.export_figure.format,
-    }))
+    apply_open_patch(params, SHEET_ID_KEYS, |f| app.canvas_dialogs.export_figure.apply_field_patch(f))?;
+    Ok(json!({ "dialog": "ExportFigure", "sheet_id": sheet_id.as_str(), "format": app.canvas_dialogs.export_figure.format }))
 }
 
 fn dispatch_ui_import_reshape_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
@@ -3800,14 +3353,11 @@ fn dispatch_ui_gallery_toggle(app: &mut UiApp, params: &Value) -> Result<Value, 
     } else {
         app.nav.sync_gallery(app.session.document());
     }
-    match params.get("open") {
-        None | Some(Value::Null) => {
-            app.nav.toggle_gallery();
+    match opt_bool_param(params, &["open"])? {
+        None => {
+            let _ = app.nav.toggle_gallery();
         }
-        Some(Value::Bool(explicit)) => {
-            app.nav.gallery.open = *explicit;
-        }
-        Some(other) => return Err(format!("ui.gallery.toggle 'open' must be a boolean, got {other}")),
+        Some(explicit) => app.nav.gallery.open = explicit,
     }
     Ok(json!({
         "gallery_open": app.nav.gallery.open,
@@ -3817,16 +3367,9 @@ fn dispatch_ui_gallery_toggle(app: &mut UiApp, params: &Value) -> Result<Value, 
 }
 
 fn dispatch_ui_pane_cycle(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let reverse = match params.get("reverse") {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(flag)) => *flag,
-        Some(other) => return Err(format!("ui.pane.cycle 'reverse' must be a boolean, got {other}")),
-    };
+    let reverse = opt_bool_param(params, &["reverse"])?.unwrap_or(false);
     let active = app.cycle_focus_pane(reverse);
-    Ok(json!({
-        "active_pane": active_pane_name(active),
-        "reverse": reverse,
-    }))
+    Ok(json!({ "active_pane": active_pane_name(active), "reverse": reverse }))
 }
 
 fn dispatch_ui_rulers_toggle(app: &mut UiApp, params: &Value) -> Result<Value, String> {
@@ -3843,15 +3386,8 @@ fn dispatch_ui_rulers_toggle(app: &mut UiApp, params: &Value) -> Result<Value, S
     if let Some(unit) = unit_override {
         app.canvas_dialogs.ruler_unit = unit;
     }
-    if let Some(explicit) = visible_override {
-        app.canvas_dialogs.rulers_visible = explicit;
-    } else {
-        app.canvas_dialogs.rulers_visible = !app.canvas_dialogs.rulers_visible;
-    }
-    Ok(json!({
-        "rulers_visible": app.canvas_dialogs.rulers_visible,
-        "unit": physical_unit_name(app.canvas_dialogs.ruler_unit),
-    }))
+    app.canvas_dialogs.rulers_visible = visible_override.unwrap_or(!app.canvas_dialogs.rulers_visible);
+    Ok(json!({ "rulers_visible": app.canvas_dialogs.rulers_visible, "unit": physical_unit_name(app.canvas_dialogs.ruler_unit) }))
 }
 
 fn dispatch_ui_shortcut_set(app: &mut UiApp, params: &Value) -> Result<Value, String> {
@@ -3975,24 +3511,6 @@ fn resolve_sheet_id_param(params: &Value) -> Result<Option<SheetId>, String> {
     SheetId::try_new(raw).map(Some).map_err(|err| err.to_string())
 }
 
-fn resolve_renderable_sheet_id(doc: &ProjectDocument, params: &Value) -> Result<SheetId, String> {
-    if let Some(explicit) = resolve_sheet_id_param(params)? {
-        return Ok(explicit);
-    }
-    if let Some(active) = &doc.active_sheet_id
-        && matches!(doc.sheet_section(active), Some(SheetSection::Graphs | SheetSection::Layouts))
-    {
-        return Ok(active.clone());
-    }
-    if let Some(graph) = doc.graph_sheets.first() {
-        return Ok(graph.id.clone());
-    }
-    if let Some(layout) = doc.layout_sheets.first() {
-        return Ok(layout.id.clone());
-    }
-    Err(String::from("no graph or layout sheet exists in project to render"))
-}
-
 fn collect_all_renderable_ids(doc: &ProjectDocument) -> Result<Vec<SheetId>, String> {
     let mut ids: Vec<SheetId> = doc.graph_sheets.iter().map(|g| g.id.clone()).collect();
     ids.extend(doc.layout_sheets.iter().map(|l| l.id.clone()));
@@ -4007,10 +3525,6 @@ fn resolve_print_sheet_ids(requested: &[SheetId], doc: &ProjectDocument) -> Resu
         return Ok(requested.to_vec());
     }
     collect_all_renderable_ids(doc)
-}
-
-fn parse_pdf_color_space(params: &Value) -> Result<PdfColorSpace, String> {
-    parse_pdf_color_space_fields(params, &["color_space"])
 }
 
 fn parse_pdf_color_space_fields(params: &Value, fields: &[&str]) -> Result<PdfColorSpace, String> {
@@ -4205,19 +3719,7 @@ fn read_bounded_control_line<R: BufRead>(reader: &mut R, max_bytes: usize) -> io
 }
 
 pub(crate) fn encode_base64(input: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-    for chunk in input.chunks(3) {
-        let b0 = usize::from(chunk[0]);
-        let b1 = usize::from(*chunk.get(1).unwrap_or(&0));
-        let b2 = usize::from(*chunk.get(2).unwrap_or(&0));
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        out.push(char::from(TABLE[(triple >> 18) & 0x3F]));
-        out.push(char::from(TABLE[(triple >> 12) & 0x3F]));
-        out.push(if chunk.len() > 1 { char::from(TABLE[(triple >> 6) & 0x3F]) } else { '=' });
-        out.push(if chunk.len() > 2 { char::from(TABLE[triple & 0x3F]) } else { '=' });
-    }
-    out
+    curvebook_platform::base64::encode(input)
 }
 
 const fn theme_mode_name(mode: UiThemeMode) -> &'static str {
@@ -5035,6 +4537,131 @@ mod tests {
         }
         assert_ne!(app.canvas_dialogs.active_dialog, ActiveDialog::None, "invalid ui.answer_dialog must not commit/close dialog");
 
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn doc_export_supports_emf_tsv_pdf_version_ttf_font_direct_path_and_gui_only_rejection() -> Result<(), Box<dyn std::error::Error>> {
+        use super::handle_control_line;
+        use crate::UiApp;
+
+        let mut app = UiApp::new();
+        app.execute_command("sheet.createData", serde_json::json!({ "sheet_id": "ds-exp", "title": "ExportData", "cols": 2, "rows": 3 }))?;
+        app.execute_command(
+            "table.setCells",
+            serde_json::json!({
+                "sheet_id": "ds-exp",
+                "edits": [
+                    { "row": 0, "col": 0, "value": 1.0 },
+                    { "row": 1, "col": 0, "value": 2.0 },
+                    { "row": 0, "col": 1, "value": 10.0 },
+                    { "row": 1, "col": 1, "value": 20.0 }
+                ]
+            }),
+        )?;
+        let g = app.execute_command("graph.create", serde_json::json!({ "data_sheet_id": "ds-exp", "kind": "xy", "title": "ExportGraph" }))?;
+        let graph_id = g.payload["sheet_id"].as_str().ok_or("missing graph_id")?.to_owned();
+
+        let dir = std::env::temp_dir().join(format!("cb_control_doc_export_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+
+        // 1. Inline TSV uses tab delimiter; csv_delimiter overrides it.
+        let tsv_reply: serde_json::Value = serde_json::from_str(&handle_control_line(
+            &mut app,
+            &serde_json::json!({ "id": "tsv-1", "method": "doc.export", "params": { "format": "tsv", "sheet_id": "ds-exp" } }).to_string(),
+        ))?;
+        assert_eq!(tsv_reply["ok"], serde_json::json!(true), "tsv export failed: {tsv_reply}");
+        let tsv_b64 = tsv_reply["result"]["data_base64"].as_str().ok_or("missing tsv base64")?;
+        let tsv_text = String::from_utf8(curvebook_platform::base64::decode(tsv_b64)?)?;
+        assert!(tsv_text.contains('\t'), "expected tab delimiter in TSV export: {tsv_text:?}");
+
+        let semi_reply: serde_json::Value = serde_json::from_str(&handle_control_line(
+            &mut app,
+            &serde_json::json!({ "id": "tsv-2", "method": "doc.export", "params": { "format": "tsv", "sheet_id": "ds-exp", "csv_delimiter": ";" } })
+                .to_string(),
+        ))?;
+        assert_eq!(semi_reply["ok"], serde_json::json!(true));
+        let semi_text = String::from_utf8(curvebook_platform::base64::decode(semi_reply["result"]["data_base64"].as_str().ok_or("missing b64")?)?)?;
+        assert!(semi_text.contains(';'), "expected explicit delimiter override: {semi_text:?}");
+
+        // 2. Direct-to-disk EMF export creates parent dir and omits data_base64.
+        let emf_path = dir.join("nested").join("figure.emf");
+        let emf_reply: serde_json::Value = serde_json::from_str(&handle_control_line(
+            &mut app,
+            &serde_json::json!({
+                "id": "emf-1",
+                "method": "doc.export",
+                "params": { "format": "emf", "sheet_id": graph_id, "path": emf_path.display().to_string() }
+            })
+            .to_string(),
+        ))?;
+        assert_eq!(emf_reply["ok"], serde_json::json!(true), "emf export failed: {emf_reply}");
+        assert_eq!(emf_reply["result"]["exported"], serde_json::json!(true));
+        assert!(emf_reply["result"].get("data_base64").is_none(), "direct path export must omit data_base64: {emf_reply}");
+        let emf_bytes = std::fs::read(&emf_path)?;
+        assert_eq!(emf_reply["result"]["bytes_written"], serde_json::json!(emf_bytes.len()));
+        assert!(emf_bytes.len() > 44 && emf_bytes.get(40..44) == Some(b" EMF"), "expected valid EMF signature");
+
+        // 3. PDF 1.4 with embedded TrueType font via ttf_font writes directly to disk.
+        let ttf_path = dir.join("minimal.ttf");
+        std::fs::write(&ttf_path, curvebook_text::build_minimal_truetype_font())?;
+        let pdf_path = dir.join("figure_v14.pdf");
+        let pdf_reply: serde_json::Value = serde_json::from_str(&handle_control_line(
+            &mut app,
+            &serde_json::json!({
+                "id": "pdf-1",
+                "method": "doc.export",
+                "params": {
+                    "format": "pdf",
+                    "sheet_id": graph_id,
+                    "pdf_version": "1.4",
+                    "ttf_font": ttf_path.display().to_string(),
+                    "path": pdf_path.display().to_string()
+                }
+            })
+            .to_string(),
+        ))?;
+        assert_eq!(pdf_reply["ok"], serde_json::json!(true), "pdf export failed: {pdf_reply}");
+        assert_eq!(pdf_reply["result"]["exported"], serde_json::json!(true));
+        assert!(pdf_reply["result"].get("data_base64").is_none());
+        let pdf_bytes = std::fs::read(&pdf_path)?;
+        assert!(pdf_bytes.starts_with(b"%PDF-1.4\n"), "expected PDF 1.4 header");
+        let pdf_latin1: String = pdf_bytes.iter().map(|&b| char::from(b)).collect();
+        assert!(pdf_latin1.contains("/Subtype /TrueType") && pdf_latin1.contains("/FontFile2"), "expected embedded TrueType font in PDF");
+
+        // 4. Invalid ttf_font file is rejected cleanly.
+        let bad_ttf = dir.join("not_a_font.ttf");
+        std::fs::write(&bad_ttf, b"not a valid sfnt binary")?;
+        let bad_font_reply: serde_json::Value = serde_json::from_str(&handle_control_line(
+            &mut app,
+            &serde_json::json!({
+                "id": "pdf-bad-font",
+                "method": "doc.export",
+                "params": { "format": "pdf", "sheet_id": graph_id, "ttf_font": bad_ttf.display().to_string() }
+            })
+            .to_string(),
+        ))?;
+        assert_eq!(bad_font_reply["ok"], serde_json::json!(false));
+
+        // 5. Under --gui-only, doc.export with path is blocked with gui_only_violation and does not touch disk.
+        let blocked_path = dir.join("blocked_gui_only.svg");
+        app.set_gui_only(true);
+        let gui_only_reply: serde_json::Value = serde_json::from_str(&handle_control_line(
+            &mut app,
+            &serde_json::json!({
+                "id": "gui-only-export",
+                "method": "doc.export",
+                "params": { "format": "svg", "sheet_id": graph_id, "path": blocked_path.display().to_string() }
+            })
+            .to_string(),
+        ))?;
+        assert_eq!(gui_only_reply["ok"], serde_json::json!(false));
+        assert_eq!(gui_only_reply["error_detail"]["code"], serde_json::json!("gui_only_violation"));
+        assert!(!blocked_path.exists(), "gui-only blocked doc.export must not create file on disk");
+
+        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 }

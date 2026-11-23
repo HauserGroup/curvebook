@@ -49,7 +49,6 @@ weezl = { version = "0.1", default-features = false, features = ["std"] }
 # native GPU desktop windowing (without default_fonts to keep only permissive licenses) & wasm bridge
 eframe = { version = "0.37", default-features = false }
 egui = { version = "0.37", default-features = false }
-egui_extras = { version = "0.37", default-features = false }
 egui_kittest = { version = "0.37", default-features = false }
 fontdb = { version = "0.24", default-features = false }
 js-sys = "0.3"

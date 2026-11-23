@@ -11,6 +11,5 @@ description = "CurveBook numerical reference assertions and synthetic dataset bu
 workspace = true
 
 [dependencies]
-curvebook-math = { workspace = true }
-curvebook-palette = { workspace = true }
+curvebook-platform = { workspace = true }
 curvebook-doc = { workspace = true }

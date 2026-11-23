@@ -747,10 +747,8 @@ dependencies = [
  "curvebook-doc",
  "curvebook-engine",
  "curvebook-format",
- "curvebook-pdf",
  "curvebook-platform",
  "curvebook-render",
- "curvebook-svg",
  "curvebook-text",
  "curvebook-ui-egui",
  "eframe",
@@ -771,7 +769,6 @@ dependencies = [
  "curvebook-math",
  "curvebook-palette",
  "curvebook-stats",
- "curvebook-testkit",
  "curvebook-text",
  "image",
  "proptest",
@@ -804,7 +801,7 @@ version = "0.1.0-alpha.2"
 dependencies = [
  "curvebook-math",
  "curvebook-palette",
- "curvebook-testkit",
+ "curvebook-platform",
  "proptest",
  "serde",
  "serde_json",
@@ -851,10 +848,8 @@ version = "0.1.0-alpha.2"
 dependencies = [
  "crc32fast",
  "curvebook-doc",
- "curvebook-math",
  "curvebook-palette",
  "curvebook-platform",
- "curvebook-testkit",
  "flate2",
  "image",
  "proptest",
@@ -883,7 +878,6 @@ dependencies = [
  "curvebook-platform",
  "curvebook-render",
  "curvebook-svg",
- "curvebook-testkit",
  "proptest",
  "serde",
  "serde_json",
@@ -893,7 +887,6 @@ dependencies = [
 name = "curvebook-palette"
 version = "0.1.0-alpha.2"
 dependencies = [
- "curvebook-testkit",
  "serde",
  "serde_json",
 ]
@@ -953,9 +946,10 @@ dependencies = [
  "curvebook-chart",
  "curvebook-doc",
  "curvebook-palette",
+ "curvebook-platform",
  "curvebook-testkit",
  "curvebook-text",
- "flate2",
+ "png",
  "quick-xml",
  "serde",
 ]
@@ -965,8 +959,7 @@ name = "curvebook-testkit"
 version = "0.1.0-alpha.2"
 dependencies = [
  "curvebook-doc",
- "curvebook-math",
- "curvebook-palette",
+ "curvebook-platform",
 ]
 
 [[package]]
@@ -988,8 +981,6 @@ dependencies = [
  "curvebook-doc",
  "curvebook-math",
  "curvebook-palette",
- "curvebook-testkit",
- "proptest",
  "serde",
  "serde_json",
 ]
@@ -1003,6 +994,7 @@ dependencies = [
  "curvebook-testkit",
  "proptest",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1025,12 +1017,11 @@ dependencies = [
  "curvebook-text",
  "curvebook-tools",
  "curvebook-transform",
+ "curvebook-ui-egui",
  "egui",
- "egui_extras",
  "egui_kittest",
  "fontdb",
  "png",
- "proptest",
  "serde",
  "serde_json",
 ]
@@ -1041,9 +1032,12 @@ version = "0.1.0-alpha.2"
 dependencies = [
  "curvebook-engine",
  "curvebook-format",
+ "curvebook-platform",
  "curvebook-text",
  "curvebook-ui-egui",
  "js-sys",
+ "serde",
+ "serde_json",
  "wasm-bindgen",
  "web-sys",
 ]
@@ -1206,20 +1200,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "egui_extras"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "def286cf47194f3fe45b8e37c503ada7a20a64b59a903b4bc704baec943b1827"
-dependencies = [
- "ahash",
- "egui",
- "enum-map",
- "itertools",
- "log",
- "profiling",
-]
-
-[[package]]
 name = "egui_glow"
 version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1266,26 +1246,6 @@ name = "endi"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
-
-[[package]]
-name = "enum-map"
-version = "3.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4532960034c15ba2f55e9eee631040ecc473c32e6c4b200828c759840f13a06"
-dependencies = [
- "enum-map-derive",
-]
-
-[[package]]
-name = "enum-map-derive"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7127272f64b3e098f7d81f350d672081b879bff896d219c42370dc858b1af9ff"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.10",
-]
 
 [[package]]
 name = "enumflags2"
@@ -4392,6 +4352,7 @@ dependencies = [
  "curvebook-svg",
  "curvebook-testkit",
  "curvebook-ui-egui",
+ "flate2",
  "image",
  "semver",
  "serde_json",

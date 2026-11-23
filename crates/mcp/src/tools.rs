@@ -10,11 +10,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use curvebook_doc::{ErrorCode, ProjectDocument, ResultSheet, SheetId, SheetSection};
 use curvebook_engine::cmd::{Caller, CommandGroup, Effects, registry};
-use curvebook_engine::{EngineError, ExternalPathPolicy, GuiOnlyPolicy, Session};
+#[cfg(not(target_arch = "wasm32"))]
+use curvebook_engine::services::command_step_writes_filesystem;
+use curvebook_engine::services::{BatchCommandStep, inspect_project_summary, inspect_sheet_detail};
+use curvebook_engine::{CommandOutcome, EngineError, ExternalPathPolicy, GuiOnlyPolicy, Session};
 use curvebook_platform::sync::{LockError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 #[cfg(not(target_arch = "wasm32"))]
 use curvebook_platform::{PlatformError, WorkdirGuard};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value, json};
 
 use crate::errors::{self, StructuredErrorPayload};
@@ -537,7 +540,14 @@ impl McpServerState {
         };
         if let Some(ref mut handler) = self.control_handler {
             return (handler)(method, params).map_err(|msg| {
-                let code = if msg.to_ascii_lowercase().contains("not found") { ErrorCode::NotFound } else { ErrorCode::BadInput };
+                let lower = msg.to_ascii_lowercase();
+                let code = if lower.contains("not found") {
+                    ErrorCode::NotFound
+                } else if lower.contains("cancelled") {
+                    ErrorCode::Cancelled
+                } else {
+                    ErrorCode::BadInput
+                };
                 StructuredErrorPayload::new(code, msg)
             });
         }
@@ -878,6 +888,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: String::from("open_file"),
+            // Keep relative manual URL here because `xtask brands` rejects `.prism` + `https://` in one string.
             description: String::from(concat!(
                 "Open or import a .curvebook, .curvebook.d, .cbtemplate, .prism, .pzfx, .csv, or .tsv file into the session. Docs: manual/v",
                 env!("CARGO_PKG_VERSION_MAJOR"),
@@ -896,7 +907,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                     "delimiter": { "type": "string", "description": "Optional single-character delimiter override for delimited text." },
                     "sheet_id": { "type": "string", "description": "Sheet ID used when importing delimited data." },
                     "title": { "type": "string", "description": "Optional title override for imported sheet or instantiated template." },
-                    "append": { "type": "boolean", "description": "When importing CSV/TSV, append as a new sheet into the active project instead of replacing it." }
+                    "append": { "type": "boolean", "description": "When importing CSV, TSV, or external archive/XML files, append/merge sheets into the active project instead of replacing it." }
                 },
                 "additionalProperties": false
             }),
@@ -1030,7 +1041,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: String::from("export"),
             description: String::from(concat!(
-                "Export a sheet or project to svg, pdf, png, tiff, csv, or json (to disk, atomically overwriting any existing file, or inline). Docs: https://hausergroup.github.io/curvebook/manual/v",
+                "Export a sheet or project to svg, pdf, emf, png, tiff, csv, tsv, or json (to disk, atomically overwriting any existing file, or inline). Docs: https://hausergroup.github.io/curvebook/manual/v",
                 env!("CARGO_PKG_VERSION_MAJOR"),
                 ".",
                 env!("CARGO_PKG_VERSION_MINOR"),
@@ -1040,7 +1051,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                 "type": "object",
                 "required": ["format"],
                 "properties": {
-                    "format": { "type": "string", "enum": ["svg", "pdf", "png", "tiff", "csv", "json"] },
+                    "format": { "type": "string", "enum": ["svg", "pdf", "emf", "png", "tiff", "csv", "tsv", "json"] },
                     "sheet_id": { "type": "string" },
                     "output_path": { "type": "string", "description": "Optional destination path (atomically overwrites any existing file)." },
                     "path": { "type": "string", "description": "Alias for output_path (atomically overwrites any existing file)." },
@@ -1049,6 +1060,8 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                     "dpi": { "type": "integer", "minimum": 18, "maximum": 2400 },
                     "tiff_compression": { "type": "string", "enum": ["none", "deflate", "lzw"] },
                     "pdf_color_space": { "type": "string", "enum": ["srgb", "cmyk", "grayscale"] },
+                    "pdf_version": { "type": "string", "enum": ["1.4", "1.7"], "description": "PDF specification version for PDF export (default: \"1.7\")." },
+                    "ttf_font": { "type": "string", "description": "Optional path to a TrueType (.ttf) font file for PDF embedding." },
                     "all_graphs": { "type": "boolean" },
                     "svg_precision": { "type": "integer", "minimum": 1, "maximum": 8 },
                     "pretty": { "type": "boolean" },
@@ -1058,7 +1071,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                     },
                     "tab_id": {
                         "type": "string",
-                        "description": "Specific ResultSheet tab ID to export via CSV (defaults tidy to false when omitted)."
+                        "description": "Specific ResultSheet tab ID to export via CSV/TSV (defaults tidy to false when supplied)."
                     },
                     "csv_delimiter": { "type": "string" }
                 },
@@ -1231,22 +1244,44 @@ fn handle_direct_command_tool(state: &mut McpServerState, command_id: &str, para
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DocInspectArgs {
+    #[serde(default)]
+    sheet_id: Option<String>,
+    #[serde(default)]
+    include_cells: Option<bool>,
+}
+
 fn handle_doc_inspect(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
-    gui_tools::reject_unknown_args("doc_inspect", args, &["sheet_id", "include_cells"])?;
-    let sheet_id = optional_non_empty_str(args, "sheet_id")?;
-    let include_cells = optional_bool(args, "include_cells")?.unwrap_or(false);
+    let parsed: DocInspectArgs = deserialize_args("doc_inspect", args)?;
+    let sheet_id = trim_opt_non_empty(parsed.sheet_id, "sheet_id")?;
+    let include_cells = parsed.include_cells.unwrap_or(false);
 
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(port) = state.control_port() {
-        if sheet_id.is_none() && !include_cells {
-            return match state.send_live_control("state.snapshot", json!({})) {
-                Ok(snapshot) => ToolCallResult::ok_json(&json!({
-                    "mode": "live_attach",
-                    "control_port": port,
-                    "snapshot": snapshot,
-                })),
-                Err(payload) => Ok(errors::result_from_payload(&payload)),
+        if sheet_id.is_none() {
+            let snapshot = match state.send_live_control("state.snapshot", json!({})) {
+                Ok(v) => v,
+                Err(payload) => return Ok(errors::result_from_payload(&payload)),
             };
+            let mut merged = Map::new();
+            match state.send_live_control("doc.inspect", json!({})) {
+                Ok(Value::Object(doc_summary)) => {
+                    for (k, v) in doc_summary {
+                        merged.insert(k, v);
+                    }
+                }
+                Ok(_) => {}
+                Err(payload) if payload.code == ErrorCode::GuiOnlyViolation => {
+                    return Ok(errors::result_from_payload(&payload));
+                }
+                Err(_) => {}
+            }
+            merged.insert(String::from("mode"), Value::String(String::from("live_attach")));
+            merged.insert(String::from("control_port"), json!(port));
+            merged.insert(String::from("snapshot"), snapshot);
+            return ToolCallResult::ok_json(&Value::Object(merged));
         }
         let params = json!({
             "sheet_id": sheet_id,
@@ -1278,116 +1313,95 @@ fn handle_doc_inspect(state: &mut McpServerState, args: &Map<String, Value>) -> 
 }
 
 fn inspect_single_sheet(doc: &ProjectDocument, target: &SheetId, include_cells: bool) -> Result<ToolCallResult, ToolCallError> {
-    let deps = doc.upstream_dependencies(target);
     let Some(section) = doc.sheet_section(target) else {
         return Ok(errors::result_from_code(ErrorCode::NotFound, format!("sheet '{}' not found", target.as_str())));
     };
-
-    let detail = match section {
-        SheetSection::Data => {
-            let Some(ds) = doc.data_sheet(target) else {
-                return Ok(errors::result_from_code(ErrorCode::NotFound, format!("sheet '{}' not found", target.as_str())));
-            };
-            let mut val = json!({
-                "section": "data",
-                "id": ds.id,
-                "title": ds.title,
-                "kind": ds.kind().label(),
-                "frozen": ds.frozen,
-                "info_sheet_id": ds.info_sheet_id,
-                "rows": ds.archetype.row_count(),
-                "columns": ds.archetype.column_count(),
-                "linked_regions": ds.linked_regions,
-                "upstream_dependencies": deps,
-            });
-            if include_cells && let Some(obj) = val.as_object_mut() {
-                match crate::resources::build_csv_preview(ds) {
-                    Ok((csv, truncated)) => {
-                        obj.insert(String::from("csv_preview"), Value::String(csv));
-                        obj.insert(String::from("csv_preview_truncated"), Value::Bool(truncated));
-                    }
-                    Err(crate::resources::ResourceError::Internal(msg)) => {
-                        return Ok(errors::result_from_code(ErrorCode::InternalError, msg));
-                    }
-                    Err(err) => {
-                        return Ok(errors::result_from_code(ErrorCode::InternalError, format!("{err:?}")));
-                    }
-                }
-            }
-            Some(val)
-        }
-        SheetSection::Info => doc.info_sheet(target).map(|info| {
-            json!({
-                "section": "info",
-                "id": info.id,
-                "title": info.title,
-                "linked_data_sheets": info.linked_data_sheets,
-                "constants": info.constants,
-                "notes_markdown": info.notes_markdown,
-                "upstream_dependencies": deps,
-            })
-        }),
-        SheetSection::Analyses => doc.result_sheet(target).map(|rs| {
-            let mut val = summarize_result_sheet(rs, &deps);
-            if include_cells && let Some(obj) = val.as_object_mut() {
-                let (tabs_preview, tabs_truncated) = crate::resources::slice_result_tabs_preview(&rs.tabs);
-                let (checklist_preview, checklist_truncated) =
-                    crate::resources::slice_preview_vec(&rs.checklist, crate::resources::MAX_RESULT_PREVIEW_CHECKLIST);
-                obj.insert(String::from("tabs"), serde_json::to_value(&tabs_preview).unwrap_or(Value::Null));
-                obj.insert(String::from("tabs_truncated"), Value::Bool(tabs_truncated));
-                obj.insert(String::from("checklist"), serde_json::to_value(&checklist_preview).unwrap_or(Value::Null));
-                obj.insert(String::from("checklist_truncated"), Value::Bool(checklist_truncated));
-            }
-            val
-        }),
-        SheetSection::Graphs => doc.graph_sheet(target).map(|gs| {
-            json!({
-                "section": "graphs",
-                "id": gs.id,
-                "title": gs.title,
-                "initialized": gs.initialized,
-                "spec": gs.spec,
-                "upstream_dependencies": deps,
-            })
-        }),
-        SheetSection::Layouts => doc.layout_sheet(target).map(|ls| {
-            json!({
-                "section": "layouts",
-                "id": ls.id,
-                "title": ls.title,
-                "spec": ls.spec,
-                "upstream_dependencies": deps,
-            })
-        }),
+    let fetch_detail_cells = include_cells || !matches!(section, SheetSection::Data);
+    let mut service_detail = match inspect_sheet_detail(doc, target, fetch_detail_cells) {
+        Ok(val) => val,
+        Err(err) => return Ok(errors::result_from_engine_error(&err)),
     };
 
-    match detail {
-        Some(value) => ToolCallResult::ok_json(&value),
-        None => Ok(errors::result_from_code(ErrorCode::NotFound, format!("sheet '{}' not found", target.as_str()))),
+    match section {
+        SheetSection::Data => {
+            if let Some(obj) = service_detail.as_object_mut() {
+                obj.insert(String::from("section"), Value::String(String::from("data")));
+                obj.remove("cols");
+                if let Some(ds) = doc.data_sheet(target) {
+                    obj.insert(String::from("linked_regions"), serde_json::to_value(&ds.linked_regions).unwrap_or(Value::Null));
+                }
+            }
+            ToolCallResult::ok_json(&service_detail)
+        }
+        SheetSection::Info => {
+            if let Some(obj) = service_detail.as_object_mut() {
+                obj.insert(String::from("section"), Value::String(String::from("info")));
+                if let Some(entries) = obj.remove("constants_entries") {
+                    obj.insert(String::from("constants"), entries);
+                }
+            }
+            ToolCallResult::ok_json(&service_detail)
+        }
+        SheetSection::Analyses => {
+            let Some(rs) = doc.result_sheet(target) else {
+                return Ok(errors::result_from_code(ErrorCode::NotFound, format!("sheet '{}' not found", target.as_str())));
+            };
+            let deps = doc.upstream_dependencies(target);
+            let mut val = summarize_result_sheet_from_detail(rs, &deps, &mut service_detail);
+            if include_cells
+                && let Some(obj) = val.as_object_mut()
+                && let Some(src) = service_detail.as_object_mut()
+            {
+                if let Some(tabs) = src.remove("tabs_data") {
+                    obj.insert(String::from("tabs"), tabs);
+                }
+                if let Some(trunc) = src.remove("tabs_truncated") {
+                    obj.insert(String::from("tabs_truncated"), trunc);
+                }
+                if let Some(checklist) = src.remove("checklist_entries") {
+                    obj.insert(String::from("checklist"), checklist);
+                }
+                if let Some(trunc) = src.remove("checklist_truncated") {
+                    obj.insert(String::from("checklist_truncated"), trunc);
+                }
+            }
+            ToolCallResult::ok_json(&val)
+        }
+        SheetSection::Graphs | SheetSection::Layouts => {
+            if let Some(obj) = service_detail.as_object_mut() {
+                let sec = if matches!(section, SheetSection::Graphs) { "graphs" } else { "layouts" };
+                obj.insert(String::from("section"), Value::String(String::from(sec)));
+            }
+            ToolCallResult::ok_json(&service_detail)
+        }
     }
 }
 
 fn build_document_summary(session: &Session) -> Value {
     let doc = session.document();
-    let data_list: Vec<Value> = doc
+    let Ok(project) = inspect_project_summary(doc, session.is_dirty(), session.file_path(), None) else {
+        return json!({});
+    };
+
+    let data_list: Vec<Value> = project
         .data_sheets
         .iter()
         .map(|ds| {
             json!({
                 "id": ds.id,
                 "title": ds.title,
-                "kind": ds.kind().label(),
+                "kind": ds.kind_label,
                 "frozen": ds.frozen,
                 "info_sheet_id": ds.info_sheet_id,
-                "rows": ds.archetype.row_count(),
-                "columns": ds.archetype.column_count(),
-                "linked_regions_count": ds.linked_regions.len(),
-                "upstream_dependencies": doc.upstream_dependencies(&ds.id),
+                "rows": ds.rows,
+                "columns": ds.cols,
+                "linked_regions_count": ds.linked_regions,
+                "upstream_dependencies": ds.upstream_dependencies,
             })
         })
         .collect();
 
-    let info_list: Vec<Value> = doc
+    let info_list: Vec<Value> = project
         .info_sheets
         .iter()
         .map(|info| {
@@ -1396,12 +1410,20 @@ fn build_document_summary(session: &Session) -> Value {
                 "title": info.title,
                 "linked_data_sheets": info.linked_data_sheets,
                 "constants": info.constants,
-                "notes_markdown_len": info.notes_markdown.len(),
+                "notes_markdown_len": info.notes_len,
             })
         })
         .collect();
 
-    let analyses_list: Vec<Value> = doc.result_sheets.iter().map(|rs| summarize_result_sheet(rs, &doc.upstream_dependencies(&rs.id))).collect();
+    let analyses_list: Vec<Value> = doc
+        .result_sheets
+        .iter()
+        .map(|rs| {
+            let deps = doc.upstream_dependencies(&rs.id);
+            let mut detail = inspect_sheet_detail(doc, &rs.id, true).unwrap_or(Value::Null);
+            summarize_result_sheet_from_detail(rs, &deps, &mut detail)
+        })
+        .collect();
 
     let graphs_list: Vec<Value> = doc
         .graph_sheets
@@ -1444,13 +1466,13 @@ fn build_document_summary(session: &Session) -> Value {
     let (variables, hooks) = collect_variables_and_hooks(doc);
 
     json!({
-        "title": doc.title,
-        "schema_version": doc.schema_version,
-        "file_path": session.file_path().map(|p| p.display().to_string()),
-        "dirty": session.is_dirty(),
-        "total_sheet_count": doc.total_sheet_count(),
-        "active_sheet_id": doc.active_sheet_id,
-        "family_anchor_sheet_id": doc.family_anchor_sheet_id,
+        "title": project.title,
+        "schema_version": project.schema_version,
+        "file_path": project.file_path,
+        "dirty": project.dirty,
+        "total_sheet_count": project.total_sheet_count,
+        "active_sheet_id": project.active_sheet_id,
+        "family_anchor_sheet_id": project.family_anchor_sheet_id,
         "sheets": {
             "data": data_list,
             "info": info_list,
@@ -1466,8 +1488,9 @@ fn build_document_summary(session: &Session) -> Value {
     })
 }
 
-fn summarize_result_sheet(rs: &ResultSheet, deps: &[SheetId]) -> Value {
-    let (scalars_preview, scalars_truncated) = crate::resources::slice_preview_vec(&rs.scalars, crate::resources::MAX_RESULT_PREVIEW_SCALARS);
+fn summarize_result_sheet_from_detail(rs: &ResultSheet, deps: &[SheetId], detail: &mut Value) -> Value {
+    let scalars_preview = detail.as_object_mut().and_then(|obj| obj.remove("scalars_data")).unwrap_or_else(|| json!([]));
+    let scalars_truncated = detail.as_object_mut().and_then(|obj| obj.remove("scalars_truncated")).unwrap_or(Value::Bool(false));
     let mut payload = json!({
         "section": "analyses",
         "id": rs.id,
@@ -1540,15 +1563,28 @@ fn collect_variables_and_hooks(doc: &ProjectDocument) -> (Value, Vec<Value>) {
     (variables, hooks)
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommandListArgs {
+    #[serde(default)]
+    filter: Option<String>,
+    #[serde(default)]
+    group: Option<String>,
+    #[serde(default)]
+    include_ui: Option<bool>,
+    #[serde(default)]
+    ui_only: Option<bool>,
+}
+
 fn handle_command_list(state: &McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
-    gui_tools::reject_unknown_args("command_list", args, &["filter", "group", "include_ui", "ui_only"])?;
-    let filter = optional_non_empty_str(args, "filter")?.map(|s| s.to_ascii_lowercase());
-    let group_filter = match optional_non_empty_str(args, "group")? {
+    let parsed: CommandListArgs = deserialize_args("command_list", args)?;
+    let filter = trim_opt_non_empty(parsed.filter, "filter")?.map(|s| s.to_ascii_lowercase());
+    let group_filter = match trim_opt_non_empty(parsed.group, "group")? {
         Some(raw) => Some(parse_command_group(&raw)?),
         None => None,
     };
-    let include_ui = optional_bool(args, "include_ui")?.unwrap_or(true);
-    let ui_only = optional_bool(args, "ui_only")?.unwrap_or(false);
+    let include_ui = parsed.include_ui.unwrap_or(true);
+    let ui_only = parsed.ui_only.unwrap_or(false);
     let attached = is_attached(state);
 
     let mut commands = Vec::new();
@@ -1614,28 +1650,41 @@ fn matches_filter(filter: Option<&str>, id: &str, label: &str, menu_path: &str, 
         || summary.to_ascii_lowercase().contains(needle)
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommandRunArgs {
+    command_id: String,
+    #[serde(default)]
+    params: Option<Value>,
+}
+
 fn handle_command_run(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
-    gui_tools::reject_unknown_args("command_run", args, &["command_id", "params"])?;
-    let command_id = required_non_empty_str(args, "command_id")?;
-    let params = extract_command_params(args)?;
+    let parsed: CommandRunArgs = deserialize_args("command_run", args)?;
+    let command_id = trim_required_non_empty(parsed.command_id, "command_id")?;
+    let params = validate_command_params_value(parsed.params)?;
     match execute_single_command(state, &command_id, params) {
         Ok(val) => ToolCallResult::ok_json(&val),
         Err(err) => Ok(errors::result_from_engine_error(&err)),
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommandBatchArgs {
+    commands: Vec<Value>,
+    #[serde(default)]
+    atomic: Option<bool>,
+}
+
 fn handle_command_batch(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
-    gui_tools::reject_unknown_args("command_batch", args, &["commands", "atomic"])?;
-    let Some(items) = args.get("commands").and_then(Value::as_array) else {
-        return Err(ToolCallError::InvalidParams(String::from("command_batch requires an array \"commands\"")));
-    };
-    if items.len() > MAX_BATCH_COMMANDS {
+    let parsed: CommandBatchArgs = deserialize_args("command_batch", args)?;
+    if parsed.commands.len() > MAX_BATCH_COMMANDS {
         return Err(ToolCallError::InvalidParams(format!("command_batch exceeds maximum {MAX_BATCH_COMMANDS} items")));
     }
 
-    let atomic = optional_bool(args, "atomic")?.unwrap_or(false);
-    let mut parsed_items = Vec::with_capacity(items.len());
-    for (idx, item) in items.iter().enumerate() {
+    let atomic = parsed.atomic.unwrap_or(false);
+    let mut parsed_items = Vec::with_capacity(parsed.commands.len());
+    for (idx, item) in parsed.commands.into_iter().enumerate() {
         let Some(obj) = item.as_object() else {
             return Err(ToolCallError::InvalidParams(format!("batch item {idx} must be an object")));
         };
@@ -1650,156 +1699,316 @@ fn handle_command_batch(state: &mut McpServerState, args: &Map<String, Value>) -
 }
 
 fn execute_batch_items(state: &mut McpServerState, items: Vec<(String, Value)>, atomic: bool) -> Result<ToolCallResult, ToolCallError> {
-    let snapshot = if atomic && !is_attached(state) { Some(state.session().clone()) } else { None };
+    #[cfg(not(target_arch = "wasm32"))]
+    if state.control_port().is_some() {
+        return execute_live_command_batch(state, items, atomic);
+    }
+
+    if atomic {
+        return execute_headless_atomic_batch(state, items);
+    }
+
     let mut outcomes = Vec::with_capacity(items.len());
-    let mut remote_mutated_steps: usize = 0;
-    let mut persisted_fs_steps: Vec<Value> = Vec::new();
     let cancel = state.current_cancel_token();
 
     for (idx, (command_id, params)) in items.into_iter().enumerate() {
         if cancel.load(Ordering::Acquire) {
             let err = EngineError::with_code(ErrorCode::Cancelled, format!("command `{command_id}` cancelled")).with_retryable(true);
-            return Ok(build_batch_failure_result(
-                state,
-                atomic,
-                snapshot,
-                remote_mutated_steps,
-                outcomes,
-                persisted_fs_steps,
-                (idx, command_id, err),
-            ));
+            return Ok(build_non_atomic_failure_result(idx, command_id, &err, outcomes));
         }
-        let step_writes_fs_hint = command_step_writes_filesystem(&command_id, &params);
         match execute_single_command(state, &command_id, params) {
             Ok(outcome) => {
-                if outcome.get("mutated").and_then(Value::as_bool) == Some(true) && !is_ui_catalog_command(&command_id) && command_id != "ping" {
-                    remote_mutated_steps = remote_mutated_steps.saturating_add(1);
-                }
-                if step_writes_fs_hint || outcome_has_written_path(&outcome) {
-                    persisted_fs_steps.push(json!({ "index": idx, "command_id": command_id }));
-                }
                 outcomes.push(json!({ "index": idx, "ok": true, "outcome": outcome }));
             }
             Err(err) => {
-                return Ok(build_batch_failure_result(
-                    state,
-                    atomic,
-                    snapshot,
-                    remote_mutated_steps,
-                    outcomes,
-                    persisted_fs_steps,
-                    (idx, command_id, err),
-                ));
+                return Ok(build_non_atomic_failure_result(idx, command_id, &err, outcomes));
             }
         }
     }
 
     ToolCallResult::ok_json(&json!({
-        "atomic": atomic,
+        "atomic": false,
         "count": outcomes.len(),
         "results": outcomes,
     }))
 }
 
-fn build_batch_failure_result(
-    state: &mut McpServerState,
-    atomic: bool,
-    snapshot: Option<Session>,
-    remote_mutated_steps: usize,
-    mut outcomes: Vec<Value>,
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_batch_failure_header(msg: &str) -> Option<(usize, String, bool)> {
+    let rest = msg.strip_prefix("batch step ")?;
+    let (idx_str, rest) = rest.split_once(" (")?;
+    let failed_index = idx_str.parse::<usize>().ok()?;
+    let (cmd_id, rest) = rest.split_once(") failed (rolled_back=")?;
+    let (rb_str, _) = rest.split_once(')')?;
+    let rolled_back = match rb_str {
+        "true" => true,
+        "false" => false,
+        _ => return None,
+    };
+    Some((failed_index, cmd_id.to_owned(), rolled_back))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn normalize_live_batch_step_outcome(cmd_id: &str, raw_outcome: Value) -> Value {
+    if cmd_id == "ping" || is_ui_catalog_command(cmd_id) {
+        if raw_outcome.get("command_id").is_some() && raw_outcome.get("live_attach").is_some() {
+            return raw_outcome;
+        }
+        let mutated = raw_outcome.get("mutated").and_then(Value::as_bool).unwrap_or(cmd_id != "ping" && !is_readonly_ui_catalog_command(cmd_id));
+        return json!({
+            "command_id": cmd_id,
+            "mutated": mutated,
+            "live_attach": true,
+            "result": raw_outcome,
+        });
+    }
+    raw_outcome
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn execute_live_command_batch(state: &mut McpServerState, mut items: Vec<(String, Value)>, atomic: bool) -> Result<ToolCallResult, ToolCallError> {
+    let cancel = state.current_cancel_token();
+    if cancel.load(Ordering::Acquire) {
+        let first_cmd = items.first().map(|(c, _)| c.clone()).unwrap_or_default();
+        let err = EngineError::with_code(ErrorCode::Cancelled, format!("command `{first_cmd}` cancelled")).with_retryable(true);
+        return if atomic {
+            Ok(build_atomic_failure_result(0, first_cmd, &err, true, Vec::new(), Vec::new()))
+        } else {
+            Ok(build_non_atomic_failure_result(0, first_cmd, &err, Vec::new()))
+        };
+    }
+
+    for (idx, (command_id, params)) in items.iter_mut().enumerate() {
+        if let Err(err) = formats::sanitize_command_params(state, params) {
+            return if atomic {
+                Ok(build_atomic_failure_result(idx, command_id.clone(), &err, true, Vec::new(), Vec::new()))
+            } else {
+                Ok(build_non_atomic_failure_result(idx, command_id.clone(), &err, Vec::new()))
+            };
+        }
+    }
+
+    let commands_json: Vec<Value> = items.iter().map(|(cmd_id, params)| json!({ "command_id": cmd_id, "params": params })).collect();
+
+    match state.send_live_control("command.batch", json!({ "atomic": atomic, "commands": commands_json })) {
+        Ok(remote) => {
+            let raw_results = remote.get("results").and_then(Value::as_array);
+            let mut outcomes = Vec::with_capacity(raw_results.map_or(0, Vec::len));
+            if let Some(entries) = raw_results {
+                for (pos, entry) in entries.iter().enumerate() {
+                    let idx = entry.get("index").and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok()).unwrap_or(pos);
+                    let cmd_id = entry
+                        .get("command")
+                        .or_else(|| entry.get("command_id"))
+                        .and_then(Value::as_str)
+                        .or_else(|| items.get(idx).map(|(c, _)| c.as_str()))
+                        .unwrap_or("");
+                    let raw_outcome = entry.get("result").or_else(|| entry.get("outcome")).cloned().unwrap_or(Value::Null);
+                    let outcome = normalize_live_batch_step_outcome(cmd_id, raw_outcome);
+                    outcomes.push(json!({ "index": idx, "ok": true, "outcome": outcome }));
+                }
+            }
+            ToolCallResult::ok_json(&json!({
+                "atomic": atomic,
+                "count": outcomes.len(),
+                "results": outcomes,
+            }))
+        }
+        Err(err_payload) => {
+            let parsed_header = parse_batch_failure_header(&err_payload.message);
+            let detail_idx =
+                err_payload.details.as_ref().and_then(|d| d.get("failed_index")).and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok());
+            let detail_cmd = err_payload.details.as_ref().and_then(|d| d.get("failed_command_id")).and_then(Value::as_str).map(ToOwned::to_owned);
+            let detail_rb = err_payload.details.as_ref().and_then(|d| d.get("rolled_back")).and_then(Value::as_bool);
+
+            let failed_index = detail_idx.or_else(|| parsed_header.as_ref().map(|(idx, _, _)| *idx)).unwrap_or(0);
+            let failed_command_id = detail_cmd
+                .or_else(|| parsed_header.as_ref().map(|(_, cmd, _)| cmd.clone()))
+                .or_else(|| items.get(failed_index).map(|(c, _)| c.clone()))
+                .unwrap_or_default();
+            let reported_rolled_back = detail_rb.or_else(|| parsed_header.as_ref().map(|(_, _, rb)| *rb)).or_else(|| {
+                if err_payload.message.contains("(rolled_back=true)") {
+                    Some(true)
+                } else if err_payload.message.contains("(rolled_back=false)") {
+                    Some(false)
+                } else {
+                    None
+                }
+            });
+
+            let mut persisted_fs_steps = Vec::new();
+            for (idx, (cmd_id, params)) in items.iter().take(failed_index).enumerate() {
+                if command_step_writes_filesystem(cmd_id, params) {
+                    persisted_fs_steps.push(json!({ "index": idx, "command_id": cmd_id }));
+                }
+            }
+
+            if atomic {
+                let session_rolled_back = reported_rolled_back.unwrap_or(false);
+                return Ok(build_atomic_failure_result_from_payload(
+                    failed_index,
+                    failed_command_id,
+                    &err_payload,
+                    session_rolled_back,
+                    Vec::new(),
+                    persisted_fs_steps,
+                ));
+            }
+
+            let fs_persisted = !persisted_fs_steps.is_empty();
+            let mut extra = Map::new();
+            extra.insert(String::from("failed_index"), json!(failed_index));
+            extra.insert(String::from("failed_command_id"), json!(failed_command_id));
+            extra.insert(String::from("error"), json!(err_payload.message));
+            extra.insert(String::from("atomic"), json!(false));
+            extra.insert(String::from("rolled_back"), json!(false));
+            extra.insert(String::from("session_rolled_back"), json!(false));
+            extra.insert(String::from("filesystem_side_effects_persisted"), json!(fs_persisted));
+            if fs_persisted {
+                extra.insert(String::from("persisted_filesystem_steps"), Value::Array(persisted_fs_steps));
+            }
+            extra.insert(String::from("completed"), json!(failed_index));
+            extra.insert(
+                String::from("results"),
+                Value::Array(vec![json!({
+                    "index": failed_index,
+                    "ok": false,
+                    "command_id": failed_command_id,
+                    "error": err_payload.message,
+                    "code": err_payload.code,
+                })]),
+            );
+            Ok(errors::result_from_payload_with_extra(&err_payload, extra))
+        }
+    }
+}
+
+fn execute_headless_atomic_batch(state: &mut McpServerState, items: Vec<(String, Value)>) -> Result<ToolCallResult, ToolCallError> {
+    let cancel = state.current_cancel_token();
+    let mut steps = Vec::with_capacity(items.len());
+    for (idx, (command_id, mut params)) in items.into_iter().enumerate() {
+        if let Err(err) = formats::sanitize_command_params(state, &mut params) {
+            return Ok(build_atomic_failure_result(idx, command_id, &err, true, Vec::new(), Vec::new()));
+        }
+        if is_ui_catalog_command(&command_id) {
+            let err = ui_command_requires_attach_error(&command_id);
+            return Ok(build_atomic_failure_result(idx, command_id, &err, true, Vec::new(), Vec::new()));
+        }
+        steps.push(BatchCommandStep::new(command_id, params));
+    }
+
+    let exec_result = state.mutate_active_session(|session| {
+        let outcomes = session.execute_batch_atomic(&steps, Caller::Mcp, &cancel)?;
+        Ok::<_, Box<curvebook_engine::services::BatchStepFailure>>((outcomes, session.is_dirty()))
+    });
+
+    match exec_result {
+        Ok((outcomes, dirty)) => {
+            let results: Vec<Value> = outcomes
+                .iter()
+                .enumerate()
+                .map(|(idx, out)| json!({ "index": idx, "ok": true, "outcome": format_command_outcome_json(out, dirty) }))
+                .collect();
+            ToolCallResult::ok_json(&json!({
+                "atomic": true,
+                "count": results.len(),
+                "results": results,
+            }))
+        }
+        Err(failure) => {
+            let dirty = state.session().is_dirty();
+            let completed: Vec<Value> = failure
+                .completed_before_failure
+                .iter()
+                .enumerate()
+                .map(|(idx, out)| json!({ "index": idx, "ok": true, "outcome": format_command_outcome_json(out, dirty) }))
+                .collect();
+            let persisted_fs: Vec<Value> =
+                failure.persisted_filesystem_steps.into_iter().map(|(idx, cmd_id)| json!({ "index": idx, "command_id": cmd_id })).collect();
+            Ok(build_atomic_failure_result(failure.failed_index, failure.failed_command_id, &failure.error, true, completed, persisted_fs))
+        }
+    }
+}
+
+fn build_atomic_failure_result(
+    idx: usize,
+    command_id: String,
+    err: &EngineError,
+    session_rolled_back: bool,
+    completed_before_failure: Vec<Value>,
     persisted_fs_steps: Vec<Value>,
-    failure: (usize, String, EngineError),
 ) -> ToolCallResult {
-    let (idx, command_id, err) = failure;
-    let err_payload = StructuredErrorPayload::from_engine_error(&err);
+    let err_payload = StructuredErrorPayload::from_engine_error(err);
+    build_atomic_failure_result_from_payload(idx, command_id, &err_payload, session_rolled_back, completed_before_failure, persisted_fs_steps)
+}
+
+fn build_atomic_failure_result_from_payload(
+    idx: usize,
+    command_id: String,
+    err_payload: &StructuredErrorPayload,
+    session_rolled_back: bool,
+    completed_before_failure: Vec<Value>,
+    persisted_fs_steps: Vec<Value>,
+) -> ToolCallResult {
+    let mut extra = Map::new();
+    extra.insert(String::from("failed_index"), json!(idx));
+    extra.insert(String::from("failed_command_id"), json!(command_id));
+    extra.insert(String::from("error"), json!(err_payload.message));
+    let fs_persisted = !persisted_fs_steps.is_empty();
+    let rolled_back = session_rolled_back && !fs_persisted;
+    extra.insert(String::from("atomic"), json!(true));
+    extra.insert(String::from("rolled_back"), json!(rolled_back));
+    extra.insert(String::from("session_rolled_back"), json!(session_rolled_back));
+    extra.insert(String::from("filesystem_side_effects_persisted"), json!(fs_persisted));
+    if fs_persisted {
+        extra.insert(String::from("persisted_filesystem_steps"), Value::Array(persisted_fs_steps));
+        extra.insert(
+            String::from("warning"),
+            json!("In-memory session changes were rolled back, but earlier filesystem writes could not be reverted and remain on disk."),
+        );
+    }
+    extra.insert(String::from("completed_before_failure"), Value::Array(completed_before_failure));
+    errors::result_from_payload_with_extra(err_payload, extra)
+}
+
+fn build_non_atomic_failure_result(idx: usize, command_id: String, err: &EngineError, mut outcomes: Vec<Value>) -> ToolCallResult {
+    let err_payload = StructuredErrorPayload::from_engine_error(err);
     let mut extra = Map::new();
     extra.insert(String::from("failed_index"), json!(idx));
     extra.insert(String::from("failed_command_id"), json!(command_id));
     extra.insert(String::from("error"), json!(err.message()));
-    if atomic {
-        let session_rolled_back = rollback_batch(state, snapshot, remote_mutated_steps);
-        let fs_persisted = !persisted_fs_steps.is_empty();
-        let rolled_back = session_rolled_back && !fs_persisted;
-        extra.insert(String::from("atomic"), json!(true));
-        extra.insert(String::from("rolled_back"), json!(rolled_back));
-        extra.insert(String::from("session_rolled_back"), json!(session_rolled_back));
-        extra.insert(String::from("filesystem_side_effects_persisted"), json!(fs_persisted));
-        if fs_persisted {
-            extra.insert(String::from("persisted_filesystem_steps"), Value::Array(persisted_fs_steps));
-            extra.insert(
-                String::from("warning"),
-                json!("In-memory session changes were rolled back, but earlier filesystem writes could not be reverted and remain on disk."),
-            );
-        }
-        extra.insert(String::from("completed_before_failure"), Value::Array(outcomes));
-    } else {
-        outcomes.push(json!({
-            "index": idx,
-            "ok": false,
-            "command_id": command_id,
-            "error": err.message(),
-            "code": err.code,
-        }));
-        extra.insert(String::from("atomic"), json!(false));
-        extra.insert(String::from("completed"), json!(idx));
-        extra.insert(String::from("results"), Value::Array(outcomes));
-    }
+    outcomes.push(json!({
+        "index": idx,
+        "ok": false,
+        "command_id": command_id,
+        "error": err.message(),
+        "code": err.code,
+    }));
+    extra.insert(String::from("atomic"), json!(false));
+    extra.insert(String::from("completed"), json!(idx));
+    extra.insert(String::from("results"), Value::Array(outcomes));
     errors::result_from_payload_with_extra(&err_payload, extra)
 }
 
-fn has_non_empty_dest_path_param(params: &Value) -> bool {
-    let Some(obj) = params.as_object() else {
-        return false;
-    };
-    ["path", "output_path", "outputPath", "file_path", "filePath"]
-        .iter()
-        .any(|key| obj.get(*key).and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty()))
+fn ui_command_requires_attach_error(command_id: &str) -> EngineError {
+    EngineError::with_code(ErrorCode::Conflict, format!("UI command '{command_id}' requires attaching to a live desktop --control <port>"))
+        .with_remediation("Attach `--control-port <port>` to a live desktop session or invoke a headless engine command.")
 }
 
-fn is_optional_path_export_or_save_cmd(command_id: &str) -> bool {
-    matches!(
-        command_id,
-        "project.save" | "project.saveTemplate" | "table.exportCsv" | "analysis.exportJson" | "analysis.exportCsv" | "result.generateReport"
-    ) || command_id.starts_with("export.")
-        || command_id.contains(".export")
-}
-
-fn command_step_writes_filesystem(command_id: &str, params: &Value) -> bool {
-    if command_id == "ui.screenshot" {
-        return has_non_empty_dest_path_param(params);
+fn format_command_outcome_json(outcome: &CommandOutcome, dirty: bool) -> Value {
+    let mut payload = json!({
+        "command_id": outcome.command_id,
+        "mutated": outcome.mutated,
+        "message": outcome.message,
+        "payload": outcome.payload,
+        "dirty": dirty,
+    });
+    if !outcome.warnings.is_empty()
+        && let Some(map) = payload.as_object_mut()
+    {
+        map.insert(String::from("warnings"), json!(outcome.warnings));
     }
-    let Some(spec) = registry().get(command_id) else {
-        return false;
-    };
-    if !spec.effects.contains(Effects::WRITES_FILESYSTEM) {
-        return false;
-    }
-    if is_optional_path_export_or_save_cmd(command_id) { has_non_empty_dest_path_param(params) } else { true }
-}
-
-fn outcome_has_written_path(outcome: &Value) -> bool {
-    outcome.pointer("/payload/path").and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty())
-        || outcome.pointer("/result/path").and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty())
-}
-
-fn rollback_batch(state: &mut McpServerState, snapshot: Option<Session>, remote_mutated_steps: usize) -> bool {
-    if let Some(prev) = snapshot {
-        state.install_session(prev);
-        return true;
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    if state.control_port().is_some() {
-        let mut all_undone = true;
-        for _ in 0..remote_mutated_steps {
-            if state.send_live_control("engine.execute", json!({ "command_id": "edit.undo", "params": {} })).is_err() {
-                all_undone = false;
-                break;
-            }
-        }
-        return all_undone;
-    }
-    let _ = remote_mutated_steps;
-    false
+    payload
 }
 
 fn execute_single_command(state: &mut McpServerState, command_id: &str, mut params: Value) -> Result<Value, EngineError> {
@@ -1816,30 +2025,14 @@ fn execute_single_command(state: &mut McpServerState, command_id: &str, mut para
     }
 
     if is_ui_catalog_command(command_id) {
-        return Err(EngineError::with_code(
-            ErrorCode::Conflict,
-            format!("UI command '{command_id}' requires attaching to a live desktop --control <port>"),
-        )
-        .with_remediation("Attach `--control-port <port>` to a live desktop session or invoke a headless engine command."));
+        return Err(ui_command_requires_attach_error(command_id));
     }
 
     let (outcome, dirty) = state.mutate_active_session(|session| {
         let out = session.execute_with_caller(command_id, params, Caller::Mcp, &cancel)?;
         Ok::<_, EngineError>((out, session.is_dirty()))
     })?;
-    let mut payload = json!({
-        "command_id": outcome.command_id,
-        "mutated": outcome.mutated,
-        "message": outcome.message,
-        "payload": outcome.payload,
-        "dirty": dirty,
-    });
-    if !outcome.warnings.is_empty()
-        && let Some(map) = payload.as_object_mut()
-    {
-        map.insert(String::from("warnings"), json!(outcome.warnings));
-    }
-    Ok(payload)
+    Ok(format_command_outcome_json(&outcome, dirty))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1890,12 +2083,39 @@ const fn is_attached(state: &McpServerState) -> bool {
     }
 }
 
-pub(crate) fn extract_command_params(args: &Map<String, Value>) -> Result<Value, ToolCallError> {
-    match args.get("params") {
+pub(crate) fn deserialize_args<T: DeserializeOwned>(tool_name: &str, args: &Map<String, Value>) -> Result<T, ToolCallError> {
+    serde_json::from_value(Value::Object(args.clone())).map_err(|err| ToolCallError::InvalidParams(format!("invalid {tool_name} arguments: {err}")))
+}
+
+pub(crate) fn trim_opt_non_empty(value: Option<String>, key: &str) -> Result<Option<String>, ToolCallError> {
+    let Some(s) = value else {
+        return Ok(None);
+    };
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Err(ToolCallError::InvalidParams(format!("parameter \"{key}\" must not be blank")));
+    }
+    Ok(Some(trimmed.to_owned()))
+}
+
+pub(crate) fn trim_required_non_empty(value: String, key: &str) -> Result<String, ToolCallError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(ToolCallError::InvalidParams(format!("missing or empty string parameter \"{key}\"")));
+    }
+    Ok(trimmed.to_owned())
+}
+
+fn validate_command_params_value(value: Option<Value>) -> Result<Value, ToolCallError> {
+    match value {
         None | Some(Value::Null) => Ok(Value::Object(Map::new())),
-        Some(v) if v.is_object() => Ok(v.clone()),
+        Some(v) if v.is_object() => Ok(v),
         Some(_) => Err(ToolCallError::InvalidParams(String::from("\"params\" must be a JSON object"))),
     }
+}
+
+pub(crate) fn extract_command_params(args: &Map<String, Value>) -> Result<Value, ToolCallError> {
+    validate_command_params_value(args.get("params").cloned())
 }
 
 pub(crate) fn required_non_empty_str(args: &Map<String, Value>, key: &str) -> Result<String, ToolCallError> {
@@ -1912,11 +2132,7 @@ pub(crate) fn optional_non_empty_str(args: &Map<String, Value>, key: &str) -> Re
     let Some(s) = val.as_str() else {
         return Err(ToolCallError::InvalidParams(format!("parameter \"{key}\" must be a string")));
     };
-    let trimmed = s.trim();
-    if trimmed.is_empty() {
-        return Err(ToolCallError::InvalidParams(format!("parameter \"{key}\" must not be blank")));
-    }
-    Ok(Some(trimmed.to_owned()))
+    trim_opt_non_empty(Some(s.to_owned()), key)
 }
 
 pub(crate) fn optional_bool(args: &Map<String, Value>, key: &str) -> Result<Option<bool>, ToolCallError> {
@@ -1949,77 +2165,16 @@ pub(crate) fn optional_u32_bounded(args: &Map<String, Value>, key: &str, min: u3
 /// Encode raw binary data using standard RFC 4648 base64 (`=` padded).
 #[must_use]
 pub(crate) fn encode_base64(input: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let enc = |idx: u32| -> char { TABLE.get((idx & 0x3F) as usize).copied().map(char::from).unwrap_or('=') };
-    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-    for chunk in input.chunks(3) {
-        let b0 = chunk.first().copied().unwrap_or(0);
-        let b1 = chunk.get(1).copied().unwrap_or(0);
-        let b2 = chunk.get(2).copied().unwrap_or(0);
-        let triple = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
-
-        out.push(enc(triple >> 18));
-        out.push(enc(triple >> 12));
-        if chunk.len() > 1 {
-            out.push(enc(triple >> 6));
-        } else {
-            out.push('=');
-        }
-        if chunk.len() > 2 {
-            out.push(enc(triple));
-        } else {
-            out.push('=');
-        }
-    }
-    out
+    curvebook_platform::base64::encode(input)
 }
 
 /// Decode standard RFC 4648 base64 (`=` padded).
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
-    let clean: Vec<u8> = input.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
-    if !clean.len().is_multiple_of(4) {
-        return Err(String::from("invalid base64 length"));
+    if input.bytes().all(|b| b.is_ascii_whitespace()) {
+        return Ok(Vec::new());
     }
-    let decode_val = |b: u8| -> Option<u8> {
-        match b {
-            b'A'..=b'Z' => Some(b - b'A'),
-            b'a'..=b'z' => Some(b - b'a' + 26),
-            b'0'..=b'9' => Some(b - b'0' + 52),
-            b'+' => Some(62),
-            b'/' => Some(63),
-            _ => None,
-        }
-    };
-    let mut out = Vec::with_capacity((clean.len() / 4) * 3);
-    let (chunks, _) = clean.as_chunks::<4>();
-    for (chunk_idx, chunk) in chunks.iter().enumerate() {
-        let is_last = (chunk_idx + 1) * 4 == clean.len();
-        let a = decode_val(chunk[0]).ok_or_else(|| String::from("invalid base64 character"))?;
-        let b = decode_val(chunk[1]).ok_or_else(|| String::from("invalid base64 character"))?;
-        let pad_c = chunk[2] == b'=';
-        let pad_d = chunk[3] == b'=';
-        if (pad_c || pad_d) && !is_last {
-            return Err(String::from("unexpected base64 padding before final quantum"));
-        }
-        if pad_c && !pad_d {
-            return Err(String::from("invalid base64 padding"));
-        }
-        let c = if pad_c { 0 } else { decode_val(chunk[2]).ok_or_else(|| String::from("invalid base64 character"))? };
-        let d = if pad_d { 0 } else { decode_val(chunk[3]).ok_or_else(|| String::from("invalid base64 character"))? };
-        let triple = (u32::from(a) << 18) | (u32::from(b) << 12) | (u32::from(c) << 6) | u32::from(d);
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            out.push(((triple >> 16) & 0xFF) as u8);
-            if !pad_c {
-                out.push(((triple >> 8) & 0xFF) as u8);
-            }
-            if !pad_d {
-                out.push((triple & 0xFF) as u8);
-            }
-        }
-    }
-    Ok(out)
+    curvebook_platform::base64::decode(input).map_err(|err| err.to_string())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2504,6 +2659,9 @@ mod live_control {
                 .map_err(|msg| StructuredErrorPayload::new(ErrorCode::IoError, msg).with_retryable(true))?;
             let auth_resp: ControlResponse = serde_json::from_slice(&auth_line)
                 .map_err(|err| StructuredErrorPayload::new(ErrorCode::CorruptData, format!("invalid control auth response JSON: {err}")))?;
+            if auth_resp.id != "mcp-auth" {
+                return Err(StructuredErrorPayload::new(ErrorCode::CorruptData, format!("mismatched control auth response id '{}'", auth_resp.id)));
+            }
             if !auth_resp.ok {
                 return Err(parse_control_error(auth_resp.error, auth_resp.error_detail));
             }
@@ -2528,13 +2686,35 @@ mod live_control {
         Ok(resp.result)
     }
 
+    fn attach_batch_header_details(mut payload: StructuredErrorPayload, raw_error: Option<&str>) -> StructuredErrorPayload {
+        if let Some(msg) = raw_error
+            && let Some((failed_index, failed_command_id, rolled_back)) = super::parse_batch_failure_header(msg)
+        {
+            let mut details = match payload.details.take() {
+                Some(Value::Object(map)) => map,
+                Some(other) => {
+                    let mut map = Map::new();
+                    map.insert(String::from("inner"), other);
+                    map
+                }
+                None => Map::new(),
+            };
+            details.entry(String::from("failed_index")).or_insert_with(|| serde_json::json!(failed_index));
+            details.entry(String::from("failed_command_id")).or_insert_with(|| serde_json::json!(failed_command_id));
+            details.entry(String::from("rolled_back")).or_insert_with(|| serde_json::json!(rolled_back));
+            payload.details = Some(Value::Object(details));
+        }
+        payload
+    }
+
     fn parse_control_error(error: Option<String>, error_detail: Option<Value>) -> StructuredErrorPayload {
+        let raw_error_copy = error.clone();
         if let Some(detail) = error_detail {
             if let Ok(parsed) = serde_json::from_value::<StructuredErrorPayload>(detail.clone()) {
-                return parsed;
+                return attach_batch_header_details(parsed, raw_error_copy.as_deref());
             }
             if let Ok(engine_err) = serde_json::from_value::<EngineError>(detail.clone()) {
-                return StructuredErrorPayload::from_engine_error(&engine_err);
+                return attach_batch_header_details(StructuredErrorPayload::from_engine_error(&engine_err), raw_error_copy.as_deref());
             }
             if let Some(code_str) = detail.get("code").and_then(Value::as_str) {
                 let code = if code_str == "unauthorized" { ErrorCode::BadInput } else { ErrorCode::from_code_str(code_str) };
@@ -2558,7 +2738,7 @@ mod live_control {
                 if let Some(extra) = detail.get("details") {
                     payload = payload.with_details(extra.clone());
                 }
-                return payload;
+                return attach_batch_header_details(payload, raw_error_copy.as_deref());
             }
         }
         let msg = error.unwrap_or_else(|| String::from("desktop control command failed"));
@@ -2573,6 +2753,9 @@ mod live_control {
         }
         if lower.contains("disabled") || lower.contains("grayed") {
             return StructuredErrorPayload::new(ErrorCode::Conflict, msg);
+        }
+        if lower.contains("cancelled") {
+            return StructuredErrorPayload::new(ErrorCode::Cancelled, msg).with_retryable(true);
         }
         StructuredErrorPayload::from_message(msg)
     }
@@ -3056,5 +3239,51 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn live_control_rejects_mismatched_auth_response_id() {
+        use std::io::Cursor;
+
+        // Payload > 32 KiB with token triggers pre-flight `mcp-auth` frame.
+        let large_params = json!({ "blob": "x".repeat(40 * 1024) });
+        let mut outbound = Vec::new();
+        let mut inbound = Cursor::new(
+            br#"{"id":"wrong-auth-id","ok":true,"result":{"authenticated":true}}
+{"id":"mcp-1","ok":true,"result":{"ok":true}}
+"#
+            .as_slice(),
+        );
+        let err = super::live_control::send_control_with_token_on_io(
+            &mut inbound,
+            &mut outbound,
+            Some("secret-token-42"),
+            "engine.execute",
+            large_params.clone(),
+            4096,
+        )
+        .expect_err("mismatched auth_resp.id must be rejected");
+        assert_eq!(err.code, curvebook_doc::ErrorCode::CorruptData);
+        assert!(err.message.contains("mismatched control auth response id"), "unexpected error: {}", err.message);
+
+        // Matching `mcp-auth` followed by matching `mcp-1` succeeds cleanly.
+        let mut outbound_ok = Vec::new();
+        let mut inbound_ok = Cursor::new(
+            br#"{"id":"mcp-auth","ok":true,"result":{"authenticated":true}}
+{"id":"mcp-1","ok":true,"result":{"accepted":true}}
+"#
+            .as_slice(),
+        );
+        let ok = super::live_control::send_control_with_token_on_io(
+            &mut inbound_ok,
+            &mut outbound_ok,
+            Some("secret-token-42"),
+            "engine.execute",
+            large_params,
+            4096,
+        )
+        .expect("matching auth_resp.id succeeds");
+        assert_eq!(ok["accepted"], json!(true));
     }
 }

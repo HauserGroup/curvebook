@@ -6,13 +6,16 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::indexing_slicing)]
 
+pub mod base64;
 pub mod fs;
 pub mod path_guard;
 pub mod process;
+pub mod sha256;
 pub mod sync;
 
 use std::fmt;
 
+pub use base64::Base64Error;
 #[cfg(not(target_arch = "wasm32"))]
 pub use fs::{read_regular_file_bytes, read_regular_file_bytes_if_exists, read_regular_file_utf8, sync_dir, write_atomic, write_atomic_with_hook};
 pub use path_guard::PATH_PARAM_KEYS;
@@ -21,6 +24,7 @@ pub use path_guard::{PathResolver, WorkdirGuard, ensure_regular_file};
 pub use process::local_host_fingerprint;
 #[cfg(not(target_arch = "wasm32"))]
 pub use process::{DEFAULT_IDLE_TIMEOUT, DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_WALL_TIMEOUT, ProcessCommand, ProcessOutput};
+pub use sha256::{Sha256, sha256_bytes, sha256_hex};
 
 /// Kind of timeout deadline exceeded while executing a child process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

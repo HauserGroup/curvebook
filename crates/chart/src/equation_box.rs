@@ -32,7 +32,8 @@ use curvebook_doc::{AnalysisKind, EquationDisplayMode, ProjectDocument, ResultSh
 use curvebook_fit::tex_format::{format_model_equation_tex, format_polynomial_equation_tex};
 use curvebook_palette::Rgba8;
 use curvebook_text::{
-    RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, lookup_greek_escape, lookup_roman_operator, measure_text_pt, parse_markup,
+    RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, TexDelimiter, extract_braced, extract_braced_opt_ws, lookup_latex_escape,
+    lookup_roman_operator, match_balanced_math_delimiters, measure_text_pt, parse_markup, parse_tex_delimiter_token, unwrap_outer_math_delimiters,
 };
 
 use crate::scene::{
@@ -587,87 +588,6 @@ fn parse_math_nodes(input: &str) -> Vec<MathNode> {
     nodes
 }
 
-fn unwrap_outer_math_delimiters(trimmed: &str) -> Option<&str> {
-    if trimmed.starts_with("$$") {
-        let (inner, consumed) = match_balanced_math_delimiters(trimmed, 2)?;
-        return (consumed == trimmed.len()).then_some(inner);
-    }
-    if trimmed.starts_with('$') {
-        let (inner, consumed) = match_balanced_math_delimiters(trimmed, 1)?;
-        return (consumed == trimmed.len()).then_some(inner);
-    }
-    None
-}
-
-fn match_balanced_math_delimiters(rest: &str, delim_len: usize) -> Option<(&str, usize)> {
-    let after_open = rest.get(delim_len..)?;
-    if delim_len == 1 && after_open.starts_with('$') {
-        return None;
-    }
-    let mut i = 0usize;
-    let mut brace_depth = 0usize;
-    while i < after_open.len() {
-        let ch = after_open.get(i..)?.chars().next()?;
-        if ch == '\\' {
-            i += 1;
-            if let Some(next_ch) = after_open.get(i..).and_then(|s| s.chars().next()) {
-                i += next_ch.len_utf8();
-            }
-            continue;
-        }
-        if ch == '{' {
-            brace_depth = brace_depth.saturating_add(1);
-            i += 1;
-            continue;
-        }
-        if ch == '}' {
-            if brace_depth == 0 {
-                return None;
-            }
-            brace_depth -= 1;
-            i += 1;
-            continue;
-        }
-        let closing = (delim_len == 1 && ch == '$') || (delim_len == 2 && after_open.get(i..).is_some_and(|s| s.starts_with("$$")));
-        if brace_depth == 0 && closing {
-            let inner = after_open.get(..i)?;
-            let after_close = after_open.get(i + delim_len..)?;
-            if is_math_mode_content(inner, after_close) {
-                return Some((inner, delim_len + i + delim_len));
-            }
-            return None;
-        }
-        i += ch.len_utf8();
-    }
-    None
-}
-
-fn is_math_mode_content(inner: &str, after_close: &str) -> bool {
-    if inner.trim().is_empty() || after_close.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-        return false;
-    }
-    if inner.ends_with(char::is_whitespace) && after_close.chars().next().is_some_and(char::is_alphanumeric) {
-        return false;
-    }
-    inner.chars().any(is_math_indicator_char) || is_pure_math_identifier(inner)
-}
-
-const fn is_math_indicator_char(ch: char) -> bool {
-    if matches!(ch, '=' | '\\' | '^' | '_' | '+' | '-' | '/' | '*' | '<' | '>' | '{' | '}') {
-        return true;
-    }
-    let cp = ch as u32;
-    matches!(cp, 0x00B0..=0x00B3 | 0x00B5 | 0x00B7 | 0x00B9 | 0x00D7 | 0x00F7 | 0x0370..=0x03FF | 0x2032..=0x2033 | 0x2190..=0x22FF)
-}
-
-fn is_pure_math_identifier(s: &str) -> bool {
-    let mut chars = s.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    first.is_ascii_alphabetic() && chars.all(|c| c.is_ascii_alphanumeric() || c == '\'')
-}
-
 fn parse_math_slice(input: &str, text_mode: bool, depth: usize) -> Vec<MathNode> {
     if depth >= MAX_TEX_DEPTH {
         if input.is_empty() {
@@ -945,7 +865,7 @@ fn parse_named_command(name: &str, tail: &str, depth: usize) -> Option<(ParsedSt
         return Some((ParsedStep::Raw(MathNode::Space { width_em: 0.278 }), 0));
     }
 
-    if let Some(sym) = lookup_greek_escape(name).or_else(|| lookup_math_escape(name)) {
+    if let Some(sym) = lookup_latex_escape(name) {
         let empty_group =
             if matches!(name, "textbackslash" | "textless" | "textgreater" | "textdegree" | "percent") && tail.starts_with("{}") { 2 } else { 0 };
         return Some((
@@ -1119,43 +1039,6 @@ fn trim_edge_spaces(nodes: &mut Vec<MathNode>) {
     }
 }
 
-fn extract_braced(s: &str) -> Option<(&str, usize)> {
-    if !s.starts_with('{') {
-        return None;
-    }
-    let mut depth = 0usize;
-    let mut escaped = false;
-    for (idx, ch) in s.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' {
-            escaped = true;
-            continue;
-        }
-        if ch == '{' {
-            depth = depth.saturating_add(1);
-            if depth > MAX_TEX_DEPTH {
-                return None;
-            }
-        } else if ch == '}' {
-            depth = depth.saturating_sub(1);
-            if depth == 0 {
-                return Some((s.get(1..idx)?, idx + 1));
-            }
-        }
-    }
-    None
-}
-
-fn extract_braced_opt_ws(s: &str) -> Option<(&str, usize)> {
-    let trimmed = s.trim_start_matches([' ', '\t']);
-    let ws_len = s.len() - trimmed.len();
-    let (inner, consumed) = extract_braced(trimmed)?;
-    Some((inner, ws_len + consumed))
-}
-
 fn extract_one_math_arg(s: &str) -> Option<(&str, usize)> {
     let trimmed = s.trim_start_matches([' ', '\t']);
     let ws = s.len() - trimmed.len();
@@ -1225,24 +1108,16 @@ fn find_matching_square_bracket(s: &str) -> Option<usize> {
 }
 
 fn parse_tex_delim_token(s: &str) -> Option<(DelimKind, usize)> {
-    let trimmed = s.trim_start_matches([' ', '\t']);
-    let ws = s.len() - trimmed.len();
-    let (kind, len) = if trimmed.starts_with('(') || trimmed.starts_with(')') {
-        (DelimKind::Paren, 1)
-    } else if trimmed.starts_with('[') || trimmed.starts_with(']') {
-        (DelimKind::Bracket, 1)
-    } else if trimmed.starts_with('|') {
-        (DelimKind::Pipe, 1)
-    } else if trimmed.starts_with('.') {
-        (DelimKind::Null, 1)
-    } else if trimmed.starts_with("\\{") || trimmed.starts_with("\\}") {
-        (DelimKind::Brace, 2)
-    } else if trimmed.starts_with("\\|") {
-        (DelimKind::DoublePipe, 2)
-    } else {
-        return None;
+    let (delim, consumed) = parse_tex_delimiter_token(s)?;
+    let kind = match delim {
+        TexDelimiter::LeftParen | TexDelimiter::RightParen => DelimKind::Paren,
+        TexDelimiter::LeftBracket | TexDelimiter::RightBracket => DelimKind::Bracket,
+        TexDelimiter::LeftBrace | TexDelimiter::RightBrace => DelimKind::Brace,
+        TexDelimiter::Pipe => DelimKind::Pipe,
+        TexDelimiter::DoublePipe => DelimKind::DoublePipe,
+        TexDelimiter::Null => DelimKind::Null,
     };
-    Some((kind, ws + len))
+    Some((kind, consumed))
 }
 
 fn extract_left_right_pair(tail: &str) -> Option<(DelimKind, &str, DelimKind, usize)> {
@@ -1378,63 +1253,6 @@ fn try_parse_matched_delim(rest: &str, open_ch: char, depth: usize) -> Option<(V
         i += ch.len_utf8();
     }
     None
-}
-
-fn lookup_math_escape(name: &str) -> Option<&'static str> {
-    match name {
-        "pm" => Some("\u{00B1}"),
-        "mp" => Some("\u{2213}"),
-        "times" => Some("\u{00D7}"),
-        "div" => Some("\u{00F7}"),
-        "cdot" => Some("\u{00B7}"),
-        "bullet" => Some("\u{2022}"),
-        "le" | "leq" => Some("\u{2264}"),
-        "ge" | "geq" => Some("\u{2265}"),
-        "ne" | "neq" => Some("\u{2260}"),
-        "approx" => Some("\u{2248}"),
-        "equiv" => Some("\u{2261}"),
-        "sim" => Some("\u{223C}"),
-        "propto" => Some("\u{221D}"),
-        "ll" => Some("\u{226A}"),
-        "gg" => Some("\u{226B}"),
-        "infty" => Some("\u{221E}"),
-        "minus" => Some("\u{2212}"),
-        "degree" | "deg" | "textdegree" => Some("\u{00B0}"),
-        "circ" => Some("\u{2218}"),
-        "prime" => Some("\u{2032}"),
-        "dprime" => Some("\u{2033}"),
-        "perthousand" | "permil" => Some("\u{2030}"),
-        "angstrom" | "AA" => Some("\u{00C5}"),
-        "partial" => Some("\u{2202}"),
-        "nabla" => Some("\u{2207}"),
-        "sum" => Some("\u{2211}"),
-        "prod" => Some("\u{220F}"),
-        "int" => Some("\u{222B}"),
-        "sqrt" => Some("\u{221A}"),
-        "to" | "rightarrow" => Some("\u{2192}"),
-        "leftarrow" => Some("\u{2190}"),
-        "leftrightarrow" => Some("\u{2194}"),
-        "uparrow" => Some("\u{2191}"),
-        "downarrow" => Some("\u{2193}"),
-        "therefore" => Some("\u{2234}"),
-        "forall" => Some("\u{2200}"),
-        "exists" => Some("\u{2203}"),
-        "in" => Some("\u{2208}"),
-        "notin" => Some("\u{2209}"),
-        "subset" => Some("\u{2282}"),
-        "subseteq" => Some("\u{2286}"),
-        "cup" => Some("\u{222A}"),
-        "cap" => Some("\u{2229}"),
-        "emptyset" => Some("\u{2205}"),
-        "ldots" | "dots" => Some("\u{2026}"),
-        "ndash" => Some("\u{2013}"),
-        "mdash" => Some("\u{2014}"),
-        "percent" => Some("%"),
-        "textbackslash" => Some("\\"),
-        "textless" => Some("<"),
-        "textgreater" => Some(">"),
-        _ => None,
-    }
 }
 
 // ---------------------------------------------------------------------------

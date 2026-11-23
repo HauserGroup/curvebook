@@ -14,7 +14,6 @@ use crate::{CommandOutcome, EngineError, ErrorCode, Session};
 pub mod effects;
 pub mod helpers;
 pub mod params;
-pub mod spellings;
 
 pub mod analysis;
 pub mod edit;

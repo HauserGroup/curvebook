@@ -599,3 +599,50 @@ fn qol1_mv_to_contingency_and_invalid_count_rejection() {
         assert!(matches!(err, TransformError::Doc(DocError::InvalidCellValue { archetype: TableKind::Contingency, .. })));
     }
 }
+
+#[test]
+fn qol2_cbtemplate_json_float_roundtrip_and_guards() {
+    let exact_floats = [
+        0.0_f64,
+        -0.0_f64,
+        0.1_f64,
+        0.3_f64,
+        1.0 / 3.0,
+        std::f64::consts::PI,
+        std::f64::consts::E,
+        f64::MIN_POSITIVE,
+        f64::from_bits(1), // smallest positive subnormal
+        1e-300_f64,
+        -1.234_567_890_123_456_7e-17_f64,
+        9_007_199_254_740_993.0_f64,
+        f64::MAX,
+        f64::MIN,
+    ];
+    let mut tpl = PlateMapTemplate::new("Float Roundtrip", PlateGeometry::Wells96, "Conc").expect("tpl");
+    for (idx, &val) in exact_floats.iter().enumerate() {
+        tpl.set_well(idx / 12, idx % 12, PlateWellRole::Treatment { group_name: format!("G{idx}"), dilution_x: val, replicate: idx }).expect("set");
+    }
+    let json = tpl.to_cbtemplate_json().expect("serialize");
+    let parsed = PlateMapTemplate::from_cbtemplate_json(&json).expect("deserialize");
+    assert_eq!(parsed, tpl);
+    for (a, b) in parsed.wells.iter().zip(tpl.wells.iter()) {
+        if let (PlateWellRole::Treatment { dilution_x: xa, .. }, PlateWellRole::Treatment { dilution_x: xb, .. }) = (a, b)
+            && *xb != 0.0
+        {
+            assert_eq!(xa.to_bits(), xb.to_bits(), "bit-exact float roundtrip mismatch for {xb}");
+        }
+    }
+
+    // Non-finite float rejected on serialize
+    let mut nan_tpl = PlateMapTemplate::new("NaN", PlateGeometry::Wells96, "X").expect("tpl");
+    nan_tpl.wells[0] = PlateWellRole::Treatment { group_name: String::from("Bad"), dilution_x: f64::NAN, replicate: 0 };
+    assert!(matches!(nan_tpl.to_cbtemplate_json(), Err(TransformError::InvalidInput { .. })));
+
+    // Trailing content rejected
+    let trailing = format!("{json} {{}}");
+    assert!(matches!(PlateMapTemplate::from_cbtemplate_json(&trailing), Err(TransformError::InvalidInput { .. })));
+
+    // Deeply nested JSON rejected cleanly without stack overflow
+    let deep = format!("{}{}", "[".repeat(256), "]".repeat(256));
+    assert!(matches!(PlateMapTemplate::from_cbtemplate_json(&deep), Err(TransformError::InvalidInput { .. })));
+}

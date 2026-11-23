@@ -34,6 +34,7 @@ pub mod links;
 pub mod param_spellings;
 pub mod project;
 pub mod result;
+pub mod result_builder;
 pub mod schema;
 
 pub use analysis::{
@@ -90,6 +91,9 @@ pub use project::{NamedCheckpoint, ProjectDocument, SheetFolderKind};
 pub use result::{
     ChecklistItem, ChecklistStatus, CiBound, CurveSamplePoint, ErrorCategory, ErrorCode, FittedCurveOverlay, PairwiseComparisonRecord,
     RemediationKind, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind,
+};
+pub use result_builder::{
+    KvTabBuilder, TabBuilder, bool_cell, ci_cell, finite_ci_cell, num_cell, opt_ci_cell, opt_num_cell, p_cell, p_cell_at_alpha, text_cell,
 };
 pub use schema::{
     AdditionalProperties, DRAFT_2020_12_SCHEMA_URI, JsonSchema, PROJECT_DOCUMENT_SCHEMA_ID, SchemaLiteral, SchemaNode, SchemaObject, SchemaType,

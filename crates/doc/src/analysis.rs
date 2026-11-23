@@ -31,8 +31,10 @@ const fn default_true() -> bool {
 pub enum MultiplicityMethod {
     /// No post-hoc multiple-comparisons adjustment (unadjusted pairwise comparisons or omnibus test only).
     #[default]
+    #[serde(alias = "none")]
     None,
     /// Tukey's Honestly Significant Difference all-pairwise Studentized range test under pooled MSE (Tukey 1953; Kramer 1956 for unequal sample sizes).
+    #[serde(alias = "tukey", alias = "tukey_hsd")]
     TukeyHsd,
     /// Dunnett's many-to-one test comparing every treatment group against a designated control column under pooled MSE (Dunnett 1955).
     Dunnett {
@@ -40,30 +42,43 @@ pub enum MultiplicityMethod {
         control_column: usize,
     },
     /// Single-step Šídák FWER adjustment `p_adj = 1 - (1 - p)^m` assuming positive orthant dependence / independence (Šídák 1967).
+    #[serde(alias = "sidak")]
     Sidak,
     /// Classical single-step Bonferroni FWER bound `p_adj = min(1, m * p)` valid under arbitrary dependence (Dunn 1961).
+    #[serde(alias = "bonferroni")]
     Bonferroni,
     /// Sequential step-down Holm–Šídák FWER procedure (`1 - (1 - p_(i))^(m - i + 1)` with monotonicity enforcement; Holm 1979; Šídák 1967).
+    #[serde(alias = "holm_sidak")]
     HolmSidak,
     /// Dunnett's T3 all-pairwise Studentized maximum modulus test for unequal variances and small sample sizes using Welch–Satterthwaite *df* (Dunnett 1980).
+    #[serde(alias = "dunnett_t3")]
     DunnettT3,
     /// Games–Howell all-pairwise Studentized range test for heteroscedastic groups with Welch–Satterthwaite *df* (Games & Howell 1976).
+    #[serde(alias = "games_howell")]
     GamesHowell,
     /// Tamhane's T2 conservative all-pairwise Šídák-*t* test for unequal variances using Welch–Satterthwaite *df* (Tamhane 1979).
+    #[serde(alias = "tamhane_t2")]
     TamhaneT2,
     /// Dunn's nonparametric rank-sum post-hoc comparisons following Kruskal–Wallis or Friedman tests with Bonferroni adjustment (Dunn 1964).
+    #[serde(alias = "dunn", alias = "dunn_rank_sum")]
     DunnRankSum,
     /// Orthogonal linear polynomial trend contrast across ordered columns (`1 df` linear slope test; Zar 2010).
+    #[serde(alias = "linear_trend")]
     LinearTrend,
     /// Benjamini–Hochberg linear step-up False Discovery Rate procedure emitting *q*-values (Benjamini & Hochberg 1995).
+    #[serde(alias = "benjamini_hochberg", alias = "bh", alias = "fdr")]
     BenjaminiHochbergFdr,
     /// Benjamini–Yekutieli conservative harmonic-sum FDR procedure valid under arbitrary test dependence (Benjamini & Yekutieli 2001).
+    #[serde(alias = "benjamini_yekutieli", alias = "by")]
     BenjaminiYekutieliFdr,
     /// Two-stage adaptive linear step-up Benjamini–Krieger–Yekutieli FDR procedure estimating `pi_0` (Benjamini, Krieger, & Yekutieli 2006).
+    #[serde(alias = "benjamini_krieger_yekutieli", alias = "bky")]
     TwoStageBkyFdr,
     /// Student–Newman–Keuls stepwise range test (Newman 1939; Keuls 1952; does not strongly control FWER for `> 3` groups and omits simultaneous CIs).
+    #[serde(alias = "newman_keuls", alias = "student_newman_keuls", alias = "snk")]
     NewmanKeuls,
     /// Unadjusted Fisher's Least Significant Difference pairwise *t* comparisons using the omnibus residual MSE and *df* (Fisher 1935).
+    #[serde(alias = "fisher_lsd", alias = "lsd", alias = "uncorrected_fisher_lsd")]
     FisherLsd,
 }
 
@@ -92,26 +107,37 @@ impl Default for MultiplicitySpec {
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum MathTransformPreset {
     /// Natural logarithm `ln(u)` (maps `u <= 0` to empty).
+    #[serde(alias = "ln_y", alias = "ln")]
     Ln,
     /// Base-10 logarithm `log10(u)` (maps `u <= 0` to empty).
+    #[serde(alias = "log10_y", alias = "log10")]
     Log10,
     /// Base-2 logarithm `log2(u)` (maps `u <= 0` to empty).
+    #[serde(alias = "log2_y", alias = "log2")]
     Log2,
     /// Base-10 antilogarithm `10^u`.
+    #[serde(alias = "exp10_y", alias = "exp10", alias = "10_pow_y")]
     Exp10,
     /// Natural exponential `exp(u)`.
+    #[serde(alias = "exp_y", alias = "exp", alias = "e_pow_y")]
     Exp,
     /// Multiplicative inverse `1 / u` (maps `u == 0` to empty).
+    #[serde(alias = "reciprocal_y", alias = "reciprocal", alias = "1/y")]
     Reciprocal,
     /// Principal square root `sqrt(u)` (maps `u < 0` to empty).
+    #[serde(alias = "sqrt")]
     Sqrt,
     /// Quadratic square `u^2`.
+    #[serde(alias = "square")]
     Square,
     /// Unit-proportion log-odds `ln(u / (1 - u))` for `u in (0, 1)`.
+    #[serde(alias = "logit")]
     Logit,
     /// Finney's +5 probit `5 + Phi^{-1}(u)` (inverse standard normal CDF plus 5) for unit proportions `u in (0, 1)`.
+    #[serde(alias = "probit")]
     Probit,
     /// Angular variance-stabilizing Freeman–Tukey / Bliss transform `arcsin(sqrt(u))` in radians for proportions `u in [0, 1]` (Zar 2010).
+    #[serde(alias = "arcsin_sqrt")]
     ArcsinSqrt,
     /// Affine rescaling `slope * u + intercept`.
     LinearScale {
@@ -132,8 +158,10 @@ pub enum MathTransformPreset {
 pub enum ErrorPropagationMode {
     /// Transform `[mean - spread, mean + spread]` endpoints directly through monotone `g` to produce asymmetric `[Lower, Upper]` limits.
     #[default]
+    #[serde(alias = "asymmetric", alias = "replicate_endpoints")]
     ReplicateEndpoints,
     /// First-order Taylor delta-method approximation `SD(g(Y)) ~= |g'(mean)| * SD(Y)`.
+    #[serde(alias = "delta", alias = "delta_method", alias = "first_order_delta")]
     FirstOrderDeltaMethod,
 }
 
@@ -141,14 +169,19 @@ pub enum ErrorPropagationMode {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum NormalizeAnchor {
     /// Minimum active value observed in the series (or across the whole table when `per_data_set == false`).
+    #[serde(alias = "smallest", alias = "min", alias = "column_min", alias = "columnmin")]
     ColumnMin,
     /// Maximum active value observed in the series (or across the whole table when `per_data_set == false`).
+    #[serde(alias = "largest", alias = "max", alias = "column_max", alias = "columnmax")]
     ColumnMax,
     /// Sum of active values in the series (for fraction-of-total scaling when paired with `FixedValue(0.0)`).
+    #[serde(alias = "sum", alias = "column_sum", alias = "columnsum")]
     ColumnSum,
     /// Active value (or replicate mean) in the first non-empty row (`row == 0`).
+    #[serde(alias = "first", alias = "first_row", alias = "firstrow")]
     FirstRow,
     /// Active value (or replicate mean) in the last non-empty row.
+    #[serde(alias = "last", alias = "last_row", alias = "lastrow")]
     LastRow,
     /// Explicit user-entered constant anchor in data units.
     FixedValue(f64),
@@ -165,12 +198,16 @@ pub enum NormalizeAnchor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum BaselineOperation {
     /// Additive subtraction `Y - Baseline`.
+    #[serde(alias = "difference", alias = "subtract")]
     Difference,
     /// Multiplicative fold ratio `Y / Baseline` (maps `Baseline == 0` to empty).
+    #[serde(alias = "ratio", alias = "divide")]
     Ratio,
     /// Percentage change `100 * (Y - Baseline) / Baseline`.
+    #[serde(alias = "percent", alias = "percent_change", alias = "pct_change", alias = "pctchange", alias = "percentchange")]
     PercentChange,
     /// Unitless fractional change `(Y - Baseline) / Baseline`.
+    #[serde(alias = "fraction", alias = "fractional_change", alias = "fractionalchange")]
     FractionalChange,
 }
 
@@ -477,19 +514,26 @@ impl Default for PassingBablokSpec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum PValueStackMethod {
     /// Single-step Bonferroni FWER bound `min(1, m * p)` (Dunn 1961).
+    #[serde(alias = "bonferroni")]
     Bonferroni,
     /// Step-down Holm–Bonferroni FWER procedure `(m - i + 1) * p_(i)` (Holm 1979).
+    #[serde(alias = "holm", alias = "holm_bonferroni", alias = "holm_1979")]
     HolmBonferroni,
     /// Single-step Šídák FWER bound `1 - (1 - p)^m` (Šídák 1967).
+    #[serde(alias = "sidak", alias = "šidák", alias = "šídák", alias = "sidak_1967")]
     Sidak,
     /// Step-down Holm–Šídák FWER procedure `1 - (1 - p_(i))^(m - i + 1)` (Holm 1979; Šídák 1967).
+    #[serde(alias = "holm_sidak", alias = "holm_šidák", alias = "holm_šídák")]
     HolmSidak,
     /// Benjamini–Hochberg linear step-up FDR *q*-values (Benjamini & Hochberg 1995).
     #[default]
+    #[serde(alias = "bh", alias = "benjamini_hochberg", alias = "benjamini_hochberg_fdr", alias = "fdr_bh")]
     BenjaminiHochberg,
     /// Benjamini–Krieger–Yekutieli two-stage adaptive FDR *q*-values (Benjamini, Krieger, & Yekutieli 2006).
+    #[serde(alias = "bky", alias = "two_stage_bky", alias = "two_stage_bky_fdr", alias = "benjamini_krieger_yekutieli", alias = "bky_2006")]
     TwoStageBky,
     /// Benjamini–Yekutieli harmonic-factor FDR *q*-values valid under arbitrary dependence (Benjamini & Yekutieli 2001).
+    #[serde(alias = "by", alias = "benjamini_yekutieli", alias = "benjamini_yekutieli_fdr", alias = "fdr_by")]
     BenjaminiYekutieli,
 }
 
@@ -568,8 +612,10 @@ pub enum OneWayMethod {
 pub enum MixedModelDfMethod {
     /// Small-sample adjusted `Phi_A` covariance and scaled `F*` statistic (Kenward & Roger, 1997).
     #[default]
+    #[serde(alias = "kenward_roger", alias = "kenwardroger", alias = "kr")]
     KenwardRoger,
     /// Satterthwaite moment-matched denominator *df* using unadjusted Wald covariance `Phi` (Fai & Cornelius, 1996).
+    #[serde(alias = "satterthwaite", alias = "sat", alias = "fai_cornelius")]
     Satterthwaite,
 }
 
@@ -611,12 +657,16 @@ pub enum SumOfSquaresType {
 pub enum RepeatedMeasuresDesign {
     /// Completely randomized between-subjects factorial design (all cells hold independent observations).
     #[default]
+    #[serde(alias = "none", alias = "no_matching")]
     None,
     /// Subjects correspond to subcolumns within each column group and are measured repeatedly across row-factor levels.
+    #[serde(alias = "row", alias = "row_factor", alias = "row_factor_matched")]
     RowFactorMatched,
     /// Subjects correspond to `(row, subcol)` slots and are measured repeatedly across column-factor data sets.
+    #[serde(alias = "column", alias = "col", alias = "column_factor", alias = "column_factor_matched")]
     ColumnFactorMatched,
     /// Doubly repeated-measures design where each subcolumn `s` is the same subject measured across every `(row, column)` combination.
+    #[serde(alias = "both", alias = "both_factors", alias = "both_factors_matched")]
     BothFactorsMatched,
 }
 
@@ -625,8 +675,10 @@ pub enum RepeatedMeasuresDesign {
 pub enum ResidualCovariance {
     /// Random-intercept / compound-symmetry covariance with equal variance and correlation across timepoints.
     #[default]
+    #[serde(alias = "compound_symmetry", alias = "compoundsymmetry", alias = "cs", alias = "random_intercept")]
     CompoundSymmetry,
     /// Unstructured positive-definite `t x t` covariance matrix (`t(t + 1) / 2` parameters via Cholesky REML).
+    #[serde(alias = "unstructured", alias = "un", alias = "general")]
     Unstructured,
 }
 
@@ -698,10 +750,13 @@ pub struct NestedAnalysisSpec {
 pub enum KappaWeighting {
     /// Nominal identity weights (`w_{ij} = 1` iff `i == j`, else `0`; Cohen 1960).
     #[default]
+    #[serde(alias = "unweighted", alias = "none")]
     Unweighted,
     /// Cicchetti–Allison linear ordinal disagreement weights `w_{ij} = 1 - |i - j| / (k - 1)` (Cohen 1968).
+    #[serde(alias = "linear")]
     Linear,
     /// Fleiss–Cohen quadratic ordinal disagreement weights `w_{ij} = 1 - ((i - j) / (k - 1))^2` (Fleiss, Cohen, & Everitt 1969).
+    #[serde(alias = "quadratic")]
     Quadratic,
 }
 
@@ -714,14 +769,19 @@ pub enum ContingencyMethod {
         yates_continuity: bool,
     },
     /// Wilks log-likelihood ratio deviance test `G^2 = 2 * sum O * ln(O / E)` on `(r - 1)(c - 1)` *df*.
+    #[serde(alias = "g2", alias = "likelihood_ratio_g2")]
     LikelihoodRatioG2,
     /// Fisher's exact conditional hypergeometric test (two-sided minimum-likelihood sum on `2 × 2` and Freeman–Halton network generalization on `R × C`; Fisher 1935; Freeman & Halton 1951).
+    #[serde(alias = "fisher", alias = "fisher_exact")]
     FisherExact,
     /// Barnard's unconditional exact CSM/Boschloo-style supremum test over nuisance proportion `pi in (0, 1)` on `2 × 2` tables (Barnard 1945).
+    #[serde(alias = "barnard", alias = "barnard_exact")]
     BarnardExact,
     /// Cochran–Armitage `1 df` linear trend test in proportions across ordered columns of a `2 × C` or `R × 2` table (Cochran 1954; Armitage 1955).
+    #[serde(alias = "trend", alias = "chi_square_for_trend", alias = "cochran_armitage", alias = "cochran_armitage_trend")]
     CochranArmitageTrend,
     /// McNemar's paired discordance test on matched `2 × 2` tables with exact binomial and mid-*p* values plus discordant odds ratio `(b / c)` (McNemar 1947).
+    #[serde(alias = "mcnemar", alias = "mcnemar_paired")]
     McNemarPaired,
     /// Two-rater Cohen's kappa inter-rater agreement on square `k × k` tables with asymptotic Fleiss–Cohen–Everitt standard error (Cohen 1960, 1968).
     CohenKappa {
@@ -730,8 +790,10 @@ pub enum ContingencyMethod {
         weighting: KappaWeighting,
     },
     /// Multi-rater Fleiss' kappa across `N` subjects (rows) and `k` categories (columns) with constant or row-sum rater counts (Fleiss 1971).
+    #[serde(alias = "fleiss_kappa")]
     FleissKappa,
     /// Exact two-sided Clopper–Pearson / Sterne one-sample binomial test against [`ContingencySpec::null_proportion`] (Clopper & Pearson 1934).
+    #[serde(alias = "exact_binomial", alias = "binomial")]
     ExactBinomial,
 }
 
@@ -764,11 +826,14 @@ pub struct ContingencySpec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum CoxTieMethod {
     /// Breslow (1974) tied-event partial likelihood approximation (fastest; slightly conservative when tie fractions are heavy).
+    #[serde(alias = "breslow")]
     Breslow,
     /// Efron (1977) tied-event partial likelihood approximation (default; closely matches exact discrete partial likelihood under moderate ties).
     #[default]
+    #[serde(alias = "efron")]
     Efron,
     /// Exact discrete partial likelihood summing over all `C(|R_i|, d_i)` subsets of tied failures (Cox 1972; Kalbfleisch & Prentice 2002).
+    #[serde(alias = "exact")]
     Exact,
 }
 
@@ -834,10 +899,13 @@ pub struct RocSpec {
 pub enum GlmFamily {
     /// Gaussian error with identity link `E[Y | X] = X beta` (ordinary multivariable linear regression via QR/SVD).
     #[default]
+    #[serde(alias = "linear")]
     Linear,
     /// Binomial Bernoulli error (`Y in {0, 1}`) with canonical logit link `ln(p / (1 - p)) = X beta` fitted by IRLS, reporting odds ratios `exp(beta_j)` and Hosmer–Lemeshow / Tjur `R^2` diagnostics.
+    #[serde(alias = "logistic")]
     Logistic,
     /// Poisson count error (`Y in {0, 1, 2, ...}`) with canonical log link `ln(E[Y | X]) = X beta` fitted by IRLS, reporting rate ratios `exp(beta_j)` and Pearson/deviance dispersion diagnostics.
+    #[serde(alias = "poisson")]
     Poisson,
 }
 
@@ -861,12 +929,16 @@ pub struct GlmSpec {
 pub enum ClusterDistance {
     /// L2 Euclidean distance `sqrt(sum_k (x_{ik} - x_{jk})^2)`.
     #[default]
+    #[serde(alias = "euclidean", alias = "l2")]
     Euclidean,
     /// L1 city-block Manhattan distance `sum_k |x_{ik} - x_{jk}|`.
+    #[serde(alias = "manhattan", alias = "l1")]
     Manhattan,
     /// Correlation dissimilarity `1 - r_{ij}` based on Pearson's correlation across features.
+    #[serde(alias = "pearson", alias = "correlation")]
     Pearson,
     /// Angular cosine dissimilarity `1 - (x_i . x_j) / (||x_i||_2 ||x_j||_2)`.
+    #[serde(alias = "cosine")]
     Cosine,
 }
 
@@ -875,18 +947,25 @@ pub enum ClusterDistance {
 pub enum ClusterLinkage {
     /// Ward's minimum within-cluster variance increase (`Delta ESS`; Ward 1963).
     #[default]
+    #[serde(alias = "ward", alias = "ward_d2", alias = "ward.d2")]
     Ward,
     /// Farthest-neighbor maximum pairwise inter-cluster distance.
+    #[serde(alias = "complete")]
     Complete,
     /// Nearest-neighbor minimum pairwise inter-cluster distance.
+    #[serde(alias = "single")]
     Single,
     /// Unweighted Pair Group Method with Arithmetic Mean (`|A| * |B|`-weighted average pairwise distance; Sokal & Michener 1958).
+    #[serde(alias = "upgma", alias = "average")]
     Upgma,
     /// Weighted Pair Group Method with Arithmetic Mean (equal `0.5` weight to each merged branch).
+    #[serde(alias = "wpgma", alias = "weighted_average")]
     Wpgma,
     /// Squared/Euclidean distance between cluster centroids (UPGMC).
+    #[serde(alias = "centroid", alias = "upgmc")]
     Centroid,
     /// Gower's unweighted midpoint centroid linkage (WPGMC; Gower 1967).
+    #[serde(alias = "median", alias = "wpgmc")]
     Median,
 }
 
@@ -999,18 +1078,24 @@ impl Default for LinearRegressionSpec {
 pub enum WeightingScheme {
     /// Uniform weights `w_i = 1` (homoscedastic constant-SD error assumption).
     #[default]
+    #[serde(alias = "none", alias = "unweighted")]
     None,
     /// `1 / Y^2` (constant `%CV` proportional scatter).
+    #[serde(alias = "relative_square", alias = "inverse_y2", alias = "1/y2", alias = "relative_1_y2")]
     RelativeSquare,
     /// `1 / |Y|` (Poisson-like variance proportional to mean response).
+    #[serde(alias = "relative", alias = "inverse_y", alias = "1/y")]
     Relative,
     /// General power-of-*Y* weight `1 / |Y|^k` with caller-supplied exponent `k`.
     GeneralPowerY(f64),
     /// `1 / |X|` weighting inversely proportional to independent variable magnitude.
+    #[serde(alias = "inverse_x", alias = "1/x")]
     InverseX,
     /// `1 / X^2` weighting inversely proportional to squared *X*.
+    #[serde(alias = "inverse_x2", alias = "1/x2")]
     InverseX2,
     /// Empirical replicate variance weighting `1 / SD_i^2` across replicates at each row.
+    #[serde(alias = "observed_sd")]
     ObservedSd,
 }
 
@@ -1019,10 +1104,13 @@ pub enum WeightingScheme {
 pub enum FitMethod {
     /// Ordinary or weighted sum-of-squares minimization via trust-region Levenberg–Marquardt (Moré 1978).
     #[default]
+    #[serde(alias = "ordinary", alias = "ols", alias = "least_squares")]
     LeastSquares,
     /// Exact Poisson log-likelihood deviance minimization `2 * sum (y_i ln(y_i / mu_i) - (y_i - mu_i))` for non-negative count responses `y_i >= 0` and `mu_i > 0` (McCullagh & Nelder 1989).
+    #[serde(alias = "poisson", alias = "poisson_deviance")]
     PoissonDeviance,
     /// Outlier-resistant Lorentzian/Cauchy M-estimator minimizing `sum ln(1 + (r_i / RSDR)^2)` without deleting points (Motulsky & Brown 2006; asymptotic SEs/CIs are intentionally omitted under robust loss).
+    #[serde(alias = "robust", alias = "cauchy")]
     RobustCauchy,
     /// Two-stage ROUT outlier detection (Cauchy robust fit -> RSDR + Benjamini–Hochberg FDR over the furthest 30% of residuals) followed by refitting ordinary/weighted least squares on retained inliers (Motulsky & Brown 2006).
     RoutOutlierElimination {
@@ -1212,20 +1300,28 @@ impl NonlinearFitSpec {
 pub enum PowerTestFamily {
     /// Two-sample unpaired Student/Welch *t*-test via exact noncentral-*t* distribution (`df = n_1 + n_2 - 2`, Cohen's `d`).
     #[default]
+    #[serde(alias = "unpairedt", alias = "twosampleunpairedt", alias = "independentt")]
     TwoSampleUnpairedT,
     /// Paired-differences *t*-test via exact noncentral-*t* distribution (`df = n - 1`, Cohen's `d_z`).
+    #[serde(alias = "pairedt", alias = "twosamplepairedt", alias = "dependentt")]
     TwoSamplePairedT,
     /// One-sample *t*-test via exact noncentral-*t* distribution (`df = n - 1`, Cohen's `d`).
+    #[serde(alias = "onesamplet", alias = "singlesamplet")]
     OneSampleT,
     /// Balanced `k`-group one-way fixed-effects ANOVA via exact noncentral-*F* distribution (`df_1 = k - 1`, `df_2 = k(n - 1)`, Cohen's `f`).
+    #[serde(alias = "onewayanova", alias = "anova")]
     OneWayAnova,
     /// Two independent binomial proportions test (`p_1` vs `p_2`; Fleiss, Levin, & Paik 2003 / Cohen's `h`).
+    #[serde(alias = "twoproportions", alias = "proportions")]
     TwoProportions,
     /// Bivariate Pearson correlation test `H_0: rho = 0` (`r` in `(-1, 1)`).
+    #[serde(alias = "correlation", alias = "pearsoncorrelation")]
     Correlation,
     /// Contingency or goodness-of-fit chi-square test via exact noncentral `chi^2` distribution (`df > 0`, Cohen's `w`).
+    #[serde(alias = "chisquare", alias = "chi2")]
     ChiSquare,
     /// Simple linear regression slope test via exact noncentral-*F* / *t* (`df_1 = 1`, `df_2 = n - 2`, Cohen's `f^2 = R^2 / (1 - R^2)`).
+    #[serde(alias = "simplelinearregression", alias = "linearregression", alias = "regression")]
     SimpleLinearRegression,
 }
 
@@ -1303,10 +1399,13 @@ pub enum PowerTailMode {
 pub enum PowerSolveTarget {
     /// Solve required integer sample size (`n_1` / per-group `n` / total `N`) to achieve `target_power` at `alpha` and `effect`.
     #[default]
+    #[serde(alias = "samplesize", alias = "n")]
     SampleSize,
     /// Evaluate achieved statistical power `1 - beta` in `(0, 1)` given `sample_size`, `alpha`, and `effect`.
+    #[serde(alias = "power")]
     Power,
     /// Solve the minimum detectable effect size given `sample_size`, `alpha`, and `target_power`.
+    #[serde(alias = "detectableeffect", alias = "effect", alias = "mde")]
     DetectableEffect,
 }
 

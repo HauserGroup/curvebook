@@ -7,13 +7,14 @@
 
 use curvebook_doc::ErrorCode;
 use curvebook_engine::cmd::Effects;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::errors::{self, StructuredErrorPayload};
 use crate::formats;
 use crate::tools::{
-    ContentBlock, McpServerState, ToolCallError, ToolCallResult, ToolDefinition, dispatch_gui_backend, optional_bool, optional_non_empty_str,
-    optional_u32_bounded, required_non_empty_str,
+    ContentBlock, McpServerState, ToolCallError, ToolCallResult, ToolDefinition, deserialize_args, dispatch_gui_backend, trim_opt_non_empty,
+    trim_required_non_empty,
 };
 use crate::toolsets::ToolAnnotations;
 
@@ -351,31 +352,105 @@ fn dispatch_json_result(state: &mut McpServerState, method: &str, params: Value)
     }
 }
 
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct MetricsArgs {
+    logical_width: Option<f64>,
+    logical_height: Option<f64>,
+    scale_factor: Option<f64>,
+    width_px: Option<f64>,
+    height_px: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct NormalizedMetrics {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    logical_width: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    logical_height: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scale_factor: Option<f64>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ModifierFlagsObj {
+    shift: Option<bool>,
+    ctrl: Option<bool>,
+    alt: Option<bool>,
+    meta: Option<bool>,
+    cmd: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ModifiersInput {
+    Object(ModifierFlagsObj),
+    List(Vec<String>),
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum TabTargetInput {
+    Index(u64),
+    Label(String),
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum MenuPathInput {
+    Single(String),
+    Segments(Vec<String>),
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct UiInspectArgs {
+    scope: Option<String>,
+    include_bounds: Option<bool>,
+    metrics: Option<MetricsArgs>,
+}
+
 fn handle_ui_inspect(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
-    reject_unknown_args("ui_inspect", args, &["scope", "include_bounds", "metrics"])?;
-    let mut params = Map::new();
-    if let Some(raw_scope) = optional_non_empty_str(args, "scope")? {
-        let scope = raw_scope.to_ascii_lowercase();
-        if !VALID_INSPECT_SCOPES.contains(&scope.as_str()) {
-            return Err(ToolCallError::InvalidParams(format!(
-                "unsupported ui_inspect scope '{raw_scope}'; expected one of: all, workspace, dialog, grid, navigator, canvas, menus, toolbar, tabs"
-            )));
+    let parsed: UiInspectArgs = deserialize_args("ui_inspect", args)?;
+    let scope = match trim_opt_non_empty(parsed.scope, "scope")? {
+        Some(raw) => {
+            let lower = raw.to_ascii_lowercase();
+            if !VALID_INSPECT_SCOPES.contains(&lower.as_str()) {
+                return Err(ToolCallError::InvalidParams(format!(
+                    "unsupported ui_inspect scope '{raw}'; expected one of: all, workspace, dialog, grid, navigator, canvas, menus, toolbar, tabs"
+                )));
+            }
+            Some(lower)
         }
-        params.insert(String::from("scope"), Value::String(scope));
-    }
-    if let Some(include_bounds) = optional_bool(args, "include_bounds")? {
+        None => None,
+    };
+    let metrics = parsed.metrics.map(|m| normalize_metrics(m, "ui_inspect")).transpose()?;
+    let mut params = Map::new();
+    insert_opt_str(&mut params, "scope", scope);
+    if let Some(include_bounds) = parsed.include_bounds {
         params.insert(String::from("include_bounds"), Value::Bool(include_bounds));
     }
-    if let Some(m) = optional_normalized_metrics(args, "ui_inspect")? {
-        params.insert(String::from("metrics"), m);
+    if let Some(m) = metrics {
+        params.insert(String::from("metrics"), serde_json::to_value(m).unwrap_or(Value::Null));
     }
     dispatch_json_result(state, "ui.inspect", Value::Object(params))
 }
 
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct UiScreenshotArgs {
+    target: Option<String>,
+    width_px: Option<u32>,
+    height_px: Option<u32>,
+    dpi: Option<u32>,
+    path: Option<String>,
+}
+
 fn handle_ui_screenshot(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
-    reject_unknown_args("ui_screenshot", args, &["target", "width_px", "height_px", "dpi", "path"])?;
+    let parsed: UiScreenshotArgs = deserialize_args("ui_screenshot", args)?;
     let mut params = Map::new();
-    if let Some(raw_target) = optional_non_empty_str(args, "target")? {
+    if let Some(raw_target) = trim_opt_non_empty(parsed.target, "target")? {
         let target = raw_target.to_ascii_lowercase();
         if !VALID_SCREENSHOT_TARGETS.contains(&target.as_str()) {
             return Err(ToolCallError::InvalidParams(format!(
@@ -384,23 +459,22 @@ fn handle_ui_screenshot(state: &mut McpServerState, args: &Map<String, Value>) -
         }
         params.insert(String::from("target"), Value::String(target));
     }
-    if let Some(width_px) = optional_u32_bounded(args, "width_px", 64, 4096)? {
-        params.insert(String::from("width_px"), json!(width_px));
+    for (key, value, min, max) in [("width_px", parsed.width_px, 64, 4096), ("height_px", parsed.height_px, 64, 4096), ("dpi", parsed.dpi, 72, 600)] {
+        if let Some(v) = value {
+            if v < min || v > max {
+                return Err(ToolCallError::InvalidParams(format!("parameter \"{key}\" must be in [{min}, {max}]")));
+            }
+            params.insert(String::from(key), json!(v));
+        }
     }
-    if let Some(height_px) = optional_u32_bounded(args, "height_px", 64, 4096)? {
-        params.insert(String::from("height_px"), json!(height_px));
-    }
-    if let Some(dpi) = optional_u32_bounded(args, "dpi", 72, 600)? {
-        params.insert(String::from("dpi"), json!(dpi));
-    }
-    if let Some(raw_path) = optional_non_empty_str(args, "path")? {
+    if let Some(raw_path) = trim_opt_non_empty(parsed.path, "path")? {
         if state.is_gui_only() {
             return Ok(errors::result_from_payload(
                 &StructuredErrorPayload::new(
                     ErrorCode::GuiOnlyViolation,
                     "direct filesystem writes via `ui_screenshot` `path` are blocked under --gui-only",
                 )
-                .with_remediation("Omit `path` and inspect the returned in-memory `data_base64` PNG instead."),
+                .with_remediation("Omit `path` and inspect the returned inline `image/png` content block instead."),
             ));
         }
         let resolved = match formats::resolve_mcp_path(state, &raw_path) {
@@ -453,31 +527,34 @@ fn format_screenshot_result(raw: Value) -> Result<ToolCallResult, ToolCallError>
     })
 }
 
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct UiPointerGestureArgs {
+    action: Option<String>,
+    widget_id: Option<String>,
+    target_id: Option<String>,
+    x: Option<f64>,
+    y: Option<f64>,
+    to_widget_id: Option<String>,
+    to_x: Option<f64>,
+    to_y: Option<f64>,
+    modifiers: Option<ModifiersInput>,
+    delta_y: Option<f64>,
+    hover_fraction_x: Option<f64>,
+    hover_n: Option<f64>,
+    metrics: Option<MetricsArgs>,
+}
+
 fn handle_ui_pointer_gesture(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
-    reject_unknown_args(
-        "ui_pointer_gesture",
-        args,
-        &[
-            "action",
-            "widget_id",
-            "target_id",
-            "x",
-            "y",
-            "to_widget_id",
-            "to_x",
-            "to_y",
-            "modifiers",
-            "delta_y",
-            "hover_fraction_x",
-            "hover_n",
-            "metrics",
-        ],
+    let parsed: UiPointerGestureArgs = deserialize_args("ui_pointer_gesture", args)?;
+    let raw_action = trim_required_non_empty(
+        parsed.action.ok_or_else(|| ToolCallError::InvalidParams(String::from("missing or empty string parameter \"action\"")))?,
+        "action",
     )?;
-    let raw_action = required_non_empty_str(args, "action")?;
     let action = normalize_pointer_action(&raw_action)?;
-    let widget_id = optional_non_empty_str(args, "widget_id")?.or(optional_non_empty_str(args, "target_id")?);
-    let x = optional_finite_f64(args, "x")?;
-    let y = optional_finite_f64(args, "y")?;
+    let widget_id = trim_opt_non_empty(parsed.widget_id, "widget_id")?.or(trim_opt_non_empty(parsed.target_id, "target_id")?);
+    let x = check_opt_finite_f64(parsed.x, "x")?;
+    let y = check_opt_finite_f64(parsed.y, "y")?;
     if x.is_some() != y.is_some() {
         return Err(ToolCallError::InvalidParams(String::from("ui_pointer_gesture requires both \"x\" and \"y\" when using coordinates")));
     }
@@ -485,9 +562,9 @@ fn handle_ui_pointer_gesture(state: &mut McpServerState, args: &Map<String, Valu
         return Err(ToolCallError::InvalidParams(String::from("ui_pointer_gesture requires \"widget_id\" or (\"x\", \"y\") coordinates")));
     }
 
-    let to_widget_id = optional_non_empty_str(args, "to_widget_id")?;
-    let to_x = optional_finite_f64(args, "to_x")?;
-    let to_y = optional_finite_f64(args, "to_y")?;
+    let to_widget_id = trim_opt_non_empty(parsed.to_widget_id, "to_widget_id")?;
+    let to_x = check_opt_finite_f64(parsed.to_x, "to_x")?;
+    let to_y = check_opt_finite_f64(parsed.to_y, "to_y")?;
     if to_x.is_some() != to_y.is_some() {
         return Err(ToolCallError::InvalidParams(String::from("ui_pointer_gesture requires both \"to_x\" and \"to_y\" for drag destination")));
     }
@@ -497,11 +574,11 @@ fn handle_ui_pointer_gesture(state: &mut McpServerState, args: &Map<String, Valu
         )));
     }
 
-    let delta_y = optional_finite_f64(args, "delta_y")?;
-    let hover_fraction_x = optional_finite_f64(args, "hover_fraction_x")?;
-    let hover_n = optional_finite_f64(args, "hover_n")?;
-    let metrics = optional_normalized_metrics(args, "ui_pointer_gesture")?;
-    let modifiers = optional_modifiers(args, "modifiers")?;
+    let delta_y = check_opt_finite_f64(parsed.delta_y, "delta_y")?;
+    let hover_fraction_x = check_opt_finite_f64(parsed.hover_fraction_x, "hover_fraction_x")?;
+    let hover_n = check_opt_finite_f64(parsed.hover_n, "hover_n")?;
+    let metrics = parsed.metrics.map(|m| normalize_metrics(m, "ui_pointer_gesture")).transpose()?;
+    let modifiers = parsed.modifiers.map(|m| normalize_modifiers(m, "modifiers")).transpose()?;
 
     let mut params = Map::new();
     params.insert(String::from("action"), Value::String(action.to_owned()));
@@ -515,7 +592,7 @@ fn handle_ui_pointer_gesture(state: &mut McpServerState, args: &Map<String, Valu
     insert_opt_f64(&mut params, "hover_fraction_x", hover_fraction_x);
     insert_opt_f64(&mut params, "hover_n", hover_n);
     if let Some(m) = metrics {
-        params.insert(String::from("metrics"), m);
+        params.insert(String::from("metrics"), serde_json::to_value(m).unwrap_or(Value::Null));
     }
     if let Some(mods) = modifiers {
         params.insert(String::from("modifiers"), mods);
@@ -524,44 +601,70 @@ fn handle_ui_pointer_gesture(state: &mut McpServerState, args: &Map<String, Valu
     dispatch_json_result(state, "ui.pointer_gesture", Value::Object(params))
 }
 
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct UiTypeTextArgs {
+    text: Option<String>,
+    widget_id: Option<String>,
+    clear_existing: Option<bool>,
+    commit_enter: Option<bool>,
+}
+
 fn handle_ui_type_text(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
-    reject_unknown_args("ui_type_text", args, &["text", "widget_id", "clear_existing", "commit_enter"])?;
-    let Some(text) = args.get("text").and_then(Value::as_str) else {
+    let parsed: UiTypeTextArgs = deserialize_args("ui_type_text", args)?;
+    let Some(text) = parsed.text else {
         return Err(ToolCallError::InvalidParams(String::from("ui_type_text requires a string parameter \"text\"")));
     };
     let mut params = Map::new();
-    params.insert(String::from("text"), Value::String(text.to_owned()));
-    insert_opt_str(&mut params, "widget_id", optional_non_empty_str(args, "widget_id")?);
-    if let Some(clear_existing) = optional_bool(args, "clear_existing")? {
+    params.insert(String::from("text"), Value::String(text));
+    insert_opt_str(&mut params, "widget_id", trim_opt_non_empty(parsed.widget_id, "widget_id")?);
+    if let Some(clear_existing) = parsed.clear_existing {
         params.insert(String::from("clear_existing"), Value::Bool(clear_existing));
     }
-    if let Some(commit_enter) = optional_bool(args, "commit_enter")? {
+    if let Some(commit_enter) = parsed.commit_enter {
         params.insert(String::from("commit_enter"), Value::Bool(commit_enter));
     }
     dispatch_json_result(state, "ui.type_text", Value::Object(params))
 }
 
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct UiPressKeyArgs {
+    key: Option<String>,
+    modifiers: Option<ModifiersInput>,
+}
+
 fn handle_ui_press_key(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
-    reject_unknown_args("ui_press_key", args, &["key", "modifiers"])?;
-    let key = required_non_empty_str(args, "key")?;
+    let parsed: UiPressKeyArgs = deserialize_args("ui_press_key", args)?;
+    let key = trim_required_non_empty(
+        parsed.key.ok_or_else(|| ToolCallError::InvalidParams(String::from("missing or empty string parameter \"key\"")))?,
+        "key",
+    )?;
     let mut params = Map::new();
     params.insert(String::from("key"), Value::String(key));
-    if let Some(mods) = optional_modifiers(args, "modifiers")? {
+    if let Some(mods) = parsed.modifiers.map(|m| normalize_modifiers(m, "modifiers")).transpose()? {
         params.insert(String::from("modifiers"), mods);
     }
     dispatch_json_result(state, "ui.press_key", Value::Object(params))
 }
 
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct UiInvokeMenuArgs {
+    path: Option<MenuPathInput>,
+    command_id: Option<String>,
+    params: Option<Map<String, Value>>,
+}
+
 fn handle_ui_invoke_menu(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
-    reject_unknown_args("ui_invoke_menu", args, &["path", "command_id", "params"])?;
-    let path = optional_menu_path(args, "path")?;
-    let command_id = optional_non_empty_str(args, "command_id")?;
-    let extra_params = optional_object(args, "params")?;
+    let parsed: UiInvokeMenuArgs = deserialize_args("ui_invoke_menu", args)?;
+    let path = parsed.path.map(|p| normalize_menu_path_input(p, "path")).transpose()?;
+    let command_id = trim_opt_non_empty(parsed.command_id, "command_id")?;
     if path.is_none() && command_id.is_none() {
         return Err(ToolCallError::InvalidParams(String::from("ui_invoke_menu requires \"path\" or \"command_id\"")));
     }
 
-    let mut extra = extra_params.unwrap_or_else(|| json!({}));
+    let mut extra = parsed.params.map_or_else(|| json!({}), Value::Object);
     if let Err(err) = formats::sanitize_command_params(state, &mut extra) {
         return Ok(errors::result_from_engine_error(&err));
     }
@@ -587,11 +690,21 @@ fn handle_ui_invoke_menu(state: &mut McpServerState, args: &Map<String, Value>) 
     dispatch_json_result(state, "ui.invoke_menu", Value::Object(params))
 }
 
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct UiSwitchTabArgs {
+    tab: Option<TabTargetInput>,
+    tab_id: Option<TabTargetInput>,
+    sheet_id: Option<String>,
+    widget_id: Option<String>,
+}
+
 fn handle_ui_switch_tab(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
-    reject_unknown_args("ui_switch_tab", args, &["tab", "tab_id", "sheet_id", "widget_id"])?;
-    let tab = optional_tab_target(args, "tab")?.or(optional_tab_target(args, "tab_id")?);
-    let sheet_id = optional_non_empty_str(args, "sheet_id")?;
-    let widget_id = optional_non_empty_str(args, "widget_id")?;
+    let parsed: UiSwitchTabArgs = deserialize_args("ui_switch_tab", args)?;
+    let tab =
+        parsed.tab.map(|t| normalize_tab_target(t, "tab")).transpose()?.or(parsed.tab_id.map(|t| normalize_tab_target(t, "tab_id")).transpose()?);
+    let sheet_id = trim_opt_non_empty(parsed.sheet_id, "sheet_id")?;
+    let widget_id = trim_opt_non_empty(parsed.widget_id, "widget_id")?;
     if tab.is_none() && sheet_id.is_none() && widget_id.is_none() {
         return Err(ToolCallError::InvalidParams(String::from("ui_switch_tab requires \"tab\" (or \"tab_id\"), \"sheet_id\", or \"widget_id\"")));
     }
@@ -605,14 +718,24 @@ fn handle_ui_switch_tab(state: &mut McpServerState, args: &Map<String, Value>) -
     dispatch_json_result(state, "ui.switch_tab", Value::Object(params))
 }
 
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct UiAnswerDialogArgs {
+    action: Option<String>,
+    fields: Option<Map<String, Value>>,
+    values: Option<Map<String, Value>>,
+    patches: Option<Map<String, Value>>,
+    force_create_new: Option<bool>,
+    choice: Option<String>,
+}
+
 fn handle_ui_answer_dialog(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
-    reject_unknown_args("ui_answer_dialog", args, &["action", "fields", "values", "patches", "force_create_new", "choice"])?;
-    let action = optional_non_empty_str(args, "action")?;
-    let fields = optional_object(args, "fields")?;
-    let values = optional_object(args, "values")?;
-    let patches = optional_object(args, "patches")?;
-    let force_create_new = optional_bool(args, "force_create_new")?;
-    let choice = optional_non_empty_str(args, "choice")?;
+    let parsed: UiAnswerDialogArgs = deserialize_args("ui_answer_dialog", args)?;
+    let action = trim_opt_non_empty(parsed.action, "action")?;
+    let fields = parsed.fields.map(Value::Object);
+    let values = parsed.values.map(Value::Object);
+    let patches = parsed.patches.map(Value::Object);
+    let choice = trim_opt_non_empty(parsed.choice, "choice")?;
     if action.is_none() && fields.is_none() && values.is_none() && patches.is_none() && choice.is_none() {
         return Err(ToolCallError::InvalidParams(String::from(
             "ui_answer_dialog requires \"action\", \"fields\", \"values\", \"patches\", or \"choice\"",
@@ -630,7 +753,7 @@ fn handle_ui_answer_dialog(state: &mut McpServerState, args: &Map<String, Value>
     let mut params = Map::new();
     insert_opt_str(&mut params, "action", action);
     insert_opt_str(&mut params, "choice", choice);
-    if let Some(force) = force_create_new {
+    if let Some(force) = parsed.force_create_new {
         params.insert(String::from("force_create_new"), Value::Bool(force));
     }
     if let Some(f) = fields {
@@ -659,15 +782,9 @@ fn normalize_pointer_action(raw: &str) -> Result<&'static str, ToolCallError> {
     }
 }
 
-fn optional_finite_f64(args: &Map<String, Value>, key: &str) -> Result<Option<f64>, ToolCallError> {
-    let Some(val) = args.get(key) else {
+fn check_opt_finite_f64(value: Option<f64>, key: &str) -> Result<Option<f64>, ToolCallError> {
+    let Some(num) = value else {
         return Ok(None);
-    };
-    if val.is_null() {
-        return Ok(None);
-    }
-    let Some(num) = val.as_f64() else {
-        return Err(ToolCallError::InvalidParams(format!("parameter \"{key}\" must be a number")));
     };
     if !num.is_finite() {
         return Err(ToolCallError::InvalidParams(format!("parameter \"{key}\" must be a finite number")));
@@ -675,105 +792,8 @@ fn optional_finite_f64(args: &Map<String, Value>, key: &str) -> Result<Option<f6
     Ok(Some(num))
 }
 
-fn optional_tab_target(args: &Map<String, Value>, key: &str) -> Result<Option<Value>, ToolCallError> {
-    let Some(val) = args.get(key) else {
-        return Ok(None);
-    };
-    if val.is_null() {
-        return Ok(None);
-    }
-    if let Some(idx) = val.as_u64() {
-        return Ok(Some(json!(idx)));
-    }
-    if let Some(s) = val.as_str() {
-        let trimmed = s.trim();
-        if trimmed.is_empty() {
-            return Err(ToolCallError::InvalidParams(format!("parameter \"{key}\" must not be blank")));
-        }
-        return Ok(Some(Value::String(trimmed.to_owned())));
-    }
-    Err(ToolCallError::InvalidParams(format!("parameter \"{key}\" must be a non-empty string or non-negative integer")))
-}
-
-fn optional_object(args: &Map<String, Value>, key: &str) -> Result<Option<Value>, ToolCallError> {
-    let Some(val) = args.get(key) else {
-        return Ok(None);
-    };
-    if val.is_null() {
-        return Ok(None);
-    }
-    if !val.is_object() {
-        return Err(ToolCallError::InvalidParams(format!("parameter \"{key}\" must be a JSON object")));
-    }
-    Ok(Some(val.clone()))
-}
-
-fn optional_menu_path(args: &Map<String, Value>, key: &str) -> Result<Option<Value>, ToolCallError> {
-    let Some(val) = args.get(key) else {
-        return Ok(None);
-    };
-    if val.is_null() {
-        return Ok(None);
-    }
-    if let Some(s) = val.as_str() {
-        let trimmed = s.trim();
-        if trimmed.is_empty() {
-            return Err(ToolCallError::InvalidParams(format!("parameter \"{key}\" must not be blank")));
-        }
-        return Ok(Some(Value::String(trimmed.to_owned())));
-    }
-    if let Some(items) = val.as_array() {
-        if items.is_empty() {
-            return Err(ToolCallError::InvalidParams(format!("parameter \"{key}\" array must not be empty")));
-        }
-        let mut segments = Vec::with_capacity(items.len());
-        for (idx, item) in items.iter().enumerate() {
-            let seg = item
-                .as_str()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| ToolCallError::InvalidParams(format!("{key}[{idx}] must be a non-empty string")))?;
-            segments.push(Value::String(seg.to_owned()));
-        }
-        return Ok(Some(Value::Array(segments)));
-    }
-    Err(ToolCallError::InvalidParams(format!("parameter \"{key}\" must be a string or non-empty string array")))
-}
-
-fn optional_modifiers(args: &Map<String, Value>, key: &str) -> Result<Option<Value>, ToolCallError> {
-    let Some(val) = args.get(key) else {
-        return Ok(None);
-    };
-    if val.is_null() {
-        return Ok(None);
-    }
-    let (mut shift, mut ctrl, mut alt, mut meta) = (false, false, false, false);
-    if let Some(obj) = val.as_object() {
-        reject_unknown_args("modifiers", obj, &["shift", "ctrl", "alt", "meta", "cmd"])?;
-        shift = optional_bool(obj, "shift")?.unwrap_or(false);
-        ctrl = optional_bool(obj, "ctrl")?.unwrap_or(false);
-        alt = optional_bool(obj, "alt")?.unwrap_or(false);
-        meta = optional_bool(obj, "meta")?.unwrap_or(false) || optional_bool(obj, "cmd")?.unwrap_or(false);
-        return Ok(Some(json!({ "shift": shift, "ctrl": ctrl, "alt": alt, "meta": meta })));
-    }
-    if let Some(arr) = val.as_array() {
-        for (idx, item) in arr.iter().enumerate() {
-            let flag = item.as_str().ok_or_else(|| ToolCallError::InvalidParams(format!("{key}[{idx}] must be a string modifier name")))?;
-            match flag.trim().to_ascii_lowercase().as_str() {
-                "shift" => shift = true,
-                "ctrl" | "control" => ctrl = true,
-                "alt" | "option" => alt = true,
-                "meta" | "cmd" | "command" | "super" => meta = true,
-                other => return Err(ToolCallError::InvalidParams(format!("unknown modifier flag '{other}' in {key}[{idx}]"))),
-            }
-        }
-        return Ok(Some(json!({ "shift": shift, "ctrl": ctrl, "alt": alt, "meta": meta })));
-    }
-    Err(ToolCallError::InvalidParams(format!("parameter \"{key}\" must be an object or string array")))
-}
-
-fn optional_positive_finite_f64(args: &Map<String, Value>, key: &str, context: &str) -> Result<Option<f64>, ToolCallError> {
-    let Some(num) = optional_finite_f64(args, key)? else {
+fn check_positive_finite_f64(value: Option<f64>, key: &str, context: &str) -> Result<Option<f64>, ToolCallError> {
+    let Some(num) = check_opt_finite_f64(value, key)? else {
         return Ok(None);
     };
     if num <= 0.0 {
@@ -782,9 +802,66 @@ fn optional_positive_finite_f64(args: &Map<String, Value>, key: &str, context: &
     Ok(Some(num))
 }
 
-fn resolve_metric_dimension(obj: &Map<String, Value>, canonical_key: &str, alias_key: &str, context: &str) -> Result<Option<f64>, ToolCallError> {
-    let canonical = optional_positive_finite_f64(obj, canonical_key, context)?;
-    let alias = optional_positive_finite_f64(obj, alias_key, context)?;
+fn normalize_tab_target(input: TabTargetInput, key: &str) -> Result<Value, ToolCallError> {
+    match input {
+        TabTargetInput::Index(idx) => Ok(json!(idx)),
+        TabTargetInput::Label(s) => Ok(Value::String(trim_required_non_empty(s, key)?)),
+    }
+}
+
+fn normalize_menu_path_input(input: MenuPathInput, key: &str) -> Result<Value, ToolCallError> {
+    match input {
+        MenuPathInput::Single(s) => Ok(Value::String(trim_required_non_empty(s, key)?)),
+        MenuPathInput::Segments(items) => {
+            if items.is_empty() {
+                return Err(ToolCallError::InvalidParams(format!("parameter \"{key}\" array must not be empty")));
+            }
+            let mut segments = Vec::with_capacity(items.len());
+            for (idx, item) in items.into_iter().enumerate() {
+                let trimmed = item.trim();
+                if trimmed.is_empty() {
+                    return Err(ToolCallError::InvalidParams(format!("{key}[{idx}] must be a non-empty string")));
+                }
+                segments.push(Value::String(trimmed.to_owned()));
+            }
+            Ok(Value::Array(segments))
+        }
+    }
+}
+
+fn normalize_modifiers(input: ModifiersInput, key: &str) -> Result<Value, ToolCallError> {
+    let (mut shift, mut ctrl, mut alt, mut meta) = (false, false, false, false);
+    match input {
+        ModifiersInput::Object(obj) => {
+            shift = obj.shift.unwrap_or(false);
+            ctrl = obj.ctrl.unwrap_or(false);
+            alt = obj.alt.unwrap_or(false);
+            meta = obj.meta.unwrap_or(false) || obj.cmd.unwrap_or(false);
+        }
+        ModifiersInput::List(items) => {
+            for (idx, flag) in items.into_iter().enumerate() {
+                match flag.trim().to_ascii_lowercase().as_str() {
+                    "shift" => shift = true,
+                    "ctrl" | "control" => ctrl = true,
+                    "alt" | "option" => alt = true,
+                    "meta" | "cmd" | "command" | "super" => meta = true,
+                    other => return Err(ToolCallError::InvalidParams(format!("unknown modifier flag '{other}' in {key}[{idx}]"))),
+                }
+            }
+        }
+    }
+    Ok(json!({ "shift": shift, "ctrl": ctrl, "alt": alt, "meta": meta }))
+}
+
+fn resolve_metric_dimension(
+    canonical: Option<f64>,
+    alias: Option<f64>,
+    canonical_key: &str,
+    alias_key: &str,
+    context: &str,
+) -> Result<Option<f64>, ToolCallError> {
+    let canonical = check_positive_finite_f64(canonical, canonical_key, context)?;
+    let alias = check_positive_finite_f64(alias, alias_key, context)?;
     match (canonical, alias) {
         (Some(c), Some(a)) if (c - a).abs() > 1e-9 => {
             Err(ToolCallError::InvalidParams(format!("{context} cannot specify conflicting \"{canonical_key}\" ({c}) and \"{alias_key}\" ({a})")))
@@ -795,39 +872,17 @@ fn resolve_metric_dimension(obj: &Map<String, Value>, canonical_key: &str, alias
     }
 }
 
-fn optional_normalized_metrics(args: &Map<String, Value>, tool_name: &str) -> Result<Option<Value>, ToolCallError> {
-    let Some(val) = args.get("metrics") else {
-        return Ok(None);
-    };
-    if val.is_null() {
-        return Ok(None);
-    }
-    let Some(obj) = val.as_object() else {
-        return Err(ToolCallError::InvalidParams(String::from("parameter \"metrics\" must be a JSON object")));
-    };
+fn normalize_metrics(raw: MetricsArgs, tool_name: &str) -> Result<NormalizedMetrics, ToolCallError> {
     let context = format!("{tool_name}.metrics");
-    reject_unknown_args(&context, obj, &["logical_width", "logical_height", "scale_factor", "width_px", "height_px"])?;
-
-    let logical_width = resolve_metric_dimension(obj, "logical_width", "width_px", &context)?;
-    let logical_height = resolve_metric_dimension(obj, "logical_height", "height_px", &context)?;
-    let scale_factor = optional_positive_finite_f64(obj, "scale_factor", &context)?;
+    let logical_width = resolve_metric_dimension(raw.logical_width, raw.width_px, "logical_width", "width_px", &context)?;
+    let logical_height = resolve_metric_dimension(raw.logical_height, raw.height_px, "logical_height", "height_px", &context)?;
+    let scale_factor = check_positive_finite_f64(raw.scale_factor, "scale_factor", &context)?;
     if logical_width.is_none() && logical_height.is_none() && scale_factor.is_none() {
         return Err(ToolCallError::InvalidParams(format!(
             "{tool_name} \"metrics\" must specify at least one of logical_width, logical_height, or scale_factor"
         )));
     }
-
-    let mut normalized = Map::new();
-    if let Some(w) = logical_width {
-        normalized.insert(String::from("logical_width"), json!(w));
-    }
-    if let Some(h) = logical_height {
-        normalized.insert(String::from("logical_height"), json!(h));
-    }
-    if let Some(s) = scale_factor {
-        normalized.insert(String::from("scale_factor"), json!(s));
-    }
-    Ok(Some(Value::Object(normalized)))
+    Ok(NormalizedMetrics { logical_width, logical_height, scale_factor })
 }
 
 fn insert_opt_str(map: &mut Map<String, Value>, key: &str, value: Option<String>) {

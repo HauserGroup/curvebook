@@ -25,7 +25,7 @@ use crate::modal_predicates::{
 };
 
 use super::widgets::{dropdown, paint_icon_button_named};
-use super::{FrameInspectEntryInput, FrameInspectMeta, FrameInspectNodeMeta, PendingUiIntents, Tokens};
+use super::{FrameInspectEntryInput, FrameInspectMeta, FrameInspectNodeMeta, PendingUiIntents, Tokens, UiIntent};
 
 /// Five parameter tabs defined for the standardized One-Way ANOVA modal (`gui-layout-spec.md` §8.8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -628,13 +628,8 @@ fn render_modal_tab_strip(
 
             let display_prefix = if enablement.enabled { "" } else { "🔒 " };
             let text_max_w = (rect.width() - 8.0).max(16.0);
-            let mut job = egui::text::LayoutJob::single_section(
-                format!("{display_prefix}{full_label}"),
-                egui::TextFormat::simple(FontId::proportional(11.5), fg),
-            );
-            job.wrap = egui::text::TextWrapping { max_width: text_max_w, max_rows: 1, break_anywhere: false, overflow_character: Some('…') };
-            let galley = ui.painter().layout_job(job);
-            let ellipsized = galley.elided;
+            let tab_text = format!("{display_prefix}{full_label}");
+            let (galley, ellipsized) = super::ui_kit::elided_galley(ui.painter(), &tab_text, FontId::proportional(11.5), fg, text_max_w, false);
             let text_pos = Pos2::new(rect.center().x - (galley.size().x * 0.5).min(text_max_w * 0.5), rect.center().y - galley.size().y * 0.5);
             ui.painter().with_clip_rect(rect.shrink(3.0)).galley(text_pos, galley, fg);
 
@@ -757,12 +752,12 @@ fn render_design_controls_left(
     render_section_title(ui, rc.tokens, tr(rc.locale, "stat_params.section.datasets"));
     let gauss_lbl = tr(rc.locale, "stat_params.label.assume_gaussian");
     if render_modal_checkbox(ui, rc.tokens, meta, "edit.assume_gaussian", gauss_lbl, rc.ep.assume_gaussian, assume_en) {
-        intents.push_dialog_widget_click("edit.assume_gaussian");
+        intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("edit.assume_gaussian") });
     }
 
     let paired_lbl = tr(rc.locale, "stat_params.label.paired_matched");
     if render_modal_checkbox(ui, rc.tokens, meta, "edit.paired_or_matched", paired_lbl, rc.ep.paired_or_matched, paired_en) {
-        intents.push_dialog_widget_click("edit.paired_or_matched");
+        intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("edit.paired_or_matched") });
     }
 
     ui.add_space(4.0);
@@ -831,7 +826,7 @@ fn render_design_controls_left(
         rc.anova.multiplicity.method == MultiplicityMethod::TukeyHsd,
         &tukey_en,
     ) {
-        intents.push_dialog_widget_click("edit.post_hoc.tukey");
+        intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("edit.post_hoc.tukey") });
     }
 
     let dunn_en = r1b_post_hoc_option_enabled(rc.ep.assume_gaussian, reml_active, MultiplicityMethod::DunnRankSum);
@@ -844,7 +839,7 @@ fn render_design_controls_left(
         rc.anova.multiplicity.method == MultiplicityMethod::DunnRankSum,
         &dunn_en,
     ) {
-        intents.push_dialog_widget_click("edit.post_hoc.dunn");
+        intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("edit.post_hoc.dunn") });
     }
 
     render_alpha_stepper(ui, rc, meta, intents);
@@ -891,13 +886,14 @@ fn draw_experimental_design_schematic(
     } else {
         tr(rc.locale, "anova.schematic.independent")
     };
-    let mut job = egui::text::LayoutJob::single_section(
-        caption.to_owned(),
-        egui::TextFormat::simple(FontId::proportional(rc.tokens.metrics.font_ui_small_pt), rc.tokens.text_muted),
+    let (cap_galley, _) = super::ui_kit::elided_galley(
+        ui.painter(),
+        caption,
+        FontId::proportional(rc.tokens.metrics.font_ui_small_pt),
+        rc.tokens.text_muted,
+        (rect.width() - 16.0).max(40.0),
+        false,
     );
-    job.wrap =
-        egui::text::TextWrapping { max_width: (rect.width() - 16.0).max(40.0), max_rows: 1, break_anywhere: false, overflow_character: Some('…') };
-    let cap_galley = ui.painter().layout_job(job);
     ui.painter().with_clip_rect(rect.shrink(4.0)).galley(Pos2::new(rect.left() + 8.0, rect.top() + 5.0), cap_galley, rc.tokens.text_muted);
 
     let plot = Rect::from_min_max(Pos2::new(rect.left() + 14.0, rect.top() + 26.0), Pos2::new(rect.right() - 14.0, rect.bottom() - 10.0));
@@ -976,7 +972,7 @@ fn render_tab_repeated_measures(ui: &mut Ui, rc: TabRenderCtx<'_>, meta: &mut Fr
         gg_checked,
         &sph_en,
     ) {
-        intents.push_dialog_widget_click("edit.sphericity.geisser_greenhouse");
+        intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("edit.sphericity.geisser_greenhouse") });
     }
     if render_modal_radio(ui, rc.tokens, meta, "edit.rm.assume_sphericity", "Assume sphericity (unadjusted df)", !gg_checked && !reml_active, &sph_en)
         && gg_checked
@@ -992,7 +988,7 @@ fn render_tab_repeated_measures(ui: &mut Ui, rc: TabRenderCtx<'_>, meta: &mut Fr
         rc.anova.mixed_effects_reml,
         &reml_en,
     ) {
-        intents.push_dialog_widget_click("edit.rm.mixed_effects_reml");
+        intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("edit.rm.mixed_effects_reml") });
     }
 
     ui.add_space(4.0);
@@ -1006,7 +1002,7 @@ fn render_tab_repeated_measures(ui: &mut Ui, rc: TabRenderCtx<'_>, meta: &mut Fr
             rc.anova.df_method == MixedModelDfMethod::KenwardRoger,
             &reml_en,
         ) {
-            intents.push_dialog_widget_click("edit.rm.df_kenward_roger");
+            intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("edit.rm.df_kenward_roger") });
         }
         if render_modal_seg_btn(
             ui,
@@ -1017,7 +1013,7 @@ fn render_tab_repeated_measures(ui: &mut Ui, rc: TabRenderCtx<'_>, meta: &mut Fr
             rc.anova.df_method == MixedModelDfMethod::Satterthwaite,
             &reml_en,
         ) {
-            intents.push_dialog_widget_click("edit.rm.df_satterthwaite");
+            intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("edit.rm.df_satterthwaite") });
         }
     });
 
@@ -1090,7 +1086,7 @@ fn render_tab_multiple_comparisons(ui: &mut Ui, rc: TabRenderCtx<'_>, meta: &mut
         mult.method == MultiplicityMethod::TukeyHsd,
         &gate(MultiplicityMethod::TukeyHsd),
     ) {
-        intents.push_dialog_widget_click("edit.post_hoc.tukey");
+        intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("edit.post_hoc.tukey") });
     }
     if render_modal_radio(
         ui,
@@ -1101,7 +1097,7 @@ fn render_tab_multiple_comparisons(ui: &mut Ui, rc: TabRenderCtx<'_>, meta: &mut
         matches!(mult.method, MultiplicityMethod::Dunnett { .. }),
         &gate(MultiplicityMethod::Dunnett { control_column: rc.ep.control_column }),
     ) {
-        intents.push_dialog_widget_click("edit.post_hoc.dunnett");
+        intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("edit.post_hoc.dunnett") });
     }
     if render_modal_radio(
         ui,
@@ -1112,7 +1108,7 @@ fn render_tab_multiple_comparisons(ui: &mut Ui, rc: TabRenderCtx<'_>, meta: &mut
         mult.method == MultiplicityMethod::DunnRankSum,
         &gate(MultiplicityMethod::DunnRankSum),
     ) {
-        intents.push_dialog_widget_click("edit.post_hoc.dunn");
+        intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("edit.post_hoc.dunn") });
     }
 
     ui.add_space(4.0);
@@ -1260,7 +1256,7 @@ fn render_tab_options(
         gg_checked,
         &sph_en,
     ) {
-        intents.push_dialog_widget_click("edit.sphericity.geisser_greenhouse");
+        intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("edit.sphericity.geisser_greenhouse") });
     }
 
     ui.add_space(6.0);
@@ -1594,65 +1590,40 @@ fn render_modal_footer(
 }
 
 pub(super) fn render_footer_button(ui: &mut Ui, tokens: &Tokens, meta: &mut FrameInspectMeta, spec: FooterBtnSpec<'_>) -> bool {
-    let FooterBtnSpec { widget_id, label, primary, selected, enabled } = spec;
-    let min_w: f32 = if primary { 96.0 } else { 68.0 };
+    let min_w: f32 = if spec.primary { 96.0 } else { 68.0 };
     let max_w = (ui.available_width() - 4.0).max(48.0);
-    let fg_text = if !enabled {
-        tokens.text_disabled
-    } else if primary {
-        tokens.on_accent
-    } else {
-        tokens.text_strong
-    };
-    let mut job = egui::text::LayoutJob::single_section(label.to_owned(), egui::TextFormat::simple(FontId::proportional(12.0), fg_text));
-    job.wrap = egui::text::TextWrapping { max_width: (max_w - 16.0).max(24.0), max_rows: 1, break_anywhere: false, overflow_character: Some('…') };
-    let galley = ui.painter().layout_job(job);
-    let ellipsized = galley.elided;
-    let w = (galley.size().x + 18.0).clamp(min_w.min(max_w), max_w);
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 26.0), if enabled { Sense::click() } else { Sense::hover() });
-
-    let (bg, fg, border) = if !enabled {
-        (tokens.panel_bg, tokens.text_disabled, tokens.divider)
-    } else if primary {
-        (
-            if resp.hovered() { tokens.accent_hover } else { tokens.accent_strong },
-            tokens.on_accent,
-            if resp.hovered() { tokens.hover_border } else { tokens.accent_strong },
-        )
-    } else if selected {
-        (tokens.active_bg, tokens.text_strong, tokens.accent)
-    } else if resp.hovered() {
-        (tokens.hover_bg, tokens.text_strong, tokens.hover_border)
-    } else {
-        (tokens.button_bg, tokens.text_strong, tokens.button_border)
-    };
-    let r = CornerRadius::same(tokens.metrics.radius_md);
-    ui.painter().rect_filled(rect, r, bg);
-    ui.painter().rect_stroke(rect, r, Stroke::new(1.0, border), StrokeKind::Inside);
-
-    let text_pos = Pos2::new(rect.center().x - galley.size().x * 0.5, rect.center().y - galley.size().y * 0.5);
-    ui.painter().with_clip_rect(rect.shrink(3.0)).galley(text_pos, galley, fg);
-
-    let a11y_label = label.to_owned();
-    resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, enabled, a11y_label.clone()));
-    let resp = if ellipsized { resp.on_hover_text(label) } else { resp };
-
-    record_widget(
+    let (_, clicked) = crate::egui_shell::ui_kit::styled_button(
         ui,
+        tokens,
         meta,
-        &resp,
-        widget_id,
-        "button",
-        label,
-        None,
-        None,
-        enabled,
-        None,
-        ZLayer::ModalDialog,
-        ellipsized,
-        ellipsized.then_some(label),
+        crate::egui_shell::ui_kit::StyledButtonSpec {
+            widget_id: spec.widget_id,
+            role: "button",
+            a11y_role: egui::Role::Button,
+            a11y_selectable: false,
+            label: spec.label,
+            tooltip: None,
+            command_id: None,
+            width: crate::egui_shell::ui_kit::ButtonWidth::FitText { min_w, max_w, pad_x: 18.0 },
+            height: 26.0,
+            font_size: 12.0,
+            radius: tokens.metrics.radius_md,
+            text_align: crate::egui_shell::ui_kit::ButtonTextAlign::Center,
+            break_anywhere: false,
+            primary: spec.primary,
+            selected: spec.selected,
+            enabled: spec.enabled,
+            accent_text_when_selected: false,
+            border_override: None,
+            value: None,
+            disabled_reason: None,
+            z_layer: ZLayer::ModalDialog,
+            skip_offscreen: false,
+            clip_interact_to_viewport: false,
+            tooltip_mode: crate::egui_shell::ui_kit::TooltipMode::Standard,
+        },
     );
-    enabled && resp.clicked()
+    clicked
 }
 
 fn render_multiplicity_dropdown(
@@ -1766,11 +1737,7 @@ pub(super) fn render_stepper_row(ui: &mut Ui, tokens: &Tokens, meta: &mut FrameI
         let (val_rect, val_resp) = ui.allocate_exact_size(Vec2::new(val_w, 22.0), Sense::hover());
         ui.painter().rect_filled(val_rect, CornerRadius::same(tokens.metrics.radius_sm), tokens.input_bg);
         ui.painter().rect_stroke(val_rect, CornerRadius::same(tokens.metrics.radius_sm), Stroke::new(1.0, tokens.divider), StrokeKind::Inside);
-        let mut job = egui::text::LayoutJob::single_section(spec.value_text.to_owned(), egui::TextFormat::simple(val_font, text_col));
-        job.wrap =
-            egui::text::TextWrapping { max_width: (val_w - 6.0).max(16.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
-        let galley = ui.painter().layout_job(job);
-        let ellipsized = galley.elided;
+        let (galley, ellipsized) = super::ui_kit::elided_galley(ui.painter(), spec.value_text, val_font, text_col, (val_w - 6.0).max(16.0), true);
         let text_pos = Pos2::new(val_rect.center().x - galley.size().x * 0.5, val_rect.center().y - galley.size().y * 0.5);
         ui.painter().with_clip_rect(val_rect.shrink(2.0)).galley(text_pos, galley, text_col);
         let val_name = format!("{}: {}", spec.label, spec.value_text);
@@ -1805,12 +1772,15 @@ pub(super) fn render_stepper_row(ui: &mut Ui, tokens: &Tokens, meta: &mut FrameI
 }
 
 pub(super) fn render_section_title(ui: &mut Ui, tokens: &Tokens, title: &str) {
-    let mut job = egui::text::LayoutJob::single_section(title.to_owned(), egui::TextFormat::simple(FontId::proportional(11.5), tokens.text_muted));
-    job.wrap =
-        egui::text::TextWrapping { max_width: ui.available_width().max(40.0), max_rows: 1, break_anywhere: false, overflow_character: Some('…') };
-    let galley = ui.painter().layout_job(job);
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width().max(40.0), 18.0), Sense::hover());
-    ui.painter().with_clip_rect(rect).galley(Pos2::new(rect.left(), rect.center().y - galley.size().y * 0.5), galley, tokens.text_muted);
+    crate::egui_shell::ui_kit::plain_clipped_label(
+        ui,
+        title,
+        ui.available_width().max(40.0),
+        18.0,
+        FontId::proportional(11.5),
+        tokens.text_muted,
+        false,
+    );
 }
 
 pub(super) struct ClippedTextSpec<'a> {
@@ -1825,43 +1795,26 @@ pub(super) struct ClippedTextSpec<'a> {
 }
 
 pub(super) fn render_clipped_text(ui: &mut Ui, meta: &mut FrameInspectMeta, spec: ClippedTextSpec<'_>) -> Response {
-    let avail_w = ui.available_width().max(24.0);
-    let font = FontId::proportional(spec.font_size);
-    let mut job = egui::text::LayoutJob::single_section(spec.text.to_owned(), egui::TextFormat::simple(font, spec.color));
-    job.wrap = egui::text::TextWrapping { max_width: avail_w, max_rows: 1, break_anywhere: false, overflow_character: Some('…') };
-    let galley = ui.painter().layout_job(job);
-    let ellipsized = galley.elided;
-    let h = galley.size().y.max(18.0);
-    let w = galley.size().x.min(avail_w);
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::hover());
-    ui.painter().with_clip_rect(rect).galley(Pos2::new(rect.left(), rect.center().y - galley.size().y * 0.5), galley, spec.color);
-    let full = spec.text.to_owned();
-    resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Label, true, full.clone()));
-    let resp = if let Some(tip) = spec.tooltip {
-        resp.on_hover_text(tip)
-    } else if ellipsized {
-        resp.on_hover_text(spec.text)
-    } else {
-        resp
-    };
-    if spec.record_meta {
-        record_widget(
-            ui,
-            meta,
-            &resp,
-            spec.widget_id,
-            spec.role,
-            spec.text,
-            None,
-            Some(json!(spec.text)),
-            true,
-            None,
-            spec.z_layer,
-            ellipsized,
-            ellipsized.then_some(spec.text),
-        );
-    }
-    resp
+    crate::egui_shell::ui_kit::clipped_label(
+        ui,
+        meta,
+        crate::egui_shell::ui_kit::ClippedLabelSpec {
+            widget_id: spec.widget_id,
+            role: spec.role,
+            text: spec.text,
+            max_w: ui.available_width().max(24.0),
+            fixed_width: false,
+            min_h: 18.0,
+            font: FontId::proportional(spec.font_size),
+            color: spec.color,
+            z_layer: spec.z_layer,
+            tooltip: spec.tooltip,
+            record_meta: spec.record_meta,
+            record_value: true,
+            skip_offscreen: false,
+        },
+    )
+    .unwrap_or_else(|| ui.allocate_exact_size(Vec2::ZERO, Sense::hover()).1)
 }
 
 pub(super) fn render_modal_checkbox(
@@ -1897,85 +1850,24 @@ pub(super) struct ModalChoiceSpec<'a> {
 }
 
 pub(super) fn render_modal_choice_row(ui: &mut Ui, tokens: &Tokens, meta: &mut FrameInspectMeta, spec: ModalChoiceSpec<'_>) -> bool {
-    let ModalChoiceSpec { widget_id, label, checked, is_radio, enablement } = spec;
-    let enabled = enablement.enabled;
-    let avail_w = ui.available_width().max(48.0);
-    let fg = if enabled { tokens.text_primary } else { tokens.text_disabled };
-    let text_max_w = (avail_w - 22.0).max(20.0);
-    let mut job = egui::text::LayoutJob::single_section(label.to_owned(), egui::TextFormat::simple(FontId::proportional(12.0), fg));
-    job.wrap = egui::text::TextWrapping { max_width: text_max_w, max_rows: 1, break_anywhere: false, overflow_character: Some('…') };
-    let galley = ui.painter().layout_job(job);
-    let ellipsized = galley.elided;
-    let row_w = (22.0 + galley.size().x).min(avail_w);
-    let row_h = tokens.metrics.min_hit_target_pt;
-    let vis_clip = if meta.viewport_rect.is_positive() { ui.clip_rect().intersect(meta.viewport_rect) } else { ui.clip_rect() };
-    let row_top = ui.cursor().top();
-    let row_bot = row_top + row_h;
-    if row_top > vis_clip.bottom() || row_bot < vis_clip.top() {
-        ui.allocate_space(Vec2::new(row_w, row_h));
-        return false;
-    }
-    // Keep `Sense::click()` so `ScrollArea`'s outer hover sensor never swallows disabled tooltip hover; clicks stay gated by `enabled`.
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(row_w, row_h), Sense::click());
-    let resp = if enabled { resp } else { resp.on_hover_cursor(egui::CursorIcon::Default) };
-
-    let bx = Rect::from_min_size(Pos2::new(rect.left() + 1.0, rect.center().y - 6.5), Vec2::splat(13.0));
-    let border = if !enabled {
-        tokens.divider
-    } else if resp.hovered() {
-        tokens.text_primary
-    } else {
-        tokens.button_border
-    };
-
-    if is_radio {
-        let c = bx.center();
-        ui.painter().circle(c, 6.0, if checked && enabled { tokens.accent_strong } else { tokens.input_bg }, Stroke::new(1.0, border));
-        if checked {
-            ui.painter().circle_filled(c, 2.5, if enabled { Color32::WHITE } else { tokens.text_disabled });
-        }
-    } else {
-        ui.painter().rect_filled(bx, CornerRadius::same(2), if checked && enabled { tokens.accent_strong } else { tokens.input_bg });
-        ui.painter().rect_stroke(bx, CornerRadius::same(2), Stroke::new(1.0, border), StrokeKind::Inside);
-        if checked {
-            let ck = if enabled { Color32::WHITE } else { tokens.text_disabled };
-            ui.painter().line_segment([bx.left_center() + Vec2::new(3.0, 0.0), bx.center_bottom() + Vec2::new(-1.0, -3.5)], Stroke::new(1.6, ck));
-            ui.painter().line_segment([bx.center_bottom() + Vec2::new(-1.0, -3.5), bx.right_top() + Vec2::new(-3.0, 3.0)], Stroke::new(1.6, ck));
-        }
-    }
-
-    let text_rect = Rect::from_min_max(Pos2::new(bx.right() + 5.0, rect.top()), rect.max);
-    ui.painter().with_clip_rect(text_rect).galley(Pos2::new(bx.right() + 5.0, rect.center().y - galley.size().y * 0.5), galley, fg);
-
-    let ak_role = if is_radio { egui::Role::RadioButton } else { egui::Role::CheckBox };
-    let ak_name = label.to_owned();
-    resp.widget_info(move || egui::WidgetInfo::selected(ak_role, enabled, checked, ak_name.clone()));
-
-    let tip = if let Some(reason) = enablement.disabled_reason.as_deref() {
-        reason.to_owned()
-    } else if ellipsized {
-        label.to_owned()
-    } else {
-        String::new()
-    };
-    let resp = attach_modal_hover_tooltip(ui, resp, &tip);
-
-    record_widget(
+    crate::egui_shell::ui_kit::choice_row(
         ui,
+        tokens,
         meta,
-        &resp,
-        widget_id,
-        if is_radio { "radio" } else { "checkbox" },
-        label,
-        None,
-        Some(json!(checked)),
-        enabled,
-        enablement.disabled_reason.as_deref(),
-        ZLayer::ModalDialog,
-        ellipsized,
-        ellipsized.then_some(label),
-    );
-    enabled && resp.clicked()
+        crate::egui_shell::ui_kit::ChoiceRowSpec {
+            widget_id: spec.widget_id,
+            label: spec.label,
+            checked: spec.checked,
+            is_radio: spec.is_radio,
+            enabled: spec.enablement.enabled,
+            disabled_reason: spec.enablement.disabled_reason.as_deref(),
+            font_size: 12.0,
+            row_height: tokens.metrics.min_hit_target_pt,
+            z_layer: ZLayer::ModalDialog,
+            value: json!(spec.checked),
+            tooltip_mode: crate::egui_shell::ui_kit::TooltipMode::ModalAlwaysOpen,
+        },
+    )
 }
 
 pub(super) fn render_modal_seg_btn(
@@ -1987,99 +1879,39 @@ pub(super) fn render_modal_seg_btn(
     selected: bool,
     enablement: &ControlEnablement,
 ) -> bool {
-    let enabled = enablement.enabled;
     let max_w = (ui.available_width() - 2.0).max(32.0);
-    let fg = if !enabled {
-        tokens.text_disabled
-    } else if selected {
-        tokens.text_strong
-    } else {
-        tokens.text_primary
-    };
-    let mut job = egui::text::LayoutJob::single_section(label.to_owned(), egui::TextFormat::simple(FontId::proportional(11.5), fg));
-    job.wrap = egui::text::TextWrapping { max_width: (max_w - 12.0).max(16.0), max_rows: 1, break_anywhere: false, overflow_character: Some('…') };
-    let galley = ui.painter().layout_job(job);
-    let ellipsized = galley.elided;
-    let w = (galley.size().x + 14.0).clamp(24.0, max_w);
-    let vis_clip = if meta.viewport_rect.is_positive() { ui.clip_rect().intersect(meta.viewport_rect) } else { ui.clip_rect() };
-    let row_top = ui.cursor().top();
-    let row_bot = row_top + 22.0;
-    let can_skip_top = !ui.layout().main_wrap() || ui.available_width() >= w;
-    if row_top > vis_clip.bottom() || (can_skip_top && row_bot < vis_clip.top()) {
-        ui.allocate_space(Vec2::new(w, 22.0));
-        return false;
-    }
-    // Keep `Sense::click()` so `ScrollArea`'s outer hover sensor never swallows disabled tooltip hover; clicks stay gated by `enabled`.
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 22.0), Sense::click());
-    let resp = if enabled { resp } else { resp.on_hover_cursor(egui::CursorIcon::Default) };
-
-    let bg = if !enabled {
-        tokens.panel_bg
-    } else if selected {
-        tokens.active_bg
-    } else if resp.hovered() {
-        tokens.hover_bg
-    } else {
-        tokens.button_bg
-    };
-    let border = if !enabled {
-        tokens.divider
-    } else if selected {
-        tokens.accent_strong
-    } else {
-        tokens.button_border
-    };
-
-    ui.painter().rect_filled(rect, CornerRadius::same(4), bg);
-    ui.painter().rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, border), StrokeKind::Inside);
-    ui.painter().with_clip_rect(rect.shrink(3.0)).galley(
-        Pos2::new(rect.center().x - galley.size().x * 0.5, rect.center().y - galley.size().y * 0.5),
-        galley,
-        fg,
-    );
-
-    let ak_name = label.to_owned();
-    resp.widget_info(move || egui::WidgetInfo::selected(egui::Role::Button, enabled, selected, ak_name.clone()));
-
-    let tip = if let Some(reason) = enablement.disabled_reason.as_deref() {
-        reason.to_owned()
-    } else if ellipsized {
-        label.to_owned()
-    } else {
-        String::new()
-    };
-    let resp = attach_modal_hover_tooltip(ui, resp, &tip);
-
-    record_widget(
+    let (_, clicked) = crate::egui_shell::ui_kit::styled_button(
         ui,
+        tokens,
         meta,
-        &resp,
-        widget_id,
-        "button",
-        label,
-        None,
-        Some(json!(selected)),
-        enabled,
-        enablement.disabled_reason.as_deref(),
-        ZLayer::ModalDialog,
-        ellipsized,
-        ellipsized.then_some(label),
+        crate::egui_shell::ui_kit::StyledButtonSpec {
+            widget_id,
+            role: "button",
+            a11y_role: egui::Role::Button,
+            a11y_selectable: true,
+            label,
+            tooltip: None,
+            command_id: None,
+            width: crate::egui_shell::ui_kit::ButtonWidth::FitText { min_w: 24.0, max_w, pad_x: 14.0 },
+            height: 22.0,
+            font_size: 11.5,
+            radius: tokens.metrics.radius_md,
+            text_align: crate::egui_shell::ui_kit::ButtonTextAlign::Center,
+            break_anywhere: false,
+            primary: false,
+            selected,
+            enabled: enablement.enabled,
+            accent_text_when_selected: false,
+            border_override: None,
+            value: Some(json!(selected)),
+            disabled_reason: enablement.disabled_reason.as_deref(),
+            z_layer: ZLayer::ModalDialog,
+            skip_offscreen: true,
+            clip_interact_to_viewport: false,
+            tooltip_mode: crate::egui_shell::ui_kit::TooltipMode::ModalAlwaysOpen,
+        },
     );
-    enabled && resp.clicked()
-}
-
-pub(super) fn attach_modal_hover_tooltip(ui: &Ui, resp: egui::Response, tip: &str) -> egui::Response {
-    if tip.is_empty() {
-        return resp;
-    }
-    let delay = ui.style().interaction.tooltip_delay;
-    let pointer_ready = ui.input(|i| !i.pointer.any_down() && i.pointer.is_still() && i.pointer.time_since_last_movement() >= delay);
-    if resp.hovered() && pointer_ready {
-        egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), resp.id.with("hover_tooltip"), egui::PopupAnchor::Pointer).show(|ui| {
-            ui.label(tip);
-        });
-    }
-    resp
+    clicked
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2099,7 +1931,7 @@ pub(super) fn render_modal_textbox_row(
         let te_id = Id::unique(widget_id);
         let resp = ui.add_sized(Vec2::new(width, 22.0), egui::TextEdit::singleline(draft).id(te_id).hint_text(hint));
         if resp.changed() {
-            intents.push_set_text_field_buffer(widget_id, draft.clone());
+            intents.push(UiIntent::SetTextFieldBuffer { widget_id: widget_id.into(), text: draft.clone() });
         }
         record_widget(ui, meta, &resp, widget_id, "textbox", label, None, Some(json!(draft.as_str())), true, None, ZLayer::ModalDialog, false, None);
     });
@@ -2121,12 +1953,9 @@ pub(super) fn record_widget(
     ellipsized: bool,
     full_label: Option<&str>,
 ) {
-    let clipped = resp.interact_rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect);
-    if !clipped.is_positive() {
-        return;
-    }
-    meta.record_response(
+    crate::egui_shell::ui_kit::record_visible_viewport(
         ui,
+        meta,
         resp,
         FrameInspectEntryInput { widget_id, role, label, command_id, value, enabled, disabled_reason, z_layer, ellipsized, full_label },
     );

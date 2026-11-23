@@ -1,5 +1,6 @@
 //! Heatmap `Format Graph` schema tabs: Color Mapping, Labels & Ticks, and Gaps & Borders.
 
+use crate::egui_shell::UiIntent;
 use curvebook_doc::{HeatmapColumnLabelAngle, HeatmapColumnLabelMode, HeatmapRowLabelMode};
 use curvebook_palette::{ColormapId, simulate_cvd};
 use egui::{CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2};
@@ -220,7 +221,7 @@ pub(super) fn render_fg_heatmap_labels(ui: &mut Ui, state: &mut GraphModalEguiSt
         }
     });
     if fg_dirty {
-        gctx.intents.push_update_format_graph_state(next_fg.clone());
+        gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next_fg.clone())));
     }
     ui.add_space(6.0);
     render_legend_toggles(ui, gctx, &next_fg);
@@ -241,7 +242,7 @@ pub(super) fn render_fg_heatmap_borders(ui: &mut Ui, state: &mut GraphModalEguiS
         let mut next = fg.clone();
         next.heatmap_labels.cell_gap_pt = clamped;
         next.heatmap_labels_dirty = true;
-        gctx.intents.push_update_format_graph_state(next);
+        gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
     }
     ui.add_space(6.0);
     render_legend_toggles(ui, gctx, &fg);

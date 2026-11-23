@@ -65,7 +65,7 @@ fn seed_xy_data_and_graph_app() -> UiApp {
             "sheet_id": "ds-xy",
             "title": "Dose Response",
             "kind": "xy",
-            "data_sets": 2,
+            "cols": 2,
             "rows": 3,
             "auto_graph": false
         }),
@@ -295,7 +295,7 @@ fn modal_footers_follow_cancel_secondary_primary_order_and_render_cleanly() {
                 "sheet_id": "ds-mv",
                 "title": "Multi Variables",
                 "kind": "multiple_variables",
-                "data_sets": 3,
+                "cols": 3,
                 "rows": 4,
                 "auto_graph": false
             }),

@@ -6,7 +6,7 @@ use curvebook_doc::{
 };
 use curvebook_ui_egui::control_io::{dispatch_gui_action, dispatch_ui_command};
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
-use curvebook_ui_egui::i18n::{LOCALES, catalog_len, w8_rv_ui};
+use curvebook_ui_egui::i18n::{CATALOG, LOCALES, catalog_len};
 use curvebook_ui_egui::menus::{ShortcutRegistry, ShortcutScope, UI_COMMANDS, normalize_shortcut_combo};
 use curvebook_ui_egui::modal_predicates::apply_r2_gaussian_toggle;
 mod human_wf_common;
@@ -40,12 +40,11 @@ fn build_column_app(cols: usize, rows: usize) -> Result<(UiApp, SheetId), String
 fn rv75_context_scoped_cmd_t_shortcuts_rebind_and_conflicts() -> TestRes {
     // Integrated UI command & i18n invariants:
     assert_eq!(UI_COMMANDS.len(), 53, "UI_COMMANDS length should be 53 after R13.8 Part 2, app.feedback, and R15-GUI-35");
-    assert_eq!(catalog_len(), 977, "i18n::catalog_len() should be 977 after SEC-18 16-locale modal entries and R15.10 F1");
+    assert_eq!(catalog_len(), 708, "i18n::catalog_len() should be 708 after catalog consolidation, SEC-18 16-locale modal entries, and R15.10 F1");
     assert!(UI_COMMANDS.iter().any(|c| c.id == "ui.editParams.open" && c.shortcut == "Cmd+T"));
-    for entry in w8_rv_ui::STAGED_ENTRIES {
-        assert_eq!(entry.translations.len(), LOCALES.len());
-        assert!(entry.translations.iter().all(|s| !s.trim().is_empty()), "empty locale in {}", entry.key);
-    }
+    let edit_params_entry = CATALOG.iter().find(|e| e.key == "cmd.ui.editParams.open").ok_or("missing cmd.ui.editParams.open in i18n::CATALOG")?;
+    assert_eq!(edit_params_entry.translations.len(), LOCALES.len());
+    assert!(edit_params_entry.translations.iter().all(|s| !s.trim().is_empty()), "empty locale in {}", edit_params_entry.key);
 
     let reg = ShortcutRegistry::new();
     let edit_b = reg.get("ui.editParams.open").ok_or("missing ui.editParams.open binding")?;

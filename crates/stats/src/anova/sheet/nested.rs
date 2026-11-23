@@ -13,8 +13,8 @@ use crate::anova::nested::nested_one_way_anova_with_reml_status;
 use crate::anova::results::NestedAnovaResult;
 use crate::anova::sheet::one_way::{append_reml_boundary_checklist, push_pairwise_outputs};
 use crate::common::{
-    append_ignored_text_checklist_and_footnote, build_tab, checklist_item, init_result_sheet, is_ignored_non_numeric_cell, num_cell, p_cell_at_alpha,
-    push_scalar, sanitize_result_sheet_floats, try_resolve_selected_indices,
+    TabBuilder, append_ignored_text_checklist_and_footnote, checklist_item, init_result_sheet, is_ignored_non_numeric_cell, num_cell,
+    p_cell_at_alpha, push_scalar, sanitize_result_sheet_floats, try_resolve_selected_indices,
 };
 use crate::error::StatsError;
 use crate::multiplicity::{GroupComparisonInput, MultiplicityProcedure, compare_groups_pairwise_with_confidence, linear_trend_test};
@@ -53,67 +53,67 @@ pub fn run_nested_analysis(sheet: &DataSheet, spec: &AnalysisSpec, nested_spec: 
         push_scalar(&mut out, "Nested t", None, t_val);
     }
 
-    let headers = vec![String::from("SS"), String::from("df"), String::from("MS"), String::from("F"), String::from("P value")];
-    let labels = vec![String::from("Among groups"), String::from("Among subclusters within groups"), String::from("Error (technical replicates)")];
-    let rows = vec![
-        vec![
-            num_cell(res.ss_groups),
-            num_cell(res.df1_groups),
-            num_cell(res.ms_groups),
-            num_cell(res.f_among_groups),
-            p_cell_at_alpha(res.p_among_groups, p_fmt, alpha),
-        ],
-        vec![
-            num_cell(res.ss_subclusters),
-            num_cell(res.df1_subclusters),
-            num_cell(res.ms_subclusters),
-            num_cell(res.f_among_subclusters),
-            p_cell_at_alpha(res.p_among_subclusters, p_fmt, alpha),
-        ],
-        vec![num_cell(res.ss_error), num_cell(res.df2_error), num_cell(res.ms_error), ResultCell::Empty, ResultCell::Empty],
-    ];
     let title = if nested_spec.two_group_t_test { "Nested t test" } else { "Nested one-way ANOVA" };
-    out.tabs.push(build_tab("nested-anova", title, ResultTabKind::AnovaTable, headers, labels, rows));
+    out.tabs.push(
+        TabBuilder::new("nested-anova", title, ResultTabKind::AnovaTable)
+            .headers(["SS", "df", "MS", "F", "P value"])
+            .row(
+                "Among groups",
+                [
+                    num_cell(res.ss_groups),
+                    num_cell(res.df1_groups),
+                    num_cell(res.ms_groups),
+                    num_cell(res.f_among_groups),
+                    p_cell_at_alpha(res.p_among_groups, p_fmt, alpha),
+                ],
+            )
+            .row(
+                "Among subclusters within groups",
+                [
+                    num_cell(res.ss_subclusters),
+                    num_cell(res.df1_subclusters),
+                    num_cell(res.ms_subclusters),
+                    num_cell(res.f_among_subclusters),
+                    p_cell_at_alpha(res.p_among_subclusters, p_fmt, alpha),
+                ],
+            )
+            .row(
+                "Error (technical replicates)",
+                [num_cell(res.ss_error), num_cell(res.df2_error), num_cell(res.ms_error), ResultCell::Empty, ResultCell::Empty],
+            )
+            .build(),
+    );
 
     // Variance components tab.
-    let vc_headers = vec![
-        String::from("Variance component"),
-        String::from("SD"),
-        String::from("% of total"),
-        String::from("Kenward-Roger df"),
-        String::from("Satterthwaite df"),
-    ];
     let tot_var = (res.variance_subclusters + res.variance_error).max(1e-18);
-    let vc_rows = vec![
-        vec![
-            num_cell(res.variance_subclusters),
-            num_cell(res.variance_subclusters.sqrt()),
-            num_cell(100.0 * res.variance_subclusters / tot_var),
-            num_cell(res.df2_groups_kenward_roger),
-            num_cell(res.df2_groups_satterthwaite),
-        ],
-        vec![
-            num_cell(res.variance_error),
-            num_cell(res.variance_error.sqrt()),
-            num_cell(100.0 * res.variance_error / tot_var),
-            ResultCell::Empty,
-            ResultCell::Empty,
-        ],
-    ];
-    let mut vc_tab = build_tab(
-        "variance-components",
-        "Variance components (REML)",
-        ResultTabKind::ParametersAndConfidenceIntervals,
-        vc_headers,
-        vec![String::from("Subclusters (biological units)"), String::from("Residual (technical)")],
-        vc_rows,
-    );
+    let mut vc_tab = TabBuilder::new("variance-components", "Variance components (REML)", ResultTabKind::ParametersAndConfidenceIntervals)
+        .headers(["Variance component", "SD", "% of total", "Kenward-Roger df", "Satterthwaite df"])
+        .row(
+            "Subclusters (biological units)",
+            [
+                num_cell(res.variance_subclusters),
+                num_cell(res.variance_subclusters.sqrt()),
+                num_cell(100.0 * res.variance_subclusters / tot_var),
+                num_cell(res.df2_groups_kenward_roger),
+                num_cell(res.df2_groups_satterthwaite),
+            ],
+        )
+        .row(
+            "Residual (technical)",
+            [
+                num_cell(res.variance_error),
+                num_cell(res.variance_error.sqrt()),
+                num_cell(100.0 * res.variance_error / tot_var),
+                ResultCell::Empty,
+                ResultCell::Empty,
+            ],
+        );
     if !reml_converged {
-        vc_tab.footnotes.push(String::from("Warning: REML variance-ratio optimization reached the upper search limit without an interior optimum."));
+        vc_tab.push_footnote("Warning: REML variance-ratio optimization reached the upper search limit without an interior optimum.");
     } else if reml_at_boundary {
-        vc_tab.footnotes.push(String::from("Subcluster variance component estimate is on the zero boundary (sigma^2_subcluster = 0)."));
+        vc_tab.push_footnote("Subcluster variance component estimate is on the zero boundary (sigma^2_subcluster = 0).");
     }
-    out.tabs.push(vc_tab);
+    out.tabs.push(vc_tab.build());
 
     // Optional group-level pairwise comparisons using hierarchical group-mean variances:
     // Var(mean_g) = sigma_u^2 * sum_j(n_{gj}^2) / N_g^2 + sigma_e^2 / N_g (Sokal & Rohlf / Montgomery).
@@ -184,21 +184,20 @@ pub(in crate::anova) fn append_nested_multiplicity(
         let trend = linear_trend_test(&g_inputs, mse_eff, active_df2)?;
         push_scalar(out, "Linear trend F", None, trend.f_statistic);
         push_scalar(out, "Linear trend P", None, trend.p_value);
-        let headers = vec![String::from("Slope"), String::from("R squared"), String::from("F"), String::from("P value")];
-        let rows = vec![vec![
-            num_cell(trend.slope_estimate),
-            num_cell(trend.r_squared),
-            num_cell(trend.f_statistic),
-            p_cell_at_alpha(trend.p_value, p_fmt, confidence.alpha()),
-        ]];
-        out.tabs.push(build_tab(
-            "linear-trend",
-            "Test for linear trend",
-            ResultTabKind::MultipleComparisons,
-            headers,
-            vec![String::from("Linear trend")],
-            rows,
-        ));
+        out.tabs.push(
+            TabBuilder::new("linear-trend", "Test for linear trend", ResultTabKind::MultipleComparisons)
+                .headers(["Slope", "R squared", "F", "P value"])
+                .row(
+                    "Linear trend",
+                    [
+                        num_cell(trend.slope_estimate),
+                        num_cell(trend.r_squared),
+                        num_cell(trend.f_statistic),
+                        p_cell_at_alpha(trend.p_value, p_fmt, confidence.alpha()),
+                    ],
+                )
+                .build(),
+        );
     } else {
         let details = compare_groups_pairwise_with_confidence(&g_inputs, mse_eff, active_df2, &nested_spec.multiplicity, confidence)?;
         push_pairwise_outputs(out, &details, "Nested multiple comparisons", p_fmt, confidence);

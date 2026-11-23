@@ -17,7 +17,7 @@ use crate::i18n::{normalize_locale, tr};
 use crate::inspect::ZLayer;
 
 use super::inspect_bridge::{ModalCaptureSpec, finalize_egui_modal_response};
-use super::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens, widgets};
+use super::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens, UiIntent, widgets};
 
 /// Specific data-reshaping / transformation dialog open natively in `egui`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -249,7 +249,7 @@ pub fn render_transform_modal(
         } else if from_edit {
             intents.push_dialog_button("cancel");
         } else {
-            intents.push_close_transform_modal();
+            intents.push(UiIntent::CloseTransformModal);
         }
     }
     if from_edit {
@@ -2125,7 +2125,7 @@ fn render_transform_footer(ui: &mut Ui, cx: &mut TransformModalCtx<'_>, kind: Tr
             if from_edit {
                 intents.push_dialog_button("cancel");
             } else {
-                intents.push_close_transform_modal();
+                intents.push(UiIntent::CloseTransformModal);
             }
         }
 
@@ -2145,14 +2145,14 @@ fn render_transform_footer(ui: &mut Ui, cx: &mut TransformModalCtx<'_>, kind: Tr
                         match build_standalone_transform_params(app, sheet, kind, state) {
                             Ok(cmd_params) => {
                                 intents.push_engine("transform.run", cmd_params);
-                                intents.push_close_transform_modal();
+                                intents.push(UiIntent::CloseTransformModal);
                             }
                             Err(err) => {
                                 state.validation_error = Some(err);
                             }
                         }
                     } else {
-                        intents.push_close_transform_modal();
+                        intents.push(UiIntent::CloseTransformModal);
                     }
                 }
             }
@@ -2584,9 +2584,5 @@ pub fn render_exclude_with_reason_modal(
 }
 
 fn choice_pill(ui: &mut Ui, tokens: &Tokens, label: &str, selected: bool, enabled: bool) -> egui::Response {
-    let mut text = RichText::new(label);
-    if selected {
-        text = text.color(tokens.accent).strong();
-    }
-    ui.add_enabled(enabled, egui::Button::new(text).selected(selected))
+    super::ui_kit::choice_pill(ui, tokens, label, selected, enabled)
 }

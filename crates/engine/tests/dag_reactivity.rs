@@ -1054,7 +1054,7 @@ fn transient_failed_analysis_preserves_result_sheet_floating_notes() {
 fn json_exclude(sheet_id: &str, row: usize, col: usize, excluded: bool) -> serde_json::Value {
     serde_json::json!({
         "sheet_id": sheet_id,
-        "coords": [{ "row": row, "col": col }],
+        "cells": [{ "row": row, "col": col }],
         "excluded": excluded
     })
 }

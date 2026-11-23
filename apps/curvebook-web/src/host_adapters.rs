@@ -15,20 +15,22 @@ use curvebook_format::{
     CURRENT_PREFERENCES_VERSION, CsvOptions, MAX_ARCHIVE_FILE_BYTES, MAX_ZIP_ENTRIES, PreferencesFile, export_datasheet_to_csv,
     parse_preferences_json,
 };
-use curvebook_ui_egui::serde_json::{self, Map, Value, json};
+use curvebook_ui_egui::control_io::host_routing::{
+    HostPrefFingerprint, capture_pref_fingerprint, command_replaces_project, has_non_null_path_param, is_command_read_only,
+    normalize_control_request_params,
+};
 use curvebook_ui_egui::{
     ActiveDialog, CanvasPreviewFilter, ClipboardBundle, KeyModifiers, PointerButton, PrintJobSpec, UiApp, UiEventOutcome, UiInputEvent,
     ViewportMetrics, dispatch_ui_command,
 };
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use serde_json::{Map, Value, json};
 
 use crate::chrome_bridge::{
     self, WebChromeAction, WebChromeBridge, WebChromeDispatch, WebChromeSnapshot, WebCommandRoute, WebExportFormat, WebNoticeLevel,
     WebShortcutAction, commit_active_modal_dialog, contextual_command_params, resolve_web_command_route,
 };
-use crate::text_bridge::{
-    BrowserCanvasTextMeasurer, MAX_FRAME_RGBA_BYTES, WebRgbaLayer, WebTextBridge, WebTextDrawOp, decode_rgba_layers_json, decode_text_ops_json,
-    encode_text_ops_json,
-};
+use crate::text_bridge::{BrowserCanvasTextMeasurer, MAX_FRAME_RGBA_BYTES, WebRgbaLayer, WebTextBridge, WebTextDrawOp};
 use crate::{WebWorkspaceHost, WorkspaceSummary};
 
 /// Default browser `localStorage` quota budget (`5 MiB`).
@@ -912,10 +914,13 @@ fn require_non_empty<'a>(raw: &'a str, label: &str) -> Result<&'a str, WebAdapte
 }
 
 /// Deterministic incremental write/removal diff for `.curvebook.d/` directory synchronization.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct DirectorySyncPlan {
+    #[serde(with = "serde_named_bytes_vec")]
     pub writes: Vec<(String, Vec<u8>)>,
+    #[serde(default)]
     pub removals: Vec<String>,
+    #[serde(default)]
     pub unchanged_count: usize,
 }
 
@@ -1417,7 +1422,7 @@ fn normalize_relative_entry_path(raw: &str, root_prefix: Option<&str>) -> Result
 }
 
 /// Active browser touch contact point in CSS logical coordinates.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct TouchPoint {
     pub id: i64,
     pub x: f64,
@@ -1643,20 +1648,253 @@ fn clamp_gesture_dt(dt_sec: f64) -> f64 {
     if dt_sec.is_finite() && dt_sec > 0.0 { dt_sec.clamp(1.0 / 240.0, 0.25) } else { 1.0 / 60.0 }
 }
 
+const VALIDATION_ERR_PREFIX: &str = "__cb_validation__:";
+
+fn to_de_err<E: de::Error>(err: WebAdapterError) -> E {
+    match err {
+        WebAdapterError::Validation(msg) => E::custom(format!("{VALIDATION_ERR_PREFIX}{msg}")),
+        other => E::custom(other.to_string()),
+    }
+}
+
+fn map_serde_err(err: serde_json::Error) -> WebAdapterError {
+    let msg = err.to_string();
+    if let Some((_, rest)) = msg.split_once(VALIDATION_ERR_PREFIX) {
+        WebAdapterError::Validation(rest.to_owned())
+    } else {
+        WebAdapterError::Serialization(msg)
+    }
+}
+
+const fn default_one_f64() -> f64 {
+    1.0
+}
+const fn default_frame_dt_sec() -> f64 {
+    1.0 / 60.0
+}
+const fn default_scale_percent() -> f64 {
+    100.0
+}
+const fn default_dpi_96() -> u16 {
+    96
+}
+const fn default_dpi_300() -> u16 {
+    300
+}
+const fn default_primary_button() -> PointerButton {
+    PointerButton::Primary
+}
+const fn default_notice_level() -> WebNoticeLevel {
+    WebNoticeLevel::Info
+}
+fn default_empty_object() -> Value {
+    Value::Object(Map::new())
+}
+fn default_status_code() -> String {
+    String::from("status")
+}
+fn de_opt_string_default<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    Ok(Option::<String>::deserialize(d)?.unwrap_or_default())
+}
+
+#[derive(Serialize, Deserialize)]
+struct NamedBytesWire {
+    path: String,
+    #[serde(default)]
+    bytes_base64: Option<String>,
+    #[serde(default, skip_serializing)]
+    bytes: Option<Vec<Value>>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct KeyValueWire {
+    key: String,
+    value: String,
+}
+
+mod serde_wire_bytes {
+    use super::{Deserialize, Deserializer, Serializer, Value, de, decode_base64, decode_wire_bytes, encode_base64, to_de_err};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&encode_base64(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        match Value::deserialize(d)? {
+            Value::Null => Ok(Vec::new()),
+            Value::String(raw) => decode_base64(&raw).map_err(to_de_err),
+            Value::Array(arr) => decode_wire_bytes(None, Some(&arr), "bytes").map_err(to_de_err),
+            _ => Err(de::Error::custom("expected base64 string or byte array")),
+        }
+    }
+}
+
+mod serde_named_bytes_vec {
+    use super::{Deserialize, Deserializer, NamedBytesWire, Serialize, Serializer, decode_named_bytes_vec, encode_base64, to_de_err};
+
+    pub fn serialize<S: Serializer>(files: &[(String, Vec<u8>)], s: S) -> Result<S::Ok, S::Error> {
+        let items: Vec<NamedBytesWire> =
+            files.iter().map(|(path, bytes)| NamedBytesWire { path: path.clone(), bytes_base64: Some(encode_base64(bytes)), bytes: None }).collect();
+        items.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<(String, Vec<u8>)>, D::Error> {
+        decode_named_bytes_vec(Vec::<NamedBytesWire>::deserialize(d)?, "files").map_err(to_de_err)
+    }
+}
+
+mod serde_named_bytes_map {
+    use super::{
+        BTreeMap, Deserialize, Deserializer, NamedBytesWire, Serialize, Serializer, collect_unique_directory_entries, decode_named_bytes_vec,
+        encode_base64, to_de_err,
+    };
+
+    pub fn serialize<S: Serializer>(entries: &BTreeMap<String, Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
+        let items: Vec<NamedBytesWire> = entries
+            .iter()
+            .map(|(path, bytes)| NamedBytesWire { path: path.clone(), bytes_base64: Some(encode_base64(bytes)), bytes: None })
+            .collect();
+        items.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<String, Vec<u8>>, D::Error> {
+        let pairs = decode_named_bytes_vec(Vec::<NamedBytesWire>::deserialize(d)?, "entries").map_err(to_de_err)?;
+        collect_unique_directory_entries("", pairs).map_err(to_de_err)
+    }
+}
+
+mod serde_kv_vec {
+    use super::{Deserialize, Deserializer, KeyValueWire, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(entries: &[(String, String)], s: S) -> Result<S::Ok, S::Error> {
+        let items: Vec<KeyValueWire> = entries.iter().map(|(k, v)| KeyValueWire { key: k.clone(), value: v.clone() }).collect();
+        items.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<(String, String)>, D::Error> {
+        Ok(Vec::<KeyValueWire>::deserialize(d)?.into_iter().map(|kv| (kv.key, kv.value)).collect())
+    }
+}
+
+mod serde_dpi_96 {
+    use super::{Deserialize, Deserializer, Serializer, Value, parse_dpi_opt, to_de_err};
+
+    pub fn serialize<S: Serializer>(dpi: &u16, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_u16(*dpi)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<u16, D::Error> {
+        parse_dpi_opt(Option::<Value>::deserialize(d)?.as_ref(), "dpi", 96).map_err(to_de_err)
+    }
+}
+
+mod serde_dpi_300 {
+    use super::{Deserialize, Deserializer, Serializer, Value, parse_dpi_opt, to_de_err};
+
+    pub fn serialize<S: Serializer>(dpi: &u16, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_u16(*dpi)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<u16, D::Error> {
+        parse_dpi_opt(Option::<Value>::deserialize(d)?.as_ref(), "dpi", 300).map_err(to_de_err)
+    }
+}
+
+mod serde_preview_filter {
+    use super::{CanvasPreviewFilter, Deserialize, Deserializer, Serialize, Serializer, Value, de};
+
+    pub fn serialize<S: Serializer>(filter: &CanvasPreviewFilter, s: S) -> Result<S::Ok, S::Error> {
+        filter.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<CanvasPreviewFilter, D::Error> {
+        let raw = Value::deserialize(d)?;
+        if let Some(name) = raw.as_str() {
+            CanvasPreviewFilter::from_name(name)
+                .or_else(|| serde_json::from_value(raw.clone()).ok())
+                .ok_or_else(|| de::Error::custom(format!("unknown canvas preview filter `{name}`")))
+        } else {
+            serde_json::from_value(raw).map_err(de::Error::custom)
+        }
+    }
+}
+
+mod serde_export_format {
+    use super::{Deserialize, Deserializer, Serializer, WebExportFormat, de};
+
+    pub fn serialize<S: Serializer>(format: &WebExportFormat, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(format.as_str())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<WebExportFormat, D::Error> {
+        let raw = String::deserialize(d)?;
+        WebExportFormat::from_name(&raw).ok_or_else(|| de::Error::custom(format!("unknown export format `{raw}`")))
+    }
+}
+
+mod serde_notice_level {
+    use super::{Deserialize, Deserializer, Serializer, WebNoticeLevel};
+
+    pub fn serialize<S: Serializer>(level: &WebNoticeLevel, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(level.as_str())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<WebNoticeLevel, D::Error> {
+        Ok(Option::<String>::deserialize(d)?.as_deref().and_then(WebNoticeLevel::from_name).unwrap_or(WebNoticeLevel::Info))
+    }
+}
+
+mod serde_pointer_button {
+    use super::{Deserialize, Deserializer, PointerButton, Serializer, parse_pointer_button, pointer_button_as_str};
+
+    pub fn serialize<S: Serializer>(button: &PointerButton, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(pointer_button_as_str(*button))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<PointerButton, D::Error> {
+        Ok(parse_pointer_button(Option::<String>::deserialize(d)?.as_deref()))
+    }
+}
+
+mod serde_rgba_layers {
+    use super::{Deserialize, Deserializer, Serialize, Serializer, Value, WebRgbaLayer, to_de_err};
+
+    pub fn serialize<S: Serializer>(layers: &[WebRgbaLayer], s: S) -> Result<S::Ok, S::Error> {
+        let vals: Vec<Value> = layers.iter().map(WebRgbaLayer::to_json_value).collect();
+        vals.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<WebRgbaLayer>, D::Error> {
+        Vec::<Value>::deserialize(d)?.iter().map(WebRgbaLayer::from_json_value).collect::<Result<Vec<_>, _>>().map_err(to_de_err)
+    }
+}
+
 /// Multi-flavor web clipboard bundle (`PDF`, `SVG`, `PNG`, `HTML`, `TSV`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WebClipboardPayload {
+    #[serde(rename = "pdf_base64", alias = "pdf_bytes", default, with = "serde_wire_bytes")]
     pub pdf_bytes: Vec<u8>,
+    #[serde(default)]
     pub svg: String,
+    #[serde(default)]
     pub html: String,
+    #[serde(rename = "png_base64", alias = "png_bytes", default, with = "serde_wire_bytes")]
     pub png_bytes: Vec<u8>,
+    #[serde(default)]
     pub tsv: Option<String>,
+    #[serde(default)]
     pub plain_text: Option<String>,
+    #[serde(default)]
     pub width_pt: f64,
+    #[serde(default)]
     pub height_pt: f64,
+    #[serde(default)]
     pub width_px: u32,
+    #[serde(default)]
     pub height_px: u32,
+    #[serde(default = "default_dpi_300", with = "serde_dpi_300")]
     pub dpi: u16,
+    #[serde(default)]
     pub flavors: Vec<String>,
 }
 
@@ -1664,86 +1902,200 @@ impl WebClipboardPayload {
     /// Serialize this clipboard payload to a JSON [`Value`].
     #[must_use]
     pub fn to_json_value(&self) -> Value {
-        json!({
-            "pdf_base64": encode_base64(&self.pdf_bytes),
-            "svg": self.svg,
-            "html": self.html,
-            "png_base64": encode_base64(&self.png_bytes),
-            "tsv": self.tsv,
-            "plain_text": self.plain_text,
-            "width_pt": self.width_pt,
-            "height_pt": self.height_pt,
-            "width_px": self.width_px,
-            "height_px": self.height_px,
-            "dpi": self.dpi,
-            "flavors": self.flavors,
-        })
+        serde_json::to_value(self).unwrap_or_else(|_| json!({}))
     }
 
     /// Reconstruct a [`WebClipboardPayload`] from its JSON representation.
     ///
     /// # Errors
-    /// Returns [`WebAdapterError::Serialization`] if required fields are missing or malformed.
+    /// Returns [`WebAdapterError::Serialization`] if required fields are missing or malformed,
+    /// or [`WebAdapterError::Validation`] if DPI or payload bytes violate bounds.
     pub fn from_json_value(value: &Value) -> Result<Self, WebAdapterError> {
-        let obj = require_object(value, "clipboard payload")?;
-        let pdf_bytes = decode_base64_field(obj, "pdf_base64", "pdf_bytes")?;
-        let png_bytes = decode_base64_field(obj, "png_base64", "png_bytes")?;
-        let svg = optional_str_field(obj, "svg").unwrap_or_default();
-        let html = optional_str_field(obj, "html").unwrap_or_default();
-        let tsv = optional_str_field(obj, "tsv");
-        let plain_text = optional_str_field(obj, "plain_text");
-        let width_pt = require_f64_or_default(obj, "width_pt", 0.0)?;
-        let height_pt = require_f64_or_default(obj, "height_pt", 0.0)?;
-        let width_px = parse_optional_u32_field(obj, "width_px", 0)?;
-        let height_px = parse_optional_u32_field(obj, "height_px", 0)?;
-        let dpi = parse_optional_validated_dpi(obj, "dpi", 300)?;
-        let flavors = obj
-            .get("flavors")
-            .and_then(Value::as_array)
-            .map(|items| items.iter().filter_map(Value::as_str).map(str::to_owned).collect())
-            .unwrap_or_default();
-
-        Ok(Self { pdf_bytes, svg, html, png_bytes, tsv, plain_text, width_pt, height_pt, width_px, height_px, dpi, flavors })
+        let out: Self = serde_json::from_value(value.clone()).map_err(map_serde_err)?;
+        let _ = require_finite(out.width_pt, "width_pt")?;
+        let _ = require_finite(out.height_pt, "height_pt")?;
+        Ok(out)
     }
 }
 
 /// Incoming event sent from browser DOM/JS host hooks into [`WebBridgeSession`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WebBridgeEvent {
-    ResizeViewport { logical_width: f64, logical_height: f64, scale_factor: f64 },
-    TouchStart { points: Vec<TouchPoint>, dt_sec: f64 },
-    TouchMove { points: Vec<TouchPoint>, dt_sec: f64 },
-    TouchEnd { released_ids: Vec<i64>, dt_sec: f64 },
+    ResizeViewport {
+        logical_width: f64,
+        logical_height: f64,
+        #[serde(default = "default_one_f64")]
+        scale_factor: f64,
+    },
+    TouchStart {
+        points: Vec<TouchPoint>,
+        #[serde(default = "default_frame_dt_sec")]
+        dt_sec: f64,
+    },
+    TouchMove {
+        points: Vec<TouchPoint>,
+        #[serde(default = "default_frame_dt_sec")]
+        dt_sec: f64,
+    },
+    TouchEnd {
+        released_ids: Vec<i64>,
+        #[serde(default = "default_frame_dt_sec")]
+        dt_sec: f64,
+    },
     TouchCancel,
-    CoastStep { dt_sec: f64 },
-    UiInput { event: UiInputEvent },
-    ExecuteCommand { command_id: String, params: Value },
-    DispatchControlLine { line: String },
-    RenderFrame { dpi: u16 },
-    CopyClipboard { sheet_id: Option<String>, dpi: u16 },
-    PrintCurrentSheet { sheet_id: Option<String>, scale_percent: f64 },
-    OpenFileBytes { file_name: String, bytes: Vec<u8> },
-    ImportDroppedFiles { files: Vec<(String, Vec<u8>)> },
-    ImportDirectoryEntries { root_name: String, entries: BTreeMap<String, Vec<u8>> },
-    SyncDirectory { root_name: Option<String> },
-    SavePreferences { preferences: PreferencesFile },
-    SaveAutosave { now_ms: u64 },
-    AcquireLock { doc_id: String, tab_id: String, now_ms: u64 },
-    ObserveExternalLock { doc_id: String, holder_tab_id: String, now_ms: u64 },
-    RenewHeartbeat { now_ms: u64 },
-    ReleaseLock { now_ms: u64 },
-    SetPreviewFilter { filter: CanvasPreviewFilter },
-    Wheel { x: f64, y: f64, delta_x: f64, delta_y: f64, modifiers: KeyModifiers },
-    ImePreedit { text: String },
-    ImeCommit { text: String },
-    DragStateChanged { active: bool },
-    PasteClipboard { text: String },
-    ExportFile { format: WebExportFormat, sheet_id: Option<String>, dpi: u16 },
-    HydrateLocalStorage { entries: Vec<(String, String)> },
-    HydrateLocalStorageAt { entries: Vec<(String, String)>, now_ms: u64 },
-    ClickChromeNode { node_id: String, button: PointerButton, modifiers: KeyModifiers },
-    ConfirmDirectorySync { root_name: String, written_paths: Vec<String>, removed_paths: Vec<String>, succeeded: bool, error: Option<String> },
-    ConfirmLocalStorage { writes: Vec<String>, removals: Vec<String>, succeeded: bool },
+    CoastStep {
+        #[serde(default = "default_frame_dt_sec")]
+        dt_sec: f64,
+    },
+    UiInput {
+        event: UiInputEvent,
+    },
+    ExecuteCommand {
+        command_id: String,
+        #[serde(default = "default_empty_object")]
+        params: Value,
+    },
+    DispatchControlLine {
+        line: String,
+    },
+    RenderFrame {
+        #[serde(default = "default_dpi_96", with = "serde_dpi_96")]
+        dpi: u16,
+    },
+    CopyClipboard {
+        #[serde(default)]
+        sheet_id: Option<String>,
+        #[serde(default = "default_dpi_300", with = "serde_dpi_300")]
+        dpi: u16,
+    },
+    PrintCurrentSheet {
+        #[serde(default)]
+        sheet_id: Option<String>,
+        #[serde(default = "default_scale_percent")]
+        scale_percent: f64,
+    },
+    OpenFileBytes {
+        file_name: String,
+        #[serde(rename = "bytes_base64", alias = "bytes", default, with = "serde_wire_bytes")]
+        bytes: Vec<u8>,
+    },
+    ImportDroppedFiles {
+        #[serde(with = "serde_named_bytes_vec")]
+        files: Vec<(String, Vec<u8>)>,
+    },
+    ImportDirectoryEntries {
+        root_name: String,
+        #[serde(with = "serde_named_bytes_map")]
+        entries: BTreeMap<String, Vec<u8>>,
+    },
+    SyncDirectory {
+        #[serde(default)]
+        root_name: Option<String>,
+    },
+    SavePreferences {
+        preferences: PreferencesFile,
+    },
+    SaveAutosave {
+        #[serde(default)]
+        now_ms: u64,
+    },
+    AcquireLock {
+        doc_id: String,
+        tab_id: String,
+        #[serde(default)]
+        now_ms: u64,
+    },
+    ObserveExternalLock {
+        doc_id: String,
+        holder_tab_id: String,
+        #[serde(default)]
+        now_ms: u64,
+    },
+    RenewHeartbeat {
+        #[serde(default)]
+        now_ms: u64,
+    },
+    ReleaseLock {
+        #[serde(default)]
+        now_ms: u64,
+    },
+    SetPreviewFilter {
+        #[serde(with = "serde_preview_filter")]
+        filter: CanvasPreviewFilter,
+    },
+    Wheel {
+        #[serde(default)]
+        x: f64,
+        #[serde(default)]
+        y: f64,
+        #[serde(default)]
+        delta_x: f64,
+        #[serde(default)]
+        delta_y: f64,
+        #[serde(default)]
+        modifiers: KeyModifiers,
+    },
+    ImePreedit {
+        #[serde(default)]
+        text: String,
+    },
+    ImeCommit {
+        #[serde(default)]
+        text: String,
+    },
+    DragStateChanged {
+        #[serde(default)]
+        active: bool,
+    },
+    PasteClipboard {
+        #[serde(default)]
+        text: String,
+    },
+    ExportFile {
+        #[serde(with = "serde_export_format")]
+        format: WebExportFormat,
+        #[serde(default)]
+        sheet_id: Option<String>,
+        #[serde(default = "default_dpi_300", with = "serde_dpi_300")]
+        dpi: u16,
+    },
+    HydrateLocalStorage {
+        #[serde(with = "serde_kv_vec")]
+        entries: Vec<(String, String)>,
+    },
+    #[serde(rename = "__hydrate_local_storage_at")]
+    HydrateLocalStorageAt {
+        #[serde(with = "serde_kv_vec")]
+        entries: Vec<(String, String)>,
+        now_ms: u64,
+    },
+    ClickChromeNode {
+        node_id: String,
+        #[serde(default = "default_primary_button", with = "serde_pointer_button")]
+        button: PointerButton,
+        #[serde(default)]
+        modifiers: KeyModifiers,
+    },
+    ConfirmDirectorySync {
+        root_name: String,
+        #[serde(default)]
+        written_paths: Vec<String>,
+        #[serde(default)]
+        removed_paths: Vec<String>,
+        #[serde(default)]
+        succeeded: bool,
+        #[serde(default)]
+        error: Option<String>,
+    },
+    ConfirmLocalStorage {
+        #[serde(default)]
+        writes: Vec<String>,
+        #[serde(default)]
+        removals: Vec<String>,
+        #[serde(default)]
+        succeeded: bool,
+    },
 }
 
 impl WebBridgeEvent {
@@ -1752,138 +2104,13 @@ impl WebBridgeEvent {
     /// # Errors
     /// Returns [`WebAdapterError::Serialization`] if embedded `UiInputEvent` or `PreferencesFile` serialization fails.
     pub fn to_json_value(&self) -> Result<Value, WebAdapterError> {
-        let value = match self {
-            Self::ResizeViewport { logical_width, logical_height, scale_factor } => json!({
-                "kind": "resize_viewport",
-                "logical_width": logical_width,
-                "logical_height": logical_height,
-                "scale_factor": scale_factor,
-            }),
-            Self::TouchStart { points, dt_sec } => json!({
-                "kind": "touch_start",
-                "points": touch_points_to_json(points),
-                "dt_sec": dt_sec,
-            }),
-            Self::TouchMove { points, dt_sec } => json!({
-                "kind": "touch_move",
-                "points": touch_points_to_json(points),
-                "dt_sec": dt_sec,
-            }),
-            Self::TouchEnd { released_ids, dt_sec } => json!({
-                "kind": "touch_end",
-                "released_ids": released_ids,
-                "dt_sec": dt_sec,
-            }),
-            Self::TouchCancel => json!({ "kind": "touch_cancel" }),
-            Self::CoastStep { dt_sec } => json!({ "kind": "coast_step", "dt_sec": dt_sec }),
-            Self::UiInput { event } => {
-                let encoded = serde_json::to_value(event).map_err(|err| WebAdapterError::Serialization(err.to_string()))?;
-                json!({ "kind": "ui_input", "event": encoded })
-            }
-            Self::ExecuteCommand { command_id, params } => json!({
-                "kind": "execute_command",
-                "command_id": command_id,
-                "params": params,
-            }),
-            Self::DispatchControlLine { line } => json!({ "kind": "dispatch_control_line", "line": line }),
-            Self::RenderFrame { dpi } => json!({ "kind": "render_frame", "dpi": dpi }),
-            Self::CopyClipboard { sheet_id, dpi } => json!({
-                "kind": "copy_clipboard",
-                "sheet_id": sheet_id,
-                "dpi": dpi,
-            }),
-            Self::PrintCurrentSheet { sheet_id, scale_percent } => json!({
-                "kind": "print_current_sheet",
-                "sheet_id": sheet_id,
-                "scale_percent": scale_percent,
-            }),
-            Self::OpenFileBytes { file_name, bytes } => json!({
-                "kind": "open_file_bytes",
-                "file_name": file_name,
-                "bytes_base64": encode_base64(bytes),
-            }),
-            Self::ImportDroppedFiles { files } => json!({
-                "kind": "import_dropped_files",
-                "files": files_to_json_array(files),
-            }),
-            Self::ImportDirectoryEntries { root_name, entries } => json!({
-                "kind": "import_directory_entries",
-                "root_name": root_name,
-                "entries": map_to_json_array(entries),
-            }),
-            Self::SyncDirectory { root_name } => json!({ "kind": "sync_directory", "root_name": root_name }),
-            Self::SavePreferences { preferences } => {
-                let encoded = serde_json::to_value(preferences).map_err(|err| WebAdapterError::Serialization(err.to_string()))?;
-                json!({ "kind": "save_preferences", "preferences": encoded })
-            }
-            Self::SaveAutosave { now_ms } => json!({ "kind": "save_autosave", "now_ms": now_ms }),
-            Self::AcquireLock { doc_id, tab_id, now_ms } => json!({
-                "kind": "acquire_lock",
-                "doc_id": doc_id,
-                "tab_id": tab_id,
-                "now_ms": now_ms,
-            }),
-            Self::ObserveExternalLock { doc_id, holder_tab_id, now_ms } => json!({
-                "kind": "observe_external_lock",
-                "doc_id": doc_id,
-                "holder_tab_id": holder_tab_id,
-                "now_ms": now_ms,
-            }),
-            Self::RenewHeartbeat { now_ms } => json!({ "kind": "renew_heartbeat", "now_ms": now_ms }),
-            Self::ReleaseLock { now_ms } => json!({ "kind": "release_lock", "now_ms": now_ms }),
-            Self::SetPreviewFilter { filter } => {
-                let encoded = serde_json::to_value(filter).map_err(|err| WebAdapterError::Serialization(err.to_string()))?;
-                json!({ "kind": "set_preview_filter", "filter": encoded })
-            }
-            Self::Wheel { x, y, delta_x, delta_y, modifiers } => json!({
-                "kind": "wheel",
-                "x": x,
-                "y": y,
-                "delta_x": delta_x,
-                "delta_y": delta_y,
-                "modifiers": modifiers_to_json(*modifiers),
-            }),
-            Self::ImePreedit { text } => json!({ "kind": "ime_preedit", "text": text }),
-            Self::ImeCommit { text } => json!({ "kind": "ime_commit", "text": text }),
-            Self::DragStateChanged { active } => json!({ "kind": "drag_state_changed", "active": active }),
-            Self::PasteClipboard { text } => json!({ "kind": "paste_clipboard", "text": text }),
-            Self::ExportFile { format, sheet_id, dpi } => json!({
-                "kind": "export_file",
-                "format": format.as_str(),
-                "sheet_id": sheet_id,
-                "dpi": dpi,
-            }),
-            Self::HydrateLocalStorage { entries } => json!({
-                "kind": "hydrate_local_storage",
-                "entries": entries.iter().map(|(k, v)| json!({ "key": k, "value": v })).collect::<Vec<_>>(),
-            }),
-            Self::HydrateLocalStorageAt { entries, now_ms } => json!({
-                "kind": "hydrate_local_storage",
-                "entries": entries.iter().map(|(k, v)| json!({ "key": k, "value": v })).collect::<Vec<_>>(),
-                "now_ms": now_ms,
-            }),
-            Self::ClickChromeNode { node_id, button, modifiers } => json!({
-                "kind": "click_chrome_node",
-                "node_id": node_id,
-                "button": pointer_button_as_str(*button),
-                "modifiers": modifiers_to_json(*modifiers),
-            }),
-            Self::ConfirmDirectorySync { root_name, written_paths, removed_paths, succeeded, error } => json!({
-                "kind": "confirm_directory_sync",
-                "root_name": root_name,
-                "written_paths": written_paths,
-                "removed_paths": removed_paths,
-                "succeeded": succeeded,
-                "error": error,
-            }),
-            Self::ConfirmLocalStorage { writes, removals, succeeded } => json!({
-                "kind": "confirm_local_storage",
-                "writes": writes,
-                "removals": removals,
-                "succeeded": succeeded,
-            }),
-        };
-        Ok(value)
+        let mut val = serde_json::to_value(self).map_err(|err| WebAdapterError::Serialization(err.to_string()))?;
+        if matches!(self, Self::HydrateLocalStorageAt { .. })
+            && let Some(obj) = val.as_object_mut()
+        {
+            obj.insert(String::from("kind"), Value::String(String::from("hydrate_local_storage")));
+        }
+        Ok(val)
     }
 
     /// Serialize this bridge event into compact JSON text.
@@ -1898,90 +2125,66 @@ impl WebBridgeEvent {
     /// Decode a [`WebBridgeEvent`] from a JSON [`Value`].
     ///
     /// # Errors
-    /// Returns [`WebAdapterError::Serialization`] when the payload does not match any supported variant.
+    /// Returns [`WebAdapterError::Serialization`] when the payload does not match any supported variant,
+    /// or [`WebAdapterError::Validation`] when DPI, byte budgets, or directory paths violate bounds.
     pub fn from_json_value(value: &Value) -> Result<Self, WebAdapterError> {
-        let obj = require_object(value, "bridge event")?;
-        let kind = require_str_field(obj, "kind")?;
-        match kind {
-            "resize_viewport" => Ok(Self::ResizeViewport {
-                logical_width: require_f64_field(obj, "logical_width")?,
-                logical_height: require_f64_field(obj, "logical_height")?,
-                scale_factor: require_f64_or_default(obj, "scale_factor", 1.0)?,
-            }),
-            "touch_start" => {
-                Ok(Self::TouchStart { points: parse_touch_points_field(obj, "points")?, dt_sec: require_f64_or_default(obj, "dt_sec", 1.0 / 60.0)? })
-            }
-            "touch_move" => {
-                Ok(Self::TouchMove { points: parse_touch_points_field(obj, "points")?, dt_sec: require_f64_or_default(obj, "dt_sec", 1.0 / 60.0)? })
-            }
-            "touch_end" => {
-                Ok(Self::TouchEnd { released_ids: parse_i64_array(obj, "released_ids")?, dt_sec: require_f64_or_default(obj, "dt_sec", 1.0 / 60.0)? })
-            }
-            "touch_cancel" => Ok(Self::TouchCancel),
-            "coast_step" => Ok(Self::CoastStep { dt_sec: require_f64_or_default(obj, "dt_sec", 1.0 / 60.0)? }),
-            "ui_input" => {
-                let raw = obj.get("event").ok_or_else(|| WebAdapterError::Serialization(String::from("missing `event` field")))?;
-                let event: UiInputEvent = serde_json::from_value(raw.clone()).map_err(|err| WebAdapterError::Serialization(err.to_string()))?;
-                Ok(Self::UiInput { event })
-            }
-            "execute_command" => Ok(Self::ExecuteCommand {
-                command_id: require_str_field(obj, "command_id")?.to_owned(),
-                params: obj.get("params").cloned().unwrap_or_else(|| Value::Object(Map::new())),
-            }),
-            "dispatch_control_line" => Ok(Self::DispatchControlLine { line: require_str_field(obj, "line")?.to_owned() }),
-            "render_frame" => Ok(Self::RenderFrame { dpi: parse_optional_validated_dpi(obj, "dpi", 96)? }),
-            "copy_clipboard" => {
-                Ok(Self::CopyClipboard { sheet_id: optional_str_field(obj, "sheet_id"), dpi: parse_optional_validated_dpi(obj, "dpi", 300)? })
-            }
-            "print_current_sheet" => Ok(Self::PrintCurrentSheet {
-                sheet_id: optional_str_field(obj, "sheet_id"),
-                scale_percent: require_f64_or_default(obj, "scale_percent", 100.0)?,
-            }),
-            "open_file_bytes" => Ok(Self::OpenFileBytes {
-                file_name: require_str_field(obj, "file_name")?.to_owned(),
-                bytes: decode_base64_field(obj, "bytes_base64", "bytes")?,
-            }),
-            "import_dropped_files" => Ok(Self::ImportDroppedFiles { files: parse_named_bytes_vec(obj, "files")? }),
-            "import_directory_entries" => {
-                let root_name = require_str_field(obj, "root_name")?.to_owned();
-                let pairs = parse_named_bytes_vec(obj, "entries")?;
-                let entries = collect_unique_directory_entries(&root_name, pairs)?;
-                Ok(Self::ImportDirectoryEntries { root_name, entries })
-            }
-            "sync_directory" => Ok(Self::SyncDirectory { root_name: optional_str_field(obj, "root_name") }),
-            "save_preferences" => {
-                let raw = obj.get("preferences").ok_or_else(|| WebAdapterError::Serialization(String::from("missing `preferences` field")))?;
-                let raw_text = serde_json::to_string(raw).map_err(|err| WebAdapterError::Serialization(err.to_string()))?;
-                check_raw_preferences_schema(&raw_text)?;
-                let preferences = parse_preferences_json(&raw_text).map_err(|err| WebAdapterError::Serialization(err.to_string()))?;
-                Ok(Self::SavePreferences { preferences })
-            }
-            "save_autosave" => Ok(Self::SaveAutosave { now_ms: require_u64_or_default(obj, "now_ms", 0) }),
-            "acquire_lock" => Ok(Self::AcquireLock {
-                doc_id: require_str_field(obj, "doc_id")?.to_owned(),
-                tab_id: require_str_field(obj, "tab_id")?.to_owned(),
-                now_ms: require_u64_or_default(obj, "now_ms", 0),
-            }),
-            "observe_external_lock" => Ok(Self::ObserveExternalLock {
-                doc_id: require_str_field(obj, "doc_id")?.to_owned(),
-                holder_tab_id: require_str_field(obj, "holder_tab_id")?.to_owned(),
-                now_ms: require_u64_or_default(obj, "now_ms", 0),
-            }),
-            "renew_heartbeat" => Ok(Self::RenewHeartbeat { now_ms: require_u64_or_default(obj, "now_ms", 0) }),
-            "release_lock" => Ok(Self::ReleaseLock { now_ms: require_u64_or_default(obj, "now_ms", 0) }),
-            "set_preview_filter" => {
-                let raw = obj.get("filter").ok_or_else(|| WebAdapterError::Serialization(String::from("missing `filter` field")))?;
-                let filter = if let Some(name) = raw.as_str() {
-                    CanvasPreviewFilter::from_name(name)
-                        .or_else(|| serde_json::from_value(raw.clone()).ok())
-                        .ok_or_else(|| WebAdapterError::Serialization(format!("unknown canvas preview filter `{name}`")))?
-                } else {
-                    serde_json::from_value(raw.clone()).map_err(|err| WebAdapterError::Serialization(err.to_string()))?
-                };
-                Ok(Self::SetPreviewFilter { filter })
-            }
-            other => decode_extended_bridge_event(other, obj),
+        let kind = value.get("kind").and_then(Value::as_str);
+        if kind == Some("save_preferences") {
+            let prefs_val = value.get("preferences").ok_or_else(|| WebAdapterError::Serialization(String::from("missing `preferences`")))?;
+            let raw_text = serde_json::to_string(prefs_val).map_err(|err| WebAdapterError::Serialization(err.to_string()))?;
+            check_raw_preferences_schema(&raw_text)?;
+            let preferences = parse_preferences_json(&raw_text).map_err(|err| WebAdapterError::Serialization(err.to_string()))?;
+            return Ok(Self::SavePreferences { preferences });
         }
+        if kind == Some("import_directory_entries") {
+            #[derive(Deserialize)]
+            struct DirImport {
+                root_name: String,
+                entries: Vec<NamedBytesWire>,
+            }
+            let parsed: DirImport = serde_json::from_value(value.clone()).map_err(map_serde_err)?;
+            let pairs = decode_named_bytes_vec(parsed.entries, "entries")?;
+            let entries = collect_unique_directory_entries(&parsed.root_name, pairs)?;
+            return Ok(Self::ImportDirectoryEntries { root_name: parsed.root_name, entries });
+        }
+        let mut owned = value.clone();
+        if kind == Some("hydrate_local_storage")
+            && owned.get("now_ms").is_some_and(|v| !v.is_null())
+            && let Some(obj) = owned.as_object_mut()
+        {
+            obj.insert(String::from("kind"), Value::String(String::from("__hydrate_local_storage_at")));
+        }
+        let event: Self = serde_json::from_value(owned).map_err(map_serde_err)?;
+        event.validate_finite_fields()?;
+        Ok(event)
+    }
+
+    fn validate_finite_fields(&self) -> Result<(), WebAdapterError> {
+        match self {
+            Self::ResizeViewport { logical_width, logical_height, scale_factor } => {
+                let _ = require_finite(*logical_width, "logical_width")?;
+                let _ = require_finite(*logical_height, "logical_height")?;
+                let _ = require_finite(*scale_factor, "scale_factor")?;
+            }
+            Self::TouchStart { points, dt_sec } | Self::TouchMove { points, dt_sec } => {
+                validate_touch_points_ref(points)?;
+                let _ = require_finite(*dt_sec, "dt_sec")?;
+            }
+            Self::TouchEnd { dt_sec, .. } | Self::CoastStep { dt_sec } => {
+                let _ = require_finite(*dt_sec, "dt_sec")?;
+            }
+            Self::PrintCurrentSheet { scale_percent, .. } => {
+                let _ = require_finite(*scale_percent, "scale_percent")?;
+            }
+            Self::Wheel { x, y, delta_x, delta_y, .. } => {
+                let _ = require_finite(*x, "x")?;
+                let _ = require_finite(*y, "y")?;
+                let _ = require_finite(*delta_x, "delta_x")?;
+                let _ = require_finite(*delta_y, "delta_y")?;
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     /// Decode a [`WebBridgeEvent`] from raw JSON text.
@@ -1994,73 +2197,30 @@ impl WebBridgeEvent {
     }
 }
 
-fn decode_extended_bridge_event(kind: &str, obj: &Map<String, Value>) -> Result<WebBridgeEvent, WebAdapterError> {
-    match kind {
-        "wheel" => Ok(WebBridgeEvent::Wheel {
-            x: require_f64_or_default(obj, "x", 0.0)?,
-            y: require_f64_or_default(obj, "y", 0.0)?,
-            delta_x: require_f64_or_default(obj, "delta_x", 0.0)?,
-            delta_y: require_f64_or_default(obj, "delta_y", 0.0)?,
-            modifiers: parse_modifiers_field(obj, "modifiers"),
-        }),
-        "ime_preedit" => Ok(WebBridgeEvent::ImePreedit { text: optional_str_field(obj, "text").unwrap_or_default() }),
-        "ime_commit" => Ok(WebBridgeEvent::ImeCommit { text: optional_str_field(obj, "text").unwrap_or_default() }),
-        "drag_state_changed" => Ok(WebBridgeEvent::DragStateChanged { active: obj.get("active").and_then(Value::as_bool).unwrap_or(false) }),
-        "paste_clipboard" => Ok(WebBridgeEvent::PasteClipboard { text: optional_str_field(obj, "text").unwrap_or_default() }),
-        "export_file" => {
-            let fmt_raw = require_str_field(obj, "format")?;
-            let format =
-                WebExportFormat::from_name(fmt_raw).ok_or_else(|| WebAdapterError::Serialization(format!("unknown export format `{fmt_raw}`")))?;
-            Ok(WebBridgeEvent::ExportFile {
-                format,
-                sheet_id: optional_str_field(obj, "sheet_id"),
-                dpi: parse_optional_validated_dpi(obj, "dpi", 300)?,
-            })
-        }
-        "hydrate_local_storage" => {
-            let entries = parse_string_pairs(obj, "entries")?;
-            if let Some(raw_now) = obj.get("now_ms").filter(|v| !v.is_null()) {
-                let now_ms = raw_now.as_u64().ok_or_else(|| WebAdapterError::Serialization(String::from("`now_ms` must be an unsigned integer")))?;
-                Ok(WebBridgeEvent::HydrateLocalStorageAt { entries, now_ms })
-            } else {
-                Ok(WebBridgeEvent::HydrateLocalStorage { entries })
-            }
-        }
-        "click_chrome_node" => Ok(WebBridgeEvent::ClickChromeNode {
-            node_id: require_str_field(obj, "node_id")?.to_owned(),
-            button: parse_pointer_button(obj.get("button")),
-            modifiers: parse_modifiers_field(obj, "modifiers"),
-        }),
-        "confirm_directory_sync" => Ok(WebBridgeEvent::ConfirmDirectorySync {
-            root_name: require_str_field(obj, "root_name")?.to_owned(),
-            written_paths: parse_string_array_or_empty(obj, "written_paths")?,
-            removed_paths: parse_string_array_or_empty(obj, "removed_paths")?,
-            succeeded: obj.get("succeeded").and_then(Value::as_bool).unwrap_or(false),
-            error: optional_str_field(obj, "error"),
-        }),
-        "confirm_local_storage" => Ok(WebBridgeEvent::ConfirmLocalStorage {
-            writes: parse_string_array_or_empty(obj, "writes")?,
-            removals: parse_string_array_or_empty(obj, "removals")?,
-            succeeded: obj.get("succeeded").and_then(Value::as_bool).unwrap_or(false),
-        }),
-        other => Err(WebAdapterError::Serialization(format!("unknown bridge event kind `{other}`"))),
-    }
-}
-
 /// Outgoing host command emitted by [`WebBridgeSession`] for the browser DOM host to execute.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WebBridgeCommand {
     RenderRgbaFrame {
         width_px: u32,
         height_px: u32,
+        #[serde(default = "default_dpi_96", with = "serde_dpi_96")]
         dpi: u16,
+        #[serde(rename = "rgba_base64", alias = "rgba_bytes", default, with = "serde_wire_bytes")]
         rgba_bytes: Vec<u8>,
+        #[serde(default, with = "serde_rgba_layers")]
         rgba_layers: Vec<WebRgbaLayer>,
+        #[serde(default)]
         text_ops: Vec<WebTextDrawOp>,
+        #[serde(default)]
         chrome: WebChromeSnapshot,
+        #[serde(default = "default_one_f64")]
         zoom: f64,
+        #[serde(default)]
         pan_pt: [f64; 2],
+        #[serde(default)]
         action: Option<String>,
+        #[serde(default)]
         command_result: Option<Value>,
     },
     WriteClipboardItems {
@@ -2068,40 +2228,60 @@ pub enum WebBridgeCommand {
     },
     TriggerPrintHtml {
         title: String,
+        #[serde(default)]
         svg_pages: Vec<String>,
+        #[serde(default)]
         html: String,
+        #[serde(rename = "pdf_base64", alias = "pdf_bytes", default, with = "serde_wire_bytes")]
         pdf_bytes: Vec<u8>,
+        #[serde(default = "default_scale_percent")]
         scale_percent: f64,
+        #[serde(default)]
         page_sizes_pt: Vec<(f64, f64)>,
     },
     ApplyDirectorySync {
         root_name: String,
+        #[serde(flatten)]
         plan: DirectorySyncPlan,
     },
     PersistLocalStorage {
+        #[serde(with = "serde_kv_vec")]
         writes: Vec<(String, String)>,
+        #[serde(default)]
         removals: Vec<String>,
     },
     SetReadOnlyBanner {
         doc_id: String,
+        #[serde(default)]
         read_only: bool,
+        #[serde(default)]
         holder_tab_id: Option<String>,
+        #[serde(default)]
         message: Option<String>,
     },
     SaveOrDownloadFile {
         file_name: String,
+        #[serde(default, deserialize_with = "de_opt_string_default")]
         mime_type: String,
+        #[serde(rename = "bytes_base64", alias = "bytes", default, with = "serde_wire_bytes")]
         bytes: Vec<u8>,
+        #[serde(with = "serde_export_format")]
         format: WebExportFormat,
     },
     TriggerFilePicker {
+        #[serde(default)]
         accept: String,
+        #[serde(default)]
         multiple: bool,
+        #[serde(default)]
         directory: bool,
     },
     NotifyStatus {
+        #[serde(default = "default_notice_level", with = "serde_notice_level")]
         level: WebNoticeLevel,
+        #[serde(default = "default_status_code")]
         code: String,
+        #[serde(default)]
         message: String,
     },
     ClearDirectoryHandle,
@@ -2110,217 +2290,90 @@ pub enum WebBridgeCommand {
     },
 }
 
+fn precheck_render_rgba_frame(value: &Value) -> Result<usize, WebAdapterError> {
+    let width_u64 = value
+        .get("width_px")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| WebAdapterError::Serialization(String::from("`width_px` must be an unsigned 32-bit integer")))?;
+    let height_u64 = value
+        .get("height_px")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| WebAdapterError::Serialization(String::from("`height_px` must be an unsigned 32-bit integer")))?;
+    let width_px = u32::try_from(width_u64).map_err(|_| WebAdapterError::Serialization(String::from("`width_px` exceeds u32::MAX")))?;
+    let height_px = u32::try_from(height_u64).map_err(|_| WebAdapterError::Serialization(String::from("`height_px` exceeds u32::MAX")))?;
+    let expected_bytes = usize::try_from(width_px)
+        .ok()
+        .and_then(|w| usize::try_from(height_px).ok().and_then(|h| w.checked_mul(h)?.checked_mul(4)))
+        .filter(|&bytes| bytes <= MAX_FRAME_RGBA_BYTES)
+        .ok_or_else(|| {
+            WebAdapterError::Validation(format!(
+                "render_rgba_frame dimensions {width_px}x{height_px} exceed MAX_FRAME_RGBA_BYTES ({MAX_FRAME_RGBA_BYTES})"
+            ))
+        })?;
+    if let Some(raw_b64) = value.get("rgba_base64").and_then(Value::as_str)
+        && raw_b64.len() > MAX_FRAME_RGBA_BYTES.div_ceil(3).saturating_mul(4).saturating_add(64)
+    {
+        return Err(WebAdapterError::Validation(String::from("rgba_base64 exceeds MAX_FRAME_RGBA_BYTES")));
+    }
+    Ok(expected_bytes)
+}
+
 impl WebBridgeCommand {
     /// Encode this command into a JSON [`Value`].
     #[must_use]
     pub fn to_json_value(&self) -> Value {
-        match self {
-            Self::RenderRgbaFrame { width_px, height_px, dpi, rgba_bytes, rgba_layers, text_ops, chrome, zoom, pan_pt, action, command_result } => {
-                json!({
-                    "kind": "render_rgba_frame",
-                    "width_px": width_px,
-                    "height_px": height_px,
-                    "dpi": dpi,
-                    "rgba_base64": encode_base64(rgba_bytes),
-                    "rgba_layers": rgba_layers.iter().map(WebRgbaLayer::to_json_value).collect::<Vec<_>>(),
-                    "text_ops": encode_text_ops_json(text_ops),
-                    "chrome": chrome.to_json_value(),
-                    "zoom": zoom,
-                    "pan_pt": pan_pt,
-                    "action": action,
-                    "command_result": command_result,
-                })
-            }
-            Self::WriteClipboardItems { payload } => json!({
-                "kind": "write_clipboard_items",
-                "payload": payload.to_json_value(),
-            }),
-            Self::TriggerPrintHtml { title, svg_pages, html, pdf_bytes, scale_percent, page_sizes_pt } => json!({
-                "kind": "trigger_print_html",
-                "title": title,
-                "svg_pages": svg_pages,
-                "html": html,
-                "pdf_base64": encode_base64(pdf_bytes),
-                "scale_percent": scale_percent,
-                "page_sizes_pt": page_sizes_pt,
-            }),
-            Self::ApplyDirectorySync { root_name, plan } => json!({
-                "kind": "apply_directory_sync",
-                "root_name": root_name,
-                "writes": files_to_json_array(&plan.writes),
-                "removals": plan.removals,
-                "unchanged_count": plan.unchanged_count,
-            }),
-            Self::PersistLocalStorage { writes, removals } => json!({
-                "kind": "persist_local_storage",
-                "writes": writes.iter().map(|(k, v)| json!({ "key": k, "value": v })).collect::<Vec<_>>(),
-                "removals": removals,
-            }),
-            Self::SetReadOnlyBanner { doc_id, read_only, holder_tab_id, message } => json!({
-                "kind": "set_read_only_banner",
-                "doc_id": doc_id,
-                "read_only": read_only,
-                "holder_tab_id": holder_tab_id,
-                "message": message,
-            }),
-            Self::SaveOrDownloadFile { file_name, mime_type, bytes, format } => json!({
-                "kind": "save_or_download_file",
-                "file_name": file_name,
-                "mime_type": mime_type,
-                "bytes_base64": encode_base64(bytes),
-                "format": format.as_str(),
-            }),
-            Self::TriggerFilePicker { accept, multiple, directory } => json!({
-                "kind": "trigger_file_picker",
-                "accept": accept,
-                "multiple": multiple,
-                "directory": directory,
-            }),
-            Self::NotifyStatus { level, code, message } => json!({
-                "kind": "notify_status",
-                "level": level.as_str(),
-                "code": code,
-                "message": message,
-            }),
-            Self::ClearDirectoryHandle => json!({
-                "kind": "clear_directory_handle",
-            }),
-            Self::SetDocumentLock { doc_id } => json!({
-                "kind": "set_document_lock",
-                "doc_id": doc_id,
-            }),
-        }
+        serde_json::to_value(self).unwrap_or_else(|_| json!({}))
     }
 
     /// Reconstruct a [`WebBridgeCommand`] from a JSON [`Value`].
     ///
     /// # Errors
-    /// Returns [`WebAdapterError::Serialization`] when required fields are missing or malformed.
+    /// Returns [`WebAdapterError::Serialization`] when required fields are missing or malformed,
+    /// or [`WebAdapterError::Validation`] when frame dimensions, DPI, or byte budgets violate bounds.
     pub fn from_json_value(value: &Value) -> Result<Self, WebAdapterError> {
-        let obj = require_object(value, "bridge command")?;
-        let kind = require_str_field(obj, "kind")?;
-        match kind {
-            "render_rgba_frame" => {
-                let width_px = parse_required_u32_field(obj, "width_px")?;
-                let height_px = parse_required_u32_field(obj, "height_px")?;
-                let dpi = parse_optional_validated_dpi(obj, "dpi", 96)?;
-                let expected_bytes = usize::try_from(width_px)
-                    .ok()
-                    .and_then(|w| usize::try_from(height_px).ok().and_then(|h| w.checked_mul(h)?.checked_mul(4)))
-                    .filter(|&bytes| bytes <= MAX_FRAME_RGBA_BYTES)
-                    .ok_or_else(|| {
-                        WebAdapterError::Validation(format!(
-                            "render_rgba_frame dimensions {width_px}x{height_px} exceed MAX_FRAME_RGBA_BYTES ({MAX_FRAME_RGBA_BYTES})"
-                        ))
-                    })?;
-                if let Some(raw_b64) = obj.get("rgba_base64").and_then(Value::as_str)
-                    && raw_b64.len() > MAX_FRAME_RGBA_BYTES.div_ceil(3).saturating_mul(4).saturating_add(64)
+        let expected_rgba =
+            if value.get("kind").and_then(Value::as_str) == Some("render_rgba_frame") { Some(precheck_render_rgba_frame(value)?) } else { None };
+        let mut cmd: Self = serde_json::from_value(value.clone()).map_err(map_serde_err)?;
+        match &mut cmd {
+            Self::RenderRgbaFrame { width_px, height_px, rgba_bytes, zoom, pan_pt, command_result, .. } => {
+                if let Some(expected) = expected_rgba
+                    && !rgba_bytes.is_empty()
+                    && rgba_bytes.len() != expected
                 {
-                    return Err(WebAdapterError::Validation(String::from("rgba_base64 exceeds MAX_FRAME_RGBA_BYTES")));
-                }
-                let rgba_bytes = decode_base64_field(obj, "rgba_base64", "rgba_bytes")?;
-                if !rgba_bytes.is_empty() && rgba_bytes.len() != expected_bytes {
                     return Err(WebAdapterError::Validation(format!(
-                        "rgba_bytes length {} does not match {width_px}x{height_px}x4 ({expected_bytes})",
+                        "rgba_bytes length {} does not match {width_px}x{height_px}x4 ({expected})",
                         rgba_bytes.len()
                     )));
                 }
-                let rgba_layers = decode_rgba_layers_json(obj)?;
-                let text_ops = decode_text_ops_json(obj)?;
-                let chrome = obj.get("chrome").map(WebChromeSnapshot::from_json_value).unwrap_or_default();
-                let zoom = require_f64_or_default(obj, "zoom", 1.0)?;
-                let pan_pt = parse_pan_pt(obj.get("pan_pt"))?;
-                let action = optional_str_field(obj, "action");
-                let command_result = obj.get("command_result").filter(|v| !v.is_null()).cloned();
-                Ok(Self::RenderRgbaFrame {
-                    width_px,
-                    height_px,
-                    dpi,
-                    rgba_bytes,
-                    rgba_layers,
-                    text_ops,
-                    chrome,
-                    zoom,
-                    pan_pt,
-                    action,
-                    command_result,
-                })
+                let _ = require_finite(*zoom, "zoom")?;
+                let _ = require_finite(pan_pt[0], "pan_pt[0]")?;
+                let _ = require_finite(pan_pt[1], "pan_pt[1]")?;
+                if command_result.as_ref().is_some_and(Value::is_null) {
+                    *command_result = None;
+                }
             }
-            "write_clipboard_items" => {
-                let payload_val = obj.get("payload").ok_or_else(|| WebAdapterError::Serialization(String::from("missing `payload`")))?;
-                Ok(Self::WriteClipboardItems { payload: WebClipboardPayload::from_json_value(payload_val)? })
+            Self::WriteClipboardItems { payload } => {
+                let _ = require_finite(payload.width_pt, "width_pt")?;
+                let _ = require_finite(payload.height_pt, "height_pt")?;
             }
-            "trigger_print_html" => {
-                let title = require_str_field(obj, "title")?.to_owned();
-                let svg_pages = obj
-                    .get("svg_pages")
-                    .and_then(Value::as_array)
-                    .map(|arr| arr.iter().filter_map(Value::as_str).map(str::to_owned).collect())
-                    .unwrap_or_default();
-                let html = optional_str_field(obj, "html").unwrap_or_default();
-                let pdf_bytes = decode_base64_field(obj, "pdf_base64", "pdf_bytes")?;
-                let scale_percent = require_f64_or_default(obj, "scale_percent", 100.0)?;
-                let page_sizes_pt = parse_page_sizes(obj.get("page_sizes_pt"))?;
-                Ok(Self::TriggerPrintHtml { title, svg_pages, html, pdf_bytes, scale_percent, page_sizes_pt })
+            Self::TriggerPrintHtml { scale_percent, page_sizes_pt, .. } => {
+                let _ = require_finite(*scale_percent, "scale_percent")?;
+                for &(w, h) in page_sizes_pt.iter() {
+                    let _ = require_finite(w, "page_sizes_pt.width")?;
+                    let _ = require_finite(h, "page_sizes_pt.height")?;
+                }
             }
-            "apply_directory_sync" => {
-                let root_name = require_str_field(obj, "root_name")?.to_owned();
-                let writes = parse_named_bytes_vec(obj, "writes")?;
-                let removals = obj
-                    .get("removals")
-                    .and_then(Value::as_array)
-                    .map(|arr| arr.iter().filter_map(Value::as_str).map(str::to_owned).collect())
-                    .unwrap_or_default();
-                let unchanged_count = parse_optional_usize_field(obj, "unchanged_count", 0)?;
-                Ok(Self::ApplyDirectorySync { root_name, plan: DirectorySyncPlan { writes, removals, unchanged_count } })
+            Self::SaveOrDownloadFile { mime_type, format, .. } => {
+                if mime_type.is_empty() {
+                    *mime_type = String::from(format.mime_type());
+                }
             }
-            "persist_local_storage" => {
-                let writes = parse_string_pairs(obj, "writes")?;
-                let removals = obj
-                    .get("removals")
-                    .and_then(Value::as_array)
-                    .map(|arr| arr.iter().filter_map(Value::as_str).map(str::to_owned).collect())
-                    .unwrap_or_default();
-                Ok(Self::PersistLocalStorage { writes, removals })
+            Self::SetDocumentLock { doc_id } => {
+                *doc_id = require_non_empty(doc_id, "doc_id")?.to_owned();
             }
-            "set_read_only_banner" => Ok(Self::SetReadOnlyBanner {
-                doc_id: require_str_field(obj, "doc_id")?.to_owned(),
-                read_only: obj.get("read_only").and_then(Value::as_bool).unwrap_or(false),
-                holder_tab_id: optional_str_field(obj, "holder_tab_id"),
-                message: optional_str_field(obj, "message"),
-            }),
-            "save_or_download_file" => {
-                let fmt_raw = require_str_field(obj, "format")?;
-                let format = WebExportFormat::from_name(fmt_raw)
-                    .ok_or_else(|| WebAdapterError::Serialization(format!("unknown export format `{fmt_raw}`")))?;
-                Ok(Self::SaveOrDownloadFile {
-                    file_name: require_str_field(obj, "file_name")?.to_owned(),
-                    mime_type: optional_str_field(obj, "mime_type").unwrap_or_else(|| String::from(format.mime_type())),
-                    bytes: decode_base64_field(obj, "bytes_base64", "bytes")?,
-                    format,
-                })
-            }
-            "trigger_file_picker" => Ok(Self::TriggerFilePicker {
-                accept: optional_str_field(obj, "accept").unwrap_or_default(),
-                multiple: obj.get("multiple").and_then(Value::as_bool).unwrap_or(false),
-                directory: obj.get("directory").and_then(Value::as_bool).unwrap_or(false),
-            }),
-            "notify_status" => {
-                let level_raw = optional_str_field(obj, "level").unwrap_or_else(|| String::from("info"));
-                let level = WebNoticeLevel::from_name(&level_raw).unwrap_or(WebNoticeLevel::Info);
-                Ok(Self::NotifyStatus {
-                    level,
-                    code: optional_str_field(obj, "code").unwrap_or_else(|| String::from("status")),
-                    message: optional_str_field(obj, "message").unwrap_or_default(),
-                })
-            }
-            "clear_directory_handle" => Ok(Self::ClearDirectoryHandle),
-            "set_document_lock" => {
-                let doc_id = require_non_empty(require_str_field(obj, "doc_id")?, "doc_id")?.to_owned();
-                Ok(Self::SetDocumentLock { doc_id })
-            }
-            other => Err(WebAdapterError::Serialization(format!("unknown bridge command kind `{other}`"))),
+            _ => {}
         }
+        Ok(cmd)
     }
 }
 
@@ -3153,7 +3206,7 @@ impl WebBridgeSession {
         let has_explicit_params = params.as_object().is_some_and(|obj| !obj.is_empty());
         let is_read_only_export_or_notice =
             matches!(route, WebCommandRoute::OpenFilePicker { .. } | WebCommandRoute::PrintCurrentSheet | WebCommandRoute::NoticeOnly { .. })
-                || matches!(route, WebCommandRoute::ExportFormat { .. } if !chrome_bridge::has_non_null_path_param(&params));
+                || matches!(route, WebCommandRoute::ExportFormat { .. } if !has_non_null_path_param(&params));
         if self.access_mode.is_read_only()
             && !is_read_only_export_or_notice
             && (!route.is_read_only_hint() || !is_command_read_only(command_id, Some(&params)))
@@ -3164,7 +3217,7 @@ impl WebBridgeSession {
         match route {
             WebCommandRoute::OpenFilePicker { accept } => Ok(vec![WebBridgeCommand::TriggerFilePicker { accept, multiple: true, directory: false }]),
             WebCommandRoute::ExportFormat { format, sheet_id } => {
-                if has_explicit_params && chrome_bridge::has_non_null_path_param(&params) && cmd::registry().get(command_id).is_some() {
+                if has_explicit_params && has_non_null_path_param(&params) && cmd::registry().get(command_id).is_some() {
                     return self.handle_execute_command(command_id, params);
                 }
                 let art = self.fs.export_bytes(&mut self.host, format, sheet_id.as_deref(), 300)?;
@@ -3250,9 +3303,8 @@ impl WebBridgeSession {
         self.dispatch_single_ui_input(UiInputEvent::TextInput { text })
     }
 
-    fn capture_pref_fingerprint(&self) -> (String, curvebook_ui_egui::theme::UiThemeMode, String) {
-        let app = self.host.app();
-        (app.locale.clone(), app.theme.mode, app.shortcuts.export_overrides_json().unwrap_or_default())
+    fn capture_pref_fingerprint(&self) -> HostPrefFingerprint {
+        capture_pref_fingerprint(self.host.app())
     }
 
     fn build_preferences_file(&self) -> PreferencesFile {
@@ -3286,11 +3338,7 @@ impl WebBridgeSession {
         Ok(WebBridgeCommand::PersistLocalStorage { writes: vec![(outcome.storage_key, outcome.encoded)], removals: outcome.evicted_keys })
     }
 
-    fn maybe_append_preferences_persist(
-        &mut self,
-        before: &(String, curvebook_ui_egui::theme::UiThemeMode, String),
-        cmds: &mut Vec<WebBridgeCommand>,
-    ) {
+    fn maybe_append_preferences_persist(&mut self, before: &HostPrefFingerprint, cmds: &mut Vec<WebBridgeCommand>) {
         if self.access_mode.is_read_only() || self.capture_pref_fingerprint() == *before {
             return;
         }
@@ -3571,7 +3619,7 @@ impl WebBridgeSession {
 
     fn handle_control_line(&mut self, line: &str) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
         let req: Value = serde_json::from_str(line).map_err(|err| WebAdapterError::Serialization(err.to_string()))?;
-        let obj = require_object(&req, "control request")?;
+        let obj = req.as_object().ok_or_else(|| WebAdapterError::Serialization(String::from("control request must be a JSON object")))?;
         let method = obj
             .get("method")
             .or_else(|| obj.get("op"))
@@ -3908,8 +3956,6 @@ fn ui_input_label(event: &UiInputEvent) -> &'static str {
     }
 }
 
-const MAX_READ_ONLY_NESTING_DEPTH: usize = 8;
-
 static NEXT_UNTITLED_DOC_SEQ: AtomicU64 = AtomicU64::new(1);
 
 fn fnv1a_64_hex(parts: &[&[u8]]) -> String {
@@ -4000,167 +4046,6 @@ fn next_untitled_doc_id(tab_id: &str) -> String {
     format!("untitled-{tab}-{seq}")
 }
 
-fn normalize_control_request_params(method: &str, obj: &Map<String, Value>) -> Value {
-    if method == "command.run" && (obj.contains_key("command") || obj.contains_key("command_id")) {
-        let mut out = Map::new();
-        if let Some(cmd) = obj.get("command") {
-            out.insert(String::from("command"), cmd.clone());
-        }
-        if let Some(cmd_id) = obj.get("command_id") {
-            out.insert(String::from("command_id"), cmd_id.clone());
-        }
-        if let Some(inner) = obj.get("params") {
-            out.insert(String::from("params"), inner.clone());
-        } else {
-            let mut inner = Map::new();
-            for (key, value) in obj {
-                if !matches!(key.as_str(), "id" | "method" | "op" | "command" | "command_id" | "params" | "token" | "auth_token") {
-                    inner.insert(key.clone(), value.clone());
-                }
-            }
-            if !inner.is_empty() {
-                out.insert(String::from("params"), Value::Object(inner));
-            }
-        }
-        return Value::Object(out);
-    }
-
-    let mut base = match obj.get("params") {
-        Some(Value::Object(map)) => map.clone(),
-        Some(other) if !other.is_null() => return other.clone(),
-        _ => Map::new(),
-    };
-    for (key, value) in obj {
-        if matches!(key.as_str(), "id" | "method" | "op" | "params" | "token" | "auth_token") {
-            continue;
-        }
-        base.entry(key.clone()).or_insert_with(|| value.clone());
-    }
-    Value::Object(base)
-}
-
-fn first_present_trimmed_str<'a>(obj: &'a Map<String, Value>, fields: &[&str]) -> Option<&'a str> {
-    for &field in fields {
-        if let Some(val) = obj.get(field)
-            && !val.is_null()
-        {
-            return val.as_str().map(str::trim).filter(|s| !s.is_empty());
-        }
-    }
-    None
-}
-
-fn extract_nested_params_like_control_io(obj: &Map<String, Value>) -> Value {
-    if let Some(explicit) = obj.get("params") {
-        return explicit.clone();
-    }
-    let mut stripped = obj.clone();
-    stripped.remove("command");
-    stripped.remove("command_id");
-    if stripped.is_empty() { Value::Null } else { Value::Object(stripped) }
-}
-
-fn extract_control_subcommand(command_id: &str, params: Option<&Value>) -> Option<(String, Value)> {
-    let obj = params?.as_object()?;
-    match command_id {
-        "command.run" => {
-            let inner = first_present_trimmed_str(obj, &["command", "command_id"])?.to_owned();
-            Some((inner, extract_nested_params_like_control_io(obj)))
-        }
-        "engine.execute" => {
-            let inner = first_present_trimmed_str(obj, &["command_id", "command"])?.to_owned();
-            let nested = obj.get("params").cloned().unwrap_or(Value::Null);
-            Some((inner, nested))
-        }
-        _ => None,
-    }
-}
-
-fn extract_batch_item_command(entry: &Value) -> Option<(String, Value)> {
-    let obj = entry.as_object()?;
-    let inner = first_present_trimmed_str(obj, &["command", "command_id"])?.to_owned();
-    Some((inner, extract_nested_params_like_control_io(obj)))
-}
-
-fn command_replaces_project(command_id: &str, params: &Value) -> bool {
-    command_replaces_project_depth(command_id, params, 0)
-}
-
-fn command_replaces_project_depth(command_id: &str, params: &Value, depth: usize) -> bool {
-    if depth > MAX_READ_ONLY_NESTING_DEPTH {
-        return false;
-    }
-    let trimmed = command_id.trim();
-    match trimmed {
-        "project.new" | "file.new" | "project.open" | "project.instantiateTemplate" => true,
-        "command.run" | "engine.execute" => extract_control_subcommand(trimmed, Some(params))
-            .is_some_and(|(inner, inner_params)| command_replaces_project_depth(&inner, &inner_params, depth + 1)),
-        "command.batch" => params.get("commands").and_then(Value::as_array).is_some_and(|cmds| {
-            cmds.iter().any(|entry| {
-                extract_batch_item_command(entry)
-                    .is_some_and(|(inner, inner_params)| command_replaces_project_depth(&inner, &inner_params, depth + 1))
-            })
-        }),
-        _ => false,
-    }
-}
-
-fn is_command_read_only(command_id: &str, params: Option<&Value>) -> bool {
-    is_command_read_only_depth(command_id, params, 0)
-}
-
-fn is_command_read_only_depth(command_id: &str, params: Option<&Value>, depth: usize) -> bool {
-    if depth > MAX_READ_ONLY_NESTING_DEPTH {
-        return false;
-    }
-    let command_id = command_id.trim();
-    let has_path = params.is_some_and(chrome_bridge::has_non_null_path_param);
-    if matches!(
-        command_id,
-        "analysis.exportJson"
-            | "analysis.exportCsv"
-            | "result.generateReport"
-            | "table.exportCsv"
-            | "export.svg"
-            | "graph.exportSvg"
-            | "export.pdf"
-            | "graph.exportPdf"
-            | "export.png"
-            | "graph.exportPng"
-            | "export.tiff"
-    ) {
-        return !has_path;
-    }
-    if let Some(spec) = cmd::registry().get(command_id) {
-        return spec.effects.read_only_hint();
-    }
-    if matches!(command_id, "command.run" | "engine.execute") {
-        return extract_control_subcommand(command_id, params)
-            .is_some_and(|(inner, inner_params)| is_command_read_only_depth(&inner, Some(&inner_params), depth + 1));
-    }
-    if command_id == "command.batch" {
-        return params.and_then(|p| p.get("commands")).and_then(Value::as_array).is_some_and(|cmds| {
-            cmds.iter().all(|entry| extract_batch_item_command(entry).is_some_and(|(id, p)| is_command_read_only_depth(&id, Some(&p), depth + 1)))
-        });
-    }
-    let base = command_id.split(':').next().unwrap_or(command_id);
-    if matches!(
-        base,
-        "ui.export.csv"
-            | "table.exportCsv"
-            | "export.svg"
-            | "graph.exportSvg"
-            | "export.pdf"
-            | "graph.exportPdf"
-            | "export.png"
-            | "graph.exportPng"
-            | "export.tiff"
-    ) {
-        return !has_path;
-    }
-    chrome_bridge::is_read_only_ui_command(base) || chrome_bridge::is_read_only_control_method(command_id)
-}
-
 fn build_print_html_document(title: &str, svg_pages: &[String], scale_percent: f64) -> String {
     let escaped_title = escape_html_text(title);
     let scale_factor = if scale_percent.is_finite() { (scale_percent / 100.0).clamp(0.1, 4.0) } else { 1.0 };
@@ -4195,44 +4080,16 @@ fn escape_html_text(raw: &str) -> String {
     out
 }
 
-fn touch_points_to_json(points: &[TouchPoint]) -> Value {
-    Value::Array(points.iter().map(|pt| json!({ "id": pt.id, "x": pt.x, "y": pt.y })).collect())
+fn require_finite(value: f64, key: &str) -> Result<f64, WebAdapterError> {
+    if value.is_finite() { Ok(value) } else { Err(WebAdapterError::Serialization(format!("field `{key}` must be a finite number"))) }
 }
 
-fn files_to_json_array(files: &[(String, Vec<u8>)]) -> Value {
-    Value::Array(files.iter().map(|(path, bytes)| json!({ "path": path, "bytes_base64": encode_base64(bytes) })).collect())
-}
-
-fn map_to_json_array(entries: &BTreeMap<String, Vec<u8>>) -> Value {
-    Value::Array(entries.iter().map(|(path, bytes)| json!({ "path": path, "bytes_base64": encode_base64(bytes) })).collect())
-}
-
-fn require_object<'a>(value: &'a Value, label: &str) -> Result<&'a Map<String, Value>, WebAdapterError> {
-    value.as_object().ok_or_else(|| WebAdapterError::Serialization(format!("{label} must be a JSON object")))
-}
-
-fn require_str_field<'a>(obj: &'a Map<String, Value>, key: &str) -> Result<&'a str, WebAdapterError> {
-    obj.get(key).and_then(Value::as_str).ok_or_else(|| WebAdapterError::Serialization(format!("missing string field `{key}`")))
-}
-
-fn optional_str_field(obj: &Map<String, Value>, key: &str) -> Option<String> {
-    obj.get(key).and_then(Value::as_str).map(str::to_owned)
-}
-
-fn require_f64_field(obj: &Map<String, Value>, key: &str) -> Result<f64, WebAdapterError> {
-    obj.get(key)
-        .and_then(Value::as_f64)
-        .filter(|v| v.is_finite())
-        .ok_or_else(|| WebAdapterError::Serialization(format!("missing finite numeric field `{key}`")))
-}
-
-fn require_f64_or_default(obj: &Map<String, Value>, key: &str, default: f64) -> Result<f64, WebAdapterError> {
-    match obj.get(key) {
-        None | Some(Value::Null) => Ok(default),
-        Some(v) => {
-            v.as_f64().filter(|n| n.is_finite()).ok_or_else(|| WebAdapterError::Serialization(format!("field `{key}` must be a finite number")))
-        }
+fn validate_touch_points_ref(points: &[TouchPoint]) -> Result<(), WebAdapterError> {
+    for pt in points {
+        let _ = require_finite(pt.x, "x")?;
+        let _ = require_finite(pt.y, "y")?;
     }
+    Ok(())
 }
 
 fn validate_web_dpi(dpi: u16, context: &str) -> Result<u16, WebAdapterError> {
@@ -4242,13 +4099,10 @@ fn validate_web_dpi(dpi: u16, context: &str) -> Result<u16, WebAdapterError> {
     Ok(dpi)
 }
 
-fn parse_optional_validated_dpi(obj: &Map<String, Value>, key: &str, default: u16) -> Result<u16, WebAdapterError> {
-    let Some(raw) = obj.get(key) else {
+fn parse_dpi_opt(raw: Option<&Value>, key: &str, default: u16) -> Result<u16, WebAdapterError> {
+    let Some(raw) = raw.filter(|v| !v.is_null()) else {
         return Ok(default);
     };
-    if raw.is_null() {
-        return Ok(default);
-    }
     let Some(val) = raw.as_u64() else {
         return Err(WebAdapterError::Validation(format!("`{key}` must be an integer in {MIN_CLIPBOARD_DPI}..={MAX_CLIPBOARD_DPI}")));
     };
@@ -4257,75 +4111,44 @@ fn parse_optional_validated_dpi(obj: &Map<String, Value>, key: &str, default: u1
     validate_web_dpi(dpi, key)
 }
 
-fn require_u64_or_default(obj: &Map<String, Value>, key: &str, default: u64) -> u64 {
-    obj.get(key).and_then(Value::as_u64).unwrap_or(default)
-}
-
-fn parse_required_u32_field(obj: &Map<String, Value>, key: &str) -> Result<u32, WebAdapterError> {
-    let raw =
-        obj.get(key).and_then(Value::as_u64).ok_or_else(|| WebAdapterError::Serialization(format!("missing non-negative integer field `{key}`")))?;
-    u32::try_from(raw).map_err(|_| WebAdapterError::Serialization(format!("integer field `{key}` value {raw} exceeds u32 range")))
-}
-
-fn parse_optional_u32_field(obj: &Map<String, Value>, key: &str, default: u32) -> Result<u32, WebAdapterError> {
-    let Some(val) = obj.get(key) else {
-        return Ok(default);
-    };
-    if val.is_null() {
-        return Ok(default);
+fn decode_wire_bytes(b64: Option<&str>, array: Option<&[Value]>, array_key: &str) -> Result<Vec<u8>, WebAdapterError> {
+    if let Some(raw_b64) = b64 {
+        return decode_base64(raw_b64);
     }
-    let raw = val.as_u64().ok_or_else(|| WebAdapterError::Serialization(format!("field `{key}` must be a non-negative integer")))?;
-    u32::try_from(raw).map_err(|_| WebAdapterError::Serialization(format!("integer field `{key}` value {raw} exceeds u32 range")))
-}
-
-fn parse_optional_usize_field(obj: &Map<String, Value>, key: &str, default: usize) -> Result<usize, WebAdapterError> {
-    let Some(val) = obj.get(key) else {
-        return Ok(default);
-    };
-    if val.is_null() {
-        return Ok(default);
+    if let Some(arr) = array {
+        if arr.len() > MAX_ARCHIVE_FILE_BYTES {
+            return Err(WebAdapterError::Validation(format!(
+                "`{array_key}` exceeds maximum allowed size ({} > {MAX_ARCHIVE_FILE_BYTES} bytes)",
+                arr.len()
+            )));
+        }
+        let mut out = Vec::new();
+        out.try_reserve_exact(arr.len()).map_err(|_| WebAdapterError::Serialization(format!("`{array_key}` exceeds memory budget")))?;
+        for item in arr {
+            let byte = item
+                .as_u64()
+                .and_then(|v| u8::try_from(v).ok())
+                .ok_or_else(|| WebAdapterError::Serialization(format!("`{array_key}` entries must be bytes 0..=255")))?;
+            out.push(byte);
+        }
+        return Ok(out);
     }
-    let raw = val.as_u64().ok_or_else(|| WebAdapterError::Serialization(format!("field `{key}` must be a non-negative integer")))?;
-    usize::try_from(raw).map_err(|_| WebAdapterError::Serialization(format!("integer field `{key}` value {raw} exceeds usize range")))
+    Ok(Vec::new())
 }
 
-fn parse_touch_points_field(obj: &Map<String, Value>, key: &str) -> Result<Vec<TouchPoint>, WebAdapterError> {
-    let arr = obj.get(key).and_then(Value::as_array).ok_or_else(|| WebAdapterError::Serialization(format!("missing array field `{key}`")))?;
-    let mut points = Vec::with_capacity(arr.len());
-    for item in arr {
-        let pt_obj = require_object(item, "touch point")?;
-        let id = pt_obj
-            .get("id")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| WebAdapterError::Serialization(String::from("touch point missing integer `id`")))?;
-        let x = require_f64_field(pt_obj, "x")?;
-        let y = require_f64_field(pt_obj, "y")?;
-        points.push(TouchPoint { id, x, y });
+fn decode_named_bytes_vec(entries: Vec<NamedBytesWire>, key: &str) -> Result<Vec<(String, Vec<u8>)>, WebAdapterError> {
+    if entries.len() > MAX_ZIP_ENTRIES {
+        return Err(WebAdapterError::Validation(format!("`{key}` exceeds maximum entry count ({} > {MAX_ZIP_ENTRIES})", entries.len())));
     }
-    Ok(points)
-}
-
-fn parse_i64_array(obj: &Map<String, Value>, key: &str) -> Result<Vec<i64>, WebAdapterError> {
-    let arr = obj.get(key).and_then(Value::as_array).ok_or_else(|| WebAdapterError::Serialization(format!("missing array field `{key}`")))?;
-    arr.iter().map(|v| v.as_i64().ok_or_else(|| WebAdapterError::Serialization(format!("array `{key}` entries must be integers")))).collect()
-}
-
-fn parse_named_bytes_vec(obj: &Map<String, Value>, key: &str) -> Result<Vec<(String, Vec<u8>)>, WebAdapterError> {
-    let arr = obj.get(key).and_then(Value::as_array).ok_or_else(|| WebAdapterError::Serialization(format!("missing array field `{key}`")))?;
-    if arr.len() > MAX_ZIP_ENTRIES {
-        return Err(WebAdapterError::Validation(format!("`{key}` exceeds maximum entry count ({} > {MAX_ZIP_ENTRIES})", arr.len())));
-    }
-    let mut out = Vec::with_capacity(arr.len());
+    let mut out = Vec::with_capacity(entries.len());
     let mut total_bytes = 0usize;
-    for entry in arr {
-        let item = require_object(entry, "named byte entry")?;
-        let path = require_str_field(item, "path")?.to_owned();
-        let bytes = decode_base64_field(item, "bytes_base64", "bytes")?;
+    for entry in entries {
+        let bytes = decode_wire_bytes(entry.bytes_base64.as_deref(), entry.bytes.as_deref(), "bytes")?;
         total_bytes = total_bytes
             .checked_add(bytes.len())
             .filter(|&sum| sum <= MAX_ARCHIVE_FILE_BYTES)
             .ok_or_else(|| WebAdapterError::Validation(format!("`{key}` exceeds total archive byte budget ({MAX_ARCHIVE_FILE_BYTES} bytes max)")))?;
-        out.push((path, bytes));
+        out.push((entry.path, bytes));
     }
     Ok(out)
 }
@@ -4398,112 +4221,12 @@ fn current_epoch_ms() -> u64 {
     }
 }
 
-fn parse_string_array_or_empty(obj: &Map<String, Value>, key: &str) -> Result<Vec<String>, WebAdapterError> {
-    let Some(raw) = obj.get(key) else {
-        return Ok(Vec::new());
-    };
-    if raw.is_null() {
-        return Ok(Vec::new());
-    }
-    let arr = raw.as_array().ok_or_else(|| WebAdapterError::Serialization(format!("field `{key}` must be a string array")))?;
-    arr.iter()
-        .map(|v| v.as_str().map(str::to_owned).ok_or_else(|| WebAdapterError::Serialization(format!("array `{key}` entries must be strings"))))
-        .collect()
-}
-
-fn parse_string_pairs(obj: &Map<String, Value>, key: &str) -> Result<Vec<(String, String)>, WebAdapterError> {
-    let arr = obj.get(key).and_then(Value::as_array).ok_or_else(|| WebAdapterError::Serialization(format!("missing array field `{key}`")))?;
-    let mut out = Vec::with_capacity(arr.len());
-    for entry in arr {
-        let item = require_object(entry, "key/value entry")?;
-        let k = require_str_field(item, "key")?.to_owned();
-        let v = require_str_field(item, "value")?.to_owned();
-        out.push((k, v));
-    }
-    Ok(out)
-}
-
-fn parse_pan_pt(value: Option<&Value>) -> Result<[f64; 2], WebAdapterError> {
-    let Some(arr) = value.and_then(Value::as_array) else {
-        return Ok([0.0, 0.0]);
-    };
-    let [x_val, y_val] = arr.as_slice() else {
-        return Err(WebAdapterError::Serialization(String::from("`pan_pt` must contain exactly 2 elements")));
-    };
-    let x = x_val.as_f64().filter(|v| v.is_finite()).ok_or_else(|| WebAdapterError::Serialization(String::from("invalid `pan_pt[0]`")))?;
-    let y = y_val.as_f64().filter(|v| v.is_finite()).ok_or_else(|| WebAdapterError::Serialization(String::from("invalid `pan_pt[1]`")))?;
-    Ok([x, y])
-}
-
-fn parse_page_sizes(value: Option<&Value>) -> Result<Vec<(f64, f64)>, WebAdapterError> {
-    let Some(arr) = value.and_then(Value::as_array) else {
-        return Ok(Vec::new());
-    };
-    let mut sizes = Vec::with_capacity(arr.len());
-    for pair in arr {
-        let pair_arr = pair.as_array().ok_or_else(|| WebAdapterError::Serialization(String::from("page size must be [w, h]")))?;
-        let [w_val, h_val] = pair_arr.as_slice() else {
-            return Err(WebAdapterError::Serialization(String::from("page size pair must have length 2")));
-        };
-        let w = w_val.as_f64().filter(|v| v.is_finite()).ok_or_else(|| WebAdapterError::Serialization(String::from("invalid page width")))?;
-        let h = h_val.as_f64().filter(|v| v.is_finite()).ok_or_else(|| WebAdapterError::Serialization(String::from("invalid page height")))?;
-        sizes.push((w, h));
-    }
-    Ok(sizes)
-}
-
-fn decode_base64_field(obj: &Map<String, Value>, b64_key: &str, array_key: &str) -> Result<Vec<u8>, WebAdapterError> {
-    if let Some(raw_b64) = obj.get(b64_key).and_then(Value::as_str) {
-        return decode_base64(raw_b64);
-    }
-    if let Some(arr) = obj.get(array_key).and_then(Value::as_array) {
-        if arr.len() > MAX_ARCHIVE_FILE_BYTES {
-            return Err(WebAdapterError::Validation(format!(
-                "`{array_key}` exceeds maximum allowed size ({} > {MAX_ARCHIVE_FILE_BYTES} bytes)",
-                arr.len()
-            )));
-        }
-        let mut out = Vec::new();
-        out.try_reserve_exact(arr.len()).map_err(|_| WebAdapterError::Serialization(format!("`{array_key}` exceeds memory budget")))?;
-        for item in arr {
-            let byte = item
-                .as_u64()
-                .and_then(|v| u8::try_from(v).ok())
-                .ok_or_else(|| WebAdapterError::Serialization(format!("`{array_key}` entries must be bytes 0..=255")))?;
-            out.push(byte);
-        }
-        return Ok(out);
-    }
-    Ok(Vec::new())
-}
-
 pub(crate) fn encode_base64_slice(input: &[u8]) -> String {
     encode_base64(input)
 }
 
 pub(crate) fn decode_base64_str(input: &str) -> Result<Vec<u8>, WebAdapterError> {
     decode_base64(input)
-}
-
-fn modifiers_to_json(mods: KeyModifiers) -> Value {
-    json!({
-        "ctrl": mods.ctrl,
-        "shift": mods.shift,
-        "alt": mods.alt,
-        "meta": mods.meta,
-    })
-}
-
-fn parse_modifiers_field(obj: &Map<String, Value>, key: &str) -> KeyModifiers {
-    let Some(m) = obj.get(key).and_then(Value::as_object) else {
-        return KeyModifiers::default();
-    };
-    KeyModifiers {
-        ctrl: m.get("ctrl").and_then(Value::as_bool).unwrap_or(false),
-        shift: m.get("shift").and_then(Value::as_bool).unwrap_or(false),
-        alt: m.get("alt").and_then(Value::as_bool).unwrap_or(false),
-        meta: m.get("meta").and_then(Value::as_bool).unwrap_or(false),
-    }
 }
 
 fn pointer_button_as_str(button: PointerButton) -> &'static str {
@@ -4514,113 +4237,24 @@ fn pointer_button_as_str(button: PointerButton) -> &'static str {
     }
 }
 
-fn parse_pointer_button(value: Option<&Value>) -> PointerButton {
-    match value.and_then(Value::as_str).map(str::to_ascii_lowercase).as_deref() {
+fn parse_pointer_button(value: Option<&str>) -> PointerButton {
+    match value.map(str::to_ascii_lowercase).as_deref() {
         Some("secondary" | "right") => PointerButton::Secondary,
         Some("middle") => PointerButton::Middle,
         _ => PointerButton::Primary,
     }
 }
 
-const B64_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
 fn encode_base64(input: &[u8]) -> String {
-    if input.is_empty() {
-        return String::new();
-    }
-    let b64_char = |idx: usize| -> char { B64_ALPHABET.get(idx & 0x3f).copied().map_or('A', char::from) };
-    let mut out = String::new();
-    if out.try_reserve_exact(input.len().div_ceil(3).saturating_mul(4)).is_err() {
-        return String::new();
-    }
-    for chunk in input.chunks(3) {
-        let Some(&b0_u8) = chunk.first() else {
-            continue;
-        };
-        let b0 = usize::from(b0_u8);
-        let b1 = usize::from(chunk.get(1).copied().unwrap_or(0));
-        let b2 = usize::from(chunk.get(2).copied().unwrap_or(0));
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-
-        out.push(b64_char(triple >> 18));
-        out.push(b64_char(triple >> 12));
-        if chunk.len() > 1 {
-            out.push(b64_char(triple >> 6));
-        } else {
-            out.push('=');
-        }
-        if chunk.len() > 2 {
-            out.push(b64_char(triple));
-        } else {
-            out.push('=');
-        }
-    }
-    out
+    curvebook_platform::base64::encode(input)
 }
 
 fn decode_base64(input: &str) -> Result<Vec<u8>, WebAdapterError> {
-    let max_b64_input_bytes = MAX_ARCHIVE_FILE_BYTES.saturating_mul(2);
-    if input.len() > max_b64_input_bytes {
-        return Err(WebAdapterError::Validation(format!(
-            "base64 payload exceeds maximum allowed size ({} > {max_b64_input_bytes} bytes)",
-            input.len()
-        )));
-    }
-    let mut compact = Vec::new();
-    compact.try_reserve_exact(input.len()).map_err(|_| WebAdapterError::Serialization(String::from("base64 input exceeds memory budget")))?;
-    compact.extend(input.bytes().filter(|b| !b.is_ascii_whitespace()));
-    if compact.is_empty() {
-        return Ok(Vec::new());
-    }
-    if !compact.len().is_multiple_of(4) {
-        return Err(WebAdapterError::Serialization(String::from("base64 length must be a multiple of 4")));
-    }
-
-    let pad_bytes = match compact.as_slice() {
-        [.., a, b] => usize::from(*b == b'=') + usize::from(*a == b'='),
-        _ => 0,
-    };
-    let exact_decoded = (compact.len() / 4).saturating_mul(3).saturating_sub(pad_bytes);
-    if exact_decoded > MAX_ARCHIVE_FILE_BYTES {
-        return Err(WebAdapterError::Validation(format!(
-            "decoded base64 payload exceeds maximum allowed size ({exact_decoded} > {MAX_ARCHIVE_FILE_BYTES} bytes)"
-        )));
-    }
-    let mut out = Vec::new();
-    out.try_reserve_exact(exact_decoded).map_err(|_| WebAdapterError::Serialization(String::from("decoded base64 payload exceeds memory budget")))?;
-    let (chunks, _rem) = compact.as_chunks::<4>();
-    for (chunk_idx, chunk) in chunks.iter().enumerate() {
-        let is_last = chunk_idx + 1 == compact.len() / 4;
-        let v0 = decode_b64_digit(chunk[0])?;
-        let v1 = decode_b64_digit(chunk[1])?;
-        let pad2 = chunk[2] == b'=';
-        let pad3 = chunk[3] == b'=';
-        if (pad2 && !pad3) || ((pad2 || pad3) && !is_last) {
-            return Err(WebAdapterError::Serialization(String::from("invalid base64 padding")));
-        }
-        let v2 = if pad2 { 0 } else { decode_b64_digit(chunk[2])? };
-        let v3 = if pad3 { 0 } else { decode_b64_digit(chunk[3])? };
-        let triple = (u32::from(v0) << 18) | (u32::from(v1) << 12) | (u32::from(v2) << 6) | u32::from(v3);
-
-        out.push(((triple >> 16) & 0xff) as u8);
-        if !pad2 {
-            out.push(((triple >> 8) & 0xff) as u8);
-        }
-        if !pad3 {
-            out.push((triple & 0xff) as u8);
-        }
-    }
-    Ok(out)
-}
-
-fn decode_b64_digit(byte: u8) -> Result<u8, WebAdapterError> {
-    match byte {
-        b'A'..=b'Z' => Ok(byte - b'A'),
-        b'a'..=b'z' => Ok(byte - b'a' + 26),
-        b'0'..=b'9' => Ok(byte - b'0' + 52),
-        b'+' => Ok(62),
-        b'/' => Ok(63),
-        _ => Err(WebAdapterError::Serialization(format!("invalid base64 byte 0x{byte:02x}"))),
+    match curvebook_platform::base64::decode_capped(input, MAX_ARCHIVE_FILE_BYTES) {
+        Ok(bytes) => Ok(bytes),
+        Err(curvebook_platform::Base64Error::Empty) => Ok(Vec::new()),
+        Err(err @ curvebook_platform::Base64Error::MaxSizeExceeded { .. }) => Err(WebAdapterError::Validation(err.to_string())),
+        Err(err) => Err(WebAdapterError::Serialization(err.to_string())),
     }
 }
 

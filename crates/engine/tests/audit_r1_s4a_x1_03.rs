@@ -109,7 +109,7 @@ fn r1_x1_03_fifo_and_symlink_to_fifo_rejected_without_blocking() -> TestResult {
 
     for (cmd, params) in [
         ("table.importTidyLong", json!({ "path": fifo_str })),
-        ("table.pasteLink", json!({ "target_sheet_id": "d1", "path": fifo_str })),
+        ("table.pasteLink", json!({ "target_sheet_id": "d1", "source_path": fifo_str })),
         ("table.importPzfx", json!({ "path": fifo_str })),
         ("table.importPrism", json!({ "path": fifo_str })),
         ("project.open", json!({ "path": fifo_str })),
@@ -207,7 +207,7 @@ fn r1_x1_03_oversized_files_rejected_before_allocation() -> TestResult {
     for (cmd, params) in [
         ("table.importCsv", json!({ "path": big_csv_str })),
         ("table.importTidyLong", json!({ "path": big_csv_str })),
-        ("table.pasteLink", json!({ "target_sheet_id": "d1", "path": big_csv_str })),
+        ("table.pasteLink", json!({ "target_sheet_id": "d1", "source_path": big_csv_str })),
         ("table.importPzfx", json!({ "path": big_pzfx_str })),
         ("table.importPrism", json!({ "path": big_archive_str })),
         ("project.open", json!({ "path": big_archive_str })),

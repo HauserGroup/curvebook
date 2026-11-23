@@ -57,8 +57,8 @@ fn untranslated_report() {
     let expected = ["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr", "ar", "he"];
     assert_eq!(LOCALES, &expected);
     assert_eq!(LOCALES.len(), 16);
-    assert_eq!(catalog_len(), 977);
-    assert_eq!(LOCALES.len() * catalog_len(), 15_632);
+    assert_eq!(catalog_len(), 708);
+    assert_eq!(LOCALES.len() * catalog_len(), 11_328);
     assert!(!CATALOG.is_empty());
 
     let mut seen_keys = HashSet::new();
@@ -411,48 +411,40 @@ fn verify_tr_keys_exist(calls: &[(String, String)]) -> Result<(), String> {
 
 #[test]
 fn shard_catalog_aggregation_searches_extra_slices_cleanly() {
-    assert_eq!(EXTRA_SHARD_CATALOGS.len(), 18);
-    let eu_slice = &[entry!("shard.test.key" => [
-        en: "Test Key",
-        de: "Testschlüssel",
-        es: "",
-        fr: "",
-        ja: "",
-        ko: "",
-        pt_br: "",
-        zh_cn: "",
-        zh_tw: "",
-        it: "",
-        nl: "",
-        pl: "",
-        ru: "",
-        tr: "",
-        ar: "",
-        he: "",
-    ])];
-    let cjk_slice = &[entry!("shard.test.key" => [
-        en: "",
-        de: "",
-        es: "",
-        fr: "",
-        ja: "テストキー",
-        ko: "",
-        pt_br: "",
-        zh_cn: "",
-        zh_tw: "",
-        it: "",
-        nl: "",
-        pl: "",
-        ru: "",
-        tr: "",
-        ar: "مفتاح اختبار",
-        he: "",
-    ])];
+    assert!(EXTRA_SHARD_CATALOGS.is_empty());
+    let eu_slice = &[super::CatalogEntry {
+        key: "shard.test.key",
+        translations: ["Test Key", "Testschlüssel", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+    }];
+    let cjk_slice = &[super::CatalogEntry {
+        key: "shard.test.key",
+        translations: ["", "", "", "", "テストキー", "", "", "", "", "", "", "", "", "", "مفتاح اختبار", ""],
+    }];
     let slices: &[&[super::CatalogEntry]] = &[eu_slice, cjk_slice];
     assert_eq!(try_tr_in_slices(slices, "de", "shard.test.key"), Some("Testschlüssel"));
     assert_eq!(try_tr_in_slices(slices, "ja", "shard.test.key"), Some("テストキー"));
     assert_eq!(try_tr_in_slices(slices, "ar", "shard.test.key"), Some("مفتاح اختبار"));
     assert_eq!(try_tr_in_slices(slices, "fr", "shard.test.key"), None);
+}
+
+#[test]
+fn catalog_is_strictly_sorted_unique_and_matches_binary_search() {
+    assert_eq!(CATALOG.len(), catalog_len());
+    for pair in CATALOG.windows(2) {
+        assert!(pair[0].key < pair[1].key, "CATALOG must be strictly sorted with zero duplicates: `{}` vs `{}`", pair[0].key, pair[1].key);
+    }
+    for entry in CATALOG {
+        for (idx, &locale) in LOCALES.iter().enumerate() {
+            let expected = Some(entry.translations[idx]);
+            assert_eq!(try_tr(locale, entry.key), expected, "binary-search mismatch for ({locale}, {})", entry.key);
+            if let Some(cmd_id) = entry.key.strip_prefix("cmd.") {
+                assert_eq!(try_tr_command(locale, cmd_id), expected, "command binary-search mismatch for ({locale}, {cmd_id})");
+            }
+        }
+    }
+    assert_eq!(try_tr("en", ""), None);
+    assert_eq!(try_tr("en", "zzz.nonexistent.key"), None);
+    assert_eq!(try_tr_command("en", "nonexistent.command"), None);
 }
 
 #[test]

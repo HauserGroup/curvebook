@@ -17,7 +17,7 @@ use crate::modal_predicates::{
 use crate::egui_shell::stat_anova_modal::{
     StepperSpec, render_modal_checkbox, render_modal_radio, render_modal_seg_btn, render_modal_textbox_row, render_section_title, render_stepper_row,
 };
-use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens};
+use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens, UiIntent};
 
 use super::factorial_mv::{MultivariateDesignCtx, render_factorial_anova_design, render_multivariate_design_controls};
 use super::helpers::{
@@ -716,7 +716,7 @@ fn render_stat_rm_tab(
                 ep.paired_or_matched,
                 &paired_en,
             ) {
-                intents.push_dialog_widget_click("edit.paired_or_matched");
+                intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("edit.paired_or_matched") });
             }
         }
         _ => {}
@@ -820,7 +820,7 @@ fn render_stat_options_tab(
         let sph = r1b_sphericity_correction(ep.paired_or_matched, reml_active);
         let gg_checked = !matches!(a.method, OneWayMethod::RepeatedMeasures { geisser_greenhouse: false });
         if render_modal_checkbox(ui, tokens, meta, "edit.sphericity.geisser_greenhouse", "Geisser-Greenhouse", gg_checked, &sph) {
-            intents.push_dialog_widget_click("edit.sphericity.geisser_greenhouse");
+            intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("edit.sphericity.geisser_greenhouse") });
         }
     }
 }

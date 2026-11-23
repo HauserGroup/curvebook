@@ -24,7 +24,7 @@ use egui::{Color32, Pos2, Sense, Stroke, Vec2};
 use serde_json::json;
 
 use crate::UiApp;
-use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, ResponsiveShellLayout, Tokens, widgets};
+use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, ResponsiveShellLayout, Tokens, UiIntent, widgets};
 use crate::i18n::is_rtl_locale;
 use crate::inspect::ZLayer;
 
@@ -322,7 +322,7 @@ pub fn render_trailing_studio(
         let on_result_sheet = crate::interaction::resolve_result_sheet_for_shortcut(app, true).is_some();
         if crate::egui_shell::inspect_bridge::consume_matching_shortcut(ui.ctx(), app, on_result_sheet, |cmd| cmd == "ui.inspector.toggle").is_some()
         {
-            intents.push_toggle_trailing_collapsed_rail();
+            intents.push(UiIntent::ToggleTrailingCollapsedRail);
         }
     }
 
@@ -415,7 +415,7 @@ pub fn render_trailing_studio(
                         },
                     );
                     if c_resp && ctx_in.enabled {
-                        intents.push_toggle_trailing_collapsed_rail();
+                        intents.push(UiIntent::ToggleTrailingCollapsedRail);
                     }
                 });
             });
@@ -517,7 +517,7 @@ fn render_trailing_dock_splitter(
         if enabled {
             if resp.double_clicked() {
                 let default_w = app.egui_views.workspace_preset.default_dock_config().trailing_width_pt;
-                intents.push_sync_trailing_width(default_w);
+                intents.push(UiIntent::SyncTrailingWidth { width_pt: default_w });
             } else if resp.dragged() {
                 let delta_w = if ctx_in.layout.rtl_mirrored { resp.drag_delta().x } else { -resp.drag_delta().x };
                 if delta_w.abs() > 0.01 {
@@ -538,7 +538,7 @@ fn render_trailing_dock_splitter(
                         .max(metrics.inspector_min_w);
                     let new_w =
                         (ctx_in.layout.trailing_dock_w_pt + delta_w).clamp(metrics.inspector_min_w, metrics.inspector_max_w.min(max_for_center));
-                    intents.push_sync_trailing_width(new_w);
+                    intents.push(UiIntent::SyncTrailingWidth { width_pt: new_w });
                 }
             }
         }

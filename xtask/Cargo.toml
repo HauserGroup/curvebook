@@ -19,6 +19,7 @@ full-gates = [
     "dep:curvebook-stats",
     "dep:curvebook-svg",
     "dep:curvebook-ui-egui",
+    "curvebook-ui-egui/test-support",
 ]
 
 [dependencies]
@@ -36,6 +37,7 @@ curvebook-stats = { workspace = true, optional = true }
 curvebook-svg = { workspace = true, optional = true }
 curvebook-testkit = { workspace = true }
 curvebook-ui-egui = { workspace = true, default-features = false, optional = true }
+flate2 = { workspace = true }
 semver = { workspace = true }
 serde_json = { workspace = true }
 

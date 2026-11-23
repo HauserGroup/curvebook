@@ -558,7 +558,7 @@ fn fa_sec17_05_canvas_media_insert_passes_sheet_id() -> TestRes {
 #[test]
 fn fa_sec17_06_survival_codes_validated_and_parts_dead_checkbox_removed() -> TestRes {
     let mut app = UiApp::new();
-    // 1. Engine `sheet.createData` accepts `event_code` / `censored_code` + camelCase aliases and rejects equality.
+    // 1. Engine `sheet.createData` accepts canonical `event_code` / `censored_code`, rejects retired camelCase aliases, and rejects equality.
     app.execute_command(
         "sheet.createData",
         json!({ "sheet_id": "surv-1", "kind": "survival", "cols": 2, "rows": 3, "event_code": 2, "censored_code": 3, "auto_graph": false }),
@@ -572,15 +572,23 @@ fn fa_sec17_06_survival_codes_validated_and_parts_dead_checkbox_removed() -> Tes
     }
     app.execute_command(
         "sheet.createData",
-        json!({ "sheet_id": "surv-camel", "kind": "survival", "cols": 2, "rows": 3, "eventCode": 7, "censoredCode": 9, "auto_graph": false }),
+        json!({ "sheet_id": "surv-custom", "kind": "survival", "cols": 2, "rows": 3, "event_code": 7, "censored_code": 9, "auto_graph": false }),
     )?;
-    match &app.document().data_sheet(&SheetId::new("surv-camel")).ok_or("missing surv-camel")?.archetype {
+    match &app.document().data_sheet(&SheetId::new("surv-custom")).ok_or("missing surv-custom")?.archetype {
         TableArchetype::Survival(s) => {
             assert_eq!(s.event_code, 7);
             assert_eq!(s.censored_code, 9);
         }
         other => return Err(format!("expected Survival, got {:?}", other.kind()).into()),
     }
+    assert!(
+        app.execute_command(
+            "sheet.createData",
+            json!({ "sheet_id": "surv-camel", "kind": "survival", "cols": 2, "rows": 3, "eventCode": 7, "censoredCode": 9, "auto_graph": false }),
+        )
+        .is_err(),
+        "retired camelCase aliases eventCode/censoredCode must be rejected"
+    );
     assert!(
         app.execute_command("sheet.createData", json!({ "sheet_id": "surv-bad-1", "kind": "survival", "event_code": 0 })).is_err(),
         "event_code == default censored_code (0) must be rejected"

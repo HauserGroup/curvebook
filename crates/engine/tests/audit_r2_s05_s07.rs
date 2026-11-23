@@ -124,33 +124,22 @@ fn r2_s07_01_convert_archetype_strict_policy_aliases_preview_and_undo() {
         .unwrap_err();
     assert_eq!(err_strict.code, ErrorCode::GuiOnlyViolation);
 
-    // Read-only preview aliases (`preview_only`, `previewOnly`, `dry_run`) permitted under Strict.
-    for alias in ["preview_only", "previewOnly", "dry_run"] {
-        let preview = session
-            .execute_with_caller(
-                "table.convertArchetype",
-                json!({ "sheet_id": "col-1", "target_kind": "Grouped", alias: true }),
-                Caller::Mcp,
-                &cancel,
-            )
-            .unwrap();
-        assert!(!preview.mutated);
-    }
-
-    // Conflicting or non-boolean preview flags rejected cleanly instead of mis-routing.
-    let conflict = session
+    // Read-only preview (`preview_only: true`) permitted under Strict; retired aliases rejected.
+    let preview = session
         .execute_with_caller(
             "table.convertArchetype",
-            json!({ "sheet_id": "col-1", "target_kind": "Grouped", "preview_only": true, "dry_run": false }),
-            Caller::Ui,
+            json!({ "sheet_id": "col-1", "target_kind": "Grouped", "preview_only": true }),
+            Caller::Mcp,
             &cancel,
         )
-        .unwrap_err();
-    assert_eq!(conflict.code, ErrorCode::BadInput);
+        .unwrap();
+    assert!(!preview.mutated);
+
+    // Non-boolean `preview_only` rejected cleanly instead of mis-routing.
     let non_bool_mcp = session
         .execute_with_caller(
             "table.convertArchetype",
-            json!({ "sheet_id": "col-1", "target_kind": "Grouped", "dry_run": "yes" }),
+            json!({ "sheet_id": "col-1", "target_kind": "Grouped", "preview_only": "yes" }),
             Caller::Mcp,
             &cancel,
         )
@@ -159,7 +148,7 @@ fn r2_s07_01_convert_archetype_strict_policy_aliases_preview_and_undo() {
     let non_bool_ui = session
         .execute_with_caller(
             "table.convertArchetype",
-            json!({ "sheet_id": "col-1", "target_kind": "Grouped", "dry_run": "yes" }),
+            json!({ "sheet_id": "col-1", "target_kind": "Grouped", "preview_only": "yes" }),
             Caller::Ui,
             &cancel,
         )
@@ -244,17 +233,21 @@ fn r2_s07_03_and_12_methods_report_accuracy_latex_safety_and_audit_parity() {
     assert!(!mw_txt.contains("Cohen's d"), "Mann-Whitney must not claim Cohen's d: {mw_txt}");
 
     // 2. One-way ANOVA coercions: KruskalWallis + TukeyHsd -> Dunn/Bonferroni (no Tukey), Welch -> Games-Howell, Friedman -> no post-hoc.
-    ok_cmd(&mut session, "stats.run", json!({ "source_sheet": "col-3g", "sheet_id": "kw-tuk", "kind": "kruskal_wallis", "multiplicity": "tukey" }));
+    ok_cmd(
+        &mut session,
+        "stats.run",
+        json!({ "source_sheet_id": "col-3g", "sheet_id": "kw-tuk", "kind": "kruskal_wallis", "multiplicity": "tukey" }),
+    );
     let kw_rep = generate_methods_report(session.document(), &SheetId::new("kw-tuk"), ReportFormat::PlainText).unwrap();
     assert!(kw_rep.contains("Dunn's nonparametric rank-sum") && kw_rep.contains("Bonferroni"), "{kw_rep}");
     assert!(!kw_rep.contains("Tukey"), "{kw_rep}");
 
-    ok_cmd(&mut session, "stats.run", json!({ "source_sheet": "col-3g", "sheet_id": "bf-tuk", "kind": "welch_anova", "multiplicity": "tukey" }));
+    ok_cmd(&mut session, "stats.run", json!({ "source_sheet_id": "col-3g", "sheet_id": "bf-tuk", "kind": "welch_anova", "multiplicity": "tukey" }));
     let bf_rep = generate_methods_report(session.document(), &SheetId::new("bf-tuk"), ReportFormat::PlainText).unwrap();
     assert!(bf_rep.contains("Games-Howell"), "{bf_rep}");
     assert!(!bf_rep.contains("Tukey") && !bf_rep.contains("eta-squared"), "{bf_rep}");
 
-    ok_cmd(&mut session, "stats.run", json!({ "source_sheet": "col-3g", "sheet_id": "fr-tuk", "kind": "friedman", "multiplicity": "tukey" }));
+    ok_cmd(&mut session, "stats.run", json!({ "source_sheet_id": "col-3g", "sheet_id": "fr-tuk", "kind": "friedman", "multiplicity": "tukey" }));
     let fr_rep = generate_methods_report(session.document(), &SheetId::new("fr-tuk"), ReportFormat::PlainText).unwrap();
     assert!(fr_rep.contains("Post-hoc pairwise comparisons were not computed"), "{fr_rep}");
     assert!(!fr_rep.contains("Tukey"), "{fr_rep}");
@@ -302,7 +295,7 @@ fn r2_s07_03_and_12_methods_report_accuracy_latex_safety_and_audit_parity() {
     ok_cmd(
         &mut session,
         "transform.run",
-        json!({ "source_sheet": "xy-tr", "sheet_id": "tr-xy", "kind": "math", "x_transform": "ln", "y_transform": "log10" }),
+        json!({ "source_sheet_id": "xy-tr", "sheet_id": "tr-xy", "kind": "math", "x_transform": "ln", "y_transform": "log10" }),
     );
     let tr_rep = generate_methods_report(session.document(), &SheetId::new("tr-xy"), ReportFormat::PlainText).unwrap();
     assert!(tr_rep.contains("X: ln(X); Y: log10(Y)"), "{tr_rep}");
@@ -374,7 +367,7 @@ fn r2_s07_04_stats_run_and_update_params_forward_cox_ties_ref_levels_and_inner_v
         &mut session,
         "stats.run",
         json!({
-            "source_sheet": "mv-cox",
+            "source_sheet_id": "mv-cox",
             "sheet_id": "res-cox",
             "kind": "cox_ph",
             "time_column": 0,
@@ -433,7 +426,7 @@ fn r2_s07_04_stats_run_and_update_params_forward_cox_ties_ref_levels_and_inner_v
     assert!(res2.tabs.iter().any(|t| t.footnotes.iter().any(|f| f.contains("Exact"))));
 
     // Inner-variant patching works for OutlierDetection (changing fdr_q_percent inside nested enum) and rejects malformed inner patch.
-    ok_cmd(&mut session, "stats.run", json!({ "source_sheet": "xy-1", "sheet_id": "res-out", "kind": "outliers" }));
+    ok_cmd(&mut session, "stats.run", json!({ "source_sheet_id": "xy-1", "sheet_id": "res-out", "kind": "outliers" }));
     let before_out = session.document().result_sheet(&SheetId::new("res-out")).unwrap().clone();
     let bad_patch = session.execute("analysis.updateParams", json!({ "sheet_id": "res-out", "fdr_q_percent": "bad" })).unwrap_err();
     assert_eq!(bad_patch.code, ErrorCode::BadInput);
@@ -550,15 +543,15 @@ fn r2_s07_06_calculated_columns_protected_across_all_mv_mutations() {
     ok_cmd(&mut session, "table.setCalculatedVariable", json!({ "sheet_id": "mv-guard", "title": "Scaled", "formula": "=Dose * 2" }));
     // Calculated column is at index 2.
     assert_eq!(
-        session.execute("table.setVariableRole", json!({ "sheet_id": "mv-guard", "column": 2, "role": "Continuous" })).unwrap_err().code,
+        session.execute("table.setVariableRole", json!({ "sheet_id": "mv-guard", "col": 2, "role": "Continuous" })).unwrap_err().code,
         ErrorCode::Conflict
     );
     assert_eq!(
-        session.execute("table.setVariableRole", json!({ "sheet_id": "mv-guard", "column": 0, "role": "Calculated" })).unwrap_err().code,
+        session.execute("table.setVariableRole", json!({ "sheet_id": "mv-guard", "col": 0, "role": "Calculated" })).unwrap_err().code,
         ErrorCode::BadInput
     );
     assert_eq!(
-        session.execute("table.recodeLevels", json!({ "sheet_id": "mv-guard", "column": 2, "mapping": { "2": "Two" } })).unwrap_err().code,
+        session.execute("table.recodeLevels", json!({ "sheet_id": "mv-guard", "col": 2, "mappings": { "2": "Two" } })).unwrap_err().code,
         ErrorCode::Conflict
     );
     assert_eq!(
@@ -598,7 +591,7 @@ fn r2_s07_07_parts_of_whole_rejects_kappa_in_runtime_execution() {
     let mut session = Session::from_document(doc);
 
     for kind in ["cohen_kappa", "fleiss_kappa"] {
-        let err = session.execute("stats.run", json!({ "source_sheet": "pow-k", "sheet_id": format!("res-{kind}"), "kind": kind })).unwrap_err();
+        let err = session.execute("stats.run", json!({ "source_sheet_id": "pow-k", "sheet_id": format!("res-{kind}"), "kind": kind })).unwrap_err();
         assert_eq!(err.code, ErrorCode::Conflict, "{kind} must be rejected on PartsOfWhole");
     }
 }
@@ -722,7 +715,7 @@ fn r2_s07_11_extract_result_tab_control_sanitization_ci_cells_and_locked_label()
     let mut doc = ProjectDocument::new("ExtractTab").unwrap();
     doc.add_data_sheet(seed_two_group_col("col-t")).unwrap();
     let mut session = Session::from_document(doc);
-    ok_cmd(&mut session, "stats.run", json!({ "source_sheet": "col-t", "sheet_id": "res-t", "kind": "unpaired_t" }));
+    ok_cmd(&mut session, "stats.run", json!({ "source_sheet_id": "col-t", "sheet_id": "res-t", "kind": "unpaired_t" }));
 
     ok_cmd(
         &mut session,
@@ -786,7 +779,7 @@ fn r2_s07_13_categorical_order_reference_level_and_randomize_groups_name_alias()
     doc.add_data_sheet(DataSheet::new("mv-cat", "Cat", TableArchetype::MultipleVariables(mv)).unwrap()).unwrap();
     let mut session = Session::from_document(doc);
 
-    ok_cmd(&mut session, "table.setCategoricalOrder", json!({ "sheet_id": "mv-cat", "column": 0, "reference_level": "Med" }));
+    ok_cmd(&mut session, "table.setCategoricalOrder", json!({ "sheet_id": "mv-cat", "col": 0, "reference_level": "Med" }));
     let TableArchetype::MultipleVariables(updated) = &session.document().data_sheet(&SheetId::new("mv-cat")).unwrap().archetype else {
         panic!("expected MV");
     };
@@ -801,7 +794,7 @@ fn r2_s07_13_categorical_order_reference_level_and_randomize_groups_name_alias()
         json!({
             "sheet_id": "rand-alias",
             "title": "Randomized",
-            "groups": [{ "name": "Vehicle", "weight": 1 }, { "name": "Drug", "weight": 2 }],
+            "groups": [{ "label": "Vehicle", "weight": 1 }, { "label": "Drug", "weight": 2 }],
             "subject_count": 6,
             "seed": 11
         }),
@@ -832,7 +825,7 @@ fn r2_s07_15_graph_create_accepts_result_sheet() {
     let mut doc = ProjectDocument::new("GraphResult").unwrap();
     doc.add_data_sheet(DataSheet::new("xy-src", "XY", TableArchetype::Xy(xy)).unwrap()).unwrap();
     let mut session = Session::from_document(doc);
-    ok_cmd(&mut session, "fit.run", json!({ "source_sheet": "xy-src", "sheet_id": "res-lin", "kind": "linear" }));
+    ok_cmd(&mut session, "fit.run", json!({ "source_sheet_id": "xy-src", "sheet_id": "res-lin", "kind": "linear" }));
 
     ok_cmd(&mut session, "graph.create", json!({ "sheet_id": "g-from-res", "data_sheet_id": "res-lin" }));
     assert!(session.document().graph_sheet(&SheetId::new("g-from-res")).is_some());
@@ -843,7 +836,7 @@ fn r2_s07_16_graph_set_spec_and_add_annotation_validate_strictly() {
     let mut doc = ProjectDocument::new("GraphValidate").unwrap();
     doc.add_data_sheet(seed_two_group_col("col-gv")).unwrap();
     let mut session = Session::from_document(doc);
-    ok_cmd(&mut session, "stats.run", json!({ "source_sheet": "col-gv", "sheet_id": "res-gv", "kind": "unpaired_t" }));
+    ok_cmd(&mut session, "stats.run", json!({ "source_sheet_id": "col-gv", "sheet_id": "res-gv", "kind": "unpaired_t" }));
     ok_cmd(&mut session, "graph.create", json!({ "sheet_id": "g-v", "data_sheet_id": "col-gv", "kind": "column" }));
 
     let err_spec = session
@@ -881,19 +874,19 @@ fn r2_s07_18_random_sample_seed_validation_and_default_proportional() {
     let mut session = Session::from_document(doc);
 
     let frac_err = session
-        .execute("transform.run", json!({ "source_sheet": "col-rs", "sheet_id": "res-bad1", "kind": "random_sample", "seed": 1.5 }))
+        .execute("transform.run", json!({ "source_sheet_id": "col-rs", "sheet_id": "res-bad1", "kind": "random_sample", "seed": 1.5 }))
         .unwrap_err();
     assert_eq!(frac_err.code, ErrorCode::BadInput);
 
     let neg_err = session
-        .execute("transform.run", json!({ "source_sheet": "col-rs", "sheet_id": "res-bad2", "kind": "random_sample", "seed": -3 }))
+        .execute("transform.run", json!({ "source_sheet_id": "col-rs", "sheet_id": "res-bad2", "kind": "random_sample", "seed": -3 }))
         .unwrap_err();
     assert_eq!(neg_err.code, ErrorCode::BadInput);
 
     ok_cmd(
         &mut session,
         "transform.run",
-        json!({ "source_sheet": "col-rs", "sheet_id": "res-rs", "kind": "random_sample", "sample_size": 3, "seed": 7 }),
+        json!({ "source_sheet_id": "col-rs", "sheet_id": "res-rs", "kind": "random_sample", "sample_size": 3, "seed": 7 }),
     );
     match &session.document().result_sheet(&SheetId::new("res-rs")).unwrap().analysis.kind {
         AnalysisKind::Transform(TransformAnalysisSpec::RandomSample { seed, proportional_allocation, .. }) => {
@@ -966,7 +959,7 @@ fn r2_s05_01_table_paste_and_clear_prune_exclusion_notes() {
     doc.add_data_sheet(seed_two_group_col("col-pr")).unwrap();
     let mut session = Session::from_document(doc);
 
-    ok_cmd(&mut session, "table.excludeCellsWithReason", json!({ "sheet_id": "col-pr", "reason": "outlier", "coords": [[0, 0], [1, 0]] }));
+    ok_cmd(&mut session, "table.excludeCellsWithReason", json!({ "sheet_id": "col-pr", "reason_tag": "outlier", "coords": [[0, 0], [1, 0]] }));
     assert_eq!(session.document().data_sheet(&SheetId::new("col-pr")).unwrap().exclusion_notes.len(), 2);
 
     // Overwriting [0, 0] via table.paste prunes its exclusion note while leaving [1, 0] intact.

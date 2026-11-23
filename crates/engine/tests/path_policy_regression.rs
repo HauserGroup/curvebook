@@ -124,8 +124,9 @@ fn workdir_policy_guards_command_path_params_paste_link_spec_and_preserves_plate
     let mut session = Session::from_document(ProjectDocument::new("Cmd Params").expect("doc")).with_path_policy(policy);
     session.execute("sheet.createData", json!({ "sheet_id": "col-1", "title": "Target", "kind": "Column", "rows": 4, "cols": 1 })).expect("sheet");
 
-    // 1. table.pasteLink via `path` escape is rejected.
-    let err = session.execute("table.pasteLink", json!({ "target_sheet_id": "col-1", "path": "../outside/secret.csv" })).expect_err("escape path");
+    // 1. table.pasteLink via `source_path` escape is rejected.
+    let err =
+        session.execute("table.pasteLink", json!({ "target_sheet_id": "col-1", "source_path": "../outside/secret.csv" })).expect_err("escape path");
     assert_eq!(err.code, ErrorCode::PathEscape);
 
     // 2. table.pasteLink via `link_spec.source.ExternalDelimitedFile.path` escape is rejected.
@@ -163,7 +164,7 @@ fn workdir_policy_guards_command_path_params_paste_link_spec_and_preserves_plate
     assert_eq!(err_spec.code, ErrorCode::PathEscape);
 
     // 3. Relative path inside workdir succeeds for pasteLink, exportCsv, and project.save.
-    session.execute("table.pasteLink", json!({ "target_sheet_id": "col-1", "path": "data.csv" })).expect("inside pasteLink");
+    session.execute("table.pasteLink", json!({ "target_sheet_id": "col-1", "source_path": "data.csv" })).expect("inside pasteLink");
     session.execute("table.exportCsv", json!({ "sheet_id": "col-1", "path": "exports/out.csv" })).expect("inside exportCsv");
     assert!(ws.workdir.join("exports/out.csv").exists());
 

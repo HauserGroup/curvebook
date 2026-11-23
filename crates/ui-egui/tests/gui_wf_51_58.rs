@@ -344,9 +344,9 @@ fn wf52_4pl_identifiability_recovery_extrapolation_and_qq_drillback() -> TestRes
             "sheet_id": res_id,
             "identify_unstable_parameters": true,
             "parameter_rules": [
-                { "parameter": "Bottom", "value": 0.0 },
-                { "parameter": "HillSlope", "scope": "shared_global" },
-                { "parameter": "Top", "scope": "shared_global" }
+                { "name": "Bottom", "scope": "constant", "value": 0.0 },
+                { "name": "HillSlope", "scope": "shared_global" },
+                { "name": "Top", "scope": "shared_global" }
             ]
         }),
     )?;
