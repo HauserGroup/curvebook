@@ -145,8 +145,13 @@ fn strip_rust_comments_and_strings(src: &str) -> String {
             i += 1;
             while i < n {
                 if b[i] == b'\\' {
-                    out.push_str("  ");
-                    i = (i + 2).min(n);
+                    out.push(' ');
+                    if let Some(esc) = src.get(i + 1..).and_then(|s| s.chars().next()) {
+                        out.push(if esc == '\n' { '\n' } else { ' ' });
+                        i += 1 + esc.len_utf8();
+                    } else {
+                        i = n;
+                    }
                 } else if b[i] == b'"' {
                     out.push(' ');
                     i += 1;
@@ -315,6 +320,7 @@ mod tests {
 #[test]
 proptest! {}
 */
+const ESC_UTF8: &str = "\α#[test]proptest! {}";
 const RAW: &str = r#"
 #[test]
 proptest! {}
@@ -330,5 +336,9 @@ fn real_one() {}
         assert_eq!(exact.tests, 1);
         assert_eq!(exact.proptests, 0);
         assert!(exact.lines < approx.lines);
+
+        let mut trailing = PkgStats::default();
+        super::accumulate_source_exact("const S: &str = \"\\α", &mut trailing);
+        assert_eq!(trailing.tests, 0);
     }
 }

@@ -148,11 +148,9 @@ fn verify_existing(root: &Path) -> Result<(), String> {
 
 fn ensure_asset_listed(rel: &str, assets_md: &str) -> Result<(), String> {
     let found = assets_md.lines().any(|raw| {
-        let trimmed = raw.trim();
-        if !trimmed.starts_with('|') || !trimmed.ends_with('|') {
+        let Some(inner) = raw.trim().strip_prefix('|').and_then(|s| s.strip_suffix('|')) else {
             return false;
-        }
-        let inner = &trimmed[1..trimmed.len() - 1];
+        };
         let Some(first_cell) = inner.split('|').next() else {
             return false;
         };
@@ -370,8 +368,9 @@ mod tests {
 
     #[test]
     fn fa_sec23_13_ensure_asset_listed_requires_table_row_not_prose() {
-        let prose_only = "Mentioning `docs/images/workspace-split-fit.png` in prose is not a table row.\n";
+        let prose_only = "|\nMentioning `docs/images/workspace-split-fit.png` in prose is not a table row.\n";
         assert!(super::ensure_asset_listed("docs/images/workspace-split-fit.png", prose_only).is_err());
+        assert!(super::ensure_asset_listed("docs/images/workspace-split-fit.png", "|").is_err());
         let row = "| `docs/images/workspace-split-fit.png` | CurveBook | Generated | MIT OR Apache-2.0 | Light |\n";
         assert!(super::ensure_asset_listed("docs/images/workspace-split-fit.png", row).is_ok());
     }

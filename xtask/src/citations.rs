@@ -814,7 +814,7 @@ fn lex_module(source: &str) -> Vec<Token> {
             i = skip_char_or_lifetime(source, i);
         } else if b.is_ascii_alphabetic() || b == b'_' {
             i = lex_ident(source, i, line, &mut tokens);
-        } else if (b == b'-' || b == b'=' || b == b'<' || b == b'>') && matches!(bytes.get(i + 1), Some(b'>' | b'=')) {
+        } else if matches!((b, bytes.get(i + 1).copied()), (b'-' | b'=', Some(b'>')) | (b'<' | b'>', Some(b'='))) {
             tokens.push(Token::Other);
             i += 2;
         } else {
@@ -1229,12 +1229,18 @@ impl<T> Estimator<T> where for<'a> &'a T: Clone {
 impl<F> Wrapper<for<'a> fn(&'a f64)> {
     pub fn undocumented_in_angle_hrtb() {}
 }
+impl<T: From<Vec<u8>>> Estimator<T> {
+    pub fn undocumented_after_nested_rangle(x: T) -> T { x }
+}
+impl<T: From<Vec<u8>>> Trait for T {
+    pub fn trait_method_should_be_skipped() {}
+}
 impl Default for Estimator<f64> {
     fn default() -> Self { unreachable!() }
 }
 ";
         let report = scan_module_source("crates/stats/src/hrtb.rs", src);
-        assert_eq!(report.public_routines, 2, "both inherent impl pub fns must be counted");
-        assert_eq!(report.violations.len(), 2, "both undocumented HRTB pub fns must trigger violations: {:?}", report.violations);
+        assert_eq!(report.public_routines, 3, "all three inherent impl pub fns must be counted");
+        assert_eq!(report.violations.len(), 3, "all three undocumented inherent pub fns must trigger violations: {:?}", report.violations);
     }
 }
