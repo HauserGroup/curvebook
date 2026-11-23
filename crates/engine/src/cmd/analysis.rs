@@ -314,7 +314,8 @@ fn schema_analyze_run() -> Value {
 struct RunAnalysisParams {
     #[serde(default)]
     sheet_id: Option<String>,
-    #[serde(default)]
+    // Retained until Stage 4 updates apps/curvebook-web/tests/browser_host_adapters.rs
+    #[serde(default, alias = "source_sheet")]
     source_sheet_id: Option<String>,
     #[serde(default)]
     spec: Option<Value>,

@@ -190,8 +190,8 @@ fn wf51_human_nonlinear_rout_replicate_interp_compare_and_relative_ic50() -> Tes
                     "source_sheet_id": "ref-xy-51",
                     "kind": "nonlinear_regression",
                     "equation_id": "log_inhibitor_vs_response_4pl",
-                    "fit_method": "rout",
-                    "fdr_q_percent": 1.0,
+                    "method": "rout",
+                    "q_percent": 1.0,
                     "interpolate_unknowns": true,
                     "flag_r_squared_below": 0.999999,
                     "comparison": {
@@ -390,9 +390,9 @@ fn wf52_human_4pl_identifiability_recovery_extrapolation_and_qq_drillback() -> T
                     "equation_id": "log_agonist_vs_response_4pl",
                     "identify_unstable_parameters": true,
                     "parameter_rules": [
-                        { "parameter": "Bottom", "scope": "constant", "value": 0.0 },
-                        { "parameter": "HillSlope", "scope": "shared_global" },
-                        { "parameter": "Top", "scope": "shared_global" }
+                        { "name": "Bottom", "scope": "constant", "value": 0.0 },
+                        { "name": "HillSlope", "scope": "shared_global" },
+                        { "name": "Top", "scope": "shared_global" }
                     ]
                 }),
             )

@@ -5,7 +5,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::cmd::helpers::{require_info_sheet_mut, resolve_target_info_sheet_id};
-use crate::cmd::params::{any_json_schema, bool_schema, non_empty_str_schema, nullable_schema, obj_schema, parse_params, str_schema};
+use crate::cmd::params::{
+    any_json_schema, bool_schema, non_empty_str_schema, nullable_schema, obj_schema, obj_schema_with_aliases, parse_params, str_schema,
+};
 use crate::cmd::project::recalculate_dirty_with_links;
 use crate::cmd::{CommandGroup, CommandSpec, Ctx, Effects};
 use crate::{CommandOutcome, EngineError, Session};
@@ -22,13 +24,15 @@ struct SetNoteParams {
 }
 
 fn set_note_schema() -> Value {
-    obj_schema(
+    // Retained until Stage 4 updates apps/curvebook-web/tests/browser_host_adapters.rs
+    obj_schema_with_aliases(
         vec![
             ("sheet_id", non_empty_str_schema("Target InfoSheet ID or paired DataSheet ID")),
             ("text", str_schema("Markdown note content to set or append")),
             ("append", nullable_schema(bool_schema("When true, append to existing notes instead of overwriting"))),
         ],
         &["sheet_id", "text"],
+        vec![("text", &["note"])],
         false,
     )
 }

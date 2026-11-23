@@ -27,7 +27,7 @@ use super::helpers::{
 };
 use super::params::{
     array_schema, bool_schema, deserialize_strict, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema,
-    parse_params, str_schema,
+    obj_schema_with_aliases, parse_params, str_schema,
 };
 use super::project::recalculate_dirty_with_links;
 use super::{CommandGroup, CommandSpec, Ctx, Effects};
@@ -1149,7 +1149,8 @@ struct SetCellParams {
 }
 
 fn schema_set_cell() -> Value {
-    obj_schema(
+    // Retained until Stage 4 updates apps/curvebook-web/tests/sec20_web_fixes.rs
+    obj_schema_with_aliases(
         vec![
             ("sheet_id", non_empty_str_schema("Target data sheet identifier")),
             ("coord", coord_object_schema()),
@@ -1162,6 +1163,7 @@ fn schema_set_cell() -> Value {
             ("parse_asterisk_exclusion", bool_schema("Interpret trailing `*` in string tokens as excluded (default true)")),
         ],
         &["sheet_id"],
+        vec![("value", &["raw"])],
         false,
     )
 }
@@ -3010,7 +3012,8 @@ struct SetCategoricalOrderParams {
 }
 
 fn schema_set_categorical_order() -> Value {
-    obj_schema(
+    // Retained until Stage 3 updates egui_shell/mod.rs
+    obj_schema_with_aliases(
         vec![
             ("sheet_id", non_empty_str_schema("Target MultipleVariables sheet identifier")),
             ("col", col_ref_schema("Zero-based variable index or column title")),
@@ -3031,6 +3034,7 @@ fn schema_set_categorical_order() -> Value {
             ("reference_level", nullable_schema(str_schema("Optional reference category label"))),
         ],
         &["sheet_id"],
+        vec![("col", &["column"])],
         false,
     )
 }

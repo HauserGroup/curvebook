@@ -30,7 +30,7 @@ fn seed_graph_and_layout_app() -> Result<UiApp, String> {
             "sheet_id": "ds-exp",
             "title": "Dose Response",
             "kind": "xy",
-            "data_sets": 1,
+            "cols": 1,
             "rows": 3,
             "auto_graph": false
         }),

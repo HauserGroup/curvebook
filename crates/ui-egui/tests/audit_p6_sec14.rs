@@ -319,7 +319,7 @@ fn fa_sec14_03_pcr_end_to_end_distinct_from_pca_with_leakage_guard_and_methods_r
     let run_out = sess.execute("analysis.run", json!({ "source_sheet_id": "mv-pcr", "sheet_id": "res-pcr-1", "kind": built_kind })).unwrap();
     assert_eq!(run_out.payload["sheet_id"], json!("res-pcr-1"));
 
-    let rep = sess.execute("result.generateReport", json!({ "sheet_id": "res-pcr-1", "format": "plain" })).unwrap();
+    let rep = sess.execute("result.generateReport", json!({ "result_sheet_id": "res-pcr-1", "format": "plain" })).unwrap();
     let rep_text = rep.payload["report"].as_str().unwrap();
     assert!(rep_text.contains("Principal component regression"), "methods report missing PCR prose: {rep_text}");
     assert!(rep_text.contains("ResponseY"), "methods report missing outcome column title: {rep_text}");
