@@ -79,9 +79,7 @@ struct CreateDataParams {
     row_factor_title: Option<String>,
     column_factor_title: Option<String>,
     time_title: Option<String>,
-    #[serde(alias = "eventCode")]
     event_code: Option<i64>,
-    #[serde(alias = "censoredCode")]
     censored_code: Option<i64>,
     variables: Option<Vec<VariableInitInput>>,
     auto_family: Option<bool>,
@@ -131,8 +129,8 @@ fn create_data_schema() -> Value {
             ("graph_sheet_id", nullable_schema(non_empty_str_schema("Optional explicit GraphSheet ID to create"))),
         ],
         &[],
-        // Retained until Stage 4 updates apps/{curvebook-cli,curvebook,curvebook-web}/
-        vec![("kind", &["archetype"]), ("cols", &["data_sets"]), ("replicates", &["subcolumns"])],
+        // Retained for R16.5 CLI deprecation-warning coverage (`r16_5_cli_and_callers.rs`).
+        vec![("kind", &["archetype"])],
         false,
     )
 }

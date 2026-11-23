@@ -23,7 +23,7 @@ use super::helpers::{
 };
 use super::params::{
     any_json_schema, array_schema, bool_schema, deserialize_strict, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema,
-    obj_schema, obj_schema_with_aliases, parse_params, str_schema,
+    obj_schema, parse_params, str_schema,
 };
 use super::{CommandGroup, CommandSpec, Ctx, Effects};
 use crate::{CommandOutcome, EngineError, Session};
@@ -441,8 +441,7 @@ struct GraphCreateParams {
 }
 
 fn schema_graph_create() -> Value {
-    // Retained until Stage 4 updates apps/curvebook-web/src/lib.rs
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("data_sheet_id", non_empty_str_schema("Source data sheet ID to plot")),
             ("sheet_id", nullable_schema(non_empty_str_schema("Optional explicit graph sheet ID (prefix when creating multiple graphs)"))),
@@ -453,7 +452,6 @@ fn schema_graph_create() -> Value {
             ("y_axis_title", nullable_schema(str_schema("Optional initial Y-axis title"))),
         ],
         &["data_sheet_id"],
-        vec![("data_sheet_id", &["source_sheet_id"])],
         false,
     )
 }

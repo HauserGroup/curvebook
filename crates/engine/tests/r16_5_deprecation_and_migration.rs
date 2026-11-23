@@ -41,18 +41,14 @@ fn only_stage4_retained_aliases_remain_in_registry_schemas() {
     assert_eq!(
         alias_commands,
         vec![
-            ("graph.create", json!({ "data_sheet_id": ["source_sheet_id"] })),
-            ("info.setNote", json!({ "text": ["note"] })),
-            ("sheet.createData", json!({ "kind": ["archetype"], "cols": ["data_sets"], "replicates": ["subcolumns"] })),
+            ("sheet.createData", json!({ "kind": ["archetype"] })),
             ("sheet.rename", json!({ "sheet_id": ["id"], "title": ["new_title"] })),
-            ("table.importCsv", json!({ "csv": ["text"], "archetype": ["kind"] })),
             ("table.setCategoricalOrder", json!({ "col": ["column"] })),
-            ("table.setCell", json!({ "value": ["raw"] })),
         ],
-        "only the Stage-3/Stage-4-retained locked-caller aliases may emit x-deprecated-aliases"
+        "only the R16.5 CLI deprecation-window and locked egui_shell aliases may emit x-deprecated-aliases"
     );
 
-    // Retired aliases outside the Stage-3/Stage-4-retained entries must now fail with BadInput.
+    // Retired aliases outside the remaining retained entries must now fail with BadInput.
     let mut session = Session::new();
     session.execute("sheet.createData", json!({ "sheet_id": "d1", "kind": "xy", "rows": 3, "cols": 1 })).expect("create d1");
     let bad_cells = session
@@ -63,6 +59,14 @@ fn only_stage4_retained_aliases_remain_in_registry_schemas() {
         .execute("table.convertArchetype", json!({ "sheet_id": "d1", "target_kind": "column", "previewOnly": true }))
         .expect_err("retired previewOnly alias rejected");
     assert_eq!(bad_preview.code, ErrorCode::BadInput);
+    let bad_graph = session.execute("graph.create", json!({ "source_sheet_id": "d1" })).expect_err("retired graph.create source_sheet_id rejected");
+    assert_eq!(bad_graph.code, ErrorCode::BadInput);
+    let bad_cell_raw =
+        session.execute("table.setCell", json!({ "sheet_id": "d1", "row": 0, "col": 0, "raw": "1.5" })).expect_err("retired setCell raw rejected");
+    assert_eq!(bad_cell_raw.code, ErrorCode::BadInput);
+    let bad_import =
+        session.execute("table.importCsv", json!({ "text": "x,y\n1,2\n", "kind": "xy" })).expect_err("retired importCsv text/kind rejected");
+    assert_eq!(bad_import.code, ErrorCode::BadInput);
 }
 
 #[test]
