@@ -156,10 +156,10 @@ impl OsAdapterStatus {
     }
 }
 
-/// Injectable platform clipboard adapter used by [`crate::UiApp`] and [`crate::egui_shell::driver::EguiHumanPathDriver`].
+/// Injectable platform clipboard adapter used by [`crate::UiApp`] and `EguiHumanPathDriver`.
 ///
 /// Production desktop sessions delegate to [`SystemPlatformClipboardAdapter`], while parallel
-/// human-path tests install [`StubPlatformClipboardAdapter`] (or a custom implementation) to
+/// human-path tests install `StubPlatformClipboardAdapter` (or a custom implementation) to
 /// capture multi-flavor [`ClipboardBundle`] payloads without mutating the live OS pasteboard.
 pub trait PlatformClipboardAdapter: std::fmt::Debug + Send + Sync {
     /// Write UTF-8 plain/TSV text to the platform clipboard.
@@ -245,6 +245,7 @@ impl PlatformClipboardAdapter for SystemPlatformClipboardAdapter {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone, Default)]
 struct StubClipboardInner {
     bundles: Vec<ClipboardBundle>,
@@ -253,19 +254,22 @@ struct StubClipboardInner {
     available: bool,
 }
 
-/// Deterministic in-memory clipboard adapter stub used by [`crate::egui_shell::driver::EguiHumanPathDriver`] and tests
+/// Deterministic in-memory clipboard adapter stub used by `EguiHumanPathDriver` and tests
 /// to capture [`ClipboardBundle`] and UTF-8 text writes with zero live OS pasteboard mutation.
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone)]
 pub struct StubPlatformClipboardAdapter {
     inner: std::sync::Arc<curvebook_platform::sync::RwLock<StubClipboardInner>>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl Default for StubPlatformClipboardAdapter {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl StubPlatformClipboardAdapter {
     /// Construct an available in-memory clipboard stub with empty capture buffers.
     #[must_use]
@@ -339,6 +343,7 @@ impl StubPlatformClipboardAdapter {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl PlatformClipboardAdapter for StubPlatformClipboardAdapter {
     fn write_text(&self, text: &str) -> Result<OsAdapterStatus, String> {
         let mut guard = self.inner.write_or_recover().map_err(|err| err.to_string())?;
@@ -408,7 +413,7 @@ impl PlatformClipboardAdapter for StubPlatformClipboardAdapter {
 ///
 /// Interactive desktop sessions install [`SystemPlatformUrlOpener::live`], interactive browser
 /// sessions install `WebPlatformUrlOpener`, and headless / test sessions keep the default
-/// [`SystemPlatformUrlOpener::guarded`] or install [`StubPlatformUrlOpener`].
+/// [`SystemPlatformUrlOpener::guarded`] or install `StubPlatformUrlOpener`.
 pub trait PlatformUrlOpener: std::fmt::Debug + Send + Sync {
     /// Open an allowlisted CurveBook GitHub new-issue URL in the user's browser.
     ///
@@ -446,6 +451,7 @@ impl PlatformUrlOpener for SystemPlatformUrlOpener {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone, Default)]
 struct StubUrlOpenerInner {
     urls: Vec<String>,
@@ -453,17 +459,20 @@ struct StubUrlOpenerInner {
 }
 
 /// In-memory [`PlatformUrlOpener`] test double recording allowlisted URL launches with zero OS side effects.
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone)]
 pub struct StubPlatformUrlOpener {
     inner: std::sync::Arc<curvebook_platform::sync::RwLock<StubUrlOpenerInner>>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl Default for StubPlatformUrlOpener {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl StubPlatformUrlOpener {
     /// Construct an available URL opener stub.
     #[must_use]
@@ -507,6 +516,7 @@ impl StubPlatformUrlOpener {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl PlatformUrlOpener for StubPlatformUrlOpener {
     fn open_external_url(&self, url: &str) -> Result<OsAdapterStatus, String> {
         crate::feedback::validate_github_issue_url(url)?;

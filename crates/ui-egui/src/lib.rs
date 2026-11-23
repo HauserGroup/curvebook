@@ -72,14 +72,18 @@ pub use menus::{
 };
 pub use modal_predicates::ControlEnablement;
 pub use os_integration::{
-    ClipboardBundle, OsAdapterAvailability, OsAdapterStatus, PlatformClipboardAdapter, PlatformUrlOpener, StubPlatformClipboardAdapter,
-    StubPlatformUrlOpener, SystemPlatformClipboardAdapter, SystemPlatformUrlOpener, build_cf_html_payload, discover_os_printers,
-    open_github_issue_url, open_os_print_preview_dialog, open_os_print_preview_dialog_titled, read_os_clipboard_pdf_bytes, read_os_clipboard_text,
+    ClipboardBundle, OsAdapterAvailability, OsAdapterStatus, PlatformClipboardAdapter, PlatformUrlOpener, SystemPlatformClipboardAdapter,
+    SystemPlatformUrlOpener, build_cf_html_payload, discover_os_printers, open_github_issue_url, open_os_print_preview_dialog,
+    open_os_print_preview_dialog_titled, read_os_clipboard_pdf_bytes, read_os_clipboard_text,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use os_integration::{StubPlatformClipboardAdapter, StubPlatformUrlOpener};
 #[cfg(not(target_arch = "wasm32"))]
 pub use os_integration::{read_os_pasteboard, submit_os_print_job, submit_os_print_pdf_bytes, write_os_clipboard_bundle, write_os_pasteboard};
 pub use power_wizard::{PowerWizardStage, PowerWizardState};
-pub use text_bridge::{DesktopTextMeasurer, FontFamilyKind, MeasuredTextMetrics, ShapedGlyphRun, ShapedTextLine, TextMeasurer, UiTextStyle};
+#[cfg(any(test, feature = "test-support"))]
+pub use text_bridge::DesktopTextMeasurer;
+pub use text_bridge::{FontFamilyKind, MeasuredTextMetrics, ShapedGlyphRun, ShapedTextLine, TextMeasurer, UiTextStyle};
 pub use theme::{DerivedUiPalette, FontBook, ThemeSeeds, UiThemeMode, UiThemeSpec};
 pub use workspace_nav::{NavigatorEntry, WorkspaceNavState};
 
@@ -723,7 +727,7 @@ impl UiApp {
         self.human_path_only = enabled;
     }
 
-    /// Install a custom [`PlatformClipboardAdapter`] (such as [`StubPlatformClipboardAdapter`])
+    /// Install a custom [`PlatformClipboardAdapter`] (such as `StubPlatformClipboardAdapter`)
     /// for deterministic clipboard capture without touching the host OS pasteboard.
     pub fn set_clipboard_adapter(&mut self, adapter: std::sync::Arc<dyn PlatformClipboardAdapter>) {
         self.clipboard_adapter = ClipboardAdapterSlot { adapter, is_custom: true };
@@ -742,7 +746,7 @@ impl UiApp {
     }
 
     /// Install a custom [`PlatformUrlOpener`] (such as [`SystemPlatformUrlOpener::live`] for
-    /// interactive desktop windows or [`StubPlatformUrlOpener`] for deterministic tests).
+    /// interactive desktop windows or `StubPlatformUrlOpener` for deterministic tests).
     pub fn set_url_opener(&mut self, opener: std::sync::Arc<dyn PlatformUrlOpener>) {
         self.url_opener = UrlOpenerSlot { opener, is_custom: true };
     }
@@ -1413,7 +1417,7 @@ pub fn encode_egui_control_response(id: serde_json::Value, res: Result<serde_jso
 }
 
 /// Accessible label/value snapshot recorded for a single rendered `egui_shell` widget.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
 #[derive(Debug, Clone, Default)]
 pub struct EguiSurfaceA11yEntry {
     pub widget_id: String,
@@ -1425,7 +1429,7 @@ pub struct EguiSurfaceA11yEntry {
 }
 
 /// Captured painted text runs and accessibility metadata from a settled `egui_shell` frame.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
 #[derive(Debug, Clone, Default)]
 pub struct EguiSurfaceCapture {
     pub text_runs: Vec<(String, String)>,
@@ -1434,19 +1438,19 @@ pub struct EguiSurfaceCapture {
 }
 
 /// Reusable offscreen `egui_shell` surface scanner sharing cached fonts across multiple frames.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
 pub struct EguiSurfaceScanner {
     ctx: egui::Context,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
 impl Default for EguiSurfaceScanner {
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
 impl EguiSurfaceScanner {
     /// Initialize a reusable offscreen `egui::Context` with AccessKit and cached UI fonts enabled.
     #[must_use]
