@@ -13,6 +13,7 @@ use curvebook_ui_egui::UiApp;
 use curvebook_ui_egui::egui_shell::UiBackend;
 use curvebook_ui_egui::i18n::BETA_ACTIVE_LOCALES;
 use curvebook_ui_egui::interaction::ViewportMetrics;
+use eframe::egui;
 use serde_json::{Value, json};
 
 struct ChannelPipeReader {

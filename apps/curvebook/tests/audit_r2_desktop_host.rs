@@ -22,6 +22,7 @@ use curvebook_format::{FormatRegistry, save_project_file, save_project_unpacked_
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::interaction::{KeyModifiers, ViewportMetrics};
 use curvebook_ui_egui::{ClipboardBundle, OsAdapterAvailability, OsAdapterStatus};
+use eframe::egui;
 use serde_json::json;
 
 static AUDIT_R2_SEQ: AtomicU64 = AtomicU64::new(1);

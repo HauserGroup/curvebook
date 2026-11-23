@@ -11,6 +11,7 @@ use curvebook_platform::sync::Mutex;
 
 use curvebook_ui_egui::control_io::CONTROL_CLIENT_IDLE_TIMEOUT;
 use curvebook_ui_egui::{ControlAuth, ControlResponse, MAX_CONTROL_LINE_BYTES};
+use eframe::egui;
 use serde_json::Value;
 
 use crate::desktop_host::{ControlFrameKind, LiveControlFrameOutput, classify_control_frame};

@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
-publish = false
+publish.workspace = true
 
 [lints]
 workspace = true
@@ -20,7 +20,7 @@ curvebook-engine = { workspace = true, features = ["bundled-fonts"] }
 curvebook-format = { workspace = true }
 curvebook-platform = { workspace = true }
 curvebook-text = { workspace = true }
-curvebook-ui-egui = { workspace = true }
+curvebook-ui-egui = { workspace = true, features = ["bundled-fonts"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

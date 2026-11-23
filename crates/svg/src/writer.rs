@@ -12,7 +12,6 @@ use curvebook_platform::base64::encode as encode_base64;
 use curvebook_text::metrics::split_rich_text_lines;
 use curvebook_text::{BUNDLED_FONTS, GlyphOutlineCmd, RichText, SpanScript, SpanSlope, SpanWeight, outline_rich_text};
 use png::{BitDepth, ColorType, Encoder as PngEncoder};
-use quick_xml::encoding::Decoder;
 use quick_xml::events::{BytesEnd, BytesRef, BytesStart, Event};
 use quick_xml::{Reader as XmlReader, XmlVersion};
 use serde::{Deserialize, Serialize};
@@ -841,11 +840,11 @@ pub fn validate_svg_structure(svg: &str) -> Result<(), SvgError> {
     loop {
         let event = reader.read_event().map_err(|err| SvgError::ValidationFailed { message: format!("malformed SVG XML: {err}") })?;
         match event {
-            Event::Start(start) => validate_start_tag(&start, false, reader.decoder(), &mut state)?,
-            Event::Empty(empty) => validate_start_tag(&empty, true, reader.decoder(), &mut state)?,
+            Event::Start(start) => validate_start_tag(&start, false, &mut state)?,
+            Event::Empty(empty) => validate_start_tag(&empty, true, &mut state)?,
             Event::End(end) => validate_end_tag(&end, &mut state)?,
             Event::Text(text) => {
-                let decoded = text.decode().map_err(|err| SvgError::ValidationFailed { message: format!("invalid SVG text encoding: {err}") })?;
+                let decoded: &str = text.as_ref();
                 if (!state.root_seen || state.root_closed) && !decoded.trim().is_empty() {
                     return Err(SvgError::ValidationFailed { message: String::from("unexpected character data outside <svg> root") });
                 }
@@ -873,12 +872,12 @@ pub fn validate_svg_structure(svg: &str) -> Result<(), SvgError> {
     Ok(())
 }
 
-fn validate_start_tag(start: &BytesStart<'_>, self_closing: bool, decoder: Decoder, state: &mut TagValidationState) -> Result<(), SvgError> {
+fn validate_start_tag(start: &BytesStart<'_>, self_closing: bool, state: &mut TagValidationState) -> Result<(), SvgError> {
     if state.root_closed {
         return Err(SvgError::ValidationFailed { message: String::from("unexpected element after closing </svg>") });
     }
     let qname = start.name();
-    let tag_name = std::str::from_utf8(qname.as_ref()).map_err(|_| SvgError::ValidationFailed { message: String::from("invalid UTF-8 tag name") })?;
+    let tag_name: &str = qname.as_ref();
     if !is_valid_xml_name(tag_name) {
         return Err(SvgError::ValidationFailed { message: format!("invalid XML tag name `{tag_name}`") });
     }
@@ -892,7 +891,7 @@ fn validate_start_tag(start: &BytesStart<'_>, self_closing: bool, decoder: Decod
         false
     };
 
-    validate_tag_attributes(start, is_root, decoder, state)?;
+    validate_tag_attributes(start, is_root, state)?;
 
     if !self_closing {
         state.depth = state.depth.saturating_add(1);
@@ -904,7 +903,7 @@ fn validate_start_tag(start: &BytesStart<'_>, self_closing: bool, decoder: Decod
 
 fn validate_end_tag(end: &BytesEnd<'_>, state: &mut TagValidationState) -> Result<(), SvgError> {
     let qname = end.name();
-    let name = std::str::from_utf8(qname.as_ref()).map_err(|_| SvgError::ValidationFailed { message: String::from("invalid UTF-8 closing tag") })?;
+    let name: &str = qname.as_ref();
     if !is_valid_xml_name(name) {
         return Err(SvgError::ValidationFailed { message: format!("invalid closing tag name `{name}`") });
     }
@@ -930,7 +929,7 @@ fn validate_general_ref(entity: &BytesRef<'_>, state: &TagValidationState) -> Re
             Ok(())
         }
         Ok(None) => {
-            let name = entity.decode().map_err(|err| SvgError::ValidationFailed { message: format!("invalid XML entity reference: {err}") })?;
+            let name: &str = entity.as_ref();
             if name.is_empty() || name.chars().any(|c| c.is_ascii_whitespace() || c == '&' || c == '<') {
                 return Err(SvgError::ValidationFailed { message: String::from("malformed XML entity reference") });
             }
@@ -940,19 +939,18 @@ fn validate_general_ref(entity: &BytesRef<'_>, state: &TagValidationState) -> Re
     }
 }
 
-fn validate_tag_attributes(start: &BytesStart<'_>, is_root: bool, decoder: Decoder, state: &mut TagValidationState) -> Result<(), SvgError> {
+fn validate_tag_attributes(start: &BytesStart<'_>, is_root: bool, state: &mut TagValidationState) -> Result<(), SvgError> {
     for raw_attr in start.attributes().with_checks(true) {
         let attr = raw_attr.map_err(|err| SvgError::ValidationFailed { message: format!("malformed XML attribute: {err}") })?;
-        let name = std::str::from_utf8(attr.key.as_ref())
-            .map_err(|_| SvgError::ValidationFailed { message: String::from("invalid UTF-8 attribute name") })?;
+        let name: &str = attr.key.as_ref();
         if !is_valid_xml_name(name) {
             return Err(SvgError::ValidationFailed { message: format!("invalid XML attribute name `{name}`") });
         }
-        if attr.value.contains(&b'<') {
+        if attr.value.contains('<') {
             return Err(SvgError::ValidationFailed { message: String::from("unescaped '<' inside attribute value") });
         }
         let val = attr
-            .decoded_and_normalized_value(XmlVersion::Implicit1_0, decoder)
+            .normalized_value(XmlVersion::Implicit1_0)
             .map_err(|err| SvgError::ValidationFailed { message: format!("invalid XML attribute `{name}`: {err}") })?;
         if let Some(bad_ch) = val.chars().find(|&c| !is_valid_xml_char(c)) {
             return Err(SvgError::ValidationFailed {

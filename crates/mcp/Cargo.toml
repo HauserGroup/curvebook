@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
 publish.workspace = true
 description = "CurveBook Model Context Protocol (MCP) server over stdio"
 
@@ -15,7 +16,6 @@ default = ["bundled-fonts"]
 bundled-fonts = ["curvebook-engine/bundled-fonts"]
 
 [dependencies]
-curvebook-chart = { workspace = true }
 curvebook-doc = { workspace = true }
 curvebook-engine = { workspace = true }
 curvebook-format = { workspace = true }

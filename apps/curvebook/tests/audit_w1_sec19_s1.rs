@@ -23,7 +23,7 @@ use curvebook_doc::{
 use curvebook_format::save_template_bytes;
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::interaction::ViewportMetrics;
-use egui::{Event, Key, Modifiers, PointerButton, Pos2, RawInput, Rect, Vec2, ViewportCommand, ViewportId};
+use eframe::egui::{self, Event, Key, Modifiers, PointerButton, Pos2, RawInput, Rect, Vec2, ViewportCommand, ViewportId};
 use serde_json::json;
 
 struct TempDirGuard(PathBuf);

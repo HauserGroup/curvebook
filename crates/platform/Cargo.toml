@@ -4,11 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
 publish.workspace = true
 description = "CurveBook platform abstractions: atomic file writes, bounded subprocess execution and workdir path containment"
 
 [lints]
 workspace = true
 
-[dependencies]
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 serde_json = { workspace = true }

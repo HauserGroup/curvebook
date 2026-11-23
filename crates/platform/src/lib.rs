@@ -1,7 +1,7 @@
 //! Host platform safety primitives for CurveBook: atomic filesystem writes, bounded
 //! subprocess execution, canonicalized `--workdir` path containment, and checked shared-state locks.
 //!
-//! Layer L0 crate: depends only on `std`, `serde`, and `serde_json`. Compiles cleanly on
+//! Layer L0 crate: depends only on `std` (plus `serde_json` on non-`wasm32` targets). Compiles cleanly on
 //! `wasm32` targets with host-only OS operations gated behind `#[cfg(not(target_arch = "wasm32"))]`.
 #![forbid(unsafe_code)]
 #![deny(clippy::indexing_slicing)]

@@ -752,7 +752,6 @@ dependencies = [
  "curvebook-text",
  "curvebook-ui-egui",
  "eframe",
- "egui",
  "muda",
  "rfd",
  "serde",
@@ -853,7 +852,7 @@ dependencies = [
  "flate2",
  "image",
  "proptest",
- "quick-xml",
+ "quick-xml 0.42.0",
  "serde",
  "serde_json",
 ]
@@ -870,7 +869,6 @@ dependencies = [
 name = "curvebook-mcp"
 version = "0.1.0-alpha.2"
 dependencies = [
- "curvebook-chart",
  "curvebook-doc",
  "curvebook-engine",
  "curvebook-format",
@@ -924,7 +922,7 @@ dependencies = [
  "flate2",
  "png",
  "serde",
- "weezl",
+ "weezl 0.2.1",
 ]
 
 [[package]]
@@ -950,7 +948,7 @@ dependencies = [
  "curvebook-testkit",
  "curvebook-text",
  "png",
- "quick-xml",
+ "quick-xml 0.42.0",
  "serde",
 ]
 
@@ -2823,6 +2821,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "quick-xml"
+version = "0.42.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41b1177fdf999d2321d3fb46ff47159d9c1fb9ad66a4879f8c50a0b504615e9b"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3355,7 +3362,7 @@ dependencies = [
  "flate2",
  "half",
  "quick-error 2.0.1",
- "weezl",
+ "weezl 0.1.12",
  "zune-jpeg",
 ]
 
@@ -3743,7 +3750,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "338e30461b3a2b67d70eb30a6d89f8e0c93a833e07d2ae89085cd070c4a00ac0"
 dependencies = [
  "proc-macro2",
- "quick-xml",
+ "quick-xml 0.41.0",
  "quote",
 ]
 
@@ -3784,6 +3791,12 @@ name = "weezl"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
+
+[[package]]
+name = "weezl"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4ca08e5ef825b65b056d9efbd95c8750683f0a6d0466d02e96dc2e4e360f3d2"
 
 [[package]]
 name = "wgpu"
