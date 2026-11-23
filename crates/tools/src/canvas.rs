@@ -24,13 +24,14 @@ pub enum AxisKind {
 const DEFAULT_SNAP_GRID_PT: f64 = 6.0;
 const DEFAULT_SNAP_TOLERANCE_PT: f64 = 5.0;
 const DEFAULT_PAGE_MARGIN_PT: f64 = 36.0;
-const MIN_ZOOM: f64 = 0.1;
-const MAX_ZOOM: f64 = 16.0;
+/// Minimum allowed viewport zoom factor across canvas and inertia states.
+pub const MIN_ZOOM: f64 = 0.1;
+/// Maximum allowed viewport zoom factor across canvas and inertia states.
+pub const MAX_ZOOM: f64 = 32.0;
 const DEFAULT_CALLOUT_WIDTH_PT: f64 = 120.0;
 const DEFAULT_CALLOUT_HEIGHT_PT: f64 = 44.0;
 const MIN_HANDLE_SPAN_PT: f64 = 18.0;
-const INERTIA_MIN_ZOOM: f64 = 0.1;
-const INERTIA_MAX_ZOOM: f64 = 32.0;
+const MIN_ARROW_CALLOUT_LEN_PT: f64 = 2.0;
 const DEFAULT_PAN_FRICTION_PER_SEC: f64 = 8.0;
 const INERTIA_STOP_SPEED_PT_PER_SEC: f64 = 0.5;
 const PAN_VELOCITY_SMOOTHING_RATE: f64 = 45.0;
@@ -268,7 +269,7 @@ impl CanvasToolState {
         }
     }
 
-    /// Clamp and update viewport zoom multiplier in `[0.1, 16.0]`.
+    /// Clamp and update viewport zoom multiplier in `[MIN_ZOOM, MAX_ZOOM]`.
     pub fn set_zoom(&mut self, zoom: f64) {
         if zoom.is_finite() && zoom > 0.0 {
             self.zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
@@ -294,15 +295,28 @@ impl CanvasToolState {
 
     /// Fit a scene of `scene_size_pt` centered inside `viewport_size_px` with uniform padding.
     pub fn fit_scene(&mut self, scene_size_pt: PointPt, viewport_size_px: PointPt, padding_px: f64) {
-        if scene_size_pt.x <= 0.0 || scene_size_pt.y <= 0.0 || viewport_size_px.x <= 0.0 || viewport_size_px.y <= 0.0 || !padding_px.is_finite() {
+        if !scene_size_pt.x.is_finite()
+            || !scene_size_pt.y.is_finite()
+            || !viewport_size_px.x.is_finite()
+            || !viewport_size_px.y.is_finite()
+            || scene_size_pt.x <= 0.0
+            || scene_size_pt.y <= 0.0
+            || viewport_size_px.x <= 0.0
+            || viewport_size_px.y <= 0.0
+            || !padding_px.is_finite()
+        {
             return;
         }
         let pad = padding_px.max(0.0);
         let avail_w = (viewport_size_px.x - pad * 2.0).max(1.0);
         let avail_h = (viewport_size_px.y - pad * 2.0).max(1.0);
         let fit_zoom = (avail_w / scene_size_pt.x).min(avail_h / scene_size_pt.y).clamp(MIN_ZOOM, MAX_ZOOM);
-        self.zoom = fit_zoom;
-        self.pan_pt = PointPt::new((viewport_size_px.x - scene_size_pt.x * fit_zoom) * 0.5, (viewport_size_px.y - scene_size_pt.y * fit_zoom) * 0.5);
+        let pan_x = (viewport_size_px.x - scene_size_pt.x * fit_zoom) * 0.5;
+        let pan_y = (viewport_size_px.y - scene_size_pt.y * fit_zoom) * 0.5;
+        if fit_zoom.is_finite() && pan_x.is_finite() && pan_y.is_finite() {
+            self.zoom = fit_zoom;
+            self.pan_pt = PointPt::new(pan_x, pan_y);
+        }
     }
 
     /// Update hovered target against a rendered graph scene and spec, returning the resolved target.
@@ -331,13 +345,17 @@ impl CanvasToolState {
 
     /// Advance two-click comparison bracket placement; click 1 arms, click 2 emits `graph.addComparisonBrackets`.
     pub fn click_bracket(&mut self, sheet_id: &SheetId, anchor: BracketAnchor, default_label: BracketLabelMode) -> Option<ToolCommandIntent> {
-        let _group = anchor.group_index?;
-        let Some(first) = self.pending_bracket_start.take() else {
+        let group = anchor.group_index?;
+        let Some(ref armed) = self.pending_bracket_start else {
             self.pending_bracket_start = Some(anchor);
             return None;
         };
+        if armed.group_index == Some(group) {
+            return None;
+        }
+        let first = self.pending_bracket_start.take()?;
         let (group_a, group_b) = resolve_bracket_group_pair(&first, &anchor)?;
-        let result_sheet_id = anchor.result_sheet_id.or(first.result_sheet_id).unwrap_or_else(|| sheet_id.clone());
+        let result_sheet_id = anchor.result_sheet_id.or(first.result_sheet_id)?;
         let step_pt = (first.pt.y - anchor.pt.y).abs().clamp(10.0, 48.0);
         let spec = PairwiseBracketSpec {
             result_sheet_id,
@@ -393,7 +411,7 @@ impl CanvasToolState {
                         .iter()
                         .find(|res| res.analysis.source_sheet_id == graph.spec.primary_source_sheet_id && !res.pairwise_comparisons.is_empty())
                 })
-                .map_or_else(|| graph.id.clone(), |res| res.id.clone());
+                .map(|res| res.id.clone())?;
             let spec = PairwiseBracketSpec {
                 result_sheet_id,
                 group_a,
@@ -423,7 +441,17 @@ impl CanvasToolState {
                 let bounds = normalized_rect_from_drag(start, end_pt, DEFAULT_CALLOUT_WIDTH_PT, DEFAULT_CALLOUT_HEIGHT_PT);
                 Some(build_add_text_callout_intent(sheet_id, bounds, "Callout", true))
             }
-            CanvasToolMode::ArrowCallout => Some(build_add_arrow_callout_intent(sheet_id, start, end_pt, true)),
+            CanvasToolMode::ArrowCallout => {
+                if !start.x.is_finite()
+                    || !start.y.is_finite()
+                    || !end_pt.x.is_finite()
+                    || !end_pt.y.is_finite()
+                    || (end_pt.x - start.x).hypot(end_pt.y - start.y) < MIN_ARROW_CALLOUT_LEN_PT
+                {
+                    return None;
+                }
+                Some(build_add_arrow_callout_intent(sheet_id, start, end_pt, true))
+            }
             CanvasToolMode::Select | CanvasToolMode::AxisBreakResize | CanvasToolMode::AxisAdjust => None,
         }
     }
@@ -517,11 +545,32 @@ impl CanvasToolState {
     }
 }
 
-/// Build an intent for `graph.addComparisonBrackets`.
+const fn bracket_style_str(style: BracketStyle) -> &'static str {
+    match style {
+        BracketStyle::Square => "square",
+        BracketStyle::HalfTick => "half_tick",
+        BracketStyle::FlatLine => "flat_line",
+        BracketStyle::CurlyBrace => "curly_brace",
+    }
+}
+
+/// Build a flat intent for `graph.addComparisonBrackets` matching engine `GraphAddComparisonBracketsParams`.
 #[must_use]
 pub fn build_add_comparison_brackets_intent(sheet_id: &SheetId, brackets: &[PairwiseBracketSpec]) -> ToolCommandIntent {
-    let brackets_val = serialize_value(&brackets);
-    ToolCommandIntent::new("graph.addComparisonBrackets", json!({ "sheet_id": sheet_id.as_str(), "brackets": brackets_val }))
+    let mut obj = serde_json::Map::new();
+    obj.insert(String::from("sheet_id"), json!(sheet_id.as_str()));
+    if let Some(spec) = brackets.first() {
+        obj.insert(String::from("result_sheet_id"), json!(spec.result_sheet_id.as_str()));
+        obj.insert(String::from("group_a"), json!(spec.group_a));
+        obj.insert(String::from("group_b"), json!(spec.group_b));
+        obj.insert(String::from("style"), json!(bracket_style_str(spec.style)));
+        obj.insert(String::from("label_mode"), serialize_value(&spec.label_mode));
+        obj.insert(String::from("hide_if_non_significant"), json!(spec.hide_if_non_significant));
+        obj.insert(String::from("stroke_width_pt"), json!(spec.stroke_width_pt));
+        obj.insert(String::from("font_size_pt"), json!(spec.font_size_pt));
+        obj.insert(String::from("bracket_step_pt"), json!(spec.bracket_step_pt));
+    }
+    ToolCommandIntent::new("graph.addComparisonBrackets", Value::Object(obj))
 }
 
 /// Build an intent for `graph.setAxes`.
@@ -855,7 +904,7 @@ fn adjust_axis_segment_share(axis: &mut AxisSpec, segment_index: usize, new_shar
         return false;
     };
     let pair_total = curr_share + neighbor_share;
-    if pair_total <= 0.1 {
+    if !curr_share.is_finite() || !neighbor_share.is_finite() || !pair_total.is_finite() || pair_total <= 0.1 {
         return false;
     }
     let clamped = new_share.clamp(0.05, pair_total - 0.05);
@@ -1161,7 +1210,7 @@ fn finite_non_neg(value: f64) -> f64 {
 }
 
 fn sanitized_inertia_zoom(zoom: f64) -> f64 {
-    if zoom.is_finite() && zoom > 0.0 { zoom.clamp(INERTIA_MIN_ZOOM, INERTIA_MAX_ZOOM) } else { 1.0 }
+    if zoom.is_finite() && zoom > 0.0 { zoom.clamp(MIN_ZOOM, MAX_ZOOM) } else { 1.0 }
 }
 
 /// Smooth trackpad pinch-to-zoom and exponential inertial pan state (`L4`).
@@ -1184,13 +1233,13 @@ impl Default for PanZoomInertiaState {
 }
 
 impl PanZoomInertiaState {
-    /// Scale `zoom` multiplicatively within `[0.1, 32.0]` while keeping `anchor_view_pt` stationary.
+    /// Scale `zoom` multiplicatively within `[MIN_ZOOM, MAX_ZOOM]` while keeping `anchor_view_pt` stationary.
     pub fn apply_pinch_zoom(&mut self, factor: f64, anchor_view_pt: [f64; 2]) {
         if !factor.is_finite() || factor <= 0.0 || !anchor_view_pt[0].is_finite() || !anchor_view_pt[1].is_finite() {
             return;
         }
         let old_zoom = sanitized_inertia_zoom(self.zoom);
-        let next_zoom = (old_zoom * factor).clamp(INERTIA_MIN_ZOOM, INERTIA_MAX_ZOOM);
+        let next_zoom = (old_zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
         let pan_x = finite_or_zero(self.pan_pt[0]);
         let pan_y = finite_or_zero(self.pan_pt[1]);
         if (next_zoom - old_zoom) == 0.0 {
@@ -1294,7 +1343,7 @@ impl PanZoomInertiaState {
         if !cw.is_finite() || !ch.is_finite() || !vw.is_finite() || !vh.is_finite() || cw <= 0.0 || ch <= 0.0 || vw <= 0.0 || vh <= 0.0 {
             return;
         }
-        let fit_zoom = (vw / cw).min(vh / ch).clamp(INERTIA_MIN_ZOOM, INERTIA_MAX_ZOOM);
+        let fit_zoom = (vw / cw).min(vh / ch).clamp(MIN_ZOOM, MAX_ZOOM);
         if !fit_zoom.is_finite() || fit_zoom <= 0.0 {
             return;
         }
@@ -1307,12 +1356,12 @@ impl PanZoomInertiaState {
         }
     }
 
-    /// Update zoom from a percentage (`100.0` = `1.0x`), clamped to `[0.1, 32.0]`.
+    /// Update zoom from a percentage (`100.0` = `1.0x`), clamped to `[MIN_ZOOM, MAX_ZOOM]`.
     pub fn set_zoom_percent(&mut self, pct: f64) {
         if !pct.is_finite() || pct <= 0.0 {
             return;
         }
-        self.zoom = (pct / 100.0).clamp(INERTIA_MIN_ZOOM, INERTIA_MAX_ZOOM);
+        self.zoom = (pct / 100.0).clamp(MIN_ZOOM, MAX_ZOOM);
     }
 
     /// Transform a view-space point into content-space points.
@@ -1755,9 +1804,12 @@ mod tests {
             .expect("second click emits intent");
         assert!(state.pending_bracket_start.is_none());
         assert_eq!(intent.command_id, "graph.addComparisonBrackets");
-        assert_eq!(intent.params["brackets"][0]["group_a"], 0);
-        assert_eq!(intent.params["brackets"][0]["group_b"], 2);
-        assert_eq!(intent.params["brackets"][0]["result_sheet_id"], "res-1");
+        assert!(intent.params.get("brackets").is_none());
+        assert_eq!(intent.params["sheet_id"], "g-1");
+        assert_eq!(intent.params["group_a"], 0);
+        assert_eq!(intent.params["group_b"], 2);
+        assert_eq!(intent.params["result_sheet_id"], "res-1");
+        assert_eq!(intent.params["style"], "square");
 
         state.set_mode(CanvasToolMode::ArrowCallout);
         state.begin_drag(PointPt::new(50.0, 50.0));
@@ -1849,5 +1901,97 @@ mod tests {
         let idx = spec.annotations.len() - 1;
         assert_eq!(hit_test_graph(&scene, &spec, PointPt::new(120.0, 108.0), 4.0), Some(CanvasHitTarget::Annotation { index: idx }));
         assert_ne!(hit_test_graph(&scene, &spec, PointPt::new(100.0, 200.0), 1.0), Some(CanvasHitTarget::Annotation { index: idx }));
+    }
+
+    #[test]
+    fn bracket_click_preserves_arm_on_same_group_and_requires_result_sheet() {
+        let g1 = SheetId::new("graph-1");
+        let mut state = CanvasToolState { mode: CanvasToolMode::Bracket, ..CanvasToolState::default() };
+        assert!(
+            state
+                .click_bracket(
+                    &g1,
+                    BracketAnchor { pt: PointPt::new(120.0, 90.0), group_index: Some(1), data_value: None, result_sheet_id: None },
+                    BracketLabelMode::SummaryStars,
+                )
+                .is_none()
+        );
+        assert!(state.pending_bracket_start.is_some());
+
+        // Second click on the same group must NOT clear `pending_bracket_start`.
+        assert!(
+            state
+                .click_bracket(
+                    &g1,
+                    BracketAnchor {
+                        pt: PointPt::new(125.0, 92.0),
+                        group_index: Some(1),
+                        data_value: None,
+                        result_sheet_id: Some(SheetId::new("res-1"))
+                    },
+                    BracketLabelMode::SummaryStars,
+                )
+                .is_none()
+        );
+        assert_eq!(state.pending_bracket_start.as_ref().and_then(|a| a.group_index), Some(1));
+
+        // Third click on a different group WITH a ResultSheet consumes the arm and emits flat params.
+        let intent = state
+            .click_bracket(
+                &g1,
+                BracketAnchor { pt: PointPt::new(220.0, 96.0), group_index: Some(3), data_value: None, result_sheet_id: Some(SheetId::new("res-1")) },
+                BracketLabelMode::NumericPOrQ,
+            )
+            .expect("distinct group click emits flat bracket intent");
+        assert!(state.pending_bracket_start.is_none());
+        assert_eq!(intent.params["group_a"], 1);
+        assert_eq!(intent.params["group_b"], 3);
+        assert_eq!(intent.params["result_sheet_id"], "res-1");
+
+        // Distinct group clicks without any backing ResultSheet must return None instead of substituting graph ID.
+        assert!(
+            state
+                .click_bracket(
+                    &g1,
+                    BracketAnchor { pt: PointPt::new(120.0, 90.0), group_index: Some(0), data_value: None, result_sheet_id: None },
+                    BracketLabelMode::SummaryStars,
+                )
+                .is_none()
+        );
+        assert!(
+            state
+                .click_bracket(
+                    &g1,
+                    BracketAnchor { pt: PointPt::new(220.0, 90.0), group_index: Some(2), data_value: None, result_sheet_id: None },
+                    BracketLabelMode::SummaryStars,
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn non_finite_fit_arrow_axis_segment_and_zoom_bounds_are_safe() {
+        let mut state = CanvasToolState::default();
+        state.fit_scene(PointPt::new(f64::NAN, 100.0), PointPt::new(800.0, 600.0), 10.0);
+        assert_eq!(state.zoom, 1.0);
+        state.fit_scene(PointPt::new(100.0, 100.0), PointPt::new(f64::INFINITY, 600.0), 10.0);
+        assert_eq!(state.zoom, 1.0);
+
+        state.set_mode(CanvasToolMode::ArrowCallout);
+        state.begin_drag(PointPt::new(40.0, 50.0));
+        assert!(state.end_drag(&SheetId::new("g-1"), PointPt::new(40.5, 50.5)).is_none(), "degenerate short arrow click ignored");
+        state.begin_drag(PointPt::new(40.0, f64::NAN));
+        assert!(state.end_drag(&SheetId::new("g-1"), PointPt::new(140.0, 80.0)).is_none(), "non-finite start arrow ignored");
+
+        let ds = sample_data_sheet();
+        let mut sheet = GraphSheet::new_uninitialized_for_data(SheetId::new("g-axis"), &ds).expect("graph sheet");
+        sheet.spec = broken_y_graph_spec();
+        sheet.spec.y_axis.segments[0].length_share = f64::NAN;
+        assert!(state.apply_axis_break_resize(&sheet, AxisKind::Y, 0, 0.5, None).is_none());
+
+        state.set_zoom(64.0);
+        assert_eq!(state.zoom, super::MAX_ZOOM);
+        assert_eq!(super::MIN_ZOOM, 0.1);
+        assert_eq!(super::MAX_ZOOM, 32.0);
     }
 }

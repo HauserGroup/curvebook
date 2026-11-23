@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
+use curvebook_platform::sync::Mutex;
+
 use curvebook_ui_egui::control_io::CONTROL_CLIENT_IDLE_TIMEOUT;
 use curvebook_ui_egui::{ControlAuth, ControlResponse, MAX_CONTROL_LINE_BYTES};
 use serde_json::Value;
@@ -28,25 +30,56 @@ pub const CONTROL_LINE_READ_DEADLINE: Duration = CONTROL_CLIENT_IDLE_TIMEOUT;
 const TRANSIENT_ACCEPT_BACKOFF: Duration = Duration::from_millis(25);
 const ACCEPT_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(1);
 const OVERSIZED_READER_DRAIN_WINDOW: Duration = Duration::from_millis(50);
+const CLIENT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// RAII guard that stops and joins the live-window control accept thread on drop.
+/// RAII guard that stops and joins the live-window control accept thread (and drains active client
+/// response flushes up to a bounded timeout) on drop.
 pub struct LiveControlServerGuard {
     shutdown: Arc<AtomicBool>,
     accept_thread: Option<std::thread::JoinHandle<()>>,
+    active_clients: Arc<AtomicUsize>,
+    drain_rx: Mutex<mpsc::Receiver<()>>,
 }
 
 impl LiveControlServerGuard {
     /// Wrap an already-spawned accept thread handle and its shared shutdown flag.
     #[must_use]
-    pub const fn new(shutdown: Arc<AtomicBool>, accept_thread: std::thread::JoinHandle<()>) -> Self {
-        Self { shutdown, accept_thread: Some(accept_thread) }
+    pub fn new(shutdown: Arc<AtomicBool>, accept_thread: std::thread::JoinHandle<()>) -> Self {
+        let (_tx, rx) = mpsc::channel();
+        Self {
+            shutdown,
+            accept_thread: Some(accept_thread),
+            active_clients: Arc::new(AtomicUsize::new(0)),
+            drain_rx: Mutex::named("live_control_client_drain", rx),
+        }
     }
 
-    /// Signal shutdown and join the accept thread immediately.
+    fn with_client_tracking(mut self, active_clients: Arc<AtomicUsize>, drain_rx: mpsc::Receiver<()>) -> Self {
+        self.active_clients = active_clients;
+        self.drain_rx = Mutex::named("live_control_client_drain", drain_rx);
+        self
+    }
+
+    /// Signal shutdown, join the accept thread, and wait (bounded) for active client handlers to flush replies.
     pub fn stop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
         if let Some(handle) = self.accept_thread.take() {
             let _ = handle.join();
+        }
+        let deadline = Instant::now() + CLIENT_DRAIN_TIMEOUT;
+        let Ok(rx) = self.drain_rx.lock() else {
+            return;
+        };
+        while self.active_clients.load(Ordering::Acquire) > 0 {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                break;
+            };
+            if remaining.is_zero() {
+                break;
+            }
+            if rx.recv_timeout(remaining).is_err() {
+                break;
+            }
         }
     }
 
@@ -120,11 +153,16 @@ impl LiveControlBridge {
     }
 }
 
-struct ActiveClientGuard(Arc<AtomicUsize>);
+struct ActiveClientGuard {
+    active_clients: Arc<AtomicUsize>,
+    drain_tx: mpsc::Sender<()>,
+}
 
 impl Drop for ActiveClientGuard {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
+        if self.active_clients.fetch_sub(1, Ordering::AcqRel) == 1 {
+            let _ = self.drain_tx.send(());
+        }
     }
 }
 
@@ -174,14 +212,16 @@ where
     R: FnMut(S) + Send + 'static,
 {
     let shutdown = Arc::clone(bridge.shutdown_flag());
+    let active_clients = Arc::new(AtomicUsize::new(0));
+    let (drain_tx, drain_rx) = mpsc::channel();
+    let loop_clients = Arc::clone(&active_clients);
     let accept_thread = std::thread::Builder::new()
         .name(String::from("curvebook-control-accept"))
         .spawn(move || {
-            let active_clients = Arc::new(AtomicUsize::new(0));
             let mut last_error_log: Option<Instant> = None;
             while !bridge.is_shutdown() {
                 match accept_next() {
-                    Ok(stream) => dispatch_accepted_stream(stream, &bridge, &active_clients, &serve_client, &mut on_rejected),
+                    Ok(stream) => dispatch_accepted_stream(stream, &bridge, &loop_clients, &drain_tx, &serve_client, &mut on_rejected),
                     Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(10));
                     }
@@ -204,18 +244,24 @@ where
             }
         })
         .map_err(|err| format!("failed to spawn live control accept thread: {err}"))?;
-    Ok(LiveControlServerGuard::new(shutdown, accept_thread))
+    Ok(LiveControlServerGuard::new(shutdown, accept_thread).with_client_tracking(active_clients, drain_rx))
 }
 
-fn dispatch_accepted_stream<S, F, R>(stream: S, bridge: &LiveControlBridge, active_clients: &Arc<AtomicUsize>, serve_client: &F, on_rejected: &mut R)
-where
+fn dispatch_accepted_stream<S, F, R>(
+    stream: S,
+    bridge: &LiveControlBridge,
+    active_clients: &Arc<AtomicUsize>,
+    drain_tx: &mpsc::Sender<()>,
+    serve_client: &F,
+    on_rejected: &mut R,
+) where
     S: Send + 'static,
     F: Fn(S, &LiveControlBridge) -> io::Result<()> + Clone + Send + Sync + 'static,
     R: FnMut(S),
 {
     let reserved = active_clients.try_update(Ordering::AcqRel, Ordering::Acquire, |c| (c < MAX_CONCURRENT_CONTROL_CLIENTS).then_some(c + 1)).is_ok();
     if reserved {
-        let guard = ActiveClientGuard(Arc::clone(active_clients));
+        let guard = ActiveClientGuard { active_clients: Arc::clone(active_clients), drain_tx: drain_tx.clone() };
         let client_bridge = bridge.clone();
         let client_serve = serve_client.clone();
         let spawned = std::thread::Builder::new().name(String::from("curvebook-control-client")).spawn(move || {

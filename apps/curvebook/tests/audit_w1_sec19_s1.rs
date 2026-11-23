@@ -84,6 +84,7 @@ fn new_host_runtime(in_window_menus: bool, recovery_root: Option<PathBuf>) -> De
         theme_override: None,
         recovery_root,
         initial_viewport: ViewportMetrics::new(1280.0, 820.0, 1.0),
+        ..DesktopHostConfig::default()
     })
 }
 

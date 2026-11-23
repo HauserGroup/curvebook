@@ -12,8 +12,8 @@ pub mod grid;
 use serde::{Deserialize, Serialize};
 
 pub use canvas::{
-    CanvasToolMode, CanvasToolState, JournalWidthPreset, NavigatorDragState, PanZoomInertiaState, PhysicalUnit, RulerTick, ToolCommandIntent,
-    build_ruler_ticks,
+    CanvasToolMode, CanvasToolState, JournalWidthPreset, MAX_ZOOM, MIN_ZOOM, NavigatorDragState, PanZoomInertiaState, PhysicalUnit, RulerTick,
+    ToolCommandIntent, build_ruler_ticks,
 };
 pub use grid::{GridCellCoord, GridToolState, GridViewportSpec, GridVisibleWindow, SelectionQuickStats};
 

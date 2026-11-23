@@ -112,6 +112,7 @@ fn muda_vs_egui_menubar_1_to_1_parity_across_locales_and_sheet_states() -> Resul
             theme_override: None,
             recovery_root: None,
             initial_viewport: metrics,
+            ..DesktopHostConfig::default()
         });
         let win_id = rt.open_window(None, metrics)?;
 
@@ -205,6 +206,7 @@ fn run_qa3_parity_case(use_bundled_fonts: bool, in_window_menus: bool, scale: f6
         theme_override: None,
         recovery_root: None,
         initial_viewport: initial,
+        ..DesktopHostConfig::default()
     });
     let win_id = rt.open_window(None, initial)?;
     {

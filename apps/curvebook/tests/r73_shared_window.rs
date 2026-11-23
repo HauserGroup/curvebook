@@ -309,6 +309,7 @@ fn shared_live_window_human_and_control_edits_render_repaint_and_persist() -> Re
         theme_override: None,
         recovery_root: Some(recovery_dir.clone()),
         initial_viewport: viewport,
+        ..DesktopHostConfig::default()
     });
     let win_id = rt.open_window_with_recovery(session, viewport, recovery_dir.clone(), journal, Some(report))?;
 
@@ -519,6 +520,7 @@ fn shared_live_window_enforces_gui_only_and_shares_human_and_agent_state() -> Re
         theme_override: None,
         recovery_root: None,
         initial_viewport: viewport,
+        ..DesktopHostConfig::default()
     });
     let win_id = rt.open_window(None, viewport)?;
     // Human toggles rulers in the live window while --gui-only is active.
@@ -635,6 +637,7 @@ fn shared_live_window_wal_recovery_and_human_close_unblocks_server() -> Result<(
         theme_override: None,
         recovery_root: Some(recovery_dir.clone()),
         initial_viewport: viewport,
+        ..DesktopHostConfig::default()
     });
     let win_id = rt.open_window_with_recovery(session, viewport, recovery_dir.clone(), journal, Some(report))?;
 

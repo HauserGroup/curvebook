@@ -124,6 +124,7 @@ fn desktop_menu_bar_sets_host_draws_flag_suppresses_canvas_duplicates_and_drives
         theme_override: None,
         recovery_root: None,
         initial_viewport: metrics,
+        ..DesktopHostConfig::default()
     });
     let (adapter, dialog_rx) = RecordingFileDialogAdapter::new();
     let adapter = Arc::new(adapter);

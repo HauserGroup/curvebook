@@ -1284,6 +1284,40 @@ impl UiApp {
         Ok(())
     }
 
+    /// Replace the active [`Session`] (e.g. when loading a dropped project into an existing
+    /// window) while preserving host security policies (`gui_only`, `path_policy`,
+    /// `human_path_only`), OS adapters (`clipboard_adapter`, `url_opener`, `egui_dispatch_hook`),
+    /// and user preferences (`theme`, `locale`, `shortcuts`, `ui_backend`, `host_draws_menu_bar`,
+    /// `rulers_visible`).
+    pub fn replace_session_preserving_policies(&mut self, mut session: Session) {
+        session.set_gui_only(self.session.gui_only());
+        session.set_path_policy(self.session.path_policy().clone());
+
+        let rulers_visible = self.canvas_dialogs.rulers_visible;
+        self.session = session;
+        self.nav = WorkspaceNavState::default();
+        self.grid = GridViewState::default();
+        self.grid.apply_locale_preset(&self.locale_preset);
+        self.canvas_dialogs = CanvasDialogState { rulers_visible, ..CanvasDialogState::default() };
+        self.split = SplitWorkspaceState::default();
+        self.brushed_cell = None;
+        self.brushed_points.clear();
+        self.preview_filter = CanvasPreviewFilter::default();
+        self.inline_editor = InlineEditorState::default();
+        self.interaction = InteractionControllerState::default();
+        self.hover_command_id = None;
+        self.focus_widget_id = None;
+        self.power_wizards_by_sheet.clear();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.egui_views = egui_shell::EguiShellViewState::default();
+        }
+        self.view_shards = views::ViewShardStates::default();
+        self.batch_undo_log = None;
+        self.mutation_seq.0 = self.mutation_seq.0.wrapping_add(1);
+        self.sync_views();
+    }
+
     /// Dispatch a keyboard shortcut combination (such as `"F6"`, `"Shift+F6"`, or a customized
     /// binding) through [`Self::shortcuts`].
     ///

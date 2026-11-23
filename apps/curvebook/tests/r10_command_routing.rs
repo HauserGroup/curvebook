@@ -19,7 +19,7 @@ use curvebook_ui_egui::dialogs_canvas::{ActiveDialog, ActiveInspector};
 use curvebook_ui_egui::interaction::{InlineEditorTarget, KeyModifiers, ViewportMetrics};
 use curvebook_ui_egui::menus::{TOOLBAR_BUTTONS, UI_COMMANDS, menu_bar_tooltips};
 use curvebook_ui_egui::theme::UiThemeMode;
-use curvebook_ui_egui::{CanvasPreviewFilter, UiApp, dispatch_gui_action};
+use curvebook_ui_egui::{CanvasPreviewFilter, StubPlatformClipboardAdapter, UiApp, dispatch_gui_action};
 use eframe::egui;
 use serde_json::{Value, json};
 
@@ -188,6 +188,8 @@ fn spawn_window_from_session(session: Session) -> Result<(DesktopHostRuntime, De
         theme_override: None,
         recovery_root: None,
         initial_viewport: metrics,
+        clipboard_adapter: Some(Arc::new(StubPlatformClipboardAdapter::new())),
+        ..DesktopHostConfig::default()
     });
     let wid = rt.open_window_with_session(session, metrics, false)?;
     Ok((rt, wid))
@@ -913,6 +915,8 @@ fn r10_23_drawn_file_menu_routes_open_save_save_as_and_exports_through_adapter()
         theme_override: None,
         recovery_root: None,
         initial_viewport: metrics,
+        clipboard_adapter: Some(Arc::new(StubPlatformClipboardAdapter::new())),
+        ..DesktopHostConfig::default()
     });
     rt.set_file_dialog_adapter(adapter.clone());
     let wid = rt.open_window(None, metrics)?;
@@ -1019,6 +1023,8 @@ fn r13_7_native_rfd_image_picker_inserts_png_on_graph_and_layout() -> Result<(),
         theme_override: None,
         recovery_root: None,
         initial_viewport: metrics,
+        clipboard_adapter: Some(Arc::new(StubPlatformClipboardAdapter::new())),
+        ..DesktopHostConfig::default()
     });
     rt.set_file_dialog_adapter(adapter.clone());
     let wid = rt.open_window(None, metrics)?;
