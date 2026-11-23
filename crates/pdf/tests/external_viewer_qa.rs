@@ -51,7 +51,9 @@ struct PpmImage {
 impl PpmImage {
     fn pixel(&self, x: usize, y: usize) -> [u8; 3] {
         let idx = (y * self.width + x) * 3;
-        [self.rgb[idx], self.rgb[idx + 1], self.rgb[idx + 2]]
+        let px: Option<[u8; 3]> = self.rgb.get(idx..idx + 3).and_then(|s| s.try_into().ok());
+        assert!(px.is_some(), "pixel ({x}, {y}) out of bounds");
+        px.unwrap_or([0; 3])
     }
 }
 
@@ -113,11 +115,11 @@ fn parse_p6_ppm(data: &[u8]) -> Result<PpmImage, String> {
 
     let read_token = |buf: &[u8], cursor: &mut usize| -> Result<usize, String> {
         loop {
-            while *cursor < buf.len() && buf[*cursor].is_ascii_whitespace() {
+            while buf.get(*cursor).is_some_and(u8::is_ascii_whitespace) {
                 *cursor += 1;
             }
-            if *cursor < buf.len() && buf[*cursor] == b'#' {
-                while *cursor < buf.len() && buf[*cursor] != b'\n' {
+            if buf.get(*cursor) == Some(&b'#') {
+                while buf.get(*cursor).is_some_and(|&b| b != b'\n') {
                     *cursor += 1;
                 }
             } else {
@@ -125,10 +127,11 @@ fn parse_p6_ppm(data: &[u8]) -> Result<PpmImage, String> {
             }
         }
         let start = *cursor;
-        while *cursor < buf.len() && !buf[*cursor].is_ascii_whitespace() {
+        while buf.get(*cursor).is_some_and(|b| !b.is_ascii_whitespace()) {
             *cursor += 1;
         }
-        let token = std::str::from_utf8(&buf[start..*cursor]).map_err(|e| format!("non-UTF8 PPM header token: {e}"))?;
+        let token_bytes = buf.get(start..*cursor).ok_or_else(|| String::from("PPM header slice out of bounds"))?;
+        let token = std::str::from_utf8(token_bytes).map_err(|e| format!("non-UTF8 PPM header token: {e}"))?;
         token.parse::<usize>().map_err(|e| format!("invalid PPM integer token '{token}': {e}"))
     };
 
@@ -136,11 +139,11 @@ fn parse_p6_ppm(data: &[u8]) -> Result<PpmImage, String> {
     let height = read_token(data, &mut pos)?;
     let maxval = read_token(data, &mut pos)?;
     assert_eq!(maxval, 255, "expected 8-bit maxval 255 in PPM");
-    assert!(pos < data.len() && data[pos].is_ascii_whitespace(), "missing whitespace byte after PPM maxval");
+    assert!(data.get(pos).is_some_and(u8::is_ascii_whitespace), "missing whitespace byte after PPM maxval");
     pos += 1;
 
     let expected_bytes = width * height * 3;
-    let payload = &data[pos..];
+    let payload = data.get(pos..).ok_or_else(|| String::from("missing PPM payload"))?;
     assert_eq!(payload.len(), expected_bytes, "PPM byte payload mismatch");
     Ok(PpmImage { width, height, rgb: payload.to_vec() })
 }

@@ -46,7 +46,7 @@ fn build_svg_equation_project() -> Result<(ProjectDocument, GraphSheet, LayoutSh
     let pts = [(0.5, 16.0), (1.0, 28.0), (2.0, 49.0), (4.0, 76.0), (8.0, 92.0), (16.0, 98.0)];
     for (r, (x, y)) in pts.into_iter().enumerate() {
         xy.set_x_cell(r, Cell::number(x))?;
-        xy.data_sets[0].cells[r][0] = Cell::number(y);
+        *xy.data_sets.first_mut().and_then(|ds| ds.cells.get_mut(r)).and_then(|row| row.first_mut()).ok_or("missing xy cell")? = Cell::number(y);
     }
     let ds = DataSheet::new("xy-svg", "Dose-Response", TableArchetype::Xy(xy))?;
     doc.add_data_sheet(ds.clone())?;

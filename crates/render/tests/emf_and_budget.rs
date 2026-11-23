@@ -42,15 +42,21 @@ const ENHMETA_VERSION: u32 = 0x0001_0000;
 const MM_ANISOTROPIC: u32 = 8;
 
 fn read_u16_le(bytes: &[u8], off: usize) -> u16 {
-    u16::from_le_bytes([bytes[off], bytes[off + 1]])
+    let arr: Option<[u8; 2]> = bytes.get(off..off + 2).and_then(|s| s.try_into().ok());
+    assert!(arr.is_some(), "u16_le offset {off} out of bounds");
+    u16::from_le_bytes(arr.unwrap_or([0; 2]))
 }
 
 fn read_u32_le(bytes: &[u8], off: usize) -> u32 {
-    u32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]])
+    let arr: Option<[u8; 4]> = bytes.get(off..off + 4).and_then(|s| s.try_into().ok());
+    assert!(arr.is_some(), "u32_le offset {off} out of bounds");
+    u32::from_le_bytes(arr.unwrap_or([0; 4]))
 }
 
 fn read_i32_le(bytes: &[u8], off: usize) -> i32 {
-    i32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]])
+    let arr: Option<[u8; 4]> = bytes.get(off..off + 4).and_then(|s| s.try_into().ok());
+    assert!(arr.is_some(), "i32_le offset {off} out of bounds");
+    i32::from_le_bytes(arr.unwrap_or([0; 4]))
 }
 
 struct ParsedEmfSummary {
@@ -102,7 +108,9 @@ impl EmfParserState {
         assert!(off_str >= 76);
         assert!(off_str + n_chars * 2 <= off_dx);
         assert!(off_dx + n_chars * 4 <= rec.len());
-        let units: Vec<u16> = rec[off_str..off_str + n_chars * 2].as_chunks::<2>().0.iter().map(|&pair| u16::from_le_bytes(pair)).collect();
+        let utf16_bytes = rec.get(off_str..off_str + n_chars * 2).unwrap_or(&[]);
+        assert_eq!(utf16_bytes.len(), n_chars * 2, "UTF-16LE slice");
+        let units: Vec<u16> = utf16_bytes.as_chunks::<2>().0.iter().map(|&pair| u16::from_le_bytes(pair)).collect();
         let decoded = String::from_utf16(&units);
         assert!(decoded.is_ok(), "valid UTF-16LE in EMR_EXTTEXTOUTW");
         if let Ok(text) = decoded {
@@ -127,7 +135,9 @@ impl EmfParserState {
         let compression = read_u32_le(rec, off_bmi + 16);
         assert_eq!(bi_size, 40);
         assert_eq!(cb_bits, (width as usize) * (height as usize) * 4);
-        self.dib_records.push(ParsedDib { width, height, bit_count, compression, pixels_bgra: rec[off_bits..off_bits + cb_bits].to_vec() });
+        let pixels_bgra = rec.get(off_bits..off_bits + cb_bits).map(<[u8]>::to_vec).unwrap_or_default();
+        assert_eq!(pixels_bgra.len(), cb_bits, "DIB pixels");
+        self.dib_records.push(ParsedDib { width, height, bit_count, compression, pixels_bgra });
     }
 
     fn validate_path_or_clip_record(&mut self, i_type: u32, n_size: u32, rec: &[u8]) {
@@ -282,7 +292,9 @@ fn parse_and_validate_emf(bytes: &[u8]) -> ParsedEmfSummary {
         assert!(rec_end <= bytes.len(), "record iType={i_type} overruns EMF stream");
         *state.record_counts.entry(i_type).or_insert(0) += 1;
         walked_records += 1;
-        state.validate_record(i_type, n_size, offset, &bytes[offset..rec_end]);
+        let rec = bytes.get(offset..rec_end).unwrap_or(&[]);
+        assert_eq!(rec.len(), rec_end - offset, "EMF record slice");
+        state.validate_record(i_type, n_size, offset, rec);
         offset = rec_end;
     }
 

@@ -56,10 +56,18 @@ fn gauss_legendre_24() -> &'static ([f64; GL_ORDER], [f64; GL_ORDER]) {
                 }
             }
             let w = 2.0 / ((1.0 - x * x) * dp * dp);
-            nodes[i] = -x;
-            nodes[GL_ORDER - 1 - i] = x;
-            weights[i] = w;
-            weights[GL_ORDER - 1 - i] = w;
+            if let Some(slot) = nodes.get_mut(i) {
+                *slot = -x;
+            }
+            if let Some(slot) = nodes.get_mut(GL_ORDER - 1 - i) {
+                *slot = x;
+            }
+            if let Some(slot) = weights.get_mut(i) {
+                *slot = w;
+            }
+            if let Some(slot) = weights.get_mut(GL_ORDER - 1 - i) {
+                *slot = w;
+            }
         }
         (nodes, weights)
     })
@@ -578,8 +586,9 @@ fn nct_positive_t_large_delta_quad(t: f64, df: f64, delta: f64, upper: bool) -> 
     let opts = crate::quad::QuadOptions { abs_tol: 1e-13, rel_tol: 1e-12, max_subdivisions: 256 };
     let mut total = 0.0_f64;
     for win in pts.windows(2) {
-        let a = win[0];
-        let b = win[1];
+        let [a, b] = *win else {
+            continue;
+        };
         if b - a <= 0.0 {
             continue;
         }

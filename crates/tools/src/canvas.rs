@@ -856,14 +856,16 @@ fn grouped_category_slots(arrangement: GroupedArrangement, grouped: &GroupedTabl
 
 fn grouped_row_centers(grouped: &GroupedTable, nrows: usize) -> (Vec<f64>, f64, f64, f64) {
     if let Some(spacing) = &grouped.row_numeric_spacing
-        && spacing.len() >= nrows
-        && let Some(vals) = spacing[..nrows].iter().map(|opt| opt.filter(|v| v.is_finite())).collect::<Option<Vec<f64>>>()
+        && let Some(prefix) = spacing.get(..nrows)
+        && let Some(vals) = prefix.iter().map(|opt| opt.filter(|v| v.is_finite())).collect::<Option<Vec<f64>>>()
     {
         let mut min_step = f64::INFINITY;
         for pair in vals.windows(2) {
-            let diff = (pair[1] - pair[0]).abs();
-            if diff > 1e-9 && diff < min_step {
-                min_step = diff;
+            if let [a, b] = pair {
+                let diff = (b - a).abs();
+                if diff > 1e-9 && diff < min_step {
+                    min_step = diff;
+                }
             }
         }
         let step = if min_step.is_finite() { min_step } else { 1.0 };

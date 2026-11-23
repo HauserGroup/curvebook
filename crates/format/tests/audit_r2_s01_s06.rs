@@ -70,12 +70,21 @@ fn build_sample_project() -> Result<ProjectDocument, Box<dyn std::error::Error>>
     let mut doc = ProjectDocument::new("R2 Audit Study")?;
 
     let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 2)?;
-    col.data_sets[0].title = String::from("Vehicle");
-    col.data_sets[1].title = String::from("Treated");
-    col.data_sets[0].cells[0] = vec![Cell::number(1.25)];
-    col.data_sets[0].cells[1] = vec![Cell::number(2.5)];
-    col.data_sets[1].cells[0] = vec![Cell::number(9.75)];
-    col.data_sets[1].cells[1] = vec![Cell::number(10.5)];
+    let [ds0, ds1] = col.data_sets.as_mut_slice() else {
+        return Err("expected 2 columns".into());
+    };
+    ds0.title = String::from("Vehicle");
+    ds1.title = String::from("Treated");
+    let [c0_r0, c0_r1] = ds0.cells.as_mut_slice() else {
+        return Err("expected 2 rows".into());
+    };
+    *c0_r0 = vec![Cell::number(1.25)];
+    *c0_r1 = vec![Cell::number(2.5)];
+    let [c1_r0, c1_r1] = ds1.cells.as_mut_slice() else {
+        return Err("expected 2 rows".into());
+    };
+    *c1_r0 = vec![Cell::number(9.75)];
+    *c1_r1 = vec![Cell::number(10.5)];
     let mut ds = DataSheet::new("sheet-a", "Cohort A", TableArchetype::Column(col))?;
     ds.set_excluded_with_reason(CellCoord::new(1, 1, 0), "hemolyzed", "Patient sample #4 hemolyzed", "2026-11-15T10:00:00Z")?;
     doc.add_data_sheet(ds)?;

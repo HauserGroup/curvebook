@@ -13,7 +13,9 @@ use curvebook_text::{RichSpan, RichText, SpanWeight};
 const EMR_EXTTEXTOUTW: u32 = 84;
 
 fn read_u32_le(bytes: &[u8], off: usize) -> u32 {
-    u32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]])
+    let arr: Option<[u8; 4]> = bytes.get(off..off + 4).and_then(|s| s.try_into().ok());
+    assert!(arr.is_some(), "u32_le offset {off} out of bounds");
+    u32::from_le_bytes(arr.unwrap_or([0; 4]))
 }
 
 fn decode_emf_texts(emf: &[u8]) -> Vec<String> {
@@ -28,9 +30,10 @@ fn decode_emf_texts(emf: &[u8]) -> Vec<String> {
         if rec_type == EMR_EXTTEXTOUTW && rec_size >= 76 {
             let n_chars = read_u32_le(emf, off + 44) as usize;
             let off_str = read_u32_le(emf, off + 48) as usize;
-            if off_str + n_chars * 2 <= rec_size {
-                let units: Vec<u16> =
-                    emf[off + off_str..off + off_str + n_chars * 2].as_chunks::<2>().0.iter().map(|&pair| u16::from_le_bytes(pair)).collect();
+            if off_str + n_chars * 2 <= rec_size
+                && let Some(utf16_bytes) = emf.get(off + off_str..off + off_str + n_chars * 2)
+            {
+                let units: Vec<u16> = utf16_bytes.as_chunks::<2>().0.iter().map(|&pair| u16::from_le_bytes(pair)).collect();
                 texts.push(String::from_utf16(&units).expect("UTF-16LE in EMR_EXTTEXTOUTW"));
             }
         }
@@ -58,7 +61,7 @@ fn dark_pixel_bbox_size(img: &RasterImage) -> (u32, u32) {
     for y in 0..img.height_px {
         for x in 0..img.width_px {
             let idx = ((y * img.width_px + x) * 4) as usize;
-            if img.rgba[idx] < 200 {
+            if img.rgba.get(idx).is_some_and(|&r| r < 200) {
                 min_x = min_x.min(x);
                 max_x = max_x.max(x);
                 min_y = min_y.min(y);

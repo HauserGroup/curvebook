@@ -106,25 +106,33 @@ fn ln_p_grid() -> &'static [f64; NUM_P_NODES] {
 
 /// Interpolate the `W(n, P)` quantile curve and tail curvature at `u = 1 / sqrt(n)`.
 fn interpolate_w_row(u: f64) -> ([f64; NUM_P_NODES], f64) {
-    if u <= LILLIEFORS_U_NODES[0] {
-        return (LILLIEFORS_W_TABLE[0], LILLIEFORS_TAIL_A[0]);
+    if let (Some(&u0), Some(&w0), Some(&a0)) = (LILLIEFORS_U_NODES.first(), LILLIEFORS_W_TABLE.first(), LILLIEFORS_TAIL_A.first())
+        && u <= u0
+    {
+        return (w0, a0);
     }
-    let last = NUM_U_NODES - 1;
-    if u >= LILLIEFORS_U_NODES[last] {
-        return (LILLIEFORS_W_TABLE[last], LILLIEFORS_TAIL_A[last]);
+    if let (Some(&u_last), Some(&w_last), Some(&a_last)) = (LILLIEFORS_U_NODES.last(), LILLIEFORS_W_TABLE.last(), LILLIEFORS_TAIL_A.last())
+        && u >= u_last
+    {
+        return (w_last, a_last);
     }
-    let mut idx = 0_usize;
-    while idx + 1 < last && LILLIEFORS_U_NODES[idx + 1] < u {
-        idx += 1;
-    }
-    let u_lo = LILLIEFORS_U_NODES[idx];
-    let u_hi = LILLIEFORS_U_NODES[idx + 1];
+    let idx = LILLIEFORS_U_NODES.windows(2).position(|pair| matches!(pair, [_, hi] if *hi >= u)).unwrap_or(NUM_U_NODES.saturating_sub(2));
+    let (Some(&u_lo), Some(&u_hi), Some(w_lo), Some(w_hi), Some(&a_lo), Some(&a_hi)) = (
+        LILLIEFORS_U_NODES.get(idx),
+        LILLIEFORS_U_NODES.get(idx + 1),
+        LILLIEFORS_W_TABLE.get(idx),
+        LILLIEFORS_W_TABLE.get(idx + 1),
+        LILLIEFORS_TAIL_A.get(idx),
+        LILLIEFORS_TAIL_A.get(idx + 1),
+    ) else {
+        return ([0.0; NUM_P_NODES], 0.0);
+    };
     let frac = (u - u_lo) / (u_hi - u_lo);
     let mut row = [0.0_f64; NUM_P_NODES];
-    for k in 0..NUM_P_NODES {
-        row[k] = LILLIEFORS_W_TABLE[idx][k] * (1.0 - frac) + LILLIEFORS_W_TABLE[idx + 1][k] * frac;
+    for ((dst, &lo), &hi) in row.iter_mut().zip(w_lo.iter()).zip(w_hi.iter()) {
+        *dst = lo * (1.0 - frac) + hi * frac;
     }
-    let tail_a = LILLIEFORS_TAIL_A[idx] * (1.0 - frac) + LILLIEFORS_TAIL_A[idx + 1] * frac;
+    let tail_a = a_lo * (1.0 - frac) + a_hi * frac;
     (row, tail_a)
 }
 
@@ -134,22 +142,29 @@ fn pchip_slopes(x: &[f64; NUM_P_NODES], y: &[f64; NUM_P_NODES]) -> [f64; NUM_P_N
     let mut d = [0.0_f64; NUM_P_NODES];
     let mut h = [0.0_f64; NUM_P_NODES - 1];
     let mut delta = [0.0_f64; NUM_P_NODES - 1];
-    for k in 0..(NUM_P_NODES - 1) {
-        h[k] = x[k + 1] - x[k];
-        delta[k] = (y[k + 1] - y[k]) / h[k];
-    }
-    for k in 1..(NUM_P_NODES - 1) {
-        if delta[k - 1] * delta[k] > 0.0 {
-            let w1 = 2.0 * h[k] + h[k - 1];
-            let w2 = h[k] + 2.0 * h[k - 1];
-            d[k] = (w1 + w2) / (w1 / delta[k - 1] + w2 / delta[k]);
+    for (((hk, dk), xw), yw) in h.iter_mut().zip(delta.iter_mut()).zip(x.windows(2)).zip(y.windows(2)) {
+        if let ([x0, x1], [y0, y1]) = (xw, yw) {
+            *hk = x1 - x0;
+            *dk = (y1 - y0) / *hk;
         }
     }
-    d[0] = pchip_endpoint_slope(h[0], h[1], delta[0], delta[1]);
-    let m1 = NUM_P_NODES - 1;
+    for (dk, (hw, dw)) in d.iter_mut().skip(1).zip(h.windows(2).zip(delta.windows(2))) {
+        if let ([h0, h1], [d0, d1]) = (hw, dw)
+            && d0 * d1 > 0.0
+        {
+            let w1 = 2.0 * h1 + h0;
+            let w2 = h1 + 2.0 * h0;
+            *dk = (w1 + w2) / (w1 / d0 + w2 / d1);
+        }
+    }
+    if let (Some(d0), Some(&h0), Some(&h1), Some(&del0), Some(&del1)) = (d.first_mut(), h.first(), h.get(1), delta.first(), delta.get(1)) {
+        *d0 = pchip_endpoint_slope(h0, h1, del0, del1);
+    }
     let m2 = NUM_P_NODES - 2;
     let m3 = NUM_P_NODES - 3;
-    d[m1] = pchip_endpoint_slope(h[m2], h[m3], delta[m2], delta[m3]);
+    if let (Some(d_last), Some(&hm2), Some(&hm3), Some(&dm2), Some(&dm3)) = (d.last_mut(), h.get(m2), h.get(m3), delta.get(m2), delta.get(m3)) {
+        *d_last = pchip_endpoint_slope(hm2, hm3, dm2, dm3);
+    }
     d
 }
 
@@ -169,21 +184,26 @@ fn eval_pchip(x: &[f64; NUM_P_NODES], y: &[f64; NUM_P_NODES], d: &[f64; NUM_P_NO
     let mut hi = NUM_P_NODES - 2;
     while lo < hi {
         let mid = (lo + hi).div_ceil(2);
-        if x[mid] <= xq {
+        if x.get(mid).is_some_and(|&xm| xm <= xq) {
             lo = mid;
         } else {
             hi = mid - 1;
         }
     }
-    let h = x[lo + 1] - x[lo];
-    let t = ((xq - x[lo]) / h).clamp(0.0, 1.0);
+    let (Some(&x0), Some(&x1), Some(&y0), Some(&y1), Some(&d0), Some(&d1)) =
+        (x.get(lo), x.get(lo + 1), y.get(lo), y.get(lo + 1), d.get(lo), d.get(lo + 1))
+    else {
+        return 0.0;
+    };
+    let h = x1 - x0;
+    let t = ((xq - x0) / h).clamp(0.0, 1.0);
     let t2 = t * t;
     let t3 = t2 * t;
     let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
     let h10 = t3 - 2.0 * t2 + t;
     let h01 = -2.0 * t3 + 3.0 * t2;
     let h11 = t3 - t2;
-    h00 * y[lo] + h10 * h * d[lo] + h01 * y[lo + 1] + h11 * h * d[lo + 1]
+    h00 * y0 + h10 * h * d0 + h01 * y1 + h11 * h * d1
 }
 
 /// Compute the Lilliefors (1967) Kolmogorov–Smirnov statistic `D_n` from a **sorted** finite slice
@@ -256,15 +276,17 @@ pub fn lilliefors_p_value(d_stat: f64, n: usize) -> Result<f64, MathError> {
     let (w_row, tail_a) = interpolate_w_row(u);
     let slopes = pchip_slopes(&w_row, ln_p);
 
-    let p = if w <= w_row[0] {
-        let p0 = LILLIEFORS_P_GRID[0];
-        let s0 = slopes[0];
-        let alpha = (-w_row[0] * p0 * s0 / (1.0 - p0)).max(0.5);
-        1.0 - (1.0 - p0) * (w / w_row[0]).powf(alpha)
-    } else if w >= w_row[NUM_P_NODES - 1] {
-        let last = NUM_P_NODES - 1;
-        let dw = w - w_row[last];
-        let lp = ln_p[last] + slopes[last] * dw - tail_a * dw * dw;
+    let [w0, .., w_last] = w_row;
+    let [p0, ..] = LILLIEFORS_P_GRID;
+    let [s0, .., s_last] = slopes;
+    let [.., ln_p_last] = *ln_p;
+
+    let p = if w <= w0 {
+        let alpha = (-w0 * p0 * s0 / (1.0 - p0)).max(0.5);
+        1.0 - (1.0 - p0) * (w / w0).powf(alpha)
+    } else if w >= w_last {
+        let dw = w - w_last;
+        let lp = ln_p_last + s_last * dw - tail_a * dw * dw;
         if lp < -745.0 { 0.0 } else { lp.exp() }
     } else {
         eval_pchip(&w_row, ln_p, &slopes, w).exp()

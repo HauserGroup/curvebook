@@ -886,7 +886,11 @@ fn spawn_reader<R: Read + Send + 'static>(
                         let _ = tx.send(StreamEvent::LimitExceeded(stream));
                         break;
                     }
-                    if tx.send(StreamEvent::Chunk { stream, bytes: buf[..n].to_vec() }).is_err() {
+                    let Some(chunk) = buf.get(..n) else {
+                        let _ = tx.send(StreamEvent::IoErr { stream, message: format!("reader returned {n} bytes for {}-byte buffer", buf.len()) });
+                        break;
+                    };
+                    if tx.send(StreamEvent::Chunk { stream, bytes: chunk.to_vec() }).is_err() {
                         break;
                     }
                 }

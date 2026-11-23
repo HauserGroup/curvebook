@@ -17,9 +17,9 @@ fn decode_cl_frames(raw: &[u8]) -> Vec<Value> {
         let text = std::str::from_utf8(cursor).unwrap();
         let (hdr, rest) = text.split_once("\r\n\r\n").unwrap();
         let len: usize = hdr.strip_prefix("Content-Length: ").unwrap().trim().parse().unwrap();
-        let body = &rest.as_bytes()[..len];
+        let (body, tail) = rest.as_bytes().split_at_checked(len).expect("truncated body");
         out.push(serde_json::from_slice(body).unwrap());
-        cursor = &rest.as_bytes()[len..];
+        cursor = tail;
     }
     out
 }
@@ -43,8 +43,8 @@ fn call_tool(state: &mut McpServerState, id: i64, name: &str, arguments: Value) 
         }),
     );
     assert!(resp.get("error").is_none(), "unexpected JSON-RPC error: {resp}");
-    assert_eq!(resp["result"]["isError"], json!(false), "tool `{name}` failed: {resp}");
-    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    assert_eq!(resp.pointer("/result/isError"), Some(&json!(false)), "tool `{name}` failed: {resp}");
+    let text = resp.pointer("/result/content/0/text").and_then(Value::as_str).unwrap();
     serde_json::from_str(text).unwrap()
 }
 

@@ -33,14 +33,14 @@ fn check_tex_text_escapes(tex: &str) -> Result<(), String> {
     let mut depth = 0_i32;
 
     while i < bytes.len() {
-        if tex[i..].starts_with("\\text{") {
+        if tex.get(i..).is_some_and(|s| s.starts_with("\\text{")) {
             depth += 1;
             i += "\\text{".len();
             let text_depth = depth;
             while i < bytes.len() && depth >= text_depth {
                 match bytes[i] {
                     b'\\' => {
-                        let tail = &tex[i..];
+                        let tail = tex.get(i..).unwrap_or("");
                         if let Some(cmd) = ["\\textbackslash{}", "\\textless{}", "\\textgreater{}"].into_iter().find(|p| tail.starts_with(p)) {
                             i += cmd.len();
                             continue;

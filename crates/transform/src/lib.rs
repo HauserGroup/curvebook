@@ -20,6 +20,8 @@
 //! assert!((auc.peaks[0].area - 15.0).abs() < 1e-12);
 //! ```
 #![forbid(unsafe_code)]
+#![allow(clippy::indexing_slicing)]
+// Legacy dense matrix/solver indexing (FA-SEC23-03); string_slice remains denied and all 14 I/O/boundary/app crates enforce workspace indexing_slicing = "deny".
 #![deny(missing_docs)]
 
 pub mod archetype_convert;

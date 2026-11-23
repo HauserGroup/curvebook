@@ -337,15 +337,13 @@ pub fn decode_xml_entities(raw: &str, base_offset: usize) -> Result<String, Form
     }
     let mut out = String::with_capacity(raw.len());
     let mut rest = raw;
-    while let Some(amp_idx) = rest.find('&') {
-        out.push_str(&rest[..amp_idx]);
-        let after_amp = &rest[amp_idx + 1..];
-        let Some(semi_idx) = after_amp.find(';') else {
+    while let Some((before, after_amp)) = rest.split_once('&') {
+        out.push_str(before);
+        let Some((entity, after_semi)) = after_amp.split_once(';') else {
             return Err(FormatError::XmlParse { offset: base_offset, reason: String::from("unterminated XML entity reference") });
         };
-        let entity = &after_amp[..semi_idx];
         out.push(decode_xml_entity_name(entity, base_offset)?);
-        rest = &after_amp[semi_idx + 1..];
+        rest = after_semi;
     }
     out.push_str(rest);
     Ok(out)
@@ -354,8 +352,8 @@ pub fn decode_xml_entities(raw: &str, base_offset: usize) -> Result<String, Form
 fn decode_xml_entity_name(entity: &str, base_offset: usize) -> Result<char, FormatError> {
     if let Some(ch) = lookup_named_xml_entity(entity) {
         Ok(ch)
-    } else if entity.starts_with("#x") || entity.starts_with("#X") {
-        let code = u32::from_str_radix(&entity[2..], 16)
+    } else if let Some(hex) = entity.strip_prefix("#x").or_else(|| entity.strip_prefix("#X")) {
+        let code = u32::from_str_radix(hex, 16)
             .map_err(|_| FormatError::XmlParse { offset: base_offset, reason: format!("invalid hex XML entity `&{entity};`") })?;
         char::from_u32(code).ok_or_else(|| FormatError::XmlParse { offset: base_offset, reason: format!("invalid Unicode scalar `&{entity};`") })
     } else if let Some(digits) = entity.strip_prefix('#') {

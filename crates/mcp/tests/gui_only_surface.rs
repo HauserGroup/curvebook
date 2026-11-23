@@ -117,9 +117,9 @@ fn decode_cl_frames(raw: &[u8]) -> Result<Vec<Value>, String> {
         let (headers, rest) = text.split_once("\r\n\r\n").ok_or_else(|| String::from("header sep"))?;
         let len_raw = headers.strip_prefix("Content-Length: ").ok_or_else(|| String::from("content-length"))?;
         let len: usize = len_raw.trim().parse().map_err(|err| format!("len: {err}"))?;
-        let body = &rest.as_bytes()[..len];
+        let (body, tail) = rest.as_bytes().split_at_checked(len).ok_or_else(|| String::from("truncated body"))?;
         out.push(serde_json::from_slice(body).map_err(|err| format!("json frame: {err}"))?);
-        cur = &rest.as_bytes()[len..];
+        cur = tail;
     }
     Ok(out)
 }

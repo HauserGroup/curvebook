@@ -831,19 +831,15 @@ fn truncate_utf8_to_bytes(raw: &str, max_bytes: usize) -> &str {
     while end > 0 && !raw.is_char_boundary(end) {
         end -= 1;
     }
-    &raw[..end]
+    raw.get(..end).unwrap_or("")
 }
 
 fn clamp_title(raw: &str, source: &str, warnings: &mut Vec<ImportWarning>) -> String {
     if raw.len() <= MAX_TITLE_BYTES {
         return raw.to_owned();
     }
-    let mut end = MAX_TITLE_BYTES;
-    while end > 0 && !raw.is_char_boundary(end) {
-        end -= 1;
-    }
     warnings.push(ImportWarning::new(ImportWarningKind::TruncatedTitle, source, format!("title exceeded {MAX_TITLE_BYTES} bytes and was truncated")));
-    raw[..end].to_owned()
+    truncate_utf8_to_bytes(raw, MAX_TITLE_BYTES).to_owned()
 }
 
 #[cfg(test)]

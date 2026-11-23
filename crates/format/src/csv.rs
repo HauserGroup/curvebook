@@ -80,7 +80,7 @@ impl CsvOptions {
 
         for delim in candidates {
             let counts: Vec<usize> = lines.iter().map(|l| count_unquoted_char(l, delim, '"')).collect();
-            let first = counts[0];
+            let first = counts.first().copied().unwrap_or(0);
             if first > 0 && counts.iter().all(|&c| c == first) {
                 let score = first * lines.len() + 10;
                 if score > best_score {
@@ -754,8 +754,8 @@ pub(crate) fn import_csv_to_datasheet_with_budget(
     let records = parse_delimited_records_with_quotes_and_limits(input, opts, max_cols, max_fields)?;
 
     let header_count = opts.header_rows.min(records.len());
-    let headers = if header_count > 0 { records[header_count - 1].clone() } else { Vec::new() };
-    let data_rows = &records[header_count..];
+    let headers = header_count.checked_sub(1).and_then(|idx| records.get(idx)).cloned().unwrap_or_default();
+    let data_rows = records.get(header_count..).unwrap_or(&[]);
     let row_count = data_rows.len();
     validate_rows(row_count)?;
 
@@ -839,8 +839,10 @@ pub(crate) fn import_csv_to_datasheet_with_budget(
             assign_row_titles(&mut surv.row_titles, data_rows, has_row_titles);
             surv.row_titles_expanded = opts.has_row_titles;
             for (r, rec) in data_rows.iter().enumerate() {
-                if let Some(tok) = rec.get(time_col) {
-                    surv.times[r] = parse_csv_field_cell(tok, opts);
+                if let Some(tok) = rec.get(time_col)
+                    && let Some(slot) = surv.times.get_mut(r)
+                {
+                    *slot = parse_csv_field_cell(tok, opts);
                 }
             }
             populate_datasets(&mut surv.cohorts, data_rows, &headers, col_offset, 1, opts)?;
@@ -876,8 +878,10 @@ pub(crate) fn import_csv_to_datasheet_with_budget(
                     var.title = header_field_title(h)?;
                 }
                 for (r, rec) in data_rows.iter().enumerate() {
-                    if let Some(tok) = rec.get(c) {
-                        var.cells[r] = parse_csv_field_cell(tok, opts);
+                    if let Some(tok) = rec.get(c)
+                        && let Some(slot) = var.cells.get_mut(r)
+                    {
+                        *slot = parse_csv_field_cell(tok, opts);
                     }
                 }
                 var.refresh_inferred_role();
@@ -977,7 +981,7 @@ fn parse_nested_column_groups(value_headers: &[String], col_offset: usize, subco
         value_headers.iter().map(|h| h.rsplit_once(':').filter(|(p, s)| !p.trim().is_empty() && !s.trim().is_empty())).collect();
 
     let all_colon = split_pairs.iter().all(Option::is_some);
-    let any_adjacent_colon_match = split_pairs.windows(2).any(|w| matches!((w[0], w[1]), (Some((p1, _)), Some((p2, _))) if p1.trim() == p2.trim()));
+    let any_adjacent_colon_match = split_pairs.windows(2).any(|w| matches!(*w, [Some((p1, _)), Some((p2, _))] if p1.trim() == p2.trim()));
 
     if all_colon || any_adjacent_colon_match {
         return group_nested_by_colon(value_headers, &split_pairs, col_offset);
@@ -1167,15 +1171,21 @@ pub fn filter_delimited_text(
     if records.is_empty() {
         return Ok(FilteredDelimitedGrid { headers: Vec::new(), cells: Vec::new() });
     }
-    let (raw_headers, data_rows) =
-        if has_header { (records[0].iter().map(|f| f.text.clone()).collect(), &records[1..]) } else { (Vec::new(), records.as_slice()) };
+    let (raw_headers, data_rows) = if has_header {
+        let Some((first_row, rest_rows)) = records.split_first() else {
+            return Ok(FilteredDelimitedGrid { headers: Vec::new(), cells: Vec::new() });
+        };
+        (first_row.iter().map(|f| f.text.clone()).collect(), rest_rows)
+    } else {
+        (Vec::new(), records.as_slice())
+    };
 
     let (r_start, r_end) = match filter.row_window {
         Some((s, e)) if e < s => return Err(FormatError::InvalidPipeline { reason: String::from("row_window end < start") }),
         Some((s, e)) => (s.min(data_rows.len()), e.min(data_rows.len().saturating_sub(1))),
         None => (0, data_rows.len().saturating_sub(1)),
     };
-    let sliced_rows = if data_rows.is_empty() || r_start >= data_rows.len() { &[][..] } else { &data_rows[r_start..=r_end] };
+    let sliced_rows = if data_rows.is_empty() { &[][..] } else { data_rows.get(r_start..=r_end).unwrap_or(&[]) };
 
     let step = match filter.decimate_every_k {
         Some(0) => return Err(FormatError::InvalidPipeline { reason: String::from("decimate_every_k must be >= 1") }),
@@ -1264,7 +1274,9 @@ fn unstack_grid(headers: &[String], cells: &[Vec<Cell>], group_col: usize) -> Re
     for (c_idx, key) in order.iter().enumerate() {
         if let Some(vals) = groups.get(key) {
             for (r_idx, val) in vals.iter().enumerate() {
-                out_cells[r_idx][c_idx] = val.clone();
+                if let Some(cell) = out_cells.get_mut(r_idx).and_then(|row| row.get_mut(c_idx)) {
+                    *cell = val.clone();
+                }
             }
         }
     }
@@ -1475,7 +1487,7 @@ fn resolve_nested_coord(
     start_subcol: usize,
     flat_offset: usize,
 ) -> Result<(usize, usize), FormatError> {
-    if start_col >= groups.len() {
+    let Some(first_group) = groups.get(start_col) else {
         if start_subcol > 0 {
             return Err(FormatError::Doc(DocError::CellOutOfBounds { row: start_row, col: start_col, subcol: start_subcol }));
         }
@@ -1483,8 +1495,8 @@ fn resolve_nested_coord(
             .checked_add(flat_offset)
             .ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("target cell coordinate overflow") })?;
         return Ok((col, 0));
-    }
-    let first_units = groups[start_col].biological_unit_count();
+    };
+    let first_units = first_group.biological_unit_count();
     validate_subcolumns(first_units)?;
     if start_subcol >= first_units {
         return Err(FormatError::Doc(DocError::CellOutOfBounds { row: start_row, col: start_col, subcol: start_subcol }));
@@ -1492,8 +1504,8 @@ fn resolve_nested_coord(
     let mut col = start_col;
     let mut subcol = start_subcol;
     let mut remaining = flat_offset;
-    while col < groups.len() {
-        let units = groups[col].biological_unit_count();
+    while let Some(group) = groups.get(col) {
+        let units = group.biological_unit_count();
         validate_subcolumns(units)?;
         let avail = units.saturating_sub(subcol);
         if remaining < avail {

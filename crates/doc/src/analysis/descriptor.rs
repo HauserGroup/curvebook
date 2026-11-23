@@ -328,12 +328,12 @@ impl AnalysisKindDescriptor {
     /// evaluate [`AnalysisKind::is_compatible_with`] to enforce sub-method constraints.
     #[must_use]
     pub const fn supports_table_kind(&self, table_kind: TableKind) -> bool {
-        let mut idx = 0;
-        while idx < self.compatible_table_kinds.len() {
-            if table_kind_eq(self.compatible_table_kinds[idx], table_kind) {
+        let mut rest = self.compatible_table_kinds;
+        while let [head, tail @ ..] = rest {
+            if table_kind_eq(*head, table_kind) {
                 return true;
             }
-            idx += 1;
+            rest = tail;
         }
         false
     }
@@ -1169,72 +1169,73 @@ const fn table_kind_eq(a: TableKind, b: TableKind) -> bool {
 }
 
 const fn const_str_eq(a: &str, b: &str) -> bool {
-    let (ab, bb) = (a.as_bytes(), b.as_bytes());
+    let (mut ab, mut bb) = (a.as_bytes(), b.as_bytes());
     if ab.len() != bb.len() {
         return false;
     }
-    let mut i = 0;
-    while i < ab.len() {
-        if ab[i] != bb[i] {
+    while let ([ah, at @ ..], [bh, bt @ ..]) = (ab, bb) {
+        if *ah != *bh {
             return false;
         }
-        i += 1;
+        ab = at;
+        bb = bt;
     }
     true
 }
 
 const fn const_ascii_eq_ignore_case(a: &str, b: &str) -> bool {
-    let (ab, bb) = (a.as_bytes(), b.as_bytes());
+    let (mut ab, mut bb) = (a.as_bytes(), b.as_bytes());
     if ab.len() != bb.len() {
         return false;
     }
-    let mut i = 0;
-    while i < ab.len() {
-        if !ab[i].eq_ignore_ascii_case(&bb[i]) {
+    while let ([ah, at @ ..], [bh, bt @ ..]) = (ab, bb) {
+        if !ah.eq_ignore_ascii_case(bh) {
             return false;
         }
-        i += 1;
+        ab = at;
+        bb = bt;
     }
     true
 }
 
 const fn const_anchor_matches_slug(anchor: &str, slug: &str) -> bool {
     const PREFIX: &[u8] = b"analysis-";
-    let ab = anchor.as_bytes();
-    let sb = slug.as_bytes();
+    let mut ab = anchor.as_bytes();
+    let mut sb = slug.as_bytes();
     if ab.len() != PREFIX.len() + sb.len() {
         return false;
     }
-    let mut i = 0;
-    while i < PREFIX.len() {
-        if ab[i] != PREFIX[i] {
+    let mut pb = PREFIX;
+    while let ([ah, at @ ..], [ph, pt @ ..]) = (ab, pb) {
+        if *ah != *ph {
             return false;
         }
-        i += 1;
+        ab = at;
+        pb = pt;
     }
-    let mut j = 0;
-    while j < sb.len() {
-        if ab[PREFIX.len() + j] != sb[j] {
+    while let ([ah, at @ ..], [sh, st @ ..]) = (ab, sb) {
+        if *ah != *sh {
             return false;
         }
-        j += 1;
+        ab = at;
+        sb = st;
     }
     true
 }
 
 const fn const_slice_contains(haystack: &[&str], needle: &str) -> bool {
-    let mut i = 0;
-    while i < haystack.len() {
-        if const_str_eq(haystack[i], needle) {
+    let mut rest = haystack;
+    while let [head, tail @ ..] = rest {
+        if const_str_eq(head, needle) {
             return true;
         }
-        i += 1;
+        rest = tail;
     }
     false
 }
 
-const fn verify_descriptor_entry(idx: usize, desc: &AnalysisKindDescriptor) {
-    assert!(AnalysisKindId::ALL[idx] as usize == idx);
+const fn verify_descriptor_entry(idx: usize, expected_id: AnalysisKindId, desc: &AnalysisKindDescriptor) {
+    assert!(expected_id as usize == idx);
     assert!(desc.id as usize == idx);
     assert!(desc.id.descriptor().id as usize == idx);
     assert!(!desc.slug.is_empty());
@@ -1249,47 +1250,51 @@ const fn verify_descriptor_entry(idx: usize, desc: &AnalysisKindDescriptor) {
     assert!(const_anchor_matches_slug(desc.docs_anchor, desc.slug));
 }
 
-const fn verify_pairwise_uniqueness(i: usize, j: usize) {
-    let a = &ALL_ANALYSIS_DESCRIPTORS[i];
-    let b = &ALL_ANALYSIS_DESCRIPTORS[j];
+const fn verify_pairwise_uniqueness(a: &AnalysisKindDescriptor, b: &AnalysisKindDescriptor) {
     assert!(a.id as usize != b.id as usize);
     assert!(!const_str_eq(a.slug, b.slug));
     assert!(!const_str_eq(a.serde_variant, b.serde_variant));
     assert!(!const_str_eq(a.docs_anchor, b.docs_anchor));
 
-    let mut sa = 0;
-    while sa < a.shorthands.len() {
-        assert!(!a.shorthands[sa].is_empty());
-        let mut sb = 0;
-        while sb < b.shorthands.len() {
-            assert!(!const_ascii_eq_ignore_case(a.shorthands[sa], b.shorthands[sb]));
-            sb += 1;
+    let mut sa_rest = a.shorthands;
+    while let [sa, sa_tail @ ..] = sa_rest {
+        assert!(!sa.is_empty());
+        let mut sb_rest = b.shorthands;
+        while let [sb, sb_tail @ ..] = sb_rest {
+            assert!(!const_ascii_eq_ignore_case(sa, sb));
+            sb_rest = sb_tail;
         }
-        sa += 1;
+        sa_rest = sa_tail;
     }
 
-    let mut ca = 0;
-    while ca < a.ui_catalog_ids.len() {
-        assert!(!a.ui_catalog_ids[ca].is_empty());
-        let mut cb = 0;
-        while cb < b.ui_catalog_ids.len() {
-            assert!(!const_str_eq(a.ui_catalog_ids[ca], b.ui_catalog_ids[cb]));
-            cb += 1;
+    let mut ca_rest = a.ui_catalog_ids;
+    while let [ca, ca_tail @ ..] = ca_rest {
+        assert!(!ca.is_empty());
+        let mut cb_rest = b.ui_catalog_ids;
+        while let [cb, cb_tail @ ..] = cb_rest {
+            assert!(!const_str_eq(ca, cb));
+            cb_rest = cb_tail;
         }
-        ca += 1;
+        ca_rest = ca_tail;
     }
 }
 
 // Compile-time bijection, completeness, and uniqueness invariant verification.
 const _: () = {
     let mut i = 0;
-    while i < AnalysisKindId::COUNT {
-        verify_descriptor_entry(i, &ALL_ANALYSIS_DESCRIPTORS[i]);
-        let mut j = i + 1;
-        while j < AnalysisKindId::COUNT {
-            verify_pairwise_uniqueness(i, j);
-            j += 1;
+    let mut all_ids = AnalysisKindId::ALL.as_slice();
+    let mut outer = ALL_ANALYSIS_DESCRIPTORS.as_slice();
+    while let ([id, rest_ids @ ..], [a, rest_a @ ..]) = (all_ids, outer) {
+        verify_descriptor_entry(i, *id, a);
+        let mut inner = rest_a;
+        while let [b, rest_b @ ..] = inner {
+            verify_pairwise_uniqueness(a, b);
+            inner = rest_b;
         }
+        all_ids = rest_ids;
+        outer = rest_a;
         i += 1;
     }
+    assert!(i == AnalysisKindId::COUNT);
+    assert!(all_ids.is_empty());
 };

@@ -41,12 +41,14 @@ fn extract_pdf_tj_text(stream: &str) -> String {
         };
         let bytes = inner.as_bytes();
         let mut i = 0usize;
-        while i < bytes.len() {
-            if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                let next = bytes[i + 1];
+        while let Some(&b) = bytes.get(i) {
+            if b == b'\\'
+                && let Some(&next) = bytes.get(i + 1)
+            {
                 if (b'0'..=b'7').contains(&next) {
                     let end = (i + 4).min(bytes.len());
-                    if let Ok(oct_str) = std::str::from_utf8(&bytes[i + 1..end])
+                    if let Some(oct_bytes) = bytes.get(i + 1..end)
+                        && let Ok(oct_str) = std::str::from_utf8(oct_bytes)
                         && let Ok(code) = u8::from_str_radix(oct_str, 8)
                     {
                         out.push(char::from(code));
@@ -57,7 +59,7 @@ fn extract_pdf_tj_text(stream: &str) -> String {
                 out.push(char::from(next));
                 i += 2;
             } else {
-                out.push(char::from(bytes[i]));
+                out.push(char::from(b));
                 i += 1;
             }
         }
@@ -188,7 +190,7 @@ fn build_pdf_equation_project() -> Result<(ProjectDocument, GraphSheet, LayoutSh
     let pts = [(0.5, 16.0), (1.0, 28.0), (2.0, 49.0), (4.0, 76.0), (8.0, 92.0), (16.0, 98.0)];
     for (r, (x, y)) in pts.into_iter().enumerate() {
         xy.set_x_cell(r, Cell::number(x))?;
-        xy.data_sets[0].cells[r][0] = Cell::number(y);
+        *xy.data_sets.first_mut().and_then(|ds| ds.cells.get_mut(r)).and_then(|row| row.first_mut()).ok_or("missing xy cell")? = Cell::number(y);
     }
     let ds = DataSheet::new("xy-pdf", "Dose-Response", TableArchetype::Xy(xy))?;
     doc.add_data_sheet(ds.clone())?;

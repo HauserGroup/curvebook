@@ -43,7 +43,7 @@ fn parse_first_cl_response(output: &[u8]) -> Result<Value, String> {
     if rest.len() < len {
         return Err(format!("truncated response body: expected {len} bytes, found {}", rest.len()));
     }
-    let body = &rest.as_bytes()[..len];
+    let (body, _) = rest.as_bytes().split_at_checked(len).ok_or_else(|| format!("truncated response body: expected {len} bytes"))?;
     serde_json::from_slice(body).map_err(|err| format!("response body must be valid JSON: {err}"))
 }
 
@@ -51,37 +51,26 @@ fn verify_stream_output_is_well_formed(output: &[u8]) -> Result<(), String> {
     if output.is_empty() {
         return Ok(());
     }
-    let text = std::str::from_utf8(output).map_err(|err| format!("non-UTF8 output: {err}"))?;
-    let bytes = text.as_bytes();
-    let mut idx = 0usize;
-    while idx < bytes.len() {
-        while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
-            idx += 1;
-        }
-        if idx >= bytes.len() {
+    let mut rest = std::str::from_utf8(output).map_err(|err| format!("non-UTF8 output: {err}"))?;
+    while !rest.is_empty() {
+        rest = rest.trim_start_matches(|c: char| c.is_ascii_whitespace());
+        if rest.is_empty() {
             break;
         }
-        if bytes[idx..].starts_with(b"Content-Length: ") {
-            let rest = &text[idx..];
-            let Some((hdr, after)) = rest.split_once("\r\n\r\n") else {
+        if let Some(after_prefix) = rest.strip_prefix("Content-Length: ") {
+            let Some((hdr, after)) = after_prefix.split_once("\r\n\r\n") else {
                 return Err(String::from("incomplete Content-Length output frame"));
             };
-            let len: usize = hdr
-                .strip_prefix("Content-Length: ")
-                .and_then(|s| s.trim().parse().ok())
-                .ok_or_else(|| String::from("invalid Content-Length header in server reply"))?;
-            let after_bytes = after.as_bytes();
-            if after_bytes.len() < len {
+            let len: usize = hdr.trim().parse().map_err(|_| String::from("invalid Content-Length header in server reply"))?;
+            let Some((body, tail)) = after.as_bytes().split_at_checked(len) else {
                 return Err(String::from("truncated Content-Length output body"));
-            }
-            let _: Value = serde_json::from_slice(&after_bytes[..len]).map_err(|err| format!("invalid JSON in CL reply: {err}"))?;
-            idx = bytes.len() - after_bytes.len() + len;
+            };
+            let _: Value = serde_json::from_slice(body).map_err(|err| format!("invalid JSON in CL reply: {err}"))?;
+            rest = std::str::from_utf8(tail).map_err(|err| format!("non-UTF8 trailing output: {err}"))?;
         } else {
-            let rest = &text[idx..];
-            let line_end = rest.find('\n').unwrap_or(rest.len());
-            let line = rest[..line_end].trim();
-            let _: Value = serde_json::from_str(line).map_err(|err| format!("invalid JSON in NDJSON reply: {err}"))?;
-            idx += line_end.saturating_add(1).min(rest.len());
+            let (line, tail) = rest.split_once('\n').unwrap_or((rest, ""));
+            let _: Value = serde_json::from_str(line.trim()).map_err(|err| format!("invalid JSON in NDJSON reply: {err}"))?;
+            rest = tail;
         }
     }
     Ok(())

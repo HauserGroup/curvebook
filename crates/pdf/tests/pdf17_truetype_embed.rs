@@ -30,8 +30,7 @@ fn rfind_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 fn extract_pdf_int(dict: &str, key: &str) -> Option<usize> {
-    let idx = dict.find(key)?;
-    let rest = &dict[idx + key.len()..];
+    let (_, rest) = dict.split_once(key)?;
     let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
     digits.parse().ok()
 }
@@ -48,33 +47,38 @@ fn parse_pdf_strict(bytes: &[u8], expected_header: &[u8]) -> Result<ParsedPdf, S
     }
 
     let startxref_pos = rfind_subslice(bytes, b"startxref\n").ok_or("missing startxref")?;
-    let after = std::str::from_utf8(&bytes[startxref_pos + b"startxref\n".len()..]).map_err(|e| format!("utf8 startxref: {e}"))?;
+    let after = std::str::from_utf8(bytes.get(startxref_pos + b"startxref\n".len()..).ok_or("startxref tail")?)
+        .map_err(|e| format!("utf8 startxref: {e}"))?;
     let xref_offset: usize = after.lines().next().ok_or("missing xref offset line")?.trim().parse().map_err(|e| format!("parse xref offset: {e}"))?;
-    if xref_offset >= startxref_pos || !bytes[xref_offset..].starts_with(b"xref\n") {
+    if xref_offset >= startxref_pos || !bytes.get(xref_offset..).is_some_and(|s| s.starts_with(b"xref\n")) {
         return Err("invalid xref offset".to_owned());
     }
 
-    let trailer_rel = find_subslice(&bytes[xref_offset..startxref_pos], b"trailer\n").ok_or("missing trailer")?;
-    let xref_str = std::str::from_utf8(&bytes[xref_offset..xref_offset + trailer_rel]).map_err(|e| format!("utf8 xref: {e}"))?;
-    let trailer = std::str::from_utf8(&bytes[xref_offset + trailer_rel..startxref_pos]).map_err(|e| format!("utf8 trailer: {e}"))?.to_owned();
+    let xref_to_start = bytes.get(xref_offset..startxref_pos).ok_or("xref slice")?;
+    let trailer_rel = find_subslice(xref_to_start, b"trailer\n").ok_or("missing trailer")?;
+    let xref_str = std::str::from_utf8(xref_to_start.get(..trailer_rel).ok_or("xref utf8")?).map_err(|e| format!("utf8 xref: {e}"))?;
+    let trailer = std::str::from_utf8(xref_to_start.get(trailer_rel..).ok_or("trailer utf8")?).map_err(|e| format!("utf8 trailer: {e}"))?.to_owned();
 
     let mut lines = xref_str.lines();
     if lines.next() != Some("xref") {
         return Err("missing xref header line".to_owned());
     }
     let count_parts: Vec<&str> = lines.next().ok_or("missing xref range")?.split_whitespace().collect();
-    if count_parts.len() != 2 || count_parts[0] != "0" {
+    let [zero, count_str] = count_parts.as_slice() else {
+        return Err(format!("unexpected xref range: {count_parts:?}"));
+    };
+    if *zero != "0" {
         return Err(format!("unexpected xref range: {count_parts:?}"));
     }
-    let total_entries: usize = count_parts[1].parse().map_err(|e| format!("xref total: {e}"))?;
+    let total_entries: usize = count_str.parse().map_err(|e| format!("xref total: {e}"))?;
 
     let mut offsets = Vec::with_capacity(total_entries);
     for (idx, line) in lines.enumerate() {
         if line.len() != 19 {
             return Err(format!("xref entry must be 20 bytes including LF: `{line}`"));
         }
-        let off: usize = line[0..10].parse().map_err(|e| format!("xref offset: {e}"))?;
-        let generation: usize = line[11..16].parse().map_err(|e| format!("xref gen: {e}"))?;
+        let off: usize = line.get(0..10).ok_or("xref off slice")?.parse().map_err(|e| format!("xref offset: {e}"))?;
+        let generation: usize = line.get(11..16).ok_or("xref gen slice")?.parse().map_err(|e| format!("xref gen: {e}"))?;
         let kind = line.chars().nth(17).ok_or("xref kind")?;
         if idx == 0 {
             if (off, generation, kind) != (0, 65535, 'f') {
@@ -96,19 +100,21 @@ fn parse_pdf_strict(bytes: &[u8], expected_header: &[u8]) -> Result<ParsedPdf, S
             continue;
         }
         let prefix = format!("{obj_id} 0 obj\n");
-        if !bytes[off..].starts_with(prefix.as_bytes()) {
+        let obj_tail = bytes.get(off..xref_offset).ok_or("object range")?;
+        if !obj_tail.starts_with(prefix.as_bytes()) {
             return Err(format!("missing object header {prefix}"));
         }
-        let body_start = off + prefix.len();
-        let endobj_rel = find_subslice(&bytes[body_start..xref_offset], b"endobj\n").ok_or("missing endobj")?;
-        let body = &bytes[body_start..body_start + endobj_rel];
+        let after_prefix = obj_tail.get(prefix.len()..).ok_or("object body range")?;
+        let endobj_rel = find_subslice(after_prefix, b"endobj\n").ok_or("missing endobj")?;
+        let body = after_prefix.get(..endobj_rel).ok_or("object body slice")?;
         objects.insert(obj_id, body.to_vec());
 
         if let Some(stream_rel) = find_subslice(body, b"\nstream\n") {
-            let dict_str = String::from_utf8_lossy(&body[..stream_rel]).into_owned();
+            let dict_str = String::from_utf8_lossy(body.get(..stream_rel).ok_or("dict slice")?).into_owned();
             let data_start = stream_rel + b"\nstream\n".len();
-            let endstream_rel = find_subslice(&body[data_start..], b"\nendstream").ok_or("missing endstream")?;
-            let raw_stream = &body[data_start..data_start + endstream_rel];
+            let stream_tail = body.get(data_start..).ok_or("stream tail")?;
+            let endstream_rel = find_subslice(stream_tail, b"\nendstream").ok_or("missing endstream")?;
+            let raw_stream = stream_tail.get(..endstream_rel).ok_or("raw stream slice")?;
             let declared_len = extract_pdf_int(&dict_str, "/Length ").ok_or("missing /Length")?;
             if raw_stream.len() != declared_len {
                 return Err(format!("stream length mismatch: {} vs {declared_len}", raw_stream.len()));
@@ -268,10 +274,9 @@ fn pdf17_embeds_truetype_font_descriptor_and_roundtrips_flate2_fontfile2() {
         .map(|b| String::from_utf8_lossy(b).into_owned())
         .find(|s| s.contains("/Subtype /TrueType"))
         .expect("truetype font dict");
-    let widths_start = widths_line.find("/Widths [").expect("widths start") + "/Widths [".len();
-    let widths_end = widths_start + widths_line[widths_start..].find(']').expect("widths end");
-    let parsed_widths: Vec<u16> =
-        widths_line[widths_start..widths_end].split_whitespace().map(|tok| tok.parse::<u16>().expect("width integer")).collect();
+    let (_, after_widths) = widths_line.split_once("/Widths [").expect("widths start");
+    let (widths_inner, _) = after_widths.split_once(']').expect("widths end");
+    let parsed_widths: Vec<u16> = widths_inner.split_whitespace().map(|tok| tok.parse::<u16>().expect("width integer")).collect();
     assert_eq!(parsed_widths.len(), 224, "/Widths must contain 224 entries for codes 32..=255");
     assert_eq!(parsed_widths, expected_info.widths_1000);
 
@@ -410,31 +415,23 @@ fn rtl_arabic_and_hebrew_labels_shape_in_visual_order() {
     assert!(!sel_stream.contains('?'), "non-WinAnsi characters must never produce `?` placeholders in PDF stream:\n{sel_stream}");
 
     // In "שלום 2026" (RTL base), "2026" renders visually to the left of the outlined Hebrew glyphs.
-    let pos_2026 = sel_stream.find("(2026) Tj").expect("2026 literal");
-    let pos_12_5 = sel_stream.find("(12.5) Tj").expect("12.5 literal");
-    let pos_ic = sel_stream.find("(IC) Tj").expect("IC literal");
-    assert!(pos_2026 < pos_12_5 && pos_12_5 < pos_ic);
-
-    let hebrew_num_seg = &sel_stream[pos_2026..pos_12_5];
+    let (_, after_2026) = sel_stream.split_once("(2026) Tj").expect("2026 literal");
+    let (hebrew_num_seg, after_12_5) = after_2026.split_once("(12.5) Tj").expect("12.5 literal");
     assert!(hebrew_num_seg.contains(" m\n"), "Hebrew word after 2026 must emit vector glyph outlines");
 
     // Between "12.5" and "IC", we have outlined Arabic glyphs for "مرحبا", then the
     // "<b>שלום</b> <i>עולם</i>" line at y=140.0 (PDF y=120.000) containing outlined "עולם",
     // selectable space `( ) Tj`, and outlined "שלום".
-    let mid_seg = &sel_stream[pos_12_5..pos_ic];
-    let pos_120 = mid_seg.find("120.000 Tm").expect("space Tm at PDF y=120");
-    let before_space = &mid_seg[..pos_120];
-    let after_space = &mid_seg[pos_120..];
+    let (mid_seg, ic_seg) = after_12_5.split_once("(IC) Tj").expect("IC literal");
+    let (before_space, after_space) = mid_seg.split_once("120.000 Tm").expect("space Tm at PDF y=120");
     assert!(before_space.contains(" m\n"), "outlined glyphs for Arabic and italic Hebrew word must precede `( ) Tj`");
-    assert!(mid_seg[pos_120..].contains("( ) Tj"), "separating space between visual RTL words");
+    assert!(after_space.contains("( ) Tj"), "separating space between visual RTL words");
     assert!(after_space.contains(" m\n"), "bold Hebrew word must emit outlined glyphs after separating space");
 
     // In "IC<sub>50</sub> = שלום", "IC", subscript "50", and " = " stay selectable while Hebrew outlines follow.
-    let ic_seg = &sel_stream[pos_ic..];
-    let pos_50 = ic_seg.find("(50) Tj").expect("50 literal");
-    let pos_eq = ic_seg.find("( = ) Tj").expect("= literal");
-    assert!(pos_50 < pos_eq);
-    assert!(ic_seg[pos_eq..].contains(" m\n"), "Hebrew word after `IC_50 = ` must emit outlined glyphs");
+    let (_, after_50) = ic_seg.split_once("(50) Tj").expect("50 literal");
+    let (_, after_eq) = after_50.split_once("( = ) Tj").expect("= literal");
+    assert!(after_eq.contains(" m\n"), "Hebrew word after `IC_50 = ` must emit outlined glyphs");
 
     // Outlined text mode: with `TextAnchor::Start` at x=20, visual RTL reordering places `"2026"` at x=20
     // (identical to rendering `"2026"` alone) followed to the right by the 4 Hebrew glyphs.

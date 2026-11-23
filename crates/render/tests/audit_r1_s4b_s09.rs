@@ -12,7 +12,7 @@ fn dark_pixel_row_bounds(img: &RasterImage, y_min: u32, y_max: u32) -> Option<(u
     for y in y_min..y_max.min(img.height_px) {
         for x in 0..img.width_px {
             let idx = ((y * img.width_px + x) * 4) as usize;
-            if img.rgba[idx] < 200 {
+            if img.rgba.get(idx).is_some_and(|&r| r < 200) {
                 any = true;
                 min_x = min_x.min(x);
                 max_x = max_x.max(x);

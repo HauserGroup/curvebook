@@ -15,7 +15,7 @@ fn percentile_sorted(sorted: &[f64], p: f64) -> f64 {
         return 0.0;
     }
     let idx = (((sorted.len() - 1) as f64) * p).round() as usize;
-    sorted[idx.min(sorted.len() - 1)]
+    sorted.get(idx.min(sorted.len() - 1)).copied().unwrap_or(0.0)
 }
 
 fn build_million_cell_grouped_sheet() -> Result<DataSheet, DocError> {
