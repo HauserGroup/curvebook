@@ -1,81 +1,100 @@
-# CurveBook
+<div align="center">
+  <img src="assets/app-icon/curvebook-win95-2508.png" alt="CurveBook logo" width="128" />
+  <h1>CurveBook</h1>
+  <p><strong>Pure-Rust scientific graphing, statistics, nonlinear curve fitting, and publication layout workbench — desktop GUI &amp; local AI automation (MCP) with zero telemetry.</strong></p>
 
-[![CI](https://github.com/HauserGroup/curvebook/actions/workflows/ci.yml/badge.svg)](https://github.com/HauserGroup/curvebook/actions/workflows/ci.yml)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license-and-privacy)
+  <p>
+    <a href="https://github.com/HauserGroup/curvebook/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/HauserGroup/curvebook/ci.yml?branch=main&style=flat-square&label=CI" alt="CI" /></a>
+    <img src="https://img.shields.io/badge/Status-Beta-D96240?style=flat-square" alt="Status: Beta" />
+    <img src="https://img.shields.io/badge/Rust-Pure%20Rust-B7410E?style=flat-square" alt="Pure Rust" />
+    <img src="https://img.shields.io/badge/Platforms-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux%20%C2%B7%20FreeBSD-374151?style=flat-square" alt="macOS · Windows · Linux · FreeBSD" />
+    <a href="https://hausergroup.github.io/curvebook/privacy.html"><img src="https://img.shields.io/badge/Telemetry-Zero-059669?style=flat-square" alt="Zero Telemetry" /></a>
+    <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-2563EB?style=flat-square" alt="MIT OR Apache-2.0" /></a>
+  </p>
 
-<p align="center">
-  <img src="assets/app-icon/curvebook-win95-2508.png" alt="CurveBook logo: seven coloured curved panes meeting at a central point" width="160">
-</p>
-
-**CurveBook** is an open-source, clean-room biostatistics, nonlinear regression, and scientific graphing application written in pure Rust.
-
-All calculations run locally on your computer with **zero telemetry**. You can work interactively in the **desktop application**, automate pipelines with the **command-line runner** (`curvebook-cli`), or analyze data through an **AI assistant** using the built-in Model Context Protocol server (`curvebook-cli mcp`).
-
-- **Website:** [hausergroup.github.io/curvebook](https://hausergroup.github.io/curvebook/)
-- **Install & Download Guide:** [Get Started (Which File Do I Need, Install & Verify)](https://hausergroup.github.io/curvebook/get-started.html)
-- **Documentation:** [Online Manual](https://hausergroup.github.io/curvebook/manual/) · [Repository Docs](docs/README.md)
-- **Downloads:** [Latest Release (GitHub Releases)](https://github.com/HauserGroup/curvebook/releases)
-- **Known Issues (Beta):** [Beta Known Issues](https://hausergroup.github.io/curvebook/troubleshooting.html#known-issues)
-
-## What You Can Do
-
-- **Structured Data Tables & Formulas:** Enter, paste, or link data across structured table types (`XY`, `Column`, `Grouped`, `Contingency`, `Survival`, `Parts of Whole`, `Multiple Variables`, and `Nested`), compute live `=` Calculated Variables, and exclude outliers with recorded audit notes.
-- **Biostatistics & Curve Fitting:** Run parametric and nonparametric group comparisons, one-way/multi-way ANOVA, REML mixed models, multiplicity adjustments, survival and contingency analyses, ROC, GLMs, PCA/clustering, power & sample size planning, and built-in or custom nonlinear regression with profile-likelihood confidence intervals.
-- **Publication Graphs & Page Layouts:** Build customizable scientific graphs and multi-panel Page Layouts, copy editable vector figures directly to the system clipboard, and export to `SVG`, `PDF`, `PNG`, `TIFF`, `EMF`, `CSV`, or `TSV`.
-- **Self-Contained Projects:** Save data tables, notes, analyses, graphs, and layouts together in one `.curvebook` file (or Git-friendly `.curvebook.d/` directory), reuse pipelines with `.cbtemplate` templates, and import `.csv`, `.tsv`, `.pzfx`, and `.prism` files.
+  <p>
+    <a href="#download-and-install">Download</a> &middot;
+    <a href="https://hausergroup.github.io/curvebook/manual/">Manual</a> &middot;
+    <a href="https://hausergroup.github.io/curvebook/manual/v0.1/get-started.html">Get Started</a> &middot;
+    <a href="#first-analysis">First Analysis</a> &middot;
+    <a href="docs/architecture.md">Architecture</a> &middot;
+    <a href="CONTRIBUTING.md">Contributing</a>
+  </p>
+</div>
 
 <p align="center">
-  <img src="docs/images/workspace-split-fit.png" alt="CurveBook light theme egui desktop split workspace showing Project Navigator, Family tree, dose-response XY table, 4PL curve fit with confidence band, and Graph Inspector" width="840"><br>
-  <em>Split workspace (Light theme): Project Navigator, Family lineage tree, XY data grid, live 4PL nonlinear fit, and Graph Inspector.</em>
+  <img src="docs/images/workspace-split-fit.png" alt="CurveBook split comparison workspace showing a structured XY table beside a reactive sigmoidal nonlinear regression plot with confidence bands" width="900" />
+  <br />
+  <sub><em>Reactive Split Comparison workspace: edit structured dose-response tables side by side with live nonlinear fits and confidence bands.</em></sub>
 </p>
 
-<p align="center">
-  <img src="docs/images/workspace-layout-dark.png" alt="CurveBook dark theme egui desktop multi-panel Page Layout showing linked dose-response and bar graphs with significance brackets, embedded table, physical rulers, and Page Layout Composer" width="840"><br>
-  <em>Page Layout view (Dark theme): multi-panel figure with significance brackets, embedded summary table, physical millimeter rulers, and Page Layout Composer.</em>
-</p>
+<table>
+  <tr>
+    <td align="center">
+      <img src="docs/images/workspace-layout-dark.png" alt="CurveBook Dark theme LayoutSheet composer assembling linked scatter, distribution, and survival panels" width="100%" />
+      <br />
+      <sub><em>Dark theme multi-panel <code>LayoutSheet</code> composer arranging linked figures and result annotations at publication page dimensions.</em></sub>
+    </td>
+  </tr>
+</table>
 
-## Download & Install
+---
 
-Download CurveBook installers from **[GitHub Releases](https://github.com/HauserGroup/curvebook/releases)** (Beta releases appear as prereleases; every desktop installer bundles both `curvebook` and `curvebook-cli`).
+## Capabilities
 
-- **Which File Do I Need, Install Steps & Checksums:** Follow **[Get Started on the CurveBook website](https://hausergroup.github.io/curvebook/get-started.html)** for platform installer selection, OS setup instructions (including macOS `PATH` setup for `curvebook-cli` and Windows SmartScreen guidance), and SHA-256 / Sigstore download verification (`SHA256SUMS.txt` and `gh attestation verify`).
-- **Known Issues & Platform Caveats:** Check **[Known Issues (Beta)](https://hausergroup.github.io/curvebook/troubleshooting.html#known-issues)** before installing.
+CurveBook replaces proprietary black-box spreadsheet and curve-fitting silos with a single reactive Rust workspace where data tables, analyses, graphs, and page layouts stay linked by dependency (`Family`), reproducible from headless scripts (`curvebook-cli`), and accessible to local AI assistants via MCP.
 
-## Your First Analysis
+| Area | What Is Included |
+|---|---|
+| **Data & Structured Tables** | Domain-typed tables (`XY`, `Column`, `Grouped`, `Contingency`, `Survival`, `Parts of Whole`, `Nested`, `Multiple Variables`), replicate subcolumns, non-destructive exclusions, live selection summary bar (`n`, `mean`, `SD`, `SEM`, `median`, `sum`), deterministic transforms, baseline subtraction, simulated distributions, and symbolic calculated columns (`FX=`). |
+| **Statistics & Curve Fitting** | Descriptive summaries, *t*-tests and nonparametric comparisons, ordinary, repeated-measures, and mixed-effects ANOVA with multiple-comparison post tests, contingency and Kaplan-Meier / Cox survival modeling, generalized linear models, multivariate methods (PCA, PCR, k-means, hierarchical clustering), weighted nonlinear curve fitting with `AICc` and extra sum-of-squares *F* model comparison, assumption diagnostics, and power/sample-size planning. |
+| **Publication Graphs & Layouts** | Publication-quality scatter, bar/box/violin, before-after, Kaplan-Meier survival, forest, population pyramid, heatmap, bubble, QQ, and correlation figures with error bars, pairwise brackets, compact letter display, rendered $\TeX$ equations, inset overlays, live embedded result tables, high-resolution images, colorblind-safe palettes (`Okabe-Ito`, `Viridis`, `Cividis`), multi-panel `LayoutSheet` composition, and vector/raster export (`SVG`, `PDF`, `PNG`, `EMF`, multi-flavor clipboard). |
+| **Desktop GUI, CLI & Local MCP** | Declarative Rust desktop shell (`Light`, `Dark`, and `HighContrast` OKLab/OKLCH themes, Split Comparison, Family pipeline cloning, dark/CVD preview), headless `curvebook-cli` batch runner and importer/exporter (`.curvebook`, `.cbtemplate`, `.pzfx`, `.prism`, `.csv`/`.tsv`), crash-safe write-ahead recovery, and local stdio Model Context Protocol (`curvebook-cli mcp`) integration. |
 
-You can run your first analysis directly in the desktop window or through an AI assistant connected over MCP.
+---
 
-### 1. In the Desktop Application (`curvebook`)
+## Download and Install
 
-1. Launch **CurveBook**. The **Welcome & New Data Table** screen opens automatically (`File › New Project` or **New** on the toolbar reopens it anytime).
-2. Choose a data table type on the left (such as **Column** or **XY**), or switch to the **Tutorial Sample Data** tab to start with a ready-made dataset.
-3. Click **Create Table** (or **Open Sample Dataset**), then click or double-click cells in the grid to enter or paste (`Cmd/Ctrl+V`) measurements.
-4. Click **Analyze…** on the toolbar (or **Analyze › Analyze…**, `Cmd/Ctrl+Shift+A`), select a test or curve fit (for example **t tests (Unpaired / Welch / Paired / Nonparametric)** or **Nonlinear Regression (Curve Fitting)**), and confirm with **OK**.
-5. Inspect the live Results sheet and linked Graph, customize appearance in the right-hand **Graph Inspector** (or **Page Layout Composer**), copy vector figures with `Cmd/Ctrl+C`, and save or export via **File › Save** (`.curvebook`) or **Export** (**File › Export Figure…** for `SVG`, `PDF`, `PNG`, `TIFF`).
+Beta installers ship from **[GitHub Releases](https://github.com/HauserGroup/curvebook/releases)**. Every release archive is paired with `SHA256SUMS.txt` and keyless GitHub Sigstore build provenance (`actions/attest-build-provenance`).
 
-### 2. Through an AI Assistant (MCP)
+| Platform | Beta Release Asset | Notes |
+|---|---|---|
+| **macOS** (`arm64` + `x86_64`) | `curvebook-<version>-macos-universal.dmg` | Signed and notarized `.dmg` bundling `CurveBook.app` and `curvebook-cli`. |
+| **Windows** (`x64`, `arm64`) | `curvebook-<version>-windows-<arch>.msi` | Dual-scope installer (`curvebook.exe` + `curvebook-cli.exe`); ships **unsigned** in Beta — review [SmartScreen guidance](https://hausergroup.github.io/curvebook/manual/v0.1/troubleshooting.html#known-issues). |
+| **Linux** (`x86_64`, `aarch64`) | `curvebook-<version>-linux-<arch>.AppImage` | Portable desktop bundle including `curvebook` and `curvebook-cli`, tested with Wayland and X11 portals. |
+| **FreeBSD** (`x86_64`) | `curvebook-<version>-freebsd-x86_64.tar.gz` | Headless CLI + Beta desktop preview archive (full FreeBSD desktop QA targets `1.0`). |
 
-Follow the step-by-step **[Beginner's Guide to using CurveBook with your AI assistant](docs/mcp-for-beginners.md)** to connect `curvebook-cli mcp --workdir <your-data-folder>` to Claude Desktop or another local MCP client, run a Welch's *t*-test by asking in plain language, and save your work as a `.curvebook` project.
+- **Installation, PATH setup, and SHA-256 / Sigstore verification:** Follow the **[Get Started Guide](https://hausergroup.github.io/curvebook/manual/v0.1/get-started.html)**.
+- **Known Beta issues & workarounds:** Check **[Troubleshooting & Known Issues](https://hausergroup.github.io/curvebook/manual/v0.1/troubleshooting.html#known-issues)** before filing a report.
 
-For MCP framing details, attaching to a shared desktop window (`curvebook --control <port> --window`), `--gui-only` mode, and troubleshooting, see [`docs/mcp.md`](docs/mcp.md).
+---
 
-## Documentation, Known Issues & Getting Help
+## First Analysis
 
-- **Online Manual & Reference:** [hausergroup.github.io/curvebook/manual/](https://hausergroup.github.io/curvebook/manual/)
-- **Repository Documentation Index:** [`docs/README.md`](docs/README.md)
-- **Known Issues & Release Notes:** [Beta Known Issues](https://hausergroup.github.io/curvebook/troubleshooting.html#known-issues) (historical Alpha notes: [`docs/history/release/alpha-known-issues.md`](docs/history/release/alpha-known-issues.md))
-- **Report a Bug or Numerical Issue:** Open a [Bug Report](.github/ISSUE_TEMPLATE/bug_report.yml), [Numerical Result Report](.github/ISSUE_TEMPLATE/numerical_result.yml), or [Feature Request](.github/ISSUE_TEMPLATE/feature_request.yml) via GitHub Issues (avoid attaching unpublished or confidential research data).
-- **Security Vulnerabilities:** Report privately following [`SECURITY.md`](SECURITY.md).
+### In the Desktop App
 
-## License and Privacy
+1. Launch **CurveBook** to open the **Workspace Hub** (`Welcome`), choose a structured table archetype (or start from a tutorial sample dataset or `.cbtemplate`), and enter, paste, or import your data.
+2. Click **Analyze…** (`Cmd/Ctrl+T` later edits parameters) to run a statistical comparison or nonlinear curve fit; inspect the reactive `ResultSheet`, assumption guidance, and automatically linked graph.
+3. Refine axes, error bars, legends, or layout panels in the Inspector, then save your `.curvebook` project (`File › Save`) or export vector `SVG`/`PDF` and raster `PNG` figures. See the **[Desktop App Guide](https://hausergroup.github.io/curvebook/manual/v0.1/desktop-gui.html)**.
 
-- **Privacy & Zero Telemetry:** Read the full [Privacy Policy](https://hausergroup.github.io/curvebook/privacy.html). CurveBook collects **zero telemetry, analytics, or crash reports**, makes **zero outbound network connections**, and includes **no auto-updater** (`cargo xtask telemetry`).
-- **License:** Dual-licensed under **`MIT OR Apache-2.0`** ([`LICENSE-MIT`](LICENSE-MIT), [`LICENSE-APACHE`](LICENSE-APACHE)).
-- **Clean-Room Development:** CurveBook is implemented independently in pure Rust from published statistical literature and public file-format specifications, without copying proprietary commercial software code, equations, wording, templates, or assets, and without copyleft (`GPL`/`AGPL`/`LGPL`) dependencies. Third-party notices and asset attributions live in [`ASSETS.md`](ASSETS.md), [`ATTRIBUTION.md`](ATTRIBUTION.md), [`NOTICE`](NOTICE), and [`docs/licences.md`](docs/licences.md).
+### With a Local AI Assistant (MCP)
 
-## Contributing & Building from Source
+Configure your MCP client once to invoke the bundled `curvebook-cli mcp --workdir <folder>` server, ask it in plain English to create tables, fit curves, compare groups, or export figures, and open the resulting `.curvebook` file directly in the CurveBook desktop app to inspect and polish interactively.
 
-Want to build CurveBook from source, run the workspace test and oracle suites, or submit a pull request?
+Start with the **[Beginner's MCP Guide](docs/mcp-for-beginners.md)** or the full **[MCP Automation Reference](https://hausergroup.github.io/curvebook/manual/v0.1/automation/mcp.html)**.
 
-- Start with [`CONTRIBUTING.md`](CONTRIBUTING.md), [`docs/development.md`](docs/development.md), and [`AGENTS.md`](AGENTS.md).
-- Contributor credits are maintained in [`docs/contributors.md`](docs/contributors.md).
+---
+
+## Privacy, Clean-Room Engineering, and License
+
+- **Zero Telemetry & Offline First:** CurveBook performs zero analytics, zero crash reporting, zero update checks, and zero outbound network calls (`cargo xtask telemetry`). See the **[Privacy Policy](https://hausergroup.github.io/curvebook/privacy.html)** and **[Privacy & Security Reference](https://hausergroup.github.io/curvebook/manual/v0.1/privacy-security.html)**.
+- **Safe Rust & Clean-Room Numerical Stack:** Written from scratch in safe Rust (`#![forbid(unsafe_code)]`) from peer-reviewed statistical and numerical literature (`cargo xtask cleanroom`, `cargo xtask brands`). Third-party source code attributions and crate licences live in [`NOTICE`](NOTICE), [`ATTRIBUTION.md`](ATTRIBUTION.md), and [`docs/licences.md`](docs/licences.md).
+- **License:** Dual-licensed under **[MIT](LICENSE-MIT)** OR **[Apache-2.0](LICENSE-APACHE)** at your option.
+
+---
+
+## Documentation, Help, and Contributing
+
+- **User Manual:** [Online Documentation](https://hausergroup.github.io/curvebook/manual/) · [Documentation Index](docs/README.md) · [Troubleshooting & Known Issues](https://hausergroup.github.io/curvebook/manual/v0.1/troubleshooting.html#known-issues)
+- **Bug Reports & Feature Requests:** [GitHub Issues](https://github.com/HauserGroup/curvebook/issues)
+- **Contributors:** Read [`CONTRIBUTING.md`](CONTRIBUTING.md), [`AGENTS.md`](AGENTS.md), [`docs/development.md`](docs/development.md), and [`docs/architecture.md`](docs/architecture.md).

@@ -38,7 +38,7 @@ Setting `CURVEBOOK_NO_PREFS=1` (or `true`/`yes`/`on`) runs in stateless mode wit
 All engine commands (`cmd::registry()`) and interactive UI commands (`UI_COMMANDS`) register customizable bindings in `ShortcutRegistry` (`crates/ui-egui/src/menus/shortcuts.rs`):
 
 - **Context Scoping (`ShortcutScope`):** Bindings declare `Global`, `ResultSheet`, or `NonResultSheet` scope so context-sensitive shortcuts (such as `Cmd/Ctrl+T` switching parameters on a `ResultSheet` vs. creating a data table elsewhere) coexist without false conflicts.
-- **Persistence & Conflict Detection:** Overrides save atomically to `preferences.json` (`shortcuts` map) and `shortcuts.json` (`curves` compatibility mirror), enforce conflict detection across overlapping `ShortcutScope`s, and can be reset individually or wholesale to defaults (`shortcuts.reset_all()`).
+- **Persistence & Conflict Detection:** Overrides save atomically to `preferences.json` (`shortcuts` map) and `shortcuts.json`, enforce conflict detection across overlapping `ShortcutScope`s, and can be reset individually or wholesale to defaults (`shortcuts.reset_all()`).
 
 ---
 
@@ -58,9 +58,11 @@ CurveBook's i18n catalog (`crates/ui-egui/src/i18n.rs`) provides full key covera
 
 ---
 
-## Right-to-Left (RTL) Mirroring {#rtl-mirroring}
+## Right-to-Left (RTL) & Bidirectional Text {#rtl-mirroring}
 
-Selecting `ar` or `he` (`is_rtl_locale == true`) enables complete horizontal UI layout mirroring (`mirror_x_for_rtl`) across the Project Navigator, toolbar/menu chrome, spreadsheet gutter & columns, dialog steppers, and hit-test coordinates (`crates/ui-egui`), paired with Unicode BiDi visual run reordering (`reorder_visual_bidi` in `curvebook-text`) for multi-script figure labels and PDF exports.
+Full desktop GUI layout mirroring (`ar` and `he`, `is_rtl_locale == true`) is deferred to **`1.0`** under `R12.5`. In **Beta**, the desktop **View › Language** picker exposes only active LTR/CJK locales (`BETA_ACTIVE_LOCALES`), and `normalize_beta_gui_locale` falls back cleanly to `"en"` if an RTL code is loaded from `preferences.json`.
+
+Unicode bidirectional visual run reordering (`reorder_visual_bidi` in `curvebook-text`) remains active for multi-script figure labels and PDF/SVG exports, while the `ar`/`he` translation entries and horizontal layout mirroring primitives (`mirror_x_for_rtl` in `crates/ui-egui`) remain built in ahead of `1.0` enablement.
 
 ---
 

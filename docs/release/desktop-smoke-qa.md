@@ -4,7 +4,7 @@ This document is the canonical cross-OS smoke walkthrough for `CurveBook` Beta c
 
 > **Gate (updated 2026-11-20):** this recorded walkthrough is a **1.0** requirement. **Beta** relies on automated completion of all `65` workflows through the drawn desktop GUI ([`R10.25`](../ROADMAP.md#r1025-automated-gui-completion-of-all-65-workflows-beta-gate)) and does not wait on this walkthrough. Run it on release candidates as they become available.
 
-Automated interactive regression backing is tracked in [GUI Workflows](../gui-workflows.md) and [UI Feature Parity](../evidence/user-interface.md). Known Beta issues (including Windows SmartScreen guidance) are tracked in [Troubleshooting & Known Issues](https://hausergroup.github.io/curvebook/troubleshooting.html#known-issues).
+Automated interactive regression backing is tracked in [GUI Workflows](../gui-workflows.md) and [UI Feature Parity](../evidence/user-interface.md). Known Beta issues (including Windows SmartScreen guidance) are tracked in [Troubleshooting & Known Issues](https://hausergroup.github.io/curvebook/manual/v0.1/troubleshooting.html#known-issues).
 
 > [!IMPORTANT]
 > **Desktop Recording & Acceptance Rule (`R10.24`):** Execute this walkthrough using computer-use (mouse and screen) or manual human operation on real or virtual desktop sessions (GitHub-hosted CI runners have no interactive display session, and semantic `--control` / `--event-script` / MCP harness runs never count per [Pitfall #6](../pitfalls.md#6-treating-semantic-agent-harness-tests-as-proof-of-human-gui-parity)). Record the exact **OS version**, **installer/build artifact**, **scaling/display-server configuration**, **steps**, and **results** in [`STATUS.md`](../STATUS.md), and file any regressions against `R10.23` or new `R10` items.
@@ -15,15 +15,15 @@ Automated interactive regression backing is tracked in [GUI Workflows](../gui-wo
 
 | Platform | Beta Release Asset (`R0.28`) | Required Desktop Environment, Portal & Scaling Checks |
 |---|---|---|
-| **macOS** (`universal`: `aarch64` + `x86_64`) | `curvebook-<version>-macos-universal.dmg` (signed & notarized under `R8.10`, bundles `CurveBook.app` + `curvebook-cli`) | Mount `.dmg`, drag `CurveBook.app` to Applications, launch via Finder; verify menu bar (`CurveBook`, `File`, `Edit`, `Analyze`, `Graph`, `View`, `Help`), Retina scaling (`2.0x` / `3.0x`), bundled `curvebook-cli --help`, and `CurveBook.app --headless-once` exit `0`. |
+| **macOS** (`universal`: `aarch64` + `x86_64`) | `curvebook-<version>-macos-universal.dmg` (signed & notarized under `R8.10`, bundles `CurveBook.app` + `curvebook-cli`) | Mount `.dmg`, drag `CurveBook.app` to Applications, launch via Finder; verify menu bar (`File`, `Edit`, `View`, `Insert`, `Data`, `Analyze`, `Graph`, `Help`, plus the macOS `CurveBook` app menu), Retina scaling (`2.0x` / `3.0x`), bundled `curvebook-cli --help`, and `CurveBook.app --headless-once` exit `0`. |
 | **Windows 11** (`x64`, `arm64`) | `curvebook-<version>-windows-x64.msi`, `curvebook-<version>-windows-arm64.msi` (**unsigned** until `R8.11`) | Install `.msi` on `x64` (and `arm64` where hardware is available); observe and **record the Windows SmartScreen prompt** for Beta release notes; test at **100%** and **200%** display scaling, window resize/maximize, and crisp HiDPI text/hairlines. |
 | **Linux** (`x86_64`, `aarch64`) | `curvebook-<version>-linux-x86_64.AppImage`, `curvebook-<version>-linux-aarch64.AppImage` *(only Linux format in the `R0.28` Beta set)* | `chmod +x` and run the `.AppImage` on both a **Wayland** session and an **X11** session using the **XDG file-chooser portal** at **1x** and **2x** scaling; confirm `--in-window-menus` chrome works without missing shared libraries. |
 | **FreeBSD** (`x86_64`) | `curvebook-<version>-freebsd-x86_64.tar.gz` *(Beta preview only)* | Full FreeBSD GUI QA stays in `R8.5` (**1.0**); Beta release notes label the FreeBSD desktop build as a preview. |
 
 ### Theme, RTL & Language Checks
 1. Toggle `Light`, `Dark`, and `HighContrast` themes; confirm zero white-on-white or black-on-black controls, legible contrast on `MultipleVariables` role badges (`NUM`, `CAT`, `LBL`, `FX=`), and visible focus rings.
-2. Open **View › Language** and scroll all 16 locales: confirm `"English (en)"` has **no** `[Draft]` suffix while all 15 non-English locales display `[Draft]`.
-3. Select **Arabic (`ar`)** or **Hebrew (`he`)**: confirm toolbar, Navigator/Inspector drawers, grid columns, and modal headers mirror into RTL cleanly; switch back to `en`.
+2. Open **View › Language** and scroll the Beta-active locales: confirm `"English (en)"` has **no** `[Draft]` suffix while translated non-English Beta locales display `[Draft]` (RTL locales `ar` and `he` stay hidden from the desktop picker in Beta and are deferred to `1.0`).
+3. *(1.0 RTL gate, when enabled)* Select **Arabic (`ar`)** or **Hebrew (`he`)**: confirm toolbar, Navigator/Inspector drawers, grid columns, and modal headers mirror into RTL cleanly; switch back to `en`.
 
 ---
 
