@@ -3,7 +3,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::process::Command;
+use std::time::Duration;
+
+use curvebook_platform::process::ProcessCommand;
 
 use super::sitemap::GeneratedSite;
 use super::template::STRICT_CSP;
@@ -86,13 +88,13 @@ fn scan_html_tags(rel_path: &str, html: &str, facts: &mut PageFacts) -> Result<(
         }
         if html[i..].starts_with("<!--") {
             let Some(end) = html[i + 4..].find("-->") else {
-                break;
+                return Err(format!("{rel_path}: unclosed HTML comment `<!--`"));
             };
             i = i + 4 + end + 3;
             continue;
         }
         let Some(tag_end_rel) = find_tag_close(&html[i + 1..]) else {
-            break;
+            return Err(format!("{rel_path}: unclosed HTML tag or attribute quote"));
         };
         let tag_body = &html[i + 1..i + 1 + tag_end_rel];
         i = i + 1 + tag_end_rel + 1;
@@ -404,38 +406,58 @@ pub fn parse_minor_dir_version(name: &str) -> Option<(u64, u64)> {
     Some((maj.parse().ok()?, min.parse().ok()?))
 }
 
-/// Check any committed release snapshots under `docs/manual/v*/manifest.json`.
+/// Check ALL committed release snapshots under `docs/manual/v*/manifest.json`.
 pub fn check_committed_snapshots(root: &Path) -> Result<(), String> {
     let manual_dir = root.join("docs/manual");
-    if !manual_dir.is_dir() {
+    if !std::fs::symlink_metadata(&manual_dir).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_dir()) {
         return Ok(());
     }
     let entries = std::fs::read_dir(&manual_dir).map_err(|e| format!("read_dir {}: {e}", manual_dir.display()))?;
     let mut snapshots: Vec<((u64, u64), String)> = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|e| format!("dir entry under docs/manual: {e}"))?;
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        if ft.is_symlink() || !ft.is_dir() {
+            continue;
+        }
         let name = entry.file_name().to_string_lossy().into_owned();
-        if entry.path().is_dir()
-            && let Some(ver) = parse_minor_dir_version(&name)
+        if let Some(ver) = parse_minor_dir_version(&name)
             && entry.path().join("manifest.json").is_file()
         {
             snapshots.push((ver, name));
         }
     }
-    let Some((_, newest_dir)) = snapshots.into_iter().max_by_key(|(v, _)| *v) else {
+    snapshots.sort_by_key(|(v, _)| *v);
+    let Some((_, newest_dir)) = snapshots.last() else {
         return Ok(());
     };
 
-    let manifest_path = manual_dir.join(&newest_dir).join("manifest.json");
-    let raw = std::fs::read_to_string(&manifest_path).map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
-    let manifest: serde_json::Value = serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", manifest_path.display()))?;
+    for (_, snap_dir) in &snapshots {
+        let manifest_path = manual_dir.join(snap_dir).join("manifest.json");
+        let raw = std::fs::read_to_string(&manifest_path).map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
+        let manifest: serde_json::Value = serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", manifest_path.display()))?;
 
-    let version =
-        manifest.get("version").and_then(serde_json::Value::as_str).ok_or_else(|| format!("{}: missing `version`", manifest_path.display()))?;
-    let commit =
-        manifest.get("commit").and_then(serde_json::Value::as_str).ok_or_else(|| format!("{}: missing `commit`", manifest_path.display()))?;
-    if commit.len() != 40 || !commit.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
-        return Err(format!("{}: `commit` `{commit}` must be a 40-hex SHA", manifest_path.display()));
+        let version =
+            manifest.get("version").and_then(serde_json::Value::as_str).ok_or_else(|| format!("{}: missing `version`", manifest_path.display()))?;
+        let commit =
+            manifest.get("commit").and_then(serde_json::Value::as_str).ok_or_else(|| format!("{}: missing `commit`", manifest_path.display()))?;
+        if commit.len() != 40 || !commit.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            return Err(format!("{}: `commit` `{commit}` must be a 40-hex SHA", manifest_path.display()));
+        }
+
+        // If a release tag for `version` already exists in git, verify the manifest commit matches the tag commit.
+        for tag_candidate in [format!("v{version}"), version.to_owned()] {
+            if let Some(tag_sha) = resolve_git_tag_commit(root, &tag_candidate)?
+                && tag_sha != commit
+            {
+                return Err(format!(
+                    "{}: manifest commit `{commit}` does not match release tag `{tag_candidate}` commit `{tag_sha}`",
+                    manifest_path.display()
+                ));
+            }
+        }
     }
 
     let index_html = std::fs::read_to_string(manual_dir.join("index.html")).map_err(|e| format!("read docs/manual/index.html: {e}"))?;
@@ -443,29 +465,19 @@ pub fn check_committed_snapshots(root: &Path) -> Result<(), String> {
     if !index_html.contains("http-equiv=\"refresh\"") || !index_html.contains(&expected_refresh) {
         return Err(format!("docs/manual/index.html must redirect via meta-refresh to `{expected_refresh}`"));
     }
-
-    // If a release tag for `version` already exists in git, verify the manifest commit matches the tag commit.
-    for tag_candidate in [format!("v{version}"), version.to_owned()] {
-        if let Some(tag_sha) = resolve_git_tag_commit(root, &tag_candidate)?
-            && tag_sha != commit
-        {
-            return Err(format!(
-                "{}: manifest commit `{commit}` does not match release tag `{tag_candidate}` commit `{tag_sha}`",
-                manifest_path.display()
-            ));
-        }
-    }
     Ok(())
 }
 
 fn resolve_git_tag_commit(root: &Path, tag: &str) -> Result<Option<String>, String> {
     let refspec = format!("refs/tags/{tag}^{{commit}}");
-    let out = Command::new("git")
+    let out = ProcessCommand::new("git")
         .current_dir(root)
         .args(["rev-parse", "--verify", "--quiet", &refspec])
-        .output()
+        .wall_timeout(Duration::from_secs(30))
+        .idle_timeout(Duration::from_secs(10))
+        .run()
         .map_err(|e| format!("git rev-parse {refspec}: {e}"))?;
-    if !out.status.success() {
+    if !out.success {
         return Ok(None);
     }
     let sha = String::from_utf8_lossy(&out.stdout).trim().to_owned();
@@ -509,9 +521,15 @@ fn scan_dir_secrets(base: &Path, dir: &Path, hits: &mut Vec<crate::secrets::Secr
         std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?.filter_map(Result::ok).map(|e| e.path()).collect();
     paths.sort();
     for path in paths {
-        if path.is_dir() {
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.file_type().is_dir() {
             scan_dir_secrets(base, &path, hits)?;
-        } else if path.is_file() {
+        } else if meta.file_type().is_file() {
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             if matches!(ext, "html" | "htm" | "css" | "json") {
                 let text = std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
@@ -629,5 +647,44 @@ mod tests {
         assert!(err.contains("missing `#missing-frag`"), "unexpected err: {err}");
         assert!(verify_target(Path::new("."), Path::new("."), &site2, &facts, "a.html", "b.html#real-frag").is_ok());
         assert!(verify_target(Path::new("."), Path::new("."), &site2, &facts, "a.html", "missing.html").is_err());
+    }
+
+    #[test]
+    fn fa_sec23_08_unclosed_html_quote_or_comment_fails_and_all_snapshots_checked() {
+        let meta = test_meta();
+        let base = render_page(&PageSpec {
+            title: "T",
+            description: "T",
+            rel_path: "t.html",
+            section_title: "Concepts",
+            section_rel_path: None,
+            h1: "T",
+            toc_headings: &[],
+            body_html: "<p>Body</p>",
+            body_has_h1: false,
+            prev: None,
+            next: None,
+            meta: &meta,
+        });
+
+        let unclosed_quote = base.replace("<p>Body</p>", "<a title=\"unclosed><script>evil()</script>");
+        assert!(audit_single_html("t.html", &unclosed_quote).is_err());
+
+        let unclosed_comment = base.replace("<p>Body</p>", "<!-- unclosed <script>evil()</script>");
+        assert!(audit_single_html("t.html", &unclosed_comment).is_err());
+
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let dir = std::env::temp_dir().join(format!("cb-docs-snapshots-{}-{nanos}", std::process::id()));
+        let manual = dir.join("docs/manual");
+        std::fs::create_dir_all(manual.join("v0.1")).unwrap();
+        std::fs::create_dir_all(manual.join("v0.2")).unwrap();
+        std::fs::write(manual.join("v0.1/manifest.json"), "{\"version\":\"0.1.0\",\"commit\":\"badsha\"}\n").unwrap();
+        std::fs::write(manual.join("v0.2/manifest.json"), "{\"version\":\"0.2.0\",\"commit\":\"0123456789abcdef0123456789abcdef01234567\"}\n")
+            .unwrap();
+        std::fs::write(manual.join("index.html"), "<meta http-equiv=\"refresh\" content=\"0; url=v0.2/index.html\">").unwrap();
+
+        let err = check_committed_snapshots(&dir).unwrap_err();
+        assert!(err.contains("v0.1"), "expected older corrupted v0.1 snapshot to fail, got {err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -3,6 +3,8 @@
 use std::fs;
 use std::path::Path;
 
+use curvebook_platform::write_atomic;
+
 const COMMANDS_DOC_REL: &str = "docs/commands.md";
 
 /// Parse CLI flags for `cargo xtask commands [--check]`.
@@ -38,7 +40,7 @@ pub fn run(root: &Path, check: bool) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|err| format!("commands: failed to create `{}`: {err}", parent.display()))?;
     }
-    fs::write(&path, expected.as_bytes()).map_err(|err| format!("commands: failed to write `{}`: {err}", path.display()))?;
+    write_atomic(&path, expected.as_bytes()).map_err(|err| format!("commands: failed to write `{}`: {err}", path.display()))?;
     println!("commands: wrote {}", path.display());
     Ok(())
 }

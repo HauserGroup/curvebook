@@ -8,7 +8,8 @@
 #>
 param(
   [ValidateSet('x64', 'arm64')] [string] $Arch = 'x64',
-  [switch] $SkipBuild
+  [switch] $SkipBuild,
+  [switch] $RequireSigning
 )
 $ErrorActionPreference = 'Stop'
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -28,7 +29,7 @@ if (-not $Version) {
   }
 }
 if (-not $Version) { throw 'could not read [workspace.package] version from Cargo.toml' }
-$MsiVersion = ($Version -split '-')[0]
+$MsiVersion = ($Version -split '[-+]')[0]
 
 $Target = switch ($Arch) { 'x64' { 'x86_64-pc-windows-msvc' } 'arm64' { 'aarch64-pc-windows-msvc' } }
 $Dist = if ($env:DIST) { $env:DIST } else { Join-Path $Root 'dist\release' }
@@ -50,9 +51,26 @@ if (-not $SkipBuild) {
 $Bin = Join-Path $TargetDir "$Target\release"
 
 function Get-PeHeader([string] $Path) {
-  $bytes = [System.IO.File]::ReadAllBytes($Path)
-  $pe = [BitConverter]::ToInt32($bytes, 0x3C)
-  return @{ Machine = [BitConverter]::ToUInt16($bytes, $pe + 4); Subsystem = [BitConverter]::ToUInt16($bytes, $pe + 0x5C) }
+  $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+  try {
+    $len = $stream.Length
+    if ($len -lt 0x40) { throw "$Path is too small to be a valid PE binary ($len bytes)" }
+    $dos = New-Object byte[] 0x40
+    if ($stream.Read($dos, 0, 0x40) -ne 0x40) { throw "Failed to read DOS header from $Path" }
+    if ($dos[0] -ne 0x4D -or $dos[1] -ne 0x5A) { throw "$Path lacks MZ DOS signature" }
+    $pe = [BitConverter]::ToInt32($dos, 0x3C)
+    if ($pe -lt 0x40 -or ($pe + 0x5E) -gt $len) { throw "$Path has invalid PE offset $pe (file length $len)" }
+    $null = $stream.Seek([long]$pe, [System.IO.SeekOrigin]::Begin)
+    $hdr = New-Object byte[] 0x5E
+    if ($stream.Read($hdr, 0, 0x5E) -ne 0x5E) { throw "Failed to read PE header from $Path" }
+    if ($hdr[0] -ne 0x50 -or $hdr[1] -ne 0x45 -or $hdr[2] -ne 0x00 -or $hdr[3] -ne 0x00) {
+      throw "$Path lacks PE\0\0 signature at offset $pe"
+    }
+    return @{ Machine = [BitConverter]::ToUInt16($hdr, 4); Subsystem = [BitConverter]::ToUInt16($hdr, 0x5C) }
+  }
+  finally {
+    $stream.Dispose()
+  }
 }
 $Machine = switch ($Arch) { 'x64' { 0x8664 } 'arm64' { 0xAA64 } }
 foreach ($check in @(@('curvebook.exe', 2), @('curvebook-cli.exe', 3))) {
@@ -66,11 +84,15 @@ Remove-Item -Recurse -Force $Stage -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Stage | Out-Null
 Copy-Item (Join-Path $Bin 'curvebook.exe'), (Join-Path $Bin 'curvebook-cli.exe') $Stage
 
-& (Join-Path $PSScriptRoot 'sign.ps1') (Join-Path $Stage 'curvebook.exe') (Join-Path $Stage 'curvebook-cli.exe')
+$signFlags = @{}
+if ($RequireSigning -or ($env:CURVEBOOK_REQUIRE_WINDOWS_SIGNING -match '^(1|true|yes)$')) {
+  $signFlags['RequireSigning'] = $true
+}
+& (Join-Path $PSScriptRoot 'sign.ps1') @signFlags (Join-Path $Stage 'curvebook.exe') (Join-Path $Stage 'curvebook-cli.exe')
 
 $Docs = Join-Path $Stage 'docs'
 New-Item -ItemType Directory -Force -Path $Docs | Out-Null
-foreach ($f in 'README.md', 'LICENSE', 'LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE', 'ASSETS.md') {
+foreach ($f in 'README.md', 'LICENSE', 'LICENSE-MIT', 'LICENSE-APACHE', 'COPYRIGHT', 'NOTICE', 'ATTRIBUTION.md', 'ASSETS.md') {
   $p = Join-Path $Root $f
   if (Test-Path $p) { Copy-Item $p $Docs }
 }
@@ -127,7 +149,7 @@ Invoke-Native 'wix build' {
 }
 & (Join-Path $PSScriptRoot 'check-install-policy.ps1') -MsiPath $Msi
 Remove-Item -Force -ErrorAction SilentlyContinue ([IO.Path]::ChangeExtension($Msi, '.wixpdb'))
-& (Join-Path $PSScriptRoot 'sign.ps1') $Msi
+& (Join-Path $PSScriptRoot 'sign.ps1') @signFlags $Msi
 
 $HostArch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
 if ($Arch -ne 'arm64' -or $HostArch -eq 'arm64') {

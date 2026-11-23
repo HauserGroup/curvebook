@@ -16,7 +16,10 @@ pub mod verify;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::time::Duration;
+
+use curvebook_platform::process::ProcessCommand;
+use curvebook_platform::write_atomic;
 
 use sitemap::{GeneratedSite, assemble_site};
 use template::{SiteMeta, render_release_redirect_index};
@@ -168,12 +171,13 @@ fn run_release_snapshot(root: &Path, version_raw: &str, check_after: bool) -> Re
         }
     });
     let manifest_str = serde_json::to_string_pretty(&manifest).map_err(|e| format!("serialize manifest.json: {e}"))?;
-    std::fs::write(snap_dir.join("manifest.json"), format!("{manifest_str}\n"))
-        .map_err(|e| format!("write {}: {e}", snap_dir.join("manifest.json").display()))?;
+    let manifest_path = snap_dir.join("manifest.json");
+    write_atomic(&manifest_path, format!("{manifest_str}\n").as_bytes()).map_err(|e| format!("write {}: {e}", manifest_path.display()))?;
 
     let versions = collect_snapshot_dirs(&root.join("docs/manual"))?;
     let redirect_html = render_release_redirect_index(&minor_dir, &format!("v{clean_ver}"), &versions);
-    std::fs::write(root.join("docs/manual/index.html"), redirect_html).map_err(|e| format!("write docs/manual/index.html: {e}"))?;
+    let redirect_path = root.join("docs/manual/index.html");
+    write_atomic(&redirect_path, redirect_html.as_bytes()).map_err(|e| format!("write docs/manual/index.html: {e}"))?;
 
     if check_after {
         verify_site(root, &snap_dir, &site)?;
@@ -193,13 +197,17 @@ pub fn format_minor_dir(ver: &str) -> Result<String, String> {
 
 fn collect_snapshot_dirs(manual_dir: &Path) -> Result<Vec<String>, String> {
     let mut dirs: Vec<((u64, u64), String)> = Vec::new();
-    if manual_dir.is_dir() {
+    if std::fs::symlink_metadata(manual_dir).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_dir()) {
         for entry in std::fs::read_dir(manual_dir).map_err(|e| format!("read_dir {}: {e}", manual_dir.display()))? {
             let entry = entry.map_err(|e| format!("dir entry under docs/manual: {e}"))?;
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if ft.is_symlink() || !ft.is_dir() {
+                continue;
+            }
             let name = entry.file_name().to_string_lossy().into_owned();
-            if entry.path().is_dir()
-                && let Some(ver) = parse_minor_dir_version(&name)
-            {
+            if let Some(ver) = parse_minor_dir_version(&name) {
                 dirs.push((ver, name));
             }
         }
@@ -217,7 +225,7 @@ fn write_preview_site(root: &Path, out_dir: &Path, site: &GeneratedSite) -> Resu
 
     let img_src_dir = root.join("docs/images");
     let img_dst_dir = out_dir.join("images");
-    if img_src_dir.is_dir() {
+    if std::fs::symlink_metadata(&img_src_dir).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_dir()) {
         std::fs::create_dir_all(&img_dst_dir).map_err(|e| format!("create {}: {e}", img_dst_dir.display()))?;
         let mut entries: Vec<_> = std::fs::read_dir(&img_src_dir)
             .map_err(|e| format!("read_dir {}: {e}", img_src_dir.display()))?
@@ -226,7 +234,7 @@ fn write_preview_site(root: &Path, out_dir: &Path, site: &GeneratedSite) -> Resu
             .collect();
         entries.sort();
         for src in entries {
-            if src.is_file()
+            if std::fs::symlink_metadata(&src).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_file())
                 && let Some(name) = src.file_name()
             {
                 let dst = img_dst_dir.join(name);
@@ -253,7 +261,7 @@ fn write_html_tree(out_dir: &Path, site: &GeneratedSite) -> Result<(), String> {
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
         }
-        std::fs::write(&dst, html).map_err(|e| format!("write {}: {e}", dst.display()))?;
+        write_atomic(&dst, html.as_bytes()).map_err(|e| format!("write {}: {e}", dst.display()))?;
     }
     Ok(())
 }
@@ -261,10 +269,16 @@ fn write_html_tree(out_dir: &Path, site: &GeneratedSite) -> Result<(), String> {
 fn collect_rel_files(base: &Path, dir: &Path, out: &mut BTreeSet<String>) -> Result<(), String> {
     for entry in std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))? {
         let entry = entry.map_err(|e| format!("dir entry {}: {e}", dir.display()))?;
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        if ft.is_symlink() {
+            continue;
+        }
         let path = entry.path();
-        if path.is_dir() {
+        if ft.is_dir() {
             collect_rel_files(base, &path, out)?;
-        } else if path.is_file()
+        } else if ft.is_file()
             && let Ok(rel) = path.strip_prefix(base)
         {
             out.insert(rel.to_string_lossy().replace('\\', "/"));
@@ -274,8 +288,14 @@ fn collect_rel_files(base: &Path, dir: &Path, out: &mut BTreeSet<String>) -> Res
 }
 
 fn git_head_sha(root: &Path) -> Option<String> {
-    let out = Command::new("git").current_dir(root).args(["rev-parse", "HEAD"]).output().ok()?;
-    if !out.status.success() {
+    let out = ProcessCommand::new("git")
+        .current_dir(root)
+        .args(["rev-parse", "HEAD"])
+        .wall_timeout(Duration::from_secs(30))
+        .idle_timeout(Duration::from_secs(10))
+        .run()
+        .ok()?;
+    if !out.success {
         return None;
     }
     let sha = String::from_utf8_lossy(&out.stdout).trim().to_owned();
@@ -283,8 +303,14 @@ fn git_head_sha(root: &Path) -> Option<String> {
 }
 
 fn git_head_date(root: &Path) -> Option<String> {
-    let out = Command::new("git").current_dir(root).args(["show", "-s", "--format=%cs", "HEAD"]).output().ok()?;
-    if !out.status.success() {
+    let out = ProcessCommand::new("git")
+        .current_dir(root)
+        .args(["show", "-s", "--format=%cs", "HEAD"])
+        .wall_timeout(Duration::from_secs(30))
+        .idle_timeout(Duration::from_secs(10))
+        .run()
+        .ok()?;
+    if !out.success {
         return None;
     }
     let date = String::from_utf8_lossy(&out.stdout).trim().to_owned();

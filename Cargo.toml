@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "crates/platform", "apps/*", "xtask"]
+members = ["crates/*", "apps/*", "xtask"]
 default-members = ["crates/*", "apps/curvebook", "apps/curvebook-cli", "xtask"]
 
 [workspace.package]

@@ -241,14 +241,14 @@ impl LinkResolver for RepoLinkResolver<'_> {
         }
 
         let trimmed = normalized.trim_end_matches('/');
-        if self.source_repo_rel.starts_with("docs/reference/")
-            && (trimmed.ends_with(".html") || (trimmed.starts_with("docs/reference/") && !self.repo_root.join(trimmed).exists()))
-        {
+        let target_path = self.repo_root.join(trimmed);
+        if trimmed.is_empty() || trimmed.ends_with(".html") || !target_path.exists() {
             self.broken_links
                 .borrow_mut()
                 .push(format!("{}: broken relative link `{raw_href}` (resolved repo path `{trimmed}` does not exist)", self.source_repo_rel));
         }
-        let is_dir = target_part.ends_with('/') || self.repo_root.join(trimmed).is_dir();
+        let is_dir = target_part.ends_with('/')
+            || std::fs::symlink_metadata(&target_path).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_dir());
         let kind = if is_dir { "tree" } else { "blob" };
         format!("{GITHUB_REPO_BASE}/{kind}/main/{trimmed}{}", frag_suffix(frag_part))
     }
@@ -261,14 +261,25 @@ impl LinkResolver for RepoLinkResolver<'_> {
         let normalized = normalize_repo_rel(source_dir, raw_src);
         let assets = super::template::asset_prefix(self.current_site_rel, self.meta.is_release_snapshot);
         if let Some(img_name) = normalized.strip_prefix("docs/images/") {
+            let candidate = self.repo_root.join("docs/images").join(img_name);
+            if std::fs::symlink_metadata(&candidate).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_file()) {
+                return format!("{assets}images/{img_name}");
+            }
+            self.broken_links
+                .borrow_mut()
+                .push(format!("{}: missing image asset `{raw_src}` (resolved repo path `{normalized}` does not exist)", self.source_repo_rel));
             return format!("{assets}images/{img_name}");
         }
-        if let Some(file_name) = Path::new(&normalized).file_name().and_then(|n| n.to_str())
-            && self.repo_root.join("docs/images").join(file_name).is_file()
-        {
-            return format!("{assets}images/{file_name}");
+        if let Some(file_name) = Path::new(&normalized).file_name().and_then(|n| n.to_str()) {
+            let candidate = self.repo_root.join("docs/images").join(file_name);
+            if std::fs::symlink_metadata(&candidate).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_file()) {
+                return format!("{assets}images/{file_name}");
+            }
         }
-        format!("{assets}images/curvebook.png")
+        self.broken_links
+            .borrow_mut()
+            .push(format!("{}: missing image asset `{raw_src}` (resolved repo path `{normalized}` does not exist)", self.source_repo_rel));
+        format!("{assets}images/{normalized}")
     }
 }
 

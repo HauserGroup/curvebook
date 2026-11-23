@@ -1,7 +1,10 @@
 //! `cargo xtask bundle`: build release binaries and assemble `dist/CurveBook.app` on macOS.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::time::Duration;
+
+use curvebook_platform::process::ProcessCommand;
+use curvebook_platform::write_atomic;
 
 const PLIST_IN: &str = "packaging/macos/Info.plist.in";
 const ICON_ICNS: &str = "assets/app-icon/curvebook.icns";
@@ -32,14 +35,26 @@ pub fn run(root: &Path) -> Result<(), String> {
 }
 
 fn build_release_binaries(root: &Path, sha: &str) -> Result<(), String> {
-    let mut cmd = Command::new("cargo");
-    cmd.current_dir(root).env("CURVEBOOK_BUILD_SHA", sha).args(["build", "--release"]);
+    let mut args = vec!["build", "--locked", "--release"];
     if std::env::var("CARGO_NET_OFFLINE").is_ok_and(|val| val == "true" || val == "1") {
-        cmd.arg("--offline");
+        args.push("--offline");
     }
-    cmd.args(["-p", "curvebook", "-p", "curvebook-cli"]);
-    let status = cmd.status().map_err(|e| format!("cargo build --release: {e}"))?;
-    if !status.success() {
+    args.extend(["-p", "curvebook", "-p", "curvebook-cli"]);
+    let out = ProcessCommand::new("cargo")
+        .current_dir(root)
+        .env("CURVEBOOK_BUILD_SHA", sha)
+        .args(args)
+        .wall_timeout(Duration::from_secs(1800))
+        .idle_timeout(Duration::from_secs(300))
+        .run()
+        .map_err(|e| format!("cargo build --locked --release: {e}"))?;
+    if !out.stdout.is_empty() {
+        print!("{}", String::from_utf8_lossy(&out.stdout));
+    }
+    if !out.stderr.is_empty() {
+        eprint!("{}", String::from_utf8_lossy(&out.stderr));
+    }
+    if !out.success {
         return Err(String::from("release build failed"));
     }
     Ok(())
@@ -55,7 +70,7 @@ fn assemble_validate_and_sign(root: &Path, app_dir: &Path, version: &str, sha: &
     let plist_tpl = std::fs::read_to_string(root.join(PLIST_IN)).map_err(|e| format!("{PLIST_IN}: {e}"))?;
     let plist = render_info_plist(&plist_tpl, version, sha);
     let plist_path = contents.join("Info.plist");
-    std::fs::write(&plist_path, plist).map_err(|e| format!("write Info.plist: {e}"))?;
+    write_atomic(&plist_path, plist.as_bytes()).map_err(|e| format!("write Info.plist: {e}"))?;
     validate_info_plist(&plist_path)?;
 
     let release_dir = resolve_target_dir(root).join("release");
@@ -68,10 +83,17 @@ fn assemble_validate_and_sign(root: &Path, app_dir: &Path, version: &str, sha: &
 
     let icns = root.join(ICON_ICNS);
     std::fs::copy(&icns, res_dir.join("curvebook.icns")).map_err(|e| format!("copy {ICON_ICNS}: {e}"))?;
-    for doc in ["README.md", "LICENSE-MIT", "LICENSE-APACHE", "NOTICE", "ASSETS.md"] {
+    for doc in ["README.md", "LICENSE", "LICENSE-MIT", "LICENSE-APACHE", "COPYRIGHT", "NOTICE", "ATTRIBUTION.md", "ASSETS.md"] {
         let src = root.join(doc);
         if src.is_file() {
             std::fs::copy(&src, res_dir.join(doc)).map_err(|e| format!("copy {doc}: {e}"))?;
+        }
+    }
+    for rel in ["THIRD-PARTY-LICENSES.html", "licenses/THIRD-PARTY-LICENSES.html"] {
+        let src = root.join(rel);
+        if src.is_file() {
+            std::fs::copy(&src, res_dir.join("THIRD-PARTY-LICENSES.html")).map_err(|e| format!("copy {rel}: {e}"))?;
+            break;
         }
     }
 
@@ -117,10 +139,16 @@ fn run_macos_tool(tool: &str, args: &[&str], target: &Path, label: &str) -> Resu
     if !Path::new(tool).exists() {
         return Err(format!("{label} failed: missing macOS system tool `{tool}`"));
     }
-    let output =
-        Command::new(tool).args(args).arg(target).output().map_err(|e| format!("{label} failed to launch `{tool}` for {}: {e}", target.display()))?;
-    if !output.status.success() {
-        let code = output.status.code().map_or_else(|| String::from("signal"), |c| c.to_string());
+    let target_str = target.to_str().ok_or_else(|| format!("{label}: non-UTF-8 path {}", target.display()))?;
+    let output = ProcessCommand::new(tool)
+        .args(args.iter().copied())
+        .arg(target_str)
+        .wall_timeout(Duration::from_secs(120))
+        .idle_timeout(Duration::from_secs(30))
+        .run()
+        .map_err(|e| format!("{label} failed to launch `{tool}` for {}: {e}", target.display()))?;
+    if !output.success {
+        let code = output.status_code.map_or_else(|| String::from("signal"), |c| c.to_string());
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         return Err(format!("{label} failed for `{}` (exit {code}): stdout=`{stdout}` stderr=`{stderr}`", target.display()));
@@ -135,12 +163,14 @@ pub fn render_info_plist(template: &str, version: &str, build_sha: &str) -> Stri
 }
 
 fn git_short_sha(root: &Path) -> String {
-    Command::new("git")
+    ProcessCommand::new("git")
         .current_dir(root)
         .args(["rev-parse", "--short=9", "HEAD"])
-        .output()
+        .wall_timeout(Duration::from_secs(30))
+        .idle_timeout(Duration::from_secs(10))
+        .run()
         .ok()
-        .filter(|o| o.status.success())
+        .filter(|o| o.success)
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| String::from("dev"))

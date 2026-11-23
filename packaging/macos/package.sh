@@ -20,7 +20,11 @@ if [[ "${GITHUB_ACTIONS:-}" == "true" ]] && [[ "${ALPHA_RELEASE:-}" != "true" ]]
 fi
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --arch) ARCH="$2"; shift 2 ;;
+    --arch)
+      [[ $# -ge 2 ]] || { echo "error: --arch requires a value" >&2; exit 2; }
+      ARCH="$2"
+      shift 2
+      ;;
     --skip-build) SKIP_BUILD=1; shift ;;
     --require-signing) REQUIRE_SIGNING=1; shift ;;
     -h | --help) sed -n '2,8p' "$0"; exit 0 ;;

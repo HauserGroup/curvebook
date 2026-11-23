@@ -80,6 +80,7 @@ jobs:
           install-nextest: ${{ (matrix.stage == 'tests' || matrix.stage == 'performance' || matrix.stage == 'features') && 'true' || 'false' }}
           # The release-scan tests unpack a synthetic `.rpm` that only libarchive can read.
           install-libarchive: ${{ matrix.stage == 'tests' && 'true' || 'false' }}
+          install-pdf-qa: ${{ matrix.stage == 'tests' && 'true' || 'false' }}
           install-deny: ${{ matrix.stage == 'policy' && 'true' || 'false' }}
           reclaim-disk: ${{ (matrix.stage == 'tests' || matrix.stage == 'performance' || matrix.stage == 'features') && 'true' || 'false' }}
       - name: Restore the test binaries built for this revision
