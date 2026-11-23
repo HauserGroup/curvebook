@@ -1113,6 +1113,7 @@ pub enum UiIntent {
     ApplyManageVarRecodes { sheet_id: SheetId },
     ApplyManageVarOrder { sheet_id: SheetId, column: usize, order: LevelOrderSpec, reference_level: Option<String> },
     CloseManageVariables,
+    CancelManageVariables { revert_steps: usize },
     OpenImportWizard { origin: ImportOriginKind, is_live_link: bool, target_sheet_id: Option<SheetId> },
     UpdateImportWizard(Box<ImportPasteWizardState>),
     PasteClipboardIntoImportReshape,
@@ -1500,6 +1501,11 @@ impl PendingUiIntents {
     /// Close `Manage Variables...` without additional mutations.
     pub fn push_close_manage_variables(&mut self) {
         self.queue.push(UiIntent::CloseManageVariables);
+    }
+
+    /// Cancel `Manage Variables...`, reverting `revert_steps` session undo entries and clearing staged recodes.
+    pub fn push_cancel_manage_variables(&mut self, revert_steps: usize) {
+        self.queue.push(UiIntent::CancelManageVariables { revert_steps });
     }
 
     /// Open the 5-stage `Import & Paste Special` wizard.
@@ -1949,6 +1955,9 @@ fn apply_single_ui_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentO
         }
         UiIntent::DialogButtonAction { action } => {
             let result = crate::gui_actions::execute_dialog_button_action(app, &action)?;
+            if !power_studio::is_power_studio_dialog_active(app) {
+                power_studio::reset_results_transient_state(&mut app.egui_views.power_studio);
+            }
             Ok(UiIntentOutcome::Ui { command_id: format!("dialog.button:{action}"), result: Some(result) })
         }
         UiIntent::SetTextFieldBuffer { widget_id, text } => {
@@ -2118,6 +2127,7 @@ fn apply_wave4_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutco
         | UiIntent::ApplyManageVarRecodes { .. }
         | UiIntent::ApplyManageVarOrder { .. }
         | UiIntent::CloseManageVariables
+        | UiIntent::CancelManageVariables { .. }
         | UiIntent::OpenImportWizard { .. }
         | UiIntent::UpdateImportWizard(_)
         | UiIntent::PasteClipboardIntoImportReshape
@@ -2181,6 +2191,7 @@ fn apply_wave4_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutco
 fn apply_wave4_grid_wizard_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutcome, EngineError> {
     match intent {
         UiIntent::OpenManageVariables { sheet_id, column } => {
+            app.egui_views.manage_vars_modal.target_sheet_id = Some(sheet_id.clone());
             if let Some(ds) = app.session.document().data_sheet(&sheet_id).cloned() {
                 let col = column.unwrap_or(0).min(ds.archetype.column_count().saturating_sub(1));
                 app.grid.variables_dialog.open_for_column(&ds, col);
@@ -2190,6 +2201,7 @@ fn apply_wave4_grid_wizard_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
             Ok(UiIntentOutcome::ShellUpdated)
         }
         UiIntent::SelectManageVarColumn { sheet_id, column } => {
+            app.egui_views.manage_vars_modal.target_sheet_id = Some(sheet_id.clone());
             if let Some(ds) = app.session.document().data_sheet(&sheet_id).cloned() {
                 let col = column.min(ds.archetype.column_count().saturating_sub(1));
                 app.grid.variables_dialog.open_for_column(&ds, col);
@@ -2233,6 +2245,16 @@ fn apply_wave4_grid_wizard_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
         }
         UiIntent::CloseManageVariables => {
             app.grid.variables_dialog.open = false;
+            app.egui_views.manage_vars_modal.target_sheet_id = None;
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::CancelManageVariables { revert_steps } => {
+            for _ in 0..revert_steps {
+                let _ = app.execute_command("edit.undo", serde_json::json!({}));
+            }
+            app.grid.variables_dialog.recode_mappings.clear();
+            app.grid.variables_dialog.open = false;
+            app.egui_views.manage_vars_modal.target_sheet_id = None;
             Ok(UiIntentOutcome::ShellUpdated)
         }
         UiIntent::OpenImportWizard { origin, is_live_link, target_sheet_id } => {
@@ -2592,8 +2614,28 @@ fn apply_wave4_modal_state_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
             }
         }
         UiIntent::SaveEditParamsAsDefault => {
-            app.egui_views.anova_modal.method_saved_as_default = true;
-            app.egui_views.stats_modals.method_saved_as_default = true;
+            if let Some(spec) = app.canvas_dialogs.edit_params.draft.clone() {
+                match &spec.kind {
+                    curvebook_doc::AnalysisKind::OneWayAnova(_) => {
+                        app.egui_views.anova_modal.saved_default_spec = Some(spec);
+                        app.egui_views.anova_modal.method_saved_as_default = true;
+                    }
+                    curvebook_doc::AnalysisKind::NonlinearRegression(_) => {
+                        app.egui_views.fit_modal.saved_default_spec = Some(spec);
+                        app.egui_views.fit_modal.method_saved_as_default = true;
+                    }
+                    _ => {
+                        let disc = std::mem::discriminant(&spec.kind);
+                        app.egui_views.stats_modals.saved_defaults.retain(|d| std::mem::discriminant(&d.kind) != disc);
+                        app.egui_views.stats_modals.saved_defaults.push(spec);
+                        app.egui_views.stats_modals.method_saved_as_default = true;
+                    }
+                }
+            } else {
+                app.egui_views.anova_modal.method_saved_as_default = true;
+                app.egui_views.stats_modals.method_saved_as_default = true;
+                app.egui_views.fit_modal.method_saved_as_default = true;
+            }
         }
         UiIntent::SelectRetargetSource { target_data_sheet_id } => {
             app.canvas_dialogs.change_data.selected_target_id = Some(target_data_sheet_id);
@@ -2622,6 +2664,9 @@ fn apply_wave4_modal_state_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
         }
         UiIntent::CommitPowerWizard { action } => {
             let result = crate::gui_actions::execute_dialog_button_action(app, &action)?;
+            if !power_studio::is_power_studio_dialog_active(app) {
+                power_studio::reset_results_transient_state(&mut app.egui_views.power_studio);
+            }
             return Ok(UiIntentOutcome::Ui { command_id: format!("power_wizard:{action}"), result: Some(result) });
         }
         UiIntent::UpdateChangeGraphTypeState(state) => app.canvas_dialogs.change_graph_type = *state,
@@ -2670,6 +2715,7 @@ fn apply_wave4_app_modal_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiI
     match intent {
         UiIntent::OpenPreferences { category } => {
             app.egui_views.app_modals.open_preferences(&app.shortcuts, category);
+            app.egui_views.app_modals.preferences.capture_live_snapshot(&app.locale, app.theme.mode, app.theme.ui_scale, app.nav.nesting_mode);
         }
         UiIntent::ClosePreferences { save } => {
             if save {
@@ -2681,6 +2727,15 @@ fn apply_wave4_app_modal_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiI
                 if let Some(staged) = app.egui_views.app_modals.preferences.staged_shortcuts.take() {
                     app.shortcuts = staged;
                 }
+                app.egui_views.app_modals.preferences.initial_snapshot = None;
+            } else {
+                if let Some(snap) = app.egui_views.app_modals.preferences.initial_snapshot.take() {
+                    app.set_theme_mode(snap.theme_mode);
+                    let _ = app.set_ui_scale(snap.ui_scale);
+                    let _ = app.set_locale(&snap.locale);
+                    app.nav.nesting_mode = snap.nesting_mode;
+                }
+                app.egui_views.app_modals.preferences.reset_scale_spinner();
             }
             app.egui_views.app_modals.preferences.discard_shortcut_draft();
             app.egui_views.app_modals.preferences_open = false;
@@ -2731,6 +2786,8 @@ fn apply_wave4_app_modal_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiI
         }
         UiIntent::CloseFindReplace => {
             app.egui_views.app_modals.find_replace_open = false;
+            app.egui_views.app_modals.find_replace.match_count = 0;
+            app.egui_views.app_modals.find_replace.status_message = None;
         }
         UiIntent::ExecuteFindReplace { replace_all, find_query, replace_with, match_case, match_entire_cell } => {
             return apply_find_replace_on_active_sheet(app, replace_all, &find_query, &replace_with, match_case, match_entire_cell);

@@ -13,7 +13,7 @@ use egui::{Align, Context, Layout, Rect, RichText, Stroke, Ui, vec2};
 use serde_json::json;
 
 use crate::UiApp;
-use crate::i18n::tr_or_fallback;
+use crate::i18n::{normalize_locale, tr};
 use crate::inspect::ZLayer;
 
 use super::inspect_bridge::{ModalCaptureSpec, finalize_egui_modal_response};
@@ -53,6 +53,7 @@ impl ManageVarsFilter {
 /// Persistent transient UI state for `render_manage_vars_modal`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ManageVarsModalEguiState {
+    pub target_sheet_id: Option<SheetId>,
     pub filter: ManageVarsFilter,
     pub selected_level: Option<String>,
     pub rename_draft: String,
@@ -67,6 +68,7 @@ pub struct ManageVarsModalEguiState {
     pub synced_level_key: Option<String>,
     pub level_merge_target_draft: String,
     pub compact_detail_tab: usize,
+    pub session_undo_depth: Option<usize>,
 }
 
 /// Frame geometry and modal capture report emitted by `render_manage_vars_modal`.
@@ -105,11 +107,16 @@ fn combine_title_and_unit(name: &str, unit: &str) -> String {
     if u.is_empty() { n.to_owned() } else { format!("{n} ({u})") }
 }
 
-fn active_mv_sheet(app: &UiApp) -> Option<(&DataSheet, &MultipleVariablesTable)> {
+fn active_mv_sheet<'a>(app: &'a UiApp, state: &ManageVarsModalEguiState) -> Option<(&'a DataSheet, &'a MultipleVariablesTable)> {
     let doc = app.document();
-    let active_id = doc.active_sheet_id.as_ref();
-    let ds = active_id
+    let ds = state
+        .target_sheet_id
+        .as_ref()
         .and_then(|id| doc.data_sheet(id))
+        .filter(|s| matches!(s.archetype, TableArchetype::MultipleVariables(_)))
+        .or_else(|| {
+            doc.active_sheet_id.as_ref().and_then(|id| doc.data_sheet(id)).filter(|s| matches!(s.archetype, TableArchetype::MultipleVariables(_)))
+        })
         .or_else(|| doc.data_sheets.iter().find(|s| matches!(s.archetype, TableArchetype::MultipleVariables(_))))?;
     match &ds.archetype {
         TableArchetype::MultipleVariables(mv) => Some((ds, mv)),
@@ -127,17 +134,32 @@ pub fn render_manage_vars_modal(
     intents: &mut PendingUiIntents,
 ) -> ManageVarsModalFrameReport {
     if !app.grid.variables_dialog.open {
+        state.target_sheet_id = None;
         state.synced_sheet_col = None;
         state.synced_var_title = None;
+        state.selected_level = None;
+        state.synced_level_key = None;
+        state.title_draft.clear();
+        state.unit_draft.clear();
+        state.rename_draft.clear();
+        state.session_undo_depth = None;
         return ManageVarsModalFrameReport::default();
     }
+    if state.session_undo_depth.is_none() {
+        state.session_undo_depth = Some(app.session().undo_depth());
+    }
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        let steps = state.session_undo_depth.take().map_or(0, |d| app.session().undo_depth().saturating_sub(d));
+        intents.push_cancel_manage_variables(steps);
+    }
 
-    let title = tr_or_fallback(tokens.locale, "mv.vars.title", "Manage Variables & Levels");
+    let locale = normalize_locale(&app.locale);
+    let title = tr(locale, "mv.vars.title");
     let viewport = ctx.content_rect();
     let max_w = (viewport.width() - 24.0).clamp(300.0, 780.0);
     let max_h = (viewport.height() - 24.0).clamp(240.0, 560.0);
 
-    let mv_ctx = active_mv_sheet(app);
+    let mv_ctx = active_mv_sheet(app, state);
     let modal_resp = egui::Modal::new(egui::Id::unique("egui_shell_manage_vars_dialog")).backdrop_color(tokens.scrim).show(ctx, |ui| {
         ui.style_mut().spacing.scroll = egui::style::ScrollStyle::solid();
         let inner_w = (max_w - 24.0).max(260.0);
@@ -237,23 +259,43 @@ pub fn render_manage_vars_modal(
         widgets::divider(ui);
         ui.add_space(4.0);
         ui.horizontal(|footer| {
-            let cancel_lbl = tr_or_fallback(tokens.locale, "btn.cancel", "Cancel");
+            let cancel_lbl = tr(locale, "btn.cancel");
             let cancel_resp = widgets::secondary_button(footer, cancel_lbl);
             meta.record_modal_response(footer, &cancel_resp, FrameInspectEntryInput::modal_button("modal.cancel", cancel_lbl, true));
             if cancel_resp.clicked() {
-                intents.push_close_manage_variables();
+                let steps = state.session_undo_depth.take().map_or(0, |d| app.session().undo_depth().saturating_sub(d));
+                intents.push_cancel_manage_variables(steps);
             }
 
             footer.with_layout(Layout::right_to_left(Align::Center), |rhs| {
-                let ok_lbl = tr_or_fallback(tokens.locale, "btn.ok", "OK");
+                let ok_lbl = tr(locale, "btn.ok");
                 let ok_resp = widgets::primary_button(rhs, ok_lbl);
                 meta.record_modal_response(rhs, &ok_resp, FrameInspectEntryInput::modal_button("modal.ok", ok_lbl, true));
                 if ok_resp.clicked() {
-                    if let Some((ds, _)) = mv_ctx
-                        && !app.grid.variables_dialog.recode_mappings.is_empty()
-                    {
-                        intents.push_apply_manage_var_recodes(ds.id.clone());
+                    if let Some((ds, mv)) = mv_ctx {
+                        let col = app.grid.variables_dialog.selected_column.unwrap_or(0).min(mv.variables.len().saturating_sub(1));
+                        if !ds.frozen && !state.title_draft.trim().is_empty() {
+                            let next_title = combine_title_and_unit(&state.title_draft, &state.unit_draft);
+                            if !next_title.is_empty() && mv.variables.get(col).is_some_and(|v| v.title != next_title) {
+                                intents.push_engine("table.setTitles", json!({ "sheet_id": ds.id.as_str(), "col": col, "title": next_title }));
+                            }
+                        }
+                        if !ds.frozen
+                            && let Some(sel_lvl) = state.selected_level.as_deref()
+                        {
+                            let trimmed = state.rename_draft.trim();
+                            if !trimmed.is_empty() && trimmed != sel_lvl {
+                                intents.push_engine(
+                                    "table.recodeLevels",
+                                    json!({ "sheet_id": ds.id.as_str(), "col": col, "mappings": [{ "from": sel_lvl, "to": trimmed }] }),
+                                );
+                            }
+                        }
+                        if !app.grid.variables_dialog.recode_mappings.is_empty() {
+                            intents.push_apply_manage_var_recodes(ds.id.clone());
+                        }
                     }
+                    state.session_undo_depth = None;
                     intents.push_close_manage_variables();
                 }
             });
@@ -353,7 +395,7 @@ fn render_detail_pane(
 ) {
     let ManageVarsSheetCtx { ds, mv, col, tokens } = sheet;
     let Some(var) = mv.variables.get(col) else {
-        ui.label("No variable selected.");
+        ui.label(tr(normalize_locale(&app.locale), "mv.vars.none_selected"));
         return;
     };
     let is_calc = matches!(var.source, VariableSource::Calculated { .. });
@@ -486,21 +528,23 @@ fn render_detail_pane(
                     intents.push_apply_manage_var_order(ds.id.clone(), col, LevelOrderSpec { order: kind, reversed: vd.level_order.reversed }, None);
                 }
             }
+            let rev_lbl = tr(tokens.locale, "mv.vars.reverse_order");
             let mut rev = vd.level_order.reversed;
-            let rr = row.checkbox(&mut rev, "Reversed");
+            let rr = row.checkbox(&mut rev, rev_lbl);
             meta.record_modal_response(
                 row,
                 &rr,
-                FrameInspectEntryInput::modal("mv_formula.vars.order.reversed", "checkbox", "Reversed", Some(rev.to_string()), !ds.frozen),
+                FrameInspectEntryInput::modal("mv_formula.vars.order.reversed", "checkbox", rev_lbl, Some(rev.to_string()), !ds.frozen),
             );
             if rr.changed() {
                 intents.push_apply_manage_var_order(ds.id.clone(), col, LevelOrderSpec { order: vd.level_order.order.clone(), reversed: rev }, None);
             }
-            let apply_ord = row.add_enabled(!ds.frozen, egui::Button::new("Apply Order"));
+            let apply_ord_lbl = tr(tokens.locale, "mv.vars.apply_order");
+            let apply_ord = row.add_enabled(!ds.frozen, egui::Button::new(apply_ord_lbl));
             meta.record_modal_response(
                 row,
                 &apply_ord,
-                FrameInspectEntryInput::modal_button("mv_formula.vars.order.apply", "Apply Order", !ds.frozen),
+                FrameInspectEntryInput::modal_button("mv_formula.vars.order.apply", apply_ord_lbl, !ds.frozen),
             );
             if apply_ord.clicked() {
                 intents.push_apply_manage_var_order(ds.id.clone(), col, vd.level_order.clone(), None);
@@ -548,9 +592,10 @@ fn render_detail_pane(
                     !ds.frozen,
                 ),
             );
+            let stage_lbl = tr(tokens.locale, "mv.vars.stage_btn");
             let can_stage = !ds.frozen && !state.recode_from_draft.trim().is_empty();
-            let stage_r = row.add_enabled(can_stage, egui::Button::new("Stage"));
-            meta.record_modal_response(row, &stage_r, FrameInspectEntryInput::modal_button("mv_formula.vars.recode_stage", "Stage", can_stage));
+            let stage_r = row.add_enabled(can_stage, egui::Button::new(stage_lbl));
+            meta.record_modal_response(row, &stage_r, FrameInspectEntryInput::modal_button("mv_formula.vars.recode_stage", stage_lbl, can_stage));
             if stage_r.clicked() {
                 intents.push_stage_manage_var_recode(state.recode_from_draft.trim(), state.recode_to_draft.trim());
             }
@@ -608,10 +653,10 @@ fn render_levels_inspector(
     ui.horizontal_wrapped(|bar| {
         let can_up = !ds.frozen && sel_idx.is_some_and(|i| i > 0);
         let can_dn = !ds.frozen && sel_idx.is_some_and(|i| i + 1 < explicit_names.len());
-        let top_lbl = tr_or_fallback(tokens.locale, "w7.mv.move_to_top", "Top");
-        let up_lbl = tr_or_fallback(tokens.locale, "w7.mv.move_up", "Up");
-        let dn_lbl = tr_or_fallback(tokens.locale, "w7.mv.move_down", "Down");
-        let end_lbl = tr_or_fallback(tokens.locale, "w7.mv.move_to_end", "End");
+        let top_lbl = tr(tokens.locale, "w7.mv.move_to_top");
+        let up_lbl = tr(tokens.locale, "w7.mv.move_up");
+        let dn_lbl = tr(tokens.locale, "w7.mv.move_down");
+        let end_lbl = tr(tokens.locale, "w7.mv.move_to_end");
 
         for (wid, lbl, en, target_pos) in [
             ("mv_formula.vars.move_top", top_lbl, can_up, 0usize),
@@ -746,13 +791,14 @@ fn render_levels_inspector(
                                 !ds.frozen,
                             ),
                         );
+                        let mr_lbl = tr(tokens.locale, "mv.vars.apply_rename_merge");
                         let trimmed = state.rename_draft.trim();
                         let can_recode = !ds.frozen && !trimmed.is_empty() && trimmed != item.level;
-                        let mr = edit_row.add_enabled(can_recode, egui::Button::new("Apply Rename/Merge"));
+                        let mr = edit_row.add_enabled(can_recode, egui::Button::new(mr_lbl));
                         meta.record_modal_response(
                             edit_row,
                             &mr,
-                            FrameInspectEntryInput::modal_button(&format!("mv_formula.vars.level_merge.{idx}"), "Apply Rename/Merge", can_recode),
+                            FrameInspectEntryInput::modal_button(&format!("mv_formula.vars.level_merge.{idx}"), mr_lbl, can_recode),
                         );
                         if mr.clicked() || (er.lost_focus() && er.ctx.input(|i| i.key_pressed(egui::Key::Enter)) && can_recode) {
                             intents.push_engine(

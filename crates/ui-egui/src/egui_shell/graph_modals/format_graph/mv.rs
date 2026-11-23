@@ -10,6 +10,7 @@ use egui::Ui;
 
 use crate::UiApp;
 use crate::grid_view::parse_localized_number_input;
+use crate::i18n::tr;
 
 use super::super::super::PendingUiIntents;
 use super::super::super::unit_spinners::{ScrubUnitFieldConfig, render_scrub_unit_field};
@@ -38,7 +39,7 @@ pub(super) fn render_fg_mv_axis_variables(ui: &mut Ui, gctx: &mut GraphModalCtx<
             gctx.meta,
             ButtonEntry {
                 widget_id: "format_graph.mv.plot_mode.bubble_scatter",
-                label: "Bubble Scatter",
+                label: tr(gctx.locale, "fg.mv.bubble_scatter"),
                 command_id: None,
                 selected: is_bubble,
                 enabled: true,
@@ -56,7 +57,7 @@ pub(super) fn render_fg_mv_axis_variables(ui: &mut Ui, gctx: &mut GraphModalCtx<
             gctx.meta,
             ButtonEntry {
                 widget_id: "format_graph.mv.plot_mode.categorical_summary",
-                label: "Categorical Summary",
+                label: tr(gctx.locale, "fg.mv.categorical_summary"),
                 command_id: None,
                 selected: is_cat_summary,
                 enabled: true,
@@ -276,16 +277,18 @@ pub(super) fn render_fg_mv_data_objects(ui: &mut Ui, state: &mut GraphModalEguiS
 
     ui.label(egui::RichText::new("Layer Overlays").strong());
     let mut ellipses = enc.show_confidence_ellipses;
-    let ell_chk = ui.checkbox(&mut ellipses, "Confidence Ellipses (95%)");
-    record_checkbox(ui, &ell_chk, gctx.meta, "format_graph.mv.confidence_ellipses", "Confidence Ellipses (95%)", ellipses);
+    let ell_lbl = tr(gctx.locale, "fg.mv.ellipses");
+    let ell_chk = ui.checkbox(&mut ellipses, ell_lbl);
+    record_checkbox(ui, &ell_chk, gctx.meta, "format_graph.mv.confidence_ellipses", ell_lbl, ellipses);
     if ell_chk.changed() {
         enc.show_confidence_ellipses = ellipses;
         push_mv_encoding(gctx.intents, fg.clone(), enc.clone());
     }
 
     let mut hulls = enc.show_convex_hulls;
-    let hull_chk = ui.checkbox(&mut hulls, "Convex Hulls");
-    record_checkbox(ui, &hull_chk, gctx.meta, "format_graph.mv.convex_hulls", "Convex Hulls", hulls);
+    let hull_lbl = tr(gctx.locale, "fg.mv.hulls");
+    let hull_chk = ui.checkbox(&mut hulls, hull_lbl);
+    record_checkbox(ui, &hull_chk, gctx.meta, "format_graph.mv.convex_hulls", hull_lbl, hulls);
     if hull_chk.changed() {
         enc.show_convex_hulls = hulls;
         push_mv_encoding(gctx.intents, fg.clone(), enc.clone());
@@ -428,13 +431,13 @@ pub(super) fn render_fg_mv_data_objects(ui: &mut Ui, state: &mut GraphModalEguiS
     ui.add_space(6.0);
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(gctx.body_w);
-        ui.label("Out-of-Range Policy:");
+        ui.label(tr(gctx.locale, "fg.mv.out_of_range"));
         if record_button(
             ui,
             gctx.meta,
             ButtonEntry {
                 widget_id: "format_graph.mv.oor_clamp",
-                label: "Clamp to Bounds",
+                label: tr(gctx.locale, "fg.mv.clamp_to_bounds"),
                 command_id: None,
                 selected: state.mv_out_of_range == MvOutOfRangePolicy::ClampToBounds,
                 enabled: true,
@@ -454,7 +457,7 @@ pub(super) fn render_fg_mv_data_objects(ui: &mut Ui, state: &mut GraphModalEguiS
             gctx.meta,
             ButtonEntry {
                 widget_id: "format_graph.mv.oor_omit",
-                label: "Omit Outliers",
+                label: tr(gctx.locale, "fg.mv.auto_scale_no_clamp"),
                 command_id: None,
                 selected: state.mv_out_of_range == MvOutOfRangePolicy::Omit,
                 enabled: true,
@@ -476,10 +479,8 @@ pub(super) fn render_fg_mv_data_objects(ui: &mut Ui, state: &mut GraphModalEguiS
 }
 
 pub(super) fn render_fg_legends(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>) {
-    let fg = gctx.app.canvas_dialogs.format_graph.clone();
     render_fg_settings(ui, gctx);
     ui.add_space(4.0);
-    let _ = fg;
 }
 
 fn collect_mv_variable_names(app: &UiApp, gid: Option<&SheetId>) -> Vec<String> {

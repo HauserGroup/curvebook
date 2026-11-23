@@ -65,6 +65,15 @@ pub enum UnsavedCloseAction {
     Cancel,
 }
 
+/// Snapshot of live preferences captured on modal open so `Cancel` / `Escape` reverts live previews.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreferencesSnapshot {
+    pub locale: String,
+    pub theme_mode: UiThemeMode,
+    pub ui_scale: f32,
+    pub nesting_mode: NavigatorNestingMode,
+}
+
 /// Editable draft settings inside the 4-category `Preferences` modal.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreferencesModalState {
@@ -78,6 +87,8 @@ pub struct PreferencesModalState {
     pub shortcut_capture_armed: bool,
     /// Staged shortcut bindings edited inside the modal and committed to `app.shortcuts` only on OK.
     pub staged_shortcuts: Option<ShortcutRegistry>,
+    /// Live preference values captured when `Preferences` opens so `Cancel` / `Escape` restores them.
+    pub initial_snapshot: Option<PreferencesSnapshot>,
 }
 
 impl Default for PreferencesModalState {
@@ -92,11 +103,22 @@ impl Default for PreferencesModalState {
             shortcuts_ui_only: false,
             shortcut_capture_armed: false,
             staged_shortcuts: None,
+            initial_snapshot: None,
         }
     }
 }
 
 impl PreferencesModalState {
+    /// Capture live `locale`, `theme_mode`, `ui_scale`, and `nesting_mode` when opening Preferences.
+    pub fn capture_live_snapshot(&mut self, locale: &str, theme_mode: UiThemeMode, ui_scale: f32, nesting_mode: NavigatorNestingMode) {
+        self.initial_snapshot = Some(PreferencesSnapshot { locale: locale.to_owned(), theme_mode, ui_scale, nesting_mode });
+    }
+
+    /// Reset transient UI scale spinner state back to `ScrubUnitFieldState::new(Percent)`.
+    pub fn reset_scale_spinner(&mut self) {
+        self.ui_scale_spinner = ScrubUnitFieldState::new(ScrubUnitKind::Percent);
+    }
+
     /// Snapshot `shortcuts` into the modal draft and clear transient editor fields when opening Preferences.
     pub fn begin_shortcut_session(&mut self, shortcuts: &ShortcutRegistry) {
         self.staged_shortcuts = Some(shortcuts.clone());
@@ -149,7 +171,7 @@ pub struct AppModalsEguiState {
     pub print_copies_spinner: ScrubUnitFieldState,
     pub print_scale_spinner: ScrubUnitFieldState,
     pub print_bleed_spinner: ScrubUnitFieldState,
-    pub about_tab: u8,
+    pub checkpoint_pending_restore_id: Option<String>,
 }
 
 impl Default for AppModalsEguiState {
@@ -168,7 +190,7 @@ impl Default for AppModalsEguiState {
             print_copies_spinner: ScrubUnitFieldState::new(ScrubUnitKind::Generic),
             print_scale_spinner: ScrubUnitFieldState::new(ScrubUnitKind::Percent),
             print_bleed_spinner: ScrubUnitFieldState::new(ScrubUnitKind::Points),
-            about_tab: 0,
+            checkpoint_pending_restore_id: None,
         }
     }
 }
@@ -192,10 +214,15 @@ impl AppModalsEguiState {
     /// Dismiss all shell-managed app modal flags cleanly and discard any staged preference drafts.
     pub fn close_all(&mut self) {
         self.preferences.discard_shortcut_draft();
+        self.preferences.initial_snapshot = None;
+        self.preferences.reset_scale_spinner();
         self.preferences_open = false;
         self.unsaved_changes_open = false;
         self.find_replace_open = false;
+        self.find_replace.match_count = 0;
+        self.find_replace.status_message = None;
         self.export_emf_selected = false;
+        self.checkpoint_pending_restore_id = None;
     }
 }
 
@@ -266,10 +293,14 @@ pub fn render_app_modal(
         return render_find_replace_modal(ctx, app, state, tokens, meta, intents);
     }
 
+    if !matches!(app.canvas_dialogs.active_dialog, ActiveDialog::Checkpoints) {
+        state.checkpoint_pending_restore_id = None;
+    }
+
     match &app.canvas_dialogs.active_dialog {
         ActiveDialog::ExportFigure { sheet_id } => render_export_modal(ctx, app, state, sheet_id.clone(), tokens, meta, intents),
         ActiveDialog::Print { .. } => render_print_modal(ctx, app, state, tokens, meta, intents),
-        ActiveDialog::Checkpoints => render_checkpoints_modal(ctx, app, tokens, meta, intents),
+        ActiveDialog::Checkpoints => render_checkpoints_modal(ctx, app, state, tokens, meta, intents),
         ActiveDialog::About => render_about_modal(ctx, app, state, tokens, meta, intents),
         ActiveDialog::Feedback => render_feedback_modal(ctx, app, tokens, meta, intents),
         _ => AppModalFrameReport::default(),
@@ -290,6 +321,10 @@ fn render_unsaved_modal(
     let locale = normalize_locale(&app.locale);
     let title = tr(locale, "w6.view.shell.unsaved_title");
     let (inner_w, max_h, body_w) = modal_bounds(ctx, 480.0);
+
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+        intents.push_resolve_unsaved_changes(UnsavedCloseAction::Cancel);
+    }
 
     let modal_resp = egui::Modal::new(egui::Id::unique("egui_shell_unsaved_changes_modal")).backdrop_color(tokens.scrim).show(ctx, |ui| {
         ui.set_min_width(inner_w);
@@ -386,9 +421,21 @@ fn render_preferences_modal(
     if state.preferences.staged_shortcuts.is_none() {
         state.preferences.staged_shortcuts = Some(app.shortcuts.clone());
     }
+    if state.preferences.initial_snapshot.is_none() {
+        state.preferences.capture_live_snapshot(&app.locale, app.theme.mode, app.theme.ui_scale, app.nav.nesting_mode);
+    }
     let locale = normalize_locale(&app.locale);
-    let title = atr(locale, "prefs.title");
+    let title = tr(locale, "prefs.title");
     let (inner_w, max_h, body_w) = modal_bounds(ctx, 720.0);
+
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+        if state.preferences.shortcut_capture_armed {
+            state.preferences.shortcut_capture_armed = false;
+        } else {
+            state.preferences.shortcut_capture_armed = false;
+            intents.push_close_preferences(false);
+        }
+    }
 
     // Optional live key-capture when armed on Keyboard Shortcuts tab.
     if state.preferences.active_category == PreferencesCategory::KeyboardShortcuts
@@ -413,7 +460,7 @@ fn render_preferences_modal(
         ui.horizontal_wrapped(|ui| {
             ui.set_max_width(body_w);
             for &cat in &PreferencesCategory::ALL {
-                let cat_lbl = atr(locale, cat.label_key());
+                let cat_lbl = tr(locale, cat.label_key());
                 let wid = format!("edit.tab.prefs.{}", cat.slug());
                 let selected = state.preferences.active_category == cat;
                 if app_tab(ui, meta, &wid, cat_lbl, selected, tokens).clicked() {
@@ -495,7 +542,7 @@ fn render_prefs_general(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
-    ui.label(egui::RichText::new(atr(locale, "prefs.general.tree_heading")).strong());
+    ui.label(egui::RichText::new(tr(locale, "prefs.general.tree_heading")).strong());
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(body_w);
         for (wid, lbl, mode) in [
@@ -523,7 +570,7 @@ fn render_prefs_appearance(
     intents: &mut PendingUiIntents,
 ) {
     let PrefsTabCtx { app, locale, body_w, tokens } = ctx;
-    ui.label(egui::RichText::new(atr(locale, "prefs.appearance.theme_heading")).strong());
+    ui.label(egui::RichText::new(tr(locale, "prefs.appearance.theme_heading")).strong());
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(body_w);
         for (wid, lbl, mode) in [
@@ -550,7 +597,7 @@ fn render_prefs_appearance(
         step_per_pt: 2.0,
         decimals: 0,
         allow_unit_switch: false,
-        ..ScrubUnitFieldConfig::new("prefs.appearance.ui_scale", atr(locale, "prefs.appearance.ui_scale"), 75.0, 300.0)
+        ..ScrubUnitFieldConfig::new("prefs.appearance.ui_scale", tr(locale, "prefs.appearance.ui_scale"), 75.0, 300.0)
     };
     let out = render_scrub_unit_field(ui, scale_pct, &mut state.preferences.ui_scale_spinner, cfg, tokens, meta);
     if let Some(pct) = out.committed_value {
@@ -563,8 +610,8 @@ fn render_prefs_appearance(
 }
 
 fn render_prefs_language(ui: &mut Ui, locale: &str, body_w: f32, tokens: &Tokens, meta: &mut FrameInspectMeta, intents: &mut PendingUiIntents) {
-    ui.label(egui::RichText::new(atr(locale, "prefs.language.heading")).strong());
-    ui.label(egui::RichText::new(atr(locale, "prefs.language.subtitle")).color(tokens.text_muted).small());
+    ui.label(egui::RichText::new(tr(locale, "prefs.language.heading")).strong());
+    ui.label(egui::RichText::new(tr(locale, "prefs.language.subtitle")).color(tokens.text_muted).small());
     ui.add_space(6.0);
 
     // Strictly display the 14 non-RTL Beta active locales (`BETA_ACTIVE_LOCALES`).
@@ -609,19 +656,20 @@ fn render_prefs_shortcuts(
 
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(body_w);
-        ui.label(atr(locale, "prefs.shortcuts.filter"));
+        ui.label(tr(locale, "prefs.shortcuts.filter"));
         let search_resp = ui.add(egui::TextEdit::singleline(&mut state.preferences.shortcut_search).desired_width(180.0));
         app_input(ui, &search_resp, meta, "prefs.shortcuts.search", "Search shortcuts", &state.preferences.shortcut_search, true);
 
-        let ui_only_chk = ui.checkbox(&mut state.preferences.shortcuts_ui_only, "UI Commands Only");
-        app_checkbox(ui, &ui_only_chk, meta, "prefs.shortcuts.ui_only", "UI Commands Only", state.preferences.shortcuts_ui_only);
+        let ui_only_lbl = tr(locale, "prefs.shortcuts.ui_only");
+        let ui_only_chk = ui.checkbox(&mut state.preferences.shortcuts_ui_only, ui_only_lbl);
+        app_checkbox(ui, &ui_only_chk, meta, "prefs.shortcuts.ui_only", ui_only_lbl, state.preferences.shortcuts_ui_only);
 
         if app_button(
             ui,
             meta,
             AppBtn {
                 widget_id: "prefs.shortcuts.reset_all",
-                label: "Reset All",
+                label: tr(locale, "prefs.shortcuts.reset_all"),
                 command_id: None,
                 selected: false,
                 enabled: true,
@@ -767,7 +815,7 @@ fn render_shortcut_editor_bar(
             meta,
             AppBtn {
                 widget_id: "prefs.shortcuts.apply",
-                label: "Apply Shortcut",
+                label: tr(tokens.locale, "prefs.shortcuts.apply"),
                 command_id: None,
                 selected: true,
                 enabled: true,
@@ -785,7 +833,7 @@ fn render_shortcut_editor_bar(
             meta,
             AppBtn {
                 widget_id: "prefs.shortcuts.reset_one",
-                label: "Reset",
+                label: tr(tokens.locale, "btn.reset"),
                 command_id: None,
                 selected: false,
                 enabled: true,
@@ -926,6 +974,10 @@ fn render_find_replace_modal(
     let title = tr(locale, "menu.edit.find");
     let (inner_w, max_h, body_w) = modal_bounds(ctx, 460.0);
 
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+        intents.push_close_find_replace();
+    }
+
     let modal_resp = egui::Modal::new(egui::Id::unique("egui_shell_find_replace_modal")).backdrop_color(tokens.scrim).show(ctx, |ui| {
         ui.set_min_width(inner_w);
         ui.set_max_width(inner_w);
@@ -945,24 +997,26 @@ fn render_find_replace_modal(
 
                 ui.horizontal_wrapped(|ui| {
                     ui.set_max_width(body_w);
-                    ui.label("Find:");
+                    ui.label(tr(locale, "find.label.find"));
                     let q_resp = ui.add(egui::TextEdit::singleline(&mut state.find_replace.find_query).desired_width((body_w - 110.0).max(120.0)));
-                    app_input(ui, &q_resp, meta, "find_replace.query", "Find", &state.find_replace.find_query, true);
+                    app_input(ui, &q_resp, meta, "find_replace.query", tr(locale, "find.label.find"), &state.find_replace.find_query, true);
                 });
                 ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
                     ui.set_max_width(body_w);
-                    ui.label("Replace:");
+                    ui.label(tr(locale, "find.label.replace"));
                     let r_resp = ui.add(egui::TextEdit::singleline(&mut state.find_replace.replace_with).desired_width((body_w - 110.0).max(120.0)));
-                    app_input(ui, &r_resp, meta, "find_replace.replace", "Replace", &state.find_replace.replace_with, true);
+                    app_input(ui, &r_resp, meta, "find_replace.replace", tr(locale, "find.label.replace"), &state.find_replace.replace_with, true);
                 });
                 ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
                     ui.set_max_width(body_w);
-                    let c_chk = ui.checkbox(&mut state.find_replace.match_case, "Match Case");
-                    app_checkbox(ui, &c_chk, meta, "find_replace.match_case", "Match Case", state.find_replace.match_case);
-                    let e_chk = ui.checkbox(&mut state.find_replace.match_entire_cell, "Match Entire Cell");
-                    app_checkbox(ui, &e_chk, meta, "find_replace.match_entire_cell", "Match Entire Cell", state.find_replace.match_entire_cell);
+                    let mc_lbl = tr(locale, "find.match_case");
+                    let c_chk = ui.checkbox(&mut state.find_replace.match_case, mc_lbl);
+                    app_checkbox(ui, &c_chk, meta, "find_replace.match_case", mc_lbl, state.find_replace.match_case);
+                    let ec_lbl = tr(locale, "find.match_entire_cell");
+                    let e_chk = ui.checkbox(&mut state.find_replace.match_entire_cell, ec_lbl);
+                    app_checkbox(ui, &e_chk, meta, "find_replace.match_entire_cell", ec_lbl, state.find_replace.match_entire_cell);
                 });
                 ui.add_space(4.0);
                 let status_txt = format!("Matches found: {}", state.find_replace.match_count);
@@ -997,7 +1051,7 @@ fn render_find_replace_modal(
                 meta,
                 AppBtn {
                     widget_id: "find_replace.find",
-                    label: "Find Next",
+                    label: tr(locale, "find.btn.next"),
                     command_id: None,
                     selected: false,
                     enabled: can_search,
@@ -1020,7 +1074,7 @@ fn render_find_replace_modal(
                 meta,
                 AppBtn {
                     widget_id: "find_replace.replace_all",
-                    label: "Replace All",
+                    label: tr(locale, "find.btn.replace_all"),
                     command_id: None,
                     selected: true,
                     enabled: can_search,
@@ -1062,8 +1116,13 @@ fn render_export_modal(
     let is_graph = doc.graph_sheet(&sheet_id).is_some();
     let is_layout = doc.layout_sheet(&sheet_id).is_some();
     let target_valid = is_graph || is_layout;
-    let title = if is_layout { atr(locale, "export.title.layout") } else { tr(locale, "w6.view.modal.export_figure") };
+    let title = if is_layout { tr(locale, "export.title.layout") } else { tr(locale, "w6.view.modal.export_figure") };
     let (inner_w, max_h, body_w) = modal_bounds(ctx, 620.0);
+
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+        state.export_emf_selected = false;
+        intents.push_dialog_button("cancel");
+    }
 
     let modal_resp =
         egui::Modal::new(egui::Id::unique(("egui_shell_app_modal", "dialog.export_figure"))).backdrop_color(tokens.scrim).show(ctx, |ui| {
@@ -1118,7 +1177,7 @@ fn render_export_modal(
                     meta,
                     AppBtn {
                         widget_id: "modal.ok",
-                        label: atr(locale, "export.commit"),
+                        label: tr(locale, "btn.export"),
                         command_id: None,
                         selected: true,
                         enabled: target_valid,
@@ -1286,7 +1345,7 @@ fn render_export_body(
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(body_w);
         let dim_disabled_reason = is_vector.then_some("Vector formats (PDF/SVG/EMF) use sheet geometry instead of pixel dimensions");
-        ui.label("Unit:");
+        ui.label(tr(normalize_locale(&app.locale), "export.unit"));
         for (slug, lbl) in [("px", "px"), ("mm", "mm"), ("in", "in")] {
             if app_button(
                 ui,
@@ -1306,7 +1365,7 @@ fn render_export_body(
                 intents.push_custom_view_action("dialogs_graph_misc", format!("export:unit:{slug}"));
             }
         }
-        ui.label("Journal Width:");
+        ui.label(tr(normalize_locale(&app.locale), "export.journal_width"));
         for mm in [85.0_f64, 114.0_f64, 174.0_f64] {
             if app_button(
                 ui,
@@ -1412,7 +1471,7 @@ fn render_export_body(
     let is_pdf_export = !state.export_emf_selected && matches!(ef.format, ExportFigureFormat::Pdf);
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(body_w);
-        ui.label("Color Space:");
+        ui.label(tr(normalize_locale(&app.locale), "w5.export.colorspace"));
         for (slug, lbl, val) in
             [("srgb", "sRGB", "sRGB"), ("p3", "Display-P3", "Display-P3"), ("gray", "Grayscale", "Grayscale"), ("cmyk", "CMYK-Proof", "CMYK-Proof")]
         {
@@ -1470,6 +1529,10 @@ fn render_print_modal(
     let (inner_w, max_h, body_w) = modal_bounds(ctx, 560.0);
     let pd = app.canvas_dialogs.print.clone();
 
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+        intents.push_dialog_button("cancel");
+    }
+
     let modal_resp = egui::Modal::new(egui::Id::unique(("egui_shell_app_modal", "dialog.print"))).backdrop_color(tokens.scrim).show(ctx, |ui| {
         ui.set_min_width(inner_w);
         ui.set_max_width(inner_w);
@@ -1495,7 +1558,7 @@ fn render_print_modal(
                         meta,
                         AppBtn {
                             widget_id: "print.queue.default",
-                            label: "OS Default / PDF Spool",
+                            label: tr(locale, "print.os_spool"),
                             command_id: None,
                             selected: pd.selected_printer.is_none(),
                             enabled: true,
@@ -1562,8 +1625,9 @@ fn render_print_modal(
 
                 ui.add_space(4.0);
                 let mut crops = pd.job.crop_marks;
-                let crop_chk = ui.checkbox(&mut crops, "Draw Publication Crop Marks");
-                app_checkbox(ui, &crop_chk, meta, "print.crop_marks", "Draw Publication Crop Marks", crops);
+                let crop_lbl = tr(locale, "print.crop_marks");
+                let crop_chk = ui.checkbox(&mut crops, crop_lbl);
+                app_checkbox(ui, &crop_chk, meta, "print.crop_marks", crop_lbl, crops);
                 if crop_chk.changed() {
                     let mut next = pd.clone();
                     next.job.crop_marks = crops;
@@ -1574,7 +1638,7 @@ fn render_print_modal(
                     ui,
                     super::graph_modals::LengthSpinnerSpec {
                         widget_id: "print.bleed_pt",
-                        label: "Bleed",
+                        label: tr(locale, "print.bleed"),
                         value_pt: pd.job.bleed_pt,
                         min_pt: 0.0,
                         max_pt: 36.0,
@@ -1594,7 +1658,7 @@ fn render_print_modal(
                 ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
                     ui.set_max_width(body_w);
-                    ui.label("Color Space:");
+                    ui.label(tr(normalize_locale(&app.locale), "w5.export.colorspace"));
                     for (lbl, cs) in [("sRGB", PdfColorSpace::Srgb), ("CMYK", PdfColorSpace::Cmyk), ("Grayscale", PdfColorSpace::Grayscale)] {
                         if app_button(
                             ui,
@@ -1621,7 +1685,8 @@ fn render_print_modal(
                 ui.add_space(4.0);
                 let gui_only = app.is_gui_only();
                 let mut submit_os = pd.submit_to_os && !gui_only;
-                let os_chk = ui.add_enabled(!gui_only, egui::Checkbox::new(&mut submit_os, "Submit directly to OS print queue"));
+                let direct_lbl = tr(locale, "print.direct_queue");
+                let os_chk = ui.add_enabled(!gui_only, egui::Checkbox::new(&mut submit_os, direct_lbl));
                 let os_reason = gui_only.then_some("Blocked under --gui-only: spool PDF cleanly in-memory");
                 if let Some(reason) = os_reason {
                     os_chk.clone().on_disabled_hover_text(reason);
@@ -1632,7 +1697,7 @@ fn render_print_modal(
                     FrameInspectEntryInput {
                         widget_id: "print.submit_to_os",
                         role: "checkbox",
-                        label: "Submit directly to OS print queue",
+                        label: direct_lbl,
                         command_id: None,
                         value: Some(Value::Bool(submit_os)),
                         enabled: !gui_only,
@@ -1675,7 +1740,7 @@ fn render_print_modal(
                 meta,
                 AppBtn {
                     widget_id: "modal.ok",
-                    label: atr(locale, "print.commit"),
+                    label: tr(locale, "print.commit"),
                     command_id: None,
                     selected: true,
                     enabled: true,
@@ -1716,12 +1781,11 @@ fn format_about_diagnostic_summary(app: &UiApp, build_sha: Option<&str>) -> Stri
 pub(crate) fn render_about_modal(
     ctx: &Context,
     app: &UiApp,
-    state: &AppModalsEguiState,
+    _state: &AppModalsEguiState,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) -> AppModalFrameReport {
-    let _ = state.about_tab;
     let locale = normalize_locale(&app.locale);
     let title = tr(locale, "menu.help.about");
     let (inner_w, max_h, body_w) = modal_bounds(ctx, 400.0);
@@ -1856,6 +1920,7 @@ pub(crate) fn render_about_modal(
 fn render_checkpoints_modal(
     ctx: &Context,
     app: &UiApp,
+    state: &mut AppModalsEguiState,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
@@ -1865,6 +1930,7 @@ fn render_checkpoints_modal(
     let (inner_w, max_h, body_w) = modal_bounds(ctx, 500.0);
 
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+        state.checkpoint_pending_restore_id = None;
         intents.push_dialog_button("cancel");
     }
 
@@ -1893,7 +1959,7 @@ fn render_checkpoints_modal(
                     ui.label(egui::RichText::new("Create Checkpoint").strong());
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        ui.label("Name");
+                        ui.label(tr(locale, "modal.label.name"));
                         let name_resp = ui.add(egui::TextEdit::singleline(&mut name_draft).desired_width((body_w - 64.0).max(120.0)));
                         app_input(ui, &name_resp, meta, "checkpoints.name", "Checkpoint Name", &name_draft, true);
                         if name_resp.changed() {
@@ -1904,7 +1970,7 @@ fn render_checkpoints_modal(
                     });
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        ui.label("Note");
+                        ui.label(tr(locale, "modal.label.note"));
                         let note_resp = ui.add(egui::TextEdit::singleline(&mut note_draft).desired_width((body_w - 64.0).max(120.0)));
                         app_input(ui, &note_resp, meta, "checkpoints.note", "Checkpoint Note", &note_draft, true);
                         if note_resp.changed() {
@@ -1929,21 +1995,13 @@ fn render_checkpoints_modal(
                         tokens,
                     );
                     if create_resp.clicked() && can_create {
-                        let trimmed_name = name_draft.trim().to_owned();
-                        let trimmed_note = note_draft.trim().to_owned();
-                        let mut params = serde_json::Map::new();
-                        params.insert(String::from("name"), Value::String(trimmed_name));
-                        if !trimmed_note.is_empty() {
-                            params.insert(String::from("note"), Value::String(trimmed_note));
-                        }
-                        intents.push_engine("project.createCheckpoint", Value::Object(params));
-                        let next_default = format!("Checkpoint {}", doc.checkpoints.len() + 2);
                         intents.push(UiIntent::PatchActiveDialog {
                             fields: serde_json::Map::from_iter([
-                                (String::from("name"), Value::String(next_default)),
-                                (String::from("note"), Value::String(String::new())),
+                                (String::from("name"), Value::String(name_draft.clone())),
+                                (String::from("note"), Value::String(note_draft.clone())),
                             ]),
                         });
+                        intents.push_dialog_button("ok");
                     }
 
                     ui.add_space(10.0);
@@ -1973,10 +2031,54 @@ fn render_checkpoints_modal(
                                         ui.add(egui::Label::new(egui::RichText::new(&cp.note).color(tokens.text_muted)).wrap());
                                     }
                                     ui.add_space(4.0);
-                                    ui.horizontal(|ui| {
+                                    ui.horizontal_wrapped(|ui| {
                                         let restore_wid = format!("checkpoints.restore.{idx}");
+                                        let confirm_wid = format!("checkpoints.restore.confirm.{idx}");
+                                        let cancel_restore_wid = format!("checkpoints.restore.cancel.{idx}");
                                         let delete_wid = format!("checkpoints.delete.{idx}");
-                                        if app_button(
+                                        let awaiting_confirm = state.checkpoint_pending_restore_id.as_deref() == Some(cp.id.as_str());
+                                        if awaiting_confirm {
+                                            if app_button(
+                                                ui,
+                                                meta,
+                                                AppBtn {
+                                                    widget_id: &confirm_wid,
+                                                    label: tr(locale, "checkpoints.confirm_restore"),
+                                                    command_id: Some("project.restoreCheckpoint"),
+                                                    selected: true,
+                                                    enabled: true,
+                                                    disabled_reason: None,
+                                                },
+                                                tokens,
+                                            )
+                                            .clicked()
+                                            {
+                                                state.checkpoint_pending_restore_id = None;
+                                                intents.push_engine("project.restoreCheckpoint", json!({ "id": cp.id }));
+                                            }
+                                            if app_button(
+                                                ui,
+                                                meta,
+                                                AppBtn {
+                                                    widget_id: &cancel_restore_wid,
+                                                    label: tr(locale, "btn.cancel"),
+                                                    command_id: None,
+                                                    selected: false,
+                                                    enabled: true,
+                                                    disabled_reason: None,
+                                                },
+                                                tokens,
+                                            )
+                                            .clicked()
+                                            {
+                                                state.checkpoint_pending_restore_id = None;
+                                            }
+                                            ui.label(
+                                                egui::RichText::new("Replaces current unsaved edits (undoable via Edit > Undo).")
+                                                    .small()
+                                                    .color(tokens.text_muted),
+                                            );
+                                        } else if app_button(
                                             ui,
                                             meta,
                                             AppBtn {
@@ -1991,7 +2093,7 @@ fn render_checkpoints_modal(
                                         )
                                         .clicked()
                                         {
-                                            intents.push_engine("project.restoreCheckpoint", json!({ "id": cp.id }));
+                                            state.checkpoint_pending_restore_id = Some(cp.id.clone());
                                         }
                                         if app_button(
                                             ui,
@@ -2008,6 +2110,9 @@ fn render_checkpoints_modal(
                                         )
                                         .clicked()
                                         {
+                                            if state.checkpoint_pending_restore_id.as_deref() == Some(cp.id.as_str()) {
+                                                state.checkpoint_pending_restore_id = None;
+                                            }
                                             intents.push_engine("project.deleteCheckpoint", json!({ "id": cp.id }));
                                         }
                                     });
@@ -2030,6 +2135,7 @@ fn render_checkpoints_modal(
                 )
                 .clicked()
                 {
+                    state.checkpoint_pending_restore_id = None;
                     intents.push_dialog_button("cancel");
                 }
             });
@@ -2249,7 +2355,14 @@ fn render_feedback_footer(ui: &mut Ui, input: &FeedbackFooterInput<'_>, meta: &m
         if app_button(
             ui,
             meta,
-            AppBtn { widget_id: "dialog.feedback.reset", label: "Clear", command_id: None, selected: false, enabled: true, disabled_reason: None },
+            AppBtn {
+                widget_id: "dialog.feedback.reset",
+                label: tr(locale, "modal.btn.clear"),
+                command_id: None,
+                selected: false,
+                enabled: true,
+                disabled_reason: None,
+            },
             tokens,
         )
         .clicked()
@@ -2283,7 +2396,7 @@ fn render_feedback_footer(ui: &mut Ui, input: &FeedbackFooterInput<'_>, meta: &m
             meta,
             AppBtn {
                 widget_id: "dialog.feedback.open_github",
-                label: "Open on GitHub...",
+                label: tr(locale, "feedback.open_github"),
                 command_id: None,
                 selected: true,
                 enabled: true,
@@ -2473,46 +2586,6 @@ fn app_text(ui: &mut Ui, resp: &Response, meta: &mut FrameInspectMeta, widget_id
             full_label: None,
         },
     );
-}
-
-fn atr(locale: &str, key: &str) -> &'static str {
-    match (key, locale) {
-        ("prefs.title", "de") => "Einstellungen",
-        ("prefs.title", "es") => "Preferencias",
-        ("prefs.title", "fr") => "Préférences",
-        ("prefs.title", "ja") => "環境設定",
-        ("prefs.title", "ko") => "환경설정",
-        ("prefs.title", "pt-BR") => "Preferências",
-        ("prefs.title", "zh-CN") => "首选项",
-        ("prefs.title", "zh-TW") => "偏好設定",
-        ("prefs.title", _) => "Preferences",
-
-        ("prefs.cat.general", "de") => "Allgemein",
-        ("prefs.cat.general", "ja") => "一般",
-        ("prefs.cat.general", _) => "General",
-        ("prefs.cat.appearance", "de") => "Darstellung",
-        ("prefs.cat.appearance", "ja") => "外観",
-        ("prefs.cat.appearance", _) => "Appearance",
-        ("prefs.cat.language", "de") => "Sprache",
-        ("prefs.cat.language", "ja") => "言語",
-        ("prefs.cat.language", _) => "Language",
-        ("prefs.cat.shortcuts", "de") => "Tastenkürzel",
-        ("prefs.cat.shortcuts", "ja") => "ショートカット",
-        ("prefs.cat.shortcuts", _) => "Keyboard Shortcuts",
-
-        ("prefs.general.tree_heading", _) => "Project Navigator Organization",
-        ("prefs.appearance.theme_heading", _) => "Theme & Contrast",
-        ("prefs.appearance.ui_scale", _) => "UI Scale",
-        ("prefs.language.heading", _) => "Application Language (14 Active Beta Locales)",
-        ("prefs.language.subtitle", _) => "Right-to-left (RTL) locales remain hidden during the Beta release.",
-        ("prefs.shortcuts.filter", _) => "Filter:",
-
-        ("export.title.layout", _) => "Export Page Layout",
-        ("export.commit", _) => "Export",
-        ("print.commit", _) => "Print / Spool PDF",
-
-        _ => "",
-    }
 }
 
 #[cfg(test)]

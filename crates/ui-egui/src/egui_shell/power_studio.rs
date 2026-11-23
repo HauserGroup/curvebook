@@ -51,6 +51,13 @@ pub struct PowerStudioFrameReport {
     pub outside_wheel_captured: bool,
 }
 
+/// Clear transient Results sub-tab and hover state when the modal closes or commits.
+pub(crate) fn reset_results_transient_state(state: &mut PowerStudioEguiState) {
+    state.results_tab = PowerResultsSubTab::default();
+    state.hover_n = None;
+    state.narrative_copied = false;
+}
+
 /// Return `true` when `ActiveDialog::PowerAndSampleSize` OR `EditAnalysisParameters` (`PowerAnalysis`) is open.
 #[must_use]
 pub fn is_power_studio_dialog_active(app: &UiApp) -> bool {
@@ -76,6 +83,9 @@ pub fn render_power_studio_modal(
     intents: &mut PendingUiIntents,
 ) -> PowerStudioFrameReport {
     if !is_power_studio_dialog_active(app) {
+        state.results_tab = PowerResultsSubTab::default();
+        state.hover_n = None;
+        state.narrative_copied = false;
         return PowerStudioFrameReport::default();
     }
 
@@ -159,7 +169,7 @@ pub fn render_power_studio_modal(
                             ui.set_max_width(scroll_w);
                             match pw.stage {
                                 PowerWizardStage::ExperimentDesign => render_stage1_design(ui, app, pw, state, tokens, meta, intents),
-                                PowerWizardStage::EffectSize => render_stage2_effect(ui, pw, tokens, meta, intents),
+                                PowerWizardStage::EffectSize => render_stage2_effect(ui, app, pw, tokens, meta, intents),
                                 PowerWizardStage::SignificanceAndSolve => render_stage3_alpha_power(ui, app, pw, tokens, meta, intents),
                                 PowerWizardStage::Results => render_stage4_results(ctx, ui, pw, state, tokens, meta, intents),
                             }
@@ -196,7 +206,7 @@ pub fn render_power_studio_modal(
                 });
             });
         },
-        |ui, _state, meta, intents| {
+        |ui, footer_state, meta, intents| {
             ui.horizontal(|ui| {
                 if render_modal_action_button(ui, tokens, meta, "modal.back", "← Back", false, false, &can_back) {
                     if is_edit_mode {
@@ -211,6 +221,7 @@ pub fn render_power_studio_modal(
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if is_edit_mode {
                         if render_modal_action_button(ui, tokens, meta, "modal.ok", tr(locale, "btn.ok"), true, false, &can_ok_edit) {
+                            reset_results_transient_state(footer_state);
                             intents.push_dialog_button("ok");
                         }
                         if pw.stage != PowerWizardStage::Results
@@ -223,6 +234,7 @@ pub fn render_power_studio_modal(
                         }
                     } else if pw.stage == PowerWizardStage::Results {
                         if render_modal_action_button(ui, tokens, meta, "modal.ok", tr(locale, "w6.view.btn.create"), true, false, &can_create) {
+                            reset_results_transient_state(footer_state);
                             intents.push_commit_power_wizard("create");
                         }
                     } else if render_modal_action_button(ui, tokens, meta, "modal.next", "Next →", true, false, &can_next) {
@@ -238,6 +250,7 @@ pub fn render_power_studio_modal(
                         false,
                         &ControlEnablement::enabled(),
                     ) {
+                        reset_results_transient_state(footer_state);
                         if is_edit_mode {
                             intents.push_dialog_button("cancel");
                         } else {
@@ -250,6 +263,7 @@ pub fn render_power_studio_modal(
     );
 
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        reset_results_transient_state(state);
         if is_edit_mode {
             intents.push_dialog_button("cancel");
         } else {
@@ -286,6 +300,7 @@ fn format_power_banner(pw: &PowerWizardState) -> String {
 
 fn render_power_stage_stepper(ui: &mut Ui, pw: &PowerWizardState, tokens: &Tokens, meta: &mut FrameInspectMeta, intents: &mut PendingUiIntents) {
     let can_advance = pw.can_advance().is_ok();
+    let stage_keys = ["pw.stage.1", "pw.stage.2", "pw.stage.3", "pw.stage.4"];
     ui.horizontal_wrapped(|ui| {
         for (idx, &stage) in PowerWizardStage::ALL.iter().enumerate() {
             let selected = pw.stage == stage;
@@ -294,8 +309,8 @@ fn render_power_stage_stepper(ui: &mut Ui, pw: &PowerWizardState, tokens: &Token
             } else {
                 ControlEnablement::disabled(pw.can_advance().err().unwrap_or_else(|| String::from("Complete current stage parameters first.")))
             };
-            if render_modal_seg_btn(ui, tokens, meta, &format!("power.stage.{}", idx + 1), &format!("{}. {}", idx + 1, stage.label()), selected, &en)
-            {
+            let lbl = tr(tokens.locale, stage_keys[idx]);
+            if render_modal_seg_btn(ui, tokens, meta, &format!("power.stage.{}", idx + 1), lbl, selected, &en) {
                 let mut next = pw.clone();
                 if next.step_to_stage(stage).is_ok() {
                     intents.push_update_power_wizard_state(next);
@@ -315,7 +330,7 @@ fn render_stage1_design(
     intents: &mut PendingUiIntents,
 ) {
     let vs = &app.view_shards.power_wizard;
-    render_section_title(ui, tokens, "1. Hypothesis Test Family");
+    render_section_title(ui, tokens, tr(tokens.locale, "pw.section.families"));
 
     for (key, lbl, fam, is_surv) in [
         ("two_sample_t", "Unpaired Two-Group t-test", PowerTestFamily::TwoSampleUnpairedT, false),
@@ -336,7 +351,7 @@ fn render_stage1_design(
     }
 
     ui.add_space(6.0);
-    render_section_title(ui, tokens, "Solve For");
+    render_section_title(ui, tokens, tr(tokens.locale, "pw.section.solve_target"));
     ui.horizontal_wrapped(|ui| {
         for (key, lbl, target) in [
             ("sample_size", "Sample Size (N)", PowerSolveTarget::SampleSize),
@@ -411,8 +426,269 @@ fn render_stage1_design(
     }
 }
 
-fn render_stage2_effect(ui: &mut Ui, pw: &PowerWizardState, tokens: &Tokens, meta: &mut FrameInspectMeta, intents: &mut PendingUiIntents) {
-    render_section_title(ui, tokens, "2. Effect Size & Pilot Calculator");
+struct PilotStepperCfg<'a> {
+    id_prefix: &'a str,
+    label: &'a str,
+    value_text: &'a str,
+    derive_eff: bool,
+}
+
+fn render_pilot_stepper(
+    ui: &mut Ui,
+    pw: &PowerWizardState,
+    cfg: PilotStepperCfg<'_>,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+    mutate: impl FnOnce(&mut PowerWizardState, i32),
+) {
+    let delta = render_stepper_row(
+        ui,
+        tokens,
+        meta,
+        StepperSpec { id_prefix: cfg.id_prefix, label: cfg.label, value_text: cfg.value_text, enablement: &ControlEnablement::enabled() },
+    );
+    if delta != 0 {
+        let mut next = pw.clone();
+        mutate(&mut next, i32::from(delta));
+        if cfg.derive_eff
+            && let Some(d) = next.derived_standardized_effect()
+        {
+            next.standardized_effect = d;
+        }
+        let _ = next.recalculate();
+        intents.push_update_power_wizard_state(next);
+    }
+}
+
+fn render_stage2_paired_t_inputs(ui: &mut Ui, pw: &PowerWizardState, tokens: &Tokens, meta: &mut FrameInspectMeta, intents: &mut PendingUiIntents) {
+    ui.horizontal_wrapped(|ui| {
+        if render_modal_seg_btn(
+            ui,
+            tokens,
+            meta,
+            "power.effect_mode.means_and_sd",
+            "Means + SD + Correlation r",
+            pw.effect_mode == PowerEffectInputMode::MeansAndSd,
+            &ControlEnablement::enabled(),
+        ) {
+            intents.push_custom_view_action("power_wizard", "effect_mode:means_and_sd");
+        }
+        if render_modal_seg_btn(
+            ui,
+            tokens,
+            meta,
+            "power.effect_mode.paired_diff",
+            "Direct Paired Diff (Δ, SD_d)",
+            pw.effect_mode == PowerEffectInputMode::PairedDiffDirect,
+            &ControlEnablement::enabled(),
+        ) {
+            intents.push_custom_view_action("power_wizard", "effect_mode:paired_diff");
+        }
+    });
+    let mean_diff_str = format!("{:.2}", pw.mean_diff);
+    render_pilot_stepper(
+        ui,
+        pw,
+        PilotStepperCfg {
+            id_prefix: "power.pilot.mean_diff",
+            label: tr(tokens.locale, "pw.pilot.paired_diff"),
+            value_text: &mean_diff_str,
+            derive_eff: true,
+        },
+        tokens,
+        meta,
+        intents,
+        |next, d| {
+            next.mean_diff = (next.mean_diff + f64::from(d) * 0.5).max(0.05);
+        },
+    );
+    if pw.effect_mode == PowerEffectInputMode::PairedDiffDirect {
+        let paired_sd_str = format!("{:.2}", pw.paired_sd_diff);
+        render_pilot_stepper(
+            ui,
+            pw,
+            PilotStepperCfg {
+                id_prefix: "power.pilot.paired_sd",
+                label: tr(tokens.locale, "pw.pilot.paired_sdd"),
+                value_text: &paired_sd_str,
+                derive_eff: true,
+            },
+            tokens,
+            meta,
+            intents,
+            |next, d| {
+                next.paired_sd_diff = (next.paired_sd_diff + f64::from(d) * 0.5).max(0.05);
+            },
+        );
+    } else {
+        let sd_str = format!("{:.2}", pw.sd);
+        render_pilot_stepper(
+            ui,
+            pw,
+            PilotStepperCfg { id_prefix: "power.pilot.sd", label: tr(tokens.locale, "pw.pilot.per_cond_sd"), value_text: &sd_str, derive_eff: true },
+            tokens,
+            meta,
+            intents,
+            |next, d| {
+                next.sd = (next.sd + f64::from(d) * 0.5).max(0.05);
+            },
+        );
+        let corr_str = format!("{:.2}", pw.within_pair_correlation);
+        render_pilot_stepper(
+            ui,
+            pw,
+            PilotStepperCfg {
+                id_prefix: "power.pilot.corr",
+                label: tr(tokens.locale, "pw.pilot.within_corr"),
+                value_text: &corr_str,
+                derive_eff: true,
+            },
+            tokens,
+            meta,
+            intents,
+            |next, d| {
+                next.within_pair_correlation = (next.within_pair_correlation + f64::from(d) * 0.05).clamp(-0.90, 0.95);
+            },
+        );
+    }
+}
+
+fn render_stage2_anova_inputs(ui: &mut Ui, pw: &PowerWizardState, tokens: &Tokens, meta: &mut FrameInspectMeta, intents: &mut PendingUiIntents) {
+    let k = pw.anova_groups.max(2);
+    let mut cur_means = pw.group_means.clone();
+    if cur_means.len() < k {
+        let base = cur_means.first().copied().unwrap_or(0.0);
+        while cur_means.len() < k {
+            let idx = cur_means.len() as f64;
+            cur_means.push(base + idx * 0.4);
+        }
+    }
+    for (g_idx, &g_val) in cur_means.iter().take(k.min(8)).enumerate() {
+        let snapshot = cur_means.clone();
+        let pid = format!("power.pilot.group_{g_idx}");
+        let lbl = format!("Group {} Mean", g_idx + 1);
+        let val = format!("{g_val:.2}");
+        render_pilot_stepper(
+            ui,
+            pw,
+            PilotStepperCfg { id_prefix: &pid, label: &lbl, value_text: &val, derive_eff: true },
+            tokens,
+            meta,
+            intents,
+            move |next, d| {
+                next.group_means = snapshot;
+                if let Some(slot) = next.group_means.get_mut(g_idx) {
+                    *slot += f64::from(d) * 0.5;
+                }
+                next.effect_mode = PowerEffectInputMode::MeansAndSd;
+            },
+        );
+    }
+    let sd_str = format!("{:.2}", pw.sd);
+    render_pilot_stepper(
+        ui,
+        pw,
+        PilotStepperCfg { id_prefix: "power.pilot.sd", label: tr(tokens.locale, "pw.pilot.within_group_sd"), value_text: &sd_str, derive_eff: true },
+        tokens,
+        meta,
+        intents,
+        |next, d| {
+            next.sd = (next.sd + f64::from(d) * 0.5).max(0.05);
+        },
+    );
+}
+
+fn render_stage2_regression_inputs(ui: &mut Ui, pw: &PowerWizardState, tokens: &Tokens, meta: &mut FrameInspectMeta, intents: &mut PendingUiIntents) {
+    ui.horizontal_wrapped(|ui| {
+        if render_modal_seg_btn(
+            ui,
+            tokens,
+            meta,
+            "power.effect_mode.slope",
+            "Slope (β₁, σ_x, σ_ε)",
+            pw.effect_mode == PowerEffectInputMode::RegressionSlope,
+            &ControlEnablement::enabled(),
+        ) {
+            intents.push_custom_view_action("power_wizard", "effect_mode:slope");
+        }
+        if render_modal_seg_btn(
+            ui,
+            tokens,
+            meta,
+            "power.effect_mode.r_squared",
+            "Target R²",
+            pw.effect_mode == PowerEffectInputMode::RegressionRSquared,
+            &ControlEnablement::enabled(),
+        ) {
+            intents.push_custom_view_action("power_wizard", "effect_mode:r_squared");
+        }
+    });
+    if pw.effect_mode == PowerEffectInputMode::RegressionRSquared {
+        let r2_str = format!("{:.3}", pw.r_squared);
+        render_pilot_stepper(
+            ui,
+            pw,
+            PilotStepperCfg { id_prefix: "power.pilot.r2", label: tr(tokens.locale, "pw.pilot.r2"), value_text: &r2_str, derive_eff: true },
+            tokens,
+            meta,
+            intents,
+            |next, d| {
+                next.r_squared = (next.r_squared + f64::from(d) * 0.05).clamp(0.01, 0.95);
+            },
+        );
+        return;
+    }
+    let b1_str = format!("{:.2}", pw.beta1);
+    render_pilot_stepper(
+        ui,
+        pw,
+        PilotStepperCfg { id_prefix: "power.pilot.beta1", label: tr(tokens.locale, "pw.pilot.slope"), value_text: &b1_str, derive_eff: true },
+        tokens,
+        meta,
+        intents,
+        |next, d| {
+            next.beta1 = (next.beta1 + f64::from(d) * 0.2).max(0.05);
+            next.effect_mode = PowerEffectInputMode::RegressionSlope;
+        },
+    );
+    let sx_str = format!("{:.2}", pw.sigma_x);
+    render_pilot_stepper(
+        ui,
+        pw,
+        PilotStepperCfg { id_prefix: "power.pilot.sigma_x", label: tr(tokens.locale, "pw.pilot.pred_sd"), value_text: &sx_str, derive_eff: true },
+        tokens,
+        meta,
+        intents,
+        |next, d| {
+            next.sigma_x = (next.sigma_x + f64::from(d) * 0.25).max(0.05);
+            next.effect_mode = PowerEffectInputMode::RegressionSlope;
+        },
+    );
+    let se_str = format!("{:.2}", pw.sigma_eps);
+    render_pilot_stepper(
+        ui,
+        pw,
+        PilotStepperCfg { id_prefix: "power.pilot.sigma_eps", label: tr(tokens.locale, "pw.pilot.resid_sd"), value_text: &se_str, derive_eff: true },
+        tokens,
+        meta,
+        intents,
+        |next, d| {
+            next.sigma_eps = (next.sigma_eps + f64::from(d) * 0.25).max(0.05);
+            next.effect_mode = PowerEffectInputMode::RegressionSlope;
+        },
+    );
+}
+
+fn render_stage2_effect(
+    ui: &mut Ui,
+    app: &UiApp,
+    pw: &PowerWizardState,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    render_section_title(ui, tokens, tr(tokens.locale, "pw.sec.effect_pilot"));
     ui.horizontal_wrapped(|ui| {
         if render_modal_seg_btn(
             ui,
@@ -420,7 +696,7 @@ fn render_stage2_effect(ui: &mut Ui, pw: &PowerWizardState, tokens: &Tokens, met
             meta,
             "power.effect_mode.pilot",
             "Pilot Data Inputs",
-            matches!(pw.effect_mode, PowerEffectInputMode::MeansAndSd | PowerEffectInputMode::Proportions | PowerEffectInputMode::RegressionSlope),
+            pw.effect_mode != PowerEffectInputMode::Standardized,
             &ControlEnablement::enabled(),
         ) {
             intents.push_custom_view_action("power_wizard", "effect_mode:pilot");
@@ -449,103 +725,139 @@ fn render_stage2_effect(ui: &mut Ui, pw: &PowerWizardState, tokens: &Tokens, met
     });
 
     ui.add_space(6.0);
+    let vs = &app.view_shards.power_wizard;
     let eff = pw.derived_standardized_effect().unwrap_or(pw.standardized_effect);
-    match pw.family {
-        PowerTestFamily::TwoSampleUnpairedT | PowerTestFamily::TwoSamplePairedT | PowerTestFamily::OneSampleT => {
-            let step_md = render_stepper_row(
-                ui,
-                tokens,
-                meta,
-                StepperSpec {
-                    id_prefix: "power.pilot.mean_diff",
-                    label: "Expected Mean Difference",
-                    value_text: &format!("{:.2}", pw.mean_diff),
-                    enablement: &ControlEnablement::enabled(),
-                },
-            );
-            if step_md != 0 {
-                let mut next = pw.clone();
-                next.mean_diff = (next.mean_diff + f64::from(step_md) * 0.5).max(0.05);
-                if let Some(d) = next.derived_standardized_effect() {
-                    next.standardized_effect = d;
+    if pw.effect_mode == PowerEffectInputMode::Standardized {
+        let eff_str = format!("{:.3}", pw.standardized_effect);
+        render_pilot_stepper(
+            ui,
+            pw,
+            PilotStepperCfg { id_prefix: "power.pilot.std", label: pw.family.default_effect_label(), value_text: &eff_str, derive_eff: false },
+            tokens,
+            meta,
+            intents,
+            |next, d| {
+                next.standardized_effect = (next.standardized_effect + f64::from(d) * 0.05).clamp(0.05, 5.0);
+            },
+        );
+    } else {
+        match pw.family {
+            PowerTestFamily::TwoSampleUnpairedT | PowerTestFamily::OneSampleT => {
+                let md_str = format!("{:.2}", pw.mean_diff);
+                render_pilot_stepper(
+                    ui,
+                    pw,
+                    PilotStepperCfg {
+                        id_prefix: "power.pilot.mean_diff",
+                        label: tr(tokens.locale, "pw.pilot.mean_diff"),
+                        value_text: &md_str,
+                        derive_eff: true,
+                    },
+                    tokens,
+                    meta,
+                    intents,
+                    |next, d| {
+                        next.mean_diff = (next.mean_diff + f64::from(d) * 0.5).max(0.05);
+                    },
+                );
+                let sd_str = format!("{:.2}", pw.sd);
+                render_pilot_stepper(
+                    ui,
+                    pw,
+                    PilotStepperCfg {
+                        id_prefix: "power.pilot.sd",
+                        label: tr(tokens.locale, "pw.pilot.common_sd"),
+                        value_text: &sd_str,
+                        derive_eff: true,
+                    },
+                    tokens,
+                    meta,
+                    intents,
+                    |next, d| {
+                        next.sd = (next.sd + f64::from(d) * 0.5).max(0.05);
+                    },
+                );
+            }
+            PowerTestFamily::TwoSamplePairedT => render_stage2_paired_t_inputs(ui, pw, tokens, meta, intents),
+            PowerTestFamily::OneWayAnova => render_stage2_anova_inputs(ui, pw, tokens, meta, intents),
+            PowerTestFamily::TwoProportions if vs.survival_log_rank => {
+                let s_hr = render_stepper_row(
+                    ui,
+                    tokens,
+                    meta,
+                    StepperSpec {
+                        id_prefix: "power.pilot.hr",
+                        label: tr(tokens.locale, "pw.pilot.hr"),
+                        value_text: &format!("{:.2}", vs.survival_hazard_ratio),
+                        enablement: &ControlEnablement::enabled(),
+                    },
+                );
+                if s_hr != 0 {
+                    let delta = if s_hr > 0 { "0.05" } else { "-0.05" };
+                    intents.push_custom_view_action("power_wizard", format!("spin:pilot_hr:{delta}"));
                 }
-                let _ = next.recalculate();
-                intents.push_update_power_wizard_state(next);
-            }
-            let step_sd = render_stepper_row(
-                ui,
-                tokens,
-                meta,
-                StepperSpec {
-                    id_prefix: "power.pilot.sd",
-                    label: "Common SD (σ)",
-                    value_text: &format!("{:.2}", pw.sd),
-                    enablement: &ControlEnablement::enabled(),
-                },
-            );
-            if step_sd != 0 {
-                let mut next = pw.clone();
-                next.sd = (next.sd + f64::from(step_sd) * 0.5).max(0.05);
-                if let Some(d) = next.derived_standardized_effect() {
-                    next.standardized_effect = d;
+                let s_ev = render_stepper_row(
+                    ui,
+                    tokens,
+                    meta,
+                    StepperSpec {
+                        id_prefix: "power.pilot.evprob",
+                        label: tr(tokens.locale, "pw.pilot.evprob"),
+                        value_text: &format!("{:.2}", vs.survival_event_prob),
+                        enablement: &ControlEnablement::enabled(),
+                    },
+                );
+                if s_ev != 0 {
+                    let delta = if s_ev > 0 { "0.05" } else { "-0.05" };
+                    intents.push_custom_view_action("power_wizard", format!("spin:pilot_evprob:{delta}"));
                 }
-                let _ = next.recalculate();
-                intents.push_update_power_wizard_state(next);
             }
-        }
-        PowerTestFamily::TwoProportions => {
-            let s1 = render_stepper_row(
-                ui,
-                tokens,
-                meta,
-                StepperSpec {
-                    id_prefix: "power.pilot.p1",
-                    label: "Proportion p₁",
-                    value_text: &format!("{:.2}", pw.p1),
-                    enablement: &ControlEnablement::enabled(),
-                },
-            );
-            if s1 != 0 {
-                let mut next = pw.clone();
-                next.p1 = (next.p1 + f64::from(s1) * 0.05).clamp(0.02, 0.98);
-                let _ = next.recalculate();
-                intents.push_update_power_wizard_state(next);
+            PowerTestFamily::TwoProportions => {
+                let p1_str = format!("{:.2}", pw.p1);
+                render_pilot_stepper(
+                    ui,
+                    pw,
+                    PilotStepperCfg { id_prefix: "power.pilot.p1", label: tr(tokens.locale, "pw.pilot.p1"), value_text: &p1_str, derive_eff: false },
+                    tokens,
+                    meta,
+                    intents,
+                    |next, d| {
+                        next.p1 = (next.p1 + f64::from(d) * 0.05).clamp(0.02, 0.98);
+                    },
+                );
+                let p2_str = format!("{:.2}", pw.p2);
+                render_pilot_stepper(
+                    ui,
+                    pw,
+                    PilotStepperCfg { id_prefix: "power.pilot.p2", label: tr(tokens.locale, "pw.pilot.p2"), value_text: &p2_str, derive_eff: false },
+                    tokens,
+                    meta,
+                    intents,
+                    |next, d| {
+                        next.p2 = (next.p2 + f64::from(d) * 0.05).clamp(0.02, 0.98);
+                    },
+                );
             }
-            let s2 = render_stepper_row(
-                ui,
-                tokens,
-                meta,
-                StepperSpec {
-                    id_prefix: "power.pilot.p2",
-                    label: "Proportion p₂",
-                    value_text: &format!("{:.2}", pw.p2),
-                    enablement: &ControlEnablement::enabled(),
-                },
-            );
-            if s2 != 0 {
-                let mut next = pw.clone();
-                next.p2 = (next.p2 + f64::from(s2) * 0.05).clamp(0.02, 0.98);
-                let _ = next.recalculate();
-                intents.push_update_power_wizard_state(next);
-            }
-        }
-        _ => {
-            let s_std = render_stepper_row(
-                ui,
-                tokens,
-                meta,
-                StepperSpec {
-                    id_prefix: "power.pilot.std",
-                    label: pw.family.default_effect_label(),
-                    value_text: &format!("{:.3}", pw.standardized_effect),
-                    enablement: &ControlEnablement::enabled(),
-                },
-            );
-            if s_std != 0 {
-                let mut next = pw.clone();
-                next.standardized_effect = (next.standardized_effect + f64::from(s_std) * 0.05).clamp(0.05, 5.0);
-                let _ = next.recalculate();
-                intents.push_update_power_wizard_state(next);
+            PowerTestFamily::SimpleLinearRegression => render_stage2_regression_inputs(ui, pw, tokens, meta, intents),
+            PowerTestFamily::Correlation | PowerTestFamily::ChiSquare => {
+                let hi = if pw.family == PowerTestFamily::Correlation { 0.95 } else { 5.0 };
+                let eff_str = format!("{:.3}", pw.standardized_effect);
+                render_pilot_stepper(
+                    ui,
+                    pw,
+                    PilotStepperCfg {
+                        id_prefix: "power.pilot.std",
+                        label: pw.family.default_effect_label(),
+                        value_text: &eff_str,
+                        derive_eff: false,
+                    },
+                    tokens,
+                    meta,
+                    intents,
+                    move |next, d| {
+                        next.standardized_effect = (next.standardized_effect + f64::from(d) * 0.05).clamp(0.05, hi);
+                    },
+                );
             }
         }
     }
@@ -746,7 +1058,7 @@ fn render_stage4_results(
     ui.add_space(6.0);
 
     let Some(res) = &pw.result else {
-        ui.label("Solving design parameters...");
+        ui.label(tr(tokens.locale, "pw.solving"));
         return;
     };
 
@@ -900,7 +1212,7 @@ fn render_sensitivity_matrix_table(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
-    render_section_title(ui, tokens, "Sensitivity Matrix (α × Target Power)");
+    render_section_title(ui, tokens, tr(tokens.locale, "pw.section.sensitivity"));
     egui::Grid::new("power_sensitivity_grid").striped(true).num_columns(5).show(ui, |ui| {
         for hdr in ["α", "Power", "N/grp", "Total N", "Select"] {
             ui.label(egui::RichText::new(hdr).strong().small().color(tokens.text_strong));

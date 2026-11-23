@@ -4,8 +4,8 @@
 
 use std::collections::BTreeMap;
 
-use curvebook_doc::{Cell, CellCoord, CellValue, LinkBorderColor, PlacementMode, TableKind};
-use egui::{Align, Context, Layout, Rect, RichText, Stroke, Ui, vec2};
+use curvebook_doc::{Cell, CellCoord, CellValue, CiBound, LinkBorderColor, PlacementMode, ResultCell, TableKind};
+use egui::{Align, Context, Key, Layout, Modifiers, Rect, RichText, Stroke, Ui, vec2};
 use serde_json::{Map, Value, json};
 
 use crate::UiApp;
@@ -13,7 +13,7 @@ use crate::dialogs_canvas::ActiveDialog;
 use crate::grid_view::{
     ImportOriginKind, ImportPasteWizardState, ImportReshapeMode, ImportWizardStage, format_cell_display, parse_localized_number_input,
 };
-use crate::i18n::tr_or_fallback;
+use crate::i18n::tr;
 use crate::inspect::ZLayer;
 
 use super::inspect_bridge::{ModalCaptureSpec, finalize_egui_modal_response};
@@ -44,13 +44,13 @@ impl ImportWizardStep {
         }
     }
 
-    fn label(self) -> &'static str {
+    fn label(self, locale: &str) -> &'static str {
         match self {
-            Self::Source => "1. Source",
-            Self::Preview => "2. Preview",
-            Self::FilterAndUnstack => "3. Filter & Unstack",
-            Self::PlacementAndReshape => "4. Placement & Reshape",
-            Self::Metadata => "5. Metadata",
+            Self::Source => tr(locale, "import.step.1"),
+            Self::Preview => tr(locale, "import.step.2"),
+            Self::FilterAndUnstack => tr(locale, "import.step.3"),
+            Self::PlacementAndReshape => tr(locale, "import.step.4"),
+            Self::Metadata => tr(locale, "import.step.5"),
         }
     }
 
@@ -171,6 +171,13 @@ pub fn render_import_or_convert_modal(
         state.initialized_for_open = false;
         return ImportWizardFrameReport::default();
     }
+    if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        if is_wizard {
+            intents.push_close_import_wizard();
+        } else {
+            intents.push_dialog_button("cancel");
+        }
+    }
 
     let (wiz, mut wiz_dirty) = if !state.initialized_for_open {
         let res = sync_drafts_from_app(app, state);
@@ -181,11 +188,11 @@ pub fn render_import_or_convert_modal(
     };
 
     let (widget_id, title) = if is_convert {
-        ("dialog.convert_archetype", tr_or_fallback(tokens.locale, "cmd.table.convertArchetype", "Convert Table Archetype"))
+        ("dialog.convert_archetype", tr(tokens.locale, "cmd.table.convertArchetype"))
     } else if is_reshape {
-        ("dialog.import_reshape", tr_or_fallback(tokens.locale, "w6.view.modal.import_reshape", "Import Plate & Tidy Data"))
+        ("dialog.import_reshape", tr(tokens.locale, "w6.view.modal.import_reshape"))
     } else {
-        ("dialog.import_paste_special", tr_or_fallback(tokens.locale, "menu.edit.paste_special", "Import & Paste Special"))
+        ("dialog.import_paste_special", tr(tokens.locale, "menu.edit.paste_special"))
     };
 
     let vp = ctx.content_rect();
@@ -298,12 +305,9 @@ fn render_five_stage_wizard_body(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail
     ui.horizontal_wrapped(|bar| {
         for step in ImportWizardStep::ALL {
             let active = cx.state.active_step == step;
-            let resp = choice_pill(bar, cx.tokens, step.label(), active, true);
-            cx.meta.record_modal_response(
-                bar,
-                &resp,
-                FrameInspectEntryInput::modal(step.tab_id(), "tab", step.label(), Some(active.to_string()), true),
-            );
+            let step_lbl = step.label(cx.tokens.locale);
+            let resp = choice_pill(bar, cx.tokens, step_lbl, active, true);
+            cx.meta.record_modal_response(bar, &resp, FrameInspectEntryInput::modal(step.tab_id(), "tab", step_lbl, Some(active.to_string()), true));
             if resp.clicked() {
                 cx.state.active_step = step;
                 cx.wiz.stage = step.sync_backend_stage();
@@ -347,6 +351,20 @@ fn render_step_source(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w: f32) {
             meta.record_modal_response(row, &r, FrameInspectEntryInput::modal(wid, "radio", label, Some(active.to_string()), true));
             if r.clicked() {
                 wiz.origin_kind = kind;
+                if kind == ImportOriginKind::InternalDataSheet
+                    && wiz.source_sheet_id.as_ref().is_none_or(|id| app.document().data_sheet(id).is_none())
+                {
+                    wiz.source_sheet_id = app.document().data_sheets.first().map(|d| d.id.clone());
+                    wiz.source_tab_id = None;
+                } else if kind == ImportOriginKind::InternalResultSheet
+                    && wiz.source_sheet_id.as_ref().is_none_or(|id| app.document().result_sheet(id).is_none())
+                {
+                    let first_rs =
+                        app.document().result_sheets.iter().find(|rs| rs.analyzable_data.is_some() || rs.tabs.iter().any(|t| !t.rows.is_empty()));
+                    wiz.source_sheet_id = first_rs.map(|rs| rs.id.clone());
+                    wiz.source_tab_id =
+                        first_rs.and_then(|rs| if rs.analyzable_data.is_some() { None } else { rs.tabs.first().map(|t| t.id.clone()) });
+                }
                 dirty = true;
             }
         }
@@ -396,7 +414,7 @@ fn render_step_source(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w: f32) {
                 dirty = true;
             }
         });
-    } else if matches!(wiz.origin_kind, ImportOriginKind::InternalDataSheet | ImportOriginKind::InternalResultSheet) {
+    } else if wiz.origin_kind == ImportOriginKind::InternalDataSheet {
         ui.horizontal_wrapped(|row| {
             row.label("Source Sheet:");
             for ds in &app.document().data_sheets {
@@ -415,10 +433,67 @@ fn render_step_source(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w: f32) {
                 );
                 if sr.clicked() {
                     wiz.source_sheet_id = Some(ds.id.clone());
+                    wiz.source_tab_id = None;
                     dirty = true;
                 }
             }
         });
+    } else if wiz.origin_kind == ImportOriginKind::InternalResultSheet {
+        let result_sheets = &app.document().result_sheets;
+        ui.horizontal_wrapped(|row| {
+            row.label("Source Result Sheet:");
+            if result_sheets.is_empty() {
+                row.label(RichText::new("No Result Sheets in project.").color(tokens.text_muted));
+            }
+            for rs in result_sheets {
+                let eligible = rs.analyzable_data.is_some() || rs.tabs.iter().any(|t| !t.rows.is_empty());
+                let sel = wiz.source_sheet_id.as_ref() == Some(&rs.id);
+                let sr = choice_pill(row, tokens, rs.title(), sel, eligible);
+                meta.record_modal_response(
+                    row,
+                    &sr,
+                    FrameInspectEntryInput::modal(
+                        &format!("import_paste.source_sheet.{}", rs.id.as_str()),
+                        "radio",
+                        rs.title(),
+                        Some(sel.to_string()),
+                        eligible,
+                    ),
+                );
+                if sr.clicked() {
+                    wiz.source_sheet_id = Some(rs.id.clone());
+                    wiz.source_tab_id = if rs.analyzable_data.is_some() { None } else { rs.tabs.first().map(|t| t.id.clone()) };
+                    dirty = true;
+                }
+            }
+        });
+        if let Some(sel_rs) = wiz.source_sheet_id.as_ref().and_then(|id| app.document().result_sheet(id))
+            && sel_rs.analyzable_data.is_none()
+            && sel_rs.tabs.len() > 1
+        {
+            ui.horizontal_wrapped(|row| {
+                row.label("Result Tab:");
+                for tab in &sel_rs.tabs {
+                    let sel = wiz.source_tab_id.as_deref() == Some(tab.id.as_str());
+                    let tr_btn = choice_pill(row, tokens, &tab.title, sel, !tab.rows.is_empty());
+                    meta.record_modal_response(
+                        row,
+                        &tr_btn,
+                        FrameInspectEntryInput::modal(
+                            &format!("import_paste.source_tab.{}", tab.id),
+                            "radio",
+                            &tab.title,
+                            Some(sel.to_string()),
+                            !tab.rows.is_empty(),
+                        ),
+                    );
+                    if tr_btn.clicked() {
+                        wiz.source_tab_id = Some(tab.id.clone());
+                        dirty = true;
+                    }
+                }
+            });
+        }
     }
 
     ui.add_space(4.0);
@@ -1275,7 +1350,7 @@ fn render_convert_archetype_body(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, body_
 fn render_wizard_footer(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, is_wizard: bool, is_reshape: bool) {
     let tokens = cx.tokens;
     ui.horizontal(|footer| {
-        let cancel_lbl = tr_or_fallback(tokens.locale, "btn.cancel", "Cancel");
+        let cancel_lbl = tr(tokens.locale, "btn.cancel");
         let cancel_resp = widgets::secondary_button(footer, cancel_lbl);
         cx.meta.record_modal_response(footer, &cancel_resp, FrameInspectEntryInput::modal("modal.cancel", "button", cancel_lbl, None, true));
         if cancel_resp.clicked() {
@@ -1288,7 +1363,7 @@ fn render_wizard_footer(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, is_wizard: boo
         }
 
         footer.with_layout(Layout::right_to_left(Align::Center), |rhs| {
-            let finish_lbl = if is_wizard { "Import" } else { tr_or_fallback(tokens.locale, "btn.ok", "OK") };
+            let finish_lbl = if is_wizard { tr(tokens.locale, "btn.import") } else { tr(tokens.locale, "btn.ok") };
             let ok_resp = widgets::primary_button(rhs, finish_lbl);
             cx.meta.record_modal_response(rhs, &ok_resp, FrameInspectEntryInput::modal("modal.ok", "button", finish_lbl, None, true));
             if ok_resp.clicked() {
@@ -1302,8 +1377,9 @@ fn render_wizard_footer(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, is_wizard: boo
             if is_wizard {
                 let idx = ImportWizardStep::ALL.iter().position(|s| *s == cx.state.active_step).unwrap_or(0);
                 let has_next = idx + 1 < ImportWizardStep::ALL.len();
-                let next_r = rhs.add_enabled(has_next, egui::Button::new("Next >"));
-                cx.meta.record_modal_response(rhs, &next_r, FrameInspectEntryInput::modal("modal.next", "button", "Next", None, has_next));
+                let next_lbl = tr(tokens.locale, "import.btn.next");
+                let next_r = rhs.add_enabled(has_next, egui::Button::new(next_lbl));
+                cx.meta.record_modal_response(rhs, &next_r, FrameInspectEntryInput::modal("modal.next", "button", next_lbl, None, has_next));
                 if next_r.clicked() && has_next {
                     cx.state.active_step = ImportWizardStep::ALL[idx + 1];
                     cx.wiz.stage = cx.state.active_step.sync_backend_stage();
@@ -1311,8 +1387,9 @@ fn render_wizard_footer(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, is_wizard: boo
                 }
 
                 let has_back = idx > 0;
-                let back_r = rhs.add_enabled(has_back, egui::Button::new("< Back"));
-                cx.meta.record_modal_response(rhs, &back_r, FrameInspectEntryInput::modal("modal.back", "button", "Back", None, has_back));
+                let back_lbl = tr(tokens.locale, "import.btn.back");
+                let back_r = rhs.add_enabled(has_back, egui::Button::new(back_lbl));
+                cx.meta.record_modal_response(rhs, &back_r, FrameInspectEntryInput::modal("modal.back", "button", back_lbl, None, has_back));
                 if back_r.clicked() && has_back {
                     cx.state.active_step = ImportWizardStep::ALL[idx - 1];
                     cx.wiz.stage = cx.state.active_step.sync_backend_stage();
@@ -1633,14 +1710,47 @@ fn read_internal_result_sheet_grid(app: &UiApp, wiz: &ImportPasteWizardState) ->
     let Some(rs) = app.document().result_sheet(sid) else {
         return Vec::new();
     };
-    let Some(ds) = rs.analyzable_data.as_ref() else {
+    if let Some(ds) = rs.analyzable_data.as_ref() {
+        return (0..ds.archetype.row_count())
+            .map(|r| {
+                (0..ds.archetype.column_count())
+                    .map(|c| ds.archetype.data_cell(CellCoord::new(r, c, 0)).cloned().unwrap_or_else(Cell::empty))
+                    .collect()
+            })
+            .collect();
+    }
+    let Some(tab) = wiz.source_tab_id.as_deref().and_then(|tid| rs.tabs.iter().find(|t| t.id == tid)).or_else(|| rs.tabs.first()) else {
         return Vec::new();
     };
-    (0..ds.archetype.row_count())
-        .map(|r| {
-            (0..ds.archetype.column_count()).map(|c| ds.archetype.data_cell(CellCoord::new(r, c, 0)).cloned().unwrap_or_else(Cell::empty)).collect()
-        })
-        .collect()
+    let mut grid = Vec::with_capacity(tab.rows.len() + 1);
+    if !tab.column_headers.is_empty() {
+        grid.push(tab.column_headers.iter().map(|h| Cell::text(h.clone())).collect());
+    }
+    for row in &tab.rows {
+        let cells = row
+            .iter()
+            .map(|rc| match rc {
+                ResultCell::Empty => Cell::empty(),
+                ResultCell::Number { value, .. } => Cell::number(*value),
+                ResultCell::PValue { raw, .. } => Cell::number(*raw),
+                ResultCell::ConfidenceInterval { lower, upper } => {
+                    let lo = match lower {
+                        CiBound::Finite(v) => format!("{v}"),
+                        CiBound::Open => String::from("-inf"),
+                    };
+                    let hi = match upper {
+                        CiBound::Finite(v) => format!("{v}"),
+                        CiBound::Open => String::from("+inf"),
+                    };
+                    Cell::text(format!("[{lo}, {hi}]"))
+                }
+                ResultCell::Text(s) => Cell::text(s.clone()),
+                ResultCell::Boolean(b) => Cell::text(b.to_string()),
+            })
+            .collect();
+        grid.push(cells);
+    }
+    grid
 }
 
 fn apply_wizard_grid_transforms(grid: &mut Vec<Vec<Cell>>, app: &UiApp, wiz: &ImportPasteWizardState, state: &ImportWizardEguiState) {

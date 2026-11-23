@@ -3,6 +3,8 @@
 use curvebook_doc::{BracketLabelMode, BracketStyle, CldOrdering, PairwiseDisplayMode};
 use egui::Ui;
 
+use crate::i18n::tr;
+
 use super::super::unit_spinners::{ScrubUnitFieldConfig, render_scrub_unit_field};
 use super::helpers::{ButtonEntry, GraphModalCtx, record_button, record_checkbox};
 use super::state::GraphModalEguiState;
@@ -16,7 +18,7 @@ pub(super) fn render_pairwise_body(ui: &mut Ui, state: &mut GraphModalEguiState,
             gctx.meta,
             ButtonEntry {
                 widget_id: "pairwise.auto_add",
-                label: "Auto-Add Comparisons",
+                label: tr(gctx.locale, "pairwise.auto_add"),
                 command_id: None,
                 selected: false,
                 enabled: !pw.available_result_ids.is_empty(),

@@ -1,6 +1,6 @@
 //! `dialogs_r9` data-generation modals (`RandomizeGroups`, `RandomSampleRows`, `SimulateDistributions`).
 
-use egui::{Context, Ui, Vec2};
+use egui::{Context, Key, Modifiers, Ui, Vec2};
 
 use crate::UiApp;
 use crate::dialogs_canvas::ActiveDialog;
@@ -24,12 +24,11 @@ use super::{StatsModalFrameReport, StatsModalsEguiState};
 pub fn render_dialogs_r9_modal(
     ctx: &Context,
     app: &UiApp,
-    state: &mut StatsModalsEguiState,
+    _state: &mut StatsModalsEguiState,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) -> StatsModalFrameReport {
-    let _ = &state.active_tab;
     let locale = normalize_locale(&app.locale);
     match &app.canvas_dialogs.active_dialog {
         ActiveDialog::RandomizeGroups => render_randomize_groups_modal(ctx, app, locale, tokens, meta, intents),
@@ -161,6 +160,9 @@ fn render_randomize_groups_modal(
             });
         },
     );
+    if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        intents.push_dialog_button("cancel");
+    }
     StatsModalFrameReport::from(capture)
 }
 
@@ -308,6 +310,9 @@ fn render_random_sample_modal(
             });
         },
     );
+    if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        intents.push_dialog_button("cancel");
+    }
     StatsModalFrameReport::from(capture)
 }
 
@@ -451,5 +456,8 @@ fn render_simulate_dist_modal(
             });
         },
     );
+    if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        intents.push_dialog_button("cancel");
+    }
     StatsModalFrameReport::from(capture)
 }

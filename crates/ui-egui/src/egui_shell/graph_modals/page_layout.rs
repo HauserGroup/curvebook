@@ -3,6 +3,8 @@
 use curvebook_doc::{JournalWidthPreset, LayoutItem, PageOrientation, PanelBadgeStyle, RectPt, SheetId};
 use egui::Ui;
 
+use crate::i18n::tr;
+
 use super::helpers::{ButtonEntry, GraphModalCtx, record_button, record_checkbox, record_input};
 use super::state::GraphModalEguiState;
 
@@ -49,7 +51,7 @@ pub(super) fn render_page_layout_body(ui: &mut Ui, state: &mut GraphModalEguiSta
             gctx.meta,
             ButtonEntry {
                 widget_id: "layout.arrange",
-                label: "Auto-Arrange Graphs",
+                label: tr(gctx.locale, "layout.auto_arrange"),
                 command_id: None,
                 selected: false,
                 enabled: true,
@@ -140,7 +142,7 @@ pub(super) fn render_page_layout_body(ui: &mut Ui, state: &mut GraphModalEguiSta
             gctx.meta,
             ButtonEntry {
                 widget_id: "layout.add_callout",
-                label: "Add Callout",
+                label: tr(gctx.locale, "layout.add_callout"),
                 command_id: None,
                 selected: false,
                 enabled: !state.page_callout_draft.trim().is_empty(),
