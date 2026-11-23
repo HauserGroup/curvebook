@@ -10,7 +10,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use curvebook_doc::{ErrorCode, ProjectDocument, ResultSheet, SheetId, SheetSection};
 use curvebook_engine::cmd::{Caller, CommandGroup, Effects, registry};
-use curvebook_engine::services::{BatchCommandStep, command_step_writes_filesystem, inspect_project_summary, inspect_sheet_detail};
+#[cfg(not(target_arch = "wasm32"))]
+use curvebook_engine::services::command_step_writes_filesystem;
+use curvebook_engine::services::{BatchCommandStep, inspect_project_summary, inspect_sheet_detail};
 use curvebook_engine::{CommandOutcome, EngineError, ExternalPathPolicy, GuiOnlyPolicy, Session};
 use curvebook_platform::sync::{LockError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 #[cfg(not(target_arch = "wasm32"))]
@@ -538,7 +540,14 @@ impl McpServerState {
         };
         if let Some(ref mut handler) = self.control_handler {
             return (handler)(method, params).map_err(|msg| {
-                let code = if msg.to_ascii_lowercase().contains("not found") { ErrorCode::NotFound } else { ErrorCode::BadInput };
+                let lower = msg.to_ascii_lowercase();
+                let code = if lower.contains("not found") {
+                    ErrorCode::NotFound
+                } else if lower.contains("cancelled") {
+                    ErrorCode::Cancelled
+                } else {
+                    ErrorCode::BadInput
+                };
                 StructuredErrorPayload::new(code, msg)
             });
         }
@@ -880,7 +889,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: String::from("open_file"),
             description: String::from(concat!(
-                "Open or import a .curvebook, .curvebook.d, .cbtemplate, .prism, .pzfx, .csv, or .tsv file into the session. Docs: manual/v",
+                "Open or import a .curvebook, .curvebook.d, .cbtemplate, .prism, .pzfx, .csv, or .tsv file into the session. Docs: https://hausergroup.github.io/curvebook/manual/v",
                 env!("CARGO_PKG_VERSION_MAJOR"),
                 ".",
                 env!("CARGO_PKG_VERSION_MINOR"),
@@ -897,7 +906,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                     "delimiter": { "type": "string", "description": "Optional single-character delimiter override for delimited text." },
                     "sheet_id": { "type": "string", "description": "Sheet ID used when importing delimited data." },
                     "title": { "type": "string", "description": "Optional title override for imported sheet or instantiated template." },
-                    "append": { "type": "boolean", "description": "When importing CSV/TSV, append as a new sheet into the active project instead of replacing it." }
+                    "append": { "type": "boolean", "description": "When importing CSV, TSV, .prism, or .pzfx files, append imported sheets into the active project instead of replacing it." }
                 },
                 "additionalProperties": false
             }),
@@ -1031,7 +1040,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: String::from("export"),
             description: String::from(concat!(
-                "Export a sheet or project to svg, pdf, png, tiff, csv, or json (to disk, atomically overwriting any existing file, or inline). Docs: https://hausergroup.github.io/curvebook/manual/v",
+                "Export a sheet or project to svg, pdf, emf, png, tiff, csv, tsv, or json (to disk, atomically overwriting any existing file, or inline). Docs: https://hausergroup.github.io/curvebook/manual/v",
                 env!("CARGO_PKG_VERSION_MAJOR"),
                 ".",
                 env!("CARGO_PKG_VERSION_MINOR"),
@@ -1041,7 +1050,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                 "type": "object",
                 "required": ["format"],
                 "properties": {
-                    "format": { "type": "string", "enum": ["svg", "pdf", "png", "tiff", "csv", "json"] },
+                    "format": { "type": "string", "enum": ["svg", "pdf", "emf", "png", "tiff", "csv", "tsv", "json"] },
                     "sheet_id": { "type": "string" },
                     "output_path": { "type": "string", "description": "Optional destination path (atomically overwrites any existing file)." },
                     "path": { "type": "string", "description": "Alias for output_path (atomically overwrites any existing file)." },
@@ -1050,6 +1059,8 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                     "dpi": { "type": "integer", "minimum": 18, "maximum": 2400 },
                     "tiff_compression": { "type": "string", "enum": ["none", "deflate", "lzw"] },
                     "pdf_color_space": { "type": "string", "enum": ["srgb", "cmyk", "grayscale"] },
+                    "pdf_version": { "type": "string", "enum": ["1.4", "1.7"], "description": "PDF specification version for PDF export (default: \"1.7\")." },
+                    "ttf_font": { "type": "string", "description": "Optional path to a TrueType (.ttf) font file for PDF embedding." },
                     "all_graphs": { "type": "boolean" },
                     "svg_precision": { "type": "integer", "minimum": 1, "maximum": 8 },
                     "pretty": { "type": "boolean" },
@@ -1059,7 +1070,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                     },
                     "tab_id": {
                         "type": "string",
-                        "description": "Specific ResultSheet tab ID to export via CSV (defaults tidy to false when omitted)."
+                        "description": "Specific ResultSheet tab ID to export via CSV/TSV (defaults tidy to false when supplied)."
                     },
                     "csv_delimiter": { "type": "string" }
                 },
@@ -1248,15 +1259,28 @@ fn handle_doc_inspect(state: &mut McpServerState, args: &Map<String, Value>) -> 
 
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(port) = state.control_port() {
-        if sheet_id.is_none() && !include_cells {
-            return match state.send_live_control("state.snapshot", json!({})) {
-                Ok(snapshot) => ToolCallResult::ok_json(&json!({
-                    "mode": "live_attach",
-                    "control_port": port,
-                    "snapshot": snapshot,
-                })),
-                Err(payload) => Ok(errors::result_from_payload(&payload)),
+        if sheet_id.is_none() {
+            let snapshot = match state.send_live_control("state.snapshot", json!({})) {
+                Ok(v) => v,
+                Err(payload) => return Ok(errors::result_from_payload(&payload)),
             };
+            let mut merged = Map::new();
+            match state.send_live_control("doc.inspect", json!({})) {
+                Ok(Value::Object(doc_summary)) => {
+                    for (k, v) in doc_summary {
+                        merged.insert(k, v);
+                    }
+                }
+                Ok(_) => {}
+                Err(payload) if payload.code == ErrorCode::GuiOnlyViolation => {
+                    return Ok(errors::result_from_payload(&payload));
+                }
+                Err(_) => {}
+            }
+            merged.insert(String::from("mode"), Value::String(String::from("live_attach")));
+            merged.insert(String::from("control_port"), json!(port));
+            merged.insert(String::from("snapshot"), snapshot);
+            return ToolCallResult::ok_json(&Value::Object(merged));
         }
         let params = json!({
             "sheet_id": sheet_id,
@@ -1674,42 +1698,188 @@ fn handle_command_batch(state: &mut McpServerState, args: &Map<String, Value>) -
 }
 
 fn execute_batch_items(state: &mut McpServerState, items: Vec<(String, Value)>, atomic: bool) -> Result<ToolCallResult, ToolCallError> {
-    if atomic && !is_attached(state) {
+    #[cfg(not(target_arch = "wasm32"))]
+    if state.control_port().is_some() {
+        return execute_live_command_batch(state, items, atomic);
+    }
+
+    if atomic {
         return execute_headless_atomic_batch(state, items);
     }
 
     let mut outcomes = Vec::with_capacity(items.len());
-    let mut remote_mutated_steps: usize = 0;
-    let mut persisted_fs_steps: Vec<Value> = Vec::new();
     let cancel = state.current_cancel_token();
 
     for (idx, (command_id, params)) in items.into_iter().enumerate() {
         if cancel.load(Ordering::Acquire) {
             let err = EngineError::with_code(ErrorCode::Cancelled, format!("command `{command_id}` cancelled")).with_retryable(true);
-            return Ok(build_batch_failure_result(state, atomic, remote_mutated_steps, outcomes, persisted_fs_steps, (idx, command_id, err)));
+            return Ok(build_non_atomic_failure_result(idx, command_id, &err, outcomes));
         }
-        let step_writes_fs_hint = command_step_writes_filesystem(&command_id, &params);
         match execute_single_command(state, &command_id, params) {
             Ok(outcome) => {
-                if outcome.get("mutated").and_then(Value::as_bool) == Some(true) && !is_ui_catalog_command(&command_id) && command_id != "ping" {
-                    remote_mutated_steps = remote_mutated_steps.saturating_add(1);
-                }
-                if step_writes_fs_hint || outcome_has_written_path(&outcome) {
-                    persisted_fs_steps.push(json!({ "index": idx, "command_id": command_id }));
-                }
                 outcomes.push(json!({ "index": idx, "ok": true, "outcome": outcome }));
             }
             Err(err) => {
-                return Ok(build_batch_failure_result(state, atomic, remote_mutated_steps, outcomes, persisted_fs_steps, (idx, command_id, err)));
+                return Ok(build_non_atomic_failure_result(idx, command_id, &err, outcomes));
             }
         }
     }
 
     ToolCallResult::ok_json(&json!({
-        "atomic": atomic,
+        "atomic": false,
         "count": outcomes.len(),
         "results": outcomes,
     }))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_batch_failure_header(msg: &str) -> Option<(usize, String, bool)> {
+    let rest = msg.strip_prefix("batch step ")?;
+    let (idx_str, rest) = rest.split_once(" (")?;
+    let failed_index = idx_str.parse::<usize>().ok()?;
+    let (cmd_id, rest) = rest.split_once(") failed (rolled_back=")?;
+    let (rb_str, _) = rest.split_once(')')?;
+    let rolled_back = match rb_str {
+        "true" => true,
+        "false" => false,
+        _ => return None,
+    };
+    Some((failed_index, cmd_id.to_owned(), rolled_back))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn normalize_live_batch_step_outcome(cmd_id: &str, raw_outcome: Value) -> Value {
+    if cmd_id == "ping" || is_ui_catalog_command(cmd_id) {
+        if raw_outcome.get("command_id").is_some() && raw_outcome.get("live_attach").is_some() {
+            return raw_outcome;
+        }
+        let mutated = raw_outcome.get("mutated").and_then(Value::as_bool).unwrap_or(cmd_id != "ping" && !is_readonly_ui_catalog_command(cmd_id));
+        return json!({
+            "command_id": cmd_id,
+            "mutated": mutated,
+            "live_attach": true,
+            "result": raw_outcome,
+        });
+    }
+    raw_outcome
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn execute_live_command_batch(state: &mut McpServerState, mut items: Vec<(String, Value)>, atomic: bool) -> Result<ToolCallResult, ToolCallError> {
+    let cancel = state.current_cancel_token();
+    if cancel.load(Ordering::Acquire) {
+        let first_cmd = items.first().map(|(c, _)| c.clone()).unwrap_or_default();
+        let err = EngineError::with_code(ErrorCode::Cancelled, format!("command `{first_cmd}` cancelled")).with_retryable(true);
+        return if atomic {
+            Ok(build_atomic_failure_result(0, first_cmd, &err, true, Vec::new(), Vec::new()))
+        } else {
+            Ok(build_non_atomic_failure_result(0, first_cmd, &err, Vec::new()))
+        };
+    }
+
+    for (idx, (command_id, params)) in items.iter_mut().enumerate() {
+        if let Err(err) = formats::sanitize_command_params(state, params) {
+            return if atomic {
+                Ok(build_atomic_failure_result(idx, command_id.clone(), &err, true, Vec::new(), Vec::new()))
+            } else {
+                Ok(build_non_atomic_failure_result(idx, command_id.clone(), &err, Vec::new()))
+            };
+        }
+    }
+
+    let commands_json: Vec<Value> = items.iter().map(|(cmd_id, params)| json!({ "command_id": cmd_id, "params": params })).collect();
+
+    match state.send_live_control("command.batch", json!({ "atomic": atomic, "commands": commands_json })) {
+        Ok(remote) => {
+            let raw_results = remote.get("results").and_then(Value::as_array);
+            let mut outcomes = Vec::with_capacity(raw_results.map_or(0, Vec::len));
+            if let Some(entries) = raw_results {
+                for (pos, entry) in entries.iter().enumerate() {
+                    let idx = entry.get("index").and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok()).unwrap_or(pos);
+                    let cmd_id = entry
+                        .get("command")
+                        .or_else(|| entry.get("command_id"))
+                        .and_then(Value::as_str)
+                        .or_else(|| items.get(idx).map(|(c, _)| c.as_str()))
+                        .unwrap_or("");
+                    let raw_outcome = entry.get("result").or_else(|| entry.get("outcome")).cloned().unwrap_or(Value::Null);
+                    let outcome = normalize_live_batch_step_outcome(cmd_id, raw_outcome);
+                    outcomes.push(json!({ "index": idx, "ok": true, "outcome": outcome }));
+                }
+            }
+            ToolCallResult::ok_json(&json!({
+                "atomic": atomic,
+                "count": outcomes.len(),
+                "results": outcomes,
+            }))
+        }
+        Err(err_payload) => {
+            let parsed_header = parse_batch_failure_header(&err_payload.message);
+            let detail_idx =
+                err_payload.details.as_ref().and_then(|d| d.get("failed_index")).and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok());
+            let detail_cmd = err_payload.details.as_ref().and_then(|d| d.get("failed_command_id")).and_then(Value::as_str).map(ToOwned::to_owned);
+            let detail_rb = err_payload.details.as_ref().and_then(|d| d.get("rolled_back")).and_then(Value::as_bool);
+
+            let failed_index = detail_idx.or_else(|| parsed_header.as_ref().map(|(idx, _, _)| *idx)).unwrap_or(0);
+            let failed_command_id = detail_cmd
+                .or_else(|| parsed_header.as_ref().map(|(_, cmd, _)| cmd.clone()))
+                .or_else(|| items.get(failed_index).map(|(c, _)| c.clone()))
+                .unwrap_or_default();
+            let reported_rolled_back = detail_rb.or_else(|| parsed_header.as_ref().map(|(_, _, rb)| *rb)).or_else(|| {
+                if err_payload.message.contains("(rolled_back=true)") {
+                    Some(true)
+                } else if err_payload.message.contains("(rolled_back=false)") {
+                    Some(false)
+                } else {
+                    None
+                }
+            });
+
+            let mut persisted_fs_steps = Vec::new();
+            for (idx, (cmd_id, params)) in items.iter().take(failed_index).enumerate() {
+                if command_step_writes_filesystem(cmd_id, params) {
+                    persisted_fs_steps.push(json!({ "index": idx, "command_id": cmd_id }));
+                }
+            }
+
+            if atomic {
+                let session_rolled_back = reported_rolled_back.unwrap_or(false);
+                return Ok(build_atomic_failure_result_from_payload(
+                    failed_index,
+                    failed_command_id,
+                    &err_payload,
+                    session_rolled_back,
+                    Vec::new(),
+                    persisted_fs_steps,
+                ));
+            }
+
+            let fs_persisted = !persisted_fs_steps.is_empty();
+            let mut extra = Map::new();
+            extra.insert(String::from("failed_index"), json!(failed_index));
+            extra.insert(String::from("failed_command_id"), json!(failed_command_id));
+            extra.insert(String::from("error"), json!(err_payload.message));
+            extra.insert(String::from("atomic"), json!(false));
+            extra.insert(String::from("rolled_back"), json!(false));
+            extra.insert(String::from("session_rolled_back"), json!(false));
+            extra.insert(String::from("filesystem_side_effects_persisted"), json!(fs_persisted));
+            if fs_persisted {
+                extra.insert(String::from("persisted_filesystem_steps"), Value::Array(persisted_fs_steps));
+            }
+            extra.insert(String::from("completed"), json!(failed_index));
+            extra.insert(
+                String::from("results"),
+                Value::Array(vec![json!({
+                    "index": failed_index,
+                    "ok": false,
+                    "command_id": failed_command_id,
+                    "error": err_payload.message,
+                    "code": err_payload.code,
+                })]),
+            );
+            Ok(errors::result_from_payload_with_extra(&err_payload, extra))
+        }
+    }
 }
 
 fn execute_headless_atomic_batch(state: &mut McpServerState, items: Vec<(String, Value)>) -> Result<ToolCallResult, ToolCallError> {
@@ -1768,10 +1938,21 @@ fn build_atomic_failure_result(
     persisted_fs_steps: Vec<Value>,
 ) -> ToolCallResult {
     let err_payload = StructuredErrorPayload::from_engine_error(err);
+    build_atomic_failure_result_from_payload(idx, command_id, &err_payload, session_rolled_back, completed_before_failure, persisted_fs_steps)
+}
+
+fn build_atomic_failure_result_from_payload(
+    idx: usize,
+    command_id: String,
+    err_payload: &StructuredErrorPayload,
+    session_rolled_back: bool,
+    completed_before_failure: Vec<Value>,
+    persisted_fs_steps: Vec<Value>,
+) -> ToolCallResult {
     let mut extra = Map::new();
     extra.insert(String::from("failed_index"), json!(idx));
     extra.insert(String::from("failed_command_id"), json!(command_id));
-    extra.insert(String::from("error"), json!(err.message()));
+    extra.insert(String::from("error"), json!(err_payload.message));
     let fs_persisted = !persisted_fs_steps.is_empty();
     let rolled_back = session_rolled_back && !fs_persisted;
     extra.insert(String::from("atomic"), json!(true));
@@ -1786,23 +1967,11 @@ fn build_atomic_failure_result(
         );
     }
     extra.insert(String::from("completed_before_failure"), Value::Array(completed_before_failure));
-    errors::result_from_payload_with_extra(&err_payload, extra)
+    errors::result_from_payload_with_extra(err_payload, extra)
 }
 
-fn build_batch_failure_result(
-    state: &mut McpServerState,
-    atomic: bool,
-    remote_mutated_steps: usize,
-    mut outcomes: Vec<Value>,
-    persisted_fs_steps: Vec<Value>,
-    failure: (usize, String, EngineError),
-) -> ToolCallResult {
-    let (idx, command_id, err) = failure;
-    if atomic {
-        let session_rolled_back = rollback_remote_batch(state, remote_mutated_steps);
-        return build_atomic_failure_result(idx, command_id, &err, session_rolled_back, outcomes, persisted_fs_steps);
-    }
-    let err_payload = StructuredErrorPayload::from_engine_error(&err);
+fn build_non_atomic_failure_result(idx: usize, command_id: String, err: &EngineError, mut outcomes: Vec<Value>) -> ToolCallResult {
+    let err_payload = StructuredErrorPayload::from_engine_error(err);
     let mut extra = Map::new();
     extra.insert(String::from("failed_index"), json!(idx));
     extra.insert(String::from("failed_command_id"), json!(command_id));
@@ -1818,27 +1987,6 @@ fn build_batch_failure_result(
     extra.insert(String::from("completed"), json!(idx));
     extra.insert(String::from("results"), Value::Array(outcomes));
     errors::result_from_payload_with_extra(&err_payload, extra)
-}
-
-fn outcome_has_written_path(outcome: &Value) -> bool {
-    outcome.pointer("/payload/path").and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty())
-        || outcome.pointer("/result/path").and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty())
-}
-
-fn rollback_remote_batch(state: &mut McpServerState, remote_mutated_steps: usize) -> bool {
-    #[cfg(not(target_arch = "wasm32"))]
-    if state.control_port().is_some() {
-        let mut all_undone = true;
-        for _ in 0..remote_mutated_steps {
-            if state.send_live_control("engine.execute", json!({ "command_id": "edit.undo", "params": {} })).is_err() {
-                all_undone = false;
-                break;
-            }
-        }
-        return all_undone;
-    }
-    let _ = (state, remote_mutated_steps);
-    false
 }
 
 fn ui_command_requires_attach_error(command_id: &str) -> EngineError {
@@ -2510,6 +2658,9 @@ mod live_control {
                 .map_err(|msg| StructuredErrorPayload::new(ErrorCode::IoError, msg).with_retryable(true))?;
             let auth_resp: ControlResponse = serde_json::from_slice(&auth_line)
                 .map_err(|err| StructuredErrorPayload::new(ErrorCode::CorruptData, format!("invalid control auth response JSON: {err}")))?;
+            if auth_resp.id != "mcp-auth" {
+                return Err(StructuredErrorPayload::new(ErrorCode::CorruptData, format!("mismatched control auth response id '{}'", auth_resp.id)));
+            }
             if !auth_resp.ok {
                 return Err(parse_control_error(auth_resp.error, auth_resp.error_detail));
             }
@@ -2534,13 +2685,35 @@ mod live_control {
         Ok(resp.result)
     }
 
+    fn attach_batch_header_details(mut payload: StructuredErrorPayload, raw_error: Option<&str>) -> StructuredErrorPayload {
+        if let Some(msg) = raw_error
+            && let Some((failed_index, failed_command_id, rolled_back)) = super::parse_batch_failure_header(msg)
+        {
+            let mut details = match payload.details.take() {
+                Some(Value::Object(map)) => map,
+                Some(other) => {
+                    let mut map = Map::new();
+                    map.insert(String::from("inner"), other);
+                    map
+                }
+                None => Map::new(),
+            };
+            details.entry(String::from("failed_index")).or_insert_with(|| serde_json::json!(failed_index));
+            details.entry(String::from("failed_command_id")).or_insert_with(|| serde_json::json!(failed_command_id));
+            details.entry(String::from("rolled_back")).or_insert_with(|| serde_json::json!(rolled_back));
+            payload.details = Some(Value::Object(details));
+        }
+        payload
+    }
+
     fn parse_control_error(error: Option<String>, error_detail: Option<Value>) -> StructuredErrorPayload {
+        let raw_error_copy = error.clone();
         if let Some(detail) = error_detail {
             if let Ok(parsed) = serde_json::from_value::<StructuredErrorPayload>(detail.clone()) {
-                return parsed;
+                return attach_batch_header_details(parsed, raw_error_copy.as_deref());
             }
             if let Ok(engine_err) = serde_json::from_value::<EngineError>(detail.clone()) {
-                return StructuredErrorPayload::from_engine_error(&engine_err);
+                return attach_batch_header_details(StructuredErrorPayload::from_engine_error(&engine_err), raw_error_copy.as_deref());
             }
             if let Some(code_str) = detail.get("code").and_then(Value::as_str) {
                 let code = if code_str == "unauthorized" { ErrorCode::BadInput } else { ErrorCode::from_code_str(code_str) };
@@ -2564,7 +2737,7 @@ mod live_control {
                 if let Some(extra) = detail.get("details") {
                     payload = payload.with_details(extra.clone());
                 }
-                return payload;
+                return attach_batch_header_details(payload, raw_error_copy.as_deref());
             }
         }
         let msg = error.unwrap_or_else(|| String::from("desktop control command failed"));
@@ -2579,6 +2752,9 @@ mod live_control {
         }
         if lower.contains("disabled") || lower.contains("grayed") {
             return StructuredErrorPayload::new(ErrorCode::Conflict, msg);
+        }
+        if lower.contains("cancelled") {
+            return StructuredErrorPayload::new(ErrorCode::Cancelled, msg).with_retryable(true);
         }
         StructuredErrorPayload::from_message(msg)
     }
@@ -3062,5 +3238,51 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn live_control_rejects_mismatched_auth_response_id() {
+        use std::io::Cursor;
+
+        // Payload > 32 KiB with token triggers pre-flight `mcp-auth` frame.
+        let large_params = json!({ "blob": "x".repeat(40 * 1024) });
+        let mut outbound = Vec::new();
+        let mut inbound = Cursor::new(
+            br#"{"id":"wrong-auth-id","ok":true,"result":{"authenticated":true}}
+{"id":"mcp-1","ok":true,"result":{"ok":true}}
+"#
+            .as_slice(),
+        );
+        let err = super::live_control::send_control_with_token_on_io(
+            &mut inbound,
+            &mut outbound,
+            Some("secret-token-42"),
+            "engine.execute",
+            large_params.clone(),
+            4096,
+        )
+        .expect_err("mismatched auth_resp.id must be rejected");
+        assert_eq!(err.code, curvebook_doc::ErrorCode::CorruptData);
+        assert!(err.message.contains("mismatched control auth response id"), "unexpected error: {}", err.message);
+
+        // Matching `mcp-auth` followed by matching `mcp-1` succeeds cleanly.
+        let mut outbound_ok = Vec::new();
+        let mut inbound_ok = Cursor::new(
+            br#"{"id":"mcp-auth","ok":true,"result":{"authenticated":true}}
+{"id":"mcp-1","ok":true,"result":{"accepted":true}}
+"#
+            .as_slice(),
+        );
+        let ok = super::live_control::send_control_with_token_on_io(
+            &mut inbound_ok,
+            &mut outbound_ok,
+            Some("secret-token-42"),
+            "engine.execute",
+            large_params,
+            4096,
+        )
+        .expect("matching auth_resp.id succeeds");
+        assert_eq!(ok["accepted"], json!(true));
     }
 }

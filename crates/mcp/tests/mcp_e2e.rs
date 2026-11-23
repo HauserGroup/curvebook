@@ -653,7 +653,7 @@ fn live_control_port_attach_dispatches_ui_and_engine_and_atomic_undo() {
     let (methods_tx, methods_rx) = mpsc::channel::<String>();
 
     let handle = thread::spawn(move || {
-        for stream_res in listener.incoming().take(6) {
+        for stream_res in listener.incoming().take(5) {
             let mut stream = stream_res.expect("accept");
             let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
             let mut line = String::new();
@@ -666,13 +666,48 @@ fn live_control_port_attach_dispatches_ui_and_engine_and_atomic_undo() {
             let resp = match method.as_str() {
                 "ping" => json!({ "id": id, "ok": true, "result": { "pong": true, "gui_only": false } }),
                 "state.snapshot" => json!({ "id": id, "ok": true, "result": { "title": "Live Desktop Window", "active_sheet_id": "xy-live" } }),
+                "doc.inspect" => json!({
+                    "id": id,
+                    "ok": true,
+                    "result": {
+                        "title": "Live Desktop Window",
+                        "file_path": null,
+                        "dirty": false,
+                        "counts": { "total": 1, "data": 1, "info": 0, "results": 0, "graphs": 0, "layouts": 0 },
+                        "data_sheets": [{ "id": "xy-live", "title": "Live XY", "kind": "xy", "rows": 2, "cols": 2, "frozen": false }],
+                        "info_sheets": [],
+                        "result_sheets": [],
+                        "graph_sheets": [],
+                        "layout_sheets": [],
+                    }
+                }),
                 "ui.navigator.toggle" => json!({ "id": id, "ok": true, "result": { "navigator_open": false } }),
-                "engine.execute" => {
-                    let cmd_id = req["params"]["command_id"].as_str().unwrap_or("");
-                    if cmd_id == "fail.step" {
-                        json!({ "id": id, "ok": false, "error": "simulated engine failure" })
+                "command.batch" => {
+                    let atomic = req["params"]["atomic"].as_bool().unwrap_or(false);
+                    let commands = req["params"]["commands"].as_array().cloned().unwrap_or_default();
+                    let fail_pos = commands.iter().position(|c| c["command_id"].as_str() == Some("fail.step"));
+                    if let Some(idx) = fail_pos {
+                        json!({
+                            "id": id,
+                            "ok": false,
+                            "error": format!("batch step {idx} (fail.step) failed (rolled_back={atomic}): simulated engine failure"),
+                            "error_detail": {
+                                "code": "bad_input",
+                                "category": "validation",
+                                "message": "simulated engine failure",
+                                "retryable": false
+                            }
+                        })
                     } else {
-                        json!({ "id": id, "ok": true, "result": { "command_id": cmd_id, "mutated": cmd_id != "edit.undo" } })
+                        let results: Vec<Value> = commands
+                            .iter()
+                            .enumerate()
+                            .map(|(i, c)| {
+                                let cmd_id = c["command_id"].as_str().unwrap_or("");
+                                json!({ "index": i, "command": cmd_id, "result": { "command_id": cmd_id, "mutated": true } })
+                            })
+                            .collect();
+                        json!({ "id": id, "ok": true, "result": { "atomic": atomic, "count": results.len(), "results": results } })
                     }
                 }
                 _ => json!({ "id": id, "ok": false, "error": "unknown method" }),
@@ -686,10 +721,13 @@ fn live_control_port_attach_dispatches_ui_and_engine_and_atomic_undo() {
 
     let mut state = McpServerState::with_control_port(port).expect("with_control_port");
 
-    // 1. doc_inspect -> state.snapshot
+    // 1. doc_inspect -> state.snapshot + doc.inspect merged summary
     let inspect = first_text_json(&call_tool_rpc(&mut state, 1, "doc_inspect", json!({})).expect("inspect rpc")).expect("inspect json");
     assert_eq!(inspect["mode"], json!("live_attach"));
     assert_eq!(inspect["snapshot"]["title"], json!("Live Desktop Window"));
+    assert_eq!(inspect["title"], json!("Live Desktop Window"));
+    assert_eq!(inspect["counts"]["total"], json!(1));
+    assert_eq!(inspect["data_sheets"][0]["id"], json!("xy-live"));
 
     // 2. command_run ui.navigator.toggle
     let ui_res =
@@ -698,7 +736,7 @@ fn live_control_port_attach_dispatches_ui_and_engine_and_atomic_undo() {
     assert_eq!(ui_res["live_attach"], json!(true));
     assert_eq!(ui_res["result"]["navigator_open"], json!(false));
 
-    // 3. atomic command_batch triggering failure -> triggers edit.undo rollback (requests 3, 4, 5)
+    // 3. atomic command_batch delegates directly to desktop command.batch (single request)
     let batch = call_tool_rpc(
         &mut state,
         3,
@@ -714,11 +752,16 @@ fn live_control_port_attach_dispatches_ui_and_engine_and_atomic_undo() {
     .expect("batch rpc");
     assert_eq!(batch["isError"], json!(true));
     let batch_json: Value = serde_json::from_str(batch["content"][0]["text"].as_str().expect("text")).expect("json");
+    assert_eq!(batch_json["atomic"], json!(true));
+    assert_eq!(batch_json["failed_index"], json!(1));
+    assert_eq!(batch_json["failed_command_id"], json!("fail.step"));
     assert_eq!(batch_json["rolled_back"], json!(true));
+    assert_eq!(batch_json["session_rolled_back"], json!(true));
+    assert_eq!(batch_json["filesystem_side_effects_persisted"], json!(false));
 
     handle.join().expect("server thread finished");
     let methods: Vec<String> = methods_rx.iter().collect();
-    assert_eq!(methods, vec!["ping", "state.snapshot", "ui.navigator.toggle", "engine.execute", "engine.execute", "engine.execute"]);
+    assert_eq!(methods, vec!["ping", "state.snapshot", "doc.inspect", "ui.navigator.toggle", "command.batch"]);
 }
 
 #[test]
@@ -888,16 +931,25 @@ fn rv18_notifications_cancelled_and_registry_abort_commands_batches_and_imports(
             if method == "ping" {
                 return Ok(json!({ "pong": true, "gui_only": false }));
             }
-            if method == "engine.execute" {
-                let cmd_id = params.get("command_id").and_then(Value::as_str).unwrap_or("");
-                if cmd_id == "sheet.createData"
-                    && let Some(reg) = reg_in_hook.get()
-                {
-                    let reg_clone = reg.clone();
-                    let was_active = std::thread::spawn(move || reg_clone.cancel(&json!("inflight-batch-77"))).join().unwrap_or(false);
-                    tripped_bg.store(was_active, Ordering::Release);
+            if method == "command.batch" {
+                let atomic = params.get("atomic").and_then(Value::as_bool).unwrap_or(false);
+                let commands = params.get("commands").and_then(Value::as_array).cloned().unwrap_or_default();
+                let mut results = Vec::new();
+                for (idx, step) in commands.iter().enumerate() {
+                    let cmd_id = step.get("command_id").and_then(Value::as_str).unwrap_or("");
+                    if tripped_bg.load(Ordering::Acquire) {
+                        return Err(format!("batch step {idx} ({cmd_id}) failed (rolled_back={atomic}): command `{cmd_id}` cancelled"));
+                    }
+                    if cmd_id == "sheet.createData"
+                        && let Some(reg) = reg_in_hook.get()
+                    {
+                        let reg_clone = reg.clone();
+                        let was_active = std::thread::spawn(move || reg_clone.cancel(&json!("inflight-batch-77"))).join().unwrap_or(false);
+                        tripped_bg.store(was_active, Ordering::Release);
+                    }
+                    results.push(json!({ "index": idx, "command": cmd_id, "result": { "command_id": cmd_id, "mutated": true } }));
                 }
-                return Ok(json!({ "command_id": cmd_id, "mutated": cmd_id != "edit.undo" }));
+                return Ok(json!({ "atomic": atomic, "count": results.len(), "results": results }));
             }
             Err(format!("unexpected method {method}"))
         });

@@ -37,7 +37,7 @@ use curvebook_format::{
     CsvOptions, ExportOptions, ExportSource, Exporter, FormatRegistry, ImportOptions, ImportPayload, Importer, is_unpacked_project_dir,
     strip_project_data_for_template,
 };
-use curvebook_pdf::{PdfColorSpace, PdfExportOptions};
+use curvebook_pdf::{PdfColorSpace, PdfExportOptions, PdfVersion};
 use curvebook_render::{MAX_CAPPED_RASTER_DIM_PX, TiffCompression};
 use curvebook_svg::SvgExportOptions;
 use serde_json::{Map, Value, json};
@@ -60,6 +60,8 @@ const MIN_DPI: u16 = 18;
 const MAX_LIVE_INLINE_ARCHIVE_BYTES: usize = ((crate::tools::MAX_CONTROL_RESPONSE_BYTES - 65_536) / 4) * 3;
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_LIVE_INLINE_CSV_BYTES: usize = 8 * 1024 * 1024;
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_FONT_FILE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Resolve `raw_path` against the active filesystem trust boundary on `state`.
 ///
@@ -305,7 +307,7 @@ fn apply_imported_payload(
                     return Ok(errors::result_from_code(ErrorCode::InternalError, format!("failed to serialize import warnings: {err}")));
                 }
             };
-            apply_report_import(state, resolved_path, format_id, &bytes, warnings)
+            apply_report_import(state, resolved_path, format_id, &bytes, warnings, append)
         }
         ("csv" | "tsv", ImportPayload::DataSheet(_)) => {
             let Some(bytes) = raw_bytes else {
@@ -496,15 +498,34 @@ fn apply_report_import(
     format_id: &str,
     bytes: &[u8],
     warnings: Value,
+    append: bool,
 ) -> Result<ToolCallResult, ToolCallError> {
     let command_id = if format_id == "prism" { "table.importPrism" } else { "table.importPzfx" };
     let params = json!({
         "bytes_base64": encode_base64(bytes),
-        "merge": false,
+        "merge": append,
     });
 
-    let mut next_session = Session::new();
     let cancel = state.current_cancel_token();
+    if append {
+        return state.mutate_active_session(|session| {
+            if let Err(err) = session.execute_with_caller(command_id, params, curvebook_engine::Caller::Mcp, &cancel) {
+                return Ok(errors::result_from_engine_error(&err));
+            }
+            let sheets = session.document().total_sheet_count();
+            let title = session.document().title.clone();
+            ToolCallResult::ok_json(&json!({
+                "opened": true,
+                "format": format_id,
+                "path": resolved_path.display().to_string(),
+                "title": title,
+                "total_sheet_count": sheets,
+                "warnings": warnings,
+            }))
+        });
+    }
+
+    let mut next_session = Session::new();
     if let Err(err) = next_session.execute_with_caller(command_id, params, curvebook_engine::Caller::Mcp, &cancel) {
         return Ok(errors::result_from_engine_error(&err));
     }
@@ -816,6 +837,8 @@ pub(crate) fn handle_export(state: &mut McpServerState, args: &Map<String, Value
             "dpi",
             "tiff_compression",
             "pdf_color_space",
+            "pdf_version",
+            "ttf_font",
             "all_graphs",
             "svg_precision",
             "pretty",
@@ -825,7 +848,7 @@ pub(crate) fn handle_export(state: &mut McpServerState, args: &Map<String, Value
         ],
     )?;
     let format = required_non_empty_str(args, "format")?.to_ascii_lowercase();
-    if !matches!(format.as_str(), "svg" | "pdf" | "png" | "tiff" | "csv" | "json") {
+    if !matches!(format.as_str(), "svg" | "pdf" | "emf" | "png" | "tiff" | "csv" | "tsv" | "json") {
         return Err(ToolCallError::InvalidParams(format!("unsupported export format '{format}'")));
     }
 
@@ -841,40 +864,80 @@ pub(crate) fn handle_export(state: &mut McpServerState, args: &Map<String, Value
         None => None,
     };
 
+    let resolved_ttf_font = match cfg.ttf_font.as_deref() {
+        Some(raw) => match resolve_mcp_path(state, raw) {
+            Ok(p) => Some(p),
+            Err(err) => return Ok(errors::result_from_engine_error(&err)),
+        },
+        None => None,
+    };
+
     #[cfg(not(target_arch = "wasm32"))]
-    if state.control_port().is_some() {
+    if let Some(port) = state.control_port() {
         let pdf_cs = match cfg.pdf_color_space {
             PdfColorSpace::Srgb => "srgb",
             PdfColorSpace::Cmyk => "cmyk",
             PdfColorSpace::Grayscale => "grayscale",
         };
+        let pdf_ver = pdf_version_str(cfg.pdf_version);
         let tiff_comp = match cfg.tiff_compression {
             TiffCompression::None => "none",
             TiffCompression::Deflate => "deflate",
             TiffCompression::Lzw => "lzw",
         };
-        let remote = match state.send_live_control(
-            "doc.export",
-            json!({
-                "format": format,
-                "sheet_id": cfg.sheet_id,
-                "pretty": cfg.pretty,
-                "tidy": cfg.tidy,
-                "tab_id": cfg.tab_id,
-                "csv_delimiter": cfg.csv_opts.as_ref().map(|c| c.delimiter.to_string()),
-                "svg_precision": cfg.svg_precision,
-                "pdf_color_space": pdf_cs,
-                "all_graphs": cfg.all_graphs,
-                "dpi": cfg.dpi,
-                "width_px": cfg.width_px,
-                "height_px": cfg.height_px,
-                "tiff_compression": tiff_comp,
-            }),
-        ) {
+        let mut live_params = json!({
+            "format": format,
+            "sheet_id": cfg.sheet_id,
+            "pretty": cfg.pretty,
+            "tidy": cfg.tidy,
+            "tab_id": cfg.tab_id,
+            "csv_delimiter": cfg.csv_opts.as_ref().map(|c| c.delimiter.to_string()),
+            "svg_precision": cfg.svg_precision,
+            "pdf_color_space": pdf_cs,
+            "pdf_version": pdf_ver,
+            "ttf_font": resolved_ttf_font.as_ref().map(|p| p.display().to_string()),
+            "all_graphs": cfg.all_graphs,
+            "dpi": cfg.dpi,
+            "width_px": cfg.width_px,
+            "height_px": cfg.height_px,
+            "tiff_compression": tiff_comp,
+        });
+        if let Some(dest) = resolved_path.as_ref()
+            && let Some(obj) = live_params.as_object_mut()
+        {
+            obj.insert(String::from("path"), json!(dest.display().to_string()));
+        }
+        let remote = match state.send_live_control("doc.export", live_params) {
             Ok(v) => v,
             Err(err) => return Ok(errors::result_from_payload(&err)),
         };
         let target_id = remote.get("sheet_id").and_then(Value::as_str).unwrap_or("project").to_owned();
+        if let Some(dest) = resolved_path {
+            if remote.get("exported").and_then(Value::as_bool) == Some(true) {
+                let written_path = remote.get("path").and_then(Value::as_str).map(ToOwned::to_owned).unwrap_or_else(|| dest.display().to_string());
+                let bytes_written = remote.get("bytes_written").or_else(|| remote.get("bytes_len")).and_then(Value::as_u64).unwrap_or(0);
+                return ToolCallResult::ok_json(&json!({
+                    "exported": true,
+                    "mode": "live_attach",
+                    "control_port": port,
+                    "format": format,
+                    "sheet_id": target_id,
+                    "path": written_path,
+                    "bytes_written": bytes_written,
+                }));
+            }
+            let Some(b64) = remote.get("data_base64").and_then(Value::as_str) else {
+                return Ok(errors::result_from_code(
+                    ErrorCode::InternalError,
+                    "live doc.export response missing exported confirmation or data_base64",
+                ));
+            };
+            let bytes = match decode_base64(b64) {
+                Ok(b) => b,
+                Err(err) => return Ok(errors::result_from_code(ErrorCode::InternalError, format!("invalid base64 from live doc.export: {err}"))),
+            };
+            return write_atomic_export(&dest, &format, &target_id, &bytes);
+        }
         let Some(b64) = remote.get("data_base64").and_then(Value::as_str) else {
             return Ok(errors::result_from_code(ErrorCode::InternalError, "live doc.export response missing data_base64"));
         };
@@ -891,14 +954,23 @@ pub(crate) fn handle_export(state: &mut McpServerState, args: &Map<String, Value
             }
             _ => None,
         };
-        if let Some(dest) = resolved_path {
-            return write_atomic_export(&dest, &format, &target_id, &bytes);
-        }
         return format_inline_export_result(&format, &target_id, &bytes, raster_meta);
     }
 
+    let embedded_ttf_font = if format == "pdf" {
+        match resolved_ttf_font.as_deref() {
+            Some(font_path) => match load_validated_ttf_font_bytes(font_path) {
+                Ok(bytes) => Some(bytes),
+                Err(err) => return Ok(errors::result_from_engine_error(&err)),
+            },
+            None => None,
+        }
+    } else {
+        None
+    };
+
     let doc = state.session().document();
-    let req = match build_export_artifact_request(doc, &format, &cfg) {
+    let req = match build_export_artifact_request(doc, &format, &cfg, embedded_ttf_font) {
         Ok(req) => req,
         Err(err) => return Ok(errors::result_from_engine_error(&err)),
     };
@@ -952,7 +1024,7 @@ fn format_inline_export_result(
     raster_meta: Option<RasterMetadata>,
 ) -> Result<ToolCallResult, ToolCallError> {
     match format {
-        "svg" | "csv" => {
+        "svg" | "csv" | "tsv" => {
             let text = String::from_utf8(bytes.to_vec()).map_err(|err| ToolCallError::Execution(format!("UTF-8 export decode failed: {err}")))?;
             Ok(ToolCallResult::ok_text(text))
         }
@@ -978,8 +1050,8 @@ fn format_inline_export_result(
                 structured_content: Some(meta),
             })
         }
-        "pdf" => ToolCallResult::ok_json(&json!({
-            "format": "pdf",
+        "pdf" | "emf" => ToolCallResult::ok_json(&json!({
+            "format": format,
             "sheet_id": target_id,
             "encoding": "base64",
             "bytes_len": bytes.len(),
@@ -1011,6 +1083,8 @@ struct ExportArtifactConfig {
     csv_opts: Option<CsvOptions>,
     svg_precision: Option<u8>,
     pdf_color_space: PdfColorSpace,
+    pdf_version: PdfVersion,
+    ttf_font: Option<String>,
     all_graphs: bool,
     width_px: Option<u32>,
     height_px: Option<u32>,
@@ -1052,6 +1126,11 @@ impl ExportArtifactConfig {
             Some(raw) => parse_pdf_color_space(&raw)?,
             None => PdfColorSpace::Srgb,
         };
+        let pdf_version = match optional_non_empty_str(args, "pdf_version")? {
+            Some(raw) => parse_pdf_version(&raw)?,
+            None => PdfVersion::Pdf17,
+        };
+        let ttf_font = optional_non_empty_str(args, "ttf_font")?;
         let all_graphs = optional_bool(args, "all_graphs")?.unwrap_or(false);
         let dpi = parse_dpi(args)?;
         let width_px = optional_u32_bounded(args, "width_px", 1, MAX_CAPPED_RASTER_DIM_PX)?;
@@ -1061,7 +1140,22 @@ impl ExportArtifactConfig {
             None => TiffCompression::Lzw,
         };
 
-        Ok(Self { sheet_id, pretty, tidy, tab_id, csv_opts, svg_precision, pdf_color_space, all_graphs, width_px, height_px, dpi, tiff_compression })
+        Ok(Self {
+            sheet_id,
+            pretty,
+            tidy,
+            tab_id,
+            csv_opts,
+            svg_precision,
+            pdf_color_space,
+            pdf_version,
+            ttf_font,
+            all_graphs,
+            width_px,
+            height_px,
+            dpi,
+            tiff_compression,
+        })
     }
 }
 
@@ -1120,7 +1214,12 @@ fn resolve_mcp_csv_target(doc: &ProjectDocument, sheet_id: Option<&str>, tab_id:
     Ok(ExportTarget::AutoOrExplicit(None))
 }
 
-fn build_export_artifact_request(doc: &ProjectDocument, format: &str, cfg: &ExportArtifactConfig) -> Result<ExportArtifactRequest, EngineError> {
+fn build_export_artifact_request(
+    doc: &ProjectDocument,
+    format: &str,
+    cfg: &ExportArtifactConfig,
+    embedded_ttf_font: Option<Vec<u8>>,
+) -> Result<ExportArtifactRequest, EngineError> {
     let default_target = ExportTarget::AutoOrExplicit(cfg.sheet_id.as_ref().map(SheetId::new));
     let (target, artifact_format) = match format {
         "svg" => {
@@ -1133,11 +1232,17 @@ fn build_export_artifact_request(doc: &ProjectDocument, format: &str, cfg: &Expo
         "pdf" => (
             default_target,
             ExportArtifactFormat::Pdf {
-                options: PdfExportOptions { color_space: cfg.pdf_color_space, ..PdfExportOptions::default() },
+                options: PdfExportOptions {
+                    color_space: cfg.pdf_color_space,
+                    version: cfg.pdf_version,
+                    embedded_truetype_font: embedded_ttf_font,
+                    ..PdfExportOptions::default()
+                },
                 all_graphs: cfg.all_graphs,
                 sheet_ids: None,
             },
         ),
+        "emf" => (default_target, ExportArtifactFormat::Emf { require_kind: None }),
         "png" => (
             default_target,
             ExportArtifactFormat::Png {
@@ -1166,10 +1271,66 @@ fn build_export_artifact_request(doc: &ProjectDocument, format: &str, cfg: &Expo
                 tidy: cfg.tidy,
             },
         ),
+        "tsv" => (
+            resolve_mcp_csv_target(doc, cfg.sheet_id.as_deref(), cfg.tab_id.as_deref())?,
+            ExportArtifactFormat::Csv {
+                options: cfg.csv_opts.clone().unwrap_or_else(CsvOptions::tsv),
+                tab_id: cfg.tab_id.clone(),
+                tab_index: None,
+                tidy: cfg.tidy,
+            },
+        ),
         "json" => (default_target, ExportArtifactFormat::Json { pretty: cfg.pretty }),
         _ => return Err(EngineError::with_code(ErrorCode::BadInput, format!("unsupported export format '{format}'"))),
     };
     Ok(ExportArtifactRequest { target, format: artifact_format })
+}
+
+fn load_validated_ttf_font_bytes(path: &Path) -> Result<Vec<u8>, EngineError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let bytes = curvebook_platform::fs::read_regular_file_bytes(path, MAX_FONT_FILE_BYTES).map_err(|err| match err {
+            curvebook_platform::PlatformError::InvalidPath { reason } => {
+                EngineError::with_code(ErrorCode::BadInput, format!("invalid TrueType font `{}`: {reason}", path.display()))
+            }
+            other => EngineError::from(other),
+        })?;
+        if !matches!(bytes.get(0..4), Some([0x00, 0x01, 0x00, 0x00] | b"true")) {
+            return Err(EngineError::with_code(
+                ErrorCode::BadInput,
+                format!("unsupported SFNT font `{}`: expected TrueType outlines (`0x00010000` or `true`), not CFF/OTTO", path.display()),
+            ));
+        }
+        let Some(num_tables) = bytes.get(4..6).and_then(|s| <[u8; 2]>::try_from(s).ok()).map(u16::from_be_bytes) else {
+            return Err(EngineError::with_code(ErrorCode::BadInput, format!("truncated TrueType font `{}`", path.display())));
+        };
+        let min_header_len = 12_usize.saturating_add(usize::from(num_tables).saturating_mul(16));
+        if num_tables == 0 || bytes.len() < min_header_len {
+            return Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid TrueType SFNT table directory in `{}`", path.display())));
+        }
+        Ok(bytes)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = path;
+        Err(EngineError::with_code(ErrorCode::IoError, "reading TrueType font files is not supported on wasm32"))
+    }
+}
+
+fn parse_pdf_version(raw: &str) -> Result<PdfVersion, ToolCallError> {
+    match raw.trim() {
+        "1.4" => Ok(PdfVersion::Pdf14),
+        "1.7" => Ok(PdfVersion::Pdf17),
+        other => Err(ToolCallError::InvalidParams(format!("unsupported pdf_version '{other}' (expected '1.4' or '1.7')"))),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+const fn pdf_version_str(version: PdfVersion) -> &'static str {
+    match version {
+        PdfVersion::Pdf14 => "1.4",
+        PdfVersion::Pdf17 => "1.7",
+    }
 }
 
 fn parse_dpi(args: &Map<String, Value>) -> Result<u16, ToolCallError> {
