@@ -31,7 +31,7 @@ pub use colormap::{
     CIVIDIS_STOPS, ColorRamp, ColorStop, ColormapId, DIVERGING_BLUE_RED_STOPS, GRAYSCALE_STOPS, MAX_DISCRETE_SAMPLES, PLASMA_STOPS, VIRIDIS_STOPS,
 };
 pub use cvd::{CanvasPreviewFilter, CvdKind, simulate_cvd, simulate_preview_filter};
-pub use space::{Cmyk, LinearRgba, Oklab, Oklch, Rgba8, lerp_oklab, linear_channel_to_srgb, srgb_channel_to_linear};
+pub use space::{Cmyk, LinearRgba, Oklab, Oklch, Rgba8, lerp_oklab, linear_channel_to_srgb, oklab_even_steps, srgb_channel_to_linear};
 pub use style::{LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle};
 
 #[cfg(test)]
@@ -289,5 +289,28 @@ mod tests {
         assert_eq!(CanvasPreviewFilter::from_name("grayscale-print"), Some(CanvasPreviewFilter::GrayscalePrint));
         assert_eq!(CanvasPreviewFilter::from_name("deuteranopia"), Some(CanvasPreviewFilter::Deuteranopia));
         assert_eq!(CanvasPreviewFilter::from_name("invalid"), None);
+    }
+
+    #[test]
+    fn oklch_gamut_mapping_preserves_hue_and_oklab_even_steps_are_uniform() {
+        use super::oklab_even_steps;
+
+        let high_chroma_indigo = Oklch::new(0.55, 0.35, 266.0);
+        assert!(!high_chroma_indigo.in_srgb_gamut());
+        let mapped = high_chroma_indigo.to_rgba8_gamut_mapped();
+        let mapped_lch = mapped.to_oklch();
+        assert!((mapped_lch.l - 0.55).abs() <= 0.02, "expected lightness preserved near 0.55, got {}", mapped_lch.l);
+        let hue_diff = (mapped_lch.h_deg - 266.0).rem_euclid(360.0);
+        let angular_err = hue_diff.min(360.0 - hue_diff);
+        assert!(angular_err <= 2.5, "expected hue preserved near 266 deg, got {} (err {angular_err})", mapped_lch.h_deg);
+
+        let steps = oklab_even_steps(Rgba8::rgb(24, 27, 33), Rgba8::rgb(245, 246, 248), 5);
+        assert_eq!(steps.len(), 5);
+        let deltas: Vec<f64> = steps.windows(2).map(|w| w[1].to_oklab().l - w[0].to_oklab().l).collect();
+        for pair in deltas.windows(2) {
+            assert!((pair[0] - pair[1]).abs() <= 0.01, "expected uniform Oklab L steps, got {deltas:?}");
+        }
+        assert!(Rgba8::BLACK.meets_wcag_aaa(Rgba8::WHITE));
+        assert!(!Rgba8::rgb(110, 110, 110).meets_wcag_aaa(Rgba8::WHITE));
     }
 }

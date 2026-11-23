@@ -94,8 +94,8 @@ pub(super) fn reset_format_graph_local_drafts(state: &mut GraphModalEguiState) {
     state.heatmap_synced_tick_angle_deg = 0.0;
 }
 
-pub(super) fn rgba_to_color32(c: Rgba8) -> Color32 {
-    Color32::from_rgba_unmultiplied(c.r, c.g, c.b, c.a)
+pub(super) const fn rgba_to_color32(c: Rgba8) -> Color32 {
+    crate::egui_shell::rgba8_to_color32(c)
 }
 
 pub(super) fn layout_elided(
@@ -134,23 +134,27 @@ pub(super) fn record_button(ui: &mut Ui, meta: &mut FrameInspectMeta, entry: But
     if let Some(reason) = entry.disabled_reason {
         resp = resp.on_disabled_hover_text(reason);
     }
-    record_if_visible(
-        ui,
-        &resp,
-        meta,
-        FrameInspectEntryInput {
-            widget_id: entry.widget_id,
-            role: "button",
-            label: entry.label,
-            command_id: entry.command_id,
-            value: Some(json!({ "selected": entry.selected })),
-            enabled: entry.enabled,
-            disabled_reason: entry.disabled_reason,
-            z_layer: ZLayer::ModalDialog,
-            ellipsized: false,
-            full_label: None,
-        },
-    );
+    let clipped = resp.interact_rect.intersect(ui.clip_rect());
+    if clipped.width() > 0.0 && clipped.height() > 0.0 {
+        let rank = if is_primary_footer { crate::egui_shell::ActionRank::Primary } else { crate::egui_shell::ActionRank::Secondary };
+        meta.record_ranked_response(
+            ui,
+            &resp,
+            FrameInspectEntryInput {
+                widget_id: entry.widget_id,
+                role: "button",
+                label: entry.label,
+                command_id: entry.command_id,
+                value: Some(json!({ "selected": entry.selected })),
+                enabled: entry.enabled,
+                disabled_reason: entry.disabled_reason,
+                z_layer: ZLayer::ModalDialog,
+                ellipsized: false,
+                full_label: None,
+            },
+            rank,
+        );
+    }
     resp
 }
 

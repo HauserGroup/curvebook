@@ -2,6 +2,39 @@
 //! Generated from `crates/ui-egui/src/menus/ui_commands.rs` by `cargo xtask ui-commands`.
 //! Do not edit by hand; re-run the xtask when that table changes.
 
+/// Structural importance tier for a UI action slot or command (`docs/design-language.md` §4).
+///
+/// Toolbars shrink deterministically by dropping [`Self::Overflow`] slots into `"⋯"` first, then
+/// [`Self::Secondary`] slots, while preserving [`Self::Primary`] until last. Each panel or modal
+/// dialog exposes at most one [`Self::Primary`] action.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ActionRank {
+    /// Main action on a surface (at most one per panel or modal dialog).
+    Primary,
+    /// Core contextual action kept visible while horizontal room permits.
+    Secondary,
+    /// Lower-frequency action that moves first into `"⋯"`, menus, or the Command Palette.
+    Overflow,
+}
+
+impl ActionRank {
+    /// Higher weight means higher retention priority when horizontal space shrinks.
+    #[must_use]
+    pub const fn retention_priority(self) -> u8 {
+        match self {
+            Self::Primary => 2,
+            Self::Secondary => 1,
+            Self::Overflow => 0,
+        }
+    }
+
+    /// Returns `true` when this rank marks a surface's single primary action.
+    #[must_use]
+    pub const fn is_primary(self) -> bool {
+        matches!(self, Self::Primary)
+    }
+}
+
 /// Declarative metadata for a front-end UI command.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct UiCommandSpec {
@@ -11,6 +44,7 @@ pub struct UiCommandSpec {
     pub params_doc: &'static str,
     pub summary: &'static str,
     pub beginner: &'static str,
+    pub rank: ActionRank,
 }
 
 /// Front-end UI commands handled by the desktop shell (`curvebook-ui-egui`).
@@ -22,6 +56,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{}",
         summary: "Show or hide the left Project Navigator sheet tree.",
         beginner: "Opens or closes the left sidebar listing Data, Info, Results, Graphs, and Layouts sheets.",
+        rank: ActionRank::Secondary,
     },
     UiCommandSpec {
         id: "ui.inspector.toggle",
@@ -30,6 +65,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{}",
         summary: "Show or hide the right-hand Format Inspector drawer.",
         beginner: "Opens or closes the right sidebar for styling axes, symbols, curves, and layout properties.",
+        rank: ActionRank::Secondary,
     },
     UiCommandSpec {
         id: "ui.family.toggle",
@@ -38,6 +74,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{}",
         summary: "Show or hide the bottom linked-sheet Family Strip.",
         beginner: "Displays linked data tables, analyses, graphs, and layouts connected to the current sheet.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.palette.open",
@@ -46,6 +83,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{}",
         summary: "Open the fuzzy-searchable Cmd+K Command Palette.",
         beginner: "Type any action name, shortcut, or command ID to search and run engine or UI commands.",
+        rank: ActionRank::Secondary,
     },
     UiCommandSpec {
         id: "ui.analyze.open",
@@ -54,6 +92,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"sheet_id\":\"optional SheetId\"}",
         summary: "Open the scientific analysis wizard for the selected data sheet.",
         beginner: "Choose a statistical test, curve fit, or data transform matched to the active table archetype.",
+        rank: ActionRank::Primary,
     },
     UiCommandSpec {
         id: "ui.editParams.open",
@@ -62,6 +101,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"sheet_id\":\"optional ResultSheetId\"}",
         summary: "Open the Change Analysis Parameters dialog for the active or specified result sheet.",
         beginner: "Reopen and edit statistical or curve-fitting parameters for the active result sheet.",
+        rank: ActionRank::Primary,
     },
     UiCommandSpec {
         id: "ui.changeGraphType.open",
@@ -70,6 +110,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"sheet_id\":\"optional GraphSheetId\"}",
         summary: "Open the dialog to switch chart style or summary error bars.",
         beginner: "Change the active graph's plot family, bar mode, scatter overlay, or SD/SEM/CI error-bar style.",
+        rank: ActionRank::Primary,
     },
     UiCommandSpec {
         id: "ui.clonePipeline.open",
@@ -78,6 +119,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"sheet_id\":\"optional SheetId\"}",
         summary: "Open the wizard to clone a sheet and its downstream pipeline.",
         beginner: "Duplicate a data table together with its linked analyses, graphs, and formatting for new data.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.zoom.fitSheet",
@@ -86,6 +128,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{}",
         summary: "Reset canvas zoom so the active sheet fits the viewport.",
         beginner: "Centers and scales the current graph or layout sheet to fill the visible workspace window.",
+        rank: ActionRank::Secondary,
     },
     UiCommandSpec {
         id: "ui.gallery.toggle",
@@ -94,6 +137,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"folder\":\"optional all|data|info|results|graphs|layouts\",\"open\":\"optional bool\"}",
         summary: "Show or hide the multi-sheet Portfolio Gallery thumbnail view.",
         beginner: "Browse visual thumbnails across Data, Info, Results, Graphs, or Layouts folders in one grid.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.rulers.toggle",
@@ -102,6 +146,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"unit\":\"optional pt|in|mm\",\"visible\":\"optional bool\"}",
         summary: "Toggle physical pt/in/mm rulers around the graph and layout canvas.",
         beginner: "Displays calibrated print rulers in points, inches, or millimeters for precise figure sizing.",
+        rank: ActionRank::Secondary,
     },
     UiCommandSpec {
         id: "ui.pane.cycle",
@@ -110,6 +155,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"reverse\":false}",
         summary: "Move keyboard focus to the next or previous workspace pane.",
         beginner: "Cycles focus between Navigator, main Sheet/Canvas, Family Strip, and Format Inspector.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.shortcut.set",
@@ -118,6 +164,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"command_id\":\"string\",\"shortcut\":\"string\"}",
         summary: "Assign a custom key combination to an engine or UI command.",
         beginner: "Rebinds a command's keyboard shortcut after checking for conflicts with existing bindings.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.shortcut.reset",
@@ -126,6 +173,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"command_id\":\"optional string\"}",
         summary: "Restore one or all keyboard shortcuts to built-in defaults.",
         beginner: "Clears a customized shortcut for one command, or resets every shortcut when command_id is omitted.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.locale.set",
@@ -134,6 +182,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"locale\":\"en|de|es|fr|ja|ko|pt-BR|zh-CN|zh-TW|it|nl|pl|ru|tr|ar|he\"}",
         summary: "Switch interface language and regional number/CSV formatting.",
         beginner: "Updates UI labels, decimal separators, and RTL layout mirroring to one of the 16 supported locales.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.theme.set",
@@ -142,6 +191,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"mode\":\"light|dark|high_contrast\"}",
         summary: "Switch the desktop UI between Light, Dark, and High Contrast themes.",
         beginner: "Applies a light, dark, or WCAG high-contrast color palette across workspace panels and dialogs.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.screenshot",
@@ -150,6 +200,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"target\":\"optional full_window|workspace|viewport|canvas|dialog\",\"width_px\":\"optional 64..=4096 (default 1024)\",\"height_px\":\"optional 64..=4096 (default 640)\",\"dpi\":\"optional 72..=600 (default 144)\",\"path\":\"optional.png (blocked under --gui-only)\"}",
         summary: "Render the full compositor workspace layout to an RGBA PNG image.",
         beginner: "Captures the active panes, sheet view, and overlays at the requested pixel dimensions and DPI.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.event.dispatch",
@@ -158,6 +209,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"event\":{\"PointerDown\":{\"x\":0.0,\"y\":0.0,\"button\":\"Primary\",\"modifiers\":{}}},\"metrics\":{\"logical_width\":1024.0,\"logical_height\":640.0,\"scale_factor\":1.0}}",
         summary: "Inject a synthetic pointer or keyboard event into the workspace.",
         beginner: "Simulates clicks, drags, wheel scrolls, or key presses for deterministic UI testing and automation.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.split.toggle",
@@ -166,6 +218,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"enabled\":\"optional bool\",\"ratio\":\"optional 0.2..0.8\",\"primary_sheet_id\":\"optional SheetId\",\"secondary_sheet_id\":\"optional SheetId\"}",
         summary: "Show or resize a side-by-side split view of two sheets.",
         beginner: "Displays a primary data table alongside a linked graph or result sheet for interactive brushing.",
+        rank: ActionRank::Secondary,
     },
     UiCommandSpec {
         id: "ui.brush.point",
@@ -174,6 +227,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"sheet_id\":\"SheetId\",\"row\":0,\"col\":0,\"subcol\":0,\"clear\":\"optional bool\"}",
         summary: "Highlight a data cell and its corresponding plotted point across panes.",
         beginner: "Selects or clears a linked point highlight shared between the spreadsheet grid and active graph.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.result.copyMethodsReport",
@@ -182,6 +236,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"result_sheet_id\":\"optional ResultSheetId\",\"format\":\"optional plain|markdown|latex\"}",
         summary: "Copy reproducible statistical methods text for a result sheet.",
         beginner: "Formats assumption checks, sample sizes, test parameters, and exact citations as plain, Markdown, or LaTeX text.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.result.applyRemediation",
@@ -190,6 +245,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"result_sheet_id\":\"optional ResultSheetId\"}",
         summary: "Deprecated under diagnostics-only policy; does not create sibling analyses or mutate the project.",
         beginner: "Diagnostics remain observational only. Inspect Residuals/Diagnostics tabs or press Cmd+T to change test parameters explicitly.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.result.inspectDiagnostics",
@@ -198,6 +254,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"result_sheet_id\":\"optional ResultSheetId\",\"tab_id\":\"optional string\"}",
         summary: "Switch to the Diagnostics, Normal Q-Q, Residuals, Covariance, or Log-Minus-Log tab on the same ResultSheet.",
         beginner: "Jumps directly to statistical diagnostic tables on the active result sheet without altering data or creating new analyses.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.canvas.applyPreset",
@@ -206,6 +263,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"sheet_id\":\"optional SheetId\",\"preset\":\"SingleColumn88mm|ColumnAndHalf130mm|DoubleColumn180mm|FullPagePortrait|Slide16x9|PosterPanel\",\"resize_mode\":\"KeepTypographyPt|ProportionalScale\"}",
         summary: "Resize a graph or layout sheet to a publication or slide preset.",
         beginner: "Applies standard journal column widths or 16:9 slide sizes while preserving point typography or scaling.",
+        rank: ActionRank::Secondary,
     },
     UiCommandSpec {
         id: "ui.canvas.preflight",
@@ -214,6 +272,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"sheet_id\":\"optional SheetId\"}",
         summary: "Audit figure typography, contrast, clipping, and print dimensions.",
         beginner: "Checks font sizes, axis margins, color contrast, and resolution against publication standards.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.previewFilter.set",
@@ -222,6 +281,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"filter\":\"normal|deuteranopia|protanopia|tritanopia|grayscale\"}",
         summary: "Simulate color-vision deficiency or grayscale printing on the canvas.",
         beginner: "Previews graphs under deuteranopia, protanopia, tritanopia, or grayscale to verify accessible palettes.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.grid.excludeWithReason",
@@ -230,6 +290,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"sheet_id\":\"optional SheetId\",\"reason_tag\":\"optional string\",\"note\":\"optional string\"}",
         summary: "Mark selected cells as excluded with a structured reason tag and note.",
         beginner: "Excludes outlier or QC-flagged cells from calculations while keeping values visible and logged.",
+        rank: ActionRank::Secondary,
     },
     UiCommandSpec {
         id: "ui.table.convertArchetype.open",
@@ -238,6 +299,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"sheet_id\":\"optional SheetId\"}",
         summary: "Open the non-destructive table archetype conversion preview dialog.",
         beginner: "Reshape a table between XY, Column, Grouped, Contingency, or Survival layouts with a live diff preview.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.import.reshape.open",
@@ -246,6 +308,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"mode\":\"optional Plate96|Plate384|TidyLongPivot\"}",
         summary: "Open the microplate or tidy-long CSV reshape import dialog.",
         beginner: "Converts 96/384-well plate grids or long-format CSV columns into structured CurveBook data tables.",
+        rank: ActionRank::Secondary,
     },
     UiCommandSpec {
         id: "ui.print.open",
@@ -254,6 +317,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"sheet_id\":\"optional SheetId\",\"copies\":\"optional u16\",\"printer\":\"optional string\",\"spool\":\"optional bool\"}",
         summary: "Open the publication-scale Print Setup dialog for graphs and layouts.",
         beginner: "Select a printer, adjust copy count or scale percentage, preview crop marks, and spool a physical-scale PDF print job.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.powerWizard.open",
@@ -262,6 +326,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"family\":\"optional PowerTestFamily\"}",
         summary: "Open the interactive 4-stage Power and Sample Size Wizard.",
         beginner: "Plan sample sizes or minimum detectable effects across 8 statistical families with live power curves and sensitivity tables.",
+        rank: ActionRank::Secondary,
     },
     UiCommandSpec {
         id: "ui.formatPoints.open",
@@ -270,6 +335,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"sheet_id\":\"optional GraphSheetId\",\"points\":\"optional array\"}",
         summary: "Open the Format Selected Points dialog to override symbol shape, color, size, or row labels.",
         beginner: "Customize individual highlighted or brushed data points on the active graph without changing the whole series.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.table.randomizeGroups",
@@ -278,6 +344,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"groups\":\"optional list\",\"subject_count\":\"optional usize\",\"scheme\":\"complete_balanced|permuted_block\",\"seed\":\"optional u64\"}",
         summary: "Open the Randomize Subjects to Groups dialog for complete balanced or permuted-block assignment.",
         beginner: "Assign experimental subjects across treatment arms reproducibly and record ARRIVE randomization constants.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.table.randomSampleRows",
@@ -286,6 +353,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"source_sheet_id\":\"optional SheetId\",\"sample_size\":\"optional usize\",\"seed\":\"optional u64\",\"stratify_column\":\"optional usize\"}",
         summary: "Open the Random Sample Rows dialog for simple or stratified subsampling without replacement.",
         beginner: "Draw a reproducible subset of rows from the active table with optional proportional stratification.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.table.simulateDistributions",
@@ -294,6 +362,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"n_rows\":\"optional usize\",\"seed\":\"optional u64\",\"columns\":\"optional array\"}",
         summary: "Open the Simulate Distributions dialog to generate Uniform, Gaussian, LogNormal, Binomial, Poisson, or Exponential data.",
         beginner: "Create synthetic columns sampled from parametric probability distributions using an explicit random seed.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.table.openFormulaBar",
@@ -302,6 +371,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"sheet_id\":\"optional DataSheetId\",\"column\":\"optional usize or variable title\",\"title\":\"optional string\"}",
         summary: "Focus and open the inline formula bar for a MultipleVariables column to define or inspect a formula-derived calculated variable.",
         beginner: "Click a variable column header or run this command to edit a live calculated-variable formula (`= ...`).",
+        rank: ActionRank::Secondary,
     },
     UiCommandSpec {
         id: "ui.result.appendClusterColumn",
@@ -310,6 +380,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"sheet_id\":\"optional ResultSheetId\",\"column_title\":\"optional string\"}",
         summary: "Read k-means cluster assignments from a Clustering ResultSheet and append/update a Categorical Cluster column on the source MultipleVariables table.",
         beginner: "Copy cluster labels (`Cluster 1`, `Cluster 2`, ...) back onto your source data sheet for graphing and downstream tests.",
+        rank: ActionRank::Secondary,
     },
     UiCommandSpec {
         id: "ui.graph.axes.open",
@@ -318,6 +389,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"sheet_id\":\"optional GraphSheetId\",\"target_axis\":\"optional X|Y|Y2\"}",
         summary: "Open the Format Axes dialog to configure axis titles, log/linear scales, bounds, broken axis segments, and reference thresholds.",
         beginner: "Edit axis range, log scales, dual Y2 axis, or reference threshold lines on the active graph.",
+        rank: ActionRank::Secondary,
     },
     UiCommandSpec {
         id: "ui.graph.insertModelEquation",
@@ -326,6 +398,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"sheet_id\":\"optional GraphSheetId\",\"result_sheet_id\":\"optional ResultSheetId\",\"mode\":\"substituted|symbolic\"}",
         summary: "Open the Insert Model Equation dialog to add or toggle a symbolic or substituted regression equation on a graph.",
         beginner: "Places a live model equation callout bound to an existing linear, nonlinear, or GLM fit sheet.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.graph.bubblePlot.open",
@@ -334,6 +407,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"sheet_id\":\"optional GraphSheetId\"}",
         summary: "Open the Bubble Plot 5-channel encoding inspector (X, Y, color, size, label, convex hulls, ellipses).",
         beginner: "Map multivariate columns onto bubble position, fill palette/ramp, radius, and data-point labels.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.graph.format.open",
@@ -342,6 +416,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"sheet_id\":\"optional GraphSheetId\"}",
         summary: "Open Format Graph controls for palette, frame preset, error bars, violin/raincloud geometry, and equation mode.",
         beginner: "Customize graph appearance, Okabe-Ito palettes, raincloud half-violins, and legend visibility.",
+        rank: ActionRank::Secondary,
     },
     UiCommandSpec {
         id: "ui.graph.pairwise.open",
@@ -350,6 +425,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"sheet_id\":\"optional GraphSheetId\"}",
         summary: "Open Pairwise Comparison Brackets to auto-add and style significance brackets from an upstream result sheet.",
         beginner: "Hook P-value stars or exact numeric p/q labels cleanly above bars and dot plots.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.applyStyleFrom.open",
@@ -358,6 +434,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"sheet_id\":\"optional GraphSheetId\"}",
         summary: "Open Apply Style From to clone palette, stroke, axis, or legend styling from another graph sheet.",
         beginner: "Copy visual styling from an existing graph onto the active graph sheet.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.layout.composer.open",
@@ -366,6 +443,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"sheet_id\":\"optional LayoutSheetId\"}",
         summary: "Open Page Layout Composer for journal width presets, grid slots, origin alignment, and panel badges.",
         beginner: "Arrange multi-panel publication figures and add Markdown callouts on millimeter/inch presets.",
+        rank: ActionRank::Primary,
     },
     UiCommandSpec {
         id: "ui.export.figure.open",
@@ -374,6 +452,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"sheet_id\":\"optional SheetId\",\"format\":\"svg|pdf|png|tiff\"}",
         summary: "Open Export Figure options for SVG, PDF, PNG, or TIFF output resolution and DPI.",
         beginner: "Choose publication vector (SVG/PDF) or high-DPI raster export settings for the active figure.",
+        rank: ActionRank::Secondary,
     },
     UiCommandSpec {
         id: "app.about",
@@ -382,6 +461,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{}",
         summary: "Open the About CurveBook version and build information dialog.",
         beginner: "Displays the application version, bundled font status, and workspace licensing information.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "app.feedback",
@@ -390,6 +470,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"category\":\"optional bug|feature|numerical\"}",
         summary: "Open the Send Feedback dialog to compose a prefilled GitHub issue or copy a Markdown report.",
         beginner: "Draft a bug report, feature request, or numerical result report with optional environment diagnostics and open it on GitHub.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.view.rowTitles.toggle",
@@ -398,6 +479,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"collapsed\":\"optional bool\"}",
         summary: "Toggle or explicitly expand/collapse the Row Titles column band in the data table grid.",
         beginner: "Shows or hides the Row Titles column along the left edge of the active data table.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.graph.create.open",
@@ -406,6 +488,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"data_sheet_id\":\"optional SheetId\",\"kind\":\"optional GraphKind\",\"one_per_data_set\":\"optional bool\",\"y_axis_title\":\"optional string\"}",
         summary: "Open the Create New Graph dialog to choose source table, graph kind, Y-axis title, or one-graph-per-data-set creation.",
         beginner: "Creates one or more graphs linked to an existing data or transform result sheet.",
+        rank: ActionRank::Secondary,
     },
     UiCommandSpec {
         id: "ui.layout.equalizeScaling.open",
@@ -414,6 +497,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"sheet_id\":\"optional LayoutSheetId\",\"mode\":\"optional match_smallest|match_largest|explicit_percent\",\"percent\":\"optional f64\"}",
         summary: "Open the Equalize Scaling dialog to match inner plot scaling across graph panels on a layout.",
         beginner: "Aligns visual data scale across multiple panels on a publication layout page.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.gridOverlay.toggle",
@@ -422,6 +506,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"visible\":\"optional bool\",\"spacing_pt\":\"optional number\"}",
         summary: "Toggle the non-exported alignment grid overlay on GraphSheet and LayoutSheet canvases.",
         beginner: "Displays a lightweight screen-only alignment grid over the figure page without affecting exports.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.embeddedTable.format.open",
@@ -430,6 +515,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"sheet_id\":\"optional GraphSheetId|LayoutSheetId\",\"annotation_index\":\"optional usize\",\"panel_index\":\"optional usize\"}",
         summary: "Open the Format Embedded Table dialog for a pasted ResultSheet or LiveTable annotation.",
         beginner: "Customize transposition, row/column titles, bold headers, borders, and font size on embedded tables.",
+        rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.image.format.open",
@@ -438,5 +524,6 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         params_doc: "{\"sheet_id\":\"optional GraphSheetId|LayoutSheetId\",\"annotation_index\":\"optional usize\",\"panel_index\":\"optional usize\"}",
         summary: "Open the Format Image dialog to edit bounds, aspect lock, rotation, 4-edge crop, and border.",
         beginner: "Resize, rotate, crop, and frame an embedded PNG, JPEG, or TIFF image.",
+        rank: ActionRank::Overflow,
     },
 ];

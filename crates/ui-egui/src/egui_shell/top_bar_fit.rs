@@ -3,7 +3,10 @@
 // Copyright (c) 2026 CurveBook contributors
 // Adapted from upstream MIT OR Apache-2.0 pure-egui helpers; see ATTRIBUTION.md and NOTICE.
 
-//! Deterministic top-bar right-group width fitting solver (`docs/planning/gui-layout-spec.md` §3.1).
+//! Deterministic top-bar right-group width fitting solver and rank-ordered toolbar overflow solver
+//! (`docs/planning/gui-layout-spec.md` §3.1, `docs/design-language.md` §4).
+
+use crate::menus::ActionRank;
 
 /// Square icon button side length in the Tier 1 Application Bar (`28 pt`).
 pub const BAR_ICON_PT: f32 = 28.0;
@@ -81,6 +84,88 @@ pub fn fit_right_group(w: &RightWidths) -> RightGroup {
     RightGroup { switcher, switcher_w, search, split_toggle, trailing_extra }
 }
 
+/// Measured control candidate supplied to [`fit_ranked_toolbar`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RankedToolbarSlot {
+    pub rank: ActionRank,
+    pub desired_width_pt: f32,
+}
+
+/// Partition of toolbar item indices into visible controls and `"⋯"` overflow items.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RankedToolbarFit {
+    /// Surviving slot indices in original left-to-right order.
+    pub visible_indices: Vec<usize>,
+    /// Overflowed slot indices in original left-to-right order.
+    pub overflow_indices: Vec<usize>,
+    /// Total horizontal width consumed by visible controls plus `"⋯"` button (when non-empty).
+    pub used_width_pt: f32,
+}
+
+/// Deterministic priority-based toolbar overflow solver (`docs/design-language.md` §4).
+///
+/// Drops [`ActionRank::Overflow`] items into `"⋯"` first (from trailing to leading), then
+/// [`ActionRank::Secondary`], keeping [`ActionRank::Primary`] visible until last while preserving
+/// original left-to-right slot order and clamping widths at `min_target_w_pt`.
+#[must_use]
+pub fn fit_ranked_toolbar(
+    room_pt: f32,
+    gap_pt: f32,
+    overflow_btn_w_pt: f32,
+    min_target_w_pt: f32,
+    max_visible: usize,
+    items: &[RankedToolbarSlot],
+) -> RankedToolbarFit {
+    if items.is_empty() {
+        return RankedToolbarFit { visible_indices: Vec::new(), overflow_indices: Vec::new(), used_width_pt: 0.0 };
+    }
+    let gap = if gap_pt.is_finite() && gap_pt >= 0.0 { gap_pt } else { 0.0 };
+    let min_w = if min_target_w_pt.is_finite() && min_target_w_pt > 0.0 { min_target_w_pt } else { 24.0 };
+    let ov_w = if overflow_btn_w_pt.is_finite() && overflow_btn_w_pt > 0.0 { overflow_btn_w_pt.max(min_w) } else { min_w };
+    let cap = max_visible.max(1);
+    let widths: Vec<f32> = items.iter().map(|it| if it.desired_width_pt.is_finite() { it.desired_width_pt.max(min_w) } else { min_w }).collect();
+
+    let mut active: Vec<bool> = vec![true; items.len()];
+    let compute_used = |mask: &[bool]| -> (usize, f32) {
+        let vis_count = mask.iter().filter(|&&on| on).count();
+        let has_ov = vis_count < mask.len();
+        let sum_w: f32 = mask.iter().enumerate().filter(|&(_, &on)| on).map(|(i, _)| widths[i]).sum();
+        let gaps = if vis_count > 1 { gap * (vis_count - 1) as f32 } else { 0.0 };
+        let ov_cost = if has_ov { (if vis_count > 0 { gap } else { 0.0 }) + ov_w } else { 0.0 };
+        (vis_count, sum_w + gaps + ov_cost)
+    };
+
+    loop {
+        let (vis_count, used) = compute_used(&active);
+        if vis_count <= 1 || (vis_count <= cap && used <= room_pt) {
+            break;
+        }
+        // Drop lowest retention priority first (`Overflow` -> `Secondary` -> `Primary`), rightmost tie-break.
+        let drop_idx = active
+            .iter()
+            .enumerate()
+            .filter(|&(_, &on)| on)
+            .min_by_key(|&(idx, _)| (items[idx].rank.retention_priority(), std::cmp::Reverse(idx)))
+            .map(|(idx, _)| idx);
+        let Some(idx) = drop_idx else {
+            break;
+        };
+        active[idx] = false;
+    }
+
+    let (_, used_width_pt) = compute_used(&active);
+    let mut visible_indices = Vec::new();
+    let mut overflow_indices = Vec::new();
+    for (i, &on) in active.iter().enumerate() {
+        if on {
+            visible_indices.push(i);
+        } else {
+            overflow_indices.push(i);
+        }
+    }
+    RankedToolbarFit { visible_indices, overflow_indices, used_width_pt }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{BAR_ICON_PT, MIN_SWITCHER_PT, RightGroup, RightWidths, SearchVisibility, fit_right_group};
@@ -136,5 +221,34 @@ mod tests {
         assert_eq!(pinned(700.0), "extra true, split true, Field, full switcher");
         assert_eq!(pinned(72.0), "extra false, split false, Hidden, minimal switcher");
         assert_eq!(pinned(71.0), "extra false, split false, Hidden, no switcher");
+    }
+
+    #[test]
+    fn ranked_toolbar_drops_overflow_then_secondary_and_preserves_primary_order() {
+        use super::{ActionRank, RankedToolbarSlot, fit_ranked_toolbar};
+
+        let slots = [
+            RankedToolbarSlot { rank: ActionRank::Secondary, desired_width_pt: 56.0 }, // 0: + New
+            RankedToolbarSlot { rank: ActionRank::Overflow, desired_width_pt: 52.0 },  // 1: Undo
+            RankedToolbarSlot { rank: ActionRank::Overflow, desired_width_pt: 52.0 },  // 2: Redo
+            RankedToolbarSlot { rank: ActionRank::Primary, desired_width_pt: 74.0 },   // 3: Analyze
+            RankedToolbarSlot { rank: ActionRank::Secondary, desired_width_pt: 82.0 }, // 4: New Graph
+            RankedToolbarSlot { rank: ActionRank::Overflow, desired_width_pt: 96.0 },  // 5: Convert
+        ];
+
+        let wide = fit_ranked_toolbar(600.0, 6.0, 34.0, 28.0, 8, &slots);
+        assert_eq!(wide.visible_indices, vec![0, 1, 2, 3, 4, 5]);
+        assert!(wide.overflow_indices.is_empty());
+
+        // Medium width: Overflow items (5, 2, 1) drop before Secondary (0, 4) or Primary (3)!
+        let medium = fit_ranked_toolbar(265.0, 6.0, 34.0, 28.0, 8, &slots);
+        assert_eq!(medium.visible_indices, vec![0, 3, 4], "expected [+ New, Analyze, New Graph] preserved in order");
+        assert_eq!(medium.overflow_indices, vec![1, 2, 5]);
+        assert!(medium.used_width_pt <= 265.0);
+
+        // Tight width: only Primary (3: Analyze) survives alongside `⋯`!
+        let tight = fit_ranked_toolbar(120.0, 6.0, 34.0, 28.0, 8, &slots);
+        assert_eq!(tight.visible_indices, vec![3], "Primary action must survive last");
+        assert_eq!(tight.overflow_indices, vec![0, 1, 2, 4, 5]);
     }
 }

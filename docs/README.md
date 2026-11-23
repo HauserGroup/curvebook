@@ -26,6 +26,7 @@ Read [AGENTS.md](../AGENTS.md), [known pitfalls](pitfalls.md), [engineering pitf
 | [Development](development.md) | Prerequisites, building from source, everyday commands, tests, coverage, and local configuration |
 | [Continuous integration](ci.md) | CI stages, shared test binaries, deadlines, and local verification |
 | [Architecture](architecture.md) | Crate layers and dependency boundaries |
+| [Design language](design-language.md) | OKLab/OKLCH derived UI tokens, data-first colour rule, fixed scales, action hierarchy, and CI enforcement gates |
 | [Extending CurveBook](extending.md) | Where and how to add commands, analyses, models, formats, cursors, locales, migrations, and assets |
 | [Command IDs](command-ids.md) and [command reference](commands.md) | Naming and replay stability; generated engine command catalog (`cargo xtask commands`) |
 | [File formats](file-formats.md) and [schemas](schemas/) | Persisted formats, versions, and migrations; generated JSON schemas (`cargo xtask schemas`) |
@@ -45,7 +46,7 @@ Read [AGENTS.md](../AGENTS.md), [known pitfalls](pitfalls.md), [engineering pitf
 | Curve fitting | [Curve-fitting evidence](evidence/curve-fitting.md) |
 | Graphing | [Graphing evidence](evidence/graphing.md) |
 | Interchange | [File-format evidence](evidence/file-formats.md) |
-| User interface | [User-interface evidence](evidence/user-interface.md), [GUI workflows](gui-workflows.md), [GUI layout specification](planning/gui-layout-spec.md), and [overlap & target-size audit](planning/ui-overlap-and-target-size-audit.md) |
+| User interface | [User-interface evidence](evidence/user-interface.md), [GUI workflows](gui-workflows.md), [GUI layout specification](planning/gui-layout-spec.md), and [overlap, target-size & clutter audit](planning/ui-overlap-and-target-size-audit.md) |
 | Platforms | [Platform evidence](evidence/platforms.md) |
 | Localization | [Localization evidence](evidence/localization.md) |
 | Quality of life | [Quality-of-life enhancements](planning/qol-enhancements.md) and [calculator reference](planning/calculators-and-quick-stats.md) |

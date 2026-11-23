@@ -26,7 +26,8 @@ use super::shared::{
     alt_row_fill, any_pointer_click_in, clamp_multi_scroll, clear_grid_drag_anchor_if_released, compute_multi_geom, compute_multi_scrollbar_rects,
     compute_visible_range, ensure_solid_scrollbar_style, format_cell_into_with_decimals, forward_frozen_wheel, handle_cell_pointer_drag_select,
     initial_edit_text_for_cell, is_linked_region_broken, is_multi_click_edit, link_border_color32, multi_text_style, paint_exclusion_corner_marker,
-    paint_linked_perimeter_edges, record_meta_if_enabled, render_ellipsized_text, set_grid_focus_active, table_display_decimals,
+    paint_linked_perimeter_edges, record_meta_if_enabled, record_meta_with_unclipped_if_enabled, render_ellipsized_text, set_grid_focus_active,
+    table_display_decimals,
 };
 use super::shortcuts::{
     clear_x_clipboard_cache, copy_x_cell_to_clipboard, handle_multi_keyboard_shortcuts, push_x_cell_text_paste_intents,
@@ -216,7 +217,8 @@ fn render_multi_gutter_body(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut M
                 }
             }
 
-            let rt_r = Rect::from_min_max(pos2(x_mid, y0), pos2(x1, y1)).intersect(g_rect);
+            let rt_raw = Rect::from_min_max(pos2(x_mid, y0), pos2(x1, y1));
+            let rt_r = rt_raw.intersect(g_rect);
             if rt_r.height() > 1.0 {
                 let row_title = row_title_at(&ds.archetype, row);
                 if geom.row_titles_collapsed {
@@ -266,11 +268,12 @@ fn render_multi_gutter_body(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut M
                         );
                         let acc_rt = if row_title.is_empty() { format!("Row {} Title", row + 1) } else { row_title.clone() };
                         resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, rt_editable, acc_rt.clone()));
-                        record_meta_if_enabled(
+                        record_meta_with_unclipped_if_enabled(
                             gui,
                             fstate.meta,
                             fstate.state.record_inspect_meta,
                             &resp,
+                            rt_raw,
                             FrameInspectEntryInput {
                                 widget_id: &wid,
                                 role: "button",

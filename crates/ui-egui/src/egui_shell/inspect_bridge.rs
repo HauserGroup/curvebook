@@ -133,10 +133,12 @@ pub fn finalize_egui_modal_response<T>(
         value: None,
         enabled: true,
         disabled_reason: None,
+        unclipped_rect: viewport,
         clipped_rect: viewport,
         z_layer: ZLayer::ModalBackdrop,
         ellipsized: false,
         full_label: None,
+        action_rank: None,
     });
 
     let pointer_pos = ctx.input(|i| i.pointer.latest_pos().or_else(|| i.pointer.interact_pos()));
@@ -171,10 +173,12 @@ pub fn finalize_egui_modal_response<T>(
         value: None,
         enabled: true,
         disabled_reason: None,
+        unclipped_rect: dlg_rect,
         clipped_rect: meta.viewport_rect.intersect(dlg_rect),
         z_layer: spec.z_dialog,
         ellipsized: false,
         full_label: None,
+        action_rank: None,
     });
 
     ModalCaptureReport { dialog_rect_pt: Some(dlg_rect), outside_click_captured, outside_wheel_captured }

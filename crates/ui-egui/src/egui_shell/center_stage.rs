@@ -27,7 +27,7 @@ use crate::egui_shell::welcome_hub::render_welcome_hub;
 use crate::egui_shell::widgets::dropdown;
 use crate::egui_shell::{
     EguiShellViewState, FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, ResponsiveShellLayout, SplitOrientation, Tokens, UiIntent,
-    doc_sheet_title, rgba8_to_color32,
+    color32_to_rgba8, doc_sheet_title, rgba8_to_color32,
 };
 use crate::i18n::{tr, tr_or_fallback};
 use crate::inspect::ZLayer;
@@ -44,7 +44,6 @@ const FLOATING_NOTE_MIN_W_PT: f32 = 160.0;
 const FLOATING_NOTE_MIN_H_PT: f32 = 76.0;
 const FLOATING_NOTE_MARGIN_PT: f32 = 6.0;
 const GALLERY_DEFAULT_CARD_W_PT: f32 = 168.0;
-const WARNING_ACCENT_LIGHT: Color32 = Color32::from_rgb(200, 120, 16);
 
 /// Resolved presentation mode for the primary `CenterStage` pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -1662,13 +1661,13 @@ fn render_bottom_banner(
 ) {
     let BottomBannerSpec { kind, rect, tokens, enabled } = spec;
     let locale = app.locale.as_str();
-    let warn_bg = if tokens.dark { Color32::from_rgb(66, 48, 22) } else { Color32::from_rgb(255, 245, 224) };
+    let warn_bg = rgba8_to_color32(curvebook_palette::lerp_oklab(color32_to_rgba8(tokens.surface_bg), color32_to_rgba8(tokens.warning), 0.14));
     let (bg, border, text_color) = match kind {
         BottomBannerKind::ResultDiagnostic { banner, .. } => {
             let warn = matches!(banner.severity, curvebook_doc::ChecklistStatus::Violated | curvebook_doc::ChecklistStatus::Warn);
-            if warn { (warn_bg, WARNING_ACCENT_LIGHT, tokens.text_primary) } else { (tokens.active_bg, tokens.accent, tokens.text_primary) }
+            if warn { (warn_bg, tokens.warning, tokens.text_primary) } else { (tokens.active_bg, tokens.accent, tokens.text_primary) }
         }
-        BottomBannerKind::GraphClipping { .. } => (warn_bg, WARNING_ACCENT_LIGHT, tokens.text_primary),
+        BottomBannerKind::GraphClipping { .. } => (warn_bg, tokens.warning, tokens.text_primary),
         BottomBannerKind::DataLinkedRegion { .. } => (tokens.active_bg, tokens.accent, tokens.text_primary),
     };
 
@@ -2001,16 +2000,18 @@ fn render_floating_notes_overlay(
                     }
                 }
 
+                let note_ink = rgba8_to_color32(crate::theme::UiThemeSpec::light().text_primary);
                 area_ui.painter().text(
-                    drag_rect.left_center() + vec2(6.0, 0.0),
+                    drag_rect.left_center() + vec2(tokens.metrics.space_sm, 0.0),
                     egui::Align2::LEFT_CENTER,
                     format!("Note · {note_id}"),
                     FontId::proportional(tokens.metrics.font_ui_small_pt),
-                    Color32::from_rgb(35, 32, 24),
+                    note_ink,
                 );
 
-                let pin_rect = Rect::from_min_size(pos2(hdr_rect.right() - 52.0, hdr_rect.top() + 3.0), vec2(22.0, 20.0));
-                let col_rect = Rect::from_min_size(pos2(hdr_rect.right() - 26.0, hdr_rect.top() + 3.0), vec2(22.0, 20.0));
+                let btn_side = tokens.metrics.min_hit_target_pt;
+                let pin_rect = Rect::from_min_size(pos2(hdr_rect.right() - 54.0, hdr_rect.top() + 1.0), Vec2::splat(btn_side));
+                let col_rect = Rect::from_min_size(pos2(hdr_rect.right() - 26.0, hdr_rect.top() + 1.0), Vec2::splat(btn_side));
 
                 let pin_resp = area_ui.interact(
                     pin_rect,
@@ -2028,7 +2029,7 @@ fn render_floating_notes_overlay(
                     egui::Align2::CENTER_CENTER,
                     if pinned { "P*" } else { "P" },
                     FontId::proportional(tokens.metrics.font_ui_small_pt),
-                    Color32::from_rgb(35, 32, 24),
+                    note_ink,
                 );
                 if pin_resp.clicked() && enabled {
                     views.center_stage.note_pinned.insert(key.clone(), !pinned);
@@ -2046,8 +2047,8 @@ fn render_floating_notes_overlay(
                     col_rect.center(),
                     egui::Align2::CENTER_CENTER,
                     if collapsed { "+" } else { "−" },
-                    FontId::proportional(12.0),
-                    Color32::from_rgb(35, 32, 24),
+                    FontId::proportional(tokens.metrics.font_ui_small_pt),
+                    note_ink,
                 );
                 if col_resp.clicked() && enabled {
                     views.center_stage.note_collapsed.insert(key.clone(), !collapsed);
@@ -2056,17 +2057,17 @@ fn render_floating_notes_overlay(
 
                 if !collapsed {
                     let body_rect = Rect::from_min_max(
-                        pos2(frame_rect.left() + 8.0, hdr_rect.bottom() + 4.0),
-                        pos2(frame_rect.right() - 8.0, frame_rect.bottom() - 14.0),
+                        pos2(frame_rect.left() + tokens.metrics.space_md, hdr_rect.bottom() + tokens.metrics.space_xs),
+                        pos2(frame_rect.right() - tokens.metrics.space_md, frame_rect.bottom() - 14.0),
                     );
                     let expanded = expand_template_hooks(&note.body_markdown, |tok| resolve_stage_hook(doc, tok));
                     let body_galley = area_ui.painter().layout(
                         expanded,
                         FontId::proportional(tokens.metrics.font_ui_small_pt),
-                        Color32::from_rgb(35, 32, 24),
+                        note_ink,
                         body_rect.width().max(40.0),
                     );
-                    area_ui.painter().with_clip_rect(body_rect).galley(body_rect.min, body_galley, Color32::from_rgb(35, 32, 24));
+                    area_ui.painter().with_clip_rect(body_rect).galley(body_rect.min, body_galley, note_ink);
 
                     let resize_rect = Rect::from_min_max(pos2(frame_rect.right() - 14.0, frame_rect.bottom() - 14.0), frame_rect.max);
                     let resize_resp = area_ui.interact(

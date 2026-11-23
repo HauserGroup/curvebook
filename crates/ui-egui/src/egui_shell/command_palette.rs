@@ -115,10 +115,12 @@ pub fn render_command_palette(
         value: None,
         enabled: true,
         disabled_reason: None,
+        unclipped_rect: screen_rect,
         clipped_rect: screen_rect,
         z_layer: ZLayer::ModalBackdrop,
         ellipsized: false,
         full_label: None,
+        action_rank: None,
     });
 
     if backdrop_resp.clicked() {
@@ -237,10 +239,12 @@ pub fn render_command_palette(
             value: Some(json!(state.selected_index)),
             enabled: true,
             disabled_reason: None,
+            unclipped_rect: dialog_rect,
             clipped_rect: dialog_rect,
             z_layer: ZLayer::ModalDialog,
             ellipsized: false,
             full_label: None,
+            action_rank: None,
         });
         capture_outside_pointer_and_wheel(ctx, dialog_rect, &mut report);
     }

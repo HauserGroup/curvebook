@@ -11,7 +11,9 @@ use crate::UiApp;
 use crate::inspect::ZLayer;
 
 use super::super::FrameInspectEntryInput;
-use super::shared::{MultiGridCtx, MultiGridFrameState, multi_text_style, record_meta_if_enabled, render_ellipsized_text};
+use super::shared::{
+    MultiGridCtx, MultiGridFrameState, multi_text_style, record_meta_if_enabled, record_meta_with_unclipped_if_enabled, render_ellipsized_text,
+};
 
 pub(super) fn active_mv_formula_operands(app: &UiApp, ds: &DataSheet) -> HashSet<usize> {
     let mut out = HashSet::new();
@@ -43,6 +45,7 @@ pub(super) fn render_mv_tier3_role_chip(
     col: usize,
     var: &VariableColumn,
     rect: Rect,
+    unclipped_rect: Rect,
 ) {
     let tokens = mctx.tokens;
     let blocked = mctx.blocked;
@@ -67,18 +70,22 @@ pub(super) fn render_mv_tier3_role_chip(
     let label = if !is_calc && var.role_inferred { format!("Auto·{chip_txt}") } else { chip_txt.to_owned() };
     let wid = format!("mv_formula.role_badge.{col}");
     let resp = ui.interact(rect, ui.make_persistent_id(&wid), if blocked { Sense::hover() } else { Sense::click() });
+    let pill_rect = rect.shrink(tokens.metrics.space_xxs);
     let alpha = if is_calc || !var.role_inferred { 0.22 } else { 0.10 };
-    ui.painter().rect_filled(rect, 2.0, chip_col.linear_multiply(alpha));
-    let stroke_w = if !is_calc && var.role_inferred { 1.0 } else { 1.5 };
-    ui.painter().rect_stroke(rect, 2.0, Stroke::new(stroke_w, chip_col), StrokeKind::Inside);
+    if pill_rect.is_positive() {
+        ui.painter().rect_filled(pill_rect, tokens.metrics.radius_sm, chip_col.linear_multiply(alpha));
+        let stroke_w = if !is_calc && var.role_inferred { tokens.metrics.stroke_thin_pt } else { 1.5 };
+        ui.painter().rect_stroke(pill_rect, tokens.metrics.radius_sm, Stroke::new(stroke_w, chip_col), StrokeKind::Inside);
+    }
     render_ellipsized_text(ui, rect.shrink2(vec2(4.0, 0.0)), &label, multi_text_style(11.5, false, chip_col, Align::Center, is_calc, false));
     let acc = format!("Variable {} role: {label}", var.title);
     resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, !blocked, acc.clone()));
-    record_meta_if_enabled(
+    record_meta_with_unclipped_if_enabled(
         ui,
         fstate.meta,
         fstate.state.record_inspect_meta,
         &resp,
+        unclipped_rect,
         FrameInspectEntryInput {
             widget_id: &wid,
             role: "button",

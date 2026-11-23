@@ -1822,8 +1822,8 @@ fn compute_badge_strip_width(entry: &NavigatorEntry) -> f32 {
 fn paint_row_badges(painter: &egui::Painter, rect: Rect, entry: &NavigatorEntry, tokens: &Tokens, _locale: &str) {
     let mut x_right = rect.right() - 4.0;
     if let Some(tag) = entry.color_tag {
-        let r = Rect::from_min_size(Pos2::new(x_right - 4.0, rect.center().y - 5.0), Vec2::new(4.0, 10.0));
-        painter.rect_filled(r, CornerRadius::same(1), Color32::from_rgba_unmultiplied(tag.r, tag.g, tag.b, tag.a));
+        let r = Rect::from_min_size(Pos2::new(x_right - 4.0, rect.center().y - 5.0), Vec2::new(tokens.metrics.space_xs, 10.0)); // design-token-exempt: compact colour-tag pip
+        painter.rect_filled(r, CornerRadius::same(1), crate::egui_shell::rgba8_to_color32(tag));
         x_right -= 7.0;
     }
     if entry.is_dirty {

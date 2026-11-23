@@ -3,12 +3,15 @@
 use std::collections::BTreeSet;
 
 use curvebook_doc::{AnalysisKind, CiBound, PValueFormat, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SheetId};
-use egui::{Color32, CornerRadius, FontId, Id, Key, Modifiers, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
+use curvebook_palette::lerp_oklab;
+use egui::{Color32, CornerRadius, FontId, Id, Key, Modifiers, Order, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::json;
 
 use crate::UiApp;
 use crate::dialogs_canvas::ResultSheetViewState;
-use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens};
+use crate::egui_shell::{
+    FrameInspectEntryInput, FrameInspectMeta, FrameInspectNodeMeta, PendingUiIntents, Tokens, color32_to_rgba8, rgba8_to_color32,
+};
 use crate::i18n::tr_or_fallback;
 use crate::inspect::ZLayer;
 use crate::tr;
@@ -64,6 +67,7 @@ pub struct ResultsViewEguiState {
     pub context_menu: Option<(SheetId, usize, Pos2)>,
     pub collapsed_sections: BTreeSet<String>,
     pub tab_strip_scroll_x: f32,
+    pub tab_overflow_open: bool,
 }
 
 impl ResultsViewEguiState {
@@ -310,38 +314,12 @@ pub fn render_results_view_for_sheet(
 
             ui.separator();
 
-            // < > stepper buttons
-            let can_prev = enabled && tab_count > 1 && active_idx > 0;
-            let prev_resp = ui.add_enabled(can_prev, egui::Button::new("<").min_size(Vec2::new(24.0, 24.0)));
-            meta.record_response(
-                ui,
-                &prev_resp,
-                FrameInspectEntryInput {
-                    widget_id: "result.tabs.prev",
-                    role: "button",
-                    label: tr_or_fallback(&app.locale, "results.prev_tabs", "Previous Tab"),
-                    command_id: None,
-                    value: None,
-                    enabled: can_prev,
-                    disabled_reason: (!can_prev).then_some("At first result tab"),
-                    z_layer: ZLayer::Workspace,
-                    ellipsized: false,
-                    full_label: None,
-                },
-            );
-            if prev_resp.clicked() && can_prev {
-                let next_i = active_idx.saturating_sub(1);
-                intents.push_select_result_tab(next_i);
-                state.tab_strip_scroll_x = (state.tab_strip_scroll_x - 100.0).max(0.0);
-            }
-
-            let next_btn_w = 26.0;
-            let strip_w = (ui.available_width() - next_btn_w - 6.0).max(0.0);
+            let avail_strip_w = ui.available_width().max(0.0);
             let max_tab_cap = if tab_count > 5 { 96.0 } else { 120.0 };
-            let max_tab_w = (strip_w - 4.0).clamp(36.0, max_tab_cap);
-            let gap = 4.0_f32;
+            let provisional_max_tab_w = (avail_strip_w - 4.0).clamp(36.0, max_tab_cap);
+            let gap = tokens.metrics.space_xs;
             let tab_font = FontId::proportional(tokens.metrics.font_ui_small_pt);
-            let tab_text_budget = (max_tab_w - 14.0).max(8.0);
+            let tab_text_budget = (provisional_max_tab_w - 14.0).max(8.0);
             let mut tab_layouts = Vec::with_capacity(tab_count);
             let mut cur_x = 0.0_f32;
             for (idx, tab) in rs.tabs.iter().enumerate() {
@@ -352,11 +330,15 @@ pub fn render_results_view_for_sheet(
                 job.wrap =
                     egui::text::TextWrapping { max_width: tab_text_budget, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
                 let g = ui.fonts_mut(|f| f.layout_job(job));
-                let w = (g.size().x + 14.0).clamp(36.0_f32.min(max_tab_w), max_tab_w);
+                let w = (g.size().x + 14.0).clamp(36.0_f32.min(provisional_max_tab_w), provisional_max_tab_w);
                 tab_layouts.push((idx, tab, cur_x, w));
                 cur_x += w + gap;
             }
             let total_tabs_w = (cur_x - gap).max(0.0);
+            let overflow_btn_w = 50.0_f32;
+            let needs_overflow = tab_count > 1 && total_tabs_w > avail_strip_w + 0.5;
+            let strip_w = if needs_overflow { (avail_strip_w - overflow_btn_w - tokens.metrics.space_sm).max(0.0) } else { avail_strip_w };
+
             let max_scroll_x = (total_tabs_w - strip_w).max(0.0);
             state.tab_strip_scroll_x = state.tab_strip_scroll_x.clamp(0.0, max_scroll_x);
             if let Some((_, _, ax0, aw)) = tab_layouts.get(active_idx) {
@@ -368,134 +350,86 @@ pub fn render_results_view_for_sheet(
                 }
             }
 
-            let strip_rect = ui.allocate_space(vec2(strip_w, 24.0)).1;
-            let strip_clip = strip_rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect);
-            if strip_w >= 28.0 && strip_clip.is_positive() {
-                ui.scope_builder(egui::UiBuilder::new().max_rect(strip_rect), |ui| {
-                    ui.set_clip_rect(strip_clip);
-                    for (idx, tab, x0, w) in &tab_layouts {
-                        let selected = *idx == active_idx;
-                        let tab_rect =
-                            Rect::from_min_size(pos2(strip_rect.left() - state.tab_strip_scroll_x + *x0, strip_rect.top() + 1.0), vec2(*w, 22.0));
-                        let vis = tab_rect.intersect(strip_clip);
-                        if !vis.is_positive() || vis.width() < 28.0 || vis.height() < 8.0 {
-                            continue;
-                        }
-                        let resp = ui.interact(
-                            vis,
-                            ui.make_persistent_id(("egui_shell.result_tab", rs.id.as_str(), *idx)),
-                            if enabled { Sense::click() } else { Sense::hover() },
-                        );
-                        let bg = if !enabled {
-                            tokens.panel_bg
-                        } else if selected {
-                            tokens.active_bg
-                        } else if resp.hovered() {
-                            tokens.hover_bg
-                        } else {
-                            tokens.surface_bg
-                        };
-                        let fg = if !enabled {
-                            tokens.text_disabled
-                        } else if selected {
-                            tokens.text_strong
-                        } else {
-                            tokens.text_primary
-                        };
-                        let border = if !enabled {
-                            tokens.divider
-                        } else if selected {
-                            tokens.accent_strong
-                        } else {
-                            tokens.border
-                        };
-                        let painter = ui.painter().with_clip_rect(vis);
-                        painter.rect_filled(vis, CornerRadius::same(4), bg);
-                        painter.rect_stroke(vis, CornerRadius::same(4), Stroke::new(1.0, border), StrokeKind::Inside);
-
-                        let pad_x = 6.0_f32;
-                        let avail_text_w = (vis.width() - pad_x * 2.0).max(4.0);
-                        let mut job = egui::text::LayoutJob::single_section(
-                            tab.title.clone(),
-                            egui::text::TextFormat { font_id: tab_font.clone(), color: fg, ..Default::default() },
-                        );
-                        job.wrap =
-                            egui::text::TextWrapping { max_width: avail_text_w, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
-                        let galley = ui.fonts_mut(|f| f.layout_job(job));
-                        let ellipsized = galley.elided;
-                        if galley.size().x <= vis.width() - pad_x || ellipsized {
-                            let tx = if galley.size().x + pad_x * 2.0 <= vis.width() {
-                                (vis.center().x - galley.size().x * 0.5).max(vis.left() + pad_x)
-                            } else {
-                                vis.left() + pad_x
-                            };
-                            let ty = vis.center().y - galley.size().y * 0.5;
-                            painter.galley(pos2(tx, ty), galley, fg);
-                        }
-
-                        let ak_title = tab.title.clone();
-                        resp.widget_info(move || egui::WidgetInfo::selected(egui::Role::Tab, enabled, selected, ak_title.clone()));
-                        let resp = if !enabled {
-                            resp.on_hover_text("modal dialog is active")
-                        } else if ellipsized {
-                            resp.on_hover_text(&tab.title)
-                        } else {
-                            resp
-                        };
-
-                        let wid = format!("result.tab.{}", tab.id);
-                        meta.record_response(
-                            ui,
-                            &resp,
-                            FrameInspectEntryInput {
-                                widget_id: &wid,
-                                role: "tab",
-                                label: &tab.title,
-                                command_id: None,
-                                value: Some(json!({ "selected": selected, "index": *idx, "tab_id": tab.id })),
-                                enabled,
-                                disabled_reason: (!enabled).then_some("modal dialog is active"),
-                                z_layer: ZLayer::Workspace,
-                                ellipsized,
-                                full_label: ellipsized.then_some(tab.title.as_str()),
-                            },
-                        );
-                        if resp.clicked() && enabled && !selected {
-                            intents.push_select_result_tab(*idx);
-                        }
-                    }
-                });
+            let tab_h = tokens.metrics.min_hit_target_pt;
+            let (strip_rect, strip_resp) = ui.allocate_exact_size(vec2(strip_w, tab_h), Sense::hover());
+            if strip_resp.hovered() && max_scroll_x > 0.0 {
+                let wheel = ui.input(|i| i.smooth_scroll_delta.x - i.smooth_scroll_delta.y);
+                if wheel.abs() > 0.1 {
+                    state.tab_strip_scroll_x = (state.tab_strip_scroll_x - wheel).clamp(0.0, max_scroll_x);
+                }
             }
 
-            let can_next = enabled && tab_count > 1 && active_idx + 1 < tab_count;
-            let next_resp = ui.add_enabled(can_next, egui::Button::new(">").min_size(Vec2::new(24.0, 24.0)));
-            meta.record_response(
-                ui,
-                &next_resp,
-                FrameInspectEntryInput {
-                    widget_id: "result.tabs.next",
-                    role: "button",
-                    label: tr_or_fallback(&app.locale, "results.next_tabs", "Next Tab"),
-                    command_id: None,
-                    value: None,
-                    enabled: can_next,
-                    disabled_reason: (!can_next).then_some("At last result tab"),
-                    z_layer: ZLayer::Workspace,
-                    ellipsized: false,
-                    full_label: None,
-                },
-            );
-            if next_resp.clicked() && can_next {
-                let next_i = (active_idx + 1).min(tab_count - 1);
-                intents.push_select_result_tab(next_i);
-                if let Some((_, _, x0, w)) = tab_layouts.get(next_i) {
-                    let x1 = *x0 + *w;
-                    if x1 > state.tab_strip_scroll_x + strip_w {
-                        state.tab_strip_scroll_x = (x1 - strip_w).clamp(0.0, max_scroll_x);
-                    }
-                } else {
-                    state.tab_strip_scroll_x = (state.tab_strip_scroll_x + 100.0).clamp(0.0, max_scroll_x);
+            let strip_clip = strip_rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect);
+            let mut hidden_tabs: Vec<(usize, String, String, f32, f32)> = Vec::new();
+            for (idx, tab, x0, w) in &tab_layouts {
+                let selected = *idx == active_idx;
+                let tab_rect = Rect::from_min_size(pos2(strip_rect.left() - state.tab_strip_scroll_x + *x0, strip_rect.top()), vec2(*w, tab_h));
+                let vis = tab_rect.intersect(strip_clip);
+                if strip_w < 28.0 || !vis.is_positive() || vis.width() < 28.0 || vis.height() < 8.0 {
+                    hidden_tabs.push((*idx, tab.id.clone(), tab.title.clone(), *x0, *w));
+                    continue;
                 }
+                if vis.width() + 2.0 < *w {
+                    hidden_tabs.push((*idx, tab.id.clone(), tab.title.clone(), *x0, *w));
+                }
+                paint_result_tab_chip(
+                    ui,
+                    &ResultTabChipSpec {
+                        sheet_id: rs.id.as_str(),
+                        idx: *idx,
+                        tab_id: &tab.id,
+                        tab_title: &tab.title,
+                        vis,
+                        selected,
+                        enabled,
+                        tokens,
+                        tab_font: &tab_font,
+                    },
+                    meta,
+                    intents,
+                );
+            }
+
+            if needs_overflow && !hidden_tabs.is_empty() {
+                let badge_lbl = format!("⋯ +{}", hidden_tabs.len());
+                let ov_tip = format!("{} (+{})", tr(&app.locale, "toolbar.overflow"), hidden_tabs.len());
+                let ov_resp = ui.add_enabled(enabled, egui::Button::new(&badge_lbl).min_size(vec2(overflow_btn_w, tab_h))).on_hover_text(&ov_tip);
+                meta.record_response(
+                    ui,
+                    &ov_resp,
+                    FrameInspectEntryInput {
+                        widget_id: "result.tabs.overflow",
+                        role: "button",
+                        label: &badge_lbl,
+                        command_id: None,
+                        value: Some(json!({ "hidden_count": hidden_tabs.len(), "open": state.tab_overflow_open })),
+                        enabled,
+                        disabled_reason: (!enabled).then_some("modal dialog is active"),
+                        z_layer: ZLayer::Workspace,
+                        ellipsized: false,
+                        full_label: Some(&ov_tip),
+                    },
+                );
+                if ov_resp.clicked() && enabled {
+                    state.tab_overflow_open = !state.tab_overflow_open;
+                }
+                if state.tab_overflow_open && enabled {
+                    render_result_tabs_overflow_popup(
+                        ui.ctx(),
+                        rs.id.as_str(),
+                        tokens,
+                        state,
+                        &hidden_tabs,
+                        active_idx,
+                        strip_w,
+                        max_scroll_x,
+                        ov_resp.rect,
+                        meta,
+                        intents,
+                    );
+                }
+            } else {
+                state.tab_overflow_open = false;
             }
         });
     });
@@ -535,20 +469,40 @@ pub fn render_results_view_for_sheet(
 
         let scroll_out = egui::ScrollArea::both()
             .id_salt(("egui_shell.results.body", rs.id.as_str(), &tab.id))
+            .scroll_bar_visibility(if enabled {
+                egui::scroll_area::ScrollBarVisibility::AlwaysVisible
+            } else {
+                egui::scroll_area::ScrollBarVisibility::AlwaysHidden
+            })
             .auto_shrink([false, false])
             .show_viewport(ui, |ui, viewport| {
                 render_result_tab_table(ui, &tab_ctx, active_idx, is_survival_summary, viewport, state, meta, intents);
                 if !tab.footnotes.is_empty() {
                     ui.add_space(6.0);
                     let fn_max_w = (body_rect.width() - 24.0).max(80.0);
-                    ui.allocate_ui(vec2(fn_max_w, 0.0), |ui| {
-                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-                        let fn_lbl = tr_or_fallback(&app.locale, "results.footnotes", "Footnotes");
-                        ui.add(egui::Label::new(RichText::new(fn_lbl).small().strong().color(tokens.text_strong)).wrap());
-                        for note in &tab.footnotes {
-                            ui.add(egui::Label::new(RichText::new(note).small().color(tokens.text_muted)).wrap());
+                    let clip_r = ui.clip_rect();
+                    let paint_clipped_note = |ui: &mut egui::Ui, salt: usize, text: &str, color: Color32, bold: bool| {
+                        let mut fmt = egui::TextFormat::simple(FontId::proportional(tokens.metrics.font_ui_small_pt), color);
+                        if bold {
+                            fmt.font_id = super::fonts::section_heading_font_id(ui.ctx(), tokens);
                         }
-                    });
+                        let mut job = egui::text::LayoutJob::single_section(text.to_owned(), fmt);
+                        job.wrap = egui::text::TextWrapping { max_width: fn_max_w, ..Default::default() };
+                        let galley = ui.painter().layout_job(job);
+                        let raw_r = ui.allocate_space(vec2(fn_max_w, galley.size().y.max(14.0))).1;
+                        let vis_r = raw_r.intersect(clip_r);
+                        if vis_r.width() >= 2.0 && vis_r.height() >= 2.0 {
+                            ui.painter().with_clip_rect(vis_r).galley(raw_r.min, galley, color);
+                            let n_resp = ui.interact(vis_r, Id::unique(("res_fn", rs.id.as_str(), &tab.id, salt)), Sense::hover());
+                            let ak_txt = text.to_owned();
+                            n_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Label, true, ak_txt.clone()));
+                        }
+                    };
+                    let fn_lbl = tr_or_fallback(&app.locale, "results.footnotes", "Footnotes");
+                    paint_clipped_note(ui, 0, fn_lbl, tokens.text_strong, true);
+                    for (idx, note) in tab.footnotes.iter().enumerate() {
+                        paint_clipped_note(ui, idx + 1, note, tokens.text_muted, false);
+                    }
                 }
             });
         state.scroll_offset_y = scroll_out.state.clamped_offset().y;
@@ -639,6 +593,98 @@ fn render_tab_category_bar(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
+fn render_result_tabs_overflow_popup(
+    ctx: &egui::Context,
+    sheet_id: &str,
+    tokens: &Tokens,
+    state: &mut ResultsViewEguiState,
+    hidden_tabs: &[(usize, String, String, f32, f32)],
+    active_idx: usize,
+    strip_w: f32,
+    max_scroll_x: f32,
+    anchor: Rect,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let screen = ctx.content_rect();
+    let popup_w = 220.0_f32.min((screen.width() - 16.0).max(120.0));
+    let est_h = (hidden_tabs.len() as f32 * 28.0 + 16.0).clamp(40.0, 260.0);
+    let px = (anchor.right() - popup_w).clamp(screen.left() + 4.0, (screen.right() - popup_w - 4.0).max(screen.left() + 4.0));
+    let py = (anchor.bottom() + tokens.metrics.space_xs).clamp(screen.top() + 4.0, (screen.bottom() - est_h - 4.0).max(screen.top() + 4.0));
+    let area_id = Id::unique(("egui_shell.result_tabs.overflow", sheet_id));
+
+    let area = egui::Area::new(area_id).fixed_pos(pos2(px, py)).order(Order::Foreground).show(ctx, |ui| {
+        egui::Frame::NONE
+            .fill(tokens.panel_bg)
+            .stroke(Stroke::new(tokens.metrics.stroke_thin_pt, tokens.border))
+            .corner_radius(CornerRadius::same(tokens.metrics.radius_lg))
+            .inner_margin(egui::Margin::same(tokens.metrics.space_sm as i8))
+            .show(ui, |ui| {
+                ui.set_min_width((popup_w - 12.0).max(96.0));
+                ui.spacing_mut().item_spacing.y = tokens.metrics.space_xs;
+                for (idx, tab_id, title, x0, w) in hidden_tabs {
+                    let selected = *idx == active_idx;
+                    let item_resp = ui.add_sized(
+                        vec2(ui.available_width().max(80.0), tokens.metrics.min_hit_target_pt),
+                        egui::Button::selectable(selected, title.as_str()),
+                    );
+                    let wid = format!("result.tab.overflow.{tab_id}");
+                    meta.record_response(
+                        ui,
+                        &item_resp,
+                        FrameInspectEntryInput {
+                            widget_id: &wid,
+                            role: "menuitem",
+                            label: title,
+                            command_id: None,
+                            value: Some(json!({ "selected": selected, "index": *idx, "tab_id": tab_id })),
+                            enabled: true,
+                            disabled_reason: None,
+                            z_layer: ZLayer::DropdownMenu,
+                            ellipsized: false,
+                            full_label: None,
+                        },
+                    );
+                    if item_resp.clicked() {
+                        intents.push_select_result_tab(*idx);
+                        let x1 = *x0 + *w;
+                        state.tab_strip_scroll_x = (x1 - strip_w).max(*x0).clamp(0.0, max_scroll_x);
+                        state.tab_overflow_open = false;
+                    }
+                }
+            });
+    });
+
+    let popup_rect = area.response.rect.intersect(meta.viewport_rect);
+    if popup_rect.is_positive() {
+        area.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Menu, true, String::from("More Tabs")));
+        meta.record(FrameInspectNodeMeta {
+            egui_id: area.response.id,
+            accesskit_id: area.response.id.accesskit_id(),
+            widget_id: String::from("popup.result.tabs.overflow"),
+            role: String::from("menu"),
+            label: String::from("More Tabs"),
+            command_id: None,
+            value: Some(json!(true)),
+            enabled: true,
+            disabled_reason: None,
+            unclipped_rect: area.response.rect,
+            clipped_rect: popup_rect,
+            z_layer: ZLayer::DropdownMenu,
+            ellipsized: false,
+            full_label: None,
+            action_rank: None,
+        });
+    }
+
+    let outside_clicked =
+        ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !area.response.rect.contains(p) && !anchor.contains(p)));
+    if outside_clicked {
+        state.tab_overflow_open = false;
+    }
+}
+
 fn render_ambiguity_callout(
     ui: &mut egui::Ui,
     rs: &ResultSheet,
@@ -648,13 +694,14 @@ fn render_ambiguity_callout(
     intents: &mut PendingUiIntents,
 ) {
     let banner_rect = ui.allocate_space(vec2(ui.available_width().max(1.0), 28.0)).1;
-    let fill = if tokens.dark { egui::Color32::from_rgb(66, 48, 22) } else { egui::Color32::from_rgb(255, 247, 224) };
-    let border = tokens.role_cat;
+    let fill = rgba8_to_color32(lerp_oklab(color32_to_rgba8(tokens.surface_bg), color32_to_rgba8(tokens.warning), 0.14));
+    let border = tokens.warning;
     ui.painter().rect_filled(banner_rect, CornerRadius::ZERO, fill);
-    ui.painter().rect_stroke(banner_rect, CornerRadius::ZERO, Stroke::new(1.0, border), StrokeKind::Inside);
+    ui.painter().rect_stroke(banner_rect, CornerRadius::ZERO, Stroke::new(tokens.metrics.stroke_thin_pt, border), StrokeKind::Inside);
 
-    ui.scope_builder(egui::UiBuilder::new().max_rect(banner_rect.shrink2(vec2(8.0, 2.0))), |ui| {
+    ui.scope_builder(egui::UiBuilder::new().max_rect(banner_rect.shrink2(vec2(tokens.metrics.space_md, tokens.metrics.space_xxs))), |ui| {
         ui.set_clip_rect(banner_rect);
+        ui.expand_to_include_rect(banner_rect);
         ui.horizontal(|ui| {
             let msg = "??? Ambiguous / Wide CI: Profile-likelihood or covariance bounds did not close; inspect parameter constraints.";
             let lbl = ui.add(egui::Label::new(RichText::new(msg).small().color(tokens.text_strong)).truncate());
@@ -793,9 +840,10 @@ fn render_result_section_row(
     let sec_ak = sec_text.clone();
     sec_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, enabled, sec_ak.clone()));
     let sec_wid = format!("result.section.{r_idx}");
-    meta.record_response(
+    meta.record_response_with_unclipped(
         ui,
         &sec_resp,
+        sec_rect,
         FrameInspectEntryInput {
             widget_id: &sec_wid,
             role: "button",
@@ -1310,4 +1358,104 @@ fn ensure_solid_scrollbar_style(ui: &mut egui::Ui, tokens: &Tokens) {
     scroll.bar_width = tokens.metrics.scroll_bar_thickness.max(10.0);
     scroll.bar_inner_margin = 2.0;
     scroll.bar_outer_margin = 2.0;
+}
+
+struct ResultTabChipSpec<'a> {
+    sheet_id: &'a str,
+    idx: usize,
+    tab_id: &'a str,
+    tab_title: &'a str,
+    vis: Rect,
+    selected: bool,
+    enabled: bool,
+    tokens: &'a Tokens,
+    tab_font: &'a FontId,
+}
+
+fn paint_result_tab_chip(ui: &mut egui::Ui, spec: &ResultTabChipSpec<'_>, meta: &mut FrameInspectMeta, intents: &mut PendingUiIntents) {
+    let tokens = spec.tokens;
+    let vis = spec.vis;
+    let resp = ui.interact(
+        vis,
+        ui.make_persistent_id(("egui_shell.result_tab", spec.sheet_id, spec.idx)),
+        if spec.enabled { Sense::click() } else { Sense::hover() },
+    );
+    let bg = if !spec.enabled {
+        tokens.panel_bg
+    } else if spec.selected {
+        tokens.active_bg
+    } else if resp.hovered() {
+        tokens.hover_bg
+    } else {
+        tokens.surface_bg
+    };
+    let fg = if !spec.enabled {
+        tokens.text_disabled
+    } else if spec.selected {
+        tokens.text_strong
+    } else {
+        tokens.text_primary
+    };
+    let border = if !spec.enabled {
+        tokens.divider
+    } else if spec.selected {
+        tokens.accent_strong
+    } else {
+        tokens.border
+    };
+    let painter = ui.painter().with_clip_rect(vis);
+    painter.rect_filled(vis, CornerRadius::same(tokens.metrics.radius_md), bg);
+    painter.rect_stroke(vis, CornerRadius::same(tokens.metrics.radius_md), Stroke::new(tokens.metrics.stroke_thin_pt, border), StrokeKind::Inside);
+
+    let pad_x = tokens.metrics.space_sm;
+    let avail_text_w = (vis.width() - pad_x * 2.0).max(4.0);
+    let mut job = egui::text::LayoutJob::single_section(
+        spec.tab_title.to_owned(),
+        egui::text::TextFormat { font_id: spec.tab_font.clone(), color: fg, ..Default::default() },
+    );
+    job.wrap = egui::text::TextWrapping { max_width: avail_text_w, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
+    let ellipsized = galley.elided;
+    if galley.size().x <= vis.width() - pad_x || ellipsized {
+        let tx = if galley.size().x + pad_x * 2.0 <= vis.width() {
+            (vis.center().x - galley.size().x * 0.5).max(vis.left() + pad_x)
+        } else {
+            vis.left() + pad_x
+        };
+        let ty = vis.center().y - galley.size().y * 0.5;
+        painter.galley(pos2(tx, ty), galley, fg);
+    }
+
+    let enabled = spec.enabled;
+    let selected = spec.selected;
+    let ak_title = spec.tab_title.to_owned();
+    resp.widget_info(move || egui::WidgetInfo::selected(egui::Role::Tab, enabled, selected, ak_title.clone()));
+    let resp = if !enabled {
+        resp.on_hover_text("modal dialog is active")
+    } else if ellipsized {
+        resp.on_hover_text(spec.tab_title)
+    } else {
+        resp
+    };
+
+    let wid = format!("result.tab.{}", spec.tab_id);
+    meta.record_response(
+        ui,
+        &resp,
+        FrameInspectEntryInput {
+            widget_id: &wid,
+            role: "tab",
+            label: spec.tab_title,
+            command_id: None,
+            value: Some(json!({ "selected": selected, "index": spec.idx, "tab_id": spec.tab_id })),
+            enabled,
+            disabled_reason: (!enabled).then_some("modal dialog is active"),
+            z_layer: ZLayer::Workspace,
+            ellipsized,
+            full_label: ellipsized.then_some(spec.tab_title),
+        },
+    );
+    if resp.clicked() && enabled && !selected {
+        intents.push_select_result_tab(spec.idx);
+    }
 }
