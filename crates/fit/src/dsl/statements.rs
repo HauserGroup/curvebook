@@ -211,8 +211,29 @@ pub(in crate::dsl) enum DslSection {
     Transforms,
 }
 
-pub(in crate::dsl) const INIT_STAT_NAMES: [&str; 11] =
-    ["YMIN", "YMAX", "XMIN", "XMAX", "XMID", "YMID", "XATYMIN", "XATYMAX", "XATY50", "SPAN", "SIGN"];
+pub(in crate::dsl) const INIT_STAT_NAMES: [&str; 21] = [
+    "YMIN",
+    "YMAX",
+    "XMIN",
+    "XMAX",
+    "XMID",
+    "YMID",
+    "XATYMIN",
+    "XATYMAX",
+    "XATY50",
+    "XATYMID",
+    "YATXMIN",
+    "YATXMID",
+    "YATXMAX",
+    "SPAN",
+    "SIGN",
+    "INITIALVALUE",
+    "MEANCOLUMNTITLE",
+    "LOGMEANCOLUMNTITLE",
+    "SLOPEATXMIN",
+    "SLOPEATXMID",
+    "SLOPEATXMAX",
+];
 
 pub(in crate::dsl) type OutputBranch = (DatasetFilter, Vec<(String, Expr)>, Expr);
 pub(in crate::dsl) type OdeInitBranch = (DatasetFilter, f64, Vec<(String, Expr)>, Expr);
@@ -1032,10 +1053,138 @@ pub(in crate::dsl) fn resolve_equation_branches(
     Ok(ResolvedEquationBody { kind: final_kind, body_stmts, ode_init_branches, warnings })
 }
 
-pub(in crate::dsl) fn compute_dataset_stats(points: &[DataPoint]) -> [f64; 11] {
+fn ols_slope(pts: &[(f64, f64)]) -> f64 {
+    if pts.len() < 2 {
+        return f64::NAN;
+    }
+    if pts.len() == 2 {
+        let (Some(&(x0, y0)), Some(&(x1, y1))) = (pts.first(), pts.get(1)) else {
+            return f64::NAN;
+        };
+        let dx = x1 - x0;
+        if dx == 0.0 || !dx.is_finite() {
+            return f64::NAN;
+        }
+        let slope = (y1 - y0) / dx;
+        return if slope.is_finite() { slope } else { f64::NAN };
+    }
+    let nf = pts.len() as f64;
+    let mx = pts.iter().map(|&(x, _)| x).sum::<f64>() / nf;
+    let my = pts.iter().map(|&(_, y)| y).sum::<f64>() / nf;
+    let mut sxx = 0.0_f64;
+    let mut sxy = 0.0_f64;
+    for &(x, y) in pts {
+        let dx = x - mx;
+        sxx += dx * dx;
+        sxy += dx * (y - my);
+    }
+    if sxx > 0.0 && sxx.is_finite() && sxy.is_finite() { sxy / sxx } else { f64::NAN }
+}
+
+fn interpolate_y_at_x(sorted_pts: &[(f64, f64)], x_target: f64, eps: f64) -> f64 {
+    let mut knots: Vec<(f64, f64)> = Vec::new();
+    let mut i = 0_usize;
+    while i < sorted_pts.len() {
+        let Some(&(x_base, _)) = sorted_pts.get(i) else {
+            break;
+        };
+        let mut sum_x = 0.0_f64;
+        let mut sum_y = 0.0_f64;
+        let mut count = 0_usize;
+        while let Some(&(x, y)) = sorted_pts.get(i) {
+            if (x - x_base).abs() <= eps {
+                sum_x += x;
+                sum_y += y;
+                count += 1;
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        if count > 0 {
+            knots.push((sum_x / count as f64, sum_y / count as f64));
+        }
+    }
+    let Some(&(first_x, first_y)) = knots.first() else {
+        return f64::NAN;
+    };
+    if knots.len() == 1 || x_target <= first_x {
+        return first_y;
+    }
+    for pair in knots.windows(2) {
+        let (Some(&(x0, y0)), Some(&(x1, y1))) = (pair.first(), pair.get(1)) else {
+            continue;
+        };
+        if x0 <= x_target && x_target <= x1 {
+            let dx = x1 - x0;
+            if dx.abs() <= 1e-15 {
+                return 0.5 * (y0 + y1);
+            }
+            return y0 + (y1 - y0) * ((x_target - x0) / dx);
+        }
+    }
+    knots.last().map_or(first_y, |&(_, y)| y)
+}
+
+fn compute_empirical_slopes(sorted_pts: &[(f64, f64)]) -> (f64, f64, f64) {
+    let n = sorted_pts.len();
+    if n < 2 {
+        return (f64::NAN, f64::NAN, f64::NAN);
+    }
+    if n >= 30 {
+        let k = n / 10;
+        let mid_start = (n - k) / 2;
+        let s_min = sorted_pts.get(..k).map_or(f64::NAN, ols_slope);
+        let s_mid = sorted_pts.get(mid_start..mid_start + k).map_or(f64::NAN, ols_slope);
+        let s_max = sorted_pts.get(n - k..).map_or(f64::NAN, ols_slope);
+        (s_min, s_mid, s_max)
+    } else {
+        let s_min = sorted_pts.get(..2).map_or(f64::NAN, ols_slope);
+        let s_max = sorted_pts.get(n - 2..).map_or(f64::NAN, ols_slope);
+        let m = n / 2;
+        let mid_slice = if n.is_multiple_of(2) { sorted_pts.get(m - 1..m + 1) } else { sorted_pts.get(m - 1..m + 2) };
+        let s_mid = mid_slice.map_or(f64::NAN, ols_slope);
+        (s_min, s_mid, s_max)
+    }
+}
+
+pub(in crate::dsl) fn compute_dataset_stats(points: &[DataPoint], column_titles: &[f64]) -> [f64; 21] {
+    let mut title_sum = 0.0_f64;
+    let mut title_count = 0_usize;
+    for &v in column_titles {
+        if v.is_finite() {
+            title_sum += v;
+            title_count += 1;
+        }
+    }
+    let mean_col_title = if title_count > 0 { title_sum / title_count as f64 } else { f64::NAN };
+    let log_mean_col_title = if mean_col_title.is_finite() && mean_col_title > 0.0 { mean_col_title.log10() } else { f64::NAN };
+
     let mut finite_pts: Vec<(f64, f64)> = points.iter().filter(|p| p.x0().is_finite() && p.y.is_finite()).map(|p| (p.x0(), p.y)).collect();
     if finite_pts.is_empty() {
-        return [0.0, 1.0, 0.0, 1.0, 0.5, 0.5, 0.0, 1.0, 0.5, 1.0, 1.0];
+        return [
+            0.0,
+            1.0,
+            0.0,
+            1.0,
+            0.5,
+            0.5,
+            0.0,
+            1.0,
+            0.5,
+            0.5,
+            0.0,
+            0.5,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            mean_col_title,
+            log_mean_col_title,
+            f64::NAN,
+            f64::NAN,
+            f64::NAN,
+        ];
     }
     finite_pts.sort_by(|a, b| a.0.total_cmp(&b.0));
     let xmin = finite_pts[0].0;
@@ -1057,15 +1206,39 @@ pub(in crate::dsl) fn compute_dataset_stats(points: &[DataPoint]) -> [f64; 11] {
     let eps = 1e-12 * (xmax - xmin).max(1e-12);
     let left_vals: Vec<f64> = finite_pts.iter().filter(|&&(x, _)| (x - xmin).abs() <= eps).map(|&(_, y)| y).collect();
     let right_vals: Vec<f64> = finite_pts.iter().filter(|&&(x, _)| (xmax - x).abs() <= eps).map(|&(_, y)| y).collect();
-    let y_left = if left_vals.is_empty() { finite_pts[0].1 } else { left_vals.iter().sum::<f64>() / left_vals.len() as f64 };
-    let y_right = if right_vals.is_empty() { finite_pts[finite_pts.len() - 1].1 } else { right_vals.iter().sum::<f64>() / right_vals.len() as f64 };
+    let y_at_xmin = if left_vals.is_empty() { finite_pts[0].1 } else { left_vals.iter().sum::<f64>() / left_vals.len() as f64 };
+    let y_at_xmax = if right_vals.is_empty() { finite_pts[finite_pts.len() - 1].1 } else { right_vals.iter().sum::<f64>() / right_vals.len() as f64 };
     let xmid = 0.5 * (xmin + xmax);
     let ymid = 0.5 * (ymin + ymax);
+    let y_at_xmid = interpolate_y_at_x(&finite_pts, xmid, eps);
     let span = ymax - ymin;
-    let sign = if y_right >= y_left { 1.0 } else { -1.0 };
+    let sign = if y_at_xmax >= y_at_xmin { 1.0 } else { -1.0 };
     let est_50 = estimate_x_at_ymid(points);
-    let x_at_y50 = if est_50.is_finite() { est_50 } else { xmid };
-    [ymin, ymax, xmin, xmax, xmid, ymid, x_at_ymin, x_at_ymax, x_at_y50, span, sign]
+    let x_at_ymid = if est_50.is_finite() { est_50 } else { xmid };
+    let (slope_at_xmin, slope_at_xmid, slope_at_xmax) = compute_empirical_slopes(&finite_pts);
+    [
+        ymin,
+        ymax,
+        xmin,
+        xmax,
+        xmid,
+        ymid,
+        x_at_ymin,
+        x_at_ymax,
+        x_at_ymid,
+        x_at_ymid,
+        y_at_xmin,
+        y_at_xmid,
+        y_at_xmax,
+        span,
+        sign,
+        1.0,
+        mean_col_title,
+        log_mean_col_title,
+        slope_at_xmin,
+        slope_at_xmid,
+        slope_at_xmax,
+    ]
 }
 
 pub(in crate::dsl) fn canonicalize_init_expr(
