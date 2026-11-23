@@ -103,3 +103,9 @@ Start with the **[Beginner's MCP Guide](docs/mcp-for-beginners.md)** or the full
 - **User Manual:** [Online Documentation](https://hausergroup.github.io/curvebook/manual/) · [Documentation Index](docs/README.md) · [Troubleshooting & Known Issues](https://hausergroup.github.io/curvebook/manual/v0.1/troubleshooting.html#known-issues)
 - **Bug Reports & Feature Requests:** [GitHub Issues](https://github.com/HauserGroup/curvebook/issues)
 - **Contributors:** Read [`CONTRIBUTING.md`](CONTRIBUTING.md), [`AGENTS.md`](AGENTS.md), [`docs/development.md`](docs/development.md), and [`docs/architecture.md`](docs/architecture.md).
+
+---
+
+## Disclaimer
+
+CurveBook is an independent open-source project and is not affiliated with, endorsed by, or sponsored by Dotmatics, GraphPad Software, or any other provider of scientific or statistical software. All trademarks and product names are the property of their respective owners. <!-- brand-ok -->

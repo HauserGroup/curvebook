@@ -168,6 +168,9 @@ const SUITE_DISCLAIMER_PATH: &str = "README.md";
 /// infrastructure would be a dependency, which the standalone-repository rule forbids.
 const SUITE_DISCLAIMER_NAMES: &[&str] = &["artcraft"];
 
+/// External vendor names the README's non-affiliation disclaimer may cite on a line carrying [`ALLOW_MARKER`].
+const VENDOR_DISCLAIMER_NAMES: &[&str] = &["dotmatics", "graphpad"];
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BrandHit {
     pub path: String,
@@ -503,6 +506,18 @@ pub(crate) fn is_attribution_or_notice_path(path: &str, allow_packaged: bool) ->
     trimmed.rsplit(['/', ':', '!']).next().is_some_and(|name| matches!(name, "ATTRIBUTION.md" | "NOTICE"))
 }
 
+fn is_readme_disclaimer_path(path: &str, allow_packaged: bool) -> bool {
+    let norm = path.replace('\\', "/");
+    let trimmed = norm.strip_prefix("./").unwrap_or(&norm);
+    if trimmed == SUITE_DISCLAIMER_PATH {
+        return true;
+    }
+    if !allow_packaged || is_generated_docs_html_path(trimmed) || trimmed.split(['/', '!', ':']).any(|seg| matches!(seg, "crates" | "apps")) {
+        return false;
+    }
+    trimmed.rsplit(['/', ':', '!']).next() == Some(SUITE_DISCLAIMER_PATH)
+}
+
 pub(crate) fn is_attributed_source_section_heading(line: &str) -> bool {
     line.trim() == ATTRIBUTED_SOURCE_SECTION_HEADING
 }
@@ -652,10 +667,18 @@ fn scan_html_file(path: &str, text: &str, out: &mut Vec<BrandHit>) {
 }
 
 fn scan_plain_lines_no_waiver(path: &str, text: &str, out: &mut Vec<BrandHit>) {
+    scan_plain_lines_with_scope(path, text, false, out);
+}
+
+fn scan_plain_lines_with_scope(path: &str, text: &str, allow_packaged: bool, out: &mut Vec<BrandHit>) {
     let is_asset_doc = matches!(Path::new(path).file_name().and_then(|n| n.to_str()), Some("ASSETS.md" | "ATTRIBUTION.md" | "NOTICE"));
+    let is_readme_disclaimer = is_readme_disclaimer_path(path, allow_packaged);
+    let strict_disclaimer_brands: Vec<&'static str> =
+        if is_readme_disclaimer { BRANDS.iter().copied().filter(|brand| !VENDOR_DISCLAIMER_NAMES.contains(brand)).collect() } else { Vec::new() };
     for (idx, line) in text.lines().enumerate() {
         let policy = if is_asset_doc { PrismPolicy::Strict } else { PrismPolicy::Standard };
-        collect_line_words(path, idx + 1, line, BRANDS, policy, out);
+        let brands = if is_readme_disclaimer && line.contains(ALLOW_MARKER) { &strict_disclaimer_brands[..] } else { BRANDS };
+        collect_line_words(path, idx + 1, line, brands, policy, out);
     }
 }
 
@@ -728,12 +751,16 @@ fn scan_desktop_entry(path: &str, text: &str, out: &mut Vec<BrandHit>) {
 fn scan_markdown(path: &str, text: &str, out: &mut Vec<BrandHit>) {
     let is_agents = path == "AGENTS.md";
     let is_dev_or_cmd = matches!(path, "docs/commands.md" | "docs/development.md" | "docs/extending.md");
+    let is_readme_disclaimer = is_readme_disclaimer_path(path, false);
+    let strict_disclaimer_brands: Vec<&'static str> =
+        if is_readme_disclaimer { BRANDS.iter().copied().filter(|brand| !VENDOR_DISCLAIMER_NAMES.contains(brand)).collect() } else { Vec::new() };
     for (idx, line) in text.lines().enumerate() {
         let line_no = idx + 1;
+        let brands = if is_readme_disclaimer && line.contains(ALLOW_MARKER) { &strict_disclaimer_brands[..] } else { BRANDS };
         if let Some(masked) = mask_markdown_format_tokens(line, is_agents, is_dev_or_cmd) {
-            collect_line_words(path, line_no, &masked, BRANDS, PrismPolicy::Standard, out);
+            collect_line_words(path, line_no, &masked, brands, PrismPolicy::Standard, out);
         } else {
-            collect_line_words(path, line_no, line, BRANDS, PrismPolicy::Standard, out);
+            collect_line_words(path, line_no, line, brands, PrismPolicy::Standard, out);
         }
     }
 }
@@ -4355,7 +4382,7 @@ fn scan_dist_bytes(display_path: &str, bytes: &[u8], depth: usize, stats: &mut D
         scan_desktop_entry(display_path, &text, hits);
     } else {
         scan_suite_lines_with_scope(display_path, &text, true, hits);
-        scan_plain_lines_no_waiver(display_path, &text, hits);
+        scan_plain_lines_with_scope(display_path, &text, true, hits);
     }
     Ok(())
 }
@@ -4677,6 +4704,48 @@ Keywords=biostatistics;regression;GraphPad;prism;
         let mut hits = Vec::new();
         scan_file("README.md", "Not affiliated with ArtCraft. <!-- brand-ok -->\n", &mut hits);
         assert!(hits.is_empty(), "{hits:?}");
+    }
+
+    #[test]
+    fn readme_disclaimer_line_with_marker_may_name_disclaimed_vendors() {
+        let mut hits = Vec::new();
+        scan_file("README.md", "Not affiliated with Dotmatics or GraphPad Software. <!-- brand-ok -->\n", &mut hits);
+        assert!(hits.is_empty(), "{hits:?}");
+
+        // Packaged README.md inside dist/ bundles is also allowed when marked.
+        let mut dist_hits = Vec::new();
+        let mut stats = super::DistScanStats::default();
+        super::scan_dist_bytes(
+            "curvebook-0.1.0-linux-x86_64/README.md",
+            b"Not affiliated with Dotmatics or GraphPad Software. <!-- brand-ok -->\n",
+            0,
+            &mut stats,
+            &mut dist_hits,
+        )
+        .unwrap();
+        assert!(dist_hits.is_empty(), "{dist_hits:?}");
+    }
+
+    #[test]
+    fn vendor_disclaimer_exemption_is_limited_to_marked_readme_lines_and_allowed_vendors() {
+        let mut hits = Vec::new();
+        // No marker: still flagged in the README.
+        scan_file("README.md", "Not affiliated with Dotmatics or GraphPad.\n", &mut hits);
+        // Marker in any other file: still flagged.
+        scan_file("docs/release/releasing.md", "Not affiliated with Dotmatics or GraphPad. <!-- brand-ok -->\n", &mut hits);
+        // Marked README line: non-exempt competitor products remain flagged.
+        scan_file("README.md", "Not affiliated with OriginPro or SPSS. <!-- brand-ok -->\n", &mut hits);
+        assert_eq!(
+            hits,
+            vec![
+                BrandHit { path: String::from("README.md"), line: 1, brand: "graphpad" },
+                BrandHit { path: String::from("README.md"), line: 1, brand: "dotmatics" },
+                BrandHit { path: String::from("docs/release/releasing.md"), line: 1, brand: "graphpad" },
+                BrandHit { path: String::from("docs/release/releasing.md"), line: 1, brand: "dotmatics" },
+                BrandHit { path: String::from("README.md"), line: 1, brand: "spss" },
+                BrandHit { path: String::from("README.md"), line: 1, brand: "originpro" },
+            ]
+        );
     }
 
     #[test]
