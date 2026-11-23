@@ -135,7 +135,7 @@ fn g12_read_only_commands_preserve_redo_stack_and_undo_depth() {
     let mut session = Session::from_document(doc);
 
     ok_cmd(&mut session, "sheet.rename", json!({ "sheet_id": "xy-1", "title": "Dose Assay v2" }));
-    ok_cmd(&mut session, "fit.run", json!({ "sheet_id": "fit-1", "source_sheet": "xy-1", "kind": "four_parameter_logistic" }));
+    ok_cmd(&mut session, "fit.run", json!({ "sheet_id": "fit-1", "source_sheet_id": "xy-1", "kind": "four_parameter_logistic" }));
     ok_cmd(&mut session, "graph.create", json!({ "sheet_id": "g-1", "data_sheet_id": "xy-1", "kind": "xy" }));
     ok_cmd(&mut session, "layout.create", json!({ "sheet_id": "lay-1", "title": "Figure 1" }));
     ok_cmd(&mut session, "sheet.rename", json!({ "sheet_id": "xy-1", "title": "Dose Assay v3" }));
@@ -162,11 +162,9 @@ fn g12_read_only_commands_preserve_redo_stack_and_undo_depth() {
         ("table.exportCsv", json!({ "sheet_id": "xy-1", "path": csv_path.to_string_lossy() })),
         ("table.exclusionAuditReport", json!({ "sheet_id": "xy-1" })),
         ("table.convertArchetype", json!({ "sheet_id": "xy-1", "target_kind": "Column", "allow_lossy": true, "preview_only": true })),
-        ("table.convertArchetype", json!({ "sheet_id": "xy-1", "target_kind": "Column", "allow_lossy": true, "previewOnly": true })),
-        ("table.convertArchetype", json!({ "sheet_id": "xy-1", "target_kind": "Column", "allow_lossy": true, "dry_run": true })),
         ("analysis.exportJson", json!({ "sheet_id": "fit-1", "path": json_path.to_string_lossy() })),
         ("analysis.exportCsv", json!({ "sheet_id": "fit-1" })),
-        ("result.generateReport", json!({ "sheet_id": "fit-1", "format": "markdown" })),
+        ("result.generateReport", json!({ "result_sheet_id": "fit-1", "format": "markdown" })),
         ("graph.preflightCheck", json!({ "sheet_id": "g-1" })),
         ("export.svg", json!({ "sheet_id": "g-1" })),
         ("export.pdf", json!({ "sheet_id": "g-1" })),

@@ -748,31 +748,8 @@ fn document_checkpoint_bytes(doc: &ProjectDocument) -> usize {
     cp_bytes.saturating_add(asset_bytes)
 }
 
-pub(crate) fn has_conflicting_convert_preview_aliases(params: &serde_json::Value) -> bool {
-    let Some(obj) = params.as_object() else {
-        return false;
-    };
-    let mut seen: Option<bool> = None;
-    for &key in cmd::spellings::CONVERT_PREVIEW {
-        if let Some(val) = obj.get(key) {
-            let Some(b) = val.as_bool() else {
-                return true;
-            };
-            match seen {
-                Some(prev) if prev != b => return true,
-                None => seen = Some(b),
-                Some(_) => {}
-            }
-        }
-    }
-    false
-}
-
 fn is_preview_only_convert(params: &serde_json::Value) -> bool {
-    if has_conflicting_convert_preview_aliases(params) {
-        return false;
-    }
-    cmd::spellings::CONVERT_PREVIEW.iter().any(|&key| params.get(key).and_then(serde_json::Value::as_bool) == Some(true))
+    params.get("preview_only").and_then(serde_json::Value::as_bool) == Some(true)
 }
 
 /// Execution channel restriction for interactive vs. direct automation callers (`docs/gui-workflows.md` §1).
@@ -1308,6 +1285,7 @@ fn invoke_spec_run(
     caller: Caller,
     cancelled: &AtomicBool,
 ) -> Result<CommandOutcome, EngineError> {
+    // Retained until Stage 4 retires r16_5_cli_and_callers.rs
     let scope = cmd::params::DeprecationScope::enter();
     let mut outcome = guard::run_guarded(spec.id, || {
         let mut ctx = cmd::Ctx { session, caller, cancelled };
@@ -1623,13 +1601,6 @@ impl Session {
         if self.path_policy.is_constrained() && spec.effects.intersects(cmd::Effects::READS_FILESYSTEM.with(cmd::Effects::WRITES_FILESYSTEM)) {
             self.path_policy.enforce_command_path_params(&mut params)?;
         }
-        if spec.id == "table.convertArchetype" && has_conflicting_convert_preview_aliases(&params) {
-            return Err(EngineError::with_code(
-                ErrorCode::BadInput,
-                "conflicting or non-boolean `preview_only` alias values supplied for `table.convertArchetype`",
-            )
-            .with_details(json!({ "command_id": spec.id })));
-        }
         if spec.id == "edit.undo" || spec.id == "edit.redo" {
             return self.execute_undo_redo_with_hook(spec, params, caller, cancelled, after_commit);
         }
@@ -1709,10 +1680,7 @@ impl Session {
     where
         F: FnOnce(&Self, &CommandOutcome) -> Result<(), EngineError>,
     {
-        let opens_project_path = spec.id == "project.open"
-            && cmd::spellings::first_present(&params, &["path", "file_path", "filePath"])
-                .and_then(Value::as_str)
-                .is_some_and(|s| !s.trim().is_empty());
+        let opens_project_path = spec.id == "project.open" && params.get("path").and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty());
         let clears_file_path_on_mutate = matches!(spec.id, "file.new" | "project.new" | "project.instantiateTemplate")
             || (matches!(spec.id, "table.importPrism" | "table.importPzfx") && !params.get("merge").and_then(Value::as_bool).unwrap_or(false))
             || (spec.id == "project.open" && !opens_project_path);

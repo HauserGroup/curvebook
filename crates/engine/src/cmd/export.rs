@@ -12,9 +12,7 @@ use serde::de::{Deserializer, Error as DeError, Visitor};
 use serde_json::{Value, json};
 
 use super::helpers::{encode_base64, parse_sheet_id, write_output_file};
-use super::params::{
-    array_schema, bool_schema, int_schema, non_empty_str_schema, nullable_schema, obj_schema_with_aliases, parse_params, str_schema,
-};
+use super::params::{array_schema, bool_schema, int_schema, non_empty_str_schema, nullable_schema, obj_schema, parse_params, str_schema};
 use super::{CommandGroup, CommandSpec, Ctx, Effects};
 use crate::services::{
     EmfSheetKind, ExportArtifactFormat, ExportArtifactRequest, ExportTarget, RasterSizingPolicy, compile_visual_scene_for_sheet,
@@ -262,7 +260,6 @@ pub(super) fn de_opt_usize<'de, D: Deserializer<'de>>(deserializer: D) -> Result
 
 #[derive(Debug, Deserialize)]
 struct ExportSvgParams {
-    #[serde(alias = "id")]
     sheet_id: String,
     path: Option<String>,
     pretty: Option<bool>,
@@ -275,7 +272,7 @@ struct ExportSvgParams {
 }
 
 fn schema_export_svg() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Graph or layout sheet ID to export")),
             ("path", nullable_schema(non_empty_str_schema("Optional output file path"))),
@@ -287,26 +284,23 @@ fn schema_export_svg() -> Value {
             ("outline_text", nullable_schema(bool_schema("Convert glyphs into vector outline paths"))),
         ],
         &["sheet_id"],
-        vec![("sheet_id", &["id"])],
         false,
     )
 }
 
 #[derive(Debug, Deserialize)]
 struct ExportPdfParams {
-    #[serde(alias = "id")]
     sheet_id: Option<String>,
     sheet_ids: Option<Vec<String>>,
     path: Option<String>,
     color_space: Option<String>,
     compress_streams: Option<bool>,
     title: Option<String>,
-    #[serde(alias = "vector_text")]
     outline_text: Option<bool>,
 }
 
 fn schema_export_pdf() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", nullable_schema(non_empty_str_schema("Graph or layout sheet ID for single-page PDF"))),
             ("sheet_ids", nullable_schema(array_schema("Ordered sheet IDs for multi-page PDF export", non_empty_str_schema("Sheet ID"), None, None))),
@@ -317,14 +311,12 @@ fn schema_export_pdf() -> Value {
             ("outline_text", nullable_schema(bool_schema("Outline text glyphs into vector paths"))),
         ],
         &[],
-        vec![("sheet_id", &["id"]), ("outline_text", &["vector_text"])],
         false,
     )
 }
 
 #[derive(Debug, Deserialize)]
 struct ExportPngParams {
-    #[serde(alias = "id")]
     sheet_id: String,
     path: Option<String>,
     #[serde(default, deserialize_with = "de_opt_u32")]
@@ -344,7 +336,7 @@ fn raster_dpi_schema() -> Value {
 }
 
 fn schema_export_png() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Graph or layout sheet ID to rasterize")),
             ("path", nullable_schema(non_empty_str_schema("Optional output PNG file path"))),
@@ -353,14 +345,12 @@ fn schema_export_png() -> Value {
             ("dpi", raster_dpi_schema()),
         ],
         &["sheet_id"],
-        vec![("sheet_id", &["id"])],
         false,
     )
 }
 
 #[derive(Debug, Deserialize)]
 struct ExportTiffParams {
-    #[serde(alias = "id")]
     sheet_id: String,
     path: Option<String>,
     #[serde(default, deserialize_with = "de_opt_u32")]
@@ -373,7 +363,7 @@ struct ExportTiffParams {
 }
 
 fn schema_export_tiff() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Graph or layout sheet ID to rasterize")),
             ("path", nullable_schema(non_empty_str_schema("Optional output TIFF file path"))),
@@ -383,26 +373,23 @@ fn schema_export_tiff() -> Value {
             ("compression", nullable_schema(str_schema("TIFF compression codec (`none`, `lzw`, `deflate`)"))),
         ],
         &["sheet_id"],
-        vec![("sheet_id", &["id"])],
         false,
     )
 }
 
 #[derive(Debug, Deserialize)]
 struct ExportEmfParams {
-    #[serde(alias = "id")]
     sheet_id: String,
     path: Option<String>,
 }
 
 fn schema_export_emf() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Target sheet ID to export to EMF")),
             ("path", nullable_schema(non_empty_str_schema("Optional output EMF file path"))),
         ],
         &["sheet_id"],
-        vec![("sheet_id", &["id"])],
         false,
     )
 }

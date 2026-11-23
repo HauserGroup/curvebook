@@ -20,8 +20,8 @@ use crate::cmd::helpers::{
     select_result_tab, sheet_id_exists, sync_info_linked_data_sheets,
 };
 use crate::cmd::params::{
-    any_json_schema, array_schema, bool_schema, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, obj_schema_with_aliases,
-    parse_params, str_schema,
+    any_json_schema, array_schema, bool_schema, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, obj_schema,
+    obj_schema_with_aliases, parse_params, str_schema,
 };
 use crate::cmd::project::{RecalcSummary, recalculate_dirty_with_links};
 use crate::cmd::{CommandGroup, CommandSpec, Ctx, Effects};
@@ -61,63 +61,34 @@ fn next_unique_sheet_id_hyphen(doc: &ProjectDocument, prefix: &str) -> Result<Sh
 #[serde(untagged)]
 enum VariableInitInput {
     Name(String),
-    Object {
-        #[serde(alias = "name")]
-        title: Option<String>,
-        role: Option<String>,
-    },
+    Object { title: Option<String>, role: Option<String> },
 }
 
 #[derive(Debug, Deserialize)]
 struct CreateDataParams {
-    #[serde(alias = "sheetId", alias = "id")]
     sheet_id: Option<String>,
-    #[serde(alias = "name")]
     title: Option<String>,
-    #[serde(alias = "archetype", alias = "table_kind", alias = "tableKind", alias = "type")]
     kind: Option<String>,
-    #[serde(alias = "row_count", alias = "rowCount", alias = "slices")]
     rows: Option<usize>,
-    #[serde(
-        alias = "columns",
-        alias = "data_sets",
-        alias = "dataSets",
-        alias = "column_count",
-        alias = "columnCount",
-        alias = "groups",
-        alias = "cohorts"
-    )]
     cols: Option<usize>,
-    #[serde(alias = "replicate_k", alias = "k", alias = "subcolumns", alias = "biological_units", alias = "biologicalUnits")]
     replicates: Option<usize>,
-    #[serde(alias = "subcolumnMode")]
     subcolumn_mode: Option<Value>,
-    #[serde(alias = "xMode")]
     x_mode: Option<Value>,
-    #[serde(alias = "xTitle")]
     x_title: Option<String>,
-    #[serde(alias = "designHint")]
     design_hint: Option<Value>,
-    #[serde(alias = "rowFactorTitle")]
     row_factor_title: Option<String>,
-    #[serde(alias = "columnFactorTitle")]
     column_factor_title: Option<String>,
-    #[serde(alias = "timeTitle")]
     time_title: Option<String>,
     variables: Option<Vec<VariableInitInput>>,
-    #[serde(alias = "autoFamily")]
     auto_family: Option<bool>,
-    #[serde(alias = "autoInfo")]
     auto_info: Option<bool>,
-    #[serde(alias = "autoGraph")]
     auto_graph: Option<bool>,
-    #[serde(alias = "infoSheetId")]
     info_sheet_id: Option<String>,
-    #[serde(alias = "graphSheetId")]
     graph_sheet_id: Option<String>,
 }
 
 fn create_data_schema() -> Value {
+    // Retained until Stage 4 retires r16_5_cli_and_callers.rs
     obj_schema_with_aliases(
         vec![
             ("sheet_id", nullable_schema(non_empty_str_schema("Optional explicit DataSheet ID (auto-generated if omitted)"))),
@@ -154,26 +125,7 @@ fn create_data_schema() -> Value {
             ("graph_sheet_id", nullable_schema(non_empty_str_schema("Optional explicit GraphSheet ID to create"))),
         ],
         &[],
-        vec![
-            ("sheet_id", &["sheetId", "id"]),
-            ("title", &["name"]),
-            ("kind", &["archetype", "table_kind", "tableKind", "type"]),
-            ("rows", &["row_count", "rowCount", "slices"]),
-            ("cols", &["columns", "data_sets", "dataSets", "column_count", "columnCount", "groups", "cohorts"]),
-            ("replicates", &["replicate_k", "k", "subcolumns", "biological_units", "biologicalUnits"]),
-            ("subcolumn_mode", &["subcolumnMode"]),
-            ("x_mode", &["xMode"]),
-            ("x_title", &["xTitle"]),
-            ("design_hint", &["designHint"]),
-            ("row_factor_title", &["rowFactorTitle"]),
-            ("column_factor_title", &["columnFactorTitle"]),
-            ("time_title", &["timeTitle"]),
-            ("auto_family", &["autoFamily"]),
-            ("auto_info", &["autoInfo"]),
-            ("auto_graph", &["autoGraph"]),
-            ("info_sheet_id", &["infoSheetId"]),
-            ("graph_sheet_id", &["graphSheetId"]),
-        ],
+        vec![("kind", &["archetype"])],
         false,
     )
 }
@@ -556,17 +508,16 @@ fn run_sheet_create_data(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutc
 
 #[derive(Debug, Deserialize)]
 struct RenameSheetParams {
-    #[serde(alias = "sheetId", alias = "id")]
     sheet_id: String,
-    #[serde(alias = "new_title", alias = "newTitle", alias = "name")]
     title: String,
 }
 
 fn rename_sheet_schema() -> Value {
+    // Retained until Stage 4 retires r16_5_cli_and_callers.rs
     obj_schema_with_aliases(
         vec![("sheet_id", non_empty_str_schema("ID of sheet to rename")), ("title", non_empty_str_schema("New title for the sheet"))],
         &["sheet_id", "title"],
-        vec![("sheet_id", &["sheetId", "id"]), ("title", &["new_title", "newTitle", "name"])],
+        vec![("sheet_id", &["id"]), ("title", &["new_title"])],
         false,
     )
 }
@@ -640,19 +591,17 @@ fn run_sheet_rename(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
 
 #[derive(Debug, Deserialize)]
 struct DeleteSheetParams {
-    #[serde(alias = "sheetId", alias = "id")]
     sheet_id: String,
     cascade: Option<bool>,
 }
 
 fn delete_sheet_schema() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("ID of the sheet to delete")),
             ("cascade", nullable_schema(bool_schema("Delete downstream dependents (true) or refuse when dependents exist (false)"))),
         ],
         &["sheet_id"],
-        vec![("sheet_id", &["sheetId", "id"])],
         false,
     )
 }
@@ -918,17 +867,14 @@ fn prune_deleted_sheets(doc: &mut ProjectDocument, to_delete: &HashSet<SheetId>)
 
 #[derive(Debug, Deserialize)]
 struct DuplicateSheetParams {
-    #[serde(alias = "sheetId", alias = "id")]
     sheet_id: String,
-    #[serde(alias = "newSheetId", alias = "target_sheet_id", alias = "targetSheetId", alias = "new_id")]
     new_sheet_id: Option<String>,
-    #[serde(alias = "new_title", alias = "newTitle")]
     title: Option<String>,
     frozen: Option<bool>,
 }
 
 fn duplicate_sheet_schema() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Source sheet ID to duplicate")),
             ("new_sheet_id", nullable_schema(non_empty_str_schema("Optional explicit ID for the duplicated sheet"))),
@@ -936,11 +882,6 @@ fn duplicate_sheet_schema() -> Value {
             ("frozen", nullable_schema(bool_schema("Preserve or set frozen flag on duplicated DataSheet (defaults to false)"))),
         ],
         &["sheet_id"],
-        vec![
-            ("sheet_id", &["sheetId", "id"]),
-            ("new_sheet_id", &["newSheetId", "target_sheet_id", "targetSheetId", "new_id"]),
-            ("title", &["new_title", "newTitle"]),
-        ],
         false,
     )
 }
@@ -1069,19 +1010,15 @@ fn run_sheet_duplicate(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcom
 
 #[derive(Debug, Deserialize)]
 struct DuplicateFamilyParams {
-    #[serde(alias = "sheetId", alias = "id")]
     sheet_id: String,
     prefix: Option<String>,
-    #[serde(alias = "clearData")]
     clear_data: Option<bool>,
-    #[serde(alias = "newSheetId", alias = "target_sheet_id", alias = "targetSheetId")]
     new_sheet_id: Option<String>,
-    #[serde(alias = "new_title", alias = "newTitle")]
     title: Option<String>,
 }
 
 fn duplicate_family_schema() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Root sheet ID whose family should be duplicated")),
             ("prefix", nullable_schema(non_empty_str_schema("ID prefix for duplicated sheets"))),
@@ -1090,49 +1027,30 @@ fn duplicate_family_schema() -> Value {
             ("title", nullable_schema(str_schema("Optional title override for duplicated DataSheet"))),
         ],
         &["sheet_id"],
-        vec![
-            ("sheet_id", &["sheetId", "id"]),
-            ("clear_data", &["clearData"]),
-            ("new_sheet_id", &["newSheetId", "target_sheet_id", "targetSheetId"]),
-            ("title", &["new_title", "newTitle"]),
-        ],
         false,
     )
 }
 
 #[derive(Debug, Deserialize)]
 struct ClonePipelineParams {
-    #[serde(alias = "sheetId", alias = "id")]
     sheet_id: String,
-    #[serde(alias = "newSheetId", alias = "target_sheet_id", alias = "targetSheetId")]
     new_sheet_id: Option<String>,
     prefix: Option<String>,
-    #[serde(alias = "new_title", alias = "newTitle")]
     title: Option<String>,
-    #[serde(alias = "clearData")]
     clear_data: Option<bool>,
-    #[serde(alias = "keepXValues")]
     keep_x_values: Option<bool>,
-    #[serde(alias = "clearYValues")]
     clear_y_values: Option<bool>,
-    #[serde(alias = "clearColumnTitles")]
     clear_column_titles: Option<bool>,
-    #[serde(alias = "clearRowTitles")]
     clear_row_titles: Option<bool>,
-    #[serde(alias = "overrideReplicates", alias = "replicates")]
     override_replicates: Option<usize>,
-    #[serde(alias = "cloneAnalyses")]
     clone_analyses: Option<bool>,
-    #[serde(alias = "cloneGraphs")]
     clone_graphs: Option<bool>,
-    #[serde(alias = "cloneLayouts")]
     clone_layouts: Option<bool>,
-    #[serde(alias = "clearResults")]
     clear_results: Option<bool>,
 }
 
 fn clone_pipeline_schema() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Source root DataSheet (or family member) ID to clone")),
             ("new_sheet_id", nullable_schema(non_empty_str_schema("Optional explicit ID for the cloned DataSheet"))),
@@ -1150,21 +1068,6 @@ fn clone_pipeline_schema() -> Value {
             ("clear_results", nullable_schema(bool_schema("Skip immediate recalculation and leave cloned ResultSheets stale"))),
         ],
         &["sheet_id"],
-        vec![
-            ("sheet_id", &["sheetId", "id"]),
-            ("new_sheet_id", &["newSheetId", "target_sheet_id", "targetSheetId"]),
-            ("title", &["new_title", "newTitle"]),
-            ("clear_data", &["clearData"]),
-            ("keep_x_values", &["keepXValues"]),
-            ("clear_y_values", &["clearYValues"]),
-            ("clear_column_titles", &["clearColumnTitles"]),
-            ("clear_row_titles", &["clearRowTitles"]),
-            ("override_replicates", &["overrideReplicates", "replicates"]),
-            ("clone_analyses", &["cloneAnalyses"]),
-            ("clone_graphs", &["cloneGraphs"]),
-            ("clone_layouts", &["cloneLayouts"]),
-            ("clear_results", &["clearResults"]),
-        ],
         false,
     )
 }
@@ -1630,12 +1533,11 @@ fn run_sheet_clone_pipeline(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandO
 
 #[derive(Debug, Deserialize)]
 struct SheetIdParams {
-    #[serde(alias = "sheetId", alias = "id")]
     sheet_id: String,
 }
 
 fn sheet_id_schema(desc: &str) -> Value {
-    obj_schema_with_aliases(vec![("sheet_id", non_empty_str_schema(desc))], &["sheet_id"], vec![("sheet_id", &["sheetId", "id"])], false)
+    obj_schema(vec![("sheet_id", non_empty_str_schema(desc))], &["sheet_id"], false)
 }
 
 fn freeze_sheet_schema() -> Value {
@@ -1681,19 +1583,15 @@ fn set_sheet_frozen(ctx: &mut Ctx<'_>, command_id: &str, params: Value, frozen: 
 struct ReorderSheetParams {
     folder: Option<String>,
     section: Option<String>,
-    #[serde(alias = "fromIndex")]
     from_index: Option<usize>,
-    #[serde(alias = "toIndex")]
     to_index: Option<usize>,
-    #[serde(alias = "sheetId", alias = "id")]
     sheet_id: Option<String>,
-    #[serde(alias = "position")]
     index: Option<usize>,
     order: Option<Vec<String>>,
 }
 
 fn reorder_sheet_schema() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("folder", nullable_schema(str_schema("Sheet folder (`data`, `info`, `results`, `graphs`, `layouts`)"))),
             ("section", nullable_schema(str_schema("Navigator section name (`data`, `info`, `results`, `analyses`, `graphs`, `layouts`)"))),
@@ -1707,7 +1605,6 @@ fn reorder_sheet_schema() -> Value {
             ),
         ],
         &[],
-        vec![("from_index", &["fromIndex"]), ("to_index", &["toIndex"]), ("sheet_id", &["sheetId", "id"]), ("index", &["position"])],
         false,
     )
 }
@@ -1850,20 +1747,17 @@ fn run_sheet_reorder(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome,
 
 #[derive(Debug, Deserialize)]
 struct SelectSheetParams {
-    #[serde(alias = "sheetId", alias = "id")]
     sheet_id: String,
-    #[serde(alias = "pane")]
     mode: Option<String>,
 }
 
 fn select_sheet_schema() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Sheet ID to select")),
             ("mode", nullable_schema(str_schema("Selection pane (`navigator` or `family`, defaults to `navigator`)"))),
         ],
         &["sheet_id"],
-        vec![("sheet_id", &["sheetId", "id"]), ("mode", &["pane"])],
         false,
     )
 }
@@ -1908,7 +1802,7 @@ struct ExtractResultTabParams {
 }
 
 fn extract_result_tab_schema() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("result_sheet_id", non_empty_str_schema("Source ResultSheet ID whose tab should be extracted")),
             ("tab_id", nullable_schema(str_schema("ResultTab ID or exact title (defaults to first tab)"))),
@@ -1924,11 +1818,6 @@ fn extract_result_tab_schema() -> Value {
             ("auto_graph", bool_schema("When true, also create an uninitialized GraphSheet linked to the extracted DataSheet")),
         ],
         &["result_sheet_id"],
-        vec![
-            ("result_sheet_id", &["source_sheet_id", "source_sheet", "result_id"]),
-            ("sheet_id", &["id", "target_sheet_id"]),
-            ("archetype", &["kind"]),
-        ],
         false,
     )
 }

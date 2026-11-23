@@ -68,7 +68,7 @@ fn audit_4_bland_altman_xy_mode_persists_across_column_additions_updates_and_ret
     let mut session = Session::from_document(doc);
 
     // 1-dataset XY defaults explicitly to xy_compare_x_vs_y = Some(true).
-    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "ba-xy1", "source_sheet": "xy1", "kind": "bland_altman" }));
+    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "ba-xy1", "source_sheet_id": "xy1", "kind": "bland_altman" }));
     let bias_before = scalar_val(&session, "ba-xy1", "Bias").unwrap();
     assert!((bias_before.abs() - 3.0).abs() < 1e-9, "expected X vs Y0 bias magnitude 3.0, got {bias_before}");
     assert!(matches!(
@@ -91,12 +91,16 @@ fn audit_4_bland_altman_xy_mode_persists_across_column_additions_updates_and_ret
     ));
 
     // Fresh Bland-Altman on 2-dataset XY defaults to Some(false) (Y0 vs Y1), unless xy_compare_x_vs_y: true.
-    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "ba-xy2", "source_sheet": "xy2", "kind": "bland_altman" }));
+    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "ba-xy2", "source_sheet_id": "xy2", "kind": "bland_altman" }));
     assert!(matches!(
         session.document().result_sheet(&SheetId::new("ba-xy2")).unwrap().analysis.kind,
         AnalysisKind::BlandAltman(BlandAltmanSpec { xy_compare_x_vs_y: Some(false), .. })
     ));
-    ok_cmd(&mut session, "analysis.run", json!({ "sheet_id": "ba-xy2-x", "source_sheet": "xy2", "kind": "bland_altman", "xy_compare_x_vs_y": true }));
+    ok_cmd(
+        &mut session,
+        "analysis.run",
+        json!({ "sheet_id": "ba-xy2-x", "source_sheet_id": "xy2", "kind": "bland_altman", "xy_compare_x_vs_y": true }),
+    );
     assert!(matches!(
         session.document().result_sheet(&SheetId::new("ba-xy2-x")).unwrap().analysis.kind,
         AnalysisKind::BlandAltman(BlandAltmanSpec { xy_compare_x_vs_y: Some(true), .. })
@@ -106,16 +110,16 @@ fn audit_4_bland_altman_xy_mode_persists_across_column_additions_updates_and_ret
 
     // Invalid X-vs-Y column index is rejected cleanly.
     let bad_x_vs_y =
-        err_cmd(&mut session, "stats.run", json!({ "source_sheet": "xy2", "kind": "bland_altman", "xy_compare_x_vs_y": true, "column_b": 2 }));
+        err_cmd(&mut session, "stats.run", json!({ "source_sheet_id": "xy2", "kind": "bland_altman", "xy_compare_x_vs_y": true, "column_b": 2 }));
     assert_eq!(bad_x_vs_y.code, ErrorCode::BadInput);
 
     // Retargeting between XY tables recomputes xy_compare_x_vs_y, and retargeting to Column clears it to None.
-    ok_cmd(&mut session, "analysis.retargetData", json!({ "sheet_id": "ba-xy1", "source_sheet": "xy2" }));
+    ok_cmd(&mut session, "analysis.retargetData", json!({ "sheet_id": "ba-xy1", "source_sheet_id": "xy2" }));
     assert!(matches!(
         session.document().result_sheet(&SheetId::new("ba-xy1")).unwrap().analysis.kind,
         AnalysisKind::BlandAltman(BlandAltmanSpec { xy_compare_x_vs_y: Some(false), .. })
     ));
-    ok_cmd(&mut session, "analysis.retargetData", json!({ "sheet_id": "ba-xy1", "source_sheet": "col2" }));
+    ok_cmd(&mut session, "analysis.retargetData", json!({ "sheet_id": "ba-xy1", "source_sheet_id": "col2" }));
     assert!(matches!(
         session.document().result_sheet(&SheetId::new("ba-xy1")).unwrap().analysis.kind,
         AnalysisKind::BlandAltman(BlandAltmanSpec { xy_compare_x_vs_y: None, .. })
@@ -172,7 +176,7 @@ fn audit_7_paired_multiple_row_tests_return_bad_input() {
         ("col3", json!({ "paired": true })),
         ("mv3", json!({ "paired": true })),
     ] {
-        let mut req = json!({ "source_sheet": src, "kind": "multiple_row_t_tests" });
+        let mut req = json!({ "source_sheet_id": src, "kind": "multiple_row_t_tests" });
         req.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
         let err = err_cmd(&mut session, "stats.run", req);
         assert_eq!(err.code, ErrorCode::BadInput, "expected BadInput for {src} with {extra}, got {err}");
@@ -182,12 +186,12 @@ fn audit_7_paired_multiple_row_tests_return_bad_input() {
     ok_cmd(
         &mut session,
         "stats.run",
-        json!({ "sheet_id": "mr-ok", "source_sheet": "grp3", "kind": "multiple_row_t_tests", "paired": true, "selected_data_sets": [0, 1] }),
+        json!({ "sheet_id": "mr-ok", "source_sheet_id": "grp3", "kind": "multiple_row_t_tests", "paired": true, "selected_data_sets": [0, 1] }),
     );
     assert_eq!(session.document().result_sheet(&SheetId::new("mr-ok")).unwrap().status, ResultStatus::UpToDate);
 
     // Delayed recalculation after table expansion on a Column sheet maps `paired_selected_columns` to BadInput.
-    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "mr-col", "source_sheet": "col4", "kind": "multiple_row_t_tests", "paired": true }));
+    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "mr-col", "source_sheet_id": "col4", "kind": "multiple_row_t_tests", "paired": true }));
     ok_cmd(&mut session, "table.paste", json!({ "sheet_id": "col4", "start_row": 0, "start_col": 4, "text": "9\n10\n11\n12" }));
     let recalc_err = err_cmd(&mut session, "analysis.run", json!({ "sheet_id": "mr-col" }));
     assert_eq!(recalc_err.code, ErrorCode::BadInput);
@@ -223,25 +227,25 @@ fn audit_32_selected_data_sets_rejects_out_of_range_and_duplicates() {
         ("fit.run", "xy2", "linear"),
         ("transform.run", "xy2", "normalize"),
     ] {
-        let dup_err = err_cmd(&mut session, cmd, json!({ "source_sheet": src, "kind": kind, "selected_data_sets": [0, 0] }));
+        let dup_err = err_cmd(&mut session, cmd, json!({ "source_sheet_id": src, "kind": kind, "selected_data_sets": [0, 0] }));
         assert_eq!(dup_err.code, ErrorCode::BadInput, "expected BadInput for duplicate on {cmd}");
-        let oob_err = err_cmd(&mut session, cmd, json!({ "source_sheet": src, "kind": kind, "selected_data_sets": [0, 5] }));
+        let oob_err = err_cmd(&mut session, cmd, json!({ "source_sheet_id": src, "kind": kind, "selected_data_sets": [0, 5] }));
         assert_eq!(oob_err.code, ErrorCode::BadInput, "expected BadInput for OOB on {cmd}");
     }
 
     // Also reject via updateParams & retargetData.
-    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "desc-1", "source_sheet": "col2", "kind": "descriptive" }));
+    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "desc-1", "source_sheet_id": "col2", "kind": "descriptive" }));
     assert_eq!(
         err_cmd(&mut session, "analysis.updateParams", json!({ "sheet_id": "desc-1", "selected_data_sets": [1, 1] })).code,
         ErrorCode::BadInput
     );
     assert_eq!(err_cmd(&mut session, "analysis.updateParams", json!({ "sheet_id": "desc-1", "selected_data_sets": [99] })).code, ErrorCode::BadInput);
     assert_eq!(
-        err_cmd(&mut session, "analysis.retargetData", json!({ "sheet_id": "desc-1", "source_sheet": "xy2", "selected_data_sets": [0, 0] })).code,
+        err_cmd(&mut session, "analysis.retargetData", json!({ "sheet_id": "desc-1", "source_sheet_id": "xy2", "selected_data_sets": [0, 0] })).code,
         ErrorCode::BadInput
     );
     assert_eq!(
-        err_cmd(&mut session, "analysis.retargetData", json!({ "sheet_id": "desc-1", "source_sheet": "xy2", "selected_data_sets": [4] })).code,
+        err_cmd(&mut session, "analysis.retargetData", json!({ "sheet_id": "desc-1", "source_sheet_id": "xy2", "selected_data_sets": [4] })).code,
         ErrorCode::BadInput
     );
 
@@ -251,7 +255,7 @@ fn audit_32_selected_data_sets_rejects_out_of_range_and_duplicates() {
         "fit.run",
         json!({
             "sheet_id": "nl-grp-ok",
-            "source_sheet": "mv-nl",
+            "source_sheet_id": "mv-nl",
             "kind": "straight_line",
             "mv_group_columns": [0],
             "mv_x_columns": [1],
@@ -263,7 +267,7 @@ fn audit_32_selected_data_sets_rejects_out_of_range_and_duplicates() {
         &mut session,
         "fit.run",
         json!({
-            "source_sheet": "mv-nl",
+            "source_sheet_id": "mv-nl",
             "kind": "straight_line",
             "mv_group_columns": [0],
             "mv_x_columns": [1],
@@ -281,15 +285,15 @@ fn audit_58_transform_rejects_unknown_operation_and_anchors() {
     let mut session = Session::from_document(doc);
 
     assert_eq!(
-        err_cmd(&mut session, "transform.run", json!({ "source_sheet": "xy2", "kind": "normalize", "hundred_anchor": "maximum" })).code,
+        err_cmd(&mut session, "transform.run", json!({ "source_sheet_id": "xy2", "kind": "normalize", "hundred_anchor": "maximum" })).code,
         ErrorCode::BadInput
     );
     assert_eq!(
-        err_cmd(&mut session, "transform.run", json!({ "source_sheet": "xy2", "kind": "normalize", "zero_anchor": "bogus" })).code,
+        err_cmd(&mut session, "transform.run", json!({ "source_sheet_id": "xy2", "kind": "normalize", "zero_anchor": "bogus" })).code,
         ErrorCode::BadInput
     );
     assert_eq!(
-        err_cmd(&mut session, "transform.run", json!({ "source_sheet": "xy2", "kind": "remove_baseline", "operation": "multiply" })).code,
+        err_cmd(&mut session, "transform.run", json!({ "source_sheet_id": "xy2", "kind": "remove_baseline", "operation": "multiply" })).code,
         ErrorCode::BadInput
     );
 
@@ -297,17 +301,17 @@ fn audit_58_transform_rejects_unknown_operation_and_anchors() {
     ok_cmd(
         &mut session,
         "transform.run",
-        json!({ "sheet_id": "norm-ok", "source_sheet": "xy2", "kind": "normalize", "zero_anchor": "smallest", "hundred_anchor": "largest" }),
+        json!({ "sheet_id": "norm-ok", "source_sheet_id": "xy2", "kind": "normalize", "zero_anchor": "smallest", "hundred_anchor": "largest" }),
     );
     ok_cmd(
         &mut session,
         "transform.run",
-        json!({ "sheet_id": "base-ok", "source_sheet": "xy2", "kind": "remove_baseline", "baseline_columns": [0], "operation": "pct_change" }),
+        json!({ "sheet_id": "base-ok", "source_sheet_id": "xy2", "kind": "remove_baseline", "baseline_columns": [0], "operation": "pct_change" }),
     );
     ok_cmd(
         &mut session,
         "transform.run",
-        json!({ "sheet_id": "base-ok2", "source_sheet": "xy2", "kind": "remove_baseline", "baseline_columns": [0], "operation": "pctchange" }),
+        json!({ "sheet_id": "base-ok2", "source_sheet_id": "xy2", "kind": "remove_baseline", "baseline_columns": [0], "operation": "pctchange" }),
     );
 
     // updateParams also rejects typos.
@@ -322,14 +326,14 @@ fn audit_78_confidence_level_fraction_rejected_across_all_commands() {
     doc.add_data_sheet(make_single_xy_sheet("xy1")).unwrap();
     let mut session = Session::from_document(doc);
 
-    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "res-base", "source_sheet": "col2", "kind": "unpaired_t" }));
+    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "res-base", "source_sheet_id": "col2", "kind": "unpaired_t" }));
 
     for (cmd, payload) in [
-        ("analysis.run", json!({ "source_sheet": "col2", "kind": "unpaired_t", "confidence_percent": 0.95 })),
-        ("analysis.run", json!({ "source_sheet": "col2", "kind": "unpaired_t", "confidence_level": 1.0 })),
-        ("stats.run", json!({ "source_sheet": "col2", "kind": "descriptive", "confidence_percent": 0.99 })),
-        ("fit.run", json!({ "source_sheet": "xy1", "kind": "linear", "confidence_percent": 0.95 })),
-        ("transform.run", json!({ "source_sheet": "xy1", "kind": "math", "confidence_percent": 0.95 })),
+        ("analysis.run", json!({ "source_sheet_id": "col2", "kind": "unpaired_t", "confidence_percent": 0.95 })),
+        ("analysis.run", json!({ "source_sheet_id": "col2", "kind": "unpaired_t", "confidence_percent": 1.0 })),
+        ("stats.run", json!({ "source_sheet_id": "col2", "kind": "descriptive", "confidence_percent": 0.99 })),
+        ("fit.run", json!({ "source_sheet_id": "xy1", "kind": "linear", "confidence_percent": 0.95 })),
+        ("transform.run", json!({ "source_sheet_id": "xy1", "kind": "math", "confidence_percent": 0.95 })),
         ("analysis.updateParams", json!({ "sheet_id": "res-base", "confidence_percent": 0.95 })),
         ("analysis.updateParams", json!({ "sheet_id": "res-base", "params": { "confidence_percent": 0.95 } })),
     ] {
@@ -367,23 +371,23 @@ fn audit_79_rejects_unknown_and_inapplicable_keys_per_kind() {
     let mut session = Session::from_document(doc);
 
     let invalid_cases = [
-        ("stats.run", json!({ "source_sheet": "col3", "kind": "unpaired_t", "alpha": 0.01 })),
-        ("stats.run", json!({ "source_sheet": "col3", "kind": "unpaired_t", "hypothetical": 5.0 })),
-        ("stats.run", json!({ "source_sheet": "col3", "kind": "unpaired_t", "bogus_param": true })),
-        ("stats.run", json!({ "source_sheet": "col3", "kind": "descriptive", "hypothetical_mean": 1.0 })),
-        ("stats.run", json!({ "source_sheet": "col3", "kind": "one_way_anova", "geisser_greenhouse": true })),
-        ("stats.run", json!({ "source_sheet": "col3", "kind": "one_way_anova", "multiplicity": "tukey", "control_column": 0 })),
-        ("stats.run", json!({ "source_sheet": "col3", "kind": "grubbs", "q_percent": 1.0 })),
-        ("stats.run", json!({ "source_sheet": "col3", "kind": "rout", "alpha": 0.05 })),
-        ("fit.run", json!({ "source_sheet": "xy1", "kind": "linear", "equation_id": "4pl" })),
-        ("fit.run", json!({ "source_sheet": "xy1", "kind": "linear", "alpha": 0.05 })),
-        ("fit.run", json!({ "source_sheet": "xy1", "kind": "4pl", "q_percent": 2.0 })),
-        ("fit.run", json!({ "source_sheet": "xy1", "kind": "4pl", "alternative_equation_id": "log_agonist_vs_response_3pl" })),
-        ("transform.run", json!({ "source_sheet": "xy1", "kind": "normalize", "every_k_rows": 2 })),
+        ("stats.run", json!({ "source_sheet_id": "col3", "kind": "unpaired_t", "alpha": 0.01 })),
+        ("stats.run", json!({ "source_sheet_id": "col3", "kind": "unpaired_t", "hypothetical": 5.0 })),
+        ("stats.run", json!({ "source_sheet_id": "col3", "kind": "unpaired_t", "bogus_param": true })),
+        ("stats.run", json!({ "source_sheet_id": "col3", "kind": "descriptive", "hypothetical_mean": 1.0 })),
+        ("stats.run", json!({ "source_sheet_id": "col3", "kind": "one_way_anova", "geisser_greenhouse": true })),
+        ("stats.run", json!({ "source_sheet_id": "col3", "kind": "one_way_anova", "multiplicity": "tukey", "control_column": 0 })),
+        ("stats.run", json!({ "source_sheet_id": "col3", "kind": "grubbs", "q_percent": 1.0 })),
+        ("stats.run", json!({ "source_sheet_id": "col3", "kind": "rout", "alpha": 0.05 })),
+        ("fit.run", json!({ "source_sheet_id": "xy1", "kind": "linear", "equation_id": "4pl" })),
+        ("fit.run", json!({ "source_sheet_id": "xy1", "kind": "linear", "alpha": 0.05 })),
+        ("fit.run", json!({ "source_sheet_id": "xy1", "kind": "4pl", "q_percent": 2.0 })),
+        ("fit.run", json!({ "source_sheet_id": "xy1", "kind": "4pl", "alternative_equation_id": "log_agonist_vs_response_3pl" })),
+        ("transform.run", json!({ "source_sheet_id": "xy1", "kind": "normalize", "every_k_rows": 2 })),
         (
             "analysis.run",
             json!({
-                "source_sheet": "col3",
+                "source_sheet_id": "col3",
                 "kind": { "DescriptiveStats": { "aggregation": "RowMeans", "custom_upper_percentile": null, "run_normality_battery": true, "hypothetical_value": null, "bogus": 1 } }
             }),
         ),
@@ -398,7 +402,7 @@ fn audit_79_rejects_unknown_and_inapplicable_keys_per_kind() {
     ok_cmd(
         &mut session,
         "stats.run",
-        json!({ "sheet_id": "rm-ok", "source_sheet": "col3", "kind": "rm_one_way_anova", "multiplicity_method": "tukey", "geisser_greenhouse": false }),
+        json!({ "sheet_id": "rm-ok", "source_sheet_id": "col3", "kind": "rm_one_way_anova", "multiplicity_method": "tukey", "geisser_greenhouse": false }),
     );
     assert_eq!(err_cmd(&mut session, "analysis.updateParams", json!({ "sheet_id": "rm-ok", "bogus": 1 })).code, ErrorCode::BadInput);
     assert_eq!(err_cmd(&mut session, "analysis.updateParams", json!({ "sheet_id": "rm-ok", "params": { "bogus": 1 } })).code, ErrorCode::BadInput);
@@ -408,7 +412,7 @@ fn audit_79_rejects_unknown_and_inapplicable_keys_per_kind() {
     ok_cmd(
         &mut session,
         "stats.run",
-        json!({ "sheet_id": "dun-ok", "source_sheet": "col3", "kind": "one_way_anova", "multiplicity": "dunnett", "control_column": 0 }),
+        json!({ "sheet_id": "dun-ok", "source_sheet_id": "col3", "kind": "one_way_anova", "multiplicity": "dunnett", "control_column": 0 }),
     );
 
     // LinearRegression rejects `parameter_rules` on creation and nested `params`, while allowing
@@ -418,14 +422,14 @@ fn audit_79_rejects_unknown_and_inapplicable_keys_per_kind() {
         "scope": { "HookedConstant": { "InfoConstant": { "info_sheet_id": "info-1", "constant_name": "DoseRef" } } }
     }]);
     assert_eq!(
-        err_cmd(&mut session, "fit.run", json!({ "source_sheet": "xy1", "kind": "linear", "parameter_rules": bad_hook_rule })).code,
+        err_cmd(&mut session, "fit.run", json!({ "source_sheet_id": "xy1", "kind": "linear", "parameter_rules": bad_hook_rule })).code,
         ErrorCode::BadInput
     );
     assert_eq!(
-        err_cmd(&mut session, "analysis.run", json!({ "source_sheet": "xy1", "kind": "linear", "parameter_rules": bad_hook_rule })).code,
+        err_cmd(&mut session, "analysis.run", json!({ "source_sheet_id": "xy1", "kind": "linear", "parameter_rules": bad_hook_rule })).code,
         ErrorCode::BadInput
     );
-    ok_cmd(&mut session, "fit.run", json!({ "sheet_id": "lin-hook", "source_sheet": "xy1", "kind": "linear" }));
+    ok_cmd(&mut session, "fit.run", json!({ "sheet_id": "lin-hook", "source_sheet_id": "xy1", "kind": "linear" }));
     ok_cmd(&mut session, "analysis.updateParams", json!({ "sheet_id": "lin-hook", "parameter_rules": bad_hook_rule }));
     assert_eq!(
         err_cmd(&mut session, "analysis.updateParams", json!({ "sheet_id": "lin-hook", "parameter_rules": "invalid" })).code,
@@ -451,7 +455,7 @@ fn audit_80_nonlinear_rout_q_override_and_bounds() {
     let mut session = Session::from_document(doc);
 
     // q_percent & fdr_q_percent override works with method: "rout".
-    ok_cmd(&mut session, "fit.run", json!({ "sheet_id": "rout-5", "source_sheet": "xy-dr", "kind": "4pl", "method": "rout", "q_percent": 5.0 }));
+    ok_cmd(&mut session, "fit.run", json!({ "sheet_id": "rout-5", "source_sheet_id": "xy-dr", "kind": "4pl", "method": "rout", "q_percent": 5.0 }));
     assert!(matches!(
         session.document().result_sheet(&SheetId::new("rout-5")).unwrap().analysis.kind,
         AnalysisKind::NonlinearRegression(ref nl)
@@ -459,14 +463,10 @@ fn audit_80_nonlinear_rout_q_override_and_bounds() {
     ));
 
     // Boundary Q = 50.0 allowed; <= 0.0 or > 50.0 rejected with BadInput.
-    ok_cmd(
-        &mut session,
-        "fit.run",
-        json!({ "sheet_id": "rout-50", "source_sheet": "xy-dr", "kind": "4pl", "method": "rout", "fdr_q_percent": 50.0 }),
-    );
+    ok_cmd(&mut session, "fit.run", json!({ "sheet_id": "rout-50", "source_sheet_id": "xy-dr", "kind": "4pl", "method": "rout", "q_percent": 50.0 }));
     for bad_q in [0.0, -1.0, 50.1] {
         assert_eq!(
-            err_cmd(&mut session, "fit.run", json!({ "source_sheet": "xy-dr", "kind": "4pl", "method": "rout", "q_percent": bad_q })).code,
+            err_cmd(&mut session, "fit.run", json!({ "source_sheet_id": "xy-dr", "kind": "4pl", "method": "rout", "q_percent": bad_q })).code,
             ErrorCode::BadInput,
             "expected BadInput for q_percent={bad_q}"
         );
@@ -474,7 +474,7 @@ fn audit_80_nonlinear_rout_q_override_and_bounds() {
     }
 
     // Valid updateParams updates fdr_q_percent on existing ROUT fit.
-    ok_cmd(&mut session, "analysis.updateParams", json!({ "sheet_id": "rout-5", "fdr_q_percent": 2.5 }));
+    ok_cmd(&mut session, "analysis.updateParams", json!({ "sheet_id": "rout-5", "q_percent": 2.5 }));
     assert!(matches!(
         session.document().result_sheet(&SheetId::new("rout-5")).unwrap().analysis.kind,
         AnalysisKind::NonlinearRegression(ref nl)
@@ -542,11 +542,11 @@ fn audit_93_mv_default_columns_persisted_before_appending_calculated_var() {
 
     let mut session = Session::from_document(doc);
 
-    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "tg-mv", "source_sheet": "mv-bio", "kind": "unpaired_t" }));
-    ok_cmd(&mut session, "fit.run", json!({ "sheet_id": "nl-mv", "source_sheet": "mv-bio", "kind": "4pl" }));
-    ok_cmd(&mut session, "fit.run", json!({ "sheet_id": "lin-mv", "source_sheet": "mv-cont", "kind": "linear" }));
-    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "pca-mv", "source_sheet": "mv-cont", "kind": "pca" }));
-    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "km-mv", "source_sheet": "mv-km", "kind": "kaplan_meier" }));
+    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "tg-mv", "source_sheet_id": "mv-bio", "kind": "unpaired_t" }));
+    ok_cmd(&mut session, "fit.run", json!({ "sheet_id": "nl-mv", "source_sheet_id": "mv-bio", "kind": "4pl" }));
+    ok_cmd(&mut session, "fit.run", json!({ "sheet_id": "lin-mv", "source_sheet_id": "mv-cont", "kind": "linear" }));
+    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "pca-mv", "source_sheet_id": "mv-cont", "kind": "pca" }));
+    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "km-mv", "source_sheet_id": "mv-km", "kind": "kaplan_meier" }));
 
     // Assert default bindings were materialized into AnalysisSpec right at creation.
     assert!(matches!(
@@ -601,7 +601,7 @@ fn audit_93_mv_default_columns_persisted_before_appending_calculated_var() {
         "analysis.run",
         json!({
             "sheet_id": "pca-explicit-empty",
-            "source_sheet": "mv-all-cont",
+            "source_sheet_id": "mv-all-cont",
             "selected_data_sets": [],
             "kind": { "Multivariate": { "Pca": { "standardize": true, "parallel_analysis_seed": 7 } } }
         }),
@@ -612,7 +612,7 @@ fn audit_93_mv_default_columns_persisted_before_appending_calculated_var() {
         "analysis.run",
         json!({
             "sheet_id": "pca-mixed-explicit-empty",
-            "source_sheet": "mv-bio",
+            "source_sheet_id": "mv-bio",
             "selected_data_sets": [],
             "kind": { "Multivariate": { "Pca": { "standardize": true, "parallel_analysis_seed": 7 } } }
         }),
@@ -634,23 +634,23 @@ fn audit_113_multiple_imputation_m_and_iters_bounds() {
 
     for bad_m in [0_usize, 1, 51] {
         assert_eq!(
-            err_cmd(&mut session, "stats.run", json!({ "source_sheet": "mv-mi", "kind": "mice", "imputations_m": bad_m })).code,
+            err_cmd(&mut session, "stats.run", json!({ "source_sheet_id": "mv-mi", "kind": "mice", "imputations_m": bad_m })).code,
             ErrorCode::BadInput,
             "expected BadInput for m={bad_m}"
         );
     }
     for bad_iters in [0_usize, 101] {
         assert_eq!(
-            err_cmd(&mut session, "stats.run", json!({ "source_sheet": "mv-mi", "kind": "mice", "max_iters": bad_iters })).code,
+            err_cmd(&mut session, "stats.run", json!({ "source_sheet_id": "mv-mi", "kind": "mice", "max_iters": bad_iters })).code,
             ErrorCode::BadInput,
             "expected BadInput for max_iters={bad_iters}"
         );
     }
 
-    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "mi-ok", "source_sheet": "mv-mi", "kind": "mice", "m": 2, "iterations": 1 }));
+    ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "mi-ok", "source_sheet_id": "mv-mi", "kind": "mice", "imputations_m": 2, "max_iters": 1 }));
     assert_eq!(err_cmd(&mut session, "analysis.updateParams", json!({ "sheet_id": "mi-ok", "imputations_m": 1 })).code, ErrorCode::BadInput);
-    assert_eq!(err_cmd(&mut session, "analysis.updateParams", json!({ "sheet_id": "mi-ok", "iterations": 101 })).code, ErrorCode::BadInput);
-    ok_cmd(&mut session, "analysis.updateParams", json!({ "sheet_id": "mi-ok", "m": 50, "max_iters": 100 }));
+    assert_eq!(err_cmd(&mut session, "analysis.updateParams", json!({ "sheet_id": "mi-ok", "max_iters": 101 })).code, ErrorCode::BadInput);
+    ok_cmd(&mut session, "analysis.updateParams", json!({ "sheet_id": "mi-ok", "imputations_m": 50, "max_iters": 100 }));
 }
 
 #[test]
@@ -664,7 +664,7 @@ fn audit_114_nonlinear_parameter_rules_unknown_and_duplicate_rejected() {
         &mut session,
         "fit.run",
         json!({
-            "source_sheet": "xy1",
+            "source_sheet_id": "xy1",
             "kind": "4pl",
             "parameter_rules": [{ "name": "BogusParam", "scope": "shared" }]
         }),
@@ -676,7 +676,7 @@ fn audit_114_nonlinear_parameter_rules_unknown_and_duplicate_rejected() {
         &mut session,
         "fit.run",
         json!({
-            "source_sheet": "xy1",
+            "source_sheet_id": "xy1",
             "kind": "straight_line",
             "parameter_rules": [
                 { "name": "Slope", "scope": "constant", "value": 1.0 },
@@ -691,7 +691,7 @@ fn audit_114_nonlinear_parameter_rules_unknown_and_duplicate_rejected() {
         &mut session,
         "fit.run",
         json!({
-            "source_sheet": "xy1",
+            "source_sheet_id": "xy1",
             "equation_id": "custom_line",
             "custom_dsl": "y = a * x + b",
             "parameter_rules": [{ "name": "c", "scope": "constant", "value": 0.0 }]
@@ -704,7 +704,7 @@ fn audit_114_nonlinear_parameter_rules_unknown_and_duplicate_rejected() {
         "fit.run",
         json!({
             "sheet_id": "fit-dsl",
-            "source_sheet": "xy1",
+            "source_sheet_id": "xy1",
             "equation_id": "custom_line",
             "custom_dsl": "y = a * x + b",
             "parameter_rules": [{ "name": "a", "scope": "constant", "value": 1.0 }]
@@ -751,7 +751,7 @@ fn audit_120_xy_glm_raw_replicates_uses_all_replicates_and_rejects_presummarized
     ok_cmd(
         &mut session,
         "stats.run",
-        json!({ "sheet_id": "glm-rep", "source_sheet": "xy-rep", "kind": "linear_glm", "predictor_columns": [0], "response_column": 1 }),
+        json!({ "sheet_id": "glm-rep", "source_sheet_id": "xy-rep", "kind": "linear_glm", "predictor_columns": [0], "response_column": 1 }),
     );
     let res = session.document().result_sheet(&SheetId::new("glm-rep")).unwrap();
     assert_eq!(res.status, ResultStatus::UpToDate);
@@ -765,8 +765,12 @@ fn audit_120_xy_glm_raw_replicates_uses_all_replicates_and_rejects_presummarized
 
     // Pre-summarized XY table remains rejected with BadInput.
     assert_eq!(
-        err_cmd(&mut session, "stats.run", json!({ "source_sheet": "xy-sum", "kind": "linear_glm", "predictor_columns": [0], "response_column": 0 }))
-            .code,
+        err_cmd(
+            &mut session,
+            "stats.run",
+            json!({ "source_sheet_id": "xy-sum", "kind": "linear_glm", "predictor_columns": [0], "response_column": 0 })
+        )
+        .code,
         ErrorCode::BadInput
     );
 }

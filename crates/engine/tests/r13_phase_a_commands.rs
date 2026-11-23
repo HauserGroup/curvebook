@@ -23,7 +23,7 @@ fn seed_column_doc() -> ProjectDocument {
         "table.setCells",
         json!({
             "sheet_id": "d-col",
-            "cells": [
+            "edits": [
                 { "row": 0, "col": 0, "value": 10.0 },
                 { "row": 1, "col": 0, "value": 12.0 },
                 { "row": 2, "col": 0, "value": 11.0 },
@@ -299,7 +299,7 @@ fn edit_paste_result_table_renders_across_png_svg_pdf_and_updates_on_upstream_ed
 
     // Mutate upstream cell strongly to shift ANOVA F / R squared, verify live SVG changes accordingly
     let svg_before = render_svg(&g_scene, &SvgExportOptions::default()).unwrap();
-    ok_cmd(&mut session, "table.setCells", json!({ "sheet_id": "d-col", "cells": [{ "row": 0, "col": 2, "value": 999.0 }] }));
+    ok_cmd(&mut session, "table.setCells", json!({ "sheet_id": "d-col", "edits": [{ "row": 0, "col": 2, "value": 999.0 }] }));
     let g_scene_after = compile_graph(session.document().graph_sheet(&SheetId::new("g-col")).unwrap(), session.document()).unwrap();
     let svg_after = render_svg(&g_scene_after, &SvgExportOptions::default()).unwrap();
     assert_ne!(svg_before, svg_after, "pasted result table must refresh on upstream data edit");

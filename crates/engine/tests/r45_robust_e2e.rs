@@ -50,8 +50,8 @@ fn build_seeded_xy_session() -> Session {
     // Row 13: X=-6.5, blank Y -> unknown Y interpolation
     x_cells.push(json!({ "row": 13, "value": -6.5 }));
 
-    exec_ok(&mut session, "table.setXCells", json!({ "sheet_id": "xy-dose", "cells": x_cells }));
-    exec_ok(&mut session, "table.setCells", json!({ "sheet_id": "xy-dose", "cells": y_cells }));
+    exec_ok(&mut session, "table.setXCells", json!({ "sheet_id": "xy-dose", "edits": x_cells }));
+    exec_ok(&mut session, "table.setCells", json!({ "sheet_id": "xy-dose", "edits": y_cells }));
     session
 }
 
@@ -314,8 +314,8 @@ fn rout_overlay_marks_the_exact_raw_replicate_and_follows_recalculation() {
         let y = baseline + if row == injected_row { 50.0 } else { 0.2 };
         y_cells.push(json!({"row": row, "col": 0, "subcol": 2, "value": y}));
     }
-    exec_ok(&mut session, "table.setXCells", json!({"sheet_id": sheet_id, "cells": x_cells}));
-    exec_ok(&mut session, "table.setCells", json!({"sheet_id": sheet_id, "cells": y_cells}));
+    exec_ok(&mut session, "table.setXCells", json!({"sheet_id": sheet_id, "edits": x_cells}));
+    exec_ok(&mut session, "table.setCells", json!({"sheet_id": sheet_id, "edits": y_cells}));
     let result_id = SheetId::new("replicated-fit");
     exec_ok(&mut session, "fit.run", json!({"sheet_id": result_id, "source_sheet_id": sheet_id, "equation_id": "straight_line", "method": "rout"}));
     let source = SourceCellId { sheet_id: sheet_id.clone(), row: 5, col: 0, subcol: 2 };
@@ -347,7 +347,7 @@ fn rout_overlay_marks_the_exact_raw_replicate_and_follows_recalculation() {
         ScenePrimitive::Path { fill: None, stroke: Some(stroke), clip: Some(_), .. } if (stroke.width_pt - 1.5).abs() < 1e-12
     )));
 
-    exec_ok(&mut session, "table.setCells", json!({"sheet_id": sheet_id, "cells": [{"row": injected_row, "col": 0, "subcol": 2, "value": 13.2}]}));
+    exec_ok(&mut session, "table.setCells", json!({"sheet_id": sheet_id, "edits": [{"row": injected_row, "col": 0, "subcol": 2, "value": 13.2}]}));
     assert!(session.document().result_sheet(&result_id).unwrap().eliminated_outliers.is_empty());
     let refreshed = compile_graph(&graph, session.document()).unwrap();
     assert!(refreshed.plotted_points.iter().all(|pt| !pt.value_summary.starts_with("ROUT outlier")));

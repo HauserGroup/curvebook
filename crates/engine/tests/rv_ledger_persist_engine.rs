@@ -264,14 +264,14 @@ fn rv16_closed_command_schemas_and_deserializer_reject_unknown_fields_with_rfc69
         ("project.inspect", json!({ "sheet_id": "xy-1", "verbose": true }), "/verbose"),
         ("info.setNote", json!({ "sheet_id": "info-1", "text": "ok", "apend": true }), "/apend"),
         ("graph.setKind", json!({ "sheet_id": "g-1", "kind": "xy", "unknown_flag": 1 }), "/unknown_flag"),
-        ("sheet.createData", json!({ "sheet_id": "xy-2", "archetype": "xy", "rowz": 10 }), "/rowz"),
+        ("sheet.createData", json!({ "sheet_id": "xy-2", "kind": "xy", "rowz": 10 }), "/rowz"),
         ("table.setTitles", json!({ "sheet_id": "xy-1", "x_title": "Time", "bogus_titles": ["Y"] }), "/bogus_titles"),
         (
             "table.randomizeGroups",
             json!({
                 "n_subjectz": 6,
                 "seed": 42,
-                "groups": [{ "name": "Control", "weight": 1 }, { "name": "Treated", "weight": 1 }]
+                "groups": [{ "label": "Control", "weight": 1 }, { "label": "Treated", "weight": 1 }]
             }),
             "/n_subjectz",
         ),
@@ -294,8 +294,8 @@ fn rv16_closed_command_schemas_and_deserializer_reject_unknown_fields_with_rfc69
         assert_eq!(session, before, "`{command_id}` must leave session unchanged on BadInput");
     }
 
-    // Declared aliases (`name`, `y_titles`) and intentional open patch commands (`graph.setAxes`, `analyze.run`) continue to succeed.
-    session.execute("table.setTitles", json!({ "sheet_id": "xy-1", "x_title": "Dose", "y_titles": ["Resp A", "Resp B"] }))?;
+    // Canonical closed commands (`table.setTitles`) and intentional open patch commands (`graph.setAxes`, `analyze.run`) continue to succeed.
+    session.execute("table.setTitles", json!({ "sheet_id": "xy-1", "x_title": "Dose", "titles": ["Resp A", "Resp B"] }))?;
     session.execute("graph.setAxes", json!({ "sheet_id": "g-1", "axis": "x", "min": 0.0, "max": 100.0 }))?;
     session.execute("analyze.run", json!({ "sheet_id": "xy-1" }))?;
 

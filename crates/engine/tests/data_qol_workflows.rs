@@ -53,7 +53,7 @@ fn g2_paste_link_missing_or_deleted_external_file_fails_loudly() {
         "table.pasteLink",
         json!({
             "target_sheet_id": "col-1",
-            "path": missing_path.to_string_lossy()
+            "source_path": missing_path.to_string_lossy()
         }),
     );
     assert!(err.contains("failed reading external link file"), "unexpected error: {err}");
@@ -69,7 +69,7 @@ fn g2_paste_link_missing_or_deleted_external_file_fails_loudly() {
         "table.pasteLink",
         json!({
             "target_sheet_id": "col-1",
-            "path": live_path.to_string_lossy()
+            "source_path": live_path.to_string_lossy()
         }),
     );
     let target_after = session.document().data_sheet(&col_id).expect("col-1");
@@ -95,7 +95,7 @@ fn qol1_convert_archetype_preview_commit_lossy_and_undo_redo() {
         "table.setCells",
         json!({
             "sheet_id": "grp-1",
-            "cells": [
+            "edits": [
                 { "row": 0, "col": 0, "subcol": 0, "value": 10.0 },
                 { "row": 0, "col": 0, "subcol": 1, "value": 12.0 },
                 { "row": 1, "col": 0, "subcol": 0, "value": 14.0 },
@@ -115,7 +115,7 @@ fn qol1_convert_archetype_preview_commit_lossy_and_undo_redo() {
             "timestamp_utc": "2026-11-14T08:00:00Z"
         }),
     );
-    exec_ok(&mut session, "analysis.run", json!({ "sheet_id": "res-stats", "source_sheet": "grp-1", "kind": "descriptive_stats" }));
+    exec_ok(&mut session, "analysis.run", json!({ "sheet_id": "res-stats", "source_sheet_id": "grp-1", "kind": "descriptive_stats" }));
 
     let depth_before_preview = session.undo_depth();
     let preview = exec_ok(&mut session, "table.convertArchetype", json!({ "sheet_id": "grp-1", "target_kind": "Column", "preview_only": true }));
@@ -133,7 +133,7 @@ fn qol1_convert_archetype_preview_commit_lossy_and_undo_redo() {
         "table.setCells",
         json!({
             "sheet_id": "col-lossy",
-            "cells": [
+            "edits": [
                 { "row": 0, "col": 0, "value": "NotNumeric" },
                 { "row": 1, "col": 0, "value": 2.0 },
                 { "row": 0, "col": 1, "value": 5.0 },
@@ -339,14 +339,14 @@ fn qol3_exclude_cells_with_reason_recalculates_and_audit_report() {
         "table.setCells",
         json!({
             "sheet_id": "s1",
-            "cells": [
+            "edits": [
                 { "row": 0, "col": 0, "value": 10.0 },
                 { "row": 1, "col": 0, "value": 20.0 },
                 { "row": 2, "col": 0, "value": 90.0 }
             ]
         }),
     );
-    exec_ok(&mut session, "analysis.run", json!({ "sheet_id": "res-1", "source_sheet": "s1", "kind": "descriptive_stats" }));
+    exec_ok(&mut session, "analysis.run", json!({ "sheet_id": "res-1", "source_sheet_id": "s1", "kind": "descriptive_stats" }));
     let mean_before = find_result_metric(&session, "res-1", "Mean");
     assert_eq!(mean_before, Some(40.0));
 
@@ -379,7 +379,7 @@ fn qol3_exclude_cells_with_reason_recalculates_and_audit_report() {
             "timestamp_utc": "2026-11-14T11:30:00Z"
         }),
     );
-    exec_ok(&mut session, "table.excludeCells", json!({ "sheet_id": "s2", "coords": [{ "row": 2, "col": 0 }], "excluded": true }));
+    exec_ok(&mut session, "table.excludeCells", json!({ "sheet_id": "s2", "cells": [{ "row": 2, "col": 0 }], "excluded": true }));
 
     let depth_before_audit = session.undo_depth();
     let s1_audit = exec_ok(&mut session, "table.exclusionAuditReport", json!({ "sheet_id": "s1" }));

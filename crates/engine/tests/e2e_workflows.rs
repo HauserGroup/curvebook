@@ -93,7 +93,7 @@ fn set_cell(session: &mut Session, sheet_id: &str, target_x: bool, row: usize, c
     if target_x {
         entry["target"] = json!("x");
     }
-    exec_ok(session, "table.setCells", json!({ "sheet_id": sheet_id, "cells": [entry] }));
+    exec_ok(session, "table.setCells", json!({ "sheet_id": sheet_id, "edits": [entry] }));
 }
 
 fn populate_xy_dose_response(session: &mut Session, sheet_id: &str, log_x: bool, include_unknowns: bool, top: f64) {
@@ -132,8 +132,8 @@ fn populate_xy_dose_response(session: &mut Session, sheet_id: &str, log_x: bool,
         y_cells.push(json!({ "row": 9, "col": 0, "subcol": 0, "value": unk2 }));
     }
 
-    exec_ok(session, "table.setXCells", json!({ "sheet_id": sheet_id, "cells": x_cells }));
-    exec_ok(session, "table.setCells", json!({ "sheet_id": sheet_id, "cells": y_cells }));
+    exec_ok(session, "table.setXCells", json!({ "sheet_id": sheet_id, "edits": x_cells }));
+    exec_ok(session, "table.setCells", json!({ "sheet_id": sheet_id, "edits": y_cells }));
 }
 
 fn export_svg_text(session: &mut Session, sheet_id: &str) -> String {
@@ -342,7 +342,7 @@ fn alpha_workflows_1_to_3_xy_transform_4pl_interpolation_exports_and_roundtrip()
         &mut session,
         "transform.run",
         json!({
-            "source_sheet": "dose-raw",
+            "source_sheet_id": "dose-raw",
             "sheet_id": "log-x-res",
             "kind": AnalysisKind::Transform(TransformAnalysisSpec::Math {
                 x_transform: Some(MathTransformPreset::Log10),
@@ -354,7 +354,7 @@ fn alpha_workflows_1_to_3_xy_transform_4pl_interpolation_exports_and_roundtrip()
     exec_ok(
         &mut session,
         "transform.run",
-        json!({ "source_sheet": "dose-raw", "sheet_id": "norm-res", "kind": "normalize", "zero_anchor": "smallest", "hundred_anchor": "largest" }),
+        json!({ "source_sheet_id": "dose-raw", "sheet_id": "norm-res", "kind": "normalize", "zero_anchor": "smallest", "hundred_anchor": "largest" }),
     );
     let log_data = result_sheet(&session, "log-x-res").analyzable_data.as_ref().unwrap();
     assert!((xy_x_number(log_data, 0).unwrap() - (-9.0)).abs() < 1e-9);
@@ -389,7 +389,7 @@ fn alpha_workflows_1_to_3_xy_transform_4pl_interpolation_exports_and_roundtrip()
         &mut session,
         "fit.run",
         json!({
-            "source_sheet": "dose-log",
+            "source_sheet_id": "dose-log",
             "sheet_id": "fit-4pl",
             "kind": "four_parameter_logistic",
             "interpolate_unknowns": true,
@@ -412,14 +412,14 @@ fn alpha_workflows_1_to_3_xy_transform_4pl_interpolation_exports_and_roundtrip()
     exec_ok(
         &mut session,
         "table.setXCells",
-        json!({ "sheet_id": "std-curve", "cells": [{ "row": 0, "value": 1.0 }, { "row": 1, "value": 2.0 }, { "row": 2, "value": 4.0 }] }),
+        json!({ "sheet_id": "std-curve", "edits": [{ "row": 0, "value": 1.0 }, { "row": 1, "value": 2.0 }, { "row": 2, "value": 4.0 }] }),
     );
     exec_ok(
         &mut session,
         "table.setCells",
         json!({
             "sheet_id": "std-curve",
-            "cells": [
+            "edits": [
                 { "row": 0, "col": 0, "subcol": 0, "value": 3.0 },
                 { "row": 1, "col": 0, "subcol": 0, "value": 5.0 },
                 { "row": 2, "col": 0, "subcol": 0, "value": 9.0 },
@@ -431,7 +431,7 @@ fn alpha_workflows_1_to_3_xy_transform_4pl_interpolation_exports_and_roundtrip()
     exec_ok(
         &mut session,
         "fit.run",
-        json!({ "source_sheet": "std-curve", "sheet_id": "fit-lin-std", "kind": "linear_regression", "interpolate_unknowns": true }),
+        json!({ "source_sheet_id": "std-curve", "sheet_id": "fit-lin-std", "kind": "linear_regression", "interpolate_unknowns": true }),
     );
     let interp_tab = find_tab(result_sheet(&session, "fit-lin-std"), ResultTabKind::InterpolatedUnknowns);
     assert_eq!(interp_tab.rows.len(), 2, "expected 2 interpolated unknown rows");
@@ -442,11 +442,7 @@ fn alpha_workflows_1_to_3_xy_transform_4pl_interpolation_exports_and_roundtrip()
         assert!((value - expected_x).abs() < 1e-6, "interpolated X row {idx}: got {value}, expected {expected_x}");
     }
 
-    exec_ok(
-        &mut session,
-        "graph.create",
-        json!({ "sheet_id": "g-dose", "source_sheet_id": "dose-log", "kind": "xy", "title": "4PL Standard Curve" }),
-    );
+    exec_ok(&mut session, "graph.create", json!({ "sheet_id": "g-dose", "data_sheet_id": "dose-log", "kind": "xy", "title": "4PL Standard Curve" }));
     exec_ok(
         &mut session,
         "graph.setAxes",
@@ -509,17 +505,21 @@ fn alpha_workflows_4_and_5_column_grouped_descriptive_t_anova_tukey_and_exports(
         json!({ "sheet_id": "col-3g", "text": "10.2\t18.1\t32.4\n11.4\t19.0\t34.1\n9.8\t17.4\t30.9\n10.6\t18.8\t33.5\n11.0\t18.5\t31.8" }),
     );
 
-    exec_ok(&mut session, "stats.run", json!({ "source_sheet": "col-3g", "sheet_id": "desc-col", "kind": "descriptive" }));
+    exec_ok(&mut session, "stats.run", json!({ "source_sheet_id": "col-3g", "sheet_id": "desc-col", "kind": "descriptive" }));
     let desc_tab = find_tab(result_sheet(&session, "desc-col"), ResultTabKind::DescriptiveSummary);
     assert!(!desc_tab.rows.is_empty());
 
-    exec_ok(&mut session, "stats.run", json!({ "source_sheet": "col-3g", "sheet_id": "anova-1w", "kind": "one_way_anova", "multiplicity": "tukey" }));
+    exec_ok(
+        &mut session,
+        "stats.run",
+        json!({ "source_sheet_id": "col-3g", "sheet_id": "anova-1w", "kind": "one_way_anova", "multiplicity": "tukey" }),
+    );
     let anova_res = result_sheet(&session, "anova-1w");
     assert!(scalar_val(anova_res, "F", None) > 50.0);
     assert_eq!(anova_res.pairwise_comparisons.len(), 3);
     assert!(anova_res.pairwise_comparisons.iter().all(|c| c.significant));
 
-    exec_ok(&mut session, "graph.create", json!({ "sheet_id": "g-col", "source_sheet_id": "col-3g", "kind": "column", "title": "Cohorts" }));
+    exec_ok(&mut session, "graph.create", json!({ "sheet_id": "g-col", "data_sheet_id": "col-3g", "kind": "column", "title": "Cohorts" }));
     let _col_svg = export_svg_text(&mut session, "g-col");
     let _col_pdf = export_pdf_bytes(&mut session, "g-col", "srgb", true);
 
@@ -530,7 +530,7 @@ fn alpha_workflows_4_and_5_column_grouped_descriptive_t_anova_tukey_and_exports(
         json!({ "sheet_id": "col-unpaired", "title": "Two Group Screen", "archetype": "column", "rows": 5, "cols": 2, "auto_graph": false }),
     );
     exec_ok(&mut session, "table.paste", json!({ "sheet_id": "col-unpaired", "text": "4.1\t9.2\n4.5\t9.8\n3.9\t8.9\n4.3\t9.5\n4.2\t9.4" }));
-    exec_ok(&mut session, "stats.run", json!({ "source_sheet": "col-unpaired", "sheet_id": "t-unpaired", "kind": "unpaired_t" }));
+    exec_ok(&mut session, "stats.run", json!({ "source_sheet_id": "col-unpaired", "sheet_id": "t-unpaired", "kind": "unpaired_t" }));
     assert!(scalar_val(result_sheet(&session, "t-unpaired"), "PValue", None) < 0.001);
 
     exec_ok(
@@ -547,7 +547,7 @@ fn alpha_workflows_4_and_5_column_grouped_descriptive_t_anova_tukey_and_exports(
         }),
     );
     exec_ok(&mut session, "table.paste", json!({ "sheet_id": "col-paired", "text": "20.0\t27.5\n22.1\t29.4\n18.9\t26.0\n21.4\t28.9\n19.6\t27.1" }));
-    exec_ok(&mut session, "stats.run", json!({ "source_sheet": "col-paired", "sheet_id": "t-paired", "kind": "paired_t" }));
+    exec_ok(&mut session, "stats.run", json!({ "source_sheet_id": "col-paired", "sheet_id": "t-paired", "kind": "paired_t" }));
     assert!(scalar_val(result_sheet(&session, "t-paired"), "PValue", None) < 0.001);
 
     // Workflow 5: Grouped Two-Way ANOVA + Tukey + Grouped graph export.
@@ -583,14 +583,18 @@ fn alpha_workflows_4_and_5_column_grouped_descriptive_t_anova_tukey_and_exports(
         (1, 1, 2, 14.2),
     ];
     let cell_json: Vec<Value> = grp_cells.iter().map(|&(r, c, s, v)| json!({ "row": r, "col": c, "subcol": s, "value": v })).collect();
-    exec_ok(&mut session, "table.setCells", json!({ "sheet_id": "grp-2w", "cells": cell_json }));
+    exec_ok(&mut session, "table.setCells", json!({ "sheet_id": "grp-2w", "edits": cell_json }));
 
-    exec_ok(&mut session, "stats.run", json!({ "source_sheet": "grp-2w", "sheet_id": "anova-2w", "kind": "two_way_anova", "multiplicity": "tukey" }));
+    exec_ok(
+        &mut session,
+        "stats.run",
+        json!({ "source_sheet_id": "grp-2w", "sheet_id": "anova-2w", "kind": "two_way_anova", "multiplicity": "tukey" }),
+    );
     let tw_res = result_sheet(&session, "anova-2w");
     assert_eq!(tw_res.status, ResultStatus::UpToDate);
     assert!(!find_tab(tw_res, ResultTabKind::AnovaTable).rows.is_empty());
 
-    exec_ok(&mut session, "graph.create", json!({ "sheet_id": "g-grp", "source_sheet_id": "grp-2w", "kind": "grouped", "title": "2-Way Grouped" }));
+    exec_ok(&mut session, "graph.create", json!({ "sheet_id": "g-grp", "data_sheet_id": "grp-2w", "kind": "grouped", "title": "2-Way Grouped" }));
     let _grp_svg = export_svg_text(&mut session, "g-grp");
 }
 
@@ -679,7 +683,7 @@ fn core_workflow_live_paste_link_reactive_transpose_and_4stage_csv_paste() {
     assert_data_cell_number(session.document(), "dst-linked", 1, 0, 12.0, 1e-9);
     assert_data_cell_number(session.document(), "dst-linked", 2, 0, 22.0, 1e-9);
 
-    exec_ok(&mut session, "stats.run", json!({ "source_sheet": "dst-linked", "sheet_id": "dst-desc", "kind": "descriptive" }));
+    exec_ok(&mut session, "stats.run", json!({ "source_sheet_id": "dst-linked", "sheet_id": "dst-desc", "kind": "descriptive" }));
     let mean_before = scalar_val(result_sheet(&session, "dst-desc"), "Mean", Some(0));
     assert!((mean_before - 12.0).abs() < 1e-9);
 
@@ -711,7 +715,11 @@ fn core_workflow_kruskal_wallis_dunn_and_rm_reml_mixed_anova() {
         "table.paste",
         json!({ "sheet_id": "kw-data", "text": "1.0\t12.0\t80.0\n2.0\t15.0\t95.0\n1.5\t14.0\t110.0\n3.0\t18.0\t150.0\n2.5\t16.0\t220.0" }),
     );
-    exec_ok(&mut session, "stats.run", json!({ "source_sheet": "kw-data", "sheet_id": "kw-res", "kind": "kruskal_wallis", "multiplicity": "dunn" }));
+    exec_ok(
+        &mut session,
+        "stats.run",
+        json!({ "source_sheet_id": "kw-data", "sheet_id": "kw-res", "kind": "kruskal_wallis", "multiplicity": "dunn" }),
+    );
     let kw_res = result_sheet(&session, "kw-res");
     assert_eq!(kw_res.status, ResultStatus::UpToDate);
     assert!(scalar_val(kw_res, "Kruskal-Wallis H", None) > 10.0);
@@ -749,7 +757,7 @@ fn core_workflow_kruskal_wallis_dunn_and_rm_reml_mixed_anova() {
             rm_cells.push(json!({ "row": r, "col": c, "subcol": s, "value": v }));
         }
     }
-    exec_ok(&mut session, "table.setCells", json!({ "sheet_id": "rm-data", "cells": rm_cells }));
+    exec_ok(&mut session, "table.setCells", json!({ "sheet_id": "rm-data", "edits": rm_cells }));
 
     let rm_spec = AnalysisSpec::new(
         "rm-balanced",
@@ -766,7 +774,7 @@ fn core_workflow_kruskal_wallis_dunn_and_rm_reml_mixed_anova() {
     exec_ok(
         &mut session,
         "stats.run",
-        json!({ "source_sheet": "rm-data", "sheet_id": "rm-balanced", "spec": serde_json::to_value(&rm_spec).unwrap() }),
+        json!({ "source_sheet_id": "rm-data", "sheet_id": "rm-balanced", "spec": serde_json::to_value(&rm_spec).unwrap() }),
     );
     let balanced_res = result_sheet(&session, "rm-balanced");
     assert!(!find_tab(balanced_res, ResultTabKind::AnovaTable).rows.is_empty());
@@ -845,8 +853,8 @@ fn core_workflow_rout_shared_global_4pl_aicc_extra_ss_f_and_ci_ribbons() {
         y_cells.push(json!({ "row": r, "col": 1, "subcol": 0, "value": yb - 0.6 }));
         y_cells.push(json!({ "row": r, "col": 1, "subcol": 1, "value": yb + 0.6 }));
     }
-    exec_ok(&mut session, "table.setXCells", json!({ "sheet_id": "xy-2curves", "cells": x_cells }));
-    exec_ok(&mut session, "table.setCells", json!({ "sheet_id": "xy-2curves", "cells": y_cells }));
+    exec_ok(&mut session, "table.setXCells", json!({ "sheet_id": "xy-2curves", "edits": x_cells }));
+    exec_ok(&mut session, "table.setCells", json!({ "sheet_id": "xy-2curves", "edits": y_cells }));
 
     // Dedicated ROUT outlier detection on column table:
     exec_ok(
@@ -855,7 +863,7 @@ fn core_workflow_rout_shared_global_4pl_aicc_extra_ss_f_and_ci_ribbons() {
         json!({ "sheet_id": "rout-col", "title": "Outlier Screen", "archetype": "column", "rows": 8, "cols": 1, "auto_graph": false }),
     );
     exec_ok(&mut session, "table.paste", json!({ "sheet_id": "rout-col", "text": "10.1\n10.4\n9.9\n10.2\n10.0\n280.0\n10.3\n9.8" }));
-    exec_ok(&mut session, "stats.run", json!({ "source_sheet": "rout-col", "sheet_id": "rout-res", "kind": "outliers", "q_percent": 1.0 }));
+    exec_ok(&mut session, "stats.run", json!({ "source_sheet_id": "rout-col", "sheet_id": "rout-res", "kind": "outliers", "q_percent": 1.0 }));
     assert!(scalar_val(result_sheet(&session, "rout-res"), "OutlierCount", Some(0)) >= 1.0);
 
     let shared_rules = vec![
@@ -887,7 +895,7 @@ fn core_workflow_rout_shared_global_4pl_aicc_extra_ss_f_and_ci_ribbons() {
     exec_ok(
         &mut session,
         "fit.run",
-        json!({ "source_sheet": "xy-2curves", "sheet_id": "fit-global-f", "spec": serde_json::to_value(&spec_f).unwrap() }),
+        json!({ "source_sheet_id": "xy-2curves", "sheet_id": "fit-global-f", "spec": serde_json::to_value(&spec_f).unwrap() }),
     );
 
     let spec_aicc = make_nonlinear_spec(
@@ -902,7 +910,7 @@ fn core_workflow_rout_shared_global_4pl_aicc_extra_ss_f_and_ci_ribbons() {
     exec_ok(
         &mut session,
         "fit.run",
-        json!({ "source_sheet": "xy-2curves", "sheet_id": "fit-global-aicc", "spec": serde_json::to_value(&spec_aicc).unwrap() }),
+        json!({ "source_sheet_id": "xy-2curves", "sheet_id": "fit-global-aicc", "spec": serde_json::to_value(&spec_aicc).unwrap() }),
     );
 
     let res_f = result_sheet(&session, "fit-global-f");
@@ -919,7 +927,7 @@ fn core_workflow_rout_shared_global_4pl_aicc_extra_ss_f_and_ci_ribbons() {
     exec_ok(
         &mut session,
         "graph.create",
-        json!({ "sheet_id": "g-global", "source_sheet_id": "xy-2curves", "kind": "xy", "title": "Global 4PL + CI Ribbon" }),
+        json!({ "sheet_id": "g-global", "data_sheet_id": "xy-2curves", "kind": "xy", "title": "Global 4PL + CI Ribbon" }),
     );
     exec_ok(
         &mut session,
@@ -952,7 +960,7 @@ fn core_workflow_broken_axis_violin_before_after_and_stacked_brackets() {
         json!({ "sheet_id": "xy-gap", "title": "Bimodal Range", "archetype": "xy", "rows": 6, "cols": 1, "replicates": 1, "auto_graph": false }),
     );
     exec_ok(&mut session, "table.paste", json!({ "sheet_id": "xy-gap", "text": "1\t5\n2\t9\n3\t14\n4\t220\n5\t360\n6\t480" }));
-    exec_ok(&mut session, "graph.create", json!({ "sheet_id": "g-broken", "source_sheet_id": "xy-gap", "kind": "xy", "title": "Segmented Y Axis" }));
+    exec_ok(&mut session, "graph.create", json!({ "sheet_id": "g-broken", "data_sheet_id": "xy-gap", "kind": "xy", "title": "Segmented Y Axis" }));
     exec_ok(
         &mut session,
         "graph.setAxes",
@@ -1006,12 +1014,12 @@ fn core_workflow_broken_axis_violin_before_after_and_stacked_brackets() {
     exec_ok(
         &mut session,
         "stats.run",
-        json!({ "source_sheet": "col-violin", "sheet_id": "violin-anova", "kind": "one_way_anova", "multiplicity": "tukey" }),
+        json!({ "source_sheet_id": "col-violin", "sheet_id": "violin-anova", "kind": "one_way_anova", "multiplicity": "tukey" }),
     );
     exec_ok(
         &mut session,
         "graph.create",
-        json!({ "sheet_id": "g-violin", "source_sheet_id": "col-violin", "kind": "column", "title": "Violin + Brackets" }),
+        json!({ "sheet_id": "g-violin", "data_sheet_id": "col-violin", "kind": "column", "title": "Violin + Brackets" }),
     );
     let violin_gdo = GraphicalDataObject::Violin {
         fill_color: Rgba8::rgba(59, 130, 246, 175),
@@ -1055,7 +1063,7 @@ fn core_workflow_broken_axis_violin_before_after_and_stacked_brackets() {
         }),
     );
     exec_ok(&mut session, "table.paste", json!({ "sheet_id": "col-ba", "text": "14\t22\n15\t24\n13\t21\n16\t25\n14.5\t23" }));
-    exec_ok(&mut session, "stats.run", json!({ "source_sheet": "col-ba", "sheet_id": "ba-t", "kind": "paired_t" }));
+    exec_ok(&mut session, "stats.run", json!({ "source_sheet_id": "col-ba", "sheet_id": "ba-t", "kind": "paired_t" }));
     let ba_series = &session.document().graph_sheet(&SheetId::new("g-ba")).unwrap().spec.series[0];
     assert!(matches!(ba_series.gdo, GraphicalDataObject::BeforeAfterLines { .. }));
     exec_ok(
@@ -1091,9 +1099,9 @@ fn beta_g9_cbtemplate_save_instantiate_and_info_constant_hooks() {
         initial_override: None,
     };
     let fit_spec = make_nonlinear_spec("tpl-fit", "tpl-xy", "log_agonist_vs_response_4pl", FitMethod::LeastSquares, vec![hooked_rule], None, false);
-    exec_ok(&mut session, "fit.run", json!({ "source_sheet": "tpl-xy", "sheet_id": "tpl-fit", "spec": serde_json::to_value(&fit_spec).unwrap() }));
+    exec_ok(&mut session, "fit.run", json!({ "source_sheet_id": "tpl-xy", "sheet_id": "tpl-fit", "spec": serde_json::to_value(&fit_spec).unwrap() }));
 
-    exec_ok(&mut session, "graph.create", json!({ "sheet_id": "tpl-graph", "source_sheet_id": "tpl-xy", "kind": "xy", "title": "Template Graph" }));
+    exec_ok(&mut session, "graph.create", json!({ "sheet_id": "tpl-graph", "data_sheet_id": "tpl-xy", "kind": "xy", "title": "Template Graph" }));
     exec_ok(
         &mut session,
         "graph.setAxes",
@@ -1124,8 +1132,8 @@ fn beta_g9_cbtemplate_save_instantiate_and_info_constant_hooks() {
         y_cells.push(json!({ "row": r, "col": 0, "subcol": 0, "value": y }));
         y_cells.push(json!({ "row": r, "col": 0, "subcol": 1, "value": y + 0.5 }));
     }
-    exec_ok(&mut run2, "table.setXCells", json!({ "sheet_id": "tpl-xy", "cells": x_cells }));
-    exec_ok(&mut run2, "table.setCells", json!({ "sheet_id": "tpl-xy", "cells": y_cells }));
+    exec_ok(&mut run2, "table.setXCells", json!({ "sheet_id": "tpl-xy", "edits": x_cells }));
+    exec_ok(&mut run2, "table.setCells", json!({ "sheet_id": "tpl-xy", "edits": y_cells }));
 
     let svg_before = export_svg_text(&mut run2, "tpl-graph");
     assert!(svg_before.contains("BATCH-A1") && svg_before.contains("Cap=100"));
@@ -1163,7 +1171,7 @@ fn beta_g9_freeze_unfreeze_and_clone_pipeline_for_new_assay_run() {
         json!({ "sheet_id": "dn", "title": "Downstream", "archetype": "column", "rows": 4, "cols": 1, "auto_graph": false }),
     );
     exec_ok(&mut session, "table.pasteLink", json!({ "source_sheet_id": "up", "target_sheet_id": "dn" }));
-    exec_ok(&mut session, "stats.run", json!({ "source_sheet": "dn", "sheet_id": "dn-desc", "kind": "descriptive" }));
+    exec_ok(&mut session, "stats.run", json!({ "source_sheet_id": "dn", "sheet_id": "dn-desc", "kind": "descriptive" }));
     assert!((scalar_val(result_sheet(&session, "dn-desc"), "Mean", Some(0)) - 25.0).abs() < 1e-9);
 
     exec_ok(&mut session, "sheet.freeze", json!({ "sheet_id": "dn" }));
@@ -1191,11 +1199,11 @@ fn beta_g9_freeze_unfreeze_and_clone_pipeline_for_new_assay_run() {
         x_cells.push(json!({ "row": r, "value": lx }));
         y_cells.push(json!({ "row": r, "col": 0, "subcol": 0, "value": hill_response(lx, 5.0, 100.0, -6.2, 1.0) }));
     }
-    exec_ok(&mut session, "table.setXCells", json!({ "sheet_id": "pipe-xy", "cells": x_cells }));
-    exec_ok(&mut session, "table.setCells", json!({ "sheet_id": "pipe-xy", "cells": y_cells }));
+    exec_ok(&mut session, "table.setXCells", json!({ "sheet_id": "pipe-xy", "edits": x_cells }));
+    exec_ok(&mut session, "table.setCells", json!({ "sheet_id": "pipe-xy", "edits": y_cells }));
 
-    exec_ok(&mut session, "fit.run", json!({ "source_sheet": "pipe-xy", "sheet_id": "pipe-fit", "kind": "four_parameter_logistic" }));
-    exec_ok(&mut session, "graph.create", json!({ "sheet_id": "pipe-graph", "source_sheet_id": "pipe-xy", "kind": "xy", "title": "Pipeline Graph" }));
+    exec_ok(&mut session, "fit.run", json!({ "source_sheet_id": "pipe-xy", "sheet_id": "pipe-fit", "kind": "four_parameter_logistic" }));
+    exec_ok(&mut session, "graph.create", json!({ "sheet_id": "pipe-graph", "data_sheet_id": "pipe-xy", "kind": "xy", "title": "Pipeline Graph" }));
     exec_ok(&mut session, "graph.setRegressionOverlay", json!({ "sheet_id": "pipe-graph", "result_sheet_id": "pipe-fit" }));
     exec_ok(&mut session, "layout.create", json!({ "sheet_id": "pipe-layout", "title": "Pipeline Figure" }));
     exec_ok(&mut session, "layout.addPanel", json!({ "sheet_id": "pipe-layout", "graph_sheet_id": "pipe-graph" }));
@@ -1225,7 +1233,7 @@ fn beta_g9_freeze_unfreeze_and_clone_pipeline_for_new_assay_run() {
         .enumerate()
         .map(|(r, &lx)| json!({ "row": r, "col": 0, "subcol": 0, "value": hill_response(lx, 5.0, 100.0, -5.1, 1.0) }))
         .collect();
-    exec_ok(&mut session, "table.setCells", json!({ "sheet_id": &cloned_data_id, "cells": run2_y }));
+    exec_ok(&mut session, "table.setCells", json!({ "sheet_id": &cloned_data_id, "edits": run2_y }));
     exec_ok(&mut session, "project.recalculate", json!({}));
 
     let run2_ec50 = scalar_val(result_sheet(&session, &cloned_res_id), "LogEC50", Some(0));
@@ -1292,7 +1300,7 @@ fn beta_g7_g8_multivariate_calculated_vars_cox_logistic_and_bubble_scatter() {
         cells.push(json!({ "row": r, "col": 4, "value": bio }));
         cells.push(json!({ "row": r, "col": 5, "value": pid }));
     }
-    exec_ok(&mut session, "table.setCells", json!({ "sheet_id": "mv-cohort", "cells": cells }));
+    exec_ok(&mut session, "table.setCells", json!({ "sheet_id": "mv-cohort", "edits": cells }));
 
     // Add dependent calculated variables via topological DAG.
     exec_ok(&mut session, "table.setCalculatedVariable", json!({ "sheet_id": "mv-cohort", "title": "LogConc", "formula": "log10(ConcRaw)" }));
@@ -1300,7 +1308,7 @@ fn beta_g7_g8_multivariate_calculated_vars_cox_logistic_and_bubble_scatter() {
     assert_data_cell_number(session.document(), "mv-cohort", 13, 6, 2.0, 1e-9);
     assert_data_cell_number(session.document(), "mv-cohort", 13, 7, 1.8, 1e-9);
 
-    exec_ok(&mut session, "table.setVariableRole", json!({ "sheet_id": "mv-cohort", "column": "Event", "role": "continuous" }));
+    exec_ok(&mut session, "table.setVariableRole", json!({ "sheet_id": "mv-cohort", "col": "Event", "role": "continuous" }));
     let mv_ds = session.document().data_sheet(&SheetId::new("mv-cohort")).unwrap();
     if let TableArchetype::MultipleVariables(mv) = &mv_ds.archetype {
         assert_eq!(mv.variables[1].role, VariableRole::Continuous);
@@ -1313,7 +1321,7 @@ fn beta_g7_g8_multivariate_calculated_vars_cox_logistic_and_bubble_scatter() {
         &mut session,
         "stats.run",
         json!({
-            "source_sheet": "mv-cohort",
+            "source_sheet_id": "mv-cohort",
             "sheet_id": "cox-res",
             "kind": "cox_ph",
             "time_column": 0,
@@ -1342,7 +1350,7 @@ fn beta_g7_g8_multivariate_calculated_vars_cox_logistic_and_bubble_scatter() {
     exec_ok(
         &mut session,
         "stats.run",
-        json!({ "source_sheet": "mv-cohort", "sheet_id": "logistic-res", "spec": serde_json::to_value(&glm_spec).unwrap() }),
+        json!({ "source_sheet_id": "mv-cohort", "sheet_id": "logistic-res", "spec": serde_json::to_value(&glm_spec).unwrap() }),
     );
     let log_res = result_sheet(&session, "logistic-res");
     assert_eq!(log_res.status, ResultStatus::UpToDate);
@@ -1352,7 +1360,7 @@ fn beta_g7_g8_multivariate_calculated_vars_cox_logistic_and_bubble_scatter() {
     exec_ok(
         &mut session,
         "graph.create",
-        json!({ "sheet_id": "g-bubble", "source_sheet_id": "mv-cohort", "kind": "multiple_variables", "title": "5-Channel Bubble Scatter" }),
+        json!({ "sheet_id": "g-bubble", "data_sheet_id": "mv-cohort", "kind": "multiple_variables", "title": "5-Channel Bubble Scatter" }),
     );
     exec_ok(
         &mut session,
@@ -1384,7 +1392,7 @@ fn beta_g11_multipanel_layout_aligned_origins_badges_and_publication_exports() {
 
     // Panel A source: XY curve.
     populate_xy_dose_response(&mut session, "lay-xy", true, false, 100.0);
-    exec_ok(&mut session, "graph.create", json!({ "sheet_id": "g-a", "source_sheet_id": "lay-xy", "kind": "xy", "title": "Potency" }));
+    exec_ok(&mut session, "graph.create", json!({ "sheet_id": "g-a", "data_sheet_id": "lay-xy", "kind": "xy", "title": "Potency" }));
 
     // Panel B source: Column cohorts.
     exec_ok(
@@ -1393,7 +1401,7 @@ fn beta_g11_multipanel_layout_aligned_origins_badges_and_publication_exports() {
         json!({ "sheet_id": "lay-col", "title": "Groups", "archetype": "column", "rows": 4, "cols": 2, "auto_graph": false }),
     );
     exec_ok(&mut session, "table.paste", json!({ "sheet_id": "lay-col", "text": "10\t25\n12\t28\n11\t26\n9\t24" }));
-    exec_ok(&mut session, "graph.create", json!({ "sheet_id": "g-b", "source_sheet_id": "lay-col", "kind": "column", "title": "Cohort Mean" }));
+    exec_ok(&mut session, "graph.create", json!({ "sheet_id": "g-b", "data_sheet_id": "lay-col", "kind": "column", "title": "Cohort Mean" }));
 
     // Panel C source: Paired responses.
     exec_ok(
@@ -1402,7 +1410,7 @@ fn beta_g11_multipanel_layout_aligned_origins_badges_and_publication_exports() {
         json!({ "sheet_id": "lay-ba", "title": "Matched", "archetype": "column", "design_hint": "paired", "rows": 4, "cols": 2, "auto_graph": false }),
     );
     exec_ok(&mut session, "table.paste", json!({ "sheet_id": "lay-ba", "text": "5\t11\n6\t13\n7\t14\n5.5\t12" }));
-    exec_ok(&mut session, "graph.create", json!({ "sheet_id": "g-c", "source_sheet_id": "lay-ba", "kind": "column", "title": "Paired Shift" }));
+    exec_ok(&mut session, "graph.create", json!({ "sheet_id": "g-c", "data_sheet_id": "lay-ba", "kind": "column", "title": "Paired Shift" }));
 
     // Assemble 2x2 LayoutSheet with A, B, C badges & align_plot_origins enabled.
     exec_ok(
@@ -1470,7 +1478,7 @@ fn beta_g10_pzfx_and_prism_cleanroom_imports_reanalysis_and_exports() {
     exec_ok(
         &mut pzfx_session,
         "stats.run",
-        json!({ "source_sheet": &pzfx_data_id, "sheet_id": "pzfx-anova", "kind": "one_way_anova", "multiplicity": "tukey" }),
+        json!({ "source_sheet_id": &pzfx_data_id, "sheet_id": "pzfx-anova", "kind": "one_way_anova", "multiplicity": "tukey" }),
     );
     let f_before = scalar_val(result_sheet(&pzfx_session, "pzfx-anova"), "F", None);
     assert!(f_before > 100.0);
@@ -1483,7 +1491,7 @@ fn beta_g10_pzfx_and_prism_cleanroom_imports_reanalysis_and_exports() {
     exec_ok(
         &mut pzfx_session,
         "graph.create",
-        json!({ "sheet_id": "g-pzfx", "source_sheet_id": &pzfx_data_id, "kind": "column", "title": "Imported XML Cohort" }),
+        json!({ "sheet_id": "g-pzfx", "data_sheet_id": &pzfx_data_id, "kind": "column", "title": "Imported XML Cohort" }),
     );
     let _pzfx_svg = export_svg_text(&mut pzfx_session, "g-pzfx");
     let _pzfx_pdf = export_pdf_bytes(&mut pzfx_session, "g-pzfx", "srgb", true);
@@ -1498,7 +1506,7 @@ fn beta_g10_pzfx_and_prism_cleanroom_imports_reanalysis_and_exports() {
     let zip_info = &zip_session.document().info_sheets[0];
     assert_eq!(zip_info.get_constant("AssayCode").unwrap().value.display_text(), "ZIP-901");
 
-    exec_ok(&mut zip_session, "fit.run", json!({ "source_sheet": &zip_data_id, "sheet_id": "zip-fit", "kind": "four_parameter_logistic" }));
+    exec_ok(&mut zip_session, "fit.run", json!({ "source_sheet_id": &zip_data_id, "sheet_id": "zip-fit", "kind": "four_parameter_logistic" }));
     let ec50_before = scalar_val(result_sheet(&zip_session, "zip-fit"), "LogEC50", Some(0));
     assert!((ec50_before - (-6.05)).abs() < 0.3);
 
@@ -1509,7 +1517,7 @@ fn beta_g10_pzfx_and_prism_cleanroom_imports_reanalysis_and_exports() {
     exec_ok(
         &mut zip_session,
         "graph.create",
-        json!({ "sheet_id": "g-zip", "source_sheet_id": &zip_data_id, "kind": "xy", "title": "Imported Archive Fit" }),
+        json!({ "sheet_id": "g-zip", "data_sheet_id": &zip_data_id, "kind": "xy", "title": "Imported Archive Fit" }),
     );
     exec_ok(&mut zip_session, "graph.setRegressionOverlay", json!({ "sheet_id": "g-zip", "result_sheet_id": "zip-fit" }));
     let _zip_svg = export_svg_text(&mut zip_session, "g-zip");

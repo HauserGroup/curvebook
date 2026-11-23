@@ -131,7 +131,7 @@ fn setup_s07_12_session() -> Session {
     dag::recalculate_project(&mut doc).unwrap();
     let mut session = Session::from_document(doc);
     ok(&mut session, "table.pasteLink", json!({ "source_sheet_id": "data-c", "target_sheet_id": "data-d" }));
-    ok(&mut session, "analysis.add", json!({ "sheet_id": "res-d", "source_sheet": "data-d", "kind": "linear_regression" }));
+    ok(&mut session, "analysis.add", json!({ "sheet_id": "res-d", "source_sheet_id": "data-d", "kind": "linear_regression" }));
     session
 }
 
@@ -351,7 +351,7 @@ fn build_colliding_source_archive_b64() -> String {
 
     let mut src_sess = Session::from_document(src_doc);
     ok(&mut src_sess, "table.pasteLink", json!({ "source_sheet_id": "data-1", "target_sheet_id": "data-2" }));
-    ok(&mut src_sess, "analysis.add", json!({ "sheet_id": "res-1", "source_sheet": "data-1", "kind": "linear_regression" }));
+    ok(&mut src_sess, "analysis.add", json!({ "sheet_id": "res-1", "source_sheet_id": "data-1", "kind": "linear_regression" }));
 
     let mut src_doc = src_sess.document().clone();
     let mut nl = NonlinearFitSpec::new("straight_line");
@@ -541,7 +541,8 @@ fn r1_x2_09_overflowing_bland_altman_fails_cleanly_and_never_blocks_save() {
     }
     scaled_doc.add_data_sheet(DataSheet::new("col-ba", "Scaled Extreme Pair", TableArchetype::Column(scaled_tbl)).unwrap()).unwrap();
     let mut scaled_session = Session::from_document(scaled_doc);
-    let scaled_res = scaled_session.execute("analysis.add", json!({ "sheet_id": "res-ba", "source_sheet": "col-ba", "kind": "stats.bland_altman" }));
+    let scaled_res =
+        scaled_session.execute("analysis.add", json!({ "sheet_id": "res-ba", "source_sheet_id": "col-ba", "kind": "stats.bland_altman" }));
     assert!(scaled_res.is_ok(), "scaled 1e300 Bland-Altman should succeed finitely: {scaled_res:?}");
     assert_eq!(scaled_session.document().result_sheet(&SheetId::new("res-ba")).unwrap().status, ResultStatus::UpToDate);
     assert!(curvebook_format::save_project_bytes(scaled_session.document()).is_ok());
@@ -560,7 +561,7 @@ fn r1_x2_09_overflowing_bland_altman_fails_cleanly_and_never_blocks_save() {
     }
     overflow_doc.add_data_sheet(DataSheet::new("col-ba", "Overflowing Pair", TableArchetype::Column(tbl)).unwrap()).unwrap();
     let mut add_session = Session::from_document(overflow_doc);
-    let add_res = add_session.execute("analysis.add", json!({ "sheet_id": "res-ba", "source_sheet": "col-ba", "kind": "stats.bland_altman" }));
+    let add_res = add_session.execute("analysis.add", json!({ "sheet_id": "res-ba", "source_sheet_id": "col-ba", "kind": "stats.bland_altman" }));
     assert!(add_res.is_err(), "analysis.add must reject non-finite Bland-Altman result");
     assert!(add_session.document().result_sheet(&SheetId::new("res-ba")).is_none(), "rolled-back session must stay clean");
     assert!(curvebook_format::save_project_bytes(add_session.document()).is_ok());
@@ -578,7 +579,7 @@ fn r1_x2_09_overflowing_bland_altman_fails_cleanly_and_never_blocks_save() {
     }
     doc.add_data_sheet(DataSheet::new("col-ba", "Healthy Pair", TableArchetype::Column(tbl2)).unwrap()).unwrap();
     let mut session = Session::from_document(doc);
-    ok(&mut session, "analysis.add", json!({ "sheet_id": "res-ba", "source_sheet": "col-ba", "kind": "stats.bland_altman" }));
+    ok(&mut session, "analysis.add", json!({ "sheet_id": "res-ba", "source_sheet_id": "col-ba", "kind": "stats.bland_altman" }));
     assert_eq!(session.document().result_sheet(&SheetId::new("res-ba")).unwrap().status, ResultStatus::UpToDate);
 
     for (r, (&a, &b)) in col_a.iter().zip(col_b.iter()).enumerate() {

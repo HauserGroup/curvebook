@@ -646,7 +646,7 @@ fn fa_sec11_08_all_sheet_schemas_publish_additional_properties_false_and_reject_
     ok_cmd(&mut session, "table.setCell", json!({ "sheet_id": "s1", "row": 0, "col": 0, "value": 1.0 }))?;
     ok_cmd(&mut session, "table.setCell", json!({ "sheet_id": "s1", "row": 1, "col": 0, "value": 2.0 }))?;
     ok_cmd(&mut session, "sheet.createData", json!({ "sheet_id": "s2", "title": "Second", "kind": "xy", "rows": 2, "cols": 1 }))?;
-    ok_cmd(&mut session, "stats.run", json!({ "source_sheet": "s1", "sheet_id": "r1", "kind": "descriptive_stats" }))?;
+    ok_cmd(&mut session, "stats.run", json!({ "source_sheet_id": "s1", "sheet_id": "r1", "kind": "descriptive_stats" }))?;
 
     let payloads: Vec<(&str, Value)> = vec![
         ("sheet.createData", json!({ "sheet_id": "s-new", "bogus": 1 })),
@@ -669,8 +669,8 @@ fn fa_sec11_08_all_sheet_schemas_publish_additional_properties_false_and_reject_
         assert_eq!(err.details.as_ref().and_then(|d| d.get("pointer")), Some(&json!("/bogus")), "`{cmd_id}` pointer mismatch");
     }
 
-    // Retired aliases continue to work with additionalProperties: false.
-    let renamed = ok_cmd(&mut session, "sheet.rename", json!({ "sheetId": "s1", "new_title": "Aliased" }))?;
+    // Stage-4-retained aliases continue to work with additionalProperties: false.
+    let renamed = ok_cmd(&mut session, "sheet.rename", json!({ "id": "s1", "new_title": "Aliased" }))?;
     assert!(!renamed.warnings.is_empty());
     assert_eq!(session.document().data_sheet(&SheetId::new("s1")).ok_or("s1")?.title, "Aliased");
     Ok(())

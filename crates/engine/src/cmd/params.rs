@@ -74,31 +74,8 @@ fn push_hits_to_active_scope(hits: &[DeprecationHit]) {
     });
 }
 
-/// Record one retired parameter spelling in the active command deprecation scope, if any.
-pub(crate) fn record_deprecated_alias(deprecated: &str, canonical: &str) {
-    if deprecated == canonical {
-        return;
-    }
-    DEPRECATION_SCOPES.with(|stack| {
-        if let Some(frame) = stack.borrow_mut().last_mut() {
-            push_unique_hit(frame, DeprecationHit { deprecated: deprecated.to_owned(), canonical: canonical.to_owned() });
-        }
-    });
-}
-
-/// Record any retired key in `pairs` (`(deprecated_alias, canonical_key)`) present on JSON object `val`.
-pub(crate) fn record_deprecated_object_aliases(val: &Value, pairs: &[(&str, &str)]) {
-    let Some(obj) = val.as_object() else {
-        return;
-    };
-    for &(alias, canonical) in pairs {
-        if obj.contains_key(alias) {
-            record_deprecated_alias(alias, canonical);
-        }
-    }
-}
-
 /// Format a deterministic user-facing deprecation notice for a retired parameter spelling.
+// Retained until Stage 4 retires r16_5_cli_and_callers.rs
 #[must_use]
 pub fn format_deprecation_warning(command_id: &str, hit: &DeprecationHit) -> String {
     format!("parameter `{}` is deprecated for `{command_id}`; use canonical `{}` instead", hit.deprecated, hit.canonical)
@@ -137,36 +114,10 @@ pub fn obj_schema(props: Vec<(&str, Value)>, required: &[&str], additional_prope
 /// Each entry `(canonical_key, aliases)` allows any listed alias to populate
 /// `canonical_key` during [`parse_params`] (while emitting a deprecation warning)
 /// before validation and deserialization.
+// Retained until Stage 4 retires r16_5_cli_and_callers.rs
 #[must_use]
 pub fn obj_schema_with_aliases(props: Vec<(&str, Value)>, required: &[&str], aliases: Vec<(&str, &[&str])>, additional_properties: bool) -> Value {
-    let has_variables_and_auto_family = props.iter().any(|(name, _)| *name == "variables") && props.iter().any(|(name, _)| *name == "auto_family");
     let mut schema = obj_schema(props, required, additional_properties);
-    let mut alias_map = Map::new();
-    for (canonical, list) in aliases {
-        let mut items: Vec<Value> = list.iter().map(|a| Value::String((*a).to_owned())).collect();
-        if canonical == "titles" && list.contains(&"data_set_titles") {
-            for extra in ["y_titles", "yTitles"] {
-                if !list.contains(&extra) {
-                    items.push(Value::String(String::from(extra)));
-                }
-            }
-        }
-        alias_map.insert(canonical.to_owned(), Value::Array(items));
-    }
-    if has_variables_and_auto_family && !alias_map.contains_key("variables") {
-        alias_map.insert(String::from("variables"), json!(["titles", "variable_titles", "variableTitles"]));
-    }
-    if let Value::Object(ref mut map) = schema
-        && !alias_map.is_empty()
-    {
-        map.insert(String::from("x-deprecated-aliases"), Value::Object(alias_map));
-    }
-    schema
-}
-
-/// Attach `x-deprecated-aliases` mappings to an existing object schema value.
-#[must_use]
-pub fn with_aliases(mut schema: Value, aliases: Vec<(&str, &[&str])>) -> Value {
     let mut alias_map = Map::new();
     for (canonical, list) in aliases {
         let items: Vec<Value> = list.iter().map(|a| Value::String((*a).to_owned())).collect();
@@ -1073,17 +1024,9 @@ fn validate_array_keywords(
     Ok(())
 }
 
+// Retained until Stage 4 retires r16_5_cli_and_callers.rs
 fn canonicalize_aliases(obj: &mut Map<String, Value>, schema_obj: &Map<String, Value>, hits: &mut Vec<DeprecationHit>) {
     let props = schema_obj.get("properties").and_then(Value::as_object);
-    // Legacy `importPrism`/`importPzfx` payloads sometimes carried an ignored `sheet_id`/`sheetId`;
-    // strip it silently since those commands have no target `sheet_id` parameter.
-    if props.is_some_and(|p| p.contains_key("merge") && p.contains_key("bytes_base64") && !p.contains_key("sheet_id")) {
-        for legacy_sheet_key in ["sheet_id", "sheetId"] {
-            if obj.get(legacy_sheet_key).is_some_and(|v| v.is_string() || v.is_null()) {
-                obj.remove(legacy_sheet_key);
-            }
-        }
-    }
     let Some(Value::Object(alias_map)) = schema_obj.get("x-deprecated-aliases") else {
         return;
     };
