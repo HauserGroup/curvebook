@@ -52,6 +52,7 @@ pub mod top_bar_fit;
 pub mod top_chrome;
 pub mod trailing_studio;
 pub mod transform_modals;
+pub(crate) mod ui_kit;
 pub mod unit_spinners;
 pub mod welcome_hub;
 pub mod widgets;
@@ -1315,19 +1316,9 @@ impl PendingUiIntents {
         self.queue.push(UiIntent::SetRowTitlesCollapsed { collapsed });
     }
 
-    /// Enqueue a dialog control click (`edit.assume_gaussian`, `edit.post_hoc.tukey`, etc.).
-    pub fn push_dialog_widget_click(&mut self, widget_id: impl Into<String>) {
-        self.queue.push(UiIntent::DialogWidgetClick { widget_id: widget_id.into() });
-    }
-
     /// Enqueue a dialog footer button action (`"ok"`, `"cancel"`, `"apply"`, `"create"`).
     pub fn push_dialog_button(&mut self, action: impl Into<String>) {
         self.queue.push(UiIntent::DialogButtonAction { action: action.into() });
-    }
-
-    /// Synchronize a modal/view text input buffer (`widget_id`) into `app.interaction.text_field_buffers`.
-    pub fn push_set_text_field_buffer(&mut self, widget_id: impl Into<String>, text: impl Into<String>) {
-        self.queue.push(UiIntent::SetTextFieldBuffer { widget_id: widget_id.into(), text: text.into() });
     }
 
     /// Enqueue a view-shard custom action (`"stat_params"`, `"grid_core"`, etc.).
@@ -1340,11 +1331,6 @@ impl PendingUiIntents {
         self.queue.push(UiIntent::SelectResultTab { index });
     }
 
-    /// Activate a specific [`ActiveInspector`] tab inside Trailing Studio Dock.
-    pub fn push_set_active_inspector(&mut self, inspector: ActiveInspector) {
-        self.queue.push(UiIntent::SetActiveInspector { inspector });
-    }
-
     /// Update focused top-level workspace pane (`F6` / `Shift+F6` / click).
     pub fn push_set_focus_pane(&mut self, pane: ActiveWorkspacePane) {
         self.queue.push(UiIntent::SetFocusPane { pane });
@@ -1353,21 +1339,6 @@ impl PendingUiIntents {
     /// Update canvas zoom percentage cleanly (`0.1 ..= 8.0`).
     pub fn push_set_canvas_zoom(&mut self, zoom: f64) {
         self.queue.push(UiIntent::SetCanvasZoom { zoom });
-    }
-
-    /// Toggle collapse/expand state of a Navigator folder section.
-    pub fn push_toggle_navigator_section(&mut self, section: SheetSection) {
-        self.queue.push(UiIntent::ToggleNavigatorSection { section });
-    }
-
-    /// Update Navigator instant substring filter query.
-    pub fn push_set_navigator_search(&mut self, query: impl Into<String>) {
-        self.queue.push(UiIntent::SetNavigatorSearch { query: query.into() });
-    }
-
-    /// Switch Navigator organization mode (`SeparateFolders` vs `NestedWithResults`).
-    pub fn push_set_navigator_nesting(&mut self, mode: NavigatorNestingMode) {
-        self.queue.push(UiIntent::SetNavigatorNesting { mode });
     }
 
     /// Persist Center Stage split divider ratio (`0.15 ..= 0.85`).
@@ -1385,36 +1356,6 @@ impl PendingUiIntents {
         self.queue.push(UiIntent::SetPaletteOpen { open });
     }
 
-    /// Open or dismiss the 3-pane Welcome & Workspace Hub launcher overlay.
-    pub fn push_set_launcher_open(&mut self, open: bool) {
-        self.queue.push(UiIntent::SetLauncherOpen { open });
-    }
-
-    /// Apply a saved [`WorkspacePreset`] dock configuration.
-    pub fn push_apply_workspace_preset(&mut self, preset: WorkspacePreset) {
-        self.queue.push(UiIntent::ApplyWorkspacePreset { preset });
-    }
-
-    /// Persist dragged Leading Dock width in logical `pt`.
-    pub fn push_sync_leading_width(&mut self, width_pt: f32) {
-        self.queue.push(UiIntent::SyncLeadingWidth { width_pt });
-    }
-
-    /// Persist dragged Trailing Studio width in logical `pt`.
-    pub fn push_sync_trailing_width(&mut self, width_pt: f32) {
-        self.queue.push(UiIntent::SyncTrailingWidth { width_pt });
-    }
-
-    /// Toggle Leading Dock between `240 pt` expanded and `36 pt` collapsed rail.
-    pub fn push_toggle_leading_collapsed_rail(&mut self) {
-        self.queue.push(UiIntent::ToggleLeadingCollapsedRail);
-    }
-
-    /// Toggle Trailing Studio between `280 pt` expanded and `36 pt` collapsed rail.
-    pub fn push_toggle_trailing_collapsed_rail(&mut self) {
-        self.queue.push(UiIntent::ToggleTrailingCollapsedRail);
-    }
-
     /// Navigate Back (`<`) in sheet visit history.
     pub fn push_history_back(&mut self) {
         self.queue.push(UiIntent::HistoryBack);
@@ -1430,11 +1371,6 @@ impl PendingUiIntents {
         self.queue.push(UiIntent::DismissDiagnosticBanner { sheet_id });
     }
 
-    /// Open `Change Data Analyzed...` retargeting `result_sheet_id` toward `target_data_sheet_id`.
-    pub fn push_open_retarget_dialog(&mut self, result_sheet_id: SheetId, target_data_sheet_id: Option<SheetId>) {
-        self.queue.push(UiIntent::OpenRetargetDialog { result_sheet_id, target_data_sheet_id });
-    }
-
     /// Brush a point/cell coordinate for two-way Split View & Data Point Drill-Back.
     pub fn push_brush_point(&mut self, sheet_id: SheetId, coord: curvebook_tools::GridCellCoord) {
         self.queue.push(UiIntent::BrushPoint { sheet_id, coord });
@@ -1448,16 +1384,6 @@ impl PendingUiIntents {
     /// Patch fields on the active modal dialog after the settled frame pass.
     pub fn push_patch_active_dialog(&mut self, fields: serde_json::Map<String, serde_json::Value>) {
         self.queue.push(UiIntent::PatchActiveDialog { fields });
-    }
-
-    /// Execute a modal footer button action (`"ok"`, `"cancel"`, `"apply"`, `"create"`, etc.).
-    pub fn push_commit_dialog_action(&mut self, action: impl Into<String>) {
-        self.queue.push(UiIntent::CommitDialogAction { action: action.into() });
-    }
-
-    /// Close all open `ActiveDialog` and shell modal surfaces cleanly.
-    pub fn push_close_all_modals(&mut self) {
-        self.queue.push(UiIntent::CloseAllModals);
     }
 
     /// Open `Manage Variables...` synced to `sheet_id` and optional `column`.
@@ -1505,34 +1431,9 @@ impl PendingUiIntents {
         self.queue.push(UiIntent::OpenImportWizard { origin, is_live_link, target_sheet_id });
     }
 
-    /// Persist a settled snapshot update to `app.grid.import_wizard`.
-    pub fn push_update_import_wizard(&mut self, wizard: ImportPasteWizardState) {
-        self.queue.push(UiIntent::UpdateImportWizard(Box::new(wizard)));
-    }
-
-    /// Populate `ImportReshape` / `ImportWizard` fields from the system clipboard.
-    pub fn push_paste_clipboard_into_import_reshape(&mut self) {
-        self.queue.push(UiIntent::PasteClipboardIntoImportReshape);
-    }
-
-    /// Commit the configured `Import & Paste Special` wizard via `Caller::Ui`.
-    pub fn push_commit_import_wizard(&mut self, close_after: bool) {
-        self.queue.push(UiIntent::CommitImportWizard { close_after });
-    }
-
-    /// Close `Import & Paste Special`.
-    pub fn push_close_import_wizard(&mut self) {
-        self.queue.push(UiIntent::CloseImportWizard);
-    }
-
     /// Open a native Transform / Baseline / MV Filter / Extract modal for `sheet_id`.
     pub fn push_open_transform_modal(&mut self, sheet_id: SheetId, kind: transform_modals::TransformModalKind) {
         self.queue.push(UiIntent::OpenTransformModal { sheet_id, kind });
-    }
-
-    /// Close the shell-hosted transform modal.
-    pub fn push_close_transform_modal(&mut self) {
-        self.queue.push(UiIntent::CloseTransformModal);
     }
 
     /// Copy the active grid selection to TSV clipboard.
@@ -1570,26 +1471,6 @@ impl PendingUiIntents {
         self.queue.push(UiIntent::PasteImageFromClipboard { target_sheet_id, anchor_pt });
     }
 
-    /// Update the live `Analyze...` instant search query.
-    pub fn push_set_analyze_query(&mut self, query: impl Into<String>) {
-        self.queue.push(UiIntent::SetAnalyzeQuery { query: query.into() });
-    }
-
-    /// Select an analysis catalog entry ID in `Analyze...`.
-    pub fn push_select_analyze_entry(&mut self, entry_id: impl Into<String>, clear_duplicate_prompt: bool) {
-        self.queue.push(UiIntent::SelectAnalyzeEntry { entry_id: entry_id.into(), clear_duplicate_prompt });
-    }
-
-    /// Toggle inclusion of dataset `col_index` in `Analyze...`.
-    pub fn push_toggle_analyze_dataset(&mut self, col_index: usize) {
-        self.queue.push(UiIntent::ToggleAnalyzeDataset { col_index });
-    }
-
-    /// Replace the selected dataset column indices in `Analyze...`.
-    pub fn push_set_analyze_selected_datasets(&mut self, cols: Vec<usize>) {
-        self.queue.push(UiIntent::SetAnalyzeSelectedDatasets { cols });
-    }
-
     /// Commit an updated `AnalysisSpec` draft onto `edit_params`.
     pub fn push_set_edit_params_draft(&mut self, spec: curvebook_doc::AnalysisSpec) {
         self.queue.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec) });
@@ -1600,29 +1481,9 @@ impl PendingUiIntents {
         self.queue.push(UiIntent::SetEditParamsActiveTab { tab: tab.into() });
     }
 
-    /// Toggle repeated-measures/paired state on `edit_params`.
-    pub fn push_set_edit_params_paired_or_matched(&mut self, paired: bool) {
-        self.queue.push(UiIntent::SetEditParamsPairedOrMatched { paired });
-    }
-
-    /// Update confidence interval level on `edit_params`.
-    pub fn push_set_edit_params_confidence(&mut self, level: ConfidenceLevel) {
-        self.queue.push(UiIntent::SetEditParamsConfidence { level });
-    }
-
     /// Persist the current `edit_params` draft configuration as family default preset.
     pub fn push_save_edit_params_as_default(&mut self) {
         self.queue.push(UiIntent::SaveEditParamsAsDefault);
-    }
-
-    /// Select target source table inside `ChangeDataAnalyzed`.
-    pub fn push_select_retarget_source(&mut self, target_data_sheet_id: SheetId) {
-        self.queue.push(UiIntent::SelectRetargetSource { target_data_sheet_id });
-    }
-
-    /// Resolve `DuplicateAnalysisPrompt` (`Some(existing)` modifies existing; `None` creates new).
-    pub fn push_resolve_duplicate_analysis(&mut self, modify_existing_id: Option<SheetId>) {
-        self.queue.push(UiIntent::ResolveDuplicateAnalysis { modify_existing_id });
     }
 
     /// Select a hook option index inside `ConstantHookPicker`.
@@ -1645,71 +1506,6 @@ impl PendingUiIntents {
         self.queue.push(UiIntent::CommitPowerWizard { action: action.into() });
     }
 
-    /// Persist updated `ChangeGraphTypeState` draft cleanly on settlement.
-    pub fn push_update_change_graph_type_state(&mut self, state: ChangeGraphTypeState) {
-        self.queue.push(UiIntent::UpdateChangeGraphTypeState(Box::new(state)));
-    }
-
-    /// Persist updated `FormatGraphState` draft cleanly on settlement.
-    pub fn push_update_format_graph_state(&mut self, state: FormatGraphState) {
-        self.queue.push(UiIntent::UpdateFormatGraphState(Box::new(state)));
-    }
-
-    /// Persist updated `FormatAxesState` draft cleanly on settlement.
-    pub fn push_update_format_axes_state(&mut self, state: FormatAxesState) {
-        self.queue.push(UiIntent::UpdateFormatAxesState(Box::new(state)));
-    }
-
-    /// Persist updated `BubblePlotInspectorState` draft cleanly on settlement.
-    pub fn push_update_bubble_plot_state(&mut self, state: BubblePlotInspectorState) {
-        self.queue.push(UiIntent::UpdateBubblePlotState(Box::new(state)));
-    }
-
-    /// Persist updated `PairwiseComparisonsState` draft cleanly on settlement.
-    pub fn push_update_pairwise_state(&mut self, state: PairwiseComparisonsState) {
-        self.queue.push(UiIntent::UpdatePairwiseState(Box::new(state)));
-    }
-
-    /// Persist updated `PageLayoutComposerState` draft cleanly on settlement.
-    pub fn push_update_page_layout_state(&mut self, state: PageLayoutComposerState) {
-        self.queue.push(UiIntent::UpdatePageLayoutState(Box::new(state)));
-    }
-
-    /// Persist updated `ExportFigureState` draft cleanly on settlement.
-    pub fn push_update_export_figure_state(&mut self, state: ExportFigureState) {
-        self.queue.push(UiIntent::UpdateExportFigureState(Box::new(state)));
-    }
-
-    /// Persist updated `PrintDialogState` draft cleanly on settlement.
-    pub fn push_update_print_dialog_state(&mut self, state: PrintDialogState) {
-        self.queue.push(UiIntent::UpdatePrintDialogState(Box::new(state)));
-    }
-
-    /// Persist updated `CreateGraphDialogState` draft cleanly on settlement.
-    pub fn push_update_create_graph_state(&mut self, state: CreateGraphDialogState) {
-        self.queue.push(UiIntent::UpdateCreateGraphState(Box::new(state)));
-    }
-
-    /// Persist updated `EqualizeScalingDialogState` draft cleanly on settlement.
-    pub fn push_update_equalize_scaling_state(&mut self, state: EqualizeScalingDialogState) {
-        self.queue.push(UiIntent::UpdateEqualizeScalingState(Box::new(state)));
-    }
-
-    /// Persist updated `FormatEmbeddedTableDialogState` draft cleanly on settlement.
-    pub fn push_update_format_embedded_table_state(&mut self, state: FormatEmbeddedTableDialogState) {
-        self.queue.push(UiIntent::UpdateFormatEmbeddedTableState(Box::new(state)));
-    }
-
-    /// Persist updated `FormatImageDialogState` draft cleanly on settlement.
-    pub fn push_update_format_image_state(&mut self, state: FormatImageDialogState) {
-        self.queue.push(UiIntent::UpdateFormatImageState(Box::new(state)));
-    }
-
-    /// Persist updated `ApplyStyleFromState` draft cleanly on settlement.
-    pub fn push_update_apply_style_state(&mut self, state: ApplyStyleFromState) {
-        self.queue.push(UiIntent::UpdateApplyStyleState(Box::new(state)));
-    }
-
     /// Replace Portfolio Gallery multi-selection set cleanly on settlement.
     pub fn push_set_gallery_selection(&mut self, sheet_ids: Vec<SheetId>) {
         self.queue.push(UiIntent::SetGallerySelection { sheet_ids });
@@ -1718,79 +1514,6 @@ impl PendingUiIntents {
     /// Open `Preferences` modal on optional category.
     pub fn push_open_preferences(&mut self, category: Option<app_modals::PreferencesCategory>) {
         self.queue.push(UiIntent::OpenPreferences { category });
-    }
-
-    /// Close `Preferences` modal (`save == true` commits active draft preferences).
-    pub fn push_close_preferences(&mut self, save: bool) {
-        self.queue.push(UiIntent::ClosePreferences { save });
-    }
-
-    /// Rebind `command_id` to `combo` with conflict validation via `ShortcutRegistry`.
-    pub fn push_set_shortcut_binding(&mut self, command_id: impl Into<String>, combo: impl Into<String>) {
-        self.queue.push(UiIntent::SetShortcutBinding { command_id: command_id.into(), combo: combo.into() });
-    }
-
-    /// Reset a single shortcut binding or all shortcuts (`None`) to defaults.
-    pub fn push_reset_shortcut_binding(&mut self, command_id: Option<String>) {
-        self.queue.push(UiIntent::ResetShortcutBinding { command_id });
-    }
-
-    /// Persist updated `PreferencesModalState` draft cleanly on settlement.
-    pub fn push_update_preferences_draft(&mut self, draft: app_modals::PreferencesModalState) {
-        self.queue.push(UiIntent::UpdatePreferencesDraft(Box::new(draft)));
-    }
-
-    /// Record the user's decision on `UnsavedChanges` (`Save` / `DontSave` / `Cancel`).
-    pub fn push_resolve_unsaved_changes(&mut self, action: app_modals::UnsavedCloseAction) {
-        self.queue.push(UiIntent::ResolveUnsavedChanges { action });
-    }
-
-    /// Open `Find & Replace` with optional initial query.
-    pub fn push_open_find_replace(&mut self, initial_query: Option<String>) {
-        self.queue.push(UiIntent::OpenFindReplace { initial_query });
-    }
-
-    /// Close `Find & Replace`.
-    pub fn push_close_find_replace(&mut self) {
-        self.queue.push(UiIntent::CloseFindReplace);
-    }
-
-    /// Execute `Find & Replace` cell match or batch single-commit replacement via `table.setCells`.
-    pub fn push_execute_find_replace(
-        &mut self,
-        replace_all: bool,
-        find_query: impl Into<String>,
-        replace_with: impl Into<String>,
-        match_case: bool,
-        match_entire_cell: bool,
-    ) {
-        self.queue.push(UiIntent::ExecuteFindReplace {
-            replace_all,
-            find_query: find_query.into(),
-            replace_with: replace_with.into(),
-            match_case,
-            match_entire_cell,
-        });
-    }
-
-    /// Persist updated `FeedbackDraft` fields cleanly on settlement.
-    pub fn push_update_feedback_draft(&mut self, draft: crate::feedback::FeedbackDraft) {
-        self.queue.push(UiIntent::UpdateFeedbackDraft(Box::new(draft)));
-    }
-
-    /// Open the prefilled GitHub new-issue URL for the current feedback draft.
-    pub fn push_open_feedback_on_github(&mut self) {
-        self.queue.push(UiIntent::OpenFeedbackOnGitHub);
-    }
-
-    /// Copy the untruncated Markdown feedback report to the configured clipboard adapter.
-    pub fn push_copy_feedback_markdown(&mut self) {
-        self.queue.push(UiIntent::CopyFeedbackMarkdown);
-    }
-
-    /// Clear user-entered feedback form fields while keeping category and diagnostics preference.
-    pub fn push_reset_feedback_draft(&mut self) {
-        self.queue.push(UiIntent::ResetFeedbackDraft);
     }
 
     /// Commit every buffered intent one by one via `Session::execute_as_ui` (`Caller::Ui`) when
@@ -2225,7 +1948,7 @@ fn apply_wave4_grid_wizard_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
             }
             let params = serde_json::json!({
                 "sheet_id": sheet_id.as_str(),
-                "column": column,
+                "col": column,
                 "order_spec": order,
                 "reference_level": reference_level,
             });
@@ -2405,22 +2128,6 @@ fn apply_wave4_grid_wizard_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
     }
 }
 
-fn encode_base64_bytes(data: &[u8]) -> String {
-    const LUT: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0];
-        let b1 = chunk.get(1).copied().unwrap_or(0);
-        let b2 = chunk.get(2).copied().unwrap_or(0);
-        let n = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
-        out.push(LUT[((n >> 18) & 0x3F) as usize] as char);
-        out.push(LUT[((n >> 12) & 0x3F) as usize] as char);
-        out.push(if chunk.len() > 1 { LUT[((n >> 6) & 0x3F) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { LUT[(n & 0x3F) as usize] as char } else { '=' });
-    }
-    out
-}
-
 fn build_canvas_paste_bounds(anchor_pt: Option<[f64; 2]>, w: f64, h: f64) -> Option<Vec<f64>> {
     anchor_pt.map(|[x, y]| vec![x.max(4.0), y.max(4.0), w, h])
 }
@@ -2439,7 +2146,7 @@ fn execute_paste_image_from_clipboard(
     };
     let mut params = serde_json::Map::new();
     params.insert(String::from("target_sheet_id"), serde_json::json!(target_sheet_id.as_str()));
-    params.insert(String::from("bytes_base64"), serde_json::json!(encode_base64_bytes(&bytes)));
+    params.insert(String::from("bytes_base64"), serde_json::json!(curvebook_platform::base64::encode(&bytes)));
     if let Some(bounds) = build_canvas_paste_bounds(anchor_pt, 160.0, 120.0) {
         params.insert(String::from("bounds_pt"), serde_json::json!(bounds));
     }

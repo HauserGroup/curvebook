@@ -1,5 +1,6 @@
 //! `Pairwise Comparisons` modal body (`gui-layout-spec.md` §8.11).
 
+use crate::egui_shell::UiIntent;
 use curvebook_doc::{BracketLabelMode, BracketStyle, CldOrdering, PairwiseDisplayMode};
 use egui::Ui;
 
@@ -28,7 +29,7 @@ pub(super) fn render_pairwise_body(ui: &mut Ui, state: &mut GraphModalEguiState,
         )
         .clicked()
         {
-            gctx.intents.push_dialog_widget_click("pairwise.auto_add");
+            gctx.intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("pairwise.auto_add") });
         }
         let mut hide_ns = pw.hide_non_significant;
         let chk = ui.checkbox(&mut hide_ns, "Hide Non-Significant");
@@ -37,7 +38,7 @@ pub(super) fn render_pairwise_body(ui: &mut Ui, state: &mut GraphModalEguiState,
             let mut next = pw.clone();
             next.hide_non_significant = hide_ns;
             next.brackets_dirty = true;
-            gctx.intents.push_update_pairwise_state(next);
+            gctx.intents.push(UiIntent::UpdatePairwiseState(Box::new(next)));
         }
     });
 
@@ -68,7 +69,7 @@ pub(super) fn render_pairwise_body(ui: &mut Ui, state: &mut GraphModalEguiState,
                 let mut next = pw.clone();
                 next.display_mode = mode;
                 next.cld_enabled = mode != PairwiseDisplayMode::BracketsOnly;
-                gctx.intents.push_update_pairwise_state(next);
+                gctx.intents.push(UiIntent::UpdatePairwiseState(Box::new(next)));
             }
         }
     });
@@ -101,7 +102,7 @@ pub(super) fn render_pairwise_body(ui: &mut Ui, state: &mut GraphModalEguiState,
                 let mut next = pw.clone();
                 next.bracket_style = st;
                 next.brackets_dirty = true;
-                gctx.intents.push_update_pairwise_state(next);
+                gctx.intents.push(UiIntent::UpdatePairwiseState(Box::new(next)));
             }
         }
         ui.label("Labels:");
@@ -124,7 +125,7 @@ pub(super) fn render_pairwise_body(ui: &mut Ui, state: &mut GraphModalEguiState,
                 let mut next = pw.clone();
                 next.label_mode = lm;
                 next.brackets_dirty = true;
-                gctx.intents.push_update_pairwise_state(next);
+                gctx.intents.push(UiIntent::UpdatePairwiseState(Box::new(next)));
             }
         }
     });
@@ -141,7 +142,7 @@ pub(super) fn render_pairwise_body(ui: &mut Ui, state: &mut GraphModalEguiState,
         if let Some(v) = f_out.committed_value {
             let mut next = pw.clone();
             next.cld_font_size_pt = v.clamp(6.0, 24.0);
-            gctx.intents.push_update_pairwise_state(next);
+            gctx.intents.push(UiIntent::UpdatePairwiseState(Box::new(next)));
         }
 
         let off_cfg = ScrubUnitFieldConfig {
@@ -154,7 +155,7 @@ pub(super) fn render_pairwise_body(ui: &mut Ui, state: &mut GraphModalEguiState,
         if let Some(v) = o_out.committed_value {
             let mut next = pw.clone();
             next.cld_offset_pt = v.clamp(0.0, 48.0);
-            gctx.intents.push_update_pairwise_state(next);
+            gctx.intents.push(UiIntent::UpdatePairwiseState(Box::new(next)));
         }
 
         let mut upper = pw.cld_uppercase;
@@ -163,7 +164,7 @@ pub(super) fn render_pairwise_body(ui: &mut Ui, state: &mut GraphModalEguiState,
         if chk.changed() {
             let mut next = pw.clone();
             next.cld_uppercase = upper;
-            gctx.intents.push_update_pairwise_state(next);
+            gctx.intents.push(UiIntent::UpdatePairwiseState(Box::new(next)));
         }
         let desc = pw.cld_ordering == CldOrdering::DescendingMean;
         if record_button(
@@ -181,7 +182,7 @@ pub(super) fn render_pairwise_body(ui: &mut Ui, state: &mut GraphModalEguiState,
         )
         .clicked()
         {
-            gctx.intents.push_dialog_widget_click("pairwise.cld_ordering");
+            gctx.intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("pairwise.cld_ordering") });
         }
     }
     ui.add_space(4.0);

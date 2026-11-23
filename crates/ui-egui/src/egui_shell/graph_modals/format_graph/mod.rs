@@ -1,6 +1,7 @@
 //! 3-Schema `Format Graph` modal dispatcher and shared legend controls (`gui-layout-spec.md`
 //! §8.11C).
 
+use crate::egui_shell::UiIntent;
 mod heatmap;
 mod mv;
 mod series;
@@ -44,7 +45,7 @@ fn render_legend_toggles(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>, fg: &crate::
     if vis_chk.changed() {
         let mut next = fg.clone();
         next.show_legend = show_legend;
-        gctx.intents.push_update_format_graph_state(next);
+        gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
     }
 
     let mut bordered = fg.legend_bordered;
@@ -54,6 +55,6 @@ fn render_legend_toggles(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>, fg: &crate::
     if brd_chk.changed() {
         let mut next = fg.clone();
         next.legend_bordered = bordered;
-        gctx.intents.push_update_format_graph_state(next);
+        gctx.intents.push(UiIntent::UpdateFormatGraphState(Box::new(next)));
     }
 }

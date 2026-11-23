@@ -1,5 +1,6 @@
 //! `Additional Ticks / Thresholds` sub-modal body inside `Format Axes`.
 
+use crate::egui_shell::UiIntent;
 use curvebook_doc::{AdditionalTick, AxisThreshold};
 use curvebook_palette::LineDashStyle;
 use egui::Ui;
@@ -43,7 +44,7 @@ pub(super) fn render_additional_ticks_submodal(ui: &mut Ui, state: &mut GraphMod
                     let mut next = fa.clone();
                     next.axis_draft.additional_ticks.remove(idx);
                     next.stage_active_additional_ticks();
-                    gctx.intents.push_update_format_axes_state(next);
+                    gctx.intents.push(UiIntent::UpdateFormatAxesState(Box::new(next)));
                 }
             });
         }
@@ -78,7 +79,7 @@ pub(super) fn render_additional_ticks_submodal(ui: &mut Ui, state: &mut GraphMod
                     let mut next = fa.clone();
                     next.axis_draft.thresholds.remove(idx);
                     next.stage_active_thresholds();
-                    gctx.intents.push_update_format_axes_state(next);
+                    gctx.intents.push(UiIntent::UpdateFormatAxesState(Box::new(next)));
                 }
             });
         }
@@ -178,7 +179,7 @@ pub(super) fn render_additional_ticks_submodal(ui: &mut Ui, state: &mut GraphMod
                     });
                     next.stage_active_additional_ticks();
                 }
-                gctx.intents.push_update_format_axes_state(next);
+                gctx.intents.push(UiIntent::UpdateFormatAxesState(Box::new(next)));
                 state.additional_tick_status = None;
                 state.additional_ticks.value_draft.clear();
                 state.additional_ticks.end_value_draft.clear();

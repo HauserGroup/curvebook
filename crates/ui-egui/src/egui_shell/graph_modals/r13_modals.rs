@@ -1,5 +1,6 @@
 //! R13 canvas modals: `Create Graph`, `Equalize Scaling`, `Format Embedded Table`, and `Format Image`.
 
+use crate::egui_shell::UiIntent;
 use curvebook_doc::CropInsetsPt;
 use curvebook_palette::{LineDashStyle, Rgba8};
 use egui::Ui;
@@ -36,7 +37,7 @@ pub(super) fn render_create_graph_body(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>
                 {
                     let mut next = cg.clone();
                     next.source_sheet_id = Some(id.clone());
-                    gctx.intents.push_update_create_graph_state(next);
+                    gctx.intents.push(UiIntent::UpdateCreateGraphState(Box::new(next)));
                 }
             }
         });
@@ -74,7 +75,7 @@ pub(super) fn render_create_graph_body(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>
             {
                 let mut next = cg.clone();
                 next.kind_slug = slug.to_owned();
-                gctx.intents.push_update_create_graph_state(next);
+                gctx.intents.push(UiIntent::UpdateCreateGraphState(Box::new(next)));
             }
         }
     });
@@ -87,7 +88,7 @@ pub(super) fn render_create_graph_body(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>
     if per_chk.changed() {
         let mut next = cg.clone();
         next.one_per_data_set = per_ds;
-        gctx.intents.push_update_create_graph_state(next);
+        gctx.intents.push(UiIntent::UpdateCreateGraphState(Box::new(next)));
     }
 
     let field_w = (gctx.body_w - 110.0).clamp(120.0, 320.0);
@@ -100,7 +101,7 @@ pub(super) fn render_create_graph_body(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>
         if r.changed() {
             let mut next = cg.clone();
             next.y_axis_title = y_title.clone();
-            gctx.intents.push_update_create_graph_state(next);
+            gctx.intents.push(UiIntent::UpdateCreateGraphState(Box::new(next)));
         }
     });
 
@@ -113,7 +114,7 @@ pub(super) fn render_create_graph_body(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>
         if r.changed() {
             let mut next = cg.clone();
             next.graph_title = g_title.clone();
-            gctx.intents.push_update_create_graph_state(next);
+            gctx.intents.push(UiIntent::UpdateCreateGraphState(Box::new(next)));
         }
     });
 }
@@ -146,7 +147,7 @@ pub(super) fn render_equalize_scaling_body(ui: &mut Ui, gctx: &mut GraphModalCtx
             {
                 let mut next = eq.clone();
                 next.mode = mode_slug.to_owned();
-                gctx.intents.push_update_equalize_scaling_state(next);
+                gctx.intents.push(UiIntent::UpdateEqualizeScalingState(Box::new(next)));
             }
         }
     });
@@ -175,7 +176,7 @@ pub(super) fn render_equalize_scaling_body(ui: &mut Ui, gctx: &mut GraphModalCtx
                 {
                     let mut next = eq.clone();
                     next.explicit_percent = pct;
-                    gctx.intents.push_update_equalize_scaling_state(next);
+                    gctx.intents.push(UiIntent::UpdateEqualizeScalingState(Box::new(next)));
                 }
             }
             let mut cur_pct = eq.explicit_percent;
@@ -184,7 +185,7 @@ pub(super) fn render_equalize_scaling_body(ui: &mut Ui, gctx: &mut GraphModalCtx
             if dv.changed() {
                 let mut next = eq.clone();
                 next.explicit_percent = cur_pct.clamp(5.0, 500.0);
-                gctx.intents.push_update_equalize_scaling_state(next);
+                gctx.intents.push(UiIntent::UpdateEqualizeScalingState(Box::new(next)));
             }
         });
     }
@@ -219,7 +220,7 @@ pub(super) fn render_equalize_scaling_body(ui: &mut Ui, gctx: &mut GraphModalCtx
                     } else {
                         next.selected_panel_ids.push(pid.clone());
                     }
-                    gctx.intents.push_update_equalize_scaling_state(next);
+                    gctx.intents.push(UiIntent::UpdateEqualizeScalingState(Box::new(next)));
                 }
             }
         });
@@ -249,7 +250,7 @@ pub(super) fn render_format_embedded_table_body(ui: &mut Ui, gctx: &mut GraphMod
     if dirty {
         let mut next = et.clone();
         next.style = style;
-        gctx.intents.push_update_format_embedded_table_state(next);
+        gctx.intents.push(UiIntent::UpdateFormatEmbeddedTableState(Box::new(next)));
     }
 
     ui.add_space(6.0);
@@ -275,7 +276,7 @@ pub(super) fn render_format_embedded_table_body(ui: &mut Ui, gctx: &mut GraphMod
             {
                 let mut next = et.clone();
                 next.style.font_size_pt = sz;
-                gctx.intents.push_update_format_embedded_table_state(next);
+                gctx.intents.push(UiIntent::UpdateFormatEmbeddedTableState(Box::new(next)));
             }
         }
         let mut cur_sz = et.style.font_size_pt;
@@ -284,7 +285,7 @@ pub(super) fn render_format_embedded_table_body(ui: &mut Ui, gctx: &mut GraphMod
         if dv.changed() {
             let mut next = et.clone();
             next.style.font_size_pt = cur_sz.clamp(4.0, 36.0);
-            gctx.intents.push_update_format_embedded_table_state(next);
+            gctx.intents.push(UiIntent::UpdateFormatEmbeddedTableState(Box::new(next)));
         }
     });
 
@@ -310,7 +311,7 @@ pub(super) fn render_format_embedded_table_body(ui: &mut Ui, gctx: &mut GraphMod
             {
                 let mut next = et.clone();
                 next.style.outer_border_width_pt = w;
-                gctx.intents.push_update_format_embedded_table_state(next);
+                gctx.intents.push(UiIntent::UpdateFormatEmbeddedTableState(Box::new(next)));
             }
         }
     });
@@ -337,7 +338,7 @@ pub(super) fn render_format_embedded_table_body(ui: &mut Ui, gctx: &mut GraphMod
             {
                 let mut next = et.clone();
                 next.style.gridline_width_pt = w;
-                gctx.intents.push_update_format_embedded_table_state(next);
+                gctx.intents.push(UiIntent::UpdateFormatEmbeddedTableState(Box::new(next)));
             }
         }
     });
@@ -369,7 +370,7 @@ pub(super) fn render_format_embedded_table_body(ui: &mut Ui, gctx: &mut GraphMod
             {
                 let mut next = et.clone();
                 next.style.fill_color = fill;
-                gctx.intents.push_update_format_embedded_table_state(next);
+                gctx.intents.push(UiIntent::UpdateFormatEmbeddedTableState(Box::new(next)));
             }
         }
     });
@@ -398,7 +399,7 @@ pub(super) fn render_format_embedded_table_body(ui: &mut Ui, gctx: &mut GraphMod
             {
                 let mut next = et.clone();
                 next.style.border_color = col;
-                gctx.intents.push_update_format_embedded_table_state(next);
+                gctx.intents.push(UiIntent::UpdateFormatEmbeddedTableState(Box::new(next)));
             }
         }
     });
@@ -431,7 +432,7 @@ fn render_format_image_geometry(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>, fi: &
             if next.lock_aspect_ratio {
                 next.bounds_pt.height = (next.bounds_pt.width * next.aspect_h_over_w()).clamp(8.0, 2000.0);
             }
-            gctx.intents.push_update_format_image_state(next);
+            gctx.intents.push(UiIntent::UpdateFormatImageState(Box::new(next)));
         }
 
         ui.label("H:");
@@ -444,7 +445,7 @@ fn render_format_image_geometry(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>, fi: &
             if next.lock_aspect_ratio {
                 next.bounds_pt.width = (next.bounds_pt.height / next.aspect_h_over_w().max(1e-9)).clamp(8.0, 2000.0);
             }
-            gctx.intents.push_update_format_image_state(next);
+            gctx.intents.push(UiIntent::UpdateFormatImageState(Box::new(next)));
         }
 
         let mut lock = fi.lock_aspect_ratio;
@@ -454,7 +455,7 @@ fn render_format_image_geometry(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>, fi: &
         if lock_chk.changed() {
             let mut next = fi.clone();
             next.lock_aspect_ratio = lock;
-            gctx.intents.push_update_format_image_state(next);
+            gctx.intents.push(UiIntent::UpdateFormatImageState(Box::new(next)));
         }
     });
 
@@ -481,7 +482,7 @@ fn render_format_image_geometry(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>, fi: &
             {
                 let mut next = fi.clone();
                 next.rotation_deg = deg;
-                gctx.intents.push_update_format_image_state(next);
+                gctx.intents.push(UiIntent::UpdateFormatImageState(Box::new(next)));
             }
         }
         let mut rot = fi.rotation_deg;
@@ -490,7 +491,7 @@ fn render_format_image_geometry(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>, fi: &
         if rot_dv.changed() {
             let mut next = fi.clone();
             next.rotation_deg = rot.clamp(-360.0, 360.0);
-            gctx.intents.push_update_format_image_state(next);
+            gctx.intents.push(UiIntent::UpdateFormatImageState(Box::new(next)));
         }
     });
 }
@@ -518,7 +519,7 @@ fn render_format_image_crop(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>, fi: &Form
         if changed {
             let mut next = fi.clone();
             next.crop = crop;
-            gctx.intents.push_update_format_image_state(next);
+            gctx.intents.push(UiIntent::UpdateFormatImageState(Box::new(next)));
         }
     });
 
@@ -548,7 +549,7 @@ fn render_format_image_crop(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>, fi: &Form
                     "top" => next.crop.top_pt = (next.crop.top_pt + 4.0).min((next.bounds_pt.height - next.crop.bottom_pt - 2.0).max(0.0)),
                     _ => next.crop.bottom_pt = (next.crop.bottom_pt + 4.0).min((next.bounds_pt.height - next.crop.top_pt - 2.0).max(0.0)),
                 }
-                gctx.intents.push_update_format_image_state(next);
+                gctx.intents.push(UiIntent::UpdateFormatImageState(Box::new(next)));
             }
         }
         let reset_lbl = tr(gctx.locale, "r13.image.crop_reset");
@@ -569,7 +570,7 @@ fn render_format_image_crop(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>, fi: &Form
         {
             let mut next = fi.clone();
             next.crop = CropInsetsPt::default();
-            gctx.intents.push_update_format_image_state(next);
+            gctx.intents.push(UiIntent::UpdateFormatImageState(Box::new(next)));
         }
     });
 }
@@ -582,7 +583,7 @@ fn render_format_image_border(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>, fi: &Fo
     if chk.changed() {
         let mut next = fi.clone();
         next.border_enabled = border_on;
-        gctx.intents.push_update_format_image_state(next);
+        gctx.intents.push(UiIntent::UpdateFormatImageState(Box::new(next)));
     }
 
     if fi.border_enabled {
@@ -607,7 +608,7 @@ fn render_format_image_border(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>, fi: &Fo
                 {
                     let mut next = fi.clone();
                     next.border_width_pt = w;
-                    gctx.intents.push_update_format_image_state(next);
+                    gctx.intents.push(UiIntent::UpdateFormatImageState(Box::new(next)));
                 }
             }
         });
@@ -635,7 +636,7 @@ fn render_format_image_border(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>, fi: &Fo
                 {
                     let mut next = fi.clone();
                     next.border_color = col;
-                    gctx.intents.push_update_format_image_state(next);
+                    gctx.intents.push(UiIntent::UpdateFormatImageState(Box::new(next)));
                 }
             }
             for (slug, lbl, dash) in
@@ -658,7 +659,7 @@ fn render_format_image_border(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>, fi: &Fo
                 {
                     let mut next = fi.clone();
                     next.border_dash = dash;
-                    gctx.intents.push_update_format_image_state(next);
+                    gctx.intents.push(UiIntent::UpdateFormatImageState(Box::new(next)));
                 }
             }
         });

@@ -15,7 +15,7 @@ use crate::modal_predicates::{
 use crate::egui_shell::stat_anova_modal::{
     StepperSpec, record_widget, render_modal_checkbox, render_modal_radio, render_modal_seg_btn, render_section_title, render_stepper_row,
 };
-use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens};
+use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens, UiIntent};
 use crate::inspect::ZLayer;
 
 use super::helpers::{render_dataset_checklist, render_mv_role_badge, resolve_source_data_sheet};
@@ -37,10 +37,10 @@ pub(super) fn render_two_group_design(
     let paired_en = r1_paired_or_matched_allowed(doc, Some(&spec.source_sheet_id));
     ui.horizontal_wrapped(|ui| {
         if render_modal_checkbox(ui, tokens, meta, "edit.assume_gaussian", "Assume Gaussian distribution", ep.assume_gaussian, &assume_en) {
-            intents.push_dialog_widget_click("edit.assume_gaussian");
+            intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("edit.assume_gaussian") });
         }
         if render_modal_checkbox(ui, tokens, meta, "edit.paired_or_matched", "Paired / Matched design", ep.paired_or_matched, &paired_en) {
-            intents.push_dialog_widget_click("edit.paired_or_matched");
+            intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("edit.paired_or_matched") });
         }
     });
     ui.add_space(4.0);
@@ -169,16 +169,16 @@ pub(super) fn render_two_group_design(
             ep.welch_correction || t.method == TwoGroupMethod::WelchT,
             &welch_en,
         ) {
-            intents.push_dialog_widget_click("edit.two_group.welch");
+            intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("edit.two_group.welch") });
         }
         if render_modal_checkbox(ui, tokens, meta, "edit.two_group.graph_differences", "Graph differences", ep.graph_differences, &diff_en) {
-            intents.push_dialog_widget_click("edit.two_group.graph_differences");
+            intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("edit.two_group.graph_differences") });
         }
         if render_modal_checkbox(ui, tokens, meta, "edit.two_group.graph_ranks", "Graph ranks", ep.graph_ranks, &np_en) {
-            intents.push_dialog_widget_click("edit.two_group.graph_ranks");
+            intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("edit.two_group.graph_ranks") });
         }
         if render_modal_checkbox(ui, tokens, meta, "edit.two_group.hodges_lehmann", "Hodges-Lehmann CI", ep.hodges_lehmann_ci, &np_en) {
-            intents.push_dialog_widget_click("edit.two_group.hodges_lehmann");
+            intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("edit.two_group.hodges_lehmann") });
         }
     });
     if let Some(ds) = resolve_source_data_sheet(doc, &spec.source_sheet_id)
