@@ -144,8 +144,7 @@ fn process_tag_attrs(rel_path: &str, tag_lower: &str, attrs: &[(String, String)]
             return Err(format!("{rel_path}: duplicate HTML id `#{v}`"));
         }
         if key_lower == "href" {
-            let lower_v = v.to_ascii_lowercase();
-            if lower_v.starts_with("javascript:") || lower_v.starts_with("data:") {
+            if is_forbidden_uri_scheme(v) {
                 return Err(format!("{rel_path}: forbidden `href` URI `{v}`"));
             }
             if matches!(tag_lower, "link" | "base") && is_external_url(v) {
@@ -153,11 +152,11 @@ fn process_tag_attrs(rel_path: &str, tag_lower: &str, attrs: &[(String, String)]
             }
             facts.hrefs.push(v.clone());
         } else if matches!(key_lower.as_str(), "src" | "poster" | "action") {
-            if is_external_url(v) || v.to_ascii_lowercase().starts_with("data:") {
-                return Err(format!("{rel_path}: external or inline `{key_lower}` asset forbidden (`{v}`)"));
+            if is_external_url(v) || is_forbidden_uri_scheme(v) {
+                return Err(format!("{rel_path}: external or forbidden `{key_lower}` asset forbidden (`{v}`)"));
             }
             facts.asset_srcs.push(v.clone());
-        } else if tag_lower == "meta" && key_lower == "http-equiv" && v.eq_ignore_ascii_case("refresh") {
+        } else if tag_lower == "meta" && key_lower == "http-equiv" && v.trim().eq_ignore_ascii_case("refresh") {
             is_meta_refresh = true;
         } else if tag_lower == "meta" && key_lower == "content" {
             meta_content = Some(v.as_str());
@@ -168,6 +167,9 @@ fn process_tag_attrs(rel_path: &str, tag_lower: &str, attrs: &[(String, String)]
         && let Some(content) = meta_content
         && let Some(target) = parse_meta_refresh_url(content)
     {
+        if is_forbidden_uri_scheme(target) || is_external_url(target) {
+            return Err(format!("{rel_path}: external or forbidden `<meta http-equiv=\"refresh\">` target `{target}`"));
+        }
         facts.meta_refresh_targets.push(target.to_owned());
     }
     Ok(())
@@ -276,29 +278,127 @@ fn parse_tag_attributes(trimmed_tag: &str) -> Vec<(String, String)> {
 }
 
 fn unescape_attr(raw: &str) -> String {
-    raw.replace("&amp;", "&").replace("&quot;", "\"").replace("&#39;", "'").replace("&lt;", "<").replace("&gt;", ">")
+    let mut out = String::with_capacity(raw.len());
+    let bytes = raw.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'&'
+            && let Some((ch, consumed)) = decode_html_entity(raw.get(i..).unwrap_or(""))
+        {
+            out.push(ch);
+            i += consumed;
+            continue;
+        }
+        if let Some(rest) = raw.get(i..)
+            && let Some(ch) = rest.chars().next()
+        {
+            out.push(ch);
+            i += ch.len_utf8();
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+fn decode_html_entity(slice: &str) -> Option<(char, usize)> {
+    let rest = slice.strip_prefix('&')?;
+    if let Some(num) = rest.strip_prefix('#') {
+        if let Some(hex_tail) = num.strip_prefix('x').or_else(|| num.strip_prefix('X')) {
+            let digits_len = hex_tail.bytes().take_while(u8::is_ascii_hexdigit).count();
+            if digits_len == 0 {
+                return None;
+            }
+            let digits = hex_tail.get(..digits_len)?;
+            let trimmed_digits = digits.trim_start_matches('0');
+            let code = if trimmed_digits.is_empty() {
+                0u32
+            } else if trimmed_digits.len() > 8 {
+                return None;
+            } else {
+                u32::from_str_radix(trimmed_digits, 16).ok()?
+            };
+            let ch = char::from_u32(code).unwrap_or('\u{FFFD}');
+            let semi = usize::from(hex_tail.as_bytes().get(digits_len) == Some(&b';'));
+            return Some((ch, 3 + digits_len + semi));
+        }
+        let digits_len = num.bytes().take_while(u8::is_ascii_digit).count();
+        if digits_len == 0 {
+            return None;
+        }
+        let digits = num.get(..digits_len)?;
+        let trimmed_digits = digits.trim_start_matches('0');
+        let code = if trimmed_digits.is_empty() {
+            0u32
+        } else if trimmed_digits.len() > 10 {
+            return None;
+        } else {
+            trimmed_digits.parse::<u32>().ok()?
+        };
+        let ch = char::from_u32(code).unwrap_or('\u{FFFD}');
+        let semi = usize::from(num.as_bytes().get(digits_len) == Some(&b';'));
+        return Some((ch, 2 + digits_len + semi));
+    }
+    let semi_pos = rest.find(';')?;
+    if semi_pos == 0 || semi_pos > 16 {
+        return None;
+    }
+    let name = rest.get(..semi_pos)?;
+    let ch = match name.to_ascii_lowercase().as_str() {
+        "amp" => '&',
+        "quot" => '"',
+        "apos" => '\'',
+        "lt" => '<',
+        "gt" => '>',
+        "colon" => ':',
+        "tab" => '\t',
+        "newline" => '\n',
+        _ => return None,
+    };
+    Some((ch, 1 + semi_pos + 1))
+}
+
+fn normalize_scheme_prefix(raw: &str) -> String {
+    raw.chars().filter(|c| !c.is_ascii_control() && !c.is_ascii_whitespace()).map(|c| c.to_ascii_lowercase()).collect()
+}
+
+fn is_forbidden_uri_scheme(raw: &str) -> bool {
+    let norm = normalize_scheme_prefix(raw);
+    norm.starts_with("javascript:") || norm.starts_with("data:") || norm.starts_with("vbscript:")
 }
 
 fn is_external_url(url: &str) -> bool {
-    let lower = url.trim().to_ascii_lowercase();
-    lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("//")
+    let norm = normalize_scheme_prefix(url);
+    norm.starts_with("http://") || norm.starts_with("https://") || norm.starts_with("//")
+}
+
+fn is_mailto_url(url: &str) -> bool {
+    normalize_scheme_prefix(url).starts_with("mailto:")
 }
 
 fn check_internal_links_and_fragments(root: &Path, out_dir: &Path, site: &GeneratedSite, facts: &BTreeMap<String, PageFacts>) -> Result<(), String> {
+    let mut extra_html_ids: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (page_rel, page_facts) in facts {
         for raw_href in &page_facts.hrefs {
-            if is_external_url(raw_href) || raw_href.starts_with("mailto:") {
+            if is_external_url(raw_href) || is_mailto_url(raw_href) {
                 continue;
             }
-            verify_target(root, out_dir, site, facts, page_rel, raw_href)?;
+            verify_target_with_cache(root, out_dir, site, facts, page_rel, raw_href, &mut extra_html_ids)?;
         }
         for raw_src in &page_facts.asset_srcs {
-            verify_target(root, out_dir, site, facts, page_rel, raw_src)?;
+            verify_target_with_cache(root, out_dir, site, facts, page_rel, raw_src, &mut extra_html_ids)?;
+        }
+        for raw_refresh in &page_facts.meta_refresh_targets {
+            if is_external_url(raw_refresh) || is_forbidden_uri_scheme(raw_refresh) {
+                return Err(format!("{page_rel}: external or forbidden `<meta http-equiv=\"refresh\">` target `{raw_refresh}`"));
+            }
+            verify_target_with_cache(root, out_dir, site, facts, page_rel, raw_refresh, &mut extra_html_ids)?;
         }
     }
     Ok(())
 }
 
+#[cfg(test)]
 fn verify_target(
     root: &Path,
     out_dir: &Path,
@@ -306,6 +406,19 @@ fn verify_target(
     facts: &BTreeMap<String, PageFacts>,
     from_rel: &str,
     raw_ref: &str,
+) -> Result<(), String> {
+    let mut extra_html_ids = BTreeMap::new();
+    verify_target_with_cache(root, out_dir, site, facts, from_rel, raw_ref, &mut extra_html_ids)
+}
+
+fn verify_target_with_cache(
+    root: &Path,
+    out_dir: &Path,
+    site: &GeneratedSite,
+    facts: &BTreeMap<String, PageFacts>,
+    from_rel: &str,
+    raw_ref: &str,
+    extra_html_ids: &mut BTreeMap<String, BTreeSet<String>>,
 ) -> Result<(), String> {
     let (target_part, frag_part) = match raw_ref.split_once('#') {
         Some((t, f)) => (t, Some(f)),
@@ -322,11 +435,32 @@ fn verify_target(
     }
 
     let resolved = resolve_relative_segments(from_rel, target_part);
-    if resolved.starts_with("../../") && site.meta.is_release_snapshot {
-        let docs_rel = resolved.trim_start_matches("../../");
+    if site.meta.is_release_snapshot
+        && let Some(docs_rel) = resolved.strip_prefix("../../")
+    {
+        if docs_rel.is_empty() || docs_rel.starts_with('/') || docs_rel.split('/').any(|seg| seg == "..") {
+            return Err(format!("{from_rel}: relative target `{raw_ref}` escapes `docs/` root (`{resolved}`)"));
+        }
         let docs_target = root.join("docs").join(docs_rel);
-        if !docs_target.is_file() {
+        if !std::fs::symlink_metadata(&docs_target).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_file()) {
             return Err(format!("{from_rel}: broken parent-docs asset/page `{raw_ref}` -> `{}`", docs_target.display()));
+        }
+        if let Some(frag) = frag_part
+            && !frag.is_empty()
+            && docs_rel.ends_with(".html")
+        {
+            let cache_key = format!("docs/{docs_rel}");
+            if !extra_html_ids.contains_key(&cache_key) {
+                let target_html = std::fs::read_to_string(&docs_target).map_err(|e| format!("read docs/{docs_rel}: {e}"))?;
+                let mut target_facts = PageFacts::default();
+                scan_html_tags(&cache_key, &target_html, &mut target_facts)?;
+                extra_html_ids.insert(cache_key.clone(), target_facts.ids);
+            }
+            if let Some(ids) = extra_html_ids.get(&cache_key)
+                && !ids.contains(frag)
+            {
+                return Err(format!("{from_rel}: broken parent-docs fragment `{raw_ref}` (missing `#{frag}` in `docs/{docs_rel}`)"));
+            }
         }
         return Ok(());
     }
@@ -344,7 +478,8 @@ fn verify_target(
         return Ok(());
     }
 
-    if out_dir.join(&resolved).is_file() {
+    let out_target = out_dir.join(&resolved);
+    if std::fs::symlink_metadata(&out_target).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_file()) {
         return Ok(());
     }
 
@@ -545,11 +680,23 @@ pub fn check_root_pages(root: &Path) -> Result<(), String> {
 
     let mut extra_html_ids: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (rel, facts) in &audited {
-        for raw_ref in facts.hrefs.iter().chain(facts.asset_srcs.iter()).chain(facts.meta_refresh_targets.iter()) {
-            if is_external_url(raw_ref) || raw_ref.starts_with("mailto:") {
+        for raw_href in &facts.hrefs {
+            if is_external_url(raw_href) || is_mailto_url(raw_href) {
                 continue;
             }
-            verify_docs_relative_target(&docs_dir, rel, raw_ref, facts, &audited, &mut extra_html_ids)?;
+            verify_docs_relative_target(&docs_dir, rel, raw_href, facts, &audited, &mut extra_html_ids)?;
+        }
+        for raw_src in &facts.asset_srcs {
+            if is_external_url(raw_src) || is_forbidden_uri_scheme(raw_src) {
+                return Err(format!("docs/{rel}: external or forbidden asset URL `{raw_src}`"));
+            }
+            verify_docs_relative_target(&docs_dir, rel, raw_src, facts, &audited, &mut extra_html_ids)?;
+        }
+        for raw_refresh in &facts.meta_refresh_targets {
+            if is_external_url(raw_refresh) || is_forbidden_uri_scheme(raw_refresh) {
+                return Err(format!("docs/{rel}: external or forbidden `<meta http-equiv=\"refresh\">` target `{raw_refresh}`"));
+            }
+            verify_docs_relative_target(&docs_dir, rel, raw_refresh, facts, &audited, &mut extra_html_ids)?;
         }
     }
     Ok(())
@@ -982,6 +1129,171 @@ $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
         // Breaking a local link inside docs/index.html must fail check_root_pages.
         std::fs::write(docs.join("index.html"), base_root_html("Home", "<a href=\"missing.html\">Broken</a>")).unwrap();
         assert!(check_root_pages(&root_dir).unwrap_err().contains("missing.html"));
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn da_03_04_empty_multiline_display_math_terminates_cleanly() {
+        let rendered1 = render_markdown("$$\n$$\n", &IdentityResolver);
+        assert!(rendered1.html.contains("$$"));
+
+        let rendered2 = render_markdown("$$\n   \n$$\nAfter\n", &IdentityResolver);
+        assert!(rendered2.html.contains("After"), "unexpected html: {}", rendered2.html);
+    }
+
+    #[test]
+    fn da_03_05_math_and_markdown_recursion_caps_complexity_and_blockquote_ids() {
+        // 1. Exponential O(2^(n/2)) hang regression on repeated incomplete \frac / \binom.
+        let frac_bomb = format!("${}$", "\\frac".repeat(80));
+        let rendered_frac = render_markdown(&frac_bomb, &IdentityResolver);
+        assert!(!rendered_frac.html.is_empty());
+
+        let binom_bomb = "\\binom".repeat(80);
+        let rendered_binom = render_math_html(&binom_bomb);
+        assert!(!rendered_binom.is_empty());
+
+        // 2. Unbounded stack recursion in brace-free TeX macros & Markdown blocks/inlines.
+        let deep_bar = format!("{}x", "\\bar".repeat(500));
+        assert!(!render_math_html(&deep_bar).is_empty());
+        let deep_sqrt = format!("{}x", "\\sqrt".repeat(500));
+        assert!(!render_math_html(&deep_sqrt).is_empty());
+
+        let deep_quote = format!("{}hi\n", "> ".repeat(200));
+        assert!(render_markdown(&deep_quote, &IdentityResolver).html.contains("hi"));
+
+        let mut deep_list = String::new();
+        for depth in 0..200 {
+            deep_list.push_str(&"  ".repeat(depth));
+            deep_list.push_str("- item\n");
+        }
+        assert!(render_markdown(&deep_list, &IdentityResolver).html.contains("item"));
+
+        let deep_inline = format!("{}x{}", "*".repeat(200), "*".repeat(200));
+        assert!(render_markdown(&deep_inline, &IdentityResolver).html.contains('x'));
+
+        let deep_links = format!("{}x{}", "[".repeat(200), "](u)".repeat(200));
+        assert!(render_markdown(&deep_links, &IdentityResolver).html.contains('x'));
+
+        // 3. Unclosed delimiter + `$` rescan complexity stays fast.
+        let unclosed_rescan = "*a ${b ".repeat(500);
+        assert!(!render_markdown(&unclosed_rescan, &IdentityResolver).html.is_empty());
+
+        // 4. Headings inside blockquotes/callouts share parent RenderCtx slug_counts so IDs stay unique.
+        let dup_md = "# Intro\n\n> # Intro\n\n> [!NOTE]\n> ## Intro\n";
+        let rendered_dup = render_markdown(dup_md, &IdentityResolver);
+        assert!(rendered_dup.html.contains("id=\"intro\""), "{}", rendered_dup.html);
+        assert!(rendered_dup.html.contains("id=\"intro-1\""), "{}", rendered_dup.html);
+        assert!(rendered_dup.html.contains("id=\"intro-2\""), "{}", rendered_dup.html);
+        let meta = test_meta();
+        let page = render_page(&PageSpec {
+            title: "Dup",
+            description: "Dup",
+            rel_path: "dup.html",
+            section_title: "Concepts",
+            section_rel_path: None,
+            h1: "Dup",
+            toc_headings: &[],
+            body_html: &rendered_dup.html,
+            body_has_h1: true,
+            prev: None,
+            next: None,
+            meta: &meta,
+        });
+        assert!(audit_single_html("dup.html", &page).is_ok());
+    }
+
+    #[test]
+    fn da_03_09_release_snapshot_parent_docs_rejects_traversal_symlinks_and_bad_fragments() {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let dir = std::env::temp_dir().join(format!("cb-docs-da-03-09-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(dir.join("docs/manual/v0.1")).unwrap();
+        std::fs::write(dir.join("README.md"), "# root\n").unwrap();
+        std::fs::write(dir.join("docs/index.html"), "<main id=\"main\"><h1>Home</h1></main>").unwrap();
+        std::fs::write(dir.join("docs/privacy.html"), "<main id=\"main\"><h1>Privacy</h1><h2 id=\"policy\">P</h2></main>").unwrap();
+
+        let mut meta = test_meta();
+        meta.is_release_snapshot = true;
+        let site = GeneratedSite { html_pages: BTreeMap::new(), expected_coverage: Default::default(), meta };
+        let facts = BTreeMap::new();
+        let out_dir = dir.join("docs/manual/v0.1");
+
+        // Valid single-level parent-docs target and valid fragment pass.
+        assert!(verify_target(&dir, &out_dir, &site, &facts, "index.html", "../../privacy.html#policy").is_ok());
+        // Missing fragment in parent docs/ HTML must fail.
+        let frag_err = verify_target(&dir, &out_dir, &site, &facts, "index.html", "../../privacy.html#missing").unwrap_err();
+        assert!(frag_err.contains("missing `#missing`"), "{frag_err}");
+        // Escaping docs/ via repeated `../` must fail (not stripped repeatedly by trim_start_matches).
+        assert!(verify_target(&dir, &out_dir, &site, &facts, "index.html", "../../../README.md").is_err());
+        assert!(verify_target(&dir, &out_dir, &site, &facts, "index.html", "../../../../index.html").is_err());
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(dir.join("README.md"), dir.join("docs/link.html")).unwrap();
+            assert!(verify_target(&dir, &out_dir, &site, &facts, "index.html", "../../link.html").is_err());
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn da_03_10_uri_obfuscation_and_meta_refresh_are_rejected_everywhere() {
+        let meta = test_meta();
+        let good = render_page(&PageSpec {
+            title: "Sec",
+            description: "Sec",
+            rel_path: "index.html",
+            section_title: "Get started",
+            section_rel_path: None,
+            h1: "Sec",
+            toc_headings: &[],
+            body_html: "<p>Clean body.</p>",
+            body_has_h1: false,
+            prev: None,
+            next: None,
+            meta: &meta,
+        });
+
+        for bad_snippet in [
+            "<a href=\"&#x6a;avascript:alert(1)\">x</a>",
+            "<a href=\"&#106;avascript:alert(1)\">x</a>",
+            "<a href=\" java\tscript:alert(1)\">x</a>",
+            "<a href=\"javascript&colon;alert(1)\">x</a>",
+            "<a href=\"vbscript:msgbox(1)\">x</a>",
+            "<a href=\" \n data:text/html,hi\">x</a>",
+            "<img src=\"javascript:alert(1)\" alt=\"\">",
+            "<video poster=\"&#x6a;avascript:alert(1)\"></video>",
+            "<meta http-equiv=\"refresh\" content=\"0; url=https://evil.example/\">",
+            "<meta http-equiv=\"refresh\" content=\"0; url=&#x6a;avascript:alert(1)\">",
+            "<meta http-equiv=\"refresh\" content=\"0; url=data:text/html,hi\">",
+        ] {
+            let poisoned = good.replace("<p>Clean body.</p>", bad_snippet);
+            assert!(audit_single_html("bad.html", &poisoned).is_err(), "expected `{bad_snippet}` to be rejected");
+        }
+
+        // Local meta-refresh to a missing page must fail check_internal_links_and_fragments.
+        let local_missing_refresh = good.replace("<p>Clean body.</p>", "<meta http-equiv=\"refresh\" content=\"0; url=missing.html\">");
+        let page_facts = audit_single_html("index.html", &local_missing_refresh).unwrap();
+        let mut facts = BTreeMap::new();
+        facts.insert(String::from("index.html"), page_facts);
+        let mut html_pages = BTreeMap::new();
+        html_pages.insert(String::from("index.html"), local_missing_refresh);
+        let site = GeneratedSite { html_pages, expected_coverage: Default::default(), meta };
+        assert!(check_internal_links_and_fragments(Path::new("."), Path::new("."), &site, &facts).is_err());
+
+        // External meta-refresh in root docs/index.html must fail check_root_pages.
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let root_dir = std::env::temp_dir().join(format!("cb-docs-da-03-10-{}-{nanos}", std::process::id()));
+        let docs = root_dir.join("docs");
+        std::fs::create_dir_all(docs.join("manual")).unwrap();
+        let root_html = |extra: &str| {
+            format!(
+                "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"referrer\" content=\"no-referrer\"><meta http-equiv=\"Content-Security-Policy\" content=\"{STRICT_CSP}\">{extra}<title>T</title></head><body><a class=\"skip-link\" href=\"#main\">Skip</a><main id=\"main\"><h1>T</h1></main></body></html>"
+            )
+        };
+        std::fs::write(docs.join("index.html"), root_html("<meta http-equiv=\"refresh\" content=\"0; url=https://evil.example/\">")).unwrap();
+        std::fs::write(docs.join("privacy.html"), root_html("")).unwrap();
+        std::fs::write(docs.join("manual/index.html"), root_html("")).unwrap();
+        assert!(check_root_pages(&root_dir).is_err());
         let _ = std::fs::remove_dir_all(&root_dir);
     }
 }

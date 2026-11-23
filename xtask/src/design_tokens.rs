@@ -12,9 +12,11 @@
 //! - Total non-exempt raw colours and raw numeric size pairs across `crates/ui-egui/src/` may
 //!   only stay equal or fall over time.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
+
+use crate::rust_lex::{RustLexer, blank_comments_and_literals, is_ident_byte, mask_cfg_test_items};
 
 /// Maximum non-exempt raw colour constructors permitted across `crates/ui-egui/src/`.
 /// Lower this ceiling whenever raw colour call sites are migrated onto `Tokens`.
@@ -102,38 +104,21 @@ pub fn scan_sources(sources: &[(String, String)]) -> DesignTokenScanReport {
         if is_test_file(rel) || EXEMPT_FILES.contains(&rel.as_str()) {
             continue;
         }
-        let prod_slice = strip_cfg_test_tail(content);
+        let blanked = blank_comments_and_literals(content);
+        let mut prod_code_bytes = blanked.as_bytes().to_vec();
+        let mut raw_prod_bytes = content.as_bytes().to_vec();
+        mask_cfg_test_items(blanked.as_bytes(), &mut [&mut prod_code_bytes, &mut raw_prod_bytes]);
+        let prod_code = String::from_utf8(prod_code_bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+        let raw_prod = String::from_utf8(raw_prod_bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+
+        let exempt_lines = collect_exemption_lines(rel, &raw_prod, &mut report.invalid_exemptions);
+        let line_starts = compute_line_starts(&prod_code);
         let is_tokens_mod = rel == TOKENS_MOD_REL;
-        let mut file_colors = 0usize;
-        let mut file_sizes = 0usize;
 
-        for (line_idx, line) in prod_slice.lines().enumerate() {
-            let line_no = line_idx + 1;
-            let (code, comment) = split_code_and_line_comment(line);
-            if let Some(comment_text) = comment {
-                if let Some((_, tail)) = comment_text.split_once(EXEMPT_MARKER) {
-                    let reason = tail.trim();
-                    if reason.is_empty() {
-                        report.invalid_exemptions.push(format!("{rel}:{line_no}: `{EXEMPT_MARKER}` requires a non-empty reason"));
-                    } else {
-                        continue;
-                    }
-                } else if comment_text.contains(BARE_EXEMPT_MARKER) {
-                    report.invalid_exemptions.push(format!("{rel}:{line_no}: use `{EXEMPT_MARKER} <reason>` with an explicit justification"));
-                }
-            }
+        let (file_colors, tokens_mod_colors) = count_color_calls(&prod_code, &line_starts, &exempt_lines, is_tokens_mod);
+        let file_sizes = count_raw_size_calls(&prod_code, &line_starts, &exempt_lines);
 
-            let sanitized = blank_string_literals(&code);
-            let c_hits = count_color_calls(&sanitized);
-            if is_tokens_mod {
-                report.tokens_mod_raw_colors += c_hits;
-                continue;
-            }
-            let s_hits = count_raw_size_calls(&sanitized);
-            file_colors += c_hits;
-            file_sizes += s_hits;
-        }
-
+        report.tokens_mod_raw_colors += tokens_mod_colors;
         if file_colors > 0 {
             report.raw_colors += file_colors;
             report.per_file_colors.insert(rel.clone(), file_colors);
@@ -183,79 +168,87 @@ fn is_test_file(rel: &str) -> bool {
     rel.ends_with("/tests.rs") || rel.contains("/tests/")
 }
 
-fn strip_cfg_test_tail(src: &str) -> &str {
-    let mut offset = 0usize;
-    for line in src.split_inclusive('\n') {
-        let trimmed = line.trim();
-        if trimmed == "#[cfg(test)]" {
-            return src.get(..offset).unwrap_or(src);
-        }
-        offset += line.len();
-    }
-    src
-}
-
-fn split_code_and_line_comment(line: &str) -> (String, Option<&str>) {
-    let mut in_str = false;
-    let mut escaped = false;
-    let mut chars = line.char_indices().peekable();
-    while let Some((i, ch)) = chars.next() {
-        if in_str {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                in_str = false;
+fn collect_exemption_lines(rel: &str, raw_prod: &str, invalid_exemptions: &mut Vec<String>) -> BTreeSet<usize> {
+    let mut exempt_lines = BTreeSet::new();
+    let mut lex = RustLexer::new(raw_prod);
+    while !lex.is_eof() {
+        if let Some((line_no, comment_text)) = lex.try_read_comment() {
+            if let Some((_, tail)) = comment_text.split_once(EXEMPT_MARKER) {
+                let reason = tail.trim();
+                if reason.is_empty() {
+                    invalid_exemptions.push(format!("{rel}:{line_no}: `{EXEMPT_MARKER}` requires a non-empty reason"));
+                } else {
+                    exempt_lines.insert(line_no);
+                }
+            } else if comment_text.contains(BARE_EXEMPT_MARKER) {
+                invalid_exemptions.push(format!("{rel}:{line_no}: use `{EXEMPT_MARKER} <reason>` with an explicit justification"));
             }
             continue;
         }
-        if ch == '"' {
-            in_str = true;
+        if lex.try_read_raw_string().is_some() || lex.try_skip_char_literal() || lex.try_read_quoted_string().is_some() {
             continue;
         }
-        if ch == '/' && chars.peek().is_some_and(|&(_, next)| next == '/') {
-            let code_part = line.get(..i).unwrap_or(line).to_owned();
-            let comment_part = line.get(i + 2..);
-            return (code_part, comment_part);
+        lex.advance_one();
+    }
+    exempt_lines
+}
+
+fn compute_line_starts(src: &str) -> Vec<usize> {
+    let mut starts = vec![0usize];
+    for (idx, &b) in src.as_bytes().iter().enumerate() {
+        if b == b'\n' {
+            starts.push(idx + 1);
         }
     }
-    (line.to_owned(), None)
+    starts
 }
 
-fn blank_string_literals(code: &str) -> String {
-    let mut out = String::with_capacity(code.len());
-    let mut in_str = false;
-    let mut escaped = false;
-    for ch in code.chars() {
-        if in_str {
-            if escaped {
-                escaped = false;
-                out.push(' ');
-            } else if ch == '\\' {
-                escaped = true;
-                out.push(' ');
-            } else if ch == '"' {
-                in_str = false;
-                out.push('"');
-            } else {
-                out.push(' ');
+fn line_of_offset(line_starts: &[usize], offset: usize) -> usize {
+    line_starts.partition_point(|&s| s <= offset)
+}
+
+fn is_call_exempt(exempt_lines: &BTreeSet<usize>, start_line: usize, end_line: usize) -> bool {
+    exempt_lines.range(start_line..=end_line).next().is_some()
+}
+
+fn count_color_calls(code: &str, line_starts: &[usize], exempt_lines: &BTreeSet<usize>, is_tokens_mod: bool) -> (usize, usize) {
+    let mut regular_count = 0usize;
+    let mut tokens_mod_count = 0usize;
+    for pat in COLOR_PATTERNS {
+        let mut search_from = 0usize;
+        while let Some(slice) = code.get(search_from..)
+            && let Some(rel_pos) = slice.find(pat)
+        {
+            let abs_pos = search_from + rel_pos;
+            let valid_boundary = abs_pos == 0 || code.as_bytes().get(abs_pos.saturating_sub(1)).is_none_or(|&prev| !is_ident_byte(prev));
+            let args_start = abs_pos + pat.len();
+            if valid_boundary {
+                let args_opt = code.get(args_start..).and_then(extract_balanced_paren_args_with_end);
+                let start_line = line_of_offset(line_starts, abs_pos);
+                let end_line = match args_opt {
+                    Some((_, close_rel)) => line_of_offset(line_starts, args_start + close_rel),
+                    None => start_line,
+                };
+                let exempt = is_call_exempt(exempt_lines, start_line, end_line);
+                if is_tokens_mod {
+                    // `TOKENS_MOD_REL` forbids all raw colour literals even with an exemption
+                    // comment; only non-literal type-conversion bridges (e.g. `Rgba8 <-> Color32`)
+                    // with an explicit `design-token-exempt: <reason>` comment are permitted.
+                    let has_literal_arg = args_opt.is_none_or(|(args, _)| contains_numeric_literal_token(args));
+                    if !exempt || has_literal_arg {
+                        tokens_mod_count += 1;
+                    }
+                } else if !exempt {
+                    regular_count += 1;
+                }
             }
-        } else {
-            if ch == '"' {
-                in_str = true;
-            }
-            out.push(ch);
+            search_from = args_start;
         }
     }
-    out
+    (regular_count, tokens_mod_count)
 }
 
-fn count_color_calls(code: &str) -> usize {
-    COLOR_PATTERNS.iter().map(|pat| code.matches(pat).count()).sum()
-}
-
-fn count_raw_size_calls(code: &str) -> usize {
+fn count_raw_size_calls(code: &str, line_starts: &[usize], exempt_lines: &BTreeSet<usize>) -> usize {
     let mut count = 0usize;
     for pat in SIZE_CALL_PATTERNS {
         let mut search_from = 0usize;
@@ -263,15 +256,17 @@ fn count_raw_size_calls(code: &str) -> usize {
             && let Some(rel_pos) = slice.find(pat)
         {
             let abs_pos = search_from + rel_pos;
-            let valid_boundary =
-                abs_pos == 0 || code.as_bytes().get(abs_pos.saturating_sub(1)).is_none_or(|&prev| !(prev.is_ascii_alphanumeric() || prev == b'_'));
+            let valid_boundary = abs_pos == 0 || code.as_bytes().get(abs_pos.saturating_sub(1)).is_none_or(|&prev| !is_ident_byte(prev));
             let args_start = abs_pos + pat.len();
             if valid_boundary
                 && let Some(args_tail) = code.get(args_start..)
-                && let Some(args) = extract_balanced_paren_args(args_tail)
-                && args_contain_nonzero_numeric_literal(args)
+                && let Some((args, close_rel)) = extract_balanced_paren_args_with_end(args_tail)
             {
-                count += 1;
+                let start_line = line_of_offset(line_starts, abs_pos);
+                let end_line = line_of_offset(line_starts, args_start + close_rel);
+                if !is_call_exempt(exempt_lines, start_line, end_line) && args_contain_nonzero_numeric_literal(args) {
+                    count += 1;
+                }
             }
             search_from = args_start;
         }
@@ -279,7 +274,7 @@ fn count_raw_size_calls(code: &str) -> usize {
     count
 }
 
-fn extract_balanced_paren_args(tail: &str) -> Option<&str> {
+fn extract_balanced_paren_args_with_end(tail: &str) -> Option<(&str, usize)> {
     let mut depth = 1usize;
     for (idx, ch) in tail.char_indices() {
         match ch {
@@ -287,7 +282,7 @@ fn extract_balanced_paren_args(tail: &str) -> Option<&str> {
             ')' => {
                 depth -= 1;
                 if depth == 0 {
-                    return tail.get(..idx);
+                    return tail.get(..idx).map(|args| (args, idx));
                 }
             }
             _ => {}
@@ -296,11 +291,60 @@ fn extract_balanced_paren_args(tail: &str) -> Option<&str> {
     None
 }
 
+fn contains_numeric_literal_token(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b.is_ascii_digit() {
+            let prev_ident = i > 0 && is_ident_byte(bytes[i - 1]);
+            if !prev_ident {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn parse_numeric_literal(part: &str) -> Option<f64> {
+    let trimmed = part.trim();
+    let trimmed = trimmed.strip_prefix('-').or_else(|| trimmed.strip_prefix('+')).unwrap_or(trimmed).trim();
+    let trimmed = trimmed
+        .strip_suffix("_f32")
+        .or_else(|| trimmed.strip_suffix("f32"))
+        .or_else(|| trimmed.strip_suffix("_f64"))
+        .or_else(|| trimmed.strip_suffix("f64"))
+        .or_else(|| trimmed.strip_suffix("_u8"))
+        .or_else(|| trimmed.strip_suffix("u8"))
+        .or_else(|| trimmed.strip_suffix("_u16"))
+        .or_else(|| trimmed.strip_suffix("u16"))
+        .or_else(|| trimmed.strip_suffix("_u32"))
+        .or_else(|| trimmed.strip_suffix("u32"))
+        .or_else(|| trimmed.strip_suffix("_i32"))
+        .or_else(|| trimmed.strip_suffix("i32"))
+        .or_else(|| trimmed.strip_suffix("_usize"))
+        .or_else(|| trimmed.strip_suffix("usize"))
+        .unwrap_or(trimmed);
+    if !trimmed.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+        return None;
+    }
+    if let Some(hex) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+        let clean: String = hex.chars().filter(|&c| c != '_').collect();
+        return u128::from_str_radix(&clean, 16).ok().map(|v| v as f64);
+    }
+    if let Some(bin) = trimmed.strip_prefix("0b").or_else(|| trimmed.strip_prefix("0B")) {
+        let clean: String = bin.chars().filter(|&c| c != '_').collect();
+        return u128::from_str_radix(&clean, 2).ok().map(|v| v as f64);
+    }
+    if let Some(oct) = trimmed.strip_prefix("0o").or_else(|| trimmed.strip_prefix("0O")) {
+        let clean: String = oct.chars().filter(|&c| c != '_').collect();
+        return u128::from_str_radix(&clean, 8).ok().map(|v| v as f64);
+    }
+    let clean: String = trimmed.chars().filter(|&c| c != '_').collect();
+    clean.parse::<f64>().ok()
+}
+
 fn args_contain_nonzero_numeric_literal(args: &str) -> bool {
     for part in split_top_level_commas(args) {
-        let trimmed = part.trim().trim_start_matches('-').trim();
-        let trimmed = trimmed.strip_suffix("_f32").or_else(|| trimmed.strip_suffix("f32")).unwrap_or(trimmed);
-        if let Ok(val) = trimmed.parse::<f64>()
+        if let Some(val) = parse_numeric_literal(part)
             && val.abs() > 0.0
         {
             return true;
@@ -384,5 +428,36 @@ mod tests {
         let err = enforce_ceilings(&report, 10, 10).unwrap_err();
         assert!(err.contains(TOKENS_MOD_REL), "{err}");
         assert!(err.contains("requires a non-empty reason"), "{err}");
+    }
+
+    #[test]
+    fn da_03_03_and_da_03_08_item_scoped_cfg_test_tokens_mod_and_rust_lex_scanning() {
+        let mod_with_early_cfg_test = format!(
+            "#[cfg(test)]\nmod tests;\n\npub fn live() {{\n    /* {}(1, 2, 3); {}(9.0, 9.0); */\n    let q = '\"';\n    let _c = {}(10, 20, 30);\n    let _s = {}(\n        1_000.0,\n        2_500.0,\n    );\n}}\n",
+            concat!("Color32::", "from_rgb"),
+            concat!("vec", "2"),
+            concat!("Color32::", "from_rgb"),
+            concat!("Vec2::", "new"),
+        );
+        let tokens_mod_src = format!(
+            "pub const fn bridge(r: u8, g: u8, b: u8) {{ let _ = {}(r, g, b); }} // {} canonical bridge\npub fn bad_lit() {{ let _ = {}(12, 34, 56); }} // {} fake excuse\npub fn bad_sz() {{ let _ = {}(14.0, 28.0); }}\n",
+            concat!("Color32::", "from_rgb"),
+            concat!("design-token-", "exempt:"),
+            concat!("Color32::", "from_rgb"),
+            concat!("design-token-", "exempt:"),
+            concat!("vec", "2"),
+        );
+        let sources = vec![
+            (String::from("crates/ui-egui/src/egui_shell/sample_mod.rs"), mod_with_early_cfg_test),
+            (String::from(TOKENS_MOD_REL), tokens_mod_src),
+        ];
+        let report = scan_sources(&sources);
+        assert_eq!(report.raw_colors, 1, "production colour after `#[cfg(test)] mod tests;` and char literal ` '\"'` must be counted");
+        assert_eq!(report.raw_size_pairs, 2, "multi-line underscore Vec2::new + TOKENS_MOD_REL vec2 must both be counted");
+        assert_eq!(
+            report.tokens_mod_raw_colors, 1,
+            "TOKENS_MOD_REL literal colour must not be bypassed by exemption, while non-literal bridge is allowed"
+        );
+        assert!(report.invalid_exemptions.is_empty());
     }
 }

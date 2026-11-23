@@ -868,9 +868,10 @@ fn build_tables_page(defined_analysis_anchors: &BTreeSet<String>, az: &mut Vec<A
         let cat_label = item.category.label();
         let _ = writeln!(
             body,
-            "<tr><td><code>{}</code></td><td>{}</td><td>{cat_label}</td><td>{}</td></tr>",
+            "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td></tr>",
             escape_html(item.id),
             escape_html(item.label),
+            escape_html(cat_label),
             escape_html(item.summary),
         );
     }
@@ -1301,4 +1302,24 @@ fn build_formats_page(root: &Path, az: &mut Vec<AzEntry>, expected: &mut Expecte
         toc_headings: toc,
         body_html: body,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::{ExpectedCoverage, build_tables_page};
+
+    #[test]
+    fn da_03_11_build_tables_page_escapes_analysis_category_labels() {
+        let mut az = Vec::new();
+        let mut expected = ExpectedCoverage::default();
+        let page = build_tables_page(&BTreeSet::new(), &mut az, &mut expected);
+        assert!(page.body_html.contains("<td>Transform &amp; Derive</td>"), "missing escaped Transform &amp; Derive");
+        assert!(page.body_html.contains("<td>XY &amp; Regression</td>"), "missing escaped XY &amp; Regression");
+        assert!(page.body_html.contains("<td>Multivariate &amp; GLM</td>"), "missing escaped Multivariate &amp; GLM");
+        assert!(!page.body_html.contains("<td>Transform & Derive</td>"));
+        assert!(!page.body_html.contains("<td>XY & Regression</td>"));
+        assert!(!page.body_html.contains("<td>Multivariate & GLM</td>"));
+    }
 }

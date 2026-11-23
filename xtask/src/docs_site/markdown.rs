@@ -50,6 +50,8 @@ impl LinkResolver for IdentityResolver {
     }
 }
 
+const MAX_MARKDOWN_DEPTH: usize = 32;
+
 /// Render Markdown into safe HTML (no raw `<script>`, `<form>`, or inline `style=`),
 /// generating unique heading IDs and resolving links via `resolver`.
 #[must_use]
@@ -57,25 +59,30 @@ pub fn render_markdown(input: &str, resolver: &dyn LinkResolver) -> RenderedMark
     let lines: Vec<&str> = input.lines().collect();
     let mut ctx = RenderCtx { resolver, slug_counts: BTreeMap::new(), headings: Vec::new(), title: None };
     let mut html = String::with_capacity(input.len().saturating_mul(2));
+    render_blocks(&mut ctx, &lines, 0, &mut html);
+    RenderedMarkdown { html, headings: ctx.headings, title: ctx.title }
+}
+
+fn render_blocks(ctx: &mut RenderCtx<'_>, lines: &[&str], block_depth: usize, html: &mut String) {
     let mut idx = 0usize;
 
     while idx < lines.len() {
         let line = lines[idx];
         let trimmed = line.trim();
         if trimmed.is_empty() || is_html_comment_start(trimmed) {
-            idx = skip_empty_or_comment(&lines, idx);
+            idx = skip_empty_or_comment(lines, idx);
             continue;
         }
         if let Some((fence_ch, fence_len, lang)) = parse_fence_open(trimmed) {
-            idx = render_fenced_code(&lines, idx, fence_ch, fence_len, &lang, &mut html);
+            idx = render_fenced_code(lines, idx, fence_ch, fence_len, &lang, html);
             continue;
         }
-        if let Some(next_idx) = try_render_math_block(&lines, idx, &mut html) {
+        if let Some(next_idx) = try_render_math_block(lines, idx, html) {
             idx = next_idx;
             continue;
         }
         if let Some((level, raw_heading)) = parse_atx_heading(trimmed) {
-            render_heading_block(&mut ctx, level, raw_heading, &mut html);
+            render_heading_block(ctx, level, raw_heading, html);
             idx += 1;
             continue;
         }
@@ -84,22 +91,20 @@ pub fn render_markdown(input: &str, resolver: &dyn LinkResolver) -> RenderedMark
             idx += 1;
             continue;
         }
-        if looks_like_table(&lines, idx) {
-            idx = render_table_block(&mut ctx, &lines, idx, &mut html);
+        if looks_like_table(lines, idx) {
+            idx = render_table_block(ctx, lines, idx, html);
             continue;
         }
         if trimmed.starts_with('>') {
-            idx = render_blockquote(&mut ctx, &lines, idx, &mut html);
+            idx = render_blockquote(ctx, lines, idx, block_depth, html);
             continue;
         }
         if let Some((ordered, _, _)) = parse_list_item(line) {
-            idx = render_list_block(&mut ctx, &lines, idx, ordered, &mut html);
+            idx = render_list_block(ctx, lines, idx, ordered, block_depth, html);
             continue;
         }
-        idx = render_paragraph_block(&mut ctx, &lines, idx, &mut html);
+        idx = render_paragraph_block(ctx, lines, idx, html);
     }
-
-    RenderedMarkdown { html, headings: ctx.headings, title: ctx.title }
 }
 
 struct RenderCtx<'a> {
@@ -363,7 +368,7 @@ fn render_table_block(ctx: &mut RenderCtx<'_>, lines: &[&str], start: usize, out
     idx
 }
 
-fn render_blockquote(ctx: &mut RenderCtx<'_>, lines: &[&str], start: usize, out: &mut String) -> usize {
+fn render_blockquote(ctx: &mut RenderCtx<'_>, lines: &[&str], start: usize, block_depth: usize, out: &mut String) -> usize {
     let mut idx = start;
     let mut inner_lines = Vec::new();
     while idx < lines.len() {
@@ -376,20 +381,30 @@ fn render_blockquote(ctx: &mut RenderCtx<'_>, lines: &[&str], start: usize, out:
         }
     }
     if let Some((kind, title, body)) = parse_alert_callout(&inner_lines) {
-        let rendered = render_markdown(&body, ctx.resolver);
         out.push_str("<div class=\"callout callout-");
         out.push_str(kind);
         out.push_str("\" role=\"note\">\n<p class=\"callout-title\">");
         out.push_str(title);
         out.push_str("</p>\n");
-        out.push_str(&rendered.html);
+        if block_depth >= MAX_MARKDOWN_DEPTH {
+            out.push_str("<p>");
+            push_html_escaped(&body, out);
+            out.push_str("</p>\n");
+        } else {
+            let body_lines: Vec<&str> = body.lines().collect();
+            render_blocks(ctx, &body_lines, block_depth + 1, out);
+        }
         out.push_str("</div>\n");
         return idx;
     }
-    let joined = inner_lines.join("\n");
-    let rendered = render_markdown(&joined, ctx.resolver);
     out.push_str("<blockquote>\n");
-    out.push_str(&rendered.html);
+    if block_depth >= MAX_MARKDOWN_DEPTH {
+        out.push_str("<p>");
+        push_html_escaped(&inner_lines.join("\n"), out);
+        out.push_str("</p>\n");
+    } else {
+        render_blocks(ctx, &inner_lines, block_depth + 1, out);
+    }
     out.push_str("</blockquote>\n");
     idx
 }
@@ -439,7 +454,7 @@ fn parse_list_item(line: &str) -> Option<(bool, usize, &str)> {
     None
 }
 
-fn render_list_block(ctx: &mut RenderCtx<'_>, lines: &[&str], start: usize, ordered: bool, out: &mut String) -> usize {
+fn render_list_block(ctx: &mut RenderCtx<'_>, lines: &[&str], start: usize, ordered: bool, block_depth: usize, out: &mut String) -> usize {
     let base_indent = lines[start].bytes().take_while(|&b| b == b' ').count();
     let tag = if ordered { "ol" } else { "ul" };
     out.push('<');
@@ -472,12 +487,17 @@ fn render_list_block(ctx: &mut RenderCtx<'_>, lines: &[&str], start: usize, orde
             }
             if let Some((sub_ord, sub_indent, _)) = parse_list_item(line) {
                 if sub_indent > base_indent {
-                    if !item_buf.is_empty() {
-                        render_inline(&item_buf.join(" "), ctx.resolver, false, out);
-                        item_buf.clear();
+                    if block_depth < MAX_MARKDOWN_DEPTH {
+                        if !item_buf.is_empty() {
+                            render_inline(&item_buf.join(" "), ctx.resolver, false, out);
+                            item_buf.clear();
+                        }
+                        out.push('\n');
+                        idx = render_list_block(ctx, lines, idx, sub_ord, block_depth + 1, out);
+                        continue;
                     }
-                    out.push('\n');
-                    idx = render_list_block(ctx, lines, idx, sub_ord, out);
+                    item_buf.push(trimmed);
+                    idx += 1;
                     continue;
                 }
                 break;
@@ -514,15 +534,16 @@ fn render_paragraph_block(ctx: &mut RenderCtx<'_>, lines: &[&str], start: usize,
     let mut idx = start;
     while idx < lines.len() {
         let trimmed = lines[idx].trim();
-        if trimmed.is_empty()
-            || is_html_comment_start(trimmed)
-            || parse_fence_open(trimmed).is_some()
-            || is_display_math_start(lines, idx)
-            || parse_atx_heading(trimmed).is_some()
-            || is_thematic_break(trimmed)
-            || trimmed.starts_with('>')
-            || looks_like_table(lines, idx)
-            || parse_list_item(lines[idx]).is_some()
+        if idx > start
+            && (trimmed.is_empty()
+                || is_html_comment_start(trimmed)
+                || parse_fence_open(trimmed).is_some()
+                || is_display_math_start(lines, idx)
+                || parse_atx_heading(trimmed).is_some()
+                || is_thematic_break(trimmed)
+                || trimmed.starts_with('>')
+                || looks_like_table(lines, idx)
+                || parse_list_item(lines[idx]).is_some())
         {
             break;
         }
@@ -558,7 +579,19 @@ fn render_paragraph_block(ctx: &mut RenderCtx<'_>, lines: &[&str], start: usize,
 }
 
 fn render_inline(text: &str, resolver: &dyn LinkResolver, allow_br: bool, out: &mut String) {
+    render_inline_depth(text, resolver, allow_br, 0, out);
+}
+
+fn render_inline_depth(text: &str, resolver: &dyn LinkResolver, allow_br: bool, depth: usize, out: &mut String) {
+    if depth > MAX_MARKDOWN_DEPTH {
+        push_html_escaped(text, out);
+        return;
+    }
     let bytes = text.as_bytes();
+    let has_link_mid = text.contains("](");
+    // Slots: 0=`**`, 1=`__`, 2=`~~`, 3=`*`, 4=`_`. Once a full scan to EOF fails to find a
+    // matching closer for a delimiter kind, later openers of the same kind cannot close either.
+    let mut delim_exhausted = [false; 5];
     let mut i = 0usize;
     while let Some(rest) = text.get(i..) {
         if rest.is_empty() {
@@ -574,13 +607,19 @@ fn render_inline(text: &str, resolver: &dyn LinkResolver, allow_br: bool, out: &
             i += 2;
             continue;
         }
-        if bytes[i] == b'`'
-            && let Some((code, next_i)) = parse_code_span(rest)
-        {
-            out.push_str("<code>");
-            push_html_escaped(code.trim_matches(' '), out);
-            out.push_str("</code>");
-            i += next_i;
+        if bytes[i] == b'`' {
+            if let Some((code, next_i)) = parse_code_span(rest) {
+                out.push_str("<code>");
+                push_html_escaped(code.trim_matches(' '), out);
+                out.push_str("</code>");
+                i += next_i;
+                continue;
+            }
+            let ticks = rest.bytes().take_while(|&b| b == b'`').count();
+            for _ in 0..ticks {
+                out.push('`');
+            }
+            i += ticks;
             continue;
         }
         if bytes[i] == b'$' {
@@ -601,7 +640,8 @@ fn render_inline(text: &str, resolver: &dyn LinkResolver, allow_br: bool, out: &
                 continue;
             }
         }
-        if let Some(after_bang) = rest.strip_prefix('!')
+        if has_link_mid
+            && let Some(after_bang) = rest.strip_prefix('!')
             && after_bang.starts_with('[')
             && let Some((alt, src, next_i)) = parse_bracket_link(after_bang)
         {
@@ -614,44 +654,60 @@ fn render_inline(text: &str, resolver: &dyn LinkResolver, allow_br: bool, out: &
             i += 1 + next_i;
             continue;
         }
-        if bytes[i] == b'['
+        if has_link_mid
+            && bytes[i] == b'['
             && let Some((label, href, next_i)) = parse_bracket_link(rest)
         {
             let resolved = resolver.resolve_href(href);
             out.push_str("<a href=\"");
             push_html_escaped(&resolved, out);
             out.push_str("\">");
-            render_inline(label, resolver, allow_br, out);
+            render_inline_depth(label, resolver, allow_br, depth + 1, out);
             out.push_str("</a>");
             i += next_i;
             continue;
         }
-        if (rest.starts_with("**") || rest.starts_with("__"))
-            && let Some((inner, next_i)) = parse_delimited_span(rest, 2)
-        {
-            out.push_str("<strong>");
-            render_inline(inner, resolver, allow_br, out);
-            out.push_str("</strong>");
-            i += next_i;
-            continue;
+        if rest.starts_with("**") || rest.starts_with("__") {
+            let slot = if rest.starts_with("**") { 0 } else { 1 };
+            if !delim_exhausted[slot] {
+                if let Some((inner, next_i)) = parse_delimited_span(rest, 2) {
+                    out.push_str("<strong>");
+                    render_inline_depth(inner, resolver, allow_br, depth + 1, out);
+                    out.push_str("</strong>");
+                    i += next_i;
+                    continue;
+                }
+                if rest.get(2..).is_some_and(|r| !r.is_empty() && !r.starts_with(' ')) {
+                    delim_exhausted[slot] = true;
+                }
+            }
         }
-        if rest.starts_with("~~")
-            && let Some((inner, next_i)) = parse_delimited_span(rest, 2)
-        {
-            out.push_str("<del>");
-            render_inline(inner, resolver, allow_br, out);
-            out.push_str("</del>");
-            i += next_i;
-            continue;
+        if rest.starts_with("~~") && !delim_exhausted[2] {
+            if let Some((inner, next_i)) = parse_delimited_span(rest, 2) {
+                out.push_str("<del>");
+                render_inline_depth(inner, resolver, allow_br, depth + 1, out);
+                out.push_str("</del>");
+                i += next_i;
+                continue;
+            }
+            if rest.get(2..).is_some_and(|r| !r.is_empty() && !r.starts_with(' ')) {
+                delim_exhausted[2] = true;
+            }
         }
-        if (bytes[i] == b'*' || (bytes[i] == b'_' && !is_word_boundary_underscore(bytes, i)))
-            && let Some((inner, next_i)) = parse_delimited_span(rest, 1)
-        {
-            out.push_str("<em>");
-            render_inline(inner, resolver, allow_br, out);
-            out.push_str("</em>");
-            i += next_i;
-            continue;
+        if bytes[i] == b'*' || (bytes[i] == b'_' && !is_word_boundary_underscore(bytes, i)) {
+            let slot = if bytes[i] == b'*' { 3 } else { 4 };
+            if !delim_exhausted[slot] {
+                if let Some((inner, next_i)) = parse_delimited_span(rest, 1) {
+                    out.push_str("<em>");
+                    render_inline_depth(inner, resolver, allow_br, depth + 1, out);
+                    out.push_str("</em>");
+                    i += next_i;
+                    continue;
+                }
+                if rest.get(1..).is_some_and(|r| !r.is_empty() && !r.starts_with(' ')) {
+                    delim_exhausted[slot] = true;
+                }
+            }
         }
         let ch = rest.chars().next().unwrap_or(' ');
         push_char_escaped(ch, out);
@@ -682,7 +738,7 @@ fn is_word_boundary_underscore(bytes: &[u8], pos: usize) -> bool {
 fn parse_code_span(slice: &str) -> Option<(&str, usize)> {
     let rest = slice.trim_start_matches('`');
     let ticks = slice.len() - rest.len();
-    if ticks == 0 {
+    if ticks == 0 || ticks > rest.len() {
         return None;
     }
     let needle = "`".repeat(ticks);
@@ -760,6 +816,10 @@ fn parse_delimited_span(slice: &str, width: usize) -> Option<(&str, usize)> {
     if rest.is_empty() || rest.starts_with(' ') {
         return None;
     }
+    let delim_str = std::str::from_utf8(delim).ok()?;
+    if !rest.contains(delim_str) {
+        return None;
+    }
     let mut i = 0usize;
     let bytes = rest.as_bytes();
     while i + width <= bytes.len() {
@@ -772,9 +832,13 @@ fn parse_delimited_span(slice: &str, width: usize) -> Option<(&str, usize)> {
             continue;
         }
         if bytes[i] == b'`'
-            && let Some((_, skip)) = rest.get(i..).and_then(parse_code_span)
+            && let Some(cur) = rest.get(i..)
         {
-            i += skip;
+            if let Some((_, skip)) = parse_code_span(cur) {
+                i += skip;
+            } else {
+                i += cur.bytes().take_while(|&b| b == b'`').count();
+            }
             continue;
         }
         if bytes[i] == b'$'
@@ -807,7 +871,17 @@ fn parse_delimited_span(slice: &str, width: usize) -> Option<(&str, usize)> {
 #[must_use]
 pub fn strip_inline_markdown(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
+    strip_inline_markdown_depth(input, 0, &mut out);
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn strip_inline_markdown_depth(input: &str, depth: usize, out: &mut String) {
+    if depth > MAX_MARKDOWN_DEPTH {
+        out.push_str(input);
+        return;
+    }
     let bytes = input.as_bytes();
+    let has_link_mid = input.contains("](");
     let mut i = 0usize;
     while let Some(rest) = input.get(i..) {
         if rest.is_empty() {
@@ -822,20 +896,21 @@ pub fn strip_inline_markdown(input: &str) -> String {
             if rest.starts_with("$$")
                 && let Some((inner, next_i)) = parse_block_math_inline(rest)
             {
-                render_tex_math_plain(inner.trim(), 0, &mut out);
+                render_tex_math_plain(inner.trim(), 0, out);
                 i += next_i;
                 continue;
             }
             if let Some((inner, next_i)) = parse_inline_math(rest) {
-                render_tex_math_plain(inner, 0, &mut out);
+                render_tex_math_plain(inner, 0, out);
                 i += next_i;
                 continue;
             }
         }
-        if bytes[i] == b'['
+        if has_link_mid
+            && bytes[i] == b'['
             && let Some((label, _, next_i)) = parse_bracket_link(rest)
         {
-            out.push_str(&strip_inline_markdown(label));
+            strip_inline_markdown_depth(label, depth + 1, out);
             i += next_i;
             continue;
         }
@@ -847,7 +922,6 @@ pub fn strip_inline_markdown(input: &str) -> String {
         out.push(ch);
         i += ch.len_utf8();
     }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Render a raw TeX-subset formula into a strict-CSP static `<span class="math">...</span>`.
@@ -864,19 +938,7 @@ pub fn render_math_html(tex: &str) -> String {
 const MAX_MATH_DEPTH: usize = 32;
 
 fn is_display_math_start(lines: &[&str], idx: usize) -> bool {
-    let Some(trimmed) = lines.get(idx).map(|s| s.trim()) else {
-        return false;
-    };
-    let Some(after_open) = trimmed.strip_prefix("$$") else {
-        return false;
-    };
-    if let Some(inner) = after_open.strip_suffix("$$") {
-        return !inner.contains("$$") && !inner.trim().is_empty();
-    }
-    if after_open.contains("$$") {
-        return false;
-    }
-    find_display_math_close(lines, idx + 1).is_some()
+    extract_display_math_block(lines, idx).is_some()
 }
 
 fn find_display_math_close(lines: &[&str], start: usize) -> Option<usize> {
@@ -900,7 +962,7 @@ fn ends_with_escaped_dollars(trimmed: &str) -> bool {
     backslashes % 2 == 1
 }
 
-fn try_render_math_block(lines: &[&str], idx: usize, out: &mut String) -> Option<usize> {
+fn extract_display_math_block(lines: &[&str], idx: usize) -> Option<(String, usize)> {
     let trimmed = lines.get(idx)?.trim();
     let after_open = trimmed.strip_prefix("$$")?;
     if let Some(inner) = after_open.strip_suffix("$$") {
@@ -908,10 +970,7 @@ fn try_render_math_block(lines: &[&str], idx: usize, out: &mut String) -> Option
         if inner.contains("$$") || clean.is_empty() {
             return None;
         }
-        out.push_str("<div class=\"math-block\"><span class=\"math\">");
-        render_tex_math_inner(clean, 0, out);
-        out.push_str("</span></div>\n");
-        return Some(idx + 1);
+        return Some((clean.to_owned(), idx + 1));
     }
     if after_open.contains("$$") {
         return None;
@@ -936,13 +995,19 @@ fn try_render_math_block(lines: &[&str], idx: usize, out: &mut String) -> Option
         }
     }
     let joined = parts.join(" ");
-    if joined.trim().is_empty() {
+    let clean = joined.trim();
+    if clean.is_empty() {
         return None;
     }
+    Some((clean.to_owned(), close_idx + 1))
+}
+
+fn try_render_math_block(lines: &[&str], idx: usize, out: &mut String) -> Option<usize> {
+    let (clean, next_idx) = extract_display_math_block(lines, idx)?;
     out.push_str("<div class=\"math-block\"><span class=\"math\">");
-    render_tex_math_inner(joined.trim(), 0, out);
+    render_tex_math_inner(&clean, 0, out);
     out.push_str("</span></div>\n");
-    Some(close_idx + 1)
+    Some(next_idx)
 }
 
 fn parse_block_math_inline(rest: &str) -> Option<(&str, usize)> {
@@ -965,6 +1030,9 @@ fn parse_block_math_inline(rest: &str) -> Option<(&str, usize)> {
         }
         if ch == '{' {
             brace_depth = brace_depth.saturating_add(1);
+            if brace_depth > MAX_MATH_DEPTH {
+                return None;
+            }
         } else if ch == '}' {
             if brace_depth == 0 {
                 return None;
@@ -1008,6 +1076,9 @@ fn parse_inline_math(rest: &str) -> Option<(&str, usize)> {
         }
         if ch == '{' {
             brace_depth = brace_depth.saturating_add(1);
+            if brace_depth > MAX_MATH_DEPTH {
+                return None;
+            }
         } else if ch == '}' {
             if brace_depth == 0 {
                 return None;
@@ -1063,7 +1134,7 @@ fn render_tex_math_inner(tex: &str, depth: usize, out: &mut String) {
         if ch == '_' || ch == '^' {
             let tag = if ch == '_' { "sub" } else { "sup" };
             let after = rest.get(1..).unwrap_or("");
-            if let Some((arg, consumed)) = extract_math_arg(after) {
+            if let Some((arg, consumed)) = extract_math_arg(after, depth) {
                 out.push('<');
                 out.push_str(tag);
                 out.push('>');
@@ -1106,7 +1177,7 @@ fn render_tex_command(rest: &str, depth: usize, out: &mut String) -> usize {
     let tail = after.get(name_len..).unwrap_or("");
 
     if matches!(name, "frac" | "dfrac" | "tfrac")
-        && let Some((num, den, consumed)) = extract_two_math_args(tail)
+        && let Some((num, den, consumed)) = extract_two_math_args(tail, depth)
     {
         out.push_str("<span class=\"math-frac\"><span class=\"math-num\">");
         render_tex_math_inner(num.trim(), depth + 1, out);
@@ -1116,7 +1187,7 @@ fn render_tex_command(rest: &str, depth: usize, out: &mut String) -> usize {
         return 1 + name_len + consumed;
     }
     if name == "binom"
-        && let Some((num, den, consumed)) = extract_two_math_args(tail)
+        && let Some((num, den, consumed)) = extract_two_math_args(tail, depth)
     {
         out.push('(');
         render_tex_math_inner(num.trim(), depth + 1, out);
@@ -1126,7 +1197,7 @@ fn render_tex_command(rest: &str, depth: usize, out: &mut String) -> usize {
         return 1 + name_len + consumed;
     }
     if name == "sqrt"
-        && let Some((deg, rad, consumed)) = extract_sqrt_args(tail)
+        && let Some((deg, rad, consumed)) = extract_sqrt_args(tail, depth)
     {
         if let Some(d) = deg {
             out.push_str("<sup>");
@@ -1155,7 +1226,7 @@ fn render_tex_command(rest: &str, depth: usize, out: &mut String) -> usize {
         return 1 + name_len + consumed;
     }
     if matches!(name, "bar" | "overline" | "hat" | "widehat" | "tilde" | "widetilde")
-        && let Some((arg, consumed)) = extract_math_arg(tail)
+        && let Some((arg, consumed)) = extract_math_arg(tail, depth)
     {
         let accent = match name {
             "bar" | "overline" => '\u{0304}',
@@ -1293,7 +1364,7 @@ fn render_tex_math_plain(tex: &str, depth: usize, out: &mut String) {
         }
         if ch == '_' || ch == '^' {
             let after = rest.get(1..).unwrap_or("");
-            if let Some((arg, consumed)) = extract_math_arg(after) {
+            if let Some((arg, consumed)) = extract_math_arg(after, depth) {
                 render_tex_math_plain(arg, depth + 1, out);
                 i += 1 + consumed;
                 continue;
@@ -1318,7 +1389,7 @@ fn render_tex_math_plain(tex: &str, depth: usize, out: &mut String) {
             let name = after.get(..nlen).unwrap_or("");
             let tail = after.get(nlen..).unwrap_or("");
             if matches!(name, "frac" | "dfrac" | "tfrac")
-                && let Some((num, den, consumed)) = extract_two_math_args(tail)
+                && let Some((num, den, consumed)) = extract_two_math_args(tail, depth)
             {
                 render_tex_math_plain(num.trim(), depth + 1, out);
                 out.push('/');
@@ -1327,7 +1398,7 @@ fn render_tex_math_plain(tex: &str, depth: usize, out: &mut String) {
                 continue;
             }
             if name == "sqrt"
-                && let Some((_, rad, consumed)) = extract_sqrt_args(tail)
+                && let Some((_, rad, consumed)) = extract_sqrt_args(tail, depth)
             {
                 out.push('\u{221A}');
                 render_tex_math_plain(rad.trim(), depth + 1, out);
@@ -1341,8 +1412,8 @@ fn render_tex_math_plain(tex: &str, depth: usize, out: &mut String) {
                 i += 1 + nlen + consumed;
                 continue;
             }
-            if matches!(name, "bar" | "hat" | "tilde")
-                && let Some((arg, consumed)) = extract_math_arg(tail)
+            if matches!(name, "bar" | "overline" | "hat" | "widehat" | "tilde" | "widetilde")
+                && let Some((arg, consumed)) = extract_math_arg(tail, depth)
             {
                 render_tex_math_plain(arg.trim(), depth + 1, out);
                 i += 1 + nlen + consumed;
@@ -1413,7 +1484,10 @@ fn extract_braced_opt_ws(s: &str) -> Option<(&str, usize)> {
     Some((inner, ws + consumed))
 }
 
-fn extract_math_arg(s: &str) -> Option<(&str, usize)> {
+fn extract_math_arg(s: &str, depth: usize) -> Option<(&str, usize)> {
+    if depth > MAX_MATH_DEPTH {
+        return None;
+    }
     let trimmed = s.trim_start_matches([' ', '\t']);
     let ws = s.len() - trimmed.len();
     if trimmed.starts_with('{') {
@@ -1428,21 +1502,18 @@ fn extract_math_arg(s: &str) -> Option<(&str, usize)> {
         if nlen > 0 {
             let name = after.get(..nlen).unwrap_or("");
             let tail = after.get(nlen..).unwrap_or("");
-            if matches!(name, "text" | "mathrm" | "textrm" | "operatorname" | "textbf" | "mathbf" | "textit" | "mathit" | "mbox")
-                && let Some((_, arg_len)) = extract_braced_opt_ws(tail)
-            {
+            if matches!(name, "text" | "mathrm" | "textrm" | "operatorname" | "textbf" | "mathbf" | "textit" | "mathit" | "mbox") {
+                if let Some((_, arg_len)) = extract_braced_opt_ws(tail) {
+                    end += arg_len;
+                }
+            } else if matches!(name, "bar" | "overline" | "hat" | "widehat" | "tilde" | "widetilde") {
+                let (_, arg_len) = extract_math_arg(tail, depth + 1)?;
                 end += arg_len;
-            } else if matches!(name, "bar" | "hat" | "tilde")
-                && let Some((_, arg_len)) = extract_math_arg(tail)
-            {
+            } else if name == "sqrt" {
+                let (_, _, arg_len) = extract_sqrt_args(tail, depth + 1)?;
                 end += arg_len;
-            } else if name == "sqrt"
-                && let Some((_, _, arg_len)) = extract_sqrt_args(tail)
-            {
-                end += arg_len;
-            } else if matches!(name, "frac" | "dfrac" | "tfrac" | "binom")
-                && let Some((_, _, arg_len)) = extract_two_math_args(tail)
-            {
+            } else if matches!(name, "frac" | "dfrac" | "tfrac" | "binom") {
+                let (_, _, arg_len) = extract_two_math_args(tail, depth + 1)?;
                 end += arg_len;
             }
         }
@@ -1451,32 +1522,43 @@ fn extract_math_arg(s: &str) -> Option<(&str, usize)> {
     Some((trimmed.get(..ch.len_utf8())?, ws + ch.len_utf8()))
 }
 
-fn extract_two_math_args(s: &str) -> Option<(&str, &str, usize)> {
-    let (a, ca) = extract_math_arg(s)?;
-    let (b, cb) = extract_math_arg(s.get(ca..)?)?;
+fn extract_two_math_args(s: &str, depth: usize) -> Option<(&str, &str, usize)> {
+    if depth > MAX_MATH_DEPTH {
+        return None;
+    }
+    let (a, ca) = extract_math_arg(s, depth + 1)?;
+    let (b, cb) = extract_math_arg(s.get(ca..)?, depth + 1)?;
     Some((a, b, ca + cb))
 }
 
-fn extract_sqrt_args(s: &str) -> Option<(Option<&str>, &str, usize)> {
+fn extract_sqrt_args(s: &str, depth: usize) -> Option<(Option<&str>, &str, usize)> {
+    if depth > MAX_MATH_DEPTH {
+        return None;
+    }
     let trimmed = s.trim_start_matches([' ', '\t']);
     let ws = s.len() - trimmed.len();
     if let Some(after_bracket) = trimmed.strip_prefix('[') {
-        let mut depth = 0usize;
+        let mut brace_depth = 0usize;
         for (idx, ch) in after_bracket.char_indices() {
             match ch {
-                '{' => depth = depth.saturating_add(1),
-                '}' => depth = depth.saturating_sub(1),
-                ']' if depth == 0 => {
+                '{' => {
+                    brace_depth = brace_depth.saturating_add(1);
+                    if brace_depth > MAX_MATH_DEPTH {
+                        return None;
+                    }
+                }
+                '}' => brace_depth = brace_depth.saturating_sub(1),
+                ']' if brace_depth == 0 => {
                     let deg = after_bracket.get(..idx)?;
                     let rest = after_bracket.get(idx + 1..)?;
-                    let (rad, rad_len) = extract_math_arg(rest)?;
+                    let (rad, rad_len) = extract_math_arg(rest, depth + 1)?;
                     return Some((Some(deg), rad, ws + 1 + idx + 1 + rad_len));
                 }
                 _ => {}
             }
         }
     }
-    let (rad, rad_len) = extract_math_arg(s)?;
+    let (rad, rad_len) = extract_math_arg(s, depth + 1)?;
     Some((None, rad, rad_len))
 }
 

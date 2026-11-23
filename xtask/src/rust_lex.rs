@@ -491,25 +491,136 @@ pub(crate) fn skip_following_attrs(bytes: &[u8], mut pos: usize) -> usize {
     }
 }
 
-/// Find the end byte offset of a Rust item (either matching `{ ... }` block or `;`) in
-/// comment/literal-blanked source bytes.
+fn read_ident_at(bytes: &[u8], start: usize) -> Option<(&[u8], usize)> {
+    let first = *bytes.get(start)?;
+    if !(first.is_ascii_alphabetic() || first == b'_') {
+        return None;
+    }
+    let mut end = start + 1;
+    while end < bytes.len() && is_ident_byte(bytes[end]) {
+        end += 1;
+    }
+    Some((&bytes[start..end], end))
+}
+
+fn skip_ws(bytes: &[u8], mut pos: usize) -> usize {
+    while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+        pos += 1;
+    }
+    pos
+}
+
+fn starts_with_rust_item_head(bytes: &[u8], mut pos: usize) -> bool {
+    let mut saw_pub = false;
+    loop {
+        pos = skip_ws(bytes, pos);
+        let Some((word, after)) = read_ident_at(bytes, pos) else {
+            return false;
+        };
+        match word {
+            b"pub" if !saw_pub => {
+                saw_pub = true;
+                pos = skip_ws(bytes, after);
+                if bytes.get(pos) == Some(&b'(') {
+                    let mut depth = 1usize;
+                    pos += 1;
+                    while pos < bytes.len() && depth > 0 {
+                        match bytes[pos] {
+                            b'(' => depth += 1,
+                            b')' => depth -= 1,
+                            _ => {}
+                        }
+                        pos += 1;
+                    }
+                }
+            }
+            b"default" | b"async" | b"unsafe" => {
+                pos = after;
+            }
+            b"extern" | b"fn" | b"struct" | b"enum" | b"trait" | b"impl" | b"mod" | b"type" | b"static" | b"const" | b"use" => {
+                return true;
+            }
+            b"macro_rules" => {
+                pos = skip_ws(bytes, after);
+                return bytes.get(pos) == Some(&b'!');
+            }
+            b"union" => {
+                pos = skip_ws(bytes, after);
+                return read_ident_at(bytes, pos).is_some();
+            }
+            _ => return false,
+        }
+    }
+}
+
+/// Find the end byte offset of a Rust item, field, variant, match arm, parameter, or trailing
+/// expression in comment/literal-blanked source bytes.
 #[must_use]
 pub(crate) fn find_item_end(bytes: &[u8], mut pos: usize) -> usize {
+    let is_item_decl = starts_with_rust_item_head(bytes, pos);
     let mut brace_depth = 0usize;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut angle_depth = 0usize;
     let mut saw_brace = false;
     while pos < bytes.len() {
         match bytes[pos] {
             b'{' => {
+                if paren_depth == 0 && bracket_depth == 0 {
+                    saw_brace = true;
+                }
                 brace_depth += 1;
-                saw_brace = true;
             }
-            b'}' if saw_brace => {
-                brace_depth = brace_depth.saturating_sub(1);
-                if brace_depth == 0 {
-                    return pos + 1;
+            b'}' => {
+                if brace_depth > 0 {
+                    brace_depth -= 1;
+                    if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 && saw_brace {
+                        return pos + 1;
+                    }
+                } else if paren_depth == 0 && bracket_depth == 0 && !saw_brace {
+                    return pos;
                 }
             }
-            b';' if !saw_brace => return pos + 1,
+            b'(' => paren_depth += 1,
+            b')' => {
+                if paren_depth > 0 {
+                    paren_depth -= 1;
+                } else if brace_depth == 0 && bracket_depth == 0 && !saw_brace {
+                    return pos;
+                }
+            }
+            b'[' => bracket_depth += 1,
+            b']' => {
+                if bracket_depth > 0 {
+                    bracket_depth -= 1;
+                } else if brace_depth == 0 && paren_depth == 0 && !saw_brace {
+                    return pos;
+                }
+            }
+            b'<' if !is_item_decl
+                && brace_depth == 0
+                && paren_depth == 0
+                && bracket_depth == 0
+                && !saw_brace
+                && pos > 0
+                && (is_ident_byte(bytes[pos - 1]) || bytes[pos - 1] == b':')
+                && !matches!(bytes.get(pos + 1), Some(b'=' | b'<')) =>
+            {
+                angle_depth += 1;
+            }
+            b'>' if angle_depth > 0 && brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 => {
+                if pos > 0 && bytes[pos - 1] == b'=' {
+                    angle_depth = 0;
+                } else if pos == 0 || bytes[pos - 1] != b'-' {
+                    angle_depth -= 1;
+                }
+            }
+            b';' if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 && !saw_brace => {
+                return pos + 1;
+            }
+            b',' if !is_item_decl && brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 && angle_depth == 0 && !saw_brace => {
+                return pos + 1;
+            }
             _ => {}
         }
         pos += 1;
@@ -693,8 +804,8 @@ impl<'a> RustLexer<'a> {
             }
             self.advance_one(); // '\n'
             while let Some(ws) = self.peek() {
-                if ws == b' ' || ws == b'\t' {
-                    self.pos += 1;
+                if matches!(ws, b' ' | b'\t' | b'\r' | b'\n') {
+                    self.advance_one();
                 } else {
                     break;
                 }
@@ -807,5 +918,91 @@ mod tests {
         }
         assert_eq!(comments, vec![(1, " c1")]);
         assert_eq!(lits, vec![String::from("a\nA"), String::from("hi")]);
+    }
+
+    #[test]
+    fn da_03_01_find_item_end_respects_array_semicolon_and_comma_and_closing_delims() {
+        let src = "\
+#[cfg(test)]
+fn test_arr() -> [u8; 4] { let _ = secret_arr(); [0; 4] }
+pub fn prod_after_arr() {}
+
+#[cfg(test)]
+const TEST_CONST: [u8; 4] = [1, 2, 3, 4];
+pub fn prod_after_const() {}
+
+#[cfg(test)]
+pub(crate) fn test_generic<A, B>(a: A) -> Result<A, B> where A: Copy, B: Clone { secret_gen(); }
+pub fn prod_after_generic() {}
+
+struct S {
+    #[cfg(test)]
+    test_field: Result<u8, u16>,
+    pub prod_field: u32,
+}
+
+struct S2 {
+    pub a: u32,
+    #[cfg(test)]
+    last_test_field: [u8; 2]
+}
+pub fn prod_after_struct() {}
+
+enum E {
+    #[cfg(test)]
+    TestVar(u8, u16),
+    ProdVar,
+}
+
+fn with_param(#[cfg(test)] test_param: i32) { prod_body(); }
+
+fn with_match(x: u8) {
+    match x {
+        #[cfg(test)]
+        0 => test_arm(),
+        _ => prod_arm(),
+    }
+}
+
+fn with_tail() -> i32 {
+    #[cfg(test)]
+    test_tail_expr
+}
+pub fn prod_after_tail() {}
+";
+        let stripped = strip_non_prod_rust(src);
+        for masked in
+            ["secret_arr", "TEST_CONST", "secret_gen", "test_field", "last_test_field", "TestVar", "test_param", "test_arm", "test_tail_expr"]
+        {
+            assert!(!stripped.contains(masked), "expected `{masked}` to be masked:\n{stripped}");
+        }
+        for kept in [
+            "prod_after_arr",
+            "prod_after_const",
+            "prod_after_generic",
+            "prod_field",
+            "prod_after_struct",
+            "ProdVar",
+            "prod_body",
+            "prod_arm",
+            "prod_after_tail",
+        ] {
+            assert!(stripped.contains(kept), "expected production symbol `{kept}` to remain:\n{stripped}");
+        }
+    }
+
+    #[test]
+    fn da_03_06_string_line_continuation_skips_blank_lines_and_tracks_line_numbers() {
+        let src = "let a = \"Foo\\\n\n   \r\n\tBar\";\nlet b = \"Next\";\n";
+        let mut lex = RustLexer::new(src);
+        let mut lits = Vec::new();
+        while !lex.is_eof() {
+            if let Some(lit) = lex.try_read_quoted_string() {
+                lits.push((lit.start_line, lit.end_line, lit.text));
+            } else {
+                lex.advance_one();
+            }
+        }
+        assert_eq!(lits, vec![(1, 4, String::from("FooBar")), (5, 5, String::from("Next"))]);
     }
 }
