@@ -906,6 +906,10 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         canonical_param_keys: &[
             "deming_model_ii",
             "force_through_origin",
+            "fixed_point",
+            "standard_addition",
+            "extend_line_to_x_intercept",
+            "deming_error",
             "confidence_bands",
             "prediction_bands",
             "interpolate_unknowns",

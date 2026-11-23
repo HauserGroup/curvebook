@@ -1219,12 +1219,24 @@ fn describe_linear_regression(s: &LinearRegressionSpec) -> Vec<ReportBlock> {
         format!(" The fit included observations within X bounds [{}, {}].", opt_bound_str(lo), opt_bound_str(hi))
     });
     if s.deming_model_ii {
+        let error_desc = match s.deming_error {
+            curvebook_doc::DemingErrorSpec::EqualError => String::from("assuming equal X and Y error variances (lambda = 1)"),
+            curvebook_doc::DemingErrorSpec::StandardDeviations { sd_x, sd_y } => {
+                format!("with specified error SDs (SD_X = {sd_x}, SD_Y = {sd_y})")
+            }
+            curvebook_doc::DemingErrorSpec::VarianceRatio { lambda } => {
+                format!("with error variance ratio lambda = {lambda}")
+            }
+        };
         return vec![ReportBlock::Paragraph(vec![plain(format!(
-            "Model II Deming orthogonal linear regression was fitted to account for measurement error in both X and Y variables, with standard errors and confidence intervals computed by leave-one-out jackknife resampling.{range}"
+            "Model II Deming linear regression was fitted {error_desc} to account for measurement error in both X and Y variables, with standard errors and confidence intervals computed by leave-one-out jackknife resampling.{range}"
         ))])];
     }
-    let origin =
-        if s.force_through_origin { "constrained through the origin (Y = Slope * X)" } else { "with free Y-intercept (Y = Slope * X + YIntercept)" };
+    let constraint = match s.effective_fixed_point() {
+        Some((0.0, 0.0)) => String::from("constrained through the origin (Y = Slope * X)"),
+        Some((x0, y0)) => format!("constrained through fixed point ({x0}, {y0}) (Y - {y0} = Slope * (X - {x0}))"),
+        None => String::from("with free Y-intercept (Y = Slope * X + YIntercept)"),
+    };
     let mut extras = Vec::new();
     if s.confidence_bands {
         extras.push("confidence bands");
@@ -1235,9 +1247,15 @@ fn describe_linear_regression(s: &LinearRegressionSpec) -> Vec<ReportBlock> {
     if s.interpolate_unknowns {
         extras.push("standard-curve inverse/forward unknown interpolation");
     }
+    if s.standard_addition {
+        extras.push("standard-addition unknown concentration (-X-intercept) with Fieller CI");
+    }
+    if s.extend_line_to_x_intercept {
+        extras.push("fitted line extended to X-intercept");
+    }
     let extra_str = if extras.is_empty() { String::new() } else { format!(" Enabled outputs: {}.", extras.join(", ")) };
     vec![ReportBlock::Paragraph(vec![plain(format!(
-        "Ordinary least-squares simple linear regression was fitted {origin}, including a runs test for departure from linearity and ANCOVA comparison of slopes and intercepts when multiple datasets are present.{extra_str}{range}"
+        "Ordinary least-squares simple linear regression was fitted {constraint}, including a runs test for departure from linearity and ANCOVA comparison of slopes and intercepts when multiple datasets are present.{extra_str}{range}"
     ))])]
 }
 
