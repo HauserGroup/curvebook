@@ -11,7 +11,10 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use curvebook_engine::cmd;
-use curvebook_format::{CURRENT_PREFERENCES_VERSION, CsvOptions, PreferencesFile, export_datasheet_to_csv, parse_preferences_json};
+use curvebook_format::{
+    CURRENT_PREFERENCES_VERSION, CsvOptions, MAX_ARCHIVE_FILE_BYTES, MAX_ZIP_ENTRIES, PreferencesFile, export_datasheet_to_csv,
+    parse_preferences_json,
+};
 use curvebook_ui_egui::serde_json::{self, Map, Value, json};
 use curvebook_ui_egui::{
     ActiveDialog, CanvasPreviewFilter, ClipboardBundle, KeyModifiers, PointerButton, PrintJobSpec, UiApp, UiEventOutcome, UiInputEvent,
@@ -985,6 +988,12 @@ impl FileSystemAccessBridge {
     /// # Errors
     /// Returns [`WebAdapterError::Workspace`] if decoding fails.
     pub fn import_file_bytes(&mut self, host: &mut WebWorkspaceHost, file_name: &str, bytes: &[u8]) -> Result<WorkspaceSummary, WebAdapterError> {
+        if bytes.len() > MAX_ARCHIVE_FILE_BYTES {
+            return Err(WebAdapterError::Validation(format!(
+                "file `{file_name}` exceeds maximum allowed size ({} > {MAX_ARCHIVE_FILE_BYTES} bytes)",
+                bytes.len()
+            )));
+        }
         let summary = host.open_bytes_for_name(file_name, bytes).map_err(WebAdapterError::Workspace)?;
         self.reset_directory_sync();
         Ok(summary)
@@ -1005,6 +1014,7 @@ impl FileSystemAccessBridge {
         if entries.is_empty() {
             return Err(WebAdapterError::Validation(String::from("directory tree must contain at least document.json")));
         }
+        validate_byte_batch_budget(entries.len(), entries.values().map(Vec::len), "directory entries")?;
         let normalized = normalize_directory_entries(root, entries)?;
         self.import_normalized_directory_tree(host, root, normalized)
     }
@@ -1015,6 +1025,7 @@ impl FileSystemAccessBridge {
         root: &str,
         normalized: BTreeMap<String, Vec<u8>>,
     ) -> Result<WorkspaceSummary, WebAdapterError> {
+        validate_byte_batch_budget(normalized.len(), normalized.values().map(Vec::len), "normalized directory entries")?;
         let summary =
             host.load_virtual_folder_entries(root, normalized.iter().map(|(k, v)| (k.clone(), v.clone()))).map_err(WebAdapterError::Workspace)?;
         self.last_synced_root = Some(root.to_owned());
@@ -1033,6 +1044,7 @@ impl FileSystemAccessBridge {
         if files.is_empty() {
             return Err(WebAdapterError::Validation(String::from("no dropped files supplied")));
         }
+        validate_byte_batch_budget(files.len(), files.iter().map(|(_, bytes)| bytes.len()), "dropped files")?;
         if files.len() == 1 && !looks_like_directory_entry(&files[0].0) {
             let (name, bytes) = &files[0];
             return self.import_file_bytes(host, name, bytes);
@@ -1053,7 +1065,7 @@ impl FileSystemAccessBridge {
             )));
         }
         let root_name = detected_root.unwrap_or_else(|| String::from("dropped.curvebook.d"));
-        self.import_directory_tree(host, &root_name, tree)
+        self.import_normalized_directory_tree(host, &root_name, tree)
     }
 
     /// Export the active workspace as a `.curvebook` archive byte buffer.
@@ -1319,12 +1331,22 @@ fn export_figure_artifact(
     };
 
     let payload = host.execute_command(cmd_id, params).map_err(WebAdapterError::Workspace)?;
-    let inner = payload.get("payload").unwrap_or(&payload);
+    build_figure_artifact_from_payload(format, cmd_id, target_id.as_str(), &payload, project_stem)
+}
+
+fn build_figure_artifact_from_payload(
+    format: WebExportFormat,
+    cmd_id: &str,
+    target_id: &str,
+    payload: &Value,
+    project_stem: &str,
+) -> Result<WebExportArtifact, WebAdapterError> {
+    let inner = payload.get("payload").unwrap_or(payload);
     let bytes = match format {
         WebExportFormat::Svg => inner
             .get("svg")
             .and_then(Value::as_str)
-            .ok_or_else(|| WebAdapterError::Workspace(String::from("export.svg missing `svg` payload")))?
+            .ok_or_else(|| WebAdapterError::Workspace(format!("{cmd_id} missing `svg` payload")))?
             .as_bytes()
             .to_vec(),
         WebExportFormat::Pdf | WebExportFormat::Png | WebExportFormat::Tiff => {
@@ -1339,7 +1361,7 @@ fn export_figure_artifact(
 
     Ok(WebExportArtifact {
         format,
-        file_name: format!("{project_stem}-{}.{}", sanitize_download_stem(target_id.as_str()), format.extension()),
+        file_name: format!("{project_stem}-{}.{}", sanitize_download_stem(target_id), format.extension()),
         mime_type: String::from(format.mime_type()),
         extension: String::from(format.extension()),
         bytes,
@@ -1717,6 +1739,7 @@ pub enum WebBridgeEvent {
     PasteClipboard { text: String },
     ExportFile { format: WebExportFormat, sheet_id: Option<String>, dpi: u16 },
     HydrateLocalStorage { entries: Vec<(String, String)> },
+    HydrateLocalStorageAt { entries: Vec<(String, String)>, now_ms: u64 },
     ClickChromeNode { node_id: String, button: PointerButton, modifiers: KeyModifiers },
     ConfirmDirectorySync { root_name: String, written_paths: Vec<String>, removed_paths: Vec<String>, succeeded: bool, error: Option<String> },
     ConfirmLocalStorage { writes: Vec<String>, removals: Vec<String>, succeeded: bool },
@@ -1832,6 +1855,11 @@ impl WebBridgeEvent {
             Self::HydrateLocalStorage { entries } => json!({
                 "kind": "hydrate_local_storage",
                 "entries": entries.iter().map(|(k, v)| json!({ "key": k, "value": v })).collect::<Vec<_>>(),
+            }),
+            Self::HydrateLocalStorageAt { entries, now_ms } => json!({
+                "kind": "hydrate_local_storage",
+                "entries": entries.iter().map(|(k, v)| json!({ "key": k, "value": v })).collect::<Vec<_>>(),
+                "now_ms": now_ms,
             }),
             Self::ClickChromeNode { node_id, button, modifiers } => json!({
                 "kind": "click_chrome_node",
@@ -1988,7 +2016,15 @@ fn decode_extended_bridge_event(kind: &str, obj: &Map<String, Value>) -> Result<
                 dpi: parse_optional_validated_dpi(obj, "dpi", 300)?,
             })
         }
-        "hydrate_local_storage" => Ok(WebBridgeEvent::HydrateLocalStorage { entries: parse_string_pairs(obj, "entries")? }),
+        "hydrate_local_storage" => {
+            let entries = parse_string_pairs(obj, "entries")?;
+            if let Some(raw_now) = obj.get("now_ms").filter(|v| !v.is_null()) {
+                let now_ms = raw_now.as_u64().ok_or_else(|| WebAdapterError::Serialization(String::from("`now_ms` must be an unsigned integer")))?;
+                Ok(WebBridgeEvent::HydrateLocalStorageAt { entries, now_ms })
+            } else {
+                Ok(WebBridgeEvent::HydrateLocalStorage { entries })
+            }
+        }
         "click_chrome_node" => Ok(WebBridgeEvent::ClickChromeNode {
             node_id: require_str_field(obj, "node_id")?.to_owned(),
             button: parse_pointer_button(obj.get("button")),
@@ -2609,8 +2645,15 @@ impl WebBridgeSession {
     /// Parse raw JSON [`WebBridgeEvent`], execute it, and return serialized JSON command array.
     ///
     /// # Errors
-    /// Returns [`WebAdapterError`] if parsing fails or dispatch returns an error.
+    /// Returns [`WebAdapterError`] if raw JSON exceeds safety caps, parsing fails, or dispatch errors.
     pub fn handle_event_json(&mut self, raw_event_json: &str) -> Result<String, WebAdapterError> {
+        let max_event_json_bytes = MAX_ARCHIVE_FILE_BYTES.saturating_mul(2);
+        if raw_event_json.len() > max_event_json_bytes {
+            return Err(WebAdapterError::Validation(format!(
+                "bridge event JSON payload exceeds maximum allowed size ({} > {max_event_json_bytes} bytes)",
+                raw_event_json.len()
+            )));
+        }
         let event = WebBridgeEvent::from_json_str(raw_event_json)?;
         let commands = self.handle_event(event)?;
         Self::commands_to_json_string(&commands)
@@ -2777,7 +2820,8 @@ impl WebBridgeSession {
                     format: art.format,
                 }])
             }
-            WebBridgeEvent::HydrateLocalStorage { entries } => self.handle_hydrate_local_storage(entries),
+            WebBridgeEvent::HydrateLocalStorage { entries } => self.handle_hydrate_local_storage(entries, current_epoch_ms()),
+            WebBridgeEvent::HydrateLocalStorageAt { entries, now_ms } => self.handle_hydrate_local_storage(entries, now_ms),
             WebBridgeEvent::ClickChromeNode { node_id, button, modifiers } => self.handle_click_chrome_node(&node_id, button, modifiers),
             WebBridgeEvent::ConfirmDirectorySync { root_name, written_paths, removed_paths, succeeded, error } => {
                 self.handle_confirm_directory_sync(&root_name, &written_paths, &removed_paths, succeeded, error)
@@ -2853,7 +2897,7 @@ impl WebBridgeSession {
     fn finish_chrome_dispatch(&mut self, dispatch: WebChromeDispatch) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
         match dispatch {
             WebChromeDispatch::PassToWorkspace(ev) => {
-                if ui_input_requires_write_lock(&ev) {
+                if ui_input_requires_write_lock(&ev) && !matches!(self.host.app().canvas_dialogs.active_dialog, ActiveDialog::CommandPalette) {
                     self.require_write_lock(ui_input_label(&ev))?;
                 }
                 let cmds = self.dispatch_single_ui_input(ev)?;
@@ -2965,7 +3009,14 @@ impl WebBridgeSession {
                         let hits = app.canvas_dialogs.command_palette.matches_for_session(app.session());
                         hits.get(app.canvas_dialogs.command_palette.selected_index).or_else(|| hits.first()).map(|h| h.id.to_owned())
                     };
-                    self.host.app_mut().canvas_dialogs.close_dialog();
+                    {
+                        let app = self.host.app_mut();
+                        app.canvas_dialogs.close_dialog();
+                        app.focus_widget_id = None;
+                        app.interaction.text_field_buffers.remove("palette.query");
+                        curvebook_ui_egui::interaction::clear_modal_text_buffers(app);
+                    }
+                    self.chrome.focused_node_id = None;
                     if let Some(cmd_id) = palette_hit {
                         return self.execute_chrome_command_or_dispatch(&cmd_id, json!({}));
                     }
@@ -2984,18 +3035,30 @@ impl WebBridgeSession {
                         curvebook_ui_egui::dialogs_canvas::ExportFigureFormat::Png => WebExportFormat::Png,
                         curvebook_ui_egui::dialogs_canvas::ExportFigureFormat::Tiff(_) => WebExportFormat::Tiff,
                     };
-                    Some((sheet_id.clone(), fmt, st.dpi.clamp(72, 1200)))
+                    Some((sheet_id.clone(), fmt))
                 } else {
                     None
                 };
                 match commit_active_modal_dialog(self.host.app_mut()) {
                     Ok(out) => {
+                        self.chrome.sync_from_app(self.host.app());
+                        let export_payload = out.command_result.clone();
                         let mut cmds = vec![self.render_frame_command(self.render_dpi, Some(out.action), out.command_result)?];
                         if was_print_dialog && let Ok(print_cmd) = self.build_print_command(None, print_scale) {
                             cmds.push(print_cmd);
                         }
-                        if let Some((export_sid, web_fmt, export_dpi)) = export_info {
-                            let art = self.fs.export_bytes(&mut self.host, web_fmt, Some(export_sid.as_str()), export_dpi)?;
+                        if let Some((export_sid, web_fmt)) = export_info
+                            && let Some(ref payload_val) = export_payload
+                        {
+                            let stem = sanitize_download_stem(&self.host.app().document().title);
+                            let cmd_id = match web_fmt {
+                                WebExportFormat::Svg => "graph.exportSvg",
+                                WebExportFormat::Pdf => "graph.exportPdf",
+                                WebExportFormat::Png => "graph.exportPng",
+                                WebExportFormat::Tiff => "graph.exportTiff",
+                                _ => "graph.export",
+                            };
+                            let art = build_figure_artifact_from_payload(web_fmt, cmd_id, export_sid.as_str(), payload_val, &stem)?;
                             cmds.push(WebBridgeCommand::SaveOrDownloadFile {
                                 file_name: art.file_name,
                                 mime_type: art.mime_type,
@@ -3015,21 +3078,72 @@ impl WebBridgeSession {
                 let norm = if key.starts_with("menu.") { key.clone() } else { format!("menu.{key}") };
                 let next = if self.chrome.open_menu_key.as_deref() == Some(norm.as_str()) { None } else { Some(norm) };
                 self.chrome.open_menu_key.clone_from(&next);
+                self.chrome.popup_scroll_y = 0;
                 self.host.app_mut().interaction.open_menu = next;
                 Ok(vec![self.render_frame_command(self.render_dpi, Some(format!("chrome.menu:{key}")), None)?])
             }
+            WebChromeAction::SelectDialogItem(idx) => {
+                let app = self.host.app_mut();
+                match &app.canvas_dialogs.active_dialog {
+                    ActiveDialog::CommandPalette => {
+                        let hits_len = app.canvas_dialogs.command_palette.matches_for_session(app.session()).len();
+                        app.canvas_dialogs.command_palette.selected_index = if hits_len == 0 { 0 } else { idx.min(hits_len - 1) };
+                    }
+                    ActiveDialog::AnalyzeSheet { .. } => {
+                        let entries = app.canvas_dialogs.analyze.compatible_entries();
+                        if let Some(entry) = entries.get(idx) {
+                            app.canvas_dialogs.analyze.selected_entry_id = Some(entry.id.to_owned());
+                        }
+                    }
+                    ActiveDialog::ConstantHookPicker { .. } if idx < app.canvas_dialogs.hook_picker.options.len() => {
+                        app.canvas_dialogs.hook_picker.selected_index = Some(idx);
+                    }
+                    _ => {}
+                }
+                Ok(vec![self.render_frame_command(self.render_dpi, Some(format!("dialog.select_item:{idx}")), None)?])
+            }
+            WebChromeAction::DialogStepBack => {
+                let stage_label = match &self.host.app().canvas_dialogs.active_dialog {
+                    ActiveDialog::PowerAndSampleSize => {
+                        let stage = self.host.app_mut().canvas_dialogs.power_wizard.go_back().map_err(WebAdapterError::Validation)?;
+                        stage.label()
+                    }
+                    _ => "none",
+                };
+                Ok(vec![self.render_frame_command(self.render_dpi, Some(format!("dialog.step_back:{stage_label}")), None)?])
+            }
+            WebChromeAction::DialogStepNext => {
+                let stage_label = match &self.host.app().canvas_dialogs.active_dialog {
+                    ActiveDialog::PowerAndSampleSize => {
+                        let stage = self.host.app_mut().canvas_dialogs.power_wizard.advance().map_err(WebAdapterError::Validation)?;
+                        stage.label()
+                    }
+                    _ => "none",
+                };
+                Ok(vec![self.render_frame_command(self.render_dpi, Some(format!("dialog.step_next:{stage_label}")), None)?])
+            }
+            WebChromeAction::FocusModalInput => {
+                let focus_target = primary_modal_focus_id(self.host.app()).map(str::to_owned);
+                self.host.app_mut().focus_widget_id.clone_from(&focus_target);
+                self.chrome.focused_node_id = focus_target;
+                Ok(vec![self.render_frame_command(self.render_dpi, Some(String::from("dialog.focus_input")), None)?])
+            }
             WebChromeAction::DialogCancel | WebChromeAction::CloseModalBackdrop => {
-                self.host.app_mut().canvas_dialogs.close_dialog();
-                self.host.app_mut().focus_widget_id = None;
+                let app = self.host.app_mut();
+                app.canvas_dialogs.close_dialog();
+                app.focus_widget_id = None;
+                curvebook_ui_egui::interaction::clear_modal_text_buffers(app);
+                self.chrome.focused_node_id = None;
                 self.chrome.close_popups();
                 Ok(vec![self.render_frame_command(self.render_dpi, Some(String::from("dialog.closed")), None)?])
             }
             WebChromeAction::DismissContextMenu => {
                 self.chrome.context_menu = None;
+                self.chrome.popup_scroll_y = 0;
                 self.host.app_mut().interaction.context_menu_target = None;
                 Ok(vec![self.render_frame_command(self.render_dpi, Some(String::from("context_menu.dismissed")), None)?])
             }
-            _ => Ok(Vec::new()),
+            WebChromeAction::None => Ok(Vec::new()),
         }
     }
 
@@ -3227,7 +3341,7 @@ impl WebBridgeSession {
         }
     }
 
-    fn handle_hydrate_local_storage(&mut self, entries: Vec<(String, String)>) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
+    fn handle_hydrate_local_storage(&mut self, entries: Vec<(String, String)>, now_ms: u64) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
         let mut cmds = Vec::new();
         for (key, value) in entries {
             if let Err(err) = self.storage.backend_mut().set_item(&key, &value) {
@@ -3247,8 +3361,16 @@ impl WebBridgeSession {
                 if let Some(theme) = prefs.theme {
                     let _ = dispatch_ui_command(self.host.app_mut(), "ui.theme.set", &json!({ "theme": theme }));
                 }
-                for (cmd_id, combo) in &prefs.shortcuts {
-                    let _ = self.host.app_mut().shortcuts.set_shortcut(cmd_id, combo);
+                if !prefs.shortcuts.is_empty() {
+                    let overrides_json = serde_json::to_string(&json!({ "overrides": prefs.shortcuts }))
+                        .map_err(|err| WebAdapterError::Serialization(err.to_string()))?;
+                    if let Err(msg) = self.host.app_mut().shortcuts.import_overrides_json(&overrides_json) {
+                        cmds.push(WebBridgeCommand::NotifyStatus {
+                            level: WebNoticeLevel::Warning,
+                            code: String::from("invalid_shortcut_overrides"),
+                            message: msg,
+                        });
+                    }
                 }
                 self.host.app_mut().sync_views();
                 restored_any = true;
@@ -3264,7 +3386,7 @@ impl WebBridgeSession {
         }
         let blank_clean_doc = self.host.app().document().total_sheet_count() == 0 && !self.host.app().session().is_dirty();
         if blank_clean_doc {
-            match self.storage.load_autosave_snapshot(&self.doc_id, 0) {
+            match self.storage.load_autosave_snapshot(&self.doc_id, now_ms) {
                 Ok(Some(snapshot)) => match self.host.open_project_json_bytes(snapshot.as_bytes()) {
                     Ok(_) => restored_any = true,
                     Err(err) => cmds.push(WebBridgeCommand::NotifyStatus {
@@ -3307,7 +3429,22 @@ impl WebBridgeSession {
 
     fn dispatch_single_ui_input(&mut self, input: UiInputEvent) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
         let before = self.capture_pref_fingerprint();
-        let outcome = self.host.dispatch_event(input).map_err(WebAdapterError::Workspace)?;
+        let fallback_text = match &input {
+            UiInputEvent::KeyDown { key, modifiers } => chrome_bridge::printable_text_input_for_key(key, *modifiers),
+            _ => None,
+        };
+        let mut outcome = self.host.dispatch_event(input).map_err(WebAdapterError::Workspace)?;
+        if !outcome.handled
+            && let Some(text) = fallback_text
+        {
+            if self.access_mode.is_read_only() && !matches!(self.host.app().canvas_dialogs.active_dialog, ActiveDialog::CommandPalette) {
+                return Err(self.read_only_err("text_input"));
+            }
+            let text_outcome = self.host.dispatch_event(UiInputEvent::TextInput { text }).map_err(WebAdapterError::Workspace)?;
+            if text_outcome.handled {
+                outcome = text_outcome;
+            }
+        }
         if outcome.handled {
             let mut cmds = vec![self.render_frame_command(self.render_dpi, Some(outcome.action), outcome.command_result)?];
             self.maybe_append_preferences_persist(&before, &mut cmds);
@@ -3318,6 +3455,12 @@ impl WebBridgeSession {
     }
 
     fn handle_open_file_bytes(&mut self, file_name: &str, bytes: &[u8]) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
+        if bytes.len() > MAX_ARCHIVE_FILE_BYTES {
+            return Err(WebAdapterError::Validation(format!(
+                "file `{file_name}` exceeds maximum allowed size ({} > {MAX_ARCHIVE_FILE_BYTES} bytes)",
+                bytes.len()
+            )));
+        }
         let next_doc_id = derive_file_doc_id(file_name, bytes);
         if next_doc_id == self.doc_id {
             self.require_write_lock("open_file_bytes")?;
@@ -3334,6 +3477,7 @@ impl WebBridgeSession {
         if files.is_empty() {
             return Err(WebAdapterError::Validation(String::from("no dropped files supplied")));
         }
+        validate_byte_batch_budget(files.len(), files.iter().map(|(_, bytes)| bytes.len()), "dropped files")?;
         let next_doc_id = derive_dropped_files_doc_id(&files);
         if next_doc_id == self.doc_id {
             self.require_write_lock("import_dropped_files")?;
@@ -3355,6 +3499,7 @@ impl WebBridgeSession {
         if entries.is_empty() {
             return Err(WebAdapterError::Validation(String::from("directory tree must contain at least document.json")));
         }
+        validate_byte_batch_budget(entries.len(), entries.values().map(Vec::len), "directory entries")?;
         let normalized = normalize_directory_entries(root, entries)?;
         let next_doc_id = derive_directory_doc_id(root, &normalized);
         if next_doc_id == self.doc_id {
@@ -3479,17 +3624,7 @@ impl WebBridgeSession {
         let bg = self.host.app().theme.surface_bg;
         let width_px = viewport.physical_width_px().max(1);
         let height_px = viewport.physical_height_px().max(1);
-        let modal_active = self.host.app().canvas_dialogs.active_dialog != ActiveDialog::None;
-        let popup_open = self.chrome.open_menu_key.is_some() || self.chrome.context_menu.is_some() || self.host.app().interaction.open_menu.is_some();
-        let layered = WebTextBridge::try_compose_placeholder_frame_with_popup(
-            width_px,
-            height_px,
-            dpi,
-            [bg.r, bg.g, bg.b, bg.a],
-            &chrome_layout.snapshot.status_summary,
-            popup_open,
-            modal_active,
-        )?;
+        let layered = WebTextBridge::try_compose_chrome_frame(width_px, height_px, dpi, [bg.r, bg.g, bg.b, bg.a], &chrome_layout)?;
         WebTextBridge::validate_layered_frame(&layered)?;
         let pan_zoom = &self.host.app().canvas_dialogs.pan_zoom;
         Ok(WebBridgeCommand::RenderRgbaFrame {
@@ -4174,17 +4309,26 @@ fn parse_i64_array(obj: &Map<String, Value>, key: &str) -> Result<Vec<i64>, WebA
 
 fn parse_named_bytes_vec(obj: &Map<String, Value>, key: &str) -> Result<Vec<(String, Vec<u8>)>, WebAdapterError> {
     let arr = obj.get(key).and_then(Value::as_array).ok_or_else(|| WebAdapterError::Serialization(format!("missing array field `{key}`")))?;
+    if arr.len() > MAX_ZIP_ENTRIES {
+        return Err(WebAdapterError::Validation(format!("`{key}` exceeds maximum entry count ({} > {MAX_ZIP_ENTRIES})", arr.len())));
+    }
     let mut out = Vec::with_capacity(arr.len());
+    let mut total_bytes = 0usize;
     for entry in arr {
         let item = require_object(entry, "named byte entry")?;
         let path = require_str_field(item, "path")?.to_owned();
         let bytes = decode_base64_field(item, "bytes_base64", "bytes")?;
+        total_bytes = total_bytes
+            .checked_add(bytes.len())
+            .filter(|&sum| sum <= MAX_ARCHIVE_FILE_BYTES)
+            .ok_or_else(|| WebAdapterError::Validation(format!("`{key}` exceeds total archive byte budget ({MAX_ARCHIVE_FILE_BYTES} bytes max)")))?;
         out.push((path, bytes));
     }
     Ok(out)
 }
 
 fn collect_unique_directory_entries(root_name: &str, pairs: Vec<(String, Vec<u8>)>) -> Result<BTreeMap<String, Vec<u8>>, WebAdapterError> {
+    validate_byte_batch_budget(pairs.len(), pairs.iter().map(|(_, b)| b.len()), "directory entries")?;
     let mut map = BTreeMap::new();
     let mut seen_normalized = BTreeSet::new();
     let trimmed_root = root_name.trim();
@@ -4201,6 +4345,54 @@ fn collect_unique_directory_entries(root_name: &str, pairs: Vec<(String, Vec<u8>
         map.insert(path, bytes);
     }
     Ok(map)
+}
+
+fn validate_byte_batch_budget<I>(count: usize, lengths: I, label: &str) -> Result<(), WebAdapterError>
+where
+    I: IntoIterator<Item = usize>,
+{
+    if count > MAX_ZIP_ENTRIES {
+        return Err(WebAdapterError::Validation(format!("{label} exceeds maximum entry count ({count} > {MAX_ZIP_ENTRIES})")));
+    }
+    let mut total = 0usize;
+    for len in lengths {
+        if len > MAX_ARCHIVE_FILE_BYTES {
+            return Err(WebAdapterError::Validation(format!("{label} entry exceeds maximum allowed size ({len} > {MAX_ARCHIVE_FILE_BYTES} bytes)")));
+        }
+        total = total
+            .checked_add(len)
+            .filter(|&sum| sum <= MAX_ARCHIVE_FILE_BYTES)
+            .ok_or_else(|| WebAdapterError::Validation(format!("{label} exceeds total byte budget ({MAX_ARCHIVE_FILE_BYTES} bytes max)")))?;
+    }
+    let _ = total;
+    Ok(())
+}
+
+fn primary_modal_focus_id(app: &UiApp) -> Option<&'static str> {
+    match &app.canvas_dialogs.active_dialog {
+        ActiveDialog::CommandPalette => Some("palette.query"),
+        ActiveDialog::AnalyzeSheet { .. } => Some("analyze.search"),
+        ActiveDialog::ConstantHookPicker { .. } => Some("hook.search_query"),
+        ActiveDialog::ExcludeWithReason { .. } => Some("exclude.note"),
+        ActiveDialog::FormatAxes { .. } => Some("axes.title"),
+        ActiveDialog::EditAnalysisParameters { .. } => Some("edit.custom_title"),
+        ActiveDialog::Checkpoints => Some("checkpoints.name"),
+        ActiveDialog::ImportReshape => Some("import.title"),
+        _ => None,
+    }
+}
+
+fn current_epoch_ms() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let ms = js_sys::Date::now();
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        if ms.is_finite() && ms >= 0.0 { ms.floor() as u64 } else { 1 }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().and_then(|dur| u64::try_from(dur.as_millis()).ok()).unwrap_or(1)
+    }
 }
 
 fn parse_string_array_or_empty(obj: &Map<String, Value>, key: &str) -> Result<Vec<String>, WebAdapterError> {
@@ -4262,6 +4454,12 @@ fn decode_base64_field(obj: &Map<String, Value>, b64_key: &str, array_key: &str)
         return decode_base64(raw_b64);
     }
     if let Some(arr) = obj.get(array_key).and_then(Value::as_array) {
+        if arr.len() > MAX_ARCHIVE_FILE_BYTES {
+            return Err(WebAdapterError::Validation(format!(
+                "`{array_key}` exceeds maximum allowed size ({} > {MAX_ARCHIVE_FILE_BYTES} bytes)",
+                arr.len()
+            )));
+        }
         let mut out = Vec::new();
         out.try_reserve_exact(arr.len()).map_err(|_| WebAdapterError::Serialization(format!("`{array_key}` exceeds memory budget")))?;
         for item in arr {
@@ -4354,6 +4552,13 @@ fn encode_base64(input: &[u8]) -> String {
 }
 
 fn decode_base64(input: &str) -> Result<Vec<u8>, WebAdapterError> {
+    let max_b64_input_bytes = MAX_ARCHIVE_FILE_BYTES.saturating_mul(2);
+    if input.len() > max_b64_input_bytes {
+        return Err(WebAdapterError::Validation(format!(
+            "base64 payload exceeds maximum allowed size ({} > {max_b64_input_bytes} bytes)",
+            input.len()
+        )));
+    }
     let mut compact = Vec::new();
     compact.try_reserve_exact(input.len()).map_err(|_| WebAdapterError::Serialization(String::from("base64 input exceeds memory budget")))?;
     compact.extend(input.bytes().filter(|b| !b.is_ascii_whitespace()));
@@ -4364,9 +4569,15 @@ fn decode_base64(input: &str) -> Result<Vec<u8>, WebAdapterError> {
         return Err(WebAdapterError::Serialization(String::from("base64 length must be a multiple of 4")));
     }
 
+    let pad_bytes = usize::from(compact[compact.len() - 1] == b'=') + usize::from(compact[compact.len() - 2] == b'=');
+    let exact_decoded = (compact.len() / 4).saturating_mul(3).saturating_sub(pad_bytes);
+    if exact_decoded > MAX_ARCHIVE_FILE_BYTES {
+        return Err(WebAdapterError::Validation(format!(
+            "decoded base64 payload exceeds maximum allowed size ({exact_decoded} > {MAX_ARCHIVE_FILE_BYTES} bytes)"
+        )));
+    }
     let mut out = Vec::new();
-    out.try_reserve_exact((compact.len() / 4) * 3)
-        .map_err(|_| WebAdapterError::Serialization(String::from("decoded base64 payload exceeds memory budget")))?;
+    out.try_reserve_exact(exact_decoded).map_err(|_| WebAdapterError::Serialization(String::from("decoded base64 payload exceeds memory budget")))?;
     let (chunks, _rem) = compact.as_chunks::<4>();
     for (chunk_idx, chunk) in chunks.iter().enumerate() {
         let is_last = chunk_idx + 1 == compact.len() / 4;
