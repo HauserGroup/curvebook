@@ -778,6 +778,8 @@ fn sheet_command_alias(command_id: &str, key: &str) -> Option<&'static str> {
                 ("rowFactorTitle", "row_factor_title"),
                 ("columnFactorTitle", "column_factor_title"),
                 ("timeTitle", "time_title"),
+                ("eventCode", "event_code"),
+                ("censoredCode", "censored_code"),
                 ("autoFamily", "auto_family"),
                 ("autoInfo", "auto_info"),
                 ("autoGraph", "auto_graph"),

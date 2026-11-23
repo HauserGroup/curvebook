@@ -152,7 +152,7 @@ pub(super) fn render_metadata_hooks_studio(
         ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
         let max_w = ui.available_width();
         for (idx, c) in info.constants.iter().enumerate() {
-            let selected = state.info_selected_constant.as_deref() == Some(c.name.as_str());
+            let selected = state.info_selected_constant.as_deref().is_some_and(|sel| sel.eq_ignore_ascii_case(&c.name));
             let lbl = format!("{} = {}", c.name, c.value.display_text());
             let wid = format!("inspector.info.const.{idx}");
             if studio_chip(
@@ -179,7 +179,7 @@ pub(super) fn render_metadata_hooks_studio(
     });
 
     let sel_key = state.info_selected_constant.clone().unwrap_or_default();
-    if state.info_synced_key.as_ref().is_none_or(|(sid, nm)| sid != &info.id || nm != &sel_key) {
+    if state.info_synced_key.as_ref().is_none_or(|(sid, nm)| sid != &info.id || !nm.eq_ignore_ascii_case(&sel_key)) {
         state.info_synced_key = Some((info.id.clone(), sel_key.clone()));
         if let Some(c) = info.get_constant(&sel_key) {
             state.info_name_draft = c.name.clone();
@@ -285,9 +285,11 @@ pub(super) fn render_metadata_hooks_studio(
     let name_ok = !state.info_name_draft.trim().is_empty();
     let raw_val = state.info_value_draft.trim();
     let parsed_num = (state.info_kind_draft == 0 && !raw_val.is_empty()).then(|| parse_localized_number_input(raw_val, &app.locale_preset)).flatten();
-    let value_ok = state.info_kind_draft != 0 || raw_val.is_empty() || parsed_num.is_some();
+    let num_ok = state.info_kind_draft != 0 || raw_val.is_empty() || parsed_num.is_some();
+    let date_ok = state.info_kind_draft != 2 || raw_val.is_empty() || crate::egui_shell::info_view::is_valid_iso_date(raw_val);
+    let value_ok = num_ok && date_ok;
     if !value_ok {
-        let err_lbl = "Expected finite number";
+        let err_lbl = if !date_ok { "Expected ISO date YYYY-MM-DD" } else { "Expected finite number" };
         let err_resp = ui.colored_label(tokens.link_red, err_lbl);
         meta.record_response(
             ui,
@@ -308,6 +310,8 @@ pub(super) fn render_metadata_hooks_studio(
     }
     let save_disabled_reason = if !name_ok {
         Some("constant name cannot be empty")
+    } else if !date_ok {
+        Some("constant date must match YYYY-MM-DD")
     } else if !value_ok {
         Some("constant numeric value must be a finite number")
     } else {

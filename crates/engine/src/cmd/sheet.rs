@@ -104,6 +104,10 @@ struct CreateDataParams {
     column_factor_title: Option<String>,
     #[serde(alias = "timeTitle")]
     time_title: Option<String>,
+    #[serde(alias = "eventCode")]
+    event_code: Option<i64>,
+    #[serde(alias = "censoredCode")]
+    censored_code: Option<i64>,
     variables: Option<Vec<VariableInitInput>>,
     #[serde(alias = "autoFamily")]
     auto_family: Option<bool>,
@@ -138,6 +142,8 @@ fn create_data_schema() -> Value {
             ("row_factor_title", nullable_schema(str_schema("Row factor title for Grouped/Contingency tables"))),
             ("column_factor_title", nullable_schema(str_schema("Column factor title for Grouped/Contingency tables"))),
             ("time_title", nullable_schema(str_schema("Elapsed time title for Survival tables"))),
+            ("event_code", nullable_schema(int_schema("Numeric status code denoting Event rows on Survival tables", None, None))),
+            ("censored_code", nullable_schema(int_schema("Numeric status code denoting Censored rows on Survival tables", None, None))),
             (
                 "variables",
                 nullable_schema(array_schema(
@@ -168,6 +174,8 @@ fn create_data_schema() -> Value {
             ("row_factor_title", &["rowFactorTitle"]),
             ("column_factor_title", &["columnFactorTitle"]),
             ("time_title", &["timeTitle"]),
+            ("event_code", &["eventCode"]),
+            ("censored_code", &["censoredCode"]),
             ("auto_family", &["autoFamily"]),
             ("auto_info", &["autoInfo"]),
             ("auto_graph", &["autoGraph"]),
@@ -389,6 +397,20 @@ fn build_archetype_from_params(parsed: &CreateDataParams, existing_cells: usize)
             if let Some(ref tt) = parsed.time_title {
                 validate_title(tt)?;
                 surv.time_title = tt.clone();
+            }
+            if let Some(ev) = parsed.event_code {
+                surv.event_code = ev;
+            }
+            if let Some(cen) = parsed.censored_code {
+                surv.censored_code = cen;
+            }
+            if surv.event_code == surv.censored_code {
+                return Err(EngineError::with_code(
+                    ErrorCode::BadInput,
+                    format!("Survival `event_code` ({}) and `censored_code` ({}) must be distinct", surv.event_code, surv.censored_code),
+                )
+                .with_remediation("Supply distinct integer codes for `event_code` and `censored_code` (for example `1` and `0`).")
+                .with_details(json!({ "pointer": "/censored_code" })));
             }
             Ok(TableArchetype::Survival(surv))
         }

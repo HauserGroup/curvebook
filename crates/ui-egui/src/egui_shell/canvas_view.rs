@@ -1641,10 +1641,18 @@ fn render_layout_hud_overlays(
                 let raw_x = round_tenth_pt(drag.initial_bounds_pt.x + dx);
                 let raw_y = round_tenth_pt(drag.initial_bounds_pt.y + dy);
                 let cand = curvebook_chart::RectPt::new(raw_x, raw_y, drag.initial_bounds_pt.width, drag.initial_bounds_pt.height);
-                let (snapped, guides) = snap_panel_with_tenth_precision(app, ls, idx, cand, &plot_origins);
+                let (snapped, guides) = if super::trailing_studio::studio_snap_enabled(ui.ctx()) {
+                    snap_panel_with_tenth_precision(app, ls, idx, cand, &plot_origins)
+                } else {
+                    (cand, Vec::new())
+                };
                 drag.current_bounds_pt = DocRectPt::new(snapped.x, snapped.y, snapped.width, snapped.height);
                 state.active_snap_guides = guides;
-                state.last_snap_readout = Some(format!("Snap: X={:.1} pt, Y={:.1} pt (0.1 pt)", snapped.x, snapped.y));
+                state.last_snap_readout = if super::trailing_studio::studio_snap_enabled(ui.ctx()) {
+                    Some(format!("Snap: X={:.1} pt, Y={:.1} pt (0.1 pt)", snapped.x, snapped.y))
+                } else {
+                    None
+                };
             }
             if p_resp.drag_stopped()
                 && state.layout_drag.as_ref().is_some_and(|d| d.item_index == idx && !d.resizing_corner)

@@ -353,8 +353,31 @@ pub(super) fn render_multi_link_guard_popover(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
     bounds: Rect,
-) {
-    let Some(pop) = state.active_link_popover.clone() else { return };
+) -> bool {
+    let Some(pop) = state.active_link_popover.clone() else {
+        return false;
+    };
+    let viewport = ui.ctx().content_rect();
+    let backdrop_scrim = tokens.scrim.gamma_multiply(0.35);
+    let mut outside_click_blocked = false;
+    let backdrop_resp = egui::Area::new(Id::unique(("multi_link_guard_backdrop", ds.id.as_str())))
+        .order(Order::Middle)
+        .fixed_pos(viewport.min)
+        .show(ui.ctx(), |ui| {
+            let (rect, resp) = ui.allocate_exact_size(viewport.size(), Sense::click_and_drag());
+            ui.painter().rect_filled(rect, CornerRadius::ZERO, backdrop_scrim);
+            resp
+        })
+        .inner;
+    if backdrop_resp.clicked() {
+        outside_click_blocked = true;
+    }
+    if ui.input(|i| i.key_pressed(Key::Escape)) {
+        state.active_link_popover = None;
+        ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+        ui.ctx().request_repaint();
+        return outside_click_blocked;
+    }
     let pop_w = (bounds.width() - 24.0).clamp(240.0, 360.0);
     let pos = pos2(bounds.center().x - pop_w * 0.5, bounds.min.y + 32.0);
     egui::Area::new(Id::unique(("multi_link_guard", ds.id.as_str()))).fixed_pos(pos).order(Order::Foreground).show(ui.ctx(), |pui| {
@@ -368,7 +391,7 @@ pub(super) fn render_multi_link_guard_popover(
                     record_meta_if_enabled(
                         row,
                         meta,
-                        true,
+                        state.record_inspect_meta,
                         &go,
                         FrameInspectEntryInput {
                             widget_id: "grid.link_guard.go_to_source",
@@ -393,7 +416,7 @@ pub(super) fn render_multi_link_guard_popover(
                 record_meta_if_enabled(
                     row,
                     meta,
-                    true,
+                    state.record_inspect_meta,
                     &ul,
                     FrameInspectEntryInput {
                         widget_id: "grid.link_guard.unlink",
@@ -416,7 +439,7 @@ pub(super) fn render_multi_link_guard_popover(
                 record_meta_if_enabled(
                     row,
                     meta,
-                    true,
+                    state.record_inspect_meta,
                     &dis,
                     FrameInspectEntryInput {
                         widget_id: "grid.link_guard.dismiss",
@@ -437,4 +460,5 @@ pub(super) fn render_multi_link_guard_popover(
             });
         });
     });
+    outside_click_blocked
 }

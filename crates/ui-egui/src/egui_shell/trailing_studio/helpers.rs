@@ -280,6 +280,7 @@ fn render_passive_collapsed_rail_badge(ui: &mut egui::Ui, tokens: &Tokens, glyph
 
 pub(super) fn render_collapsed_rail(
     ui: &mut egui::Ui,
+    app: &UiApp,
     tokens: &Tokens,
     surface: StudioContextSurface,
     enabled: bool,
@@ -287,6 +288,7 @@ pub(super) fn render_collapsed_rail(
     intents: &mut PendingUiIntents,
 ) {
     let locale = &tokens.locale;
+    let expand_tip = super::format_studio_toggle_tooltip(app, "Expand Studio");
     ui.vertical_centered(|ui| {
         ui.spacing_mut().item_spacing.y = 6.0;
         let expand_resp = studio_chip(
@@ -295,7 +297,7 @@ pub(super) fn render_collapsed_rail(
             meta,
             &StudioChipSpec {
                 label: if is_rtl_locale(locale) { "»" } else { "«" },
-                tooltip: "Expand Studio (Cmd/Ctrl+Shift+I)",
+                tooltip: &expand_tip,
                 max_w: 26.0,
                 selected: false,
                 enabled,
@@ -413,7 +415,7 @@ pub(super) fn render_canvas_media_buttons(
                 disabled_reason: None,
             },
         ) {
-            intents.push_engine(spec.insert_cmd, json!({}));
+            intents.push_engine(spec.insert_cmd, json!({ "sheet_id": spec.sheet_id.as_str() }));
         }
         if studio_chip(
             ui,

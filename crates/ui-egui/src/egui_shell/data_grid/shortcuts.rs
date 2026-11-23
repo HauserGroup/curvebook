@@ -35,25 +35,27 @@ pub(super) fn handle_grid_keyboard_shortcuts(ui: &mut Ui, rctx: &GridRenderCtx<'
     if let Some(e_mods) = pressed_key_event_modifiers(ui, Key::E)
         && (e_mods.command || e_mods.mac_cmd || e_mods.ctrl)
     {
-        if e_mods.shift {
-            intents.push_ui("ui.grid.excludeWithReason", json!({ "sheet_id": rctx.ds.id.as_str() }));
-        } else if !rctx.ds.frozen {
+        if !rctx.ds.frozen {
             if let Some(reg) = linked_region_for_cell(rctx.ds, active.row, active.col) {
                 open_link_popover(state, reg, rctx.locale);
                 ui.ctx().request_repaint();
                 return;
             }
-            let cur_excl = rctx.ds.cell(CellCoord::from(active)).is_some_and(|c| c.excluded);
-            intents.push_engine(
-                "table.excludeCells",
-                json!({
-                    "sheet_id": rctx.ds.id.as_str(),
-                    "excluded": !cur_excl,
-                    "row": active.row,
-                    "col": active.col,
-                    "subcol": active.subcol,
-                }),
-            );
+            if e_mods.shift {
+                intents.push_ui("ui.grid.excludeWithReason", json!({ "sheet_id": rctx.ds.id.as_str() }));
+            } else {
+                let cur_excl = rctx.ds.cell(CellCoord::from(active)).is_some_and(|c| c.excluded);
+                intents.push_engine(
+                    "table.excludeCells",
+                    json!({
+                        "sheet_id": rctx.ds.id.as_str(),
+                        "excluded": !cur_excl,
+                        "row": active.row,
+                        "col": active.col,
+                        "subcol": active.subcol,
+                    }),
+                );
+            }
         }
         ui.ctx().request_repaint();
         return;
@@ -379,6 +381,136 @@ fn handle_multi_clipboard_shortcuts(ui: &Ui, app: &UiApp, ds: &DataSheet, aux: &
     false
 }
 
+fn first_linked_region_in_bounds(ds: &DataSheet, s: GridCellCoord, e: GridCellCoord) -> Option<&curvebook_doc::LinkedDataRegion> {
+    (s.row..=e.row).find_map(|r| (s.col..=e.col).find_map(|c| linked_region_for_cell(ds, r, c)))
+}
+
+fn handle_multi_exclude_shortcut(ui: &Ui, mctx: &MultiGridCtx<'_>, fstate: &mut MultiGridFrameState<'_>) -> bool {
+    let Some(e_mods) = pressed_key_event_modifiers(ui, Key::E) else {
+        return false;
+    };
+    if !(e_mods.command || e_mods.mac_cmd || e_mods.ctrl) {
+        return false;
+    }
+    let app = mctx.app;
+    let ds = mctx.ds;
+    if ds.frozen {
+        return true;
+    }
+    if let Some((xr, xs)) = fstate.aux.selected_x_cell {
+        if e_mods.shift {
+            fstate.intents.push_ui("ui.grid.excludeWithReason", json!({ "sheet_id": ds.id.as_str() }));
+        } else {
+            let was_ex = ds.archetype.x_or_time_cell(xr, xs).is_some_and(|c| c.excluded);
+            fstate.intents.push_engine(
+                "table.excludeCells",
+                json!({ "sheet_id": ds.id.as_str(), "target": "x", "row": xr, "subcol": xs, "excluded": !was_ex }),
+            );
+        }
+        return true;
+    }
+    if let Some(range) = app.grid.tool.selection_bounds() {
+        if let Some(reg) = first_linked_region_in_bounds(ds, range.0, range.1) {
+            super::linked_regions::open_link_popover(fstate.state, reg, &app.locale);
+            ui.ctx().request_repaint();
+            return true;
+        }
+        if e_mods.shift {
+            fstate.intents.push_ui("ui.grid.excludeWithReason", json!({ "sheet_id": ds.id.as_str() }));
+        } else {
+            let target_excluded = !ds.archetype.data_cell(CellCoord::from(range.0)).is_some_and(|c| c.excluded);
+            let doc_range = SheetCellRange::new(CellCoord::from(range.0), CellCoord::from(range.1));
+            fstate.intents.push_engine("table.excludeCells", json!({ "sheet_id": ds.id.as_str(), "range": doc_range, "excluded": target_excluded }));
+        }
+        return true;
+    }
+    if e_mods.shift {
+        fstate.intents.push_ui("ui.grid.excludeWithReason", json!({ "sheet_id": ds.id.as_str() }));
+        return true;
+    }
+    false
+}
+
+fn handle_multi_clear_and_edit_shortcuts(ui: &Ui, mctx: &MultiGridCtx<'_>, fstate: &mut MultiGridFrameState<'_>) -> bool {
+    let app = mctx.app;
+    let ds = mctx.ds;
+    if ds.frozen {
+        return false;
+    }
+    if pressed_key_event_modifiers(ui, Key::Delete).is_some() || pressed_key_event_modifiers(ui, Key::Backspace).is_some() {
+        if let Some((xr, xs)) = fstate.aux.selected_x_cell {
+            if !is_x_column_readonly(ds) {
+                fstate
+                    .intents
+                    .push_engine("table.setXCells", json!({ "sheet_id": ds.id.as_str(), "row": xr, "subcol": xs, "value": serde_json::Value::Null }));
+            }
+            return true;
+        }
+        if let Some(range) = app.grid.tool.selection_bounds() {
+            if let Some(reg) = first_linked_region_in_bounds(ds, range.0, range.1) {
+                super::linked_regions::open_link_popover(fstate.state, reg, &app.locale);
+                ui.ctx().request_repaint();
+                return true;
+            }
+            let doc_range = SheetCellRange::new(CellCoord::from(range.0), CellCoord::from(range.1));
+            fstate.intents.push_engine("table.clearCells", json!({ "sheet_id": ds.id.as_str(), "range": doc_range }));
+            return true;
+        }
+    }
+    if pressed_key_event_modifiers(ui, Key::F2).is_some() {
+        if let Some((xr, xs)) = fstate.aux.selected_x_cell {
+            if !is_x_column_readonly(ds) {
+                let init = initial_edit_text_for_cell(ds.archetype.x_or_time_cell(xr, xs), &app.locale_preset);
+                fstate.aux.aux_edit = Some((AuxInlineTarget::XCell { row: xr, subcol: xs }, init, true));
+            }
+            return true;
+        }
+        if let Some(c) = app.grid.tool.active {
+            if matches!(&ds.archetype, TableArchetype::MultipleVariables(mv) if mv.variables.get(c.col).is_some_and(|v| matches!(v.source, VariableSource::Calculated { .. })))
+            {
+                fstate.intents.push_ui("ui.table.openFormulaBar", json!({ "sheet_id": ds.id.as_str(), "col": c.col }));
+                return true;
+            }
+            if let Some(reg) = linked_region_for_cell(ds, c.row, c.col) {
+                super::linked_regions::open_link_popover(fstate.state, reg, &app.locale);
+                ui.ctx().request_repaint();
+                return true;
+            }
+            let init = initial_edit_text_for_cell(ds.archetype.data_cell(c.into()), &app.locale_preset);
+            begin_inline_edit(ui, fstate.state, GridInlineEditTarget::Cell(c), init);
+            return true;
+        }
+    }
+    let mods = ui.input(|i| i.modifiers);
+    if !(mods.command || mods.mac_cmd || mods.ctrl) {
+        let typed: String = ui.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|ev| match ev {
+                    egui::Event::Text(t) if !t.is_empty() && t.chars().all(|c| !c.is_control()) => Some(t.as_str()),
+                    _ => None,
+                })
+                .collect()
+        });
+        if !typed.is_empty() {
+            if let Some((xr, xs)) = fstate.aux.selected_x_cell {
+                if !is_x_column_readonly(ds) {
+                    fstate.aux.aux_edit = Some((AuxInlineTarget::XCell { row: xr, subcol: xs }, typed, true));
+                }
+                return true;
+            }
+            if let Some(c) = app.grid.tool.active {
+                let is_calc = matches!(&ds.archetype, TableArchetype::MultipleVariables(mv) if mv.variables.get(c.col).is_some_and(|v| matches!(v.source, VariableSource::Calculated { .. })));
+                if !is_calc && linked_region_for_cell(ds, c.row, c.col).is_none() {
+                    begin_inline_edit(ui, fstate.state, GridInlineEditTarget::Cell(c), typed);
+                }
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub(super) fn handle_multi_keyboard_shortcuts(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut MultiGridFrameState<'_>) {
     let app = mctx.app;
     let ds = mctx.ds;
@@ -389,47 +521,11 @@ pub(super) fn handle_multi_keyboard_shortcuts(ui: &mut Ui, mctx: &MultiGridCtx<'
     if !is_grid_focus_active(ui, app, &ds.id) && fstate.aux.selected_x_cell.is_none() && app.grid.tool.active.is_none() {
         return;
     }
-    if let Some(e_mods) = pressed_key_event_modifiers(ui, Key::E)
-        && (e_mods.command || e_mods.mac_cmd || e_mods.ctrl)
-    {
-        if e_mods.shift {
-            fstate.intents.push_ui("ui.grid.excludeWithReason", json!({ "sheet_id": ds.id.as_str() }));
-            return;
-        }
-        if let Some((xr, xs)) = fstate.aux.selected_x_cell {
-            let was_ex = ds.archetype.x_or_time_cell(xr, xs).is_some_and(|c| c.excluded);
-            fstate.intents.push_engine(
-                "table.excludeCells",
-                json!({ "sheet_id": ds.id.as_str(), "target": "x", "row": xr, "subcol": xs, "excluded": !was_ex }),
-            );
-            return;
-        }
-        if let Some(range) = app.grid.tool.selection_bounds() {
-            let target_excluded = !ds.archetype.data_cell(CellCoord::from(range.0)).is_some_and(|c| c.excluded);
-            let doc_range = SheetCellRange::new(CellCoord::from(range.0), CellCoord::from(range.1));
-            fstate.intents.push_engine("table.excludeCells", json!({ "sheet_id": ds.id.as_str(), "range": doc_range, "excluded": target_excluded }));
-            return;
-        }
-    }
-
-    if handle_multi_clipboard_shortcuts(ui, app, ds, fstate.aux, fstate.intents) {
+    if handle_multi_exclude_shortcut(ui, mctx, fstate) || handle_multi_clipboard_shortcuts(ui, app, ds, fstate.aux, fstate.intents) {
         return;
     }
-
-    if (pressed_key_event_modifiers(ui, Key::Delete).is_some() || pressed_key_event_modifiers(ui, Key::Backspace).is_some()) && !ds.frozen {
-        if let Some((xr, xs)) = fstate.aux.selected_x_cell {
-            if !is_x_column_readonly(ds) {
-                fstate
-                    .intents
-                    .push_engine("table.setXCells", json!({ "sheet_id": ds.id.as_str(), "row": xr, "subcol": xs, "value": serde_json::Value::Null }));
-            }
-            return;
-        }
-        if let Some(range) = app.grid.tool.selection_bounds() {
-            let doc_range = SheetCellRange::new(CellCoord::from(range.0), CellCoord::from(range.1));
-            fstate.intents.push_engine("table.clearCells", json!({ "sheet_id": ds.id.as_str(), "range": doc_range }));
-            return;
-        }
+    if handle_multi_clear_and_edit_shortcuts(ui, mctx, fstate) {
+        return;
     }
 
     for (key, dx, dy) in [(Key::ArrowLeft, -1_isize, 0_isize), (Key::ArrowRight, 1, 0), (Key::ArrowUp, 0, -1), (Key::ArrowDown, 0, 1)] {
@@ -471,47 +567,6 @@ pub(super) fn handle_multi_keyboard_shortcuts(ui: &mut Ui, mctx: &MultiGridCtx<'
             fstate.aux.selected_x_cell = None;
             fstate.intents.push_select_grid_cell(nc);
             ui.ctx().request_repaint();
-        }
-        return;
-    }
-
-    if pressed_key_event_modifiers(ui, Key::F2).is_some() && !ds.frozen {
-        if let Some((xr, xs)) = fstate.aux.selected_x_cell {
-            let init = initial_edit_text_for_cell(ds.archetype.x_or_time_cell(xr, xs), &app.locale_preset);
-            fstate.aux.aux_edit = Some((AuxInlineTarget::XCell { row: xr, subcol: xs }, init, true));
-            return;
-        }
-        if let Some(c) = app.grid.tool.active {
-            let init = initial_edit_text_for_cell(ds.archetype.data_cell(c.into()), &app.locale_preset);
-            begin_inline_edit(ui, fstate.state, GridInlineEditTarget::Cell(c), init);
-            return;
-        }
-    }
-
-    let mods = ui.input(|i| i.modifiers);
-    let cmd = mods.command || mods.mac_cmd || mods.ctrl;
-    if !cmd && !ds.frozen {
-        let typed: String = ui.input(|i| {
-            i.events
-                .iter()
-                .filter_map(|ev| match ev {
-                    egui::Event::Text(t) if !t.is_empty() && t.chars().all(|c| !c.is_control()) => Some(t.as_str()),
-                    _ => None,
-                })
-                .collect()
-        });
-        if !typed.is_empty() {
-            if let Some((xr, xs)) = fstate.aux.selected_x_cell {
-                let x_ro = matches!(&ds.archetype, TableArchetype::Xy(xy) if matches!(xy.x_mode, XColumnMode::GeneratedSequence { .. }));
-                if !x_ro {
-                    fstate.aux.aux_edit = Some((AuxInlineTarget::XCell { row: xr, subcol: xs }, typed, true));
-                }
-            } else if let Some(c) = app.grid.tool.active {
-                let is_calc = matches!(&ds.archetype, TableArchetype::MultipleVariables(mv) if mv.variables.get(c.col).is_some_and(|v| matches!(v.source, VariableSource::Calculated { .. })));
-                if !is_calc && linked_region_for_cell(ds, c.row, c.col).is_none() {
-                    begin_inline_edit(ui, fstate.state, GridInlineEditTarget::Cell(c), typed);
-                }
-            }
         }
     }
 }

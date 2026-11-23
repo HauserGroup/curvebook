@@ -208,6 +208,10 @@ fn advance_selection_after_edit(
     }
 }
 
+fn pending_aux_commit_key(sheet_id: &curvebook_doc::SheetId) -> Id {
+    Id::unique(("r15_aux_inline_pending_commit", sheet_id.as_str()))
+}
+
 pub(super) fn render_multi_inline_editors(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut MultiGridFrameState<'_>) {
     if mctx.blocked {
         return;
@@ -223,49 +227,74 @@ pub(super) fn render_multi_inline_editors(ui: &mut Ui, mctx: &MultiGridCtx<'_>, 
             GridInlineEditTarget::RowTitle { row } => format!("grid.row_title.{row}"),
         };
         let te_id = ui.make_persistent_id(("multi_std_inline", &wid));
-        let resp = ui.put(rect, TextEdit::singleline(&mut edit.draft).id(te_id).desired_width(rect.width()));
         let first_frame = !edit.focused_once;
+        let esc = !first_frame && pressed_key_event_modifiers(ui, Key::Escape).is_some();
+        if esc {
+            ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+            ui.data_mut(|d| d.remove::<bool>(pending_commit_key(&ds.id)));
+            ui.memory_mut(|m| m.surrender_focus(te_id));
+            ui.ctx().request_repaint();
+            return;
+        }
+        let resp = ui.put(rect, TextEdit::singleline(&mut edit.draft).id(te_id).desired_width(rect.width()));
         if first_frame {
             resp.request_focus();
             edit.focused_once = true;
+            ui.ctx().request_repaint();
         }
-        record_meta_if_enabled(
-            ui,
-            fstate.meta,
-            fstate.state.record_inspect_meta,
-            &resp,
-            FrameInspectEntryInput {
-                widget_id: &wid,
-                role: "textbox",
-                label: &edit.draft,
-                command_id: None,
-                value: Some(serde_json::Value::String(edit.draft.clone())),
-                enabled: true,
-                disabled_reason: None,
-                z_layer: ZLayer::Workspace,
-                ellipsized: false,
-                full_label: None,
-            },
-        );
-        let esc = pressed_key_event_modifiers(ui, Key::Escape).is_some();
-        let enter = pressed_key_event_modifiers(ui, Key::Enter).is_some();
-        let tab = pressed_key_event_modifiers(ui, Key::Tab);
-        if esc {
-            return;
+        if !ui.ctx().will_discard() {
+            record_meta_if_enabled(
+                ui,
+                fstate.meta,
+                fstate.state.record_inspect_meta,
+                &resp,
+                FrameInspectEntryInput {
+                    widget_id: &wid,
+                    role: "textbox",
+                    label: &edit.draft,
+                    command_id: None,
+                    value: Some(serde_json::Value::String(edit.draft.clone())),
+                    enabled: true,
+                    disabled_reason: None,
+                    z_layer: ZLayer::Workspace,
+                    ellipsized: false,
+                    full_label: None,
+                },
+            );
         }
-        if enter || tab.is_some() || (resp.lost_focus() && !first_frame) {
-            commit_standard_inline_edit(app, ds, edit.target, edit.draft, fstate.intents);
+        let enter = !first_frame && pressed_key_event_modifiers(ui, Key::Enter).is_some();
+        let tab = if first_frame { None } else { pressed_key_event_modifiers(ui, Key::Tab) };
+        let discard_retry = ui.data(|d| d.get_temp::<bool>(pending_commit_key(&ds.id)).unwrap_or(false));
+        if discard_retry || enter || tab.is_some() || (resp.lost_focus() && !first_frame) {
+            commit_standard_inline_edit(app, ds, edit.target, edit.draft.clone(), fstate.intents);
             if enter {
-                if let Some(c) = app.grid.tool.active {
+                ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
+                if let GridInlineEditTarget::Cell(_) = edit.target
+                    && let Some(c) = app.grid.tool.active
+                {
                     fstate.intents.push_select_grid_cell(GridCellCoord::new((c.row + 1).min(geom.row_count.saturating_sub(1)), c.col, c.subcol));
                 }
-            } else if let Some(mods) = tab
-                && let Some(c) = app.grid.tool.active
-            {
-                let next = step_cell_horiz(geom, Some(c), None, mods.shift);
-                if let (false, Some(nc), _) = next {
-                    fstate.intents.push_select_grid_cell(nc);
+            } else if let Some(mods) = tab {
+                ui.input_mut(|i| {
+                    i.consume_key(Modifiers::NONE, Key::Tab);
+                    i.consume_key(Modifiers::SHIFT, Key::Tab);
+                });
+                if let GridInlineEditTarget::Cell(_) = edit.target
+                    && let Some(c) = app.grid.tool.active
+                {
+                    let next = step_cell_horiz(geom, Some(c), None, mods.shift);
+                    if let (false, Some(nc), _) = next {
+                        fstate.intents.push_select_grid_cell(nc);
+                    }
                 }
+            }
+            if ui.ctx().will_discard() {
+                ui.data_mut(|d| d.insert_temp(pending_commit_key(&ds.id), true));
+                fstate.state.inline_edit = Some(edit);
+            } else {
+                ui.data_mut(|d| d.remove::<bool>(pending_commit_key(&ds.id)));
+                ui.memory_mut(|m| m.surrender_focus(te_id));
+                ui.ctx().request_repaint();
             }
             return;
         }
@@ -282,49 +311,84 @@ pub(super) fn render_multi_inline_editors(ui: &mut Ui, mctx: &MultiGridCtx<'_>, 
             AuxInlineTarget::SheetTitle => String::from("grid.sheet_title"),
         };
         let te_id = ui.make_persistent_id(("multi_aux_inline", &wid));
+        let first_frame = just_focused;
         if matches!(target, AuxInlineTarget::XCell { .. })
-            && (!just_focused || ui.memory(|m| m.has_focus(te_id)))
+            && (!first_frame || ui.memory(|m| m.has_focus(te_id)))
             && let Some(multi_text) = extract_multiline_or_tab_x_input(ui, app)
         {
             commit_aux_inline_edit(app, ds, fstate.aux, &target, multi_text, fstate.intents);
+            ui.data_mut(|d| d.remove::<bool>(pending_aux_commit_key(&ds.id)));
+            return;
+        }
+        let esc = !first_frame && pressed_key_event_modifiers(ui, Key::Escape).is_some();
+        if esc {
+            ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+            ui.data_mut(|d| d.remove::<bool>(pending_aux_commit_key(&ds.id)));
+            ui.memory_mut(|m| m.surrender_focus(te_id));
+            ui.ctx().request_repaint();
             return;
         }
         let resp = ui.put(rect, TextEdit::singleline(&mut draft).id(te_id).desired_width(rect.width()));
-        if just_focused {
+        if first_frame {
             resp.request_focus();
             just_focused = false;
             fstate.aux.suppress_loss_commit_once = true;
+            ui.ctx().request_repaint();
         }
-        record_meta_if_enabled(
-            ui,
-            fstate.meta,
-            fstate.state.record_inspect_meta,
-            &resp,
-            FrameInspectEntryInput {
-                widget_id: &wid,
-                role: "textbox",
-                label: &draft,
-                command_id: None,
-                value: Some(serde_json::Value::String(draft.clone())),
-                enabled: true,
-                disabled_reason: None,
-                z_layer: ZLayer::Workspace,
-                ellipsized: false,
-                full_label: None,
-            },
-        );
-        let esc = pressed_key_event_modifiers(ui, Key::Escape).is_some();
-        let enter = pressed_key_event_modifiers(ui, Key::Enter).is_some();
-        let tab = pressed_key_event_modifiers(ui, Key::Tab);
-        let lost = resp.lost_focus() && !fstate.aux.suppress_loss_commit_once;
+        if !ui.ctx().will_discard() {
+            record_meta_if_enabled(
+                ui,
+                fstate.meta,
+                fstate.state.record_inspect_meta,
+                &resp,
+                FrameInspectEntryInput {
+                    widget_id: &wid,
+                    role: "textbox",
+                    label: &draft,
+                    command_id: None,
+                    value: Some(serde_json::Value::String(draft.clone())),
+                    enabled: true,
+                    disabled_reason: None,
+                    z_layer: ZLayer::Workspace,
+                    ellipsized: false,
+                    full_label: None,
+                },
+            );
+        }
+        let enter = !first_frame && pressed_key_event_modifiers(ui, Key::Enter).is_some();
+        let tab = if first_frame { None } else { pressed_key_event_modifiers(ui, Key::Tab) };
+        let lost = resp.lost_focus() && !first_frame && !fstate.aux.suppress_loss_commit_once;
         fstate.aux.suppress_loss_commit_once = false;
-        if esc {
-            return;
-        }
-        if enter || tab.is_some() || lost {
-            commit_aux_inline_edit(app, ds, fstate.aux, &target, draft, fstate.intents);
-            if enter && let AuxInlineTarget::XCell { row, subcol } = target {
-                fstate.aux.selected_x_cell = Some(((row + 1).min(geom.row_count.saturating_sub(1)), subcol));
+        let discard_retry = ui.data(|d| d.get_temp::<bool>(pending_aux_commit_key(&ds.id)).unwrap_or(false));
+        if discard_retry || enter || tab.is_some() || lost {
+            commit_aux_inline_edit(app, ds, fstate.aux, &target, draft.clone(), fstate.intents);
+            if enter {
+                ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
+                if let AuxInlineTarget::XCell { row, subcol } = target {
+                    fstate.aux.selected_x_cell = Some(((row + 1).min(geom.row_count.saturating_sub(1)), subcol));
+                }
+            } else if let Some(mods) = tab {
+                ui.input_mut(|i| {
+                    i.consume_key(Modifiers::NONE, Key::Tab);
+                    i.consume_key(Modifiers::SHIFT, Key::Tab);
+                });
+                if let AuxInlineTarget::XCell { row, subcol } = target {
+                    let (is_x, nc_opt, nx_opt) = step_cell_horiz(geom, None, Some((row, subcol)), mods.shift);
+                    if is_x {
+                        fstate.aux.selected_x_cell = nx_opt;
+                    } else if let Some(nc) = nc_opt {
+                        fstate.aux.selected_x_cell = None;
+                        fstate.intents.push_select_grid_cell(nc);
+                    }
+                }
+            }
+            if ui.ctx().will_discard() {
+                ui.data_mut(|d| d.insert_temp(pending_aux_commit_key(&ds.id), true));
+                fstate.aux.aux_edit = Some((target, draft, just_focused));
+            } else {
+                ui.data_mut(|d| d.remove::<bool>(pending_aux_commit_key(&ds.id)));
+                ui.memory_mut(|m| m.surrender_focus(te_id));
+                ui.ctx().request_repaint();
             }
             return;
         }

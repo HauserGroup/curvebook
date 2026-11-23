@@ -171,8 +171,7 @@ pub struct WelcomeSchemaDraft {
     pub survival_time_title: String,
     pub survival_event_code: i64,
     pub survival_censored_code: i64,
-    pub parts_check_total: bool,
-    pub mv_role_kinds: [usize; 6],
+    pub mv_role_kinds: Vec<usize>,
     pub selected_template_index: usize,
     pub clone_source_sheet_id: Option<SheetId>,
     pub clone_include_downstream: bool,
@@ -208,8 +207,7 @@ impl Default for WelcomeSchemaDraft {
             survival_time_title: String::from("Time"),
             survival_event_code: 1,
             survival_censored_code: 0,
-            parts_check_total: true,
-            mv_role_kinds: [0, 1, 0, 0, 2, 0],
+            mv_role_kinds: vec![0, 1, 0, 0, 2, 0],
             selected_template_index: 0,
             clone_source_sheet_id: None,
             clone_include_downstream: true,
@@ -232,6 +230,7 @@ pub struct WelcomeHubEguiState {
     pub clone_options_open: bool,
     pub open_file_path_draft: String,
     pub open_file_request_count: u64,
+    pub template_error: Option<String>,
 }
 
 /// Per-frame layout report returned by [`render_welcome_hub`].
@@ -1016,21 +1015,12 @@ fn render_archetype_schema_controls(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx
                 FontId::proportional(tokens.metrics.font_ui_small_pt),
                 tokens.text_muted,
             );
-            if render_check_toggle(
+            render_plain_clipped_label(
                 ui,
-                tokens,
-                cx.meta,
-                CheckToggleSpec {
-                    widget_id: "welcome.pow.check_total",
-                    label: "Normalize / 100% total check",
-                    checked: cx.state.schema.parts_check_total,
-                    enabled,
-                    z_layer,
-                },
-            ) && enabled
-            {
-                cx.state.schema.parts_check_total = !cx.state.schema.parts_check_total;
-            }
+                "Analysis computes proportions against column sums automatically.",
+                FontId::proportional(tokens.metrics.font_ui_small_pt),
+                tokens.text_muted,
+            );
             render_dimension_steppers(ui, cx, "Series", "Categories", 1..=16);
         }
         WelcomeArchetypeChoice::MultipleVariables => {
@@ -1045,7 +1035,10 @@ fn render_archetype_schema_controls(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx
                 z_layer,
                 cx.meta,
             );
-            let shown_vars = cx.state.schema.cols.clamp(1, 6);
+            let shown_vars = cx.state.schema.cols.clamp(1, 32);
+            if cx.state.schema.mv_role_kinds.len() < shown_vars {
+                cx.state.schema.mv_role_kinds.resize(shown_vars, 0);
+            }
             let roles = [("Cont", "Continuous"), ("Cat", "Categorical"), ("Lbl", "Label")];
             let chip_w = ((content_w - 58.0) / 3.0).clamp(32.0, 68.0);
             for v_idx in 0..shown_vars {
@@ -1302,12 +1295,33 @@ fn render_middle_starter_templates(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<
         {
             state.schema.selected_template_index = idx;
             state.schema.archetype = tpl.archetype;
+            state.template_error = None;
         }
         ui.add_space(2.0);
     }
     if let Some(chosen) = STARTER_TEMPLATES.get(sel) {
         ui.add_space(4.0);
         render_plain_clipped_label(ui, chosen.summary, FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted);
+    }
+    if let Some(ref err_msg) = state.template_error {
+        ui.add_space(4.0);
+        let err_resp = ui.add(egui::Label::new(egui::RichText::new(err_msg).small().color(tokens.link_red)).wrap());
+        meta.record_response(
+            ui,
+            &err_resp,
+            FrameInspectEntryInput {
+                widget_id: "welcome.template.error",
+                role: "text",
+                label: err_msg,
+                command_id: None,
+                value: None,
+                enabled: true,
+                disabled_reason: None,
+                z_layer,
+                ellipsized: false,
+                full_label: None,
+            },
+        );
     }
     ui.add_space(6.0);
     render_plain_clipped_label(ui, tr(locale, "welcome.field.title"), FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted);
@@ -1654,19 +1668,27 @@ fn dispatch_welcome_primary_action(app: &UiApp, state: &mut WelcomeHubEguiState,
             intents.push_set_launcher_open(false);
         }
         WelcomeLeftMode::StarterTemplates => {
-            if let Some(tpl) = STARTER_TEMPLATES.get(state.schema.selected_template_index)
-                && let Ok(bytes) = build_starter_template_bytes(tpl.id)
-            {
-                let b64 = encode_base64(&bytes);
-                let title_trim = state.schema.title.trim();
-                let mut obj = json!({ "bytes_base64": b64 });
-                if !title_trim.is_empty()
-                    && let Some(map) = obj.as_object_mut()
-                {
-                    map.insert(String::from("title"), json!(title_trim));
+            let Some(tpl) = STARTER_TEMPLATES.get(state.schema.selected_template_index) else {
+                state.template_error = Some(format!("Starter template index {} is unavailable.", state.schema.selected_template_index));
+                return;
+            };
+            match build_starter_template_bytes(tpl.id) {
+                Ok(bytes) => {
+                    state.template_error = None;
+                    let b64 = encode_base64(&bytes);
+                    let title_trim = state.schema.title.trim();
+                    let mut obj = json!({ "bytes_base64": b64 });
+                    if !title_trim.is_empty()
+                        && let Some(map) = obj.as_object_mut()
+                    {
+                        map.insert(String::from("title"), json!(title_trim));
+                    }
+                    intents.push_engine("project.instantiateTemplate", obj);
+                    intents.push_set_launcher_open(false);
                 }
-                intents.push_engine("project.instantiateTemplate", obj);
-                intents.push_set_launcher_open(false);
+                Err(err) => {
+                    state.template_error = Some(format!("Failed to load starter template `{}`: {err}", tpl.title));
+                }
             }
         }
         WelcomeLeftMode::ClonePipeline => {
@@ -1967,6 +1989,8 @@ fn build_empty_create_params(arch: WelcomeArchetypeChoice, schema: &WelcomeSchem
             WelcomeArchetypeChoice::Survival => {
                 let time_title = if schema.survival_time_kind == 1 { "Date" } else { schema.survival_time_title.as_str() };
                 map.insert(String::from("time_title"), json!(time_title));
+                map.insert(String::from("event_code"), json!(schema.survival_event_code));
+                map.insert(String::from("censored_code"), json!(schema.survival_censored_code));
             }
             WelcomeArchetypeChoice::PartsOfWhole => {
                 map.insert(String::from("cols"), json!(schema.cols.clamp(1, 16)));
@@ -2053,6 +2077,8 @@ fn dispatch_sample_creation(app: &UiApp, arch: WelcomeArchetypeChoice, schema: &
             }
             TableArchetype::Survival(t) => {
                 map.insert(String::from("time_title"), json!(t.time_title));
+                map.insert(String::from("event_code"), json!(t.event_code));
+                map.insert(String::from("censored_code"), json!(t.censored_code));
             }
             TableArchetype::MultipleVariables(t) => {
                 let vars: Vec<Value> = t.variables.iter().map(|v| json!({ "title": v.title, "role": v.role })).collect();

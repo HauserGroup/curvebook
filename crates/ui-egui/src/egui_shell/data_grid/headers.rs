@@ -394,8 +394,8 @@ fn render_row_titles_header_block(
             enabled: !blocked,
             disabled_reason: blocked.then_some("modal dialog is active"),
             z_layer: ZLayer::Workspace,
-            ellipsized: elided && false,
-            full_label: None,
+            ellipsized: elided,
+            full_label: elided.then_some(collapse_lbl),
         },
     );
 }
@@ -631,7 +631,25 @@ pub(super) fn column_subcolumn_role_label(mode: SubcolumnMode, subcol: usize, lo
             2 => grid_tr(locale, "w5.grid_core.n_col", "N").to_owned(),
             _ => format!("Y{}", subcol + 1),
         },
-        _ => {
+        SubcolumnMode::MeanLowHigh => match subcol {
+            0 => grid_tr(locale, "w5.grid_core.mean_col", "Mean").to_owned(),
+            1 => String::from("-Err"),
+            2 => String::from("+Err"),
+            _ => format!("Y{}", subcol + 1),
+        },
+        SubcolumnMode::UpperLowerLimits => match subcol {
+            0 => grid_tr(locale, "w5.grid_core.mean_col", "Mean").to_owned(),
+            1 => grid_tr(locale, "w5.grid_core.min_col", "Min").to_owned(),
+            2 => grid_tr(locale, "w5.grid_core.max_col", "Max").to_owned(),
+            _ => format!("Y{}", subcol + 1),
+        },
+        SubcolumnMode::MedianIqr => match subcol {
+            0 => grid_tr(locale, "w5.grid_core.median_col", "Median").to_owned(),
+            1 => String::from("Q1"),
+            2 => String::from("Q3"),
+            _ => format!("Y{}", subcol + 1),
+        },
+        SubcolumnMode::RawReplicates(_) => {
             if subcol == 0 {
                 String::from("Y")
             } else {
@@ -696,8 +714,10 @@ pub(super) fn render_multi_corner(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: 
 
     let sheet_btn_r = Rect::from_min_max(pos2(x_mid, y1), pos2(x_end, y2));
     if sheet_btn_r.width() > 8.0 {
-        let st_resp = ui.interact(sheet_btn_r, ui.make_persistent_id("grid.sheet_title"), if blocked { Sense::hover() } else { Sense::click() });
-        if st_resp.hovered() && !blocked {
+        let sheet_editable = !blocked && !ds.frozen;
+        let st_resp =
+            ui.interact(sheet_btn_r, ui.make_persistent_id("grid.sheet_title"), if sheet_editable { Sense::click() } else { Sense::hover() });
+        if st_resp.hovered() && sheet_editable {
             ui.painter().rect_filled(sheet_btn_r, 0.0, tokens.hover_bg);
         }
         let (ellip, _) = render_ellipsized_text(
@@ -710,7 +730,7 @@ pub(super) fn render_multi_corner(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: 
             fstate.state.ellipsized_headers += 1;
         }
         let acc_title = ds.title.clone();
-        st_resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, !blocked, acc_title.clone()));
+        st_resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, sheet_editable, acc_title.clone()));
         record_meta_if_enabled(
             ui,
             fstate.meta,
@@ -722,14 +742,20 @@ pub(super) fn render_multi_corner(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: 
                 label: &ds.title,
                 command_id: Some("sheet.rename"),
                 value: Some(serde_json::Value::String(ds.title.clone())),
-                enabled: !blocked,
-                disabled_reason: blocked.then_some("modal dialog is active"),
+                enabled: sheet_editable,
+                disabled_reason: if blocked {
+                    Some("modal dialog is active")
+                } else if ds.frozen {
+                    Some("Data sheet is frozen (read-only).")
+                } else {
+                    None
+                },
                 z_layer: ZLayer::Workspace,
                 ellipsized: ellip,
                 full_label: ellip.then_some(ds.title.as_str()),
             },
         );
-        if st_resp.clicked() && !blocked {
+        if st_resp.clicked() && sheet_editable {
             fstate.state.inline_edit = None;
             fstate.aux.aux_edit = Some((AuxInlineTarget::SheetTitle, ds.title.clone(), true));
         }
@@ -947,8 +973,9 @@ fn render_multi_x_headers(hdr_ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut
         let x_title = x_column_title(&ds.archetype, sx);
         if t2_r.width() > 2.0 {
             let wid = format!("grid.x_title.{sx}");
-            let resp = hdr_ui.interact(t2_r, hdr_ui.make_persistent_id(&wid), if blocked { Sense::hover() } else { Sense::click() });
-            if resp.hovered() && !blocked {
+            let x_title_editable = !blocked && !ds.frozen && sx == 0;
+            let resp = hdr_ui.interact(t2_r, hdr_ui.make_persistent_id(&wid), if x_title_editable { Sense::click() } else { Sense::hover() });
+            if resp.hovered() && x_title_editable {
                 hdr_ui.painter().rect_filled(t2_r, 0.0, tokens.hover_bg);
             }
             render_ellipsized_text(
@@ -958,7 +985,7 @@ fn render_multi_x_headers(hdr_ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut
                 CellTextStyle::plain(FontId::proportional(12.0), tokens.accent, Align::Center),
             );
             let acc = format!("X Title: {x_title}");
-            resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, !blocked, acc.clone()));
+            resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, x_title_editable, acc.clone()));
             record_meta_if_enabled(
                 hdr_ui,
                 fstate.meta,
@@ -970,21 +997,29 @@ fn render_multi_x_headers(hdr_ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut
                     label: &x_title,
                     command_id: Some("table.setTitles"),
                     value: Some(serde_json::Value::String(x_title.clone())),
-                    enabled: !blocked,
-                    disabled_reason: blocked.then_some("modal dialog is active"),
+                    enabled: x_title_editable,
+                    disabled_reason: if blocked {
+                        Some("modal dialog is active")
+                    } else if ds.frozen {
+                        Some("Data sheet is frozen (read-only).")
+                    } else if sx != 0 {
+                        Some("X error subcolumn title is derived.")
+                    } else {
+                        None
+                    },
                     z_layer: ZLayer::Workspace,
                     ellipsized: false,
                     full_label: None,
                 },
             );
-            if resp.clicked() && !blocked && sx == 0 {
+            if resp.clicked() && x_title_editable {
                 fstate.state.inline_edit = None;
                 fstate.aux.aux_edit = Some((AuxInlineTarget::XTitle { subcol: sx }, x_title, true));
             }
         }
 
         let t3_r = Rect::from_min_max(pos2(sx_x0, y3), pos2(sx_x1, y4)).intersect(hdr_rect);
-        let x_sub_lbl = x_subcolumn_label(&ds.archetype, sx);
+        let x_sub_lbl = x_subcolumn_label(&ds.archetype, sx, &mctx.app.locale);
         if t3_r.width() > 2.0 {
             let swid = format!("grid.subcol_hdr.x.{sx}");
             let sresp = hdr_ui.interact(t3_r, hdr_ui.make_persistent_id(&swid), Sense::hover());
@@ -1115,8 +1150,9 @@ fn render_multi_data_col_headers(
         let col_title = data_column_title(&ds.archetype, col);
         if t2_r.width() > 4.0 && fstate.state.inline_edit.as_ref().is_none_or(|e| e.target != GridInlineEditTarget::ColumnTitle { col }) {
             let wid = format!("grid.col_title.{col}");
-            let resp = hdr_ui.interact(t2_r, hdr_ui.make_persistent_id(&wid), if blocked { Sense::hover() } else { Sense::click() });
-            if resp.hovered() && !blocked {
+            let col_editable = !blocked && !ds.frozen;
+            let resp = hdr_ui.interact(t2_r, hdr_ui.make_persistent_id(&wid), if col_editable { Sense::click() } else { Sense::hover() });
+            if resp.hovered() && col_editable {
                 hdr_ui.painter().rect_filled(t2_r, 0.0, tokens.hover_bg);
             }
             let (ellip, _) = render_ellipsized_text(
@@ -1129,7 +1165,7 @@ fn render_multi_data_col_headers(
                 fstate.state.ellipsized_headers += 1;
             }
             let acc = col_title.clone();
-            resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, !blocked, acc.clone()));
+            resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, col_editable, acc.clone()));
             record_meta_if_enabled(
                 hdr_ui,
                 fstate.meta,
@@ -1141,14 +1177,20 @@ fn render_multi_data_col_headers(
                     label: &col_title,
                     command_id: Some("table.setTitles"),
                     value: Some(serde_json::Value::String(col_title.clone())),
-                    enabled: !blocked,
-                    disabled_reason: blocked.then_some("modal dialog is active"),
+                    enabled: col_editable,
+                    disabled_reason: if blocked {
+                        Some("modal dialog is active")
+                    } else if ds.frozen {
+                        Some("Data sheet is frozen (read-only).")
+                    } else {
+                        None
+                    },
                     z_layer: ZLayer::Workspace,
                     ellipsized: ellip,
                     full_label: ellip.then_some(col_title.as_str()),
                 },
             );
-            if resp.clicked() && !blocked {
+            if resp.clicked() && col_editable {
                 fstate.aux.aux_edit = None;
                 begin_inline_edit(hdr_ui, fstate.state, GridInlineEditTarget::ColumnTitle { col }, col_title);
             }
@@ -1195,9 +1237,10 @@ fn render_subcolumn_tier3_cells(
         }
         let sub_lbl = data_subcolumn_header_label(ds, col, subcol, &app.locale);
         let swid = if is_nested { format!("grid.subcol_title.{col}.{subcol}") } else { format!("grid.subcol_hdr.{col}.{subcol}") };
-        let sense = if is_nested && !blocked { Sense::click() } else { Sense::hover() };
+        let sub_editable = is_nested && !blocked && !ds.frozen;
+        let sense = if sub_editable { Sense::click() } else { Sense::hover() };
         let sresp = hdr_ui.interact(t3_r, hdr_ui.make_persistent_id(&swid), sense);
-        if is_nested && sresp.hovered() && !blocked {
+        if is_nested && sresp.hovered() && sub_editable {
             hdr_ui.painter().rect_filled(t3_r, 0.0, tokens.hover_bg);
         }
         let fg = if is_nested { tokens.text_primary } else { tokens.text_muted };
@@ -1210,7 +1253,7 @@ fn render_subcolumn_tier3_cells(
         let acc_s = sub_lbl.clone();
         let role = if is_nested { egui::Role::Button } else { egui::Role::ColumnHeader };
         let role_str = if is_nested { "button" } else { "columnheader" };
-        sresp.widget_info(move || WidgetInfo::labeled(role, !is_nested || !blocked, acc_s.clone()));
+        sresp.widget_info(move || WidgetInfo::labeled(role, !is_nested || sub_editable, acc_s.clone()));
         record_meta_if_enabled(
             hdr_ui,
             fstate.meta,
@@ -1222,14 +1265,20 @@ fn render_subcolumn_tier3_cells(
                 label: &sub_lbl,
                 command_id: is_nested.then_some("table.setSubcolumnTitles"),
                 value: is_nested.then(|| serde_json::Value::String(sub_lbl.clone())),
-                enabled: !is_nested || !blocked,
-                disabled_reason: (is_nested && blocked).then_some("modal dialog is active"),
+                enabled: !is_nested || sub_editable,
+                disabled_reason: if is_nested && blocked {
+                    Some("modal dialog is active")
+                } else if is_nested && ds.frozen {
+                    Some("Data sheet is frozen (read-only).")
+                } else {
+                    None
+                },
                 z_layer: ZLayer::Workspace,
                 ellipsized: false,
                 full_label: None,
             },
         );
-        if is_nested && sresp.clicked() && !blocked {
+        if sub_editable && sresp.clicked() {
             fstate.state.inline_edit = None;
             fstate.aux.aux_edit = Some((AuxInlineTarget::SubcolumnTitle { col, subcol }, sub_lbl, true));
         }
@@ -1242,7 +1291,7 @@ fn render_subcolumn_tier3_cells(
 fn x_column_title(arch: &TableArchetype, subcol: usize) -> String {
     match arch {
         TableArchetype::Xy(xy) => {
-            if subcol == 1 {
+            if subcol >= 1 {
                 String::from("±X Error")
             } else {
                 xy.x_title.clone()
@@ -1253,12 +1302,12 @@ fn x_column_title(arch: &TableArchetype, subcol: usize) -> String {
     }
 }
 
-fn x_subcolumn_label(arch: &TableArchetype, subcol: usize) -> String {
+fn x_subcolumn_label(arch: &TableArchetype, subcol: usize, locale: &str) -> String {
     match arch {
         TableArchetype::Xy(xy) => match &xy.x_mode {
             XColumnMode::Numbers { subcolumn_mode } => {
                 if subcolumn_mode.subcolumn_count() > 1 && subcol > 0 {
-                    String::from("X Error")
+                    column_subcolumn_role_label(*subcolumn_mode, subcol, locale)
                 } else {
                     String::from("X")
                 }
@@ -1278,7 +1327,7 @@ fn x_subcolumn_label(arch: &TableArchetype, subcol: usize) -> String {
 }
 
 fn data_super_column_label(arch: &TableArchetype, col: usize) -> String {
-    let letter = (b'A' + u8::try_from(col % 26).unwrap_or(0)) as char;
+    let letter = default_column_label(col);
     match arch {
         TableArchetype::Grouped(g) if !g.column_factor_title.trim().is_empty() => format!("{} {letter}", g.column_factor_title),
         TableArchetype::Contingency(c) if !c.column_factor_title.trim().is_empty() => format!("{} {letter}", c.column_factor_title),
