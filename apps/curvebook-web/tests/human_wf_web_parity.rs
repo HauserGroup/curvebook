@@ -153,7 +153,7 @@ fn web_human_wf50_cld_five_stage_keyboard_ime_and_export_parity() -> TestRes {
     let _ = session
         .handle_event(WebBridgeEvent::ExecuteCommand {
             command_id: String::from("sheet.createData"),
-            params: json!({ "sheet_id": "ds-cld", "kind": "grouped", "title": "CLD Table", "rows": 3, "cols": 2, "subcolumns": 2, "auto_family": false }),
+            params: json!({ "sheet_id": "ds-cld", "kind": "grouped", "title": "CLD Table", "rows": 3, "cols": 2, "replicates": 2, "auto_family": false }),
         })
         .map_err(|e| e.to_string())?;
 

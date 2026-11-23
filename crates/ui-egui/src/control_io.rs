@@ -1,6 +1,8 @@
 //! Local JSON-lines control channel and publication clipboard/print payload builders
 //! (`docs/control-protocol.md`, `docs/evidence/platforms.md`).
 
+pub mod host_routing;
+
 use std::fmt;
 use std::io::{self, BufRead, Write};
 #[cfg(not(target_arch = "wasm32"))]

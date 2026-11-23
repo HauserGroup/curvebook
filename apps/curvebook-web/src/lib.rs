@@ -298,9 +298,9 @@ impl WebWorkspaceHost {
         }
         let text = std::str::from_utf8(bytes).map_err(|err| format!("delimited bytes are not valid UTF-8: {err}"))?;
         let mut params = json!({
-            "text": text,
+            "csv": text,
             "title": title.unwrap_or(if is_tsv { "Imported TSV" } else { "Imported CSV" }),
-            "kind": kind.unwrap_or("xy"),
+            "archetype": kind.unwrap_or("xy"),
         });
         if is_tsv && let Some(obj) = params.as_object_mut() {
             obj.insert(String::from("delimiter"), Value::String(String::from("\t")));
@@ -622,7 +622,7 @@ mod tests {
 
         let sheet_id = summary.active_sheet_id.expect("imported CSV becomes active sheet");
         let graph =
-            host.execute_command("graph.create", json!({ "source_sheet_id": sheet_id, "title": "Dose Plot" })).expect("graph.create must succeed");
+            host.execute_command("graph.create", json!({ "data_sheet_id": sheet_id, "title": "Dose Plot" })).expect("graph.create must succeed");
         assert!(graph.get("payload").is_some());
         assert_eq!(host.app().document().graph_sheets.len(), 1);
         host

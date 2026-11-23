@@ -621,9 +621,7 @@ fn write_control_token_file(path: &Path, auth: &ControlAuth) -> Result<(), Strin
     .map_err(|err| format!("failed to write control token file `{}`: {err}", path.display()))
 }
 
-fn capture_control_pref_fingerprint(app: &UiApp) -> (String, UiThemeMode, u32, Option<String>) {
-    (normalize_locale(&app.locale).to_owned(), app.theme.mode, app.ui_scale().to_bits(), app.shortcuts.export_overrides_json().ok())
-}
+use curvebook_ui_egui::control_io::host_routing::{HostPrefFingerprint, capture_pref_fingerprint};
 
 fn theme_mode_pref_str(mode: UiThemeMode) -> &'static str {
     match mode {
@@ -636,16 +634,16 @@ fn theme_mode_pref_str(mode: UiThemeMode) -> &'static str {
 fn maybe_persist_changed_control_prefs(
     app: &UiApp,
     ctx: &ControlPostRequestContext<'_>,
-    prev_prefs: &mut Option<(String, UiThemeMode, u32, Option<String>)>,
+    prev_prefs: &mut Option<HostPrefFingerprint>,
     app_paths: &AppPaths,
     no_prefs: bool,
 ) {
     if no_prefs {
         return;
     }
-    let baseline = prev_prefs.get_or_insert_with(|| capture_control_pref_fingerprint(app));
+    let baseline = prev_prefs.get_or_insert_with(|| capture_pref_fingerprint(app));
     if ctx.request_ok && !ctx.rolled_back {
-        let current = capture_control_pref_fingerprint(app);
+        let current = capture_pref_fingerprint(app);
         if *baseline != current {
             *baseline = current;
             persist_window_preferences_best_effort(app, app_paths, false);
@@ -669,10 +667,10 @@ fn serve_control_with_pref_persistence<F>(win: &mut DesktopWindowSession, app_pa
 where
     F: FnMut(&mut UiApp, &mut dyn FnMut(&UiApp, &ControlPostRequestContext<'_>) -> Result<(), String>) -> std::io::Result<()>,
 {
-    let mut prev_prefs: Option<(String, UiThemeMode, u32, Option<String>)> = None;
+    let mut prev_prefs: Option<HostPrefFingerprint> = None;
     win.with_control_journal_hook(|app, on_post_request| {
         if !no_prefs && prev_prefs.is_none() {
-            prev_prefs = Some(capture_control_pref_fingerprint(app));
+            prev_prefs = Some(capture_pref_fingerprint(app));
         }
         let mut persist_after_control = |app: &UiApp, ctx: &ControlPostRequestContext<'_>| -> Result<(), String> {
             on_post_request(app, ctx)?;

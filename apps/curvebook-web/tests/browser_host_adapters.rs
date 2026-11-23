@@ -934,11 +934,11 @@ fn audit_123_4_explicit_sheet_targeting_validation_and_clipboard_isolation() {
     let info_only_id = created_2["payload"]["info_sheet_id"].as_str().expect("second info_id").to_owned();
     session.host.execute_command("table.setXCells", json!({ "sheet_id": data_2_id, "values": [10.0, 20.0] })).expect("set x2");
     session.host.execute_command("table.setCell", json!({ "sheet_id": data_2_id, "row": 0, "col": 0, "value": 555.0 })).expect("set y2");
-    session.host.execute_command("info.setNote", json!({ "sheet_id": data_2_id, "note": "Study Notes Line" })).expect("set info note");
+    session.host.execute_command("info.setNote", json!({ "sheet_id": data_2_id, "text": "Study Notes Line" })).expect("set info note");
     session.host.execute_command("layout.create", json!({ "sheet_id": "layout-only", "title": "Summary Layout" })).expect("create layout sheet");
     session
         .host
-        .execute_command("analysis.run", json!({ "source_sheet": data_id, "sheet_id": "res-only", "kind": "linear_regression" }))
+        .execute_command("analysis.run", json!({ "source_sheet_id": data_id, "sheet_id": "res-only", "kind": "linear_regression" }))
         .expect("create result sheet");
 
     // 1. Export CSV with nonexistent or GraphSheet ID returns WebAdapterError::Validation (no silent fallback).

@@ -21,19 +21,22 @@ use curvebook_format::{
     CrashRecoveryJournal, DirectoryJournalBackend, FormatKind, FormatRegistry, ImportOptions, JournalBackend, JournalRecoveryWarning,
     MAX_ARCHIVE_FILE_BYTES, RecoveryReport, instantiate_template_bytes, is_unpacked_project_dir,
 };
+use curvebook_ui_egui::control_io::host_routing::{
+    active_data_sheet_id, capture_pref_fingerprint, is_read_only_control_method, next_locale_code, next_preview_filter_name, next_theme_mode_name,
+    resolve_any_sheet_id, resolve_data_sheet_id, resolve_graph_sheet_id, resolve_info_sheet_id, resolve_layout_sheet_id, resolve_mv_sheet_id,
+    resolve_renderable_sheet_id, resolve_result_sheet_id, resolve_uninit_or_graph_sheet_id, resolve_xy_or_data_sheet_id, sheet_id_obj_or_empty,
+    split_variant_command,
+};
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::egui_shell::UiBackend;
 use curvebook_ui_egui::grid_view::ImportOriginKind;
-use curvebook_ui_egui::interaction::{
-    InlineEditorTarget, KeyModifiers, PointerButton, UiEventOutcome, UiInputEvent, ViewportMetrics, build_shortcut_candidates,
-};
+use curvebook_ui_egui::interaction::{InlineEditorTarget, KeyModifiers, UiEventOutcome, UiInputEvent, ViewportMetrics, build_shortcut_candidates};
 use curvebook_ui_egui::menus::{CuratedMenuNode, TOOLBAR_BUTTONS, curated_menu_bar, is_desktop_host_routed_command};
 use curvebook_ui_egui::theme::UiThemeMode;
 use curvebook_ui_egui::workspace_nav::WelcomeMode;
 use curvebook_ui_egui::{
-    BETA_ACTIVE_LOCALES, CanvasPreviewFilter, ClipboardBundle, ControlAuth, ControlPostRequestContext, OsAdapterStatus, UiApp, dispatch_ui_command,
-    is_http_request_line, normalize_beta_gui_locale, read_os_pasteboard, serve_control_stream_with_quit_and_hook, tr, write_os_clipboard_bundle,
-    write_os_pasteboard,
+    ClipboardBundle, ControlAuth, ControlPostRequestContext, OsAdapterStatus, UiApp, dispatch_ui_command, is_http_request_line,
+    normalize_beta_gui_locale, read_os_pasteboard, serve_control_stream_with_quit_and_hook, tr, write_os_clipboard_bundle, write_os_pasteboard,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -133,13 +136,6 @@ pub struct DesktopMenuChromeState {
     pub locale: String,
     pub sections: Vec<DesktopMenuSection>,
     pub dispatched_actions: Vec<String>,
-}
-
-/// Active IME preedit composition state prior to [`DesktopHostEvent::ImeCommit`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ImePreeditState {
-    pub text: String,
-    pub cursor: Option<(usize, usize)>,
 }
 
 mod ui_backend_serde {
@@ -269,10 +265,6 @@ pub struct DesktopFrameOutput {
     pub window_title: String,
 }
 
-const fn default_click_count() -> u8 {
-    1
-}
-
 /// Native windowing / OS input events processed by [`DesktopHostRuntime::dispatch`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DesktopHostEvent {
@@ -287,10 +279,6 @@ pub enum DesktopHostEvent {
         #[serde(default)]
         force: bool,
     },
-    AppQuitRequested {
-        #[serde(default)]
-        force: bool,
-    },
     WindowFocused {
         window_id: DesktopWindowId,
     },
@@ -302,25 +290,6 @@ pub enum DesktopHostEvent {
     ScaleFactorChanged {
         window_id: DesktopWindowId,
         scale_factor: f32,
-    },
-    PointerMoved {
-        window_id: DesktopWindowId,
-        x_pt: f64,
-        y_pt: f64,
-        #[serde(default)]
-        modifiers: KeyModifiers,
-    },
-    PointerButton {
-        window_id: DesktopWindowId,
-        x_pt: f64,
-        y_pt: f64,
-        #[serde(default)]
-        button: PointerButton,
-        pressed: bool,
-        #[serde(default = "default_click_count")]
-        click_count: u8,
-        #[serde(default)]
-        modifiers: KeyModifiers,
     },
     MouseWheel {
         window_id: DesktopWindowId,
@@ -354,16 +323,6 @@ pub enum DesktopHostEvent {
         modifiers: KeyModifiers,
         #[serde(default)]
         text: Option<String>,
-    },
-    ImePreedit {
-        window_id: DesktopWindowId,
-        text: String,
-        #[serde(default)]
-        cursor: Option<(usize, usize)>,
-    },
-    ImeCommit {
-        window_id: DesktopWindowId,
-        text: String,
     },
     FileHovered {
         window_id: DesktopWindowId,
@@ -447,16 +406,6 @@ fn file_stem_title(path: &Path) -> String {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map_or_else(|| String::from("Imported Table"), ToOwned::to_owned)
-}
-
-struct PointerButtonInput {
-    window_id: DesktopWindowId,
-    x_pt: f64,
-    y_pt: f64,
-    button: PointerButton,
-    pressed: bool,
-    click_count: u8,
-    modifiers: KeyModifiers,
 }
 
 enum LoadedPathPayload {
@@ -799,19 +748,7 @@ pub fn claim_isolated_journal_dir(root: &Path, new_instance: bool, window_id: De
 }
 
 fn is_readonly_control_method(method: &str) -> bool {
-    matches!(
-        method,
-        "ping"
-            | "command.list"
-            | "doc.inspect"
-            | "doc.export"
-            | "render.svg"
-            | "render.pdf"
-            | "render.preview"
-            | "ui.state"
-            | "state.snapshot"
-            | "app.quit"
-    )
+    is_read_only_control_method(method) || method == "app.quit"
 }
 
 fn apply_control_journal_steps(
@@ -1057,9 +994,7 @@ pub struct DesktopWindowSession {
     recovered_from_crash: bool,
     recovery_warnings: Vec<JournalRecoveryWarning>,
     hovered_files: Vec<PathBuf>,
-    ime_preedit: Option<ImePreeditState>,
     coasting_active: bool,
-    last_pointer_pt: Option<[f64; 2]>,
     last_frame: Option<DesktopFrameOutput>,
 }
 
@@ -1133,12 +1068,6 @@ impl DesktopWindowSession {
     #[must_use]
     pub fn hovered_files(&self) -> &[PathBuf] {
         &self.hovered_files
-    }
-
-    /// Active IME preedit text and cursor span prior to [`DesktopHostEvent::ImeCommit`].
-    #[must_use]
-    pub fn ime_preedit(&self) -> Option<&ImePreeditState> {
-        self.ime_preedit.as_ref()
     }
 
     /// Whether inertial trackpad momentum coasting is actively ticking for this window.
@@ -1324,26 +1253,11 @@ impl DesktopWindowSession {
             maybe_renew_journal_lease_periodically(journal);
         }
         let started = Instant::now();
-        let saved_preedit_snapshot = if let Some(preedit) = &self.ime_preedit
-            && self.app.inline_editor.active
-            && !preedit.text.is_empty()
-        {
-            let snapshot = (self.app.inline_editor.buffer.clone(), self.app.inline_editor.caret_byte, self.app.grid.tool.editing_buffer.clone());
-            self.app.inline_editor.insert_text(&preedit.text);
-            Some(snapshot)
-        } else {
-            None
-        };
-
         let target = self.viewport.to_render_target_spec(BASE_LOGICAL_DPI);
-        let raster_res = self.app.render_egui_shell_rgba(target, curvebook_ui_egui::ScreenshotRegionTarget::FullWindow);
-        if let Some((orig_buf, orig_caret, orig_grid_buf)) = saved_preedit_snapshot {
-            self.app.inline_editor.buffer = orig_buf;
-            self.app.inline_editor.caret_byte = orig_caret;
-            self.app.grid.tool.editing_buffer = orig_grid_buf;
-        }
-
-        let raster = raster_res.map_err(|err| format!("egui rasterize failed: {err}"))?;
+        let raster = self
+            .app
+            .render_egui_shell_rgba(target, curvebook_ui_egui::ScreenshotRegionTarget::FullWindow)
+            .map_err(|err| format!("egui rasterize failed: {err}"))?;
         let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
         #[allow(clippy::cast_possible_truncation)]
         let scale_factor = self.viewport.clamped_scale_factor() as f32;
@@ -1452,13 +1366,6 @@ impl StubNativeFileDialogAdapter {
     pub fn with_response(self, command_id: impl Into<String>, path: Option<PathBuf>) -> Self {
         self.push_response(command_id, path);
         self
-    }
-
-    /// Enqueue a fallback FIFO response used when no keyed response matches `request.command_id`.
-    pub fn enqueue(&self, path: Option<PathBuf>) {
-        if let Ok(mut guard) = self.state.write() {
-            guard.queued_responses.push_back(path);
-        }
     }
 
     /// Return a snapshot of every [`NativeFileDialogRequest`] received by this adapter.
@@ -2131,10 +2038,6 @@ impl DesktopHostRuntime {
         }
     }
 
-    fn capture_pref_fingerprint(app: &UiApp) -> (String, curvebook_ui_egui::UiThemeMode, u32, String) {
-        (app.locale.clone(), app.theme.mode, app.ui_scale().to_bits(), app.shortcuts.export_overrides_json().unwrap_or_default())
-    }
-
     /// Persist `preferences.json` for `window_id` when a persistence hook is attached.
     pub fn notify_preferences_changed(&mut self, window_id: DesktopWindowId) {
         self.persist_window_preferences(window_id);
@@ -2267,12 +2170,6 @@ impl DesktopHostRuntime {
     #[must_use]
     pub fn focused_window(&self) -> Option<&DesktopWindowSession> {
         self.focused_window.and_then(|id| self.windows.get(&id))
-    }
-
-    /// Mutable reference to the currently focused window, if any.
-    pub fn focused_window_mut(&mut self) -> Option<&mut DesktopWindowSession> {
-        let id = self.focused_window?;
-        self.windows.get_mut(&id)
     }
 
     /// Last plain/TSV/SVG text copied via [`DesktopHostEvent::ClipboardCopy`].
@@ -2486,9 +2383,7 @@ impl DesktopHostRuntime {
             recovered_from_crash,
             recovery_warnings,
             hovered_files: Vec::new(),
-            ime_preedit: None,
             coasting_active: false,
-            last_pointer_pt: None,
             last_frame: None,
         };
         self.windows.insert(id, win);
@@ -2522,14 +2417,9 @@ impl DesktopHostRuntime {
                 self.persist_window_preferences(window_id);
                 self.handle_window_close_requested(window_id, force)
             }
-            DesktopHostEvent::AppQuitRequested { force } => self.request_app_quit(None, force),
             DesktopHostEvent::WindowFocused { window_id } => self.handle_window_focused(window_id),
             DesktopHostEvent::Resized { window_id, width_px, height_px } => self.handle_resized(window_id, width_px, height_px),
             DesktopHostEvent::ScaleFactorChanged { window_id, scale_factor } => self.handle_scale_factor_changed(window_id, scale_factor),
-            DesktopHostEvent::PointerMoved { window_id, x_pt, y_pt, modifiers } => self.handle_pointer_moved(window_id, x_pt, y_pt, modifiers),
-            DesktopHostEvent::PointerButton { window_id, x_pt, y_pt, button, pressed, click_count, modifiers } => {
-                self.handle_pointer_button(PointerButtonInput { window_id, x_pt, y_pt, button, pressed, click_count, modifiers })
-            }
             DesktopHostEvent::MouseWheel { window_id, x_pt, y_pt, delta_x, delta_y, modifiers } => {
                 self.handle_mouse_wheel(window_id, x_pt, y_pt, delta_x, delta_y, modifiers)
             }
@@ -2542,8 +2432,6 @@ impl DesktopHostRuntime {
             DesktopHostEvent::KeyboardInput { window_id, key, pressed, modifiers, text } => {
                 self.handle_keyboard_input(window_id, key, pressed, modifiers, text)
             }
-            DesktopHostEvent::ImePreedit { window_id, text, cursor } => self.handle_ime_preedit(window_id, text, cursor),
-            DesktopHostEvent::ImeCommit { window_id, text } => self.handle_ime_commit(window_id, text),
             DesktopHostEvent::FileHovered { window_id, paths } => self.handle_file_hovered(window_id, paths),
             DesktopHostEvent::FileHoverCancelled { window_id } => self.handle_file_hover_cancelled(window_id),
             DesktopHostEvent::FileDropped { window_id, path } => self.handle_file_dropped(window_id, path),
@@ -2715,42 +2603,6 @@ impl DesktopHostRuntime {
             command_result: ui_out.command_result,
             ..Default::default()
         })
-    }
-
-    fn handle_pointer_moved(
-        &mut self,
-        window_id: DesktopWindowId,
-        x_pt: f64,
-        y_pt: f64,
-        modifiers: KeyModifiers,
-    ) -> Result<DesktopEventOutcome, String> {
-        {
-            let win = self.window_mut(window_id)?;
-            win.last_pointer_pt = Some([x_pt, y_pt]);
-        }
-        self.dispatch_ui_event_on_window(window_id, UiInputEvent::PointerMove { x: x_pt, y: y_pt, modifiers })
-    }
-
-    fn handle_pointer_button(&mut self, input: PointerButtonInput) -> Result<DesktopEventOutcome, String> {
-        let PointerButtonInput { window_id, x_pt, y_pt, button, pressed, click_count, modifiers } = input;
-        {
-            let win = self.window_mut(window_id)?;
-            win.last_pointer_pt = Some([x_pt, y_pt]);
-            if pressed {
-                win.ime_preedit = None;
-            }
-        }
-        if pressed && button == PointerButton::Primary {
-            let _ = self.handle_window_focused(window_id)?;
-        }
-        let ui_event = if pressed && click_count >= 2 {
-            UiInputEvent::DoubleClick { x: x_pt, y: y_pt, button, modifiers }
-        } else if pressed {
-            UiInputEvent::PointerDown { x: x_pt, y: y_pt, button, modifiers }
-        } else {
-            UiInputEvent::PointerUp { x: x_pt, y: y_pt, button, modifiers }
-        };
-        self.dispatch_ui_event_on_window(window_id, ui_event)
     }
 
     fn handle_mouse_wheel(
@@ -2952,25 +2804,6 @@ impl DesktopHostRuntime {
         Ok(out)
     }
 
-    fn handle_ime_preedit(
-        &mut self,
-        window_id: DesktopWindowId,
-        text: String,
-        cursor: Option<(usize, usize)>,
-    ) -> Result<DesktopEventOutcome, String> {
-        let win = self.window_mut(window_id)?;
-        win.ime_preedit = if text.is_empty() { None } else { Some(ImePreeditState { text, cursor }) };
-        Ok(DesktopEventOutcome { handled: true, action: String::from("ime.preedit"), window_id: Some(window_id), ..Default::default() })
-    }
-
-    fn handle_ime_commit(&mut self, window_id: DesktopWindowId, text: String) -> Result<DesktopEventOutcome, String> {
-        {
-            let win = self.window_mut(window_id)?;
-            win.ime_preedit = None;
-        }
-        self.dispatch_ui_event_on_window(window_id, UiInputEvent::TextInput { text })
-    }
-
     fn handle_file_hovered(&mut self, window_id: DesktopWindowId, paths: Vec<PathBuf>) -> Result<DesktopEventOutcome, String> {
         let win = self.window_mut(window_id)?;
         win.hovered_files = paths;
@@ -3062,7 +2895,6 @@ impl DesktopHostRuntime {
                     win.app.set_clipboard_adapter(adapter);
                 }
                 win.dirty_commands.clear();
-                win.ime_preedit = None;
                 win.coasting_active = false;
                 win.checkpoint_recovery_journal()?;
                 Ok(DesktopEventOutcome {
@@ -3145,7 +2977,7 @@ impl DesktopHostRuntime {
             DesktopCommandRoute::UiCommand { ui_command_id, params } => {
                 let has_hook = self.preferences_persist_hook.is_some();
                 let win = self.window_mut(window_id)?;
-                let prev_prefs = has_hook.then(|| Self::capture_pref_fingerprint(&win.app));
+                let prev_prefs = has_hook.then(|| capture_pref_fingerprint(&win.app));
                 let prev_undo = win.app.session().undo_depth();
                 let prev_redo = win.app.session().redo_depth();
                 let prev_dirty = win.app.session().is_dirty();
@@ -3154,7 +2986,7 @@ impl DesktopHostRuntime {
                     .ok_or_else(|| format!("UI command `{ui_command_id}` is not registered in dispatcher"))?;
                 win.app.sync_views();
                 win.record_ui_mutation_checkpoint(Some(trimmed), prev_undo, prev_redo, prev_dirty, prev_mutation_seq)?;
-                let changed = prev_prefs.is_some_and(|before| before != Self::capture_pref_fingerprint(&win.app));
+                let changed = prev_prefs.is_some_and(|before| before != capture_pref_fingerprint(&win.app));
                 if changed {
                     self.persist_window_preferences(window_id);
                 }
@@ -3183,9 +3015,9 @@ impl DesktopHostRuntime {
             DesktopCommandRoute::EngineCommand { engine_command_id, params } => {
                 let has_hook = self.preferences_persist_hook.is_some();
                 let win = self.window_mut(window_id)?;
-                let prev_prefs = has_hook.then(|| Self::capture_pref_fingerprint(&win.app));
+                let prev_prefs = has_hook.then(|| capture_pref_fingerprint(&win.app));
                 let outcome = win.execute_and_journal(&engine_command_id, params)?;
-                if prev_prefs.is_some_and(|before| before != Self::capture_pref_fingerprint(&win.app)) {
+                if prev_prefs.is_some_and(|before| before != capture_pref_fingerprint(&win.app)) {
                     self.persist_window_preferences(window_id);
                 }
                 Ok(DesktopEventOutcome {
@@ -3562,158 +3394,6 @@ pub fn resolve_desktop_command_route(app: &UiApp, session_file_path: Option<&Pat
     }
 
     Ok(DesktopCommandRoute::EngineCommand { engine_command_id: base_cmd.to_owned(), params: json!({}) })
-}
-
-fn split_variant_command(command_id: &str) -> (&str, Option<&str>) {
-    let Some((prefix, suffix)) = command_id.split_once(':') else {
-        return (command_id, None);
-    };
-    if matches!(
-        prefix,
-        "ui.theme.set" | "ui.locale.set" | "ui.previewFilter.set" | "ui.canvas.applyPreset" | "graph.applyCanvasPreset" | "layout.applyCanvasPreset"
-    ) && !suffix.trim().is_empty()
-    {
-        (prefix, Some(suffix.trim()))
-    } else {
-        (command_id, None)
-    }
-}
-
-fn next_theme_mode_name(current: UiThemeMode) -> &'static str {
-    match current {
-        UiThemeMode::Light => "dark",
-        UiThemeMode::Dark => "high_contrast",
-        UiThemeMode::HighContrast => "light",
-    }
-}
-
-fn next_preview_filter_name(current: CanvasPreviewFilter) -> &'static str {
-    match current {
-        CanvasPreviewFilter::Normal => "deuteranopia",
-        CanvasPreviewFilter::Deuteranopia => "protanopia",
-        CanvasPreviewFilter::Protanopia => "tritanopia",
-        CanvasPreviewFilter::Tritanopia => "grayscale",
-        CanvasPreviewFilter::GrayscalePrint => "normal",
-    }
-}
-
-fn next_locale_code(current: &str) -> &'static str {
-    if BETA_ACTIVE_LOCALES.is_empty() {
-        return "en";
-    }
-    let idx = BETA_ACTIVE_LOCALES.iter().position(|&loc| loc.eq_ignore_ascii_case(current)).unwrap_or(0);
-    BETA_ACTIVE_LOCALES.get((idx + 1) % BETA_ACTIVE_LOCALES.len()).copied().unwrap_or("en")
-}
-
-fn resolve_any_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
-    doc.active_sheet_id
-        .clone()
-        .or_else(|| doc.data_sheets.first().map(|s| s.id.clone()))
-        .or_else(|| doc.graph_sheets.first().map(|s| s.id.clone()))
-        .or_else(|| doc.result_sheets.first().map(|s| s.id.clone()))
-        .or_else(|| doc.layout_sheets.first().map(|s| s.id.clone()))
-        .or_else(|| doc.info_sheets.first().map(|s| s.id.clone()))
-}
-
-fn active_data_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
-    doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()).cloned()
-}
-
-fn resolve_data_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
-    if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()) {
-        return Some(active.clone());
-    }
-    if let Some(active) = doc.active_sheet_id.as_ref() {
-        if let Some(graph) = doc.graph_sheet(active) {
-            let src = &graph.spec.primary_source_sheet_id;
-            if doc.data_sheet(src).is_some() {
-                return Some(src.clone());
-            }
-        }
-        if let Some(res) = doc.result_sheet(active) {
-            let src = &res.analysis.source_sheet_id;
-            if doc.data_sheet(src).is_some() {
-                return Some(src.clone());
-            }
-        }
-    }
-    doc.data_sheets.first().map(|s| s.id.clone())
-}
-
-fn resolve_xy_or_data_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
-    if let Some(active) = doc.active_sheet_id.as_ref()
-        && let Some(ds) = doc.data_sheet(active)
-        && matches!(ds.archetype, TableArchetype::Xy(_) | TableArchetype::Survival(_))
-    {
-        return Some(ds.id.clone());
-    }
-    doc.data_sheets
-        .iter()
-        .find(|ds| matches!(ds.archetype, TableArchetype::Xy(_) | TableArchetype::Survival(_)))
-        .map(|ds| ds.id.clone())
-        .or_else(|| resolve_data_sheet_id(doc))
-}
-
-fn resolve_mv_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
-    if let Some(active) = doc.active_sheet_id.as_ref()
-        && let Some(ds) = doc.data_sheet(active)
-        && matches!(ds.archetype, TableArchetype::MultipleVariables(_))
-    {
-        return Some(ds.id.clone());
-    }
-    doc.data_sheets.iter().find(|ds| matches!(ds.archetype, TableArchetype::MultipleVariables(_))).map(|ds| ds.id.clone())
-}
-
-fn resolve_result_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
-    doc.active_sheet_id.as_ref().filter(|id| doc.result_sheet(id).is_some()).cloned().or_else(|| doc.result_sheets.first().map(|r| r.id.clone()))
-}
-
-fn resolve_graph_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
-    doc.active_sheet_id.as_ref().filter(|id| doc.graph_sheet(id).is_some()).cloned().or_else(|| doc.graph_sheets.first().map(|g| g.id.clone()))
-}
-
-fn resolve_uninit_or_graph_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
-    doc.active_sheet_id
-        .as_ref()
-        .filter(|id| doc.graph_sheet(id).is_some())
-        .cloned()
-        .or_else(|| doc.graph_sheets.iter().find(|g| !g.initialized).map(|g| g.id.clone()))
-        .or_else(|| doc.graph_sheets.first().map(|g| g.id.clone()))
-}
-
-fn resolve_layout_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
-    doc.active_sheet_id.as_ref().filter(|id| doc.layout_sheet(id).is_some()).cloned().or_else(|| doc.layout_sheets.first().map(|l| l.id.clone()))
-}
-
-fn resolve_renderable_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
-    if let Some(active) = doc.active_sheet_id.as_ref()
-        && matches!(doc.sheet_section(active), Some(SheetSection::Graphs | SheetSection::Layouts))
-    {
-        return Some(active.clone());
-    }
-    doc.graph_sheets.first().map(|g| g.id.clone()).or_else(|| doc.layout_sheets.first().map(|l| l.id.clone()))
-}
-
-fn resolve_info_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
-    if let Some(active) = doc.active_sheet_id.as_ref() {
-        if doc.info_sheet(active).is_some() {
-            return Some(active.clone());
-        }
-        if let Some(ds) = doc.data_sheet(active)
-            && let Some(linked) = &ds.info_sheet_id
-            && doc.info_sheet(linked).is_some()
-        {
-            return Some(linked.clone());
-        }
-    }
-    doc.info_sheets.first().map(|i| i.id.clone())
-}
-
-fn sheet_id_obj_or_empty(sheet_id: Option<SheetId>) -> Value {
-    match sheet_id {
-        Some(id) => json!({ "sheet_id": id.as_str() }),
-        None => json!({}),
-    }
 }
 
 fn resolve_host_or_ui_route(

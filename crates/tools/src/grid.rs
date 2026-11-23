@@ -964,7 +964,7 @@ impl GridToolState {
             json!({
                 "sheet_id": sheet_id.as_str(),
                 "anchor": { "row": anchor.row, "col": anchor.col, "subcol": anchor.subcol },
-                "tsv": raw_tsv,
+                "text": raw_tsv,
                 "decimal_separator": self.decimal_separator.to_string(),
                 "transpose": transpose,
                 "filter": { "parse_asterisk_exclusions": parse_asterisk_exclusions },
