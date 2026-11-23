@@ -1,11 +1,10 @@
-//! Frozen 3-tier column headers, corner archetype triggers, and row-title header bands for
-//! `Column` and multi-archetype data grids.
+//! Unified frozen 3-tier column headers, corner archetype trigger, and row-title header band
+//! across all 8 table archetypes.
 
 use std::collections::HashSet;
 use std::ops::Range;
 
 use curvebook_doc::{ColumnDesignHint, DataSheet, SheetId, SubcolumnMode, TableArchetype, XColumnMode, default_column_label};
-use curvebook_tools::GridCellCoord;
 use egui::{Align, CornerRadius, FontId, Key, Modifiers, Rect, Sense, Stroke, StrokeKind, TextEdit, Ui, UiBuilder, WidgetInfo, pos2, vec2};
 use serde_json::json;
 
@@ -13,15 +12,14 @@ use crate::i18n::tr;
 use crate::inspect::ZLayer;
 use crate::views::grid_core::grid_tr;
 
-use super::super::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents};
-use super::inline_edit::{InlineTextEditSpec, begin_inline_edit, render_inline_text_edit};
+use super::super::FrameInspectEntryInput;
+use super::GridInlineEditTarget;
+use super::inline_edit::begin_inline_edit;
 use super::mv_roles::render_mv_tier3_role_chip;
 use super::shared::{
-    AuxInlineTarget, CORNER_TRIGGER_HEIGHT_PT, CellTextStyle, GridRenderCtx, MultiGridCtx, MultiGridFrameState, archetype_badge,
-    compute_visible_range, is_multi_click_edit, pressed_key_event_modifiers, record_meta_if_enabled, record_meta_with_unclipped_if_enabled,
-    render_ellipsized_text, set_grid_focus_active,
+    AuxInlineTarget, CellTextStyle, MultiGridCtx, MultiGridFrameState, archetype_badge, compute_visible_range, is_multi_click_edit,
+    pressed_key_event_modifiers, record_meta_if_enabled, record_meta_with_unclipped_if_enabled, render_ellipsized_text,
 };
-use super::{ColumnGridEguiState, GridInlineEditTarget};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum FactorTitleTarget {
@@ -152,466 +150,6 @@ fn render_factor_title_editor(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut
     ui.ctx().data_mut(|d| d.insert_temp(key, Some(edit)));
 }
 
-pub(super) fn render_corner_and_row_titles_header(
-    ui: &mut Ui,
-    rctx: &GridRenderCtx<'_>,
-    state: &mut ColumnGridEguiState,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
-    let geom = rctx.geom;
-    let tokens = rctx.tokens;
-    let blocked = rctx.input_blocked(state);
-    ui.scope_builder(UiBuilder::new().max_rect(geom.corner_rect), |ui| {
-        ui.set_clip_rect(geom.corner_rect);
-
-        // Top-left Corner Archetype Trigger (`Column`)
-        let trigger_h = CORNER_TRIGGER_HEIGHT_PT.min(geom.header_h);
-        let trigger_rect = Rect::from_min_size(geom.corner_rect.min, vec2(geom.row_num_w, trigger_h));
-        let trigger_sense = if blocked { Sense::hover() } else { Sense::click() };
-        let trigger_resp = ui.interact(trigger_rect, rctx.sheet_id_base.with("corner_archetype"), trigger_sense);
-        let trigger_bg = if trigger_resp.hovered() && !blocked { tokens.hover_bg } else { tokens.header_bg };
-        ui.painter().rect_filled(trigger_rect, CornerRadius::ZERO, trigger_bg);
-        ui.painter().rect_stroke(trigger_rect, CornerRadius::ZERO, Stroke::new(1.0, tokens.border), StrokeKind::Inside);
-
-        let archetype_label = format!("{} ▾", tr(rctx.locale, "table.column"));
-        let (trigger_elided, _) = render_ellipsized_text(
-            ui,
-            trigger_rect,
-            &archetype_label,
-            CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_strong, Align::Center),
-        );
-        if trigger_elided {
-            state.ellipsized_headers += 1;
-        }
-        let acc_archetype = archetype_label.clone();
-        trigger_resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, !blocked, acc_archetype.clone()));
-        if trigger_resp.hovered() {
-            let tip = if trigger_elided {
-                format!("{archetype_label} — {}", tr(rctx.locale, "cmd.ui.table.convertArchetype.open"))
-            } else {
-                tr(rctx.locale, "cmd.ui.table.convertArchetype.open").to_owned()
-            };
-            let _ = trigger_resp.clone().on_hover_text(tip);
-        }
-        if trigger_resp.clicked() && !blocked {
-            intents.push_ui("ui.table.convertArchetype.open", json!({ "sheet_id": rctx.ds.id.as_str() }));
-            ui.ctx().request_repaint();
-        }
-        record_meta_if_enabled(
-            ui,
-            meta,
-            state.record_inspect_meta,
-            &trigger_resp,
-            FrameInspectEntryInput {
-                widget_id: "grid.corner.archetype",
-                role: "button",
-                label: &archetype_label,
-                command_id: Some("ui.table.convertArchetype.open"),
-                value: Some(json!({ "archetype": "column" })),
-                enabled: !blocked,
-                disabled_reason: blocked.then_some("modal dialog is active"),
-                z_layer: ZLayer::Workspace,
-                ellipsized: trigger_elided,
-                full_label: trigger_elided.then_some(archetype_label.as_str()),
-            },
-        );
-
-        // `#` header below Corner Trigger
-        let hash_rect = Rect::from_min_max(
-            pos2(geom.corner_rect.left(), geom.corner_rect.top() + trigger_h),
-            pos2(geom.corner_rect.left() + geom.row_num_w, geom.corner_rect.bottom()),
-        );
-        let hash_resp = ui.interact(hash_rect, rctx.sheet_id_base.with("corner_row_num"), Sense::hover());
-        ui.painter().rect_filled(hash_rect, CornerRadius::ZERO, tokens.header_bg);
-        ui.painter().rect_stroke(hash_rect, CornerRadius::ZERO, Stroke::new(1.0, tokens.border), StrokeKind::Inside);
-        let hash_label = grid_tr(rctx.locale, "w5.grid_core.row_number_header", "#");
-        let (hash_elided, _) = render_ellipsized_text(
-            ui,
-            hash_rect,
-            hash_label,
-            CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted, Align::Center),
-        );
-        let acc_hash = hash_label.to_owned();
-        hash_resp.widget_info(move || WidgetInfo::labeled(egui::Role::Label, true, acc_hash.clone()));
-        record_meta_if_enabled(
-            ui,
-            meta,
-            state.record_inspect_meta,
-            &hash_resp,
-            FrameInspectEntryInput {
-                widget_id: "grid.corner.row_num",
-                role: "label",
-                label: hash_label,
-                command_id: None,
-                value: None,
-                enabled: true,
-                disabled_reason: None,
-                z_layer: ZLayer::Workspace,
-                ellipsized: hash_elided,
-                full_label: hash_elided.then_some(hash_label),
-            },
-        );
-
-        // Row Titles header + toggle
-        let rt_x = geom.corner_rect.left() + geom.row_num_w;
-        let rt_header_rect = Rect::from_min_size(pos2(rt_x, geom.corner_rect.top()), vec2(geom.rt_w, geom.header_h));
-        render_row_titles_header_block(ui, rctx, state, meta, intents, rt_header_rect, blocked);
-    });
-}
-
-fn render_row_titles_header_block(
-    ui: &mut Ui,
-    rctx: &GridRenderCtx<'_>,
-    state: &mut ColumnGridEguiState,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-    rt_header_rect: Rect,
-    blocked: bool,
-) {
-    let tokens = rctx.tokens;
-    let geom = rctx.geom;
-    let toggle_sense = if blocked { Sense::hover() } else { Sense::click() };
-
-    if geom.effective_collapsed {
-        let expand_lbl = grid_tr(rctx.locale, "w5.grid_core.expand_row_titles", "Expand Row Titles");
-        let short_lbl = grid_tr(rctx.locale, "w5.grid_core.row_titles_short", "RT");
-        let resp = ui.interact(rt_header_rect, rctx.sheet_id_base.with("row_titles_toggle"), toggle_sense);
-        let bg = if resp.hovered() && !blocked { tokens.hover_bg } else { tokens.header_bg };
-        ui.painter().rect_filled(rt_header_rect, CornerRadius::ZERO, bg);
-        ui.painter().rect_stroke(rt_header_rect, CornerRadius::ZERO, Stroke::new(1.0, tokens.border), StrokeKind::Inside);
-        let (elided, _) = render_ellipsized_text(
-            ui,
-            rt_header_rect,
-            short_lbl,
-            CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_primary, Align::Center),
-        );
-        if elided {
-            state.ellipsized_headers += 1;
-        }
-        let acc = expand_lbl.to_owned();
-        resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, !blocked, acc.clone()));
-        if resp.hovered() {
-            let _ = resp.clone().on_hover_text(expand_lbl);
-        }
-        if resp.clicked() && !blocked {
-            state.row_titles_collapsed = false;
-            intents.push_set_row_titles_collapsed(false);
-            ui.ctx().request_repaint();
-        }
-        record_meta_if_enabled(
-            ui,
-            meta,
-            state.record_inspect_meta,
-            &resp,
-            FrameInspectEntryInput {
-                widget_id: "grid.row_titles.toggle",
-                role: "button",
-                label: expand_lbl,
-                command_id: None,
-                value: Some(json!({ "collapsed": true })),
-                enabled: !blocked,
-                disabled_reason: blocked.then_some("modal dialog is active"),
-                z_layer: ZLayer::Workspace,
-                ellipsized: false,
-                full_label: None,
-            },
-        );
-        return;
-    }
-
-    let top_rect = Rect::from_min_size(rt_header_rect.min, vec2(geom.rt_w, geom.tier1_h));
-    let rt_title = grid_tr(rctx.locale, "w5.grid_core.row_titles", "Row Titles");
-    let band_resp = ui.interact(top_rect, rctx.sheet_id_base.with("row_titles_band"), Sense::hover());
-    ui.painter().rect_filled(top_rect, CornerRadius::ZERO, tokens.header_bg);
-    ui.painter().rect_stroke(top_rect, CornerRadius::ZERO, Stroke::new(1.0, tokens.border), StrokeKind::Inside);
-    let (band_elided, _) = render_ellipsized_text(
-        ui,
-        top_rect,
-        rt_title,
-        CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_strong, Align::Center),
-    );
-    if band_elided {
-        state.ellipsized_headers += 1;
-    }
-    let acc_band = rt_title.to_owned();
-    band_resp.widget_info(move || WidgetInfo::labeled(egui::Role::Label, true, acc_band.clone()));
-    if band_elided && band_resp.hovered() {
-        let _ = band_resp.clone().on_hover_text(rt_title);
-    }
-    record_meta_if_enabled(
-        ui,
-        meta,
-        state.record_inspect_meta,
-        &band_resp,
-        FrameInspectEntryInput {
-            widget_id: "grid.row_titles.band",
-            role: "label",
-            label: rt_title,
-            command_id: None,
-            value: None,
-            enabled: true,
-            disabled_reason: None,
-            z_layer: ZLayer::Workspace,
-            ellipsized: band_elided,
-            full_label: band_elided.then_some(rt_title),
-        },
-    );
-
-    let toggle_rect = Rect::from_min_max(pos2(rt_header_rect.left(), top_rect.bottom()), rt_header_rect.max);
-    let collapse_lbl = grid_tr(rctx.locale, "w5.grid_core.collapse_row_titles", "Collapse Row Titles");
-    let resp = ui.interact(toggle_rect, rctx.sheet_id_base.with("row_titles_toggle"), toggle_sense);
-    let bg = if resp.hovered() && !blocked { tokens.hover_bg } else { tokens.panel_bg };
-    ui.painter().rect_filled(toggle_rect, CornerRadius::ZERO, bg);
-    ui.painter().rect_stroke(toggle_rect, CornerRadius::ZERO, Stroke::new(1.0, tokens.border), StrokeKind::Inside);
-    let toggle_visual = format!("◀ {}", grid_tr(rctx.locale, "w5.grid_core.row_titles_short", "RT"));
-    let (elided, _) = render_ellipsized_text(
-        ui,
-        toggle_rect,
-        &toggle_visual,
-        CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted, Align::Center),
-    );
-    let acc_toggle = collapse_lbl.to_owned();
-    resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, !blocked, acc_toggle.clone()));
-    if resp.hovered() {
-        let _ = resp.clone().on_hover_text(collapse_lbl);
-    }
-    if resp.clicked() && !blocked {
-        state.row_titles_collapsed = true;
-        intents.push_set_row_titles_collapsed(true);
-        ui.ctx().request_repaint();
-    }
-    record_meta_if_enabled(
-        ui,
-        meta,
-        state.record_inspect_meta,
-        &resp,
-        FrameInspectEntryInput {
-            widget_id: "grid.row_titles.toggle",
-            role: "button",
-            label: collapse_lbl,
-            command_id: None,
-            value: Some(json!({ "collapsed": false })),
-            enabled: !blocked,
-            disabled_reason: blocked.then_some("modal dialog is active"),
-            z_layer: ZLayer::Workspace,
-            ellipsized: elided,
-            full_label: elided.then_some(collapse_lbl),
-        },
-    );
-}
-
-pub(super) fn render_column_headers_3tier(
-    ui: &mut Ui,
-    rctx: &GridRenderCtx<'_>,
-    state: &mut ColumnGridEguiState,
-    scroll_x: f32,
-    vis_subcols: &Range<usize>,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
-    let geom = rctx.geom;
-    let tokens = rctx.tokens;
-    let blocked = rctx.input_blocked(state);
-    if geom.total_cols == 0 || geom.header_data_rect.width() <= 1.0 {
-        return;
-    }
-
-    let flat_range = if vis_subcols.is_empty() {
-        compute_visible_range(scroll_x, geom.header_data_rect.width(), geom.subcol_w, geom.total_flat_cols)
-    } else {
-        vis_subcols.clone()
-    };
-    if flat_range.is_empty() {
-        return;
-    }
-
-    let start_col = flat_range.start / geom.subs_per_col;
-    let end_col = flat_range.end.div_ceil(geom.subs_per_col).min(geom.total_cols);
-
-    ui.scope_builder(UiBuilder::new().max_rect(geom.header_data_rect), |ui| {
-        ui.set_clip_rect(geom.header_data_rect);
-        let y1 = geom.header_data_rect.top();
-        let y2 = y1 + geom.tier1_h;
-        let y3 = y2 + geom.tier2_h;
-
-        for col in start_col..end_col {
-            #[allow(clippy::cast_precision_loss)]
-            let col_x = geom.header_data_rect.left() - scroll_x + ((col * geom.subs_per_col) as f32) * geom.subcol_w;
-            #[allow(clippy::cast_precision_loss)]
-            let col_w = (geom.subs_per_col as f32) * geom.subcol_w;
-
-            // Tier 1: Super-Column ID (`Col A`, `Col B`, ...)
-            let r1_raw = Rect::from_min_size(pos2(col_x, y1), vec2(col_w, geom.tier1_h));
-            let r1 = r1_raw.intersect(geom.header_data_rect);
-            if r1.width() > 0.5 && r1.height() > 0.5 {
-                let super_label = format!("Col {}", default_column_label(col));
-                let r1_resp = ui.interact(r1, rctx.sheet_id_base.with(("col_super", col)), Sense::hover());
-                ui.painter().rect_filled(r1, CornerRadius::ZERO, tokens.header_bg);
-                ui.painter().rect_stroke(r1, CornerRadius::ZERO, Stroke::new(1.0, tokens.border), StrokeKind::Inside);
-                let (elided, _) = render_ellipsized_text(
-                    ui,
-                    r1,
-                    &super_label,
-                    CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted, Align::Center),
-                );
-                if elided {
-                    state.ellipsized_headers += 1;
-                }
-                let acc = super_label.clone();
-                r1_resp.widget_info(move || WidgetInfo::labeled(egui::Role::ColumnHeader, true, acc.clone()));
-                if elided && r1_resp.hovered() {
-                    let _ = r1_resp.clone().on_hover_text(&super_label);
-                }
-                record_meta_if_enabled(
-                    ui,
-                    meta,
-                    state.record_inspect_meta,
-                    &r1_resp,
-                    FrameInspectEntryInput {
-                        widget_id: &format!("grid.col_super.{col}"),
-                        role: "label",
-                        label: &super_label,
-                        command_id: None,
-                        value: None,
-                        enabled: true,
-                        disabled_reason: None,
-                        z_layer: ZLayer::Workspace,
-                        ellipsized: elided,
-                        full_label: elided.then_some(super_label.as_str()),
-                    },
-                );
-            }
-
-            // Tier 2: Editable Column Title
-            let r2_raw = Rect::from_min_size(pos2(col_x, y2), vec2(col_w, geom.tier2_h));
-            let r2 = r2_raw.intersect(geom.header_data_rect);
-            if r2.width() > 0.5 && r2.height() > 0.5 {
-                let col_title_raw = rctx.col_table.data_sets.get(col).map_or("", |d| d.title.as_str());
-                let col_title = if col_title_raw.is_empty() { default_column_label(col) } else { col_title_raw.to_owned() };
-                if state.inline_edit.as_ref().is_some_and(|e| e.target == GridInlineEditTarget::ColumnTitle { col }) {
-                    let widget_id = format!("grid.col_title.{col}");
-                    let _ = render_inline_text_edit(
-                        ui,
-                        rctx,
-                        state,
-                        meta,
-                        intents,
-                        InlineTextEditSpec {
-                            rect: r2,
-                            editor_id: rctx.sheet_id_base.with(("col_title_edit", col)),
-                            hint: &col_title,
-                            widget_id: &widget_id,
-                        },
-                    );
-                } else {
-                    let sense = if blocked { Sense::hover() } else { Sense::click() };
-                    let r2_resp = ui.interact(r2, rctx.sheet_id_base.with(("col_title", col)), sense);
-                    let bg = if r2_resp.hovered() && !blocked { tokens.hover_bg } else { tokens.panel_bg };
-                    ui.painter().rect_filled(r2, CornerRadius::ZERO, bg);
-                    ui.painter().rect_stroke(r2, CornerRadius::ZERO, Stroke::new(1.0, tokens.border), StrokeKind::Inside);
-                    let (elided, _) = render_ellipsized_text(
-                        ui,
-                        r2,
-                        &col_title,
-                        CellTextStyle::plain(FontId::proportional(12.0), tokens.text_strong, Align::Center),
-                    );
-                    if elided {
-                        state.ellipsized_headers += 1;
-                    }
-                    let acc = col_title.clone();
-                    let editable = !rctx.ds.frozen && !blocked;
-                    r2_resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, editable, acc.clone()));
-                    if r2_resp.hovered() {
-                        let _ = r2_resp.clone().on_hover_text(&col_title);
-                    }
-                    if !blocked {
-                        if is_multi_click_edit(&r2_resp) && !rctx.ds.frozen {
-                            begin_inline_edit(ui, state, GridInlineEditTarget::ColumnTitle { col }, col_title.clone());
-                        } else if r2_resp.clicked() && geom.total_rows > 0 {
-                            intents.push_select_grid_cell(GridCellCoord::new(0, col, 0));
-                            intents.push_extend_grid_selection(GridCellCoord::new(geom.total_rows - 1, col, geom.subs_per_col.saturating_sub(1)));
-                            set_grid_focus_active(ui, true);
-                            ui.ctx().request_repaint();
-                        }
-                    }
-                    record_meta_with_unclipped_if_enabled(
-                        ui,
-                        meta,
-                        state.record_inspect_meta,
-                        &r2_resp,
-                        r2_raw,
-                        FrameInspectEntryInput {
-                            widget_id: &format!("grid.col_title.{col}"),
-                            role: "button",
-                            label: &col_title,
-                            command_id: None,
-                            value: Some(json!({ "col": col, "title": col_title })),
-                            enabled: editable,
-                            disabled_reason: blocked.then_some("modal dialog is active").or_else(|| rctx.ds.frozen.then_some("Frozen")),
-                            z_layer: ZLayer::Workspace,
-                            ellipsized: elided,
-                            full_label: elided.then_some(col_title.as_str()),
-                        },
-                    );
-                }
-            }
-
-            // Tier 3: Subcolumn Roles
-            for subcol in 0..geom.subs_per_col {
-                #[allow(clippy::cast_precision_loss)]
-                let sub_x = col_x + (subcol as f32) * geom.subcol_w;
-                let r3_raw = Rect::from_min_size(pos2(sub_x, y3), vec2(geom.subcol_w, geom.tier3_h));
-                let r3 = r3_raw.intersect(geom.header_data_rect);
-                if r3.width() <= 0.5 || r3.height() <= 0.5 {
-                    continue;
-                }
-                let sub_label = column_subcolumn_role_label(rctx.col_table.subcolumn_mode, subcol, rctx.locale);
-                let r3_resp = ui.interact(r3, rctx.sheet_id_base.with(("subcol_hdr", col, subcol)), Sense::hover());
-                ui.painter().rect_filled(r3, CornerRadius::ZERO, tokens.header_bg);
-                ui.painter().rect_stroke(r3, CornerRadius::ZERO, Stroke::new(1.0, tokens.border), StrokeKind::Inside);
-                let (elided, _) = render_ellipsized_text(
-                    ui,
-                    r3,
-                    &sub_label,
-                    CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted, Align::Center),
-                );
-                if elided {
-                    state.ellipsized_headers += 1;
-                }
-                let acc = sub_label.clone();
-                r3_resp.widget_info(move || WidgetInfo::labeled(egui::Role::ColumnHeader, true, acc.clone()));
-                if r3_resp.hovered() {
-                    let hint_tag = match rctx.col_table.design_hint {
-                        ColumnDesignHint::UnpairedReplicates => "Unpaired",
-                        ColumnDesignHint::PairedRepeatedMeasures => "Paired",
-                        ColumnDesignHint::PrecomputedError => "Summary",
-                    };
-                    let _ = r3_resp.clone().on_hover_text(format!("{sub_label} · {hint_tag}"));
-                }
-                record_meta_if_enabled(
-                    ui,
-                    meta,
-                    state.record_inspect_meta,
-                    &r3_resp,
-                    FrameInspectEntryInput {
-                        widget_id: &format!("grid.subcol_title.{col}.{subcol}"),
-                        role: "label",
-                        label: &sub_label,
-                        command_id: None,
-                        value: None,
-                        enabled: true,
-                        disabled_reason: None,
-                        z_layer: ZLayer::Workspace,
-                        ellipsized: elided,
-                        full_label: elided.then_some(sub_label.as_str()),
-                    },
-                );
-            }
-        }
-    });
-}
-
 pub(super) fn column_subcolumn_role_label(mode: SubcolumnMode, subcol: usize, locale: &str) -> String {
     match mode {
         SubcolumnMode::Single => String::from("Y"),
@@ -692,6 +230,9 @@ pub(super) fn render_multi_corner(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: 
     );
     let acc_badge = badge.to_owned();
     corner_resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, !blocked, acc_badge.clone()));
+    if corner_resp.hovered() {
+        let _ = corner_resp.clone().on_hover_text(tr(mctx.locale, "cmd.ui.table.convertArchetype.open"));
+    }
     record_meta_if_enabled(
         ui,
         fstate.meta,
@@ -715,7 +256,8 @@ pub(super) fn render_multi_corner(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: 
     }
 
     let sheet_btn_r = Rect::from_min_max(pos2(x_mid, y1), pos2(x_end, y2));
-    if sheet_btn_r.width() > 8.0 {
+    let editing_sheet_title = fstate.aux.aux_edit.as_ref().is_some_and(|(t, _, _)| *t == AuxInlineTarget::SheetTitle);
+    if sheet_btn_r.width() > 8.0 && !editing_sheet_title {
         let sheet_editable = !blocked && !ds.frozen;
         let st_resp =
             ui.interact(sheet_btn_r, ui.make_persistent_id("grid.sheet_title"), if sheet_editable { Sense::click() } else { Sense::hover() });
@@ -730,6 +272,9 @@ pub(super) fn render_multi_corner(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: 
         );
         if ellip {
             fstate.state.ellipsized_headers += 1;
+            if st_resp.hovered() {
+                let _ = st_resp.clone().on_hover_text(&ds.title);
+            }
         }
         let acc_title = ds.title.clone();
         st_resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, sheet_editable, acc_title.clone()));
@@ -862,6 +407,9 @@ pub(super) fn render_multi_corner(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: 
     );
     let acc_tgl = if geom.row_titles_collapsed { "Expand Row Titles" } else { "Collapse Row Titles" };
     toggle_resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, !blocked, acc_tgl.to_owned()));
+    if toggle_resp.hovered() {
+        let _ = toggle_resp.clone().on_hover_text(acc_tgl);
+    }
     record_meta_if_enabled(
         ui,
         fstate.meta,
@@ -872,7 +420,7 @@ pub(super) fn render_multi_corner(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: 
             role: "button",
             label: toggle_lbl,
             command_id: None,
-            value: None,
+            value: Some(json!({ "collapsed": geom.row_titles_collapsed })),
             enabled: !blocked,
             disabled_reason: blocked.then_some("modal dialog is active"),
             z_layer: ZLayer::Workspace,
@@ -884,6 +432,7 @@ pub(super) fn render_multi_corner(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: 
         let next = !geom.row_titles_collapsed;
         fstate.state.row_titles_collapsed = next;
         fstate.intents.push_set_row_titles_collapsed(next);
+        ui.ctx().request_repaint();
     }
 
     let p = ui.painter();
@@ -905,6 +454,8 @@ pub(super) fn render_multi_column_headers(
     ui: &mut Ui,
     mctx: &MultiGridCtx<'_>,
     fstate: &mut MultiGridFrameState<'_>,
+    scroll_x: f32,
+    vis_flat_hint: &Range<usize>,
     active_mv_operands: &HashSet<usize>,
 ) {
     let geom = mctx.geom;
@@ -913,8 +464,11 @@ pub(super) fn render_multi_column_headers(
     if !hdr_rect.is_positive() {
         return;
     }
-    let scroll_x = fstate.state.scroll_offset_pt.x;
-    let vis_flat = compute_visible_range(scroll_x, hdr_rect.width(), geom.subcol_w, geom.total_flat_cols);
+    let vis_flat = if vis_flat_hint.is_empty() {
+        compute_visible_range(scroll_x, hdr_rect.width(), geom.subcol_w, geom.total_flat_cols)
+    } else {
+        vis_flat_hint.clone()
+    };
 
     ui.scope_builder(UiBuilder::new().max_rect(hdr_rect), |hdr_ui| {
         hdr_ui.set_clip_rect(hdr_rect);
@@ -974,7 +528,8 @@ fn render_multi_x_headers(hdr_ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut
         let t2_raw = Rect::from_min_max(pos2(sx_x0, y2), pos2(sx_x1, y3));
         let t2_r = t2_raw.intersect(hdr_rect);
         let x_title = x_column_title(&ds.archetype, sx);
-        if t2_r.width() > 2.0 {
+        let editing_x_title = fstate.aux.aux_edit.as_ref().is_some_and(|(t, _, _)| *t == AuxInlineTarget::XTitle { subcol: sx });
+        if t2_r.width() > 2.0 && !editing_x_title {
             let wid = format!("grid.x_title.{sx}");
             let x_title_editable = !blocked && !ds.frozen && sx == 0;
             let resp = hdr_ui.interact(t2_r, hdr_ui.make_persistent_id(&wid), if x_title_editable { Sense::click() } else { Sense::hover() });
@@ -1120,6 +675,12 @@ fn render_multi_data_col_headers(
                     &super_lbl,
                     CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted, Align::Center),
                 );
+                if ellip_s {
+                    fstate.state.ellipsized_headers += 1;
+                    if !col_factor_editable && s_resp.hovered() {
+                        let _ = s_resp.clone().on_hover_text(&super_lbl);
+                    }
+                }
                 let acc_s = super_lbl.clone();
                 let has_col_factor = col_factor.is_some();
                 let s_role = if has_col_factor { egui::Role::Button } else { egui::Role::Label };
@@ -1170,6 +731,9 @@ fn render_multi_data_col_headers(
             );
             if ellip {
                 fstate.state.ellipsized_headers += 1;
+            }
+            if resp.hovered() && ellip {
+                let _ = resp.clone().on_hover_text(&col_title);
             }
             let acc = col_title.clone();
             resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, col_editable, acc.clone()));
@@ -1236,6 +800,7 @@ fn render_subcolumn_tier3_cells(
     let y3 = hdr_rect.min.y + geom.h_tier1 + geom.h_tier2;
     let y4 = hdr_rect.max.y;
     let is_nested = matches!(ds.archetype, TableArchetype::Nested(_));
+    let is_column = matches!(ds.archetype, TableArchetype::Column(_));
     for subcol in 0..span_subs {
         #[allow(clippy::cast_precision_loss)]
         let sx0 = cx0 + (subcol as f32) * geom.subcol_w;
@@ -1245,8 +810,12 @@ fn render_subcolumn_tier3_cells(
         if t3_r.width() <= 2.0 {
             continue;
         }
+        let editing_sub = fstate.aux.aux_edit.as_ref().is_some_and(|(t, _, _)| *t == AuxInlineTarget::SubcolumnTitle { col, subcol });
+        if editing_sub {
+            continue;
+        }
         let sub_lbl = data_subcolumn_header_label(ds, col, subcol, &app.locale);
-        let swid = if is_nested { format!("grid.subcol_title.{col}.{subcol}") } else { format!("grid.subcol_hdr.{col}.{subcol}") };
+        let swid = if is_nested || is_column { format!("grid.subcol_title.{col}.{subcol}") } else { format!("grid.subcol_hdr.{col}.{subcol}") };
         let sub_editable = is_nested && !blocked && !ds.frozen;
         let sense = if sub_editable { Sense::click() } else { Sense::hover() };
         let sresp = hdr_ui.interact(t3_r, hdr_ui.make_persistent_id(&swid), sense);
@@ -1254,12 +823,27 @@ fn render_subcolumn_tier3_cells(
             hdr_ui.painter().rect_filled(t3_r, 0.0, tokens.hover_bg);
         }
         let fg = if is_nested { tokens.text_primary } else { tokens.text_muted };
-        render_ellipsized_text(
+        let (sub_elided, _) = render_ellipsized_text(
             hdr_ui,
             t3_r.shrink2(vec2(3.0, 1.0)),
             &sub_lbl,
             CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), fg, Align::Center),
         );
+        if sub_elided {
+            fstate.state.ellipsized_headers += 1;
+        }
+        if sresp.hovered() {
+            if let TableArchetype::Column(col_t) = &ds.archetype {
+                let hint_tag = match col_t.design_hint {
+                    ColumnDesignHint::UnpairedReplicates => "Unpaired",
+                    ColumnDesignHint::PairedRepeatedMeasures => "Paired",
+                    ColumnDesignHint::PrecomputedError => "Summary",
+                };
+                let _ = sresp.clone().on_hover_text(format!("{sub_lbl} · {hint_tag}"));
+            } else if sub_elided {
+                let _ = sresp.clone().on_hover_text(&sub_lbl);
+            }
+        }
         let acc_s = sub_lbl.clone();
         let role = if is_nested { egui::Role::Button } else { egui::Role::ColumnHeader };
         let role_str = if is_nested { "button" } else { "columnheader" };
@@ -1285,8 +869,8 @@ fn render_subcolumn_tier3_cells(
                     None
                 },
                 z_layer: ZLayer::Workspace,
-                ellipsized: false,
-                full_label: None,
+                ellipsized: sub_elided,
+                full_label: sub_elided.then_some(sub_lbl.as_str()),
             },
         );
         if sub_editable && sresp.clicked() {
@@ -1340,6 +924,7 @@ fn x_subcolumn_label(arch: &TableArchetype, subcol: usize, locale: &str) -> Stri
 fn data_super_column_label(arch: &TableArchetype, col: usize) -> String {
     let letter = default_column_label(col);
     match arch {
+        TableArchetype::Column(_) => format!("Col {letter}"),
         TableArchetype::Grouped(g) if !g.column_factor_title.trim().is_empty() => format!("{} {letter}", g.column_factor_title),
         TableArchetype::Contingency(c) if !c.column_factor_title.trim().is_empty() => format!("{} {letter}", c.column_factor_title),
         TableArchetype::Survival(_) => format!("Cohort {letter}"),
@@ -1351,7 +936,10 @@ fn data_super_column_label(arch: &TableArchetype, col: usize) -> String {
 
 fn data_column_title(arch: &TableArchetype, col: usize) -> String {
     match arch {
-        TableArchetype::Column(t) => t.data_sets.get(col).map_or_else(String::new, |d| d.title.clone()),
+        TableArchetype::Column(t) => {
+            let raw = t.data_sets.get(col).map_or("", |d| d.title.as_str());
+            if raw.is_empty() { default_column_label(col) } else { raw.to_owned() }
+        }
         TableArchetype::Xy(t) => t.data_sets.get(col).map_or_else(String::new, |d| d.title.clone()),
         TableArchetype::Grouped(t) => t.data_sets.get(col).map_or_else(String::new, |d| d.title.clone()),
         TableArchetype::Contingency(t) => t.data_sets.get(col).map_or_else(String::new, |d| d.title.clone()),
