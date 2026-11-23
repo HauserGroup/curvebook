@@ -10,14 +10,14 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 
 use curvebook_text::{
-    RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, TextDirection, contains_rtl_script, measure_text_pt, parse_markup, reorder_visual_bidi,
-    shape_bidi_runs,
+    RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, TextDirection, contains_rtl_script, measure_text_pt, parse_markup, shape_bidi_runs,
 };
 use curvebook_ui_egui::RasterImage;
 use curvebook_ui_egui::ZLayer as TreeZLayer;
 use curvebook_ui_egui::serde_json::{Map, Value, json};
 use curvebook_ui_egui::text_bridge::{FontFamilyKind as TreeFontFamilyKind, UiTextStyle as TreeUiTextStyle};
 
+use crate::chrome_bridge::{WebChromeLayout, WebChromeRole};
 use crate::host_adapters::{WebAdapterError, decode_base64_str, encode_base64_slice};
 
 /// Default maximum cached text measurements retained per [`BrowserCanvasTextMeasurer`].
@@ -595,7 +595,8 @@ impl<B: CanvasMeasureBackend> WebTextMeasurer for BrowserCanvasTextMeasurer<B> {
 
     fn shape_line(&self, style: &UiTextStyle, text: &str, dpi: u16) -> ShapedTextLine {
         let direction = if contains_rtl_script(text) { TextDirection::Rtl } else { TextDirection::Ltr };
-        let visual_text = if direction == TextDirection::Rtl { reorder_visual_bidi(text, direction) } else { text.to_owned() };
+        let runs = shape_bidi_runs(text, direction);
+        let visual_text: String = runs.iter().map(|run| run.text.as_str()).collect();
         let metrics = self.measure(style, &visual_text, dpi);
         let eff_px = effective_font_px(style.size_px, dpi);
         let size_pt = eff_px * (72.0 / f64::from(CSS_REFERENCE_DPI));
@@ -603,38 +604,41 @@ impl<B: CanvasMeasureBackend> WebTextMeasurer for BrowserCanvasTextMeasurer<B> {
 
         let mut glyphs = Vec::with_capacity(visual_text.chars().count());
         let mut pen_x = 0.0_f64;
-        for _run in shape_bidi_runs(&visual_text, direction) {
-            // `visual_text` is already visually ordered; iterate its chars with measured advances.
-        }
-        for ch in visual_text.chars() {
-            let adv_px = if matches!(style.family, FontFamilyKind::UiMono) {
-                eff_px * 0.60
-            } else if style.tabular_nums && ch.is_ascii_digit() {
-                eff_px * 0.56
-            } else {
-                let mut buf = [0u8; 4];
-                let s = ch.encode_utf8(&mut buf);
-                let measured_ch = self.measure(style, s, dpi).width_px;
-                if measured_ch > 0.0 { measured_ch } else { measure_text_pt(&RichText::plain(s), size_pt).width_pt * pt_to_px }
-            };
-            glyphs.push(ShapedGlyphRun {
-                ch,
-                x_px: pen_x,
-                y_px: metrics.ascent_px,
-                advance_px: adv_px,
-                glyph_id: None,
-                used_vector_fallback: false,
-                missing_glyph: false,
-            });
-            pen_x += adv_px;
-        }
-        if pen_x > 0.0 && metrics.width_px > 0.0 {
-            let scale = metrics.width_px / pen_x;
-            if (scale - 1.0).abs() > 1e-4 {
-                for g in &mut glyphs {
-                    g.x_px *= scale;
-                    g.advance_px *= scale;
-                }
+        for run in &runs {
+            let mut run_prev_w = 0.0_f64;
+            let mut char_iter = run.text.char_indices().peekable();
+            while let Some((idx, ch)) = char_iter.next() {
+                let end = char_iter.peek().map_or(run.text.len(), |&(next_idx, _)| next_idx);
+                let adv_px = if matches!(style.family, FontFamilyKind::UiMono) {
+                    let adv = eff_px * 0.60;
+                    run_prev_w += adv;
+                    adv
+                } else if style.tabular_nums && ch.is_ascii_digit() {
+                    let adv = eff_px * 0.56;
+                    run_prev_w += adv;
+                    adv
+                } else {
+                    let prefix_w = self.measure(style, &run.text[..end], dpi).width_px;
+                    let adv = if prefix_w > run_prev_w {
+                        prefix_w - run_prev_w
+                    } else {
+                        let slice = &run.text[idx..end];
+                        let single_w = self.measure(style, slice, dpi).width_px;
+                        if single_w > 0.0 { single_w } else { measure_text_pt(&RichText::plain(slice), size_pt).width_pt * pt_to_px }
+                    };
+                    run_prev_w = if prefix_w >= run_prev_w { prefix_w } else { run_prev_w + adv };
+                    adv
+                };
+                glyphs.push(ShapedGlyphRun {
+                    ch,
+                    x_px: pen_x,
+                    y_px: metrics.ascent_px,
+                    advance_px: adv_px,
+                    glyph_id: None,
+                    used_vector_fallback: false,
+                    missing_glyph: false,
+                });
+                pen_x += adv_px;
             }
         }
 
@@ -1228,6 +1232,29 @@ impl WebTextBridge {
         Self::try_compose_placeholder_frame_with_popup(width_px, height_px, dpi, surface_bg, status_label, false, modal_active)
     }
 
+    /// Render a [`WebChromeLayout`] (menu bar/sections, dropdown items & shortcuts, toolbar buttons,
+    /// context menu items, modal inputs/items/buttons, and status bar) into layered RGBA + [`WebTextDrawOp`]s,
+    /// enforcing [`MAX_FRAME_RGBA_BYTES`] before any pixel allocation.
+    ///
+    /// # Errors
+    /// Returns [`WebAdapterError::Validation`] when projected RGBA buffers exceed [`MAX_FRAME_RGBA_BYTES`]
+    /// or allocation reservation fails.
+    pub fn try_compose_chrome_frame(
+        width_px: u32,
+        height_px: u32,
+        dpi: u16,
+        surface_bg: [u8; 4],
+        layout: &WebChromeLayout,
+    ) -> Result<WebLayeredFrame, WebAdapterError> {
+        let w = width_px.max(1);
+        let h = height_px.max(1);
+        let eff_dpi = dpi.max(72);
+        let (rect_primitives, text_ops) = build_chrome_frame_primitives(w, h, eff_dpi, surface_bg, layout);
+        preflight_layered_rgba_budget(w, h, &rect_primitives)?;
+        let base_img = try_solid_raster_image(w, h, eff_dpi, [surface_bg[0], surface_bg[1], surface_bg[2], 255])?;
+        Self::try_compose_layered_frame(base_img, &rect_primitives, text_ops)
+    }
+
     /// Render the minimal strict-CSP placeholder frame with optional popup-dropdown and modal layers,
     /// enforcing [`MAX_FRAME_RGBA_BYTES`] before any pixel allocation.
     ///
@@ -1531,6 +1558,284 @@ fn build_placeholder_primitives(
             ellipsized: false,
             node_id: Some(String::from("popup.menu")),
         });
+    }
+    (rect_primitives, text_ops)
+}
+
+fn preflight_layered_rgba_budget(w: u32, h: u32, rect_primitives: &[WebRectPrimitive]) -> Result<(), WebAdapterError> {
+    let mut total = checked_rgba_byte_len(w, h)?;
+    if total > MAX_FRAME_RGBA_BYTES {
+        return Err(WebAdapterError::Validation(format!("frame {w}x{h} base buffer {total} exceeds {MAX_FRAME_RGBA_BYTES}-byte cap")));
+    }
+    let viewport_rect = LayoutRectPx::new(0, 0, w, h);
+    let mut band_rects: [Vec<WebRectPrimitive>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+    for prim in rect_primitives {
+        let idx = usize::from(prim.z_layer.band() as u8);
+        if let Some(bucket) = band_rects.get_mut(idx) {
+            bucket.push(*prim);
+        }
+    }
+    for band in [ZLayerBand::PopupDropdown, ZLayerBand::ModalOverlay, ZLayerBand::TopOverlay] {
+        if let Some(bounds) = band_bounds_for_primitives(viewport_rect, &band_rects[band as usize]) {
+            let band_bytes = checked_rgba_byte_len(bounds.width, bounds.height)?;
+            total = total
+                .checked_add(band_bytes)
+                .filter(|&sum| sum <= MAX_FRAME_RGBA_BYTES)
+                .ok_or_else(|| WebAdapterError::Validation(format!("frame {w}x{h} overlay RGBA buffers exceed {MAX_FRAME_RGBA_BYTES}-byte cap")))?;
+        }
+    }
+    Ok(())
+}
+
+fn build_chrome_frame_primitives(
+    w: u32,
+    h: u32,
+    dpi: u16,
+    surface_bg: [u8; 4],
+    layout: &WebChromeLayout,
+) -> (Vec<WebRectPrimitive>, Vec<WebTextDrawOp>) {
+    let viewport_rect = LayoutRectPx::new(0, 0, w, h);
+    let style = UiTextStyle::ui_sans(12.0);
+    let font_css = canvas_font_css(&style, dpi.max(72));
+    let mut rect_primitives = Vec::with_capacity(layout.nodes.len());
+    let mut text_ops = Vec::with_capacity(layout.nodes.len());
+    let mut order = 0u32;
+    let mut next_order = || {
+        order = order.saturating_add(1);
+        order
+    };
+
+    let text_dir = |s: &str| {
+        if curvebook_text::contains_rtl_script(s) { WebTextDirection::Rtl } else { WebTextDirection::Ltr }
+    };
+
+    for node in &layout.nodes {
+        match node.role {
+            WebChromeRole::MenuBar | WebChromeRole::StatusBar => {
+                rect_primitives.push(WebRectPrimitive {
+                    z_layer: node.z_layer,
+                    clip_px: Some(viewport_rect),
+                    rect_px: node.rect_px,
+                    fill: Some([surface_bg[0].saturating_sub(10), surface_bg[1].saturating_sub(10), surface_bg[2].saturating_sub(8), 255]),
+                    stroke: None,
+                    stroke_width_px: 0,
+                });
+                if node.role == WebChromeRole::StatusBar && !node.label.is_empty() {
+                    text_ops.push(WebTextDrawOp {
+                        z_layer: node.z_layer,
+                        z_band: node.z_layer.band(),
+                        paint_order: next_order(),
+                        clip_px: Some(node.clip_px),
+                        x_px: f64::from(node.rect_px.x) + 8.0,
+                        y_px: f64::from(node.rect_px.y) + 4.0,
+                        baseline_y_px: f64::from(node.rect_px.y) + 16.0,
+                        max_width_px: Some(f64::from(node.rect_px.width.saturating_sub(16))),
+                        text: node.label.clone(),
+                        style: style.clone(),
+                        font_css: font_css.clone(),
+                        color_rgba: [226, 232, 240, 255],
+                        align: WebTextAlign::Left,
+                        direction: text_dir(&node.label),
+                        ellipsized: false,
+                        node_id: Some(node.id.clone()),
+                    });
+                }
+            }
+            WebChromeRole::MenuSection | WebChromeRole::ToolbarButton | WebChromeRole::ModalButton | WebChromeRole::ModalCloseButton => {
+                let (fill, stroke, text_col) = if node.role == WebChromeRole::ModalButton && node.id == "modal.ok" {
+                    ([37, 99, 235, 255], [96, 165, 250, 255], [255, 255, 255, 255])
+                } else if node.role == WebChromeRole::MenuSection {
+                    ([30, 41, 59, 180], [51, 65, 85, 255], [226, 232, 240, 255])
+                } else if node.enabled {
+                    ([30, 41, 59, 230], [71, 85, 105, 255], [241, 245, 249, 255])
+                } else {
+                    ([24, 30, 44, 210], [51, 65, 85, 180], [148, 163, 184, 255])
+                };
+                rect_primitives.push(WebRectPrimitive {
+                    z_layer: node.z_layer,
+                    clip_px: Some(node.clip_px),
+                    rect_px: node.rect_px,
+                    fill: Some(fill),
+                    stroke: Some(stroke),
+                    stroke_width_px: 1,
+                });
+                if !node.label.is_empty() {
+                    text_ops.push(WebTextDrawOp {
+                        z_layer: node.z_layer,
+                        z_band: node.z_layer.band(),
+                        paint_order: next_order(),
+                        clip_px: Some(node.clip_px),
+                        x_px: f64::from(node.rect_px.x) + 6.0,
+                        y_px: f64::from(node.rect_px.y) + 6.0,
+                        baseline_y_px: f64::from(node.rect_px.y) + 18.0,
+                        max_width_px: Some(f64::from(node.rect_px.width.saturating_sub(12).max(1))),
+                        text: node.label.clone(),
+                        style: style.clone(),
+                        font_css: font_css.clone(),
+                        color_rgba: text_col,
+                        align: WebTextAlign::Left,
+                        direction: text_dir(&node.label),
+                        ellipsized: false,
+                        node_id: Some(node.id.clone()),
+                    });
+                }
+            }
+            WebChromeRole::DropdownMenu | WebChromeRole::ContextMenu => {
+                rect_primitives.push(WebRectPrimitive {
+                    z_layer: node.z_layer,
+                    clip_px: Some(viewport_rect),
+                    rect_px: node.rect_px,
+                    fill: Some([30, 41, 59, 244]),
+                    stroke: Some([99, 102, 241, 255]),
+                    stroke_width_px: 1,
+                });
+            }
+            WebChromeRole::MenuItem | WebChromeRole::ModalItem => {
+                let text_col = if node.enabled { [241, 245, 249, 255] } else { [148, 163, 184, 255] };
+                if !node.label.is_empty() {
+                    text_ops.push(WebTextDrawOp {
+                        z_layer: node.z_layer,
+                        z_band: node.z_layer.band(),
+                        paint_order: next_order(),
+                        clip_px: Some(node.clip_px),
+                        x_px: f64::from(node.rect_px.x) + 4.0,
+                        y_px: f64::from(node.rect_px.y) + 1.0,
+                        baseline_y_px: f64::from(node.rect_px.y) + 11.0,
+                        max_width_px: Some(f64::from(node.rect_px.width.saturating_sub(8).max(1))),
+                        text: node.label.clone(),
+                        style: style.clone(),
+                        font_css: font_css.clone(),
+                        color_rgba: text_col,
+                        align: WebTextAlign::Left,
+                        direction: text_dir(&node.label),
+                        ellipsized: false,
+                        node_id: Some(node.id.clone()),
+                    });
+                }
+                if let Some(ref sc) = node.shortcut
+                    && !sc.is_empty()
+                {
+                    text_ops.push(WebTextDrawOp {
+                        z_layer: node.z_layer,
+                        z_band: node.z_layer.band(),
+                        paint_order: next_order(),
+                        clip_px: Some(node.clip_px),
+                        x_px: f64::from(node.rect_px.right()) - 4.0,
+                        y_px: f64::from(node.rect_px.y) + 1.0,
+                        baseline_y_px: f64::from(node.rect_px.y) + 11.0,
+                        max_width_px: Some(f64::from(node.rect_px.width / 2)),
+                        text: sc.clone(),
+                        style: style.clone(),
+                        font_css: font_css.clone(),
+                        color_rgba: [148, 163, 184, 255],
+                        align: WebTextAlign::Right,
+                        direction: WebTextDirection::Ltr,
+                        ellipsized: false,
+                        node_id: Some(format!("{}.shortcut", node.id)),
+                    });
+                }
+            }
+            WebChromeRole::ModalBackdrop => {
+                rect_primitives.push(WebRectPrimitive {
+                    z_layer: ZLayer::ModalBackdrop,
+                    clip_px: Some(viewport_rect),
+                    rect_px: node.rect_px,
+                    fill: Some([15, 23, 42, 110]),
+                    stroke: None,
+                    stroke_width_px: 0,
+                });
+            }
+            WebChromeRole::ModalDialog => {
+                rect_primitives.push(WebRectPrimitive {
+                    z_layer: ZLayer::ModalDialog,
+                    clip_px: Some(viewport_rect),
+                    rect_px: node.rect_px,
+                    fill: Some([24, 30, 44, 250]),
+                    stroke: Some([99, 102, 241, 255]),
+                    stroke_width_px: 1,
+                });
+                if !node.label.is_empty() {
+                    text_ops.push(WebTextDrawOp {
+                        z_layer: node.z_layer,
+                        z_band: node.z_layer.band(),
+                        paint_order: next_order(),
+                        clip_px: Some(node.clip_px),
+                        x_px: f64::from(node.rect_px.x) + 16.0,
+                        y_px: f64::from(node.rect_px.y) + 12.0,
+                        baseline_y_px: f64::from(node.rect_px.y) + 24.0,
+                        max_width_px: Some(f64::from(node.rect_px.width.saturating_sub(32).max(1))),
+                        text: node.label.clone(),
+                        style: style.clone(),
+                        font_css: font_css.clone(),
+                        color_rgba: [248, 250, 252, 255],
+                        align: WebTextAlign::Left,
+                        direction: text_dir(&node.label),
+                        ellipsized: false,
+                        node_id: Some(node.id.clone()),
+                    });
+                }
+            }
+            WebChromeRole::ModalInput => {
+                rect_primitives.push(WebRectPrimitive {
+                    z_layer: node.z_layer,
+                    clip_px: Some(node.clip_px),
+                    rect_px: node.rect_px,
+                    fill: Some([15, 23, 42, 255]),
+                    stroke: Some([100, 116, 139, 255]),
+                    stroke_width_px: 1,
+                });
+                if !node.label.is_empty() {
+                    text_ops.push(WebTextDrawOp {
+                        z_layer: node.z_layer,
+                        z_band: node.z_layer.band(),
+                        paint_order: next_order(),
+                        clip_px: Some(node.clip_px),
+                        x_px: f64::from(node.rect_px.x) + 8.0,
+                        y_px: f64::from(node.rect_px.y) + 6.0,
+                        baseline_y_px: f64::from(node.rect_px.y) + 18.0,
+                        max_width_px: Some(f64::from(node.rect_px.width.saturating_sub(16).max(1))),
+                        text: node.label.clone(),
+                        style: style.clone(),
+                        font_css: font_css.clone(),
+                        color_rgba: [241, 245, 249, 255],
+                        align: WebTextAlign::Left,
+                        direction: text_dir(&node.label),
+                        ellipsized: false,
+                        node_id: Some(node.id.clone()),
+                    });
+                }
+            }
+            WebChromeRole::Tooltip => {
+                rect_primitives.push(WebRectPrimitive {
+                    z_layer: ZLayer::Tooltip,
+                    clip_px: Some(viewport_rect),
+                    rect_px: node.rect_px,
+                    fill: Some([15, 23, 42, 245]),
+                    stroke: Some([96, 165, 250, 255]),
+                    stroke_width_px: 1,
+                });
+                if !node.label.is_empty() {
+                    text_ops.push(WebTextDrawOp {
+                        z_layer: node.z_layer,
+                        z_band: node.z_layer.band(),
+                        paint_order: next_order(),
+                        clip_px: Some(node.clip_px),
+                        x_px: f64::from(node.rect_px.x) + 6.0,
+                        y_px: f64::from(node.rect_px.y) + 4.0,
+                        baseline_y_px: f64::from(node.rect_px.y) + 16.0,
+                        max_width_px: Some(f64::from(node.rect_px.width.saturating_sub(12).max(1))),
+                        text: node.label.clone(),
+                        style: style.clone(),
+                        font_css: font_css.clone(),
+                        color_rgba: [241, 245, 249, 255],
+                        align: WebTextAlign::Left,
+                        direction: text_dir(&node.label),
+                        ellipsized: false,
+                        node_id: Some(node.id.clone()),
+                    });
+                }
+            }
+        }
     }
     (rect_primitives, text_ops)
 }

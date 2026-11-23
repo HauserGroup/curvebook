@@ -19,8 +19,8 @@ fn build_session_with_data_and_graph(doc_id: &str, tab_id: &str) -> Result<(WebB
         .map_err(|e| e.to_string())?;
     let _ = session.host.execute_command("sheet.createData", json!({ "kind": "xy", "title": "Study Data", "auto_family": true }))?;
     let data_id = session.host.app().document().data_sheets.first().map(|s| s.id.as_str().to_owned()).ok_or("missing data sheet")?;
-    let _ = session.host.execute_command("table.setCell", json!({ "sheet_id": data_id, "row": 0, "col": 0, "subcol": 0, "raw": "1.0" }))?;
-    let _ = session.host.execute_command("table.setCell", json!({ "sheet_id": data_id, "row": 0, "col": 1, "subcol": 0, "raw": "2.5" }))?;
+    let _ = session.host.execute_command("table.setCell", json!({ "sheet_id": data_id, "row": 0, "col": 0, "subcol": 0, "value": 1.0 }))?;
+    let _ = session.host.execute_command("table.setCell", json!({ "sheet_id": data_id, "row": 0, "col": 1, "subcol": 0, "value": 2.5 }))?;
     let graph_id = session.host.app().document().graph_sheets.first().map(|s| s.id.as_str().to_owned()).ok_or("missing auto graph sheet")?;
     Ok((session, data_id, graph_id))
 }

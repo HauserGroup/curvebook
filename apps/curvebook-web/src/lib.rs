@@ -6,10 +6,10 @@
 //! self-contained in memory.
 #![forbid(unsafe_code)]
 
-use curvebook_engine::Session;
+use curvebook_engine::{ExternalPathPolicy, Session};
 use curvebook_format::{
-    ArchiveKind, ImportReport, import_prism_bytes, import_pzfx_bytes, instantiate_template_bytes, migrate_document_json, open_archive_bytes,
-    save_project_bytes, validate_project_document,
+    ArchiveKind, ImportReport, MAX_ARCHIVE_FILE_BYTES, MAX_CSV_FILE_BYTES, import_prism_bytes, import_pzfx_bytes, instantiate_template_bytes,
+    migrate_document_json, open_archive_bytes, save_project_bytes, validate_project_document,
 };
 use curvebook_text::{TrueTypeFontInfo, parse_truetype_font_info};
 use curvebook_ui_egui::serde_json::{self, Value, json};
@@ -128,6 +128,7 @@ impl WebWorkspaceHost {
         let _ = curvebook_ui_egui::bundled_fonts_enabled();
         let _ = curvebook_format::EXTENSION;
         let mut app = UiApp::new();
+        app.session_mut().set_path_policy(ExternalPathPolicy::RejectExternal);
         app.set_url_opener(std::sync::Arc::new(WebPlatformUrlOpener));
         app.sync_views();
         Self { app, viewport, format_tag: String::from("empty"), warnings: Vec::new() }
@@ -246,6 +247,9 @@ impl WebWorkspaceHost {
     /// # Errors
     /// Returns an error description if JSON deserialization fails.
     pub fn open_project_json_bytes(&mut self, bytes: &[u8]) -> Result<WorkspaceSummary, String> {
+        if bytes.len() > MAX_ARCHIVE_FILE_BYTES {
+            return Err(format!("project JSON payload exceeds maximum allowed size ({} > {MAX_ARCHIVE_FILE_BYTES} bytes)", bytes.len()));
+        }
         let raw_val: Value = serde_json::from_slice(bytes).map_err(|err| format!("invalid project JSON: {err}"))?;
         let obj = raw_val.as_object().ok_or_else(|| String::from("invalid project JSON: root must be a JSON object"))?;
         let from_version = match obj.get("schema_version") {
@@ -258,6 +262,7 @@ impl WebWorkspaceHost {
         let migrated = migrate_document_json(raw_val, from_version).map_err(|err| format!("invalid project JSON: {err}"))?;
         let doc = serde_json::from_value(migrated).map_err(|err| format!("invalid project JSON: {err}"))?;
         validate_project_document(&doc).map_err(|err| format!("invalid project document: {err}"))?;
+        doc.validate_structural_limits().map_err(|err| format!("invalid project document limits: {err}"))?;
         self.install_session(Session::from_document(doc), "json", Vec::new(), false, false);
         Ok(self.inspect_summary())
     }
@@ -267,10 +272,10 @@ impl WebWorkspaceHost {
     /// # Errors
     /// Returns an error description if `bytes` are not valid UTF-8 or CSV import fails.
     pub fn open_delimited_bytes(&mut self, bytes: &[u8], is_tsv: bool, title: Option<&str>, kind: Option<&str>) -> Result<WorkspaceSummary, String> {
-        *self.app.session_mut() = Session::new();
-        self.app.virtual_workspace = VirtualWorkspaceFolder::default();
-        self.app.sync_views();
-        self.warnings.clear();
+        if bytes.len() > MAX_CSV_FILE_BYTES {
+            return Err(format!("delimited payload exceeds maximum allowed size ({} > {MAX_CSV_FILE_BYTES} bytes)", bytes.len()));
+        }
+        self.install_session(Session::new(), if is_tsv { "tsv" } else { "csv" }, Vec::new(), false, false);
         let summary = self.import_delimited_bytes(bytes, is_tsv, title, kind)?;
         self.format_tag = String::from(if is_tsv { "tsv" } else { "csv" });
         Ok(self.inspect_summary_with_format(summary))
@@ -287,6 +292,9 @@ impl WebWorkspaceHost {
         title: Option<&str>,
         kind: Option<&str>,
     ) -> Result<WorkspaceSummary, String> {
+        if bytes.len() > MAX_CSV_FILE_BYTES {
+            return Err(format!("delimited payload exceeds maximum allowed size ({} > {MAX_CSV_FILE_BYTES} bytes)", bytes.len()));
+        }
         let text = std::str::from_utf8(bytes).map_err(|err| format!("delimited bytes are not valid UTF-8: {err}"))?;
         let mut params = json!({
             "text": text,
@@ -558,6 +566,8 @@ impl WebWorkspaceHost {
     }
 
     fn install_session(&mut self, mut session: Session, tag: &str, warnings: Vec<String>, mark_clean: bool, preserve_virtual_workspace: bool) {
+        session.set_path_policy(ExternalPathPolicy::RejectExternal);
+        session.set_gui_only(self.app.session().gui_only());
         if mark_clean {
             session.set_file_path(None, true);
         }
