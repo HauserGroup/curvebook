@@ -18,8 +18,10 @@ use curvebook_math::PValueFormat;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use super::export::{de_opt_usize, write_atomic_output_file};
-use super::helpers::{next_unique_sheet_id, parse_serde_enum, parse_sheet_id, require_analyzable_data_sheet, require_result_sheet, sheet_id_exists};
+use super::export::de_opt_usize;
+use super::helpers::{
+    next_unique_sheet_id, parse_serde_enum, parse_sheet_id, require_analyzable_data_sheet, require_result_sheet, sheet_id_exists, write_output_file,
+};
 use super::params::{
     any_json_schema, array_schema, bool_schema, deserialize_strict, int_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema,
     parse_params, str_schema,
@@ -778,9 +780,9 @@ fn run_existing_or_project_analysis(doc: &mut ProjectDocument, command_id: &str,
         if doc.result_sheet(&id).is_none() {
             return Err(EngineError::with_code(
                 ErrorCode::NotFound,
-                format!("result sheet `{id}` not found; supply `source_sheet` and `kind` to create a new analysis"),
+                format!("result sheet `{id}` not found; supply `source_sheet_id` and `kind` to create a new analysis"),
             )
-            .with_remediation("Supply `source_sheet` and `kind` to create a new result sheet, or verify the existing `sheet_id`.")
+            .with_remediation("Supply `source_sheet_id` and `kind` to create a new result sheet, or verify the existing `sheet_id`.")
             .with_details(json!({ "sheet_id": id.as_str() })));
         }
         let recalculated = dag::recalculate_dirty_with_report(doc, std::slice::from_ref(&id))?.total_updated();
@@ -847,6 +849,10 @@ fn run_analysis_update_params(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
         && let Some(rules_val) = parsed.extra.get("parameter_rules")
     {
         let _ = parse_parameter_rules(rules_val)?;
+    }
+    if matches!(updated.kind, AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { .. })) {
+        let _ = opt_bool_checked(&combined, "correlation_all_pairs")?;
+        let _ = opt_bool_checked(&combined, "correlation_heatmap")?;
     }
 
     if !updated.kind.is_compatible_with(source_kind) {
@@ -947,7 +953,7 @@ fn run_analysis_export_json(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutc
     let pretty = params.pretty.unwrap_or(true);
     let json_text = export_result_sheet_json(res, pretty)?;
     if let Some(ref p) = params.path {
-        write_atomic_output_file(p, json_text.as_bytes())?;
+        write_output_file(&ctx.session.path_policy, p, json_text.as_bytes())?;
     }
     Ok(CommandOutcome::read_only(
         "analysis.exportJson",
@@ -988,7 +994,7 @@ fn run_analysis_export_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutco
     };
 
     if let Some(ref p) = params.path {
-        write_atomic_output_file(p, csv.as_bytes())?;
+        write_output_file(&ctx.session.path_policy, p, csv.as_bytes())?;
     }
     Ok(CommandOutcome::read_only(
         "analysis.exportCsv",
@@ -1011,7 +1017,7 @@ fn run_result_generate_report(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
     };
     let report = generate_methods_report(ctx.session.document(), &id, format)?;
     if let Some(ref p) = params.path {
-        write_atomic_output_file(p, report.as_bytes())?;
+        write_output_file(&ctx.session.path_policy, p, report.as_bytes())?;
     }
     Ok(CommandOutcome::read_only(
         "result.generateReport",
@@ -1131,7 +1137,7 @@ fn build_analysis_spec(
     } else {
         let raw_source = parsed.source_sheet_id.as_deref().ok_or_else(|| {
             EngineError::with_code(ErrorCode::BadInput, "missing required parameter `source_sheet_id`")
-                .with_remediation("Supply `source_sheet` / `source_sheet_id` referencing an existing data sheet.")
+                .with_remediation("Supply `source_sheet_id` referencing an existing data sheet.")
                 .with_details(json!({ "pointer": "/source_sheet_id" }))
         })?;
         let source_sheet_id = parse_sheet_id(raw_source)?;
@@ -1319,25 +1325,21 @@ fn extract_clean_patch_map(spec: &mut AnalysisSpec, params_val: Option<&Value>) 
         return Err(EngineError::with_code(ErrorCode::BadInput, "`params` must be a JSON object or null"));
     };
     let mut cleaned = map.clone();
-    if let Some(conf_val) = cleaned.remove("confidence_percent").or_else(|| cleaned.remove("confidence_level")) {
-        let _ = cleaned.remove("confidence_level");
+    if let Some(conf_val) = cleaned.remove("confidence_percent") {
         let pct = conf_val
             .as_f64()
             .filter(|v| v.is_finite())
             .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`confidence_percent` must be a finite percentage in (1.0, 99.99]"))?;
         apply_metadata_updates(spec, None, Some(pct), None, None)?;
     }
-    if let Some(title_val) = cleaned.remove("title").or_else(|| cleaned.remove("custom_title")) {
-        let _ = cleaned.remove("custom_title");
+    if let Some(title_val) = cleaned.remove("title") {
         match title_val {
             Value::Null => apply_metadata_updates(spec, Some(None), None, None, None)?,
             Value::String(ref s) => apply_metadata_updates(spec, Some(Some(s.as_str())), None, None, None)?,
             _ => return Err(EngineError::with_code(ErrorCode::BadInput, "`title` must be a string or null")),
         }
     }
-    if let Some(sel_val) = cleaned.remove("selected_data_sets").or_else(|| cleaned.remove("selected_columns")).or_else(|| cleaned.remove("columns")) {
-        let _ = cleaned.remove("selected_columns");
-        let _ = cleaned.remove("columns");
+    if let Some(sel_val) = cleaned.remove("selected_data_sets") {
         let Value::Array(arr) = sel_val else {
             return Err(EngineError::with_code(ErrorCode::BadInput, "`selected_data_sets` must be an array of dataset indices"));
         };
@@ -1931,11 +1933,7 @@ enum KeyValidationMode {
 }
 
 impl KeyValidationMode {
-    const fn allow_simulate_params(self) -> bool {
-        matches!(self, Self::Create)
-    }
-
-    const fn allow_linear_hook_compat(self) -> bool {
+    const fn allow_ui_update_compat(self) -> bool {
         matches!(self, Self::UpdateParamsTopLevel)
     }
 }
@@ -1960,47 +1958,40 @@ fn validate_map_keys_for_kind(
 
 fn is_key_allowed_for_kind(kind: &AnalysisKind, key: &str, mode: KeyValidationMode) -> bool {
     match kind {
-        AnalysisKind::Transform(tr) => is_key_allowed_for_transform(tr, key, mode.allow_simulate_params()),
-        AnalysisKind::LinearRegression(_) | AnalysisKind::NonlinearRegression(_) => {
-            is_key_allowed_for_fit(kind, key, mode.allow_linear_hook_compat())
-        }
-        _ => is_key_allowed_for_stats(kind, key),
+        AnalysisKind::Transform(tr) => is_key_allowed_for_transform(tr, key),
+        AnalysisKind::LinearRegression(_) | AnalysisKind::NonlinearRegression(_) => is_key_allowed_for_fit(kind, key, mode.allow_ui_update_compat()),
+        _ => is_key_allowed_for_stats(kind, key, mode.allow_ui_update_compat()),
     }
 }
 
-fn is_key_allowed_for_transform(tr: &TransformAnalysisSpec, key: &str, allow_simulate_params: bool) -> bool {
+fn is_key_allowed_for_transform(tr: &TransformAnalysisSpec, key: &str) -> bool {
     match tr {
-        TransformAnalysisSpec::Math { .. } => {
-            matches!(key, "x_transform" | "y_transform" | "preset" | "operation" | "error_propagation" | "propagate_error")
-        }
+        TransformAnalysisSpec::Math { .. } => matches!(key, "x_transform" | "y_transform" | "error_propagation"),
         TransformAnalysisSpec::Normalize { .. } => {
-            matches!(key, "zero_anchor" | "zero" | "hundred_anchor" | "hundred" | "output_percent" | "as_fraction" | "per_data_set")
+            matches!(key, "zero_anchor" | "hundred_anchor" | "output_percent" | "as_fraction" | "per_data_set")
         }
         TransformAnalysisSpec::RemoveBaseline { .. } => matches!(key, "baseline_columns" | "operation"),
         TransformAnalysisSpec::Transpose { .. } => key == "swap_row_and_column_titles",
-        TransformAnalysisSpec::PruneRows { .. } => matches!(key, "every_k_rows" | "step" | "average_window" | "average_dropped"),
-        TransformAnalysisSpec::SelectAndTransform { .. } => {
-            matches!(key, "filter_formula" | "target_archetype" | "derived_columns" | "derived" | "column_formulas" | "formulas")
-        }
+        TransformAnalysisSpec::PruneRows { .. } => matches!(key, "every_k_rows" | "average_window"),
+        TransformAnalysisSpec::SelectAndTransform { .. } => matches!(key, "filter_formula" | "target_archetype" | "derived_columns"),
         TransformAnalysisSpec::Simulate { .. } => {
-            matches!(key, "seed" | "row_count" | "n_points" | "replicates" | "x_min" | "x_max" | "equation_id" | "parameters" | "noise")
-                || (allow_simulate_params && key == "params")
+            matches!(key, "seed" | "row_count" | "replicates" | "x_min" | "x_max" | "equation_id" | "parameters" | "noise")
         }
         TransformAnalysisSpec::RandomSample { .. } => {
-            matches!(key, "seed" | "sample_size" | "n_samples" | "stratify_column" | "proportional_allocation")
+            matches!(key, "seed" | "sample_size" | "stratify_column" | "proportional_allocation")
         }
     }
 }
 
 fn is_key_allowed_for_multiplicity(mult: &MultiplicitySpec, key: &str) -> bool {
-    matches!(key, "multiplicity" | "post_hoc" | "multiplicity_method" | "report_confidence_intervals" | "alpha" | "threshold")
+    matches!(key, "multiplicity" | "report_confidence_intervals" | "alpha")
         || (matches!(mult.method, MultiplicityMethod::Dunnett { .. }) && key == "control_column")
 }
 
-fn is_key_allowed_for_fit(kind: &AnalysisKind, key: &str, allow_linear_hook_compat: bool) -> bool {
+fn is_key_allowed_for_fit(kind: &AnalysisKind, key: &str, allow_ui_update_compat: bool) -> bool {
     match kind {
         AnalysisKind::LinearRegression(_) => {
-            (allow_linear_hook_compat && key == "parameter_rules")
+            (allow_ui_update_compat && key == "parameter_rules")
                 || matches!(
                     key,
                     "deming"
@@ -2021,20 +2012,17 @@ fn is_key_allowed_for_fit(kind: &AnalysisKind, key: &str, allow_linear_hook_comp
                 "equation_id"
                     | "custom_dsl"
                     | "method"
-                    | "fit_method"
                     | "weighting"
                     | "parameter_rules"
                     | "profile_likelihood_ci"
                     | "identify_unstable_parameters"
                     | "flag_r_squared_below"
                     | "comparison"
-                    | "model_comparison"
                     | "confidence_bands"
                     | "prediction_bands"
                     | "interpolate_unknowns"
                     | "replicates_lack_of_fit_test"
                     | "normality_of_residuals"
-                    | "normality_tests"
                     | "max_iters"
                     | "x_range_filter"
                     | "y_range_filter"
@@ -2049,13 +2037,13 @@ fn is_key_allowed_for_fit(kind: &AnalysisKind, key: &str, allow_linear_hook_comp
                     | "mv_x_columns"
                     | "mv_y_column"
             ) || (matches!(nl.method, FitMethod::RoutOutlierElimination { .. }) && matches!(key, "q_percent" | "fdr_q_percent"))
-                || (nl.comparison.is_some() && matches!(key, "alternative_equation_id" | "alternative_model"))
+                || (nl.comparison.is_some() && key == "alternative_equation_id")
         }
         _ => false,
     }
 }
 
-fn is_key_allowed_for_stats(kind: &AnalysisKind, key: &str) -> bool {
+fn is_key_allowed_for_stats(kind: &AnalysisKind, key: &str, allow_ui_update_compat: bool) -> bool {
     match kind {
         AnalysisKind::DescriptiveStats(_) => {
             matches!(key, "aggregation" | "custom_upper_percentile" | "run_normality_battery" | "hypothetical_value")
@@ -2063,11 +2051,8 @@ fn is_key_allowed_for_stats(kind: &AnalysisKind, key: &str) -> bool {
         AnalysisKind::OutlierDetection(OutlierSpec::Rout { .. }) => matches!(key, "q_percent" | "fdr_q_percent"),
         AnalysisKind::OutlierDetection(OutlierSpec::Grubbs { .. }) => matches!(key, "alpha" | "iterative"),
         AnalysisKind::TwoGroupComparison(tg) => {
-            matches!(
-                key,
-                "two_tailed" | "one_tailed" | "compute_effect_sizes" | "mv_group_column" | "group_column" | "mv_response_column" | "response_column"
-            ) || (matches!(tg.method, TwoGroupMethod::OneSampleT { .. } | TwoGroupMethod::OneSampleWilcoxon { .. })
-                && matches!(key, "hypothetical" | "hypothetical_mean"))
+            matches!(key, "two_tailed" | "one_tailed" | "compute_effect_sizes" | "mv_group_column" | "mv_response_column")
+                || (matches!(tg.method, TwoGroupMethod::OneSampleT { .. } | TwoGroupMethod::OneSampleWilcoxon { .. }) && key == "hypothetical")
         }
         AnalysisKind::BlandAltman(_) => matches!(key, "column_a" | "column_b" | "percent_difference" | "xy_compare_x_vs_y"),
         AnalysisKind::PassingBablok(_) => matches!(key, "x_column" | "y_column"),
@@ -2102,54 +2087,35 @@ fn is_key_allowed_for_stats(kind: &AnalysisKind, key: &str) -> bool {
             matches!(
                 key,
                 "method"
-                    | "contingency_method"
                     | "compute_odds_and_risk_ratios"
                     | "compute_sensitivity_specificity"
                     | "compute_phi_and_cramers_v"
                     | "expected_proportions"
                     | "null_proportion"
-            ) || (matches!(c.method, ContingencyMethod::PearsonChiSquare { .. }) && matches!(key, "yates" | "yates_continuity"))
-                || (matches!(c.method, ContingencyMethod::CohenKappa { .. }) && matches!(key, "weighting" | "kappa_weighting"))
+            ) || (matches!(c.method, ContingencyMethod::PearsonChiSquare { .. }) && key == "yates_continuity")
+                || (matches!(c.method, ContingencyMethod::CohenKappa { .. }) && key == "weighting")
         }
         AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { multiplicity, .. }) => {
             matches!(
                 key,
                 "log_rank_mantel_cox"
-                    | "log_rank"
                     | "gehan_breslow_wilcoxon"
-                    | "gehan"
                     | "trend_test"
                     | "asymmetrical_greenwood_ci"
                     | "mv_time_column"
-                    | "time_column"
                     | "mv_status_column"
-                    | "status_column"
                     | "mv_group_column"
-                    | "group_column"
             ) || is_key_allowed_for_multiplicity(multiplicity, key)
         }
         AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { .. }) => {
-            matches!(key, "time_column" | "status_column" | "predictor_columns" | "cox_covariate_columns" | "reference_levels" | "tie_method")
+            matches!(key, "time_column" | "status_column" | "predictor_columns" | "reference_levels" | "tie_method")
         }
         AnalysisKind::RocCurve(_) => key == "ci_method",
         AnalysisKind::GeneralizedLinearModel(_) => {
-            matches!(key, "family" | "glm_family" | "response_column" | "predictor_columns" | "reference_levels" | "compute_vif")
+            matches!(key, "family" | "response_column" | "predictor_columns" | "reference_levels" | "compute_vif")
         }
-        AnalysisKind::Multivariate(mv) => is_key_allowed_for_multivariate(mv, key),
-        AnalysisKind::PValueStack(_) => matches!(
-            key,
-            "method"
-                | "pvalue_stack_method"
-                | "multiplicity_method"
-                | "multiplicity"
-                | "threshold"
-                | "pvalue_stack_threshold"
-                | "alpha"
-                | "q"
-                | "fdr_q"
-                | "column"
-                | "pvalue_stack_column"
-        ),
+        AnalysisKind::Multivariate(mv) => is_key_allowed_for_multivariate(mv, key, allow_ui_update_compat),
+        AnalysisKind::PValueStack(_) => matches!(key, "method" | "threshold" | "column"),
         AnalysisKind::PowerAnalysis(_) => matches!(
             key,
             "family"
@@ -2159,48 +2125,31 @@ fn is_key_allowed_for_stats(kind: &AnalysisKind, key: &str) -> bool {
                 | "alpha"
                 | "target_power"
                 | "sample_size"
-                | "n"
                 | "sample_size_group2"
-                | "n2"
                 | "allocation_ratio"
                 | "effect"
                 | "effect_size"
-                | "standardized_effect"
                 | "chi_square_df"
-                | "df"
                 | "two_proportions_mode"
                 | "continuity_correction"
                 | "correlation_method"
                 | "info_sheet_id"
                 | "num_groups"
-                | "anova_groups"
         ),
         AnalysisKind::Transform(_) | AnalysisKind::LinearRegression(_) | AnalysisKind::NonlinearRegression(_) => false,
     }
 }
 
-fn is_key_allowed_for_multivariate(mv: &MultivariateSpec, key: &str) -> bool {
+fn is_key_allowed_for_multivariate(mv: &MultivariateSpec, key: &str, allow_ui_update_compat: bool) -> bool {
     match mv {
         MultivariateSpec::Pca { .. } => matches!(key, "standardize" | "parallel_analysis_seed" | "pcr_outcome_column"),
         MultivariateSpec::CorrelationMatrix { .. } => {
-            matches!(key, "spearman" | "spearman_rank" | "correlation_all_pairs" | "correlation_heatmap")
+            matches!(key, "spearman" | "spearman_rank") || (allow_ui_update_compat && matches!(key, "correlation_all_pairs" | "correlation_heatmap"))
         }
-        MultivariateSpec::Clustering { .. } => {
-            matches!(key, "k_means_k" | "k_clusters" | "distance" | "distance_metric" | "linkage" | "linkage_method" | "k_sweep_max")
+        MultivariateSpec::Clustering { .. } => matches!(key, "k_means_k" | "k_clusters" | "distance" | "linkage" | "k_sweep_max"),
+        MultivariateSpec::MultipleImputation { .. } => {
+            matches!(key, "imputations_m" | "max_iters" | "seed" | "response_column" | "predictor_columns")
         }
-        MultivariateSpec::MultipleImputation { .. } => matches!(
-            key,
-            "imputations_m"
-                | "m"
-                | "num_imputations"
-                | "max_iters"
-                | "iterations"
-                | "seed"
-                | "response_column"
-                | "target_column"
-                | "predictor_columns"
-                | "predictors"
-        ),
     }
 }
 
@@ -2558,6 +2507,8 @@ const NULLABLE_KIND_FIELDS: &[&str] = &[
     "plot_x_min",
     "plot_x_max",
     "plot_segments",
+    "custom_upper_percentile",
+    "hypothetical_value",
     "mv_group_column",
     "mv_response_column",
     "mv_time_column",
@@ -2692,9 +2643,20 @@ fn apply_custom_kind_overrides(kind: &mut AnalysisKind, norm: &Value) -> Result<
             {
                 spec.two_tailed = !one_tailed;
             }
+            if let Some(h) = opt_f64_checked(norm, "hypothetical")? {
+                match &mut spec.method {
+                    TwoGroupMethod::OneSampleT { hypothetical } | TwoGroupMethod::OneSampleWilcoxon { hypothetical } => {
+                        *hypothetical = h;
+                    }
+                    _ => {}
+                }
+            }
         }
         AnalysisKind::MultipleRowTTests(spec) => apply_multiplicity_override(&mut spec.multiplicity, norm)?,
         AnalysisKind::OneWayAnova(spec) => {
+            if let OneWayMethod::RepeatedMeasures { ref mut geisser_greenhouse } = spec.method {
+                apply_bool_opt_checked(norm, "geisser_greenhouse", geisser_greenhouse)?;
+            }
             apply_enum_field(norm, "df_method", &mut spec.df_method, "`df_method`")?;
             apply_enum_field(norm, "residual_covariance", &mut spec.residual_covariance, "`residual_covariance`")?;
             apply_multiplicity_override(&mut spec.multiplicity, norm)?;
@@ -2886,7 +2848,14 @@ fn apply_nonlinear_custom_overrides(spec: &mut NonlinearFitSpec, norm: &Value) -
     {
         spec.method = parse_fit_method_value(m_val)?;
     }
-    if let Some(q) = opt_f64_checked(norm, "q_percent")?
+    let q_override = match (opt_f64_checked(norm, "q_percent")?, opt_f64_checked(norm, "fdr_q_percent")?) {
+        (Some(q), Some(fdr_q)) if (q - fdr_q).abs() > 1e-12 => {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "conflicting `q_percent` and `fdr_q_percent` values supplied"));
+        }
+        (Some(q), _) | (None, Some(q)) => Some(q),
+        (None, None) => None,
+    };
+    if let Some(q) = q_override
         && let FitMethod::RoutOutlierElimination { ref mut fdr_q_percent } = spec.method
     {
         *fdr_q_percent = q;
@@ -3048,8 +3017,11 @@ fn patch_analysis_kind_fields(kind: &mut AnalysisKind, patch: &Value) -> Result<
                 && !matches!(kind, AnalysisKind::Transform(TransformAnalysisSpec::RandomSample { .. }) if ks == "sample_size")
                 && !matches!(kind, AnalysisKind::GeneralizedLinearModel(_) if ks == "response_column");
             if v.is_null() {
-                if !is_nullable && STRICT_NON_NULL_USIZE_FIELDS.contains(&ks) {
-                    return Err(EngineError::with_code(ErrorCode::BadInput, format!("`{ks}` must be a non-negative integer")));
+                if !is_nullable {
+                    if STRICT_NON_NULL_USIZE_FIELDS.contains(&ks) {
+                        return Err(EngineError::with_code(ErrorCode::BadInput, format!("`{ks}` must be a non-negative integer")));
+                    }
+                    continue;
                 }
                 target_map.insert(k.clone(), Value::Null);
                 patched_any = true;

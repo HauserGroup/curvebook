@@ -418,7 +418,7 @@ fn audit_79_rejects_unknown_and_inapplicable_keys_per_kind() {
     ok_cmd(
         &mut session,
         "stats.run",
-        json!({ "sheet_id": "rm-ok", "source_sheet_id": "col3", "kind": "rm_one_way_anova", "multiplicity_method": "tukey", "geisser_greenhouse": false }),
+        json!({ "sheet_id": "rm-ok", "source_sheet_id": "col3", "kind": "rm_one_way_anova", "multiplicity": "tukey", "geisser_greenhouse": false }),
     );
     assert_eq!(err_cmd(&mut session, "analysis.updateParams", json!({ "sheet_id": "rm-ok", "bogus": 1 })).code, ErrorCode::BadInput);
     assert_eq!(err_cmd(&mut session, "analysis.updateParams", json!({ "sheet_id": "rm-ok", "params": { "bogus": 1 } })).code, ErrorCode::BadInput);

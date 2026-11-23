@@ -218,7 +218,7 @@ fn run_project_save(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
     };
 
     if let Some(resolved_path) = saved_path {
-        ctx.session.set_file_path(Some(resolved_path), true);
+        ctx.session.mark_saved_clean(resolved_path);
     }
 
     let bytes_len = archive_bytes.len();
