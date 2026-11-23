@@ -135,6 +135,7 @@ pub fn render_page(spec: &PageSpec<'_>) -> String {
 
     out.push_str("      </article>\n    </main>\n");
     render_footer(spec, &root, &assets, &mut out);
+    render_statusbar(&mut out);
     out.push_str("  </div>\n</body>\n</html>\n");
     out
 }
@@ -310,6 +311,15 @@ fn render_footer(spec: &PageSpec<'_>, root: &str, assets: &str, out: &mut String
     out.push_str("    </footer>\n");
 }
 
+fn render_statusbar(out: &mut String) {
+    out.push_str("    <div class=\"window-statusbar\" aria-label=\"Application summary\">\n");
+    out.push_str("      <span class=\"status-cell is-grow\">Ready · Offline Desktop · CLI · Local MCP</span>\n");
+    out.push_str("      <span class=\"status-cell\">Pure Rust</span>\n");
+    out.push_str("      <span class=\"status-cell\">Zero Telemetry</span>\n");
+    out.push_str("      <span class=\"status-cell\">MIT / Apache-2.0</span>\n");
+    out.push_str("    </div>\n");
+}
+
 /// Deterministic helper to render a static script-free `docs/manual/index.html` meta-refresh page
 /// when `--release <version>` snapshots a release.
 #[must_use]
@@ -352,7 +362,9 @@ pub fn render_release_redirect_index(version_dir: &str, version_label: &str, ava
         }
         out.push_str("        </ul>\n");
     }
-    out.push_str("      </div>\n    </main>\n    <footer class=\"site-footer\">\n      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>\n      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>\n      <p class=\"privacy\">CurveBook runs locally and collects no telemetry. Read the <a href=\"../privacy.html\">Privacy Policy</a> · <a href=\"https://github.com/HauserGroup/curvebook\">Source code &amp; credits <span aria-hidden=\"true\">↗</span></a></p>\n    </footer>\n  </div>\n</body>\n</html>\n");
+    out.push_str("      </div>\n    </main>\n    <footer class=\"site-footer\">\n      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>\n      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>\n      <p class=\"privacy\">CurveBook runs locally and collects no telemetry. Read the <a href=\"../privacy.html\">Privacy Policy</a> · <a href=\"https://github.com/HauserGroup/curvebook\">Source code &amp; credits <span aria-hidden=\"true\">↗</span></a></p>\n    </footer>\n");
+    render_statusbar(&mut out);
+    out.push_str("  </div>\n</body>\n</html>\n");
     out
 }
 
@@ -404,6 +416,8 @@ pub fn render_root_redirect_shim(title: &str, description: &str, target_href: &s
     out.push_str("      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>\n");
     out.push_str("      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>\n");
     out.push_str("      <p class=\"privacy\">CurveBook runs locally and collects no telemetry. Read the <a href=\"privacy.html\">Privacy Policy</a> · <a href=\"https://github.com/HauserGroup/curvebook\">Source code &amp; credits <span aria-hidden=\"true\">↗</span></a></p>\n");
-    out.push_str("    </footer>\n  </div>\n</body>\n</html>\n");
+    out.push_str("    </footer>\n");
+    render_statusbar(&mut out);
+    out.push_str("  </div>\n</body>\n</html>\n");
     out
 }
