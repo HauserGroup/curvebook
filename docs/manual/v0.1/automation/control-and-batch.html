@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Loopback --control JSON-lines protocol, curvebook.batch.v1 manifests, run scripts, and engine error codes.">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'">
+  <meta name="color-scheme" content="light">
+  <title>Control Protocol, Batch Format &amp; Engine Errors — CurveBook Documentation</title>
+  <link rel="icon" type="image/png" href="../../../images/curvebook.png">
+  <link rel="stylesheet" href="../../../site.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="desktop-window wrap">
+    <header class="site-header">
+      <div class="title-bar">
+        <div class="wordmark">
+          <img src="../../../images/curvebook.png" width="64" height="64" alt="">
+          <span>CurveBook · Reference Manual</span>
+        </div>
+        <span class="window-status">Automation</span>
+      </div>
+      <nav aria-label="Manual navigation">
+        <a href="../index.html">Manual Home</a>
+        <a href="../section-get-started.html">Get Started</a>
+        <a href="../section-analyses.html">Reference</a>
+        <a href="../section-automation.html" aria-current="page">Automation</a>
+        <a href="../registry/commands.html">Commands &amp; Tools</a>
+        <a href="../az-index.html">A–Z Index</a>
+        <a href="../section-contribute.html">Contribute</a>
+        <a href="../../../index.html">Product Home</a>
+        <a href="../../../privacy.html">Privacy Policy</a>
+      </nav>
+    </header>
+    <div class="version-banner" role="note" aria-label="Documentation version">
+      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-23 (commit <code>4964288a03</code>)</span>
+      <span>No scripts · No telemetry · <a href="../az-index.html">A–Z Index</a></span>
+    </div>
+    <main id="main" tabindex="-1">
+      <article class="overview doc-body">
+        <nav class="breadcrumbs" aria-label="Breadcrumb">
+          <a href="../index.html">Manual</a>
+          <span aria-hidden="true">/</span>
+          <a href="../section-automation.html">Automation</a>
+          <span aria-hidden="true">/</span>
+          <span aria-current="page">Control Protocol, Batch Format &amp; Engine Errors</span>
+        </nav>
+        <nav class="toc" aria-label="On this page">
+          <p class="toc-title">On this page</p>
+          <ul>
+            <li><a href="#loopback-desktop-control-protocol---control">Loopback Desktop Control Protocol (--control)</a></li>
+            <li><a href="#batch-manifest">Batch Manifest Format (curvebook.batch.v1)</a></li>
+            <li><a href="#run-script-format">run Script Format</a></li>
+            <li><a href="#error-codes">Engine Error Codes and Categories</a></li>
+            <li><a href="#command-id-stability-rules">Command ID Stability Rules</a></li>
+          </ul>
+        </nav>
+<h1 id="control-protocol-batch-format--engine-errors" tabindex="-1">Control Protocol, Batch Format &amp; Engine Errors</h1>
+<p>CurveBook supports three scriptable interfaces alongside MCP: a loopback JSON-lines <code>--control</code> channel attached to a desktop window, standalone <code>run</code> command scripts, and <code>curvebook.batch.v1</code> manifests. Every engine command identifier follows the stability contract documented in <a href="https://github.com/HauserGroup/curvebook/blob/main/docs/command-ids.md">Command IDs</a>.</p>
+<h2 id="loopback-desktop-control-protocol---control" tabindex="-1">Loopback Desktop Control Protocol (<code>--control</code>)</h2>
+<p>Launch the desktop GUI with <code>--control &lt;port&gt;</code> (optionally paired with <code>--gui-only</code> or <code>--control-token &lt;token&gt;</code>) to bind a loopback TCP JSON-lines listener on <code>127.0.0.1:&lt;port&gt;</code>. Non-loopback bindings are never opened.</p>
+<ul>
+<li><strong>Framing:</strong> One UTF-8 JSON object per line terminated by <code>\n</code>, bounded by <code>MAX_CONTROL_LINE_BYTES</code> (<code>16 MiB</code>).</li>
+<li><strong>Authentication:</strong> Supply the bearer token via <code>&quot;auth&quot;</code> handshake or per-request <code>&quot;token&quot;</code> field (<code>--control-token</code>, <code>CURVEBOOK_CONTROL_TOKEN</code>, or the <code>control-&lt;port&gt;.token</code> file).</li>
+<li><strong>Dispatch key:</strong> Requests accept <code>&quot;method&quot;</code> or its alias <code>&quot;op&quot;</code>.</li>
+</ul>
+<p>Single-call request and response syntax:</p>
+<pre><code class="language-json">{&quot;id&quot;:1,&quot;op&quot;:&quot;command.run&quot;,&quot;command&quot;:&quot;sheet.createData&quot;,&quot;params&quot;:{&quot;kind&quot;:&quot;xy&quot;,&quot;replicates&quot;:3,&quot;title&quot;:&quot;Data 1&quot;}}</code></pre>
+<pre><code class="language-json">{&quot;id&quot;:1,&quot;ok&quot;:true,&quot;result&quot;:{&quot;command_id&quot;:&quot;sheet.createData&quot;,&quot;mutated&quot;:true,&quot;message&quot;:&quot;created data table sheet&quot;,&quot;payload&quot;:{&quot;sheet_id&quot;:&quot;data-1&quot;,&quot;title&quot;:&quot;Data 1&quot;,&quot;kind&quot;:&quot;xy&quot;,&quot;info_sheet_id&quot;:&quot;info-1&quot;,&quot;graph_sheet_id&quot;:&quot;graph-1&quot;}},&quot;error&quot;:null}</code></pre>
+<p>Built-in control methods: <code>&quot;auth&quot;</code>, <code>&quot;ping&quot;</code>, <code>&quot;command.list&quot;</code>, <code>&quot;command.run&quot;</code>, <code>&quot;command.batch&quot;</code>, <code>&quot;engine.execute&quot;</code>, <code>&quot;doc.inspect&quot;</code>, <code>&quot;doc.export&quot;</code>, <code>&quot;render.svg&quot;</code>, <code>&quot;render.pdf&quot;</code>, <code>&quot;render.preview&quot;</code>, <code>&quot;ui.state&quot;</code> (alias <code>&quot;state.snapshot&quot;</code>), <code>&quot;app.quit&quot;</code>, the interactive <code>ui.*</code> GUI actions (<code>ui.inspect</code>, <code>ui.screenshot</code>, <code>ui.pointer_gesture</code>, <code>ui.type_text</code>, <code>ui.press_key</code>, <code>ui.invoke_menu</code>, <code>ui.switch_tab</code>, <code>ui.answer_dialog</code>), plus any registered engine or <code>ui.*</code> command ID passed directly as <code>&quot;method&quot;</code>/<code>&quot;op&quot;</code>.</p>
+<p>When started with <code>--gui-only</code>, direct engine commands (<code>command.run</code>, <code>command.batch</code>, <code>engine.execute</code>), <code>doc.inspect</code>, <code>doc.export</code>, and <code>render.*</code> are rejected with <code>gui_only_violation</code> so external agents drive the desktop exclusively through the <code>ui.*</code> surface.</p>
+<h2 id="batch-manifest" tabindex="-1">Batch Manifest Format (<code>curvebook.batch.v1</code>)</h2>
+<p>A <code>curvebook.batch.v1</code> manifest is a deterministic JSON document validated strictly against the JSON Schema (<code>additionalProperties: false</code>) published in the <a href="../registry/formats.html#schema-batch-v1">Formats &amp; Schemas Registry</a> before any operation runs. Execute a manifest with <code>curvebook-cli batch &lt;manifest&gt; [--workdir &lt;dir&gt;] [--json]</code>.</p>
+<p>Single-call manifest structure (top-level keys):</p>
+<pre><code class="language-json">{&quot;schema&quot;:&quot;curvebook.batch.v1&quot;,&quot;project&quot;:&quot;in.curvebook&quot;,&quot;inputs&quot;:[{&quot;csv&quot;:&quot;assay.csv&quot;,&quot;sheet&quot;:&quot;data-2&quot;,&quot;kind&quot;:&quot;xy&quot;}],&quot;commands&quot;:[{&quot;cmd&quot;:&quot;fit.run&quot;,&quot;id&quot;:&quot;step-1&quot;,&quot;params&quot;:{&quot;source_sheet_id&quot;:&quot;data-2&quot;,&quot;sheet_id&quot;:&quot;fit-1&quot;,&quot;equation_id&quot;:&quot;log_agonist_vs_response_4pl&quot;}}],&quot;exports&quot;:[{&quot;out&quot;:&quot;out.curvebook&quot;,&quot;format&quot;:&quot;curvebook&quot;},{&quot;sheet&quot;:&quot;graph-1&quot;,&quot;out&quot;:&quot;out.svg&quot;,&quot;format&quot;:&quot;svg&quot;}]}</code></pre>
+<ul>
+<li><code>schema</code>: Required constant <code>&quot;curvebook.batch.v1&quot;</code>.</li>
+<li><code>project</code> / <code>template</code>: Mutually exclusive optional source project path or <code>.cbtemplate</code> template path (omit both to start from a blank session).</li>
+<li><code>inputs</code>: Optional ordered list of delimited imports using canonical keys (<code>path</code>/<code>file</code> or inline <code>csv</code>/<code>tsv</code>; optional <code>sheet</code>, <code>kind</code>, <code>subcolumn_mode</code>, <code>delimiter</code>, and <code>decimal_separator</code>).</li>
+<li><code>commands</code>: Optional ordered list of command steps, each naming the command via <code>cmd</code> (accepted aliases: <code>command</code>, <code>method</code>), with optional <code>id</code> and canonical <code>snake_case</code> <code>params</code> object.</li>
+<li><code>exports</code>: Optional ordered list of project saves or table/figure exports using canonical keys (<code>out</code>/<code>path</code>; optional <code>format</code>, <code>sheet</code>, <code>dpi</code>, <code>pretty</code>, <code>tab_index</code>, <code>pdf_version</code>, <code>ttf_font</code>). Pass <code>format: &quot;curvebook&quot;</code> or <code>&quot;curvebook.d&quot;</code> to write the resulting project archive or unpacked directory.</li>
+</ul>
+<h2 id="run-script-format" tabindex="-1"><code>run</code> Script Format</h2>
+<p><code>curvebook-cli run &lt;script&gt; [--workdir &lt;dir&gt;] [--json]</code> accepts either newline-delimited JSON objects (NDJSON) or a JSON array of command step objects (<code>{&quot;cmd&quot;:&quot;...&quot;,&quot;id&quot;:&quot;...&quot;,&quot;params&quot;:{...}}</code>, accepting <code>cmd</code>, <code>command</code>, or <code>method</code>). Passing <code>-</code> reads the script from <code>stdin</code>.</p>
+<h2 id="error-codes" tabindex="-1">Engine Error Codes and Categories</h2>
+<p>Engine, MCP, and CLI errors carry stable machine-readable <code>ErrorCode</code> variants classified into seven <code>ErrorCategory</code> values (<code>input</code>, <code>state</code>, <code>format</code>, <code>io</code>, <code>policy</code>, <code>compute</code>, <code>internal</code>) and an explicit <code>retryable</code> boolean flag (<code>StructuredErrorPayload</code> / <code>StructuredCliError</code>). See the complete generated <code>ErrorCode</code> table in the <a href="../registry/tables.html#error-codes">Tables &amp; Error Codes Registry</a>.</p>
+<h2 id="command-id-stability-rules" tabindex="-1">Command ID Stability Rules</h2>
+<p>Command IDs used in scripts, batch manifests, and MCP <code>command_run</code> calls remain stable across minor releases. See <a href="https://github.com/HauserGroup/curvebook/blob/main/docs/command-ids.md">Command IDs</a> for naming, command aliases, and canonical <code>snake_case</code> parameter schema compatibility guarantees.</p>
+        <nav class="pager" aria-label="Previous and next pages">
+          <a href="../automation/cli.html">← CLI Reference (curvebook-cli)</a>
+          <a href="../registry/commands.html">Engine &amp; UI Command Registry →</a>
+        </nav>
+      </article>
+    </main>
+    <footer class="site-footer">
+      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>
+      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
+      <p class="privacy">CurveBook runs locally and collects no telemetry. Read <a href="../../../privacy.html">Privacy, Licences &amp; Security</a> · <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a></p>
+    </footer>
+  </div>
+</body>
+</html>

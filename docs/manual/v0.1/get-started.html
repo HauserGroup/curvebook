@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="System requirements, installing CurveBook, verifying checksums/attestations, and font configuration.">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'">
+  <meta name="color-scheme" content="light">
+  <title>Get Started &amp; Installation — CurveBook Documentation</title>
+  <link rel="icon" type="image/png" href="../../images/curvebook.png">
+  <link rel="stylesheet" href="../../site.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="desktop-window wrap">
+    <header class="site-header">
+      <div class="title-bar">
+        <div class="wordmark">
+          <img src="../../images/curvebook.png" width="64" height="64" alt="">
+          <span>CurveBook · Reference Manual</span>
+        </div>
+        <span class="window-status">Get started</span>
+      </div>
+      <nav aria-label="Manual navigation">
+        <a href="index.html">Manual Home</a>
+        <a href="section-get-started.html" aria-current="page">Get Started</a>
+        <a href="section-analyses.html">Reference</a>
+        <a href="section-automation.html">Automation</a>
+        <a href="registry/commands.html">Commands &amp; Tools</a>
+        <a href="az-index.html">A–Z Index</a>
+        <a href="section-contribute.html">Contribute</a>
+        <a href="../../index.html">Product Home</a>
+        <a href="../../privacy.html">Privacy Policy</a>
+      </nav>
+    </header>
+    <div class="version-banner" role="note" aria-label="Documentation version">
+      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-23 (commit <code>4964288a03</code>)</span>
+      <span>No scripts · No telemetry · <a href="az-index.html">A–Z Index</a></span>
+    </div>
+    <main id="main" tabindex="-1">
+      <article class="overview doc-body">
+        <nav class="breadcrumbs" aria-label="Breadcrumb">
+          <a href="index.html">Manual</a>
+          <span aria-hidden="true">/</span>
+          <a href="section-get-started.html">Get started</a>
+          <span aria-hidden="true">/</span>
+          <span aria-current="page">Get Started &amp; Installation</span>
+        </nav>
+        <details open class="toc">
+          <summary class="toc-title">On this page</summary>
+          <ul>
+            <li><a href="#system-requirements">Which File Do I Need? (System Requirements &amp; Beta Assets)</a></li>
+            <li><a href="#installing-packages">Installing Beta Release Packages</a></li>
+            <li><a href="#install-macos">— macOS (universal.dmg)</a></li>
+            <li><a href="#install-windows">— Windows (x64 / arm64 .msi)</a></li>
+            <li><a href="#install-linux">— Linux (x86_64 / aarch64 .AppImage)</a></li>
+            <li><a href="#install-freebsd">— FreeBSD Preview (x86_64 .tar.gz)</a></li>
+            <li><a href="#verifying-downloads">Verifying Checksums &amp; Build Attestations</a></li>
+            <li><a href="#verification-meaning">— What a Passing Check Means</a></li>
+            <li><a href="#verification-fails">— If a Check Fails</a></li>
+            <li><a href="#fonts">Fonts &amp; CURVEBOOK_FONTS_DIR</a></li>
+            <li><a href="#updating-and-uninstalling">Updating &amp; Uninstalling</a></li>
+            <li><a href="#updating">— Updating Without an Auto-Updater</a></li>
+            <li><a href="#uninstalling">— Uninstalling Cleanly</a></li>
+          </ul>
+        </details>
+<h1 id="get-started--installation" tabindex="-1">Get Started &amp; Installation</h1>
+<p>CurveBook ships standalone desktop (<code>curvebook</code>) and headless CLI/MCP (<code>curvebook-cli</code>) binaries built in pure Rust with zero telemetry and zero runtime network egress.</p>
+<hr>
+<h2 id="system-requirements" tabindex="-1">Which File Do I Need? (System Requirements &amp; Beta Assets)</h2>
+<p>Every Beta release attaches one installer package per supported desktop platform/architecture under the naming scheme <code>curvebook-&lt;version&gt;-&lt;os&gt;-&lt;arch&gt;.&lt;ext&gt;</code>. Every package bundles both the desktop GUI (<code>curvebook</code>) and the headless CLI/MCP executable (<code>curvebook-cli</code>):</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Platform</th><th>Beta Release Asset(s)</th><th>Notes &amp; Omitted Formats (<code>R0.28</code>)</th></tr></thead>
+<tbody>
+<tr><td><strong>macOS</strong></td><td><code>curvebook-&lt;version&gt;-macos-universal.dmg</code></td><td>macOS 11+ (<code>arm64</code> Apple Silicon and <code>x86_64</code> Intel universal binary); Developer ID signed &amp; Apple-notarized (<code>R8.10</code>). Bundles <code>CurveBook.app</code> and <code>curvebook-cli</code> (no separate macOS CLI <code>.zip</code>).</td></tr>
+<tr><td><strong>Windows</strong></td><td><code>curvebook-&lt;version&gt;-windows-x64.msi</code><br><code>curvebook-&lt;version&gt;-windows-arm64.msi</code></td><td>Windows 10/11 (<code>x64</code> / <code>arm64</code>). Currently <strong>unsigned</strong> pending code signing (<code>R8.11</code>). Windows <code>x86</code> (32-bit) and <code>-portable.zip</code> are dropped; Microsoft Store MSIX (<code>R8.9</code>) is a separate Store channel alternative.</td></tr>
+<tr><td><strong>Linux</strong></td><td><code>curvebook-&lt;version&gt;-linux-x86_64.AppImage</code><br><code>curvebook-&lt;version&gt;-linux-aarch64.AppImage</code></td><td>Wayland / X11 desktop + bundled <code>curvebook-cli</code>. Requires FUSE v2 (<code>libfuse2</code>) or <code>--appimage-extract</code>. <code>.AppImage.zsync</code>, <code>.deb</code>, <code>.rpm</code>, <code>.tar.gz</code>, and Flatpak packages are omitted.</td></tr>
+<tr><td><strong>FreeBSD (Preview)</strong></td><td><code>curvebook-&lt;version&gt;-freebsd-x86_64.tar.gz</code></td><td>Desktop GUI &amp; CLI <strong>preview</strong> tarball for <code>x86_64</code>.</td></tr>
+<tr><td><strong>Shared Verification &amp; Attribution</strong></td><td><code>SHA256SUMS.txt</code><br><code>THIRD-PARTY-LICENSES.html</code></td><td>Published alongside every GitHub Release for checksum verification and dependency licence disclosure.</td></tr>
+</tbody>
+</table></div>
+<div class="callout callout-note" role="note">
+<p class="callout-title">Note</p>
+<p>The browser WebAssembly bundle (<code>curvebook-web</code>) is deferred until CurveBook <code>1.0</code> (<code>R0.28</code>, <code>R11</code>) and is not published in Beta releases.</p>
+</div>
+<hr>
+<h2 id="installing-packages" tabindex="-1">Installing Beta Release Packages</h2>
+<p>Download release assets from <a href="https://github.com/HauserGroup/curvebook/releases">CurveBook Releases</a> (never the automatic GitHub &quot;Source code&quot; archive unless compiling from source).</p>
+<h3 id="install-macos" tabindex="-1">macOS (<code>universal.dmg</code>)</h3>
+<ol>
+<li>Open <code>curvebook-&lt;version&gt;-macos-universal.dmg</code>.</li>
+<li>Drag <strong>CurveBook.app</strong> into <strong>Applications</strong> (<code>/Applications/CurveBook.app</code>).</li>
+<li>Beta <code>.dmg</code> releases are Developer ID signed and Apple-notarized (<code>R8.10</code>).</li>
+<li><strong>Adding the bundled CLI (<code>curvebook-cli</code>) to <code>PATH</code>:</strong> Beta macOS releases bundle <code>curvebook-cli</code> directly inside <code>/Applications/CurveBook.app/Contents/MacOS/curvebook-cli</code>. Either pass that full path in scripts and MCP client configs or add the <code>MacOS</code> directory to <code>PATH</code> in <code>~/.zshrc</code>:</li>
+</ol>
+<pre><code class="language-zsh">export PATH=&quot;/Applications/CurveBook.app/Contents/MacOS:$PATH&quot;</code></pre>
+<p>Verify installation with <code>curvebook-cli --version</code>.</p>
+<h3 id="install-windows" tabindex="-1">Windows (<code>x64</code> / <code>arm64</code> <code>.msi</code>)</h3>
+<ol>
+<li>Run <code>curvebook-&lt;version&gt;-windows-x64.msi</code> (or <code>curvebook-&lt;version&gt;-windows-arm64.msi</code> on Windows on ARM).</li>
+<li><strong>Unsigned Beta SmartScreen &amp; Store note:</strong> Beta Windows <code>.msi</code> installers are currently <strong>unsigned</strong> (<code>R8.11</code> pending). After verifying <code>SHA256SUMS.txt</code> and <code>gh attestation verify</code> below, click <strong>More info</strong> -&gt; <strong>Run anyway</strong> when Windows Defender SmartScreen shows <em>&quot;Windows protected your PC&quot;</em>.
+<ul>
+<li><strong>Windows 11 Smart App Control:</strong> Systems running Smart App Control in enforcement mode block unsigned installers at the OS level until Authenticode signing lands (<code>R8.11</code>) or a signed Microsoft Store <strong>MSIX</strong> distribution ships under <code>R8.9</code> as a Store channel alternative.</li>
+</ul>
+</li>
+<li>By default, the MSI installs per-user under <code>%LocalAppData%\Programs\CurveBook</code> (exposing <code>curvebook.exe</code> and <code>curvebook-cli.exe</code>). Administrators performing machine-wide silent deployment pass <code>ALLUSERS=1</code> to <code>msiexec</code>. Cross-context user vs. machine duplicate installs are rejected until the opposite scope is uninstalled.</li>
+<li><strong>Upgrading from Alpha <code>x86</code>:</strong> Windows <code>x86</code> is no longer published for Beta, and upgrading directly from an Alpha <code>x86</code> <code>.msi</code> to Beta <code>x64</code> has not yet been runner-verified; uninstall any Alpha <code>x86</code> copy manually before installing <code>x64</code>.</li>
+</ol>
+<h3 id="install-linux" tabindex="-1">Linux (<code>x86_64</code> / <code>aarch64</code> <code>.AppImage</code>)</h3>
+<ol>
+<li>Mark the downloaded AppImage executable and run it:</li>
+</ol>
+<pre><code class="language-sh">chmod +x curvebook-&lt;version&gt;-linux-x86_64.AppImage
+./curvebook-&lt;version&gt;-linux-x86_64.AppImage</code></pre>
+<ol>
+<li>Run the bundled headless CLI directly via <code>--appimage-extract</code> or extract into a stable folder on systems without <code>libfuse2</code>:</li>
+</ol>
+<pre><code class="language-sh">./curvebook-&lt;version&gt;-linux-x86_64.AppImage --appimage-extract
+./squashfs-root/usr/bin/curvebook-cli --version</code></pre>
+<p>See <a href="troubleshooting.html#linux-fuse">Troubleshooting</a> if FUSE v2 is unavailable.</p>
+<h3 id="install-freebsd" tabindex="-1">FreeBSD Preview (<code>x86_64</code> <code>.tar.gz</code>)</h3>
+<p>Extract the preview archive and run <code>bin/curvebook</code> or <code>bin/curvebook-cli</code>:</p>
+<pre><code class="language-sh">tar -xzf curvebook-&lt;version&gt;-freebsd-x86_64.tar.gz</code></pre>
+<hr>
+<h2 id="verifying-downloads" tabindex="-1">Verifying Checksums &amp; Build Attestations</h2>
+<p>This section is the complete user guide for verifying Beta downloads. Download both your installer package and <code>SHA256SUMS.txt</code> from the same release tag into the same working directory before running the checks below:</p>
+<ul>
+<li><strong>Checksum (<code>SHA256SUMS.txt</code>):</strong> Confirms the downloaded archive was not corrupted in transit.</li>
+<li><strong>Sigstore Build Provenance (<code>gh attestation verify</code>):</strong> Confirms <code>SHA256SUMS.txt</code> (and every individual release file) was built by CurveBook&#39;s GitHub Actions release workflow from a recorded commit (requires the <a href="https://cli.github.com/">GitHub CLI</a> <code>gh</code>, signed in via <code>gh auth login</code>). Verify provenance at least once, because a checksum alone cannot protect against a tampered file paired with a tampered <code>SHA256SUMS.txt</code>.</li>
+</ul>
+<ol>
+<li><strong>Verify <code>SHA256SUMS.txt</code> build provenance:</strong></li>
+</ol>
+<pre><code class="language-sh">gh attestation verify SHA256SUMS.txt \
+  --repo HauserGroup/curvebook \
+  --signer-workflow HauserGroup/curvebook/.github/workflows/release.yml</code></pre>
+<p>For tag-built releases, also pin the release tag by appending <code>--source-ref refs/tags/v&lt;version&gt;</code>. Keep <code>--signer-workflow</code> included so <code>gh</code> accepts attestations only from <code>release.yml</code>.</p>
+<ol>
+<li><strong>Verify your downloaded file&#39;s SHA-256 checksum against <code>SHA256SUMS.txt</code>:</strong></li>
+</ol>
+<ul>
+<li><strong>macOS</strong> (prints <code>OK</code> next to the matched file):</li>
+</ul>
+<pre><code class="language-sh">     shasum -a 256 --check --ignore-missing SHA256SUMS.txt</code></pre>
+<ul>
+<li><strong>Linux</strong> (prints <code>OK</code> next to the matched file):</li>
+</ul>
+<pre><code class="language-sh">     sha256sum --check --ignore-missing SHA256SUMS.txt</code></pre>
+<ul>
+<li><strong>FreeBSD</strong> (replace <code>&lt;version&gt;</code> if needed; exits with status <code>0</code> silently on match and reports mismatches):</li>
+</ul>
+<pre><code class="language-sh">     f=curvebook-&lt;version&gt;-freebsd-x86_64.tar.gz
+     sha256 -c &quot;$(awk -v f=&quot;$f&quot; &#39;$2 == f { print $1 }&#39; SHA256SUMS.txt)&quot; &quot;$f&quot;</code></pre>
+<ul>
+<li><strong>Windows PowerShell</strong> (replace the filename for <code>arm64</code> if needed; prints <code>True</code> on match):</li>
+</ul>
+<pre><code class="language-powershell">     $f = &quot;curvebook-&lt;version&gt;-windows-x64.msi&quot;
+     $expected = (Select-String -Path SHA256SUMS.txt -SimpleMatch &quot;  $f&quot;).Line.Split(&quot; &quot;)[0]
+     (Get-FileHash $f -Algorithm SHA256).Hash -eq $expected.ToUpper()</code></pre>
+<ol>
+<li><strong>Alternative — verify a downloaded installer directly via Sigstore:</strong></li>
+</ol>
+<pre><code class="language-sh">gh attestation verify &lt;downloaded-file&gt; \
+  --repo HauserGroup/curvebook \
+  --signer-workflow HauserGroup/curvebook/.github/workflows/release.yml</code></pre>
+<div class="callout callout-note" role="note">
+<p class="callout-title">Note</p>
+<p>Linux <code>.AppImage</code> and FreeBSD <code>.tar.gz</code> assets ship without separate GPG/Minisign signature files because every release asset (and <code>SHA256SUMS.txt</code>) carries a public Sigstore provenance attestation (<code>R8.10</code>). If any verification step fails, do <strong>not</strong> run the installer — delete the file, re-download from <a href="https://github.com/HauserGroup/curvebook/releases">CurveBook Releases</a>, and report persistent mismatches via <a href="privacy-security.html#security-reporting">Privacy &amp; Security</a>.</p>
+</div>
+<h3 id="verification-meaning" tabindex="-1">What a Passing Check Means</h3>
+<ul>
+<li>The file&#39;s SHA-256 hash matches an attestation signed by <code>.github/workflows/release.yml</code> in <code>HauserGroup/curvebook</code>. The attestation names the commit and ref the release was built from.</li>
+<li>Without <code>--signer-workflow</code>, <code>gh</code> accepts an attestation from <em>any</em> workflow in the repository, so keep that option.</li>
+<li>It does not mean an operating system trusts the file. OS trust signing is separate (<code>R8.10</code> and <code>R8.11</code> in the <a href="https://github.com/HauserGroup/curvebook/blob/main/docs/ROADMAP.md">roadmap</a>): from Beta onward, macOS <code>.dmg</code> downloads are Developer ID signed and notarized, whereas Windows <code>.msi</code> (<code>x64</code> and <code>arm64</code>, following <code>R0.28</code> retirement of <code>x86</code> and <code>-portable.zip</code>) ships unsigned until <code>R8.11</code>.</li>
+</ul>
+<h3 id="verification-fails" tabindex="-1">If a Check Fails</h3>
+<p>Do not open or install the file. Download it again from the release page and repeat the check. If it still fails, report it as described in <a href="https://github.com/HauserGroup/curvebook/blob/main/SECURITY.md">SECURITY.md</a>.</p>
+<hr>
+<h2 id="fonts" tabindex="-1">Fonts &amp; <code>CURVEBOOK_FONTS_DIR</code></h2>
+<p>CurveBook contains <strong>zero bundled binary font files</strong> in its source tree (<code>cargo xtask assets</code>) and relies by default on standard OS TrueType/OpenType system fonts (e.g., <code>Arial Unicode.ttf</code> / <code>Arial.ttf</code> / <code>AppleGothic.ttf</code> / <code>Monaco.ttf</code> on macOS, <code>NotoSansCJK</code> / <code>DejaVuSans</code> / <code>LiberationSans</code> on Linux/FreeBSD, <code>arial.ttf</code> / <code>consola.ttf</code> on Windows) paired with a minimal clean-room fallback vector font metrics engine and Core-14 PDF metrics.</p>
+<ul>
+<li><strong>Custom font directory (<code>CURVEBOOK_FONTS_DIR</code>):</strong> Set <code>CURVEBOOK_FONTS_DIR</code> to a directory containing <code>.ttf</code> / <code>.otf</code> files (loaded lexicographically ahead of OS fallbacks for desktop canvas measurement, SVG embedding, and TrueType PDF embedding).</li>
+<li><strong>Explicit single font (<code>--ttf-font &lt;path&gt;</code>):</strong> Pass <code>--ttf-font &lt;path&gt;</code> to <code>curvebook</code> to validate and load a specific TrueType/SFNT font at startup.</li>
+</ul>
+<hr>
+<h2 id="updating-and-uninstalling" tabindex="-1">Updating &amp; Uninstalling</h2>
+<h3 id="updating" tabindex="-1">Updating Without an Auto-Updater</h3>
+<p>Because CurveBook enforces <strong>zero background network egress</strong> (<a href="privacy-security.html#zero-egress">Privacy &amp; Security</a>), it never checks for updates automatically or phones home. To update:</p>
+<ol>
+<li>Download and verify the new release package from <a href="https://github.com/HauserGroup/curvebook/releases">GitHub Releases</a>.</li>
+<li>Replace <code>CurveBook.app</code> on macOS, replace the <code>.AppImage</code> on Linux (or <code>.tar.gz</code> directory on FreeBSD), or run the new <code>.msi</code> on Windows (which preserves your remembered install folder and scope).</li>
+<li>Your saved preferences, keyboard shortcuts, and recovery directory stay preserved in your OS configuration folder (<a href="settings.html#storage-paths">Settings, Shortcuts &amp; Storage Paths</a>).</li>
+</ol>
+<h3 id="uninstalling" tabindex="-1">Uninstalling Cleanly</h3>
+<ul>
+<li><strong>macOS:</strong> Move <code>/Applications/CurveBook.app</code> to Trash and remove any <code>PATH</code> export line added to <code>~/.zshrc</code>; optionally remove <code>~/Library/Application Support/CurveBook</code>.</li>
+<li><strong>Windows:</strong> Uninstall <strong>CurveBook</strong> from <strong>Settings -&gt; Apps -&gt; Installed apps</strong> (or <code>msiexec /x</code>); optionally delete <code>%APPDATA%\CurveBook</code> and <code>%LOCALAPPDATA%\CurveBook</code>.</li>
+<li><strong>Linux / FreeBSD:</strong> Delete the <code>.AppImage</code> (and optional extracted <code>squashfs-root/</code>) or FreeBSD tarball folder; optionally remove <code>~/.config/curvebook</code> and <code>~/.local/share/curvebook</code>.</li>
+</ul>
+<p>See <a href="desktop-gui.html">Desktop GUI Quick Start</a> or <a href="automation/mcp.html">Automation: MCP</a> to launch your first workspace.</p>
+        <nav class="pager" aria-label="Previous and next pages">
+          <a href="section-get-started.html">← Get started</a>
+          <a href="desktop-gui.html">Desktop GUI Overview →</a>
+        </nav>
+      </article>
+    </main>
+    <footer class="site-footer">
+      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>
+      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
+      <p class="privacy">CurveBook runs locally and collects no telemetry. Read <a href="../../privacy.html">Privacy, Licences &amp; Security</a> · <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a></p>
+    </footer>
+  </div>
+</body>
+</html>

@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Registry of CurveBook table archetypes, subcolumn modes, analysis kinds, info keys, and error codes.">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'">
+  <meta name="color-scheme" content="light">
+  <title>Tables, Analyses &amp; Error Codes Registry — CurveBook Documentation</title>
+  <link rel="icon" type="image/png" href="../../../images/curvebook.png">
+  <link rel="stylesheet" href="../../../site.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="desktop-window wrap">
+    <header class="site-header">
+      <div class="title-bar">
+        <div class="wordmark">
+          <img src="../../../images/curvebook.png" width="64" height="64" alt="">
+          <span>CurveBook · Reference Manual</span>
+        </div>
+        <span class="window-status">Data tables &amp; formulas</span>
+      </div>
+      <nav aria-label="Manual navigation">
+        <a href="../index.html">Manual Home</a>
+        <a href="../section-get-started.html">Get Started</a>
+        <a href="../section-analyses.html" aria-current="page">Reference</a>
+        <a href="../section-automation.html">Automation</a>
+        <a href="../registry/commands.html">Commands &amp; Tools</a>
+        <a href="../az-index.html">A–Z Index</a>
+        <a href="../section-contribute.html">Contribute</a>
+        <a href="../../../index.html">Product Home</a>
+        <a href="../../../privacy.html">Privacy Policy</a>
+      </nav>
+    </header>
+    <div class="version-banner" role="note" aria-label="Documentation version">
+      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-23 (commit <code>4964288a03</code>)</span>
+      <span>No scripts · No telemetry · <a href="../az-index.html">A–Z Index</a></span>
+    </div>
+    <main id="main" tabindex="-1">
+      <article class="overview doc-body">
+        <nav class="breadcrumbs" aria-label="Breadcrumb">
+          <a href="../index.html">Manual</a>
+          <span aria-hidden="true">/</span>
+          <a href="../section-tables.html">Data tables &amp; formulas</a>
+          <span aria-hidden="true">/</span>
+          <span aria-current="page">Tables, Analyses &amp; Error Codes Registry</span>
+        </nav>
+        <h1 id="page-title" tabindex="-1">Tables, Analyses &amp; Error Codes Registry</h1>
+        <nav class="toc" aria-label="On this page">
+          <p class="toc-title">On this page</p>
+          <ul>
+            <li><a href="#table-archetypes">Table Archetypes (TableKind)</a></li>
+            <li><a href="#subcolumn-modes">Subcolumn Modes (SubcolumnMode)</a></li>
+            <li><a href="#analysis-kinds">Analysis Kinds (AnalysisKind)</a></li>
+            <li><a href="#analysis-catalog">Interactive Analysis Catalog Entries</a></li>
+            <li><a href="#power-families">Statistical Power Test Families</a></li>
+            <li><a href="#info-keys">Standard Info Sheet Keys</a></li>
+            <li><a href="#error-codes">Engine Error Codes (ErrorCode)</a></li>
+          </ul>
+        </nav>
+<p class="lead">Typed definitions from <code>curvebook-doc</code> and <code>curvebook-stats</code>: <strong>8</strong> table archetypes, <strong>8</strong> subcolumn modes, <strong>19</strong> analysis kinds, <strong>6</strong> info keys, and <strong>18</strong> canonical engine error codes.</p>
+<h2 id="table-archetypes" tabindex="-1">Table Archetypes (TableKind)</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Kind ID</th><th>Display Label</th><th>Supported Subcolumn Modes</th></tr></thead>
+<tbody>
+<tr id="table-xy" tabindex="-1"><td><code>xy</code></td><td>XY</td><td>single, raw_replicates, mean_sd_n, mean_sem_n, mean_cv_n, mean_low_high, upper_lower_limits, median_iqr</td></tr>
+<tr id="table-column" tabindex="-1"><td><code>column</code></td><td>Column</td><td>single, mean_sd_n, mean_sem_n, mean_cv_n</td></tr>
+<tr id="table-grouped" tabindex="-1"><td><code>grouped</code></td><td>Grouped</td><td>raw_replicates, mean_sd_n, mean_sem_n, mean_cv_n, mean_low_high, upper_lower_limits, median_iqr</td></tr>
+<tr id="table-contingency" tabindex="-1"><td><code>contingency</code></td><td>Contingency</td><td>single</td></tr>
+<tr id="table-survival" tabindex="-1"><td><code>survival</code></td><td>Survival</td><td>single</td></tr>
+<tr id="table-parts_of_whole" tabindex="-1"><td><code>parts_of_whole</code></td><td>Parts of Whole</td><td>single</td></tr>
+<tr id="table-multiple_variables" tabindex="-1"><td><code>multiple_variables</code></td><td>Multiple Variables</td><td>single</td></tr>
+<tr id="table-nested" tabindex="-1"><td><code>nested</code></td><td>Nested</td><td>raw_replicates</td></tr>
+</tbody>
+</table></div>
+<h2 id="subcolumn-modes" tabindex="-1">Subcolumn Modes (SubcolumnMode)</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Mode</th><th>Subcolumns</th><th>Pre-summarized</th><th>Parametric Moments</th><th>Headers</th></tr></thead>
+<tbody>
+<tr id="subcolumn-single" tabindex="-1"><td><code>single</code></td><td>1</td><td>false</td><td>false</td><td>Y</td></tr>
+<tr id="subcolumn-raw_replicates" tabindex="-1"><td><code>raw_replicates</code></td><td>3</td><td>false</td><td>false</td><td>Y1, Y2, Y3</td></tr>
+<tr id="subcolumn-mean_sd_n" tabindex="-1"><td><code>mean_sd_n</code></td><td>3</td><td>true</td><td>true</td><td>Mean, SD, N</td></tr>
+<tr id="subcolumn-mean_sem_n" tabindex="-1"><td><code>mean_sem_n</code></td><td>3</td><td>true</td><td>true</td><td>Mean, SEM, N</td></tr>
+<tr id="subcolumn-mean_cv_n" tabindex="-1"><td><code>mean_cv_n</code></td><td>3</td><td>true</td><td>true</td><td>Mean, %CV, N</td></tr>
+<tr id="subcolumn-mean_low_high" tabindex="-1"><td><code>mean_low_high</code></td><td>3</td><td>true</td><td>false</td><td>Mean, -Error, +Error</td></tr>
+<tr id="subcolumn-upper_lower_limits" tabindex="-1"><td><code>upper_lower_limits</code></td><td>3</td><td>true</td><td>false</td><td>Mean, Lower, Upper</td></tr>
+<tr id="subcolumn-median_iqr" tabindex="-1"><td><code>median_iqr</code></td><td>3</td><td>true</td><td>false</td><td>Median, Q1, Q3</td></tr>
+</tbody>
+</table></div>
+<h2 id="analysis-kinds" tabindex="-1">Analysis Kinds (AnalysisKind)</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Analysis Kind</th><th>Reference Link</th><th>Scope Summary</th></tr></thead>
+<tbody>
+<tr id="analysis-kind-transform" tabindex="-1"><td><code>transform</code></td><td><a href="../analyses.html#analysis-transform">Transforms &amp; Data Manipulation</a></td><td>Mathematical transforms, normalization, baseline subtraction, transpose, row pruning, simulation, and random sampling.</td></tr>
+<tr id="analysis-kind-descriptive-stats" tabindex="-1"><td><code>descriptive-stats</code></td><td><a href="../analyses.html#analysis-descriptive-stats">Descriptive Statistics &amp; Normality</a></td><td>Univariate location, spread, quantiles, normality battery, and one-sample location tests.</td></tr>
+<tr id="analysis-kind-outlier-detection" tabindex="-1"><td><code>outlier-detection</code></td><td><a href="../analyses.html#analysis-outlier-detection">Outlier Detection (Grubbs / ROUT)</a></td><td>Single-outlier Grubbs ESD and multi-outlier ROUT false-discovery-rate detection.</td></tr>
+<tr id="analysis-kind-two-group-comparison" tabindex="-1"><td><code>two-group-comparison</code></td><td><a href="../analyses.html#analysis-two-group-comparison">Two-Group &amp; One-Sample Comparisons</a></td><td>Parametric t-tests (Student, Welch, paired, ratio, lognormal) and nonparametric rank/sign tests.</td></tr>
+<tr id="analysis-kind-bland-altman" tabindex="-1"><td><code>bland-altman</code></td><td><a href="../analyses.html#analysis-bland-altman">Bland–Altman Method Comparison</a></td><td>Method-comparison bias and 95% limits of agreement.</td></tr>
+<tr id="analysis-kind-multiple-row-t-tests" tabindex="-1"><td><code>multiple-row-t-tests</code></td><td><a href="../analyses.html#analysis-multiple-row-t-tests">Multiple Row-by-Row Two-Group Tests</a></td><td>Row-wise parametric or nonparametric comparisons with FWER/FDR correction.</td></tr>
+<tr id="analysis-kind-passing-bablok" tabindex="-1"><td><code>passing-bablok</code></td><td><a href="../analyses.html#analysis-passing-bablok">Passing–Bablok Regression</a></td><td>Nonparametric errors-in-variables linear method-comparison regression.</td></tr>
+<tr id="analysis-kind-one-way-anova" tabindex="-1"><td><code>one-way-anova</code></td><td><a href="../analyses.html#analysis-one-way-anova">One-Way ANOVA &amp; Nonparametric Equivalents</a></td><td>Ordinary, Brown–Forsythe/Welch, repeated-measures/REML, Kruskal–Wallis, and Friedman ANOVA with post-hoc multiple comparisons.</td></tr>
+<tr id="analysis-kind-factorial-anova" tabindex="-1"><td><code>factorial-anova</code></td><td><a href="../analyses.html#analysis-factorial-anova">Two-Way, Three-Way &amp; Factorial ANOVA</a></td><td>Multi-factor ANOVA / REML mixed models with main effects, interactions, and simple-effects slicing.</td></tr>
+<tr id="analysis-kind-nested-comparison" tabindex="-1"><td><code>nested-comparison</code></td><td><a href="../analyses.html#analysis-nested-comparison">Nested t-Test &amp; Nested One-Way ANOVA</a></td><td>Hierarchical nested random-effects / mixed-model comparisons.</td></tr>
+<tr id="analysis-kind-contingency" tabindex="-1"><td><code>contingency</code></td><td><a href="../analyses.html#analysis-contingency">Contingency &amp; Proportion Tests</a></td><td>Chi-square, Fisher&#39;s exact, chi-square for trend, McNemar, Cohen&#39;s kappa, and exact binomial tests.</td></tr>
+<tr id="analysis-kind-survival" tabindex="-1"><td><code>survival</code></td><td><a href="../analyses.html#analysis-survival">Survival Analysis &amp; Cox Regression</a></td><td>Kaplan–Meier survival curves, log-rank/Gehan-Breslow-Wilcoxon tests, and Cox proportional hazards regression.</td></tr>
+<tr id="analysis-kind-roc-curve" tabindex="-1"><td><code>roc-curve</code></td><td><a href="../analyses.html#analysis-roc-curve">ROC Curve Analysis</a></td><td>Receiver operating characteristic curves, DeLong/Hanley–McNeil AUC confidence intervals, Youden cutoffs, and AUC comparison.</td></tr>
+<tr id="analysis-kind-generalized-linear-model" tabindex="-1"><td><code>generalized-linear-model</code></td><td><a href="../analyses.html#analysis-generalized-linear-model">Generalized Linear Models (GLM)</a></td><td>Multiple linear, logistic, and Poisson regression with link diagnostics and likelihood tests.</td></tr>
+<tr id="analysis-kind-multivariate" tabindex="-1"><td><code>multivariate</code></td><td><a href="../analyses.html#analysis-multivariate">Multivariate Analysis (PCA, Correlation, Clustering, MI)</a></td><td>Principal component analysis, Pearson/Spearman correlation matrices, k-means/hierarchical clustering, and Rubin multiple imputation.</td></tr>
+<tr id="analysis-kind-linear-regression" tabindex="-1"><td><code>linear-regression</code></td><td><a href="../analyses.html#analysis-linear-regression">Simple &amp; Deming Linear Regression</a></td><td>Model I OLS, ANCOVA slope/intercept comparison, and Model II Deming regression.</td></tr>
+<tr id="analysis-kind-nonlinear-regression" tabindex="-1"><td><code>nonlinear-regression</code></td><td><a href="../analyses.html#analysis-nonlinear-regression">Nonlinear Regression &amp; Custom Equations</a></td><td>Trust-region Levenberg–Marquardt, Poisson deviance, Cauchy robust, and ROUT curve fitting with DSL/ODE support.</td></tr>
+<tr id="analysis-kind-p-value-stack" tabindex="-1"><td><code>p-value-stack</code></td><td><a href="../analyses.html#analysis-p-value-stack">P-Value Stack Multiplicity Adjustment</a></td><td>Standalone FWER and FDR adjustment over a pre-computed column of P values.</td></tr>
+<tr id="analysis-kind-power-analysis" tabindex="-1"><td><code>power-analysis</code></td><td><a href="../analyses.html#analysis-power-analysis">Statistical Power &amp; Sample Size</a></td><td>Prospective power, sample-size, and minimum-detectable-effect calculations.</td></tr>
+</tbody>
+</table></div>
+<h2 id="analysis-catalog" tabindex="-1">Interactive Analysis Catalog Entries</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Catalog ID</th><th>Label</th><th>Category</th><th>Summary</th></tr></thead>
+<tbody>
+<tr><td><code>transform.math</code></td><td>Transform Math (Log / Exp / Scale)</td><td>Transform & Derive</td><td>Create a linked derived table via scalar mathematical functions.</td></tr>
+<tr><td><code>transform.normalize</code></td><td>Normalize (0% - 100%)</td><td>Transform & Derive</td><td>Rescale curves or columns between control anchor endpoints.</td></tr>
+<tr><td><code>transform.baseline</code></td><td>Remove Baseline and Column Math</td><td>Transform & Derive</td><td>Compute difference, ratio, or percent change vs baseline columns.</td></tr>
+<tr><td><code>transform.transpose</code></td><td>Transpose Rows and Columns</td><td>Transform & Derive</td><td>Create a live linked transposed table.</td></tr>
+<tr><td><code>transform.prune</code></td><td>Prune Rows</td><td>Transform & Derive</td><td>Subsample or block-average noisy high-frequency recordings.</td></tr>
+<tr><td><code>transform.select</code></td><td>Select and Transform</td><td>Transform & Derive</td><td>Filter rows and reshape into another analyzable table archetype.</td></tr>
+<tr><td><code>transform.simulate</code></td><td>Simulate Data</td><td>Transform & Derive</td><td>Generate deterministic or noisy replicate data from a parametric curve.</td></tr>
+<tr><td><code>transform.random_sample</code></td><td>Random Sample Rows</td><td>Transform & Derive</td><td>Draw a reproducible simple or stratified random sample of rows.</td></tr>
+<tr><td><code>stats.descriptive</code></td><td>Column Statistics (Descriptive &amp; Normality)</td><td>Column Analyses</td><td>Quantiles, parametric/nonparametric moments, CIs, and normality battery.</td></tr>
+<tr><td><code>stats.outliers</code></td><td>Identify Outliers (ROUT / Grubbs)</td><td>Column Analyses</td><td>Single-value Grubbs or FDR-controlled ROUT outlier detection.</td></tr>
+<tr><td><code>stats.two_group</code></td><td>t tests (Unpaired / Welch / Paired / Nonparametric)</td><td>Column Analyses</td><td>Compare two groups with effect sizes, CIs, and assumption checks.</td></tr>
+<tr><td><code>stats.one_way_anova</code></td><td>One-way ANOVA and Nonparametric</td><td>Column Analyses</td><td>Compare three or more groups with multiplicity-adjusted comparisons.</td></tr>
+<tr><td><code>stats.nested</code></td><td>Nested t test / Nested One-way ANOVA</td><td>Column Analyses</td><td>Account for biological units nested inside experimental groups.</td></tr>
+<tr><td><code>stats.roc</code></td><td>ROC Curve (DeLong CI)</td><td>Column Analyses</td><td>Receiver operating characteristic curve, AUC CI, and Youden threshold.</td></tr>
+<tr><td><code>stats.factorial_anova</code></td><td>Two-way / Three-way / Multifactor ANOVA</td><td>Grouped Analyses</td><td>Multi-factor variance decomposition with interaction and RM tests.</td></tr>
+<tr><td><code>fit.linear</code></td><td>Simple Linear / Deming Regression</td><td>XY & Regression</td><td>Ordinary or Model II Deming regression with confidence/prediction bands.</td></tr>
+<tr><td><code>fit.nonlinear</code></td><td>Nonlinear Regression (Curve Fitting)</td><td>XY & Regression</td><td>Built-in scientific equation library with profile-likelihood CIs and AICc.</td></tr>
+<tr><td><code>stats.survival_km</code></td><td>Kaplan-Meier Survival Analysis</td><td>Survival Analyses</td><td>Product-limit survival curves, log-rank tests, and number-at-risk table.</td></tr>
+<tr><td><code>stats.survival_cox</code></td><td>Cox Proportional Hazards Regression</td><td>Survival Analyses</td><td>Multivariable time-to-event hazard ratios from survival or MV tables.</td></tr>
+<tr><td><code>stats.contingency</code></td><td>Contingency Table (Chi-square / Fisher&#39;s Exact)</td><td>Contingency</td><td>Exact and asymptotic contingency tests plus diagnostic accuracy metrics.</td></tr>
+<tr><td><code>stats.glm</code></td><td>Multiple Regression (Linear / Logistic / Poisson)</td><td>Multivariate & GLM</td><td>Multivariable modeling over Multiple Variables continuous and categorical predictors.</td></tr>
+<tr><td><code>stats.pca</code></td><td>Principal Component Analysis (PCA)</td><td>Multivariate & GLM</td><td>Standardized PCA with scores, loadings, and Horn parallel-analysis thresholds.</td></tr>
+<tr><td><code>stats.pcr</code></td><td>Principal Component Regression (PCR)</td><td>Multivariate & GLM</td><td>Principal component regression with strict predictor/outcome separation.</td></tr>
+<tr><td><code>stats.corr_matrix</code></td><td>Correlation Matrix (Pearson / Spearman)</td><td>Multivariate & GLM</td><td>All-pairs correlation coefficients with adjusted p-values.</td></tr>
+<tr><td><code>stats.clustering</code></td><td>Cluster Analysis (K-means / Hierarchical)</td><td>Multivariate & GLM</td><td>Unsupervised observation clustering on standardized numeric variables.</td></tr>
+<tr><td><code>stats.multiple_row_t_tests</code></td><td>Multiple Row t Tests / Nonparametric</td><td>Grouped Analyses</td><td>Row-wise two-group parametric or rank comparisons with multiplicity control.</td></tr>
+<tr><td><code>stats.bland_altman</code></td><td>Bland-Altman Method Comparison</td><td>Column Analyses</td><td>Paired bias and 95% limits of agreement across two measurement methods.</td></tr>
+<tr><td><code>stats.passing_bablok</code></td><td>Passing-Bablok Regression</td><td>XY & Regression</td><td>Rank-based Passing-Bablok regression with exact/bootstrap CIs and CUSUM check.</td></tr>
+<tr><td><code>stats.multiple_imputation</code></td><td>Multiple Imputation (PMM)</td><td>Multivariate & GLM</td><td>Chained predictive mean matching imputations pooled via Rubin&#39;s rules.</td></tr>
+<tr><td><code>stats.pvalue_stack</code></td><td>Analyze a Stack of P Values</td><td>Column Analyses</td><td>Adjust a column stack of raw P values across 7 FWER/FDR procedures and flag discoveries.</td></tr>
+</tbody>
+</table></div>
+<h2 id="power-families" tabindex="-1">Statistical Power Test Families</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Family</th><th>Default Standardized Effect Size</th></tr></thead>
+<tbody>
+<tr><td>Unpaired t test</td><td><code>Cohen&#39;s d</code></td></tr>
+<tr><td>Paired t test</td><td><code>Cohen&#39;s dz</code></td></tr>
+<tr><td>One-sample t test</td><td><code>Cohen&#39;s d</code></td></tr>
+<tr><td>One-way ANOVA</td><td><code>Cohen&#39;s f</code></td></tr>
+<tr><td>Two proportions</td><td><code>Cohen&#39;s h</code></td></tr>
+<tr><td>Pearson correlation</td><td><code>Pearson r</code></td></tr>
+<tr><td>Chi-square test</td><td><code>Cohen&#39;s w</code></td></tr>
+<tr><td>Simple linear regression</td><td><code>Cohen&#39;s f^2</code></td></tr>
+</tbody>
+</table></div>
+<h2 id="info-keys" tabindex="-1">Standard Info Sheet Keys</h2>
+<ul>
+  <li><code>Experiment Date</code></li>
+  <li><code>Experiment ID</code></li>
+  <li><code>Notebook ID</code></li>
+  <li><code>Project</code></li>
+  <li><code>Experimenter</code></li>
+  <li><code>Protocol</code></li>
+</ul>
+<h2 id="error-codes" tabindex="-1">Engine Error Codes (ErrorCode)</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Code</th><th>Category</th></tr></thead>
+<tbody>
+<tr id="error-bad_input" tabindex="-1"><td><code>bad_input</code></td><td><code>input</code></td></tr>
+<tr id="error-not_found" tabindex="-1"><td><code>not_found</code></td><td><code>state</code></td></tr>
+<tr id="error-already_exists" tabindex="-1"><td><code>already_exists</code></td><td><code>state</code></td></tr>
+<tr id="error-conflict" tabindex="-1"><td><code>conflict</code></td><td><code>state</code></td></tr>
+<tr id="error-frozen_sheet" tabindex="-1"><td><code>frozen_sheet</code></td><td><code>state</code></td></tr>
+<tr id="error-cycle_detected" tabindex="-1"><td><code>cycle_detected</code></td><td><code>state</code></td></tr>
+<tr id="error-unsupported_format" tabindex="-1"><td><code>unsupported_format</code></td><td><code>format</code></td></tr>
+<tr id="error-unsupported_version" tabindex="-1"><td><code>unsupported_version</code></td><td><code>format</code></td></tr>
+<tr id="error-corrupt_data" tabindex="-1"><td><code>corrupt_data</code></td><td><code>format</code></td></tr>
+<tr id="error-io_error" tabindex="-1"><td><code>io_error</code></td><td><code>io</code></td></tr>
+<tr id="error-path_escape" tabindex="-1"><td><code>path_escape</code></td><td><code>policy</code></td></tr>
+<tr id="error-resource_limit" tabindex="-1"><td><code>resource_limit</code></td><td><code>policy</code></td></tr>
+<tr id="error-solver_failed" tabindex="-1"><td><code>solver_failed</code></td><td><code>compute</code></td></tr>
+<tr id="error-insufficient_data" tabindex="-1"><td><code>insufficient_data</code></td><td><code>compute</code></td></tr>
+<tr id="error-cancelled" tabindex="-1"><td><code>cancelled</code></td><td><code>compute</code></td></tr>
+<tr id="error-gui_only_violation" tabindex="-1"><td><code>gui_only_violation</code></td><td><code>policy</code></td></tr>
+<tr id="error-internal_panic" tabindex="-1"><td><code>internal_panic</code></td><td><code>internal</code></td></tr>
+<tr id="error-internal_error" tabindex="-1"><td><code>internal_error</code></td><td><code>internal</code></td></tr>
+</tbody>
+</table></div>
+        <nav class="pager" aria-label="Previous and next pages">
+          <a href="../tables.html">← Data Tables, Formulas &amp; Transforms</a>
+          <a href="../section-analyses.html">Analyses →</a>
+        </nav>
+      </article>
+    </main>
+    <footer class="site-footer">
+      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>
+      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
+      <p class="privacy">CurveBook runs locally and collects no telemetry. Read <a href="../../../privacy.html">Privacy, Licences &amp; Security</a> · <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a></p>
+    </footer>
+  </div>
+</body>
+</html>
