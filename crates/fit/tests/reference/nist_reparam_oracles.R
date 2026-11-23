@@ -109,3 +109,35 @@ f <- run_nls(y ~ Y0 * (PF / 100 * exp(-KF * x) + PS / 100 * exp(-KS * x) + (1 - 
 emit("Lanczos3>ThreePhaseDecay", f,
      c(Y0 = y0, PF = 100 * b[5] / y0, PS = 100 * b[3] / y0, KF = b[6], KS = b[4], KV = b[2]),
      c(Y0 = NA, PF = NA, PS = NA, KF = s[6], KS = s[4], KV = s[2]), m$rss)
+
+# 9. Eckerle4 -> gaussian_area (Area = b1 * sqrt(2*pi), Mean = b3, SD = b2)
+m <- read_nls("Eckerle4"); b <- m$est; s <- m$se
+s2p <- sqrt(2 * pi)
+f <- run_nls(y ~ (Area / (SD * sqrt(2 * pi))) * exp(-0.5 * ((x - Mean) / SD)^2), m$d,
+             start = list(Area = b[1] * s2p * 1.05, Mean = 451, SD = 5), control = ctl)
+emit("Eckerle4>GaussianArea", f,
+     c(Area = b[1] * s2p, Mean = b[3], SD = b[2]),
+     c(Area = s[1] * s2p, Mean = s[3], SD = s[2]), m$rss)
+
+# 10. Rat42 -> boltzmann_sigmoid (Bottom=0, Top = b1, V50 = b2 / b3, Slope = 1 / b3)
+m <- read_nls("Rat42"); b <- m$est; s <- m$se
+f <- run_nls(y ~ Top / (1 + exp((V50 - x) / Slope)), m$d,
+             start = as.list(1.05 * c(Top = b[1], V50 = b[2] / b[3], Slope = 1 / b[3])), control = ctl)
+emit("Rat42>BoltzmannSigmoid", f,
+     c(Top = b[1], V50 = b[2] / b[3], Slope = 1 / b[3]),
+     c(Top = s[1], V50 = NA, Slope = s[3] / b[3]^2), m$rss)
+
+# 11. BoxBOD -> two_phase_association (Y0=0, PercentFast=100, KSlow=0.01)
+m <- read_nls("BoxBOD"); b <- m$est; s <- m$se
+f <- run_nls(y ~ Plateau * (1 - exp(-KFast * x)), m$d,
+             start = list(Plateau = 200, KFast = 0.5), control = ctl)
+emit("BoxBOD>TwoPhaseAssociation", f,
+     c(Plateau = b[1], KFast = b[2]),
+     c(Plateau = s[1], KFast = s[2]), m$rss)
+
+# 12. DanWood -> power_series_two_term (C=0, D=1 => y = A * x^B)
+m <- read_nls("DanWood"); b <- m$est; s <- m$se
+f <- run_nls(y ~ A * x^B, m$d, start = list(A = 1, B = 5), control = ctl)
+emit("DanWood>PowerSeriesTwoTerm", f,
+     c(A = b[1], B = b[2]),
+     c(A = s[1], B = s[2]), m$rss)

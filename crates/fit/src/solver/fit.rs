@@ -100,7 +100,7 @@ pub fn fit_nonlinear(
         return Err(FitError::InsufficientData { required: min_required, actual: n_total_obs });
     }
 
-    if active_datasets.len() > 1 && !uses_shared_global(&config.parameter_rules) {
+    if active_datasets.len() > 1 && !uses_shared_global(&config.parameter_rules) && !layout.free_slots.iter().any(|s| s.is_shared) {
         return fit_independent_datasets(model, active_datasets, hooks, config, layout, obs);
     }
     fit_single_or_shared(model, active_datasets, config, layout, obs)
