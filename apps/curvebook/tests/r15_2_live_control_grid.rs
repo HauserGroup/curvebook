@@ -206,7 +206,7 @@ fn scroll_to_target_cell(client: &mut InteractiveControlClient, top_bounds: [f64
             && let Some(b) = bounds_rect(cell)
             && b[2] > 0.0
             && b[3] > 0.0
-            && b[1] + b[3] <= 800.0
+            && b[1] + b[3] <= 660.0
         {
             assert_eq!(cell.pointer("/value/text"), Some(&json!("987.65")), "unexpected text for revealed cell: {cell}");
             return Ok(b);

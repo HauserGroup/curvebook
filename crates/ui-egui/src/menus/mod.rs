@@ -11,11 +11,11 @@ pub use shortcuts::{
     normalize_shortcut_combo,
 };
 pub use tooltips::{
-    CommandTooltip, MenuSectionTooltips, TOOLBAR_BUTTONS, ToolbarButtonSpec, ToolbarButtonTooltip, command_tooltip, menu_bar_tooltips,
-    toolbar_caption_command_id, toolbar_tooltips,
+    CommandTooltip, MenuSectionTooltips, TOOLBAR_BUTTONS, ToolbarButtonSpec, ToolbarButtonTooltip, command_tooltip, default_command_action_rank,
+    menu_bar_tooltips, toolbar_caption_command_id, toolbar_tooltips,
 };
 pub(crate) use tooltips::{ui_command_enabled_for_doc, ui_command_menu_info};
-pub use ui_commands::{UI_COMMANDS, UiCommandSpec};
+pub use ui_commands::{ActionRank, UI_COMMANDS, UiCommandSpec};
 
 /// Canonical list of desktop host-routed commands intercepted by the native desktop host
 /// (`CurveBookNativeApp` / `DesktopHostRuntime`) rather than executed directly in the shell

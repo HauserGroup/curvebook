@@ -72,8 +72,9 @@ where
 
             // Header strip
             ui.horizontal(|ui| {
-                let title_w = (inner_w - 30.0).max(80.0);
-                ui.allocate_ui(Vec2::new(title_w, 22.0), |ui| {
+                let close_side = tokens.metrics.min_hit_target_pt;
+                let title_w = (inner_w - close_side - tokens.metrics.space_md).max(80.0);
+                ui.allocate_ui(Vec2::new(title_w, close_side), |ui| {
                     render_clipped_text(
                         ui,
                         meta,
@@ -81,7 +82,7 @@ where
                             widget_id: "modal.title",
                             role: "label",
                             text: cfg.title,
-                            font_size: 14.5,
+                            font_size: tokens.metrics.font_ui_title_pt,
                             color: tokens.text_strong,
                             z_layer: ZLayer::ModalDialog,
                             tooltip: None,
@@ -89,7 +90,7 @@ where
                         },
                     );
                 });
-                let (_, close_alloc) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::click());
+                let (_, close_alloc) = ui.allocate_exact_size(Vec2::splat(close_side), Sense::click());
                 let close_lbl = tr(tokens.locale, "btn.cancel");
                 let close_resp = paint_icon_button_named(ui, close_alloc, "close", close_lbl, close_lbl, false);
                 record_widget(ui, meta, &close_resp, "modal.close", "button", close_lbl, None, None, true, None, ZLayer::ModalDialog, false, None);
@@ -412,10 +413,10 @@ fn paint_equation_segments(ui: &Ui, painter: &egui::Painter, origin: Pos2, segme
 /// Render an Okabe-Ito-derived variable role tag (`NUM`, `CAT`, `LBL`, `FX=`).
 pub(in crate::egui_shell) fn render_mv_role_badge(ui: &mut Ui, tokens: &Tokens, role: VariableRole, inferred: bool) {
     let (tag, col) = match role {
-        VariableRole::Continuous => ("NUM", if tokens.dark { Color32::from_rgb(86, 180, 233) } else { Color32::from_rgb(0, 114, 178) }),
-        VariableRole::Categorical => ("CAT", Color32::from_rgb(213, 94, 0)),
-        VariableRole::Label => ("LBL", tokens.text_muted),
-        VariableRole::Calculated => ("FX=", Color32::from_rgb(0, 158, 115)),
+        VariableRole::Continuous => ("NUM", tokens.role_num),
+        VariableRole::Categorical => ("CAT", tokens.role_cat),
+        VariableRole::Label => ("LBL", tokens.role_lbl),
+        VariableRole::Calculated => ("FX=", tokens.role_fx),
     };
     let text = if inferred { format!("{tag}*") } else { String::from(tag) };
     egui::Frame::NONE

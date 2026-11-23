@@ -1149,8 +1149,7 @@ struct SetCellParams {
 }
 
 fn schema_set_cell() -> Value {
-    // Retained until Stage 4 updates apps/curvebook-web/tests/sec20_web_fixes.rs
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Target data sheet identifier")),
             ("coord", coord_object_schema()),
@@ -1163,7 +1162,6 @@ fn schema_set_cell() -> Value {
             ("parse_asterisk_exclusion", bool_schema("Interpret trailing `*` in string tokens as excluded (default true)")),
         ],
         &["sheet_id"],
-        vec![("value", &["raw"])],
         false,
     )
 }

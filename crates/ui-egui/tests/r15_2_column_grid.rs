@@ -164,7 +164,7 @@ fn frozen_three_tier_headers_corner_trigger_and_row_titles_toggle() -> Result<()
     assert!(parity.is_clean(), "initial parity violations: {:?}", parity.violations);
     assert!(driver.check_scrollbar_non_overlap().is_empty());
 
-    // Canonical 3-tier header heights (`20 / 24 / 20`) & `#` (`48 pt`) + `Row Titles` (`112 pt` expanded)
+    // Canonical 3-tier header heights (`24 / 24 / 24`) & `#` (`48 pt`) + `Row Titles` (`112 pt` expanded)
     let corner = driver.frame_meta().find_by_widget_id("grid.corner.archetype").ok_or("missing corner trigger")?;
     assert_eq!(corner.clipped_rect.width(), 48.0);
     let super_a = driver.frame_meta().find_by_widget_id("grid.col_super.0").ok_or("missing col_super.0")?;
@@ -173,9 +173,9 @@ fn frozen_three_tier_headers_corner_trigger_and_row_titles_toggle() -> Result<()
     assert_eq!(super_a.label, "Col A");
     assert_eq!(title_a.label, "Group 1");
     assert_eq!(sub_a.label, "Y");
-    assert!((super_a.clipped_rect.height() - 20.0).abs() < 0.1);
+    assert!((super_a.clipped_rect.height() - 24.0).abs() < 0.1);
     assert!((title_a.clipped_rect.height() - 24.0).abs() < 0.1);
-    assert!((sub_a.clipped_rect.height() - 20.0).abs() < 0.1);
+    assert!((sub_a.clipped_rect.height() - 24.0).abs() < 0.1);
     let rt_band = driver.frame_meta().find_by_widget_id("grid.row_titles.band").ok_or("missing row_titles.band")?;
     assert!((rt_band.clipped_rect.width() - 112.0).abs() < 0.5);
 

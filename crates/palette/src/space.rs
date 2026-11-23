@@ -118,10 +118,16 @@ impl Rgba8 {
         self.contrast_ratio(background) >= 4.5
     }
 
-    /// Whether large text or graphical strokes meet WCAG 2.1 AA contrast (`>= 3.0:1`).
+    /// Whether large text or graphical strokes meet WCAG 2.2 AA contrast (`>= 3.0:1`).
     #[must_use]
     pub fn meets_wcag_aa_large(self, background: Self) -> bool {
         self.contrast_ratio(background) >= 3.0
+    }
+
+    /// Whether normal-sized text meets WCAG 2.2 AAA enhanced contrast (`>= 7.0:1`).
+    #[must_use]
+    pub fn meets_wcag_aaa(self, background: Self) -> bool {
+        self.contrast_ratio(background) >= 7.0
     }
 }
 
@@ -141,6 +147,18 @@ pub struct LinearRgba {
 }
 
 impl LinearRgba {
+    /// Whether all linear RGB channels lie inside the displayable `[0.0, 1.0]` sRGB gamut.
+    #[must_use]
+    pub fn in_srgb_gamut(self) -> bool {
+        const EPS: f64 = 1e-6;
+        self.r.is_finite()
+            && self.g.is_finite()
+            && self.b.is_finite()
+            && (-EPS..=1.0 + EPS).contains(&self.r)
+            && (-EPS..=1.0 + EPS).contains(&self.g)
+            && (-EPS..=1.0 + EPS).contains(&self.b)
+    }
+
     /// Clamp and encode linear-light channels into 8-bit sRGB.
     #[must_use]
     pub fn to_rgba8(self) -> Rgba8 {
@@ -242,12 +260,61 @@ pub struct Oklch {
 }
 
 impl Oklch {
+    /// Construct an opaque cylindrical OkLCH colour (`l` in `[0, 1]`, `c >= 0`, `h_deg` in degrees).
+    #[must_use]
+    pub fn new(l: f64, c: f64, h_deg: f64) -> Self {
+        Self { l: sanitize_unit(l), c: sanitize_finite(c).max(0.0), h_deg: sanitize_finite(h_deg).rem_euclid(360.0), alpha: 1.0 }
+    }
+
+    /// Return a copy at adjusted perceptual lightness `l` and chroma scale `chroma_scale`.
+    #[must_use]
+    pub fn with_lightness_and_chroma_scale(self, l: f64, chroma_scale: f64) -> Self {
+        let scale = sanitize_finite(chroma_scale).max(0.0);
+        Self { l: sanitize_unit(l), c: sanitize_finite(self.c).max(0.0) * scale, ..self }
+    }
+
     /// Convert cylindrical OkLCH into Cartesian Oklab.
     #[must_use]
     pub fn to_oklab(self) -> Oklab {
         let c = sanitize_finite(self.c).max(0.0);
         let rad = sanitize_finite(self.h_deg).to_radians();
         Oklab { l: sanitize_finite(self.l), a: c * rad.cos(), b: c * rad.sin(), alpha: sanitize_unit(self.alpha) }
+    }
+
+    /// Whether this OkLCH colour converts into linear sRGB without channel clipping.
+    #[must_use]
+    pub fn in_srgb_gamut(self) -> bool {
+        self.to_oklab().to_linear_rgba().in_srgb_gamut()
+    }
+
+    /// Convert cylindrical OkLCH to 8-bit sRGB using chroma-reduction gamut mapping
+    /// (Ottosson 2020; W3C CSS Color 4 §13.2) so out-of-gamut colours preserve hue and lightness.
+    #[must_use]
+    pub fn to_rgba8_gamut_mapped(self) -> Rgba8 {
+        let l = sanitize_unit(self.l);
+        let alpha = sanitize_unit(self.alpha);
+        if l <= 0.0 {
+            return Rgba8::BLACK.with_alpha(unit_to_u8(alpha));
+        }
+        if l >= 1.0 {
+            return Rgba8::WHITE.with_alpha(unit_to_u8(alpha));
+        }
+        let target_c = sanitize_finite(self.c).max(0.0);
+        let candidate = Self { l, c: target_c, h_deg: sanitize_finite(self.h_deg), alpha };
+        if candidate.in_srgb_gamut() {
+            return candidate.to_rgba8();
+        }
+        let mut lo = 0.0_f64;
+        let mut hi = target_c;
+        for _ in 0..32 {
+            let mid = 0.5 * (lo + hi);
+            if (Self { l, c: mid, ..candidate }).in_srgb_gamut() {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        (Self { l, c: lo, ..candidate }).to_rgba8()
     }
 
     /// Convert cylindrical OkLCH to clamped 8-bit sRGB.
@@ -307,6 +374,18 @@ pub fn lerp_oklab(start: Rgba8, end: Rgba8, t: f64) -> Rgba8 {
     let a = start.to_oklab();
     let b = end.to_oklab();
     Oklab { l: a.l + (b.l - a.l) * t, a: a.a + (b.a - a.a) * t, b: a.b + (b.b - a.b) * t, alpha: a.alpha + (b.alpha - a.alpha) * t }.to_rgba8()
+}
+
+/// Generate `steps` evenly spaced colours in Oklab perceptual space from `start` to `end`
+/// (Ottosson 2020), clamped to `[1, 256]`.
+#[must_use]
+pub fn oklab_even_steps(start: Rgba8, end: Rgba8, steps: usize) -> Vec<Rgba8> {
+    let n = steps.clamp(1, 256);
+    if n == 1 {
+        return vec![start];
+    }
+    let denom = (n - 1) as f64;
+    (0..n).map(|idx| lerp_oklab(start, end, idx as f64 / denom)).collect()
 }
 
 ///IEC 61966-2-1 sRGB to linear-light transfer function.

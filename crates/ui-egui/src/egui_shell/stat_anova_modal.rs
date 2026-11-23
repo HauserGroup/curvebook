@@ -214,7 +214,7 @@ pub fn render_one_way_anova_modal(
 
     let locale = normalize_locale(&app.locale);
     let screen_rect = ctx.content_rect();
-    let backdrop_scrim = if tokens.dark { Color32::from_black_alpha(152) } else { Color32::from_rgba_unmultiplied(15, 23, 42, 118) };
+    let backdrop_scrim = tokens.scrim;
 
     // 1. ZLayer::ModalBackdrop (Order::Middle): 100% outside click & wheel absorption.
     let backdrop_area =
@@ -341,10 +341,12 @@ pub fn render_one_way_anova_modal(
         value: None,
         enabled: true,
         disabled_reason: None,
+        unclipped_rect: screen_rect,
         clipped_rect: screen_rect,
         z_layer: ZLayer::ModalBackdrop,
         ellipsized: false,
         full_label: None,
+        action_rank: None,
     });
 
     meta.record(FrameInspectNodeMeta {
@@ -357,10 +359,12 @@ pub fn render_one_way_anova_modal(
         value: None,
         enabled: true,
         disabled_reason: None,
+        unclipped_rect: actual_dialog_rect,
         clipped_rect: screen_rect.intersect(actual_dialog_rect),
         z_layer: ZLayer::ModalDialog,
         ellipsized: false,
         full_label: None,
+        action_rank: None,
     });
 
     handle_modal_capture_and_keyboard(ctx, actual_dialog_rect, ep, state, intents, &mut report);
@@ -898,7 +902,7 @@ fn draw_experimental_design_schematic(
 
     let plot = Rect::from_min_max(Pos2::new(rect.left() + 14.0, rect.top() + 26.0), Pos2::new(rect.right() - 14.0, rect.bottom() - 10.0));
     let cols_x = [plot.left() + plot.width() * 0.18, plot.center().x, plot.right() - plot.width() * 0.18];
-    let palette = [rc.tokens.accent_strong, Color32::from_rgb(22, 163, 74), Color32::from_rgb(234, 88, 12)];
+    let palette = [rc.tokens.accent_strong, rc.tokens.role_fx, rc.tokens.role_cat];
     let subject_offsets = [[0.22_f32, 0.35, 0.25], [0.52, 0.48, 0.62], [0.80, 0.72, 0.85]];
 
     if rc.ep.paired_or_matched {
@@ -1903,15 +1907,16 @@ pub(super) fn render_modal_choice_row(ui: &mut Ui, tokens: &Tokens, meta: &mut F
     let galley = ui.painter().layout_job(job);
     let ellipsized = galley.elided;
     let row_w = (22.0 + galley.size().x).min(avail_w);
+    let row_h = tokens.metrics.min_hit_target_pt;
     let vis_clip = if meta.viewport_rect.is_positive() { ui.clip_rect().intersect(meta.viewport_rect) } else { ui.clip_rect() };
     let row_top = ui.cursor().top();
-    let row_bot = row_top + 22.0;
+    let row_bot = row_top + row_h;
     if row_top > vis_clip.bottom() || row_bot < vis_clip.top() {
-        ui.allocate_space(Vec2::new(row_w, 22.0));
+        ui.allocate_space(Vec2::new(row_w, row_h));
         return false;
     }
     // Keep `Sense::click()` so `ScrollArea`'s outer hover sensor never swallows disabled tooltip hover; clicks stay gated by `enabled`.
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(row_w, 22.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(row_w, row_h), Sense::click());
     let resp = if enabled { resp } else { resp.on_hover_cursor(egui::CursorIcon::Default) };
 
     let bx = Rect::from_min_size(Pos2::new(rect.left() + 1.0, rect.center().y - 6.5), Vec2::splat(13.0));

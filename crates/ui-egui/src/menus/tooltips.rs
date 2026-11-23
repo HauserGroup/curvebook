@@ -4,7 +4,7 @@ use curvebook_engine::cmd;
 
 use crate::UiApp;
 use crate::i18n;
-use crate::menus::ui_commands::UI_COMMANDS;
+use crate::menus::ui_commands::{ActionRank, UI_COMMANDS};
 
 /// Rich menu/toolbar hover tooltip metadata surfacing `summary`, `beginner`, status, and effects.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,26 +46,41 @@ impl CommandTooltip {
     }
 }
 
-/// Declarative desktop toolbar button wired to an i18n label key and command ID.
+/// Declarative desktop toolbar button wired to an i18n label key, command ID, and default [`ActionRank`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct ToolbarButtonSpec {
     pub id: &'static str,
     pub label_key: &'static str,
     pub command_id: &'static str,
+    pub rank: ActionRank,
 }
 
 /// Primary desktop toolbar actions exposing rich `summary` + `beginner` tooltips.
 pub const TOOLBAR_BUTTONS: &[ToolbarButtonSpec] = &[
-    ToolbarButtonSpec { id: "toolbar.new", label_key: "menu.file.new_project", command_id: "project.new" },
-    ToolbarButtonSpec { id: "toolbar.open", label_key: "menu.file.open", command_id: "project.open" },
-    ToolbarButtonSpec { id: "toolbar.save", label_key: "menu.file.save", command_id: "project.save" },
-    ToolbarButtonSpec { id: "toolbar.undo", label_key: "menu.edit.undo", command_id: "edit.undo" },
-    ToolbarButtonSpec { id: "toolbar.redo", label_key: "menu.edit.redo", command_id: "edit.redo" },
-    ToolbarButtonSpec { id: "toolbar.analyze", label_key: "btn.analyze", command_id: "ui.analyze.open" },
-    ToolbarButtonSpec { id: "toolbar.axes", label_key: "inspector.format_axes", command_id: "graph.setAxes" },
-    ToolbarButtonSpec { id: "toolbar.palette", label_key: "menu.view.command_palette", command_id: "ui.palette.open" },
-    ToolbarButtonSpec { id: "toolbar.export_svg", label_key: "menu.file.export_svg", command_id: "export.svg" },
+    ToolbarButtonSpec { id: "toolbar.new", label_key: "menu.file.new_project", command_id: "project.new", rank: ActionRank::Secondary },
+    ToolbarButtonSpec { id: "toolbar.open", label_key: "menu.file.open", command_id: "project.open", rank: ActionRank::Secondary },
+    ToolbarButtonSpec { id: "toolbar.save", label_key: "menu.file.save", command_id: "project.save", rank: ActionRank::Secondary },
+    ToolbarButtonSpec { id: "toolbar.undo", label_key: "menu.edit.undo", command_id: "edit.undo", rank: ActionRank::Overflow },
+    ToolbarButtonSpec { id: "toolbar.redo", label_key: "menu.edit.redo", command_id: "edit.redo", rank: ActionRank::Overflow },
+    ToolbarButtonSpec { id: "toolbar.analyze", label_key: "btn.analyze", command_id: "ui.analyze.open", rank: ActionRank::Primary },
+    ToolbarButtonSpec { id: "toolbar.axes", label_key: "inspector.format_axes", command_id: "graph.setAxes", rank: ActionRank::Secondary },
+    ToolbarButtonSpec { id: "toolbar.palette", label_key: "menu.view.command_palette", command_id: "ui.palette.open", rank: ActionRank::Secondary },
+    ToolbarButtonSpec { id: "toolbar.export_svg", label_key: "menu.file.export_svg", command_id: "export.svg", rank: ActionRank::Secondary },
 ];
+
+/// Resolve the default [`ActionRank`] for any UI (`UI_COMMANDS`) or engine (`cmd::registry()`) command ID.
+#[must_use]
+pub fn default_command_action_rank(command_id: &str) -> ActionRank {
+    if let Some(ui_spec) = UI_COMMANDS.iter().find(|s| s.id == command_id) {
+        return ui_spec.rank;
+    }
+    match command_id {
+        "analysis.run" | "fit.run" | "stats.run" | "transform.run" => ActionRank::Primary,
+        "sheet.createData" | "graph.create" | "layout.create" | "info.setConstant" | "project.open" | "project.save" | "export.svg"
+        | "export.pdf" | "export.png" => ActionRank::Secondary,
+        _ => ActionRank::Overflow,
+    }
+}
 
 /// Map a compact top-bar button caption rendered by the compositor to its underlying command ID.
 #[must_use]

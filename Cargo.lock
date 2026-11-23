@@ -1017,6 +1017,7 @@ dependencies = [
  "curvebook-text",
  "curvebook-tools",
  "curvebook-transform",
+ "curvebook-ui-egui",
  "egui",
  "egui_kittest",
  "fontdb",

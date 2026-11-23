@@ -221,7 +221,7 @@ fn render_test_shell(ui: &mut egui::Ui, meta: &mut FrameInspectMeta, state: &mut
         } else {
             for idx in 0..3 {
                 let tip = format!("{} #{idx}", tr(&locale, "nav.results"));
-                let r = icon_button(ui, "+", &tip, idx == 0, 20.0);
+                let r = icon_button(ui, "+", &tip, idx == 0, metrics.min_hit_target_pt);
                 record_meta(ui, meta, &r, &format!("inspector.rail.{idx}"), "Button", &tip, None);
             }
         }

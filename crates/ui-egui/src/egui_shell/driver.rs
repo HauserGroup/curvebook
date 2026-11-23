@@ -1,5 +1,6 @@
 //! Native `egui` human-path driver (`EguiHumanPathDriver`), IME preedit/commit checks,
 //! AccessKit/`Role::ScrollBar` parity verification, and 14-locale ellipsis verification (`R15.1`).
+#![cfg(any(test, feature = "test-support"))]
 
 use std::ops::Range;
 use std::time::Duration;
@@ -12,7 +13,7 @@ use egui::{
     Pos2, RawInput, Rect, Response, TouchPhase, Ui, Vec2, ViewportId, WidgetInfo,
 };
 
-use super::{FrameInspectEntryInput, FrameInspectMeta, GeometryStamp, Tokens};
+use super::{ActionRank, FrameInspectEntryInput, FrameInspectMeta, FrameInspectNodeMeta, GeometryStamp, LayoutMetrics, Tokens};
 use crate::inspect::{ParityReport, ParityViolation, ZLayer};
 use crate::interaction::{KeyModifiers, PointerButton, ViewportMetrics};
 
@@ -343,12 +344,13 @@ pub struct AccessKitRoleBounds {
 }
 
 /// Assert zero [`AccessKitRole::ScrollBar`] intersections with interactive controls, rows, or labels,
-/// isolating foreground modal layers (`ZLayer::ModalDialog`+) from occluded workspace layers
-/// behind [`ZLayer::ModalBackdrop`] when `meta` reports an active modal dialog.
+/// isolating foreground modal (`ZLayer::ModalDialog`+) and dropdown/context popup (`ZLayer::DropdownMenu`+)
+/// layers from occluded workspace layers behind them.
 #[must_use]
 pub fn check_accesskit_scrollbar_non_overlap_with_meta(nodes: &[(AccessKitNodeId, AccessKitNode)], meta: &FrameInspectMeta) -> Vec<ParityViolation> {
     let has_modal = meta.entries.iter().any(|e| matches!(e.z_layer, ZLayer::ModalBackdrop | ZLayer::ModalDialog | ZLayer::ModalDropdown));
-    if !has_modal {
+    let has_popup = meta.entries.iter().any(|e| matches!(e.z_layer, ZLayer::DropdownMenu | ZLayer::ContextMenu));
+    if !has_modal && !has_popup {
         return check_accesskit_scrollbar_non_overlap(nodes);
     }
 
@@ -358,33 +360,56 @@ pub fn check_accesskit_scrollbar_non_overlap_with_meta(nodes: &[(AccessKitNodeId
         .filter(|e| matches!(e.z_layer, ZLayer::ModalDialog | ZLayer::ModalDropdown) && e.clipped_rect.is_positive())
         .map(|e| e.clipped_rect)
         .collect();
+    let popup_rects: Vec<Rect> = meta
+        .entries
+        .iter()
+        .filter(|e| matches!(e.z_layer, ZLayer::DropdownMenu | ZLayer::ContextMenu) && e.role == "menu" && e.clipped_rect.is_positive())
+        .map(|e| e.clipped_rect)
+        .collect();
 
-    let mut modal_subtree_ids: std::collections::HashSet<AccessKitNodeId> = std::collections::HashSet::new();
-    let mut bfs_queue: Vec<AccessKitNodeId> = Vec::new();
     let node_map: std::collections::HashMap<AccessKitNodeId, &AccessKitNode> = nodes.iter().map(|(id, n)| (*id, n)).collect();
-    for entry in &meta.entries {
-        if matches!(entry.z_layer, ZLayer::ModalBackdrop | ZLayer::ModalDialog | ZLayer::ModalDropdown)
-            && modal_subtree_ids.insert(entry.accesskit_id)
-        {
-            bfs_queue.push(entry.accesskit_id);
-        }
-    }
-    for (id, node) in nodes {
-        if node.role() == AccessKitRole::Dialog && modal_subtree_ids.insert(*id) {
-            bfs_queue.push(*id);
-        }
-    }
-    while let Some(cur) = bfs_queue.pop() {
-        if let Some(node) = node_map.get(&cur) {
-            for &child in node.children() {
-                if modal_subtree_ids.insert(child) {
-                    bfs_queue.push(child);
+    let collect_subtree = |seed_ids: Vec<AccessKitNodeId>| -> std::collections::HashSet<AccessKitNodeId> {
+        let mut set: std::collections::HashSet<AccessKitNodeId> = seed_ids.iter().copied().collect();
+        let mut queue = seed_ids;
+        while let Some(cur) = queue.pop() {
+            if let Some(node) = node_map.get(&cur) {
+                for &child in node.children() {
+                    if set.insert(child) {
+                        queue.push(child);
+                    }
                 }
             }
         }
+        set
+    };
+
+    let mut modal_seeds: Vec<AccessKitNodeId> = meta
+        .entries
+        .iter()
+        .filter(|e| matches!(e.z_layer, ZLayer::ModalBackdrop | ZLayer::ModalDialog | ZLayer::ModalDropdown))
+        .map(|e| e.accesskit_id)
+        .collect();
+    for (id, node) in nodes {
+        if node.role() == AccessKitRole::Dialog {
+            modal_seeds.push(*id);
+        }
     }
+    let modal_subtree_ids = collect_subtree(modal_seeds);
+
+    let popup_seeds: Vec<AccessKitNodeId> =
+        meta.entries.iter().filter(|e| matches!(e.z_layer, ZLayer::DropdownMenu | ZLayer::ContextMenu)).map(|e| e.accesskit_id).collect();
+    let popup_subtree_ids = collect_subtree(popup_seeds);
+
+    let is_popup_edge_scrollbar = |popup: Rect, sb: Rect| -> bool {
+        if sb.height() >= sb.width() {
+            (popup.right() - sb.right()).abs() <= 20.0 || (sb.left() - popup.left()).abs() <= 20.0
+        } else {
+            (popup.bottom() - sb.bottom()).abs() <= 20.0
+        }
+    };
 
     let mut modal_items = Vec::new();
+    let mut popup_items = Vec::new();
     let mut background_items = Vec::new();
     for (id, node) in nodes {
         if node.is_hidden() {
@@ -398,23 +423,38 @@ pub fn check_accesskit_scrollbar_non_overlap_with_meta(nodes: &[(AccessKitNodeId
         }
         let rect = accesskit_rect_to_egui(bounds);
         let item = AccessKitRoleBounds { id: *id, role: node.role(), label: accesskit_accessible_name(node).unwrap_or("<unnamed>").to_owned(), rect };
-        let in_modal = if modal_subtree_ids.contains(id) {
-            true
-        } else if let Some(entry) = meta.find_by_accesskit_id(*id) {
-            matches!(entry.z_layer, ZLayer::ModalBackdrop | ZLayer::ModalDialog | ZLayer::ModalDropdown)
-        } else {
-            !matches!(item.role, AccessKitRole::Label | AccessKitRole::ScrollBar)
+        let meta_entry = meta.find_by_accesskit_id(*id);
+
+        let in_popup = popup_subtree_ids.contains(id)
+            || meta_entry.is_some_and(|e| matches!(e.z_layer, ZLayer::DropdownMenu | ZLayer::ContextMenu))
+            || (meta_entry.is_none()
+                && item.role != AccessKitRole::Label
                 && !node.is_disabled()
-                && dialog_rects.iter().any(|r| r.expand(2.0).contains(rect.center()))
-        };
-        if in_modal {
+                && popup_rects
+                    .iter()
+                    .any(|&r| r.expand(4.0).contains_rect(rect) && (item.role != AccessKitRole::ScrollBar || is_popup_edge_scrollbar(r, rect))));
+
+        let in_modal = !in_popup
+            && (modal_subtree_ids.contains(id)
+                || meta_entry.is_some_and(|e| matches!(e.z_layer, ZLayer::ModalBackdrop | ZLayer::ModalDialog | ZLayer::ModalDropdown))
+                || (meta_entry.is_none()
+                    && item.role != AccessKitRole::Label
+                    && !node.is_disabled()
+                    && dialog_rects
+                        .iter()
+                        .any(|&r| r.expand(4.0).contains_rect(rect) && (item.role != AccessKitRole::ScrollBar || is_popup_edge_scrollbar(r, rect)))));
+
+        if in_popup {
+            popup_items.push(item);
+        } else if in_modal {
             modal_items.push(item);
-        } else if !dialog_rects.iter().any(|r| r.contains(item.rect.center())) {
+        } else if !dialog_rects.iter().any(|r| r.contains(item.rect.center())) && !popup_rects.iter().any(|r| r.contains(item.rect.center())) {
             background_items.push(item);
         }
     }
 
     let mut violations = check_role_bounds_scrollbar_non_overlap(&modal_items);
+    violations.extend(check_role_bounds_scrollbar_non_overlap(&popup_items));
     violations.extend(check_role_bounds_scrollbar_non_overlap(&background_items));
     violations
 }
@@ -533,12 +573,410 @@ pub fn verify_egui_frame_parity(
     let checked_nodes = check_frame_inspect_meta(meta, nodes, viewport_rect, &mut violations);
     check_accesskit_interactive_nodes(nodes, viewport_rect, &mut violations);
     violations.extend(check_accesskit_scrollbar_non_overlap_with_meta(nodes, meta));
+    violations.extend(check_clickable_partial_non_overlap(meta));
+    violations.extend(check_wcag_258_target_size(meta));
+    violations.extend(check_single_primary_per_region(meta));
 
     let text_runs = extract_rendered_text_runs(shapes);
     let checked_text_runs = text_runs.len();
     violations.extend(check_rendered_text_bleed(&text_runs, viewport_rect, policy));
 
     ParityReport { checked_nodes, checked_text_runs, violations }
+}
+
+const INTERACTIVE_OVERLAP_TOL_PT: f32 = 1.0;
+const WCAG_258_TARGET_MIN_PT: f32 = 24.0;
+const WCAG_258_FLOAT_TOL_PT: f32 = 0.5;
+
+/// Logical workspace region used for per-region control budgets and primary-action hierarchy checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ShellRegion {
+    TopChrome,
+    Navigator,
+    CenterStage,
+    Inspector,
+    StatusFooter,
+    DropdownMenu,
+    ModalDialog,
+}
+
+/// Per-region visible clickable control ceilings (excluding virtualized spreadsheet `gridcell`s).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegionBudgets {
+    pub top_chrome: usize,
+    pub navigator: usize,
+    pub center_stage: usize,
+    pub inspector: usize,
+    pub status_footer: usize,
+    pub dropdown_menu: usize,
+    pub modal_dialog: usize,
+}
+
+impl RegionBudgets {
+    /// Canonical per-region control-count ceilings anchored to measured workspace and dialog views
+    /// (`docs/planning/ui-overlap-and-target-size-audit.md` F5).
+    pub const CANONICAL: Self =
+        Self { top_chrome: 24, navigator: 36, center_stage: 24, inspector: 36, status_footer: 14, dropdown_menu: 16, modal_dialog: 44 };
+
+    /// Ceiling configured for `region`.
+    #[must_use]
+    pub const fn limit_for(self, region: ShellRegion) -> usize {
+        match region {
+            ShellRegion::TopChrome => self.top_chrome,
+            ShellRegion::Navigator => self.navigator,
+            ShellRegion::CenterStage => self.center_stage,
+            ShellRegion::Inspector => self.inspector,
+            ShellRegion::StatusFooter => self.status_footer,
+            ShellRegion::DropdownMenu => self.dropdown_menu,
+            ShellRegion::ModalDialog => self.modal_dialog,
+        }
+    }
+}
+
+impl Default for RegionBudgets {
+    fn default() -> Self {
+        Self::CANONICAL
+    }
+}
+
+/// Measured enabled clickable control counts per [`ShellRegion`] on a settled frame.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RegionControlCounts {
+    pub top_chrome: usize,
+    pub navigator: usize,
+    pub center_stage: usize,
+    pub inspector: usize,
+    pub status_footer: usize,
+    pub dropdown_menu: usize,
+    pub modal_dialog: usize,
+    pub grid_cells: usize,
+}
+
+impl RegionControlCounts {
+    /// Count recorded for `region`.
+    #[must_use]
+    pub const fn count_for(self, region: ShellRegion) -> usize {
+        match region {
+            ShellRegion::TopChrome => self.top_chrome,
+            ShellRegion::Navigator => self.navigator,
+            ShellRegion::CenterStage => self.center_stage,
+            ShellRegion::Inspector => self.inspector,
+            ShellRegion::StatusFooter => self.status_footer,
+            ShellRegion::DropdownMenu => self.dropdown_menu,
+            ShellRegion::ModalDialog => self.modal_dialog,
+        }
+    }
+
+    /// Total enabled clickable chrome/widget controls across all regions (excluding `grid_cells`).
+    #[must_use]
+    pub const fn total_chrome_controls(self) -> usize {
+        self.top_chrome + self.navigator + self.center_stage + self.inspector + self.status_footer + self.dropdown_menu + self.modal_dialog
+    }
+}
+
+/// Classify a recorded [`FrameInspectNodeMeta`] entry into its owning [`ShellRegion`].
+#[must_use]
+pub fn classify_entry_region(entry: &FrameInspectNodeMeta) -> ShellRegion {
+    match entry.z_layer {
+        ZLayer::ModalDialog | ZLayer::ModalDropdown | ZLayer::ModalBackdrop => return ShellRegion::ModalDialog,
+        ZLayer::DropdownMenu | ZLayer::ContextMenu => return ShellRegion::DropdownMenu,
+        ZLayer::Workspace | ZLayer::FloatingOverlay | ZLayer::SplitHandle | ZLayer::Tooltip => {}
+    }
+    let id = entry.widget_id.as_str();
+    if id.starts_with("toolbar.") || id.starts_with("menu.") || id.starts_with("sheet.tab.") {
+        ShellRegion::TopChrome
+    } else if id.starts_with("navigator.") || id.starts_with("nav.") || id.starts_with("family.") {
+        ShellRegion::Navigator
+    } else if id.starts_with("status.") {
+        ShellRegion::StatusFooter
+    } else if id.starts_with("inspector.") || id.starts_with("studio.") {
+        ShellRegion::Inspector
+    } else {
+        ShellRegion::CenterStage
+    }
+}
+
+fn is_clickable_meta_role(role: &str) -> bool {
+    matches!(
+        role.to_ascii_lowercase().as_str(),
+        "button"
+            | "textbox"
+            | "textinput"
+            | "searchbox"
+            | "radio"
+            | "radiobutton"
+            | "tab"
+            | "menuitem"
+            | "checkbox"
+            | "treeitem"
+            | "option"
+            | "spinbutton"
+            | "combobox"
+            | "slider"
+            | "link"
+            | "gridcell"
+            | "splitter"
+    )
+}
+
+fn is_target_size_exempt_entry(entry: &FrameInspectNodeMeta) -> bool {
+    if matches!(entry.role.to_ascii_lowercase().as_str(), "gridcell" | "splitter") {
+        return true;
+    }
+    is_canvas_manipulation_handle(entry.widget_id.as_str())
+}
+
+fn is_canvas_manipulation_handle(id: &str) -> bool {
+    id.starts_with("canvas.image.handle.") || (id.starts_with("canvas.layout_panel.") && id.contains(".resize_"))
+}
+
+fn is_canvas_scene_overlay(entry: &FrameInspectNodeMeta) -> bool {
+    entry.z_layer == ZLayer::FloatingOverlay && entry.widget_id.starts_with("canvas.")
+}
+
+fn rect_contains_with_tol(outer: Rect, inner: Rect, tol: f32) -> bool {
+    inner.left() >= outer.left() - tol
+        && inner.right() <= outer.right() + tol
+        && inner.top() >= outer.top() - tol
+        && inner.bottom() <= outer.bottom() + tol
+}
+
+fn is_scroll_edge_clipped_slice(entry: &FrameInspectNodeMeta, min_pt: f32) -> bool {
+    let thresh = min_pt - WCAG_258_FLOAT_TOL_PT;
+    let unclipped_ok = entry.unclipped_rect.width() >= thresh && entry.unclipped_rect.height() >= thresh;
+    let clipped_smaller = entry.clipped_rect.width() + WCAG_258_FLOAT_TOL_PT < entry.unclipped_rect.width()
+        || entry.clipped_rect.height() + WCAG_258_FLOAT_TOL_PT < entry.unclipped_rect.height();
+    unclipped_ok && clipped_smaller
+}
+
+fn circle_intersects_rect(center: Pos2, radius: f32, rect: Rect) -> bool {
+    let closest_x = center.x.clamp(rect.left(), rect.right());
+    let closest_y = center.y.clamp(rect.top(), rect.bottom());
+    let dx = center.x - closest_x;
+    let dy = center.y - closest_y;
+    dx * dx + dy * dy < radius * radius
+}
+
+/// Assert that no two enabled clickable controls on the same [`ZLayer`] partially overlap
+/// (`> 1.0 x 1.0 pt`), while allowing nested parent/child containment (`F4.1`).
+#[must_use]
+pub fn check_clickable_partial_non_overlap(meta: &FrameInspectMeta) -> Vec<ParityViolation> {
+    let modal_active = meta.entries.iter().any(|e| matches!(e.z_layer, ZLayer::ModalBackdrop | ZLayer::ModalDialog | ZLayer::ModalDropdown));
+    let active: Vec<&FrameInspectNodeMeta> = meta
+        .entries
+        .iter()
+        .filter(|e| {
+            e.enabled
+                && e.clipped_rect.is_positive()
+                && is_clickable_meta_role(&e.role)
+                && (!modal_active || matches!(e.z_layer, ZLayer::ModalDialog | ZLayer::ModalDropdown | ZLayer::ContextMenu))
+        })
+        .collect();
+
+    let mut violations = Vec::new();
+    for i in 0..active.len() {
+        let a = active[i];
+        for &b in &active[i + 1..] {
+            if a.z_layer != b.z_layer || a.egui_id == b.egui_id {
+                continue;
+            }
+            if is_canvas_scene_overlay(a) && is_canvas_scene_overlay(b) {
+                continue;
+            }
+            let ra = a.clipped_rect;
+            let rb = b.clipped_rect;
+            let inter = ra.intersect(rb);
+            if inter.width() <= INTERACTIVE_OVERLAP_TOL_PT || inter.height() <= INTERACTIVE_OVERLAP_TOL_PT {
+                continue;
+            }
+            if rect_contains_with_tol(ra, rb, INTERACTIVE_OVERLAP_TOL_PT) || rect_contains_with_tol(rb, ra, INTERACTIVE_OVERLAP_TOL_PT) {
+                continue;
+            }
+            violations.push(ParityViolation {
+                widget_id: a.widget_id.clone(),
+                check: String::from("interactive_partial_overlap"),
+                detail: format!(
+                    "enabled control `{}` ({:?}) partially overlaps `{}` ({:?}) on {:?} by {:.1}x{:.1} pt",
+                    a.widget_id,
+                    ra,
+                    b.widget_id,
+                    rb,
+                    a.z_layer,
+                    inter.width(),
+                    inter.height()
+                ),
+            });
+        }
+    }
+    violations
+}
+
+/// Assert WCAG 2.2 SC 2.5.8 Target Size (Minimum) across enabled clickable controls (`F4.2`):
+/// every non-exempt control is either `>= 24 x 24 pt` or maintains a `24 pt`-diameter (`12 pt`
+/// radius) spacing circle free of neighbouring enabled controls and undersized-target circles.
+#[must_use]
+pub fn check_wcag_258_target_size(meta: &FrameInspectMeta) -> Vec<ParityViolation> {
+    let min_pt = LayoutMetrics::CANONICAL.min_hit_target_pt.max(WCAG_258_TARGET_MIN_PT);
+    let thresh = min_pt - WCAG_258_FLOAT_TOL_PT;
+    let radius = min_pt * 0.5 - WCAG_258_FLOAT_TOL_PT * 0.5;
+    let min_center_dist = min_pt - WCAG_258_FLOAT_TOL_PT;
+
+    let modal_active = meta.entries.iter().any(|e| matches!(e.z_layer, ZLayer::ModalBackdrop | ZLayer::ModalDialog | ZLayer::ModalDropdown));
+    let peers: Vec<&FrameInspectNodeMeta> = meta
+        .entries
+        .iter()
+        .filter(|e| {
+            e.enabled
+                && e.clipped_rect.is_positive()
+                && is_clickable_meta_role(&e.role)
+                && (!modal_active || matches!(e.z_layer, ZLayer::ModalDialog | ZLayer::ModalDropdown | ZLayer::ContextMenu))
+        })
+        .collect();
+
+    let mut violations = Vec::new();
+    for (i, &a) in peers.iter().enumerate() {
+        if is_target_size_exempt_entry(a) || is_scroll_edge_clipped_slice(a, min_pt) {
+            continue;
+        }
+        let ra = a.clipped_rect;
+        if ra.width() >= thresh && ra.height() >= thresh {
+            continue;
+        }
+        let ca = ra.center();
+        for (j, &b) in peers.iter().enumerate() {
+            if i == j || a.z_layer != b.z_layer || a.egui_id == b.egui_id {
+                continue;
+            }
+            let rb = b.clipped_rect;
+            if rect_contains_with_tol(rb, ra, INTERACTIVE_OVERLAP_TOL_PT) || rect_contains_with_tol(ra, rb, INTERACTIVE_OVERLAP_TOL_PT) {
+                continue;
+            }
+            if circle_intersects_rect(ca, radius, rb) {
+                violations.push(ParityViolation {
+                    widget_id: a.widget_id.clone(),
+                    check: String::from("wcag_258_target_size"),
+                    detail: format!(
+                        "undersized control `{}` ({:.1}x{:.1} pt at {:?}) violates WCAG 2.5.8 24pt spacing against `{}` ({:?})",
+                        a.widget_id,
+                        ra.width(),
+                        ra.height(),
+                        ra,
+                        b.widget_id,
+                        rb
+                    ),
+                });
+                break;
+            }
+            let b_undersized =
+                !is_target_size_exempt_entry(b) && !is_scroll_edge_clipped_slice(b, min_pt) && (rb.width() < thresh || rb.height() < thresh);
+            if b_undersized && ca.distance(rb.center()) < min_center_dist {
+                violations.push(ParityViolation {
+                    widget_id: a.widget_id.clone(),
+                    check: String::from("wcag_258_target_size"),
+                    detail: format!(
+                        "undersized controls `{}` ({:.1}x{:.1} pt) and `{}` ({:.1}x{:.1} pt) have centres {:.1} pt apart (< 24 pt)",
+                        a.widget_id,
+                        ra.width(),
+                        ra.height(),
+                        b.widget_id,
+                        rb.width(),
+                        rb.height(),
+                        ca.distance(rb.center())
+                    ),
+                });
+                break;
+            }
+        }
+    }
+    violations
+}
+
+/// Assert that each [`ShellRegion`] exposes at most one enabled [`ActionRank::Primary`] action (`F5.3`).
+#[must_use]
+pub fn check_single_primary_per_region(meta: &FrameInspectMeta) -> Vec<ParityViolation> {
+    let modal_active = meta.entries.iter().any(|e| matches!(e.z_layer, ZLayer::ModalBackdrop | ZLayer::ModalDialog | ZLayer::ModalDropdown));
+    let mut primaries_by_region: std::collections::BTreeMap<ShellRegion, Vec<&str>> = std::collections::BTreeMap::new();
+    for entry in &meta.entries {
+        if !entry.enabled || !entry.clipped_rect.is_positive() || entry.action_rank != Some(ActionRank::Primary) {
+            continue;
+        }
+        if modal_active && !matches!(entry.z_layer, ZLayer::ModalDialog | ZLayer::ModalDropdown | ZLayer::ContextMenu) {
+            continue;
+        }
+        let region = classify_entry_region(entry);
+        let list = primaries_by_region.entry(region).or_default();
+        if !list.contains(&entry.widget_id.as_str()) {
+            list.push(entry.widget_id.as_str());
+        }
+    }
+
+    let mut violations = Vec::new();
+    for (region, ids) in primaries_by_region {
+        if ids.len() > 1 {
+            violations.push(ParityViolation {
+                widget_id: String::from(ids[0]),
+                check: String::from("single_primary_action"),
+                detail: format!("region {region:?} exposes {} Primary actions (expected <= 1): {ids:?}", ids.len()),
+            });
+        }
+    }
+    violations
+}
+
+/// Count enabled clickable controls by [`ShellRegion`] on `meta` (`F5.3`).
+#[must_use]
+pub fn count_controls_by_region(meta: &FrameInspectMeta) -> RegionControlCounts {
+    let modal_active = meta.entries.iter().any(|e| matches!(e.z_layer, ZLayer::ModalBackdrop | ZLayer::ModalDialog | ZLayer::ModalDropdown));
+    let mut counts = RegionControlCounts::default();
+    for entry in &meta.entries {
+        if !entry.enabled || !entry.clipped_rect.is_positive() || !is_clickable_meta_role(&entry.role) {
+            continue;
+        }
+        if modal_active && !matches!(entry.z_layer, ZLayer::ModalDialog | ZLayer::ModalDropdown | ZLayer::ContextMenu) {
+            continue;
+        }
+        if entry.role.eq_ignore_ascii_case("gridcell") {
+            counts.grid_cells += 1;
+            continue;
+        }
+        match classify_entry_region(entry) {
+            ShellRegion::TopChrome => counts.top_chrome += 1,
+            ShellRegion::Navigator => counts.navigator += 1,
+            ShellRegion::CenterStage => counts.center_stage += 1,
+            ShellRegion::Inspector => counts.inspector += 1,
+            ShellRegion::StatusFooter => counts.status_footer += 1,
+            ShellRegion::DropdownMenu => counts.dropdown_menu += 1,
+            ShellRegion::ModalDialog => counts.modal_dialog += 1,
+        }
+    }
+    counts
+}
+
+/// Verify per-region visible clickable control counts against `budgets` (`F5.3`).
+#[must_use]
+pub fn check_region_control_budgets(meta: &FrameInspectMeta, budgets: &RegionBudgets) -> Vec<ParityViolation> {
+    let counts = count_controls_by_region(meta);
+    let mut violations = Vec::new();
+    for region in [
+        ShellRegion::TopChrome,
+        ShellRegion::Navigator,
+        ShellRegion::CenterStage,
+        ShellRegion::Inspector,
+        ShellRegion::StatusFooter,
+        ShellRegion::DropdownMenu,
+        ShellRegion::ModalDialog,
+    ] {
+        let actual = counts.count_for(region);
+        let limit = budgets.limit_for(region);
+        if actual > limit {
+            violations.push(ParityViolation {
+                widget_id: format!("region:{region:?}"),
+                check: String::from("region_control_budget"),
+                detail: format!("region {region:?} exposes {actual} enabled clickable controls (budget <= {limit})"),
+            });
+        }
+    }
+    violations
 }
 
 fn check_frame_inspect_meta(
@@ -1279,5 +1717,57 @@ mod tests {
         let sb_violations = check_role_bounds_scrollbar_non_overlap(&bounds);
         assert!(sb_violations.is_empty(), "scrollbar overlapped controls: {sb_violations:?}");
         Ok(())
+    }
+
+    #[test]
+    fn overlap_target_size_primary_rank_and_budget_gates_fail_closed_on_violations() {
+        use super::{
+            ActionRank, FrameInspectMeta, FrameInspectNodeMeta, RegionBudgets, check_clickable_partial_non_overlap, check_region_control_budgets,
+            check_single_primary_per_region, check_wcag_258_target_size,
+        };
+        use egui::{Pos2, Rect, Vec2};
+
+        let mk = |id: &str, role: &str, rect: Rect, rank: Option<ActionRank>| FrameInspectNodeMeta {
+            egui_id: egui::Id::unique(id),
+            accesskit_id: egui::Id::unique(id).accesskit_id(),
+            widget_id: String::from(id),
+            role: String::from(role),
+            label: String::from(id),
+            command_id: None,
+            value: None,
+            enabled: true,
+            disabled_reason: None,
+            unclipped_rect: rect,
+            clipped_rect: rect,
+            z_layer: ZLayer::Workspace,
+            ellipsized: false,
+            full_label: None,
+            action_rank: rank,
+        };
+
+        // 1. Partial overlap catches two colliding buttons while permitting nested containers.
+        let mut meta_ov = FrameInspectMeta::new();
+        meta_ov.record(mk("toolbar.a", "button", Rect::from_min_size(Pos2::new(40.0, 40.0), Vec2::new(60.0, 24.0)), Some(ActionRank::Primary)));
+        meta_ov.record(mk("toolbar.b", "button", Rect::from_min_size(Pos2::new(88.0, 40.0), Vec2::new(60.0, 24.0)), Some(ActionRank::Primary)));
+        assert_eq!(check_clickable_partial_non_overlap(&meta_ov).len(), 1);
+        assert_eq!(check_single_primary_per_region(&meta_ov).len(), 1);
+
+        // 2. WCAG 2.5.8 catches undersized stacked 20pt controls with 0pt vertical gap, while
+        // passing spaced 20pt controls and scroll-clipped 24pt list slices.
+        let mut meta_sz = FrameInspectMeta::new();
+        meta_sz.record(mk("grid.super", "button", Rect::from_min_size(Pos2::new(100.0, 40.0), Vec2::new(120.0, 20.0)), None));
+        meta_sz.record(mk("grid.title", "button", Rect::from_min_size(Pos2::new(100.0, 60.0), Vec2::new(120.0, 24.0)), None));
+        assert_eq!(check_wcag_258_target_size(&meta_sz).len(), 1);
+
+        let mut meta_ok = FrameInspectMeta::new();
+        meta_ok.record(mk("status.a", "button", Rect::from_min_size(Pos2::new(10.0, 390.0), Vec2::new(22.0, 20.0)), None));
+        meta_ok.record(mk("status.b", "button", Rect::from_min_size(Pos2::new(36.0, 390.0), Vec2::new(22.0, 20.0)), None));
+        let mut clipped_row = mk("list.row", "option", Rect::from_min_size(Pos2::new(10.0, 200.0), Vec2::new(200.0, 12.0)), None);
+        clipped_row.unclipped_rect = Rect::from_min_size(Pos2::new(10.0, 200.0), Vec2::new(200.0, 28.0));
+        meta_ok.record(clipped_row);
+        assert!(check_wcag_258_target_size(&meta_ok).is_empty());
+
+        let tight_budget = RegionBudgets { status_footer: 1, ..RegionBudgets::CANONICAL };
+        assert_eq!(check_region_control_budgets(&meta_ok, &tight_budget).len(), 1);
     }
 }

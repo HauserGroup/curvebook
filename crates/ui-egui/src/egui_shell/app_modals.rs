@@ -2550,6 +2550,8 @@ fn app_checkbox(ui: &mut Ui, resp: &Response, meta: &mut FrameInspectMeta, widge
 }
 
 fn app_input(ui: &mut Ui, resp: &Response, meta: &mut FrameInspectMeta, widget_id: &str, label: &str, text: &str, enabled: bool) {
+    let ak_lbl = label.to_owned();
+    resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::TextInput, enabled, ak_lbl.clone()));
     app_record_visible(
         ui,
         resp,

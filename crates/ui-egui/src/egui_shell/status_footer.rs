@@ -28,8 +28,8 @@ use crate::inspect::ZLayer;
 /// Hard selection cell cap (`50,000`) preventing pathological UI stalls on 1M-row sheets (`§7.2`).
 pub const QUICK_STATS_CELL_CAP: usize = 50_000;
 
-const FOOTER_CTRL_H: f32 = 20.0;
-const POPUP_ROW_H: f32 = 22.0;
+const FOOTER_CTRL_H: f32 = 24.0;
+const POPUP_ROW_H: f32 = 24.0;
 
 /// Cached summary statistics over the active sheet selection (`N`, `Mean`, `SD`, `SEM`, `Median`, `Range`).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -846,7 +846,7 @@ fn draw_footer_summary_label(ui: &mut egui::Ui, tokens: &Tokens, spec: FooterSum
     job.wrap.max_width = (spec.max_w - 8.0).max(8.0);
     let galley = ui.fonts_mut(|f| f.layout_job(job));
     let ellipsized = galley.elided;
-    let w = (galley.size().x + 8.0).min(spec.max_w.max(8.0));
+    let w = (galley.size().x + 8.0).clamp(24.0_f32.min(spec.max_w.max(8.0)), spec.max_w.max(8.0));
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, FOOTER_CTRL_H), if spec.clickable { Sense::click() } else { Sense::hover() });
     if ui.is_rect_visible(rect) {
         if spec.clickable && resp.hovered() {
@@ -1032,7 +1032,7 @@ fn render_footer_history_and_sections(
             label: if is_rtl { ">" } else { "<" },
             tooltip: "Previous sheet in history",
             max_w: 24.0,
-            min_w: 22.0,
+            min_w: 24.0,
             selected: false,
             enabled: ctx_in.enabled && ctx_in.history_can_back,
             accent_override: None,
@@ -1054,7 +1054,7 @@ fn render_footer_history_and_sections(
             label: if is_rtl { "<" } else { ">" },
             tooltip: "Next sheet in history",
             max_w: 24.0,
-            min_w: 22.0,
+            min_w: 24.0,
             selected: false,
             enabled: ctx_in.enabled && ctx_in.history_can_forward,
             accent_override: None,
@@ -1308,8 +1308,8 @@ fn render_footer_trailing_controls(
                 FooterChipSpec {
                     label: "+",
                     tooltip: "Zoom in",
-                    max_w: 22.0,
-                    min_w: 20.0,
+                    max_w: 24.0,
+                    min_w: 24.0,
                     selected: false,
                     enabled: ctx_in.enabled && zoom < 7.99,
                     accent_override: None,
@@ -1355,8 +1355,8 @@ fn render_footer_trailing_controls(
                 FooterChipSpec {
                     label: "-",
                     tooltip: "Zoom out",
-                    max_w: 22.0,
-                    min_w: 20.0,
+                    max_w: 24.0,
+                    min_w: 24.0,
                     selected: false,
                     enabled: ctx_in.enabled && zoom > 0.11,
                     accent_override: None,
@@ -1676,10 +1676,10 @@ pub fn render_status_footer(
     report.rulers_toggle_visible = show_rulers;
 
     let footer_frame =
-        egui::Frame::NONE.fill(ctx_in.tokens.app_bar).stroke(Stroke::new(1.0, ctx_in.tokens.border)).inner_margin(egui::Margin::symmetric(6, 2));
+        egui::Frame::NONE.fill(ctx_in.tokens.app_bar).stroke(Stroke::new(1.0, ctx_in.tokens.border)).inner_margin(egui::Margin::symmetric(6, 1));
 
     let resp = egui::Panel::bottom("egui_shell.status_footer")
-        .exact_size(ctx_in.layout.status_bar_h_pt.max(22.0))
+        .exact_size(ctx_in.layout.status_bar_h_pt.max(26.0))
         .frame(footer_frame)
         .show(ui, |ui| {
             let total_w = ui.available_width().max(80.0);
@@ -1688,7 +1688,7 @@ pub fn render_status_footer(
             let compact = total_w < 760.0;
             let cvd_w = if compact { 66.0 } else { 96.0 };
             let rulers_w = if show_rulers { if compact { 32.0 } else { 58.0 } } else { 0.0 };
-            let zoom_w = if show_zoom { 126.0 } else { 0.0 };
+            let zoom_w = if show_zoom { 136.0 } else { 0.0 };
             let right_budget = cvd_w + rulers_w + zoom_w + 18.0;
 
             ui.horizontal(|ui| {

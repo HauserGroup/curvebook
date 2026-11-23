@@ -9,14 +9,14 @@ use serde_json::{Value, json};
 use crate::UiApp;
 use crate::dialogs_canvas::{ActiveDialog, SplitWorkspaceState};
 use crate::egui_shell::inspect_bridge::HybridCoexistenceDecision;
-use crate::egui_shell::top_bar_fit::{MIN_SWITCHER_PT, RightWidths, SearchVisibility, fit_right_group};
+use crate::egui_shell::top_bar_fit::{MIN_SWITCHER_PT, RankedToolbarSlot, RightWidths, SearchVisibility, fit_ranked_toolbar, fit_right_group};
 use crate::egui_shell::{
-    FrameInspectEntryInput, FrameInspectMeta, FrameInspectNodeMeta, PendingUiIntents, ResponsiveShellLayout, Tokens, WorkspacePreset,
+    ActionRank, FrameInspectEntryInput, FrameInspectMeta, FrameInspectNodeMeta, PendingUiIntents, ResponsiveShellLayout, Tokens, WorkspacePreset,
 };
 use crate::i18n::{LOCALES, locale_picker_label, normalize_locale};
 use crate::inspect::ZLayer;
 use crate::interaction::resolve_result_sheet_for_shortcut;
-use crate::menus::{CommandTooltip, CuratedMenuNode, command_tooltip, curated_menu_bar, format_shortcut_for_platform};
+use crate::menus::{CommandTooltip, CuratedMenuNode, command_tooltip, curated_menu_bar, default_command_action_rank, format_shortcut_for_platform};
 use crate::tr;
 use curvebook_doc::{AnalysisKind, InfoSheet, MultivariateSpec, SheetId, TableArchetype};
 
@@ -214,6 +214,7 @@ struct Tier2ActionSpec {
     enabled: bool,
     disabled_reason: Option<String>,
     primary: bool,
+    rank: ActionRank,
     retarget_sheet_id: Option<SheetId>,
 }
 
@@ -617,9 +618,12 @@ fn render_top_menu_button(
             let popup_rect = ui.min_rect().intersect(ui.clip_rect()).intersect(meta.viewport_rect);
             if popup_rect.is_positive() {
                 let popup_id = ui.scope_id().with(("popup", &sec.menu_key));
+                let p_resp = ui.interact(popup_rect, popup_id, Sense::hover());
+                let p_lbl = sec.title.clone();
+                p_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Menu, true, p_lbl.clone()));
                 meta.record(FrameInspectNodeMeta {
-                    egui_id: popup_id,
-                    accesskit_id: popup_id.accesskit_id(),
+                    egui_id: p_resp.id,
+                    accesskit_id: p_resp.id.accesskit_id(),
                     widget_id: format!("popup.{}", sec.menu_key),
                     role: String::from("menu"),
                     label: sec.title.clone(),
@@ -627,10 +631,12 @@ fn render_top_menu_button(
                     value: Some(json!(true)),
                     enabled: true,
                     disabled_reason: None,
+                    unclipped_rect: ui.min_rect(),
                     clipped_rect: popup_rect,
                     z_layer: ZLayer::DropdownMenu,
                     ellipsized: false,
                     full_label: None,
+                    action_rank: None,
                 });
             }
         });
@@ -777,9 +783,13 @@ fn render_menu_leaf_item(
             let popup_rect = scroll_out.inner_rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect);
             if popup_rect.is_positive() {
                 let popup_id = ui.scope_id().with("popup.menu.ui.locale.set");
+                let p_resp = ui.interact(popup_rect, popup_id, Sense::hover());
+                let p_lbl = item.label.clone();
+                let p_en = item.enabled;
+                p_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Menu, p_en, p_lbl.clone()));
                 meta.record(FrameInspectNodeMeta {
-                    egui_id: popup_id,
-                    accesskit_id: popup_id.accesskit_id(),
+                    egui_id: p_resp.id,
+                    accesskit_id: p_resp.id.accesskit_id(),
                     widget_id: String::from("popup.menu.ui.locale.set"),
                     role: String::from("menu"),
                     label: item.label.clone(),
@@ -787,10 +797,12 @@ fn render_menu_leaf_item(
                     value: None,
                     enabled: item.enabled,
                     disabled_reason: None,
+                    unclipped_rect: scroll_out.inner_rect,
                     clipped_rect: popup_rect,
                     z_layer: ZLayer::DropdownMenu,
                     ellipsized: false,
                     full_label: None,
+                    action_rank: None,
                 });
             }
         });
@@ -1198,30 +1210,21 @@ fn render_tier2_strip(
     let tabs_reserve = if tab_entries.is_empty() { 0.0 } else { (strip_w * 0.34).clamp(96.0, 280.0) };
     let action_budget = (strip_w - tabs_reserve).max(110.0);
 
-    let mut measured = Vec::with_capacity(actions.len());
+    let mut slots = Vec::with_capacity(actions.len());
     for act in &actions {
         let (galley, _) = layout_single_line_job(ui.painter(), &act.label, 152.0, tokens.text_primary, 12.0);
-        measured.push((galley.size().x + 16.0).clamp(40.0, 168.0));
+        let desired_width_pt = (galley.size().x + 16.0).clamp(tokens.metrics.min_toolbar_target_pt, 168.0);
+        slots.push(RankedToolbarSlot { rank: act.rank, desired_width_pt });
     }
 
     let overflow_btn_w = 34.0;
-    let mut fit_count = 0usize;
-    let mut used_w = 0.0_f32;
-    for (idx, &w) in measured.iter().enumerate() {
-        let has_more = idx + 1 < actions.len();
-        let ov_reserve = if has_more { overflow_btn_w + 6.0 } else { 0.0 };
-        if used_w + w + ov_reserve <= action_budget || idx == 0 {
-            used_w += w + 6.0;
-            fit_count += 1;
-        } else {
-            break;
-        }
-    }
+    let plan = fit_ranked_toolbar(action_budget, tokens.metrics.space_sm, overflow_btn_w, tokens.metrics.min_toolbar_target_pt, 8, &slots);
 
     ui.horizontal_centered(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        for act in actions.iter().take(fit_count) {
-            let resp = chrome_button_fitted(
+        ui.spacing_mut().item_spacing.x = tokens.metrics.space_sm;
+        for &idx in &plan.visible_indices {
+            let act = &actions[idx];
+            let resp = chrome_button_fitted_with_rank(
                 ui,
                 tokens,
                 meta,
@@ -1234,6 +1237,7 @@ fn render_tier2_strip(
                     disabled_reason: act.disabled_reason.as_deref(),
                     max_w: 168.0,
                 },
+                Some(act.rank),
             )
             .on_hover_text(&act.tooltip);
             if resp.clicked() && act.enabled {
@@ -1242,9 +1246,9 @@ fn render_tier2_strip(
             }
         }
 
-        if fit_count < actions.len() {
-            overflow.items = actions[fit_count..].to_vec();
-            let ov_resp = chrome_button_fitted(
+        if !plan.overflow_indices.is_empty() {
+            overflow.items = plan.overflow_indices.iter().map(|&i| actions[i].clone()).collect();
+            let ov_resp = chrome_button_fitted_with_rank(
                 ui,
                 tokens,
                 meta,
@@ -1257,6 +1261,7 @@ fn render_tier2_strip(
                     disabled_reason: modal_reason(enabled),
                     max_w: overflow_btn_w,
                 },
+                Some(ActionRank::Secondary),
             )
             .on_hover_text(tr(&app.locale, "toolbar.overflow"));
             overflow.anchor = Some(ov_resp.rect);
@@ -1445,7 +1450,7 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
                     primary: false,
                 },
             ));
-            actions.push(make_ui_action(
+            let mut chain_analyze = make_ui_action(
                 app,
                 Tier2ActionInput {
                     widget_id: "toolbar.analyze",
@@ -1456,7 +1461,9 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
                     disabled_reason: analyze_reason,
                     primary: false,
                 },
-            ));
+            );
+            chain_analyze.rank = ActionRank::Overflow;
+            actions.push(chain_analyze);
         }
         Tier2SheetContext::DataStructured => {
             actions.push(make_ui_action(
@@ -1498,18 +1505,20 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
                     primary: false,
                 },
             ));
-            actions.push(make_ui_action(
-                app,
-                Tier2ActionInput {
-                    widget_id: "toolbar.edit_params",
-                    label: tr(&app.locale, "toolbar.parameters"),
-                    command_id: "ui.editParams.open",
-                    params: json!({}),
-                    enabled: modal_enabled && on_result_sheet,
-                    disabled_reason: edit_reason,
-                    primary: false,
-                },
-            ));
+            if on_result_sheet {
+                actions.push(make_ui_action(
+                    app,
+                    Tier2ActionInput {
+                        widget_id: "toolbar.edit_params",
+                        label: tr(&app.locale, "toolbar.parameters"),
+                        command_id: "ui.editParams.open",
+                        params: json!({}),
+                        enabled: modal_enabled && on_result_sheet,
+                        disabled_reason: edit_reason,
+                        primary: false,
+                    },
+                ));
+            }
         }
         Tier2SheetContext::DataMultipleVariables => {
             actions.push(make_ui_action(
@@ -1631,7 +1640,7 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
                     },
                 ));
             }
-            actions.push(make_ui_action(
+            let mut chain_analyze = make_ui_action(
                 app,
                 Tier2ActionInput {
                     widget_id: "toolbar.analyze",
@@ -1642,7 +1651,9 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
                     disabled_reason: analyze_reason,
                     primary: false,
                 },
-            ));
+            );
+            chain_analyze.rank = ActionRank::Overflow;
+            actions.push(chain_analyze);
         }
         Tier2SheetContext::GraphSheet => {
             actions.push(make_ui_action(
@@ -1693,7 +1704,7 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
                     primary: false,
                 },
             ));
-            actions.push(make_ui_action(
+            let mut chain_analyze = make_ui_action(
                 app,
                 Tier2ActionInput {
                     widget_id: "toolbar.analyze",
@@ -1704,7 +1715,9 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
                     disabled_reason: analyze_reason,
                     primary: false,
                 },
-            ));
+            );
+            chain_analyze.rank = ActionRank::Overflow;
+            actions.push(chain_analyze);
         }
         Tier2SheetContext::LayoutSheet => {
             actions.push(make_ui_action(
@@ -1788,7 +1801,7 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
                 },
                 can_new_graph,
             ));
-            actions.push(make_ui_action(
+            let mut chain_analyze = make_ui_action(
                 app,
                 Tier2ActionInput {
                     widget_id: "toolbar.analyze",
@@ -1799,7 +1812,9 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
                     disabled_reason: analyze_reason,
                     primary: false,
                 },
-            ));
+            );
+            chain_analyze.rank = ActionRank::Overflow;
+            actions.push(chain_analyze);
         }
     }
 
@@ -1822,9 +1837,14 @@ fn format_command_tooltip(tip: Option<CommandTooltip>, fallback: &str) -> String
     }
 }
 
+fn slot_action_rank(command_id: &str, primary: bool) -> ActionRank {
+    if primary { ActionRank::Primary } else { default_command_action_rank(command_id).max(ActionRank::Secondary) }
+}
+
 fn make_engine_action(app: &UiApp, input: Tier2ActionInput<'_>, base_enabled: bool) -> Tier2ActionSpec {
     let Tier2ActionInput { widget_id, label, command_id, params, enabled, disabled_reason, primary } = input;
     let eff_enabled = enabled && base_enabled;
+    let rank = slot_action_rank(command_id, primary);
     Tier2ActionSpec {
         widget_id: widget_id.to_owned(),
         label: label.to_owned(),
@@ -1835,12 +1855,14 @@ fn make_engine_action(app: &UiApp, input: Tier2ActionInput<'_>, base_enabled: bo
         enabled: eff_enabled,
         disabled_reason: (!eff_enabled).then(|| disabled_reason.unwrap_or("modal dialog is active").to_owned()),
         primary,
+        rank,
         retarget_sheet_id: None,
     }
 }
 
 fn make_ui_action(app: &UiApp, input: Tier2ActionInput<'_>) -> Tier2ActionSpec {
     let Tier2ActionInput { widget_id, label, command_id, params, enabled, disabled_reason, primary } = input;
+    let rank = slot_action_rank(command_id, primary);
     Tier2ActionSpec {
         widget_id: widget_id.to_owned(),
         label: label.to_owned(),
@@ -1851,6 +1873,7 @@ fn make_ui_action(app: &UiApp, input: Tier2ActionInput<'_>) -> Tier2ActionSpec {
         enabled,
         disabled_reason: (!enabled).then(|| disabled_reason.unwrap_or("modal dialog is active").to_owned()),
         primary,
+        rank,
         retarget_sheet_id: None,
     }
 }
@@ -1975,28 +1998,55 @@ fn render_single_line_title_badge(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut
 }
 
 fn chrome_button_fitted(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInspectMeta, spec: ChromeButtonSpec<'_>) -> egui::Response {
+    chrome_button_fitted_with_rank(ui, tokens, meta, spec, None)
+}
+
+fn chrome_button_fitted_with_rank(
+    ui: &mut egui::Ui,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    spec: ChromeButtonSpec<'_>,
+    rank: Option<ActionRank>,
+) -> egui::Response {
     let ChromeButtonSpec { widget_id, label, command_id, selected, enabled, disabled_reason, max_w } = spec;
+    let is_primary_cta = rank == Some(ActionRank::Primary) && enabled;
     let text_max = (max_w - 14.0).max(12.0);
-    let (galley, ellipsized) = layout_single_line_job(ui.painter(), label, text_max, tokens.text_primary, 12.0);
+    let fg = if is_primary_cta {
+        tokens.on_accent
+    } else if enabled {
+        tokens.text_strong
+    } else {
+        tokens.text_disabled
+    };
+    let (galley, ellipsized) = layout_single_line_job(ui.painter(), label, text_max, fg, 12.0);
     let min_w = max_w.min(34.0);
     let w = (galley.size().x + 14.0).clamp(min_w, max_w);
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 24.0), if enabled { Sense::click() } else { Sense::hover() });
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, tokens.metrics.min_hit_target_pt), if enabled { Sense::click() } else { Sense::hover() });
     let radius = CornerRadius::same(tokens.metrics.radius_md);
-    super::widgets::paint_interactive_chrome(
-        ui,
-        rect,
-        tokens,
-        super::widgets::InteractiveChromeSpec {
-            radius,
-            base_bg: if enabled { tokens.button_bg } else { tokens.panel_bg },
-            base_border: Some(if enabled { tokens.button_border } else { tokens.divider }),
-            hovered: resp.hovered(),
-            selected,
-            pressed: resp.is_pointer_button_down_on(),
-            enabled,
-        },
-    );
-    let fg = if enabled { tokens.text_strong } else { tokens.text_disabled };
+    if is_primary_cta {
+        let fill = if resp.is_pointer_button_down_on() || resp.hovered() { tokens.accent_hover } else { tokens.accent_strong };
+        let stroke = if resp.has_focus() {
+            Stroke::new(tokens.metrics.stroke_focus_pt, tokens.focus_ring)
+        } else {
+            Stroke::new(tokens.metrics.stroke_thin_pt, tokens.accent_hover)
+        };
+        ui.painter().rect(rect, radius, fill, stroke, StrokeKind::Inside);
+    } else {
+        super::widgets::paint_interactive_chrome(
+            ui,
+            rect,
+            tokens,
+            super::widgets::InteractiveChromeSpec {
+                radius,
+                base_bg: if enabled { tokens.button_bg } else { tokens.panel_bg },
+                base_border: Some(if enabled { tokens.button_border } else { tokens.divider }),
+                hovered: resp.hovered(),
+                selected,
+                pressed: resp.is_pointer_button_down_on(),
+                enabled,
+            },
+        );
+    }
     ui.painter().with_clip_rect(rect.shrink(3.0)).galley(
         Pos2::new(rect.center().x - galley.size().x * 0.5, rect.center().y - galley.size().y * 0.5),
         galley,
@@ -2014,22 +2064,23 @@ fn chrome_button_fitted(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInsp
     };
 
     if rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect).is_positive() {
-        meta.record_response(
-            ui,
-            &resp,
-            FrameInspectEntryInput {
-                widget_id,
-                role: "button",
-                label,
-                command_id,
-                value: None,
-                enabled,
-                disabled_reason,
-                z_layer: ZLayer::Workspace,
-                ellipsized,
-                full_label: ellipsized.then_some(label),
-            },
-        );
+        let input = FrameInspectEntryInput {
+            widget_id,
+            role: "button",
+            label,
+            command_id,
+            value: None,
+            enabled,
+            disabled_reason,
+            z_layer: ZLayer::Workspace,
+            ellipsized,
+            full_label: ellipsized.then_some(label),
+        };
+        if let Some(r) = rank {
+            meta.record_ranked_response(ui, &resp, input, r);
+        } else {
+            meta.record_response(ui, &resp, input);
+        }
     }
     resp
 }

@@ -346,6 +346,9 @@ pub fn render_trailing_studio(
         .resizable(false)
         .frame(dock_frame)
         .show(ui, |ui| {
+            if !ctx_in.enabled {
+                ui.disable();
+            }
             if ctx_in.layout.trailing_collapsed_to_rail {
                 render_collapsed_rail(ui, app, ctx_in.tokens, surface, ctx_in.enabled, meta, intents);
                 return;

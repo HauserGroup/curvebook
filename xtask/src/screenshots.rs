@@ -26,7 +26,13 @@ const MIN_WIDTH: u32 = 1280;
 const MIN_HEIGHT: u32 = 800;
 const MIN_IDAT_BYTES: usize = 1024;
 
-pub const SCREENSHOT_REL_PATHS: &[&str] = &["docs/images/workspace-split-fit.png", "docs/images/workspace-layout-dark.png"];
+pub const SCREENSHOT_REL_PATHS: &[&str] = &[
+    "docs/images/workspace-split-fit.png",
+    "docs/images/workspace-layout-dark.png",
+    "docs/images/specimen-light.png",
+    "docs/images/specimen-dark.png",
+    "docs/images/specimen-high-contrast.png",
+];
 const EXTRA_DOC_IMAGES: &[(&str, (u32, u32), usize)] = &[("docs/images/curvebook.png", (128, 128), 64)];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
