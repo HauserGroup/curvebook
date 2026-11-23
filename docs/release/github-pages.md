@@ -10,6 +10,22 @@ Initial decisions: 2026-11-16–18. **Beta overhaul recorded: 2026-11-23.** Scop
 
 This record governs the public CurveBook website and its GitHub Pages presentation: page structure, visitor-facing copy, visual styling, links, accessibility, and publication. It does not prescribe the desktop application interface, browser application interface, application themes, menus, dialogs, or scientific graph styles (governed separately by [`design-language.md`](../design-language.md)). References to windows, title bars, or desktop styling below describe the website's visual treatment only.
 
+### Warm Stone Coral & readability refinement (2026-11-23)
+
+Preserved 100% of the Classic coral desktop geometry (`0px` corners, crisp two-pixel raised/inset bevels, hard `3px 3px 0` outer window shadow, solid `--desktop` background with no decorative grid texture, zero JavaScript, strict CSP, and `Referrer-Policy: no-referrer`) while refining color harmony, interactive affordance honesty, and long-form readability across [`site.css`](../site.css), [`index.html`](../index.html), [`privacy.html`](../privacy.html), and [`xtask/src/docs_site/template.rs`](../../xtask/src/docs_site/template.rs):
+
+- **Warm Stone Coral palette:** Replaced the slightly olive-cast 1990s grays (`#ECEBE5`, `#D5D5CF`, `#747974`) with clean warm-stone neutrals (`#EFEDE8`, `#DCD9D2`, `#72706B`), lifted document paper to crisp `#FEFEFE`, deepened the title bar to slate-indigo (`#243752`, echoing the desktop app's accent family in [`design-language.md`](../design-language.md)), and cleaned up the coral primary/link accents (`#B83D37` / `#962F2B` / `#9B312D`). Every text and non-text pair exceeds WCAG 2.2 AA (with primary text `>15:1` AAA, muted text on chrome `5.27:1`, and bevel shadow on chrome `3.51:1`).
+- **Affordance honesty ("only buttons look like buttons"):** In a beveled desktop aesthetic, raised three-dimensional boxes imply clickability. Raised button bevels are therefore reserved strictly for actual interactive controls (`.button`, active hover states on `nav a`, and clickable `.az-letters a`). Non-interactive metadata is styled as flat or recessed readouts:
+  - `.pill-row` / `.pill` (`Pure Rust`, `Zero Telemetry`, `MIT OR Apache-2.0`, `Desktop · CLI · MCP`): flat monospace metadata strip separated by vertical rules.
+  - `.platform-tag` (`Signed & Notarized`, `Unsigned Beta`, `AppImage`, `Preview`) and manual `.badge` tags: flat monospace status readouts without raised button chrome.
+  - `.file-type` (`.curvebook · .curvebook.d/ · .cbtemplate`): recessed inset well (`--inset` border direction) so it reads as a read-only path display rather than a button.
+  - `.az-letters span`: flat muted cell for inactive index letters.
+- **Typography & WCAG readability:**
+  - Switched `:root` from hardcoded `15px` Tahoma/Verdana to `font-size: 100%` with the native system UI stack (`system-ui, -apple-system, "Segoe UI", Roboto, Tahoma, sans-serif`) so browser default font-size preferences are respected and HiDPI rendering is crisp.
+  - Capped prose measure to `64ch–68ch` (`.lead`, `.section-lead`, and `.doc-body > p, ul, ol, dl, blockquote`) while keeping tables, code blocks, figures, math blocks, and card grids full width.
+  - Raised small metadata labels to `>= 0.78rem–0.8125rem`, added `font-variant-numeric: tabular-nums` on tables and instrument metadata, added subtle alternating row striping (`--row-alt: #F6F5F2`) on `.doc-body table`, added flat `0px`-radius warm-stone highlights on inline prose `<code>`, upgraded keyboard focus rings to `2px solid var(--title)` (`outline-offset: 3px`), and enabled `scroll-behavior: smooth` inside `@media (prefers-reduced-motion: no-preference)`.
+- **Iconic instrument chrome:** Used the existing `<h1>` `<span>` hook for the coral punchline (`h1 { color: var(--title); }`, `h1 span { color: var(--accent); }`), styled `.window-status` and status tags in monospace, added tactile menu-bar hover states on `nav a`, and added a classic recessed `.window-statusbar` along the base of `.desktop-window` (hidden in `@media print`).
+
 ### Beta overhaul record (2026-11-23)
 
 - **Elevated Classic coral landing page (`index.html`, `site.css`):** Preserved the Classic coral palette (`#ECEBE5`, `#D5D5CF`, `#FAFAF6`, `#29394D`, `#222B35`, `#555D64`, `#AB443D`, `#8F3936`, `#1D6561`), `color-scheme: light`, system fonts, square two-pixel bevels, zero JavaScript, zero forms, zero inline `style=` attributes, `Referrer-Policy: no-referrer`, and strict CSP (`default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'`). Upgraded the Alpha single-column opener into a Beta product site with:
@@ -47,23 +63,27 @@ The clean-room statement refers to developing CurveBook without using commercial
 
 ### Visual tokens
 
-| Role | Color |
-|---|---|
-| Desktop | `#ECEBE5` |
-| Window chrome | `#D5D5CF` |
-| Document surfaces | `#FAFAF6` |
-| Title bars | `#29394D` |
-| Text | `#222B35` |
-| Secondary text | `#555D64` |
-| Coral primary action | `#AB443D` |
-| Darker coral links / action hover | `#8F3936` |
-| Small project-file accent | `#1D6561` |
+| Role | CSS token | Color | Verified WCAG 2.2 contrast |
+|---|---|---|---|
+| Desktop | `--desktop` | `#EFEDE8` | `--ink` on `--desktop`: `13.05:1` (AAA) |
+| Window chrome | `--chrome` | `#DCD9D2` | `--ink` on `--chrome`: `10.83:1` (AAA) |
+| Document surfaces | `--paper` | `#FEFEFE` | `--ink` on `--paper`: `15.14:1` (AAA) |
+| Alternating table row | `--row-alt` | `#F6F5F2` | `--ink` on `--row-alt`: `14.01:1` (AAA) |
+| Title bars | `--title` | `#243752` | `--highlight` on `--title`: `12.05:1` (AAA) |
+| Text | `--ink` | `#1E2630` | Primary body & headings |
+| Secondary text | `--muted` | `#4F565F` | `7.36:1` on `--paper`, `5.27:1` on `--chrome` (AA) |
+| Coral primary action | `--accent` | `#B83D37` | `--highlight` on `--accent`: `5.58:1` (AA) |
+| Action hover | `--accent-hover` | `#962F2B` | `--highlight` on `--accent-hover`: `7.67:1` (AAA) |
+| Accessible coral links | `--link` | `#9B312D` | `7.25:1` on `--paper`, `5.19:1` on `--chrome` (AA) |
+| Project-file & signed status accent | `--file-ink` | `#156260` | `6.09:1` on `--desktop`, `5.05:1` on `--chrome` (AA) |
+| Bevel shadow | `--shadow` | `#72706B` | `3.51:1` on `--chrome` (AA non-text `>= 3:1`) |
+| Deep bevel edge | `--deep` | `#30343A` | Outer window & button lower-right bevel |
 
-Use `--link` (`#8F3936`) for links and small accent labels on `--chrome` or `--desktop` to preserve WCAG AA contrast, and `--ink` (`#222B35`) on secondary chrome controls. All visual assets under [`images/`](../images/) must carry verified attribution rows in [`ASSETS.md`](../../ASSETS.md).
+Use `--link` (`#9B312D`) for links and unsigned status readouts on `--paper`, `--chrome`, or `--desktop` to preserve WCAG AA contrast, and `--ink` (`#1E2630`) on secondary chrome controls. All visual assets under [`images/`](../images/) must carry verified attribution rows in [`ASSETS.md`](../../ASSETS.md).
 
 ### Behavior and maintenance
 
-Use native fragment links, semantic headings, a skip link, keyboard focus on destination sections (`tabindex="-1"`), native `<details>` disclosure for long TOCs, and visible dotted focus outlines. Reflow cleanly down to `320px` with zero horizontal overflow. Link to the full GitHub Releases list rather than assuming `/releases/latest` (since prereleases do not populate `/releases/latest`).
+Use native fragment links, semantic headings, a skip link, keyboard focus on destination sections (`tabindex="-1"`), native `<details>` disclosure for long TOCs, and visible `2px solid` focus outlines (`var(--title)`). Reflow cleanly down to `320px` with zero horizontal overflow. Link to the full GitHub Releases list rather than assuming `/releases/latest` (since prereleases do not populate `/releases/latest`).
 
 Keep the site completely buildless to serve: local HTML/CSS/PNG only, zero scripts, zero external fonts, zero analytics, zero forms, and zero background requests across `index.html`, `privacy.html`, `manual/`, and root redirect shims. Preserve `Referrer-Policy: no-referrer` and the strict `Content-Security-Policy`, and keep the GitHub Pages IP-log disclosure accurate against [GitHub documentation](https://docs.github.com/en/pages/getting-started-with-github-pages/what-is-github-pages#data-collection).
 
