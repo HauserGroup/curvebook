@@ -455,7 +455,7 @@ impl DataSheet {
     /// Non-destructively set or clear the exclusion mask on an independent `X` (`Xy`) or
     /// elapsed-time (`Survival`, `subcol == 0`) cell.
     ///
-    /// Lazily materializes row width `1` on [`XColumnMode::GeneratedSequence`] tables so generated `X`
+    /// Lazily materializes row width `1` on [`crate::archetypes::XColumnMode::GeneratedSequence`] tables so generated `X`
     /// points can still carry exclusion masks.
     pub fn set_x_or_time_excluded(&mut self, row: usize, subcol: usize, excluded: bool) -> Result<(), DocError> {
         self.ensure_mutable()?;
