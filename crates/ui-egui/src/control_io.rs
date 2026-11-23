@@ -1471,7 +1471,11 @@ fn dispatch_command_by_id(
     }
     if app.is_gui_only()
         && !is_control_readonly_ui_command(command_id)
-        && (command_id.starts_with("ui.") || command_id == "app.about" || command_id == "app.feedback" || command_id == "file.print")
+        && (command_id.starts_with("ui.")
+            || command_id == "app.about"
+            || command_id == "app.feedback"
+            || command_id == "file.print"
+            || command_id == "analysis.updateParams")
     {
         return Err(EngineError::with_code(
             ErrorCode::GuiOnlyViolation,
@@ -1694,9 +1698,13 @@ fn finish_committed_atomic_batch(app: &mut UiApp, rollback: AtomicBatchRollbackS
         return;
     }
     let child_tracker = app.batch_undo_log.take();
+    let is_outermost = rollback.prev_tracker.is_none();
     app.batch_undo_log = rollback.prev_tracker;
     if let (Some(parent), Some(child)) = (app.batch_undo_log.as_mut(), child_tracker) {
         parent.merge_committed_child(child);
+    } else if is_outermost && let Some(baseline) = rollback.baseline_session {
+        let _ = app.session.collapse_atomic_group(baseline);
+        app.sync_views();
     }
 }
 
@@ -2256,9 +2264,11 @@ fn handle_doc_export(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
                 .or_else(|| doc.result_sheets.iter().find(|rs| rs.tabs.iter().any(|t| t.id == tid)))
                 .ok_or_else(|| ControlCallError::from(format!("tab '{tid}' not found on any result sheet")))?;
             ExportTarget::Explicit(matched.id.clone())
-        } else if doc.active_sheet_id.is_none()
-            && let Some(rs) = doc.result_sheets.first()
+        } else if let Some(active) = &doc.active_sheet_id
+            && (doc.result_sheet(active).is_some() || doc.data_sheet(active).is_some())
         {
+            ExportTarget::Explicit(active.clone())
+        } else if let Some(rs) = doc.result_sheets.first() {
             ExportTarget::Explicit(rs.id.clone())
         } else {
             ExportTarget::AutoOrExplicit(None)

@@ -2564,7 +2564,7 @@ impl WebBridgeSession {
             let reply_raw = self.host.dispatch_control_line(&req);
             let reply: Value = serde_json::from_str(&reply_raw).map_err(|err| WebAdapterError::Print(err.to_string()))?;
             if reply.get("ok").and_then(Value::as_bool) != Some(true) {
-                let err_msg = reply.get("error").and_then(|e| e.get("message")).and_then(Value::as_str).unwrap_or("SVG print render failed");
+                let err_msg = extract_control_reply_error(&reply, "SVG print render failed");
                 return Err(WebAdapterError::Print(err_msg.to_owned()));
             }
             let svg = reply
@@ -3607,7 +3607,7 @@ impl WebBridgeSession {
         let reply_raw = self.host.dispatch_control_line(&line);
         let reply: Value = serde_json::from_str(&reply_raw).map_err(|err| WebAdapterError::Workspace(err.to_string()))?;
         if reply.get("ok").and_then(Value::as_bool) != Some(true) {
-            let err_msg = reply.get("error").and_then(|e| e.get("message")).and_then(Value::as_str).unwrap_or("control command failed");
+            let err_msg = extract_control_reply_error(&reply, "control command failed");
             return Err(WebAdapterError::Workspace(err_msg.to_owned()));
         }
         let extra = if replaces { self.apply_project_replacement_state(true) } else { Vec::new() };
@@ -3638,7 +3638,7 @@ impl WebBridgeSession {
         let reply_raw = self.host.dispatch_control_line(line);
         let reply: Value = serde_json::from_str(&reply_raw).map_err(|err| WebAdapterError::Workspace(err.to_string()))?;
         if reply.get("ok").and_then(Value::as_bool) != Some(true) {
-            let err_msg = reply.get("error").and_then(|e| e.get("message")).and_then(Value::as_str).unwrap_or("control line failed");
+            let err_msg = extract_control_reply_error(&reply, "control line failed");
             return Err(WebAdapterError::Workspace(err_msg.to_owned()));
         }
         let extra = if replaces { self.apply_project_replacement_state(true) } else { Vec::new() };
@@ -3762,6 +3762,15 @@ fn resolve_clipboard_target(app: &UiApp, sheet_id: Option<&str>) -> Result<Clipb
     }
 
     Err(WebAdapterError::Clipboard(String::from("no printable graph/layout or data sheet available for clipboard export")))
+}
+
+fn extract_control_reply_error<'a>(reply: &'a Value, fallback: &'a str) -> &'a str {
+    reply
+        .get("error")
+        .and_then(|err| err.as_str().or_else(|| err.get("message").and_then(Value::as_str)))
+        .or_else(|| reply.pointer("/error_detail/message").and_then(Value::as_str))
+        .filter(|msg| !msg.trim().is_empty())
+        .unwrap_or(fallback)
 }
 
 fn build_data_clipboard_payload(app: &UiApp, target_id: &str, dpi: u16) -> Result<WebClipboardPayload, WebAdapterError> {
@@ -4804,5 +4813,83 @@ mod tests {
                 spec.id
             );
         }
+    }
+
+    #[test]
+    fn da_06_04_extracts_control_reply_error_strings_and_error_detail_messages() {
+        use super::extract_control_reply_error;
+        use serde_json::Value;
+
+        // 1. Helper handles string `error`, object `error.message`, `/error_detail/message`, and fallback.
+        assert_eq!(extract_control_reply_error(&json!({ "ok": false, "error": "real string diagnostic" }), "fallback"), "real string diagnostic");
+        assert_eq!(
+            extract_control_reply_error(
+                &json!({ "ok": false, "error": Value::Null, "error_detail": { "message": "structured detail diagnostic" } }),
+                "fallback"
+            ),
+            "structured detail diagnostic"
+        );
+        assert_eq!(
+            extract_control_reply_error(&json!({ "ok": false, "error": { "message": "legacy object message" } }), "fallback"),
+            "legacy object message"
+        );
+        assert_eq!(extract_control_reply_error(&json!({ "ok": false, "error": "   " }), "fallback"), "fallback");
+
+        // 2. Live WebAdapterSession surfaces real ControlResponse.error string instead of generic fallback.
+        let (mut session, _data_id, _graph_id) = build_session_with_xy_and_result();
+        let line_err = session
+            .handle_event(WebBridgeEvent::DispatchControlLine {
+                line: json!({ "id": "t1", "method": "doc.export", "params": { "format": "bogus_fmt" } }).to_string(),
+            })
+            .expect_err("unsupported format must fail");
+        let line_msg = line_err.to_string();
+        assert!(line_msg.contains("unsupported export format"), "expected real control_io diagnostic, got: {line_msg}");
+        assert!(!line_msg.contains("control line failed"), "generic fallback must not mask real error: {line_msg}");
+
+        let cmd_err = session
+            .handle_event(WebBridgeEvent::ExecuteCommand { command_id: String::from("doc.export"), params: json!({ "format": "bogus_fmt" }) })
+            .expect_err("unsupported format via ExecuteCommand must fail");
+        let cmd_msg = cmd_err.to_string();
+        assert!(cmd_msg.contains("unsupported export format"), "expected real control_io diagnostic, got: {cmd_msg}");
+        assert!(!cmd_msg.contains("control command failed"), "generic fallback must not mask real error: {cmd_msg}");
+    }
+
+    #[test]
+    fn da_06_03_and_da_06_06_web_contended_read_only_blocks_path_exports_and_checkpoint_route_succeeds() {
+        use super::TabAccessMode;
+        use serde_json::Value;
+
+        // DA-06-06: `project.createCheckpoint` route emits `"name"` and executes cleanly without BadInput.
+        let (mut session, _data_id, _graph_id) = build_session_with_xy_and_result();
+        let route = crate::chrome_bridge::resolve_web_command_route(session.host.app(), "project.createCheckpoint");
+        assert!(
+            matches!(route, crate::chrome_bridge::WebCommandRoute::EngineCommand { .. }),
+            "expected EngineCommand for project.createCheckpoint, got {route:?}"
+        );
+        if let crate::chrome_bridge::WebCommandRoute::EngineCommand { command_id, params } = route {
+            assert_eq!(command_id, "project.createCheckpoint");
+            assert_eq!(params.get("name").and_then(Value::as_str), Some("Checkpoint"));
+            assert!(params.get("label").is_none());
+            session.handle_event(WebBridgeEvent::ExecuteCommand { command_id, params }).expect("project.createCheckpoint via web route must succeed");
+            assert_eq!(session.host.app().document().checkpoints.len(), 1);
+        }
+
+        // DA-06-03: Contended read-only web tab rejects disk-writing `doc.export` (path/output_path) and `render.pdf` (path).
+        session.access_mode = TabAccessMode::ReadOnlyContended { holder_tab_id: String::from("other-tab") };
+        let export_out_path = session.handle_event(WebBridgeEvent::DispatchControlLine {
+            line: json!({ "id": "ro1", "method": "doc.export", "params": { "format": "csv", "output_path": "evil.csv" } }).to_string(),
+        });
+        assert!(matches!(export_out_path, Err(WebAdapterError::ReadOnlyContended { .. })), "output_path export must be blocked: {export_out_path:?}");
+
+        let pdf_path = session.handle_event(WebBridgeEvent::DispatchControlLine {
+            line: json!({ "id": "ro2", "method": "render.pdf", "params": { "path": "evil.pdf" } }).to_string(),
+        });
+        assert!(matches!(pdf_path, Err(WebAdapterError::ReadOnlyContended { .. })), "path render.pdf must be blocked: {pdf_path:?}");
+
+        // Pathless `doc.export` and `render.pdf` remain allowed in read-only mode.
+        let export_inline = session.handle_event(WebBridgeEvent::DispatchControlLine {
+            line: json!({ "id": "ro3", "method": "doc.export", "params": { "format": "csv" } }).to_string(),
+        });
+        assert!(export_inline.is_ok(), "pathless doc.export should succeed in read-only mode: {export_inline:?}");
     }
 }

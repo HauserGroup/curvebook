@@ -34,7 +34,7 @@ curvebook-chart = { workspace = true }
 curvebook-ui-egui = { workspace = true, features = ["test-support"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-eframe = { workspace = true, features = ["wayland", "x11"] }
+eframe = { workspace = true, features = ["wayland", "x11", "wgpu"] }
 rfd = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

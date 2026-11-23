@@ -152,19 +152,19 @@ pub fn is_read_only_ui_command(command_id: &str) -> bool {
     )
 }
 
-/// Explicit allowlist of read-only control-protocol inspection and vector/preview methods.
+/// Explicit allowlist of unconditionally read-only control-protocol inspection and vector/preview methods.
+///
+/// Path-capable control methods (`doc.export`, `render.pdf`) are gated on `!has_non_null_path_param`
+/// inside [`is_command_read_only`].
 #[must_use]
 pub fn is_read_only_control_method(command_id: &str) -> bool {
-    matches!(
-        command_id,
-        "ping" | "command.list" | "doc.inspect" | "doc.export" | "render.svg" | "render.pdf" | "render.preview" | "ui.state" | "state.snapshot"
-    )
+    matches!(command_id, "ping" | "command.list" | "doc.inspect" | "render.svg" | "render.preview" | "ui.state" | "state.snapshot")
 }
 
-/// Whether `params` carries a non-null filesystem export path (`path`, `file_path`, or `filePath`).
+/// Whether `params` carries a non-null filesystem export path (`path`, `file_path`, `filePath`, `output_path`, or `outputPath`).
 #[must_use]
 pub fn has_non_null_path_param(params: &Value) -> bool {
-    params.get("path").or_else(|| params.get("file_path")).or_else(|| params.get("filePath")).is_some_and(|v| !v.is_null())
+    ["path", "file_path", "filePath", "output_path", "outputPath"].iter().any(|&key| params.get(key).is_some_and(|v| !v.is_null()))
 }
 
 /// Return the first non-null, non-empty trimmed string value across candidate keys in `obj`.
@@ -311,6 +311,8 @@ fn is_command_read_only_depth(command_id: &str, params: Option<&Value>, depth: u
             | "export.png"
             | "graph.exportPng"
             | "export.tiff"
+            | "doc.export"
+            | "render.pdf"
     ) {
         return !has_path;
     }
@@ -575,7 +577,7 @@ pub fn contextual_command_params(app: &UiApp, command_id: &str) -> Value {
         | "ui.result.inspectDiagnostics"
         | "ui.result.appendClusterColumn" => json!({ "sheet_id": result_str }),
         "result.generateReport" => json!({ "result_sheet_id": result_str, "format": "markdown" }),
-        "project.createCheckpoint" => json!({ "label": "Checkpoint" }),
+        "project.createCheckpoint" => json!({ "name": "Checkpoint" }),
         "ui.theme.set" => json!({ "mode": next_theme_mode_name(app.theme.mode) }),
         "ui.locale.set" => json!({ "locale": if app.locale == "en" { "de" } else { "en" } }),
         "ui.previewFilter.set" => json!({ "filter": next_preview_filter_name(app.preview_filter) }),

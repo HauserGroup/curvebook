@@ -70,8 +70,10 @@ const MAX_FONT_FILE_BYTES: usize = 64 * 1024 * 1024;
 ///   [`ErrorCode::PathEscape`] if `raw_path`, `..` components, or symlinks escape `<dir>`.
 /// - When no `WorkdirGuard` is configured (including live `--control-port` sessions, which
 ///   cannot be combined with `--workdir`), `raw_path` may be any non-empty, NUL-free relative or
-///   absolute path accessible to the current OS user; callers writing to the returned path (such as
-///   `save_file` and `export`) atomically overwrite any user-writable destination file.
+///   absolute path accessible to the current OS user; relative paths are resolved against
+///   [`std::env::current_dir`] so live-attached desktop processes receive the exact same absolute
+///   path as the MCP server regardless of CWD differences. Callers writing to the returned path
+///   (such as `save_file` and `export`) atomically overwrite any user-writable destination file.
 pub(crate) fn resolve_mcp_path(state: &McpServerState, raw_path: &str) -> Result<PathBuf, EngineError> {
     if raw_path.trim().is_empty() {
         return Err(EngineError::with_code(ErrorCode::BadInput, "path must not be empty"));
@@ -84,7 +86,14 @@ pub(crate) fn resolve_mcp_path(state: &McpServerState, raw_path: &str) -> Result
         if let Some(guard) = state.workdir_guard() {
             return guard.resolve(raw_path).map_err(EngineError::from);
         }
-        Ok(PathBuf::from(raw_path))
+        let path = PathBuf::from(raw_path);
+        if path.is_relative() {
+            let cwd = std::env::current_dir()
+                .map_err(|err| EngineError::with_code(ErrorCode::IoError, format!("failed to determine current working directory: {err}")))?;
+            Ok(cwd.join(path))
+        } else {
+            Ok(path)
+        }
     }
     #[cfg(target_arch = "wasm32")]
     {
