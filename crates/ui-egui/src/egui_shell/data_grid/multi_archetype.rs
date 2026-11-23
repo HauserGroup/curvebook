@@ -24,9 +24,9 @@ use super::shared::LinkedEdgePaint;
 use super::shared::{
     AuxInlineTarget, CellTextStyle, ContextCellTarget, ContextMenuState, MultiGridAuxState, MultiGridCtx, MultiGridFrameState, MultiGridGeom,
     alt_row_fill, any_pointer_click_in, clamp_multi_scroll, clear_grid_drag_anchor_if_released, compute_multi_geom, compute_multi_scrollbar_rects,
-    compute_visible_range, ensure_solid_scrollbar_style, format_cell_into, forward_frozen_wheel, handle_cell_pointer_drag_select,
+    compute_visible_range, ensure_solid_scrollbar_style, format_cell_into_with_decimals, forward_frozen_wheel, handle_cell_pointer_drag_select,
     initial_edit_text_for_cell, is_linked_region_broken, is_multi_click_edit, link_border_color32, multi_text_style, paint_exclusion_corner_marker,
-    paint_linked_perimeter_edges, record_meta_if_enabled, render_ellipsized_text, set_grid_focus_active,
+    paint_linked_perimeter_edges, record_meta_if_enabled, render_ellipsized_text, set_grid_focus_active, table_display_decimals,
 };
 use super::shortcuts::{
     clear_x_clipboard_cache, copy_x_cell_to_clipboard, handle_multi_keyboard_shortcuts, push_x_cell_text_paste_intents,
@@ -126,7 +126,7 @@ pub(super) fn render_multi_archetype_grid(
         body_out
     };
 
-    render_multi_link_guard_popover(ui, ds, state, tokens, meta, intents, geom.grid_outer_rect);
+    let link_outside_click = render_multi_link_guard_popover(ui, ds, state, tokens, meta, intents, geom.grid_outer_rect);
 
     let (v_sb, h_sb) = compute_multi_scrollbar_rects(&geom);
     state.last_visible_rows = body_out.vis_rows.clone();
@@ -141,7 +141,7 @@ pub(super) fn render_multi_archetype_grid(
         vertical_scrollbar_rect_pt: v_sb,
         horizontal_scrollbar_rect_pt: h_sb,
         rendered_modal_guard_open: state.active_link_popover.is_some(),
-        outside_click_blocked,
+        outside_click_blocked: outside_click_blocked || link_outside_click,
     }
 }
 
@@ -253,8 +253,9 @@ fn render_multi_gutter_body(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut M
                     let wid = format!("grid.row_title.{row}");
                     let editing_this = fstate.state.inline_edit.as_ref().is_some_and(|e| e.target == GridInlineEditTarget::RowTitle { row });
                     if !editing_this {
-                        let resp = gui.interact(rt_r, gui.make_persistent_id(&wid), if blocked { Sense::hover() } else { Sense::click() });
-                        if resp.hovered() && !blocked {
+                        let rt_editable = !blocked && !ds.frozen;
+                        let resp = gui.interact(rt_r, gui.make_persistent_id(&wid), if rt_editable { Sense::click() } else { Sense::hover() });
+                        if resp.hovered() && rt_editable {
                             gui.painter().rect_filled(rt_r, 0.0, tokens.hover_bg);
                         }
                         render_ellipsized_text(
@@ -264,7 +265,7 @@ fn render_multi_gutter_body(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut M
                             CellTextStyle::plain(FontId::proportional(12.0), tokens.text_primary, Align::LEFT),
                         );
                         let acc_rt = if row_title.is_empty() { format!("Row {} Title", row + 1) } else { row_title.clone() };
-                        resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, !blocked, acc_rt.clone()));
+                        resp.widget_info(move || WidgetInfo::labeled(egui::Role::Button, rt_editable, acc_rt.clone()));
                         record_meta_if_enabled(
                             gui,
                             fstate.meta,
@@ -276,14 +277,20 @@ fn render_multi_gutter_body(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut M
                                 label: &row_title,
                                 command_id: Some("table.setRowTitles"),
                                 value: Some(serde_json::Value::String(row_title.clone())),
-                                enabled: !blocked,
-                                disabled_reason: blocked.then_some("modal dialog is active"),
+                                enabled: rt_editable,
+                                disabled_reason: if blocked {
+                                    Some("modal dialog is active")
+                                } else if ds.frozen {
+                                    Some("Data sheet is frozen (read-only).")
+                                } else {
+                                    None
+                                },
                                 z_layer: ZLayer::Workspace,
                                 ellipsized: false,
                                 full_label: None,
                             },
                         );
-                        if resp.clicked() && !blocked {
+                        if resp.clicked() && rt_editable {
                             fstate.aux.aux_edit = None;
                             begin_inline_edit(gui, fstate.state, GridInlineEditTarget::RowTitle { row }, row_title);
                         }
@@ -329,6 +336,7 @@ struct MultiBodyDrawBuffers<'a> {
     id_buf: &'a mut String,
     acc_buf: &'a mut String,
     record_meta: bool,
+    table_decimals: Option<u8>,
     base_row_bg: Color32,
     x_seq_readonly: bool,
     is_mv: bool,
@@ -356,6 +364,7 @@ fn render_multi_body(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut MultiGri
     let geom = mctx.geom;
     let tokens = mctx.tokens;
     let blocked = mctx.blocked;
+    let table_decimals = table_display_decimals(ui.ctx());
     let b_rect = geom.body_rect;
     if !b_rect.is_positive() {
         return MultiBodyOut { rendered_cells: 0, vis_rows: 0..0, vis_all_flat: 0..0 };
@@ -407,6 +416,7 @@ fn render_multi_body(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut MultiGri
                         id_buf: &mut id_buf,
                         acc_buf: &mut acc_buf,
                         record_meta,
+                        table_decimals,
                         base_row_bg: if row % 2 == 1 { alt_fill } else { tokens.surface_bg },
                         x_seq_readonly,
                         is_mv,
@@ -469,7 +479,7 @@ fn render_single_multi_x_cell(
     let cell_opt = ds.archetype.x_or_time_cell(row, subcol);
     dbuf.text_buf.clear();
     if let Some(c) = cell_opt {
-        format_cell_into(c, &app.locale_preset, dbuf.text_buf);
+        format_cell_into_with_decimals(c, &app.locale_preset, dbuf.table_decimals, dbuf.text_buf);
     } else if dbuf.x_seq_readonly
         && subcol == 0
         && let TableArchetype::Xy(xy) = &ds.archetype
@@ -480,7 +490,7 @@ fn render_single_multi_x_cell(
             curvebook_doc::SequenceProgression::Arithmetic => *start + (row as f64) * (*step),
             curvebook_doc::SequenceProgression::Geometric => *start * step.powi(row as i32),
         };
-        format_cell_into(&Cell::number(seq_val), &app.locale_preset, dbuf.text_buf);
+        format_cell_into_with_decimals(&Cell::number(seq_val), &app.locale_preset, dbuf.table_decimals, dbuf.text_buf);
     }
     let excluded = cell_opt.is_some_and(|c| c.excluded);
     let editable = !dbuf.blocked && !ds.frozen && !dbuf.x_seq_readonly;
@@ -607,7 +617,7 @@ fn render_single_multi_data_cell(
     let cell_opt = ds.archetype.data_cell(CellCoord::from(coord));
     dbuf.text_buf.clear();
     if let Some(c) = cell_opt {
-        format_cell_into(c, &app.locale_preset, dbuf.text_buf);
+        format_cell_into_with_decimals(c, &app.locale_preset, dbuf.table_decimals, dbuf.text_buf);
     }
     let mv_var =
         if dbuf.is_mv { if let TableArchetype::MultipleVariables(mv) = &ds.archetype { mv.variables.get(coord.col) } else { None } } else { None };
@@ -885,6 +895,7 @@ pub(super) struct GridContextMenuHost<'a> {
     pub(super) ds: &'a DataSheet,
     pub(super) tokens: &'a Tokens,
     pub(super) blocked: bool,
+    pub(super) record_inspect_meta: bool,
     pub(super) selected_x_cell: Option<(usize, usize)>,
 }
 
@@ -1000,7 +1011,7 @@ pub(super) fn render_grid_context_menu_popup(
                 record_meta_if_enabled(
                     list,
                     meta,
-                    true,
+                    host.record_inspect_meta,
                     &r,
                     FrameInspectEntryInput {
                         widget_id: wid,
@@ -1185,7 +1196,13 @@ pub(super) fn render_grid_context_menu_popup(
 }
 
 fn render_row_context_menu_popup(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut MultiGridFrameState<'_>) {
-    let host =
-        GridContextMenuHost { app: mctx.app, ds: mctx.ds, tokens: mctx.tokens, blocked: mctx.blocked, selected_x_cell: fstate.aux.selected_x_cell };
+    let host = GridContextMenuHost {
+        app: mctx.app,
+        ds: mctx.ds,
+        tokens: mctx.tokens,
+        blocked: mctx.blocked,
+        record_inspect_meta: fstate.state.record_inspect_meta,
+        selected_x_cell: fstate.aux.selected_x_cell,
+    };
     render_grid_context_menu_popup(ui, &host, &mut fstate.aux.context_menu, fstate.meta, fstate.intents);
 }

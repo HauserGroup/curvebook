@@ -101,6 +101,8 @@ pub(super) fn render_mv_formula_studio(
 ) {
     let tokens = ctx_in.tokens;
     let locale = &tokens.locale;
+    let editable = ctx_in.enabled && !ds.frozen;
+    let frozen_reason = ds.frozen.then_some("data sheet is frozen (read-only)");
     let col_count = mv.variables.len();
     if col_count > 0 && state.mv_selected_col >= col_count {
         state.mv_selected_col = 0;
@@ -168,10 +170,14 @@ pub(super) fn render_mv_formula_studio(
         state.mv_sub_tab = next_sub;
     }
     ui.add_space(4.0);
+    if ds.frozen {
+        ui.colored_label(tokens.text_muted, "Frozen (read-only): formula and role edits are locked.");
+        ui.add_space(2.0);
+    }
 
     if state.mv_sub_tab == 0 {
         let mut resp_title = egui::TextEdit::singleline(&mut state.mv_title_draft).desired_width(ui.available_width()).hint_text("Variable title");
-        if !ctx_in.enabled {
+        if !editable {
             resp_title = resp_title.interactive(false);
         }
         ui.add(resp_title);
@@ -179,7 +185,7 @@ pub(super) fn render_mv_formula_studio(
         ui.add_space(4.0);
         widgets::subheader(ui, "f(x) =");
         let mut formula_edit = egui::TextEdit::singleline(&mut state.mv_formula_draft).desired_width(ui.available_width()).hint_text("= [Dose] * 2");
-        if !ctx_in.enabled {
+        if !editable {
             formula_edit = formula_edit.interactive(false);
         }
         let f_resp = ui.add(formula_edit);
@@ -193,8 +199,8 @@ pub(super) fn render_mv_formula_studio(
                     label: "f(x) formula",
                     command_id: Some("table.setCalculatedVariable"),
                     value: Some(json!(state.mv_formula_draft)),
-                    enabled: ctx_in.enabled,
-                    disabled_reason: None,
+                    enabled: editable,
+                    disabled_reason: frozen_reason,
                     z_layer: ZLayer::Workspace,
                     ellipsized: false,
                     full_label: None,
@@ -250,7 +256,8 @@ pub(super) fn render_mv_formula_studio(
             });
         }
 
-        let can_apply = ctx_in.enabled && !state.mv_formula_draft.trim().is_empty() && formula_status.is_ok();
+        let can_apply = editable && !state.mv_formula_draft.trim().is_empty() && formula_status.is_ok();
+        let apply_reason = frozen_reason.or_else(|| (!can_apply).then_some("enter a valid non-circular formula"));
         ui.add_space(4.0);
         if studio_full_button(
             ui,
@@ -264,7 +271,7 @@ pub(super) fn render_mv_formula_studio(
                 primary: true,
                 widget_id: "inspector.mv.apply_formula",
                 command_id: Some("table.setCalculatedVariable"),
-                disabled_reason: (!can_apply).then_some("enter a valid non-circular formula"),
+                disabled_reason: apply_reason,
             },
         ) {
             let title =
@@ -299,12 +306,12 @@ pub(super) fn render_mv_formula_studio(
                         tooltip: "Insert variable reference into formula",
                         max_w,
                         selected: false,
-                        enabled: ctx_in.enabled,
+                        enabled: editable,
                         border_override: hl,
                         widget_id: &wid,
                         role: "button",
                         command_id: None,
-                        disabled_reason: None,
+                        disabled_reason: frozen_reason,
                     },
                 );
                 if r {
@@ -338,12 +345,12 @@ pub(super) fn render_mv_formula_studio(
                         tooltip: func.summary,
                         max_w: 84.0,
                         selected: state.mv_selected_fn == func.name,
-                        enabled: ctx_in.enabled,
+                        enabled: editable,
                         border_override: None,
                         widget_id: &wid,
                         role: "button",
                         command_id: None,
-                        disabled_reason: None,
+                        disabled_reason: frozen_reason,
                     },
                 );
                 if r {
@@ -376,6 +383,9 @@ pub(super) fn render_mv_formula_studio(
                 ("label", "Label", VariableRole::Label),
             ] {
                 let wid = format!("inspector.mv.role.{slug}");
+                let role_enabled = editable && cur_role != VariableRole::Calculated;
+                let role_reason =
+                    frozen_reason.or_else(|| (cur_role == VariableRole::Calculated).then_some("calculated columns lock Calculated role"));
                 let r = studio_chip(
                     ui,
                     tokens,
@@ -385,12 +395,12 @@ pub(super) fn render_mv_formula_studio(
                         tooltip: "Assign variable semantic role",
                         max_w: 88.0,
                         selected: cur_role == r_kind,
-                        enabled: ctx_in.enabled && cur_role != VariableRole::Calculated,
+                        enabled: role_enabled,
                         border_override: None,
                         widget_id: &wid,
                         role: "button",
                         command_id: Some("table.setVariableRole"),
-                        disabled_reason: (cur_role == VariableRole::Calculated).then_some("calculated columns lock Calculated role"),
+                        disabled_reason: role_reason,
                     },
                 );
                 if r {
@@ -420,12 +430,12 @@ pub(super) fn render_mv_formula_studio(
                             tooltip: "Set categorical level ordering",
                             max_w: 74.0,
                             selected: active,
-                            enabled: ctx_in.enabled,
+                            enabled: editable,
                             border_override: None,
                             widget_id: &wid,
                             role: "button",
                             command_id: Some("table.setCategoricalOrder"),
-                            disabled_reason: None,
+                            disabled_reason: frozen_reason,
                         },
                     );
                     if r {
@@ -438,9 +448,19 @@ pub(super) fn render_mv_formula_studio(
             });
 
             ui.add_space(4.0);
-            ui.add(egui::TextEdit::singleline(&mut state.mv_recode_from).desired_width(ui.available_width()).hint_text("Recode from level"));
-            ui.add(egui::TextEdit::singleline(&mut state.mv_recode_to).desired_width(ui.available_width()).hint_text("Recode to level"));
-            let can_recode = ctx_in.enabled && !state.mv_recode_from.trim().is_empty() && !state.mv_recode_to.trim().is_empty();
+            let mut from_edit =
+                egui::TextEdit::singleline(&mut state.mv_recode_from).desired_width(ui.available_width()).hint_text("Recode from level");
+            if !editable {
+                from_edit = from_edit.interactive(false);
+            }
+            ui.add(from_edit);
+            let mut to_edit = egui::TextEdit::singleline(&mut state.mv_recode_to).desired_width(ui.available_width()).hint_text("Recode to level");
+            if !editable {
+                to_edit = to_edit.interactive(false);
+            }
+            ui.add(to_edit);
+            let can_recode = editable && !state.mv_recode_from.trim().is_empty() && !state.mv_recode_to.trim().is_empty();
+            let recode_reason = frozen_reason.or_else(|| (!can_recode).then_some("enter source and target level names"));
             if studio_full_button(
                 ui,
                 tokens,
@@ -453,7 +473,7 @@ pub(super) fn render_mv_formula_studio(
                     primary: false,
                     widget_id: "inspector.mv.recode_apply",
                     command_id: Some("table.recodeLevels"),
-                    disabled_reason: (!can_recode).then_some("enter source and target level names"),
+                    disabled_reason: recode_reason,
                 },
             ) {
                 let mut map = serde_json::Map::new();

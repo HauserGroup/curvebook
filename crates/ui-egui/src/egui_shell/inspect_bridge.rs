@@ -1084,7 +1084,14 @@ pub fn render_egui_shell_frame_with_host(
         ui,
         app,
         &mut views.trailing_studio,
-        TrailingStudioContext { tokens: &tokens, layout, enabled, focused: app.nav.active_pane == ActiveWorkspacePane::Inspector },
+        TrailingStudioContext {
+            tokens: &tokens,
+            layout,
+            enabled,
+            focused: app.nav.active_pane == ActiveWorkspacePane::Inspector,
+            selected_panel_index: views.canvas_view.selected_panel_index,
+            selected_graph_annotation: views.canvas_view.selected_graph_annotation,
+        },
         meta,
         intents,
     );

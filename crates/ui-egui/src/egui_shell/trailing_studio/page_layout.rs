@@ -1,6 +1,6 @@
 //! Page Layout Composer studio surface.
 
-use curvebook_doc::{LayoutItem, LayoutSheet, PageOrientation, PanelBadgeStyle};
+use curvebook_doc::{LayoutItem, LayoutSheet, LayoutSpec, PageOrientation, PanelBadgeStyle, RectPt};
 use egui::Vec2;
 use serde_json::json;
 
@@ -10,6 +10,40 @@ use crate::i18n::tr;
 
 use super::helpers::{MediaControlsSpec, StudioButtonSpec, StudioChipSpec, render_canvas_media_buttons, studio_chip, studio_full_button};
 use super::{TrailingStudioContext, TrailingStudioEguiState};
+
+fn arrange_layout_grid_items(spec: &LayoutSpec, rows_u8: u8, cols_u8: u8, margin_mm: u16) -> Vec<LayoutItem> {
+    let page = spec.page_size_pt();
+    let margin = f64::from(margin_mm) * (72.0 / 25.4);
+    let gutter = 12.0_f64;
+    let rows = usize::from(rows_u8.max(1));
+    let cols = usize::from(cols_u8.max(1));
+    let usable_w = (page.width - 2.0 * margin - gutter * ((cols - 1) as f64)).max(40.0);
+    let usable_h = (page.height - 2.0 * margin - gutter * ((rows - 1) as f64)).max(40.0);
+    let cell_w = usable_w / (cols as f64);
+    let cell_h = usable_h / (rows as f64);
+    let mut updated = spec.items.clone();
+    let mut grid_slot = 0usize;
+    for item in &mut updated {
+        if let LayoutItem::LiveGraph { bounds_pt, .. } | LayoutItem::LiveTable { bounds_pt, .. } = item {
+            let col = grid_slot % cols;
+            let row = grid_slot / cols;
+            *bounds_pt = RectPt::new(margin + (col as f64) * (cell_w + gutter), margin + (row as f64) * (cell_h + gutter), cell_w, cell_h);
+            grid_slot += 1;
+        }
+    }
+    updated
+}
+
+fn push_margin_rearrange_intent(ls: &LayoutSheet, margin_mm: u16, intents: &mut PendingUiIntents) {
+    if ls.spec.items.is_empty() {
+        return;
+    }
+    let (rows_u8, cols_u8) = ls.spec.grid_template.unwrap_or((2, 2));
+    let next_items = arrange_layout_grid_items(&ls.spec, rows_u8, cols_u8, margin_mm);
+    if next_items != ls.spec.items {
+        intents.push_engine("layout.setSpec", json!({ "sheet_id": ls.id.as_str(), "spec": { "items": next_items } }));
+    }
+}
 
 pub(super) fn render_page_layout_composer_studio(
     ui: &mut egui::Ui,
@@ -193,11 +227,12 @@ pub(super) fn render_page_layout_composer_studio(
                 border_override: None,
                 widget_id: "inspector.layout.margin.dec",
                 role: "button",
-                command_id: None,
+                command_id: (!spec.items.is_empty()).then_some("layout.setSpec"),
                 disabled_reason: None,
             },
         ) {
             state.layout_margin_mm = state.layout_margin_mm.saturating_sub(2).max(2);
+            push_margin_rearrange_intent(ls, state.layout_margin_mm, intents);
         }
         ui.label(
             egui::RichText::new(format!("{} mm", state.layout_margin_mm)).size(tokens.metrics.font_ui_small_pt).strong().color(tokens.text_primary),
@@ -215,11 +250,12 @@ pub(super) fn render_page_layout_composer_studio(
                 border_override: None,
                 widget_id: "inspector.layout.margin.inc",
                 role: "button",
-                command_id: None,
+                command_id: (!spec.items.is_empty()).then_some("layout.setSpec"),
                 disabled_reason: None,
             },
         ) {
             state.layout_margin_mm = (state.layout_margin_mm + 2).min(40);
+            push_margin_rearrange_intent(ls, state.layout_margin_mm, intents);
         }
     });
 
@@ -268,6 +304,7 @@ pub(super) fn render_page_layout_composer_studio(
             },
         ) {
             state.snap_enabled = !state.snap_enabled;
+            super::set_studio_snap_enabled(ui.ctx(), state.snap_enabled);
         }
     });
 
@@ -295,7 +332,18 @@ pub(super) fn render_page_layout_composer_studio(
                     disabled_reason: None,
                 },
             ) {
-                intents.push_engine("layout.setSpec", json!({ "sheet_id": ls.id.as_str(), "grid_template": [rows, cols] }));
+                if spec.items.is_empty() {
+                    intents.push_engine("layout.setSpec", json!({ "sheet_id": ls.id.as_str(), "grid_template": [rows, cols] }));
+                } else {
+                    let next_items = arrange_layout_grid_items(spec, rows, cols, state.layout_margin_mm);
+                    intents.push_engine(
+                        "layout.setSpec",
+                        json!({
+                            "sheet_id": ls.id.as_str(),
+                            "spec": { "grid_template": [rows, cols], "items": next_items },
+                        }),
+                    );
+                }
             }
         }
     });
@@ -355,7 +403,7 @@ pub(super) fn render_page_layout_composer_studio(
 
     let has_live_graphs = spec.items.iter().any(|it| matches!(it, LayoutItem::LiveGraph { .. }));
     let can_reorder = ctx_in.enabled && spec.items.len() >= 2;
-    let target_panel_idx = app.egui_views.canvas_view.selected_panel_index.unwrap_or(0).min(spec.items.len().saturating_sub(1));
+    let target_panel_idx = ctx_in.selected_panel_index.unwrap_or(0).min(spec.items.len().saturating_sub(1));
 
     ui.add_space(6.0);
     widgets::subheader(ui, "Panel Z-Order & Scaling");
@@ -511,7 +559,7 @@ fn render_layout_media_controls(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
-    let sel = app.egui_views.canvas_view.selected_panel_index;
+    let sel = ctx_in.selected_panel_index;
     let img_idx = sel
         .filter(|&i| matches!(ls.spec.items.get(i), Some(LayoutItem::EmbeddedImage { .. })))
         .or_else(|| ls.spec.items.iter().position(|it| matches!(it, LayoutItem::EmbeddedImage { .. })));

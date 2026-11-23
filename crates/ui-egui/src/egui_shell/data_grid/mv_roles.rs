@@ -96,15 +96,20 @@ pub(super) fn render_mv_tier3_role_chip(
         if is_calc {
             fstate.aux.active_role_menu_col = None;
             fstate.intents.push_ui("ui.table.openFormulaBar", json!({ "sheet_id": mctx.ds.id.as_str(), "col": col }));
-        } else {
-            fstate.aux.active_role_menu_col = if fstate.aux.active_role_menu_col == Some(col) { None } else { Some(col) };
+        } else if !mctx.ds.frozen {
+            let opening = fstate.aux.active_role_menu_col != Some(col);
+            fstate.aux.active_role_menu_col = opening.then_some(col);
+            if opening {
+                let frame_id = ui.ctx().cumulative_frame_nr();
+                ui.ctx().data_mut(|d| d.insert_temp(Id::unique(("mv_role_open_frame", mctx.ds.id.as_str())), frame_id));
+            }
         }
     }
 }
 
 pub(super) fn render_mv_role_menu_popup(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut MultiGridFrameState<'_>) {
     let Some(col) = fstate.aux.active_role_menu_col else { return };
-    if mctx.blocked || !matches!(mctx.ds.archetype, TableArchetype::MultipleVariables(_)) {
+    if mctx.blocked || mctx.ds.frozen || !matches!(mctx.ds.archetype, TableArchetype::MultipleVariables(_)) {
         fstate.aux.active_role_menu_col = None;
         return;
     }
@@ -116,28 +121,55 @@ pub(super) fn render_mv_role_menu_popup(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fs
     let x0 = (geom.col_header_rect.min.x + (flat as f32) * geom.subcol_w - scroll_x)
         .clamp(geom.grid_outer_rect.min.x, (geom.grid_outer_rect.max.x - 180.0).max(geom.grid_outer_rect.min.x));
     let pos = pos2(x0, geom.col_header_rect.max.y + 2.0);
-    egui::Area::new(Id::unique(("mv_role_popup", mctx.ds.id.as_str(), col))).fixed_pos(pos).order(Order::Foreground).show(ui.ctx(), |pui| {
-        egui::Frame::popup(pui.style()).fill(tokens.panel_bg).stroke(Stroke::new(1.0, tokens.border)).show(pui, |m| {
-            m.set_min_width(172.0);
-            for (slug, text) in [
-                ("auto", "Auto (Infer role)"),
-                ("continuous", "NUM · Continuous"),
-                ("categorical", "CAT · Categorical"),
-                ("label", "LBL · Label / ID"),
-            ] {
-                let wid = format!("mv_formula.role_opt.{col}.{slug}");
-                let r = m.button(text);
+    let area_resp =
+        egui::Area::new(Id::unique(("mv_role_popup", mctx.ds.id.as_str(), col))).fixed_pos(pos).order(Order::Foreground).show(ui.ctx(), |pui| {
+            egui::Frame::popup(pui.style()).fill(tokens.panel_bg).stroke(Stroke::new(1.0, tokens.border)).show(pui, |m| {
+                m.set_min_width(172.0);
+                for (slug, text) in [
+                    ("auto", "Auto (Infer role)"),
+                    ("continuous", "NUM · Continuous"),
+                    ("categorical", "CAT · Categorical"),
+                    ("label", "LBL · Label / ID"),
+                ] {
+                    let wid = format!("mv_formula.role_opt.{col}.{slug}");
+                    let r = m.button(text);
+                    record_meta_if_enabled(
+                        m,
+                        fstate.meta,
+                        fstate.state.record_inspect_meta,
+                        &r,
+                        FrameInspectEntryInput {
+                            widget_id: &wid,
+                            role: "menuitem",
+                            label: text,
+                            command_id: Some("table.setVariableRole"),
+                            value: Some(serde_json::Value::String(slug.to_owned())),
+                            enabled: true,
+                            disabled_reason: None,
+                            z_layer: ZLayer::FloatingOverlay,
+                            ellipsized: false,
+                            full_label: None,
+                        },
+                    );
+                    if r.clicked() {
+                        fstate.intents.push_engine("table.setVariableRole", json!({ "sheet_id": mctx.ds.id.as_str(), "col": col, "role": slug }));
+                        fstate.aux.active_role_menu_col = None;
+                    }
+                }
+                m.separator();
+                let mwid = format!("mv_formula.role_manage.{col}");
+                let mr = m.button("Manage Variables & Levels…");
                 record_meta_if_enabled(
                     m,
                     fstate.meta,
-                    true,
-                    &r,
+                    fstate.state.record_inspect_meta,
+                    &mr,
                     FrameInspectEntryInput {
-                        widget_id: &wid,
+                        widget_id: &mwid,
                         role: "menuitem",
-                        label: text,
-                        command_id: Some("table.setVariableRole"),
-                        value: Some(serde_json::Value::String(slug.to_owned())),
+                        label: "Manage Variables & Levels…",
+                        command_id: None,
+                        value: None,
                         enabled: true,
                         disabled_reason: None,
                         z_layer: ZLayer::FloatingOverlay,
@@ -145,36 +177,21 @@ pub(super) fn render_mv_role_menu_popup(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fs
                         full_label: None,
                     },
                 );
-                if r.clicked() {
-                    fstate.intents.push_engine("table.setVariableRole", json!({ "sheet_id": mctx.ds.id.as_str(), "col": col, "role": slug }));
+                if mr.clicked() {
+                    fstate.intents.push_open_manage_variables(mctx.ds.id.clone(), Some(col));
                     fstate.aux.active_role_menu_col = None;
                 }
-            }
-            m.separator();
-            let mwid = format!("mv_formula.role_manage.{col}");
-            let mr = m.button("Manage Variables & Levels…");
-            record_meta_if_enabled(
-                m,
-                fstate.meta,
-                true,
-                &mr,
-                FrameInspectEntryInput {
-                    widget_id: &mwid,
-                    role: "menuitem",
-                    label: "Manage Variables & Levels…",
-                    command_id: None,
-                    value: None,
-                    enabled: true,
-                    disabled_reason: None,
-                    z_layer: ZLayer::FloatingOverlay,
-                    ellipsized: false,
-                    full_label: None,
-                },
-            );
-            if mr.clicked() {
-                fstate.intents.push_open_manage_variables(mctx.ds.id.clone(), Some(col));
-                fstate.aux.active_role_menu_col = None;
-            }
+            });
         });
-    });
+    let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+    if esc {
+        ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+    }
+    let opened_this_frame =
+        ui.ctx().data(|d| d.get_temp::<u64>(Id::unique(("mv_role_open_frame", mctx.ds.id.as_str())))) == Some(ui.ctx().cumulative_frame_nr());
+    let outside_click = !opened_this_frame
+        && ui.input(|i| i.pointer.primary_clicked() && i.pointer.interact_pos().is_some_and(|p| !area_resp.response.rect.contains(p)));
+    if esc || outside_click {
+        fstate.aux.active_role_menu_col = None;
+    }
 }
