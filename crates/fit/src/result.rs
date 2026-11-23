@@ -1806,11 +1806,14 @@ mod tests {
         let spec = AnalysisSpec::new("lin-auc-1", "lin-auc-ds", AnalysisKind::LinearRegression(lin_spec)).unwrap();
         let res = execute_analysis(&spec, &sheet, &HookContext::default()).unwrap();
 
-        // linear_summary must preserve exact original 10 row labels without inserted AUC rows.
+        // linear_summary must preserve exact 12 R18.5 row labels without inserted AUC rows.
         let summary = res.tabs.iter().find(|t| t.id == "linear_summary").expect("linear_summary tab");
-        assert_eq!(summary.rows.len(), 10);
+        assert_eq!(summary.rows.len(), 12);
         assert_eq!(summary.row_labels[0], "Slope");
         assert_eq!(summary.row_labels[9], "Runs test P value");
+        assert_eq!(summary.row_labels[10], "X-intercept");
+        assert_eq!(summary.row_labels[11], "95% CI X-intercept");
+        assert!(!summary.row_labels.iter().any(|lbl| lbl.contains("AUC")));
 
         // Exact scalar keys per dataset index.
         let ds0_emp = res.scalars.iter().find(|s| s.key == "AUC (trapezoidal)" && s.data_set_index == Some(0)).expect("DS0 AUC (trapezoidal)");
