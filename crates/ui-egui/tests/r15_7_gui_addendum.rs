@@ -96,8 +96,8 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Result<(),
 fn strip_line_comments(src: &str) -> String {
     let mut out = String::with_capacity(src.len());
     for line in src.lines() {
-        let code = match line.find("//") {
-            Some(idx) if !line[..idx].contains('"') => &line[..idx],
+        let code = match line.split_once("//") {
+            Some((head, _)) if !head.contains('"') => head,
             _ => line,
         };
         out.push_str(code);
@@ -110,16 +110,15 @@ fn extract_push_engine_literals(src: &str) -> Vec<String> {
     let clean = strip_line_comments(src);
     let mut found = Vec::new();
     let needle = "push_engine(";
-    let mut cursor = 0usize;
-    while let Some(rel) = clean[cursor..].find(needle) {
-        let after = &clean[cursor + rel + needle.len()..];
+    let mut tail = clean.as_str();
+    while let Some((_, after)) = tail.split_once(needle) {
         let trimmed = after.trim_start();
         if let Some(rest) = trimmed.strip_prefix('"')
-            && let Some(end_q) = rest.find('"')
+            && let Some((lit, _)) = rest.split_once('"')
         {
-            found.push(rest[..end_q].to_owned());
+            found.push(lit.to_owned());
         }
-        cursor += rel + needle.len();
+        tail = after;
     }
     found
 }
@@ -264,13 +263,12 @@ fn extract_push_ui_literals(src: &str) -> Vec<String> {
     let clean = strip_line_comments(src);
     let mut found = Vec::new();
     let needle = "push_ui(\"";
-    let mut cursor = 0usize;
-    while let Some(rel) = clean[cursor..].find(needle) {
-        let rest = &clean[cursor + rel + needle.len()..];
-        if let Some(end_q) = rest.find('"') {
-            found.push(rest[..end_q].to_owned());
+    let mut tail = clean.as_str();
+    while let Some((_, rest)) = tail.split_once(needle) {
+        if let Some((lit, _)) = rest.split_once('"') {
+            found.push(lit.to_owned());
         }
-        cursor += rel + needle.len();
+        tail = rest;
     }
     found
 }

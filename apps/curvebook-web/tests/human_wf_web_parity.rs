@@ -243,14 +243,15 @@ fn encode_base64_web(input: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
-        let b0 = usize::from(chunk[0]);
+        let b0 = usize::from(*chunk.first().unwrap_or(&0));
         let b1 = usize::from(*chunk.get(1).unwrap_or(&0));
         let b2 = usize::from(*chunk.get(2).unwrap_or(&0));
         let triple = (b0 << 16) | (b1 << 8) | b2;
-        out.push(char::from(TABLE[(triple >> 18) & 0x3F]));
-        out.push(char::from(TABLE[(triple >> 12) & 0x3F]));
-        out.push(if chunk.len() > 1 { char::from(TABLE[(triple >> 6) & 0x3F]) } else { '=' });
-        out.push(if chunk.len() > 2 { char::from(TABLE[triple & 0x3F]) } else { '=' });
+        let encode = |shift: usize| char::from(TABLE.get((triple >> shift) & 0x3F).copied().unwrap_or(b'A'));
+        out.push(encode(18));
+        out.push(encode(12));
+        out.push(if chunk.len() > 1 { encode(6) } else { '=' });
+        out.push(if chunk.len() > 2 { encode(0) } else { '=' });
     }
     out
 }

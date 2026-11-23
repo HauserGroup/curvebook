@@ -52,22 +52,28 @@ fn build_synthetic_dose_response_sheet(id: &str) -> Result<DataSheet, Box<dyn Er
     let log_concs = [-9.0_f64, -8.5, -8.0, -7.5, -7.0, -6.5, -6.0, -5.5, -5.0, -4.5];
     let mut table = XyTable::new(SubcolumnMode::RawReplicates(3), 2, log_concs.len())?;
     table.x_title = String::from("Log10 [Compound X] (M)");
-    table.data_sets[0].title = String::from("Wild-Type");
-    table.data_sets[1].title = String::from("Variant R1");
+    let [ds0, ds1, ..] = table.data_sets.as_mut_slice() else {
+        return Err("expected 2 XY datasets".into());
+    };
+    ds0.title = String::from("Wild-Type");
+    ds1.title = String::from("Variant R1");
 
     let offsets_wt = [-2.4_f64, 0.3, 2.1];
     let offsets_vr = [-1.9_f64, 0.2, 1.7];
 
     for (row, &x) in log_concs.iter().enumerate() {
-        table.x_cells[row][0] = Cell::number(x);
+        let x_cell = table.x_cells.get_mut(row).and_then(|r| r.first_mut()).ok_or("missing X cell")?;
+        *x_cell = Cell::number(x);
 
         let y_wt = 8.0 + 88.0 / (1.0 + 10.0_f64.powf((-6.85 - x) * 1.15));
         let y_vr = 10.0 + 72.0 / (1.0 + 10.0_f64.powf((-5.95 - x) * 0.95));
 
         for (rep, (&ow, &ov)) in offsets_wt.iter().zip(offsets_vr.iter()).enumerate() {
             let phase = if row % 2 == 0 { 1.0 } else { -1.0 };
-            table.data_sets[0].cells[row][rep] = Cell::number(((y_wt + ow * phase) * 100.0).round() / 100.0);
-            table.data_sets[1].cells[row][rep] = Cell::number(((y_vr + ov * phase) * 100.0).round() / 100.0);
+            let c0 = ds0.cells.get_mut(row).and_then(|r| r.get_mut(rep)).ok_or("missing WT Y cell")?;
+            *c0 = Cell::number(((y_wt + ow * phase) * 100.0).round() / 100.0);
+            let c1 = ds1.cells.get_mut(row).and_then(|r| r.get_mut(rep)).ok_or("missing VR Y cell")?;
+            *c1 = Cell::number(((y_vr + ov * phase) * 100.0).round() / 100.0);
         }
     }
 
@@ -83,9 +89,11 @@ fn build_synthetic_efficacy_sheet(id: &str) -> Result<DataSheet, Box<dyn Error>>
     ];
     let mut table = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, groups.len(), 5)?;
     for (col, (label, vals)) in groups.iter().enumerate() {
-        table.data_sets[col].title = String::from(*label);
+        let ds = table.data_sets.get_mut(col).ok_or("missing efficacy dataset")?;
+        ds.title = String::from(*label);
         for (row, &val) in vals.iter().enumerate() {
-            table.data_sets[col].cells[row][0] = Cell::number(val);
+            let cell = ds.cells.get_mut(row).and_then(|r| r.first_mut()).ok_or("missing efficacy cell")?;
+            *cell = Cell::number(val);
         }
     }
     Ok(DataSheet::new(SheetId::new(id), "Potency Summary", TableArchetype::Column(table))?)

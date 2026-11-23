@@ -128,35 +128,40 @@ pub fn run_perf(args: &[String]) -> Result<(), CliError> {
     let export_bench = bench_exports(&batch_scene)?;
 
     let (report, budget_result) = build_perf_report(mv_bench, batch_bench, archive_bench, export_bench);
-    let mv_check = &report["checks"]["mv_100k_calculated_variable"];
-    let curve_check = &report["checks"]["dose_response_96_curves"];
-    let arch_check = &report["checks"]["archive_roundtrip"];
-    let exp_check = &report["checks"]["exports"];
+    const NULL_VALUE: Value = Value::Null;
+    fn json_field<'a>(val: &'a Value, key: &str) -> &'a Value {
+        val.get(key).unwrap_or(&NULL_VALUE)
+    }
+    let checks = json_field(&report, "checks");
+    let mv_check = json_field(checks, "mv_100k_calculated_variable");
+    let curve_check = json_field(checks, "dose_response_96_curves");
+    let arch_check = json_field(checks, "archive_roundtrip");
+    let exp_check = json_field(checks, "exports");
 
     emit_report(&report, parsed.json, || {
         println!(
             "G12 perf results (profile={}):\n  (a) 100k MV CalcVar: {} ms (budget < {PERF_MV_BUDGET_MS:.0} ms, within_budget={})\n  (b) 96-curve 4PL fit + compile: {}/{} converged, fit={} ms (budget <= {PERF_96_CURVE_BUDGET_MS:.0} ms, within_budget={}), compile={} ms, total={} ms (total_within_budget={})\n  (c) .curvebook save/reopen: save={} ms, open={} ms, total={} ms ({} bytes)\n  (d) exports ({} DPI): svg={} ms ({} B), pdf={} ms ({} B), png={} ms ({} B)",
-            report["build_profile"],
-            mv_check["eval_ms"],
-            mv_check["within_budget"],
-            curve_check["converged_curves"],
-            curve_check["curves"],
-            curve_check["fit_ms"],
-            curve_check["within_budget"],
-            curve_check["compile_ms"],
-            curve_check["total_ms"],
-            curve_check["total_within_budget"],
-            arch_check["save_ms"],
-            arch_check["open_ms"],
-            arch_check["total_ms"],
-            arch_check["archive_bytes"],
+            json_field(&report, "build_profile"),
+            json_field(mv_check, "eval_ms"),
+            json_field(mv_check, "within_budget"),
+            json_field(curve_check, "converged_curves"),
+            json_field(curve_check, "curves"),
+            json_field(curve_check, "fit_ms"),
+            json_field(curve_check, "within_budget"),
+            json_field(curve_check, "compile_ms"),
+            json_field(curve_check, "total_ms"),
+            json_field(curve_check, "total_within_budget"),
+            json_field(arch_check, "save_ms"),
+            json_field(arch_check, "open_ms"),
+            json_field(arch_check, "total_ms"),
+            json_field(arch_check, "archive_bytes"),
             PERF_RASTER_DPI,
-            exp_check["svg_ms"],
-            exp_check["svg_bytes"],
-            exp_check["pdf_ms"],
-            exp_check["pdf_bytes"],
-            exp_check["png_ms"],
-            exp_check["png_bytes"],
+            json_field(exp_check, "svg_ms"),
+            json_field(exp_check, "svg_bytes"),
+            json_field(exp_check, "pdf_ms"),
+            json_field(exp_check, "pdf_bytes"),
+            json_field(exp_check, "png_ms"),
+            json_field(exp_check, "png_bytes"),
         );
     })?;
 
@@ -164,9 +169,9 @@ pub fn run_perf(args: &[String]) -> Result<(), CliError> {
 }
 
 fn build_perf_report(mv_bench: Value, batch_bench: Value, archive_bench: Value, export_bench: Value) -> (Value, Result<(), CliError>) {
-    let mv_within = mv_bench["within_budget"].as_bool().unwrap_or(false);
-    let curve_within = batch_bench["within_budget"].as_bool().unwrap_or(false);
-    let curve_total_within = batch_bench["total_within_budget"].as_bool().unwrap_or(false);
+    let mv_within = mv_bench.get("within_budget").and_then(Value::as_bool).unwrap_or(false);
+    let curve_within = batch_bench.get("within_budget").and_then(Value::as_bool).unwrap_or(false);
+    let curve_total_within = batch_bench.get("total_within_budget").and_then(Value::as_bool).unwrap_or(false);
     let all_within_budget = mv_within && curve_within && curve_total_within;
     let build_profile = if cfg!(debug_assertions) { "debug" } else { "release" };
 
@@ -195,18 +200,21 @@ fn build_perf_report(mv_bench: Value, batch_bench: Value, archive_bench: Value, 
 
 fn bench_mv_100k_calculated_variable() -> Result<Value, CliError> {
     let mut mv = MultipleVariablesTable::new(4, PERF_MV_ROWS)?;
-    mv.variables[0].title = String::from("Dose_uM");
-    mv.variables[1].title = String::from("Signal");
-    mv.variables[2].title = String::from("Baseline");
-    mv.variables[3].title = String::from("LogResponse");
+    let [v0, v1, v2, v3] = mv.variables.as_mut_slice() else {
+        return Err(CliError::Runtime(String::from("expected 4 MV variables in perf bench")));
+    };
+    v0.title = String::from("Dose_uM");
+    v1.title = String::from("Signal");
+    v2.title = String::from("Baseline");
+    v3.title = String::from("LogResponse");
 
-    for r in 0..PERF_MV_ROWS {
+    for (r, ((c0, c1), c2)) in v0.cells.iter_mut().zip(v1.cells.iter_mut()).zip(v2.cells.iter_mut()).enumerate().take(PERF_MV_ROWS) {
         let rf = f64_from_usize(r + 1);
-        mv.variables[0].cells[r] = Cell::number(0.001 * rf);
-        mv.variables[1].cells[r] = Cell::number(10.0 + 90.0 * (f64_from_usize(r % 200) / 200.0));
-        mv.variables[2].cells[r] = Cell::number(2.0 + 0.25 * f64_from_usize(r % 10));
+        *c0 = Cell::number(0.001 * rf);
+        *c1 = Cell::number(10.0 + 90.0 * (f64_from_usize(r % 200) / 200.0));
+        *c2 = Cell::number(2.0 + 0.25 * f64_from_usize(r % 10));
     }
-    mv.variables[3].set_calculated_formula("=log10(Signal - Baseline + 1.0) * Dose_uM");
+    v3.set_calculated_formula("=log10(Signal - Baseline + 1.0) * Dose_uM");
 
     let ds = DataSheet::new(SheetId::new("mv_100k"), "MV 100k", TableArchetype::MultipleVariables(mv))?;
     let mut doc = ProjectDocument::new("Perf MV 100k")?;
@@ -217,11 +225,10 @@ fn bench_mv_100k_calculated_variable() -> Result<Value, CliError> {
     session.recalculate_all()?;
     let eval_ms = elapsed_ms(t0);
 
-    let evaluated_ok = match &session.document().data_sheets[0].archetype {
-        TableArchetype::MultipleVariables(table) => {
-            table.variables[3].cells.first().and_then(|c| c.value.finite_f64()).is_some()
-                && table.variables[3].cells.last().and_then(|c| c.value.finite_f64()).is_some()
-        }
+    let evaluated_ok = match session.document().data_sheets.first().map(|s| &s.archetype) {
+        Some(TableArchetype::MultipleVariables(table)) => table.variables.get(3).is_some_and(|v3| {
+            v3.cells.first().and_then(|c| c.value.finite_f64()).is_some() && v3.cells.last().and_then(|c| c.value.finite_f64()).is_some()
+        }),
         _ => false,
     };
     if !evaluated_ok {
@@ -241,9 +248,11 @@ fn bench_96_curve_dose_response() -> Result<(Value, ProjectDocument, ChartScene)
     let mut xy = XyTable::new(SubcolumnMode::RawReplicates(3), PERF_BATCH_CURVES, log_concs.len())?;
     xy.x_title = String::from("Log[Agonist] (M)");
 
-    for (r, &lx) in log_concs.iter().enumerate() {
-        xy.x_cells[r][0] = Cell::number(lx);
-        for c in 0..PERF_BATCH_CURVES {
+    for (r, (&lx, x_row)) in log_concs.iter().zip(xy.x_cells.iter_mut()).enumerate() {
+        if let Some(x_cell) = x_row.first_mut() {
+            *x_cell = Cell::number(lx);
+        }
+        for (c, ds) in xy.data_sets.iter_mut().enumerate().take(PERF_BATCH_CURVES) {
             let bottom = 5.0 + f64_from_usize(c % 4);
             let top = 95.0 + 2.0 * f64_from_usize(c % 5);
             let log_ec50 = -7.2 + 0.015 * f64_from_usize(c);
@@ -252,8 +261,10 @@ fn bench_96_curve_dose_response() -> Result<(Value, ProjectDocument, ChartScene)
             // Deterministic per-(row, curve) scatter so replicate means stay genuinely noisy around the 4PL model.
             let curve_noise = 1.6 * (f64_from_usize(c) * 0.73 + f64_from_usize(r) * 1.37).sin();
             let jitter = [-0.6, 0.0, 0.6];
-            for (rep, &jit) in jitter.iter().enumerate() {
-                xy.data_sets[c].cells[r][rep] = Cell::number(mean_y + curve_noise + jit);
+            if let Some(row) = ds.cells.get_mut(r) {
+                for (cell, &jit) in row.iter_mut().zip(jitter.iter()) {
+                    *cell = Cell::number(mean_y + curve_noise + jit);
+                }
             }
         }
     }
@@ -318,7 +329,9 @@ fn bench_96_curve_dose_response() -> Result<(Value, ProjectDocument, ChartScene)
     }
 
     let t_compile = Instant::now();
-    let scene = compile_graph(&fitted_doc.graph_sheets[0], &fitted_doc)?;
+    let first_graph =
+        fitted_doc.graph_sheets.first().ok_or_else(|| CliError::Runtime(String::from("missing graph sheet after 96-curve batch fit")))?;
+    let scene = compile_graph(first_graph, &fitted_doc)?;
     let compile_ms = elapsed_ms(t_compile);
     let total_ms = ((fit_ms + compile_ms) * 1_000.0).round() / 1_000.0;
     let fit_within_budget = fit_ms <= PERF_96_CURVE_BUDGET_MS;

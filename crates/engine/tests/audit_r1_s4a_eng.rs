@@ -504,7 +504,7 @@ fn verify_sheet_and_table_title_limits(session: &mut Session, oversized_ascii: &
         ErrorCode::ResourceLimit,
     )?;
     let first_col_title = match &session.document().data_sheet(&SheetId::new("d-xy")).ok_or("missing d-xy")?.archetype {
-        TableArchetype::Xy(xy) => xy.data_sets[0].title.as_str(),
+        TableArchetype::Xy(xy) => xy.data_sets.first().ok_or("missing dataset 0")?.title.as_str(),
         _ => return Err(String::from("expected Xy table")),
     };
     assert_ne!(first_col_title, "GoodFirstCol");
@@ -530,7 +530,7 @@ fn verify_sheet_and_table_title_limits(session: &mut Session, oversized_ascii: &
         ErrorCode::ResourceLimit,
     )?;
     let sub0_title = match &session.document().data_sheet(&SheetId::new("d-nest")).ok_or("missing d-nest")?.archetype {
-        TableArchetype::Nested(nest) => nest.groups[0].subcolumn_titles[0].as_str(),
+        TableArchetype::Nested(nest) => nest.groups.first().and_then(|g| g.subcolumn_titles.first()).ok_or("missing subcolumn 0")?.as_str(),
         _ => return Err(String::from("expected Nested table")),
     };
     assert_ne!(sub0_title, "FirstSubOk");

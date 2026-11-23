@@ -1607,8 +1607,11 @@ fn try_parse_kv_line(raw_line: &str, delimiter: char, allow_unprefixed: bool) ->
         (None, Some(b)) => Some(b),
         (None, None) => None,
     }?;
-    let key = body[..sep_pos].trim();
-    let val = body[sep_pos + 1..].trim();
+    let (Some(raw_key), Some(raw_val)) = (body.get(..sep_pos), body.get(sep_pos + 1..)) else {
+        return None;
+    };
+    let key = raw_key.trim();
+    let val = raw_val.trim();
     if key.is_empty() || key.len() > 64 || val.is_empty() || body.contains("://") {
         return None;
     }

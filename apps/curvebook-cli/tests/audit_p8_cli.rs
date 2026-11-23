@@ -49,10 +49,16 @@ fn build_large_inspect_doc() -> ProjectDocument {
     let mut doc = ProjectDocument::new("Control Inspect Parity Doc").expect("new doc");
 
     let mut xy = XyTable::new(SubcolumnMode::Single, 1, 250).expect("xy table");
-    xy.data_sets[0].title = format!("LongSeries_{}", "X".repeat(320));
-    for r in 0..250 {
-        xy.x_cells[r][0] = Cell::number(r as f64);
-        xy.data_sets[0].cells[r][0] = Cell::text(format!("val_{r:03}_{}", "V".repeat(400)));
+    if let Some(ds0) = xy.data_sets.first_mut() {
+        ds0.title = format!("LongSeries_{}", "X".repeat(320));
+        for (r, (x_row, ds_row)) in xy.x_cells.iter_mut().zip(ds0.cells.iter_mut()).enumerate().take(250) {
+            if let Some(x_cell) = x_row.first_mut() {
+                *x_cell = Cell::number(r as f64);
+            }
+            if let Some(y_cell) = ds_row.first_mut() {
+                *y_cell = Cell::text(format!("val_{r:03}_{}", "V".repeat(400)));
+            }
+        }
     }
     let big_ds = DataSheet::new("big_data", "Big Data Table", TableArchetype::Xy(xy)).expect("big_ds");
     doc.add_data_sheet(big_ds).expect("add big_data");

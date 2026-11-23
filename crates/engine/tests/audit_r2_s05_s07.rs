@@ -45,40 +45,68 @@ fn ok_cmd(session: &mut Session, id: &str, params: Value) -> curvebook_engine::C
 
 fn seed_two_group_col(id: &str) -> DataSheet {
     let mut t = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 5).unwrap();
-    t.data_sets[0].title = String::from("Ctrl");
-    t.data_sets[1].title = String::from("Drug");
-    for (r, (&a, &b)) in [10.0, 11.2, 9.8, 10.5, 11.0].iter().zip([15.2, 16.0, 14.8, 17.1, 15.9].iter()).enumerate() {
-        t.data_sets[0].cells[r][0] = Cell::number(a);
-        t.data_sets[1].cells[r][0] = Cell::number(b);
+    if let [ds0, ds1] = t.data_sets.as_mut_slice() {
+        ds0.title = String::from("Ctrl");
+        ds1.title = String::from("Drug");
+        for (r, (&a, &b)) in [10.0, 11.2, 9.8, 10.5, 11.0].iter().zip([15.2, 16.0, 14.8, 17.1, 15.9].iter()).enumerate() {
+            if let Some(c0) = ds0.cells.get_mut(r).and_then(|row| row.first_mut()) {
+                *c0 = Cell::number(a);
+            }
+            if let Some(c1) = ds1.cells.get_mut(r).and_then(|row| row.first_mut()) {
+                *c1 = Cell::number(b);
+            }
+        }
     }
     DataSheet::new(id, "TwoGroup", TableArchetype::Column(t)).unwrap()
 }
 
 fn seed_three_group_col(id: &str) -> DataSheet {
     let mut t = ColumnTable::new(ColumnDesignHint::PairedRepeatedMeasures, 3, 5).unwrap();
-    t.data_sets[0].title = String::from("Baseline");
-    t.data_sets[1].title = String::from("Low");
-    t.data_sets[2].title = String::from("High");
-    for r in 0..5 {
-        t.data_sets[0].cells[r][0] = Cell::number(10.0 + r as f64);
-        t.data_sets[1].cells[r][0] = Cell::number(14.0 + r as f64 * 1.1);
-        t.data_sets[2].cells[r][0] = Cell::number(22.0 + r as f64 * 1.2);
+    if let [ds0, ds1, ds2] = t.data_sets.as_mut_slice() {
+        ds0.title = String::from("Baseline");
+        ds1.title = String::from("Low");
+        ds2.title = String::from("High");
+        for r in 0..5 {
+            if let Some(c0) = ds0.cells.get_mut(r).and_then(|row| row.first_mut()) {
+                *c0 = Cell::number(10.0 + r as f64);
+            }
+            if let Some(c1) = ds1.cells.get_mut(r).and_then(|row| row.first_mut()) {
+                *c1 = Cell::number(14.0 + r as f64 * 1.1);
+            }
+            if let Some(c2) = ds2.cells.get_mut(r).and_then(|row| row.first_mut()) {
+                *c2 = Cell::number(22.0 + r as f64 * 1.2);
+            }
+        }
     }
     DataSheet::new(id, "ThreeGroup", TableArchetype::Column(t)).unwrap()
 }
 
 fn seed_mv_survival_sheet(id: &str) -> DataSheet {
     let mut mv = MultipleVariablesTable::new(3, 6).unwrap();
-    mv.variables[0].title = String::from("Time");
-    mv.variables[1].title = String::from("Status");
-    mv.variables[2].title = String::from("Arm");
-    mv.variables[2].role = VariableRole::Categorical;
-    let rows =
-        [(4.0, 1.0, "Control"), (6.0, 1.0, "Control"), (8.0, 0.0, "Control"), (5.0, 1.0, "Treated"), (10.0, 1.0, "Treated"), (12.0, 0.0, "Treated")];
-    for (r, (tm, st, arm)) in rows.into_iter().enumerate() {
-        mv.variables[0].cells[r] = Cell::number(tm);
-        mv.variables[1].cells[r] = Cell::number(st);
-        mv.variables[2].cells[r] = Cell::text(arm);
+    if let [v0, v1, v2] = mv.variables.as_mut_slice() {
+        v0.title = String::from("Time");
+        v1.title = String::from("Status");
+        v2.title = String::from("Arm");
+        v2.role = VariableRole::Categorical;
+        let rows = [
+            (4.0, 1.0, "Control"),
+            (6.0, 1.0, "Control"),
+            (8.0, 0.0, "Control"),
+            (5.0, 1.0, "Treated"),
+            (10.0, 1.0, "Treated"),
+            (12.0, 0.0, "Treated"),
+        ];
+        for (r, (tm, st, arm)) in rows.into_iter().enumerate() {
+            if let Some(c0) = v0.cells.get_mut(r) {
+                *c0 = Cell::number(tm);
+            }
+            if let Some(c1) = v1.cells.get_mut(r) {
+                *c1 = Cell::number(st);
+            }
+            if let Some(c2) = v2.cells.get_mut(r) {
+                *c2 = Cell::text(arm);
+            }
+        }
     }
     DataSheet::new(id, "CoxMV", TableArchetype::MultipleVariables(mv)).unwrap()
 }

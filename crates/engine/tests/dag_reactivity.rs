@@ -29,11 +29,17 @@ fn make_dose_response_sheet(id: &str, info_id: Option<&str>, xs: &[f64], true_pa
     let model = get_builtin_model("log_agonist_vs_response_4pl").expect("4PL builtin");
     let mut xy = XyTable::new_with_x_mode(XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single }, SubcolumnMode::Single, 1, xs.len())
         .expect("xy table");
-    xy.data_sets[0].title = String::from("Agonist");
     for (r, &x) in xs.iter().enumerate() {
-        let y = model.eval(&[x], &true_params, 0).expect("4PL eval");
         xy.set_x_cell(r, Cell::number(x)).expect("set x");
-        xy.data_sets[0].cells[r][0] = Cell::number(y);
+    }
+    if let Some(ds0) = xy.data_sets.first_mut() {
+        ds0.title = String::from("Agonist");
+        for (&x, row) in xs.iter().zip(ds0.cells.iter_mut()) {
+            let y = model.eval(&[x], &true_params, 0).expect("4PL eval");
+            if let Some(cell) = row.first_mut() {
+                *cell = Cell::number(y);
+            }
+        }
     }
     let mut ds = DataSheet::new(id, "Dose Response", TableArchetype::Xy(xy)).expect("xy sheet");
     ds.info_sheet_id = info_id.map(SheetId::new);

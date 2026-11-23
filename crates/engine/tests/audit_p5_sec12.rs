@@ -29,10 +29,14 @@ fn seed_xy_sheet(id: &str, title: &str, data_sets: usize, y_sub: SubcolumnMode, 
     let mut xy = XyTable::new_with_x_mode(XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single }, y_sub, data_sets, rows)?;
     let subs = y_sub.subcolumn_count();
     for r in 0..rows {
-        xy.x_cells[r][0] = Cell::number((r + 1) as f64);
+        if let Some(x_cell) = xy.x_cells.get_mut(r).and_then(|row| row.first_mut()) {
+            *x_cell = Cell::number((r + 1) as f64);
+        }
         for c in 0..data_sets {
             for s in 0..subs {
-                xy.data_sets[c].cells[r][s] = Cell::number(((c + 1) * 10 + r) as f64 + s as f64 * 0.1);
+                if let Some(cell) = xy.data_sets.get_mut(c).and_then(|ds| ds.cells.get_mut(r)).and_then(|row| row.get_mut(s)) {
+                    *cell = Cell::number(((c + 1) * 10 + r) as f64 + s as f64 * 0.1);
+                }
             }
         }
     }

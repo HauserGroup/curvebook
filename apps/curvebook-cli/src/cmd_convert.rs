@@ -604,8 +604,10 @@ fn resolve_visual_target<'a>(doc: &'a ProjectDocument, sheet: Option<&str>) -> R
         return Err(CliError::Runtime(format!("visual sheet `{needle}` was not found among graphs or layouts")));
     }
 
-    if doc.layout_sheets.len() == 1 && doc.graph_sheets.is_empty() {
-        return Ok(VisualTarget::Layout(&doc.layout_sheets[0]));
+    if doc.graph_sheets.is_empty()
+        && let [only_layout] = doc.layout_sheets.as_slice()
+    {
+        return Ok(VisualTarget::Layout(only_layout));
     }
     if let Some(g) = doc.graph_sheets.iter().find(|g| g.initialized).or_else(|| doc.graph_sheets.first()) {
         return Ok(VisualTarget::Graph(g));
@@ -714,8 +716,11 @@ fn export_json_target(
         return Err(CliError::Runtime(format!("sheet `{needle}` not found for JSON export")));
     }
 
-    if doc.result_sheets.len() == 1 && doc.data_sheets.is_empty() && doc.graph_sheets.is_empty() && doc.layout_sheets.is_empty() {
-        let res = &doc.result_sheets[0];
+    if doc.data_sheets.is_empty()
+        && doc.graph_sheets.is_empty()
+        && doc.layout_sheets.is_empty()
+        && let [res] = doc.result_sheets.as_slice()
+    {
         return Ok((exporter.export_bytes(ExportSource::ResultSheet(res), &opts)?, Some(res.id.as_str().to_owned())));
     }
 
@@ -744,7 +749,9 @@ fn parse_export_or_convert_args(args: &[String], cmd_name: &str) -> Result<Conve
     let mut idx = 0;
 
     while idx < args.len() {
-        let arg = &args[idx];
+        let Some(arg) = args.get(idx) else {
+            break;
+        };
         if arg == "--json" {
             json = true;
             idx += 1;
@@ -805,7 +812,9 @@ fn resolve_io_positionals(positionals: &mut Vec<String>, explicit_out: Option<St
 }
 
 fn consume_flag_opt(args: &[String], idx: &mut usize, flag: &str, missing_msg: &str) -> Result<Option<String>, CliError> {
-    let arg = &args[*idx];
+    let Some(arg) = args.get(*idx) else {
+        return Ok(None);
+    };
     if arg == flag {
         *idx += 1;
         let val = args.get(*idx).ok_or_else(|| CliError::Usage(String::from(missing_msg)))?;

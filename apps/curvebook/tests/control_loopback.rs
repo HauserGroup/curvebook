@@ -309,11 +309,13 @@ fn loopback_validation_and_ephemeral_tcp_check_body() -> Result<(), Box<dyn std:
 
             serve_control_listener(&mut app, &listener, &auth)?;
             let responses = client.join().map_err(|_| "client thread panicked")??;
-            assert_eq!(responses.len(), 4);
-            assert_eq!(responses[0]["ok"], json!(true));
-            assert_eq!(responses[1]["ok"], json!(true));
-            assert_eq!(responses[2]["ok"], json!(true));
-            assert_eq!(responses[3]["result"]["quit"], json!(true));
+            let [r0, r1, r2, r3] = responses.as_slice() else {
+                return Err(format!("expected 4 responses, got {}", responses.len()).into());
+            };
+            assert_eq!(r0.get("ok"), Some(&json!(true)));
+            assert_eq!(r1.get("ok"), Some(&json!(true)));
+            assert_eq!(r2.get("ok"), Some(&json!(true)));
+            assert_eq!(r3.pointer("/result/quit"), Some(&json!(true)));
             assert_eq!(app.document().data_sheets.len(), 1);
         }
     }
@@ -403,7 +405,7 @@ fn bad_control_connection_does_not_stop_the_server_body() -> Result<(), Box<dyn 
         line.clear();
         std::io::BufRead::read_line(&mut reader, &mut line).map_err(|e| e.to_string())?;
         let quit: Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
-        if quit["result"]["quit"] != json!(true) {
+        if quit.pointer("/result/quit") != Some(&json!(true)) {
             return Err(format!("app.quit was not acknowledged: {quit}"));
         }
         cleanup.disarm();
@@ -412,7 +414,7 @@ fn bad_control_connection_does_not_stop_the_server_body() -> Result<(), Box<dyn 
 
     serve_control_listener(&mut app, &listener, &auth)?;
     let ping = client.join().map_err(|_| "client thread panicked")??;
-    assert_eq!(ping["ok"], json!(true));
+    assert_eq!(ping.get("ok"), Some(&json!(true)));
     Ok(())
 }
 
@@ -534,7 +536,7 @@ fn tcp_control_socket_rejects_unauthenticated_and_browser_http_post_before_dispa
             line.clear();
             std::io::BufRead::read_line(&mut reader, &mut line).map_err(|e| e.to_string())?;
             let quit: Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
-            if quit["result"]["quit"] != json!(true) {
+            if quit.pointer("/result/quit") != Some(&json!(true)) {
                 return Err(format!("app.quit was not acknowledged: {quit}"));
             }
             response
@@ -547,20 +549,20 @@ fn tcp_control_socket_rejects_unauthenticated_and_browser_http_post_before_dispa
     serve_control_listener(&mut app, &listener, &auth)?;
     let (unauth_resp, wrong_resp, http_reply, ok_resp) = client.join().map_err(|_| "client thread panicked")??;
 
-    assert_eq!(unauth_resp["ok"], json!(false));
-    assert!(unauth_resp["error"].as_str().is_some_and(|e| e.contains("unauthorized")));
-    assert_eq!(unauth_resp["error_detail"]["code"], json!("unauthorized"));
+    assert_eq!(unauth_resp.get("ok"), Some(&json!(false)));
+    assert!(unauth_resp.get("error").and_then(Value::as_str).is_some_and(|e| e.contains("unauthorized")));
+    assert_eq!(unauth_resp.pointer("/error_detail/code"), Some(&json!("unauthorized")));
 
-    assert_eq!(wrong_resp["ok"], json!(false));
-    assert!(wrong_resp["error"].as_str().is_some_and(|e| e.contains("unauthorized")));
-    assert_eq!(wrong_resp["error_detail"]["code"], json!("unauthorized"));
+    assert_eq!(wrong_resp.get("ok"), Some(&json!(false)));
+    assert!(wrong_resp.get("error").and_then(Value::as_str).is_some_and(|e| e.contains("unauthorized")));
+    assert_eq!(wrong_resp.pointer("/error_detail/code"), Some(&json!("unauthorized")));
 
     assert_eq!(http_reply, CONTROL_HTTP_FORBIDDEN_RESPONSE);
     assert!(!forbidden_shot.exists(), "HTTP POST attack must never write screenshot file");
 
-    assert_eq!(ok_resp["ok"], json!(true));
+    assert_eq!(ok_resp.get("ok"), Some(&json!(true)));
     assert_eq!(app.document().data_sheets.len(), 1);
-    assert_eq!(app.document().data_sheets[0].id.as_str(), "good-1");
+    assert_eq!(app.document().data_sheets.first().map(|s| s.id.as_str()), Some("good-1"));
 
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())
@@ -621,11 +623,11 @@ fn control_server_survives_small_viewport_dialog_screenshot_and_continues_body()
 
     serve_control_listener(&mut app, &listener, &auth)?;
     let (small_shot, next_ping, quit_resp) = client.join().map_err(|_| "client thread panicked")??;
-    if small_shot["ok"] == json!(false) {
-        assert_eq!(small_shot["error_detail"]["code"], json!("internal_panic"));
+    if small_shot.get("ok") == Some(&json!(false)) {
+        assert_eq!(small_shot.pointer("/error_detail/code"), Some(&json!("internal_panic")));
     }
-    assert_eq!(next_ping["ok"], json!(true));
-    assert_eq!(quit_resp["result"]["quit"], json!(true));
+    assert_eq!(next_ping.get("ok"), Some(&json!(true)));
+    assert_eq!(quit_resp.pointer("/result/quit"), Some(&json!(true)));
     Ok(())
 }
 

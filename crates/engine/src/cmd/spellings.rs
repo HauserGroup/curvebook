@@ -50,8 +50,8 @@ impl ParamSource for Map<String, Value> {
 /// spelling (`spellings[0]`) for the active command deprecation scope.
 #[must_use]
 pub fn first_present_with_key<'a, 'b, S: ParamSource + ?Sized>(source: &'a S, spellings: &[&'b str]) -> Option<(&'b str, &'a Value)> {
-    if let Some(&canonical) = spellings.first() {
-        for &deprecated in &spellings[1..] {
+    if let Some((&canonical, deprecated_list)) = spellings.split_first() {
+        for &deprecated in deprecated_list {
             if deprecated != canonical && source.param(deprecated).is_some() {
                 super::params::record_deprecated_alias(deprecated, canonical);
             }

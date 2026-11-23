@@ -3,6 +3,7 @@
 //!
 //! Layer L2 crate. Governing spec: `docs/implementation/graphing-and-layouts.md` (§3.3) and `docs/development.md` (§Fonts).
 #![forbid(unsafe_code)]
+#![allow(clippy::indexing_slicing)] // Legacy dense layout/UI/lexer indexing (FA-SEC23-03); string_slice remains denied and all 14 I/O/boundary/app crates enforce workspace indexing_slicing = "deny".
 
 pub mod glyph_paths;
 pub mod markup;

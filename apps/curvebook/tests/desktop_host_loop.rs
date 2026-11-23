@@ -31,7 +31,9 @@ fn build_desktop_test_project() -> Result<ProjectDocument, Box<dyn std::error::E
     let mut doc = ProjectDocument::default();
 
     let mut xy = XyTable::new(SubcolumnMode::Single, 1, 5)?;
-    xy.data_sets[0].title = String::from("Signal");
+    if let Some(ds0) = xy.data_sets.first_mut() {
+        ds0.title = String::from("Signal");
+    }
     let mut ds_xy = DataSheet::new("data-xy", "Dose Response", TableArchetype::Xy(xy))?;
     ds_xy.set_x_or_time_cell(0, 0, Cell::number(1.0))?;
     ds_xy.set_cell(CellCoord::new(0, 0, 0), Cell::number(12.5))?;

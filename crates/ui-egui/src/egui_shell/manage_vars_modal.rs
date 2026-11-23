@@ -90,13 +90,11 @@ struct ManageVarsSheetCtx<'a> {
 
 fn split_title_and_unit(raw: &str) -> (String, String) {
     let trimmed = raw.trim();
-    if let Some(open) = trimmed.rfind(" (")
-        && trimmed.ends_with(')')
-        && open > 0
+    if let Some(inner) = trimmed.strip_suffix(')')
+        && let Some((name, unit)) = inner.rsplit_once(" (")
+        && !name.is_empty()
     {
-        let name = trimmed[..open].trim().to_owned();
-        let unit = trimmed[open + 2..trimmed.len() - 1].trim().to_owned();
-        return (name, unit);
+        return (name.trim().to_owned(), unit.trim().to_owned());
     }
     (trimmed.to_owned(), String::new())
 }

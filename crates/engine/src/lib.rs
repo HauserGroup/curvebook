@@ -989,7 +989,7 @@ fn enforce_unconstrained_gui_only_recalculate(doc: &ProjectDocument, params: &mu
             }
         }
     }
-    if explicit_vals.len() > 1 && explicit_vals.windows(2).any(|w| w[0] != w[1]) {
+    if explicit_vals.len() > 1 && explicit_vals.windows(2).any(|w| matches!(w, [a, b] if a != b)) {
         return Err(EngineError::with_code(
             ErrorCode::BadInput,
             "conflicting `include_external_links` alias values supplied for `project.recalculate`",

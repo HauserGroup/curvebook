@@ -179,9 +179,9 @@ fn parse_hex_rgba8(hex: &str) -> Option<Rgba8> {
     if raw.len() != 6 {
         return None;
     }
-    let r = u8::from_str_radix(&raw[0..2], 16).ok()?;
-    let g = u8::from_str_radix(&raw[2..4], 16).ok()?;
-    let b = u8::from_str_radix(&raw[4..6], 16).ok()?;
+    let r = u8::from_str_radix(raw.get(0..2)?, 16).ok()?;
+    let g = u8::from_str_radix(raw.get(2..4)?, 16).ok()?;
+    let b = u8::from_str_radix(raw.get(4..6)?, 16).ok()?;
     Some(Rgba8::rgb(r, g, b))
 }
 

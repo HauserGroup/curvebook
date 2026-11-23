@@ -60,14 +60,15 @@ fn encode_base64(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
-        let b0 = u32::from(chunk[0]);
-        let b1 = if chunk.len() > 1 { u32::from(chunk[1]) } else { 0 };
-        let b2 = if chunk.len() > 2 { u32::from(chunk[2]) } else { 0 };
+        let b0 = u32::from(*chunk.first().unwrap_or(&0));
+        let b1 = u32::from(*chunk.get(1).unwrap_or(&0));
+        let b2 = u32::from(*chunk.get(2).unwrap_or(&0));
         let triple = (b0 << 16) | (b1 << 8) | b2;
-        out.push(TABLE[((triple >> 18) & 0x3f) as usize] as char);
-        out.push(TABLE[((triple >> 12) & 0x3f) as usize] as char);
-        out.push(if chunk.len() > 1 { TABLE[((triple >> 6) & 0x3f) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { TABLE[(triple & 0x3f) as usize] as char } else { '=' });
+        let encode = |shift: usize| TABLE.get(((triple >> shift) & 0x3f) as usize).copied().unwrap_or(b'A') as char;
+        out.push(encode(18));
+        out.push(encode(12));
+        out.push(if chunk.len() > 1 { encode(6) } else { '=' });
+        out.push(if chunk.len() > 2 { encode(0) } else { '=' });
     }
     out
 }
@@ -90,8 +91,8 @@ fn hill_response(log_x: f64, bottom: f64, top: f64, log_ec50: f64, slope: f64) -
 
 fn set_cell(session: &mut Session, sheet_id: &str, target_x: bool, row: usize, col: usize, subcol: usize, value: f64) {
     let mut entry = json!({ "row": row, "col": col, "subcol": subcol, "value": value });
-    if target_x {
-        entry["target"] = json!("x");
+    if target_x && let Some(obj) = entry.as_object_mut() {
+        obj.insert(String::from("target"), json!("x"));
     }
     exec_ok(session, "table.setCells", json!({ "sheet_id": sheet_id, "cells": [entry] }));
 }
@@ -154,9 +155,9 @@ fn export_png_bytes(session: &mut Session, sheet_id: &str, dpi: u64) -> (Vec<u8>
     let out = exec_ok(session, "export.png", json!({ "sheet_id": sheet_id, "dpi": dpi }));
     let bytes = decode_base64(payload_str(&out, "base64"));
     assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]), "invalid PNG magic bytes");
-    let w = out.payload["width_px"].as_u64().unwrap();
-    let h = out.payload["height_px"].as_u64().unwrap();
-    assert_eq!(out.payload["dpi"].as_u64().unwrap(), dpi);
+    let w = out.payload.get("width_px").and_then(Value::as_u64).unwrap();
+    let h = out.payload.get("height_px").and_then(Value::as_u64).unwrap();
+    assert_eq!(out.payload.get("dpi").and_then(Value::as_u64).unwrap(), dpi);
     (bytes, w, h)
 }
 
@@ -281,11 +282,11 @@ fn assert_4pl_replicate_interpolation(session: &Session, fit_res: &ResultSheet) 
     assert_eq!(rep_tab.kind, ResultTabKind::InterpolatedUnknowns);
     assert_eq!(rep_tab.rows.len(), 2, "expected 2 replicate interpolated rows in `{}`", fit_res.id);
     for (idx, expected_lx) in [-6.2_f64, -5.4_f64].iter().enumerate() {
-        let ResultCell::Number { value: mean_est, .. } = mean_tab.rows[idx][1] else {
+        let Some(ResultCell::Number { value: mean_est, .. }) = mean_tab.rows.get(idx).and_then(|r| r.get(1)) else {
             panic!("expected numeric interpolated mean X in row {idx}");
         };
         assert!((mean_est - expected_lx).abs() < 0.05, "4PL mean interpolated X row {idx}: got {mean_est}, expected {expected_lx}");
-        let ResultCell::Number { value: rep_est, .. } = rep_tab.rows[idx][1] else {
+        let Some(ResultCell::Number { value: rep_est, .. }) = rep_tab.rows.get(idx).and_then(|r| r.get(1)) else {
             panic!("expected numeric interpolated replicate X in row {idx}");
         };
         assert!((rep_est - expected_lx).abs() < 0.05, "4PL replicate interpolated X row {idx}: got {rep_est}, expected {expected_lx}");
@@ -316,16 +317,16 @@ fn assert_4pl_replicate_interpolation(session: &Session, fit_res: &ResultSheet) 
     let rep_items: Vec<_> = nl_res.interpolated_x.iter().filter(|item| item.replicate_subcolumn == Some(0)).collect();
     assert_eq!(mean_items.len(), 2, "expected 2 replicate-mean interpolated entries");
     assert_eq!(rep_items.len(), 2, "expected 2 single-replicate interpolated entries");
-    for (idx, expected_lx) in [-6.2_f64, -5.4_f64].iter().enumerate() {
+    for (idx, (&expected_lx, (mean_item, rep_item))) in [-6.2_f64, -5.4_f64].iter().zip(mean_items.iter().zip(rep_items.iter())).enumerate() {
         assert!(
-            (mean_items[idx].output_estimate - expected_lx).abs() < 0.05,
+            (mean_item.output_estimate - expected_lx).abs() < 0.05,
             "4PL interpolated mean X row {idx}: got {}, expected {expected_lx}",
-            mean_items[idx].output_estimate
+            mean_item.output_estimate
         );
         assert!(
-            (rep_items[idx].output_estimate - expected_lx).abs() < 0.05,
+            (rep_item.output_estimate - expected_lx).abs() < 0.05,
             "4PL interpolated replicate X row {idx}: got {}, expected {expected_lx}",
-            rep_items[idx].output_estimate
+            rep_item.output_estimate
         );
     }
 }

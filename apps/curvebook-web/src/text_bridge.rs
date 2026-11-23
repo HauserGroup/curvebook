@@ -618,13 +618,14 @@ impl<B: CanvasMeasureBackend> WebTextMeasurer for BrowserCanvasTextMeasurer<B> {
                     run_prev_w += adv;
                     adv
                 } else {
-                    let prefix_w = self.measure(style, &run.text[..end], dpi).width_px;
+                    let prefix_w = run.text.get(..end).map_or(0.0, |prefix| self.measure(style, prefix, dpi).width_px);
                     let adv = if prefix_w > run_prev_w {
                         prefix_w - run_prev_w
-                    } else {
-                        let slice = &run.text[idx..end];
+                    } else if let Some(slice) = run.text.get(idx..end) {
                         let single_w = self.measure(style, slice, dpi).width_px;
                         if single_w > 0.0 { single_w } else { measure_text_pt(&RichText::plain(slice), size_pt).width_pt * pt_to_px }
+                    } else {
+                        eff_px * 0.5
                     };
                     run_prev_w = if prefix_w >= run_prev_w { prefix_w } else { run_prev_w + adv };
                     adv
@@ -1151,7 +1152,7 @@ impl WebTextBridge {
         let mut projected_total = base_expected;
         let mut planned_bands: Vec<(ZLayerBand, LayoutRectPx, usize)> = Vec::with_capacity(3);
         for band in [ZLayerBand::PopupDropdown, ZLayerBand::ModalOverlay, ZLayerBand::TopOverlay] {
-            let prims = &band_rects[band as usize];
+            let prims = band_rects.get(band as usize).map_or(&[][..], Vec::as_slice);
             if let Some(bounds) = band_bounds_for_primitives(viewport_rect, prims) {
                 let band_bytes = checked_rgba_byte_len(bounds.width, bounds.height)?;
                 projected_total = projected_total
@@ -1163,8 +1164,10 @@ impl WebTextBridge {
         }
 
         let mut base_img = base_frame;
-        for prim in &band_rects[ZLayerBand::Workspace as usize] {
-            paint_rect_primitive(&mut base_img, viewport_rect, prim);
+        if let Some(ws_prims) = band_rects.get(ZLayerBand::Workspace as usize) {
+            for prim in ws_prims {
+                paint_rect_primitive(&mut base_img, viewport_rect, prim);
+            }
         }
 
         let mut rgba_layers = Vec::with_capacity(1 + planned_bands.len());
@@ -1177,7 +1180,7 @@ impl WebTextBridge {
         });
 
         for (band, bounds, band_bytes) in planned_bands {
-            let prims = &band_rects[band as usize];
+            let prims = band_rects.get(band as usize).map_or(&[][..], Vec::as_slice);
             rgba_layers.push(try_rasterize_band_layer(band, bounds, band_bytes, prims)?);
         }
 
@@ -1576,7 +1579,8 @@ fn preflight_layered_rgba_budget(w: u32, h: u32, rect_primitives: &[WebRectPrimi
         }
     }
     for band in [ZLayerBand::PopupDropdown, ZLayerBand::ModalOverlay, ZLayerBand::TopOverlay] {
-        if let Some(bounds) = band_bounds_for_primitives(viewport_rect, &band_rects[band as usize]) {
+        let prims = band_rects.get(band as usize).map_or(&[][..], Vec::as_slice);
+        if let Some(bounds) = band_bounds_for_primitives(viewport_rect, prims) {
             let band_bytes = checked_rgba_byte_len(bounds.width, bounds.height)?;
             total = total
                 .checked_add(band_bytes)
@@ -1938,31 +1942,37 @@ fn blend_pixel_rgba(img: &mut RasterImage, x: u32, y: u32, src: [u8; 4]) {
         return;
     }
     let idx = (y as usize).saturating_mul(img.width_px as usize).saturating_add(x as usize).saturating_mul(4);
-    let Some(dst) = img.rgba.get_mut(idx..idx + 4) else {
+    let Some(dst_slice) = img.rgba.get_mut(idx..idx + 4) else {
         return;
     };
-    if src[3] == 255 || dst[3] == 0 {
-        dst.copy_from_slice(&src);
+    let [dr, dg, db, da] = dst_slice else {
+        return;
+    };
+    if src[3] == 255 || *da == 0 {
+        *dr = src[0];
+        *dg = src[1];
+        *db = src[2];
+        *da = src[3];
         return;
     }
     let src_a = u32::from(src[3]);
-    let dst_a = u32::from(dst[3]);
+    let dst_a = u32::from(*da);
     let inv = 255 - src_a;
     #[allow(clippy::cast_possible_truncation)]
     if dst_a == 255 {
-        dst[0] = ((u32::from(src[0]) * src_a + u32::from(dst[0]) * inv + 127) / 255) as u8;
-        dst[1] = ((u32::from(src[1]) * src_a + u32::from(dst[1]) * inv + 127) / 255) as u8;
-        dst[2] = ((u32::from(src[2]) * src_a + u32::from(dst[2]) * inv + 127) / 255) as u8;
-        dst[3] = 255;
+        *dr = ((u32::from(src[0]) * src_a + u32::from(*dr) * inv + 127) / 255) as u8;
+        *dg = ((u32::from(src[1]) * src_a + u32::from(*dg) * inv + 127) / 255) as u8;
+        *db = ((u32::from(src[2]) * src_a + u32::from(*db) * inv + 127) / 255) as u8;
+        *da = 255;
     } else {
         let out_a_num = src_a * 255 + dst_a * inv;
         if out_a_num == 0 {
             return;
         }
-        dst[0] = ((u32::from(src[0]) * src_a * 255 + u32::from(dst[0]) * dst_a * inv + out_a_num / 2) / out_a_num).min(255) as u8;
-        dst[1] = ((u32::from(src[1]) * src_a * 255 + u32::from(dst[1]) * dst_a * inv + out_a_num / 2) / out_a_num).min(255) as u8;
-        dst[2] = ((u32::from(src[2]) * src_a * 255 + u32::from(dst[2]) * dst_a * inv + out_a_num / 2) / out_a_num).min(255) as u8;
-        dst[3] = ((out_a_num + 127) / 255).min(255) as u8;
+        *dr = ((u32::from(src[0]) * src_a * 255 + u32::from(*dr) * dst_a * inv + out_a_num / 2) / out_a_num).min(255) as u8;
+        *dg = ((u32::from(src[1]) * src_a * 255 + u32::from(*dg) * dst_a * inv + out_a_num / 2) / out_a_num).min(255) as u8;
+        *db = ((u32::from(src[2]) * src_a * 255 + u32::from(*db) * dst_a * inv + out_a_num / 2) / out_a_num).min(255) as u8;
+        *da = ((out_a_num + 127) / 255).min(255) as u8;
     }
 }
 

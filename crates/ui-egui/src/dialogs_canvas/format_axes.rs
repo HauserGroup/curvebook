@@ -769,10 +769,11 @@ pub(super) fn parse_threshold_color(val: &Value, key: &str) -> Result<Rgba8, Str
     if let Some(hex) = val.as_str() {
         let s = hex.trim().trim_start_matches('#');
         if s.is_ascii() && (s.len() == 6 || s.len() == 8) {
-            let r = u8::from_str_radix(&s[0..2], 16).map_err(|_| format!("invalid `{key}` hex color `{hex}`"))?;
-            let g = u8::from_str_radix(&s[2..4], 16).map_err(|_| format!("invalid `{key}` hex color `{hex}`"))?;
-            let b = u8::from_str_radix(&s[4..6], 16).map_err(|_| format!("invalid `{key}` hex color `{hex}`"))?;
-            let a = if s.len() == 8 { u8::from_str_radix(&s[6..8], 16).map_err(|_| format!("invalid `{key}` hex color `{hex}`"))? } else { 255 };
+            let err = || format!("invalid `{key}` hex color `{hex}`");
+            let r = u8::from_str_radix(s.get(0..2).ok_or_else(err)?, 16).map_err(|_| err())?;
+            let g = u8::from_str_radix(s.get(2..4).ok_or_else(err)?, 16).map_err(|_| err())?;
+            let b = u8::from_str_radix(s.get(4..6).ok_or_else(err)?, 16).map_err(|_| err())?;
+            let a = if s.len() == 8 { u8::from_str_radix(s.get(6..8).ok_or_else(err)?, 16).map_err(|_| err())? } else { 255 };
             return Ok(Rgba8::rgba(r, g, b, a));
         }
     }

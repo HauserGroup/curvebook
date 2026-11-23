@@ -216,14 +216,14 @@ fn replace_frac_once(s: &str) -> Option<String> {
         d_cursor += 1;
     }
     let (d_open, d_close) = find_brace_group(s, d_cursor)?;
-    let num = s[n_open + 1..n_close].trim();
-    let den = s[d_open + 1..d_close].trim();
+    let num = s.get(n_open + 1..n_close)?.trim();
+    let den = s.get(d_open + 1..d_close)?.trim();
     let n_str = if is_simple_math_atom(num) { num.to_owned() } else { format!("({num})") };
     let d_str = if is_simple_math_atom(den) { den.to_owned() } else { format!("({den})") };
     let mut out = String::with_capacity(s.len());
-    out.push_str(&s[..idx]);
+    out.push_str(s.get(..idx)?);
     let _ = write!(out, "{n_str} / {d_str}");
-    out.push_str(&s[d_close + 1..]);
+    out.push_str(s.get(d_close + 1..)?);
     Some(out)
 }
 
@@ -234,11 +234,11 @@ fn replace_unary_macro_once(s: &str, name: &str, prefix: &str) -> Option<String>
         cursor += 1;
     }
     let (open, close) = find_brace_group(s, cursor)?;
-    let inner = s[open + 1..close].trim();
+    let inner = s.get(open + 1..close)?.trim();
     let mut out = String::with_capacity(s.len());
-    out.push_str(&s[..idx]);
+    out.push_str(s.get(..idx)?);
     let _ = write!(out, "{prefix}({inner})");
-    out.push_str(&s[close + 1..]);
+    out.push_str(s.get(close + 1..)?);
     Some(out)
 }
 

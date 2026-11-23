@@ -14,12 +14,14 @@ use serde_json::json;
 
 fn make_mv_sheet(id: &str) -> DataSheet {
     let mut mv = MultipleVariablesTable::new(3, 4).unwrap();
-    mv.variables[0].title = String::from("A");
-    mv.variables[1].title = String::from("B");
-    mv.variables[2].title = String::from("C");
-    for r in 0..4 {
-        mv.variables[0].cells[r] = Cell::number((r + 1) as f64);
-        mv.variables[1].cells[r] = Cell::number(((r + 1) * 10) as f64);
+    if let [v0, v1, v2] = mv.variables.as_mut_slice() {
+        v0.title = String::from("A");
+        v1.title = String::from("B");
+        v2.title = String::from("C");
+        for (r, (c0, c1)) in v0.cells.iter_mut().zip(v1.cells.iter_mut()).enumerate().take(4) {
+            *c0 = Cell::number((r + 1) as f64);
+            *c1 = Cell::number(((r + 1) * 10) as f64);
+        }
     }
     DataSheet::new(SheetId::new(id), "MV Calc", TableArchetype::MultipleVariables(mv)).unwrap()
 }

@@ -611,20 +611,27 @@ fn evaluate_data_sheet_node(
     report: &mut RecalcReport,
     external_policy: Option<&ExternalPathPolicy>,
 ) -> Result<usize, EngineError> {
-    let sheet_id = working.data_sheets[ds_idx].id.clone();
-    if working.data_sheets[ds_idx].frozen {
+    let Some(ds) = working.data_sheets.get(ds_idx) else {
+        return Ok(0);
+    };
+    let sheet_id = ds.id.clone();
+    if ds.frozen {
         report.skipped_frozen_sheets.push(sheet_id);
         return Ok(0);
     }
 
     let before_active = crate::cmd::helpers::snapshot_active_series_lengths(working, &sheet_id);
-    let had_links = !working.data_sheets[ds_idx].linked_regions.is_empty();
+    let had_links = !ds.linked_regions.is_empty();
+    let info_sheet_id = ds.info_sheet_id.clone();
     let refreshed = refresh_data_sheet_links(working, ds_idx, external_policy)?;
 
     // Resolve Info constants strictly from this sheet's bound `info_sheet_id` (never fall back to `info_sheets.first()`).
-    let info_opt = working.data_sheets[ds_idx].info_sheet_id.as_ref().and_then(|id| working.info_sheet(id)).cloned();
+    let info_opt = info_sheet_id.as_ref().and_then(|id| working.info_sheet(id)).cloned();
 
-    let eval_cols = evaluate_data_sheet_calculated_variables(&mut working.data_sheets[ds_idx], info_opt.as_ref())
+    let Some(ds_mut) = working.data_sheets.get_mut(ds_idx) else {
+        return Ok(refreshed);
+    };
+    let eval_cols = evaluate_data_sheet_calculated_variables(ds_mut, info_opt.as_ref())
         .map_err(|err| EngineError::new(format!("calculated variables on sheet `{sheet_id}` failed: {err}")))?;
 
     if had_links || !eval_cols.is_empty() {
@@ -829,7 +836,9 @@ fn refresh_single_region(
     reg_idx: usize,
     external_policy: Option<&ExternalPathPolicy>,
 ) -> Result<bool, EngineError> {
-    let region = target.linked_regions[reg_idx].clone();
+    let Some(region) = target.linked_regions.get(reg_idx).cloned() else {
+        return Ok(false);
+    };
     let Some(resolved) = resolve_refresh_source(working, &target.id, &region.id, &region.spec.source, external_policy)? else {
         return Ok(false);
     };
@@ -871,8 +880,10 @@ fn refresh_single_region(
     {
         crate::cmd::helpers::apply_result_tab_metadata_to_sheet(target, tab);
     }
-    target.linked_regions[reg_idx].target_range = report.target_range;
-    target.linked_regions[reg_idx].provenance_summary = report.provenance_summary;
+    if let Some(slot) = target.linked_regions.get_mut(reg_idx) {
+        slot.target_range = report.target_range;
+        slot.provenance_summary = report.provenance_summary;
+    }
     Ok(true)
 }
 
@@ -881,20 +892,25 @@ fn refresh_data_sheet_links(
     ds_idx: usize,
     external_policy: Option<&ExternalPathPolicy>,
 ) -> Result<usize, EngineError> {
-    let region_count = working.data_sheets[ds_idx].linked_regions.len();
+    let Some(ds) = working.data_sheets.get(ds_idx) else {
+        return Ok(0);
+    };
+    let region_count = ds.linked_regions.len();
     if region_count == 0 {
         return Ok(0);
     }
 
     // Clone target temporarily so `working` can be read immutably to resolve upstream payloads.
-    let mut target = working.data_sheets[ds_idx].clone();
+    let mut target = ds.clone();
     let mut refreshed = 0usize;
     for reg_idx in 0..region_count {
         if refresh_single_region(working, &mut target, reg_idx, external_policy)? {
             refreshed = refreshed.saturating_add(1);
         }
     }
-    working.data_sheets[ds_idx] = target;
+    if let Some(slot) = working.data_sheets.get_mut(ds_idx) {
+        *slot = target;
+    }
     Ok(refreshed)
 }
 
@@ -983,11 +999,15 @@ fn validate_info_constant_hooks(doc: &ProjectDocument, analysis: &AnalysisSpec, 
 }
 
 fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize) -> bool {
-    let existing = doc.result_sheets[res_idx].clone();
+    let Some(existing) = doc.result_sheets.get(res_idx).cloned() else {
+        return false;
+    };
     let source_ds = match resolve_source_table(doc, &existing.analysis.source_sheet_id) {
         Ok(ds) => ds,
         Err((code, message)) => {
-            clear_failed_result_sheet(&mut doc.result_sheets[res_idx], code, message);
+            if let Some(target) = doc.result_sheets.get_mut(res_idx) {
+                clear_failed_result_sheet(target, code, message);
+            }
             return false;
         }
     };
@@ -996,7 +1016,9 @@ fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize) -> bool {
             && let Some(res) = doc.result_sheet(&result_sheet_id)
             && let Err((code, message)) = check_upstream_result_status(res, &result_sheet_id)
         {
-            clear_failed_result_sheet(&mut doc.result_sheets[res_idx], code, message);
+            if let Some(target) = doc.result_sheets.get_mut(res_idx) {
+                clear_failed_result_sheet(target, code, message);
+            }
             return false;
         }
     }
@@ -1061,7 +1083,9 @@ fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize) -> bool {
         }
     };
 
-    let target = &mut doc.result_sheets[res_idx];
+    let Some(target) = doc.result_sheets.get_mut(res_idx) else {
+        return false;
+    };
     match output {
         Ok(mut computed) => {
             if let Err(reason) = validate_result_sheet_finite(&computed, &existing.id) {

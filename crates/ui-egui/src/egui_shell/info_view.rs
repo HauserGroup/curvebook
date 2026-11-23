@@ -796,9 +796,12 @@ pub(crate) fn is_valid_iso_date(raw: &str) -> bool {
     if !bytes[0..4].iter().all(u8::is_ascii_digit) || !bytes[5..7].iter().all(u8::is_ascii_digit) || !bytes[8..10].iter().all(u8::is_ascii_digit) {
         return false;
     }
-    let Ok(year) = raw[0..4].parse::<u16>() else { return false };
-    let Ok(month) = raw[5..7].parse::<u8>() else { return false };
-    let Ok(day) = raw[8..10].parse::<u8>() else { return false };
+    let (Some(y_str), Some(m_str), Some(d_str)) = (raw.get(0..4), raw.get(5..7), raw.get(8..10)) else {
+        return false;
+    };
+    let Ok(year) = y_str.parse::<u16>() else { return false };
+    let Ok(month) = m_str.parse::<u8>() else { return false };
+    let Ok(day) = d_str.parse::<u8>() else { return false };
     (1..=9999).contains(&year) && (1..=12).contains(&month) && (1..=31).contains(&day)
 }
 

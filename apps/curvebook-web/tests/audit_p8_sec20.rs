@@ -233,8 +233,8 @@ fn fa_sec20_05_dropped_directory_preserves_nested_sheets_and_index_guards() -> R
     assert!(files.iter().any(|p| p.starts_with("sheets/")), "nested `sheets/` prefix must not be stripped: {files:?}");
 
     let html = include_str!("../index.html");
-    let start = html.find("async function collectDroppedEntry").ok_or("missing collectDroppedEntry")?;
-    let slice = &html[start..(start + 900).min(html.len())];
+    let (_, after_start) = html.split_once("async function collectDroppedEntry").ok_or("missing collectDroppedEntry")?;
+    let slice: String = after_start.chars().take(900).collect();
     assert!(slice.contains("try {") && slice.contains("} catch (err) {") && slice.contains("reject(err)"));
     Ok(())
 }
@@ -270,8 +270,8 @@ fn fa_sec20_06_full_a11y_tree_schema_matches_dom_mirror() -> Result<(), Box<dyn 
 #[test]
 fn fa_sec20_07_browser_shortcut_prevention_and_unhandled_printable_keydown_routes_text_input() -> Result<(), Box<dyn std::error::Error>> {
     let html = include_str!("../index.html");
-    let fn_start = html.find("function shouldPreventBrowserShortcut").ok_or("missing shouldPreventBrowserShortcut")?;
-    let fn_slice = &html[fn_start..(fn_start + 900).min(html.len())];
+    let (_, after_fn) = html.split_once("function shouldPreventBrowserShortcut").ok_or("missing shouldPreventBrowserShortcut")?;
+    let fn_slice: String = after_fn.chars().take(900).collect();
     assert!(fn_slice.contains("\"F6\""));
     assert!(fn_slice.contains("[\"a\", \"f\", \"g\"]"));
     assert!(fn_slice.contains("\"enter\""));
@@ -359,8 +359,8 @@ fn fa_sec20_08_atomic_shortcuts_now_ms_autosave_and_index_local_storage_guards()
     assert!(!html.contains("if (!window.localStorage)"), "bare window.localStorage check outside try/catch must not exist");
     assert!(!html.contains("!holdsCurrentWebLock || !window.localStorage"), "heartbeat must use tryGetLocalStorage()");
     assert!(html.contains("emitEvent({ kind: \"hydrate_local_storage\", entries: stored, now_ms: Date.now() })"));
-    let lock_start = html.find("function tryAcquireFallbackStorageLock").ok_or("missing tryAcquireFallbackStorageLock")?;
-    let lock_slice = &html[lock_start..(lock_start + 4000).min(html.len())];
+    let (_, after_lock) = html.split_once("function tryAcquireFallbackStorageLock").ok_or("missing tryAcquireFallbackStorageLock")?;
+    let lock_slice: String = after_lock.chars().take(4000).collect();
     assert!(lock_slice.contains("clearInterval(fallbackLockTimerId)"));
     assert!(lock_slice.contains("holder_tab_id: \"storage-unavailable\""));
     Ok(())

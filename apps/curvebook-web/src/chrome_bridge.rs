@@ -1335,14 +1335,18 @@ impl WebChromeBridge {
                         let entries = app.canvas_dialogs.analyze.compatible_entries();
                         let cur = entries.iter().position(|e| Some(e.id) == app.canvas_dialogs.analyze.selected_entry_id.as_deref()).unwrap_or(0);
                         let next = (cur + 1).min(entries.len() - 1);
-                        app.canvas_dialogs.analyze.selected_entry_id = Some(entries[next].id.to_owned());
+                        if let Some(entry) = entries.get(next) {
+                            app.canvas_dialogs.analyze.selected_entry_id = Some(entry.id.to_owned());
+                        }
                         WebChromeDispatch::HandledRedraw { action: String::from("analyze.next"), command_result: None }
                     }
                     "ArrowUp" | "Up" if hits_len > 0 => {
                         let entries = app.canvas_dialogs.analyze.compatible_entries();
                         let cur = entries.iter().position(|e| Some(e.id) == app.canvas_dialogs.analyze.selected_entry_id.as_deref()).unwrap_or(0);
                         let prev = cur.saturating_sub(1);
-                        app.canvas_dialogs.analyze.selected_entry_id = Some(entries[prev].id.to_owned());
+                        if let Some(entry) = entries.get(prev) {
+                            app.canvas_dialogs.analyze.selected_entry_id = Some(entry.id.to_owned());
+                        }
                         WebChromeDispatch::HandledRedraw { action: String::from("analyze.prev"), command_result: None }
                     }
                     _ if printable_text_input_for_key(key, modifiers).is_some() => {

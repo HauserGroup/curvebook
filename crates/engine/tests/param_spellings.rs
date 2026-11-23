@@ -447,12 +447,17 @@ fn expand(spec: &GroupSpec, out: &mut Vec<Case>) {
     for s in spellings {
         push(out, format!("spelling:{s}"), fields(&[(s, &spec.value)]));
     }
-    let first = spellings[0];
-    let last = spellings[spellings.len() - 1];
+    let Some(&first) = spellings.first() else {
+        return;
+    };
+    let Some(&last) = spellings.last() else {
+        return;
+    };
     for (alt_label, alt) in &spec.alts {
         push(out, format!("precedence:{first}={alt_label},{last}=value"), fields(&[(first, alt), (last, &spec.value)]));
-        if spellings.len() >= 3 {
-            let mid = spellings[1];
+        if spellings.len() >= 3
+            && let Some(&mid) = spellings.get(1)
+        {
             push(out, format!("precedence:{mid}={alt_label},{last}=value"), fields(&[(mid, alt), (last, &spec.value)]));
         }
     }
@@ -473,11 +478,11 @@ fn custom(out: &mut Vec<Case>, group: &'static str, label: &str, fixture: Fx, co
 // ---------------------------------------------------------------------------
 
 fn canonical_spelling(group: &str) -> &'static str {
-    spellings_of(group)[0]
+    spellings_of(group).first().copied().expect("non-empty spelling group")
 }
 
 fn deprecated_spellings(group: &str) -> &'static [&'static str] {
-    &spellings_of(group)[1..]
+    spellings_of(group).get(1..).unwrap_or(&[])
 }
 
 fn transform_run(kind: &str) -> Value {
@@ -1024,7 +1029,9 @@ fn compute_outcomes(cases: &[Case]) -> BTreeMap<String, String> {
     let first_fixtures = build_fixtures();
     let second_fixtures = build_fixtures();
     for fx in ALL_FIXTURES {
-        assert_eq!(document_hash(&first_fixtures[fx]), document_hash(&second_fixtures[fx]), "fixture {fx:?} is not deterministic");
+        let s1 = first_fixtures.get(fx).unwrap_or_else(|| panic!("missing fixture {fx:?}"));
+        let s2 = second_fixtures.get(fx).unwrap_or_else(|| panic!("missing fixture {fx:?}"));
+        assert_eq!(document_hash(s1), document_hash(s2), "fixture {fx:?} is not deterministic");
     }
     let mut outcomes = BTreeMap::new();
     for case in cases {
@@ -1064,7 +1071,8 @@ fn report(cases: &[Case], outcomes: &BTreeMap<String, String>) {
     let mut sites: BTreeMap<(String, String), Vec<(String, String)>> = BTreeMap::new();
     for case in cases {
         let (variant, rest) = case.label.rsplit_once('/').map_or((String::new(), case.label.clone()), |(v, r)| (format!("{v}/"), r.to_owned()));
-        sites.entry((case.group.to_owned(), variant)).or_default().push((rest, outcomes[&case.key()].clone()));
+        let outcome = outcomes.get(&case.key()).cloned().unwrap_or_default();
+        sites.entry((case.group.to_owned(), variant)).or_default().push((rest, outcome));
     }
     eprintln!("==== param_spellings generation report ({} cases) ====", cases.len());
     for ((group, variant), entries) in &sites {
@@ -1073,7 +1081,7 @@ fn report(cases: &[Case], outcomes: &BTreeMap<String, String>) {
             continue;
         };
         let spellings = spellings_of(group);
-        let first = get(&format!("spelling:{}", spellings[0]));
+        let first = spellings.first().and_then(|s0| get(&format!("spelling:{s0}")));
         if first == Some(baseline) {
             eprintln!("VACUOUS {group}/{variant}: first spelling outcome equals baseline ({baseline})");
         }
