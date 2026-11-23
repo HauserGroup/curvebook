@@ -21,7 +21,7 @@ use curvebook_engine::services::{
 use curvebook_engine::{BatchCommandStep, Caller, EngineError, Session, cmd};
 use curvebook_format::CsvOptions;
 use curvebook_palette::{CanvasPreviewFilter, Rgba8};
-use curvebook_pdf::{PdfColorSpace, PdfExportOptions, render_pdf_pages};
+use curvebook_pdf::{PdfColorSpace, PdfExportOptions, PdfVersion, render_pdf_pages};
 use curvebook_render::{MAX_CAPPED_RASTER_DIM_PX, TiffCompression};
 use curvebook_svg::SvgExportOptions;
 use curvebook_tools::{GridCellCoord, PhysicalUnit};
@@ -2126,9 +2126,12 @@ fn handle_render_preview(app: &UiApp, params: &Value) -> Result<Value, ControlCa
     }))
 }
 
-fn parse_doc_export_csv_options(params: &Value) -> Result<CsvOptions, ControlCallError> {
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_CONTROL_FONT_FILE_BYTES: usize = 64 * 1024 * 1024;
+
+fn parse_doc_export_csv_options(params: &Value, format: &str) -> Result<CsvOptions, ControlCallError> {
     let Some(delim) = opt_non_empty_str_param(params, &["csv_delimiter"])? else {
-        return Ok(CsvOptions::csv());
+        return Ok(if format == "tsv" { CsvOptions::tsv() } else { CsvOptions::csv() });
     };
     let mut chars = delim.chars();
     let Some(ch) = chars.next() else {
@@ -2142,15 +2145,67 @@ fn parse_doc_export_csv_options(params: &Value) -> Result<CsvOptions, ControlCal
     Ok(opts)
 }
 
+fn parse_doc_export_pdf_version(params: &Value) -> Result<PdfVersion, ControlCallError> {
+    match opt_non_empty_str_param(params, &["pdf_version"])? {
+        None => Ok(PdfVersion::Pdf17),
+        Some("1.4") => Ok(PdfVersion::Pdf14),
+        Some("1.7") => Ok(PdfVersion::Pdf17),
+        Some(other) => Err(ControlCallError::from(format!("unsupported pdf_version '{other}' (expected '1.4' or '1.7')"))),
+    }
+}
+
+fn load_validated_control_ttf_font(path_str: &str) -> Result<Vec<u8>, ControlCallError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let path = std::path::Path::new(path_str);
+        let bytes = curvebook_platform::fs::read_regular_file_bytes(path, MAX_CONTROL_FONT_FILE_BYTES).map_err(|err| match err {
+            curvebook_platform::PlatformError::InvalidPath { reason } => {
+                ControlCallError::from(EngineError::with_code(ErrorCode::BadInput, format!("invalid TrueType font `{path_str}`: {reason}")))
+            }
+            other => ControlCallError::from(EngineError::from(other)),
+        })?;
+        let _info = curvebook_text::parse_truetype_font_info(&bytes).map_err(|err| {
+            ControlCallError::from(EngineError::with_code(ErrorCode::BadInput, format!("invalid TrueType font `{path_str}`: {err}")))
+        })?;
+        if !matches!(bytes.get(0..4), Some([0x00, 0x01, 0x00, 0x00] | b"true")) {
+            return Err(ControlCallError::from(EngineError::with_code(
+                ErrorCode::BadInput,
+                format!("unsupported SFNT font `{path_str}`: expected TrueType outlines (`0x00010000` or `true`), not CFF/OTTO"),
+            )));
+        }
+        Ok(bytes)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = path_str;
+        Err(ControlCallError::from(EngineError::with_code(
+            ErrorCode::UnsupportedFormat,
+            "reading TrueType font from filesystem is unsupported on wasm32",
+        )))
+    }
+}
+
 fn handle_doc_export(app: &UiApp, params: &Value) -> Result<Value, ControlCallError> {
     reject_control_if_gui_only(app, "doc.export")?;
     require_params_object_or_null(params, "doc.export")?;
     let format = opt_non_empty_str_param(params, &["format"])?
         .ok_or_else(|| ControlCallError::from("doc.export requires a non-empty string 'format'"))?
         .to_ascii_lowercase();
-    if !matches!(format.as_str(), "svg" | "pdf" | "png" | "tiff" | "csv" | "json") {
+    if !matches!(format.as_str(), "svg" | "pdf" | "emf" | "png" | "tiff" | "csv" | "tsv" | "json") {
         return Err(ControlCallError::from(format!("unsupported export format '{format}'")));
     }
+
+    let opt_out_path = opt_non_empty_str_param(params, &["path", "output_path"])?;
+    let validated_out_path = match opt_out_path {
+        Some(raw) => Some(app.session().validate_host_write_path(raw)?),
+        None => None,
+    };
+
+    let opt_ttf_font = opt_non_empty_str_param(params, &["ttf_font"])?;
+    let validated_ttf_font = match opt_ttf_font {
+        Some(raw) => Some(app.session().validate_host_write_path(raw)?),
+        None => None,
+    };
 
     let sheet_id_str = opt_non_empty_str_param(params, &["sheet_id", "sheetId"])?;
     let pretty = opt_bool_param(params, &["pretty"])?.unwrap_or(true);
@@ -2162,9 +2217,10 @@ fn handle_doc_export(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
         ));
     }
     let tidy = explicit_tidy.unwrap_or(tab_id.is_none());
-    let csv_opts = parse_doc_export_csv_options(params)?;
+    let csv_opts = parse_doc_export_csv_options(params, &format)?;
     let svg_precision = opt_u16_bounded_param(params, "svg_precision", 1, 8)?;
     let pdf_color_space = parse_pdf_color_space_fields(params, &["pdf_color_space", "color_space"])?;
+    let pdf_version = parse_doc_export_pdf_version(params)?;
     let all_graphs = opt_bool_param(params, &["all_graphs", "all"])?.unwrap_or(false);
     let dpi = opt_u16_bounded_param(params, "dpi", 18, 2400)?.unwrap_or(144);
     let width_px = opt_u32_bounded_param(params, "width_px", 1, MAX_CAPPED_RASTER_DIM_PX)?;
@@ -2179,9 +2235,18 @@ fn handle_doc_export(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
         None => TiffCompression::Lzw,
     };
 
+    let ttf_font_bytes = if format == "pdf" {
+        match validated_ttf_font.as_deref() {
+            Some(path_str) => Some(load_validated_control_ttf_font(path_str)?),
+            None => None,
+        }
+    } else {
+        None
+    };
+
     let doc = app.document();
     let explicit_id = sheet_id_str.map(SheetId::new);
-    let target = if format == "csv" && explicit_id.is_none() {
+    let target = if matches!(format.as_str(), "csv" | "tsv") && explicit_id.is_none() {
         if let Some(tid) = tab_id {
             let matched = doc
                 .active_sheet_id
@@ -2211,10 +2276,16 @@ fn handle_doc_export(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
             ExportArtifactFormat::Svg { options }
         }
         "pdf" => ExportArtifactFormat::Pdf {
-            options: PdfExportOptions { color_space: pdf_color_space, ..PdfExportOptions::default() },
+            options: PdfExportOptions {
+                color_space: pdf_color_space,
+                version: pdf_version,
+                embedded_truetype_font: ttf_font_bytes,
+                ..PdfExportOptions::default()
+            },
             all_graphs,
             sheet_ids: None,
         },
+        "emf" => ExportArtifactFormat::Emf { require_kind: None },
         "png" => ExportArtifactFormat::Png { width_px, height_px, dpi: Some(dpi), sizing: RasterSizingPolicy::CapToLimits { default_dpi: 144 } },
         "tiff" => ExportArtifactFormat::Tiff {
             width_px,
@@ -2223,18 +2294,32 @@ fn handle_doc_export(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
             compression: tiff_compression,
             sizing: RasterSizingPolicy::CapToLimits { default_dpi: 144 },
         },
-        "csv" => ExportArtifactFormat::Csv { options: csv_opts, tab_id: tab_id.map(str::to_owned), tab_index: None, tidy },
+        "csv" | "tsv" => ExportArtifactFormat::Csv { options: csv_opts, tab_id: tab_id.map(str::to_owned), tab_index: None, tidy },
         "json" => ExportArtifactFormat::Json { pretty },
         _ => return Err(ControlCallError::from(format!("unsupported export format '{format}'"))),
     };
 
     let artifact = export_document_artifact(doc, &ExportArtifactRequest { target, format: artifact_format }, None, "doc.export").map_err(|err| {
-        if format == "csv" {
+        if matches!(format.as_str(), "csv" | "tsv") {
             ControlCallError { message: format!("CSV export failed: {err}"), detail: Some(engine_error_detail(&err)) }
         } else {
             ControlCallError::from(err)
         }
     })?;
+
+    if let Some(dest_path) = validated_out_path {
+        app.session().write_host_file_atomic(&dest_path, &artifact.bytes)?;
+        return Ok(json!({
+            "exported": true,
+            "format": format,
+            "sheet_id": artifact.target_id,
+            "path": dest_path,
+            "bytes_written": artifact.bytes.len(),
+            "width_px": artifact.raster.map(|r| r.width_px),
+            "height_px": artifact.raster.map(|r| r.height_px),
+            "dpi": artifact.raster.map(|r| r.dpi),
+        }));
+    }
 
     enforce_control_payload_budget(artifact.bytes.len())?;
     Ok(json!({
@@ -4452,6 +4537,131 @@ mod tests {
         }
         assert_ne!(app.canvas_dialogs.active_dialog, ActiveDialog::None, "invalid ui.answer_dialog must not commit/close dialog");
 
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn doc_export_supports_emf_tsv_pdf_version_ttf_font_direct_path_and_gui_only_rejection() -> Result<(), Box<dyn std::error::Error>> {
+        use super::handle_control_line;
+        use crate::UiApp;
+
+        let mut app = UiApp::new();
+        app.execute_command("sheet.createData", serde_json::json!({ "sheet_id": "ds-exp", "title": "ExportData", "cols": 2, "rows": 3 }))?;
+        app.execute_command(
+            "table.setCells",
+            serde_json::json!({
+                "sheet_id": "ds-exp",
+                "edits": [
+                    { "row": 0, "col": 0, "value": 1.0 },
+                    { "row": 1, "col": 0, "value": 2.0 },
+                    { "row": 0, "col": 1, "value": 10.0 },
+                    { "row": 1, "col": 1, "value": 20.0 }
+                ]
+            }),
+        )?;
+        let g = app.execute_command("graph.create", serde_json::json!({ "data_sheet_id": "ds-exp", "kind": "xy", "title": "ExportGraph" }))?;
+        let graph_id = g.payload["sheet_id"].as_str().ok_or("missing graph_id")?.to_owned();
+
+        let dir = std::env::temp_dir().join(format!("cb_control_doc_export_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+
+        // 1. Inline TSV uses tab delimiter; csv_delimiter overrides it.
+        let tsv_reply: serde_json::Value = serde_json::from_str(&handle_control_line(
+            &mut app,
+            &serde_json::json!({ "id": "tsv-1", "method": "doc.export", "params": { "format": "tsv", "sheet_id": "ds-exp" } }).to_string(),
+        ))?;
+        assert_eq!(tsv_reply["ok"], serde_json::json!(true), "tsv export failed: {tsv_reply}");
+        let tsv_b64 = tsv_reply["result"]["data_base64"].as_str().ok_or("missing tsv base64")?;
+        let tsv_text = String::from_utf8(curvebook_platform::base64::decode(tsv_b64)?)?;
+        assert!(tsv_text.contains('\t'), "expected tab delimiter in TSV export: {tsv_text:?}");
+
+        let semi_reply: serde_json::Value = serde_json::from_str(&handle_control_line(
+            &mut app,
+            &serde_json::json!({ "id": "tsv-2", "method": "doc.export", "params": { "format": "tsv", "sheet_id": "ds-exp", "csv_delimiter": ";" } })
+                .to_string(),
+        ))?;
+        assert_eq!(semi_reply["ok"], serde_json::json!(true));
+        let semi_text = String::from_utf8(curvebook_platform::base64::decode(semi_reply["result"]["data_base64"].as_str().ok_or("missing b64")?)?)?;
+        assert!(semi_text.contains(';'), "expected explicit delimiter override: {semi_text:?}");
+
+        // 2. Direct-to-disk EMF export creates parent dir and omits data_base64.
+        let emf_path = dir.join("nested").join("figure.emf");
+        let emf_reply: serde_json::Value = serde_json::from_str(&handle_control_line(
+            &mut app,
+            &serde_json::json!({
+                "id": "emf-1",
+                "method": "doc.export",
+                "params": { "format": "emf", "sheet_id": graph_id, "path": emf_path.display().to_string() }
+            })
+            .to_string(),
+        ))?;
+        assert_eq!(emf_reply["ok"], serde_json::json!(true), "emf export failed: {emf_reply}");
+        assert_eq!(emf_reply["result"]["exported"], serde_json::json!(true));
+        assert!(emf_reply["result"].get("data_base64").is_none(), "direct path export must omit data_base64: {emf_reply}");
+        let emf_bytes = std::fs::read(&emf_path)?;
+        assert_eq!(emf_reply["result"]["bytes_written"], serde_json::json!(emf_bytes.len()));
+        assert!(emf_bytes.len() > 44 && emf_bytes.get(40..44) == Some(b" EMF"), "expected valid EMF signature");
+
+        // 3. PDF 1.4 with embedded TrueType font via ttf_font writes directly to disk.
+        let ttf_path = dir.join("minimal.ttf");
+        std::fs::write(&ttf_path, curvebook_text::build_minimal_truetype_font())?;
+        let pdf_path = dir.join("figure_v14.pdf");
+        let pdf_reply: serde_json::Value = serde_json::from_str(&handle_control_line(
+            &mut app,
+            &serde_json::json!({
+                "id": "pdf-1",
+                "method": "doc.export",
+                "params": {
+                    "format": "pdf",
+                    "sheet_id": graph_id,
+                    "pdf_version": "1.4",
+                    "ttf_font": ttf_path.display().to_string(),
+                    "path": pdf_path.display().to_string()
+                }
+            })
+            .to_string(),
+        ))?;
+        assert_eq!(pdf_reply["ok"], serde_json::json!(true), "pdf export failed: {pdf_reply}");
+        assert_eq!(pdf_reply["result"]["exported"], serde_json::json!(true));
+        assert!(pdf_reply["result"].get("data_base64").is_none());
+        let pdf_bytes = std::fs::read(&pdf_path)?;
+        assert!(pdf_bytes.starts_with(b"%PDF-1.4\n"), "expected PDF 1.4 header");
+        let pdf_latin1: String = pdf_bytes.iter().map(|&b| char::from(b)).collect();
+        assert!(pdf_latin1.contains("/Subtype /TrueType") && pdf_latin1.contains("/FontFile2"), "expected embedded TrueType font in PDF");
+
+        // 4. Invalid ttf_font file is rejected cleanly.
+        let bad_ttf = dir.join("not_a_font.ttf");
+        std::fs::write(&bad_ttf, b"not a valid sfnt binary")?;
+        let bad_font_reply: serde_json::Value = serde_json::from_str(&handle_control_line(
+            &mut app,
+            &serde_json::json!({
+                "id": "pdf-bad-font",
+                "method": "doc.export",
+                "params": { "format": "pdf", "sheet_id": graph_id, "ttf_font": bad_ttf.display().to_string() }
+            })
+            .to_string(),
+        ))?;
+        assert_eq!(bad_font_reply["ok"], serde_json::json!(false));
+
+        // 5. Under --gui-only, doc.export with path is blocked with gui_only_violation and does not touch disk.
+        let blocked_path = dir.join("blocked_gui_only.svg");
+        app.set_gui_only(true);
+        let gui_only_reply: serde_json::Value = serde_json::from_str(&handle_control_line(
+            &mut app,
+            &serde_json::json!({
+                "id": "gui-only-export",
+                "method": "doc.export",
+                "params": { "format": "svg", "sheet_id": graph_id, "path": blocked_path.display().to_string() }
+            })
+            .to_string(),
+        ))?;
+        assert_eq!(gui_only_reply["ok"], serde_json::json!(false));
+        assert_eq!(gui_only_reply["error_detail"]["code"], serde_json::json!("gui_only_violation"));
+        assert!(!blocked_path.exists(), "gui-only blocked doc.export must not create file on disk");
+
+        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 }

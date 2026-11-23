@@ -278,6 +278,7 @@ proptest! {
                 | "tools/list"
                 | "tools/call"
                 | "resources/list"
+                | "resources/templates/list"
                 | "resources/read"
                 | "prompts/list"
                 | "prompts/get"

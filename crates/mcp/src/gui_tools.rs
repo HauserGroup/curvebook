@@ -474,7 +474,7 @@ fn handle_ui_screenshot(state: &mut McpServerState, args: &Map<String, Value>) -
                     ErrorCode::GuiOnlyViolation,
                     "direct filesystem writes via `ui_screenshot` `path` are blocked under --gui-only",
                 )
-                .with_remediation("Omit `path` and inspect the returned in-memory `data_base64` PNG instead."),
+                .with_remediation("Omit `path` and inspect the returned inline `image/png` content block instead."),
             ));
         }
         let resolved = match formats::resolve_mcp_path(state, &raw_path) {

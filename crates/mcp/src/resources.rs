@@ -1,4 +1,4 @@
-//! MCP `resources/list` and `resources/read` handlers exposing active `Session` sheets and results.
+//! MCP `resources/list`, `resources/templates/list`, and `resources/read` handlers exposing active `Session` sheets and results.
 
 use curvebook_doc::{
     ColumnTable, ContingencyTable, DataSetColumn, DataSheet, GroupedTable, MultipleVariablesTable, NestedGroupColumn, NestedTable, PartsOfWholeTable,
@@ -26,6 +26,36 @@ pub struct ResourceDescriptor {
     pub description: String,
     #[serde(rename = "mimeType")]
     pub mime_type: String,
+}
+
+/// Resource template entry returned inside MCP `resources/templates/list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceTemplateDescriptor {
+    #[serde(rename = "uriTemplate")]
+    pub uri_template: String,
+    pub name: String,
+    pub description: String,
+    #[serde(rename = "mimeType")]
+    pub mime_type: String,
+}
+
+/// Enumerate canonical MCP resource URI templates supported by `resources/read`.
+#[must_use]
+pub fn list_resource_templates() -> Vec<ResourceTemplateDescriptor> {
+    vec![
+        ResourceTemplateDescriptor {
+            uri_template: String::from("sheet://{id}"),
+            name: String::from("Sheet summary"),
+            description: String::from("Active project sheet summary/preview (Data, Info, Analyses, Graphs, Layouts)."),
+            mime_type: String::from("application/json"),
+        },
+        ResourceTemplateDescriptor {
+            uri_template: String::from("result://{id}"),
+            name: String::from("Result sheet JSON"),
+            description: String::from("Canonical computed ResultSheet JSON export."),
+            mime_type: String::from("application/json"),
+        },
+    ]
 }
 
 /// Content entry returned inside MCP `resources/read`.
