@@ -86,18 +86,18 @@ if [[ -z "$TOOL" ]]; then
   TOOL="$CARGO_TARGET_DIR/appimagetool-$APPIMAGETOOL_VERSION-$ARCH.AppImage"
   if [[ ! -x "$TOOL" ]]; then
     download="$TOOL.download"
-    curl --proto '=https' -fsSL -o "$download" \
+    curl --proto '=https' --proto-redir '=https' -fsSL -o "$download" \
       "https://github.com/AppImage/appimagetool/releases/download/$APPIMAGETOOL_VERSION/appimagetool-$ARCH.AppImage"
     verify_sha256 "$APPIMAGETOOL_SHA256" "$download"
     chmod 755 "$download"
     mv "$download" "$TOOL"
   fi
-  verify_sha256 "$APPIMAGETOOL_SHA256" "$TOOL"
 fi
+verify_sha256 "$APPIMAGETOOL_SHA256" "$TOOL"
 RUNTIME="$CARGO_TARGET_DIR/appimage-runtime-$APPIMAGE_RUNTIME_VERSION-$ARCH"
 if [[ ! -f "$RUNTIME" ]]; then
   download="$RUNTIME.download"
-  curl --proto '=https' -fsSL -o "$download" \
+  curl --proto '=https' --proto-redir '=https' -fsSL -o "$download" \
     "https://github.com/AppImage/type2-runtime/releases/download/$APPIMAGE_RUNTIME_VERSION/runtime-$ARCH"
   verify_sha256 "$APPIMAGE_RUNTIME_SHA256" "$download"
   mv "$download" "$RUNTIME"

@@ -26,7 +26,7 @@ impl SimRepoTemplate {
         let root = workspace_root()?;
         let mut files = Vec::new();
 
-        for file in ["AGENTS.md", "NOTICE"] {
+        for file in ["AGENTS.md", "NOTICE", "README.md", "SECURITY.md", "Cargo.toml"] {
             let bytes = fs::read(root.join(file)).map_err(|e| format!("read {file}: {e}"))?;
             files.push((PathBuf::from(file), bytes));
         }
@@ -89,7 +89,7 @@ fn collect_docs_subset(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), String
             continue;
         };
         if p.is_file() {
-            if !matches!(name, "ROADMAP.md" | "STATUS.md" | "gui-workflows.md") {
+            if !matches!(name, "STATUS.md" | "gui-workflows.md") {
                 out.push(Path::new("docs").join(name));
             }
         } else if p.is_dir() && matches!(name, "images" | "schemas" | "release" | "manual" | "reference") {

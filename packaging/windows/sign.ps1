@@ -3,6 +3,7 @@
   Authenticode-sign files with signtool, using whichever signing material is configured.
 #>
 param(
+  [switch] $RequireSigning,
   [Parameter(Mandatory = $true, ValueFromRemainingArguments = $true)]
   [string[]] $Files
 )
@@ -34,7 +35,11 @@ $haveCert = [bool]$env:WINDOWS_CERTIFICATE
 $azureVars = 'AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET', 'AZURE_SIGNING_ENDPOINT', 'AZURE_SIGNING_ACCOUNT', 'AZURE_CERT_PROFILE'
 $haveAzure = -not ($azureVars | Where-Object { -not [Environment]::GetEnvironmentVariable($_) })
 
+$enforceSigning = $RequireSigning -or ($env:CURVEBOOK_REQUIRE_WINDOWS_SIGNING -match '^(1|true|yes)$')
 if (-not $haveCert -and -not $haveAzure) {
+  if ($enforceSigning) {
+    throw "Windows signing is required (-RequireSigning / CURVEBOOK_REQUIRE_WINDOWS_SIGNING), but neither WINDOWS_CERTIFICATE nor AZURE_* signing secrets are set"
+  }
   Write-Warn "Windows signing secrets not set (WINDOWS_CERTIFICATE or AZURE_*): leaving unsigned: $($Files -join ', ')"
   exit 0
 }
@@ -44,15 +49,31 @@ $common = @('sign', '/v', '/fd', 'SHA256', '/td', 'SHA256', '/d', 'CurveBook', '
 $tmp = Join-Path ([IO.Path]::GetTempPath()) "curvebook-sign-$([IO.Path]::GetRandomFileName())"
 New-Item -ItemType Directory -Path $tmp | Out-Null
 
+$importedStore = $null
+$importedCert = $null
 try {
   if ($haveCert) {
     Write-Output "Signing with WINDOWS_CERTIFICATE: $($Files -join ', ')"
-    $pfx = Join-Path $tmp 'cert.pfx'
-    [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+    $pfxBytes = [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE)
+    $securePwd = $null
+    try {
+      if ($env:WINDOWS_CERTIFICATE_PASSWORD) {
+        $securePwd = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+      }
+      $flags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::UserKeySet -bor
+               [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::PersistKeySet
+      $importedCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2
+      $importedCert.Import($pfxBytes, $securePwd, $flags)
+    }
+    finally {
+      [Array]::Clear($pfxBytes, 0, $pfxBytes.Length)
+      if ($null -ne $securePwd) { $securePwd.Dispose() }
+    }
+    $importedStore = New-Object System.Security.Cryptography.X509Certificates.X509Store('My', 'CurrentUser')
+    $importedStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+    $importedStore.Add($importedCert)
     $ts = if ($env:WINDOWS_TIMESTAMP_URL) { $env:WINDOWS_TIMESTAMP_URL } else { 'http://timestamp.digicert.com' }
-    $signArgs = $common + @('/tr', $ts, '/f', $pfx)
-    if ($env:WINDOWS_CERTIFICATE_PASSWORD) { $signArgs += @('/p', $env:WINDOWS_CERTIFICATE_PASSWORD) }
-    Invoke-SignTool ($signArgs + $Files)
+    Invoke-SignTool ($common + @('/tr', $ts, '/sha1', $importedCert.Thumbprint) + $Files)
   }
   else {
     Write-Output "Signing with Azure Trusted Signing ($env:AZURE_SIGNING_ACCOUNT / $env:AZURE_CERT_PROFILE): $($Files -join ', ')"
@@ -81,5 +102,10 @@ try {
   Invoke-SignTool (@('verify', '/pa', '/v') + $Files)
 }
 finally {
+  if ($null -ne $importedStore -and $null -ne $importedCert) {
+    try { $importedStore.Remove($importedCert) } catch {}
+  }
+  if ($null -ne $importedStore) { $importedStore.Dispose() }
+  if ($null -ne $importedCert) { $importedCert.Dispose() }
   Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }

@@ -28,6 +28,9 @@ inputs:
   install-libarchive:
     description: Install libarchive-tools (bsdtar) required by release-scan archive tests.
     default: 'false'
+  install-pdf-qa:
+    description: Install poppler-utils (pdftoppm), ghostscript (gs), and DejaVu Sans fonts required by PDF external viewer QA tests.
+    default: 'false'
 runs:
   using: composite
   steps:
@@ -38,12 +41,13 @@ runs:
         sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
         df -h /
     - name: Install system libraries
-      if: inputs.install-gui-libs == 'true' || inputs.install-linters == 'true' || inputs.install-libarchive == 'true'
+      if: inputs.install-gui-libs == 'true' || inputs.install-linters == 'true' || inputs.install-libarchive == 'true' || inputs.install-pdf-qa == 'true'
       shell: bash
       env:
         INSTALL_GUI_LIBS: ${{ inputs.install-gui-libs }}
         INSTALL_LINTERS: ${{ inputs.install-linters }}
         INSTALL_LIBARCHIVE: ${{ inputs.install-libarchive }}
+        INSTALL_PDF_QA: ${{ inputs.install-pdf-qa }}
       run: |
         set -euo pipefail
         pkgs=()
@@ -59,6 +63,9 @@ runs:
         fi
         if [ "$INSTALL_LIBARCHIVE" = "true" ]; then
           pkgs+=(libarchive-tools)
+        fi
+        if [ "$INSTALL_PDF_QA" = "true" ]; then
+          pkgs+=(poppler-utils ghostscript fonts-dejavu-core)
         fi
         if [ "${#pkgs[@]}" -eq 0 ]; then
           exit 0
@@ -138,14 +145,14 @@ runs:
         mkdir -p "$RUNNER_TEMP/ci-tools"
         if [ "$INSTALL_NEXTEST" = "true" ]; then
           tarball="$RUNNER_TEMP/ci-tools/nextest.tar.gz"
-          curl -fsSL --retry 5 --retry-all-errors --connect-timeout 15 --max-time 60 'https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.152/cargo-nextest-0.9.152-x86_64-unknown-linux-gnu.tar.gz' -o "$tarball"
+          curl --proto '=https' --proto-redir '=https' -fsSL --retry 5 --retry-all-errors --connect-timeout 15 --max-time 60 'https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.152/cargo-nextest-0.9.152-x86_64-unknown-linux-gnu.tar.gz' -o "$tarball"
           printf '%s  %s\n' 'd039b43c3e0958441b6ad0a39c8884d018b3d2e8fb9928f209074b1100b5e17a' "$tarball" | sha256sum --check
           tar -xzf "$tarball" -C "$RUNNER_TEMP/ci-tools" cargo-nextest
           rm -f "$tarball"
         fi
         if [ "$INSTALL_LINTERS" = "true" ]; then
           tarball="$RUNNER_TEMP/ci-tools/actionlint.tar.gz"
-          curl -fsSL --retry 5 --retry-all-errors --connect-timeout 15 --max-time 60 'https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz' -o "$tarball"
+          curl --proto '=https' --proto-redir '=https' -fsSL --retry 5 --retry-all-errors --connect-timeout 15 --max-time 60 'https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz' -o "$tarball"
           printf '%s  %s\n' '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8' "$tarball" | sha256sum --check
           tar -xzf "$tarball" -C "$RUNNER_TEMP/ci-tools" actionlint
           rm -f "$tarball"

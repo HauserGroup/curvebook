@@ -12,7 +12,13 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::time::Duration;
+
+use curvebook_platform::process::ProcessCommand;
+use curvebook_platform::read_regular_file_bytes;
+
+const MAX_DOC_PNG_BYTES: usize = 32 * 1024 * 1024;
+const MAX_ASSETS_MD_BYTES: usize = 4 * 1024 * 1024;
 
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 const EXPECTED_WIDTH: u32 = 1440;
@@ -50,7 +56,10 @@ fn parse_args(args: &[String]) -> Result<bool, String> {
 
 fn nested_target_dir(root: &Path) -> PathBuf {
     match std::env::var_os("CARGO_TARGET_DIR") {
-        Some(dir) if !dir.is_empty() => PathBuf::from(dir).join("doc-screenshots-nested"),
+        Some(dir) if !dir.is_empty() => {
+            let p = PathBuf::from(dir);
+            if p.is_absolute() { p } else { root.join(p) }.join("doc-screenshots-nested")
+        }
         _ => root.join("target").join("doc-screenshots-nested"),
     }
 }
@@ -60,29 +69,50 @@ fn generate_and_verify(root: &Path) -> Result<(), String> {
     fs::create_dir_all(&out_dir).map_err(|e| format!("create {}: {e}", out_dir.display()))?;
 
     let nested_target = nested_target_dir(root);
+    let nested_str = nested_target.to_str().ok_or_else(|| format!("non-UTF-8 path {}", nested_target.display()))?;
     let args = ["run", "--offline", "--locked", "--quiet", "-p", "curvebook-ui-egui", "--example", "doc_screenshots", "--", "docs/images"];
     println!("+ CARGO_TARGET_DIR={} cargo {}", nested_target.display(), args.join(" "));
 
-    let status = Command::new("cargo")
+    let out = ProcessCommand::new("cargo")
         .current_dir(root)
-        .env("CARGO_TARGET_DIR", &nested_target)
+        .env("CARGO_TARGET_DIR", nested_str)
         .args(args)
-        .status()
+        .wall_timeout(Duration::from_secs(600))
+        .idle_timeout(Duration::from_secs(180))
+        .run()
         .map_err(|e| format!("invoke doc_screenshots example: {e}"))?;
-    if !status.success() {
-        return Err(format!("doc_screenshots example failed with {status}"));
+    if !out.stdout.is_empty() {
+        print!("{}", String::from_utf8_lossy(&out.stdout));
+    }
+    if !out.stderr.is_empty() {
+        eprint!("{}", String::from_utf8_lossy(&out.stderr));
+    }
+    if !out.success {
+        return Err(format!("doc_screenshots example failed with exit code {:?}", out.status_code));
     }
 
     verify_existing(root)
 }
 
+fn read_non_symlink_png_bytes(path: &Path, label: &str) -> Result<Vec<u8>, String> {
+    let meta = fs::symlink_metadata(path).map_err(|e| format!("missing or unreadable `{label}`: {e}"))?;
+    if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+        return Err(format!("`{label}` must be a regular non-symlink PNG file"));
+    }
+    if meta.len() > u64::try_from(MAX_DOC_PNG_BYTES).unwrap_or(u64::MAX) {
+        return Err(format!("`{label}` size {} exceeds {MAX_DOC_PNG_BYTES} bytes", meta.len()));
+    }
+    read_regular_file_bytes(path, MAX_DOC_PNG_BYTES).map_err(|e| format!("read `{label}`: {e}"))
+}
+
 fn verify_existing(root: &Path) -> Result<(), String> {
     let assets_path = root.join("ASSETS.md");
-    let assets_md = fs::read_to_string(&assets_path).map_err(|e| format!("read {}: {e}", assets_path.display()))?;
+    let assets_bytes = read_regular_file_bytes(&assets_path, MAX_ASSETS_MD_BYTES).map_err(|e| format!("read {}: {e}", assets_path.display()))?;
+    let assets_md = String::from_utf8(assets_bytes).map_err(|_| format!("{} is not valid UTF-8", assets_path.display()))?;
 
     for rel in SCREENSHOT_REL_PATHS {
         let abs = root.join(rel);
-        let bytes = fs::read(&abs).map_err(|e| format!("missing or unreadable screenshot `{rel}`: {e}"))?;
+        let bytes = read_non_symlink_png_bytes(&abs, rel)?;
         let summary = validate_png_bytes(rel, &bytes)?;
         ensure_asset_listed(rel, &assets_md)?;
         println!(
@@ -99,7 +129,7 @@ fn verify_existing(root: &Path) -> Result<(), String> {
     for &(rel, (exp_w, exp_h), min_idat) in EXTRA_DOC_IMAGES {
         let abs = root.join(rel);
         if abs.exists() {
-            let bytes = fs::read(&abs).map_err(|e| format!("unreadable doc image `{rel}`: {e}"))?;
+            let bytes = read_non_symlink_png_bytes(&abs, rel)?;
             let summary = validate_png_bytes_with_bounds(rel, &bytes, Some((exp_w, exp_h)), min_idat)?;
             ensure_asset_listed(rel, &assets_md)?;
             println!(
@@ -117,8 +147,19 @@ fn verify_existing(root: &Path) -> Result<(), String> {
 }
 
 fn ensure_asset_listed(rel: &str, assets_md: &str) -> Result<(), String> {
-    let needle = format!("`{rel}`");
-    if assets_md.contains(&needle) { Ok(()) } else { Err(format!("ASSETS.md is missing attribution row containing {needle}")) }
+    let found = assets_md.lines().any(|raw| {
+        let trimmed = raw.trim();
+        if !trimmed.starts_with('|') || !trimmed.ends_with('|') {
+            return false;
+        }
+        let inner = &trimmed[1..trimmed.len() - 1];
+        let Some(first_cell) = inner.split('|').next() else {
+            return false;
+        };
+        let asset = first_cell.trim().trim_matches('`').trim();
+        asset == rel
+    });
+    if found { Ok(()) } else { Err(format!("ASSETS.md is missing attribution table row for `{rel}`")) }
 }
 
 /// Validate a 1440x900 8-bit RGBA PNG payload (`R0.14`).
@@ -325,5 +366,13 @@ mod tests {
         assert_eq!(parse_args(&[String::from("--check")]), Ok(true));
         assert!(parse_args(&[String::from("--bogus")]).is_err());
         assert!(parse_args(&[String::from("--check"), String::from("extra")]).is_err());
+    }
+
+    #[test]
+    fn fa_sec23_13_ensure_asset_listed_requires_table_row_not_prose() {
+        let prose_only = "Mentioning `docs/images/workspace-split-fit.png` in prose is not a table row.\n";
+        assert!(super::ensure_asset_listed("docs/images/workspace-split-fit.png", prose_only).is_err());
+        let row = "| `docs/images/workspace-split-fit.png` | CurveBook | Generated | MIT OR Apache-2.0 | Light |\n";
+        assert!(super::ensure_asset_listed("docs/images/workspace-split-fit.png", row).is_ok());
     }
 }

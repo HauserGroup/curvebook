@@ -3,7 +3,10 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::process::Command;
+use std::time::Duration;
+
+use curvebook_platform::process::ProcessCommand;
+use curvebook_platform::write_atomic;
 
 const PEOPLE_REL: &str = "contributors/people.toml";
 const OUT_REL: &str = "contributors/contributors.json";
@@ -50,7 +53,7 @@ pub fn run(root: &Path) -> Result<(), String> {
     if let Some(parent) = out_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
-    std::fs::write(&out_path, rendered).map_err(|e| format!("write {OUT_REL}: {e}"))?;
+    write_atomic(&out_path, rendered.as_bytes()).map_err(|e| format!("write {OUT_REL}: {e}"))?;
     println!("contributors: wrote {OUT_REL} ({commits} commit(s), {} listed contributor(s))", roster.len());
     Ok(())
 }
@@ -70,16 +73,25 @@ fn resolve_repo_slug(root: &Path) -> String {
 #[must_use]
 pub fn parse_cargo_repo_slug(cargo_toml: &str) -> Option<String> {
     let mut in_pkg = false;
-    for line in cargo_toml.lines() {
-        let trimmed = line.trim();
+    for raw in cargo_toml.lines() {
+        let trimmed = strip_toml_comment(raw).trim();
+        if trimmed.is_empty() {
+            continue;
+        }
         if trimmed.starts_with('[') {
             in_pkg = trimmed == "[workspace.package]";
             continue;
         }
-        if !in_pkg || !trimmed.starts_with("repository") {
+        if !in_pkg {
             continue;
         }
-        let val = parse_quoted_rhs(trimmed)?;
+        let Some((key, rhs)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "repository" {
+            continue;
+        }
+        let val = parse_quoted_value(rhs.trim())?;
         let stripped = val.trim_end_matches('/').trim_end_matches(".git");
         if let Some(rest) = stripped.strip_prefix("https://github.com/")
             && rest.split('/').count() == 2
@@ -97,8 +109,14 @@ fn existing_head_date(path: &Path) -> Option<String> {
 }
 
 fn git_stdout(root: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git").current_dir(root).args(args).output().ok()?;
-    if !out.status.success() {
+    let out = ProcessCommand::new("git")
+        .current_dir(root)
+        .args(args.iter().copied())
+        .wall_timeout(Duration::from_secs(60))
+        .idle_timeout(Duration::from_secs(30))
+        .run()
+        .ok()?;
+    if !out.success {
         return None;
     }
     let text = String::from_utf8_lossy(&out.stdout).trim().to_owned();
@@ -115,7 +133,7 @@ pub fn parse_people_toml(text: &str) -> BTreeMap<String, PersonOverride> {
             continue;
         }
         if let Some(header) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-            current = header.trim().strip_prefix("people.").map(|s| s.trim().trim_matches('"').to_ascii_lowercase());
+            current = header.trim().strip_prefix("people.").map(|s| s.trim().trim_matches(['"', '\'']).to_ascii_lowercase());
             if let Some(login) = &current {
                 map.entry(login.clone()).or_default();
             }
@@ -149,32 +167,42 @@ fn apply_person_field(entry: &mut PersonOverride, key: &str, rhs: &str) {
 }
 
 fn strip_toml_comment(line: &str) -> &str {
-    let mut in_quotes = false;
-    let bytes = line.as_bytes();
-    let mut i = 0usize;
-    while let Some(&b) = bytes.get(i) {
-        if in_quotes && b == b'\\' {
-            i += 2;
-            continue;
+    let mut in_double = false;
+    let mut in_single = false;
+    let mut escaped = false;
+    for (idx, ch) in line.char_indices() {
+        if in_double {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_double = false;
+            }
+        } else if in_single {
+            if ch == '\'' {
+                in_single = false;
+            }
+        } else {
+            match ch {
+                '"' => in_double = true,
+                '\'' => in_single = true,
+                '#' => return &line[..idx],
+                _ => {}
+            }
         }
-        if b == b'"' {
-            in_quotes = !in_quotes;
-        } else if !in_quotes && b == b'#' {
-            return line.get(..i).unwrap_or(line);
-        }
-        i += 1;
     }
     line
 }
 
-fn parse_quoted_rhs(line: &str) -> Option<String> {
-    let (_, rhs) = line.split_once('=')?;
-    parse_quoted_value(rhs.trim())
-}
-
 fn parse_quoted_value(rhs: &str) -> Option<String> {
-    let inner = rhs.strip_prefix('"')?.strip_suffix('"')?;
-    Some(inner.replace("\\\"", "\"").replace("\\\\", "\\"))
+    if let Some(inner) = rhs.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+        return Some(inner.replace("\\\"", "\"").replace("\\\\", "\\"));
+    }
+    if let Some(inner) = rhs.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) {
+        return Some(inner.to_owned());
+    }
+    None
 }
 
 #[must_use]
@@ -339,5 +367,16 @@ Local User\x1flocal@example.org
     fn extracts_repo_slug_from_workspace_cargo_toml() {
         let cargo = "[workspace.package]\nversion = \"0.1.0\"\nrepository = \"https://github.com/HauserGroup/curvebook\"\n";
         assert_eq!(parse_cargo_repo_slug(cargo).as_deref(), Some("HauserGroup/curvebook"));
+    }
+
+    #[test]
+    fn fa_sec23_15_handles_single_quotes_compact_assign_and_comments() {
+        let cargo = "[workspace.package] # header comment\nrepository_mirror = 'https://evil.example/a/b'\nrepository='https://github.com/HauserGroup/curvebook' # trailing\n";
+        assert_eq!(parse_cargo_repo_slug(cargo).as_deref(), Some("HauserGroup/curvebook"));
+
+        let people = "[people.'ada-lovelace']\nreal_name='Ada # Byron'\ndisplay_name='Ada' # ok\n";
+        let map = parse_people_toml(people);
+        assert_eq!(map["ada-lovelace"].real_name.as_deref(), Some("Ada # Byron"));
+        assert_eq!(map["ada-lovelace"].display_name.as_deref(), Some("Ada"));
     }
 }

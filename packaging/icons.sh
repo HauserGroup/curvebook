@@ -44,7 +44,7 @@ done
 mkdir -p "$ICON_DIR/hicolor/scalable/apps"
 cp "$SMALL_SVG" "$ICON_DIR/hicolor/scalable/apps/${APP_ID}.svg"
 
-(cd "$ROOT" && cargo xtask ico "$ICON_DIR/curvebook.ico" \
+(cd "$ROOT" && cargo run --locked -p xtask -- ico "$ICON_DIR/curvebook.ico" \
   "$ICON_DIR/hicolor/16x16/apps/${APP_ID}.png" \
   "$ICON_DIR/hicolor/24x24/apps/${APP_ID}.png" \
   "$ICON_DIR/hicolor/32x32/apps/${APP_ID}.png" \

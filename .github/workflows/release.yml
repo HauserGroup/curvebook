@@ -126,7 +126,7 @@ jobs:
         with:
           toolchain: "1.99.1"
       - name: Run cargo xtask contributors
-        run: cargo xtask contributors
+        run: cargo run --locked -p xtask -- contributors
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: contributors-json
@@ -228,6 +228,9 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.event_name != 'schedule' }}
+      - name: Run 1M-cell Column Go/No-Go release benchmark
+        if: matrix.arch == 'x86_64'
+        run: cargo test --release --locked -p curvebook-ui-egui --test r15_2_anova_and_1m_bench r15_2_gonogo_1m_column_matched_benchmark_release -- --ignored --exact --nocapture
       - name: Build Linux AppImage
         env:
           INPUT_VERSION: ${{ inputs.version }}
@@ -415,6 +418,7 @@ jobs:
           GITHUB_REF_TYPE: ${{ github.ref_type }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
           MATRIX_ARCH: ${{ matrix.arch }}
+          WINDOWS_SIGNING_ENABLED: ${{ github.event_name != 'schedule' && !inputs.alpha && vars.WINDOWS_SIGNING_ENABLED || '' }}
           WINDOWS_CERTIFICATE: ${{ github.event_name != 'schedule' && !inputs.alpha && secrets.WINDOWS_CERTIFICATE || '' }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ github.event_name != 'schedule' && !inputs.alpha && secrets.WINDOWS_CERTIFICATE_PASSWORD || '' }}
           AZURE_TENANT_ID: ${{ github.event_name != 'schedule' && !inputs.alpha && secrets.AZURE_TENANT_ID || '' }}
@@ -429,7 +433,12 @@ jobs:
           } elseif ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME.StartsWith('v')) {
             $env:CURVEBOOK_VERSION = $env:GITHUB_REF_NAME.Substring(1)
           }
-          ./packaging/windows/package.ps1 -Arch $env:MATRIX_ARCH
+          $requireSigning = ($env:WINDOWS_SIGNING_ENABLED -eq 'true') -or [bool]$env:WINDOWS_CERTIFICATE -or [bool]$env:AZURE_SIGNING_ACCOUNT
+          if ($requireSigning) {
+            ./packaging/windows/package.ps1 -Arch $env:MATRIX_ARCH -RequireSigning
+          } else {
+            ./packaging/windows/package.ps1 -Arch $env:MATRIX_ARCH
+          }
       - name: Scan Windows release assets
         shell: pwsh
         env:
@@ -678,6 +687,13 @@ jobs:
             fi
             gh release edit "$tag" "${release_flags[@]}"
             gh release upload "$tag" dist/release/* --clobber
+            while IFS= read -r existing_asset; do
+              [ -n "$existing_asset" ] || continue
+              if [ ! -e "dist/release/$existing_asset" ]; then
+                echo "Pruning stale draft release asset: $existing_asset"
+                gh release delete-asset "$tag" "$existing_asset" --yes
+              fi
+            done < <(gh release view "$tag" --json assets --jq '.assets[].name')
           else
             gh release create "$tag" dist/release/* "${release_flags[@]}" --target "$GITHUB_SHA" --generate-notes
           fi

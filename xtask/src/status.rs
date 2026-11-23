@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const STATUS_REL: &str = "docs/STATUS.md";
 const ROADMAP_REL: &str = "docs/ROADMAP.md";
@@ -161,7 +161,7 @@ pub fn collect_workspace_tests(root: &Path) -> Result<WorkspaceTests, String> {
     let mut tests = WorkspaceTests::default();
     for dir_name in ["crates", "apps"] {
         let base = root.join(dir_name);
-        if base.is_dir() {
+        if fs::symlink_metadata(&base).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_dir()) {
             visit_rust_dir(&base, &mut tests)?;
         }
     }
@@ -172,15 +172,21 @@ fn visit_rust_dir(dir: &Path, out: &mut WorkspaceTests) -> Result<(), String> {
     let entries = fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     for entry_res in entries {
         let entry = entry_res.map_err(|e| format!("{}: {e}", dir.display()))?;
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        if ft.is_symlink() {
+            continue;
+        }
         let path = entry.path();
-        if path.is_dir() {
+        if ft.is_dir() {
             let skip = path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n == "target" || n.starts_with('.'));
             if !skip {
                 visit_rust_dir(&path, out)?;
             }
             continue;
         }
-        if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+        if ft.is_file() && path.extension().and_then(|e| e.to_str()) == Some("rs") {
             let src = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
             let parent =
@@ -192,11 +198,12 @@ fn visit_rust_dir(dir: &Path, out: &mut WorkspaceTests) -> Result<(), String> {
 }
 
 fn scan_tests_in_rust_source(stem: &str, parent_mod: Option<&str>, src: &str, out: &mut WorkspaceTests) {
+    let (_with_strings, code_only) = build_stripped_views(src);
     let mut pending_test = false;
     let mut pending_ignored = false;
     let mut attr_depth = 0isize;
 
-    for line in src.lines() {
+    for line in code_only.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with("//") {
             continue;
@@ -903,23 +910,32 @@ fn has_concrete_manual_detail(after: &str) -> bool {
     !first.is_empty() && !matches!(first, "none" | "no" | "todo" | "n/a" | "pending" | "tbd" | "planned" | "missing" | "needed" | "untested")
 }
 
-/// Scan all `crates/ui-egui/tests/human_wf_*.rs` suites on disk for statically complete `WF-01`..`WF-65`
-/// `WorkflowRun` tests and forbidden bypass/guard patterns (`R10.26`).
+/// Scan all `crates/ui-egui/tests/human_wf_*.rs` and `human_wf_*/**/*.rs` suites on disk
+/// (excluding `human_wf_common`) for statically complete `WF-01`..`WF-65` `WorkflowRun` tests
+/// and forbidden bypass/guard patterns (`R10.26`).
 pub fn scan_human_wf_completion(root: &Path) -> Result<(BTreeSet<u8>, Vec<EvidenceViolation>), String> {
     let tests_dir = root.join("crates/ui-egui/tests");
-    if !tests_dir.is_dir() {
+    if !fs::symlink_metadata(&tests_dir).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_dir()) {
         return Ok((BTreeSet::new(), Vec::new()));
     }
     let mut paths = Vec::new();
     let entries = fs::read_dir(&tests_dir).map_err(|e| format!("{}: {e}", tests_dir.display()))?;
     for entry_res in entries {
         let entry = entry_res.map_err(|e| format!("{}: {e}", tests_dir.display()))?;
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        if ft.is_symlink() {
+            continue;
+        }
         let path = entry.path();
-        if path.is_file()
-            && path.extension().and_then(|s| s.to_str()) == Some("rs")
-            && path.file_name().and_then(|s| s.to_str()).is_some_and(|n| n.starts_with("human_wf_"))
-        {
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if ft.is_file() && name.ends_with(".rs") && name.starts_with("human_wf_") {
             paths.push(path);
+        } else if ft.is_dir() && name.starts_with("human_wf_") && name != "human_wf_common" {
+            collect_rs_files_no_symlinks(&path, &mut paths)?;
         }
     }
     paths.sort();
@@ -934,6 +950,26 @@ pub fn scan_human_wf_completion(root: &Path) -> Result<(BTreeSet<u8>, Vec<Eviden
     Ok(analyze_human_wf_sources(&refs))
 }
 
+fn collect_rs_files_no_symlinks(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    let entries = fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    for entry_res in entries {
+        let entry = entry_res.map_err(|e| format!("{}: {e}", dir.display()))?;
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        if ft.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if ft.is_dir() {
+            collect_rs_files_no_symlinks(&path, out)?;
+        } else if ft.is_file() && path.extension().and_then(|s| s.to_str()) == Some("rs") {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
 /// Analyze `(rel_path, rust_source)` pairs for `WF-NN` `WorkflowRun` five-stage completeness and forbidden bypasses.
 #[must_use]
 pub fn analyze_human_wf_sources(sources: &[(&str, &str)]) -> (BTreeSet<u8>, Vec<EvidenceViolation>) {
@@ -941,7 +977,7 @@ pub fn analyze_human_wf_sources(sources: &[(&str, &str)]) -> (BTreeSet<u8>, Vec<
     let mut violations = Vec::new();
     for &(path, src) in sources {
         for func in extract_rust_functions(src) {
-            if func.header_and_body_code.contains("WorkflowRun") {
+            if !func.is_test || parse_wf_fn_prefix(&func.name).is_some() || func.header_and_body_code.contains("WorkflowRun") {
                 check_workflow_run_lint(path, &func, &mut violations);
             }
             if func.is_test
@@ -1106,6 +1142,7 @@ fn try_skip_char_literal(src: &str, idx: usize) -> Option<usize> {
     let mut chars = tail.char_indices();
     let (_, first) = chars.next()?;
     if first == '\\' {
+        let _escaped = chars.next()?;
         for (off, ch) in chars {
             if ch == '\'' {
                 return Some(idx + 1 + off + 1);
@@ -1157,64 +1194,52 @@ fn extract_rust_functions(src: &str) -> Vec<ScannedRustFn> {
     let mut out = Vec::new();
     let mut i = 0usize;
     let mut line_no = 1usize;
-    let mut brace_depth = 0usize;
     let mut pending_test = false;
     let mut pending_ignored = false;
 
     while i < n {
-        if brace_depth == 0 {
-            if i + 1 < n
-                && bytes[i] == b'#'
-                && bytes[i + 1] == b'['
-                && let Some((attr, tail)) = split_balanced_attr(&code_only[i..])
+        if i + 1 < n
+            && bytes[i] == b'#'
+            && bytes[i + 1] == b'['
+            && let Some((attr, tail)) = split_balanced_attr(&code_only[i..])
+        {
+            pending_test |= is_test_attribute(attr);
+            pending_ignored |= is_ignore_attribute(attr);
+            let consumed = code_only[i..].len() - tail.len();
+            line_no += code_only[i..i + consumed].bytes().filter(|&b| b == b'\n').count();
+            i += consumed;
+            continue;
+        }
+        if is_word_at(&code_only, i, "fn") && can_start_item_before(&code_only[..i]) {
+            let fn_start = i;
+            let fn_line = line_no;
+            let after_fn = code_only[i + 2..].trim_start();
+            let name: String = after_fn.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+            if !name.is_empty()
+                && let Some((body_open, body_close)) = find_fn_body_braces(bytes, i + 2)
             {
-                pending_test |= is_test_attribute(attr);
-                pending_ignored |= is_ignore_attribute(attr);
-                let consumed = code_only[i..].len() - tail.len();
-                line_no += code_only[i..i + consumed].bytes().filter(|&b| b == b'\n').count();
-                i += consumed;
-                continue;
-            }
-            if is_word_at(&code_only, i, "fn") && can_start_item_before(&code_only[..i]) {
-                let fn_start = i;
-                let fn_line = line_no;
-                let after_fn = code_only[i + 2..].trim_start();
-                let name: String = after_fn.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
-                if !name.is_empty()
-                    && let Some((body_open, body_close)) = find_fn_body_braces(bytes, i + 2)
-                {
-                    out.push(ScannedRustFn {
-                        is_test: pending_test,
-                        is_ignored: pending_ignored,
-                        name,
-                        line: fn_line,
-                        header_and_body_code: code_only[fn_start..=body_close].to_owned(),
-                        body_with_strings: with_strings[body_open..=body_close].to_owned(),
-                        body_code_only: code_only[body_open..=body_close].to_owned(),
-                    });
-                    line_no += code_only[i..=body_close].bytes().filter(|&b| b == b'\n').count();
-                    i = body_close + 1;
-                    pending_test = false;
-                    pending_ignored = false;
-                    continue;
-                }
-            }
-            if bytes[i] == b';' {
+                out.push(ScannedRustFn {
+                    is_test: pending_test,
+                    is_ignored: pending_ignored,
+                    name,
+                    line: fn_line,
+                    header_and_body_code: code_only[fn_start..=body_close].to_owned(),
+                    body_with_strings: with_strings[body_open..=body_close].to_owned(),
+                    body_code_only: code_only[body_open..=body_close].to_owned(),
+                });
+                line_no += code_only[i..=body_close].bytes().filter(|&b| b == b'\n').count();
+                i = body_close + 1;
                 pending_test = false;
                 pending_ignored = false;
+                continue;
             }
+        }
+        if matches!(bytes[i], b';' | b'{' | b'}') {
+            pending_test = false;
+            pending_ignored = false;
         }
 
         let step = code_only[i..].chars().next().map_or(1, char::len_utf8);
-        if bytes[i] == b'{' {
-            brace_depth += 1;
-        } else if bytes[i] == b'}' && brace_depth > 0 {
-            brace_depth -= 1;
-            if brace_depth == 0 {
-                pending_test = false;
-                pending_ignored = false;
-            }
-        }
         if bytes[i] == b'\n' {
             line_no += 1;
         }
@@ -1229,7 +1254,7 @@ fn can_start_item_before(prefix: &str) -> bool {
         return true;
     }
     if let Some(last) = trimmed.chars().next_back()
-        && matches!(last, ';' | '}' | ']')
+        && matches!(last, ';' | '{' | '}' | ']')
     {
         return true;
     }
@@ -1301,7 +1326,81 @@ fn has_wf_start(body_with_strings: &str, idx: u8) -> bool {
 
 fn has_finish(body_code_only: &str) -> bool {
     let compact: String = body_code_only.chars().filter(|c| !c.is_ascii_whitespace()).collect();
-    compact.contains(".finish()")
+    if let Some(bound_var) = find_workflow_run_binding(body_code_only) {
+        return compact.contains(&format!("{bound_var}.finish()")) || compact.contains(&format!("WorkflowRun::finish({bound_var})"));
+    }
+    has_chained_workflow_run_finish(&compact)
+}
+
+fn find_workflow_run_binding(code: &str) -> Option<String> {
+    let bytes = code.as_bytes();
+    let n = bytes.len();
+    let mut i = 0usize;
+    while i < n {
+        if is_word_at(code, i, "let") {
+            let mut j = i + 3;
+            while j < n && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if is_word_at(code, j, "mut") {
+                j += 3;
+                while j < n && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+            }
+            let ident_start = j;
+            while j < n && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+                j += 1;
+            }
+            if j > ident_start {
+                let ident = &code[ident_start..j];
+                while j < n && bytes[j] != b';' && bytes[j] != b'=' {
+                    j += 1;
+                }
+                if j < n && bytes[j] == b'=' {
+                    j += 1;
+                    while j < n && bytes[j].is_ascii_whitespace() {
+                        j += 1;
+                    }
+                    let rest: String = code[j..].chars().take(64).filter(|c| !c.is_ascii_whitespace()).collect();
+                    if rest.starts_with("WorkflowRun::start") {
+                        return Some(ident.to_owned());
+                    }
+                }
+            }
+        }
+        i += code[i..].chars().next().map_or(1, char::len_utf8);
+    }
+    None
+}
+
+fn has_chained_workflow_run_finish(compact: &str) -> bool {
+    let mut start = 0usize;
+    while let Some(rel) = compact[start..].find("WorkflowRun::start") {
+        let open_paren_rel = compact[start + rel..].find('(');
+        if let Some(open_rel) = open_paren_rel {
+            let open_idx = start + rel + open_rel;
+            let mut depth = 0usize;
+            for (offset, b) in compact[open_idx..].bytes().enumerate() {
+                match b {
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            let after = &compact[open_idx + offset + 1..];
+                            if after.starts_with(".finish()") || after.starts_with("?.finish()") {
+                                return true;
+                            }
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        start += rel + 1;
+    }
+    false
 }
 
 fn contains_word_token(haystack: &str, needle: &str) -> bool {
@@ -1317,20 +1416,22 @@ fn contains_word_token(haystack: &str, needle: &str) -> bool {
 }
 
 fn has_guarded_find_by_widget_id(code: &str) -> bool {
-    for (i, _) in code.match_indices("if") {
-        if is_word_at(code, i, "if") && if_condition_contains_find(code, i + 2) {
-            return true;
+    for (kw, allow_let) in [("if", true), ("while", true), ("match", false)] {
+        for (i, _) in code.match_indices(kw) {
+            if is_word_at(code, i, kw) && branch_header_contains_find(code, i + kw.len(), allow_let) {
+                return true;
+            }
         }
     }
     false
 }
 
-fn if_condition_contains_find(code: &str, after_if: usize) -> bool {
+fn branch_header_contains_find(code: &str, after_kw: usize, allow_let: bool) -> bool {
     let bytes = code.as_bytes();
-    let trimmed = code[after_if..].trim_start();
+    let trimmed = code[after_kw..].trim_start();
     let start = code.len() - trimmed.len();
-    let is_if_let = is_word_at(code, start, "let");
-    let mut past_eq = !is_if_let;
+    let is_let_binding = allow_let && is_word_at(code, start, "let");
+    let mut past_eq = !is_let_binding;
     let mut paren = 0usize;
     let mut bracket = 0usize;
     let mut pat_brace = 0usize;
@@ -2133,10 +2234,30 @@ pub fn check_live_status_metrics(root: &Path, status_md: &str) -> Vec<EvidenceVi
 fn count_live_ui_commands(root: &Path) -> Option<usize> {
     let rel = "crates/ui-egui/src/menus/ui_commands.rs";
     let src = fs::read_to_string(root.join(rel)).ok()?;
-    let slice_start = src.find("pub const UI_COMMANDS:")?;
-    let slice_tail = &src[slice_start..];
-    let slice_end = slice_tail.find("];")?;
-    Some(slice_tail[..slice_end].matches("UiCommandSpec {").count())
+    let (_with_strings, code_only) = build_stripped_views(&src);
+    let slice_start = code_only.find("pub const UI_COMMANDS:")?;
+    let after_decl = &code_only[slice_start..];
+    let eq_rel = after_decl.find('=')?;
+    let after_eq = &after_decl[eq_rel + 1..];
+    let open_rel = after_eq.find('[')?;
+    let slice = &after_eq[open_rel..];
+    let mut depth = 0usize;
+    let mut slice_end = None;
+    for (idx, b) in slice.bytes().enumerate() {
+        match b {
+            b'[' => depth += 1,
+            b']' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    slice_end = Some(idx);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let slice_end = slice_end?;
+    Some(slice[..slice_end].matches("UiCommandSpec {").count())
 }
 
 fn check_status_structural_headings(status_md: &str, violations: &mut Vec<EvidenceViolation>) {
@@ -2351,5 +2472,67 @@ mod tests {
         #[cfg(feature = "full-gates")]
         assert!(stale_hits.iter().any(|v| v.reason.contains("Engine command registry")), "{stale_hits:?}");
         assert!(stale_hits.iter().any(|v| v.reason.contains("UI command catalog")), "{stale_hits:?}");
+    }
+
+    #[test]
+    fn fa_sec23_04_handles_comments_raw_strings_mod_tests_helpers_guards_and_decoy_finish() {
+        // 1. Commented/raw-string `#[test]` and escaped `'\''` char literals don't fool test collector.
+        let mut tests = super::WorkspaceTests::default();
+        let src = r###"
+            const CH: char = '\'';
+            /* #[test] fn fake_block_comment_test() {} */
+            const RAW: &str = r##"
+                #[test]
+                fn fake_raw_string_test() {}
+            "##;
+            #[test]
+            fn real_test_fn() {}
+        "###;
+        super::scan_tests_in_rust_source("sample", None, src, &mut tests);
+        assert!(tests.unqualified.contains("real_test_fn"));
+        assert!(!tests.unqualified.contains("fake_block_comment_test"));
+        assert!(!tests.unqualified.contains("fake_raw_string_test"));
+
+        // 2. `mod tests { ... }`, helper functions without `"WorkflowRun"` text, decoy `.finish()`,
+        //    and `while`/`match` `find_by_widget_id(` guards are caught strictly.
+        let tricky_wf = r#"
+            fn sneaky_helper(app: &mut App) {
+                let _ = app.app_mut();
+            }
+            mod tests {
+                type Run = WorkflowRun;
+                #[test]
+                fn wf01_type_alias_bypass() -> Result<(), String> {
+                    let mut run = Run::start("WF-01");
+                    let _ = dispatch_gui_action(&mut app, "x", ());
+                    run.finish()
+                }
+                #[test]
+                fn wf02_decoy_finish_and_while_guard() -> Result<(), String> {
+                    let mut run = WorkflowRun::start("WF-02");
+                    while run.frame_meta().find_by_widget_id("x").is_some() {}
+                    let other = Dummy;
+                    other.finish();
+                    Ok(())
+                }
+                #[test]
+                fn wf03_match_guard() -> Result<(), String> {
+                    let mut run = WorkflowRun::start("WF-03");
+                    match run.frame_meta().find_by_widget_id("y") {
+                        Some(_) => {}
+                        None => {}
+                    }
+                    run.finish()
+                }
+            }
+        "#;
+        let (complete, lints) = super::analyze_human_wf_sources(&[("crates/ui-egui/tests/human_wf_01_06.rs", tricky_wf)]);
+        assert!(!complete.contains(&2), "decoy other.finish() must NOT mark WF-02 complete: {complete:?}");
+        assert!(lints.iter().any(|v| v.reason.contains("app_mut")), "missing helper app_mut: {lints:?}");
+        assert!(lints.iter().any(|v| v.reason.contains("dispatch_gui_action")), "missing mod-nested type-alias bypass: {lints:?}");
+        assert!(
+            lints.iter().filter(|v| v.reason.contains("find_by_widget_id(")).count() >= 2,
+            "while and match find_by_widget_id guards must be flagged: {lints:?}"
+        );
     }
 }
