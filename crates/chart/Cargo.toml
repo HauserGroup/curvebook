@@ -21,5 +21,4 @@ curvebook-text = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
-curvebook-testkit = { workspace = true }
 proptest = { workspace = true }
