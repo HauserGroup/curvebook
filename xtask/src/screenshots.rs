@@ -14,7 +14,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use curvebook_platform::process::ProcessCommand;
 use curvebook_platform::read_regular_file_bytes;
 
 const MAX_DOC_PNG_BYTES: usize = 32 * 1024 * 1024;
@@ -73,7 +72,7 @@ fn generate_and_verify(root: &Path) -> Result<(), String> {
     let args = ["run", "--offline", "--locked", "--quiet", "-p", "curvebook-ui-egui", "--example", "doc_screenshots", "--", "docs/images"];
     println!("+ CARGO_TARGET_DIR={} cargo {}", nested_target.display(), args.join(" "));
 
-    let out = ProcessCommand::new("cargo")
+    let out = crate::dev_tool_command("cargo")
         .current_dir(root)
         .env("CARGO_TARGET_DIR", nested_str)
         .args(args)

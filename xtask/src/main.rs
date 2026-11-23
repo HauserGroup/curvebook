@@ -390,6 +390,52 @@ fn has_cargo_nextest() -> bool {
     Command::new("cargo").args(["nextest", "--version"]).output().is_ok_and(|o| o.status.success())
 }
 
+/// Build a bounded `ProcessCommand` for a local developer/CI tool (`cargo`, `rustc`, `rustfmt`,
+/// `git`, `curl`) while preserving the ambient toolchain environment (`PATH`, `CARGO_*`,
+/// `RUSTUP_*`, compiler/linker/proxy vars) that `ProcessCommand` strips by default for shipped
+/// desktop apps.
+pub(crate) fn dev_tool_command(program: &str) -> curvebook_platform::process::ProcessCommand {
+    const FORWARD_ENV_KEYS: &[&str] = &[
+        "PATH",
+        "PATHEXT",
+        "CARGO",
+        "CARGO_HOME",
+        "CARGO_TARGET_DIR",
+        "CARGO_NET_OFFLINE",
+        "RUSTUP_HOME",
+        "RUSTUP_TOOLCHAIN",
+        "RUSTC",
+        "RUSTC_WRAPPER",
+        "RUSTFMT",
+        "RUSTFLAGS",
+        "RUSTDOCFLAGS",
+        "LLVM_COV",
+        "LLVM_PROFDATA",
+        "CC",
+        "CXX",
+        "AR",
+        "SDKROOT",
+        "DEVELOPER_DIR",
+        "MACOSX_DEPLOYMENT_TARGET",
+        "CI",
+        "GITHUB_ACTIONS",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "NO_PROXY",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+    ];
+    let mut cmd = curvebook_platform::process::ProcessCommand::new(program);
+    for key in FORWARD_ENV_KEYS {
+        if let Ok(val) = std::env::var(key)
+            && !val.is_empty()
+        {
+            cmd = cmd.env(*key, val);
+        }
+    }
+    cmd
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -498,5 +544,12 @@ mod tests {
             let res = verify_exact_single_test_passed(bad, TEST);
             assert!(res.is_err(), "expected failure for output: {bad}");
         }
+    }
+
+    #[test]
+    fn dev_tool_command_runs_host_rustfmt() {
+        let out = super::dev_tool_command("rustfmt").arg("--version").run().expect("rustfmt on host PATH should execute");
+        assert!(out.success, "rustfmt --version failed: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(String::from_utf8_lossy(&out.stdout).contains("rustfmt"));
     }
 }

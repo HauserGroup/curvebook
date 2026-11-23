@@ -7,8 +7,6 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use curvebook_platform::process::ProcessCommand;
-
 const USAGE: &str = "usage: cargo xtask coverage [-p <crate>]... [-- <test-runner args>]";
 
 /// Packages left out of both the instrumented test run and the report.
@@ -169,7 +167,7 @@ fn summary_lines(doc: &serde_json::Value) -> Result<Vec<String>, String> {
 }
 
 fn ensure_tools(root: &Path) -> Result<(), String> {
-    let has_llvm_cov = ProcessCommand::new("cargo")
+    let has_llvm_cov = crate::dev_tool_command("cargo")
         .current_dir(root)
         .args(["llvm-cov", "--version"])
         .wall_timeout(Duration::from_secs(30))
@@ -206,7 +204,7 @@ fn llvm_tools_available(root: &Path) -> bool {
 }
 
 fn rustc_output(root: &Path, args: &[&str]) -> Option<String> {
-    let out = ProcessCommand::new("rustc")
+    let out = crate::dev_tool_command("rustc")
         .current_dir(root)
         .args(args.iter().copied())
         .wall_timeout(Duration::from_secs(30))

@@ -40,7 +40,7 @@ fn build_release_binaries(root: &Path, sha: &str) -> Result<(), String> {
         args.push("--offline");
     }
     args.extend(["-p", "curvebook", "-p", "curvebook-cli"]);
-    let out = ProcessCommand::new("cargo")
+    let out = crate::dev_tool_command("cargo")
         .current_dir(root)
         .env("CURVEBOOK_BUILD_SHA", sha)
         .args(args)
@@ -163,7 +163,7 @@ pub fn render_info_plist(template: &str, version: &str, build_sha: &str) -> Stri
 }
 
 fn git_short_sha(root: &Path) -> String {
-    ProcessCommand::new("git")
+    crate::dev_tool_command("git")
         .current_dir(root)
         .args(["rev-parse", "--short=9", "HEAD"])
         .wall_timeout(Duration::from_secs(30))

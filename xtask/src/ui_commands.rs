@@ -5,7 +5,6 @@
 use std::path::Path;
 use std::time::Duration;
 
-use curvebook_platform::process::ProcessCommand;
 use curvebook_platform::write_atomic;
 
 const SRC_REL: &str = "crates/ui-egui/src/menus/ui_commands.rs";
@@ -71,7 +70,7 @@ fn strip_leading_inner_doc(src: &str) -> &str {
 
 fn rustfmt(root: &Path, code: &str) -> Result<String, String> {
     let cfg = root.join("rustfmt.toml");
-    let mut cmd = ProcessCommand::new("rustfmt")
+    let mut cmd = crate::dev_tool_command("rustfmt")
         .args(["--edition", "2024"])
         .stdin_bytes(code.as_bytes())
         .wall_timeout(Duration::from_secs(30))

@@ -5,8 +5,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::Duration;
 
-use curvebook_platform::process::ProcessCommand;
-
 use super::sitemap::GeneratedSite;
 use super::template::STRICT_CSP;
 
@@ -470,7 +468,7 @@ pub fn check_committed_snapshots(root: &Path) -> Result<(), String> {
 
 fn resolve_git_tag_commit(root: &Path, tag: &str) -> Result<Option<String>, String> {
     let refspec = format!("refs/tags/{tag}^{{commit}}");
-    let out = ProcessCommand::new("git")
+    let out = crate::dev_tool_command("git")
         .current_dir(root)
         .args(["rev-parse", "--verify", "--quiet", &refspec])
         .wall_timeout(Duration::from_secs(30))

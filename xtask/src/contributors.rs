@@ -5,7 +5,6 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
-use curvebook_platform::process::ProcessCommand;
 use curvebook_platform::write_atomic;
 
 const PEOPLE_REL: &str = "contributors/people.toml";
@@ -109,7 +108,7 @@ fn existing_head_date(path: &Path) -> Option<String> {
 }
 
 fn git_stdout(root: &Path, args: &[&str]) -> Option<String> {
-    let out = ProcessCommand::new("git")
+    let out = crate::dev_tool_command("git")
         .current_dir(root)
         .args(args.iter().copied())
         .wall_timeout(Duration::from_secs(60))

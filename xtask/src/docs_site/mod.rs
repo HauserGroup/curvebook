@@ -18,7 +18,6 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use curvebook_platform::process::ProcessCommand;
 use curvebook_platform::write_atomic;
 
 use sitemap::{GeneratedSite, assemble_site};
@@ -288,7 +287,7 @@ fn collect_rel_files(base: &Path, dir: &Path, out: &mut BTreeSet<String>) -> Res
 }
 
 fn git_head_sha(root: &Path) -> Option<String> {
-    let out = ProcessCommand::new("git")
+    let out = crate::dev_tool_command("git")
         .current_dir(root)
         .args(["rev-parse", "HEAD"])
         .wall_timeout(Duration::from_secs(30))
@@ -303,7 +302,7 @@ fn git_head_sha(root: &Path) -> Option<String> {
 }
 
 fn git_head_date(root: &Path) -> Option<String> {
-    let out = ProcessCommand::new("git")
+    let out = crate::dev_tool_command("git")
         .current_dir(root)
         .args(["show", "-s", "--format=%cs", "HEAD"])
         .wall_timeout(Duration::from_secs(30))

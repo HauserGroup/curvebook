@@ -14,7 +14,6 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-use curvebook_platform::process::ProcessCommand;
 use curvebook_platform::{read_regular_file_bytes, write_atomic};
 use curvebook_testkit::nist_strd::{
     MAX_STRD_BYTES, PINNED_NIST_STRD_CORPUS, PinnedStrdSpec, parse_anova_dat, parse_linear_regression_dat, parse_nonlinear_dat, parse_univariate_dat,
@@ -220,7 +219,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
 
 fn run_cargo_corpus(root: &Path, args: &[&str], require_corpus: bool) -> Result<(), String> {
     println!("+ cargo {}", args.join(" "));
-    let mut cmd = ProcessCommand::new("cargo")
+    let mut cmd = crate::dev_tool_command("cargo")
         .current_dir(root)
         .args(args.iter().copied())
         .wall_timeout(CORPUS_CARGO_WALL_TIMEOUT)
@@ -516,7 +515,7 @@ fn fetch_single_dataset(item: StrdDatasetSpec, dest: &Path, max_filesize: &str) 
 
     for url in item.candidate_urls() {
         println!("+ curl -fsSL {url}");
-        let out = ProcessCommand::new("curl")
+        let out = crate::dev_tool_command("curl")
             .args([
                 "-fsSL",
                 "--proto",
