@@ -428,7 +428,7 @@ fn docs_site_ingests_populated_reference_markdown_and_verifies_release_snapshot(
         ("privacy-security", "# Privacy & Security\n\nSee [Security](../../SECURITY.md).\n"),
         (
             "troubleshooting",
-            "# Troubleshooting\n\nSee [Privacy & Security](privacy-security.md).\n\n## Known Issues {#known-issues}\n\nBeta known issues.\n",
+            "# Troubleshooting\n\nSee [Privacy & Security](privacy-security.md).\n\n## Known Issues {#known-issues}\n\nBeta known issues.\n\n### MCP Client Cannot Connect {#mcp-connection}\n\nVerify absolute command and `--workdir` paths.\n",
         ),
         ("glossary", "# Glossary\n\n## Reactive DAG {#term-reactive-dag}\n\nRecomputes sheets.\n"),
     ] {
