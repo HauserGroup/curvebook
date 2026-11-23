@@ -76,6 +76,8 @@ panic = "deny"
 todo = "deny"
 unimplemented = "deny"
 unreachable = "deny"
+indexing_slicing = "deny"
+string_slice = "deny"
 # Rust 1.100+ expanded `needless_range_loop` on nested matrix/grid loops that pass pinned CI 1.99.1.
 needless_range_loop = "allow"
 
