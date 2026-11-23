@@ -1,6 +1,5 @@
 //! `curvebook-cli run <script>` and `curvebook-cli batch <manifest>` execution runners.
 
-use std::fs;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -17,8 +16,8 @@ use curvebook_platform::PlatformError;
 use serde_json::{Map, Value, json};
 
 use crate::cmd_convert::{
-    ExportFormat, ExportRequest, detect_export_format_from_path, export_from_document, load_project_from_path, load_validated_ttf_font,
-    parse_export_format, parse_pdf_version,
+    ExportFormat, ExportRequest, MAX_RASTER_DPI, MIN_RASTER_DPI, detect_export_format_from_path, export_from_document, load_project_from_path,
+    load_validated_ttf_font, parse_export_format, parse_pdf_version,
 };
 use crate::error::CliError;
 use crate::sandbox::{PathResolver, WorkdirGuard};
@@ -91,7 +90,7 @@ pub fn run_script(args: &[String]) -> Result<(), CliError> {
         if let Some(dir) = parsed.workdir.as_deref() {
             session.set_path_policy(ExternalPathPolicy::workdir(Path::new(dir))?);
         }
-        let executed = execute_commands(&mut session, &commands, parsed.workdir.is_some())?;
+        let executed = execute_commands(&mut session, &commands)?;
 
         if parsed.json {
             let mut payload = json!({
@@ -142,7 +141,7 @@ pub fn run_batch(args: &[String]) -> Result<(), CliError> {
             eprintln!("warning: {w}");
             push_unique_warning(&mut all_warnings, w);
         }
-        let executed = execute_commands(&mut session, &manifest.commands, parsed.workdir.is_some())?;
+        let executed = execute_commands(&mut session, &manifest.commands)?;
         for w in executed.warnings {
             push_unique_warning(&mut all_warnings, w);
         }
@@ -484,8 +483,8 @@ fn parse_export_dpi(idx: usize, val: Option<&Value>) -> Result<Option<u16>, CliE
             let raw_u64 = n.as_u64().ok_or_else(|| CliError::Schema(format!("manifest `exports[{idx}].dpi` must be a positive integer")))?;
             let val_u16 = u16::try_from(raw_u64)
                 .ok()
-                .filter(|&d| d > 0)
-                .ok_or_else(|| CliError::Schema(format!("manifest `exports[{idx}].dpi` out of range")))?;
+                .filter(|&d| (MIN_RASTER_DPI..=MAX_RASTER_DPI).contains(&d))
+                .ok_or_else(|| CliError::Schema(format!("manifest `exports[{idx}].dpi` out of range ({MIN_RASTER_DPI}..={MAX_RASTER_DPI})")))?;
             Ok(Some(val_u16))
         }
         Some(_) => Err(CliError::Schema(format!("manifest `exports[{idx}].dpi` must be an integer"))),
@@ -585,15 +584,12 @@ fn resolve_existing_data_sheet_id(doc: &ProjectDocument, sheet: Option<&str>) ->
         .map(|d| d.id.as_str().to_owned())
 }
 
-fn execute_commands(session: &mut Session, commands: &[ParsedCommand], ensure_output_parents: bool) -> Result<ExecutedCommands, CliError> {
+fn execute_commands(session: &mut Session, commands: &[ParsedCommand]) -> Result<ExecutedCommands, CliError> {
     let mut results = Vec::with_capacity(commands.len());
     let mut warnings = Vec::new();
     for entry in commands {
         let mut params = entry.params.clone();
         apply_command_convenience_defaults(session.document(), &entry.cmd, &mut params);
-        if ensure_output_parents && is_file_write_command(&entry.cmd) {
-            ensure_parent_dir_exists(&params)?;
-        }
         let cancelled = AtomicBool::new(false);
         let outcome = session.execute_with_caller(&entry.cmd, params, Caller::Cli, &cancelled)?;
         for w in &outcome.warnings {
@@ -627,45 +623,6 @@ fn apply_command_convenience_defaults(doc: &ProjectDocument, cmd: &str, params: 
             obj.insert(String::from("sheet_id"), Value::String(doc.info_sheets[0].id.as_str().to_owned()));
         }
     }
-}
-
-fn is_file_write_command(cmd: &str) -> bool {
-    matches!(
-        cmd,
-        "project.save"
-            | "project.saveTemplate"
-            | "table.exportCsv"
-            | "analysis.exportJson"
-            | "analysis.exportCsv"
-            | "export.svg"
-            | "export.pdf"
-            | "export.emf"
-            | "export.png"
-            | "export.tiff"
-            | "graph.exportEmf"
-            | "graph.exportSvg"
-            | "graph.exportPdf"
-            | "graph.exportPng"
-            | "graph.exportTiff"
-            | "layout.exportEmf"
-            | "layout.exportSvg"
-            | "layout.exportPdf"
-            | "layout.exportPng"
-            | "layout.exportTiff"
-    )
-}
-
-fn ensure_parent_dir_exists(params: &Value) -> Result<(), CliError> {
-    if let Some(raw_path) = params.get("path").and_then(Value::as_str) {
-        let p = Path::new(raw_path);
-        if let Some(parent) = p.parent()
-            && !parent.as_os_str().is_empty()
-            && !parent.exists()
-        {
-            fs::create_dir_all(parent).map_err(|err| CliError::Runtime(format!("failed to create directory `{}`: {err}", parent.display())))?;
-        }
-    }
-    Ok(())
 }
 
 fn reject_unknown_keys(obj: &Map<String, Value>, allowed: &[&str], context: &str) -> Result<(), CliError> {

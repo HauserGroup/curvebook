@@ -138,7 +138,7 @@ const EXPORT_CONVERT_FLAGS: &[CliFlagSpec] = &[
         short: None,
         value_placeholder: Some("<u16>"),
         default_value: "300",
-        description: "Rasterization resolution in dots per inch for `png` and `tiff` exports (>= 1).",
+        description: "Rasterization resolution in dots per inch for `png` and `tiff` exports (18..=2400).",
     },
     CliFlagSpec {
         long: "--pdf-version",

@@ -585,13 +585,41 @@ fn gui_tools_forward_extended_parameters_and_reject_screenshot_path_in_gui_only(
     assert_eq!(calls[3].1["target"], json!("full_window"));
     assert_eq!(calls[4].1["hover_fraction_x"], json!(0.45));
     assert_eq!(calls[4].1["hover_n"], json!(18.0));
-    assert_eq!(calls[4].1["metrics"]["width_px"], json!(1280.0));
+    assert_eq!(calls[4].1["metrics"], json!({ "logical_width": 1280.0, "logical_height": 800.0, "scale_factor": 1.0 }));
+    assert!(calls[4].1["metrics"].get("width_px").is_none());
+    assert!(calls[4].1["metrics"].get("height_px").is_none());
     assert_eq!(calls[5].1["params"]["kind"], json!("Column"));
     assert_eq!(calls[6].1["sheet_id"], json!("result-1"));
     assert_eq!(calls[7].1["tab"], json!(2));
     assert_eq!(calls[8].1["patches"]["alpha"], json!(0.01));
     assert_eq!(calls[8].1["force_create_new"], json!(true));
     assert_eq!(calls[8].1["choice"], json!("create_new"));
+    drop(host_guard);
+
+    call_tool(
+        &mut state,
+        "ui_pointer_gesture",
+        json!({
+            "action": "click",
+            "widget_id": "btn.ok",
+            "metrics": { "logical_width": 1440.0, "logical_height": 900.0, "scale_factor": 2.0 }
+        }),
+    )
+    .expect("canonical pointer metrics");
+    call_tool(
+        &mut state,
+        "ui_inspect",
+        json!({
+            "scope": "canvas",
+            "include_bounds": true,
+            "metrics": { "width_px": 1600.0, "height_px": 1000.0, "scale_factor": 1.5 }
+        }),
+    )
+    .expect("ui_inspect alias metrics");
+
+    let host_guard = shared.borrow();
+    assert_eq!(host_guard.calls[9].1["metrics"], json!({ "logical_width": 1440.0, "logical_height": 900.0, "scale_factor": 2.0 }));
+    assert_eq!(host_guard.calls[10].1["metrics"], json!({ "logical_width": 1600.0, "logical_height": 1000.0, "scale_factor": 1.5 }));
 }
 
 #[test]

@@ -512,15 +512,15 @@ fn mcp_gui_only_r13_ui_commands_and_strict_block_parity() -> Result<(), Box<dyn 
     let grid_on = mcp.call_tool(20, "ui_invoke_menu", json!({ "command_id": "ui.gridOverlay.toggle", "params": { "visible": true } }))?;
     assert_ne!(grid_on["result"]["isError"], json!(true), "ui.gridOverlay.toggle failed: {grid_on}");
 
-    let row_titles = mcp.call_tool(21, "ui_invoke_menu", json!({ "command_id": "ui.view.rowTitles.toggle", "params": { "collapsed": false } }))?;
-    assert_ne!(row_titles["result"]["isError"], json!(true), "ui.view.rowTitles.toggle failed: {row_titles}");
-
     let create_xy = mcp.call_tool(
-        22,
+        21,
         "ui_invoke_menu",
         json!({ "command_id": "sheet.createData", "params": { "sheet_id": "xy-mcp-r13", "kind": "xy", "cols": 1, "rows": 4 } }),
     )?;
     assert_ne!(create_xy["result"]["isError"], json!(true), "sheet.createData via ui_invoke_menu failed: {create_xy}");
+
+    let row_titles = mcp.call_tool(22, "ui_invoke_menu", json!({ "command_id": "ui.view.rowTitles.toggle", "params": { "collapsed": false } }))?;
+    assert_ne!(row_titles["result"]["isError"], json!(true), "ui.view.rowTitles.toggle failed: {row_titles}");
 
     let open_cg =
         mcp.call_tool(23, "ui_invoke_menu", json!({ "command_id": "ui.graph.create.open", "params": { "source_sheet_id": "xy-mcp-r13" } }))?;

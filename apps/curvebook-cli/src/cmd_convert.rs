@@ -10,8 +10,8 @@ use curvebook_doc::{
 };
 use curvebook_format::registry::{ExportOptions, ExportSource, FormatKind, FormatRegistry, ImportOptions, ImportPayload};
 use curvebook_format::{
-    ArchiveKind, CsvOptions, ImportReport, MAX_ARCHIVE_FILE_BYTES, export_result_tab_csv, import_prism_bytes, import_pzfx_bytes,
-    is_unpacked_project_dir, open_archive_bytes,
+    ArchiveKind, CsvOptions, ImportReport, MAX_ARCHIVE_FILE_BYTES, ensure_result_sheet_csv_exportable, import_prism_bytes, import_pzfx_bytes,
+    is_unpacked_project_dir, open_archive_bytes, try_export_result_tab_csv,
 };
 use curvebook_pdf::{PdfExportOptions, PdfVersion, render_pdf};
 use curvebook_platform::PlatformError;
@@ -26,8 +26,11 @@ use crate::error::CliError;
 /// Default raster DPI used when `--dpi` is omitted on PNG/TIFF export.
 const DEFAULT_RASTER_DPI: u16 = 300;
 
-/// Maximum raster canvas edge in pixels (`16_384`).
-const MAX_RASTER_EDGE_PX: f64 = 16_384.0;
+/// Minimum supported raster DPI for PNG/TIFF exports.
+pub(crate) const MIN_RASTER_DPI: u16 = 18;
+
+/// Maximum supported raster DPI for PNG/TIFF exports.
+pub(crate) const MAX_RASTER_DPI: u16 = 2400;
 
 /// Maximum TrueType SFNT font file read size (`64 MiB`).
 const MAX_FONT_FILE_BYTES: usize = 64 * 1024 * 1024;
@@ -406,9 +409,9 @@ fn import_with_registered_adapter(
 pub fn export_from_document(req: &ExportRequest<'_>) -> Result<ExportOutcomeSummary, CliError> {
     run_guarded_cli("cli.export_from_document", || {
         if let Some(dpi) = req.dpi
-            && dpi == 0
+            && !(MIN_RASTER_DPI..=MAX_RASTER_DPI).contains(&dpi)
         {
-            return Err(CliError::Usage(String::from("--dpi must be >= 1")));
+            return Err(CliError::Usage(format!("--dpi must be in {MIN_RASTER_DPI}..={MAX_RASTER_DPI} (got {dpi})")));
         }
 
         let registry = FormatRegistry::default_registry();
@@ -679,8 +682,9 @@ fn export_tabular_csv(
         TabularTarget::Data(ds) => Ok((exporter.export_bytes(ExportSource::DataSheet(ds), &opts)?, Some(ds.id.as_str().to_owned()))),
         TabularTarget::Result(res) => match tab_index {
             Some(idx) => {
+                ensure_result_sheet_csv_exportable(res)?;
                 let tab = res.tabs.get(idx).ok_or_else(|| CliError::Runtime(format!("result sheet `{}` has no tab at index {idx}", res.id)))?;
-                Ok((export_result_tab_csv(tab, csv_opts).into_bytes(), Some(res.id.as_str().to_owned())))
+                Ok((try_export_result_tab_csv(res, tab, csv_opts)?.into_bytes(), Some(res.id.as_str().to_owned())))
             }
             None => Ok((exporter.export_bytes(ExportSource::ResultSheet(res), &opts)?, Some(res.id.as_str().to_owned()))),
         },
@@ -719,15 +723,8 @@ fn export_json_target(
 }
 
 fn rasterize_scene(scene: &ChartScene, dpi: u16) -> Result<curvebook_render::RasterImage, CliError> {
-    let scale = f64::from(dpi) / 72.0;
-    let width_px = clamped_pixel_dim(scene.width_pt.max(1.0) * scale);
-    let height_px = clamped_pixel_dim(scene.height_pt.max(1.0) * scale);
-    Ok(render_scene(scene, RenderTargetSpec { width_px, height_px, dpi })?)
-}
-
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn clamped_pixel_dim(raw: f64) -> u32 {
-    raw.round().clamp(1.0, MAX_RASTER_EDGE_PX) as u32
+    let target = RenderTargetSpec::from_scene_dpi(scene, dpi)?;
+    Ok(render_scene(scene, target)?)
 }
 
 #[cfg(test)]
@@ -759,7 +756,7 @@ fn parse_export_or_convert_args(args: &[String], cmd_name: &str) -> Result<Conve
             format = Some(parse_export_format(&val)?);
         } else if let Some(val) = consume_flag_opt(args, &mut idx, "--sheet", "--sheet requires a sheet ID or title")? {
             sheet = Some(val);
-        } else if let Some(val) = consume_flag_opt(args, &mut idx, "--dpi", "--dpi requires an integer >= 1")? {
+        } else if let Some(val) = consume_flag_opt(args, &mut idx, "--dpi", "--dpi requires an integer in 18..=2400")? {
             dpi = Some(parse_dpi_value(&val)?);
         } else if let Some(val) = consume_flag_opt(args, &mut idx, "--pdf-version", "--pdf-version requires `1.4` or `1.7`")? {
             pdf_version = parse_pdf_version(&val)?;
@@ -823,9 +820,10 @@ fn consume_flag_opt(args: &[String], idx: &mut usize, flag: &str, missing_msg: &
 }
 
 fn parse_dpi_value(raw: &str) -> Result<u16, CliError> {
-    let dpi: u16 = raw.parse().map_err(|_| CliError::Usage(format!("invalid --dpi `{raw}` (expected positive integer <= {})", u16::MAX)))?;
-    if dpi == 0 {
-        return Err(CliError::Usage(String::from("--dpi must be >= 1")));
+    let dpi: u16 =
+        raw.parse().map_err(|_| CliError::Usage(format!("invalid --dpi `{raw}` (expected integer in {MIN_RASTER_DPI}..={MAX_RASTER_DPI})")))?;
+    if !(MIN_RASTER_DPI..=MAX_RASTER_DPI).contains(&dpi) {
+        return Err(CliError::Usage(format!("--dpi must be in {MIN_RASTER_DPI}..={MAX_RASTER_DPI} (got {dpi})")));
     }
     Ok(dpi)
 }
