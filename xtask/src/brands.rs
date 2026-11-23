@@ -2681,10 +2681,11 @@ pub fn check_svg_metadata(source: &str, svg: &str) -> Vec<BrandHit> {
 
     while pos < svg.len() {
         let rest = &svg[pos..];
-        if rest.starts_with("<!--") {
-            let end = rest.find("-->").map_or(svg.len(), |rel| pos + rel + 3);
-            let inner_end = if end == svg.len() { end } else { end - 3 };
-            let comment_body = &svg[pos + 4..inner_end];
+        if let Some(after) = rest.strip_prefix("<!--") {
+            let (comment_body, end) = match after.find("-->") {
+                Some(rel) => (&after[..rel], pos + 4 + rel + 3),
+                None => (after, svg.len()),
+            };
             if !comment_body.trim().is_empty() {
                 scan_xml_text_fragment(source, line, comment_body, PrismPolicy::Strict, &mut out);
             }
@@ -2692,11 +2693,13 @@ pub fn check_svg_metadata(source: &str, svg: &str) -> Vec<BrandHit> {
             pos = end;
             continue;
         }
-        if rest.starts_with("<![CDATA[") {
-            let end = rest.find("]]>").map_or(svg.len(), |rel| pos + rel + 3);
+        if let Some(after) = rest.strip_prefix("<![CDATA[") {
+            let (cdata_body, end) = match after.find("]]>") {
+                Some(rel) => (&after[..rel], pos + 9 + rel + 3),
+                None => (after, svg.len()),
+            };
             if skip_depth == 0 && (meta_depth > 0 || text_depth > 0) {
-                let inner_end = if end == svg.len() { end } else { end - 3 };
-                buf.push_str(&svg[pos + 9..inner_end]);
+                buf.push_str(cdata_body);
             }
             line += count_newlines(&svg[pos..end]);
             pos = end;
@@ -6018,6 +6021,12 @@ it: "Copia Statistica report",
         let svg_meta = check_svg_metadata("meta.svg", "<svg><!-- SigmaPlot --><text><textPath>Graph&#80;ad</textPath></text></svg>");
         assert!(svg_meta.iter().any(|h| h.brand == "sigmaplot"), "{svg_meta:?}");
         assert!(svg_meta.iter().any(|h| h.brand == "graphpad"), "{svg_meta:?}");
+        for degenerate in ["<!--><g/>", "<!---><g/>", "<!----><g/>", "<!-->"] {
+            assert!(check_svg_metadata("degenerate.svg", degenerate).is_empty());
+            let mut hits = Vec::new();
+            super::scan_svg("degenerate.svg", degenerate, &mut hits);
+            assert!(hits.is_empty(), "degenerate SVG comment `{degenerate}` produced {hits:?}");
+        }
 
         let dist_vc = dir.join("dist-vc");
         std::fs::create_dir_all(&dist_vc).unwrap();
