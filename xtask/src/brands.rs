@@ -4224,9 +4224,17 @@ fn scan_dist_path_and_file(dist_dir: &Path, rel: &str, stats: &mut DistScanStats
     scan_dist_bytes(rel, &bytes, 0, stats, hits)
 }
 
+fn is_macos_stapled_ticket(display_path: &str, bytes: &[u8]) -> bool {
+    let norm = display_path.replace('\\', "/");
+    norm.ends_with(".app/Contents/CodeResources") && bytes.starts_with(b"s8ch")
+}
+
 fn is_native_binary_blob(display_path: &str, bytes: &[u8]) -> bool {
     let ext = Path::new(display_path).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
     if matches!(ext.as_str(), "exe" | "dll" | "so" | "dylib" | "wasm" | "deb" | "rpm" | "dmg" | "msi" | "appimage" | "zsync" | "a" | "lib") {
+        return true;
+    }
+    if is_macos_stapled_ticket(display_path, bytes) {
         return true;
     }
     bytes.starts_with(b"\x7FELF")
@@ -5538,6 +5546,29 @@ it: "Copia Statistica report",
         assert!(super::scan_dist_artefacts(&dist_bad).is_ok());
         std::fs::write(dist_bad.join("index.html"), b"\xFFbad-utf8").unwrap();
         assert!(super::scan_dist_artefacts(&dist_bad).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dist_scan_allows_macos_stapled_notarization_ticket_coderesources_only() {
+        let dir = temp_dir("macos-stapled-coderesources");
+        let app_contents = dir.join("CurveBook.app/Contents");
+        std::fs::create_dir_all(app_contents.join("Resources")).unwrap();
+
+        // Apple `xcrun stapler staple` writes a binary ticket prefixed with `s8ch` to Contents/CodeResources.
+        let ticket_bytes = b"s8ch\x01\x00\x00\x00\x30\x82\x01\x02\xFF\xFEnotarization-ticket";
+        std::fs::write(app_contents.join("CodeResources"), ticket_bytes).unwrap();
+        assert!(super::scan_dist_artefacts(&dir).unwrap().is_empty());
+
+        // Non-ticket binary bytes at Contents/CodeResources must still fail closed.
+        std::fs::write(app_contents.join("CodeResources"), b"\xFF\x00not-a-stapled-ticket").unwrap();
+        assert!(super::scan_dist_artefacts(&dir).is_err());
+
+        // Restore valid ticket and verify `s8ch` magic alone does not waive arbitrary paths.
+        std::fs::write(app_contents.join("CodeResources"), ticket_bytes).unwrap();
+        std::fs::write(app_contents.join("Resources/bogus.txt"), ticket_bytes).unwrap();
+        assert!(super::scan_dist_artefacts(&dir).is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

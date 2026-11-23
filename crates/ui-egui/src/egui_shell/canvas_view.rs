@@ -686,10 +686,15 @@ struct CompositeSceneSpec<'a> {
 fn composite_async_scene_texture(ui: &egui::Ui, app: &UiApp, spec: CompositeSceneSpec<'_>, state: &mut CanvasViewEguiState) {
     let CompositeSceneSpec { scene, sheet_id, paper_rect, slot_tag, painter } = spec;
     let ppp = ui.ctx().pixels_per_point().clamp(1.0, 4.0);
+    #[allow(clippy::cast_precision_loss)]
+    let max_side = ui.ctx().input(|i| i.max_texture_side).clamp(32, 4096) as f32;
+    let raw_w = (paper_rect.width() * ppp).max(32.0);
+    let raw_h = (paper_rect.height() * ppp).max(32.0);
+    let downscale = (max_side / raw_w.max(raw_h)).min(1.0);
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let width_px = (paper_rect.width() * ppp).round().clamp(32.0, 4096.0) as u32;
+    let width_px = (raw_w * downscale).round().clamp(32.0, max_side) as u32;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let height_px = (paper_rect.height() * ppp).round().clamp(32.0, 4096.0) as u32;
+    let height_px = (raw_h * downscale).round().clamp(32.0, max_side) as u32;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let dpi = (f64::from(ppp) * 96.0).round().clamp(72.0, 600.0) as u16;
     let filter_slug = app.preview_filter.as_str().to_owned();
