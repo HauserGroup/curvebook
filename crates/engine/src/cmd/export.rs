@@ -11,14 +11,14 @@ use serde::Deserialize;
 use serde::de::{Deserializer, Error as DeError, Visitor};
 use serde_json::{Value, json};
 
-use super::helpers::{encode_base64, parse_sheet_id, write_output_file};
+use super::helpers::{encode_base64, parse_sheet_id};
 use super::params::{array_schema, bool_schema, int_schema, non_empty_str_schema, nullable_schema, obj_schema, parse_params, str_schema};
 use super::{CommandGroup, CommandSpec, Ctx, Effects};
 use crate::services::{
     EmfSheetKind, ExportArtifactFormat, ExportArtifactRequest, ExportTarget, RasterSizingPolicy, compile_visual_scene_for_sheet,
     export_document_artifact,
 };
-use crate::{CommandOutcome, EngineError, ExternalPathPolicy, Session};
+use crate::{CommandOutcome, EngineError, Session};
 
 const EXPORT_EFFECTS: Effects = Effects::WRITES_FILESYSTEM.with(Effects::IDEMPOTENT);
 
@@ -163,20 +163,6 @@ fn has_layout_sheet(session: &Session) -> bool {
 // ---------------------------------------------------------------------------
 // Shared Export & Serde Utilities (reused across sibling cmd modules)
 // ---------------------------------------------------------------------------
-
-/// Atomically write exported bytes to `path`, creating parent directories when needed.
-pub(super) fn write_atomic_output_file(path: &str, bytes: &[u8]) -> Result<(), EngineError> {
-    write_output_with_policy(&ExternalPathPolicy::Unconstrained, path, bytes)
-}
-
-fn write_output_with_policy(policy: &ExternalPathPolicy, path: &str, bytes: &[u8]) -> Result<(), EngineError> {
-    if path.trim().is_empty() {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "`path` must not be empty")
-            .with_remediation("Provide a non-empty destination file path or omit `path` to return exported bytes inline.")
-            .with_details(json!({ "pointer": "/path" })));
-    }
-    write_output_file(policy, path, bytes)
-}
 
 /// Compile either a graph sheet or a layout sheet into a device-independent [`ChartScene`].
 pub(super) fn compile_scene_for_sheet(doc: &ProjectDocument, id: &SheetId) -> Result<ChartScene, EngineError> {

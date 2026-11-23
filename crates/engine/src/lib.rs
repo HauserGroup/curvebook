@@ -1021,7 +1021,7 @@ fn enforce_unconstrained_gui_only_session_rules(doc: &ProjectDocument, spec_id: 
 }
 
 /// Stateful project session owning undo/redo history, dirty tracking, and guarded command execution.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Session {
     doc: ProjectDocument,
     file_path: Option<PathBuf>,
@@ -1030,6 +1030,59 @@ pub struct Session {
     path_policy: ExternalPathPolicy,
     undo_stack: VecDeque<UndoEntry>,
     redo_stack: Vec<UndoEntry>,
+    mutation_epoch: u64,
+    history_epoch: u64,
+    clean_epoch: u64,
+}
+
+impl PartialEq for Session {
+    fn eq(&self, other: &Self) -> bool {
+        self.doc == other.doc
+            && self.file_path == other.file_path
+            && self.dirty == other.dirty
+            && self.gui_only == other.gui_only
+            && self.path_policy == other.path_policy
+            && self.undo_stack == other.undo_stack
+            && self.redo_stack == other.redo_stack
+    }
+}
+
+fn docs_equal_ignoring_selection(a: &ProjectDocument, b: &ProjectDocument) -> bool {
+    let ProjectDocument {
+        schema_version: sv_a,
+        title: title_a,
+        data_sheets: data_a,
+        info_sheets: info_a,
+        result_sheets: res_a,
+        graph_sheets: graph_a,
+        layout_sheets: layout_a,
+        active_sheet_id: _,
+        family_anchor_sheet_id: _,
+        checkpoints: cp_a,
+        image_assets: img_a,
+    } = a;
+    let ProjectDocument {
+        schema_version: sv_b,
+        title: title_b,
+        data_sheets: data_b,
+        info_sheets: info_b,
+        result_sheets: res_b,
+        graph_sheets: graph_b,
+        layout_sheets: layout_b,
+        active_sheet_id: _,
+        family_anchor_sheet_id: _,
+        checkpoints: cp_b,
+        image_assets: img_b,
+    } = b;
+    sv_a == sv_b
+        && title_a == title_b
+        && data_a == data_b
+        && info_a == info_b
+        && res_a == res_b
+        && graph_a == graph_b
+        && layout_a == layout_b
+        && cp_a == cp_b
+        && img_a == img_b
 }
 
 /// Optional crash-recovery WAL journal hooks backed by `curvebook_format::recovery`.
@@ -1324,6 +1377,9 @@ impl Session {
             path_policy: ExternalPathPolicy::Unconstrained,
             undo_stack: VecDeque::new(),
             redo_stack: Vec::new(),
+            mutation_epoch: 0,
+            history_epoch: 0,
+            clean_epoch: 0,
         }
     }
 
@@ -1429,6 +1485,11 @@ impl Session {
         }
     }
 
+    pub(crate) fn mark_saved_clean(&mut self, path: PathBuf) {
+        self.set_file_path(Some(path), true);
+        self.clean_epoch = self.clean_epoch.wrapping_add(1);
+    }
+
     /// Whether the project has unsaved edits since creation or the last clean save/load.
     #[must_use]
     pub const fn is_dirty(&self) -> bool {
@@ -1472,23 +1533,40 @@ impl Session {
     }
 
     /// Collapse a sequence of mutating operations executed after `baseline` into a single atomic
-    /// undo step on `self`, returning `true` when the document or file path changed.
+    /// undo step on `self`, returning `true` when the document content or history changed.
+    ///
+    /// Read-only sheet selection changes (`active_sheet_id` / `family_anchor_sheet_id`) do not
+    /// push spurious undo entries, wipe `redo_stack`, or dirty the session; clean `project.save` /
+    /// `project.open` transitions preserve `dirty == false`; and batches containing `edit.undo` /
+    /// `edit.redo` retain their exact undo/redo stack state instead of inverting history.
     pub fn collapse_atomic_group(&mut self, mut baseline: Self) -> bool {
-        let mut mutated = self.doc != baseline.doc || self.file_path != baseline.file_path;
-        if mutated {
+        let content_changed = !docs_equal_ignoring_selection(&self.doc, &baseline.doc)
+            || (self.mutation_epoch > baseline.mutation_epoch && self.file_path != baseline.file_path);
+        let history_changed = self.history_epoch > baseline.history_epoch;
+        let saved_or_opened_clean = self.clean_epoch > baseline.clean_epoch;
+
+        if history_changed {
+            return true;
+        }
+
+        if content_changed {
             let pre_doc = std::mem::take(&mut baseline.doc);
             let pre_path = baseline.file_path.take();
             self.undo_stack = baseline.undo_stack;
             self.push_undo_snapshot(pre_doc, pre_path);
             self.redo_stack.clear();
-            self.dirty = true;
+            if !saved_or_opened_clean {
+                self.dirty = true;
+            }
+            true
         } else {
             self.undo_stack = baseline.undo_stack;
             self.redo_stack = baseline.redo_stack;
-            self.dirty = baseline.dirty;
-            mutated = false;
+            if !saved_or_opened_clean {
+                self.dirty = baseline.dirty;
+            }
+            false
         }
-        mutated
     }
 
     /// Execute a multi-step session operation `f` as a single atomic transaction: if `f` returns
@@ -1613,12 +1691,14 @@ impl Session {
             let before_anchor = self.doc.family_anchor_sheet_id.clone();
             let before_path = self.file_path.clone();
             let before_dirty = self.dirty;
+            let before_clean_epoch = self.clean_epoch;
             let res = invoke_spec_run(self, spec, params, caller, cancelled)?;
             if let Err(hook_err) = after_commit(self, &res) {
                 self.doc.active_sheet_id = before_active;
                 self.doc.family_anchor_sheet_id = before_anchor;
                 self.file_path = before_path;
                 self.dirty = before_dirty;
+                self.clean_epoch = before_clean_epoch;
                 return Err(hook_err);
             }
             return Ok(res);
@@ -1639,6 +1719,7 @@ impl Session {
         F: FnOnce(&Self, &CommandOutcome) -> Result<(), EngineError>,
     {
         let before_dirty = self.dirty;
+        let before_history_epoch = self.history_epoch;
         let redo_may_evict = spec.id == "edit.redo"
             && !self.redo_stack.is_empty()
             && (self.undo_stack.len() >= MAX_UNDO_ENTRIES
@@ -1664,6 +1745,7 @@ impl Session {
                     }
                 }
                 self.dirty = before_dirty;
+                self.history_epoch = before_history_epoch;
             }
             return Err(hook_err);
         }
@@ -1730,6 +1812,10 @@ impl Session {
                     }
                     self.push_undo_snapshot(before, before_path);
                     self.redo_stack.clear();
+                    self.mutation_epoch = self.mutation_epoch.wrapping_add(1);
+                    if opens_project_path {
+                        self.clean_epoch = self.clean_epoch.wrapping_add(1);
+                    }
                 } else {
                     after_commit(self, &res)?;
                 }
@@ -1753,6 +1839,7 @@ impl Session {
         let current_path = std::mem::replace(&mut self.file_path, prev.file_path);
         self.redo_stack.push(UndoEntry::from_snapshot(current_doc, current_path));
         self.dirty = true;
+        self.history_epoch = self.history_epoch.wrapping_add(1);
         Ok(true)
     }
 
@@ -1765,6 +1852,7 @@ impl Session {
         let current_path = std::mem::replace(&mut self.file_path, next.file_path);
         self.push_undo_snapshot(current_doc, current_path);
         self.dirty = true;
+        self.history_epoch = self.history_epoch.wrapping_add(1);
         Ok(true)
     }
 

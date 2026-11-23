@@ -529,7 +529,7 @@ fn sweep_valid_info_and_analysis_commands(s: &mut Session, covered: &mut BTreeSe
         s,
         covered,
         "stats.pvalueStack",
-        json!({ "sheet_id": "res-pstack", "source_sheet_id": "pval-1", "method": "benjamini_hochberg", "alpha": 0.05 }),
+        json!({ "sheet_id": "res-pstack", "source_sheet_id": "pval-1", "method": "benjamini_hochberg", "threshold": 0.05 }),
     )?;
     run_valid(s, covered, "fit.run", json!({ "sheet_id": "res-fit", "source_sheet_id": "xy-1", "kind": "linear_regression" }))?;
     run_valid(s, covered, "analysis.add", json!({ "sheet_id": "res-ba", "source_sheet_id": "col-1", "kind": "stats.bland_altman" }))?;

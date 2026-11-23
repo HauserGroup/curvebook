@@ -2680,11 +2680,10 @@ fn apply_axis_updates(axis: &mut AxisSpec, val: &Value) -> Result<(), EngineErro
             return Err(EngineError::with_code(ErrorCode::BadInput, "axis `segments` must contain 1 to 3 segments")
                 .with_details(json!({ "pointer": "/segments" })));
         }
-        let template = axis.segments.first().cloned().unwrap_or_default();
         let mut parsed = Vec::with_capacity(segs_val.len());
-        for s in segs_val {
+        for (idx, s) in segs_val.iter().enumerate() {
             let seg_patch: SegmentPatch = deserialize_patch(s, "axis segment")?;
-            let mut seg = template.clone();
+            let mut seg = axis.segments.get(idx).cloned().unwrap_or_default();
             seg_patch.apply(&mut seg)?;
             parsed.push(seg);
         }

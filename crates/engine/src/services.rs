@@ -617,7 +617,15 @@ fn export_raster_artifact(
     let spec = match params.sizing {
         RasterSizingPolicy::StrictLimits => resolve_strict_raster_target(&scene, params.width_px, params.height_px, params.dpi)?,
         RasterSizingPolicy::CapToLimits { default_dpi } => {
-            RenderTargetSpec::from_scene_capped(&scene, params.width_px, params.height_px, params.dpi.unwrap_or(default_dpi))
+            if params.width_px == Some(0) || params.height_px == Some(0) {
+                return Err(EngineError::with_code(ErrorCode::BadInput, "raster width and height must be greater than 0")
+                    .with_details(json!({ "pointer": if params.width_px == Some(0) { "/width_px" } else { "/height_px" } })));
+            }
+            let eff_dpi = params.dpi.unwrap_or(default_dpi);
+            if eff_dpi == 0 {
+                return Err(EngineError::with_code(ErrorCode::BadInput, "`dpi` must be greater than 0").with_details(json!({ "pointer": "/dpi" })));
+            }
+            RenderTargetSpec::from_scene_capped(&scene, params.width_px, params.height_px, eff_dpi)
         }
     };
     let raster = render_scene(&scene, spec)?;

@@ -274,7 +274,7 @@ pub fn column_subcolumn_count(arch: &TableArchetype, col: usize) -> usize {
         TableArchetype::Contingency(t) => t.data_sets.get(col).map_or(1, DataSetColumn::subcolumn_count).max(1),
         TableArchetype::PartsOfWhole(t) => t.data_sets.get(col).map_or(1, DataSetColumn::subcolumn_count).max(1),
         TableArchetype::Survival(t) => t.cohorts.get(col).map_or(1, DataSetColumn::subcolumn_count).max(1),
-        TableArchetype::Nested(t) => t.groups.get(col).map_or(1, |g| g.cells.len()).max(1),
+        TableArchetype::Nested(t) => t.groups.get(col).map_or(1, curvebook_doc::NestedGroupColumn::biological_unit_count).max(1),
         TableArchetype::MultipleVariables(_) => 1,
     }
 }
