@@ -1,5 +1,6 @@
 //! Headless command-line runner and stdio MCP server entry point for CurveBook.
 #![forbid(unsafe_code)]
+#![deny(clippy::indexing_slicing)]
 
 mod cli_catalog;
 mod cmd_bench_perf;

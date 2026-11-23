@@ -76,7 +76,8 @@ panic = "deny"
 todo = "deny"
 unimplemented = "deny"
 unreachable = "deny"
-indexing_slicing = "deny"
+# `indexing_slicing = "deny"` is enforced at every strict crate root and verified by `cargo xtask layers`,
+# keeping legacy math/UI integration-test helper modules free of `clippy::indexing_slicing` churn.
 string_slice = "deny"
 # Rust 1.100+ expanded `needless_range_loop` on nested matrix/grid loops that pass pinned CI 1.99.1.
 needless_range_loop = "allow"

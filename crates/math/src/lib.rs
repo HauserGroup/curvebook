@@ -27,6 +27,7 @@
 //! assert_eq!(logit.inverse(0.0), Some(0.5));
 //! ```
 #![forbid(unsafe_code)]
+#![deny(clippy::indexing_slicing)]
 #![deny(missing_docs)]
 
 pub mod dist;

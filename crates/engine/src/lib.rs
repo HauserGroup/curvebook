@@ -5,6 +5,7 @@
 //! server. Nothing in or below this crate depends on a UI toolkit.
 //! Governing spec: `docs/architecture.md`, `docs/implementation/data-tables-and-transforms.md` (§6), and `docs/development.md`.
 #![forbid(unsafe_code)]
+#![deny(clippy::indexing_slicing)]
 
 pub mod cmd;
 pub use cmd::Caller;

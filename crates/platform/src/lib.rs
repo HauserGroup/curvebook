@@ -4,6 +4,7 @@
 //! Layer L0 crate: depends only on `std`, `serde`, and `serde_json`. Compiles cleanly on
 //! `wasm32` targets with host-only OS operations gated behind `#[cfg(not(target_arch = "wasm32"))]`.
 #![forbid(unsafe_code)]
+#![deny(clippy::indexing_slicing)]
 
 pub mod fs;
 pub mod path_guard;

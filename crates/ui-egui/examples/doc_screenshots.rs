@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![deny(clippy::indexing_slicing)]
 
 //! Clean-room deterministic workspace screenshot generator (`R0.14`).
 //!

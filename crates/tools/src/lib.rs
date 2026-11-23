@@ -5,6 +5,7 @@
 //! Layer L4 crate: pointer and keyboard events in, engine command specs and overlays out.
 //! Governing spec: `docs/development.md` (§Cursors) and `docs/evidence/user-interface.md`.
 #![forbid(unsafe_code)]
+#![deny(clippy::indexing_slicing)]
 
 pub mod canvas;
 pub mod grid;

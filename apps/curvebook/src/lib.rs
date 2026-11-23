@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![deny(clippy::indexing_slicing)]
 
 //! CurveBook desktop application library and native host event-loop integration.
 

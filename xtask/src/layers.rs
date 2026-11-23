@@ -641,6 +641,159 @@ pub fn check_source_hygiene(root: &Path) -> Vec<HygieneViolation> {
     violations
 }
 
+const LEGACY_INDEXING_ALLOWLIST: &[&str] =
+    &["crates/stats", "crates/fit", "crates/transform", "crates/chart", "crates/text", "crates/ui-egui", "crates/testkit", "xtask"];
+
+const DOC_SCREENSHOTS_REL: &str = "crates/ui-egui/examples/doc_screenshots.rs";
+
+/// Check workspace Clippy lint policy (`FA-SEC23-03`):
+/// - `Cargo.toml` denies `string_slice` globally under `[workspace.lints.clippy]`.
+/// - All non-allowlisted strict crate roots (`crates/*/src/{lib,main}.rs`, `apps/*/src/{lib,main}.rs`)
+///   and `crates/ui-egui/examples/doc_screenshots.rs` enforce `#![deny(clippy::indexing_slicing)]`.
+/// - No `src/**` file (or `doc_screenshots.rs`) allows `clippy::string_slice`, and no strict crate
+///   `src/**` file (or `doc_screenshots.rs`) allows `clippy::indexing_slicing`.
+#[must_use]
+pub fn check_lint_policy(root: &Path) -> Vec<HygieneViolation> {
+    let mut violations = Vec::new();
+    check_workspace_string_slice_lint(root, &mut violations);
+    check_strict_crate_indexing_deny(root, &mut violations);
+    check_lint_allow_escapes(root, &mut violations);
+    violations.sort_by(|a, b| {
+        a.path.cmp(&b.path).then_with(|| a.line.cmp(&b.line)).then_with(|| a.rule.cmp(b.rule)).then_with(|| a.pattern.cmp(b.pattern))
+    });
+    violations.dedup();
+    violations
+}
+
+fn check_workspace_string_slice_lint(root: &Path, violations: &mut Vec<HygieneViolation>) {
+    let cargo_path = root.join("Cargo.toml");
+    let Ok(toml_src) = std::fs::read_to_string(&cargo_path) else {
+        violations.push(HygieneViolation { path: String::from("Cargo.toml"), line: 1, rule: "lint-policy", pattern: "string_slice = \"deny\"" });
+        return;
+    };
+    let mut in_clippy_section = false;
+    for raw in toml_src.lines() {
+        let code = raw.split_once('#').map_or(raw, |(head, _)| head).trim();
+        if code.is_empty() {
+            continue;
+        }
+        if code.starts_with('[') && code.ends_with(']') {
+            in_clippy_section = code == "[workspace.lints.clippy]";
+            continue;
+        }
+        if in_clippy_section
+            && let Some((key, val)) = code.split_once('=')
+            && key.trim() == "string_slice"
+            && val.trim() == "\"deny\""
+        {
+            return;
+        }
+    }
+    violations.push(HygieneViolation { path: String::from("Cargo.toml"), line: 1, rule: "lint-policy", pattern: "string_slice = \"deny\"" });
+}
+
+fn check_strict_crate_indexing_deny(root: &Path, violations: &mut Vec<HygieneViolation>) {
+    for group in ["crates", "apps"] {
+        let Ok(entries) = std::fs::read_dir(root.join(group)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+                continue;
+            }
+            let dir_name = entry.file_name();
+            let Some(dir_str) = dir_name.to_str() else {
+                continue;
+            };
+            let pkg_rel = format!("{group}/{dir_str}");
+            if LEGACY_INDEXING_ALLOWLIST.contains(&pkg_rel.as_str()) {
+                continue;
+            }
+            for root_file in ["src/lib.rs", "src/main.rs"] {
+                let rel = format!("{pkg_rel}/{root_file}");
+                if root.join(&rel).is_file() {
+                    require_indexing_slicing_deny(root, &rel, violations);
+                }
+            }
+        }
+    }
+    let screenshots = root.join(DOC_SCREENSHOTS_REL);
+    if screenshots.is_file() || root.join("crates/ui-egui").is_dir() {
+        require_indexing_slicing_deny(root, DOC_SCREENSHOTS_REL, violations);
+    }
+}
+
+fn require_indexing_slicing_deny(root: &Path, rel: &str, violations: &mut Vec<HygieneViolation>) {
+    let Ok(src) = std::fs::read_to_string(root.join(rel)) else {
+        violations.push(HygieneViolation { path: rel.to_owned(), line: 1, rule: "lint-policy", pattern: "#![deny(clippy::indexing_slicing)]" });
+        return;
+    };
+    let prod = strip_non_prod_rust(&src);
+    let compact: String = prod.chars().filter(|ch| !ch.is_whitespace()).collect();
+    if !compact.contains("#![deny(clippy::indexing_slicing)]") {
+        violations.push(HygieneViolation { path: rel.to_owned(), line: 1, rule: "lint-policy", pattern: "#![deny(clippy::indexing_slicing)]" });
+    }
+}
+
+fn check_lint_allow_escapes(root: &Path, violations: &mut Vec<HygieneViolation>) {
+    let mut files = Vec::new();
+    collect_rs_files(root, root, &mut files);
+    files.sort();
+    for rel in files {
+        let in_strict_src = is_strict_src_path(&rel);
+        let in_any_src = is_workspace_src_path(&rel);
+        if !in_any_src && rel != DOC_SCREENSHOTS_REL {
+            continue;
+        }
+        let Ok(src) = std::fs::read_to_string(root.join(&rel)) else {
+            continue;
+        };
+        let blanked = blank_comments_and_literals(&src);
+        if has_lint_allow(&blanked, "clippy::string_slice") {
+            let line = first_matching_line(&src, "string_slice").unwrap_or(1);
+            violations.push(HygieneViolation { path: rel.clone(), line, rule: "lint-policy", pattern: "allow(clippy::string_slice)" });
+        }
+        if in_strict_src || rel == DOC_SCREENSHOTS_REL {
+            let prod = strip_cfg_test_items(&blanked);
+            if has_lint_allow(&prod, "clippy::indexing_slicing") {
+                let line = first_matching_line(&src, "indexing_slicing").unwrap_or(1);
+                violations.push(HygieneViolation { path: rel, line, rule: "lint-policy", pattern: "allow(clippy::indexing_slicing)" });
+            }
+        }
+    }
+}
+
+fn is_workspace_src_path(rel: &str) -> bool {
+    (rel.starts_with("crates/") || rel.starts_with("apps/")) && rel.contains("/src/") || rel.starts_with("xtask/src/")
+}
+
+fn is_strict_src_path(rel: &str) -> bool {
+    if !is_workspace_src_path(rel) {
+        return false;
+    }
+    !LEGACY_INDEXING_ALLOWLIST.iter().any(|prefix| rel == *prefix || rel.starts_with(&format!("{prefix}/")))
+}
+
+fn has_lint_allow(src: &str, lint: &str) -> bool {
+    let compact: String = src.chars().filter(|ch| !ch.is_whitespace()).collect();
+    let mut rest = compact.as_str();
+    while let Some((_, after)) = rest.split_once("allow(") {
+        if let Some((inside, tail)) = after.split_once(')') {
+            if inside.split(',').any(|item| item == lint) {
+                return true;
+            }
+            rest = tail;
+        } else {
+            break;
+        }
+    }
+    false
+}
+
+fn first_matching_line(src: &str, needle: &str) -> Option<usize> {
+    src.lines().enumerate().find(|(_, line)| line.contains(needle)).map(|(idx, _)| idx + 1)
+}
+
 fn collect_rs_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -1276,8 +1429,8 @@ fn find_item_end(bytes: &[u8], mut pos: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        ALLOWED_RAW_PROCESS_BASELINE, ALLOWED_UI_IO_BASELINE, Class, Crate, Dep, DepKind, TABLE, Violation, check, check_source_hygiene, classify,
-        from_metadata, scan_patch_sections,
+        ALLOWED_RAW_PROCESS_BASELINE, ALLOWED_UI_IO_BASELINE, Class, Crate, Dep, DepKind, TABLE, Violation, check, check_lint_policy,
+        check_source_hygiene, classify, from_metadata, scan_patch_sections,
     };
     fn parse(s: &str) -> Result<serde_json::Value, serde_json::Error> {
         serde_json::from_str(s)
@@ -1604,5 +1757,36 @@ serde = "1"
         {
             assert!(hits.iter().any(|h| h.path.ends_with("dir_ops.rs") && h.pattern == expected), "missing `{expected}` in {hits:?}");
         }
+    }
+
+    #[test]
+    fn lint_policy_passes_on_workspace_and_catches_violations() {
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let real_hits = check_lint_policy(workspace_root);
+        assert!(real_hits.is_empty(), "expected clean lint policy on workspace root: {real_hits:?}");
+
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let root = std::env::temp_dir().join(format!("cb-xtask-lint-policy-{}-{nanos}", std::process::id()));
+        let write_rel = |rel: &str, content: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, content).unwrap();
+        };
+
+        write_rel("Cargo.toml", "[workspace.lints.clippy]\nunwrap_used = \"deny\"\n");
+        write_rel("crates/platform/src/lib.rs", "#![forbid(unsafe_code)]\n");
+        write_rel("crates/format/src/lib.rs", "#![forbid(unsafe_code)]\n#![deny(clippy::indexing_slicing)]\n");
+        write_rel("crates/format/src/bad.rs", "#![allow(clippy::string_slice)]\npub fn f() {}\n");
+        write_rel("crates/format/src/bad_idx.rs", "#![allow(clippy::indexing_slicing)]\npub fn g() {}\n");
+        write_rel("crates/stats/src/lib.rs", "#![allow(clippy::indexing_slicing)]\npub fn ok() {}\n");
+
+        let hits = check_lint_policy(&root);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(hits.iter().any(|h| h.path == "Cargo.toml" && h.rule == "lint-policy"), "{hits:?}");
+        assert!(hits.iter().any(|h| h.path == "crates/platform/src/lib.rs" && h.pattern == "#![deny(clippy::indexing_slicing)]"), "{hits:?}");
+        assert!(hits.iter().any(|h| h.path == "crates/format/src/bad.rs" && h.pattern == "allow(clippy::string_slice)"), "{hits:?}");
+        assert!(hits.iter().any(|h| h.path == "crates/format/src/bad_idx.rs" && h.pattern == "allow(clippy::indexing_slicing)"), "{hits:?}");
+        assert!(!hits.iter().any(|h| h.path == "crates/stats/src/lib.rs"), "{hits:?}");
     }
 }

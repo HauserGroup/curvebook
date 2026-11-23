@@ -5,6 +5,7 @@
 //! Layer L3 file-format crate. Governing spec: `docs/evidence/file-formats.md` and
 //! `docs/implementation/data-tables-and-transforms.md`.
 #![forbid(unsafe_code)]
+#![deny(clippy::indexing_slicing)]
 
 pub mod archive;
 pub mod csv;

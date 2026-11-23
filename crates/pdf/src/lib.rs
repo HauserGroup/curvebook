@@ -3,6 +3,7 @@
 //!
 //! Layer L3 crate. Governing spec: `docs/implementation/graphing-and-layouts.md` (§6) and `docs/evidence/file-formats.md`.
 #![forbid(unsafe_code)]
+#![deny(clippy::indexing_slicing)]
 
 pub mod writer;
 

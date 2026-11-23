@@ -1,5 +1,6 @@
 //! Browser WebAssembly entry point for CurveBook.
 #![forbid(unsafe_code)]
+#![deny(clippy::indexing_slicing)]
 
 use curvebook_ui_egui::UiApp;
 use curvebook_web::{WebAdapterError, WebBridgeCommand, WebBridgeEvent, WebBridgeSession, WebNoticeLevel, WebWorkspaceHost};

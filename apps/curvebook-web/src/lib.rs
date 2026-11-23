@@ -5,6 +5,7 @@
 //! color-vision simulation filters, and RGBA framebuffer rendering stay 100%
 //! self-contained in memory.
 #![forbid(unsafe_code)]
+#![deny(clippy::indexing_slicing)]
 
 use curvebook_engine::{ExternalPathPolicy, Session};
 use curvebook_format::{

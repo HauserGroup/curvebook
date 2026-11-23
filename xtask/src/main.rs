@@ -235,7 +235,8 @@ fn cmd_layers(root: &Path) -> Result<(), String> {
     let graph = layers::from_metadata(&meta)?;
     let mut violations = layers::check(&graph);
     violations.extend(layers::check_manifest_patches(root));
-    let hygiene = layers::check_source_hygiene(root);
+    let mut hygiene = layers::check_source_hygiene(root);
+    hygiene.extend(layers::check_lint_policy(root));
     if violations.is_empty() && hygiene.is_empty() {
         println!("layers: all {} workspace packages satisfy L0..L7 dependency rules and source hygiene", graph.len());
         return Ok(());
