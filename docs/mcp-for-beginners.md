@@ -148,7 +148,7 @@ You can also hand files back the other way: save edits in the desktop app, then 
 
 ## Troubleshooting
 
-- **Your AI app does not see CurveBook tools:** Make sure you edited the right config file, checked your `--command` path and JSON commas/backslashes, and **fully restarted** the AI app.
+- **Your AI app does not see CurveBook tools:** Make sure you edited the right config file, checked your `"command"` path and JSON commas/backslashes, and **fully restarted** the AI app.
 - **"Access denied" / path outside `--workdir`:** CurveBook blocks file paths outside the `--workdir` directory you configured. Move data files inside that folder or update `--workdir`.
 - **More MCP connection checks:** See [Troubleshooting: MCP Connection](reference/troubleshooting.md#mcp-connection).
 - **Technical reference:** See [MCP Automation Reference](reference/automation/mcp.md), [Control & Batch Automation](reference/automation/control-and-batch.md), and [docs/mcp.md](mcp.md).
