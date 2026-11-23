@@ -959,8 +959,7 @@ name = "curvebook-testkit"
 version = "0.1.0-alpha.2"
 dependencies = [
  "curvebook-doc",
- "curvebook-math",
- "curvebook-palette",
+ "curvebook-platform",
 ]
 
 [[package]]
@@ -4349,6 +4348,7 @@ dependencies = [
  "curvebook-svg",
  "curvebook-testkit",
  "curvebook-ui-egui",
+ "flate2",
  "image",
  "semver",
  "serde_json",

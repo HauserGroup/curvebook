@@ -12,6 +12,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use crate::rust_lex::{
+    count_newlines, find_char_literal_span, find_raw_string_span, is_cfg_test_only, is_ident_byte, skip_block_comment_end, skip_line_comment_end,
+    skip_quoted_string_end,
+};
+
 /// Crate source directories governed by the `D1` rule-1 literature-citation gate.
 pub const NUMERICAL_SRC_DIRS: &[&str] = &["crates/math/src", "crates/stats/src", "crates/fit/src", "crates/transform/src"];
 
@@ -804,18 +809,17 @@ fn lex_module(source: &str) -> Vec<Token> {
             i = lex_block_comment(source, i, &mut line, &mut tokens);
         } else if b == b'#' && (bytes.get(i + 1) == Some(&b'[') || (bytes.get(i + 1) == Some(&b'!') && bytes.get(i + 2) == Some(&b'['))) {
             i = lex_attribute(source, i, &mut line, &mut tokens);
-        } else if b == b'r' && matches!(bytes.get(i + 1), Some(b'"' | b'#')) {
-            if let Some(next_i) = skip_raw_string(bytes, i, &mut line) {
-                tokens.push(Token::Other);
-                i = next_i;
-            } else {
-                i = lex_ident(source, i, line, &mut tokens);
-            }
+        } else if let Some((_, next_i, _)) = find_raw_string_span(bytes, i) {
+            line += count_newlines(&bytes[i..next_i]);
+            tokens.push(Token::Other);
+            i = next_i;
         } else if b == b'"' {
-            i = skip_quoted_string(bytes, i, &mut line);
+            let next_i = skip_quoted_string_end(bytes, i);
+            line += count_newlines(&bytes[i..next_i]);
+            i = next_i;
             tokens.push(Token::Other);
         } else if b == b'\'' {
-            i = skip_char_or_lifetime(source, i);
+            i = find_char_literal_span(source, i).map_or(i + 1, |(_, end_q)| end_q + 1);
         } else if b.is_ascii_alphabetic() || b == b'_' {
             i = lex_ident(source, i, line, &mut tokens);
         } else if matches!((b, bytes.get(i + 1).copied()), (b'-' | b'=', Some(b'>')) | (b'<' | b'>', Some(b'='))) {
@@ -841,11 +845,7 @@ fn lex_module(source: &str) -> Vec<Token> {
 }
 
 fn lex_line_comment(source: &str, start: usize, tokens: &mut Vec<Token>) -> usize {
-    let bytes = source.as_bytes();
-    let mut end = start + 2;
-    while end < bytes.len() && bytes[end] != b'\n' {
-        end += 1;
-    }
+    let end = skip_line_comment_end(source.as_bytes(), start);
     let slice = source.get(start..end).unwrap_or("");
     if let Some(inner) = slice.strip_prefix("//!") {
         tokens.push(Token::InnerDoc(inner.trim().to_owned()));
@@ -861,30 +861,16 @@ fn lex_block_comment(source: &str, start: usize, line: &mut usize, tokens: &mut 
     let bytes = source.as_bytes();
     let is_inner = bytes.get(start + 2) == Some(&b'!');
     let is_outer = bytes.get(start + 2) == Some(&b'*') && bytes.get(start + 3) != Some(&b'*') && bytes.get(start + 3) != Some(&b'/');
-    let mut depth = 1usize;
-    let mut i = start + 2;
-    while i < bytes.len() && depth > 0 {
-        if bytes[i] == b'\n' {
-            *line += 1;
-            i += 1;
-        } else if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
-            depth += 1;
-            i += 2;
-        } else if bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/') {
-            depth -= 1;
-            i += 2;
-        } else {
-            i += 1;
-        }
-    }
-    let body_end = i.saturating_sub(2);
+    let end = skip_block_comment_end(bytes, start);
+    *line += count_newlines(&bytes[start..end]);
+    let body_end = end.saturating_sub(2);
     if (is_inner || is_outer)
         && let Some(body) = source.get(start + 3..body_end)
     {
         let text = body.trim().to_owned();
         tokens.push(if is_inner { Token::InnerDoc(text) } else { Token::OuterDoc(text) });
     }
-    i
+    end
 }
 
 fn lex_attribute(source: &str, start: usize, line: &mut usize, tokens: &mut Vec<Token>) -> usize {
@@ -900,7 +886,9 @@ fn lex_attribute(source: &str, start: usize, line: &mut usize, tokens: &mut Vec<
                 i += 1;
             }
             b'"' => {
-                i = skip_quoted_string(bytes, i, line);
+                let next_i = skip_quoted_string_end(bytes, i);
+                *line += count_newlines(&bytes[i..next_i]);
+                i = next_i;
             }
             b'[' => {
                 depth += 1;
@@ -925,7 +913,7 @@ fn lex_attribute(source: &str, start: usize, line: &mut usize, tokens: &mut Vec<
         }
     } else if !is_inner {
         let compact: String = inside.chars().filter(|c| !c.is_whitespace()).collect();
-        tokens.push(Token::OuterAttr { is_cfg_test: compact == "cfg(test)" });
+        tokens.push(Token::OuterAttr { is_cfg_test: is_cfg_test_only(&compact) });
     }
     i
 }
@@ -937,88 +925,10 @@ fn extract_doc_attr_value(inside: &str) -> Option<String> {
     Some(unquoted.to_owned())
 }
 
-fn skip_quoted_string(bytes: &[u8], start: usize, line: &mut usize) -> usize {
-    let mut i = start + 1;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\n' => {
-                *line += 1;
-                i += 1;
-            }
-            b'\\' => i = (i + 2).min(bytes.len()),
-            b'"' => return i + 1,
-            _ => i += 1,
-        }
-    }
-    bytes.len()
-}
-
-fn skip_raw_string(bytes: &[u8], start: usize, line: &mut usize) -> Option<usize> {
-    let mut i = start + 1;
-    let mut hashes = 0usize;
-    while bytes.get(i) == Some(&b'#') {
-        hashes += 1;
-        i += 1;
-    }
-    if bytes.get(i) != Some(&b'"') {
-        return None;
-    }
-    i += 1;
-    while i < bytes.len() {
-        if bytes[i] == b'\n' {
-            *line += 1;
-            i += 1;
-            continue;
-        }
-        if bytes[i] == b'"' {
-            let mut matched = 0usize;
-            while matched < hashes && bytes.get(i + 1 + matched) == Some(&b'#') {
-                matched += 1;
-            }
-            if matched == hashes {
-                return Some(i + 1 + hashes);
-            }
-        }
-        i += 1;
-    }
-    Some(bytes.len())
-}
-
-fn skip_char_or_lifetime(source: &str, start: usize) -> usize {
-    let Some(tail) = source.get(start + 1..) else {
-        return start + 1;
-    };
-    let mut chars = tail.char_indices();
-    let Some((_, first)) = chars.next() else {
-        return start + 1;
-    };
-    if first == '\\' {
-        let Some(_) = chars.next() else {
-            return start + 1;
-        };
-        for (rel, ch) in chars {
-            if ch == '\'' {
-                return start + 1 + rel + ch.len_utf8();
-            }
-            if ch == '\n' || rel > 12 {
-                return start + 1;
-            }
-        }
-        return start + 1;
-    }
-    // Single-char literal `'x'` (including multi-byte UTF-8); lifetimes like `'a` have no closing `'`.
-    if first != '\''
-        && let Some((rel, '\'')) = chars.next()
-    {
-        return start + 1 + rel + 1;
-    }
-    start + 1
-}
-
 fn lex_ident(source: &str, start: usize, line: usize, tokens: &mut Vec<Token>) -> usize {
     let bytes = source.as_bytes();
     let mut end = start + 1;
-    while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+    while end < bytes.len() && is_ident_byte(bytes[end]) {
         end += 1;
     }
     let text = source.get(start..end).unwrap_or("").to_owned();
