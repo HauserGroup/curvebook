@@ -1761,7 +1761,7 @@ serde = "1"
 
     #[test]
     fn lint_policy_passes_on_workspace_and_catches_violations() {
-        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let real_hits = check_lint_policy(workspace_root);
         assert!(real_hits.is_empty(), "expected clean lint policy on workspace root: {real_hits:?}");
 
