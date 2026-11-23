@@ -66,7 +66,7 @@ fn build_rich_project_app() -> UiApp {
             "sheet_id": "ds-xy",
             "title": "Dose Response",
             "kind": "xy",
-            "data_sets": 2,
+            "cols": 2,
             "rows": 5,
             "auto_info": true,
             "info_sheet_id": "info-notes"
