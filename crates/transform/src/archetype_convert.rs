@@ -1184,8 +1184,7 @@ fn pivot_mv_summary_to_grouped(
         ];
         let (Some(rk), Some(ck)) = (r_tok, c_tok) else {
             let skipped = count_mv_row_occupied(mv, [row_fac_col, col_fac_col], r) + triplet.iter().filter(|c| is_occupied(c)).count();
-            acc.dropped += skipped;
-            acc.schema_lossy = true;
+            acc.drop_cells(skipped);
             continue;
         };
         let ri = row_levels.intern(rk);

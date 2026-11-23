@@ -209,7 +209,7 @@ impl SummaryMoments {
     }
 
     #[inline]
-    fn scaled_m2(&self) -> (f64, f64) {
+    pub(crate) fn scaled_m2(&self) -> (f64, f64) {
         self.scaled_css.unwrap_or((1.0, self.css))
     }
 

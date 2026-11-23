@@ -646,3 +646,47 @@ fn qol2_cbtemplate_json_float_roundtrip_and_guards() {
     let deep = format!("{}{}", "[".repeat(256), "]".repeat(256));
     assert!(matches!(PlateMapTemplate::from_cbtemplate_json(&deep), Err(TransformError::InvalidInput { .. })));
 }
+
+#[test]
+fn qol1_mv_summary_to_grouped_ignores_blank_trailing_rows_without_marking_lossy() {
+    // DA-01-06 regression: blank trailing rows (skipped == 0) must not mark summary pivot lossy.
+    let mut mv = MultipleVariablesTable::new(5, 3).expect("mv summary");
+    mv.variables[0].title = "Dose".into();
+    mv.variables[0].role = VariableRole::Categorical;
+    mv.variables[0].role_inferred = false;
+    mv.variables[1].title = "Arm".into();
+    mv.variables[1].role = VariableRole::Categorical;
+    mv.variables[1].role_inferred = false;
+    mv.variables[2].title = "Mean".into();
+    mv.variables[3].title = "SD".into();
+    mv.variables[4].title = "N".into();
+
+    mv.variables[0].cells = vec![Cell::text("Low"), Cell::text("High"), Cell::empty()];
+    mv.variables[1].cells = vec![Cell::text("Drug"), Cell::text("Drug"), Cell::empty()];
+    mv.variables[2].cells = vec![Cell::number(10.0), Cell::number(20.0), Cell::empty()];
+    mv.variables[3].cells = vec![Cell::number(1.5), Cell::number(2.5), Cell::empty()];
+    mv.variables[4].cells = vec![Cell::number(5.0), Cell::number(6.0), Cell::empty()];
+
+    let sheet = DataSheet::new("mv-sum", "MVSummary", TableArchetype::MultipleVariables(mv)).expect("sheet");
+    let (converted, prev) = convert_datasheet_archetype(&sheet, TargetArchetypeKind::Grouped, false).expect("lossless summary pivot");
+    assert!(!prev.lossy);
+    assert_eq!(prev.dropped_cells, 0);
+    let TableArchetype::Grouped(grp) = &converted.archetype else {
+        panic!("expected Grouped");
+    };
+    assert_eq!(grp.subcolumn_mode, SubcolumnMode::MeanSdN);
+    assert_eq!(grp.row_titles, vec!["Low", "High"]);
+    assert_eq!(grp.data_sets.len(), 1);
+    assert_eq!(grp.data_sets[0].title, "Drug");
+
+    // Conversely, a row missing a factor token with an occupied summary cell IS genuinely lossy.
+    let TableArchetype::MultipleVariables(mut mv_lossy) = sheet.archetype else {
+        panic!("expected MultipleVariables");
+    };
+    mv_lossy.variables[2].cells[2] = Cell::number(99.0);
+    let lossy_sheet = DataSheet::new("mv-sum-lossy", "MVSummaryLossy", TableArchetype::MultipleVariables(mv_lossy)).expect("lossy sheet");
+    assert!(matches!(convert_datasheet_archetype(&lossy_sheet, TargetArchetypeKind::Grouped, false), Err(TransformError::InvalidSpec { .. })));
+    let (_, lossy_prev) = convert_datasheet_archetype(&lossy_sheet, TargetArchetypeKind::Grouped, true).expect("lossy allowed");
+    assert!(lossy_prev.lossy);
+    assert_eq!(lossy_prev.dropped_cells, 1);
+}

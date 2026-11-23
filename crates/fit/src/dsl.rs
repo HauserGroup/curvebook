@@ -48,7 +48,7 @@ mod vm;
 
 pub use ast::{BinaryKind, BuiltinFn, DatasetFilter, DslCompileWarning, DslEquationKind, DslWarningKind, OpCode, UnaryKind};
 pub(crate) use ast::{BinaryOp, Expr, UnaryOp};
-pub(crate) use limits::{DEFAULT_MAX_ODE_STEPS_PER_FIT, MAX_DSL_LINES, MAX_DSL_SOURCE_BYTES};
+pub(crate) use limits::{DEFAULT_MAX_ODE_STEPS_PER_FIT, MAX_DSL_LINES, MAX_DSL_SOURCE_BYTES, MAX_TOTAL_DATASET_INDICES};
 pub use model::CompiledDslModel;
 pub use ode::integrate_rk45;
 pub(crate) use ode::{enter_ode_fit_budget, ode_fit_budget_exceeded};

@@ -177,17 +177,26 @@ pub fn shapiro_wilk(values: &[f64]) -> Result<NormalityResult, MathError> {
     let mut sorted = values.to_vec();
     sorted.sort_by(f64::total_cmp);
     let moments = SummaryMoments::from_slice(&sorted)?;
-    if moments.css <= 0.0 {
-        return Err(MathError::DomainError { name: "variance", value: 0.0 });
+    let sd = moments.population_sd();
+    let (scale, css_s) = moments.scaled_m2();
+    if !sd.is_finite() || sd <= 0.0 || !scale.is_finite() || scale <= 0.0 || !css_s.is_finite() || css_s <= 0.0 {
+        return Err(MathError::DomainError { name: "variance", value: sd });
     }
 
+    let inv_scale = 1.0 / scale;
     let weights = shapiro_wilk_weights(n)?;
     let mut num_acc = NeumaierSum::new();
     for ((&x_lo, &x_hi), &w_hi) in sorted.iter().zip(sorted.iter().rev()).zip(weights.iter().rev()).take(n / 2) {
-        num_acc.add(w_hi * (x_hi - x_lo));
+        let diff = x_hi - x_lo;
+        let scaled_diff = if diff.is_finite() { diff * inv_scale } else { x_hi * inv_scale - x_lo * inv_scale };
+        num_acc.add(w_hi * scaled_diff);
     }
     let num = num_acc.total();
-    let w = ((num * num) / moments.css).clamp(0.0, 1.0);
+    let raw_w = (num * num) / css_s;
+    if !raw_w.is_finite() {
+        return Err(MathError::DomainError { name: "w", value: raw_w });
+    }
+    let w = raw_w.clamp(0.0, 1.0);
     let p_value = shapiro_wilk_p_value(w, n);
     Ok(NormalityResult { statistic: w, p_value })
 }
@@ -220,24 +229,26 @@ pub fn dagostino_pearson(values: &[f64]) -> Result<NormalityResult, MathError> {
         return Err(MathError::InvalidParameter { name: "n", value: n as f64 });
     }
     let moments = SummaryMoments::from_slice(values)?;
-    if moments.css <= 0.0 {
-        return Err(MathError::DomainError { name: "variance", value: 0.0 });
+    let sd = moments.population_sd();
+    if !sd.is_finite() || sd <= 0.0 {
+        return Err(MathError::DomainError { name: "variance", value: sd });
     }
 
     let nf = n as f64;
-    let m2 = moments.css / nf;
     let mut s3 = NeumaierSum::new();
     let mut s4 = NeumaierSum::new();
     for &x in values {
-        let d = x - moments.mean;
-        let d2 = d * d;
-        s3.add(d2 * d);
-        s4.add(d2 * d2);
+        let diff = x - moments.mean;
+        let z = if diff.is_finite() { diff / sd } else { x / sd - moments.mean / sd };
+        let z2 = z * z;
+        s3.add(z2 * z);
+        s4.add(z2 * z2);
     }
-    let m3 = s3.total() / nf;
-    let m4 = s4.total() / nf;
-    let sqrt_b1 = m3 / (m2 * m2.sqrt());
-    let b2 = m4 / (m2 * m2);
+    let sqrt_b1 = s3.total() / nf;
+    let b2 = s4.total() / nf;
+    if !sqrt_b1.is_finite() || !b2.is_finite() {
+        return Err(MathError::DomainError { name: "moments", value: if !sqrt_b1.is_finite() { sqrt_b1 } else { b2 } });
+    }
 
     // Skewness normal transform (D'Agostino 1970).
     let y = sqrt_b1 * (((nf + 1.0) * (nf + 3.0)) / (6.0 * (nf - 2.0))).sqrt();
@@ -254,11 +265,19 @@ pub fn dagostino_pearson(values: &[f64]) -> Result<NormalityResult, MathError> {
     let sqrt_beta1 =
         (6.0 * (nf * nf - 5.0 * nf + 2.0) / ((nf + 7.0) * (nf + 9.0))) * ((6.0 * (nf + 3.0) * (nf + 5.0)) / (nf * (nf - 2.0) * (nf - 3.0))).sqrt();
     let a = 6.0 + (8.0 / sqrt_beta1) * (2.0 / sqrt_beta1 + (1.0 + 4.0 / (sqrt_beta1 * sqrt_beta1)).sqrt());
-    let denom = (1.0 + x_k * (2.0 / (a - 4.0)).sqrt()).max(1e-12);
+    let denom_raw = 1.0 + x_k * (2.0 / (a - 4.0)).sqrt();
+    if !denom_raw.is_finite() {
+        return Err(MathError::DomainError { name: "kurtosis", value: denom_raw });
+    }
+    let denom = denom_raw.max(1e-12);
     let term = (1.0 - 2.0 / a) / denom;
     let z2 = ((1.0 - 2.0 / (9.0 * a)) - term.cbrt()) / (2.0 / (9.0 * a)).sqrt();
 
-    let k2 = (z1 * z1 + z2 * z2).max(0.0);
+    let raw_k2 = z1 * z1 + z2 * z2;
+    if !raw_k2.is_finite() {
+        return Err(MathError::DomainError { name: "k2", value: raw_k2 });
+    }
+    let k2 = raw_k2.max(0.0);
     let p_value = chi2_sf(k2, 2.0)?.clamp(0.0, 1.0);
     Ok(NormalityResult { statistic: k2, p_value })
 }
@@ -463,5 +482,60 @@ mod tests {
         assert_eq!(average_ranks(&[20.0, 30.0, 10.0, 30.0, 20.0, 30.0]), vec![2.5, 5.0, 1.0, 5.0, 2.5, 5.0]);
         // Signed zeros are numerically equal and share mid-rank 1.5.
         assert_eq!(average_ranks(&[0.0, -0.0, 1.0]), vec![1.5, 1.5, 3.0]);
+    }
+
+    #[test]
+    fn dagostino_pearson_is_scale_invariant_across_extreme_exponents() {
+        // DA-01-01 regression: standardized moments stay accurate and finite across 1e-200..1e200.
+        let normal_base = [-1.8, -1.3, -0.9, -0.6, -0.3, -0.1, 0.1, 0.3, 0.6, 0.9, 1.3, 1.8];
+        let ref_norm = dagostino_pearson(&normal_base).unwrap();
+        for scale in [1e-200_f64, 1e-90, 1e80, 1e160, 1e200] {
+            let scaled: Vec<f64> = normal_base.iter().map(|&x| x * scale).collect();
+            let res = dagostino_pearson(&scaled).unwrap();
+            assert_close(res.statistic, ref_norm.statistic, 1e-10, 1e-10, &format!("DP normal K^2 @ {scale:e}"));
+            assert_close(res.p_value, ref_norm.p_value, 1e-10, 1e-10, &format!("DP normal p @ {scale:e}"));
+        }
+
+        // Extreme non-normal outlier at 1e160 must reject normality instead of masking NaN to K^2=0, p=1.
+        let outlier_base = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        let ref_out = dagostino_pearson(&outlier_base).unwrap();
+        let outlier_huge = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1e160];
+        let res_huge = dagostino_pearson(&outlier_huge).unwrap();
+        assert_close(res_huge.statistic, ref_out.statistic, 1e-10, 1e-10, "DP outlier 1e160 K^2");
+        assert_close(res_huge.p_value, ref_out.p_value, 1e-10, 1e-10, "DP outlier 1e160 p");
+        assert!(res_huge.statistic > 10.0 && res_huge.p_value < 0.01);
+
+        // Overflow-safe diff fallback when x - mean overflows f64::MAX.
+        let extreme_span = [-1e308, -1e308, 1e308, 1e308, 1e308, 1e308, 1e308, 1e308];
+        let unit_span = [-1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+        let res_ext = dagostino_pearson(&extreme_span).unwrap();
+        let res_unit = dagostino_pearson(&unit_span).unwrap();
+        assert_close(res_ext.statistic, res_unit.statistic, 1e-10, 1e-10, "DP extreme span K^2");
+        assert_close(res_ext.p_value, res_unit.p_value, 1e-10, 1e-10, "DP extreme span p");
+    }
+
+    #[test]
+    fn shapiro_wilk_is_scale_invariant_across_extreme_exponents() {
+        // DA-01-02 regression: standardized numerator avoids css overflow/underflow and NaN masking.
+        let skewed_base = [0.0, 0.0, 0.0, 1.0];
+        let ref_skew = shapiro_wilk(&skewed_base).unwrap();
+        for scale in [1e-200_f64, 1e-160, 1e160, 1e200] {
+            let scaled: Vec<f64> = skewed_base.iter().map(|&x| x * scale).collect();
+            let res = shapiro_wilk(&scaled).unwrap();
+            assert_close(res.statistic, ref_skew.statistic, 1e-11, 1e-11, &format!("SW skewed W @ {scale:e}"));
+            assert_close(res.p_value, ref_skew.p_value, 1e-9, 1e-9, &format!("SW skewed p @ {scale:e}"));
+        }
+
+        // Tiny scale where unscaled css underflows to 0.0 must still compute valid W and p.
+        let tiny_sym = [1e-200, 2e-200, 3e-200];
+        let res_tiny = shapiro_wilk(&tiny_sym).unwrap();
+        assert_close(res_tiny.statistic, 1.0, 1e-12, 1e-12, "SW tiny symmetric W");
+        assert_close(res_tiny.p_value, 1.0, 1e-12, 1e-12, "SW tiny symmetric p");
+
+        // Overflow-safe x_hi - x_lo fallback when difference overflows f64::MAX.
+        let huge_span = [-1e308, 0.0, 1e308];
+        let res_span = shapiro_wilk(&huge_span).unwrap();
+        assert_close(res_span.statistic, 1.0, 1e-12, 1e-12, "SW huge span W");
+        assert_close(res_span.p_value, 1.0, 1e-12, 1e-12, "SW huge span p");
     }
 }

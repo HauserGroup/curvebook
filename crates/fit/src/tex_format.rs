@@ -10,8 +10,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::dsl::{
-    BinaryOp, DatasetFilter, Expr, MAX_DSL_LINES, MAX_DSL_SOURCE_BYTES, UnaryOp, is_valid_ident, parse_dataset_prefix, parse_expr_collecting_locs,
-    split_top_level_assignment,
+    BinaryOp, DatasetFilter, Expr, MAX_DSL_LINES, MAX_DSL_SOURCE_BYTES, MAX_TOTAL_DATASET_INDICES, UnaryOp, is_valid_ident, parse_dataset_prefix,
+    parse_expr_collecting_locs, split_top_level_assignment,
 };
 use crate::library::normalize_id;
 use crate::types::per_dataset_parameter_key;
@@ -1125,6 +1125,7 @@ struct SelectedDslScript<'a> {
 
 fn select_dsl_script(src: &str, data_set_index: Option<usize>) -> Option<SelectedDslScript<'_>> {
     let mut parsed: Vec<(DatasetFilter, DslRawStmt<'_>)> = Vec::new();
+    let mut total_dataset_indices = 0_usize;
     for (idx, raw_line) in src.lines().enumerate() {
         if idx >= MAX_DSL_LINES {
             break;
@@ -1155,6 +1156,14 @@ fn select_dsl_script(src: &str, data_set_index: Option<usize>) -> Option<Selecte
             continue;
         }
         let (filter, body) = parse_dataset_prefix(stripped, idx + 1).unwrap_or((DatasetFilter::Any, stripped));
+        let filter_len = match &filter {
+            DatasetFilter::Any => 0,
+            DatasetFilter::Include(v) | DatasetFilter::Exclude(v) => v.len(),
+        };
+        total_dataset_indices = total_dataset_indices.saturating_add(filter_len);
+        if total_dataset_indices > MAX_TOTAL_DATASET_INDICES {
+            return None;
+        }
         let body = body.trim();
         if !body.is_empty() {
             parsed.push((filter, classify_dsl_line(body)));
@@ -1497,6 +1506,27 @@ fn has_leading_dsl_neg(mut expr: &Expr) -> bool {
     }
 }
 
+fn has_balanced_outer_parens(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() < 2 || bytes.first() != Some(&b'(') || bytes.last() != Some(&b')') {
+        return false;
+    }
+    let mut depth = 0_usize;
+    for (idx, &byte) in bytes.iter().enumerate() {
+        match byte {
+            b'(' => depth += 1,
+            b')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 && idx + 1 < bytes.len() {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    depth == 0
+}
+
 enum RenderTask<'a> {
     Visit { expr: &'a Expr, parent_prec: u8, strip_left_neg: bool },
     FinishNeg { parent_prec: u8, need_paren: bool },
@@ -1504,7 +1534,7 @@ enum RenderTask<'a> {
     FinishSub { parent_prec: u8, r_paren: bool },
     FinishMul { parent_prec: u8 },
     FinishDiv { parent_prec: u8, strip_neg_active: bool, inner_is_add_sub: bool },
-    FinishPow { lhs_is_bin_or_neg: bool },
+    FinishPow { lhs_is_bin_or_neg: bool, lhs_is_pow: bool },
     FinishCall { name: &'a str, arg_count: usize, first_is_atom: bool },
 }
 
@@ -1565,12 +1595,12 @@ fn render_dsl_tex_iterative(root: &Expr, ctx: &EqCtx<'_>, shadowed_locals: Optio
                     results.push(format!("\\frac{{{n}}}{{{d}}}"));
                 }
             }
-            RenderTask::FinishPow { lhs_is_bin_or_neg } => {
+            RenderTask::FinishPow { lhs_is_bin_or_neg, lhs_is_pow } => {
                 let e = results.pop().unwrap_or_default();
                 let mut b = results.pop().unwrap_or_default();
-                let base_needs_paren =
-                    lhs_is_bin_or_neg || ((b.starts_with('-') || b.contains("\\times") || b.starts_with("\\frac")) && !b.starts_with('('));
-                if base_needs_paren && !b.starts_with('(') {
+                let already_wrapped = has_balanced_outer_parens(&b);
+                let base_needs_paren = lhs_is_pow || lhs_is_bin_or_neg || b.starts_with('-') || b.contains("\\times") || b.starts_with("\\frac");
+                if base_needs_paren && !already_wrapped {
                     b = format!("({b})");
                 }
                 results.push(format!("{b}^{{{e}}}"));
@@ -1655,8 +1685,10 @@ fn push_visit_tasks<'a>(
             tasks.push(RenderTask::Visit { expr: lhs, parent_prec: 0, strip_left_neg: strip_neg_active });
         }
         Expr::Binary { op: BinaryOp::Pow, lhs, rhs } => {
+            let lhs_is_pow = matches!(lhs.as_ref(), Expr::Binary { op: BinaryOp::Pow, .. })
+                || matches!(lhs.as_ref(), Expr::Call { name, .. } if name.eq_ignore_ascii_case("pow") || name.eq_ignore_ascii_case("exp10"));
             let lhs_is_bin_or_neg = matches!(lhs.as_ref(), Expr::Binary { .. } | Expr::Unary { op: UnaryOp::Neg, .. });
-            tasks.push(RenderTask::FinishPow { lhs_is_bin_or_neg });
+            tasks.push(RenderTask::FinishPow { lhs_is_bin_or_neg, lhs_is_pow });
             tasks.push(RenderTask::Visit { expr: rhs, parent_prec: 0, strip_left_neg: false });
             tasks.push(RenderTask::Visit { expr: lhs, parent_prec: 4, strip_left_neg: false });
         }
@@ -2256,5 +2288,27 @@ mod tests {
         assert_eq!(format_model_equation_tex("custom_dsl", Some("Y' = -k * Y"), &[("k".into(), 0.25)], true, 4), "Y' = -0.25 \\cdot Y");
         assert_eq!(format_model_equation_tex("custom_dsl", Some("Y = 1.25e-5 * X + 0.5"), &[], false, 4), "Y = 1.25 \\times 10^{-5} \\cdot X + 0.5");
         assert_eq!(format_model_equation_tex("custom_dsl", Some("Y = 2^-3^2 + X^-2"), &[], false, 4), "Y = 2^{-3^{2}} + X^{-2}");
+    }
+
+    #[test]
+    fn custom_dsl_enforces_cumulative_dataset_index_cap() {
+        // DA-04-01 regression: cumulative dataset indices across lines are capped at MAX_TOTAL_DATASET_INDICES (50_000).
+        let within_cap = "<0:9999>Y=X\n".repeat(5);
+        assert_eq!(format_model_equation_tex("custom_dsl", Some(&within_cap), &[], false, 4), "Y = X");
+
+        let over_cap = "<0:9999>Y=X\n".repeat(6);
+        assert_eq!(format_model_equation_tex("custom_dsl", Some(&over_cap), &[], false, 4), "Y = f(X)");
+    }
+
+    #[test]
+    fn custom_dsl_left_nested_powers_parenthesize_outer_base() {
+        // DA-04-03 regression: left-nested powers whose inner base starts with `(` must not emit double superscripts.
+        assert_eq!(format_model_equation_tex("custom_dsl", Some("Y = ((a + b)^2)^3"), &[], false, 4), "Y = ((a + b)^{2})^{3}");
+        assert_eq!(format_model_equation_tex("custom_dsl", Some("Y = ((-a)^b)^c"), &[], false, 4), "Y = ((-a)^{b})^{c}");
+        assert_eq!(format_model_equation_tex("custom_dsl", Some("Y = (a^b)^c"), &[], false, 4), "Y = (a^{b})^{c}");
+        assert_eq!(format_model_equation_tex("custom_dsl", Some("Y = pow(a + b, 2)^3"), &[], false, 4), "Y = ((a + b)^{2})^{3}");
+        assert_eq!(format_model_equation_tex("custom_dsl", Some("Y = exp10(X)^2"), &[], false, 4), "Y = (10^{X})^{2}");
+        // Single-level parenthesized base stays cleanly unwrapped (no double parens).
+        assert_eq!(format_model_equation_tex("custom_dsl", Some("Y = (a + b)^2"), &[], false, 4), "Y = (a + b)^{2}");
     }
 }
