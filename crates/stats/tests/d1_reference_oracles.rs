@@ -301,7 +301,9 @@ fn oracle_one_sample_and_two_group_parametric_r_reference() {
     let ft = f_test_variances(&g_a, &g_b).unwrap();
     assert_approx_eq(ft.f_statistic, 1.881_864_623_243_93, 1e-11, 1e-11, "var.test F");
     assert_approx_eq(ft.p_value, 0.463_492_555_478_103, 1e-10, 1e-10, "var.test p");
-    assert!(levene_variance_test(&[&g_a, &g_b], true).unwrap().p_value > 0.2);
+    let lev_bf = levene_variance_test(&[&g_a, &g_b], true).unwrap();
+    assert_approx_eq(lev_bf.f_statistic, 0.676_290_810_583_538_6, 1e-11, 1e-11, "Levene (median) F");
+    assert_approx_eq(lev_bf.p_value, 0.428_333_491_728_102_9, 1e-10, 1e-10, "Levene (median) p");
 
     // Paired t-test, Ratio paired t-test, Lognormal unpaired t, Bland-Altman, Multiple Row t
     let pre = [120.0, 132.0, 118.0, 140.0, 125.0, 135.0, 128.0, 144.0];
