@@ -1031,9 +1031,12 @@ version = "0.1.0-alpha.2"
 dependencies = [
  "curvebook-engine",
  "curvebook-format",
+ "curvebook-platform",
  "curvebook-text",
  "curvebook-ui-egui",
  "js-sys",
+ "serde",
+ "serde_json",
  "wasm-bindgen",
  "web-sys",
 ]

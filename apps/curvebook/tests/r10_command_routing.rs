@@ -1032,7 +1032,7 @@ fn r13_7_native_rfd_image_picker_inserts_png_on_graph_and_layout() -> Result<(),
 
     rt.window_mut(wid)?.app_mut().execute_command(
         "sheet.createData",
-        json!({ "sheet_id": "data-xy", "title": "Image Host Data", "kind": "xy", "data_sets": 1, "rows": 3, "auto_graph": false }),
+        json!({ "sheet_id": "data-xy", "title": "Image Host Data", "kind": "xy", "cols": 1, "rows": 3, "auto_graph": false }),
     )?;
     rt.window_mut(wid)?.app_mut().execute_command("graph.create", json!({ "sheet_id": "g-img", "data_sheet_id": "data-xy", "kind": "xy" }))?;
     rt.window_mut(wid)?.app_mut().execute_command("layout.create", json!({ "sheet_id": "lay-img", "title": "Img Layout" }))?;

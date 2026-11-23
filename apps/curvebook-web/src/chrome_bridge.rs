@@ -3,12 +3,18 @@
 #![forbid(unsafe_code)]
 
 use curvebook_engine::cmd;
-use curvebook_ui_egui::menus::normalize_shortcut_combo;
-use curvebook_ui_egui::serde_json::{Map, Value, json};
-use curvebook_ui_egui::{
-    ActiveDialog, KeyModifiers, PointerButton, UiApp, UiEventOutcome, UiInputEvent, ViewportMetrics, dispatch_gui_action, dispatch_ui_command,
-    menu_bar_tooltips, menus::toolbar_tooltips,
+pub use curvebook_ui_egui::control_io::host_routing::contextual_command_params;
+use curvebook_ui_egui::control_io::host_routing::{
+    self, dialog_ui_command_for_engine_cmd, first_data_sheet_id as resolve_first_data_sheet_id, has_non_null_path_param, is_read_only_control_method,
+    is_read_only_ui_command, resolve_renderable_sheet_id, resolve_result_sheet_id,
 };
+use curvebook_ui_egui::menus::normalize_shortcut_combo;
+use curvebook_ui_egui::{
+    ActiveDialog, KeyModifiers, PointerButton, UiApp, UiEventOutcome, UiInputEvent, ViewportMetrics, dispatch_ui_command, menu_bar_tooltips,
+    menus::toolbar_tooltips,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use crate::text_bridge::{LayoutRectPx, ZLayer};
 
@@ -610,12 +616,18 @@ pub struct WebChromeNode {
     pub action: WebChromeAction,
 }
 
+fn default_active_dialog_none() -> String {
+    String::from("none")
+}
+
 /// Accessible summary of current Web chrome state mirrored to `RenderRgbaFrame.chrome`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct WebChromeSnapshot {
     pub menu_bar_visible: bool,
     pub open_menu_key: Option<String>,
     pub context_menu_open: bool,
+    #[serde(default = "default_active_dialog_none")]
     pub active_dialog: String,
     pub hovered_node_id: Option<String>,
     pub focused_node_id: Option<String>,
@@ -633,49 +645,13 @@ impl WebChromeSnapshot {
     /// Encode chrome state snapshot into JSON for `RenderRgbaFrame.chrome`.
     #[must_use]
     pub fn to_json_value(&self) -> Value {
-        json!({
-            "menu_bar_visible": self.menu_bar_visible,
-            "open_menu_key": self.open_menu_key,
-            "context_menu_open": self.context_menu_open,
-            "active_dialog": self.active_dialog,
-            "hovered_node_id": self.hovered_node_id,
-            "focused_node_id": self.focused_node_id,
-            "ime_preedit": self.ime_preedit,
-            "drag_active": self.drag_active,
-            "node_count": self.node_count,
-            "menu_titles": self.menu_titles,
-            "toolbar_ids": self.toolbar_ids,
-            "status_summary": self.status_summary,
-            "dirty": self.dirty,
-            "a11y_tree": self.a11y_tree,
-        })
+        serde_json::to_value(self).unwrap_or_else(|_| json!({}))
     }
 
     /// Decode a [`WebChromeSnapshot`] from JSON, tolerating missing optional fields.
     #[must_use]
     pub fn from_json_value(value: &Value) -> Self {
-        let Some(obj) = value.as_object() else {
-            return Self::default();
-        };
-        let str_list = |key: &str| -> Vec<String> {
-            obj.get(key).and_then(Value::as_array).map(|arr| arr.iter().filter_map(Value::as_str).map(str::to_owned).collect()).unwrap_or_default()
-        };
-        Self {
-            menu_bar_visible: obj.get("menu_bar_visible").and_then(Value::as_bool).unwrap_or(false),
-            open_menu_key: obj.get("open_menu_key").and_then(Value::as_str).map(str::to_owned),
-            context_menu_open: obj.get("context_menu_open").and_then(Value::as_bool).unwrap_or(false),
-            active_dialog: obj.get("active_dialog").and_then(Value::as_str).unwrap_or("none").to_owned(),
-            hovered_node_id: obj.get("hovered_node_id").and_then(Value::as_str).map(str::to_owned),
-            focused_node_id: obj.get("focused_node_id").and_then(Value::as_str).map(str::to_owned),
-            ime_preedit: obj.get("ime_preedit").and_then(Value::as_str).map(str::to_owned),
-            drag_active: obj.get("drag_active").and_then(Value::as_bool).unwrap_or(false),
-            node_count: usize::try_from(obj.get("node_count").and_then(Value::as_u64).unwrap_or(0)).unwrap_or(0),
-            menu_titles: str_list("menu_titles"),
-            toolbar_ids: str_list("toolbar_ids"),
-            status_summary: obj.get("status_summary").and_then(Value::as_str).unwrap_or_default().to_owned(),
-            dirty: obj.get("dirty").and_then(Value::as_bool).unwrap_or(false),
-            a11y_tree: obj.get("a11y_tree").filter(|v| !v.is_null()).cloned().map(Box::new),
-        }
+        serde_json::from_value(value.clone()).unwrap_or_default()
     }
 }
 
@@ -1808,7 +1784,7 @@ fn build_chrome_a11y_tree(app: &UiApp, bridge: &WebChromeBridge, nodes: &[WebChr
             WebChromeRole::StatusBar => "status",
             WebChromeRole::Tooltip => "tooltip",
         };
-        let mut attrs = Map::new();
+        let mut attrs = serde_json::Map::new();
         attrs.insert(String::from("role"), Value::String(String::from(aria_role)));
         attrs.insert(String::from("aria-label"), Value::String(node.label.clone()));
         attrs.insert(String::from("data-node-id"), Value::String(node.id.clone()));
@@ -1911,81 +1887,6 @@ pub enum WebCommandRoute {
     NoticeOnly { level: WebNoticeLevel, code: String, message: String },
 }
 
-/// Explicit allowlist of front-end UI commands that do not mutate the project document.
-pub(crate) fn is_read_only_ui_command(command_id: &str) -> bool {
-    let base = command_id.split(':').next().unwrap_or(command_id);
-    matches!(
-        base,
-        "app.about"
-            | "app.feedback"
-            | "ui.previewFilter.set"
-            | "ui.rulers.toggle"
-            | "ui.theme.set"
-            | "ui.locale.set"
-            | "ui.palette.open"
-            | "ui.about.open"
-            | "ui.sheet.select"
-            | "ui.split.set"
-            | "ui.grid.selectRange"
-            | "ui.clipboard.copy"
-            | "ui.export.figure"
-            | "ui.print.open"
-            | "file.print"
-            | "ui.navigator.toggle"
-            | "ui.inspector.toggle"
-            | "ui.family.toggle"
-            | "ui.zoom.fitSheet"
-            | "ui.split.toggle"
-            | "ui.gallery.toggle"
-            | "ui.pane.cycle"
-            | "ui.shortcut.set"
-            | "ui.shortcut.reset"
-            | "ui.closeWorkspace.prompt"
-            | "ui.analyze.open"
-            | "ui.powerWizard.open"
-            | "ui.formatPoints.open"
-            | "ui.changeGraphType.open"
-            | "ui.clonePipeline.open"
-            | "ui.graph.axes.open"
-            | "ui.graph.format.open"
-            | "ui.graph.pairwise.open"
-            | "ui.graph.insertModelEquation"
-            | "ui.graph.bubblePlot.open"
-            | "ui.applyStyleFrom.open"
-            | "ui.layout.composer.open"
-            | "ui.layout.equalizeScaling.open"
-            | "ui.graph.create.open"
-            | "ui.view.rowTitles.toggle"
-            | "ui.gridOverlay.toggle"
-            | "ui.embeddedTable.format.open"
-            | "ui.image.format.open"
-            | "ui.export.figure.open"
-            | "ui.import.reshape.open"
-            | "ui.result.copyMethodsReport"
-            | "ui.result.applyRemediation"
-            | "ui.result.inspectDiagnostics"
-            | "ui.canvas.preflight"
-            | "ui.brush.point"
-            | "ui.table.convertArchetype.open"
-            | "ui.table.randomizeGroups"
-            | "ui.table.randomSampleRows"
-            | "ui.table.simulateDistributions"
-            | "ui.table.openFormulaBar"
-    )
-}
-
-/// Explicit allowlist of read-only control-protocol inspection and vector/preview methods.
-pub(crate) fn is_read_only_control_method(command_id: &str) -> bool {
-    matches!(
-        command_id,
-        "ping" | "command.list" | "doc.inspect" | "doc.export" | "render.svg" | "render.pdf" | "render.preview" | "ui.state" | "state.snapshot"
-    )
-}
-
-pub(crate) fn has_non_null_path_param(params: &Value) -> bool {
-    params.get("path").or_else(|| params.get("file_path")).or_else(|| params.get("filePath")).is_some_and(|v| !v.is_null())
-}
-
 impl WebCommandRoute {
     /// Whether this route only reads/views state or opens a non-mutating picker/export.
     #[must_use]
@@ -2010,9 +1911,10 @@ impl WebCommandRoute {
 /// Resolve any toolbar, dropdown, palette, or shortcut command ID (including `:variant` suffixes) cleanly.
 #[must_use]
 pub fn resolve_web_command_route(app: &UiApp, raw_command_id: &str) -> WebCommandRoute {
+    let doc = app.document();
     let trimmed = raw_command_id.trim();
     if let Some((base, variant)) = trimmed.split_once(':') {
-        let active_render = first_renderable_sheet_id(app);
+        let active_render = resolve_renderable_sheet_id(doc).map(|id| id.as_str().to_owned());
         let params = match base {
             "ui.theme.set" => json!({ "mode": variant }),
             "ui.locale.set" => json!({ "locale": variant }),
@@ -2023,6 +1925,9 @@ pub fn resolve_web_command_route(app: &UiApp, raw_command_id: &str) -> WebComman
         };
         return WebCommandRoute::UiCommand { command_id: base.to_owned(), params };
     }
+
+    let first_data = || resolve_first_data_sheet_id(doc).map(|id| id.as_str().to_owned());
+    let first_renderable = || resolve_renderable_sheet_id(doc).map(|id| id.as_str().to_owned());
 
     match trimmed {
         "file.open" | "project.open" | "ui.file.open" => {
@@ -2036,15 +1941,15 @@ pub fn resolve_web_command_route(app: &UiApp, raw_command_id: &str) -> WebComman
         "project.save" | "file.save" | "project.saveTemplate" => {
             WebCommandRoute::ExportFormat { format: WebExportFormat::CurveBookArchive, sheet_id: None }
         }
-        "table.exportCsv" => WebCommandRoute::ExportFormat { format: WebExportFormat::Csv, sheet_id: first_data_sheet_id(app) },
-        "export.svg" | "graph.exportSvg" => WebCommandRoute::ExportFormat { format: WebExportFormat::Svg, sheet_id: first_renderable_sheet_id(app) },
-        "export.pdf" | "graph.exportPdf" => WebCommandRoute::ExportFormat { format: WebExportFormat::Pdf, sheet_id: first_renderable_sheet_id(app) },
-        "export.png" | "graph.exportPng" => WebCommandRoute::ExportFormat { format: WebExportFormat::Png, sheet_id: first_renderable_sheet_id(app) },
-        "export.tiff" => WebCommandRoute::ExportFormat { format: WebExportFormat::Tiff, sheet_id: first_renderable_sheet_id(app) },
+        "table.exportCsv" => WebCommandRoute::ExportFormat { format: WebExportFormat::Csv, sheet_id: first_data() },
+        "export.svg" | "graph.exportSvg" => WebCommandRoute::ExportFormat { format: WebExportFormat::Svg, sheet_id: first_renderable() },
+        "export.pdf" | "graph.exportPdf" => WebCommandRoute::ExportFormat { format: WebExportFormat::Pdf, sheet_id: first_renderable() },
+        "export.png" | "graph.exportPng" => WebCommandRoute::ExportFormat { format: WebExportFormat::Png, sheet_id: first_renderable() },
+        "export.tiff" => WebCommandRoute::ExportFormat { format: WebExportFormat::Tiff, sheet_id: first_renderable() },
         "file.print" => WebCommandRoute::PrintCurrentSheet,
         "ui.editParams.open" | "analysis.updateParams" => {
-            if let Some(rs_id) = active_or_first_result_sheet_id(app) {
-                WebCommandRoute::OpenEditAnalysisParameters(rs_id)
+            if let Some(rs_id) = resolve_result_sheet_id(doc) {
+                WebCommandRoute::OpenEditAnalysisParameters(rs_id.as_str().to_owned())
             } else {
                 WebCommandRoute::NoticeOnly {
                     level: WebNoticeLevel::Info,
@@ -2069,29 +1974,7 @@ pub fn resolve_web_command_route(app: &UiApp, raw_command_id: &str) -> WebComman
 }
 
 fn resolve_mapped_ui_or_engine_route(app: &UiApp, cmd_id: &str) -> WebCommandRoute {
-    let dialog_route = match cmd_id {
-        "toolbar.axes" | "graph.setAxes" => Some("ui.graph.axes.open"),
-        "graph.setKind" => Some("ui.changeGraphType.open"),
-        "graph.setSpec" | "graph.setSeries" | "graph.setAdditionalTicks" | "graph.setRegressionOverlay" | "graph.applyStyleFrom" => {
-            Some("ui.graph.format.open")
-        }
-        "graph.formatSelectedPoints" => Some("ui.formatPoints.open"),
-        "graph.addComparisonBrackets" | "graph.setCompactLetterDisplay" => Some("ui.graph.pairwise.open"),
-        "graph.applyCanvasPreset" | "layout.applyCanvasPreset" => Some("ui.canvas.applyPreset"),
-        "analysis.run" | "stats.run" | "fit.run" | "transform.run" | "analysis.add" | "stats.pvalueStack" => Some("ui.analyze.open"),
-        "analysis.retargetData" => Some("ui.analyze.open"),
-        "table.convertArchetype" => Some("ui.table.convertArchetype.open"),
-        "table.excludeCellsWithReason" => Some("ui.grid.excludeWithReason"),
-        "table.randomizeGroups" => Some("ui.table.randomizeGroups"),
-        "table.randomSampleRows" => Some("ui.table.randomSampleRows"),
-        "table.simulateDistributions" => Some("ui.table.simulateDistributions"),
-        "table.setCalculatedVariable" => Some("ui.table.openFormulaBar"),
-        "table.pasteLink" => Some("ui.import.reshape.open"),
-        "sheet.clonePipeline" => Some("ui.clonePipeline.open"),
-        "layout.setSpec" | "layout.addPanel" => Some("ui.layout.composer.open"),
-        _ => None,
-    };
-    if let Some(ui_cmd) = dialog_route {
+    if let Some(ui_cmd) = dialog_ui_command_for_engine_cmd(cmd_id) {
         return WebCommandRoute::UiCommand { command_id: ui_cmd.to_owned(), params: contextual_command_params(app, ui_cmd) };
     }
     if curvebook_ui_egui::UI_COMMANDS.iter().any(|s| s.id == cmd_id)
@@ -2102,529 +1985,61 @@ fn resolve_mapped_ui_or_engine_route(app: &UiApp, cmd_id: &str) -> WebCommandRou
     WebCommandRoute::EngineCommand { command_id: cmd_id.to_owned(), params: contextual_command_params(app, cmd_id) }
 }
 
-fn first_data_sheet_id(app: &UiApp) -> Option<String> {
-    let doc = app.document();
-    doc.active_sheet_id
-        .as_ref()
-        .filter(|id| doc.data_sheet(id).is_some())
-        .or_else(|| doc.data_sheets.first().map(|s| &s.id))
-        .map(|id| id.as_str().to_owned())
-}
-
-fn first_renderable_sheet_id(app: &UiApp) -> Option<String> {
-    let doc = app.document();
-    doc.active_sheet_id
-        .as_ref()
-        .filter(|id| doc.graph_sheet(id).is_some() || doc.layout_sheet(id).is_some())
-        .or_else(|| doc.graph_sheets.first().map(|s| &s.id))
-        .or_else(|| doc.layout_sheets.first().map(|s| &s.id))
-        .map(|id| id.as_str().to_owned())
-}
-
-fn active_or_first_result_sheet_id(app: &UiApp) -> Option<String> {
-    let doc = app.document();
-    doc.active_sheet_id
-        .as_ref()
-        .filter(|id| doc.result_sheet(id).is_some())
-        .or_else(|| doc.result_sheets.first().map(|s| &s.id))
-        .map(|id| id.as_str().to_owned())
-}
-
-fn next_cycle_theme_mode(app: &UiApp) -> &'static str {
-    let lum = app.theme.surface_bg.relative_luminance();
-    if lum > 0.5 {
-        "dark"
-    } else if app.theme.border.r >= 240 && app.theme.border.g >= 240 {
-        "light"
-    } else {
-        "high_contrast"
-    }
-}
-
-fn next_cycle_preview_filter(filter: curvebook_ui_egui::CanvasPreviewFilter) -> &'static str {
-    use curvebook_ui_egui::CanvasPreviewFilter;
-    match filter {
-        CanvasPreviewFilter::Normal => "deuteranopia",
-        CanvasPreviewFilter::Deuteranopia => "protanopia",
-        CanvasPreviewFilter::Protanopia => "tritanopia",
-        CanvasPreviewFilter::Tritanopia => "grayscale",
-        CanvasPreviewFilter::GrayscalePrint => "normal",
-    }
-}
-
-/// Build contextual default parameters for menu/toolbar/palette commands (always returns a JSON object, never `Value::Null`).
-#[must_use]
-pub fn contextual_command_params(app: &UiApp, command_id: &str) -> Value {
-    let doc = app.document();
-    let active_sheet = doc.active_sheet_id.as_ref().map(|id| id.as_str());
-    let active_data = first_data_sheet_id(app);
-    let active_graph = doc
-        .active_sheet_id
-        .as_ref()
-        .filter(|id| doc.graph_sheet(id).is_some())
-        .or_else(|| doc.graph_sheets.first().map(|s| &s.id))
-        .map(|id| id.as_str().to_owned());
-    let active_layout = doc
-        .active_sheet_id
-        .as_ref()
-        .filter(|id| doc.layout_sheet(id).is_some())
-        .or_else(|| doc.layout_sheets.first().map(|s| &s.id))
-        .map(|id| id.as_str().to_owned());
-    let active_render = first_renderable_sheet_id(app);
-    let active_result = active_or_first_result_sheet_id(app);
-
-    match command_id {
-        "sheet.createData" => json!({ "kind": "xy", "title": "Data Table", "auto_family": true }),
-        "sheet.rename" => json!({ "sheet_id": active_sheet, "title": "Renamed Sheet" }),
-        "sheet.duplicate" | "sheet.duplicateFamily" | "sheet.clonePipeline" | "sheet.delete" | "sheet.freeze" | "sheet.unfreeze" | "sheet.select" => {
-            json!({ "sheet_id": active_sheet })
-        }
-        "sheet.extractResultTab" => json!({ "result_sheet_id": active_result }),
-        "graph.create" => json!({ "source_sheet_id": active_data, "title": "Graph" }),
-        "graph.initialize" | "graph.preflightCheck" | "graph.setAxes" | "graph.setKind" | "graph.setSpec" | "graph.setSeries" => {
-            json!({ "sheet_id": active_graph })
-        }
-        "graph.addAnnotation" => json!({ "sheet_id": active_graph, "text": "Annotation", "x_pt": 72.0, "y_pt": 72.0 }),
-        "graph.applyStyleFrom" => json!({
-            "target_sheet_id": active_graph,
-            "source_sheet_id": doc.graph_sheets.first().map(|s| s.id.as_str()),
-        }),
-        "graph.applyCanvasPreset" | "ui.canvas.applyPreset" => json!({ "sheet_id": active_render, "preset": "single_column_88mm" }),
-        "layout.create" => json!({ "title": "Layout" }),
-        "layout.alignOrigins" => json!({ "sheet_id": active_layout, "align": true, "normalize_bounds": true }),
-        "layout.applyCanvasPreset" => json!({ "sheet_id": active_layout, "preset": "double_column_180mm" }),
-        "layout.addPanel" | "layout.setSpec" => json!({ "sheet_id": active_layout }),
-        "table.clearCells" | "table.excludeCells" => {
-            let coords = app.grid.selected_coords.iter().map(|c| json!({ "row": c.row, "col": c.col, "subcol": c.subcol })).collect::<Vec<_>>();
-            if coords.is_empty() {
-                if let Some(c) = app.grid.tool.active {
-                    json!({ "sheet_id": active_data, "cells": [{ "row": c.row, "col": c.col, "subcol": c.subcol }] })
-                } else {
-                    json!({ "sheet_id": active_data })
-                }
-            } else {
-                json!({ "sheet_id": active_data, "cells": coords })
-            }
-        }
-        "table.exclusionAuditReport" | "table.exportCsv" => json!({ "sheet_id": active_data }),
-        "export.svg" | "graph.exportSvg" | "export.pdf" | "graph.exportPdf" | "export.png" | "graph.exportPng" | "export.tiff"
-        | "graph.exportEmf" | "layout.exportEmf" | "ui.print.open" | "file.print" => json!({ "sheet_id": active_render }),
-        "analysis.run" | "stats.run" | "fit.run" | "transform.run" | "analysis.add" => {
-            json!({ "source_sheet_id": active_data, "kind": "descriptive_stats" })
-        }
-        "analysis.exportJson"
-        | "analysis.exportCsv"
-        | "ui.result.copyMethodsReport"
-        | "ui.result.inspectDiagnostics"
-        | "ui.result.appendClusterColumn" => json!({ "sheet_id": active_result }),
-        "result.generateReport" => json!({ "result_sheet_id": active_result, "format": "markdown" }),
-        "project.createCheckpoint" => json!({ "label": "Checkpoint" }),
-        "ui.theme.set" => json!({ "mode": next_cycle_theme_mode(app) }),
-        "ui.locale.set" => json!({ "locale": if app.locale == "en" { "de" } else { "en" } }),
-        "ui.previewFilter.set" => json!({ "filter": next_cycle_preview_filter(app.preview_filter) }),
-        "ui.brush.point" => {
-            if let (Some(d), Some(c)) = (active_data, app.grid.tool.active) {
-                json!({ "sheet_id": d, "row": c.row, "col": c.col, "subcol": c.subcol })
-            } else {
-                json!({ "clear": true })
-            }
-        }
-        _ => json!({}),
-    }
-}
-
 /// Commit the active modal dialog cleanly via `UiApp` state machines (never via `ui.answer_dialog`).
 ///
 /// # Errors
 /// Returns a descriptive error message when validation or engine execution fails.
 pub fn commit_active_modal_dialog(app: &mut UiApp) -> Result<UiEventOutcome, String> {
-    let dialog = app.canvas_dialogs.active_dialog.clone();
-    match dialog {
-        ActiveDialog::None => Ok(UiEventOutcome { handled: false, action: String::from("dialog.none"), ..Default::default() }),
-        ActiveDialog::AnalyzeSheet { .. } => {
-            let intent = match app.canvas_dialogs.analyze.try_build_run_intent(app.document()) {
-                Ok(intent) => intent,
-                Err(existing_ids) => {
-                    let entry_id = app.canvas_dialogs.analyze.selected_entry_id.clone().unwrap_or_default();
-                    let Some(src) =
-                        app.canvas_dialogs.analyze.source_sheet_id.clone().or_else(|| app.document().data_sheets.first().map(|ds| ds.id.clone()))
-                    else {
-                        return Err(String::from("no source data sheet selected"));
-                    };
-                    app.canvas_dialogs.active_dialog =
-                        ActiveDialog::DuplicateAnalysisPrompt { source_sheet_id: src, existing_result_ids: existing_ids, pending_entry_id: entry_id };
-                    return Ok(UiEventOutcome { handled: true, action: String::from("dialog.duplicate_prompt"), ..Default::default() });
-                }
-            };
-            let out = app.execute_command(&intent.command_id, intent.params).map_err(|e| e.to_string())?;
-            app.canvas_dialogs.close_dialog();
-            curvebook_ui_egui::interaction::clear_modal_text_buffers(app);
-            app.focus_widget_id = None;
+    host_routing::commit_active_modal_dialog(app, |app, hit_id| match resolve_web_command_route(app, hit_id) {
+        WebCommandRoute::EngineCommand { command_id, params } => {
+            let out = app.execute_command(&command_id, params).map_err(|e| e.to_string())?;
             Ok(UiEventOutcome {
                 handled: true,
-                action: String::from("dialog.analyze_committed"),
-                command_id: Some(intent.command_id),
+                action: format!("palette.engine:{command_id}"),
+                command_id: Some(command_id),
                 command_result: Some(out.payload),
             })
         }
-        ActiveDialog::DuplicateAnalysisPrompt { .. } => {
-            let intent = app
-                .canvas_dialogs
-                .analyze
-                .build_create_new_intent()
-                .ok_or_else(|| String::from("no selected analysis for duplicate confirmation"))?;
-            let out = app.execute_command(&intent.command_id, intent.params).map_err(|e| e.to_string())?;
-            app.canvas_dialogs.close_dialog();
-            curvebook_ui_egui::interaction::clear_modal_text_buffers(app);
-            app.focus_widget_id = None;
+        WebCommandRoute::UiCommand { command_id, params } => {
+            let ui_val = dispatch_ui_command(app, &command_id, &params)?.ok_or_else(|| format!("unhandled palette UI command `{command_id}`"))?;
             Ok(UiEventOutcome {
                 handled: true,
-                action: String::from("dialog.duplicate_created_new"),
-                command_id: Some(intent.command_id),
-                command_result: Some(out.payload),
+                action: format!("palette.ui:{command_id}"),
+                command_id: Some(command_id),
+                command_result: Some(ui_val),
             })
         }
-        ActiveDialog::EditAnalysisParameters { .. } => {
-            curvebook_ui_egui::interaction::sync_edit_params_text_buffers(app);
+        WebCommandRoute::OpenEditAnalysisParameters(rs_id) => {
             let doc = app.document().clone();
-            let intents = app.canvas_dialogs.edit_params.commit_intents(Some(&doc));
-            let mut iter = intents.into_iter();
-            let primary = iter.next().ok_or_else(|| String::from("no draft parameters ready to commit"))?;
-            let primary_cmd = primary.command_id.clone();
-            let out = app.execute_command(&primary.command_id, primary.params).map_err(|e| e.to_string())?;
-            for extra in iter {
-                let _ = app.execute_command(&extra.command_id, extra.params).map_err(|e| e.to_string())?;
-            }
-            app.canvas_dialogs.close_dialog();
-            curvebook_ui_egui::interaction::clear_modal_text_buffers(app);
-            app.focus_widget_id = None;
-            Ok(UiEventOutcome {
-                handled: true,
-                action: String::from("dialog.edit_params_committed"),
-                command_id: Some(primary_cmd),
-                command_result: Some(out.payload),
-            })
-        }
-        ActiveDialog::CommandPalette => {
-            let hits = app.canvas_dialogs.command_palette.matches_for_session(app.session());
-            let selected = hits.get(app.canvas_dialogs.command_palette.selected_index).or_else(|| hits.first()).cloned();
-            app.canvas_dialogs.close_dialog();
-            app.focus_widget_id = None;
-            app.interaction.text_field_buffers.remove("palette.query");
-            curvebook_ui_egui::interaction::clear_modal_text_buffers(app);
-            let Some(hit) = selected else {
-                return Ok(UiEventOutcome { handled: true, action: String::from("palette.no_match"), ..Default::default() });
-            };
-            match resolve_web_command_route(app, hit.id) {
-                WebCommandRoute::EngineCommand { command_id, params } => {
-                    let out = app.execute_command(&command_id, params).map_err(|e| e.to_string())?;
-                    Ok(UiEventOutcome {
-                        handled: true,
-                        action: format!("palette.engine:{command_id}"),
-                        command_id: Some(command_id),
-                        command_result: Some(out.payload),
-                    })
-                }
-                WebCommandRoute::UiCommand { command_id, params } => {
-                    let ui_val =
-                        dispatch_ui_command(app, &command_id, &params)?.ok_or_else(|| format!("unhandled palette UI command `{command_id}`"))?;
-                    Ok(UiEventOutcome {
-                        handled: true,
-                        action: format!("palette.ui:{command_id}"),
-                        command_id: Some(command_id),
-                        command_result: Some(ui_val),
-                    })
-                }
-                WebCommandRoute::OpenEditAnalysisParameters(rs_id) => {
-                    let doc = app.document().clone();
-                    let found_id = doc
-                        .result_sheets
-                        .iter()
-                        .find(|s| s.id.as_str() == rs_id)
-                        .map(|s| s.id.clone())
-                        .ok_or_else(|| format!("result sheet `{rs_id}` not found"))?;
-                    if !app.canvas_dialogs.open_edit_parameters(&doc, &found_id) {
-                        return Err(format!("could not open EditAnalysisParameters for `{rs_id}`"));
-                    }
-                    Ok(UiEventOutcome {
-                        handled: true,
-                        action: String::from("dialog.edit_analysis_parameters"),
-                        command_id: Some(String::from("ui.editParams.open")),
-                        command_result: Some(json!({ "sheet_id": rs_id })),
-                    })
-                }
-                WebCommandRoute::NoticeOnly { code, message, .. } => Ok(UiEventOutcome {
-                    handled: true,
-                    action: format!("palette.notice:{code}"),
-                    command_id: Some(hit.id.to_owned()),
-                    command_result: Some(json!({ "notice": message })),
-                }),
-                WebCommandRoute::OpenFilePicker { .. } | WebCommandRoute::ExportFormat { .. } | WebCommandRoute::PrintCurrentSheet => {
-                    Ok(UiEventOutcome {
-                        handled: true,
-                        action: format!("palette.host:{}", hit.id),
-                        command_id: Some(hit.id.to_owned()),
-                        command_result: Some(json!({ "deferred_host_command": hit.id })),
-                    })
-                }
-            }
-        }
-        ActiveDialog::ExcludeWithReason { .. } => {
-            let intent = app.canvas_dialogs.exclude_with_reason.commit_intent()?;
-            let out = app.execute_command(&intent.command_id, intent.params).map_err(|e| e.to_string())?;
-            app.canvas_dialogs.close_dialog();
-            curvebook_ui_egui::interaction::clear_modal_text_buffers(app);
-            app.focus_widget_id = None;
-            Ok(UiEventOutcome {
-                handled: true,
-                action: String::from("dialog.exclude_committed"),
-                command_id: Some(intent.command_id),
-                command_result: Some(out.payload),
-            })
-        }
-        ActiveDialog::ExportFigure { sheet_id } => {
-            let mut intent = app.canvas_dialogs.export_figure.commit_intent(&sheet_id);
-            let export_opts = &app.view_shards.dialogs_graph_misc;
-            if matches!(app.canvas_dialogs.export_figure.format, curvebook_ui_egui::dialogs_canvas::ExportFigureFormat::Pdf)
-                && let Some(obj) = intent.params.as_object_mut()
-            {
-                let pdf_cs = if export_opts.export_color_space == "CMYK-Proof" { "cmyk" } else { "srgb" };
-                obj.insert(String::from("color_space"), json!(pdf_cs));
-            }
-            let opts_snapshot = json!({
-                "transparent_bg": export_opts.export_transparent_bg,
-                "color_space": export_opts.export_color_space,
-                "unit": export_opts.export_unit,
-            });
-            let out = app.execute_command(&intent.command_id, intent.params).map_err(|e| e.to_string())?;
-            app.canvas_dialogs.close_dialog();
-            curvebook_ui_egui::interaction::clear_modal_text_buffers(app);
-            app.focus_widget_id = None;
-            let mut payload = out.payload;
-            if let Some(obj) = payload.as_object_mut() {
-                obj.insert(String::from("export_options"), opts_snapshot);
+            let found_id = doc
+                .result_sheets
+                .iter()
+                .find(|s| s.id.as_str() == rs_id)
+                .map(|s| s.id.clone())
+                .ok_or_else(|| format!("result sheet `{rs_id}` not found"))?;
+            if !app.canvas_dialogs.open_edit_parameters(&doc, &found_id) {
+                return Err(format!("could not open EditAnalysisParameters for `{rs_id}`"));
             }
             Ok(UiEventOutcome {
                 handled: true,
-                action: String::from("dialog.export_committed"),
-                command_id: Some(intent.command_id),
-                command_result: Some(payload),
+                action: String::from("dialog.edit_analysis_parameters"),
+                command_id: Some(String::from("ui.editParams.open")),
+                command_result: Some(json!({ "sheet_id": rs_id })),
             })
         }
-        ActiveDialog::ImportReshape => {
-            let payload = curvebook_ui_egui::views::import_paste::commit_import_paste_dialog(app)?;
-            app.canvas_dialogs.close_dialog();
-            curvebook_ui_egui::interaction::clear_modal_text_buffers(app);
-            app.focus_widget_id = None;
-            Ok(UiEventOutcome {
-                handled: true,
-                action: String::from("dialog.import_reshape_committed"),
-                command_id: Some(String::from("ui.importReshape.commit")),
-                command_result: Some(payload),
-            })
-        }
-        ActiveDialog::Print { .. } => {
-            let submit = app.canvas_dialogs.print.submit_to_os;
-            if submit && app.is_gui_only() {
-                return Err(String::from("submitting print jobs directly to the OS queue is blocked under --gui-only"));
-            }
-            let out = app.execute_print_dialog_spool(submit)?;
-            app.canvas_dialogs.close_dialog();
-            curvebook_ui_egui::interaction::clear_modal_text_buffers(app);
-            app.focus_widget_id = None;
-            Ok(UiEventOutcome {
-                handled: true,
-                action: String::from("dialog.print_committed"),
-                command_id: Some(String::from("ui.print.open")),
-                command_result: Some(json!({ "page_count": out.page_count, "submitted_to_os": submit })),
-            })
-        }
-        ActiveDialog::RandomizeGroups => {
-            let intent =
-                app.canvas_dialogs.randomize_groups.commit_intent().ok_or_else(|| String::from("no active sheet bound for Randomize Groups"))?;
-            commit_web_intent_single(app, &intent.command_id, intent.params, "dialog.randomize_groups_committed")
-        }
-        ActiveDialog::RandomSampleRows { .. } => {
-            let intent = app
-                .canvas_dialogs
-                .random_sample_rows
-                .commit_intent()
-                .ok_or_else(|| String::from("no source sheet selected for Random Sample Rows"))?;
-            commit_web_intent_single(app, &intent.command_id, intent.params, "dialog.random_sample_rows_committed")
-        }
-        ActiveDialog::SimulateDistributions => {
-            let intent = app
-                .canvas_dialogs
-                .simulate_distributions
-                .commit_intent()
-                .ok_or_else(|| String::from("invalid Simulate Distributions configuration"))?;
-            commit_web_intent_single(app, &intent.command_id, intent.params, "dialog.simulate_distributions_committed")
-        }
-        ActiveDialog::ConstantHookPicker { .. } => {
-            let intent = app.canvas_dialogs.hook_picker.commit_intent().ok_or_else(|| String::from("no constant hook option selected"))?;
-            commit_web_intent_single(app, &intent.command_id, intent.params, "dialog.constant_hook_committed")
-        }
-        ActiveDialog::Checkpoints => {
-            let name = app.canvas_dialogs.checkpoints.name_draft.trim().to_owned();
-            if name.is_empty() {
-                return Err(String::from("Enter a checkpoint name before saving."));
-            }
-            let mut params = Map::new();
-            params.insert(String::from("name"), Value::String(name));
-            let note = app.canvas_dialogs.checkpoints.note_draft.trim().to_owned();
-            if !note.is_empty() {
-                params.insert(String::from("note"), Value::String(note));
-            }
-            let out = app.execute_command("project.createCheckpoint", Value::Object(params)).map_err(|e| e.to_string())?;
-            let doc = app.document().clone();
-            app.canvas_dialogs.checkpoints.name_draft = format!("Checkpoint {}", doc.checkpoints.len() + 1);
-            app.canvas_dialogs.checkpoints.note_draft.clear();
-            app.interaction.text_field_buffers.remove("checkpoints.name");
-            app.interaction.text_field_buffers.remove("checkpoints.note");
-            Ok(UiEventOutcome {
-                handled: true,
-                action: String::from("dialog.checkpoint_created"),
-                command_id: Some(String::from("project.createCheckpoint")),
-                command_result: Some(out.payload),
-            })
-        }
-        ActiveDialog::PowerAndSampleSize => {
-            if app.canvas_dialogs.power_wizard.stage != curvebook_ui_egui::PowerWizardStage::Results {
-                let next = app.canvas_dialogs.power_wizard.advance()?;
-                return Ok(UiEventOutcome { handled: true, action: format!("dialog.power_advance:{}", next.label()), ..Default::default() });
-            }
-            let payload = dispatch_gui_action(app, "ui.answer_dialog", json!({ "action": "create" })).map_err(|e| e.to_string())?;
-            app.focus_widget_id = None;
-            Ok(UiEventOutcome {
-                handled: true,
-                action: String::from("dialog.power_created"),
-                command_id: Some(String::from("ui.powerWizard.create")),
-                command_result: Some(payload),
-            })
-        }
-        ActiveDialog::ConvertArchetype { .. } => {
-            let out = app.commit_convert_archetype()?;
-            app.focus_widget_id = None;
-            Ok(UiEventOutcome {
-                handled: true,
-                action: String::from("dialog.convert_archetype"),
-                command_id: Some(out.command_id),
-                command_result: Some(out.payload),
-            })
-        }
-        ActiveDialog::ChangeGraphType { .. } => {
-            let intents = app.canvas_dialogs.change_graph_type.commit_intents(app.document());
-            commit_web_intent_batch(app, intents.into_iter().map(|i| (i.command_id, i.params)), "dialog.change_graph_type_committed")
-        }
-        ActiveDialog::FormatAxes { .. } => {
-            curvebook_ui_egui::interaction::sync_format_axes_text_buffers(app);
-            let intent = app.canvas_dialogs.format_axes.commit_intent().ok_or_else(|| String::from("invalid Format Axes settings"))?;
-            commit_web_intent_single(app, &intent.command_id, intent.params, "dialog.format_axes_committed")
-        }
-        ActiveDialog::FormatGraph { .. } => {
-            let intents = app.canvas_dialogs.format_graph.commit_intents();
-            commit_web_intent_batch(app, intents.into_iter().map(|i| (i.command_id, i.params)), "dialog.format_graph_committed")
-        }
-        ActiveDialog::PairwiseComparisons { .. } => {
-            let intents = app.canvas_dialogs.pairwise.commit_intents();
-            commit_web_intent_batch(app, intents.into_iter().map(|i| (i.command_id, i.params)), "dialog.pairwise_committed")
-        }
-        ActiveDialog::BubblePlotInspector { .. } => {
-            let intent = app.canvas_dialogs.bubble_plot.commit_intent().ok_or_else(|| String::from("no bubble plot graph target selected"))?;
-            commit_web_intent_single(app, &intent.command_id, intent.params, "dialog.bubble_plot_committed")
-        }
-        ActiveDialog::InsertModelEquation { .. } => {
-            let doc = app.document().clone();
-            let intent = app
-                .canvas_dialogs
-                .insert_model_equation
-                .commit_intent(Some(&doc))
-                .ok_or_else(|| String::from("no model equation result sheet selected"))?;
-            commit_web_intent_single(app, &intent.command_id, intent.params, "dialog.insert_model_equation_committed")
-        }
-        ActiveDialog::ApplyStyleFrom { .. } => {
-            let intent =
-                app.canvas_dialogs.apply_style.commit_intent().ok_or_else(|| String::from("no donor graph selected for Apply Style From"))?;
-            commit_web_intent_single(app, &intent.command_id, intent.params, "dialog.apply_style_committed")
-        }
-        ActiveDialog::ChangeDataAnalyzed { .. } => {
-            let intent =
-                app.canvas_dialogs.change_data.commit_intent().ok_or_else(|| String::from("no compatible replacement data sheet selected"))?;
-            commit_web_intent_single(app, &intent.command_id, intent.params, "dialog.change_data_committed")
-        }
-        ActiveDialog::FormatSelectedPoints { .. } => {
-            if app.canvas_dialogs.format_points.selected_points.is_empty()
-                && let Some(active_ds_id) = app.brushed_points.first().map(|p| p.sheet_id.clone())
-                && let Some(ds) = app.document().data_sheet(&active_ds_id).cloned()
-            {
-                let targets = app.grid.selected_graph_point_targets(&ds, usize::MAX);
-                app.canvas_dialogs.format_points.set_selected_targets(targets);
-            }
-            let mut pairs: Vec<(String, Value)> = Vec::new();
-            if let Some(intent) = app.canvas_dialogs.format_points.build_commit_intent() {
-                pairs.push((intent.command_id, intent.params));
-            }
-            let scene = app.canvas_dialogs.format_points.graph_sheet_id.as_ref().and_then(|gid| app.session().render_sheet_scene(gid).ok());
-            let doc = app.document().clone();
-            for intent in app.canvas_dialogs.format_points.build_row_label_intents_for_scene(&doc, scene.as_ref()) {
-                pairs.push((intent.command_id, intent.params));
-            }
-            commit_web_intent_batch(app, pairs, "dialog.format_points_committed")
-        }
-        ActiveDialog::PageLayoutComposer { .. } => {
-            let intents = app.canvas_dialogs.page_layout.commit_intents();
-            commit_web_intent_batch(app, intents.into_iter().map(|i| (i.command_id, i.params)), "dialog.page_layout_committed")
-        }
-        ActiveDialog::CreateGraph { .. } => {
-            let intent = app.canvas_dialogs.create_graph.commit_intent().ok_or_else(|| String::from("no source data sheet selected"))?;
-            commit_web_intent_single(app, &intent.command_id, intent.params, "dialog.create_graph_committed")
-        }
-        ActiveDialog::EqualizeScaling { .. } => {
-            let intent =
-                app.canvas_dialogs.equalize_scaling.commit_intent().ok_or_else(|| String::from("no live graph panels available to equalize"))?;
-            commit_web_intent_single(app, &intent.command_id, intent.params, "dialog.equalize_scaling_committed")
-        }
-        ActiveDialog::FormatEmbeddedTable { .. } => {
-            let doc = app.document().clone();
-            let intent = app.canvas_dialogs.format_embedded_table.commit_intent(&doc).ok_or_else(|| String::from("no embedded table selected"))?;
-            commit_web_intent_single(app, &intent.command_id, intent.params, "dialog.format_embedded_table_committed")
-        }
-        ActiveDialog::FormatImage { .. } => {
-            let intent = app.canvas_dialogs.format_image.commit_intent().ok_or_else(|| String::from("no embedded image selected"))?;
-            commit_web_intent_single(app, &intent.command_id, intent.params, "dialog.format_image_committed")
-        }
-        _ => {
-            app.canvas_dialogs.close_dialog();
-            curvebook_ui_egui::interaction::clear_modal_text_buffers(app);
-            app.focus_widget_id = None;
-            Ok(UiEventOutcome { handled: true, action: String::from("dialog.closed"), ..Default::default() })
-        }
-    }
-}
-
-fn commit_web_intent_single(app: &mut UiApp, command_id: &str, params: Value, action: &str) -> Result<UiEventOutcome, String> {
-    let out = app.execute_command(command_id, params).map_err(|e| e.to_string())?;
-    app.canvas_dialogs.close_dialog();
-    curvebook_ui_egui::interaction::clear_modal_text_buffers(app);
-    app.focus_widget_id = None;
-    Ok(UiEventOutcome { handled: true, action: action.to_owned(), command_id: Some(command_id.to_owned()), command_result: Some(out.payload) })
-}
-
-fn commit_web_intent_batch<I>(app: &mut UiApp, intents: I, action: &str) -> Result<UiEventOutcome, String>
-where
-    I: IntoIterator<Item = (String, Value)>,
-{
-    let mut last_cmd = None;
-    let mut last_payload = None;
-    for (command_id, params) in intents {
-        let out = app.execute_command(&command_id, params).map_err(|e| e.to_string())?;
-        last_cmd = Some(command_id);
-        last_payload = Some(out.payload);
-    }
-    app.canvas_dialogs.close_dialog();
-    curvebook_ui_egui::interaction::clear_modal_text_buffers(app);
-    app.focus_widget_id = None;
-    Ok(UiEventOutcome { handled: true, action: action.to_owned(), command_id: last_cmd, command_result: last_payload })
+        WebCommandRoute::NoticeOnly { code, message, .. } => Ok(UiEventOutcome {
+            handled: true,
+            action: format!("palette.notice:{code}"),
+            command_id: Some(hit_id.to_owned()),
+            command_result: Some(json!({ "notice": message })),
+        }),
+        WebCommandRoute::OpenFilePicker { .. } | WebCommandRoute::ExportFormat { .. } | WebCommandRoute::PrintCurrentSheet => Ok(UiEventOutcome {
+            handled: true,
+            action: format!("palette.host:{hit_id}"),
+            command_id: Some(hit_id.to_owned()),
+            command_result: Some(json!({ "deferred_host_command": hit_id })),
+        }),
+    })
 }
 
 fn build_status_summary(app: &UiApp, bridge: &WebChromeBridge) -> String {
@@ -2771,7 +2186,7 @@ mod tests {
         let ds_g = app
             .execute_command(
                 "sheet.createData",
-                json!({ "sheet_id": "ds-grp", "kind": "grouped", "rows": 3, "cols": 2, "subcolumns": 2, "auto_family": false }),
+                json!({ "sheet_id": "ds-grp", "kind": "grouped", "rows": 3, "cols": 2, "replicates": 2, "auto_family": false }),
             )
             .map_err(|e| e.to_string())?;
         let grp_id = curvebook_ui_egui::serde_json::Value::as_str(&ds_g.payload["sheet_id"]).ok_or("missing grp id")?.to_owned();
