@@ -26,20 +26,20 @@
 //!    must always be launched with `--workdir <dir>` (or `--gui-only`).
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
 
-use curvebook_chart::{ChartScene, compile_graph, compile_layout};
-use curvebook_doc::{DataSheet, ErrorCode, ProjectDocument, ResultSheet, SheetId, SubcolumnMode, TableKind};
+use curvebook_doc::{DataSheet, ErrorCode, ProjectDocument, SheetId, SubcolumnMode, TableKind};
+use curvebook_engine::services::{
+    ExportArtifactFormat, ExportArtifactRequest, ExportTarget, RasterMetadata, RasterSizingPolicy, compile_visual_scene_for_sheet,
+    export_document_artifact,
+};
 use curvebook_engine::{EngineError, Session};
 use curvebook_format::{
-    CsvOptions, ExportOptions, ExportSource, Exporter, FormatDescriptor, FormatError, FormatKind, FormatRegistry, ImportOptions, ImportPayload,
-    Importer, ensure_result_sheet_csv_exportable, export_datasheet_to_csv, export_result_sheet_json, is_unpacked_project_dir,
-    strip_project_data_for_template, try_export_result_sheet_tidy_csv, try_export_result_tab_csv,
+    CsvOptions, ExportOptions, ExportSource, Exporter, FormatRegistry, ImportOptions, ImportPayload, Importer, is_unpacked_project_dir,
+    strip_project_data_for_template,
 };
-use curvebook_pdf::{PdfColorSpace, PdfExportOptions, render_pdf, render_pdf_pages};
-use curvebook_render::{MAX_CAPPED_RASTER_DIM_PX, RenderTargetSpec, TiffCompression, encode_png, encode_tiff, render_scene};
-use curvebook_svg::{SvgExportOptions, render_svg};
-use serde::Serialize;
+use curvebook_pdf::{PdfColorSpace, PdfExportOptions};
+use curvebook_render::{MAX_CAPPED_RASTER_DIM_PX, TiffCompression};
+use curvebook_svg::SvgExportOptions;
 use serde_json::{Map, Value, json};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -60,18 +60,6 @@ const MIN_DPI: u16 = 18;
 const MAX_LIVE_INLINE_ARCHIVE_BYTES: usize = ((crate::tools::MAX_CONTROL_RESPONSE_BYTES - 65_536) / 4) * 3;
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_LIVE_INLINE_CSV_BYTES: usize = 8 * 1024 * 1024;
-
-const DESC_SVG: FormatDescriptor =
-    FormatDescriptor { id: "svg", label: "Scalable Vector Graphics", extensions: &["svg"], kind: FormatKind::FigureVector };
-const DESC_PDF: FormatDescriptor =
-    FormatDescriptor { id: "pdf", label: "Portable Document Format", extensions: &["pdf"], kind: FormatKind::FigureVector };
-const DESC_PNG: FormatDescriptor =
-    FormatDescriptor { id: "png", label: "Portable Network Graphics", extensions: &["png"], kind: FormatKind::FigureRaster };
-const DESC_TIFF: FormatDescriptor =
-    FormatDescriptor { id: "tiff", label: "Tagged Image File Format", extensions: &["tiff", "tif"], kind: FormatKind::FigureRaster };
-const DESC_CSV: FormatDescriptor =
-    FormatDescriptor { id: "csv", label: "Comma-Separated Values", extensions: &["csv"], kind: FormatKind::DelimitedText };
-const DESC_JSON: FormatDescriptor = FormatDescriptor { id: "json", label: "JSON Result Table", extensions: &["json"], kind: FormatKind::ResultTable };
 
 /// Resolve `raw_path` against the active filesystem trust boundary on `state`.
 ///
@@ -758,23 +746,37 @@ pub(crate) fn handle_render_preview(state: &mut McpServerState, args: &Map<Strin
         });
     }
 
-    let (target_id, sheet_kind, scene) = match compile_visual_sheet(state.session().document(), sheet_id.as_deref()) {
-        Ok(compiled) => compiled,
-        Err(msg) => return Ok(errors::result_from_code(ErrorCode::NotFound, msg)),
+    let doc = state.session().document();
+    let (target_id, sheet_kind) = match resolve_preview_sheet_id(doc, sheet_id.as_deref()) {
+        Ok(found) => found,
+        Err(err) => return Ok(errors::result_from_engine_error(&err)),
     };
-
-    let spec = RenderTargetSpec::from_scene_capped(&scene, requested_w, requested_h, dpi);
-    let raster = match render_scene(&scene, spec) {
-        Ok(img) => img,
-        Err(err) => return Ok(errors::result_from_engine_error(&EngineError::from(err))),
+    let scene = match compile_visual_scene_for_sheet(doc, &target_id) {
+        Ok(scene) => scene,
+        Err(err) => return Ok(errors::result_from_engine_error(&err)),
     };
-    let png_bytes = match encode_png(&raster) {
-        Ok(bytes) => bytes,
-        Err(err) => return Ok(errors::result_from_engine_error(&EngineError::from(err))),
+    let cancel = state.current_cancel_token();
+    let artifact = match export_document_artifact(
+        doc,
+        &ExportArtifactRequest {
+            target: ExportTarget::Explicit(target_id.clone()),
+            format: ExportArtifactFormat::Png {
+                width_px: requested_w,
+                height_px: requested_h,
+                dpi: Some(dpi),
+                sizing: RasterSizingPolicy::CapToLimits { default_dpi: DEFAULT_PREVIEW_DPI },
+            },
+        },
+        Some(&cancel),
+        "render_preview",
+    ) {
+        Ok(art) => art,
+        Err(err) => return Ok(errors::result_from_engine_error(&err)),
     };
+    let raster = artifact.raster.unwrap_or(RasterMetadata { width_px: 0, height_px: 0, dpi });
 
     let metadata = json!({
-        "sheet_id": target_id,
+        "sheet_id": target_id.as_str(),
         "sheet_kind": sheet_kind,
         "title": scene.title,
         "width_px": raster.width_px,
@@ -782,7 +784,7 @@ pub(crate) fn handle_render_preview(state: &mut McpServerState, args: &Map<Strin
         "dpi": raster.dpi,
         "width_pt": scene.width_pt,
         "height_pt": scene.height_pt,
-        "png_bytes": png_bytes.len(),
+        "png_bytes": artifact.bytes.len(),
         "primitives_count": scene.primitives.len(),
         "warnings": scene.warnings,
     });
@@ -790,7 +792,7 @@ pub(crate) fn handle_render_preview(state: &mut McpServerState, args: &Map<Strin
 
     Ok(ToolCallResult {
         content: vec![
-            ContentBlock::Image { data: encode_base64(&png_bytes), mime_type: String::from("image/png") },
+            ContentBlock::Image { data: encode_base64(&artifact.bytes), mime_type: String::from("image/png") },
             ContentBlock::Text { text: metadata_text },
         ],
         is_error: false,
@@ -798,7 +800,7 @@ pub(crate) fn handle_render_preview(state: &mut McpServerState, args: &Map<Strin
     })
 }
 
-/// Handle `export` dispatched through a populated [`FormatRegistry`] with `WorkdirGuard` path checks
+/// Handle `export` delegated to [`export_document_artifact`] with `WorkdirGuard` path checks
 /// and atomic writes (`write_atomic`).
 pub(crate) fn handle_export(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
     reject_unknown_args(
@@ -829,7 +831,7 @@ pub(crate) fn handle_export(state: &mut McpServerState, args: &Map<String, Value
 
     let sheet_id = optional_non_empty_str(args, "sheet_id")?;
     let output_path = optional_non_empty_str(args, "output_path")?.or(optional_non_empty_str(args, "path")?);
-    let cfg = ExportArtifactConfig::parse(args, sheet_id.clone())?;
+    let cfg = ExportArtifactConfig::parse(args, sheet_id)?;
 
     let resolved_path = match output_path.as_deref() {
         Some(raw) => match resolve_mcp_path(state, raw) {
@@ -839,7 +841,6 @@ pub(crate) fn handle_export(state: &mut McpServerState, args: &Map<String, Value
         None => None,
     };
 
-    let recorder = Arc::new(ExportArtifactRecorder::default());
     #[cfg(not(target_arch = "wasm32"))]
     if state.control_port().is_some() {
         let pdf_cs = match cfg.pdf_color_space {
@@ -881,37 +882,37 @@ pub(crate) fn handle_export(state: &mut McpServerState, args: &Map<String, Value
             Ok(b) => b,
             Err(err) => return Ok(errors::result_from_code(ErrorCode::InternalError, format!("invalid base64 from live doc.export: {err}"))),
         };
-        let _ = recorder.target_id.set(target_id.clone());
-        if let (Some(w), Some(h)) = (remote.get("width_px").and_then(Value::as_u64), remote.get("height_px").and_then(Value::as_u64)) {
-            let w32 = u32::try_from(w).unwrap_or(0);
-            let h32 = u32::try_from(h).unwrap_or(0);
-            let dpi_u16 = remote.get("dpi").and_then(Value::as_u64).and_then(|d| u16::try_from(d).ok()).unwrap_or(cfg.dpi);
-            let _ = recorder.raster_meta.set((w32, h32, dpi_u16));
-        }
+        let raster_meta = match (remote.get("width_px").and_then(Value::as_u64), remote.get("height_px").and_then(Value::as_u64)) {
+            (Some(w), Some(h)) => {
+                let w32 = u32::try_from(w).unwrap_or(0);
+                let h32 = u32::try_from(h).unwrap_or(0);
+                let dpi_u16 = remote.get("dpi").and_then(Value::as_u64).and_then(|d| u16::try_from(d).ok()).unwrap_or(cfg.dpi);
+                Some(RasterMetadata { width_px: w32, height_px: h32, dpi: dpi_u16 })
+            }
+            _ => None,
+        };
         if let Some(dest) = resolved_path {
             return write_atomic_export(&dest, &format, &target_id, &bytes);
         }
-        return format_inline_export_result(&format, &target_id, &bytes, &recorder);
+        return format_inline_export_result(&format, &target_id, &bytes, raster_meta);
     }
 
-    let reg = build_mcp_export_registry(&cfg, Arc::clone(&recorder));
-    let Some(exporter) = reg.exporter_by_format(&format) else {
-        return Err(ToolCallError::InvalidParams(format!("unsupported export format '{format}'")));
-    };
-
-    let export_opts = ExportOptions { csv: cfg.csv_opts.clone(), pretty: cfg.pretty, sheet_id };
     let doc = state.session().document();
-    let bytes = match exporter.export_bytes(ExportSource::Document(doc), &export_opts) {
-        Ok(b) => b,
-        Err(err) => return Ok(errors::result_from_engine_error(&EngineError::from(err))),
+    let req = match build_export_artifact_request(doc, &format, &cfg) {
+        Ok(req) => req,
+        Err(err) => return Ok(errors::result_from_engine_error(&err)),
     };
-    let target_id = recorder.target_id.get().cloned().unwrap_or_else(|| String::from("project"));
+    let cancel = state.current_cancel_token();
+    let artifact = match export_document_artifact(doc, &req, Some(&cancel), "export") {
+        Ok(art) => art,
+        Err(err) => return Ok(errors::result_from_engine_error(&err)),
+    };
 
     if let Some(dest) = resolved_path {
-        return write_atomic_export(&dest, &format, &target_id, &bytes);
+        return write_atomic_export(&dest, &format, &artifact.target_id, &artifact.bytes);
     }
 
-    format_inline_export_result(&format, &target_id, &bytes, &recorder)
+    format_inline_export_result(&format, &artifact.target_id, &artifact.bytes, artifact.raster)
 }
 
 fn write_atomic_export(dest: &Path, format: &str, target_id: &str, bytes: &[u8]) -> Result<ToolCallResult, ToolCallError> {
@@ -948,7 +949,7 @@ fn format_inline_export_result(
     format: &str,
     target_id: &str,
     bytes: &[u8],
-    recorder: &ExportArtifactRecorder,
+    raster_meta: Option<RasterMetadata>,
 ) -> Result<ToolCallResult, ToolCallError> {
     match format {
         "svg" | "csv" => {
@@ -961,13 +962,13 @@ fn format_inline_export_result(
             Ok(ToolCallResult { content: vec![ContentBlock::Text { text }], is_error: false, structured_content: structured })
         }
         "png" => {
-            let (width_px, height_px, dpi) = recorder.raster_meta.get().copied().unwrap_or((0, 0, DEFAULT_PREVIEW_DPI));
+            let raster = raster_meta.unwrap_or(RasterMetadata { width_px: 0, height_px: 0, dpi: DEFAULT_PREVIEW_DPI });
             let meta = json!({
                 "format": "png",
                 "sheet_id": target_id,
-                "width_px": width_px,
-                "height_px": height_px,
-                "dpi": dpi,
+                "width_px": raster.width_px,
+                "height_px": raster.height_px,
+                "dpi": raster.dpi,
                 "bytes_len": bytes.len(),
             });
             let text = serde_json::to_string_pretty(&meta).unwrap_or_default();
@@ -985,14 +986,14 @@ fn format_inline_export_result(
             "data": encode_base64(bytes),
         })),
         "tiff" => {
-            let (width_px, height_px, dpi) = recorder.raster_meta.get().copied().unwrap_or((0, 0, DEFAULT_PREVIEW_DPI));
+            let raster = raster_meta.unwrap_or(RasterMetadata { width_px: 0, height_px: 0, dpi: DEFAULT_PREVIEW_DPI });
             ToolCallResult::ok_json(&json!({
                 "format": "tiff",
                 "sheet_id": target_id,
                 "encoding": "base64",
-                "width_px": width_px,
-                "height_px": height_px,
-                "dpi": dpi,
+                "width_px": raster.width_px,
+                "height_px": raster.height_px,
+                "dpi": raster.dpi,
                 "bytes_len": bytes.len(),
                 "data": encode_base64(bytes),
             }))
@@ -1064,328 +1065,111 @@ impl ExportArtifactConfig {
     }
 }
 
-#[derive(Default)]
-struct ExportArtifactRecorder {
-    target_id: OnceLock<String>,
-    raster_meta: OnceLock<(u32, u32, u16)>,
-}
-
-fn build_mcp_export_registry(cfg: &ExportArtifactConfig, recorder: Arc<ExportArtifactRecorder>) -> FormatRegistry {
-    let mut reg = FormatRegistry::default_registry();
-    reg.register_exporter(Arc::new(McpSvgExporter { cfg: cfg.clone(), recorder: Arc::clone(&recorder) }));
-    reg.register_exporter(Arc::new(McpPdfExporter { cfg: cfg.clone(), recorder: Arc::clone(&recorder) }));
-    reg.register_exporter(Arc::new(McpPngExporter { cfg: cfg.clone(), recorder: Arc::clone(&recorder) }));
-    reg.register_exporter(Arc::new(McpTiffExporter { cfg: cfg.clone(), recorder: Arc::clone(&recorder) }));
-    reg.register_exporter(Arc::new(McpCsvExporter { cfg: cfg.clone(), recorder: Arc::clone(&recorder) }));
-    reg.register_exporter(Arc::new(McpJsonExporter { cfg: cfg.clone(), recorder }));
-    reg
-}
-
-struct McpSvgExporter {
-    cfg: ExportArtifactConfig,
-    recorder: Arc<ExportArtifactRecorder>,
-}
-
-impl Exporter for McpSvgExporter {
-    fn descriptor(&self) -> FormatDescriptor {
-        DESC_SVG
-    }
-
-    fn export_bytes(&self, source: ExportSource<'_>, _opts: &ExportOptions) -> Result<Vec<u8>, FormatError> {
-        let doc = expect_document(source, DESC_SVG.id)?;
-        let (target_id, _, scene) = compile_visual_sheet(doc, self.cfg.sheet_id.as_deref()).map_err(FormatError::Io)?;
-        let _ = self.recorder.target_id.set(target_id);
-
-        let mut opts = SvgExportOptions { pretty: self.cfg.pretty, ..SvgExportOptions::default() };
-        if let Some(p) = self.cfg.svg_precision {
-            opts.precision = p;
-        }
-        let svg = render_svg(&scene, &opts).map_err(|err| FormatError::Io(format!("SVG export failed: {err}")))?;
-        Ok(svg.into_bytes())
-    }
-}
-
-struct McpPdfExporter {
-    cfg: ExportArtifactConfig,
-    recorder: Arc<ExportArtifactRecorder>,
-}
-
-impl Exporter for McpPdfExporter {
-    fn descriptor(&self) -> FormatDescriptor {
-        DESC_PDF
-    }
-
-    fn export_bytes(&self, source: ExportSource<'_>, _opts: &ExportOptions) -> Result<Vec<u8>, FormatError> {
-        let doc = expect_document(source, DESC_PDF.id)?;
-        let mut opts = PdfExportOptions { color_space: self.cfg.pdf_color_space, ..PdfExportOptions::default() };
-
-        let (target_id, pdf_bytes) = if self.cfg.all_graphs && self.cfg.sheet_id.is_none() {
-            let total_sheets = doc.graph_sheets.len().saturating_add(doc.layout_sheets.len());
-            if total_sheets > curvebook_pdf::MAX_PDF_PAGES {
-                return Err(FormatError::Io(format!("PDF page count {total_sheets} exceeds maximum {}", curvebook_pdf::MAX_PDF_PAGES)));
-            }
-            let mut scenes = Vec::with_capacity(total_sheets);
-            let mut total_primitives: usize = 0;
-            for gs in &doc.graph_sheets {
-                let scene = compile_graph(gs, doc).map_err(|err| FormatError::Io(format!("chart compile failed for '{}': {err}", gs.id)))?;
-                total_primitives = total_primitives.saturating_add(scene.primitives.len());
-                if total_primitives > curvebook_pdf::MAX_PDF_TOTAL_PRIMITIVES {
-                    return Err(FormatError::Io(format!(
-                        "PDF primitive count {total_primitives} exceeds maximum {}",
-                        curvebook_pdf::MAX_PDF_TOTAL_PRIMITIVES
-                    )));
-                }
-                scenes.push(scene);
-            }
-            for ls in &doc.layout_sheets {
-                let scene = compile_layout(ls, doc).map_err(|err| FormatError::Io(format!("layout compile failed for '{}': {err}", ls.id)))?;
-                total_primitives = total_primitives.saturating_add(scene.primitives.len());
-                if total_primitives > curvebook_pdf::MAX_PDF_TOTAL_PRIMITIVES {
-                    return Err(FormatError::Io(format!(
-                        "PDF primitive count {total_primitives} exceeds maximum {}",
-                        curvebook_pdf::MAX_PDF_TOTAL_PRIMITIVES
-                    )));
-                }
-                scenes.push(scene);
-            }
-            if scenes.is_empty() {
-                return Err(FormatError::Io(String::from("no GraphSheet or LayoutSheet available to export")));
-            }
-            opts.title = Some(doc.title.clone());
-            let bytes = render_pdf_pages(&scenes, &opts).map_err(|err| FormatError::Io(format!("PDF export failed: {err}")))?;
-            (String::from("all"), bytes)
-        } else {
-            let (target_id, _, scene) = compile_visual_sheet(doc, self.cfg.sheet_id.as_deref()).map_err(FormatError::Io)?;
-            opts.title = Some(scene.title.clone());
-            let bytes = render_pdf(&scene, &opts).map_err(|err| FormatError::Io(format!("PDF export failed: {err}")))?;
-            (target_id, bytes)
-        };
-
-        let _ = self.recorder.target_id.set(target_id);
-        Ok(pdf_bytes)
-    }
-}
-
-struct McpPngExporter {
-    cfg: ExportArtifactConfig,
-    recorder: Arc<ExportArtifactRecorder>,
-}
-
-impl Exporter for McpPngExporter {
-    fn descriptor(&self) -> FormatDescriptor {
-        DESC_PNG
-    }
-
-    fn export_bytes(&self, source: ExportSource<'_>, _opts: &ExportOptions) -> Result<Vec<u8>, FormatError> {
-        let doc = expect_document(source, DESC_PNG.id)?;
-        let (target_id, _, scene) = compile_visual_sheet(doc, self.cfg.sheet_id.as_deref()).map_err(FormatError::Io)?;
-        let spec = RenderTargetSpec::from_scene_capped(&scene, self.cfg.width_px, self.cfg.height_px, self.cfg.dpi);
-        let raster = render_scene(&scene, spec).map_err(|err| FormatError::Io(format!("rasterization failed: {err}")))?;
-        let png_bytes = encode_png(&raster).map_err(|err| FormatError::Io(format!("PNG encoding failed: {err}")))?;
-        let _ = self.recorder.target_id.set(target_id);
-        let _ = self.recorder.raster_meta.set((raster.width_px, raster.height_px, raster.dpi));
-        Ok(png_bytes)
-    }
-}
-
-struct McpTiffExporter {
-    cfg: ExportArtifactConfig,
-    recorder: Arc<ExportArtifactRecorder>,
-}
-
-impl Exporter for McpTiffExporter {
-    fn descriptor(&self) -> FormatDescriptor {
-        DESC_TIFF
-    }
-
-    fn export_bytes(&self, source: ExportSource<'_>, _opts: &ExportOptions) -> Result<Vec<u8>, FormatError> {
-        let doc = expect_document(source, DESC_TIFF.id)?;
-        let (target_id, _, scene) = compile_visual_sheet(doc, self.cfg.sheet_id.as_deref()).map_err(FormatError::Io)?;
-        let spec = RenderTargetSpec::from_scene_capped(&scene, self.cfg.width_px, self.cfg.height_px, self.cfg.dpi);
-        let raster = render_scene(&scene, spec).map_err(|err| FormatError::Io(format!("rasterization failed: {err}")))?;
-        let tiff_bytes = encode_tiff(&raster, self.cfg.tiff_compression).map_err(|err| FormatError::Io(format!("TIFF encoding failed: {err}")))?;
-        let _ = self.recorder.target_id.set(target_id);
-        let _ = self.recorder.raster_meta.set((raster.width_px, raster.height_px, raster.dpi));
-        Ok(tiff_bytes)
-    }
-}
-
-struct McpCsvExporter {
-    cfg: ExportArtifactConfig,
-    recorder: Arc<ExportArtifactRecorder>,
-}
-
-impl Exporter for McpCsvExporter {
-    fn descriptor(&self) -> FormatDescriptor {
-        DESC_CSV
-    }
-
-    fn export_bytes(&self, source: ExportSource<'_>, _opts: &ExportOptions) -> Result<Vec<u8>, FormatError> {
-        let doc = expect_document(source, DESC_CSV.id)?;
-        let csv_opts = self.cfg.csv_opts.clone().unwrap_or_else(CsvOptions::csv);
-        let (target_id, csv_text) =
-            match resolve_tabular_export_target(doc, self.cfg.sheet_id.as_deref(), self.cfg.tab_id.as_deref()).map_err(FormatError::Io)? {
-                TabularTarget::Data(ds) => (ds.id.as_str().to_owned(), export_datasheet_to_csv(ds, &csv_opts)?),
-                TabularTarget::Result(rs) => {
-                    ensure_result_sheet_csv_exportable(rs)?;
-                    let text = if self.cfg.tidy {
-                        try_export_result_sheet_tidy_csv(rs, &csv_opts)?
-                    } else if let Some(tid) = self.cfg.tab_id.as_deref() {
-                        let tab = rs
-                            .tabs
-                            .iter()
-                            .find(|t| t.id == tid)
-                            .ok_or_else(|| FormatError::Io(format!("tab '{tid}' not found on result sheet '{}'", rs.id)))?;
-                        try_export_result_tab_csv(rs, tab, &csv_opts)?
-                    } else if let Some(first_tab) = rs.tabs.first() {
-                        try_export_result_tab_csv(rs, first_tab, &csv_opts)?
-                    } else {
-                        try_export_result_sheet_tidy_csv(rs, &csv_opts)?
-                    };
-                    (rs.id.as_str().to_owned(), text)
-                }
-            };
-        let _ = self.recorder.target_id.set(target_id);
-        Ok(csv_text.into_bytes())
-    }
-}
-
-struct McpJsonExporter {
-    cfg: ExportArtifactConfig,
-    recorder: Arc<ExportArtifactRecorder>,
-}
-
-impl Exporter for McpJsonExporter {
-    fn descriptor(&self) -> FormatDescriptor {
-        DESC_JSON
-    }
-
-    fn export_bytes(&self, source: ExportSource<'_>, _opts: &ExportOptions) -> Result<Vec<u8>, FormatError> {
-        let doc = expect_document(source, DESC_JSON.id)?;
-        let (target_id, json_text) = if let Some(id_str) = self.cfg.sheet_id.as_deref() {
-            let id = SheetId::new(id_str);
-            if let Some(rs) = doc.result_sheet(&id) {
-                (id_str.to_owned(), export_result_sheet_json(rs, self.cfg.pretty)?)
-            } else if let Some(ds) = doc.data_sheet(&id) {
-                (id_str.to_owned(), serialize_json_value(ds, self.cfg.pretty)?)
-            } else if let Some(info) = doc.info_sheet(&id) {
-                (id_str.to_owned(), serialize_json_value(info, self.cfg.pretty)?)
-            } else if let Some(gs) = doc.graph_sheet(&id) {
-                (id_str.to_owned(), serialize_json_value(gs, self.cfg.pretty)?)
-            } else if let Some(ls) = doc.layout_sheet(&id) {
-                (id_str.to_owned(), serialize_json_value(ls, self.cfg.pretty)?)
-            } else {
-                return Err(FormatError::Io(format!("sheet '{id_str}' not found")));
-            }
-        } else {
-            (String::from("project"), serialize_json_value(doc, self.cfg.pretty)?)
-        };
-
-        let _ = self.recorder.target_id.set(target_id);
-        Ok(json_text.into_bytes())
-    }
-}
-
-fn expect_document<'a>(source: ExportSource<'a>, format_id: &str) -> Result<&'a ProjectDocument, FormatError> {
-    match source {
-        ExportSource::Document(doc) => Ok(doc),
-        ExportSource::DataSheet(_) | ExportSource::ResultSheet(_) => {
-            Err(FormatError::UnsupportedFormat { reason: format!("MCP format `{format_id}` requires a ProjectDocument source") })
-        }
-    }
-}
-
-fn serialize_json_value(val: &impl Serialize, pretty: bool) -> Result<String, FormatError> {
-    if pretty { Ok(serde_json::to_string_pretty(val)?) } else { Ok(serde_json::to_string(val)?) }
-}
-
-fn compile_visual_sheet(doc: &ProjectDocument, sheet_id: Option<&str>) -> Result<(String, &'static str, ChartScene), String> {
+fn resolve_preview_sheet_id(doc: &ProjectDocument, sheet_id: Option<&str>) -> Result<(SheetId, &'static str), EngineError> {
     if let Some(id_str) = sheet_id {
         let id = SheetId::new(id_str);
-        if let Some(gs) = doc.graph_sheet(&id) {
-            let scene = compile_graph(gs, doc).map_err(|err| format!("failed to compile graph '{id_str}': {err}"))?;
-            return Ok((id_str.to_owned(), "graph", scene));
+        if doc.graph_sheet(&id).is_some() {
+            return Ok((id, "graph"));
         }
-        if let Some(ls) = doc.layout_sheet(&id) {
-            let scene = compile_layout(ls, doc).map_err(|err| format!("failed to compile layout '{id_str}': {err}"))?;
-            return Ok((id_str.to_owned(), "layout", scene));
+        if doc.layout_sheet(&id).is_some() {
+            return Ok((id, "layout"));
         }
-        return Err(format!("graph or layout sheet '{id_str}' not found"));
+        return Err(EngineError::with_code(ErrorCode::NotFound, format!("graph or layout sheet '{id_str}' not found")));
     }
-
     if let Some(active) = &doc.active_sheet_id {
-        if let Some(gs) = doc.graph_sheet(active) {
-            let scene = compile_graph(gs, doc).map_err(|err| format!("failed to compile graph '{}': {err}", active.as_str()))?;
-            return Ok((active.as_str().to_owned(), "graph", scene));
+        if doc.graph_sheet(active).is_some() {
+            return Ok((active.clone(), "graph"));
         }
-        if let Some(ls) = doc.layout_sheet(active) {
-            let scene = compile_layout(ls, doc).map_err(|err| format!("failed to compile layout '{}': {err}", active.as_str()))?;
-            return Ok((active.as_str().to_owned(), "layout", scene));
+        if doc.layout_sheet(active).is_some() {
+            return Ok((active.clone(), "layout"));
         }
     }
-
     if let Some(gs) = doc.graph_sheets.first() {
-        let scene = compile_graph(gs, doc).map_err(|err| format!("failed to compile graph '{}': {err}", gs.id.as_str()))?;
-        return Ok((gs.id.as_str().to_owned(), "graph", scene));
+        return Ok((gs.id.clone(), "graph"));
     }
     if let Some(ls) = doc.layout_sheets.first() {
-        let scene = compile_layout(ls, doc).map_err(|err| format!("failed to compile layout '{}': {err}", ls.id.as_str()))?;
-        return Ok((ls.id.as_str().to_owned(), "layout", scene));
+        return Ok((ls.id.clone(), "layout"));
     }
-
-    Err(String::from("no GraphSheet or LayoutSheet exists in the current document"))
+    Err(EngineError::with_code(ErrorCode::NotFound, "no GraphSheet or LayoutSheet exists in the current document"))
 }
 
-enum TabularTarget<'a> {
-    Data(&'a DataSheet),
-    Result(&'a ResultSheet),
-}
-
-fn resolve_tabular_export_target<'a>(doc: &'a ProjectDocument, sheet_id: Option<&str>, tab_id: Option<&str>) -> Result<TabularTarget<'a>, String> {
+fn resolve_mcp_csv_target(doc: &ProjectDocument, sheet_id: Option<&str>, tab_id: Option<&str>) -> Result<ExportTarget, EngineError> {
     if let Some(id_str) = sheet_id {
-        let id = SheetId::new(id_str);
-        if let Some(rs) = doc.result_sheet(&id) {
-            return Ok(TabularTarget::Result(rs));
-        }
-        if let Some(ds) = doc.data_sheet(&id) {
-            if let Some(tid) = tab_id {
-                return Err(format!("tab '{tid}' requires a ResultSheet, but '{id_str}' is a DataSheet"));
-            }
-            return Ok(TabularTarget::Data(ds));
-        }
-        return Err(format!("data or result sheet '{id_str}' not found"));
+        return Ok(ExportTarget::Explicit(SheetId::new(id_str)));
     }
-
     if let Some(tid) = tab_id {
         if let Some(active) = &doc.active_sheet_id
             && let Some(rs) = doc.result_sheet(active)
             && rs.tabs.iter().any(|t| t.id == tid)
         {
-            return Ok(TabularTarget::Result(rs));
+            return Ok(ExportTarget::Explicit(rs.id.clone()));
         }
         if let Some(rs) = doc.result_sheets.iter().find(|rs| rs.tabs.iter().any(|t| t.id == tid)) {
-            return Ok(TabularTarget::Result(rs));
+            return Ok(ExportTarget::Explicit(rs.id.clone()));
         }
-        return Err(format!("tab '{tid}' not found on any result sheet"));
+        return Err(EngineError::with_code(ErrorCode::NotFound, format!("tab '{tid}' not found on any result sheet")));
     }
-
-    if let Some(active) = &doc.active_sheet_id {
-        if let Some(rs) = doc.result_sheet(active) {
-            return Ok(TabularTarget::Result(rs));
-        }
-        if let Some(ds) = doc.data_sheet(active) {
-            return Ok(TabularTarget::Data(ds));
-        }
+    if let Some(active) = &doc.active_sheet_id
+        && (doc.result_sheet(active).is_some() || doc.data_sheet(active).is_some())
+    {
+        return Ok(ExportTarget::Explicit(active.clone()));
     }
-
     if let Some(rs) = doc.result_sheets.first() {
-        return Ok(TabularTarget::Result(rs));
+        return Ok(ExportTarget::Explicit(rs.id.clone()));
     }
-    if let Some(ds) = doc.data_sheets.first() {
-        return Ok(TabularTarget::Data(ds));
-    }
+    Ok(ExportTarget::AutoOrExplicit(None))
+}
 
-    Err(String::from("no DataSheet or ResultSheet exists in the current document"))
+fn build_export_artifact_request(doc: &ProjectDocument, format: &str, cfg: &ExportArtifactConfig) -> Result<ExportArtifactRequest, EngineError> {
+    let default_target = ExportTarget::AutoOrExplicit(cfg.sheet_id.as_ref().map(SheetId::new));
+    let (target, artifact_format) = match format {
+        "svg" => {
+            let mut options = SvgExportOptions { pretty: cfg.pretty, ..SvgExportOptions::default() };
+            if let Some(p) = cfg.svg_precision {
+                options.precision = p;
+            }
+            (default_target, ExportArtifactFormat::Svg { options })
+        }
+        "pdf" => (
+            default_target,
+            ExportArtifactFormat::Pdf {
+                options: PdfExportOptions { color_space: cfg.pdf_color_space, ..PdfExportOptions::default() },
+                all_graphs: cfg.all_graphs,
+                sheet_ids: None,
+            },
+        ),
+        "png" => (
+            default_target,
+            ExportArtifactFormat::Png {
+                width_px: cfg.width_px,
+                height_px: cfg.height_px,
+                dpi: Some(cfg.dpi),
+                sizing: RasterSizingPolicy::CapToLimits { default_dpi: DEFAULT_PREVIEW_DPI },
+            },
+        ),
+        "tiff" => (
+            default_target,
+            ExportArtifactFormat::Tiff {
+                width_px: cfg.width_px,
+                height_px: cfg.height_px,
+                dpi: Some(cfg.dpi),
+                compression: cfg.tiff_compression,
+                sizing: RasterSizingPolicy::CapToLimits { default_dpi: DEFAULT_PREVIEW_DPI },
+            },
+        ),
+        "csv" => (
+            resolve_mcp_csv_target(doc, cfg.sheet_id.as_deref(), cfg.tab_id.as_deref())?,
+            ExportArtifactFormat::Csv {
+                options: cfg.csv_opts.clone().unwrap_or_else(CsvOptions::csv),
+                tab_id: cfg.tab_id.clone(),
+                tab_index: None,
+                tidy: cfg.tidy,
+            },
+        ),
+        "json" => (default_target, ExportArtifactFormat::Json { pretty: cfg.pretty }),
+        _ => return Err(EngineError::with_code(ErrorCode::BadInput, format!("unsupported export format '{format}'"))),
+    };
+    Ok(ExportArtifactRequest { target, format: artifact_format })
 }
 
 fn parse_dpi(args: &Map<String, Value>) -> Result<u16, ToolCallError> {
