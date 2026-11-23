@@ -4,14 +4,16 @@
 //! - Abramowitz, M. & Stegun, I. A. (eds.) (1964). *Handbook of Mathematical Functions with Formulas, Graphs, and Mathematical Tables*. National Bureau of Standards.
 //! - Olver, F. W. J. et al. (eds.) (2010). *NIST Handbook of Mathematical Functions* (NIST Digital Library of Mathematical Functions, <https://dlmf.nist.gov/>). Cambridge University Press.
 
-use curvebook_math::dist::{norm_cdf, norm_ppf};
-use curvebook_math::special::{beta, digamma, erf, erfc, gamma, ln_gamma};
+use curvebook_math::dist::{
+    chi2_cdf, chi2_isf, chi2_sf, f_isf, f_pdf, f_sf, norm_cdf, norm_pdf, norm_ppf, student_t_pdf, student_t_sf, student_t_two_sided_isf,
+};
+use curvebook_math::special::{beta, digamma, erf, erfc, gamma, ln_gamma, reg_beta, reg_gamma_p, reg_gamma_q};
 
 use crate::dsl::ast::{BinaryKind, BuiltinFn, CompiledProgram, OpCode, UnaryKind};
 use crate::dsl::limits::MAX_VM_STEPS;
 use crate::dsl::special::{
-    bessel_i0, bessel_i1, bessel_j0, bessel_j1, bessel_jn, bessel_k0, bessel_k1, bessel_y0, bessel_y1, bessel_yn, confluent_u, hyp1f1, hyp2f1,
-    parse_bessel_order,
+    bessel_i0, bessel_i1, bessel_in, bessel_j0, bessel_j1, bessel_jn, bessel_k0, bessel_k1, bessel_kn, bessel_y0, bessel_y1, bessel_yn,
+    binomial_upper_tail, confluent_u, factorial_f64, hyp1f1, hyp2f1, parse_bessel_order,
 };
 
 pub(in crate::dsl) fn eval_bytecode(prog: &CompiledProgram, x: &[f64], y: f64, params: &[f64], ds_idx: usize) -> Option<f64> {
@@ -192,6 +194,9 @@ pub(in crate::dsl) fn eval_binary_op(kind: BinaryKind, a: f64, b: f64) -> Option
 }
 
 pub(in crate::dsl) fn eval_builtin(bf: BuiltinFn, a: &[f64]) -> Option<f64> {
+    if matches!(bf, BuiltinFn::IsDefined) {
+        return Some(if a[0].is_finite() { 1.0 } else { 0.0 });
+    }
     if a.iter().any(|v| v.is_nan()) {
         return None;
     }
@@ -199,6 +204,7 @@ pub(in crate::dsl) fn eval_builtin(bf: BuiltinFn, a: &[f64]) -> Option<f64> {
         bf,
         BuiltinFn::Abs
             | BuiltinFn::Sqrt
+            | BuiltinFn::Sqr
             | BuiltinFn::Cbrt
             | BuiltinFn::Exp
             | BuiltinFn::Exp10
@@ -219,6 +225,9 @@ pub(in crate::dsl) fn eval_builtin(bf: BuiltinFn, a: &[f64]) -> Option<f64> {
             | BuiltinFn::Erf
             | BuiltinFn::Erfc
             | BuiltinFn::NormCdf
+            | BuiltinFn::NormPdf
+            | BuiltinFn::NormDist3
+            | BuiltinFn::NormPdf3
     );
     let val = match bf {
         BuiltinFn::Abs => a[0].abs(),
@@ -228,6 +237,7 @@ pub(in crate::dsl) fn eval_builtin(bf: BuiltinFn, a: &[f64]) -> Option<f64> {
             }
             a[0].sqrt()
         }
+        BuiltinFn::Sqr => a[0] * a[0],
         BuiltinFn::Cbrt => a[0].cbrt(),
         BuiltinFn::Exp => a[0].exp(),
         BuiltinFn::Exp10 => 10.0_f64.powf(a[0]),
@@ -275,6 +285,12 @@ pub(in crate::dsl) fn eval_builtin(bf: BuiltinFn, a: &[f64]) -> Option<f64> {
                 0.0
             }
         }
+        BuiltinFn::Mod => {
+            if a[1] == 0.0 {
+                return None;
+            }
+            a[0] % a[1]
+        }
         BuiltinFn::Min => a[0].min(a[1]),
         BuiltinFn::Max => a[0].max(a[1]),
         BuiltinFn::Clamp => {
@@ -284,10 +300,64 @@ pub(in crate::dsl) fn eval_builtin(bf: BuiltinFn, a: &[f64]) -> Option<f64> {
         }
         BuiltinFn::Hypot => a[0].hypot(a[1]),
         BuiltinFn::PowFn => a[0].powf(a[1]),
+        BuiltinFn::Perc => a[0] / 100.0,
+        BuiltinFn::Deg => a[0].to_degrees(),
+        BuiltinFn::Rad => a[0].to_radians(),
+        BuiltinFn::IsDefined => unreachable_is_defined(a[0]),
+        other => eval_special_or_dist_builtin(other, a)?,
+    };
+    if val.is_nan() {
+        return None;
+    }
+    if allow_inf || val.is_finite() { Some(val) } else { None }
+}
+
+fn eval_special_or_dist_builtin(bf: BuiltinFn, a: &[f64]) -> Option<f64> {
+    let val = match bf {
+        BuiltinFn::Fact => factorial_f64(a[0])?,
+        BuiltinFn::Logit => {
+            if !(a[0] > 0.0 && a[0] < 1.0) {
+                return None;
+            }
+            a[0].ln() - (-a[0]).ln_1p()
+        }
+        BuiltinFn::Probit => 5.0 + norm_ppf(a[0]).ok()?,
         BuiltinFn::Erf => erf(a[0]),
         BuiltinFn::Erfc => erfc(a[0]),
+        BuiltinFn::IBeta => reg_beta(a[2], a[0], a[1]).ok()?,
+        BuiltinFn::IGamma => reg_gamma_p(a[0], a[1]).ok()?,
+        BuiltinFn::IGammaC => reg_gamma_q(a[0], a[1]).ok()?,
         BuiltinFn::NormCdf => norm_cdf(a[0]),
+        BuiltinFn::NormPdf => norm_pdf(a[0]),
         BuiltinFn::NormInv => norm_ppf(a[0]).ok()?,
+        BuiltinFn::NormDist3 => {
+            if !a[1].is_finite() || !a[2].is_finite() || a[2] <= 0.0 {
+                return None;
+            }
+            norm_cdf((a[0] - a[1]) / a[2])
+        }
+        BuiltinFn::NormInv3 => {
+            if !a[1].is_finite() || !a[2].is_finite() || a[2] <= 0.0 {
+                return None;
+            }
+            a[1] + a[2] * norm_ppf(a[0]).ok()?
+        }
+        BuiltinFn::NormPdf3 => {
+            if !a[1].is_finite() || !a[2].is_finite() || a[2] <= 0.0 {
+                return None;
+            }
+            norm_pdf((a[0] - a[1]) / a[2]) / a[2]
+        }
+        BuiltinFn::TDist => student_t_sf(a[0], a[1]).ok()?,
+        BuiltinFn::TInv => student_t_two_sided_isf(a[0], a[1]).ok()?,
+        BuiltinFn::TPdf => student_t_pdf(a[0], a[1]).ok()?,
+        BuiltinFn::FDist => f_sf(a[0], a[1], a[2]).ok()?,
+        BuiltinFn::FInv => f_isf(a[0], a[1], a[2]).ok()?,
+        BuiltinFn::FPdf => f_pdf(a[0], a[1], a[2]).ok()?,
+        BuiltinFn::ChiDist => chi2_sf(a[0], a[1]).ok()?,
+        BuiltinFn::ChiSqC => chi2_cdf(a[0], a[1]).ok()?,
+        BuiltinFn::ChiInv => chi2_isf(a[0], a[1]).ok()?,
+        BuiltinFn::Binomial => binomial_upper_tail(a[0], a[1], a[2])?,
         BuiltinFn::Gamma => gamma(a[0]).ok()?,
         BuiltinFn::LnGamma => ln_gamma(a[0]).ok()?,
         BuiltinFn::Beta => beta(a[0], a[1]).ok()?,
@@ -306,14 +376,24 @@ pub(in crate::dsl) fn eval_builtin(bf: BuiltinFn, a: &[f64]) -> Option<f64> {
         }
         BuiltinFn::BesselI0 => bessel_i0(a[0])?,
         BuiltinFn::BesselI1 => bessel_i1(a[0])?,
+        BuiltinFn::BesselIn => {
+            let n = parse_bessel_order(a[0])?;
+            bessel_in(n, a[1])?
+        }
         BuiltinFn::BesselK0 => bessel_k0(a[0])?,
         BuiltinFn::BesselK1 => bessel_k1(a[0])?,
+        BuiltinFn::BesselKn => {
+            let n = parse_bessel_order(a[0])?;
+            bessel_kn(n, a[1])?
+        }
         BuiltinFn::Hyp1F1 => hyp1f1(a[0], a[1], a[2])?,
         BuiltinFn::Hyp2F1 => hyp2f1(a[0], a[1], a[2], a[3])?,
         BuiltinFn::ConfluentU => confluent_u(a[0], a[1], a[2])?,
+        _ => return None,
     };
-    if val.is_nan() {
-        return None;
-    }
-    if allow_inf || val.is_finite() { Some(val) } else { None }
+    Some(val)
+}
+
+fn unreachable_is_defined(x: f64) -> f64 {
+    if x.is_finite() { 1.0 } else { 0.0 }
 }
