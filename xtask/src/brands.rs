@@ -561,18 +561,19 @@ fn mask_exact_upstream_url_on_line(line: &str) -> String {
     while let Some(rel) = line.get(cursor..).and_then(|s| s.find(ADAPTED_UPSTREAM_REPO_URL)) {
         let pos = cursor + rel;
         let end = pos + url_len;
-        let prefix_ok = is_valid_url_prefix(line[..pos].chars().next_back());
-        let suffix_ok = is_valid_url_suffix(&line[end..]);
+        let prefix_ok = is_valid_url_prefix(line.get(..pos).and_then(|s| s.chars().next_back()));
+        let suffix_ok = is_valid_url_suffix(line.get(end..).unwrap_or(""));
         if prefix_ok && suffix_ok {
-            out.push_str(&line[cursor..pos]);
+            out.push_str(line.get(cursor..pos).unwrap_or(""));
             out.push_str(ATTRIBUTED_REPO_PLACEHOLDER);
             cursor = end;
         } else {
-            out.push_str(&line[cursor..pos + 1]);
-            cursor = pos + 1;
+            let step = line.get(pos..).and_then(|s| s.chars().next()).map_or(1, char::len_utf8);
+            out.push_str(line.get(cursor..pos + step).unwrap_or(""));
+            cursor = pos + step;
         }
     }
-    out.push_str(&line[cursor..]);
+    out.push_str(line.get(cursor..).unwrap_or(""));
     out
 }
 
@@ -780,7 +781,11 @@ impl SvgState {
         while i < bytes.len() {
             if self.in_comment {
                 if bytes.get(i..i + 3) == Some(b"-->") {
-                    chunks.push(SvgChunk { text: decode_xml_or_html_entities(&line[span_start..i]), is_meta_text: false, prev_word: None });
+                    chunks.push(SvgChunk {
+                        text: decode_xml_or_html_entities(line.get(span_start..i).unwrap_or("")),
+                        is_meta_text: false,
+                        prev_word: None,
+                    });
                     i += 3;
                     self.in_comment = false;
                     span_start = i;
@@ -791,9 +796,10 @@ impl SvgState {
             }
             if self.in_tag {
                 if bytes[i] == b'>' {
-                    self.tag_buf.push_str(&line[span_start..=i]);
+                    let tag_chunk = line.get(span_start..=i).unwrap_or("");
+                    self.tag_buf.push_str(tag_chunk);
                     self.apply_completed_tag();
-                    chunks.push(SvgChunk { text: decode_xml_or_html_entities(&line[span_start..=i]), is_meta_text: false, prev_word: None });
+                    chunks.push(SvgChunk { text: decode_xml_or_html_entities(tag_chunk), is_meta_text: false, prev_word: None });
                     i += 1;
                     span_start = i;
                 } else {
@@ -817,13 +823,14 @@ impl SvgState {
             i += 1;
         }
         if span_start < line.len() {
+            let tail = line.get(span_start..).unwrap_or("");
             if self.in_tag {
-                self.tag_buf.push_str(&line[span_start..]);
+                self.tag_buf.push_str(tail);
             }
             if !self.in_comment && !self.in_tag {
                 self.push_text_chunk(line, span_start, line.len(), &mut chunks);
             } else {
-                chunks.push(SvgChunk { text: decode_xml_or_html_entities(&line[span_start..]), is_meta_text: false, prev_word: None });
+                chunks.push(SvgChunk { text: decode_xml_or_html_entities(tail), is_meta_text: false, prev_word: None });
             }
         }
         chunks
@@ -833,7 +840,7 @@ impl SvgState {
         if start >= end {
             return;
         }
-        let decoded = decode_xml_or_html_entities(&line[start..end]);
+        let decoded = decode_xml_or_html_entities(line.get(start..end).unwrap_or(""));
         let prev_word = if self.in_meta { self.prev_meta_word.clone() } else { None };
         let is_meta = self.in_meta;
         if is_meta && !decoded.trim().is_empty() {
@@ -893,22 +900,22 @@ fn check_and_strip_svg_data_uri(path: &str, line: &str, out: &mut Vec<BrandHit>)
     }
     let mut out_str = String::with_capacity(line.len().min(4096));
     let mut pos = 0usize;
-    while let Some(rel) = lower[pos..].find(MARKER) {
+    while let Some(rel) = lower.get(pos..).and_then(|s| s.find(MARKER)) {
         let hit = pos + rel;
-        out_str.push_str(&line[pos..hit]);
-        let after = &line[hit + MARKER.len()..];
-        let after_lower = &lower[hit + MARKER.len()..];
+        out_str.push_str(line.get(pos..hit).unwrap_or(""));
+        let after = line.get(hit + MARKER.len()..).unwrap_or("");
+        let after_lower = lower.get(hit + MARKER.len()..).unwrap_or("");
         let Some(comma_rel) = after.find(',') else {
-            out_str.push_str(&line[hit..hit + MARKER.len()]);
+            out_str.push_str(line.get(hit..hit + MARKER.len()).unwrap_or(MARKER));
             pos = hit + MARKER.len();
             continue;
         };
-        let meta = &after_lower[..comma_rel];
+        let meta = after_lower.get(..comma_rel).unwrap_or("");
         let mime = meta.split(';').next().unwrap_or("").trim();
         let is_base64 = meta.split(';').skip(1).any(|p| p.trim() == "base64");
-        let payload_start = &after[comma_rel + 1..];
+        let payload_start = after.get(comma_rel + 1..).unwrap_or("");
         let end_quote = payload_start.find(['"', '\'', ')', ' ', '\t']).unwrap_or(payload_start.len());
-        let raw_payload = &payload_start[..end_quote];
+        let raw_payload = payload_start.get(..end_quote).unwrap_or(payload_start);
         if is_base64 {
             if let Some(decoded) = decode_base64_ascii(raw_payload) {
                 inspect_embedded_image_payload(path, mime, &decoded, out);
@@ -921,7 +928,7 @@ fn check_and_strip_svg_data_uri(path: &str, line: &str, out: &mut Vec<BrandHit>)
         out_str.push_str("data:image/stripped");
         pos = hit + MARKER.len() + comma_rel + 1 + end_quote;
     }
-    out_str.push_str(&line[pos..]);
+    out_str.push_str(line.get(pos..).unwrap_or(""));
     Some(out_str)
 }
 
@@ -2049,7 +2056,7 @@ fn collect_word_matches(raw: &str, lower: &str, word: &'static str, policy: Pris
                 }
                 let span_start = subs[s_idx].0;
                 let span_end = subs[s_idx + count - 1].1;
-                if &lower[span_start..span_end] == word && !is_token_match_exempt(raw, lower, word, span_start, span_end, policy) {
+                if lower.get(span_start..span_end) == Some(word) && !is_token_match_exempt(raw, lower, word, span_start, span_end, policy) {
                     on_match(span_start);
                 }
             }
@@ -2087,7 +2094,7 @@ fn collect_snake_kebab_compound_matches(raw: &str, lower: &str, word: &'static s
             for i in 0..parts.len() {
                 let mut joined = String::new();
                 for j in i..(i + 3).min(parts.len()) {
-                    joined.push_str(&lower[parts[j].0..parts[j].1]);
+                    joined.push_str(lower.get(parts[j].0..parts[j].1).unwrap_or(""));
                     if j > i && joined == word && !is_token_match_exempt(raw, lower, word, parts[i].0, parts[j].1, policy) {
                         on_match(parts[i].0);
                     }
@@ -2100,7 +2107,7 @@ fn collect_snake_kebab_compound_matches(raw: &str, lower: &str, word: &'static s
 fn collect_delimited_suite_matches(lower: &str, word: &'static str, on_match: &mut impl FnMut(usize)) {
     let bytes = lower.as_bytes();
     let mut start = 0usize;
-    while let Some(rel) = lower[start..].find(word) {
+    while let Some(rel) = lower.get(start..).and_then(|s| s.find(word)) {
         let pos = start + rel;
         let end = pos + word.len();
         let left_ok = pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric();
@@ -2191,7 +2198,7 @@ fn is_prism_match_exempt(raw: &str, lower: &str, pos: usize, end: usize, policy:
         PrismPolicy::UiTextRun { allow_dot_prism, allow_palette_cmd_id, .. } => {
             (allow_dot_prism && is_lower_dot_ext) || (allow_palette_cmd_id && is_cmd_prism)
         }
-        PrismPolicy::SvgTitleOrDesc { prev_word } => is_lower_dot_ext || is_preceded_by_optical_modifier(&lower[..pos], prev_word),
+        PrismPolicy::SvgTitleOrDesc { prev_word } => is_lower_dot_ext || is_preceded_by_optical_modifier(lower.get(..pos).unwrap_or(""), prev_word),
     }
 }
 
@@ -2240,7 +2247,7 @@ fn tail_char_slice(s: &str, max_bytes: usize) -> &str {
     while start < s.len() && !s.is_char_boundary(start) {
         start += 1;
     }
-    &s[start..]
+    s.get(start..).unwrap_or(s)
 }
 
 fn head_char_slice(s: &str, max_bytes: usize) -> &str {
@@ -2248,12 +2255,12 @@ fn head_char_slice(s: &str, max_bytes: usize) -> &str {
     while end > 0 && !s.is_char_boundary(end) {
         end -= 1;
     }
-    &s[..end]
+    s.get(..end).unwrap_or(s)
 }
 
 fn statement_prefix_tail(before: &str, max_bytes: usize) -> &str {
     let window = tail_char_slice(before, max_bytes);
-    if let Some(pos) = window.rfind([';', '{', '}']) { &window[pos + 1..] } else { window }
+    if let Some((_, after)) = window.rsplit_once([';', '{', '}']) { after } else { window }
 }
 
 fn is_import_export_prism_literal(path: &str, src: &str, lit: &ExtractedLiteral) -> bool {
@@ -2288,8 +2295,10 @@ fn is_prism_match_pattern(before: &str, after: &str) -> bool {
     let before_trim = before.trim_end();
     let after_trim = after.trim_start();
 
-    if before_trim.ends_with("Some(") && after_trim.starts_with(')') {
-        let post_paren = after_trim[1..].trim_start();
+    if before_trim.ends_with("Some(")
+        && let Some(after_paren) = after_trim.strip_prefix(')')
+    {
+        let post_paren = after_paren.trim_start();
         if post_paren.starts_with("=>") || post_paren.starts_with('|') || post_paren.starts_with("if ") {
             return true;
         }
@@ -2376,13 +2385,13 @@ fn is_prism_extension_array_item(before: &str, after: &str) -> bool {
     let Some(close_idx) = find_enclosing_bracket_close(after) else {
         return false;
     };
-    let inner_before = &before[open_idx..];
-    let inner_after = &after[..close_idx];
+    let inner_before = before.get(open_idx..).unwrap_or("");
+    let inner_after = after.get(..close_idx).unwrap_or("");
     const PEER_EXT_LITERALS: &[&str] = &["\"pzfx\"", "\"cbtemplate\"", "\"curvebook\"", "\"curvebook.d\"", "\"csv\"", "\"tsv\""];
     if PEER_EXT_LITERALS.iter().any(|peer| inner_before.contains(peer) || inner_after.contains(peer)) {
         return true;
     }
-    let prefix = statement_prefix_tail(&before[..open_idx], 160).to_ascii_lowercase();
+    let prefix = statement_prefix_tail(before.get(..open_idx).unwrap_or(""), 160).to_ascii_lowercase();
     const ARRAY_CONTEXT_MARKERS: &[&str] = &["add_filter", "extension", "file_filter", "import", "export", "accept", "format_"];
     ARRAY_CONTEXT_MARKERS.iter().any(|m| prefix.contains(m))
 }
@@ -2390,14 +2399,14 @@ fn is_prism_extension_array_item(before: &str, after: &str) -> bool {
 fn is_prism_format_call_arg(before: &str) -> bool {
     let stmt = statement_prefix_tail(before, 220).to_ascii_lowercase();
     let trimmed = before.trim_end();
-    if let Some(paren_pos) = trimmed.rfind('(') {
-        let callee = trailing_ascii_word(trimmed[..paren_pos].trim_end()).to_ascii_lowercase();
+    if let Some((before_paren, _)) = trimmed.rsplit_once('(') {
+        let callee = trailing_ascii_word(before_paren.trim_end()).to_ascii_lowercase();
         if matches!(callee.as_str(), "label" | "title" | "text" | "button" | "tooltip" | "heading" | "window_title" | "set_title") {
             return false;
         }
     }
-    if let Some(colon_pos) = trimmed.rfind(':') {
-        let field = trailing_ascii_word(trimmed[..colon_pos].trim_end()).to_ascii_lowercase();
+    if let Some((before_colon, _)) = trimmed.rsplit_once(':') {
+        let field = trailing_ascii_word(before_colon.trim_end()).to_ascii_lowercase();
         if matches!(field.as_str(), "label" | "title" | "text" | "tooltip" | "summary" | "beginner" | "message" | "placeholder") {
             return false;
         }
@@ -2446,7 +2455,7 @@ fn trailing_ascii_word(s: &str) -> &str {
     while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'-') {
         start -= 1;
     }
-    &s[start..]
+    s.get(start..).unwrap_or("")
 }
 
 fn check_single_string_with_extra(
@@ -2603,15 +2612,14 @@ pub fn check_i18n_catalog() -> Vec<BrandHit> {
 fn decode_xml_or_html_entities(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut rest = input;
-    while let Some(amp) = rest.find('&') {
-        out.push_str(&rest[..amp]);
-        let after_amp = &rest[amp + 1..];
-        if let Some(semi) = after_amp.find(';')
-            && semi <= 12
-            && let Some(decoded) = decode_named_or_numeric_entity(&after_amp[..semi])
+    while let Some((before, after_amp)) = rest.split_once('&') {
+        out.push_str(before);
+        if let Some((entity, tail)) = after_amp.split_once(';')
+            && entity.len() <= 12
+            && let Some(decoded) = decode_named_or_numeric_entity(entity)
         {
             out.push(decoded);
-            rest = &after_amp[semi + 1..];
+            rest = tail;
             continue;
         }
         out.push('&');
@@ -2679,29 +2687,31 @@ pub fn check_svg_metadata(source: &str, svg: &str) -> Vec<BrandHit> {
     let mut active_start_line = 1usize;
     let mut buf = String::new();
 
-    while pos < svg.len() {
-        let rest = &svg[pos..];
+    while let Some(rest) = svg.get(pos..) {
+        if rest.is_empty() {
+            break;
+        }
         if let Some(after) = rest.strip_prefix("<!--") {
-            let (comment_body, end) = match after.find("-->") {
-                Some(rel) => (&after[..rel], pos + 4 + rel + 3),
+            let (comment_body, end) = match after.split_once("-->") {
+                Some((body, _)) => (body, pos + 4 + body.len() + 3),
                 None => (after, svg.len()),
             };
             if !comment_body.trim().is_empty() {
                 scan_xml_text_fragment(source, line, comment_body, PrismPolicy::Strict, &mut out);
             }
-            line += count_newlines(&svg[pos..end]);
+            line += count_newlines(svg.get(pos..end).unwrap_or(rest));
             pos = end;
             continue;
         }
         if let Some(after) = rest.strip_prefix("<![CDATA[") {
-            let (cdata_body, end) = match after.find("]]>") {
-                Some(rel) => (&after[..rel], pos + 9 + rel + 3),
+            let (cdata_body, end) = match after.split_once("]]>") {
+                Some((body, _)) => (body, pos + 9 + body.len() + 3),
                 None => (after, svg.len()),
             };
             if skip_depth == 0 && (meta_depth > 0 || text_depth > 0) {
                 buf.push_str(cdata_body);
             }
-            line += count_newlines(&svg[pos..end]);
+            line += count_newlines(svg.get(pos..end).unwrap_or(rest));
             pos = end;
             continue;
         }
@@ -2709,7 +2719,7 @@ pub fn check_svg_metadata(source: &str, svg: &str) -> Vec<BrandHit> {
             && let Some(gt_rel) = rest.find('>')
         {
             let tag_end = pos + gt_rel + 1;
-            let raw_inner = &svg[pos + 1..tag_end - 1];
+            let raw_inner = rest.get(1..gt_rel).unwrap_or("");
             let (is_close, self_closing, name) = extract_tag_name(raw_inner);
             let lower = name.to_ascii_lowercase();
             let is_meta_tag = matches!(lower.as_str(), "title" | "desc" | "metadata");
@@ -2752,18 +2762,21 @@ pub fn check_svg_metadata(source: &str, svg: &str) -> Vec<BrandHit> {
                     text_depth += 1;
                 }
             }
-            line += count_newlines(&svg[pos..tag_end]);
+            line += count_newlines(svg.get(pos..tag_end).unwrap_or(""));
             pos = tag_end;
             continue;
         }
-        let next_lt = rest.find('<').map_or(svg.len(), |rel| pos + rel.max(1));
+        let next_lt = rest.find('<').map_or(svg.len(), |rel| {
+            let step = if rel == 0 { rest.chars().next().map_or(1, char::len_utf8) } else { rel };
+            pos + step
+        });
         if skip_depth == 0 && (meta_depth > 0 || text_depth > 0) {
             if buf.is_empty() {
                 active_start_line = line;
             }
-            buf.push_str(&svg[pos..next_lt]);
+            buf.push_str(svg.get(pos..next_lt).unwrap_or(""));
         }
-        line += count_newlines(&svg[pos..next_lt]);
+        line += count_newlines(svg.get(pos..next_lt).unwrap_or(""));
         pos = next_lt;
     }
 
@@ -2794,7 +2807,7 @@ fn scan_svg_tag_attributes(source: &str, start_line: usize, raw_inner: &str, out
                 }
                 i += 1;
             }
-            let val = &raw_inner[val_start..i];
+            let val = raw_inner.get(val_start..i).unwrap_or("");
             if !val.to_ascii_lowercase().trim_start().starts_with("data:image/") {
                 scan_xml_text_fragment(source, attr_line, val, PrismPolicy::Strict, out);
             }
@@ -2991,7 +3004,7 @@ pub fn check_pdf_metadata(source: &str, pdf_bytes: &[u8]) -> Vec<BrandHit> {
 fn extract_html_attr(raw_tag_inner: &str, attr_name: &str) -> Option<String> {
     let lower = raw_tag_inner.to_ascii_lowercase();
     let mut search = 0usize;
-    while let Some(rel) = lower[search..].find(attr_name) {
+    while let Some(rel) = lower.get(search..).and_then(|s| s.find(attr_name)) {
         let pos = search + rel;
         let end = pos + attr_name.len();
         let left_ok = pos == 0 || lower.as_bytes()[pos - 1].is_ascii_whitespace();
@@ -3005,10 +3018,11 @@ fn extract_html_attr(raw_tag_inner: &str, attr_name: &str) -> Option<String> {
             continue;
         };
         let val_src = after_eq.trim_start();
-        if let Some(q) = val_src.chars().next().filter(|&c| c == '"' || c == '\'') {
-            let inner = &val_src[1..];
-            if let Some(close) = inner.find(q) {
-                return Some(decode_xml_or_html_entities(&inner[..close]));
+        for q in ['"', '\''] {
+            if let Some(inner) = val_src.strip_prefix(q)
+                && let Some((val, _)) = inner.split_once(q)
+            {
+                return Some(decode_xml_or_html_entities(val));
             }
         }
         search = end;
@@ -3028,13 +3042,20 @@ pub fn check_html_metadata(source: &str, html: &str) -> Vec<BrandHit> {
     let mut text_start_line = 1usize;
     let mut buf = String::new();
 
-    while pos < html.len() {
-        let rest = &html[pos..];
-        if rest.starts_with("<!--") {
-            let end = rest.find("-->").map_or(html.len(), |rel| pos + rel + 3);
-            let comment_inner = &html[pos + 4..end.saturating_sub(3).max(pos + 4)];
+    while let Some(rest) = html.get(pos..) {
+        if rest.is_empty() {
+            break;
+        }
+        if let Some(after) = rest.strip_prefix("<!--") {
+            let (comment_inner, end) = match rest.find("-->") {
+                Some(rel) => {
+                    let close_pos = pos + rel;
+                    (html.get(pos + 4..close_pos.max(pos + 4)).unwrap_or(""), close_pos + 3)
+                }
+                None => (after, html.len()),
+            };
             flush_html_text(source, line, comment_inner, true, &mut out);
-            line += count_newlines(&html[pos..end]);
+            line += count_newlines(html.get(pos..end).unwrap_or(rest));
             pos = end;
             continue;
         }
@@ -3043,13 +3064,14 @@ pub fn check_html_metadata(source: &str, html: &str) -> Vec<BrandHit> {
             let close_pos = lower_rest.find("</script").or_else(|| lower_rest.find("</style"));
             let chunk_end = close_pos.map_or(html.len(), |rel| pos + rel);
             if chunk_end > pos {
-                flush_html_text(source, line, &html[pos..chunk_end], false, &mut out);
-                line += count_newlines(&html[pos..chunk_end]);
+                let chunk = html.get(pos..chunk_end).unwrap_or("");
+                flush_html_text(source, line, chunk, false, &mut out);
+                line += count_newlines(chunk);
             }
             if let Some(rel) = close_pos {
                 let tag_start = pos + rel;
-                let gt_end = html[tag_start..].find('>').map_or(html.len(), |g| tag_start + g + 1);
-                line += count_newlines(&html[tag_start..gt_end]);
+                let gt_end = html.get(tag_start..).and_then(|s| s.find('>')).map_or(html.len(), |g| tag_start + g + 1);
+                line += count_newlines(html.get(tag_start..gt_end).unwrap_or(""));
                 pos = gt_end;
                 in_script_or_style = false;
             } else {
@@ -3065,7 +3087,7 @@ pub fn check_html_metadata(source: &str, html: &str) -> Vec<BrandHit> {
             }
             buf.clear();
             let tag_end = pos + gt_rel + 1;
-            let raw_inner = &html[pos + 1..tag_end - 1];
+            let raw_inner = rest.get(1..gt_rel).unwrap_or("");
             let (is_close, self_closing, name) = extract_tag_name(raw_inner);
             let lower = name.to_ascii_lowercase();
             let tag_line = line;
@@ -3091,16 +3113,20 @@ pub fn check_html_metadata(source: &str, html: &str) -> Vec<BrandHit> {
             } else if matches!(lower.as_str(), "title" | "desc" | "metadata") {
                 strict_depth = strict_depth.saturating_sub(1);
             }
-            line += count_newlines(&html[pos..tag_end]);
+            line += count_newlines(html.get(pos..tag_end).unwrap_or(""));
             pos = tag_end;
             continue;
         }
-        let next_lt = rest.find('<').map_or(html.len(), |rel| pos + rel.max(1));
+        let next_lt = rest.find('<').map_or(html.len(), |rel| {
+            let step = if rel == 0 { rest.chars().next().map_or(1, char::len_utf8) } else { rel };
+            pos + step
+        });
         if buf.is_empty() {
             text_start_line = line;
         }
-        buf.push_str(&html[pos..next_lt]);
-        line += count_newlines(&html[pos..next_lt]);
+        let text_chunk = html.get(pos..next_lt).unwrap_or("");
+        buf.push_str(text_chunk);
+        line += count_newlines(text_chunk);
         pos = next_lt;
     }
 

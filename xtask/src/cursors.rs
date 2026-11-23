@@ -413,7 +413,7 @@ fn strip_toml_comment(line: &str) -> &str {
         } else if ch == '\'' {
             in_single = true;
         } else if ch == '#' {
-            return &line[..idx];
+            return line.get(..idx).unwrap_or(line);
         }
     }
     line

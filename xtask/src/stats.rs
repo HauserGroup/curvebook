@@ -128,7 +128,7 @@ fn strip_rust_comments_and_strings(src: &str) -> String {
                     i += 1;
                 } else {
                     out.push(' ');
-                    i += src[i..].chars().next().map_or(1, char::len_utf8);
+                    i += next_char_at(src, i).map_or(1, char::len_utf8);
                 }
             }
             continue;
@@ -146,7 +146,7 @@ fn strip_rust_comments_and_strings(src: &str) -> String {
             while i < n {
                 if b[i] == b'\\' {
                     out.push(' ');
-                    if let Some(esc) = src.get(i + 1..).and_then(|s| s.chars().next()) {
+                    if let Some(esc) = next_char_at(src, i + 1) {
                         out.push(if esc == '\n' { '\n' } else { ' ' });
                         i += 1 + esc.len_utf8();
                     } else {
@@ -161,7 +161,7 @@ fn strip_rust_comments_and_strings(src: &str) -> String {
                     i += 1;
                 } else {
                     out.push(' ');
-                    i += src[i..].chars().next().map_or(1, char::len_utf8);
+                    i += next_char_at(src, i).map_or(1, char::len_utf8);
                 }
             }
             continue;
@@ -175,11 +175,15 @@ fn strip_rust_comments_and_strings(src: &str) -> String {
             i = char_end;
             continue;
         }
-        let ch = src[i..].chars().next().unwrap_or(' ');
+        let ch = next_char_at(src, i).unwrap_or(' ');
         out.push(ch);
         i += ch.len_utf8();
     }
     out
+}
+
+fn next_char_at(src: &str, idx: usize) -> Option<char> {
+    src.get(idx..).and_then(|s| s.chars().next())
 }
 
 fn skip_raw_string_end(b: &[u8], idx: usize) -> Option<usize> {
@@ -253,7 +257,7 @@ fn count_exact_test_attrs(code: &str) -> usize {
                 }
                 j += 1;
             }
-            let attr: String = code[start..end].chars().filter(|c| !c.is_whitespace()).collect();
+            let attr: String = code.get(start..end).unwrap_or("").chars().filter(|c| !c.is_whitespace()).collect();
             if attr == "#[test]" || attr.contains("::test]") || attr.contains("::test(") {
                 count += 1;
             }

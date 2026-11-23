@@ -117,24 +117,23 @@ pub(crate) fn decode_xml_html_entities(input: &str) -> String {
     if !input.contains('&') {
         return input.to_owned();
     }
-    let bytes = input.as_bytes();
     let mut out = String::with_capacity(input.len());
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes[i] == b'&'
-            && let Some(semi_rel) = input[i + 1..].find(';')
-            && semi_rel > 0
-            && semi_rel <= 12
-            && let Some(decoded) = decode_entity_body(&input[i + 1..i + 1 + semi_rel])
+    let mut rest = input;
+    while let Some((before, after_amp)) = rest.split_once('&') {
+        out.push_str(before);
+        if let Some((body, tail)) = after_amp.split_once(';')
+            && !body.is_empty()
+            && body.len() <= 12
+            && let Some(decoded) = decode_entity_body(body)
         {
             out.push(decoded);
-            i += 1 + semi_rel + 1;
-            continue;
+            rest = tail;
+        } else {
+            out.push('&');
+            rest = after_amp;
         }
-        let ch = input[i..].chars().next().unwrap_or('&');
-        out.push(ch);
-        i += ch.len_utf8();
     }
+    out.push_str(rest);
     out
 }
 

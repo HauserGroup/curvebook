@@ -470,7 +470,7 @@ fn tokenize_spdx(expr: &str) -> Result<Vec<SpdxToken>, String> {
                 while i < bytes.len() && !bytes[i].is_ascii_whitespace() && !matches!(bytes[i], b'(' | b')' | b'/') {
                     i += 1;
                 }
-                let word = &expr[start..i];
+                let word = expr.get(start..i).ok_or_else(|| String::from("invalid UTF-8 boundary in SPDX expression"))?;
                 match word {
                     "AND" => tokens.push(SpdxToken::And),
                     "OR" => tokens.push(SpdxToken::Or),
@@ -613,15 +613,13 @@ fn is_wildcard_dep_spec(key: &str, rhs: &str) -> bool {
         return (key == "version" || !key.is_empty()) && is_wildcard_version_str(&v);
     }
     if rhs.starts_with('{')
-        && let Some(ver_pos) = rhs.find("version")
+        && let Some((_, after)) = rhs.split_once("version")
+        && let Some((_, val_part)) = after.split_once('=')
     {
-        let after = &rhs[ver_pos + "version".len()..];
-        if let Some((_, val_part)) = after.split_once('=') {
-            let val = val_part.trim();
-            if val.starts_with('"') || val.starts_with('\'') {
-                let first_quoted = extract_first_quoted(val);
-                return is_wildcard_version_str(&first_quoted);
-            }
+        let val = val_part.trim();
+        if val.starts_with('"') || val.starts_with('\'') {
+            let first_quoted = extract_first_quoted(val);
+            return is_wildcard_version_str(&first_quoted);
         }
     }
     false
@@ -962,44 +960,53 @@ fn escape_html(input: &str) -> String {
 }
 
 fn strip_toml_comment(line: &str) -> &str {
-    let bytes = line.as_bytes();
     let mut in_dq = false;
     let mut in_sq = false;
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\\' if in_dq => {
-                i += 2;
-                continue;
+    let mut escaped = false;
+    for (i, ch) in line.char_indices() {
+        if in_dq {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_dq = false;
             }
-            b'"' if !in_sq => in_dq = !in_dq,
-            b'\'' if !in_dq => in_sq = !in_sq,
-            b'#' if !in_dq && !in_sq => return &line[..i],
-            _ => {}
+        } else if in_sq {
+            if ch == '\'' {
+                in_sq = false;
+            }
+        } else {
+            match ch {
+                '"' => in_dq = true,
+                '\'' => in_sq = true,
+                '#' => return line.get(..i).unwrap_or(line),
+                _ => {}
+            }
         }
-        i += 1;
     }
     line
 }
 
 fn parse_section_header(line: &str) -> Option<&str> {
-    if line.starts_with('[') && !line.starts_with("[[") && line.ends_with(']') { Some(line[1..line.len() - 1].trim()) } else { None }
+    if line.starts_with("[[") {
+        return None;
+    }
+    line.strip_prefix('[')?.strip_suffix(']').map(str::trim)
 }
 
 fn unquote_toml_str(s: &str) -> String {
     let t = s.trim();
-    if t.len() >= 2 && ((t.starts_with('"') && t.ends_with('"')) || (t.starts_with('\'') && t.ends_with('\''))) {
-        t[1..t.len() - 1].to_owned()
-    } else {
-        t.to_owned()
-    }
+    t.strip_prefix('"').and_then(|r| r.strip_suffix('"')).or_else(|| t.strip_prefix('\'').and_then(|r| r.strip_suffix('\''))).unwrap_or(t).to_owned()
 }
 
 fn extract_first_quoted(s: &str) -> String {
-    let Some(quote) = s.chars().next().filter(|&c| c == '"' || c == '\'') else {
-        return String::new();
-    };
-    s[1..].split(quote).next().unwrap_or("").to_owned()
+    for quote in ['"', '\''] {
+        if let Some(rest) = s.strip_prefix(quote) {
+            return rest.split(quote).next().unwrap_or("").to_owned();
+        }
+    }
+    String::new()
 }
 
 fn extract_quoted_items(s: &str, out: &mut Vec<String>) {

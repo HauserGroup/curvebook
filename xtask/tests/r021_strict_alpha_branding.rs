@@ -850,14 +850,15 @@ fn r021_icns_gif_svg_docs_images_and_windows_ico_geometry_intact() -> Result<(),
     {
         let svg = fs::read_to_string(root.join(rel)).map_err(|e| format!("read {rel}: {e}"))?;
         let marker = "data:image/png;base64,";
-        let Some(idx) = svg.find(marker) else {
+        let Some((before, after)) = svg.split_once(marker) else {
             return Err(format!("{rel} missing embedded base64 PNG"));
         };
-        let after = &svg[idx + marker.len()..];
-        let end = after.find('"').ok_or_else(|| format!("{rel} unterminated data URI"))?;
-        let decoded = decode_b64(&after[..end]).ok_or_else(|| format!("{rel} invalid base64 PNG"))?;
+        let Some((b64, tail)) = after.split_once('"') else {
+            return Err(format!("{rel} unterminated data URI"));
+        };
+        let decoded = decode_b64(b64).ok_or_else(|| format!("{rel} invalid base64 PNG"))?;
         verify_png_chunks(Path::new(rel), &decoded, png_sig, &pre_rename)?;
-        let outer = format!("{}{}", &svg[..idx], &svg[idx + marker.len() + end..]);
+        let outer = format!("{before}\"{tail}");
         if contains_ascii_word(&outer, &pre_rename) {
             return Err(format!("{rel} outer XML contains pre-rename token"));
         }

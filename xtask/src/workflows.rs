@@ -114,25 +114,24 @@ fn check_yaml_file_offline(root: &Path, rel: &str, require_workflow_keys: bool) 
 }
 
 fn scan_yaml_line_expressions(rel: &str, line: &str, line_no: usize, open_expr_line: &mut Option<usize>) -> Result<(), String> {
-    let mut cursor = 0usize;
-    while cursor < line.len() {
+    let mut rest = line;
+    while !rest.is_empty() {
         if let Some(open_line) = *open_expr_line {
-            if let Some(close_rel) = line[cursor..].find("}}") {
-                if let Some(nested) = line[cursor..cursor + close_rel].find("${{") {
-                    let _ = nested;
+            if let Some((inside, after_close)) = rest.split_once("}}") {
+                if inside.contains("${{") {
                     return Err(format!("{rel}:{open_line}: unclosed GitHub Actions expression `${{{{`"));
                 }
                 *open_expr_line = None;
-                cursor += close_rel + 2;
+                rest = after_close;
             } else {
-                if line[cursor..].contains("${{") {
+                if rest.contains("${{") {
                     return Err(format!("{rel}:{open_line}: unclosed GitHub Actions expression `${{{{`"));
                 }
                 break;
             }
-        } else if let Some(open_rel) = line[cursor..].find("${{") {
+        } else if let Some((_, after_open)) = rest.split_once("${{") {
             *open_expr_line = Some(line_no);
-            cursor += open_rel + 3;
+            rest = after_open;
         } else {
             break;
         }

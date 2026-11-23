@@ -195,9 +195,9 @@ fn parse_table_cells(line: &str) -> Option<Vec<&str>> {
 fn strip_trailing_licence_note(raw: &str) -> &str {
     let trimmed = raw.trim();
     if trimmed.ends_with("`)")
-        && let Some(idx) = trimmed.rfind(" (`")
+        && let Some((head, _)) = trimmed.rsplit_once(" (`")
     {
-        return trimmed[..idx].trim();
+        return head.trim();
     }
     trimmed
 }
@@ -284,7 +284,7 @@ fn has_ascii_word(lower: &str, word: &str) -> bool {
     let bytes = lower.as_bytes();
     let wlen = word.len();
     let mut start = 0usize;
-    while let Some(rel) = lower[start..].find(word) {
+    while let Some(rel) = lower.get(start..).and_then(|s| s.find(word)) {
         let pos = start + rel;
         let end = pos + wlen;
         let left_ok = pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric();
@@ -292,7 +292,7 @@ fn has_ascii_word(lower: &str, word: &str) -> bool {
         if left_ok && right_ok {
             return true;
         }
-        start = pos + 1;
+        start = pos + lower.get(pos..).and_then(|s| s.chars().next()).map_or(1, char::len_utf8);
     }
     false
 }
@@ -322,16 +322,15 @@ fn check_row_safety(row: &AssetRow) -> Result<(), String> {
 fn extract_backticked_asset_refs(source: &str) -> Vec<&str> {
     let mut refs = Vec::new();
     let mut rest = source;
-    while let Some(start) = rest.find('`') {
-        let after = &rest[start + 1..];
-        let Some(end) = after.find('`') else {
+    while let Some((_, after)) = rest.split_once('`') {
+        let Some((token_raw, tail)) = after.split_once('`') else {
             break;
         };
-        let token = after[..end].trim();
+        let token = token_raw.trim();
         if token.contains('/') {
             refs.push(token);
         }
-        rest = &after[end + 1..];
+        rest = tail;
     }
     refs
 }
@@ -827,17 +826,15 @@ fn check_asset_embedded_metadata(display_path: &str, bytes: &[u8], violations: &
 fn is_flatpak_appstream_icon_cache(catalog: &RepoAssetCatalog, dist_dir: &Path, display_path: &str) -> bool {
     const MARKER: &str = "/share/app-info/icons/flatpak/";
     const ICON_FILE: &str = "/org.curvebook.CurveBook.png";
-    let Some(marker_pos) = display_path.find(MARKER) else {
+    let Some((prefix, after)) = display_path.split_once(MARKER) else {
         return false;
     };
-    let after = &display_path[marker_pos + MARKER.len()..];
     let Some(dim) = after.strip_suffix(ICON_FILE) else {
         return false;
     };
     if dim.is_empty() || dim.contains('/') {
         return false;
     }
-    let prefix = &display_path[..marker_pos];
     let hicolor_rel = format!("{prefix}/share/icons/hicolor/{dim}/apps/org.curvebook.CurveBook.png");
     let Ok(src_bytes) = curvebook_platform::fs::read_regular_file_bytes(&dist_dir.join(hicolor_rel), MAX_DIST_ASSET_BYTES) else {
         return false;

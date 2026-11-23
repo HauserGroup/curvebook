@@ -667,7 +667,9 @@ fn contains_isbn(lower: &str) -> bool {
         if pos > 0 && lower.as_bytes()[pos - 1].is_ascii_alphanumeric() {
             continue;
         }
-        let mut rest = &lower[pos + 4..];
+        let Some(mut rest) = lower.get(pos + 4..) else {
+            continue;
+        };
         if let Some(after_tag) = rest.strip_prefix("-13").or_else(|| rest.strip_prefix("-10")) {
             rest = after_tag;
         }
@@ -690,9 +692,11 @@ fn contains_author_year_citation(doc: &str) -> bool {
             continue;
         }
         let window_start = floor_char_boundary(doc, idx.saturating_sub(56));
-        let mut prefix = &doc[window_start..idx];
-        if let Some(cut) = prefix.rfind(['<', '>', '=', '[', ']', '`']) {
-            prefix = &prefix[cut + 1..];
+        let Some(mut prefix) = doc.get(window_start..idx) else {
+            continue;
+        };
+        if let Some((_, after_cut)) = prefix.rsplit_once(['<', '>', '=', '[', ']', '`']) {
+            prefix = after_cut;
         }
         if (prefix.contains('(') || prefix.contains(',') || prefix.contains(' ')) && window_contains_author_surname(prefix, &disallowed_set) {
             return true;
@@ -830,7 +834,7 @@ fn lex_module(source: &str) -> Vec<Token> {
                 b';' => tokens.push(Token::Semi),
                 _ => {}
             }
-            i += source[i..].chars().next().map_or(1, char::len_utf8);
+            i += source.get(i..).and_then(|s| s.chars().next()).map_or(1, char::len_utf8);
         }
     }
     tokens
@@ -842,7 +846,7 @@ fn lex_line_comment(source: &str, start: usize, tokens: &mut Vec<Token>) -> usiz
     while end < bytes.len() && bytes[end] != b'\n' {
         end += 1;
     }
-    let slice = &source[start..end];
+    let slice = source.get(start..end).unwrap_or("");
     if let Some(inner) = slice.strip_prefix("//!") {
         tokens.push(Token::InnerDoc(inner.trim().to_owned()));
     } else if let Some(outer) = slice.strip_prefix("///")
@@ -874,10 +878,11 @@ fn lex_block_comment(source: &str, start: usize, line: &mut usize, tokens: &mut 
         }
     }
     let body_end = i.saturating_sub(2);
-    if is_inner && start + 3 <= body_end {
-        tokens.push(Token::InnerDoc(source[start + 3..body_end].trim().to_owned()));
-    } else if is_outer && start + 3 <= body_end {
-        tokens.push(Token::OuterDoc(source[start + 3..body_end].trim().to_owned()));
+    if (is_inner || is_outer)
+        && let Some(body) = source.get(start + 3..body_end)
+    {
+        let text = body.trim().to_owned();
+        tokens.push(if is_inner { Token::InnerDoc(text) } else { Token::OuterDoc(text) });
     }
     i
 }
@@ -1016,7 +1021,7 @@ fn lex_ident(source: &str, start: usize, line: usize, tokens: &mut Vec<Token>) -
     while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
         end += 1;
     }
-    let text = source[start..end].to_owned();
+    let text = source.get(start..end).unwrap_or("").to_owned();
     tokens.push(Token::Ident { text, line });
     end
 }

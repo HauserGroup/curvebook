@@ -91,7 +91,7 @@ fn extract_inline_script_hashes(html: &str) -> Result<Vec<String>, String> {
     let bytes = lower.as_bytes();
     let mut hashes = Vec::new();
     let mut pos = 0usize;
-    while let Some(rel) = lower[pos..].find("<script") {
+    while let Some(rel) = lower.get(pos..).and_then(|s| s.find("<script")) {
         let tag_start = pos + rel;
         let after_name = tag_start + "<script".len();
         let next_b = bytes.get(after_name).copied();
@@ -99,19 +99,19 @@ fn extract_inline_script_hashes(html: &str) -> Result<Vec<String>, String> {
             pos = after_name;
             continue;
         }
-        let close_rel = find_html_tag_close(&html[after_name..]).ok_or_else(|| String::from("unclosed `<script>` opening tag"))?;
+        let close_rel = html.get(after_name..).and_then(find_html_tag_close).ok_or_else(|| String::from("unclosed `<script>` opening tag"))?;
         let open_end = after_name + close_rel;
-        let attrs = &html[after_name..open_end];
+        let attrs = html.get(after_name..open_end).ok_or_else(|| String::from("unclosed `<script>` opening tag"))?;
         let body_start = open_end + 1;
         if attrs.trim_end().ends_with('/') {
             pos = body_start;
             continue;
         }
-        let close_tag_rel = lower[body_start..].find("</script").ok_or_else(|| String::from("unclosed `<script>` element"))?;
+        let close_tag_rel = lower.get(body_start..).and_then(|s| s.find("</script")).ok_or_else(|| String::from("unclosed `<script>` element"))?;
         let body_end = body_start + close_tag_rel;
-        let close_tag_gt = find_html_tag_close(&html[body_end..]).ok_or_else(|| String::from("unclosed `</script>` closing tag"))?;
+        let close_tag_gt = html.get(body_end..).and_then(find_html_tag_close).ok_or_else(|| String::from("unclosed `</script>` closing tag"))?;
         if !tag_has_src_attr(attrs) {
-            let body = &html[body_start..body_end];
+            let body = html.get(body_start..body_end).ok_or_else(|| String::from("unclosed `<script>` element"))?;
             let digest = crate::release_scan::sha256_bytes(body.as_bytes());
             let token = format!("'sha256-{}'", encode_base64_std(&digest));
             if !hashes.contains(&token) {
@@ -151,7 +151,7 @@ fn tag_has_src_attr(attrs: &str) -> bool {
         while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'=' && bytes[i] != b'/' {
             i += 1;
         }
-        let key = &lower[k_start..i];
+        let key = lower.get(k_start..i).unwrap_or("");
         while i < bytes.len() && bytes[i].is_ascii_whitespace() {
             i += 1;
         }
@@ -186,16 +186,16 @@ fn tag_has_src_attr(attrs: &str) -> bool {
 fn rewrite_csp_meta_tag(html: &str, script_hashes: &[String]) -> Result<String, String> {
     let lower = html.to_ascii_lowercase();
     let mut pos = 0usize;
-    while let Some(rel) = lower[pos..].find("<meta") {
+    while let Some(rel) = lower.get(pos..).and_then(|s| s.find("<meta")) {
         let tag_start = pos + rel;
         let after_name = tag_start + "<meta".len();
         if !matches!(lower.as_bytes().get(after_name), Some(b' ' | b'\t' | b'\r' | b'\n')) {
             pos = after_name;
             continue;
         }
-        let close_rel = find_html_tag_close(&html[after_name..]).ok_or_else(|| String::from("unclosed `<meta>` tag"))?;
+        let close_rel = html.get(after_name..).and_then(find_html_tag_close).ok_or_else(|| String::from("unclosed `<meta>` tag"))?;
         let tag_end = after_name + close_rel;
-        let tag = &html[tag_start..=tag_end];
+        let tag = html.get(tag_start..=tag_end).ok_or_else(|| String::from("unclosed `<meta>` tag"))?;
         if !tag.to_ascii_lowercase().contains("content-security-policy") {
             pos = tag_end + 1;
             continue;
@@ -203,7 +203,7 @@ fn rewrite_csp_meta_tag(html: &str, script_hashes: &[String]) -> Result<String, 
         let Some((val_start, val_end)) = find_meta_content_span(tag) else {
             return Err(String::from("Content-Security-Policy `<meta>` lacks `content=\"...\"`"));
         };
-        let old_policy = &tag[val_start..val_end];
+        let old_policy = tag.get(val_start..val_end).ok_or_else(|| String::from("Content-Security-Policy `<meta>` lacks `content=\"...\"`"))?;
         let mut rebuilt = Vec::new();
         for dir in old_policy.split(';') {
             let trimmed = dir.trim();
@@ -220,10 +220,12 @@ fn rewrite_csp_meta_tag(html: &str, script_hashes: &[String]) -> Result<String, 
             }
         }
         let new_policy = rebuilt.join("; ");
+        let prefix = html.get(..tag_start + val_start).ok_or_else(|| String::from("invalid CSP meta tag boundary"))?;
+        let suffix = html.get(tag_start + val_end..).ok_or_else(|| String::from("invalid CSP meta tag boundary"))?;
         let mut out = String::with_capacity(html.len() + 256);
-        out.push_str(&html[..tag_start + val_start]);
+        out.push_str(prefix);
         out.push_str(&new_policy);
-        out.push_str(&html[tag_start + val_end..]);
+        out.push_str(suffix);
         return Ok(out);
     }
     Err(String::from("built index.html missing `<meta http-equiv=\"Content-Security-Policy\">`"))
@@ -241,7 +243,7 @@ fn find_meta_content_span(tag: &str) -> Option<(usize, usize)> {
         while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'=' && bytes[i] != b'/' && bytes[i] != b'>' {
             i += 1;
         }
-        let key = &lower[k_start..i];
+        let key = lower.get(k_start..i).unwrap_or("");
         while i < bytes.len() && bytes[i].is_ascii_whitespace() {
             i += 1;
         }
@@ -457,7 +459,7 @@ fn strip_hash_comments(text: &str) -> String {
                 }
             }
         }
-        out.push_str(&line[..cut]);
+        out.push_str(line.get(..cut).unwrap_or(line));
         out.push('\n');
     }
     out
@@ -466,11 +468,10 @@ fn strip_hash_comments(text: &str) -> String {
 fn strip_html_comments(html: &str) -> Result<String, String> {
     let mut out = String::with_capacity(html.len());
     let mut rest = html;
-    while let Some(start) = rest.find("<!--") {
-        out.push_str(&rest[..start]);
-        let after = &rest[start + 4..];
-        let end = after.find("-->").ok_or_else(|| String::from("unclosed HTML comment in index.html"))?;
-        rest = &after[end + 3..];
+    while let Some((before, after)) = rest.split_once("<!--") {
+        out.push_str(before);
+        let (_, tail) = after.split_once("-->").ok_or_else(|| String::from("unclosed HTML comment in index.html"))?;
+        rest = tail;
     }
     out.push_str(rest);
     Ok(out)

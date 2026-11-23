@@ -54,18 +54,16 @@ pub fn render_catalog(src: &str) -> Result<String, String> {
 
 fn strip_leading_inner_doc(src: &str) -> &str {
     let mut rest = src;
-    loop {
-        let Some(line_end) = rest.find('\n') else {
-            let trimmed = rest.trim();
-            return if trimmed.is_empty() || trimmed.starts_with("//!") { "" } else { rest };
-        };
-        let line = rest[..line_end].trim();
+    while let Some((head, tail)) = rest.split_once('\n') {
+        let line = head.trim();
         if line.is_empty() || line.starts_with("//!") {
-            rest = &rest[line_end + 1..];
+            rest = tail;
         } else {
             return rest;
         }
     }
+    let trimmed = rest.trim();
+    if trimmed.is_empty() || trimmed.starts_with("//!") { "" } else { rest }
 }
 
 fn rustfmt(root: &Path, code: &str) -> Result<String, String> {
