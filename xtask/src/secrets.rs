@@ -83,7 +83,7 @@ pub fn run(root: &Path) -> Result<(), String> {
     let files = crate::repo_files(root)?;
     let hits = scan_repo(root, &files);
     if hits.is_empty() {
-        println!("secrets: 0 secret/path findings across {} tracked files", files.len());
+        println!("secrets: 0 secret/path findings across {} workspace files (tracked + untracked)", files.len());
         return Ok(());
     }
     format_err(&hits)
@@ -121,9 +121,7 @@ fn run_history(root: &Path) -> Result<(), String> {
         if n == 0 {
             break;
         }
-        if buf.contains(&0) {
-            continue;
-        }
+        buf.retain(|&b| b != 0);
         let raw_line = String::from_utf8_lossy(&buf);
         let line = raw_line.trim_end_matches(['\r', '\n']);
         scan_git_diff_line(line, &mut state, &mut hits);
@@ -145,7 +143,7 @@ fn format_err(hits: &[SecretHit]) -> Result<(), String> {
     Err(format!("{} potential secret or local home-path exposure(s) found:\n  {}", hits.len(), lines.join("\n  ")))
 }
 
-/// Scan `files` relative to `root`, skipping binary blobs containing NUL bytes.
+/// Scan `files` relative to `root`, decoding UTF-8/UTF-16 and skipping true binary blobs.
 #[must_use]
 pub fn scan_repo(root: &Path, files: &[String]) -> Vec<SecretHit> {
     let mut hits = Vec::new();
@@ -153,24 +151,107 @@ pub fn scan_repo(root: &Path, files: &[String]) -> Vec<SecretHit> {
         let Ok(bytes) = std::fs::read(root.join(path)) else {
             continue;
         };
-        if bytes.contains(&0) {
+        if let Ok(Some(text)) = crate::text_decode::decode_utf8_or_utf16(&bytes) {
+            scan_text(path, &text, &mut hits);
             continue;
         }
-        let text = String::from_utf8_lossy(&bytes);
+        if is_likely_binary_file(path, &bytes) {
+            continue;
+        }
+        let cleaned: Vec<u8> = bytes.iter().copied().filter(|&b| b != 0).collect();
+        let text = String::from_utf8_lossy(&cleaned);
         scan_text(path, &text, &mut hits);
     }
     hits
+}
+
+fn is_likely_binary_file(path: &str, bytes: &[u8]) -> bool {
+    let ext = Path::new(path).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+    if matches!(
+        ext.as_str(),
+        "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "webp"
+            | "bmp"
+            | "ico"
+            | "icns"
+            | "cur"
+            | "pdf"
+            | "zip"
+            | "gz"
+            | "tgz"
+            | "zst"
+            | "xz"
+            | "tar"
+            | "ttf"
+            | "otf"
+            | "woff"
+            | "woff2"
+            | "eot"
+            | "wasm"
+            | "exe"
+            | "dll"
+            | "so"
+            | "dylib"
+            | "a"
+            | "lib"
+            | "rlib"
+            | "rmeta"
+            | "pdb"
+            | "sqlite"
+            | "db"
+            | "bin"
+            | "wav"
+            | "mp3"
+            | "mp4"
+            | "ogg"
+            | "flac"
+            | "curvebook"
+            | "cbtemplate"
+            | "pzfx"
+            | "pzf"
+    ) {
+        return true;
+    }
+    [
+        &b"\x89PNG\r\n\x1a\n"[..],
+        b"GIF8",
+        b"PK\x03\x04",
+        b"PK\x05\x06",
+        b"%PDF-",
+        b"\x00asm",
+        b"\x7FELF",
+        b"\x1F\x8B",
+        b"wOF2",
+        b"OTTO",
+        b"\x00\x01\x00\x00",
+        b"icns",
+    ]
+    .iter()
+    .any(|sig| bytes.starts_with(sig))
 }
 
 struct DiffScanState {
     commit: String,
     current_file: String,
     added_line_no: usize,
+    remaining_old: usize,
+    remaining_new: usize,
+    in_hunk: bool,
 }
 
 impl DiffScanState {
     fn new() -> Self {
-        Self { commit: String::from("HEAD"), current_file: String::from("<unknown>"), added_line_no: 0 }
+        Self {
+            commit: String::from("HEAD"),
+            current_file: String::from("<unknown>"),
+            added_line_no: 0,
+            remaining_old: 0,
+            remaining_new: 0,
+            in_hunk: false,
+        }
     }
 }
 
@@ -187,9 +268,50 @@ pub fn scan_git_diff(diff: &str) -> Vec<SecretHit> {
 }
 
 fn scan_git_diff_line(raw_line: &str, state: &mut DiffScanState, hits: &mut Vec<SecretHit>) {
+    if state.in_hunk {
+        if raw_line == "\\ No newline at end of file" {
+            return;
+        }
+        if let Some(added) = raw_line.strip_prefix('+')
+            && state.remaining_new > 0
+        {
+            let location = format!("{}:{}", state.commit, state.current_file);
+            let line_no = if state.added_line_no > 0 { state.added_line_no } else { 1 };
+            scan_line(&location, line_no, added, hits);
+            state.added_line_no = state.added_line_no.saturating_add(1);
+            state.remaining_new -= 1;
+            if state.remaining_old == 0 && state.remaining_new == 0 {
+                state.in_hunk = false;
+            }
+            return;
+        }
+        if raw_line.starts_with('-') && state.remaining_old > 0 {
+            state.remaining_old -= 1;
+            if state.remaining_old == 0 && state.remaining_new == 0 {
+                state.in_hunk = false;
+            }
+            return;
+        }
+        if raw_line.starts_with(' ') && state.remaining_old > 0 && state.remaining_new > 0 {
+            state.remaining_old -= 1;
+            state.remaining_new -= 1;
+            state.added_line_no = state.added_line_no.saturating_add(1);
+            if state.remaining_old == 0 && state.remaining_new == 0 {
+                state.in_hunk = false;
+            }
+            return;
+        }
+        state.in_hunk = false;
+    }
+
     if let Some(rest) = raw_line.strip_prefix("commit ") {
         let short = rest.split_whitespace().next().unwrap_or(rest);
         state.commit = short.chars().take(12).collect();
+        state.in_hunk = false;
+        return;
+    }
+    if raw_line.starts_with("diff --git ") {
+        state.in_hunk = false;
         return;
     }
     if raw_line.starts_with("+++ ") {
@@ -201,8 +323,11 @@ fn scan_git_diff_line(raw_line: &str, state: &mut DiffScanState, hits: &mut Vec<
     if raw_line.starts_with("--- ") {
         return;
     }
-    if let Some(plus_line) = parse_hunk_new_start(raw_line) {
+    if let Some((old_cnt, plus_line, new_cnt)) = parse_hunk_ranges(raw_line) {
         state.added_line_no = plus_line;
+        state.remaining_old = old_cnt;
+        state.remaining_new = new_cnt;
+        state.in_hunk = old_cnt > 0 || new_cnt > 0;
         return;
     }
     if let Some(added) = raw_line.strip_prefix('+') {
@@ -295,11 +420,21 @@ fn unescape_git_quoted_path(escaped: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn parse_hunk_new_start(line: &str) -> Option<usize> {
+fn parse_hunk_ranges(line: &str) -> Option<(usize, usize, usize)> {
     let rest = line.strip_prefix("@@ ")?;
-    let plus_part = rest.split_whitespace().find(|tok| tok.starts_with('+'))?;
-    let num = plus_part.trim_start_matches('+').split(',').next()?;
-    num.parse().ok()
+    let end = rest.find(" @@")?;
+    let mut parts = rest[..end].split_whitespace();
+    let old_part = parts.next()?.strip_prefix('-')?;
+    let new_part = parts.next()?.strip_prefix('+')?;
+    let old_cnt = match old_part.split_once(',') {
+        Some((_, c)) => c.parse().ok()?,
+        None => 1,
+    };
+    let (new_start, new_cnt) = match new_part.split_once(',') {
+        Some((s, c)) => (s.parse().ok()?, c.parse().ok()?),
+        None => (new_part.parse().ok()?, 1),
+    };
+    Some((old_cnt, new_start, new_cnt))
 }
 
 /// Scan a complete text buffer line-by-line for secrets and local home paths.
@@ -717,5 +852,31 @@ let token = raw.trim();
         let qhits = scan_git_diff(&quoted_diff);
         assert_eq!(qhits.len(), 1);
         assert_eq!(qhits[0].location, "1234567890ab:src/café/cfg.rs");
+    }
+
+    #[test]
+    fn scans_utf16_repo_files_and_does_not_confuse_added_plus_plus_lines_with_diff_headers() {
+        let fake_sk = concat!("sk-", "test", "abcdef12");
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let dir = std::env::temp_dir().join(format!("cb-xtask-sec22-secrets-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let utf16_payload: Vec<u8> = format!("key = \"{fake_sk}\"\n").encode_utf16().flat_map(u16::to_le_bytes).collect();
+        std::fs::write(dir.join("utf16.txt"), utf16_payload).unwrap();
+        let hits = super::scan_repo(&dir, &[String::from("utf16.txt")]);
+        assert_eq!(hits.len(), 1, "UTF-16LE repo file must be scanned: {hits:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let diff = format!(
+            "commit abcdef1234567890\n\
+             +++ b/src/real.rs\n\
+             @@ -1,0 +1,2 @@\n\
+             +++ fake header b/src/spoofed.rs\n\
+             +let key = \"{fake_sk}\";\n"
+        );
+        let dhits = scan_git_diff(&diff);
+        assert_eq!(dhits.len(), 1, "{dhits:?}");
+        assert_eq!(dhits[0].location, "abcdef123456:src/real.rs");
+        assert_eq!(dhits[0].line, 2);
     }
 }

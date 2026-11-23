@@ -243,11 +243,11 @@ fn parse_about_accepted(text: &str) -> Result<Vec<String>, String> {
 fn run_locked_offline_metadata(root: &Path) -> Result<Value, String> {
     let out = Command::new("cargo")
         .current_dir(root)
-        .args(["metadata", "--format-version", "1", "--locked", "--offline"])
+        .args(["metadata", "--format-version", "1", "--locked", "--offline", "--all-features"])
         .output()
-        .map_err(|e| format!("cargo metadata --locked --offline: {e}"))?;
+        .map_err(|e| format!("cargo metadata --locked --offline --all-features: {e}"))?;
     if !out.status.success() {
-        return Err(format!("cargo metadata --locked --offline failed: {}", String::from_utf8_lossy(&out.stderr)));
+        return Err(format!("cargo metadata --locked --offline --all-features failed: {}", String::from_utf8_lossy(&out.stderr)));
     }
     serde_json::from_slice(&out.stdout).map_err(|e| format!("cargo metadata json: {e}"))
 }
@@ -545,15 +545,16 @@ fn collect_manifests_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(),
     let entries = std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("dir entry {}: {e}", dir.display()))?;
+        let ft = entry.file_type().map_err(|e| format!("file_type {}: {e}", entry.path().display()))?;
         let path = entry.path();
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        if path.is_dir() {
+        if ft.is_dir() {
             if name_str == "target" || name_str == "dist" || name_str == "corpus" || name_str.starts_with('.') {
                 continue;
             }
             collect_manifests_recursive(&path, out)?;
-        } else if name_str == "Cargo.toml" {
+        } else if ft.is_file() && name_str == "Cargo.toml" {
             out.push(path);
         }
     }
@@ -600,6 +601,10 @@ fn is_dependency_section(section: &str) -> bool {
         || section.starts_with("dependencies.")
         || section.starts_with("dev-dependencies.")
         || section.starts_with("build-dependencies.")
+        || section.starts_with("workspace.dependencies.")
+        || section.contains(".dependencies.")
+        || section.contains(".dev-dependencies.")
+        || section.contains(".build-dependencies.")
 }
 
 fn is_wildcard_dep_spec(key: &str, rhs: &str) -> bool {
@@ -747,10 +752,10 @@ fn generate_licenses_html(root: &Path, out_path: &Path, policy: &DenyPolicy, res
         return Err(String::from("`cargo-about` is not installed in PATH (required for `--html` when CI=true)"));
     }
 
-    let attribution = std::fs::read_to_string(root.join("ATTRIBUTION.md")).unwrap_or_default();
-    let notice = std::fs::read_to_string(root.join("NOTICE")).unwrap_or_default();
+    let attribution = std::fs::read_to_string(root.join("ATTRIBUTION.md")).map_err(|e| format!("read ATTRIBUTION.md: {e}"))?;
+    let notice = std::fs::read_to_string(root.join("NOTICE")).map_err(|e| format!("read NOTICE: {e}"))?;
     let html = render_detailed_licenses_html(policy, resolved, &attribution, &notice);
-    std::fs::write(out_path, html).map_err(|e| format!("write {}: {e}", out_path.display()))
+    curvebook_platform::fs::write_atomic(out_path, html.as_bytes()).map_err(|e| format!("write {}: {e}", out_path.display()))
 }
 
 /// Render a standalone offline `THIRD-PARTY-LICENSES.html` from resolved non-dev crates, on-disk
@@ -1173,5 +1178,9 @@ source = \"registry+https://example.com/index\"
         assert!(html.contains("serde"));
         assert!(!html.contains("proptest"), "dev-only crate must be excluded");
         assert!(html.contains("Permission is hereby granted, free of charge"), "full license text missing");
+
+        let subtable_toml = "[target.'cfg(unix)'.dependencies.evil_dep]\nversion = \"*\"\n";
+        let wild_hits = super::find_wildcard_dependencies("crates/x/Cargo.toml", subtable_toml);
+        assert_eq!(wild_hits.len(), 1, "target subtable wildcard dependency must be flagged: {wild_hits:?}");
     }
 }

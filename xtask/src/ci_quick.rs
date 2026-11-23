@@ -20,10 +20,20 @@ use serde_json::Value;
 use crate::layers::Crate;
 use crate::{cargo_metadata_resolved, ci, has_cargo_nextest, layers, run_cargo};
 
-/// Root-level files whose edits can change how every workspace package builds or lints.
-const WORKSPACE_WIDE_FILES: &[&str] = &["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain", "clippy.toml", ".clippy.toml"];
-/// Directories whose contents can change how every workspace package builds.
-const WORKSPACE_WIDE_DIRS: &[&str] = &[".cargo/"];
+/// Root-level files whose edits can change how every workspace package builds, tests, or verifies.
+const WORKSPACE_WIDE_FILES: &[&str] = &[
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    "rust-toolchain",
+    "clippy.toml",
+    ".clippy.toml",
+    ".config/nextest.toml",
+    "deny.toml",
+    "docs/control-protocol.md",
+];
+/// Directories whose contents can change how every workspace package builds, tests, or packages.
+const WORKSPACE_WIDE_DIRS: &[&str] = &[".cargo/", ".github/", "assets/app-icon/", "packaging/windows/"];
 /// The package whose test library hosts the untranslated-locale report run by `policy`.
 const I18N_PACKAGE: &str = "curvebook-ui-egui";
 
@@ -246,8 +256,22 @@ mod tests {
 
     #[test]
     fn documentation_only_changes_select_no_package() {
-        let changed = files(&["docs/ROADMAP.md", "AGENTS.md", ".github/workflows/ci.yml"]);
+        let changed = files(&["docs/ROADMAP.md", "AGENTS.md"]);
         assert_eq!(select(&changed, &dirs(), &graph()), set(&[]));
+    }
+
+    #[test]
+    fn policy_and_shared_harness_inputs_select_workspace() {
+        for path in [
+            ".config/nextest.toml",
+            "deny.toml",
+            "assets/app-icon/icon.png",
+            "docs/control-protocol.md",
+            ".github/workflows/ci.yml",
+            "packaging/windows/installer.wxs",
+        ] {
+            assert_eq!(select(&files(&[path]), &dirs(), &graph()), Selection::Workspace, "{path}");
+        }
     }
 
     #[test]
