@@ -11,13 +11,18 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 
+use curvebook_platform::{read_regular_file_bytes, write_atomic};
 use curvebook_testkit::nist_strd::{
     MAX_STRD_BYTES, PINNED_NIST_STRD_CORPUS, PinnedStrdSpec, parse_anova_dat, parse_linear_regression_dat, parse_nonlinear_dat, parse_univariate_dat,
 };
 use curvebook_testkit::{CorpusManifestEntry, load_verified_corpus_file, verify_blob};
+
+const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
+const CORPUS_CARGO_WALL_TIMEOUT: Duration = Duration::from_secs(600);
+const CORPUS_CARGO_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
 
 const NIST_STRD_BASE_URL: &str = "https://www.itl.nist.gov/div898/strd";
 const MANIFEST_FILENAME: &str = "sha256sums.txt";
@@ -214,16 +219,73 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
 
 fn run_cargo_corpus(root: &Path, args: &[&str], require_corpus: bool) -> Result<(), String> {
     println!("+ cargo {}", args.join(" "));
-    let mut cmd = Command::new("cargo");
-    cmd.current_dir(root).args(args);
+    let mut cmd = crate::dev_tool_command("cargo")
+        .current_dir(root)
+        .args(args.iter().copied())
+        .wall_timeout(CORPUS_CARGO_WALL_TIMEOUT)
+        .idle_timeout(CORPUS_CARGO_IDLE_TIMEOUT);
     if require_corpus {
-        cmd.env("CURVEBOOK_REQUIRE_CORPUS", "1");
+        cmd = cmd.env("CURVEBOOK_REQUIRE_CORPUS", "1");
     }
-    let status = cmd.status().map_err(|e| format!("cargo {}: {e}", args.join(" ")))?;
-    if !status.success() {
-        return Err(format!("`cargo {}` failed with {status}", args.join(" ")));
+    let out = cmd.run().map_err(|e| format!("cargo {}: {e}", args.join(" ")))?;
+    if !out.stdout.is_empty() {
+        print!("{}", String::from_utf8_lossy(&out.stdout));
+    }
+    if !out.stderr.is_empty() {
+        eprint!("{}", String::from_utf8_lossy(&out.stderr));
+    }
+    if !out.success {
+        return Err(format!("`cargo {}` failed with exit code {:?}", args.join(" "), out.status_code));
     }
     Ok(())
+}
+
+fn validate_manifest_rel_path(nist_root: &Path, rel: &str, context: &str) -> Result<PathBuf, String> {
+    if rel.is_empty()
+        || rel.contains(['\\', '\0', ':'])
+        || rel.starts_with('/')
+        || rel.ends_with('/')
+        || rel.split('/').any(|seg| seg.is_empty() || seg == "." || seg == "..")
+    {
+        return Err(format!("{context}: invalid relative corpus path `{rel}`"));
+    }
+    let mut full = nist_root.to_path_buf();
+    let mut count = 0_usize;
+    for component in Path::new(rel).components() {
+        match component {
+            Component::Normal(part) => {
+                count += 1;
+                full.push(part);
+                match fs::symlink_metadata(&full) {
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        return Err(format!("{context}: corpus path `{rel}` must not be or traverse a symlink"));
+                    }
+                    Ok(_) => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(err) => return Err(format!("{context}: inspect `{rel}`: {err}")),
+                }
+            }
+            Component::CurDir | Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(format!("{context}: corpus path `{rel}` must contain only normal path components"));
+            }
+        }
+    }
+    if count == 0 {
+        return Err(format!("{context}: empty corpus path"));
+    }
+    Ok(full)
+}
+
+fn read_non_symlink_regular_bytes(path: &Path, max_bytes: usize, label: &str) -> Result<Vec<u8>, String> {
+    let meta = fs::symlink_metadata(path).map_err(|e| format!("inspect {label} ({}): {e}", path.display()))?;
+    if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+        return Err(format!("{label}: `{}` must be a regular non-symlink file", path.display()));
+    }
+    let max_u64 = u64::try_from(max_bytes).unwrap_or(u64::MAX);
+    if meta.len() > max_u64 {
+        return Err(format!("{label}: size {} exceeds {max_bytes} bytes", meta.len()));
+    }
+    read_regular_file_bytes(path, max_bytes).map_err(|e| format!("read {label} ({}): {e}", path.display()))
 }
 
 fn validate_dat_by_suite(suite: StrdSuite, text: &str, label: &str) -> Result<(), String> {
@@ -267,38 +329,57 @@ fn validate_dat_text(rel_path: &str, text: &str) -> Result<(), String> {
 }
 
 fn verify_manifest_file(nist_root: &Path, manifest_path: &Path, enforce_pinned: bool, verified_paths: &mut BTreeSet<String>) -> Result<(), String> {
-    let manifest_text = fs::read_to_string(manifest_path).map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
+    let manifest_bytes = read_non_symlink_regular_bytes(manifest_path, MAX_MANIFEST_BYTES, "corpus manifest")?;
+    let manifest_text = String::from_utf8(manifest_bytes).map_err(|_| format!("read {}: invalid UTF-8", manifest_path.display()))?;
     for (idx, raw_line) in manifest_text.lines().enumerate() {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
         let line_no = idx + 1;
+        let loc = format!("{}:{line_no}", manifest_path.display());
         let parts: Vec<&str> = line.split_whitespace().collect();
         let (rel_path, text) = match parts.as_slice() {
             [sha_hex, size_tok, rel] => {
-                if enforce_pinned && rel.ends_with(".dat") && pinned_spec_for_rel(rel).is_none() {
-                    return Err(format!("{rel}: unexpected `.dat` file is not in `PINNED_NIST_STRD_CORPUS`"));
+                let _full = validate_manifest_rel_path(nist_root, rel, &loc)?;
+                if enforce_pinned {
+                    if !rel.ends_with(".dat") {
+                        return Err(format!("{rel}: unexpected non-`.dat` manifest entry is not in `PINNED_NIST_STRD_CORPUS`"));
+                    }
+                    if pinned_spec_for_rel(rel).is_none() {
+                        return Err(format!("{rel}: unexpected `.dat` file is not in `PINNED_NIST_STRD_CORPUS`"));
+                    }
                 }
-                let expected_bytes =
-                    size_tok.parse::<usize>().map_err(|_| format!("{}:{line_no}: invalid byte count `{size_tok}`", manifest_path.display()))?;
+                let expected_bytes = size_tok.parse::<usize>().map_err(|_| format!("{loc}: invalid byte count `{size_tok}`"))?;
+                if expected_bytes > MAX_STRD_BYTES {
+                    return Err(format!("{loc} ({rel}): declared size {expected_bytes} exceeds {MAX_STRD_BYTES} bytes"));
+                }
                 let entry = CorpusManifestEntry { relative_path: rel, expected_bytes, sha256_hex: sha_hex };
-                let loaded =
-                    load_verified_corpus_file(nist_root, entry).map_err(|e| format!("{}:{line_no} ({rel}): {e}", manifest_path.display()))?;
+                let loaded = load_verified_corpus_file(nist_root, entry).map_err(|e| format!("{loc} ({rel}): {e}"))?;
                 ((*rel).to_owned(), loaded)
             }
             [sha_hex, rel] => {
                 let clean_rel = rel.strip_prefix('*').unwrap_or(rel);
-                if enforce_pinned && clean_rel.ends_with(".dat") && pinned_spec_for_rel(clean_rel).is_none() {
+                let full_path = validate_manifest_rel_path(nist_root, clean_rel, &loc)?;
+                if enforce_pinned && !clean_rel.ends_with(".dat") {
+                    return Err(format!("{clean_rel}: unexpected non-`.dat` manifest entry is not in `PINNED_NIST_STRD_CORPUS`"));
+                }
+                let pinned = pinned_spec_for_rel(clean_rel);
+                if enforce_pinned && pinned.is_none() {
                     return Err(format!("{clean_rel}: unexpected `.dat` file is not in `PINNED_NIST_STRD_CORPUS`"));
                 }
-                let bytes = fs::read(nist_root.join(clean_rel)).map_err(|e| format!("read {clean_rel}: {e}"))?;
-                verify_blob(&bytes, bytes.len(), sha_hex).map_err(|e| format!("{}:{line_no} ({clean_rel}): {e}", manifest_path.display()))?;
+                let bytes = read_non_symlink_regular_bytes(&full_path, MAX_STRD_BYTES, clean_rel)?;
+                if let Some(spec) = pinned {
+                    verify_blob(&bytes, spec.manifest.expected_bytes, sha_hex).map_err(|e| format!("{loc} ({clean_rel}): {e}"))?;
+                } else {
+                    let meta_len = bytes.len();
+                    verify_blob(&bytes, meta_len, sha_hex).map_err(|e| format!("{loc} ({clean_rel}): {e}"))?;
+                }
                 let loaded = String::from_utf8(bytes).map_err(|_| format!("{clean_rel}: invalid UTF-8"))?;
                 (clean_rel.to_owned(), loaded)
             }
             _ => {
-                return Err(format!("{}:{line_no}: malformed manifest line `{line}`", manifest_path.display()));
+                return Err(format!("{loc}: malformed manifest line `{line}`"));
             }
         };
         if rel_path.ends_with(".dat") {
@@ -331,7 +412,9 @@ fn should_verify_pinned_catalog(nist_root: &Path, manifest_path: &Path, verified
     if nist_root.file_name().and_then(|s| s.to_str()) == Some("nist-strd") || verified_paths.len() >= PINNED_NIST_STRD_CORPUS.len() {
         return true;
     }
-    if let Ok(text) = fs::read_to_string(manifest_path) {
+    if let Ok(bytes) = read_non_symlink_regular_bytes(manifest_path, MAX_MANIFEST_BYTES, "corpus manifest")
+        && let Ok(text) = String::from_utf8(bytes)
+    {
         return text.contains("NIST StRD SHA-256") || PINNED_NIST_STRD_CORPUS.iter().any(|spec| text.contains(spec.manifest.sha256_hex));
     }
     false
@@ -377,10 +460,7 @@ pub fn verify_corpus_dir(nist_root: &Path) -> Result<usize, String> {
         let Some(spec) = pinned_spec_for_rel(&rel) else {
             return Err(format!("{rel}: unmanifested `.dat` file is not in `PINNED_NIST_STRD_CORPUS`"));
         };
-        let bytes = fs::read(&full_path).map_err(|e| format!("read {}: {e}", full_path.display()))?;
-        if bytes.len() > MAX_STRD_BYTES {
-            return Err(format!("{rel}: size {} exceeds {MAX_STRD_BYTES} bytes", bytes.len()));
-        }
+        let bytes = read_non_symlink_regular_bytes(&full_path, MAX_STRD_BYTES, &rel)?;
         verify_blob(&bytes, spec.manifest.expected_bytes, spec.manifest.sha256_hex).map_err(|e| format!("{rel}: {e}"))?;
         let text = String::from_utf8(bytes).map_err(|_| format!("{rel}: corpus .dat file is not valid UTF-8"))?;
         validate_dat_text(&rel, &text)?;
@@ -413,11 +493,11 @@ fn verify_candidate_dat(item: StrdDatasetSpec, bytes: &[u8]) -> Result<(), Strin
 }
 
 fn commit_verified_download(tmp_dest: &Path, dest: &Path, item: StrdDatasetSpec) -> Result<(), String> {
-    let bytes = match fs::read(tmp_dest) {
+    let bytes = match read_non_symlink_regular_bytes(tmp_dest, MAX_STRD_BYTES, &item.relative_path()) {
         Ok(b) => b,
-        Err(e) => {
+        Err(err) => {
             let _ = fs::remove_file(tmp_dest);
-            return Err(format!("read {}: {e}", tmp_dest.display()));
+            return Err(err);
         }
     };
     if let Err(err) = verify_candidate_dat(item, &bytes) {
@@ -430,34 +510,39 @@ fn commit_verified_download(tmp_dest: &Path, dest: &Path, item: StrdDatasetSpec)
 fn fetch_single_dataset(item: StrdDatasetSpec, dest: &Path, max_filesize: &str) -> Result<(), String> {
     let rel = item.relative_path();
     let tmp_dest = dest.with_extension("dat.part");
+    let tmp_str = tmp_dest.to_str().ok_or_else(|| format!("non-UTF-8 path {}", tmp_dest.display()))?;
     let mut last_err = format!("{rel}: no candidate download URLs configured");
 
     for url in item.candidate_urls() {
         println!("+ curl -fsSL {url}");
-        let status = Command::new("curl")
-            .arg("-fsSL")
-            .arg("--proto")
-            .arg("=https")
-            .arg("--proto-redir")
-            .arg("=https")
-            .arg("--max-time")
-            .arg("30")
-            .arg("--connect-timeout")
-            .arg("15")
-            // Retries only transient failures (timeouts and HTTP 408/429/500/502/503/504); a
-            // 404 still falls through to the next candidate URL immediately.
-            .arg("--retry")
-            .arg(CURL_RETRIES)
-            .arg("--max-filesize")
-            .arg(max_filesize)
-            .arg("-o")
-            .arg(&tmp_dest)
-            .arg(&url)
-            .status()
+        let out = crate::dev_tool_command("curl")
+            .args([
+                "-fsSL",
+                "--proto",
+                "=https",
+                "--proto-redir",
+                "=https",
+                "--max-time",
+                "30",
+                "--connect-timeout",
+                "15",
+                // Retries only transient failures (timeouts and HTTP 408/429/500/502/503/504); a
+                // 404 still falls through to the next candidate URL immediately.
+                "--retry",
+                CURL_RETRIES,
+                "--max-filesize",
+                max_filesize,
+                "-o",
+                tmp_str,
+                &url,
+            ])
+            .wall_timeout(Duration::from_secs(120))
+            .idle_timeout(Duration::from_secs(30))
+            .run()
             .map_err(|e| format!("failed to execute `curl` for {url}: {e}"))?;
-        if !status.success() {
+        if !out.success {
             let _ = fs::remove_file(&tmp_dest);
-            last_err = format!("`curl -fsSL {url}` failed with {status}");
+            last_err = format!("`curl -fsSL {url}` failed with exit code {:?}", out.status_code);
             continue;
         }
         match commit_verified_download(&tmp_dest, dest, item) {
@@ -498,7 +583,7 @@ struct FetchSummary {
 /// suite structure), so it can be kept instead of downloaded again. Any read or verification
 /// failure means "download it".
 fn is_verified_on_disk(item: StrdDatasetSpec, dest: &Path) -> bool {
-    fs::read(dest).is_ok_and(|bytes| verify_candidate_dat(item, &bytes).is_ok())
+    read_non_symlink_regular_bytes(dest, MAX_STRD_BYTES, &item.relative_path()).is_ok_and(|bytes| verify_candidate_dat(item, &bytes).is_ok())
 }
 
 fn fetch_nist_strd(nist_root: &Path) -> Result<FetchSummary, String> {
@@ -520,9 +605,7 @@ fn fetch_nist_strd(nist_root: &Path) -> Result<FetchSummary, String> {
     }
 
     let manifest_path = nist_root.join(MANIFEST_FILENAME);
-    let manifest_tmp = nist_root.join(format!("{MANIFEST_FILENAME}.part"));
-    fs::write(&manifest_tmp, build_pinned_manifest_body()).map_err(|e| format!("write {}: {e}", manifest_tmp.display()))?;
-    fs::rename(&manifest_tmp, &manifest_path).map_err(|e| format!("rename {} -> {}: {e}", manifest_tmp.display(), manifest_path.display()))?;
+    write_atomic(&manifest_path, build_pinned_manifest_body().as_bytes()).map_err(|e| format!("write {}: {e}", manifest_path.display()))?;
 
     Ok(summary)
 }
@@ -742,5 +825,36 @@ Data:  y   x
         assert!(err2.contains("anova/SiRstv.dat"), "unexpected error: {err2}");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fa_sec23_02_manifest_rejects_traversal_unknown_non_dat_and_two_column_size_bypass() {
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let base = std::env::temp_dir().join(format!("cb-xtask-sec23-02-{}-{stamp}", std::process::id()));
+        let nist_dir = base.join("nist-strd");
+        fs::create_dir_all(nist_dir.join("univ")).unwrap();
+
+        // 1. Traversal relative path rejected cleanly before read.
+        let bad_rel = format!("{}  3  ../escape.dat\n", curvebook_testkit::sha256_hex(b"abc"));
+        fs::write(nist_dir.join(MANIFEST_FILENAME), bad_rel).unwrap();
+        assert!(verify_corpus_dir(&nist_dir).unwrap_err().contains("invalid relative corpus path"));
+
+        // 2. Non-.dat two-column entry rejected in pinned `nist-strd` manifest.
+        let extra = nist_dir.join("README.txt");
+        fs::write(&extra, b"arbitrary").unwrap();
+        let non_dat_manifest = format!("{}  README.txt\n", curvebook_testkit::sha256_hex(b"arbitrary"));
+        fs::write(nist_dir.join(MANIFEST_FILENAME), non_dat_manifest).unwrap();
+        assert!(verify_corpus_dir(&nist_dir).unwrap_err().contains("non-`.dat`"));
+
+        // 3. Two-column pinned `.dat` entry checks against pinned `expected_bytes` rather than `bytes.len()`.
+        let pinned_numacc1 = PINNED_NIST_STRD_CORPUS.iter().find(|s| s.manifest.relative_path == "univ/NumAcc1.dat").unwrap();
+        let spoofed = b"Dataset Name:  NumAcc1\nData:  y\n 1\n 2\n";
+        fs::write(nist_dir.join(pinned_numacc1.manifest.relative_path), spoofed).unwrap();
+        let two_col = format!("{}  univ/NumAcc1.dat\n", curvebook_testkit::sha256_hex(spoofed));
+        fs::write(nist_dir.join(MANIFEST_FILENAME), two_col).unwrap();
+        let err = verify_corpus_dir(&nist_dir).unwrap_err();
+        assert!(err.contains("size mismatch"), "expected pinned size mismatch, got {err}");
+
+        let _ = fs::remove_dir_all(&base);
     }
 }

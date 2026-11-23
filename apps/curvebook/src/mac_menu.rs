@@ -6,11 +6,56 @@ use curvebook_ui_egui::UiApp;
 use curvebook_ui_egui::egui_shell::top_chrome::submenu_variants_for_command;
 use curvebook_ui_egui::egui_shell::top_chrome::{collect_in_window_menu_sections, effective_menu_item_enabled, is_menu_item_visible};
 #[cfg(target_os = "macos")]
-use curvebook_ui_egui::i18n::{BETA_ACTIVE_LOCALES, normalize_locale};
+use curvebook_ui_egui::i18n::BETA_ACTIVE_LOCALES;
+use curvebook_ui_egui::i18n::{normalize_locale, tr};
 
 use crate::desktop_host::DesktopMenuChromeState;
 #[cfg(target_os = "macos")]
 use crate::desktop_host::{DesktopMenuItem, DesktopMenuNode};
+
+/// Return the localized macOS application submenu `(about, preferences, quit)` labels for `locale`.
+#[must_use]
+pub fn localized_app_submenu_labels(locale: &str) -> (&'static str, &'static str, &'static str) {
+    let norm = normalize_locale(locale);
+    let about = tr(norm, "menu.help.about");
+    let prefs = match norm {
+        "de" => "Einstellungen…",
+        "es" => "Preferencias…",
+        "fr" => "Préférences…",
+        "it" => "Preferenze…",
+        "ja" => "環境設定…",
+        "ko" => "환경설정…",
+        "nl" => "Voorkeuren…",
+        "pl" => "Preferencje…",
+        "pt-BR" => "Preferências…",
+        "ru" => "Настройки…",
+        "tr" => "Tercihler…",
+        "zh-CN" => "首选项…",
+        "zh-TW" => "偏好設定…",
+        "ar" => "التفضيلات…",
+        "he" => "העדפות…",
+        _ => "Settings…",
+    };
+    let quit = match norm {
+        "de" => "CurveBook beenden",
+        "es" => "Salir de CurveBook",
+        "fr" => "Quitter CurveBook",
+        "it" => "Esci da CurveBook",
+        "ja" => "CurveBook を終了",
+        "ko" => "CurveBook 종료",
+        "nl" => "Stop CurveBook",
+        "pl" => "Zakończ CurveBook",
+        "pt-BR" => "Encerrar CurveBook",
+        "ru" => "Завершить CurveBook",
+        "tr" => "CurveBook'tan Çık",
+        "zh-CN" => "退出 CurveBook",
+        "zh-TW" => "結束 CurveBook",
+        "ar" => "إنهاء CurveBook",
+        "he" => "צא מ-CurveBook",
+        _ => "Quit CurveBook",
+    };
+    (about, prefs, quit)
+}
 
 /// Canonical 8-menu top-level bar titles specified in `docs/planning/gui-layout-spec.md` §3.1.
 pub const NATIVE_MENU_BAR_TITLES: [&str; 8] = ["File", "Edit", "View", "Insert", "Data", "Analyze", "Graph", "Help"];
@@ -152,10 +197,10 @@ pub fn parse_muda_accelerator(shortcut: &str) -> Option<muda::accelerator::Accel
     let (mod_tokens, key_token) = if primary.ends_with('+') && !primary.ends_with("++") {
         return None;
     } else if primary.contains('+') {
-        let idx = parts.len().saturating_sub(1);
-        (&parts[..idx], parts[idx])
+        let (&last_tok, head_toks) = parts.split_last()?;
+        (head_toks, last_tok)
     } else {
-        (&[][..], parts[0])
+        (&[][..], *parts.first()?)
     };
 
     for &tok in mod_tokens {
@@ -253,7 +298,7 @@ fn parse_muda_key_code(raw: &str) -> Option<muda::accelerator::Code> {
 }
 
 #[cfg(target_os = "macos")]
-type MenuStructureSignature = Vec<(String, String, Vec<(String, String, String)>)>;
+type MenuStructureSignature = ((String, String, String, String), Vec<(String, String, Vec<(String, String, String)>)>);
 
 /// Native macOS menu host powered by `muda` (`default-features = false`, strictly `cfg(target_os = "macos")`).
 ///
@@ -265,6 +310,7 @@ type MenuStructureSignature = Vec<(String, String, Vec<(String, String, String)>
 pub struct MacNativeMenuHost {
     section_specs: Vec<MudaMenuSectionSpec>,
     parity_entries: Vec<MenuSectionParityEntry>,
+    active_locale: String,
     structure_signature: MenuStructureSignature,
     enablement_signature: Vec<bool>,
     live_nsapp_mode: bool,
@@ -289,11 +335,12 @@ impl std::fmt::Debug for MacNativeMenuHost {
 impl MacNativeMenuHost {
     /// Construct an empty macOS native menu host (no AppKit side-effects until windowed startup).
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             section_specs: Vec::new(),
             parity_entries: Vec::new(),
-            structure_signature: Vec::new(),
+            active_locale: String::from("en"),
+            structure_signature: ((String::new(), String::new(), String::new(), String::new()), Vec::new()),
             enablement_signature: Vec::new(),
             live_nsapp_mode: false,
             installed_nsmenu: false,
@@ -303,23 +350,37 @@ impl MacNativeMenuHost {
         }
     }
 
+    /// Active normalized locale mirrored by the macOS application submenu.
+    #[must_use]
+    pub fn active_locale(&self) -> &str {
+        &self.active_locale
+    }
+
+    /// Localized macOS application submenu `(about, preferences, quit)` labels for the active locale.
+    #[must_use]
+    pub fn app_submenu_labels(&self) -> (&'static str, &'static str, &'static str) {
+        localized_app_submenu_labels(&self.active_locale)
+    }
+
     /// Update menu descriptors and parity entries from `chrome` cleanly on any thread, and update
     /// the live `muda::Menu` / `NSMenu` only when [`Self::attach_to_nsapp_for_windowed_host`] is active.
     ///
     /// # Errors
     /// Returns an error if live `muda` menu construction fails on macOS AppKit.
     pub fn sync_from_chrome(&mut self, chrome: &DesktopMenuChromeState) -> Result<(), String> {
+        let locale = normalize_locale(&chrome.locale);
         let next_parity = collect_menu_parity_entries(chrome);
         let next_specs = build_muda_section_specs(chrome);
-        let next_struct_sig = compute_structure_signature(&next_specs);
+        let next_struct_sig = compute_structure_signature(locale, &next_specs);
         let next_enable_sig = compute_enablement_signature(&next_specs);
 
         self.parity_entries = next_parity;
         self.section_specs = next_specs;
+        self.active_locale = locale.to_owned();
 
         if self.live_nsapp_mode {
             if next_struct_sig != self.structure_signature || self.live_menu.is_none() {
-                self.rebuild_live_muda_menu()?;
+                self.rebuild_live_muda_menu(locale)?;
                 if let Some(menu) = &self.live_menu {
                     menu.init_for_nsapp();
                     self.installed_nsmenu = true;
@@ -393,21 +454,22 @@ impl MacNativeMenuHost {
         }
     }
 
-    fn rebuild_live_muda_menu(&mut self) -> Result<(), String> {
+    fn rebuild_live_muda_menu(&mut self, locale: &str) -> Result<(), String> {
+        let (about_label, prefs_label, quit_label) = localized_app_submenu_labels(locale);
         let menu = muda::Menu::new();
         let app_sub = muda::Submenu::with_items(
             "CurveBook",
             true,
             &[
-                &muda::MenuItem::with_id(muda::MenuId::new("app.about"), "About CurveBook", true, None),
+                &muda::MenuItem::with_id(muda::MenuId::new("app.about"), about_label, true, None),
                 &muda::PredefinedMenuItem::separator(),
-                &muda::MenuItem::with_id(muda::MenuId::new("app.preferences"), "Settings…", true, parse_muda_accelerator("Cmd+,")),
+                &muda::MenuItem::with_id(muda::MenuId::new("app.preferences"), prefs_label, true, parse_muda_accelerator("Cmd+,")),
                 &muda::PredefinedMenuItem::separator(),
                 &muda::PredefinedMenuItem::hide(None),
                 &muda::PredefinedMenuItem::hide_others(None),
                 &muda::PredefinedMenuItem::show_all(None),
                 &muda::PredefinedMenuItem::separator(),
-                &muda::MenuItem::with_id(muda::MenuId::new("app.quit"), "Quit CurveBook", true, parse_muda_accelerator("Cmd+Q")),
+                &muda::MenuItem::with_id(muda::MenuId::new("app.quit"), quit_label, true, parse_muda_accelerator("Cmd+Q")),
             ],
         )
         .map_err(|err| format!("build macOS app submenu: {err}"))?;
@@ -562,15 +624,17 @@ fn push_node_structure_signature(nodes: &[MudaMenuNodeSpec], out: &mut Vec<(Stri
 }
 
 #[cfg(target_os = "macos")]
-fn compute_structure_signature(specs: &[MudaMenuSectionSpec]) -> MenuStructureSignature {
-    specs
+fn compute_structure_signature(locale: &str, specs: &[MudaMenuSectionSpec]) -> MenuStructureSignature {
+    let (about_label, prefs_label, quit_label) = localized_app_submenu_labels(locale);
+    let sections = specs
         .iter()
         .map(|sec| {
             let mut items = Vec::new();
             push_node_structure_signature(&sec.nodes, &mut items);
             (sec.menu_key.clone(), sec.title.clone(), items)
         })
-        .collect()
+        .collect();
+    ((normalize_locale(locale).to_owned(), about_label.to_owned(), prefs_label.to_owned(), quit_label.to_owned()), sections)
 }
 
 #[cfg(target_os = "macos")]
@@ -591,6 +655,7 @@ mod tests {
             menu_bar_visible: true,
             menu_bar_height_pt: 28.0,
             active_menu_key: None,
+            locale: String::from("en"),
             sections: vec![DesktopMenuSection {
                 menu_key: String::from("menu.file"),
                 title: String::from("File"),

@@ -35,12 +35,15 @@ fn bounded_reader(bytes: &[u8], kind: ImageMimeKind) -> ImageReader<Cursor<&[u8]
 }
 
 fn has_svg_or_xml_signature(bytes: &[u8]) -> bool {
-    let stripped = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
-    let mut idx = 0_usize;
-    while idx < stripped.len() && stripped[idx].is_ascii_whitespace() {
-        idx += 1;
+    let mut tail = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+    while let Some((&b, rest)) = tail.split_first() {
+        if b.is_ascii_whitespace() {
+            tail = rest;
+        } else {
+            break;
+        }
     }
-    let head = &stripped[idx..stripped.len().min(idx + 16)];
+    let head = tail.get(..16).unwrap_or(tail);
     let lower: Vec<u8> = head.iter().map(u8::to_ascii_lowercase).collect();
     lower.starts_with(b"<svg") || lower.starts_with(b"<?xml") || lower.starts_with(b"<!doctype svg")
 }

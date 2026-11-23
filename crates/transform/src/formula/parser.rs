@@ -387,7 +387,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn next_char(&self) -> Option<char> {
-        self.src[self.pos..].chars().next()
+        self.src.get(self.pos..).and_then(|s| s.chars().next())
     }
 
     fn skip_whitespace(&mut self) {
@@ -429,7 +429,7 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
-        let slice = &self.src[start..self.pos];
+        let slice = self.src.get(start..self.pos).ok_or_else(|| self.err(start, "invalid numeric literal span"))?;
         let val = slice.parse::<f64>().map_err(|_| self.err(start, format!("invalid numeric literal `{slice}`")))?;
         if !val.is_finite() {
             return Err(self.err(start, format!("numeric literal `{slice}` overflows IEEE-754 f64")));
@@ -473,7 +473,8 @@ impl<'a> Lexer<'a> {
         let inner_start = self.pos;
         while let Some(ch) = self.next_char() {
             if ch == ']' {
-                let name = self.src[inner_start..self.pos].trim().to_owned();
+                let name =
+                    self.src.get(inner_start..self.pos).ok_or_else(|| self.err(start, "invalid bracketed column reference span"))?.trim().to_owned();
                 self.pos += 1;
                 if name.is_empty() {
                     return Err(self.err(start, "empty bracketed column reference `[]`"));
@@ -497,7 +498,7 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
-        let ident = &self.src[start..self.pos];
+        let ident = self.src.get(start..self.pos).unwrap_or("");
         if ident.is_empty() {
             let ch = self.next_char().unwrap_or('?');
             return Err(self.err(start, format!("unexpected character `{ch}`")));

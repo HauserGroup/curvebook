@@ -5,8 +5,9 @@ use curvebook_doc::{CategoricalTickSource, FramePreset, GraphAxisScale, LogitDom
 use egui::{CornerRadius, Stroke, Ui};
 
 use crate::dialogs_canvas::AxisTarget;
+use crate::i18n::tr;
 
-use super::super::helpers::{ButtonEntry, GraphModalCtx, gtr, record_button, record_checkbox, record_label};
+use super::super::helpers::{ButtonEntry, GraphModalCtx, record_button, record_checkbox, record_label};
 use super::super::state::GraphModalEguiState;
 use super::segments_ticks::{render_axis_segments_section, render_axis_ticks_section};
 
@@ -19,7 +20,7 @@ pub(super) fn render_axes_single_axis_tab(ui: &mut Ui, state: &mut GraphModalEgu
             gctx.meta,
             ButtonEntry {
                 widget_id: "axes.enable_y2",
-                label: "Enable Right Y2 Axis",
+                label: tr(gctx.locale, "axes.enable_y2"),
                 command_id: None,
                 selected: false,
                 enabled: true,
@@ -50,7 +51,7 @@ pub(super) fn render_axes_single_axis_tab(ui: &mut Ui, state: &mut GraphModalEgu
     }
 
     // Scale selector with Categorical Guard intercept.
-    ui.label(egui::RichText::new(gtr(gctx.locale, "axes.scale.heading")).strong());
+    ui.label(egui::RichText::new(tr(gctx.locale, "axes.scale.heading")).strong());
     let cur_scale = fa.axis_draft.segments.first().map_or(GraphAxisScale::Linear, |s| s.scale);
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(gctx.body_w);
@@ -111,7 +112,7 @@ fn render_categorical_tick_controls(
         TickLabelFormat::Categorical(src) => src,
         _ => CategoricalTickSource::RowTitles,
     };
-    ui.label(egui::RichText::new(gtr(gctx.locale, "axes.categorical.heading")).strong());
+    ui.label(egui::RichText::new(tr(gctx.locale, "axes.categorical.heading")).strong());
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(gctx.body_w);
         for (slug, lbl, src) in [
@@ -144,7 +145,7 @@ fn render_categorical_tick_controls(
             gctx.meta,
             ButtonEntry {
                 widget_id: "axes.switch_to_continuous",
-                label: gtr(gctx.locale, "axes.categorical.switch_btn"),
+                label: tr(gctx.locale, "axes.categorical.switch_btn"),
                 command_id: None,
                 selected: false,
                 enabled: true,
@@ -168,7 +169,7 @@ fn render_categorical_guard_banner(
     gctx: &mut GraphModalCtx<'_>,
     fa: &crate::dialogs_canvas::FormatAxesState,
 ) {
-    let warn_text = gtr(gctx.locale, "axes.guard.warning");
+    let warn_text = tr(gctx.locale, "axes.guard.warning");
     egui::Frame::group(ui.style())
         .fill(gctx.tokens.header_bg)
         .stroke(Stroke::new(1.5, gctx.tokens.accent_strong))
@@ -178,13 +179,13 @@ fn render_categorical_guard_banner(
             let warn_resp = ui.add(egui::Label::new(egui::RichText::new(warn_text).color(gctx.tokens.link_red).strong()).wrap());
             record_label(ui, &warn_resp, gctx.meta, "axes.categorical_guard.warning", warn_text);
 
-            let confirm_chk_lbl = gtr(gctx.locale, "axes.guard.confirm_chk");
+            let confirm_chk_lbl = tr(gctx.locale, "axes.guard.confirm_chk");
             let chk = ui.checkbox(&mut state.categorical_guard_confirmed, confirm_chk_lbl);
             record_checkbox(ui, &chk, gctx.meta, "axes.categorical_guard.confirm_checkbox", confirm_chk_lbl, state.categorical_guard_confirmed);
 
             ui.horizontal_wrapped(|ui| {
                 let can_confirm = state.categorical_guard_confirmed;
-                let proceed_lbl = gtr(gctx.locale, "axes.guard.confirm_btn");
+                let proceed_lbl = tr(gctx.locale, "axes.guard.confirm_btn");
                 let disabled_reason = (!can_confirm).then_some("Check confirmation above to switch categorical axis to numeric scale");
                 let proceed = record_button(
                     ui,
@@ -212,7 +213,7 @@ fn render_categorical_guard_banner(
                     state.format_axes_guard_pending_tick_format = None;
                 }
 
-                let abort_lbl = gtr(gctx.locale, "axes.guard.cancel_btn");
+                let abort_lbl = tr(gctx.locale, "axes.guard.cancel_btn");
                 if record_button(
                     ui,
                     gctx.meta,

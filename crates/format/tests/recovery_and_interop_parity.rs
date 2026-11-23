@@ -450,8 +450,10 @@ fn verify_cleanroom_pzfx_edge_contents(doc: &ProjectDocument) {
     assert_eq!(doc.title, "Cleanroom Edge Parity (α-Assay)");
     assert_eq!(doc.info_sheets.len(), 1);
     assert_eq!(doc.data_sheets.len(), 5);
-    verify_edge_info_and_nested(&doc.info_sheets[0], &doc.data_sheets[0]);
-    verify_edge_survival_mv_contingency_pow(&doc.data_sheets[1..]);
+    let info0 = doc.info_sheets.first().expect("expected 1 info sheet");
+    let (ds0, ds_rest) = doc.data_sheets.split_first().expect("expected 5 data sheets");
+    verify_edge_info_and_nested(info0, ds0);
+    verify_edge_survival_mv_contingency_pow(ds_rest);
 }
 
 fn verify_edge_info_and_nested(info: &InfoSheet, nested_sheet: &curvebook_doc::DataSheet) {
@@ -466,56 +468,75 @@ fn verify_edge_info_and_nested(info: &InfoSheet, nested_sheet: &curvebook_doc::D
     };
     assert_eq!(nested.row_titles, vec!["Rep α", "Rep β"]);
     assert_eq!(nested.groups.len(), 2);
-    assert_eq!(nested.groups[0].biological_unit_count(), 2);
-    assert_eq!(nested.groups[0].subcolumn_titles, vec!["WT:1", "WT:2"]);
-    assert_eq!(nested.groups[0].cells[0][1], Cell { value: CellValue::Number(9.9), excluded: true });
-    assert_eq!(nested.groups[0].cells[1][0], Cell { value: CellValue::Number(1.2), excluded: true });
-    assert_eq!(nested.groups[1].cells[0][0], Cell { value: CellValue::Empty, excluded: true });
-    assert_eq!(nested.groups[1].cells[1][1], Cell { value: CellValue::Number(2.4), excluded: true });
+    let [g0, g1] = nested.groups.as_slice() else {
+        panic!("expected 2 nested groups");
+    };
+    assert_eq!(g0.biological_unit_count(), 2);
+    assert_eq!(g0.subcolumn_titles, vec!["WT:1", "WT:2"]);
+    assert_eq!(g0.cells.first().and_then(|r| r.get(1)), Some(&Cell { value: CellValue::Number(9.9), excluded: true }));
+    assert_eq!(g0.cells.get(1).and_then(|r| r.first()), Some(&Cell { value: CellValue::Number(1.2), excluded: true }));
+    assert_eq!(g1.cells.first().and_then(|r| r.first()), Some(&Cell { value: CellValue::Empty, excluded: true }));
+    assert_eq!(g1.cells.get(1).and_then(|r| r.get(1)), Some(&Cell { value: CellValue::Number(2.4), excluded: true }));
 }
 
 fn verify_edge_survival_mv_contingency_pow(sheets: &[curvebook_doc::DataSheet]) {
-    let TableArchetype::Survival(ref surv) = sheets[0].archetype else {
+    let [surv_sheet, mv_sheet, cont_sheet, pow_sheet] = sheets else {
+        panic!("expected 4 trailing sheets");
+    };
+    let TableArchetype::Survival(ref surv) = surv_sheet.archetype else {
         panic!("expected Survival");
     };
-    assert_eq!(sheets[0].title, "Survival Curve (τ ≤ 30d)");
-    assert_eq!(surv.times[1], Cell { value: CellValue::Number(10.0), excluded: true });
-    assert_eq!(surv.times[2], Cell { value: CellValue::Number(15.0), excluded: true });
-    assert_eq!(surv.cohorts[0].cells[1][0], Cell { value: CellValue::Number(0.0), excluded: true });
-    assert_eq!(surv.cohorts[0].cells[2][0], Cell { value: CellValue::Empty, excluded: true });
+    assert_eq!(surv_sheet.title, "Survival Curve (τ ≤ 30d)");
+    assert_eq!(surv.times.get(1), Some(&Cell { value: CellValue::Number(10.0), excluded: true }));
+    assert_eq!(surv.times.get(2), Some(&Cell { value: CellValue::Number(15.0), excluded: true }));
+    let cohort0 = surv.cohorts.first().expect("expected survival cohort 0");
+    assert_eq!(cohort0.cells.get(1).and_then(|r| r.first()), Some(&Cell { value: CellValue::Number(0.0), excluded: true }));
+    assert_eq!(cohort0.cells.get(2).and_then(|r| r.first()), Some(&Cell { value: CellValue::Empty, excluded: true }));
 
-    let TableArchetype::MultipleVariables(ref mv) = sheets[1].archetype else {
+    let TableArchetype::MultipleVariables(ref mv) = mv_sheet.archetype else {
         panic!("expected MultipleVariables");
     };
-    assert_eq!(mv.variables[0].role, VariableRole::Categorical);
-    assert_eq!(mv.variables[1].role, VariableRole::Continuous);
-    assert_eq!(mv.variables[1].title, "IC50");
-    assert!(mv.variables[1].cells[1].excluded);
-    assert!(mv.variables[1].cells[2].excluded);
+    let [var0, var1, ..] = mv.variables.as_slice() else {
+        panic!("expected at least 2 variables");
+    };
+    assert_eq!(var0.role, VariableRole::Categorical);
+    assert_eq!(var1.role, VariableRole::Continuous);
+    assert_eq!(var1.title, "IC50");
+    assert!(var1.cells.get(1).is_some_and(|c| c.excluded));
+    assert!(var1.cells.get(2).is_some_and(|c| c.excluded));
 
-    let TableArchetype::Contingency(ref cont) = sheets[2].archetype else {
+    let TableArchetype::Contingency(ref cont) = cont_sheet.archetype else {
         panic!("expected Contingency");
     };
     assert_eq!(cont.row_titles, vec!["Exposed", "Control"]);
-    assert_eq!(cont.data_sets[1].cells[0][0], Cell { value: CellValue::Number(2.0), excluded: true });
+    assert_eq!(
+        cont.data_sets.get(1).and_then(|ds| ds.cells.first()).and_then(|r| r.first()),
+        Some(&Cell { value: CellValue::Number(2.0), excluded: true })
+    );
 
-    let TableArchetype::PartsOfWhole(ref pow) = sheets[3].archetype else {
+    let TableArchetype::PartsOfWhole(ref pow) = pow_sheet.archetype else {
         panic!("expected PartsOfWhole");
     };
     assert_eq!(pow.slice_labels, vec!["CD4+", "CD8+", "B-cell"]);
-    assert_eq!(pow.data_sets[0].cells[1][0], Cell { value: CellValue::Number(35.0), excluded: true });
+    assert_eq!(
+        pow.data_sets.first().and_then(|ds| ds.cells.get(1)).and_then(|r| r.first()),
+        Some(&Cell { value: CellValue::Number(35.0), excluded: true })
+    );
 }
 
 fn verify_prism_zip_roundtrip(doc: &ProjectDocument, pzfx: &str) {
-    let info = &doc.info_sheets[0];
+    let info = doc.info_sheets.first().expect("expected info sheet");
+    let [ds0, ds1, ds2, ds3, ds4] = doc.data_sheets.as_slice() else {
+        panic!("expected 5 data sheets");
+    };
     let csv_opts = CsvOptions::csv();
     let mut prism_zip = ZipWriter::new();
     let sheet_specs = [
-        ("tbl-nested", &doc.data_sheets[0], "Nested", "sheets/01_nested.csv"),
-        ("tbl-surv", &doc.data_sheets[1], "Survival", "sheets/02_survival.csv"),
-        ("tbl-mv", &doc.data_sheets[2], "MultipleVariables", "sheets/03_multivar.csv"),
-        ("tbl-cont", &doc.data_sheets[3], "Contingency", "sheets/04_contingency.csv"),
-        ("tbl-pow", &doc.data_sheets[4], "PartsOfWhole", "sheets/05_pow.csv"),
+        ("tbl-nested", ds0, "Nested", "sheets/01_nested.csv"),
+        ("tbl-surv", ds1, "Survival", "sheets/02_survival.csv"),
+        ("tbl-mv", ds2, "MultipleVariables", "sheets/03_multivar.csv"),
+        ("tbl-cont", ds3, "Contingency", "sheets/04_contingency.csv"),
+        ("tbl-pow", ds4, "PartsOfWhole", "sheets/05_pow.csv"),
     ];
     let mut manifest_sheets = Vec::new();
     for (id, sheet, kind_str, csv_path) in sheet_specs {
@@ -551,12 +572,13 @@ fn verify_prism_zip_roundtrip(doc: &ProjectDocument, pzfx: &str) {
     assert_eq!(prism_report.document.title, doc.title);
     assert_eq!(prism_report.document.data_sheets.len(), 5);
     assert_eq!(prism_report.document.info_sheets.len(), 1);
-    assert_eq!(prism_report.document.info_sheets[0].get_constant("Km").and_then(|c| c.units.as_deref()), Some("μM"));
-    assert_eq!(prism_report.document.info_sheets[0].notes_markdown, info.notes_markdown);
+    let roundtrip_info = prism_report.document.info_sheets.first().expect("expected roundtrip info sheet");
+    assert_eq!(roundtrip_info.get_constant("Km").and_then(|c| c.units.as_deref()), Some("μM"));
+    assert_eq!(roundtrip_info.notes_markdown, info.notes_markdown);
 
-    for idx in 0..5 {
-        assert_eq!(prism_report.document.data_sheets[idx].kind(), doc.data_sheets[idx].kind());
-        assert_eq!(prism_report.document.data_sheets[idx].archetype, doc.data_sheets[idx].archetype);
+    for (actual, expected) in prism_report.document.data_sheets.iter().zip(doc.data_sheets.iter()) {
+        assert_eq!(actual.kind(), expected.kind());
+        assert_eq!(actual.archetype, expected.archetype);
     }
 
     // Also confirm a `.prism` containing an embedded `.pzfx` file imports cleanly.

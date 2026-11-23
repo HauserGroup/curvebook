@@ -5,6 +5,7 @@
 //! server. Nothing in or below this crate depends on a UI toolkit.
 //! Governing spec: `docs/architecture.md`, `docs/implementation/data-tables-and-transforms.md` (§6), and `docs/development.md`.
 #![forbid(unsafe_code)]
+#![deny(clippy::indexing_slicing)]
 
 pub mod cmd;
 pub use cmd::Caller;
@@ -968,7 +969,7 @@ fn enforce_unconstrained_gui_only_recalculate(doc: &ProjectDocument, params: &mu
             }
         }
     }
-    if explicit_vals.len() > 1 && explicit_vals.windows(2).any(|w| w[0] != w[1]) {
+    if explicit_vals.len() > 1 && explicit_vals.windows(2).any(|w| matches!(w, [a, b] if a != b)) {
         return Err(EngineError::with_code(
             ErrorCode::BadInput,
             "conflicting `include_external_links` alias values supplied for `project.recalculate`",

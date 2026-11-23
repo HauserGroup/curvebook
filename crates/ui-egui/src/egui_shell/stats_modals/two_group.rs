@@ -1,22 +1,28 @@
 //! Two-group comparison design controls (`TwoGroupComparison`).
 
-use curvebook_doc::{AnalysisKind, ProjectDocument, TableArchetype, TwoGroupMethod};
-use egui::Ui;
+use curvebook_doc::{AnalysisKind, TableArchetype, TwoGroupMethod};
+use egui::{Id, TextEdit, Ui, Vec2};
 
+use crate::UiApp;
 use crate::dialogs_canvas::EditAnalysisParametersState;
+use crate::grid_view::parse_localized_number_input;
+use crate::i18n::{normalize_locale, tr};
 use crate::modal_predicates::{
     ControlEnablement, r1_paired_or_matched_allowed, r2_assume_gaussian_allowed, r4_two_group_graph_differences, r4_two_group_nonparametric_options,
     r4_two_group_welch_correction,
 };
 
-use crate::egui_shell::stat_anova_modal::{render_modal_checkbox, render_modal_radio, render_modal_seg_btn, render_section_title};
+use crate::egui_shell::stat_anova_modal::{
+    StepperSpec, record_widget, render_modal_checkbox, render_modal_radio, render_modal_seg_btn, render_section_title, render_stepper_row,
+};
 use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens};
+use crate::inspect::ZLayer;
 
 use super::helpers::{render_dataset_checklist, render_mv_role_badge, resolve_source_data_sheet};
 
 pub(super) fn render_two_group_design(
     ui: &mut Ui,
-    doc: &ProjectDocument,
+    app: &UiApp,
     ep: &EditAnalysisParametersState,
     spec: &curvebook_doc::AnalysisSpec,
     tokens: &Tokens,
@@ -26,6 +32,7 @@ pub(super) fn render_two_group_design(
     let AnalysisKind::TwoGroupComparison(t) = &spec.kind else {
         return;
     };
+    let doc = app.document();
     let assume_en = r2_assume_gaussian_allowed(doc, Some(&spec.source_sheet_id));
     let paired_en = r1_paired_or_matched_allowed(doc, Some(&spec.source_sheet_id));
     ui.horizontal_wrapped(|ui| {
@@ -41,17 +48,23 @@ pub(super) fn render_two_group_design(
     let welch_en = r4_two_group_welch_correction(t.method);
     let unpaired_nonparam_en = assume_en.clone();
     let paired_nonparam_en = if !assume_en.enabled { assume_en.clone() } else { paired_en.clone() };
+    let cur_hyp = match t.method {
+        TwoGroupMethod::OneSampleT { hypothetical } | TwoGroupMethod::OneSampleWilcoxon { hypothetical } => hypothetical,
+        _ => 0.0,
+    };
     ui.horizontal_wrapped(|ui| {
         for (wid, lbl, m, en) in [
             ("edit.tg.unpaired_t", "Unpaired Student t", TwoGroupMethod::UnpairedT, ControlEnablement::enabled()),
-            ("edit.tg.welch_t", "Welch's t", TwoGroupMethod::WelchT, welch_en.clone()),
+            ("edit.tg.welch_t", "Welch's t", TwoGroupMethod::WelchT, ControlEnablement::enabled()),
             ("edit.tg.paired_t", "Paired Student t", TwoGroupMethod::PairedT, paired_en.clone()),
             ("edit.tg.ratio_paired", "Ratio paired t", TwoGroupMethod::RatioPairedT, paired_en.clone()),
             ("edit.tg.lognormal", "Lognormal t", TwoGroupMethod::LognormalUnpairedT, ControlEnablement::enabled()),
             ("edit.tg.mann_whitney", "Mann-Whitney U", TwoGroupMethod::MannWhitneyU, unpaired_nonparam_en.clone()),
             ("edit.tg.wilcoxon", "Wilcoxon signed-rank", TwoGroupMethod::WilcoxonSignedRank, paired_nonparam_en.clone()),
-            ("edit.tg.ks", "Kolmogorov-Smirnov", TwoGroupMethod::KolmogorovSmirnov, unpaired_nonparam_en),
+            ("edit.tg.ks", "Kolmogorov-Smirnov", TwoGroupMethod::KolmogorovSmirnov, unpaired_nonparam_en.clone()),
             ("edit.tg.sign", "Paired binomial sign", TwoGroupMethod::PairedSignTest, paired_nonparam_en),
+            ("edit.tg.one_sample_t", "One-sample t", TwoGroupMethod::OneSampleT { hypothetical: cur_hyp }, ControlEnablement::enabled()),
+            ("edit.tg.one_sample_wilcoxon", "One-sample Wilcoxon", TwoGroupMethod::OneSampleWilcoxon { hypothetical: cur_hyp }, unpaired_nonparam_en),
         ] {
             let active = std::mem::discriminant(&t.method) == std::mem::discriminant(&m);
             if render_modal_radio(ui, tokens, meta, wid, lbl, active, &en) {
@@ -63,6 +76,64 @@ pub(super) fn render_two_group_design(
             }
         }
     });
+    if let TwoGroupMethod::OneSampleT { hypothetical } | TwoGroupMethod::OneSampleWilcoxon { hypothetical } = t.method {
+        ui.add_space(4.0);
+        let hyp_key = Id::unique(("edit_tg_hyp_draft", spec.source_sheet_id.as_str()));
+        let mut hyp_draft: String = ui.ctx().data(|d| d.get_temp(hyp_key)).unwrap_or_else(|| format!("{hypothetical}"));
+        let locale = normalize_locale(&app.locale);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(tr(locale, "two_group.hypothetical"));
+            let resp = ui.add_sized(Vec2::new(88.0, 22.0), TextEdit::singleline(&mut hyp_draft).id(hyp_key));
+            record_widget(
+                ui,
+                meta,
+                &resp,
+                "edit.two_group.hypothetical",
+                "textbox",
+                "Hypothetical Value",
+                None,
+                Some(serde_json::json!(hyp_draft)),
+                true,
+                None,
+                ZLayer::ModalDialog,
+                false,
+                None,
+            );
+            if resp.changed() {
+                ui.ctx().data_mut(|d| d.insert_temp(hyp_key, hyp_draft.clone()));
+                if let Some(parsed) = parse_localized_number_input(&hyp_draft, &app.locale_preset).filter(|v| v.is_finite()) {
+                    let mut next = spec.clone();
+                    if let AnalysisKind::TwoGroupComparison(tg) = &mut next.kind {
+                        match &mut tg.method {
+                            TwoGroupMethod::OneSampleT { hypothetical: h } | TwoGroupMethod::OneSampleWilcoxon { hypothetical: h } => *h = parsed,
+                            _ => {}
+                        }
+                    }
+                    intents.push_set_edit_params_draft(next);
+                }
+            } else if !resp.has_focus() {
+                let canonical = format!("{hypothetical}");
+                if hyp_draft != canonical {
+                    ui.ctx().data_mut(|d| d.insert_temp(hyp_key, canonical));
+                }
+            }
+            let step = render_stepper_row(
+                ui,
+                tokens,
+                meta,
+                StepperSpec {
+                    id_prefix: "edit.two_group.hypothetical.step",
+                    label: "Step",
+                    value_text: &format!("{hypothetical}"),
+                    enablement: &ControlEnablement::enabled(),
+                },
+            );
+            if step != 0 {
+                ui.ctx().data_mut(|d| d.remove::<String>(hyp_key));
+                intents.push_custom_view_action("stat_params", format!("spinner:edit.two_group.hypothetical:{step}"));
+            }
+        });
+    }
     ui.add_space(4.0);
     let diff_en = r4_two_group_graph_differences(t.method);
     let np_en = r4_two_group_nonparametric_options(t.method);

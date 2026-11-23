@@ -2,9 +2,10 @@
 //! `crates/ui-egui/src/menus/ui_commands.rs` so headless MCP command discovery stays in lockstep
 //! with the desktop shell without introducing an L6 -> L6 dependency.
 
-use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::time::Duration;
+
+use curvebook_platform::write_atomic;
 
 const SRC_REL: &str = "crates/ui-egui/src/menus/ui_commands.rs";
 const DST_REL: &str = "crates/mcp/src/ui_catalog.rs";
@@ -32,7 +33,7 @@ pub fn run(root: &Path, check: bool) -> Result<(), String> {
         return Ok(());
     }
 
-    std::fs::write(&dst_path, formatted).map_err(|e| format!("write {DST_REL}: {e}"))?;
+    write_atomic(&dst_path, formatted.as_bytes()).map_err(|e| format!("write {DST_REL}: {e}"))?;
     println!("ui-commands: wrote {DST_REL}");
     Ok(())
 }
@@ -53,33 +54,31 @@ pub fn render_catalog(src: &str) -> Result<String, String> {
 
 fn strip_leading_inner_doc(src: &str) -> &str {
     let mut rest = src;
-    loop {
-        let Some(line_end) = rest.find('\n') else {
-            let trimmed = rest.trim();
-            return if trimmed.is_empty() || trimmed.starts_with("//!") { "" } else { rest };
-        };
-        let line = rest[..line_end].trim();
+    while let Some((head, tail)) = rest.split_once('\n') {
+        let line = head.trim();
         if line.is_empty() || line.starts_with("//!") {
-            rest = &rest[line_end + 1..];
+            rest = tail;
         } else {
             return rest;
         }
     }
+    let trimmed = rest.trim();
+    if trimmed.is_empty() || trimmed.starts_with("//!") { "" } else { rest }
 }
 
 fn rustfmt(root: &Path, code: &str) -> Result<String, String> {
     let cfg = root.join("rustfmt.toml");
-    let mut cmd = Command::new("rustfmt");
-    cmd.arg("--edition").arg("2024");
+    let mut cmd = crate::dev_tool_command("rustfmt")
+        .args(["--edition", "2024"])
+        .stdin_bytes(code.as_bytes())
+        .wall_timeout(Duration::from_secs(30))
+        .idle_timeout(Duration::from_secs(10));
     if cfg.is_file() {
-        cmd.arg("--config-path").arg(&cfg);
+        let cfg_str = cfg.to_str().ok_or_else(|| format!("non-UTF-8 path {}", cfg.display()))?;
+        cmd = cmd.args(["--config-path", cfg_str]);
     }
-    let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("spawn rustfmt: {e}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(code.as_bytes()).map_err(|e| format!("rustfmt stdin: {e}"))?;
-    }
-    let out = child.wait_with_output().map_err(|e| format!("wait rustfmt: {e}"))?;
-    if !out.status.success() {
+    let out = cmd.run().map_err(|e| format!("rustfmt: {e}"))?;
+    if !out.success {
         return Err(format!("rustfmt failed: {}", String::from_utf8_lossy(&out.stderr)));
     }
     String::from_utf8(out.stdout).map_err(|e| format!("rustfmt utf-8: {e}"))

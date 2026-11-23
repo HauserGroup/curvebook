@@ -23,30 +23,36 @@ fn push_u32(buf: &mut Vec<u8>, v: u32) {
     buf.extend_from_slice(&v.to_be_bytes());
 }
 
+fn put_bytes(buf: &mut [u8], off: usize, bytes: &[u8]) {
+    if let Some(dst) = buf.get_mut(off..off + bytes.len()) {
+        dst.copy_from_slice(bytes);
+    }
+}
+
 /// Build an uncompressed Regular SFNT TrueType font mapping only ASCII `'A'..='Z'` (`0x0041..=0x005A`).
 /// Deliberately omits `'€'` (Win-1252-only) and `'±'` (Win-1252 + Symbol) to verify `/F6` fallback.
 fn build_ascii_caps_only_ttf() -> Vec<u8> {
     let num_glyphs: u16 = 27; // 0 = .notdef, 1..=26 = A..Z
 
     let mut head = vec![0u8; 54];
-    head[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
-    head[12..16].copy_from_slice(&0x5F0F_3CF5u32.to_be_bytes());
-    head[18..20].copy_from_slice(&1000u16.to_be_bytes());
-    head[36..38].copy_from_slice(&0i16.to_be_bytes());
-    head[38..40].copy_from_slice(&(-200i16).to_be_bytes());
-    head[40..42].copy_from_slice(&700i16.to_be_bytes());
-    head[42..44].copy_from_slice(&800i16.to_be_bytes());
+    put_bytes(&mut head, 0, &0x0001_0000u32.to_be_bytes());
+    put_bytes(&mut head, 12, &0x5F0F_3CF5u32.to_be_bytes());
+    put_bytes(&mut head, 18, &1000u16.to_be_bytes());
+    put_bytes(&mut head, 36, &0i16.to_be_bytes());
+    put_bytes(&mut head, 38, &(-200i16).to_be_bytes());
+    put_bytes(&mut head, 40, &700i16.to_be_bytes());
+    put_bytes(&mut head, 42, &800i16.to_be_bytes());
 
     let mut hhea = vec![0u8; 36];
-    hhea[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
-    hhea[4..6].copy_from_slice(&800i16.to_be_bytes());
-    hhea[6..8].copy_from_slice(&(-200i16).to_be_bytes());
-    hhea[8..10].copy_from_slice(&90i16.to_be_bytes());
-    hhea[34..36].copy_from_slice(&num_glyphs.to_be_bytes());
+    put_bytes(&mut hhea, 0, &0x0001_0000u32.to_be_bytes());
+    put_bytes(&mut hhea, 4, &800i16.to_be_bytes());
+    put_bytes(&mut hhea, 6, &(-200i16).to_be_bytes());
+    put_bytes(&mut hhea, 8, &90i16.to_be_bytes());
+    put_bytes(&mut hhea, 34, &num_glyphs.to_be_bytes());
 
     let mut maxp = vec![0u8; 6];
-    maxp[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
-    maxp[4..6].copy_from_slice(&num_glyphs.to_be_bytes());
+    put_bytes(&mut maxp, 0, &0x0001_0000u32.to_be_bytes());
+    put_bytes(&mut maxp, 4, &num_glyphs.to_be_bytes());
 
     let mut hmtx = Vec::with_capacity(usize::from(num_glyphs) * 4);
     for _ in 0..num_glyphs {
@@ -98,15 +104,15 @@ fn build_ascii_caps_only_ttf() -> Vec<u8> {
     name.extend_from_slice(&str_buf);
 
     let mut post = vec![0u8; 32];
-    post[0..4].copy_from_slice(&0x0003_0000u32.to_be_bytes());
+    put_bytes(&mut post, 0, &0x0003_0000u32.to_be_bytes());
 
     let mut os2 = vec![0u8; 96];
-    os2[0..2].copy_from_slice(&4u16.to_be_bytes());
-    os2[4..6].copy_from_slice(&400u16.to_be_bytes());
-    os2[62..64].copy_from_slice(&0x0040u16.to_be_bytes());
-    os2[68..70].copy_from_slice(&800i16.to_be_bytes());
-    os2[70..72].copy_from_slice(&(-200i16).to_be_bytes());
-    os2[88..90].copy_from_slice(&700i16.to_be_bytes());
+    put_bytes(&mut os2, 0, &4u16.to_be_bytes());
+    put_bytes(&mut os2, 4, &400u16.to_be_bytes());
+    put_bytes(&mut os2, 62, &0x0040u16.to_be_bytes());
+    put_bytes(&mut os2, 68, &800i16.to_be_bytes());
+    put_bytes(&mut os2, 70, &(-200i16).to_be_bytes());
+    put_bytes(&mut os2, 88, &700i16.to_be_bytes());
 
     let tables = [
         (*b"OS/2", os2),
@@ -152,12 +158,15 @@ fn inflate_first_flate_page_or_raw(pdf: &[u8]) -> String {
     }
     let mut out = String::new();
     let mut idx = 0usize;
-    while let Some(rel) = pdf[idx..].windows(b"\nstream\n".len()).position(|w| w == b"\nstream\n") {
-        let header_slice = &pdf[idx..idx + rel];
+    while let Some(tail) = pdf.get(idx..)
+        && let Some(rel) = tail.windows(b"\nstream\n".len()).position(|w| w == b"\nstream\n")
+    {
+        let header_slice = tail.get(..rel).unwrap_or(&[]);
         let header = String::from_utf8_lossy(header_slice);
         let stream_start = idx + rel + b"\nstream\n".len();
-        let end_rel = pdf[stream_start..].windows(b"\nendstream".len()).position(|w| w == b"\nendstream").expect("endstream");
-        let payload = &pdf[stream_start..stream_start + end_rel];
+        let after_start = pdf.get(stream_start..).unwrap_or(&[]);
+        let end_rel = after_start.windows(b"\nendstream".len()).position(|w| w == b"\nendstream").expect("endstream");
+        let payload = after_start.get(..end_rel).unwrap_or(&[]);
         if header.contains("/FlateDecode") && !header.contains("/Length1 ") {
             let mut dec = ZlibDecoder::new(payload);
             let mut s = String::new();

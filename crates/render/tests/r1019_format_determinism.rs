@@ -26,8 +26,10 @@ fn assert_cleanroom_font_baseline() {
 }
 
 fn read_u32_be(bytes: &[u8], off: usize) -> Option<u32> {
-    let slice = bytes.get(off..off + 4)?;
-    Some(u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]))
+    let &[b0, b1, b2, b3] = bytes.get(off..off + 4)? else {
+        return None;
+    };
+    Some(u32::from_be_bytes([b0, b1, b2, b3]))
 }
 
 fn decode_png_idat_len_and_signature(png: &[u8]) -> Result<usize, Box<dyn std::error::Error>> {
@@ -120,7 +122,7 @@ fn build_equation_project() -> Result<(ProjectDocument, GraphSheet, LayoutSheet)
     let pts = [(0.5, 18.0), (1.0, 29.0), (2.0, 48.0), (4.0, 74.0), (8.0, 91.0), (16.0, 97.0)];
     for (r, (x, y)) in pts.into_iter().enumerate() {
         xy.set_x_cell(r, Cell::number(x))?;
-        xy.data_sets[0].cells[r][0] = Cell::number(y);
+        *xy.data_sets.first_mut().and_then(|ds| ds.cells.get_mut(r)).and_then(|row| row.first_mut()).ok_or("missing xy cell")? = Cell::number(y);
     }
     let ds = DataSheet::new("xy-1", "Enzyme Kinetics", TableArchetype::Xy(xy))?;
     doc.add_data_sheet(ds.clone())?;

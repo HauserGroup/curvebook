@@ -260,14 +260,17 @@ fn r1_s11_12_bracket_pointer_drag_resolves_real_category_slots() -> TestRes {
     if intent.command_id != "graph.addComparisonBrackets" {
         return Err(format!("expected graph.addComparisonBrackets, got {}", intent.command_id));
     }
-    let first_b = &intent.params["brackets"][0];
-    let exec_params = json!({
-        "sheet_id": intent.params["sheet_id"],
-        "result_sheet_id": first_b["result_sheet_id"],
-        "group_a": first_b["group_a"],
-        "group_b": first_b["group_b"],
-    });
-    app.execute_command(&intent.command_id, exec_params).map_err(|e| format!("bracket cmd failed: {e}"))?;
+    if intent.params.get("brackets").is_some() {
+        return Err(format!("comparison bracket intent must emit flat params, got {:?}", intent.params));
+    }
+    if intent.params["sheet_id"] != "gr-col"
+        || intent.params["result_sheet_id"] != "res-anova"
+        || intent.params["group_a"] != 0
+        || intent.params["group_b"] != 2
+    {
+        return Err(format!("unexpected flat bracket params: {:?}", intent.params));
+    }
+    app.execute_command(&intent.command_id, intent.params.clone()).map_err(|e| format!("bracket cmd failed: {e}"))?;
 
     let updated = app.document().graph_sheet(&SheetId::new("gr-col")).ok_or_else(|| String::from("missing updated gr-col"))?;
     if updated.spec.comparisons.len() != 1 {

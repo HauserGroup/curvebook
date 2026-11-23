@@ -11,9 +11,9 @@ use crate::{
 use crate::{commands, docs_site};
 
 // Keep existing UI frame/latency (`r10_*`, including `r10_phase7_gates`), human-path
-// input-to-paint budgets (`human_wf_*`), grid, and curve-fit throughput gates off the
-// parallel correctness runner. The complement below still covers every other test.
-const PERFORMANCE_FILTER: &str = "binary(r10_*) | binary(human_wf_*) | binary(*perf*)";
+// input-to-paint budgets (`human_wf_*`), grid, curve-fit, and ANOVA/1M throughput gates
+// off the parallel correctness runner. The complement below still covers every other test.
+const PERFORMANCE_FILTER: &str = "binary(r10_*) | binary(human_wf_*) | binary(*perf*) | binary(r15_2_anova_and_1m_bench)";
 const HOSTED_STAGES: &[&str] = &["policy", "lint", "tests", "doctests", "features", "performance"];
 
 pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
@@ -163,6 +163,11 @@ pub(crate) fn policy(root: &Path, include_i18n: bool) -> Result<(), String> {
     }
     #[cfg(not(feature = "full-gates"))]
     {
+        if workflows::is_ci_env() {
+            return Err(String::from(
+                "ci policy: `full-gates` feature is disabled while CI=true; cannot skip `commands --check` and `docs-site --check`",
+            ));
+        }
         println!("ci policy: skipping `commands --check` and `docs-site --check` (`full-gates` feature disabled)");
     }
     cmd_layers(root)?;
@@ -204,7 +209,7 @@ mod tests {
 
     #[test]
     fn performance_filter_serializes_r10_and_human_path_latency_binaries() {
-        for binary in ["binary(r10_*)", "binary(human_wf_*)", "binary(*perf*)"] {
+        for binary in ["binary(r10_*)", "binary(human_wf_*)", "binary(*perf*)", "binary(r15_2_anova_and_1m_bench)"] {
             assert!(PERFORMANCE_FILTER.split(" | ").any(|term| term == binary), "PERFORMANCE_FILTER must select {binary}");
         }
     }

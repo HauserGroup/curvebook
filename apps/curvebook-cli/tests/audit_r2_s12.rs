@@ -33,6 +33,14 @@ use serde_json::{Value, json};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+fn env_truthy(var: &str) -> bool {
+    std::env::var(var).is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
+fn loopback_required() -> bool {
+    env_truthy("CI") || env_truthy("CURVEBOOK_REQUIRE_LOOPBACK")
+}
+
 static TEMP_SEQ: AtomicUsize = AtomicUsize::new(1);
 
 struct TempDir {
@@ -226,12 +234,12 @@ fn r2_s12_01_cli_control_port_handshake_enforces_gui_only_in_both_directions() -
     // Live TCP loopback binary test when loopback bind+connect is permitted in the active environment.
     let listener = match TcpListener::bind("127.0.0.1:0") {
         Ok(l) => l,
-        Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
+        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => return Ok(()),
         Err(err) => return Err(err.into()),
     };
     let addr = listener.local_addr()?;
     if let Err(err) = TcpStream::connect_timeout(&addr, Duration::from_millis(200)) {
-        if err.kind() == ErrorKind::PermissionDenied {
+        if err.kind() == ErrorKind::PermissionDenied && !loopback_required() {
             return Ok(());
         }
         return Err(err.into());

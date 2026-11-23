@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const STATUS_REL: &str = "docs/STATUS.md";
 const ROADMAP_REL: &str = "docs/ROADMAP.md";
@@ -161,7 +161,7 @@ pub fn collect_workspace_tests(root: &Path) -> Result<WorkspaceTests, String> {
     let mut tests = WorkspaceTests::default();
     for dir_name in ["crates", "apps"] {
         let base = root.join(dir_name);
-        if base.is_dir() {
+        if fs::symlink_metadata(&base).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_dir()) {
             visit_rust_dir(&base, &mut tests)?;
         }
     }
@@ -172,15 +172,21 @@ fn visit_rust_dir(dir: &Path, out: &mut WorkspaceTests) -> Result<(), String> {
     let entries = fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     for entry_res in entries {
         let entry = entry_res.map_err(|e| format!("{}: {e}", dir.display()))?;
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        if ft.is_symlink() {
+            continue;
+        }
         let path = entry.path();
-        if path.is_dir() {
+        if ft.is_dir() {
             let skip = path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n == "target" || n.starts_with('.'));
             if !skip {
                 visit_rust_dir(&path, out)?;
             }
             continue;
         }
-        if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+        if ft.is_file() && path.extension().and_then(|e| e.to_str()) == Some("rs") {
             let src = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
             let parent =
@@ -192,11 +198,12 @@ fn visit_rust_dir(dir: &Path, out: &mut WorkspaceTests) -> Result<(), String> {
 }
 
 fn scan_tests_in_rust_source(stem: &str, parent_mod: Option<&str>, src: &str, out: &mut WorkspaceTests) {
+    let (_with_strings, code_only) = build_stripped_views(src);
     let mut pending_test = false;
     let mut pending_ignored = false;
     let mut attr_depth = 0isize;
 
-    for line in src.lines() {
+    for line in code_only.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with("//") {
             continue;
@@ -265,7 +272,7 @@ fn split_balanced_attr(input: &str) -> Option<(&str, &str)> {
                 depth -= 1;
                 if depth == 0 {
                     let split = idx + ch.len_utf8();
-                    return Some((&input[..split], &input[split..]));
+                    return input.split_at_checked(split);
                 }
             }
             _ => {}
@@ -303,14 +310,14 @@ fn is_ignore_attribute(attr: &str) -> bool {
 }
 
 fn extract_fn_name(trimmed: &str) -> Option<&str> {
-    let idx = trimmed.find("fn ")?;
-    let prefix = trimmed[..idx].trim();
+    let (prefix_raw, after_fn_raw) = trimmed.split_once("fn ")?;
+    let prefix = prefix_raw.trim();
     let valid_prefix =
         prefix.is_empty() || prefix.split_whitespace().all(|kw| kw == "async" || kw == "unsafe" || kw == "const" || kw.starts_with("pub"));
     if !valid_prefix {
         return None;
     }
-    let after_fn = trimmed[idx + 3..].trim_start();
+    let after_fn = after_fn_raw.trim_start();
     let name = after_fn.split(['(', '<', ' ']).next()?;
     if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') { Some(name) } else { None }
 }
@@ -482,13 +489,8 @@ fn is_checked_markdown_item(trimmed: &str) -> bool {
 
     let after_marker = if let Some(rest) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* ")).or_else(|| trimmed.strip_prefix("+ ")) {
         Some(rest.trim_start())
-    } else if let Some(dot_pos) = trimmed.find(['.', ')']) {
-        let prefix = &trimmed[..dot_pos];
-        if !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()) {
-            trimmed[dot_pos + 1..].strip_prefix(' ').map(str::trim_start)
-        } else {
-            None
-        }
+    } else if let Some((prefix, rest)) = trimmed.split_once(['.', ')']) {
+        if !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()) { rest.strip_prefix(' ').map(str::trim_start) } else { None }
     } else {
         None
     };
@@ -545,13 +547,13 @@ fn parse_workflow_fractions(text: &str) -> Vec<(usize, usize, Option<&str>)> {
             continue;
         }
 
-        let Ok(num) = text[left_start..left_end].parse::<usize>() else {
+        let Some(num) = text.get(left_start..left_end).and_then(|s| s.parse::<usize>().ok()) else {
             continue;
         };
-        let Ok(den) = text[right_start..right_end].parse::<usize>() else {
+        let Some(den) = text.get(right_start..right_end).and_then(|s| s.parse::<usize>().ok()) else {
             continue;
         };
-        let trailing = text[right_end..].trim_start().split(|c: char| !c.is_ascii_alphanumeric()).next().unwrap_or("");
+        let trailing = text.get(right_end..).unwrap_or("").trim_start().split(|c: char| !c.is_ascii_alphanumeric()).next().unwrap_or("");
         let backend = KNOWN_BACKENDS.iter().copied().find(|&b_name| trailing.eq_ignore_ascii_case(b_name));
         out.push((num, den, backend));
     }
@@ -569,15 +571,15 @@ pub struct BackendWorkflowTelemetry {
 
 fn parse_backend_wf_index(fn_name: &str) -> Option<(&'static str, u8)> {
     let rest = fn_name.strip_prefix("wf")?;
-    let digits_len = rest.chars().take_while(char::is_ascii_digit).count();
-    if digits_len == 0 {
+    let suffix = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+    let digits = rest.strip_suffix(suffix)?;
+    if digits.is_empty() {
         return None;
     }
-    let idx: u8 = rest[..digits_len].parse().ok()?;
+    let idx: u8 = digits.parse().ok()?;
     if !(1..=TOTAL_WORKFLOWS_U8).contains(&idx) {
         return None;
     }
-    let suffix = &rest[digits_len..];
     if suffix == "_human" || suffix.starts_with("_human_") || suffix == "_egui_human" || suffix.starts_with("_egui_human_") {
         Some(("egui", idx))
     } else {
@@ -751,13 +753,12 @@ fn extract_candidate_tokens(text: &str) -> Vec<String> {
     let mut out = Vec::new();
 
     let mut rest = text;
-    while let Some(start) = rest.find('`') {
-        let after_start = &rest[start + 1..];
-        let Some(end) = after_start.find('`') else {
+    while let Some((_, after_start)) = rest.split_once('`') {
+        let Some((code, tail)) = after_start.split_once('`') else {
             break;
         };
-        push_clean_tokens(&after_start[..end], &mut seen, &mut out);
-        rest = &after_start[end + 1..];
+        push_clean_tokens(code, &mut seen, &mut out);
+        rest = tail;
     }
     push_clean_tokens(text, &mut seen, &mut out);
     out
@@ -806,9 +807,8 @@ fn is_wf_harness_fn(seg: &str) -> bool {
     let Some(rest) = seg.strip_prefix("wf") else {
         return false;
     };
-    let digit_count = rest.chars().take_while(char::is_ascii_digit).count();
-    let suffix = &rest[digit_count..];
-    digit_count > 0
+    let suffix = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+    suffix.len() < rest.len()
         && suffix.starts_with('_')
         && !suffix.starts_with("_human_")
         && suffix != "_human"
@@ -854,9 +854,9 @@ fn has_recorded_manual_run(text: &str) -> bool {
         "computer use walkthrough:",
         "computer use qa:",
     ] {
-        if let Some(pos) = lower.find(prefix)
-            && !is_negated_prefix(&lower[..pos])
-            && has_concrete_manual_detail(&lower[pos + prefix.len()..])
+        if let Some((before, after)) = lower.split_once(prefix)
+            && !is_negated_prefix(before)
+            && has_concrete_manual_detail(after)
         {
             return true;
         }
@@ -874,9 +874,9 @@ fn has_recorded_manual_run(text: &str) -> bool {
     ]
     .iter()
     .any(|marker| {
-        lower.find(marker).is_some_and(|pos| {
-            !is_negated_prefix(&lower[..pos])
-                && lower[pos + marker.len()..].split_once(')').is_some_and(|(inside, _)| {
+        lower.split_once(marker).is_some_and(|(before, after)| {
+            !is_negated_prefix(before)
+                && after.split_once(')').is_some_and(|(inside, _)| {
                     let clean = inside.trim();
                     clean.contains("202")
                         && !clean.contains("todo")
@@ -903,23 +903,32 @@ fn has_concrete_manual_detail(after: &str) -> bool {
     !first.is_empty() && !matches!(first, "none" | "no" | "todo" | "n/a" | "pending" | "tbd" | "planned" | "missing" | "needed" | "untested")
 }
 
-/// Scan all `crates/ui-egui/tests/human_wf_*.rs` suites on disk for statically complete `WF-01`..`WF-65`
-/// `WorkflowRun` tests and forbidden bypass/guard patterns (`R10.26`).
+/// Scan all `crates/ui-egui/tests/human_wf_*.rs` and `human_wf_*/**/*.rs` suites on disk
+/// (excluding `human_wf_common`) for statically complete `WF-01`..`WF-65` `WorkflowRun` tests
+/// and forbidden bypass/guard patterns (`R10.26`).
 pub fn scan_human_wf_completion(root: &Path) -> Result<(BTreeSet<u8>, Vec<EvidenceViolation>), String> {
     let tests_dir = root.join("crates/ui-egui/tests");
-    if !tests_dir.is_dir() {
+    if !fs::symlink_metadata(&tests_dir).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_dir()) {
         return Ok((BTreeSet::new(), Vec::new()));
     }
     let mut paths = Vec::new();
     let entries = fs::read_dir(&tests_dir).map_err(|e| format!("{}: {e}", tests_dir.display()))?;
     for entry_res in entries {
         let entry = entry_res.map_err(|e| format!("{}: {e}", tests_dir.display()))?;
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        if ft.is_symlink() {
+            continue;
+        }
         let path = entry.path();
-        if path.is_file()
-            && path.extension().and_then(|s| s.to_str()) == Some("rs")
-            && path.file_name().and_then(|s| s.to_str()).is_some_and(|n| n.starts_with("human_wf_"))
-        {
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if ft.is_file() && name.ends_with(".rs") && name.starts_with("human_wf_") {
             paths.push(path);
+        } else if ft.is_dir() && name.starts_with("human_wf_") && name != "human_wf_common" {
+            collect_rs_files_no_symlinks(&path, &mut paths)?;
         }
     }
     paths.sort();
@@ -934,6 +943,26 @@ pub fn scan_human_wf_completion(root: &Path) -> Result<(BTreeSet<u8>, Vec<Eviden
     Ok(analyze_human_wf_sources(&refs))
 }
 
+fn collect_rs_files_no_symlinks(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    let entries = fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    for entry_res in entries {
+        let entry = entry_res.map_err(|e| format!("{}: {e}", dir.display()))?;
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        if ft.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if ft.is_dir() {
+            collect_rs_files_no_symlinks(&path, out)?;
+        } else if ft.is_file() && path.extension().and_then(|s| s.to_str()) == Some("rs") {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
 /// Analyze `(rel_path, rust_source)` pairs for `WF-NN` `WorkflowRun` five-stage completeness and forbidden bypasses.
 #[must_use]
 pub fn analyze_human_wf_sources(sources: &[(&str, &str)]) -> (BTreeSet<u8>, Vec<EvidenceViolation>) {
@@ -941,7 +970,7 @@ pub fn analyze_human_wf_sources(sources: &[(&str, &str)]) -> (BTreeSet<u8>, Vec<
     let mut violations = Vec::new();
     for &(path, src) in sources {
         for func in extract_rust_functions(src) {
-            if func.header_and_body_code.contains("WorkflowRun") {
+            if !func.is_test || parse_wf_fn_prefix(&func.name).is_some() || func.header_and_body_code.contains("WorkflowRun") {
                 check_workflow_run_lint(path, &func, &mut violations);
             }
             if func.is_test
@@ -984,20 +1013,20 @@ fn lex_rust_segments(src: &str) -> Vec<(LexSegment, usize, &str)> {
     while i < n {
         if i + 1 < n && b[i] == b'/' && b[i + 1] == b'/' {
             if i > code_start {
-                out.push((LexSegment::Code, code_start, &src[code_start..i]));
+                out.push((LexSegment::Code, code_start, src.get(code_start..i).unwrap_or("")));
             }
             let start = i;
             i += 2;
             while i < n && b[i] != b'\n' {
                 i += 1;
             }
-            out.push((LexSegment::Comment, start, &src[start..i]));
+            out.push((LexSegment::Comment, start, src.get(start..i).unwrap_or("")));
             code_start = i;
             continue;
         }
         if i + 1 < n && b[i] == b'/' && b[i + 1] == b'*' {
             if i > code_start {
-                out.push((LexSegment::Code, code_start, &src[code_start..i]));
+                out.push((LexSegment::Code, code_start, src.get(code_start..i).unwrap_or("")));
             }
             let start = i;
             i += 2;
@@ -1016,28 +1045,29 @@ fn lex_rust_segments(src: &str) -> Vec<(LexSegment, usize, &str)> {
             if depth > 0 {
                 i = n;
             }
-            out.push((LexSegment::Comment, start, &src[start..i]));
+            out.push((LexSegment::Comment, start, src.get(start..i).unwrap_or("")));
             code_start = i;
             continue;
         }
         if let Some(raw_end) = try_skip_raw_string(b, i) {
             if i > code_start {
-                out.push((LexSegment::Code, code_start, &src[code_start..i]));
+                out.push((LexSegment::Code, code_start, src.get(code_start..i).unwrap_or("")));
             }
-            out.push((LexSegment::StringOrChar, i, &src[i..raw_end]));
+            out.push((LexSegment::StringOrChar, i, src.get(i..raw_end).unwrap_or("")));
             i = raw_end;
             code_start = i;
             continue;
         }
         if b[i] == b'"' {
             if i > code_start {
-                out.push((LexSegment::Code, code_start, &src[code_start..i]));
+                out.push((LexSegment::Code, code_start, src.get(code_start..i).unwrap_or("")));
             }
             let start = i;
             i += 1;
             while i < n {
                 if b[i] == b'\\' {
-                    i = (i + 2).min(n);
+                    let esc_len = src.get(i + 1..).and_then(|s| s.chars().next()).map_or(0, char::len_utf8);
+                    i = (i + 1 + esc_len).min(n);
                 } else if b[i] == b'"' {
                     i += 1;
                     break;
@@ -1045,7 +1075,7 @@ fn lex_rust_segments(src: &str) -> Vec<(LexSegment, usize, &str)> {
                     i += 1;
                 }
             }
-            out.push((LexSegment::StringOrChar, start, &src[start..i]));
+            out.push((LexSegment::StringOrChar, start, src.get(start..i).unwrap_or("")));
             code_start = i;
             continue;
         }
@@ -1053,9 +1083,9 @@ fn lex_rust_segments(src: &str) -> Vec<(LexSegment, usize, &str)> {
             && let Some(char_end) = try_skip_char_literal(src, i)
         {
             if i > code_start {
-                out.push((LexSegment::Code, code_start, &src[code_start..i]));
+                out.push((LexSegment::Code, code_start, src.get(code_start..i).unwrap_or("")));
             }
-            out.push((LexSegment::StringOrChar, i, &src[i..char_end]));
+            out.push((LexSegment::StringOrChar, i, src.get(i..char_end).unwrap_or("")));
             i = char_end;
             code_start = i;
             continue;
@@ -1063,7 +1093,7 @@ fn lex_rust_segments(src: &str) -> Vec<(LexSegment, usize, &str)> {
         i += 1;
     }
     if code_start < n {
-        out.push((LexSegment::Code, code_start, &src[code_start..n]));
+        out.push((LexSegment::Code, code_start, src.get(code_start..n).unwrap_or("")));
     }
     out
 }
@@ -1102,10 +1132,11 @@ fn try_skip_raw_string(b: &[u8], idx: usize) -> Option<usize> {
 }
 
 fn try_skip_char_literal(src: &str, idx: usize) -> Option<usize> {
-    let tail = &src[idx + 1..];
+    let tail = src.get(idx + 1..)?;
     let mut chars = tail.char_indices();
     let (_, first) = chars.next()?;
     if first == '\\' {
+        let _escaped = chars.next()?;
         for (off, ch) in chars {
             if ch == '\'' {
                 return Some(idx + 1 + off + 1);
@@ -1157,64 +1188,53 @@ fn extract_rust_functions(src: &str) -> Vec<ScannedRustFn> {
     let mut out = Vec::new();
     let mut i = 0usize;
     let mut line_no = 1usize;
-    let mut brace_depth = 0usize;
     let mut pending_test = false;
     let mut pending_ignored = false;
 
     while i < n {
-        if brace_depth == 0 {
-            if i + 1 < n
-                && bytes[i] == b'#'
-                && bytes[i + 1] == b'['
-                && let Some((attr, tail)) = split_balanced_attr(&code_only[i..])
+        if i + 1 < n
+            && bytes[i] == b'#'
+            && bytes[i + 1] == b'['
+            && let Some(code_rest) = code_only.get(i..)
+            && let Some((attr, tail)) = split_balanced_attr(code_rest)
+        {
+            pending_test |= is_test_attribute(attr);
+            pending_ignored |= is_ignore_attribute(attr);
+            let consumed = code_rest.len() - tail.len();
+            line_no += code_rest.get(..consumed).unwrap_or("").bytes().filter(|&b| b == b'\n').count();
+            i += consumed;
+            continue;
+        }
+        if is_word_at(&code_only, i, "fn") && code_only.get(..i).is_some_and(can_start_item_before) {
+            let fn_start = i;
+            let fn_line = line_no;
+            let after_fn = code_only.get(i + 2..).unwrap_or("").trim_start();
+            let name: String = after_fn.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+            if !name.is_empty()
+                && let Some((body_open, body_close)) = find_fn_body_braces(bytes, i + 2)
             {
-                pending_test |= is_test_attribute(attr);
-                pending_ignored |= is_ignore_attribute(attr);
-                let consumed = code_only[i..].len() - tail.len();
-                line_no += code_only[i..i + consumed].bytes().filter(|&b| b == b'\n').count();
-                i += consumed;
+                out.push(ScannedRustFn {
+                    is_test: pending_test,
+                    is_ignored: pending_ignored,
+                    name,
+                    line: fn_line,
+                    header_and_body_code: code_only.get(fn_start..=body_close).unwrap_or("").to_owned(),
+                    body_with_strings: with_strings.get(body_open..=body_close).unwrap_or("").to_owned(),
+                    body_code_only: code_only.get(body_open..=body_close).unwrap_or("").to_owned(),
+                });
+                line_no += code_only.get(i..=body_close).unwrap_or("").bytes().filter(|&b| b == b'\n').count();
+                i = body_close + 1;
+                pending_test = false;
+                pending_ignored = false;
                 continue;
             }
-            if is_word_at(&code_only, i, "fn") && can_start_item_before(&code_only[..i]) {
-                let fn_start = i;
-                let fn_line = line_no;
-                let after_fn = code_only[i + 2..].trim_start();
-                let name: String = after_fn.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
-                if !name.is_empty()
-                    && let Some((body_open, body_close)) = find_fn_body_braces(bytes, i + 2)
-                {
-                    out.push(ScannedRustFn {
-                        is_test: pending_test,
-                        is_ignored: pending_ignored,
-                        name,
-                        line: fn_line,
-                        header_and_body_code: code_only[fn_start..=body_close].to_owned(),
-                        body_with_strings: with_strings[body_open..=body_close].to_owned(),
-                        body_code_only: code_only[body_open..=body_close].to_owned(),
-                    });
-                    line_no += code_only[i..=body_close].bytes().filter(|&b| b == b'\n').count();
-                    i = body_close + 1;
-                    pending_test = false;
-                    pending_ignored = false;
-                    continue;
-                }
-            }
-            if bytes[i] == b';' {
-                pending_test = false;
-                pending_ignored = false;
-            }
+        }
+        if matches!(bytes[i], b';' | b'{' | b'}') {
+            pending_test = false;
+            pending_ignored = false;
         }
 
-        let step = code_only[i..].chars().next().map_or(1, char::len_utf8);
-        if bytes[i] == b'{' {
-            brace_depth += 1;
-        } else if bytes[i] == b'}' && brace_depth > 0 {
-            brace_depth -= 1;
-            if brace_depth == 0 {
-                pending_test = false;
-                pending_ignored = false;
-            }
-        }
+        let step = code_only.get(i..).and_then(|s| s.chars().next()).map_or(1, char::len_utf8);
         if bytes[i] == b'\n' {
             line_no += 1;
         }
@@ -1229,7 +1249,7 @@ fn can_start_item_before(prefix: &str) -> bool {
         return true;
     }
     if let Some(last) = trimmed.chars().next_back()
-        && matches!(last, ';' | '}' | ']')
+        && matches!(last, ';' | '{' | '}' | ']')
     {
         return true;
     }
@@ -1273,7 +1293,7 @@ fn find_fn_body_braces(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
 }
 
 fn is_word_at(text: &str, pos: usize, word: &str) -> bool {
-    if !text[pos..].starts_with(word) {
+    if !text.get(pos..).is_some_and(|s| s.starts_with(word)) {
         return false;
     }
     let left_ok = pos == 0 || !text.as_bytes()[pos - 1].is_ascii_alphanumeric() && text.as_bytes()[pos - 1] != b'_';
@@ -1284,11 +1304,12 @@ fn is_word_at(text: &str, pos: usize, word: &str) -> bool {
 
 fn parse_wf_fn_prefix(fn_name: &str) -> Option<u8> {
     let rest = fn_name.strip_prefix("wf")?;
-    let digits_len = rest.chars().take_while(char::is_ascii_digit).count();
-    if digits_len == 0 || !rest[digits_len..].starts_with('_') {
+    let suffix = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+    let digits = rest.strip_suffix(suffix)?;
+    if digits.is_empty() || !suffix.starts_with('_') {
         return None;
     }
-    let idx: u8 = rest[..digits_len].parse().ok()?;
+    let idx: u8 = digits.parse().ok()?;
     (1..=TOTAL_WORKFLOWS_U8).contains(&idx).then_some(idx)
 }
 
@@ -1301,43 +1322,121 @@ fn has_wf_start(body_with_strings: &str, idx: u8) -> bool {
 
 fn has_finish(body_code_only: &str) -> bool {
     let compact: String = body_code_only.chars().filter(|c| !c.is_ascii_whitespace()).collect();
-    compact.contains(".finish()")
+    if let Some(bound_var) = find_workflow_run_binding(body_code_only) {
+        return compact.contains(&format!("{bound_var}.finish()")) || compact.contains(&format!("WorkflowRun::finish({bound_var})"));
+    }
+    has_chained_workflow_run_finish(&compact)
+}
+
+fn find_workflow_run_binding(code: &str) -> Option<String> {
+    let bytes = code.as_bytes();
+    let n = bytes.len();
+    let mut i = 0usize;
+    while i < n {
+        if is_word_at(code, i, "let") {
+            let mut j = i + 3;
+            while j < n && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if is_word_at(code, j, "mut") {
+                j += 3;
+                while j < n && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+            }
+            let ident_start = j;
+            while j < n && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+                j += 1;
+            }
+            if j > ident_start {
+                let ident = code.get(ident_start..j).unwrap_or("");
+                while j < n && bytes[j] != b';' && bytes[j] != b'=' {
+                    j += 1;
+                }
+                if j < n && bytes[j] == b'=' {
+                    j += 1;
+                    while j < n && bytes[j].is_ascii_whitespace() {
+                        j += 1;
+                    }
+                    let rest: String = code.get(j..).unwrap_or("").chars().take(64).filter(|c| !c.is_ascii_whitespace()).collect();
+                    if rest.starts_with("WorkflowRun::start") {
+                        return Some(ident.to_owned());
+                    }
+                }
+            }
+        }
+        i += code.get(i..).and_then(|s| s.chars().next()).map_or(1, char::len_utf8);
+    }
+    None
+}
+
+fn has_chained_workflow_run_finish(compact: &str) -> bool {
+    let mut start = 0usize;
+    while let Some(rel) = compact.get(start..).and_then(|s| s.find("WorkflowRun::start")) {
+        let open_paren_rel = compact.get(start + rel..).and_then(|s| s.find('('));
+        if let Some(open_rel) = open_paren_rel {
+            let open_idx = start + rel + open_rel;
+            let mut depth = 0usize;
+            if let Some(paren_slice) = compact.get(open_idx..) {
+                for (offset, b) in paren_slice.bytes().enumerate() {
+                    match b {
+                        b'(' => depth += 1,
+                        b')' => {
+                            depth = depth.saturating_sub(1);
+                            if depth == 0 {
+                                let after = paren_slice.get(offset + 1..).unwrap_or("");
+                                if after.starts_with(".finish()") || after.starts_with("?.finish()") {
+                                    return true;
+                                }
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        start += rel + 1;
+    }
+    false
 }
 
 fn contains_word_token(haystack: &str, needle: &str) -> bool {
     let mut start = 0usize;
-    while let Some(rel) = haystack[start..].find(needle) {
+    while let Some(rel) = haystack.get(start..).and_then(|s| s.find(needle)) {
         let pos = start + rel;
         if is_word_at(haystack, pos, needle) {
             return true;
         }
-        start = pos + 1;
+        start = pos + haystack.get(pos..).and_then(|s| s.chars().next()).map_or(1, char::len_utf8);
     }
     false
 }
 
 fn has_guarded_find_by_widget_id(code: &str) -> bool {
-    for (i, _) in code.match_indices("if") {
-        if is_word_at(code, i, "if") && if_condition_contains_find(code, i + 2) {
-            return true;
+    for (kw, allow_let) in [("if", true), ("while", true), ("match", false)] {
+        for (i, _) in code.match_indices(kw) {
+            if is_word_at(code, i, kw) && branch_header_contains_find(code, i + kw.len(), allow_let) {
+                return true;
+            }
         }
     }
     false
 }
 
-fn if_condition_contains_find(code: &str, after_if: usize) -> bool {
+fn branch_header_contains_find(code: &str, after_kw: usize, allow_let: bool) -> bool {
     let bytes = code.as_bytes();
-    let trimmed = code[after_if..].trim_start();
+    let trimmed = code.get(after_kw..).unwrap_or("").trim_start();
     let start = code.len() - trimmed.len();
-    let is_if_let = is_word_at(code, start, "let");
-    let mut past_eq = !is_if_let;
+    let is_let_binding = allow_let && is_word_at(code, start, "let");
+    let mut past_eq = !is_let_binding;
     let mut paren = 0usize;
     let mut bracket = 0usize;
     let mut pat_brace = 0usize;
 
-    for (rel, ch) in code[start..].char_indices() {
+    for (rel, ch) in trimmed.char_indices() {
         let j = start + rel;
-        if code[j..].starts_with("find_by_widget_id(") {
+        if trimmed.get(rel..).is_some_and(|s| s.starts_with("find_by_widget_id(")) {
             return true;
         }
         match ch {
@@ -1400,7 +1499,7 @@ fn parse_shard_wf_range(shard_cell: &str) -> Option<(u8, u8)> {
             end += 1;
         }
         if end > i + 3
-            && let Ok(val) = lower[i + 3..end].parse::<u8>()
+            && let Some(val) = lower.get(i + 3..end).and_then(|s| s.parse::<u8>().ok())
             && (1..=TOTAL_WORKFLOWS_U8).contains(&val)
         {
             nums.push(val);
@@ -1438,7 +1537,7 @@ fn parse_labeled_fraction(text: &str, label: &str) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut search_from = 0usize;
 
-    while let Some(rel) = lower[search_from..].find(label) {
+    while let Some(rel) = lower.get(search_from..).and_then(|s| s.find(label)) {
         let pos = search_from + rel;
         let left_ok = pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric();
         let after_label = pos + label.len();
@@ -1457,7 +1556,7 @@ fn parse_labeled_fraction(text: &str, label: &str) -> Vec<(usize, usize)> {
         if cur == num_start {
             continue;
         }
-        let Ok(num) = lower[num_start..cur].parse::<usize>() else {
+        let Some(num) = lower.get(num_start..cur).and_then(|s| s.parse::<usize>().ok()) else {
             continue;
         };
         while cur < bytes.len() && bytes[cur].is_ascii_whitespace() {
@@ -1475,7 +1574,7 @@ fn parse_labeled_fraction(text: &str, label: &str) -> Vec<(usize, usize)> {
             cur += 1;
         }
         if cur > den_start
-            && let Ok(den) = lower[den_start..cur].parse::<usize>()
+            && let Some(den) = lower.get(den_start..cur).and_then(|s| s.parse::<usize>().ok())
         {
             out.push((num, den));
         }
@@ -2133,10 +2232,28 @@ pub fn check_live_status_metrics(root: &Path, status_md: &str) -> Vec<EvidenceVi
 fn count_live_ui_commands(root: &Path) -> Option<usize> {
     let rel = "crates/ui-egui/src/menus/ui_commands.rs";
     let src = fs::read_to_string(root.join(rel)).ok()?;
-    let slice_start = src.find("pub const UI_COMMANDS:")?;
-    let slice_tail = &src[slice_start..];
-    let slice_end = slice_tail.find("];")?;
-    Some(slice_tail[..slice_end].matches("UiCommandSpec {").count())
+    let (_with_strings, code_only) = build_stripped_views(&src);
+    let (_, after_decl) = code_only.split_once("pub const UI_COMMANDS:")?;
+    let (_, after_eq) = after_decl.split_once('=')?;
+    let open_rel = after_eq.find('[')?;
+    let slice = after_eq.get(open_rel..)?;
+    let mut depth = 0usize;
+    let mut slice_end = None;
+    for (idx, b) in slice.bytes().enumerate() {
+        match b {
+            b'[' => depth += 1,
+            b']' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    slice_end = Some(idx);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let slice_end = slice_end?;
+    Some(slice.get(..slice_end)?.matches("UiCommandSpec {").count())
 }
 
 fn check_status_structural_headings(status_md: &str, violations: &mut Vec<EvidenceViolation>) {
@@ -2229,7 +2346,7 @@ fn cell_contains_number(row: &str, needle: &str) -> bool {
     let second_cell = row.split('|').nth(2).unwrap_or(row);
     let bytes = second_cell.as_bytes();
     let mut start = 0usize;
-    while let Some(rel) = second_cell[start..].find(needle) {
+    while let Some(rel) = second_cell.get(start..).and_then(|s| s.find(needle)) {
         let pos = start + rel;
         let end = pos + needle.len();
         let left_ok = pos == 0 || !bytes[pos - 1].is_ascii_digit();
@@ -2351,5 +2468,67 @@ mod tests {
         #[cfg(feature = "full-gates")]
         assert!(stale_hits.iter().any(|v| v.reason.contains("Engine command registry")), "{stale_hits:?}");
         assert!(stale_hits.iter().any(|v| v.reason.contains("UI command catalog")), "{stale_hits:?}");
+    }
+
+    #[test]
+    fn fa_sec23_04_handles_comments_raw_strings_mod_tests_helpers_guards_and_decoy_finish() {
+        // 1. Commented/raw-string `#[test]` and escaped `'\''` char literals don't fool test collector.
+        let mut tests = super::WorkspaceTests::default();
+        let src = r###"
+            const CH: char = '\'';
+            /* #[test] fn fake_block_comment_test() {} */
+            const RAW: &str = r##"
+                #[test]
+                fn fake_raw_string_test() {}
+            "##;
+            #[test]
+            fn real_test_fn() {}
+        "###;
+        super::scan_tests_in_rust_source("sample", None, src, &mut tests);
+        assert!(tests.unqualified.contains("real_test_fn"));
+        assert!(!tests.unqualified.contains("fake_block_comment_test"));
+        assert!(!tests.unqualified.contains("fake_raw_string_test"));
+
+        // 2. `mod tests { ... }`, helper functions without `"WorkflowRun"` text, decoy `.finish()`,
+        //    and `while`/`match` `find_by_widget_id(` guards are caught strictly.
+        let tricky_wf = r#"
+            fn sneaky_helper(app: &mut App) {
+                let _ = app.app_mut();
+            }
+            mod tests {
+                type Run = WorkflowRun;
+                #[test]
+                fn wf01_type_alias_bypass() -> Result<(), String> {
+                    let mut run = Run::start("WF-01");
+                    let _ = dispatch_gui_action(&mut app, "x", ());
+                    run.finish()
+                }
+                #[test]
+                fn wf02_decoy_finish_and_while_guard() -> Result<(), String> {
+                    let mut run = WorkflowRun::start("WF-02");
+                    while run.frame_meta().find_by_widget_id("x").is_some() {}
+                    let other = Dummy;
+                    other.finish();
+                    Ok(())
+                }
+                #[test]
+                fn wf03_match_guard() -> Result<(), String> {
+                    let mut run = WorkflowRun::start("WF-03");
+                    match run.frame_meta().find_by_widget_id("y") {
+                        Some(_) => {}
+                        None => {}
+                    }
+                    run.finish()
+                }
+            }
+        "#;
+        let (complete, lints) = super::analyze_human_wf_sources(&[("crates/ui-egui/tests/human_wf_01_06.rs", tricky_wf)]);
+        assert!(!complete.contains(&2), "decoy other.finish() must NOT mark WF-02 complete: {complete:?}");
+        assert!(lints.iter().any(|v| v.reason.contains("app_mut")), "missing helper app_mut: {lints:?}");
+        assert!(lints.iter().any(|v| v.reason.contains("dispatch_gui_action")), "missing mod-nested type-alias bypass: {lints:?}");
+        assert!(
+            lints.iter().filter(|v| v.reason.contains("find_by_widget_id(")).count() >= 2,
+            "while and match find_by_widget_id guards must be flagged: {lints:?}"
+        );
     }
 }

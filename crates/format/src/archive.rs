@@ -518,11 +518,14 @@ fn validate_sheet_csv_path(raw: &str) -> Result<(), FormatError> {
     let Some(file_name) = clean.strip_prefix("sheets/") else {
         return Err(FormatError::UnsafePath { path: raw.to_owned() });
     };
-    if file_name.contains('/') || file_name.len() <= 4 || !file_name.ends_with(".csv") {
+    let Some(stem) = file_name.strip_suffix(".csv") else {
         return Err(FormatError::UnsafePath { path: raw.to_owned() });
-    }
-    let stem = &file_name[..file_name.len() - 4];
-    if stem.is_empty() || stem.len() > MAX_MANIFEST_CSV_STEM_LEN || !stem.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+    };
+    if file_name.contains('/')
+        || stem.is_empty()
+        || stem.len() > MAX_MANIFEST_CSV_STEM_LEN
+        || !stem.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
         return Err(FormatError::UnsafePath { path: raw.to_owned() });
     }
     Ok(())
@@ -2504,7 +2507,8 @@ where
             }
         };
         if let Err(err) = rename_res {
-            if let Err(rollback_failures) = rollback_unpacked_commits(&staged[..idx], &mut restore_file) {
+            let committed = staged.get(..idx).unwrap_or(staged);
+            if let Err(rollback_failures) = rollback_unpacked_commits(committed, &mut restore_file) {
                 tx_guard.preserve_for_recovery();
                 return Err(FormatError::Io(format!(
                     "unpacked commit failed at `{}` ({err}); rollback also failed ({}); preserved `{UNPACKED_TX_DIR}` recovery snapshot",
@@ -3193,15 +3197,14 @@ fn strip_template_hooks_targeting(text: &mut String, target_id: &SheetId, defaul
     let mut rest = text.as_str();
     let mut removed = 0usize;
 
-    while let Some(open) = rest.find("{{") {
-        out.push_str(&rest[..open]);
-        let after_open = &rest[open + 2..];
-        let Some(close) = after_open.find("}}") else {
-            out.push_str(&rest[open..]);
+    while let Some((before, after_open)) = rest.split_once("{{") {
+        out.push_str(before);
+        let Some((inner, after_close)) = after_open.split_once("}}") else {
+            out.push_str("{{");
+            out.push_str(after_open);
             rest = "";
             break;
         };
-        let inner = &after_open[..close];
         let token = format!("{{{{{inner}}}}}");
         let hits_target = extract_template_hooks(&token)
             .first()
@@ -3212,7 +3215,7 @@ fn strip_template_hooks_targeting(text: &mut String, target_id: &SheetId, defaul
         } else {
             out.push_str(&token);
         }
-        rest = &after_open[close + 2..];
+        rest = after_close;
     }
     out.push_str(rest);
     if removed > 0 {

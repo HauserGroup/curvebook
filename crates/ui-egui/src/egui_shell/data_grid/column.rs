@@ -22,10 +22,10 @@ use super::shared::LinkedEdgePaint;
 use super::shared::{
     BodyRenderResult, CellTextStyle, ContextCellTarget, ContextMenuState, GridRenderCtx, LINK_STRIP_HEIGHT_PT, SelectionFastLookup,
     active_column_sheet, alt_row_fill, any_pointer_click_in, clamp_scroll_offset, clear_grid_drag_anchor_if_released, compute_grid_geometry,
-    compute_scrollbar_rects, compute_visible_range, ensure_solid_scrollbar_style, format_cell_into, forward_gutter_header_wheel,
+    compute_scrollbar_rects, compute_visible_range, ensure_solid_scrollbar_style, format_cell_into_with_decimals, forward_gutter_header_wheel,
     handle_cell_pointer_drag_select, initial_edit_text_for_cell, is_linked_region_broken, is_multi_click_edit, link_border_color32,
     paint_exclusion_corner_marker, paint_linked_perimeter_edges, paint_scrollbar_corner_cap, record_meta_if_enabled, render_ellipsized_text,
-    set_grid_focus_active,
+    set_grid_focus_active, table_display_decimals,
 };
 use super::shortcuts::handle_grid_keyboard_shortcuts;
 use super::{ColumnGridEguiState, ColumnGridFrameReport, ColumnGridRenderContext, GridInlineEditTarget};
@@ -127,7 +127,14 @@ pub fn render_column_grid(
 
     render_grid_context_menu_popup(
         ui,
-        &GridContextMenuHost { app, ds, tokens: render_ctx.tokens, blocked: rctx.input_blocked(state), selected_x_cell: None },
+        &GridContextMenuHost {
+            app,
+            ds,
+            tokens: render_ctx.tokens,
+            blocked: rctx.input_blocked(state),
+            record_inspect_meta: state.record_inspect_meta,
+            selected_x_cell: None,
+        },
         &mut state.context_menu,
         meta,
         intents,
@@ -211,6 +218,7 @@ struct CellDrawInput<'a> {
     is_selected: bool,
     linked_reg: Option<&'a LinkedDataRegion>,
     blocked: bool,
+    table_decimals: Option<u8>,
 }
 
 fn render_visible_cells(
@@ -255,6 +263,7 @@ fn render_visible_cells(
     let sel = SelectionFastLookup::new(rctx.app, geom.total_rows, geom.subs_per_col, geom.total_flat_cols);
     let has_links = !rctx.ds.linked_regions.is_empty();
     let blocked = rctx.input_blocked(state);
+    let table_decimals = table_display_decimals(ui.ctx());
     let mut text_buf = String::with_capacity(32);
     let mut rendered_cells = 0usize;
     let mut min_vis_row = usize::MAX;
@@ -315,7 +324,7 @@ fn render_visible_cells(
                 continue;
             }
 
-            let draw = CellDrawInput { coord, cell_rect, clipped_rect, cell_opt, is_active, is_selected, linked_reg, blocked };
+            let draw = CellDrawInput { coord, cell_rect, clipped_rect, cell_opt, is_active, is_selected, linked_reg, blocked, table_decimals };
             let interacted = render_single_cell(ui, rctx, state, meta, intents, &draw, &mut text_buf);
             cell_clicked_or_edited |= interacted;
         }
@@ -371,7 +380,7 @@ fn render_single_cell(
     if let Some(cell) = draw.cell_opt {
         excluded = cell.excluded;
         is_numeric = matches!(cell.value, CellValue::Number(_));
-        format_cell_into(cell, &rctx.app.locale_preset, text_buf);
+        format_cell_into_with_decimals(cell, &rctx.app.locale_preset, draw.table_decimals, text_buf);
     }
 
     let mut elided = false;

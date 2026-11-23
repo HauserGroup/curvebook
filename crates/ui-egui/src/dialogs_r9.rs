@@ -308,7 +308,10 @@ fn parse_rout_inline_q(raw: &str) -> Result<Option<f64>, String> {
     if !lower.starts_with("rout") {
         return Ok(None);
     }
-    let rest = trimmed[4..].trim();
+    let Some(after_rout) = trimmed.get(4..) else {
+        return Ok(None);
+    };
+    let rest = after_rout.trim();
     if rest.is_empty() {
         return Ok(None);
     }

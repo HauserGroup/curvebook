@@ -51,7 +51,13 @@ pub fn format_number_sig_figs(value: f64, sig_figs: usize) -> String {
         return if body == "0" { body } else { format!("{prefix}{body}") };
     }
 
-    let mantissa = if digits.len() > 1 { trim_decimal_trailing_zeros(format!("{}.{}", &digits[..1], &digits[1..])) } else { digits };
+    let mantissa = if let Some((head, tail)) = digits.split_at_checked(1)
+        && !tail.is_empty()
+    {
+        trim_decimal_trailing_zeros(format!("{head}.{tail}"))
+    } else {
+        digits
+    };
     format!("{prefix}{mantissa} \\times 10^{{{exp}}}")
 }
 
@@ -65,7 +71,8 @@ fn format_decimal_from_digits(digits: &str, exp: i32) -> String {
         let zeros = "0".repeat(pos - digits.len());
         return format!("{digits}{zeros}");
     }
-    trim_decimal_trailing_zeros(format!("{}.{}", &digits[..pos], &digits[pos..]))
+    let (head, tail) = digits.split_at_checked(pos).unwrap_or((digits, ""));
+    trim_decimal_trailing_zeros(format!("{head}.{tail}"))
 }
 
 fn trim_decimal_trailing_zeros(mut s: String) -> String {
@@ -1126,8 +1133,8 @@ fn select_dsl_script(src: &str, data_set_index: Option<usize>) -> Option<Selecte
         if stripped.is_empty() {
             continue;
         }
-        if stripped.starts_with('[') && stripped.ends_with(']') {
-            let sec = normalize_id(&stripped[1..stripped.len() - 1]);
+        if let Some(section_name) = stripped.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            let sec = normalize_id(section_name);
             if matches!(
                 sec.as_str(),
                 "initialvalues"
@@ -1225,16 +1232,15 @@ fn classify_dsl_line(line: &str) -> DslRawStmt<'_> {
 }
 
 fn strip_dsl_comment(line: &str) -> &str {
-    let mut cut = line.len();
-    for marker in [';', '#'] {
-        if let Some(idx) = line.find(marker) {
-            cut = cut.min(idx);
+    let mut best = line;
+    for marker in [";", "#", "//"] {
+        if let Some((prefix, _)) = line.split_once(marker)
+            && prefix.len() < best.len()
+        {
+            best = prefix;
         }
     }
-    if let Some(idx) = line.find("//") {
-        cut = cut.min(idx);
-    }
-    &line[..cut]
+    best
 }
 
 struct DslRenderEnv<'a> {
@@ -1790,15 +1796,15 @@ fn substitute_and_escape_fallback(input: &str, params: &[(String, f64)], substit
 fn replace_ident_word_prefix(input: &str, pat: &str, rep: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut rest = input;
-    while let Some(idx) = rest.find(pat) {
-        let prefix_ok = rest[..idx].chars().next_back().is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_' && c != '\\');
-        out.push_str(&rest[..idx]);
+    while let Some((before, after)) = rest.split_once(pat) {
+        let prefix_ok = before.chars().next_back().is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_' && c != '\\');
+        out.push_str(before);
         if prefix_ok {
             out.push_str(rep);
         } else {
             out.push_str(pat);
         }
-        rest = &rest[idx + pat.len()..];
+        rest = after;
     }
     out.push_str(rest);
     out

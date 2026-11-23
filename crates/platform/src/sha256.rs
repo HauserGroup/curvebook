@@ -77,23 +77,26 @@ const H0: [u32; 8] = [0x6a09_e667, 0xbb67_ae85, 0x3c6e_f372, 0xa54f_f53a, 0x510e
 
 fn compress_block(state: &mut [u32; 8], block: &[u8; 64]) {
     let mut w = [0_u32; 64];
-    for (i, slot) in w.iter_mut().take(16).enumerate() {
-        let base = i * 4;
-        *slot = u32::from_be_bytes([block[base], block[base + 1], block[base + 2], block[base + 3]]);
+    let (word_chunks, _) = block.as_chunks::<4>();
+    for (slot, word) in w.iter_mut().zip(word_chunks) {
+        *slot = u32::from_be_bytes(*word);
     }
     for i in 16..64 {
-        let w15 = w[i - 15];
-        let w2 = w[i - 2];
+        let (Some(&w15), Some(&w2), Some(&w16), Some(&w7)) = (w.get(i - 15), w.get(i - 2), w.get(i - 16), w.get(i - 7)) else {
+            continue;
+        };
         let s0 = w15.rotate_right(7) ^ w15.rotate_right(18) ^ (w15 >> 3);
         let s1 = w2.rotate_right(17) ^ w2.rotate_right(19) ^ (w2 >> 10);
-        w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
+        if let Some(slot) = w.get_mut(i) {
+            *slot = w16.wrapping_add(s0).wrapping_add(w7).wrapping_add(s1);
+        }
     }
 
     let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *state;
-    for i in 0..64 {
+    for (&ki, &wi) in K256.iter().zip(w.iter()) {
         let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
         let ch = (e & f) ^ ((!e) & g);
-        let temp1 = h.wrapping_add(s1).wrapping_add(ch).wrapping_add(K256[i]).wrapping_add(w[i]);
+        let temp1 = h.wrapping_add(s1).wrapping_add(ch).wrapping_add(ki).wrapping_add(wi);
         let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
         let maj = (a & b) ^ (a & c) ^ (b & c);
         let temp2 = s0.wrapping_add(maj);
@@ -147,15 +150,21 @@ impl Sha256 {
         if self.buffer_len > 0 {
             let space = 64 - self.buffer_len;
             if rest.len() < space {
-                self.buffer[self.buffer_len..self.buffer_len + rest.len()].copy_from_slice(rest);
+                if let Some(dst) = self.buffer.get_mut(self.buffer_len..self.buffer_len + rest.len()) {
+                    dst.copy_from_slice(rest);
+                }
                 self.buffer_len += rest.len();
                 return;
             }
-            self.buffer[self.buffer_len..64].copy_from_slice(&rest[..space]);
-            let block = self.buffer;
-            compress_block(&mut self.state, &block);
-            self.buffer_len = 0;
-            rest = &rest[space..];
+            if let Some((head, tail)) = rest.split_at_checked(space) {
+                if let Some(dst) = self.buffer.get_mut(self.buffer_len..64) {
+                    dst.copy_from_slice(head);
+                }
+                let block = self.buffer;
+                compress_block(&mut self.state, &block);
+                self.buffer_len = 0;
+                rest = tail;
+            }
         }
 
         let (blocks, rem) = rest.as_chunks::<64>();
@@ -163,7 +172,9 @@ impl Sha256 {
             compress_block(&mut self.state, block);
         }
         if !rem.is_empty() {
-            self.buffer[..rem.len()].copy_from_slice(rem);
+            if let Some(dst) = self.buffer.get_mut(..rem.len()) {
+                dst.copy_from_slice(rem);
+            }
             self.buffer_len = rem.len();
         }
     }
@@ -172,24 +183,33 @@ impl Sha256 {
     #[must_use]
     pub fn finalize(mut self) -> [u8; 32] {
         let bit_len = self.total_bytes.wrapping_mul(8);
-        self.buffer[self.buffer_len] = 0x80;
+        if let Some(slot) = self.buffer.get_mut(self.buffer_len) {
+            *slot = 0x80;
+        }
         self.buffer_len += 1;
 
         if self.buffer_len > 56 {
-            self.buffer[self.buffer_len..64].fill(0);
+            if let Some(tail) = self.buffer.get_mut(self.buffer_len..64) {
+                tail.fill(0);
+            }
             let block = self.buffer;
             compress_block(&mut self.state, &block);
-            self.buffer[..56].fill(0);
-        } else {
-            self.buffer[self.buffer_len..56].fill(0);
+            if let Some(head) = self.buffer.get_mut(..56) {
+                head.fill(0);
+            }
+        } else if let Some(mid) = self.buffer.get_mut(self.buffer_len..56) {
+            mid.fill(0);
         }
-        self.buffer[56..64].copy_from_slice(&bit_len.to_be_bytes());
+        if let Some(len_slot) = self.buffer.get_mut(56..64) {
+            len_slot.copy_from_slice(&bit_len.to_be_bytes());
+        }
         let final_block = self.buffer;
         compress_block(&mut self.state, &final_block);
 
         let mut out = [0_u8; 32];
-        for (idx, word) in self.state.into_iter().enumerate() {
-            out[idx * 4..idx * 4 + 4].copy_from_slice(&word.to_be_bytes());
+        let (out_words, _) = out.as_chunks_mut::<4>();
+        for (dst, word) in out_words.iter_mut().zip(self.state) {
+            dst.copy_from_slice(&word.to_be_bytes());
         }
         out
     }
@@ -205,10 +225,11 @@ impl Sha256 {
 #[must_use]
 pub fn digest_to_hex(digest: &[u8; 32]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
+    let hex_char = |nibble: u8| -> char { HEX.get(usize::from(nibble & 0x0F)).copied().map_or('0', char::from) };
     let mut out = String::with_capacity(64);
     for &byte in digest {
-        out.push(char::from(HEX[usize::from(byte >> 4)]));
-        out.push(char::from(HEX[usize::from(byte & 0x0F)]));
+        out.push(hex_char(byte >> 4));
+        out.push(hex_char(byte & 0x0F));
     }
     out
 }

@@ -18,7 +18,17 @@ use crate::inspect::ZLayer;
 use crate::interaction::resolve_result_sheet_for_shortcut;
 use crate::menus::{CommandTooltip, CuratedMenuNode, command_tooltip, curated_menu_bar, format_shortcut_for_platform};
 use crate::tr;
-use curvebook_doc::{AnalysisKind, MultivariateSpec, SheetId, TableArchetype};
+use curvebook_doc::{AnalysisKind, InfoSheet, MultivariateSpec, SheetId, TableArchetype};
+
+fn next_unused_constant_name(info: &InfoSheet) -> String {
+    for idx in 1usize.. {
+        let candidate = format!("Constant {idx}");
+        if !info.constants.iter().any(|c| c.name.eq_ignore_ascii_case(&candidate)) {
+            return candidate;
+        }
+    }
+    String::from("Constant 1")
+}
 
 /// Shared canonical variant lists for submenu-backed settings & layout commands.
 pub fn submenu_variants_for_command(command_id: &str) -> Option<&'static [(&'static str, &'static str)]> {
@@ -1747,15 +1757,17 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
             ));
         }
         Tier2SheetContext::InfoSheet => {
-            let info_id = doc.active_sheet_id.as_ref().map(|id| id.as_str()).unwrap_or_default();
+            let info_opt = doc.active_sheet_id.as_ref().and_then(|id| doc.info_sheet(id));
+            let info_id = info_opt.map(|s| s.id.as_str()).unwrap_or_default();
+            let const_name = info_opt.map(next_unused_constant_name).unwrap_or_else(|| String::from("Constant 1"));
             actions.push(make_engine_action(
                 app,
                 Tier2ActionInput {
                     widget_id: "toolbar.info_add_constant",
                     label: "+ Constant",
                     command_id: "info.setConstant",
-                    params: json!({ "sheet_id": info_id, "name": "Constant", "value": 1.0 }),
-                    enabled: modal_enabled,
+                    params: json!({ "sheet_id": info_id, "name": const_name, "value": Value::Null }),
+                    enabled: modal_enabled && info_opt.is_some(),
                     disabled_reason: None,
                     primary: true,
                 },

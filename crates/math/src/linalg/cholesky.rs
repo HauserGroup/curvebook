@@ -129,20 +129,28 @@ impl Cholesky {
         let mut y = vec![0.0_f64; n];
         for i in 0..n {
             let mut acc = NeumaierSum::new();
-            acc.add(b[i]);
+            if let Some(&bi) = b.get(i) {
+                acc.add(bi);
+            }
             for (k, &yk) in y.iter().enumerate().take(i) {
                 acc.add(-self.l.entry(i, k) * yk);
             }
-            y[i] = acc.total() / self.l.entry(i, i);
+            if let Some(yi) = y.get_mut(i) {
+                *yi = acc.total() / self.l.entry(i, i);
+            }
         }
         let mut x = vec![0.0_f64; n];
         for i in (0..n).rev() {
             let mut acc = NeumaierSum::new();
-            acc.add(y[i]);
+            if let Some(&yi) = y.get(i) {
+                acc.add(yi);
+            }
             for (k, &xk) in x.iter().enumerate().take(n).skip(i + 1) {
                 acc.add(-self.l.entry(k, i) * xk);
             }
-            x[i] = acc.total() / self.l.entry(i, i);
+            if let Some(xi) = x.get_mut(i) {
+                *xi = acc.total() / self.l.entry(i, i);
+            }
         }
         Ok(x)
     }
@@ -156,9 +164,13 @@ impl Cholesky {
         let mut inv = DenseMatrix::zeros(n, n)?;
         let mut e = vec![0.0_f64; n];
         for col in 0..n {
-            e[col] = 1.0;
+            if let Some(slot) = e.get_mut(col) {
+                *slot = 1.0;
+            }
             let sol = self.solve(&e)?;
-            e[col] = 0.0;
+            if let Some(slot) = e.get_mut(col) {
+                *slot = 0.0;
+            }
             for (row, &val) in sol.iter().enumerate() {
                 inv.set_in_bounds(row, col, val);
             }

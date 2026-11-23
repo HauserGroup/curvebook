@@ -79,11 +79,17 @@ fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
 }
 
 fn png_dimensions(png: &[u8]) -> Option<(u32, u32)> {
-    if png.len() < 24 || !png.starts_with(b"\x89PNG\r\n\x1a\n") || &png[12..16] != b"IHDR" {
+    if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
         return None;
     }
-    let w = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
-    let h = u32::from_be_bytes([png[20], png[21], png[22], png[23]]);
+    let chunk = png.get(12..24)?;
+    let (ihdr, dims) = chunk.split_at_checked(4)?;
+    if ihdr != b"IHDR" {
+        return None;
+    }
+    let (w_bytes, h_bytes) = dims.split_at_checked(4)?;
+    let w = u32::from_be_bytes(w_bytes.try_into().ok()?);
+    let h = u32::from_be_bytes(h_bytes.try_into().ok()?);
     Some((w, h))
 }
 
@@ -124,6 +130,7 @@ fn desktop_menu_bar_sets_host_draws_flag_suppresses_canvas_duplicates_and_drives
         theme_override: None,
         recovery_root: None,
         initial_viewport: metrics,
+        ..DesktopHostConfig::default()
     });
     let (adapter, dialog_rx) = RecordingFileDialogAdapter::new();
     let adapter = Arc::new(adapter);

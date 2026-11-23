@@ -16,11 +16,17 @@ fn ok(session: &mut Session, cmd_id: &str, params: Value) -> CommandOutcome {
 
 fn make_linear_xy(id: &str, title: &str, slope: f64, intercept: f64) -> DataSheet {
     let mut xy = XyTable::new(SubcolumnMode::RawReplicates(1), 1, 5).unwrap();
-    xy.data_sets[0].title = String::from("10.0");
     for r in 0..5 {
-        let x = (r + 1) as f64;
-        xy.set_x_cell(r, Cell::number(x)).unwrap();
-        xy.data_sets[0].cells[r][0] = Cell::number(slope * x + intercept);
+        xy.set_x_cell(r, Cell::number((r + 1) as f64)).unwrap();
+    }
+    if let Some(ds0) = xy.data_sets.first_mut() {
+        ds0.title = String::from("10.0");
+        for (r, row) in ds0.cells.iter_mut().enumerate().take(5) {
+            let x = (r + 1) as f64;
+            if let Some(cell) = row.first_mut() {
+                *cell = Cell::number(slope * x + intercept);
+            }
+        }
     }
     DataSheet::new(id, title, TableArchetype::Xy(xy)).unwrap()
 }
@@ -380,15 +386,18 @@ fn build_colliding_source_archive_b64() -> String {
         .add_result_sheet(ResultSheet::new(AnalysisSpec::new("res-2", "data-1", AnalysisKind::NonlinearRegression(nl)).unwrap()).unwrap())
         .unwrap();
 
-    let mut src_graph = GraphSheet::new_uninitialized_for_data("graph-1", &src_doc.data_sheets[0]).unwrap();
+    let ds0 = src_doc.data_sheets.first().expect("missing source sheet 0");
+    let mut src_graph = GraphSheet::new_uninitialized_for_data("graph-1", ds0).unwrap();
     src_graph.spec.title = String::from("Imported Graph");
-    src_graph.spec.series[0].regression_overlay = Some(RegressionOverlaySpec {
-        result_sheet_id: SheetId::new("res-1"),
-        sample_segments: 256,
-        show_confidence_band: false,
-        show_prediction_band: false,
-        shaded_ribbon: false,
-    });
+    if let Some(s0) = src_graph.spec.series.first_mut() {
+        s0.regression_overlay = Some(RegressionOverlaySpec {
+            result_sheet_id: SheetId::new("res-1"),
+            sample_segments: 256,
+            show_confidence_band: false,
+            show_prediction_band: false,
+            shaded_ribbon: false,
+        });
+    }
     src_graph.spec.comparisons.push(PairwiseBracketSpec {
         result_sheet_id: SheetId::new("res-2"),
         group_a: 0,
@@ -434,7 +443,7 @@ fn build_colliding_source_archive_b64() -> String {
 
     let mut src_export_sess = Session::from_document(src_doc);
     let saved = ok(&mut src_export_sess, "project.save", json!({}));
-    saved.payload["bytes_base64"].as_str().unwrap().to_owned()
+    saved.payload.get("bytes_base64").and_then(Value::as_str).unwrap().to_owned()
 }
 
 #[test]
@@ -489,7 +498,7 @@ fn assert_remapped_archive_refs(merged: &ProjectDocument) {
     assert_eq!(imp_d1.info_sheet_id, Some(SheetId::new("info-1-2")));
 
     let imp_d2 = merged.data_sheet(&SheetId::new("data-2-2")).expect("remapped data-2-2");
-    assert_eq!(imp_d2.linked_regions[0].spec.source.upstream_sheet_id(), Some(&SheetId::new("data-1-2")));
+    assert_eq!(imp_d2.linked_regions.first().and_then(|r| r.spec.source.upstream_sheet_id()), Some(&SheetId::new("data-1-2")));
 
     let imp_r1 = merged.result_sheet(&SheetId::new("res-1-2")).expect("remapped res-1-2");
     assert_eq!(imp_r1.analysis.id, SheetId::new("res-1-2"));
@@ -503,10 +512,11 @@ fn assert_remapped_archive_refs(merged: &ProjectDocument) {
 
     let imp_g1 = merged.graph_sheet(&SheetId::new("graph-1-2")).expect("remapped graph-1-2");
     assert_eq!(imp_g1.spec.primary_source_sheet_id, SheetId::new("data-1-2"));
-    assert_eq!(imp_g1.spec.series[0].source_sheet_id, SheetId::new("data-1-2"));
-    assert_eq!(imp_g1.spec.series[0].regression_overlay.as_ref().unwrap().result_sheet_id, SheetId::new("res-1-2"));
-    assert_eq!(imp_g1.spec.comparisons[0].result_sheet_id, SheetId::new("res-2-2"));
-    match &imp_g1.spec.annotations[0] {
+    let g_s0 = imp_g1.spec.series.first().expect("remapped graph series 0");
+    assert_eq!(g_s0.source_sheet_id, SheetId::new("data-1-2"));
+    assert_eq!(g_s0.regression_overlay.as_ref().unwrap().result_sheet_id, SheetId::new("res-1-2"));
+    assert_eq!(imp_g1.spec.comparisons.first().expect("remapped comparison 0").result_sheet_id, SheetId::new("res-2-2"));
+    match imp_g1.spec.annotations.first().expect("remapped annotation 0") {
         GraphAnnotation::TextBox { markdown, .. } => {
             assert!(markdown.contains("{{result:res-1-2:Slope}}"), "markdown={markdown}");
             assert!(markdown.contains("{{info:info-1-2:Dose}}"), "markdown={markdown}");
@@ -515,9 +525,12 @@ fn assert_remapped_archive_refs(merged: &ProjectDocument) {
     }
 
     let imp_l1 = merged.layout_sheet(&SheetId::new("layout-1-2")).expect("remapped layout-1-2");
-    assert!(matches!(&imp_l1.spec.items[0], LayoutItem::LiveGraph { graph_sheet_id, .. } if graph_sheet_id == &SheetId::new("graph-1-2")));
-    assert!(matches!(&imp_l1.spec.items[1], LayoutItem::LiveTable { source_sheet_id, .. } if source_sheet_id == &SheetId::new("res-1-2")));
-    match &imp_l1.spec.items[2] {
+    let [item0, item1, item2] = imp_l1.spec.items.as_slice() else {
+        panic!("expected 3 layout items, got {}", imp_l1.spec.items.len());
+    };
+    assert!(matches!(item0, LayoutItem::LiveGraph { graph_sheet_id, .. } if graph_sheet_id == &SheetId::new("graph-1-2")));
+    assert!(matches!(item1, LayoutItem::LiveTable { source_sheet_id, .. } if source_sheet_id == &SheetId::new("res-1-2")));
+    match item2 {
         LayoutItem::TextCallout { markdown, .. } => {
             assert!(markdown.contains("{{info:info-1-2:Top}}"), "markdown={markdown}");
             assert!(markdown.contains("{{result:res-1-2:0:Slope}}"), "markdown={markdown}");

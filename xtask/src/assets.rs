@@ -153,8 +153,9 @@ pub fn is_font_file(path: &str) -> bool {
 
 #[must_use]
 pub fn is_asset(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
     let ext = lower_ext(path);
-    ASSET_DIRS.iter().any(|d| path.starts_with(d)) || ASSET_EXT.contains(&ext.as_str())
+    ASSET_DIRS.iter().any(|d| lower.starts_with(d)) || ASSET_EXT.contains(&ext.as_str())
 }
 
 #[must_use]
@@ -163,10 +164,10 @@ pub fn is_original_only_visual_asset(path: &str) -> bool {
     if !VISUAL_ASSET_EXT.contains(&ext.as_str()) {
         return false;
     }
-    if matches!(ext.as_str(), "cur" | "ani") || ORIGINAL_PROVENANCE_PREFIXES.iter().any(|prefix| path.starts_with(prefix)) {
+    let lower = path.to_ascii_lowercase();
+    if matches!(ext.as_str(), "cur" | "ani") || ORIGINAL_PROVENANCE_PREFIXES.iter().any(|prefix| lower.starts_with(prefix)) {
         return true;
     }
-    let lower = path.to_ascii_lowercase();
     ORIGINAL_PROVENANCE_KEYWORDS.iter().any(|kw| lower.contains(kw))
 }
 
@@ -187,19 +188,16 @@ fn is_header_row(cells: &[&str]) -> bool {
 
 fn parse_table_cells(line: &str) -> Option<Vec<&str>> {
     let trimmed = line.trim();
-    if !trimmed.starts_with('|') || !trimmed.ends_with('|') {
-        return None;
-    }
-    let inner = &trimmed[1..trimmed.len() - 1];
+    let inner = trimmed.strip_prefix('|').and_then(|s| s.strip_suffix('|'))?;
     Some(inner.split('|').map(str::trim).collect())
 }
 
 fn strip_trailing_licence_note(raw: &str) -> &str {
     let trimmed = raw.trim();
     if trimmed.ends_with("`)")
-        && let Some(idx) = trimmed.rfind(" (`")
+        && let Some((head, _)) = trimmed.rsplit_once(" (`")
     {
-        return trimmed[..idx].trim();
+        return head.trim();
     }
     trimmed
 }
@@ -286,7 +284,7 @@ fn has_ascii_word(lower: &str, word: &str) -> bool {
     let bytes = lower.as_bytes();
     let wlen = word.len();
     let mut start = 0usize;
-    while let Some(rel) = lower[start..].find(word) {
+    while let Some(rel) = lower.get(start..).and_then(|s| s.find(word)) {
         let pos = start + rel;
         let end = pos + wlen;
         let left_ok = pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric();
@@ -294,7 +292,7 @@ fn has_ascii_word(lower: &str, word: &str) -> bool {
         if left_ok && right_ok {
             return true;
         }
-        start = pos + 1;
+        start = pos + lower.get(pos..).and_then(|s| s.chars().next()).map_or(1, char::len_utf8);
     }
     false
 }
@@ -324,16 +322,15 @@ fn check_row_safety(row: &AssetRow) -> Result<(), String> {
 fn extract_backticked_asset_refs(source: &str) -> Vec<&str> {
     let mut refs = Vec::new();
     let mut rest = source;
-    while let Some(start) = rest.find('`') {
-        let after = &rest[start + 1..];
-        let Some(end) = after.find('`') else {
+    while let Some((_, after)) = rest.split_once('`') {
+        let Some((token_raw, tail)) = after.split_once('`') else {
             break;
         };
-        let token = after[..end].trim();
+        let token = token_raw.trim();
         if token.contains('/') {
             refs.push(token);
         }
-        rest = &after[end + 1..];
+        rest = tail;
     }
     refs
 }
@@ -509,31 +506,47 @@ fn check_document_prose(doc_name: &str, text: &str, allow_packaged: bool) -> Res
     Ok(())
 }
 
+const MAX_DIST_ASSET_BYTES: usize = 256 * 1024 * 1024;
+
 fn verify_asset_binaries(root: &Path, files: &[String], errors: &mut Vec<String>) {
     for path in files {
         let ext = lower_ext(path);
-        if !matches!(ext.as_str(), "png" | "ico" | "icns" | "svg" | "gif") {
+        let is_archive = matches!(ext.as_str(), "zip" | "curvebook" | "cbtemplate" | "prism" | "pzf");
+        if !matches!(ext.as_str(), "png" | "ico" | "icns" | "svg" | "svgz" | "gif" | "pdf") && !is_archive {
             continue;
         }
-        let Ok(bytes) = std::fs::read(root.join(path)) else {
-            errors.push(format!("{path}: unreadable asset file"));
+        let Ok(bytes) = curvebook_platform::fs::read_regular_file_bytes(&root.join(path), MAX_DIST_ASSET_BYTES) else {
+            errors.push(format!("{path}: unreadable or oversized asset file"));
             continue;
         };
-        let hits = match ext.as_str() {
-            "png" => crate::brands::check_png_metadata(path, &bytes),
-            "ico" | "icns" => crate::brands::check_icon_container_metadata(path, &bytes),
-            "gif" => crate::brands::check_gif_metadata(path, &bytes),
-            "svg" => match std::str::from_utf8(&bytes) {
-                Ok(svg) => crate::brands::check_svg_metadata(path, svg),
-                Err(e) => {
-                    errors.push(format!("{path}: invalid UTF-8 in SVG: {e}"));
-                    Vec::new()
+        if is_archive || bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06") {
+            if bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06") || ext == "zip" || ext == "curvebook" || ext == "cbtemplate" {
+                scan_repo_zip_for_fonts(path, &bytes, 0, errors);
+            }
+            continue;
+        }
+        check_asset_embedded_metadata(path, &bytes, errors);
+    }
+}
+
+fn scan_repo_zip_for_fonts(display_path: &str, bytes: &[u8], depth: usize, errors: &mut Vec<String>) {
+    if depth >= 2 {
+        errors.push(format!("{display_path}: nested archive depth exceeded while inspecting for bundled fonts"));
+        return;
+    }
+    match ZipArchive::from_bytes_with_limits(bytes, ZipLimits::default()) {
+        Ok(zip) => {
+            for (name, entry_bytes) in zip.iter() {
+                let nested = format!("{display_path}!{name}");
+                if is_font_file(name) {
+                    errors.push(format!("{nested}: bundled font file forbidden by zero-bundled-fonts policy"));
+                } else if entry_bytes.starts_with(b"PK\x03\x04") || entry_bytes.starts_with(b"PK\x05\x06") {
+                    scan_repo_zip_for_fonts(&nested, entry_bytes, depth + 1, errors);
                 }
-            },
-            _ => Vec::new(),
-        };
-        for hit in hits {
-            errors.push(format!("{}:{}: embedded metadata mentions `{}`", hit.path, hit.line, hit.brand));
+            }
+        }
+        Err(err) => {
+            errors.push(format!("{display_path}: corrupt ZIP archive while checking bundled fonts: {err}"));
         }
     }
 }
@@ -648,7 +661,8 @@ pub(crate) fn scan_dist_artefacts(catalog: &RepoAssetCatalog, dist_dir: &Path) -
             state.violations.push(format!("{rel}: bundled reference or historical audit directory is forbidden"));
             continue;
         }
-        let bytes = std::fs::read(dist_dir.join(&rel)).map_err(|e| format!("read dist file `{rel}`: {e}"))?;
+        let bytes = curvebook_platform::fs::read_regular_file_bytes(&dist_dir.join(&rel), MAX_DIST_ASSET_BYTES)
+            .map_err(|e| format!("read dist file `{rel}`: {e}"))?;
         scan_dist_asset_bytes(&mut state, &rel, &bytes, 0);
     }
     state.violations.sort();
@@ -719,7 +733,11 @@ fn scan_dist_asset_bytes(state: &mut DistAssetScanState<'_>, display_path: &str,
     }
 
     let is_zip = bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06");
-    if is_zip && depth < 2 {
+    if is_zip {
+        if depth >= 2 {
+            state.violations.push(format!("{display_path}: nested archive depth exceeded (max depth 2)"));
+            return;
+        }
         match ZipArchive::from_bytes_with_limits(bytes, ZipLimits::default()) {
             Ok(zip) => {
                 for (name, entry_bytes) in zip.iter() {
@@ -773,10 +791,28 @@ fn check_asset_embedded_metadata(display_path: &str, bytes: &[u8], violations: &
         "png" => crate::brands::check_png_metadata(display_path, bytes),
         "ico" | "icns" => crate::brands::check_icon_container_metadata(display_path, bytes),
         "gif" => crate::brands::check_gif_metadata(display_path, bytes),
-        "svg" => match std::str::from_utf8(bytes) {
-            Ok(svg) => crate::brands::check_svg_metadata(display_path, svg),
+        "pdf" => crate::brands::check_pdf_metadata(display_path, bytes),
+        "svg" => match crate::text_decode::decode_utf8_or_utf16(bytes) {
+            Ok(Some(svg)) => crate::brands::check_svg_metadata(display_path, &svg),
+            Ok(None) => {
+                violations.push(format!("{display_path}: invalid UTF-8/UTF-16 in SVG"));
+                Vec::new()
+            }
             Err(e) => {
-                violations.push(format!("{display_path}: invalid UTF-8 in SVG: {e}"));
+                violations.push(format!("{display_path}: invalid SVG text: {e}"));
+                Vec::new()
+            }
+        },
+        "svgz" => match crate::brands::inflate_gzip_bounded(bytes) {
+            Ok(raw) => match crate::text_decode::decode_utf8_or_utf16(&raw) {
+                Ok(Some(svg)) => crate::brands::check_svg_metadata(display_path, &svg),
+                _ => {
+                    violations.push(format!("{display_path}: invalid UTF-8/UTF-16 inside .svgz"));
+                    Vec::new()
+                }
+            },
+            Err(()) => {
+                violations.push(format!("{display_path}: corrupt or oversized .svgz gzip payload"));
                 Vec::new()
             }
         },
@@ -790,19 +826,17 @@ fn check_asset_embedded_metadata(display_path: &str, bytes: &[u8], violations: &
 fn is_flatpak_appstream_icon_cache(catalog: &RepoAssetCatalog, dist_dir: &Path, display_path: &str) -> bool {
     const MARKER: &str = "/share/app-info/icons/flatpak/";
     const ICON_FILE: &str = "/org.curvebook.CurveBook.png";
-    let Some(marker_pos) = display_path.find(MARKER) else {
+    let Some((prefix, after)) = display_path.split_once(MARKER) else {
         return false;
     };
-    let after = &display_path[marker_pos + MARKER.len()..];
     let Some(dim) = after.strip_suffix(ICON_FILE) else {
         return false;
     };
     if dim.is_empty() || dim.contains('/') {
         return false;
     }
-    let prefix = &display_path[..marker_pos];
     let hicolor_rel = format!("{prefix}/share/icons/hicolor/{dim}/apps/org.curvebook.CurveBook.png");
-    let Ok(src_bytes) = std::fs::read(dist_dir.join(hicolor_rel)) else {
+    let Ok(src_bytes) = curvebook_platform::fs::read_regular_file_bytes(&dist_dir.join(hicolor_rel), MAX_DIST_ASSET_BYTES) else {
         return false;
     };
     catalog.allowed_sha256.contains(&crate::release_scan::sha256_bytes(&src_bytes))
@@ -1035,5 +1069,46 @@ See also `assets/prose.png` in prose.
         ] {
             assert!(super::check_document_prose(doc, &bad, allow_pkg).is_err(), "expected failure for {doc} (allow_pkg={allow_pkg}): {bad:?}");
         }
+    }
+
+    #[test]
+    fn sec22_handles_bare_pipe_case_prefixes_zip_fonts_pdf_svgz_and_nested_depth() {
+        assert_eq!(super::parse_table_cells("|"), None);
+        assert!(is_asset("ASSETS/APP-ICON/ICON.PNG"));
+        assert!(is_original_only_visual_asset("ASSETS/APP-ICON/ICON.PNG"));
+
+        let root = std::env::temp_dir().join(format!("cb-assets-sec22-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("assets/ui")).unwrap();
+
+        let mut zw = curvebook_format::ZipWriter::new();
+        zw.add_file("fonts/Sneaky.ttf", b"font".to_vec()).unwrap();
+        std::fs::write(root.join("assets/ui/bundle.zip"), zw.finish().unwrap()).unwrap();
+        let files = vec![String::from("assets/ui/bundle.zip")];
+        let assets_md =
+            "| Asset | Author | Source | Licence | Notes |\n|---|---|---|---|---|\n| `assets/ui/bundle.zip` | CurveBook | Original | MIT | z |\n";
+        let err_zip = super::verify_repo_provenance(&root, &files, assets_md, "", "CurveBook").unwrap_err();
+        assert!(err_zip.contains("Sneaky.ttf"), "{err_zip}");
+
+        std::fs::write(root.join("assets/ui/report.pdf"), b"%PDF-1.4\n1 0 obj\n<< /Creator (GraphPad Prism) >>\nendobj\n").unwrap();
+        let pdf_files = vec![String::from("assets/ui/report.pdf")];
+        let pdf_md =
+            "| Asset | Author | Source | Licence | Notes |\n|---|---|---|---|---|\n| `assets/ui/report.pdf` | CurveBook | Original | MIT | p |\n";
+        let err_pdf = super::verify_repo_provenance(&root, &pdf_files, pdf_md, "", "CurveBook").unwrap_err();
+        assert!(err_pdf.contains("graphpad") || err_pdf.contains("prism"), "{err_pdf}");
+
+        let dist = root.join("dist");
+        std::fs::create_dir_all(&dist).unwrap();
+        let mut lvl2 = curvebook_format::ZipWriter::new();
+        lvl2.add_file("ok.txt", b"clean".to_vec()).unwrap();
+        let mut lvl1 = curvebook_format::ZipWriter::new();
+        lvl1.add_file("inner.zip", lvl2.finish().unwrap()).unwrap();
+        let mut outer = curvebook_format::ZipWriter::new();
+        outer.add_file("mid.zip", lvl1.finish().unwrap()).unwrap();
+        std::fs::write(dist.join("deep.zip"), outer.finish().unwrap()).unwrap();
+        let cat = super::RepoAssetCatalog { allowed_sha256: std::collections::BTreeSet::new() };
+        let (_, dist_errs) = super::scan_dist_artefacts(&cat, &dist).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(dist_errs.iter().any(|e| e.contains("nested archive depth")), "{dist_errs:?}");
     }
 }

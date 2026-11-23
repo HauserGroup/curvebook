@@ -2352,11 +2352,19 @@ pub(crate) fn patch_active_dialog(app: &mut UiApp, fields: &Map<String, Value>) 
                     "query" | "palette.query" => {
                         let q = val.as_str().ok_or_else(|| bad_input(format!("`{key}` must be a string")))?;
                         app.canvas_dialogs.command_palette.query = q.to_owned();
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            app.egui_views.command_palette.query = q.to_owned();
+                        }
                     }
                     "selected_index" | "palette.selected_index" => {
                         let raw = val.as_u64().ok_or_else(|| bad_input(format!("`{key}` must be a non-negative integer")))?;
                         let idx = usize::try_from(raw).map_err(|_| bad_input(format!("`{key}` exceeds usize")))?;
                         app.canvas_dialogs.command_palette.selected_index = idx;
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            app.egui_views.command_palette.selected_index = idx;
+                        }
                     }
                     other => return Err(bad_input(format!("unknown CommandPalette field `{other}`"))),
                 }

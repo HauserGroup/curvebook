@@ -83,7 +83,12 @@ fn assert_json_error_code(out: &Output, expected_code: &str) -> TestResult {
             String::from_utf8_lossy(&out.stderr)
         )
     })?;
-    assert_eq!(parsed["error"]["code"].as_str(), Some(expected_code), "stdout={parsed}, stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        parsed.get("error").and_then(|e| e.get("code")).and_then(Value::as_str),
+        Some(expected_code),
+        "stdout={parsed}, stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     Ok(())
 }
 

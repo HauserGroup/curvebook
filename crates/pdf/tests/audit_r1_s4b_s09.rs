@@ -9,15 +9,13 @@ fn inflate_stream(pdf: &[u8]) -> String {
     let text = String::from_utf8_lossy(pdf);
     let mut all = String::new();
     let mut rest = text.as_ref();
-    while let Some(pos) = rest.find("stream\n") {
-        let after = &rest[pos + 7..];
-        if let Some(end) = after.find("\nendstream") {
-            all.push_str(&after[..end]);
-            all.push('\n');
-            rest = &after[end + 10..];
-        } else {
+    while let Some((_, after)) = rest.split_once("stream\n") {
+        let Some((body, tail)) = after.split_once("\nendstream") else {
             break;
-        }
+        };
+        all.push_str(body);
+        all.push('\n');
+        rest = tail;
     }
     all
 }
@@ -27,8 +25,8 @@ fn extract_first_tm_xy(stream: &str) -> Option<(f64, f64)> {
         let trimmed = line.trim();
         if let Some(body) = trimmed.strip_suffix(" Tm") {
             let parts: Vec<&str> = body.split_whitespace().collect();
-            if parts.len() == 6
-                && let (Ok(x), Ok(y)) = (parts[4].parse::<f64>(), parts[5].parse::<f64>())
+            if let [_, _, _, _, xs, ys] = parts.as_slice()
+                && let (Ok(x), Ok(y)) = (xs.parse::<f64>(), ys.parse::<f64>())
             {
                 return Some((x, y));
             }
@@ -43,8 +41,8 @@ fn extract_all_tms(stream: &str) -> Vec<(f64, f64)> {
         let trimmed = line.trim();
         if let Some(body) = trimmed.strip_suffix(" Tm") {
             let parts: Vec<&str> = body.split_whitespace().collect();
-            if parts.len() == 6
-                && let (Ok(x), Ok(y)) = (parts[4].parse::<f64>(), parts[5].parse::<f64>())
+            if let [_, _, _, _, xs, ys] = parts.as_slice()
+                && let (Ok(x), Ok(y)) = (xs.parse::<f64>(), ys.parse::<f64>())
             {
                 out.push((x, y));
             }
@@ -165,11 +163,9 @@ fn r1_s09_08_pdf_outlined_and_selectable_bidi_avoid_double_reversal() {
     );
 
     let sel_bidi = inflate_stream(&render_pdf(&scene, &pdf_opts(false)).expect("bidi selectable"));
-    let bt_start = sel_bidi.find("BT\n").unwrap_or_else(|| panic!("BT block missing: {sel_bidi}"));
-    let pos_2026 = sel_bidi.find("(2026) Tj").unwrap_or_else(|| panic!("selectable digits missing: {sel_bidi}"));
-    let pos_space =
-        sel_bidi[pos_2026..].find("( ) Tj").map(|off| pos_2026 + off).unwrap_or_else(|| panic!("RTL space after digits missing: {sel_bidi}"));
-    assert!(bt_start < pos_2026, "digits should appear in first BT block: {sel_bidi}");
-    assert!(!sel_bidi[bt_start..pos_2026].contains(" m\n"), "Hebrew outlines must not precede '2026': {sel_bidi}");
-    assert!(sel_bidi[pos_space..].contains(" m\n"), "Hebrew outlines must follow '2026 ': {sel_bidi}");
+    let (before_2026, after_2026) = sel_bidi.split_once("(2026) Tj").unwrap_or_else(|| panic!("selectable digits missing: {sel_bidi}"));
+    let (_, after_bt) = before_2026.split_once("BT\n").unwrap_or_else(|| panic!("BT block missing before digits: {sel_bidi}"));
+    assert!(!after_bt.contains(" m\n"), "Hebrew outlines must not precede '2026': {sel_bidi}");
+    let (_, after_space) = after_2026.split_once("( ) Tj").unwrap_or_else(|| panic!("RTL space after digits missing: {sel_bidi}"));
+    assert!(after_space.contains(" m\n"), "Hebrew outlines must follow '2026 ': {sel_bidi}");
 }

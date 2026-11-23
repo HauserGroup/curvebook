@@ -16,6 +16,14 @@ use curvebook_mcp::{
 };
 use serde_json::{Value, json};
 
+fn env_truthy(var: &str) -> bool {
+    std::env::var(var).is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
+fn loopback_required() -> bool {
+    env_truthy("CI") || env_truthy("CURVEBOOK_REQUIRE_LOOPBACK")
+}
+
 #[derive(Default)]
 struct MockGuiHost {
     gui_only: bool,
@@ -109,9 +117,9 @@ fn decode_cl_frames(raw: &[u8]) -> Result<Vec<Value>, String> {
         let (headers, rest) = text.split_once("\r\n\r\n").ok_or_else(|| String::from("header sep"))?;
         let len_raw = headers.strip_prefix("Content-Length: ").ok_or_else(|| String::from("content-length"))?;
         let len: usize = len_raw.trim().parse().map_err(|err| format!("len: {err}"))?;
-        let body = &rest.as_bytes()[..len];
+        let (body, tail) = rest.as_bytes().split_at_checked(len).ok_or_else(|| String::from("truncated body"))?;
         out.push(serde_json::from_slice(body).map_err(|err| format!("json frame: {err}"))?);
-        cur = &rest.as_bytes()[len..];
+        cur = tail;
     }
     Ok(out)
 }
@@ -360,6 +368,7 @@ fn gui_tools_return_conflict_when_unattached_and_route_over_control_port() {
     let listener = match TcpListener::bind("127.0.0.1:0") {
         Ok(l) => l,
         Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+            assert!(!loopback_required(), "FAIL-CLOSED loopback bind denied under CI/CURVEBOOK_REQUIRE_LOOPBACK: {err}");
             let mut attached = McpServerState::with_control_port_and_gui_only(59999, true).expect("control port state");
             let inspect = call_tool(&mut attached, "ui_inspect", json!({ "scope": "grid" })).expect("sandbox err");
             assert!(inspect.is_error);
@@ -375,6 +384,7 @@ fn gui_tools_return_conflict_when_unattached_and_route_over_control_port() {
             let _ = listener.accept();
         }
         Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+            assert!(!loopback_required(), "FAIL-CLOSED loopback connect denied under CI/CURVEBOOK_REQUIRE_LOOPBACK: {err}");
             let mut attached = McpServerState::with_control_port_and_gui_only(port, true).expect("control port state");
             let inspect = call_tool(&mut attached, "ui_inspect", json!({ "scope": "grid" })).expect("sandbox err");
             assert!(inspect.is_error);
@@ -585,13 +595,41 @@ fn gui_tools_forward_extended_parameters_and_reject_screenshot_path_in_gui_only(
     assert_eq!(calls[3].1["target"], json!("full_window"));
     assert_eq!(calls[4].1["hover_fraction_x"], json!(0.45));
     assert_eq!(calls[4].1["hover_n"], json!(18.0));
-    assert_eq!(calls[4].1["metrics"]["width_px"], json!(1280.0));
+    assert_eq!(calls[4].1["metrics"], json!({ "logical_width": 1280.0, "logical_height": 800.0, "scale_factor": 1.0 }));
+    assert!(calls[4].1["metrics"].get("width_px").is_none());
+    assert!(calls[4].1["metrics"].get("height_px").is_none());
     assert_eq!(calls[5].1["params"]["kind"], json!("Column"));
     assert_eq!(calls[6].1["sheet_id"], json!("result-1"));
     assert_eq!(calls[7].1["tab"], json!(2));
     assert_eq!(calls[8].1["patches"]["alpha"], json!(0.01));
     assert_eq!(calls[8].1["force_create_new"], json!(true));
     assert_eq!(calls[8].1["choice"], json!("create_new"));
+    drop(host_guard);
+
+    call_tool(
+        &mut state,
+        "ui_pointer_gesture",
+        json!({
+            "action": "click",
+            "widget_id": "btn.ok",
+            "metrics": { "logical_width": 1440.0, "logical_height": 900.0, "scale_factor": 2.0 }
+        }),
+    )
+    .expect("canonical pointer metrics");
+    call_tool(
+        &mut state,
+        "ui_inspect",
+        json!({
+            "scope": "canvas",
+            "include_bounds": true,
+            "metrics": { "width_px": 1600.0, "height_px": 1000.0, "scale_factor": 1.5 }
+        }),
+    )
+    .expect("ui_inspect alias metrics");
+
+    let host_guard = shared.borrow();
+    assert_eq!(host_guard.calls[9].1["metrics"], json!({ "logical_width": 1440.0, "logical_height": 900.0, "scale_factor": 2.0 }));
+    assert_eq!(host_guard.calls[10].1["metrics"], json!({ "logical_width": 1600.0, "logical_height": 1000.0, "scale_factor": 1.5 }));
 }
 
 #[test]
@@ -609,6 +647,12 @@ fn gui_tools_worst_case_annotations_cover_all_eight_tools() {
 
     let gui_defs = curvebook_mcp::list_gui_tools();
     assert_eq!(gui_defs.len(), GUI_TOOL_NAMES.len());
+    // Confirm `ui_inspect` input schema uses canonical ViewportMetrics keys (`logical_width`, `logical_height`, `scale_factor`).
+    let ui_inspect_metrics =
+        gui_defs[0].input_schema.pointer("/properties/metrics/properties").and_then(Value::as_object).expect("ui_inspect metrics schema");
+    for key in ["logical_width", "logical_height", "scale_factor"] {
+        assert!(ui_inspect_metrics.contains_key(key), "ui_inspect schema missing canonical ViewportMetrics key `{key}`");
+    }
 
     let mut gui_only_state = McpServerState::new().with_gui_only(true);
     let gui_only_defs = list_tools_for_state(&gui_only_state);

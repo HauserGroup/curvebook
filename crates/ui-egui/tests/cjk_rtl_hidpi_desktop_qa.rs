@@ -164,7 +164,7 @@ fn cjk_rtl_locales_render_mirror_panes_and_keep_hidpi_hit_test_parity() {
     let scales = [1.0_f64, 1.5, 2.0, 3.0];
 
     for locale in locales {
-        let _ = app.set_locale(locale);
+        assert_eq!(app.set_locale(locale), locale);
         app.nav.welcome.open = false;
         app.sync_views();
 
@@ -177,9 +177,18 @@ fn cjk_rtl_locales_render_mirror_panes_and_keep_hidpi_hit_test_parity() {
 
             let layout = measure_qa_regions(&app, metrics);
             assert!(layout.navigator.width > 0 && layout.canvas.width > 0 && layout.inspector.width > 0);
-            assert_eq!(layout.navigator.x, 0, "{locale}@{scale}x: navigator starts on left");
-            assert!(layout.navigator.x < layout.canvas.x && layout.canvas.x < layout.inspector.x);
-            assert_eq!(layout.inspector.x + layout.inspector.width, phys_w, "{locale}@{scale}x: inspector flushes right");
+            if curvebook_ui_egui::i18n::is_rtl_locale(locale) {
+                assert_eq!(layout.inspector.x, 0, "{locale}@{scale}x: RTL inspector must dock flush left");
+                assert!(
+                    layout.inspector.x < layout.canvas.x && layout.canvas.x < layout.navigator.x,
+                    "{locale}@{scale}x: expected mirrored RTL pane order inspector < canvas < navigator: {layout:?}"
+                );
+                assert_eq!(layout.navigator.x + layout.navigator.width, phys_w, "{locale}@{scale}x: RTL navigator must flush right");
+            } else {
+                assert_eq!(layout.navigator.x, 0, "{locale}@{scale}x: navigator starts on left");
+                assert!(layout.navigator.x < layout.canvas.x && layout.canvas.x < layout.inspector.x);
+                assert_eq!(layout.inspector.x + layout.inspector.width, phys_w, "{locale}@{scale}x: inspector flushes right");
+            }
 
             let target = RenderTargetSpec { width_px: phys_w, height_px: phys_h, dpi };
             let img = app.render_egui_shell_rgba(target, ScreenshotRegionTarget::FullWindow).expect("render egui shell rgba");
@@ -399,7 +408,7 @@ fn r13_rtl_ar_he_and_hidpi_pixel_to_hit_box_parity() {
         for metrics in [ViewportMetrics::new(1280.0, 800.0, 1.0), ViewportMetrics::new(1024.0, 640.0, 2.0)] {
             for (cmd_id, params) in &dialogs {
                 let mut app = base_app.clone();
-                let _ = app.set_locale(locale);
+                assert_eq!(app.set_locale(locale), locale);
                 let _ = dispatch_ui_command(&mut app, cmd_id, params).expect("open R13 modal").expect("handled");
                 app.sync_views();
                 let h = human_wf_common::EguiWfHarness::from_app(app, metrics);

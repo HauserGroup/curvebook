@@ -14,6 +14,7 @@
 //! assert_eq!(ColormapId::Viridis.sample(0.0), Rgba8::rgb(68, 1, 84));
 //! ```
 #![forbid(unsafe_code)]
+#![deny(clippy::indexing_slicing)]
 
 pub mod categorical;
 pub mod colormap;

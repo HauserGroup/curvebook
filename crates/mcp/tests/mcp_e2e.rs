@@ -9,6 +9,14 @@ use curvebook_mcp::{McpServerState, serve};
 use curvebook_svg::validate_svg_structure;
 use serde_json::{Value, json};
 
+fn env_truthy(var: &str) -> bool {
+    std::env::var(var).is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
+fn loopback_required() -> bool {
+    env_truthy("CI") || env_truthy("CURVEBOOK_REQUIRE_LOOPBACK")
+}
+
 struct TempDirGuard {
     path: PathBuf,
 }
@@ -44,9 +52,11 @@ fn decode_cl_frames(raw: &[u8]) -> Result<Vec<Value>, String> {
         if rest.len() < len {
             return Err(format!("truncated body: expected {len} bytes, found {}", rest.len()));
         }
-        let body = &rest.as_bytes()[..len];
+        let Some((body, tail)) = rest.as_bytes().split_at_checked(len) else {
+            return Err(format!("truncated body: expected {len} bytes, found {}", rest.len()));
+        };
         out.push(serde_json::from_slice(body).map_err(|err| format!("json body: {err}"))?);
-        cursor = &rest.as_bytes()[len..];
+        cursor = tail;
     }
     Ok(out)
 }
@@ -78,14 +88,14 @@ fn call_tool_rpc(state: &mut McpServerState, id: i64, name: &str, arguments: Val
     if resp.get("error").is_some() {
         return Err(format!("unexpected JSON-RPC error for {name}: {resp}"));
     }
-    Ok(resp["result"].clone())
+    resp.get("result").cloned().ok_or_else(|| format!("missing result for {name}: {resp}"))
 }
 
 fn first_text_json(tool_res: &Value) -> Result<Value, String> {
-    if tool_res["isError"] != json!(false) {
+    if tool_res.get("isError") != Some(&json!(false)) {
         return Err(format!("tool failed: {tool_res}"));
     }
-    let text = tool_res["content"][0]["text"].as_str().ok_or_else(|| String::from("first block text missing"))?;
+    let text = tool_res.pointer("/content/0/text").and_then(Value::as_str).ok_or_else(|| String::from("first block text missing"))?;
     serde_json::from_str(text).map_err(|err| format!("valid JSON in tool text block: {err}"))
 }
 
@@ -141,24 +151,24 @@ fn slice0_handshake_and_catalog(state: &mut McpServerState) -> Result<(), String
     let mut hs_out = Vec::new();
     serve(&mut Cursor::new(handshake), &mut hs_out, state).map_err(|err| format!("handshake serve: {err}"))?;
     let hs_replies = decode_cl_frames(&hs_out)?;
-    if hs_replies.len() != 3 {
+    let [r0, _, r2] = hs_replies.as_slice() else {
         return Err(format!("expected 3 handshake replies, got {}", hs_replies.len()));
-    }
-    if hs_replies[0]["result"]["protocolVersion"] != json!("2024-11-05")
-        || hs_replies[0]["result"]["serverInfo"]["name"] != json!("curvebook")
-        || !hs_replies[0]["result"]["capabilities"]["tools"].is_object()
+    };
+    if r0.pointer("/result/protocolVersion") != Some(&json!("2024-11-05"))
+        || r0.pointer("/result/serverInfo/name") != Some(&json!("curvebook"))
+        || !r0.pointer("/result/capabilities/tools").is_some_and(Value::is_object)
     {
-        return Err(format!("unexpected initialize reply: {}", hs_replies[0]));
+        return Err(format!("unexpected initialize reply: {r0}"));
     }
-    if hs_replies[2]["result"]["tools"].as_array().map(Vec::len) != Some(10) || !state.is_initialized() {
-        return Err(format!("unexpected tools/list or init state: {}", hs_replies[2]));
+    if r2.pointer("/result/tools").and_then(Value::as_array).map(Vec::len) != Some(10) || !state.is_initialized() {
+        return Err(format!("unexpected tools/list or init state: {r2}"));
     }
 
     let cmd_list = first_text_json(&call_tool_rpc(state, 4, "command_list", json!({}))?)?;
-    let entries = cmd_list["commands"].as_array().ok_or_else(|| String::from("missing commands array"))?;
+    let entries = cmd_list.get("commands").and_then(Value::as_array).ok_or_else(|| String::from("missing commands array"))?;
     for spec in UI_COMMANDS {
-        let hit = entries.iter().find(|item| item["id"] == spec.id).ok_or_else(|| format!("missing UI command {}", spec.id))?;
-        if hit["ui"] != json!(true) {
+        let hit = entries.iter().find(|item| item.get("id") == Some(&json!(spec.id))).ok_or_else(|| format!("missing UI command {}", spec.id))?;
+        if hit.get("ui") != Some(&json!(true)) {
             return Err(format!("expected ui=true on {}: {hit}", spec.id));
         }
     }
@@ -185,7 +195,7 @@ fn slice0_populate_and_fit(state: &mut McpServerState) -> Result<(), String> {
             }
         }),
     )?)?;
-    if create_res["mutated"] != json!(true) {
+    if create_res.get("mutated") != Some(&json!(true)) {
         return Err(format!("expected mutated=true: {create_res}"));
     }
 
@@ -229,7 +239,7 @@ fn slice0_populate_and_fit(state: &mut McpServerState) -> Result<(), String> {
             }
         }),
     )?)?;
-    if fit_res["payload"]["sheet_id"] != json!("fit-1") {
+    if fit_res.pointer("/payload/sheet_id") != Some(&json!("fit-1")) {
         return Err(format!("unexpected fit result: {fit_res}"));
     }
 
@@ -245,20 +255,22 @@ fn slice0_populate_and_fit(state: &mut McpServerState) -> Result<(), String> {
 
     let inspect = first_text_json(&call_tool_rpc(state, 10, "doc_inspect", json!({}))?)?;
     let counts = (
-        inspect["sheets"]["data"].as_array().map(Vec::len),
-        inspect["sheets"]["info"].as_array().map(Vec::len),
-        inspect["analyses"].as_array().map(Vec::len),
-        inspect["graphs"].as_array().map(Vec::len),
+        inspect.pointer("/sheets/data").and_then(Value::as_array).map(Vec::len),
+        inspect.pointer("/sheets/info").and_then(Value::as_array).map(Vec::len),
+        inspect.get("analyses").and_then(Value::as_array).map(Vec::len),
+        inspect.get("graphs").and_then(Value::as_array).map(Vec::len),
     );
     if counts != (Some(1), Some(1), Some(1), Some(1)) {
         return Err(format!("unexpected sheet counts: {counts:?}"));
     }
 
-    let result_scalars = inspect["variables"]["result_scalars"].as_array().ok_or_else(|| String::from("missing result scalars"))?;
+    let result_scalars =
+        inspect.pointer("/variables/result_scalars").and_then(Value::as_array).ok_or_else(|| String::from("missing result scalars"))?;
     let log_ec50 = result_scalars
         .iter()
-        .find(|s| s["key"] == "LogEC50")
-        .and_then(|s| s["value"].as_f64())
+        .find(|s| s.get("key") == Some(&json!("LogEC50")))
+        .and_then(|s| s.get("value"))
+        .and_then(Value::as_f64)
         .ok_or_else(|| String::from("LogEC50 scalar missing"))?;
     if (log_ec50 - (-6.0)).abs() >= 0.05 {
         return Err(format!("unexpected LogEC50: {log_ec50}"));
@@ -273,29 +285,32 @@ fn slice0_render_and_exports(state: &mut McpServerState, dir: &std::path::Path) 
     let csv_path = dir.join("fit_tidy.csv");
 
     let preview = call_tool_rpc(state, 11, "render_preview", json!({ "sheet_id": "graph-1", "width_px": 640, "height_px": 480, "dpi": 96 }))?;
-    if preview["isError"] != json!(false)
-        || preview["content"][0]["type"] != json!("image")
-        || preview["content"][0]["mimeType"] != json!("image/png")
+    if preview.get("isError") != Some(&json!(false))
+        || preview.pointer("/content/0/type") != Some(&json!("image"))
+        || preview.pointer("/content/0/mimeType") != Some(&json!("image/png"))
     {
         return Err(format!("invalid render_preview envelope: {preview}"));
     }
-    let png_b64 = preview["content"][0]["data"].as_str().ok_or_else(|| String::from("png base64 missing"))?;
+    let png_b64 = preview.pointer("/content/0/data").and_then(Value::as_str).ok_or_else(|| String::from("png base64 missing"))?;
     let png_raw = decode_base64(png_b64)?;
     if !png_raw.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Err(String::from("invalid PNG signature"));
     }
 
-    let meta_text = preview["content"][1]["text"].as_str().ok_or_else(|| String::from("metadata text missing"))?;
+    let meta_text = preview.pointer("/content/1/text").and_then(Value::as_str).ok_or_else(|| String::from("metadata text missing"))?;
     let preview_meta: Value = serde_json::from_str(meta_text).map_err(|err| format!("meta json: {err}"))?;
-    if preview_meta["sheet_id"] != json!("graph-1") || preview_meta["width_px"] != json!(640) || preview_meta["height_px"] != json!(480) {
+    if preview_meta.get("sheet_id") != Some(&json!("graph-1"))
+        || preview_meta.get("width_px") != Some(&json!(640))
+        || preview_meta.get("height_px") != Some(&json!(480))
+    {
         return Err(format!("unexpected preview meta: {preview_meta}"));
     }
-    if preview_meta["primitives_count"].as_u64().unwrap_or(0) == 0 {
+    if preview_meta.get("primitives_count").and_then(Value::as_u64).unwrap_or(0) == 0 {
         return Err(String::from("expected non-zero primitives count"));
     }
 
     let svg_inline = call_tool_rpc(state, 12, "export", json!({ "format": "svg", "sheet_id": "graph-1" }))?;
-    let svg_text = svg_inline["content"][0]["text"].as_str().ok_or_else(|| String::from("svg text missing"))?;
+    let svg_text = svg_inline.pointer("/content/0/text").and_then(Value::as_str).ok_or_else(|| String::from("svg text missing"))?;
     validate_svg_structure(svg_text).map_err(|err| format!("valid inline SVG: {err}"))?;
 
     call_tool_rpc(state, 13, "export", json!({ "format": "svg", "sheet_id": "graph-1", "output_path": svg_path.display().to_string() }))?;
@@ -326,9 +341,9 @@ fn slice0_render_and_exports(state: &mut McpServerState, dir: &std::path::Path) 
     }
 
     let json_inline = call_tool_rpc(state, 17, "export", json!({ "format": "json", "sheet_id": "fit-1" }))?;
-    let fit_text = json_inline["content"][0]["text"].as_str().ok_or_else(|| String::from("fit json missing"))?;
+    let fit_text = json_inline.pointer("/content/0/text").and_then(Value::as_str).ok_or_else(|| String::from("fit json missing"))?;
     let exported_fit: Value = serde_json::from_str(fit_text).map_err(|err| format!("parse fit json: {err}"))?;
-    if exported_fit["id"] != json!("fit-1") {
+    if exported_fit.get("id") != Some(&json!("fit-1")) {
         return Err(format!("unexpected fit export id: {exported_fit}"));
     }
     Ok(())
@@ -339,7 +354,7 @@ fn slice0_save_and_reopen(state: &mut McpServerState, dir: &std::path::Path) -> 
     let template_path = dir.join("dose_response.cbtemplate");
 
     let save_res = first_text_json(&call_tool_rpc(state, 18, "save_file", json!({ "path": project_path.display().to_string() }))?)?;
-    if save_res["saved"] != json!(true) {
+    if save_res.get("saved") != Some(&json!(true)) {
         return Err(format!("expected saved=true: {save_res}"));
     }
 
@@ -347,17 +362,19 @@ fn slice0_save_and_reopen(state: &mut McpServerState, dir: &std::path::Path) -> 
 
     let mut reopened_state = McpServerState::new();
     let open_res = first_text_json(&call_tool_rpc(&mut reopened_state, 20, "open_file", json!({ "path": project_path.display().to_string() }))?)?;
-    if open_res["opened"] != json!(true) || open_res["total_sheet_count"] != json!(4) {
+    if open_res.get("opened") != Some(&json!(true)) || open_res.get("total_sheet_count") != Some(&json!(4)) {
         return Err(format!("unexpected reopen result: {open_res}"));
     }
 
     let reopened_inspect = first_text_json(&call_tool_rpc(&mut reopened_state, 21, "doc_inspect", json!({}))?)?;
-    if reopened_inspect["analyses"].as_array().map(Vec::len) != Some(1) || reopened_inspect["graphs"].as_array().map(Vec::len) != Some(1) {
+    if reopened_inspect.get("analyses").and_then(Value::as_array).map(Vec::len) != Some(1)
+        || reopened_inspect.get("graphs").and_then(Value::as_array).map(Vec::len) != Some(1)
+    {
         return Err(format!("unexpected reopened inspect: {reopened_inspect}"));
     }
 
     let single_xy = first_text_json(&call_tool_rpc(&mut reopened_state, 22, "doc_inspect", json!({ "sheet_id": "xy-1", "include_cells": true }))?)?;
-    if !single_xy["csv_preview"].as_str().is_some_and(|s| s.contains("-9")) {
+    if !single_xy.get("csv_preview").and_then(Value::as_str).is_some_and(|s| s.contains("-9")) {
         return Err(format!("missing -9 in xy csv preview: {single_xy}"));
     }
 
@@ -369,7 +386,7 @@ fn slice0_save_and_reopen(state: &mut McpServerState, dir: &std::path::Path) -> 
         json!({ "path": template_path.display().to_string(), "title": "From Template" }),
     )?)?;
     let tpl_inspect = first_text_json(&call_tool_rpc(&mut tpl_state, 24, "doc_inspect", json!({}))?)?;
-    if tpl_inspect["title"] != json!("From Template") {
+    if tpl_inspect.get("title") != Some(&json!("From Template")) {
         return Err(format!("unexpected template title: {tpl_inspect}"));
     }
     Ok(())
@@ -605,6 +622,7 @@ fn live_control_port_attach_dispatches_ui_and_engine_and_atomic_undo() {
     let listener = match TcpListener::bind("127.0.0.1:0") {
         Ok(l) => l,
         Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+            assert!(!loopback_required(), "FAIL-CLOSED loopback bind denied under CI/CURVEBOOK_REQUIRE_LOOPBACK: {err}");
             let mut state = McpServerState::with_control_port(59999).expect("valid port");
             let res = call_tool_rpc(&mut state, 1, "doc_inspect", json!({})).expect("rpc reply");
             assert_eq!(res["isError"], json!(true));
@@ -622,6 +640,7 @@ fn live_control_port_attach_dispatches_ui_and_engine_and_atomic_undo() {
             let _ = listener.accept();
         }
         Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+            assert!(!loopback_required(), "FAIL-CLOSED loopback connect denied under CI/CURVEBOOK_REQUIRE_LOOPBACK: {err}");
             let mut state = McpServerState::with_control_port(port).expect("valid port");
             let res = call_tool_rpc(&mut state, 1, "doc_inspect", json!({})).expect("rpc reply");
             assert_eq!(res["isError"], json!(true));

@@ -187,8 +187,10 @@ fn parse_segment(input: &str, state: &mut StyleState, spans: &mut Vec<RichSpan>,
     let mut prev_char: Option<char> = None;
     let mut no_more_closing = [false; 4];
 
-    while idx < input.len() {
-        let rest = &input[idx..];
+    while let Some(rest) = input.get(idx..) {
+        if rest.is_empty() {
+            break;
+        }
 
         if let Some((tag, consumed)) = parse_html_tag(rest) {
             apply_html_tag(tag, state);
@@ -255,7 +257,8 @@ fn parse_segment(input: &str, state: &mut StyleState, spans: &mut Vec<RichSpan>,
         }
 
         let ch_len = ch.len_utf8();
-        push_styled(spans, &rest[..ch_len], state);
+        let mut buf = [0u8; 4];
+        push_styled(spans, ch.encode_utf8(&mut buf), state);
         idx += ch_len;
         prev_char = Some(ch);
     }
@@ -274,14 +277,11 @@ enum HtmlTag {
 }
 
 fn parse_html_tag(rest: &str) -> Option<(HtmlTag, usize)> {
-    if !rest.starts_with('<') {
+    let after = rest.strip_prefix('<')?;
+    let (inner, _) = after.split_once('>')?;
+    if inner.is_empty() || inner.len() > 7 {
         return None;
     }
-    let close = rest.find('>')?;
-    if close == 0 || close > 8 {
-        return None;
-    }
-    let inner = &rest[1..close];
     let tag = if inner.eq_ignore_ascii_case("b") {
         HtmlTag::BoldOpen
     } else if inner.eq_ignore_ascii_case("/b") {
@@ -301,7 +301,7 @@ fn parse_html_tag(rest: &str) -> Option<(HtmlTag, usize)> {
     } else {
         return None;
     };
-    Some((tag, close + 1))
+    Some((tag, 1 + inner.len() + 1))
 }
 
 fn apply_html_tag(tag: HtmlTag, state: &mut StyleState) {
@@ -339,8 +339,7 @@ fn handle_backslash(rest: &str, state: &StyleState, spans: &mut Vec<RichSpan>, d
 
     if first.is_ascii_alphabetic() {
         let name_len = after.bytes().take_while(u8::is_ascii_alphabetic).count();
-        let name = &after[..name_len];
-        let tail = &after[name_len..];
+        let (name, tail) = after.split_at_checked(name_len)?;
 
         if matches!(name, "frac" | "dfrac" | "tfrac")
             && let Some((num, den, args_consumed)) = extract_frac_args(tail)
@@ -433,7 +432,8 @@ pub fn match_balanced_math_delimiters(rest: &str, delim_len: usize) -> Option<(&
     let mut brace_depth = 0usize;
 
     while i < bytes.len() {
-        let ch = after_open.get(i..)?.chars().next()?;
+        let slice = after_open.get(i..)?;
+        let ch = slice.chars().next()?;
         if ch == '\\' {
             i += 1;
             if let Some(next_ch) = after_open.get(i..).and_then(|s| s.chars().next()) {
@@ -457,7 +457,7 @@ pub fn match_balanced_math_delimiters(rest: &str, delim_len: usize) -> Option<(&
             i += 1;
             continue;
         }
-        if brace_depth == 0 && ((delim_len == 1 && ch == '$') || (delim_len == 2 && after_open.get(i..).is_some_and(|s| s.starts_with("$$")))) {
+        if brace_depth == 0 && ((delim_len == 1 && ch == '$') || (delim_len == 2 && slice.starts_with("$$"))) {
             let inner = after_open.get(..i)?;
             let after_close = after_open.get(i + delim_len..)?;
             if is_math_mode_content(inner, after_close) {
@@ -516,7 +516,7 @@ fn handle_asterisk_run(
     no_more_closing: &mut [bool; 4],
 ) -> Option<(usize, Option<char>)> {
     let run_len = rest.bytes().take_while(|&b| b == b'*').count();
-    let after_open = &rest[run_len..];
+    let after_open = rest.get(run_len..)?;
     let next_char = after_open.chars().next()?;
 
     if run_len >= 4 || next_char.is_whitespace() || next_char == '*' {
@@ -545,7 +545,7 @@ fn handle_asterisk_run(
         return None;
     };
 
-    let inner = &after_open[..close_offset];
+    let inner = after_open.get(..close_offset)?;
     let mut inner_state = match run_len {
         3 => state.with_bold().with_italic(),
         2 => state.with_bold(),
@@ -561,20 +561,20 @@ fn find_closing_star_run(s: &str, needed: usize, exact: bool) -> Option<usize> {
     while i < bytes.len() {
         if bytes[i] == b'\\' {
             i += 1;
-            if let Some(ch) = s[i..].chars().next() {
+            if let Some(ch) = s.get(i..).and_then(|sub| sub.chars().next()) {
                 i += ch.len_utf8();
             }
             continue;
         }
         if bytes[i] != b'*' {
-            let Some(ch) = s[i..].chars().next() else {
+            let Some(ch) = s.get(i..).and_then(|sub| sub.chars().next()) else {
                 break;
             };
             i += ch.len_utf8();
             continue;
         }
         let run_len = bytes[i..].iter().take_while(|&&b| b == b'*').count();
-        let prev_non_space = i > 0 && s[..i].chars().next_back().is_some_and(|c| !c.is_whitespace() && c != '*');
+        let prev_non_space = i > 0 && s.get(..i).and_then(|sub| sub.chars().next_back()).is_some_and(|c| !c.is_whitespace() && c != '*');
         let len_matches = if exact { run_len == needed } else { run_len == needed || (needed == 2 && run_len == 3) };
         if prev_non_space && len_matches {
             let offset = if needed == 2 && run_len == 3 { i + 1 } else { i };
@@ -587,7 +587,7 @@ fn find_closing_star_run(s: &str, needed: usize, exact: bool) -> Option<usize> {
 
 fn handle_script_marker(rest: &str, marker: char, state: &StyleState, spans: &mut Vec<RichSpan>, depth: usize) -> Option<(usize, Option<char>)> {
     let target_script = if marker == '^' { SpanScript::Superscript } else { SpanScript::Subscript };
-    let after = &rest[1..];
+    let after = rest.get(1..)?;
     let first = after.chars().next()?;
 
     if first == '{' {
@@ -608,7 +608,7 @@ fn handle_script_marker(rest: &str, marker: char, state: &StyleState, spans: &mu
     }
 
     let token_len = scan_script_token(after)?;
-    let token = &after[..token_len];
+    let token = after.get(..token_len)?;
     let script_state = state.with_script(target_script);
     push_styled(spans, token, &script_state);
     Some((1 + token_len, token.chars().last()))
@@ -630,7 +630,7 @@ fn scan_script_token(after: &str) -> Option<usize> {
         return None;
     };
 
-    for (_, ch) in after[end..].char_indices() {
+    for (_, ch) in chars {
         if ch.is_alphanumeric() {
             end += ch.len_utf8();
         } else {
@@ -685,7 +685,7 @@ pub fn extract_braced_opt_ws(s: &str) -> Option<(&str, usize)> {
 
 fn extract_frac_args(s: &str) -> Option<(&str, &str, usize)> {
     let (num, num_consumed) = extract_braced_opt_ws(s)?;
-    let (den, den_consumed) = extract_braced_opt_ws(&s[num_consumed..])?;
+    let (den, den_consumed) = extract_braced_opt_ws(s.get(num_consumed..)?)?;
     Some((num, den, num_consumed + den_consumed))
 }
 
@@ -1079,23 +1079,23 @@ pub fn lookup_math_escape(name: &str) -> Option<&'static str> {
 
 fn parse_html_entity(rest: &str) -> Option<(String, usize)> {
     let after = rest.strip_prefix('&')?;
-    let semi = after.find(';')?;
-    if semi == 0 || semi > 16 {
+    let (name, _) = after.split_once(';')?;
+    if name.is_empty() || name.len() > 16 {
         return None;
     }
-    let name = &after[..semi];
+    let consumed = 1 + name.len() + 1;
     if let Some(hex) = name.strip_prefix("#x").or_else(|| name.strip_prefix("#X")) {
         let code = u32::from_str_radix(hex, 16).ok()?;
         let ch = valid_entity_char(code)?;
-        return Some((ch.to_string(), 1 + semi + 1));
+        return Some((ch.to_string(), consumed));
     }
     if let Some(dec) = name.strip_prefix('#') {
         let code = dec.parse::<u32>().ok()?;
         let ch = valid_entity_char(code)?;
-        return Some((ch.to_string(), 1 + semi + 1));
+        return Some((ch.to_string(), consumed));
     }
     let mapped = lookup_html_entity(name)?;
-    Some((mapped.to_owned(), 1 + semi + 1))
+    Some((mapped.to_owned(), consumed))
 }
 
 fn valid_entity_char(code: u32) -> Option<char> {
@@ -1180,21 +1180,20 @@ where
 {
     let mut out = String::with_capacity(template.len());
     let mut rest = template;
-    while let Some(start) = rest.find("{{") {
-        out.push_str(&rest[..start]);
-        let after_open = &rest[start + 2..];
-        if let Some(end) = after_open.find("}}") {
-            let token = after_open[..end].trim();
+    while let Some((before, after_open)) = rest.split_once("{{") {
+        out.push_str(before);
+        if let Some((raw_token, tail)) = after_open.split_once("}}") {
+            let token = raw_token.trim();
             if !token.is_empty()
                 && let Some(value) = resolver(token)
             {
                 out.push_str(&value);
             } else {
                 out.push_str("{{");
-                out.push_str(&after_open[..end]);
+                out.push_str(raw_token);
                 out.push_str("}}");
             }
-            rest = &after_open[end + 2..];
+            rest = tail;
         } else {
             out.push_str("{{");
             rest = after_open;
@@ -1270,14 +1269,18 @@ fn parse_equation_segments_inner(input: &str, out: &mut Vec<EquationSegment>, de
     let mut inline_start = 0usize;
     let mut brace_depth = 0usize;
 
-    while idx < input.len() {
-        let rest = &input[idx..];
+    while let Some(rest) = input.get(idx..) {
+        if rest.is_empty() {
+            break;
+        }
         if !in_math
             && brace_depth == 0
             && rest.starts_with('$')
             && let Some((inner, consumed)) = match_math_for_segments(rest)
         {
-            push_inline_segment(out, parse_markup_mode(&input[inline_start..idx], in_math));
+            if let Some(inline_slice) = input.get(inline_start..idx) {
+                push_inline_segment(out, parse_markup_mode(inline_slice, in_math));
+            }
             parse_equation_segments_inner(inner, out, depth + 1, true);
             idx += consumed;
             inline_start = idx;
@@ -1285,12 +1288,14 @@ fn parse_equation_segments_inner(input: &str, out: &mut Vec<EquationSegment>, de
         }
 
         if rest.starts_with('\\') {
-            let preceded_by_script = ends_with_unescaped_script_marker(&input[inline_start..idx]);
+            let preceded_by_script = input.get(inline_start..idx).is_some_and(ends_with_unescaped_script_marker);
             if brace_depth == 0
                 && !preceded_by_script
                 && let Some((frac_seg, consumed)) = try_parse_frac_segment(rest, depth)
             {
-                push_inline_segment(out, parse_markup_mode(&input[inline_start..idx], in_math));
+                if let Some(inline_slice) = input.get(inline_start..idx) {
+                    push_inline_segment(out, parse_markup_mode(inline_slice, in_math));
+                }
                 out.push(frac_seg);
                 idx += consumed;
                 inline_start = idx;
@@ -1311,19 +1316,20 @@ fn parse_equation_segments_inner(input: &str, out: &mut Vec<EquationSegment>, de
         idx += ch.len_utf8();
     }
 
-    if inline_start < input.len() {
-        push_inline_segment(out, parse_markup_mode(&input[inline_start..], in_math));
+    if inline_start < input.len()
+        && let Some(tail) = input.get(inline_start..)
+    {
+        push_inline_segment(out, parse_markup_mode(tail, in_math));
     }
 }
 
 fn try_parse_frac_segment(rest: &str, depth: usize) -> Option<(EquationSegment, usize)> {
     let after = rest.get(1..)?;
     let name_len = after.bytes().take_while(u8::is_ascii_alphabetic).count();
-    let name = after.get(..name_len)?;
+    let (name, tail) = after.split_at_checked(name_len)?;
     if !matches!(name, "frac" | "dfrac" | "tfrac") {
         return None;
     }
-    let tail = &after[name_len..];
     let (num, den, args_consumed) = extract_frac_args(tail)?;
     let mut numerator = Vec::new();
     parse_equation_segments_inner(trim_horiz_ws_nonempty(num), &mut numerator, depth + 1, true);
@@ -1436,19 +1442,25 @@ pub fn shape_bidi_runs(text: &str, base_dir: TextDirection) -> Vec<BidiRun> {
     let mut runs = Vec::new();
     let mut line_start = 0usize;
 
-    while line_start < text.len() {
-        let rest = &text[line_start..];
+    while let Some(rest) = text.get(line_start..) {
+        if rest.is_empty() {
+            break;
+        }
         let (line_rel_end, sep_rel_end) = find_paragraph_break(rest);
         let line_end = line_start + line_rel_end;
         let sep_end = line_start + sep_rel_end;
 
-        if line_end > line_start {
-            shape_bidi_line(&text[line_start..line_end], line_start, base_dir, &mut runs);
+        if line_end > line_start
+            && let Some(line_slice) = text.get(line_start..line_end)
+        {
+            shape_bidi_line(line_slice, line_start, base_dir, &mut runs);
         }
-        if sep_end > line_end {
+        if sep_end > line_end
+            && let Some(sep_slice) = text.get(line_end..sep_end)
+        {
             push_merged_run(
                 &mut runs,
-                BidiRun { text: text[line_end..sep_end].to_owned(), direction: TextDirection::Ltr, start_byte: line_end, end_byte: sep_end },
+                BidiRun { text: sep_slice.to_owned(), direction: TextDirection::Ltr, start_byte: line_end, end_byte: sep_end },
             );
         }
         line_start = sep_end;
@@ -1471,7 +1483,7 @@ pub fn reorder_visual_bidi(text: &str, base_dir: TextDirection) -> String {
 fn find_paragraph_break(rest: &str) -> (usize, usize) {
     for (idx, ch) in rest.char_indices() {
         if ch == '\r' {
-            let next_len = if rest[idx + 1..].starts_with('\n') { 2 } else { 1 };
+            let next_len = if rest.get(idx + 1..).is_some_and(|s| s.starts_with('\n')) { 2 } else { 1 };
             return (idx, idx + next_len);
         }
         if matches!(ch, '\n' | '\u{0085}' | '\u{2029}') {

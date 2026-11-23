@@ -25,6 +25,7 @@ fn ensure_drill_points_cache<'a>(app: &UiApp, gs: &GraphSheet, state: &'a mut Tr
                     .plotted_points
                     .into_iter()
                     .map(|p| DrillBackPointEntry {
+                        source_sheet_id: p.source_cell.sheet_id.clone(),
                         row: p.source_cell.row,
                         col: p.source_cell.col,
                         subcol: p.source_cell.subcol,
@@ -76,7 +77,11 @@ pub(super) fn render_data_point_drill_back_studio(
     };
 
     let points = ensure_drill_points_cache(app, gs, state);
-    let matched_pt = points.iter().find(|p| p.row == brushed.row && p.col == brushed.col && p.subcol == brushed.subcol);
+    let matched_pt =
+        points.iter().find(|p| p.source_sheet_id == brushed.sheet_id && p.row == brushed.row && p.col == brushed.col && p.subcol == brushed.subcol);
+    let brushed_on_graph = matched_pt.is_some()
+        || gs.spec.primary_source_sheet_id == brushed.sheet_id
+        || gs.spec.series.iter().any(|s| s.source_sheet_id == brushed.sheet_id);
 
     let src_ds = doc.data_sheet(&brushed.sheet_id);
     let src_title = src_ds.map_or(brushed.sheet_id.as_str(), |d| d.title.as_str());
@@ -147,6 +152,17 @@ pub(super) fn render_data_point_drill_back_studio(
         );
     }
 
+    let resolved_series_idx = brushed_on_graph
+        .then(|| {
+            gs.spec
+                .series
+                .iter()
+                .position(|s| s.source_sheet_id == brushed.sheet_id && s.data_set_index == brushed.col)
+                .or_else(|| gs.spec.series.iter().position(|s| s.data_set_index == brushed.col))
+                .or_else(|| (brushed.col < gs.spec.series.len()).then_some(brushed.col))
+        })
+        .flatten();
+    let format_enabled = ctx_in.enabled && resolved_series_idx.is_some();
     if studio_full_button(
         ui,
         tokens,
@@ -155,18 +171,29 @@ pub(super) fn render_data_point_drill_back_studio(
             label: "Format Selected Point…",
             tooltip: "Customize individual point color, shape, and size",
             selected: false,
-            enabled: ctx_in.enabled,
+            enabled: format_enabled,
             primary: false,
             widget_id: "inspector.drill_back.format_point",
             command_id: Some("ui.formatPoints.open"),
-            disabled_reason: None,
+            disabled_reason: (ctx_in.enabled && resolved_series_idx.is_none()).then_some("brushed cell is not a plotted series on this graph"),
         },
-    ) {
+    ) && let Some(series_idx) = resolved_series_idx
+    {
+        let subcol_count = src_ds.map_or(1, |d| crate::grid_view::data_set_subcolumn_count(&d.archetype, brushed.col));
+        let mut pt_obj = json!({
+            "series_index": series_idx,
+            "point_index": brushed.row,
+        });
+        if subcol_count > 1
+            && let Some(map) = pt_obj.as_object_mut()
+        {
+            map.insert(String::from("subcol"), json!(brushed.subcol));
+        }
         intents.push_ui(
             "ui.formatPoints.open",
             json!({
                 "sheet_id": gs.id.as_str(),
-                "points": [[brushed.col, brushed.row]],
+                "points": [pt_obj],
             }),
         );
     }

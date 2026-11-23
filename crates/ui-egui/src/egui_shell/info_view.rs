@@ -287,7 +287,7 @@ pub fn render_info_view_for_sheet(
         return report;
     };
 
-    sync_notes_draft_with_sheet(state, info);
+    sync_notes_draft_with_sheet(doc, state, info, intents);
 
     let avail = ui.available_rect_before_wrap();
     if avail.width() < 60.0 || avail.height() < 60.0 {
@@ -569,6 +569,12 @@ fn render_constants_pane(
                         );
                         hook_resp.clone().on_hover_text(tip);
                         if hook_resp.clicked() && enabled {
+                            if let Some((draft_id, draft_text)) = state.notes_draft.clone()
+                                && draft_id == info.id
+                            {
+                                flush_dirty_notes_if_needed(doc, &info.id, &draft_text, &mut state.notes_dirty, intents, true);
+                                state.notes_focus_seen = false;
+                            }
                             state.selected_row = Some(idx);
                             intents.push_engine("sheet.select", json!({ "sheet_id": refs[0].target_sheet_id.as_str() }));
                         }
@@ -782,7 +788,7 @@ fn validate_constant_draft(kind: InfoConstantKind, draft: &str, locale_preset: &
 }
 
 /// Validate strict 10-byte ASCII ISO date shape `YYYY-MM-DD` (`0001..=9999`, `01..=12`, `01..=31`).
-fn is_valid_iso_date(raw: &str) -> bool {
+pub(crate) fn is_valid_iso_date(raw: &str) -> bool {
     let bytes = raw.as_bytes();
     if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
         return false;
@@ -790,9 +796,12 @@ fn is_valid_iso_date(raw: &str) -> bool {
     if !bytes[0..4].iter().all(u8::is_ascii_digit) || !bytes[5..7].iter().all(u8::is_ascii_digit) || !bytes[8..10].iter().all(u8::is_ascii_digit) {
         return false;
     }
-    let Ok(year) = raw[0..4].parse::<u16>() else { return false };
-    let Ok(month) = raw[5..7].parse::<u8>() else { return false };
-    let Ok(day) = raw[8..10].parse::<u8>() else { return false };
+    let (Some(y_str), Some(m_str), Some(d_str)) = (raw.get(0..4), raw.get(5..7), raw.get(8..10)) else {
+        return false;
+    };
+    let Ok(year) = y_str.parse::<u16>() else { return false };
+    let Ok(month) = m_str.parse::<u8>() else { return false };
+    let Ok(day) = d_str.parse::<u8>() else { return false };
     (1..=9999).contains(&year) && (1..=12).contains(&month) && (1..=31).contains(&day)
 }
 
@@ -833,9 +842,31 @@ fn commit_constant_edit(
     state.editing_key = None;
 }
 
-fn sync_notes_draft_with_sheet(state: &mut InfoViewEguiState, info: &InfoSheet) {
+fn flush_dirty_notes_if_needed(
+    doc: &ProjectDocument,
+    sheet_id: &SheetId,
+    draft: &str,
+    notes_dirty: &mut bool,
+    intents: &mut PendingUiIntents,
+    skip_if_unchanged: bool,
+) {
+    if !*notes_dirty {
+        return;
+    }
+    if let Some(target_info) = doc.info_sheet(sheet_id)
+        && (!skip_if_unchanged || target_info.notes_markdown != draft)
+    {
+        intents.push_engine("info.setNote", json!({ "sheet_id": sheet_id.as_str(), "text": draft, "append": false }));
+    }
+    *notes_dirty = false;
+}
+
+fn sync_notes_draft_with_sheet(doc: &ProjectDocument, state: &mut InfoViewEguiState, info: &InfoSheet, intents: &mut PendingUiIntents) {
     let same_sheet = state.notes_draft.as_ref().is_some_and(|(id, _)| id == &info.id);
     if !same_sheet {
+        if let Some((prev_id, prev_draft)) = state.notes_draft.take() {
+            flush_dirty_notes_if_needed(doc, &prev_id, &prev_draft, &mut state.notes_dirty, intents, true);
+        }
         state.notes_draft = Some((info.id.clone(), info.notes_markdown.clone()));
         state.notes_dirty = false;
         state.notes_focus_seen = false;
@@ -1008,8 +1039,7 @@ fn render_notes_pane(
             && state.notes_dirty
             && let Some((_, draft)) = &state.notes_draft
         {
-            intents.push_engine("info.setNote", json!({ "sheet_id": info.id.as_str(), "text": draft, "append": false }));
-            state.notes_dirty = false;
+            flush_dirty_notes_if_needed(doc, &info.id, draft, &mut state.notes_dirty, intents, false);
             state.notes_focus_seen = false;
         }
     });

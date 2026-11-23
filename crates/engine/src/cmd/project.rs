@@ -418,9 +418,9 @@ fn is_valid_iso8601_utc_timestamp(raw: &str) -> bool {
         return false;
     }
     // Core calendar + time prefix: YYYY-MM-DDTHH:MM:SS (or 't')
-    if !(bytes[4] == b'-' && bytes[7] == b'-' && matches!(bytes[10], b'T' | b't') && bytes[13] == b':' && bytes[16] == b':') {
+    let [_, _, _, _, b'-', _, _, b'-', _, _, b'T' | b't', _, _, b':', _, _, b':', ..] = bytes else {
         return false;
-    }
+    };
     let parse_2 = |i: usize| -> Option<u32> {
         let s = raw.get(i..i + 2)?;
         if s.bytes().all(|b| b.is_ascii_digit()) { s.parse().ok() } else { None }
@@ -450,23 +450,29 @@ fn is_valid_iso8601_utc_timestamp(raw: &str) -> bool {
     if !(1..=max_day).contains(&day) || hour > 23 || min > 59 || sec > 60 {
         return false;
     }
-    let mut rest = &raw[19..];
+    let Some(mut rest) = raw.get(19..) else {
+        return false;
+    };
     if let Some(after_dot) = rest.strip_prefix('.') {
         let frac_len = after_dot.bytes().take_while(u8::is_ascii_digit).count();
         if frac_len == 0 || frac_len > 9 {
             return false;
         }
-        rest = &after_dot[frac_len..];
+        let Some(after_frac) = after_dot.get(frac_len..) else {
+            return false;
+        };
+        rest = after_frac;
     }
     if matches!(rest, "Z" | "z") {
         return true;
     }
     if let Some(off) = rest.strip_prefix('+').or_else(|| rest.strip_prefix('-'))
-        && off.len() == 5
-        && off.as_bytes()[2] == b':'
+        && let Some((hh_str, mm_str)) = off.split_once(':')
+        && hh_str.len() == 2
+        && mm_str.len() == 2
     {
-        let oh = off[0..2].bytes().all(|b| b.is_ascii_digit()).then(|| off[0..2].parse::<u32>().ok()).flatten();
-        let om = off[3..5].bytes().all(|b| b.is_ascii_digit()).then(|| off[3..5].parse::<u32>().ok()).flatten();
+        let oh = hh_str.bytes().all(|b| b.is_ascii_digit()).then(|| hh_str.parse::<u32>().ok()).flatten();
+        let om = mm_str.bytes().all(|b| b.is_ascii_digit()).then(|| mm_str.parse::<u32>().ok()).flatten();
         return matches!((oh, om), (Some(h), Some(m)) if h <= 23 && m <= 59);
     }
     false
@@ -628,7 +634,8 @@ fn find_checkpoint_index(doc: &ProjectDocument, command_id: &str, params: &Check
 fn run_project_restore_checkpoint(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
     let parsed: CheckpointRefParams = parse_params(&checkpoint_ref_schema(), params)?;
     let idx = find_checkpoint_index(&ctx.session.doc, "project.restoreCheckpoint", &parsed)?;
-    let cp = ctx.session.doc.checkpoints[idx].clone();
+    let cp =
+        ctx.session.doc.checkpoints.get(idx).cloned().ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, "checkpoint index out of bounds"))?;
     if cp.snapshot_json.len() > MAX_ARCHIVE_FILE_BYTES {
         return Err(EngineError::with_code(
             ErrorCode::ResourceLimit,

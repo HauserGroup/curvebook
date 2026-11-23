@@ -25,13 +25,21 @@ fn err_cmd(session: &mut Session, cmd: &str, params: Value) -> Result<EngineErro
 fn seed_three_group_column_session() -> Result<Session, Box<dyn Error>> {
     let mut doc = ProjectDocument::new("RV82")?;
     let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 3, 4)?;
-    col.data_sets[0].title = String::from("Vehicle");
-    col.data_sets[1].title = String::from("Low Dose");
-    col.data_sets[2].title = String::from("High Dose");
-    for (r, (v0, v1, v2)) in [(10.0, 20.0, 40.0), (11.0, 21.0, 42.0), (9.5, 19.5, 41.0), (10.5, 20.5, 43.0)].into_iter().enumerate() {
-        col.data_sets[0].cells[r][0] = Cell::number(v0);
-        col.data_sets[1].cells[r][0] = Cell::number(v1);
-        col.data_sets[2].cells[r][0] = Cell::number(v2);
+    if let [ds0, ds1, ds2] = col.data_sets.as_mut_slice() {
+        ds0.title = String::from("Vehicle");
+        ds1.title = String::from("Low Dose");
+        ds2.title = String::from("High Dose");
+        for (r, (v0, v1, v2)) in [(10.0, 20.0, 40.0), (11.0, 21.0, 42.0), (9.5, 19.5, 41.0), (10.5, 20.5, 43.0)].into_iter().enumerate() {
+            if let Some(c0) = ds0.cells.get_mut(r).and_then(|row| row.first_mut()) {
+                *c0 = Cell::number(v0);
+            }
+            if let Some(c1) = ds1.cells.get_mut(r).and_then(|row| row.first_mut()) {
+                *c1 = Cell::number(v1);
+            }
+            if let Some(c2) = ds2.cells.get_mut(r).and_then(|row| row.first_mut()) {
+                *c2 = Cell::number(v2);
+            }
+        }
     }
     let ds = DataSheet::new("col-1", "Groups", TableArchetype::Column(col))?;
     doc.add_data_sheet(ds)?;

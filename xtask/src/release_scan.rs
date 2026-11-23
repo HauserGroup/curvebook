@@ -10,7 +10,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use curvebook_format::{ZipArchive, ZipLimits};
 use curvebook_platform::process::ProcessCommand;
-use curvebook_platform::{PlatformError, write_atomic};
+use curvebook_platform::{PlatformError, read_regular_file_bytes, write_atomic};
+
+const MAX_REPORT_JSON_BYTES: usize = 16 * 1024 * 1024;
+const MAX_CHECKSUMS_BYTES: usize = 4 * 1024 * 1024;
+const MAX_COMPLIANCE_TEXT_BYTES: usize = 32 * 1024 * 1024;
+const MAX_ZSYNC_BYTES: usize = 64 * 1024 * 1024;
+const MAX_CONTAINER_FILE_BYTES: usize = 1024 * 1024 * 1024;
+const MAX_APPIMAGE_RUNTIME_SCAN_BYTES: usize = 32 * 1024 * 1024;
+const MAX_MOUNTED_FILE_BYTES: usize = 512 * 1024 * 1024;
 
 const USAGE: &str = "\
 usage: cargo xtask release-scan [--require-checksums | --no-checksums] [--expect-beta-set <version>] [--cross-os-reports <dir>] [--report <json-out>] <assets-dir>
@@ -174,7 +182,7 @@ impl Default for ToolConfig {
             ostree_bin: String::from("ostree"),
             hdiutil_bin: String::from("/usr/bin/hdiutil"),
             msiexec_bin: String::from("msiexec"),
-            allow_appimage_exec: cfg!(target_os = "linux"),
+            allow_appimage_exec: false,
             allow_dmg: cfg!(target_os = "macos"),
             allow_msi: cfg!(windows),
         }
@@ -495,7 +503,8 @@ impl CrossOsReportCatalog {
 }
 
 fn parse_cross_os_report_file(path: &Path, out: &mut Vec<CrossOsVerifiedRecord>) -> Result<(), String> {
-    let raw = std::fs::read_to_string(path).map_err(|e| format!("read report `{}`: {e}", path.display()))?;
+    let raw_bytes = read_non_symlink_regular_bytes(path, MAX_REPORT_JSON_BYTES, "cross-OS report")?;
+    let raw = String::from_utf8(raw_bytes).map_err(|_| format!("cross-OS report `{}` is not valid UTF-8", path.display()))?;
     let val: serde_json::Value = serde_json::from_str(&raw).map_err(|e| format!("parse report `{}`: {e}", path.display()))?;
     if val.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
         return Err(format!("cross-OS report `{}` is not marked `ok: true`", path.display()));
@@ -681,8 +690,9 @@ fn classify_asset_name(name: &str) -> Result<AssetKind, String> {
 
 fn verify_checksum_manifest(assets_dir: &Path, discovered: &[DiscoveredAsset]) -> Result<(), String> {
     let manifest_path = assets_dir.join(CHECKSUMS_FILE);
-    let raw = std::fs::read_to_string(&manifest_path)
+    let raw_bytes = read_non_symlink_regular_bytes(&manifest_path, MAX_CHECKSUMS_BYTES, CHECKSUMS_FILE)
         .map_err(|e| format!("missing or unreadable `{CHECKSUMS_FILE}` in `{}`: {e}", assets_dir.display()))?;
+    let raw = String::from_utf8(raw_bytes).map_err(|_| format!("`{CHECKSUMS_FILE}` in `{}` is not valid UTF-8", assets_dir.display()))?;
     let expected_by_name = parse_sha256sums(&raw)?;
 
     let mut actual_siblings: BTreeMap<&str, &str> = BTreeMap::new();
@@ -765,7 +775,7 @@ fn scan_single_asset(
 ) -> Result<ScannedAssetRecord, String> {
     match item.kind {
         AssetKind::Checksums | AssetKind::HtmlCompliance => {
-            let bytes = std::fs::read(&item.path).map_err(|e| format!("read `{}`: {e}", item.name))?;
+            let bytes = read_non_symlink_regular_bytes(&item.path, MAX_COMPLIANCE_TEXT_BYTES, &item.name)?;
             let text = std::str::from_utf8(&bytes).map_err(|e| format!("`{}` is not valid UTF-8: {e}", item.name))?;
             collect_compliance_hits(&item.name, text, &bytes, violations);
             Ok(ScannedAssetRecord {
@@ -779,7 +789,7 @@ fn scan_single_asset(
             })
         }
         AssetKind::Zsync => {
-            let bytes = std::fs::read(&item.path).map_err(|e| format!("read `{}`: {e}", item.name))?;
+            let bytes = read_non_symlink_regular_bytes(&item.path, MAX_ZSYNC_BYTES, &item.name)?;
             let header = extract_zsync_header_utf8(&item.name, &bytes)?;
             collect_compliance_hits(&item.name, header, &bytes, violations);
             Ok(ScannedAssetRecord {
@@ -943,7 +953,7 @@ fn scan_tree_symlinks(asset_name: &str, root: &Path, dir: &Path, violations: &mu
 }
 
 fn unpack_zip(asset_name: &str, path: &Path, stage_dir: &Path) -> Result<(), String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("read `{asset_name}`: {e}"))?;
+    let bytes = read_non_symlink_regular_bytes(path, MAX_CONTAINER_FILE_BYTES, asset_name)?;
     let zip = ZipArchive::from_bytes_with_limits(&bytes, RELEASE_ZIP_LIMITS).map_err(|e| format!("unpack `{asset_name}`: {e}"))?;
     if zip.is_empty() {
         return Err(format!("`{asset_name}`: ZIP archive contains zero files"));
@@ -968,12 +978,12 @@ fn unpack_tarball(tools: &ToolConfig, asset_name: &str, archive_path: &Path, sta
     }
     let archive_str = archive_path.to_string_lossy();
     let stage_str = stage_dir.to_string_lossy();
-    let list_flag = if require_gzip_magic { "-tzf" } else { "-tf" };
+    let list_flag = if require_gzip_magic { "-tvzf" } else { "-tvf" };
     let extract_flag = if require_gzip_magic { "-xzf" } else { "-xf" };
 
     let (chosen_tar, list_out) = run_tar_or_bsdtar(tools, &[list_flag, archive_str.as_ref()], asset_name, "list entries")?;
     let listing = String::from_utf8_lossy(&list_out);
-    validate_archive_listing(asset_name, &listing)?;
+    validate_verbose_archive_listing(asset_name, &listing, false)?;
 
     let out = build_cmd(tools, chosen_tar)
         .args([extract_flag, archive_str.as_ref(), "-C", stage_str.as_ref()])
@@ -1048,24 +1058,46 @@ fn extract_deb_ar_members(tools: &ToolConfig, asset_name: &str, deb_path: &Path,
     let deb_str = deb_path.to_string_lossy();
     let mut errors = Vec::new();
 
-    match build_cmd(tools, &tools.ar_bin).current_dir(ar_dir).args(["-x", deb_str.as_ref()]).run() {
-        Ok(out) if out.success && dir_has_deb_data_tar(ar_dir) => return Ok(()),
-        Ok(out) => errors.push(format!("{}: exit {:?} ({})", tools.ar_bin, out.status_code, String::from_utf8_lossy(&out.stderr).trim())),
-        Err(err) => errors.push(format!("{}: {err}", tools.ar_bin)),
+    match build_cmd(tools, &tools.ar_bin).args(["-t", deb_str.as_ref()]).run() {
+        Ok(list_out) if list_out.success => {
+            validate_deb_ar_listing(asset_name, &String::from_utf8_lossy(&list_out.stdout))?;
+            match build_cmd(tools, &tools.ar_bin).current_dir(ar_dir).args(["-x", deb_str.as_ref()]).run() {
+                Ok(out) if out.success && dir_has_deb_data_tar(ar_dir) => return Ok(()),
+                Ok(out) => errors.push(format!("{}: exit {:?} ({})", tools.ar_bin, out.status_code, String::from_utf8_lossy(&out.stderr).trim())),
+                Err(err) => errors.push(format!("{}: {err}", tools.ar_bin)),
+            }
+        }
+        Ok(list_out) => {
+            errors.push(format!("{} -t: exit {:?} ({})", tools.ar_bin, list_out.status_code, String::from_utf8_lossy(&list_out.stderr).trim()))
+        }
+        Err(err) => errors.push(format!("{} -t: {err}", tools.ar_bin)),
     }
 
     // Fallback for GNU/SVR4 `.deb` archives whose 16-byte member names carry trailing `/`
     // (`data.tar.gz/    `), which macOS BSD `/usr/bin/ar -x` rejects while `bsdtar -xf` unpacks cleanly.
     let ar_dir_str = ar_dir.to_string_lossy();
-    match build_cmd(tools, &tools.bsdtar_bin).args(["-xf", deb_str.as_ref(), "-C", ar_dir_str.as_ref()]).run() {
-        Ok(out) if out.success && dir_has_deb_data_tar(ar_dir) => Ok(()),
-        Ok(out) => {
-            errors.push(format!("{}: exit {:?} ({})", tools.bsdtar_bin, out.status_code, String::from_utf8_lossy(&out.stderr).trim()));
-            Err(format!("`{asset_name}`: failed to unpack `.deb` `ar` members ({})", errors.join("; ")))
+    match build_cmd(tools, &tools.bsdtar_bin).args(["-tvf", deb_str.as_ref()]).run() {
+        Ok(list_out) if list_out.success => {
+            validate_verbose_archive_listing(asset_name, &String::from_utf8_lossy(&list_out.stdout), true)?;
+            match build_cmd(tools, &tools.bsdtar_bin).args(["-xf", deb_str.as_ref(), "-C", ar_dir_str.as_ref()]).run() {
+                Ok(out) if out.success && dir_has_deb_data_tar(ar_dir) => Ok(()),
+                Ok(out) => {
+                    errors.push(format!("{}: exit {:?} ({})", tools.bsdtar_bin, out.status_code, String::from_utf8_lossy(&out.stderr).trim()));
+                    Err(format!("`{asset_name}`: failed to unpack `.deb` `ar` members ({})", errors.join("; ")))
+                }
+                Err(err) => {
+                    errors.push(format!("{}: {err}", tools.bsdtar_bin));
+                    Err(format!("`{asset_name}`: failed to unpack `.deb` `ar` members ({})", errors.join("; ")))
+                }
+            }
+        }
+        Ok(list_out) => {
+            errors.push(format!("{} -tvf: exit {:?} ({})", tools.bsdtar_bin, list_out.status_code, String::from_utf8_lossy(&list_out.stderr).trim()));
+            Err(format!("`{asset_name}`: failed to inspect `.deb` `ar` members ({})", errors.join("; ")))
         }
         Err(err) => {
-            errors.push(format!("{}: {err}", tools.bsdtar_bin));
-            Err(format!("`{asset_name}`: failed to unpack `.deb` `ar` members ({})", errors.join("; ")))
+            errors.push(format!("{} -tvf: {err}", tools.bsdtar_bin));
+            Err(format!("`{asset_name}`: failed to inspect `.deb` `ar` members ({})", errors.join("; ")))
         }
     }
 }
@@ -1089,9 +1121,9 @@ fn unpack_rpm(tools: &ToolConfig, asset_name: &str, rpm_path: &Path, stage_dir: 
     let stage_str = stage_dir.to_string_lossy();
     let mut errors = Vec::new();
 
-    match build_cmd(tools, &tools.bsdtar_bin).args(["-tf", rpm_str.as_ref()]).run() {
+    match build_cmd(tools, &tools.bsdtar_bin).args(["-tvf", rpm_str.as_ref()]).run() {
         Ok(list_out) if list_out.success => {
-            validate_archive_listing(asset_name, &String::from_utf8_lossy(&list_out.stdout))?;
+            validate_verbose_archive_listing(asset_name, &String::from_utf8_lossy(&list_out.stdout), false)?;
             let ext_out = build_cmd(tools, &tools.bsdtar_bin)
                 .args(["-xf", rpm_str.as_ref(), "-C", stage_str.as_ref()])
                 .run()
@@ -1101,7 +1133,7 @@ fn unpack_rpm(tools: &ToolConfig, asset_name: &str, rpm_path: &Path, stage_dir: 
             }
             errors.push(format!("bsdtar -xf: exit {:?} ({})", ext_out.status_code, String::from_utf8_lossy(&ext_out.stderr).trim()));
         }
-        Ok(list_out) => errors.push(format!("bsdtar -tf: exit {:?} ({})", list_out.status_code, String::from_utf8_lossy(&list_out.stderr).trim())),
+        Ok(list_out) => errors.push(format!("bsdtar -tvf: exit {:?} ({})", list_out.status_code, String::from_utf8_lossy(&list_out.stderr).trim())),
         Err(err) => errors.push(format!("bsdtar: {err}")),
     }
 
@@ -1118,14 +1150,14 @@ fn unpack_rpm(tools: &ToolConfig, asset_name: &str, rpm_path: &Path, stage_dir: 
     };
 
     let list_cpio = build_cmd(tools, &tools.cpio_bin)
-        .arg("-it")
+        .arg("-itv")
         .stdin_bytes(cpio_stream.clone())
         .run()
-        .map_err(|e| format!("`{asset_name}`: cpio -it failed: {e}"))?;
+        .map_err(|e| format!("`{asset_name}`: cpio -itv failed: {e}"))?;
     if !list_cpio.success {
-        return Err(format!("`{asset_name}`: cpio -it failed: {}", String::from_utf8_lossy(&list_cpio.stderr).trim()));
+        return Err(format!("`{asset_name}`: cpio -itv failed: {}", String::from_utf8_lossy(&list_cpio.stderr).trim()));
     }
-    validate_archive_listing(asset_name, &String::from_utf8_lossy(&list_cpio.stdout))?;
+    validate_verbose_archive_listing(asset_name, &String::from_utf8_lossy(&list_cpio.stdout), false)?;
 
     let extract_cpio = build_cmd(tools, &tools.cpio_bin)
         .current_dir(stage_dir)
@@ -1171,12 +1203,17 @@ fn unpack_appimage(
     stage_dir: &Path,
     violations: &mut Vec<String>,
 ) -> Result<(), String> {
-    let bytes = std::fs::read(appimage_path).map_err(|e| format!("read `{asset_name}`: {e}"))?;
-    let sqfs_offset = find_squashfs_offset(&bytes);
+    let meta = std::fs::symlink_metadata(appimage_path).map_err(|e| format!("stat `{asset_name}`: {e}"))?;
+    if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+        return Err(format!("`{asset_name}`: must be a regular non-symlink file"));
+    }
+    let scan_cap = usize::try_from(meta.len()).unwrap_or(MAX_APPIMAGE_RUNTIME_SCAN_BYTES).min(MAX_APPIMAGE_RUNTIME_SCAN_BYTES);
+    let header_bytes = read_prefix_bytes(appimage_path, scan_cap).map_err(|e| format!("read `{asset_name}` header: {e}"))?;
+    let sqfs_offset = find_squashfs_offset(&header_bytes);
     if let Some(off) = sqfs_offset
         && off > 0
     {
-        for hit in crate::cleanroom::scan_compliance_bytes(&format!("{asset_name}#runtime"), &bytes[..off]) {
+        for hit in crate::cleanroom::scan_compliance_bytes(&format!("{asset_name}#runtime"), &header_bytes[..off]) {
             violations.push(format!("{}:{}: [cleanroom] matched `{}`", hit.path, hit.line, hit.signature));
         }
     }
@@ -1202,7 +1239,8 @@ fn unpack_appimage(
         errors.push(String::from("no embedded SquashFS 4.0 (`hsqs`) superblock found"));
     }
 
-    if tools.allow_appimage_exec && bytes.starts_with(b"\x7fELF") {
+    if tools.allow_appimage_exec && header_bytes.starts_with(b"\x7fELF") {
+        let bytes = read_non_symlink_regular_bytes(appimage_path, MAX_CONTAINER_FILE_BYTES, asset_name)?;
         let exec_work = item_scratch.join("appimage-exec");
         std::fs::create_dir_all(&exec_work).map_err(|e| format!("mkdir appimage-exec for `{asset_name}`: {e}"))?;
         let runner_copy = exec_work.join("runner.AppImage");
@@ -1219,7 +1257,7 @@ fn unpack_appimage(
             Err(err) => errors.push(format!("--appimage-extract: {err}")),
         }
     } else if !tools.allow_appimage_exec {
-        errors.push(String::from("`--appimage-extract` execution disabled on non-Linux host; install `unsquashfs` or scan on Linux"));
+        errors.push(String::from("`--appimage-extract` execution is disabled (never execute untrusted AppImages); install `unsquashfs`"));
     }
 
     Err(format!("`{asset_name}`: cannot unpack `.AppImage` ({})", errors.join("; ")))
@@ -1344,7 +1382,7 @@ fn copy_mounted_tree_no_symlinks(
             if let Some(parent) = dst.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| format!("mkdir parent `{asset_name}!{rel_norm}`: {e}"))?;
             }
-            let bytes = std::fs::read(&path).map_err(|e| format!("read mounted `{asset_name}!{rel_norm}`: {e}"))?;
+            let bytes = read_non_symlink_regular_bytes(&path, MAX_MOUNTED_FILE_BYTES, &format!("{asset_name}!{rel_norm}"))?;
             write_atomic(&dst, &bytes).map_err(|e| format!("stage mounted `{asset_name}!{rel_norm}`: {e}"))?;
         }
     }
@@ -1421,6 +1459,7 @@ fn run_checked_tool(tools: &ToolConfig, program: &str, args: &[&str], asset_name
 
 fn build_cmd(tools: &ToolConfig, program: &str) -> ProcessCommand {
     let mut cmd = ProcessCommand::new(program)
+        .env("LC_ALL", "C")
         .wall_timeout(SUBPROCESS_WALL_TIMEOUT)
         .idle_timeout(SUBPROCESS_IDLE_TIMEOUT)
         .max_output_bytes(SUBPROCESS_STREAM_CAP_BYTES);
@@ -1430,7 +1469,19 @@ fn build_cmd(tools: &ToolConfig, program: &str) -> ProcessCommand {
     cmd
 }
 
-fn validate_archive_listing(asset_name: &str, listing: &str) -> Result<(), String> {
+fn read_non_symlink_regular_bytes(path: &Path, max_bytes: usize, label: &str) -> Result<Vec<u8>, String> {
+    let meta = std::fs::symlink_metadata(path).map_err(|e| format!("stat `{label}`: {e}"))?;
+    if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+        return Err(format!("`{label}`: must be a regular non-symlink file"));
+    }
+    let max_u64 = u64::try_from(max_bytes).unwrap_or(u64::MAX);
+    if meta.len() > max_u64 {
+        return Err(format!("`{label}`: size {} exceeds bounded scan limit {max_bytes} bytes", meta.len()));
+    }
+    read_regular_file_bytes(path, max_bytes).map_err(|e| format!("read `{label}`: {e}"))
+}
+
+fn validate_deb_ar_listing(asset_name: &str, listing: &str) -> Result<(), String> {
     let mut saw_entry = false;
     for raw_line in listing.lines() {
         let entry = raw_line.trim_end_matches('\r');
@@ -1438,12 +1489,143 @@ fn validate_archive_listing(asset_name: &str, listing: &str) -> Result<(), Strin
             continue;
         }
         saw_entry = true;
-        let _ = validate_safe_archive_member_path(asset_name, entry)?;
+        let trimmed = entry.trim_end_matches('/');
+        if trimmed.is_empty() || trimmed.contains('/') {
+            return Err(format!("`{asset_name}`: unsafe `.deb` ar member path `{entry}`"));
+        }
+        let _ = validate_safe_archive_member_path(asset_name, trimmed)?;
+    }
+    if !saw_entry {
+        return Err(format!("`{asset_name}`: `.deb` archive contains zero ar members"));
+    }
+    Ok(())
+}
+
+fn validate_verbose_archive_listing(asset_name: &str, listing: &str, flat_deb_ar: bool) -> Result<(), String> {
+    let mut saw_entry = false;
+    for raw_line in listing.lines() {
+        let line = raw_line.trim_end_matches('\r');
+        if line.trim().is_empty() {
+            continue;
+        }
+        saw_entry = true;
+        let entry = parse_verbose_listing_entry(asset_name, line)?;
+        if flat_deb_ar {
+            let trimmed = entry.trim_end_matches('/');
+            if trimmed.is_empty() || trimmed.contains('/') {
+                return Err(format!("`{asset_name}`: unsafe `.deb` ar member path `{entry}`"));
+            }
+            let _ = validate_safe_archive_member_path(asset_name, trimmed)?;
+        } else {
+            let _ = validate_safe_archive_member_path(asset_name, entry)?;
+        }
     }
     if !saw_entry {
         return Err(format!("`{asset_name}`: archive contains zero entries"));
     }
     Ok(())
+}
+
+fn collect_token_spans(line: &str) -> Vec<(usize, &str)> {
+    let mut out = Vec::new();
+    let bytes = line.as_bytes();
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if idx >= bytes.len() {
+            break;
+        }
+        let start = idx;
+        while idx < bytes.len() && !bytes[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if let Some(tok) = line.get(start..idx) {
+            out.push((start, tok));
+        }
+    }
+    out
+}
+
+fn is_ascii_month(tok: &str) -> bool {
+    matches!(tok, "Jan" | "Feb" | "Mar" | "Apr" | "May" | "Jun" | "Jul" | "Aug" | "Sep" | "Oct" | "Nov" | "Dec")
+}
+
+fn is_iso_date(tok: &str) -> bool {
+    let b = tok.as_bytes();
+    b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b[..4].iter().all(u8::is_ascii_digit)
+        && b[5..7].iter().all(u8::is_ascii_digit)
+        && b[8..10].iter().all(u8::is_ascii_digit)
+}
+
+fn is_time_or_year(tok: &str) -> bool {
+    let b = tok.as_bytes();
+    let is_year = b.len() == 4 && b.iter().all(u8::is_ascii_digit);
+    let is_hhmm = b.len() == 5 && b[2] == b':' && b[..2].iter().all(u8::is_ascii_digit) && b[3..5].iter().all(u8::is_ascii_digit);
+    let is_hhmmss = b.len() == 8
+        && b[2] == b':'
+        && b[5] == b':'
+        && b[..2].iter().all(u8::is_ascii_digit)
+        && b[3..5].iter().all(u8::is_ascii_digit)
+        && b[6..8].iter().all(u8::is_ascii_digit);
+    is_year || is_hhmm || is_hhmmss
+}
+
+fn parse_verbose_listing_entry<'a>(asset_name: &str, line: &'a str) -> Result<&'a str, String> {
+    let tokens = collect_token_spans(line);
+    let Some((_, mode)) = tokens.first().copied() else {
+        return Err(format!("`{asset_name}`: empty archive listing entry"));
+    };
+    let mode_bytes = mode.as_bytes();
+    let is_mode = mode_bytes.len() >= 10 && mode_bytes[1..10].iter().all(|b| matches!(b, b'r' | b'w' | b'x' | b'-' | b's' | b'S' | b't' | b'T'));
+    if !is_mode {
+        return Err(format!("`{asset_name}`: unexpected archive listing format `{line}`"));
+    }
+    match mode_bytes[0] {
+        b'-' | b'd' => {}
+        b'l' => return Err(format!("`{asset_name}`: symbolic link archive member rejected: `{line}`")),
+        b'h' => return Err(format!("`{asset_name}`: hard link archive member rejected: `{line}`")),
+        _ => return Err(format!("`{asset_name}`: special/unsupported archive member rejected: `{line}`")),
+    }
+
+    let name_start = if tokens.len() >= 6 && is_iso_date(tokens[3].1) && is_time_or_year(tokens[4].1) {
+        Some(tokens[5].0)
+    } else if tokens.len() >= 9 && is_ascii_month(tokens[5].1) && tokens[6].1.bytes().all(|b| b.is_ascii_digit()) && is_time_or_year(tokens[7].1) {
+        Some(tokens[8].0)
+    } else {
+        let mut found = None;
+        for idx in 2..tokens.len() {
+            if idx + 2 < tokens.len() && is_iso_date(tokens[idx].1) && is_time_or_year(tokens[idx + 1].1) {
+                found = Some(tokens[idx + 2].0);
+                break;
+            }
+            if idx + 3 < tokens.len()
+                && is_ascii_month(tokens[idx].1)
+                && tokens[idx + 1].1.bytes().all(|b| b.is_ascii_digit())
+                && is_time_or_year(tokens[idx + 2].1)
+            {
+                found = Some(tokens[idx + 3].0);
+                break;
+            }
+        }
+        found
+    };
+
+    let Some(start) = name_start else {
+        return Err(format!("`{asset_name}`: cannot locate archive member path in listing `{line}`"));
+    };
+    let rest = line.get(start..).ok_or_else(|| format!("`{asset_name}`: invalid path slice in `{line}`"))?;
+    if rest.contains(" -> ") {
+        return Err(format!("`{asset_name}`: symbolic link archive member rejected: `{line}`"));
+    }
+    if rest.contains(" link to ") {
+        return Err(format!("`{asset_name}`: hard link archive member rejected: `{line}`"));
+    }
+    Ok(rest)
 }
 
 fn validate_safe_archive_member_path(asset_name: &str, raw_entry: &str) -> Result<PathBuf, String> {
@@ -1474,10 +1656,14 @@ fn validate_safe_archive_member_path(asset_name: &str, raw_entry: &str) -> Resul
     Ok(out)
 }
 
-fn read_prefix_bytes(path: &Path, count: usize) -> Result<Vec<u8>, std::io::Error> {
-    let file = std::fs::File::open(path)?;
+fn read_prefix_bytes(path: &Path, count: usize) -> Result<Vec<u8>, String> {
+    let meta = std::fs::symlink_metadata(path).map_err(|e| format!("stat `{}`: {e}", path.display()))?;
+    if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+        return Err(format!("`{}` must be a regular non-symlink file", path.display()));
+    }
+    let file = std::fs::File::open(path).map_err(|e| format!("open `{}`: {e}", path.display()))?;
     let mut buf = Vec::with_capacity(count);
-    file.take(count as u64).read_to_end(&mut buf)?;
+    file.take(count as u64).read_to_end(&mut buf).map_err(|e| format!("read `{}`: {e}", path.display()))?;
     Ok(buf)
 }
 
@@ -2176,9 +2362,40 @@ mod tests {
         {
             assert_eq!(super::absolute_tool_path(Path::new(r"\\?\C:\dist\release\app.msi")).unwrap(), PathBuf::from(r"C:\dist\release\app.msi"));
             assert_eq!(
-                super::absolute_tool_path(Path::new(r"\\?\UNC\server\share\dist\app.msi")).unwrap(),
+                super::strip_windows_verbatim_prefix(Path::new(r"\\?\UNC\server\share\dist\app.msi")),
                 PathBuf::from(r"\\server\share\dist\app.msi")
             );
         }
+    }
+
+    #[test]
+    fn fa_sec23_01_appimage_no_exec_default_and_verbose_archive_listing_checks() {
+        assert!(!ToolConfig::default().allow_appimage_exec, "AppImage execution fallback must default to false on all OSes");
+
+        // BSD/tar and GNU/tar clean regular + directory entries (including filenames with spaces) pass.
+        let clean_listing = "\
+drwxr-xr-x  0 user   group        0 Nov 23 04:50 ./usr/
+-rw-r--r--  0 user   group      123 Nov 23 04:50 ./usr/share/doc/curvebook/Read Me.txt
+-rw-r--r-- root/root       456 2026-11-23 04:50 usr/bin/curvebook
+";
+        assert!(super::validate_verbose_archive_listing("pkg.tar.gz", clean_listing, false).is_ok());
+
+        // Symlinks, tar hardlinks, cpio hardlinks, special files, and traversal entries are rejected.
+        for bad_line in [
+            "lrwxr-xr-x  0 root   wheel        0 Nov 23 04:50 usr/bin/sym -> /etc/passwd",
+            "hrw-r--r--  0 root   wheel        0 Nov 23 04:50 usr/bin/hard link to /etc/passwd",
+            "-rw-r--r--  2 root   wheel       10 Nov 23 04:50 usr/bin/hard link to usr/bin/curvebook",
+            "crw-r--r--  0 root   wheel     1, 3 Nov 23 04:50 dev/null",
+            "prw-r--r--  0 root   wheel        0 Nov 23 04:50 var/fifo",
+            "-rw-r--r--  0 root   wheel        7 Nov 23 04:50 ../escape.txt",
+        ] {
+            let err = super::validate_verbose_archive_listing("bad.tar.gz", bad_line, false).unwrap_err();
+            assert!(!err.is_empty(), "expected rejection for {bad_line}");
+        }
+
+        // Debian ar flat listing accepts SVR4 trailing `/` and rejects subdirectories/traversal.
+        assert!(super::validate_deb_ar_listing("pkg.deb", "debian-binary/\ncontrol.tar.gz/\ndata.tar.gz/\n").is_ok());
+        assert!(super::validate_deb_ar_listing("pkg.deb", "sub/data.tar.gz\n").is_err());
+        assert!(super::validate_deb_ar_listing("pkg.deb", "../escape\n").is_err());
     }
 }

@@ -241,7 +241,7 @@ pub fn check_workspace_with_allowlist(
 
     for &src_rel in src_dirs {
         let dir = root.join(src_rel);
-        if !dir.is_dir() {
+        if !std::fs::symlink_metadata(&dir).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_dir()) {
             violations.push(CitationViolation {
                 path: src_rel.to_owned(),
                 line: 1,
@@ -377,6 +377,11 @@ enum Token {
     OuterAttr { is_cfg_test: bool },
     Ident { text: String, line: usize },
     LParen,
+    RParen,
+    LBracket,
+    RBracket,
+    LAngle,
+    RAngle,
     LBrace,
     RBrace,
     Semi,
@@ -536,10 +541,44 @@ fn enter_or_skip_container(
     report: &mut ModuleScanReport,
 ) -> usize {
     let mut saw_for = false;
+    let mut in_where = false;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut angle_depth = 0usize;
     while idx < end {
         match &tokens[idx] {
-            Token::Semi => return idx + 1,
-            Token::Ident { text, .. } if reject_trait_for && text == "for" => {
+            Token::Semi if paren_depth == 0 && bracket_depth == 0 => return idx + 1,
+            Token::LParen => {
+                paren_depth += 1;
+                idx += 1;
+            }
+            Token::RParen => {
+                paren_depth = paren_depth.saturating_sub(1);
+                idx += 1;
+            }
+            Token::LBracket => {
+                bracket_depth += 1;
+                idx += 1;
+            }
+            Token::RBracket => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                idx += 1;
+            }
+            Token::LAngle => {
+                angle_depth += 1;
+                idx += 1;
+            }
+            Token::RAngle => {
+                angle_depth = angle_depth.saturating_sub(1);
+                idx += 1;
+            }
+            Token::Ident { text, .. } if reject_trait_for && text == "where" && paren_depth == 0 && bracket_depth == 0 && angle_depth == 0 => {
+                in_where = true;
+                idx += 1;
+            }
+            Token::Ident { text, .. }
+                if reject_trait_for && text == "for" && !in_where && paren_depth == 0 && bracket_depth == 0 && angle_depth == 0 =>
+            {
                 saw_for = true;
                 idx += 1;
             }
@@ -557,9 +596,27 @@ fn enter_or_skip_container(
 }
 
 fn skip_item(tokens: &[Token], mut idx: usize, end: usize) -> usize {
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
     while idx < end {
         match tokens[idx] {
-            Token::Semi => return idx + 1,
+            Token::LParen => {
+                paren_depth += 1;
+                idx += 1;
+            }
+            Token::RParen => {
+                paren_depth = paren_depth.saturating_sub(1);
+                idx += 1;
+            }
+            Token::LBracket => {
+                bracket_depth += 1;
+                idx += 1;
+            }
+            Token::RBracket => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                idx += 1;
+            }
+            Token::Semi if paren_depth == 0 && bracket_depth == 0 => return idx + 1,
             Token::LBrace => {
                 let close = find_matching_rbrace(tokens, idx, end);
                 return (close + 1).min(end);
@@ -610,7 +667,9 @@ fn contains_isbn(lower: &str) -> bool {
         if pos > 0 && lower.as_bytes()[pos - 1].is_ascii_alphanumeric() {
             continue;
         }
-        let mut rest = &lower[pos + 4..];
+        let Some(mut rest) = lower.get(pos + 4..) else {
+            continue;
+        };
         if let Some(after_tag) = rest.strip_prefix("-13").or_else(|| rest.strip_prefix("-10")) {
             rest = after_tag;
         }
@@ -633,9 +692,11 @@ fn contains_author_year_citation(doc: &str) -> bool {
             continue;
         }
         let window_start = floor_char_boundary(doc, idx.saturating_sub(56));
-        let mut prefix = &doc[window_start..idx];
-        if let Some(cut) = prefix.rfind(['<', '>', '=', '[', ']', '`']) {
-            prefix = &prefix[cut + 1..];
+        let Some(mut prefix) = doc.get(window_start..idx) else {
+            continue;
+        };
+        if let Some((_, after_cut)) = prefix.rsplit_once(['<', '>', '=', '[', ']', '`']) {
+            prefix = after_cut;
         }
         if (prefix.contains('(') || prefix.contains(',') || prefix.contains(' ')) && window_contains_author_surname(prefix, &disallowed_set) {
             return true;
@@ -754,18 +815,26 @@ fn lex_module(source: &str) -> Vec<Token> {
             i = skip_quoted_string(bytes, i, &mut line);
             tokens.push(Token::Other);
         } else if b == b'\'' {
-            i = skip_char_or_lifetime(bytes, i);
+            i = skip_char_or_lifetime(source, i);
         } else if b.is_ascii_alphabetic() || b == b'_' {
             i = lex_ident(source, i, line, &mut tokens);
+        } else if matches!((b, bytes.get(i + 1).copied()), (b'-' | b'=', Some(b'>')) | (b'<' | b'>', Some(b'='))) {
+            tokens.push(Token::Other);
+            i += 2;
         } else {
             match b {
                 b'(' => tokens.push(Token::LParen),
+                b')' => tokens.push(Token::RParen),
+                b'[' => tokens.push(Token::LBracket),
+                b']' => tokens.push(Token::RBracket),
+                b'<' => tokens.push(Token::LAngle),
+                b'>' => tokens.push(Token::RAngle),
                 b'{' => tokens.push(Token::LBrace),
                 b'}' => tokens.push(Token::RBrace),
                 b';' => tokens.push(Token::Semi),
                 _ => {}
             }
-            i += 1;
+            i += source.get(i..).and_then(|s| s.chars().next()).map_or(1, char::len_utf8);
         }
     }
     tokens
@@ -777,7 +846,7 @@ fn lex_line_comment(source: &str, start: usize, tokens: &mut Vec<Token>) -> usiz
     while end < bytes.len() && bytes[end] != b'\n' {
         end += 1;
     }
-    let slice = &source[start..end];
+    let slice = source.get(start..end).unwrap_or("");
     if let Some(inner) = slice.strip_prefix("//!") {
         tokens.push(Token::InnerDoc(inner.trim().to_owned()));
     } else if let Some(outer) = slice.strip_prefix("///")
@@ -809,10 +878,11 @@ fn lex_block_comment(source: &str, start: usize, line: &mut usize, tokens: &mut 
         }
     }
     let body_end = i.saturating_sub(2);
-    if is_inner && start + 3 <= body_end {
-        tokens.push(Token::InnerDoc(source[start + 3..body_end].trim().to_owned()));
-    } else if is_outer && start + 3 <= body_end {
-        tokens.push(Token::OuterDoc(source[start + 3..body_end].trim().to_owned()));
+    if (is_inner || is_outer)
+        && let Some(body) = source.get(start + 3..body_end)
+    {
+        let text = body.trim().to_owned();
+        tokens.push(if is_inner { Token::InnerDoc(text) } else { Token::OuterDoc(text) });
     }
     i
 }
@@ -914,17 +984,33 @@ fn skip_raw_string(bytes: &[u8], start: usize, line: &mut usize) -> Option<usize
     Some(bytes.len())
 }
 
-fn skip_char_or_lifetime(bytes: &[u8], start: usize) -> usize {
-    if bytes.get(start + 1) == Some(&b'\\') {
-        let mut i = start + 3;
-        while i < bytes.len() && bytes[i] != b'\'' && bytes[i] != b'\n' {
-            i += 1;
+fn skip_char_or_lifetime(source: &str, start: usize) -> usize {
+    let Some(tail) = source.get(start + 1..) else {
+        return start + 1;
+    };
+    let mut chars = tail.char_indices();
+    let Some((_, first)) = chars.next() else {
+        return start + 1;
+    };
+    if first == '\\' {
+        let Some(_) = chars.next() else {
+            return start + 1;
+        };
+        for (rel, ch) in chars {
+            if ch == '\'' {
+                return start + 1 + rel + ch.len_utf8();
+            }
+            if ch == '\n' || rel > 12 {
+                return start + 1;
+            }
         }
-        return if bytes.get(i) == Some(&b'\'') { i + 1 } else { start + 1 };
+        return start + 1;
     }
-    // Single-char literal `'x'`; lifetimes like `'a` have no closing quote at `start + 2`.
-    if bytes.get(start + 2) == Some(&b'\'') {
-        return start + 3;
+    // Single-char literal `'x'` (including multi-byte UTF-8); lifetimes like `'a` have no closing `'`.
+    if first != '\''
+        && let Some((rel, '\'')) = chars.next()
+    {
+        return start + 1 + rel + 1;
     }
     start + 1
 }
@@ -935,7 +1021,7 @@ fn lex_ident(source: &str, start: usize, line: usize, tokens: &mut Vec<Token>) -
     while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
         end += 1;
     }
-    let text = source[start..end].to_owned();
+    let text = source.get(start..end).unwrap_or("").to_owned();
     tokens.push(Token::Ident { text, line });
     end
 }
@@ -1135,5 +1221,31 @@ mod tests {
         let (stats, violations) = check_workspace_with_allowlist(&root, NUMERICAL_SRC_DIRS, ALLOWLIST).unwrap();
         assert!(violations.is_empty(), "live workspace has D1 citation violations: {violations:?}");
         assert!(stats.cited_modules >= 40, "expected at least 40 cited numerical modules, got {stats:?}");
+    }
+
+    #[test]
+    fn fa_sec23_05_hrtb_for_lifetimes_and_multibyte_chars_scan_accurately() {
+        let src = "\
+const ALPHA: char = 'α';
+const ESC: char = '\\'';
+impl<T> Estimator<T> where for<'a> &'a T: Clone {
+    pub fn undocumented_in_where_hrtb(x: T) -> T { x }
+}
+impl<F> Wrapper<for<'a> fn(&'a f64)> {
+    pub fn undocumented_in_angle_hrtb() {}
+}
+impl<T: From<Vec<u8>>> Estimator<T> {
+    pub fn undocumented_after_nested_rangle(x: T) -> T { x }
+}
+impl<T: From<Vec<u8>>> Trait for T {
+    pub fn trait_method_should_be_skipped() {}
+}
+impl Default for Estimator<f64> {
+    fn default() -> Self { unreachable!() }
+}
+";
+        let report = scan_module_source("crates/stats/src/hrtb.rs", src);
+        assert_eq!(report.public_routines, 3, "all three inherent impl pub fns must be counted");
+        assert_eq!(report.violations.len(), 3, "all three undocumented inherent pub fns must trigger violations: {:?}", report.violations);
     }
 }

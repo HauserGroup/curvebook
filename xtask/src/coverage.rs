@@ -5,7 +5,7 @@
 //! into hand-written docs. Reports stay on disk (lcov + HTML); nothing is uploaded anywhere.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::time::Duration;
 
 const USAGE: &str = "usage: cargo xtask coverage [-p <crate>]... [-- <test-runner args>]";
 
@@ -167,7 +167,13 @@ fn summary_lines(doc: &serde_json::Value) -> Result<Vec<String>, String> {
 }
 
 fn ensure_tools(root: &Path) -> Result<(), String> {
-    let has_llvm_cov = Command::new("cargo").current_dir(root).args(["llvm-cov", "--version"]).output().is_ok_and(|o| o.status.success());
+    let has_llvm_cov = crate::dev_tool_command("cargo")
+        .current_dir(root)
+        .args(["llvm-cov", "--version"])
+        .wall_timeout(Duration::from_secs(30))
+        .idle_timeout(Duration::from_secs(10))
+        .run()
+        .is_ok_and(|o| o.success);
     if !has_llvm_cov {
         return Err(format!("`cargo-llvm-cov` is not installed; {INSTALL_HINT}"));
     }
@@ -198,8 +204,14 @@ fn llvm_tools_available(root: &Path) -> bool {
 }
 
 fn rustc_output(root: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("rustc").current_dir(root).args(args).output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    let out = crate::dev_tool_command("rustc")
+        .current_dir(root)
+        .args(args.iter().copied())
+        .wall_timeout(Duration::from_secs(30))
+        .idle_timeout(Duration::from_secs(10))
+        .run()
+        .ok()?;
+    out.success.then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// `<cargo target dir>/llvm-cov`, honouring `CARGO_TARGET_DIR` so parallel agents stay isolated.

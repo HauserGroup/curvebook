@@ -1068,10 +1068,9 @@ mod platform_impl {
             let Some(entry) = self.locks.get_mut(&lock_id) else {
                 return;
             };
-            let Some(pos) = entry.holders.iter().position(|h| h.thread_id == tid) else {
+            let Some((pos, holder)) = entry.holders.iter_mut().enumerate().find(|(_, h)| h.thread_id == tid) else {
                 return;
             };
-            let holder = &mut entry.holders[pos];
             if is_long_job {
                 holder.long_job_holds = holder.long_job_holds.saturating_sub(1);
             } else {

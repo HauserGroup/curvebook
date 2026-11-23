@@ -194,6 +194,7 @@ fn make_stage_driver<'a>(state: StageHarness, metrics: ViewportMetrics, tokens: 
                 leading_width_override_pt: None,
                 trailing_width_override_pt: None,
                 host_draws_menu_bar: false,
+                is_rtl: curvebook_ui_egui::i18n::is_rtl_locale(&st.app.locale),
             })
         });
         let tokens = Tokens::for_mode(st.app.theme.mode);
@@ -971,7 +972,7 @@ fn all_14_beta_locales_and_viewports_pass_parity_and_scrollbar_non_overlap() -> 
         for &target in &sheet_modes {
             for &vp in &viewports {
                 let mut app = make_full_project_app()?;
-                app.set_locale(locale);
+                assert_eq!(app.set_locale(locale), locale);
                 if target == "gallery" {
                     app.nav.gallery.open = true;
                     let doc_clone = app.document().clone();

@@ -192,7 +192,7 @@ fn build_qol_test_project() -> ProjectDocument {
 fn hidpi_scales_and_rtl_coordinate_roundtrip_drag_select_and_inline_edit() {
     let mut app = UiApp::from_session(Session::from_document(build_qol_test_project()));
     app.nav.welcome.open = false;
-    let _ = app.set_locale("de");
+    assert_eq!(app.set_locale("de"), "de");
 
     let mut harness = human_wf_common::EguiWfHarness::from_app(app, ViewportMetrics::new(1024.0, 640.0, 1.0));
     for scale in [1.0_f64, 1.5, 2.0, 3.0] {
@@ -242,10 +242,10 @@ fn hidpi_scales_and_rtl_coordinate_roundtrip_drag_select_and_inline_edit() {
     assert_eq!(orig_11, Some(28.0));
 
     // Compare LTR ("en") vs RTL ("ar") rendered pixels & drag selection (0,0)->(2,1).
-    let _ = harness.app_mut().set_locale("en");
+    assert_eq!(harness.app_mut().set_locale("en"), "en");
     harness.driver.run_settled();
     let ltr_rgba = harness.app_mut().render_egui_shell_rgba(metrics_2x.to_render_target_spec(96), ScreenshotRegionTarget::FullWindow).expect("ltr");
-    let _ = harness.app_mut().set_locale("ar");
+    assert_eq!(harness.app_mut().set_locale("ar"), "ar");
     harness.driver.run_settled();
     let rtl_rgba = harness.app_mut().render_egui_shell_rgba(metrics_2x.to_render_target_spec(96), ScreenshotRegionTarget::FullWindow).expect("rtl");
     assert_ne!(ltr_rgba.rgba, rtl_rgba.rgba);

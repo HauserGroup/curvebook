@@ -8,15 +8,16 @@ use serde_json::{Value, json};
 
 fn mv_cell_f64(grid_snap: &Value, row: usize, col: usize) -> Result<f64, String> {
     let wid = format!("grid.cell.{row}.{col}.0");
-    let node = find_node(&grid_snap["grid_cells"], &wid).ok_or_else(|| format!("missing `{wid}` in grid_cells"))?;
-    let text = node["value"]["text"].as_str().ok_or_else(|| format!("non-text value at `{wid}`: {node}"))?;
+    let grid_cells = grid_snap.get("grid_cells").unwrap_or(&Value::Null);
+    let node = find_node(grid_cells, &wid).ok_or_else(|| format!("missing `{wid}` in grid_cells"))?;
+    let text = node.get("value").and_then(|v| v.get("text")).and_then(Value::as_str).ok_or_else(|| format!("non-text value at `{wid}`: {node}"))?;
     text.trim().parse::<f64>().map_err(|e| format!("parse float `{text}` at `{wid}`: {e}"))
 }
 
 fn set_formula_via_bar(gui: &mut McpChild, col: usize, formula: &str) -> Result<(), String> {
     gui.ui_invoke("ui.table.openFormulaBar", json!({ "column": col }))?;
     let typed = gui.ui_type(Some("formula_bar.input"), formula, true, false)?;
-    if typed["is_valid"] != json!(true) {
+    if typed.get("is_valid").and_then(Value::as_bool) != Some(true) {
         return Err(format!("formula `{formula}` marked invalid: {typed}"));
     }
     gui.ui_pointer(json!({ "action": "click", "widget_id": "formula_bar.commit" }))?;

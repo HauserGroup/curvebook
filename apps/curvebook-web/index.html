@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
@@ -17,193 +17,12 @@
   <link rel="icon" type="image/png" sizes="32x32" href="icons/32/org.curvebook.CurveBook.png">
   <link rel="apple-touch-icon" href="icons/256/org.curvebook.CurveBook.png">
   <link data-trunk rel="rust" data-bin="curvebook-web" data-wasm-opt="z" data-wasm-opt-params="--enable-bulk-memory --enable-simd --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types" data-weak-refs />
-  <style>
-    html, body {
-      margin: 0;
-      padding: 0;
-      width: 100%;
-      height: 100%;
-      overflow: hidden;
-      background: #181c28;
-      overscroll-behavior: none;
-      -webkit-user-select: none;
-      user-select: none;
-      -webkit-touch-callout: none;
-      -webkit-tap-highlight-color: transparent;
-      -webkit-text-size-adjust: 100%;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    }
-
-    #curvebook_canvas {
-      position: absolute;
-      top: env(safe-area-inset-top, 0);
-      right: env(safe-area-inset-right, 0);
-      bottom: env(safe-area-inset-bottom, 0);
-      left: env(safe-area-inset-left, 0);
-      width: calc(100% - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
-      height: calc(100% - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
-      display: block;
-      touch-action: none;
-    }
-
-    #curvebook_loading {
-      position: absolute;
-      inset: 0;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      color: #c2c8d6;
-      font-size: 14px;
-      pointer-events: none;
-    }
-
-    #curvebook_readonly_banner {
-      position: fixed;
-      top: env(safe-area-inset-top, 10px);
-      left: 50%;
-      transform: translateX(-50%);
-      z-index: 20;
-      display: none;
-      align-items: center;
-      gap: 10px;
-      max-width: min(720px, calc(100vw - 32px));
-      padding: 8px 14px;
-      border-radius: 8px;
-      border: 1px solid #d99b26;
-      background: rgba(33, 27, 16, 0.94);
-      color: #fde6b4;
-      font-size: 13px;
-      line-height: 1.35;
-      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
-    }
-
-    #curvebook_readonly_banner[data-visible="true"] {
-      display: flex;
-    }
-
-    #curvebook_readonly_badge {
-      padding: 2px 7px;
-      border-radius: 4px;
-      background: #d99b26;
-      color: #181c28;
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-      flex-shrink: 0;
-    }
-
-    #curvebook_drop_overlay {
-      position: fixed;
-      inset: 12px;
-      z-index: 15;
-      display: none;
-      align-items: center;
-      justify-content: center;
-      border: 2px dashed #6da4ff;
-      border-radius: 12px;
-      background: rgba(24, 28, 40, 0.82);
-      color: #e6eefc;
-      font-size: 15px;
-      font-weight: 600;
-      pointer-events: none;
-    }
-
-    #curvebook_drop_overlay[data-active="true"] {
-      display: flex;
-    }
-
-    #curvebook_toast {
-      position: fixed;
-      right: 16px;
-      bottom: 32px;
-      z-index: 30;
-      display: none;
-      max-width: min(440px, calc(100vw - 32px));
-      padding: 8px 12px;
-      border-radius: 7px;
-      border: 1px solid #3c4a66;
-      background: rgba(20, 24, 34, 0.95);
-      color: #e6eefc;
-      font-size: 12.5px;
-      line-height: 1.35;
-      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
-      pointer-events: none;
-    }
-
-    #curvebook_toast[data-visible="true"] {
-      display: block;
-    }
-
-    #curvebook_toast[data-level="error"] {
-      border-color: #e05d5d;
-      color: #ffd9d9;
-    }
-
-    #curvebook_toast[data-level="warning"] {
-      border-color: #d99b26;
-      color: #fde6b4;
-    }
-
-    #curvebook_toast[data-level="success"] {
-      border-color: #3da86d;
-      color: #ccf4dc;
-    }
-
-    #curvebook_print_stage {
-      display: none;
-    }
-
-    @media print {
-      @page {
-        margin: 0;
-      }
-
-      html, body {
-        width: auto;
-        height: auto;
-        overflow: visible;
-        background: #ffffff;
-      }
-
-      #curvebook_canvas,
-      #curvebook_loading,
-      #curvebook_readonly_banner,
-      #curvebook_drop_overlay,
-      #curvebook_toast,
-      #curvebook_a11y_chrome,
-      #curvebook_file_input,
-      #curvebook_dir_input {
-        display: none !important;
-      }
-
-      #curvebook_print_stage {
-        display: block;
-      }
-
-      .curvebook-print-page {
-        page-break-after: always;
-        break-after: page;
-      }
-
-      .curvebook-print-page:last-child {
-        page-break-after: auto;
-        break-after: auto;
-      }
-
-      #curvebook_print_stage svg {
-        display: block;
-        max-width: 100%;
-        height: auto;
-      }
-    }
-  </style>
+  <link data-trunk rel="css" href="styles.css" />
 </head>
 <body>
   <canvas id="curvebook_canvas" tabindex="0" aria-label="CurveBook workspace canvas"></canvas>
   <div id="curvebook_loading">
-    <img src="icons/256/org.curvebook.CurveBook.png" alt="" width="64" height="64" style="margin-bottom: 12px;" />
+    <img id="curvebook_loading_icon" src="icons/256/org.curvebook.CurveBook.png" alt="" width="64" height="64" />
     <span>Loading CurveBook&hellip;</span>
   </div>
   <div id="curvebook_readonly_banner" role="status" aria-live="polite" data-visible="false">
@@ -214,7 +33,7 @@
     Drop .curvebook, .curvebook.d, .pzfx, .prism, .csv, or .tsv files to open locally
   </div>
   <div id="curvebook_toast" role="status" aria-live="polite" data-visible="false" data-level="info"></div>
-  <div id="curvebook_a11y_chrome" aria-live="polite" style="position:fixed;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;"></div>
+  <div id="curvebook_a11y_chrome" aria-live="polite"></div>
   <input id="curvebook_file_input" type="file" accept=".curvebook,.cbtemplate,.pzfx,.prism,.csv,.tsv,.txt" multiple hidden />
   <input id="curvebook_dir_input" type="file" webkitdirectory multiple hidden />
   <div id="curvebook_print_stage" aria-hidden="true"></div>
@@ -716,50 +535,46 @@
         }
       }
 
+      function tryGetLocalStorage() {
+        try {
+          return window.localStorage || null;
+        } catch (_err) {
+          return null;
+        }
+      }
+
+      function tryReadLocalStorageItem(storage, key) {
+        try {
+          return storage.getItem(key);
+        } catch (_err) {
+          return null;
+        }
+      }
+
       function applyLocalStorageCommand(cmd) {
-        if (!window.localStorage) {
+        const isManagedKey = (k) => typeof k === "string" && (k === PREFERENCES_KEY || k.startsWith(AUTOSAVE_PREFIX));
+        const allowedWrites = Array.isArray(cmd.writes) ? cmd.writes.filter((e) => e && isManagedKey(e.key) && typeof e.value === "string") : [];
+        const allowedRemovals = Array.isArray(cmd.removals) ? cmd.removals.filter((k) => isManagedKey(k)) : [];
+        const storage = tryGetLocalStorage();
+        if (!storage) {
+          showNotice("warning", "Local browser storage is unavailable; state stays in memory.");
+          emitEvent({ kind: "confirm_local_storage", writes: allowedWrites.map((e) => e.key), removals: [], succeeded: false });
           return;
         }
-        const isManagedKey = (key) => typeof key === "string" && (key === PREFERENCES_KEY || key.startsWith(AUTOSAVE_PREFIX));
-        const allowedWrites = Array.isArray(cmd.writes)
-          ? cmd.writes.filter((entry) => entry && isManagedKey(entry.key) && typeof entry.value === "string")
-          : [];
-        const allowedRemovals = Array.isArray(cmd.removals)
-          ? cmd.removals.filter((key) => isManagedKey(key))
-          : [];
-        const prevWrites = allowedWrites.map((entry) => [entry.key, window.localStorage.getItem(entry.key)]);
-        const removalBackups = allowedRemovals.map((key) => [key, window.localStorage.getItem(key)]);
+        const prevWrites = allowedWrites.map((e) => [e.key, tryReadLocalStorageItem(storage, e.key)]);
+        const removalBackups = allowedRemovals.map((k) => [k, tryReadLocalStorageItem(storage, k)]);
         const removedDuringRetry = [];
-
         const rollbackStorage = () => {
           for (let i = removedDuringRetry.length - 1; i >= 0; i -= 1) {
             const [k, v] = removedDuringRetry[i];
-            try {
-              if (v !== null) {
-                window.localStorage.setItem(k, v);
-              }
-            } catch (_restoreErr) {}
+            try { if (v !== null) storage.setItem(k, v); } catch (_restoreErr) {}
           }
           for (let i = prevWrites.length - 1; i >= 0; i -= 1) {
             const [k, v] = prevWrites[i];
-            try {
-              if (v === null) {
-                window.localStorage.removeItem(k);
-              } else {
-                window.localStorage.setItem(k, v);
-              }
-            } catch (_restoreErr) {}
+            try { if (v === null) storage.removeItem(k); else storage.setItem(k, v); } catch (_restoreErr) {}
           }
         };
-
-        const writeAll = () => {
-          for (const entry of allowedWrites) {
-            window.localStorage.setItem(entry.key, entry.value);
-          }
-        };
-
-        // Write new snapshot(s) BEFORE evicting older entries; only evict & retry if quota rejects,
-        // rolling back evicted recovery snapshots if writes still fail (`RV-80`).
+        const writeAll = () => { for (const entry of allowedWrites) { storage.setItem(entry.key, entry.value); } };
         let writesSucceeded = false;
         try {
           writeAll();
@@ -768,7 +583,7 @@
           for (const backup of removalBackups) {
             try {
               if (backup[1] !== null) {
-                window.localStorage.removeItem(backup[0]);
+                storage.removeItem(backup[0]);
                 removedDuringRetry.push(backup);
               }
               writeAll();
@@ -777,37 +592,22 @@
             } catch (_retryErr) {}
           }
         }
-
         if (!writesSucceeded) {
           rollbackStorage();
           showNotice("warning", "Local browser storage quota exceeded or restricted; state stays in memory.");
-          emitEvent({
-            kind: "confirm_local_storage",
-            writes: allowedWrites.map((entry) => entry.key),
-            removals: [],
-            succeeded: false
-          });
+          emitEvent({ kind: "confirm_local_storage", writes: allowedWrites.map((e) => e.key), removals: [], succeeded: false });
           return;
         }
-
         const actuallyRemoved = new Set(removedDuringRetry.map(([k]) => k));
         for (const key of allowedRemovals) {
-          if (!allowedWrites.some((entry) => entry.key === key)) {
-            try {
-              window.localStorage.removeItem(key);
-              actuallyRemoved.add(key);
-            } catch (_rmErr) {}
+          if (!allowedWrites.some((e) => e.key === key)) {
+            try { storage.removeItem(key); actuallyRemoved.add(key); } catch (_rmErr) {}
           }
         }
-        if (allowedWrites.some((entry) => entry.key.startsWith(AUTOSAVE_PREFIX))) {
+        if (allowedWrites.some((e) => e.key.startsWith(AUTOSAVE_PREFIX))) {
           hasUnflushedAutosave = false;
         }
-        emitEvent({
-          kind: "confirm_local_storage",
-          writes: allowedWrites.map((entry) => entry.key),
-          removals: Array.from(actuallyRemoved),
-          succeeded: true
-        });
+        emitEvent({ kind: "confirm_local_storage", writes: allowedWrites.map((e) => e.key), removals: Array.from(actuallyRemoved), succeeded: true });
       }
 
       function applyReadOnlyBannerCommand(cmd) {
@@ -1346,13 +1146,42 @@
           if (ev.key === "Tab") {
             return true;
           }
+          if (!ev.altKey && !ev.metaKey && !ev.ctrlKey && ev.key === "F6") {
+            return true;
+          }
           if (ev.altKey && !ev.metaKey && !ev.ctrlKey) {
             return ["w", "t", "n", "b", "i", "p", "l", "k", "0", "e"].includes(lower);
           }
           if ((ev.metaKey || ev.ctrlKey) && !ev.altKey) {
+            if (ev.shiftKey && ["a", "f", "g"].includes(lower)) {
+              return true;
+            }
+            if (lower === "enter") {
+              return true;
+            }
             return ["c", "p", "o", "s", "k", "t", "z", "y", "e", "0", "\\"].includes(lower);
           }
           return false;
+        }
+
+        function isSinglePrintableGraphemeKey(ev) {
+          if (ev.ctrlKey || ev.metaKey || ev.altKey || typeof ev.key !== "string" || ev.key.length === 0) {
+            return false;
+          }
+          if (/[\u0000-\u001F\u007F]/.test(ev.key)) {
+            return false;
+          }
+          if (typeof Intl !== "undefined" && typeof Intl.Segmenter === "function") {
+            let count = 0;
+            for (const _seg of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(ev.key)) {
+              count += 1;
+              if (count > 1) {
+                return false;
+              }
+            }
+            return count === 1;
+          }
+          return Array.from(ev.key).length === 1;
         }
 
         window.addEventListener("keydown", (ev) => {
@@ -1362,7 +1191,7 @@
           if (shouldPreventBrowserShortcut(ev)) {
             ev.preventDefault();
           }
-          emitEvent({
+          const cmds = emitEvent({
             kind: "ui_input",
             event: {
               KeyDown: {
@@ -1371,6 +1200,16 @@
               }
             }
           });
+          if (Array.isArray(cmds) && cmds.length === 0 && isSinglePrintableGraphemeKey(ev)) {
+            emitEvent({
+              kind: "ui_input",
+              event: {
+                TextInput: {
+                  text: ev.key
+                }
+              }
+            });
+          }
         });
 
         window.addEventListener("compositionstart", () => {
@@ -1394,28 +1233,65 @@
         });
       }
 
+      const MAX_ARCHIVE_BYTES = 128 * 1024 * 1024;
+      const MAX_CSV_BYTES = 64 * 1024 * 1024;
+      const MAX_DIR_ENTRIES = 4096;
+
+      function singleFileLimitForName(name) {
+        const lower = (name || "").toLowerCase();
+        if (lower.endsWith(".csv") || lower.endsWith(".tsv") || lower.endsWith(".txt")) {
+          return MAX_CSV_BYTES;
+        }
+        return MAX_ARCHIVE_BYTES;
+      }
+
+      function assertFileWithinImportBudget(file, singleLimitBytes, batchState) {
+        const size = typeof file.size === "number" ? file.size : 0;
+        if (size > singleLimitBytes) {
+          throw new Error("File \"" + file.name + "\" exceeds maximum allowed size (" + size + " > " + singleLimitBytes + " bytes).");
+        }
+        if (batchState) {
+          batchState.count += 1;
+          if (batchState.count > MAX_DIR_ENTRIES) {
+            throw new Error("Import batch exceeds maximum entry count (" + MAX_DIR_ENTRIES + ").");
+          }
+          batchState.totalBytes += size;
+          if (batchState.totalBytes > MAX_ARCHIVE_BYTES) {
+            throw new Error("Import batch exceeds maximum total size (" + MAX_ARCHIVE_BYTES + " bytes).");
+          }
+        }
+      }
+
       if (fileInputEl) {
         fileInputEl.addEventListener("change", async () => {
           const files = fileInputEl.files;
           if (!files || files.length === 0) {
             return;
           }
-          if (files.length === 1) {
-            const file = files[0];
-            const bytes = new Uint8Array(await file.arrayBuffer());
-            activeDirectoryHandle = null;
-            emitEvent({ kind: "open_file_bytes", file_name: file.name, bytes_base64: bytesToBase64(bytes) });
-          } else {
-            const batch = [];
-            for (let i = 0; i < files.length; i += 1) {
-              const file = files[i];
+          try {
+            if (files.length === 1) {
+              const file = files[0];
+              assertFileWithinImportBudget(file, singleFileLimitForName(file.name), null);
               const bytes = new Uint8Array(await file.arrayBuffer());
-              batch.push({ path: file.name, bytes_base64: bytesToBase64(bytes) });
+              activeDirectoryHandle = null;
+              emitEvent({ kind: "open_file_bytes", file_name: file.name, bytes_base64: bytesToBase64(bytes) });
+            } else {
+              const batch = [];
+              const batchState = { count: 0, totalBytes: 0 };
+              for (let i = 0; i < files.length; i += 1) {
+                const file = files[i];
+                assertFileWithinImportBudget(file, MAX_ARCHIVE_BYTES, batchState);
+                const bytes = new Uint8Array(await file.arrayBuffer());
+                batch.push({ path: file.name, bytes_base64: bytesToBase64(bytes) });
+              }
+              activeDirectoryHandle = null;
+              emitEvent({ kind: "import_dropped_files", files: batch });
             }
-            activeDirectoryHandle = null;
-            emitEvent({ kind: "import_dropped_files", files: batch });
+          } catch (err) {
+            showNotice("error", err && err.message ? err.message : String(err));
+          } finally {
+            fileInputEl.value = "";
           }
-          fileInputEl.value = "";
         });
       }
 
@@ -1425,31 +1301,39 @@
           if (!files || files.length === 0) {
             return;
           }
-          const firstRel = files[0].webkitRelativePath || "workspace.curvebook.d/document.json";
-          const rootName = firstRel.includes("/") ? firstRel.split("/")[0] : "workspace.curvebook.d";
-          const entries = [];
-          for (let i = 0; i < files.length; i += 1) {
-            const file = files[i];
-            const rawRel = file.webkitRelativePath || file.name;
-            const rel = rawRel.startsWith(rootName + "/") ? rawRel.slice(rootName.length + 1) : rawRel;
-            const bytes = new Uint8Array(await file.arrayBuffer());
-            entries.push({ path: rel, bytes_base64: bytesToBase64(bytes) });
+          try {
+            const firstRel = files[0].webkitRelativePath || "workspace.curvebook.d/document.json";
+            const rootName = firstRel.includes("/") ? firstRel.split("/")[0] : "workspace.curvebook.d";
+            const entries = [];
+            const batchState = { count: 0, totalBytes: 0 };
+            for (let i = 0; i < files.length; i += 1) {
+              const file = files[i];
+              assertFileWithinImportBudget(file, MAX_ARCHIVE_BYTES, batchState);
+              const rawRel = file.webkitRelativePath || file.name;
+              const rel = rawRel.startsWith(rootName + "/") ? rawRel.slice(rootName.length + 1) : rawRel;
+              const bytes = new Uint8Array(await file.arrayBuffer());
+              entries.push({ path: rel, bytes_base64: bytesToBase64(bytes) });
+            }
+            activeDirectoryHandle = null;
+            emitEvent({ kind: "import_directory_entries", root_name: rootName, entries });
+          } catch (err) {
+            showNotice("error", err && err.message ? err.message : String(err));
+          } finally {
+            dirInputEl.value = "";
           }
-          activeDirectoryHandle = null;
-          emitEvent({ kind: "import_directory_entries", root_name: rootName, entries });
-          dirInputEl.value = "";
         });
       }
 
-      async function readDirectoryHandleEntries(dirHandle, prefix, out) {
+      async function readDirectoryHandleEntries(dirHandle, prefix, out, batchState) {
         for await (const [name, handle] of dirHandle.entries()) {
           const rel = prefix ? (prefix + "/" + name) : name;
           if (handle.kind === "file") {
             const file = await handle.getFile();
+            assertFileWithinImportBudget(file, MAX_ARCHIVE_BYTES, batchState);
             const buf = new Uint8Array(await file.arrayBuffer());
             out.push({ path: rel, bytes_base64: bytesToBase64(buf) });
           } else if (handle.kind === "directory") {
-            await readDirectoryHandleEntries(handle, rel, out);
+            await readDirectoryHandleEntries(handle, rel, out, batchState);
           }
         }
       }
@@ -1473,6 +1357,11 @@
             }]
           });
           const file = await handle.getFile();
+          const limit = singleFileLimitForName(file.name);
+          if (file.size > limit) {
+            showNotice("error", "File \"" + file.name + "\" exceeds maximum allowed size (" + file.size + " > " + limit + " bytes).");
+            return true;
+          }
           const bytes = new Uint8Array(await file.arrayBuffer());
           activeDirectoryHandle = null;
           emitEvent({ kind: "open_file_bytes", file_name: file.name, bytes_base64: bytesToBase64(bytes) });
@@ -1506,7 +1395,8 @@
         try {
           const dirHandle = await window.showDirectoryPicker({ mode: "readwrite" });
           const entries = [];
-          await readDirectoryHandleEntries(dirHandle, "", entries);
+          const batchState = { count: 0, totalBytes: 0 };
+          await readDirectoryHandleEntries(dirHandle, "", entries, batchState);
           const cmds = emitEvent({ kind: "import_directory_entries", root_name: dirHandle.name, entries });
           if (
             Array.isArray(cmds) &&
@@ -1520,6 +1410,10 @@
           if (err && err.name === "AbortError") {
             return true;
           }
+          if (err && err.message && err.message.includes("exceeds maximum")) {
+            showNotice("error", err.message);
+            return true;
+          }
           if (dirInputEl) {
             dirInputEl.click();
           }
@@ -1527,14 +1421,20 @@
         }
       }
 
-      async function collectDroppedEntry(entry, prefix, out) {
+      async function collectDroppedEntry(entry, prefix, out, batchState) {
         if (entry.isFile) {
           await new Promise((resolve, reject) => {
             entry.file(async (file) => {
-              const bytes = new Uint8Array(await file.arrayBuffer());
-              const rel = prefix ? (prefix + "/" + file.name) : file.name;
-              out.push({ path: rel, bytes_base64: bytesToBase64(bytes) });
-              resolve();
+              try {
+                const limit = prefix ? MAX_ARCHIVE_BYTES : singleFileLimitForName(file.name);
+                assertFileWithinImportBudget(file, limit, batchState);
+                const bytes = new Uint8Array(await file.arrayBuffer());
+                const rel = prefix ? (prefix + "/" + file.name) : file.name;
+                out.push({ path: rel, bytes_base64: bytesToBase64(bytes) });
+                resolve();
+              } catch (err) {
+                reject(err);
+              }
             }, reject);
           });
         } else if (entry.isDirectory) {
@@ -1544,7 +1444,7 @@
           let batch = await readBatch();
           while (batch.length > 0) {
             for (const child of batch) {
-              await collectDroppedEntry(child, dirPrefix, out);
+              await collectDroppedEntry(child, dirPrefix, out, batchState);
             }
             batch = await readBatch();
           }
@@ -1581,33 +1481,42 @@
         if (!dt) {
           return;
         }
-        const collected = [];
-        if (dt.items && dt.items.length > 0) {
-          for (let i = 0; i < dt.items.length; i += 1) {
-            const item = dt.items[i];
-            if (typeof item.webkitGetAsEntry === "function") {
-              const entry = item.webkitGetAsEntry();
-              if (entry) {
-                await collectDroppedEntry(entry, "", collected);
-                continue;
+        try {
+          const collected = [];
+          const batchState = { count: 0, totalBytes: 0 };
+          if (dt.items && dt.items.length > 0) {
+            for (let i = 0; i < dt.items.length; i += 1) {
+              const item = dt.items[i];
+              if (typeof item.webkitGetAsEntry === "function") {
+                const entry = item.webkitGetAsEntry();
+                if (entry) {
+                  await collectDroppedEntry(entry, "", collected, batchState);
+                  continue;
+                }
+              }
+              const file = item.getAsFile();
+              if (file) {
+                const limit = dt.items.length === 1 ? singleFileLimitForName(file.name) : MAX_ARCHIVE_BYTES;
+                assertFileWithinImportBudget(file, limit, batchState);
+                const bytes = new Uint8Array(await file.arrayBuffer());
+                collected.push({ path: file.name, bytes_base64: bytesToBase64(bytes) });
               }
             }
-            const file = item.getAsFile();
-            if (file) {
+          } else if (dt.files && dt.files.length > 0) {
+            for (let i = 0; i < dt.files.length; i += 1) {
+              const file = dt.files[i];
+              const limit = dt.files.length === 1 ? singleFileLimitForName(file.name) : MAX_ARCHIVE_BYTES;
+              assertFileWithinImportBudget(file, limit, batchState);
               const bytes = new Uint8Array(await file.arrayBuffer());
               collected.push({ path: file.name, bytes_base64: bytesToBase64(bytes) });
             }
           }
-        } else if (dt.files && dt.files.length > 0) {
-          for (let i = 0; i < dt.files.length; i += 1) {
-            const file = dt.files[i];
-            const bytes = new Uint8Array(await file.arrayBuffer());
-            collected.push({ path: file.name, bytes_base64: bytesToBase64(bytes) });
+          if (collected.length > 0) {
+            activeDirectoryHandle = null;
+            emitEvent({ kind: "import_dropped_files", files: collected });
           }
-        }
-        if (collected.length > 0) {
-          activeDirectoryHandle = null;
-          emitEvent({ kind: "import_dropped_files", files: collected });
+        } catch (err) {
+          showNotice("error", err && err.message ? err.message : String(err));
         }
       });
 
@@ -1616,18 +1525,19 @@
           clearInterval(fallbackLockTimerId);
           fallbackLockTimerId = null;
         }
-        if (!window.localStorage) {
+        const storage = tryGetLocalStorage();
+        if (!storage) {
           return;
         }
         try {
           const key = LOCK_KEY_PREFIX + (docId || activeLockDocId || "default");
-          const raw = window.localStorage.getItem(key);
+          const raw = storage.getItem(key);
           if (!raw) {
             return;
           }
           const parsed = JSON.parse(raw);
           if (parsed && parsed.tabId === tabId) {
-            window.localStorage.removeItem(key);
+            storage.removeItem(key);
           }
         } catch (_err) {
           // Ignore storage read/remove errors.
@@ -1641,48 +1551,62 @@
           clearTimeout(fallbackRetryTimerId);
           fallbackRetryTimerId = null;
         }
+        if (fallbackLockTimerId !== null) {
+          clearInterval(fallbackLockTimerId);
+          fallbackLockTimerId = null;
+        }
         try {
-          if (window.localStorage) {
-            const raw = window.localStorage.getItem(key);
-            if (raw) {
-              const existing = JSON.parse(raw);
-              if (existing && existing.tabId && existing.tabId !== tabId && Number(existing.expiresAt) > now) {
-                holdsCurrentWebLock = false;
-                emitEvent({
-                  kind: "observe_external_lock",
-                  doc_id: docId,
-                  holder_tab_id: String(existing.tabId),
-                  now_ms: now
-                });
-                const waitMs = Math.max(250, Math.min(LOCK_LEASE_TTL_MS, Number(existing.expiresAt) - now + 50));
-                fallbackRetryTimerId = setTimeout(() => {
-                  fallbackRetryTimerId = null;
-                  if (!holdsCurrentWebLock && activeLockDocId === docId) {
-                    coordinateDocumentLock(docId);
-                  }
-                }, waitMs);
-                return;
-              }
+          const storage = tryGetLocalStorage();
+          if (!storage) {
+            throw new Error("localStorage unavailable");
+          }
+          const raw = storage.getItem(key);
+          if (raw) {
+            const existing = JSON.parse(raw);
+            if (existing && existing.tabId && existing.tabId !== tabId && Number(existing.expiresAt) > now) {
+              holdsCurrentWebLock = false;
+              emitEvent({
+                kind: "observe_external_lock",
+                doc_id: docId,
+                holder_tab_id: String(existing.tabId),
+                now_ms: now
+              });
+              const waitMs = Math.max(250, Math.min(LOCK_LEASE_TTL_MS, Number(existing.expiresAt) - now + 50));
+              fallbackRetryTimerId = setTimeout(() => {
+                fallbackRetryTimerId = null;
+                if (!holdsCurrentWebLock && activeLockDocId === docId) {
+                  coordinateDocumentLock(docId);
+                }
+              }, waitMs);
+              return;
             }
-            window.localStorage.setItem(key, JSON.stringify({ tabId, expiresAt: now + LOCK_LEASE_TTL_MS }));
-            fallbackLockTimerId = setInterval(() => {
-              if (!holdsCurrentWebLock || !window.localStorage) {
-                return;
-              }
-              try {
-                window.localStorage.setItem(key, JSON.stringify({ tabId, expiresAt: Date.now() + LOCK_LEASE_TTL_MS }));
-              } catch (_err) {
-                // Ignore heartbeat write errors.
-              }
-            }, 5000);
+          }
+          storage.setItem(key, JSON.stringify({ tabId, expiresAt: now + LOCK_LEASE_TTL_MS }));
+          fallbackLockTimerId = setInterval(() => {
+            const hbStorage = tryGetLocalStorage();
+            if (!holdsCurrentWebLock || !hbStorage) {
+              return;
+            }
+            try {
+              hbStorage.setItem(key, JSON.stringify({ tabId, expiresAt: Date.now() + LOCK_LEASE_TTL_MS }));
+            } catch (_err) {
+              // Ignore heartbeat write errors.
+            }
+          }, 5000);
+          holdsCurrentWebLock = true;
+          emitEvent({ kind: "acquire_lock", doc_id: docId, tab_id: tabId, now_ms: now });
+          if (lockChannel) {
+            lockChannel.postMessage({ type: "holder", docId, tabId });
           }
         } catch (_err) {
-          // Fall back to exclusive local session when localStorage is restricted.
-        }
-        holdsCurrentWebLock = true;
-        emitEvent({ kind: "acquire_lock", doc_id: docId, tab_id: tabId, now_ms: now });
-        if (lockChannel) {
-          lockChannel.postMessage({ type: "holder", docId, tabId });
+          holdsCurrentWebLock = false;
+          showNotice("warning", "Browser localStorage lock is unavailable; opening in read-only fallback mode.");
+          emitEvent({
+            kind: "observe_external_lock",
+            doc_id: docId,
+            holder_tab_id: "storage-unavailable",
+            now_ms: now
+          });
         }
       }
 
@@ -1834,14 +1758,15 @@
 
       function collectLocalStorageSnapshot() {
         const entries = [];
-        if (!window.localStorage) {
+        const storage = tryGetLocalStorage();
+        if (!storage) {
           return entries;
         }
         try {
-          for (let i = 0; i < window.localStorage.length; i += 1) {
-            const key = window.localStorage.key(i);
+          for (let i = 0; i < storage.length; i += 1) {
+            const key = storage.key(i);
             if (key && (key === PREFERENCES_KEY || key.startsWith(AUTOSAVE_PREFIX))) {
-              const val = window.localStorage.getItem(key);
+              const val = storage.getItem(key);
               if (typeof val === "string") {
                 entries.push({ key, value: val });
               }
@@ -1860,7 +1785,7 @@
           dispatchFn = fn;
           const stored = collectLocalStorageSnapshot();
           if (stored.length > 0) {
-            emitEvent({ kind: "hydrate_local_storage", entries: stored });
+            emitEvent({ kind: "hydrate_local_storage", entries: stored, now_ms: Date.now() });
           }
           syncCanvasViewport();
           coordinateDocumentLock(activeLockDocId);

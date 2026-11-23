@@ -6,6 +6,7 @@
 //! `ui_catalog` mirror checked by `cargo xtask ui-commands --check`.
 //! Governing spec: `docs/mcp.md` and `docs/implementation/scripting-and-automation.md`.
 #![forbid(unsafe_code)]
+#![deny(clippy::indexing_slicing)]
 
 pub mod errors;
 pub mod formats;

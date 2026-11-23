@@ -319,7 +319,7 @@ fn r15_4_r10_23_egui_pane_toggle_shortcuts_and_rtl_hidpi() -> Result<(), String>
     assert!(driver.state().app.family_open, "Ctrl+Shift+F must restore Family pane");
 
     // 4. Arabic (`ar`) @ 1.5x HiDPI layout parity, scrollbar non-overlap, and pane toggles remain clean.
-    let _ = driver.state_mut().app.set_locale("ar");
+    assert_eq!(driver.state_mut().app.set_locale("ar"), "ar");
     driver.set_viewport(ViewportMetrics::new(1440.0, 900.0, 1.5));
     assert!(driver.state().leading_dock_rect_pt.is_some());
     assert!(driver.state().trailing_dock_rect_pt.is_some());
@@ -408,7 +408,7 @@ fn r15_4_r10_23_egui_14_beta_locales_themes_and_section_9_4_layout_gates() -> Re
         for mode in [UiThemeMode::Light, UiThemeMode::Dark, UiThemeMode::HighContrast] {
             let mut app = build_r10_23_column_and_nav_app()?;
             app.set_theme_mode(mode);
-            let _ = app.set_locale(locale);
+            assert_eq!(app.set_locale(locale), locale);
             let mut driver = make_driver(app, ViewportMetrics::new(1440.0, 600.0, 1.0), build_driver_font_definitions());
             assert_clean_section_9_4(&driver, &format!("1440x600@1.0x locale={locale} theme={mode:?}"))?;
 
@@ -436,7 +436,7 @@ fn r15_4_r10_23_egui_fontless_embedded_fallback_scenarios() -> Result<(), String
 
     for (locale, mode, scale) in [("en", UiThemeMode::Light, 1.0), ("de", UiThemeMode::Dark, 2.0), ("ar", UiThemeMode::HighContrast, 3.0)] {
         let mut app = build_r10_23_column_and_nav_app()?;
-        let _ = app.set_locale(locale);
+        assert_eq!(app.set_locale(locale), locale);
         app.set_theme_mode(mode);
         let mut driver = make_driver(app, ViewportMetrics::new(1280.0, 800.0, scale), cleanroom_fonts.definitions.clone());
         assert_clean_section_9_4(&driver, &format!("fontless locale={locale} mode={mode:?} scale={scale}"))?;
@@ -545,7 +545,7 @@ fn r15_4_r10_23_egui_drag_select_clipboard_bundle_language_draft_and_wave4_grids
     driver.wheel_at(popup_center, egui::vec2(0.0, 400.0))?;
     driver.click_widget_id("popup.menu.ui.locale.set.opt.1")?; // `de`
     assert_eq!(driver.state().app.locale, "de");
-    let _ = driver.state_mut().app.set_locale("en");
+    assert_eq!(driver.state_mut().app.set_locale("en"), "en");
     driver.run_settled();
 
     // 4. `Xy` X-cell inline editing + `Cmd+C/V` grid paste + `ResultSheet` 640x420@1.5x scroll-clip check across RTL/CJK/LTR.
@@ -579,7 +579,7 @@ fn r15_4_r10_23_egui_drag_select_clipboard_bundle_language_draft_and_wave4_grids
         ("ar", UiThemeMode::HighContrast, 1.5),
         ("he", UiThemeMode::Dark, 1.5),
     ] {
-        let _ = driver.state_mut().app.set_locale(loc);
+        assert_eq!(driver.state_mut().app.set_locale(loc), loc);
         driver.state_mut().app.set_theme_mode(mode);
         driver.set_viewport(ViewportMetrics::new(640.0, 420.0, scale));
         assert_clean_section_9_4(&driver, &format!("ResultSheet 640x420@{scale}x locale={loc} mode={mode:?}"))?;
@@ -588,7 +588,7 @@ fn r15_4_r10_23_egui_drag_select_clipboard_bundle_language_draft_and_wave4_grids
     }
 
     // 6. `MV` Data-tab role badges (`mv_formula.role_badge.0`) & `Manage Variables…` modal (`dialog.manage_variables`).
-    let _ = driver.state_mut().app.set_locale("en");
+    assert_eq!(driver.state_mut().app.set_locale("en"), "en");
     driver.state_mut().app.set_theme_mode(UiThemeMode::Light);
     driver.set_viewport(ViewportMetrics::new(1280.0, 800.0, 1.0));
     driver.click_widget_id("nav.chip.data")?;

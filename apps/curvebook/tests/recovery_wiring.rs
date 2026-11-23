@@ -16,6 +16,14 @@ use curvebook_ui_egui::ControlAuth;
 use curvebook_ui_egui::interaction::ViewportMetrics;
 use serde_json::{Value, json};
 
+fn env_truthy(var: &str) -> bool {
+    std::env::var(var).is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
+fn loopback_required() -> bool {
+    env_truthy("CI") || env_truthy("CURVEBOOK_REQUIRE_LOOPBACK")
+}
+
 static APP_TEST_DIR_SEQ: AtomicU64 = AtomicU64::new(1);
 
 struct TempDirGuard {
@@ -201,7 +209,7 @@ fn r1_s11_01_and_s06_03_binary_default_launch_and_control_recovery() -> Result<(
     // 3. Default single-instance --control binary crash test (when loopback TCP connect is permitted by host sandbox).
     let probe_listener = match std::net::TcpListener::bind("127.0.0.1:0") {
         Ok(l) => l,
-        Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
+        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => return Ok(()),
         Err(err) => return Err(Box::new(err)),
     };
     let port = probe_listener.local_addr()?.port();
@@ -233,7 +241,7 @@ fn r1_s11_01_and_s06_03_binary_default_launch_and_control_recovery() -> Result<(
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let stream = match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
         Ok(s) => s,
-        Err(err) if matches!(err.kind(), ErrorKind::PermissionDenied | ErrorKind::TimedOut) => {
+        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => {
             return Ok(());
         }
         Err(err) => return Err(Box::new(err)),

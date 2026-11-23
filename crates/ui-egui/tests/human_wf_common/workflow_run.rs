@@ -17,12 +17,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use curvebook_chart::compile_graph;
 use curvebook_doc::{CiBound, DataSheet, GraphSheet, ProjectDocument, ResultCell, ResultSheet, ResultStatus, SheetId};
-use curvebook_engine::Session;
+use curvebook_engine::{CommandOutcome, Session};
 use curvebook_svg::{SvgExportOptions, render_svg};
 use curvebook_testkit::metrics::approx_eq;
 use curvebook_ui_egui::UiApp;
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
-use curvebook_ui_egui::egui_shell::FrameInspectMeta;
+use curvebook_ui_egui::egui_shell::{FrameInspectMeta, UiIntentOutcome};
 use curvebook_ui_egui::inspect::ScreenshotRegionTarget;
 use curvebook_ui_egui::interaction::{KeyModifiers, PointerButton, ViewportMetrics};
 use curvebook_ui_egui::os_integration::StubPlatformClipboardAdapter;
@@ -454,6 +454,15 @@ impl WorkflowRun {
     #[must_use]
     pub fn intent_errors(&self) -> &[String] {
         &self.harness.driver.state().intent_errors
+    }
+
+    /// Most recent committed [`CommandOutcome`] emitted for `command_id` across settled GUI intents.
+    #[must_use]
+    pub fn last_engine_outcome(&self, command_id: &str) -> Option<&CommandOutcome> {
+        self.harness.driver.state().recorded_outcomes.iter().rev().find_map(|item| match item {
+            UiIntentOutcome::Engine { command_id: cid, outcome } if cid == command_id => Some(outcome),
+            _ => None,
+        })
     }
 
     /// Read-only access to the attached clipboard stub.

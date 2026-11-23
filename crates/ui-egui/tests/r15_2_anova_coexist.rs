@@ -381,7 +381,7 @@ fn all_14_beta_locales_and_hybrid_screenshots_pass_at_640x420_and_1440x600() -> 
     for locale in BETA_LOCALE_CODES {
         for [w_pt, h_pt] in [[640.0_f64, 420.0], [1440.0, 600.0]] {
             let mut app = base_app.clone();
-            let _ = app.set_locale(locale);
+            assert_eq!(app.set_locale(locale), locale);
             let doc_loc = app.document().clone();
             assert!(app.canvas_dialogs.open_edit_parameters(&doc_loc, &rs_id));
             app.sync_views();

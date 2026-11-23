@@ -9,12 +9,13 @@ use curvebook_doc::FramePreset;
 use egui::Ui;
 
 use crate::UiApp;
+use crate::dialogs_canvas::AxisTarget;
+use crate::i18n::tr;
 
 use super::helpers::{
-    ButtonEntry, GraphModalCtx, LengthSpinnerSpec, format_localized_draft_f64, gtr, record_button, record_checkbox, record_input,
-    render_length_spinner_pt,
+    ButtonEntry, GraphModalCtx, LengthSpinnerSpec, format_localized_draft_f64, record_button, record_checkbox, record_input, render_length_spinner_pt,
 };
-use super::state::{FormatAxesTab, GraphModalEguiState};
+use super::state::{AxisDraftCache, FormatAxesTab, GraphModalEguiState, axis_target_slot};
 
 use additional_ticks::render_additional_ticks_submodal;
 use single_axis::render_axes_single_axis_tab;
@@ -47,24 +48,53 @@ fn sync_format_axes_local_drafts(app: &UiApp, state: &mut GraphModalEguiState) {
         state.format_axes_session_synced = true;
         state.format_axes_synced_generation = Some(fa.open_generation);
         state.format_axes_last_sheet_id = sheet_key;
+        state.format_axes_per_axis_cache = [None, None, None];
+        state.format_axes_pending_tab = None;
         state.format_axes_frame_preset_dirty = false;
         if let Some(gs) = fa.graph_sheet_id.as_ref().and_then(|id| app.document().graph_sheet(id)) {
             state.format_axes_frame_preset = gs.spec.frame_preset;
         }
         state.additional_ticks.open = false;
         state.additional_tick_status = None;
+    } else if axis_changed && let Some(prev_axis) = state.format_axes_last_target {
+        state.format_axes_per_axis_cache[axis_target_slot(prev_axis)] = Some(AxisDraftCache {
+            min_draft: state.axis_min_draft.clone(),
+            max_draft: state.axis_max_draft.clone(),
+            bounds_error: state.axis_bounds_error.clone(),
+            major_interval_draft: state.axis_major_interval_draft.clone(),
+            minor_ticks_draft: state.axis_minor_ticks_draft,
+            ticks_error: state.axis_ticks_error.clone(),
+        });
     }
     if axis_changed {
         state.format_axes_last_target = Some(fa.target_axis);
+        if let Some(pending) = state.format_axes_pending_tab.take() {
+            state.format_axes_tab = pending;
+        } else if matches!(state.format_axes_tab, FormatAxesTab::XAxis | FormatAxesTab::LeftYAxis | FormatAxesTab::RightYAxis) {
+            state.format_axes_tab = match fa.target_axis {
+                AxisTarget::X => FormatAxesTab::XAxis,
+                AxisTarget::Y => FormatAxesTab::LeftYAxis,
+                AxisTarget::Y2 => FormatAxesTab::RightYAxis,
+            };
+        }
         state.format_axes_title_draft = fa.axis_draft.title.clone();
-        let seg0 = fa.axis_draft.segments.first();
-        state.axis_min_draft = seg0.and_then(|s| s.min).map(|v| format_localized_draft_f64(v, &app.locale_preset)).unwrap_or_default();
-        state.axis_max_draft = seg0.and_then(|s| s.max).map(|v| format_localized_draft_f64(v, &app.locale_preset)).unwrap_or_default();
-        state.axis_bounds_error = None;
-        state.axis_major_interval_draft =
-            seg0.and_then(|s| s.major_tick_interval).map(|v| format_localized_draft_f64(v, &app.locale_preset)).unwrap_or_default();
-        state.axis_minor_ticks_draft = seg0.map_or(0, |s| s.minor_ticks_per_interval.min(10));
-        state.axis_ticks_error = None;
+        if let Some(cached) = state.format_axes_per_axis_cache[axis_target_slot(fa.target_axis)].take() {
+            state.axis_min_draft = cached.min_draft;
+            state.axis_max_draft = cached.max_draft;
+            state.axis_bounds_error = cached.bounds_error;
+            state.axis_major_interval_draft = cached.major_interval_draft;
+            state.axis_minor_ticks_draft = cached.minor_ticks_draft;
+            state.axis_ticks_error = cached.ticks_error;
+        } else {
+            let seg0 = fa.axis_draft.segments.first();
+            state.axis_min_draft = seg0.and_then(|s| s.min).map(|v| format_localized_draft_f64(v, &app.locale_preset)).unwrap_or_default();
+            state.axis_max_draft = seg0.and_then(|s| s.max).map(|v| format_localized_draft_f64(v, &app.locale_preset)).unwrap_or_default();
+            state.axis_bounds_error = None;
+            state.axis_major_interval_draft =
+                seg0.and_then(|s| s.major_tick_interval).map(|v| format_localized_draft_f64(v, &app.locale_preset)).unwrap_or_default();
+            state.axis_minor_ticks_draft = seg0.map_or(0, |s| s.minor_ticks_per_interval.min(10));
+            state.axis_ticks_error = None;
+        }
         state.axis_min_spinner.draft_text.clear();
         state.axis_min_spinner.editing = false;
         state.axis_max_spinner.draft_text.clear();
@@ -82,7 +112,7 @@ fn sync_format_axes_local_drafts(app: &UiApp, state: &mut GraphModalEguiState) {
 
 fn render_axes_frame_origin_tab(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &mut GraphModalCtx<'_>) {
     let fa = gctx.app.canvas_dialogs.format_axes.clone();
-    ui.label(egui::RichText::new(gtr(gctx.locale, "axes.frame.heading")).strong());
+    ui.label(egui::RichText::new(tr(gctx.locale, "axes.frame.heading")).strong());
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(gctx.body_w);
@@ -121,7 +151,7 @@ fn render_axes_frame_origin_tab(ui: &mut Ui, state: &mut GraphModalEguiState, gc
 
     ui.add_space(8.0);
     let mut enable_y2 = fa.enable_y2;
-    let y2_lbl = "Enable Secondary Right Y2 Axis";
+    let y2_lbl = tr(gctx.locale, "axes.enable_y2");
     let chk = ui.checkbox(&mut enable_y2, y2_lbl);
     record_checkbox(ui, &chk, gctx.meta, "axes.enable_y2", y2_lbl, enable_y2);
     if chk.changed() {
@@ -139,7 +169,7 @@ fn render_axes_titles_tab(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &m
     let fa = gctx.app.canvas_dialogs.format_axes.clone();
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(gctx.body_w);
-        let title_lbl = gtr(gctx.locale, "axes.title_label");
+        let title_lbl = tr(gctx.locale, "axes.title_label");
         ui.label(title_lbl);
         let title_edit = ui.add(egui::TextEdit::singleline(&mut state.format_axes_title_draft).desired_width((gctx.body_w - 120.0).max(120.0)));
         record_input(ui, &title_edit, gctx.meta, "axes.title", title_lbl, &state.format_axes_title_draft, true);

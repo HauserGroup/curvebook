@@ -156,7 +156,7 @@ Registered commands: 105
 - **Shortcut:** `Cmd+T`
 - **Summary:** Create a typed data table sheet and optional paired info/graph sheets.
 - **Beginner note:** Creates one of the eight scientific table archetypes (XY, Column, Grouped, Contingency, Survival, Parts of Whole, Multiple Variables, or Nested).
-- **Parameters:** `auto_family` (any), `auto_graph` (any), `auto_info` (any), `cols` (any), `column_factor_title` (any), `design_hint` (any), `graph_sheet_id` (any), `info_sheet_id` (any), `kind` (any), `replicates` (any), `row_factor_title` (any), `rows` (any), `sheet_id` (any), `subcolumn_mode` (any), `time_title` (any), `title` (any), `variables` (any), `x_mode` (any), `x_title` (any)
+- **Parameters:** `auto_family` (any), `auto_graph` (any), `auto_info` (any), `censored_code` (any), `cols` (any), `column_factor_title` (any), `design_hint` (any), `event_code` (any), `graph_sheet_id` (any), `info_sheet_id` (any), `kind` (any), `replicates` (any), `row_factor_title` (any), `rows` (any), `sheet_id` (any), `subcolumn_mode` (any), `time_title` (any), `title` (any), `variables` (any), `x_mode` (any), `x_title` (any)
 
 ### `sheet.delete` — Delete Sheet
 

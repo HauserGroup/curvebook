@@ -3,6 +3,7 @@
 //!
 //! Layer L3 rendering crate. Governing spec: `docs/implementation/graphing-and-layouts.md` (§1, §6).
 #![forbid(unsafe_code)]
+#![deny(clippy::indexing_slicing)]
 
 pub mod emf;
 pub mod png;

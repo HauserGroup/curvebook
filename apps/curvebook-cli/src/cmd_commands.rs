@@ -1,11 +1,10 @@
 //! Engine command discovery (`commands`) and direct schema-typed command execution (`<command-id>`).
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
-use curvebook_engine::cmd::{Caller, CommandGroup, CommandSpec, Effects, registry};
+use curvebook_engine::cmd::{Caller, CommandGroup, CommandSpec, registry};
 use curvebook_engine::{ExternalPathPolicy, Session};
 use curvebook_format::registry::{ExportOptions, ExportSource, FormatKind, FormatRegistry};
 use serde_json::{Map, Value, json};
@@ -16,21 +15,6 @@ use crate::cmd_convert::{
 };
 use crate::error::CliError;
 use crate::sandbox::{PathResolver, WorkdirGuard};
-
-const OUTPUT_PATH_PARAM_KEYS: &[&str] = &[
-    "path",
-    "file",
-    "file_path",
-    "filePath",
-    "out",
-    "output",
-    "output_path",
-    "outputPath",
-    "target_path",
-    "targetPath",
-    "project_path",
-    "projectPath",
-];
 
 /// Parsed flags for `curvebook-cli commands [--group <g>] [--json]`.
 struct ListCommandsArgs {
@@ -148,9 +132,6 @@ pub fn run_direct_command_with_cancel(spec: &CommandSpec, args: &[String], cance
     let out_target = parsed.out_path.as_deref().map(|raw| resolve_and_validate_out_target(&resolver, raw)).transpose()?;
 
     resolver.sanitize_params(&mut parsed.params)?;
-    if parsed.workdir.is_some() && spec.effects.contains(Effects::WRITES_FILESYSTEM) {
-        ensure_param_output_parents(&parsed.params)?;
-    }
 
     let mut session = match resolved_in {
         Some(ref path) => {
@@ -220,7 +201,9 @@ fn parse_list_commands_args(args: &[String]) -> Result<ListCommandsArgs, CliErro
     let mut idx = 0usize;
 
     while idx < args.len() {
-        let arg = args[idx].as_str();
+        let Some(arg) = args.get(idx).map(String::as_str) else {
+            break;
+        };
         if arg == "--json" {
             json = true;
         } else if arg == "--help" || arg == "-h" {
@@ -291,7 +274,9 @@ fn parse_direct_command_args(spec: &CommandSpec, schema: &Value, args: &[String]
 
     let mut idx = 0usize;
     while idx < args.len() {
-        let arg = args[idx].as_str();
+        let Some(arg) = args.get(idx).map(String::as_str) else {
+            break;
+        };
         if handle_wrapper_flag(args, &mut idx, &mut in_path, &mut out_path, &mut workdir, &mut json, &mut help)? {
             idx += 1;
             continue;
@@ -334,7 +319,9 @@ fn handle_wrapper_flag(
     json: &mut bool,
     help: &mut bool,
 ) -> Result<bool, CliError> {
-    let arg = args[*idx].as_str();
+    let Some(arg) = args.get(*idx).map(String::as_str) else {
+        return Ok(false);
+    };
     match arg {
         "--json" => *json = true,
         "--help" | "-h" => *help = true,
@@ -743,23 +730,6 @@ fn persist_session_output(session: &Session, out_path: &Path, format: Option<Exp
         pdf_version: curvebook_pdf::PdfVersion::default(),
         embedded_truetype_font: None,
     })?;
-    Ok(())
-}
-
-fn ensure_param_output_parents(params: &Value) -> Result<(), CliError> {
-    let Some(obj) = params.as_object() else {
-        return Ok(());
-    };
-    for (k, v) in obj {
-        if OUTPUT_PATH_PARAM_KEYS.contains(&k.as_str())
-            && let Some(raw) = v.as_str()
-            && let Some(parent) = Path::new(raw).parent()
-            && !parent.as_os_str().is_empty()
-            && !parent.exists()
-        {
-            fs::create_dir_all(parent).map_err(|err| CliError::Runtime(format!("failed to create directory `{}`: {err}", parent.display())))?;
-        }
-    }
     Ok(())
 }
 

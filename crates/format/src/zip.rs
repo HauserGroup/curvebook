@@ -330,7 +330,8 @@ impl ZipArchive {
             if record_end > cd_end {
                 return Err(FormatError::InvalidZip { reason: String::from("central directory record extends past directory end") });
             }
-            if let Ok(raw_name) = std::str::from_utf8(&bytes[name_start..name_start + name_len])
+            if let Some(name_bytes) = name_start.checked_add(name_len).and_then(|end| bytes.get(name_start..end))
+                && let Ok(raw_name) = std::str::from_utf8(name_bytes)
                 && let Ok(clean) = sanitize_zip_path(raw_name)
                 && names.contains(&clean.as_str())
                 && uncompressed_size <= max_entry_bytes
@@ -431,8 +432,12 @@ fn parse_central_directory(bytes: &[u8], eocd: &EocdInfo, limits: ZipLimits) -> 
             return Err(FormatError::InvalidZip { reason: String::from("central directory record extends past directory end") });
         }
 
-        let raw_name = std::str::from_utf8(&bytes[name_start..name_start + name_len])
-            .map_err(|_| FormatError::InvalidZip { reason: String::from("non-UTF-8 ZIP entry filename") })?;
+        let name_bytes = name_start
+            .checked_add(name_len)
+            .and_then(|end| bytes.get(name_start..end))
+            .ok_or_else(|| FormatError::InvalidZip { reason: String::from("central directory entry filename out of bounds") })?;
+        let raw_name =
+            std::str::from_utf8(name_bytes).map_err(|_| FormatError::InvalidZip { reason: String::from("non-UTF-8 ZIP entry filename") })?;
         let clean = sanitize_zip_path(raw_name)?;
         if !seen.insert(clean.clone()) {
             return Err(FormatError::DuplicateEntry { path: clean });
@@ -476,10 +481,8 @@ fn read_and_verify_entry(bytes: &[u8], cd: &ParsedCdEntry, remaining_budget: u64
     let comp_len = usize::try_from(cd.compressed_size).map_err(|_| FormatError::ZipBomb { reason: String::from("compressed size exceeds usize") })?;
     let data_end =
         data_start.checked_add(comp_len).ok_or_else(|| FormatError::InvalidZip { reason: String::from("compressed payload range overflow") })?;
-    if data_end > bytes.len() {
-        return Err(FormatError::InvalidZip { reason: format!("entry `{}` payload extends past EOF", cd.path) });
-    }
-    let compressed = &bytes[data_start..data_end];
+    let compressed =
+        bytes.get(data_start..data_end).ok_or_else(|| FormatError::InvalidZip { reason: format!("entry `{}` payload extends past EOF", cd.path) })?;
     let entry_cap = max_entry_bytes.min(remaining_budget);
 
     let decompressed = match cd.method {
@@ -522,7 +525,10 @@ fn read_u16_le(bytes: &[u8], offset: usize) -> Result<u16, FormatError> {
         .checked_add(2)
         .and_then(|end| bytes.get(offset..end))
         .ok_or_else(|| FormatError::InvalidZip { reason: String::from("unexpected EOF reading u16") })?;
-    Ok(u16::from_le_bytes([slice[0], slice[1]]))
+    let &[b0, b1] = slice else {
+        return Err(FormatError::InvalidZip { reason: String::from("unexpected EOF reading u16") });
+    };
+    Ok(u16::from_le_bytes([b0, b1]))
 }
 
 fn read_u32_le(bytes: &[u8], offset: usize) -> Result<u32, FormatError> {
@@ -530,5 +536,8 @@ fn read_u32_le(bytes: &[u8], offset: usize) -> Result<u32, FormatError> {
         .checked_add(4)
         .and_then(|end| bytes.get(offset..end))
         .ok_or_else(|| FormatError::InvalidZip { reason: String::from("unexpected EOF reading u32") })?;
-    Ok(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
+    let &[b0, b1, b2, b3] = slice else {
+        return Err(FormatError::InvalidZip { reason: String::from("unexpected EOF reading u32") });
+    };
+    Ok(u32::from_le_bytes([b0, b1, b2, b3]))
 }

@@ -36,7 +36,7 @@ fn next_unique_id_with_reserved(doc: &ProjectDocument, base: &str, reserved: &Ha
         base.trim().chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c.to_ascii_lowercase() } else { '-' }).collect();
     let clean_base = sanitized.trim_matches('-');
     let prefix = if clean_base.is_empty() { "sheet" } else { clean_base };
-    let truncated = if prefix.len() > 40 { &prefix[..40] } else { prefix };
+    let truncated = if prefix.len() > 40 { prefix.get(..40).unwrap_or(prefix) } else { prefix };
 
     for n in 1..10_000_usize {
         let candidate_str = format!("{truncated}-{n}");
@@ -79,6 +79,10 @@ struct CreateDataParams {
     row_factor_title: Option<String>,
     column_factor_title: Option<String>,
     time_title: Option<String>,
+    #[serde(alias = "eventCode")]
+    event_code: Option<i64>,
+    #[serde(alias = "censoredCode")]
+    censored_code: Option<i64>,
     variables: Option<Vec<VariableInitInput>>,
     auto_family: Option<bool>,
     auto_info: Option<bool>,
@@ -109,6 +113,8 @@ fn create_data_schema() -> Value {
             ("row_factor_title", nullable_schema(str_schema("Row factor title for Grouped/Contingency tables"))),
             ("column_factor_title", nullable_schema(str_schema("Column factor title for Grouped/Contingency tables"))),
             ("time_title", nullable_schema(str_schema("Elapsed time title for Survival tables"))),
+            ("event_code", nullable_schema(int_schema("Numeric status code denoting Event rows on Survival tables", None, None))),
+            ("censored_code", nullable_schema(int_schema("Numeric status code denoting Censored rows on Survival tables", None, None))),
             (
                 "variables",
                 nullable_schema(array_schema(
@@ -342,6 +348,20 @@ fn build_archetype_from_params(parsed: &CreateDataParams, existing_cells: usize)
             if let Some(ref tt) = parsed.time_title {
                 validate_title(tt)?;
                 surv.time_title = tt.clone();
+            }
+            if let Some(ev) = parsed.event_code {
+                surv.event_code = ev;
+            }
+            if let Some(cen) = parsed.censored_code {
+                surv.censored_code = cen;
+            }
+            if surv.event_code == surv.censored_code {
+                return Err(EngineError::with_code(
+                    ErrorCode::BadInput,
+                    format!("Survival `event_code` ({}) and `censored_code` ({}) must be distinct", surv.event_code, surv.censored_code),
+                )
+                .with_remediation("Supply distinct integer codes for `event_code` and `censored_code` (for example `1` and `0`).")
+                .with_details(json!({ "pointer": "/censored_code" })));
             }
             Ok(TableArchetype::Survival(surv))
         }
@@ -1380,12 +1400,11 @@ fn text_hooks_any_sheet(text: &str, id_map: &HashMap<SheetId, SheetId>) -> bool 
         return true;
     }
     let mut rest = text;
-    while let Some(open) = rest.find("{{") {
-        let after_open = &rest[open + 2..];
-        let Some(close) = after_open.find("}}") else {
+    while let Some((_, after_open)) = rest.split_once("{{") {
+        let Some((inner, tail)) = after_open.split_once("}}") else {
             break;
         };
-        let parts: Vec<&str> = after_open[..close].trim().split(':').map(str::trim).collect();
+        let parts: Vec<&str> = inner.trim().split(':').map(str::trim).collect();
         if let ["scalar", sheet, rest_parts @ ..] = parts.as_slice()
             && !sheet.is_empty()
             && !rest_parts.is_empty()
@@ -1393,7 +1412,7 @@ fn text_hooks_any_sheet(text: &str, id_map: &HashMap<SheetId, SheetId>) -> bool 
         {
             return true;
         }
-        rest = &after_open[close + 2..];
+        rest = tail;
     }
     false
 }

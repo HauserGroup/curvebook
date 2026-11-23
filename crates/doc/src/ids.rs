@@ -287,16 +287,14 @@ impl HookSource {
 pub fn extract_template_hooks(text: &str) -> Vec<HookSource> {
     let mut hooks = Vec::new();
     let mut rest = text;
-    while let Some(open) = rest.find("{{") {
-        let after_open = &rest[open + 2..];
-        let Some(close) = after_open.find("}}") else {
+    while let Some((_, after_open)) = rest.split_once("{{") {
+        let Some((token, after_close)) = after_open.split_once("}}") else {
             break;
         };
-        let token = after_open[..close].trim();
-        if let Some(hook) = parse_single_hook_token(token) {
+        if let Some(hook) = parse_single_hook_token(token.trim()) {
             hooks.push(hook);
         }
-        rest = &after_open[close + 2..];
+        rest = after_close;
     }
     hooks
 }

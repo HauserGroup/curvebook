@@ -11,7 +11,7 @@ use crate::i18n::tr;
 
 use super::super::super::unit_spinners::{ScrubUnitFieldConfig, render_scrub_unit_field};
 use super::super::helpers::{
-    ButtonEntry, GraphModalCtx, LengthSpinnerSpec, gtr, record_button, record_checkbox, render_length_spinner_pt, rgba_to_color32,
+    ButtonEntry, GraphModalCtx, LengthSpinnerSpec, record_button, record_checkbox, render_length_spinner_pt, rgba_to_color32,
 };
 use super::super::state::GraphModalEguiState;
 use super::render_legend_toggles;
@@ -23,7 +23,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
     // Dataset Scope Header Bar + Apply Globally.
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(gctx.body_w);
-        ui.label(egui::RichText::new(gtr(gctx.locale, "fg.scope.series")).strong());
+        ui.label(egui::RichText::new(tr(gctx.locale, "fg.scope.series")).strong());
         if record_button(
             ui,
             gctx.meta,
@@ -73,7 +73,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
         }
 
         let mut apply_all = fg.apply_all_data_sets;
-        let all_lbl = gtr(gctx.locale, "fg.apply_globally");
+        let all_lbl = tr(gctx.locale, "fg.apply_globally");
         let chk = ui.checkbox(&mut apply_all, all_lbl);
         record_checkbox(ui, &chk, gctx.meta, "format_graph.apply_globally", all_lbl, apply_all);
         if chk.changed() {
@@ -90,7 +90,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
         ui,
         LengthSpinnerSpec {
             widget_id: "format_graph.marker_size_pt",
-            label: gtr(gctx.locale, "fg.symbol_size"),
+            label: tr(gctx.locale, "fg.symbol_size"),
             value_pt: fg.marker_size_pt,
             min_pt: 1.0,
             max_pt: 24.0,
@@ -110,7 +110,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(gctx.body_w);
-        ui.label(gtr(gctx.locale, "fg.symbol_fill"));
+        ui.label(tr(gctx.locale, "fg.symbol_fill"));
         for (slug, lbl, mode) in [
             ("filled", "Filled", MarkerFillMode::Filled),
             ("open", "Open", MarkerFillMode::Open),
@@ -142,7 +142,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(gctx.body_w);
-        ui.label(gtr(gctx.locale, "fg.line_dash"));
+        ui.label(tr(gctx.locale, "fg.line_dash"));
         for (slug, lbl, dash) in [
             ("solid", "Solid", LineDashStyle::Solid),
             ("dashed", "Dashed", LineDashStyle::Dashed),
@@ -174,7 +174,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(gctx.body_w);
-        ui.label("Opacity:");
+        ui.label(tr(gctx.locale, "fg.opacity"));
         for pct in [25u8, 50, 75, 100] {
             let lbl = format!("{pct}%");
             if record_button(
@@ -251,7 +251,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
                 ui.set_max_width(gctx.body_w);
-                ui.label("Regression Overlay:");
+                ui.label(tr(gctx.locale, "fg.regression_overlay"));
                 for (idx, rs) in compatible_fits.iter().enumerate() {
                     let selected = fg.cached_regression_overlay.as_ref().is_some_and(|o| o.result_sheet_id == rs.id);
                     if record_button(
@@ -288,7 +288,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
                         gctx.meta,
                         ButtonEntry {
                             widget_id: "format_graph.overlay.clear",
-                            label: "Clear Overlay",
+                            label: tr(gctx.locale, "fg.clear_overlay"),
                             command_id: None,
                             selected: false,
                             enabled: true,
@@ -388,7 +388,11 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
     };
     if has_bar_border {
         ui.add_space(4.0);
-        let spin_id = egui::Id::unique("format_graph.bar_border_width_spinner");
+        let spin_id = egui::Id::unique((
+            "format_graph.bar_border_width_spinner",
+            fg.graph_sheet_id.as_ref().map(curvebook_doc::SheetId::as_str),
+            fg.selected_series_index,
+        ));
         let mut bar_spin = ui.ctx().data_mut(|d| {
             d.get_temp::<crate::egui_shell::unit_spinners::ScrubUnitFieldState>(spin_id).unwrap_or_else(|| {
                 crate::egui_shell::unit_spinners::ScrubUnitFieldState::new(crate::egui_shell::unit_spinners::ScrubUnitKind::Points)
@@ -398,7 +402,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
             ui,
             super::super::helpers::LengthSpinnerSpec {
                 widget_id: "format_graph.bar_border_width_pt",
-                label: "Bar Border",
+                label: tr(gctx.locale, "fg.bar_border"),
                 value_pt: fg.bar_border_width_pt,
                 min_pt: 0.0,
                 max_pt: 6.0,
@@ -512,7 +516,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
             step_per_pt: 0.25,
             decimals: 2,
             allow_unit_switch: false,
-            ..ScrubUnitFieldConfig::new("format_graph.error_bar_stroke", gtr(gctx.locale, "fg.error_stroke"), 0.25, 6.0)
+            ..ScrubUnitFieldConfig::new("format_graph.error_bar_stroke", tr(gctx.locale, "fg.error_stroke"), 0.25, 6.0)
         };
         let stroke_out =
             render_scrub_unit_field(ui, fg.error_bar_spec.stroke_width_pt, &mut state.line_thickness_spinner, stroke_cfg, gctx.tokens, gctx.meta);
@@ -539,7 +543,7 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
 
 pub(super) fn render_fg_series_arrangement(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>) {
     let fg = gctx.app.canvas_dialogs.format_graph.clone();
-    ui.label(egui::RichText::new(gtr(gctx.locale, "fg.grouped_arrangement")).strong());
+    ui.label(egui::RichText::new(tr(gctx.locale, "fg.grouped_arrangement")).strong());
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(gctx.body_w);
         for (slug, lbl, arr) in [
@@ -604,7 +608,7 @@ pub(super) fn render_fg_series_arrangement(ui: &mut Ui, gctx: &mut GraphModalCtx
     }
 
     ui.add_space(8.0);
-    ui.label(egui::RichText::new(gtr(gctx.locale, "fg.active_series_list")).strong());
+    ui.label(egui::RichText::new(tr(gctx.locale, "fg.active_series_list")).strong());
     if let Some(gs) = fg.graph_sheet_id.as_ref().and_then(|id| gctx.app.document().graph_sheet(id)) {
         for (idx, series) in gs.spec.series.iter().enumerate() {
             let swatch = fg.preview_swatch(idx);
@@ -643,7 +647,7 @@ pub(super) fn render_fg_series_arrangement(ui: &mut Ui, gctx: &mut GraphModalCtx
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
                 ui.set_max_width(gctx.body_w);
-                ui.label("Selected Series Y Axis:");
+                ui.label(tr(gctx.locale, "fg.series_y_axis"));
                 for (slug, lbl, y2_target) in [("left_y", "Left Y", false), ("right_y2", "Right Y2", true)] {
                     if record_button(
                         ui,
@@ -669,7 +673,11 @@ pub(super) fn render_fg_series_arrangement(ui: &mut Ui, gctx: &mut GraphModalCtx
             });
 
             ui.add_space(4.0);
-            let off_spin_id = egui::Id::unique("format_graph.series_offset_x_spinner");
+            let off_spin_id = egui::Id::unique((
+                "format_graph.series_offset_x_spinner",
+                fg.graph_sheet_id.as_ref().map(curvebook_doc::SheetId::as_str),
+                fg.selected_series_index,
+            ));
             let mut off_spin = ui.ctx().data_mut(|d| {
                 d.get_temp::<crate::egui_shell::unit_spinners::ScrubUnitFieldState>(off_spin_id).unwrap_or_else(|| {
                     crate::egui_shell::unit_spinners::ScrubUnitFieldState::new(crate::egui_shell::unit_spinners::ScrubUnitKind::Generic)
@@ -696,7 +704,7 @@ pub(super) fn render_fg_series_arrangement(ui: &mut Ui, gctx: &mut GraphModalCtx
 
 pub(super) fn render_fg_settings(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>) {
     let fg = gctx.app.canvas_dialogs.format_graph.clone();
-    ui.label(egui::RichText::new(gtr(gctx.locale, "fg.palette")).strong());
+    ui.label(egui::RichText::new(tr(gctx.locale, "fg.palette")).strong());
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(gctx.body_w);
         for &pal in &PaletteId::ALL {
@@ -804,13 +812,13 @@ pub(super) fn render_fg_settings(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>) {
 
 pub(super) fn render_fg_annotations(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>) {
     let fg = gctx.app.canvas_dialogs.format_graph.clone();
-    ui.label(egui::RichText::new(gtr(gctx.locale, "fg.annotations.heading")).strong());
+    ui.label(egui::RichText::new(tr(gctx.locale, "fg.annotations.heading")).strong());
     ui.add_space(4.0);
     let has_eq = fg.model_equation_mode.is_some();
     if has_eq {
         ui.horizontal_wrapped(|ui| {
             ui.set_max_width(gctx.body_w);
-            ui.label(gtr(gctx.locale, "fg.equation_mode"));
+            ui.label(tr(gctx.locale, "fg.equation_mode"));
             for (slug, lbl, mode) in
                 [("substituted", "Substituted", EquationDisplayMode::Substituted), ("symbolic", "Symbolic", EquationDisplayMode::Symbolic)]
             {
@@ -836,7 +844,7 @@ pub(super) fn render_fg_annotations(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>) {
             }
         });
     } else {
-        ui.label(gtr(gctx.locale, "fg.annotations.empty"));
+        ui.label(tr(gctx.locale, "fg.annotations.empty"));
     }
     ui.add_space(6.0);
     render_legend_toggles(ui, gctx, &fg);

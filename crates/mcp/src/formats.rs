@@ -33,8 +33,8 @@ use curvebook_doc::{DataSheet, ErrorCode, ProjectDocument, ResultSheet, SheetId,
 use curvebook_engine::{EngineError, Session};
 use curvebook_format::{
     CsvOptions, ExportOptions, ExportSource, Exporter, FormatDescriptor, FormatError, FormatKind, FormatRegistry, ImportOptions, ImportPayload,
-    Importer, export_datasheet_to_csv, export_result_sheet_json, export_result_sheet_tidy_csv, export_result_tab_csv, is_unpacked_project_dir,
-    strip_project_data_for_template,
+    Importer, ensure_result_sheet_csv_exportable, export_datasheet_to_csv, export_result_sheet_json, is_unpacked_project_dir,
+    strip_project_data_for_template, try_export_result_sheet_tidy_csv, try_export_result_tab_csv,
 };
 use curvebook_pdf::{PdfColorSpace, PdfExportOptions, render_pdf, render_pdf_pages};
 use curvebook_render::{MAX_CAPPED_RASTER_DIM_PX, RenderTargetSpec, TiffCompression, encode_png, encode_tiff, render_scene};
@@ -45,6 +45,7 @@ use serde_json::{Map, Value, json};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::errors::StructuredErrorPayload;
 use crate::errors::{self};
+use crate::gui_tools::reject_unknown_args;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::tools::decode_base64;
 use crate::tools::{
@@ -55,6 +56,10 @@ use crate::tools::{
 const DEFAULT_PREVIEW_DPI: u16 = 144;
 const MAX_DPI: u16 = 2400;
 const MIN_DPI: u16 = 18;
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_LIVE_INLINE_ARCHIVE_BYTES: usize = ((crate::tools::MAX_CONTROL_RESPONSE_BYTES - 65_536) / 4) * 3;
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_LIVE_INLINE_CSV_BYTES: usize = 8 * 1024 * 1024;
 
 const DESC_SVG: FormatDescriptor =
     FormatDescriptor { id: "svg", label: "Scalable Vector Graphics", extensions: &["svg"], kind: FormatKind::FigureVector };
@@ -115,6 +120,7 @@ pub(crate) fn sanitize_command_params(state: &McpServerState, params: &mut Value
 
 /// Handle `open_file` dispatched via [`FormatRegistry`] with optional `WorkdirGuard` enforcement.
 pub(crate) fn handle_open_file(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
+    reject_unknown_args("open_file", args, &["path", "format", "target_kind", "subcolumn_mode", "delimiter", "sheet_id", "title", "append"])?;
     let raw_path = required_non_empty_str(args, "path")?;
     let explicit_format = optional_non_empty_str(args, "format")?.map(|s| s.to_ascii_lowercase());
     let title_override = optional_non_empty_str(args, "title")?;
@@ -167,7 +173,13 @@ fn live_attach_import_error(payload: StructuredErrorPayload) -> ToolCallResult {
     errors::result_from_payload(&payload)
 }
 
-fn build_csv_import_params(resolved_path: &Path, format_id: &str, raw_bytes: Vec<u8>, import_opts: &ImportOptions) -> Result<Value, ToolCallResult> {
+fn build_csv_import_params(
+    resolved_path: &Path,
+    format_id: &str,
+    raw_bytes: Vec<u8>,
+    import_opts: &ImportOptions,
+    prefer_path: bool,
+) -> Result<Value, ToolCallResult> {
     let csv_text = match String::from_utf8(raw_bytes) {
         Ok(text) => text,
         Err(err) => {
@@ -181,15 +193,19 @@ fn build_csv_import_params(resolved_path: &Path, format_id: &str, raw_bytes: Vec
             return Err(errors::result_from_code(ErrorCode::InternalError, format!("failed to serialize subcolumn mode: {err}")));
         }
     };
-    Ok(json!({
-        "sheet_id": import_opts.sheet_id.as_str(),
-        "csv": csv_text,
-        "title": import_opts.title,
-        "archetype": import_opts.table_kind.label(),
-        "subcolumn_mode": subcolumn_mode,
-        "delimiter": csv_opts.delimiter.to_string(),
-        "decimal_separator": csv_opts.decimal_separator.to_string(),
-    }))
+    let mut map = Map::new();
+    map.insert(String::from("sheet_id"), json!(import_opts.sheet_id.as_str()));
+    if prefer_path {
+        map.insert(String::from("path"), json!(resolved_path.display().to_string()));
+    } else {
+        map.insert(String::from("csv"), json!(csv_text));
+    }
+    map.insert(String::from("title"), json!(import_opts.title));
+    map.insert(String::from("archetype"), json!(import_opts.table_kind.label()));
+    map.insert(String::from("subcolumn_mode"), subcolumn_mode);
+    map.insert(String::from("delimiter"), json!(csv_opts.delimiter.to_string()));
+    map.insert(String::from("decimal_separator"), json!(csv_opts.decimal_separator.to_string()));
+    Ok(Value::Object(map))
 }
 
 fn resolve_importer<'a>(reg: &'a FormatRegistry, explicit: Option<&str>, path: &Path) -> Result<&'a dyn Importer, ToolCallError> {
@@ -314,6 +330,30 @@ fn apply_imported_payload(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn build_live_report_import_params(resolved_path: Option<&Path>, raw_bytes: Option<&[u8]>, append: bool) -> Result<Value, StructuredErrorPayload> {
+    if let Some(path) = resolved_path {
+        let path_str = path.display().to_string();
+        if !path_str.trim().is_empty() {
+            return Ok(json!({ "path": path_str, "merge": append }));
+        }
+    }
+    let Some(bytes) = raw_bytes else {
+        return Err(StructuredErrorPayload::new(ErrorCode::InternalError, "missing buffered bytes for live archive import"));
+    };
+    if bytes.len() > MAX_LIVE_INLINE_ARCHIVE_BYTES {
+        return Err(StructuredErrorPayload::new(
+            ErrorCode::ResourceLimit,
+            format!(
+                "inline live-control payload ({} bytes) exceeds maximum {MAX_LIVE_INLINE_ARCHIVE_BYTES} bytes before base64 encoding",
+                bytes.len()
+            ),
+        )
+        .with_remediation("Open the archive from a filesystem path accessible to the desktop host."));
+    }
+    Ok(json!({ "bytes_base64": encode_base64(bytes), "merge": append }))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::too_many_arguments)]
 fn apply_imported_payload_live(
     state: &mut McpServerState,
@@ -373,9 +413,6 @@ fn apply_imported_payload_live(
             }))
         }
         ("prism" | "pzfx", ImportPayload::Report(report)) => {
-            let Some(bytes) = raw_bytes else {
-                return Ok(errors::result_from_code(ErrorCode::InternalError, format!("missing buffered bytes for '{format_id}'")));
-            };
             let warnings = match serde_json::to_value(&report.warnings) {
                 Ok(v) => v,
                 Err(err) => {
@@ -383,7 +420,10 @@ fn apply_imported_payload_live(
                 }
             };
             let cmd_id = if format_id == "prism" { "table.importPrism" } else { "table.importPzfx" };
-            let import_params = json!({ "bytes_base64": encode_base64(&bytes), "merge": append });
+            let import_params = match build_live_report_import_params(Some(resolved_path), raw_bytes.as_deref(), append) {
+                Ok(p) => p,
+                Err(err) => return Ok(live_attach_import_error(err)),
+            };
             let send_res = if append {
                 state.send_live_control("engine.execute", json!({ "command_id": cmd_id, "params": import_params }))
             } else {
@@ -419,7 +459,8 @@ fn apply_imported_payload_live(
             let Some(bytes) = raw_bytes else {
                 return Ok(errors::result_from_code(ErrorCode::InternalError, format!("missing buffered bytes for '{format_id}'")));
             };
-            let params = match build_csv_import_params(resolved_path, format_id, bytes, import_opts) {
+            let prefer_path = bytes.len() > MAX_LIVE_INLINE_CSV_BYTES;
+            let params = match build_csv_import_params(resolved_path, format_id, bytes, import_opts, prefer_path) {
                 Ok(p) => p,
                 Err(err_res) => return Ok(err_res),
             };
@@ -507,7 +548,7 @@ fn apply_csv_import(
         })));
     }
 
-    let params = match build_csv_import_params(resolved_path, format_id, raw_bytes, import_opts) {
+    let params = match build_csv_import_params(resolved_path, format_id, raw_bytes, import_opts, false) {
         Ok(p) => p,
         Err(err_res) => return Ok(err_res),
     };
@@ -563,6 +604,7 @@ fn sheet_summary_json(format_id: &str, resolved_path: &Path, ds: &DataSheet) -> 
 
 /// Handle `save_file` dispatched via [`FormatRegistry`] (which persists atomically via `write_atomic`).
 pub(crate) fn handle_save_file(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
+    reject_unknown_args("save_file", args, &["path", "format"])?;
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(port) = state.control_port() {
         let raw_path = match optional_non_empty_str(args, "path")? {
@@ -679,6 +721,7 @@ fn resolve_save_exporter<'a>(reg: &'a FormatRegistry, explicit: Option<&str>, pa
 
 /// Handle `render_preview`: compile GraphSheet/LayoutSheet and rasterize PNG preview with metadata.
 pub(crate) fn handle_render_preview(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
+    reject_unknown_args("render_preview", args, &["sheet_id", "width_px", "height_px", "dpi"])?;
     let sheet_id = optional_non_empty_str(args, "sheet_id")?;
     let dpi = parse_dpi(args)?;
     let requested_w = optional_u32_bounded(args, "width_px", 1, MAX_CAPPED_RASTER_DIM_PX)?;
@@ -758,6 +801,27 @@ pub(crate) fn handle_render_preview(state: &mut McpServerState, args: &Map<Strin
 /// Handle `export` dispatched through a populated [`FormatRegistry`] with `WorkdirGuard` path checks
 /// and atomic writes (`write_atomic`).
 pub(crate) fn handle_export(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
+    reject_unknown_args(
+        "export",
+        args,
+        &[
+            "format",
+            "sheet_id",
+            "output_path",
+            "path",
+            "width_px",
+            "height_px",
+            "dpi",
+            "tiff_compression",
+            "pdf_color_space",
+            "all_graphs",
+            "svg_precision",
+            "pretty",
+            "tidy",
+            "tab_id",
+            "csv_delimiter",
+        ],
+    )?;
     let format = required_non_empty_str(args, "format")?.to_ascii_lowercase();
     if !matches!(format.as_str(), "svg" | "pdf" | "png" | "tiff" | "csv" | "json") {
         return Err(ToolCallError::InvalidParams(format!("unsupported export format '{format}'")));
@@ -1163,19 +1227,20 @@ impl Exporter for McpCsvExporter {
             match resolve_tabular_export_target(doc, self.cfg.sheet_id.as_deref(), self.cfg.tab_id.as_deref()).map_err(FormatError::Io)? {
                 TabularTarget::Data(ds) => (ds.id.as_str().to_owned(), export_datasheet_to_csv(ds, &csv_opts)?),
                 TabularTarget::Result(rs) => {
+                    ensure_result_sheet_csv_exportable(rs)?;
                     let text = if self.cfg.tidy {
-                        export_result_sheet_tidy_csv(rs, &csv_opts)
+                        try_export_result_sheet_tidy_csv(rs, &csv_opts)?
                     } else if let Some(tid) = self.cfg.tab_id.as_deref() {
                         let tab = rs
                             .tabs
                             .iter()
                             .find(|t| t.id == tid)
                             .ok_or_else(|| FormatError::Io(format!("tab '{tid}' not found on result sheet '{}'", rs.id)))?;
-                        export_result_tab_csv(tab, &csv_opts)
+                        try_export_result_tab_csv(rs, tab, &csv_opts)?
                     } else if let Some(first_tab) = rs.tabs.first() {
-                        export_result_tab_csv(first_tab, &csv_opts)
+                        try_export_result_tab_csv(rs, first_tab, &csv_opts)?
                     } else {
-                        export_result_sheet_tidy_csv(rs, &csv_opts)
+                        try_export_result_sheet_tidy_csv(rs, &csv_opts)?
                     };
                     (rs.id.as_str().to_owned(), text)
                 }
@@ -1389,4 +1454,27 @@ fn sanitize_sheet_id(stem: &str, fallback: &str) -> String {
     let cleaned: String = stem.chars().map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' { ch } else { '-' }).collect();
     let trimmed = cleaned.trim_matches('-');
     if trimmed.is_empty() { fallback.to_owned() } else { trimmed.to_owned() }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use std::path::Path;
+
+    use curvebook_doc::ErrorCode;
+    use serde_json::json;
+
+    use super::{MAX_LIVE_INLINE_ARCHIVE_BYTES, build_live_report_import_params};
+
+    #[test]
+    fn live_report_import_prefers_path_and_rejects_oversized_inline_fallback_before_base64() {
+        let by_path = build_live_report_import_params(Some(Path::new("/study/big.pzfx")), Some(b"ignored"), true).expect("path-based import params");
+        assert_eq!(by_path, json!({ "path": "/study/big.pzfx", "merge": true }));
+
+        let small_inline = build_live_report_import_params(None, Some(b"PK\x03\x04"), false).expect("small inline fallback");
+        assert_eq!(small_inline, json!({ "bytes_base64": "UEsDBA==", "merge": false }));
+
+        let oversized = vec![0x55_u8; MAX_LIVE_INLINE_ARCHIVE_BYTES + 1];
+        let err = build_live_report_import_params(None, Some(&oversized), false).expect_err("oversized inline fallback must fail");
+        assert_eq!(err.code, ErrorCode::ResourceLimit);
+    }
 }

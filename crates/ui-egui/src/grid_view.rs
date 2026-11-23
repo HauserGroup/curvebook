@@ -554,11 +554,14 @@ impl FormulaBarState {
             return false;
         };
         let (prefix_start, prefix_end) = active_token_span(&self.input, self.cursor_byte);
+        let (Some(prefix), Some(suffix)) = (self.input.get(..prefix_start), self.input.get(prefix_end..)) else {
+            return false;
+        };
         let mut updated = String::with_capacity(self.input.len() + item.insert_text.len());
-        updated.push_str(&self.input[..prefix_start]);
+        updated.push_str(prefix);
         updated.push_str(&item.insert_text);
         let new_cursor = updated.len();
-        updated.push_str(&self.input[prefix_end..]);
+        updated.push_str(suffix);
         self.set_input(updated, Some(new_cursor), doc);
         true
     }
@@ -2630,8 +2633,9 @@ pub fn parse_localized_number_input(raw: &str, preset: impl Borrow<LocalePreset>
 
     let (mantissa, exp_suffix) = match body.find(['e', 'E']) {
         Some(idx) => {
-            let (m, exp) = body.split_at(idx);
-            let normalized_exp = normalize_exponent_suffix(&exp[1..], &preset.minus_sign)?;
+            let m = body.get(..idx)?;
+            let exp_body = body.get(idx + 1..)?;
+            let normalized_exp = normalize_exponent_suffix(exp_body, &preset.minus_sign)?;
             (m, Some(normalized_exp))
         }
         None => (body, None),
@@ -2927,13 +2931,13 @@ fn clamp_char_boundary(s: &str, mut pos: usize) -> usize {
 
 fn active_token_span(input: &str, cursor_byte: usize) -> (usize, usize) {
     let cursor = clamp_char_boundary(input, cursor_byte);
-    let prefix = &input[..cursor];
+    let prefix = input.get(..cursor).unwrap_or(input);
 
-    if let Some(open_bracket) = prefix.rfind('[') {
-        let after = &prefix[open_bracket + 1..];
-        if !after.contains(']') {
-            return (open_bracket, cursor);
-        }
+    if let Some(open_bracket) = prefix.rfind('[')
+        && let Some(after) = prefix.get(open_bracket + 1..)
+        && !after.contains(']')
+    {
+        return (open_bracket, cursor);
     }
 
     let mut start = cursor;
@@ -2955,7 +2959,7 @@ fn build_autocomplete_items(
     sheet: Option<&DataSheet>,
 ) -> Vec<FormulaAutocompleteItem> {
     let (start, end) = active_token_span(input, cursor_byte);
-    let raw_token = &input[start..end];
+    let raw_token = input.get(start..end).unwrap_or("");
     let bracket_mode = raw_token.starts_with('[');
     let query = raw_token.trim_start_matches('[').trim().to_ascii_lowercase();
 

@@ -87,6 +87,7 @@ pub(super) fn render_table_selection_studio(
                 },
             ) {
                 state.table_decimals = opt;
+                super::set_studio_table_decimals(ui.ctx(), opt);
             }
         }
     });

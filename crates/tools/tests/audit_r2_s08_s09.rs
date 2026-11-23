@@ -14,7 +14,8 @@ fn build_doc_with_equation(ann: GraphAnnotation) -> Result<(ProjectDocument, Gra
     let mut xy = XyTable::new(SubcolumnMode::Single, 1, 4)?;
     for r in 0..4 {
         xy.set_x_cell(r, Cell::number((r + 1) as f64))?;
-        xy.data_sets[0].cells[r][0] = Cell::number(2.0 * ((r + 1) as f64) + 1.5);
+        *xy.data_sets.first_mut().and_then(|ds| ds.cells.get_mut(r)).and_then(|row| row.first_mut()).ok_or("missing xy cell")? =
+            Cell::number(2.0 * ((r + 1) as f64) + 1.5);
     }
     let ds = DataSheet::new(SheetId::new("xy-1"), "XY", TableArchetype::Xy(xy))?;
     doc.add_data_sheet(ds)?;

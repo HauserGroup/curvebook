@@ -373,18 +373,17 @@ pub fn parse_color_string(raw: &str) -> Result<Rgba8, EngineError> {
 }
 
 fn parse_short_hex(hex: &str, orig: &str) -> Result<Rgba8, EngineError> {
-    let bytes = hex.as_bytes();
-    let nibble = |idx: usize| -> Result<u8, EngineError> {
+    let nibble = |byte: u8| -> Result<u8, EngineError> {
         let digit =
-            char::from(bytes[idx]).to_digit(16).ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("invalid hex color `{orig}`")))?;
+            char::from(byte).to_digit(16).ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("invalid hex color `{orig}`")))?;
         let v = digit as u8;
         Ok((v << 4) | v)
     };
-    let r = nibble(0)?;
-    let g = nibble(1)?;
-    let b = nibble(2)?;
-    let a = if bytes.len() == 4 { nibble(3)? } else { 255 };
-    Ok(Rgba8::rgba(r, g, b, a))
+    match hex.as_bytes() {
+        [r, g, b] => Ok(Rgba8::rgba(nibble(*r)?, nibble(*g)?, nibble(*b)?, 255)),
+        [r, g, b, a] => Ok(Rgba8::rgba(nibble(*r)?, nibble(*g)?, nibble(*b)?, nibble(*a)?)),
+        _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid hex color `{orig}`"))),
+    }
 }
 
 fn parse_long_hex(hex: &str, orig: &str) -> Result<Rgba8, EngineError> {
@@ -464,24 +463,25 @@ pub(super) fn remap_inline_hook_tokens(text: &mut String, id_map: &HashMap<Sheet
     let mut rest = text.as_str();
     let mut changed = false;
 
-    while let Some(open) = rest.find("{{") {
-        out.push_str(&rest[..open]);
-        let after_open = &rest[open + 2..];
-        let Some(close) = after_open.find("}}") else {
-            out.push_str(&rest[open..]);
+    while let Some((before, after_open)) = rest.split_once("{{") {
+        out.push_str(before);
+        let Some((inner, tail)) = after_open.split_once("}}") else {
+            out.push_str("{{");
+            out.push_str(after_open);
             rest = "";
             break;
         };
-        let inner = &after_open[..close];
         if let Some(rewritten) = rewrite_single_hook_token(inner.trim(), id_map) {
             out.push_str("{{");
             out.push_str(&rewritten);
             out.push_str("}}");
             changed = true;
         } else {
-            out.push_str(&rest[open..open + 2 + close + 2]);
+            out.push_str("{{");
+            out.push_str(inner);
+            out.push_str("}}");
         }
-        rest = &after_open[close + 2..];
+        rest = tail;
     }
     out.push_str(rest);
     if changed {

@@ -297,9 +297,37 @@ fn audit_21_exact_small_sample_hodges_lehmann_ci() {
     assert!(tab_w4.footnotes.iter().any(|f| f.contains("87.50%")));
     assert!(res_w4.checklist.iter().any(|c| c.assumption == "Hodges-Lehmann CI achieved coverage" && c.status == ChecklistStatus::Warn));
 
-    // Direct function check matches sheet.
-    let direct_w4 = wilcoxon_matched_pairs(&[10.0, 20.0, 40.0, 80.0], &[9.0, 18.0, 36.0, 72.0], true, ConfidenceLevel::DEFAULT_95, false).unwrap();
+    // Direct function check matches sheet (TwoGroupMethod::WilcoxonSignedRank uses Pratt 1959 zero handling).
+    let direct_w4 = wilcoxon_matched_pairs(&[10.0, 20.0, 40.0, 80.0], &[9.0, 18.0, 36.0, 72.0], true, ConfidenceLevel::DEFAULT_95, true).unwrap();
     assert_close(direct_w4.ci_actual_confidence_percent.unwrap(), 87.5, 1e-9);
+    assert_close(cell_num(row_cell(tab_w4, "Sum of positive ranks (W+)", 0)), direct_w4.w_plus, 1e-12);
+
+    // Paired input with exact zero differences: run_analysis WilcoxonSignedRank matches Pratt (true), not classic (false).
+    let a_zero = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0];
+    let b_zero = [10.0, 18.0, 26.0, 35.0, 44.0, 52.0];
+    let s_wz = col_sheet("Wilcoxon Pratt Zeros", &[("Before", &a_zero), ("After", &b_zero)]);
+    let res_wz = run_analysis(
+        &s_wz,
+        &AnalysisSpec::new(
+            "wilc-pratt-z",
+            s_wz.id.clone(),
+            AnalysisKind::TwoGroupComparison(TwoGroupSpec {
+                method: TwoGroupMethod::WilcoxonSignedRank,
+                two_tailed: true,
+                compute_effect_sizes: true,
+                mv_group_column: None,
+                mv_response_column: None,
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let pratt_wz = wilcoxon_matched_pairs(&a_zero, &b_zero, true, ConfidenceLevel::DEFAULT_95, true).unwrap();
+    let classic_wz = wilcoxon_matched_pairs(&a_zero, &b_zero, true, ConfidenceLevel::DEFAULT_95, false).unwrap();
+    let tab_wz = find_tab(&res_wz, "wilcoxon-paired");
+    assert_close(cell_num(row_cell(tab_wz, "Sum of positive ranks (W+)", 0)), pratt_wz.w_plus, 1e-12);
+    assert_close(cell_num(row_cell(tab_wz, "Sum of negative ranks (W-)", 0)), pratt_wz.w_minus, 1e-12);
+    assert_ne!((pratt_wz.w_plus - classic_wz.w_plus).abs(), 0.0, "Pratt zero handling must retain zero ranks in W+ ranking");
 
     // 3. Mann-Whitney U: n_a=3, n_b=3 -> C(6,3)=20 -> max achievable 90.0%; n_a=8, n_b=8 -> exact DP >= 95%.
     let mw33 = mann_whitney_u(&[1.0, 2.0, 3.0], &[10.0, 20.0, 30.0], true, ConfidenceLevel::DEFAULT_95).unwrap();

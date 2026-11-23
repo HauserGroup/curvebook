@@ -31,7 +31,9 @@ fn build_desktop_test_project() -> Result<ProjectDocument, Box<dyn std::error::E
     let mut doc = ProjectDocument::default();
 
     let mut xy = XyTable::new(SubcolumnMode::Single, 1, 5)?;
-    xy.data_sets[0].title = String::from("Signal");
+    if let Some(ds0) = xy.data_sets.first_mut() {
+        ds0.title = String::from("Signal");
+    }
     let mut ds_xy = DataSheet::new("data-xy", "Dose Response", TableArchetype::Xy(xy))?;
     ds_xy.set_x_or_time_cell(0, 0, Cell::number(1.0))?;
     ds_xy.set_cell(CellCoord::new(0, 0, 0), Cell::number(12.5))?;
@@ -75,6 +77,7 @@ fn in_window_menus_chrome_and_menu_action_vs_native_mode() -> Result<(), Box<dyn
         theme_override: Some(String::from("dark")),
         recovery_root: None,
         initial_viewport: ViewportMetrics::new(1200.0, 760.0, 1.0),
+        ..DesktopHostConfig::default()
     });
     let w_in = in_window_rt.open_window(None, ViewportMetrics::new(1200.0, 760.0, 1.0))?;
 
@@ -111,6 +114,7 @@ fn in_window_menus_chrome_and_menu_action_vs_native_mode() -> Result<(), Box<dyn
         theme_override: None,
         recovery_root: None,
         initial_viewport: ViewportMetrics::new(1200.0, 760.0, 1.0),
+        ..DesktopHostConfig::default()
     });
     let w_native = native_rt.open_window(None, ViewportMetrics::new(1200.0, 760.0, 1.0))?;
     let chrome_native = native_rt.window(w_native)?.chrome_state();
@@ -139,6 +143,7 @@ fn new_instance_isolated_recovery_journals_and_prompt_unsaved_close_guard() -> R
         theme_override: None,
         recovery_root: Some(recovery_root.clone()),
         initial_viewport: ViewportMetrics::new(1024.0, 640.0, 1.0),
+        ..DesktopHostConfig::default()
     };
     let mut rt = DesktopHostRuntime::new(cfg.clone());
 
@@ -599,6 +604,7 @@ fn file_dropped_pzfx_and_zip_archive_open_cleanly() -> Result<(), Box<dyn std::e
         theme_override: None,
         recovery_root: None,
         initial_viewport: metrics,
+        ..DesktopHostConfig::default()
     });
     let wid = rt.open_window(None, metrics)?;
 

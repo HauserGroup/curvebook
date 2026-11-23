@@ -772,22 +772,23 @@ fn remap_template_hooks_in_text(text: &mut String, remap: &BTreeMap<SheetId, She
     let mut rest = text.as_str();
     let mut changed = false;
 
-    while let Some(open) = rest.find("{{") {
-        out.push_str(&rest[..open]);
-        let after_open = &rest[open + 2..];
-        let Some(close) = after_open.find("}}") else {
-            out.push_str(&rest[open..]);
+    while let Some((before, after_open)) = rest.split_once("{{") {
+        out.push_str(before);
+        let Some((raw_inner, after_close)) = after_open.split_once("}}") else {
+            out.push_str("{{");
+            out.push_str(after_open);
             rest = "";
             break;
         };
-        let raw_inner = &after_open[..close];
         if let Some(rewritten) = rewrite_hook_token(raw_inner, remap) {
             out.push_str(&rewritten);
             changed = true;
         } else {
-            out.push_str(&rest[open..open + 2 + close + 2]);
+            out.push_str("{{");
+            out.push_str(raw_inner);
+            out.push_str("}}");
         }
-        rest = &after_open[close + 2..];
+        rest = after_close;
     }
     out.push_str(rest);
     if changed {

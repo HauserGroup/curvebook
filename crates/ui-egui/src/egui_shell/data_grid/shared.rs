@@ -651,14 +651,28 @@ pub(super) fn render_ellipsized_text(ui: &Ui, clip_rect: Rect, text: &str, style
     (elided, text_rect)
 }
 
-pub(super) fn format_cell_into(cell: &Cell, preset: &LocalePreset, out: &mut String) {
+pub(super) fn table_display_decimals(ctx: &egui::Context) -> Option<u8> {
+    crate::egui_shell::trailing_studio::studio_table_decimals(ctx)
+}
+
+pub(super) fn format_cell_into_with_decimals(cell: &Cell, preset: &LocalePreset, decimals: Option<u8>, out: &mut String) {
     out.clear();
     match &cell.value {
         CellValue::Empty => {}
         CellValue::Number(v) if v.is_finite() => {
             let normalized = if *v == 0.0 { 0.0 } else { *v };
-            let _ = write!(out, "{normalized}");
-            if normalized.is_sign_negative() && normalized != 0.0 && preset.minus_sign != "-" && out.starts_with('-') {
+            if let Some(dec) = decimals {
+                let d = usize::from(dec.min(12));
+                let _ = write!(out, "{normalized:.d$}");
+                if let Some(rest) = out.strip_prefix('-')
+                    && rest.bytes().all(|b| b == b'0' || b == b'.')
+                {
+                    out.remove(0);
+                }
+            } else {
+                let _ = write!(out, "{normalized}");
+            }
+            if out.starts_with('-') && preset.minus_sign != "-" {
                 out.replace_range(..1, &preset.minus_sign);
             }
             if preset.decimal_separator != '.'
@@ -672,6 +686,10 @@ pub(super) fn format_cell_into(cell: &Cell, preset: &LocalePreset, out: &mut Str
         CellValue::Number(_) => {}
         CellValue::Text(s) => out.push_str(s),
     }
+}
+
+pub(super) fn format_cell_into(cell: &Cell, preset: &LocalePreset, out: &mut String) {
+    format_cell_into_with_decimals(cell, preset, None, out);
 }
 
 pub(super) fn initial_edit_text_for_cell(cell: Option<&Cell>, preset: &LocalePreset) -> String {

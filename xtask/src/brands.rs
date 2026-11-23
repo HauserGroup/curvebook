@@ -35,7 +35,7 @@ use curvebook_ui_egui::{
     ActiveDialog, ClipboardBundle, EguiSurfaceCapture, EguiSurfaceScanner, UiApp, UiTreeSnapshot, ViewportMetrics, inspect_ui_tree,
 };
 
-use crate::text_decode::{decode_utf16, detect_bomless_utf16};
+use crate::text_decode::{decode_utf8_or_utf16, decode_utf16};
 
 /// Competitor vendor and product names checked on ASCII token boundaries (including CamelCase / snake_case / kebab-case splits).
 const BRANDS: &[&str] = &[
@@ -97,10 +97,13 @@ const ATTRIBUTED_REPO_PLACEHOLDER: &str = "upstream-attributed-repo";
 
 const ALLOW_MARKER: &str = "brand-ok";
 
-/// Legacy historical audit directory preserved read-only (`R0.21` / `AGENTS.md`).
+/// Intentional audit-archive waiver: read-only audit reports under `docs/audit/` and
+/// `docs/history/audit/` document prior findings verbatim and are skipped only in working-tree
+/// scans (`skip_path`), never when scanning `dist/` bundles (`scan_dist_path_and_file`).
 const AUDIT_PREFIX: &str = "docs/audit/";
 
-/// Archived audit rounds moved under `docs/history/` (`R0.31`); same read-only treatment as `AUDIT_PREFIX`.
+/// Archived audit rounds moved under `docs/history/` (`R0.31`); same intentional read-only
+/// working-tree waiver as `AUDIT_PREFIX` (`scan_dist_path_and_file` still rejects if bundled).
 const HISTORY_AUDIT_PREFIX: &str = "docs/history/audit/";
 
 /// Xtask gate implementation modules that intentionally embed the scanner definitions and unit probes.
@@ -260,31 +263,14 @@ pub fn scan_repo_checked(root: &Path, files: &[String]) -> Result<Vec<BrandHit>,
             continue;
         }
         scan_tracked_path_name(path, &mut hits);
-        let bytes = match std::fs::read(root.join(path)) {
+        let bytes = match curvebook_platform::fs::read_regular_file_bytes(&root.join(path), MAX_DIST_FILE_BYTES) {
             Ok(b) => b,
             Err(e) => {
                 scan_errors.push(format!("cannot scan {path}: {e}"));
                 continue;
             }
         };
-        let ext_lower = Path::new(path).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
-        if ext_lower == "png" {
-            hits.extend(check_png_metadata(path, &bytes));
-            continue;
-        }
-        if matches!(ext_lower.as_str(), "ico" | "icns") {
-            hits.extend(check_icon_container_metadata(path, &bytes));
-            continue;
-        }
-        if ext_lower == "gif" {
-            hits.extend(check_gif_metadata(path, &bytes));
-            continue;
-        }
-        match decode_text_file(path, &bytes) {
-            Ok(DecodedFile::Text(text)) => scan_file(path, &text, &mut hits),
-            Ok(DecodedFile::BinaryAsset) => {}
-            Err(msg) => scan_errors.push(msg),
-        }
+        scan_repo_file_bytes(path, &bytes, &mut hits, &mut scan_errors);
     }
     if !scan_errors.is_empty() {
         if !hits.is_empty() {
@@ -295,6 +281,52 @@ pub fn scan_repo_checked(root: &Path, files: &[String]) -> Result<Vec<BrandHit>,
         return Err(scan_errors.join("\n  "));
     }
     Ok(hits)
+}
+
+fn scan_repo_file_bytes(path: &str, bytes: &[u8], hits: &mut Vec<BrandHit>, scan_errors: &mut Vec<String>) {
+    let ext_lower = Path::new(path).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+    if ext_lower == "png" {
+        hits.extend(check_png_metadata(path, bytes));
+        return;
+    }
+    if matches!(ext_lower.as_str(), "ico" | "icns") {
+        hits.extend(check_icon_container_metadata(path, bytes));
+        return;
+    }
+    if ext_lower == "gif" {
+        hits.extend(check_gif_metadata(path, bytes));
+        return;
+    }
+    if ext_lower == "pdf" || bytes.starts_with(b"%PDF-") {
+        hits.extend(check_pdf_metadata(path, bytes));
+        return;
+    }
+    if ext_lower == "svgz" || (bytes.starts_with(&[0x1F, 0x8B]) && is_binary_asset_ext(path)) {
+        match inflate_gzip_bounded(bytes) {
+            Ok(raw) => match decode_text_file(path, &raw) {
+                Ok(DecodedFile::Text(svg)) => {
+                    scan_svg(path, &svg, hits);
+                    hits.extend(check_svg_metadata(path, &svg));
+                }
+                _ => scan_errors.push(format!("cannot scan {path}: .svgz payload is not valid UTF-8/UTF-16 SVG text")),
+            },
+            Err(()) => scan_errors.push(format!("cannot scan {path}: corrupt or oversized .svgz gzip payload")),
+        }
+        return;
+    }
+    let is_pk_zip = bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06");
+    if is_pk_zip || matches!(ext_lower.as_str(), "zip" | "curvebook" | "cbtemplate") {
+        let mut stats = DistScanStats::default();
+        if let Err(err) = scan_dist_bytes(path, bytes, 0, &mut stats, hits) {
+            scan_errors.push(err);
+        }
+        return;
+    }
+    match decode_text_file(path, bytes) {
+        Ok(DecodedFile::Text(text)) => scan_file(path, &text, hits),
+        Ok(DecodedFile::BinaryAsset) => {}
+        Err(msg) => scan_errors.push(msg),
+    }
 }
 
 fn scan_tracked_path_name(path: &str, out: &mut Vec<BrandHit>) {
@@ -319,30 +351,20 @@ fn is_binary_asset_ext(path: &str) -> bool {
 }
 
 fn decode_text_file(path: &str, bytes: &[u8]) -> Result<DecodedFile, String> {
-    if let Some(bomless) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
-        return match std::str::from_utf8(bomless) {
-            Ok(s) => Ok(DecodedFile::Text(s.to_owned())),
-            Err(e) => Err(format!("cannot scan {path}: invalid UTF-8 after BOM: {e}")),
-        };
+    match decode_utf8_or_utf16(bytes) {
+        Ok(Some(text)) => Ok(DecodedFile::Text(text)),
+        Err(err) => Err(format!("cannot scan {path}: {err}")),
+        Ok(None) => {
+            if is_binary_asset_ext(path) {
+                Ok(DecodedFile::BinaryAsset)
+            } else {
+                Err(format!("cannot scan {path}: file is not valid UTF-8 or UTF-16"))
+            }
+        }
     }
-    if bytes.starts_with(&[0xFF, 0xFE]) {
-        return Ok(DecodedFile::Text(decode_utf16(bytes.get(2..).unwrap_or_default(), true)));
-    }
-    if bytes.starts_with(&[0xFE, 0xFF]) {
-        return Ok(DecodedFile::Text(decode_utf16(bytes.get(2..).unwrap_or_default(), false)));
-    }
-    if let Ok(s) = std::str::from_utf8(bytes) {
-        return Ok(DecodedFile::Text(s.to_owned()));
-    }
-    if let Some(little_endian) = detect_bomless_utf16(bytes) {
-        return Ok(DecodedFile::Text(decode_utf16(bytes, little_endian)));
-    }
-    if is_binary_asset_ext(path) {
-        return Ok(DecodedFile::BinaryAsset);
-    }
-    Err(format!("cannot scan {path}: file is not valid UTF-8 or UTF-16"))
 }
 
+// Intentional working-tree audit waiver: see AUDIT_PREFIX / HISTORY_AUDIT_PREFIX above.
 fn skip_path(path: &str) -> bool {
     let norm = path.replace('\\', "/");
     let trimmed = norm.strip_prefix("./").unwrap_or(&norm);
@@ -357,35 +379,68 @@ fn scan_file(path: &str, text: &str, out: &mut Vec<BrandHit>) {
     let start_idx = out.len();
     scan_suite_lines(path, text, out);
     let ext = Path::new(path).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+    let lower_path = path.to_ascii_lowercase();
     let is_cargo_toml = path == "Cargo.toml" || path.ends_with("/Cargo.toml");
+    let is_provenance_doc = matches!(Path::new(path).file_name().and_then(|n| n.to_str()), Some("ASSETS.md" | "ATTRIBUTION.md" | "NOTICE"));
     if ext == "rs" {
         scan_rust(path, text, out);
     } else if is_cargo_toml {
         scan_cargo_toml(path, text, out);
     } else if ext == "svg" {
         scan_svg(path, text, out);
-    } else if path.ends_with(".plist") || path.ends_with(".plist.in") {
+    } else if lower_path.ends_with(".plist") || lower_path.ends_with(".plist.in") {
         scan_plist(path, text, out);
     } else if is_mime_package_xml(path) {
         scan_mime_xml(path, text, out);
-    } else if path.ends_with(".desktop") {
+    } else if lower_path.ends_with(".desktop") {
         scan_desktop_entry(path, text, out);
+    } else if is_provenance_doc {
+        scan_plain_lines_no_waiver(path, text, out);
     } else if ext == "md" {
         scan_markdown(path, text, out);
     } else if matches!(ext.as_str(), "html" | "htm") {
         scan_html_file(path, text, out);
         out.extend(check_html_metadata(path, text));
-    } else if path == "docs/development.md" || is_scanned_non_rs_text_file(path, &ext) {
+    } else if is_scanned_non_rs_text_file(path, &ext) {
         scan_plain_lines_no_waiver(path, text, out);
     }
     dedup_tail_hits(out, start_idx);
 }
 
 fn is_scanned_non_rs_text_file(path: &str, ext: &str) -> bool {
+    let norm = path.replace('\\', "/");
+    let trimmed = norm.strip_prefix("./").unwrap_or(&norm);
+    let file_name = Path::new(trimmed).file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let is_hook = trimmed.strip_prefix(".githooks/").is_some_and(|rest| !rest.is_empty() && !rest.ends_with(".sample"));
     matches!(
         ext,
-        "txt" | "toml" | "json" | "yaml" | "yml" | "xml" | "css" | "js" | "mjs" | "ts" | "sh" | "ps1" | "wxs" | "wxl" | "rc" | "in" | "conf" | "ini"
-    ) || matches!(Path::new(path).file_name().and_then(|n| n.to_str()), Some("_headers" | ".htaccess" | "NOTICE" | "LICENSE" | "LICENSE.txt"))
+        "txt"
+            | "toml"
+            | "json"
+            | "yaml"
+            | "yml"
+            | "xml"
+            | "css"
+            | "js"
+            | "mjs"
+            | "cjs"
+            | "ts"
+            | "jsx"
+            | "tsx"
+            | "sh"
+            | "ps1"
+            | "wxs"
+            | "wxl"
+            | "wxi"
+            | "hbs"
+            | "py"
+            | "r"
+            | "rc"
+            | "in"
+            | "conf"
+            | "ini"
+    ) || is_hook
+        || matches!(file_name, "_headers" | ".htaccess" | "NOTICE" | "LICENSE" | "LICENSE.txt" | "CODEOWNERS")
 }
 
 fn dedup_tail_hits(hits: &mut Vec<BrandHit>, from: usize) {
@@ -406,7 +461,7 @@ fn scan_suite_lines(path: &str, text: &str, out: &mut Vec<BrandHit>) {
 
 fn scan_suite_lines_with_scope(path: &str, text: &str, allow_packaged: bool, out: &mut Vec<BrandHit>) {
     let masked = mask_attributed_upstream_url(path, text, allow_packaged);
-    let check_adapted_brand = is_crates_or_apps_path(path);
+    let check_adapted_brand = is_crates_or_apps_path(path) || (allow_packaged && !is_attribution_or_notice_path(path, true));
     for (idx, line) in masked.lines().enumerate() {
         let line_no = idx + 1;
         if path == SUITE_DISCLAIMER_PATH && line.contains(ALLOW_MARKER) {
@@ -506,18 +561,19 @@ fn mask_exact_upstream_url_on_line(line: &str) -> String {
     while let Some(rel) = line.get(cursor..).and_then(|s| s.find(ADAPTED_UPSTREAM_REPO_URL)) {
         let pos = cursor + rel;
         let end = pos + url_len;
-        let prefix_ok = is_valid_url_prefix(line[..pos].chars().next_back());
-        let suffix_ok = is_valid_url_suffix(&line[end..]);
+        let prefix_ok = is_valid_url_prefix(line.get(..pos).and_then(|s| s.chars().next_back()));
+        let suffix_ok = is_valid_url_suffix(line.get(end..).unwrap_or(""));
         if prefix_ok && suffix_ok {
-            out.push_str(&line[cursor..pos]);
+            out.push_str(line.get(cursor..pos).unwrap_or(""));
             out.push_str(ATTRIBUTED_REPO_PLACEHOLDER);
             cursor = end;
         } else {
-            out.push_str(&line[cursor..pos + 1]);
-            cursor = pos + 1;
+            let step = line.get(pos..).and_then(|s| s.chars().next()).map_or(1, char::len_utf8);
+            out.push_str(line.get(cursor..pos + step).unwrap_or(""));
+            cursor = pos + step;
         }
     }
-    out.push_str(&line[cursor..]);
+    out.push_str(line.get(cursor..).unwrap_or(""));
     out
 }
 
@@ -701,8 +757,8 @@ fn mask_markdown_format_tokens(line: &str, is_agents: bool, is_dev_or_cmd: bool)
     if changed { Some(work) } else { None }
 }
 
-struct SvgChunk<'a> {
-    text: &'a str,
+struct SvgChunk {
+    text: String,
     is_meta_text: bool,
     prev_word: Option<String>,
 }
@@ -717,7 +773,7 @@ struct SvgState {
 }
 
 impl SvgState {
-    fn split_line_chunks<'a>(&mut self, line: &'a str) -> Vec<SvgChunk<'a>> {
+    fn split_line_chunks(&mut self, line: &str) -> Vec<SvgChunk> {
         let mut chunks = Vec::new();
         let bytes = line.as_bytes();
         let mut i = 0usize;
@@ -725,6 +781,11 @@ impl SvgState {
         while i < bytes.len() {
             if self.in_comment {
                 if bytes.get(i..i + 3) == Some(b"-->") {
+                    chunks.push(SvgChunk {
+                        text: decode_xml_or_html_entities(line.get(span_start..i).unwrap_or("")),
+                        is_meta_text: false,
+                        prev_word: None,
+                    });
                     i += 3;
                     self.in_comment = false;
                     span_start = i;
@@ -735,9 +796,10 @@ impl SvgState {
             }
             if self.in_tag {
                 if bytes[i] == b'>' {
-                    self.tag_buf.push_str(&line[span_start..=i]);
+                    let tag_chunk = line.get(span_start..=i).unwrap_or("");
+                    self.tag_buf.push_str(tag_chunk);
                     self.apply_completed_tag();
-                    chunks.push(SvgChunk { text: &line[span_start..=i], is_meta_text: false, prev_word: None });
+                    chunks.push(SvgChunk { text: decode_xml_or_html_entities(tag_chunk), is_meta_text: false, prev_word: None });
                     i += 1;
                     span_start = i;
                 } else {
@@ -761,29 +823,31 @@ impl SvgState {
             i += 1;
         }
         if span_start < line.len() {
+            let tail = line.get(span_start..).unwrap_or("");
             if self.in_tag {
-                self.tag_buf.push_str(&line[span_start..]);
+                self.tag_buf.push_str(tail);
             }
             if !self.in_comment && !self.in_tag {
                 self.push_text_chunk(line, span_start, line.len(), &mut chunks);
             } else {
-                chunks.push(SvgChunk { text: &line[span_start..], is_meta_text: false, prev_word: None });
+                chunks.push(SvgChunk { text: decode_xml_or_html_entities(tail), is_meta_text: false, prev_word: None });
             }
         }
         chunks
     }
 
-    fn push_text_chunk<'a>(&mut self, line: &'a str, start: usize, end: usize, chunks: &mut Vec<SvgChunk<'a>>) {
+    fn push_text_chunk(&mut self, line: &str, start: usize, end: usize, chunks: &mut Vec<SvgChunk>) {
         if start >= end {
             return;
         }
-        let text = &line[start..end];
+        let decoded = decode_xml_or_html_entities(line.get(start..end).unwrap_or(""));
         let prev_word = if self.in_meta { self.prev_meta_word.clone() } else { None };
-        chunks.push(SvgChunk { text, is_meta_text: self.in_meta, prev_word });
-        if self.in_meta && !text.trim().is_empty() {
-            let tail = trailing_ascii_word(text.trim_end()).to_ascii_lowercase();
+        let is_meta = self.in_meta;
+        if is_meta && !decoded.trim().is_empty() {
+            let tail = trailing_ascii_word(decoded.trim_end()).to_ascii_lowercase();
             self.prev_meta_word = if tail.is_empty() { None } else { Some(tail) };
         }
+        chunks.push(SvgChunk { text: decoded, is_meta_text: is_meta, prev_word });
     }
 
     fn apply_completed_tag(&mut self) {
@@ -819,7 +883,7 @@ fn scan_svg(path: &str, text: &str, out: &mut Vec<BrandHit>) {
             let policy = if chunk.is_meta_text { PrismPolicy::SvgTitleOrDesc { prev_word: chunk.prev_word.as_deref() } } else { PrismPolicy::Strict };
             let lower = chunk.text.to_ascii_lowercase();
             for &brand in BRANDS.iter().chain(PRE_RENAME_ASSET_BRANDS) {
-                if !line_brands.contains(brand) && has_word_match(chunk.text, &lower, brand, policy) {
+                if !line_brands.contains(brand) && has_word_match(&chunk.text, &lower, brand, policy) {
                     line_brands.insert(brand);
                     out.push(BrandHit { path: path.to_owned(), line: idx + 1, brand });
                 }
@@ -830,33 +894,76 @@ fn scan_svg(path: &str, text: &str, out: &mut Vec<BrandHit>) {
 
 fn check_and_strip_svg_data_uri(path: &str, line: &str, out: &mut Vec<BrandHit>) -> Option<String> {
     const MARKER: &str = "data:image/";
-    if !line.contains(MARKER) {
+    let lower = line.to_ascii_lowercase();
+    if !lower.contains(MARKER) {
         return None;
     }
     let mut out_str = String::with_capacity(line.len().min(4096));
-    let mut rest = line;
-    while let Some(pos) = rest.find(MARKER) {
-        out_str.push_str(&rest[..pos]);
-        let after = &rest[pos + MARKER.len()..];
-        let Some(b64_rel) = after.find(";base64,") else {
-            out_str.push_str(MARKER);
-            rest = after;
+    let mut pos = 0usize;
+    while let Some(rel) = lower.get(pos..).and_then(|s| s.find(MARKER)) {
+        let hit = pos + rel;
+        out_str.push_str(line.get(pos..hit).unwrap_or(""));
+        let after = line.get(hit + MARKER.len()..).unwrap_or("");
+        let after_lower = lower.get(hit + MARKER.len()..).unwrap_or("");
+        let Some(comma_rel) = after.find(',') else {
+            out_str.push_str(line.get(hit..hit + MARKER.len()).unwrap_or(MARKER));
+            pos = hit + MARKER.len();
             continue;
         };
-        let subtype = &after[..b64_rel];
-        let payload_start = &after[b64_rel + ";base64,".len()..];
+        let meta = after_lower.get(..comma_rel).unwrap_or("");
+        let mime = meta.split(';').next().unwrap_or("").trim();
+        let is_base64 = meta.split(';').skip(1).any(|p| p.trim() == "base64");
+        let payload_start = after.get(comma_rel + 1..).unwrap_or("");
         let end_quote = payload_start.find(['"', '\'', ')', ' ', '\t']).unwrap_or(payload_start.len());
-        let b64_payload = &payload_start[..end_quote];
-        if subtype.eq_ignore_ascii_case("png")
-            && let Some(decoded) = decode_base64_ascii(b64_payload)
-        {
-            out.extend(check_png_metadata(path, &decoded));
+        let raw_payload = payload_start.get(..end_quote).unwrap_or(payload_start);
+        if is_base64 {
+            if let Some(decoded) = decode_base64_ascii(raw_payload) {
+                inspect_embedded_image_payload(path, mime, &decoded, out);
+            }
+        } else if mime == "svg+xml" {
+            let svg_text = percent_decode_utf8_lossy(raw_payload);
+            scan_svg(path, &svg_text, out);
+            out.extend(check_svg_metadata(path, &svg_text));
         }
         out_str.push_str("data:image/stripped");
-        rest = &payload_start[end_quote..];
+        pos = hit + MARKER.len() + comma_rel + 1 + end_quote;
     }
-    out_str.push_str(rest);
+    out_str.push_str(line.get(pos..).unwrap_or(""));
     Some(out_str)
+}
+
+fn inspect_embedded_image_payload(path: &str, mime: &str, decoded: &[u8], out: &mut Vec<BrandHit>) {
+    if mime == "png" || decoded.starts_with(b"\x89PNG\r\n\x1a\n") {
+        out.extend(check_png_metadata(path, decoded));
+    } else if mime == "gif" || decoded.starts_with(b"GIF87a") || decoded.starts_with(b"GIF89a") {
+        out.extend(check_gif_metadata(path, decoded));
+    } else if matches!(mime, "x-icon" | "vnd.microsoft.icon") {
+        out.extend(check_icon_container_metadata(path, decoded));
+    } else if mime == "svg+xml"
+        && let Ok(Some(svg_text)) = decode_utf8_or_utf16(decoded)
+    {
+        scan_svg(path, &svg_text, out);
+        out.extend(check_svg_metadata(path, &svg_text));
+    }
+}
+
+fn percent_decode_utf8_lossy(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let (Some(h), Some(l)) = (bytes.get(i + 1), bytes.get(i + 2))
+            && let (Some(hd), Some(ld)) = ((char::from(*h)).to_digit(16), (char::from(*l)).to_digit(16))
+        {
+            out.push(((hd << 4) | ld) as u8);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn decode_base64_ascii(b64: &str) -> Option<Vec<u8>> {
@@ -1556,17 +1663,52 @@ impl<'a> RustLexer<'a> {
             return;
         }
         self.advance_one();
-        let ch = match next {
-            b'n' => '\n',
-            b'r' => '\r',
-            b't' => '\t',
-            b'0' => '\0',
-            b'\\' => '\\',
-            b'"' => '"',
-            b'\'' => '\'',
-            other => char::from(other),
-        };
-        push_char_with_line(text, byte_lines, ch, esc_line);
+        match next {
+            b'n' => push_char_with_line(text, byte_lines, '\n', esc_line),
+            b'r' => push_char_with_line(text, byte_lines, '\r', esc_line),
+            b't' => push_char_with_line(text, byte_lines, '\t', esc_line),
+            b'0' => push_char_with_line(text, byte_lines, '\0', esc_line),
+            b'\\' => push_char_with_line(text, byte_lines, '\\', esc_line),
+            b'"' => push_char_with_line(text, byte_lines, '"', esc_line),
+            b'\'' => push_char_with_line(text, byte_lines, '\'', esc_line),
+            b'x' => {
+                if let (Some(h), Some(l)) = (self.peek(), self.bytes.get(self.pos + 1).copied())
+                    && let (Some(hd), Some(ld)) = ((char::from(h)).to_digit(16), (char::from(l)).to_digit(16))
+                {
+                    self.pos += 2;
+                    let byte_val = ((hd << 4) | ld) as u8;
+                    push_char_with_line(text, byte_lines, char::from(byte_val), esc_line);
+                } else {
+                    push_char_with_line(text, byte_lines, 'x', esc_line);
+                }
+            }
+            b'u' if self.peek() == Some(b'{') => {
+                self.pos += 1;
+                let mut hex = String::new();
+                while let Some(b) = self.peek() {
+                    if b == b'}' {
+                        self.pos += 1;
+                        break;
+                    }
+                    if b == b'_' {
+                        self.pos += 1;
+                        continue;
+                    }
+                    if (b as char).is_ascii_hexdigit() && hex.len() < 8 {
+                        hex.push(char::from(b));
+                        self.pos += 1;
+                    } else {
+                        break;
+                    }
+                }
+                if let Ok(code) = u32::from_str_radix(&hex, 16)
+                    && let Some(ch) = char::from_u32(code)
+                {
+                    push_char_with_line(text, byte_lines, ch, esc_line);
+                }
+            }
+            other => push_char_with_line(text, byte_lines, char::from(other), esc_line),
+        }
     }
 }
 
@@ -1643,6 +1785,10 @@ fn scan_rust(path: &str, text: &str, out: &mut Vec<BrandHit>) {
                 PrismPolicy::RustLiteral { allow_bare_prism, allow_dot_prism, allow_import_prism_cmd, allow_pzfx_xml, allow_test_container_op }
             };
             collect_literal_words(path, &lit, BRANDS, policy, &mut seen, out);
+            collect_literal_words(path, &lit, SUITE_BRANDS, PrismPolicy::Strict, &mut seen, out);
+            if is_crates_or_apps_path(path) {
+                collect_literal_words(path, &lit, &[ADAPTED_UPSTREAM_BRAND], PrismPolicy::Strict, &mut seen, out);
+            }
             continue;
         }
         if let Some((line, ident)) = lexer.try_read_identifier() {
@@ -1910,7 +2056,7 @@ fn collect_word_matches(raw: &str, lower: &str, word: &'static str, policy: Pris
                 }
                 let span_start = subs[s_idx].0;
                 let span_end = subs[s_idx + count - 1].1;
-                if &lower[span_start..span_end] == word && !is_token_match_exempt(raw, lower, word, span_start, span_end, policy) {
+                if lower.get(span_start..span_end) == Some(word) && !is_token_match_exempt(raw, lower, word, span_start, span_end, policy) {
                     on_match(span_start);
                 }
             }
@@ -1948,7 +2094,7 @@ fn collect_snake_kebab_compound_matches(raw: &str, lower: &str, word: &'static s
             for i in 0..parts.len() {
                 let mut joined = String::new();
                 for j in i..(i + 3).min(parts.len()) {
-                    joined.push_str(&lower[parts[j].0..parts[j].1]);
+                    joined.push_str(lower.get(parts[j].0..parts[j].1).unwrap_or(""));
                     if j > i && joined == word && !is_token_match_exempt(raw, lower, word, parts[i].0, parts[j].1, policy) {
                         on_match(parts[i].0);
                     }
@@ -1961,7 +2107,7 @@ fn collect_snake_kebab_compound_matches(raw: &str, lower: &str, word: &'static s
 fn collect_delimited_suite_matches(lower: &str, word: &'static str, on_match: &mut impl FnMut(usize)) {
     let bytes = lower.as_bytes();
     let mut start = 0usize;
-    while let Some(rel) = lower[start..].find(word) {
+    while let Some(rel) = lower.get(start..).and_then(|s| s.find(word)) {
         let pos = start + rel;
         let end = pos + word.len();
         let left_ok = pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric();
@@ -2052,7 +2198,7 @@ fn is_prism_match_exempt(raw: &str, lower: &str, pos: usize, end: usize, policy:
         PrismPolicy::UiTextRun { allow_dot_prism, allow_palette_cmd_id, .. } => {
             (allow_dot_prism && is_lower_dot_ext) || (allow_palette_cmd_id && is_cmd_prism)
         }
-        PrismPolicy::SvgTitleOrDesc { prev_word } => is_lower_dot_ext || is_preceded_by_optical_modifier(&lower[..pos], prev_word),
+        PrismPolicy::SvgTitleOrDesc { prev_word } => is_lower_dot_ext || is_preceded_by_optical_modifier(lower.get(..pos).unwrap_or(""), prev_word),
     }
 }
 
@@ -2101,7 +2247,7 @@ fn tail_char_slice(s: &str, max_bytes: usize) -> &str {
     while start < s.len() && !s.is_char_boundary(start) {
         start += 1;
     }
-    &s[start..]
+    s.get(start..).unwrap_or(s)
 }
 
 fn head_char_slice(s: &str, max_bytes: usize) -> &str {
@@ -2109,12 +2255,12 @@ fn head_char_slice(s: &str, max_bytes: usize) -> &str {
     while end > 0 && !s.is_char_boundary(end) {
         end -= 1;
     }
-    &s[..end]
+    s.get(..end).unwrap_or(s)
 }
 
 fn statement_prefix_tail(before: &str, max_bytes: usize) -> &str {
     let window = tail_char_slice(before, max_bytes);
-    if let Some(pos) = window.rfind([';', '{', '}']) { &window[pos + 1..] } else { window }
+    if let Some((_, after)) = window.rsplit_once([';', '{', '}']) { after } else { window }
 }
 
 fn is_import_export_prism_literal(path: &str, src: &str, lit: &ExtractedLiteral) -> bool {
@@ -2149,8 +2295,10 @@ fn is_prism_match_pattern(before: &str, after: &str) -> bool {
     let before_trim = before.trim_end();
     let after_trim = after.trim_start();
 
-    if before_trim.ends_with("Some(") && after_trim.starts_with(')') {
-        let post_paren = after_trim[1..].trim_start();
+    if before_trim.ends_with("Some(")
+        && let Some(after_paren) = after_trim.strip_prefix(')')
+    {
+        let post_paren = after_paren.trim_start();
         if post_paren.starts_with("=>") || post_paren.starts_with('|') || post_paren.starts_with("if ") {
             return true;
         }
@@ -2237,13 +2385,13 @@ fn is_prism_extension_array_item(before: &str, after: &str) -> bool {
     let Some(close_idx) = find_enclosing_bracket_close(after) else {
         return false;
     };
-    let inner_before = &before[open_idx..];
-    let inner_after = &after[..close_idx];
+    let inner_before = before.get(open_idx..).unwrap_or("");
+    let inner_after = after.get(..close_idx).unwrap_or("");
     const PEER_EXT_LITERALS: &[&str] = &["\"pzfx\"", "\"cbtemplate\"", "\"curvebook\"", "\"curvebook.d\"", "\"csv\"", "\"tsv\""];
     if PEER_EXT_LITERALS.iter().any(|peer| inner_before.contains(peer) || inner_after.contains(peer)) {
         return true;
     }
-    let prefix = statement_prefix_tail(&before[..open_idx], 160).to_ascii_lowercase();
+    let prefix = statement_prefix_tail(before.get(..open_idx).unwrap_or(""), 160).to_ascii_lowercase();
     const ARRAY_CONTEXT_MARKERS: &[&str] = &["add_filter", "extension", "file_filter", "import", "export", "accept", "format_"];
     ARRAY_CONTEXT_MARKERS.iter().any(|m| prefix.contains(m))
 }
@@ -2251,14 +2399,14 @@ fn is_prism_extension_array_item(before: &str, after: &str) -> bool {
 fn is_prism_format_call_arg(before: &str) -> bool {
     let stmt = statement_prefix_tail(before, 220).to_ascii_lowercase();
     let trimmed = before.trim_end();
-    if let Some(paren_pos) = trimmed.rfind('(') {
-        let callee = trailing_ascii_word(trimmed[..paren_pos].trim_end()).to_ascii_lowercase();
+    if let Some((before_paren, _)) = trimmed.rsplit_once('(') {
+        let callee = trailing_ascii_word(before_paren.trim_end()).to_ascii_lowercase();
         if matches!(callee.as_str(), "label" | "title" | "text" | "button" | "tooltip" | "heading" | "window_title" | "set_title") {
             return false;
         }
     }
-    if let Some(colon_pos) = trimmed.rfind(':') {
-        let field = trailing_ascii_word(trimmed[..colon_pos].trim_end()).to_ascii_lowercase();
+    if let Some((before_colon, _)) = trimmed.rsplit_once(':') {
+        let field = trailing_ascii_word(before_colon.trim_end()).to_ascii_lowercase();
         if matches!(field.as_str(), "label" | "title" | "text" | "tooltip" | "summary" | "beginner" | "message" | "placeholder") {
             return false;
         }
@@ -2307,7 +2455,7 @@ fn trailing_ascii_word(s: &str) -> &str {
     while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'-') {
         start -= 1;
     }
-    &s[start..]
+    s.get(start..).unwrap_or("")
 }
 
 fn check_single_string_with_extra(
@@ -2464,15 +2612,14 @@ pub fn check_i18n_catalog() -> Vec<BrandHit> {
 fn decode_xml_or_html_entities(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut rest = input;
-    while let Some(amp) = rest.find('&') {
-        out.push_str(&rest[..amp]);
-        let after_amp = &rest[amp + 1..];
-        if let Some(semi) = after_amp.find(';')
-            && semi <= 12
-            && let Some(decoded) = decode_named_or_numeric_entity(&after_amp[..semi])
+    while let Some((before, after_amp)) = rest.split_once('&') {
+        out.push_str(before);
+        if let Some((entity, tail)) = after_amp.split_once(';')
+            && entity.len() <= 12
+            && let Some(decoded) = decode_named_or_numeric_entity(entity)
         {
             out.push(decoded);
-            rest = &after_amp[semi + 1..];
+            rest = tail;
             continue;
         }
         out.push('&');
@@ -2490,6 +2637,11 @@ fn decode_named_or_numeric_entity(entity: &str) -> Option<char> {
         "quot" => Some('"'),
         "apos" => Some('\''),
         "nbsp" => Some(' '),
+        "colon" => Some(':'),
+        "sol" => Some('/'),
+        "period" => Some('.'),
+        "quest" => Some('?'),
+        "equals" => Some('='),
         "hellip" => Some('…'),
         "mdash" => Some('—'),
         "ndash" => Some('–'),
@@ -2535,21 +2687,31 @@ pub fn check_svg_metadata(source: &str, svg: &str) -> Vec<BrandHit> {
     let mut active_start_line = 1usize;
     let mut buf = String::new();
 
-    while pos < svg.len() {
-        let rest = &svg[pos..];
-        if rest.starts_with("<!--") {
-            let end = rest.find("-->").map_or(svg.len(), |rel| pos + rel + 3);
-            line += count_newlines(&svg[pos..end]);
+    while let Some(rest) = svg.get(pos..) {
+        if rest.is_empty() {
+            break;
+        }
+        if let Some(after) = rest.strip_prefix("<!--") {
+            let (comment_body, end) = match after.split_once("-->") {
+                Some((body, _)) => (body, pos + 4 + body.len() + 3),
+                None => (after, svg.len()),
+            };
+            if !comment_body.trim().is_empty() {
+                scan_xml_text_fragment(source, line, comment_body, PrismPolicy::Strict, &mut out);
+            }
+            line += count_newlines(svg.get(pos..end).unwrap_or(rest));
             pos = end;
             continue;
         }
-        if rest.starts_with("<![CDATA[") {
-            let end = rest.find("]]>").map_or(svg.len(), |rel| pos + rel + 3);
+        if let Some(after) = rest.strip_prefix("<![CDATA[") {
+            let (cdata_body, end) = match after.split_once("]]>") {
+                Some((body, _)) => (body, pos + 9 + body.len() + 3),
+                None => (after, svg.len()),
+            };
             if skip_depth == 0 && (meta_depth > 0 || text_depth > 0) {
-                let inner_end = if end == svg.len() { end } else { end - 3 };
-                buf.push_str(&svg[pos + 9..inner_end]);
+                buf.push_str(cdata_body);
             }
-            line += count_newlines(&svg[pos..end]);
+            line += count_newlines(svg.get(pos..end).unwrap_or(rest));
             pos = end;
             continue;
         }
@@ -2557,13 +2719,16 @@ pub fn check_svg_metadata(source: &str, svg: &str) -> Vec<BrandHit> {
             && let Some(gt_rel) = rest.find('>')
         {
             let tag_end = pos + gt_rel + 1;
-            let raw_inner = &svg[pos + 1..tag_end - 1];
+            let raw_inner = rest.get(1..gt_rel).unwrap_or("");
             let (is_close, self_closing, name) = extract_tag_name(raw_inner);
             let lower = name.to_ascii_lowercase();
             let is_meta_tag = matches!(lower.as_str(), "title" | "desc" | "metadata");
-            let is_text_tag = matches!(lower.as_str(), "text" | "tspan");
+            let is_text_tag = matches!(lower.as_str(), "text" | "tspan" | "textpath");
             let is_skip_tag = matches!(lower.as_str(), "style" | "image");
 
+            if !is_close && !is_skip_tag {
+                scan_svg_tag_attributes(source, line, raw_inner, &mut out);
+            }
             if is_close {
                 if is_skip_tag {
                     skip_depth = skip_depth.saturating_sub(1);
@@ -2597,18 +2762,21 @@ pub fn check_svg_metadata(source: &str, svg: &str) -> Vec<BrandHit> {
                     text_depth += 1;
                 }
             }
-            line += count_newlines(&svg[pos..tag_end]);
+            line += count_newlines(svg.get(pos..tag_end).unwrap_or(""));
             pos = tag_end;
             continue;
         }
-        let next_lt = rest.find('<').map_or(svg.len(), |rel| pos + rel.max(1));
+        let next_lt = rest.find('<').map_or(svg.len(), |rel| {
+            let step = if rel == 0 { rest.chars().next().map_or(1, char::len_utf8) } else { rel };
+            pos + step
+        });
         if skip_depth == 0 && (meta_depth > 0 || text_depth > 0) {
             if buf.is_empty() {
                 active_start_line = line;
             }
-            buf.push_str(&svg[pos..next_lt]);
+            buf.push_str(svg.get(pos..next_lt).unwrap_or(""));
         }
-        line += count_newlines(&svg[pos..next_lt]);
+        line += count_newlines(svg.get(pos..next_lt).unwrap_or(""));
         pos = next_lt;
     }
 
@@ -2616,6 +2784,40 @@ pub fn check_svg_metadata(source: &str, svg: &str) -> Vec<BrandHit> {
         scan_xml_text_fragment(source, active_start_line, &buf, PrismPolicy::Strict, &mut out);
     }
     out
+}
+
+fn scan_svg_tag_attributes(source: &str, start_line: usize, raw_inner: &str, out: &mut Vec<BrandHit>) {
+    let bytes = raw_inner.as_bytes();
+    let mut i = 0usize;
+    let mut cur_line = start_line;
+    while i < bytes.len() {
+        if bytes[i] == b'\n' {
+            cur_line += 1;
+            i += 1;
+            continue;
+        }
+        let q = bytes[i];
+        if q == b'"' || q == b'\'' {
+            let attr_line = cur_line;
+            i += 1;
+            let val_start = i;
+            while i < bytes.len() && bytes[i] != q {
+                if bytes[i] == b'\n' {
+                    cur_line += 1;
+                }
+                i += 1;
+            }
+            let val = raw_inner.get(val_start..i).unwrap_or("");
+            if !val.to_ascii_lowercase().trim_start().starts_with("data:image/") {
+                scan_xml_text_fragment(source, attr_line, val, PrismPolicy::Strict, out);
+            }
+            if i < bytes.len() {
+                i += 1;
+            }
+            continue;
+        }
+        i += 1;
+    }
 }
 
 fn is_pdf_stream_start(bytes: &[u8], pos: usize) -> Option<usize> {
@@ -2802,7 +3004,7 @@ pub fn check_pdf_metadata(source: &str, pdf_bytes: &[u8]) -> Vec<BrandHit> {
 fn extract_html_attr(raw_tag_inner: &str, attr_name: &str) -> Option<String> {
     let lower = raw_tag_inner.to_ascii_lowercase();
     let mut search = 0usize;
-    while let Some(rel) = lower[search..].find(attr_name) {
+    while let Some(rel) = lower.get(search..).and_then(|s| s.find(attr_name)) {
         let pos = search + rel;
         let end = pos + attr_name.len();
         let left_ok = pos == 0 || lower.as_bytes()[pos - 1].is_ascii_whitespace();
@@ -2816,10 +3018,11 @@ fn extract_html_attr(raw_tag_inner: &str, attr_name: &str) -> Option<String> {
             continue;
         };
         let val_src = after_eq.trim_start();
-        if let Some(q) = val_src.chars().next().filter(|&c| c == '"' || c == '\'') {
-            let inner = &val_src[1..];
-            if let Some(close) = inner.find(q) {
-                return Some(decode_xml_or_html_entities(&inner[..close]));
+        for q in ['"', '\''] {
+            if let Some(inner) = val_src.strip_prefix(q)
+                && let Some((val, _)) = inner.split_once(q)
+            {
+                return Some(decode_xml_or_html_entities(val));
             }
         }
         search = end;
@@ -2839,13 +3042,20 @@ pub fn check_html_metadata(source: &str, html: &str) -> Vec<BrandHit> {
     let mut text_start_line = 1usize;
     let mut buf = String::new();
 
-    while pos < html.len() {
-        let rest = &html[pos..];
-        if rest.starts_with("<!--") {
-            let end = rest.find("-->").map_or(html.len(), |rel| pos + rel + 3);
-            let comment_inner = &html[pos + 4..end.saturating_sub(3).max(pos + 4)];
+    while let Some(rest) = html.get(pos..) {
+        if rest.is_empty() {
+            break;
+        }
+        if let Some(after) = rest.strip_prefix("<!--") {
+            let (comment_inner, end) = match rest.find("-->") {
+                Some(rel) => {
+                    let close_pos = pos + rel;
+                    (html.get(pos + 4..close_pos.max(pos + 4)).unwrap_or(""), close_pos + 3)
+                }
+                None => (after, html.len()),
+            };
             flush_html_text(source, line, comment_inner, true, &mut out);
-            line += count_newlines(&html[pos..end]);
+            line += count_newlines(html.get(pos..end).unwrap_or(rest));
             pos = end;
             continue;
         }
@@ -2854,13 +3064,14 @@ pub fn check_html_metadata(source: &str, html: &str) -> Vec<BrandHit> {
             let close_pos = lower_rest.find("</script").or_else(|| lower_rest.find("</style"));
             let chunk_end = close_pos.map_or(html.len(), |rel| pos + rel);
             if chunk_end > pos {
-                flush_html_text(source, line, &html[pos..chunk_end], false, &mut out);
-                line += count_newlines(&html[pos..chunk_end]);
+                let chunk = html.get(pos..chunk_end).unwrap_or("");
+                flush_html_text(source, line, chunk, false, &mut out);
+                line += count_newlines(chunk);
             }
             if let Some(rel) = close_pos {
                 let tag_start = pos + rel;
-                let gt_end = html[tag_start..].find('>').map_or(html.len(), |g| tag_start + g + 1);
-                line += count_newlines(&html[tag_start..gt_end]);
+                let gt_end = html.get(tag_start..).and_then(|s| s.find('>')).map_or(html.len(), |g| tag_start + g + 1);
+                line += count_newlines(html.get(tag_start..gt_end).unwrap_or(""));
                 pos = gt_end;
                 in_script_or_style = false;
             } else {
@@ -2876,7 +3087,7 @@ pub fn check_html_metadata(source: &str, html: &str) -> Vec<BrandHit> {
             }
             buf.clear();
             let tag_end = pos + gt_rel + 1;
-            let raw_inner = &html[pos + 1..tag_end - 1];
+            let raw_inner = rest.get(1..gt_rel).unwrap_or("");
             let (is_close, self_closing, name) = extract_tag_name(raw_inner);
             let lower = name.to_ascii_lowercase();
             let tag_line = line;
@@ -2902,16 +3113,20 @@ pub fn check_html_metadata(source: &str, html: &str) -> Vec<BrandHit> {
             } else if matches!(lower.as_str(), "title" | "desc" | "metadata") {
                 strict_depth = strict_depth.saturating_sub(1);
             }
-            line += count_newlines(&html[pos..tag_end]);
+            line += count_newlines(html.get(pos..tag_end).unwrap_or(""));
             pos = tag_end;
             continue;
         }
-        let next_lt = rest.find('<').map_or(html.len(), |rel| pos + rel.max(1));
+        let next_lt = rest.find('<').map_or(html.len(), |rel| {
+            let step = if rel == 0 { rest.chars().next().map_or(1, char::len_utf8) } else { rel };
+            pos + step
+        });
         if buf.is_empty() {
             text_start_line = line;
         }
-        buf.push_str(&html[pos..next_lt]);
-        line += count_newlines(&html[pos..next_lt]);
+        let text_chunk = html.get(pos..next_lt).unwrap_or("");
+        buf.push_str(text_chunk);
+        line += count_newlines(text_chunk);
         pos = next_lt;
     }
 
@@ -4301,6 +4516,31 @@ impl HuffTable {
     }
 }
 
+pub(crate) fn inflate_gzip_bounded(gz: &[u8]) -> Result<Vec<u8>, ()> {
+    if gz.len() < 18 || gz[0] != 0x1F || gz[1] != 0x8B || gz[2] != 8 {
+        return Err(());
+    }
+    let flg = gz[3];
+    let mut pos = 10usize;
+    if (flg & 0x04) != 0 {
+        let xlen = u16::from_le_bytes([*gz.get(pos).ok_or(())?, *gz.get(pos + 1).ok_or(())?]) as usize;
+        pos = pos.checked_add(2 + xlen).ok_or(())?;
+    }
+    for flag in [0x08u8, 0x10u8] {
+        if (flg & flag) != 0 {
+            let rel = gz.get(pos..).ok_or(())?.iter().position(|&b| b == 0).ok_or(())?;
+            pos = pos.checked_add(rel + 1).ok_or(())?;
+        }
+    }
+    if (flg & 0x02) != 0 {
+        pos = pos.checked_add(2).ok_or(())?;
+    }
+    if pos + 8 > gz.len() {
+        return Err(());
+    }
+    inflate_deflate_bounded(&gz[pos..gz.len() - 8])
+}
+
 fn inflate_zlib_bounded(zlib: &[u8]) -> Result<Vec<u8>, ()> {
     if zlib.len() < 6 {
         return Err(());
@@ -4312,6 +4552,10 @@ fn inflate_zlib_bounded(zlib: &[u8]) -> Result<Vec<u8>, ()> {
     }
     let header_len = if (flg & 0x20) != 0 { 6 } else { 2 };
     let payload = zlib.get(header_len..zlib.len() - 4).ok_or(())?;
+    inflate_deflate_bounded(payload)
+}
+
+fn inflate_deflate_bounded(payload: &[u8]) -> Result<Vec<u8>, ()> {
     let mut reader = BitReader::new(payload);
     let mut out = Vec::new();
     loop {
@@ -4486,6 +4730,8 @@ fn collect_dist_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<
     Ok(())
 }
 
+const MAX_DIST_FILE_BYTES: usize = 256 * 1024 * 1024;
+
 fn scan_dist_path_and_file(dist_dir: &Path, rel: &str, stats: &mut DistScanStats, hits: &mut Vec<BrandHit>) -> Result<(), String> {
     if rel.starts_with(AUDIT_PREFIX)
         || rel.contains("/docs/audit/")
@@ -4499,22 +4745,47 @@ fn scan_dist_path_and_file(dist_dir: &Path, rel: &str, stats: &mut DistScanStats
         return Ok(());
     }
     collect_line_words(rel, 1, rel, SUITE_BRANDS, PrismPolicy::Strict, hits);
+    collect_line_words(rel, 1, rel, &[ADAPTED_UPSTREAM_BRAND], PrismPolicy::Strict, hits);
     collect_line_words(rel, 1, rel, BRANDS, PrismPolicy::Strict, hits);
     collect_line_words(rel, 1, rel, PRE_RENAME_ASSET_BRANDS, PrismPolicy::Strict, hits);
-    let bytes = std::fs::read(dist_dir.join(rel)).map_err(|e| format!("read dist file {rel}: {e}"))?;
+    let bytes = curvebook_platform::fs::read_regular_file_bytes(&dist_dir.join(rel), MAX_DIST_FILE_BYTES)
+        .map_err(|e| format!("read dist file {rel}: {e}"))?;
     scan_dist_bytes(rel, &bytes, 0, stats, hits)
+}
+
+fn is_native_binary_blob(display_path: &str, bytes: &[u8]) -> bool {
+    let ext = Path::new(display_path).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+    if matches!(ext.as_str(), "exe" | "dll" | "so" | "dylib" | "wasm" | "deb" | "rpm" | "dmg" | "msi" | "appimage" | "zsync" | "a" | "lib") {
+        return true;
+    }
+    bytes.starts_with(b"\x7FELF")
+        || bytes.starts_with(b"\x00asm")
+        || bytes.starts_with(b"MZ")
+        || bytes.starts_with(b"!<arch>\n")
+        || bytes.starts_with(b"\xED\xAB\xEE\xDB")
+        || bytes.starts_with(b"\xFE\xED\xFA\xCE")
+        || bytes.starts_with(b"\xFE\xED\xFA\xCF")
+        || bytes.starts_with(b"\xCE\xFA\xED\xFE")
+        || bytes.starts_with(b"\xCF\xFA\xED\xFE")
+        || bytes.starts_with(b"\xCA\xFE\xBA\xBE")
+        || bytes.starts_with(b"\xBE\xBA\xFE\xCA")
 }
 
 fn scan_dist_bytes(display_path: &str, bytes: &[u8], depth: usize, stats: &mut DistScanStats, hits: &mut Vec<BrandHit>) -> Result<(), String> {
     let ext = Path::new(display_path).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+    let lower_path = display_path.to_ascii_lowercase();
     let is_zip = bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06");
-    if is_zip && depth < 2 {
+    if is_zip {
+        if depth >= 2 {
+            return Err(format!("{display_path}: nested archive depth exceeded (max depth 2)"));
+        }
         let zip =
             ZipArchive::from_bytes_with_limits(bytes, ZipLimits::default()).map_err(|e| format!("cannot inspect archive `{display_path}`: {e}"))?;
         for (name, entry_bytes) in zip.iter() {
             stats.archive_entries += 1;
             let entry_path = format!("{display_path}!{name}");
             collect_line_words(&entry_path, 1, name, SUITE_BRANDS, PrismPolicy::Strict, hits);
+            collect_line_words(&entry_path, 1, name, &[ADAPTED_UPSTREAM_BRAND], PrismPolicy::Strict, hits);
             collect_line_words(&entry_path, 1, name, BRANDS, PrismPolicy::Strict, hits);
             collect_line_words(&entry_path, 1, name, PRE_RENAME_ASSET_BRANDS, PrismPolicy::Strict, hits);
             scan_dist_bytes(&entry_path, entry_bytes, depth + 1, stats, hits)?;
@@ -4537,8 +4808,25 @@ fn scan_dist_bytes(display_path: &str, bytes: &[u8], depth: usize, stats: &mut D
         hits.extend(check_pdf_metadata(display_path, bytes));
         return Ok(());
     }
-    let Ok(DecodedFile::Text(text)) = decode_text_file(display_path, bytes) else {
+    if ext == "svgz" || (bytes.starts_with(&[0x1F, 0x8B]) && is_binary_asset_ext(display_path)) {
+        let raw = inflate_gzip_bounded(bytes).map_err(|()| format!("{display_path}: corrupt or oversized .svgz gzip payload"))?;
+        let text = match decode_text_file(display_path, &raw)? {
+            DecodedFile::Text(s) => s,
+            DecodedFile::BinaryAsset => return Err(format!("{display_path}: undecodable .svgz SVG text")),
+        };
+        scan_svg(display_path, &text, hits);
+        hits.extend(check_svg_metadata(display_path, &text));
         return Ok(());
+    }
+    let text = match decode_text_file(display_path, bytes) {
+        Ok(DecodedFile::Text(s)) => s,
+        Ok(DecodedFile::BinaryAsset) => return Ok(()),
+        Err(err) => {
+            if is_native_binary_blob(display_path, bytes) {
+                return Ok(());
+            }
+            return Err(err);
+        }
     };
     if ext == "json" {
         hits.extend(check_manifest_metadata(display_path, &text));
@@ -4548,11 +4836,11 @@ fn scan_dist_bytes(display_path: &str, bytes: &[u8], depth: usize, stats: &mut D
     } else if matches!(ext.as_str(), "html" | "htm") {
         scan_html_file(display_path, &text, hits);
         hits.extend(check_html_metadata(display_path, &text));
-    } else if display_path.ends_with(".plist") || display_path.ends_with(".plist.in") {
+    } else if lower_path.ends_with(".plist") || lower_path.ends_with(".plist.in") {
         scan_plist(display_path, &text, hits);
     } else if is_mime_package_xml(display_path) {
         scan_mime_xml(display_path, &text, hits);
-    } else if display_path.ends_with(".desktop") {
+    } else if lower_path.ends_with(".desktop") {
         scan_desktop_entry(display_path, &text, hits);
     } else {
         scan_suite_lines_with_scope(display_path, &text, true, hits);
@@ -4562,7 +4850,7 @@ fn scan_dist_bytes(display_path: &str, bytes: &[u8], depth: usize, stats: &mut D
 }
 
 fn is_mime_package_xml(path: &str) -> bool {
-    let norm = path.replace('\\', "/");
+    let norm = path.replace('\\', "/").to_ascii_lowercase();
     norm.ends_with(".mime.xml") || (norm.ends_with(".xml") && (norm.starts_with("share/mime/packages/") || norm.contains("/share/mime/packages/")))
 }
 
@@ -4612,7 +4900,8 @@ pub fn check_docs_site_dir(dir: &Path) -> Result<Vec<BrandHit>, String> {
         collect_line_words(&display_path, 1, &rel, SUITE_BRANDS, PrismPolicy::Strict, &mut hits);
         collect_line_words(&display_path, 1, &rel, BRANDS, PrismPolicy::Strict, &mut hits);
         collect_line_words(&display_path, 1, &rel, PRE_RENAME_ASSET_BRANDS, PrismPolicy::Strict, &mut hits);
-        let bytes = std::fs::read(dir.join(&rel)).map_err(|e| format!("read docs-site file {rel}: {e}"))?;
+        let bytes = curvebook_platform::fs::read_regular_file_bytes(&dir.join(&rel), MAX_DIST_FILE_BYTES)
+            .map_err(|e| format!("read docs-site file {rel}: {e}"))?;
         scan_dist_bytes(&display_path, &bytes, 0, &mut stats, &mut hits)?;
     }
     hits.sort();
@@ -5707,5 +5996,78 @@ it: "Copia Statistica report",
         assert!(skip_path("./docs/history/audit"));
         assert!(!skip_path("docs/history/roadmap/r0.md"));
         assert!(!skip_path("docs/evidence/overview.md"));
+    }
+
+    #[test]
+    fn sec22_catches_rust_escapes_svg_comments_textpath_data_uris_pdf_case_and_dist_bypasses() {
+        let dir = temp_dir("sec22-brands");
+        std::fs::create_dir_all(dir.join("crates/core/src")).unwrap();
+        std::fs::create_dir_all(dir.join("assets/ui")).unwrap();
+        std::fs::create_dir_all(dir.join("packaging/macos")).unwrap();
+
+        std::fs::write(
+            dir.join("crates/core/src/esc.rs"),
+            "pub fn a() -> &'static str { \"\\x47raph\\u{0050}ad\" }\n\
+             pub fn b() -> &'static str { \"\\x61rtcraft\" }\n\
+             pub fn c() -> &'static str { \"\\x76ectorcraft\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("assets/ui/sneaky.svg"),
+            "<svg xmlns=\"http://www.w3.org/2000/svg\">\n\
+               <!-- OriginPro comment -->\n\
+               <g aria-label=\"Graph&#80;ad\"><textPath>Minitab</textPath></g>\n\
+               <image href=\"data:image/svg+xml;charset=utf-8;base64,PHN2Zz48dGl0bGU+U3lzdGF0PC90aXRsZT48L3N2Zz4=\"/>\n\
+             </svg>\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("packaging/macos/INFO.PLIST"), "<string>GraphPad</string>\n").unwrap();
+        std::fs::write(dir.join("ASSETS.md"), "| Asset | Author |\n|---|---|\n| `a` | Prism optical curve |\n").unwrap();
+
+        let repo_hits = scan_repo_checked(
+            &dir,
+            &[
+                String::from("crates/core/src/esc.rs"),
+                String::from("assets/ui/sneaky.svg"),
+                String::from("packaging/macos/INFO.PLIST"),
+                String::from("ASSETS.md"),
+            ],
+        )
+        .unwrap();
+        assert!(repo_hits.iter().any(|h| h.path.ends_with("esc.rs") && h.brand == "graphpad"), "{repo_hits:?}");
+        assert!(repo_hits.iter().any(|h| h.path.ends_with("esc.rs") && h.brand == "artcraft"), "{repo_hits:?}");
+        assert!(repo_hits.iter().any(|h| h.path.ends_with("esc.rs") && h.brand == "vectorcraft"), "{repo_hits:?}");
+        assert!(repo_hits.iter().any(|h| h.path.ends_with("sneaky.svg") && h.brand == "originpro"), "{repo_hits:?}");
+        assert!(repo_hits.iter().any(|h| h.path.ends_with("sneaky.svg") && h.brand == "graphpad"), "{repo_hits:?}");
+        assert!(repo_hits.iter().any(|h| h.path.ends_with("sneaky.svg") && h.brand == "minitab"), "{repo_hits:?}");
+        assert!(repo_hits.iter().any(|h| h.path.ends_with("sneaky.svg") && h.brand == "systat"), "{repo_hits:?}");
+        assert!(repo_hits.iter().any(|h| h.path.ends_with("INFO.PLIST") && h.brand == "graphpad"), "{repo_hits:?}");
+        assert!(repo_hits.iter().any(|h| h.path == "ASSETS.md" && h.brand == "prism"), "{repo_hits:?}");
+
+        let svg_meta = check_svg_metadata("meta.svg", "<svg><!-- SigmaPlot --><text><textPath>Graph&#80;ad</textPath></text></svg>");
+        assert!(svg_meta.iter().any(|h| h.brand == "sigmaplot"), "{svg_meta:?}");
+        assert!(svg_meta.iter().any(|h| h.brand == "graphpad"), "{svg_meta:?}");
+        for degenerate in ["<!--><g/>", "<!---><g/>", "<!----><g/>", "<!-->"] {
+            assert!(check_svg_metadata("degenerate.svg", degenerate).is_empty());
+            let mut hits = Vec::new();
+            super::scan_svg("degenerate.svg", degenerate, &mut hits);
+            assert!(hits.is_empty(), "degenerate SVG comment `{degenerate}` produced {hits:?}");
+        }
+
+        let dist_vc = dir.join("dist-vc");
+        std::fs::create_dir_all(&dist_vc).unwrap();
+        std::fs::write(dist_vc.join("curvebook"), b"\x7FELF\xFF\xFEclean_elf_stub").unwrap();
+        std::fs::write(dist_vc.join("notes.txt"), b"Powered by VectorCraft.\n").unwrap();
+        let vc_hits = super::scan_dist_artefacts(&dist_vc).unwrap();
+        assert!(vc_hits.iter().any(|h| h.brand == "vectorcraft"), "{vc_hits:?}");
+
+        let dist_bad = dir.join("dist-bad");
+        std::fs::create_dir_all(&dist_bad).unwrap();
+        std::fs::write(dist_bad.join("index.html"), b"\xFF\xFE\x00\xD8broken").unwrap();
+        assert!(super::scan_dist_artefacts(&dist_bad).is_ok());
+        std::fs::write(dist_bad.join("index.html"), b"\xFFbad-utf8").unwrap();
+        assert!(super::scan_dist_artefacts(&dist_bad).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -37,7 +37,11 @@ pub(in crate::dsl) fn tokenize(input: &str, line: usize) -> Result<Vec<Token>, F
                     i = save;
                 }
             }
-            let slice = &input[start..i];
+            let slice = input.get(start..i).ok_or_else(|| FitError::DslCompileError {
+                message: "Invalid numeric literal span".to_owned(),
+                line,
+                column: col,
+            })?;
             let num = slice.parse::<f64>().map_err(|_| FitError::DslCompileError {
                 message: format!("Invalid numeric literal `{slice}`"),
                 line,
@@ -51,7 +55,8 @@ pub(in crate::dsl) fn tokenize(input: &str, line: usize) -> Result<Vec<Token>, F
             while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                 i += 1;
             }
-            tokens.push(Token { kind: TokenKind::Ident, text: input[start..i].to_owned(), num: 0.0, line, col });
+            let ident = input.get(start..i).unwrap_or("");
+            tokens.push(Token { kind: TokenKind::Ident, text: ident.to_owned(), num: 0.0, line, col });
             continue;
         }
         let next = bytes.get(i + 1).copied().unwrap_or(0);
@@ -81,7 +86,8 @@ pub(in crate::dsl) fn tokenize(input: &str, line: usize) -> Result<Vec<Token>, F
                 return Err(FitError::DslCompileError { message: format!("Unexpected character `{}`", ch as char), line, column: col });
             }
         };
-        tokens.push(Token { kind, text: input[i..i + len].to_owned(), num: 0.0, line, col });
+        let text = input.get(i..i + len).unwrap_or("").to_owned();
+        tokens.push(Token { kind, text, num: 0.0, line, col });
         i += len;
     }
     Ok(tokens)

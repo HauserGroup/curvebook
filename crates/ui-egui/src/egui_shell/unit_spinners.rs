@@ -604,8 +604,9 @@ pub fn parse_scrub_text_input(raw: &str, default_unit: ScrubUnitKind, preset: &L
     for sfx in suffix_candidates {
         if let Some(prefix_len) = lower.strip_suffix(sfx).map(str::len)
             && let Some(unit) = ScrubUnitKind::parse_suffix(sfx)
+            && let Some(num_raw) = trimmed.get(..prefix_len)
         {
-            let num_part = trimmed[..prefix_len].trim();
+            let num_part = num_raw.trim();
             if let Some(val) = parse_localized_number_input(num_part, preset).filter(|v| v.is_finite()) {
                 return Some((val, Some(unit)));
             }

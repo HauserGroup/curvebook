@@ -19,7 +19,7 @@ use curvebook_ui_egui::dialogs_canvas::{ActiveDialog, ActiveInspector};
 use curvebook_ui_egui::interaction::{InlineEditorTarget, KeyModifiers, ViewportMetrics};
 use curvebook_ui_egui::menus::{TOOLBAR_BUTTONS, UI_COMMANDS, menu_bar_tooltips};
 use curvebook_ui_egui::theme::UiThemeMode;
-use curvebook_ui_egui::{CanvasPreviewFilter, UiApp, dispatch_gui_action};
+use curvebook_ui_egui::{CanvasPreviewFilter, StubPlatformClipboardAdapter, UiApp, dispatch_gui_action};
 use eframe::egui;
 use serde_json::{Value, json};
 
@@ -165,14 +165,15 @@ fn encode_base64(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
-        let b0 = usize::from(chunk[0]);
+        let b0 = usize::from(*chunk.first().unwrap_or(&0));
         let b1 = usize::from(*chunk.get(1).unwrap_or(&0));
         let b2 = usize::from(*chunk.get(2).unwrap_or(&0));
         let triple = (b0 << 16) | (b1 << 8) | b2;
-        out.push(char::from(TABLE[(triple >> 18) & 0x3F]));
-        out.push(char::from(TABLE[(triple >> 12) & 0x3F]));
-        out.push(if chunk.len() > 1 { char::from(TABLE[(triple >> 6) & 0x3F]) } else { '=' });
-        out.push(if chunk.len() > 2 { char::from(TABLE[triple & 0x3F]) } else { '=' });
+        let encode = |shift: usize| char::from(TABLE.get((triple >> shift) & 0x3F).copied().unwrap_or(b'A'));
+        out.push(encode(18));
+        out.push(encode(12));
+        out.push(if chunk.len() > 1 { encode(6) } else { '=' });
+        out.push(if chunk.len() > 2 { encode(0) } else { '=' });
     }
     out
 }
@@ -188,6 +189,8 @@ fn spawn_window_from_session(session: Session) -> Result<(DesktopHostRuntime, De
         theme_override: None,
         recovery_root: None,
         initial_viewport: metrics,
+        clipboard_adapter: Some(Arc::new(StubPlatformClipboardAdapter::new())),
+        ..DesktopHostConfig::default()
     });
     let wid = rt.open_window_with_session(session, metrics, false)?;
     Ok((rt, wid))
@@ -913,6 +916,8 @@ fn r10_23_drawn_file_menu_routes_open_save_save_as_and_exports_through_adapter()
         theme_override: None,
         recovery_root: None,
         initial_viewport: metrics,
+        clipboard_adapter: Some(Arc::new(StubPlatformClipboardAdapter::new())),
+        ..DesktopHostConfig::default()
     });
     rt.set_file_dialog_adapter(adapter.clone());
     let wid = rt.open_window(None, metrics)?;
@@ -1019,6 +1024,8 @@ fn r13_7_native_rfd_image_picker_inserts_png_on_graph_and_layout() -> Result<(),
         theme_override: None,
         recovery_root: None,
         initial_viewport: metrics,
+        clipboard_adapter: Some(Arc::new(StubPlatformClipboardAdapter::new())),
+        ..DesktopHostConfig::default()
     });
     rt.set_file_dialog_adapter(adapter.clone());
     let wid = rt.open_window(None, metrics)?;

@@ -4,6 +4,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
+use curvebook_platform::write_atomic;
+
 const SCHEMAS_DIR_REL: &str = "docs/schemas";
 
 /// Parse CLI flags for `cargo xtask schemas [--check]`.
@@ -47,14 +49,14 @@ pub fn run(root: &Path, check: bool) -> Result<(), String> {
     for (name, value) in &schemas {
         let rendered = render_schema_json(value)?;
         let out_path = dir.join(name);
-        fs::write(&out_path, rendered.as_bytes()).map_err(|err| format!("schemas: failed to write `{}`: {err}", out_path.display()))?;
+        write_atomic(&out_path, rendered.as_bytes()).map_err(|err| format!("schemas: failed to write `{}`: {err}", out_path.display()))?;
     }
     println!("schemas: wrote {} schema file(s) to {}", schemas.len(), dir.display());
     Ok(())
 }
 
 fn check_schemas(dir: &Path, schemas: &[(&'static str, serde_json::Value)]) -> Result<(), String> {
-    if !dir.is_dir() {
+    if !fs::symlink_metadata(dir).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_dir()) {
         return Err(format!("schemas: missing directory `{}`; run `cargo xtask schemas`", dir.display()));
     }
 

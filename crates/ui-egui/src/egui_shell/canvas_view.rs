@@ -1,6 +1,7 @@
 //! Native `egui` async `ChartScene` / `LayoutScene` viewport (`docs/planning/gui-layout-spec.md`
 //! §8.11A & §8.12, `R15.3`).
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, mpsc};
 
 use curvebook_chart::equation_box::resolve_model_equation_hit_bounds;
@@ -14,7 +15,7 @@ use curvebook_palette::{CanvasPreviewFilter, Rgba8};
 use curvebook_platform::sync::RwLock;
 use curvebook_render::{RasterImage, RenderTargetSpec, apply_canvas_preview_filter, render_scene};
 use curvebook_tools::GridCellCoord;
-use curvebook_tools::canvas::{PhysicalUnit, SnapGuide, SnapOrientation, SnapSource};
+use curvebook_tools::canvas::{MAX_ZOOM, MIN_ZOOM, PhysicalUnit, SnapGuide, SnapOrientation, SnapSource};
 use egui::{Color32, CornerRadius, FontId, Id, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::json;
 
@@ -87,6 +88,14 @@ pub struct CanvasSceneRenderSlot {
     pub layout_return_breadcrumb: Option<SheetId>,
 }
 
+/// Per-sheet persistent viewport pan & selection state (`FA-SEC16-10`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CanvasPerSheetViewportState {
+    pub pan_pt: [f32; 2],
+    pub selected_panel_index: Option<usize>,
+    pub selected_graph_annotation: Option<usize>,
+}
+
 /// Persistent `egui_shell` viewport state for `GraphSheet` and `LayoutSheet` scenes (`R15.3`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CanvasViewEguiState {
@@ -109,6 +118,14 @@ pub struct CanvasViewEguiState {
     pub graph_context_menu: Option<(SheetId, Option<usize>, Pos2, [f64; 2])>,
     /// Active move / corner-resize / rotation gesture on a graph or layout embedded object.
     pub image_gesture: Option<ImageTransformGestureState>,
+    /// Last rendered active canvas sheet and paper rect/scene dimensions (for accurate footer cursor coords).
+    pub last_active_paper_sheet_id: Option<SheetId>,
+    pub last_paper_rect_pt: Option<Rect>,
+    pub last_scene_size_pt: Option<[f64; 2]>,
+    /// Sheet whose pan & selection are currently materialized in `pan_pt` / `selected_*`.
+    pub active_viewport_sheet: Option<SheetId>,
+    /// Saved pan & selection state keyed per [`SheetId`].
+    pub sheet_viewports: BTreeMap<SheetId, CanvasPerSheetViewportState>,
 }
 
 /// Input bundle passed to [`render_canvas_view`] (keeping argument count within `<= 7`).
@@ -210,6 +227,19 @@ struct AsyncRasterWorkerHandle {
 }
 
 impl AsyncRasterWorkerHandle {
+    fn try_get(ctx: &egui::Context) -> Option<Self> {
+        let worker_id = Id::unique("egui_shell.canvas_async_worker");
+        ctx.data(|d| d.get_temp::<Self>(worker_id))
+    }
+
+    fn prune_deleted_sheets(&self, doc: &ProjectDocument) {
+        let exists = |id: &SheetId| doc.graph_sheet(id).is_some() || doc.layout_sheet(id).is_some();
+        if let Ok(mut guard) = self.owner.results.write_or_recover() {
+            guard.completed.retain(|((_, sid), _, _)| exists(sid));
+            guard.last_submitted.retain(|((_, sid), _)| exists(sid));
+        }
+    }
+
     fn get_or_spawn(ctx: &egui::Context) -> Option<Self> {
         let worker_id = Id::unique("egui_shell.canvas_async_worker");
         if let Some(existing) = ctx.data(|d| d.get_temp::<Self>(worker_id)) {
@@ -355,7 +385,6 @@ pub fn render_canvas_view(
 }
 
 /// Render a specific `GraphSheet` or `LayoutSheet` inside `ui` (`§8.11A` / `§8.12`).
-#[allow(clippy::too_many_arguments)]
 pub fn render_canvas_view_for_sheet(
     ui: &mut egui::Ui,
     app: &UiApp,
@@ -381,6 +410,11 @@ pub fn render_canvas_view_for_sheet(
     let ls_opt = doc.layout_sheet(target_id);
     if gs_opt.is_none() && ls_opt.is_none() {
         return report;
+    }
+
+    sync_canvas_sheet_viewport_state(state, doc, target_id);
+    if let Some(worker) = AsyncRasterWorkerHandle::try_get(ui.ctx()) {
+        worker.prune_deleted_sheets(doc);
     }
 
     // Clear stale layout drill-down breadcrumb when target layout no longer exists or user returned to layout.
@@ -452,7 +486,8 @@ pub fn render_canvas_view_for_sheet(
 
     // Reserve space below paper for KM Number-at-Risk alignment track when Survival graph enables it
     let km_reserve_h = if gs_opt.is_some_and(|g| should_show_km_track(g, doc)) { 64.0 } else { 0.0 };
-    let zoom = (app.canvas_dialogs.canvas.zoom as f32).clamp(0.1, 8.0);
+    #[allow(clippy::cast_possible_truncation)]
+    let zoom = (app.canvas_dialogs.canvas.zoom as f32).clamp(MIN_ZOOM as f32, MAX_ZOOM as f32);
     let fit_scale =
         ((mat_rect.width() - 28.0).max(40.0) / scene_w_pt).min((mat_rect.height() - 28.0 - km_reserve_h).max(40.0) / scene_h_pt).clamp(0.2, 4.0);
     let eff_scale = fit_scale * zoom;
@@ -462,6 +497,11 @@ pub fn render_canvas_view_for_sheet(
     let paper_center = mat_rect.center() + vec2(pan_x, pan_y - km_reserve_h * 0.4);
     let paper_rect = Rect::from_center_size(paper_center, paper_size);
     report.paper_rect_pt = Some(paper_rect);
+    if !ctx_in.is_secondary_split {
+        state.last_active_paper_sheet_id = Some(target_id.clone());
+        state.last_paper_rect_pt = Some(paper_rect);
+        state.last_scene_size_pt = Some([f64::from(scene_w_pt), f64::from(scene_h_pt)]);
+    }
 
     if let (Some(tr_r), Some(lr_r)) = (top_ruler_rect, left_ruler_rect) {
         render_canvas_rulers(
@@ -529,8 +569,44 @@ pub fn render_canvas_view_for_sheet(
         state.pan_pt[1] += resp.drag_delta().y;
     }
 
+    state.sheet_viewports.insert(
+        target_id.clone(),
+        CanvasPerSheetViewportState {
+            pan_pt: state.pan_pt,
+            selected_panel_index: state.selected_panel_index,
+            selected_graph_annotation: state.selected_graph_annotation,
+        },
+    );
+
     report.hover_readout = state.hover_readout.clone();
     report
+}
+
+fn sync_canvas_sheet_viewport_state(state: &mut CanvasViewEguiState, doc: &ProjectDocument, target_id: &SheetId) {
+    state.sheet_viewports.retain(|sid, _| doc.graph_sheet(sid).is_some() || doc.layout_sheet(sid).is_some());
+    if state.active_viewport_sheet.as_ref() == Some(target_id) {
+        return;
+    }
+    if let Some(prev_id) = state.active_viewport_sheet.as_ref() {
+        state.sheet_viewports.insert(
+            prev_id.clone(),
+            CanvasPerSheetViewportState {
+                pan_pt: state.pan_pt,
+                selected_panel_index: state.selected_panel_index,
+                selected_graph_annotation: state.selected_graph_annotation,
+            },
+        );
+    }
+    if let Some(saved) = state.sheet_viewports.get(target_id).cloned() {
+        state.pan_pt = saved.pan_pt;
+        state.selected_panel_index = saved.selected_panel_index;
+        state.selected_graph_annotation = saved.selected_graph_annotation;
+    } else if state.active_viewport_sheet.is_some() {
+        state.pan_pt = [0.0, 0.0];
+        state.selected_panel_index = None;
+        state.selected_graph_annotation = None;
+    }
+    state.active_viewport_sheet = Some(target_id.clone());
 }
 
 fn render_layout_breadcrumb_bar(
@@ -677,7 +753,10 @@ fn composite_async_scene_texture(ui: &egui::Ui, app: &UiApp, spec: CompositeScen
             }
         } else {
             state.slot.rendering_in_flight = true;
-            ui.ctx().request_repaint();
+            // Wake cleanly via `job.ctx_wake.request_repaint()` when the worker finishes, with a
+            // 16 ms fallback timer rather than zero-delay `request_repaint()` so headless drivers
+            // and tests do not spin 12+ settle passes per input event while async raster is busy.
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
         }
     }
 
@@ -1563,19 +1642,29 @@ fn render_layout_hud_overlays(
                 let raw_x = round_tenth_pt(drag.initial_bounds_pt.x + dx);
                 let raw_y = round_tenth_pt(drag.initial_bounds_pt.y + dy);
                 let cand = curvebook_chart::RectPt::new(raw_x, raw_y, drag.initial_bounds_pt.width, drag.initial_bounds_pt.height);
-                let (snapped, guides) = snap_panel_with_tenth_precision(app, ls, idx, cand, &plot_origins);
+                let (snapped, guides) = if super::trailing_studio::studio_snap_enabled(ui.ctx()) {
+                    snap_panel_with_tenth_precision(app, ls, idx, cand, &plot_origins)
+                } else {
+                    (cand, Vec::new())
+                };
                 drag.current_bounds_pt = DocRectPt::new(snapped.x, snapped.y, snapped.width, snapped.height);
                 state.active_snap_guides = guides;
-                state.last_snap_readout = Some(format!("Snap: X={:.1} pt, Y={:.1} pt (0.1 pt)", snapped.x, snapped.y));
+                state.last_snap_readout = if super::trailing_studio::studio_snap_enabled(ui.ctx()) {
+                    Some(format!("Snap: X={:.1} pt, Y={:.1} pt (0.1 pt)", snapped.x, snapped.y))
+                } else {
+                    None
+                };
             }
             if p_resp.drag_stopped()
                 && state.layout_drag.as_ref().is_some_and(|d| d.item_index == idx && !d.resizing_corner)
                 && let Some(drag) = state.layout_drag.take()
             {
-                let mut updated_items = ls.spec.items.clone();
-                if let Some(target_item) = updated_items.get_mut(idx) {
-                    set_layout_item_bounds_doc(target_item, drag.current_bounds_pt);
-                    intents.push_engine("layout.setSpec", json!({ "sheet_id": ls.id.as_str(), "spec": { "items": updated_items } }));
+                if drag.current_bounds_pt != drag.initial_bounds_pt {
+                    let mut updated_items = ls.spec.items.clone();
+                    if let Some(target_item) = updated_items.get_mut(idx) {
+                        set_layout_item_bounds_doc(target_item, drag.current_bounds_pt);
+                        intents.push_engine("layout.setSpec", json!({ "sheet_id": ls.id.as_str(), "spec": { "items": updated_items } }));
+                    }
                 }
                 state.active_snap_guides.clear();
             }
@@ -2186,7 +2275,7 @@ fn render_graph_context_menu(
                         Some("graph.insertImage"),
                         true,
                     ) {
-                        intents.push_engine("graph.insertImage", json!({}));
+                        intents.push_engine("graph.insertImage", json!({ "sheet_id": gs.id.as_str() }));
                         close_menu = true;
                     }
                     if let Some(ann_idx) = opt_ann_idx
@@ -2292,7 +2381,7 @@ fn append_layout_context_menu_extras(
         clicked = true;
     }
     if render_context_menu_item(ui, meta, "canvas.layout_ctx.insert_image", tr(locale, "r13.canvas.insert_image"), Some("layout.insertImage"), true) {
-        intents.push_engine("layout.insertImage", json!({}));
+        intents.push_engine("layout.insertImage", json!({ "sheet_id": ls.id.as_str() }));
         clicked = true;
     }
     if render_context_menu_item(ui, meta, "canvas.layout_ctx.toggle_grid", tr(locale, "r13.canvas.grid_overlay"), Some("ui.gridOverlay.toggle"), true)
@@ -2548,10 +2637,12 @@ fn render_layout_panel_resize_handle(
         && state.layout_drag.as_ref().is_some_and(|d| d.sheet_id == ls.id && d.item_index == sel_idx && d.resizing_corner)
         && let Some(drag) = state.layout_drag.take()
     {
-        let mut updated_items = ls.spec.items.clone();
-        if let Some(target_item) = updated_items.get_mut(sel_idx) {
-            set_layout_item_bounds_doc(target_item, drag.current_bounds_pt);
-            intents.push_engine("layout.setSpec", json!({ "sheet_id": ls.id.as_str(), "spec": { "items": updated_items } }));
+        if drag.current_bounds_pt != drag.initial_bounds_pt {
+            let mut updated_items = ls.spec.items.clone();
+            if let Some(target_item) = updated_items.get_mut(sel_idx) {
+                set_layout_item_bounds_doc(target_item, drag.current_bounds_pt);
+                intents.push_engine("layout.setSpec", json!({ "sheet_id": ls.id.as_str(), "spec": { "items": updated_items } }));
+            }
         }
         state.active_snap_guides.clear();
         state.last_snap_readout = None;

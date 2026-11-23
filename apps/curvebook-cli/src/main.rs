@@ -1,5 +1,6 @@
 //! Headless command-line runner and stdio MCP server entry point for CurveBook.
 #![forbid(unsafe_code)]
+#![deny(clippy::indexing_slicing)]
 
 mod cli_catalog;
 mod cmd_bench_perf;
@@ -35,52 +36,55 @@ fn wants_json_output(args: &[String]) -> bool {
 }
 
 fn wants_subcommand_help(args: &[String]) -> bool {
-    args.len() == 1 && matches!(args[0].as_str(), "-h" | "--help")
+    args.len() == 1 && matches!(args.first().map(String::as_str), Some("-h" | "--help"))
 }
 
 fn dispatch(args: &[String]) -> Result<(), CliError> {
-    cmd_convert::run_guarded_cli("cli.dispatch", || match args.first().map(String::as_str) {
-        None | Some("-h" | "--help") => {
-            print!("{}", cli_catalog::format_usage());
-            Ok(())
-        }
-        Some("help") => {
-            if let Some(sub) = args.get(1)
-                && let Some(help) = cli_catalog::format_subcommand_help(sub)
-            {
-                print!("{help}");
-                return Ok(());
-            }
-            print!("{}", cli_catalog::format_usage());
-            Ok(())
-        }
-        Some("-V" | "--version" | "version") => {
-            println!("curvebook-cli {}", env!("CARGO_PKG_VERSION"));
-            Ok(())
-        }
-        Some(sub @ ("info" | "run" | "batch" | "convert" | "export" | "bench" | "perf" | "mcp")) if wants_subcommand_help(&args[1..]) => {
-            if let Some(help) = cli_catalog::format_subcommand_help(sub) {
-                print!("{help}");
-            } else {
+    cmd_convert::run_guarded_cli("cli.dispatch", || {
+        let tail = args.get(1..).unwrap_or(&[]);
+        match args.first().map(String::as_str) {
+            None | Some("-h" | "--help") => {
                 print!("{}", cli_catalog::format_usage());
+                Ok(())
             }
-            Ok(())
-        }
-        Some("info") => cmd_info::run_info(&args[1..]),
-        Some("commands") => cmd_commands::run_commands(&args[1..]),
-        Some("run") => cmd_run_batch::run_script(&args[1..]),
-        Some("batch") => cmd_run_batch::run_batch(&args[1..]),
-        Some("convert") => cmd_convert::run_convert(&args[1..]),
-        Some("export") => cmd_convert::run_export(&args[1..]),
-        Some("bench") => cmd_bench_perf::run_bench(&args[1..]),
-        Some("perf") => cmd_bench_perf::run_perf(&args[1..]),
-        Some("mcp") => run_mcp(&args[1..]),
-        Some(other) => {
-            if let Some(spec) = curvebook_engine::cmd::registry().get(other) {
-                return cmd_commands::run_direct_command(spec, &args[1..]);
+            Some("help") => {
+                if let Some(sub) = args.get(1)
+                    && let Some(help) = cli_catalog::format_subcommand_help(sub)
+                {
+                    print!("{help}");
+                    return Ok(());
+                }
+                print!("{}", cli_catalog::format_usage());
+                Ok(())
             }
-            let usage = cli_catalog::format_usage();
-            Err(CliError::Usage(format!("unknown command `{other}`\n\n{usage}")))
+            Some("-V" | "--version" | "version") => {
+                println!("curvebook-cli {}", env!("CARGO_PKG_VERSION"));
+                Ok(())
+            }
+            Some(sub @ ("info" | "run" | "batch" | "convert" | "export" | "bench" | "perf" | "mcp")) if wants_subcommand_help(tail) => {
+                if let Some(help) = cli_catalog::format_subcommand_help(sub) {
+                    print!("{help}");
+                } else {
+                    print!("{}", cli_catalog::format_usage());
+                }
+                Ok(())
+            }
+            Some("info") => cmd_info::run_info(tail),
+            Some("commands") => cmd_commands::run_commands(tail),
+            Some("run") => cmd_run_batch::run_script(tail),
+            Some("batch") => cmd_run_batch::run_batch(tail),
+            Some("convert") => cmd_convert::run_convert(tail),
+            Some("export") => cmd_convert::run_export(tail),
+            Some("bench") => cmd_bench_perf::run_bench(tail),
+            Some("perf") => cmd_bench_perf::run_perf(tail),
+            Some("mcp") => run_mcp(tail),
+            Some(other) => {
+                if let Some(spec) = curvebook_engine::cmd::registry().get(other) {
+                    return cmd_commands::run_direct_command(spec, tail);
+                }
+                let usage = cli_catalog::format_usage();
+                Err(CliError::Usage(format!("unknown command `{other}`\n\n{usage}")))
+            }
         }
     })
 }
@@ -197,7 +201,9 @@ fn parse_mcp_args_with_env(args: &[String], env_lookup: &dyn Fn(&str) -> Option<
     let mut cfg = McpCliConfig::default();
     let mut idx = 0usize;
     while idx < args.len() {
-        let arg = args[idx].as_str();
+        let Some(arg) = args.get(idx).map(String::as_str) else {
+            break;
+        };
         if let Some(raw) = arg.strip_prefix("--control-port=") {
             cfg.control_port = Some(parse_control_port_value(raw)?);
         } else if arg == "--control-port" {

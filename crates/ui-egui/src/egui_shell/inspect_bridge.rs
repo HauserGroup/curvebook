@@ -95,6 +95,8 @@ pub enum HybridModalSurface {
     EguiPreferences,
     /// Native `egui` `Find & Replace` modal (`R15.4`).
     EguiFindReplace,
+    /// Native `egui` Navigator sheet delete confirmation modal (`FA-SEC16-04`).
+    EguiNavDeleteConfirm,
 }
 
 /// Shared metadata descriptor passed into [`finalize_egui_modal_response`].
@@ -224,6 +226,8 @@ impl HybridCoexistenceArbiter {
             HybridModalSurface::EguiImportWizard
         } else if views.transform_modals.open_kind.is_some() {
             HybridModalSurface::EguiTransformModal
+        } else if views.leading_dock.delete_confirm.is_some() {
+            HybridModalSurface::EguiNavDeleteConfirm
         } else {
             classify_active_dialog_surface(app)
         };
@@ -455,23 +459,33 @@ fn build_dialog_snapshot_from_meta(
     include_bounds: bool,
     baseline_dialog: Option<&UiDialogSnapshot>,
 ) -> Option<UiDialogSnapshot> {
+    let decision = HybridCoexistenceArbiter::evaluate(app, false);
     let dialog_entry = meta
         .find_by_widget_id("modal.dialog")
         .or_else(|| meta.find_by_widget_id("dialog.about"))
+        .or_else(|| meta.find_by_widget_id("palette.dialog"))
         .or_else(|| meta.entries.iter().find(|e| (e.widget_id.starts_with("dialog.") || e.widget_id.starts_with("modal.")) && e.role == "dialog"));
-    let has_shell_modal = dialog_entry.is_some() || app.grid.variables_dialog.open || app.grid.import_wizard.open;
+    let has_shell_modal = dialog_entry.is_some() || decision.modal_surface != HybridModalSurface::None;
     if app.canvas_dialogs.active_dialog == ActiveDialog::None && !has_shell_modal {
         return None;
     }
 
-    let dialog_kind = if app.canvas_dialogs.active_dialog != ActiveDialog::None {
-        active_dialog_slug(&app.canvas_dialogs.active_dialog)
-    } else if app.grid.variables_dialog.open {
-        String::from("manage_variables")
-    } else if app.grid.import_wizard.open {
-        String::from("import_paste_special")
-    } else {
-        dialog_entry.map(|e| e.widget_id.trim_start_matches("dialog.").to_owned()).unwrap_or_else(|| String::from("shell_modal"))
+    let dialog_kind = match decision.modal_surface {
+        HybridModalSurface::HostUnsavedClose => String::from("unsaved_changes"),
+        HybridModalSurface::EguiPreferences => String::from("preferences"),
+        HybridModalSurface::EguiFindReplace => String::from("find_replace"),
+        HybridModalSurface::EguiManageVariables => String::from("manage_variables"),
+        HybridModalSurface::EguiNavDeleteConfirm => String::from("nav_delete_confirm"),
+        HybridModalSurface::EguiCommandPalette => String::from("command_palette"),
+        _ if app.canvas_dialogs.active_dialog != ActiveDialog::None => active_dialog_slug(&app.canvas_dialogs.active_dialog),
+        HybridModalSurface::EguiImportWizard => String::from("import_paste_special"),
+        HybridModalSurface::EguiTransformModal => String::from("transform_modal"),
+        _ => dialog_entry
+            .map(|e| match e.widget_id.as_str() {
+                "palette.dialog" => String::from("command_palette"),
+                raw => raw.strip_prefix("dialog.").or_else(|| raw.strip_prefix("modal.")).unwrap_or(raw).to_owned(),
+            })
+            .unwrap_or_else(|| String::from("shell_modal")),
     };
 
     let title = dialog_entry
@@ -499,10 +513,15 @@ fn build_dialog_snapshot_from_meta(
     let mut buttons = Vec::new();
     for entry in &meta.entries {
         let wid = entry.widget_id.as_str();
-        if matches!(wid, "modal.backdrop" | "modal.dialog" | "dialog.about" | "modal.title") || entry.role == "dialog" {
+        if matches!(wid, "modal.backdrop" | "modal.dialog" | "dialog.about" | "palette.dialog" | "modal.title") || entry.role == "dialog" {
             continue;
         }
-        if !(entry.z_layer == ZLayer::ModalDialog || wid.starts_with("dialog.") || wid.starts_with("modal.") || wid.starts_with("edit.")) {
+        if !(entry.z_layer == ZLayer::ModalDialog
+            || wid.starts_with("dialog.")
+            || wid.starts_with("modal.")
+            || wid.starts_with("edit.")
+            || wid.starts_with("palette."))
+        {
             continue;
         }
         let node = widget_node_from_meta(entry, ak, meta.scale_factor, include_bounds);
@@ -520,6 +539,8 @@ fn build_dialog_snapshot_from_meta(
                     | "modal.create"
                     | "modal.restore"
                     | "modal.discard"
+                    | "nav.delete_confirm.cancel"
+                    | "nav.delete_confirm.confirm"
             )
         {
             buttons.push(node);
@@ -974,7 +995,6 @@ pub fn render_egui_shell_frame(
 
 /// Full native `egui` workspace/dialog frame entry point supporting optional host close modal
 /// arbitration from `CurveBookNativeApp` (`R15.5`).
-#[allow(clippy::too_many_arguments)]
 pub fn render_egui_shell_frame_with_host(
     ui: &mut egui::Ui,
     app: &UiApp,
@@ -1010,6 +1030,7 @@ pub fn render_egui_shell_frame_with_host(
         leading_width_override_pt: views.leading_width_pt,
         trailing_width_override_pt: views.trailing_width_pt,
         host_draws_menu_bar: app.host_draws_menu_bar,
+        is_rtl: crate::i18n::is_rtl_locale(&app.locale),
     });
     views.last_shell_layout = Some(layout);
 
@@ -1063,7 +1084,14 @@ pub fn render_egui_shell_frame_with_host(
         ui,
         app,
         &mut views.trailing_studio,
-        TrailingStudioContext { tokens: &tokens, layout, enabled, focused: app.nav.active_pane == ActiveWorkspacePane::Inspector },
+        TrailingStudioContext {
+            tokens: &tokens,
+            layout,
+            enabled,
+            focused: app.nav.active_pane == ActiveWorkspacePane::Inspector,
+            selected_panel_index: views.canvas_view.selected_panel_index,
+            selected_graph_annotation: views.canvas_view.selected_graph_annotation,
+        },
         meta,
         intents,
     );
@@ -1196,10 +1224,140 @@ pub fn render_egui_shell_frame_with_host(
             report.outside_click_captured = gr_rep.outside_click_captured;
             report.outside_wheel_captured = gr_rep.outside_wheel_captured;
         }
+        HybridModalSurface::EguiNavDeleteConfirm => {
+            let del_rep = crate::egui_shell::leading_dock::render_navigator_delete_confirm_modal(
+                &ctx,
+                &app.locale,
+                &mut views.leading_dock,
+                &tokens,
+                meta,
+                intents,
+            );
+            report.regions.dialog_rect_pt = del_rep.dialog_rect_pt;
+            report.outside_click_captured = del_rep.outside_click_captured;
+            report.outside_wheel_captured = del_rep.outside_wheel_captured;
+        }
         HybridModalSurface::None => {}
     }
 
     report
+}
+
+pub(crate) const fn map_egui_key_to_shortcut_name(key: Key) -> Option<&'static str> {
+    match key {
+        Key::A => Some("A"),
+        Key::B => Some("B"),
+        Key::C => Some("C"),
+        Key::D => Some("D"),
+        Key::E => Some("E"),
+        Key::F => Some("F"),
+        Key::G => Some("G"),
+        Key::H => Some("H"),
+        Key::I => Some("I"),
+        Key::J => Some("J"),
+        Key::K => Some("K"),
+        Key::L => Some("L"),
+        Key::M => Some("M"),
+        Key::N => Some("N"),
+        Key::O => Some("O"),
+        Key::P => Some("P"),
+        Key::Q => Some("Q"),
+        Key::R => Some("R"),
+        Key::S => Some("S"),
+        Key::T => Some("T"),
+        Key::U => Some("U"),
+        Key::V => Some("V"),
+        Key::W => Some("W"),
+        Key::X => Some("X"),
+        Key::Y => Some("Y"),
+        Key::Z => Some("Z"),
+        Key::Num0 => Some("0"),
+        Key::Num1 => Some("1"),
+        Key::Num2 => Some("2"),
+        Key::Num3 => Some("3"),
+        Key::Num4 => Some("4"),
+        Key::Num5 => Some("5"),
+        Key::Num6 => Some("6"),
+        Key::Num7 => Some("7"),
+        Key::Num8 => Some("8"),
+        Key::Num9 => Some("9"),
+        Key::F1 => Some("F1"),
+        Key::F2 => Some("F2"),
+        Key::F3 => Some("F3"),
+        Key::F4 => Some("F4"),
+        Key::F5 => Some("F5"),
+        Key::F6 => Some("F6"),
+        Key::F7 => Some("F7"),
+        Key::F8 => Some("F8"),
+        Key::F9 => Some("F9"),
+        Key::F10 => Some("F10"),
+        Key::F11 => Some("F11"),
+        Key::F12 => Some("F12"),
+        Key::Backslash => Some("\\"),
+        Key::Slash => Some("/"),
+        Key::Minus => Some("-"),
+        Key::Plus => Some("+"),
+        Key::Equals => Some("="),
+        Key::Comma => Some(","),
+        Key::Period => Some("."),
+        Key::Semicolon => Some(";"),
+        Key::Quote => Some("'"),
+        Key::OpenBracket => Some("["),
+        Key::CloseBracket => Some("]"),
+        _ => None,
+    }
+}
+
+const fn egui_mods_to_key_mods(m: Modifiers) -> KeyModifiers {
+    KeyModifiers { shift: m.shift, ctrl: m.ctrl, alt: m.alt, meta: m.mac_cmd || (m.command && !m.ctrl) }
+}
+
+pub(crate) fn has_registered_shortcut(app: &UiApp, on_result_sheet: bool, key: Key, mods: Modifiers) -> bool {
+    let Some(key_name) = map_egui_key_to_shortcut_name(key) else {
+        return false;
+    };
+    let km = egui_mods_to_key_mods(mods);
+    crate::interaction::build_shortcut_candidates(key_name, km)
+        .into_iter()
+        .any(|cand| app.shortcuts.handle_key_combo_for_context(&cand, on_result_sheet).is_some())
+}
+
+pub(crate) fn consume_matching_shortcut<F>(
+    ctx: &egui::Context,
+    app: &UiApp,
+    on_result_sheet: bool,
+    mut handles_command: F,
+) -> Option<crate::menus::ShortcutMatch>
+where
+    F: FnMut(&str) -> bool,
+{
+    ctx.input_mut(|i| {
+        let mut matched: Option<(usize, crate::menus::ShortcutMatch)> = None;
+        for (idx, ev) in i.events.iter().enumerate() {
+            if let egui::Event::Key { key, pressed: true, modifiers, .. } = ev
+                && let Some(key_name) = map_egui_key_to_shortcut_name(*key)
+            {
+                let km = egui_mods_to_key_mods(*modifiers);
+                for candidate in crate::interaction::build_shortcut_candidates(key_name, km) {
+                    if let Some(m) = app.shortcuts.handle_key_combo_for_context(&candidate, on_result_sheet)
+                        && handles_command(&m.command_id)
+                    {
+                        matched = Some((idx, m));
+                        break;
+                    }
+                }
+            }
+            if matched.is_some() {
+                break;
+            }
+        }
+        if let Some((idx, m)) = matched {
+            i.events.remove(idx);
+            Some(m)
+        } else {
+            None
+        }
+    })
 }
 
 fn handle_shell_global_shortcuts(
@@ -1210,41 +1368,70 @@ fn handle_shell_global_shortcuts(
     intents: &mut PendingUiIntents,
 ) {
     let egui_wants_kb = ctx.egui_wants_keyboard_input() || views.column_grid.inline_edit.is_some();
-    if HybridCoexistenceArbiter::allows_cmd_t_edit_params(app, decision, egui_wants_kb)
-        && ctx.input_mut(|i| {
-            i.consume_key(Modifiers::COMMAND, Key::T) || i.consume_key(Modifiers::CTRL, Key::T) || i.consume_key(Modifiers::MAC_CMD, Key::T)
-        })
-    {
-        intents.push_ui("ui.editParams.open", json!({}));
-    }
     if decision.modal_backdrop_active || egui_wants_kb {
         return;
     }
-    if ctx.input_mut(|i| {
-        i.consume_key(Modifiers::COMMAND, Key::K) || i.consume_key(Modifiers::CTRL, Key::K) || i.consume_key(Modifiers::MAC_CMD, Key::K)
+
+    let on_result_sheet = crate::interaction::resolve_result_sheet_for_shortcut(app, true).is_some();
+    let active_canvas_target = if !app.egui_views.launcher_open && !app.nav.welcome.open && !app.nav.gallery.open {
+        let doc = app.document();
+        doc.active_sheet_id.as_ref().filter(|id| doc.graph_sheet(id).is_some() || doc.layout_sheet(id).is_some()).cloned()
+    } else {
+        None
+    };
+
+    while let Some(m) = consume_matching_shortcut(ctx, app, on_result_sheet, |cmd| match cmd {
+        "ui.editParams.open" => on_result_sheet,
+        "ui.palette.open" | "edit.redo" | "edit.undo" | "ui.split.toggle" | "ui.pane.cycle" => true,
+        "edit.copy" => true,
+        "edit.paste" | "edit.pasteImage" | "table.paste" => active_canvas_target.is_some(),
+        _ => false,
     }) {
-        intents.push_set_palette_open(true);
-    }
-    let shift_cmd = Modifiers::COMMAND | Modifiers::SHIFT;
-    let shift_ctrl = Modifiers::CTRL | Modifiers::SHIFT;
-    let shift_mac = Modifiers::MAC_CMD | Modifiers::SHIFT;
-    if ctx.input_mut(|i| {
-        i.consume_key(shift_cmd, Key::Z)
-            || i.consume_key(shift_ctrl, Key::Z)
-            || i.consume_key(shift_mac, Key::Z)
-            || i.consume_key(Modifiers::COMMAND, Key::Y)
-            || i.consume_key(Modifiers::CTRL, Key::Y)
-            || i.consume_key(Modifiers::MAC_CMD, Key::Y)
-    }) {
-        if app.session().redo_depth() > 0 {
-            intents.push_engine("edit.redo", json!({}));
+        match m.command_id.as_str() {
+            "ui.editParams.open" => intents.push_ui("ui.editParams.open", json!({})),
+            "ui.palette.open" => intents.push_set_palette_open(true),
+            "edit.redo" => {
+                if app.session().redo_depth() > 0 {
+                    intents.push_engine("edit.redo", json!({}));
+                }
+            }
+            "edit.undo" => {
+                if app.session().undo_depth() > 0 {
+                    intents.push_engine("edit.undo", json!({}));
+                }
+            }
+            "edit.copy" => {
+                let dpi = ViewportMetrics::new(1.0, 1.0, f64::from(ctx.pixels_per_point())).dpi_for_base(144);
+                intents.push_workspace_copy(dpi);
+            }
+            "edit.paste" | "edit.pasteImage" | "table.paste" => {
+                if let Some(ref target_id) = active_canvas_target {
+                    intents.push_canvas_paste(target_id.clone(), None);
+                }
+            }
+            "ui.split.toggle" => intents.push_ui("ui.split.toggle", json!({})),
+            "ui.pane.cycle" => intents.push_ui("ui.pane.cycle", m.params),
+            _ => {}
         }
-    } else if ctx.input_mut(|i| {
-        i.consume_key(Modifiers::COMMAND, Key::Z) || i.consume_key(Modifiers::CTRL, Key::Z) || i.consume_key(Modifiers::MAC_CMD, Key::Z)
-    }) && app.session().undo_depth() > 0
-    {
-        intents.push_engine("edit.undo", json!({}));
     }
+
+    // Standard Windows/Linux Ctrl+Y / Cmd+Y Redo convenience fallback when `Cmd+Y` is not bound to
+    // another command and `edit.redo` remains on its default binding (`Cmd+Shift+Z`).
+    let redo_y_allowed = app.shortcuts.active_combo("edit.redo") == Some("Cmd+Shift+Z")
+        && !has_registered_shortcut(app, on_result_sheet, Key::Y, Modifiers::COMMAND)
+        && !has_registered_shortcut(app, on_result_sheet, Key::Y, Modifiers::CTRL);
+    if redo_y_allowed
+        && ctx.input_mut(|i| {
+            i.consume_key(Modifiers::COMMAND, Key::Y) || i.consume_key(Modifiers::CTRL, Key::Y) || i.consume_key(Modifiers::MAC_CMD, Key::Y)
+        })
+        && app.session().redo_depth() > 0
+    {
+        intents.push_engine("edit.redo", json!({}));
+    }
+
+    let copy_key_unbound = app.shortcuts.active_combo("edit.copy").is_none_or(|c| c == "Cmd+C")
+        && !has_registered_shortcut(app, on_result_sheet, Key::C, Modifiers::COMMAND)
+        && !has_registered_shortcut(app, on_result_sheet, Key::C, Modifiers::CTRL);
     let copy_triggered = ctx.input_mut(|i| {
         let mut hit = false;
         i.events.retain(|ev| {
@@ -1255,7 +1442,9 @@ fn handle_shell_global_shortcuts(
                 true
             }
         });
-        if i.consume_key(Modifiers::COMMAND, Key::C) || i.consume_key(Modifiers::CTRL, Key::C) || i.consume_key(Modifiers::MAC_CMD, Key::C) {
+        if copy_key_unbound
+            && (i.consume_key(Modifiers::COMMAND, Key::C) || i.consume_key(Modifiers::CTRL, Key::C) || i.consume_key(Modifiers::MAC_CMD, Key::C))
+        {
             hit = true;
         }
         hit
@@ -1264,13 +1453,11 @@ fn handle_shell_global_shortcuts(
         let dpi = ViewportMetrics::new(1.0, 1.0, f64::from(ctx.pixels_per_point())).dpi_for_base(144);
         intents.push_workspace_copy(dpi);
     }
-    let active_canvas_target = if !app.egui_views.launcher_open && !app.nav.welcome.open && !app.nav.gallery.open {
-        let doc = app.document();
-        doc.active_sheet_id.as_ref().filter(|id| doc.graph_sheet(id).is_some() || doc.layout_sheet(id).is_some()).cloned()
-    } else {
-        None
-    };
+
     if let Some(target_id) = active_canvas_target {
+        let paste_key_unbound = app.shortcuts.active_combo("table.paste") == Some("Cmd+V")
+            && !has_registered_shortcut(app, on_result_sheet, Key::V, Modifiers::COMMAND)
+            && !has_registered_shortcut(app, on_result_sheet, Key::V, Modifiers::CTRL);
         let paste_triggered = ctx.input_mut(|i| {
             let mut hit = false;
             i.events.retain(|ev| {
@@ -1281,7 +1468,9 @@ fn handle_shell_global_shortcuts(
                     true
                 }
             });
-            if i.consume_key(Modifiers::COMMAND, Key::V) || i.consume_key(Modifiers::CTRL, Key::V) || i.consume_key(Modifiers::MAC_CMD, Key::V) {
+            if paste_key_unbound
+                && (i.consume_key(Modifiers::COMMAND, Key::V) || i.consume_key(Modifiers::CTRL, Key::V) || i.consume_key(Modifiers::MAC_CMD, Key::V))
+            {
                 hit = true;
             }
             hit
@@ -1289,18 +1478,6 @@ fn handle_shell_global_shortcuts(
         if paste_triggered {
             intents.push_canvas_paste(target_id, None);
         }
-    }
-    if ctx.input_mut(|i| {
-        i.consume_key(Modifiers::COMMAND, Key::Backslash)
-            || i.consume_key(Modifiers::CTRL, Key::Backslash)
-            || i.consume_key(Modifiers::MAC_CMD, Key::Backslash)
-    }) {
-        intents.push_ui("ui.split.toggle", json!({}));
-    }
-    if ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::F6)) {
-        intents.push_ui("ui.pane.cycle", json!({ "reverse": true }));
-    } else if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F6)) {
-        intents.push_ui("ui.pane.cycle", json!({ "reverse": false }));
     }
 }
 

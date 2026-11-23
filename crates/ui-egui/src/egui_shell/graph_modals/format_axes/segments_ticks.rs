@@ -8,7 +8,7 @@ use crate::grid_view::parse_localized_number_input;
 use crate::i18n::{LocalePreset, tr};
 
 use super::super::helpers::{
-    ButtonEntry, GraphModalCtx, LengthSpinnerSpec, gtr, record_button, record_checkbox, record_input, record_label, render_length_spinner_pt,
+    ButtonEntry, GraphModalCtx, LengthSpinnerSpec, record_button, record_checkbox, record_input, record_label, render_length_spinner_pt,
 };
 use super::super::state::GraphModalEguiState;
 
@@ -27,21 +27,22 @@ pub(super) fn render_axis_segments_section(
     fa: &crate::dialogs_canvas::FormatAxesState,
 ) {
     let seg0 = fa.axis_draft.segments.first().cloned().unwrap_or_default();
-    let min_lbl = gtr(gctx.locale, "axes.min");
-    let max_lbl = gtr(gctx.locale, "axes.max");
+    let min_lbl = tr(gctx.locale, "axes.min");
+    let max_lbl = tr(gctx.locale, "axes.max");
+    let auto_lbl = tr(gctx.locale, "axes.auto");
     let mut bounds_edited = false;
 
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(gctx.body_w);
         ui.label(min_lbl);
-        let min_resp = ui.add(egui::TextEdit::singleline(&mut state.axis_min_draft).hint_text("Auto").desired_width(96.0));
+        let min_resp = ui.add(egui::TextEdit::singleline(&mut state.axis_min_draft).hint_text(auto_lbl).desired_width(96.0));
         record_input(ui, &min_resp, gctx.meta, "axes.seg.0.min", min_lbl, &state.axis_min_draft, true);
         if min_resp.changed() || min_resp.lost_focus() {
             bounds_edited = true;
         }
 
         ui.label(max_lbl);
-        let max_resp = ui.add(egui::TextEdit::singleline(&mut state.axis_max_draft).hint_text("Auto").desired_width(96.0));
+        let max_resp = ui.add(egui::TextEdit::singleline(&mut state.axis_max_draft).hint_text(auto_lbl).desired_width(96.0));
         record_input(ui, &max_resp, gctx.meta, "axes.seg.0.max", max_lbl, &state.axis_max_draft, true);
         if max_resp.changed() || max_resp.lost_focus() {
             bounds_edited = true;
@@ -53,7 +54,7 @@ pub(super) fn render_axis_segments_section(
             gctx.meta,
             ButtonEntry {
                 widget_id: "axes.seg.0.auto",
-                label: "Auto",
+                label: auto_lbl,
                 command_id: None,
                 selected: is_auto,
                 enabled: !is_auto,
@@ -112,7 +113,7 @@ pub(super) fn render_axis_segments_section(
             gctx.meta,
             ButtonEntry {
                 widget_id: "axes.segment.add",
-                label: "+ Add Break Segment",
+                label: tr(gctx.locale, "axes.add_segment"),
                 command_id: None,
                 selected: false,
                 enabled: fa.axis_draft.segments.len() < 3,
@@ -132,7 +133,7 @@ pub(super) fn render_axis_segments_section(
             gctx.meta,
             ButtonEntry {
                 widget_id: "axes.segment.remove",
-                label: "- Remove Segment",
+                label: tr(gctx.locale, "axes.remove_segment"),
                 command_id: None,
                 selected: false,
                 enabled: fa.axis_draft.segments.len() > 1,
@@ -185,7 +186,7 @@ pub(super) fn render_axis_segments_section(
             ui,
             LengthSpinnerSpec {
                 widget_id: "axes.gap_width_pt",
-                label: "Break Gap Width",
+                label: tr(gctx.locale, "axes.break_gap_width"),
                 value_pt: fa.axis_draft.gap_width_pt,
                 min_pt: 2.0,
                 max_pt: 48.0,
@@ -211,7 +212,7 @@ pub(super) fn render_axis_ticks_section(
     fa: &crate::dialogs_canvas::FormatAxesState,
     is_categorical: bool,
 ) {
-    ui.label(egui::RichText::new(gtr(gctx.locale, "axes.ticks.heading")).strong());
+    ui.label(egui::RichText::new(tr(gctx.locale, "axes.ticks.heading")).strong());
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(gctx.body_w);
         for (slug, lbl, fmt) in [
@@ -301,10 +302,15 @@ pub(super) fn render_axis_ticks_section(
     ui.add_space(4.0);
     render_minor_ticks_stepper_row(ui, state, gctx, fa);
 
+    if let Some(err) = &state.axis_ticks_error {
+        let err_resp = ui.add(egui::Label::new(egui::RichText::new(err).color(gctx.tokens.link_red)).wrap());
+        record_label(ui, &err_resp, gctx.meta, "axes.seg.0.ticks_error", err);
+    }
+
     ui.add_space(6.0);
     let tick_count = fa.axis_draft.additional_ticks.len();
     let thresh_count = fa.axis_draft.thresholds.len();
-    let add_btn_lbl = format!("{} ({} / {})", gtr(gctx.locale, "axes.add_tick.open"), tick_count, thresh_count);
+    let add_btn_lbl = format!("{} ({} / {})", tr(gctx.locale, "axes.add_tick.open"), tick_count, thresh_count);
     if record_button(
         ui,
         gctx.meta,
@@ -366,10 +372,6 @@ fn render_major_tick_interval_row(
             state.axis_ticks_error = Some(format!("Invalid major tick interval `{trimmed}` (must be > 0)"));
         }
     }
-    if let Some(err) = &state.axis_ticks_error {
-        let err_resp = ui.add(egui::Label::new(egui::RichText::new(err).color(gctx.tokens.link_red)).wrap());
-        record_label(ui, &err_resp, gctx.meta, "axes.seg.0.ticks_error", err);
-    }
 }
 
 fn push_minor_ticks_update(gctx: &mut GraphModalCtx<'_>, fa: &crate::dialogs_canvas::FormatAxesState, minor_ticks: u8) {
@@ -389,12 +391,12 @@ fn render_minor_ticks_stepper_row(
     gctx: &mut GraphModalCtx<'_>,
     fa: &crate::dialogs_canvas::FormatAxesState,
 ) {
-    let buf_id = egui::Id::unique(("axes.seg.0.minor_ticks_buf", fa.target_axis));
+    let buf_id = egui::Id::unique(("axes.seg.0.minor_ticks_buf", fa.target_axis, fa.open_generation));
     let (last_synced, mut buf) = ui
         .ctx()
         .data(|d| d.get_temp::<(u8, String)>(buf_id))
         .unwrap_or_else(|| (state.axis_minor_ticks_draft, state.axis_minor_ticks_draft.to_string()));
-    if last_synced != state.axis_minor_ticks_draft {
+    if last_synced != state.axis_minor_ticks_draft && state.axis_ticks_error.is_none() {
         buf = state.axis_minor_ticks_draft.to_string();
     }
 
@@ -418,6 +420,7 @@ fn render_minor_ticks_stepper_row(
         {
             state.axis_minor_ticks_draft = state.axis_minor_ticks_draft.saturating_sub(1);
             buf = state.axis_minor_ticks_draft.to_string();
+            state.axis_ticks_error = None;
             push_minor_ticks_update(gctx, fa, state.axis_minor_ticks_draft);
         }
 
@@ -425,22 +428,27 @@ fn render_minor_ticks_stepper_row(
         record_input(ui, &resp, gctx.meta, "axes.seg.0.minor_ticks_per_interval", "Minor Ticks per Interval", &buf, true);
         if resp.changed() {
             let trimmed = buf.trim();
-            if let Ok(parsed) = trimmed.parse::<u16>() {
-                let clamped = parsed.min(10) as u8;
-                state.axis_minor_ticks_draft = clamped;
-                if parsed > 10 {
-                    buf = clamped.to_string();
+            if trimmed.is_empty() {
+                state.axis_ticks_error = Some(String::from("Invalid minor ticks `` (enter integer 0..=10)"));
+            } else if let Ok(parsed) = trimmed.parse::<u16>() {
+                if parsed <= 10 {
+                    let v = parsed as u8;
+                    state.axis_minor_ticks_draft = v;
+                    state.axis_ticks_error = None;
+                    push_minor_ticks_update(gctx, fa, v);
+                } else {
+                    state.axis_ticks_error = Some(format!("Minor ticks `{trimmed}` exceeds maximum 10."));
                 }
-                push_minor_ticks_update(gctx, fa, clamped);
+            } else {
+                state.axis_ticks_error = Some(format!("Invalid minor ticks `{trimmed}` (must be an integer 0..=10)."));
             }
         } else if resp.lost_focus() {
             let trimmed = buf.trim();
             if trimmed.is_empty() {
                 state.axis_minor_ticks_draft = 0;
                 buf = String::from("0");
+                state.axis_ticks_error = None;
                 push_minor_ticks_update(gctx, fa, 0);
-            } else if trimmed.parse::<u16>().is_err() {
-                buf = state.axis_minor_ticks_draft.to_string();
             }
         }
 
@@ -461,6 +469,7 @@ fn render_minor_ticks_stepper_row(
         {
             state.axis_minor_ticks_draft = state.axis_minor_ticks_draft.saturating_add(1).min(10);
             buf = state.axis_minor_ticks_draft.to_string();
+            state.axis_ticks_error = None;
             push_minor_ticks_update(gctx, fa, state.axis_minor_ticks_draft);
         }
     });

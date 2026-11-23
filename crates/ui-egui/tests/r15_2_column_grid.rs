@@ -448,7 +448,7 @@ fn cjk_ime_14_beta_locales_themes_ellipsis_and_kittest_scrollbar_non_overlap() -
     for &locale in &BETA_LOCALE_CODES {
         for mode in UiThemeMode::ALL {
             let mut app = UiApp::from_session(Session::from_document(build_column_doc(8, 30, SubcolumnMode::Single)));
-            let _ = app.set_locale(locale);
+            assert_eq!(app.set_locale(locale), locale);
             app.set_theme_mode(mode);
             let mut ds_doc = app.document().clone();
             if let Some(ds) = ds_doc.data_sheet_mut(&SheetId::from("col-main"))
@@ -493,7 +493,7 @@ fn cjk_ime_14_beta_locales_themes_ellipsis_and_kittest_scrollbar_non_overlap() -
 
     // 2. CJK IME preedit + commit inside cell
     let mut ime_driver = build_column_driver(3, 6, SubcolumnMode::Single, 900.0, 560.0);
-    let _ = ime_driver.state_mut().app.set_locale("ja");
+    assert_eq!(ime_driver.state_mut().app.set_locale("ja"), "ja");
     let c00 = widget_center(&ime_driver, "grid.cell.0.0.0", true)?;
     ime_driver.click_at(c00)?;
     ime_driver.click_at(c00)?;

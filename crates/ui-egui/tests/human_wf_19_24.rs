@@ -9,8 +9,8 @@ use curvebook_chart::{PathCmd, ScenePrimitive, compile_graph};
 use curvebook_doc::{
     AnalysisKind, Cell, CellCoord, ClusterLinkage, ColumnDesignHint, ContingencyMethod, ContingencySpec, DataSheet, DiagnosticPlotKind, GlmFamily,
     GlmSpec, GraphAxisScale, GraphKind, GroupedArrangement, GroupedTable, MultipleRowTestsSpec, MultipleVariablesTable, MultivariateSpec,
-    OneWayAnovaSpec, ProjectDocument, ResultCell, ResultSheet, ResultTabKind, RocCiMethod, RocSpec, SheetId, SubcolumnMode, SurvivalAnalysisSpec,
-    TableArchetype, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableRole, XyTable,
+    OneWayAnovaSpec, ProjectDocument, ResultCell, ResultSheet, ResultStatus, ResultTabKind, RocCiMethod, RocSpec, SheetId, SubcolumnMode,
+    SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableRole, XyTable,
 };
 use curvebook_palette::Rgba8;
 use curvebook_testkit::wf_datasets;
@@ -846,6 +846,36 @@ fn wf23_human_stacked_superimposed_pcr_r10_and_chaining() -> TestRes {
     ensure(widget_enabled(&run, "analyze.pcr.outcome.2")?, "R10: non-predictor col 2 must be enabled as PCR outcome")?;
     run.click("analyze.pcr.outcome.2")?;
     run.commit_modal_ok()?;
+    {
+        let pcr_rs =
+            run.document().result_sheets.iter().rfind(|r| r.analysis.source_sheet_id == pcr_mv_id).ok_or("WF-23 missing created PCR ResultSheet")?;
+        ensure(matches!(pcr_rs.status, ResultStatus::UpToDate), "WF-23 PCR ResultSheet must be UpToDate")?;
+        ensure(
+            matches!(pcr_rs.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::Pca { pcr_outcome_column: Some(2), .. })),
+            format!("WF-23 expected PCR outcome col 2, got {:?}", pcr_rs.analysis.kind),
+        )?;
+        ensure(
+            pcr_rs.analysis.selected_data_sets == vec![0, 1],
+            format!("WF-23 expected predictors [0, 1], got {:?}", pcr_rs.analysis.selected_data_sets),
+        )?;
+        let r2 = scalar_val(pcr_rs, "PCR R squared")?;
+        ensure(r2.is_finite() && r2 > 0.99, format!("WF-23 expected PCR R squared > 0.99, got {r2}"))?;
+        let pred_n = scalar_val(pcr_rs, "PCR Predictor count")?;
+        ensure((pred_n - 2.0).abs() < 1e-9, format!("WF-23 expected 2 PCR predictors, got {pred_n}"))?;
+        let sum_tab = pcr_rs.tabs.iter().find(|t| t.id == "pcr-summary").ok_or("WF-23 missing pcr-summary tab")?;
+        ensure(
+            sum_tab.rows.first().and_then(|r| r.first()) == Some(&ResultCell::Text(String::from("Target"))),
+            format!("WF-23 pcr-summary outcome row mismatch: {:?}", sum_tab.rows.first()),
+        )?;
+        let coef_tab = pcr_rs.tabs.iter().find(|t| t.id == "pcr-predictors").ok_or("WF-23 missing pcr-predictors tab")?;
+        ensure(coef_tab.rows.len() >= 3, format!("WF-23 expected intercept + 2 predictor coefficients, got {}", coef_tab.rows.len()))?;
+        for (idx, row) in coef_tab.rows.iter().enumerate() {
+            ensure(
+                matches!(row.first(), Some(ResultCell::Number { value, .. }) if value.is_finite()),
+                format!("WF-23 predictor row {idx} missing finite Estimate: {row:?}"),
+            )?;
+        }
+    }
 
     // Stage 5 LiveEdit across Grouped bars and 2-hop chained XY -> Normalize -> LinearRegression.
     run.live_edit(LiveEditTarget::sheet_grid_cell(grp_id, 0, 0, 0, "22.0"), LiveEditExpectation::graph_svg_changed(grp_gs_id))?;
@@ -913,6 +943,21 @@ fn wf24_human_significance_brackets_stars_and_axes() -> TestRes {
     run.click("export.fmt.svg")?;
     run.commit_modal_ok()?;
     ensure(!matches!(run.active_dialog(), ActiveDialog::ExportFigure { .. }), "WF-24 ExportFigure must close after ok")?;
+    {
+        let svg_out = run.last_engine_outcome("graph.exportSvg").ok_or("WF-24 ExportFigure commit did not emit graph.exportSvg")?;
+        ensure(
+            svg_out.payload["sheet_id"].as_str() == Some(col_gs_id.as_str()),
+            format!("WF-24 ExportFigure sheet_id mismatch: {}", svg_out.payload),
+        )?;
+        let svg = svg_out.payload["svg"].as_str().ok_or("WF-24 ExportFigure missing SVG string payload")?;
+        let byte_len = svg_out.payload["byte_len"].as_u64().ok_or("WF-24 ExportFigure missing byte_len")?;
+        ensure(byte_len > 200 && svg.len() as u64 == byte_len, format!("WF-24 SVG byte_len={byte_len}, len={}", svg.len()))?;
+        ensure(
+            svg.contains("<svg") && svg.contains("</svg>") && (svg.contains("<path") || svg.contains("<rect") || svg.contains("<line")),
+            "WF-24 exported SVG missing root or vector drawing elements",
+        )?;
+        curvebook_svg::validate_svg_structure(svg).map_err(|e| format!("WF-24 exported SVG validation failed: {e}"))?;
+    }
 
     let ref_col = fx.to_data_sheet("ref-wf24-col").map_err(|e| e.to_string())?;
     let anova_kind = serde_json::to_value(AnalysisKind::OneWayAnova(OneWayAnovaSpec::default())).map_err(|e| e.to_string())?;

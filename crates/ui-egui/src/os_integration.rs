@@ -645,20 +645,24 @@ pub fn build_cf_html_payload(html_fragment: &str) -> String {
     const HEADER_TEMPLATE_LEN: usize = 105;
 
     let (body_html, frag_start_rel, frag_end_rel) = if let Some(s) = html_fragment.find(START_MARK)
-        && let Some(e_rel) = html_fragment[s + START_MARK.len()..].find(END_MARK)
+        && let Some(after_start) = html_fragment.get(s + START_MARK.len()..)
+        && let Some(e_rel) = after_start.find(END_MARK)
     {
         let fs = s + START_MARK.len();
         (html_fragment.to_owned(), fs, fs + e_rel)
     } else {
         let lower = html_fragment.to_ascii_lowercase();
         if let Some(body_open) = lower.find("<body")
-            && let Some(gt_rel) = lower[body_open..].find('>')
+            && let Some(after_body) = lower.get(body_open..)
+            && let Some(gt_rel) = after_body.find('>')
             && let Some(body_close) = lower.rfind("</body>")
             && body_open + gt_rel < body_close
+            && let Some(before) = html_fragment.get(..body_open + gt_rel + 1)
+            && let Some(inner) = html_fragment.get(body_open + gt_rel + 1..body_close)
+            && let Some(after) = html_fragment.get(body_close..)
         {
             let insert_start = body_open + gt_rel + 1;
-            let inner = &html_fragment[insert_start..body_close];
-            let wrapped = format!("{}{}{START_MARK}{inner}{END_MARK}{}", &html_fragment[..insert_start], "", &html_fragment[body_close..]);
+            let wrapped = format!("{before}{START_MARK}{inner}{END_MARK}{after}");
             let fs = insert_start + START_MARK.len();
             let fe = fs + inner.len();
             (wrapped, fs, fe)
@@ -732,7 +736,7 @@ fn cleanup_stale_stage_dirs(base: &std::path::Path, prefix: &str) {
             && let Ok(age) = now.duration_since(modified)
             && age.as_secs() >= STALE_PREVIEW_MAX_AGE_SECS
         {
-            let _ = std::fs::remove_dir_all(&path);
+            let _ = curvebook_platform::fs::remove_dir_all_if_not_symlink(&path);
         }
     }
 }
@@ -799,7 +803,7 @@ impl StageDirGuard {
 impl Drop for StageDirGuard {
     fn drop(&mut self) {
         if !self.disarmed {
-            let _ = std::fs::remove_dir_all(&self.path);
+            let _ = curvebook_platform::fs::remove_dir_all_if_not_symlink(&self.path);
         }
     }
 }
@@ -1959,9 +1963,10 @@ mod tests {
         let end_frag = parse_offset("EndFragment:");
 
         assert_eq!(end_html, payload.len());
-        assert!(payload[start_html..end_html].starts_with("<!DOCTYPE html>"));
-        assert!(payload[start_html..end_html].ends_with("</html>"));
-        assert_eq!(&payload[start_frag..end_frag], frag);
+        let html_slice = payload.get(start_html..end_html).expect("valid StartHTML..EndHTML");
+        assert!(html_slice.starts_with("<!DOCTYPE html>"));
+        assert!(html_slice.ends_with("</html>"));
+        assert_eq!(payload.get(start_frag..end_frag), Some(frag));
 
         let wrapped_doc = "<!DOCTYPE html><html><head></head><body><div>α</div></body></html>";
         let wrapped_cf = super::build_cf_html_payload(wrapped_doc);
@@ -1975,7 +1980,7 @@ mod tests {
             .find(|l| l.starts_with("EndFragment:"))
             .and_then(|l| l.trim_start_matches("EndFragment:").trim().parse::<usize>().ok())
             .expect("EndFragment");
-        assert_eq!(&wrapped_cf[ws..we], "<div>α</div>");
+        assert_eq!(wrapped_cf.get(ws..we), Some("<div>α</div>"));
     }
 
     #[test]

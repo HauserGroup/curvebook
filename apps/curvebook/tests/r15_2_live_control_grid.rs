@@ -53,11 +53,11 @@ impl Read for ChannelPipeReader {
             }
         }
         let mut n = 0usize;
-        while n < out.len() {
+        for dst in out.iter_mut() {
             let Some(b) = self.buf.pop_front() else {
                 break;
             };
-            out[n] = b;
+            *dst = b;
             n += 1;
         }
         Ok(n)
@@ -142,20 +142,26 @@ fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
 }
 
 fn png_dimensions(png: &[u8]) -> Option<(u32, u32)> {
-    if png.len() < 24 || !png.starts_with(b"\x89PNG\r\n\x1a\n") || &png[12..16] != b"IHDR" {
+    if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
         return None;
     }
-    let w = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
-    let h = u32::from_be_bytes([png[20], png[21], png[22], png[23]]);
+    let chunk = png.get(12..24)?;
+    let (ihdr, dims) = chunk.split_at_checked(4)?;
+    if ihdr != b"IHDR" {
+        return None;
+    }
+    let (w_bytes, h_bytes) = dims.split_at_checked(4)?;
+    let w = u32::from_be_bytes(w_bytes.try_into().ok()?);
+    let h = u32::from_be_bytes(h_bytes.try_into().ok()?);
     Some((w, h))
 }
 
 fn find_grid_cell<'a>(inspect_resp: &'a Value, widget_id: &str) -> Option<&'a Value> {
-    inspect_resp["result"]["grid_cells"].as_array()?.iter().find(|n| n["widget_id"] == widget_id)
+    inspect_resp.pointer("/result/grid_cells")?.as_array()?.iter().find(|n| n.get("widget_id").and_then(Value::as_str) == Some(widget_id))
 }
 
 fn bounds_rect(node: &Value) -> Option<[f64; 4]> {
-    let arr = node["bounds"].as_array()?;
+    let arr = node.get("bounds")?.as_array()?;
     Some([arr.first()?.as_f64()?, arr.get(1)?.as_f64()?, arr.get(2)?.as_f64()?, arr.get(3)?.as_f64()?])
 }
 
@@ -176,7 +182,7 @@ fn scroll_to_target_cell(client: &mut InteractiveControlClient, top_bounds: [f64
                 "metrics": { "logical_width": 1280.0, "logical_height": 800.0, "scale_factor": 1.0 }
             }
         }))?;
-        assert_eq!(scr["ok"], json!(true), "scroll step {step} failed: {scr}");
+        assert_eq!(scr.get("ok"), Some(&json!(true)), "scroll step {step} failed: {scr}");
 
         let mid_inspect = client.send(&json!({
             "id": format!("mid-inspect-{step}"),
@@ -184,11 +190,12 @@ fn scroll_to_target_cell(client: &mut InteractiveControlClient, top_bounds: [f64
             "params": { "scope": "grid", "include_bounds": true, "metrics": { "logical_width": 1280.0, "logical_height": 800.0, "scale_factor": 1.0 } }
         }))?;
         if step == 0 || step == 15 {
-            let vis_ids: Vec<&str> = mid_inspect["result"]["grid_cells"]
-                .as_array()
+            let vis_ids: Vec<&str> = mid_inspect
+                .pointer("/result/grid_cells")
+                .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
-                .filter_map(|c| c["widget_id"].as_str())
+                .filter_map(|c| c.get("widget_id").and_then(Value::as_str))
                 .filter(|id| id.starts_with("grid.cell."))
                 .take(6)
                 .collect();
@@ -201,7 +208,7 @@ fn scroll_to_target_cell(client: &mut InteractiveControlClient, top_bounds: [f64
             && b[3] > 0.0
             && b[1] + b[3] <= 800.0
         {
-            assert_eq!(cell["value"]["text"], json!("987.65"), "unexpected text for revealed cell: {cell}");
+            assert_eq!(cell.pointer("/value/text"), Some(&json!("987.65")), "unexpected text for revealed cell: {cell}");
             return Ok(b);
         }
     }
@@ -227,11 +234,11 @@ fn verify_resize_geometry_stamp(
         "method": "ui.screenshot",
         "params": { "target": "full_window" }
     }))?;
-    assert_eq!(resized_shot["ok"], json!(true), "resized screenshot failed: {resized_shot}");
-    assert_eq!(resized_shot["result"]["width_px"], json!(1680));
-    assert_eq!(resized_shot["result"]["height_px"], json!(1050));
-    assert_eq!(resized_shot["result"]["dpi"], json!(144));
-    let r_png = decode_base64(resized_shot["result"]["data_base64"].as_str().ok_or("missing resized data_base64")?)?;
+    assert_eq!(resized_shot.get("ok"), Some(&json!(true)), "resized screenshot failed: {resized_shot}");
+    assert_eq!(resized_shot.pointer("/result/width_px"), Some(&json!(1680)));
+    assert_eq!(resized_shot.pointer("/result/height_px"), Some(&json!(1050)));
+    assert_eq!(resized_shot.pointer("/result/dpi"), Some(&json!(144)));
+    let r_png = decode_base64(resized_shot.pointer("/result/data_base64").and_then(Value::as_str).ok_or("missing resized data_base64")?)?;
     assert_eq!(png_dimensions(&r_png), Some((1680, 1050)));
 
     let resized_inspect = client.send(&json!({
@@ -239,7 +246,7 @@ fn verify_resize_geometry_stamp(
         "method": "ui.inspect",
         "params": { "scope": "grid", "include_bounds": true }
     }))?;
-    assert_eq!(resized_inspect["ok"], json!(true), "resized inspect failed: {resized_inspect}");
+    assert_eq!(resized_inspect.get("ok"), Some(&json!(true)), "resized inspect failed: {resized_inspect}");
     let post_resize_cell =
         find_grid_cell(&resized_inspect, "grid.cell.45.1.0").ok_or("expected grid.cell.45.1.0 to remain inspectable after 1.5x DPI resize")?;
     let resized_bounds = bounds_rect(post_resize_cell).ok_or("missing resized cell bounds")?;
@@ -260,6 +267,7 @@ fn run_live_control_column_scroll_inspect_click_screenshot() -> Result<(), Box<d
         theme_override: None,
         recovery_root: None,
         initial_viewport: initial,
+        ..DesktopHostConfig::default()
     });
     let win_id = rt.open_window(None, initial)?;
 
@@ -287,14 +295,14 @@ fn run_live_control_column_scroll_inspect_click_screenshot() -> Result<(), Box<d
             InteractiveControlClient { reader: BufReader::new(ChannelPipeReader::new(s2c_rx)), writer: ChannelPipeWriter { tx: c2s_tx } };
 
         let r_auth = client.send(&json!({ "id": "0", "method": "auth", "params": { "token": token } }))?;
-        assert_eq!(r_auth["ok"], json!(true));
+        assert_eq!(r_auth.get("ok"), Some(&json!(true)));
 
         let r_create = client.send(&json!({
             "id": "1",
             "method": "sheet.createData",
             "params": { "sheet_id": "col-ctrl", "title": "Control Scroll Column", "kind": "column", "cols": 4, "rows": 80, "auto_graph": false }
         }))?;
-        assert_eq!(r_create["ok"], json!(true), "createData failed: {r_create}");
+        assert_eq!(r_create.get("ok"), Some(&json!(true)), "createData failed: {r_create}");
 
         for (r, c, val) in [(0usize, 0usize, 10.5_f64), (45, 1, 987.65)] {
             let set_resp = client.send(&json!({
@@ -302,7 +310,7 @@ fn run_live_control_column_scroll_inspect_click_screenshot() -> Result<(), Box<d
                 "method": "table.setCell",
                 "params": { "sheet_id": "col-ctrl", "row": r, "col": c, "value": val }
             }))?;
-            assert_eq!(set_resp["ok"], json!(true), "setCell failed: {set_resp}");
+            assert_eq!(set_resp.get("ok"), Some(&json!(true)), "setCell failed: {set_resp}");
         }
 
         // 1. Pre-scroll inspect: cell (0,0,0) visible, row 45 off-screen (no visible bounds).
@@ -311,7 +319,7 @@ fn run_live_control_column_scroll_inspect_click_screenshot() -> Result<(), Box<d
             "method": "ui.inspect",
             "params": { "scope": "grid", "include_bounds": true, "metrics": { "logical_width": 1280.0, "logical_height": 800.0, "scale_factor": 1.0 } }
         }))?;
-        assert_eq!(pre_inspect["ok"], json!(true));
+        assert_eq!(pre_inspect.get("ok"), Some(&json!(true)));
         let top_cell = find_grid_cell(&pre_inspect, "grid.cell.0.0.0").ok_or("missing grid.cell.0.0.0 before scroll")?;
         let top_bounds = bounds_rect(top_cell).ok_or("missing bounds for grid.cell.0.0.0")?;
         assert!(top_bounds[2] > 0.0 && top_bounds[3] > 0.0);
@@ -323,8 +331,8 @@ fn run_live_control_column_scroll_inspect_click_screenshot() -> Result<(), Box<d
             "method": "ui.screenshot",
             "params": { "target": "full_window", "width_px": 1280, "height_px": 800, "dpi": 96 }
         }))?;
-        assert_eq!(pre_shot["ok"], json!(true));
-        let pre_png = decode_base64(pre_shot["result"]["data_base64"].as_str().ok_or("missing pre data_base64")?)?;
+        assert_eq!(pre_shot.get("ok"), Some(&json!(true)));
+        let pre_png = decode_base64(pre_shot.pointer("/result/data_base64").and_then(Value::as_str).ok_or("missing pre data_base64")?)?;
         assert_eq!(png_dimensions(&pre_png), Some((1280, 800)));
 
         // 2. Scroll the Column grid downward until row 45 is revealed on-screen (`egui` uses delta_y < 0).
@@ -343,17 +351,17 @@ fn run_live_control_column_scroll_inspect_click_screenshot() -> Result<(), Box<d
                 "metrics": { "logical_width": 1280.0, "logical_height": 800.0, "scale_factor": 1.0 }
             }
         }))?;
-        assert_eq!(click_resp["ok"], json!(true), "click failed: {click_resp}");
+        assert_eq!(click_resp.get("ok"), Some(&json!(true)), "click failed: {click_resp}");
 
         let post_inspect = client.send(&json!({
             "id": "5",
             "method": "ui.inspect",
             "params": { "scope": "grid", "include_bounds": true, "metrics": { "logical_width": 1280.0, "logical_height": 800.0, "scale_factor": 1.0 } }
         }))?;
-        assert_eq!(post_inspect["ok"], json!(true));
-        let active = &post_inspect["result"]["grid_selection"]["active_cell"];
-        assert_eq!(active["row"], json!(45), "expected active row 45 after clicking cell: {post_inspect}");
-        assert_eq!(active["col"], json!(1), "expected active col 1 after clicking cell: {post_inspect}");
+        assert_eq!(post_inspect.get("ok"), Some(&json!(true)));
+        let active = post_inspect.pointer("/result/grid_selection/active_cell").ok_or("missing active_cell")?;
+        assert_eq!(active.get("row"), Some(&json!(45)), "expected active row 45 after clicking cell: {post_inspect}");
+        assert_eq!(active.get("col"), Some(&json!(1)), "expected active col 1 after clicking cell: {post_inspect}");
 
         // 4. Verify updated ui.screenshot reflects scrolled + selected pixels.
         let post_shot = client.send(&json!({
@@ -361,8 +369,8 @@ fn run_live_control_column_scroll_inspect_click_screenshot() -> Result<(), Box<d
             "method": "ui.screenshot",
             "params": { "target": "full_window", "width_px": 1280, "height_px": 800, "dpi": 96 }
         }))?;
-        assert_eq!(post_shot["ok"], json!(true));
-        let post_png = decode_base64(post_shot["result"]["data_base64"].as_str().ok_or("missing post data_base64")?)?;
+        assert_eq!(post_shot.get("ok"), Some(&json!(true)));
+        let post_png = decode_base64(post_shot.pointer("/result/data_base64").and_then(Value::as_str).ok_or("missing post data_base64")?)?;
         assert_eq!(png_dimensions(&post_png), Some((1280, 800)));
         assert_ne!(pre_png, post_png, "post-scroll + post-click screenshot must differ from pre-scroll screenshot");
 
@@ -370,7 +378,7 @@ fn run_live_control_column_scroll_inspect_click_screenshot() -> Result<(), Box<d
         verify_resize_geometry_stamp(&mut client, &resize_trigger_c, &resize_settled_c, target_bounds)?;
 
         let quit = client.send(&json!({ "id": "8", "method": "app.quit" }))?;
-        assert_eq!(quit["result"]["quit"], json!(true));
+        assert_eq!(quit.pointer("/result/quit"), Some(&json!(true)));
         Ok(())
     });
 

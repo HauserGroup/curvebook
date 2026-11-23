@@ -420,14 +420,13 @@ fn minimal_example_args(schema: &serde_json::Value) -> serde_json::Value {
 fn escape_inline_backticks(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len() + 16);
     let mut rest = raw;
-    while let Some(start) = rest.find('`') {
-        out.push_str(&escape_html(&rest[..start]));
-        let after = &rest[start + 1..];
-        if let Some(end) = after.find('`') {
+    while let Some((before, after)) = rest.split_once('`') {
+        out.push_str(&escape_html(before));
+        if let Some((code, tail)) = after.split_once('`') {
             out.push_str("<code>");
-            out.push_str(&escape_html(&after[..end]));
+            out.push_str(&escape_html(code));
             out.push_str("</code>");
-            rest = &after[end + 1..];
+            rest = tail;
         } else {
             out.push('`');
             rest = after;

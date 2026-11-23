@@ -25,11 +25,17 @@ fn scalar_val(session: &Session, sheet_id: &str, key: &str) -> Option<f64> {
 fn make_single_xy_sheet(id: &str) -> DataSheet {
     let mut xy = XyTable::new(SubcolumnMode::Single, 1, 5).unwrap();
     xy.x_title = String::from("X");
-    xy.data_sets[0].title = String::from("Y0");
-    for r in 0..5 {
-        let x = (r + 1) as f64;
-        xy.x_cells[r][0] = Cell::number(x);
-        xy.data_sets[0].cells[r][0] = Cell::number(x + 3.0);
+    if let Some(ds0) = xy.data_sets.first_mut() {
+        ds0.title = String::from("Y0");
+        for (r, (x_row, ds_row)) in xy.x_cells.iter_mut().zip(ds0.cells.iter_mut()).enumerate().take(5) {
+            let x = (r + 1) as f64;
+            if let Some(x_cell) = x_row.first_mut() {
+                *x_cell = Cell::number(x);
+            }
+            if let Some(y_cell) = ds_row.first_mut() {
+                *y_cell = Cell::number(x + 3.0);
+            }
+        }
     }
     DataSheet::new(id, "Single XY", TableArchetype::Xy(xy)).unwrap()
 }
@@ -37,23 +43,33 @@ fn make_single_xy_sheet(id: &str) -> DataSheet {
 fn make_two_xy_sheet(id: &str) -> DataSheet {
     let mut xy = XyTable::new(SubcolumnMode::Single, 2, 5).unwrap();
     xy.x_title = String::from("X");
-    xy.data_sets[0].title = String::from("Y0");
-    xy.data_sets[1].title = String::from("Y1");
-    for r in 0..5 {
-        let x = (r + 1) as f64;
-        xy.x_cells[r][0] = Cell::number(x);
-        xy.data_sets[0].cells[r][0] = Cell::number(x + 3.0);
-        xy.data_sets[1].cells[r][0] = Cell::number(200.0 + x);
+    if let [ds0, ds1] = xy.data_sets.as_mut_slice() {
+        ds0.title = String::from("Y0");
+        ds1.title = String::from("Y1");
+        for ((r, x_row), (row0, row1)) in xy.x_cells.iter_mut().enumerate().zip(ds0.cells.iter_mut().zip(ds1.cells.iter_mut())).take(5) {
+            let x = (r + 1) as f64;
+            if let Some(x_cell) = x_row.first_mut() {
+                *x_cell = Cell::number(x);
+            }
+            if let Some(c0) = row0.first_mut() {
+                *c0 = Cell::number(x + 3.0);
+            }
+            if let Some(c1) = row1.first_mut() {
+                *c1 = Cell::number(200.0 + x);
+            }
+        }
     }
     DataSheet::new(id, "Two XY", TableArchetype::Xy(xy)).unwrap()
 }
 
 fn make_col_sheet(id: &str, cols: usize, rows: usize) -> DataSheet {
     let mut t = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, cols, rows).unwrap();
-    for c in 0..cols {
-        t.data_sets[c].title = format!("G{c}");
-        for r in 0..rows {
-            t.data_sets[c].cells[r][0] = Cell::number((c * 10 + r + 1) as f64 + 0.1 * (r as f64));
+    for (c, ds) in t.data_sets.iter_mut().enumerate().take(cols) {
+        ds.title = format!("G{c}");
+        for (r, row) in ds.cells.iter_mut().enumerate().take(rows) {
+            if let Some(cell) = row.first_mut() {
+                *cell = Cell::number((c * 10 + r + 1) as f64 + 0.1 * (r as f64));
+            }
         }
     }
     DataSheet::new(id, "Col Sheet", TableArchetype::Column(t)).unwrap()

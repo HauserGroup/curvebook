@@ -53,10 +53,9 @@ fn rv53_web_download_filenames_preserve_cjk_cyrillic_arabic_hebrew_and_guard_res
     assert_eq!(csv2.file_name, "图表.csv");
     assert_ne!(csv1.file_name, csv2.file_name);
 
-    // Rename project to `CON` and verify archive export guards the reserved stem.
-    let _ = host.execute_command("project.setTitle", json!({ "title": "CON" }));
-    if host.app().document().title == "CON" {
-        let archive = fs.export_bytes(&mut host, WebExportFormat::CurveBookArchive, None, 300).expect("export archive");
-        assert_eq!(archive.file_name, "_CON.curvebook");
-    }
+    // Create a project titled `CON` and verify archive export guards the reserved stem.
+    host.execute_command("project.new", json!({ "title": "CON" })).expect("project.new CON must succeed");
+    assert_eq!(host.app().document().title, "CON");
+    let archive = fs.export_bytes(&mut host, WebExportFormat::CurveBookArchive, None, 300).expect("export archive");
+    assert_eq!(archive.file_name, "_CON.curvebook");
 }

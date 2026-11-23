@@ -152,11 +152,12 @@ fn parse_fence_open(trimmed: &str) -> Option<(char, usize, String)> {
     if first != '`' && first != '~' {
         return None;
     }
-    let count = trimmed.chars().take_while(|&c| c == first).count();
+    let rest = trimmed.trim_start_matches(first);
+    let count = trimmed.len() - rest.len();
     if count < 3 {
         return None;
     }
-    let info = trimmed[count..].trim();
+    let info = rest.trim();
     if first == '`' && info.contains('`') {
         return None;
     }
@@ -166,7 +167,7 @@ fn parse_fence_open(trimmed: &str) -> Option<(char, usize, String)> {
 
 fn is_fence_close(trimmed: &str, ch: char, min_len: usize) -> bool {
     let count = trimmed.chars().take_while(|&c| c == ch).count();
-    count >= min_len && trimmed[count..].trim().is_empty()
+    count >= min_len && trimmed.trim_start_matches(ch).trim().is_empty()
 }
 
 fn render_fenced_code(lines: &[&str], start: usize, ch: char, len: usize, lang: &str, out: &mut String) -> usize {
@@ -201,11 +202,11 @@ fn render_fenced_code(lines: &[&str], start: usize, ch: char, len: usize, lang: 
 }
 
 fn parse_atx_heading(trimmed: &str) -> Option<(u8, &str)> {
-    let level = trimmed.bytes().take_while(|&b| b == b'#').count();
+    let rest = trimmed.trim_start_matches('#');
+    let level = trimmed.len() - rest.len();
     if !(1..=6).contains(&level) {
         return None;
     }
-    let rest = &trimmed[level..];
     if !rest.is_empty() && !rest.starts_with(' ') && !rest.starts_with('\t') {
         return None;
     }
@@ -215,13 +216,13 @@ fn parse_atx_heading(trimmed: &str) -> Option<(u8, &str)> {
 
 fn split_heading_custom_id(raw: &str) -> (&str, Option<&str>) {
     let trimmed = raw.trim();
-    if let Some(open) = trimmed.rfind("{#")
-        && let Some(close) = trimmed[open..].strip_suffix('}')
+    if let Some((head, after_open)) = trimmed.rsplit_once("{#")
+        && let Some(raw_id) = after_open.strip_suffix('}')
     {
-        let id = close[2..].trim();
+        let id = raw_id.trim();
         let valid = !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
         if valid {
-            return (trimmed[..open].trim_end(), Some(id));
+            return (head.trim_end(), Some(id));
         }
     }
     (trimmed, None)
@@ -307,12 +308,12 @@ fn split_table_cells(line: &str) -> Vec<&str> {
             continue;
         }
         if bytes[i] == b'|' && !in_code {
-            cells.push(s[start..i].trim());
+            cells.push(s.get(start..i).unwrap_or("").trim());
             start = i + 1;
         }
         i += 1;
     }
-    cells.push(s[start..].trim());
+    cells.push(s.get(start..).unwrap_or("").trim());
     cells
 }
 
@@ -368,19 +369,19 @@ fn render_blockquote(ctx: &mut RenderCtx<'_>, lines: &[&str], start: usize, out:
 }
 
 fn parse_list_item(line: &str) -> Option<(bool, usize, &str)> {
-    let indent = line.bytes().take_while(|&b| b == b' ').count();
-    let rest = &line[indent..];
+    let rest = line.trim_start_matches(' ');
+    let indent = line.len() - rest.len();
     for prefix in ["- ", "* ", "+ "] {
         if let Some(body) = rest.strip_prefix(prefix) {
             return Some((false, indent, body));
         }
     }
-    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-    if digits > 0 {
-        let after_num = &rest[digits..];
-        if let Some(body) = after_num.strip_prefix(". ").or_else(|| after_num.strip_prefix(") ")) {
-            return Some((true, indent, body));
-        }
+    let after_num = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+    let digits = rest.len() - after_num.len();
+    if digits > 0
+        && let Some(body) = after_num.strip_prefix(". ").or_else(|| after_num.strip_prefix(") "))
+    {
+        return Some((true, indent, body));
     }
     None
 }
@@ -483,19 +484,22 @@ fn render_paragraph_block(ctx: &mut RenderCtx<'_>, lines: &[&str], start: usize,
 fn render_inline(text: &str, resolver: &dyn LinkResolver, allow_br: bool, out: &mut String) {
     let bytes = text.as_bytes();
     let mut i = 0usize;
-    while i < bytes.len() {
-        if allow_br && let Some(len) = match_br_tag(&text[i..]) {
+    while let Some(rest) = text.get(i..) {
+        if rest.is_empty() {
+            break;
+        }
+        if allow_br && let Some(len) = match_br_tag(rest) {
             out.push_str("<br>");
             i += len;
             continue;
         }
         if bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_punctuation() {
-            push_char_escaped(text[i + 1..].chars().next().unwrap_or('\\'), out);
+            push_char_escaped(char::from(bytes[i + 1]), out);
             i += 2;
             continue;
         }
         if bytes[i] == b'`'
-            && let Some((code, next_i)) = parse_code_span(&text[i..])
+            && let Some((code, next_i)) = parse_code_span(rest)
         {
             out.push_str("<code>");
             push_html_escaped(code.trim_matches(' '), out);
@@ -503,9 +507,9 @@ fn render_inline(text: &str, resolver: &dyn LinkResolver, allow_br: bool, out: &
             i += next_i;
             continue;
         }
-        if bytes[i] == b'!'
-            && bytes.get(i + 1) == Some(&b'[')
-            && let Some((alt, src, next_i)) = parse_bracket_link(&text[i + 1..])
+        if let Some(after_bang) = rest.strip_prefix('!')
+            && after_bang.starts_with('[')
+            && let Some((alt, src, next_i)) = parse_bracket_link(after_bang)
         {
             let resolved = resolver.resolve_image(src);
             out.push_str("<img src=\"");
@@ -517,7 +521,7 @@ fn render_inline(text: &str, resolver: &dyn LinkResolver, allow_br: bool, out: &
             continue;
         }
         if bytes[i] == b'['
-            && let Some((label, href, next_i)) = parse_bracket_link(&text[i..])
+            && let Some((label, href, next_i)) = parse_bracket_link(rest)
         {
             let resolved = resolver.resolve_href(href);
             out.push_str("<a href=\"");
@@ -528,8 +532,8 @@ fn render_inline(text: &str, resolver: &dyn LinkResolver, allow_br: bool, out: &
             i += next_i;
             continue;
         }
-        if (text[i..].starts_with("**") || text[i..].starts_with("__"))
-            && let Some((inner, next_i)) = parse_delimited_span(&text[i..], 2)
+        if (rest.starts_with("**") || rest.starts_with("__"))
+            && let Some((inner, next_i)) = parse_delimited_span(rest, 2)
         {
             out.push_str("<strong>");
             render_inline(inner, resolver, allow_br, out);
@@ -537,8 +541,8 @@ fn render_inline(text: &str, resolver: &dyn LinkResolver, allow_br: bool, out: &
             i += next_i;
             continue;
         }
-        if text[i..].starts_with("~~")
-            && let Some((inner, next_i)) = parse_delimited_span(&text[i..], 2)
+        if rest.starts_with("~~")
+            && let Some((inner, next_i)) = parse_delimited_span(rest, 2)
         {
             out.push_str("<del>");
             render_inline(inner, resolver, allow_br, out);
@@ -547,7 +551,7 @@ fn render_inline(text: &str, resolver: &dyn LinkResolver, allow_br: bool, out: &
             continue;
         }
         if (bytes[i] == b'*' || (bytes[i] == b'_' && !is_word_boundary_underscore(bytes, i)))
-            && let Some((inner, next_i)) = parse_delimited_span(&text[i..], 1)
+            && let Some((inner, next_i)) = parse_delimited_span(rest, 1)
         {
             out.push_str("<em>");
             render_inline(inner, resolver, allow_br, out);
@@ -555,7 +559,7 @@ fn render_inline(text: &str, resolver: &dyn LinkResolver, allow_br: bool, out: &
             i += next_i;
             continue;
         }
-        let ch = text[i..].chars().next().unwrap_or(' ');
+        let ch = rest.chars().next().unwrap_or(' ');
         push_char_escaped(ch, out);
         i += ch.len_utf8();
     }
@@ -582,16 +586,20 @@ fn is_word_boundary_underscore(bytes: &[u8], pos: usize) -> bool {
 }
 
 fn parse_code_span(slice: &str) -> Option<(&str, usize)> {
-    let ticks = slice.bytes().take_while(|&b| b == b'`').count();
-    let rest = &slice[ticks..];
+    let rest = slice.trim_start_matches('`');
+    let ticks = slice.len() - rest.len();
+    if ticks == 0 {
+        return None;
+    }
+    let needle = "`".repeat(ticks);
     let mut offset = 0usize;
-    while let Some(rel) = rest[offset..].find(&"`".repeat(ticks)) {
+    while let Some(rel) = rest.get(offset..).and_then(|s| s.find(&needle)) {
         let abs = offset + rel;
         let after = abs + ticks;
         let trailing_ticks = rest.as_bytes().get(after) == Some(&b'`');
         let leading_ticks = abs > 0 && rest.as_bytes()[abs - 1] == b'`';
         if !trailing_ticks && !leading_ticks {
-            return Some((&rest[..abs], ticks + after));
+            return rest.get(..abs).map(|code| (code, ticks + after));
         }
         offset = abs + 1;
     }
@@ -630,8 +638,8 @@ fn parse_bracket_link(slice: &str) -> Option<(&str, &str, usize)> {
     if depth != 0 {
         return None;
     }
-    let label = &after_open[..i];
-    let after_label = after_open[i + 1..].strip_prefix('(')?;
+    let (label, after_close_bracket) = after_open.split_at_checked(i)?;
+    let after_label = after_close_bracket.strip_prefix("](")?;
     let mut p_depth = 1usize;
     let mut j = 0usize;
     let hbytes = after_label.as_bytes();
@@ -641,7 +649,7 @@ fn parse_bracket_link(slice: &str) -> Option<(&str, &str, usize)> {
         } else if hbytes[j] == b')' {
             p_depth -= 1;
             if p_depth == 0 {
-                let raw_target = after_label[..j].trim();
+                let raw_target = after_label.get(..j)?.trim();
                 let target = raw_target.split_whitespace().next().unwrap_or("").trim_matches('<').trim_matches('>');
                 return Some((label, target, 1 + i + 2 + j + 1));
             }
@@ -652,9 +660,9 @@ fn parse_bracket_link(slice: &str) -> Option<(&str, &str, usize)> {
 }
 
 fn parse_delimited_span(slice: &str, width: usize) -> Option<(&str, usize)> {
-    let delim = &slice.as_bytes()[..width];
-    let ch = delim[0];
-    let rest = &slice[width..];
+    let delim = slice.as_bytes().get(..width)?;
+    let ch = *delim.first()?;
+    let rest = slice.get(width..)?;
     if rest.is_empty() || rest.starts_with(' ') {
         return None;
     }
@@ -670,12 +678,12 @@ fn parse_delimited_span(slice: &str, width: usize) -> Option<(&str, usize)> {
             continue;
         }
         if bytes[i] == b'`'
-            && let Some((_, skip)) = parse_code_span(&rest[i..])
+            && let Some((_, skip)) = rest.get(i..).and_then(parse_code_span)
         {
             i += skip;
             continue;
         }
-        if &bytes[i..i + width] == delim && i > 0 && bytes[i - 1] != b' ' {
+        if bytes.get(i..i + width) == Some(delim) && i > 0 && bytes[i - 1] != b' ' {
             if width == 1 && ch == b'_' && is_word_boundary_underscore(bytes, i) {
                 i += 1;
                 continue;
@@ -684,7 +692,7 @@ fn parse_delimited_span(slice: &str, width: usize) -> Option<(&str, usize)> {
                 i += 2;
                 continue;
             }
-            return Some((&rest[..i], width + i + width));
+            return rest.get(..i).map(|inner| (inner, width + i + width));
         }
         i += 1;
     }
@@ -697,9 +705,12 @@ pub fn strip_inline_markdown(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let bytes = input.as_bytes();
     let mut i = 0usize;
-    while i < bytes.len() {
+    while let Some(rest) = input.get(i..) {
+        if rest.is_empty() {
+            break;
+        }
         if bytes[i] == b'['
-            && let Some((label, _, next_i)) = parse_bracket_link(&input[i..])
+            && let Some((label, _, next_i)) = parse_bracket_link(rest)
         {
             out.push_str(&strip_inline_markdown(label));
             i += next_i;
@@ -709,7 +720,7 @@ pub fn strip_inline_markdown(input: &str) -> String {
             i += 1;
             continue;
         }
-        let ch = input[i..].chars().next().unwrap_or(' ');
+        let ch = rest.chars().next().unwrap_or(' ');
         out.push(ch);
         i += ch.len_utf8();
     }

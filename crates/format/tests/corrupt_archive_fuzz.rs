@@ -173,14 +173,20 @@ fn build_rich_eight_archetype_project() -> ProjectDocument {
     xy.x_title = String::from("Log[Agonist]");
     xy.row_titles = vec![String::from("Low"), String::from("Mid"), String::from("High")];
     xy.row_titles_expanded = true;
-    xy.data_sets[0].title = String::from("Wildtype");
-    xy.data_sets[1].title = String::from("Mutant");
+    if let [ds0, ds1] = xy.data_sets.as_mut_slice() {
+        ds0.title = String::from("Wildtype");
+        ds1.title = String::from("Mutant");
+        if let [r0, r1, ..] = ds0.cells.as_mut_slice() {
+            *r0 = vec![Cell::number(10.5), Cell::excluded_number(99.9)];
+            *r1 = vec![Cell::number(48.2), Cell::number(51.0)];
+        }
+        if let Some(r2) = ds1.cells.get_mut(2) {
+            *r2 = vec![Cell::number(95.0), Cell::number(94.1)];
+        }
+    }
     for (r, x) in [-9.0, -8.0, -7.0].iter().enumerate() {
         xy.set_x_cell(r, Cell::number(*x)).unwrap();
     }
-    xy.data_sets[0].cells[0] = vec![Cell::number(10.5), Cell::excluded_number(99.9)];
-    xy.data_sets[0].cells[1] = vec![Cell::number(48.2), Cell::number(51.0)];
-    xy.data_sets[1].cells[2] = vec![Cell::number(95.0), Cell::number(94.1)];
     let mut xy_sheet = DataSheet::new("data-xy", "Dose Curve", TableArchetype::Xy(xy)).unwrap();
     xy_sheet.info_sheet_id = Some(SheetId::new("info-main"));
     xy_sheet.floating_notes.push(FloatingNote::new("note-xy", RectPt::new(8.0, 12.0, 120.0, 40.0), "Check outlier"));
@@ -188,8 +194,14 @@ fn build_rich_eight_archetype_project() -> ProjectDocument {
 
     let mut col = ColumnTable::new(ColumnDesignHint::PairedRepeatedMeasures, 2, 3).unwrap();
     col.row_titles = vec![String::from("Subj 1"), String::from("Subj 2"), String::from("Subj 3")];
-    col.data_sets[0].cells[0][0] = Cell::number(4.1);
-    col.data_sets[1].cells[0][0] = Cell::number(8.4);
+    if let [c0, c1] = col.data_sets.as_mut_slice() {
+        if let Some(cell) = c0.cells.first_mut().and_then(|r| r.first_mut()) {
+            *cell = Cell::number(4.1);
+        }
+        if let Some(cell) = c1.cells.first_mut().and_then(|r| r.first_mut()) {
+            *cell = Cell::number(8.4);
+        }
+    }
     let mut col_sheet = DataSheet::new("data-col", "Paired Groups", TableArchetype::Column(col)).unwrap();
     col_sheet.linked_regions.push(LinkedDataRegion {
         id: String::from("lnk-ext"),
@@ -205,33 +217,49 @@ fn build_rich_eight_archetype_project() -> ProjectDocument {
 
     let mut grp = GroupedTable::new(SubcolumnMode::MeanSemN, 2, 2).unwrap();
     grp.row_titles = vec![String::from("24h"), String::from("48h")];
-    grp.data_sets[0].cells[0] = vec![Cell::number(20.0), Cell::number(1.5), Cell::number(6.0)];
+    if let Some(r0) = grp.data_sets.first_mut().and_then(|ds| ds.cells.first_mut()) {
+        *r0 = vec![Cell::number(20.0), Cell::number(1.5), Cell::number(6.0)];
+    }
     doc.add_data_sheet(DataSheet::new("data-grp", "Factorial", TableArchetype::Grouped(grp)).unwrap()).unwrap();
 
     let mut cont = ContingencyTable::new(2, 2).unwrap();
     cont.row_titles = vec![String::from("Exposed"), String::from("Unexposed")];
-    cont.data_sets[0].cells[0][0] = Cell::number(14.0);
-    cont.data_sets[1].cells[1][0] = Cell::number(17.0);
+    if let [c0, c1] = cont.data_sets.as_mut_slice() {
+        if let Some(cell) = c0.cells.first_mut().and_then(|r| r.first_mut()) {
+            *cell = Cell::number(14.0);
+        }
+        if let Some(cell) = c1.cells.get_mut(1).and_then(|r| r.first_mut()) {
+            *cell = Cell::number(17.0);
+        }
+    }
     doc.add_data_sheet(DataSheet::new("data-cont", "Responder Counts", TableArchetype::Contingency(cont)).unwrap()).unwrap();
 
     let mut surv = SurvivalTable::new(2, 2).unwrap();
     surv.times = vec![Cell::number(5.0), Cell::number(12.0)];
-    surv.cohorts[0].cells = vec![vec![Cell::number(1.0)], vec![Cell::number(0.0)]];
+    if let Some(ds0) = surv.cohorts.first_mut() {
+        ds0.cells = vec![vec![Cell::number(1.0)], vec![Cell::number(0.0)]];
+    }
     doc.add_data_sheet(DataSheet::new("data-surv", "Survival Cohort", TableArchetype::Survival(surv)).unwrap()).unwrap();
 
     let mut pow = PartsOfWholeTable::new(1, 2).unwrap();
     pow.slice_labels = vec![String::from("CD4"), String::from("CD8")];
-    pow.data_sets[0].cells = vec![vec![Cell::number(40.0)], vec![Cell::number(60.0)]];
+    if let Some(ds0) = pow.data_sets.first_mut() {
+        ds0.cells = vec![vec![Cell::number(40.0)], vec![Cell::number(60.0)]];
+    }
     doc.add_data_sheet(DataSheet::new("data-pow", "Cell Fractions", TableArchetype::PartsOfWhole(pow)).unwrap()).unwrap();
 
     let mut mv = MultipleVariablesTable::new(2, 2).unwrap();
-    mv.variables[0].cells = vec![Cell::text("Ctrl"), Cell::text("Drug")];
-    mv.variables[0].refresh_inferred_role();
-    mv.variables[1].cells = vec![Cell::number(12.3), Cell::number(28.7)];
+    if let [v0, v1] = mv.variables.as_mut_slice() {
+        v0.cells = vec![Cell::text("Ctrl"), Cell::text("Drug")];
+        v0.refresh_inferred_role();
+        v1.cells = vec![Cell::number(12.3), Cell::number(28.7)];
+    }
     doc.add_data_sheet(DataSheet::new("data-mv", "Cohort Frame", TableArchetype::MultipleVariables(mv)).unwrap()).unwrap();
 
     let mut nest = NestedTable::new(2, 2, 2).unwrap();
-    nest.groups[0].cells[0] = vec![Cell::number(1.1), Cell::number(1.2)];
+    if let Some(r0) = nest.groups.first_mut().and_then(|g| g.cells.first_mut()) {
+        *r0 = vec![Cell::number(1.1), Cell::number(1.2)];
+    }
     let mut nest_sheet = DataSheet::new("data-nest", "Nested Replicates", TableArchetype::Nested(nest)).unwrap();
     nest_sheet.linked_regions.push(LinkedDataRegion {
         id: String::from("lnk-int"),

@@ -101,6 +101,19 @@ struct FormattedCellDisplay {
     is_significant: bool,
 }
 
+fn contains_ascii_case_insensitive(haystack: &str, needle_lower: &[u8]) -> bool {
+    !needle_lower.is_empty() && haystack.as_bytes().windows(needle_lower.len()).any(|w| w.eq_ignore_ascii_case(needle_lower))
+}
+
+fn result_cell_is_ambiguous(cell: &ResultCell, is_survival_summary: bool) -> bool {
+    match cell {
+        ResultCell::Empty | ResultCell::PValue { .. } | ResultCell::Boolean(_) => false,
+        ResultCell::Number { value, prefix, .. } => value.is_finite() && prefix.as_deref() == Some("~"),
+        ResultCell::ConfidenceInterval { lower, upper } => !is_survival_summary && (matches!(lower, CiBound::Open) || matches!(upper, CiBound::Open)),
+        ResultCell::Text(s) => s.contains("???") || contains_ascii_case_insensitive(s, b"ambiguous"),
+    }
+}
+
 fn format_result_cell_semantic(cell: &ResultCell, p_format: PValueFormat, is_survival_summary: bool) -> FormattedCellDisplay {
     match cell {
         ResultCell::Empty => FormattedCellDisplay { text: String::new(), is_ambiguous: false, is_significant: false },
@@ -146,8 +159,7 @@ fn format_result_cell_semantic(cell: &ResultCell, p_format: PValueFormat, is_sur
             FormattedCellDisplay { text, is_ambiguous: false, is_significant: is_sig }
         }
         ResultCell::Text(s) => {
-            let lower = s.to_ascii_lowercase();
-            let is_amb = s.contains("???") || lower.contains("ambiguous");
+            let is_amb = s.contains("???") || contains_ascii_case_insensitive(s, b"ambiguous");
             let text = if is_amb && !s.contains("???") { format!("??? {s}") } else { s.clone() };
             FormattedCellDisplay { text, is_ambiguous: is_amb, is_significant: false }
         }
@@ -292,7 +304,7 @@ pub fn render_results_view_for_sheet(
                     },
                 );
                 if copy_resp.clicked() && enabled && has_tabs {
-                    intents.push_workspace_copy(144);
+                    intents.push_custom_view_action("results", format!("copy_selection:{}", rs.id.as_str()));
                 }
             }
 
@@ -521,9 +533,11 @@ pub fn render_results_view_for_sheet(
             render_ambiguity_callout(ui, rs, tokens, enabled, meta, intents);
         }
 
-        let scroll_out =
-            egui::ScrollArea::both().id_salt(("egui_shell.results.body", rs.id.as_str(), &tab.id)).auto_shrink([false, false]).show(ui, |ui| {
-                render_result_tab_table(ui, &tab_ctx, active_idx, is_survival_summary, state, meta, intents);
+        let scroll_out = egui::ScrollArea::both()
+            .id_salt(("egui_shell.results.body", rs.id.as_str(), &tab.id))
+            .auto_shrink([false, false])
+            .show_viewport(ui, |ui, viewport| {
+                render_result_tab_table(ui, &tab_ctx, active_idx, is_survival_summary, viewport, state, meta, intents);
                 if !tab.footnotes.is_empty() {
                     ui.add_space(6.0);
                     let fn_max_w = (body_rect.width() - 24.0).max(80.0);
@@ -550,15 +564,8 @@ pub fn render_results_view_for_sheet(
     report
 }
 
-fn tab_contains_ambiguity(tab: &ResultTab, p_format: PValueFormat, is_survival_summary: bool) -> bool {
-    for row in &tab.rows {
-        for cell in row {
-            if format_result_cell_semantic(cell, p_format, is_survival_summary).is_ambiguous {
-                return true;
-            }
-        }
-    }
-    false
+fn tab_contains_ambiguity(tab: &ResultTab, _p_format: PValueFormat, is_survival_summary: bool) -> bool {
+    tab.rows.iter().any(|row| row.iter().any(|cell| result_cell_is_ambiguous(cell, is_survival_summary)))
 }
 
 struct ResultTabRenderCtx<'a> {
@@ -689,7 +696,8 @@ struct ResultPointerInput {
 
 #[derive(Clone, Copy)]
 struct ResultTableLayout {
-    num_cols: usize,
+    col_start: usize,
+    col_end: usize,
     row_stub_w: f32,
     col_w: f32,
     row_h: f32,
@@ -722,7 +730,7 @@ fn render_result_table_header(ui: &mut egui::Ui, tab: &ResultTab, tokens: &Token
         );
     }
 
-    for c_idx in 0..layout.num_cols {
+    for c_idx in layout.col_start..layout.col_end {
         let cell_rect = Rect::from_min_size(
             pos2(hdr_rect.left() + layout.row_stub_w + (c_idx as f32) * layout.col_w, hdr_rect.top()),
             vec2(layout.col_w, layout.row_h),
@@ -906,7 +914,7 @@ fn render_result_data_row(
         );
     }
 
-    for c_idx in 0..layout.num_cols {
+    for c_idx in layout.col_start..layout.col_end {
         let cell_rect = Rect::from_min_size(
             pos2(row_rect.left() + layout.row_stub_w + (c_idx as f32) * layout.col_w, row_rect.top()),
             vec2(layout.col_w, layout.row_h),
@@ -985,11 +993,13 @@ fn render_result_data_row(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_result_tab_table(
     ui: &mut egui::Ui,
     ctx: &ResultTabRenderCtx<'_>,
     active_tab_idx: usize,
     is_survival_summary: bool,
+    viewport: Rect,
     state: &mut ResultsViewEguiState,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
@@ -1017,8 +1027,13 @@ fn render_result_tab_table(
     let row_stub_w = 190.0_f32;
     let col_w = 128.0_f32;
     let row_h = 24.0_f32;
+    let vis_x_min = (viewport.min.x - row_stub_w).max(0.0);
+    let vis_x_max = (viewport.max.x - row_stub_w).max(0.0);
+    let col_start = ((vis_x_min / col_w).floor().max(0.0) as usize).saturating_sub(1).min(num_cols);
+    let col_end = (((vis_x_max / col_w).ceil().max(0.0) as usize) + 1).min(num_cols).max(col_start);
     let layout = ResultTableLayout {
-        num_cols,
+        col_start,
+        col_end,
         row_stub_w,
         col_w,
         row_h,
@@ -1026,21 +1041,85 @@ fn render_result_tab_table(
         visible_clip: ui.clip_rect().intersect(meta.viewport_rect),
     };
 
+    let spacing_y = ui.spacing().item_spacing.y;
+    let row_stride = row_h + spacing_y;
+
     render_result_table_header(ui, tab, tokens, layout);
 
-    let mut current_section: Option<String> = None;
-    for (r_idx, row) in tab.rows.iter().enumerate() {
+    let is_section_at = |r_idx: usize| -> bool {
         let row_lbl = tab.row_labels.get(r_idx).map_or("", String::as_str);
-        if !row_lbl.is_empty() && row.iter().all(|c| matches!(c, ResultCell::Empty)) {
-            current_section = Some(render_result_section_row(ui, ctx, r_idx, row_lbl, state, layout, meta));
-            continue;
+        !row_lbl.is_empty() && tab.rows[r_idx].iter().all(|c| matches!(c, ResultCell::Empty))
+    };
+
+    let body_top = (viewport.min.y - row_stride).max(0.0);
+    let body_bot = (viewport.max.y - row_stride).max(0.0);
+    if state.collapsed_sections.is_empty() {
+        let total_rows = tab.rows.len();
+        let start_r = ((body_top / row_stride).floor().max(0.0) as usize).saturating_sub(1).min(total_rows);
+        let end_r = (((body_bot / row_stride).ceil().max(0.0) as usize) + 1).min(total_rows);
+        if start_r > 0 {
+            let spacer_h = ((start_r as f32) * row_stride - spacing_y).max(0.0);
+            ui.allocate_space(vec2(layout.total_w, spacer_h));
         }
-        if let Some(sec_key) = &current_section
-            && state.collapsed_sections.contains(sec_key)
-        {
-            continue;
+        for r_idx in start_r..end_r {
+            let row_lbl = tab.row_labels.get(r_idx).map_or("", String::as_str);
+            let row = &tab.rows[r_idx];
+            if is_section_at(r_idx) {
+                let _ = render_result_section_row(ui, ctx, r_idx, row_lbl, state, layout, meta);
+            } else {
+                render_result_data_row(
+                    ui,
+                    ctx,
+                    ResultDataRowInput { active_tab_idx, r_idx, row_lbl, row, is_survival_summary, ptr, layout },
+                    state,
+                    meta,
+                );
+            }
         }
-        render_result_data_row(ui, ctx, ResultDataRowInput { active_tab_idx, r_idx, row_lbl, row, is_survival_summary, ptr, layout }, state, meta);
+        let tail = total_rows.saturating_sub(end_r);
+        if tail > 0 {
+            let spacer_h = ((tail as f32) * row_stride - spacing_y).max(0.0);
+            ui.allocate_space(vec2(layout.total_w, spacer_h));
+        }
+    } else {
+        let mut visible_rows: Vec<(usize, bool)> = Vec::with_capacity(tab.rows.len());
+        let mut current_section: Option<String> = None;
+        for r_idx in 0..tab.rows.len() {
+            if is_section_at(r_idx) {
+                let sec_key = format!("{}:{}:{r_idx}", rs.id.as_str(), tab.id);
+                current_section = Some(sec_key);
+                visible_rows.push((r_idx, true));
+            } else if !current_section.as_ref().is_some_and(|sec_key| state.collapsed_sections.contains(sec_key)) {
+                visible_rows.push((r_idx, false));
+            }
+        }
+        let total_vis = visible_rows.len();
+        let start_d = ((body_top / row_stride).floor().max(0.0) as usize).saturating_sub(1).min(total_vis);
+        let end_d = (((body_bot / row_stride).ceil().max(0.0) as usize) + 1).min(total_vis);
+        if start_d > 0 {
+            let spacer_h = ((start_d as f32) * row_stride - spacing_y).max(0.0);
+            ui.allocate_space(vec2(layout.total_w, spacer_h));
+        }
+        for &(r_idx, is_sec) in &visible_rows[start_d..end_d] {
+            let row_lbl = tab.row_labels.get(r_idx).map_or("", String::as_str);
+            if is_sec {
+                let _ = render_result_section_row(ui, ctx, r_idx, row_lbl, state, layout, meta);
+            } else {
+                let row = &tab.rows[r_idx];
+                render_result_data_row(
+                    ui,
+                    ctx,
+                    ResultDataRowInput { active_tab_idx, r_idx, row_lbl, row, is_survival_summary, ptr, layout },
+                    state,
+                    meta,
+                );
+            }
+        }
+        let tail = total_vis.saturating_sub(end_d);
+        if tail > 0 {
+            let spacer_h = ((tail as f32) * row_stride - spacing_y).max(0.0);
+            ui.allocate_space(vec2(layout.total_w, spacer_h));
+        }
     }
 
     if ptr_released || !ptr_down {
@@ -1110,7 +1189,7 @@ fn render_result_context_menu(
                         },
                     );
                     if btn_sel.clicked() {
-                        intents.push_workspace_copy(144);
+                        intents.push_custom_view_action("results", format!("copy_selection:{}", rs.id.as_str()));
                         close_menu = true;
                     }
                     let copy_all_lbl = tr(tokens.locale, "r13.result.copy_table");

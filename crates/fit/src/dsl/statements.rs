@@ -26,8 +26,8 @@ pub(in crate::dsl) fn byte_offset_in_line(raw_line: &str, slice: &str) -> usize 
 
 pub(in crate::dsl) fn strip_comment<'a>(line: &'a str, line_no: usize, hints: &mut HashMap<String, f64>) -> Result<&'a str, FitError> {
     let trimmed = line.trim();
-    if let Some(pos) = [trimmed.find('#'), trimmed.find(';')].into_iter().flatten().min() {
-        let comment = trimmed[pos + 1..].trim();
+    if let Some((before, after)) = trimmed.split_once('#').into_iter().chain(trimmed.split_once(';')).min_by_key(|(before, _)| before.len()) {
+        let comment = after.trim();
         if let Some(rest) = comment.strip_prefix("initial:") {
             for pair in rest.split(',') {
                 if let Some((k, v)) = pair.split_once('=') {
@@ -47,20 +47,20 @@ pub(in crate::dsl) fn strip_comment<'a>(line: &'a str, line_no: usize, hints: &m
                 }
             }
         }
-        return Ok(trimmed[..pos].trim());
+        return Ok(before.trim());
     }
     Ok(trimmed)
 }
 
 pub(crate) fn parse_dataset_prefix(line: &str, line_no: usize) -> Result<(DatasetFilter, &str), FitError> {
-    if !line.starts_with('<') {
+    let Some(after_open) = line.strip_prefix('<') else {
         return Ok((DatasetFilter::Any, line));
-    }
-    let Some(close) = line.find('>') else {
+    };
+    let Some((inside_raw, rest_raw)) = after_open.split_once('>') else {
         return Err(FitError::DslCompileError { message: "Unclosed `<...>` dataset prefix".to_owned(), line: line_no, column: 1 });
     };
-    let inside = line[1..close].trim();
-    let rest = line[close + 1..].trim();
+    let inside = inside_raw.trim();
+    let rest = rest_raw.trim();
     let (negated, body) = if let Some(s) = inside.strip_prefix('~') { (true, s.trim()) } else { (false, inside) };
     let mut indices = Vec::new();
     for part in body.split(',') {
@@ -175,8 +175,15 @@ pub(crate) fn split_top_level_assignment(s: &str) -> Option<(&str, &str)> {
             b'=' if depth == 0 => {
                 let prev = if i > 0 { bytes[i - 1] } else { 0 };
                 let next = bytes.get(i + 1).copied().unwrap_or(0);
-                if prev != b'!' && prev != b'<' && prev != b'>' && prev != b'=' && next != b'=' {
-                    return Some((&s[..i], &s[i + 1..]));
+                if prev != b'!'
+                    && prev != b'<'
+                    && prev != b'>'
+                    && prev != b'='
+                    && next != b'='
+                    && let Some((lhs, after_eq)) = s.split_at_checked(i)
+                    && let Some(rhs) = after_eq.strip_prefix('=')
+                {
+                    return Some((lhs, rhs));
                 }
                 if next == b'=' {
                     i += 1;
@@ -261,11 +268,10 @@ impl EqItem {
 }
 
 pub(in crate::dsl) fn parse_section_header(trimmed: &str, line_no: usize) -> Result<Option<DslSection>, FitError> {
-    if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+    let Some(stripped) = trimmed.strip_prefix('[').and_then(|s| s.strip_suffix(']')) else {
         return Ok(None);
-    }
-    let inner: String =
-        trimmed[1..trimmed.len() - 1].chars().filter(|c| !c.is_ascii_whitespace() && *c != '_' && *c != '-').flat_map(char::to_lowercase).collect();
+    };
+    let inner: String = stripped.chars().filter(|c| !c.is_ascii_whitespace() && *c != '_' && *c != '-').flat_map(char::to_lowercase).collect();
     match inner.as_str() {
         "equation" | "equations" | "body" | "model" => Ok(Some(DslSection::Equation)),
         "initialvalues" | "initialvalue" | "initials" | "init" => Ok(Some(DslSection::InitialValues)),

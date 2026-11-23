@@ -220,7 +220,7 @@ fn r15_gui_27_add_constant_picks_first_unused_name_without_overwriting() -> Resu
 #[test]
 fn r15_gui_22_comma_decimal_locale_in_info_studio_ticks_and_heatmap() -> Result<(), Box<dyn std::error::Error>> {
     let SeededWorkspace { mut app, info_id, graph_id, heatmap_id } = seed_workspace()?;
-    app.set_locale("de");
+    assert_eq!(app.set_locale("de"), "de");
     app.sync_views();
 
     let mut driver = make_driver(app, ViewportMetrics::new(1440.0, 760.0, 1.0));

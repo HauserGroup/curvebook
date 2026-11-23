@@ -5,8 +5,9 @@ use curvebook_palette::LineDashStyle;
 use egui::Ui;
 
 use crate::grid_view::parse_localized_number_input;
+use crate::i18n::tr;
 
-use super::super::helpers::{ButtonEntry, GraphModalCtx, gtr, record_button, record_checkbox, record_input, record_label};
+use super::super::helpers::{ButtonEntry, GraphModalCtx, record_button, record_checkbox, record_input, record_label};
 use super::super::state::GraphModalEguiState;
 
 pub(super) fn render_additional_ticks_submodal(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &mut GraphModalCtx<'_>) {
@@ -29,7 +30,7 @@ pub(super) fn render_additional_ticks_submodal(ui: &mut Ui, state: &mut GraphMod
                     gctx.meta,
                     ButtonEntry {
                         widget_id: &format!("axes.add_tick.delete.{idx}"),
-                        label: "Delete",
+                        label: tr(gctx.locale, "modal.btn.delete"),
                         command_id: None,
                         selected: false,
                         enabled: true,
@@ -64,7 +65,7 @@ pub(super) fn render_additional_ticks_submodal(ui: &mut Ui, state: &mut GraphMod
                     gctx.meta,
                     ButtonEntry {
                         widget_id: &format!("axes.threshold.delete.{idx}"),
-                        label: "Delete",
+                        label: tr(gctx.locale, "modal.btn.delete"),
                         command_id: None,
                         selected: false,
                         enabled: true,
@@ -100,14 +101,17 @@ pub(super) fn render_additional_ticks_submodal(ui: &mut Ui, state: &mut GraphMod
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(gctx.body_w);
-        let grid_chk = ui.checkbox(&mut state.additional_tick_draw_gridline, "Draw Gridline");
-        record_checkbox(ui, &grid_chk, gctx.meta, "axes.add_tick.gridline", "Draw Gridline", state.additional_tick_draw_gridline);
+        let grid_lbl = tr(gctx.locale, "axes.draw_gridline");
+        let grid_chk = ui.checkbox(&mut state.additional_tick_draw_gridline, grid_lbl);
+        record_checkbox(ui, &grid_chk, gctx.meta, "axes.add_tick.gridline", grid_lbl, state.additional_tick_draw_gridline);
 
-        let line_chk = ui.checkbox(&mut state.additional_ticks.show_line, "Show Threshold Rule");
-        record_checkbox(ui, &line_chk, gctx.meta, "axes.add_tick.show_line", "Show Threshold Rule", state.additional_ticks.show_line);
+        let line_lbl = tr(gctx.locale, "axes.show_threshold_rule");
+        let line_chk = ui.checkbox(&mut state.additional_ticks.show_line, line_lbl);
+        record_checkbox(ui, &line_chk, gctx.meta, "axes.add_tick.show_line", line_lbl, state.additional_ticks.show_line);
 
-        let shade_chk = ui.checkbox(&mut state.additional_ticks.shaded_zone, "Shaded Zone Band");
-        record_checkbox(ui, &shade_chk, gctx.meta, "axes.add_tick.shaded_zone", "Shaded Zone Band", state.additional_ticks.shaded_zone);
+        let shade_lbl = tr(gctx.locale, "axes.shaded_zone_band");
+        let shade_chk = ui.checkbox(&mut state.additional_ticks.shaded_zone, shade_lbl);
+        record_checkbox(ui, &shade_chk, gctx.meta, "axes.add_tick.shaded_zone", shade_lbl, state.additional_ticks.shaded_zone);
     });
 
     if state.additional_ticks.shaded_zone {
@@ -130,7 +134,7 @@ pub(super) fn render_additional_ticks_submodal(ui: &mut Ui, state: &mut GraphMod
         gctx.meta,
         ButtonEntry {
             widget_id: "axes.add_tick.save",
-            label: gtr(gctx.locale, "axes.add_tick.save"),
+            label: tr(gctx.locale, "axes.add_tick.save"),
             command_id: None,
             selected: true,
             enabled: true,

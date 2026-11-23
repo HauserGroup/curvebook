@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use curvebook_doc::{
-    AnalysisKind, FitMethod, HookSource, ModelComparisonSpec, NonlinearFitSpec, PValueFormat, ParameterRule, ParameterScope, ProjectDocument,
-    SheetId, TableArchetype, WeightingScheme,
+    AnalysisKind, AnalysisSpec, FitMethod, HookSource, ModelComparisonSpec, NonlinearFitSpec, PValueFormat, ParameterRule, ParameterScope,
+    ProjectDocument, SheetId, TableArchetype, WeightingScheme,
 };
 use curvebook_fit::{
     CompiledDslModel, DataPoint, DslEquationKind, EquationCatalogEntry, EquationCategory, MultivarExtractionSpec, ParametricModel,
@@ -19,11 +19,11 @@ use crate::dialogs_canvas::{ActiveDialog, ConstantHookPickerState, EditAnalysisP
 use crate::grid_view::parse_localized_number_input;
 use crate::i18n::{LocalePreset, normalize_locale, tr};
 use crate::inspect::ZLayer;
-use crate::modal_predicates::ControlEnablement;
+use crate::modal_predicates::{ControlEnablement, r9_pvalue_precision_spinner};
 
 use super::stat_anova_modal::{
-    ClippedTextSpec, StepperSpec, column_titles_for_draft, record_widget, render_clipped_text, render_modal_checkbox, render_modal_radio,
-    render_modal_seg_btn, render_modal_textbox_row, render_section_title, render_stepper_row,
+    ClippedTextSpec, StepperSpec, record_widget, render_clipped_text, render_modal_checkbox, render_modal_radio, render_modal_seg_btn,
+    render_modal_textbox_row, render_section_title, render_stepper_row,
 };
 use super::stats_modals::{Wave4ModalShell, render_modal_action_button, render_mv_role_badge, render_tex_equation_preview, show_wave4_modal};
 use super::{FrameInspectMeta, PendingUiIntents, Tokens};
@@ -61,18 +61,18 @@ impl FitModalTab {
         }
     }
 
-    /// Human-readable §8.9 tab label.
+    /// Localized tab label across all 16 locales.
     #[must_use]
-    pub const fn label(self) -> &'static str {
+    pub fn localized_label(self, locale: &str) -> &'static str {
         match self {
-            Self::Data => "Data",
-            Self::Model => "Model",
-            Self::Compare => "Compare",
-            Self::Constrain => "Constrain",
-            Self::InitialValues => "Initial Values",
-            Self::Range => "Range",
-            Self::Weight => "Weight",
-            Self::Output => "Output",
+            Self::Data => tr(locale, "fit.tab.data"),
+            Self::Model => tr(locale, "fit.tab.model"),
+            Self::Compare => tr(locale, "fit_params.tab.compare"),
+            Self::Constrain => tr(locale, "fit.tab.constrain"),
+            Self::InitialValues => tr(locale, "fit_params.tab.initial_values"),
+            Self::Range => tr(locale, "fit.tab.range"),
+            Self::Weight => tr(locale, "fit.tab.weight"),
+            Self::Output => tr(locale, "fit.tab.output"),
         }
     }
 
@@ -94,7 +94,7 @@ impl FitModalTab {
 }
 
 /// Persistent transient UI state for `render_fit_modal` and `render_hook_constant_modal`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct FitModalEguiState {
     pub active_tab: FitModalTab,
     pub model_search: String,
@@ -112,6 +112,8 @@ pub struct FitModalEguiState {
     pub lower_bound_drafts: BTreeMap<String, String>,
     pub upper_bound_drafts: BTreeMap<String, String>,
     pub constant_drafts: BTreeMap<String, String>,
+    pub method_saved_as_default: bool,
+    pub saved_default_spec: Option<AnalysisSpec>,
 }
 
 /// Frame geometry and modal capture report emitted by `fit_modal`.
@@ -152,21 +154,27 @@ pub fn render_fit_modal(
     let ActiveDialog::EditAnalysisParameters { result_sheet_id } = &app.canvas_dialogs.active_dialog else {
         state.open_session_sheet_id = None;
         state.constant_drafts.clear();
+        state.model_search.clear();
+        state.hook_search_draft.clear();
         return FitModalFrameReport::default();
     };
     let doc = app.document();
     let Some(spec) = app.canvas_dialogs.edit_params.draft.as_ref().or_else(|| doc.result_sheet(result_sheet_id).map(|rs| &rs.analysis)) else {
         state.open_session_sheet_id = None;
         state.constant_drafts.clear();
+        state.model_search.clear();
+        state.hook_search_draft.clear();
         return FitModalFrameReport::default();
     };
     let AnalysisKind::NonlinearRegression(nl) = &spec.kind else {
         state.open_session_sheet_id = None;
         state.constant_drafts.clear();
+        state.model_search.clear();
+        state.hook_search_draft.clear();
         return FitModalFrameReport::default();
     };
 
-    sync_fit_modal_state(result_sheet_id, &app.canvas_dialogs.edit_params, nl, state);
+    sync_fit_modal_state(result_sheet_id, doc, &app.canvas_dialogs.edit_params, spec, nl, state, intents);
     let is_mv = doc.data_sheet(&spec.source_sheet_id).is_some_and(|ds| matches!(ds.archetype, TableArchetype::MultipleVariables(_)));
     let mut tabs = Vec::with_capacity(8);
     if is_mv {
@@ -198,7 +206,7 @@ pub fn render_fit_modal(
         state,
         Wave4ModalShell {
             widget_id: "dialog.nonlinear_fit",
-            title: "Parameters: Nonlinear Curve Fitting",
+            title: tr(locale, "fit.modal.title"),
             subtitle_or_banner: Some(&banner),
             banner_widget_id: "edit.resolved_test_banner",
             max_width_pt: 820.0,
@@ -216,7 +224,7 @@ pub fn render_fit_modal(
                         tokens,
                         meta,
                         &format!("fit.tab.{}", tab.slug()),
-                        tab.label(),
+                        tab.localized_label(locale),
                         selected,
                         &ControlEnablement::enabled(),
                     ) {
@@ -267,28 +275,32 @@ pub fn render_fit_modal(
                 FitModalTab::Output => render_fit_output_tab(ui, spec, nl, state, tokens, meta, intents),
             }
         },
-        |ui, _state, meta, intents| {
+        |ui, footer_state, meta, intents| {
             ui.horizontal(|ui| {
+                let save_lbl =
+                    if footer_state.method_saved_as_default { tr(locale, "anova.saved_default") } else { tr(locale, "anova.save_default") };
                 if render_modal_action_button(
                     ui,
                     tokens,
                     meta,
                     "dialog.button.save_default",
-                    "Save as Default",
+                    save_lbl,
                     false,
-                    false,
+                    footer_state.method_saved_as_default,
                     &ControlEnablement::enabled(),
                 ) {
+                    footer_state.saved_default_spec = Some(spec.clone());
+                    footer_state.method_saved_as_default = true;
                     intents.push_save_edit_params_as_default();
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let ok_lbl = if is_create { "Fit Curve" } else { tr(locale, "btn.ok") };
+                    let ok_lbl = if is_create { tr(locale, "fit.commit.create") } else { tr(locale, "btn.ok") };
                     if render_modal_action_button(ui, tokens, meta, "modal.ok", ok_lbl, true, false, &commit_en) {
                         intents.push_dialog_button("ok");
                     }
                     if !is_create
                         && doc.result_sheet(result_sheet_id).is_some()
-                        && render_modal_action_button(ui, tokens, meta, "modal.apply", "Update Fit", false, false, &commit_en)
+                        && render_modal_action_button(ui, tokens, meta, "modal.apply", tr(locale, "fit.commit.update"), false, false, &commit_en)
                     {
                         intents.push_dialog_button("apply");
                     }
@@ -417,15 +429,45 @@ fn seed_x_domain_bounds(doc: &ProjectDocument, spec: &curvebook_doc::AnalysisSpe
     }
 }
 
-fn sync_fit_modal_state(result_sheet_id: &SheetId, ep: &EditAnalysisParametersState, nl: &NonlinearFitSpec, state: &mut FitModalEguiState) {
+fn sync_fit_modal_state(
+    result_sheet_id: &SheetId,
+    doc: &ProjectDocument,
+    ep: &EditAnalysisParametersState,
+    spec: &AnalysisSpec,
+    nl: &NonlinearFitSpec,
+    state: &mut FitModalEguiState,
+    intents: &mut PendingUiIntents,
+) {
+    let is_create_mode = doc.result_sheet(result_sheet_id).is_none();
     if state.open_session_sheet_id.as_deref() != Some(result_sheet_id.as_str()) {
         state.open_session_sheet_id = Some(result_sheet_id.as_str().to_owned());
+        state.model_search.clear();
+        state.hook_search_draft.clear();
         state.active_tab = FitModalTab::from_slug(&ep.active_tab).unwrap_or(FitModalTab::Model);
-        state.custom_dsl_enabled = nl.custom_dsl.is_some();
+        let effective_nl = if is_create_mode
+            && let Some(saved) = &state.saved_default_spec
+            && let AnalysisKind::NonlinearRegression(saved_nl) = &saved.kind
+        {
+            let mut applied = saved.clone();
+            applied.source_sheet_id = spec.source_sheet_id.clone();
+            applied.selected_data_sets.clone_from(&spec.selected_data_sets);
+            applied.custom_title.clone_from(&spec.custom_title);
+            if applied != *spec {
+                intents.push_set_edit_params_draft(applied);
+            }
+            state.method_saved_as_default = true;
+            saved_nl
+        } else {
+            state.method_saved_as_default = state.saved_default_spec.as_ref().is_some_and(|saved| {
+                saved.kind == spec.kind && saved.confidence_level == spec.confidence_level && saved.p_value_format == spec.p_value_format
+            });
+            nl
+        };
+        state.custom_dsl_enabled = effective_nl.custom_dsl.is_some();
         state.custom_equation_draft =
-            nl.custom_dsl.clone().unwrap_or_else(|| String::from("Y = Bottom + (Top - Bottom) / (1 + 10^((LogEC50 - X) * HillSlope))"));
-        state.r2_threshold_draft = nl.flag_r_squared_below.map_or_else(String::new, |v| format!("{v}"));
-        let (xmin_str, xmax_str) = match nl.x_range_filter {
+            effective_nl.custom_dsl.clone().unwrap_or_else(|| String::from("Y = Bottom + (Top - Bottom) / (1 + 10^((LogEC50 - X) * HillSlope))"));
+        state.r2_threshold_draft = effective_nl.flag_r_squared_below.map_or_else(String::new, |v| format!("{v}"));
+        let (xmin_str, xmax_str) = match effective_nl.x_range_filter {
             Some((lo, hi)) => (lo.map_or_else(String::new, format_fit_number), hi.map_or_else(String::new, format_fit_number)),
             None => (String::new(), String::new()),
         };
@@ -435,7 +477,7 @@ fn sync_fit_modal_state(result_sheet_id: &SheetId, ep: &EditAnalysisParametersSt
         state.lower_bound_drafts.clear();
         state.upper_bound_drafts.clear();
         state.constant_drafts.clear();
-        for rule in &nl.parameter_rules {
+        for rule in &effective_nl.parameter_rules {
             if let ParameterScope::Constant(val) = rule.scope {
                 state.constant_drafts.insert(rule.name.clone(), format_fit_number(val));
             }
@@ -449,6 +491,10 @@ fn sync_fit_modal_state(result_sheet_id: &SheetId, ep: &EditAnalysisParametersSt
                 state.upper_bound_drafts.insert(rule.name.clone(), format_fit_number(hi));
             }
         }
+    } else {
+        state.method_saved_as_default = state.saved_default_spec.as_ref().is_some_and(|saved| {
+            saved.kind == spec.kind && saved.confidence_level == spec.confidence_level && saved.p_value_format == spec.p_value_format
+        });
     }
 }
 
@@ -483,6 +529,12 @@ fn check_draft_numeric_alerts(
     alerts: &mut Vec<String>,
     blocking: &mut Option<String>,
 ) {
+    if !state.r2_threshold_draft.trim().is_empty() {
+        match parse_fit_number(&state.r2_threshold_draft, preset) {
+            Some(v) if (0.0..=1.0).contains(&v) => {}
+            _ => alerts.push(format!("Output alert: R² flag threshold (`{}`) must lie in [0, 1].", state.r2_threshold_draft.trim())),
+        }
+    }
     let mut record_blocking = |msg: String| {
         if blocking.is_none() {
             *blocking = Some(msg.clone());
@@ -497,7 +549,18 @@ fn check_draft_numeric_alerts(
             record_blocking(format!("Range alert: X max (`{}`) must be a finite number.", state.x_max_draft.trim()));
         }
     }
+    if state.custom_dsl_enabled
+        && let Err(err) = CompiledDslModel::compile("custom", &state.custom_equation_draft)
+    {
+        record_blocking(format!("DSL equation alert: {err}"));
+    }
     for p in params {
+        if nl.parameter_rules.iter().any(|r| r.name == *p && matches!(r.scope, ParameterScope::Constant(_)))
+            && let Some(raw) = state.constant_drafts.get(p)
+            && parse_fit_number(raw, preset).is_none()
+        {
+            record_blocking(format!("Constraint alert on `{p}`: constant value `{}` must be a finite number.", raw.trim()));
+        }
         if let Some(raw) = state.initial_override_drafts.get(p)
             && !raw.trim().is_empty()
             && parse_fit_number(raw, preset).is_none()
@@ -712,7 +775,7 @@ fn render_fit_model_tab(
     }
     let preview_params: Vec<(String, f64)> = param_names.iter().map(|p| (p.clone(), 1.0)).collect();
     let tex = format_model_equation_tex(&nl.equation_id, nl.custom_dsl.as_deref(), &preview_params, false, 4);
-    render_section_title(ui, tokens, "Symbolic TeX Preview");
+    render_section_title(ui, tokens, tr(tokens.locale, "fit_params.eq.preview_heading"));
     render_tex_equation_preview(ui, tokens, meta, "fit.eq.tex_preview", &tex, 13.5);
 
     ui.add_space(4.0);
@@ -916,6 +979,7 @@ fn render_fit_model_tab(
                 state.initial_override_drafts.clear();
                 state.lower_bound_drafts.clear();
                 state.upper_bound_drafts.clear();
+                state.constant_drafts.clear();
                 intents.push_set_edit_params_draft(next);
             }
         }
@@ -935,7 +999,7 @@ fn render_fit_compare_tab(
         Some(ModelComparisonSpec::ExtraSumOfSquaresF { alternative_equation_id })
         | Some(ModelComparisonSpec::Aicc { alternative_equation_id })
         | Some(ModelComparisonSpec::LikelihoodRatioTest { alternative_equation_id }) => alternative_equation_id.clone(),
-        None => String::from("linear"),
+        None => String::from("straight_line"),
     };
     for (wid, lbl, active, comp) in [
         ("fit.cmp.none", "Fit one model only (no comparison)", nl.comparison.is_none(), None),
@@ -970,7 +1034,7 @@ fn render_fit_compare_tab(
     if let Some(cur_cmp) = &nl.comparison {
         ui.add_space(6.0);
         render_section_title(ui, tokens, "Select Null / Alternative Comparison Equation");
-        for entry in builtin_catalog().iter().take(18) {
+        for entry in builtin_catalog() {
             if entry.id == nl.equation_id {
                 continue;
             }
@@ -1110,21 +1174,23 @@ fn render_fit_constrain_tab(
                 let mut picker = ConstantHookPickerState::default();
                 picker.open_for_document(result_sheet_id.clone(), Some(target_param.clone()), doc);
                 render_section_title(ui, tokens, &format!("Link Constant to `{target_param}`"));
-                for opt in picker.options.iter().take(12) {
-                    if render_modal_seg_btn(
-                        ui,
-                        tokens,
-                        meta,
-                        &format!("fit.con.hook_opt.{}.{}", target_param, opt.label),
-                        &format!("{} ({})", opt.label, opt.preview_value),
-                        false,
-                        &ControlEnablement::enabled(),
-                    ) {
-                        let source = opt.source.clone();
-                        update_param_rule(spec, &target_param, move |r| r.scope = ParameterScope::HookedConstant(source), intents);
-                        ctx.data_mut(|d| d.insert_temp::<Option<String>>(hook_target_key, None));
+                egui::ScrollArea::vertical().id_salt("fit.con.hook_opt.scroll").max_height(180.0).auto_shrink([false, true]).show(ui, |ui| {
+                    for opt in &picker.options {
+                        if render_modal_seg_btn(
+                            ui,
+                            tokens,
+                            meta,
+                            &format!("fit.con.hook_opt.{}.{}", target_param, opt.label),
+                            &format!("{} ({})", opt.label, opt.preview_value),
+                            false,
+                            &ControlEnablement::enabled(),
+                        ) {
+                            let source = opt.source.clone();
+                            update_param_rule(spec, &target_param, move |r| r.scope = ParameterScope::HookedConstant(source), intents);
+                            ctx.data_mut(|d| d.insert_temp::<Option<String>>(hook_target_key, None));
+                        }
                     }
-                }
+                });
             });
     }
 }
@@ -1610,7 +1676,43 @@ fn render_fit_output_tab(
         &mut state.r2_threshold_draft,
         96.0,
     );
-    let _ = (&spec.p_value_format, PValueFormat::FourDecimal, column_titles_for_draft);
+
+    ui.add_space(6.0);
+    render_section_title(ui, tokens, "P-Value Display Formatting");
+    ui.horizontal_wrapped(|ui| {
+        for (wid, slug, lbl, active) in [
+            ("fit.out.pval.four_decimal", "four_decimal", "0.0001", matches!(spec.p_value_format, PValueFormat::FourDecimal)),
+            ("fit.out.pval.apa", "apa", "APA", matches!(spec.p_value_format, PValueFormat::Apa)),
+            ("fit.out.pval.nejm", "nejm", "NEJM", matches!(spec.p_value_format, PValueFormat::Nejm)),
+            ("fit.out.pval.custom", "custom", "Custom", matches!(spec.p_value_format, PValueFormat::Custom { .. })),
+        ] {
+            if render_modal_seg_btn(ui, tokens, meta, wid, lbl, active, &ControlEnablement::enabled()) {
+                intents.push_custom_view_action("stat_params", format!("set_pvalue_format:{slug}"));
+            }
+        }
+    });
+    let digits = match spec.p_value_format {
+        PValueFormat::FourDecimal => 4,
+        PValueFormat::Apa | PValueFormat::Nejm => 3,
+        PValueFormat::Custom { decimals, .. } => decimals,
+    };
+    let r9_en = r9_pvalue_precision_spinner(&spec.p_value_format);
+    let step = render_stepper_row(
+        ui,
+        tokens,
+        meta,
+        StepperSpec {
+            id_prefix: "fit.out.pvalue.digits",
+            label: "Custom P-Value Decimal Digits",
+            value_text: &digits.to_string(),
+            enablement: &r9_en,
+        },
+    );
+    if step < 0 {
+        intents.push_custom_view_action("stat_params", "spinner:edit.pvalue.digits:-1");
+    } else if step > 0 {
+        intents.push_custom_view_action("stat_params", "spinner:edit.pvalue.digits:1");
+    }
 }
 
 fn update_param_rule<F: FnOnce(&mut ParameterRule)>(spec: &curvebook_doc::AnalysisSpec, param_name: &str, mutate: F, intents: &mut PendingUiIntents) {

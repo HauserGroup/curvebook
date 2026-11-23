@@ -1,6 +1,6 @@
 //! `ActiveDialog::ResultViewer` modal renderer.
 
-use egui::Context;
+use egui::{Context, Key, Modifiers};
 
 use crate::UiApp;
 use crate::dialogs_canvas::{ActiveDialog, ResultSheetViewState};
@@ -87,7 +87,7 @@ pub fn render_result_viewer_modal(
                     }
                 });
             } else {
-                ui.label("No tabular results available.");
+                ui.label(tr(locale, "results.no_tabular"));
             }
         },
         |ui, _state, meta, intents| {
@@ -102,5 +102,8 @@ pub fn render_result_viewer_modal(
             });
         },
     );
+    if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        intents.push_dialog_button("cancel");
+    }
     StatsModalFrameReport::from(capture)
 }

@@ -39,69 +39,69 @@ struct StatTabDef {
     label: &'static str,
 }
 
-fn tabs_for_spec(app: &UiApp, spec: &curvebook_doc::AnalysisSpec) -> Vec<StatTabDef> {
+fn tabs_for_spec(app: &UiApp, spec: &curvebook_doc::AnalysisSpec, locale: &str) -> Vec<StatTabDef> {
     let is_mv = resolve_source_data_sheet(app.document(), &spec.source_sheet_id)
         .is_some_and(|ds| matches!(ds.archetype, TableArchetype::MultipleVariables(_)));
     match &spec.kind {
         AnalysisKind::TwoGroupComparison(_) => vec![
-            StatTabDef { slug: "experimental_design", label: "Design & Test" },
-            StatTabDef { slug: "repeated_measures", label: "Repeated Measures" },
-            StatTabDef { slug: "options", label: "Options" },
-            StatTabDef { slug: "diagnostics", label: "Diagnostics" },
+            StatTabDef { slug: "experimental_design", label: tr(locale, "stat_params.tab.design_test") },
+            StatTabDef { slug: "repeated_measures", label: tr(locale, "stat_params.tab.repeated_measures") },
+            StatTabDef { slug: "options", label: tr(locale, "stat_params.tab.options") },
+            StatTabDef { slug: "diagnostics", label: tr(locale, "stat_params.tab.diagnostics") },
         ],
         AnalysisKind::FactorialAnova(_) => {
             let mut v = Vec::new();
             if is_mv {
-                v.push(StatTabDef { slug: "data", label: "Data" });
+                v.push(StatTabDef { slug: "data", label: tr(locale, "stat_params.tab.data") });
             }
-            v.push(StatTabDef { slug: "experimental_design", label: "Design & Model" });
-            v.push(StatTabDef { slug: "repeated_measures", label: "Repeated Measures" });
-            v.push(StatTabDef { slug: "multiple_comparisons", label: "Comparisons" });
-            v.push(StatTabDef { slug: "options", label: "Options" });
+            v.push(StatTabDef { slug: "experimental_design", label: tr(locale, "stat_params.tab.design_model") });
+            v.push(StatTabDef { slug: "repeated_measures", label: tr(locale, "stat_params.tab.repeated_measures") });
+            v.push(StatTabDef { slug: "multiple_comparisons", label: tr(locale, "stat_params.tab.comparisons") });
+            v.push(StatTabDef { slug: "options", label: tr(locale, "stat_params.tab.options") });
             v
         }
         AnalysisKind::NestedComparison(_) | AnalysisKind::MultipleRowTTests(_) => vec![
-            StatTabDef { slug: "experimental_design", label: "Design & Data" },
-            StatTabDef { slug: "multiple_comparisons", label: "Multiple Comparisons" },
-            StatTabDef { slug: "options", label: "Options" },
+            StatTabDef { slug: "experimental_design", label: tr(locale, "stat_params.tab.design_data") },
+            StatTabDef { slug: "multiple_comparisons", label: tr(locale, "stat_params.tab.multiple_comparisons") },
+            StatTabDef { slug: "options", label: tr(locale, "stat_params.tab.options") },
         ],
         AnalysisKind::GeneralizedLinearModel(_)
         | AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { .. })
         | AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation { .. }) => vec![
-            StatTabDef { slug: "data", label: "Data" },
-            StatTabDef { slug: "experimental_design", label: "Model & Formula" },
-            StatTabDef { slug: "options", label: "Options" },
-            StatTabDef { slug: "diagnostics", label: "Diagnostics" },
+            StatTabDef { slug: "data", label: tr(locale, "stat_params.tab.data") },
+            StatTabDef { slug: "experimental_design", label: tr(locale, "stat_params.tab.model_formula") },
+            StatTabDef { slug: "options", label: tr(locale, "stat_params.tab.options") },
+            StatTabDef { slug: "diagnostics", label: tr(locale, "stat_params.tab.diagnostics") },
         ],
         AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { .. }) => {
             let mut v = Vec::new();
             if is_mv {
-                v.push(StatTabDef { slug: "data", label: "Data" });
+                v.push(StatTabDef { slug: "data", label: tr(locale, "stat_params.tab.data") });
             }
-            v.push(StatTabDef { slug: "experimental_design", label: "Survival Tests" });
-            v.push(StatTabDef { slug: "multiple_comparisons", label: "Pairwise Log-Rank" });
-            v.push(StatTabDef { slug: "options", label: "Confidence & Options" });
+            v.push(StatTabDef { slug: "experimental_design", label: tr(locale, "stat_params.tab.survival_tests") });
+            v.push(StatTabDef { slug: "multiple_comparisons", label: tr(locale, "stat_params.tab.pairwise_logrank") });
+            v.push(StatTabDef { slug: "options", label: tr(locale, "stat_params.tab.conf_options") });
             v
         }
         AnalysisKind::LinearRegression(_) => {
             let mut v = Vec::new();
             if is_mv {
-                v.push(StatTabDef { slug: "data", label: "Data" });
+                v.push(StatTabDef { slug: "data", label: tr(locale, "stat_params.tab.data") });
             }
-            v.push(StatTabDef { slug: "experimental_design", label: "Parameters" });
-            v.push(StatTabDef { slug: "range", label: "Range & Curve" });
-            v.push(StatTabDef { slug: "options", label: "Options" });
-            v.push(StatTabDef { slug: "diagnostics", label: "Diagnostics" });
+            v.push(StatTabDef { slug: "experimental_design", label: tr(locale, "stat_params.tab.parameters") });
+            v.push(StatTabDef { slug: "range", label: tr(locale, "stat_params.tab.range_curve") });
+            v.push(StatTabDef { slug: "options", label: tr(locale, "stat_params.tab.options") });
+            v.push(StatTabDef { slug: "diagnostics", label: tr(locale, "stat_params.tab.diagnostics") });
             v
         }
         _ => {
             let mut v = Vec::new();
             if is_mv {
-                v.push(StatTabDef { slug: "data", label: "Data" });
+                v.push(StatTabDef { slug: "data", label: tr(locale, "stat_params.tab.data") });
             }
-            v.push(StatTabDef { slug: "experimental_design", label: "Parameters" });
-            v.push(StatTabDef { slug: "options", label: "Options" });
-            v.push(StatTabDef { slug: "diagnostics", label: "Diagnostics" });
+            v.push(StatTabDef { slug: "experimental_design", label: tr(locale, "stat_params.tab.parameters") });
+            v.push(StatTabDef { slug: "options", label: tr(locale, "stat_params.tab.options") });
+            v.push(StatTabDef { slug: "diagnostics", label: tr(locale, "stat_params.tab.diagnostics") });
             v
         }
     }
@@ -290,9 +290,10 @@ pub fn render_stat_params_modal(
         return StatsModalFrameReport::default();
     };
 
+    let locale = normalize_locale(&app.locale);
     let (header_title, banner) = resolve_stat_params_banner(app, spec);
     state.last_resolved_banner.clone_from(&banner);
-    let tabs = tabs_for_spec(app, spec);
+    let tabs = tabs_for_spec(app, spec, locale);
     let ep = &app.canvas_dialogs.edit_params;
 
     // Sync active tab and transient input drafts cleanly when opening or switching sheets
@@ -300,7 +301,26 @@ pub fn render_stat_params_modal(
         state.open_session_sheet_id = Some(result_sheet_id.as_str().to_owned());
         state.active_tab = tabs.iter().find(|t| t.slug == ep.active_tab).map_or(tabs[0].slug, |t| t.slug).to_owned();
         state.show_method_reference = false;
-        state.method_saved_as_default = false;
+        let is_create_session = doc.result_sheet(result_sheet_id).is_none();
+        if is_create_session
+            && let Some(saved) = state.saved_defaults.iter().find(|d| std::mem::discriminant(&d.kind) == std::mem::discriminant(&spec.kind))
+        {
+            let mut applied = saved.clone();
+            applied.source_sheet_id = spec.source_sheet_id.clone();
+            applied.selected_data_sets.clone_from(&spec.selected_data_sets);
+            applied.custom_title.clone_from(&spec.custom_title);
+            if applied != *spec {
+                intents.push_set_edit_params_draft(applied);
+            }
+            state.method_saved_as_default = true;
+        } else {
+            state.method_saved_as_default = state.saved_defaults.iter().any(|saved| {
+                std::mem::discriminant(&saved.kind) == std::mem::discriminant(&spec.kind)
+                    && saved.kind == spec.kind
+                    && saved.confidence_level == spec.confidence_level
+                    && saved.p_value_format == spec.p_value_format
+            });
+        }
         if let AnalysisKind::LinearRegression(lin) = &spec.kind {
             let (lo, hi) = lin.x_range_filter.unwrap_or_default();
             state.lin_x_min_draft = lo.map_or_else(String::new, |v| format!("{v}"));
@@ -315,13 +335,20 @@ pub fn render_stat_params_modal(
             state.lin_plot_max_draft.clear();
             state.lin_segments_draft.clear();
         }
-    } else if !tabs.iter().any(|t| t.slug == state.active_tab) {
-        state.active_tab = tabs[0].slug.to_owned();
+    } else {
+        state.method_saved_as_default = state.saved_defaults.iter().any(|saved| {
+            std::mem::discriminant(&saved.kind) == std::mem::discriminant(&spec.kind)
+                && saved.kind == spec.kind
+                && saved.confidence_level == spec.confidence_level
+                && saved.p_value_format == spec.p_value_format
+        });
+        if !tabs.iter().any(|t| t.slug == state.active_tab) {
+            state.active_tab = tabs[0].slug.to_owned();
+        }
     }
 
     let is_create_mode = doc.result_sheet(result_sheet_id).is_none();
-    let locale = normalize_locale(&app.locale);
-    let ok_lbl = if is_create_mode { "Run Analysis" } else { tr(locale, "btn.ok") };
+    let ok_lbl = if is_create_mode { tr(locale, "anova.run_analysis") } else { tr(locale, "btn.ok") };
 
     let mut report = StatsModalFrameReport::from(show_wave4_modal(
         ctx,
@@ -379,23 +406,27 @@ pub fn render_stat_params_modal(
                     tokens,
                     meta,
                     "dialog.button.method_ref",
-                    "Method Reference",
+                    tr(locale, "anova.method_ref"),
                     false,
                     state.show_method_reference,
                     &ControlEnablement::enabled(),
                 ) {
                     state.show_method_reference = !state.show_method_reference;
                 }
+                let save_lbl = if state.method_saved_as_default { tr(locale, "anova.saved_default") } else { tr(locale, "anova.save_default") };
                 if render_modal_action_button(
                     ui,
                     tokens,
                     meta,
                     "dialog.button.save_default",
-                    "Save as Default",
+                    save_lbl,
                     false,
                     state.method_saved_as_default,
                     &ControlEnablement::enabled(),
                 ) {
+                    let disc = std::mem::discriminant(&spec.kind);
+                    state.saved_defaults.retain(|d| std::mem::discriminant(&d.kind) != disc);
+                    state.saved_defaults.push(spec.clone());
                     state.method_saved_as_default = true;
                     intents.push_save_edit_params_as_default();
                 }
@@ -405,7 +436,16 @@ pub fn render_stat_params_modal(
                     }
                     if !is_create_mode
                         && doc.result_sheet(result_sheet_id).is_some()
-                        && render_modal_action_button(ui, tokens, meta, "modal.apply", "Update Analysis", false, false, &ControlEnablement::enabled())
+                        && render_modal_action_button(
+                            ui,
+                            tokens,
+                            meta,
+                            "modal.apply",
+                            tr(locale, "anova.update_analysis"),
+                            false,
+                            false,
+                            &ControlEnablement::enabled(),
+                        )
                     {
                         intents.push_dialog_button("apply");
                     }
@@ -577,7 +617,7 @@ fn render_stat_design_tab(
 ) {
     let doc = app.document();
     match &spec.kind {
-        AnalysisKind::TwoGroupComparison(_) => render_two_group_design(ui, doc, ep, spec, tokens, meta, intents),
+        AnalysisKind::TwoGroupComparison(_) => render_two_group_design(ui, app, ep, spec, tokens, meta, intents),
         AnalysisKind::FactorialAnova(_) => render_factorial_anova_design(ui, doc, ep, spec, tokens, meta, intents),
         AnalysisKind::GeneralizedLinearModel(glm) => {
             render_section_title(ui, tokens, "Exponential Family & Link Function");
@@ -797,6 +837,12 @@ fn render_stat_diagnostics_tab(
     match &spec.kind {
         AnalysisKind::TwoGroupComparison(t) => {
             let diag_en = r4_two_group_diagnostics(t.method);
+            ui.label(
+                egui::RichText::new("Client preview toggles: ResultSheet diagnostics tabs are generated automatically by the engine.")
+                    .small()
+                    .color(tokens.text_muted),
+            );
+            ui.add_space(4.0);
             if render_modal_checkbox(
                 ui,
                 tokens,

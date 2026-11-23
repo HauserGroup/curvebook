@@ -344,13 +344,11 @@ pub(super) fn parse_rect_pt(val: Option<&Value>, default: RectPt) -> Result<Rect
     let Some(v) = val else {
         return Ok(default);
     };
-    if let Some(arr) = v.as_array()
-        && arr.len() == 4
-    {
-        let x = arr[0].as_f64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "rect x must be f64"))?;
-        let y = arr[1].as_f64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "rect y must be f64"))?;
-        let w = arr[2].as_f64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "rect width must be f64"))?;
-        let h = arr[3].as_f64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "rect height must be f64"))?;
+    if let Some([x_v, y_v, w_v, h_v]) = v.as_array().map(Vec::as_slice) {
+        let x = x_v.as_f64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "rect x must be f64"))?;
+        let y = y_v.as_f64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "rect y must be f64"))?;
+        let w = w_v.as_f64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "rect width must be f64"))?;
+        let h = h_v.as_f64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "rect height must be f64"))?;
         return Ok(RectPt::new(x, y, w, h));
     }
     serde_json::from_value(v.clone()).map_err(|err| EngineError::with_code(ErrorCode::BadInput, format!("invalid `bounds_pt`: {err}")))
@@ -1072,9 +1070,11 @@ fn run_graph_create(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Eng
         }
 
         let created_ids: Vec<String> = candidates.iter().map(|g| g.id.as_str().to_owned()).collect();
-        let first_title = candidates[0].title.clone();
-        let first_init = candidates[0].initialized;
-        let first_kind = candidates[0].spec.kind;
+        let first = candidates.first().ok_or_else(|| EngineError::with_code(ErrorCode::InternalError, "no graph candidates created"))?;
+        let first_id = first.id.as_str().to_owned();
+        let first_title = first.title.clone();
+        let first_init = first.initialized;
+        let first_kind = first.spec.kind;
         for graph in candidates {
             doc.add_graph_sheet(graph)?;
         }
@@ -1083,7 +1083,7 @@ fn run_graph_create(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Eng
             "graph.create",
             format!("created {} graph(s) from `{data_id}`", created_ids.len()),
             json!({
-                "sheet_id": created_ids[0],
+                "sheet_id": first_id,
                 "sheet_ids": created_ids,
                 "created_count": n,
                 "data_sheet_id": data_id.as_str(),
@@ -2143,8 +2143,8 @@ fn run_graph_apply_style_from(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
     let (primary_target_id, primary_source_sheet_id) =
         first_target.unwrap_or_else(|| (donor_id.as_str().to_owned(), donor_spec.primary_source_sheet_id.as_str().to_owned()));
     let mutated = !applied_ids.is_empty();
-    let msg = if applied_ids.len() == 1 {
-        format!("applied style from `{donor_id}` to `{}`", applied_ids[0])
+    let msg = if let [only_id] = applied_ids.as_slice() {
+        format!("applied style from `{donor_id}` to `{only_id}`")
     } else {
         format!("applied style from `{donor_id}` to {} graph(s)", applied_ids.len())
     };
@@ -2415,7 +2415,7 @@ fn resize_graph_spec(spec: &mut GraphSpec, new_size: SizePt, mode: CanvasResizeM
 
 fn okabe_swatch(idx: usize) -> Rgba8 {
     let swatches = PaletteId::OkabeIto.swatches();
-    swatches[idx % swatches.len()]
+    swatches.get(idx % swatches.len()).copied().unwrap_or(Rgba8::BLACK)
 }
 
 fn resolve_graph_option(option_id: &str, requested_kind: Option<GraphKind>) -> Option<(GraphKind, Option<GroupedArrangement>, Option<&'static str>)> {
@@ -3443,11 +3443,9 @@ fn parse_pair_f64(val: Option<&Value>, def: (f64, f64)) -> Result<(f64, f64), En
     let Some(v) = val else {
         return Ok(def);
     };
-    if let Some(arr) = v.as_array()
-        && arr.len() == 2
-    {
-        let x = arr[0].as_f64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "point x must be f64"))?;
-        let y = arr[1].as_f64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "point y must be f64"))?;
+    if let Some([x_v, y_v]) = v.as_array().map(Vec::as_slice) {
+        let x = x_v.as_f64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "point x must be f64"))?;
+        let y = y_v.as_f64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "point y must be f64"))?;
         return Ok((x, y));
     }
     if let Some(obj) = v.as_object()

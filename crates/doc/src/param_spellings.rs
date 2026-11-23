@@ -448,8 +448,8 @@ fn lookup_pairs(pairs: &[AliasPair], key: &str) -> Option<&'static str> {
 
 fn lookup_tables(tables: &[&[&'static str]], key: &str) -> Option<&'static str> {
     for &table in tables {
-        if let Some(&canonical) = table.first()
-            && table[1..].contains(&key)
+        if let Some((&canonical, aliases)) = table.split_first()
+            && aliases.contains(&key)
         {
             return Some(canonical);
         }
@@ -778,6 +778,8 @@ fn sheet_command_alias(command_id: &str, key: &str) -> Option<&'static str> {
                 ("rowFactorTitle", "row_factor_title"),
                 ("columnFactorTitle", "column_factor_title"),
                 ("timeTitle", "time_title"),
+                ("eventCode", "event_code"),
+                ("censoredCode", "censored_code"),
                 ("autoFamily", "auto_family"),
                 ("autoInfo", "auto_info"),
                 ("autoGraph", "auto_graph"),

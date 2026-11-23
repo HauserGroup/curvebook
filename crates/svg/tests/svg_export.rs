@@ -408,12 +408,10 @@ fn cld_sample_document() -> (ProjectDocument, GraphSheet) {
     };
 
     let mut table = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 3, 4).expect("column table");
-    table.data_sets[0].title = String::from("Ctrl");
-    table.data_sets[1].title = String::from("Mid");
-    table.data_sets[2].title = String::from("High");
-    for (c, base) in [(0, 10.0), (1, 14.0), (2, 22.0)] {
-        table.data_sets[c].cells =
-            vec![vec![Cell::number(base - 1.0)], vec![Cell::number(base)], vec![Cell::number(base + 1.0)], vec![Cell::number(base)]];
+    for (col, (title, base)) in [("Ctrl", 10.0), ("Mid", 14.0), ("High", 22.0)].into_iter().enumerate() {
+        let ds = table.data_sets.get_mut(col).expect("column dataset");
+        ds.title = String::from(title);
+        ds.cells = vec![vec![Cell::number(base - 1.0)], vec![Cell::number(base)], vec![Cell::number(base + 1.0)], vec![Cell::number(base)]];
     }
     let ds = DataSheet::new(SheetId::new("col-cld"), "Treatment", TableArchetype::Column(table)).expect("data sheet");
     let spec = AnalysisSpec::new(SheetId::new("res-cld"), SheetId::new("col-cld"), AnalysisKind::OneWayAnova(OneWayAnovaSpec::default()))
@@ -481,9 +479,9 @@ fn extract_svg_text_xy(svg: &str, tspan_text: &str) -> (f64, f64) {
     let line = svg.lines().find(|l| l.contains(&needle)).expect("SVG text line for CLD label");
     let parse_attr = |attr: &str| -> f64 {
         let key = format!("{attr}=\"");
-        let start = line.find(&key).expect("SVG coordinate attribute") + key.len();
-        let end = start + line[start..].find('"').expect("closing quote");
-        line[start..end].parse::<f64>().expect("numeric SVG coordinate")
+        let (_, after_key) = line.split_once(&key).expect("SVG coordinate attribute");
+        let (val, _) = after_key.split_once('"').expect("closing quote");
+        val.parse::<f64>().expect("numeric SVG coordinate")
     };
     (parse_attr("x"), parse_attr("y"))
 }

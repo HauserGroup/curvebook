@@ -11,7 +11,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use curvebook_doc::{ErrorCode, ProjectDocument, ResultSheet, SheetId, SheetSection};
 use curvebook_engine::cmd::{Caller, CommandGroup, Effects, registry};
 use curvebook_engine::{EngineError, ExternalPathPolicy, GuiOnlyPolicy, Session};
-use curvebook_format::{CsvOptions, export_datasheet_to_csv};
 use curvebook_platform::sync::{LockError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 #[cfg(not(target_arch = "wasm32"))]
 use curvebook_platform::{PlatformError, WorkdirGuard};
@@ -23,6 +22,9 @@ use crate::formats;
 use crate::gui_tools;
 use crate::toolsets::{self, ToolAnnotations, command_id_to_mcp_tool_name, command_spec_to_tool_definition, group_enum_json, parse_command_group};
 use crate::ui_catalog::UI_COMMANDS;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use live_control::MAX_CONTROL_RESPONSE_BYTES;
 
 const MAX_BATCH_COMMANDS: usize = 1024;
 const MAX_PRE_CANCELLED_IDS: usize = 256;
@@ -1177,7 +1179,7 @@ fn dispatch_tool_inner(state: &mut McpServerState, name: &str, arguments: Value)
         "command_batch" => handle_command_batch(state, args),
         "render_preview" => formats::handle_render_preview(state, args),
         "export" => formats::handle_export(state, args),
-        "list_toolsets" => toolsets::handle_list_toolsets(state),
+        "list_toolsets" => toolsets::handle_list_toolsets(state, args),
         "enable_toolset" => toolsets::handle_enable_toolset(state, args),
         _ => {
             if let Some(spec) = toolsets::find_command_spec_by_tool_name(name)
@@ -1230,6 +1232,7 @@ fn handle_direct_command_tool(state: &mut McpServerState, command_id: &str, para
 }
 
 fn handle_doc_inspect(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
+    gui_tools::reject_unknown_args("doc_inspect", args, &["sheet_id", "include_cells"])?;
     let sheet_id = optional_non_empty_str(args, "sheet_id")?;
     let include_cells = optional_bool(args, "include_cells")?.unwrap_or(false);
 
@@ -1281,7 +1284,10 @@ fn inspect_single_sheet(doc: &ProjectDocument, target: &SheetId, include_cells: 
     };
 
     let detail = match section {
-        SheetSection::Data => doc.data_sheet(target).map(|ds| {
+        SheetSection::Data => {
+            let Some(ds) = doc.data_sheet(target) else {
+                return Ok(errors::result_from_code(ErrorCode::NotFound, format!("sheet '{}' not found", target.as_str())));
+            };
             let mut val = json!({
                 "section": "data",
                 "id": ds.id,
@@ -1295,11 +1301,21 @@ fn inspect_single_sheet(doc: &ProjectDocument, target: &SheetId, include_cells: 
                 "upstream_dependencies": deps,
             });
             if include_cells && let Some(obj) = val.as_object_mut() {
-                let csv = export_datasheet_to_csv(ds, &CsvOptions::csv()).unwrap_or_default();
-                obj.insert(String::from("csv_preview"), Value::String(csv));
+                match crate::resources::build_csv_preview(ds) {
+                    Ok((csv, truncated)) => {
+                        obj.insert(String::from("csv_preview"), Value::String(csv));
+                        obj.insert(String::from("csv_preview_truncated"), Value::Bool(truncated));
+                    }
+                    Err(crate::resources::ResourceError::Internal(msg)) => {
+                        return Ok(errors::result_from_code(ErrorCode::InternalError, msg));
+                    }
+                    Err(err) => {
+                        return Ok(errors::result_from_code(ErrorCode::InternalError, format!("{err:?}")));
+                    }
+                }
             }
-            val
-        }),
+            Some(val)
+        }
         SheetSection::Info => doc.info_sheet(target).map(|info| {
             json!({
                 "section": "info",
@@ -1314,8 +1330,13 @@ fn inspect_single_sheet(doc: &ProjectDocument, target: &SheetId, include_cells: 
         SheetSection::Analyses => doc.result_sheet(target).map(|rs| {
             let mut val = summarize_result_sheet(rs, &deps);
             if include_cells && let Some(obj) = val.as_object_mut() {
-                obj.insert(String::from("tabs"), serde_json::to_value(&rs.tabs).unwrap_or(Value::Null));
-                obj.insert(String::from("checklist"), serde_json::to_value(&rs.checklist).unwrap_or(Value::Null));
+                let (tabs_preview, tabs_truncated) = crate::resources::slice_result_tabs_preview(&rs.tabs);
+                let (checklist_preview, checklist_truncated) =
+                    crate::resources::slice_preview_vec(&rs.checklist, crate::resources::MAX_RESULT_PREVIEW_CHECKLIST);
+                obj.insert(String::from("tabs"), serde_json::to_value(&tabs_preview).unwrap_or(Value::Null));
+                obj.insert(String::from("tabs_truncated"), Value::Bool(tabs_truncated));
+                obj.insert(String::from("checklist"), serde_json::to_value(&checklist_preview).unwrap_or(Value::Null));
+                obj.insert(String::from("checklist_truncated"), Value::Bool(checklist_truncated));
             }
             val
         }),
@@ -1446,6 +1467,7 @@ fn build_document_summary(session: &Session) -> Value {
 }
 
 fn summarize_result_sheet(rs: &ResultSheet, deps: &[SheetId]) -> Value {
+    let (scalars_preview, scalars_truncated) = crate::resources::slice_preview_vec(&rs.scalars, crate::resources::MAX_RESULT_PREVIEW_SCALARS);
     let mut payload = json!({
         "section": "analyses",
         "id": rs.id,
@@ -1455,7 +1477,8 @@ fn summarize_result_sheet(rs: &ResultSheet, deps: &[SheetId]) -> Value {
         "status": rs.status,
         "has_analyzable_data": rs.analyzable_data.is_some(),
         "tabs_count": rs.tabs.len(),
-        "scalars": rs.scalars,
+        "scalars": scalars_preview,
+        "scalars_truncated": scalars_truncated,
         "pairwise_comparisons_count": rs.pairwise_comparisons.len(),
         "fitted_curves_count": rs.fitted_curves.len(),
         "checklist_count": rs.checklist.len(),
@@ -1518,6 +1541,7 @@ fn collect_variables_and_hooks(doc: &ProjectDocument) -> (Value, Vec<Value>) {
 }
 
 fn handle_command_list(state: &McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
+    gui_tools::reject_unknown_args("command_list", args, &["filter", "group", "include_ui", "ui_only"])?;
     let filter = optional_non_empty_str(args, "filter")?.map(|s| s.to_ascii_lowercase());
     let group_filter = match optional_non_empty_str(args, "group")? {
         Some(raw) => Some(parse_command_group(&raw)?),
@@ -1591,6 +1615,7 @@ fn matches_filter(filter: Option<&str>, id: &str, label: &str, menu_path: &str, 
 }
 
 fn handle_command_run(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
+    gui_tools::reject_unknown_args("command_run", args, &["command_id", "params"])?;
     let command_id = required_non_empty_str(args, "command_id")?;
     let params = extract_command_params(args)?;
     match execute_single_command(state, &command_id, params) {
@@ -1600,6 +1625,7 @@ fn handle_command_run(state: &mut McpServerState, args: &Map<String, Value>) -> 
 }
 
 fn handle_command_batch(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
+    gui_tools::reject_unknown_args("command_batch", args, &["commands", "atomic"])?;
     let Some(items) = args.get("commands").and_then(Value::as_array) else {
         return Err(ToolCallError::InvalidParams(String::from("command_batch requires an array \"commands\"")));
     };
@@ -1924,22 +1950,23 @@ pub(crate) fn optional_u32_bounded(args: &Map<String, Value>, key: &str, min: u3
 #[must_use]
 pub(crate) fn encode_base64(input: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let enc = |idx: u32| -> char { TABLE.get((idx & 0x3F) as usize).copied().map(char::from).unwrap_or('=') };
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
-        let b0 = chunk[0];
+        let b0 = chunk.first().copied().unwrap_or(0);
         let b1 = chunk.get(1).copied().unwrap_or(0);
         let b2 = chunk.get(2).copied().unwrap_or(0);
         let triple = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
 
-        out.push(char::from(TABLE[((triple >> 18) & 0x3F) as usize]));
-        out.push(char::from(TABLE[((triple >> 12) & 0x3F) as usize]));
+        out.push(enc(triple >> 18));
+        out.push(enc(triple >> 12));
         if chunk.len() > 1 {
-            out.push(char::from(TABLE[((triple >> 6) & 0x3F) as usize]));
+            out.push(enc(triple >> 6));
         } else {
             out.push('=');
         }
         if chunk.len() > 2 {
-            out.push(char::from(TABLE[(triple & 0x3F) as usize]));
+            out.push(enc(triple));
         } else {
             out.push('=');
         }
@@ -2011,10 +2038,54 @@ mod live_control {
     use crate::errors::StructuredErrorPayload;
 
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
-    const IO_TIMEOUT: Duration = Duration::from_secs(5);
+    const DEFAULT_IO_TIMEOUT: Duration = Duration::from_secs(30);
+    const HEAVY_IO_TIMEOUT: Duration = Duration::from_secs(120);
+    const MIN_CONFIGURED_IO_TIMEOUT_MS: u64 = 100;
+    const MAX_CONFIGURED_IO_TIMEOUT_MS: u64 = 600_000;
     pub(crate) const MAX_CONTROL_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
     const MAX_CONTROL_TOKEN_BYTES: usize = 512;
     const MAX_CONTROL_TOKEN_FILE_BYTES: usize = 1024;
+
+    pub(crate) fn io_timeout_for_method_with_env(
+        method: &str,
+        env_get: &impl Fn(&str) -> Option<OsString>,
+    ) -> Result<Duration, StructuredErrorPayload> {
+        if let Some(raw_ms) = env_get("CURVEBOOK_CONTROL_IO_TIMEOUT_MS").filter(|v| !v.to_string_lossy().trim().is_empty()) {
+            let text = raw_ms
+                .to_str()
+                .ok_or_else(|| StructuredErrorPayload::new(ErrorCode::BadInput, "CURVEBOOK_CONTROL_IO_TIMEOUT_MS must be valid UTF-8"))?;
+            let parsed = text.trim().parse::<u64>().map_err(|_| {
+                StructuredErrorPayload::new(
+                    ErrorCode::BadInput,
+                    format!("invalid CURVEBOOK_CONTROL_IO_TIMEOUT_MS `{text}`: expected integer milliseconds in {MIN_CONFIGURED_IO_TIMEOUT_MS}..={MAX_CONFIGURED_IO_TIMEOUT_MS}"),
+                )
+            })?;
+            if !(MIN_CONFIGURED_IO_TIMEOUT_MS..=MAX_CONFIGURED_IO_TIMEOUT_MS).contains(&parsed) {
+                return Err(StructuredErrorPayload::new(
+                    ErrorCode::BadInput,
+                    format!("CURVEBOOK_CONTROL_IO_TIMEOUT_MS={parsed} out of range [{MIN_CONFIGURED_IO_TIMEOUT_MS}, {MAX_CONFIGURED_IO_TIMEOUT_MS}]"),
+                ));
+            }
+            return Ok(Duration::from_millis(parsed));
+        }
+        let is_heavy = matches!(
+            method,
+            "doc.export"
+                | "command.batch"
+                | "engine.execute"
+                | "project.open"
+                | "project.save"
+                | "project.instantiateTemplate"
+                | "table.importPrism"
+                | "table.importPzfx"
+                | "table.importCsv"
+                | "render.preview"
+                | "render.pdf"
+                | "render.svg"
+                | "ui.screenshot"
+        );
+        Ok(if is_heavy { HEAVY_IO_TIMEOUT } else { DEFAULT_IO_TIMEOUT })
+    }
 
     #[derive(Debug, Deserialize)]
     struct ControlResponse {
@@ -2066,34 +2137,67 @@ mod live_control {
     }
 
     #[cfg(unix)]
-    fn verify_private_dir(path: &std::path::Path, expected_uid: u32, label: &str, must_exist: bool) -> Result<(), StructuredErrorPayload> {
+    fn verify_unix_dir_checked(
+        path: &std::path::Path,
+        expected_uid: u32,
+        label: &str,
+        must_exist: bool,
+        forbidden_mode_bits: u32,
+    ) -> Result<(), (bool, StructuredErrorPayload)> {
         use std::os::unix::fs::MetadataExt;
         let meta = match std::fs::symlink_metadata(path) {
             Ok(meta) => meta,
             Err(err) if !must_exist && err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(err) => {
-                return Err(StructuredErrorPayload::new(ErrorCode::BadInput, format!("failed to inspect {label} `{}`: {err}", path.display())));
+                let is_perm_denied = err.kind() == std::io::ErrorKind::PermissionDenied;
+                return Err((
+                    is_perm_denied,
+                    StructuredErrorPayload::new(ErrorCode::BadInput, format!("failed to inspect {label} `{}`: {err}", path.display())),
+                ));
             }
         };
         if meta.file_type().is_symlink() || !meta.is_dir() {
-            return Err(StructuredErrorPayload::new(
-                ErrorCode::BadInput,
-                format!("refusing unsafe non-directory or symlink {label} `{}`", path.display()),
+            return Err((
+                false,
+                StructuredErrorPayload::new(ErrorCode::BadInput, format!("refusing unsafe non-directory or symlink {label} `{}`", path.display())),
             ));
         }
         if meta.uid() != expected_uid {
-            return Err(StructuredErrorPayload::new(
-                ErrorCode::BadInput,
-                format!("refusing {label} `{}` owned by uid {} (expected uid {expected_uid})", path.display(), meta.uid()),
+            return Err((
+                false,
+                StructuredErrorPayload::new(
+                    ErrorCode::BadInput,
+                    format!("refusing {label} `{}` owned by uid {} (expected uid {expected_uid})", path.display(), meta.uid()),
+                ),
             ));
         }
-        if (meta.mode() & 0o077) != 0 {
-            return Err(StructuredErrorPayload::new(
-                ErrorCode::BadInput,
-                format!("refusing {label} `{}` with group/world permissions {:04o} (must be private 0700)", path.display(), meta.mode() & 0o777),
+        if (meta.mode() & forbidden_mode_bits) != 0 {
+            let requirement = if forbidden_mode_bits == 0o077 { "must be private 0700" } else { "must not be group/world-writable" };
+            return Err((
+                false,
+                StructuredErrorPayload::new(
+                    ErrorCode::BadInput,
+                    format!("refusing {label} `{}` with permissions {:04o} ({requirement})", path.display(), meta.mode() & 0o777),
+                ),
             ));
         }
         Ok(())
+    }
+
+    #[cfg(unix)]
+    fn verify_unix_dir(
+        path: &std::path::Path,
+        expected_uid: u32,
+        label: &str,
+        must_exist: bool,
+        forbidden_mode_bits: u32,
+    ) -> Result<(), StructuredErrorPayload> {
+        verify_unix_dir_checked(path, expected_uid, label, must_exist, forbidden_mode_bits).map_err(|(_, err)| err)
+    }
+
+    #[cfg(unix)]
+    fn verify_private_dir(path: &std::path::Path, expected_uid: u32, label: &str, must_exist: bool) -> Result<(), StructuredErrorPayload> {
+        verify_unix_dir(path, expected_uid, label, must_exist, 0o077)
     }
 
     #[cfg(unix)]
@@ -2112,45 +2216,62 @@ mod live_control {
         Ok(uid_root)
     }
 
-    pub(crate) fn resolve_config_dir_with_env(env_get: &impl Fn(&str) -> Option<OsString>) -> Result<PathBuf, StructuredErrorPayload> {
+    fn resolve_config_dir_parts_with_env(env_get: &impl Fn(&str) -> Option<OsString>) -> Result<(PathBuf, bool), StructuredErrorPayload> {
         let nonempty_path = |key: &str| env_get(key).filter(|v| !v.is_empty()).map(PathBuf::from);
         if let Some(raw_cfg) = env_get("CURVEBOOK_CONFIG_DIR").filter(|v| !v.to_string_lossy().trim().is_empty()) {
-            return Ok(PathBuf::from(raw_cfg));
+            return Ok((PathBuf::from(raw_cfg), false));
         }
-
         #[cfg(target_os = "macos")]
         {
             if let Some(home) = nonempty_path("HOME") {
-                return Ok(home.join("Library").join("Application Support").join("CurveBook"));
+                Ok((home.join("Library").join("Application Support").join("CurveBook"), true))
+            } else {
+                Ok((resolve_unix_private_fallback_root(env_get)?, false))
             }
-            resolve_unix_private_fallback_root(env_get)
         }
         #[cfg(target_os = "windows")]
         {
             let fallback_base = nonempty_path("USERPROFILE").map(|h| h.join("AppData").join("Roaming").join("CurveBook"));
-            nonempty_path("APPDATA").map(|p| p.join("CurveBook")).or(fallback_base).ok_or_else(|| {
+            let dir = nonempty_path("APPDATA").map(|p| p.join("CurveBook")).or(fallback_base).ok_or_else(|| {
                 StructuredErrorPayload::new(
                     ErrorCode::BadInput,
                     "cannot determine CurveBook config directory: APPDATA and USERPROFILE are unset (set CURVEBOOK_CONFIG_DIR)",
                 )
-            })
+            })?;
+            Ok((dir, false))
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         {
-            if let Some(dir) = nonempty_path("XDG_CONFIG_HOME")
-                .map(|p| p.join("curvebook"))
-                .or_else(|| nonempty_path("HOME").map(|h| h.join(".config").join("curvebook")))
-            {
-                return Ok(dir);
+            if let Some(xdg) = nonempty_path("XDG_CONFIG_HOME") {
+                let uid = current_unix_uid()?;
+                verify_unix_dir(&xdg, uid, "XDG_CONFIG_HOME directory", false, 0o022)?;
+                Ok((xdg.join("curvebook"), false))
+            } else if let Some(home) = nonempty_path("HOME") {
+                Ok((home.join(".config").join("curvebook"), true))
+            } else {
+                let uid = current_unix_uid()?;
+                let root = resolve_unix_private_fallback_root(env_get)?;
+                let cfg_dir = root.join("config");
+                verify_private_dir(&cfg_dir, uid, "per-user config fallback directory", false)?;
+                Ok((cfg_dir, false))
             }
-            let uid = current_unix_uid()?;
-            let root = resolve_unix_private_fallback_root(env_get)?;
-            let cfg_dir = root.join("config");
-            verify_private_dir(&cfg_dir, uid, "per-user config fallback directory", false)?;
-            Ok(cfg_dir)
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn resolve_config_dir_with_env(env_get: &impl Fn(&str) -> Option<OsString>) -> Result<PathBuf, StructuredErrorPayload> {
+        let (resolved, _) = resolve_config_dir_parts_with_env(env_get)?;
+
+        #[cfg(unix)]
+        {
+            let uid = current_unix_uid()?;
+            verify_unix_dir(&resolved, uid, "config directory", false, 0o022)?;
+        }
+
+        Ok(resolved)
+    }
+
+    #[cfg(test)]
     pub(crate) fn control_token_file_path_with_env(
         port: u16,
         env_get: &impl Fn(&str) -> Option<OsString>,
@@ -2160,6 +2281,81 @@ mod live_control {
 
     pub(crate) fn resolve_default_control_token(port: u16) -> Result<Option<String>, StructuredErrorPayload> {
         resolve_default_control_token_with_env(port, &|key| std::env::var_os(key))
+    }
+
+    #[cfg(unix)]
+    fn read_private_control_token_file_unix(path: &std::path::Path) -> Result<Option<Vec<u8>>, StructuredErrorPayload> {
+        use std::os::unix::fs::MetadataExt;
+        let expected_uid = current_unix_uid()?;
+        let lmeta = match std::fs::symlink_metadata(path) {
+            Ok(meta) => meta,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => {
+                return Err(StructuredErrorPayload::new(
+                    ErrorCode::IoError,
+                    format!("failed to inspect control token file `{}`: {err}", path.display()),
+                ));
+            }
+        };
+        if lmeta.file_type().is_symlink() || !lmeta.file_type().is_file() {
+            return Err(StructuredErrorPayload::new(
+                ErrorCode::BadInput,
+                format!("refusing unsafe symlink or non-regular control token file `{}`", path.display()),
+            ));
+        }
+        if lmeta.uid() != expected_uid {
+            return Err(StructuredErrorPayload::new(
+                ErrorCode::BadInput,
+                format!("refusing control token file `{}` owned by uid {} (expected uid {expected_uid})", path.display(), lmeta.uid()),
+            ));
+        }
+        if (lmeta.mode() & 0o077) != 0 {
+            return Err(StructuredErrorPayload::new(
+                ErrorCode::BadInput,
+                format!(
+                    "refusing control token file `{}` with group/world permissions {:04o} (must be private 0600)",
+                    path.display(),
+                    lmeta.mode() & 0o777
+                ),
+            ));
+        }
+        if lmeta.len() > MAX_CONTROL_TOKEN_FILE_BYTES as u64 {
+            return Err(StructuredErrorPayload::new(
+                ErrorCode::BadInput,
+                format!("control token file `{}` exceeds maximum {MAX_CONTROL_TOKEN_FILE_BYTES} bytes", path.display()),
+            ));
+        }
+
+        let file = std::fs::File::open(path).map_err(|err| {
+            StructuredErrorPayload::new(ErrorCode::IoError, format!("failed to open control token file `{}`: {err}", path.display()))
+        })?;
+        let fmeta = file.metadata().map_err(|err| {
+            StructuredErrorPayload::new(ErrorCode::IoError, format!("failed to inspect opened control token file `{}`: {err}", path.display()))
+        })?;
+        if !fmeta.file_type().is_file()
+            || fmeta.uid() != expected_uid
+            || (fmeta.mode() & 0o077) != 0
+            || fmeta.dev() != lmeta.dev()
+            || fmeta.ino() != lmeta.ino()
+        {
+            return Err(StructuredErrorPayload::new(
+                ErrorCode::BadInput,
+                format!("control token file `{}` failed safety checks after open", path.display()),
+            ));
+        }
+
+        let mut buf = Vec::new();
+        let cap = (MAX_CONTROL_TOKEN_FILE_BYTES as u64).saturating_add(1);
+        file.take(cap).read_to_end(&mut buf).map_err(|err| {
+            StructuredErrorPayload::new(ErrorCode::IoError, format!("failed to read control token file `{}`: {err}", path.display()))
+        })?;
+        if buf.len() > MAX_CONTROL_TOKEN_FILE_BYTES {
+            return Err(StructuredErrorPayload::new(
+                ErrorCode::BadInput,
+                format!("control token file `{}` exceeds maximum {MAX_CONTROL_TOKEN_FILE_BYTES} bytes", path.display()),
+            ));
+        }
+        Ok(Some(buf))
     }
 
     pub(crate) fn resolve_default_control_token_with_env(
@@ -2177,7 +2373,25 @@ mod live_control {
             }
         }
 
-        let path = control_token_file_path_with_env(port, env_get)?;
+        let (dir, _is_implicit_home) = resolve_config_dir_parts_with_env(env_get)?;
+        let path = dir.join(format!("control-{port}.token"));
+        #[cfg(unix)]
+        let Some(buf) = ({
+            let uid = current_unix_uid()?;
+            if let Err((is_perm_denied, err)) = verify_unix_dir_checked(&dir, uid, "config directory", false, 0o022) {
+                if _is_implicit_home
+                    && is_perm_denied
+                    && matches!(std::fs::symlink_metadata(&path), Err(meta_err) if meta_err.kind() == std::io::ErrorKind::NotFound)
+                {
+                    return Ok(None);
+                }
+                return Err(err);
+            }
+            read_private_control_token_file_unix(&path)?
+        }) else {
+            return Ok(None);
+        };
+        #[cfg(not(unix))]
         let buf = match curvebook_platform::fs::read_regular_file_bytes_if_exists(&path, MAX_CONTROL_TOKEN_FILE_BYTES) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return Ok(None),
@@ -2209,14 +2423,15 @@ mod live_control {
         if port == 0 {
             return Err(StructuredErrorPayload::new(ErrorCode::BadInput, "control port must be in 1..=65535"));
         }
+        let io_timeout = io_timeout_for_method_with_env(method, &|key| std::env::var_os(key))?;
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         let mut stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT).map_err(|err| {
             StructuredErrorPayload::new(ErrorCode::IoError, format!("failed to connect to desktop control port 127.0.0.1:{port}: {err}"))
                 .with_retryable(true)
                 .with_remediation("Ensure the desktop control server is running and reachable on 127.0.0.1.")
         })?;
-        let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
-        let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
+        let _ = stream.set_read_timeout(Some(io_timeout));
+        let _ = stream.set_write_timeout(Some(io_timeout));
 
         let mut writer = stream
             .try_clone()
@@ -2377,7 +2592,8 @@ mod live_control {
                 if buf.len().saturating_add(take) > max_bytes {
                     return Err(format!("control response exceeds {max_bytes} bytes"));
                 }
-                buf.extend_from_slice(&avail[..take]);
+                let chunk = avail.get(..take).ok_or_else(|| String::from("short control read buffer"))?;
+                buf.extend_from_slice(chunk);
                 reader.consume(take);
                 return Ok(buf);
             }
@@ -2712,8 +2928,19 @@ mod tests {
         assert_eq!(super::live_control::resolve_default_control_token_with_env(port, &fake_env).expect("missing file ok"), None);
 
         let tok_path = super::live_control::control_token_file_path_with_env(port, &fake_env).expect("token path");
-        std::fs::create_dir_all(tok_path.parent().expect("parent")).expect("mkdir");
+        let tok_parent = tok_path.parent().expect("parent");
+        std::fs::create_dir_all(tok_parent).expect("mkdir");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(tok_parent, std::fs::Permissions::from_mode(0o700)).expect("chmod dir 0700");
+        }
         std::fs::write(&tok_path, "file-token-99\n").expect("write token file");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tok_path, std::fs::Permissions::from_mode(0o600)).expect("chmod token 0600");
+        }
         assert_eq!(
             super::live_control::resolve_default_control_token_with_env(port, &fake_env).expect("read token file"),
             Some(String::from("file-token-99"))
@@ -2731,10 +2958,50 @@ mod tests {
         );
 
         // When HOME/XDG are unset on Unix, MCP resolves a UID-scoped path (never shared `/tmp/curvebook`)
-        // and rejects symlinked fallback directories explicitly.
+        // and rejects symlinked fallback directories, permissive token files, and group-writable/symlinked config dirs.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+
+            // Permissive 0o644 / 0o660 / symlinked control-{port}.token files must be rejected.
+            std::fs::set_permissions(&tok_path, std::fs::Permissions::from_mode(0o644)).expect("chmod 0644");
+            assert!(super::live_control::resolve_default_control_token_with_env(port, &fake_env).is_err());
+            std::fs::set_permissions(&tok_path, std::fs::Permissions::from_mode(0o660)).expect("chmod 0660");
+            assert!(super::live_control::resolve_default_control_token_with_env(port, &fake_env).is_err());
+            std::fs::set_permissions(&tok_path, std::fs::Permissions::from_mode(0o600)).expect("restore 0600");
+
+            let real_tok_target = tmp_dir.join("real-token.txt");
+            std::fs::write(&real_tok_target, "sym-token-88\n").expect("write target");
+            std::fs::set_permissions(&real_tok_target, std::fs::Permissions::from_mode(0o600)).expect("chmod target 0600");
+            let sym_cfg = tmp_dir.join("sym-tok-cfg");
+            std::fs::create_dir_all(&sym_cfg).expect("sym cfg");
+            std::fs::set_permissions(&sym_cfg, std::fs::Permissions::from_mode(0o700)).expect("chmod 0700");
+            std::os::unix::fs::symlink(&real_tok_target, sym_cfg.join(format!("control-{port}.token"))).expect("symlink token");
+            let sym_cfg_os = OsString::from(&sym_cfg);
+            assert!(
+                super::live_control::resolve_default_control_token_with_env(port, &|k| {
+                    if k == "CURVEBOOK_CONFIG_DIR" { Some(sym_cfg_os.clone()) } else { None }
+                })
+                .is_err()
+            );
+
+            // Group-writable (0o775) and symlinked CURVEBOOK_CONFIG_DIR must be rejected.
+            let gw_cfg = tmp_dir.join("gw-cfg");
+            std::fs::create_dir_all(&gw_cfg).expect("gw cfg");
+            std::fs::set_permissions(&gw_cfg, std::fs::Permissions::from_mode(0o775)).expect("chmod 0775");
+            let gw_os = OsString::from(&gw_cfg);
+            assert!(
+                super::live_control::resolve_config_dir_with_env(&|k| if k == "CURVEBOOK_CONFIG_DIR" { Some(gw_os.clone()) } else { None }).is_err()
+            );
+
+            let sym_dir = tmp_dir.join("sym-cfg-dir");
+            std::os::unix::fs::symlink(tok_parent, &sym_dir).expect("symlink cfg dir");
+            let sym_dir_os = OsString::from(&sym_dir);
+            assert!(
+                super::live_control::resolve_config_dir_with_env(&|k| { if k == "CURVEBOOK_CONFIG_DIR" { Some(sym_dir_os.clone()) } else { None } })
+                    .is_err()
+            );
+
             let unset_tmp = tmp_dir.join("unset-home-tmp");
             std::fs::create_dir_all(&unset_tmp).expect("unset tmp");
             let unset_os = OsString::from(&unset_tmp);
@@ -2759,6 +3026,34 @@ mod tests {
                 super::live_control::resolve_config_dir_with_env(&|key| if key == "XDG_RUNTIME_DIR" { Some(rt_os.clone()) } else { None }).is_err()
             );
         }
+
+        // Verify heavy synchronous control methods receive longer IO timeouts and env override works.
+        assert_eq!(super::live_control::io_timeout_for_method_with_env("ping", &|_| None).expect("ping timeout"), std::time::Duration::from_secs(30));
+        assert_eq!(
+            super::live_control::io_timeout_for_method_with_env("doc.export", &|_| None).expect("doc.export timeout"),
+            std::time::Duration::from_secs(120)
+        );
+        assert_eq!(
+            super::live_control::io_timeout_for_method_with_env("command.batch", &|_| None).expect("command.batch timeout"),
+            std::time::Duration::from_secs(120)
+        );
+        assert_eq!(
+            super::live_control::io_timeout_for_method_with_env("project.open", &|_| None).expect("project.open timeout"),
+            std::time::Duration::from_secs(120)
+        );
+        assert_eq!(
+            super::live_control::io_timeout_for_method_with_env("doc.export", &|k| {
+                if k == "CURVEBOOK_CONTROL_IO_TIMEOUT_MS" { Some(OsString::from("45000")) } else { None }
+            })
+            .expect("env override timeout"),
+            std::time::Duration::from_millis(45_000)
+        );
+        assert!(
+            super::live_control::io_timeout_for_method_with_env("ping", &|k| {
+                if k == "CURVEBOOK_CONTROL_IO_TIMEOUT_MS" { Some(OsString::from("0")) } else { None }
+            })
+            .is_err()
+        );
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }

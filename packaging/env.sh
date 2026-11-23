@@ -14,8 +14,41 @@ export ROOT
 
 workspace_version() {
   awk '
-    /^\[/ { in_pkg = ($0 == "[workspace.package]") ; next }
-    in_pkg && $1 == "version" { gsub(/[" ]/, "", $3); print $3; exit }
+    {
+      # Strip # comments outside quotes cleanly
+      out = ""
+      in_dq = 0
+      in_sq = 0
+      esc = 0
+      for (i = 1; i <= length($0); i++) {
+        c = substr($0, i, 1)
+        if (in_dq) {
+          if (esc) { esc = 0 }
+          else if (c == "\\") { esc = 1 }
+          else if (c == "\"") { in_dq = 0 }
+        } else if (in_sq) {
+          if (c == "'"'"'") { in_sq = 0 }
+        } else {
+          if (c == "\"") { in_dq = 1 }
+          else if (c == "'"'"'") { in_sq = 1 }
+          else if (c == "#") { break }
+        }
+        out = out c
+      }
+      sub(/^[[:space:]]+/, "", out)
+      sub(/[[:space:]]+$/, "", out)
+      if (out == "") next
+      if (substr(out, 1, 1) == "[") {
+        in_pkg = (out == "[workspace.package]")
+        next
+      }
+      if (in_pkg && out ~ /^version[[:space:]]*=/) {
+        sub(/^version[[:space:]]*=[[:space:]]*/, "", out)
+        gsub(/^["'"'"']|["'"'"']$/, "", out)
+        print out
+        exit
+      }
+    }
   ' "$ROOT/Cargo.toml"
 }
 
@@ -43,7 +76,7 @@ warn() {
 
 copy_docs() {
   local dest="$1" f
-  for f in README.md LICENSE LICENSE-MIT LICENSE-APACHE COPYRIGHT NOTICE ASSETS.md; do
+  for f in README.md LICENSE LICENSE-MIT LICENSE-APACHE COPYRIGHT NOTICE ATTRIBUTION.md ASSETS.md; do
     if [[ -f "$ROOT/$f" ]]; then cp "$ROOT/$f" "$dest/"; fi
   done
   if [[ -d "$ROOT/licenses" ]]; then

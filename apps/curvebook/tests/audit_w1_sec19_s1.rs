@@ -45,7 +45,9 @@ fn build_rich_test_project() -> Result<ProjectDocument, Box<dyn std::error::Erro
     let mut doc = ProjectDocument::default();
 
     let mut xy = XyTable::new(SubcolumnMode::Single, 1, 4)?;
-    xy.data_sets[0].title = String::from("Signal");
+    if let Some(ds0) = xy.data_sets.first_mut() {
+        ds0.title = String::from("Signal");
+    }
     let mut ds_xy = DataSheet::new("ds-xy", "Dose Response", TableArchetype::Xy(xy))?;
     ds_xy.set_x_or_time_cell(0, 0, Cell::number(1.0))?;
     ds_xy.set_cell(CellCoord::new(0, 0, 0), Cell::number(10.0))?;
@@ -84,6 +86,7 @@ fn new_host_runtime(in_window_menus: bool, recovery_root: Option<PathBuf>) -> De
         theme_override: None,
         recovery_root,
         initial_viewport: ViewportMetrics::new(1280.0, 820.0, 1.0),
+        ..DesktopHostConfig::default()
     })
 }
 
@@ -157,11 +160,13 @@ fn press_cmd_q(native: &mut CurveBookNativeApp, ctx: &egui::Context) -> Vec<View
 }
 
 fn decode_png_dimensions(bytes: &[u8]) -> Result<(u32, u32), String> {
-    if bytes.len() < 24 || !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+    if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Err(String::from("invalid PNG signature"));
     }
-    let w = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
-    let h = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+    let dims = bytes.get(16..24).ok_or_else(|| String::from("invalid PNG signature"))?;
+    let (w_bytes, h_bytes) = dims.split_at_checked(4).ok_or_else(|| String::from("invalid PNG signature"))?;
+    let w = u32::from_be_bytes(w_bytes.try_into().map_err(|_| String::from("invalid PNG width"))?);
+    let h = u32::from_be_bytes(h_bytes.try_into().map_err(|_| String::from("invalid PNG height"))?);
     Ok((w, h))
 }
 
@@ -177,14 +182,15 @@ fn base64_encode(data: &[u8]) -> String {
     const LUT: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
-        let b0 = chunk[0];
+        let b0 = chunk.first().copied().unwrap_or(0);
         let b1 = chunk.get(1).copied().unwrap_or(0);
         let b2 = chunk.get(2).copied().unwrap_or(0);
         let n = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
-        out.push(LUT[((n >> 18) & 0x3F) as usize] as char);
-        out.push(LUT[((n >> 12) & 0x3F) as usize] as char);
-        out.push(if chunk.len() > 1 { LUT[((n >> 6) & 0x3F) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { LUT[(n & 0x3F) as usize] as char } else { '=' });
+        let encode = |shift: usize| LUT.get(((n >> shift) & 0x3F) as usize).copied().unwrap_or(b'A') as char;
+        out.push(encode(18));
+        out.push(encode(12));
+        out.push(if chunk.len() > 1 { encode(6) } else { '=' });
+        out.push(if chunk.len() > 2 { encode(0) } else { '=' });
     }
     out
 }

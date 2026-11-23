@@ -416,7 +416,7 @@ fn r13_8_p2_14_beta_locales_3_themes_2_sizes_2_dpis_and_modal_capture() -> TestR
                 ("ui.image.format.open", json!({ "sheet_id": "g-xy", "annotation_index": 1 })),
             ] {
                 let mut app = base_app.clone();
-                let _ = app.set_locale(locale);
+                assert_eq!(app.set_locale(locale), locale);
                 let _ = dispatch_gui_action(&mut app, "ui.invoke_menu", json!({ "command_id": cmd_id, "params": params }))?;
                 app.sync_views();
                 let mut drv = make_driver(TestState::new(app), ViewportMetrics::new(w_pt, h_pt, 1.0));

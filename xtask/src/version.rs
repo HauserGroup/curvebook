@@ -16,10 +16,11 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
         [sub, ver] if sub == "set" => {
             validate_semver(ver)?;
             let updated = replace_workspace_version(&text, ver)?;
-            let tmp = root.join("Cargo.toml.tmp");
-            std::fs::write(&tmp, &updated).map_err(|e| format!("write Cargo.toml.tmp: {e}"))?;
-            std::fs::rename(&tmp, &manifest).map_err(|e| format!("rename Cargo.toml.tmp: {e}"))?;
-            refresh_lockfile(root)?;
+            curvebook_platform::fs::write_atomic(&manifest, updated.as_bytes()).map_err(|e| format!("write Cargo.toml: {e}"))?;
+            if let Err(err) = refresh_lockfile(root) {
+                let _ = curvebook_platform::fs::write_atomic(&manifest, text.as_bytes());
+                return Err(err);
+            }
             println!("version: set workspace version to {ver}");
             Ok(())
         }
@@ -27,18 +28,22 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     }
 }
 
+fn is_toml_version_rhs(trimmed: &str) -> Option<&str> {
+    let rest = trimmed.strip_prefix("version")?;
+    let trimmed_rest = rest.trim_start();
+    trimmed_rest.strip_prefix('=')
+}
+
 pub fn read_workspace_version(cargo_toml: &str) -> Result<String, String> {
     let mut in_ws_pkg = false;
     for line in cargo_toml.lines() {
         let t = line.trim();
-        if t.starts_with('[') {
-            in_ws_pkg = t == "[workspace.package]";
+        let no_comment = t.split('#').next().unwrap_or_default().trim();
+        if no_comment.starts_with('[') && no_comment.ends_with(']') {
+            in_ws_pkg = no_comment == "[workspace.package]";
             continue;
         }
-        if in_ws_pkg
-            && let Some(rest) = t.strip_prefix("version")
-            && let Some((_, rhs)) = rest.split_once('=')
-        {
+        if in_ws_pkg && let Some(rhs) = is_toml_version_rhs(t) {
             let v = rhs.split('#').next().unwrap_or_default().trim().trim_matches('"');
             if !v.is_empty() {
                 return Ok(v.to_owned());
@@ -62,9 +67,10 @@ pub fn replace_workspace_version(cargo_toml: &str, new_ver: &str) -> Result<Stri
     let mut replaced = false;
     for line in cargo_toml.split_inclusive('\n') {
         let t = line.trim();
-        if t.starts_with('[') {
-            in_ws_pkg = t == "[workspace.package]";
-        } else if in_ws_pkg && !replaced && t.starts_with("version") && t.contains('=') {
+        let no_comment = t.split('#').next().unwrap_or_default().trim();
+        if no_comment.starts_with('[') && no_comment.ends_with(']') {
+            in_ws_pkg = no_comment == "[workspace.package]";
+        } else if in_ws_pkg && !replaced && is_toml_version_rhs(t).is_some() {
             let newline = if line.ends_with("\r\n") {
                 "\r\n"
             } else if line.ends_with('\n') {
@@ -102,7 +108,7 @@ mod tests {
 
     #[test]
     fn reads_validates_and_replaces_workspace_version() {
-        let toml = "[workspace]\nmembers = []\n\n[workspace.package]\nversion = \"0.1.0\"\nedition = \"2024\"\n";
+        let toml = "[workspace]\nmembers = []\n\n[workspace.package] # trailing comment\nversion_extra = \"9.9.9\"\nversion = \"0.1.0\"\nedition = \"2024\"\n";
         assert_eq!(read_workspace_version(toml).unwrap(), "0.1.0");
         for good in ["0.1.0", "0.2.0-rc.1", "1.0.0-alpha.2", "1.2.3-beta-1.0"] {
             validate_semver(good).unwrap();
@@ -111,6 +117,7 @@ mod tests {
             assert!(validate_semver(bad).is_err(), "expected failure for `{bad}`");
         }
         let next = replace_workspace_version(toml, "0.2.0-rc.1").unwrap();
+        assert!(next.contains("version_extra = \"9.9.9\""), "unrelated `version_*` key must stay untouched");
         assert_eq!(read_workspace_version(&next).unwrap(), "0.2.0-rc.1");
     }
 }

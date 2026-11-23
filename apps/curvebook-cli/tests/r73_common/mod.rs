@@ -154,11 +154,11 @@ impl McpChild {
     fn read_until_id(&mut self, expected_id: u64) -> Result<Value, String> {
         loop {
             let msg = self.read_message()?;
-            if msg.get("id").is_none() || msg["id"].is_null() {
+            if msg.get("id").is_none_or(Value::is_null) {
                 self.notifications.push_back(msg);
                 continue;
             }
-            if msg["id"] != json!(expected_id) {
+            if msg.get("id") != Some(&json!(expected_id)) {
                 return Err(format!("JSON-RPC id mismatch: expected {expected_id}, got {msg}"));
             }
             return Ok(msg);
@@ -182,7 +182,7 @@ impl McpChild {
             return Err(format!("initialize failed: {err}"));
         }
         self.send_notification("notifications/initialized", json!({}))?;
-        Ok(resp["result"].clone())
+        Ok(resp.get("result").cloned().unwrap_or(Value::Null))
     }
 
     pub fn call_tool_raw(&mut self, name: &str, arguments: Value) -> Result<Value, String> {
@@ -190,12 +190,12 @@ impl McpChild {
         if let Some(err) = resp.get("error") {
             return Err(format!("JSON-RPC protocol error calling `{name}`: {err}"));
         }
-        Ok(resp["result"].clone())
+        Ok(resp.get("result").cloned().unwrap_or(Value::Null))
     }
 
     pub fn call_tool_ok(&mut self, name: &str, arguments: Value) -> Result<Value, String> {
         let result = self.call_tool_raw(name, arguments)?;
-        if result["isError"] == json!(true) {
+        if result.get("isError").and_then(Value::as_bool) == Some(true) {
             return Err(format!("tool `{name}` returned isError=true: {result}"));
         }
         Ok(result)
@@ -206,8 +206,9 @@ impl McpChild {
         if let Some(sc) = result.get("structuredContent").filter(|v| !v.is_null()) {
             return Ok(sc.clone());
         }
-        let text = result["content"]
-            .as_array()
+        let text = result
+            .get("content")
+            .and_then(Value::as_array)
             .and_then(|arr| arr.iter().find_map(|b| b.get("text").and_then(Value::as_str)))
             .ok_or_else(|| format!("tool `{name}` missing text/structuredContent: {result}"))?;
         serde_json::from_str(text).map_err(|e| format!("parse tool `{name}` text JSON `{text}`: {e}"))
@@ -215,7 +216,7 @@ impl McpChild {
 
     pub fn call_tool_err(&mut self, name: &str, arguments: Value) -> Result<Value, String> {
         let result = self.call_tool_raw(name, arguments)?;
-        if result["isError"] != json!(true) {
+        if result.get("isError").and_then(Value::as_bool) != Some(true) {
             return Err(format!("expected tool `{name}` to return isError=true, got: {result}"));
         }
         if let Some(sc) = result.get("structuredContent").filter(|v| !v.is_null()) {
@@ -242,16 +243,17 @@ impl McpChild {
                 "dpi": 144,
             }),
         )?;
-        let img = result["content"]
-            .as_array()
-            .and_then(|arr| arr.iter().find(|b| b["type"] == json!("image")))
+        let img = result
+            .get("content")
+            .and_then(Value::as_array)
+            .and_then(|arr| arr.iter().find(|b| b.get("type").and_then(Value::as_str) == Some("image")))
             .ok_or_else(|| format!("ui_screenshot missing image block: {result}"))?;
-        if img["mimeType"] != json!("image/png") {
+        if img.get("mimeType").and_then(Value::as_str) != Some("image/png") {
             return Err(format!("ui_screenshot unexpected mimeType: {img}"));
         }
-        let b64 = img["data"].as_str().ok_or_else(|| format!("ui_screenshot missing base64 data: {img}"))?;
+        let b64 = img.get("data").and_then(Value::as_str).ok_or_else(|| format!("ui_screenshot missing base64 data: {img}"))?;
         let bytes = decode_base64(b64)?;
-        if bytes.len() < 128 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" {
+        if bytes.len() < 128 || !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
             return Err(format!("ui_screenshot invalid PNG bytes (len={})", bytes.len()));
         }
         Ok(bytes)
@@ -335,7 +337,11 @@ impl McpChild {
 
     pub fn create_table(&mut self, params: Value) -> Result<String, String> {
         let res = self.ui_invoke("sheet.createData", params)?;
-        res["payload"]["sheet_id"].as_str().map(ToOwned::to_owned).ok_or_else(|| format!("sheet.createData missing sheet_id: {res}"))
+        res.get("payload")
+            .and_then(|p| p.get("sheet_id"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| format!("sheet.createData missing sheet_id: {res}"))
     }
 
     pub fn paste_tsv(&mut self, sheet_id: &str, row: usize, col: usize, subcol: usize, tsv: &str) -> Result<(), String> {
@@ -377,8 +383,12 @@ impl McpChild {
 
     pub fn navigator_result_ids(&mut self) -> Result<Vec<String>, String> {
         let nav = self.ui_inspect("navigator", false)?;
-        let arr = nav["navigator_sheets"].as_array().ok_or_else(|| format!("missing navigator_sheets in ui_inspect: {nav}"))?;
-        Ok(arr.iter().filter(|s| s["section"] == json!("results")).filter_map(|s| s["sheet_id"].as_str().map(ToOwned::to_owned)).collect())
+        let arr = nav.get("navigator_sheets").and_then(Value::as_array).ok_or_else(|| format!("missing navigator_sheets in ui_inspect: {nav}"))?;
+        Ok(arr
+            .iter()
+            .filter(|s| s.get("section").and_then(Value::as_str) == Some("results"))
+            .filter_map(|s| s.get("sheet_id").and_then(Value::as_str).map(ToOwned::to_owned))
+            .collect())
     }
 
     pub fn run_analyze(&mut self, sheet_id: &str, fields: Value) -> Result<String, String> {
@@ -390,7 +400,7 @@ impl McpChild {
             "force_create_new": true,
             "action": "ok",
         }))?;
-        if let Some(sid) = out["payload"]["sheet_id"].as_str() {
+        if let Some(sid) = out.get("payload").and_then(|p| p.get("sheet_id")).and_then(Value::as_str) {
             return Ok(sid.to_owned());
         }
         let after = self.navigator_result_ids()?;
@@ -405,20 +415,20 @@ impl McpChild {
 
     pub fn graph_for_source(&mut self, source_id: &str) -> Result<String, String> {
         let nav = self.ui_inspect("navigator", false)?;
-        let arr = nav["navigator_sheets"].as_array().ok_or_else(|| format!("missing navigator_sheets: {nav}"))?;
+        let arr = nav.get("navigator_sheets").and_then(Value::as_array).ok_or_else(|| format!("missing navigator_sheets: {nav}"))?;
         let expected_prefix = format!("{source_id}-graph");
         if let Some(found) = arr
             .iter()
-            .filter(|s| s["section"] == json!("graphs"))
-            .filter_map(|s| s["sheet_id"].as_str())
+            .filter(|s| s.get("section").and_then(Value::as_str) == Some("graphs"))
+            .filter_map(|s| s.get("sheet_id").and_then(Value::as_str))
             .find(|id| id.starts_with(&expected_prefix) || *id == source_id)
         {
             return Ok(found.to_owned());
         }
         arr.iter()
             .rev()
-            .filter(|s| s["section"] == json!("graphs"))
-            .filter_map(|s| s["sheet_id"].as_str())
+            .filter(|s| s.get("section").and_then(Value::as_str) == Some("graphs"))
+            .filter_map(|s| s.get("sheet_id").and_then(Value::as_str))
             .next()
             .map(ToOwned::to_owned)
             .ok_or_else(|| format!("no graph sheet found near `{source_id}` in navigator: {nav}"))
@@ -450,14 +460,15 @@ pub fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
     let bytes = clean.as_bytes();
     let mut out = Vec::with_capacity((bytes.len() / 4) * 3);
     for chunk in bytes.as_chunks::<4>().0 {
-        let a = val(chunk[0])?;
-        let b = val(chunk[1])?;
+        let [c0, c1, c2, c3] = *chunk;
+        let a = val(c0)?;
+        let b = val(c1)?;
         out.push((a << 2) | (b >> 4));
-        if chunk[2] != b'=' {
-            let c = val(chunk[2])?;
+        if c2 != b'=' {
+            let c = val(c2)?;
             out.push((b << 4) | (c >> 2));
-            if chunk[3] != b'=' {
-                let d = val(chunk[3])?;
+            if c3 != b'=' {
+                let d = val(c3)?;
                 out.push((c << 6) | d);
             }
         }
@@ -466,7 +477,7 @@ pub fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
 }
 
 pub fn find_node<'a>(nodes: &'a Value, widget_id: &str) -> Option<&'a Value> {
-    nodes.as_array()?.iter().find(|n| n["widget_id"].as_str() == Some(widget_id))
+    nodes.as_array()?.iter().find(|n| n.get("widget_id").and_then(Value::as_str) == Some(widget_id))
 }
 
 pub fn assert_approx(actual: f64, expected: f64, tol: f64, label: &str) -> Result<(), String> {
@@ -485,7 +496,7 @@ pub fn save_and_verify_headless(
     verify: impl FnOnce(&mut McpChild) -> Result<(), String>,
 ) -> Result<(), String> {
     let save_out = gui.ui_invoke_path(&["File", "Save"], json!({ "path": archive_rel }))?;
-    if save_out["invoked"] != json!(true) {
+    if save_out.get("invoked").and_then(Value::as_bool) != Some(true) {
         return Err(format!("File/Save unexpected output: {save_out}"));
     }
     let archive_path = workdir.join(archive_rel);
@@ -498,7 +509,7 @@ pub fn save_and_verify_headless(
     let mut headless = McpChild::spawn(&["mcp", "--workdir", &wd_str])?;
     headless.initialize()?;
     let opened = headless.call_tool_payload("open_file", json!({ "path": archive_rel }))?;
-    if opened["total_sheet_count"].as_u64().or_else(|| opened["total_sheets"].as_u64()).unwrap_or(0) == 0 {
+    if opened.get("total_sheet_count").and_then(Value::as_u64).or_else(|| opened.get("total_sheets").and_then(Value::as_u64)).unwrap_or(0) == 0 {
         return Err(format!("reopened archive had zero sheets: {opened}"));
     }
     verify(&mut headless)
@@ -510,40 +521,48 @@ pub fn read_result_json(headless: &mut McpChild, result_sheet_id: &str) -> Resul
     if let Some(err) = resp.get("error") {
         return Err(format!("resources/read `{result_sheet_id}` error: {err}"));
     }
-    let text = resp["result"]["contents"][0]["text"].as_str().ok_or_else(|| format!("missing text in resources/read `{result_sheet_id}`: {resp}"))?;
+    let text = resp
+        .pointer("/result/contents/0/text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("missing text in resources/read `{result_sheet_id}`: {resp}"))?;
     serde_json::from_str(text).map_err(|e| format!("parse result JSON `{result_sheet_id}`: {e}"))
 }
 
 pub fn result_scalar_f64(rs_json: &Value, key: &str) -> Result<f64, String> {
-    if let Some(arr) = rs_json["scalars"].as_array()
-        && let Some(item) = arr.iter().find(|s| s["key"].as_str() == Some(key))
-        && let Some(v) = item["value"].as_f64()
+    if let Some(arr) = rs_json.get("scalars").and_then(Value::as_array)
+        && let Some(item) = arr.iter().find(|s| s.get("key").and_then(Value::as_str) == Some(key))
+        && let Some(v) = item.get("value").and_then(Value::as_f64)
     {
         return Ok(v);
     }
-    if let Some(obj) = rs_json["scalars"].as_object()
+    if let Some(obj) = rs_json.get("scalars").and_then(Value::as_object)
         && let Some(v) = obj.get(key).and_then(Value::as_f64)
     {
         return Ok(v);
     }
-    Err(format!("missing scalar `{key}` in result JSON: {}", rs_json["scalars"]))
+    Err(format!("missing scalar `{key}` in result JSON: {}", rs_json.get("scalars").unwrap_or(&Value::Null)))
 }
 
 pub fn result_tab<'a>(rs_json: &'a Value, tab_id: &str) -> Result<&'a Value, String> {
-    rs_json["tabs"]
-        .as_array()
-        .and_then(|arr| arr.iter().find(|t| t["id"].as_str() == Some(tab_id)))
+    rs_json
+        .get("tabs")
+        .and_then(Value::as_array)
+        .and_then(|arr| arr.iter().find(|t| t.get("id").and_then(Value::as_str) == Some(tab_id)))
         .ok_or_else(|| format!("missing tab `{tab_id}` in result JSON"))
 }
 
 pub fn tab_cell_f64(tab: &Value, row_label: &str, col_name: &str) -> Result<f64, String> {
-    let rows_lbl = tab["row_labels"].as_array().ok_or("tab missing row_labels")?;
-    let cols_hdr = tab["column_headers"].as_array().ok_or("tab missing column_headers")?;
+    let rows_lbl = tab.get("row_labels").and_then(Value::as_array).ok_or("tab missing row_labels")?;
+    let cols_hdr = tab.get("column_headers").and_then(Value::as_array).ok_or("tab missing column_headers")?;
     let r_idx =
         rows_lbl.iter().position(|v| v.as_str() == Some(row_label)).ok_or_else(|| format!("row `{row_label}` missing in tab rows={rows_lbl:?}"))?;
     let c_idx =
         cols_hdr.iter().position(|v| v.as_str() == Some(col_name)).ok_or_else(|| format!("col `{col_name}` missing in tab cols={cols_hdr:?}"))?;
-    let cell = &tab["rows"][r_idx][c_idx];
+    let cell = tab
+        .get("rows")
+        .and_then(|r| r.get(r_idx))
+        .and_then(|row| row.get(c_idx))
+        .ok_or_else(|| format!("missing cell at ({row_label}, {col_name})"))?;
     extract_result_cell_f64(cell).ok_or_else(|| format!("non-numeric cell at ({row_label}, {col_name}): {cell}"))
 }
 

@@ -30,11 +30,19 @@ fn sample_two_group_column_sheet(id: &str) -> DataSheet {
     let a = [10.1_f64, 11.4, 9.8, 10.7, 11.2];
     let b = [16.2_f64, 17.5, 15.9, 18.1, 16.8];
     let mut table = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, a.len()).unwrap();
-    table.data_sets[0].title = String::from("Control");
-    table.data_sets[1].title = String::from("Treatment_Alpha");
-    for r in 0..a.len() {
-        table.data_sets[0].cells[r][0] = Cell::number(a[r]);
-        table.data_sets[1].cells[r][0] = Cell::number(b[r]);
+    if let [ds0, ds1] = table.data_sets.as_mut_slice() {
+        ds0.title = String::from("Control");
+        ds1.title = String::from("Treatment_Alpha");
+        for (row, &val) in ds0.cells.iter_mut().zip(a.iter()) {
+            if let Some(cell) = row.first_mut() {
+                *cell = Cell::number(val);
+            }
+        }
+        for (row, &val) in ds1.cells.iter_mut().zip(b.iter()) {
+            if let Some(cell) = row.first_mut() {
+                *cell = Cell::number(val);
+            }
+        }
     }
     DataSheet::new(SheetId::new(id), "Two-Group Study", TableArchetype::Column(table)).unwrap()
 }
@@ -43,10 +51,12 @@ fn sample_rm_anova_column_sheet(id: &str) -> DataSheet {
     let groups =
         [("Baseline", [12.0_f64, 13.5, 11.8, 14.1, 12.6]), ("Week_4", [16.4, 17.8, 15.9, 18.5, 17.0]), ("Week_8", [21.2, 23.0, 20.5, 24.1, 22.4])];
     let mut table = ColumnTable::new(ColumnDesignHint::PairedRepeatedMeasures, groups.len(), 5).unwrap();
-    for (c, (name, vals)) in groups.iter().enumerate() {
-        table.data_sets[c].title = (*name).to_owned();
-        for (r, &v) in vals.iter().enumerate() {
-            table.data_sets[c].cells[r][0] = Cell::number(v);
+    for (ds, (name, vals)) in table.data_sets.iter_mut().zip(groups.iter()) {
+        ds.title = (*name).to_owned();
+        for (row, &v) in ds.cells.iter_mut().zip(vals.iter()) {
+            if let Some(cell) = row.first_mut() {
+                *cell = Cell::number(v);
+            }
         }
     }
     DataSheet::new(SheetId::new(id), "Longitudinal Biomarker", TableArchetype::Column(table)).unwrap()
@@ -56,16 +66,24 @@ fn sample_4pl_two_dataset_xy_sheet(id: &str, title: &str) -> DataSheet {
     let xs = [-9.5_f64, -8.5, -8.0, -7.5, -7.0, -6.5, -6.0, -5.5, -5.0, -4.0];
     let mut table = XyTable::new(SubcolumnMode::RawReplicates(2), 2, xs.len()).unwrap();
     table.x_title = String::from("Log10 [Agonist] (M)");
-    table.data_sets[0].title = String::from("Wildtype_A");
-    table.data_sets[1].title = String::from("Mutant_B");
-    for (r, &x) in xs.iter().enumerate() {
-        table.x_cells[r][0] = Cell::number(x);
-        let y0 = 10.0 + 90.0 / (1.0 + 10.0_f64.powf((-6.5 - x) * 1.1));
-        let y1 = 10.0 + 90.0 / (1.0 + 10.0_f64.powf((-5.8 - x) * 1.1));
-        table.data_sets[0].cells[r][0] = Cell::number(y0 - 0.6);
-        table.data_sets[0].cells[r][1] = Cell::number(y0 + 0.6);
-        table.data_sets[1].cells[r][0] = Cell::number(y1 - 0.6);
-        table.data_sets[1].cells[r][1] = Cell::number(y1 + 0.6);
+    if let [ds0, ds1] = table.data_sets.as_mut_slice() {
+        ds0.title = String::from("Wildtype_A");
+        ds1.title = String::from("Mutant_B");
+        for ((&x, x_row), (row0, row1)) in xs.iter().zip(table.x_cells.iter_mut()).zip(ds0.cells.iter_mut().zip(ds1.cells.iter_mut())) {
+            if let Some(x_cell) = x_row.first_mut() {
+                *x_cell = Cell::number(x);
+            }
+            let y0 = 10.0 + 90.0 / (1.0 + 10.0_f64.powf((-6.5 - x) * 1.1));
+            let y1 = 10.0 + 90.0 / (1.0 + 10.0_f64.powf((-5.8 - x) * 1.1));
+            if let [c0, c1] = row0.as_mut_slice() {
+                *c0 = Cell::number(y0 - 0.6);
+                *c1 = Cell::number(y0 + 0.6);
+            }
+            if let [c0, c1] = row1.as_mut_slice() {
+                *c0 = Cell::number(y1 - 0.6);
+                *c1 = Cell::number(y1 + 0.6);
+            }
+        }
     }
     DataSheet::new(SheetId::new(id), title, TableArchetype::Xy(table)).unwrap()
 }
@@ -84,15 +102,21 @@ fn sample_survival_sheet(id: &str) -> DataSheet {
         (28.0, None, Some(1.0)),
     ];
     let mut table = SurvivalTable::new(2, rows.len()).unwrap();
-    table.cohorts[0].title = String::from("Placebo");
-    table.cohorts[1].title = String::from("Active Drug");
-    for (r, &(t, c0, c1)) in rows.iter().enumerate() {
-        table.times[r] = Cell::number(t);
-        if let Some(ev) = c0 {
-            table.cohorts[0].cells[r][0] = Cell::number(ev);
-        }
-        if let Some(ev) = c1 {
-            table.cohorts[1].cells[r][0] = Cell::number(ev);
+    if let [ch0, ch1] = table.cohorts.as_mut_slice() {
+        ch0.title = String::from("Placebo");
+        ch1.title = String::from("Active Drug");
+        for ((&(t, c0, c1), time_cell), (row0, row1)) in rows.iter().zip(table.times.iter_mut()).zip(ch0.cells.iter_mut().zip(ch1.cells.iter_mut())) {
+            *time_cell = Cell::number(t);
+            if let Some(ev) = c0
+                && let Some(cell) = row0.first_mut()
+            {
+                *cell = Cell::number(ev);
+            }
+            if let Some(ev) = c1
+                && let Some(cell) = row1.first_mut()
+            {
+                *cell = Cell::number(ev);
+            }
         }
     }
     DataSheet::new(SheetId::new(id), "Survival Cohort", TableArchetype::Survival(table)).unwrap()
@@ -111,19 +135,35 @@ fn sample_multivariate_sheet(id: &str) -> DataSheet {
     ];
     let mut table = MultipleVariablesTable::new(6, rows.len()).unwrap();
     let titles = ["Marker_X", "Marker_Y", "Marker_Z", "Time_Months", "Event_Status", "Arm"];
-    for (c, title) in titles.iter().enumerate() {
-        table.variables[c].title = (*title).to_owned();
+    for (var, title) in table.variables.iter_mut().zip(titles.iter()) {
+        var.title = (*title).to_owned();
     }
-    table.variables[5].role = VariableRole::Categorical;
-    table.variables[5].role_inferred = false;
-    for (r, &(x, y, z, t, st, arm)) in rows.iter().enumerate() {
-        table.row_titles[r] = format!("Pt_{}", r + 1);
-        table.variables[0].cells[r] = Cell::number(x);
-        table.variables[1].cells[r] = Cell::number(y);
-        table.variables[2].cells[r] = Cell::number(z);
-        table.variables[3].cells[r] = Cell::number(t);
-        table.variables[4].cells[r] = Cell::number(st);
-        table.variables[5].cells[r] = Cell::text(arm);
+    if let [v0, v1, v2, v3, v4, v5] = table.variables.as_mut_slice() {
+        v5.role = VariableRole::Categorical;
+        v5.role_inferred = false;
+        for (r, &(x, y, z, t, st, arm)) in rows.iter().enumerate() {
+            if let Some(rt) = table.row_titles.get_mut(r) {
+                *rt = format!("Pt_{}", r + 1);
+            }
+            if let Some(c) = v0.cells.get_mut(r) {
+                *c = Cell::number(x);
+            }
+            if let Some(c) = v1.cells.get_mut(r) {
+                *c = Cell::number(y);
+            }
+            if let Some(c) = v2.cells.get_mut(r) {
+                *c = Cell::number(z);
+            }
+            if let Some(c) = v3.cells.get_mut(r) {
+                *c = Cell::number(t);
+            }
+            if let Some(c) = v4.cells.get_mut(r) {
+                *c = Cell::number(st);
+            }
+            if let Some(c) = v5.cells.get_mut(r) {
+                *c = Cell::text(arm);
+            }
+        }
     }
     DataSheet::new(SheetId::new(id), "Multivariate Cohort", TableArchetype::MultipleVariables(table)).unwrap()
 }

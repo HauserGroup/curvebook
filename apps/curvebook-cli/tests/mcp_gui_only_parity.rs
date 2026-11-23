@@ -14,6 +14,14 @@ use curvebook_mcp::{GUI_ONLY_SERVER_INSTRUCTIONS, GUI_TOOL_NAMES, McpServerState
 use curvebook_ui_egui::UiApp;
 use serde_json::{Value, json};
 
+fn env_truthy(var: &str) -> bool {
+    std::env::var(var).is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
+fn loopback_required() -> bool {
+    env_truthy("CI") || env_truthy("CURVEBOOK_REQUIRE_LOOPBACK")
+}
+
 fn write_framed_rpc(writer: &mut impl Write, payload: &Value) -> Result<(), Box<dyn std::error::Error>> {
     let body = serde_json::to_string(payload)?;
     let header = format!("Content-Length: {}\r\n\r\n", body.len());
@@ -149,6 +157,44 @@ fn mcp_in_process_gui_only_enforces_tool_surface_violations_and_real_ui_app() ->
     assert_eq!(initial_snap["gui_only"], json!(true));
     assert_eq!(initial_snap["active_dialog"], json!("none"));
 
+    // FA-X3-04: Canonical ViewportMetrics schema parity against real UiApp / InProcessUiGuiHost (`1024x640@1x` vs `1920x1200@2x` and alias equivalence).
+    let ui_inspect_tool = tools.iter().find(|t| t["name"] == json!("ui_inspect")).ok_or("missing ui_inspect schema")?;
+    let metrics_props =
+        ui_inspect_tool["inputSchema"]["properties"]["metrics"]["properties"].as_object().ok_or("ui_inspect missing metrics schema")?;
+    for req_key in ["logical_width", "logical_height", "scale_factor"] {
+        assert!(metrics_props.contains_key(req_key), "ui_inspect schema missing canonical ViewportMetrics field `{req_key}`");
+    }
+    let small_insp = mcp.call_tool(
+        120,
+        "ui_inspect",
+        json!({ "scope": "toolbar", "include_bounds": true, "metrics": { "logical_width": 1024.0, "logical_height": 640.0, "scale_factor": 1.0 } }),
+    )?;
+    assert_ne!(small_insp["result"]["isError"], json!(true), "canonical small metrics inspect failed: {small_insp}");
+    let small_snap: Value = serde_json::from_str(small_insp["result"]["content"][0]["text"].as_str().ok_or("missing small text")?)?;
+
+    let large_canon = mcp.call_tool(
+        121,
+        "ui_inspect",
+        json!({ "scope": "toolbar", "include_bounds": true, "metrics": { "logical_width": 1920.0, "logical_height": 1200.0, "scale_factor": 2.0 } }),
+    )?;
+    assert_ne!(large_canon["result"]["isError"], json!(true), "canonical large metrics inspect failed: {large_canon}");
+    let large_canon_snap: Value = serde_json::from_str(large_canon["result"]["content"][0]["text"].as_str().ok_or("missing large canon text")?)?;
+
+    let large_alias = mcp.call_tool(
+        122,
+        "ui_inspect",
+        json!({ "scope": "toolbar", "include_bounds": true, "metrics": { "width_px": 1920.0, "height_px": 1200.0, "scale_factor": 2.0 } }),
+    )?;
+    assert_ne!(large_alias["result"]["isError"], json!(true), "alias large metrics inspect failed: {large_alias}");
+    let large_alias_snap: Value = serde_json::from_str(large_alias["result"]["content"][0]["text"].as_str().ok_or("missing large alias text")?)?;
+
+    assert_ne!(small_snap["toolbar"], large_canon_snap["toolbar"], "canonical ViewportMetrics must change toolbar inspect bounds");
+    assert_eq!(large_canon_snap["toolbar"], large_alias_snap["toolbar"], "canonical ViewportMetrics and legacy alias must match on real UiApp");
+
+    let conflict_metrics =
+        mcp.call_tool(123, "ui_inspect", json!({ "scope": "toolbar", "metrics": { "logical_width": 1024.0, "width_px": 1280.0 } }))?;
+    assert!(conflict_metrics.get("error").is_some(), "conflicting ViewportMetrics + width_px alias must fail with InvalidParams");
+
     // Open Power & Sample Size wizard via array path segments to exercise InProcessUiGuiHost normalization too.
     let open_wiz = mcp.call_tool(21, "ui_invoke_menu", json!({ "path": ["Analyze", "Power and Sample Size..."] }))?;
     assert_ne!(open_wiz["result"]["isError"], json!(true), "ui_invoke_menu failed: {open_wiz}");
@@ -187,13 +233,13 @@ fn mcp_in_process_gui_only_enforces_tool_surface_violations_and_real_ui_app() ->
 fn mcp_control_port_gui_only_drives_live_control_tcp_session() -> Result<(), Box<dyn std::error::Error>> {
     let listener = match TcpListener::bind("127.0.0.1:0") {
         Ok(l) => l,
-        Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
+        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => return Ok(()),
         Err(err) => return Err(err.into()),
     };
     let addr = listener.local_addr()?;
     let port = addr.port();
     if let Err(err) = TcpStream::connect_timeout(&addr, Duration::from_millis(200)) {
-        if err.kind() == ErrorKind::PermissionDenied {
+        if err.kind() == ErrorKind::PermissionDenied && !loopback_required() {
             return Ok(());
         }
         return Err(err.into());
@@ -262,7 +308,8 @@ fn mcp_control_port_gui_only_drives_live_control_tcp_session() -> Result<(), Box
     assert!(serde_json::to_string(&blocked["result"])?.contains("gui_only_violation"));
 
     let inspected = mcp.call_tool(4, "ui_inspect", json!({ "scope": "all" }))?;
-    if inspected["result"]["isError"] == json!(true)
+    if !loopback_required()
+        && inspected["result"]["isError"] == json!(true)
         && inspected["result"]["structuredContent"]["code"] == json!("io_error")
         && inspected["result"]["structuredContent"]["message"]
             .as_str()
@@ -343,15 +390,15 @@ fn verify_live_attach_end_to_end(state: &mut McpServerState, workdir: &std::path
 
     let res_list = curvebook_mcp::dispatch_json_value(json!({"jsonrpc": "2.0", "id": 101, "method": "resources/list", "params": {}}), state)
         .ok_or("unexpected None from resources/list")?;
-    let resources = res_list["result"]["resources"].as_array().ok_or("missing resources array")?;
-    assert!(resources.iter().any(|r| r["uri"] == json!("sheet://live-data")), "missing live sheet resource: {res_list}");
+    let resources = res_list.pointer("/result/resources").and_then(Value::as_array).ok_or("missing resources array")?;
+    assert!(resources.iter().any(|r| r.get("uri") == Some(&json!("sheet://live-data"))), "missing live sheet resource: {res_list}");
 
     let res_read = curvebook_mcp::dispatch_json_value(
         json!({"jsonrpc": "2.0", "id": 102, "method": "resources/read", "params": {"uri": "sheet://live-data"}}),
         state,
     )
     .ok_or("unexpected None from resources/read")?;
-    let res_text = res_read["result"]["contents"][0]["text"].as_str().ok_or("missing resource text")?;
+    let res_text = res_read.pointer("/result/contents/0/text").and_then(Value::as_str).ok_or("missing resource text")?;
     assert!(res_text.contains("GroupA") && res_text.contains("25"), "unexpected live resource content: {res_text}");
 
     let preview = call(state, "render_preview", json!({ "sheet_id": "live-graph", "width_px": 256, "height_px": 160 }))?;
@@ -413,7 +460,7 @@ fn r1_s12_09_live_attach_stream_dispatch_forwards_tools_and_resources() -> Resul
 fn r1_s12_09_live_attach_forwards_tools_and_resources() -> Result<(), Box<dyn std::error::Error>> {
     let listener = match TcpListener::bind("127.0.0.1:0") {
         Ok(l) => l,
-        Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
+        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => return Ok(()),
         Err(err) => return Err(err.into()),
     };
     let port = listener.local_addr()?.port();
@@ -456,7 +503,8 @@ fn r1_s12_09_live_attach_forwards_tools_and_resources() -> Result<(), Box<dyn st
     assert!(state.set_workdir(Some(&workdir)).is_err(), "combining control_port and workdir must be rejected");
     let probe = curvebook_mcp::call_tool(&mut state, "command_run", json!({ "command_id": "ui.navigator.toggle", "params": {} }))
         .map_err(|e| format!("{e:?}"))?;
-    if probe.is_error
+    if !loopback_required()
+        && probe.is_error
         && probe.structured_content.as_ref().is_some_and(|s| {
             s["code"] == json!("io_error")
                 && s["message"].as_str().is_some_and(|m| m.contains("Operation not permitted") || m.contains("Permission denied"))
@@ -512,15 +560,15 @@ fn mcp_gui_only_r13_ui_commands_and_strict_block_parity() -> Result<(), Box<dyn 
     let grid_on = mcp.call_tool(20, "ui_invoke_menu", json!({ "command_id": "ui.gridOverlay.toggle", "params": { "visible": true } }))?;
     assert_ne!(grid_on["result"]["isError"], json!(true), "ui.gridOverlay.toggle failed: {grid_on}");
 
-    let row_titles = mcp.call_tool(21, "ui_invoke_menu", json!({ "command_id": "ui.view.rowTitles.toggle", "params": { "collapsed": false } }))?;
-    assert_ne!(row_titles["result"]["isError"], json!(true), "ui.view.rowTitles.toggle failed: {row_titles}");
-
     let create_xy = mcp.call_tool(
-        22,
+        21,
         "ui_invoke_menu",
         json!({ "command_id": "sheet.createData", "params": { "sheet_id": "xy-mcp-r13", "kind": "xy", "cols": 1, "rows": 4 } }),
     )?;
     assert_ne!(create_xy["result"]["isError"], json!(true), "sheet.createData via ui_invoke_menu failed: {create_xy}");
+
+    let row_titles = mcp.call_tool(22, "ui_invoke_menu", json!({ "command_id": "ui.view.rowTitles.toggle", "params": { "collapsed": false } }))?;
+    assert_ne!(row_titles["result"]["isError"], json!(true), "ui.view.rowTitles.toggle failed: {row_titles}");
 
     let open_cg =
         mcp.call_tool(23, "ui_invoke_menu", json!({ "command_id": "ui.graph.create.open", "params": { "source_sheet_id": "xy-mcp-r13" } }))?;

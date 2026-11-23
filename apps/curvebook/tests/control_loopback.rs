@@ -17,6 +17,14 @@ use curvebook_ui_egui::{
 };
 use serde_json::{Value, json};
 
+fn env_truthy(var: &str) -> bool {
+    std::env::var(var).is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
+fn loopback_required() -> bool {
+    env_truthy("CI") || env_truthy("CURVEBOOK_REQUIRE_LOOPBACK")
+}
+
 #[test]
 fn jsonl_control_protocol_end_to_end_over_in_memory_stream() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = UiApp::new();
@@ -249,8 +257,8 @@ fn loopback_validation_and_ephemeral_tcp_check_body() -> Result<(), Box<dyn std:
 
     let loopback_ephemeral = SocketAddr::from(([127, 0, 0, 1], 0));
     match bind_control_tcp_listener(loopback_ephemeral) {
-        Err(err) if err.kind() == ErrorKind::PermissionDenied => {
-            // Restricted sandboxes may deny TCP socket bind; in-memory stream test covers full protocol.
+        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => {
+            // Restricted local sandboxes may deny TCP socket bind; in-memory stream test covers full protocol.
         }
         Err(err) => return Err(Box::new(err)),
         Ok(listener) => {
@@ -260,7 +268,7 @@ fn loopback_validation_and_ephemeral_tcp_check_body() -> Result<(), Box<dyn std:
                     drop(probe);
                     let _ = listener.accept();
                 }
-                Err(err) if matches!(err.kind(), ErrorKind::PermissionDenied | ErrorKind::TimedOut) => {
+                Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => {
                     return Ok(());
                 }
                 Err(err) => return Err(Box::new(err)),
@@ -301,11 +309,13 @@ fn loopback_validation_and_ephemeral_tcp_check_body() -> Result<(), Box<dyn std:
 
             serve_control_listener(&mut app, &listener, &auth)?;
             let responses = client.join().map_err(|_| "client thread panicked")??;
-            assert_eq!(responses.len(), 4);
-            assert_eq!(responses[0]["ok"], json!(true));
-            assert_eq!(responses[1]["ok"], json!(true));
-            assert_eq!(responses[2]["ok"], json!(true));
-            assert_eq!(responses[3]["result"]["quit"], json!(true));
+            let [r0, r1, r2, r3] = responses.as_slice() else {
+                return Err(format!("expected 4 responses, got {}", responses.len()).into());
+            };
+            assert_eq!(r0.get("ok"), Some(&json!(true)));
+            assert_eq!(r1.get("ok"), Some(&json!(true)));
+            assert_eq!(r2.get("ok"), Some(&json!(true)));
+            assert_eq!(r3.pointer("/result/quit"), Some(&json!(true)));
             assert_eq!(app.document().data_sheets.len(), 1);
         }
     }
@@ -353,7 +363,7 @@ fn bad_control_connection_does_not_stop_the_server() -> Result<(), Box<dyn std::
 
 fn bad_control_connection_does_not_stop_the_server_body() -> Result<(), Box<dyn std::error::Error>> {
     let listener = match bind_control_tcp_listener(SocketAddr::from(([127, 0, 0, 1], 0))) {
-        Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
+        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => return Ok(()),
         other => other?,
     };
     let local_addr = listener.local_addr()?;
@@ -362,7 +372,7 @@ fn bad_control_connection_does_not_stop_the_server_body() -> Result<(), Box<dyn 
             drop(probe);
             let _ = listener.accept();
         }
-        Err(err) if matches!(err.kind(), ErrorKind::PermissionDenied | ErrorKind::TimedOut) => {
+        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => {
             return Ok(());
         }
         Err(err) => return Err(Box::new(err)),
@@ -395,7 +405,7 @@ fn bad_control_connection_does_not_stop_the_server_body() -> Result<(), Box<dyn 
         line.clear();
         std::io::BufRead::read_line(&mut reader, &mut line).map_err(|e| e.to_string())?;
         let quit: Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
-        if quit["result"]["quit"] != json!(true) {
+        if quit.pointer("/result/quit") != Some(&json!(true)) {
             return Err(format!("app.quit was not acknowledged: {quit}"));
         }
         cleanup.disarm();
@@ -404,7 +414,7 @@ fn bad_control_connection_does_not_stop_the_server_body() -> Result<(), Box<dyn 
 
     serve_control_listener(&mut app, &listener, &auth)?;
     let ping = client.join().map_err(|_| "client thread panicked")??;
-    assert_eq!(ping["ok"], json!(true));
+    assert_eq!(ping.get("ok"), Some(&json!(true)));
     Ok(())
 }
 
@@ -420,7 +430,7 @@ fn tcp_control_socket_rejects_unauthenticated_and_browser_http_post_before_dispa
     use std::io::Read;
 
     let listener = match bind_control_tcp_listener(SocketAddr::from(([127, 0, 0, 1], 0))) {
-        Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
+        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => return Ok(()),
         other => other?,
     };
     let local_addr = listener.local_addr()?;
@@ -429,7 +439,7 @@ fn tcp_control_socket_rejects_unauthenticated_and_browser_http_post_before_dispa
             drop(probe);
             let _ = listener.accept();
         }
-        Err(err) if matches!(err.kind(), ErrorKind::PermissionDenied | ErrorKind::TimedOut) => {
+        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => {
             return Ok(());
         }
         Err(err) => return Err(Box::new(err)),
@@ -526,7 +536,7 @@ fn tcp_control_socket_rejects_unauthenticated_and_browser_http_post_before_dispa
             line.clear();
             std::io::BufRead::read_line(&mut reader, &mut line).map_err(|e| e.to_string())?;
             let quit: Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
-            if quit["result"]["quit"] != json!(true) {
+            if quit.pointer("/result/quit") != Some(&json!(true)) {
                 return Err(format!("app.quit was not acknowledged: {quit}"));
             }
             response
@@ -539,20 +549,20 @@ fn tcp_control_socket_rejects_unauthenticated_and_browser_http_post_before_dispa
     serve_control_listener(&mut app, &listener, &auth)?;
     let (unauth_resp, wrong_resp, http_reply, ok_resp) = client.join().map_err(|_| "client thread panicked")??;
 
-    assert_eq!(unauth_resp["ok"], json!(false));
-    assert!(unauth_resp["error"].as_str().is_some_and(|e| e.contains("unauthorized")));
-    assert_eq!(unauth_resp["error_detail"]["code"], json!("unauthorized"));
+    assert_eq!(unauth_resp.get("ok"), Some(&json!(false)));
+    assert!(unauth_resp.get("error").and_then(Value::as_str).is_some_and(|e| e.contains("unauthorized")));
+    assert_eq!(unauth_resp.pointer("/error_detail/code"), Some(&json!("unauthorized")));
 
-    assert_eq!(wrong_resp["ok"], json!(false));
-    assert!(wrong_resp["error"].as_str().is_some_and(|e| e.contains("unauthorized")));
-    assert_eq!(wrong_resp["error_detail"]["code"], json!("unauthorized"));
+    assert_eq!(wrong_resp.get("ok"), Some(&json!(false)));
+    assert!(wrong_resp.get("error").and_then(Value::as_str).is_some_and(|e| e.contains("unauthorized")));
+    assert_eq!(wrong_resp.pointer("/error_detail/code"), Some(&json!("unauthorized")));
 
     assert_eq!(http_reply, CONTROL_HTTP_FORBIDDEN_RESPONSE);
     assert!(!forbidden_shot.exists(), "HTTP POST attack must never write screenshot file");
 
-    assert_eq!(ok_resp["ok"], json!(true));
+    assert_eq!(ok_resp.get("ok"), Some(&json!(true)));
     assert_eq!(app.document().data_sheets.len(), 1);
-    assert_eq!(app.document().data_sheets[0].id.as_str(), "good-1");
+    assert_eq!(app.document().data_sheets.first().map(|s| s.id.as_str()), Some("good-1"));
 
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())
@@ -568,7 +578,7 @@ fn control_server_survives_small_viewport_dialog_screenshot_and_continues() -> R
 
 fn control_server_survives_small_viewport_dialog_screenshot_and_continues_body() -> Result<(), Box<dyn std::error::Error>> {
     let listener = match bind_control_tcp_listener(SocketAddr::from(([127, 0, 0, 1], 0))) {
-        Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
+        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => return Ok(()),
         other => other?,
     };
     let local_addr = listener.local_addr()?;
@@ -577,7 +587,7 @@ fn control_server_survives_small_viewport_dialog_screenshot_and_continues_body()
             drop(probe);
             let _ = listener.accept();
         }
-        Err(err) if matches!(err.kind(), ErrorKind::PermissionDenied | ErrorKind::TimedOut) => {
+        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => {
             return Ok(());
         }
         Err(err) => return Err(Box::new(err)),
@@ -613,18 +623,18 @@ fn control_server_survives_small_viewport_dialog_screenshot_and_continues_body()
 
     serve_control_listener(&mut app, &listener, &auth)?;
     let (small_shot, next_ping, quit_resp) = client.join().map_err(|_| "client thread panicked")??;
-    if small_shot["ok"] == json!(false) {
-        assert_eq!(small_shot["error_detail"]["code"], json!("internal_panic"));
+    if small_shot.get("ok") == Some(&json!(false)) {
+        assert_eq!(small_shot.pointer("/error_detail/code"), Some(&json!("internal_panic")));
     }
-    assert_eq!(next_ping["ok"], json!(true));
-    assert_eq!(quit_resp["result"]["quit"], json!(true));
+    assert_eq!(next_ping.get("ok"), Some(&json!(true)));
+    assert_eq!(quit_resp.pointer("/result/quit"), Some(&json!(true)));
     Ok(())
 }
 
 #[test]
 fn cli_control_token_file_created_0600_enforced_and_cleaned_up_on_quit() -> Result<(), Box<dyn std::error::Error>> {
     let probe = match bind_control_tcp_listener(SocketAddr::from(([127, 0, 0, 1], 0))) {
-        Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
+        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => return Ok(()),
         other => other?,
     };
     let port = probe.local_addr()?.port();
@@ -671,7 +681,7 @@ fn cli_control_token_file_created_0600_enforced_and_cleaned_up_on_quit() -> Resu
     // Restricted sandboxes may permit bind() in probe while denying outbound connect().
     let first_stream = match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
         Ok(stream) => stream,
-        Err(err) if matches!(err.kind(), ErrorKind::PermissionDenied | ErrorKind::TimedOut) => {
+        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => {
             let _ = guard.0.kill();
             let _ = guard.0.wait();
             let _ = std::fs::remove_dir_all(&temp_dir);
@@ -728,7 +738,7 @@ fn tcp_fixture_client_error_and_panic_both_stop_the_listener() -> control_fixtur
     control_fixture::run("tcp_fixture_client_error_and_panic_both_stop_the_listener", || {
         for panic_client in [false, true] {
             let listener = match bind_control_tcp_listener(SocketAddr::from(([127, 0, 0, 1], 0))) {
-                Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
+                Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => return Ok(()),
                 other => other?,
             };
             let address = listener.local_addr()?;
@@ -737,7 +747,7 @@ fn tcp_fixture_client_error_and_panic_both_stop_the_listener() -> control_fixtur
                     drop(probe);
                     let _ = listener.accept();
                 }
-                Err(err) if matches!(err.kind(), ErrorKind::PermissionDenied | ErrorKind::TimedOut) => {
+                Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => {
                     return Ok(());
                 }
                 Err(err) => return Err(Box::new(err)),

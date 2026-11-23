@@ -51,7 +51,9 @@ struct PpmImage {
 impl PpmImage {
     fn pixel(&self, x: usize, y: usize) -> [u8; 3] {
         let idx = (y * self.width + x) * 3;
-        [self.rgb[idx], self.rgb[idx + 1], self.rgb[idx + 2]]
+        let px: Option<[u8; 3]> = self.rgb.get(idx..idx + 3).and_then(|s| s.try_into().ok());
+        assert!(px.is_some(), "pixel ({x}, {y}) out of bounds");
+        px.unwrap_or([0; 3])
     }
 }
 
@@ -77,12 +79,28 @@ fn find_existing_path(candidates: &[&str]) -> Option<PathBuf> {
     candidates.iter().map(PathBuf::from).find(|p| p.is_file())
 }
 
+fn env_truthy(var: &str) -> bool {
+    std::env::var(var).is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
+fn require_external_viewers() -> bool {
+    env_truthy("CI") || env_truthy("CURVEBOOK_REQUIRE_EXTERNAL_VIEWERS")
+}
+
+fn require_cjk_rtl_fonts() -> bool {
+    env_truthy("CURVEBOOK_REQUIRE_CJK_RTL_FONTS")
+}
+
 fn discover_engines_or_skip(test_name: &str) -> Option<(PathBuf, PathBuf)> {
     let pdftoppm = find_binary("pdftoppm", &["/opt/homebrew/bin/pdftoppm", "/usr/local/bin/pdftoppm", "/usr/bin/pdftoppm"]);
     let gs = find_binary("gs", &["/opt/homebrew/bin/gs", "/usr/local/bin/gs", "/usr/bin/gs"]);
     match (pdftoppm, gs) {
         (Some(p), Some(g)) => Some((p, g)),
         (p, g) => {
+            assert!(
+                !require_external_viewers(),
+                "FAIL-CLOSED {test_name}: external viewer binary missing under CI/CURVEBOOK_REQUIRE_EXTERNAL_VIEWERS (pdftoppm={p:?}, gs={g:?})"
+            );
             eprintln!("SKIP {test_name}: external viewer binary missing (pdftoppm={p:?}, gs={g:?})");
             None
         }
@@ -97,11 +115,11 @@ fn parse_p6_ppm(data: &[u8]) -> Result<PpmImage, String> {
 
     let read_token = |buf: &[u8], cursor: &mut usize| -> Result<usize, String> {
         loop {
-            while *cursor < buf.len() && buf[*cursor].is_ascii_whitespace() {
+            while buf.get(*cursor).is_some_and(u8::is_ascii_whitespace) {
                 *cursor += 1;
             }
-            if *cursor < buf.len() && buf[*cursor] == b'#' {
-                while *cursor < buf.len() && buf[*cursor] != b'\n' {
+            if buf.get(*cursor) == Some(&b'#') {
+                while buf.get(*cursor).is_some_and(|&b| b != b'\n') {
                     *cursor += 1;
                 }
             } else {
@@ -109,10 +127,11 @@ fn parse_p6_ppm(data: &[u8]) -> Result<PpmImage, String> {
             }
         }
         let start = *cursor;
-        while *cursor < buf.len() && !buf[*cursor].is_ascii_whitespace() {
+        while buf.get(*cursor).is_some_and(|b| !b.is_ascii_whitespace()) {
             *cursor += 1;
         }
-        let token = std::str::from_utf8(&buf[start..*cursor]).map_err(|e| format!("non-UTF8 PPM header token: {e}"))?;
+        let token_bytes = buf.get(start..*cursor).ok_or_else(|| String::from("PPM header slice out of bounds"))?;
+        let token = std::str::from_utf8(token_bytes).map_err(|e| format!("non-UTF8 PPM header token: {e}"))?;
         token.parse::<usize>().map_err(|e| format!("invalid PPM integer token '{token}': {e}"))
     };
 
@@ -120,11 +139,11 @@ fn parse_p6_ppm(data: &[u8]) -> Result<PpmImage, String> {
     let height = read_token(data, &mut pos)?;
     let maxval = read_token(data, &mut pos)?;
     assert_eq!(maxval, 255, "expected 8-bit maxval 255 in PPM");
-    assert!(pos < data.len() && data[pos].is_ascii_whitespace(), "missing whitespace byte after PPM maxval");
+    assert!(data.get(pos).is_some_and(u8::is_ascii_whitespace), "missing whitespace byte after PPM maxval");
     pos += 1;
 
     let expected_bytes = width * height * 3;
-    let payload = &data[pos..];
+    let payload = data.get(pos..).ok_or_else(|| String::from("missing PPM payload"))?;
     assert_eq!(payload.len(), expected_bytes, "PPM byte payload mismatch");
     Ok(PpmImage { width, height, rgb: payload.to_vec() })
 }
@@ -299,6 +318,10 @@ fn external_qa_scientific_chart_pdf17_alpha_fontfile2_and_crop_marks() {
     };
     let Some(arial_path) = find_existing_path(&["/System/Library/Fonts/Supplemental/Arial.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"])
     else {
+        assert!(
+            !require_external_viewers(),
+            "FAIL-CLOSED external_qa_scientific_chart: host TrueType font (Arial.ttf/DejaVuSans.ttf) absent under CI/CURVEBOOK_REQUIRE_EXTERNAL_VIEWERS"
+        );
         eprintln!("SKIP external_qa_scientific_chart: host TrueType font absent");
         return;
     };
@@ -446,7 +469,10 @@ fn external_qa_cjk_labels_embedded_single_face_ttf() {
     let Some((pdftoppm, gs)) = discover_engines_or_skip("external_qa_cjk") else {
         return;
     };
-    let Some(cjk_path) = find_existing_path(&["/System/Library/Fonts/Supplemental/Arial Unicode.ttf"]) else {
+    let Some(cjk_path) =
+        find_existing_path(&["/System/Library/Fonts/Supplemental/Arial Unicode.ttf", "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf"])
+    else {
+        assert!(!require_cjk_rtl_fonts(), "FAIL-CLOSED external_qa_cjk: host single-face CJK .ttf absent under CURVEBOOK_REQUIRE_CJK_RTL_FONTS");
         eprintln!("SKIP external_qa_cjk: host single-face CJK .ttf absent");
         return;
     };
@@ -521,9 +547,15 @@ fn external_qa_rtl_arabic_and_hebrew_bidi_visual_order() {
     let Some((pdftoppm, gs)) = discover_engines_or_skip("external_qa_rtl") else {
         return;
     };
-    let Some(ttf_path) =
-        find_existing_path(&["/System/Library/Fonts/Supplemental/Arial.ttf", "/System/Library/Fonts/Supplemental/Arial Unicode.ttf"])
-    else {
+    let Some(ttf_path) = find_existing_path(&[
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]) else {
+        assert!(
+            !require_cjk_rtl_fonts(),
+            "FAIL-CLOSED external_qa_rtl: host TrueType font with Hebrew/Arabic absent under CURVEBOOK_REQUIRE_CJK_RTL_FONTS"
+        );
         eprintln!("SKIP external_qa_rtl: host TrueType font with Hebrew/Arabic absent");
         return;
     };

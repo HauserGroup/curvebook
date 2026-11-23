@@ -34,6 +34,14 @@ use serde_json::{Value, json};
 
 type TestResult = Result<(), String>;
 
+fn env_truthy(var: &str) -> bool {
+    std::env::var(var).is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
+fn loopback_required() -> bool {
+    env_truthy("CI") || env_truthy("CURVEBOOK_REQUIRE_LOOPBACK")
+}
+
 static TEMP_SEQ: AtomicUsize = AtomicUsize::new(1);
 
 struct TempDir {
@@ -224,13 +232,13 @@ fn r2_s12_01_control_port_bidirectional_gui_only_handshake() -> TestResult {
 fn r2_s12_01_control_port_tcp_loopback_handshake_when_permitted() -> TestResult {
     let listener = match TcpListener::bind("127.0.0.1:0") {
         Ok(l) => l,
-        Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
+        Err(err) if err.kind() == ErrorKind::PermissionDenied && !loopback_required() => return Ok(()),
         Err(err) => return Err(format!("bind failed: {err}")),
     };
     let addr = listener.local_addr().map_err(|e| format!("local_addr: {e}"))?;
     let port = addr.port();
     if let Err(err) = TcpStream::connect_timeout(&addr, Duration::from_millis(200)) {
-        if err.kind() == ErrorKind::PermissionDenied {
+        if err.kind() == ErrorKind::PermissionDenied && !loopback_required() {
             return Ok(());
         }
         return Err(format!("probe connect: {err}"));

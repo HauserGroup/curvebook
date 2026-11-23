@@ -123,6 +123,7 @@ impl MvOperandHighlight {
 /// Cached plotted-point summary used by `DataPointDrillBack` without re-compiling scenes every frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DrillBackPointEntry {
+    pub source_sheet_id: SheetId,
     pub row: usize,
     pub col: usize,
     pub subcol: usize,
@@ -223,6 +224,32 @@ impl Default for TrailingStudioEguiState {
     }
 }
 
+const STUDIO_SNAP_ENABLED_KEY: &str = "curvebook.trailing_studio.snap_enabled";
+const STUDIO_TABLE_DECIMALS_KEY: &str = "curvebook.trailing_studio.table_decimals";
+
+pub(crate) fn studio_snap_enabled(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp::<bool>(egui::Id::unique(STUDIO_SNAP_ENABLED_KEY))).unwrap_or(true)
+}
+
+pub(crate) fn set_studio_snap_enabled(ctx: &egui::Context, enabled: bool) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique(STUDIO_SNAP_ENABLED_KEY), enabled));
+}
+
+pub(crate) fn studio_table_decimals(ctx: &egui::Context) -> Option<u8> {
+    ctx.data(|d| d.get_temp::<Option<u8>>(egui::Id::unique(STUDIO_TABLE_DECIMALS_KEY))).flatten()
+}
+
+pub(crate) fn set_studio_table_decimals(ctx: &egui::Context, decimals: Option<u8>) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique(STUDIO_TABLE_DECIMALS_KEY), decimals));
+}
+
+pub(super) fn format_studio_toggle_tooltip(app: &UiApp, verb: &str) -> String {
+    match app.shortcuts.active_combo("ui.inspector.toggle") {
+        Some(combo) if !combo.trim().is_empty() => format!("{verb} ({})", crate::menus::format_shortcut_for_platform(combo)),
+        _ => verb.to_owned(),
+    }
+}
+
 /// Input context bundle for [`render_trailing_studio`] (`<= 7` function arguments).
 #[derive(Debug, Clone, Copy)]
 pub struct TrailingStudioContext<'a> {
@@ -230,6 +257,8 @@ pub struct TrailingStudioContext<'a> {
     pub layout: ResponsiveShellLayout,
     pub enabled: bool,
     pub focused: bool,
+    pub selected_panel_index: Option<usize>,
+    pub selected_graph_annotation: Option<usize>,
 }
 
 /// Per-frame geometry & active-surface report emitted by [`render_trailing_studio`].
@@ -278,6 +307,8 @@ pub fn render_trailing_studio(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) -> TrailingStudioFrameReport {
+    set_studio_snap_enabled(ui.ctx(), state.snap_enabled);
+    set_studio_table_decimals(ui.ctx(), state.table_decimals);
     let surface = resolve_studio_surface(app);
     let mut report = TrailingStudioFrameReport {
         dock_rect_pt: None,
@@ -288,13 +319,9 @@ pub fn render_trailing_studio(
     };
 
     if ctx_in.enabled && !ui.ctx().egui_wants_keyboard_input() {
-        let shift_cmd = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
-        let shift_ctrl = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
-        let shift_mac = egui::Modifiers::MAC_CMD | egui::Modifiers::SHIFT;
-        let toggle_shortcut = ui.ctx().input_mut(|i| {
-            i.consume_key(shift_cmd, egui::Key::I) || i.consume_key(shift_ctrl, egui::Key::I) || i.consume_key(shift_mac, egui::Key::I)
-        });
-        if toggle_shortcut {
+        let on_result_sheet = crate::interaction::resolve_result_sheet_for_shortcut(app, true).is_some();
+        if crate::egui_shell::inspect_bridge::consume_matching_shortcut(ui.ctx(), app, on_result_sheet, |cmd| cmd == "ui.inspector.toggle").is_some()
+        {
             intents.push_toggle_trailing_collapsed_rail();
         }
     }
@@ -312,13 +339,15 @@ pub fn render_trailing_studio(
     let doc = app.document();
     let active_id = doc.active_sheet_id.as_ref();
 
-    let resp = egui::Panel::right("egui_shell.trailing_studio")
+    let panel_builder =
+        if ctx_in.layout.rtl_mirrored { egui::Panel::left("egui_shell.trailing_studio") } else { egui::Panel::right("egui_shell.trailing_studio") };
+    let resp = panel_builder
         .exact_size(w)
         .resizable(false)
         .frame(dock_frame)
         .show(ui, |ui| {
             if ctx_in.layout.trailing_collapsed_to_rail {
-                render_collapsed_rail(ui, ctx_in.tokens, surface, ctx_in.enabled, meta, intents);
+                render_collapsed_rail(ui, app, ctx_in.tokens, surface, ctx_in.enabled, meta, intents);
                 return;
             }
 
@@ -364,13 +393,14 @@ pub fn render_trailing_studio(
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let collapse_tip = format_studio_toggle_tooltip(app, "Collapse Studio");
                     let c_resp = studio_chip(
                         ui,
                         ctx_in.tokens,
                         meta,
                         &StudioChipSpec {
                             label: if is_rtl_locale(ctx_in.tokens.locale) { "«" } else { "»" },
-                            tooltip: "Collapse Studio (Cmd/Ctrl+Shift+I)",
+                            tooltip: &collapse_tip,
                             max_w: 24.0,
                             selected: false,
                             enabled: ctx_in.enabled,
@@ -378,10 +408,10 @@ pub fn render_trailing_studio(
                             widget_id: "inspector.collapse_rail",
                             role: "button",
                             command_id: Some("ui.inspector.toggle"),
-                            disabled_reason: None,
+                            disabled_reason: (!ctx_in.enabled).then_some("modal dialog is active"),
                         },
                     );
-                    if c_resp {
+                    if c_resp && ctx_in.enabled {
                         intents.push_toggle_trailing_collapsed_rail();
                     }
                 });
@@ -460,70 +490,71 @@ fn render_trailing_dock_splitter(
     let tokens = ctx_in.tokens;
     let metrics = tokens.metrics;
     let splitter_w = ctx_in.layout.trailing_splitter_w_pt;
-    egui::Panel::right("egui_shell.trailing_dock_splitter")
-        .exact_size(splitter_w)
-        .resizable(false)
-        .frame(egui::Frame::NONE.fill(tokens.panel_bg))
-        .show(ui, |ui| {
-            let split_rect = ui.available_rect_before_wrap();
-            let _ = ui.allocate_rect(split_rect, Sense::hover());
-            let slop = ((metrics.splitter_hit_slop_w - split_rect.width()) * 0.5).max(0.0);
-            let hit_rect = split_rect.expand2(Vec2::new(slop, 0.0)).intersect(meta.viewport_rect);
-            ui.set_clip_rect(hit_rect);
-            let enabled = ctx_in.enabled;
-            let sense = if enabled { Sense::click_and_drag() } else { Sense::hover() };
-            let resp = ui.interact(hit_rect, ui.scope_id().with("inspector_dock_splitter"), sense);
-            resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Splitter, enabled, "Inspector Dock Splitter"));
-            if enabled && (resp.hovered() || resp.dragged()) {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-            }
-            let line_col = if enabled && (resp.hovered() || resp.dragged()) { tokens.accent } else { tokens.border };
-            ui.painter().vline(split_rect.center().x, split_rect.y_range(), Stroke::new(1.0, line_col));
+    let splitter_panel = if ctx_in.layout.rtl_mirrored {
+        egui::Panel::left("egui_shell.trailing_dock_splitter")
+    } else {
+        egui::Panel::right("egui_shell.trailing_dock_splitter")
+    };
+    splitter_panel.exact_size(splitter_w).resizable(false).frame(egui::Frame::NONE.fill(tokens.panel_bg)).show(ui, |ui| {
+        let split_rect = ui.available_rect_before_wrap();
+        let _ = ui.allocate_rect(split_rect, Sense::hover());
+        let slop = ((metrics.splitter_hit_slop_w - split_rect.width()) * 0.5).max(0.0);
+        let hit_rect = split_rect.expand2(Vec2::new(slop, 0.0)).intersect(meta.viewport_rect);
+        ui.set_clip_rect(hit_rect);
+        let enabled = ctx_in.enabled;
+        let sense = if enabled { Sense::click_and_drag() } else { Sense::hover() };
+        let resp = ui.interact(hit_rect, ui.scope_id().with("inspector_dock_splitter"), sense);
+        resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Splitter, enabled, "Inspector Dock Splitter"));
+        if enabled && (resp.hovered() || resp.dragged()) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        }
+        let line_col = if enabled && (resp.hovered() || resp.dragged()) { tokens.accent } else { tokens.border };
+        ui.painter().vline(split_rect.center().x, split_rect.y_range(), Stroke::new(1.0, line_col));
 
-            if enabled {
-                if resp.double_clicked() {
-                    let default_w = app.egui_views.workspace_preset.default_dock_config().trailing_width_pt;
-                    intents.push_sync_trailing_width(default_w);
-                } else if resp.dragged() {
-                    let delta_w = -resp.drag_delta().x;
-                    if delta_w.abs() > 0.01 {
-                        let vw = ui.ctx().content_rect().width().max(1.0);
-                        let target_center_min = if !ctx_in.layout.leading_collapsed_to_rail
-                            && !ctx_in.layout.trailing_collapsed_to_rail
-                            && vw >= metrics.inspector_collapse_breakpoint_w
-                        {
-                            480.0
-                        } else {
-                            metrics.center_stage_min_w
-                        };
-                        let max_for_center = (vw
-                            - ctx_in.layout.leading_dock_w_pt
-                            - ctx_in.layout.leading_splitter_w_pt
-                            - ctx_in.layout.trailing_splitter_w_pt
-                            - target_center_min)
-                            .max(metrics.inspector_min_w);
-                        let new_w =
-                            (ctx_in.layout.trailing_dock_w_pt + delta_w).clamp(metrics.inspector_min_w, metrics.inspector_max_w.min(max_for_center));
-                        intents.push_sync_trailing_width(new_w);
-                    }
+        if enabled {
+            if resp.double_clicked() {
+                let default_w = app.egui_views.workspace_preset.default_dock_config().trailing_width_pt;
+                intents.push_sync_trailing_width(default_w);
+            } else if resp.dragged() {
+                let delta_w = if ctx_in.layout.rtl_mirrored { resp.drag_delta().x } else { -resp.drag_delta().x };
+                if delta_w.abs() > 0.01 {
+                    let vw = ui.ctx().content_rect().width().max(1.0);
+                    let target_center_min = if !ctx_in.layout.leading_collapsed_to_rail
+                        && !ctx_in.layout.trailing_collapsed_to_rail
+                        && vw >= metrics.inspector_collapse_breakpoint_w
+                    {
+                        480.0
+                    } else {
+                        metrics.center_stage_min_w
+                    };
+                    let max_for_center = (vw
+                        - ctx_in.layout.leading_dock_w_pt
+                        - ctx_in.layout.leading_splitter_w_pt
+                        - ctx_in.layout.trailing_splitter_w_pt
+                        - target_center_min)
+                        .max(metrics.inspector_min_w);
+                    let new_w =
+                        (ctx_in.layout.trailing_dock_w_pt + delta_w).clamp(metrics.inspector_min_w, metrics.inspector_max_w.min(max_for_center));
+                    intents.push_sync_trailing_width(new_w);
                 }
             }
+        }
 
-            meta.record_response(
-                ui,
-                &resp,
-                FrameInspectEntryInput {
-                    widget_id: "inspector.dock_splitter",
-                    role: "splitter",
-                    label: "Inspector Dock Splitter",
-                    command_id: None,
-                    value: Some(json!({ "width_pt": ctx_in.layout.trailing_dock_w_pt })),
-                    enabled,
-                    disabled_reason: (!enabled).then_some("modal dialog is active"),
-                    z_layer: ZLayer::SplitHandle,
-                    ellipsized: false,
-                    full_label: None,
-                },
-            );
-        });
+        meta.record_response(
+            ui,
+            &resp,
+            FrameInspectEntryInput {
+                widget_id: "inspector.dock_splitter",
+                role: "splitter",
+                label: "Inspector Dock Splitter",
+                command_id: None,
+                value: Some(json!({ "width_pt": ctx_in.layout.trailing_dock_w_pt })),
+                enabled,
+                disabled_reason: (!enabled).then_some("modal dialog is active"),
+                z_layer: ZLayer::SplitHandle,
+                ellipsized: false,
+                full_label: None,
+            },
+        );
+    });
 }

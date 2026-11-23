@@ -21,8 +21,8 @@ fn assert_svd_invariants(a: &DenseMatrix, expected_rank: usize, label: &str) {
 
     let mut u_sigma = s.u.clone();
     for r in 0..a.nrows() {
-        for j in 0..k {
-            u_sigma.set(r, j, u_sigma.get(r, j).unwrap() * s.singular_values[j]).unwrap();
+        for (j, &sj) in s.singular_values.iter().enumerate().take(k) {
+            u_sigma.set(r, j, u_sigma.get(r, j).unwrap() * sj).unwrap();
         }
     }
     let recon = u_sigma.matmul(&s.v.transpose()).unwrap();
@@ -41,7 +41,7 @@ fn assert_svd_invariants(a: &DenseMatrix, expected_rank: usize, label: &str) {
 
 fn assert_aliased_zeroed(sol_coeffs: &[f64], cov: &DenseMatrix, aliased: &[usize], p: usize) {
     for &al in aliased {
-        assert_eq!(sol_coeffs[al], 0.0);
+        assert_eq!(sol_coeffs.get(al).copied(), Some(0.0));
         for k in 0..p {
             assert_eq!(cov.get(al, k).unwrap(), 0.0);
             assert_eq!(cov.get(k, al).unwrap(), 0.0);
@@ -181,7 +181,12 @@ fn random_tall_standardized_rank4(rng: &mut DeterministicRng, m: usize) -> Dense
     }
     let weights = [0.7_f64, -1.3, 0.4, 2.1];
     for r in 0..m {
-        raw_cols[p - 1][r] = (0..p - 1).map(|j| weights[j] * raw_cols[j][r]).sum();
+        let sum: f64 = weights.iter().zip(raw_cols.iter()).map(|(&w, col)| w * col.get(r).copied().unwrap_or(0.0)).sum();
+        if let Some(last_col) = raw_cols.last_mut()
+            && let Some(cell) = last_col.get_mut(r)
+        {
+            *cell = sum;
+        }
     }
     for col in &mut raw_cols {
         let mean = col.iter().sum::<f64>() / (m as f64);
@@ -196,7 +201,7 @@ fn random_tall_standardized_rank4(rng: &mut DeterministicRng, m: usize) -> Dense
     let mut tall = DenseMatrix::zeros(m, p).unwrap();
     for r in 0..m {
         for (c, col) in raw_cols.iter().enumerate() {
-            tall.set(r, c, col[r]).unwrap();
+            tall.set(r, c, col.get(r).copied().unwrap_or(0.0)).unwrap();
         }
     }
     tall

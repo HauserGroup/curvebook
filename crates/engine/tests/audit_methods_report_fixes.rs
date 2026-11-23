@@ -66,13 +66,17 @@ fn assert_clean_room_prose(text: &str) {
 
 fn seed_three_group_column(id: &str) -> DataSheet {
     let mut t = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 3, 5).unwrap();
-    t.data_sets[0].title = String::from("Ctrl");
-    t.data_sets[1].title = String::from("Low");
-    t.data_sets[2].title = String::from("High");
-    let cols = [[10.0, 11.0, 12.0, 9.5, 10.5], [14.0, 15.0, 14.5, 16.0, 15.5], [22.0, 23.0, 21.5, 24.0, 22.5]];
-    for (c, vals) in cols.iter().enumerate() {
-        for (r, &v) in vals.iter().enumerate() {
-            t.data_sets[c].cells[r][0] = Cell::number(v);
+    if let [ds0, ds1, ds2] = t.data_sets.as_mut_slice() {
+        ds0.title = String::from("Ctrl");
+        ds1.title = String::from("Low");
+        ds2.title = String::from("High");
+        let cols = [[10.0, 11.0, 12.0, 9.5, 10.5], [14.0, 15.0, 14.5, 16.0, 15.5], [22.0, 23.0, 21.5, 24.0, 22.5]];
+        for (ds, vals) in [ds0, ds1, ds2].into_iter().zip(cols.iter()) {
+            for (row, &v) in ds.cells.iter_mut().zip(vals.iter()) {
+                if let Some(cell) = row.first_mut() {
+                    *cell = Cell::number(v);
+                }
+            }
         }
     }
     DataSheet::new(id, "ThreeGroup", TableArchetype::Column(t)).unwrap()
@@ -80,13 +84,17 @@ fn seed_three_group_column(id: &str) -> DataSheet {
 
 fn seed_rm_three_group_column(id: &str) -> DataSheet {
     let mut t = ColumnTable::new(ColumnDesignHint::PairedRepeatedMeasures, 3, 5).unwrap();
-    t.data_sets[0].title = String::from("Baseline");
-    t.data_sets[1].title = String::from("DoseA");
-    t.data_sets[2].title = String::from("DoseB");
-    let rows = [[10.0, 13.0, 19.0], [11.2, 14.8, 20.5], [9.8, 12.6, 18.4], [10.6, 13.9, 19.7], [12.1, 15.4, 21.8]];
-    for (r, vals) in rows.iter().enumerate() {
-        for (c, &v) in vals.iter().enumerate() {
-            t.data_sets[c].cells[r][0] = Cell::number(v);
+    if let [ds0, ds1, ds2] = t.data_sets.as_mut_slice() {
+        ds0.title = String::from("Baseline");
+        ds1.title = String::from("DoseA");
+        ds2.title = String::from("DoseB");
+        let rows = [[10.0, 13.0, 19.0], [11.2, 14.8, 20.5], [9.8, 12.6, 18.4], [10.6, 13.9, 19.7], [12.1, 15.4, 21.8]];
+        for (r, vals) in rows.iter().enumerate() {
+            for (ds, &v) in [&mut *ds0, &mut *ds1, &mut *ds2].into_iter().zip(vals.iter()) {
+                if let Some(cell) = ds.cells.get_mut(r).and_then(|row| row.first_mut()) {
+                    *cell = Cell::number(v);
+                }
+            }
         }
     }
     DataSheet::new(id, "RmCol", TableArchetype::Column(t)).unwrap()

@@ -1,16 +1,18 @@
 #![forbid(unsafe_code)]
-//! Minimal strict-CSP browser placeholder tests matching the workflow contract names (`docs/gui-workflows.md` §6.2).
+//! Strict-CSP browser parity and container integration tests (`docs/gui-workflows.md` §6.2).
 //!
-//! Full browser canvas rendering is deferred to post-Beta `R11.11`; until then these tests verify
-//! the strict-CSP placeholder bridge, analysis/edit-params workflows, `.curvebook`/`.curvebook.d`
-//! exports, HiDPI/RTL text metrics, and large-table interaction responsiveness without legacy `LayoutTree`.
+//! Container-level `ExecuteCommand` suites (`web_container_*`) are separated cleanly from genuine
+//! interactive web UI parity tests (`web_ui_parity_*`, `web_human_*`) which drive chrome nodes,
+//! modal shortcuts, `UiInputEvent` dispatch, `dispatch_gui_action`, and `WebChromeBridge`
+//! alongside numerical `ResultSheet`, `GraphSheet`, `LayoutSheet`, and SVG output assertions.
 
 mod web_parity_common;
 
 use std::time::Instant;
 
 use curvebook_ui_egui::serde_json::json;
-use curvebook_ui_egui::{KeyModifiers, UiInputEvent, dispatch_gui_action};
+use curvebook_ui_egui::{ActiveDialog, KeyModifiers, PointerButton, UiInputEvent, ViewportMetrics, dispatch_gui_action};
+use curvebook_web::WebChromeBridge;
 use curvebook_web::chrome_bridge::{WebExportFormat, commit_active_modal_dialog};
 use curvebook_web::host_adapters::{WebBridgeCommand, WebBridgeEvent, WebBridgeSession};
 use curvebook_web::text_bridge::{CSS_REFERENCE_DPI, WebTextBridge, WebTextDirection, ZLayerBand};
@@ -33,6 +35,51 @@ fn assert_last_frame_valid(cmds: &[WebBridgeCommand], expected_w: u32, expected_
         }
     }
     Err(format!("{ctx}: no RenderRgbaFrame emitted"))
+}
+
+fn require_result_scalar(session: &WebBridgeSession, result_id: &str, key: &str, ds_idx: Option<usize>) -> Result<f64, String> {
+    let rs = session
+        .host
+        .app()
+        .document()
+        .result_sheets
+        .iter()
+        .find(|r| r.id.as_str() == result_id)
+        .ok_or_else(|| format!("missing ResultSheet `{result_id}`"))?;
+    let status_dbg = format!("{:?}", rs.status);
+    if status_dbg != "UpToDate" {
+        return Err(format!("ResultSheet `{result_id}` expected UpToDate, got {status_dbg}"));
+    }
+    if rs.tabs.is_empty() {
+        return Err(format!("ResultSheet `{result_id}` has empty tabs"));
+    }
+    rs.lookup_scalar(key, ds_idx).filter(|v| v.is_finite()).ok_or_else(|| {
+        let keys: Vec<&str> = rs.scalars.iter().map(|s| s.key.as_str()).collect();
+        format!("ResultSheet `{result_id}` missing finite scalar `{key}` (available: {keys:?})")
+    })
+}
+
+fn require_result_tab_present(session: &WebBridgeSession, result_id: &str, tab_id: &str) -> TestRes {
+    let rs = session
+        .host
+        .app()
+        .document()
+        .result_sheets
+        .iter()
+        .find(|r| r.id.as_str() == result_id)
+        .ok_or_else(|| format!("missing ResultSheet `{result_id}`"))?;
+    if !rs.tabs.iter().any(|t| t.id == tab_id && !t.rows.is_empty()) {
+        return Err(format!("ResultSheet `{result_id}` missing non-empty tab `{tab_id}`"));
+    }
+    Ok(())
+}
+
+fn web_gui(
+    session: &mut WebBridgeSession,
+    method: &str,
+    params: curvebook_ui_egui::serde_json::Value,
+) -> Result<curvebook_ui_egui::serde_json::Value, String> {
+    dispatch_gui_action(session.host.app_mut(), method, params).map_err(|e| format!("{method} failed: {e}"))
 }
 
 #[test]
@@ -68,9 +115,14 @@ fn r10_1_web_spike_one_way_anova_and_edit_params_human_path() -> TestRes {
             params: json!({ "source_sheet_id": "ds-anova", "kind": "one_way_anova" }),
         })
         .map_err(|e| e.to_string())?;
-    let rs_id = session.host.app().document().result_sheets.first().map(|r| r.id.clone()).ok_or("missing ResultSheet")?;
+    let rs_id = session.host.app().document().result_sheets.first().map(|r| r.id.as_str().to_owned()).ok_or("missing ResultSheet")?;
+    let f_stat = require_result_scalar(&session, &rs_id, "F", None)?;
+    let p_val = require_result_scalar(&session, &rs_id, "P value", None)?;
+    if f_stat <= 10.0 || p_val >= 0.01 {
+        return Err(format!("unexpected initial ANOVA F={f_stat}, P={p_val}"));
+    }
     let _ = session
-        .handle_event(WebBridgeEvent::ExecuteCommand { command_id: String::from("sheet.select"), params: json!({ "sheet_id": rs_id.as_str() }) })
+        .handle_event(WebBridgeEvent::ExecuteCommand { command_id: String::from("sheet.select"), params: json!({ "sheet_id": rs_id }) })
         .map_err(|e| e.to_string())?;
 
     // Open Edit Analysis Parameters via browser shortcut Alt+T, mutate, and commit.
@@ -83,6 +135,10 @@ fn r10_1_web_spike_one_way_anova_and_edit_params_human_path() -> TestRes {
     let commit = commit_active_modal_dialog(session.host.app_mut())?;
     if !commit.handled {
         return Err(String::from("expected EditAnalysisParameters commit to succeed"));
+    }
+    let f_after = require_result_scalar(&session, &rs_id, "F", None)?;
+    if !f_after.is_finite() || (f_after - f_stat).abs() > 1e-9 {
+        return Err(format!("expected unchanged F after re-commit: before={f_stat}, after={f_after}"));
     }
     Ok(())
 }
@@ -187,14 +243,15 @@ fn encode_base64_web(input: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
-        let b0 = usize::from(chunk[0]);
+        let b0 = usize::from(*chunk.first().unwrap_or(&0));
         let b1 = usize::from(*chunk.get(1).unwrap_or(&0));
         let b2 = usize::from(*chunk.get(2).unwrap_or(&0));
         let triple = (b0 << 16) | (b1 << 8) | b2;
-        out.push(char::from(TABLE[(triple >> 18) & 0x3F]));
-        out.push(char::from(TABLE[(triple >> 12) & 0x3F]));
-        out.push(if chunk.len() > 1 { char::from(TABLE[(triple >> 6) & 0x3F]) } else { '=' });
-        out.push(if chunk.len() > 2 { char::from(TABLE[triple & 0x3F]) } else { '=' });
+        let encode = |shift: usize| char::from(TABLE.get((triple >> shift) & 0x3F).copied().unwrap_or(b'A'));
+        out.push(encode(18));
+        out.push(encode(12));
+        out.push(if chunk.len() > 1 { encode(6) } else { '=' });
+        out.push(if chunk.len() > 2 { encode(0) } else { '=' });
     }
     out
 }
@@ -206,8 +263,11 @@ fn exec_web(session: &mut WebBridgeSession, command_id: &str, params: curvebook_
         .map_err(|e| format!("{command_id} failed: {e}"))
 }
 
+/// Direct-command (`ExecuteCommand`) container check for WF-51..58 batch transforms, linear
+/// regression, descriptive stats, embedded ResultSheet table, layout PNG insert, and ZIP export
+/// (distinct from interactive chrome/modal `web_ui_parity_*` suites below).
 #[test]
-fn web_human_r13_wf51_to_wf58_regression_survival_batch_image_and_embedded_table_parity() -> TestRes {
+fn web_container_wf51_to_wf58_direct_exec_and_result_parity() -> TestRes {
     let mut session = WebBridgeSession::with_ids("doc-r13-s8", "tab-r13-s8");
     let cmds = session
         .handle_event(WebBridgeEvent::ResizeViewport { logical_width: 1280.0, logical_height: 800.0, scale_factor: 1.0 })
@@ -224,6 +284,11 @@ fn web_human_r13_wf51_to_wf58_regression_survival_batch_image_and_embedded_table
         "analysis.run",
         json!({ "sheet_id": "res-lin-r", "source_sheet_id": "tr-log", "kind": "linear_regression", "x_range_filter": [10.0, 20.0] }),
     )?;
+    let lin_slope = require_result_scalar(&session, "res-lin-r", "Slope", Some(0))?;
+    let lin_r2 = require_result_scalar(&session, "res-lin-r", "R2", Some(0))?;
+    if lin_slope <= 0.05 || lin_r2 <= 0.98 {
+        return Err(format!("WF-56 expected strong log10 linear slope/R2 on [10,20], got slope={lin_slope}, R2={lin_r2}"));
+    }
     exec_web(&mut session, "transform.run", json!({ "sheet_id": "tr-norm", "source_sheet_id": "xy-w56", "kind": "normalize" }))?;
 
     // WF-55 / WF-58: Transpose + Descriptive stats embedded table on GraphSheet
@@ -231,12 +296,20 @@ fn web_human_r13_wf51_to_wf58_regression_survival_batch_image_and_embedded_table
     exec_web(&mut session, "table.setCells", json!({ "sheet_id": "col-w58", "rows": [[18.0, 24.0], [20.0, 26.0], [19.0, 25.0], [21.0, 27.0]] }))?;
     exec_web(&mut session, "transform.run", json!({ "sheet_id": "tr-t", "source_sheet_id": "col-w58", "kind": "transpose" }))?;
     exec_web(&mut session, "analysis.run", json!({ "sheet_id": "res-desc", "source_sheet_id": "col-w58", "kind": "descriptive" }))?;
+    let mean0 = require_result_scalar(&session, "res-desc", "Mean", Some(0))?;
+    let mean1 = require_result_scalar(&session, "res-desc", "Mean", Some(1))?;
+    if (mean0 - 19.5).abs() > 1e-9 || (mean1 - 25.5).abs() > 1e-9 {
+        return Err(format!("WF-58 expected descriptive means (19.5, 25.5), got ({mean0}, {mean1})"));
+    }
     exec_web(&mut session, "graph.create", json!({ "sheet_id": "g-w58", "data_sheet_id": "col-w58", "kind": "column" }))?;
     exec_web(
         &mut session,
         "edit.pasteResultTable",
         json!({ "source_sheet_id": "res-desc", "target_sheet_id": "g-w58", "bounds_pt": [40.0, 24.0, 220.0, 96.0] }),
     )?;
+    if !session.host.app().document().graph_sheets.iter().any(|g| g.id.as_str() == "g-w58" && !g.spec.annotations.is_empty()) {
+        return Err(String::from("WF-58 expected embedded ResultTable annotation on g-w58"));
+    }
 
     // WF-57: Layout embedded PNG + non-exported grid overlay toggle
     let png_cmds = session
@@ -260,6 +333,9 @@ fn web_human_r13_wf51_to_wf58_regression_survival_batch_image_and_embedded_table
         "layout.insertImage",
         json!({ "sheet_id": "lay-w57", "bytes_base64": encode_base64_web(&png_bytes), "bounds_pt": [260.0, 24.0, 96.0, 72.0] }),
     )?;
+    if !session.host.app().document().layout_sheets.iter().any(|l| l.id.as_str() == "lay-w57" && l.spec.items.len() >= 2) {
+        return Err(String::from("WF-57 expected graph panel + embedded image items in lay-w57"));
+    }
     dispatch_gui_action(session.host.app_mut(), "ui.invoke_menu", json!({ "command_id": "ui.gridOverlay.toggle", "params": { "visible": true } }))
         .map_err(|e| e.to_string())?;
 
@@ -273,8 +349,10 @@ fn web_human_r13_wf51_to_wf58_regression_survival_batch_image_and_embedded_table
     Ok(())
 }
 
+/// Direct-command (`ExecuteCommand`) container check for WF-59..65 nested t-test, factorial RM
+/// ANOVA, EqualizeScaling, point overrides, unsigned ticks, and SVG container export.
 #[test]
-fn web_human_r13_wf59_to_wf65_equalize_nested_forest_pyramid_and_spaghetti_parity() -> TestRes {
+fn web_container_wf59_to_wf65_direct_exec_and_result_parity() -> TestRes {
     let mut session = WebBridgeSession::with_ids("doc-r13-s9", "tab-r13-s9");
     let cmds = session
         .handle_event(WebBridgeEvent::ResizeViewport { logical_width: 1280.0, logical_height: 800.0, scale_factor: 1.0 })
@@ -291,6 +369,9 @@ fn web_human_r13_wf59_to_wf65_equalize_nested_forest_pyramid_and_spaghetti_parit
         "graph.formatSelectedPoints",
         json!({ "sheet_id": "g-box", "points": [{ "series_index": 0, "point_index": 2 }], "color": "#E11D48" }),
     )?;
+    if !session.host.app().document().graph_sheets.iter().any(|g| g.id.as_str() == "g-box" && !g.spec.point_overrides.is_empty()) {
+        return Err(String::from("WF-59 expected point style override on g-box"));
+    }
     exec_web(&mut session, "layout.create", json!({ "sheet_id": "lay-w59", "preset": "double_column" }))?;
     exec_web(
         &mut session,
@@ -333,6 +414,11 @@ fn web_human_r13_wf59_to_wf65_equalize_nested_forest_pyramid_and_spaghetti_parit
         }),
     )?;
     exec_web(&mut session, "analysis.run", json!({ "sheet_id": "res-nest", "source_sheet_id": "nest-w62", "kind": "nested_t" }))?;
+    let nest_f = require_result_scalar(&session, "res-nest", "F (among groups)", None)?;
+    let nest_p = require_result_scalar(&session, "res-nest", "P value (groups)", None)?;
+    if nest_f <= 20.0 || nest_p >= 0.01 {
+        return Err(format!("WF-62 expected significant nested t-test F>20 & P<0.01, got F={nest_f}, P={nest_p}"));
+    }
 
     exec_web(
         &mut session,
@@ -361,6 +447,7 @@ fn web_human_r13_wf59_to_wf65_equalize_nested_forest_pyramid_and_spaghetti_parit
         "analysis.run",
         json!({ "sheet_id": "res-fac", "source_sheet_id": "grp-w62", "kind": "factorial_anova", "repeated_measures": "both_factors" }),
     )?;
+    let _fac_ms = require_result_scalar(&session, "res-fac", "MS residual", None)?;
 
     exec_web(
         &mut session,
@@ -400,12 +487,299 @@ fn web_human_r13_wf59_to_wf65_equalize_nested_forest_pyramid_and_spaghetti_parit
 
     let svg_cmds =
         session.handle_event(WebBridgeEvent::ExportFile { format: WebExportFormat::Svg, sheet_id: None, dpi: 96 }).map_err(|e| e.to_string())?;
-    let has_svg = svg_cmds.iter().any(|c| match c {
-        WebBridgeCommand::SaveOrDownloadFile { bytes, .. } => std::str::from_utf8(bytes).is_ok_and(|s| s.contains("<svg")),
+    let svg_str = svg_cmds
+        .iter()
+        .find_map(|c| match c {
+            WebBridgeCommand::SaveOrDownloadFile { bytes, .. } => std::str::from_utf8(bytes).ok(),
+            _ => None,
+        })
+        .ok_or_else(|| String::from("expected UTF-8 SVG export bytes for WF-59..65"))?;
+    if !svg_str.contains("<svg")
+        || !svg_str.contains("</svg>")
+        || !(svg_str.contains("<path") || svg_str.contains("<polyline") || svg_str.contains("<line"))
+    {
+        return Err(format!("expected valid rendered SVG elements for WF-59..65 (len={})", svg_str.len()));
+    }
+    Ok(())
+}
+
+/// Interactive Web UI parity covering representative WF-01..49 workflows driven strictly through
+/// `WebBridgeEvent::ClickChromeNode`, `WebBridgeEvent::UiInput`, `dispatch_gui_action`, and
+/// `WebChromeBridge` layout + concrete ResultSheet/GraphSheet/SVG assertions.
+#[test]
+fn web_ui_parity_wf01_to_wf49_chrome_modals_inputs_and_results() -> TestRes {
+    let mut session = WebBridgeSession::with_ids("doc-web-ui-wf", "tab-web-ui-wf");
+    let cmds = session
+        .handle_event(WebBridgeEvent::ResizeViewport { logical_width: 1280.0, logical_height: 800.0, scale_factor: 1.0 })
+        .map_err(|e| e.to_string())?;
+    assert_last_frame_valid(&cmds, 1280, 800, "web ui parity resize")?;
+
+    // 1. WF-07 / WF-10 / WF-24: Create Column table via GUI menu, enter cells via ui.type_text,
+    // open Analyze via toolbar.analyze click, run One-Way ANOVA via modal.ok click, toggle
+    // Kruskal-Wallis via Alt+T UiInput, and update Y-axis via toolbar.axes click + ExportFile SVG.
+    let col_created = web_gui(
+        &mut session,
+        "ui.invoke_menu",
+        json!({ "path": "Insert/New Data Table", "params": { "sheet_id": "col-ui", "kind": "column", "cols": 3, "rows": 4, "auto_graph": true, "graph_sheet_id": "g-col-ui" } }),
+    )?;
+    if col_created.pointer("/payload/sheet_id").and_then(|v| v.as_str()) != Some("col-ui") {
+        return Err(format!("unexpected column create payload: {col_created}"));
+    }
+    web_gui(
+        &mut session,
+        "ui.type_text",
+        json!({ "widget_id": "grid.cell.0.0.0", "text": "10\t20\t35\n11\t21\t37\n9\t19\t34\n12\t22\t38", "clear_existing": true, "commit_enter": true }),
+    )?;
+
+    session
+        .handle_event(WebBridgeEvent::ClickChromeNode {
+            node_id: String::from("toolbar.analyze"),
+            button: PointerButton::Primary,
+            modifiers: KeyModifiers::default(),
+        })
+        .map_err(|e| format!("toolbar.analyze click failed: {e}"))?;
+    if !matches!(session.host.app().canvas_dialogs.active_dialog, ActiveDialog::AnalyzeSheet { .. }) {
+        return Err(String::from("expected toolbar.analyze click to open AnalyzeSheet dialog"));
+    }
+    web_gui(&mut session, "ui.answer_dialog", json!({ "fields": { "entry_id": "stats.one_way_anova" } }))?;
+    session
+        .handle_event(WebBridgeEvent::ClickChromeNode {
+            node_id: String::from("modal.ok"),
+            button: PointerButton::Primary,
+            modifiers: KeyModifiers::default(),
+        })
+        .map_err(|e| format!("analyze modal.ok click failed: {e}"))?;
+    let anova_id = session.host.app().document().result_sheets.first().map(|r| r.id.as_str().to_owned()).ok_or("missing ANOVA ResultSheet")?;
+    let f_stat = require_result_scalar(&session, &anova_id, "F", None)?;
+    let p_val = require_result_scalar(&session, &anova_id, "P value", None)?;
+    if f_stat <= 50.0 || p_val >= 0.001 {
+        return Err(format!("WF-10 web UI ANOVA unexpected F={f_stat}, P={p_val}"));
+    }
+
+    // Switch to ResultSheet via GUI tab + Alt+T -> switch ANOVA to non-parametric Kruskal-Wallis via modal.ok click.
+    web_gui(&mut session, "ui.switch_tab", json!({ "sheet_id": anova_id }))?;
+    session
+        .handle_event(WebBridgeEvent::UiInput {
+            event: UiInputEvent::KeyDown { key: String::from("t"), modifiers: KeyModifiers { alt: true, ..Default::default() } },
+        })
+        .map_err(|e| format!("Alt+T edit params open failed: {e}"))?;
+    if !matches!(session.host.app().canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }) {
+        return Err(String::from("expected Alt+T to open EditAnalysisParameters"));
+    }
+    web_gui(&mut session, "ui.answer_dialog", json!({ "fields": { "assume_gaussian": false } }))?;
+    session
+        .handle_event(WebBridgeEvent::ClickChromeNode {
+            node_id: String::from("modal.ok"),
+            button: PointerButton::Primary,
+            modifiers: KeyModifiers::default(),
+        })
+        .map_err(|e| format!("edit params modal.ok click failed: {e}"))?;
+    let kw_h = require_result_scalar(&session, &anova_id, "Kruskal-Wallis H", None)?;
+    if kw_h <= 5.0 {
+        return Err(format!("WF-11 web UI expected Kruskal-Wallis H > 5, got {kw_h}"));
+    }
+
+    // Switch to GraphSheet (opens ChangeGraphType for uninitialized graph) -> confirm via modal.ok, then click toolbar.axes.
+    web_gui(&mut session, "ui.switch_tab", json!({ "sheet_id": "g-col-ui" }))?;
+    if matches!(session.host.app().canvas_dialogs.active_dialog, ActiveDialog::ChangeGraphType { .. }) {
+        session
+            .handle_event(WebBridgeEvent::ClickChromeNode {
+                node_id: String::from("modal.ok"),
+                button: PointerButton::Primary,
+                modifiers: KeyModifiers::default(),
+            })
+            .map_err(|e| format!("ChangeGraphType modal.ok click failed: {e}"))?;
+    }
+    session
+        .handle_event(WebBridgeEvent::ClickChromeNode {
+            node_id: String::from("toolbar.axes"),
+            button: PointerButton::Primary,
+            modifiers: KeyModifiers::default(),
+        })
+        .map_err(|e| format!("toolbar.axes click failed: {e}"))?;
+    if !matches!(session.host.app().canvas_dialogs.active_dialog, ActiveDialog::FormatAxes { .. }) {
+        return Err(format!("expected toolbar.axes click to open FormatAxes dialog, got {:?}", session.host.app().canvas_dialogs.active_dialog));
+    }
+    web_gui(&mut session, "ui.answer_dialog", json!({ "fields": { "target_axis": "y", "title": "Web Signal (AU)" } }))?;
+    session
+        .handle_event(WebBridgeEvent::ClickChromeNode {
+            node_id: String::from("modal.ok"),
+            button: PointerButton::Primary,
+            modifiers: KeyModifiers::default(),
+        })
+        .map_err(|e| format!("axes modal.ok click failed: {e}"))?;
+    let y_title_ok =
+        session.host.app().document().graph_sheets.iter().any(|g| g.id.as_str() == "g-col-ui" && g.spec.y_axis.title == "Web Signal (AU)");
+    if !y_title_ok {
+        return Err(String::from("WF-24 web UI expected y_axis title `Web Signal (AU)`"));
+    }
+    let svg_cmds = session
+        .handle_event(WebBridgeEvent::ExportFile { format: WebExportFormat::Svg, sheet_id: Some(String::from("g-col-ui")), dpi: 96 })
+        .map_err(|e| e.to_string())?;
+    let svg_ok = svg_cmds.iter().any(|c| match c {
+        WebBridgeCommand::SaveOrDownloadFile { bytes, .. } => {
+            std::str::from_utf8(bytes).is_ok_and(|s| s.contains("<svg") && s.contains("Web Signal (AU)"))
+        }
         _ => false,
     });
-    if !has_svg {
-        return Err(String::from("expected valid SVG export bytes for WF-59..65"));
+    if !svg_ok {
+        return Err(String::from("WF-24 web UI exported SVG missing `<svg` or updated y-axis title"));
     }
+
+    // 2. WF-16: Create XY table via GUI, fit.linear via toolbar.analyze -> modal.ok, test toolbar.undo/redo + WebChromeBridge layout.
+    web_gui(
+        &mut session,
+        "ui.invoke_menu",
+        json!({ "path": "Insert/New Data Table", "params": { "sheet_id": "xy-ui", "kind": "xy", "cols": 1, "rows": 5, "auto_graph": false } }),
+    )?;
+    for (r, x) in [1.0_f64, 2.0, 3.0, 4.0, 5.0].iter().enumerate() {
+        web_gui(
+            &mut session,
+            "ui.type_text",
+            json!({ "widget_id": format!("grid.xcell.{r}.0"), "text": format!("{x}"), "clear_existing": true, "commit_enter": true }),
+        )?;
+    }
+    web_gui(
+        &mut session,
+        "ui.type_text",
+        json!({ "widget_id": "grid.cell.0.0.0", "text": "3\n5\n7\n9\n11", "clear_existing": true, "commit_enter": true }),
+    )?;
+    session
+        .handle_event(WebBridgeEvent::ClickChromeNode {
+            node_id: String::from("toolbar.analyze"),
+            button: PointerButton::Primary,
+            modifiers: KeyModifiers::default(),
+        })
+        .map_err(|e| e.to_string())?;
+    web_gui(&mut session, "ui.answer_dialog", json!({ "fields": { "entry_id": "fit.linear" } }))?;
+    session
+        .handle_event(WebBridgeEvent::ClickChromeNode {
+            node_id: String::from("modal.ok"),
+            button: PointerButton::Primary,
+            modifiers: KeyModifiers::default(),
+        })
+        .map_err(|e| e.to_string())?;
+    let lin_id = session.host.app().document().result_sheets.last().map(|r| r.id.as_str().to_owned()).ok_or("missing WF-16 linear ResultSheet")?;
+    let slope = require_result_scalar(&session, &lin_id, "Slope", Some(0))?;
+    let r2 = require_result_scalar(&session, &lin_id, "R2", Some(0))?;
+    if (slope - 2.0).abs() > 1e-6 || (r2 - 1.0).abs() > 1e-6 {
+        return Err(format!("WF-16 web UI expected Slope=2.0, R2=1.0; got Slope={slope}, R2={r2}"));
+    }
+
+    // Undo and redo the fit via toolbar chrome buttons.
+    let rs_count_before_undo = session.host.app().document().result_sheets.len();
+    session
+        .handle_event(WebBridgeEvent::ClickChromeNode {
+            node_id: String::from("toolbar.undo"),
+            button: PointerButton::Primary,
+            modifiers: KeyModifiers::default(),
+        })
+        .map_err(|e| format!("toolbar.undo click failed: {e}"))?;
+    if session.host.app().document().result_sheets.len() + 1 != rs_count_before_undo {
+        return Err(String::from("expected toolbar.undo to revert created WF-16 ResultSheet"));
+    }
+    session
+        .handle_event(WebBridgeEvent::ClickChromeNode {
+            node_id: String::from("toolbar.redo"),
+            button: PointerButton::Primary,
+            modifiers: KeyModifiers::default(),
+        })
+        .map_err(|e| format!("toolbar.redo click failed: {e}"))?;
+    if session.host.app().document().result_sheets.len() != rs_count_before_undo {
+        return Err(String::from("expected toolbar.redo to restore WF-16 ResultSheet"));
+    }
+    let chrome = WebChromeBridge::new().build_layout(session.host.app(), ViewportMetrics::new(1280.0, 800.0, 1.0));
+    if chrome.nodes.is_empty() || chrome.snapshot.toolbar_ids.is_empty() || chrome.snapshot.menu_titles.len() < 8 {
+        return Err(format!(
+            "expected populated web chrome layout (nodes={}, toolbar_ids={}, menus={})",
+            chrome.nodes.len(),
+            chrome.snapshot.toolbar_ids.len(),
+            chrome.snapshot.menu_titles.len()
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn web_ui_parity_wf30_mv_formula_bar_and_wf21_km_survival() -> TestRes {
+    let mut session = WebBridgeSession::with_ids("doc-web-mv-km", "tab-web-mv-km");
+    session
+        .handle_event(WebBridgeEvent::ResizeViewport { logical_width: 1280.0, logical_height: 800.0, scale_factor: 1.0 })
+        .map_err(|e| e.to_string())?;
+
+    // WF-30: MV formula bar calculated variable `[20, 40, 60]` via `formula_bar.input` + `commit_enter`.
+    web_gui(
+        &mut session,
+        "ui.invoke_menu",
+        json!({ "path": "Insert/New Data Table", "params": { "sheet_id": "mv-web-30", "kind": "multiple_variables", "cols": 2, "rows": 3, "auto_graph": false } }),
+    )?;
+    web_gui(
+        &mut session,
+        "ui.type_text",
+        json!({ "widget_id": "grid.cell.0.0.0", "text": "10\t0\n20\t0\n30\t0", "clear_existing": true, "commit_enter": true }),
+    )?;
+    web_gui(&mut session, "ui.invoke_menu", json!({ "command_id": "ui.table.openFormulaBar", "params": { "column": 1 } }))?;
+    let live = web_gui(
+        &mut session,
+        "ui.type_text",
+        json!({ "widget_id": "formula_bar.input", "text": "= [Variable A] * 2", "clear_existing": true, "commit_enter": false }),
+    )?;
+    if live["is_valid"] != json!(true) {
+        return Err(format!("WF-30 web expected live formula bar validation is_valid=true, got {live}"));
+    }
+    let committed = web_gui(
+        &mut session,
+        "ui.type_text",
+        json!({ "widget_id": "formula_bar.input", "text": "= [Variable A] * 2", "clear_existing": true, "commit_enter": true }),
+    )?;
+    if committed["committed"] != json!(true) || committed["command_id"] != json!("table.setCalculatedVariable") {
+        return Err(format!("WF-30 web expected formula bar commit to succeed, got {committed}"));
+    }
+    let grid_snap = web_gui(&mut session, "ui.inspect", json!({ "scope": "grid" }))?;
+    let cells = grid_snap["grid_cells"].as_array().ok_or("WF-30 web missing grid_cells")?;
+    for (r, expected_txt) in ["20", "40", "60"].iter().enumerate() {
+        let wid = format!("grid.cell.{r}.1.0");
+        let node = cells.iter().find(|n| n["widget_id"] == json!(wid)).ok_or_else(|| format!("WF-30 web missing {wid}"))?;
+        if node["value"]["text"] != json!(expected_txt) {
+            return Err(format!("WF-30 web {wid} expected `{expected_txt}`, got {}", node["value"]));
+        }
+    }
+
+    // WF-21: Survival KM via GUI toolbar.analyze -> modal.ok + Number-at-Risk + Log-rank scalar.
+    web_gui(
+        &mut session,
+        "ui.invoke_menu",
+        json!({ "path": "Insert/New Data Table", "params": { "sheet_id": "surv-web-21", "kind": "survival", "cols": 2, "rows": 6, "auto_graph": false } }),
+    )?;
+    for (r, &(t, col, status)) in [(2.0, 0, "1"), (4.0, 0, "1"), (6.0, 0, "0"), (5.0, 1, "0"), (8.0, 1, "1"), (12.0, 1, "0")].iter().enumerate() {
+        web_gui(
+            &mut session,
+            "ui.type_text",
+            json!({ "widget_id": format!("grid.xcell.{r}.0"), "text": format!("{t}"), "clear_existing": true, "commit_enter": true }),
+        )?;
+        web_gui(
+            &mut session,
+            "ui.type_text",
+            json!({ "widget_id": format!("grid.cell.{r}.{col}.0"), "text": status, "clear_existing": true, "commit_enter": true }),
+        )?;
+    }
+    session
+        .handle_event(WebBridgeEvent::ClickChromeNode {
+            node_id: String::from("toolbar.analyze"),
+            button: PointerButton::Primary,
+            modifiers: KeyModifiers::default(),
+        })
+        .map_err(|e| e.to_string())?;
+    web_gui(&mut session, "ui.answer_dialog", json!({ "fields": { "entry_id": "stats.survival_km" } }))?;
+    session
+        .handle_event(WebBridgeEvent::ClickChromeNode {
+            node_id: String::from("modal.ok"),
+            button: PointerButton::Primary,
+            modifiers: KeyModifiers::default(),
+        })
+        .map_err(|e| e.to_string())?;
+    let km_id = session.host.app().document().result_sheets.last().map(|r| r.id.as_str().to_owned()).ok_or("missing WF-21 KM ResultSheet")?;
+    require_result_tab_present(&session, &km_id, "number-at-risk")?;
+    let _lr_chi2 = require_result_scalar(&session, &km_id, "Log-rank chi-square", None)?;
     Ok(())
 }

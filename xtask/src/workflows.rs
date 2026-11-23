@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const ACTIONLINT_CONFIG: &str = ".github/actionlint.yaml";
+const REQUIRE_WORKFLOW_LINT_ENV: &str = "CURVEBOOK_REQUIRE_WORKFLOW_LINT";
 
 /// Parse whether the `CI` environment variable enables strict CI enforcement.
 ///
@@ -37,22 +38,29 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
         return Err(format!("no `.yml`/`.yaml` workflows found in `{}/.github/workflows`", root.display()));
     }
     check_workflows_offline_yaml(root, &workflows)?;
+    let actions = collect_action_files(root)?;
+    check_action_files_offline_yaml(root, &actions)?;
 
     let shell_scripts = collect_shell_scripts(root)?;
     let in_ci = is_ci_env();
+    let require_lint = in_ci || parse_ci_env_value(std::env::var_os(REQUIRE_WORKFLOW_LINT_ENV).as_deref());
 
-    let actionlint_ran = run_actionlint_if_installed(root, &workflows, in_ci)?;
-    let shellcheck_ran = run_shellcheck_if_installed(root, &shell_scripts, in_ci)?;
+    let actionlint_ran = run_actionlint_if_installed(root, &workflows, in_ci, require_lint)?;
+    let shellcheck_ran = run_shellcheck_if_installed(root, &shell_scripts, in_ci, require_lint)?;
 
-    if actionlint_ran && shellcheck_ran {
+    if actionlint_ran && (shellcheck_ran || shell_scripts.is_empty()) {
         println!("workflows: actionlint ({} workflow files) and shellcheck ({} shell scripts) passed", workflows.len(), shell_scripts.len());
-    } else if actionlint_ran {
-        println!("workflows: actionlint ({} workflow files) passed", workflows.len());
-    } else if shellcheck_ran {
-        println!("workflows: shellcheck ({} shell scripts) passed", shell_scripts.len());
-    } else {
+    } else if !actionlint_ran && !shellcheck_ran {
         return Err(String::from(
             "neither `actionlint` nor `shellcheck` is installed in PATH; cannot verify workflows/scripts (offline YAML check passed, both required when CI=true)",
+        ));
+    } else if !actionlint_ran {
+        return Err(String::from(
+            "`actionlint` is not installed in PATH while `shellcheck` ran; cannot skip workflow linting silently (install `actionlint`)",
+        ));
+    } else {
+        return Err(String::from(
+            "`shellcheck` is not installed in PATH while `actionlint` ran; cannot skip shell script linting silently (install `shellcheck`)",
         ));
     }
     Ok(())
@@ -61,32 +69,71 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
 /// Perform offline YAML syntax & structure checks so malformed workflows always fail even without `actionlint`.
 pub fn check_workflows_offline_yaml(root: &Path, workflows: &[String]) -> Result<(), String> {
     for rel in workflows {
-        let text = std::fs::read_to_string(root.join(rel)).map_err(|e| format!("{rel}: {e}"))?;
-        if text.trim().is_empty() {
-            return Err(format!("{rel}: workflow YAML file is empty"));
+        check_yaml_file_offline(root, rel, true)?;
+    }
+    Ok(())
+}
+
+/// Perform offline YAML syntax checks on `.github/actions/**/*.{yml,yaml}` without requiring workflow keys.
+pub fn check_action_files_offline_yaml(root: &Path, actions: &[String]) -> Result<(), String> {
+    for rel in actions {
+        check_yaml_file_offline(root, rel, false)?;
+    }
+    Ok(())
+}
+
+fn check_yaml_file_offline(root: &Path, rel: &str, require_workflow_keys: bool) -> Result<(), String> {
+    let text = std::fs::read_to_string(root.join(rel)).map_err(|e| format!("{rel}: {e}"))?;
+    if text.trim().is_empty() {
+        return Err(format!("{rel}: workflow YAML file is empty"));
+    }
+    let mut has_jobs = false;
+    let mut has_on = false;
+    let mut open_expr_line: Option<usize> = None;
+    for (idx, line) in text.lines().enumerate() {
+        let line_no = idx + 1;
+        if line.trim_start_matches(' ').starts_with('\t') {
+            return Err(format!("{rel}:{line_no}: YAML indentation cannot use tab characters"));
         }
-        let mut has_jobs = false;
-        let mut has_on = false;
-        for (idx, line) in text.lines().enumerate() {
-            let line_no = idx + 1;
-            if line.starts_with('\t') {
-                return Err(format!("{rel}:{line_no}: YAML indentation cannot use tab characters"));
-            }
-            let trimmed = line.trim();
-            if trimmed == "jobs:" || trimmed.starts_with("jobs:") {
-                has_jobs = true;
-            }
-            if trimmed == "on:" || trimmed.starts_with("on:") || trimmed.starts_with("'on':") || trimmed.starts_with("\"on\":") {
-                has_on = true;
-            }
-            if let Some(open) = line.find("${{")
-                && !line[open + 3..].contains("}}")
-            {
-                return Err(format!("{rel}:{line_no}: unclosed GitHub Actions expression `${{{{`"));
-            }
+        let trimmed = line.trim();
+        if trimmed == "jobs:" || trimmed.starts_with("jobs:") {
+            has_jobs = true;
         }
-        if !has_on || !has_jobs {
-            return Err(format!("{rel}: workflow YAML must declare `on:` and `jobs:` keys"));
+        if trimmed == "on:" || trimmed.starts_with("on:") || trimmed.starts_with("'on':") || trimmed.starts_with("\"on\":") {
+            has_on = true;
+        }
+        scan_yaml_line_expressions(rel, line, line_no, &mut open_expr_line)?;
+    }
+    if let Some(open_line) = open_expr_line {
+        return Err(format!("{rel}:{open_line}: unclosed GitHub Actions expression `${{{{`"));
+    }
+    if require_workflow_keys && (!has_on || !has_jobs) {
+        return Err(format!("{rel}: workflow YAML must declare `on:` and `jobs:` keys"));
+    }
+    Ok(())
+}
+
+fn scan_yaml_line_expressions(rel: &str, line: &str, line_no: usize, open_expr_line: &mut Option<usize>) -> Result<(), String> {
+    let mut rest = line;
+    while !rest.is_empty() {
+        if let Some(open_line) = *open_expr_line {
+            if let Some((inside, after_close)) = rest.split_once("}}") {
+                if inside.contains("${{") {
+                    return Err(format!("{rel}:{open_line}: unclosed GitHub Actions expression `${{{{`"));
+                }
+                *open_expr_line = None;
+                rest = after_close;
+            } else {
+                if rest.contains("${{") {
+                    return Err(format!("{rel}:{open_line}: unclosed GitHub Actions expression `${{{{`"));
+                }
+                break;
+            }
+        } else if let Some((_, after_open)) = rest.split_once("${{") {
+            *open_expr_line = Some(line_no);
+            rest = after_open;
+        } else {
+            break;
         }
     }
     Ok(())
@@ -103,7 +150,7 @@ pub fn collect_workflow_files(root: &Path) -> Result<Vec<String>, String> {
     for entry in entries {
         let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
         let path = entry.path();
-        if !path.is_file() {
+        if !entry.file_type().is_ok_and(|ft| ft.is_file()) {
             continue;
         }
         let is_yaml =
@@ -116,12 +163,39 @@ pub fn collect_workflow_files(root: &Path) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+/// Discover all `.yml` / `.yaml` files inside `.github/actions` recursively as slash-normalized paths.
+pub fn collect_action_files(root: &Path) -> Result<Vec<String>, String> {
+    let dir = root.join(".github").join("actions");
+    if !std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    collect_yaml_tree(root, &dir, &mut out)?;
+    out.sort();
+    Ok(out)
+}
+
+fn collect_yaml_tree(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
+    for entry in std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+        let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
+        let ft = entry.file_type().map_err(|e| format!("{}: {e}", entry.path().display()))?;
+        let path = entry.path();
+        if ft.is_dir() {
+            collect_yaml_tree(root, &path, out)?;
+        } else if ft.is_file()
+            && path.extension().and_then(|s| s.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("yml") || ext.eq_ignore_ascii_case("yaml"))
+        {
+            out.push(rel_slash(root, &path));
+        }
+    }
+    Ok(())
+}
+
 /// Discover all tracked `.sh` scripts and `.githooks/*` hooks (falling back to recursive filesystem scan outside git).
 pub fn collect_shell_scripts(root: &Path) -> Result<Vec<String>, String> {
     let mut rels = Vec::new();
-    if root.join(".git").exists()
-        && let Ok(tracked) = crate::repo_files(root)
-    {
+    if root.join(".git").exists() && has_tool("git") {
+        let tracked = crate::repo_files(root)?;
         for rel in tracked {
             if is_shell_or_hook_rel(&rel) {
                 rels.push(rel);
@@ -159,7 +233,9 @@ fn walk_shell_targets(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result
         let name_str = name.to_string_lossy();
         let ft = entry.file_type().map_err(|e| format!("{}: {e}", path.display()))?;
         if ft.is_dir() {
-            if matches!(name_str.as_ref(), "target" | "dist" | "corpus" | ".git") || (name_str.starts_with('.') && name_str != ".githooks") {
+            if matches!(name_str.as_ref(), "target" | "dist" | "corpus" | ".git")
+                || (name_str.starts_with('.') && name_str != ".githooks" && name_str != ".github")
+            {
                 continue;
             }
             walk_shell_targets(root, &path, out)?;
@@ -181,10 +257,13 @@ fn has_tool(bin: &str) -> bool {
     Command::new(bin).arg("--version").output().is_ok_and(|o| o.status.success())
 }
 
-fn run_actionlint_if_installed(root: &Path, workflows: &[String], in_ci: bool) -> Result<bool, String> {
+fn run_actionlint_if_installed(root: &Path, workflows: &[String], in_ci: bool, require_lint: bool) -> Result<bool, String> {
     if !has_tool("actionlint") {
         if in_ci {
             return Err(String::from("`actionlint` is not installed in PATH (required when CI=true)"));
+        }
+        if require_lint {
+            return Err(String::from("`actionlint` is not installed in PATH (required when CURVEBOOK_REQUIRE_WORKFLOW_LINT=1)"));
         }
         println!("workflows: `actionlint` not found in PATH; skipping live workflow lint across {} file(s) (enforced when CI=true)", workflows.len());
         return Ok(false);
@@ -202,13 +281,16 @@ fn run_actionlint_if_installed(root: &Path, workflows: &[String], in_ci: bool) -
     Ok(true)
 }
 
-fn run_shellcheck_if_installed(root: &Path, scripts: &[String], in_ci: bool) -> Result<bool, String> {
+fn run_shellcheck_if_installed(root: &Path, scripts: &[String], in_ci: bool, require_lint: bool) -> Result<bool, String> {
     if scripts.is_empty() {
         return Ok(false);
     }
     if !has_tool("shellcheck") {
         if in_ci {
             return Err(String::from("`shellcheck` is not installed in PATH (required when CI=true)"));
+        }
+        if require_lint {
+            return Err(String::from("`shellcheck` is not installed in PATH (required when CURVEBOOK_REQUIRE_WORKFLOW_LINT=1)"));
         }
         println!("workflows: `shellcheck` not found in PATH; skipping shell script lint across {} file(s) (enforced when CI=true)", scripts.len());
         return Ok(false);
@@ -315,6 +397,33 @@ mod tests {
         std::fs::write(dir.join(".github/workflows/ci.yml"), "name: Broken\non:\n\tbad: true\njobs:\n  a:\n").unwrap();
         let yaml_err = run(&dir, &[]).unwrap_err();
         assert!(yaml_err.contains("tab") || yaml_err.contains("actionlint"), "{yaml_err}");
+
+        // Offline YAML check also catches space-indented tabs, second unclosed ${{, and invalid action YAML.
+        std::fs::write(dir.join(".github/workflows/ci.yml"), "name: IndentedTab\non:\n  \tbad: true\njobs:\n  a:\n").unwrap();
+        let tab_err = super::check_workflows_offline_yaml(&dir, &[String::from(".github/workflows/ci.yml")]).unwrap_err();
+        assert!(tab_err.contains("tab"), "{tab_err}");
+
+        std::fs::write(dir.join(".github/workflows/ci.yml"), "name: Unclosed2\non: push\njobs:\n  a:\n    name: ${{ a }} ${{ b\n").unwrap();
+        let expr_err = super::check_workflows_offline_yaml(&dir, &[String::from(".github/workflows/ci.yml")]).unwrap_err();
+        assert!(expr_err.contains("unclosed GitHub Actions expression"), "{expr_err}");
+
+        std::fs::create_dir_all(dir.join(".github/actions/setup")).unwrap();
+        std::fs::write(
+            dir.join(".github/actions/setup/action.yml"),
+            "name: Setup\nruns:\n  using: composite\n  steps:\n    - run: echo ${{ a }} ${{ unclosed\n",
+        )
+        .unwrap();
+        let actions = super::collect_action_files(&dir).unwrap();
+        assert_eq!(actions, vec![".github/actions/setup/action.yml"]);
+        let act_err = super::check_action_files_offline_yaml(&dir, &actions).unwrap_err();
+        assert!(act_err.contains("unclosed GitHub Actions expression"), "{act_err}");
+
+        if has_tool("git") {
+            let corrupt = make_temp_dir("corrupt-git");
+            std::fs::create_dir_all(corrupt.join(".git")).unwrap();
+            assert!(collect_shell_scripts(&corrupt).is_err(), "corrupt .git must propagate git ls-files failure");
+            let _ = std::fs::remove_dir_all(&corrupt);
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -7,7 +7,9 @@ mod series;
 
 use egui::Ui;
 
-use super::helpers::{GraphModalCtx, gtr, record_checkbox};
+use crate::i18n::tr;
+
+use super::helpers::{GraphModalCtx, record_checkbox};
 use super::state::{FormatGraphSchema, FormatGraphTab, GraphModalEguiState};
 
 use heatmap::{render_fg_heatmap_borders, render_fg_heatmap_color_mapping, render_fg_heatmap_labels};
@@ -36,7 +38,7 @@ pub(super) fn render_format_graph_body(ui: &mut Ui, state: &mut GraphModalEguiSt
 
 fn render_legend_toggles(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>, fg: &crate::dialogs_canvas::FormatGraphState) {
     let mut show_legend = fg.show_legend;
-    let vis_lbl = gtr(gctx.locale, "fg.legend");
+    let vis_lbl = tr(gctx.locale, "fg.legend");
     let vis_chk = ui.checkbox(&mut show_legend, vis_lbl);
     record_checkbox(ui, &vis_chk, gctx.meta, "format_graph.show_legend", vis_lbl, show_legend);
     if vis_chk.changed() {

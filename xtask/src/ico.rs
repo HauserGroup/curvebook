@@ -3,7 +3,10 @@
 
 use std::path::{Path, PathBuf};
 
+use curvebook_platform::{read_regular_file_bytes, write_atomic};
+
 const PNG_SIG: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
+const MAX_ICO_INPUT_PNG_BYTES: usize = 64 * 1024 * 1024;
 
 struct Frame {
     width: u32,
@@ -25,7 +28,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
 pub fn pack_files(out: &Path, inputs: &[PathBuf]) -> Result<(), String> {
     let mut frames = Vec::with_capacity(inputs.len());
     for path in inputs {
-        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let meta = std::fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+            return Err(format!("{}: ICO input PNG must be a regular non-symlink file", path.display()));
+        }
+        let bytes = read_regular_file_bytes(path, MAX_ICO_INPUT_PNG_BYTES).map_err(|e| format!("{}: {e}", path.display()))?;
         let (width, height) = png_dimensions(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
         if width == 0 || height == 0 || width > 256 || height > 256 {
             return Err(format!("{}: ICO PNG dimensions must be in 1..=256 (got {width}x{height})", path.display()));
@@ -38,7 +45,7 @@ pub fn pack_files(out: &Path, inputs: &[PathBuf]) -> Result<(), String> {
     {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
-    std::fs::write(out, ico).map_err(|e| format!("write {}: {e}", out.display()))
+    write_atomic(out, &ico).map_err(|e| format!("write {}: {e}", out.display()))
 }
 
 fn png_dimensions(bytes: &[u8]) -> Result<(u32, u32), String> {

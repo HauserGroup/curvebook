@@ -893,7 +893,7 @@ fn wf64_human_population_pyramid_horizontal_stacked_and_unsigned_ticks() -> Test
             ScenePrimitive::Text(t) => {
                 let txt = t.rich.plain_text();
                 let trimmed = txt.trim();
-                trimmed.starts_with('-') && trimmed[1..].chars().all(|c| c.is_ascii_digit() || c == '.')
+                trimmed.strip_prefix('-').is_some_and(|rest| rest.chars().all(|c| c.is_ascii_digit() || c == '.'))
             }
             _ => false,
         });

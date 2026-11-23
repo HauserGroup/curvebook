@@ -28,7 +28,9 @@ struct DecodedPng {
 }
 
 fn read_u32_be(bytes: &[u8], off: usize) -> u32 {
-    u32::from_be_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]])
+    let arr: Option<[u8; 4]> = bytes.get(off..off + 4).and_then(|s| s.try_into().ok());
+    assert!(arr.is_some(), "u32_be offset {off} out of bounds");
+    u32::from_be_bytes(arr.unwrap_or([0; 4]))
 }
 
 fn decode_and_verify_png(bytes: &[u8]) -> DecodedPng {
@@ -48,10 +50,14 @@ fn decode_and_verify_png(bytes: &[u8]) -> DecodedPng {
 
     while pos < bytes.len() {
         let len = read_u32_be(bytes, pos) as usize;
-        let chunk_type: [u8; 4] = [bytes[pos + 4], bytes[pos + 5], bytes[pos + 6], bytes[pos + 7]];
+        let chunk_type_opt: Option<[u8; 4]> = bytes.get(pos + 4..pos + 8).and_then(|s| s.try_into().ok());
+        assert!(chunk_type_opt.is_some(), "PNG chunk type out of bounds");
+        let chunk_type = chunk_type_opt.unwrap_or([0; 4]);
         let data_start = pos + 8;
         let data_end = data_start + len;
-        let data = &bytes[data_start..data_end];
+        let data_opt = bytes.get(data_start..data_end);
+        assert!(data_opt.is_some(), "PNG chunk data out of bounds");
+        let data = data_opt.unwrap_or(&[]);
         let expected_crc = read_u32_be(bytes, data_end);
 
         let mut hasher = Hasher::new();
@@ -64,18 +70,23 @@ fn decode_and_verify_png(bytes: &[u8]) -> DecodedPng {
                 assert_eq!(len, 13);
                 width = read_u32_be(data, 0);
                 height = read_u32_be(data, 4);
-                bit_depth = data[8];
-                color_type = data[9];
-                assert_eq!(data[10], 0, "compression method must be 0");
-                assert_eq!(data[11], 0, "filter method must be 0");
-                assert_eq!(data[12], 0, "interlace method must be 0");
+                let ihdr_tail: Option<[u8; 5]> = data.get(8..13).and_then(|s| s.try_into().ok());
+                assert!(ihdr_tail.is_some(), "IHDR tail out of bounds");
+                let [bd, ct, comp, filt, inter] = ihdr_tail.unwrap_or([0; 5]);
+                bit_depth = bd;
+                color_type = ct;
+                assert_eq!(comp, 0, "compression method must be 0");
+                assert_eq!(filt, 0, "filter method must be 0");
+                assert_eq!(inter, 0, "interlace method must be 0");
                 saw_ihdr = true;
             }
             b"pHYs" => {
                 assert_eq!(len, 9);
                 phys_x_ppm = read_u32_be(data, 0);
                 phys_y_ppm = read_u32_be(data, 4);
-                phys_unit = data[8];
+                let unit_opt = data.get(8).copied();
+                assert!(unit_opt.is_some(), "pHYs unit out of bounds");
+                phys_unit = unit_opt.unwrap_or(0);
                 saw_phys = true;
             }
             b"IDAT" => idat.extend_from_slice(data),
@@ -100,26 +111,30 @@ fn decode_and_verify_png(bytes: &[u8]) -> DecodedPng {
     let mut rgba = vec![0u8; stride * (height as usize)];
 
     for y in 0..(height as usize) {
-        let src_row = &raw[y * (stride + 1)..(y + 1) * (stride + 1)];
-        let filter = src_row[0];
-        let filt_bytes = &src_row[1..];
+        let src_row_opt = raw.get(y * (stride + 1)..(y + 1) * (stride + 1)).and_then(<[u8]>::split_first);
+        assert!(src_row_opt.is_some(), "PNG scanline out of bounds");
+        let (&filter, filt_bytes) = src_row_opt.unwrap_or((&0, &[]));
         let (prev_rows, curr_rows) = rgba.split_at_mut(y * stride);
-        let curr = &mut curr_rows[..stride];
-        let prev = if y > 0 { &prev_rows[(y - 1) * stride..] } else { &[] };
+        let curr = curr_rows.get_mut(..stride).unwrap_or(&mut []);
+        assert_eq!(curr.len(), stride);
+        let prev = if y > 0 { prev_rows.get((y - 1) * stride..).unwrap_or(&[]) } else { &[] };
 
         assert!(filter <= 4, "unexpected PNG filter byte {filter}");
         for x in 0..stride {
-            let a = if x >= 4 { curr[x - 4] } else { 0 };
-            let b = if prev.is_empty() { 0 } else { prev[x] };
-            let c = if prev.is_empty() || x < 4 { 0 } else { prev[x - 4] };
+            let a = x.checked_sub(4).and_then(|idx| curr.get(idx).copied()).unwrap_or(0);
+            let b = prev.get(x).copied().unwrap_or(0);
+            let c = x.checked_sub(4).and_then(|idx| prev.get(idx).copied()).unwrap_or(0);
+            let fb = filt_bytes.get(x).copied().unwrap_or(0);
             let recon = match filter {
-                0 => filt_bytes[x],
-                1 => filt_bytes[x].wrapping_add(a),
-                2 => filt_bytes[x].wrapping_add(b),
-                3 => filt_bytes[x].wrapping_add(((u16::from(a) + u16::from(b)) / 2) as u8),
-                _ => filt_bytes[x].wrapping_add(paeth_predictor(a, b, c)),
+                0 => fb,
+                1 => fb.wrapping_add(a),
+                2 => fb.wrapping_add(b),
+                3 => fb.wrapping_add(((u16::from(a) + u16::from(b)) / 2) as u8),
+                _ => fb.wrapping_add(paeth_predictor(a, b, c)),
             };
-            curr[x] = recon;
+            if let Some(slot) = curr.get_mut(x) {
+                *slot = recon;
+            }
         }
     }
 
@@ -157,15 +172,19 @@ struct DecodedTiff {
 }
 
 fn read_u16_le(bytes: &[u8], off: usize) -> u16 {
-    u16::from_le_bytes([bytes[off], bytes[off + 1]])
+    let arr: Option<[u8; 2]> = bytes.get(off..off + 2).and_then(|s| s.try_into().ok());
+    assert!(arr.is_some(), "u16_le offset {off} out of bounds");
+    u16::from_le_bytes(arr.unwrap_or([0; 2]))
 }
 
 fn read_u32_le(bytes: &[u8], off: usize) -> u32 {
-    u32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]])
+    let arr: Option<[u8; 4]> = bytes.get(off..off + 4).and_then(|s| s.try_into().ok());
+    assert!(arr.is_some(), "u32_le offset {off} out of bounds");
+    u32::from_le_bytes(arr.unwrap_or([0; 4]))
 }
 
 fn decode_and_verify_tiff(bytes: &[u8]) -> DecodedTiff {
-    assert_eq!(&bytes[0..2], b"II", "little-endian TIFF header expected");
+    assert_eq!(bytes.get(0..2), Some(b"II".as_slice()), "little-endian TIFF header expected");
     assert_eq!(read_u16_le(bytes, 2), 42, "TIFF magic 42 expected");
     let ifd_off = read_u32_le(bytes, 4) as usize;
     let count = read_u16_le(bytes, ifd_off) as usize;
@@ -234,7 +253,8 @@ fn decode_and_verify_tiff(bytes: &[u8]) -> DecodedTiff {
         assert_eq!(read_u16_le(bytes, bps_off + ch * 2), 8);
     }
 
-    let strip = &bytes[strip_off..strip_off + strip_bytes];
+    let strip = bytes.get(strip_off..strip_off + strip_bytes).unwrap_or(&[]);
+    assert_eq!(strip.len(), strip_bytes, "TIFF strip slice");
     assert!(matches!(compression, 1 | 5 | 8), "unexpected TIFF compression code {compression}");
     let rgba = match compression {
         1 => strip.to_vec(),
@@ -302,16 +322,20 @@ fn decode_tiff_lzw(encoded: &[u8]) -> Vec<u8> {
             continue;
         }
         if let Some(prev) = old_code {
-            let entry = if usize::from(code) < table.len() {
-                let s = table[usize::from(code)].clone();
-                let mut combined = table[usize::from(prev)].clone();
-                combined.push(s[0]);
+            let entry = if let Some(existing) = table.get(usize::from(code)) {
+                let s = existing.clone();
+                let mut combined = table.get(usize::from(prev)).cloned().unwrap_or_default();
+                if let Some(&first_b) = s.first() {
+                    combined.push(first_b);
+                }
                 table.push(combined);
                 s
             } else {
                 assert_eq!(usize::from(code), table.len(), "corrupt LZW code {code}");
-                let mut combined = table[usize::from(prev)].clone();
-                combined.push(combined[0]);
+                let mut combined = table.get(usize::from(prev)).cloned().unwrap_or_default();
+                if let Some(&first_b) = combined.first() {
+                    combined.push(first_b);
+                }
                 table.push(combined.clone());
                 combined
             };
@@ -323,7 +347,7 @@ fn decode_tiff_lzw(encoded: &[u8]) -> Vec<u8> {
                 _ => {}
             }
         } else {
-            let s = table[usize::from(code)].clone();
+            let s = table.get(usize::from(code)).cloned().unwrap_or_default();
             out.extend_from_slice(&s);
         }
         old_code = Some(code);
@@ -334,7 +358,10 @@ fn decode_tiff_lzw(encoded: &[u8]) -> Vec<u8> {
 
 fn pixel_at(img: &RasterImage, x: u32, y: u32) -> Rgba8 {
     let idx = ((y as usize) * (img.width_px as usize) + (x as usize)) * 4;
-    Rgba8::rgba(img.rgba[idx], img.rgba[idx + 1], img.rgba[idx + 2], img.rgba[idx + 3])
+    let px: Option<[u8; 4]> = img.rgba.get(idx..idx + 4).and_then(|s| s.try_into().ok());
+    assert!(px.is_some(), "pixel ({x}, {y}) out of bounds");
+    let [r, g, b, a] = px.unwrap_or([0; 4]);
+    Rgba8::rgba(r, g, b, a)
 }
 
 #[test]
@@ -855,7 +882,9 @@ fn assert_rendered_ink_bounds(img: &RasterImage, expected_w: std::ops::RangeIncl
     for y in 0..img.height_px {
         for x in 0..img.width_px {
             let off = ((y * img.width_px + x) * 4) as usize;
-            if img.rgba[off] < 250 || img.rgba[off + 1] < 250 || img.rgba[off + 2] < 250 {
+            if let Some(&[r, g, b, _]) = img.rgba.get(off..off + 4)
+                && (r < 250 || g < 250 || b < 250)
+            {
                 min_x = min_x.min(x);
                 max_x = max_x.max(x);
                 min_y = min_y.min(y);

@@ -933,7 +933,7 @@ fn render_graph_canvas_media_controls(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
-    let sel = app.egui_views.canvas_view.selected_graph_annotation;
+    let sel = ctx_in.selected_graph_annotation;
     let img_idx = sel
         .filter(|&i| matches!(gs.spec.annotations.get(i), Some(GraphAnnotation::EmbeddedImage { .. })))
         .or_else(|| gs.spec.annotations.iter().position(|a| matches!(a, GraphAnnotation::EmbeddedImage { .. })));

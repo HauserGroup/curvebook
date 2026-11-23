@@ -356,36 +356,64 @@ fn parse_cursor_variants(src: &str) -> Result<Vec<String>, String> {
 
 fn parse_manifest_names(toml: &str) -> Vec<String> {
     let mut out = Vec::new();
+    let mut in_cursor_section = false;
     for line in toml.lines() {
         let stripped = strip_toml_comment(line).trim();
+        if stripped.is_empty() {
+            continue;
+        }
+        if stripped.starts_with('[') && stripped.ends_with(']') {
+            let compact: String = stripped.chars().filter(|c| !c.is_whitespace()).collect();
+            in_cursor_section = compact == "[[cursor]]";
+            continue;
+        }
+        if !in_cursor_section {
+            continue;
+        }
         if let Some((key, val)) = stripped.split_once('=')
             && key.trim() == "name"
+            && let Some(name) = parse_toml_string(val.trim())
+            && !name.is_empty()
         {
-            let name = val.trim().trim_matches('"');
-            if !name.is_empty() {
-                out.push(name.to_owned());
-            }
+            out.push(name);
         }
     }
     out
 }
 
+fn parse_toml_string(raw: &str) -> Option<String> {
+    if let Some(inner) = raw.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+        return Some(inner.replace("\\\"", "\"").replace("\\\\", "\\"));
+    }
+    if let Some(inner) = raw.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) {
+        return Some(inner.to_owned());
+    }
+    None
+}
+
 fn strip_toml_comment(line: &str) -> &str {
-    let mut in_quote = false;
+    let mut in_double = false;
+    let mut in_single = false;
     let mut escaped = false;
     for (idx, ch) in line.char_indices() {
-        if in_quote {
+        if in_double {
             if escaped {
                 escaped = false;
             } else if ch == '\\' {
                 escaped = true;
             } else if ch == '"' {
-                in_quote = false;
+                in_double = false;
+            }
+        } else if in_single {
+            if ch == '\'' {
+                in_single = false;
             }
         } else if ch == '"' {
-            in_quote = true;
+            in_double = true;
+        } else if ch == '\'' {
+            in_single = true;
         } else if ch == '#' {
-            return &line[..idx];
+            return line.get(..idx).unwrap_or(line);
         }
     }
     line
@@ -442,5 +470,20 @@ pub enum Cursor {
 
         let toml_ok = "[[cursor]]\nname = \"Select\"\nnamespace = \"ignored\"\n[[cursor]]\nname = \"Lasso\"\n";
         assert_eq!(check_sources(src, toml_ok).unwrap(), 2);
+    }
+
+    #[test]
+    fn fa_sec23_15_ignores_non_cursor_tables_and_supports_single_quotes_and_comments() {
+        let toml = "\
+[meta]
+name = \"NotACursor\"
+[[cursor]] # comment
+name='Select'
+[[cursor]]
+name = \"Cross # Hair\" # trailing comment
+[footer]
+name = \"AlsoIgnored\"
+";
+        assert_eq!(parse_manifest_names(toml), vec!["Select", "Cross # Hair"]);
     }
 }

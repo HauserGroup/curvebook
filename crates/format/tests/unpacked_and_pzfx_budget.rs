@@ -51,15 +51,21 @@ fn build_rich_project_with_notes_and_checkpoints() -> Result<ProjectDocument, Fo
 
     let mut xy = XyTable::new(SubcolumnMode::RawReplicates(2), 2, 3)?;
     xy.x_title = String::from("Conc (nM)");
-    xy.data_sets[0].title = String::from("Wildtype");
-    xy.data_sets[1].title = String::from("Mutant");
+    if let [ds0, ds1] = xy.data_sets.as_mut_slice() {
+        ds0.title = String::from("Wildtype");
+        ds1.title = String::from("Mutant");
+        if let [r0, r1, r2] = ds0.cells.as_mut_slice() {
+            *r0 = vec![Cell::number(11.2), Cell::number(12.4)];
+            *r1 = vec![Cell::number(45.8), Cell::number(999.0)];
+            *r2 = vec![Cell::number(88.1), Cell::number(89.5)];
+        }
+        if let Some(r0) = ds1.cells.first_mut() {
+            *r0 = vec![Cell::number(10.0), Cell::number(10.6)];
+        }
+    }
     for (r, x) in [1.0, 10.0, 100.0].iter().enumerate() {
         xy.set_x_cell(r, Cell::number(*x))?;
     }
-    xy.data_sets[0].cells[0] = vec![Cell::number(11.2), Cell::number(12.4)];
-    xy.data_sets[0].cells[1] = vec![Cell::number(45.8), Cell::number(999.0)];
-    xy.data_sets[0].cells[2] = vec![Cell::number(88.1), Cell::number(89.5)];
-    xy.data_sets[1].cells[0] = vec![Cell::number(10.0), Cell::number(10.6)];
 
     let mut ds1 = DataSheet::new("data-xy", "Dose Response", TableArchetype::Xy(xy))?;
     ds1.info_sheet_id = Some(SheetId::new("info-1"));
@@ -67,12 +73,18 @@ fn build_rich_project_with_notes_and_checkpoints() -> Result<ProjectDocument, Fo
     doc.add_data_sheet(ds1.clone())?;
 
     let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 2)?;
-    col.data_sets[0].title = String::from("Vehicle");
-    col.data_sets[1].title = String::from("Treated");
-    col.data_sets[0].cells[0] = vec![Cell::number(4.5)];
-    col.data_sets[0].cells[1] = vec![Cell::number(4.8)];
-    col.data_sets[1].cells[0] = vec![Cell::number(9.2)];
-    col.data_sets[1].cells[1] = vec![Cell::number(9.7)];
+    if let [c0, c1] = col.data_sets.as_mut_slice() {
+        c0.title = String::from("Vehicle");
+        c1.title = String::from("Treated");
+        if let [r0, r1] = c0.cells.as_mut_slice() {
+            *r0 = vec![Cell::number(4.5)];
+            *r1 = vec![Cell::number(4.8)];
+        }
+        if let [r0, r1] = c1.cells.as_mut_slice() {
+            *r0 = vec![Cell::number(9.2)];
+            *r1 = vec![Cell::number(9.7)];
+        }
+    }
     let mut ds2 = DataSheet::new("data-col", "Cohort Summary", TableArchetype::Column(col))?;
     ds2.set_excluded_with_reason(CellCoord::new(0, 1, 0), "hemolyzed", "Sample hemolyzed on visual QC", "2026-11-14T08:05:00Z")?;
     doc.add_data_sheet(ds2)?;

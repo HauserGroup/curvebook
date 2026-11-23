@@ -9,7 +9,7 @@
 //! scientific glyphs (`→ ▾ ● ✓ ± ≤ ≥ μ χ²`) always resolve cleanly even when host or
 //! primary proportional faces lack them.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -38,7 +38,7 @@ const BOLD_AVAILABLE_DATA_KEY: &str = "curvebook_bold_face_loaded";
 const MAX_FONT_FILE_BYTES: usize = 48 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: usize = 256 * 1024;
 const MAX_ENV_FONT_FILES: usize = 48;
-const MAX_OS_FONT_FILES: usize = 28;
+const MAX_OS_FONT_FILES: usize = 36;
 const MAX_DIR_DEPTH: usize = 3;
 
 type SharedFontBlob = Arc<dyn AsRef<[u8]> + Send + Sync>;
@@ -216,28 +216,30 @@ fn assemble_font_definitions(
     mut report: FontDiscoveryReport,
 ) -> BuiltEguiFonts {
     let mut defs = egui::FontDefinitions::empty();
+    let mut id_keys: HashMap<fontdb::ID, String> = HashMap::new();
     let mut proportional = Vec::new();
     let mut monospace = Vec::new();
     let mut prop_seen = HashSet::new();
     let mut mono_seen = HashSet::new();
+    let mut rctx = FontRegisterCtx { db, defs: &mut defs, id_keys: &mut id_keys };
 
     // Tier 1: explicit CURVEBOOK_FONTS_DIR overrides first (regular normal faces prioritized).
-    push_sorted_tier_faces(db, env_ids, false, &mut defs, &mut prop_seen, &mut proportional);
-    push_sorted_tier_faces(db, env_ids, true, &mut defs, &mut mono_seen, &mut monospace);
+    push_sorted_tier_faces(&mut rctx, env_ids, false, &mut prop_seen, &mut proportional);
+    push_sorted_tier_faces(&mut rctx, env_ids, true, &mut mono_seen, &mut monospace);
 
     // Tier 2: compile-time optional bundled faces (empty unless external staging was compiled).
-    push_sorted_tier_faces(db, bundled_ids, false, &mut defs, &mut prop_seen, &mut proportional);
-    push_sorted_tier_faces(db, bundled_ids, true, &mut defs, &mut mono_seen, &mut monospace);
+    push_sorted_tier_faces(&mut rctx, bundled_ids, false, &mut prop_seen, &mut proportional);
+    push_sorted_tier_faces(&mut rctx, bundled_ids, true, &mut mono_seen, &mut monospace);
 
     // Tier 3: host OS faces selected via fontdb queries (zero memmap, zero fontconfig).
-    let os_prop_id = query_primary_proportional(db).or_else(|| first_regular_id(db, os_ids, false));
+    let os_prop_id = query_primary_proportional(rctx.db).or_else(|| first_regular_id(rctx.db, os_ids, false));
     if let Some(id) = os_prop_id {
-        register_face_for_family(db, id, "os_proportional", &mut defs, &mut prop_seen, &mut proportional);
+        register_face_for_family(&mut rctx, id, "os_proportional", &mut prop_seen, &mut proportional);
     }
 
-    let os_mono_id = query_primary_monospace(db).or_else(|| first_regular_id(db, os_ids, true));
+    let os_mono_id = query_primary_monospace(rctx.db).or_else(|| first_regular_id(rctx.db, os_ids, true));
     if let Some(id) = os_mono_id {
-        register_face_for_family(db, id, "os_monospace", &mut defs, &mut mono_seen, &mut monospace);
+        register_face_for_family(&mut rctx, id, "os_monospace", &mut mono_seen, &mut monospace);
     }
 
     for (idx, family_name) in OS_SYMBOL_FAMILIES.iter().enumerate() {
@@ -247,10 +249,10 @@ fn assemble_font_definitions(
             stretch: fontdb::Stretch::Normal,
             style: fontdb::Style::Normal,
         };
-        if let Some(id) = db.query(&query) {
+        if let Some(id) = rctx.db.query(&query) {
             let prefix = format!("os_symbol_{idx}");
-            register_face_for_family(db, id, &prefix, &mut defs, &mut prop_seen, &mut proportional);
-            register_face_for_family(db, id, &prefix, &mut defs, &mut mono_seen, &mut monospace);
+            register_face_for_family(&mut rctx, id, &prefix, &mut prop_seen, &mut proportional);
+            register_face_for_family(&mut rctx, id, &prefix, &mut mono_seen, &mut monospace);
         }
     }
 
@@ -261,10 +263,24 @@ fn assemble_font_definitions(
             stretch: fontdb::Stretch::Normal,
             style: fontdb::Style::Normal,
         };
-        if let Some(id) = db.query(&query) {
+        if let Some(id) = rctx.db.query(&query) {
             let prefix = format!("os_cjk_{idx}");
-            register_face_for_family(db, id, &prefix, &mut defs, &mut prop_seen, &mut proportional);
-            register_face_for_family(db, id, &prefix, &mut defs, &mut mono_seen, &mut monospace);
+            register_face_for_family(&mut rctx, id, &prefix, &mut prop_seen, &mut proportional);
+            register_face_for_family(&mut rctx, id, &prefix, &mut mono_seen, &mut monospace);
+        }
+    }
+
+    for (idx, family_name) in OS_RTL_FAMILIES.iter().enumerate() {
+        let query = fontdb::Query {
+            families: &[fontdb::Family::Name(family_name)],
+            weight: fontdb::Weight::NORMAL,
+            stretch: fontdb::Stretch::Normal,
+            style: fontdb::Style::Normal,
+        };
+        if let Some(id) = rctx.db.query(&query) {
+            let prefix = format!("os_rtl_{idx}");
+            register_face_for_family(&mut rctx, id, &prefix, &mut prop_seen, &mut proportional);
+            register_face_for_family(&mut rctx, id, &prefix, &mut mono_seen, &mut monospace);
         }
     }
 
@@ -275,42 +291,42 @@ fn assemble_font_definitions(
         if extra_count >= 6 {
             break;
         }
-        if is_regular_face(db, id) && register_face_for_family(db, id, "os_extra", &mut defs, &mut prop_seen, &mut proportional) {
+        if is_regular_face(rctx.db, id) && register_face_for_family(&mut rctx, id, "os_extra", &mut prop_seen, &mut proportional) {
             extra_count += 1;
         }
     }
 
-    // Ensure monospace can still fall back through primary proportional & CJK/symbol OS faces.
+    // Ensure monospace can still fall back through primary proportional & CJK/RTL/symbol OS faces.
     for key in &proportional {
         if !monospace.iter().any(|existing| existing == key) {
             monospace.push(key.clone());
         }
     }
 
-    let bold_id = first_regular_nonmono_id(db, env_ids)
-        .or_else(|| first_regular_nonmono_id(db, bundled_ids))
+    let bold_id = first_regular_nonmono_id(rctx.db, env_ids)
+        .or_else(|| first_regular_nonmono_id(rctx.db, bundled_ids))
         .or(os_prop_id)
-        .and_then(|reg_id| query_primary_proportional_bold(db, reg_id));
+        .and_then(|reg_id| query_primary_proportional_bold(rctx.db, reg_id));
 
-    defs.families.insert(egui::FontFamily::Proportional, proportional);
-    defs.families.insert(egui::FontFamily::Monospace, monospace);
+    rctx.defs.families.insert(egui::FontFamily::Proportional, proportional);
+    rctx.defs.families.insert(egui::FontFamily::Monospace, monospace);
 
     // Deterministic cleanroom SFNT layers: sans first, mandatory symbols right after.
-    append_cleanroom_sans_fallback(&mut defs);
-    append_symbol_fallback(&mut defs);
+    append_cleanroom_sans_fallback(rctx.defs);
+    append_symbol_fallback(rctx.defs);
 
     if let Some(bid) = bold_id {
         let mut bold_chain = Vec::new();
         let mut bold_seen = HashSet::new();
-        if register_face_for_family(db, bid, "os_proportional_bold", &mut defs, &mut bold_seen, &mut bold_chain) {
-            if let Some(prop_chain) = defs.families.get(&egui::FontFamily::Proportional) {
+        if register_face_for_family(&mut rctx, bid, "os_proportional_bold", &mut bold_seen, &mut bold_chain) {
+            if let Some(prop_chain) = rctx.defs.families.get(&egui::FontFamily::Proportional) {
                 for key in prop_chain {
                     if !bold_chain.iter().any(|existing| existing == key) {
                         bold_chain.push(key.clone());
                     }
                 }
             }
-            defs.families.insert(egui::FontFamily::Name(Arc::from(BOLD_FONT_FAMILY)), bold_chain);
+            rctx.defs.families.insert(egui::FontFamily::Name(Arc::from(BOLD_FONT_FAMILY)), bold_chain);
             report.bold_face_loaded = true;
         }
     }
@@ -323,11 +339,16 @@ fn assemble_font_definitions(
     BuiltEguiFonts { definitions: defs, report }
 }
 
+struct FontRegisterCtx<'a> {
+    db: &'a fontdb::Database,
+    defs: &'a mut egui::FontDefinitions,
+    id_keys: &'a mut HashMap<fontdb::ID, String>,
+}
+
 fn push_sorted_tier_faces(
-    db: &fontdb::Database,
+    rctx: &mut FontRegisterCtx<'_>,
     ids: &[fontdb::ID],
     prefer_mono: bool,
-    defs: &mut egui::FontDefinitions,
     seen: &mut HashSet<fontdb::ID>,
     chain: &mut Vec<String>,
 ) {
@@ -335,7 +356,7 @@ fn push_sorted_tier_faces(
         .iter()
         .copied()
         .map(|id| {
-            let Some(face) = db.face(id) else {
+            let Some(face) = rctx.db.face(id) else {
                 return (9, id);
             };
             let reg_rank = u8::from(!(face.style == fontdb::Style::Normal && face.weight == fontdb::Weight::NORMAL));
@@ -346,30 +367,53 @@ fn push_sorted_tier_faces(
     ordered.sort_by_key(|&(rank, _)| rank);
     let prefix = if prefer_mono { "tier_mono" } else { "tier_prop" };
     for (_, id) in ordered {
-        register_face_for_family(db, id, prefix, defs, seen, chain);
+        register_face_for_family(rctx, id, prefix, seen, chain);
     }
 }
 
 fn register_face_for_family(
-    db: &fontdb::Database,
+    rctx: &mut FontRegisterCtx<'_>,
     id: fontdb::ID,
     prefix: &str,
-    defs: &mut egui::FontDefinitions,
     seen: &mut HashSet<fontdb::ID>,
     chain: &mut Vec<String>,
 ) -> bool {
     if !seen.insert(id) {
         return false;
     }
-    let Some((fontdb::Source::Binary(blob), face_index)) = db.face_source(id) else {
+    if let Some(existing_key) = rctx.id_keys.get(&id).cloned() {
+        if !chain.iter().any(|existing| existing == &existing_key) {
+            chain.push(existing_key);
+        }
+        return true;
+    }
+    let Some((fontdb::Source::Binary(blob), face_index)) = rctx.db.face_source(id) else {
         return false;
     };
-    let key = format!("{prefix}_{}_{}", id_to_slug(db, id), face_index);
-    defs.font_data.entry(key.clone()).or_insert_with(|| Arc::new(egui::FontData::from_blob(blob, face_index)));
+    let fam_slug = id_to_slug(rctx.db, id);
+    let ps_slug = id_to_ps_slug(rctx.db, id);
+    let base = if ps_slug.is_empty() || ps_slug == fam_slug {
+        format!("{prefix}_{fam_slug}_{face_index}")
+    } else {
+        format!("{prefix}_{fam_slug}_{ps_slug}_{face_index}")
+    };
+    let mut key = base.clone();
+    let mut suffix = 2usize;
+    while rctx.defs.font_data.contains_key(&key) {
+        key = format!("{base}_{suffix}");
+        suffix += 1;
+    }
+    rctx.defs.font_data.insert(key.clone(), Arc::new(egui::FontData::from_blob(blob, face_index)));
+    rctx.id_keys.insert(id, key.clone());
     if !chain.iter().any(|existing| existing == &key) {
         chain.push(key);
     }
     true
+}
+
+fn id_to_ps_slug(db: &fontdb::Database, id: fontdb::ID) -> String {
+    let raw = db.face(id).map_or("", |f| f.post_script_name.as_str());
+    raw.chars().map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_lowercase() } else { '_' }).collect()
 }
 
 fn id_to_slug(db: &fontdb::Database, id: fontdb::ID) -> String {
@@ -471,6 +515,21 @@ const OS_CJK_FAMILIES: &[&str] = &[
     "Malgun Gothic",
     "Arial Unicode MS",
     "AppleGothic",
+];
+
+const OS_RTL_FAMILIES: &[&str] = &[
+    "Geeza Pro",
+    "Damascus",
+    "Arial Hebrew",
+    "SF Arabic",
+    "Al Bayan",
+    "Noto Sans Arabic",
+    "Noto Naskh Arabic",
+    "Noto Sans Hebrew",
+    "Tahoma",
+    "Segoe UI",
+    "DejaVu Sans",
+    "Arial Unicode MS",
 ];
 
 fn load_bundled_into_db(db: &mut fontdb::Database, out_ids: &mut Vec<fontdb::ID>) {
@@ -627,6 +686,10 @@ fn curated_os_font_candidates() -> &'static [&'static str] {
             "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
             "/System/Library/Fonts/Hiragino Sans GB.ttc",
             "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+            "/System/Library/Fonts/GeezaPro.ttc",
+            "/System/Library/Fonts/Supplemental/Damascus.ttc",
+            "/System/Library/Fonts/Supplemental/ArialHB.ttc",
+            "/System/Library/Fonts/SFArabic.ttf",
         ]
     }
     #[cfg(target_os = "windows")]
@@ -636,6 +699,7 @@ fn curated_os_font_candidates() -> &'static [&'static str] {
             r"C:\Windows\Fonts\segoeuib.ttf",
             r"C:\Windows\Fonts\arial.ttf",
             r"C:\Windows\Fonts\arialbd.ttf",
+            r"C:\Windows\Fonts\tahoma.ttf",
             r"C:\Windows\Fonts\consola.ttf",
             r"C:\Windows\Fonts\cour.ttf",
             r"C:\Windows\Fonts\seguisym.ttf",
@@ -656,10 +720,14 @@ fn curated_os_font_candidates() -> &'static [&'static str] {
             "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
             "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
             "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansHebrew-Regular.ttf",
             "/usr/share/fonts/TTF/DejaVuSans.ttf",
             "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
             "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
             "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSansArabic-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSansHebrew-Regular.ttf",
             "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
             "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",

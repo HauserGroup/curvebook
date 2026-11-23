@@ -54,16 +54,17 @@ impl Drop for TempDir {
 
 fn encode_base64(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let enc = |idx: u32| -> char { TABLE.get((idx & 0x3f) as usize).copied().map(char::from).unwrap_or('=') };
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
-        let b0 = chunk[0];
+        let b0 = chunk.first().copied().unwrap_or(0);
         let b1 = chunk.get(1).copied().unwrap_or(0);
         let b2 = chunk.get(2).copied().unwrap_or(0);
         let n = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
-        out.push(char::from(TABLE[((n >> 18) & 0x3f) as usize]));
-        out.push(char::from(TABLE[((n >> 12) & 0x3f) as usize]));
-        out.push(if chunk.len() > 1 { char::from(TABLE[((n >> 6) & 0x3f) as usize]) } else { '=' });
-        out.push(if chunk.len() > 2 { char::from(TABLE[(n & 0x3f) as usize]) } else { '=' });
+        out.push(enc(n >> 18));
+        out.push(enc(n >> 12));
+        out.push(if chunk.len() > 1 { enc(n >> 6) } else { '=' });
+        out.push(if chunk.len() > 2 { enc(n) } else { '=' });
     }
     out
 }

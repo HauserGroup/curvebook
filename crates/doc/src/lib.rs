@@ -17,6 +17,7 @@
 //! assert_eq!(sheet.cell(CellCoord::new(0, 0, 0)).unwrap().active_number(), None);
 //! ```
 #![forbid(unsafe_code)]
+#![deny(clippy::indexing_slicing)]
 #![deny(missing_docs)]
 
 pub mod analysis;

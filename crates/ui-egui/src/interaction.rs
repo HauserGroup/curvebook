@@ -1,11 +1,17 @@
 //! HiDPI viewport coordinate metrics, keyboard/shortcut/inline-edit dispatch,
 //! inertial pan/zoom state, and in-memory WASM-clean [`VirtualWorkspaceFolder`] (`G6`, `M7`, `QOL-4`, `QOL-5`, `QOL-10`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use curvebook_chart::PointPt;
-use curvebook_doc::{CellCoord, ConstantValue, ProjectDocument, RectPt, SheetCellRange, SheetId};
-use curvebook_format::{export_datasheet_to_csv, migrate_document_json, open_project_bytes, save_project_bytes, validate_project_document};
+use curvebook_doc::{
+    CURRENT_SCHEMA_VERSION, CellCoord, ConstantValue, ImageMimeKind, MAX_IMAGE_ASSET_BYTES, MAX_PROJECT_IMAGE_ASSETS, ProjectDocument, RectPt,
+    SheetCellRange, SheetId, SheetSection,
+};
+use curvebook_format::{
+    ArchiveKind, ArchiveManifest, AssetManifestEntry, ZipLimits, export_datasheet_to_csv, migrate_document_json, open_project_bytes,
+    save_project_bytes, validate_project_document,
+};
 use curvebook_render::RenderTargetSpec;
 use curvebook_tools::canvas::ResizeHandleCorner;
 use curvebook_tools::{GridCellCoord, ToolCommandIntent};
@@ -207,7 +213,7 @@ impl InlineEditorState {
         }
         let end = self.caret_byte.min(self.buffer.len());
         let end = if self.buffer.is_char_boundary(end) { end } else { self.buffer.len() };
-        if let Some((prev_idx, _)) = self.buffer[..end].char_indices().last() {
+        if let Some((prev_idx, _)) = self.buffer.get(..end).and_then(|s| s.char_indices().last()) {
             self.buffer.drain(prev_idx..end);
             self.caret_byte = prev_idx;
         }
@@ -358,8 +364,28 @@ impl VirtualWorkspaceFolder {
     ///
     /// # Errors
     /// Returns an error if `rel_path` fails validation.
+    /// Write a relative file inside the virtual workspace while enforcing `ZipLimits::default()` caps.
     pub fn write_file(&mut self, rel_path: &str, bytes: Vec<u8>) -> Result<(), String> {
         let clean = Self::normalize_rel_path(rel_path)?;
+        let limits = ZipLimits::default();
+        let bytes_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        if bytes_len > limits.max_entry_uncompressed_bytes {
+            return Err(format!(
+                "virtual workspace entry `{clean}` exceeds per-entry byte limit ({} > {})",
+                bytes.len(),
+                limits.max_entry_uncompressed_bytes
+            ));
+        }
+        if !self.files.contains_key(&clean) && self.files.len() >= limits.max_entries {
+            return Err(format!("virtual workspace exceeds maximum entry count ({})", limits.max_entries));
+        }
+        let current_total: u64 = self.files.values().fold(0u64, |acc, data| acc.saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX)));
+        let existing_len = u64::try_from(self.files.get(&clean).map_or(0usize, Vec::len)).unwrap_or(u64::MAX);
+        let _next_total = current_total
+            .saturating_sub(existing_len)
+            .checked_add(bytes_len)
+            .filter(|&sum| sum <= limits.max_total_uncompressed_bytes)
+            .ok_or_else(|| format!("virtual workspace exceeds total byte budget ({} bytes max)", limits.max_total_uncompressed_bytes))?;
         self.files.insert(clean, bytes);
         Ok(())
     }
@@ -439,12 +465,202 @@ impl VirtualWorkspaceFolder {
         open_project_bytes(bytes).map_err(|err| err.to_string())
     }
 
+    /// Validate entry-count, per-entry, and total byte caps against `ZipLimits::default()`.
+    ///
+    /// # Errors
+    /// Returns an error if any path is invalid or any storage limit is exceeded.
+    pub fn validate_limits(&self) -> Result<(), String> {
+        let limits = ZipLimits::default();
+        if self.files.len() > limits.max_entries {
+            return Err(format!("virtual workspace exceeds maximum entry count ({} > {})", self.files.len(), limits.max_entries));
+        }
+        let mut total_bytes = 0u64;
+        for (path, bytes) in &self.files {
+            let _ = Self::normalize_rel_path(path)?;
+            let entry_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            if entry_len > limits.max_entry_uncompressed_bytes {
+                return Err(format!(
+                    "virtual workspace entry `{path}` exceeds per-entry byte limit ({} > {})",
+                    bytes.len(),
+                    limits.max_entry_uncompressed_bytes
+                ));
+            }
+            total_bytes = total_bytes
+                .checked_add(entry_len)
+                .filter(|&sum| sum <= limits.max_total_uncompressed_bytes)
+                .ok_or_else(|| format!("virtual workspace exceeds total byte budget ({} bytes max)", limits.max_total_uncompressed_bytes))?;
+        }
+        let _ = total_bytes;
+        Ok(())
+    }
+
+    fn validate_manifest_and_assets(&self, doc_bytes: &[u8], raw_doc: &Value, from_version: u32) -> Result<ValidatedVirtualManifest, String> {
+        let manifest_bytes = self.read_file("manifest.json").ok_or_else(|| String::from("virtual snapshot missing `manifest.json`"))?;
+        let manifest_val: Value = serde_json::from_slice(manifest_bytes).map_err(|err| format!("failed decoding virtual `manifest.json`: {err}"))?;
+        let manifest_obj = manifest_val.as_object().ok_or_else(|| String::from("virtual `manifest.json` must be a JSON object"))?;
+
+        let manifest_schema_version = manifest_obj
+            .get("schema_version")
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(|| String::from("virtual `manifest.json` missing valid `schema_version`"))?;
+        if manifest_schema_version > CURRENT_SCHEMA_VERSION {
+            return Err(format!("unsupported virtual `manifest.json` schema_version {manifest_schema_version}"));
+        }
+        if manifest_schema_version != from_version {
+            return Err(format!(
+                "virtual `manifest.json` schema_version ({manifest_schema_version}) does not match `document.json` ({from_version})"
+            ));
+        }
+        if let Some(title_val) = manifest_obj.get("title") {
+            let manifest_title = title_val.as_str().ok_or_else(|| String::from("virtual `manifest.json` has non-string `title`"))?;
+            if let Some(raw_title) = raw_doc.get("title").and_then(Value::as_str)
+                && manifest_title != raw_title
+            {
+                return Err(String::from("virtual `manifest.json` title does not match `document.json`"));
+            }
+        }
+
+        let is_archive_manifest = manifest_obj.contains_key("format") || manifest_obj.contains_key("kind") || manifest_obj.contains_key("assets");
+        if is_archive_manifest {
+            if !manifest_obj.contains_key("format") || !manifest_obj.contains_key("document_crc32") {
+                return Err(String::from("archive virtual `manifest.json` missing `format` or `document_crc32`"));
+            }
+            let archive_manifest: ArchiveManifest =
+                serde_json::from_value(manifest_val.clone()).map_err(|err| format!("invalid archive virtual `manifest.json`: {err}"))?;
+            if archive_manifest.format != "curvebook-archive" {
+                return Err(format!("unsupported virtual `manifest.json` format `{}`", archive_manifest.format));
+            }
+            if archive_manifest.kind != ArchiveKind::Project {
+                return Err(format!("virtual workspace requires project archive, got `{}`", archive_manifest.kind.as_str()));
+            }
+            let actual_doc_crc = virtual_crc32_ieee(doc_bytes);
+            if archive_manifest.document_crc32 != actual_doc_crc {
+                return Err(format!(
+                    "virtual `document.json` CRC-32 mismatch (manifest {:08x} != actual {actual_doc_crc:08x})",
+                    archive_manifest.document_crc32
+                ));
+            }
+            let limits = ZipLimits::default();
+            if archive_manifest.sheets.len() > limits.max_entries {
+                return Err(format!(
+                    "archive virtual `manifest.json` sheet count {} exceeds limit {}",
+                    archive_manifest.sheets.len(),
+                    limits.max_entries
+                ));
+            }
+            let mut seen_sections = HashSet::with_capacity(archive_manifest.sheets.len());
+            for entry in &archive_manifest.sheets {
+                if !seen_sections.insert((entry.section, entry.id.as_str().to_owned())) {
+                    return Err(format!("archive virtual `manifest.json` contains duplicate sheet `{}`", entry.id.as_str()));
+                }
+                if entry.section == SheetSection::Data {
+                    let csv_path = entry
+                        .csv_path
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| format!("archive virtual `manifest.json` data sheet `{}` missing `csv_path`", entry.id.as_str()))?;
+                    let clean_csv = Self::normalize_rel_path(csv_path)?;
+                    let csv_bytes =
+                        self.read_file(&clean_csv).ok_or_else(|| format!("virtual `manifest.json` references missing sheet `{clean_csv}`"))?;
+                    let expected_crc =
+                        entry.crc32.ok_or_else(|| format!("archive virtual `manifest.json` data sheet `{}` missing `crc32`", entry.id.as_str()))?;
+                    let actual_crc = virtual_crc32_ieee(csv_bytes);
+                    if expected_crc != actual_crc {
+                        return Err(format!("virtual `{clean_csv}` CRC-32 mismatch (manifest {expected_crc:08x} != actual {actual_crc:08x})"));
+                    }
+                } else if let Some(csv_path) = entry.csv_path.as_deref().filter(|s| !s.is_empty()) {
+                    let clean_csv = Self::normalize_rel_path(csv_path)?;
+                    let csv_bytes =
+                        self.read_file(&clean_csv).ok_or_else(|| format!("virtual `manifest.json` references missing sheet `{clean_csv}`"))?;
+                    if let Some(expected_crc) = entry.crc32 {
+                        let actual_crc = virtual_crc32_ieee(csv_bytes);
+                        if expected_crc != actual_crc {
+                            return Err(format!("virtual `{clean_csv}` CRC-32 mismatch (manifest {expected_crc:08x} != actual {actual_crc:08x})"));
+                        }
+                    }
+                }
+            }
+            if archive_manifest.assets.len() > MAX_PROJECT_IMAGE_ASSETS {
+                return Err(format!(
+                    "archive virtual `manifest.json` asset count {} exceeds limit {MAX_PROJECT_IMAGE_ASSETS}",
+                    archive_manifest.assets.len()
+                ));
+            }
+            let mut seen_asset_paths = BTreeSet::new();
+            let mut hydrated_assets = BTreeMap::new();
+            for asset in &archive_manifest.assets {
+                let clean_asset = Self::normalize_rel_path(&asset.path)?;
+                if !seen_asset_paths.insert(clean_asset.clone()) {
+                    return Err(format!("archive virtual `manifest.json` contains duplicate asset path `{clean_asset}`"));
+                }
+                if hydrated_assets.contains_key(&asset.asset_id) {
+                    return Err(format!("archive virtual `manifest.json` contains duplicate asset id `{}`", asset.asset_id));
+                }
+                let asset_bytes =
+                    self.read_file(&clean_asset).ok_or_else(|| format!("virtual `manifest.json` references missing asset `{clean_asset}`"))?;
+                if asset_bytes.len() > MAX_IMAGE_ASSET_BYTES {
+                    return Err(format!("virtual asset `{clean_asset}` exceeds maximum asset size ({MAX_IMAGE_ASSET_BYTES} bytes)"));
+                }
+                if u64::try_from(asset_bytes.len()).unwrap_or(u64::MAX) != asset.byte_len {
+                    return Err(format!(
+                        "virtual asset `{clean_asset}` byte length {} disagrees with manifest {}",
+                        asset_bytes.len(),
+                        asset.byte_len
+                    ));
+                }
+                let actual_crc = virtual_crc32_ieee(asset_bytes);
+                if asset.crc32 != actual_crc {
+                    return Err(format!("virtual asset `{clean_asset}` CRC-32 mismatch (manifest {:08x} != actual {actual_crc:08x})", asset.crc32));
+                }
+                hydrated_assets.insert(asset.asset_id.clone(), (asset.media_type, asset_bytes.to_vec()));
+            }
+            return Ok(ValidatedVirtualManifest::Archive { manifest: archive_manifest, hydrated_assets });
+        }
+
+        if let Some(root_val) = manifest_obj.get("root_name")
+            && !root_val.is_string()
+        {
+            return Err(String::from("virtual `manifest.json` has non-string `root_name`"));
+        }
+        if let Some(crc_val) = manifest_obj.get("document_crc32") {
+            verify_manifest_crc32("document.json", crc_val, doc_bytes)?;
+        }
+
+        let sheets_arr =
+            manifest_obj.get("sheets").and_then(Value::as_array).ok_or_else(|| String::from("virtual `manifest.json` missing `sheets` array"))?;
+        let mut seen_sheet_ids = BTreeSet::new();
+        for sheet_entry in sheets_arr {
+            let obj = sheet_entry.as_object().ok_or_else(|| String::from("virtual `manifest.json` sheet entry must be an object"))?;
+            let sheet_id = obj
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| String::from("virtual `manifest.json` sheet entry missing `id`"))?;
+            if !seen_sheet_ids.insert(sheet_id.to_owned()) {
+                return Err(format!("virtual `manifest.json` contains duplicate sheet `{sheet_id}`"));
+            }
+            let csv_path = obj
+                .get("csv_path")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| String::from("virtual `manifest.json` sheet entry missing `csv_path`"))?;
+            let clean_csv = Self::normalize_rel_path(csv_path)?;
+            let csv_bytes = self.read_file(&clean_csv).ok_or_else(|| format!("virtual `manifest.json` references missing sheet `{clean_csv}`"))?;
+            if let Some(crc_val) = obj.get("crc32") {
+                verify_manifest_crc32(&clean_csv, crc_val, csv_bytes)?;
+            }
+        }
+        Ok(ValidatedVirtualManifest::Unpacked { sheet_ids: seen_sheet_ids })
+    }
+
     /// Write an unpacked `.curvebook.d`-compatible virtual snapshot (`document.json`, `manifest.json`,
     /// and `sheets/<id>.csv`) directly into memory with zero filesystem access (`QOL-10`).
     ///
     /// # Errors
-    /// Returns an error if serialization fails.
+    /// Returns an error if serialization fails or storage caps are exceeded.
     pub fn save_unpacked_snapshot(&mut self, doc: &ProjectDocument) -> Result<usize, String> {
+        doc.validate_structural_limits().map_err(|err| format!("invalid project structural limits: {err}"))?;
         let doc_bytes = serde_json::to_vec_pretty(doc).map_err(|err| err.to_string())?;
         let mut sheet_entries = Vec::new();
         self.files.retain(|k, _| !k.starts_with("sheets/"));
@@ -464,14 +680,16 @@ impl VirtualWorkspaceFolder {
         .map_err(|err| err.to_string())?;
         self.write_file("document.json", doc_bytes)?;
         self.write_file("manifest.json", manifest_bytes)?;
+        self.validate_limits()?;
         Ok(self.total_bytes())
     }
 
-    /// Load a [`ProjectDocument`] from `document.json` in this virtual workspace (`QOL-10`).
+    /// Load and validate a [`ProjectDocument`] from `manifest.json` + `document.json` in this virtual workspace (`QOL-10`).
     ///
     /// # Errors
-    /// Returns an error if `document.json` is missing or malformed.
+    /// Returns an error if limits are exceeded or `manifest.json`, `document.json`, or declared sheets are missing/corrupt.
     pub fn open_unpacked_snapshot(&self) -> Result<ProjectDocument, String> {
+        self.validate_limits()?;
         let bytes = self.read_file("document.json").ok_or_else(|| String::from("virtual snapshot missing `document.json`"))?;
         let raw: Value = serde_json::from_slice(bytes).map_err(|err| format!("failed decoding virtual `document.json`: {err}"))?;
         let from_version = match raw.get("schema_version") {
@@ -480,11 +698,113 @@ impl VirtualWorkspaceFolder {
                 v.as_u64().and_then(|n| u32::try_from(n).ok()).ok_or_else(|| String::from("virtual `document.json` has invalid `schema_version`"))?
             }
         };
+        if from_version > CURRENT_SCHEMA_VERSION {
+            return Err(format!("unsupported virtual `document.json` schema_version {from_version} (max {CURRENT_SCHEMA_VERSION})"));
+        }
+        let validated_manifest = self.validate_manifest_and_assets(bytes, &raw, from_version)?;
         let migrated = migrate_document_json(raw, from_version).map_err(|err| format!("failed migrating virtual `document.json`: {err}"))?;
-        let doc: ProjectDocument = serde_json::from_value(migrated).map_err(|err| format!("failed decoding virtual `document.json`: {err}"))?;
+        let mut doc: ProjectDocument = serde_json::from_value(migrated).map_err(|err| format!("failed decoding virtual `document.json`: {err}"))?;
+        match validated_manifest {
+            ValidatedVirtualManifest::Archive { manifest, hydrated_assets } => {
+                hydrate_virtual_image_assets(&mut doc, &manifest.assets, hydrated_assets)?;
+                validate_archive_manifest_sections(&doc, &manifest)?;
+            }
+            ValidatedVirtualManifest::Unpacked { sheet_ids } => {
+                if doc.data_sheets.len() != sheet_ids.len() || doc.data_sheets.iter().any(|ds| !sheet_ids.contains(ds.id.as_str())) {
+                    return Err(String::from("virtual `manifest.json` sheet entries do not match `document.json` data sheets"));
+                }
+            }
+        }
+        doc.validate_structural_limits().map_err(|err| format!("invalid virtual `document.json`: {err}"))?;
         validate_project_document(&doc).map_err(|err| format!("invalid virtual `document.json`: {err}"))?;
         Ok(doc)
     }
+}
+
+enum ValidatedVirtualManifest {
+    Archive { manifest: ArchiveManifest, hydrated_assets: BTreeMap<String, (ImageMimeKind, Vec<u8>)> },
+    Unpacked { sheet_ids: BTreeSet<String> },
+}
+
+fn hydrate_virtual_image_assets(
+    doc: &mut ProjectDocument,
+    manifest_assets: &[AssetManifestEntry],
+    mut hydrated_assets: BTreeMap<String, (ImageMimeKind, Vec<u8>)>,
+) -> Result<(), String> {
+    if doc.image_assets.len() > MAX_PROJECT_IMAGE_ASSETS {
+        return Err(format!("virtual `document.json` image asset count {} exceeds limit {MAX_PROJECT_IMAGE_ASSETS}", doc.image_assets.len()));
+    }
+    let mut seen_ids = BTreeSet::new();
+    for asset in &mut doc.image_assets {
+        if !seen_ids.insert(asset.asset_id.clone()) {
+            return Err(format!("virtual `document.json` contains duplicate image asset `{}`", asset.asset_id));
+        }
+        let Some((loaded_mime, loaded_bytes)) = hydrated_assets.remove(&asset.asset_id) else {
+            return Err(format!("virtual `manifest.json` missing image asset `{}` declared in `document.json`", asset.asset_id));
+        };
+        if loaded_mime != asset.media_type {
+            return Err(format!(
+                "virtual image asset `{}` media_type {:?} in `document.json` disagrees with {:?} in `manifest.json`",
+                asset.asset_id, asset.media_type, loaded_mime
+            ));
+        }
+        if !asset.bytes.is_empty() && asset.bytes != loaded_bytes {
+            return Err(format!("virtual image asset `{}` inline bytes disagree with external payload", asset.asset_id));
+        }
+        asset.bytes = loaded_bytes;
+    }
+    if let Some(orphan) = manifest_assets.iter().find(|entry| hydrated_assets.contains_key(&entry.asset_id)) {
+        return Err(format!("virtual `manifest.json` declares image asset `{}` missing from `document.json`", orphan.asset_id));
+    }
+    Ok(())
+}
+
+fn validate_archive_manifest_sections(doc: &ProjectDocument, manifest: &ArchiveManifest) -> Result<(), String> {
+    let mut expected = HashSet::with_capacity(doc.total_sheet_count());
+    for ds in &doc.data_sheets {
+        expected.insert((SheetSection::Data, ds.id.as_str().to_owned()));
+    }
+    for info in &doc.info_sheets {
+        expected.insert((SheetSection::Info, info.id.as_str().to_owned()));
+    }
+    for res in &doc.result_sheets {
+        expected.insert((SheetSection::Analyses, res.id.as_str().to_owned()));
+    }
+    for graph in &doc.graph_sheets {
+        expected.insert((SheetSection::Graphs, graph.id.as_str().to_owned()));
+    }
+    for layout in &doc.layout_sheets {
+        expected.insert((SheetSection::Layouts, layout.id.as_str().to_owned()));
+    }
+    let actual: HashSet<(SheetSection, String)> = manifest.sheets.iter().map(|s| (s.section, s.id.as_str().to_owned())).collect();
+    if actual != expected {
+        return Err(String::from("archive virtual `manifest.json` sheet entries do not match `document.json`"));
+    }
+    Ok(())
+}
+
+fn virtual_crc32_ieee(bytes: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFF_u32;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+fn verify_manifest_crc32(entry_name: &str, crc_val: &Value, bytes: &[u8]) -> Result<(), String> {
+    let expected = crc_val
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+        .ok_or_else(|| format!("virtual `manifest.json` entry `{entry_name}` has invalid `crc32`"))?;
+    let actual = virtual_crc32_ieee(bytes);
+    if expected != actual {
+        return Err(format!("virtual `{entry_name}` CRC-32 mismatch (manifest {expected:08x} != actual {actual:08x})"));
+    }
+    Ok(())
 }
 
 /// Persistent container scroll offsets stored on `InteractionControllerState`.
@@ -606,7 +926,7 @@ impl TextFieldEditState {
         }
         let sb = char_to_byte_idx(&self.text, lo);
         let eb = char_to_byte_idx(&self.text, hi);
-        Some(self.text[sb..eb].to_owned())
+        self.text.get(sb..eb).map(str::to_owned)
     }
 
     /// Cut the active selection (when non-empty), returning the removed text.

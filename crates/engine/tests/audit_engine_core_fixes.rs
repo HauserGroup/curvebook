@@ -240,36 +240,56 @@ fn audit_75_undo_open_restores_matching_file_path() -> TestResult {
     let path_b = dir.join("study_b.curvebook");
 
     let mut sess_a = Session::from_document(ProjectDocument::new("Project A")?);
+    assert!(!sess_a.is_dirty(), "fresh session starts clean");
     ok_cmd(&mut sess_a, "sheet.createData", json!({ "sheet_id": "sheet-a", "title": "Only A", "kind": "Column" }))?;
+    assert!(sess_a.is_dirty(), "mutating command must mark session dirty");
     ok_cmd(&mut sess_a, "project.save", json!({ "path": path_a.to_string_lossy() }))?;
+    assert!(!sess_a.is_dirty(), "project.save must clear is_dirty()");
 
     let mut sess_b = Session::from_document(ProjectDocument::new("Project B")?);
     ok_cmd(&mut sess_b, "sheet.createData", json!({ "sheet_id": "sheet-b", "title": "Only B", "kind": "Column" }))?;
+    assert!(sess_b.is_dirty());
     ok_cmd(&mut sess_b, "project.save", json!({ "path": path_b.to_string_lossy() }))?;
+    assert!(!sess_b.is_dirty());
     let bytes_b_before = std::fs::read(&path_b)?;
 
     let mut session = Session::new();
+    assert!(!session.is_dirty());
     ok_cmd(&mut session, "project.open", json!({ "path": path_a.to_string_lossy() }))?;
+    assert!(!session.is_dirty(), "project.open must leave session clean");
     assert_eq!(session.file_path().map(|p| p.to_path_buf()), Some(path_a.clone()));
 
+    // Mutate after open -> dirty; failed project.open preserves dirty state; valid project.open clears dirty state.
+    ok_cmd(&mut session, "sheet.createData", json!({ "sheet_id": "temp-dirty", "title": "Temp", "kind": "Column" }))?;
+    assert!(session.is_dirty(), "post-open edit must mark session dirty");
+    let missing_err = err_cmd(&mut session, "project.open", json!({ "path": dir.join("missing.curvebook").to_string_lossy() }))?;
+    assert_eq!(missing_err.code, ErrorCode::IoError);
+    assert!(session.is_dirty(), "failed project.open must preserve is_dirty()");
+
     ok_cmd(&mut session, "project.open", json!({ "path": path_b.to_string_lossy() }))?;
+    assert!(!session.is_dirty(), "successful project.open clears is_dirty()");
     assert_eq!(session.document().title, "Project B");
     assert_eq!(session.file_path().map(|p| p.to_path_buf()), Some(path_b.clone()));
 
-    // Undoing project.open B restores A's document AND A's file path.
+    // Undoing project.open B restores A's document AND A's file path (and marks dirty until saved).
     assert!(session.undo()?);
+    assert!(session.is_dirty(), "undo marks session dirty");
     assert_eq!(session.document().title, "Project A");
     assert_eq!(session.file_path().map(|p| p.to_path_buf()), Some(path_a.clone()));
 
-    // Saving to session.file_path() writes to A, leaving B untouched.
+    // Saving to session.file_path() writes to A, leaving B untouched, and clears is_dirty().
     let target_save = session.file_path().ok_or("expected restored file_path")?.to_path_buf();
     ok_cmd(&mut session, "project.save", json!({ "path": target_save.to_string_lossy() }))?;
+    assert!(!session.is_dirty(), "project.save after undo must clear is_dirty()");
     assert_eq!(std::fs::read(&path_b)?, bytes_b_before);
 
-    // Redoing restores B's document and B's path again.
+    // Redoing restores B's document and B's path again, and subsequent save clears dirty state.
     assert!(session.redo()?);
+    assert!(session.is_dirty(), "redo marks session dirty");
     assert_eq!(session.document().title, "Project B");
     assert_eq!(session.file_path().map(|p| p.to_path_buf()), Some(path_b.clone()));
+    ok_cmd(&mut session, "project.save", json!({ "path": path_b.to_string_lossy() }))?;
+    assert!(!session.is_dirty(), "project.save after redo must clear is_dirty()");
 
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())

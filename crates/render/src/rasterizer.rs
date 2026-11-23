@@ -288,14 +288,17 @@ impl RasterImage {
 
 #[inline]
 fn blend_pixel_slice(px: &mut [u8], src: Rgba8, cov: f64) {
-    if px.len() < 4 || src.a == 0 || cov <= 0.0 {
+    let [dst_r, dst_g, dst_b, dst_a, ..] = px else {
+        return;
+    };
+    if src.a == 0 || cov <= 0.0 {
         return;
     }
     if src.a == u8::MAX && cov >= 1.0 {
-        px[0] = src.r;
-        px[1] = src.g;
-        px[2] = src.b;
-        px[3] = u8::MAX;
+        *dst_r = src.r;
+        *dst_g = src.g;
+        *dst_b = src.b;
+        *dst_a = u8::MAX;
         return;
     }
 
@@ -303,36 +306,36 @@ fn blend_pixel_slice(px: &mut [u8], src: Rgba8, cov: f64) {
     if sa <= 0.0 {
         return;
     }
-    if px[3] == 0 {
-        px[0] = src.r;
-        px[1] = src.g;
-        px[2] = src.b;
-        px[3] = clamp_u8(sa * 255.0);
+    if *dst_a == 0 {
+        *dst_r = src.r;
+        *dst_g = src.g;
+        *dst_b = src.b;
+        *dst_a = clamp_u8(sa * 255.0);
         return;
     }
-    if px[3] == u8::MAX {
+    if *dst_a == u8::MAX {
         let inv = 1.0 - sa;
-        px[0] = clamp_u8(f64::from(src.r) * sa + f64::from(px[0]) * inv);
-        px[1] = clamp_u8(f64::from(src.g) * sa + f64::from(px[1]) * inv);
-        px[2] = clamp_u8(f64::from(src.b) * sa + f64::from(px[2]) * inv);
-        px[3] = u8::MAX;
+        *dst_r = clamp_u8(f64::from(src.r) * sa + f64::from(*dst_r) * inv);
+        *dst_g = clamp_u8(f64::from(src.g) * sa + f64::from(*dst_g) * inv);
+        *dst_b = clamp_u8(f64::from(src.b) * sa + f64::from(*dst_b) * inv);
+        *dst_a = u8::MAX;
         return;
     }
 
-    let da = f64::from(px[3]) / 255.0;
+    let da = f64::from(*dst_a) / 255.0;
     let da_inv = da * (1.0 - sa);
     let out_a = sa + da_inv;
     if out_a <= 1e-12 {
-        px[0] = 0;
-        px[1] = 0;
-        px[2] = 0;
-        px[3] = 0;
+        *dst_r = 0;
+        *dst_g = 0;
+        *dst_b = 0;
+        *dst_a = 0;
         return;
     }
-    px[0] = clamp_u8((f64::from(src.r) * sa + f64::from(px[0]) * da_inv) / out_a);
-    px[1] = clamp_u8((f64::from(src.g) * sa + f64::from(px[1]) * da_inv) / out_a);
-    px[2] = clamp_u8((f64::from(src.b) * sa + f64::from(px[2]) * da_inv) / out_a);
-    px[3] = clamp_u8(out_a * 255.0);
+    *dst_r = clamp_u8((f64::from(src.r) * sa + f64::from(*dst_r) * da_inv) / out_a);
+    *dst_g = clamp_u8((f64::from(src.g) * sa + f64::from(*dst_g) * da_inv) / out_a);
+    *dst_b = clamp_u8((f64::from(src.b) * sa + f64::from(*dst_b) * da_inv) / out_a);
+    *dst_a = clamp_u8(out_a * 255.0);
 }
 
 /// Errors produced by CPU rasterization or PNG/TIFF encoding.
@@ -537,11 +540,11 @@ fn sample_bilinear_rgba(rgba: &[u8], w: u32, h: u32, u: f64, v: f64) -> Rgba8 {
 
     let load = |x: u32, y: u32| -> (f64, f64, f64, f64) {
         let idx = ((y as usize) * (w as usize) + (x as usize)) * 4;
-        let Some(px) = rgba.get(idx..idx + 4) else {
+        let Some(&[r, g, b, a_byte]) = rgba.get(idx..idx + 4) else {
             return (0.0, 0.0, 0.0, 0.0);
         };
-        let a = f64::from(px[3]);
-        (f64::from(px[0]) * a, f64::from(px[1]) * a, f64::from(px[2]) * a, a)
+        let a = f64::from(a_byte);
+        (f64::from(r) * a, f64::from(g) * a, f64::from(b) * a, a)
     };
     let (r00, g00, b00, a00) = load(x0, y0);
     let (r10, g10, b10, a10) = load(x1, y0);
@@ -958,8 +961,9 @@ fn write_mask_row(py: u32, x_start: u32, row_cov: &[u8], dst: &mut MaskRowTarget
         if lx >= 0
             && (lx as u32) < dst.width
             && let Some(cell) = dst.cells.get_mut(row_base + (lx as usize))
+            && let Some(slot) = cell.get_mut(dst.channel)
         {
-            cell[dst.channel] = hits.min(16);
+            *slot = hits.min(16);
         }
     }
 }
@@ -979,8 +983,9 @@ fn write_stroke_mask_row(py: u32, x_start: u32, row_masks: &[u16], dst: &mut Mas
         if lx >= 0
             && (lx as u32) < dst.width
             && let Some(cell) = dst.cells.get_mut(row_base + (lx as usize))
+            && let Some(slot) = cell.get_mut(dst.channel)
         {
-            cell[dst.channel] = (hits as u8).min(16);
+            *slot = (hits as u8).min(16);
         }
     }
 }
@@ -1338,7 +1343,9 @@ fn build_ellipse_mask(key: EllipseMaskKey) -> CoverageMask {
         for col_idx in 0..(width as usize) {
             let px = f64::from(min_dx + (col_idx as i32));
             let (f_hits, s_hits) = geom.eval_unclipped_pixel(px, py);
-            raw_cells[row_idx * (width as usize) + col_idx] = [f_hits, s_hits];
+            if let Some(slot) = raw_cells.get_mut(row_idx * (width as usize) + col_idx) {
+                *slot = [f_hits, s_hits];
+            }
         }
     }
 
@@ -1366,17 +1373,23 @@ fn compact_coverage_mask(min_dx: i32, min_dy: i32, width: u32, height: u32, raw_
     let h = height as usize;
     let mut rows = Vec::with_capacity(h);
     let mut cells = Vec::with_capacity(raw_cells.len());
-    for row_idx in 0..h {
-        let row = &raw_cells[row_idx * w..(row_idx + 1) * w];
+    if w == 0 {
+        return CoverageMask { min_dx, min_dy, rows, cells };
+    }
+    for row in raw_cells.chunks_exact(w).take(h) {
         let first = row.iter().position(|&c| c[0] > 0 || c[1] > 0);
         let last = row.iter().rposition(|&c| c[0] > 0 || c[1] > 0);
         match (first, last) {
             (Some(lo), Some(hi)) => {
-                let offset = u32::try_from(cells.len()).unwrap_or(0);
-                let len = u16::try_from(hi - lo + 1).unwrap_or(0);
-                let x_off = u16::try_from(lo).unwrap_or(0);
-                cells.extend_from_slice(&row[lo..=hi]);
-                rows.push(MaskRowSpan { x_off, len, offset });
+                if let Some(span) = row.get(lo..=hi) {
+                    let offset = u32::try_from(cells.len()).unwrap_or(0);
+                    let len = u16::try_from(hi - lo + 1).unwrap_or(0);
+                    let x_off = u16::try_from(lo).unwrap_or(0);
+                    cells.extend_from_slice(span);
+                    rows.push(MaskRowSpan { x_off, len, offset });
+                } else {
+                    rows.push(MaskRowSpan { x_off: 0, len: 0, offset: 0 });
+                }
             }
             _ => rows.push(MaskRowSpan { x_off: 0, len: 0, offset: 0 }),
         }
@@ -1463,20 +1476,23 @@ fn clamp_u8_f32(val: f32) -> u8 {
 
 #[inline]
 fn blend_baked_translucent_dst(dst: &mut [u8], pr: f32, pg: f32, pb: f32, sa: f32, inv_sa: f32) {
-    let da = f64::from(dst[3]) / 255.0;
+    let [dst_r, dst_g, dst_b, dst_a, ..] = dst else {
+        return;
+    };
+    let da = f64::from(*dst_a) / 255.0;
     let da_inv = da * f64::from(inv_sa);
     let out_a = f64::from(sa) + da_inv;
     if out_a <= 1e-12 {
-        dst[0] = 0;
-        dst[1] = 0;
-        dst[2] = 0;
-        dst[3] = 0;
+        *dst_r = 0;
+        *dst_g = 0;
+        *dst_b = 0;
+        *dst_a = 0;
         return;
     }
-    dst[0] = clamp_u8((f64::from(pr) + f64::from(dst[0]) * da_inv) / out_a);
-    dst[1] = clamp_u8((f64::from(pg) + f64::from(dst[1]) * da_inv) / out_a);
-    dst[2] = clamp_u8((f64::from(pb) + f64::from(dst[2]) * da_inv) / out_a);
-    dst[3] = clamp_u8(out_a * 255.0);
+    *dst_r = clamp_u8((f64::from(pr) + f64::from(*dst_r) * da_inv) / out_a);
+    *dst_g = clamp_u8((f64::from(pg) + f64::from(*dst_g) * da_inv) / out_a);
+    *dst_b = clamp_u8((f64::from(pb) + f64::from(*dst_b) * da_inv) / out_a);
+    *dst_a = clamp_u8(out_a * 255.0);
 }
 
 fn blit_baked_stamp(img: &mut RasterImage, stamp: &BakedStamp, anchor_x: i32, anchor_y: i32, canvas_opaque: bool) {
@@ -1683,9 +1699,11 @@ fn try_rasterize_small_poly_stamp(
             max_dx_f = max_dx_f.max(qdx_f);
             min_dy_f = min_dy_f.min(qdy_f);
             max_dy_f = max_dy_f.max(qdy_f);
-            cmds[idx] = SmallPolyCmdQ { op, dx: dx_q, dy: dy_q };
-        } else {
-            cmds[idx] = SmallPolyCmdQ { op, dx: 0, dy: 0 };
+            if let Some(slot) = cmds.get_mut(idx) {
+                *slot = SmallPolyCmdQ { op, dx: dx_q, dy: dy_q };
+            }
+        } else if let Some(slot) = cmds.get_mut(idx) {
+            *slot = SmallPolyCmdQ { op, dx: 0, dy: 0 };
         }
     }
 
@@ -1778,7 +1796,7 @@ fn build_small_poly_mask(
     let origin_x = f64::from(key.qx) / STAMP_PHASE_STEPS - f64::from(min_dx);
     let origin_y = f64::from(key.qy) / STAMP_PHASE_STEPS - f64::from(min_dy);
     let mut local_path = Path2D::new();
-    for cmd in &key.cmds[..usize::from(key.len)] {
+    for cmd in key.cmds.get(..usize::from(key.len)).unwrap_or(&key.cmds) {
         let pt = curvebook_chart::PointPt::new(origin_x + f64::from(cmd.dx) / STAMP_DIM_STEPS, origin_y + f64::from(cmd.dy) / STAMP_DIM_STEPS);
         match cmd.op {
             0 => local_path.commands.push(PathCmd::MoveTo(pt)),
@@ -2367,7 +2385,7 @@ impl StrokePiece {
                     Some((cx - dx, cx + dx))
                 }
             }
-            StrokePieceKind::ConvexPoly { verts, len } => convex_poly_interval(&verts[..len], y_sub),
+            StrokePieceKind::ConvexPoly { verts, len } => convex_poly_interval(verts.get(..len).unwrap_or(&verts), y_sub),
         }
     }
 }

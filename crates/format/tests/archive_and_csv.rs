@@ -22,14 +22,20 @@ fn build_sample_project() -> Result<ProjectDocument, FormatError> {
 
     let mut xy = XyTable::new(SubcolumnMode::RawReplicates(2), 2, 3)?;
     xy.x_title = String::from("Log[Agonist]");
-    xy.data_sets[0].title = String::from("Wildtype");
-    xy.data_sets[1].title = String::from("Mutant");
+    if let [ds0, ds1] = xy.data_sets.as_mut_slice() {
+        ds0.title = String::from("Wildtype");
+        ds1.title = String::from("Mutant");
+        if let [r0, r1, ..] = ds0.cells.as_mut_slice() {
+            *r0 = vec![Cell::number(10.5), Cell::excluded_number(99.9)];
+            *r1 = vec![Cell::number(48.2), Cell::number(51.0)];
+        }
+        if let Some(r0) = ds1.cells.first_mut() {
+            *r0 = vec![Cell::number(12.0), Cell::number(11.4)];
+        }
+    }
     for (r, x) in [-9.0, -8.0, -7.0].iter().enumerate() {
         xy.set_x_cell(r, Cell::number(*x))?;
     }
-    xy.data_sets[0].cells[0] = vec![Cell::number(10.5), Cell::excluded_number(99.9)];
-    xy.data_sets[0].cells[1] = vec![Cell::number(48.2), Cell::number(51.0)];
-    xy.data_sets[1].cells[0] = vec![Cell::number(12.0), Cell::number(11.4)];
     let mut ds = DataSheet::new("data-xy", "Binding Curve", TableArchetype::Xy(xy))?;
     ds.info_sheet_id = Some(SheetId::new("info-1"));
     ds.floating_notes.push(FloatingNote::new("note-1", RectPt::new(10.0, 10.0, 120.0, 50.0), "Outlier flagged"));

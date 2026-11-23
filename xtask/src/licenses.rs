@@ -243,11 +243,11 @@ fn parse_about_accepted(text: &str) -> Result<Vec<String>, String> {
 fn run_locked_offline_metadata(root: &Path) -> Result<Value, String> {
     let out = Command::new("cargo")
         .current_dir(root)
-        .args(["metadata", "--format-version", "1", "--locked", "--offline"])
+        .args(["metadata", "--format-version", "1", "--locked", "--offline", "--all-features"])
         .output()
-        .map_err(|e| format!("cargo metadata --locked --offline: {e}"))?;
+        .map_err(|e| format!("cargo metadata --locked --offline --all-features: {e}"))?;
     if !out.status.success() {
-        return Err(format!("cargo metadata --locked --offline failed: {}", String::from_utf8_lossy(&out.stderr)));
+        return Err(format!("cargo metadata --locked --offline --all-features failed: {}", String::from_utf8_lossy(&out.stderr)));
     }
     serde_json::from_slice(&out.stdout).map_err(|e| format!("cargo metadata json: {e}"))
 }
@@ -470,7 +470,7 @@ fn tokenize_spdx(expr: &str) -> Result<Vec<SpdxToken>, String> {
                 while i < bytes.len() && !bytes[i].is_ascii_whitespace() && !matches!(bytes[i], b'(' | b')' | b'/') {
                     i += 1;
                 }
-                let word = &expr[start..i];
+                let word = expr.get(start..i).ok_or_else(|| String::from("invalid UTF-8 boundary in SPDX expression"))?;
                 match word {
                     "AND" => tokens.push(SpdxToken::And),
                     "OR" => tokens.push(SpdxToken::Or),
@@ -545,15 +545,16 @@ fn collect_manifests_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(),
     let entries = std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("dir entry {}: {e}", dir.display()))?;
+        let ft = entry.file_type().map_err(|e| format!("file_type {}: {e}", entry.path().display()))?;
         let path = entry.path();
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        if path.is_dir() {
+        if ft.is_dir() {
             if name_str == "target" || name_str == "dist" || name_str == "corpus" || name_str.starts_with('.') {
                 continue;
             }
             collect_manifests_recursive(&path, out)?;
-        } else if name_str == "Cargo.toml" {
+        } else if ft.is_file() && name_str == "Cargo.toml" {
             out.push(path);
         }
     }
@@ -600,6 +601,10 @@ fn is_dependency_section(section: &str) -> bool {
         || section.starts_with("dependencies.")
         || section.starts_with("dev-dependencies.")
         || section.starts_with("build-dependencies.")
+        || section.starts_with("workspace.dependencies.")
+        || section.contains(".dependencies.")
+        || section.contains(".dev-dependencies.")
+        || section.contains(".build-dependencies.")
 }
 
 fn is_wildcard_dep_spec(key: &str, rhs: &str) -> bool {
@@ -608,15 +613,13 @@ fn is_wildcard_dep_spec(key: &str, rhs: &str) -> bool {
         return (key == "version" || !key.is_empty()) && is_wildcard_version_str(&v);
     }
     if rhs.starts_with('{')
-        && let Some(ver_pos) = rhs.find("version")
+        && let Some((_, after)) = rhs.split_once("version")
+        && let Some((_, val_part)) = after.split_once('=')
     {
-        let after = &rhs[ver_pos + "version".len()..];
-        if let Some((_, val_part)) = after.split_once('=') {
-            let val = val_part.trim();
-            if val.starts_with('"') || val.starts_with('\'') {
-                let first_quoted = extract_first_quoted(val);
-                return is_wildcard_version_str(&first_quoted);
-            }
+        let val = val_part.trim();
+        if val.starts_with('"') || val.starts_with('\'') {
+            let first_quoted = extract_first_quoted(val);
+            return is_wildcard_version_str(&first_quoted);
         }
     }
     false
@@ -747,10 +750,10 @@ fn generate_licenses_html(root: &Path, out_path: &Path, policy: &DenyPolicy, res
         return Err(String::from("`cargo-about` is not installed in PATH (required for `--html` when CI=true)"));
     }
 
-    let attribution = std::fs::read_to_string(root.join("ATTRIBUTION.md")).unwrap_or_default();
-    let notice = std::fs::read_to_string(root.join("NOTICE")).unwrap_or_default();
+    let attribution = std::fs::read_to_string(root.join("ATTRIBUTION.md")).map_err(|e| format!("read ATTRIBUTION.md: {e}"))?;
+    let notice = std::fs::read_to_string(root.join("NOTICE")).map_err(|e| format!("read NOTICE: {e}"))?;
     let html = render_detailed_licenses_html(policy, resolved, &attribution, &notice);
-    std::fs::write(out_path, html).map_err(|e| format!("write {}: {e}", out_path.display()))
+    curvebook_platform::fs::write_atomic(out_path, html.as_bytes()).map_err(|e| format!("write {}: {e}", out_path.display()))
 }
 
 /// Render a standalone offline `THIRD-PARTY-LICENSES.html` from resolved non-dev crates, on-disk
@@ -957,44 +960,53 @@ fn escape_html(input: &str) -> String {
 }
 
 fn strip_toml_comment(line: &str) -> &str {
-    let bytes = line.as_bytes();
     let mut in_dq = false;
     let mut in_sq = false;
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\\' if in_dq => {
-                i += 2;
-                continue;
+    let mut escaped = false;
+    for (i, ch) in line.char_indices() {
+        if in_dq {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_dq = false;
             }
-            b'"' if !in_sq => in_dq = !in_dq,
-            b'\'' if !in_dq => in_sq = !in_sq,
-            b'#' if !in_dq && !in_sq => return &line[..i],
-            _ => {}
+        } else if in_sq {
+            if ch == '\'' {
+                in_sq = false;
+            }
+        } else {
+            match ch {
+                '"' => in_dq = true,
+                '\'' => in_sq = true,
+                '#' => return line.get(..i).unwrap_or(line),
+                _ => {}
+            }
         }
-        i += 1;
     }
     line
 }
 
 fn parse_section_header(line: &str) -> Option<&str> {
-    if line.starts_with('[') && !line.starts_with("[[") && line.ends_with(']') { Some(line[1..line.len() - 1].trim()) } else { None }
+    if line.starts_with("[[") {
+        return None;
+    }
+    line.strip_prefix('[')?.strip_suffix(']').map(str::trim)
 }
 
 fn unquote_toml_str(s: &str) -> String {
     let t = s.trim();
-    if t.len() >= 2 && ((t.starts_with('"') && t.ends_with('"')) || (t.starts_with('\'') && t.ends_with('\''))) {
-        t[1..t.len() - 1].to_owned()
-    } else {
-        t.to_owned()
-    }
+    t.strip_prefix('"').and_then(|r| r.strip_suffix('"')).or_else(|| t.strip_prefix('\'').and_then(|r| r.strip_suffix('\''))).unwrap_or(t).to_owned()
 }
 
 fn extract_first_quoted(s: &str) -> String {
-    let Some(quote) = s.chars().next().filter(|&c| c == '"' || c == '\'') else {
-        return String::new();
-    };
-    s[1..].split(quote).next().unwrap_or("").to_owned()
+    for quote in ['"', '\''] {
+        if let Some(rest) = s.strip_prefix(quote) {
+            return rest.split(quote).next().unwrap_or("").to_owned();
+        }
+    }
+    String::new()
 }
 
 fn extract_quoted_items(s: &str, out: &mut Vec<String>) {
@@ -1173,5 +1185,9 @@ source = \"registry+https://example.com/index\"
         assert!(html.contains("serde"));
         assert!(!html.contains("proptest"), "dev-only crate must be excluded");
         assert!(html.contains("Permission is hereby granted, free of charge"), "full license text missing");
+
+        let subtable_toml = "[target.'cfg(unix)'.dependencies.evil_dep]\nversion = \"*\"\n";
+        let wild_hits = super::find_wildcard_dependencies("crates/x/Cargo.toml", subtable_toml);
+        assert_eq!(wild_hits.len(), 1, "target subtable wildcard dependency must be flagged: {wild_hits:?}");
     }
 }

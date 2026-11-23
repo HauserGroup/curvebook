@@ -38,8 +38,11 @@ impl io::Read for ChannelPipeReader {
                 Err(_) => return Ok(0),
             }
         }
-        let n = (self.buf.len() - self.pos).min(out.len());
-        out[..n].copy_from_slice(&self.buf[self.pos..self.pos + n]);
+        let avail = self.buf.get(self.pos..).unwrap_or(&[]);
+        let n = avail.len().min(out.len());
+        if let (Some(dst), Some(src)) = (out.get_mut(..n), avail.get(..n)) {
+            dst.copy_from_slice(src);
+        }
         self.pos += n;
         Ok(n)
     }
@@ -83,9 +86,9 @@ fn find_bounds_in_snapshot(snap: &Value, target_wid: &str) -> Option<[f64; 4]> {
             for item in arr {
                 if item.get("widget_id").and_then(Value::as_str) == Some(target_wid)
                     && let Some(bounds) = item.get("bounds").and_then(Value::as_array)
-                    && bounds.len() == 4
+                    && let [b0, b1, b2, b3] = bounds.as_slice()
                 {
-                    return Some([bounds[0].as_f64()?, bounds[1].as_f64()?, bounds[2].as_f64()?, bounds[3].as_f64()?]);
+                    return Some([b0.as_f64()?, b1.as_f64()?, b2.as_f64()?, b3.as_f64()?]);
                 }
             }
         }
@@ -112,6 +115,7 @@ fn muda_vs_egui_menubar_1_to_1_parity_across_locales_and_sheet_states() -> Resul
             theme_override: None,
             recovery_root: None,
             initial_viewport: metrics,
+            ..DesktopHostConfig::default()
         });
         let win_id = rt.open_window(None, metrics)?;
 
@@ -205,6 +209,7 @@ fn run_qa3_parity_case(use_bundled_fonts: bool, in_window_menus: bool, scale: f6
         theme_override: None,
         recovery_root: None,
         initial_viewport: initial,
+        ..DesktopHostConfig::default()
     });
     let win_id = rt.open_window(None, initial)?;
     {
@@ -236,14 +241,14 @@ fn run_qa3_parity_case(use_bundled_fonts: bool, in_window_menus: bool, scale: f6
     let client_handle = std::thread::spawn(move || -> Result<Value, String> {
         let mut client = InteractiveClient { reader: BufReader::new(ChannelPipeReader::new(s2c_rx)), writer: ChannelPipeWriter { tx: c2s_tx } };
         let r_auth = client.send(&json!({ "id": "0", "method": "auth", "params": { "token": token } }))?;
-        assert_eq!(r_auth["ok"], json!(true));
+        assert_eq!(r_auth.get("ok"), Some(&json!(true)));
 
         let insp = client.send(&json!({
             "id": "1",
             "method": "ui.inspect",
             "params": { "include_bounds": true, "metrics": { "logical_width": f64::from(logical_w), "logical_height": f64::from(logical_h), "scale_factor": scale } }
         }))?;
-        assert_eq!(insp["ok"], json!(true));
+        assert_eq!(insp.get("ok"), Some(&json!(true)));
         let analyze_b = find_bounds_in_snapshot(&insp, "toolbar.analyze").ok_or("missing toolbar.analyze bounds in ui.inspect")?;
         let click_x = (analyze_b[0] + analyze_b[2] * 0.5) / scale;
         let click_y = (analyze_b[1] + analyze_b[3] * 0.5) / scale;
@@ -252,7 +257,7 @@ fn run_qa3_parity_case(use_bundled_fonts: bool, in_window_menus: bool, scale: f6
             "method": "ui.pointer_gesture",
             "params": { "action": "click", "x": click_x, "y": click_y }
         }))?;
-        assert_eq!(gesture["ok"], json!(true));
+        assert_eq!(gesture.get("ok"), Some(&json!(true)));
         let _ = client.send(&json!({ "id": "3", "method": "app.quit", "params": {} }));
         Ok(insp)
     });

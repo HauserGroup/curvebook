@@ -31,9 +31,9 @@ use curvebook_ui_egui::menus::{CuratedMenuNode, TOOLBAR_BUTTONS, curated_menu_ba
 use curvebook_ui_egui::theme::UiThemeMode;
 use curvebook_ui_egui::workspace_nav::WelcomeMode;
 use curvebook_ui_egui::{
-    BETA_ACTIVE_LOCALES, CanvasPreviewFilter, ClipboardBundle, ControlAuth, ControlPostRequestContext, ControlRequest, OsAdapterStatus, UiApp,
-    dispatch_ui_command, encode_egui_control_response, is_http_request_line, normalize_beta_gui_locale, read_os_pasteboard,
-    serve_control_stream_with_quit_and_hook, tr, write_os_clipboard_bundle, write_os_pasteboard,
+    BETA_ACTIVE_LOCALES, CanvasPreviewFilter, ClipboardBundle, ControlAuth, ControlPostRequestContext, OsAdapterStatus, UiApp, dispatch_ui_command,
+    is_http_request_line, normalize_beta_gui_locale, read_os_pasteboard, serve_control_stream_with_quit_and_hook, tr, write_os_clipboard_bundle,
+    write_os_pasteboard,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -117,6 +117,10 @@ pub struct DesktopMenuSection {
     pub items: Vec<DesktopMenuItem>,
 }
 
+fn default_chrome_locale() -> String {
+    String::from("en")
+}
+
 /// Observed menu bar chrome state for a [`DesktopWindowSession`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DesktopMenuChromeState {
@@ -125,6 +129,8 @@ pub struct DesktopMenuChromeState {
     pub menu_bar_visible: bool,
     pub menu_bar_height_pt: f64,
     pub active_menu_key: Option<String>,
+    #[serde(default = "default_chrome_locale")]
+    pub locale: String,
     pub sections: Vec<DesktopMenuSection>,
     pub dispatched_actions: Vec<String>,
 }
@@ -152,7 +158,7 @@ mod ui_backend_serde {
 
 /// Host runtime configuration constructed from CLI flags (`--in-window-menus`, `--new-instance`, ...)
 /// or embedded test harnesses.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DesktopHostConfig {
     pub in_window_menus: bool,
     pub new_instance: bool,
@@ -164,6 +170,51 @@ pub struct DesktopHostConfig {
     pub theme_override: Option<String>,
     pub recovery_root: Option<PathBuf>,
     pub initial_viewport: ViewportMetrics,
+    #[serde(skip)]
+    pub path_policy: curvebook_engine::ExternalPathPolicy,
+    #[serde(default)]
+    pub human_path_only: bool,
+    #[serde(skip)]
+    pub clipboard_adapter: Option<Arc<dyn curvebook_ui_egui::PlatformClipboardAdapter>>,
+}
+
+impl fmt::Debug for DesktopHostConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DesktopHostConfig")
+            .field("in_window_menus", &self.in_window_menus)
+            .field("new_instance", &self.new_instance)
+            .field("gui_only", &self.gui_only)
+            .field("ui_backend", &self.ui_backend)
+            .field("locale_override", &self.locale_override)
+            .field("theme_override", &self.theme_override)
+            .field("recovery_root", &self.recovery_root)
+            .field("initial_viewport", &self.initial_viewport)
+            .field("path_policy", &self.path_policy)
+            .field("human_path_only", &self.human_path_only)
+            .field("clipboard_adapter", &self.clipboard_adapter.is_some())
+            .finish()
+    }
+}
+
+impl PartialEq for DesktopHostConfig {
+    fn eq(&self, other: &Self) -> bool {
+        let clip_eq = match (&self.clipboard_adapter, &other.clipboard_adapter) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        self.in_window_menus == other.in_window_menus
+            && self.new_instance == other.new_instance
+            && self.gui_only == other.gui_only
+            && self.ui_backend == other.ui_backend
+            && self.locale_override == other.locale_override
+            && self.theme_override == other.theme_override
+            && self.recovery_root == other.recovery_root
+            && self.initial_viewport == other.initial_viewport
+            && self.path_policy == other.path_policy
+            && self.human_path_only == other.human_path_only
+            && clip_eq
+    }
 }
 
 impl Default for DesktopHostConfig {
@@ -177,6 +228,9 @@ impl Default for DesktopHostConfig {
             theme_override: None,
             recovery_root: None,
             initial_viewport: ViewportMetrics::new(1280.0, 800.0, 1.0),
+            path_policy: curvebook_engine::ExternalPathPolicy::default(),
+            human_path_only: false,
+            clipboard_adapter: None,
         }
     }
 }
@@ -503,9 +557,12 @@ pub fn open_document_from_files(files: &[PathBuf]) -> Result<Session, String> {
     }
 
     let primary_had_project = primary_project.is_some();
-    let (mut doc, primary_archive_path, clean_archive) = match primary_project {
-        Some((_, loaded_doc, archive_path, is_clean)) => (loaded_doc, archive_path, is_clean),
-        None => (ProjectDocument::default(), None, false),
+    let (mut doc, pre_merge_doc, primary_archive_path, clean_archive) = match primary_project {
+        Some((_, loaded_doc, archive_path, is_clean)) => {
+            let baseline = loaded_doc.clone();
+            (loaded_doc, Some(baseline), archive_path, is_clean)
+        }
+        None => (ProjectDocument::default(), None, None, false),
     };
 
     let merged_delimited = !delimited_files.is_empty();
@@ -533,8 +590,23 @@ pub fn open_document_from_files(files: &[PathBuf]) -> Result<Session, String> {
             .execute("project.recalculate", json!({ "include_external_links": false }))
             .map_err(|err| format!("failed to recalculate merged startup project: {err}"))?;
     }
-    if let Some(path) = primary_archive_path {
+    let should_mark_dirty = primary_archive_path.is_none() && (merged_delimited || primary_had_project) || !clean_archive || merged_delimited;
+    if let Some(path) = primary_archive_path.clone() {
         session.set_file_path(Some(path), clean_archive && !merged_delimited);
+    }
+    if should_mark_dirty && !session.is_dirty() {
+        let mut baseline = match (primary_archive_path.as_ref(), pre_merge_doc) {
+            (Some(path), Some(doc_before)) => {
+                let mut b = Session::from_document(doc_before);
+                b.set_file_path(Some(path.clone()), true);
+                b
+            }
+            _ => Session::new(),
+        };
+        if let Some(path) = primary_archive_path {
+            baseline.set_file_path(Some(path), true);
+        }
+        let _ = session.collapse_atomic_group(baseline);
     }
     Ok(session)
 }
@@ -764,7 +836,9 @@ fn apply_control_journal_steps(
                 }
             } else if step.command_id == "project.save" {
                 recorded_any_step = true;
-                dirty_commands.clear();
+                if !app.session().is_dirty() {
+                    dirty_commands.clear();
+                }
                 requires_final_checkpoint = true;
             }
         }
@@ -898,38 +972,6 @@ where
     }
 
     let prepended_reauth = conn_authenticated && kind == ControlFrameKind::Command;
-    if prepended_reauth
-        && win.app().ui_backend() == UiBackend::Egui
-        && let Ok(text) = std::str::from_utf8(raw_bytes)
-        && let Ok(req) = serde_json::from_str::<ControlRequest>(text.trim())
-    {
-        let prev_undo_depth = win.app().session().undo_depth();
-        let prev_redo_depth = win.app().session().redo_depth();
-        let prev_dirty = win.app().session().is_dirty();
-        let prev_mutation_seq = win.app().mutation_seq();
-        let method = req.method.clone();
-        if let Some(res) = win.app_mut().try_dispatch_egui_backend(&req.method, &req.params) {
-            let reply = encode_egui_control_response(req.id, res);
-            let mut response_bytes = serde_json::to_vec(&reply).map_err(|err| format!("failed to encode control response: {err}"))?;
-            response_bytes.push(b'\n');
-            let post_ctx = ControlPostRequestContext {
-                method: &method,
-                steps: &[],
-                prev_undo_depth,
-                prev_redo_depth,
-                prev_dirty,
-                prev_mutation_seq,
-                rolled_back: false,
-                request_ok: reply.ok,
-            };
-            win.with_control_journal_hook(|app_ref, journal_hook| {
-                journal_hook(app_ref, &post_ctx)?;
-                on_post_request(app_ref, &post_ctx)
-            })?;
-            win.app_mut().sync_views();
-            return Ok(LiveControlFrameOutput { response_bytes, quit: false, close_connection: false, auth_succeeded: None });
-        }
-    }
     let reauth_line = if prepended_reauth { Some(build_control_reauth_line(auth)?) } else { None };
     let mut out_bytes = Vec::new();
     let mut last_saved_path: Option<PathBuf> = None;
@@ -990,6 +1032,11 @@ fn configure_app_overrides(app: &mut UiApp, cfg: &DesktopHostConfig) -> Result<(
         app.set_theme_mode(mode);
     }
     app.set_gui_only(cfg.gui_only);
+    app.session_mut().set_path_policy(cfg.path_policy.clone());
+    app.set_human_path_only(cfg.human_path_only);
+    if let Some(adapter) = cfg.clipboard_adapter.as_ref() {
+        app.set_clipboard_adapter(Arc::clone(adapter));
+    }
     app.sync_views();
     Ok(())
 }
@@ -1122,6 +1169,12 @@ impl DesktopWindowSession {
         format!("{base}{dirty_marker} — CurveBook")
     }
 
+    /// Whether menu bars are drawn inside the window chrome rather than in a global native bar.
+    #[must_use]
+    pub const fn in_window_menus(&self) -> bool {
+        self.in_window_menus
+    }
+
     /// Current menu chrome configuration (`InWindowMenuBar` vs `NativeMenuBar`) and localized sections.
     #[must_use]
     pub fn chrome_state(&self) -> DesktopMenuChromeState {
@@ -1132,6 +1185,7 @@ impl DesktopWindowSession {
             menu_bar_visible: mode.is_in_window(),
             menu_bar_height_pt: if mode.is_in_window() { IN_WINDOW_MENU_BAR_HEIGHT_PT } else { 0.0 },
             active_menu_key: self.active_menu_key.clone(),
+            locale: self.app.locale.clone(),
             sections: build_menu_sections(&self.app),
             dispatched_actions: self.chrome_dispatched_actions.clone(),
         }
@@ -1673,6 +1727,23 @@ impl OsClipboardAdapter for SystemOsClipboardAdapter {
     }
 }
 
+#[derive(Debug)]
+struct PlatformOsClipboardBridge(Arc<dyn curvebook_ui_egui::PlatformClipboardAdapter>);
+
+impl OsClipboardAdapter for PlatformOsClipboardBridge {
+    fn write_text(&self, text: &str) -> Result<OsAdapterStatus, String> {
+        self.0.write_text(text)
+    }
+
+    fn write_bundle(&self, bundle: &ClipboardBundle) -> Result<OsAdapterStatus, String> {
+        self.0.write_bundle(bundle)
+    }
+
+    fn read_text(&self) -> Result<OsAdapterStatus, String> {
+        self.0.read_text()
+    }
+}
+
 /// Multi-window desktop host managing event loop dispatch, HiDPI scaling, IME composition,
 /// inertial trackpad coasting, file drops, clipboard pasteboard sync, and crash recovery.
 #[derive(Debug)]
@@ -1694,6 +1765,10 @@ impl DesktopHostRuntime {
     /// Construct a new empty [`DesktopHostRuntime`] governed by `config`.
     #[must_use]
     pub fn new(config: DesktopHostConfig) -> Self {
+        let clipboard_adapter: Box<dyn OsClipboardAdapter> = match config.clipboard_adapter.as_ref() {
+            Some(adapter) => Box::new(PlatformOsClipboardBridge(Arc::clone(adapter))),
+            None => Box::new(SystemOsClipboardAdapter),
+        };
         Self {
             config,
             next_window_id: 1,
@@ -1701,7 +1776,7 @@ impl DesktopHostRuntime {
             focused_window: None,
             clipboard_text: None,
             clipboard_bundle: None,
-            clipboard_adapter: Box::new(SystemOsClipboardAdapter),
+            clipboard_adapter,
             preferences_persist_hook: None,
             open_file_dialog_hook: None,
             file_dialog_adapter: None,
@@ -1877,9 +1952,10 @@ impl DesktopHostRuntime {
             }
             "graph.insertImage" | "layout.insertImage" => {
                 let target_kind = if command_id == "graph.insertImage" { NativeExportTargetKind::Graph } else { NativeExportTargetKind::Layout };
+                let sheet_hint = params.get("sheet_id").and_then(Value::as_str);
                 let target_sheet_id = {
                     let win = self.window(window_id)?;
-                    resolve_native_export_sheet_id(win.app().document(), target_kind)
+                    resolve_native_export_sheet_id_with_hint(win.app().document(), target_kind, sheet_hint)
                         .ok_or_else(|| format!("no matching target sheet available for `{command_id}`"))?
                 };
                 let req = NativeFileDialogRequest {
@@ -2863,6 +2939,9 @@ impl DesktopHostRuntime {
         }
 
         if (modifiers.meta || modifiers.ctrl) && !modifiers.alt && !modifiers.shift {
+            if trimmed.eq_ignore_ascii_case("x") {
+                return self.cut_selection(window_id);
+            }
             if trimmed.eq_ignore_ascii_case("c") {
                 return self.handle_clipboard_copy(window_id);
             }
@@ -2943,6 +3022,8 @@ impl DesktopHostRuntime {
                     let mut session = Session::from_document(*doc);
                     if let Some(p) = archive_path {
                         session.set_file_path(Some(p), clean_archive);
+                    } else if !session.is_dirty() {
+                        let _ = session.collapse_atomic_group(Session::new());
                     }
                     let new_id = self.open_window_with_session(session, viewport, self.config.recovery_root.is_some())?;
                     return Ok(DesktopEventOutcome {
@@ -2957,34 +3038,32 @@ impl DesktopHostRuntime {
                 let mut session = Session::from_document(*doc);
                 if let Some(p) = archive_path {
                     session.set_file_path(Some(p), clean_archive);
+                } else if !session.is_dirty() {
+                    let _ = session.collapse_atomic_group(Session::new());
                 }
                 let inherited_url_opener = self.url_opener.clone();
+                let cfg_path_policy = self.config.path_policy.clone();
+                let cfg_human_path_only = self.config.human_path_only;
+                let cfg_clipboard_adapter = self.config.clipboard_adapter.clone();
                 let win = self.window_mut(window_id)?;
-                let prev_locale = win.app.locale.clone();
-                let prev_theme = win.app.theme.mode;
-                let prev_ui_scale = win.app.ui_scale();
-                let prev_ui_backend = win.app.ui_backend();
-                let prev_host_draws_menu_bar = win.app.host_draws_menu_bar;
-                let prev_shortcuts = win.app.shortcuts.clone();
-                let prev_rulers = win.app.canvas_dialogs.rulers_visible;
-                let prev_gui_only = win.app.is_gui_only();
-
-                let mut next_app = UiApp::from_session(session);
+                win.app.replace_session_preserving_policies(session);
                 if let Some(opener) = inherited_url_opener {
-                    next_app.set_url_opener(opener);
+                    win.app.set_url_opener(opener);
                 }
-                let _ = next_app.set_locale(normalize_beta_gui_locale(&prev_locale));
-                next_app.set_theme_mode(prev_theme);
-                next_app.set_ui_scale(prev_ui_scale);
-                next_app.set_ui_backend(prev_ui_backend);
-                next_app.host_draws_menu_bar = prev_host_draws_menu_bar;
-                next_app.shortcuts = prev_shortcuts;
-                next_app.canvas_dialogs.rulers_visible = prev_rulers;
-                next_app.set_gui_only(prev_gui_only);
-                next_app.sync_views();
-                win.app = next_app;
+                if cfg_path_policy != curvebook_engine::ExternalPathPolicy::default() {
+                    win.app.session_mut().set_path_policy(cfg_path_policy);
+                }
+                if cfg_human_path_only {
+                    win.app.set_human_path_only(true);
+                }
+                if let Some(adapter) = cfg_clipboard_adapter
+                    && !win.app.has_custom_clipboard_adapter()
+                {
+                    win.app.set_clipboard_adapter(adapter);
+                }
                 win.dirty_commands.clear();
                 win.ime_preedit = None;
+                win.coasting_active = false;
                 win.checkpoint_recovery_journal()?;
                 Ok(DesktopEventOutcome {
                     handled: true,
@@ -4287,7 +4366,14 @@ fn shortcut_uses_desktop_routing(command_id: &str) -> bool {
         || matches!(
             command_id,
             "sheet.createData"
+                | "ui.analyze.open"
+                | "ui.editParams.open"
+                | "ui.print.open"
+                | "ui.changeGraphType.open"
+                | "ui.zoom.fitSheet"
                 | "app.preferences"
+                | "app.quit"
+                | "file.quit"
                 | "ui.theme.set"
                 | "ui.locale.set"
                 | "ui.previewFilter.set"

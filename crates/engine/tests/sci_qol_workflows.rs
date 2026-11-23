@@ -32,16 +32,14 @@ fn decode_base64(input: &str) -> Vec<u8> {
     }
     let clean: Vec<u8> = input.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
     let mut out = Vec::with_capacity(clean.len() * 3 / 4);
-    for chunk in clean.chunks(4) {
-        if chunk.len() < 4 {
-            break;
-        }
-        let n = (u32::from(val(chunk[0])) << 18) | (u32::from(val(chunk[1])) << 12) | (u32::from(val(chunk[2])) << 6) | u32::from(val(chunk[3]));
+    for chunk in clean.as_chunks::<4>().0 {
+        let [c0, c1, c2, c3] = *chunk;
+        let n = (u32::from(val(c0)) << 18) | (u32::from(val(c1)) << 12) | (u32::from(val(c2)) << 6) | u32::from(val(c3));
         out.push(((n >> 16) & 0xFF) as u8);
-        if chunk[2] != b'=' {
+        if c2 != b'=' {
             out.push(((n >> 8) & 0xFF) as u8);
         }
-        if chunk[3] != b'=' {
+        if c3 != b'=' {
             out.push((n & 0xFF) as u8);
         }
     }
@@ -52,12 +50,18 @@ fn sample_4pl_xy_sheet(id: &str) -> DataSheet {
     let xs = [-9.5_f64, -8.5, -8.0, -7.5, -7.0, -6.5, -6.0, -5.5, -5.0, -4.0];
     let mut table = XyTable::new(SubcolumnMode::RawReplicates(2), 1, xs.len()).unwrap();
     table.x_title = String::from("Log10 Concentration (M)");
-    table.data_sets[0].title = String::from("Compound A");
-    for (r, &x) in xs.iter().enumerate() {
-        table.x_cells[r][0] = Cell::number(x);
-        let y_true = 10.0 + 90.0 / (1.0 + 10.0_f64.powf((-6.5 - x) * 1.1));
-        table.data_sets[0].cells[r][0] = Cell::number(y_true - 0.8);
-        table.data_sets[0].cells[r][1] = Cell::number(y_true + 0.8);
+    if let Some(ds0) = table.data_sets.first_mut() {
+        ds0.title = String::from("Compound A");
+        for ((&x, x_row), row) in xs.iter().zip(table.x_cells.iter_mut()).zip(ds0.cells.iter_mut()) {
+            if let Some(x_cell) = x_row.first_mut() {
+                *x_cell = Cell::number(x);
+            }
+            let y_true = 10.0 + 90.0 / (1.0 + 10.0_f64.powf((-6.5 - x) * 1.1));
+            if let [c0, c1] = row.as_mut_slice() {
+                *c0 = Cell::number(y_true - 0.8);
+                *c1 = Cell::number(y_true + 0.8);
+            }
+        }
     }
     DataSheet::new(SheetId::new(id), "Dose Response", TableArchetype::Xy(table)).unwrap()
 }
@@ -66,10 +70,12 @@ fn sample_anova_column_sheet(id: &str) -> DataSheet {
     let groups =
         [("Vehicle", [10.2_f64, 11.0, 9.8, 10.5, 10.1]), ("Low Dose", [14.5, 15.2, 13.9, 14.8, 15.1]), ("High Dose", [22.4, 23.1, 21.8, 22.9, 23.0])];
     let mut table = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, groups.len(), 5).unwrap();
-    for (c, (name, vals)) in groups.iter().enumerate() {
-        table.data_sets[c].title = (*name).to_owned();
-        for (r, &v) in vals.iter().enumerate() {
-            table.data_sets[c].cells[r][0] = Cell::number(v);
+    for (ds, (name, vals)) in table.data_sets.iter_mut().zip(groups.iter()) {
+        ds.title = (*name).to_owned();
+        for (row, &v) in ds.cells.iter_mut().zip(vals.iter()) {
+            if let Some(cell) = row.first_mut() {
+                *cell = Cell::number(v);
+            }
         }
     }
     DataSheet::new(SheetId::new(id), "Treatment Response", TableArchetype::Column(table)).unwrap()

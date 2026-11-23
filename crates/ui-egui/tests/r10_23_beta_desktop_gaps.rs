@@ -288,7 +288,7 @@ fn r10_23_mv_data_tab_variable_picker_filter_badges_and_matrix_parity() -> Resul
     for theme in [UiThemeMode::Light, UiThemeMode::Dark, UiThemeMode::HighContrast] {
         harness.app_mut().set_theme_mode(theme);
         for locale in ["en", "ar"] {
-            let _ = harness.app_mut().set_locale(locale);
+            assert_eq!(harness.app_mut().set_locale(locale), locale);
             for scale in [1.0, 2.0, 3.0] {
                 harness.driver.set_viewport(ViewportMetrics::new(1280.0, 800.0, scale));
                 harness.assert_parity_and_layout(&format!("MV picker theme={theme:?} locale={locale} scale={scale}"))?;

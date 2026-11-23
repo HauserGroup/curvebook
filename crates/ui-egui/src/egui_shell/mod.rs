@@ -492,7 +492,7 @@ impl LayoutMetrics {
                 center_stage_w_pt: w,
                 center_stage_h_pt,
                 split_orientation,
-                rtl_mirrored: false,
+                rtl_mirrored: input.is_rtl,
             };
         }
 
@@ -518,7 +518,7 @@ impl LayoutMetrics {
                 center_stage_w_pt: (w - lead_w - trail_w).max(0.0),
                 center_stage_h_pt,
                 split_orientation,
-                rtl_mirrored: false,
+                rtl_mirrored: input.is_rtl,
             };
         }
 
@@ -596,7 +596,7 @@ impl LayoutMetrics {
             center_stage_w_pt: center_w.max(0.0),
             center_stage_h_pt,
             split_orientation,
-            rtl_mirrored: false,
+            rtl_mirrored: input.is_rtl,
         }
     }
 }
@@ -637,6 +637,7 @@ pub struct ShellLayoutInput {
     pub leading_width_override_pt: Option<f32>,
     pub trailing_width_override_pt: Option<f32>,
     pub host_draws_menu_bar: bool,
+    pub is_rtl: bool,
 }
 
 /// Deterministic panel dimensions and collapse state computed once per frame for `egui_shell`.
@@ -1112,6 +1113,7 @@ pub enum UiIntent {
     ApplyManageVarRecodes { sheet_id: SheetId },
     ApplyManageVarOrder { sheet_id: SheetId, column: usize, order: LevelOrderSpec, reference_level: Option<String> },
     CloseManageVariables,
+    CancelManageVariables { revert_steps: usize },
     OpenImportWizard { origin: ImportOriginKind, is_live_link: bool, target_sheet_id: Option<SheetId> },
     UpdateImportWizard(Box<ImportPasteWizardState>),
     PasteClipboardIntoImportReshape,
@@ -1499,6 +1501,11 @@ impl PendingUiIntents {
     /// Close `Manage Variables...` without additional mutations.
     pub fn push_close_manage_variables(&mut self) {
         self.queue.push(UiIntent::CloseManageVariables);
+    }
+
+    /// Cancel `Manage Variables...`, reverting `revert_steps` session undo entries and clearing staged recodes.
+    pub fn push_cancel_manage_variables(&mut self, revert_steps: usize) {
+        self.queue.push(UiIntent::CancelManageVariables { revert_steps });
     }
 
     /// Open the 5-stage `Import & Paste Special` wizard.
@@ -1948,6 +1955,9 @@ fn apply_single_ui_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentO
         }
         UiIntent::DialogButtonAction { action } => {
             let result = crate::gui_actions::execute_dialog_button_action(app, &action)?;
+            if !power_studio::is_power_studio_dialog_active(app) {
+                power_studio::reset_results_transient_state(&mut app.egui_views.power_studio);
+            }
             Ok(UiIntentOutcome::Ui { command_id: format!("dialog.button:{action}"), result: Some(result) })
         }
         UiIntent::SetTextFieldBuffer { widget_id, text } => {
@@ -2117,6 +2127,7 @@ fn apply_wave4_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutco
         | UiIntent::ApplyManageVarRecodes { .. }
         | UiIntent::ApplyManageVarOrder { .. }
         | UiIntent::CloseManageVariables
+        | UiIntent::CancelManageVariables { .. }
         | UiIntent::OpenImportWizard { .. }
         | UiIntent::UpdateImportWizard(_)
         | UiIntent::PasteClipboardIntoImportReshape
@@ -2180,6 +2191,7 @@ fn apply_wave4_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutco
 fn apply_wave4_grid_wizard_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutcome, EngineError> {
     match intent {
         UiIntent::OpenManageVariables { sheet_id, column } => {
+            app.egui_views.manage_vars_modal.target_sheet_id = Some(sheet_id.clone());
             if let Some(ds) = app.session.document().data_sheet(&sheet_id).cloned() {
                 let col = column.unwrap_or(0).min(ds.archetype.column_count().saturating_sub(1));
                 app.grid.variables_dialog.open_for_column(&ds, col);
@@ -2189,6 +2201,7 @@ fn apply_wave4_grid_wizard_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
             Ok(UiIntentOutcome::ShellUpdated)
         }
         UiIntent::SelectManageVarColumn { sheet_id, column } => {
+            app.egui_views.manage_vars_modal.target_sheet_id = Some(sheet_id.clone());
             if let Some(ds) = app.session.document().data_sheet(&sheet_id).cloned() {
                 let col = column.min(ds.archetype.column_count().saturating_sub(1));
                 app.grid.variables_dialog.open_for_column(&ds, col);
@@ -2232,6 +2245,16 @@ fn apply_wave4_grid_wizard_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
         }
         UiIntent::CloseManageVariables => {
             app.grid.variables_dialog.open = false;
+            app.egui_views.manage_vars_modal.target_sheet_id = None;
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::CancelManageVariables { revert_steps } => {
+            for _ in 0..revert_steps {
+                let _ = app.execute_command("edit.undo", serde_json::json!({}));
+            }
+            app.grid.variables_dialog.recode_mappings.clear();
+            app.grid.variables_dialog.open = false;
+            app.egui_views.manage_vars_modal.target_sheet_id = None;
             Ok(UiIntentOutcome::ShellUpdated)
         }
         UiIntent::OpenImportWizard { origin, is_live_link, target_sheet_id } => {
@@ -2591,8 +2614,28 @@ fn apply_wave4_modal_state_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
             }
         }
         UiIntent::SaveEditParamsAsDefault => {
-            app.egui_views.anova_modal.method_saved_as_default = true;
-            app.egui_views.stats_modals.method_saved_as_default = true;
+            if let Some(spec) = app.canvas_dialogs.edit_params.draft.clone() {
+                match &spec.kind {
+                    curvebook_doc::AnalysisKind::OneWayAnova(_) => {
+                        app.egui_views.anova_modal.saved_default_spec = Some(spec);
+                        app.egui_views.anova_modal.method_saved_as_default = true;
+                    }
+                    curvebook_doc::AnalysisKind::NonlinearRegression(_) => {
+                        app.egui_views.fit_modal.saved_default_spec = Some(spec);
+                        app.egui_views.fit_modal.method_saved_as_default = true;
+                    }
+                    _ => {
+                        let disc = std::mem::discriminant(&spec.kind);
+                        app.egui_views.stats_modals.saved_defaults.retain(|d| std::mem::discriminant(&d.kind) != disc);
+                        app.egui_views.stats_modals.saved_defaults.push(spec);
+                        app.egui_views.stats_modals.method_saved_as_default = true;
+                    }
+                }
+            } else {
+                app.egui_views.anova_modal.method_saved_as_default = true;
+                app.egui_views.stats_modals.method_saved_as_default = true;
+                app.egui_views.fit_modal.method_saved_as_default = true;
+            }
         }
         UiIntent::SelectRetargetSource { target_data_sheet_id } => {
             app.canvas_dialogs.change_data.selected_target_id = Some(target_data_sheet_id);
@@ -2621,6 +2664,9 @@ fn apply_wave4_modal_state_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
         }
         UiIntent::CommitPowerWizard { action } => {
             let result = crate::gui_actions::execute_dialog_button_action(app, &action)?;
+            if !power_studio::is_power_studio_dialog_active(app) {
+                power_studio::reset_results_transient_state(&mut app.egui_views.power_studio);
+            }
             return Ok(UiIntentOutcome::Ui { command_id: format!("power_wizard:{action}"), result: Some(result) });
         }
         UiIntent::UpdateChangeGraphTypeState(state) => app.canvas_dialogs.change_graph_type = *state,
@@ -2669,6 +2715,7 @@ fn apply_wave4_app_modal_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiI
     match intent {
         UiIntent::OpenPreferences { category } => {
             app.egui_views.app_modals.open_preferences(&app.shortcuts, category);
+            app.egui_views.app_modals.preferences.capture_live_snapshot(&app.locale, app.theme.mode, app.theme.ui_scale, app.nav.nesting_mode);
         }
         UiIntent::ClosePreferences { save } => {
             if save {
@@ -2680,6 +2727,15 @@ fn apply_wave4_app_modal_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiI
                 if let Some(staged) = app.egui_views.app_modals.preferences.staged_shortcuts.take() {
                     app.shortcuts = staged;
                 }
+                app.egui_views.app_modals.preferences.initial_snapshot = None;
+            } else {
+                if let Some(snap) = app.egui_views.app_modals.preferences.initial_snapshot.take() {
+                    app.set_theme_mode(snap.theme_mode);
+                    let _ = app.set_ui_scale(snap.ui_scale);
+                    let _ = app.set_locale(&snap.locale);
+                    app.nav.nesting_mode = snap.nesting_mode;
+                }
+                app.egui_views.app_modals.preferences.reset_scale_spinner();
             }
             app.egui_views.app_modals.preferences.discard_shortcut_draft();
             app.egui_views.app_modals.preferences_open = false;
@@ -2730,6 +2786,8 @@ fn apply_wave4_app_modal_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiI
         }
         UiIntent::CloseFindReplace => {
             app.egui_views.app_modals.find_replace_open = false;
+            app.egui_views.app_modals.find_replace.match_count = 0;
+            app.egui_views.app_modals.find_replace.status_message = None;
         }
         UiIntent::ExecuteFindReplace { replace_all, find_query, replace_with, match_case, match_entire_cell } => {
             return apply_find_replace_on_active_sheet(app, replace_all, &find_query, &replace_with, match_case, match_entire_cell);
@@ -2755,6 +2813,51 @@ fn apply_wave4_app_modal_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiI
     Ok(UiIntentOutcome::ShellUpdated)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FindCellTarget {
+    XCell { row: usize, subcol: usize },
+    DataCell { coord: CellCoord },
+}
+
+struct FindCellMatch {
+    pos_key: (usize, bool, usize, usize),
+    target: FindCellTarget,
+    next_value: Option<String>,
+}
+
+fn replace_matched_cell_text(raw: &str, find_query: &str, query_cmp: &str, replace_with: &str, match_case: bool, match_entire_cell: bool) -> String {
+    if match_entire_cell {
+        replace_with.to_owned()
+    } else if match_case {
+        raw.replace(find_query, replace_with)
+    } else {
+        let mut out = String::new();
+        let lower_raw = raw.to_ascii_lowercase();
+        let mut cursor = 0usize;
+        while let Some(rel) = lower_raw.get(cursor..).and_then(|slice| slice.find(query_cmp)) {
+            let start = cursor + rel;
+            let end = start + query_cmp.len();
+            if let Some(prefix) = raw.get(cursor..start) {
+                out.push_str(prefix);
+            }
+            out.push_str(replace_with);
+            cursor = end;
+        }
+        if let Some(tail) = raw.get(cursor..) {
+            out.push_str(tail);
+        }
+        out
+    }
+}
+
+fn cell_raw_find_text(cell: &curvebook_doc::Cell) -> Option<String> {
+    match &cell.value {
+        curvebook_doc::CellValue::Empty => None,
+        curvebook_doc::CellValue::Number(v) => Some(v.to_string()),
+        curvebook_doc::CellValue::Text(t) => Some(t.clone()),
+    }
+}
+
 fn apply_find_replace_on_active_sheet(
     app: &mut UiApp,
     replace_all: bool,
@@ -2773,71 +2876,109 @@ fn apply_find_replace_on_active_sheet(
         return Ok(UiIntentOutcome::ShellUpdated);
     };
 
-    let mut edits = Vec::new();
-    let mut first_match: Option<curvebook_tools::GridCellCoord> = None;
-    let mut match_count = 0usize;
     let query_cmp = if match_case { find_query.to_owned() } else { find_query.to_ascii_lowercase() };
-
     let rows = ds.archetype.row_count();
     let cols = ds.archetype.column_count();
+    let x_is_generated_seq = matches!(
+        &ds.archetype,
+        curvebook_doc::TableArchetype::Xy(xy) if matches!(xy.x_mode, curvebook_doc::XColumnMode::GeneratedSequence { .. })
+    );
+
+    let mut matches: Vec<FindCellMatch> = Vec::new();
     for r in 0..rows {
+        if !x_is_generated_seq {
+            for xs in 0usize.. {
+                let Some(cell) = ds.archetype.x_or_time_cell(r, xs) else {
+                    break;
+                };
+                if let Some(raw) = cell_raw_find_text(cell) {
+                    let hay = if match_case { raw.clone() } else { raw.to_ascii_lowercase() };
+                    let matched = if match_entire_cell { hay == query_cmp } else { hay.contains(&query_cmp) };
+                    if matched {
+                        let next_value =
+                            replace_all.then(|| replace_matched_cell_text(&raw, find_query, &query_cmp, replace_with, match_case, match_entire_cell));
+                        matches.push(FindCellMatch { pos_key: (r, false, 0, xs), target: FindCellTarget::XCell { row: r, subcol: xs }, next_value });
+                    }
+                }
+            }
+        }
         for c in 0..cols {
             let subcols = crate::grid_view::data_set_subcolumn_count(&ds.archetype, c).max(1);
             for s in 0..subcols {
-                let Some(cell) = ds.archetype.data_cell(CellCoord::new(r, c, s)) else {
+                let coord = CellCoord::new(r, c, s);
+                let Some(cell) = ds.archetype.data_cell(coord) else {
                     continue;
                 };
-                let raw = match &cell.value {
-                    curvebook_doc::CellValue::Empty => continue,
-                    curvebook_doc::CellValue::Number(v) => v.to_string(),
-                    curvebook_doc::CellValue::Text(t) => t.clone(),
+                let Some(raw) = cell_raw_find_text(cell) else {
+                    continue;
                 };
                 let hay = if match_case { raw.clone() } else { raw.to_ascii_lowercase() };
                 let matched = if match_entire_cell { hay == query_cmp } else { hay.contains(&query_cmp) };
-                if !matched {
-                    continue;
-                }
-                match_count += 1;
-                if first_match.is_none() {
-                    first_match = Some(curvebook_tools::GridCellCoord::new(r, c, s));
-                }
-                if replace_all {
-                    let next_text = if match_entire_cell {
-                        replace_with.to_owned()
-                    } else if match_case {
-                        raw.replace(find_query, replace_with)
-                    } else {
-                        let mut out = String::new();
-                        let lower_raw = raw.to_ascii_lowercase();
-                        let mut cursor = 0usize;
-                        while let Some(rel) = lower_raw.get(cursor..).and_then(|slice| slice.find(&query_cmp)) {
-                            let start = cursor + rel;
-                            let end = start + query_cmp.len();
-                            if let Some(prefix) = raw.get(cursor..start) {
-                                out.push_str(prefix);
-                            }
-                            out.push_str(replace_with);
-                            cursor = end;
-                        }
-                        if let Some(tail) = raw.get(cursor..) {
-                            out.push_str(tail);
-                        }
-                        out
-                    };
-                    edits.push(serde_json::json!({ "row": r, "col": c, "subcol": s, "value": next_text }));
+                if matched {
+                    let next_value =
+                        replace_all.then(|| replace_matched_cell_text(&raw, find_query, &query_cmp, replace_with, match_case, match_entire_cell));
+                    matches.push(FindCellMatch { pos_key: (r, true, c, s), target: FindCellTarget::DataCell { coord }, next_value });
                 }
             }
         }
     }
 
-    app.egui_views.app_modals.find_replace.match_count = match_count;
-    if let Some(coord) = first_match {
-        app.grid.select_single_sync(coord);
-        app.focus_widget_id = Some(format!("grid.cell.{}.{}.{}", coord.row, coord.col, coord.subcol));
+    app.egui_views.app_modals.find_replace.match_count = matches.len();
+    let cur_pos_key = if let Some((xr, xs)) = app.grid.active_x_cell {
+        Some((xr, false, 0usize, xs))
+    } else {
+        app.grid.tool.active.map(|ac| (ac.row, true, ac.col, ac.subcol))
+    };
+
+    let selected_match = if replace_all {
+        matches.first()
+    } else if let Some(cur) = cur_pos_key {
+        matches.iter().find(|m| m.pos_key > cur).or_else(|| matches.first())
+    } else {
+        matches.first()
+    };
+
+    if let Some(chosen) = selected_match {
+        match chosen.target {
+            FindCellTarget::XCell { row, subcol } => {
+                app.grid.select_x_cell_sync(row, subcol);
+                app.focus_widget_id = Some(format!("grid.xcell.{row}.{subcol}"));
+            }
+            FindCellTarget::DataCell { coord } => {
+                app.grid.select_single_sync(curvebook_tools::GridCellCoord::new(coord.row, coord.col, coord.subcol));
+                app.focus_widget_id = Some(format!("grid.cell.{}.{}.{}", coord.row, coord.col, coord.subcol));
+            }
+        }
     }
-    if replace_all && !edits.is_empty() {
-        let outcome = app.execute_session_ui_cmd("table.setCells", serde_json::json!({ "sheet_id": ds_id.as_str(), "edits": edits }))?;
-        return Ok(UiIntentOutcome::Engine { command_id: String::from("table.setCells"), outcome });
+
+    if replace_all {
+        let mut x_edits = Vec::new();
+        let mut data_edits = Vec::new();
+        for m in matches {
+            let Some(val) = m.next_value else {
+                continue;
+            };
+            match m.target {
+                FindCellTarget::XCell { row, subcol } => {
+                    x_edits.push(serde_json::json!({ "row": row, "subcol": subcol, "value": val }));
+                }
+                FindCellTarget::DataCell { coord } => {
+                    data_edits.push(serde_json::json!({ "row": coord.row, "col": coord.col, "subcol": coord.subcol, "value": val }));
+                }
+            }
+        }
+        let mut last_outcome: Option<(&'static str, curvebook_engine::CommandOutcome)> = None;
+        if !x_edits.is_empty() {
+            let outcome = app.execute_session_ui_cmd("table.setXCells", serde_json::json!({ "sheet_id": ds_id.as_str(), "edits": x_edits }))?;
+            last_outcome = Some(("table.setXCells", outcome));
+        }
+        if !data_edits.is_empty() {
+            let outcome = app.execute_session_ui_cmd("table.setCells", serde_json::json!({ "sheet_id": ds_id.as_str(), "edits": data_edits }))?;
+            last_outcome = Some(("table.setCells", outcome));
+        }
+        if let Some((cmd_id, outcome)) = last_outcome {
+            return Ok(UiIntentOutcome::Engine { command_id: String::from(cmd_id), outcome });
+        }
     }
     Ok(UiIntentOutcome::ShellUpdated)
 }
@@ -3229,9 +3370,13 @@ mod tests {
             leading_width_override_pt: None,
             trailing_width_override_pt: None,
             host_draws_menu_bar: false,
+            is_rtl: false,
         };
 
+        let rtl_wide = metrics.solve_shell_layout(ShellLayoutInput { is_rtl: true, ..base_in });
+        assert!(rtl_wide.rtl_mirrored);
         let wide = metrics.solve_shell_layout(base_in);
+        assert!(!wide.rtl_mirrored);
         assert_eq!(wide.tier, ViewportTier::WideDesktop);
         assert!(!wide.leading_collapsed_to_rail);
         assert!(!wide.trailing_collapsed_to_rail);

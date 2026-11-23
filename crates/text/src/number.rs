@@ -192,8 +192,10 @@ fn place_decimal_digits(digits: &str, exp: i32) -> (String, String) {
                 int_part.push('0');
             }
             (int_part, String::new())
+        } else if let Some((int_part, frac_part)) = digits.split_at_checked(int_len) {
+            (int_part.to_owned(), frac_part.to_owned())
         } else {
-            (digits[..int_len].to_owned(), digits[int_len..].to_owned())
+            (digits.to_owned(), String::new())
         }
     } else {
         let leading_zeros = ((-exp) as usize).saturating_sub(1);

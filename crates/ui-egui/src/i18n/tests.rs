@@ -57,8 +57,8 @@ fn untranslated_report() {
     let expected = ["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr", "ar", "he"];
     assert_eq!(LOCALES, &expected);
     assert_eq!(LOCALES.len(), 16);
-    assert_eq!(catalog_len(), 511);
-    assert_eq!(LOCALES.len() * catalog_len(), 8_176);
+    assert_eq!(catalog_len(), 706);
+    assert_eq!(LOCALES.len() * catalog_len(), 11_296);
     assert!(!CATALOG.is_empty());
 
     let mut seen_keys = HashSet::new();
@@ -255,7 +255,7 @@ fn strip_comments_preserving_lines(src: &str) -> String {
             out.push_str("  ");
             i += 2;
         } else {
-            let ch = src[i..].chars().next().unwrap_or(' ');
+            let ch = src.get(i..).and_then(|s| s.chars().next()).unwrap_or(' ');
             out.push(ch);
             i += ch.len_utf8();
         }
@@ -314,7 +314,7 @@ fn split_call_args_and_end(src: &str, open_paren: usize) -> Option<(Vec<String>,
             b')' | b']' | b'}' => {
                 depth -= 1;
                 if depth == 0 {
-                    let tail = src[start..i].trim();
+                    let tail = src.get(start..i).unwrap_or("").trim();
                     if !tail.is_empty() {
                         args.push(tail.to_owned());
                     }
@@ -322,7 +322,7 @@ fn split_call_args_and_end(src: &str, open_paren: usize) -> Option<(Vec<String>,
                 }
             }
             b',' if depth == 1 => {
-                args.push(src[start..i].trim().to_owned());
+                args.push(src.get(start..i).unwrap_or("").trim().to_owned());
                 start = i + 1;
             }
             _ => {}
@@ -370,7 +370,7 @@ fn extract_tr_literal_keys(file_label: &str, src: &str, out: &mut Vec<(String, S
             while i < bytes.len() && is_ident_byte(bytes[i]) {
                 i += 1;
             }
-            let ident = &code[start..i];
+            let ident = code.get(start..i).unwrap_or("");
             let mut lookahead = i;
             while lookahead < bytes.len() && bytes[lookahead].is_ascii_whitespace() {
                 lookahead += 1;
@@ -383,7 +383,7 @@ fn extract_tr_literal_keys(file_label: &str, src: &str, out: &mut Vec<(String, S
             {
                 let target_arg = if args.len() == 1 { args.first() } else { args.get(1) };
                 if let Some(key) = target_arg.and_then(|arg| parse_plain_string_literal(arg)) {
-                    let line = code[..start].bytes().filter(|&b| b == b'\n').count() + 1;
+                    let line = code.get(..start).unwrap_or("").bytes().filter(|&b| b == b'\n').count() + 1;
                     out.push((format!("{file_label}:{line}"), key));
                 }
             }

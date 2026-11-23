@@ -13,7 +13,7 @@ use crate::i18n::tr;
 use crate::inspect::ZLayer;
 
 use super::super::{FrameInspectEntryInput, Tokens};
-use super::helpers::{ButtonEntry, GraphModalCtx, gtr, layout_elided, record_button, record_checkbox, record_label, rgba_to_color32};
+use super::helpers::{ButtonEntry, GraphModalCtx, layout_elided, record_button, record_checkbox, record_label, rgba_to_color32};
 use super::state::{GraphModalEguiState, GraphTypeFamily};
 
 pub(super) fn render_change_graph_type_body(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &mut GraphModalCtx<'_>) {
@@ -45,7 +45,7 @@ pub(super) fn render_change_graph_type_body(ui: &mut Ui, state: &mut GraphModalE
             }
         }
         let mut show_all = state.graph_type_show_all;
-        let show_all_lbl = gtr(gctx.locale, "cgt.show_all");
+        let show_all_lbl = tr(gctx.locale, "cgt.show_all");
         let chk = ui.checkbox(&mut show_all, show_all_lbl);
         record_checkbox(ui, &chk, gctx.meta, "graph_type.show_all", show_all_lbl, show_all);
         if chk.changed() {
@@ -266,12 +266,12 @@ fn build_compatibility_hint(
         && let Some(kind) = src_kind
         && !o.compatible_tables.contains(&kind)
     {
-        return format!("{} ({:?} -> {})", gtr(locale, "cgt.hint.cross_table"), kind, o.label);
+        return format!("{} ({:?} -> {})", tr(locale, "cgt.hint.cross_table"), kind, o.label);
     }
     if design_hint == Some(ColumnDesignHint::PairedRepeatedMeasures) {
-        return gtr(locale, "cgt.hint.paired").to_owned();
+        return tr(locale, "cgt.hint.paired").to_owned();
     }
-    gtr(locale, "cgt.hint.compatible").to_owned()
+    tr(locale, "cgt.hint.compatible").to_owned()
 }
 
 fn render_graph_type_card(
@@ -460,7 +460,7 @@ fn render_live_dataset_preview(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>, graph_
             ui.painter().text(
                 rect.center(),
                 Align2::CENTER_CENTER,
-                gtr(gctx.locale, "cgt.preview.empty"),
+                tr(gctx.locale, "cgt.preview.empty"),
                 FontId::proportional(gctx.tokens.metrics.font_ui_small_pt),
                 gctx.tokens.text_muted,
             );

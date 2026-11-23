@@ -55,28 +55,29 @@ impl std::error::Error for Base64Error {}
 /// Encode raw binary bytes into standard RFC 4648 Base64 with `=` padding and no line wrapping.
 #[must_use]
 pub fn encode(input: &[u8]) -> String {
+    let enc = |idx: usize| -> char { ENCODE_TABLE.get(idx & 0x3F).copied().map_or('=', char::from) };
     let mut out = String::with_capacity(input.len().div_ceil(3).saturating_mul(4));
     let (chunks, remainder) = input.as_chunks::<3>();
     for &[b0, b1, b2] in chunks {
         let triple = (usize::from(b0) << 16) | (usize::from(b1) << 8) | usize::from(b2);
-        out.push(char::from(ENCODE_TABLE[(triple >> 18) & 0x3F]));
-        out.push(char::from(ENCODE_TABLE[(triple >> 12) & 0x3F]));
-        out.push(char::from(ENCODE_TABLE[(triple >> 6) & 0x3F]));
-        out.push(char::from(ENCODE_TABLE[triple & 0x3F]));
+        out.push(enc(triple >> 18));
+        out.push(enc(triple >> 12));
+        out.push(enc(triple >> 6));
+        out.push(enc(triple));
     }
     match remainder {
         [b0] => {
             let triple = usize::from(*b0) << 16;
-            out.push(char::from(ENCODE_TABLE[(triple >> 18) & 0x3F]));
-            out.push(char::from(ENCODE_TABLE[(triple >> 12) & 0x3F]));
+            out.push(enc(triple >> 18));
+            out.push(enc(triple >> 12));
             out.push('=');
             out.push('=');
         }
         [b0, b1] => {
             let triple = (usize::from(*b0) << 16) | (usize::from(*b1) << 8);
-            out.push(char::from(ENCODE_TABLE[(triple >> 18) & 0x3F]));
-            out.push(char::from(ENCODE_TABLE[(triple >> 12) & 0x3F]));
-            out.push(char::from(ENCODE_TABLE[(triple >> 6) & 0x3F]));
+            out.push(enc(triple >> 18));
+            out.push(enc(triple >> 12));
+            out.push(enc(triple >> 6));
             out.push('=');
         }
         _ => {}
@@ -175,7 +176,9 @@ pub fn decode_capped(input: &str, max_decoded_bytes: usize) -> Result<Vec<u8>, B
         if saw_padding {
             return Err(Base64Error::InvalidPadding);
         }
-        quad[quad_len] = byte;
+        if let Some(slot) = quad.get_mut(quad_len) {
+            *slot = byte;
+        }
         quad_len += 1;
         if quad_len < 4 {
             continue;
@@ -186,7 +189,9 @@ pub fn decode_capped(input: &str, max_decoded_bytes: usize) -> Result<Vec<u8>, B
         if out.len().saturating_add(decoded_len) > max_decoded_bytes {
             return Err(Base64Error::MaxSizeExceeded { max_bytes: max_decoded_bytes });
         }
-        out.extend_from_slice(&bytes[..decoded_len]);
+        if let Some(slice) = bytes.get(..decoded_len) {
+            out.extend_from_slice(slice);
+        }
     }
     Ok(out)
 }

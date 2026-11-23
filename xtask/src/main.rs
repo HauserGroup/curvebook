@@ -1,5 +1,6 @@
 //! Workspace quality gates, packaging helpers, and architectural checks for CurveBook.
 #![forbid(unsafe_code)]
+#![allow(clippy::indexing_slicing)] // Build/policy CLI scanners with heavy tabular/parser slicing (FA-SEC23-03); string_slice remains denied and all 14 I/O/boundary/app crates enforce workspace indexing_slicing = "deny".
 
 mod assets;
 mod brands;
@@ -214,11 +215,19 @@ fn run_cargo_metadata(root: &Path, args: &[&str]) -> Result<serde_json::Value, S
 }
 
 pub(crate) fn cargo_metadata(root: &Path) -> Result<serde_json::Value, String> {
-    run_cargo_metadata(root, &["metadata", "--format-version", "1", "--no-deps"])
+    if root.join("Cargo.lock").is_file() {
+        run_cargo_metadata(root, &["metadata", "--locked", "--format-version", "1", "--no-deps"])
+    } else {
+        run_cargo_metadata(root, &["metadata", "--format-version", "1", "--no-deps"])
+    }
 }
 
 pub(crate) fn cargo_metadata_resolved(root: &Path) -> Result<serde_json::Value, String> {
-    run_cargo_metadata(root, &["metadata", "--format-version", "1"])
+    if root.join("Cargo.lock").is_file() {
+        run_cargo_metadata(root, &["metadata", "--locked", "--format-version", "1"])
+    } else {
+        run_cargo_metadata(root, &["metadata", "--format-version", "1"])
+    }
 }
 
 fn cmd_layers(root: &Path) -> Result<(), String> {
@@ -226,7 +235,8 @@ fn cmd_layers(root: &Path) -> Result<(), String> {
     let graph = layers::from_metadata(&meta)?;
     let mut violations = layers::check(&graph);
     violations.extend(layers::check_manifest_patches(root));
-    let hygiene = layers::check_source_hygiene(root);
+    let mut hygiene = layers::check_source_hygiene(root);
+    hygiene.extend(layers::check_lint_policy(root));
     if violations.is_empty() && hygiene.is_empty() {
         println!("layers: all {} workspace packages satisfy L0..L7 dependency rules and source hygiene", graph.len());
         return Ok(());
@@ -324,7 +334,7 @@ fn run_trunk_web_release_if_available(root: &Path) -> Result<(), String> {
         return Ok(());
     }
 
-    let target_dir = std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| root.join("target"), PathBuf::from);
+    let target_dir = ci_cache::resolve_target_dir_from_env(root);
     let dist_dir = target_dir.join("wasm-trunk-dist");
     std::fs::create_dir_all(&dist_dir).map_err(|e| format!("mkdir {}: {e}", dist_dir.display()))?;
     let dist_arg = dist_dir.to_string_lossy().into_owned();
@@ -380,6 +390,52 @@ fn run_cargo(root: &Path, args: &[String]) -> Result<(), String> {
 
 fn has_cargo_nextest() -> bool {
     Command::new("cargo").args(["nextest", "--version"]).output().is_ok_and(|o| o.status.success())
+}
+
+/// Build a bounded `ProcessCommand` for a local developer/CI tool (`cargo`, `rustc`, `rustfmt`,
+/// `git`, `curl`) while preserving the ambient toolchain environment (`PATH`, `CARGO_*`,
+/// `RUSTUP_*`, compiler/linker/proxy vars) that `ProcessCommand` strips by default for shipped
+/// desktop apps.
+pub(crate) fn dev_tool_command(program: &str) -> curvebook_platform::process::ProcessCommand {
+    const FORWARD_ENV_KEYS: &[&str] = &[
+        "PATH",
+        "PATHEXT",
+        "CARGO",
+        "CARGO_HOME",
+        "CARGO_TARGET_DIR",
+        "CARGO_NET_OFFLINE",
+        "RUSTUP_HOME",
+        "RUSTUP_TOOLCHAIN",
+        "RUSTC",
+        "RUSTC_WRAPPER",
+        "RUSTFMT",
+        "RUSTFLAGS",
+        "RUSTDOCFLAGS",
+        "LLVM_COV",
+        "LLVM_PROFDATA",
+        "CC",
+        "CXX",
+        "AR",
+        "SDKROOT",
+        "DEVELOPER_DIR",
+        "MACOSX_DEPLOYMENT_TARGET",
+        "CI",
+        "GITHUB_ACTIONS",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "NO_PROXY",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+    ];
+    let mut cmd = curvebook_platform::process::ProcessCommand::new(program);
+    for key in FORWARD_ENV_KEYS {
+        if let Ok(val) = std::env::var(key)
+            && !val.is_empty()
+        {
+            cmd = cmd.env(*key, val);
+        }
+    }
+    cmd
 }
 
 #[cfg(test)]
@@ -490,5 +546,12 @@ mod tests {
             let res = verify_exact_single_test_passed(bad, TEST);
             assert!(res.is_err(), "expected failure for output: {bad}");
         }
+    }
+
+    #[test]
+    fn dev_tool_command_runs_host_rustfmt() {
+        let out = super::dev_tool_command("rustfmt").arg("--version").run().expect("rustfmt on host PATH should execute");
+        assert!(out.success, "rustfmt --version failed: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(String::from_utf8_lossy(&out.stdout).contains("rustfmt"));
     }
 }
