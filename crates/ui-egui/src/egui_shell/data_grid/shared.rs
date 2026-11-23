@@ -1,12 +1,12 @@
 //! Shared geometry, scrolling, render contexts, formatting, and pointer/focus helpers for the
-//! data grid (`Column` and multi-archetype views).
+//! unified virtualized data grid across all 8 table archetypes.
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::ops::Range;
 
 use curvebook_doc::{
-    Cell, CellCoord, CellValue, ColumnTable, DataSheet, LinkBorderColor, LinkedDataRegion, ProjectDocument, ResultStatus, SheetId, TableArchetype,
+    Cell, CellCoord, CellValue, DataSheet, LinkBorderColor, LinkedDataRegion, ProjectDocument, ResultStatus, SheetId, TableArchetype,
 };
 use curvebook_tools::GridCellCoord;
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
@@ -26,58 +26,6 @@ pub(super) const ROW_TITLES_COLLAPSED_WIDTH_PT: f32 = 34.0;
 pub(super) const DEFAULT_DATA_COL_WIDTH_PT: f32 = 96.0;
 pub(super) const LINK_STRIP_HEIGHT_PT: f32 = 26.0;
 pub(super) const CELL_PAD_X_PT: f32 = 4.0;
-pub(super) const CORNER_TRIGGER_HEIGHT_PT: f32 = 24.0;
-
-#[derive(Debug, Clone)]
-pub(super) struct GridGeometry {
-    pub(super) available_rect: Rect,
-    pub(super) table_rect: Rect,
-    pub(super) row_num_w: f32,
-    pub(super) rt_w: f32,
-    pub(super) tier1_h: f32,
-    pub(super) tier2_h: f32,
-    pub(super) tier3_h: f32,
-    pub(super) header_h: f32,
-    pub(super) row_h: f32,
-    pub(super) subcol_w: f32,
-    pub(super) subs_per_col: usize,
-    pub(super) total_rows: usize,
-    pub(super) total_cols: usize,
-    pub(super) total_flat_cols: usize,
-    pub(super) total_data_w: f32,
-    pub(super) total_data_h: f32,
-    pub(super) need_h: bool,
-    pub(super) need_v: bool,
-    pub(super) h_reserve: f32,
-    pub(super) v_reserve: f32,
-    pub(super) cols_x: f32,
-    pub(super) data_y: f32,
-    pub(super) body_inner_w: f32,
-    pub(super) body_inner_h: f32,
-    pub(super) effective_collapsed: bool,
-    pub(super) corner_rect: Rect,
-    pub(super) header_data_rect: Rect,
-    pub(super) gutter_body_rect: Rect,
-    pub(super) body_outer_rect: Rect,
-}
-
-pub(super) struct GridRenderCtx<'a> {
-    pub(super) app: &'a UiApp,
-    pub(super) ds: &'a DataSheet,
-    pub(super) col_table: &'a ColumnTable,
-    pub(super) tokens: &'a Tokens,
-    pub(super) metrics: LayoutMetrics,
-    pub(super) geom: &'a GridGeometry,
-    pub(super) sheet_id_base: Id,
-    pub(super) modal_blocked: bool,
-    pub(super) locale: &'a str,
-}
-
-impl<'a> GridRenderCtx<'a> {
-    pub(super) const fn input_blocked(&self, state: &ColumnGridEguiState) -> bool {
-        self.modal_blocked || state.active_link_popover.is_some()
-    }
-}
 
 pub(super) struct SelectionFastLookup<'a> {
     pub(super) active: Option<GridCellCoord>,
@@ -87,7 +35,7 @@ pub(super) struct SelectionFastLookup<'a> {
 }
 
 impl<'a> SelectionFastLookup<'a> {
-    pub(super) fn new(app: &'a UiApp, total_rows: usize, subs_per_col: usize, total_flat: usize) -> Self {
+    pub(super) fn new(app: &'a UiApp, geom: &MultiGridGeom) -> Self {
         let active = app.grid.tool.active;
         let has_discontig =
             app.grid.selected_coords.len() > 1 || (!app.grid.selected_coords.is_empty() && app.grid.tool.anchor == app.grid.tool.active);
@@ -98,21 +46,21 @@ impl<'a> SelectionFastLookup<'a> {
             }
             return Self { active, rect_bounds: None, discontig_slice: Some(&app.grid.selected_coords), discontig_set: None };
         }
-        let rect_bounds = if total_rows == 0 || total_flat == 0 {
+        let rect_bounds = if geom.row_count == 0 || geom.total_data_flat_cols == 0 {
             None
         } else if let Some((min_c, max_c)) = app.grid.tool.selection_bounds() {
             let r0 = min_c.row;
-            let r1 = max_c.row.min(total_rows.saturating_sub(1));
-            let f0 = min_c.col.saturating_mul(subs_per_col).saturating_add(min_c.subcol.min(subs_per_col - 1));
-            let f1 = max_c.col.saturating_mul(subs_per_col).saturating_add(max_c.subcol.min(subs_per_col - 1));
-            if r0 <= r1 && f0 < total_flat { Some((r0, r1, f0.min(f1), f0.max(f1).min(total_flat - 1))) } else { None }
+            let r1 = max_c.row.min(geom.row_count.saturating_sub(1));
+            let f0 = geom.coord_to_flat_all(false, min_c.col, min_c.subcol).saturating_sub(geom.x_subcols);
+            let f1 = geom.coord_to_flat_all(false, max_c.col, max_c.subcol).saturating_sub(geom.x_subcols);
+            if r0 <= r1 && f0 < geom.total_data_flat_cols { Some((r0, r1, f0.min(f1), f0.max(f1).min(geom.total_data_flat_cols - 1))) } else { None }
         } else {
             None
         };
         Self { active, rect_bounds, discontig_slice: None, discontig_set: None }
     }
 
-    pub(super) fn contains(&self, coord: GridCellCoord, flat_col: usize) -> bool {
+    pub(super) fn contains(&self, coord: GridCellCoord, flat_data_col: usize) -> bool {
         if let Some(set) = &self.discontig_set {
             return set.contains(&coord);
         }
@@ -120,21 +68,10 @@ impl<'a> SelectionFastLookup<'a> {
             return slice.contains(&coord);
         }
         if let Some((r0, r1, f0, f1)) = self.rect_bounds {
-            return (r0..=r1).contains(&coord.row) && (f0..=f1).contains(&flat_col);
+            return (r0..=r1).contains(&coord.row) && (f0..=f1).contains(&flat_data_col);
         }
         false
     }
-}
-
-pub(super) struct BodyRenderResult {
-    pub(super) inner_rect: Rect,
-    pub(super) rendered_cells: usize,
-    pub(super) visible_rows: Range<usize>,
-    pub(super) visible_subcols: Range<usize>,
-    pub(super) used_scroll_offset: Vec2,
-    pub(super) new_scroll_offset: Vec2,
-    pub(super) inline_edit_handled_key: bool,
-    pub(super) cell_clicked_or_edited: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,12 +105,12 @@ pub(super) struct MultiGridAuxState {
     pub(super) last_app_x_cell: Option<(usize, usize)>,
     pub(super) last_app_y_selection: Option<(Option<GridCellCoord>, Option<GridCellCoord>, usize)>,
     pub(super) active_role_menu_col: Option<usize>,
-    pub(super) context_menu: Option<ContextMenuState>,
     pub(super) suppress_loss_commit_once: bool,
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct MultiGridGeom {
+    pub(super) available_rect: Rect,
     pub(super) grid_outer_rect: Rect,
     pub(super) link_strip_rect: Option<Rect>,
     pub(super) h_tier1: f32,
@@ -183,7 +120,10 @@ pub(super) struct MultiGridGeom {
     pub(super) row_num_w: f32,
     pub(super) row_title_w: f32,
     pub(super) subcol_w: f32,
-    pub(super) bar_reserve: f32,
+    pub(super) need_h: bool,
+    pub(super) need_v: bool,
+    pub(super) h_reserve: f32,
+    pub(super) v_reserve: f32,
     pub(super) row_count: usize,
     pub(super) col_count: usize,
     pub(super) x_subcols: usize,
@@ -225,9 +165,13 @@ impl MultiGridGeom {
             return subcol.min(self.x_subcols.saturating_sub(1));
         }
         let data_flat = if let Some(subs) = self.uniform_data_subcols {
-            col.saturating_mul(subs.max(1)).saturating_add(subcol)
+            let s = subs.max(1);
+            col.saturating_mul(s).saturating_add(subcol.min(s - 1))
         } else {
-            self.col_flat_offsets.get(col).copied().unwrap_or(0).saturating_add(subcol)
+            let start = self.col_flat_offsets.get(col).copied().unwrap_or(0);
+            let next = self.col_flat_offsets.get(col + 1).copied().unwrap_or(self.total_data_flat_cols);
+            let span = next.saturating_sub(start).max(1);
+            start.saturating_add(subcol.min(span - 1))
         };
         self.x_subcols.saturating_add(data_flat)
     }
@@ -244,31 +188,23 @@ impl MultiGridGeom {
     }
 }
 
-/// Immutable per-frame context shared across multi-archetype grid helpers (`R15-GUI-08`).
+/// Immutable per-frame context shared across unified grid helpers (`R15-GUI-08`).
 pub(super) struct MultiGridCtx<'a> {
     pub(super) app: &'a UiApp,
     pub(super) ds: &'a DataSheet,
     pub(super) geom: &'a MultiGridGeom,
     pub(super) tokens: &'a Tokens,
+    pub(super) metrics: LayoutMetrics,
     pub(super) blocked: bool,
+    pub(super) locale: &'a str,
 }
 
-/// Mutable per-frame state & output handles threaded through multi-archetype grid helpers (`R15-GUI-08`).
+/// Mutable per-frame state & output handles threaded through unified grid helpers (`R15-GUI-08`).
 pub(super) struct MultiGridFrameState<'a> {
     pub(super) state: &'a mut ColumnGridEguiState,
     pub(super) aux: &'a mut MultiGridAuxState,
     pub(super) meta: &'a mut FrameInspectMeta,
     pub(super) intents: &'a mut PendingUiIntents,
-}
-
-pub(super) fn active_column_sheet(app: &UiApp) -> Option<(&DataSheet, &ColumnTable)> {
-    let doc = app.document();
-    let sid = doc.active_sheet_id.as_ref()?;
-    let ds = doc.data_sheet(sid)?;
-    let TableArchetype::Column(col_table) = &ds.archetype else {
-        return None;
-    };
-    Some((ds, col_table))
 }
 
 pub(super) fn ensure_solid_scrollbar_style(ui: &mut Ui, metrics: LayoutMetrics) {
@@ -280,110 +216,28 @@ pub(super) fn ensure_solid_scrollbar_style(ui: &mut Ui, metrics: LayoutMetrics) 
     scroll.bar_outer_margin = 2.0;
 }
 
-pub(super) fn compute_grid_geometry(
-    available_rect: Rect,
-    table_rect: Rect,
-    col_table: &ColumnTable,
+pub(super) fn compute_multi_geom(
+    app: &UiApp,
+    ds: &DataSheet,
+    state: &ColumnGridEguiState,
     metrics: LayoutMetrics,
     scroll_allocated_w: f32,
-    collapsed: bool,
-) -> GridGeometry {
-    let row_num_w = ROW_NUM_WIDTH_PT.min((table_rect.width() * 0.25).floor()).max(24.0);
-    let desired_rt_w = if collapsed { ROW_TITLES_COLLAPSED_WIDTH_PT } else { ROW_TITLES_EXPANDED_WIDTH_PT };
-    let max_rt_w = (table_rect.width() - row_num_w - 32.0).max(24.0);
-    let rt_w = desired_rt_w.min(max_rt_w);
-    let left_gutter_w = row_num_w + rt_w;
-
-    let tier1_h = metrics.grid_header_tier_heights[0].max(18.0);
-    let tier2_h = metrics.grid_header_tier_heights[1].max(24.0);
-    let tier3_h = metrics.grid_header_tier_heights[2].max(18.0);
-    let header_h = tier1_h + tier2_h + tier3_h;
-    let row_h = metrics.grid_row_h.max(24.0);
-    let subcol_w = DEFAULT_DATA_COL_WIDTH_PT;
-
-    let subs_per_col = col_table.subcolumn_mode.subcolumn_count().max(1);
-    let total_rows = col_table.row_count();
-    let total_cols = col_table.data_sets.len();
-    let total_flat_cols = total_cols.saturating_mul(subs_per_col);
-
-    #[allow(clippy::cast_precision_loss)]
-    let total_data_w = (total_flat_cols as f32) * subcol_w;
-    #[allow(clippy::cast_precision_loss)]
-    let total_data_h = (total_rows as f32) * row_h;
-
-    let avail_cols0 = (table_rect.width() - left_gutter_w).max(0.0);
-    let avail_body0 = (table_rect.height() - header_h).max(0.0);
-
-    let mut need_v = total_data_h > avail_body0 + 0.5;
-    let mut need_h = total_data_w > avail_cols0 + 0.5;
-    for _ in 0..2 {
-        let vr = if need_v { scroll_allocated_w } else { 0.0 };
-        let hr = if need_h { scroll_allocated_w } else { 0.0 };
-        need_v = total_data_h > (avail_body0 - hr).max(0.0) + 0.5;
-        need_h = total_data_w > (avail_cols0 - vr).max(0.0) + 0.5;
-    }
-
-    let v_reserve = if need_v { scroll_allocated_w } else { 0.0 };
-    let h_reserve = if need_h { scroll_allocated_w } else { 0.0 };
-    let cols_x = table_rect.left() + left_gutter_w;
-    let data_y = table_rect.top() + header_h;
-    let body_inner_w = (table_rect.right() - v_reserve - cols_x).max(0.0);
-    let body_inner_h = (table_rect.bottom() - h_reserve - data_y).max(0.0);
-
-    let corner_rect = Rect::from_min_max(table_rect.min, pos2(cols_x, data_y));
-    let header_data_rect = Rect::from_min_max(pos2(cols_x, table_rect.top()), pos2(table_rect.right() - v_reserve, data_y));
-    let gutter_body_rect = Rect::from_min_max(pos2(table_rect.left(), data_y), pos2(cols_x, table_rect.bottom() - h_reserve));
-    let body_outer_rect = Rect::from_min_max(pos2(cols_x, data_y), table_rect.max);
-
-    GridGeometry {
-        available_rect,
-        table_rect,
-        row_num_w,
-        rt_w,
-        tier1_h,
-        tier2_h,
-        tier3_h,
-        header_h,
-        row_h,
-        subcol_w,
-        subs_per_col,
-        total_rows,
-        total_cols,
-        total_flat_cols,
-        total_data_w,
-        total_data_h,
-        need_h,
-        need_v,
-        h_reserve,
-        v_reserve,
-        cols_x,
-        data_y,
-        body_inner_w,
-        body_inner_h,
-        effective_collapsed: collapsed,
-        corner_rect,
-        header_data_rect,
-        gutter_body_rect,
-        body_outer_rect,
-    }
-}
-
-pub(super) fn compute_multi_geom(app: &UiApp, ds: &DataSheet, state: &ColumnGridEguiState, metrics: LayoutMetrics, available: Rect) -> MultiGridGeom {
-    let link_h = if ds.linked_regions.is_empty() { 0.0 } else { LINK_STRIP_HEIGHT_PT };
+    available: Rect,
+) -> MultiGridGeom {
+    let link_h = if !ds.linked_regions.is_empty() && available.height() > 110.0 { LINK_STRIP_HEIGHT_PT } else { 0.0 };
     let link_strip_rect = (link_h > 0.0).then(|| Rect::from_min_max(available.min, pos2(available.max.x, available.min.y + link_h)));
     let grid_outer_rect = Rect::from_min_max(pos2(available.min.x, available.min.y + link_h), available.max);
 
     let row_titles_collapsed = app.grid.row_titles_collapsed_override.unwrap_or(state.row_titles_collapsed);
     let [h_tier1, h_tier2, h_tier3] = metrics.grid_header_tier_heights;
     let header_h = h_tier1 + h_tier2 + h_tier3;
-    let row_h = metrics.grid_row_h.max(20.0);
+    let row_h = metrics.grid_row_h.max(24.0);
     let row_num_w = ROW_NUM_WIDTH_PT.min((grid_outer_rect.width() * 0.25).floor()).max(24.0);
-    let row_title_w = if row_titles_collapsed { ROW_TITLES_COLLAPSED_WIDTH_PT } else { ROW_TITLES_EXPANDED_WIDTH_PT }
-        .min((grid_outer_rect.width() * 0.35).floor())
-        .max(28.0);
+    let desired_rt_w = if row_titles_collapsed { ROW_TITLES_COLLAPSED_WIDTH_PT } else { ROW_TITLES_EXPANDED_WIDTH_PT };
+    let max_rt_w = (grid_outer_rect.width() - row_num_w - 32.0).max(24.0);
+    let row_title_w = desired_rt_w.min(max_rt_w);
     let gutter_w = row_num_w + row_title_w;
     let subcol_w = DEFAULT_DATA_COL_WIDTH_PT;
-    let bar_reserve = (metrics.scroll_bar_thickness + 4.0).max(14.0);
 
     let row_count = ds.archetype.row_count();
     let col_count = ds.archetype.column_count();
@@ -407,23 +261,37 @@ pub(super) fn compute_multi_geom(app: &UiApp, ds: &DataSheet, state: &ColumnGrid
     };
     let total_flat_cols = x_subcols.saturating_add(total_data_flat_cols);
 
-    let body_x0 = (grid_outer_rect.min.x + gutter_w).min(grid_outer_rect.max.x);
-    let body_y0 = (grid_outer_rect.min.y + header_h).min(grid_outer_rect.max.y);
-    let corner_rect = Rect::from_min_max(grid_outer_rect.min, pos2(body_x0, body_y0));
-    let col_header_rect = Rect::from_min_max(pos2(body_x0, grid_outer_rect.min.y), pos2((grid_outer_rect.max.x - bar_reserve).max(body_x0), body_y0));
-    let row_gutter_rect = Rect::from_min_max(pos2(grid_outer_rect.min.x, body_y0), pos2(body_x0, (grid_outer_rect.max.y - bar_reserve).max(body_y0)));
-    let body_rect = Rect::from_min_max(pos2(body_x0, body_y0), grid_outer_rect.max);
-    let body_inner_clip = Rect::from_min_max(
-        body_rect.min,
-        pos2((body_rect.max.x - bar_reserve).max(body_rect.min.x), (body_rect.max.y - bar_reserve).max(body_rect.min.y)),
-    );
-
     #[allow(clippy::cast_precision_loss)]
     let content_w = (total_flat_cols as f32) * subcol_w;
     #[allow(clippy::cast_precision_loss)]
     let content_h = (row_count as f32) * row_h;
 
+    let avail_cols0 = (grid_outer_rect.width() - gutter_w).max(0.0);
+    let avail_body0 = (grid_outer_rect.height() - header_h).max(0.0);
+    let mut need_v = content_h > avail_body0 + 0.5;
+    let mut need_h = content_w > avail_cols0 + 0.5;
+    for _ in 0..2 {
+        let vr = if need_v { scroll_allocated_w } else { 0.0 };
+        let hr = if need_h { scroll_allocated_w } else { 0.0 };
+        need_v = content_h > (avail_body0 - hr).max(0.0) + 0.5;
+        need_h = content_w > (avail_cols0 - vr).max(0.0) + 0.5;
+    }
+    let v_reserve = if need_v { scroll_allocated_w } else { 0.0 };
+    let h_reserve = if need_h { scroll_allocated_w } else { 0.0 };
+
+    let body_x0 = (grid_outer_rect.min.x + gutter_w).min(grid_outer_rect.max.x);
+    let body_y0 = (grid_outer_rect.min.y + header_h).min(grid_outer_rect.max.y);
+    let corner_rect = Rect::from_min_max(grid_outer_rect.min, pos2(body_x0, body_y0));
+    let col_header_rect = Rect::from_min_max(pos2(body_x0, grid_outer_rect.min.y), pos2((grid_outer_rect.max.x - v_reserve).max(body_x0), body_y0));
+    let row_gutter_rect = Rect::from_min_max(pos2(grid_outer_rect.min.x, body_y0), pos2(body_x0, (grid_outer_rect.max.y - h_reserve).max(body_y0)));
+    let body_rect = Rect::from_min_max(pos2(body_x0, body_y0), grid_outer_rect.max);
+    let body_inner_clip = Rect::from_min_max(
+        body_rect.min,
+        pos2((body_rect.max.x - v_reserve).max(body_rect.min.x), (body_rect.max.y - h_reserve).max(body_rect.min.y)),
+    );
+
     MultiGridGeom {
+        available_rect: available,
         grid_outer_rect,
         link_strip_rect,
         h_tier1,
@@ -433,7 +301,10 @@ pub(super) fn compute_multi_geom(app: &UiApp, ds: &DataSheet, state: &ColumnGrid
         row_num_w,
         row_title_w,
         subcol_w,
-        bar_reserve,
+        need_h,
+        need_v,
+        h_reserve,
+        v_reserve,
         row_count,
         col_count,
         x_subcols,
@@ -454,42 +325,67 @@ pub(super) fn compute_multi_geom(app: &UiApp, ds: &DataSheet, state: &ColumnGrid
     }
 }
 
-pub(super) fn clamp_scroll_offset(state: &mut ColumnGridEguiState, geom: &GridGeometry) {
-    let max_x = (geom.total_data_w - geom.body_inner_w).max(0.0);
-    let max_y = (geom.total_data_h - geom.body_inner_h).max(0.0);
+pub(super) fn clamp_multi_scroll(state: &mut ColumnGridEguiState, geom: &MultiGridGeom) {
+    let max_x = (geom.content_w - geom.body_inner_clip.width()).max(0.0);
+    let max_y = (geom.content_h - geom.body_inner_clip.height()).max(0.0);
     state.scroll_offset_pt.x = if state.scroll_offset_pt.x.is_finite() { state.scroll_offset_pt.x.clamp(0.0, max_x) } else { 0.0 };
     state.scroll_offset_pt.y = if state.scroll_offset_pt.y.is_finite() { state.scroll_offset_pt.y.clamp(0.0, max_y) } else { 0.0 };
 }
 
-pub(super) fn clamp_multi_scroll(state: &mut ColumnGridEguiState, geom: &MultiGridGeom) {
-    let max_x = (geom.content_w - geom.body_inner_clip.width()).max(0.0);
-    let max_y = (geom.content_h - geom.body_inner_clip.height()).max(0.0);
-    state.scroll_offset_pt.x = state.scroll_offset_pt.x.clamp(0.0, max_x);
-    state.scroll_offset_pt.y = state.scroll_offset_pt.y.clamp(0.0, max_y);
-}
-
 pub(super) fn forward_frozen_wheel(ui: &mut Ui, geom: &MultiGridGeom, state: &mut ColumnGridEguiState) {
-    let pointer = ui.input(|i| i.pointer.hover_pos());
-    let over_frozen = pointer.is_some_and(|p| geom.col_header_rect.contains(p) || geom.row_gutter_rect.contains(p));
-    if !over_frozen {
+    let Some(pointer) = ui.input(|i| i.pointer.hover_pos().or_else(|| i.pointer.latest_pos())) else {
+        return;
+    };
+    let delta = ui.input(|i| i.smooth_scroll_delta);
+    if delta == Vec2::ZERO {
         return;
     }
-    let delta = ui.input(|i| i.smooth_scroll_delta);
-    if delta.length_sq() > 0.0 {
-        state.scroll_offset_pt.x -= delta.x;
+    let mut consumed = false;
+    if geom.row_gutter_rect.contains(pointer) && geom.need_v && delta.y.abs() > 0.0 {
         state.scroll_offset_pt.y -= delta.y;
+        consumed = true;
+    } else if geom.col_header_rect.contains(pointer) && geom.need_h && delta.x.abs() > 0.0 {
+        state.scroll_offset_pt.x -= delta.x;
+        consumed = true;
+    }
+    if consumed {
         clamp_multi_scroll(state, geom);
+        ui.input_mut(|i| {
+            i.smooth_scroll_delta = Vec2::ZERO;
+        });
     }
 }
 
-pub(super) fn compute_multi_scrollbar_rects(geom: &MultiGridGeom) -> (Option<Rect>, Option<Rect>) {
-    let b = geom.body_rect;
-    if b.width() <= geom.bar_reserve || b.height() <= geom.bar_reserve {
-        return (None, None);
+pub(super) fn compute_multi_scrollbar_rects(ui: &Ui, geom: &MultiGridGeom, inner_rect: Rect) -> (Option<Rect>, Option<Rect>) {
+    let scroll = ui.spacing().scroll;
+    let bar_w = scroll.bar_width;
+    let inner_m = scroll.bar_inner_margin;
+    let v_rect = geom.need_v.then(|| {
+        Rect::from_min_max(
+            pos2(inner_rect.right() + inner_m, inner_rect.top()),
+            pos2((inner_rect.right() + inner_m + bar_w).min(geom.grid_outer_rect.right()), inner_rect.bottom()),
+        )
+    });
+    let h_rect = geom.need_h.then(|| {
+        Rect::from_min_max(
+            pos2(inner_rect.left(), inner_rect.bottom() + inner_m),
+            pos2(inner_rect.right(), (inner_rect.bottom() + inner_m + bar_w).min(geom.grid_outer_rect.bottom())),
+        )
+    });
+    (v_rect.filter(Rect::is_positive), h_rect.filter(Rect::is_positive))
+}
+
+pub(super) fn paint_scrollbar_corner_cap(ui: &Ui, geom: &MultiGridGeom, tokens: &Tokens) {
+    if geom.need_v && geom.need_h {
+        let cap = Rect::from_min_max(
+            pos2(geom.grid_outer_rect.right() - geom.v_reserve, geom.grid_outer_rect.bottom() - geom.h_reserve),
+            geom.grid_outer_rect.max,
+        );
+        if cap.is_positive() {
+            ui.painter().rect_filled(cap, CornerRadius::ZERO, tokens.header_bg);
+            ui.painter().rect_stroke(cap, CornerRadius::ZERO, Stroke::new(1.0, tokens.divider), StrokeKind::Inside);
+        }
     }
-    let v_sb = Rect::from_min_max(pos2(b.max.x - geom.bar_reserve, b.min.y), pos2(b.max.x, b.max.y - geom.bar_reserve));
-    let h_sb = Rect::from_min_max(pos2(b.min.x, b.max.y - geom.bar_reserve), pos2(b.max.x - geom.bar_reserve, b.max.y));
-    (v_sb.is_positive().then_some(v_sb), h_sb.is_positive().then_some(h_sb))
 }
 
 pub(super) fn archetype_x_subcol_count(arch: &TableArchetype) -> usize {
@@ -531,61 +427,6 @@ pub(super) const fn link_border_color32(color: Option<LinkBorderColor>, tokens: 
     }
 }
 
-pub(super) fn compute_scrollbar_rects(ui: &Ui, geom: &GridGeometry, inner_rect: Rect) -> (Option<Rect>, Option<Rect>) {
-    let scroll = ui.spacing().scroll;
-    let bar_w = scroll.bar_width;
-    let inner_m = scroll.bar_inner_margin;
-    let v_rect = geom.need_v.then(|| {
-        Rect::from_min_max(
-            pos2(inner_rect.right() + inner_m, inner_rect.top()),
-            pos2((inner_rect.right() + inner_m + bar_w).min(geom.table_rect.right()), inner_rect.bottom()),
-        )
-    });
-    let h_rect = geom.need_h.then(|| {
-        Rect::from_min_max(
-            pos2(inner_rect.left(), inner_rect.bottom() + inner_m),
-            pos2(inner_rect.right(), (inner_rect.bottom() + inner_m + bar_w).min(geom.table_rect.bottom())),
-        )
-    });
-    (v_rect, h_rect)
-}
-
-pub(super) fn paint_scrollbar_corner_cap(ui: &Ui, rctx: &GridRenderCtx<'_>) {
-    let geom = rctx.geom;
-    if geom.need_v && geom.need_h {
-        let cap = Rect::from_min_max(pos2(geom.table_rect.right() - geom.v_reserve, geom.table_rect.bottom() - geom.h_reserve), geom.table_rect.max);
-        ui.painter().rect_filled(cap, CornerRadius::ZERO, rctx.tokens.header_bg);
-        ui.painter().rect_stroke(cap, CornerRadius::ZERO, Stroke::new(1.0, rctx.tokens.divider), StrokeKind::Inside);
-    }
-}
-
-pub(super) fn forward_gutter_header_wheel(ui: &mut Ui, rctx: &GridRenderCtx<'_>, state: &mut ColumnGridEguiState) {
-    if rctx.input_blocked(state) {
-        return;
-    }
-    let Some(pointer) = ui.input(|i| i.pointer.latest_pos()) else {
-        return;
-    };
-    let delta = ui.input(|i| i.smooth_scroll_delta);
-    if delta == Vec2::ZERO {
-        return;
-    }
-    let mut consumed = false;
-    if rctx.geom.gutter_body_rect.contains(pointer) && rctx.geom.need_v && delta.y.abs() > 0.0 {
-        state.scroll_offset_pt.y -= delta.y;
-        consumed = true;
-    } else if rctx.geom.header_data_rect.contains(pointer) && rctx.geom.need_h && delta.x.abs() > 0.0 {
-        state.scroll_offset_pt.x -= delta.x;
-        consumed = true;
-    }
-    if consumed {
-        clamp_scroll_offset(state, rctx.geom);
-        ui.input_mut(|i| {
-            i.smooth_scroll_delta = Vec2::ZERO;
-        });
-    }
-}
-
 pub(super) fn compute_visible_range(start_px: f32, extent_px: f32, unit_px: f32, total: usize) -> Range<usize> {
     if total == 0 || unit_px <= 0.0 || extent_px <= 0.0 {
         return 0..0;
@@ -618,10 +459,10 @@ pub(super) fn multi_text_style(pt: f32, mono: bool, color: Color32, align: Align
 }
 
 pub(super) fn render_ellipsized_text(ui: &Ui, clip_rect: Rect, text: &str, style: CellTextStyle) -> (bool, Rect) {
-    if text.is_empty() || clip_rect.width() <= 2.0 || clip_rect.height() <= 2.0 {
+    let max_w = clip_rect.width() - CELL_PAD_X_PT * 2.0;
+    if text.is_empty() || max_w <= 1.0 || clip_rect.height() <= 2.0 {
         return (false, Rect::NOTHING);
     }
-    let max_w = (clip_rect.width() - CELL_PAD_X_PT * 2.0).max(1.0);
     let mut job = LayoutJob::single_section(
         text.to_owned(),
         TextFormat {
@@ -644,6 +485,9 @@ pub(super) fn render_ellipsized_text(ui: &Ui, clip_rect: Rect, text: &str, style
     let y = clip_rect.center().y - size.y * 0.5;
     let text_pos = pos2(x, y);
     let text_rect = Rect::from_min_size(text_pos, size);
+    if !elided && (text_rect.left() < clip_rect.left() - 0.5 || text_rect.right() > clip_rect.right() + 0.5) {
+        return (false, Rect::NOTHING);
+    }
     ui.painter().with_clip_rect(clip_rect).galley(text_pos, galley, style.color);
     (elided, text_rect)
 }

@@ -1,18 +1,16 @@
-//! Linked-region provenance strips and read-only guard popovers for `Column` and multi-archetype
-//! data grids.
+//! Unified linked-region provenance strip and read-only guard popover for all 8 data grid archetypes.
 
-use curvebook_doc::{DataSheet, LinkedDataRegion};
+use curvebook_doc::LinkedDataRegion;
 use egui::{Align, CornerRadius, FontId, Id, Key, Modifiers, Order, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder, WidgetInfo, pos2, vec2};
 use serde_json::json;
 
-use crate::UiApp;
 use crate::inspect::ZLayer;
 use crate::views::grid_core::grid_tr;
 
-use super::super::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens};
+use super::super::FrameInspectEntryInput;
 use super::shared::{
-    CellTextStyle, GridRenderCtx, is_linked_region_broken, link_border_color32, paint_broken_link_glyph, paint_dashed_rect_stroke,
-    record_meta_if_enabled, render_ellipsized_text,
+    CellTextStyle, MultiGridCtx, MultiGridFrameState, is_linked_region_broken, link_border_color32, paint_broken_link_glyph,
+    paint_dashed_rect_stroke, record_meta_if_enabled, render_ellipsized_text,
 };
 use super::{ColumnGridEguiState, LinkedRegionPopover};
 
@@ -23,31 +21,24 @@ pub(super) fn open_link_popover(state: &mut ColumnGridEguiState, reg: &LinkedDat
         Some(LinkedRegionPopover { region_id: reg.id.clone(), upstream_sheet_id: reg.spec.source.upstream_sheet_id().cloned(), message: msg });
 }
 
-pub(super) fn render_link_provenance_strip(
-    ui: &mut Ui,
-    rctx: &GridRenderCtx<'_>,
-    state: &mut ColumnGridEguiState,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-    strip_rect: Rect,
-) {
-    let tokens = rctx.tokens;
+pub(super) fn render_link_provenance_strip(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut MultiGridFrameState<'_>, strip_rect: Rect) {
+    let tokens = mctx.tokens;
+    let blocked = mctx.blocked;
     ui.scope_builder(UiBuilder::new().max_rect(strip_rect), |ui| {
         ui.set_clip_rect(strip_rect);
         ui.painter().rect_filled(strip_rect, CornerRadius::ZERO, tokens.panel_bg);
         ui.painter().rect_stroke(strip_rect, CornerRadius::ZERO, Stroke::new(1.0, tokens.border), StrokeKind::Inside);
 
-        let badge_lbl = grid_tr(rctx.locale, "w5.grid_core.linked_badge", "Linked");
+        let badge_lbl = grid_tr(mctx.locale, "w5.grid_core.linked_badge", "Linked");
         let mut cursor_x = strip_rect.left() + 6.0;
-        let blocked = rctx.input_blocked(state);
-        for (idx, reg) in rctx.ds.linked_regions.iter().enumerate() {
+        for (idx, reg) in mctx.ds.linked_regions.iter().enumerate() {
             let rem = strip_rect.right() - cursor_x;
             if rem < 72.0 {
                 break;
             }
             let chip_w = 240.0_f32.min((rem - 6.0).max(0.0));
             let chip_rect = Rect::from_min_size(pos2(cursor_x, strip_rect.top() + 3.0), vec2(chip_w, (strip_rect.height() - 6.0).max(16.0)));
-            let broken = is_linked_region_broken(rctx.app.document(), reg);
+            let broken = is_linked_region_broken(mctx.app.document(), reg);
             let color = if broken { tokens.link_red } else { link_border_color32(reg.border_color(), tokens) };
             let raw_label = if reg.provenance_summary.is_empty() {
                 format!("{badge_lbl} #{}", idx + 1)
@@ -55,8 +46,9 @@ pub(super) fn render_link_provenance_strip(
                 format!("{badge_lbl}: {}", reg.provenance_summary)
             };
             let label = if broken { format!("Broken {raw_label}") } else { raw_label };
+            let wid = format!("grid.link_badge.{idx}");
             let sense = if blocked { Sense::hover() } else { Sense::click() };
-            let resp = ui.interact(chip_rect, rctx.sheet_id_base.with(("link_badge", idx)), sense);
+            let resp = ui.interact(chip_rect, ui.make_persistent_id((&wid, mctx.ds.id.as_str())), sense);
             let fill = if resp.hovered() && !blocked { color.gamma_multiply(0.24) } else { color.gamma_multiply(0.12) };
             ui.painter().rect_filled(chip_rect, CornerRadius::same(tokens.metrics.radius_sm), fill);
             if broken {
@@ -79,14 +71,13 @@ pub(super) fn render_link_provenance_strip(
                 let _ = resp.clone().on_hover_text(&label);
             }
             if resp.clicked() && !blocked {
-                open_link_popover(state, reg, rctx.locale);
+                open_link_popover(fstate.state, reg, mctx.locale);
                 ui.ctx().request_repaint();
             }
-            let wid = format!("grid.link_badge.{idx}");
             record_meta_if_enabled(
                 ui,
-                meta,
-                state.record_inspect_meta,
+                fstate.meta,
+                fstate.state.record_inspect_meta,
                 &resp,
                 FrameInspectEntryInput {
                     widget_id: &wid,
@@ -104,25 +95,18 @@ pub(super) fn render_link_provenance_strip(
             cursor_x += chip_w + 6.0;
         }
     });
-    let _ = intents;
 }
 
-pub(super) fn render_linked_region_guard_popover(
-    ui: &mut Ui,
-    rctx: &GridRenderCtx<'_>,
-    state: &mut ColumnGridEguiState,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) -> bool {
-    let Some(pop) = state.active_link_popover.clone() else {
+pub(super) fn render_linked_region_guard_popover(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut MultiGridFrameState<'_>) -> bool {
+    let Some(pop) = fstate.state.active_link_popover.clone() else {
         return false;
     };
-    let tokens = rctx.tokens;
+    let tokens = mctx.tokens;
     let viewport = ui.ctx().content_rect();
     let backdrop_scrim = tokens.scrim.gamma_multiply(0.35);
 
     let mut outside_click_blocked = false;
-    let backdrop_resp = egui::Area::new(Id::unique(("grid_link_guard_backdrop", rctx.ds.id.as_str())))
+    let backdrop_resp = egui::Area::new(Id::unique(("grid_link_guard_backdrop", mctx.ds.id.as_str())))
         .order(Order::Middle)
         .fixed_pos(viewport.min)
         .show(ui.ctx(), |ui| {
@@ -137,21 +121,21 @@ pub(super) fn render_linked_region_guard_popover(
     }
 
     if ui.input(|i| i.key_pressed(Key::Escape)) {
-        state.active_link_popover = None;
+        fstate.state.active_link_popover = None;
         ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
         ui.ctx().request_repaint();
         return outside_click_blocked;
     }
 
-    let card_w = 400.0_f32.min((rctx.geom.available_rect.width() - 24.0).max(240.0));
+    let card_w = 400.0_f32.min((mctx.geom.available_rect.width() - 24.0).max(240.0));
     let card_pos = pos2(
-        (rctx.geom.available_rect.center().x - card_w * 0.5).max(viewport.left() + 8.0),
-        (rctx.geom.available_rect.top() + 48.0).min(viewport.bottom() - 150.0),
+        (mctx.geom.available_rect.center().x - card_w * 0.5).max(viewport.left() + 8.0),
+        (mctx.geom.available_rect.top() + 48.0).min(viewport.bottom() - 150.0),
     );
-    let title = grid_tr(rctx.locale, "w5.grid_core.linked_region_title", "Linked Data Region");
+    let title = grid_tr(mctx.locale, "w5.grid_core.linked_region_title", "Linked Data Region");
     let mut should_close = false;
 
-    let card_area = egui::Area::new(Id::unique(("grid_link_guard_card", rctx.ds.id.as_str()))).order(Order::Foreground).fixed_pos(card_pos).show(
+    let card_area = egui::Area::new(Id::unique(("grid_link_guard_card", mctx.ds.id.as_str()))).order(Order::Foreground).fixed_pos(card_pos).show(
         ui.ctx(),
         |ui| {
             egui::Frame::popup(ui.style())
@@ -166,13 +150,13 @@ pub(super) fn render_linked_region_guard_popover(
                     ui.colored_label(tokens.link_red, &pop.message);
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
-                        let goto_lbl = grid_tr(rctx.locale, "w5.grid_core.go_to_source", "Go To Source");
+                        let goto_lbl = grid_tr(mctx.locale, "w5.grid_core.go_to_source", "Go To Source");
                         let has_upstream = pop.upstream_sheet_id.is_some();
                         let goto_resp = ui.add_enabled(has_upstream, egui::Button::new(goto_lbl));
                         record_meta_if_enabled(
                             ui,
-                            meta,
-                            state.record_inspect_meta,
+                            fstate.meta,
+                            fstate.state.record_inspect_meta,
                             &goto_resp,
                             FrameInspectEntryInput {
                                 widget_id: "grid.link_popover.goto",
@@ -190,16 +174,16 @@ pub(super) fn render_linked_region_guard_popover(
                         if goto_resp.clicked()
                             && let Some(target_sid) = &pop.upstream_sheet_id
                         {
-                            intents.push_engine("sheet.select", json!({ "sheet_id": target_sid.as_str(), "mode": "navigator" }));
+                            fstate.intents.push_engine("sheet.select", json!({ "sheet_id": target_sid.as_str(), "mode": "navigator" }));
                             should_close = true;
                         }
 
-                        let unlink_lbl = grid_tr(rctx.locale, "w5.grid_core.unlink", "Unlink");
-                        let unlink_resp = ui.add_enabled(!rctx.ds.frozen, egui::Button::new(unlink_lbl));
+                        let unlink_lbl = grid_tr(mctx.locale, "w5.grid_core.unlink", "Unlink");
+                        let unlink_resp = ui.add_enabled(!mctx.ds.frozen, egui::Button::new(unlink_lbl));
                         record_meta_if_enabled(
                             ui,
-                            meta,
-                            state.record_inspect_meta,
+                            fstate.meta,
+                            fstate.state.record_inspect_meta,
                             &unlink_resp,
                             FrameInspectEntryInput {
                                 widget_id: "grid.link_popover.unlink",
@@ -207,24 +191,24 @@ pub(super) fn render_linked_region_guard_popover(
                                 label: unlink_lbl,
                                 command_id: Some("table.clearCells"),
                                 value: None,
-                                enabled: !rctx.ds.frozen,
-                                disabled_reason: rctx.ds.frozen.then_some("Frozen"),
+                                enabled: !mctx.ds.frozen,
+                                disabled_reason: mctx.ds.frozen.then_some("Frozen"),
                                 z_layer: ZLayer::ModalDialog,
                                 ellipsized: false,
                                 full_label: None,
                             },
                         );
-                        if unlink_resp.clicked() && !rctx.ds.frozen {
-                            intents.push_engine("table.clearCells", json!({ "sheet_id": rctx.ds.id.as_str(), "cells": [], "unlink": true }));
+                        if unlink_resp.clicked() && !mctx.ds.frozen {
+                            fstate.intents.push_engine("table.clearCells", json!({ "sheet_id": mctx.ds.id.as_str(), "cells": [], "unlink": true }));
                             should_close = true;
                         }
 
-                        let close_lbl = grid_tr(rctx.locale, "w5.grid_core.close", "Close");
+                        let close_lbl = grid_tr(mctx.locale, "w5.grid_core.close", "Close");
                         let close_resp = ui.button(close_lbl);
                         record_meta_if_enabled(
                             ui,
-                            meta,
-                            state.record_inspect_meta,
+                            fstate.meta,
+                            fstate.state.record_inspect_meta,
                             &close_resp,
                             FrameInspectEntryInput {
                                 widget_id: "grid.link_popover.close",
@@ -247,10 +231,10 @@ pub(super) fn render_linked_region_guard_popover(
         },
     );
 
-    if state.record_inspect_meta && !ui.ctx().will_discard() {
+    if fstate.state.record_inspect_meta && !ui.ctx().will_discard() {
         record_meta_if_enabled(
             ui,
-            meta,
+            fstate.meta,
             true,
             &card_area.response,
             FrameInspectEntryInput {
@@ -269,196 +253,9 @@ pub(super) fn render_linked_region_guard_popover(
     }
 
     if should_close {
-        state.active_link_popover = None;
+        fstate.state.active_link_popover = None;
         ui.ctx().request_repaint();
     }
 
-    outside_click_blocked
-}
-
-pub(super) fn render_multi_link_strip(
-    ui: &mut Ui,
-    app: &UiApp,
-    ds: &DataSheet,
-    strip_rect: Rect,
-    state: &mut ColumnGridEguiState,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-) {
-    ui.painter().rect_filled(strip_rect, 0.0, tokens.panel_bg);
-    ui.painter().line_segment([pos2(strip_rect.min.x, strip_rect.max.y), pos2(strip_rect.max.x, strip_rect.max.y)], Stroke::new(1.0, tokens.divider));
-    let mut cursor_x = strip_rect.min.x + 6.0;
-    for (idx, reg) in ds.linked_regions.iter().enumerate() {
-        let broken = is_linked_region_broken(app.document(), reg);
-        let color = if broken { tokens.link_red } else { link_border_color32(reg.spec.source.border_color(), tokens) };
-        let badge_txt = if broken {
-            format!("Broken Link {}: {}", idx + 1, reg.provenance_summary)
-        } else {
-            format!("Link {}: {}", idx + 1, reg.provenance_summary)
-        };
-        #[allow(clippy::cast_precision_loss)]
-        let pill_w = (badge_txt.len() as f32 * 6.5 + if broken { 32.0 } else { 18.0 }).min(260.0);
-        if cursor_x + pill_w > strip_rect.max.x - 4.0 {
-            break;
-        }
-        let r = Rect::from_min_size(pos2(cursor_x, strip_rect.min.y + 2.0), vec2(pill_w, strip_rect.height() - 4.0));
-        let wid = format!("grid.link_badge.{idx}");
-        let resp = ui.interact(r, ui.make_persistent_id(&wid), Sense::click());
-        ui.painter().rect_filled(r, CornerRadius::same(tokens.metrics.radius_sm), color.gamma_multiply(0.16));
-        if broken {
-            paint_dashed_rect_stroke(ui.painter(), r, Stroke::new(1.5, color));
-            let glyph_r = Rect::from_min_size(pos2(r.left() + 4.0, r.center().y - 6.0), vec2(12.0, 12.0));
-            paint_broken_link_glyph(ui.painter(), glyph_r, color);
-        } else {
-            ui.painter().rect_stroke(r, CornerRadius::same(tokens.metrics.radius_sm), Stroke::new(1.0, color), StrokeKind::Inside);
-        }
-        let text_r =
-            if broken { Rect::from_min_max(pos2(r.left() + 18.0, r.top()), r.max).shrink2(vec2(3.0, 1.0)) } else { r.shrink2(vec2(5.0, 1.0)) };
-        render_ellipsized_text(
-            ui,
-            text_r,
-            &badge_txt,
-            CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_primary, Align::LEFT),
-        );
-        record_meta_if_enabled(
-            ui,
-            meta,
-            state.record_inspect_meta,
-            &resp,
-            FrameInspectEntryInput {
-                widget_id: &wid,
-                role: "button",
-                label: &badge_txt,
-                command_id: None,
-                value: None,
-                enabled: true,
-                disabled_reason: None,
-                z_layer: ZLayer::Workspace,
-                ellipsized: false,
-                full_label: None,
-            },
-        );
-        if resp.clicked() {
-            open_link_popover(state, reg, &app.locale);
-        }
-        cursor_x += pill_w + 6.0;
-    }
-}
-
-pub(super) fn render_multi_link_guard_popover(
-    ui: &mut Ui,
-    ds: &DataSheet,
-    state: &mut ColumnGridEguiState,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-    bounds: Rect,
-) -> bool {
-    let Some(pop) = state.active_link_popover.clone() else {
-        return false;
-    };
-    let viewport = ui.ctx().content_rect();
-    let backdrop_scrim = tokens.scrim.gamma_multiply(0.35);
-    let mut outside_click_blocked = false;
-    let backdrop_resp = egui::Area::new(Id::unique(("multi_link_guard_backdrop", ds.id.as_str())))
-        .order(Order::Middle)
-        .fixed_pos(viewport.min)
-        .show(ui.ctx(), |ui| {
-            let (rect, resp) = ui.allocate_exact_size(viewport.size(), Sense::click_and_drag());
-            ui.painter().rect_filled(rect, CornerRadius::ZERO, backdrop_scrim);
-            resp
-        })
-        .inner;
-    if backdrop_resp.clicked() {
-        outside_click_blocked = true;
-    }
-    if ui.input(|i| i.key_pressed(Key::Escape)) {
-        state.active_link_popover = None;
-        ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
-        ui.ctx().request_repaint();
-        return outside_click_blocked;
-    }
-    let pop_w = (bounds.width() - 24.0).clamp(240.0, 360.0);
-    let pos = pos2(bounds.center().x - pop_w * 0.5, bounds.min.y + 32.0);
-    egui::Area::new(Id::unique(("multi_link_guard", ds.id.as_str()))).fixed_pos(pos).order(Order::Foreground).show(ui.ctx(), |pui| {
-        egui::Frame::popup(pui.style()).fill(tokens.panel_bg).stroke(Stroke::new(1.5, tokens.link_blue)).show(pui, |box_ui| {
-            box_ui.set_min_width(pop_w);
-            box_ui.label(egui::RichText::new(&pop.message).color(tokens.text_primary));
-            box_ui.add_space(6.0);
-            box_ui.horizontal(|row| {
-                if let Some(up) = &pop.upstream_sheet_id {
-                    let go = row.button("Go To Source");
-                    record_meta_if_enabled(
-                        row,
-                        meta,
-                        state.record_inspect_meta,
-                        &go,
-                        FrameInspectEntryInput {
-                            widget_id: "grid.link_guard.go_to_source",
-                            role: "button",
-                            label: "Go To Source",
-                            command_id: Some("sheet.select"),
-                            value: None,
-                            enabled: true,
-                            disabled_reason: None,
-                            z_layer: ZLayer::ModalDialog,
-                            ellipsized: false,
-                            full_label: None,
-                        },
-                    );
-                    if go.clicked() {
-                        intents.push_engine("sheet.select", json!({ "sheet_id": up.as_str() }));
-                        state.active_link_popover = None;
-                    }
-                }
-                let can_unlink = !ds.frozen;
-                let ul = row.add_enabled(can_unlink, egui::Button::new("Unlink Region"));
-                record_meta_if_enabled(
-                    row,
-                    meta,
-                    state.record_inspect_meta,
-                    &ul,
-                    FrameInspectEntryInput {
-                        widget_id: "grid.link_guard.unlink",
-                        role: "button",
-                        label: "Unlink Region",
-                        command_id: Some("table.clearCells"),
-                        value: None,
-                        enabled: can_unlink,
-                        disabled_reason: ds.frozen.then_some("Data sheet is frozen (read-only)."),
-                        z_layer: ZLayer::ModalDialog,
-                        ellipsized: false,
-                        full_label: None,
-                    },
-                );
-                if ul.clicked() && can_unlink {
-                    intents.push_engine("table.clearCells", json!({ "sheet_id": ds.id.as_str(), "cells": [], "unlink": true }));
-                    state.active_link_popover = None;
-                }
-                let dis = row.button("Dismiss");
-                record_meta_if_enabled(
-                    row,
-                    meta,
-                    state.record_inspect_meta,
-                    &dis,
-                    FrameInspectEntryInput {
-                        widget_id: "grid.link_guard.dismiss",
-                        role: "button",
-                        label: "Dismiss",
-                        command_id: None,
-                        value: None,
-                        enabled: true,
-                        disabled_reason: None,
-                        z_layer: ZLayer::ModalDialog,
-                        ellipsized: false,
-                        full_label: None,
-                    },
-                );
-                if dis.clicked() {
-                    state.active_link_popover = None;
-                }
-            });
-        });
-    });
     outside_click_blocked
 }
