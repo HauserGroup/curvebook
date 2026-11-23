@@ -318,14 +318,13 @@ fn run_qa3_parity_case(use_bundled_fonts: bool, in_window_menus: bool, scale: f6
     }
 
     // Drive frames until control client finishes inspect + coordinate click + quit.
-    for _ in 0..24 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !client_handle.is_finished() && std::time::Instant::now() < deadline {
         step_once(&mut native_app, Vec::new());
-        if client_handle.is_finished() {
-            break;
-        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
     }
+    bridge.signal_shutdown();
     let live_insp = client_handle.join().map_err(|_| "client panic")??;
-    drop(bridge);
     let _ = srv_handle.join();
 
     for wid in ["toolbar.home", "toolbar.analyze", "toolbar.command_palette"] {

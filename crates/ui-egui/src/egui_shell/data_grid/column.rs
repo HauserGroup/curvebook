@@ -24,8 +24,8 @@ use super::shared::{
     active_column_sheet, alt_row_fill, any_pointer_click_in, clamp_scroll_offset, clear_grid_drag_anchor_if_released, compute_grid_geometry,
     compute_scrollbar_rects, compute_visible_range, ensure_solid_scrollbar_style, format_cell_into_with_decimals, forward_gutter_header_wheel,
     handle_cell_pointer_drag_select, initial_edit_text_for_cell, is_linked_region_broken, is_multi_click_edit, link_border_color32,
-    paint_exclusion_corner_marker, paint_linked_perimeter_edges, paint_scrollbar_corner_cap, record_meta_if_enabled, render_ellipsized_text,
-    set_grid_focus_active, table_display_decimals,
+    paint_exclusion_corner_marker, paint_linked_perimeter_edges, paint_scrollbar_corner_cap, record_meta_if_enabled,
+    record_meta_with_unclipped_if_enabled, render_ellipsized_text, set_grid_focus_active, table_display_decimals,
 };
 use super::shortcuts::handle_grid_keyboard_shortcuts;
 use super::{ColumnGridEguiState, ColumnGridFrameReport, ColumnGridRenderContext, GridInlineEditTarget};
@@ -177,11 +177,14 @@ fn render_body_scroll_area(
     };
 
     ui.scope_builder(UiBuilder::new().max_rect(geom.body_outer_rect), |ui| {
+        if blocked {
+            ui.disable();
+        }
         let scroll_out = egui::ScrollArea::new([geom.need_h, geom.need_v])
             .id_salt(("column_grid_scroll", rctx.ds.id.as_str()))
             .auto_shrink([false, false])
             .animated(false)
-            .scroll_bar_visibility(ScrollBarVisibility::AlwaysVisible)
+            .scroll_bar_visibility(if blocked { ScrollBarVisibility::AlwaysHidden } else { ScrollBarVisibility::AlwaysVisible })
             .scroll_source(scroll_source)
             .scroll_offset(state.scroll_offset_pt)
             .show_viewport(ui, |ui, viewport| {
@@ -607,7 +610,8 @@ fn render_gutter_body(
             }
 
             // `Row Titles` cell
-            let rt_rect = Rect::from_min_size(pos2(rt_x, row_y), vec2(geom.rt_w, geom.row_h)).intersect(geom.gutter_body_rect);
+            let rt_raw = Rect::from_min_size(pos2(rt_x, row_y), vec2(geom.rt_w, geom.row_h));
+            let rt_rect = rt_raw.intersect(geom.gutter_body_rect);
             if rt_rect.width() <= 0.5 || rt_rect.height() <= 0.5 {
                 continue;
             }
@@ -698,11 +702,12 @@ fn render_gutter_body(
                 }
             }
             if state.record_inspect_meta && !ui.ctx().will_discard() {
-                record_meta_if_enabled(
+                record_meta_with_unclipped_if_enabled(
                     ui,
                     meta,
                     true,
                     &rt_resp,
+                    rt_raw,
                     FrameInspectEntryInput {
                         widget_id: &format!("grid.row_title.{row}"),
                         role: "button",

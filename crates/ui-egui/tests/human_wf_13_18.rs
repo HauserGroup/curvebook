@@ -915,13 +915,12 @@ fn r13_1_human_replicate_interpolation_tabs() -> TestRes {
         [("nonlinear_interpolated_mean_x", "Interpolated Mean X", 1), ("nonlinear_interpolated_replicates", "Interpolated Replicates", 2)]
     {
         let widget_id = format!("result.tab.{tab_id}");
-        for _ in 0..12 {
-            if h.driver.frame_meta().find_by_widget_id(&widget_id).is_some_and(|e| e.clipped_rect.is_positive()) {
-                break;
-            }
-            h.click("result.tabs.next")?;
+        if h.driver.frame_meta().find_by_widget_id(&widget_id).is_some_and(|e| e.clipped_rect.is_positive()) {
+            h.click(&widget_id)?;
+        } else {
+            h.click("result.tabs.overflow")?;
+            h.click(&format!("result.tab.overflow.{tab_id}"))?;
         }
-        h.click(&widget_id)?;
         let snap = inspect_ui_tree_for_metrics(h.app(), ViewportMetrics::new(1280.0, 800.0, 1.0), Some("tabs"), true);
         let tab_node = snap.tabs.as_deref().unwrap_or(&[]).iter().find(|n| n.widget_id == widget_id).ok_or("missing selected interpolation tab")?;
         ensure(tab_node.value.as_ref().and_then(|v| v.get("selected")).and_then(|v| v.as_bool()) == Some(true), "interpolation tab selected")?;

@@ -13,7 +13,7 @@ use super::{StudioContextSurface, TrailingStudioContext};
 
 pub(super) const STUDIO_INNER_PAD: f32 = 8.0;
 pub(super) const SCROLL_BAR_RESERVE_PT: f32 = 16.0;
-pub(super) const SECTION_BTN_H: f32 = 22.0;
+pub(super) const SECTION_BTN_H: f32 = 24.0;
 
 pub(super) struct StudioChipSpec<'a> {
     pub(super) label: &'a str,
@@ -115,9 +115,10 @@ pub(super) fn studio_chip(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameIn
         resp
     };
 
-    meta.record_response(
+    meta.record_response_with_unclipped(
         ui,
         &resp,
+        rect,
         FrameInspectEntryInput {
             widget_id,
             role,
@@ -218,9 +219,10 @@ pub(super) fn studio_full_button(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut 
         resp
     };
 
-    meta.record_response(
+    meta.record_response_with_unclipped(
         ui,
         &resp,
+        rect,
         FrameInspectEntryInput {
             widget_id,
             role: "button",

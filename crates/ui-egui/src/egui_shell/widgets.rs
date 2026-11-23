@@ -106,12 +106,16 @@ pub fn choice_width(ui: &Ui, label: &str) -> f32 {
 
 fn choice_row(ui: &mut Ui, text: &str, enabled: bool) -> (Rect, Response, Color32) {
     let t = Tokens::get(ui.ctx());
+    let min_hit = t.metrics.min_hit_target_pt;
     let galley =
         ui.painter().layout_no_wrap(text.to_owned(), egui::FontId::proportional(12.5), if enabled { t.text_primary } else { t.text_disabled });
-    let (rect, resp) =
-        ui.allocate_exact_size(vec2(18.0 + galley.size().x, 20.0f32.max(galley.size().y)), if enabled { Sense::click() } else { Sense::hover() });
-    let bx = Rect::from_min_size(pos2(rect.left(), rect.center().y - 6.5), Vec2::splat(13.0));
-    ui.painter().galley(pos2(bx.right() + 5.0, rect.center().y - galley.size().y / 2.0), galley, t.text_primary);
+    let alloc_w = if text.is_empty() { min_hit } else { (18.0 + galley.size().x).max(min_hit) };
+    let (rect, resp) = ui.allocate_exact_size(vec2(alloc_w, min_hit.max(galley.size().y)), if enabled { Sense::click() } else { Sense::hover() });
+    let bx_left = if text.is_empty() { rect.center().x - 6.5 } else { rect.left() };
+    let bx = Rect::from_min_size(pos2(bx_left, rect.center().y - 6.5), Vec2::splat(13.0));
+    if !text.is_empty() {
+        ui.painter().galley(pos2(bx.right() + 5.0, rect.center().y - galley.size().y / 2.0), galley, t.text_primary);
+    }
     let border = if !enabled {
         t.divider
     } else if resp.hovered() {

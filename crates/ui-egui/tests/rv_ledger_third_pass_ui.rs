@@ -40,7 +40,7 @@ fn build_column_app(cols: usize, rows: usize) -> Result<(UiApp, SheetId), String
 fn rv75_context_scoped_cmd_t_shortcuts_rebind_and_conflicts() -> TestRes {
     // Integrated UI command & i18n invariants:
     assert_eq!(UI_COMMANDS.len(), 53, "UI_COMMANDS length should be 53 after R13.8 Part 2, app.feedback, and R15-GUI-35");
-    assert_eq!(catalog_len(), 706, "i18n::catalog_len() should be 706 after catalog consolidation and SEC-18 16-locale modal entries");
+    assert_eq!(catalog_len(), 704, "i18n::catalog_len() should be 704 after catalog consolidation, SEC-18 16-locale modal entries, and R15.10 F1");
     assert!(UI_COMMANDS.iter().any(|c| c.id == "ui.editParams.open" && c.shortcut == "Cmd+T"));
     let edit_params_entry = CATALOG.iter().find(|e| e.key == "cmd.ui.editParams.open").ok_or("missing cmd.ui.editParams.open in i18n::CATALOG")?;
     assert_eq!(edit_params_entry.translations.len(), LOCALES.len());

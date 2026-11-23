@@ -65,10 +65,10 @@ pub use interaction::{
     UiEventOutcome, UiInputEvent, ViewportMetrics, VirtualWorkspaceFolder, build_shortcut_candidates, dispatch_mouse_wheel, dispatch_ui_event,
 };
 pub use menus::{
-    CommandTooltip, CuratedMenuNode, CuratedMenuSection, DESKTOP_HOST_ROUTED_COMMANDS, MenuSectionTooltips, ShortcutBinding, ShortcutExecution,
-    ShortcutMatch, ShortcutRegistry, ShortcutScope, TOOLBAR_BUTTONS, ToolbarButtonSpec, ToolbarButtonTooltip, UI_COMMANDS, UiCommandSpec,
-    command_tooltip, curated_menu_bar, format_shortcut_for_os, format_shortcut_for_platform, is_desktop_host_routed_command, menu_bar_tooltips,
-    normalize_shortcut_combo, toolbar_caption_command_id, toolbar_tooltips,
+    ActionRank, CommandTooltip, CuratedMenuNode, CuratedMenuSection, DESKTOP_HOST_ROUTED_COMMANDS, MenuSectionTooltips, ShortcutBinding,
+    ShortcutExecution, ShortcutMatch, ShortcutRegistry, ShortcutScope, TOOLBAR_BUTTONS, ToolbarButtonSpec, ToolbarButtonTooltip, UI_COMMANDS,
+    UiCommandSpec, command_tooltip, curated_menu_bar, default_command_action_rank, format_shortcut_for_os, format_shortcut_for_platform,
+    is_desktop_host_routed_command, menu_bar_tooltips, normalize_shortcut_combo, toolbar_caption_command_id, toolbar_tooltips,
 };
 pub use modal_predicates::ControlEnablement;
 pub use os_integration::{
@@ -80,7 +80,7 @@ pub use os_integration::{
 pub use os_integration::{read_os_pasteboard, submit_os_print_job, submit_os_print_pdf_bytes, write_os_clipboard_bundle, write_os_pasteboard};
 pub use power_wizard::{PowerWizardStage, PowerWizardState};
 pub use text_bridge::{DesktopTextMeasurer, FontFamilyKind, MeasuredTextMetrics, ShapedGlyphRun, ShapedTextLine, TextMeasurer, UiTextStyle};
-pub use theme::{FontBook, UiThemeMode, UiThemeSpec};
+pub use theme::{DerivedUiPalette, FontBook, ThemeSeeds, UiThemeMode, UiThemeSpec};
 pub use workspace_nav::{NavigatorEntry, WorkspaceNavState};
 
 /// Whether the UI crate was compiled with bundled interface/document fonts enabled.

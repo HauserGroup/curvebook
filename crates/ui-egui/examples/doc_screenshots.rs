@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use curvebook_doc::{Cell, ColumnDesignHint, ColumnTable, DataSheet, ProjectDocument, SheetId, SubcolumnMode, TableArchetype, XyTable};
 use curvebook_render::RenderTargetSpec;
+use curvebook_ui_egui::egui_shell::specimen::render_design_specimen_png;
 use curvebook_ui_egui::{RenderError, ScreenshotRegionTarget, UiApp, UiThemeMode, dispatch_ui_command};
 use serde_json::json;
 
@@ -31,6 +32,16 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let layout_png = build_layout_dark_png()?;
     write_png(&out_dir.join("workspace-layout-dark.png"), &layout_png)?;
+
+    let target = RenderTargetSpec { width_px: WIDTH_PX, height_px: HEIGHT_PX, dpi: DPI };
+    for (mode, file_name) in [
+        (UiThemeMode::Light, "specimen-light.png"),
+        (UiThemeMode::Dark, "specimen-dark.png"),
+        (UiThemeMode::HighContrast, "specimen-high-contrast.png"),
+    ] {
+        let specimen_png = render_design_specimen_png(mode, "en", target)?;
+        write_png(&out_dir.join(file_name), &specimen_png)?;
+    }
 
     Ok(())
 }

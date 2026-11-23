@@ -661,7 +661,8 @@ fn result_sheet_multi_tab_cmd_t_navigation_ambiguity_blank_median_and_extract() 
     driver.click_widget_id("result.section.0")?;
     assert!(driver.state().views.collapsed_sections.is_empty());
 
-    driver.click_widget_id("result.tabs.next")?;
+    let tab1_id = driver.state().app.document().result_sheet(&SheetId::new("res-1")).unwrap().tabs[1].id.clone();
+    driver.click_widget_id(&format!("result.tab.{tab1_id}"))?;
     assert_eq!(driver.state().app.canvas_dialogs.result_view.active_tab_index, 1);
     assert!(driver.state().has_ambiguity, "Fit Params tab with Open CI / ~ prefix must flag ambiguity callout");
     assert!(driver.frame_meta().find_by_widget_id("result.ambiguity_callout").is_some());
@@ -1048,14 +1049,24 @@ fn result_sheet_wide_tabs_many_sections_and_clipped_columns_pass_parity() -> Res
         assert!(parity.is_clean(), "result sheet parity violations at {vp:?}: {:?}", parity.violations);
         assert!(driver.check_scrollbar_non_overlap().is_empty(), "result sheet scrollbar overlap at {vp:?}");
         for entry in &driver.frame_meta().entries {
-            if entry.widget_id.starts_with("result.tab.") {
+            if entry.widget_id.starts_with("result.tab.") && !entry.widget_id.starts_with("result.tab.overflow.") {
                 assert!(entry.clipped_rect.width() <= 140.0, "tab `{}` too wide: {:?}", entry.widget_id, entry.clipped_rect);
             }
         }
-        if driver.frame_meta().find_by_widget_id("result.tabs.next").is_some_and(|e| e.enabled) {
-            driver.click_widget_id("result.tabs.next")?;
-            let after_next = driver.verify_pixel_to_hit_box_parity();
-            assert!(after_next.is_clean(), "post-next parity violations at {vp:?}: {:?}", after_next.violations);
+        if driver.frame_meta().find_by_widget_id("result.tabs.overflow").is_some_and(|e| e.enabled) {
+            driver.click_widget_id("result.tabs.overflow")?;
+            let after_open = driver.verify_pixel_to_hit_box_parity();
+            assert!(after_open.is_clean(), "overflow popup parity violations at {vp:?}: {:?}", after_open.violations);
+            let first_ov = driver
+                .frame_meta()
+                .entries
+                .iter()
+                .find(|e| e.widget_id.starts_with("result.tab.overflow."))
+                .map(|e| e.widget_id.clone())
+                .expect("expected at least one overflow tab item");
+            driver.click_widget_id(&first_ov)?;
+            let after_select = driver.verify_pixel_to_hit_box_parity();
+            assert!(after_select.is_clean(), "post-overflow parity violations at {vp:?}: {:?}", after_select.violations);
         }
     }
     Ok(())

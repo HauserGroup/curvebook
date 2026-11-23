@@ -3,7 +3,10 @@
 
 use curvebook_doc::{CellCoord, ConfidenceLevel, ErrorCode, LevelOrderSpec, SheetId, SheetSection};
 use curvebook_engine::{CommandOutcome, EngineError, Session};
-use curvebook_palette::{CIVIDIS_STOPS, CanvasPreviewFilter, OKABE_ITO, Rgba8, VIRIDIS_STOPS};
+use curvebook_palette::{
+    CIVIDIS_STOPS, CanvasPreviewFilter, DIVERGING_BLUE_RED_STOPS, OKABE_ITO, OKABE_ITO_BLACK, OKABE_ITO_BLUE, OKABE_ITO_BLUISH_GREEN,
+    OKABE_ITO_ORANGE, OKABE_ITO_REDDISH_PURPLE, OKABE_ITO_SKY_BLUE, OKABE_ITO_VERMILION, OKABE_ITO_YELLOW, Rgba8, VIRIDIS_STOPS,
+};
 use egui::{Color32, CornerRadius, FontId, Rect, Stroke, TextStyle, Visuals};
 use serde::{Deserialize, Serialize};
 
@@ -17,8 +20,10 @@ use crate::dialogs_canvas::{
 use crate::grid_view::{ImportOriginKind, ImportPasteWizardState};
 use crate::i18n;
 use crate::inspect::ZLayer;
+pub use crate::menus::ActionRank;
+use crate::menus::default_command_action_rank;
 use crate::power_wizard::PowerWizardState;
-use crate::theme::{UiThemeMode, UiThemeSpec};
+use crate::theme::{DerivedUiPalette, UiThemeMode, UiThemeSpec};
 use crate::workspace_nav::{ActiveWorkspacePane, NavigatorNestingMode};
 
 pub mod app_modals;
@@ -39,6 +44,7 @@ pub mod manage_vars_modal;
 pub mod power_studio;
 pub mod rasterizer;
 pub mod results_view;
+pub mod specimen;
 pub mod stat_anova_modal;
 pub mod stats_modals;
 pub mod status_footer;
@@ -362,6 +368,8 @@ pub struct LayoutMetrics {
     pub radius_sm: u8,
     pub radius_md: u8,
     pub radius_lg: u8,
+    pub stroke_thin_pt: f32,
+    pub stroke_focus_pt: f32,
     pub max_motion_sec: f32,
     pub min_window_w_pt: f32,
     pub min_window_h_pt: f32,
@@ -390,7 +398,7 @@ impl LayoutMetrics {
         center_stage_min_w: 360.0,
         split_vertical_breakpoint_w: 720.0,
         grid_row_h: 24.0,
-        grid_header_tier_heights: [20.0, 24.0, 20.0],
+        grid_header_tier_heights: [24.0, 24.0, 24.0],
         min_hit_target_pt: 24.0,
         min_toolbar_target_pt: 28.0,
         scroll_bar_thickness: 10.0,
@@ -411,6 +419,8 @@ impl LayoutMetrics {
         radius_sm: 2,
         radius_md: 4,
         radius_lg: 6,
+        stroke_thin_pt: 1.0,
+        stroke_focus_pt: 2.0,
         max_motion_sec: 0.15,
         min_window_w_pt: 640.0,
         min_window_h_pt: 420.0,
@@ -445,7 +455,7 @@ impl LayoutMetrics {
         self.status_bar_h
     }
 
-    /// Combined 3-tier frozen column-grid header height (`64 pt`).
+    /// Combined 3-tier frozen column-grid header height (`72 pt`).
     #[must_use]
     pub const fn grid_header_total_height(self) -> f32 {
         self.grid_header_tier_heights[0] + self.grid_header_tier_heights[1] + self.grid_header_tier_heights[2]
@@ -669,33 +679,44 @@ impl Default for LayoutMetrics {
     }
 }
 
-/// Convert [`Rgba8`] into an [`egui::Color32`].
+/// Convert [`Rgba8`] into a premultiplied [`egui::Color32`].
 #[must_use]
+#[allow(clippy::cast_possible_truncation)]
 pub const fn rgba8_to_color32(color: Rgba8) -> Color32 {
-    Color32::from_rgba_premultiplied(color.r, color.g, color.b, color.a)
+    if color.a == 255 {
+        Color32::from_rgb(color.r, color.g, color.b) // design-token-exempt: canonical Rgba8 -> Color32 bridge
+    } else if color.a == 0 {
+        Color32::TRANSPARENT
+    } else {
+        let a = color.a as u16;
+        let r = ((color.r as u16 * a + 127) / 255) as u8;
+        let g = ((color.g as u16 * a + 127) / 255) as u8;
+        let b = ((color.b as u16 * a + 127) / 255) as u8;
+        Color32::from_rgba_premultiplied(r, g, b, color.a) // design-token-exempt: canonical Rgba8 -> Color32 bridge
+    }
 }
 
 /// Convert an unpremultiplied/opaque [`egui::Color32`] to [`Rgba8`].
 #[must_use]
 pub const fn color32_to_rgba8(color: Color32) -> Rgba8 {
-    Rgba8::rgba(color.r(), color.g(), color.b(), color.a())
+    Rgba8::rgba(color.r(), color.g(), color.b(), color.a()) // design-token-exempt: canonical Color32 -> Rgba8 bridge
 }
 
 /// Canonical 8-color Okabe-Ito categorical series palette (`gui-layout-spec.md` §9.2).
 pub const OKABE_ITO_SERIES_PALETTE: [Color32; 8] = [
-    Color32::from_rgb(0x00, 0x00, 0x00),
-    Color32::from_rgb(0xE6, 0x9F, 0x00),
-    Color32::from_rgb(0x56, 0xB4, 0xE9),
-    Color32::from_rgb(0x00, 0x9E, 0x73),
-    Color32::from_rgb(0xF0, 0xE4, 0x42),
-    Color32::from_rgb(0x00, 0x72, 0xB2),
-    Color32::from_rgb(0xD5, 0x5E, 0x00),
-    Color32::from_rgb(0xCC, 0x79, 0xA7),
+    rgba8_to_color32(OKABE_ITO_BLACK),
+    rgba8_to_color32(OKABE_ITO_ORANGE),
+    rgba8_to_color32(OKABE_ITO_SKY_BLUE),
+    rgba8_to_color32(OKABE_ITO_BLUISH_GREEN),
+    rgba8_to_color32(OKABE_ITO_YELLOW),
+    rgba8_to_color32(OKABE_ITO_BLUE),
+    rgba8_to_color32(OKABE_ITO_VERMILION),
+    rgba8_to_color32(OKABE_ITO_REDDISH_PURPLE),
 ];
 
 /// Diverging Blue-White-Vermilion colorblind-safe ramp stops (`-1 -> 0 -> +1`).
 pub const BLUE_WHITE_VERMILION_STOPS: [Color32; 3] =
-    [Color32::from_rgb(0x00, 0x72, 0xB2), Color32::from_rgb(0xF7, 0xF7, 0xF7), Color32::from_rgb(0xD5, 0x5E, 0x00)];
+    [rgba8_to_color32(OKABE_ITO_BLUE), rgba8_to_color32(DIVERGING_BLUE_RED_STOPS[8]), rgba8_to_color32(OKABE_ITO_VERMILION)];
 
 /// Scientific categorical and perceptual colormap accessors for `egui` views.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -733,7 +754,7 @@ impl ScientificPaletteTokens {
     }
 }
 
-/// Complete WCAG 2.1 AA theme, semantic role, provenance, and geometry tokens for the `egui` shell.
+/// Complete WCAG 2.2 AA/AAA seed-derived theme, semantic status, provenance, and geometry tokens for the `egui` shell.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Tokens {
     pub mode: UiThemeMode,
@@ -767,6 +788,9 @@ pub struct Tokens {
     pub on_accent: Color32,
     pub paper_white: Color32,
     pub scrim: Color32,
+    pub error: Color32,
+    pub warning: Color32,
+    pub stale: Color32,
     pub role_num: Color32,
     pub role_cat: Color32,
     pub role_lbl: Color32,
@@ -791,142 +815,61 @@ impl Tokens {
     }
 
     /// Construct canonical [`Tokens`] from a [`UiThemeSpec`] and normalized BCP-47 `locale`.
+    ///
+    /// All surface, state, and semantic tokens are derived deterministically in OKLab/OKLCH from
+    /// [`ThemeSeeds`](crate::theme::ThemeSeeds) via [`DerivedUiPalette`], honouring any explicit
+    /// field overrides carried on `spec`.
     #[must_use]
     pub fn from_theme_spec(spec: &UiThemeSpec, locale: &str) -> Self {
         let dark = !matches!(spec.mode, UiThemeMode::Light);
         let ui_scale = if spec.ui_scale.is_finite() { spec.ui_scale.clamp(0.75, 3.0) } else { 1.0 };
         let canonical_locale = i18n::normalize_locale(locale);
-        let panel_bg = rgba8_to_color32(spec.panel_bg);
-        let surface_bg = rgba8_to_color32(spec.surface_bg);
-        let text_primary = rgba8_to_color32(spec.text_primary);
-        let text_muted = rgba8_to_color32(spec.text_muted);
-        let accent = rgba8_to_color32(spec.accent);
+        let p = DerivedUiPalette::for_mode(spec.mode);
         let border = rgba8_to_color32(spec.border);
 
-        match spec.mode {
-            UiThemeMode::Light => Self {
-                mode: spec.mode,
-                dark,
-                locale: canonical_locale,
-                ui_scale,
-                metrics: LayoutMetrics::CANONICAL,
-                app_bar: Color32::from_rgb(234, 237, 242),
-                panel_bg,
-                surface_bg,
-                canvas_mat: Color32::from_rgb(237, 240, 245),
-                header_bg: Color32::from_rgb(232, 236, 242),
-                border,
-                divider: Color32::from_rgb(214, 219, 228),
-                hover_bg: Color32::from_rgb(196, 213, 242),
-                hover_border: Color32::from_rgb(29, 78, 216),
-                active_bg: Color32::from_rgb(176, 200, 238),
-                focus_ring: Color32::from_rgb(29, 78, 216),
-                input_bg: Color32::WHITE,
-                input_border: Color32::from_rgb(132, 140, 154),
-                button_bg: Color32::from_rgb(238, 241, 246),
-                button_border: Color32::from_rgb(120, 129, 145),
-                text_primary,
-                text_strong: Color32::from_rgb(15, 19, 26),
-                text_muted,
-                text_disabled: Color32::from_rgb(125, 134, 148),
-                icon: Color32::from_rgb(38, 45, 58),
-                accent,
-                accent_strong: Color32::from_rgb(24, 64, 184),
-                accent_hover: Color32::from_rgb(18, 49, 148),
-                on_accent: Color32::WHITE,
-                paper_white: rgba8_to_color32(spec.paper_white),
-                scrim: Color32::from_rgba_unmultiplied(15, 23, 42, 128),
-                role_num: Color32::from_rgb(29, 78, 216),
-                role_cat: Color32::from_rgb(180, 62, 0),
-                role_lbl: Color32::from_rgb(71, 85, 105),
-                role_fx: Color32::from_rgb(4, 120, 87),
-                link_blue: rgba8_to_color32(spec.link_blue),
-                link_green: rgba8_to_color32(spec.link_green),
-                link_red: rgba8_to_color32(spec.link_red),
-                excluded_cell_text: rgba8_to_color32(spec.excluded_cell_text),
-            },
-            UiThemeMode::Dark => Self {
-                mode: spec.mode,
-                dark,
-                locale: canonical_locale,
-                ui_scale,
-                metrics: LayoutMetrics::CANONICAL,
-                app_bar: Color32::from_rgb(20, 23, 29),
-                panel_bg,
-                surface_bg,
-                canvas_mat: Color32::from_rgb(21, 24, 30),
-                header_bg: Color32::from_rgb(38, 43, 53),
-                border,
-                divider: Color32::from_rgb(56, 63, 76),
-                hover_bg: Color32::from_rgb(58, 74, 104),
-                hover_border: Color32::from_rgb(96, 165, 250),
-                active_bg: Color32::from_rgb(44, 64, 98),
-                focus_ring: Color32::from_rgb(96, 165, 250),
-                input_bg: Color32::from_rgb(20, 23, 29),
-                input_border: border,
-                button_bg: Color32::from_rgb(40, 46, 56),
-                button_border: Color32::from_rgb(112, 123, 140),
-                text_primary,
-                text_strong: Color32::from_rgb(248, 250, 252),
-                text_muted,
-                text_disabled: Color32::from_rgb(128, 138, 152),
-                icon: Color32::from_rgb(212, 220, 232),
-                accent,
-                accent_strong: Color32::from_rgb(37, 99, 235),
-                accent_hover: Color32::from_rgb(29, 78, 216),
-                on_accent: Color32::WHITE,
-                paper_white: rgba8_to_color32(spec.paper_white),
-                scrim: Color32::from_rgba_unmultiplied(15, 23, 42, 128),
-                role_num: Color32::from_rgb(96, 165, 250),
-                role_cat: Color32::from_rgb(251, 146, 60),
-                role_lbl: Color32::from_rgb(148, 163, 184),
-                role_fx: Color32::from_rgb(52, 211, 153),
-                link_blue: rgba8_to_color32(spec.link_blue),
-                link_green: rgba8_to_color32(spec.link_green),
-                link_red: rgba8_to_color32(spec.link_red),
-                excluded_cell_text: rgba8_to_color32(spec.excluded_cell_text),
-            },
-            UiThemeMode::HighContrast => Self {
-                mode: spec.mode,
-                dark,
-                locale: canonical_locale,
-                ui_scale,
-                metrics: LayoutMetrics::CANONICAL,
-                app_bar: Color32::BLACK,
-                panel_bg,
-                surface_bg,
-                canvas_mat: Color32::from_rgb(8, 10, 14),
-                header_bg: Color32::from_rgb(22, 26, 34),
-                border,
-                divider: Color32::from_rgb(160, 170, 188),
-                hover_bg: Color32::from_rgb(42, 64, 102),
-                hover_border: Color32::from_rgb(125, 211, 252),
-                active_bg: Color32::from_rgb(26, 76, 128),
-                focus_ring: Color32::from_rgb(125, 211, 252),
-                input_bg: Color32::BLACK,
-                input_border: border,
-                button_bg: Color32::from_rgb(20, 24, 32),
-                button_border: Color32::from_rgb(210, 218, 230),
-                text_primary,
-                text_strong: Color32::WHITE,
-                text_muted,
-                text_disabled: Color32::from_rgb(165, 174, 188),
-                icon: Color32::WHITE,
-                accent,
-                accent_strong: Color32::from_rgb(14, 116, 144),
-                accent_hover: Color32::from_rgb(10, 88, 112),
-                on_accent: Color32::WHITE,
-                paper_white: rgba8_to_color32(spec.paper_white),
-                scrim: Color32::from_rgba_unmultiplied(15, 23, 42, 128),
-                role_num: Color32::from_rgb(125, 211, 252),
-                role_cat: Color32::from_rgb(253, 186, 116),
-                role_lbl: Color32::from_rgb(203, 213, 225),
-                role_fx: Color32::from_rgb(110, 231, 183),
-                link_blue: rgba8_to_color32(spec.link_blue),
-                link_green: rgba8_to_color32(spec.link_green),
-                link_red: rgba8_to_color32(spec.link_red),
-                excluded_cell_text: rgba8_to_color32(spec.excluded_cell_text),
-            },
+        Self {
+            mode: spec.mode,
+            dark,
+            locale: canonical_locale,
+            ui_scale,
+            metrics: LayoutMetrics::CANONICAL,
+            app_bar: rgba8_to_color32(p.app_bar),
+            panel_bg: rgba8_to_color32(spec.panel_bg),
+            surface_bg: rgba8_to_color32(spec.surface_bg),
+            canvas_mat: rgba8_to_color32(p.canvas_mat),
+            header_bg: rgba8_to_color32(p.header_bg),
+            border,
+            divider: rgba8_to_color32(p.divider),
+            hover_bg: rgba8_to_color32(p.hover_bg),
+            hover_border: rgba8_to_color32(p.hover_border),
+            active_bg: rgba8_to_color32(p.active_bg),
+            focus_ring: rgba8_to_color32(p.focus_ring),
+            input_bg: rgba8_to_color32(p.input_bg),
+            input_border: border,
+            button_bg: rgba8_to_color32(p.button_bg),
+            button_border: rgba8_to_color32(p.button_border),
+            text_primary: rgba8_to_color32(spec.text_primary),
+            text_strong: rgba8_to_color32(p.text_strong),
+            text_muted: rgba8_to_color32(spec.text_muted),
+            text_disabled: rgba8_to_color32(p.text_disabled),
+            icon: rgba8_to_color32(p.icon),
+            accent: rgba8_to_color32(spec.accent),
+            accent_strong: rgba8_to_color32(p.accent_strong),
+            accent_hover: rgba8_to_color32(p.accent_hover),
+            on_accent: rgba8_to_color32(p.on_accent),
+            paper_white: rgba8_to_color32(spec.paper_white),
+            scrim: rgba8_to_color32(p.scrim),
+            error: rgba8_to_color32(spec.error),
+            warning: rgba8_to_color32(spec.warning),
+            stale: rgba8_to_color32(spec.stale),
+            role_num: rgba8_to_color32(p.role_num),
+            role_cat: rgba8_to_color32(p.role_cat),
+            role_lbl: rgba8_to_color32(p.role_lbl),
+            role_fx: rgba8_to_color32(p.role_fx),
+            link_blue: rgba8_to_color32(spec.link_blue),
+            link_green: rgba8_to_color32(spec.link_green),
+            link_red: rgba8_to_color32(spec.link_red),
+            excluded_cell_text: rgba8_to_color32(spec.excluded_cell_text),
         }
     }
 
@@ -936,10 +879,12 @@ impl Tokens {
         ctx.data(|d| d.get_temp::<Self>(egui::Id::NULL)).unwrap_or_default()
     }
 
-    /// Build [`egui::Visuals`] aligned with these WCAG 2.1 AA theme tokens.
+    /// Build [`egui::Visuals`] aligned with these WCAG 2.2 AA/AAA theme and stroke tokens.
     #[must_use]
     pub fn to_visuals(&self) -> Visuals {
         let mut visuals = if self.dark { Visuals::dark() } else { Visuals::light() };
+        let thin = self.metrics.stroke_thin_pt;
+        let focus = self.metrics.stroke_focus_pt;
         visuals.dark_mode = self.dark;
         visuals.override_text_color = Some(self.text_primary);
         visuals.weak_text_color = Some(self.text_muted);
@@ -947,36 +892,36 @@ impl Tokens {
         visuals.window_fill = self.surface_bg;
         visuals.extreme_bg_color = self.input_bg;
         visuals.faint_bg_color = self.header_bg;
-        visuals.window_stroke = Stroke::new(1.0, self.border);
+        visuals.window_stroke = Stroke::new(thin, self.border);
         visuals.window_corner_radius = CornerRadius::same(self.metrics.radius_lg);
         visuals.selection.bg_fill = self.active_bg;
-        visuals.selection.stroke = Stroke::new(2.0, self.focus_ring);
+        visuals.selection.stroke = Stroke::new(focus, self.focus_ring);
         let md_radius = CornerRadius::same(self.metrics.radius_md);
         visuals.widgets.noninteractive.corner_radius = md_radius;
         visuals.widgets.noninteractive.bg_fill = self.panel_bg;
         visuals.widgets.noninteractive.weak_bg_fill = self.panel_bg;
-        visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, self.border);
-        visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, self.text_primary);
+        visuals.widgets.noninteractive.bg_stroke = Stroke::new(thin, self.border);
+        visuals.widgets.noninteractive.fg_stroke = Stroke::new(thin, self.text_primary);
         visuals.widgets.inactive.corner_radius = md_radius;
         visuals.widgets.inactive.bg_fill = self.button_bg;
         visuals.widgets.inactive.weak_bg_fill = self.button_bg;
-        visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, self.button_border);
-        visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, self.text_primary);
+        visuals.widgets.inactive.bg_stroke = Stroke::new(thin, self.button_border);
+        visuals.widgets.inactive.fg_stroke = Stroke::new(thin, self.text_primary);
         visuals.widgets.hovered.corner_radius = md_radius;
         visuals.widgets.hovered.bg_fill = self.hover_bg;
         visuals.widgets.hovered.weak_bg_fill = self.hover_bg;
-        visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, self.hover_border);
-        visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, self.text_strong);
+        visuals.widgets.hovered.bg_stroke = Stroke::new(thin, self.hover_border);
+        visuals.widgets.hovered.fg_stroke = Stroke::new(thin, self.text_strong);
         visuals.widgets.active.corner_radius = md_radius;
         visuals.widgets.active.bg_fill = self.active_bg;
         visuals.widgets.active.weak_bg_fill = self.active_bg;
-        visuals.widgets.active.bg_stroke = Stroke::new(2.0, self.focus_ring);
-        visuals.widgets.active.fg_stroke = Stroke::new(1.0, self.text_strong);
+        visuals.widgets.active.bg_stroke = Stroke::new(focus, self.focus_ring);
+        visuals.widgets.active.fg_stroke = Stroke::new(thin, self.text_strong);
         visuals.widgets.open.corner_radius = md_radius;
         visuals.widgets.open.bg_fill = self.hover_bg;
         visuals.widgets.open.weak_bg_fill = self.hover_bg;
-        visuals.widgets.open.bg_stroke = Stroke::new(1.0, self.border);
-        visuals.widgets.open.fg_stroke = Stroke::new(1.0, self.text_strong);
+        visuals.widgets.open.bg_stroke = Stroke::new(thin, self.border);
+        visuals.widgets.open.fg_stroke = Stroke::new(thin, self.text_strong);
         visuals
     }
 
@@ -1022,46 +967,93 @@ impl Tokens {
         ctx.set_zoom_factor(self.ui_scale.clamp(0.75, 3.0));
     }
 
-    /// Verify all primary text and interactive UI boundary pairs satisfy WCAG 2.1 AA contrast.
+    /// Return detailed WCAG 2.2 contrast violations across all text-on-background and non-text UI
+    /// boundary pairs (`text_disabled` is exempt per WCAG 2.2 SC 1.4.3).
     #[must_use]
-    pub fn meets_wcag_aa(&self) -> bool {
+    pub fn contrast_violations(&self) -> Vec<String> {
+        let mut violations = Vec::new();
         let text_pairs = [
-            (self.text_primary, self.surface_bg),
-            (self.text_primary, self.panel_bg),
-            (self.text_primary, self.app_bar),
-            (self.text_primary, self.header_bg),
-            (self.text_primary, self.hover_bg),
-            (self.text_primary, self.active_bg),
-            (self.text_strong, self.hover_bg),
-            (self.text_strong, self.active_bg),
-            (self.text_muted, self.surface_bg),
-            (self.text_muted, self.panel_bg),
-            (self.text_muted, self.app_bar),
-            (self.text_muted, self.hover_bg),
-            (self.text_muted, self.active_bg),
-            (self.on_accent, self.accent_strong),
-            (self.on_accent, self.accent_hover),
+            ("text_primary on surface_bg", self.text_primary, self.surface_bg),
+            ("text_primary on panel_bg", self.text_primary, self.panel_bg),
+            ("text_primary on app_bar", self.text_primary, self.app_bar),
+            ("text_primary on header_bg", self.text_primary, self.header_bg),
+            ("text_primary on input_bg", self.text_primary, self.input_bg),
+            ("text_primary on button_bg", self.text_primary, self.button_bg),
+            ("text_primary on hover_bg", self.text_primary, self.hover_bg),
+            ("text_primary on active_bg", self.text_primary, self.active_bg),
+            ("text_strong on surface_bg", self.text_strong, self.surface_bg),
+            ("text_strong on panel_bg", self.text_strong, self.panel_bg),
+            ("text_strong on hover_bg", self.text_strong, self.hover_bg),
+            ("text_strong on active_bg", self.text_strong, self.active_bg),
+            ("text_muted on surface_bg", self.text_muted, self.surface_bg),
+            ("text_muted on panel_bg", self.text_muted, self.panel_bg),
+            ("text_muted on app_bar", self.text_muted, self.app_bar),
+            ("text_muted on header_bg", self.text_muted, self.header_bg),
+            ("text_muted on input_bg", self.text_muted, self.input_bg),
+            ("text_muted on button_bg", self.text_muted, self.button_bg),
+            ("text_muted on hover_bg", self.text_muted, self.hover_bg),
+            ("text_muted on active_bg", self.text_muted, self.active_bg),
+            ("on_accent on accent_strong", self.on_accent, self.accent_strong),
+            ("on_accent on accent_hover", self.on_accent, self.accent_hover),
+            ("accent on surface_bg", self.accent, self.surface_bg),
+            ("accent on panel_bg", self.accent, self.panel_bg),
+            ("error on surface_bg", self.error, self.surface_bg),
+            ("error on panel_bg", self.error, self.panel_bg),
+            ("warning on surface_bg", self.warning, self.surface_bg),
+            ("warning on panel_bg", self.warning, self.panel_bg),
+            ("stale on surface_bg", self.stale, self.surface_bg),
+            ("stale on panel_bg", self.stale, self.panel_bg),
+            ("link_blue on surface_bg", self.link_blue, self.surface_bg),
+            ("link_green on surface_bg", self.link_green, self.surface_bg),
+            ("link_red on surface_bg", self.link_red, self.surface_bg),
+            ("excluded_cell_text on surface_bg", self.excluded_cell_text, self.surface_bg),
         ];
         let ui_pairs = [
-            (self.border, self.surface_bg),
-            (self.border, self.panel_bg),
-            (self.input_border, self.surface_bg),
-            (self.button_border, self.panel_bg),
-            (self.focus_ring, self.surface_bg),
-            (self.hover_border, self.panel_bg),
-            (self.hover_border, self.surface_bg),
-            (self.hover_border, self.hover_bg),
-            (self.role_num, self.surface_bg),
-            (self.role_cat, self.surface_bg),
-            (self.role_lbl, self.surface_bg),
-            (self.role_fx, self.surface_bg),
+            ("border on surface_bg", self.border, self.surface_bg),
+            ("border on panel_bg", self.border, self.panel_bg),
+            ("input_border on surface_bg", self.input_border, self.surface_bg),
+            ("input_border on input_bg", self.input_border, self.input_bg),
+            ("button_border on panel_bg", self.button_border, self.panel_bg),
+            ("button_border on button_bg", self.button_border, self.button_bg),
+            ("focus_ring on surface_bg", self.focus_ring, self.surface_bg),
+            ("focus_ring on panel_bg", self.focus_ring, self.panel_bg),
+            ("hover_border on panel_bg", self.hover_border, self.panel_bg),
+            ("hover_border on surface_bg", self.hover_border, self.surface_bg),
+            ("hover_border on hover_bg", self.hover_border, self.hover_bg),
+            ("icon on surface_bg", self.icon, self.surface_bg),
+            ("icon on panel_bg", self.icon, self.panel_bg),
+            ("role_num on surface_bg", self.role_num, self.surface_bg),
+            ("role_cat on surface_bg", self.role_cat, self.surface_bg),
+            ("role_lbl on surface_bg", self.role_lbl, self.surface_bg),
+            ("role_fx on surface_bg", self.role_fx, self.surface_bg),
         ];
-        let hover_vs_panel = color32_to_rgba8(self.hover_bg).contrast_ratio(color32_to_rgba8(self.panel_bg)) >= 1.30;
-        let hover_vs_btn = color32_to_rgba8(self.hover_bg).contrast_ratio(color32_to_rgba8(self.button_bg)) >= 1.25;
-        text_pairs.into_iter().all(|(fg, bg)| color32_to_rgba8(fg).contrast_ratio(color32_to_rgba8(bg)) >= 4.5)
-            && ui_pairs.into_iter().all(|(fg, bg)| color32_to_rgba8(fg).contrast_ratio(color32_to_rgba8(bg)) >= 3.0)
-            && hover_vs_panel
-            && hover_vs_btn
+        for (label, fg, bg) in text_pairs {
+            let ratio = color32_to_rgba8(fg).contrast_ratio(color32_to_rgba8(bg));
+            if ratio < 4.5 {
+                violations.push(format!("{:?} {label}: contrast {ratio:.2}:1 < 4.5:1", self.mode));
+            }
+        }
+        for (label, fg, bg) in ui_pairs {
+            let ratio = color32_to_rgba8(fg).contrast_ratio(color32_to_rgba8(bg));
+            if ratio < 3.0 {
+                violations.push(format!("{:?} {label}: contrast {ratio:.2}:1 < 3.0:1", self.mode));
+            }
+        }
+        let hover_vs_panel = color32_to_rgba8(self.hover_bg).contrast_ratio(color32_to_rgba8(self.panel_bg));
+        if hover_vs_panel < 1.30 {
+            violations.push(format!("{:?} hover_bg vs panel_bg: contrast {hover_vs_panel:.2}:1 < 1.30:1", self.mode));
+        }
+        let hover_vs_btn = color32_to_rgba8(self.hover_bg).contrast_ratio(color32_to_rgba8(self.button_bg));
+        if hover_vs_btn < 1.25 {
+            violations.push(format!("{:?} hover_bg vs button_bg: contrast {hover_vs_btn:.2}:1 < 1.25:1", self.mode));
+        }
+        violations
+    }
+
+    /// Verify all primary text and interactive UI boundary pairs satisfy WCAG 2.2 AA contrast.
+    #[must_use]
+    pub fn meets_wcag_aa(&self) -> bool {
+        self.contrast_violations().is_empty()
     }
 }
 
@@ -3017,11 +3009,44 @@ pub struct FrameInspectNodeMeta {
     pub value: Option<serde_json::Value>,
     pub enabled: bool,
     pub disabled_reason: Option<String>,
+    /// Unclipped interaction rectangle before UI scroll/panel clipping (logical `pt`).
+    pub unclipped_rect: Rect,
     /// Interaction rectangle clipped against the active UI clip rect (logical `pt`).
     pub clipped_rect: Rect,
     pub z_layer: ZLayer,
     pub ellipsized: bool,
     pub full_label: Option<String>,
+    /// Structural action hierarchy rank (`Primary`, `Secondary`, `Overflow`) when applicable.
+    pub action_rank: Option<ActionRank>,
+}
+
+fn infer_slot_action_rank(widget_id: &str, role: &str, command_id: Option<&str>) -> Option<ActionRank> {
+    if !role.eq_ignore_ascii_case("button") {
+        return None;
+    }
+    match widget_id {
+        "modal.ok"
+        | "dialog.button.save"
+        | "dialog.feedback.open_github"
+        | "welcome.clone_modal.apply"
+        | "welcome.action.create"
+        | "power.commit"
+        | "import.commit"
+        | "transform.commit" => return Some(ActionRank::Primary),
+        "modal.cancel"
+        | "modal.apply"
+        | "modal.close"
+        | "dialog.button.cancel"
+        | "dialog.button.dont_save"
+        | "dialog.feedback.reset"
+        | "dialog.feedback.copy_markdown"
+        | "welcome.clone_modal.close" => return Some(ActionRank::Secondary),
+        _ => {}
+    }
+    if widget_id.starts_with("toolbar.") {
+        return command_id.map_or(Some(ActionRank::Overflow), |cid| Some(default_command_action_rank(cid)));
+    }
+    command_id.map(default_command_action_rank)
 }
 
 /// Minimum clipped width and height (logical `pt`) required before a modal widget is recorded in [`FrameInspectMeta`].
@@ -3123,6 +3148,29 @@ impl FrameInspectMeta {
 
     /// Record inspection metadata from an `egui::Response`, clipping its interaction rect to `ui.clip_rect()`.
     pub fn record_response(&mut self, ui: &egui::Ui, resp: &egui::Response, input: FrameInspectEntryInput<'_>) {
+        let inferred = infer_slot_action_rank(input.widget_id, input.role, input.command_id);
+        self.record_response_inner(ui, resp, resp.rect, input, inferred);
+    }
+
+    /// Record inspection metadata with an explicit unclipped logical rect (for virtualized scroll bands).
+    pub fn record_response_with_unclipped(&mut self, ui: &egui::Ui, resp: &egui::Response, unclipped_rect: Rect, input: FrameInspectEntryInput<'_>) {
+        let inferred = infer_slot_action_rank(input.widget_id, input.role, input.command_id);
+        self.record_response_inner(ui, resp, unclipped_rect, input, inferred);
+    }
+
+    /// Record inspection metadata with an explicit per-slot [`ActionRank`].
+    pub fn record_ranked_response(&mut self, ui: &egui::Ui, resp: &egui::Response, input: FrameInspectEntryInput<'_>, rank: ActionRank) {
+        self.record_response_inner(ui, resp, resp.rect, input, Some(rank));
+    }
+
+    fn record_response_inner(
+        &mut self,
+        ui: &egui::Ui,
+        resp: &egui::Response,
+        unclipped_rect: Rect,
+        input: FrameInspectEntryInput<'_>,
+        action_rank: Option<ActionRank>,
+    ) {
         let clipped_rect = resp.interact_rect.intersect(ui.clip_rect());
         self.entries.push(FrameInspectNodeMeta {
             egui_id: resp.id,
@@ -3134,10 +3182,12 @@ impl FrameInspectMeta {
             value: input.value,
             enabled: input.enabled,
             disabled_reason: input.disabled_reason.map(str::to_owned),
+            unclipped_rect,
             clipped_rect,
             z_layer: input.z_layer,
             ellipsized: input.ellipsized,
             full_label: input.full_label.map(str::to_owned),
+            action_rank,
         });
     }
 
@@ -3261,7 +3311,7 @@ mod tests {
         }
         assert_eq!(LayoutMetrics::CANONICAL.top_chrome_height(), 70.0);
         assert_eq!(LayoutMetrics::CANONICAL.status_bar_height(), 26.0);
-        assert_eq!(LayoutMetrics::CANONICAL.grid_header_total_height(), 64.0);
+        assert_eq!(LayoutMetrics::CANONICAL.grid_header_total_height(), 72.0);
         assert_eq!(ScientificPaletteTokens::okabe_ito_series().len(), 8);
         assert_eq!(ScientificPaletteTokens::viridis_stops().len(), 17);
         assert_eq!(ScientificPaletteTokens::cividis_stops().len(), 17);
