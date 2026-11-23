@@ -260,9 +260,26 @@ pub fn resolve_stat_params_banner(app: &UiApp, spec: &curvebook_doc::AnalysisSpe
             (String::from("Parameters: Analyze Stack of P Values"), format!("{} (threshold {:.3})", ps.method.label(), ps.threshold))
         }
         AnalysisKind::LinearRegression(lin) => {
-            let kind = if lin.deming_model_ii { "Deming Model II orthogonal regression" } else { "Ordinary Least Squares (Model I)" };
-            let origin = if lin.force_through_origin && !lin.deming_model_ii { " (through origin)" } else { "" };
-            (String::from("Parameters: Simple Linear / Deming Regression"), format!("{kind}{origin}"))
+            let summary = if lin.deming_model_ii {
+                match lin.deming_error {
+                    curvebook_doc::DemingErrorSpec::EqualError => String::from("Deming Model II orthogonal regression (λ = 1)"),
+                    curvebook_doc::DemingErrorSpec::StandardDeviations { sd_x, sd_y } => {
+                        format!("Deming Model II regression (SD_X={sd_x}, SD_Y={sd_y})")
+                    }
+                    curvebook_doc::DemingErrorSpec::VarianceRatio { lambda } => {
+                        format!("Deming Model II regression (λ = {lambda})")
+                    }
+                }
+            } else {
+                let constraint = match lin.effective_fixed_point() {
+                    Some((0.0, 0.0)) => String::from(" (through origin)"),
+                    Some((x0, y0)) => format!(" (fixed ({x0}, {y0}))"),
+                    None => String::new(),
+                };
+                let sa = if lin.standard_addition { ", standard addition" } else { "" };
+                format!("Ordinary Least Squares (Model I){constraint}{sa}")
+            };
+            (String::from("Parameters: Simple Linear / Deming Regression"), summary)
         }
         AnalysisKind::PassingBablok(_) => {
             (String::from("Parameters: Passing-Bablok Regression"), format!("Nonparametric median-slope + Cusum ({conf:.0}% CI)"))

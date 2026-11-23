@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 
 use curvebook_doc::result_builder::{KvTabBuilder, TabBuilder, bool_cell, ci_cell, num_cell, opt_num_cell, p_cell, text_cell};
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, ChecklistItem, ChecklistStatus, CiBound, CurveSamplePoint, DataSheet, ErrorCode, FittedCurveOverlay,
+    AnalysisKind, AnalysisSpec, ChecklistItem, ChecklistStatus, CiBound, CurveSamplePoint, DataSheet, DemingErrorSpec, ErrorCode, FittedCurveOverlay,
     LinearRegressionSpec, NonlinearFitSpec, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTabKind, SourceCellId, TableArchetype,
 };
 use curvebook_math::PValueFormat;
@@ -27,8 +27,8 @@ use crate::dsl::CompiledDslModel;
 use crate::error::{FitError, FitIdentifiability, FitStatus, ParameterNote};
 use crate::library::{ParametricModel, get_builtin_model};
 use crate::linear::{
-    DemingOptions, SimpleLinearOptions, SimpleLinearResult, compare_linear_lines, deming_regression, fit_linear_points, linear_grid,
-    prepare_linear_points, resolve_linear_grid_bounds,
+    DemingOptions, InverseIntervalSet, SimpleLinearOptions, SimpleLinearResult, compare_linear_lines, deming_regression, fit_linear_points,
+    linear_grid, prepare_linear_points, resolve_linear_grid_bounds,
 };
 use crate::solver::{
     InterpolatedUnknown, ModelComparisonOutcome, NonlinearFitResult, SolverConfig, compare_models_checked, fit_nonlinear, ordered_nested_roles,
@@ -96,6 +96,9 @@ pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionS
     }
     let options = SimpleLinearOptions {
         force_through_origin: lin_spec.force_through_origin,
+        fixed_point: lin_spec.fixed_point,
+        standard_addition: lin_spec.standard_addition,
+        extend_line_to_x_intercept: lin_spec.extend_line_to_x_intercept,
         confidence_level: spec.confidence_level,
         compute_bands: lin_spec.confidence_bands || lin_spec.prediction_bands,
         band_grid_points: segments + 1,
@@ -104,7 +107,7 @@ pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionS
         ..SimpleLinearOptions::default()
     };
     if lin_spec.deming_model_ii {
-        return build_deming_result_sheet(result, &datasets, &excluded, &options, lin_spec.plot_segments.is_some());
+        return build_deming_result_sheet(result, &datasets, &excluded, &options, lin_spec);
     }
 
     let mut fits: Vec<(usize, String, SimpleLinearResult)> = Vec::with_capacity(datasets.len());
@@ -115,14 +118,19 @@ pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionS
             opts.unknown_x_values = ds.unknowns_x.iter().map(|&(_, x)| x).collect();
         }
         let mut fit = fit_linear_points(&ds.points, &opts, n_excluded)?;
+        let extend_x = if opts.extend_line_to_x_intercept { fit.x_intercept } else { None };
         let overlay_points = if fit.bands.is_empty() {
-            build_linear_overlay_points(&ds.points, fit.slope, fit.intercept, &opts)?
+            build_linear_overlay_points(&ds.points, fit.slope, fit.intercept, &opts, extend_x)?
         } else {
             std::mem::take(&mut fit.bands)
         };
         result.fitted_curves.push(FittedCurveOverlay {
             data_set_index: ds.data_set_index,
-            equation_id: if lin_spec.force_through_origin { "line_through_origin".to_owned() } else { "straight_line".to_owned() },
+            equation_id: if lin_spec.fixed_point.is_none() && lin_spec.force_through_origin {
+                "line_through_origin".to_owned()
+            } else {
+                "straight_line".to_owned()
+            },
             converged: true,
             ambiguous: false,
             points: overlay_points,
@@ -135,6 +143,22 @@ pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionS
             units: None,
         });
         result.scalars.push(ResultScalarEntry { key: "R2".to_owned(), data_set_index: Some(ds.data_set_index), value: fit.r_squared, units: None });
+        if let Some(x_int) = fit.x_intercept {
+            result.scalars.push(ResultScalarEntry {
+                key: "XIntercept".to_owned(),
+                data_set_index: Some(ds.data_set_index),
+                value: x_int,
+                units: None,
+            });
+        }
+        if let Some(conc) = fit.standard_addition_concentration {
+            result.scalars.push(ResultScalarEntry {
+                key: "StandardAdditionConcentration".to_owned(),
+                data_set_index: Some(ds.data_set_index),
+                value: conc,
+                units: None,
+            });
+        }
 
         let runs = &fit.runs_test;
         result.checklist.push(ChecklistItem {
@@ -177,16 +201,35 @@ pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionS
         .row("Sy.x", fits.iter().map(|(_, _, f)| num_cell(f.sy_x)))
         .row("F", fits.iter().map(|(_, _, f)| num_cell(f.f_stat)))
         .row("P value", fits.iter().map(|(_, _, f)| p_cell(f.p_value, p_fmt)))
-        .row("Runs test P value", fits.iter().map(|(_, _, f)| p_cell(f.runs_test.p_too_few_runs, p_fmt)));
+        .row("Runs test P value", fits.iter().map(|(_, _, f)| p_cell(f.runs_test.p_too_few_runs, p_fmt)))
+        .row("X-intercept", fits.iter().map(|(_, _, f)| opt_num_cell(f.x_intercept)))
+        .row(
+            format!("{conf_pct}% CI X-intercept"),
+            fits.iter().map(|(_, _, f)| {
+                let (lo, hi) = f.x_intercept_ci.to_ci_bounds();
+                ci_bounds_cell(lo, hi)
+            }),
+        );
+    if lin_spec.standard_addition {
+        summary_tab.push_row("Unknown concentration (-X-intercept)", fits.iter().map(|(_, _, f)| opt_num_cell(f.standard_addition_concentration)));
+        summary_tab.push_row(
+            format!("{conf_pct}% CI Unknown concentration"),
+            fits.iter().map(|(_, _, f)| {
+                let (lo, hi) = f.standard_addition_ci.unwrap_or(InverseIntervalSet::Undefined).to_ci_bounds();
+                ci_bounds_cell(lo, hi)
+            }),
+        );
+    }
     if x_filter.is_some() {
         append_linear_observation_counts(&mut summary_tab, fits.iter().map(|(_, _, f)| [f.n, f.n_excluded_by_range, f.df_residual]));
     }
     result.tabs.push(summary_tab.build());
 
-    // Multi-line ANCOVA comparison if >1 dataset.
-    if datasets.len() >= 2 {
+    // Multi-line ANCOVA comparison if >1 dataset (for unconstrained or origin-forced models).
+    if datasets.len() >= 2 && lin_spec.fixed_point.is_none_or(|pt| pt == (0.0, 0.0)) {
         let grouped_slices: Vec<&[crate::types::DataPoint]> = datasets.iter().map(|d| d.points.as_slice()).collect();
-        if let Ok(cmp) = compare_linear_lines(&grouped_slices, lin_spec.force_through_origin) {
+        let origin_only = lin_spec.effective_fixed_point() == Some((0.0, 0.0));
+        if let Ok(cmp) = compare_linear_lines(&grouped_slices, origin_only) {
             let mut tab = TabBuilder::new("linear_comparison", "Comparison of Lines (ANCOVA)", ResultTabKind::ModelComparison)
                 .headers(["F", "DFn, DFd", "P value", "Significantly different?"])
                 .row(
@@ -267,15 +310,18 @@ fn build_deming_result_sheet(
     datasets: &[DatasetSeries],
     excluded: &[usize],
     options: &SimpleLinearOptions,
-    has_explicit_segments: bool,
+    lin_spec: &LinearRegressionSpec,
 ) -> Result<ResultSheet, FitError> {
-    // `LinearRegressionSpec` currently does not carry a variance-ratio parameter, so orthogonal
-    // Deming regression fixes `variance_ratio_lambda = 1.0` (equal measurement-error variances).
-    let opts = DemingOptions { variance_ratio_lambda: 1.0, confidence_level: options.confidence_level };
+    let lambda = lin_spec.deming_error.resolved_lambda().ok_or_else(|| FitError::InvalidParameter {
+        name: "deming_error",
+        reason: String::from("Deming error SDs and variance ratio lambda must be finite and > 0"),
+    })?;
+    let opts = DemingOptions { variance_ratio_lambda: lambda, confidence_level: options.confidence_level };
     let mut dems = Vec::with_capacity(datasets.len());
     let has_range = options.x_range_filter.is_some();
     let (plot_min, plot_max) = options.plot_x_range.unwrap_or_default();
-    let emit_overlay = has_range || plot_min.is_some() || plot_max.is_some() || has_explicit_segments;
+    let emit_overlay =
+        has_range || plot_min.is_some() || plot_max.is_some() || lin_spec.plot_segments.is_some() || lin_spec.extend_line_to_x_intercept;
     let conf_pct = format_percent_label(options.confidence_level.percent());
 
     for (ds, &n_excluded) in datasets.iter().zip(excluded) {
@@ -284,12 +330,13 @@ fn build_deming_result_sheet(
         }
         let dem = deming_regression(&ds.points, &opts)?;
         if emit_overlay {
+            let extend_x = if lin_spec.extend_line_to_x_intercept { dem.x_intercept } else { None };
             result.fitted_curves.push(FittedCurveOverlay {
                 data_set_index: ds.data_set_index,
                 equation_id: "straight_line".to_owned(),
                 converged: true,
                 ambiguous: false,
-                points: build_linear_overlay_points(&ds.points, dem.slope, dem.intercept, options)?,
+                points: build_linear_overlay_points(&ds.points, dem.slope, dem.intercept, options, extend_x)?,
             });
         }
         result.scalars.push(ResultScalarEntry { key: "Slope".to_owned(), data_set_index: Some(ds.data_set_index), value: dem.slope, units: None });
@@ -299,9 +346,26 @@ fn build_deming_result_sheet(
             value: dem.intercept,
             units: None,
         });
+        if let Some(x_int) = dem.x_intercept {
+            result.scalars.push(ResultScalarEntry {
+                key: "XIntercept".to_owned(),
+                data_set_index: Some(ds.data_set_index),
+                value: x_int,
+                units: None,
+            });
+        }
         dems.push((ds.label.as_str(), dem, n_excluded));
     }
 
+    let error_footnote = match lin_spec.deming_error {
+        DemingErrorSpec::EqualError => String::from("Orthogonal Deming regression uses equal error variances (lambda = 1.0)."),
+        DemingErrorSpec::StandardDeviations { sd_x, sd_y } => {
+            format!("Deming regression uses SD_X = {sd_x}, SD_Y = {sd_y} (variance ratio lambda = {lambda:.6}).")
+        }
+        DemingErrorSpec::VarianceRatio { .. } => {
+            format!("Deming regression uses error variance ratio lambda = sigma_X^2 / sigma_Y^2 = {lambda:.6}.")
+        }
+    };
     let mut tab = TabBuilder::new("deming_summary", "Deming (Model II) linear regression", ResultTabKind::MainSummary)
         .headers(dems.iter().map(|(lbl, _, _)| *lbl))
         .row("Slope", dems.iter().map(|(_, d, _)| num_cell(d.slope)))
@@ -311,10 +375,9 @@ fn build_deming_result_sheet(
         .row(format!("{conf_pct}% CI Slope"), dems.iter().map(|(_, d, _)| ci_cell(d.ci_slope.0, d.ci_slope.1)))
         .row(format!("{conf_pct}% CI Intercept"), dems.iter().map(|(_, d, _)| ci_cell(d.ci_intercept.0, d.ci_intercept.1)))
         .row("Sy.x", dems.iter().map(|(_, d, _)| num_cell(d.sy_x)))
-        .footnotes([
-            "Standard errors computed by Leave-One-Out jackknife.",
-            "Orthogonal Deming regression uses fixed variance ratio lambda = 1.0 (equal X and Y error variances).",
-        ]);
+        .row("Variance ratio (lambda)", dems.iter().map(|(_, d, _)| num_cell(d.lambda)))
+        .row("X-intercept", dems.iter().map(|(_, d, _)| opt_num_cell(d.x_intercept)))
+        .footnotes(["Standard errors computed by Leave-One-Out jackknife.".to_owned(), error_footnote]);
     if has_range {
         append_linear_observation_counts(&mut tab, dems.iter().map(|(_, d, n_excluded)| [d.n, *n_excluded, d.df]));
     }
@@ -1195,11 +1258,13 @@ fn build_linear_overlay_points(
     slope: f64,
     intercept: f64,
     options: &SimpleLinearOptions,
+    extend_x_intercept: Option<f64>,
 ) -> Result<Vec<CurveSamplePoint>, FitError> {
     let bounds = resolve_linear_grid_bounds(
         points.iter().map(DataPoint::x0),
         options.x_range_filter.unwrap_or_default(),
         options.plot_x_range.unwrap_or_default(),
+        extend_x_intercept,
     )?;
     linear_grid(bounds, options.band_grid_points)
         .map(|x| {

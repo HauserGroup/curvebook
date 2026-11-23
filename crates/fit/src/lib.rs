@@ -61,8 +61,9 @@ pub use dsl::{CompiledDslModel, DslEquationKind, integrate_rk45};
 pub use error::{FitError, FitIdentifiability, FitStatus, ParameterNote};
 pub use library::{EquationCatalogEntry, ParametricModel, get_builtin_model, list_builtin_equations};
 pub use linear::{
-    DemingOptions, DemingResult, LinearComparisonResult, LinearInterpolation, LinearResidual, SimpleLinearOptions, SimpleLinearResult,
-    compare_linear_lines, deming_regression, simple_linear_regression,
+    DemingOptions, DemingResult, InverseCalibrationResult, InverseIntervalSet, LinearComparisonResult, LinearInterpolation, LinearResidual,
+    SimpleLinearOptions, SimpleLinearResult, compare_linear_lines, deming_regression, duplicate_pair_repeatability_sd, interpolate_x_from_y,
+    simple_linear_regression,
 };
 pub use result::{execute_analysis, execute_linear_analysis, execute_nonlinear_analysis, resolve_model_from_spec};
 pub use solver::{

@@ -57,8 +57,8 @@ fn untranslated_report() {
     let expected = ["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr", "ar", "he"];
     assert_eq!(LOCALES, &expected);
     assert_eq!(LOCALES.len(), 16);
-    assert_eq!(catalog_len(), 708);
-    assert_eq!(LOCALES.len() * catalog_len(), 11_328);
+    assert_eq!(catalog_len(), 720);
+    assert_eq!(LOCALES.len() * catalog_len(), 11_520);
     assert!(!CATALOG.is_empty());
 
     let mut seen_keys = HashSet::new();

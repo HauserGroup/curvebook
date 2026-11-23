@@ -761,8 +761,11 @@ fn restricted_linear_fit_uses_the_same_domain_for_analysis_and_overlay() -> Test
     assert_eq!(overlay.iter().map(|p| p.x).collect::<Vec<_>>(), [10.0, 12.0, 14.0, 16.0]);
     assert!(overlay.iter().all(|p| p.ci_lower.is_none() && p.pred_lower.is_none()));
     let summary = result.tabs.iter().find(|tab| tab.id == "linear_summary").ok_or("missing summary")?;
-    assert_eq!(&summary.row_labels[10..], ["Observations analyzed", "Excluded by X range", "Residual degrees of freedom"]);
-    for (row, expected) in summary.rows[10..].iter().zip([4.0, 2.0, 2.0]) {
+    assert_eq!(
+        &summary.row_labels[10..],
+        ["X-intercept", "95% CI X-intercept", "Observations analyzed", "Excluded by X range", "Residual degrees of freedom"]
+    );
+    for (row, expected) in summary.rows[12..].iter().zip([4.0, 2.0, 2.0]) {
         assert!(matches!(row.as_slice(), [curvebook_doc::ResultCell::Number { value, .. }] if *value == expected));
     }
 
