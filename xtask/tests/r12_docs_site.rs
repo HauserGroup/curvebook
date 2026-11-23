@@ -262,19 +262,29 @@ fn docs_site_check_passes_and_output_is_deterministic() -> Result<(), String> {
     }
 
     // Spot-check critical Beta site map sections, registry content, direct GitHub contributor links, and CSP.
-    assert!(map_a.contains_key("index.html"));
-    assert!(map_a.contains_key("az-index.html"));
-    assert!(map_a.contains_key("analyses.html"));
-    assert!(map_a.contains_key("automation/mcp.html"));
-    assert!(map_a.contains_key("automation/cli.html"));
-    assert!(map_a.contains_key("automation/control-and-batch.html"));
-    assert!(map_a.contains_key("registry/commands.html"));
-    assert!(map_a.contains_key("registry/mcp-tools.html"));
-    assert!(map_a.contains_key("registry/cli.html"));
-    assert!(map_a.contains_key("registry/equations.html"));
-    assert!(map_a.contains_key("registry/tables.html"));
-    assert!(map_a.contains_key("registry/graphs.html"));
-    assert!(map_a.contains_key("registry/formats.html"));
+    assert_beta_site_contents(&map_a)?;
+
+    Ok(())
+}
+
+fn assert_beta_site_contents(map_a: &BTreeMap<String, String>) -> Result<(), String> {
+    for key in [
+        "index.html",
+        "az-index.html",
+        "analyses.html",
+        "automation/mcp.html",
+        "automation/cli.html",
+        "automation/control-and-batch.html",
+        "registry/commands.html",
+        "registry/mcp-tools.html",
+        "registry/cli.html",
+        "registry/equations.html",
+        "registry/tables.html",
+        "registry/graphs.html",
+        "registry/formats.html",
+    ] {
+        assert!(map_a.contains_key(key), "missing generated page `{key}`");
+    }
 
     assert!(
         !map_a.keys().any(|k| k.starts_with("contribute/")),
@@ -292,12 +302,41 @@ fn docs_site_check_passes_and_output_is_deterministic() -> Result<(), String> {
         "docs/file-formats.md",
         "docs/licences.md",
         "docs/localization.md",
+        "docs/design-language.md",
         "docs/ci.md",
         "docs/release/releasing.md",
     ] {
         let expected_url = format!("https://github.com/HauserGroup/curvebook/blob/main/{repo_path}");
         assert!(contrib_index.contains(&expected_url), "section-contribute.html missing GitHub main link `{expected_url}`");
     }
+
+    // Verify grouped Manual Home sections, static math/callouts/figures on live pages, and registry upgrades.
+    let home_html = map_a.get("index.html").ok_or("missing index.html")?;
+    for group in [
+        "class=\"section-group\"",
+        "Start Here",
+        "Scientific &amp; Graphing Reference",
+        "Files, Automation &amp; Settings",
+        "Support &amp; Contribute",
+        "aria-current=\"page\"",
+    ] {
+        assert!(home_html.contains(group), "index.html missing `{group}`");
+    }
+
+    let glossary_html = map_a.get("glossary.html").ok_or("missing glossary.html")?;
+    assert!(glossary_html.contains("<span class=\"math\">"), "glossary.html must render math spans");
+    assert!(!glossary_html.contains("$\\text{AIC}_c$"), "glossary.html leaked raw TeX");
+
+    let desktop_html = map_a.get("desktop-gui.html").ok_or("missing desktop-gui.html")?;
+    assert!(desktop_html.contains("<figure class=\"doc-figure\">"), "desktop-gui.html should wrap standalone screenshots in <figure>");
+
+    let equations_html = map_a.get("registry/equations.html").ok_or("missing registry/equations.html")?;
+    assert!(equations_html.contains("<span class=\"math-frac\">"), "registry/equations.html must render static math fractions");
+    assert!(equations_html.contains("<code>Y ="), "registry/equations.html must retain copyable TeX inside <code>");
+
+    let graphs_html = map_a.get("registry/graphs.html").ok_or("missing registry/graphs.html")?;
+    assert!(graphs_html.contains("id=\"graph-layout-features\""), "registry/graphs.html missing R13 features section");
+    assert!(graphs_html.contains("EqualizeScaleMode") || graphs_html.contains("layout.equalizeScaling"));
 
     // Contributor docs linked from automation pages must rewrite directly to GitHub blob URLs.
     let batch_html = map_a.get("automation/control-and-batch.html").ok_or("missing automation/control-and-batch.html")?;
@@ -387,7 +426,10 @@ fn docs_site_ingests_populated_reference_markdown_and_verifies_release_snapshot(
         ("files", "# Files, Import & Export\n\nSee [Batch Schema](../schemas/batch-v1.schema.json).\n"),
         ("settings", "# Settings & Languages\n\nSee [Preferences Schema](../schemas/preferences.schema.json).\n"),
         ("privacy-security", "# Privacy & Security\n\nSee [Security](../../SECURITY.md).\n"),
-        ("troubleshooting", "# Troubleshooting\n\nSee [Privacy & Security](privacy-security.md).\n"),
+        (
+            "troubleshooting",
+            "# Troubleshooting\n\nSee [Privacy & Security](privacy-security.md).\n\n## Known Issues {#known-issues}\n\nBeta known issues.\n",
+        ),
         ("glossary", "# Glossary\n\n## Reactive DAG {#term-reactive-dag}\n\nRecomputes sheets.\n"),
     ] {
         fs::write(ref_dir.join(format!("{name}.md")), body).map_err(|e| e.to_string())?;
@@ -452,6 +494,21 @@ fn docs_site_ingests_populated_reference_markdown_and_verifies_release_snapshot(
     assert!(redirect_html.contains("<meta http-equiv=\"refresh\" content=\"0; url=v0.1/index.html\">"));
     assert!(!redirect_html.contains("<script"));
 
+    let gs_shim = fs::read_to_string(sim_root.join("docs/get-started.html")).map_err(|e| e.to_string())?;
+    assert!(gs_shim.contains("<meta http-equiv=\"refresh\" content=\"0; url=manual/v0.1/get-started.html\">"));
+    assert!(gs_shim.contains("href=\"manual/v0.1/get-started.html\""));
+    assert!(!gs_shim.contains("<script"));
+
+    let ts_shim = fs::read_to_string(sim_root.join("docs/troubleshooting.html")).map_err(|e| e.to_string())?;
+    assert!(ts_shim.contains("<meta http-equiv=\"refresh\" content=\"0; url=manual/v0.1/troubleshooting.html#known-issues\">"));
+    assert!(ts_shim.contains("href=\"manual/v0.1/troubleshooting.html#known-issues\""));
+    assert!(!ts_shim.contains("<script"));
+
+    let snap_home = fs::read_to_string(sim_root.join("docs/manual/v0.1/index.html")).map_err(|e| e.to_string())?;
+    assert!(snap_home.contains("Product Home</a>"));
+    assert!(snap_home.contains("Privacy Policy</a>"));
+    assert!(snap_home.contains("aria-current=\"page\""));
+
     // Corrupting the manifest commit must make `--check` fail because it no longer matches tag `v0.1.0-alpha.2`.
     let bad_manifest = manifest_text.replace(&head_sha, "0000000000000000000000000000000000000000");
     fs::write(&snap_manifest, bad_manifest).map_err(|e| e.to_string())?;
@@ -459,6 +516,102 @@ fn docs_site_ingests_populated_reference_markdown_and_verifies_release_snapshot(
     let fail_res = run_xtask(sim_root, &["docs-site", "--check", "--output", preview_dir.to_str().ok_or("bad path")?])?;
     assert!(!fail_res.status.success(), "mismatched tag commit in manifest must fail --check");
     assert!(String::from_utf8_lossy(&fail_res.stderr).contains("does not match release tag"));
+
+    Ok(())
+}
+
+#[test]
+fn docs_site_renders_math_callouts_figures_toc_and_rejects_leaks_and_broken_root_pages() -> Result<(), String> {
+    let root = workspace_root()?;
+    let sandbox = WorkspaceScratchDir::new(&root, "math-callout-root")?;
+    let sim_root = &sandbox.path;
+    SimRepoTemplate::shared()?.materialize_into(sim_root)?;
+
+    let qol_md = sim_root.join("docs/reference/qol.md");
+    let orig_qol = fs::read_to_string(&qol_md).map_err(|e| e.to_string())?;
+    let mut headings = String::new();
+    for i in 1..=9 {
+        headings.push_str(&format!("## Section {i}\n\nItem {i} with $\\frac{{{i}}}{{2}}$, $\\sqrt{{x_{i}}}$, $\\bar{{d}}$, $\\hat{{\\varepsilon}}$, $\\tilde{{\\varepsilon}}$, $\\Delta\\text{{AIC}}_c$.\n\n"));
+    }
+    let test_md = format!(
+        "{orig_qol}\n\n\
+        ## Synthetic Callout Suite\n\n\
+        > [!NOTE]\n> Inline Greek $\\alpha \\chi \\Phi \\kappa \\pi \\tau \\theta \\ge 5.0\\text{{ pt}} \\le 10$ and $\\ln \\log \\arcsin \\exp \\TeX$ and $\\left(\\frac{{p}}{{1 - p}}\\right)\\,\\!$ with $K_{{\\text{{eff}}}}$.\n\n\
+        > [!TIP]\n> Tip callout.\n\n\
+        > [!IMPORTANT]\n> Important callout.\n\n\
+        > [!WARNING]\n> Warning callout.\n\n\
+        > [!CAUTION]\n> Caution callout.\n\n\
+        Currency & shell: \\$100, $100, $50, between $50 and $100, $50-$100, $HOME, $XDG_CONFIG_HOME, $TMPDIR, $PATH, $HOME/$PATH, $row and $index, `$row`.\n\n\
+        $$\n\\chi^2 = \\frac{{(O - E)^2}}{{E}}\n$$\n\n\
+        ![Split fit screenshot](../images/workspace-split-fit.png)\n\n\
+        {headings}"
+    );
+    fs::write(&qol_md, &test_md).map_err(|e| e.to_string())?;
+
+    let out_dir = WorkspaceScratchDir::new(&root, "math-callout-out")?;
+    let res = run_xtask(sim_root, &["docs-site", "--check", "--output", out_dir.path.to_str().ok_or("bad path")?])?;
+    assert!(
+        res.status.success(),
+        "docs-site --check failed on synthetic math/callout page:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&res.stdout),
+        String::from_utf8_lossy(&res.stderr)
+    );
+
+    let qol_html = fs::read_to_string(out_dir.path.join("qol.html")).map_err(|e| e.to_string())?;
+    for expected in [
+        "<div class=\"callout callout-note\" role=\"note\">\n<p class=\"callout-title\">Note</p>",
+        "<div class=\"callout callout-tip\" role=\"note\">\n<p class=\"callout-title\">Tip</p>",
+        "<div class=\"callout callout-important\" role=\"note\">\n<p class=\"callout-title\">Important</p>",
+        "<div class=\"callout callout-warning\" role=\"note\">\n<p class=\"callout-title\">Warning</p>",
+        "<div class=\"callout callout-caution\" role=\"note\">\n<p class=\"callout-title\">Caution</p>",
+        "<details open class=\"toc\">\n          <summary class=\"toc-title\">On this page</summary>",
+        "<figure class=\"doc-figure\"><img src=\"images/workspace-split-fit.png\" alt=\"Split fit screenshot\" loading=\"lazy\"><figcaption>Split fit screenshot</figcaption></figure>",
+        "<div class=\"math-block\"><span class=\"math\">",
+        "<span class=\"math-frac\">",
+        "√<span class=\"math-rad\">",
+        "$100",
+        "$50",
+        "between $50 and $100",
+        "$50-$100",
+        "$HOME",
+        "$XDG_CONFIG_HOME",
+        "$TMPDIR",
+        "$PATH",
+        "$HOME/$PATH",
+        "$row and $index",
+        "<code>$row</code>",
+    ] {
+        assert!(qol_html.contains(expected), "qol.html missing expected `{expected}`:\n{qol_html}");
+    }
+    let (_, synthetic_tail) =
+        qol_html.split_once("<h2 id=\"synthetic-callout-suite\" tabindex=\"-1\">").ok_or("missing synthetic callout suite heading")?;
+    assert!(!synthetic_tail.contains("<em>"), "underscores inside math must not become <em>");
+
+    // 1. Negative test: raw leaked TeX outside <code> must fail --check.
+    fs::write(&qol_md, format!("{orig_qol}\n\nUnwrapped \\frac{{1}}{{2}} macro.\n")).map_err(|e| e.to_string())?;
+    let leak_tex_res = run_xtask(sim_root, &["docs-site", "--check", "--output", out_dir.path.to_str().ok_or("bad path")?])?;
+    assert!(!leak_tex_res.status.success(), "leaked raw TeX macro must fail --check");
+    assert!(String::from_utf8_lossy(&leak_tex_res.stderr).contains("unrendered TeX macro"));
+
+    // 2. Negative test: raw [!NOTE] outside blockquote/code must fail --check.
+    fs::write(&qol_md, format!("{orig_qol}\n\nPlain [!NOTE] outside blockquote.\n")).map_err(|e| e.to_string())?;
+    let leak_callout_res = run_xtask(sim_root, &["docs-site", "--check", "--output", out_dir.path.to_str().ok_or("bad path")?])?;
+    assert!(!leak_callout_res.status.success(), "leaked [!NOTE] marker must fail --check");
+    assert!(String::from_utf8_lossy(&leak_callout_res.stderr).contains("callout marker"));
+
+    // Restore valid qol.md, then test check_root_pages catches broken root HTML and broken root shims.
+    fs::write(&qol_md, &orig_qol).map_err(|e| e.to_string())?;
+    let root_index = sim_root.join("docs/index.html");
+    let orig_root_index = fs::read_to_string(&root_index).map_err(|e| e.to_string())?;
+    fs::write(&root_index, orig_root_index.replace("privacy.html", "does-not-exist.html")).map_err(|e| e.to_string())?;
+    let bad_root_res = run_xtask(sim_root, &["docs-site", "--check", "--output", out_dir.path.to_str().ok_or("bad path")?])?;
+    assert!(!bad_root_res.status.success(), "broken relative link in docs/index.html must fail --check");
+    assert!(String::from_utf8_lossy(&bad_root_res.stderr).contains("does-not-exist.html"));
+
+    fs::write(&root_index, orig_root_index).map_err(|e| e.to_string())?;
+    fs::write(sim_root.join("docs/get-started.html"), "<script>alert(1)</script>").map_err(|e| e.to_string())?;
+    let bad_shim_res = run_xtask(sim_root, &["docs-site", "--check", "--output", out_dir.path.to_str().ok_or("bad path")?])?;
+    assert!(!bad_shim_res.status.success(), "unsafe root redirect shim must fail check_root_pages");
 
     Ok(())
 }

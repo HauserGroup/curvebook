@@ -70,6 +70,10 @@ pub fn render_markdown(input: &str, resolver: &dyn LinkResolver) -> RenderedMark
             idx = render_fenced_code(&lines, idx, fence_ch, fence_len, &lang, &mut html);
             continue;
         }
+        if let Some(next_idx) = try_render_math_block(&lines, idx, &mut html) {
+            idx = next_idx;
+            continue;
+        }
         if let Some((level, raw_heading)) = parse_atx_heading(trimmed) {
             render_heading_block(&mut ctx, level, raw_heading, &mut html);
             idx += 1;
@@ -307,6 +311,17 @@ fn split_table_cells(line: &str) -> Vec<&str> {
             i += 1;
             continue;
         }
+        if !in_code
+            && bytes[i] == b'$'
+            && let Some(rest) = s.get(i..)
+        {
+            let skip =
+                if rest.starts_with("$$") { parse_block_math_inline(rest).map(|(_, len)| len) } else { parse_inline_math(rest).map(|(_, len)| len) };
+            if let Some(len) = skip {
+                i += len;
+                continue;
+            }
+        }
         if bytes[i] == b'|' && !in_code {
             cells.push(s.get(start..i).unwrap_or("").trim());
             start = i + 1;
@@ -360,12 +375,50 @@ fn render_blockquote(ctx: &mut RenderCtx<'_>, lines: &[&str], start: usize, out:
             break;
         }
     }
+    if let Some((kind, title, body)) = parse_alert_callout(&inner_lines) {
+        let rendered = render_markdown(&body, ctx.resolver);
+        out.push_str("<div class=\"callout callout-");
+        out.push_str(kind);
+        out.push_str("\" role=\"note\">\n<p class=\"callout-title\">");
+        out.push_str(title);
+        out.push_str("</p>\n");
+        out.push_str(&rendered.html);
+        out.push_str("</div>\n");
+        return idx;
+    }
     let joined = inner_lines.join("\n");
     let rendered = render_markdown(&joined, ctx.resolver);
     out.push_str("<blockquote>\n");
     out.push_str(&rendered.html);
     out.push_str("</blockquote>\n");
     idx
+}
+
+fn parse_alert_callout(inner_lines: &[&str]) -> Option<(&'static str, &'static str, String)> {
+    let first = inner_lines.first()?.trim();
+    let markers = [
+        ("[!NOTE]", "note", "Note"),
+        ("[!TIP]", "tip", "Tip"),
+        ("[!IMPORTANT]", "important", "Important"),
+        ("[!WARNING]", "warning", "Warning"),
+        ("[!CAUTION]", "caution", "Caution"),
+    ];
+    for (tag, kind, title) in markers {
+        if let Some(after) = first.strip_prefix(tag)
+            && (after.is_empty() || after.starts_with(char::is_whitespace))
+        {
+            let mut body_lines: Vec<&str> = Vec::with_capacity(inner_lines.len());
+            let first_rest = after.trim();
+            if !first_rest.is_empty() {
+                body_lines.push(first_rest);
+            }
+            if let Some(rest) = inner_lines.get(1..) {
+                body_lines.extend_from_slice(rest);
+            }
+            return Some((kind, title, body_lines.join("\n")));
+        }
+    }
+    None
 }
 
 fn parse_list_item(line: &str) -> Option<(bool, usize, &str)> {
@@ -464,6 +517,7 @@ fn render_paragraph_block(ctx: &mut RenderCtx<'_>, lines: &[&str], start: usize,
         if trimmed.is_empty()
             || is_html_comment_start(trimmed)
             || parse_fence_open(trimmed).is_some()
+            || is_display_math_start(lines, idx)
             || parse_atx_heading(trimmed).is_some()
             || is_thematic_break(trimmed)
             || trimmed.starts_with('>')
@@ -475,8 +529,30 @@ fn render_paragraph_block(ctx: &mut RenderCtx<'_>, lines: &[&str], start: usize,
         parts.push(trimmed);
         idx += 1;
     }
+    let joined = parts.join(" ");
+    let trimmed_para = joined.trim();
+    if let Some(after_bang) = trimmed_para.strip_prefix('!')
+        && after_bang.starts_with('[')
+        && let Some((alt, src, consumed)) = parse_bracket_link(after_bang)
+        && 1 + consumed == trimmed_para.len()
+    {
+        let resolved = ctx.resolver.resolve_image(src);
+        out.push_str("<figure class=\"doc-figure\"><img src=\"");
+        push_html_escaped(&resolved, out);
+        out.push_str("\" alt=\"");
+        push_html_escaped(alt, out);
+        out.push_str("\" loading=\"lazy\">");
+        let cap = alt.trim();
+        if !cap.is_empty() {
+            out.push_str("<figcaption>");
+            push_html_escaped(cap, out);
+            out.push_str("</figcaption>");
+        }
+        out.push_str("</figure>\n");
+        return idx;
+    }
     out.push_str("<p>");
-    render_inline(&parts.join(" "), ctx.resolver, false, out);
+    render_inline(&joined, ctx.resolver, false, out);
     out.push_str("</p>\n");
     idx
 }
@@ -506,6 +582,24 @@ fn render_inline(text: &str, resolver: &dyn LinkResolver, allow_br: bool, out: &
             out.push_str("</code>");
             i += next_i;
             continue;
+        }
+        if bytes[i] == b'$' {
+            if rest.starts_with("$$")
+                && let Some((inner, next_i)) = parse_block_math_inline(rest)
+            {
+                out.push_str("<span class=\"math math-block\">");
+                render_tex_math_inner(inner.trim(), 0, out);
+                out.push_str("</span>");
+                i += next_i;
+                continue;
+            }
+            if let Some((inner, next_i)) = parse_inline_math(rest) {
+                out.push_str("<span class=\"math\">");
+                render_tex_math_inner(inner, 0, out);
+                out.push_str("</span>");
+                i += next_i;
+                continue;
+            }
         }
         if let Some(after_bang) = rest.strip_prefix('!')
             && after_bang.starts_with('[')
@@ -683,6 +777,16 @@ fn parse_delimited_span(slice: &str, width: usize) -> Option<(&str, usize)> {
             i += skip;
             continue;
         }
+        if bytes[i] == b'$'
+            && let Some(cur) = rest.get(i..)
+        {
+            let skip =
+                if cur.starts_with("$$") { parse_block_math_inline(cur).map(|(_, len)| len) } else { parse_inline_math(cur).map(|(_, len)| len) };
+            if let Some(len) = skip {
+                i += len;
+                continue;
+            }
+        }
         if bytes.get(i..i + width) == Some(delim) && i > 0 && bytes[i - 1] != b' ' {
             if width == 1 && ch == b'_' && is_word_boundary_underscore(bytes, i) {
                 i += 1;
@@ -709,6 +813,25 @@ pub fn strip_inline_markdown(input: &str) -> String {
         if rest.is_empty() {
             break;
         }
+        if bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_punctuation() {
+            out.push(char::from(bytes[i + 1]));
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'$' {
+            if rest.starts_with("$$")
+                && let Some((inner, next_i)) = parse_block_math_inline(rest)
+            {
+                render_tex_math_plain(inner.trim(), 0, &mut out);
+                i += next_i;
+                continue;
+            }
+            if let Some((inner, next_i)) = parse_inline_math(rest) {
+                render_tex_math_plain(inner, 0, &mut out);
+                i += next_i;
+                continue;
+            }
+        }
         if bytes[i] == b'['
             && let Some((label, _, next_i)) = parse_bracket_link(rest)
         {
@@ -725,6 +848,781 @@ pub fn strip_inline_markdown(input: &str) -> String {
         i += ch.len_utf8();
     }
     out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Render a raw TeX-subset formula into a strict-CSP static `<span class="math">...</span>`.
+#[must_use]
+pub fn render_math_html(tex: &str) -> String {
+    let trimmed = tex.trim();
+    let mut out = String::with_capacity(trimmed.len().saturating_mul(2) + 32);
+    out.push_str("<span class=\"math\">");
+    render_tex_math_inner(trimmed, 0, &mut out);
+    out.push_str("</span>");
+    out
+}
+
+const MAX_MATH_DEPTH: usize = 32;
+
+fn is_display_math_start(lines: &[&str], idx: usize) -> bool {
+    let Some(trimmed) = lines.get(idx).map(|s| s.trim()) else {
+        return false;
+    };
+    let Some(after_open) = trimmed.strip_prefix("$$") else {
+        return false;
+    };
+    if let Some(inner) = after_open.strip_suffix("$$") {
+        return !inner.contains("$$") && !inner.trim().is_empty();
+    }
+    if after_open.contains("$$") {
+        return false;
+    }
+    find_display_math_close(lines, idx + 1).is_some()
+}
+
+fn find_display_math_close(lines: &[&str], start: usize) -> Option<usize> {
+    for (offset, line) in lines.get(start..)?.iter().enumerate() {
+        let trimmed = line.trim();
+        if parse_fence_open(trimmed).is_some() {
+            return None;
+        }
+        if trimmed == "$$" || (trimmed.ends_with("$$") && !ends_with_escaped_dollars(trimmed)) {
+            return Some(start + offset);
+        }
+    }
+    None
+}
+
+fn ends_with_escaped_dollars(trimmed: &str) -> bool {
+    let Some(before) = trimmed.strip_suffix("$$") else {
+        return false;
+    };
+    let backslashes = before.bytes().rev().take_while(|&b| b == b'\\').count();
+    backslashes % 2 == 1
+}
+
+fn try_render_math_block(lines: &[&str], idx: usize, out: &mut String) -> Option<usize> {
+    let trimmed = lines.get(idx)?.trim();
+    let after_open = trimmed.strip_prefix("$$")?;
+    if let Some(inner) = after_open.strip_suffix("$$") {
+        let clean = inner.trim();
+        if inner.contains("$$") || clean.is_empty() {
+            return None;
+        }
+        out.push_str("<div class=\"math-block\"><span class=\"math\">");
+        render_tex_math_inner(clean, 0, out);
+        out.push_str("</span></div>\n");
+        return Some(idx + 1);
+    }
+    if after_open.contains("$$") {
+        return None;
+    }
+    let close_idx = find_display_math_close(lines, idx + 1)?;
+    let mut parts: Vec<&str> = Vec::new();
+    let head = after_open.trim();
+    if !head.is_empty() {
+        parts.push(head);
+    }
+    for line in lines.get(idx + 1..close_idx)? {
+        let t = line.trim();
+        if !t.is_empty() {
+            parts.push(t);
+        }
+    }
+    let close_trimmed = lines.get(close_idx)?.trim();
+    if let Some(tail) = close_trimmed.strip_suffix("$$") {
+        let tail_t = tail.trim();
+        if !tail_t.is_empty() {
+            parts.push(tail_t);
+        }
+    }
+    let joined = parts.join(" ");
+    if joined.trim().is_empty() {
+        return None;
+    }
+    out.push_str("<div class=\"math-block\"><span class=\"math\">");
+    render_tex_math_inner(joined.trim(), 0, out);
+    out.push_str("</span></div>\n");
+    Some(close_idx + 1)
+}
+
+fn parse_block_math_inline(rest: &str) -> Option<(&str, usize)> {
+    let after_open = rest.strip_prefix("$$")?;
+    let mut i = 0usize;
+    let mut brace_depth = 0usize;
+    while let Some(cur) = after_open.get(i..) {
+        let Some(ch) = cur.chars().next() else {
+            break;
+        };
+        if ch == '\\' {
+            i += 1;
+            if let Some(nc) = after_open.get(i..).and_then(|s| s.chars().next()) {
+                i += nc.len_utf8();
+            }
+            continue;
+        }
+        if ch == '`' && parse_code_span(cur).is_some() {
+            return None;
+        }
+        if ch == '{' {
+            brace_depth = brace_depth.saturating_add(1);
+        } else if ch == '}' {
+            if brace_depth == 0 {
+                return None;
+            }
+            brace_depth -= 1;
+        } else if brace_depth == 0 && cur.starts_with("$$") {
+            let inner = after_open.get(..i)?;
+            if inner.trim().is_empty() {
+                return None;
+            }
+            return Some((inner, 2 + i + 2));
+        }
+        i += ch.len_utf8();
+    }
+    None
+}
+
+fn parse_inline_math(rest: &str) -> Option<(&str, usize)> {
+    let after_open = rest.strip_prefix('$')?;
+    if after_open.is_empty() || after_open.starts_with('$') {
+        return None;
+    }
+    if after_open.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    let mut i = 0usize;
+    let mut brace_depth = 0usize;
+    while let Some(cur) = after_open.get(i..) {
+        let Some(ch) = cur.chars().next() else {
+            break;
+        };
+        if ch == '\\' {
+            i += 1;
+            if let Some(nc) = after_open.get(i..).and_then(|s| s.chars().next()) {
+                i += nc.len_utf8();
+            }
+            continue;
+        }
+        if ch == '`' && parse_code_span(cur).is_some() {
+            return None;
+        }
+        if ch == '{' {
+            brace_depth = brace_depth.saturating_add(1);
+        } else if ch == '}' {
+            if brace_depth == 0 {
+                return None;
+            }
+            brace_depth -= 1;
+        } else if ch == '$' && brace_depth == 0 {
+            let inner = after_open.get(..i)?;
+            if inner.is_empty() || inner.chars().last().is_some_and(char::is_whitespace) {
+                return None;
+            }
+            let after_close = after_open.get(i + 1..)?;
+            if after_close.starts_with('$') {
+                return None;
+            }
+            if after_close.chars().next().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+                return None;
+            }
+            return Some((inner, 1 + i + 1));
+        }
+        i += ch.len_utf8();
+    }
+    None
+}
+
+fn render_tex_math_inner(tex: &str, depth: usize, out: &mut String) {
+    if depth > MAX_MATH_DEPTH {
+        push_html_escaped(tex, out);
+        return;
+    }
+    let mut i = 0usize;
+    while let Some(rest) = tex.get(i..) {
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
+        if ch.is_whitespace() {
+            while let Some(nc) = tex.get(i..).and_then(|s| s.chars().next())
+                && nc.is_whitespace()
+            {
+                i += nc.len_utf8();
+            }
+            if !out.ends_with(' ') && !out.is_empty() && !out.ends_with('>') {
+                out.push(' ');
+            }
+            continue;
+        }
+        if ch == '{'
+            && let Some((inner, consumed)) = extract_braced(rest)
+        {
+            render_tex_math_inner(inner, depth + 1, out);
+            i += consumed;
+            continue;
+        }
+        if ch == '_' || ch == '^' {
+            let tag = if ch == '_' { "sub" } else { "sup" };
+            let after = rest.get(1..).unwrap_or("");
+            if let Some((arg, consumed)) = extract_math_arg(after) {
+                out.push('<');
+                out.push_str(tag);
+                out.push('>');
+                render_tex_math_inner(arg, depth + 1, out);
+                out.push_str("</");
+                out.push_str(tag);
+                out.push('>');
+                i += 1 + consumed;
+                continue;
+            }
+        }
+        if ch == '\\' {
+            i += render_tex_command(rest, depth, out);
+            continue;
+        }
+        push_char_escaped(ch, out);
+        i += ch.len_utf8();
+    }
+}
+
+fn render_tex_command(rest: &str, depth: usize, out: &mut String) -> usize {
+    let Some(after) = rest.get(1..) else {
+        return 1;
+    };
+    let Some(first) = after.chars().next() else {
+        return 1;
+    };
+    if !first.is_ascii_alphabetic() {
+        match first {
+            ',' => out.push('\u{2009}'),
+            '!' => {}
+            ';' | ':' | ' ' | '\\' => out.push(' '),
+            '|' => out.push('\u{2016}'),
+            _ => push_char_escaped(first, out),
+        }
+        return 1 + first.len_utf8();
+    }
+    let name_len = after.bytes().take_while(u8::is_ascii_alphabetic).count();
+    let name = after.get(..name_len).unwrap_or("");
+    let tail = after.get(name_len..).unwrap_or("");
+
+    if matches!(name, "frac" | "dfrac" | "tfrac")
+        && let Some((num, den, consumed)) = extract_two_math_args(tail)
+    {
+        out.push_str("<span class=\"math-frac\"><span class=\"math-num\">");
+        render_tex_math_inner(num.trim(), depth + 1, out);
+        out.push_str("</span><span class=\"math-den\">");
+        render_tex_math_inner(den.trim(), depth + 1, out);
+        out.push_str("</span></span>");
+        return 1 + name_len + consumed;
+    }
+    if name == "binom"
+        && let Some((num, den, consumed)) = extract_two_math_args(tail)
+    {
+        out.push('(');
+        render_tex_math_inner(num.trim(), depth + 1, out);
+        out.push_str(" choose ");
+        render_tex_math_inner(den.trim(), depth + 1, out);
+        out.push(')');
+        return 1 + name_len + consumed;
+    }
+    if name == "sqrt"
+        && let Some((deg, rad, consumed)) = extract_sqrt_args(tail)
+    {
+        if let Some(d) = deg {
+            out.push_str("<sup>");
+            render_tex_math_inner(d.trim(), depth + 1, out);
+            out.push_str("</sup>");
+        }
+        out.push_str("\u{221A}<span class=\"math-rad\">");
+        render_tex_math_inner(rad.trim(), depth + 1, out);
+        out.push_str("</span>");
+        return 1 + name_len + consumed;
+    }
+    if matches!(name, "text" | "mathrm" | "textrm" | "operatorname" | "textbf" | "mathbf" | "mbox")
+        && let Some((inner, consumed)) = extract_braced_opt_ws(tail)
+    {
+        out.push_str("<span class=\"math-text\">");
+        render_tex_text_mode(inner, out);
+        out.push_str("</span>");
+        return 1 + name_len + consumed;
+    }
+    if matches!(name, "textit" | "mathit")
+        && let Some((inner, consumed)) = extract_braced_opt_ws(tail)
+    {
+        out.push_str("<em>");
+        render_tex_text_mode(inner, out);
+        out.push_str("</em>");
+        return 1 + name_len + consumed;
+    }
+    if matches!(name, "bar" | "overline" | "hat" | "widehat" | "tilde" | "widetilde")
+        && let Some((arg, consumed)) = extract_math_arg(tail)
+    {
+        let accent = match name {
+            "bar" | "overline" => '\u{0304}',
+            "hat" | "widehat" => '\u{0302}',
+            _ => '\u{0303}',
+        };
+        let mut inner_html = String::new();
+        render_tex_math_inner(arg.trim(), depth + 1, &mut inner_html);
+        push_accented_html(&inner_html, accent, out);
+        return 1 + name_len + consumed;
+    }
+    if matches!(name, "left" | "right") {
+        let extra = if tail.starts_with('.') { 1 } else { 0 };
+        return 1 + name_len + extra;
+    }
+    if name == "TeX" {
+        out.push_str("<span class=\"math-text\">TeX</span>");
+        return 1 + name_len;
+    }
+    if name == "LaTeX" {
+        out.push_str("<span class=\"math-text\">LaTeX</span>");
+        return 1 + name_len;
+    }
+    if name == "quad" {
+        out.push('\u{2003}');
+        return 1 + name_len;
+    }
+    if name == "qquad" {
+        out.push_str("\u{2003}\u{2003}");
+        return 1 + name_len;
+    }
+    if is_roman_math_function(name) {
+        out.push_str("<span class=\"math-text\">");
+        out.push_str(name);
+        out.push_str("</span>");
+        return 1 + name_len;
+    }
+    if let Some(sym) = lookup_greek_symbol(name).or_else(|| lookup_math_symbol(name)) {
+        let extra = if matches!(name, "textbackslash" | "textless" | "textgreater" | "textdegree") && tail.starts_with("{}") { 2 } else { 0 };
+        push_html_escaped(sym, out);
+        return 1 + name_len + extra;
+    }
+
+    push_html_escaped(name, out);
+    1 + name_len
+}
+
+fn render_tex_text_mode(inner: &str, out: &mut String) {
+    let mut i = 0usize;
+    while let Some(rest) = inner.get(i..) {
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
+        if ch == '\\'
+            && let Some(next_ch) = rest.get(1..).and_then(|s| s.chars().next())
+        {
+            if next_ch.is_ascii_punctuation() || next_ch == ' ' {
+                push_char_escaped(next_ch, out);
+                i += 1 + next_ch.len_utf8();
+                continue;
+            }
+            let after = rest.get(1..).unwrap_or("");
+            let nlen = after.bytes().take_while(u8::is_ascii_alphabetic).count();
+            if nlen > 0 {
+                let name = after.get(..nlen).unwrap_or("");
+                if let Some(sym) = lookup_greek_symbol(name).or_else(|| lookup_math_symbol(name)) {
+                    push_html_escaped(sym, out);
+                    i += 1 + nlen;
+                    continue;
+                }
+            }
+        }
+        push_char_escaped(ch, out);
+        i += ch.len_utf8();
+    }
+}
+
+fn push_accented_html(rendered: &str, accent: char, out: &mut String) {
+    let mut inserted = false;
+    let mut in_tag = false;
+    let mut in_entity = false;
+    for ch in rendered.chars() {
+        out.push(ch);
+        if inserted {
+            continue;
+        }
+        if ch == '<' {
+            in_tag = true;
+            continue;
+        }
+        if in_tag {
+            if ch == '>' {
+                in_tag = false;
+            }
+            continue;
+        }
+        if ch == '&' {
+            in_entity = true;
+            continue;
+        }
+        if in_entity {
+            if ch == ';' {
+                in_entity = false;
+                out.push(accent);
+                inserted = true;
+            }
+            continue;
+        }
+        if !ch.is_whitespace() {
+            out.push(accent);
+            inserted = true;
+        }
+    }
+    if !inserted {
+        out.push(accent);
+    }
+}
+
+fn render_tex_math_plain(tex: &str, depth: usize, out: &mut String) {
+    if depth > MAX_MATH_DEPTH {
+        out.push_str(tex);
+        return;
+    }
+    let mut i = 0usize;
+    while let Some(rest) = tex.get(i..) {
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
+        if ch == '{'
+            && let Some((inner, consumed)) = extract_braced(rest)
+        {
+            render_tex_math_plain(inner, depth + 1, out);
+            i += consumed;
+            continue;
+        }
+        if ch == '_' || ch == '^' {
+            let after = rest.get(1..).unwrap_or("");
+            if let Some((arg, consumed)) = extract_math_arg(after) {
+                render_tex_math_plain(arg, depth + 1, out);
+                i += 1 + consumed;
+                continue;
+            }
+        }
+        if ch == '\\' {
+            let after = rest.get(1..).unwrap_or("");
+            let Some(first) = after.chars().next() else {
+                i += 1;
+                continue;
+            };
+            if !first.is_ascii_alphabetic() {
+                if !matches!(first, '!' | ',') {
+                    out.push(first);
+                } else if first == ',' {
+                    out.push(' ');
+                }
+                i += 1 + first.len_utf8();
+                continue;
+            }
+            let nlen = after.bytes().take_while(u8::is_ascii_alphabetic).count();
+            let name = after.get(..nlen).unwrap_or("");
+            let tail = after.get(nlen..).unwrap_or("");
+            if matches!(name, "frac" | "dfrac" | "tfrac")
+                && let Some((num, den, consumed)) = extract_two_math_args(tail)
+            {
+                render_tex_math_plain(num.trim(), depth + 1, out);
+                out.push('/');
+                render_tex_math_plain(den.trim(), depth + 1, out);
+                i += 1 + nlen + consumed;
+                continue;
+            }
+            if name == "sqrt"
+                && let Some((_, rad, consumed)) = extract_sqrt_args(tail)
+            {
+                out.push('\u{221A}');
+                render_tex_math_plain(rad.trim(), depth + 1, out);
+                i += 1 + nlen + consumed;
+                continue;
+            }
+            if matches!(name, "text" | "mathrm" | "textrm" | "operatorname" | "textbf" | "mathbf" | "textit" | "mathit" | "mbox")
+                && let Some((inner, consumed)) = extract_braced_opt_ws(tail)
+            {
+                out.push_str(inner);
+                i += 1 + nlen + consumed;
+                continue;
+            }
+            if matches!(name, "bar" | "hat" | "tilde")
+                && let Some((arg, consumed)) = extract_math_arg(tail)
+            {
+                render_tex_math_plain(arg.trim(), depth + 1, out);
+                i += 1 + nlen + consumed;
+                continue;
+            }
+            if matches!(name, "left" | "right") {
+                let extra = if tail.starts_with('.') { 1 } else { 0 };
+                i += 1 + nlen + extra;
+                continue;
+            }
+            if name == "TeX" {
+                out.push_str("TeX");
+                i += 1 + nlen;
+                continue;
+            }
+            if name == "LaTeX" {
+                out.push_str("LaTeX");
+                i += 1 + nlen;
+                continue;
+            }
+            if let Some(sym) = lookup_greek_symbol(name).or_else(|| lookup_math_symbol(name)) {
+                out.push_str(sym);
+            } else {
+                out.push_str(name);
+            }
+            i += 1 + nlen;
+            continue;
+        }
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+}
+
+fn extract_braced(s: &str) -> Option<(&str, usize)> {
+    if !s.starts_with('{') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut escaped = false;
+    for (idx, ch) in s.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == '{' {
+            depth = depth.saturating_add(1);
+            if depth > MAX_MATH_DEPTH {
+                return None;
+            }
+        } else if ch == '}' {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return Some((s.get(1..idx)?, idx + 1));
+            }
+        }
+    }
+    None
+}
+
+fn extract_braced_opt_ws(s: &str) -> Option<(&str, usize)> {
+    let trimmed = s.trim_start_matches([' ', '\t']);
+    let ws = s.len() - trimmed.len();
+    let (inner, consumed) = extract_braced(trimmed)?;
+    Some((inner, ws + consumed))
+}
+
+fn extract_math_arg(s: &str) -> Option<(&str, usize)> {
+    let trimmed = s.trim_start_matches([' ', '\t']);
+    let ws = s.len() - trimmed.len();
+    if trimmed.starts_with('{') {
+        let (inner, consumed) = extract_braced(trimmed)?;
+        return Some((inner, ws + consumed));
+    }
+    let ch = trimmed.chars().next()?;
+    if ch == '\\' {
+        let after = trimmed.get(1..)?;
+        let nlen = after.bytes().take_while(u8::is_ascii_alphabetic).count();
+        let mut end = if nlen > 0 { 1 + nlen } else { 1 + after.chars().next().map_or(0, char::len_utf8) };
+        if nlen > 0 {
+            let name = after.get(..nlen).unwrap_or("");
+            let tail = after.get(nlen..).unwrap_or("");
+            if matches!(name, "text" | "mathrm" | "textrm" | "operatorname" | "textbf" | "mathbf" | "textit" | "mathit" | "mbox")
+                && let Some((_, arg_len)) = extract_braced_opt_ws(tail)
+            {
+                end += arg_len;
+            } else if matches!(name, "bar" | "hat" | "tilde")
+                && let Some((_, arg_len)) = extract_math_arg(tail)
+            {
+                end += arg_len;
+            } else if name == "sqrt"
+                && let Some((_, _, arg_len)) = extract_sqrt_args(tail)
+            {
+                end += arg_len;
+            } else if matches!(name, "frac" | "dfrac" | "tfrac" | "binom")
+                && let Some((_, _, arg_len)) = extract_two_math_args(tail)
+            {
+                end += arg_len;
+            }
+        }
+        return Some((trimmed.get(..end)?, ws + end));
+    }
+    Some((trimmed.get(..ch.len_utf8())?, ws + ch.len_utf8()))
+}
+
+fn extract_two_math_args(s: &str) -> Option<(&str, &str, usize)> {
+    let (a, ca) = extract_math_arg(s)?;
+    let (b, cb) = extract_math_arg(s.get(ca..)?)?;
+    Some((a, b, ca + cb))
+}
+
+fn extract_sqrt_args(s: &str) -> Option<(Option<&str>, &str, usize)> {
+    let trimmed = s.trim_start_matches([' ', '\t']);
+    let ws = s.len() - trimmed.len();
+    if let Some(after_bracket) = trimmed.strip_prefix('[') {
+        let mut depth = 0usize;
+        for (idx, ch) in after_bracket.char_indices() {
+            match ch {
+                '{' => depth = depth.saturating_add(1),
+                '}' => depth = depth.saturating_sub(1),
+                ']' if depth == 0 => {
+                    let deg = after_bracket.get(..idx)?;
+                    let rest = after_bracket.get(idx + 1..)?;
+                    let (rad, rad_len) = extract_math_arg(rest)?;
+                    return Some((Some(deg), rad, ws + 1 + idx + 1 + rad_len));
+                }
+                _ => {}
+            }
+        }
+    }
+    let (rad, rad_len) = extract_math_arg(s)?;
+    Some((None, rad, rad_len))
+}
+
+fn is_roman_math_function(name: &str) -> bool {
+    matches!(
+        name,
+        "ln" | "log"
+            | "exp"
+            | "sin"
+            | "cos"
+            | "tan"
+            | "sinh"
+            | "cosh"
+            | "tanh"
+            | "arcsin"
+            | "arccos"
+            | "arctan"
+            | "sec"
+            | "csc"
+            | "cot"
+            | "erf"
+            | "erfc"
+            | "min"
+            | "max"
+            | "lim"
+            | "sup"
+            | "inf"
+            | "arg"
+            | "det"
+            | "dim"
+            | "gcd"
+            | "lg"
+    )
+}
+
+fn lookup_greek_symbol(name: &str) -> Option<&'static str> {
+    match name {
+        "alpha" => Some("\u{03B1}"),
+        "beta" => Some("\u{03B2}"),
+        "gamma" => Some("\u{03B3}"),
+        "delta" => Some("\u{03B4}"),
+        "epsilon" | "varepsilon" => Some("\u{03B5}"),
+        "zeta" => Some("\u{03B6}"),
+        "eta" => Some("\u{03B7}"),
+        "theta" => Some("\u{03B8}"),
+        "vartheta" => Some("\u{03D1}"),
+        "iota" => Some("\u{03B9}"),
+        "kappa" => Some("\u{03BA}"),
+        "varkappa" => Some("\u{03F0}"),
+        "lambda" => Some("\u{03BB}"),
+        "mu" | "micro" => Some("\u{03BC}"),
+        "nu" => Some("\u{03BD}"),
+        "xi" => Some("\u{03BE}"),
+        "omicron" => Some("\u{03BF}"),
+        "pi" => Some("\u{03C0}"),
+        "varpi" => Some("\u{03D6}"),
+        "rho" => Some("\u{03C1}"),
+        "varrho" => Some("\u{03F1}"),
+        "varsigma" => Some("\u{03C2}"),
+        "sigma" => Some("\u{03C3}"),
+        "tau" => Some("\u{03C4}"),
+        "upsilon" => Some("\u{03C5}"),
+        "phi" => Some("\u{03C6}"),
+        "varphi" => Some("\u{03D5}"),
+        "chi" => Some("\u{03C7}"),
+        "psi" => Some("\u{03C8}"),
+        "omega" => Some("\u{03C9}"),
+        "Alpha" => Some("\u{0391}"),
+        "Beta" => Some("\u{0392}"),
+        "Gamma" => Some("\u{0393}"),
+        "Delta" => Some("\u{0394}"),
+        "Epsilon" => Some("\u{0395}"),
+        "Zeta" => Some("\u{0396}"),
+        "Eta" => Some("\u{0397}"),
+        "Theta" => Some("\u{0398}"),
+        "Iota" => Some("\u{0399}"),
+        "Kappa" => Some("\u{039A}"),
+        "Lambda" => Some("\u{039B}"),
+        "Mu" => Some("\u{039C}"),
+        "Nu" => Some("\u{039D}"),
+        "Xi" => Some("\u{039E}"),
+        "Omicron" => Some("\u{039F}"),
+        "Pi" => Some("\u{03A0}"),
+        "Rho" => Some("\u{03A1}"),
+        "Sigma" => Some("\u{03A3}"),
+        "Tau" => Some("\u{03A4}"),
+        "Upsilon" => Some("\u{03A5}"),
+        "Phi" => Some("\u{03A6}"),
+        "Chi" => Some("\u{03A7}"),
+        "Psi" => Some("\u{03A8}"),
+        "Omega" => Some("\u{03A9}"),
+        _ => None,
+    }
+}
+
+fn lookup_math_symbol(name: &str) -> Option<&'static str> {
+    match name {
+        "ge" | "geq" => Some("\u{2265}"),
+        "le" | "leq" => Some("\u{2264}"),
+        "pm" => Some("\u{00B1}"),
+        "mp" => Some("\u{2213}"),
+        "times" => Some("\u{00D7}"),
+        "div" => Some("\u{00F7}"),
+        "cdot" => Some("\u{00B7}"),
+        "bullet" => Some("\u{2022}"),
+        "in" => Some("\u{2208}"),
+        "notin" => Some("\u{2209}"),
+        "ne" | "neq" => Some("\u{2260}"),
+        "infty" => Some("\u{221E}"),
+        "propto" => Some("\u{221D}"),
+        "approx" => Some("\u{2248}"),
+        "equiv" => Some("\u{2261}"),
+        "sim" => Some("\u{223C}"),
+        "ll" => Some("\u{226A}"),
+        "gg" => Some("\u{226B}"),
+        "partial" => Some("\u{2202}"),
+        "nabla" => Some("\u{2207}"),
+        "sum" => Some("\u{2211}"),
+        "prod" => Some("\u{220F}"),
+        "int" => Some("\u{222B}"),
+        "to" | "rightarrow" => Some("\u{2192}"),
+        "leftarrow" => Some("\u{2190}"),
+        "leftrightarrow" => Some("\u{2194}"),
+        "subset" => Some("\u{2282}"),
+        "subseteq" => Some("\u{2286}"),
+        "cup" => Some("\u{222A}"),
+        "cap" => Some("\u{2229}"),
+        "emptyset" => Some("\u{2205}"),
+        "forall" => Some("\u{2200}"),
+        "exists" => Some("\u{2203}"),
+        "dots" | "ldots" | "cdots" => Some("\u{2026}"),
+        "prime" => Some("\u{2032}"),
+        "dprime" => Some("\u{2033}"),
+        "degree" | "deg" | "textdegree" => Some("\u{00B0}"),
+        "langle" => Some("\u{27E8}"),
+        "rangle" => Some("\u{27E9}"),
+        "lceil" => Some("\u{2308}"),
+        "rceil" => Some("\u{2309}"),
+        "lfloor" => Some("\u{230A}"),
+        "rfloor" => Some("\u{230B}"),
+        "textbackslash" => Some("\\"),
+        "textless" => Some("<"),
+        "textgreater" => Some(">"),
+        "space" => Some(" "),
+        _ => None,
+    }
 }
 
 /// Escape `<`, `>`, `&`, `"`, and `'` for safe HTML text and attribute emission.
