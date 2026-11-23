@@ -125,7 +125,8 @@ fn create_data_schema() -> Value {
             ("graph_sheet_id", nullable_schema(non_empty_str_schema("Optional explicit GraphSheet ID to create"))),
         ],
         &[],
-        vec![("kind", &["archetype"])],
+        // Retained until Stage 4 updates apps/{curvebook-cli,curvebook,curvebook-web}/
+        vec![("kind", &["archetype"]), ("cols", &["data_sets"]), ("replicates", &["subcolumns"])],
         false,
     )
 }

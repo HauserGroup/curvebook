@@ -62,7 +62,7 @@ fn seed_xy_data_and_graph_app() -> Result<UiApp, String> {
             "sheet_id": "ds-xy",
             "title": "Dose Response",
             "kind": "xy",
-            "data_sets": 2,
+            "cols": 2,
             "rows": 3,
             "auto_graph": false
         }),

@@ -30,7 +30,7 @@ fn seed_data_and_graph_app() -> UiApp {
             "sheet_id": "ds-1",
             "title": "Dose Response",
             "kind": "xy",
-            "data_sets": 2,
+            "cols": 2,
             "rows": 4,
             "auto_graph": false
         }),

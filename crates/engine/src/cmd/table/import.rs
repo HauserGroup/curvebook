@@ -36,7 +36,7 @@ use crate::cmd::helpers::{
 };
 use crate::cmd::params::{
     any_json_schema, array_schema, bool_schema, deserialize_strict, int_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema,
-    parse_params, str_schema,
+    obj_schema_with_aliases, parse_params, str_schema,
 };
 use crate::cmd::project::recalculate_dirty_with_links;
 
@@ -453,7 +453,8 @@ pub(super) struct ImportCsvParams {
 }
 
 pub(super) fn schema_import_csv() -> Value {
-    obj_schema(
+    // Retained until Stage 4 updates apps/curvebook-web/src/lib.rs
+    obj_schema_with_aliases(
         vec![
             ("sheet_id", nullable_schema(non_empty_str_schema("Optional target sheet ID (auto-generated if omitted)"))),
             ("csv", nullable_schema(str_schema("Inline CSV/TSV content"))),
@@ -483,6 +484,7 @@ pub(super) fn schema_import_csv() -> Value {
             ("transpose", bool_schema("Transpose imported table")),
         ],
         &[],
+        vec![("csv", &["text"]), ("archetype", &["kind"])],
         false,
     )
 }
@@ -1059,8 +1061,14 @@ pub(super) fn parse_plate_well_role(val: &Value) -> Result<PlateWellRole, Engine
     #[serde(deny_unknown_fields)]
     struct RoleObj {
         role: Option<String>,
+        // Retained until Stage 3 updates egui_shell/import_wizard.rs
+        #[serde(alias = "group")]
         group_name: Option<String>,
+        // Retained until Stage 3 updates egui_shell/import_wizard.rs
+        #[serde(alias = "x")]
         dilution_x: Option<f64>,
+        // Retained until Stage 3 updates egui_shell/import_wizard.rs
+        #[serde(alias = "rep")]
         replicate: Option<usize>,
     }
     let obj: RoleObj =
