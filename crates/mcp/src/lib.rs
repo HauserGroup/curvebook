@@ -38,7 +38,9 @@ pub use protocol::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use protocol::{run_stdio_with_control_port, run_stdio_with_control_port_gui_only, run_stdio_with_control_port_options};
-pub use resources::{ResourceContent, ResourceDescriptor, ResourceError, list_resources, read_resource};
+pub use resources::{
+    ResourceContent, ResourceDescriptor, ResourceError, ResourceTemplateDescriptor, list_resource_templates, list_resources, read_resource,
+};
 pub use tools::{
     CancellationRegistry, ContentBlock, GuiSessionHost, McpServerState, ToolCallError, ToolCallResult, ToolDefinition, call_tool,
     call_tool_with_cancel, list_tools, list_tools_for_state,

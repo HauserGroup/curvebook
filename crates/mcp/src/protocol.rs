@@ -14,7 +14,7 @@ use crate::errors::{self, StructuredErrorPayload};
 use crate::prompts::{get_prompt_for_mode, list_prompts_for_mode};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::resources::{ResourceContent, ResourceDescriptor};
-use crate::resources::{ResourceError, list_resources, read_resource};
+use crate::resources::{ResourceError, list_resource_templates, list_resources, read_resource};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::tools::decode_base64;
 use crate::tools::{McpServerState, ToolCallError, call_tool, list_tools_for_state};
@@ -312,9 +312,10 @@ fn extract_request_id(obj: &Map<String, Value>) -> Result<Option<Value>, ()> {
 
 fn dispatch_method(req_id: Option<Value>, method: &str, params: Value, state: &mut McpServerState) -> Option<JsonRpcResponse> {
     if is_notification_method(method, req_id.is_none()) {
-        if method == "notifications/initialized" || method == "initialized" {
-            state.mark_initialized();
-        } else if method == "notifications/cancelled"
+        // `handle_initialize` marks the session initialized; ignore `notifications/initialized`
+        // (and legacy `initialized`) prior to `initialize` so a premature notification neither
+        // bypasses `require_initialize` nor blocks the subsequent `initialize` handshake.
+        if method == "notifications/cancelled"
             && let Some(target_id) = extract_cancelled_request_id(&params)
         {
             let _ = state.cancel_request(target_id);
@@ -349,6 +350,7 @@ fn dispatch_method(req_id: Option<Value>, method: &str, params: Value, state: &m
         "tools/list" => handle_tools_list(id, &params, state),
         "tools/call" => handle_tools_call(id, params, state),
         "resources/list" => handle_resources_list(id, &params, state),
+        "resources/templates/list" => handle_resources_templates_list(id, &params, state),
         "resources/read" => handle_resources_read(id, &params, state),
         "prompts/list" => handle_prompts_list(id, &params, state),
         "prompts/get" => handle_prompts_get(id, &params, state),
@@ -496,6 +498,17 @@ fn handle_resources_list(id: Value, params: &Value, state: &mut McpServerState) 
         }
         Ok(JsonRpcResponse::ok(req_id.clone(), json!({ "resources": list_resources(state.session().document()) })))
     })
+}
+
+fn handle_resources_templates_list(id: Value, params: &Value, state: &mut McpServerState) -> JsonRpcResponse {
+    if !params.is_object() {
+        return JsonRpcResponse::err(id, ERR_INVALID_PARAMS, "resources/templates/list params must be an object", None);
+    }
+    if let Err(payload) = state.sync_remote_control_policy() {
+        return rpc_error_from_payload(id, payload);
+    }
+    let templates = if state.is_gui_only() { Vec::new() } else { list_resource_templates() };
+    JsonRpcResponse::ok(id, json!({ "resourceTemplates": templates }))
 }
 
 fn handle_resources_read(id: Value, params: &Value, state: &mut McpServerState) -> JsonRpcResponse {
