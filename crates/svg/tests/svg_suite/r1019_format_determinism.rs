@@ -299,3 +299,29 @@ fn upstream_coefficient_and_model_edits_refresh_svg_without_stale_content() -> T
 
     Ok(())
 }
+
+#[test]
+fn r20_5_fit_summary_svg_export_is_byte_deterministic() -> TestResult {
+    let (doc, mut graph, _) = build_svg_equation_project()?;
+    graph.spec.annotations.clear();
+    graph.spec.series[0].regression_overlay = Some(curvebook_doc::RegressionOverlaySpec {
+        result_sheet_id: SheetId::new("res-4pl"),
+        sample_segments: 256,
+        show_confidence_band: false,
+        show_prediction_band: false,
+        shaded_ribbon: true,
+    });
+    let opts = curvebook_chart::CompileOptions {
+        fit_summary: curvebook_chart::FitSummarySpec { enabled: true, ..curvebook_chart::FitSummarySpec::default() },
+    };
+    let s1 = curvebook_chart::compile_graph_with_options(&graph, &doc, &opts)?;
+    let s2 = curvebook_chart::compile_graph_with_options(&graph, &doc, &opts)?;
+    let svg_opts = SvgExportOptions::default();
+    let svg_1 = render_svg(&s1, &svg_opts)?;
+    let svg_2 = render_svg(&s2, &svg_opts)?;
+    assert_eq!(sha256_bytes(svg_1.as_bytes()), sha256_bytes(svg_2.as_bytes()));
+    validate_svg_structure(&svg_1)?;
+    assert!(svg_1.contains("4PL"), "expected fit-summary equation label in SVG");
+    assert!(svg_1.contains("LogEC50"), "expected fit-summary metric in SVG");
+    Ok(())
+}

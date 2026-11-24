@@ -404,3 +404,32 @@ fn upstream_coefficient_and_model_edits_refresh_rgba_pixels_without_stale_ink() 
 
     Ok(())
 }
+
+#[test]
+fn r20_5_fit_summary_png_export_is_byte_deterministic() -> TestResult {
+    let (doc, mut graph, _) = build_equation_project()?;
+    graph.spec.annotations.clear();
+    graph.spec.series[0].regression_overlay = Some(curvebook_doc::RegressionOverlaySpec {
+        result_sheet_id: SheetId::new("res-4pl"),
+        sample_segments: 256,
+        show_confidence_band: false,
+        show_prediction_band: false,
+        shaded_ribbon: true,
+    });
+    let opts = curvebook_chart::CompileOptions {
+        fit_summary: curvebook_chart::FitSummarySpec { enabled: true, ..curvebook_chart::FitSummarySpec::default() },
+    };
+    let s1 = curvebook_chart::compile_graph_with_options(&graph, &doc, &opts)?;
+    let s2 = curvebook_chart::compile_graph_with_options(&graph, &doc, &opts)?;
+    let target = RenderTargetSpec { width_px: 360, height_px: 260, dpi: 72 };
+    let img_1 = render_scene(&s1, target)?;
+    let img_2 = render_scene(&s2, target)?;
+    let png_1 = encode_png(&img_1)?;
+    let png_2 = encode_png(&img_2)?;
+    assert_eq!(sha256_bytes(&png_1), sha256_bytes(&png_2));
+    assert!(decode_png_idat_len_and_signature(&png_1)? > 0);
+    // Right gutter region outside plot_rect_pt must contain rendered fit-summary ink.
+    let gutter = RectPt::new(s1.plot_rect_pt.right() + 4.0, s1.plot_rect_pt.y, s1.width_pt - s1.plot_rect_pt.right() - 4.0, s1.plot_rect_pt.height);
+    assert!(count_non_white_pixels_in_rect(&img_1, &s1, gutter) > 40, "expected rendered fit-summary pixels in right gutter");
+    Ok(())
+}

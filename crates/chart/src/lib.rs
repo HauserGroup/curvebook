@@ -8,6 +8,7 @@
 
 pub mod column_grouped;
 pub mod equation_box;
+pub mod fit_summary;
 pub mod image_decode;
 pub mod markers;
 pub mod multivariate_layout;
@@ -18,6 +19,11 @@ pub mod xy;
 
 use curvebook_doc::{GraphKind, GraphSheet, GraphSpec, LayoutSheet, ProjectDocument};
 use curvebook_palette::{MarkerStyle, Rgba8};
+pub use fit_summary::{
+    DEFAULT_FIGURE_TYPOGRAPHY, FigureTypography, FitSummaryEntry, FitSummaryMetric, FitSummaryPlacement, FitSummarySpec, InsetCorner,
+    PlacementCandidateScore, PlacementEvaluation, PlacementStrategy, evaluate_fit_summary_placement, extract_fit_summary_entries,
+    measure_fit_summary_card, render_fit_summary_card,
+};
 pub use scene::{
     ChartError, ChartScene, ChartWarning, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PlottedPointMeta, PointPt, PositionedText, PreflightIssue,
     RectPt, ScenePrimitive, SceneRasterImage, SourceCellId, StrokePaint, TextAnchor, preflight_check_scene,
@@ -155,11 +161,31 @@ pub(crate) fn clamp_f64_safe(value: f64, min: f64, max: f64) -> f64 {
     if value.is_nan() { lo } else { value.clamp(lo, hi) }
 }
 
-/// Compile a single [`GraphSheet`] within `doc` into a resolution-independent [`ChartScene`].
+/// Explicit opt-in compilation options for [`compile_graph_with_options`] (`R20.5`).
+///
+/// [`CompileOptions::default()`] keeps `fit_summary.enabled == false` so existing saved figures
+/// and SVG/PDF/PNG export goldens remain bit-identical.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct CompileOptions {
+    /// Optional readable fit-summary card placement and decoupled figure typography.
+    pub fit_summary: FitSummarySpec,
+}
+
+/// Compile a single [`GraphSheet`] within `doc` into a resolution-independent [`ChartScene`]
+/// using backward-compatible default [`CompileOptions`].
 ///
 /// # Errors
 /// Returns [`ChartError::InvalidSpec`] when required canvas dimensions or parameters are invalid.
 pub fn compile_graph(graph: &GraphSheet, doc: &ProjectDocument) -> Result<ChartScene, ChartError> {
+    compile_graph_with_options(graph, doc, &CompileOptions::default())
+}
+
+/// Compile a single [`GraphSheet`] within `doc` into a resolution-independent [`ChartScene`]
+/// with explicit [`CompileOptions`] (e.g., `R20.5` readable fit-summary layout).
+///
+/// # Errors
+/// Returns [`ChartError::InvalidSpec`] when required canvas dimensions or parameters are invalid.
+pub fn compile_graph_with_options(graph: &GraphSheet, doc: &ProjectDocument, options: &CompileOptions) -> Result<ChartScene, ChartError> {
     let size = graph.spec.canvas_size_pt;
     if !size.width.is_finite() || !size.height.is_finite() || size.width <= 0.0 || size.height <= 0.0 {
         return Err(ChartError::InvalidSpec { message: format!("invalid graph canvas dimensions ({}, {})", size.width, size.height) });
@@ -167,7 +193,7 @@ pub fn compile_graph(graph: &GraphSheet, doc: &ProjectDocument) -> Result<ChartS
     let mut scene = ChartScene::new(graph.id.as_str(), graph.title.clone(), size.width, size.height, graph.spec.paper_fill);
 
     match graph.spec.kind {
-        GraphKind::Xy => xy::compile_xy_graph(graph, doc, &mut scene)?,
+        GraphKind::Xy => xy::compile_xy_graph_with_options(graph, doc, options, &mut scene)?,
         GraphKind::Column | GraphKind::Grouped => column_grouped::compile_column_or_grouped_graph(graph, doc, &mut scene)?,
         GraphKind::Survival | GraphKind::Contingency | GraphKind::PartsOfWhole => {
             survival_cat::compile_survival_or_categorical_graph(graph, doc, &mut scene)?;
@@ -183,7 +209,7 @@ pub fn compile_graph(graph: &GraphSheet, doc: &ProjectDocument) -> Result<ChartS
             rich: xy::expand_doc_text(&graph.spec.title, doc, info_id),
             anchor_pt: PointPt::new(scene.width_pt * 0.5, 18.0),
             anchor: TextAnchor::Middle,
-            font_size_pt: 12.0,
+            font_size_pt: DEFAULT_FIGURE_TYPOGRAPHY.title_pt,
             rotation_deg: 0.0,
             color: Rgba8::BLACK,
         }));

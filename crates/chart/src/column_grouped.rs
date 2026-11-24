@@ -323,7 +323,7 @@ fn compile_horizontal_column_or_grouped(
         render_horizontal_pairwise_brackets(scene, graph, doc, &horiz_bounds);
     }
 
-    render_legend_and_annotations_with_offset(scene, graph, doc, &legend_items, applied_extra_right)?;
+    let _ = render_legend_and_annotations_with_offset(scene, graph, doc, &legend_items, applied_extra_right)?;
     Ok(())
 }
 

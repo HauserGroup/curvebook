@@ -487,3 +487,29 @@ fn upstream_coefficient_and_model_edits_refresh_pdf17_binary_and_streams() -> Te
 
     Ok(())
 }
+
+#[test]
+fn r20_5_fit_summary_pdf_export_is_byte_deterministic() -> TestResult {
+    let (doc, mut graph, _) = build_pdf_equation_project()?;
+    graph.spec.annotations.clear();
+    graph.spec.series[0].regression_overlay = Some(curvebook_doc::RegressionOverlaySpec {
+        result_sheet_id: SheetId::new("res-4pl"),
+        sample_segments: 256,
+        show_confidence_band: false,
+        show_prediction_band: false,
+        shaded_ribbon: true,
+    });
+    let opts = curvebook_chart::CompileOptions {
+        fit_summary: curvebook_chart::FitSummarySpec { enabled: true, ..curvebook_chart::FitSummarySpec::default() },
+    };
+    let s1 = curvebook_chart::compile_graph_with_options(&graph, &doc, &opts)?;
+    let s2 = curvebook_chart::compile_graph_with_options(&graph, &doc, &opts)?;
+    let pdf_opts = PdfExportOptions::default();
+    let pdf_1 = render_pdf(&s1, &pdf_opts)?;
+    let pdf_2 = render_pdf(&s2, &pdf_opts)?;
+    assert_eq!(sha256_bytes(&pdf_1), sha256_bytes(&pdf_2));
+    let parsed = parse_pdf17_strict(&pdf_1)?;
+    let text = extract_pdf_tj_text(&parsed.page_streams[0]);
+    assert!(text.contains("4PL") && text.contains("LogEC50"), "expected fit-summary text in PDF: {text}");
+    Ok(())
+}

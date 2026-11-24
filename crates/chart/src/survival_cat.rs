@@ -317,7 +317,7 @@ pub(crate) fn draw_legend_entries(scene: &mut ChartScene, spec: &GraphSpec, entr
         })
         .collect();
     let info_id = doc.paired_info_sheet_id(&spec.primary_source_sheet_id);
-    crate::scales::render_legend_with_placement(
+    let _ = crate::scales::render_legend_with_placement(
         &spec.legend,
         &scaled,
         doc,

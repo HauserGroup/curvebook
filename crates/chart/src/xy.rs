@@ -1042,7 +1042,8 @@ pub(crate) fn render_legend_and_annotations(
     doc: &ProjectDocument,
     legend_items: &[LegendItem],
 ) -> Result<(), ChartError> {
-    render_legend_and_annotations_with_offset(scene, graph, doc, legend_items, 0.0)
+    let _ = render_legend_and_annotations_with_offset(scene, graph, doc, legend_items, 0.0)?;
+    Ok(())
 }
 
 pub(crate) fn render_legend_and_annotations_with_offset(
@@ -1051,17 +1052,18 @@ pub(crate) fn render_legend_and_annotations_with_offset(
     doc: &ProjectDocument,
     legend_items: &[LegendItem],
     outside_right_offset_pt: f64,
-) -> Result<(), ChartError> {
+) -> Result<Option<RectPt>, ChartError> {
     let info_id = primary_info_sheet_id(doc, &graph.spec.primary_source_sheet_id);
     let mut budget = crate::scales::AnnotationBudget::default();
     crate::scales::render_annotations_with_budget(&graph.spec.annotations, doc, info_id, &mut budget, scene)?;
+    let mut legend_bounds = None;
     if graph.spec.legend.visible && !legend_items.is_empty() {
         let entries: Vec<crate::scales::LegendEntry> = legend_items.iter().map(legend_item_to_entry).collect();
         let has_right_y2 = graph.spec.y2_axis.is_some()
             || graph.spec.series.iter().any(|s| s.bind_to_right_y2)
             || matches!(graph.spec.frame_preset, FramePreset::DualYSecondaryRight);
         let y2_offset = if has_right_y2 { 48.0 } else { 0.0 };
-        crate::scales::render_legend_with_placement(
+        legend_bounds = crate::scales::render_legend_with_placement(
             &graph.spec.legend,
             &entries,
             doc,
@@ -1070,7 +1072,7 @@ pub(crate) fn render_legend_and_annotations_with_offset(
             scene,
         );
     }
-    Ok(())
+    Ok(legend_bounds)
 }
 
 /// Parameters for rendering an embedded live result or data table onto a graph or layout scene.
@@ -1462,6 +1464,16 @@ struct FittedOverlayData {
 
 /// Compile an XY graph sheet into vector primitives inside `scene`.
 pub fn compile_xy_graph(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartScene) -> Result<(), ChartError> {
+    compile_xy_graph_with_options(graph, doc, &crate::CompileOptions::default(), scene)
+}
+
+/// Compile an XY graph sheet into vector primitives inside `scene` with explicit [`crate::CompileOptions`].
+pub fn compile_xy_graph_with_options(
+    graph: &GraphSheet,
+    doc: &ProjectDocument,
+    options: &crate::CompileOptions,
+    scene: &mut ChartScene,
+) -> Result<(), ChartError> {
     if resolve_data_sheet(doc, &graph.spec.primary_source_sheet_id).is_none() {
         scene
             .warnings
@@ -1473,7 +1485,12 @@ pub fn compile_xy_graph(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut C
     let extracted = extract_all_xy_series(graph, doc, &mut scene.warnings);
     let info_id = primary_info_sheet_id(doc, &graph.spec.primary_source_sheet_id);
     let legend_box_w = crate::scales::auto_legend_box_width_pt(&graph.spec.legend, extracted.iter().map(|d| d.label.as_str()), doc, info_id);
-    configure_plot_rect(graph, scene, has_y2, 0.0, legend_box_w);
+    let fit_summary_w = crate::fit_summary::reserved_adjacent_fit_summary_width_pt(graph, doc, scene.width_pt, has_y2, &options.fit_summary);
+    let right_gutter_w = match (legend_box_w, fit_summary_w) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    };
+    configure_plot_rect(graph, scene, has_y2, 0.0, right_gutter_w);
     let (x_vals, y_vals, y2_vals) = collect_xy_domain_values(&graph.spec, &extracted);
     let has_bar_y =
         graph.spec.series.iter().any(|s| !s.bind_to_right_y2 && s.show_raw_data && matches!(s.gdo, GraphicalDataObject::BarWithReplicates { .. }));
@@ -1481,12 +1498,13 @@ pub fn compile_xy_graph(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut C
         graph.spec.series.iter().any(|s| s.bind_to_right_y2 && s.show_raw_data && matches!(s.gdo, GraphicalDataObject::BarWithReplicates { .. }));
 
     let r = scene.plot_rect_pt;
+    let y_headroom = crate::scales::DEFAULT_AUTORANGE_HEADROOM.default_xy_top_headroom_frac;
     let x_axis = SegmentedAxis::build(&graph.spec.x_axis, r.x, r.right(), &x_vals, false, 0.0);
-    let y_axis = SegmentedAxis::build(&graph.spec.y_axis, r.bottom(), r.y, &y_vals, has_bar_y, 0.05);
+    let y_axis = SegmentedAxis::build(&graph.spec.y_axis, r.bottom(), r.y, &y_vals, has_bar_y, y_headroom);
     let y2_axis = if has_y2 {
         let y2_spec = graph.spec.y2_axis.clone().unwrap_or_else(|| AxisSpec::linear("Y2"));
         let source = if y2_vals.is_empty() { &y_vals } else { &y2_vals };
-        Some(SegmentedAxis::build(&y2_spec, r.bottom(), r.y, source, has_bar_y2, 0.05))
+        Some(SegmentedAxis::build(&y2_spec, r.bottom(), r.y, source, has_bar_y2, y_headroom))
     } else {
         None
     };
@@ -1501,11 +1519,21 @@ pub fn compile_xy_graph(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut C
             mb.total_cmp(&ma).then_with(|| lb.total_cmp(&la)).then_with(|| a.cmp(&b))
         });
     }
+    let mut curve_samples_pt: Vec<PointPt> = Vec::new();
     for idx in render_order {
         let series_spec = &graph.spec.series[idx];
         let data = &extracted[idx];
         let target_y = if series_spec.bind_to_right_y2 { y2_axis.as_ref().unwrap_or(&y_axis) } else { &y_axis };
         render_xy_series(scene, &graph.spec, series_spec, data, &x_axis, target_y);
+        if options.fit_summary.enabled
+            && let Some(ov) = &data.fitted_overlay
+        {
+            for cp in &ov.curve.points {
+                if let (Some((_, px)), Some((_, py))) = (x_axis.map_value(cp.x), target_y.map_value(cp.y)) {
+                    curve_samples_pt.push(PointPt::new(px, py));
+                }
+            }
+        }
     }
 
     let mut legend_items = Vec::new();
@@ -1538,7 +1566,23 @@ pub fn compile_xy_graph(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut C
         });
     }
 
-    render_legend_and_annotations(scene, graph, doc, &legend_items)?;
+    let legend_bounds = render_legend_and_annotations_with_offset(scene, graph, doc, &legend_items, 0.0)?;
+    if options.fit_summary.enabled {
+        let entries = crate::fit_summary::extract_fit_summary_entries(graph, doc, options.fit_summary.max_metrics_per_series);
+        let legend_bottom_y = legend_bounds.filter(|lb| lb.x > scene.plot_rect_pt.right()).map(RectPt::bottom);
+        let y2_offset = if has_y2 { 48.0 } else { 0.0 };
+        if let Some(eval) =
+            crate::fit_summary::evaluate_fit_summary_placement(scene, &entries, &curve_samples_pt, legend_bottom_y, y2_offset, &options.fit_summary)
+        {
+            crate::fit_summary::render_fit_summary_card(
+                scene,
+                &entries,
+                eval.chosen.bounds_pt,
+                eval.chosen.font_size_pt,
+                options.fit_summary.bordered,
+            );
+        }
+    }
     Ok(())
 }
 

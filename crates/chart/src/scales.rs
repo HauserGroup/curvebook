@@ -625,7 +625,8 @@ impl ResolvedAxis {
 
     /// Resolve an [`AxisSpec`] over an explicit point span `span_pt = (start_pt, end_pt)` using raw data samples.
     #[must_use]
-    pub(crate) fn resolve_from_samples(
+    /// Resolve a segmented axis directly from raw data samples with explicit headroom and zero-inclusion rules.
+    pub fn resolve_from_samples(
         spec: &AxisSpec,
         orientation: AxisOrientation,
         span_pt: (f64, f64),
@@ -1501,8 +1502,51 @@ fn log_auto_domain_min(raw_min: f64, scale: AxisScale) -> f64 {
     if candidate.is_finite() && candidate > 0.0 && scale_transform(scale, candidate).is_some() { candidate.min(raw_min) } else { raw_min }
 }
 
+/// Explicit autoranging headroom policy (`R20.5`).
+///
+/// Governs automatic upper-bound headroom on segments whose `max` is `None` (`auto_range == true`).
+/// Segments with explicit manual bounds (`AxisSegment::min = Some(_)` or `max = Some(_)`) are
+/// **never** modified by this policy.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AutoRangeHeadroomPolicy {
+    /// Base linear headroom fraction added above `raw_max` before nice-step snapping (`0.08`).
+    pub base_linear_headroom_frac: f64,
+    /// Default extra top headroom fraction applied to XY Y-axes (`0.05`).
+    pub default_xy_top_headroom_frac: f64,
+    /// Upper clamp on caller-supplied `top_headroom_frac` to prevent non-finite or extreme blowout (`1.0`).
+    pub max_extra_headroom_frac: f64,
+    /// When `true`, strictly negative linear data (`raw_max < 0.0`, `raw_min < raw_max`) clamps
+    /// its top-headroom padded upper bound at `0.0` instead of overshooting into positive space.
+    pub clamp_negative_max_at_zero: bool,
+}
+
+/// Canonical `R20.5` autoranging headroom policy for `curvebook-chart`.
+pub const DEFAULT_AUTORANGE_HEADROOM: AutoRangeHeadroomPolicy = AutoRangeHeadroomPolicy {
+    base_linear_headroom_frac: 0.08,
+    default_xy_top_headroom_frac: 0.05,
+    max_extra_headroom_frac: 1.0,
+    clamp_negative_max_at_zero: true,
+};
+
+/// Returns `true` when `seg` has at least one explicit manual bound (`auto_range == false` on
+/// lower, upper, or both ends).
+#[must_use]
+pub const fn segment_has_manual_limits(seg: &AxisSegment) -> bool {
+    seg.min.is_some() || seg.max.is_some()
+}
+
+/// Returns `true` when both ends of `seg` are automatic (`min.is_none() && max.is_none()`).
+#[must_use]
+pub const fn segment_is_auto_range(seg: &AxisSegment) -> bool {
+    seg.min.is_none() && seg.max.is_none()
+}
+
+fn sanitize_top_headroom_frac(top_headroom_frac: f64) -> f64 {
+    if top_headroom_frac.is_finite() { top_headroom_frac.clamp(0.0, DEFAULT_AUTORANGE_HEADROOM.max_extra_headroom_frac) } else { 0.0 }
+}
+
 fn log_auto_domain_max(raw_max: f64, scale: AxisScale, top_headroom_frac: f64) -> f64 {
-    let headroom = if top_headroom_frac.is_finite() { top_headroom_frac.max(0.0) } else { 0.0 };
+    let headroom = sanitize_top_headroom_frac(top_headroom_frac);
     let padded = raw_max * (1.0 + headroom);
     let candidate = match scale {
         AxisScale::Log10 if padded.is_finite() => 10.0_f64.powf(padded.log10().ceil()),
@@ -1576,18 +1620,21 @@ fn sample_auto_domain_max(valid: &[f64], scale: AxisScale, top_headroom_frac: f6
     match scale {
         AxisScale::Linear => {
             let raw_span = raw_max - raw_min;
-            let headroom = 0.08 + top_headroom_frac.max(0.0);
+            let headroom = DEFAULT_AUTORANGE_HEADROOM.base_linear_headroom_frac + sanitize_top_headroom_frac(top_headroom_frac);
+            let clamp_neg_to_zero = DEFAULT_AUTORANGE_HEADROOM.clamp_negative_max_at_zero && raw_max < 0.0 && raw_min < raw_max;
             let (step, padded) = if raw_span.is_finite() {
                 let span = raw_span.max(raw_max.abs() * 0.1);
                 let safe_span = if span.is_finite() && span > MIN_FINITE_AXIS_SPAN { span } else { 1.0 };
                 let p = raw_max + safe_span * headroom;
-                (nice_linear_step(safe_span / 5.0), if p.is_finite() { p } else { raw_max })
+                let clamped = if clamp_neg_to_zero && p > 0.0 { 0.0 } else { p };
+                (nice_linear_step(safe_span / 5.0), if clamped.is_finite() { clamped } else { raw_max })
             } else {
                 let half_span = (0.5 * raw_max - 0.5 * raw_min).max(MIN_FINITE_AXIS_SPAN);
                 let half_step = nice_linear_step(half_span / 5.0);
                 let full_step = if (2.0 * half_step).is_finite() { 2.0 * half_step } else { half_span };
                 let p = raw_max + 2.0 * half_span * headroom;
-                (full_step, if p.is_finite() { p } else { raw_max })
+                let clamped = if clamp_neg_to_zero && p > 0.0 { 0.0 } else { p };
+                (full_step, if clamped.is_finite() { clamped } else { raw_max })
             };
             let snapped = (padded / step).ceil() * step;
             clean_zero(if snapped.is_finite() { snapped } else { raw_max })
@@ -2850,7 +2897,7 @@ pub(crate) struct LegendPlacement {
 /// Render a figure legend from `legend` and `entries` into `scene`.
 pub fn render_legend(legend: &LegendSpec, entries: &[LegendEntry], doc: &ProjectDocument, primary_id: Option<&SheetId>, scene: &mut ChartScene) {
     let info_id = resolve_paired_info_id(doc, primary_id);
-    render_legend_with_placement(legend, entries, doc, info_id, LegendPlacement::default(), scene);
+    let _ = render_legend_with_placement(legend, entries, doc, info_id, LegendPlacement::default(), scene);
 }
 
 fn auto_legend_origin(scene: &ChartScene, box_w: f64, placement: LegendPlacement) -> (f64, f64) {
@@ -2872,9 +2919,9 @@ pub(crate) fn render_legend_with_placement(
     info_id: Option<&SheetId>,
     placement: LegendPlacement,
     scene: &mut ChartScene,
-) {
+) -> Option<RectPt> {
     if !legend.visible || entries.is_empty() {
-        return;
+        return None;
     }
     let mut font_size = LEGEND_FONT_SIZE_PT;
     let mut row_h = LEGEND_ROW_H_PT;
@@ -2940,6 +2987,7 @@ pub(crate) fn render_legend_with_placement(
             color: Rgba8::BLACK,
         }));
     }
+    Some(box_rect)
 }
 
 fn emit_legend_swatch(entry: &LegendEntry, x0: f64, cy: f64, width: f64, scene: &mut ChartScene) {
