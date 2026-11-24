@@ -1360,9 +1360,11 @@ fn handle_shell_global_shortcuts(
     let on_searchable_sheet = !views.launcher_open
         && !app.nav.welcome.open
         && !app.nav.gallery.open
-        && app.document().active_sheet_id.as_ref().is_some_and(|id| {
-            app.document().data_sheet(id).is_some() || app.document().result_sheet(id).is_some()
-        });
+        && app
+            .document()
+            .active_sheet_id
+            .as_ref()
+            .is_some_and(|id| app.document().data_sheet(id).is_some() || app.document().result_sheet(id).is_some());
     let active_canvas_target = if !app.egui_views.launcher_open && !app.nav.welcome.open && !app.nav.gallery.open {
         let doc = app.document();
         doc.active_sheet_id.as_ref().filter(|id| doc.graph_sheet(id).is_some() || doc.layout_sheet(id).is_some()).cloned()

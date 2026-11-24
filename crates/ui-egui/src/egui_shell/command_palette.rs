@@ -408,13 +408,7 @@ fn render_palette_scope_pills(ui: &mut egui::Ui, query: &mut String, tokens: &To
 }
 
 /// Paint inline ghost-text completion suffix right after the typed characters in a `TextEdit`.
-pub(crate) fn paint_inline_ghost_completion(
-    ui: &egui::Ui,
-    text_edit_resp: &egui::Response,
-    typed_query: &str,
-    ghost_suffix: &str,
-    tokens: &Tokens,
-) {
+pub(crate) fn paint_inline_ghost_completion(ui: &egui::Ui, text_edit_resp: &egui::Response, typed_query: &str, ghost_suffix: &str, tokens: &Tokens) {
     if typed_query.is_empty() || ghost_suffix.is_empty() {
         return;
     }
@@ -516,7 +510,10 @@ pub(crate) fn paint_unified_search_row_content(ui: &egui::Ui, rect: Rect, item: 
         let (sc_galley, _) = layout_palette_line(ui.painter(), &plat_sc, 86.0, tokens.text_muted, 10.5);
         let pill_w = sc_galley.size().x + 10.0;
         let pill_h = 18.0;
-        let pill_rect = Rect::from_min_size(Pos2::new((right_limit - pill_w).max(badge_rect.right() + 40.0), rect.center().y - pill_h * 0.5), Vec2::new(pill_w, pill_h));
+        let pill_rect = Rect::from_min_size(
+            Pos2::new((right_limit - pill_w).max(badge_rect.right() + 40.0), rect.center().y - pill_h * 0.5),
+            Vec2::new(pill_w, pill_h),
+        );
         painter.rect_filled(pill_rect, CornerRadius::same(4), tokens.panel_bg);
         painter.rect_stroke(pill_rect, CornerRadius::same(4), Stroke::new(1.0, tokens.border), StrokeKind::Inside);
         painter.galley(
@@ -532,15 +529,8 @@ pub(crate) fn paint_unified_search_row_content(ui: &egui::Ui, rect: Rect, item: 
     let avail_w = (right_limit - text_left).max(40.0);
     let title_color = if item.enabled { tokens.text_strong } else { tokens.text_disabled };
     let hi_color = if item.enabled { tokens.accent } else { tokens.text_disabled };
-    let (title_galley, ellipsized) = layout_highlighted_search_title(
-        ui.painter(),
-        &item.title,
-        &item.match_spans,
-        avail_w,
-        title_color,
-        hi_color,
-        tokens.metrics.font_ui_body_pt,
-    );
+    let (title_galley, ellipsized) =
+        layout_highlighted_search_title(ui.painter(), &item.title, &item.match_spans, avail_w, title_color, hi_color, tokens.metrics.font_ui_body_pt);
     let title_w = title_galley.size().x;
     painter.galley(Pos2::new(text_left, rect.center().y - title_galley.size().y * 0.5), title_galley, title_color);
 
@@ -645,9 +635,7 @@ fn render_palette_footer(ui: &mut egui::Ui, app: &UiApp, selected: Option<&Unifi
     let preview_w = ui.available_width().max(80.0);
     let (msg, color) = match selected {
         Some(item) if !item.enabled => (format!("Disabled: {}", disabled_reason_for_item(app, item)), tokens.text_muted),
-        Some(item) if !item.subtitle.is_empty() => {
-            (format!("[{}] {} — {}", item.category_badge, item.title, item.subtitle), tokens.text_primary)
-        }
+        Some(item) if !item.subtitle.is_empty() => (format!("[{}] {} — {}", item.category_badge, item.title, item.subtitle), tokens.text_primary),
         _ => (String::from("↑↓ Navigate · Tab Autocomplete · Enter Execute · Esc Dismiss"), tokens.text_muted),
     };
     let (galley, _) = layout_palette_line(ui.painter(), &msg, (preview_w - 8.0).max(40.0), color, 11.5);
@@ -1162,30 +1150,17 @@ mod unified_search_integration_tests {
 
     fn app_with_populated_data_sheet() -> Result<(UiApp, SheetId), String> {
         let mut app = UiApp::new();
-        let created = app
-            .execute_session_ui_cmd("sheet.createData", json!({ "kind": "Column", "title": "Dose Response" }))
-            .map_err(|e| e.to_string())?;
-        let sheet_id_str = created
-            .payload
-            .get("sheet_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| String::from("missing sheet_id"))?;
+        let created =
+            app.execute_session_ui_cmd("sheet.createData", json!({ "kind": "Column", "title": "Dose Response" })).map_err(|e| e.to_string())?;
+        let sheet_id_str = created.payload.get("sheet_id").and_then(Value::as_str).ok_or_else(|| String::from("missing sheet_id"))?;
         let sheet_id = SheetId::try_new(sheet_id_str).map_err(|e| e.to_string())?;
         let _ = app
-            .execute_session_ui_cmd(
-                "table.setTitles",
-                json!({ "sheet_id": sheet_id.as_str(), "titles": ["Control", "DrugA"] }),
-            )
+            .execute_session_ui_cmd("table.setTitles", json!({ "sheet_id": sheet_id.as_str(), "titles": ["Control", "DrugA"] }))
             .map_err(|e| e.to_string())?;
         let _ = app
-            .execute_session_ui_cmd(
-                "table.setCell",
-                json!({ "sheet_id": sheet_id.as_str(), "row": 0, "col": 1, "subcol": 0, "value": 42.5 }),
-            )
+            .execute_session_ui_cmd("table.setCell", json!({ "sheet_id": sheet_id.as_str(), "row": 0, "col": 1, "subcol": 0, "value": 42.5 }))
             .map_err(|e| e.to_string())?;
-        let _ = app
-            .execute_session_ui_cmd("sheet.select", json!({ "sheet_id": sheet_id.as_str() }))
-            .map_err(|e| e.to_string())?;
+        let _ = app.execute_session_ui_cmd("sheet.select", json!({ "sheet_id": sheet_id.as_str() })).map_err(|e| e.to_string())?;
         app.egui_views.launcher_open = false;
         app.nav.welcome.open = false;
         Ok((app, sheet_id))

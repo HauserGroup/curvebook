@@ -721,8 +721,7 @@ fn render_multi_data_col_headers(
             let col_editable = !blocked && !ds.frozen;
             let resp = hdr_ui.interact(t2_r, hdr_ui.make_persistent_id(&wid), if col_editable { Sense::click() } else { Sense::hover() });
             let col_find_active = fstate.state.active_find_matches.as_ref().is_some_and(|h| h.active_col_title == Some(col));
-            let col_find_match =
-                col_find_active || fstate.state.active_find_matches.as_ref().is_some_and(|h| h.matching_col_titles.contains(&col));
+            let col_find_match = col_find_active || fstate.state.active_find_matches.as_ref().is_some_and(|h| h.matching_col_titles.contains(&col));
             if col_find_match {
                 paint_find_highlight(hdr_ui, t2_r, tokens, col_find_active);
             } else if resp.hovered() && col_editable {

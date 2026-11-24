@@ -491,7 +491,9 @@ pub fn render_not_found_page(base_path: &str) -> String {
     out.push_str(base_path);
     out.push_str("faq.html\">FAQ</a>\n        <a href=\"");
     out.push_str(base_path);
-    out.push_str("privacy.html\">Privacy</a>\n        <a href=\"https://github.com/HauserGroup/curvebook\">GitHub <span aria-hidden=\"true\">↗</span></a>\n");
+    out.push_str(
+        "privacy.html\">Privacy</a>\n        <a href=\"https://github.com/HauserGroup/curvebook\">GitHub <span aria-hidden=\"true\">↗</span></a>\n",
+    );
     out.push_str("      </nav>\n    </header>\n");
     out.push_str("    <main id=\"main\" tabindex=\"-1\">\n      <article class=\"overview doc-body\">\n");
     out.push_str("        <p class=\"eyebrow\">HTTP 404</p>\n");

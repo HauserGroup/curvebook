@@ -99,7 +99,12 @@ fn wf51_human_nonlinear_rout_replicate_interp_compare_and_relative_ic50() -> Tes
     run.click("fit.tab.compare")?;
     run.click("fit.cmp.extra_f")?;
     let cmp_pt = run.widget_center("fit.cmp.extra_f")?;
-    run.wheel(cmp_pt, egui::vec2(0.0, -280.0))?;
+    for _ in 0..12 {
+        if run.frame_meta().find_by_widget_id("fit.cmp.alt.log_inhibitor_vs_response_3pl").is_some() {
+            break;
+        }
+        run.wheel(cmp_pt, egui::vec2(0.0, -180.0))?;
+    }
     run.click("fit.cmp.alt.log_inhibitor_vs_response_3pl")?;
     run.click("fit.tab.output")?;
     run.click("fit.out.interp")?;

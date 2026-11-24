@@ -344,10 +344,22 @@ fn rect_for_aux_target(geom: &MultiGridGeom, scroll_offset: Vec2, target: &AuxIn
     }
 }
 
+fn cell_value_matches_json(cell: Option<&curvebook_doc::Cell>, val: &serde_json::Value) -> bool {
+    match (cell.map(|c| &c.value), val) {
+        (None | Some(curvebook_doc::CellValue::Empty), serde_json::Value::Null) => true,
+        (Some(curvebook_doc::CellValue::Number(cur)), serde_json::Value::Number(n)) => n.as_f64().is_some_and(|v| v.to_bits() == cur.to_bits()),
+        (Some(curvebook_doc::CellValue::Text(cur)), serde_json::Value::String(s)) => cur == s,
+        _ => false,
+    }
+}
+
 fn commit_standard_inline_edit(app: &UiApp, ds: &DataSheet, target: GridInlineEditTarget, draft: String, intents: &mut PendingUiIntents) {
     match target {
         GridInlineEditTarget::Cell(coord) => {
             let val = parse_inline_cell_input(app, &draft);
+            if cell_value_matches_json(ds.cell(curvebook_doc::CellCoord::new(coord.row, coord.col, coord.subcol)), &val) {
+                return;
+            }
             intents.push_engine(
                 "table.setCell",
                 json!({ "sheet_id": ds.id.as_str(), "row": coord.row, "col": coord.col, "subcol": coord.subcol, "value": val }),

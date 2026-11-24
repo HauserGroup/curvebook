@@ -43,10 +43,7 @@ fn check_unique_meta_descriptions<'a>(pages: impl IntoIterator<Item = (&'a str, 
     let mut seen: BTreeMap<String, &str> = BTreeMap::new();
     for (rel, facts) in pages {
         if facts.meta_descriptions.len() != 1 {
-            return Err(format!(
-                "{rel}: expected exactly one `<meta name=\"description\">` tag, found {}",
-                facts.meta_descriptions.len()
-            ));
+            return Err(format!("{rel}: expected exactly one `<meta name=\"description\">` tag, found {}", facts.meta_descriptions.len()));
         }
         let desc = facts.meta_descriptions[0].trim();
         if desc.is_empty() {
@@ -209,9 +206,7 @@ fn process_tag_attrs(rel_path: &str, tag_lower: &str, attrs: &[(String, String)]
             return Err(format!("{rel_path}: `<img>` must declare an `alt` attribute (use `alt=\"\"` for decorative images)"));
         }
         if rel_path.starts_with("docs/") {
-            let valid_dim = |name: &str| {
-                attrs.iter().any(|(k, v)| k.eq_ignore_ascii_case(name) && v.trim().parse::<u32>().is_ok_and(|n| n > 0))
-            };
+            let valid_dim = |name: &str| attrs.iter().any(|(k, v)| k.eq_ignore_ascii_case(name) && v.trim().parse::<u32>().is_ok_and(|n| n > 0));
             if !valid_dim("width") || !valid_dim("height") {
                 return Err(format!("{rel_path}: root page `<img>` must declare positive integer `width` and `height` attributes"));
             }
@@ -732,11 +727,8 @@ pub fn check_root_pages(root: &Path) -> Result<(), String> {
     let docs_dir = root.join("docs");
     let required = ["index.html", "privacy.html", "manual/index.html"];
     let mut pages_to_audit: Vec<&str> = required.to_vec();
-    let optional = super::seo::LANDING_PAGES
-        .iter()
-        .copied()
-        .filter(|p| !required.contains(p))
-        .chain(["404.html", "get-started.html", "troubleshooting.html"]);
+    let optional =
+        super::seo::LANDING_PAGES.iter().copied().filter(|p| !required.contains(p)).chain(["404.html", "get-started.html", "troubleshooting.html"]);
     for shim in optional {
         let path = docs_dir.join(shim);
         if std::fs::symlink_metadata(&path).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_file()) {
@@ -1187,7 +1179,8 @@ $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
         std::fs::write(docs.join("images/curvebook.png"), b"png").unwrap();
 
         let shim_gs = render_root_redirect_shim("Get Started", "Get started redirect", "manual/v0.1/get-started.html", "v0.1.0");
-        let shim_ts = render_root_redirect_shim("Troubleshooting", "Troubleshooting redirect", "manual/v0.1/troubleshooting.html#known-issues", "v0.1.0");
+        let shim_ts =
+            render_root_redirect_shim("Troubleshooting", "Troubleshooting redirect", "manual/v0.1/troubleshooting.html#known-issues", "v0.1.0");
         assert!(audit_single_html("docs/get-started.html", &shim_gs).is_ok());
         assert!(audit_single_html("docs/troubleshooting.html", &shim_ts).is_ok());
 

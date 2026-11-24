@@ -2011,11 +2011,7 @@ fn apply_search_and_find_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiI
         }
         UiIntent::OpenSheetFind => {
             let doc = app.session.document();
-            let target = doc
-                .active_sheet_id
-                .as_ref()
-                .filter(|sid| doc.data_sheet(sid).is_some() || doc.result_sheet(sid).is_some())
-                .cloned();
+            let target = doc.active_sheet_id.as_ref().filter(|sid| doc.data_sheet(sid).is_some() || doc.result_sheet(sid).is_some()).cloned();
             if target.is_some() {
                 app.egui_views.sheet_find.open_for_sheet(target);
             }

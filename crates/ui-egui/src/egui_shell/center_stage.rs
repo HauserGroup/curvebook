@@ -24,8 +24,7 @@ use crate::egui_shell::info_view::{InfoViewEguiState, render_info_view_for_sheet
 use crate::egui_shell::inspect_bridge::HybridCoexistenceDecision;
 use crate::egui_shell::results_view::{ResultsViewEguiState, render_results_view_for_sheet};
 use crate::egui_shell::sheet_find_bar::{
-    DataSheetFindMatch, DataSheetFindOverlay, ResultSheetFindOverlay, find_matches_in_data_sheet, find_matches_in_result_sheet,
-    render_sheet_find_bar,
+    DataSheetFindMatch, DataSheetFindOverlay, ResultSheetFindOverlay, find_matches_in_data_sheet, find_matches_in_result_sheet, render_sheet_find_bar,
 };
 use crate::egui_shell::welcome_hub::render_welcome_hub;
 use crate::egui_shell::widgets::dropdown;
@@ -394,21 +393,10 @@ pub fn render_center_stage(
         }
     }
 
-    if stage_enabled
-        && let Some((is_data, is_result, match_count)) = sheet_find_sync
-    {
+    if stage_enabled && let Some((is_data, is_result, match_count)) = sheet_find_sync {
         let anchor_rect = report.primary_rect_pt.unwrap_or(work_rect);
-        let still_open = render_sheet_find_bar(
-            ui.ctx(),
-            anchor_rect,
-            is_data,
-            is_result,
-            match_count,
-            &mut views.sheet_find,
-            ctx_in.tokens,
-            meta,
-            intents,
-        );
+        let still_open =
+            render_sheet_find_bar(ui.ctx(), anchor_rect, is_data, is_result, match_count, &mut views.sheet_find, ctx_in.tokens, meta, intents);
         if !still_open {
             views.column_grid.active_find_matches = None;
             views.results_view.active_find_matches = None;

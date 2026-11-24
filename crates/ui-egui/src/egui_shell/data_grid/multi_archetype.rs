@@ -252,8 +252,7 @@ fn render_multi_gutter_body(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut M
             if rt_r.height() > 1.0 {
                 let row_title = row_title_at(&ds.archetype, row);
                 let rt_find_active = fstate.state.active_find_matches.as_ref().is_some_and(|h| h.active_row_title == Some(row));
-                let rt_find_match =
-                    rt_find_active || fstate.state.active_find_matches.as_ref().is_some_and(|h| h.matching_row_titles.contains(&row));
+                let rt_find_match = rt_find_active || fstate.state.active_find_matches.as_ref().is_some_and(|h| h.matching_row_titles.contains(&row));
                 if rt_find_match {
                     paint_find_highlight(gui, rt_r, tokens, rt_find_active);
                 }

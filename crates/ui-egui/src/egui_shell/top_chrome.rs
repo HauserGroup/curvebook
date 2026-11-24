@@ -407,8 +407,11 @@ pub fn render_top_chrome(
         render_tier2_overflow_popup(ui.ctx(), &popup_ctx, state, &tier2_overflow.items, anchor, meta, intents);
     }
 
-    report.menu_popup_open =
-        state.active_in_window_menu.is_some() || state.split_menu_open || state.preset_menu_open || state.overflow_menu_open || state.search_dropdown_open;
+    report.menu_popup_open = state.active_in_window_menu.is_some()
+        || state.split_menu_open
+        || state.preset_menu_open
+        || state.overflow_menu_open
+        || state.search_dropdown_open;
     report
 }
 
@@ -1033,11 +1036,7 @@ fn render_inline_search_capsule(
     let capsule_h = 24.0;
     let input_w = (capsule_w - kbd_btn_w - 10.0).max(72.0);
 
-    let frame_stroke = if input_focused && enabled {
-        Stroke::new(1.5, tokens.focus_ring)
-    } else {
-        Stroke::new(1.0, tokens.border)
-    };
+    let frame_stroke = if input_focused && enabled { Stroke::new(1.5, tokens.focus_ring) } else { Stroke::new(1.0, tokens.border) };
     let frame_fill = if enabled { tokens.surface_bg } else { tokens.panel_bg };
 
     let capsule_resp = egui::Frame::NONE

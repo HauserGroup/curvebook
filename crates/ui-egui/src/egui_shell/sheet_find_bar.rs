@@ -392,12 +392,7 @@ fn render_toggle_pill(
     let ak_label = tooltip.to_owned();
     let is_active = *active;
     resp.widget_info(move || WidgetInfo::selected(egui::Role::Button, true, is_active, ak_label.clone()));
-    record_find_widget(
-        ui,
-        meta,
-        &resp,
-        FindWidgetMeta { widget_id, role: "button", label, value: Some(json!(is_active)), enabled: true },
-    );
+    record_find_widget(ui, meta, &resp, FindWidgetMeta { widget_id, role: "button", label, value: Some(json!(is_active)), enabled: true });
     let clicked = resp.clicked();
     let _ = resp.on_hover_text(tooltip);
     if clicked {
@@ -430,12 +425,7 @@ fn render_find_bar_controls(
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
 
-        let query_resp = ui.add(
-            TextEdit::singleline(&mut state.query)
-                .id(flags.query_id)
-                .desired_width(156.0)
-                .hint_text("Find in sheet…"),
-        );
+        let query_resp = ui.add(TextEdit::singleline(&mut state.query).id(flags.query_id).desired_width(156.0).hint_text("Find in sheet…"));
         if state.request_focus {
             query_resp.request_focus();
             state.request_focus = false;
@@ -446,24 +436,14 @@ fn render_find_bar_controls(
             ui,
             meta,
             &query_resp,
-            FindWidgetMeta {
-                widget_id: "sheet_find.query",
-                role: "textbox",
-                label: "Find in sheet",
-                value: Some(json!(state.query)),
-                enabled: true,
-            },
+            FindWidgetMeta { widget_id: "sheet_find.query", role: "textbox", label: "Find in sheet", value: Some(json!(state.query)), enabled: true },
         );
         if query_resp.changed() {
             out.query_or_toggle_changed = true;
         }
 
         let match_count = flags.match_count;
-        let count_text = if match_count == 0 {
-            String::from("0 / 0")
-        } else {
-            format!("{} / {match_count}", state.active_match_index + 1)
-        };
+        let count_text = if match_count == 0 { String::from("0 / 0") } else { format!("{} / {match_count}", state.active_match_index + 1) };
         let count_col = if !state.query.is_empty() && match_count == 0 { tokens.error } else { tokens.text_muted };
         let count_resp = ui.add(egui::Label::new(RichText::new(&count_text).small().monospace().color(count_col)));
         record_find_widget(
@@ -685,13 +665,7 @@ mod tests {
         );
 
         let cs_sub = find_matches_in_data_sheet(&ds, "Alpha", true, false);
-        assert_eq!(
-            cs_sub,
-            vec![
-                DataSheetFindMatch::Cell(GridCellCoord::new(1, 0, 0)),
-                DataSheetFindMatch::Cell(GridCellCoord::new(2, 1, 0)),
-            ]
-        );
+        assert_eq!(cs_sub, vec![DataSheetFindMatch::Cell(GridCellCoord::new(1, 0, 0)), DataSheetFindMatch::Cell(GridCellCoord::new(2, 1, 0)),]);
 
         let cs_exact = find_matches_in_data_sheet(&ds, "Alpha", true, true);
         assert_eq!(cs_exact, vec![DataSheetFindMatch::Cell(GridCellCoord::new(1, 0, 0))]);
@@ -713,10 +687,7 @@ mod tests {
         let all_tabs = find_matches_in_result_sheet(&rs, 0, true, "significant", false, false);
         assert_eq!(
             all_tabs,
-            vec![
-                ResultSheetFindMatch { tab_idx: 0, row_idx: 0, col_idx: 1 },
-                ResultSheetFindMatch { tab_idx: 1, row_idx: 0, col_idx: 0 },
-            ]
+            vec![ResultSheetFindMatch { tab_idx: 0, row_idx: 0, col_idx: 1 }, ResultSheetFindMatch { tab_idx: 1, row_idx: 0, col_idx: 0 },]
         );
 
         let exact = find_matches_in_result_sheet(&rs, 0, true, "Significant", true, true);
@@ -725,10 +696,7 @@ mod tests {
         let row_hdr = find_matches_in_result_sheet(&rs, 0, true, "slope", false, false);
         assert_eq!(
             row_hdr,
-            vec![
-                ResultSheetFindMatch { tab_idx: 0, row_idx: 0, col_idx: 0 },
-                ResultSheetFindMatch { tab_idx: 1, row_idx: 0, col_idx: 0 },
-            ]
+            vec![ResultSheetFindMatch { tab_idx: 0, row_idx: 0, col_idx: 0 }, ResultSheetFindMatch { tab_idx: 1, row_idx: 0, col_idx: 0 },]
         );
     }
 

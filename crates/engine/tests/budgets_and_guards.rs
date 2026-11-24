@@ -47,6 +47,7 @@ fn s07_05_doc_constructors_and_create_data_reject_oversized_cell_products_withou
     // Existing G12 26M-cell test remains within MAX_SHEET_CELLS.
     let ok_26m = MultipleVariablesTable::new(260, 100_000).expect("26M cell table must remain permitted");
     assert_eq!(ok_26m.variables.len(), 260);
+    drop(ok_26m);
 
     // Engine `sheet.createData` rejects extreme products immediately with ResourceLimit.
     let mut session = Session::new();

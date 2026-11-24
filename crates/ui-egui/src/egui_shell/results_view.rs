@@ -510,37 +510,36 @@ pub fn render_results_view_for_sheet(
         if let Some(target_y) = scroll_to_y {
             scroll_area = scroll_area.vertical_scroll_offset(target_y);
         }
-        let scroll_out = scroll_area
-            .show_viewport(ui, |ui, viewport| {
-                render_result_tab_table(ui, &tab_ctx, active_idx, is_survival_summary, viewport, state, meta, intents);
-                if !tab.footnotes.is_empty() {
-                    ui.add_space(6.0);
-                    let fn_max_w = (body_rect.width() - 24.0).max(80.0);
-                    let clip_r = ui.clip_rect();
-                    let paint_clipped_note = |ui: &mut egui::Ui, salt: usize, text: &str, color: Color32, bold: bool| {
-                        let mut fmt = egui::TextFormat::simple(FontId::proportional(tokens.metrics.font_ui_small_pt), color);
-                        if bold {
-                            fmt.font_id = super::fonts::section_heading_font_id(ui.ctx(), tokens);
-                        }
-                        let mut job = egui::text::LayoutJob::single_section(text.to_owned(), fmt);
-                        job.wrap = egui::text::TextWrapping { max_width: fn_max_w, ..Default::default() };
-                        let galley = ui.painter().layout_job(job);
-                        let raw_r = ui.allocate_space(vec2(fn_max_w, galley.size().y.max(14.0))).1;
-                        let vis_r = raw_r.intersect(clip_r);
-                        if vis_r.width() >= 2.0 && vis_r.height() >= 2.0 {
-                            ui.painter().with_clip_rect(vis_r).galley(raw_r.min, galley, color);
-                            let n_resp = ui.interact(vis_r, Id::unique(("res_fn", rs.id.as_str(), &tab.id, salt)), Sense::hover());
-                            let ak_txt = text.to_owned();
-                            n_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Label, true, ak_txt.clone()));
-                        }
-                    };
-                    let fn_lbl = tr_or_fallback(&app.locale, "results.footnotes", "Footnotes");
-                    paint_clipped_note(ui, 0, fn_lbl, tokens.text_strong, true);
-                    for (idx, note) in tab.footnotes.iter().enumerate() {
-                        paint_clipped_note(ui, idx + 1, note, tokens.text_muted, false);
+        let scroll_out = scroll_area.show_viewport(ui, |ui, viewport| {
+            render_result_tab_table(ui, &tab_ctx, active_idx, is_survival_summary, viewport, state, meta, intents);
+            if !tab.footnotes.is_empty() {
+                ui.add_space(6.0);
+                let fn_max_w = (body_rect.width() - 24.0).max(80.0);
+                let clip_r = ui.clip_rect();
+                let paint_clipped_note = |ui: &mut egui::Ui, salt: usize, text: &str, color: Color32, bold: bool| {
+                    let mut fmt = egui::TextFormat::simple(FontId::proportional(tokens.metrics.font_ui_small_pt), color);
+                    if bold {
+                        fmt.font_id = super::fonts::section_heading_font_id(ui.ctx(), tokens);
                     }
+                    let mut job = egui::text::LayoutJob::single_section(text.to_owned(), fmt);
+                    job.wrap = egui::text::TextWrapping { max_width: fn_max_w, ..Default::default() };
+                    let galley = ui.painter().layout_job(job);
+                    let raw_r = ui.allocate_space(vec2(fn_max_w, galley.size().y.max(14.0))).1;
+                    let vis_r = raw_r.intersect(clip_r);
+                    if vis_r.width() >= 2.0 && vis_r.height() >= 2.0 {
+                        ui.painter().with_clip_rect(vis_r).galley(raw_r.min, galley, color);
+                        let n_resp = ui.interact(vis_r, Id::unique(("res_fn", rs.id.as_str(), &tab.id, salt)), Sense::hover());
+                        let ak_txt = text.to_owned();
+                        n_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Label, true, ak_txt.clone()));
+                    }
+                };
+                let fn_lbl = tr_or_fallback(&app.locale, "results.footnotes", "Footnotes");
+                paint_clipped_note(ui, 0, fn_lbl, tokens.text_strong, true);
+                for (idx, note) in tab.footnotes.iter().enumerate() {
+                    paint_clipped_note(ui, idx + 1, note, tokens.text_muted, false);
                 }
-            });
+            }
+        });
         state.scroll_offset_y = scroll_out.state.clamped_offset().y;
         if scroll_out.content_size.y > scroll_out.inner_rect.height() + 0.5 {
             let bar_w = ui.spacing().scroll.bar_width.max(10.0);

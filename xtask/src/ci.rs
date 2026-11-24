@@ -128,8 +128,11 @@ const FEATURE_CHECK_COMMANDS: &[&[&str]] = &[
     // Verify every curvebook-ui-egui target (lib, bins, integration tests) compiles without
     // `bundled-fonts`, then run the unit tests and dedicated `install_fonts` integration test
     // rather than repeating all 90+ GUI workflow and serial performance binaries.
+    // Run with `--test-threads=1` so timing-sensitive unit tests (`rv50` 1M-row selection budget
+    // and `r1_s11_08` pasteboard drain) get the same isolation that `.config/nextest.toml` grants
+    // them in the `tests` stage.
     &["check", "--locked", "-p", "curvebook-ui-egui", "--no-default-features", "--all-targets"],
-    &["test", "--locked", "-p", "curvebook-ui-egui", "--no-default-features", "--lib", "--test", "install_fonts"],
+    &["test", "--locked", "-p", "curvebook-ui-egui", "--no-default-features", "--lib", "--test", "install_fonts", "--", "--test-threads=1"],
     &["test", "--locked", "-p", "curvebook-ui-egui", "--no-default-features", "--doc"],
     &["check", "--locked", "-p", "curvebook-mcp", "--no-default-features"],
 ];
@@ -236,7 +239,18 @@ mod tests {
             &[
                 &["test", "--locked", "-p", "curvebook-text", "--no-default-features"][..],
                 &["check", "--locked", "-p", "curvebook-ui-egui", "--no-default-features", "--all-targets"][..],
-                &["test", "--locked", "-p", "curvebook-ui-egui", "--no-default-features", "--lib", "--test", "install_fonts"][..],
+                &[
+                    "test",
+                    "--locked",
+                    "-p",
+                    "curvebook-ui-egui",
+                    "--no-default-features",
+                    "--lib",
+                    "--test",
+                    "install_fonts",
+                    "--",
+                    "--test-threads=1"
+                ][..],
                 &["test", "--locked", "-p", "curvebook-ui-egui", "--no-default-features", "--doc"][..],
                 &["check", "--locked", "-p", "curvebook-mcp", "--no-default-features"][..],
             ]
