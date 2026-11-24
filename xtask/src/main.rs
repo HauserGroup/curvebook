@@ -23,6 +23,7 @@ mod ico;
 mod layers;
 mod licenses;
 mod msix;
+mod pages_site;
 mod pending;
 mod release_scan;
 mod rust_lex;
@@ -73,6 +74,8 @@ commands:
   schemas [--check]     regenerate (or verify) docs/schemas/*.schema.json from curvebook-format
   docs-site [--check] [--output <dir>] [--release <ver>]
                         build (or verify) the static GitHub Pages documentation site
+  pages-stage <dir> | --list | --check
+                        copy only the published Pages site files into <dir> (or list / verify them)
   wasm                  check + clippy (-D warnings) wasm32 targets, trunk web-release build, and web bundle readiness
   web-bundle            verify web bundle readiness and R10.22 zip size budget (CURVEBOOK_REQUIRE_WEB_BUNDLE=1 requires zip)
   corpus [--fetch]      run offline corpus & NIST StRD suites (optionally fetch corpus/nist-strd)
@@ -132,6 +135,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         "commands" => cmd_commands(&root, rest),
         "schemas" => schemas::run_cli(&root, rest),
         "docs-site" => cmd_docs_site(&root, rest),
+        "pages-stage" => pages_site::run(&root, rest),
         "wasm" => cmd_wasm(&root),
         "web-bundle" => web_fonts::run_bundle_check(&root, rest),
         "corpus" => corpus::run(&root, rest),

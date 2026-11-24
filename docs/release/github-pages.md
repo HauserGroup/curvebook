@@ -104,7 +104,7 @@ cargo xtask docs-site --release <version> --check
 
 ### Search metadata (`R12.8`)
 
-`docs/sitemap.xml` lists the hand-written landing pages (`seo::LANDING_PAGES` in `xtask/src/docs_site/seo.rs`) and every page of the newest release snapshot, and nothing else: redirect shims and older snapshots stay out so search engines index one copy of each page. `--release` rewrites it; after adding or removing a landing page, regenerate it with:
+`docs/sitemap.xml` lists the hand-written landing pages (`LANDING_PAGES` in `xtask/src/pages_site.rs`) and every page of the newest release snapshot, and nothing else: redirect shims and older snapshots stay out so search engines index one copy of each page. `--release` rewrites it; after adding or removing a landing page, regenerate it with:
 
 ```sh
 cargo xtask docs-site --sitemap
@@ -112,7 +112,28 @@ cargo xtask docs-site --sitemap
 
 `cargo xtask docs-site --check` fails when the committed sitemap is stale or when a landing page lacks exactly one `<link rel="canonical">` naming its own published URL. Canonical links are the only absolute `<link href>` the checks accept, and only inside `https://hausergroup.github.io/curvebook/`. A new landing page goes in `docs/`, gets a canonical link and an entry in `LANDING_PAGES`, and is linked from `index.html`.
 
-A project site on `github.io` cannot serve its own `robots.txt` (that file belongs to the organisation's root site), so submit the sitemap directly in Google Search Console and Bing Webmaster Tools. Both verify ownership with an HTML file or `<meta>` tag placed in `docs/` and add no script to the pages.
+A project site on `github.io` cannot serve its own `robots.txt` (that file belongs to the organisation's root site), so submit the sitemap directly in Google Search Console and Bing Webmaster Tools. Both verify ownership with an HTML file or `<meta>` tag placed in `docs/` and add no script to the pages. A verification file must also be added to `SITE_FILES` in `xtask/src/pages_site.rs`, or it is not published.
+
+### What Pages publishes (`R12.9`)
+
+Pages serves only the files on the publish list in `xtask/src/pages_site.rs`, not the whole `docs/` folder, so the internal Markdown kept under `docs/` (roadmap, audits, planning, evidence, reference sources, schemas) is never served next to the site. The list is the landing pages (`LANDING_PAGES`), the redirect pages (`REDIRECT_PAGES`), every release snapshot under `docs/manual/v<major>.<minor>/` except its `manifest.json`, `site.css`, `sitemap.xml`, and everything under `images/`. Markdown and symlinks are never published.
+
+`.github/workflows/pages.yml` runs on pushes to `main` that touch `docs/`, `xtask/`, or the workflow itself (and on demand): it copies the list into `_site` and deploys that folder. Its `deploy` job is the only place outside `release.yml` that may hold `pages: write` and `id-token: write` (`cargo xtask telemetry`). To see or check the list locally:
+
+```sh
+cargo xtask pages-stage --list
+cargo xtask pages-stage --check
+cargo xtask pages-stage target/pages-site
+```
+
+`--check` (also part of `cargo xtask docs-site --check`) fails when a published page links to, or redirects to, a local file that is not published, or when `sitemap.xml` names one. A new top-level page or file needs an entry in the list; otherwise its links fail this check and it is not deployed. The repository stays public, so this keeps internal files off the website, not out of view.
+
+**One-time switch from branch publishing (maintainer, admin access).** Until the source is switched, `pages.yml` runs but its `deploy` job cannot publish, so switch right after the workflow lands on `main`:
+
+1. **Settings → Pages → Build and deployment → Source:** choose **GitHub Actions**. GitHub creates the `github-pages` environment, limited to `main`.
+2. **Actions → Pages → Run workflow** on `main`, and wait for the `deploy` job.
+3. Check that `/`, `/open-pzfx-files.html`, `/privacy.html`, `/sitemap.xml`, `/manual/`, `/manual/v0.1/get-started.html`, and the redirect pages return `200`, and that internal files such as `/ROADMAP.md`, `/pitfalls.md`, `/reference/concepts.md`, and `/schemas/preferences.schema.json` return `404`.
+4. Remove `docs/.nojekyll`, which only branch publishing reads, and record the check in [`history/release/pages-verification.md`](../history/release/pages-verification.md). Search engines drop the removed URLs over the following weeks; once the site is verified in Search Console, its Removals tool can speed that up.
 
 Relative asset and page paths (`site.css`, `images/*.png`, `privacy.html`, `manual/index.html`, `index.html`) support deployment below `/curvebook/` or at a domain root. Verify cross-page links (`index.html` ↔ `privacy.html` ↔ `manual/index.html` and generated manual internal `#fragment` links), keyboard focus, WCAG AA text contrast, `@media (forced-colors: active)`, `@media print`, zero external browser network requests, and responsive (`1280px` / `850px` / `700px` / `390px` / `320px`) layouts without horizontal overflow, then run the full gate suite:
 
@@ -124,18 +145,19 @@ cargo xtask cleanroom
 cargo xtask secrets
 cargo xtask telemetry
 cargo xtask docs-site --check
+cargo xtask pages-stage --check
 cargo xtask status
 git diff --check
 ```
 
 ## Publish alongside Beta
 
-Keep hosting strictly limited to static files under `/docs` with `.nojekyll` disabling Jekyll processing.
+Keep hosting strictly limited to the staged publish list ([What Pages publishes](#what-pages-publishes-r129)). The Actions source deploys the staged folder as is, without Jekyll.
 
 1. Cut and verify the Beta prerelease using [`releasing.md`](releasing.md#alpha-and-beta-releases-with-the-release-workflow). Confirm the release contains `curvebook-<version>-macos-universal.dmg`, `curvebook-<version>-windows-{x64,arm64}.msi`, `curvebook-<version>-linux-{x86_64,aarch64}.AppImage`, `curvebook-<version>-freebsd-x86_64.tar.gz`, `SHA256SUMS.txt`, and `THIRD-PARTY-LICENSES.html` with passing Sigstore attestations.
 2. Run `cargo xtask docs-site --release <version> --check` from the tagged commit so `docs/manual/v0.1/`, `docs/manual/index.html`, and the root redirect shims (`docs/get-started.html`, `docs/troubleshooting.html`) are refreshed and verified against the release tag SHA, and confirm `#downloads` links in [`index.html`](../index.html) point to `manual/v0.1/get-started.html`, `manual/v0.1/troubleshooting.html#known-issues`, and `manual/v0.1/mcp-for-beginners.html`.
 3. Run the local responsive (`1280px` / `850px` / `700px` / `390px` / `320px`), keyboard, contrast, `forced-colors: active`, print, zero-network-request, and `cargo xtask` checks listed in [Preview and checks](#preview-and-checks).
-4. Ensure **Settings → Pages → Deploy from a branch → main → /docs** is active so pushes to `main` publish `docs/`.
+4. Ensure **Settings → Pages → Source** is **GitHub Actions**, so `.github/workflows/pages.yml` publishes the staged site on pushes to `main`.
 5. Wait for GitHub Pages deployment to succeed, then verify `https://hausergroup.github.io/curvebook/`, `/privacy.html`, `/manual/`, `/manual/v0.1/get-started.html`, `/manual/v0.1/troubleshooting.html#known-issues`, and the root redirect shims (`/get-started.html`, `/troubleshooting.html`) live in a browser across desktop and narrow mobile widths, and record the verification in [`history/release/pages-verification.md`](../history/release/pages-verification.md).
 
 The documentation site is separate from the `1.0`-deferred WASM application under `packaging/web/`. Its server-header files are not a GitHub Pages configuration, and publishing `/docs` does not publish `curvebook-web`.
