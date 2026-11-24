@@ -26,7 +26,7 @@ pub use archive::{
     ensure_existing_archive_not_newer, ensure_existing_unpacked_dir_not_newer, instantiate_template_bytes, is_unpacked_project_dir,
     migrate_document_json, open_archive_bytes, open_archive_bytes_with_limits, open_project_bytes, open_project_file, open_project_unpacked_dir,
     open_template_bytes, open_template_file, sanitize_circular_hooks, save_project_bytes, save_project_file, save_project_unpacked_dir,
-    save_template_bytes, save_template_file, strip_project_data_for_template, validate_project_document,
+    save_template_bytes, save_template_file, strip_project_data_for_template, validate_project_document, validate_project_document_skip_checkpoints,
 };
 pub use csv::{
     CsvOptions, FilteredDelimitedGrid, ImportBaselineAdjustment, MAX_CSV_FILE_BYTES, apply_csv_import_link, export_datasheet_to_csv,

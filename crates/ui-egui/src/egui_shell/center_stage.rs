@@ -304,7 +304,7 @@ pub fn render_center_stage(
     // In split view, the primary pane's sheet owns the singleton bottom banner.
     let banner_sheet_id = if split_active { app.split.resolve_sheets(doc).0.or_else(|| active_sheet_id.clone()) } else { active_sheet_id.clone() };
     let banner_kind = if !matches!(mode, CenterStageMode::Welcome | CenterStageMode::Gallery) {
-        detect_bottom_banner(app, views, banner_sheet_id.as_ref())
+        detect_bottom_banner(ui.ctx(), app, views, banner_sheet_id.as_ref())
     } else {
         None
     };
@@ -1596,7 +1596,7 @@ enum BottomBannerKind {
     DataLinkedRegion { sheet_id: SheetId, region_count: usize, upstream_id: Option<SheetId> },
 }
 
-fn detect_bottom_banner(app: &UiApp, views: &EguiShellViewState, active_sheet_id: Option<&SheetId>) -> Option<BottomBannerKind> {
+fn detect_bottom_banner(ctx: &egui::Context, app: &UiApp, views: &EguiShellViewState, active_sheet_id: Option<&SheetId>) -> Option<BottomBannerKind> {
     let sheet_id = active_sheet_id?;
     if views.center_stage.dismissed_banner_sheets.contains(sheet_id) || app.egui_views.center_stage.dismissed_banner_sheets.contains(sheet_id) {
         return None;
@@ -1610,7 +1610,7 @@ fn detect_bottom_banner(app: &UiApp, views: &EguiShellViewState, active_sheet_id
     }
 
     if let Some(gs) = doc.graph_sheet(sheet_id) {
-        let (count, details) = collect_graph_clipping_warnings(app, gs);
+        let (count, details) = collect_graph_clipping_warnings(ctx, app, gs);
         if count > 0 {
             return Some(BottomBannerKind::GraphClipping { sheet_id: sheet_id.clone(), count, details });
         }
@@ -1626,9 +1626,9 @@ fn detect_bottom_banner(app: &UiApp, views: &EguiShellViewState, active_sheet_id
     None
 }
 
-fn collect_graph_clipping_warnings(app: &UiApp, gs: &GraphSheet) -> (usize, Vec<String>) {
+fn collect_graph_clipping_warnings(ctx: &egui::Context, app: &UiApp, gs: &GraphSheet) -> (usize, Vec<String>) {
     let mut details = Vec::new();
-    if let Ok(scene) = app.session.render_sheet_scene(&gs.id) {
+    if let Some(scene) = super::canvas_view::resolve_cached_scene(ctx, app, &gs.id, "canvas") {
         for w in &scene.warnings {
             details.push(format!("{}: {}", w.code, w.message));
         }
@@ -2245,7 +2245,8 @@ fn render_progress_modal_if_open(ui: &mut egui::Ui, app: &UiApp, views: &mut Egu
                         pos2(bar_rect.left() + bar_rect.width() * end, bar_rect.bottom()),
                     );
                     body.painter().rect_filled(pulse_rect, bar_r, tokens.accent);
-                    body.ctx().request_repaint();
+                    // Cap indeterminate spinner pulse to ~30 FPS rather than unbounded max-rate spinning.
+                    body.ctx().request_repaint_after(std::time::Duration::from_millis(33));
                 }
 
                 if snapshot.cancellable {

@@ -1216,6 +1216,65 @@ where
     Ok(())
 }
 
+pub(crate) struct FastSetCellPrep {
+    pub(crate) sheet_id: SheetId,
+    pub(crate) coord: CellCoord,
+    pub(crate) cell: Cell,
+}
+
+/// Parse and pre-validate `table.setCell` when it can execute safely as an O(1) in-place delta
+/// without whole-document cloning, DAG recalculation, or checkpoint re-deserialization.
+///
+/// Returns `Ok(None)` whenever the mutation must use the full general path (row auto-expansion,
+/// linked regions, calculated variables, downstream dependents, active graph point overrides,
+/// dirty analyses, or non-finite values whose structured error format expects full validation).
+pub(crate) fn prepare_fast_set_cell(doc: &ProjectDocument, raw: &Value) -> Result<Option<FastSetCellPrep>, EngineError> {
+    if !doc.graph_sheets.iter().all(|g| g.spec.point_overrides.is_empty()) {
+        return Ok(None);
+    }
+    if doc.result_sheets.iter().any(|r| matches!(r.status, curvebook_doc::ResultStatus::Dirty)) {
+        return Ok(None);
+    }
+    let p: SetCellParams = parse_params(&schema_set_cell(), raw.clone())?;
+    let sheet_id = parse_sheet_id(&p.sheet_id)?;
+    let coord = p.coord.resolve()?;
+    let cell = p.cell.into_cell()?;
+    if matches!(cell.value, CellValue::Number(v) if !v.is_finite()) {
+        return Ok(None);
+    }
+    let ds = doc.data_sheet(&sheet_id).ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("data sheet `{sheet_id}` not found")))?;
+    ensure_sheet_not_frozen(ds)?;
+    ensure_mv_columns_editable(ds, std::iter::once(coord.col))?;
+    ensure_coord_outside_linked_regions(ds, coord, "edit")?;
+
+    // Only use O(1) delta when slot already exists, table has no links/formulas, and no other
+    // sheet has a dependency edge pointing to `sheet_id`.
+    if !ds.linked_regions.is_empty()
+        || crate::dag::data_sheet_has_calculated_variables(ds)
+        || ds.archetype.data_cell(coord).is_none()
+        || doc.data_sheets.iter().any(|other| other.linked_regions.iter().any(|r| r.spec.source.upstream_sheet_id() == Some(&sheet_id)))
+        || doc.result_sheets.iter().any(|res| doc.upstream_dependencies(&res.id).contains(&sheet_id))
+    {
+        return Ok(None);
+    }
+    Ok(Some(FastSetCellPrep { sheet_id, coord, cell }))
+}
+
+pub(crate) fn fast_set_cell_outcome(id: &SheetId, coord: CellCoord) -> CommandOutcome {
+    CommandOutcome::mutated(
+        "table.setCell",
+        "updated cell",
+        json!({
+            "sheet_id": id.as_str(),
+            "row": coord.row,
+            "col": coord.col,
+            "subcol": coord.subcol,
+            "recalculated_sheets": 0_usize,
+            "refreshed_links": 0_usize,
+        }),
+    )
+}
+
 fn run_set_cell(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let p: SetCellParams = parse_params(&schema_set_cell(), raw)?;
     let id = parse_sheet_id(&p.sheet_id)?;
