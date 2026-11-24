@@ -42,7 +42,7 @@ cache behavior, per-test timeouts, and scoped `cargo xtask ci <stage>` commands.
 
 | Task | Command |
 |---|---|
-| Run the fast pre-PR tier (policy + changed crates and dependents) | `cargo xtask ci quick` |
+| Run the fast pre-PR tier (policy + changed crates and dependents; add `--direct` for inner-loop work on foundational crates) | `cargo xtask ci quick [--direct]` |
 | Run the default CI gates locally | `cargo xtask ci` |
 | Run the opt-in WASM checks locally | `cargo xtask ci wasm` |
 | Run unit, integration & doctests | `cargo xtask test` |
@@ -78,7 +78,7 @@ Before adding or modifying behaviour in any domain crate, read its governing spe
 Font binaries never live inside this repository ([`AGENTS.md`](../AGENTS.md) › Assets).
 
 - Set `CURVEBOOK_FONTS_DIR` to an absolute directory of SIL OFL font faces when building if you want embedded fonts staged via `crates/text/build.rs` into `curvebook_text::BUNDLED_FONTS` and copied into `dist/web/fonts/` via `cargo xtask web-fonts`. At runtime, pass `--ttf-font <path>` (to `curvebook` or to `curvebook-cli convert` / `export`) when you want an external `.ttf` file embedded as a TrueType `/FontFile2` font stream in `%PDF-1.7` exports; `CURVEBOOK_FONTS_DIR` itself is read only at build time (`crates/text/build.rs`, `cargo xtask web-fonts`). Set `CURVEBOOK_FONTS_REQUIRED=1` to make the build fail when `CURVEBOOK_FONTS_DIR` is unset.
-- **Leaving out the bundled fonts:** `curvebook-text`, `curvebook-engine`, and `curvebook-ui-egui` gate embedded font bytes behind the default-on `bundled-fonts` Cargo feature. Embedders can depend on them with `default-features = false`; `curvebook_ui_egui::theme::install_fonts()` then reports `0` bundled faces. `cargo xtask ci` tests `curvebook-text` and `curvebook-ui-egui` and checks `curvebook-mcp` with `--no-default-features`.
+- **Leaving out the bundled fonts:** `curvebook-text`, `curvebook-engine`, and `curvebook-ui-egui` gate embedded font bytes behind the default-on `bundled-fonts` Cargo feature. Embedders can depend on them with `default-features = false`; `curvebook_ui_egui::theme::install_fonts()` then reports `0` bundled faces. `cargo xtask ci` (`ci features`) runs `curvebook-text` tests, compile-checks all `curvebook-ui-egui` targets and runs its `--lib`, `install_fonts`, and doctests, and checks `curvebook-mcp` with `--no-default-features`.
 
 ## Web build
 

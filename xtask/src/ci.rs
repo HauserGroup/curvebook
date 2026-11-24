@@ -21,7 +21,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
         [] => run_all(root),
         [stage, rest @ ..] if stage == "quick" => crate::ci_quick::run(root, rest),
         [stage] if matches!(stage.as_str(), "build" | "wasm") || HOSTED_STAGES.contains(&stage.as_str()) => run_stage(root, stage),
-        _ => Err(format!("usage: cargo xtask ci [quick [--base <git-ref>]|build|{}|wasm]", HOSTED_STAGES.join("|"))),
+        _ => Err(format!("usage: cargo xtask ci [quick [--direct] [--base <git-ref>]|build|{}|wasm]", HOSTED_STAGES.join("|"))),
     }
 }
 
@@ -123,25 +123,27 @@ fn native_tests(root: &Path, performance: bool) -> Result<(), String> {
     run_cargo(root, &test_args(root, performance, archive.as_deref()))
 }
 
+const FEATURE_CHECK_COMMANDS: &[&[&str]] = &[
+    &["test", "--locked", "-p", "curvebook-text", "--no-default-features"],
+    // Verify every curvebook-ui-egui target (lib, bins, integration tests) compiles without
+    // `bundled-fonts`, then run the unit tests and dedicated `install_fonts` integration test
+    // rather than repeating all 90+ GUI workflow and serial performance binaries.
+    &["check", "--locked", "-p", "curvebook-ui-egui", "--no-default-features", "--all-targets"],
+    &["test", "--locked", "-p", "curvebook-ui-egui", "--no-default-features", "--lib", "--test", "install_fonts"],
+    &["test", "--locked", "-p", "curvebook-ui-egui", "--no-default-features", "--doc"],
+    &["check", "--locked", "-p", "curvebook-mcp", "--no-default-features"],
+];
+
 fn feature_checks(root: &Path) -> Result<(), String> {
-    run_cargo_strs(root, &["test", "--locked", "-p", "curvebook-text", "--no-default-features"])?;
-    if has_cargo_nextest() {
-        // Preserve every no-font UI test, while also running its existing budgets serially.
-        for performance in [false, true] {
-            let mut args = test_args(root, performance, None);
-            args.retain(|arg| arg != "--workspace");
-            args.extend([String::from("-p"), String::from("curvebook-ui-egui"), String::from("--no-default-features")]);
-            run_cargo(root, &args)?;
-        }
-        run_cargo_strs(root, &["test", "--locked", "-p", "curvebook-ui-egui", "--no-default-features", "--doc"])?;
-    } else {
-        run_cargo_strs(root, &["test", "--locked", "-p", "curvebook-ui-egui", "--no-default-features"])?;
+    for args in FEATURE_CHECK_COMMANDS {
+        run_cargo_strs(root, args)?;
     }
-    run_cargo_strs(root, &["check", "--locked", "-p", "curvebook-mcp", "--no-default-features"])
+    Ok(())
 }
 
 /// Every policy gate. `include_i18n` runs the untranslated-locale report, which compiles the
-/// `curvebook-ui-egui` test library; `cargo xtask ci quick` skips it when that crate is unaffected.
+/// `curvebook-ui-egui` test library; `cargo xtask ci quick` skips it unless that crate is
+/// directly modified or a workspace-wide build input changed.
 pub(crate) fn policy(root: &Path, include_i18n: bool) -> Result<(), String> {
     run_cargo_strs(root, &["fmt", "--all", "--", "--check"])?;
     assets::run(root)?;
@@ -189,7 +191,7 @@ pub(crate) fn policy(root: &Path, include_i18n: bool) -> Result<(), String> {
 mod tests {
     use std::path::Path;
 
-    use super::{HOSTED_STAGES, PERFORMANCE_FILTER, run, test_args};
+    use super::{FEATURE_CHECK_COMMANDS, HOSTED_STAGES, PERFORMANCE_FILTER, run, test_args};
 
     #[test]
     fn archived_tests_do_not_rebuild_or_override_the_archived_feature_selection() {
@@ -225,5 +227,19 @@ mod tests {
         assert!(!workflow.contains("./packaging/web/package.sh"));
         assert!(!setup.contains("wasm32-unknown-unknown"));
         assert!(run(Path::new("."), &[String::from("nonexistent")]).is_err());
+    }
+
+    #[test]
+    fn feature_checks_compile_all_ui_targets_and_run_only_targeted_no_font_tests() {
+        assert_eq!(
+            FEATURE_CHECK_COMMANDS,
+            &[
+                &["test", "--locked", "-p", "curvebook-text", "--no-default-features"][..],
+                &["check", "--locked", "-p", "curvebook-ui-egui", "--no-default-features", "--all-targets"][..],
+                &["test", "--locked", "-p", "curvebook-ui-egui", "--no-default-features", "--lib", "--test", "install_fonts"][..],
+                &["test", "--locked", "-p", "curvebook-ui-egui", "--no-default-features", "--doc"][..],
+                &["check", "--locked", "-p", "curvebook-mcp", "--no-default-features"][..],
+            ]
+        );
     }
 }
