@@ -540,7 +540,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         shortcut: "",
         params_doc: "{}",
         summary: "Open the Import Warnings panel showing non-fatal warnings from the latest file import.",
-        beginner: "Review skipped parts, notes, or formatting warnings reported when importing a Prism, PZFX, or Excel file.",
+        beginner: "Review skipped parts, notes, or formatting warnings reported when importing a .prism, .pzfx, or .xlsx file.",
         rank: ActionRank::Overflow,
     },
     UiCommandSpec {

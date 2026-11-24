@@ -54,7 +54,7 @@ impl Drop for TempDir {
 /// section so `ImportWarning`s are deterministically emitted without external-app files.
 fn build_pzfx_fixture_bytes() -> Vec<u8> {
     let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
-<GraphPadPrismFile PrismXMLVersion="5.00">
+<PrismFile PrismXMLVersion="5.00">
   <Table ID="Table0" XFormat="none" TableType="OneWay" EVFormat="AsteriskAfterNumber">
     <Title>Drug Assay</Title>
     <YColumn Width="81" Decimals="1" Subcolumns="1">
@@ -77,18 +77,18 @@ fn build_pzfx_fixture_bytes() -> Vec<u8> {
   <Graph ID="Graph0">
     <Title>Legacy Unsupported Graph</Title>
   </Graph>
-</GraphPadPrismFile>
+</PrismFile>
 "#;
     xml.as_bytes().to_vec()
 }
 
 /// Build a self-authored `.prism` ZIP fixture with a CSV table, JSON table metadata, and an
 /// unrecognized JSON chunk so `ImportWarning`s are deterministically emitted.
-fn build_prism_fixture_bytes() -> Result<Vec<u8>, String> {
+fn build_archive_fixture_bytes() -> Result<Vec<u8>, String> {
     let mut zw = ZipWriter::new();
     zw.add_file("data/assay.csv", b"GroupA,GroupB\n4.2,9.1\n5.3,10.4\n6.1,11.2\n".to_vec())
         .map_err(|e| format!("failed to add data/assay.csv: {e}"))?;
-    zw.add_file("data/assay.json", br#"{"id":"prism-tbl-1","title":"Prism Assay","kind":"column"}"#.to_vec())
+    zw.add_file("data/assay.json", br#"{"id":"archive-tbl-1","title":"Archive Assay","kind":"column"}"#.to_vec())
         .map_err(|e| format!("failed to add data/assay.json: {e}"))?;
     zw.add_file("extras/unsupported_chunk.json", br#"{"unsupported_vendor_extension":true,"payload":[1,2,3]}"#.to_vec())
         .map_err(|e| format!("failed to add extras/unsupported_chunk.json: {e}"))?;
@@ -123,12 +123,12 @@ fn assert_file_bytes_eq(label: &str, gui_path: &Path, ref_path: &Path) -> TestRe
 }
 
 #[test]
-fn r10_30_human_pzfx_and_prism_import_warnings_and_live_edit() -> TestRes {
+fn r10_30_human_pzfx_and_archive_import_warnings_and_live_edit() -> TestRes {
     let dir = TempDir::new("import-warnings")?;
     let pzfx_path = dir.path().join("drug_assay.pzfx");
-    let prism_path = dir.path().join("prism_assay.prism");
+    let archive_path = dir.path().join("assay_bundle.prism");
     fs::write(&pzfx_path, build_pzfx_fixture_bytes()).map_err(|e| e.to_string())?;
-    fs::write(&prism_path, build_prism_fixture_bytes()?).map_err(|e| e.to_string())?;
+    fs::write(&archive_path, build_archive_fixture_bytes()?).map_err(|e| e.to_string())?;
 
     // --- 1A. .pzfx import from empty UiApp via File > Import ---
     {
@@ -206,49 +206,49 @@ fn r10_30_human_pzfx_and_prism_import_warnings_and_live_edit() -> TestRes {
 
     // --- 1B. .prism import from empty UiApp via File > Import ---
     {
-        let mut run = WorkflowRun::start("R10.30-PRISM");
-        run.script_file_dialog_for("table.importPrism", Some(prism_path.clone()));
+        let mut run = WorkflowRun::start("R10.30-ARCHIVE");
+        run.script_file_dialog_for("table.importPrism", Some(archive_path.clone()));
         run.open_menu_and_click("menu.file", &["menu.file.import"], "menu.table.importPrism")?;
 
         let reqs = run.recorded_file_dialog_requests();
         ensure(
             reqs.iter().any(|r| r.command_id == "table.importPrism" && r.kind == NativeFileDialogKind::OpenFile),
-            format!("R10.30-PRISM: expected OpenFile dialog request for table.importPrism, got {reqs:?}"),
+            format!("R10.30-ARCHIVE: expected OpenFile dialog request for table.importPrism, got {reqs:?}"),
         )?;
 
         let mut oracle = Session::new();
         oracle
-            .execute("table.importPrism", json!({ "path": prism_path.to_string_lossy() }))
-            .map_err(|e| format!("R10.30-PRISM: headless oracle import failed: {e}"))?;
-        assert_datasheets_match("R10.30-PRISM", &run.document().data_sheets, &oracle.document().data_sheets)?;
+            .execute("table.importPrism", json!({ "path": archive_path.to_string_lossy() }))
+            .map_err(|e| format!("R10.30-ARCHIVE: headless oracle import failed: {e}"))?;
+        assert_datasheets_match("R10.30-ARCHIVE", &run.document().data_sheets, &oracle.document().data_sheets)?;
 
         ensure(
             matches!(run.active_dialog(), ActiveDialog::ImportWarnings),
-            format!("R10.30-PRISM: expected ActiveDialog::ImportWarnings, got {:?}", run.active_dialog()),
+            format!("R10.30-ARCHIVE: expected ActiveDialog::ImportWarnings, got {:?}", run.active_dialog()),
         )?;
         let snap_open = inspect_ui_tree(run.app(), None, false);
-        let iw = snap_open.import_warnings.as_ref().ok_or("R10.30-PRISM: ui.inspect missing import_warnings")?;
-        ensure(iw.open && !iw.warnings.is_empty(), "R10.30-PRISM: expected open non-empty import_warnings in ui.inspect")?;
-        ensure(iw.command_id == "table.importPrism", format!("R10.30-PRISM: expected command_id=table.importPrism, got {:?}", iw.command_id))?;
+        let iw = snap_open.import_warnings.as_ref().ok_or("R10.30-ARCHIVE: ui.inspect missing import_warnings")?;
+        ensure(iw.open && !iw.warnings.is_empty(), "R10.30-ARCHIVE: expected open non-empty import_warnings in ui.inspect")?;
+        ensure(iw.command_id == "table.importPrism", format!("R10.30-ARCHIVE: expected command_id=table.importPrism, got {:?}", iw.command_id))?;
 
         // Close, reopen via status footer pill, and close again.
         run.click("modal.cancel")?;
-        ensure(matches!(run.active_dialog(), ActiveDialog::None), "R10.30-PRISM: expected modal closed")?;
+        ensure(matches!(run.active_dialog(), ActiveDialog::None), "R10.30-ARCHIVE: expected modal closed")?;
         run.click("status.import_warnings")?;
-        ensure(matches!(run.active_dialog(), ActiveDialog::ImportWarnings), "R10.30-PRISM: expected modal reopened via footer pill")?;
+        ensure(matches!(run.active_dialog(), ActiveDialog::ImportWarnings), "R10.30-ARCHIVE: expected modal reopened via footer pill")?;
         run.click("modal.cancel")?;
 
         // Live-edit an imported table cell.
-        let sheet_id = run.document().data_sheets.first().ok_or("R10.30-PRISM: missing imported sheet")?.id.clone();
+        let sheet_id = run.document().data_sheets.first().ok_or("R10.30-ARCHIVE: missing imported sheet")?.id.clone();
         run.select_sheet(&sheet_id)?;
         run.enter_grid_cell(0, 0, 0, "99.5")?;
         let edited_cell = run.document().data_sheet(&sheet_id).and_then(|ds| ds.cell(CellCoord::new(0, 0, 0))).map(|c| &c.value);
         ensure(
             matches!(edited_cell, Some(CellValue::Number(v)) if (v - 99.5).abs() < 1e-9),
-            format!("R10.30-PRISM: expected live-edited cell (0,0,0) to be 99.5, got {edited_cell:?}"),
+            format!("R10.30-ARCHIVE: expected live-edited cell (0,0,0) to be 99.5, got {edited_cell:?}"),
         )?;
 
-        run.assert_shell_health("R10.30-PRISM")?;
+        run.assert_shell_health("R10.30-ARCHIVE")?;
     }
 
     Ok(())
@@ -258,9 +258,9 @@ fn r10_30_human_pzfx_and_prism_import_warnings_and_live_edit() -> TestRes {
 fn r10_30_human_import_replace_or_merge_on_dirty_project() -> TestRes {
     let dir = TempDir::new("replace-merge")?;
     let pzfx_path = dir.path().join("merge_source.pzfx");
-    let prism_path = dir.path().join("replace_source.prism");
+    let archive_path = dir.path().join("replace_source.prism");
     fs::write(&pzfx_path, build_pzfx_fixture_bytes()).map_err(|e| e.to_string())?;
-    fs::write(&prism_path, build_prism_fixture_bytes()?).map_err(|e| e.to_string())?;
+    fs::write(&archive_path, build_archive_fixture_bytes()?).map_err(|e| e.to_string())?;
 
     let mut run = WorkflowRun::start("R10.30-MERGE-REPLACE");
     let orig_id = run.create_table_via_welcome("welcome.arch.column", "Original Dirty Table", &[])?;
@@ -292,7 +292,7 @@ fn r10_30_human_import_replace_or_merge_on_dirty_project() -> TestRes {
     )?;
 
     // 2. Import .prism on dirty project -> ImportProjectMode modal -> Open as new project (merge: false).
-    run.script_file_dialog_for("table.importPrism", Some(prism_path.clone()));
+    run.script_file_dialog_for("table.importPrism", Some(archive_path.clone()));
     run.open_menu_and_click("menu.file", &["menu.file.import"], "menu.table.importPrism")?;
     match run.active_dialog() {
         ActiveDialog::ImportProjectMode { command_id, has_unsaved_changes, .. } => {
@@ -310,7 +310,7 @@ fn r10_30_human_import_replace_or_merge_on_dirty_project() -> TestRes {
     }
     let replaced_titles: Vec<&str> = run.document().data_sheets.iter().map(|s| s.title.as_str()).collect();
     ensure(
-        replaced_titles == vec!["Prism Assay"],
+        replaced_titles == vec!["Archive Assay"],
         format!("R10.30-MERGE-REPLACE: replace should retain only imported .prism sheet, got {replaced_titles:?}"),
     )?;
 
@@ -359,9 +359,12 @@ fn r10_30_human_anova_exports_and_all_tables_csv() -> TestRes {
         .scalar("P value", None, 1e-8, 1e-8),
     )?;
 
-    // Snapshot the exact live document into a headless Session oracle for byte-for-byte export comparisons.
+    // Snapshot the exact live document via archive round-trip into a headless Session oracle for byte-for-byte export comparisons.
     run.select_sheet(&res_id)?;
-    let mut oracle = Session::from_document(run.document().clone());
+    let snap_path = dir.path().join("oracle_snapshot.curvebook");
+    curvebook_format::archive::save_project_file(&snap_path, run.document()).map_err(|e| format!("failed to save oracle snapshot: {e}"))?;
+    let mut oracle = Session::new();
+    oracle.execute("project.open", json!({ "path": snap_path.to_string_lossy() })).map_err(|e| format!("failed to open oracle snapshot: {e}"))?;
     let tab0_id = run
         .document()
         .result_sheet(&res_id)

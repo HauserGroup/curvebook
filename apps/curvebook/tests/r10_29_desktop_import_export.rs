@@ -82,19 +82,19 @@ fn write_clean_pzfx(path: &std::path::Path, table_title: &str) -> Result<(), Box
     Ok(())
 }
 
-fn write_warning_prism(path: &std::path::Path, table_title: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn write_warning_zip_project(path: &std::path::Path, table_title: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut doc = ProjectDocument::default();
     let mut xy = XyTable::new(SubcolumnMode::Single, 1, 2)?;
     if let Some(col) = xy.data_sets.first_mut() {
         col.title = String::from("Signal");
     }
-    let mut ds = DataSheet::new("prism-xy", table_title, TableArchetype::Xy(xy))?;
+    let mut ds = DataSheet::new("zip-xy", table_title, TableArchetype::Xy(xy))?;
     ds.set_x_or_time_cell(0, 0, Cell::number(1.0))?;
     ds.set_cell(CellCoord::new(0, 0, 0), Cell::number(11.0))?;
     doc.add_data_sheet(ds)?;
 
     let mut zw = ZipWriter::new();
-    zw.add_file("manifest.json", br#"{"title":"Imported Prism"}"#.to_vec())?;
+    zw.add_file("manifest.json", br#"{"title":"Imported Archive"}"#.to_vec())?;
     zw.add_file("document.json", serde_json::to_vec(&doc)?)?;
     zw.add_file("analyses/skipped_anova.json", br#"{"kind":"unsupported"}"#.to_vec())?;
     fs::write(path, zw.finish()?)?;
@@ -123,13 +123,13 @@ fn build_anova_session() -> Result<Session, Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn pzfx_and_prism_import_warnings_captured_in_ui_app_and_ui_inspect_including_dnd() -> Result<(), Box<dyn std::error::Error>> {
+fn pzfx_and_archive_import_warnings_captured_in_ui_app_and_ui_inspect_including_dnd() -> Result<(), Box<dyn std::error::Error>> {
     let tmp = TempDir::new("cb-r10-29-warnings")?;
     let pzfx_warn = tmp.0.join("warn.pzfx");
-    let prism_warn = tmp.0.join("warn.prism");
+    let archive_warn = tmp.0.join("warn.prism");
     let pzfx_clean = tmp.0.join("clean.pzfx");
     write_warning_pzfx(&pzfx_warn, "WarnPZFX")?;
-    write_warning_prism(&prism_warn, "WarnPrism")?;
+    write_warning_zip_project(&archive_warn, "WarnArchive")?;
     write_clean_pzfx(&pzfx_clean, "CleanPZFX")?;
 
     // 1. Native file dialog import of .pzfx captures warnings and exposes them via ui.inspect.
@@ -166,7 +166,7 @@ fn pzfx_and_prism_import_warnings_captured_in_ui_app_and_ui_inspect_including_dn
 
     // 3. Drag-and-drop (handle_file_dropped) of .prism and .pzfx also captures warnings.
     let (mut rt_dnd, wid_dnd, _) = spawn_runtime(Session::new())?;
-    let drop_out = rt_dnd.dispatch(DesktopHostEvent::FileDropped { window_id: wid_dnd, path: prism_warn })?;
+    let drop_out = rt_dnd.dispatch(DesktopHostEvent::FileDropped { window_id: wid_dnd, path: archive_warn })?;
     assert_eq!(drop_out.action, "file.dropped_loaded_in_window");
     let win_dnd = rt_dnd.window(wid_dnd)?;
     assert!(!win_dnd.app().import_warnings.warnings.is_empty(), "expected .prism drop warnings");

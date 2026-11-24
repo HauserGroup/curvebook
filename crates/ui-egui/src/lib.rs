@@ -207,7 +207,7 @@ impl PartialEq for EguiDispatchHookSlot {
     }
 }
 
-/// Single non-fatal warning captured from a file import (`table.importPzfx`, `table.importPrism`, `table.importXlsx`, etc.).
+/// Single non-fatal warning captured from a file import (`.pzfx`, `.prism`, `.xlsx`, etc.).
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct ImportWarningItem {
     pub kind: String,
