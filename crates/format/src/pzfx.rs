@@ -1,8 +1,9 @@
 //! Clean-room `.pzfx` XML project importer.
 //!
 //! Parses scientific XML tables, replicate subcolumns, row/column titles (preserving nested
-//! formatting text), excluded-cell masks (`Excluded="1"`), and Info constants into a
-//! [`ProjectDocument`] alongside non-fatal [`ImportWarning`] diagnostics.
+//! formatting text), locale-formatted decimal-comma and thousands-grouped numbers, excluded-cell
+//! masks (`Excluded="1"`), and Info constants into a [`ProjectDocument`] alongside non-fatal
+//! [`ImportWarning`] diagnostics.
 
 use std::collections::HashSet;
 
@@ -52,9 +53,10 @@ pub(crate) fn import_pzfx_str_with_used_cells(xml: &str, used_cells: &mut usize)
     let clamped_title = clamp_title(&title, "project", &mut warnings);
     let mut doc = ProjectDocument::new(clamped_title)?;
     let mut used_ids = HashSet::new();
+    let doc_evidence = collect_document_decimal_evidence(&root);
 
-    import_info_sections(&root, &mut doc, &mut used_ids, &mut warnings)?;
-    import_table_sections(&root, &mut doc, &mut used_ids, &mut warnings, used_cells)?;
+    import_info_sections(&root, &mut doc, &mut used_ids, &mut warnings, doc_evidence)?;
+    import_table_sections(&root, &mut doc, &mut used_ids, &mut warnings, used_cells, doc_evidence)?;
     warn_ignored_sections(&root, &mut warnings);
 
     validate_project_document(&doc)?;
@@ -66,6 +68,7 @@ fn import_info_sections(
     doc: &mut ProjectDocument,
     used_ids: &mut HashSet<String>,
     warnings: &mut Vec<ImportWarning>,
+    doc_evidence: DecimalEvidence,
 ) -> Result<(), FormatError> {
     let mut info_nodes: Vec<&XmlElement> = Vec::new();
     for seq in root.children_named("InfoSequence") {
@@ -74,6 +77,7 @@ fn import_info_sections(
     info_nodes.extend(root.children_named("Info"));
 
     for (idx, info_el) in info_nodes.iter().enumerate() {
+        let info_evidence = collect_info_decimal_evidence(info_el);
         let id = allocate_valid_unique_sheet_id(info_el.attr("ID"), "info", idx + 1, used_ids, warnings);
         let raw_title =
             info_el.first_child("Title").map(XmlElement::plain_text).filter(|s| !s.trim().is_empty()).unwrap_or_else(|| format!("Info {}", idx + 1));
@@ -95,9 +99,7 @@ fn import_info_sections(
             let val_trimmed = val_raw.trim();
             let value = if val_trimmed.is_empty() {
                 ConstantValue::Empty
-            } else if let Ok(num) = val_trimmed.parse::<f64>()
-                && num.is_finite()
-            {
+            } else if let Some(num) = parse_pzfx_scalar_f64(val_trimmed, info_evidence, doc_evidence) {
                 ConstantValue::Number(num)
             } else {
                 ConstantValue::Text(val_trimmed.to_owned())
@@ -123,6 +125,7 @@ fn import_table_sections(
     used_ids: &mut HashSet<String>,
     warnings: &mut Vec<ImportWarning>,
     total_cells: &mut usize,
+    doc_evidence: DecimalEvidence,
 ) -> Result<(), FormatError> {
     let mut table_nodes: Vec<&XmlElement> = Vec::new();
     for seq in root.children_named("TableSequence") {
@@ -132,7 +135,7 @@ fn import_table_sections(
 
     let primary_info = doc.info_sheets.first().map(|s| s.id.clone());
     for (idx, table_el) in table_nodes.iter().enumerate() {
-        let mut ds = parse_table_element(table_el, idx + 1, used_ids, warnings, *total_cells)?;
+        let mut ds = parse_table_element(table_el, idx + 1, used_ids, warnings, *total_cells, doc_evidence)?;
         let actual_cells = ds.archetype.allocated_cell_slots();
         let next_total = total_cells.checked_add(actual_cells).ok_or_else(|| FormatError::XmlParse {
             offset: 0,
@@ -163,6 +166,7 @@ fn parse_table_element(
     used_ids: &mut HashSet<String>,
     warnings: &mut Vec<ImportWarning>,
     used_cells: usize,
+    doc_evidence: DecimalEvidence,
 ) -> Result<DataSheet, FormatError> {
     let id = allocate_valid_unique_sheet_id(table_el.attr("ID"), "data", one_based_idx, used_ids, warnings);
     let raw_title =
@@ -170,6 +174,8 @@ fn parse_table_element(
     let title = clamp_title(&raw_title, id.as_str(), warnings);
 
     let kind = resolve_table_kind(table_el.attr("TableType"), id.as_str(), warnings);
+    let table_evidence = collect_table_decimal_evidence(table_el, kind);
+    let num_ctx = NumericParseScope { table_ev: table_evidence, doc_ev: doc_evidence };
     let explicit_replicates = table_el.attr("Replicates").and_then(|s| s.trim().parse::<usize>().ok());
     let replicates = explicit_replicates.unwrap_or(1);
     if replicates > 0 {
@@ -201,8 +207,8 @@ fn parse_table_element(
         .filter(|s| !s.trim().is_empty())
         .map(|raw| clamp_title(&raw, id.as_str(), warnings))
         .unwrap_or_else(|| String::from("X"));
-    let x_cols = x_el.map(extract_column_subcolumns).unwrap_or_default();
-    let x_mode = resolve_x_mode(table_el, &x_cols, x_declared_subs)?;
+    let (x_cols, x_sub_stats) = x_el.map(|el| extract_column_subcolumns_with_stats(el, num_ctx)).unwrap_or_default();
+    let x_mode = resolve_x_mode_with_scope(table_el, &x_cols, x_declared_subs, num_ctx)?;
 
     let y_elements: Vec<&XmlElement> =
         table_el.children_named("YColumn").chain(table_el.children_named("Column")).chain(table_el.children_named("VariableColumn")).collect();
@@ -217,8 +223,8 @@ fn parse_table_element(
             .map(|raw| clamp_title(&raw, id.as_str(), warnings))
             .unwrap_or_else(|| default_column_label(c_idx));
         let declared_subcolumns = parse_subcolumns_attr(y_el)?;
-        let (sub_titles, subcolumns) = extract_labeled_subcolumns(y_el, id.as_str(), warnings);
-        parsed_y.push(ParsedYColumn { title: col_title, declared_subcolumns, sub_titles, subcolumns });
+        let (sub_titles, subcolumns, sub_stats) = extract_labeled_subcolumns(y_el, id.as_str(), warnings, num_ctx);
+        parsed_y.push(ParsedYColumn { title: col_title, declared_subcolumns, sub_titles, subcolumns, sub_stats });
     }
 
     let subcolumn_mode = widen_y_subcolumn_mode(kind, initial_subcolumn_mode, &parsed_y)?;
@@ -234,10 +240,7 @@ fn parse_table_element(
 
     warn_discarded_x_subcolumns(warnings, (id.as_str(), &title), kind, &x_mode, &x_title, &x_cols, x_declared_subs, has_row_titles);
     if kind != TableKind::Nested {
-        let allowed_y_subs = match kind {
-            TableKind::Contingency | TableKind::Survival | TableKind::PartsOfWhole | TableKind::MultipleVariables => 1,
-            _ => subcolumn_mode.subcolumn_count(),
-        };
+        let allowed_y_subs = allowed_y_subcolumns_for_kind(kind, subcolumn_mode);
         let mode_desc = format!("{kind:?} mode {subcolumn_mode:?}");
         for col in &parsed_y {
             warn_discarded_subcolumns(
@@ -251,6 +254,11 @@ fn parse_table_element(
             );
         }
     }
+    emit_table_numeric_cell_warnings(
+        warnings,
+        (id.as_str(), &title),
+        &TableNumericStatsView { kind, x_mode: &x_mode, subcolumn_mode, x_sub_stats: &x_sub_stats, parsed_y: &parsed_y },
+    );
 
     let remaining_cells = MAX_IMPORT_CELLS.saturating_sub(used_cells);
     let table_cells = estimate_table_cells(kind, subcolumn_mode, &x_mode, &parsed_y, row_count)?;
@@ -288,6 +296,7 @@ struct ParsedYColumn {
     declared_subcolumns: Option<usize>,
     sub_titles: Vec<Option<String>>,
     subcolumns: Vec<Vec<Cell>>,
+    sub_stats: Vec<SubcolumnNumericStats>,
 }
 
 fn parse_subcolumns_attr(el: &XmlElement) -> Result<Option<usize>, FormatError> {
@@ -543,7 +552,17 @@ fn build_table_archetype(
     }
 }
 
+#[cfg(test)]
 fn resolve_x_mode(table_el: &XmlElement, x_cols: &[Vec<Cell>], x_declared_subs: Option<usize>) -> Result<XColumnMode, FormatError> {
+    resolve_x_mode_with_scope(table_el, x_cols, x_declared_subs, NumericParseScope::default())
+}
+
+fn resolve_x_mode_with_scope(
+    table_el: &XmlElement,
+    x_cols: &[Vec<Cell>],
+    x_declared_subs: Option<usize>,
+    scope: NumericParseScope,
+) -> Result<XColumnMode, FormatError> {
     let x_fmt = table_el.attr("XFormat").unwrap_or("").trim();
     if x_fmt.eq_ignore_ascii_case("date") || x_fmt.eq_ignore_ascii_case("time") || x_fmt.eq_ignore_ascii_case("elapsed-time") {
         let unit_label = table_el
@@ -555,8 +574,8 @@ fn resolve_x_mode(table_el: &XmlElement, x_cols: &[Vec<Cell>], x_declared_subs: 
         return Ok(XColumnMode::DateOrElapsedTime { unit_label });
     }
     if x_fmt.eq_ignore_ascii_case("start-step") || x_fmt.eq_ignore_ascii_case("sequence") {
-        let start = table_el.attr("X0").and_then(|s| s.parse::<f64>().ok()).filter(|v| v.is_finite()).unwrap_or(0.0);
-        let step = table_el.attr("DeltaX").and_then(|s| s.parse::<f64>().ok()).filter(|v| v.is_finite()).unwrap_or(1.0);
+        let start = table_el.attr("X0").and_then(|s| parse_pzfx_scalar_f64(s, scope.table_ev, scope.doc_ev)).unwrap_or(0.0);
+        let step = table_el.attr("DeltaX").and_then(|s| parse_pzfx_scalar_f64(s, scope.table_ev, scope.doc_ev)).unwrap_or(1.0);
         return Ok(XColumnMode::GeneratedSequence { start, step, progression: SequenceProgression::Arithmetic });
     }
     if x_fmt.eq_ignore_ascii_case("replicates") {
@@ -595,32 +614,414 @@ fn fill_datasets(target: &mut [DataSetColumn], parsed_y: &[ParsedYColumn]) {
     }
 }
 
-fn parse_pzfx_cell(d_el: &XmlElement) -> Cell {
-    let excluded = d_el.attr("Excluded").is_some_and(|v| v.trim() == "1" || v.trim().eq_ignore_ascii_case("true"));
-    let raw = d_el.plain_text();
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Cell { value: CellValue::Empty, excluded };
-    }
-    if let Ok(num) = trimmed.parse::<f64>()
-        && num.is_finite()
-    {
-        return Cell { value: CellValue::Number(num), excluded };
-    }
-    Cell { value: CellValue::Text(raw), excluded }
+#[derive(Debug, Clone, Copy, Default)]
+struct DecimalEvidence {
+    dot: usize,
+    comma: usize,
 }
 
-fn extract_subcolumn_cells(sub_el: &XmlElement) -> Vec<Cell> {
-    sub_el.children_named("d").map(parse_pzfx_cell).collect()
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EvidenceBias {
+    None,
+    Dot,
+    Comma,
+    Conflicting,
+}
+
+impl DecimalEvidence {
+    fn record(&mut self, class: PzfxTokenClass) {
+        match class {
+            PzfxTokenClass::DotNumber(_) => self.dot = self.dot.saturating_add(1),
+            PzfxTokenClass::CommaNumber(_) => self.comma = self.comma.saturating_add(1),
+            PzfxTokenClass::Empty
+            | PzfxTokenClass::PlainText
+            | PzfxTokenClass::NeutralNumber(_)
+            | PzfxTokenClass::AmbiguousThreeDigitComma { .. }
+            | PzfxTokenClass::MalformedNumeric => {}
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.dot = self.dot.saturating_add(other.dot);
+        self.comma = self.comma.saturating_add(other.comma);
+    }
+
+    const fn bias(self) -> EvidenceBias {
+        match (self.dot > 0, self.comma > 0) {
+            (false, false) => EvidenceBias::None,
+            (true, false) => EvidenceBias::Dot,
+            (false, true) => EvidenceBias::Comma,
+            (true, true) => EvidenceBias::Conflicting,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct NumericParseScope {
+    table_ev: DecimalEvidence,
+    doc_ev: DecimalEvidence,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ColumnParseContext {
+    col_ev: DecimalEvidence,
+    table_ev: DecimalEvidence,
+    doc_ev: DecimalEvidence,
+    col_decimals: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct SubcolumnNumericStats {
+    numeric_looking_kept_as_text: usize,
+    ambiguous_via_decimals_attr: usize,
+    ambiguous_zero_context_thousands: usize,
+}
+
+impl SubcolumnNumericStats {
+    fn merge(&mut self, other: Self) {
+        self.numeric_looking_kept_as_text = self.numeric_looking_kept_as_text.saturating_add(other.numeric_looking_kept_as_text);
+        self.ambiguous_via_decimals_attr = self.ambiguous_via_decimals_attr.saturating_add(other.ambiguous_via_decimals_attr);
+        self.ambiguous_zero_context_thousands = self.ambiguous_zero_context_thousands.saturating_add(other.ambiguous_zero_context_thousands);
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PzfxTokenClass {
+    Empty,
+    PlainText,
+    NeutralNumber(f64),
+    DotNumber(f64),
+    CommaNumber(f64),
+    AmbiguousThreeDigitComma { as_decimal: f64, as_thousands: f64 },
+    MalformedNumeric,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AmbiguousCommaResolution {
+    Decimal { warned_via_decimals_attr: bool },
+    Thousands { warned_zero_context: bool },
+    ConflictingKeepText,
+}
+
+fn split_sign_mantissa_exponent(trimmed: &str) -> Option<(&str, &str, &str)> {
+    let (sign, after_sign) = if let Some(rest) = trimmed.strip_prefix('+') {
+        ("+", rest)
+    } else if let Some(rest) = trimmed.strip_prefix('-') {
+        ("-", rest)
+    } else {
+        ("", trimmed)
+    };
+    let (mantissa, exp_suffix) = if let Some(pos) = after_sign.find(['e', 'E']) {
+        let mant = after_sign.get(..pos)?;
+        let exp_full = after_sign.get(pos..)?;
+        let exp_body = exp_full.get(1..)?;
+        let exp_digits = exp_body.strip_prefix(['+', '-']).unwrap_or(exp_body);
+        if exp_digits.is_empty() || !exp_digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        (mant, exp_full)
+    } else {
+        (after_sign, "")
+    };
+    if mantissa.is_empty() || !mantissa.bytes().any(|b| b.is_ascii_digit()) || !mantissa.bytes().all(|b| b.is_ascii_digit() || b == b'.' || b == b',')
+    {
+        return None;
+    }
+    Some((sign, mantissa, exp_suffix))
+}
+
+fn is_grouped_thousands(part: &str, sep: char, min_groups_after_first: usize) -> bool {
+    let mut groups = part.split(sep);
+    let Some(first) = groups.next() else {
+        return false;
+    };
+    if !(1..=3).contains(&first.len()) || first.starts_with('0') || !first.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    let mut tail_count = 0_usize;
+    for group in groups {
+        if group.len() != 3 || !group.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        tail_count += 1;
+    }
+    tail_count >= min_groups_after_first
+}
+
+fn parse_finite_assembled(sign: &str, int_digits: &str, frac_digits: Option<&str>, exp_suffix: &str) -> Option<f64> {
+    let cap = sign
+        .len()
+        .saturating_add(int_digits.len())
+        .saturating_add(frac_digits.map_or(0, |f| f.len().saturating_add(1)))
+        .saturating_add(exp_suffix.len());
+    let mut buf = String::with_capacity(cap);
+    buf.push_str(sign);
+    buf.push_str(int_digits);
+    if let Some(frac) = frac_digits {
+        buf.push('.');
+        buf.push_str(frac);
+    }
+    buf.push_str(exp_suffix);
+    buf.parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
+fn classify_mixed_dot_and_comma(sign: &str, mantissa: &str, exp_suffix: &str, dots: usize, commas: usize) -> PzfxTokenClass {
+    if dots == 1
+        && let Some((int_part, frac_part)) = mantissa.split_once('.')
+        && !frac_part.is_empty()
+        && frac_part.bytes().all(|b| b.is_ascii_digit())
+        && is_grouped_thousands(int_part, ',', 1)
+    {
+        let int_digits: String = int_part.bytes().filter(|&b| b != b',').map(char::from).collect();
+        return parse_finite_assembled(sign, &int_digits, Some(frac_part), exp_suffix)
+            .map_or(PzfxTokenClass::MalformedNumeric, PzfxTokenClass::DotNumber);
+    }
+    if commas == 1
+        && let Some((int_part, frac_part)) = mantissa.split_once(',')
+        && !frac_part.is_empty()
+        && frac_part.bytes().all(|b| b.is_ascii_digit())
+        && is_grouped_thousands(int_part, '.', 1)
+    {
+        let int_digits: String = int_part.bytes().filter(|&b| b != b'.').map(char::from).collect();
+        return parse_finite_assembled(sign, &int_digits, Some(frac_part), exp_suffix)
+            .map_or(PzfxTokenClass::MalformedNumeric, PzfxTokenClass::CommaNumber);
+    }
+    PzfxTokenClass::MalformedNumeric
+}
+
+fn classify_single_comma(sign: &str, mantissa: &str, exp_suffix: &str) -> PzfxTokenClass {
+    let Some((int_part, frac_part)) = mantissa.split_once(',') else {
+        return PzfxTokenClass::MalformedNumeric;
+    };
+    if int_part.is_empty() || frac_part.is_empty() {
+        return PzfxTokenClass::MalformedNumeric;
+    }
+    if exp_suffix.is_empty() && is_grouped_thousands(mantissa, ',', 1) {
+        let joined = format!("{int_part}{frac_part}");
+        if let (Some(as_decimal), Some(as_thousands)) =
+            (parse_finite_assembled(sign, int_part, Some(frac_part), ""), parse_finite_assembled(sign, &joined, None, ""))
+        {
+            return PzfxTokenClass::AmbiguousThreeDigitComma { as_decimal, as_thousands };
+        }
+        return PzfxTokenClass::MalformedNumeric;
+    }
+    parse_finite_assembled(sign, int_part, Some(frac_part), exp_suffix).map_or(PzfxTokenClass::MalformedNumeric, PzfxTokenClass::CommaNumber)
+}
+
+fn classify_pzfx_numeric_token(raw: &str) -> PzfxTokenClass {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return PzfxTokenClass::Empty;
+    }
+    let Some((sign, mantissa, exp_suffix)) = split_sign_mantissa_exponent(trimmed) else {
+        return PzfxTokenClass::PlainText;
+    };
+    let dots = mantissa.bytes().filter(|&b| b == b'.').count();
+    let commas = mantissa.bytes().filter(|&b| b == b',').count();
+    match (commas, dots) {
+        (0, 0) => trimmed.parse::<f64>().ok().filter(|v| v.is_finite()).map_or(PzfxTokenClass::MalformedNumeric, PzfxTokenClass::NeutralNumber),
+        (0, 1) => trimmed.parse::<f64>().ok().filter(|v| v.is_finite()).map_or(PzfxTokenClass::MalformedNumeric, PzfxTokenClass::DotNumber),
+        (0, _) => {
+            if exp_suffix.is_empty() && is_grouped_thousands(mantissa, '.', 2) {
+                let digits: String = mantissa.bytes().filter(|&b| b != b'.').map(char::from).collect();
+                parse_finite_assembled(sign, &digits, None, "").map_or(PzfxTokenClass::MalformedNumeric, PzfxTokenClass::CommaNumber)
+            } else {
+                PzfxTokenClass::MalformedNumeric
+            }
+        }
+        (1, 0) => classify_single_comma(sign, mantissa, exp_suffix),
+        (_, 0) => {
+            if exp_suffix.is_empty() && is_grouped_thousands(mantissa, ',', 2) {
+                let digits: String = mantissa.bytes().filter(|&b| b != b',').map(char::from).collect();
+                parse_finite_assembled(sign, &digits, None, "").map_or(PzfxTokenClass::MalformedNumeric, PzfxTokenClass::DotNumber)
+            } else {
+                PzfxTokenClass::MalformedNumeric
+            }
+        }
+        _ => classify_mixed_dot_and_comma(sign, mantissa, exp_suffix, dots, commas),
+    }
+}
+
+fn resolve_ambiguous_three_digit_comma(ctx: ColumnParseContext) -> AmbiguousCommaResolution {
+    for scope_ev in [ctx.col_ev, ctx.table_ev] {
+        match scope_ev.bias() {
+            EvidenceBias::Comma => return AmbiguousCommaResolution::Decimal { warned_via_decimals_attr: false },
+            EvidenceBias::Dot => return AmbiguousCommaResolution::Thousands { warned_zero_context: false },
+            EvidenceBias::Conflicting => return AmbiguousCommaResolution::ConflictingKeepText,
+            EvidenceBias::None => {}
+        }
+    }
+    match ctx.doc_ev.bias() {
+        EvidenceBias::Comma => return AmbiguousCommaResolution::Decimal { warned_via_decimals_attr: false },
+        EvidenceBias::Dot => return AmbiguousCommaResolution::Thousands { warned_zero_context: false },
+        EvidenceBias::None | EvidenceBias::Conflicting => {}
+    }
+    match ctx.col_decimals {
+        Some(3) => AmbiguousCommaResolution::Decimal { warned_via_decimals_attr: true },
+        Some(_) => AmbiguousCommaResolution::Thousands { warned_zero_context: false },
+        None if ctx.doc_ev.bias() == EvidenceBias::Conflicting => AmbiguousCommaResolution::ConflictingKeepText,
+        None => AmbiguousCommaResolution::Thousands { warned_zero_context: true },
+    }
+}
+
+fn parse_pzfx_scalar_f64(raw: &str, local_ev: DecimalEvidence, doc_ev: DecimalEvidence) -> Option<f64> {
+    match classify_pzfx_numeric_token(raw) {
+        PzfxTokenClass::NeutralNumber(v) | PzfxTokenClass::DotNumber(v) | PzfxTokenClass::CommaNumber(v) => Some(v),
+        PzfxTokenClass::AmbiguousThreeDigitComma { as_decimal, as_thousands } => {
+            match resolve_ambiguous_three_digit_comma(ColumnParseContext { col_ev: local_ev, table_ev: local_ev, doc_ev, col_decimals: None }) {
+                AmbiguousCommaResolution::Decimal { .. } => Some(as_decimal),
+                AmbiguousCommaResolution::Thousands { .. } => Some(as_thousands),
+                AmbiguousCommaResolution::ConflictingKeepText => None,
+            }
+        }
+        PzfxTokenClass::Empty | PzfxTokenClass::PlainText | PzfxTokenClass::MalformedNumeric => None,
+    }
+}
+
+fn parse_decimals_attr(col_el: &XmlElement) -> Option<usize> {
+    col_el.attr("Decimals").map(str::trim).filter(|s| !s.is_empty()).and_then(|s| s.parse::<usize>().ok())
+}
+
+fn collect_column_decimal_evidence(col_el: &XmlElement) -> DecimalEvidence {
+    let mut ev = DecimalEvidence::default();
+    for sub_el in col_el.children_named("Subcolumn") {
+        for d_el in sub_el.children_named("d") {
+            ev.record(classify_pzfx_numeric_token(&d_el.plain_text()));
+        }
+    }
+    ev
+}
+
+fn collect_info_decimal_evidence(info_el: &XmlElement) -> DecimalEvidence {
+    let mut ev = DecimalEvidence::default();
+    for c_el in info_el.children_named("Constant") {
+        if let Some(val_raw) = c_el.first_child("Value").map(XmlElement::plain_text).or_else(|| c_el.attr("Value").map(str::to_owned)) {
+            ev.record(classify_pzfx_numeric_token(&val_raw));
+        }
+    }
+    ev
+}
+
+fn table_x_is_numeric_source(table_el: &XmlElement, kind: TableKind) -> bool {
+    if !matches!(kind, TableKind::Xy | TableKind::Survival) {
+        return false;
+    }
+    let x_fmt = table_el.attr("XFormat").unwrap_or("").trim();
+    !(x_fmt.eq_ignore_ascii_case("date")
+        || x_fmt.eq_ignore_ascii_case("time")
+        || x_fmt.eq_ignore_ascii_case("elapsed-time")
+        || x_fmt.eq_ignore_ascii_case("start-step")
+        || x_fmt.eq_ignore_ascii_case("sequence"))
+}
+
+fn collect_table_decimal_evidence(table_el: &XmlElement, kind: TableKind) -> DecimalEvidence {
+    let mut ev = DecimalEvidence::default();
+    let x_fmt = table_el.attr("XFormat").unwrap_or("").trim();
+    if x_fmt.eq_ignore_ascii_case("start-step") || x_fmt.eq_ignore_ascii_case("sequence") {
+        for attr in ["X0", "DeltaX"] {
+            if let Some(val) = table_el.attr(attr) {
+                ev.record(classify_pzfx_numeric_token(val));
+            }
+        }
+    }
+    if table_x_is_numeric_source(table_el, kind)
+        && let Some(x_el) = table_el.first_child("XColumn")
+    {
+        ev.merge(collect_column_decimal_evidence(x_el));
+    }
+    for y_el in table_el.children_named("YColumn").chain(table_el.children_named("Column")).chain(table_el.children_named("VariableColumn")) {
+        ev.merge(collect_column_decimal_evidence(y_el));
+    }
+    ev
+}
+
+fn peek_table_kind_quiet(raw: Option<&str>) -> TableKind {
+    match raw.map(str::trim).unwrap_or("") {
+        "XY" | "xy" => TableKind::Xy,
+        "TwoWay" | "Grouped" | "grouped" => TableKind::Grouped,
+        "Contingency" | "contingency" => TableKind::Contingency,
+        "Survival" | "survival" => TableKind::Survival,
+        "PartsOfWhole" | "parts-of-whole" => TableKind::PartsOfWhole,
+        "MultipleVariables" | "multiple-variables" => TableKind::MultipleVariables,
+        "Nested" | "nested" => TableKind::Nested,
+        _ => TableKind::Column,
+    }
+}
+
+fn collect_document_decimal_evidence(root: &XmlElement) -> DecimalEvidence {
+    let mut ev = DecimalEvidence::default();
+    for info_el in root.children_named("InfoSequence").flat_map(|s| s.children_named("Info")).chain(root.children_named("Info")) {
+        ev.merge(collect_info_decimal_evidence(info_el));
+    }
+    for table_el in root.children_named("TableSequence").flat_map(|s| s.children_named("Table")).chain(root.children_named("Table")) {
+        ev.merge(collect_table_decimal_evidence(table_el, peek_table_kind_quiet(table_el.attr("TableType"))));
+    }
+    ev
+}
+
+fn parse_pzfx_cell_with_context(d_el: &XmlElement, ctx: ColumnParseContext, stats: &mut SubcolumnNumericStats) -> Cell {
+    let excluded = d_el.attr("Excluded").is_some_and(|v| v.trim() == "1" || v.trim().eq_ignore_ascii_case("true"));
+    let raw = d_el.plain_text();
+    match classify_pzfx_numeric_token(&raw) {
+        PzfxTokenClass::Empty => Cell { value: CellValue::Empty, excluded },
+        PzfxTokenClass::NeutralNumber(num) | PzfxTokenClass::DotNumber(num) | PzfxTokenClass::CommaNumber(num) => {
+            Cell { value: CellValue::Number(num), excluded }
+        }
+        PzfxTokenClass::AmbiguousThreeDigitComma { as_decimal, as_thousands } => match resolve_ambiguous_three_digit_comma(ctx) {
+            AmbiguousCommaResolution::Decimal { warned_via_decimals_attr } => {
+                if warned_via_decimals_attr {
+                    stats.ambiguous_via_decimals_attr = stats.ambiguous_via_decimals_attr.saturating_add(1);
+                }
+                Cell { value: CellValue::Number(as_decimal), excluded }
+            }
+            AmbiguousCommaResolution::Thousands { warned_zero_context } => {
+                if warned_zero_context {
+                    stats.ambiguous_zero_context_thousands = stats.ambiguous_zero_context_thousands.saturating_add(1);
+                }
+                Cell { value: CellValue::Number(as_thousands), excluded }
+            }
+            AmbiguousCommaResolution::ConflictingKeepText => {
+                stats.numeric_looking_kept_as_text = stats.numeric_looking_kept_as_text.saturating_add(1);
+                Cell { value: CellValue::Text(raw), excluded }
+            }
+        },
+        PzfxTokenClass::MalformedNumeric => {
+            stats.numeric_looking_kept_as_text = stats.numeric_looking_kept_as_text.saturating_add(1);
+            Cell { value: CellValue::Text(raw), excluded }
+        }
+        PzfxTokenClass::PlainText => Cell { value: CellValue::Text(raw), excluded },
+    }
+}
+
+fn extract_subcolumn_cells_with_stats(sub_el: &XmlElement, ctx: ColumnParseContext) -> (Vec<Cell>, SubcolumnNumericStats) {
+    let mut stats = SubcolumnNumericStats::default();
+    let cells = sub_el.children_named("d").map(|d_el| parse_pzfx_cell_with_context(d_el, ctx, &mut stats)).collect();
+    (cells, stats)
 }
 
 fn extract_raw_subcolumn_strings(col_el: &XmlElement) -> Vec<Vec<String>> {
     col_el.children_named("Subcolumn").map(|sub_el| sub_el.children_named("d").map(XmlElement::plain_text).collect()).collect()
 }
 
-fn extract_labeled_subcolumns(col_el: &XmlElement, source_id: &str, warnings: &mut Vec<ImportWarning>) -> (Vec<Option<String>>, Vec<Vec<Cell>>) {
+fn build_column_parse_context(col_el: &XmlElement, scope: NumericParseScope) -> ColumnParseContext {
+    ColumnParseContext {
+        col_ev: collect_column_decimal_evidence(col_el),
+        table_ev: scope.table_ev,
+        doc_ev: scope.doc_ev,
+        col_decimals: parse_decimals_attr(col_el),
+    }
+}
+
+fn extract_labeled_subcolumns(
+    col_el: &XmlElement,
+    source_id: &str,
+    warnings: &mut Vec<ImportWarning>,
+    scope: NumericParseScope,
+) -> (Vec<Option<String>>, Vec<Vec<Cell>>, Vec<SubcolumnNumericStats>) {
+    let ctx = build_column_parse_context(col_el, scope);
     let mut titles = Vec::new();
     let mut subcolumns = Vec::new();
+    let mut sub_stats = Vec::new();
     for sub_el in col_el.children_named("Subcolumn") {
         let sub_title = sub_el
             .first_child("Title")
@@ -629,9 +1030,11 @@ fn extract_labeled_subcolumns(col_el: &XmlElement, source_id: &str, warnings: &m
             .filter(|s| !s.trim().is_empty())
             .map(|raw| clamp_title(&raw, source_id, warnings));
         titles.push(sub_title);
-        subcolumns.push(extract_subcolumn_cells(sub_el));
+        let (cells, stats) = extract_subcolumn_cells_with_stats(sub_el, ctx);
+        subcolumns.push(cells);
+        sub_stats.push(stats);
     }
-    (titles, subcolumns)
+    (titles, subcolumns, sub_stats)
 }
 
 fn apply_nested_subcolumn_titles(nested: &mut NestedTable, nested_sub_titles: &[Vec<Option<String>>]) {
@@ -649,8 +1052,86 @@ fn apply_nested_subcolumn_titles(nested: &mut NestedTable, nested_sub_titles: &[
     }
 }
 
+fn extract_column_subcolumns_with_stats(col_el: &XmlElement, scope: NumericParseScope) -> (Vec<Vec<Cell>>, Vec<SubcolumnNumericStats>) {
+    let ctx = build_column_parse_context(col_el, scope);
+    let mut cols = Vec::new();
+    let mut stats = Vec::new();
+    for sub_el in col_el.children_named("Subcolumn") {
+        let (sub_cells, sub_stat) = extract_subcolumn_cells_with_stats(sub_el, ctx);
+        cols.push(sub_cells);
+        stats.push(sub_stat);
+    }
+    (cols, stats)
+}
+
+#[cfg(test)]
 fn extract_column_subcolumns(col_el: &XmlElement) -> Vec<Vec<Cell>> {
-    col_el.children_named("Subcolumn").map(extract_subcolumn_cells).collect()
+    extract_column_subcolumns_with_stats(col_el, NumericParseScope::default()).0
+}
+
+fn allowed_y_subcolumns_for_kind(kind: TableKind, subcolumn_mode: SubcolumnMode) -> usize {
+    match kind {
+        TableKind::Nested => usize::MAX,
+        TableKind::Contingency | TableKind::Survival | TableKind::PartsOfWhole | TableKind::MultipleVariables => 1,
+        TableKind::Xy | TableKind::Column | TableKind::Grouped => subcolumn_mode.subcolumn_count(),
+    }
+}
+
+struct TableNumericStatsView<'a> {
+    kind: TableKind,
+    x_mode: &'a XColumnMode,
+    subcolumn_mode: SubcolumnMode,
+    x_sub_stats: &'a [SubcolumnNumericStats],
+    parsed_y: &'a [ParsedYColumn],
+}
+
+fn emit_table_numeric_cell_warnings(warnings: &mut Vec<ImportWarning>, table: (&str, &str), view: &TableNumericStatsView<'_>) {
+    let (table_id, table_title) = table;
+    let mut total = SubcolumnNumericStats::default();
+    let retained_x_subs = match view.kind {
+        TableKind::Xy if matches!(view.x_mode, XColumnMode::Numbers { .. }) => view.x_mode.subcolumn_count(),
+        TableKind::Survival => 1,
+        _ => 0,
+    };
+    for stat in view.x_sub_stats.iter().take(retained_x_subs) {
+        total.merge(*stat);
+    }
+    let retained_y_subs = allowed_y_subcolumns_for_kind(view.kind, view.subcolumn_mode);
+    for col in view.parsed_y {
+        for stat in col.sub_stats.iter().take(retained_y_subs) {
+            total.merge(*stat);
+        }
+    }
+    if total.numeric_looking_kept_as_text > 0 {
+        warnings.push(ImportWarning::new(
+            ImportWarningKind::CoercedValue,
+            table_id,
+            format!(
+                "table `{table_id}` (`{table_title}`) kept {} numeric-looking cell(s) as text because decimal or thousands separators were malformed, overflowing, or conflicted within the sheet",
+                total.numeric_looking_kept_as_text
+            ),
+        ));
+    }
+    if total.ambiguous_via_decimals_attr > 0 {
+        warnings.push(ImportWarning::new(
+            ImportWarningKind::CoercedValue,
+            table_id,
+            format!(
+                "table `{table_id}` (`{table_title}`) interpreted {} `ddd,ddd` cell(s) as decimal-comma numbers using column `Decimals=\"3\"` metadata",
+                total.ambiguous_via_decimals_attr
+            ),
+        ));
+    }
+    if total.ambiguous_zero_context_thousands > 0 {
+        warnings.push(ImportWarning::new(
+            ImportWarningKind::CoercedValue,
+            table_id,
+            format!(
+                "table `{table_id}` (`{table_title}`) interpreted {} ambiguous `ddd,ddd` cell(s) as thousands-grouped integers",
+                total.ambiguous_zero_context_thousands
+            ),
+        ));
+    }
 }
 
 fn resolve_table_kind(raw: Option<&str>, id: &str, warnings: &mut Vec<ImportWarning>) -> TableKind {
@@ -910,6 +1391,7 @@ mod tests {
                     declared_subcolumns: None,
                     sub_titles: Vec::new(),
                     subcolumns: extract_column_subcolumns(y_el),
+                    sub_stats: Vec::new(),
                 })
                 .collect();
             let max_y = parsed_y.iter().flat_map(|c| c.subcolumns.iter().map(Vec::len)).max().unwrap_or(0);
@@ -927,7 +1409,13 @@ mod tests {
     #[test]
     fn estimate_table_cells_rejects_usize_overflow_cleanly() {
         let parsed_y: Vec<ParsedYColumn> = (0..1_024)
-            .map(|_| ParsedYColumn { title: String::from("A"), declared_subcolumns: None, sub_titles: Vec::new(), subcolumns: vec![vec![]] })
+            .map(|_| ParsedYColumn {
+                title: String::from("A"),
+                declared_subcolumns: None,
+                sub_titles: Vec::new(),
+                subcolumns: vec![vec![]],
+                sub_stats: Vec::new(),
+            })
             .collect();
         let x_mode = XColumnMode::default();
         // On 64-bit, `usize::MAX` rows overflows checked_mul cleanly without panic.
