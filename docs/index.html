@@ -9,6 +9,14 @@
   <meta name="color-scheme" content="light">
   <title>CurveBook — free, open-source biostatistics, curve fitting, and scientific graphs</title>
   <link rel="canonical" href="https://hausergroup.github.io/curvebook/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="CurveBook">
+  <meta property="og:title" content="CurveBook — free, open-source biostatistics, curve fitting, and scientific graphs">
+  <meta property="og:description" content="CurveBook is a free, open-source biostatistics, nonlinear regression, and scientific graphing application for macOS, Windows, and Linux. It runs offline with zero telemetry and opens .pzfx and .prism data files.">
+  <meta property="og:url" content="https://hausergroup.github.io/curvebook/">
+  <meta property="og:image" content="https://hausergroup.github.io/curvebook/images/workspace-split-fit.png">
+  <meta property="og:image:alt" content="CurveBook split workspace showing an XY dose-response data table alongside a live four-parameter logistic curve fit, confidence ribbons, and Graph Inspector.">
+  <meta name="twitter:card" content="summary_large_image">
   <link rel="icon" type="image/png" href="images/curvebook.png">
   <link rel="stylesheet" href="site.css">
 </head>
@@ -28,6 +36,7 @@
         <a href="#workspace">Share a workspace</a>
         <a href="#downloads">Downloads</a>
         <a href="manual/index.html">Documentation</a>
+        <a href="faq.html">FAQ</a>
         <a href="privacy.html">Privacy</a>
         <a href="https://github.com/HauserGroup/curvebook">GitHub <span aria-hidden="true">↗</span></a>
       </nav>
@@ -35,7 +44,18 @@
 
     <main id="main" tabindex="-1">
       <div class="overview">
-        <section class="intro" aria-labelledby="intro-title">
+        <section class="intro" aria-labelledby="intro-title" itemscope itemtype="https://schema.org/SoftwareApplication">
+          <meta itemprop="name" content="CurveBook">
+          <meta itemprop="applicationCategory" content="ScientificApplication">
+          <meta itemprop="operatingSystem" content="macOS, Windows, Linux, FreeBSD">
+          <meta itemprop="license" content="https://spdx.org/licenses/MIT.html">
+          <meta itemprop="isAccessibleForFree" content="true">
+          <meta itemprop="url" content="https://hausergroup.github.io/curvebook/">
+          <meta itemprop="downloadUrl" content="https://github.com/HauserGroup/curvebook/releases">
+          <span itemprop="offers" itemscope itemtype="https://schema.org/Offer">
+            <meta itemprop="price" content="0">
+            <meta itemprop="priceCurrency" content="USD">
+          </span>
           <div class="document-brand"><img src="images/curvebook.png" width="64" height="64" alt=""><span>CurveBook</span></div>
           <p class="eyebrow">Open-source scientific software</p>
           <h1 id="intro-title">Biostatistics.<br>Curve fitting.<br><span>Scientific graphs.</span></h1>
@@ -115,8 +135,8 @@
             <div class="download-links">
               <a href="https://github.com/HauserGroup/curvebook/releases">GitHub Releases <span aria-hidden="true">↗</span></a>
               <a href="manual/index.html">Online Manual</a>
-              <a href="manual/v0.1/get-started.html">Install &amp; Checksums</a>
-              <a href="manual/v0.1/mcp-for-beginners.html">AI Assistant (MCP) Setup</a>
+              <a href="manual/latest/get-started.html">Install &amp; Checksums</a>
+              <a href="manual/latest/mcp-for-beginners.html">AI Assistant (MCP) Setup</a>
             </div>
           </div>
 
@@ -124,7 +144,7 @@
             <p><strong>Beta · desktop GUI, CLI &amp; MCP</strong></p>
             <p>The native desktop GUI (verified across automated five-stage workflows), <code>curvebook-cli</code>, local MCP, and Developer ID notarized macOS packages are ready in Beta. FreeBSD ships as a Tier 2 CLI-only archive, Windows <code>.msi</code> installers ship unsigned until Authenticode signing lands, and manual cross-OS human walkthroughs, RTL GUI mirroring, and the WebAssembly browser app (<code>curvebook-web</code>) remain scoped for <code>1.0</code>.</p>
             <div class="download-links">
-              <a href="manual/v0.1/troubleshooting.html#known-issues">Beta known issues</a>
+              <a href="manual/latest/troubleshooting.html#known-issues">Beta known issues</a>
               <a href="https://github.com/HauserGroup/curvebook/blob/main/docs/STATUS.md">Engineering status <span aria-hidden="true">↗</span></a>
             </div>
           </aside>
@@ -177,7 +197,7 @@
     <footer class="site-footer">
       <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>
       <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
-      <p class="privacy">CurveBook runs locally and collects no telemetry. GitHub Pages logs visitor IP addresses for security. Read the <a href="privacy.html">Privacy Policy</a>.</p>
+      <p class="privacy">CurveBook runs locally and collects no telemetry. GitHub Pages logs visitor IP addresses for security. Read the <a href="privacy.html">Privacy Policy</a> or the <a href="faq.html">FAQ</a>.</p>
       <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a>
     </footer>
 

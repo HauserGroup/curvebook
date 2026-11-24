@@ -1,0 +1,2961 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Registered import/export file formats, JSON Schemas (preferences, batch-v1, document, archive, journal), and supported locales.">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'">
+  <meta name="color-scheme" content="light">
+  <title>Formats, Schemas &amp; Locales Registry — CurveBook Documentation</title>
+  <link rel="canonical" href="https://hausergroup.github.io/curvebook/manual/latest/registry/formats.html">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="CurveBook">
+  <meta property="og:title" content="Formats, Schemas &amp; Locales Registry — CurveBook Documentation">
+  <meta property="og:description" content="Registered import/export file formats, JSON Schemas (preferences, batch-v1, document, archive, journal), and supported locales.">
+  <meta property="og:url" content="https://hausergroup.github.io/curvebook/manual/latest/registry/formats.html">
+  <meta property="og:image" content="https://hausergroup.github.io/curvebook/images/workspace-split-fit.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" type="image/png" href="../../../images/curvebook.png">
+  <link rel="stylesheet" href="../../../site.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="desktop-window wrap">
+    <header class="site-header">
+      <div class="title-bar">
+        <div class="wordmark">
+          <img src="../../../images/curvebook.png" width="64" height="64" alt="">
+          <span>CurveBook · Reference Manual</span>
+        </div>
+        <span class="window-status">Files, import &amp; export</span>
+      </div>
+      <nav aria-label="Manual navigation">
+        <a href="../index.html">Manual Home</a>
+        <a href="../section-get-started.html">Get Started</a>
+        <a href="../section-analyses.html" aria-current="page">Reference</a>
+        <a href="../section-automation.html">Automation</a>
+        <a href="../registry/commands.html">Commands &amp; Tools</a>
+        <a href="../az-index.html">A–Z Index</a>
+        <a href="../section-contribute.html">Contribute</a>
+        <a href="../../../index.html">Product Home</a>
+        <a href="../../../privacy.html">Privacy Policy</a>
+      </nav>
+    </header>
+    <div class="version-banner" role="note" aria-label="Documentation version">
+      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-24 (commit <code>0acc0a8468</code>)</span>
+      <span>No scripts · No telemetry · <a href="../az-index.html">A–Z Index</a></span>
+    </div>
+    <main id="main" tabindex="-1">
+      <article class="overview doc-body">
+        <nav class="breadcrumbs" aria-label="Breadcrumb">
+          <a href="../index.html">Manual</a>
+          <span aria-hidden="true">/</span>
+          <a href="../section-files.html">Files, import &amp; export</a>
+          <span aria-hidden="true">/</span>
+          <span aria-current="page">Formats, Schemas &amp; Locales Registry</span>
+        </nav>
+        <h1 id="page-title" tabindex="-1">Formats, Schemas &amp; Locales Registry</h1>
+        <nav class="toc" aria-label="On this page">
+          <p class="toc-title">On this page</p>
+          <ul>
+            <li><a href="#formats">Registered Import &amp; Export Formats</a></li>
+            <li><a href="#schema-preferences">Preferences File Schema</a></li>
+            <li><a href="#schema-batch-v1">Batch Manifest Schema (curvebook.batch.v1)</a></li>
+            <li><a href="#schema-document">Project Document Schema</a></li>
+            <li><a href="#schema-archive-manifest">Archive Manifest Schema</a></li>
+            <li><a href="#schema-journal-record">Autosave Journal Record Schema</a></li>
+            <li><a href="#locales">Supported Interface Locales (LOCALES)</a></li>
+          </ul>
+        </nav>
+<p class="lead">Import/export format descriptors compiled from <code>FormatRegistry::default_registry()</code> (<strong>14</strong> formats) alongside persisted JSON Schemas and supported UI locales.</p>
+<h2 id="formats" tabindex="-1">Registered Import &amp; Export Formats</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Format ID</th><th>Label</th><th>Extensions</th><th>Category</th><th>Import</th><th>Export</th></tr></thead>
+<tbody>
+<tr id="format-curvebook" tabindex="-1"><td><code>curvebook</code></td><td>CurveBook Project Archive</td><td><code>.curvebook</code></td><td>Project Archive</td><td>yes</td><td>yes</td></tr>
+<tr id="format-curvebook-d" tabindex="-1"><td><code>curvebook.d</code></td><td>CurveBook Unpacked Project</td><td><code>.curvebook.d</code></td><td>Unpacked Project Directory</td><td>yes</td><td>yes</td></tr>
+<tr id="format-cbtemplate" tabindex="-1"><td><code>cbtemplate</code></td><td>CurveBook Template</td><td><code>.cbtemplate</code></td><td>Project Template</td><td>yes</td><td>yes</td></tr>
+<tr id="format-prism" tabindex="-1"><td><code>prism</code></td><td>External Project Archive (.prism)</td><td><code>.prism</code></td><td>External Project Interchange</td><td>yes</td><td>no</td></tr>
+<tr id="format-pzfx" tabindex="-1"><td><code>pzfx</code></td><td>PZFX XML Document</td><td><code>.pzfx</code></td><td>External Project Interchange</td><td>yes</td><td>no</td></tr>
+<tr id="format-xlsx" tabindex="-1"><td><code>xlsx</code></td><td>Spreadsheet Workbook (.xlsx)</td><td><code>.xlsx</code></td><td>External Project Interchange</td><td>yes</td><td>no</td></tr>
+<tr id="format-csv" tabindex="-1"><td><code>csv</code></td><td>Comma-Separated Values</td><td><code>.csv</code></td><td>Delimited Text</td><td>yes</td><td>yes</td></tr>
+<tr id="format-tsv" tabindex="-1"><td><code>tsv</code></td><td>Tab-Separated Values</td><td><code>.tsv</code></td><td>Delimited Text</td><td>yes</td><td>yes</td></tr>
+<tr id="format-json" tabindex="-1"><td><code>json</code></td><td>JSON Result Table</td><td><code>.json</code></td><td>Structured Result Export</td><td>no</td><td>yes</td></tr>
+<tr id="format-svg" tabindex="-1"><td><code>svg</code></td><td>Scalable Vector Graphics</td><td><code>.svg</code></td><td>Vector Publication Figure</td><td>no</td><td>yes</td></tr>
+<tr id="format-pdf" tabindex="-1"><td><code>pdf</code></td><td>Portable Document Format</td><td><code>.pdf</code></td><td>Vector Publication Figure</td><td>no</td><td>yes</td></tr>
+<tr id="format-png" tabindex="-1"><td><code>png</code></td><td>Portable Network Graphics</td><td><code>.png</code></td><td>Raster Publication Figure</td><td>no</td><td>yes</td></tr>
+<tr id="format-tiff" tabindex="-1"><td><code>tiff</code></td><td>Tagged Image File Format</td><td><code>.tiff, .tif</code></td><td>Raster Publication Figure</td><td>no</td><td>yes</td></tr>
+<tr id="format-emf" tabindex="-1"><td><code>emf</code></td><td>Enhanced Metafile</td><td><code>.emf</code></td><td>Vector Publication Figure</td><td>no</td><td>yes</td></tr>
+</tbody>
+</table></div>
+<h2 id="schema-preferences" tabindex="-1">Preferences File Schema</h2>
+<p>Draft 2020-12 schema for versioned user preferences files with forward-compatible extension fields.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Property Key</th><th>Schema Type / Details</th></tr></thead>
+<tbody>
+<tr id="pref-locale" tabindex="-1"><td><code>locale</code></td><td><code>{&quot;type&quot;:[&quot;string&quot;,&quot;null&quot;]}</code></td></tr>
+<tr id="pref-shortcuts" tabindex="-1"><td><code>shortcuts</code></td><td><code>{&quot;additionalProperties&quot;:{&quot;type&quot;:&quot;string&quot;},&quot;type&quot;:[&quot;object&quot;,&quot;null&quot;]}</code></td></tr>
+<tr id="pref-theme" tabindex="-1"><td><code>theme</code></td><td><code>{&quot;type&quot;:[&quot;string&quot;,&quot;null&quot;]}</code></td></tr>
+<tr id="pref-version" tabindex="-1"><td><code>version</code></td><td><code>{&quot;maximum&quot;:1,&quot;minimum&quot;:0,&quot;type&quot;:&quot;integer&quot;}</code></td></tr>
+</tbody>
+</table></div>
+<pre><code class="language-json">{
+  &quot;$id&quot;: &quot;https://github.com/HauserGroup/curvebook/blob/main/docs/schemas/preferences.schema.json&quot;,
+  &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+  &quot;additionalProperties&quot;: true,
+  &quot;description&quot;: &quot;Draft 2020-12 schema for versioned user preferences files with forward-compatible extension fields.&quot;,
+  &quot;properties&quot;: {
+    &quot;locale&quot;: {
+      &quot;type&quot;: [
+        &quot;string&quot;,
+        &quot;null&quot;
+      ]
+    },
+    &quot;shortcuts&quot;: {
+      &quot;additionalProperties&quot;: {
+        &quot;type&quot;: &quot;string&quot;
+      },
+      &quot;type&quot;: [
+        &quot;object&quot;,
+        &quot;null&quot;
+      ]
+    },
+    &quot;theme&quot;: {
+      &quot;type&quot;: [
+        &quot;string&quot;,
+        &quot;null&quot;
+      ]
+    },
+    &quot;version&quot;: {
+      &quot;maximum&quot;: 1,
+      &quot;minimum&quot;: 0,
+      &quot;type&quot;: &quot;integer&quot;
+    }
+  },
+  &quot;title&quot;: &quot;PreferencesFile&quot;,
+  &quot;type&quot;: &quot;object&quot;
+}</code></pre>
+<h2 id="schema-batch-v1" tabindex="-1">Batch Manifest Schema (curvebook.batch.v1)</h2>
+<p>Draft 2020-12 schema for curvebook.batch.v1 headless batch manifests.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Property Key</th><th>Schema Type / Details</th></tr></thead>
+<tbody>
+<tr><td><code>commands</code></td><td><code>{&quot;items&quot;:{&quot;$ref&quot;:&quot;#/$defs/BatchCommand&quot;},&quot;type&quot;:[&quot;array&quot;,&quot;null&quot;]}</code></td></tr>
+<tr><td><code>exports</code></td><td><code>{&quot;items&quot;:{&quot;$ref&quot;:&quot;#/$defs/BatchExport&quot;},&quot;type&quot;:[&quot;array&quot;,&quot;null&quot;]}</code></td></tr>
+<tr><td><code>inputs</code></td><td><code>{&quot;items&quot;:{&quot;$ref&quot;:&quot;#/$defs/BatchInput&quot;},&quot;type&quot;:[&quot;array&quot;,&quot;null&quot;]}</code></td></tr>
+<tr><td><code>project</code></td><td><code>{&quot;minLength&quot;:1,&quot;type&quot;:[&quot;string&quot;,&quot;null&quot;]}</code></td></tr>
+<tr><td><code>schema</code></td><td><code>{&quot;const&quot;:&quot;curvebook.batch.v1&quot;,&quot;type&quot;:&quot;string&quot;}</code></td></tr>
+<tr><td><code>template</code></td><td><code>{&quot;minLength&quot;:1,&quot;type&quot;:[&quot;string&quot;,&quot;null&quot;]}</code></td></tr>
+</tbody>
+</table></div>
+<pre><code class="language-json">{
+  &quot;$defs&quot;: {
+    &quot;BatchCommand&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;anyOf&quot;: [
+        {
+          &quot;properties&quot;: {
+            &quot;cmd&quot;: {
+              &quot;minLength&quot;: 1,
+              &quot;pattern&quot;: &quot;\\S&quot;,
+              &quot;type&quot;: &quot;string&quot;
+            }
+          },
+          &quot;required&quot;: [
+            &quot;cmd&quot;
+          ]
+        },
+        {
+          &quot;properties&quot;: {
+            &quot;command&quot;: {
+              &quot;minLength&quot;: 1,
+              &quot;pattern&quot;: &quot;\\S&quot;,
+              &quot;type&quot;: &quot;string&quot;
+            }
+          },
+          &quot;required&quot;: [
+            &quot;command&quot;
+          ]
+        },
+        {
+          &quot;properties&quot;: {
+            &quot;method&quot;: {
+              &quot;minLength&quot;: 1,
+              &quot;pattern&quot;: &quot;\\S&quot;,
+              &quot;type&quot;: &quot;string&quot;
+            }
+          },
+          &quot;required&quot;: [
+            &quot;method&quot;
+          ]
+        }
+      ],
+      &quot;properties&quot;: {
+        &quot;cmd&quot;: {
+          &quot;minLength&quot;: 1,
+          &quot;pattern&quot;: &quot;\\S&quot;,
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;command&quot;: {
+          &quot;deprecated&quot;: true,
+          &quot;minLength&quot;: 1,
+          &quot;pattern&quot;: &quot;\\S&quot;,
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;id&quot;: {},
+        &quot;method&quot;: {
+          &quot;deprecated&quot;: true,
+          &quot;minLength&quot;: 1,
+          &quot;pattern&quot;: &quot;\\S&quot;,
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;params&quot;: {
+          &quot;type&quot;: [
+            &quot;object&quot;,
+            &quot;null&quot;
+          ]
+        }
+      },
+      &quot;title&quot;: &quot;BatchCommand&quot;,
+      &quot;type&quot;: &quot;object&quot;,
+      &quot;x-deprecated-aliases&quot;: {
+        &quot;cmd&quot;: [
+          &quot;command&quot;,
+          &quot;method&quot;
+        ]
+      }
+    },
+    &quot;BatchExport&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;anyOf&quot;: [
+        {
+          &quot;properties&quot;: {
+            &quot;out&quot;: {
+              &quot;minLength&quot;: 1,
+              &quot;type&quot;: &quot;string&quot;
+            }
+          },
+          &quot;required&quot;: [
+            &quot;out&quot;
+          ]
+        },
+        {
+          &quot;properties&quot;: {
+            &quot;path&quot;: {
+              &quot;minLength&quot;: 1,
+              &quot;type&quot;: &quot;string&quot;
+            }
+          },
+          &quot;required&quot;: [
+            &quot;path&quot;
+          ]
+        }
+      ],
+      &quot;properties&quot;: {
+        &quot;dpi&quot;: {
+          &quot;maximum&quot;: 65535,
+          &quot;minimum&quot;: 1,
+          &quot;type&quot;: [
+            &quot;integer&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;format&quot;: {
+          &quot;enum&quot;: [
+            &quot;curvebook&quot;,
+            &quot;curvebook.d&quot;,
+            &quot;curvebook-dir&quot;,
+            &quot;unpacked&quot;,
+            &quot;dir&quot;,
+            &quot;csv&quot;,
+            &quot;tsv&quot;,
+            &quot;json&quot;,
+            &quot;svg&quot;,
+            &quot;pdf&quot;,
+            &quot;png&quot;,
+            &quot;tiff&quot;,
+            &quot;tif&quot;,
+            &quot;emf&quot;,
+            null
+          ],
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;out&quot;: {
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;path&quot;: {
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;pdfVersion&quot;: {
+          &quot;deprecated&quot;: true,
+          &quot;enum&quot;: [
+            &quot;1.4&quot;,
+            &quot;1.7&quot;,
+            null
+          ],
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;pdf_version&quot;: {
+          &quot;enum&quot;: [
+            &quot;1.4&quot;,
+            &quot;1.7&quot;,
+            null
+          ],
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;pretty&quot;: {
+          &quot;type&quot;: [
+            &quot;boolean&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;sheet&quot;: {
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;sheetId&quot;: {
+          &quot;deprecated&quot;: true,
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;sheet_id&quot;: {
+          &quot;deprecated&quot;: true,
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;tabIndex&quot;: {
+          &quot;deprecated&quot;: true,
+          &quot;minimum&quot;: 0,
+          &quot;type&quot;: [
+            &quot;integer&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;tab_index&quot;: {
+          &quot;minimum&quot;: 0,
+          &quot;type&quot;: [
+            &quot;integer&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;ttfFont&quot;: {
+          &quot;deprecated&quot;: true,
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;ttf_font&quot;: {
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        }
+      },
+      &quot;title&quot;: &quot;BatchExport&quot;,
+      &quot;type&quot;: &quot;object&quot;,
+      &quot;x-deprecated-aliases&quot;: {
+        &quot;pdf_version&quot;: [
+          &quot;pdfVersion&quot;
+        ],
+        &quot;sheet&quot;: [
+          &quot;sheet_id&quot;,
+          &quot;sheetId&quot;
+        ],
+        &quot;tab_index&quot;: [
+          &quot;tabIndex&quot;
+        ],
+        &quot;ttf_font&quot;: [
+          &quot;ttfFont&quot;
+        ]
+      }
+    },
+    &quot;BatchInput&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;anyOf&quot;: [
+        {
+          &quot;properties&quot;: {
+            &quot;csv&quot;: {
+              &quot;minLength&quot;: 1,
+              &quot;type&quot;: &quot;string&quot;
+            }
+          },
+          &quot;required&quot;: [
+            &quot;csv&quot;
+          ]
+        },
+        {
+          &quot;properties&quot;: {
+            &quot;tsv&quot;: {
+              &quot;minLength&quot;: 1,
+              &quot;type&quot;: &quot;string&quot;
+            }
+          },
+          &quot;required&quot;: [
+            &quot;tsv&quot;
+          ]
+        },
+        {
+          &quot;properties&quot;: {
+            &quot;path&quot;: {
+              &quot;minLength&quot;: 1,
+              &quot;type&quot;: &quot;string&quot;
+            }
+          },
+          &quot;required&quot;: [
+            &quot;path&quot;
+          ]
+        },
+        {
+          &quot;properties&quot;: {
+            &quot;file&quot;: {
+              &quot;minLength&quot;: 1,
+              &quot;type&quot;: &quot;string&quot;
+            }
+          },
+          &quot;required&quot;: [
+            &quot;file&quot;
+          ]
+        }
+      ],
+      &quot;properties&quot;: {
+        &quot;csv&quot;: {
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;decimalSeparator&quot;: {
+          &quot;deprecated&quot;: true,
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;decimal_separator&quot;: {
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;delimiter&quot;: {
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;file&quot;: {
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;kind&quot;: {
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;path&quot;: {
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;sheet&quot;: {
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;sheetId&quot;: {
+          &quot;deprecated&quot;: true,
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;sheet_id&quot;: {
+          &quot;deprecated&quot;: true,
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;subcolumnMode&quot;: {
+          &quot;deprecated&quot;: true,
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;subcolumn_mode&quot;: {
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;tableKind&quot;: {
+          &quot;deprecated&quot;: true,
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;table_kind&quot;: {
+          &quot;deprecated&quot;: true,
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;tsv&quot;: {
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        }
+      },
+      &quot;title&quot;: &quot;BatchInput&quot;,
+      &quot;type&quot;: &quot;object&quot;,
+      &quot;x-deprecated-aliases&quot;: {
+        &quot;decimal_separator&quot;: [
+          &quot;decimalSeparator&quot;
+        ],
+        &quot;kind&quot;: [
+          &quot;table_kind&quot;,
+          &quot;tableKind&quot;
+        ],
+        &quot;sheet&quot;: [
+          &quot;sheet_id&quot;,
+          &quot;sheetId&quot;
+        ],
+        &quot;subcolumn_mode&quot;: [
+          &quot;subcolumnMode&quot;
+        ]
+      }
+    }
+  },
+  &quot;$id&quot;: &quot;https://github.com/HauserGroup/curvebook/blob/main/docs/schemas/batch-v1.schema.json&quot;,
+  &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+  &quot;additionalProperties&quot;: false,
+  &quot;description&quot;: &quot;Draft 2020-12 schema for curvebook.batch.v1 headless batch manifests.&quot;,
+  &quot;not&quot;: {
+    &quot;properties&quot;: {
+      &quot;project&quot;: {
+        &quot;type&quot;: &quot;string&quot;
+      },
+      &quot;template&quot;: {
+        &quot;type&quot;: &quot;string&quot;
+      }
+    },
+    &quot;required&quot;: [
+      &quot;template&quot;,
+      &quot;project&quot;
+    ]
+  },
+  &quot;properties&quot;: {
+    &quot;commands&quot;: {
+      &quot;items&quot;: {
+        &quot;$ref&quot;: &quot;#/$defs/BatchCommand&quot;
+      },
+      &quot;type&quot;: [
+        &quot;array&quot;,
+        &quot;null&quot;
+      ]
+    },
+    &quot;exports&quot;: {
+      &quot;items&quot;: {
+        &quot;$ref&quot;: &quot;#/$defs/BatchExport&quot;
+      },
+      &quot;type&quot;: [
+        &quot;array&quot;,
+        &quot;null&quot;
+      ]
+    },
+    &quot;inputs&quot;: {
+      &quot;items&quot;: {
+        &quot;$ref&quot;: &quot;#/$defs/BatchInput&quot;
+      },
+      &quot;type&quot;: [
+        &quot;array&quot;,
+        &quot;null&quot;
+      ]
+    },
+    &quot;project&quot;: {
+      &quot;minLength&quot;: 1,
+      &quot;type&quot;: [
+        &quot;string&quot;,
+        &quot;null&quot;
+      ]
+    },
+    &quot;schema&quot;: {
+      &quot;const&quot;: &quot;curvebook.batch.v1&quot;,
+      &quot;type&quot;: &quot;string&quot;
+    },
+    &quot;template&quot;: {
+      &quot;minLength&quot;: 1,
+      &quot;type&quot;: [
+        &quot;string&quot;,
+        &quot;null&quot;
+      ]
+    }
+  },
+  &quot;required&quot;: [
+    &quot;schema&quot;
+  ],
+  &quot;title&quot;: &quot;BatchManifestV1&quot;,
+  &quot;type&quot;: &quot;object&quot;
+}</code></pre>
+<h2 id="schema-document" tabindex="-1">Project Document Schema</h2>
+<p>Canonical CurveBook L1 ProjectDocument JSON schema (Draft 2020-12).</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Property Key</th><th>Schema Type / Details</th></tr></thead>
+<tbody>
+<tr><td><code>active_sheet_id</code></td><td><code>{&quot;anyOf&quot;:[{&quot;$ref&quot;:&quot;#/$defs/SheetId&quot;},{&quot;type&quot;:&quot;null&quot;}]}</code></td></tr>
+<tr><td><code>checkpoints</code></td><td><code>{&quot;items&quot;:{&quot;$ref&quot;:&quot;#/$defs/NamedCheckpoint&quot;},&quot;type&quot;:&quot;array&quot;}</code></td></tr>
+<tr><td><code>data_sheets</code></td><td><code>{&quot;items&quot;:{&quot;$ref&quot;:&quot;#/$defs/DataSheet&quot;},&quot;maxItems&quot;:500,&quot;type&quot;:&quot;array&quot;}</code></td></tr>
+<tr><td><code>family_anchor_sheet_id</code></td><td><code>{&quot;anyOf&quot;:[{&quot;$ref&quot;:&quot;#/$defs/SheetId&quot;},{&quot;type&quot;:&quot;null&quot;}]}</code></td></tr>
+<tr><td><code>graph_sheets</code></td><td><code>{&quot;items&quot;:{&quot;$ref&quot;:&quot;#/$defs/GraphSheet&quot;},&quot;maxItems&quot;:500,&quot;type&quot;:&quot;array&quot;}</code></td></tr>
+<tr><td><code>image_assets</code></td><td><code>{&quot;items&quot;:{&quot;$ref&quot;:&quot;#/$defs/ProjectImageAsset&quot;},&quot;maxItems&quot;:256,&quot;type&quot;:&quot;array&quot;}</code></td></tr>
+<tr><td><code>info_sheets</code></td><td><code>{&quot;items&quot;:{&quot;$ref&quot;:&quot;#/$defs/InfoSheet&quot;},&quot;maxItems&quot;:500,&quot;type&quot;:&quot;array&quot;}</code></td></tr>
+<tr><td><code>layout_sheets</code></td><td><code>{&quot;items&quot;:{&quot;$ref&quot;:&quot;#/$defs/LayoutSheet&quot;},&quot;maxItems&quot;:500,&quot;type&quot;:&quot;array&quot;}</code></td></tr>
+<tr><td><code>result_sheets</code></td><td><code>{&quot;items&quot;:{&quot;$ref&quot;:&quot;#/$defs/ResultSheet&quot;},&quot;maxItems&quot;:500,&quot;type&quot;:&quot;array&quot;}</code></td></tr>
+<tr><td><code>schema_version</code></td><td><code>{&quot;maximum&quot;:7,&quot;minimum&quot;:1,&quot;type&quot;:&quot;integer&quot;}</code></td></tr>
+<tr><td><code>title</code></td><td><code>{&quot;description&quot;:&quot;Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).&quot;,&quot;maxLength&quot;:4096,&quot;type&quot;:&quot;string&quot;}</code></td></tr>
+</tbody>
+</table></div>
+<pre><code class="language-json">{
+  &quot;$defs&quot;: {
+    &quot;AnalysisSpec&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;properties&quot;: {
+        &quot;auto_title&quot;: {
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;confidence_level&quot;: {
+          &quot;maximum&quot;: 99.99,
+          &quot;minimum&quot;: 0.01,
+          &quot;type&quot;: &quot;number&quot;
+        },
+        &quot;custom_title&quot;: {
+          &quot;description&quot;: &quot;Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).&quot;,
+          &quot;maxLength&quot;: 4096,
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;id&quot;: {
+          &quot;$ref&quot;: &quot;#/$defs/SheetId&quot;
+        },
+        &quot;kind&quot;: {
+          &quot;anyOf&quot;: [
+            {
+              &quot;additionalProperties&quot;: false,
+              &quot;properties&quot;: {
+                &quot;PowerAnalysis&quot;: {
+                  &quot;$ref&quot;: &quot;#/$defs/PowerAnalysisSpec&quot;
+                }
+              },
+              &quot;required&quot;: [
+                &quot;PowerAnalysis&quot;
+              ],
+              &quot;type&quot;: &quot;object&quot;
+            },
+            {
+              &quot;additionalProperties&quot;: false,
+              &quot;properties&quot;: {
+                &quot;BlandAltman&quot;: {
+                  &quot;type&quot;: &quot;object&quot;
+                },
+                &quot;Contingency&quot;: {
+                  &quot;type&quot;: &quot;object&quot;
+                },
+                &quot;DescriptiveStats&quot;: {
+                  &quot;type&quot;: &quot;object&quot;
+                },
+                &quot;FactorialAnova&quot;: {
+                  &quot;type&quot;: &quot;object&quot;
+                },
+                &quot;GeneralizedLinearModel&quot;: {
+                  &quot;type&quot;: &quot;object&quot;
+                },
+                &quot;LinearRegression&quot;: {
+                  &quot;type&quot;: &quot;object&quot;
+                },
+                &quot;MultipleRowTTests&quot;: {
+                  &quot;type&quot;: &quot;object&quot;
+                },
+                &quot;Multivariate&quot;: {
+                  &quot;type&quot;: &quot;object&quot;
+                },
+                &quot;NestedComparison&quot;: {
+                  &quot;type&quot;: &quot;object&quot;
+                },
+                &quot;NonlinearRegression&quot;: {
+                  &quot;type&quot;: &quot;object&quot;
+                },
+                &quot;OneWayAnova&quot;: {
+                  &quot;type&quot;: &quot;object&quot;
+                },
+                &quot;OutlierDetection&quot;: {
+                  &quot;type&quot;: &quot;object&quot;
+                },
+                &quot;PValueStack&quot;: {
+                  &quot;type&quot;: &quot;object&quot;
+                },
+                &quot;PassingBablok&quot;: {
+                  &quot;type&quot;: &quot;object&quot;
+                },
+                &quot;RocCurve&quot;: {
+                  &quot;type&quot;: &quot;object&quot;
+                },
+                &quot;Survival&quot;: {
+                  &quot;type&quot;: &quot;object&quot;
+                },
+                &quot;Transform&quot;: {
+                  &quot;type&quot;: &quot;object&quot;
+                },
+                &quot;TwoGroupComparison&quot;: {
+                  &quot;type&quot;: &quot;object&quot;
+                }
+              },
+              &quot;type&quot;: &quot;object&quot;
+            }
+          ]
+        },
+        &quot;p_value_format&quot;: {
+          &quot;oneOf&quot;: [
+            {
+              &quot;const&quot;: &quot;FourDecimal&quot;,
+              &quot;type&quot;: &quot;string&quot;
+            },
+            {
+              &quot;const&quot;: &quot;Apa&quot;,
+              &quot;type&quot;: &quot;string&quot;
+            },
+            {
+              &quot;const&quot;: &quot;Nejm&quot;,
+              &quot;type&quot;: &quot;string&quot;
+            },
+            {
+              &quot;additionalProperties&quot;: false,
+              &quot;properties&quot;: {
+                &quot;Custom&quot;: {
+                  &quot;additionalProperties&quot;: false,
+                  &quot;properties&quot;: {
+                    &quot;decimals&quot;: {
+                      &quot;maximum&quot;: 15,
+                      &quot;minimum&quot;: 1,
+                      &quot;type&quot;: &quot;integer&quot;
+                    },
+                    &quot;scientific_below&quot;: {
+                      &quot;minimum&quot;: 0.0,
+                      &quot;type&quot;: [
+                        &quot;number&quot;,
+                        &quot;null&quot;
+                      ]
+                    }
+                  },
+                  &quot;required&quot;: [
+                    &quot;decimals&quot;,
+                    &quot;scientific_below&quot;
+                  ],
+                  &quot;type&quot;: &quot;object&quot;
+                }
+              },
+              &quot;required&quot;: [
+                &quot;Custom&quot;
+              ],
+              &quot;type&quot;: &quot;object&quot;
+            }
+          ]
+        },
+        &quot;selected_data_sets&quot;: {
+          &quot;items&quot;: {
+            &quot;minimum&quot;: 0,
+            &quot;type&quot;: &quot;integer&quot;
+          },
+          &quot;type&quot;: &quot;array&quot;
+        },
+        &quot;source_sheet_id&quot;: {
+          &quot;$ref&quot;: &quot;#/$defs/SheetId&quot;
+        }
+      },
+      &quot;required&quot;: [
+        &quot;id&quot;,
+        &quot;source_sheet_id&quot;,
+        &quot;selected_data_sets&quot;,
+        &quot;auto_title&quot;,
+        &quot;custom_title&quot;,
+        &quot;confidence_level&quot;,
+        &quot;p_value_format&quot;,
+        &quot;kind&quot;
+      ],
+      &quot;title&quot;: &quot;AnalysisSpec&quot;,
+      &quot;type&quot;: &quot;object&quot;
+    },
+    &quot;CellCoord&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;properties&quot;: {
+        &quot;col&quot;: {
+          &quot;minimum&quot;: 0,
+          &quot;type&quot;: &quot;integer&quot;
+        },
+        &quot;row&quot;: {
+          &quot;minimum&quot;: 0,
+          &quot;type&quot;: &quot;integer&quot;
+        },
+        &quot;subcol&quot;: {
+          &quot;minimum&quot;: 0,
+          &quot;type&quot;: &quot;integer&quot;
+        }
+      },
+      &quot;required&quot;: [
+        &quot;row&quot;,
+        &quot;col&quot;,
+        &quot;subcol&quot;
+      ],
+      &quot;title&quot;: &quot;CellCoord&quot;,
+      &quot;type&quot;: &quot;object&quot;
+    },
+    &quot;CellExclusionNote&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;properties&quot;: {
+        &quot;coord&quot;: {
+          &quot;$ref&quot;: &quot;#/$defs/CellCoord&quot;
+        },
+        &quot;note&quot;: {
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;reason_tag&quot;: {
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;timestamp_utc&quot;: {
+          &quot;type&quot;: &quot;string&quot;
+        }
+      },
+      &quot;required&quot;: [
+        &quot;coord&quot;,
+        &quot;reason_tag&quot;,
+        &quot;note&quot;,
+        &quot;timestamp_utc&quot;
+      ],
+      &quot;title&quot;: &quot;CellExclusionNote&quot;,
+      &quot;type&quot;: &quot;object&quot;
+    },
+    &quot;ChecklistItem&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;properties&quot;: {
+        &quot;assumption&quot;: {
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;diagnostic_metric&quot;: {
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;explanation&quot;: {
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;remediation&quot;: {
+          &quot;anyOf&quot;: [
+            {
+              &quot;$ref&quot;: &quot;#/$defs/RemediationKind&quot;
+            },
+            {
+              &quot;type&quot;: &quot;null&quot;
+            }
+          ]
+        },
+        &quot;status&quot;: {
+          &quot;$ref&quot;: &quot;#/$defs/ChecklistStatus&quot;
+        }
+      },
+      &quot;required&quot;: [
+        &quot;assumption&quot;,
+        &quot;status&quot;,
+        &quot;diagnostic_metric&quot;,
+        &quot;explanation&quot;
+      ],
+      &quot;title&quot;: &quot;ChecklistItem&quot;,
+      &quot;type&quot;: &quot;object&quot;
+    },
+    &quot;ChecklistStatus&quot;: {
+      &quot;enum&quot;: [
+        &quot;Pass&quot;,
+        &quot;Warn&quot;,
+        &quot;Violated&quot;,
+        &quot;Info&quot;
+      ],
+      &quot;title&quot;: &quot;ChecklistStatus&quot;,
+      &quot;type&quot;: &quot;string&quot;
+    },
+    &quot;DataSheet&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;properties&quot;: {
+        &quot;archetype&quot;: {
+          &quot;$ref&quot;: &quot;#/$defs/TableArchetype&quot;
+        },
+        &quot;color_tag&quot;: {
+          &quot;anyOf&quot;: [
+            {
+              &quot;$ref&quot;: &quot;#/$defs/Rgba8&quot;
+            },
+            {
+              &quot;type&quot;: &quot;null&quot;
+            }
+          ]
+        },
+        &quot;exclusion_notes&quot;: {
+          &quot;items&quot;: {
+            &quot;$ref&quot;: &quot;#/$defs/CellExclusionNote&quot;
+          },
+          &quot;type&quot;: &quot;array&quot;
+        },
+        &quot;floating_notes&quot;: {
+          &quot;items&quot;: {
+            &quot;$ref&quot;: &quot;#/$defs/FloatingNote&quot;
+          },
+          &quot;type&quot;: &quot;array&quot;
+        },
+        &quot;frozen&quot;: {
+          &quot;type&quot;: &quot;boolean&quot;
+        },
+        &quot;id&quot;: {
+          &quot;$ref&quot;: &quot;#/$defs/SheetId&quot;
+        },
+        &quot;info_sheet_id&quot;: {
+          &quot;anyOf&quot;: [
+            {
+              &quot;$ref&quot;: &quot;#/$defs/SheetId&quot;
+            },
+            {
+              &quot;type&quot;: &quot;null&quot;
+            }
+          ]
+        },
+        &quot;linked_regions&quot;: {
+          &quot;items&quot;: {
+            &quot;$ref&quot;: &quot;#/$defs/LinkedDataRegion&quot;
+          },
+          &quot;type&quot;: &quot;array&quot;
+        },
+        &quot;title&quot;: {
+          &quot;description&quot;: &quot;Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).&quot;,
+          &quot;maxLength&quot;: 4096,
+          &quot;type&quot;: &quot;string&quot;
+        }
+      },
+      &quot;required&quot;: [
+        &quot;id&quot;,
+        &quot;title&quot;,
+        &quot;archetype&quot;,
+        &quot;frozen&quot;,
+        &quot;info_sheet_id&quot;,
+        &quot;linked_regions&quot;,
+        &quot;floating_notes&quot;,
+        &quot;color_tag&quot;
+      ],
+      &quot;title&quot;: &quot;DataSheet&quot;,
+      &quot;type&quot;: &quot;object&quot;
+    },
+    &quot;ErrorCategory&quot;: {
+      &quot;enum&quot;: [
+        &quot;input&quot;,
+        &quot;state&quot;,
+        &quot;format&quot;,
+        &quot;io&quot;,
+        &quot;policy&quot;,
+        &quot;compute&quot;,
+        &quot;internal&quot;
+      ],
+      &quot;title&quot;: &quot;ErrorCategory&quot;,
+      &quot;type&quot;: &quot;string&quot;
+    },
+    &quot;ErrorCode&quot;: {
+      &quot;enum&quot;: [
+        &quot;bad_input&quot;,
+        &quot;not_found&quot;,
+        &quot;already_exists&quot;,
+        &quot;conflict&quot;,
+        &quot;frozen_sheet&quot;,
+        &quot;cycle_detected&quot;,
+        &quot;unsupported_format&quot;,
+        &quot;unsupported_version&quot;,
+        &quot;corrupt_data&quot;,
+        &quot;io_error&quot;,
+        &quot;path_escape&quot;,
+        &quot;resource_limit&quot;,
+        &quot;solver_failed&quot;,
+        &quot;insufficient_data&quot;,
+        &quot;cancelled&quot;,
+        &quot;gui_only_violation&quot;,
+        &quot;internal_panic&quot;,
+        &quot;internal_error&quot;
+      ],
+      &quot;title&quot;: &quot;ErrorCode&quot;,
+      &quot;type&quot;: &quot;string&quot;
+    },
+    &quot;FittedCurveOverlay&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;properties&quot;: {
+        &quot;ambiguous&quot;: {
+          &quot;type&quot;: &quot;boolean&quot;
+        },
+        &quot;converged&quot;: {
+          &quot;type&quot;: &quot;boolean&quot;
+        },
+        &quot;data_set_index&quot;: {
+          &quot;minimum&quot;: 0,
+          &quot;type&quot;: &quot;integer&quot;
+        },
+        &quot;equation_id&quot;: {
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;points&quot;: {
+          &quot;items&quot;: {
+            &quot;additionalProperties&quot;: false,
+            &quot;properties&quot;: {
+              &quot;ci_lower&quot;: {
+                &quot;type&quot;: [
+                  &quot;number&quot;,
+                  &quot;null&quot;
+                ]
+              },
+              &quot;ci_upper&quot;: {
+                &quot;type&quot;: [
+                  &quot;number&quot;,
+                  &quot;null&quot;
+                ]
+              },
+              &quot;pred_lower&quot;: {
+                &quot;type&quot;: [
+                  &quot;number&quot;,
+                  &quot;null&quot;
+                ]
+              },
+              &quot;pred_upper&quot;: {
+                &quot;type&quot;: [
+                  &quot;number&quot;,
+                  &quot;null&quot;
+                ]
+              },
+              &quot;x&quot;: {
+                &quot;type&quot;: &quot;number&quot;
+              },
+              &quot;y&quot;: {
+                &quot;type&quot;: &quot;number&quot;
+              }
+            },
+            &quot;required&quot;: [
+              &quot;x&quot;,
+              &quot;y&quot;,
+              &quot;ci_lower&quot;,
+              &quot;ci_upper&quot;,
+              &quot;pred_lower&quot;,
+              &quot;pred_upper&quot;
+            ],
+            &quot;type&quot;: &quot;object&quot;
+          },
+          &quot;type&quot;: &quot;array&quot;
+        }
+      },
+      &quot;required&quot;: [
+        &quot;data_set_index&quot;,
+        &quot;equation_id&quot;,
+        &quot;converged&quot;,
+        &quot;ambiguous&quot;,
+        &quot;points&quot;
+      ],
+      &quot;title&quot;: &quot;FittedCurveOverlay&quot;,
+      &quot;type&quot;: &quot;object&quot;
+    },
+    &quot;FloatingNote&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;properties&quot;: {
+        &quot;body_markdown&quot;: {
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;bounds_pt&quot;: {
+          &quot;$ref&quot;: &quot;#/$defs/RectPt&quot;
+        },
+        &quot;fill_color&quot;: {
+          &quot;$ref&quot;: &quot;#/$defs/Rgba8&quot;
+        },
+        &quot;id&quot;: {
+          &quot;maxLength&quot;: 256,
+          &quot;minLength&quot;: 1,
+          &quot;pattern&quot;: &quot;\\S&quot;,
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;minimized&quot;: {
+          &quot;type&quot;: &quot;boolean&quot;
+        }
+      },
+      &quot;required&quot;: [
+        &quot;id&quot;,
+        &quot;fill_color&quot;,
+        &quot;bounds_pt&quot;,
+        &quot;minimized&quot;,
+        &quot;body_markdown&quot;
+      ],
+      &quot;title&quot;: &quot;FloatingNote&quot;,
+      &quot;type&quot;: &quot;object&quot;
+    },
+    &quot;GraphSheet&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;properties&quot;: {
+        &quot;color_tag&quot;: {
+          &quot;anyOf&quot;: [
+            {
+              &quot;$ref&quot;: &quot;#/$defs/Rgba8&quot;
+            },
+            {
+              &quot;type&quot;: &quot;null&quot;
+            }
+          ]
+        },
+        &quot;floating_notes&quot;: {
+          &quot;items&quot;: {
+            &quot;$ref&quot;: &quot;#/$defs/FloatingNote&quot;
+          },
+          &quot;type&quot;: &quot;array&quot;
+        },
+        &quot;id&quot;: {
+          &quot;$ref&quot;: &quot;#/$defs/SheetId&quot;
+        },
+        &quot;initialized&quot;: {
+          &quot;type&quot;: &quot;boolean&quot;
+        },
+        &quot;spec&quot;: {
+          &quot;$ref&quot;: &quot;#/$defs/GraphSpec&quot;
+        },
+        &quot;title&quot;: {
+          &quot;description&quot;: &quot;Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).&quot;,
+          &quot;maxLength&quot;: 4096,
+          &quot;type&quot;: &quot;string&quot;
+        }
+      },
+      &quot;required&quot;: [
+        &quot;id&quot;,
+        &quot;title&quot;,
+        &quot;initialized&quot;,
+        &quot;spec&quot;,
+        &quot;floating_notes&quot;,
+        &quot;color_tag&quot;
+      ],
+      &quot;title&quot;: &quot;GraphSheet&quot;,
+      &quot;type&quot;: &quot;object&quot;
+    },
+    &quot;GraphSpec&quot;: {
+      &quot;additionalProperties&quot;: true,
+      &quot;properties&quot;: {
+        &quot;canvas_size_pt&quot;: {
+          &quot;$ref&quot;: &quot;#/$defs/SizePt&quot;
+        },
+        &quot;paper_fill&quot;: {
+          &quot;anyOf&quot;: [
+            {
+              &quot;$ref&quot;: &quot;#/$defs/Rgba8&quot;
+            },
+            {
+              &quot;type&quot;: &quot;null&quot;
+            }
+          ]
+        },
+        &quot;primary_source_sheet_id&quot;: {
+          &quot;$ref&quot;: &quot;#/$defs/SheetId&quot;
+        },
+        &quot;title&quot;: {
+          &quot;description&quot;: &quot;Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).&quot;,
+          &quot;maxLength&quot;: 4096,
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;x_axis&quot;: {
+          &quot;additionalProperties&quot;: true,
+          &quot;properties&quot;: {
+            &quot;segments&quot;: {
+              &quot;items&quot;: {
+                &quot;type&quot;: &quot;object&quot;
+              },
+              &quot;maxItems&quot;: 3,
+              &quot;minItems&quot;: 1,
+              &quot;type&quot;: &quot;array&quot;
+            },
+            &quot;stroke_width_pt&quot;: {
+              &quot;minimum&quot;: 0.0,
+              &quot;type&quot;: &quot;number&quot;
+            },
+            &quot;title&quot;: {
+              &quot;description&quot;: &quot;Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).&quot;,
+              &quot;maxLength&quot;: 4096,
+              &quot;type&quot;: &quot;string&quot;
+            }
+          },
+          &quot;required&quot;: [
+            &quot;title&quot;,
+            &quot;segments&quot;,
+            &quot;stroke_width_pt&quot;
+          ],
+          &quot;type&quot;: &quot;object&quot;
+        },
+        &quot;y2_axis&quot;: {
+          &quot;additionalProperties&quot;: true,
+          &quot;properties&quot;: {
+            &quot;segments&quot;: {
+              &quot;items&quot;: {
+                &quot;type&quot;: &quot;object&quot;
+              },
+              &quot;maxItems&quot;: 3,
+              &quot;minItems&quot;: 1,
+              &quot;type&quot;: &quot;array&quot;
+            },
+            &quot;stroke_width_pt&quot;: {
+              &quot;minimum&quot;: 0.0,
+              &quot;type&quot;: &quot;number&quot;
+            },
+            &quot;title&quot;: {
+              &quot;description&quot;: &quot;Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).&quot;,
+              &quot;maxLength&quot;: 4096,
+              &quot;type&quot;: &quot;string&quot;
+            }
+          },
+          &quot;required&quot;: [
+            &quot;title&quot;,
+            &quot;segments&quot;,
+            &quot;stroke_width_pt&quot;
+          ],
+          &quot;type&quot;: [
+            &quot;object&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;y_axis&quot;: {
+          &quot;additionalProperties&quot;: true,
+          &quot;properties&quot;: {
+            &quot;segments&quot;: {
+              &quot;items&quot;: {
+                &quot;type&quot;: &quot;object&quot;
+              },
+              &quot;maxItems&quot;: 3,
+              &quot;minItems&quot;: 1,
+              &quot;type&quot;: &quot;array&quot;
+            },
+            &quot;stroke_width_pt&quot;: {
+              &quot;minimum&quot;: 0.0,
+              &quot;type&quot;: &quot;number&quot;
+            },
+            &quot;title&quot;: {
+              &quot;description&quot;: &quot;Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).&quot;,
+              &quot;maxLength&quot;: 4096,
+              &quot;type&quot;: &quot;string&quot;
+            }
+          },
+          &quot;required&quot;: [
+            &quot;title&quot;,
+            &quot;segments&quot;,
+            &quot;stroke_width_pt&quot;
+          ],
+          &quot;type&quot;: &quot;object&quot;
+        }
+      },
+      &quot;required&quot;: [
+        &quot;kind&quot;,
+        &quot;primary_source_sheet_id&quot;,
+        &quot;palette&quot;,
+        &quot;canvas_size_pt&quot;,
+        &quot;paper_fill&quot;,
+        &quot;title&quot;,
+        &quot;frame_preset&quot;,
+        &quot;x_axis&quot;,
+        &quot;y_axis&quot;,
+        &quot;series&quot;,
+        &quot;legend&quot;
+      ],
+      &quot;title&quot;: &quot;GraphSpec&quot;,
+      &quot;type&quot;: &quot;object&quot;
+    },
+    &quot;InfoConstant&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;properties&quot;: {
+        &quot;name&quot;: {
+          &quot;description&quot;: &quot;Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).&quot;,
+          &quot;maxLength&quot;: 4096,
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;units&quot;: {
+          &quot;description&quot;: &quot;Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).&quot;,
+          &quot;maxLength&quot;: 4096,
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;value&quot;: {
+          &quot;oneOf&quot;: [
+            {
+              &quot;const&quot;: &quot;Empty&quot;,
+              &quot;type&quot;: &quot;string&quot;
+            },
+            {
+              &quot;additionalProperties&quot;: false,
+              &quot;properties&quot;: {
+                &quot;Number&quot;: {
+                  &quot;type&quot;: &quot;number&quot;
+                }
+              },
+              &quot;required&quot;: [
+                &quot;Number&quot;
+              ],
+              &quot;type&quot;: &quot;object&quot;
+            },
+            {
+              &quot;additionalProperties&quot;: false,
+              &quot;properties&quot;: {
+                &quot;Text&quot;: {
+                  &quot;type&quot;: &quot;string&quot;
+                }
+              },
+              &quot;required&quot;: [
+                &quot;Text&quot;
+              ],
+              &quot;type&quot;: &quot;object&quot;
+            },
+            {
+              &quot;additionalProperties&quot;: false,
+              &quot;properties&quot;: {
+                &quot;Date&quot;: {
+                  &quot;type&quot;: &quot;string&quot;
+                }
+              },
+              &quot;required&quot;: [
+                &quot;Date&quot;
+              ],
+              &quot;type&quot;: &quot;object&quot;
+            }
+          ]
+        }
+      },
+      &quot;required&quot;: [
+        &quot;name&quot;,
+        &quot;value&quot;,
+        &quot;units&quot;
+      ],
+      &quot;title&quot;: &quot;InfoConstant&quot;,
+      &quot;type&quot;: &quot;object&quot;
+    },
+    &quot;InfoSheet&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;properties&quot;: {
+        &quot;color_tag&quot;: {
+          &quot;anyOf&quot;: [
+            {
+              &quot;$ref&quot;: &quot;#/$defs/Rgba8&quot;
+            },
+            {
+              &quot;type&quot;: &quot;null&quot;
+            }
+          ]
+        },
+        &quot;constants&quot;: {
+          &quot;items&quot;: {
+            &quot;$ref&quot;: &quot;#/$defs/InfoConstant&quot;
+          },
+          &quot;type&quot;: &quot;array&quot;
+        },
+        &quot;floating_notes&quot;: {
+          &quot;items&quot;: {
+            &quot;$ref&quot;: &quot;#/$defs/FloatingNote&quot;
+          },
+          &quot;type&quot;: &quot;array&quot;
+        },
+        &quot;id&quot;: {
+          &quot;$ref&quot;: &quot;#/$defs/SheetId&quot;
+        },
+        &quot;linked_data_sheets&quot;: {
+          &quot;items&quot;: {
+            &quot;$ref&quot;: &quot;#/$defs/SheetId&quot;
+          },
+          &quot;type&quot;: &quot;array&quot;
+        },
+        &quot;notes_markdown&quot;: {
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;title&quot;: {
+          &quot;description&quot;: &quot;Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).&quot;,
+          &quot;maxLength&quot;: 4096,
+          &quot;type&quot;: &quot;string&quot;
+        }
+      },
+      &quot;required&quot;: [
+        &quot;id&quot;,
+        &quot;title&quot;,
+        &quot;linked_data_sheets&quot;,
+        &quot;constants&quot;,
+        &quot;notes_markdown&quot;,
+        &quot;floating_notes&quot;,
+        &quot;color_tag&quot;
+      ],
+      &quot;title&quot;: &quot;InfoSheet&quot;,
+      &quot;type&quot;: &quot;object&quot;
+    },
+    &quot;LayoutSheet&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;properties&quot;: {
+        &quot;color_tag&quot;: {
+          &quot;anyOf&quot;: [
+            {
+              &quot;$ref&quot;: &quot;#/$defs/Rgba8&quot;
+            },
+            {
+              &quot;type&quot;: &quot;null&quot;
+            }
+          ]
+        },
+        &quot;floating_notes&quot;: {
+          &quot;items&quot;: {
+            &quot;$ref&quot;: &quot;#/$defs/FloatingNote&quot;
+          },
+          &quot;type&quot;: &quot;array&quot;
+        },
+        &quot;id&quot;: {
+          &quot;$ref&quot;: &quot;#/$defs/SheetId&quot;
+        },
+        &quot;spec&quot;: {
+          &quot;$ref&quot;: &quot;#/$defs/LayoutSpec&quot;
+        },
+        &quot;title&quot;: {
+          &quot;description&quot;: &quot;Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).&quot;,
+          &quot;maxLength&quot;: 4096,
+          &quot;type&quot;: &quot;string&quot;
+        }
+      },
+      &quot;required&quot;: [
+        &quot;id&quot;,
+        &quot;title&quot;,
+        &quot;spec&quot;,
+        &quot;floating_notes&quot;,
+        &quot;color_tag&quot;
+      ],
+      &quot;title&quot;: &quot;LayoutSheet&quot;,
+      &quot;type&quot;: &quot;object&quot;
+    },
+    &quot;LayoutSpec&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;properties&quot;: {
+        &quot;align_plot_origins&quot;: {
+          &quot;type&quot;: &quot;boolean&quot;
+        },
+        &quot;background_fill&quot;: {
+          &quot;anyOf&quot;: [
+            {
+              &quot;$ref&quot;: &quot;#/$defs/Rgba8&quot;
+            },
+            {
+              &quot;type&quot;: &quot;null&quot;
+            }
+          ]
+        },
+        &quot;grid_template&quot;: {
+          &quot;items&quot;: {
+            &quot;maximum&quot;: 255,
+            &quot;minimum&quot;: 1,
+            &quot;type&quot;: &quot;integer&quot;
+          },
+          &quot;maxItems&quot;: 2,
+          &quot;minItems&quot;: 2,
+          &quot;type&quot;: [
+            &quot;array&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;height&quot;: {
+          &quot;minimum&quot;: 2.2250738585072014e-308,
+          &quot;type&quot;: &quot;number&quot;
+        },
+        &quot;items&quot;: {
+          &quot;items&quot;: {
+            &quot;type&quot;: &quot;object&quot;
+          },
+          &quot;maxItems&quot;: 64,
+          &quot;type&quot;: &quot;array&quot;
+        },
+        &quot;orientation&quot;: {
+          &quot;enum&quot;: [
+            &quot;Portrait&quot;,
+            &quot;Landscape&quot;
+          ],
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;panel_badges&quot;: {
+          &quot;enum&quot;: [
+            &quot;UpperCaseLetters&quot;,
+            &quot;LowerCaseLetters&quot;,
+            &quot;None&quot;
+          ],
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;unit&quot;: {
+          &quot;enum&quot;: [
+            &quot;Millimeters&quot;,
+            &quot;Centimeters&quot;,
+            &quot;Inches&quot;,
+            &quot;Points&quot;
+          ],
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;width&quot;: {
+          &quot;minimum&quot;: 2.2250738585072014e-308,
+          &quot;type&quot;: &quot;number&quot;
+        }
+      },
+      &quot;required&quot;: [
+        &quot;width&quot;,
+        &quot;height&quot;,
+        &quot;unit&quot;,
+        &quot;orientation&quot;,
+        &quot;grid_template&quot;,
+        &quot;align_plot_origins&quot;,
+        &quot;panel_badges&quot;,
+        &quot;background_fill&quot;,
+        &quot;items&quot;
+      ],
+      &quot;title&quot;: &quot;LayoutSpec&quot;,
+      &quot;type&quot;: &quot;object&quot;
+    },
+    &quot;LinkedDataRegion&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;properties&quot;: {
+        &quot;id&quot;: {
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;provenance_summary&quot;: {
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;spec&quot;: {
+          &quot;type&quot;: &quot;object&quot;
+        },
+        &quot;target_range&quot;: {
+          &quot;additionalProperties&quot;: false,
+          &quot;properties&quot;: {
+            &quot;end&quot;: {
+              &quot;$ref&quot;: &quot;#/$defs/CellCoord&quot;
+            },
+            &quot;start&quot;: {
+              &quot;$ref&quot;: &quot;#/$defs/CellCoord&quot;
+            }
+          },
+          &quot;required&quot;: [
+            &quot;start&quot;,
+            &quot;end&quot;
+          ],
+          &quot;type&quot;: &quot;object&quot;
+        }
+      },
+      &quot;required&quot;: [
+        &quot;id&quot;,
+        &quot;spec&quot;,
+        &quot;target_range&quot;,
+        &quot;provenance_summary&quot;
+      ],
+      &quot;title&quot;: &quot;LinkedDataRegion&quot;,
+      &quot;type&quot;: &quot;object&quot;
+    },
+    &quot;NamedCheckpoint&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;properties&quot;: {
+        &quot;created_utc&quot;: {
+          &quot;description&quot;: &quot;Creation timestamp string (RFC 3339 UTC or `unix:&lt;seconds&gt;`).&quot;,
+          &quot;minLength&quot;: 1,
+          &quot;pattern&quot;: &quot;\\S&quot;,
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;id&quot;: {
+          &quot;maxLength&quot;: 256,
+          &quot;minLength&quot;: 1,
+          &quot;pattern&quot;: &quot;\\S&quot;,
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;name&quot;: {
+          &quot;description&quot;: &quot;Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).&quot;,
+          &quot;maxLength&quot;: 4096,
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;note&quot;: {
+          &quot;description&quot;: &quot;Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).&quot;,
+          &quot;maxLength&quot;: 4096,
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;snapshot_json&quot;: {
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: &quot;string&quot;
+        }
+      },
+      &quot;required&quot;: [
+        &quot;id&quot;,
+        &quot;name&quot;,
+        &quot;note&quot;,
+        &quot;created_utc&quot;,
+        &quot;snapshot_json&quot;
+      ],
+      &quot;title&quot;: &quot;NamedCheckpoint&quot;,
+      &quot;type&quot;: &quot;object&quot;
+    },
+    &quot;PairwiseComparisonRecord&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;properties&quot;: {
+        &quot;estimate_diff&quot;: {
+          &quot;type&quot;: [
+            &quot;number&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;group_a&quot;: {
+          &quot;minimum&quot;: 0,
+          &quot;type&quot;: &quot;integer&quot;
+        },
+        &quot;group_b&quot;: {
+          &quot;minimum&quot;: 0,
+          &quot;type&quot;: &quot;integer&quot;
+        },
+        &quot;is_fdr_q&quot;: {
+          &quot;type&quot;: &quot;boolean&quot;
+        },
+        &quot;label_a&quot;: {
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;label_b&quot;: {
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;raw_p_or_q&quot;: {
+          &quot;maximum&quot;: 1.0,
+          &quot;minimum&quot;: 0.0,
+          &quot;type&quot;: &quot;number&quot;
+        },
+        &quot;significant&quot;: {
+          &quot;type&quot;: &quot;boolean&quot;
+        }
+      },
+      &quot;required&quot;: [
+        &quot;group_a&quot;,
+        &quot;group_b&quot;,
+        &quot;label_a&quot;,
+        &quot;label_b&quot;,
+        &quot;estimate_diff&quot;,
+        &quot;raw_p_or_q&quot;,
+        &quot;is_fdr_q&quot;,
+        &quot;significant&quot;
+      ],
+      &quot;title&quot;: &quot;PairwiseComparisonRecord&quot;,
+      &quot;type&quot;: &quot;object&quot;
+    },
+    &quot;PowerAnalysisSpec&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;properties&quot;: {
+        &quot;allocation_ratio&quot;: {
+          &quot;minimum&quot;: 2.2250738585072014e-308,
+          &quot;type&quot;: &quot;number&quot;
+        },
+        &quot;alpha&quot;: {
+          &quot;maximum&quot;: 1.0,
+          &quot;minimum&quot;: 0.0,
+          &quot;type&quot;: &quot;number&quot;
+        },
+        &quot;chi_square_df&quot;: {
+          &quot;minimum&quot;: 2.2250738585072014e-308,
+          &quot;type&quot;: &quot;number&quot;
+        },
+        &quot;continuity_correction&quot;: {
+          &quot;type&quot;: &quot;boolean&quot;
+        },
+        &quot;correlation_method&quot;: {
+          &quot;enum&quot;: [
+            &quot;FisherZ&quot;,
+            &quot;FisherZWithTCrit&quot;,
+            &quot;ExactTTransform&quot;,
+            &quot;ConditionalSlopeT&quot;
+          ],
+          &quot;title&quot;: &quot;CorrelationPowerMethod&quot;,
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;effect&quot;: {
+          &quot;oneOf&quot;: [
+            {
+              &quot;const&quot;: &quot;Unspecified&quot;,
+              &quot;type&quot;: &quot;string&quot;
+            },
+            {
+              &quot;additionalProperties&quot;: false,
+              &quot;properties&quot;: {
+                &quot;Standardized&quot;: {
+                  &quot;type&quot;: &quot;number&quot;
+                }
+              },
+              &quot;required&quot;: [
+                &quot;Standardized&quot;
+              ],
+              &quot;type&quot;: &quot;object&quot;
+            },
+            {
+              &quot;additionalProperties&quot;: false,
+              &quot;properties&quot;: {
+                &quot;MeanDiffAndSd&quot;: {
+                  &quot;additionalProperties&quot;: false,
+                  &quot;properties&quot;: {
+                    &quot;mean_diff&quot;: {
+                      &quot;type&quot;: &quot;number&quot;
+                    },
+                    &quot;sd&quot;: {
+                      &quot;minimum&quot;: 2.2250738585072014e-308,
+                      &quot;type&quot;: &quot;number&quot;
+                    },
+                    &quot;sd_group2&quot;: {
+                      &quot;type&quot;: [
+                        &quot;number&quot;,
+                        &quot;null&quot;
+                      ]
+                    },
+                    &quot;within_pair_correlation&quot;: {
+                      &quot;maximum&quot;: 1.0,
+                      &quot;minimum&quot;: -1.0,
+                      &quot;type&quot;: [
+                        &quot;number&quot;,
+                        &quot;null&quot;
+                      ]
+                    }
+                  },
+                  &quot;required&quot;: [
+                    &quot;mean_diff&quot;,
+                    &quot;sd&quot;
+                  ],
+                  &quot;type&quot;: &quot;object&quot;
+                }
+              },
+              &quot;required&quot;: [
+                &quot;MeanDiffAndSd&quot;
+              ],
+              &quot;type&quot;: &quot;object&quot;
+            },
+            {
+              &quot;additionalProperties&quot;: false,
+              &quot;properties&quot;: {
+                &quot;PairedDiff&quot;: {
+                  &quot;additionalProperties&quot;: false,
+                  &quot;properties&quot;: {
+                    &quot;mean_diff&quot;: {
+                      &quot;type&quot;: &quot;number&quot;
+                    },
+                    &quot;sd_diff&quot;: {
+                      &quot;type&quot;: &quot;number&quot;
+                    }
+                  },
+                  &quot;required&quot;: [
+                    &quot;mean_diff&quot;,
+                    &quot;sd_diff&quot;
+                  ],
+                  &quot;type&quot;: &quot;object&quot;
+                }
+              },
+              &quot;required&quot;: [
+                &quot;PairedDiff&quot;
+              ],
+              &quot;type&quot;: &quot;object&quot;
+            },
+            {
+              &quot;additionalProperties&quot;: false,
+              &quot;properties&quot;: {
+                &quot;GroupMeansAndSd&quot;: {
+                  &quot;additionalProperties&quot;: false,
+                  &quot;properties&quot;: {
+                    &quot;means&quot;: {
+                      &quot;items&quot;: {
+                        &quot;type&quot;: &quot;number&quot;
+                      },
+                      &quot;type&quot;: &quot;array&quot;
+                    },
+                    &quot;within_sd&quot;: {
+                      &quot;type&quot;: &quot;number&quot;
+                    }
+                  },
+                  &quot;required&quot;: [
+                    &quot;means&quot;,
+                    &quot;within_sd&quot;
+                  ],
+                  &quot;type&quot;: &quot;object&quot;
+                }
+              },
+              &quot;required&quot;: [
+                &quot;GroupMeansAndSd&quot;
+              ],
+              &quot;type&quot;: &quot;object&quot;
+            },
+            {
+              &quot;additionalProperties&quot;: false,
+              &quot;properties&quot;: {
+                &quot;TwoProportions&quot;: {
+                  &quot;additionalProperties&quot;: false,
+                  &quot;properties&quot;: {
+                    &quot;p1&quot;: {
+                      &quot;maximum&quot;: 1.0,
+                      &quot;minimum&quot;: 0.0,
+                      &quot;type&quot;: &quot;number&quot;
+                    },
+                    &quot;p2&quot;: {
+                      &quot;maximum&quot;: 1.0,
+                      &quot;minimum&quot;: 0.0,
+                      &quot;type&quot;: &quot;number&quot;
+                    }
+                  },
+                  &quot;required&quot;: [
+                    &quot;p1&quot;,
+                    &quot;p2&quot;
+                  ],
+                  &quot;type&quot;: &quot;object&quot;
+                }
+              },
+              &quot;required&quot;: [
+                &quot;TwoProportions&quot;
+              ],
+              &quot;type&quot;: &quot;object&quot;
+            },
+            {
+              &quot;additionalProperties&quot;: false,
+              &quot;properties&quot;: {
+                &quot;BaselineProportion&quot;: {
+                  &quot;additionalProperties&quot;: false,
+                  &quot;properties&quot;: {
+                    &quot;p1&quot;: {
+                      &quot;maximum&quot;: 1.0,
+                      &quot;minimum&quot;: 0.0,
+                      &quot;type&quot;: &quot;number&quot;
+                    }
+                  },
+                  &quot;required&quot;: [
+                    &quot;p1&quot;
+                  ],
+                  &quot;type&quot;: &quot;object&quot;
+                }
+              },
+              &quot;required&quot;: [
+                &quot;BaselineProportion&quot;
+              ],
+              &quot;type&quot;: &quot;object&quot;
+            },
+            {
+              &quot;additionalProperties&quot;: false,
+              &quot;properties&quot;: {
+                &quot;RSquared&quot;: {
+                  &quot;maximum&quot;: 1.0,
+                  &quot;minimum&quot;: 0.0,
+                  &quot;type&quot;: &quot;number&quot;
+                }
+              },
+              &quot;required&quot;: [
+                &quot;RSquared&quot;
+              ],
+              &quot;type&quot;: &quot;object&quot;
+            },
+            {
+              &quot;additionalProperties&quot;: false,
+              &quot;properties&quot;: {
+                &quot;RegressionSlope&quot;: {
+                  &quot;additionalProperties&quot;: false,
+                  &quot;properties&quot;: {
+                    &quot;beta1&quot;: {
+                      &quot;type&quot;: &quot;number&quot;
+                    },
+                    &quot;sigma_eps&quot;: {
+                      &quot;type&quot;: &quot;number&quot;
+                    },
+                    &quot;sigma_x&quot;: {
+                      &quot;type&quot;: &quot;number&quot;
+                    }
+                  },
+                  &quot;required&quot;: [
+                    &quot;beta1&quot;,
+                    &quot;sigma_x&quot;,
+                    &quot;sigma_eps&quot;
+                  ],
+                  &quot;type&quot;: &quot;object&quot;
+                }
+              },
+              &quot;required&quot;: [
+                &quot;RegressionSlope&quot;
+              ],
+              &quot;type&quot;: &quot;object&quot;
+            }
+          ],
+          &quot;title&quot;: &quot;PowerEffectSpec&quot;
+        },
+        &quot;family&quot;: {
+          &quot;enum&quot;: [
+            &quot;TwoSampleUnpairedT&quot;,
+            &quot;TwoSamplePairedT&quot;,
+            &quot;OneSampleT&quot;,
+            &quot;OneWayAnova&quot;,
+            &quot;TwoProportions&quot;,
+            &quot;Correlation&quot;,
+            &quot;ChiSquare&quot;,
+            &quot;SimpleLinearRegression&quot;
+          ],
+          &quot;title&quot;: &quot;PowerTestFamily&quot;,
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;info_sheet_id&quot;: {
+          &quot;anyOf&quot;: [
+            {
+              &quot;$ref&quot;: &quot;#/$defs/SheetId&quot;
+            },
+            {
+              &quot;type&quot;: &quot;null&quot;
+            }
+          ]
+        },
+        &quot;num_groups&quot;: {
+          &quot;minimum&quot;: 2,
+          &quot;type&quot;: [
+            &quot;integer&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;sample_size&quot;: {
+          &quot;minimum&quot;: 0.0,
+          &quot;type&quot;: [
+            &quot;number&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;sample_size_group2&quot;: {
+          &quot;minimum&quot;: 0.0,
+          &quot;type&quot;: [
+            &quot;number&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;solve_target&quot;: {
+          &quot;enum&quot;: [
+            &quot;SampleSize&quot;,
+            &quot;Power&quot;,
+            &quot;DetectableEffect&quot;
+          ],
+          &quot;title&quot;: &quot;PowerSolveTarget&quot;,
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;tail_mode&quot;: {
+          &quot;oneOf&quot;: [
+            {
+              &quot;const&quot;: &quot;TwoSided&quot;,
+              &quot;type&quot;: &quot;string&quot;
+            },
+            {
+              &quot;additionalProperties&quot;: false,
+              &quot;properties&quot;: {
+                &quot;OneSided&quot;: {
+                  &quot;enum&quot;: [
+                    &quot;Greater&quot;,
+                    &quot;Less&quot;
+                  ],
+                  &quot;type&quot;: &quot;string&quot;
+                }
+              },
+              &quot;required&quot;: [
+                &quot;OneSided&quot;
+              ],
+              &quot;type&quot;: &quot;object&quot;
+            }
+          ],
+          &quot;title&quot;: &quot;PowerTailMode&quot;
+        },
+        &quot;target_power&quot;: {
+          &quot;maximum&quot;: 1.0,
+          &quot;minimum&quot;: 0.0,
+          &quot;type&quot;: [
+            &quot;number&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;two_proportions_mode&quot;: {
+          &quot;enum&quot;: [
+            &quot;PooledNullUnpooledAlt&quot;,
+            &quot;Unpooled&quot;,
+            &quot;CohensH&quot;
+          ],
+          &quot;title&quot;: &quot;TwoProportionsMethod&quot;,
+          &quot;type&quot;: &quot;string&quot;
+        }
+      },
+      &quot;required&quot;: [
+        &quot;family&quot;,
+        &quot;solve_target&quot;,
+        &quot;tail_mode&quot;,
+        &quot;alpha&quot;,
+        &quot;allocation_ratio&quot;,
+        &quot;effect&quot;,
+        &quot;chi_square_df&quot;,
+        &quot;two_proportions_mode&quot;,
+        &quot;continuity_correction&quot;,
+        &quot;correlation_method&quot;
+      ],
+      &quot;title&quot;: &quot;PowerAnalysisSpec&quot;,
+      &quot;type&quot;: &quot;object&quot;
+    },
+    &quot;ProjectImageAsset&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;properties&quot;: {
+        &quot;asset_id&quot;: {
+          &quot;minLength&quot;: 4,
+          &quot;pattern&quot;: &quot;^img-[0-9a-f]{16}$&quot;,
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;bytes&quot;: {
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;media_type&quot;: {
+          &quot;enum&quot;: [
+            &quot;Png&quot;,
+            &quot;Jpeg&quot;,
+            &quot;Tiff&quot;
+          ],
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;pixel_size&quot;: {
+          &quot;items&quot;: {
+            &quot;minimum&quot;: 1,
+            &quot;type&quot;: &quot;integer&quot;
+          },
+          &quot;maxItems&quot;: 2,
+          &quot;minItems&quot;: 2,
+          &quot;type&quot;: &quot;array&quot;
+        }
+      },
+      &quot;required&quot;: [
+        &quot;asset_id&quot;,
+        &quot;media_type&quot;,
+        &quot;pixel_size&quot;
+      ],
+      &quot;title&quot;: &quot;ProjectImageAsset&quot;,
+      &quot;type&quot;: &quot;object&quot;
+    },
+    &quot;RectPt&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;properties&quot;: {
+        &quot;height&quot;: {
+          &quot;minimum&quot;: 0.0,
+          &quot;type&quot;: &quot;number&quot;
+        },
+        &quot;width&quot;: {
+          &quot;minimum&quot;: 0.0,
+          &quot;type&quot;: &quot;number&quot;
+        },
+        &quot;x&quot;: {
+          &quot;type&quot;: &quot;number&quot;
+        },
+        &quot;y&quot;: {
+          &quot;type&quot;: &quot;number&quot;
+        }
+      },
+      &quot;required&quot;: [
+        &quot;x&quot;,
+        &quot;y&quot;,
+        &quot;width&quot;,
+        &quot;height&quot;
+      ],
+      &quot;title&quot;: &quot;RectPt&quot;,
+      &quot;type&quot;: &quot;object&quot;
+    },
+    &quot;RemediationKind&quot;: {
+      &quot;enum&quot;: [
+        &quot;WelchT&quot;,
+        &quot;MannWhitneyU&quot;,
+        &quot;WilcoxonSignedRank&quot;,
+        &quot;OneSampleWilcoxon&quot;,
+        &quot;WelchAnova&quot;,
+        &quot;KruskalWallis&quot;,
+        &quot;Friedman&quot;
+      ],
+      &quot;title&quot;: &quot;RemediationKind&quot;,
+      &quot;type&quot;: &quot;string&quot;
+    },
+    &quot;ResultScalarEntry&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;properties&quot;: {
+        &quot;data_set_index&quot;: {
+          &quot;minimum&quot;: 0,
+          &quot;type&quot;: [
+            &quot;integer&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;key&quot;: {
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;units&quot;: {
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;value&quot;: {
+          &quot;type&quot;: &quot;number&quot;
+        }
+      },
+      &quot;required&quot;: [
+        &quot;key&quot;,
+        &quot;data_set_index&quot;,
+        &quot;value&quot;,
+        &quot;units&quot;
+      ],
+      &quot;title&quot;: &quot;ResultScalarEntry&quot;,
+      &quot;type&quot;: &quot;object&quot;
+    },
+    &quot;ResultSheet&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;properties&quot;: {
+        &quot;analysis&quot;: {
+          &quot;$ref&quot;: &quot;#/$defs/AnalysisSpec&quot;
+        },
+        &quot;analyzable_data&quot;: {
+          &quot;anyOf&quot;: [
+            {
+              &quot;$ref&quot;: &quot;#/$defs/DataSheet&quot;
+            },
+            {
+              &quot;type&quot;: &quot;null&quot;
+            }
+          ]
+        },
+        &quot;checklist&quot;: {
+          &quot;items&quot;: {
+            &quot;$ref&quot;: &quot;#/$defs/ChecklistItem&quot;
+          },
+          &quot;type&quot;: &quot;array&quot;
+        },
+        &quot;color_tag&quot;: {
+          &quot;anyOf&quot;: [
+            {
+              &quot;$ref&quot;: &quot;#/$defs/Rgba8&quot;
+            },
+            {
+              &quot;type&quot;: &quot;null&quot;
+            }
+          ]
+        },
+        &quot;eliminated_outliers&quot;: {
+          &quot;items&quot;: {
+            &quot;$ref&quot;: &quot;#/$defs/SourceCellId&quot;
+          },
+          &quot;type&quot;: &quot;array&quot;
+        },
+        &quot;fitted_curves&quot;: {
+          &quot;items&quot;: {
+            &quot;$ref&quot;: &quot;#/$defs/FittedCurveOverlay&quot;
+          },
+          &quot;type&quot;: &quot;array&quot;
+        },
+        &quot;floating_notes&quot;: {
+          &quot;items&quot;: {
+            &quot;$ref&quot;: &quot;#/$defs/FloatingNote&quot;
+          },
+          &quot;type&quot;: &quot;array&quot;
+        },
+        &quot;id&quot;: {
+          &quot;$ref&quot;: &quot;#/$defs/SheetId&quot;
+        },
+        &quot;pairwise_comparisons&quot;: {
+          &quot;items&quot;: {
+            &quot;$ref&quot;: &quot;#/$defs/PairwiseComparisonRecord&quot;
+          },
+          &quot;type&quot;: &quot;array&quot;
+        },
+        &quot;scalars&quot;: {
+          &quot;items&quot;: {
+            &quot;$ref&quot;: &quot;#/$defs/ResultScalarEntry&quot;
+          },
+          &quot;type&quot;: &quot;array&quot;
+        },
+        &quot;status&quot;: {
+          &quot;$ref&quot;: &quot;#/$defs/ResultStatus&quot;
+        },
+        &quot;tabs&quot;: {
+          &quot;items&quot;: {
+            &quot;$ref&quot;: &quot;#/$defs/ResultTab&quot;
+          },
+          &quot;type&quot;: &quot;array&quot;
+        }
+      },
+      &quot;required&quot;: [
+        &quot;id&quot;,
+        &quot;analysis&quot;,
+        &quot;status&quot;,
+        &quot;analyzable_data&quot;,
+        &quot;tabs&quot;,
+        &quot;scalars&quot;,
+        &quot;pairwise_comparisons&quot;,
+        &quot;fitted_curves&quot;,
+        &quot;checklist&quot;,
+        &quot;floating_notes&quot;,
+        &quot;color_tag&quot;
+      ],
+      &quot;title&quot;: &quot;ResultSheet&quot;,
+      &quot;type&quot;: &quot;object&quot;
+    },
+    &quot;ResultStatus&quot;: {
+      &quot;oneOf&quot;: [
+        {
+          &quot;const&quot;: &quot;Dirty&quot;,
+          &quot;type&quot;: &quot;string&quot;
+        },
+        {
+          &quot;const&quot;: &quot;UpToDate&quot;,
+          &quot;type&quot;: &quot;string&quot;
+        },
+        {
+          &quot;additionalProperties&quot;: false,
+          &quot;properties&quot;: {
+            &quot;Failed&quot;: {
+              &quot;additionalProperties&quot;: false,
+              &quot;properties&quot;: {
+                &quot;code&quot;: {
+                  &quot;anyOf&quot;: [
+                    {
+                      &quot;$ref&quot;: &quot;#/$defs/ErrorCode&quot;
+                    },
+                    {
+                      &quot;description&quot;: &quot;Legacy or historical error code accepted by ErrorCode::from_code_str (normalizes unknown strings to internal_error).&quot;,
+                      &quot;type&quot;: &quot;string&quot;
+                    }
+                  ]
+                },
+                &quot;message&quot;: {
+                  &quot;type&quot;: &quot;string&quot;
+                }
+              },
+              &quot;required&quot;: [
+                &quot;code&quot;,
+                &quot;message&quot;
+              ],
+              &quot;type&quot;: &quot;object&quot;
+            }
+          },
+          &quot;required&quot;: [
+            &quot;Failed&quot;
+          ],
+          &quot;type&quot;: &quot;object&quot;
+        }
+      ],
+      &quot;title&quot;: &quot;ResultStatus&quot;
+    },
+    &quot;ResultTab&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;properties&quot;: {
+        &quot;column_headers&quot;: {
+          &quot;items&quot;: {
+            &quot;type&quot;: &quot;string&quot;
+          },
+          &quot;type&quot;: &quot;array&quot;
+        },
+        &quot;footnotes&quot;: {
+          &quot;items&quot;: {
+            &quot;type&quot;: &quot;string&quot;
+          },
+          &quot;type&quot;: &quot;array&quot;
+        },
+        &quot;id&quot;: {
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;kind&quot;: {
+          &quot;enum&quot;: [
+            &quot;MainSummary&quot;,
+            &quot;AnovaTable&quot;,
+            &quot;MultipleComparisons&quot;,
+            &quot;ParametersAndConfidenceIntervals&quot;,
+            &quot;ModelComparison&quot;,
+            &quot;Residuals&quot;,
+            &quot;DescriptiveSummary&quot;,
+            &quot;InterpolatedUnknowns&quot;,
+            &quot;CurveCoordinates&quot;,
+            &quot;NumberAtRisk&quot;,
+            &quot;Diagnostics&quot;,
+            &quot;CovarianceMatrix&quot;,
+            &quot;NormalQq&quot;,
+            &quot;BaselineSurvival&quot;,
+            &quot;LogMinusLog&quot;
+          ],
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;row_labels&quot;: {
+          &quot;items&quot;: {
+            &quot;type&quot;: &quot;string&quot;
+          },
+          &quot;type&quot;: &quot;array&quot;
+        },
+        &quot;rows&quot;: {
+          &quot;items&quot;: {
+            &quot;items&quot;: {
+              &quot;type&quot;: [
+                &quot;string&quot;,
+                &quot;object&quot;
+              ]
+            },
+            &quot;type&quot;: &quot;array&quot;
+          },
+          &quot;type&quot;: &quot;array&quot;
+        },
+        &quot;title&quot;: {
+          &quot;description&quot;: &quot;Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).&quot;,
+          &quot;maxLength&quot;: 4096,
+          &quot;type&quot;: &quot;string&quot;
+        }
+      },
+      &quot;required&quot;: [
+        &quot;id&quot;,
+        &quot;title&quot;,
+        &quot;kind&quot;,
+        &quot;column_headers&quot;,
+        &quot;row_labels&quot;,
+        &quot;rows&quot;,
+        &quot;footnotes&quot;
+      ],
+      &quot;title&quot;: &quot;ResultTab&quot;,
+      &quot;type&quot;: &quot;object&quot;
+    },
+    &quot;Rgba8&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;properties&quot;: {
+        &quot;a&quot;: {
+          &quot;maximum&quot;: 255,
+          &quot;minimum&quot;: 0,
+          &quot;type&quot;: &quot;integer&quot;
+        },
+        &quot;b&quot;: {
+          &quot;maximum&quot;: 255,
+          &quot;minimum&quot;: 0,
+          &quot;type&quot;: &quot;integer&quot;
+        },
+        &quot;g&quot;: {
+          &quot;maximum&quot;: 255,
+          &quot;minimum&quot;: 0,
+          &quot;type&quot;: &quot;integer&quot;
+        },
+        &quot;r&quot;: {
+          &quot;maximum&quot;: 255,
+          &quot;minimum&quot;: 0,
+          &quot;type&quot;: &quot;integer&quot;
+        }
+      },
+      &quot;required&quot;: [
+        &quot;r&quot;,
+        &quot;g&quot;,
+        &quot;b&quot;,
+        &quot;a&quot;
+      ],
+      &quot;title&quot;: &quot;Rgba8&quot;,
+      &quot;type&quot;: &quot;object&quot;
+    },
+    &quot;SheetFolderKind&quot;: {
+      &quot;enum&quot;: [
+        &quot;Data&quot;,
+        &quot;Info&quot;,
+        &quot;Results&quot;,
+        &quot;Graphs&quot;,
+        &quot;Layouts&quot;
+      ],
+      &quot;title&quot;: &quot;SheetFolderKind&quot;,
+      &quot;type&quot;: &quot;string&quot;
+    },
+    &quot;SheetId&quot;: {
+      &quot;description&quot;: &quot;Non-empty hook-safe sheet identifier (1..=256 bytes, no whitespace, control characters, `:`, `{{`, or `}}`).&quot;,
+      &quot;maxLength&quot;: 256,
+      &quot;minLength&quot;: 1,
+      &quot;pattern&quot;: &quot;^(?!.*(?:\\{\\{|\\}\\}))[^\\s:\\x00-\\x1f\\x7f]{1,256}$&quot;,
+      &quot;title&quot;: &quot;SheetId&quot;,
+      &quot;type&quot;: &quot;string&quot;
+    },
+    &quot;SizePt&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;properties&quot;: {
+        &quot;height&quot;: {
+          &quot;minimum&quot;: 0.0,
+          &quot;type&quot;: &quot;number&quot;
+        },
+        &quot;width&quot;: {
+          &quot;minimum&quot;: 0.0,
+          &quot;type&quot;: &quot;number&quot;
+        }
+      },
+      &quot;required&quot;: [
+        &quot;width&quot;,
+        &quot;height&quot;
+      ],
+      &quot;title&quot;: &quot;SizePt&quot;,
+      &quot;type&quot;: &quot;object&quot;
+    },
+    &quot;SourceCellId&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;properties&quot;: {
+        &quot;col&quot;: {
+          &quot;minimum&quot;: 0,
+          &quot;type&quot;: &quot;integer&quot;
+        },
+        &quot;row&quot;: {
+          &quot;minimum&quot;: 0,
+          &quot;type&quot;: &quot;integer&quot;
+        },
+        &quot;sheet_id&quot;: {
+          &quot;$ref&quot;: &quot;#/$defs/SheetId&quot;
+        },
+        &quot;subcol&quot;: {
+          &quot;minimum&quot;: 0,
+          &quot;type&quot;: &quot;integer&quot;
+        }
+      },
+      &quot;required&quot;: [
+        &quot;sheet_id&quot;,
+        &quot;row&quot;,
+        &quot;col&quot;,
+        &quot;subcol&quot;
+      ],
+      &quot;title&quot;: &quot;SourceCellId&quot;,
+      &quot;type&quot;: &quot;object&quot;
+    },
+    &quot;TableArchetype&quot;: {
+      &quot;oneOf&quot;: [
+        {
+          &quot;additionalProperties&quot;: false,
+          &quot;properties&quot;: {
+            &quot;Xy&quot;: {
+              &quot;type&quot;: &quot;object&quot;
+            }
+          },
+          &quot;required&quot;: [
+            &quot;Xy&quot;
+          ],
+          &quot;type&quot;: &quot;object&quot;
+        },
+        {
+          &quot;additionalProperties&quot;: false,
+          &quot;properties&quot;: {
+            &quot;Column&quot;: {
+              &quot;type&quot;: &quot;object&quot;
+            }
+          },
+          &quot;required&quot;: [
+            &quot;Column&quot;
+          ],
+          &quot;type&quot;: &quot;object&quot;
+        },
+        {
+          &quot;additionalProperties&quot;: false,
+          &quot;properties&quot;: {
+            &quot;Grouped&quot;: {
+              &quot;type&quot;: &quot;object&quot;
+            }
+          },
+          &quot;required&quot;: [
+            &quot;Grouped&quot;
+          ],
+          &quot;type&quot;: &quot;object&quot;
+        },
+        {
+          &quot;additionalProperties&quot;: false,
+          &quot;properties&quot;: {
+            &quot;Contingency&quot;: {
+              &quot;type&quot;: &quot;object&quot;
+            }
+          },
+          &quot;required&quot;: [
+            &quot;Contingency&quot;
+          ],
+          &quot;type&quot;: &quot;object&quot;
+        },
+        {
+          &quot;additionalProperties&quot;: false,
+          &quot;properties&quot;: {
+            &quot;Survival&quot;: {
+              &quot;type&quot;: &quot;object&quot;
+            }
+          },
+          &quot;required&quot;: [
+            &quot;Survival&quot;
+          ],
+          &quot;type&quot;: &quot;object&quot;
+        },
+        {
+          &quot;additionalProperties&quot;: false,
+          &quot;properties&quot;: {
+            &quot;PartsOfWhole&quot;: {
+              &quot;type&quot;: &quot;object&quot;
+            }
+          },
+          &quot;required&quot;: [
+            &quot;PartsOfWhole&quot;
+          ],
+          &quot;type&quot;: &quot;object&quot;
+        },
+        {
+          &quot;additionalProperties&quot;: false,
+          &quot;properties&quot;: {
+            &quot;MultipleVariables&quot;: {
+              &quot;type&quot;: &quot;object&quot;
+            }
+          },
+          &quot;required&quot;: [
+            &quot;MultipleVariables&quot;
+          ],
+          &quot;type&quot;: &quot;object&quot;
+        },
+        {
+          &quot;additionalProperties&quot;: false,
+          &quot;properties&quot;: {
+            &quot;Nested&quot;: {
+              &quot;type&quot;: &quot;object&quot;
+            }
+          },
+          &quot;required&quot;: [
+            &quot;Nested&quot;
+          ],
+          &quot;type&quot;: &quot;object&quot;
+        }
+      ],
+      &quot;title&quot;: &quot;TableArchetype&quot;
+    },
+    &quot;TableKind&quot;: {
+      &quot;enum&quot;: [
+        &quot;Xy&quot;,
+        &quot;Column&quot;,
+        &quot;Grouped&quot;,
+        &quot;Contingency&quot;,
+        &quot;Survival&quot;,
+        &quot;PartsOfWhole&quot;,
+        &quot;MultipleVariables&quot;,
+        &quot;Nested&quot;
+      ],
+      &quot;title&quot;: &quot;TableKind&quot;,
+      &quot;type&quot;: &quot;string&quot;
+    }
+  },
+  &quot;$id&quot;: &quot;https://github.com/HauserGroup/curvebook/blob/main/docs/schemas/document.schema.json&quot;,
+  &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+  &quot;additionalProperties&quot;: false,
+  &quot;description&quot;: &quot;Canonical CurveBook L1 ProjectDocument JSON schema (Draft 2020-12).&quot;,
+  &quot;properties&quot;: {
+    &quot;active_sheet_id&quot;: {
+      &quot;anyOf&quot;: [
+        {
+          &quot;$ref&quot;: &quot;#/$defs/SheetId&quot;
+        },
+        {
+          &quot;type&quot;: &quot;null&quot;
+        }
+      ]
+    },
+    &quot;checkpoints&quot;: {
+      &quot;items&quot;: {
+        &quot;$ref&quot;: &quot;#/$defs/NamedCheckpoint&quot;
+      },
+      &quot;type&quot;: &quot;array&quot;
+    },
+    &quot;data_sheets&quot;: {
+      &quot;items&quot;: {
+        &quot;$ref&quot;: &quot;#/$defs/DataSheet&quot;
+      },
+      &quot;maxItems&quot;: 500,
+      &quot;type&quot;: &quot;array&quot;
+    },
+    &quot;family_anchor_sheet_id&quot;: {
+      &quot;anyOf&quot;: [
+        {
+          &quot;$ref&quot;: &quot;#/$defs/SheetId&quot;
+        },
+        {
+          &quot;type&quot;: &quot;null&quot;
+        }
+      ]
+    },
+    &quot;graph_sheets&quot;: {
+      &quot;items&quot;: {
+        &quot;$ref&quot;: &quot;#/$defs/GraphSheet&quot;
+      },
+      &quot;maxItems&quot;: 500,
+      &quot;type&quot;: &quot;array&quot;
+    },
+    &quot;image_assets&quot;: {
+      &quot;items&quot;: {
+        &quot;$ref&quot;: &quot;#/$defs/ProjectImageAsset&quot;
+      },
+      &quot;maxItems&quot;: 256,
+      &quot;type&quot;: &quot;array&quot;
+    },
+    &quot;info_sheets&quot;: {
+      &quot;items&quot;: {
+        &quot;$ref&quot;: &quot;#/$defs/InfoSheet&quot;
+      },
+      &quot;maxItems&quot;: 500,
+      &quot;type&quot;: &quot;array&quot;
+    },
+    &quot;layout_sheets&quot;: {
+      &quot;items&quot;: {
+        &quot;$ref&quot;: &quot;#/$defs/LayoutSheet&quot;
+      },
+      &quot;maxItems&quot;: 500,
+      &quot;type&quot;: &quot;array&quot;
+    },
+    &quot;result_sheets&quot;: {
+      &quot;items&quot;: {
+        &quot;$ref&quot;: &quot;#/$defs/ResultSheet&quot;
+      },
+      &quot;maxItems&quot;: 500,
+      &quot;type&quot;: &quot;array&quot;
+    },
+    &quot;schema_version&quot;: {
+      &quot;maximum&quot;: 7,
+      &quot;minimum&quot;: 1,
+      &quot;type&quot;: &quot;integer&quot;
+    },
+    &quot;title&quot;: {
+      &quot;description&quot;: &quot;Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).&quot;,
+      &quot;maxLength&quot;: 4096,
+      &quot;type&quot;: &quot;string&quot;
+    }
+  },
+  &quot;required&quot;: [
+    &quot;schema_version&quot;,
+    &quot;title&quot;,
+    &quot;data_sheets&quot;,
+    &quot;info_sheets&quot;,
+    &quot;result_sheets&quot;,
+    &quot;graph_sheets&quot;,
+    &quot;layout_sheets&quot;,
+    &quot;active_sheet_id&quot;,
+    &quot;family_anchor_sheet_id&quot;
+  ],
+  &quot;title&quot;: &quot;ProjectDocument&quot;,
+  &quot;type&quot;: &quot;object&quot;
+}</code></pre>
+<h2 id="schema-archive-manifest" tabindex="-1">Archive Manifest Schema</h2>
+<p>Draft 2020-12 schema for CurveBook .curvebook / .cbtemplate archive manifest.json files.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Property Key</th><th>Schema Type / Details</th></tr></thead>
+<tbody>
+<tr><td><code>assets</code></td><td><code>{&quot;items&quot;:{&quot;$ref&quot;:&quot;#/$defs/AssetManifestEntry&quot;},&quot;type&quot;:&quot;array&quot;}</code></td></tr>
+<tr><td><code>document_crc32</code></td><td><code>{&quot;maximum&quot;:4294967295,&quot;minimum&quot;:0,&quot;type&quot;:&quot;integer&quot;}</code></td></tr>
+<tr><td><code>format</code></td><td><code>{&quot;const&quot;:&quot;curvebook-archive&quot;,&quot;type&quot;:&quot;string&quot;}</code></td></tr>
+<tr><td><code>kind</code></td><td><code>{&quot;enum&quot;:[&quot;Project&quot;,&quot;Template&quot;],&quot;type&quot;:&quot;string&quot;}</code></td></tr>
+<tr><td><code>schema_version</code></td><td><code>{&quot;maximum&quot;:7,&quot;minimum&quot;:0,&quot;type&quot;:&quot;integer&quot;}</code></td></tr>
+<tr><td><code>sheets</code></td><td><code>{&quot;items&quot;:{&quot;$ref&quot;:&quot;#/$defs/SheetManifestEntry&quot;},&quot;type&quot;:&quot;array&quot;}</code></td></tr>
+<tr><td><code>title</code></td><td><code>{&quot;maxLength&quot;:4096,&quot;type&quot;:&quot;string&quot;}</code></td></tr>
+</tbody>
+</table></div>
+<pre><code class="language-json">{
+  &quot;$defs&quot;: {
+    &quot;AssetManifestEntry&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;properties&quot;: {
+        &quot;asset_id&quot;: {
+          &quot;pattern&quot;: &quot;^img-[0-9a-f]{16}$&quot;,
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;byte_len&quot;: {
+          &quot;maximum&quot;: 33554432,
+          &quot;minimum&quot;: 0,
+          &quot;type&quot;: &quot;integer&quot;
+        },
+        &quot;crc32&quot;: {
+          &quot;maximum&quot;: 4294967295,
+          &quot;minimum&quot;: 0,
+          &quot;type&quot;: &quot;integer&quot;
+        },
+        &quot;media_type&quot;: {
+          &quot;$ref&quot;: &quot;#/$defs/ImageMimeKind&quot;
+        },
+        &quot;path&quot;: {
+          &quot;type&quot;: &quot;string&quot;
+        }
+      },
+      &quot;required&quot;: [
+        &quot;asset_id&quot;,
+        &quot;media_type&quot;,
+        &quot;path&quot;,
+        &quot;byte_len&quot;,
+        &quot;crc32&quot;
+      ],
+      &quot;title&quot;: &quot;AssetManifestEntry&quot;,
+      &quot;type&quot;: &quot;object&quot;
+    },
+    &quot;ImageMimeKind&quot;: {
+      &quot;enum&quot;: [
+        &quot;Png&quot;,
+        &quot;Jpeg&quot;,
+        &quot;Tiff&quot;
+      ],
+      &quot;type&quot;: &quot;string&quot;
+    },
+    &quot;SheetId&quot;: {
+      &quot;description&quot;: &quot;Non-empty hook-safe sheet identifier (1..=256 bytes, no whitespace, control characters, `:`, `{{`, or `}}`).&quot;,
+      &quot;maxLength&quot;: 256,
+      &quot;minLength&quot;: 1,
+      &quot;pattern&quot;: &quot;^(?!.*(?:\\{\\{|\\}\\}))[^\\s:\\x00-\\x1f\\x7f]{1,256}$&quot;,
+      &quot;title&quot;: &quot;SheetId&quot;,
+      &quot;type&quot;: &quot;string&quot;
+    },
+    &quot;SheetManifestEntry&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;properties&quot;: {
+        &quot;crc32&quot;: {
+          &quot;maximum&quot;: 4294967295,
+          &quot;minimum&quot;: 0,
+          &quot;type&quot;: [
+            &quot;integer&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;csv_path&quot;: {
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;id&quot;: {
+          &quot;$ref&quot;: &quot;#/$defs/SheetId&quot;
+        },
+        &quot;section&quot;: {
+          &quot;$ref&quot;: &quot;#/$defs/SheetSection&quot;
+        },
+        &quot;title&quot;: {
+          &quot;maxLength&quot;: 4096,
+          &quot;type&quot;: &quot;string&quot;
+        }
+      },
+      &quot;required&quot;: [
+        &quot;id&quot;,
+        &quot;section&quot;,
+        &quot;title&quot;,
+        &quot;csv_path&quot;,
+        &quot;crc32&quot;
+      ],
+      &quot;title&quot;: &quot;SheetManifestEntry&quot;,
+      &quot;type&quot;: &quot;object&quot;
+    },
+    &quot;SheetSection&quot;: {
+      &quot;enum&quot;: [
+        &quot;Data&quot;,
+        &quot;Info&quot;,
+        &quot;Analyses&quot;,
+        &quot;Graphs&quot;,
+        &quot;Layouts&quot;
+      ],
+      &quot;type&quot;: &quot;string&quot;
+    }
+  },
+  &quot;$id&quot;: &quot;https://github.com/HauserGroup/curvebook/blob/main/docs/schemas/archive-manifest.schema.json&quot;,
+  &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+  &quot;additionalProperties&quot;: false,
+  &quot;description&quot;: &quot;Draft 2020-12 schema for CurveBook .curvebook / .cbtemplate archive manifest.json files.&quot;,
+  &quot;properties&quot;: {
+    &quot;assets&quot;: {
+      &quot;items&quot;: {
+        &quot;$ref&quot;: &quot;#/$defs/AssetManifestEntry&quot;
+      },
+      &quot;type&quot;: &quot;array&quot;
+    },
+    &quot;document_crc32&quot;: {
+      &quot;maximum&quot;: 4294967295,
+      &quot;minimum&quot;: 0,
+      &quot;type&quot;: &quot;integer&quot;
+    },
+    &quot;format&quot;: {
+      &quot;const&quot;: &quot;curvebook-archive&quot;,
+      &quot;type&quot;: &quot;string&quot;
+    },
+    &quot;kind&quot;: {
+      &quot;enum&quot;: [
+        &quot;Project&quot;,
+        &quot;Template&quot;
+      ],
+      &quot;type&quot;: &quot;string&quot;
+    },
+    &quot;schema_version&quot;: {
+      &quot;maximum&quot;: 7,
+      &quot;minimum&quot;: 0,
+      &quot;type&quot;: &quot;integer&quot;
+    },
+    &quot;sheets&quot;: {
+      &quot;items&quot;: {
+        &quot;$ref&quot;: &quot;#/$defs/SheetManifestEntry&quot;
+      },
+      &quot;type&quot;: &quot;array&quot;
+    },
+    &quot;title&quot;: {
+      &quot;maxLength&quot;: 4096,
+      &quot;type&quot;: &quot;string&quot;
+    }
+  },
+  &quot;required&quot;: [
+    &quot;format&quot;,
+    &quot;schema_version&quot;,
+    &quot;kind&quot;,
+    &quot;title&quot;,
+    &quot;document_crc32&quot;,
+    &quot;sheets&quot;
+  ],
+  &quot;title&quot;: &quot;ArchiveManifest&quot;,
+  &quot;type&quot;: &quot;object&quot;
+}</code></pre>
+<h2 id="schema-journal-record" tabindex="-1">Autosave Journal Record Schema</h2>
+<p>Draft 2020-12 schema for crash-recovery ops.journal NDJSON lines and curvebook.lock leases.</p>
+<pre><code class="language-json">{
+  &quot;$defs&quot;: {
+    &quot;JournalLockLease&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;properties&quot;: {
+        &quot;acquired_epoch_ms&quot;: {
+          &quot;maximum&quot;: 18446744073709551615,
+          &quot;minimum&quot;: 0,
+          &quot;type&quot;: &quot;integer&quot;
+        },
+        &quot;format_version&quot;: {
+          &quot;maximum&quot;: 1,
+          &quot;minimum&quot;: 1,
+          &quot;type&quot;: &quot;integer&quot;
+        },
+        &quot;host_id&quot;: {
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: [
+            &quot;string&quot;,
+            &quot;null&quot;
+          ]
+        },
+        &quot;owner_id&quot;: {
+          &quot;minLength&quot;: 1,
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;ttl_ms&quot;: {
+          &quot;maximum&quot;: 18446744073709551615,
+          &quot;minimum&quot;: 0,
+          &quot;type&quot;: &quot;integer&quot;
+        }
+      },
+      &quot;required&quot;: [
+        &quot;owner_id&quot;,
+        &quot;acquired_epoch_ms&quot;,
+        &quot;ttl_ms&quot;
+      ],
+      &quot;title&quot;: &quot;JournalLockLease&quot;,
+      &quot;type&quot;: &quot;object&quot;
+    },
+    &quot;JournalOpRecord&quot;: {
+      &quot;additionalProperties&quot;: false,
+      &quot;properties&quot;: {
+        &quot;command_json&quot;: {},
+        &quot;crc32&quot;: {
+          &quot;maximum&quot;: 4294967295,
+          &quot;minimum&quot;: 0,
+          &quot;type&quot;: &quot;integer&quot;
+        },
+        &quot;format_version&quot;: {
+          &quot;maximum&quot;: 2,
+          &quot;minimum&quot;: 1,
+          &quot;type&quot;: &quot;integer&quot;
+        },
+        &quot;seq&quot;: {
+          &quot;maximum&quot;: 18446744073709551615,
+          &quot;minimum&quot;: 1,
+          &quot;type&quot;: &quot;integer&quot;
+        }
+      },
+      &quot;required&quot;: [
+        &quot;seq&quot;,
+        &quot;crc32&quot;,
+        &quot;command_json&quot;
+      ],
+      &quot;title&quot;: &quot;JournalOpRecord&quot;,
+      &quot;type&quot;: &quot;object&quot;
+    }
+  },
+  &quot;$id&quot;: &quot;https://github.com/HauserGroup/curvebook/blob/main/docs/schemas/journal-record.schema.json&quot;,
+  &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+  &quot;description&quot;: &quot;Draft 2020-12 schema for crash-recovery ops.journal NDJSON lines and curvebook.lock leases.&quot;,
+  &quot;oneOf&quot;: [
+    {
+      &quot;$ref&quot;: &quot;#/$defs/JournalOpRecord&quot;
+    },
+    {
+      &quot;$ref&quot;: &quot;#/$defs/JournalLockLease&quot;
+    }
+  ],
+  &quot;title&quot;: &quot;JournalPersistenceRecord&quot;
+}</code></pre>
+<h2 id="locales" tabindex="-1">Supported Interface Locales (LOCALES)</h2>
+<p>Registered locale tags compiled in <code>curvebook_ui_egui::i18n::LOCALES</code> (<strong>16</strong> entries):</p>
+<p><code>en</code>, <code>de</code>, <code>es</code>, <code>fr</code>, <code>ja</code>, <code>ko</code>, <code>pt-BR</code>, <code>zh-CN</code>, <code>zh-TW</code>, <code>it</code>, <code>nl</code>, <code>pl</code>, <code>ru</code>, <code>tr</code>, <code>ar</code>, <code>he</code></p>
+        <nav class="pager" aria-label="Previous and next pages">
+          <a href="../files.html">← Files, Import &amp; Export</a>
+          <a href="../section-automation.html">Automation →</a>
+        </nav>
+      </article>
+    </main>
+    <footer class="site-footer">
+      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>
+      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
+      <p class="privacy">CurveBook runs locally and collects no telemetry. Read <a href="../../../privacy.html">Privacy, Licences &amp; Security</a> · <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a></p>
+    </footer>
+    <div class="window-statusbar" aria-label="Application summary">
+      <span class="status-cell is-grow">Ready · Offline Desktop · CLI · Local MCP</span>
+      <span class="status-cell">Pure Rust</span>
+      <span class="status-cell">Zero Telemetry</span>
+      <span class="status-cell">MIT / Apache-2.0</span>
+    </div>
+  </div>
+</body>
+</html>

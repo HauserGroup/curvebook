@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Common install, font discovery, MCP transport, archive recovery, and solver diagnostics.">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'">
+  <meta name="color-scheme" content="light">
+  <title>Troubleshooting, Error Codes &amp; Known Issues — CurveBook Documentation</title>
+  <link rel="canonical" href="https://hausergroup.github.io/curvebook/manual/latest/troubleshooting.html">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="CurveBook">
+  <meta property="og:title" content="Troubleshooting, Error Codes &amp; Known Issues — CurveBook Documentation">
+  <meta property="og:description" content="Common install, font discovery, MCP transport, archive recovery, and solver diagnostics.">
+  <meta property="og:url" content="https://hausergroup.github.io/curvebook/manual/latest/troubleshooting.html">
+  <meta property="og:image" content="https://hausergroup.github.io/curvebook/images/workspace-split-fit.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" type="image/png" href="../../images/curvebook.png">
+  <link rel="stylesheet" href="../../site.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="desktop-window wrap">
+    <header class="site-header">
+      <div class="title-bar">
+        <div class="wordmark">
+          <img src="../../images/curvebook.png" width="64" height="64" alt="">
+          <span>CurveBook · Reference Manual</span>
+        </div>
+        <span class="window-status">Troubleshooting &amp; known issues</span>
+      </div>
+      <nav aria-label="Manual navigation">
+        <a href="index.html">Manual Home</a>
+        <a href="section-get-started.html">Get Started</a>
+        <a href="section-analyses.html" aria-current="page">Reference</a>
+        <a href="section-automation.html">Automation</a>
+        <a href="registry/commands.html">Commands &amp; Tools</a>
+        <a href="az-index.html">A–Z Index</a>
+        <a href="section-contribute.html">Contribute</a>
+        <a href="../../index.html">Product Home</a>
+        <a href="../../privacy.html">Privacy Policy</a>
+      </nav>
+    </header>
+    <div class="version-banner" role="note" aria-label="Documentation version">
+      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-24 (commit <code>0acc0a8468</code>)</span>
+      <span>No scripts · No telemetry · <a href="az-index.html">A–Z Index</a></span>
+    </div>
+    <main id="main" tabindex="-1">
+      <article class="overview doc-body">
+        <nav class="breadcrumbs" aria-label="Breadcrumb">
+          <a href="index.html">Manual</a>
+          <span aria-hidden="true">/</span>
+          <a href="section-troubleshooting.html">Troubleshooting &amp; known issues</a>
+          <span aria-hidden="true">/</span>
+          <span aria-current="page">Troubleshooting, Error Codes &amp; Known Issues</span>
+        </nav>
+        <details open class="toc">
+          <summary class="toc-title">On this page</summary>
+          <ul>
+            <li><a href="#install-issues">Installation &amp; OS Security Prompts</a></li>
+            <li><a href="#macos-gatekeeper">— macOS Gatekeeper / Quarantine</a></li>
+            <li><a href="#windows-smartscreen">— Windows SmartScreen &amp; Smart App Control</a></li>
+            <li><a href="#linux-fuse">— Linux AppImage &amp; Missing FUSE v2 (libfuse2)</a></li>
+            <li><a href="#fonts-and-rendering">Fonts &amp; Rendering Issues</a></li>
+            <li><a href="#mcp-and-cli">MCP, CLI &amp; --control Automation</a></li>
+            <li><a href="#mcp-connection">— MCP client cannot connect</a></li>
+            <li><a href="#recovery-and-files">Crash Recovery &amp; File Loading</a></li>
+            <li><a href="#error-codes">Structured Error Codes (ErrorCode)</a></li>
+            <li><a href="#known-issues">Known Issues &amp; Beta Scope</a></li>
+          </ul>
+        </details>
+<h1 id="troubleshooting-error-codes--known-issues" tabindex="-1">Troubleshooting, Error Codes &amp; Known Issues</h1>
+<p>Use this reference to diagnose installation warnings, font discovery issues, MCP/CLI confinement errors, WAL crash recovery messages, structured <code>ErrorCode</code> diagnostics, and Beta known issues.</p>
+<hr>
+<h2 id="install-issues" tabindex="-1">Installation &amp; OS Security Prompts</h2>
+<h3 id="macos-gatekeeper" tabindex="-1">macOS Gatekeeper / Quarantine</h3>
+<ul>
+<li>Beta universal <code>.dmg</code> releases are Developer ID signed and Apple-notarized (<code>R8.10</code>). If Gatekeeper flags a file copied across unsigned local media, confirm checksum and provenance with <a href="get-started.html#verifying-downloads">Get Started: Verifying Checksums &amp; Build Attestations</a>, and ensure <code>CurveBook.app</code> lives inside <code>/Applications</code> with clean extended attributes.</li>
+<li>If <code>curvebook-cli</code> reports <code>command not found</code> in Terminal, verify <code>/Applications/CurveBook.app/Contents/MacOS</code> is on <code>PATH</code> (<a href="get-started.html#install-macos">Get Started: macOS</a>).</li>
+</ul>
+<h3 id="windows-smartscreen" tabindex="-1">Windows SmartScreen &amp; Smart App Control</h3>
+<ul>
+<li><strong>Defender SmartScreen (&quot;Windows protected your PC&quot;):</strong> Beta Windows <code>.msi</code> installers (<code>x64</code>, <code>arm64</code>) are <strong>unsigned</strong> until <code>R8.11</code>. After verifying <code>SHA256SUMS.txt</code> and <code>gh attestation verify</code> against <code>HauserGroup/curvebook</code> (<a href="get-started.html#verifying-downloads">Get Started: Verification</a>), select <strong>More info</strong> -&gt; <strong>Run anyway</strong>.</li>
+<li><strong>Windows 11 Smart App Control (Enforcement Mode):</strong> Smart App Control blocks unsigned installers and executables automatically without a bypass prompt; signed Windows releases (<code>R8.11</code>) or a signed Microsoft Store MSIX distribution (<code>R8.9</code>) will address this after Beta.</li>
+<li><strong>Cross-context duplicate MSI error:</strong> Upgrading or switching between per-user (<code>Programs\CurveBook</code>) and machine-wide (<code>ALLUSERS=1</code>) installs requires uninstalling the opposite-scope installation first (<a href="get-started.html#install-windows">Windows installation policy</a>).</li>
+</ul>
+<h3 id="linux-fuse" tabindex="-1">Linux AppImage &amp; Missing FUSE v2 (<code>libfuse2</code>)</h3>
+<p>If running <code>.AppImage</code> fails with <code>dlopen(): error loading libfuse.so.2</code> or <code>AppImages require FUSE to run</code>:</p>
+<ol>
+<li>Extract the AppImage without FUSE and execute directly:</li>
+</ol>
+<pre><code class="language-sh">./curvebook-&lt;version&gt;-linux-x86_64.AppImage --appimage-extract
+./squashfs-root/AppRun</code></pre>
+<ol>
+<li>Headless CLI/MCP binaries sit inside <code>squashfs-root/usr/bin/curvebook-cli</code> and require no FUSE or display server once extracted. Ensure the AppImage has executable permissions (<code>chmod +x</code>).</li>
+</ol>
+<hr>
+<h2 id="fonts-and-rendering" tabindex="-1">Fonts &amp; Rendering Issues</h2>
+<ul>
+<li><strong>Missing CJK / RTL / Special Mathematical Glyphs:</strong> Because CurveBook ships zero bundled font binaries in the repository, it relies on host OS TrueType/OpenType system fonts. On minimal Linux/FreeBSD desktops or headless servers lacking <code>NotoSansCJK</code> or <code>DejaVuSans</code>, install system fonts or point <code>CURVEBOOK_FONTS_DIR</code> to a folder of <code>.ttf</code>/<code>.otf</code> faces (or pass <code>--ttf-font &lt;path&gt;</code> to <code>curvebook</code>).</li>
+<li><strong>Preflight warnings (<code>min_font_size</code>, <code>hairline_stroke</code>, <code>text_outside_canvas</code>):</strong> Run <code>graph.preflightCheck</code> or switch <a href="graphs.html#page-layouts"><code>CanvasResizeMode</code></a> to <code>KeepTypographyPt</code> when shrinking canvases for narrow journal columns so labels stay <span class="math">≥ 5.0<span class="math-text"> pt</span></span> and strokes stay <span class="math">≥ 0.25<span class="math-text"> pt</span></span>.</li>
+</ul>
+<hr>
+<h2 id="mcp-and-cli" tabindex="-1">MCP, CLI &amp; <code>--control</code> Automation</h2>
+<ul>
+<li><strong><code>path_escape</code> under <code>--workdir</code>:</strong> All path parameters (<code>path</code>, <code>out</code>, <code>image_path</code>, stored <code>ImportLinkSpec</code> targets) must resolve strictly inside <code>--workdir</code> without <code>..</code> traversal or external symlinks. Pass paths relative to <code>--workdir</code> (e.g., <code>&quot;study.curvebook&quot;</code>, <code>&quot;exports/figure.pdf&quot;</code>).</li>
+<li><strong>MCP client connection failures:</strong> <code>curvebook-cli mcp</code> reserves <code>stdout</code> strictly for JSON-RPC 2.0 frames and prints human diagnostics to <code>stderr</code>. Never wrap <code>curvebook-cli mcp</code> in shell profiles that print banners to <code>stdout</code>. See <a href="automation/mcp.html">Automation: MCP</a>.</li>
+<li><strong><code>--control</code> binding errors:</strong> <code>--control &lt;port&gt;</code> accepts <code>1..=65535</code> (port <code>0</code> is rejected) and binds strictly to <code>127.0.0.1</code>. Set <code>CURVEBOOK_CONTROL_TOKEN</code> in the environment instead of <code>--control-token</code> CLI flags.</li>
+<li><strong><code>gui_only_violation</code>:</strong> When <code>--gui-only</code> is active, direct engine tools (<code>analyze.run</code>, <code>table.setCell</code>, <code>project.save</code>, etc.) are blocked by policy; drive interactions via <code>ui.*</code> / GUI action primitives.</li>
+</ul>
+<h3 id="mcp-connection" tabindex="-1">MCP client cannot connect</h3>
+<p>Start by checking whether the MCP client can launch the configured server process, then check the protocol handshake.</p>
+<ol>
+<li><strong>Use absolute paths for the binary and for <code>--workdir</code>.</strong> Set <code>&quot;command&quot;</code> to the full path of <code>curvebook-cli</code> (for example <code>./target/release/curvebook-cli</code> after running <code>cargo build --release -p curvebook-cli</code>, or <code>/Applications/CurveBook.app/Contents/MacOS/curvebook-cli</code> on macOS) and pass <code>--workdir</code> as a full path to a directory that already exists (<code>mkdir -p /path/to/your/data-folder</code>). Relative paths resolve against whatever working directory the client happens to start the process in, which is usually not your project folder. A missing or unreadable <code>--workdir</code> makes the server exit before the handshake with <code>usage error: --workdir ... is inaccessible</code> (exit status <code>2</code>).</li>
+<li><strong>Do not rely on <code>PATH</code> (fixes <code>command not found</code> / <code>ENOENT</code>).</strong> Applications started from the macOS Dock or Finder, or from a desktop launcher on Linux or Windows, do not inherit the <code>PATH</code> of your interactive shell, so a bare <code>curvebook-cli</code> that works in a terminal can fail to start from the client. Use the full path (for example the output of <code>command -v curvebook-cli</code>, or the absolute path to <code>target/release/curvebook-cli</code> from a checkout build). The same applies to wrappers such as <code>cargo run</code>; prefer the built binary.</li>
+<li><strong>Add <code>&quot;type&quot;: &quot;stdio&quot;</code> if your client asks for it.</strong> Some clients require an explicit transport on each server entry and ignore or reject entries without one:</li>
+</ol>
+<pre><code class="language-json">   {
+     &quot;mcpServers&quot;: {
+       &quot;curvebook&quot;: {
+         &quot;type&quot;: &quot;stdio&quot;,
+         &quot;command&quot;: &quot;/absolute/path/to/curvebook-cli&quot;,
+         &quot;args&quot;: [&quot;mcp&quot;, &quot;--workdir&quot;, &quot;/path/to/workspace&quot;]
+       }
+     }
+   }</code></pre>
+<ol>
+<li><strong>&quot;No tools available&quot; or a missing server usually means the process did not start.</strong> Run the exact configured command by hand in a terminal, with the same arguments, and read its standard error. A usage or <code>--workdir</code> error prints one line to stderr and exits non-zero; a healthy server prints nothing and waits for input. Then confirm the handshake by sending the requests below (output abbreviated):</li>
+</ol>
+<pre><code class="language-sh">   printf &#39;%s\n&#39; \
+     &#39;{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:1,&quot;method&quot;:&quot;initialize&quot;,&quot;params&quot;:{&quot;protocolVersion&quot;:&quot;2024-11-05&quot;,&quot;capabilities&quot;:{},&quot;clientInfo&quot;:{&quot;name&quot;:&quot;check&quot;,&quot;version&quot;:&quot;0&quot;}}}&#39; \
+     &#39;{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;notifications/initialized&quot;}&#39; \
+     &#39;{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:2,&quot;method&quot;:&quot;tools/list&quot;}&#39; \
+     | /absolute/path/to/curvebook-cli mcp --workdir /path/to/workspace</code></pre>
+<p>Expect two JSON lines: the <code>initialize</code> result (<code>serverInfo.name</code> is <code>&quot;curvebook&quot;</code>) and a <code>tools/list</code> result containing the tool list. These responses confirm that the configured binary starts and handles basic discovery. Next check the client configuration, its protocol logs, and whether it needs restarting after a configuration change.</p>
+<ol>
+<li><strong>Keep stdout clean.</strong> Stdout carries the protocol. Wrappers must send banners and diagnostics to stderr. Normal Cargo progress messages already use stderr; <code>cargo run -q</code> reduces that noise but cannot repair a wrapper that writes to stdout. Prefer the built binary for a stable launch command.</li>
+<li><strong>Source build fails on older Rust versions.</strong> Run <code>rustc --version</code> and <code>cargo --version</code> inside the repository to verify both report <code>1.99.1</code> or newer (<a href="https://github.com/HauserGroup/curvebook/blob/main/docs/development.md#prerequisites">development prerequisites</a>).</li>
+</ol>
+<p>Errors that appear after a successful connection:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Symptom</th><th>Cause and fix</th></tr></thead>
+<tbody>
+<tr><td>Tool result with <code>code: &quot;path_escape&quot;</code> (<code>category: &quot;policy&quot;</code>)</td><td><code>--workdir</code> is set and the requested path is outside it (absolute path elsewhere, <code>..</code>, or a symlink out). Move the file inside the workdir or widen <code>--workdir</code>.</td></tr>
+<tr><td>Tool result with <code>code: &quot;gui_only_violation&quot;</code></td><td>The server was started with <code>--gui-only</code>, which exposes only the <code>gui</code> tools (<code>ui_*</code>); every other tool, and <code>resources/read</code>, is rejected. Remove <code>--gui-only</code> for engine, file, and export tools (<a href="automation/mcp.html#gui-only">strict <code>--gui-only</code> policy</a>).</td></tr>
+<tr><td>Tool result with <code>code: &quot;conflict&quot;</code> when calling a <code>ui_*</code> tool</td><td>Default headless mode has no live window. Start with <code>--gui-only</code>, or attach with <code>--control-port</code> (<a href="automation/mcp.html#attachment-modes-and-filesystem-policy">attachment modes</a>).</td></tr>
+<tr><td>Tool result with <code>code: &quot;io_error&quot;</code> and <code>failed to connect to desktop control port</code></td><td><code>--control-port</code> (or <code>CURVEBOOK_CONTROL_PORT</code>) is set but no <code>curvebook --control &lt;port&gt;</code> instance is listening on <code>127.0.0.1:&lt;port&gt;</code>. Start the desktop side first, or drop the flag. The server itself still starts; the error appears on each tool call.</td></tr>
+<tr><td>Tool result with <code>code: &quot;bad_input&quot;</code> and <code>invalid or missing control authentication token</code></td><td>The attached desktop rejected the control authentication token (the raw control error <code>unauthorized</code> is mapped to MCP <code>bad_input</code>). Check <code>--control-token</code>, <code>CURVEBOOK_CONTROL_TOKEN</code>, and the per-user token file described in the <a href="automation/control-and-batch.html#loopback-desktop-control-protocol---control">control protocol reference</a>. Use the token for the running desktop instance; do not disable authentication.</td></tr>
+<tr><td><code>usage error: invalid --control-port</code> / <code>invalid CURVEBOOK_CONTROL_PORT</code></td><td>The port must be an integer in <code>1..=65535</code>.</td></tr>
+</tbody>
+</table></div>
+<hr>
+<h2 id="recovery-and-files" tabindex="-1">Crash Recovery &amp; File Loading</h2>
+<ul>
+<li><strong>Recovery journal replay warnings:</strong> On launch after an unexpected crash, CurveBook replays <code>snapshot.curvebook</code> + valid lines of <code>ops.journal</code> cleanly up to the last intact CRC-32 record (<code>RecoveryReport</code>), logging <code>JournalRecoveryWarning</code> diagnostics for any torn final line.</li>
+<li><strong>Parallel desktop instances &amp; <code>curvebook.lock</code>:</strong> Active locks isolate additional windows into fresh per-instance recovery directories automatically; expired leases from dead local processes are reclaimed safely (<code>is_dead_same_host_owner</code>). Set <code>CURVEBOOK_NO_PREFS=1</code> to launch cleanly without touching preferences or recovery state.</li>
+<li><strong><code>unsupported_version</code> on open or save:</strong> Occurs when opening or targeting a file written with <code>schema_version &gt; CURRENT_SCHEMA_VERSION</code> (<code>project.save</code> / <code>save_project_unpacked_dir</code> refuses to overwrite newer files to prevent data loss). Open and edit with the newer release, or save to a new destination path.</li>
+<li><strong><code>corrupt_data</code> / CRC mismatch:</strong> Indicates truncated ZIP bytes or manual edits to <code>.curvebook.d/document.json</code> without updating <code>manifest.json</code> CRCs.</li>
+</ul>
+<hr>
+<h2 id="error-codes" tabindex="-1">Structured Error Codes (<code>ErrorCode</code>)</h2>
+<p>Every validation, format, policy, solver, and system error maps deterministically to one of the canonical <code>ErrorCode</code> strings (<code>crates/doc/src/result.rs</code>):</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Canonical Code (<code>snake_case</code>)</th><th>Category</th><th>Typical Cause &amp; Resolution</th></tr></thead>
+<tbody>
+<tr><td><code>bad_input</code></td><td><code>Input</code></td><td>Invalid command argument, negative count, malformed formula/DSL syntax, out-of-range coordinate, or invalid parameter/confidence bounds.</td></tr>
+<tr><td><code>not_found</code></td><td><code>State</code></td><td>Unknown <code>sheet_id</code>, checkpoint name/ID, column index, or built-in <code>equation_id</code>.</td></tr>
+<tr><td><code>already_exists</code></td><td><code>State</code></td><td>Duplicate <code>sheet_id</code> or checkpoint identifier created without <code>overwrite: true</code>.</td></tr>
+<tr><td><code>conflict</code></td><td><code>State</code></td><td>Incompatible state or policy transition (e.g., deprecated remediation requests blocked by <code>QOL-7</code> <code>diagnostics_only_policy</code>, or cross-scope installer clash).</td></tr>
+<tr><td><code>frozen_sheet</code></td><td><code>State</code></td><td>Mutation attempted on a <code>DataSheet</code> locked with <code>frozen == true</code> (<code>sheet.unfreeze</code> first).</td></tr>
+<tr><td><code>cycle_detected</code></td><td><code>State</code></td><td>Circular dependency in <code>=</code> Calculated Variables, <code>HookSource</code> parameters, or <code>LinkedDataRegion</code>s.</td></tr>
+<tr><td><code>unsupported_format</code></td><td><code>Format</code></td><td>Unrecognized file header, unsupported archive kind, or incompatible legacy container.</td></tr>
+<tr><td><code>unsupported_version</code></td><td><code>Format</code></td><td>File/preferences schema version exceeds this release&#39;s supported maximum (<code>CURRENT_SCHEMA_VERSION = 7</code>, <code>CURRENT_PREFERENCES_VERSION = 1</code>).</td></tr>
+<tr><td><code>corrupt_data</code></td><td><code>Format</code></td><td>Malformed UTF-8/JSON/XML/ZIP structure or CRC-32 mismatch in archives or WAL journals.</td></tr>
+<tr><td><code>io_error</code></td><td><code>Io</code></td><td>OS file read/write/rename failure, missing input file, or permission denied.</td></tr>
+<tr><td><code>path_escape</code></td><td><code>Policy</code></td><td>Path traversal (<code>..</code>), absolute external path, or escaping symlink rejected under <code>--workdir</code> or ZIP extraction.</td></tr>
+<tr><td><code>resource_limit</code></td><td><code>Policy</code></td><td>Exceeded <code>MAX_ARCHIVE_FILE_BYTES</code> (<code>128 MiB</code>), <code>MAX_CSV_FILE_BYTES</code> (<code>64 MiB</code>), <code>MAX_SHEET_CELLS</code> (<code>30M</code> / <code>30,000,000</code>), <code>MAX_RASTER_DIM_PX</code> (<code>16,384</code>), <code>MAX_RASTER_PIXELS</code> (<code>67,108,864</code>), <code>MAX_PDF_PAGES</code> (<code>64</code>), <code>MAX_PDF_OUTPUT_BYTES</code> (<code>32 MiB</code>), or DSL/ODE step budgets.</td></tr>
+<tr><td><code>solver_failed</code></td><td><code>Compute</code></td><td>Non-convergence (<code>HitMaxIters</code>), <code>ZeroVariance</code>, singular design/covariance matrix, unbracketed implicit root, ODE divergence, or <code>WeightingScheme</code> zero denominator (<code>ImpossibleWeights</code>).</td></tr>
+<tr><td><code>insufficient_data</code></td><td><code>Compute</code></td><td>Empty input, too few non-excluded observations/events for <code>df</code>, or missing raw replicates (<code>RequiresRawReplicates</code>) when <code>MeanSdN</code>/<code>MeanSemN</code> subcolumns are supplied.</td></tr>
+<tr><td><code>cancelled</code></td><td><code>Compute</code></td><td>Operation aborted via MCP/engine cancellation token.</td></tr>
+<tr><td><code>gui_only_violation</code></td><td><code>Policy</code></td><td>Direct non-GUI mutation or filesystem bypass attempted while <code>--gui-only</code> policy is active.</td></tr>
+<tr><td><code>internal_panic</code></td><td><code>Internal</code></td><td>Unexpected invariant fault trapped cleanly at the <code>guard.rs</code> safety boundary without aborting the host process.</td></tr>
+<tr><td><code>internal_error</code></td><td><code>Internal</code></td><td>Unclassified internal dispatch or serialization error.</td></tr>
+</tbody>
+</table></div>
+<hr>
+<h2 id="known-issues" tabindex="-1">Known Issues &amp; Beta Scope</h2>
+<ul>
+<li><strong>Supported Interfaces &amp; Verification Boundary:</strong> The native <code>egui</code> desktop GUI (<code>curvebook</code>) is a supported CurveBook interface alongside <code>curvebook-cli</code> and <code>curvebook-cli mcp</code> (the Alpha <em>&quot;GUI is pre-alpha&quot;</em> warning no longer applies). Automated <code>R15</code> and <code>R13</code> <code>EguiHumanPathDriver</code> / <code>egui_kittest</code> desktop suites verify interactive widget, menu, dialog, and canvas parity across the automated desktop workflows (<code>R10.25</code> Beta gate), while recorded interactive OS walkthroughs (<code>R10.13</code> macOS/browser walkthroughs and <code>R10.24</code> cross-OS Windows/Linux smoke QA) are <strong>1.0</strong> release-gate verification. The FreeBSD <code>x86_64</code> package (<code>curvebook-&lt;version&gt;-freebsd-x86_64.tar.gz</code>) is shipped as a <strong>preview</strong> (<code>R10.24</code>, <code>R8.5</code>).</li>
+<li><strong>Windows <code>x86</code> Dropped &amp; Unsigned Beta <code>.msi</code> Installers:</strong> Beta omits 32-bit Windows (<code>x86</code>) and <code>-portable.zip</code> archives (<code>R0.28</code>). <code>curvebook-&lt;version&gt;-windows-x64.msi</code> and <code>curvebook-&lt;version&gt;-windows-arm64.msi</code> are currently <strong>unsigned</strong> until <code>R8.11</code> (Windows Defender SmartScreen prompts <strong>More info</strong> -&gt; <strong>Run anyway</strong>, and Windows 11 Smart App Control in enforcement mode blocks unsigned installers until Authenticode signing or Microsoft Store MSIX distribution under <code>R8.9</code> arrives). Direct <code>x64</code> <code>.msi</code> upgrade over an Alpha <code>x86</code> <code>.msi</code> has not yet been runner-verified; manually uninstall any Alpha <code>x86</code> copy before installing <code>x64</code>.</li>
+<li><strong>Draft Non-English Translations (<code>[Draft]</code>):</strong> All Beta-active non-English UI locales (<code>de</code>, <code>es</code>, <code>fr</code>, <code>ja</code>, <code>ko</code>, <code>pt-BR</code>, <code>zh-CN</code>, <code>zh-TW</code>, <code>it</code>, <code>nl</code>, <code>pl</code>, <code>ru</code>, <code>tr</code>) carry <code>[Draft]</code> suffix labels in <strong>View › Language</strong> (<code>BETA_ACTIVE_LOCALES</code>) pending native-speaker scientific review (<code>R10.23</code>).</li>
+<li><strong>Right-to-Left (<code>ar</code>, <code>fa</code>, <code>he</code>, <code>ur</code>) GUI Locales Deferred to <code>1.0</code>:</strong> While the underlying localization catalog (<code>LOCALES</code>) and text-shaping modules recognize <code>ar</code> and <code>he</code>, full right-to-left desktop GUI mirroring (<code>ar</code>, <code>fa</code>, <code>he</code>, <code>ur</code>, and legacy <code>iw</code>) is deferred to CurveBook <strong><code>1.0</code></strong>. In Beta desktop builds, the GUI language picker exposes only active LTR/CJK locales (<code>BETA_ACTIVE_LOCALES</code>: <code>en</code> plus <code>[Draft]</code> translations) and hides RTL options; any existing <code>preferences.json</code> specifying an RTL locale falls back cleanly to <code>&quot;en&quot;</code> on startup (<code>normalize_beta_gui_locale</code>) while mathematical coordinate axes and formulas stay left-to-right.</li>
+<li><strong>Browser App (<code>curvebook-web</code>) Deferred to <code>1.0</code>:</strong> The browser WebAssembly bundle (<code>curvebook-web</code>) is deferred until CurveBook <code>1.0</code> (<code>R0.28</code>, <code>R11</code>) and is not published in Beta releases.</li>
+<li><strong>Zero Bundled Binary Fonts:</strong> International CJK, RTL, and special technical glyph rendering depends on OS system TrueType/OpenType fonts or user-provided <code>.ttf</code>/<code>.otf</code> faces via <code>CURVEBOOK_FONTS_DIR</code> / <code>--ttf-font</code> (<a href="get-started.html#fonts">Get Started: Fonts</a>).</li>
+<li><strong>Pre-<code>R0.20</code> Legacy Archive Rejection:</strong> Pre-<code>R0.20</code> containers stamped with the legacy <code>lumencraft-archive</code> magic are rejected with <code>unsupported_format</code>; only current <code>.curvebook</code> / <code>.curvebook.d/</code> containers (<code>schema_version &lt;= CURRENT_SCHEMA_VERSION</code>, currently <code>7</code>) and documented import formats (<code>.csv</code>, <code>.tsv</code>, <code>.pzfx</code>, <code>.prism</code>) are supported.</li>
+<li><strong>Formula Evaluator &amp; <code>1.0</code>-Deferred Capabilities:</strong> <code>=</code> Calculated Variables support numeric, boolean/3-valued logic, conditional aggregates, and window functions, and omit text-manipulation and date-arithmetic functions in Beta. Post-Beta <code>1.0</code> scope (<code>QOL-10</code> browser collaborator viewer extensions, <code>QOL-11</code> additional unpacked-directory QoL extensions, <code>QOL-13</code> instant statistical/Bayesian calculators, and <code>QOL-15</code> bench molarity/dilution/radiochemical calculators) is deferred beyond Beta.</li>
+<li><strong>Release Notes &amp; Downloads:</strong> Inspect <a href="https://github.com/HauserGroup/curvebook/releases">CurveBook Releases</a> for per-tag Beta release notes, checksums, and build provenance attestations.</li>
+</ul>
+        <nav class="pager" aria-label="Previous and next pages">
+          <a href="section-troubleshooting.html">← Troubleshooting &amp; known issues</a>
+          <a href="section-glossary.html">Glossary &amp; A–Z index →</a>
+        </nav>
+      </article>
+    </main>
+    <footer class="site-footer">
+      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>
+      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
+      <p class="privacy">CurveBook runs locally and collects no telemetry. Read <a href="../../privacy.html">Privacy, Licences &amp; Security</a> · <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a></p>
+    </footer>
+    <div class="window-statusbar" aria-label="Application summary">
+      <span class="status-cell is-grow">Ready · Offline Desktop · CLI · Local MCP</span>
+      <span class="status-cell">Pure Rust</span>
+      <span class="status-cell">Zero Telemetry</span>
+      <span class="status-cell">MIT / Apache-2.0</span>
+    </div>
+  </div>
+</body>
+</html>

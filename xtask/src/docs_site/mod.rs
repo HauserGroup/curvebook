@@ -8,6 +8,7 @@
 
 #![allow(dead_code)]
 
+pub mod llms;
 pub mod markdown;
 pub mod registries;
 pub mod seo;
@@ -49,7 +50,13 @@ pub fn run_cli(root: &Path, args: &[String]) -> Result<(), String> {
             return Err(format!("`--sitemap` cannot be combined with other options\n{USAGE}"));
         }
         let count = seo::write_sitemap(root)?;
-        println!("docs-site: wrote {} with {count} URLs", seo::SITEMAP_REL_PATH);
+        llms::write_llms_files(root)?;
+        println!(
+            "docs-site: wrote {} ({count} URLs), {}, and {}",
+            seo::SITEMAP_REL_PATH,
+            llms::LLMS_TXT_REL_PATH,
+            llms::LLMS_FULL_TXT_REL_PATH
+        );
         return Ok(());
     }
     if let Some(ref version) = opts.release {
@@ -182,34 +189,41 @@ fn run_release_snapshot(root: &Path, version_raw: &str, check_after: bool) -> Re
         }
     });
     let manifest_str = serde_json::to_string_pretty(&manifest).map_err(|e| format!("serialize manifest.json: {e}"))?;
+    let manifest_bytes = format!("{manifest_str}\n");
     let manifest_path = snap_dir.join("manifest.json");
-    write_atomic(&manifest_path, format!("{manifest_str}\n").as_bytes()).map_err(|e| format!("write {}: {e}", manifest_path.display()))?;
+    write_atomic(&manifest_path, manifest_bytes.as_bytes()).map_err(|e| format!("write {}: {e}", manifest_path.display()))?;
+
+    let latest_dir = root.join("docs/manual/latest");
+    write_html_tree(&latest_dir, &site)?;
+    let latest_manifest_path = latest_dir.join("manifest.json");
+    write_atomic(&latest_manifest_path, manifest_bytes.as_bytes()).map_err(|e| format!("write {}: {e}", latest_manifest_path.display()))?;
 
     let versions = collect_snapshot_dirs(&root.join("docs/manual"))?;
     let ver_label = format!("v{clean_ver}");
-    let redirect_html = render_release_redirect_index(&minor_dir, &ver_label, &versions);
+    let redirect_html = render_release_redirect_index("latest", &ver_label, &versions);
     let redirect_path = root.join("docs/manual/index.html");
     write_atomic(&redirect_path, redirect_html.as_bytes()).map_err(|e| format!("write docs/manual/index.html: {e}"))?;
 
-    let get_started_target = format!("manual/{minor_dir}/get-started.html");
+    let get_started_target = "manual/latest/get-started.html";
     let get_started_shim = render_root_redirect_shim(
         "Get Started & Installation",
-        "Redirecting to CurveBook Get Started & Installation in the versioned reference manual.",
-        &get_started_target,
+        "Redirecting to CurveBook Get Started & Installation in the reference manual.",
+        get_started_target,
         &ver_label,
     );
     write_atomic(&root.join("docs/get-started.html"), get_started_shim.as_bytes()).map_err(|e| format!("write docs/get-started.html: {e}"))?;
 
-    let troubleshooting_target = format!("manual/{minor_dir}/troubleshooting.html#known-issues");
+    let troubleshooting_target = "manual/latest/troubleshooting.html#known-issues";
     let troubleshooting_shim = render_root_redirect_shim(
         "Troubleshooting & Known Issues",
-        "Redirecting to CurveBook Troubleshooting & Known Issues in the versioned reference manual.",
-        &troubleshooting_target,
+        "Redirecting to CurveBook Troubleshooting & Known Issues in the reference manual.",
+        troubleshooting_target,
         &ver_label,
     );
     write_atomic(&root.join("docs/troubleshooting.html"), troubleshooting_shim.as_bytes())
         .map_err(|e| format!("write docs/troubleshooting.html: {e}"))?;
     seo::write_sitemap(root)?;
+    llms::write_llms_files(root)?;
 
     if check_after {
         verify_site(root, &snap_dir, &site)?;

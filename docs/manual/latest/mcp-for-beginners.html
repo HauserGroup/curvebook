@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Configure an MCP client to connect to CurveBook and verify the connection.">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'">
+  <meta name="color-scheme" content="light">
+  <title>Using CurveBook with Your AI Assistant — CurveBook Documentation</title>
+  <link rel="canonical" href="https://hausergroup.github.io/curvebook/manual/latest/mcp-for-beginners.html">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="CurveBook">
+  <meta property="og:title" content="Using CurveBook with Your AI Assistant — CurveBook Documentation">
+  <meta property="og:description" content="Configure an MCP client to connect to CurveBook and verify the connection.">
+  <meta property="og:url" content="https://hausergroup.github.io/curvebook/manual/latest/mcp-for-beginners.html">
+  <meta property="og:image" content="https://hausergroup.github.io/curvebook/images/workspace-split-fit.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" type="image/png" href="../../images/curvebook.png">
+  <link rel="stylesheet" href="../../site.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="desktop-window wrap">
+    <header class="site-header">
+      <div class="title-bar">
+        <div class="wordmark">
+          <img src="../../images/curvebook.png" width="64" height="64" alt="">
+          <span>CurveBook · Reference Manual</span>
+        </div>
+        <span class="window-status">Get started</span>
+      </div>
+      <nav aria-label="Manual navigation">
+        <a href="index.html">Manual Home</a>
+        <a href="section-get-started.html" aria-current="page">Get Started</a>
+        <a href="section-analyses.html">Reference</a>
+        <a href="section-automation.html">Automation</a>
+        <a href="registry/commands.html">Commands &amp; Tools</a>
+        <a href="az-index.html">A–Z Index</a>
+        <a href="section-contribute.html">Contribute</a>
+        <a href="../../index.html">Product Home</a>
+        <a href="../../privacy.html">Privacy Policy</a>
+      </nav>
+    </header>
+    <div class="version-banner" role="note" aria-label="Documentation version">
+      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-24 (commit <code>0acc0a8468</code>)</span>
+      <span>No scripts · No telemetry · <a href="az-index.html">A–Z Index</a></span>
+    </div>
+    <main id="main" tabindex="-1">
+      <article class="overview doc-body">
+        <nav class="breadcrumbs" aria-label="Breadcrumb">
+          <a href="index.html">Manual</a>
+          <span aria-hidden="true">/</span>
+          <a href="section-get-started.html">Get started</a>
+          <span aria-hidden="true">/</span>
+          <span aria-current="page">Using CurveBook with Your AI Assistant</span>
+        </nav>
+        <details open class="toc">
+          <summary class="toc-title">On this page</summary>
+          <ul>
+            <li><a href="#what-you-need">What You Need</a></li>
+            <li><a href="#step-1-locate-curvebook-cli-on-your-computer">Step 1: Locate curvebook-cli on Your Computer</a></li>
+            <li><a href="#step-2-connect-curvebook-to-your-ai-app-one-time-setup">Step 2: Connect CurveBook to Your AI App (One-Time Setup)</a></li>
+            <li><a href="#macos">— macOS</a></li>
+            <li><a href="#windows">— Windows</a></li>
+            <li><a href="#linux">— Linux</a></li>
+            <li><a href="#step-3-run-your-first-analysis-in-plain-english">Step 3: Run Your First Analysis in Plain English</a></li>
+            <li><a href="#step-4-open-first-examplecurvebook-in-the-curvebook-desktop-app">Step 4: Open first-example.curvebook in the CurveBook Desktop App</a></li>
+            <li><a href="#everyday-things-you-can-ask-for">Everyday Things You Can Ask For</a></li>
+            <li><a href="#troubleshooting">Troubleshooting</a></li>
+            <li><a href="#your-data-stays-private">Your Data Stays Private</a></li>
+          </ul>
+        </details>
+<h1 id="using-curvebook-with-your-ai-assistant" tabindex="-1">Using CurveBook with Your AI Assistant</h1>
+<p>CurveBook includes both a full <strong><a href="desktop-gui.html">desktop app</a></strong> (<code>CurveBook</code>) and a built-in <strong>MCP (Model Context Protocol)</strong> server (<code>curvebook-cli mcp</code>) so you can drive analyses from a local AI assistant in plain English and inspect or refine the same <code>.curvebook</code> project in the desktop GUI.</p>
+<p>Every Beta installer bundles both <code>curvebook</code> (desktop app) and <code>curvebook-cli</code> (CLI &amp; MCP server) inside the same package, and everything runs locally on your computer with zero telemetry or cloud uploads.</p>
+<blockquote>
+<p><strong>Using CurveBook directly without AI?</strong> Follow <a href="get-started.html">Get Started</a> to install the desktop app and browse the <a href="desktop-gui.html">Desktop App Guide</a>.</p>
+</blockquote>
+<hr>
+<h2 id="what-you-need" tabindex="-1">What You Need</h2>
+<ol>
+<li><strong>CurveBook installed</strong> from the <a href="https://github.com/HauserGroup/curvebook/releases">Releases page</a> (follow <a href="get-started.html">Get Started</a> to install and verify your download).</li>
+<li><strong>An AI desktop app that supports MCP</strong>, such as Claude Desktop, Cursor, Windsurf, or any other local MCP client.</li>
+<li><strong>A folder for your data</strong> — for example <code>Documents/MyResearchData</code> — where you keep your CSV/data files and <code>.curvebook</code> projects.</li>
+</ol>
+<hr>
+<h2 id="step-1-locate-curvebook-cli-on-your-computer" tabindex="-1">Step 1: Locate <code>curvebook-cli</code> on Your Computer</h2>
+<p>Each CurveBook installer places <code>curvebook-cli</code> alongside the desktop application:</p>
+<ul>
+<li><strong>macOS:</strong> Drag <code>CurveBook.app</code> from the <code>.dmg</code> into <code>/Applications</code>. The bundled CLI binary is at:
+<pre><code class="language-text">  /Applications/CurveBook.app/Contents/MacOS/curvebook-cli</code></pre>
+</li>
+<li><strong>Windows:</strong> Run the <code>.msi</code> installer (Per-User default). The bundled CLI binary is at:
+<pre><code class="language-text">  %LocalAppData%\Programs\CurveBook\curvebook-cli.exe</code></pre>
+<em>(If you chose a machine-wide install for all users, use <code>%ProgramFiles%\CurveBook\curvebook-cli.exe</code>.)</em></li>
+<li><strong>Linux:</strong> Make the <code>.AppImage</code> executable and extract the bundled binaries once so your AI assistant can invoke <code>curvebook-cli</code> directly without unpacking the AppImage on every launch:
+<pre><code class="language-sh">  chmod +x curvebook-&lt;version&gt;-linux-x86_64.AppImage
+  ./curvebook-&lt;version&gt;-linux-x86_64.AppImage --appimage-extract</code></pre>
+<em>(Use <code>aarch64</code> instead of <code>x86_64</code> on ARM64 Linux.)</em> The CLI binary is inside the extracted directory at:
+<pre><code class="language-text">  &lt;path-to-extracted-folder&gt;/squashfs-root/usr/bin/curvebook-cli</code></pre>
+</li>
+<li><strong>Contributors / source checkouts / FreeBSD:</strong> Build with <code>cargo build --release -p curvebook-cli</code> and point your AI client to <code>target/release/curvebook-cli</code> inside your checkout (see <a href="automation/mcp.html">docs/mcp.md</a>).</li>
+</ul>
+<hr>
+<h2 id="step-2-connect-curvebook-to-your-ai-app-one-time-setup" tabindex="-1">Step 2: Connect CurveBook to Your AI App (One-Time Setup)</h2>
+<p>Open your AI assistant&#39;s MCP settings file:</p>
+<ul>
+<li><strong>Claude Desktop (macOS):</strong> <code>~/Library/Application Support/Claude/claude_desktop_config.json</code> <em>(or *</em>Settings → Developer → Edit Config<em>*)</em></li>
+<li><strong>Claude Desktop (Windows):</strong> <code>%APPDATA%\Claude\claude_desktop_config.json</code> <em>(or *</em>Settings → Developer → Edit Config<em>*)</em></li>
+<li><strong>Other MCP clients (Cursor, Windsurf, Cline, etc.):</strong> Open your client&#39;s <code>mcp.json</code> or MCP server configuration screen.</li>
+</ul>
+<p>Add a <code>&quot;curvebook&quot;</code> entry matching your OS, replacing <code>YOURNAME</code> and the <code>--workdir</code> folder path with your real username and project folder.</p>
+<h3 id="macos" tabindex="-1">macOS</h3>
+<pre><code class="language-json">{
+  &quot;mcpServers&quot;: {
+    &quot;curvebook&quot;: {
+      &quot;command&quot;: &quot;/Applications/CurveBook.app/Contents/MacOS/curvebook-cli&quot;,
+      &quot;args&quot;: [
+        &quot;mcp&quot;,
+        &quot;--workdir&quot;,
+        &quot;/Users/YOURNAME/Documents/MyResearchData&quot;
+      ]
+    }
+  }
+}</code></pre>
+<h3 id="windows" tabindex="-1">Windows</h3>
+<pre><code class="language-json">{
+  &quot;mcpServers&quot;: {
+    &quot;curvebook&quot;: {
+      &quot;command&quot;: &quot;C:\\Users\\YOURNAME\\AppData\\Local\\Programs\\CurveBook\\curvebook-cli.exe&quot;,
+      &quot;args&quot;: [
+        &quot;mcp&quot;,
+        &quot;--workdir&quot;,
+        &quot;C:\\Users\\YOURNAME\\Documents\\MyResearchData&quot;
+      ]
+    }
+  }
+}</code></pre>
+<blockquote>
+<p><strong>Note:</strong> Use double backslashes (<code>\\</code>) inside Windows JSON strings, and write out your real Windows username (<code>YOURNAME</code>) instead of <code>%LocalAppData%</code> because most JSON configs do not expand environment variables.</p>
+</blockquote>
+<h3 id="linux" tabindex="-1">Linux</h3>
+<pre><code class="language-json">{
+  &quot;mcpServers&quot;: {
+    &quot;curvebook&quot;: {
+      &quot;command&quot;: &quot;/home/YOURNAME/Applications/squashfs-root/usr/bin/curvebook-cli&quot;,
+      &quot;args&quot;: [
+        &quot;mcp&quot;,
+        &quot;--workdir&quot;,
+        &quot;/home/YOURNAME/Documents/MyResearchData&quot;
+      ]
+    }
+  }
+}</code></pre>
+<p>Save the config file and <strong>fully quit and reopen your AI app</strong> so it detects the new <code>&quot;curvebook&quot;</code> server.</p>
+<blockquote>
+<p><strong>Why <code>--workdir</code>?</strong> <code>--workdir</code> locks file access strictly to that folder and its subfolders. CurveBook will not read or write files outside it.</p>
+</blockquote>
+<hr>
+<h2 id="step-3-run-your-first-analysis-in-plain-english" tabindex="-1">Step 3: Run Your First Analysis in Plain English</h2>
+<p>Open a fresh chat in your AI app and paste a request like this:</p>
+<blockquote>
+<p>Use CurveBook to create a Column table comparing two groups:</p>
+<ul>
+<li>Control: 10.2, 9.8, 10.5, 10.0, 10.1</li>
+<li>Treated: 14.1, 13.8, 14.5, 13.9, 14.2</li>
+</ul>
+<p>Run a Welch&#39;s t-test, show me the summary statistics and P-value, create a box-and-whisker graph showing individual points, export the graph as <code>comparison.png</code> and <code>comparison.pdf</code>, and save the project as <code>first-example.curvebook</code>.</p>
+</blockquote>
+<p>Your assistant will call CurveBook&#39;s tools locally, print the <em>t</em>-test summary and <em>P</em>-value in chat, and write <code>comparison.png</code>, <code>comparison.pdf</code>, and <code>first-example.curvebook</code> inside your <code>--workdir</code> folder.</p>
+<hr>
+<h2 id="step-4-open-first-examplecurvebook-in-the-curvebook-desktop-app" tabindex="-1">Step 4: Open <code>first-example.curvebook</code> in the CurveBook Desktop App</h2>
+<p>Projects created by an AI assistant use the exact same native <code>.curvebook</code> format as the desktop app:</p>
+<ol>
+<li>Launch <strong>CurveBook</strong> (from <code>/Applications</code> on macOS, the Start Menu on Windows, or your <code>.AppImage</code> on Linux).</li>
+<li>Choose <strong>File › Open…</strong> (<code>Cmd+O</code> on macOS / <code>Ctrl+O</code> on Windows &amp; Linux) — or drag <code>first-example.curvebook</code> from your <code>--workdir</code> folder onto the CurveBook window — and open <code>first-example.curvebook</code>.</li>
+<li>Explore the reactive <strong>Project Navigator</strong> and <strong>Family</strong> tree on the left: click the <strong>Data</strong> table to inspect values, click the <strong>ResultSheet</strong> to review diagnostics and parameter details, or click the <strong>Graph</strong> to customize axes, error bars, themes, and multi-panel layouts interactively.</li>
+</ol>
+<p>You can also hand files back the other way: save edits in the desktop app, then ask your AI assistant to open the updated <code>.curvebook</code> file and run follow-up fits or batch exports.</p>
+<hr>
+<h2 id="everyday-things-you-can-ask-for" tabindex="-1">Everyday Things You Can Ask For</h2>
+<ul>
+<li><strong>Curve fitting:</strong> <em>&quot;Fit a 4-parameter logistic (EC50) dose-response curve to this XY dataset and report IC50 with 95% confidence intervals.&quot;</em></li>
+<li><strong>Model comparison:</strong> <em>&quot;Compare a 3-parameter vs 4-parameter curve fit on this table using AICc and the extra sum-of-squares F-test.&quot;</em></li>
+<li><strong>Multi-group &amp; survival statistics:</strong> <em>&quot;Import <code>experiment.csv</code>, run a one-way ANOVA with Tukey post-hoc comparisons (or Kaplan-Meier log-rank survival analysis), and tell me which differences are significant.&quot;</em></li>
+<li><strong>Publication figures:</strong> <em>&quot;Export every graph in <code>study.curvebook</code> as 300 DPI PNG and vector PDF.&quot;</em></li>
+</ul>
+<hr>
+<h2 id="troubleshooting" tabindex="-1">Troubleshooting</h2>
+<ul>
+<li><strong>Your AI app does not see CurveBook tools:</strong> Make sure you edited the right config file, checked your <code>&quot;command&quot;</code> path and JSON commas/backslashes, and <strong>fully restarted</strong> the AI app.</li>
+<li><strong>&quot;Access denied&quot; / path outside <code>--workdir</code>:</strong> CurveBook blocks file paths outside the <code>--workdir</code> directory you configured. Move data files inside that folder or update <code>--workdir</code>.</li>
+<li><strong>More MCP connection checks:</strong> See <a href="troubleshooting.html#mcp-connection">Troubleshooting: MCP Connection</a>.</li>
+<li><strong>Technical reference:</strong> See <a href="automation/mcp.html">MCP Automation Reference</a>, <a href="automation/control-and-batch.html">Control &amp; Batch Automation</a>, and <a href="automation/mcp.html">docs/mcp.md</a>.</li>
+</ul>
+<hr>
+<h2 id="your-data-stays-private" tabindex="-1">Your Data Stays Private</h2>
+<ul>
+<li>CurveBook has <strong>no network telemetry</strong> and never sends spreadsheets or projects to external servers (<code>cargo xtask telemetry</code>).</li>
+<li>Everything runs offline inside the <code>--workdir</code> folder you choose (see <a href="privacy-security.html">Privacy &amp; Security</a>).</li>
+<li>Your AI assistant sees only the tool parameters and summary outputs shown in your chat — never arbitrary folders outside <code>--workdir</code>.</li>
+</ul>
+        <nav class="pager" aria-label="Previous and next pages">
+          <a href="desktop-gui.html">← Desktop GUI Overview</a>
+          <a href="section-concepts.html">Concepts →</a>
+        </nav>
+      </article>
+    </main>
+    <footer class="site-footer">
+      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>
+      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
+      <p class="privacy">CurveBook runs locally and collects no telemetry. Read <a href="../../privacy.html">Privacy, Licences &amp; Security</a> · <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a></p>
+    </footer>
+    <div class="window-statusbar" aria-label="Application summary">
+      <span class="status-cell is-grow">Ready · Offline Desktop · CLI · Local MCP</span>
+      <span class="status-cell">Pure Rust</span>
+      <span class="status-cell">Zero Telemetry</span>
+      <span class="status-cell">MIT / Apache-2.0</span>
+    </div>
+  </div>
+</body>
+</html>

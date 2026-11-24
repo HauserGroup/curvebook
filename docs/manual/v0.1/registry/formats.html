@@ -8,6 +8,14 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'">
   <meta name="color-scheme" content="light">
   <title>Formats, Schemas &amp; Locales Registry — CurveBook Documentation</title>
+  <link rel="canonical" href="https://hausergroup.github.io/curvebook/manual/latest/registry/formats.html">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="CurveBook">
+  <meta property="og:title" content="Formats, Schemas &amp; Locales Registry — CurveBook Documentation">
+  <meta property="og:description" content="Registered import/export file formats, JSON Schemas (preferences, batch-v1, document, archive, journal), and supported locales.">
+  <meta property="og:url" content="https://hausergroup.github.io/curvebook/manual/latest/registry/formats.html">
+  <meta property="og:image" content="https://hausergroup.github.io/curvebook/images/workspace-split-fit.png">
+  <meta name="twitter:card" content="summary_large_image">
   <link rel="icon" type="image/png" href="../../../images/curvebook.png">
   <link rel="stylesheet" href="../../../site.css">
 </head>
@@ -35,7 +43,7 @@
       </nav>
     </header>
     <div class="version-banner" role="note" aria-label="Documentation version">
-      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-23 (commit <code>4964288a03</code>)</span>
+      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-24 (commit <code>0acc0a8468</code>)</span>
       <span>No scripts · No telemetry · <a href="../az-index.html">A–Z Index</a></span>
     </div>
     <main id="main" tabindex="-1">
@@ -60,7 +68,7 @@
             <li><a href="#locales">Supported Interface Locales (LOCALES)</a></li>
           </ul>
         </nav>
-<p class="lead">Import/export format descriptors compiled from <code>FormatRegistry::default_registry()</code> (<strong>13</strong> formats) alongside persisted JSON Schemas and supported UI locales.</p>
+<p class="lead">Import/export format descriptors compiled from <code>FormatRegistry::default_registry()</code> (<strong>14</strong> formats) alongside persisted JSON Schemas and supported UI locales.</p>
 <h2 id="formats" tabindex="-1">Registered Import &amp; Export Formats</h2>
 <div class="table-wrap"><table>
 <thead><tr><th>Format ID</th><th>Label</th><th>Extensions</th><th>Category</th><th>Import</th><th>Export</th></tr></thead>
@@ -70,6 +78,7 @@
 <tr id="format-cbtemplate" tabindex="-1"><td><code>cbtemplate</code></td><td>CurveBook Template</td><td><code>.cbtemplate</code></td><td>Project Template</td><td>yes</td><td>yes</td></tr>
 <tr id="format-prism" tabindex="-1"><td><code>prism</code></td><td>External Project Archive (.prism)</td><td><code>.prism</code></td><td>External Project Interchange</td><td>yes</td><td>no</td></tr>
 <tr id="format-pzfx" tabindex="-1"><td><code>pzfx</code></td><td>PZFX XML Document</td><td><code>.pzfx</code></td><td>External Project Interchange</td><td>yes</td><td>no</td></tr>
+<tr id="format-xlsx" tabindex="-1"><td><code>xlsx</code></td><td>Spreadsheet Workbook (.xlsx)</td><td><code>.xlsx</code></td><td>External Project Interchange</td><td>yes</td><td>no</td></tr>
 <tr id="format-csv" tabindex="-1"><td><code>csv</code></td><td>Comma-Separated Values</td><td><code>.csv</code></td><td>Delimited Text</td><td>yes</td><td>yes</td></tr>
 <tr id="format-tsv" tabindex="-1"><td><code>tsv</code></td><td>Tab-Separated Values</td><td><code>.tsv</code></td><td>Delimited Text</td><td>yes</td><td>yes</td></tr>
 <tr id="format-json" tabindex="-1"><td><code>json</code></td><td>JSON Result Table</td><td><code>.json</code></td><td>Structured Result Export</td><td>no</td><td>yes</td></tr>
@@ -2941,6 +2950,12 @@
       <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
       <p class="privacy">CurveBook runs locally and collects no telemetry. Read <a href="../../../privacy.html">Privacy, Licences &amp; Security</a> · <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a></p>
     </footer>
+    <div class="window-statusbar" aria-label="Application summary">
+      <span class="status-cell is-grow">Ready · Offline Desktop · CLI · Local MCP</span>
+      <span class="status-cell">Pure Rust</span>
+      <span class="status-cell">Zero Telemetry</span>
+      <span class="status-cell">MIT / Apache-2.0</span>
+    </div>
   </div>
 </body>
 </html>

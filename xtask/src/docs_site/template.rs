@@ -93,7 +93,8 @@ pub fn asset_prefix(from_rel: &str, is_release_snapshot: bool) -> String {
 pub fn render_page(spec: &PageSpec<'_>) -> String {
     let root = rel_href(spec.rel_path, "");
     let assets = asset_prefix(spec.rel_path, spec.meta.is_release_snapshot);
-    let mut out = String::with_capacity(spec.body_html.len() + 3072);
+    let canonical_url = super::seo::manual_canonical_url(spec.rel_path);
+    let mut out = String::with_capacity(spec.body_html.len() + 3584);
 
     out.push_str("<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n");
     out.push_str("  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
@@ -105,7 +106,17 @@ pub fn render_page(spec: &PageSpec<'_>) -> String {
     out.push_str(STRICT_CSP);
     out.push_str("\">\n  <meta name=\"color-scheme\" content=\"light\">\n  <title>");
     push_html_escaped(spec.title, &mut out);
-    out.push_str(" — CurveBook Documentation</title>\n  <link rel=\"icon\" type=\"image/png\" href=\"");
+    out.push_str(" — CurveBook Documentation</title>\n  <link rel=\"canonical\" href=\"");
+    push_html_escaped(&canonical_url, &mut out);
+    out.push_str("\">\n  <meta property=\"og:type\" content=\"article\">\n  <meta property=\"og:site_name\" content=\"CurveBook\">\n  <meta property=\"og:title\" content=\"");
+    push_html_escaped(spec.title, &mut out);
+    out.push_str(" — CurveBook Documentation\">\n  <meta property=\"og:description\" content=\"");
+    push_html_escaped(spec.description, &mut out);
+    out.push_str("\">\n  <meta property=\"og:url\" content=\"");
+    push_html_escaped(&canonical_url, &mut out);
+    out.push_str("\">\n  <meta property=\"og:image\" content=\"");
+    out.push_str(super::seo::SITE_BASE_URL);
+    out.push_str("images/workspace-split-fit.png\">\n  <meta name=\"twitter:card\" content=\"summary_large_image\">\n  <link rel=\"icon\" type=\"image/png\" href=\"");
     out.push_str(&assets);
     out.push_str("images/curvebook.png\">\n  <link rel=\"stylesheet\" href=\"");
     out.push_str(&assets);

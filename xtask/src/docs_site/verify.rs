@@ -658,8 +658,25 @@ pub fn check_committed_snapshots(root: &Path) -> Result<(), String> {
         }
     }
 
+    let latest_manifest_path = manual_dir.join("latest/manifest.json");
+    let expected_refresh =
+        if std::fs::symlink_metadata(&latest_manifest_path).is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_file()) {
+            let latest_raw = std::fs::read_to_string(&latest_manifest_path)
+                .map_err(|e| format!("read {}: {e}", latest_manifest_path.display()))?;
+            let newest_manifest_path = manual_dir.join(newest_dir).join("manifest.json");
+            let newest_raw = std::fs::read_to_string(&newest_manifest_path)
+                .map_err(|e| format!("read {}: {e}", newest_manifest_path.display()))?;
+            if latest_raw != newest_raw {
+                return Err(format!(
+                    "docs/manual/latest/manifest.json does not match newest snapshot docs/manual/{newest_dir}/manifest.json"
+                ));
+            }
+            String::from("latest/index.html")
+        } else {
+            format!("{newest_dir}/index.html")
+        };
+
     let index_html = std::fs::read_to_string(manual_dir.join("index.html")).map_err(|e| format!("read docs/manual/index.html: {e}"))?;
-    let expected_refresh = format!("{newest_dir}/index.html");
     if !index_html.contains("http-equiv=\"refresh\"") || !index_html.contains(&expected_refresh) {
         return Err(format!("docs/manual/index.html must redirect via meta-refresh to `{expected_refresh}`"));
     }
@@ -1338,5 +1355,57 @@ $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
         std::fs::write(docs.join("manual/index.html"), root_html("")).unwrap();
         assert!(check_root_pages(&root_dir).is_err());
         let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn r12_10_manual_pages_emit_latest_canonical_og_and_latest_manifest_is_verified() {
+        let meta = test_meta();
+        let page = render_page(&PageSpec {
+            title: "Analyses",
+            description: "Statistical analyses reference.",
+            rel_path: "analyses.html",
+            section_title: "Analyses",
+            section_rel_path: Some("section-analyses.html"),
+            h1: "Analyses",
+            toc_headings: &[],
+            body_html: "<p>Body.</p>",
+            body_has_h1: false,
+            prev: None,
+            next: None,
+            meta: &meta,
+        });
+        assert!(audit_single_html("analyses.html", &page).is_ok());
+        assert!(page.contains("<link rel=\"canonical\" href=\"https://hausergroup.github.io/curvebook/manual/latest/analyses.html\">"));
+        assert!(page.contains("<meta property=\"og:type\" content=\"article\">"));
+        assert!(page.contains("<meta property=\"og:site_name\" content=\"CurveBook\">"));
+        assert!(page.contains("<meta property=\"og:title\" content=\"Analyses — CurveBook Documentation\">"));
+        assert!(page.contains("<meta property=\"og:description\" content=\"Statistical analyses reference.\">"));
+        assert!(page.contains("<meta property=\"og:url\" content=\"https://hausergroup.github.io/curvebook/manual/latest/analyses.html\">"));
+        assert!(page.contains("<meta property=\"og:image\" content=\"https://hausergroup.github.io/curvebook/images/workspace-split-fit.png\">"));
+        assert!(page.contains("<meta name=\"twitter:card\" content=\"summary_large_image\">"));
+        assert!(!page.contains("<script"));
+
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let dir = std::env::temp_dir().join(format!("cb-docs-latest-{}-{nanos}", std::process::id()));
+        let manual = dir.join("docs/manual");
+        std::fs::create_dir_all(manual.join("v0.1")).unwrap();
+        std::fs::create_dir_all(manual.join("latest")).unwrap();
+        let manifest = "{\"version\":\"0.1.0\",\"commit\":\"0123456789abcdef0123456789abcdef01234567\"}\n";
+        std::fs::write(manual.join("v0.1/manifest.json"), manifest).unwrap();
+        std::fs::write(manual.join("latest/manifest.json"), manifest).unwrap();
+        std::fs::write(manual.join("index.html"), "<meta http-equiv=\"refresh\" content=\"0; url=latest/index.html\">").unwrap();
+        assert!(check_committed_snapshots(&dir).is_ok());
+
+        // Redirect pointing to v0.1 instead of latest must fail when latest/manifest.json exists.
+        std::fs::write(manual.join("index.html"), "<meta http-equiv=\"refresh\" content=\"0; url=v0.1/index.html\">").unwrap();
+        assert!(check_committed_snapshots(&dir).unwrap_err().contains("latest/index.html"));
+
+        // Mismatched latest/manifest.json must fail.
+        std::fs::write(manual.join("index.html"), "<meta http-equiv=\"refresh\" content=\"0; url=latest/index.html\">").unwrap();
+        std::fs::write(manual.join("latest/manifest.json"), "{\"version\":\"0.1.0\",\"commit\":\"ffffffffffffffffffffffffffffffffffffffff\"}\n")
+            .unwrap();
+        assert!(check_committed_snapshots(&dir).unwrap_err().contains("latest/manifest.json"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

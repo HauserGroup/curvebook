@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Project structure, five sheet types, reactive recalculation pipeline, exclusions, checkpoints, and undo.">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'">
+  <meta name="color-scheme" content="light">
+  <title>Concepts &amp; Document Architecture — CurveBook Documentation</title>
+  <link rel="canonical" href="https://hausergroup.github.io/curvebook/manual/latest/concepts.html">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="CurveBook">
+  <meta property="og:title" content="Concepts &amp; Document Architecture — CurveBook Documentation">
+  <meta property="og:description" content="Project structure, five sheet types, reactive recalculation pipeline, exclusions, checkpoints, and undo.">
+  <meta property="og:url" content="https://hausergroup.github.io/curvebook/manual/latest/concepts.html">
+  <meta property="og:image" content="https://hausergroup.github.io/curvebook/images/workspace-split-fit.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" type="image/png" href="../../images/curvebook.png">
+  <link rel="stylesheet" href="../../site.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="desktop-window wrap">
+    <header class="site-header">
+      <div class="title-bar">
+        <div class="wordmark">
+          <img src="../../images/curvebook.png" width="64" height="64" alt="">
+          <span>CurveBook · Reference Manual</span>
+        </div>
+        <span class="window-status">Concepts</span>
+      </div>
+      <nav aria-label="Manual navigation">
+        <a href="index.html">Manual Home</a>
+        <a href="section-get-started.html">Get Started</a>
+        <a href="section-analyses.html" aria-current="page">Reference</a>
+        <a href="section-automation.html">Automation</a>
+        <a href="registry/commands.html">Commands &amp; Tools</a>
+        <a href="az-index.html">A–Z Index</a>
+        <a href="section-contribute.html">Contribute</a>
+        <a href="../../index.html">Product Home</a>
+        <a href="../../privacy.html">Privacy Policy</a>
+      </nav>
+    </header>
+    <div class="version-banner" role="note" aria-label="Documentation version">
+      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-24 (commit <code>0acc0a8468</code>)</span>
+      <span>No scripts · No telemetry · <a href="az-index.html">A–Z Index</a></span>
+    </div>
+    <main id="main" tabindex="-1">
+      <article class="overview doc-body">
+        <nav class="breadcrumbs" aria-label="Breadcrumb">
+          <a href="index.html">Manual</a>
+          <span aria-hidden="true">/</span>
+          <a href="section-concepts.html">Concepts</a>
+          <span aria-hidden="true">/</span>
+          <span aria-current="page">Concepts &amp; Document Architecture</span>
+        </nav>
+        <details open class="toc">
+          <summary class="toc-title">On this page</summary>
+          <ul>
+            <li><a href="#projects-identifiers-and-limits">Projects, Identifiers &amp; Document Limits</a></li>
+            <li><a href="#sheet-sections-and-families">Sheet Sections &amp; Sheet Families</a></li>
+            <li><a href="#sheet-families">— Sheet Families (family_anchor_sheet_id)</a></li>
+            <li><a href="#reactive-dag">Reactive DAG &amp; Recalculation Lifecycle</a></li>
+            <li><a href="#cell-exclusions">Non-Destructive Cell Exclusions &amp; Provenance</a></li>
+            <li><a href="#undo-and-checkpoints">Session Undo/Redo &amp; Named Checkpoints</a></li>
+            <li><a href="#undo-redo">— Bounded Session Undo/Redo</a></li>
+            <li><a href="#named-checkpoints">— Named In-File Checkpoints (NamedCheckpoint)</a></li>
+            <li><a href="#number-and-pvalue-formatting">Number Formatting &amp; P-Value Conventions</a></li>
+            <li><a href="#persisted-analysis-settings">Persisted Analysis Settings (AnalysisSpec)</a></li>
+          </ul>
+        </details>
+<h1 id="concepts--document-architecture" tabindex="-1">Concepts &amp; Document Architecture</h1>
+<p>CurveBook stores an entire statistical and graphing study inside a single deterministic project (<code>ProjectDocument</code>) organized into five typed workspace sections, connected by a reactive directed acyclic graph (DAG), and protected by non-destructive cell exclusions, bounded session undo/redo, and explicit schema versioning.</p>
+<hr>
+<h2 id="projects-identifiers-and-limits" tabindex="-1">Projects, Identifiers &amp; Document Limits</h2>
+<p>A <code>ProjectDocument</code> pairs a project title, persistent analysis/workspace metadata, optional checkpoints, and an ordered collection of typed sheets. All structural sizes obey explicit upper bounds enforced during editing and archive validation:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Limit Constant</th><th>Value</th><th>Scope</th></tr></thead>
+<tbody>
+<tr><td><code>CURRENT_SCHEMA_VERSION</code></td><td><code>7</code></td><td>Active project document JSON schema version</td></tr>
+<tr><td><code>MAX_SHEETS_PER_PROJECT</code></td><td><code>500</code></td><td>Maximum sheets across all five navigator sections in one project</td></tr>
+<tr><td><code>MAX_ROWS</code></td><td><code>1,000,000</code></td><td>Maximum rows per individual data table</td></tr>
+<tr><td><code>MAX_DATA_SETS</code></td><td><code>1,024</code></td><td>Maximum dataset/group/variable columns per data table</td></tr>
+<tr><td><code>MAX_SUBCOLUMNS</code></td><td><code>512</code></td><td>Maximum replicate subcolumns per dataset (<code>RawReplicates(n)</code>)</td></tr>
+<tr><td><code>MAX_SHEET_CELLS</code></td><td><code>30,000,000</code></td><td>Maximum total dense cells (<code>rows * cols * subcols</code>) in one table</td></tr>
+<tr><td><code>MAX_PROJECT_CELLS</code></td><td><code>50,000,000</code></td><td>Maximum total cells across all data sheets in one project</td></tr>
+<tr><td><code>MAX_TITLE_BYTES</code></td><td><code>4,096</code></td><td>Maximum UTF-8 byte length for project or sheet titles</td></tr>
+<tr><td><code>MAX_SHEET_ID_BYTES</code></td><td><code>256</code></td><td>Maximum UTF-8 byte length for a <code>SheetId</code></td></tr>
+<tr><td><code>MAX_CHECKPOINTS_PER_PROJECT</code></td><td><code>32</code> (creation) / <code>64</code> (archive ceiling)</td><td><code>project.createCheckpoint</code> allows up to <code>32</code> per project; archive/loader validation accepts up to <code>64</code></td></tr>
+</tbody>
+</table></div>
+<p>Every sheet carries a stable, non-whitespace <code>SheetId</code> (distinct across the project) and a mutable display <code>title</code>.</p>
+<hr>
+<h2 id="sheet-sections-and-families" tabindex="-1">Sheet Sections &amp; Sheet Families</h2>
+<p>CurveBook organizes sheets into five canonical <code>SheetSection</code> navigator folders:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Section</th><th>Sheet Type</th><th>Role in the Workspace</th></tr></thead>
+<tbody>
+<tr><td><strong>Data</strong></td><td><code>DataSheet</code></td><td>Typed data grid holding one of the <a href="tables.html#table-archetypes">eight table archetypes</a>, row titles, excluded-cell masks, exclusion provenance notes, calculated-variable formulas, and linked data regions.</td></tr>
+<tr><td><strong>Info</strong></td><td><code>InfoSheet</code></td><td>Free-form notes plus typed key/value experiment constants (<code>Text</code>, <code>Number</code>, <code>Boolean</code>), including standard metadata keys (<code>ExperimentDate</code>, <code>Experimenter</code>, <code>Protocol</code>, <code>ProjectCode</code>, <code>NotebookId</code>, <code>LotNumber</code>, <code>Instrument</code>, <code>Notes</code>). Can be linked upstream via <code>HookSource</code> parameters.</td></tr>
+<tr><td><strong>Analyses</strong></td><td><code>ResultSheet</code></td><td>Multi-tab statistical, transform, simulation, or curve-fitting output derived from an upstream <code>DataSheet</code> (or analyzable upstream <code>ResultSheet</code>), accompanied by diagnostic checklists (<code>QOL-7</code>), hookable scalars, curve overlays, and optional <code>floating_notes</code>.</td></tr>
+<tr><td><strong>Graphs</strong></td><td><code>GraphSheet</code></td><td>Publication graph specification (<code>GraphSpec</code>) referencing one or more upstream <code>DataSheet</code>s and optional <code>ResultSheet</code> overlays (fitted curves, comparison brackets, compact letter display, live <span class="math"><span class="math-text">TeX</span></span> equation boxes).</td></tr>
+<tr><td><strong>Layouts</strong></td><td><code>LayoutSheet</code></td><td>Multi-panel physical page composition (<code>LayoutSpec</code>, up to <code>64</code> <code>LayoutItem</code> panels) arranging <code>GraphSheet</code>s, live <code>ResultSheet</code> tables, embedded raster images, and supporting text/badges with physical paper sizes and journal column-width presets.</td></tr>
+</tbody>
+</table></div>
+<h3 id="sheet-families" tabindex="-1">Sheet Families (<code>family_anchor_sheet_id</code>)</h3>
+<p>Each sheet tracks its lineage to a root <code>DataSheet</code> via <code>family_anchor_sheet_id</code>, allowing downstream <code>ResultSheet</code>s, derived <code>DataSheet</code>s (from transforms), <code>GraphSheet</code>s, and <code>LayoutSheet</code>s to be inspected together or cloned coherently via <code>sheet.duplicateFamily</code> and <code>sheet.clonePipeline</code> (see <a href="registry/commands.html">Command Reference</a>).</p>
+<hr>
+<h2 id="reactive-dag" tabindex="-1">Reactive DAG &amp; Recalculation Lifecycle</h2>
+<p>Dependencies between sheets form a strict <strong>directed acyclic graph (DAG)</strong> evaluated by <code>curvebook-engine</code> (<code>crates/engine/src/dag.rs</code>):</p>
+<pre><code class="language-text">InfoSheet (HookSource constants) ──┐
+DataSheet (raw observations)       ├──► Formula (= Calculated Variables)
+                                   ├──► LinkedDataRegion (paste / transform links)
+                                   ├──► ResultSheet (Transform / Stats / Fit) ──► HookSource scalars
+                                   └──► GraphSheet (series + fit overlays + CLD/TeX) ──► LayoutSheet</code></pre>
+<ul>
+<li><strong>Cycle detection:</strong> Formula circularity, linked-region loops (<code>detect_link_cycles</code>), and cyclic <code>HookSource</code> parameter bindings are rejected with <code>ErrorCode::CycleDetected</code> before committing edits or running recalculation.</li>
+<li><strong>Dirty propagation &amp; topological order:</strong> Editing a cell, toggling an exclusion, updating an <code>InfoSheet</code> constant, or modifying an <code>AnalysisSpec</code> marks downstream dependents dirty and recalculates them in deterministic topological order (<code>project.recalculate</code>).</li>
+<li><strong>Freezing (<code>sheet.freeze</code> / <code>sheet.unfreeze</code>):</strong> Sets <code>frozen: bool</code> on a sheet (<code>DataSheet</code>, <code>ResultSheet</code>, <code>GraphSheet</code>, <code>LayoutSheet</code>). A frozen <code>DataSheet</code> (<code>frozen: true</code>) rejects direct mutations with <code>ErrorCode::FrozenSheet</code>; a frozen <code>ResultSheet</code> retains its snapshot instead of recomputing when upstream data change.</li>
+<li><strong><code>ResultStatus</code> lifecycle:</strong> Every <code>ResultSheet</code> reports one of three statuses:
+<ul>
+<li><code>Dirty</code>: Upstream inputs or <code>AnalysisSpec</code> parameters changed and recalculation is pending.</li>
+<li><code>UpToDate</code>: Computed tabs, scalars, pairwise comparisons, fitted curves, and checklist reflect current upstream inputs without error.</li>
+<li><code>Failed { code, message }</code>: Most recent recalculation could not succeed for current inputs (e.g., all rows excluded or singular model); <code>lookup_scalar</code> returns <code>None</code> while failed so invalid results never propagate through hooks. When valid upstream data are restored, recalculation resumes <code>UpToDate</code> results automatically.</li>
+</ul>
+</li>
+</ul>
+<hr>
+<h2 id="cell-exclusions" tabindex="-1">Non-Destructive Cell Exclusions &amp; Provenance</h2>
+<p>Every numeric or text cell stores <code>excluded: bool</code> independently of <code>value: CellValue</code>. Marking a cell excluded:</p>
+<ol>
+<li>Preserves the underlying raw numeric or text value in memory, <code>.curvebook</code> archives, and <code>.curvebook.d/</code> sheet CSVs (written with a leading <code>*</code> prefix such as <code>*12.4</code> when <code>parse_asterisk_exclusions</code> is active).</li>
+<li>Excludes the observation from descriptive summaries, statistical tests, curve fits, transforms, and plotted points/error bars, and omits it from selection <a href="qol.html#quick-statistics">Quick Statistics</a>.</li>
+<li>Propagates as missing in <a href="tables.html#calculated-variables"><code>=</code> Calculated Variables</a>.</li>
+<li>Supports optional structured provenance tags via <code>DataSheet::exclusion_notes: Vec&lt;CellExclusionNote&gt;</code> (<code>QOL-3</code>), storing <code>(coord, reason_tag, note, timestamp_utc)</code> (<code>table.excludeCellsWithReason</code> and <code>table.exclusionAuditReport</code>) for reproducible audit trails without touching hot numerical loops.</li>
+</ol>
+<hr>
+<h2 id="undo-and-checkpoints" tabindex="-1">Session Undo/Redo &amp; Named Checkpoints</h2>
+<h3 id="undo-redo" tabindex="-1">Bounded Session Undo/Redo</h3>
+<p>Every mutating engine command executes inside <code>Session</code> (<code>crates/engine/src/lib.rs</code>) as an atomic undoable step (<code>edit.undo</code>, <code>edit.redo</code>), subject to three simultaneous memory-safety caps:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Undo Bound</th><th>Value</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>MAX_UNDO_ENTRIES</code></td><td><code>64</code></td><td>Maximum undo steps retained in memory per open session</td></tr>
+<tr><td><code>MAX_UNDO_CELL_BUDGET</code></td><td><code>25,000,000</code></td><td>Cumulative table cell count cap across retained undo snapshots</td></tr>
+<tr><td><code>MAX_UNDO_CHECKPOINT_BYTES_BUDGET</code></td><td><code>16,777,216</code> (<code>16 MiB</code>)</td><td>Byte budget for full serialized snapshots in the undo stack</td></tr>
+</tbody>
+</table></div>
+<p>Undo/redo history lives only in the active session and is intentionally not written inside <code>.curvebook</code> archives. Crash resilience between saves is handled separately by the <a href="files.html#crash-recovery">WAL <code>CrashRecoveryJournal</code></a>.</p>
+<h3 id="named-checkpoints" tabindex="-1">Named In-File Checkpoints (<code>NamedCheckpoint</code>)</h3>
+<p>For persistent milestone snapshots across sessions, <code>ProjectDocument</code> supports named in-file checkpoints (<code>project.createCheckpoint</code>, <code>project.listCheckpoints</code>, <code>project.restoreCheckpoint</code>, <code>project.deleteCheckpoint</code>, up to <code>32</code> created per project via <code>project.createCheckpoint</code>, with <code>crates/format</code> permitting up to <code>64</code> on archive validation). Each <code>NamedCheckpoint</code> stores an <code>id</code>, human-readable <code>name</code>, optional <code>note</code>, UTC timestamp, and a complete validated JSON snapshot of the project at creation time (subject to <code>MAX_ARCHIVE_FILE_BYTES = 128 MiB</code> on restore). Restoring a checkpoint creates a single undoable action in the live session.</p>
+<hr>
+<h2 id="number-and-pvalue-formatting" tabindex="-1">Number Formatting &amp; <em>P</em>-Value Conventions</h2>
+<ul>
+<li><strong>Data &amp; Tick Formatting (<code>LocaleNumberPolicy</code>, <code>AxisTickFormat</code>, <code>TickLabelFormat</code>):</strong> Graphs and tables separate stored IEEE-754 <code>f64</code> precision from display formatting. <code>LocaleNumberPolicy</code> controls decimal separators (<code>.</code> vs <code>,</code>) and thousands grouping, while numeric axis ticks (<code>AxisTickFormat</code>) support <code>Decimal</code>, <code>PowerOfTenSuperscript</code>, <code>ScientificE</code>, <code>Antilog</code>, and <code>EngineeringSi</code> (with <code>TickLabelFormat</code> adding <code>Categorical(CategoricalTickSource)</code>) without rounding underlying computed data.</li>
+<li><strong><em>P</em>-Value Display (<code>PValueFormat</code>):</strong> Stored per <code>AnalysisSpec</code> (<code>curvebook-math</code>):
+<ul>
+<li>Exact numeric formats: <code>FourDecimal</code> (default, floor <code>&lt; 0.0001</code>, up to <code>****</code>), <code>Apa</code> (<code>.123</code>, floor <code>&lt; .001</code>, up to <code>***</code>), <code>Nejm</code> (<code>0.123</code>, floor <code>&lt; 0.001</code>, up to <code>***</code>), and <code>Custom { decimals, scientific_below }</code> (<code>decimals</code> in <code>1..=15</code> with optional positive scientific-notation cutoff).</li>
+<li>Formatting affects presentation only; multiplicity procedures and hypothesis decisions operate on full unrounded IEEE-754 probabilities.</li>
+</ul>
+</li>
+</ul>
+<hr>
+<h2 id="persisted-analysis-settings" tabindex="-1">Persisted Analysis Settings (<code>AnalysisSpec</code>)</h2>
+<p>Every <code>ResultSheet</code> embeds the complete <code>AnalysisSpec</code> that generated it, recording:</p>
+<ul>
+<li><code>id</code>, <code>title</code>, and <code>source_sheet_id</code></li>
+<li><code>kind: AnalysisKind</code> and its method-specific option struct (test selection, tails, pairing, sphericity/REML df method, multiplicity procedure, weighting scheme, fit method, parameter rules, or power targets)</li>
+<li><code>selected_data_sets: Vec&lt;usize&gt;</code> (empty selects all compatible columns/datasets)</li>
+<li><code>confidence_level: ConfidenceLevel</code> (continuous percentage <code>(0, 100)</code>, defaulting to <code>95%</code>)</li>
+<li><code>p_value_format: PValueFormat</code></li>
+</ul>
+<p>Because <code>AnalysisSpec</code> travels inside both <code>.curvebook</code> / <code>.curvebook.d/</code> projects and <code>.cbtemplate</code> reusable templates, re-running (<code>analysis.run</code>), modifying parameters (<code>analysis.updateParams</code>), or retargeting to new experimental data (<code>analysis.retargetData</code>) preserves every statistical choice deterministically. See <a href="registry/commands.html">Command Reference</a>, <a href="automation/mcp.html">Automation: MCP</a>, and <a href="automation/cli.html">Automation: CLI</a> for programmatic parameter schemas.</p>
+        <nav class="pager" aria-label="Previous and next pages">
+          <a href="section-concepts.html">← Concepts</a>
+          <a href="section-tables.html">Data tables &amp; formulas →</a>
+        </nav>
+      </article>
+    </main>
+    <footer class="site-footer">
+      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>
+      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
+      <p class="privacy">CurveBook runs locally and collects no telemetry. Read <a href="../../privacy.html">Privacy, Licences &amp; Security</a> · <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a></p>
+    </footer>
+    <div class="window-statusbar" aria-label="Application summary">
+      <span class="status-cell is-grow">Ready · Offline Desktop · CLI · Local MCP</span>
+      <span class="status-cell">Pure Rust</span>
+      <span class="status-cell">Zero Telemetry</span>
+      <span class="status-cell">MIT / Apache-2.0</span>
+    </div>
+  </div>
+</body>
+</html>

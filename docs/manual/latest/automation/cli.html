@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Headless runner subcommands, schema-typed direct command flags, exit codes, and PDF/format flags.">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'">
+  <meta name="color-scheme" content="light">
+  <title>CLI Reference (curvebook-cli) — CurveBook Documentation</title>
+  <link rel="canonical" href="https://hausergroup.github.io/curvebook/manual/latest/automation/cli.html">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="CurveBook">
+  <meta property="og:title" content="CLI Reference (curvebook-cli) — CurveBook Documentation">
+  <meta property="og:description" content="Headless runner subcommands, schema-typed direct command flags, exit codes, and PDF/format flags.">
+  <meta property="og:url" content="https://hausergroup.github.io/curvebook/manual/latest/automation/cli.html">
+  <meta property="og:image" content="https://hausergroup.github.io/curvebook/images/workspace-split-fit.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" type="image/png" href="../../../images/curvebook.png">
+  <link rel="stylesheet" href="../../../site.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="desktop-window wrap">
+    <header class="site-header">
+      <div class="title-bar">
+        <div class="wordmark">
+          <img src="../../../images/curvebook.png" width="64" height="64" alt="">
+          <span>CurveBook · Reference Manual</span>
+        </div>
+        <span class="window-status">Automation</span>
+      </div>
+      <nav aria-label="Manual navigation">
+        <a href="../index.html">Manual Home</a>
+        <a href="../section-get-started.html">Get Started</a>
+        <a href="../section-analyses.html">Reference</a>
+        <a href="../section-automation.html" aria-current="page">Automation</a>
+        <a href="../registry/commands.html">Commands &amp; Tools</a>
+        <a href="../az-index.html">A–Z Index</a>
+        <a href="../section-contribute.html">Contribute</a>
+        <a href="../../../index.html">Product Home</a>
+        <a href="../../../privacy.html">Privacy Policy</a>
+      </nav>
+    </header>
+    <div class="version-banner" role="note" aria-label="Documentation version">
+      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-24 (commit <code>0acc0a8468</code>)</span>
+      <span>No scripts · No telemetry · <a href="../az-index.html">A–Z Index</a></span>
+    </div>
+    <main id="main" tabindex="-1">
+      <article class="overview doc-body">
+        <nav class="breadcrumbs" aria-label="Breadcrumb">
+          <a href="../index.html">Manual</a>
+          <span aria-hidden="true">/</span>
+          <a href="../section-automation.html">Automation</a>
+          <span aria-hidden="true">/</span>
+          <span aria-current="page">CLI Reference (curvebook-cli)</span>
+        </nav>
+        <nav class="toc" aria-label="On this page">
+          <p class="toc-title">On this page</p>
+          <ul>
+            <li><a href="#global-syntax-and-options">Global Syntax and Options</a></li>
+            <li><a href="#subcommands-summary">Subcommands Summary</a></li>
+            <li><a href="#direct-command-flag-mapping">Direct Command Flag Mapping</a></li>
+            <li><a href="#exit-codes">Exit Codes and Structured JSON Errors</a></li>
+            <li><a href="#format-and-pdf-options">Format and PDF Options</a></li>
+          </ul>
+        </nav>
+<h1 id="cli-reference-curvebook-cli" tabindex="-1">CLI Reference (<code>curvebook-cli</code>)</h1>
+<p><code>curvebook-cli</code> is the headless command-line runner and stdio MCP entry point for CurveBook. Command names, usage lines, flags, defaults, and exit codes in the <a href="../registry/cli.html">CLI Reference Registry</a> and in <code>curvebook-cli --help</code> are generated from the same typed Rust catalog (<code>cli_catalog.rs</code>).</p>
+<h2 id="global-syntax-and-options" tabindex="-1">Global Syntax and Options</h2>
+<p>Single-call top-level invocation forms:</p>
+<pre><code class="language-sh">curvebook-cli &lt;command&gt; [args]
+curvebook-cli &lt;command-id&gt; [--in &lt;file&gt;] [--out &lt;file&gt;] [--workdir &lt;dir&gt;] [--json] [--&lt;param&gt; &lt;val&gt; ...]
+curvebook-cli --help
+curvebook-cli --version</code></pre>
+<ul>
+<li><code>-h</code>, <code>--help</code>, <code>help [subcommand]</code>: Print the command catalog or subcommand flag help and exit with <code>0</code>.</li>
+<li><code>-V</code>, <code>--version</code>, <code>version</code>: Print the <code>curvebook-cli</code> package version and exit with <code>0</code>.</li>
+</ul>
+<h2 id="subcommands-summary" tabindex="-1">Subcommands Summary</h2>
+<p>Every built-in subcommand accepts <code>-h</code> / <code>--help</code> and follows deterministic single-call flag syntax:</p>
+<ul>
+<li><code>info &lt;file&gt; [--json]</code> — Inspect tables, info sheets, analyses, graphs, and layouts in an archive or project file.</li>
+<li><code>commands [--group &lt;group&gt;] [--json]</code> — List registered engine commands with schemas, effects, and shortcuts (see the <a href="../registry/commands.html">Engine Command Registry</a>).</li>
+<li><code>&lt;command-id&gt; [--in &lt;file&gt;] [--out &lt;file&gt;] [--workdir &lt;dir&gt;] [--json] [--&lt;param&gt; &lt;val&gt; ...]</code> — Invoke any registered engine command directly with schema-typed flags (<code>--no-&lt;param&gt;</code> negates booleans).</li>
+<li><code>run &lt;script&gt; [--workdir &lt;dir&gt;] [--json]</code> — Execute an NDJSON or JSON-array command stream headlessly (<code>-</code> reads <code>stdin</code>).</li>
+<li><code>batch &lt;manifest&gt; [--workdir &lt;dir&gt;] [--json]</code> — Execute a <code>curvebook.batch.v1</code> manifest headlessly (see <a href="../automation/control-and-batch.html#batch-manifest">Control Protocol &amp; Batch Reference</a>).</li>
+<li><code>convert &lt;in&gt; &lt;out&gt; [--format &lt;fmt&gt;] [--sheet &lt;id&gt;] [--dpi &lt;u16&gt;] [--pdf-version &lt;1.4|1.7&gt;] [--ttf-font &lt;path&gt;] [--json]</code> — Convert archives, <code>.curvebook.d/</code> unpacked directories, templates, or interchange data files, or export tables and figures.</li>
+<li><code>export &lt;in&gt; (&lt;out&gt; | --out &lt;out&gt;) [--format &lt;fmt&gt;] [--sheet &lt;id&gt;] [--dpi &lt;u16&gt;] [--pdf-version &lt;1.4|1.7&gt;] [--ttf-font &lt;path&gt;] [--json]</code> — Export a specific table, graph, layout, or project to SVG, PDF, EMF, PNG, TIFF, CSV, TSV, JSON, <code>.curvebook</code>, or <code>.curvebook.d</code>.</li>
+<li><code>bench &lt;file&gt; [--json]</code> — Measure parse, recalculation, scene compilation, and export timings on a project file.</li>
+<li><code>perf [--json] [--require-release]</code> — Run synthetic performance budget checks.</li>
+<li><code>mcp [--control-port &lt;port&gt;] [--gui-only] [--workdir &lt;dir&gt;] [--control-token &lt;token&gt;]</code> — Start the stdio <a href="../automation/mcp.html">MCP Server</a>.</li>
+</ul>
+<p>Full argument, flag, default value, and option descriptions for every subcommand live in the generated <a href="../registry/cli.html">CLI Reference Registry</a>.</p>
+<h2 id="direct-command-flag-mapping" tabindex="-1">Direct Command Flag Mapping</h2>
+<p>When invoking an engine command ID directly on the command line (for example <code>curvebook-cli sheet.createData --in proj.curvebook --out proj.curvebook --kind xy</code>), CLI flags are validated against the command&#39;s JSON parameter schema:</p>
+<ul>
+<li>String, integer, float, and array parameters accept <code>--&lt;param&gt; &lt;value&gt;</code> or <code>--&lt;param&gt;=&lt;value&gt;</code> (JSON arrays/objects are parsed when the schema expects structured fields).</li>
+<li>Boolean parameters accept <code>--&lt;param&gt;</code> (sets <code>true</code>), <code>--&lt;param&gt;=true|false</code>, or <code>--no-&lt;param&gt;</code> (sets <code>false</code>).</li>
+<li>Unknown parameters, wrong types, or <code>--workdir</code> path escapes fail immediately before mutation with exit code <code>2</code>.</li>
+</ul>
+<h2 id="exit-codes" tabindex="-1">Exit Codes and Structured JSON Errors</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Code</th><th>Constant</th><th>Condition</th></tr></thead>
+<tbody>
+<tr><td><code>0</code></td><td><code>EXIT_OK</code></td><td>Command completed cleanly.</td></tr>
+<tr><td><code>1</code></td><td><code>EXIT_RUNTIME</code></td><td>I/O error, archive/format error, solver/math failure, or engine runtime error.</td></tr>
+<tr><td><code>2</code></td><td><code>EXIT_USAGE_OR_POLICY</code></td><td>Invalid CLI syntax, unknown flag/command, malformed batch schema, or <code>--workdir</code> containment violation.</td></tr>
+<tr><td><code>130</code></td><td><code>EXIT_INTERRUPTED</code></td><td>Cancelled or interrupted (<code>SIGINT</code> / <code>ErrorCode::Cancelled</code>).</td></tr>
+</tbody>
+</table></div>
+<p>Passing <code>--json</code> before <code>--</code> guarantees that failures write a structured JSON <code>CliErrorEnvelope</code> (<code>{&quot;error&quot;:{&quot;code&quot;,&quot;category&quot;,&quot;message&quot;,&quot;retryable&quot;,&quot;remediation&quot;,&quot;details&quot;}}</code>) to standard output rather than plain text on standard error.</p>
+<h2 id="format-and-pdf-options" tabindex="-1">Format and PDF Options</h2>
+<p>For interchange format descriptors and accepted file extensions (<code>.curvebook</code>, <code>.curvebook.d</code>, <code>.cbtemplate</code>, <code>.pzfx</code>, <code>.prism</code>, <code>.csv</code>, <code>.tsv</code>, <code>.svg</code>, <code>.pdf</code>, <code>.emf</code>, <code>.png</code>, <code>.tiff</code>, <code>.json</code>), see the <a href="../registry/formats.html">Formats &amp; Schemas Registry</a> and <a href="../files.html">Files, Import &amp; Export</a>. PDF export defaults to version <code>1.7</code> (<code>--pdf-version 1.4|1.7</code>) and accepts <code>--ttf-font &lt;path&gt;</code> for TrueType subset embedding.</p>
+        <nav class="pager" aria-label="Previous and next pages">
+          <a href="../automation/mcp.html">← MCP Server Reference</a>
+          <a href="../automation/control-and-batch.html">Control Protocol, Batch Format &amp; Errors →</a>
+        </nav>
+      </article>
+    </main>
+    <footer class="site-footer">
+      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>
+      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
+      <p class="privacy">CurveBook runs locally and collects no telemetry. Read <a href="../../../privacy.html">Privacy, Licences &amp; Security</a> · <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a></p>
+    </footer>
+    <div class="window-statusbar" aria-label="Application summary">
+      <span class="status-cell is-grow">Ready · Offline Desktop · CLI · Local MCP</span>
+      <span class="status-cell">Pure Rust</span>
+      <span class="status-cell">Zero Telemetry</span>
+      <span class="status-cell">MIT / Apache-2.0</span>
+    </div>
+  </div>
+</body>
+</html>

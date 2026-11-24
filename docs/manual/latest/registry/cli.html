@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Generated subcommand usage, flags, defaults, and exit codes for curvebook-cli.">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'">
+  <meta name="color-scheme" content="light">
+  <title>CLI Subcommands &amp; Flags Registry — CurveBook Documentation</title>
+  <link rel="canonical" href="https://hausergroup.github.io/curvebook/manual/latest/registry/cli.html">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="CurveBook">
+  <meta property="og:title" content="CLI Subcommands &amp; Flags Registry — CurveBook Documentation">
+  <meta property="og:description" content="Generated subcommand usage, flags, defaults, and exit codes for curvebook-cli.">
+  <meta property="og:url" content="https://hausergroup.github.io/curvebook/manual/latest/registry/cli.html">
+  <meta property="og:image" content="https://hausergroup.github.io/curvebook/images/workspace-split-fit.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" type="image/png" href="../../../images/curvebook.png">
+  <link rel="stylesheet" href="../../../site.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="desktop-window wrap">
+    <header class="site-header">
+      <div class="title-bar">
+        <div class="wordmark">
+          <img src="../../../images/curvebook.png" width="64" height="64" alt="">
+          <span>CurveBook · Reference Manual</span>
+        </div>
+        <span class="window-status">Automation</span>
+      </div>
+      <nav aria-label="Manual navigation">
+        <a href="../index.html">Manual Home</a>
+        <a href="../section-get-started.html">Get Started</a>
+        <a href="../section-analyses.html">Reference</a>
+        <a href="../section-automation.html" aria-current="page">Automation</a>
+        <a href="../registry/commands.html">Commands &amp; Tools</a>
+        <a href="../az-index.html">A–Z Index</a>
+        <a href="../section-contribute.html">Contribute</a>
+        <a href="../../../index.html">Product Home</a>
+        <a href="../../../privacy.html">Privacy Policy</a>
+      </nav>
+    </header>
+    <div class="version-banner" role="note" aria-label="Documentation version">
+      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-24 (commit <code>0acc0a8468</code>)</span>
+      <span>No scripts · No telemetry · <a href="../az-index.html">A–Z Index</a></span>
+    </div>
+    <main id="main" tabindex="-1">
+      <article class="overview doc-body">
+        <nav class="breadcrumbs" aria-label="Breadcrumb">
+          <a href="../index.html">Manual</a>
+          <span aria-hidden="true">/</span>
+          <a href="../section-automation.html">Automation</a>
+          <span aria-hidden="true">/</span>
+          <span aria-current="page">CLI Subcommands &amp; Flags Registry</span>
+        </nav>
+        <h1 id="page-title" tabindex="-1">CLI Subcommands &amp; Flags Registry</h1>
+        <nav class="toc" aria-label="On this page">
+          <p class="toc-title">On this page</p>
+          <ul>
+            <li><a href="#cli-global-flags">Global Options</a></li>
+            <li><a href="#cli-subcommands">Subcommands</a></li>
+            <li><a href="#cli-exit-codes">Exit Codes</a></li>
+          </ul>
+        </nav>
+<p class="lead">Typed command and flag catalog shared between <code>curvebook-cli --help</code> and this manual page (<strong>10</strong> subcommands, <strong>4</strong> exit codes).</p>
+<p>See <a href="../automation/cli.html">CLI Reference</a> for direct command flag mapping rules and error envelopes.</p>
+<h2 id="cli-global-flags" tabindex="-1">Global Options</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Flags</th><th>Default</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td><code>-V, --version</code></td><td>—</td><td>print version and exit</td></tr>
+<tr><td><code>-h, --help</code></td><td>—</td><td>print this help message and exit</td></tr>
+</tbody>
+</table></div>
+<h2 id="cli-subcommands" tabindex="-1">Subcommands</h2>
+<div class="entry-card" id="cli-info" tabindex="-1">
+  <h3><code>info</code></h3>
+  <p>inspect tables, info sheets, analyses, graphs, layouts, or .xlsx workbook tabs</p>
+  <pre><code class="language-sh">curvebook-cli info &lt;file&gt; [--list-sheets] [--json]</code></pre>
+<div class="table-wrap"><table>
+<thead><tr><th>Argument</th><th>Required</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td><code>&lt;file&gt;</code></td><td>required</td><td>Input <code>.curvebook</code>, <code>.curvebook.d/</code>, <code>.cbtemplate</code>, <code>.prism</code>, <code>.pzfx</code>, <code>.xlsx</code>, <code>.csv</code>, <code>.tsv</code>, or project <code>.json</code> path.</td></tr>
+</tbody>
+</table></div>
+<div class="table-wrap"><table>
+<thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td><code>--list-sheets</code></td><td>false</td><td>Enumerate worksheet tab names and indices in an <code>.xlsx</code> workbook.</td></tr>
+<tr><td><code>--json</code></td><td>false</td><td>Emit structured JSON output (and structured JSON errors on failure).</td></tr>
+</tbody>
+</table></div>
+</div>
+<div class="entry-card" id="cli-commands" tabindex="-1">
+  <h3><code>commands</code></h3>
+  <p>list registered engine commands with schemas, effects and shortcuts</p>
+  <pre><code class="language-sh">curvebook-cli commands [--group &lt;group&gt;] [--json]</code></pre>
+<div class="table-wrap"><table>
+<thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td><code>--group &lt;group&gt;</code></td><td>all groups</td><td>Filter by <code>CommandGroup</code> (<code>project</code>, <code>edit</code>, <code>sheet</code>, <code>table</code>, <code>info</code>, <code>analysis</code>, <code>graph</code>, <code>layout</code>, <code>export</code>).</td></tr>
+<tr><td><code>--json</code></td><td>false</td><td>Emit structured JSON output (and structured JSON errors on failure).</td></tr>
+</tbody>
+</table></div>
+</div>
+<div class="entry-card" id="cli-direct-command" tabindex="-1">
+  <h3><code>direct-command</code></h3>
+  <p>execute a registered engine command directly with schema-typed flags</p>
+  <pre><code class="language-sh">curvebook-cli &lt;command-id&gt; [--in &lt;file&gt;] [--out &lt;file&gt;] [--workdir &lt;dir&gt;] [--json] [--&lt;param&gt; &lt;val&gt; ...]</code></pre>
+<div class="table-wrap"><table>
+<thead><tr><th>Argument</th><th>Required</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td><code>&lt;command-id&gt;</code></td><td>required</td><td>Registered engine command identifier (for example <code>sheet.createData</code>, <code>stats.run</code>, <code>fit.run</code>).</td></tr>
+</tbody>
+</table></div>
+<div class="table-wrap"><table>
+<thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td><code>--in &lt;file&gt;</code></td><td>fresh empty session</td><td>Load an existing project or interchange file before executing the command.</td></tr>
+<tr><td><code>--out &lt;file&gt;</code></td><td>none (in-memory only)</td><td>Write the resulting project or sheet export to <code>&lt;file&gt;</code> after execution.</td></tr>
+<tr><td><code>--workdir &lt;dir&gt;</code></td><td>unconstrained (current working directory)</td><td>Confine all file reads, saves, exports, and external CSV/TSV links strictly within <code>&lt;dir&gt;</code>.</td></tr>
+<tr><td><code>--json</code></td><td>false</td><td>Emit structured JSON output (and structured JSON errors on failure).</td></tr>
+<tr><td><code>--&lt;param&gt; &lt;val&gt;</code></td><td>per-command schema default</td><td>Schema-typed command parameter flag (<code>--no-&lt;param&gt;</code> negates boolean parameters).</td></tr>
+</tbody>
+</table></div>
+</div>
+<div class="entry-card" id="cli-run" tabindex="-1">
+  <h3><code>run</code></h3>
+  <p>execute a JSON-lines command stream headlessly</p>
+  <pre><code class="language-sh">curvebook-cli run &lt;script&gt; [--workdir &lt;dir&gt;] [--json]</code></pre>
+<div class="table-wrap"><table>
+<thead><tr><th>Argument</th><th>Required</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td><code>&lt;script&gt;</code></td><td>required</td><td>Path to an NDJSON or JSON-array command script file, or <code>-</code> to read from <code>stdin</code>.</td></tr>
+</tbody>
+</table></div>
+<div class="table-wrap"><table>
+<thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td><code>--workdir &lt;dir&gt;</code></td><td>unconstrained (current working directory)</td><td>Confine all file reads, saves, exports, and external CSV/TSV links strictly within <code>&lt;dir&gt;</code>.</td></tr>
+<tr><td><code>--json</code></td><td>false</td><td>Emit structured JSON output (and structured JSON errors on failure).</td></tr>
+</tbody>
+</table></div>
+</div>
+<div class="entry-card" id="cli-batch" tabindex="-1">
+  <h3><code>batch</code></h3>
+  <p>execute a <code>curvebook.batch.v1</code> JSON manifest headlessly</p>
+  <pre><code class="language-sh">curvebook-cli batch &lt;manifest&gt; [--workdir &lt;dir&gt;] [--json]</code></pre>
+<div class="table-wrap"><table>
+<thead><tr><th>Argument</th><th>Required</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td><code>&lt;manifest&gt;</code></td><td>required</td><td>Path to a <code>curvebook.batch.v1</code> JSON manifest file, or <code>-</code> to read from <code>stdin</code>.</td></tr>
+</tbody>
+</table></div>
+<div class="table-wrap"><table>
+<thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td><code>--workdir &lt;dir&gt;</code></td><td>unconstrained (current working directory)</td><td>Confine all file reads, saves, exports, and external CSV/TSV links strictly within <code>&lt;dir&gt;</code>.</td></tr>
+<tr><td><code>--json</code></td><td>false</td><td>Emit structured JSON output (and structured JSON errors on failure).</td></tr>
+</tbody>
+</table></div>
+</div>
+<div class="entry-card" id="cli-convert" tabindex="-1">
+  <h3><code>convert</code></h3>
+  <p>convert archives/unpacked <code>.curvebook.d</code> dirs or export tables and figures (curvebook, curvebook.d, svg, pdf, emf, png, tiff, csv, tsv, json)</p>
+  <pre><code class="language-sh">curvebook-cli convert &lt;in&gt; &lt;out&gt; [--format &lt;fmt&gt;] [--sheet &lt;id&gt;] [--dpi &lt;u16&gt;] [--pdf-version &lt;1.4|1.7&gt;] [--ttf-font &lt;path&gt;] [--json]</code></pre>
+<div class="table-wrap"><table>
+<thead><tr><th>Argument</th><th>Required</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td><code>&lt;in&gt;</code></td><td>required</td><td>Input project archive, <code>.curvebook.d/</code>, template, or data file.</td></tr>
+<tr><td><code>&lt;out&gt;</code></td><td>optional</td><td>Output path (may instead be passed via <code>--out</code> / <code>-o</code>).</td></tr>
+</tbody>
+</table></div>
+<div class="table-wrap"><table>
+<thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td><code>-o, --out &lt;out&gt;</code></td><td>positional <code>&lt;out&gt;</code></td><td>Explicit output file or <code>.curvebook.d</code> directory path.</td></tr>
+<tr><td><code>--format &lt;fmt&gt;</code></td><td>inferred from <code>&lt;out&gt;</code> extension</td><td>Explicit target format (<code>curvebook</code>, <code>curvebook.d</code>, <code>svg</code>, <code>pdf</code>, <code>emf</code>, <code>png</code>, <code>tiff</code>, <code>csv</code>, <code>tsv</code>, <code>json</code>).</td></tr>
+<tr><td><code>--sheet &lt;id&gt;</code></td><td>first matching sheet</td><td>Target sheet ID or title to export.</td></tr>
+<tr><td><code>--xlsx-sheets &lt;names&gt;</code></td><td>all visible sheets</td><td>Comma-separated <code>.xlsx</code> worksheet names to import from an input workbook.</td></tr>
+<tr><td><code>--dpi &lt;u16&gt;</code></td><td>300</td><td>Rasterization resolution in dots per inch for <code>png</code> and <code>tiff</code> exports (18..=2400).</td></tr>
+<tr><td><code>--pdf-version &lt;1.4|1.7&gt;</code></td><td>1.7</td><td>PDF specification level for <code>pdf</code> exports (<code>1.4</code> or <code>1.7</code>).</td></tr>
+<tr><td><code>--ttf-font &lt;path&gt;</code></td><td>none</td><td>Optional TrueType <code>.ttf</code> font file embedded as <code>/FontFile2</code> in <code>pdf</code> exports.</td></tr>
+<tr><td><code>--json</code></td><td>false</td><td>Emit structured JSON output (and structured JSON errors on failure).</td></tr>
+</tbody>
+</table></div>
+</div>
+<div class="entry-card" id="cli-export" tabindex="-1">
+  <h3><code>export</code></h3>
+  <p>export a table, graph, layout, or project to svg, pdf, emf, png, tiff, csv, tsv, json, or .curvebook/.curvebook.d</p>
+  <pre><code class="language-sh">curvebook-cli export &lt;in&gt; (&lt;out&gt; | --out &lt;out&gt;) [--format &lt;fmt&gt;] [--sheet &lt;id&gt;] [--dpi &lt;u16&gt;] [--pdf-version &lt;1.4|1.7&gt;] [--ttf-font &lt;path&gt;] [--json]</code></pre>
+<div class="table-wrap"><table>
+<thead><tr><th>Argument</th><th>Required</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td><code>&lt;in&gt;</code></td><td>required</td><td>Input project archive, <code>.curvebook.d/</code>, template, or data file.</td></tr>
+<tr><td><code>&lt;out&gt;</code></td><td>optional</td><td>Output path (or supply <code>--out &lt;out&gt;</code> / <code>-o &lt;out&gt;</code>).</td></tr>
+</tbody>
+</table></div>
+<div class="table-wrap"><table>
+<thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td><code>-o, --out &lt;out&gt;</code></td><td>positional <code>&lt;out&gt;</code></td><td>Explicit output file or <code>.curvebook.d</code> directory path.</td></tr>
+<tr><td><code>--format &lt;fmt&gt;</code></td><td>inferred from <code>&lt;out&gt;</code> extension</td><td>Explicit target format (<code>curvebook</code>, <code>curvebook.d</code>, <code>svg</code>, <code>pdf</code>, <code>emf</code>, <code>png</code>, <code>tiff</code>, <code>csv</code>, <code>tsv</code>, <code>json</code>).</td></tr>
+<tr><td><code>--sheet &lt;id&gt;</code></td><td>first matching sheet</td><td>Target sheet ID or title to export.</td></tr>
+<tr><td><code>--xlsx-sheets &lt;names&gt;</code></td><td>all visible sheets</td><td>Comma-separated <code>.xlsx</code> worksheet names to import from an input workbook.</td></tr>
+<tr><td><code>--dpi &lt;u16&gt;</code></td><td>300</td><td>Rasterization resolution in dots per inch for <code>png</code> and <code>tiff</code> exports (18..=2400).</td></tr>
+<tr><td><code>--pdf-version &lt;1.4|1.7&gt;</code></td><td>1.7</td><td>PDF specification level for <code>pdf</code> exports (<code>1.4</code> or <code>1.7</code>).</td></tr>
+<tr><td><code>--ttf-font &lt;path&gt;</code></td><td>none</td><td>Optional TrueType <code>.ttf</code> font file embedded as <code>/FontFile2</code> in <code>pdf</code> exports.</td></tr>
+<tr><td><code>--json</code></td><td>false</td><td>Emit structured JSON output (and structured JSON errors on failure).</td></tr>
+</tbody>
+</table></div>
+</div>
+<div class="entry-card" id="cli-bench" tabindex="-1">
+  <h3><code>bench</code></h3>
+  <p>measure parse, recalculation, compilation and export timings</p>
+  <pre><code class="language-sh">curvebook-cli bench &lt;file&gt; [--json]</code></pre>
+<div class="table-wrap"><table>
+<thead><tr><th>Argument</th><th>Required</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td><code>&lt;file&gt;</code></td><td>required</td><td>Project file to benchmark.</td></tr>
+</tbody>
+</table></div>
+<div class="table-wrap"><table>
+<thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td><code>--json</code></td><td>false</td><td>Emit structured JSON output (and structured JSON errors on failure).</td></tr>
+</tbody>
+</table></div>
+</div>
+<div class="entry-card" id="cli-perf" tabindex="-1">
+  <h3><code>perf</code></h3>
+  <p>run synthetic G12 performance checks</p>
+  <pre><code class="language-sh">curvebook-cli perf [--json] [--require-release]</code></pre>
+<div class="table-wrap"><table>
+<thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td><code>--json</code></td><td>false</td><td>Emit structured JSON output (and structured JSON errors on failure).</td></tr>
+<tr><td><code>--require-release</code></td><td>false</td><td>Fail immediately unless <code>curvebook-cli</code> was compiled in <code>--release</code> mode.</td></tr>
+</tbody>
+</table></div>
+</div>
+<div class="entry-card" id="cli-mcp" tabindex="-1">
+  <h3><code>mcp</code></h3>
+  <p>run the Model Context Protocol (MCP) server over stdio (<code>--workdir</code> and <code>--control-port</code> are mutually exclusive)</p>
+  <pre><code class="language-sh">curvebook-cli mcp [--control-port &lt;port&gt;] [--gui-only] [--workdir &lt;dir&gt;] [--control-token &lt;token&gt;]</code></pre>
+<div class="table-wrap"><table>
+<thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td><code>--control-port &lt;port&gt;</code></td><td>CURVEBOOK_CONTROL_PORT env or headless</td><td>Attach over loopback <code>127.0.0.1:&lt;port&gt;</code> to a running <code>curvebook --control &lt;port&gt;</code> window (<code>1..=65535</code>; mutually exclusive with <code>--workdir</code>).</td></tr>
+<tr><td><code>--gui-only</code></td><td>false</td><td>Expose strictly the human-equivalent <code>gui</code> MCP tools (<code>GuiOnlyPolicy::Strict</code>).</td></tr>
+<tr><td><code>--workdir &lt;dir&gt;</code></td><td>unconfined</td><td>Confine all MCP file/command paths strictly within directory <code>&lt;dir&gt;</code> (mutually exclusive with <code>--control-port</code>, which attaches to an external desktop host).</td></tr>
+<tr><td><code>--control-token &lt;token&gt;</code></td><td>CURVEBOOK_CONTROL_TOKEN env or control-&lt;port&gt;.token</td><td>Bearer token used to authenticate against a <code>--control</code> desktop listener.</td></tr>
+</tbody>
+</table></div>
+</div>
+<h2 id="cli-exit-codes" tabindex="-1">Exit Codes</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Code</th><th>Constant</th><th>Condition</th></tr></thead>
+<tbody>
+<tr><td><code>0</code></td><td><code>EXIT_OK</code></td><td>Command completed cleanly.</td></tr>
+<tr><td><code>1</code></td><td><code>EXIT_RUNTIME</code></td><td>Runtime, filesystem I/O, archive/format, solver, rendering, or engine execution error.</td></tr>
+<tr><td><code>2</code></td><td><code>EXIT_USAGE_OR_POLICY</code></td><td>Invalid CLI syntax, unknown flag/command, malformed batch/script schema, or <code>--workdir</code> path containment violation.</td></tr>
+<tr><td><code>130</code></td><td><code>EXIT_INTERRUPTED</code></td><td>Operation cancelled or interrupted (<code>SIGINT</code> / <code>ErrorCode::Cancelled</code>).</td></tr>
+</tbody>
+</table></div>
+        <nav class="pager" aria-label="Previous and next pages">
+          <a href="../registry/mcp-tools.html">← MCP Tools, Toolsets, Resources &amp; Prompts</a>
+          <a href="../section-settings.html">Settings &amp; languages →</a>
+        </nav>
+      </article>
+    </main>
+    <footer class="site-footer">
+      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>
+      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
+      <p class="privacy">CurveBook runs locally and collects no telemetry. Read <a href="../../../privacy.html">Privacy, Licences &amp; Security</a> · <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a></p>
+    </footer>
+    <div class="window-statusbar" aria-label="Application summary">
+      <span class="status-cell is-grow">Ready · Offline Desktop · CLI · Local MCP</span>
+      <span class="status-cell">Pure Rust</span>
+      <span class="status-cell">Zero Telemetry</span>
+      <span class="status-cell">MIT / Apache-2.0</span>
+    </div>
+  </div>
+</body>
+</html>
