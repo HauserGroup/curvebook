@@ -79,11 +79,15 @@ All import and export adapters register through `FormatRegistry` (`crates/format
   - `.csv` / `.tsv` / delimited text (`table.importCsv`, `table.paste`)
   - `.pzfx` XML files (`table.importPzfx`, parsing tables, subcolumn modes, row/column titles, `Excluded="1"` masks, and Info constants strictly at the format boundary)
   - `.prism` ZIP containers (`table.importPrism`, bounded ZIP reader extracting tabular CSVs, optional table/info metadata JSON, or embedded XML tables while emitting non-fatal `ImportWarning` entries for unrecognized binary or script chunks)
+  - `.xlsx` workbooks (`table.importXlsx`, bounded OOXML spreadsheet reader importing worksheet tables while emitting non-fatal `ImportWarning` entries for skipped archive parts or unsupported elements)
+- **Import Warnings & Replace-or-Merge Behavior:**
+  - Non-fatal `ImportWarning` entries produced by `.pzfx`, `.prism`, and `.xlsx` imports (e.g., skipped archive parts) are surfaced in the desktop **Import Warnings** panel (reopenable from the status bar or **File › Import › Import Warnings…**) and exposed via `ui.inspect`.
+  - When importing `.prism`, `.pzfx`, or `.xlsx` into an open project that has unsaved changes or existing sheets, CurveBook prompts before replacing the workspace, offering **Add to current project** (`merge: true`) alongside **Open as new project** (`merge: false`).
 - **Supported Exports:**
   - `.curvebook`, `.curvebook.d/`, `.cbtemplate`
-  - Table CSV (`export_datasheet_to_csv`), Result sheet single-tab or tidy CSV (`analysis.exportCsv`), Result sheet structured JSON (`analysis.exportJson`)
+  - Table delimited export (`table.exportCsv` / `export_datasheet_to_csv`), **Export All Data Tables…** (`ui.export.allTablesCsv`, folder picker writing one delimited file per `DataSheet`, named from the sanitized table title), Result sheet single-tab or tidy delimited export (`analysis.exportCsv`), and Result sheet structured JSON (`analysis.exportJson`)
   - Publication figures: **SVG**, **`%PDF-1.7`**, **PNG**, **TIFF**, and ECMA-234 **`.emf`** ([Graphs & Export Capabilities](graphs.md#export-capabilities))
-  - Analytical methods summary (`result.generateReport`: `plain`, `markdown`, `latex`).
+  - **Save Methods Report…** (`result.generateReport`): writes `plain`, `markdown`, or `latex` analytical methods summaries, with output format selected by file extension (`.txt`, `.md`, `.tex`).
 
 ### CSV / TSV Parsing & Formatting Rules (`CsvOptions`) {#csv-rules}
 
@@ -91,3 +95,4 @@ All import and export adapters register through `FormatRegistry` (`crates/format
 - **RFC-4180 Quotes & BOM:** Strips leading UTF-8 BOM (`\u{FEFF}`), honors standard double-quote escaping (`""`), and preserves embedded newlines within quoted fields.
 - **Auto-Detection (`CsvOptions::detect`):** Inspects the first `10` non-empty lines to distinguish `\t` (TSV), `;` (European CSV with `,` decimal), and `,` (standard CSV with `.` decimal). Presets include `CsvOptions::csv()`, `CsvOptions::tsv()`, and `CsvOptions::european_csv()`.
 - **Exclusion Syntax & Missing Sentinels:** When `parse_asterisk_exclusions == true` (default), numeric tokens prefixed with `*` (e.g., `*4.52`) import as excluded numeric cells (`Cell { value: Number(4.52), excluded: true }`). Empty cells and recognized missing sentinels (e.g., `NA`, `NaN`, `null`) map cleanly to `CellValue::Empty`.
+- **Default CSV / TSV Export Behavior:** `analysis.exportCsv` defaults to exporting all result tabs in tidy format using `,` as the delimiter and the active locale preset's decimal separator (or a single selected tab when `tab_id` or `tab_index` is specified). `table.exportCsv` uses the same delimiter and decimal separator choices, and saving with a `.tsv` extension automatically selects the tab (`\t`) delimiter.

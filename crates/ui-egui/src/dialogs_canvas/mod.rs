@@ -41,7 +41,7 @@ pub use format_axes::{AxisTarget, FormatAxesState};
 pub use format_graph::FormatGraphState;
 pub use graph_overlays::{ApplyStyleFromState, BubblePlotInspectorState, PairwiseComparisonsState};
 pub use graph_type::{ChangeGraphTypeState, GRAPH_TYPE_OPTIONS, GraphTypeOption, ThumbnailGlyphKind};
-pub use layout_export::{ExportFigureFormat, ExportFigureState, PageLayoutComposerState};
+pub use layout_export::{CsvExportOptionsState, CsvExportTargetKind, ExportFigureFormat, ExportFigureState, PageLayoutComposerState};
 pub(crate) use parse_helpers::parse_table_kind_str;
 pub use print_dialog::PrintDialogState;
 pub use r13_dialogs::{CreateGraphDialogState, EqualizeScalingDialogState, FormatEmbeddedTableDialogState, FormatImageDialogState};
@@ -150,6 +150,13 @@ pub enum ActiveDialog {
     Checkpoints,
     About,
     Feedback,
+    ImportWarnings,
+    ImportProjectMode {
+        command_id: String,
+        path: String,
+        has_unsaved_changes: bool,
+    },
+    CsvExportOptions(CsvExportTargetKind),
 }
 
 /// Editable draft state for the `Checkpoints` modal (`R15-GUI-31`).
@@ -261,6 +268,8 @@ pub struct CanvasDialogState {
     pub format_image: FormatImageDialogState,
     #[serde(default)]
     pub checkpoints: CheckpointsDialogState,
+    #[serde(default)]
+    pub csv_export: CsvExportOptionsState,
 }
 
 impl Default for CanvasDialogState {
@@ -308,6 +317,7 @@ impl Default for CanvasDialogState {
             format_embedded_table: FormatEmbeddedTableDialogState::default(),
             format_image: FormatImageDialogState::default(),
             checkpoints: CheckpointsDialogState::default(),
+            csv_export: CsvExportOptionsState::default(),
         }
     }
 }

@@ -203,6 +203,8 @@ fn build_file_menu(app: &UiApp) -> CuratedMenuSection {
     push_action(&mut import_children, app, "table.importPzfx", None);
     push_action(&mut import_children, app, "table.importPrism", None);
     push_action(&mut import_children, app, "table.importXlsx", None);
+    import_children.push(CuratedMenuNode::Separator);
+    push_action(&mut import_children, app, "ui.import.warnings.open", None);
     nodes.push(submenu_node("menu.file.import", "menu.file.import", app, import_children));
 
     let mut export_children = Vec::new();
@@ -213,9 +215,12 @@ fn build_file_menu(app: &UiApp) -> CuratedMenuSection {
     push_action(&mut export_children, app, "export.svg", None);
     push_action(&mut export_children, app, "export.tiff", None);
     export_children.push(CuratedMenuNode::Separator);
-    push_action(&mut export_children, app, "table.exportCsv", None);
-    push_action(&mut export_children, app, "analysis.exportCsv", None);
+    push_action(&mut export_children, app, "ui.export.tableCsv.open", None);
+    push_action(&mut export_children, app, "ui.export.allTablesCsv.open", None);
+    push_action(&mut export_children, app, "ui.export.resultsCsv.open", None);
     push_action(&mut export_children, app, "analysis.exportJson", None);
+    export_children.push(CuratedMenuNode::Separator);
+    push_action(&mut export_children, app, "result.generateReport", Some("menu.file.save_methods_report"));
     nodes.push(submenu_node("menu.file.export", "menu.file.export", app, export_children));
 
     let mut checkpoint_children = Vec::new();

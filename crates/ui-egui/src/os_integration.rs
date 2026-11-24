@@ -614,6 +614,125 @@ impl PlatformUrlOpener for StubPlatformUrlOpener {
     }
 }
 
+/// OS file-dialog modality requested by native menu, toolbar, or welcome file actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NativeFileDialogKind {
+    OpenFile,
+    PickFolder,
+    SaveFile,
+}
+
+/// Canonical dialog request descriptor sent to a [`PlatformFileDialogAdapter`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeFileDialogRequest {
+    pub command_id: String,
+    pub kind: NativeFileDialogKind,
+    pub filter_label: String,
+    pub extensions: Vec<String>,
+    pub default_file_name: Option<String>,
+}
+
+/// Injectable OS file-dialog backend used by the desktop host and human-path tests (`R10.30`).
+pub trait PlatformFileDialogAdapter: std::fmt::Debug + Send + Sync {
+    /// Prompt the user with `request`, returning `Ok(None)` when cancelled.
+    ///
+    /// # Errors
+    /// Returns an error string if presenting the native OS dialog fails unexpectedly.
+    fn pick(&self, request: &NativeFileDialogRequest) -> Result<Option<std::path::PathBuf>, String>;
+}
+
+#[derive(Debug, Default)]
+struct StubPlatformFileDialogInner {
+    requests: Vec<NativeFileDialogRequest>,
+    keyed_responses: std::collections::BTreeMap<String, std::collections::VecDeque<Option<std::path::PathBuf>>>,
+    queued_responses: std::collections::VecDeque<Option<std::path::PathBuf>>,
+}
+
+/// Deterministic in-memory [`PlatformFileDialogAdapter`] stub recording every prompt and returning
+/// scripted paths from per-command or FIFO queues.
+#[derive(Debug, Clone)]
+pub struct StubPlatformFileDialogAdapter {
+    inner: std::sync::Arc<curvebook_platform::sync::RwLock<StubPlatformFileDialogInner>>,
+}
+
+impl Default for StubPlatformFileDialogAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StubPlatformFileDialogAdapter {
+    /// Construct an empty stub file-dialog adapter.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            inner: std::sync::Arc::new(curvebook_platform::sync::RwLock::named(
+                "ui.stub_file_dialog",
+                StubPlatformFileDialogInner::default(),
+            )),
+        }
+    }
+
+    /// Enqueue a response for a specific `command_id` (`"project.open"`, `"file.save_as"`, `"export.svg"`, ...).
+    pub fn push_response(&self, command_id: impl Into<String>, path: Option<std::path::PathBuf>) {
+        if let Ok(mut guard) = self.inner.write_or_recover() {
+            guard.keyed_responses.entry(command_id.into()).or_default().push_back(path);
+        }
+    }
+
+    /// Builder helper queueing a response for `command_id`.
+    #[must_use]
+    pub fn with_response(self, command_id: impl Into<String>, path: Option<std::path::PathBuf>) -> Self {
+        self.push_response(command_id, path);
+        self
+    }
+
+    /// Enqueue a FIFO response consumed when no command-specific response is queued.
+    pub fn push_next(&self, path: Option<std::path::PathBuf>) {
+        if let Ok(mut guard) = self.inner.write_or_recover() {
+            guard.queued_responses.push_back(path);
+        }
+    }
+
+    /// Builder helper queueing a FIFO response consumed when no command-specific response is queued.
+    #[must_use]
+    pub fn with_next(self, path: Option<std::path::PathBuf>) -> Self {
+        self.push_next(path);
+        self
+    }
+
+    /// Return a snapshot of every [`NativeFileDialogRequest`] received by this adapter.
+    #[must_use]
+    pub fn requests(&self) -> Vec<NativeFileDialogRequest> {
+        self.inner.read_or_recover().map(|guard| guard.requests.clone()).unwrap_or_default()
+    }
+
+    /// Clear all recorded requests and queued responses.
+    pub fn clear(&self) {
+        if let Ok(mut guard) = self.inner.write_or_recover() {
+            guard.requests.clear();
+            guard.keyed_responses.clear();
+            guard.queued_responses.clear();
+        }
+    }
+}
+
+impl PlatformFileDialogAdapter for StubPlatformFileDialogAdapter {
+    fn pick(&self, request: &NativeFileDialogRequest) -> Result<Option<std::path::PathBuf>, String> {
+        let mut guard = self.inner.write_or_recover().map_err(|err| format!("stub file dialog lock error: {err}"))?;
+        guard.requests.push(request.clone());
+        if let Some(queue) = guard.keyed_responses.get_mut(&request.command_id)
+            && let Some(resp) = queue.pop_front()
+        {
+            return Ok(resp);
+        }
+        if let Some(resp) = guard.queued_responses.pop_front() {
+            return Ok(resp);
+        }
+        Ok(None)
+    }
+}
+
 #[cfg(any(all(not(target_arch = "wasm32"), target_os = "windows"), all(not(target_arch = "wasm32"), test)))]
 fn build_windows_url_opener_candidate(stage_dir: &std::path::Path) -> Result<OsCommandCandidate, String> {
     const PS_OPEN_URL: &str =

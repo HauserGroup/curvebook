@@ -1729,6 +1729,38 @@ pub fn render_status_footer(
                     }
                 }
 
+                if !app.import_warnings.warnings.is_empty() && ui.available_width() > right_budget + 80.0 {
+                    let count = app.import_warnings.warnings.len();
+                    let pill_word = app.tr("import.warnings.status_pill");
+                    let pill_label = format!("! {count} {pill_word}");
+                    let pill_tip = if app.import_warnings.source_label.is_empty() {
+                        app.tr("import.warnings.title").to_owned()
+                    } else {
+                        format!("{}: {}", app.tr("import.warnings.title"), app.import_warnings.source_label)
+                    };
+                    let warn_resp = draw_footer_chip(
+                        ui,
+                        ctx_in.tokens,
+                        FooterChipSpec {
+                            label: &pill_label,
+                            tooltip: &pill_tip,
+                            max_w: if compact { 82.0 } else { 132.0 },
+                            min_w: 44.0,
+                            selected: app.canvas_dialogs.active_dialog == crate::dialogs_canvas::ActiveDialog::ImportWarnings,
+                            enabled: ctx_in.enabled,
+                            accent_override: Some(ctx_in.tokens.warning),
+                            widget_id: "status.import_warnings",
+                            role: "button",
+                            command_id: Some("ui.import.warnings.open"),
+                            disabled_reason: None,
+                        },
+                        meta,
+                    );
+                    if warn_resp.clicked() {
+                        intents.push_ui("ui.import.warnings.open", serde_json::json!({}));
+                    }
+                }
+
                 let center_budget = (ui.available_width() - right_budget).max(24.0);
                 let (stats_anchor, active_stats) = render_footer_center_readout(ui, app, views, ctx_in, center_budget, meta, &mut report);
                 anchors.stats = stats_anchor;

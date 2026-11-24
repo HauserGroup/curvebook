@@ -262,9 +262,13 @@ fn classify_active_dialog_surface(app: &UiApp) -> HybridModalSurface {
     match &app.canvas_dialogs.active_dialog {
         ActiveDialog::None => HybridModalSurface::None,
         ActiveDialog::About => HybridModalSurface::EguiAbout,
-        ActiveDialog::ExportFigure { .. } | ActiveDialog::Print { .. } | ActiveDialog::Checkpoints | ActiveDialog::Feedback => {
-            HybridModalSurface::EguiAppModal
-        }
+        ActiveDialog::ExportFigure { .. }
+        | ActiveDialog::Print { .. }
+        | ActiveDialog::Checkpoints
+        | ActiveDialog::Feedback
+        | ActiveDialog::ImportWarnings
+        | ActiveDialog::ImportProjectMode { .. }
+        | ActiveDialog::CsvExportOptions(_) => HybridModalSurface::EguiAppModal,
         ActiveDialog::CommandPalette => HybridModalSurface::EguiCommandPalette,
         ActiveDialog::AnalyzeSheet { .. } => HybridModalSurface::EguiAnalyzeSheet,
         ActiveDialog::DuplicateAnalysisPrompt { .. } => HybridModalSurface::EguiDuplicateAnalysis,
@@ -889,6 +893,7 @@ pub fn build_ui_tree_snapshot_from_egui(
         status_banner: baseline.status_banner,
         context_menu_target: baseline.context_menu_target,
         result_diagnostic_banner: baseline.result_diagnostic_banner,
+        import_warnings: baseline.import_warnings,
         menus,
         toolbar,
         navigator_sheets,

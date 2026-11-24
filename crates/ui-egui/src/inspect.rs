@@ -182,6 +182,15 @@ pub struct UiDialogSnapshot {
     pub buttons: Vec<UiWidgetNode>,
 }
 
+/// Non-fatal import warnings state exposed by `ui.inspect` (`R10.29`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportWarningsSnapshot {
+    pub open: bool,
+    pub command_id: String,
+    pub source_label: String,
+    pub warnings: Vec<crate::ImportWarningItem>,
+}
+
 /// Full deterministic workspace UI tree snapshot returned by `ui.inspect`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UiTreeSnapshot {
@@ -201,6 +210,8 @@ pub struct UiTreeSnapshot {
     pub context_menu_target: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_diagnostic_banner: Option<AssumptionDiagnosticBanner>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub import_warnings: Option<ImportWarningsSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub menus: Option<Vec<UiMenuSnapshot>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -377,6 +388,17 @@ pub(crate) fn inspect_semantic_snapshot(app: &UiApp, _metrics: ViewportMetrics, 
     };
     let brushed_points = if want("canvas") || want("grid") { collect_brushed_points(app) } else { Vec::new() };
     let result_diagnostic_banner = active_id.and_then(|id| doc.result_sheet(id)).and_then(AssumptionDiagnosticBanner::from_result);
+    let import_warnings_open = app.import_warnings.panel_open || app.canvas_dialogs.active_dialog == ActiveDialog::ImportWarnings;
+    let import_warnings = if !app.import_warnings.warnings.is_empty() || import_warnings_open {
+        Some(ImportWarningsSnapshot {
+            open: import_warnings_open,
+            command_id: app.import_warnings.command_id.clone(),
+            source_label: app.import_warnings.source_label.clone(),
+            warnings: app.import_warnings.warnings.clone(),
+        })
+    } else {
+        None
+    };
 
     UiTreeSnapshot {
         active_sheet_id: active_id.map(|id| id.as_str().to_owned()),
@@ -394,6 +416,7 @@ pub(crate) fn inspect_semantic_snapshot(app: &UiApp, _metrics: ViewportMetrics, 
         status_banner: app.canvas_dialogs.status_banner.clone(),
         context_menu_target: app.interaction.context_menu_target.clone(),
         result_diagnostic_banner,
+        import_warnings,
         menus: want("menus").then(|| build_menus_snapshot(app)),
         toolbar: want("toolbar").then(|| build_toolbar_snapshot(app)),
         navigator_sheets: want("navigator").then(|| build_navigator_snapshot(app, doc)),
@@ -2021,6 +2044,21 @@ fn build_generic_dialog_nodes(app: &UiApp, dialog: &ActiveDialog) -> DialogBuild
         }
         ActiveDialog::About => (insp_tr(app, "menu.help.about", "About CurveBook"), None),
         ActiveDialog::Feedback => (insp_tr(app, "menu.help.feedback", "Send Feedback..."), None),
+        ActiveDialog::ImportWarnings => (insp_tr(app, "import.warnings.title", "Import Warnings"), None),
+        ActiveDialog::ImportProjectMode { .. } => (insp_tr(app, "import.mode.title", "Import File"), None),
+        ActiveDialog::CsvExportOptions(target) => {
+            let sid = match target {
+                crate::dialogs_canvas::CsvExportTargetKind::ResultSheet { sheet_id }
+                | crate::dialogs_canvas::CsvExportTargetKind::DataTable { sheet_id } => Some(sheet_id),
+                crate::dialogs_canvas::CsvExportTargetKind::AllDataTables => None,
+            };
+            let title = match target {
+                crate::dialogs_canvas::CsvExportTargetKind::ResultSheet { .. } => insp_tr(app, "export.csv.title_results", "Export CSV Results"),
+                crate::dialogs_canvas::CsvExportTargetKind::DataTable { .. } => insp_tr(app, "export.csv.title_table", "Export CSV Table"),
+                crate::dialogs_canvas::CsvExportTargetKind::AllDataTables => insp_tr(app, "export.csv.title_all_tables", "Export All Data Tables"),
+            };
+            (title, sid)
+        }
         _ => ("", None),
     };
     (title, target.map(|id| id.as_str().to_owned()), None, Vec::new(), controls, ok_cancel(app))
@@ -2071,6 +2109,9 @@ pub(crate) fn active_dialog_slug(dialog: &ActiveDialog) -> String {
         ActiveDialog::Checkpoints => String::from("checkpoints"),
         ActiveDialog::About => String::from("about"),
         ActiveDialog::Feedback => String::from("feedback"),
+        ActiveDialog::ImportWarnings => String::from("import_warnings"),
+        ActiveDialog::ImportProjectMode { .. } => String::from("import_project_mode"),
+        ActiveDialog::CsvExportOptions(_) => String::from("csv_export_options"),
     }
 }
 

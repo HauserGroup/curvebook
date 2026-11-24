@@ -2482,7 +2482,13 @@ pub(crate) fn patch_active_dialog(app: &mut UiApp, fields: &Map<String, Value>) 
                 }
             }
         }
-        ActiveDialog::ResultViewer { .. } | ActiveDialog::About | ActiveDialog::Feedback | ActiveDialog::None => {
+        ActiveDialog::ResultViewer { .. }
+        | ActiveDialog::About
+        | ActiveDialog::Feedback
+        | ActiveDialog::ImportWarnings
+        | ActiveDialog::ImportProjectMode { .. }
+        | ActiveDialog::CsvExportOptions(_)
+        | ActiveDialog::None => {
             if !fields.is_empty() {
                 return Err(bad_input("active dialog does not accept field patches"));
             }
@@ -2652,7 +2658,16 @@ fn commit_active_dialog_action(app: &mut UiApp, action: &str, params: &Value) ->
             app.canvas_dialogs.checkpoints.note_draft.clear();
             Ok(outcome.payload)
         }
-        ActiveDialog::ResultViewer { .. } | ActiveDialog::About | ActiveDialog::Feedback | ActiveDialog::None => {
+        ActiveDialog::ResultViewer { .. }
+        | ActiveDialog::About
+        | ActiveDialog::Feedback
+        | ActiveDialog::ImportWarnings
+        | ActiveDialog::ImportProjectMode { .. }
+        | ActiveDialog::CsvExportOptions(_)
+        | ActiveDialog::None => {
+            if app.canvas_dialogs.active_dialog == ActiveDialog::ImportWarnings {
+                app.import_warnings.panel_open = false;
+            }
             app.canvas_dialogs.close_dialog();
             Ok(json!({ "action": action, "closed": true }))
         }

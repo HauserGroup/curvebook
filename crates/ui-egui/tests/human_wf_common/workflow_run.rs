@@ -11,6 +11,7 @@
 //!
 //! Bypasses (`from_app`, `app_mut`, `state_mut`, `dispatch_gui_action`) are intentionally absent.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Once;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -25,7 +26,7 @@ use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::egui_shell::{FrameInspectMeta, UiIntentOutcome};
 use curvebook_ui_egui::inspect::ScreenshotRegionTarget;
 use curvebook_ui_egui::interaction::{KeyModifiers, PointerButton, ViewportMetrics};
-use curvebook_ui_egui::os_integration::StubPlatformClipboardAdapter;
+use curvebook_ui_egui::os_integration::{NativeFileDialogRequest, StubPlatformClipboardAdapter, StubPlatformFileDialogAdapter};
 use egui::{Key, Modifiers, Pos2, Vec2};
 
 use super::{EguiWfHarness, TestRes, WfShellState, assert_input_to_paint_budget, assert_zero_shortcut_compliance, default_viewport, ensure};
@@ -381,6 +382,7 @@ pub struct WorkflowRun {
     wf_id: String,
     harness: EguiWfHarness,
     clipboard: Arc<StubPlatformClipboardAdapter>,
+    file_dialog: Arc<StubPlatformFileDialogAdapter>,
     stages: WorkflowStages,
     reference_verified: bool,
     bg_panics_at_start: usize,
@@ -396,10 +398,28 @@ impl WorkflowRun {
     /// Start a five-stage GUI workflow test for `wf_id` wired to an OS-boundary clipboard stub.
     #[must_use]
     pub fn start_with_clipboard(wf_id: &str, clipboard: Arc<StubPlatformClipboardAdapter>) -> Self {
+        Self::start_with_adapters(wf_id, clipboard, Arc::new(StubPlatformFileDialogAdapter::new()))
+    }
+
+    /// Start a five-stage GUI workflow test for `wf_id` wired to OS-boundary clipboard and file-dialog stubs.
+    #[must_use]
+    pub fn start_with_adapters(
+        wf_id: &str,
+        clipboard: Arc<StubPlatformClipboardAdapter>,
+        file_dialog: Arc<StubPlatformFileDialogAdapter>,
+    ) -> Self {
         install_bg_panic_hook();
         let bg_panics_at_start = BG_PANIC_COUNT.load(Ordering::SeqCst);
-        let harness = EguiWfHarness::new_with_clipboard(default_viewport(), Arc::clone(&clipboard));
-        Self { wf_id: wf_id.to_owned(), harness, clipboard, stages: WorkflowStages::default(), reference_verified: false, bg_panics_at_start }
+        let harness = EguiWfHarness::new_with_adapters(default_viewport(), Arc::clone(&clipboard), Arc::clone(&file_dialog));
+        Self {
+            wf_id: wf_id.to_owned(),
+            harness,
+            clipboard,
+            file_dialog,
+            stages: WorkflowStages::default(),
+            reference_verified: false,
+            bg_panics_at_start,
+        }
     }
 
     /// Workflow identifier passed to [`WorkflowRun::start`].
@@ -469,6 +489,37 @@ impl WorkflowRun {
     #[must_use]
     pub fn clipboard(&self) -> &StubPlatformClipboardAdapter {
         &self.clipboard
+    }
+
+    /// Read-only access to the attached native file-dialog stub.
+    #[must_use]
+    pub fn file_dialog(&self) -> &StubPlatformFileDialogAdapter {
+        &self.file_dialog
+    }
+
+    /// Queue a FIFO scripted response for the next native file-dialog prompt.
+    pub fn script_file_dialog(&self, path: Option<PathBuf>) {
+        self.file_dialog.push_next(path);
+    }
+
+    /// Queue a command-keyed scripted response for `command_id`.
+    pub fn script_file_dialog_for(&self, command_id: impl Into<String>, path: Option<PathBuf>) {
+        self.file_dialog.push_response(command_id, path);
+    }
+
+    /// Return a snapshot of every [`NativeFileDialogRequest`] sent to the stub file picker.
+    #[must_use]
+    pub fn recorded_file_dialog_requests(&self) -> Vec<NativeFileDialogRequest> {
+        self.file_dialog.requests()
+    }
+
+    /// Verify zero accumulated intent errors, zero background panics, strict `gui_only`/`human_path_only`
+    /// compliance, and clean `egui` hit-box/scrollbar parity (useful for non-analysis I/O workflows).
+    pub fn assert_shell_health(&mut self, label: &str) -> TestRes {
+        self.assert_no_intent_errors(label)?;
+        self.assert_no_bg_panics(label)?;
+        assert_zero_shortcut_compliance(&mut self.harness)?;
+        assert_input_to_paint_budget(&self.harness, 50.0)
     }
 
     /// Center point in logical points of settled widget `wid`.

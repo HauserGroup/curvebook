@@ -585,10 +585,18 @@ fn resolve_palette_ui_route(app: &UiApp, command_id: &str) -> Option<PaletteComm
         "ui.layout.composer.open" | "ui.layout.equalizeScaling.open" => {
             Some(PaletteCommandRoute::UiCommand { command_id: command_id.to_owned(), params: sheet_id_param(resolve_layout_sheet_id(doc)) })
         }
-        "ui.editParams.open" | "ui.result.copyMethodsReport" | "ui.result.inspectDiagnostics" | "ui.result.appendClusterColumn" => {
+        "ui.editParams.open"
+        | "ui.result.copyMethodsReport"
+        | "ui.result.inspectDiagnostics"
+        | "ui.result.appendClusterColumn"
+        | "ui.export.resultsCsv.open" => {
             Some(PaletteCommandRoute::UiCommand { command_id: command_id.to_owned(), params: sheet_id_param(resolve_result_sheet_id(doc)) })
         }
-        "ui.analyze.open" | "ui.grid.excludeWithReason" | "ui.table.convertArchetype.open" | "ui.graph.create.open" => {
+        "ui.analyze.open"
+        | "ui.grid.excludeWithReason"
+        | "ui.table.convertArchetype.open"
+        | "ui.graph.create.open"
+        | "ui.export.tableCsv.open" => {
             Some(PaletteCommandRoute::UiCommand { command_id: command_id.to_owned(), params: sheet_id_param(resolve_data_sheet_id(doc)) })
         }
         "ui.table.openFormulaBar" => Some(PaletteCommandRoute::UiCommand {

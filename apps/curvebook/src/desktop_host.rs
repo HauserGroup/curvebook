@@ -4,15 +4,13 @@
 //! OS chrome/menu dispatch, IME text composition, trackpad gesture inertia, file drop routing,
 //! clipboard pasteboard integration, isolated crash-recovery journals, and JSONL playback.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{BufRead, BufReader, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-
-use curvebook_platform::sync::RwLock;
 
 use curvebook_doc::{CellCoord, CellValue, ProjectDocument, SheetId, SheetSection, SubcolumnMode, TableArchetype, TableKind, VariableSource};
 use curvebook_engine::{CommandOutcome, Session, cmd as engine_cmd};
@@ -410,7 +408,13 @@ fn file_stem_title(path: &Path) -> String {
 }
 
 enum LoadedPathPayload {
-    Project { doc: Box<ProjectDocument>, archive_path: Option<PathBuf>, clean_archive: bool },
+    Project {
+        doc: Box<ProjectDocument>,
+        archive_path: Option<PathBuf>,
+        clean_archive: bool,
+        import_warnings: Vec<curvebook_format::ImportWarning>,
+        import_command_id: Option<&'static str>,
+    },
     DelimitedTable { importer_id: &'static str, title: String, is_tsv: bool },
 }
 
@@ -437,20 +441,50 @@ fn classify_and_load_path(path: &Path) -> Result<LoadedPathPayload, String> {
             let payload =
                 importer.import_path(path, &ImportOptions::default()).map_err(|err| format!("failed to open `{}`: {err}", path.display()))?;
             let doc = payload.into_document().ok_or_else(|| format!("archive `{}` did not decode a project document", path.display()))?;
-            Ok(LoadedPathPayload::Project { doc: Box::new(doc), archive_path: Some(path.to_path_buf()), clean_archive: true })
+            Ok(LoadedPathPayload::Project {
+                doc: Box::new(doc),
+                archive_path: Some(path.to_path_buf()),
+                clean_archive: true,
+                import_warnings: Vec::new(),
+                import_command_id: None,
+            })
         }
         FormatKind::Template => {
             let bytes = curvebook_platform::fs::read_regular_file_bytes(path, MAX_ARCHIVE_FILE_BYTES)
                 .map_err(|err| format!("failed to read `{}`: {err}", path.display()))?;
             let doc =
                 instantiate_template_bytes(&bytes, None).map_err(|err| format!("failed to instantiate template `{}`: {err}", path.display()))?;
-            Ok(LoadedPathPayload::Project { doc: Box::new(doc), archive_path: None, clean_archive: false })
+            Ok(LoadedPathPayload::Project {
+                doc: Box::new(doc),
+                archive_path: None,
+                clean_archive: false,
+                import_warnings: Vec::new(),
+                import_command_id: None,
+            })
         }
         FormatKind::ForeignProject => {
             let payload =
                 importer.import_path(path, &ImportOptions::default()).map_err(|err| format!("failed to import `{}`: {err}", path.display()))?;
-            let doc = payload.into_document().ok_or_else(|| format!("file `{}` did not yield a project document", path.display()))?;
-            Ok(LoadedPathPayload::Project { doc: Box::new(doc), archive_path: None, clean_archive: false })
+            let (doc, import_warnings) = match payload {
+                curvebook_format::ImportPayload::Report(report) => (report.document, report.warnings),
+                curvebook_format::ImportPayload::Document(doc) => (doc, Vec::new()),
+                curvebook_format::ImportPayload::DataSheet(_) => {
+                    return Err(format!("file `{}` did not yield a project document", path.display()));
+                }
+            };
+            let import_command_id = match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+                Some("prism") => Some("table.importPrism"),
+                Some("pzfx") => Some("table.importPzfx"),
+                Some("xlsx") => Some("table.importXlsx"),
+                _ => None,
+            };
+            Ok(LoadedPathPayload::Project {
+                doc: Box::new(doc),
+                archive_path: None,
+                clean_archive: false,
+                import_warnings,
+                import_command_id,
+            })
         }
         FormatKind::DelimitedText => {
             let is_tsv = path.extension().and_then(|e| e.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("tsv"));
@@ -490,7 +524,7 @@ pub fn open_document_from_files(files: &[PathBuf]) -> Result<Session, String> {
 
     for (idx, path) in files.iter().enumerate() {
         match classify_and_load_path(path)? {
-            LoadedPathPayload::Project { doc, archive_path, clean_archive } => {
+            LoadedPathPayload::Project { doc, archive_path, clean_archive, .. } => {
                 if let Some((first_path, _, _, _)) = &primary_project {
                     return Err(format!(
                         "cannot open multiple project files together (`{}` and `{}`); pass at most one project file and optional .csv/.tsv files",
@@ -1309,89 +1343,10 @@ pub const NATIVE_TEMPLATE_FILE_EXTENSIONS: &[&str] = &["cbtemplate"];
 /// Default filename suggested when saving a reusable `.cbtemplate` archive.
 pub const DEFAULT_TEMPLATE_FILE_NAME: &str = "untitled.cbtemplate";
 
-/// OS file-dialog modality requested by native menu, toolbar, or welcome file actions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NativeFileDialogKind {
-    OpenFile,
-    PickFolder,
-    SaveFile,
-}
-
-/// Canonical dialog request descriptor sent to a [`NativeFileDialogAdapter`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NativeFileDialogRequest {
-    pub command_id: String,
-    pub kind: NativeFileDialogKind,
-    pub filter_label: String,
-    pub extensions: Vec<String>,
-    pub default_file_name: Option<String>,
-}
-
-/// Injectable OS file-dialog backend used by [`DesktopHostRuntime`] and the native window shell.
-pub trait NativeFileDialogAdapter: fmt::Debug + Send + Sync {
-    /// Prompt the user with `request`, returning `Ok(None)` when cancelled.
-    ///
-    /// # Errors
-    /// Returns an error string if presenting the native OS dialog fails unexpectedly.
-    fn pick(&self, request: &NativeFileDialogRequest) -> Result<Option<PathBuf>, String>;
-}
-
-#[derive(Debug, Default)]
-struct StubNativeFileDialogState {
-    requests: Vec<NativeFileDialogRequest>,
-    keyed_responses: BTreeMap<String, VecDeque<Option<PathBuf>>>,
-    queued_responses: VecDeque<Option<PathBuf>>,
-}
-
-/// Deterministic test stub for [`NativeFileDialogAdapter`] recording every prompt and returning scripted paths.
-#[derive(Debug, Default)]
-pub struct StubNativeFileDialogAdapter {
-    state: RwLock<StubNativeFileDialogState>,
-}
-
-impl StubNativeFileDialogAdapter {
-    /// Construct an empty stub dialog adapter.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Enqueue a response for a specific `command_id` (`"project.open"`, `"file.save_as"`, `"export.svg"`, ...).
-    pub fn push_response(&self, command_id: impl Into<String>, path: Option<PathBuf>) {
-        if let Ok(mut guard) = self.state.write() {
-            guard.keyed_responses.entry(command_id.into()).or_default().push_back(path);
-        }
-    }
-
-    /// Builder helper queueing a response for `command_id`.
-    #[must_use]
-    pub fn with_response(self, command_id: impl Into<String>, path: Option<PathBuf>) -> Self {
-        self.push_response(command_id, path);
-        self
-    }
-
-    /// Return a snapshot of every [`NativeFileDialogRequest`] received by this adapter.
-    #[must_use]
-    pub fn requests(&self) -> Vec<NativeFileDialogRequest> {
-        self.state.read().map(|guard| guard.requests.clone()).unwrap_or_default()
-    }
-}
-
-impl NativeFileDialogAdapter for StubNativeFileDialogAdapter {
-    fn pick(&self, request: &NativeFileDialogRequest) -> Result<Option<PathBuf>, String> {
-        let mut guard = self.state.write().map_err(|err| format!("stub file dialog lock error: {err}"))?;
-        guard.requests.push(request.clone());
-        if let Some(queue) = guard.keyed_responses.get_mut(&request.command_id)
-            && let Some(resp) = queue.pop_front()
-        {
-            return Ok(resp);
-        }
-        if let Some(resp) = guard.queued_responses.pop_front() {
-            return Ok(resp);
-        }
-        Ok(None)
-    }
-}
+pub use curvebook_ui_egui::os_integration::{
+    NativeFileDialogKind, NativeFileDialogRequest, PlatformFileDialogAdapter as NativeFileDialogAdapter,
+    StubPlatformFileDialogAdapter as StubNativeFileDialogAdapter,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NativeExportTargetKind {
@@ -1493,7 +1448,7 @@ fn native_export_spec_for_command(command_id: &str) -> Option<NativeExportSpec> 
         "analysis.exportCsv" => NativeExportSpec {
             command: "analysis.exportCsv",
             filter_label: "CSV Results",
-            extensions: &["csv"],
+            extensions: &["csv", "tsv"],
             default_name: "analysis.csv",
             target_kind: NativeExportTargetKind::Result,
         },
@@ -1532,6 +1487,7 @@ pub fn menu_action_triggers_native_file_dialog(command_id: &str) -> bool {
             | "table.importXlsx"
             | "graph.insertImage"
             | "layout.insertImage"
+            | "ui.export.allTablesCsv"
     ) || native_export_spec_for_command(command_id).is_some()
 }
 
@@ -1542,18 +1498,46 @@ pub fn native_import_replaces_project_file_path(command_id: &str) -> bool {
     matches!(command_id, "project.instantiateTemplate" | "table.importPrism" | "table.importPzfx" | "table.importXlsx")
 }
 
-/// Execute a file-backed import or template instantiation command at `path`, clearing the active
-/// session's archive association when the command replaces the full document.
+/// Execute a file-backed import or template instantiation command at `path`, optionally merging
+/// into the active project (`table.importPrism`, `table.importPzfx`, `table.importXlsx`), clearing
+/// the active session's archive association when replacing the full document, and recording any
+/// structured import warnings into `UiApp`.
 ///
 /// # Errors
 /// Returns an error string if executing the underlying engine command fails.
-pub fn execute_native_import_at_path(win: &mut DesktopWindowSession, command: &str, path: &Path) -> Result<(), String> {
+pub fn execute_native_import_at_path(win: &mut DesktopWindowSession, command: &str, path: &Path, merge: bool) -> Result<(), String> {
     let path_str = path.to_string_lossy().into_owned();
-    win.execute_and_journal(command, json!({ "path": path_str }))?;
-    if native_import_replaces_project_file_path(command) {
+    let params = if matches!(command, "table.importPrism" | "table.importPzfx" | "table.importXlsx") {
+        json!({ "path": path_str, "merge": merge })
+    } else {
+        json!({ "path": path_str })
+    };
+    let outcome = win.execute_and_journal(command, params)?;
+    if !merge && native_import_replaces_project_file_path(command) {
         win.app_mut().session_mut().set_file_path(None, false);
     }
+    let source_label = path.file_name().and_then(|n| n.to_str()).unwrap_or(&path_str);
+    win.app_mut().record_import_warnings(command, source_label, &outcome);
     Ok(())
+}
+
+fn sanitize_export_table_stem(title: &str, fallback_id: &str) -> String {
+    let mut out = String::with_capacity(title.len());
+    let mut last_was_sep = false;
+    for ch in title.trim().chars() {
+        let is_bad = matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || ch.is_control();
+        if is_bad {
+            if !last_was_sep && !out.is_empty() {
+                out.push('_');
+                last_was_sep = true;
+            }
+        } else {
+            out.push(ch);
+            last_was_sep = false;
+        }
+    }
+    let trimmed = out.trim_matches(|c: char| c.is_whitespace() || c == '.' || c == '_');
+    if trimmed.is_empty() { fallback_id.to_owned() } else { trimmed.to_owned() }
 }
 
 fn resolve_native_export_sheet_id_with_hint(doc: &ProjectDocument, kind: NativeExportTargetKind, hint: Option<&str>) -> Option<SheetId> {
@@ -1783,6 +1767,15 @@ impl DesktopHostRuntime {
         {
             return self.handle_file_dropped(window_id, PathBuf::from(explicit_path)).map(Some);
         }
+        if matches!(command_id, "table.importPrism" | "table.importPzfx" | "table.importXlsx")
+            && let Some(explicit_path) = params.get("path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
+            && let Some(merge) = params.get("merge").and_then(Value::as_bool)
+        {
+            let path = PathBuf::from(explicit_path);
+            let win = self.window_mut(window_id)?;
+            execute_native_import_at_path(win, command_id, &path, merge)?;
+            return Ok(Some(Self::completed_file_dialog_outcome(window_id, command_id, &path)));
+        }
         if command_id == "project.open"
             && let Some(mut hook) = self.open_file_dialog_hook.take()
         {
@@ -1871,10 +1864,111 @@ impl DesktopHostRuntime {
                 match adapter.pick(&req)? {
                     Some(path) => {
                         let win = self.window_mut(window_id)?;
-                        execute_native_import_at_path(win, command_id, &path)?;
-                        Self::completed_file_dialog_outcome(window_id, command_id, &path)
+                        if matches!(command_id, "table.importPrism" | "table.importPzfx" | "table.importXlsx") {
+                            if let Some(merge) = params.get("merge").and_then(Value::as_bool) {
+                                execute_native_import_at_path(win, command_id, &path, merge)?;
+                                Self::completed_file_dialog_outcome(window_id, command_id, &path)
+                            } else if win.app().document().total_sheet_count() > 0 || win.has_unsaved_changes() {
+                                let has_unsaved = win.has_unsaved_changes();
+                                win.app_mut().open_import_project_mode_dialog(
+                                    command_id,
+                                    path.to_string_lossy().into_owned(),
+                                    has_unsaved,
+                                );
+                                DesktopEventOutcome {
+                                    handled: true,
+                                    action: format!("native_file_dialog.confirm_import_mode:{command_id}"),
+                                    window_id: Some(window_id),
+                                    command_id: Some(command_id.to_owned()),
+                                    command_result: Some(json!({ "path": path.to_string_lossy(), "prompted": true })),
+                                    ..Default::default()
+                                }
+                            } else {
+                                execute_native_import_at_path(win, command_id, &path, false)?;
+                                Self::completed_file_dialog_outcome(window_id, command_id, &path)
+                            }
+                        } else {
+                            execute_native_import_at_path(win, command_id, &path, false)?;
+                            Self::completed_file_dialog_outcome(window_id, command_id, &path)
+                        }
                     }
                     None => Self::cancelled_file_dialog_outcome(window_id, command_id),
+                }
+            }
+            "ui.export.allTablesCsv" => {
+                let sheets: Vec<(SheetId, String)> = {
+                    let win = self.window(window_id)?;
+                    win.app().document().data_sheets.iter().map(|ds| (ds.id.clone(), ds.title.clone())).collect()
+                };
+                if sheets.is_empty() {
+                    return Err(String::from("no data tables available to export"));
+                }
+                let req = NativeFileDialogRequest {
+                    command_id: String::from("ui.export.allTablesCsv"),
+                    kind: NativeFileDialogKind::PickFolder,
+                    filter_label: String::from("Export All Data Tables"),
+                    extensions: Vec::new(),
+                    default_file_name: None,
+                };
+                match adapter.pick(&req)? {
+                    Some(dir) => {
+                        std::fs::create_dir_all(&dir)
+                            .map_err(|err| format!("failed to prepare export folder `{}`: {err}", dir.display()))?;
+                        let delimiter = params.get("delimiter").and_then(Value::as_str).unwrap_or(",").to_owned();
+                        let default_decimal = self
+                            .window(window_id)
+                            .map(|w| w.app().locale_preset.decimal_separator.to_string())
+                            .unwrap_or_else(|_| String::from("."));
+                        let decimal_separator =
+                            params.get("decimal_separator").and_then(Value::as_str).map_or(default_decimal, ToOwned::to_owned);
+                        let ext = if delimiter == "\t" { "tsv" } else { "csv" };
+                        let mut used_stems: std::collections::HashSet<String> = std::collections::HashSet::new();
+                        let mut planned: Vec<(SheetId, PathBuf)> = Vec::with_capacity(sheets.len());
+                        for (sheet_id, title) in sheets {
+                            let base = sanitize_export_table_stem(&title, sheet_id.as_str());
+                            let stem = if used_stems.insert(base.to_ascii_lowercase()) {
+                                base
+                            } else {
+                                let mut suffix = 2usize;
+                                loop {
+                                    let candidate = format!("{base}-{suffix}");
+                                    if used_stems.insert(candidate.to_ascii_lowercase()) {
+                                        break candidate;
+                                    }
+                                    suffix = suffix.saturating_add(1);
+                                }
+                            };
+                            planned.push((sheet_id, dir.join(format!("{stem}.{ext}"))));
+                        }
+                        let mut exported_files: Vec<String> = Vec::with_capacity(planned.len());
+                        let win = self.window_mut(window_id)?;
+                        for (sheet_id, file_path) in planned {
+                            let file_path_str = file_path.to_string_lossy().into_owned();
+                            win.execute_and_journal(
+                                "table.exportCsv",
+                                json!({
+                                    "sheet_id": sheet_id.as_str(),
+                                    "path": file_path_str,
+                                    "delimiter": delimiter,
+                                    "decimal_separator": decimal_separator,
+                                }),
+                            )?;
+                            exported_files.push(file_path_str);
+                        }
+                        DesktopEventOutcome {
+                            handled: true,
+                            action: String::from("native_file_dialog.completed:ui.export.allTablesCsv"),
+                            window_id: Some(window_id),
+                            command_id: Some(String::from("ui.export.allTablesCsv")),
+                            command_result: Some(json!({
+                                "path": dir.to_string_lossy(),
+                                "exported_files": exported_files,
+                                "count": exported_files.len(),
+                            })),
+                            ..Default::default()
+                        }
+                    }
+                    None => Self::cancelled_file_dialog_outcome(window_id, "ui.export.allTablesCsv"),
                 }
             }
             "graph.insertImage" | "layout.insertImage" => {
@@ -1986,6 +2080,11 @@ impl DesktopHostRuntime {
         }
 
         Self::copy_present_params(&mut map, caller_params, Self::allowed_native_export_keys(command));
+        if matches!(command, "table.exportCsv" | "analysis.exportCsv")
+            && path.extension().and_then(|e| e.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("tsv"))
+        {
+            map.insert(String::from("delimiter"), Value::String(String::from("\t")));
+        }
         let has_multi_pdf =
             matches!(command, "export.pdf" | "graph.exportPdf") && map.get("sheet_ids").and_then(Value::as_array).is_some_and(|arr| !arr.is_empty());
         if !has_multi_pdf {
@@ -2866,7 +2965,25 @@ impl DesktopHostRuntime {
                     ..Default::default()
                 })
             }
-            LoadedPathPayload::Project { doc, archive_path, clean_archive } => {
+            LoadedPathPayload::Project { doc, archive_path, clean_archive, import_warnings, import_command_id } => {
+                let record_dropped_warnings = |app: &mut UiApp, path: &Path| {
+                    if let Some(cmd_id) = import_command_id {
+                        let source_label =
+                            path.file_name().and_then(|n| n.to_str()).map_or_else(|| path.to_string_lossy().into_owned(), str::to_owned);
+                        let mut synthetic = CommandOutcome::mutated(cmd_id, "imported file", json!({ "warnings": &import_warnings }));
+                        synthetic.warnings = import_warnings
+                            .iter()
+                            .map(|w| {
+                                if w.source.trim().is_empty() {
+                                    format!("[{:?}] {}", w.kind, w.message)
+                                } else {
+                                    format!("[{:?}] {}: {}", w.kind, w.source, w.message)
+                                }
+                            })
+                            .collect();
+                        app.record_import_warnings(cmd_id, &source_label, &synthetic);
+                    }
+                };
                 let (open_new, viewport) = {
                     let win = self.window(window_id)?;
                     (self.config.new_instance || win.has_unsaved_changes(), win.viewport)
@@ -2879,6 +2996,9 @@ impl DesktopHostRuntime {
                         let _ = session.collapse_atomic_group(Session::new());
                     }
                     let new_id = self.open_window_with_session(session, viewport, self.config.recovery_root.is_some())?;
+                    if let Ok(new_win) = self.window_mut(new_id) {
+                        record_dropped_warnings(new_win.app_mut(), &path);
+                    }
                     return Ok(DesktopEventOutcome {
                         handled: true,
                         action: String::from("file.dropped_opened_new_window"),
@@ -2914,6 +3034,7 @@ impl DesktopHostRuntime {
                 {
                     win.app.set_clipboard_adapter(adapter);
                 }
+                record_dropped_warnings(win.app_mut(), &path);
                 win.dirty_commands.clear();
                 win.coasting_active = false;
                 win.checkpoint_recovery_journal()?;
@@ -3506,6 +3627,10 @@ fn resolve_host_or_ui_route(
         "file.print" => Ok(Some(DesktopCommandRoute::UiCommand {
             ui_command_id: String::from("ui.print.open"),
             params: sheet_id_obj_or_empty(resolve_any_sheet_id(doc)),
+        })),
+        "ui.export.allTablesCsv" => Ok(Some(DesktopCommandRoute::UiCommand {
+            ui_command_id: String::from("ui.export.allTablesCsv.open"),
+            params: json!({}),
         })),
         "ui.theme.set" => {
             let mode = variant.unwrap_or_else(|| next_theme_mode_name(app.theme.mode));

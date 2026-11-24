@@ -1184,6 +1184,8 @@ pub enum UiIntent {
     OpenFeedbackOnGitHub,
     CopyFeedbackMarkdown,
     ResetFeedbackDraft,
+    CopyImportWarnings,
+    UpdateCsvExportOptions(Box<crate::dialogs_canvas::CsvExportOptionsState>),
 }
 
 /// Outcome produced when committing a buffered [`UiIntent`].
@@ -1854,6 +1856,7 @@ fn apply_wave4_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutco
             Ok(UiIntentOutcome::Ui { command_id: format!("dialog.button:{action}"), result: Some(result) })
         }
         UiIntent::CloseAllModals => {
+            app.import_warnings.panel_open = false;
             app.canvas_dialogs.close_dialog();
             app.grid.variables_dialog.open = false;
             app.grid.import_wizard.open = false;
@@ -1925,7 +1928,9 @@ fn apply_wave4_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutco
         | UiIntent::UpdateFeedbackDraft(_)
         | UiIntent::OpenFeedbackOnGitHub
         | UiIntent::CopyFeedbackMarkdown
-        | UiIntent::ResetFeedbackDraft => apply_wave4_app_modal_intent(app, intent),
+        | UiIntent::ResetFeedbackDraft
+        | UiIntent::CopyImportWarnings
+        | UiIntent::UpdateCsvExportOptions(_) => apply_wave4_app_modal_intent(app, intent),
         _ => Ok(UiIntentOutcome::ShellUpdated),
     }
 }
@@ -2568,6 +2573,14 @@ fn apply_wave4_app_modal_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiI
         }
         UiIntent::ResetFeedbackDraft => {
             app.canvas_dialogs.feedback.clear_fields();
+        }
+        UiIntent::CopyImportWarnings => {
+            if let Err(err) = app.copy_import_warnings_to_clipboard() {
+                app.canvas_dialogs.status_banner = Some(format!("Could not copy import warnings: {err}"));
+            }
+        }
+        UiIntent::UpdateCsvExportOptions(opts) => {
+            app.canvas_dialogs.csv_export = *opts;
         }
         _ => {}
     }

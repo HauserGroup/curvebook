@@ -46,8 +46,8 @@ pub use control_io::{
     bind_control_tcp_listener, run_control_tcp_server, serve_control_listener, serve_control_listener_with_hook, validate_loopback_addr,
 };
 pub use dialogs_canvas::{
-    ActiveDialog, AssumptionDiagnosticBanner, CanvasDialogState, ConvertArchetypeDialogState, ExcludeWithReasonDialogState, PrintDialogState,
-    RemediationKind, SplitWorkspaceState,
+    ActiveDialog, AssumptionDiagnosticBanner, CanvasDialogState, ConvertArchetypeDialogState, CsvExportOptionsState, CsvExportTargetKind,
+    ExcludeWithReasonDialogState, PrintDialogState, RemediationKind, SplitWorkspaceState,
 };
 pub use dialogs_r9::{InsertModelEquationDialogState, RandomSampleRowsDialogState, RandomizeGroupsDialogState, SimulateDistributionsDialogState};
 pub use feedback::{
@@ -59,7 +59,10 @@ pub use i18n::{
     BETA_ACTIVE_LOCALES, LOCALES, LocalePreset, is_beta_active_locale, is_draft_translation_locale, locale_display_name, locale_picker_label,
     normalize_beta_gui_locale, normalize_locale, tr, tr_or_fallback,
 };
-pub use inspect::{ParityReport, ParityViolation, ScreenshotRegionTarget, UiTreeSnapshot, ZLayer, inspect_ui_tree, inspect_ui_tree_for_metrics};
+pub use inspect::{
+    ImportWarningsSnapshot, ParityReport, ParityViolation, ScreenshotRegionTarget, UiTreeSnapshot, ZLayer, inspect_ui_tree,
+    inspect_ui_tree_for_metrics,
+};
 pub use interaction::{
     CanvasDragTarget, InlineEditorState, InlineEditorTarget, InteractionControllerState, KeyModifiers, LayoutResizeHandle, PointerButton,
     UiEventOutcome, UiInputEvent, ViewportMetrics, VirtualWorkspaceFolder, build_shortcut_candidates, dispatch_mouse_wheel, dispatch_ui_event,
@@ -204,6 +207,49 @@ impl PartialEq for EguiDispatchHookSlot {
     }
 }
 
+/// Single non-fatal warning captured from a file import (`table.importPzfx`, `table.importPrism`, `table.importXlsx`, etc.).
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct ImportWarningItem {
+    pub kind: String,
+    pub source: String,
+    pub message: String,
+}
+
+/// Persistent state for non-fatal import warnings surfaced in the status bar, modal panel, and `ui.inspect` (`R10.29`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct ImportWarningsState {
+    pub source_label: String,
+    pub command_id: String,
+    pub warnings: Vec<ImportWarningItem>,
+    pub panel_open: bool,
+}
+
+impl ImportWarningsState {
+    /// Format all captured warnings as plain text suitable for clipboard copy.
+    #[must_use]
+    pub fn format_plain_text(&self) -> String {
+        let mut lines = Vec::with_capacity(self.warnings.len() + 2);
+        if !self.source_label.is_empty() {
+            lines.push(format!("Import warnings ({} — {}):", self.source_label, self.command_id));
+        } else if !self.command_id.is_empty() {
+            lines.push(format!("Import warnings ({}):", self.command_id));
+        } else {
+            lines.push(String::from("Import warnings:"));
+        }
+        for (idx, item) in self.warnings.iter().enumerate() {
+            let mut prefix = format!("{}.", idx + 1);
+            if !item.kind.trim().is_empty() {
+                prefix.push_str(&format!(" [{}]", item.kind.trim()));
+            }
+            if !item.source.trim().is_empty() {
+                prefix.push_str(&format!(" {}", item.source.trim()));
+            }
+            lines.push(format!("{prefix}: {}", item.message.trim()));
+        }
+        lines.join("\n")
+    }
+}
+
 /// Top-level application shell facade owning [`Session`] and panel/tool view state.
 /// Compact rollback snapshot of UI shell state excluding `Session` and its undo history.
 #[derive(Debug, Clone, PartialEq)]
@@ -212,6 +258,7 @@ pub(crate) struct UiShellSnapshot {
     pub nav: WorkspaceNavState,
     pub grid: GridViewState,
     pub canvas_dialogs: CanvasDialogState,
+    pub import_warnings: ImportWarningsState,
     pub shortcuts: ShortcutRegistry,
     pub family_open: bool,
     pub locale: String,
@@ -358,6 +405,7 @@ pub struct UiApp {
     pub nav: WorkspaceNavState,
     pub grid: GridViewState,
     pub canvas_dialogs: CanvasDialogState,
+    pub import_warnings: ImportWarningsState,
     pub shortcuts: ShortcutRegistry,
     pub family_open: bool,
     pub locale: String,
@@ -409,6 +457,7 @@ impl UiApp {
             nav: WorkspaceNavState::default(),
             grid: GridViewState::default(),
             canvas_dialogs: CanvasDialogState::default(),
+            import_warnings: ImportWarningsState::default(),
             shortcuts: ShortcutRegistry::new(),
             family_open: true,
             locale: String::from("en"),
@@ -449,6 +498,7 @@ impl UiApp {
             nav: self.nav.clone(),
             grid: self.grid.clone(),
             canvas_dialogs: self.canvas_dialogs.clone(),
+            import_warnings: self.import_warnings.clone(),
             shortcuts: self.shortcuts.clone(),
             family_open: self.family_open,
             locale: self.locale.clone(),
@@ -483,6 +533,7 @@ impl UiApp {
         self.nav = snap.nav;
         self.grid = snap.grid;
         self.canvas_dialogs = snap.canvas_dialogs;
+        self.import_warnings = snap.import_warnings;
         self.shortcuts = snap.shortcuts;
         self.family_open = snap.family_open;
         self.locale = snap.locale;
@@ -827,6 +878,85 @@ impl UiApp {
             String::from("Prepared Markdown feedback report (host clipboard unavailable in this session).")
         });
         Ok((markdown, status))
+    }
+
+    /// Record non-fatal warnings from an import command outcome, opening [`ActiveDialog::ImportWarnings`]
+    /// when warnings are present or clearing stale warnings on a clean import (`R10.29`).
+    pub fn record_import_warnings(&mut self, command_id: &str, source_label: &str, outcome: &CommandOutcome) {
+        let mut items = Vec::new();
+        if let Some(arr) = outcome.payload.get("warnings").and_then(serde_json::Value::as_array) {
+            for entry in arr {
+                if let Some(obj) = entry.as_object() {
+                    let kind = obj.get("kind").and_then(serde_json::Value::as_str).unwrap_or("warning").trim().to_owned();
+                    let source = obj.get("source").and_then(serde_json::Value::as_str).unwrap_or("").trim().to_owned();
+                    let message = obj.get("message").and_then(serde_json::Value::as_str).unwrap_or("").trim().to_owned();
+                    if !message.is_empty() {
+                        items.push(ImportWarningItem { kind, source, message });
+                    }
+                } else if let Some(msg) = entry.as_str() {
+                    let trimmed = msg.trim();
+                    if !trimmed.is_empty() {
+                        items.push(ImportWarningItem {
+                            kind: String::from("warning"),
+                            source: source_label.to_owned(),
+                            message: trimmed.to_owned(),
+                        });
+                    }
+                }
+            }
+        }
+        if items.is_empty() && !outcome.warnings.is_empty() {
+            for msg in &outcome.warnings {
+                let trimmed = msg.trim();
+                if !trimmed.is_empty() {
+                    items.push(ImportWarningItem {
+                        kind: String::from("warning"),
+                        source: source_label.to_owned(),
+                        message: trimmed.to_owned(),
+                    });
+                }
+            }
+        }
+        if items.is_empty() {
+            self.import_warnings = ImportWarningsState::default();
+            if self.canvas_dialogs.active_dialog == ActiveDialog::ImportWarnings {
+                self.canvas_dialogs.active_dialog = ActiveDialog::None;
+            }
+        } else {
+            self.import_warnings = ImportWarningsState {
+                source_label: source_label.to_owned(),
+                command_id: command_id.to_owned(),
+                warnings: items,
+                panel_open: true,
+            };
+            self.canvas_dialogs.active_dialog = ActiveDialog::ImportWarnings;
+        }
+        self.mutation_seq.0 = self.mutation_seq.0.wrapping_add(1);
+    }
+
+    /// Open the replace-or-merge confirmation modal before importing a multi-sheet file (`R10.29`).
+    pub fn open_import_project_mode_dialog(&mut self, command_id: impl Into<String>, path: impl Into<String>, has_unsaved_changes: bool) {
+        self.canvas_dialogs.active_dialog = ActiveDialog::ImportProjectMode {
+            command_id: command_id.into(),
+            path: path.into(),
+            has_unsaved_changes,
+        };
+        self.mutation_seq.0 = self.mutation_seq.0.wrapping_add(1);
+    }
+
+    /// Copy all recorded import warnings to the configured [`PlatformClipboardAdapter`].
+    ///
+    /// # Errors
+    /// Returns an error if the clipboard adapter reports an error.
+    pub fn copy_import_warnings_to_clipboard(&mut self) -> Result<(String, OsAdapterStatus), String> {
+        let text = self.import_warnings.format_plain_text();
+        let status = self.write_clipboard_text(&text)?;
+        self.canvas_dialogs.status_banner = Some(if status.available {
+            String::from("Copied import warnings to clipboard.")
+        } else {
+            String::from("Prepared import warnings text (host clipboard unavailable in this session).")
+        });
+        Ok((text, status))
     }
 
     pub(crate) fn write_clipboard_text(&self, text: &str) -> Result<OsAdapterStatus, String> {

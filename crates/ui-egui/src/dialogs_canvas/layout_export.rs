@@ -275,3 +275,64 @@ impl ExportFigureState {
         Ok(())
     }
 }
+
+/// Target surface for the CSV Export Options modal (`R10.29`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CsvExportTargetKind {
+    ResultSheet { sheet_id: SheetId },
+    DataTable { sheet_id: SheetId },
+    AllDataTables,
+}
+
+const fn default_csv_delimiter() -> char {
+    ','
+}
+
+const fn default_csv_decimal_separator() -> char {
+    '.'
+}
+
+/// Editable options for CSV/TSV export (`R10.29`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CsvExportOptionsState {
+    /// Selected result tab ID (`None` = All tabs tidy). Only used for [`CsvExportTargetKind::ResultSheet`].
+    #[serde(default)]
+    pub tab_id: Option<String>,
+    /// Field delimiter (`','`, `';'`, or `'\t'`).
+    #[serde(default = "default_csv_delimiter")]
+    pub delimiter: char,
+    /// Decimal separator (`'.'` or `','`).
+    #[serde(default = "default_csv_decimal_separator")]
+    pub decimal_separator: char,
+}
+
+impl Default for CsvExportOptionsState {
+    fn default() -> Self {
+        Self { tab_id: None, delimiter: ',', decimal_separator: '.' }
+    }
+}
+
+impl CsvExportOptionsState {
+    /// Reset options cleanly using the active locale's default decimal separator.
+    pub fn reset_for_locale(&mut self, decimal_separator: char) {
+        self.tab_id = None;
+        self.delimiter = ',';
+        self.decimal_separator = if decimal_separator == ',' { ',' } else { '.' };
+    }
+
+    /// Normalize delimiter into the supported set `[',', ';', '\t']`.
+    #[must_use]
+    pub const fn normalized_delimiter(&self) -> char {
+        match self.delimiter {
+            ';' => ';',
+            '\t' => '\t',
+            _ => ',',
+        }
+    }
+
+    /// Normalize decimal separator into the supported set `['.', ',']`.
+    #[must_use]
+    pub const fn normalized_decimal_separator(&self) -> char {
+        if self.decimal_separator == ',' { ',' } else { '.' }
+    }
+}

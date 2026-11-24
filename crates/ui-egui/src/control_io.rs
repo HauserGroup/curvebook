@@ -1240,6 +1240,11 @@ fn lookup_ui_command_handler(command_id: &str) -> Option<UiCommandHandler> {
         "ui.applyStyleFrom.open" => Some(|app, p| map_ui_err(dispatch_ui_apply_style_from_open(app, p))),
         "ui.layout.composer.open" => Some(|app, p| map_ui_err(dispatch_ui_layout_composer_open(app, p))),
         "ui.export.figure.open" => Some(|app, p| map_ui_err(dispatch_ui_export_figure_open(app, p))),
+        "ui.export.tableCsv.open" => Some(|app, p| map_ui_err(dispatch_ui_export_table_csv_open(app, p))),
+        "ui.export.resultsCsv.open" => Some(|app, p| map_ui_err(dispatch_ui_export_results_csv_open(app, p))),
+        "ui.export.allTablesCsv.open" => Some(|app, p| map_ui_err(dispatch_ui_export_all_tables_csv_open(app, p))),
+        "ui.export.allTablesCsv" => Some(|app, p| map_ui_err(dispatch_ui_export_all_tables_csv_fallback(app, p))),
+        "ui.import.warnings.open" => Some(|app, p| map_ui_err(dispatch_ui_import_warnings_open(app, p))),
         "ui.import.reshape.open" => Some(|app, p| map_ui_err(dispatch_ui_import_reshape_open(app, p))),
         "ui.print.open" | "file.print" => Some(|app, p| map_ui_err(dispatch_ui_print_open(app, p))),
         "app.about" => Some(|app, _| {
@@ -3246,6 +3251,70 @@ fn dispatch_ui_export_figure_open(app: &mut UiApp, params: &Value) -> Result<Val
     Ok(json!({ "dialog": "ExportFigure", "sheet_id": sheet_id.as_str(), "format": app.canvas_dialogs.export_figure.format }))
 }
 
+fn dispatch_ui_export_table_csv_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let sheet_id = resolve_target_data_id(app.document(), params)?;
+    app.canvas_dialogs.csv_export.reset_for_locale(app.locale_preset.decimal_separator);
+    app.canvas_dialogs.active_dialog = ActiveDialog::CsvExportOptions(crate::dialogs_canvas::CsvExportTargetKind::DataTable {
+        sheet_id: sheet_id.clone(),
+    });
+    Ok(json!({
+        "dialog": "CsvExportOptions",
+        "target": "DataTable",
+        "sheet_id": sheet_id.as_str(),
+        "delimiter": app.canvas_dialogs.csv_export.delimiter.to_string(),
+        "decimal_separator": app.canvas_dialogs.csv_export.decimal_separator.to_string(),
+    }))
+}
+
+fn dispatch_ui_export_results_csv_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let sheet_id = resolve_target_result_sheet_id(app.document(), params)?;
+    app.canvas_dialogs.csv_export.reset_for_locale(app.locale_preset.decimal_separator);
+    app.canvas_dialogs.active_dialog = ActiveDialog::CsvExportOptions(crate::dialogs_canvas::CsvExportTargetKind::ResultSheet {
+        sheet_id: sheet_id.clone(),
+    });
+    Ok(json!({
+        "dialog": "CsvExportOptions",
+        "target": "ResultSheet",
+        "sheet_id": sheet_id.as_str(),
+        "delimiter": app.canvas_dialogs.csv_export.delimiter.to_string(),
+        "decimal_separator": app.canvas_dialogs.csv_export.decimal_separator.to_string(),
+    }))
+}
+
+fn dispatch_ui_export_all_tables_csv_open(app: &mut UiApp, _params: &Value) -> Result<Value, String> {
+    if app.document().data_sheets.is_empty() {
+        return Err(String::from("no data tables available to export"));
+    }
+    app.canvas_dialogs.csv_export.reset_for_locale(app.locale_preset.decimal_separator);
+    app.canvas_dialogs.active_dialog = ActiveDialog::CsvExportOptions(crate::dialogs_canvas::CsvExportTargetKind::AllDataTables);
+    Ok(json!({
+        "dialog": "CsvExportOptions",
+        "target": "AllDataTables",
+        "table_count": app.document().data_sheets.len(),
+        "delimiter": app.canvas_dialogs.csv_export.delimiter.to_string(),
+        "decimal_separator": app.canvas_dialogs.csv_export.decimal_separator.to_string(),
+    }))
+}
+
+fn dispatch_ui_export_all_tables_csv_fallback(app: &mut UiApp, _params: &Value) -> Result<Value, String> {
+    if app.document().data_sheets.is_empty() {
+        return Err(String::from("no data tables available to export"));
+    }
+    Err(String::from("ui.export.allTablesCsv requires the native desktop host folder picker"))
+}
+
+fn dispatch_ui_import_warnings_open(app: &mut UiApp, _params: &Value) -> Result<Value, String> {
+    app.import_warnings.panel_open = true;
+    app.canvas_dialogs.active_dialog = ActiveDialog::ImportWarnings;
+    Ok(json!({
+        "dialog": "ImportWarnings",
+        "open": true,
+        "count": app.import_warnings.warnings.len(),
+        "command_id": app.import_warnings.command_id,
+        "source_label": app.import_warnings.source_label,
+    }))
+}
+
 fn dispatch_ui_copy_for_slides(app: &mut UiApp, params: &Value) -> Result<Value, ControlCallError> {
     require_params_object_or_null(params, "ui.clipboard.copyForSlides")?;
     let sheet_id = resolve_renderable_sheet_id(app.document(), params).map_err(ControlCallError::from)?;
@@ -3784,6 +3853,9 @@ const fn active_dialog_name(dialog: &ActiveDialog) -> &'static str {
         ActiveDialog::Checkpoints => "Checkpoints",
         ActiveDialog::About => "About",
         ActiveDialog::Feedback => "Feedback",
+        ActiveDialog::ImportWarnings => "ImportWarnings",
+        ActiveDialog::ImportProjectMode { .. } => "ImportProjectMode",
+        ActiveDialog::CsvExportOptions(_) => "CsvExportOptions",
     }
 }
 
