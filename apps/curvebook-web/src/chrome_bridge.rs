@@ -1932,6 +1932,7 @@ pub fn resolve_web_command_route(app: &UiApp, raw_command_id: &str) -> WebComman
             "ui.theme.set" => json!({ "mode": variant }),
             "ui.locale.set" => json!({ "locale": variant }),
             "ui.previewFilter.set" => json!({ "filter": variant }),
+            "ui.workspacePreset.set" => json!({ "preset": variant }),
             "ui.canvas.applyPreset" => json!({ "sheet_id": active_render, "preset": variant }),
             "ui.rulers.toggle" => json!({ "unit": variant }),
             _ => json!({ "variant": variant }),

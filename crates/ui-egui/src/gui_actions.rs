@@ -2762,6 +2762,19 @@ fn commit_format_points_action(app: &mut UiApp) -> Result<Value, EngineError> {
     Ok(json!({ "action": "ok", "formatted_count": count, "outcomes": outcomes }))
 }
 
+fn maybe_open_nonlinear_fit_params(app: &mut UiApp, sheet_id_str: &str, from_physical_gui: bool) {
+    if !from_physical_gui {
+        return;
+    }
+    let Ok(rs_id) = SheetId::try_new(sheet_id_str) else {
+        return;
+    };
+    let doc = app.session.document().clone();
+    if doc.result_sheet(&rs_id).is_some_and(|rs| matches!(rs.analysis.kind, AnalysisKind::NonlinearRegression(_))) {
+        let _ = app.canvas_dialogs.open_edit_parameters(&doc, &rs_id);
+    }
+}
+
 fn commit_analyze_sheet_action(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
     let tab_id_opt = app.canvas_dialogs.analyze.extracted_result_tab_id.clone();
     let src_id_opt = app.canvas_dialogs.analyze.source_sheet_id.clone();
@@ -2787,11 +2800,13 @@ fn commit_analyze_sheet_action(app: &mut UiApp, params: &Value) -> Result<Value,
         app.canvas_dialogs.analyze.extracted_result_tab_id = None;
     }
 
+    let from_physical_gui = params.is_null();
     let force_new = opt_bool_param(params, &["force_create_new"]).map_err(bad_input)?.unwrap_or(false);
     if !force_new && let Some(intent) = app.canvas_dialogs.submit_analyze_or_prompt(app.session.document()) {
         let out = app.execute_command(&intent.command_id, intent.params)?;
         if let Some(new_id) = out.payload.get("sheet_id").and_then(Value::as_str) {
             let _ = app.execute_command("sheet.select", json!({ "sheet_id": new_id }));
+            maybe_open_nonlinear_fit_params(app, new_id, from_physical_gui);
         }
         return Ok(json!({ "action": "ok", "mutated": out.mutated, "payload": out.payload }));
     }
@@ -2800,14 +2815,16 @@ fn commit_analyze_sheet_action(app: &mut UiApp, params: &Value) -> Result<Value,
     }
     let intent = app.canvas_dialogs.analyze.build_create_new_intent().ok_or_else(|| bad_input("Analyze selection incomplete"))?;
     let out = app.execute_command(&intent.command_id, intent.params)?;
+    app.canvas_dialogs.close_dialog();
     if let Some(new_id) = out.payload.get("sheet_id").and_then(Value::as_str) {
         let _ = app.execute_command("sheet.select", json!({ "sheet_id": new_id }));
+        maybe_open_nonlinear_fit_params(app, new_id, from_physical_gui);
     }
-    app.canvas_dialogs.close_dialog();
     Ok(json!({ "action": "ok", "mutated": out.mutated, "payload": out.payload }))
 }
 
 fn commit_duplicate_prompt(app: &mut UiApp, existing_ids: &[SheetId], params: &Value) -> Result<Value, EngineError> {
+    let from_physical_gui = params.is_null();
     let raw_choice = match params.get("choice") {
         Some(v) => Some(v),
         None => params.get("fields").and_then(Value::as_object).and_then(|f| f.get("choice")),
@@ -2836,6 +2853,7 @@ fn commit_duplicate_prompt(app: &mut UiApp, existing_ids: &[SheetId], params: &V
     let out = commit_single_intent(app, Some(intent), true)?;
     if let Some(new_id) = out.get("payload").and_then(|p| p.get("sheet_id")).and_then(Value::as_str) {
         let _ = app.execute_command("sheet.select", json!({ "sheet_id": new_id }));
+        maybe_open_nonlinear_fit_params(app, new_id, from_physical_gui);
     }
     app.view_shards.analyze_picker.duplicate_choice = crate::views::analyze_picker::DuplicateChoice::CreateNew;
     app.view_shards.analyze_picker.duplicate_target_id = None;

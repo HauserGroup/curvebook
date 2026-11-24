@@ -10,7 +10,7 @@ use crate::UiApp;
 use crate::dialogs_canvas::{ActiveDialog, SplitWorkspaceState};
 use crate::egui_shell::command_palette::{commit_unified_search_item, paint_inline_ghost_completion, paint_unified_search_row_content};
 use crate::egui_shell::inspect_bridge::HybridCoexistenceDecision;
-use crate::egui_shell::top_bar_fit::{MIN_SWITCHER_PT, RankedToolbarSlot, RightWidths, SearchVisibility, fit_ranked_toolbar, fit_right_group};
+use crate::egui_shell::top_bar_fit::{RankedToolbarSlot, RightWidths, SearchVisibility, fit_ranked_toolbar, fit_right_group};
 use crate::egui_shell::{
     ActionRank, FrameInspectEntryInput, FrameInspectMeta, FrameInspectNodeMeta, PendingUiIntents, ResponsiveShellLayout, Tokens, UiIntent,
     WorkspacePreset,
@@ -44,6 +44,13 @@ pub fn submenu_variants_for_command(command_id: &str) -> Option<&'static [(&'sta
             ("Tritanopia", "tritanopia"),
             ("Grayscale Print", "grayscale"),
         ]),
+        "ui.workspacePreset.set" => Some(&[
+            ("Default", "default"),
+            ("Data Prep", "data_prep"),
+            ("Modeling", "modeling"),
+            ("Publication", "publication"),
+            ("Compact", "compact"),
+        ]),
         "ui.canvas.applyPreset" | "graph.applyCanvasPreset" | "layout.applyCanvasPreset" => Some(&[
             ("Single Column (88 mm)", "SingleColumn88mm"),
             ("1.5 Column (130 mm)", "ColumnAndHalf130mm"),
@@ -67,6 +74,7 @@ fn is_submenu_variant_selected(app: &UiApp, command_id: &str, variant: &str) -> 
             Some(active == variant)
         }
         "ui.previewFilter.set" => Some(app.preview_filter.as_str() == variant),
+        "ui.workspacePreset.set" => Some(app.egui_views.workspace_preset.as_str() == variant),
         _ => None,
     }
 }
@@ -238,7 +246,6 @@ struct Tier1PopupsInput<'a> {
     app: &'a UiApp,
     tokens: &'a Tokens,
     enabled: bool,
-    workspace_preset: WorkspacePreset,
     search_recents: &'a SearchRecents,
 }
 
@@ -252,7 +259,6 @@ struct Tier1BarInput<'a> {
 #[derive(Default)]
 struct Tier1Anchors {
     split: Option<Rect>,
-    preset: Option<Rect>,
     search_capsule: Option<Rect>,
 }
 
@@ -383,7 +389,7 @@ pub fn render_top_chrome(
         state.overflow_menu_open = false;
     }
 
-    let popup_ctx = Tier1PopupsInput { app, tokens, enabled, workspace_preset: ctx_in.workspace_preset, search_recents: ctx_in.search_recents };
+    let popup_ctx = Tier1PopupsInput { app, tokens, enabled, search_recents: ctx_in.search_recents };
     if state.search_dropdown_open
         && enabled
         && let Some(anchor) = tier1_anchors.search_capsule
@@ -394,11 +400,6 @@ pub fn render_top_chrome(
         && let Some(anchor) = tier1_anchors.split
     {
         render_split_preset_popup(ui.ctx(), &popup_ctx, state, anchor, meta, intents);
-    }
-    if state.preset_menu_open
-        && let Some(anchor) = tier1_anchors.preset
-    {
-        render_workspace_preset_popup(ui.ctx(), &popup_ctx, state, anchor, meta, intents);
     }
     if state.overflow_menu_open
         && let Some(anchor) = tier2_overflow.anchor
@@ -499,9 +500,6 @@ fn estimate_tier1_right_width(fitted: &crate::egui_shell::top_bar_fit::RightGrou
     }
     if fitted.split_toggle {
         parts.push(58.0);
-    }
-    if fitted.switcher {
-        parts.push(fitted.switcher_w.max(MIN_SWITCHER_PT));
     }
     let gaps = parts.len().saturating_sub(1) as f32 * 6.0;
     parts.into_iter().sum::<f32>() + gaps
@@ -877,6 +875,11 @@ fn push_menu_command_intent(app: &UiApp, command_id: &str, variant: Option<&str>
             "ui.theme.set" => intents.push_ui("ui.theme.set", json!({ "mode": var })),
             "ui.locale.set" => intents.push_ui("ui.locale.set", json!({ "locale": var })),
             "ui.previewFilter.set" => intents.push_ui("ui.previewFilter.set", json!({ "filter": var })),
+            "ui.workspacePreset.set" => {
+                if let Some(preset) = WorkspacePreset::parse(var) {
+                    intents.push(UiIntent::ApplyWorkspacePreset { preset });
+                }
+            }
             "ui.canvas.applyPreset" | "graph.applyCanvasPreset" | "layout.applyCanvasPreset" => {
                 let mut params = json!({ "preset": var, "resize_mode": "KeepTypographyPt" });
                 if let Some(sid) = super::command_palette::resolve_renderable_sheet_id_for_menu(app.document())
@@ -976,29 +979,6 @@ fn render_tier1_right_group(
             let next = !state.split_menu_open;
             state.close_all_popups();
             state.split_menu_open = next;
-        }
-    }
-
-    if fitted.switcher {
-        let preset_resp = chrome_button_fitted(
-            ui,
-            tokens,
-            meta,
-            ChromeButtonSpec {
-                widget_id: "toolbar.preset",
-                label: ctx_in.workspace_preset.label(),
-                command_id: None,
-                selected: state.preset_menu_open,
-                enabled,
-                disabled_reason: modal_reason(enabled),
-                max_w: fitted.switcher_w.max(MIN_SWITCHER_PT),
-            },
-        );
-        anchors.preset = Some(preset_resp.rect);
-        if preset_resp.clicked() && enabled {
-            let next = !state.preset_menu_open;
-            state.close_all_popups();
-            state.preset_menu_open = next;
         }
     }
 }
@@ -1455,48 +1435,6 @@ fn render_split_preset_popup(
 
     if !input.enabled || popup_dismissed(ctx, area.response.rect, anchor) {
         state.split_menu_open = false;
-    }
-}
-
-fn render_workspace_preset_popup(
-    ctx: &egui::Context,
-    input: &Tier1PopupsInput<'_>,
-    state: &mut TopChromeEguiState,
-    anchor: Rect,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
-    let tokens = input.tokens;
-    let pos = clamp_popup_pos(ctx, Pos2::new(anchor.left(), anchor.bottom() + 4.0), 172.0, 160.0);
-    let area = egui::Area::new(Id::unique("egui_shell.workspace.preset_popup")).fixed_pos(pos).order(Order::Foreground).show(ctx, |ui| {
-        egui::Frame::NONE
-            .fill(tokens.panel_bg)
-            .stroke(Stroke::new(1.0, tokens.border))
-            .corner_radius(CornerRadius::same(6))
-            .inner_margin(egui::Margin::same(6))
-            .show(ui, |ui| {
-                ui.set_min_width(160.0);
-                ui.spacing_mut().item_spacing.y = 4.0;
-                for preset in WorkspacePreset::ALL {
-                    let selected = preset == input.workspace_preset;
-                    let label = if selected { format!("✓ {}", preset.label()) } else { preset.label().to_owned() };
-                    let wid = preset_widget_id(preset);
-                    let resp = popup_action_button(
-                        ui,
-                        tokens,
-                        meta,
-                        PopupActionButtonSpec { widget_id: wid, label: &label, selected, enabled: true, disabled_reason: None },
-                    );
-                    if resp.clicked() {
-                        intents.push(UiIntent::ApplyWorkspacePreset { preset });
-                        state.preset_menu_open = false;
-                    }
-                }
-            });
-    });
-
-    if !input.enabled || popup_dismissed(ctx, area.response.rect, anchor) {
-        state.preset_menu_open = false;
     }
 }
 
@@ -2266,16 +2204,6 @@ fn collect_two_up_pair(doc: &curvebook_doc::ProjectDocument, split: &SplitWorksp
     let primary = doc.active_sheet_id.as_ref().or(split.primary_sheet_id.as_ref()).map_or_else(|| ids[0].clone(), |id| id.as_str().to_owned());
     let secondary = ids.iter().find(|id| *id != &primary).cloned().unwrap_or_else(|| ids[1].clone());
     Some((primary, secondary))
-}
-
-const fn preset_widget_id(preset: WorkspacePreset) -> &'static str {
-    match preset {
-        WorkspacePreset::Default => "toolbar.preset.default",
-        WorkspacePreset::DataPrep => "toolbar.preset.data_prep",
-        WorkspacePreset::Modeling => "toolbar.preset.modeling",
-        WorkspacePreset::Publication => "toolbar.preset.publication",
-        WorkspacePreset::Compact => "toolbar.preset.compact",
-    }
 }
 
 fn clamp_popup_pos(ctx: &egui::Context, desired: Pos2, w: f32, h: f32) -> Pos2 {

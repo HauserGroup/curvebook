@@ -269,6 +269,7 @@ fn build_view_menu(app: &UiApp) -> CuratedMenuSection {
     push_action(&mut nodes, app, "ui.family.toggle", Some("menu.view.family_pane"));
     push_action(&mut nodes, app, "ui.split.toggle", None);
     push_action(&mut nodes, app, "ui.gallery.toggle", None);
+    push_action(&mut nodes, app, "ui.workspacePreset.set", None);
     nodes.push(CuratedMenuNode::Separator);
     push_action(&mut nodes, app, "ui.rulers.toggle", None);
     push_action(&mut nodes, app, "ui.gridOverlay.toggle", None);

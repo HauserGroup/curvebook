@@ -97,7 +97,7 @@ fn top_chrome_all_14_beta_locales_zero_bleed_640x420_and_1440x600() -> Result<()
             assert!((wide_t1.height() - 32.0).abs() <= 1.0, "tier1 height should be 32pt, got {}", wide_t1.height());
             assert!((wide_t2.height() - 38.0).abs() <= 1.0, "tier2 height should be 38pt, got {}", wide_t2.height());
             assert!(driver.frame_meta().find_by_widget_id("toolbar.command_palette").is_some(), "{locale} wide must show Cmd+K field");
-            assert!(driver.frame_meta().find_by_widget_id("toolbar.preset").is_some(), "{locale} wide must show Preset switcher");
+            assert!(driver.frame_meta().find_by_widget_id("toolbar.preset").is_none(), "{locale} wide must not show Preset switcher on main bar");
 
             // Narrow responsive breakpoint 640x420 @ 1.5x HiDPI: must collapse gracefully with zero bleed/wrapping.
             driver.set_viewport(ViewportMetrics::new(640.0, 420.0, 1.5));
@@ -249,7 +249,7 @@ fn verify_info_layout_and_overflow(driver: &mut EguiHumanPathDriver<'_, TopChrom
 
 #[test]
 fn top_chrome_split_presets_and_workspace_presets() -> Result<(), String> {
-    let mut state = TopChromeHarnessState::new("en", true);
+    let mut state = TopChromeHarnessState::new("en", false);
     state
         .app
         .execute_command("sheet.createData", json!({ "sheet_id": "ds-s1", "title": "Assay Data", "kind": "xy", "cols": 2, "rows": 5 }))
@@ -262,19 +262,26 @@ fn top_chrome_split_presets_and_workspace_presets() -> Result<(), String> {
     let mut driver = EguiHumanPathDriver::new(state, ViewportMetrics::new(1440.0, 600.0, 1.0), render_top_chrome_harness);
     driver.set_bleed_policy(TextBleedPolicy::AllowVerticalScrollClip);
 
-    // 1. Workspace Preset Switcher (`Default`, `Data Prep`, `Modeling`, `Publication`, `Compact`).
-    driver.click_widget_id("toolbar.preset")?;
-    for wid in
-        ["toolbar.preset.default", "toolbar.preset.data_prep", "toolbar.preset.modeling", "toolbar.preset.publication", "toolbar.preset.compact"]
-    {
-        let entry = driver.frame_meta().find_by_widget_id(wid).ok_or_else(|| format!("preset switcher popup missing `{wid}`"))?;
+    // 1. Workspace Preset Switcher lives in View -> Workspace Preset (not on the main Tier 1 bar).
+    assert!(driver.frame_meta().find_by_widget_id("toolbar.preset").is_none(), "workspace preset switcher must not appear on main Tier 1 bar");
+    driver.click_widget_id("menu.view")?;
+    driver.hover_widget_id("menu.ui.workspacePreset.set")?;
+    for wid in [
+        "popup.menu.ui.workspacePreset.set.opt.default",
+        "popup.menu.ui.workspacePreset.set.opt.data_prep",
+        "popup.menu.ui.workspacePreset.set.opt.modeling",
+        "popup.menu.ui.workspacePreset.set.opt.publication",
+        "popup.menu.ui.workspacePreset.set.opt.compact",
+    ] {
+        let entry = driver.frame_meta().find_by_widget_id(wid).ok_or_else(|| format!("View -> Workspace Preset submenu missing `{wid}`"))?;
         assert_eq!(entry.z_layer, ZLayer::DropdownMenu);
     }
-    driver.click_widget_id("toolbar.preset.publication")?;
+    driver.click_widget_id("popup.menu.ui.workspacePreset.set.opt.publication")?;
     assert_eq!(driver.state().app.egui_views.workspace_preset, WorkspacePreset::Publication);
 
-    driver.click_widget_id("toolbar.preset")?;
-    driver.click_widget_id("toolbar.preset.compact")?;
+    driver.click_widget_id("menu.view")?;
+    driver.hover_widget_id("menu.ui.workspacePreset.set")?;
+    driver.click_widget_id("popup.menu.ui.workspacePreset.set.opt.compact")?;
     assert_eq!(driver.state().app.egui_views.workspace_preset, WorkspacePreset::Compact);
 
     // 2. Split Preset Selector (`Data + Graph`, `Swap Panes`, `Single Pane`, plus `Cmd+\`).
@@ -398,13 +405,7 @@ fn da_05_06_top_chrome_popups_dismiss_on_escape() -> Result<(), String> {
     driver.press_egui_key(Key::Escape, Modifiers::NONE);
     assert!(driver.frame_meta().find_by_widget_id("toolbar.split.preset.data_graph").is_none(), "Escape must dismiss split preset popup");
 
-    // 2. Workspace preset popup dismisses on Escape.
-    driver.click_widget_id("toolbar.preset")?;
-    assert!(driver.frame_meta().find_by_widget_id("toolbar.preset.default").is_some(), "preset popup should be open");
-    driver.press_egui_key(Key::Escape, Modifiers::NONE);
-    assert!(driver.frame_meta().find_by_widget_id("toolbar.preset.default").is_none(), "Escape must dismiss workspace preset popup");
-
-    // 3. Tier2 overflow popup dismisses on Escape (narrow viewport forces overflow button).
+    // 2. Tier2 overflow popup dismisses on Escape (narrow viewport forces overflow button).
     driver.set_viewport(ViewportMetrics::new(640.0, 420.0, 1.0));
     driver.click_widget_id("toolbar.overflow")?;
     assert!(driver.frame_meta().find_by_widget_id("toolbar.overflow.item.0").is_some(), "tier2 overflow popup should be open");

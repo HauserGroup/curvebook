@@ -3629,6 +3629,10 @@ fn resolve_host_or_ui_route(
             let filter = variant.unwrap_or_else(|| next_preview_filter_name(app.preview_filter));
             Ok(Some(DesktopCommandRoute::UiCommand { ui_command_id: String::from("ui.previewFilter.set"), params: json!({ "filter": filter }) }))
         }
+        "ui.workspacePreset.set" => {
+            let preset = variant.unwrap_or("default");
+            Ok(Some(DesktopCommandRoute::UiCommand { ui_command_id: String::from("ui.workspacePreset.set"), params: json!({ "preset": preset }) }))
+        }
         "ui.locale.set" => {
             let locale = variant.unwrap_or_else(|| next_locale_code(&app.locale));
             Ok(Some(DesktopCommandRoute::UiCommand { ui_command_id: String::from("ui.locale.set"), params: json!({ "locale": locale }) }))
@@ -4273,6 +4277,7 @@ fn shortcut_uses_desktop_routing(command_id: &str) -> bool {
                 | "ui.theme.set"
                 | "ui.locale.set"
                 | "ui.previewFilter.set"
+                | "ui.workspacePreset.set"
                 | "ui.canvas.applyPreset"
                 | "ui.shortcut.set"
                 | "ui.result.applyRemediation"

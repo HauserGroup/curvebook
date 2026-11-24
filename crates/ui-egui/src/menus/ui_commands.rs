@@ -292,6 +292,15 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         rank: ActionRank::Overflow,
     },
     UiCommandSpec {
+        id: "ui.workspacePreset.set",
+        label: "Workspace Preset",
+        shortcut: "",
+        params_doc: "{\"preset\":\"default|data_prep|modeling|publication|compact\"}",
+        summary: "Switch the workspace dock layout preset (Default, Data Prep, Modeling, Publication, or Compact).",
+        beginner: "Adjusts navigator, family pane, and inspector dock widths for your current workflow.",
+        rank: ActionRank::Overflow,
+    },
+    UiCommandSpec {
         id: "ui.grid.excludeWithReason",
         label: "Exclude Selection with Auditable Reason...",
         shortcut: "Cmd+Shift+E",

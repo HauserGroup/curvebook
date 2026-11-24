@@ -293,6 +293,11 @@ impl EguiWfHarness {
 
     /// Select `id` via the Project Navigator filter chip and sheet tree row.
     pub fn select_sheet(&mut self, id: &SheetId) -> TestRes {
+        if self.app().document().active_sheet_id.as_ref() == Some(id)
+            && matches!(self.app().canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. })
+        {
+            return Ok(());
+        }
         let wid = format!("nav.sheet.{}", id.as_str());
         if self.driver.frame_meta().find_by_widget_id(&wid).is_none() {
             let chip = match self.app().document().sheet_section(id) {
@@ -349,8 +354,11 @@ impl EguiWfHarness {
         Ok(sid)
     }
 
-    /// Open `EditAnalysisParameters` via `Cmd+T`.
+    /// Open `EditAnalysisParameters` via `Cmd+T` (no-op if already open, e.g. auto-opened after Nonlinear Fit creation).
     pub fn open_cmd_t(&mut self) -> TestRes {
+        if matches!(self.app().canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }) {
+            return Ok(());
+        }
         self.driver.press_key("T", KeyModifiers { meta: true, ..Default::default() })?;
         if !matches!(self.app().canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }) {
             return Err(format!("Cmd+T failed to open EditAnalysisParameters: {:?}", self.app().canvas_dialogs.active_dialog));

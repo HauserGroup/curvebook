@@ -149,6 +149,7 @@ pub(crate) fn ui_command_menu_info(id: &str) -> (&'static str, &'static str) {
         "ui.locale.set" => ("menu.view", "View/Language"),
         "ui.theme.set" => ("menu.view", "View/Theme"),
         "ui.previewFilter.set" => ("menu.view", "View/Colorblind Preview"),
+        "ui.workspacePreset.set" => ("menu.view", "View/Workspace Preset"),
         "ui.split.toggle" => ("menu.view", "View/Split Workspace"),
         "ui.screenshot" => ("menu.view", "View/Capture Screenshot"),
         "ui.event.dispatch" => ("menu.view", "Tools/Dispatch UI Event"),

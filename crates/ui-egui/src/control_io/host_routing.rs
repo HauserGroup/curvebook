@@ -79,7 +79,13 @@ pub fn split_variant_command(command_id: &str) -> (&str, Option<&str>) {
     };
     if matches!(
         prefix,
-        "ui.theme.set" | "ui.locale.set" | "ui.previewFilter.set" | "ui.canvas.applyPreset" | "graph.applyCanvasPreset" | "layout.applyCanvasPreset"
+        "ui.theme.set"
+            | "ui.locale.set"
+            | "ui.previewFilter.set"
+            | "ui.workspacePreset.set"
+            | "ui.canvas.applyPreset"
+            | "graph.applyCanvasPreset"
+            | "layout.applyCanvasPreset"
     ) && !suffix.trim().is_empty()
     {
         (prefix, Some(suffix.trim()))
@@ -97,6 +103,7 @@ pub fn is_read_only_ui_command(command_id: &str) -> bool {
         "app.about"
             | "app.feedback"
             | "ui.previewFilter.set"
+            | "ui.workspacePreset.set"
             | "ui.rulers.toggle"
             | "ui.theme.set"
             | "ui.locale.set"

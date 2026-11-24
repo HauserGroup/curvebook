@@ -1226,6 +1226,7 @@ fn lookup_ui_command_handler(command_id: &str) -> Option<UiCommandHandler> {
         "ui.canvas.applyPreset" => Some(dispatch_ui_canvas_apply_preset),
         "ui.canvas.preflight" => Some(dispatch_ui_canvas_preflight),
         "ui.previewFilter.set" => Some(|app, p| map_ui_err(dispatch_ui_preview_filter_set(app, p))),
+        "ui.workspacePreset.set" => Some(|app, p| map_ui_err(dispatch_ui_workspace_preset_set(app, p))),
         "ui.grid.excludeWithReason" => Some(dispatch_ui_grid_exclude_with_reason),
         "ui.table.convertArchetype.open" => Some(|app, p| map_ui_err(dispatch_ui_table_convert_archetype_open(app, p))),
         "ui.table.randomizeGroups" => Some(|app, p| map_ui_err(dispatch_ui_randomize_groups_open(app, p))),
@@ -2786,6 +2787,21 @@ fn dispatch_ui_preview_filter_set(app: &mut UiApp, params: &Value) -> Result<Val
     let filter = CanvasPreviewFilter::from_name(raw).ok_or_else(|| format!("unknown preview filter `{raw}`"))?;
     app.preview_filter = filter;
     Ok(json!({ "preview_filter": app.preview_filter.as_str() }))
+}
+
+fn dispatch_ui_workspace_preset_set(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let raw = opt_non_empty_str_param(params, &["preset"])?.ok_or_else(|| String::from("missing non-empty `preset` string"))?;
+    let preset = crate::egui_shell::WorkspacePreset::parse(raw).ok_or_else(|| format!("unknown workspace preset `{raw}`"))?;
+    let cfg = preset.default_dock_config();
+    app.nav.navigator_open = cfg.navigator_open;
+    app.family_open = cfg.family_open;
+    app.nav.inspector_open = cfg.inspector_open;
+    app.egui_views.workspace_preset = preset;
+    app.egui_views.leading_collapsed_rail = cfg.leading_collapsed_rail;
+    app.egui_views.trailing_collapsed_rail = cfg.trailing_collapsed_rail;
+    app.egui_views.leading_width_pt = Some(cfg.leading_width_pt);
+    app.egui_views.trailing_width_pt = Some(cfg.trailing_width_pt);
+    Ok(json!({ "workspace_preset": app.egui_views.workspace_preset.as_str() }))
 }
 
 fn dispatch_ui_grid_exclude_with_reason(app: &mut UiApp, params: &Value) -> Result<Value, ControlCallError> {

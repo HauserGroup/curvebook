@@ -931,3 +931,50 @@ fn r13_1_human_replicate_interpolation_tabs() -> TestRes {
     assert_zero_shortcut_compliance(&mut h)?;
     assert_input_to_paint_budget(&h, 50.0)
 }
+
+#[test]
+fn nonlinear_analyze_ok_auto_opens_fit_params_modal() -> TestRes {
+    let mut xy = XyTable::new(SubcolumnMode::Single, 1, 5).map_err(|e| e.to_string())?;
+    for (r, (x, y)) in [(0.5, 10.0), (1.0, 18.0), (2.5, 32.0), (5.0, 45.0), (10.0, 56.0)].into_iter().enumerate() {
+        xy.x_cells[r][0] = Cell::number(x);
+        xy.data_sets[0].cells[r][0] = Cell::number(y);
+    }
+    let sheet = DataSheet::new("xy-auto-fit", "Enzyme", TableArchetype::Xy(xy)).map_err(|e| e.to_string())?;
+    let mut doc = ProjectDocument::new("Auto open fit params").map_err(|e| e.to_string())?;
+    doc.add_data_sheet(sheet).map_err(|e| e.to_string())?;
+    let app = curvebook_ui_egui::UiApp::from_session(Session::from_document(doc));
+    let mut h = EguiWfHarness::from_app(app, ViewportMetrics::new(1280.0, 800.0, 1.0));
+
+    h.select_sheet(&SheetId::from("xy-auto-fit"))?;
+    let fit_id = h.run_analyze_entry("Nonlinear", "analyze.entry.fit.nonlinear")?;
+
+    // Nonlinear curve fit creation via Analyze Data OK must immediately open the
+    // Nonlinear Curve Fitting (Parameters / Cmd+T) modal on the Model tab.
+    ensure(
+        matches!(
+            &h.app().canvas_dialogs.active_dialog,
+            curvebook_ui_egui::dialogs_canvas::ActiveDialog::EditAnalysisParameters { result_sheet_id } if *result_sheet_id == fit_id
+        ),
+        format!("expected EditAnalysisParameters to auto-open for `{fit_id}`, got {:?}", h.app().canvas_dialogs.active_dialog),
+    )?;
+    ensure(
+        h.driver.frame_meta().find_by_widget_id("fit.eq.search").is_some(),
+        "expected Model tab equation search (`fit.eq.search`) to be immediately visible",
+    )?;
+
+    // User can pick a nonlinear model right away without pressing Cmd+T.
+    h.click("fit.eq.search")?;
+    h.driver.type_text("michaelis")?;
+    h.click("fit.eq.item.michaelis_menten")?;
+    h.click("modal.ok")?;
+    ensure(
+        h.app().canvas_dialogs.active_dialog == curvebook_ui_egui::dialogs_canvas::ActiveDialog::None,
+        "expected modal to close after confirming model selection",
+    )?;
+    let rs = h.app().document().result_sheet(&fit_id).ok_or("missing fit result sheet")?;
+    ensure(
+        matches!(&rs.analysis.kind, AnalysisKind::NonlinearRegression(nl) if nl.equation_id == "michaelis_menten"),
+        "expected michaelis_menten to persist after immediate model selection",
+    )?;
+    Ok(())
+}
