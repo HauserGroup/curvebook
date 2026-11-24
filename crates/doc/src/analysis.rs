@@ -1151,6 +1151,55 @@ impl Default for LinearRegressionSpec {
     }
 }
 
+/// Standalone simple logistic regression specification on single-subcolumn `XY` tables with
+/// binary outcomes `Y in {0, 1}` (`crates/stats::simple_logistic`; Hosmer, Lemeshow & Sturdivant 2013;
+/// Tjur 2009; Heinze & Schemper 2002).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct SimpleLogisticSpec {
+    /// When `true` (default), includes a `Row Classification` output tab listing observed `(X_i, Y_i)`,
+    /// predicted probabilities `P_hat(X_i)` with confidence intervals, and automatic predictions for
+    /// appended `(X_new, blank Y)` rows.
+    pub emit_row_classification: bool,
+    /// When `true` (default), samples two-sided confidence bands around the fitted sigmoid probability
+    /// curve at [`AnalysisSpec::confidence_level`].
+    pub confidence_bands: bool,
+    /// Classification probability threshold in `(0, 1)` used to classify predicted probabilities into
+    /// `0`/`1` in the `Row Classification` tab and confusion summary (default `0.5`).
+    pub classification_cutoff: f64,
+    /// Optional fitted-curve starting *X*, overriding the automatic data-driven minimum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plot_x_min: Option<f64>,
+    /// Optional fitted-curve ending *X*, overriding the automatic data-driven maximum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plot_x_max: Option<f64>,
+    /// Optional number of sigmoid curve segments (`1..=10_000`; default `100`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plot_segments: Option<usize>,
+}
+
+impl SimpleLogisticSpec {
+    /// Default number of segments for the fitted sigmoid probability curve.
+    pub const DEFAULT_PLOT_SEGMENTS: usize = 100;
+    /// Maximum allowed number of segments for the fitted sigmoid probability curve.
+    pub const MAX_PLOT_SEGMENTS: usize = 10_000;
+    /// Default classification probability threshold (`0.5`).
+    pub const DEFAULT_CLASSIFICATION_CUTOFF: f64 = 0.5;
+}
+
+impl Default for SimpleLogisticSpec {
+    fn default() -> Self {
+        Self {
+            emit_row_classification: true,
+            confidence_bands: true,
+            classification_cutoff: Self::DEFAULT_CLASSIFICATION_CUTOFF,
+            plot_x_min: None,
+            plot_x_max: None,
+            plot_segments: None,
+        }
+    }
+}
+
 /// Differential weighting scheme for nonlinear regression (`docs/implementation/curve-fitting-implementation.md` §1.1).
 #[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum WeightingScheme {
@@ -1175,6 +1224,72 @@ pub enum WeightingScheme {
     /// Empirical replicate variance weighting `1 / SD_i^2` across replicates at each row.
     #[serde(alias = "observed_sd")]
     ObservedSd,
+}
+
+/// Basis used to evaluate response-dependent weights (`RelativeSquare`, `Relative`, `GeneralPowerY`).
+///
+/// Reference: Carroll, R. J. & Ruppert, D. (1988). *Transformation and Weighting in Regression*. Chapman & Hall.
+/// Reference: Motulsky, H. & Christopoulos, A. (2004). *Fitting Models to Biological Data Using Linear and Nonlinear Regression*. Oxford University Press.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum WeightingSource {
+    /// Static weights computed from observed responses `y_i` (legacy/default for backward compatibility).
+    #[default]
+    #[serde(alias = "observed_y", alias = "observed", alias = "data")]
+    ObservedY,
+    /// Iteratively reweighted least squares (IRLS) weights computed from fitted curve heights `y_hat_i = f(x_i; theta)`.
+    #[serde(alias = "predicted_y", alias = "predicted", alias = "curve", alias = "y_curve", alias = "irls")]
+    PredictedY,
+}
+
+/// Outlier detection and elimination policy for nonlinear regression (Motulsky & Brown 2006).
+///
+/// Reference: Motulsky, H. J. & Brown, R. E. (2006). Detecting outliers when fitting data with nonlinear regression – a new method based on robust nonlinear regression and the false discovery rate. *BMC Bioinformatics* 7, 123. doi:10.1186/1471-2105-7-123
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum OutlierHandling {
+    /// No separate ROUT outlier handling override (uses [`FitMethod`] directly).
+    #[default]
+    #[serde(alias = "none", alias = "off", alias = "disabled")]
+    None,
+    /// Identify and count ROUT outliers (emitting the outlier audit table and counts) while retaining all observations in the least-squares fit.
+    #[serde(alias = "identify_and_count_only", alias = "count_only", alias = "identify_only", alias = "count")]
+    IdentifyAndCountOnly,
+    /// Identify and exclude ROUT outliers before refitting least squares on the retained inliers.
+    #[serde(alias = "eliminate", alias = "remove", alias = "exclude")]
+    Eliminate,
+}
+
+/// How replicate observations within each table row enter the nonlinear regression objective.
+///
+/// Reference: Motulsky, H. & Christopoulos, A. (2004). *Fitting Models to Biological Data Using Linear and Nonlinear Regression*. Oxford University Press.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum ReplicateFitMode {
+    /// Treat each replicate subcell as an individual observation (or expand `(Mean, SD, n)` sufficient statistics with `n` degrees of freedom).
+    #[default]
+    #[serde(alias = "individual_replicates", alias = "individual", alias = "replicates", alias = "all")]
+    IndividualReplicates,
+    /// Collapse each row's active replicates to its unweighted sample mean with `1` observation per row (for technical replicates sharing one biological unit).
+    #[serde(alias = "row_means_only", alias = "row_means", alias = "means_only", alias = "means")]
+    RowMeansOnly,
+}
+
+/// Convergence strictness preset controlling the Levenberg–Marquardt stopping criterion.
+///
+/// Reference: Moré, J. J. (1978). The Levenberg–Marquardt algorithm: implementation and theory. *Lecture Notes in Mathematics* 630, 105–116. doi:10.1007/BFb0067700
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum ConvergenceStrictness {
+    /// Machine-precision MINPACK-1 `ftol`/`xtol`/`gtol` stopping criteria (default).
+    #[default]
+    #[serde(alias = "default", alias = "minpack", alias = "machine")]
+    Default,
+    /// Fast stopping: `2` consecutive accepted iterations changing objective SS by `< 0.01%` (`1e-4`).
+    #[serde(alias = "quick", alias = "fast")]
+    Quick,
+    /// Balanced stopping: `5` consecutive accepted iterations changing objective SS by `< 0.0001%` (`1e-6`).
+    #[serde(alias = "medium", alias = "standard")]
+    Medium,
+    /// Tight stopping: `5` consecutive accepted iterations changing objective SS by `< 1e-8%` (`1e-10`).
+    #[serde(alias = "strict", alias = "tight")]
+    Strict,
 }
 
 /// Regression objective function (`docs/implementation/curve-fitting-implementation.md` §1.1).
@@ -1229,6 +1344,109 @@ pub struct ParameterRule {
     pub upper_bound: Option<f64>,
 }
 
+/// Parameter identifiability and ambiguity reporting mode for nonlinear regression
+/// (`docs/implementation/curve-fitting-implementation.md` §2.5.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum IdentifiabilityMode {
+    /// Assemble the converged objective Hessian `H` (`2 J^T W J` under WLS, Fisher information
+    /// under Poisson deviance) and greedily delete rows/columns until `kappa(H) <= 10 / sqrt(eps_mach)`,
+    /// marking dropped parameters `"Unstable"` while preserving well-conditioned parameters' SE/CIs.
+    #[default]
+    #[serde(alias = "identify_unstable_parameters", alias = "unstable")]
+    IdentifyUnstableParameters,
+    /// Legacy dependency criterion (`max_k Dependency_k > 0.9999` or rank-deficient Jacobian),
+    /// labeling the fit `"Ambiguous"`, prefixing tangled estimates with `~`, and omitting CIs.
+    #[serde(alias = "identify_ambiguous_fits", alias = "ambiguous")]
+    IdentifyAmbiguousFits,
+    /// Report raw converged parameter values unconditionally without unstable/ambiguous tagging.
+    #[serde(alias = "report_all", alias = "neither", alias = "none")]
+    ReportAll,
+}
+
+/// Statistical test criterion used to compare two candidate nonlinear models (§2.4, §2.5.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum ModelComparisonMethod {
+    /// Nested extra-sum-of-squares *F*-test (Motulsky & Christopoulos 2004).
+    #[default]
+    #[serde(alias = "extra_sum_of_squares_f", alias = "f_test", alias = "f")]
+    ExtraSumOfSquaresF,
+    /// Small-sample corrected Akaike Information Criterion (`AICc`, Burnham & Anderson 2002).
+    #[serde(alias = "aicc", alias = "aic")]
+    Aicc,
+    /// Nested deviance / Gaussian likelihood-ratio chi-square test (Wilks 1938).
+    #[serde(alias = "likelihood_ratio_test", alias = "lrt", alias = "likelihood_ratio")]
+    LikelihoodRatioTest,
+}
+
+/// Scientific hypothesis question evaluated by nonlinear model comparison (§2.5.2).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum ModelComparisonQuestion {
+    /// Compare the primary equation against a different candidate built-in equation.
+    AlternativeEquation {
+        /// Built-in equation ID of the competing/null model.
+        alternative_equation_id: String,
+    },
+    /// Test whether selected parameters share a single global value across datasets (`H_0`)
+    /// versus differing per dataset (`H_1`, e.g., parallel Hill slopes or shared plateaus).
+    ParameterInvarianceAcrossDatasets {
+        /// Equation parameter names constrained to [`ParameterScope::SharedGlobal`] under `H_0`
+        /// and freed to [`ParameterScope::Local`] under `H_1`.
+        shared_params: Vec<String>,
+    },
+    /// Test whether one global curve (all non-constant parameters [`ParameterScope::SharedGlobal`], `H_0`)
+    /// fits all datasets as well as separate per-dataset curves (all non-constant parameters [`ParameterScope::Local`], `H_1`).
+    SingleGlobalCurveVsSeparate,
+    /// Test whether constraining a single parameter to a theoretical constant (`theta_p = c`, `H_0`,
+    /// e.g., `HillSlope = 1.0`) degrades fit relative to leaving `param` free (`H_1`).
+    ParameterEqualsTheoretical {
+        /// Exact equation parameter name constrained under `H_0`.
+        param: String,
+        /// Theoretical null value `c` imposed under `H_0`.
+        theoretical_value: f64,
+    },
+}
+
+/// Automated 6-rule fit-quality flag criteria labeling dubious nonlinear fits `"Flagged"` (§2.5.4).
+///
+/// Each rule threshold is optional; a fit is labeled `"Flagged"` whenever any configured rule is violated.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct FitFlagRules {
+    /// Flag when unweighted `R^2` is strictly below this threshold (in `[0, 1]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_r_squared: Option<f64>,
+    /// Flag when the analyzed observation count `N` is strictly below this threshold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_observations: Option<usize>,
+    /// Flag when `max_k Dependency_k` strictly exceeds this threshold (in `[0, 1]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_dependency: Option<f64>,
+    /// Flag when any computed residual normality test *p*-value is strictly below this alpha (in `(0, 1)`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_normality_p: Option<f64>,
+    /// Flag when the runs test or replicates lack-of-fit *p*-value is strictly below this alpha (in `(0, 1)`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_runs_or_lof_p: Option<f64>,
+    /// Flag when the ROUT outlier count strictly exceeds this maximum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_rout_outliers: Option<usize>,
+    /// When `true`, exclude flagged replicates from batch/Monte Carlo parameter summary tabulations.
+    #[serde(default)]
+    pub exclude_flagged_from_summary: bool,
+}
+
+impl FitFlagRules {
+    /// Return `true` when at least one of the 6 automated flag rules is configured.
+    #[must_use]
+    pub const fn has_any_rule(&self) -> bool {
+        self.min_r_squared.is_some()
+            || self.min_observations.is_some()
+            || self.max_dependency.is_some()
+            || self.min_normality_p.is_some()
+            || self.min_runs_or_lof_p.is_some()
+            || self.max_rout_outliers.is_some()
+    }
+}
+
 /// Model-comparison configuration (`Extra-sum-of-squares F` vs `AICc` vs `LikelihoodRatioTest`; §2.4).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ModelComparisonSpec {
@@ -1247,6 +1465,28 @@ pub enum ModelComparisonSpec {
         /// Built-in equation ID of the competing nested model.
         alternative_equation_id: String,
     },
+}
+
+impl ModelComparisonSpec {
+    /// Statistical criterion represented by this legacy model-comparison specification.
+    #[must_use]
+    pub const fn method(&self) -> ModelComparisonMethod {
+        match self {
+            Self::ExtraSumOfSquaresF { .. } => ModelComparisonMethod::ExtraSumOfSquaresF,
+            Self::Aicc { .. } => ModelComparisonMethod::Aicc,
+            Self::LikelihoodRatioTest { .. } => ModelComparisonMethod::LikelihoodRatioTest,
+        }
+    }
+
+    /// Alternative built-in equation ID stored in this legacy model-comparison specification.
+    #[must_use]
+    pub fn alternative_equation_id(&self) -> &str {
+        match self {
+            Self::ExtraSumOfSquaresF { alternative_equation_id }
+            | Self::Aicc { alternative_equation_id }
+            | Self::LikelihoodRatioTest { alternative_equation_id } => alternative_equation_id.as_str(),
+        }
+    }
 }
 
 /// Complete nonlinear regression specification (`crates/fit`).
@@ -1318,6 +1558,63 @@ pub struct NonlinearFitSpec {
     /// Zero-based continuous dependent response column index on [`TableKind::MultipleVariables`] sources; `None` on `Xy` / `Grouped` tables.
     #[serde(default)]
     pub mv_y_column: Option<usize>,
+    /// Zero-based continuous dependent response column indices on [`TableKind::MultipleVariables`] sources (backward-compatible extension of `mv_y_column`; fits `M` responses x `G` groups).
+    #[serde(default)]
+    pub mv_y_columns: Vec<usize>,
+    /// Basis for response-dependent weighting (`ObservedY` static weights vs `PredictedY` curve-height IRLS).
+    #[serde(default)]
+    pub weighting_source: WeightingSource,
+    /// ROUT outlier handling mode (`None`, `IdentifyAndCountOnly`, or `Eliminate`).
+    #[serde(default)]
+    pub outlier_handling: OutlierHandling,
+    /// When `true` and ROUT outlier detection runs, emits an analyzable `"Cleaned data"` tab (and `ResultSheet::analyzable_data`) with ROUT outliers excluded.
+    #[serde(default)]
+    pub emit_cleaned_data_tab: bool,
+    /// Whether replicate subcolumns enter individually (`IndividualReplicates`) or collapse to unweighted row means (`RowMeansOnly`).
+    #[serde(default)]
+    pub replicate_fit_mode: ReplicateFitMode,
+    /// Convergence strictness preset (`Default` MINPACK machine precision, `Quick`, `Medium`, or `Strict`).
+    #[serde(default)]
+    pub convergence_strictness: ConvergenceStrictness,
+    /// Three-way identifiability reporting mode (`IdentifyUnstableParameters`, `IdentifyAmbiguousFits`,
+    /// or `ReportAll`; §2.5.1). `None` preserves legacy behavior (`IdentifyUnstableParameters` when
+    /// `identify_unstable_parameters == true`, otherwise unassessed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifiability_mode: Option<IdentifiabilityMode>,
+    /// Explicit override for `Std. Error` column visibility on the nonlinear parameter table (§2.5.1).
+    /// `None` omits asymptotic SEs by default under asymmetrical profile-likelihood CIs (`profile_likelihood_ci == true`)
+    /// and includes them under symmetrical Wald CIs (`profile_likelihood_ci == false`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_standard_errors: Option<bool>,
+    /// Extended 4-question model-comparison hypothesis (§2.5.2). When `Some(_)`, specifies the
+    /// scientific comparison question (`AlternativeEquation`, `ParameterInvarianceAcrossDatasets`,
+    /// `SingleGlobalCurveVsSeparate`, or `ParameterEqualsTheoretical`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comparison_question: Option<ModelComparisonQuestion>,
+    /// Statistical test criterion (`ExtraSumOfSquaresF`, `Aicc`, or `LikelihoodRatioTest`) used
+    /// with `comparison_question` when `comparison` is `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comparison_method: Option<ModelComparisonMethod>,
+    /// Pre-check before Extra-SS *F*, LRT, or `AICc`: if one candidate fit is `Ambiguous`,
+    /// `Unstable`, or `Flagged` while the other converges cleanly, select the clean model
+    /// immediately without running a statistical test (§2.5.2).
+    #[serde(default)]
+    pub prefer_well_defined_fit: bool,
+    /// Optional parameter (or derived scalar) name summarized across fitted datasets into a
+    /// dedicated analyzable parameter summary `ResultTab` (§2.5.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_parameter: Option<String>,
+    /// When `true` and `summary_parameter` is `Some(_)`, automatically create a linked secondary
+    /// bar or XY `GraphSheet` plotting the summarized parameter across datasets (§2.5.3).
+    #[serde(default)]
+    pub create_summary_graph: bool,
+    /// Optional significant-digit precision (`1..=15`) controlling displayed formatting on
+    /// parameter tables and Embedded Result tables (§2.5.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_significant_digits: Option<u8>,
+    /// Automated 6-rule fit-quality flag criteria labeling dubious fits `"Flagged"` (§2.5.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fit_flag_rules: Option<FitFlagRules>,
 }
 
 impl NonlinearFitSpec {
@@ -1359,13 +1656,268 @@ impl NonlinearFitSpec {
             mv_group_columns: Vec::new(),
             mv_x_columns: Vec::new(),
             mv_y_column: None,
+            mv_y_columns: Vec::new(),
+            weighting_source: WeightingSource::ObservedY,
+            outlier_handling: OutlierHandling::None,
+            emit_cleaned_data_tab: false,
+            replicate_fit_mode: ReplicateFitMode::IndividualReplicates,
+            convergence_strictness: ConvergenceStrictness::Default,
+            identifiability_mode: None,
+            show_standard_errors: None,
+            comparison_question: None,
+            comparison_method: None,
+            prefer_well_defined_fit: false,
+            summary_parameter: None,
+            create_summary_graph: false,
+            output_significant_digits: None,
+            fit_flag_rules: None,
         }
+    }
+
+    /// Resolve the effective [`IdentifiabilityMode`], honoring explicit `identifiability_mode`
+    /// first and falling back to `identify_unstable_parameters` for backwards compatibility.
+    #[must_use]
+    pub const fn effective_identifiability_mode(&self) -> Option<IdentifiabilityMode> {
+        if let Some(mode) = self.identifiability_mode {
+            Some(mode)
+        } else if self.identify_unstable_parameters {
+            Some(IdentifiabilityMode::IdentifyUnstableParameters)
+        } else {
+            None
+        }
+    }
+
+    /// Return `true` when the `Std. Error` column should be shown on the parameter table (§2.5.1).
+    ///
+    /// Defaults to omitting asymptotic SEs under asymmetrical profile-likelihood CIs
+    /// (`profile_likelihood_ci == true`) and showing them under symmetrical Wald CIs
+    /// (`profile_likelihood_ci == false`), unless overridden by `show_standard_errors`.
+    #[must_use]
+    pub fn should_show_standard_errors(&self) -> bool {
+        self.show_standard_errors.unwrap_or(!self.profile_likelihood_ci)
+    }
+
+    /// Resolve the effective `(ModelComparisonMethod, ModelComparisonQuestion)` pair when either
+    /// `comparison_question` or legacy `comparison` is configured.
+    #[must_use]
+    pub fn effective_comparison(&self) -> Option<(ModelComparisonMethod, ModelComparisonQuestion)> {
+        if let Some(question) = &self.comparison_question {
+            let method = self
+                .comparison_method
+                .or_else(|| self.comparison.as_ref().map(ModelComparisonSpec::method))
+                .unwrap_or(ModelComparisonMethod::ExtraSumOfSquaresF);
+            return Some((method, question.clone()));
+        }
+        self.comparison.as_ref().map(|spec| {
+            (spec.method(), ModelComparisonQuestion::AlternativeEquation { alternative_equation_id: spec.alternative_equation_id().to_owned() })
+        })
     }
 
     /// Return `max_iters` clamped into `1..=Self::HARD_MAX_ITERS`.
     #[must_use]
     pub fn clamped_max_iters(&self) -> usize {
         self.max_iters.clamp(1, Self::HARD_MAX_ITERS)
+    }
+
+    /// Resolve effective `MultipleVariables` response columns, preferring `mv_y_columns` when
+    /// non-empty and falling back to legacy singular `mv_y_column`.
+    #[must_use]
+    pub fn effective_mv_y_columns(&self) -> Vec<usize> {
+        if !self.mv_y_columns.is_empty() {
+            self.mv_y_columns.clone()
+        } else if let Some(yc) = self.mv_y_column {
+            vec![yc]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Resolve effective ROUT outlier handling combining `method` and `outlier_handling`.
+    #[must_use]
+    pub const fn effective_outlier_handling(&self) -> OutlierHandling {
+        match (self.method, self.outlier_handling) {
+            (FitMethod::RoutOutlierElimination { .. }, OutlierHandling::IdentifyAndCountOnly) => OutlierHandling::IdentifyAndCountOnly,
+            (FitMethod::RoutOutlierElimination { .. }, OutlierHandling::None | OutlierHandling::Eliminate) => OutlierHandling::Eliminate,
+            (FitMethod::LeastSquares, OutlierHandling::IdentifyAndCountOnly) => OutlierHandling::IdentifyAndCountOnly,
+            (FitMethod::LeastSquares, OutlierHandling::Eliminate) => OutlierHandling::Eliminate,
+            _ => OutlierHandling::None,
+        }
+    }
+}
+
+// ============================================================================
+// Model-Free Spline & LOWESS Curve Fitting (`docs/implementation/curve-fitting-implementation.md` §6.1)
+// ============================================================================
+
+/// Model-free XY curve-fitting algorithm (`docs/implementation/curve-fitting-implementation.md` §6.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum SplineLowessMethod {
+    /// Natural cubic spline ($C^2$ piecewise cubic through sorted distinct knots with zero endpoint second derivatives; de Boor 1978).
+    #[default]
+    #[serde(alias = "natural_cubic_spline", alias = "natural_spline", alias = "cubic_spline", alias = "spline")]
+    NaturalCubicSpline,
+    /// Akima subspline ($C^1$ piecewise cubic using 5-point secant slope weights suppressing overshoot; Akima 1970).
+    #[serde(alias = "akima_subspline", alias = "akima", alias = "akima_spline")]
+    AkimaSubspline,
+    /// Penalized cubic smoothing spline minimizing weighted RSS plus curvature penalty parameterized by knot count or effective degrees of freedom (Reinsch 1967).
+    #[serde(alias = "smoothing_spline", alias = "reinsch", alias = "penalized_spline")]
+    SmoothingSpline,
+    /// Tricube-weighted local linear regression with Tukey bisquare robustness passes (Cleveland 1979).
+    #[serde(alias = "lowess", alias = "loess")]
+    Lowess,
+    /// Dense piecewise-linear curve in data space resampled onto `segment_count` `(X, Y)` vertices (distinct from straight graph-space connectors on log axes).
+    #[serde(alias = "point_to_point", alias = "point-to-point", alias = "dense_point_to_point", alias = "piecewise_linear")]
+    PointToPoint,
+}
+
+impl SplineLowessMethod {
+    /// All five model-free XY curve-fitting methods in canonical order.
+    pub const ALL: [Self; 5] = [Self::NaturalCubicSpline, Self::AkimaSubspline, Self::SmoothingSpline, Self::Lowess, Self::PointToPoint];
+
+    /// Neutral human-readable label for titles, inspectors, and methods reports.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::NaturalCubicSpline => "Natural cubic spline",
+            Self::AkimaSubspline => "Akima subspline",
+            Self::SmoothingSpline => "Smoothing spline",
+            Self::Lowess => "LOWESS",
+            Self::PointToPoint => "Dense point-to-point curve",
+        }
+    }
+
+    /// Canonical snake-case equation identifier stored on [`crate::FittedCurveOverlay::equation_id`].
+    #[must_use]
+    pub const fn equation_id(self) -> &'static str {
+        match self {
+            Self::NaturalCubicSpline => "natural_cubic_spline",
+            Self::AkimaSubspline => "akima_subspline",
+            Self::SmoothingSpline => "smoothing_spline",
+            Self::Lowess => "lowess",
+            Self::PointToPoint => "point_to_point",
+        }
+    }
+}
+
+/// Window-span preset for Cleveland (1979) LOWESS smoothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum LowessPreset {
+    /// Broad smoothing window (`f = 0.75`).
+    #[serde(alias = "coarse")]
+    Coarse,
+    /// Balanced default smoothing window (`f = 0.50`).
+    #[default]
+    #[serde(alias = "medium")]
+    Medium,
+    /// Tight local smoothing window (`f = 0.25`).
+    #[serde(alias = "fine")]
+    Fine,
+}
+
+impl LowessPreset {
+    /// All three LOWESS window presets in canonical order.
+    pub const ALL: [Self; 3] = [Self::Coarse, Self::Medium, Self::Fine];
+
+    /// Neighborhood span fraction `f` in `(0, 1]` corresponding to this preset.
+    #[must_use]
+    pub const fn fraction(self) -> f64 {
+        match self {
+            Self::Coarse => 0.75,
+            Self::Medium => 0.50,
+            Self::Fine => 0.25,
+        }
+    }
+
+    /// Neutral human-readable label for UI selectors and methods reports.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Coarse => "Coarse (f = 0.75)",
+            Self::Medium => "Medium (f = 0.50)",
+            Self::Fine => "Fine (f = 0.25)",
+        }
+    }
+}
+
+const fn default_spline_segment_count() -> usize {
+    SplineLowessSpec::DEFAULT_SEGMENTS
+}
+
+const fn default_lowess_robustness_iters() -> usize {
+    SplineLowessSpec::DEFAULT_LOWESS_ROBUSTNESS_ITERS
+}
+
+/// Dedicated XY model-free curve-fitting specification (`Spline / LOWESS`; `docs/implementation/curve-fitting-implementation.md` §6.1).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct SplineLowessSpec {
+    /// Model-free curve algorithm (`NaturalCubicSpline`, `AkimaSubspline`, `SmoothingSpline`, `Lowess`, or `PointToPoint`).
+    pub method: SplineLowessMethod,
+    /// Number of polyline vertices sampled along `[x_min, x_max]` (clamped into `2..=Self::MAX_SEGMENTS`; LOWESS enforces `>= 4 * N`).
+    #[serde(default = "default_spline_segment_count")]
+    pub segment_count: usize,
+    /// Optional target knot count (`>= 2`) for [`SplineLowessMethod::SmoothingSpline`]; used when `smoothing_df` is `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smoothing_knots: Option<usize>,
+    /// Optional explicit effective degrees of freedom (`df` in `[2, G]`) for [`SplineLowessMethod::SmoothingSpline`] (Reinsch 1967); overrides `smoothing_knots` when `Some`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smoothing_df: Option<f64>,
+    /// Window-span preset for [`SplineLowessMethod::Lowess`] (`Coarse` = 0.75, `Medium` = 0.50, `Fine` = 0.25) used when `lowess_fraction` is `None`.
+    pub lowess_preset: LowessPreset,
+    /// Optional custom LOWESS neighborhood fraction `f` in `(0, 1]`; overrides `lowess_preset` when `Some`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lowess_fraction: Option<f64>,
+    /// Number of Tukey bisquare robustness passes for [`SplineLowessMethod::Lowess`] (default `3`, matching Cleveland 1979).
+    #[serde(default = "default_lowess_robustness_iters")]
+    pub lowess_robustness_iters: usize,
+    /// Optional explicit lower *X* coordinate for curve evaluation; `None` uses the observed data minimum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plot_x_min: Option<f64>,
+    /// Optional explicit upper *X* coordinate for curve evaluation; `None` uses the observed data maximum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plot_x_max: Option<f64>,
+    /// When `true`, emits a [`crate::ResultTabKind::CurveCoordinates`] tab containing the sampled `(X, Y)` curve table.
+    pub emit_curve_coordinates_tab: bool,
+    /// When `true`, interpolates unpaired unknown rows (`S(x_unk)` for `(X, blank Y)` and root-finding `S(x) = y_unk` for `(blank X, Y)`).
+    pub interpolate_unknowns: bool,
+}
+
+impl SplineLowessSpec {
+    /// Default polyline vertex count (`200`).
+    pub const DEFAULT_SEGMENTS: usize = 200;
+    /// Minimum polyline vertex count (`2`).
+    pub const MIN_SEGMENTS: usize = 2;
+    /// Maximum polyline vertex count (`10_000`).
+    pub const MAX_SEGMENTS: usize = 10_000;
+    /// Default Tukey bisquare robustness iteration count (`3`).
+    pub const DEFAULT_LOWESS_ROBUSTNESS_ITERS: usize = 3;
+    /// Hard ceiling on LOWESS robustness iterations (`20`).
+    pub const MAX_LOWESS_ROBUSTNESS_ITERS: usize = 20;
+    /// Minimum recommended sample size for LOWESS before emitting an assumption warning (`20`).
+    pub const LOWESS_MIN_RECOMMENDED_N: usize = 20;
+
+    /// Resolve the active LOWESS neighborhood fraction (`lowess_fraction` override or `lowess_preset.fraction()`).
+    #[must_use]
+    pub fn effective_lowess_fraction(&self) -> f64 {
+        self.lowess_fraction.unwrap_or_else(|| self.lowess_preset.fraction())
+    }
+}
+
+impl Default for SplineLowessSpec {
+    fn default() -> Self {
+        Self {
+            method: SplineLowessMethod::NaturalCubicSpline,
+            segment_count: Self::DEFAULT_SEGMENTS,
+            smoothing_knots: None,
+            smoothing_df: None,
+            lowess_preset: LowessPreset::Medium,
+            lowess_fraction: None,
+            lowess_robustness_iters: Self::DEFAULT_LOWESS_ROBUSTNESS_ITERS,
+            plot_x_min: None,
+            plot_x_max: None,
+            emit_curve_coordinates_tab: false,
+            interpolate_unknowns: false,
+        }
     }
 }
 
@@ -2055,6 +2607,7 @@ impl crate::schema::JsonSchema for PowerAnalysisSpec {
 // ============================================================================
 
 /// Discriminated statistical, regression, or transformation specification.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum AnalysisKind {
     /// Derived data-table transformation, normalization, baseline removal, transpose, pruning, or Monte Carlo simulation ([`TransformAnalysisSpec`]).
@@ -2091,10 +2644,14 @@ pub enum AnalysisKind {
     LinearRegression(LinearRegressionSpec),
     /// Nonlinear least-squares, Poisson deviance, Cauchy robust, or ROUT curve fitting and custom DSL/ODE modeling ([`NonlinearFitSpec`]).
     NonlinearRegression(NonlinearFitSpec),
+    /// Model-free XY spline (natural cubic, Akima, smoothing), LOWESS, and dense point-to-point curve fitting ([`SplineLowessSpec`]).
+    FitSplineLowess(SplineLowessSpec),
     /// Standalone FWER/FDR adjustment of a column of pre-computed *P* values ([`PValueStackSpec`]).
     PValueStack(PValueStackSpec),
     /// Statistical power, sample-size, and minimum-detectable-effect solver ([`PowerAnalysisSpec`]).
     PowerAnalysis(PowerAnalysisSpec),
+    /// Standalone single-predictor binary logistic regression on `XY` tables ([`SimpleLogisticSpec`]).
+    SimpleLogisticRegression(SimpleLogisticSpec),
 }
 
 impl AnalysisKind {
@@ -2189,8 +2746,10 @@ impl AnalysisKind {
             Self::Multivariate(MultivariateSpec::MultipleImputation { .. }) => String::from("Multiple imputation"),
             Self::LinearRegression(_) => String::from("Simple linear regression"),
             Self::NonlinearRegression(fit) => format!("Nonlinear regression ({})", fit.equation_id),
+            Self::FitSplineLowess(s) => format!("Spline / LOWESS ({})", s.method.label()),
             Self::PValueStack(s) => format!("Analyze stack of P values ({})", s.method.label()),
             Self::PowerAnalysis(s) => s.derive_auto_title(),
+            Self::SimpleLogisticRegression(_) => String::from("Simple logistic regression"),
         }
     }
 

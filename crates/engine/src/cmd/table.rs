@@ -4436,6 +4436,7 @@ fn remap_analysis_kind_columns(kind: &mut AnalysisKind, plan: &ConversionColPlan
             nl.mv_group_columns = plan.map_col_list_or_oob(&nl.mv_group_columns, "NonlinearRegression mv_group_columns", err);
             nl.mv_x_columns = plan.map_col_list_or_oob(&nl.mv_x_columns, "NonlinearRegression mv_x_columns", err);
             plan.map_opt_or_oob(&mut nl.mv_y_column, "NonlinearRegression mv_y_column", err);
+            nl.mv_y_columns = plan.map_col_list_or_oob(&nl.mv_y_columns, "NonlinearRegression mv_y_columns", err);
             for rule in &mut nl.parameter_rules {
                 if let ParameterScope::PerDatasetConstant(pairs) = &mut rule.scope {
                     for (col, _) in pairs.iter_mut() {

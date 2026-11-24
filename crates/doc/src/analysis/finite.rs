@@ -80,6 +80,10 @@ fn kind_first_non_finite_float(kind: &AnalysisKind) -> Option<String> {
         AnalysisKind::LinearRegression(fit) => range_first_non_finite_float(fit.x_range_filter, "x_range_filter")
             .or_else(|| non_finite_opt(fit.plot_x_min, at("plot_x_min")))
             .or_else(|| non_finite_opt(fit.plot_x_max, at("plot_x_max"))),
+        AnalysisKind::FitSplineLowess(spec) => non_finite_opt(spec.smoothing_df, at("smoothing_df"))
+            .or_else(|| non_finite_opt(spec.lowess_fraction, at("lowess_fraction")))
+            .or_else(|| non_finite_opt(spec.plot_x_min, at("plot_x_min")))
+            .or_else(|| non_finite_opt(spec.plot_x_max, at("plot_x_max"))),
         AnalysisKind::BlandAltman(_)
         | AnalysisKind::PassingBablok(_)
         | AnalysisKind::RocCurve(_)
@@ -87,6 +91,9 @@ fn kind_first_non_finite_float(kind: &AnalysisKind) -> Option<String> {
         | AnalysisKind::Multivariate(_) => None,
         AnalysisKind::PValueStack(ps) => non_finite(ps.threshold, at("pvalue_stack.threshold")),
         AnalysisKind::PowerAnalysis(p) => p.first_non_finite_float().map(|field| format!("analysis.{field}")),
+        AnalysisKind::SimpleLogisticRegression(sl) => non_finite(sl.classification_cutoff, at("classification_cutoff"))
+            .or_else(|| non_finite_opt(sl.plot_x_min, at("plot_x_min")))
+            .or_else(|| non_finite_opt(sl.plot_x_max, at("plot_x_max"))),
     }
 }
 
@@ -183,4 +190,18 @@ fn nonlinear_fit_first_non_finite_float(fit: &NonlinearFitSpec) -> Option<String
         .or_else(|| range_first_non_finite_float(fit.y_range_filter, "y_range_filter"))
         .or_else(|| non_finite_opt(fit.plot_x_min, at("plot_x_min")))
         .or_else(|| non_finite_opt(fit.plot_x_max, at("plot_x_max")))
+        .or_else(|| match &fit.comparison_question {
+            Some(super::ModelComparisonQuestion::ParameterEqualsTheoretical { theoretical_value, .. }) => {
+                non_finite(*theoretical_value, at("comparison_question.theoretical_value"))
+            }
+            _ => None,
+        })
+        .or_else(|| {
+            fit.fit_flag_rules.as_ref().and_then(|rules| {
+                non_finite_opt(rules.min_r_squared, at("fit_flag_rules.min_r_squared"))
+                    .or_else(|| non_finite_opt(rules.max_dependency, at("fit_flag_rules.max_dependency")))
+                    .or_else(|| non_finite_opt(rules.min_normality_p, at("fit_flag_rules.min_normality_p")))
+                    .or_else(|| non_finite_opt(rules.min_runs_or_lof_p, at("fit_flag_rules.min_runs_or_lof_p")))
+            })
+        })
 }

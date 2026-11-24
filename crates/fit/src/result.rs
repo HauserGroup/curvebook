@@ -16,8 +16,10 @@ use std::collections::{HashMap, HashSet};
 
 use curvebook_doc::result_builder::{KvTabBuilder, TabBuilder, bool_cell, ci_cell, num_cell, opt_num_cell, p_cell, text_cell};
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, ChecklistItem, ChecklistStatus, CiBound, CurveSamplePoint, DataSheet, DemingErrorSpec, ErrorCode, FittedCurveOverlay,
-    LinearRegressionSpec, NonlinearFitSpec, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTabKind, SourceCellId, TableArchetype,
+    AnalysisKind, AnalysisSpec, Cell, ChecklistItem, ChecklistStatus, CiBound, ColumnDesignHint, ColumnTable, CurveSamplePoint, DataSheet,
+    DemingErrorSpec, ErrorCode, FitFlagRules, FittedCurveOverlay, IdentifiabilityMode, LinearRegressionSpec, NonlinearFitSpec, OutlierHandling,
+    ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTabKind, SourceCellId, SubcolumnMode, TableArchetype, XColumnMode, XyTable,
+    format_significant_digits,
 };
 use curvebook_math::PValueFormat;
 use curvebook_math::dist::norm_ppf;
@@ -31,10 +33,11 @@ use crate::linear::{
     linear_grid, prepare_linear_points, resolve_linear_grid_bounds,
 };
 use crate::solver::{
-    InterpolatedUnknown, ModelComparisonOutcome, NonlinearFitResult, SolverConfig, compare_models_checked, fit_nonlinear, ordered_nested_roles,
+    InterpolatedUnknown, ModelComparisonOutcome, NonlinearFitResult, SolverConfig, compare_models_question, evaluate_fit_flags, fit_nonlinear,
+    ordered_nested_roles,
 };
 use crate::types::{
-    DataPoint, DatasetSeries, HookContext, MultivarExtractionSpec, extract_datasets_from_sheet, extract_datasets_from_sheet_with_options,
+    DataPoint, DatasetSeries, HookContext, extract_datasets_from_sheet, extract_datasets_from_sheet_multi, extract_from_multivar_multi_with_y_map,
     filter_datasets_by_range, per_dataset_parameter_key,
 };
 
@@ -408,20 +411,60 @@ pub fn execute_nonlinear_analysis(
     if nl_spec.flag_r_squared_below.is_some_and(|value| !(0.0..=1.0).contains(&value)) {
         return Err(FitError::InvalidParameter { name: "flag_r_squared_below", reason: "threshold must be a finite number from 0 to 1".to_owned() });
     }
-    let mv_spec =
-        MultivarExtractionSpec { group_columns: &nl_spec.mv_group_columns, x_columns: &nl_spec.mv_x_columns, y_column: nl_spec.mv_y_column };
-    let datasets = match extract_datasets_from_sheet_with_options(sheet, &spec.selected_data_sets, &mv_spec) {
-        Ok(ds) => ds,
-        Err(FitError::EmptyInput) if nl_spec.plot_function_only => vec![DatasetSeries {
-            data_set_index: 0,
-            label: nl_spec.equation_id.clone(),
-            points: Vec::new(),
-            unknowns_y: Vec::new(),
-            unknowns_x: Vec::new(),
-            is_pre_summarized: false,
-            column_title_value: None,
-        }],
-        Err(err) => return Err(err),
+    if nl_spec.output_significant_digits.is_some_and(|d| !(1..=15).contains(&d)) {
+        return Err(FitError::InvalidParameter { name: "output_significant_digits", reason: "significant digits must be in 1..=15".to_owned() });
+    }
+    if let Some(rules) = &nl_spec.fit_flag_rules {
+        validate_fit_flag_rules(rules)?;
+    }
+    let effective_y_cols = nl_spec.effective_mv_y_columns();
+    let (datasets, mv_y_col_map) = match &sheet.archetype {
+        TableArchetype::MultipleVariables(mv) => {
+            match extract_from_multivar_multi_with_y_map(
+                mv,
+                &spec.selected_data_sets,
+                &nl_spec.mv_group_columns,
+                &nl_spec.mv_x_columns,
+                &effective_y_cols,
+            ) {
+                Ok((ds, map)) => (ds, Some(map)),
+                Err(FitError::EmptyInput) if nl_spec.plot_function_only => (
+                    vec![DatasetSeries {
+                        data_set_index: 0,
+                        label: nl_spec.equation_id.clone(),
+                        points: Vec::new(),
+                        unknowns_y: Vec::new(),
+                        unknowns_x: Vec::new(),
+                        is_pre_summarized: false,
+                        column_title_value: None,
+                    }],
+                    None,
+                ),
+                Err(err) => return Err(err),
+            }
+        }
+        _ => match extract_datasets_from_sheet_multi(
+            sheet,
+            &spec.selected_data_sets,
+            &nl_spec.mv_group_columns,
+            &nl_spec.mv_x_columns,
+            &effective_y_cols,
+        ) {
+            Ok(ds) => (ds, None),
+            Err(FitError::EmptyInput) if nl_spec.plot_function_only => (
+                vec![DatasetSeries {
+                    data_set_index: 0,
+                    label: nl_spec.equation_id.clone(),
+                    points: Vec::new(),
+                    unknowns_y: Vec::new(),
+                    unknowns_x: Vec::new(),
+                    is_pre_summarized: false,
+                    column_title_value: None,
+                }],
+                None,
+            ),
+            Err(err) => return Err(err),
+        },
     };
     let model = resolve_model_from_spec(nl_spec)?;
 
@@ -433,6 +476,7 @@ pub fn execute_nonlinear_analysis(
         max_iters: nl_spec.clamped_max_iters(),
         compute_profile_ci: nl_spec.profile_likelihood_ci,
         identify_unstable_parameters: nl_spec.identify_unstable_parameters,
+        identifiability_mode: nl_spec.effective_identifiability_mode(),
         compute_hougaard: true,
         compute_bands: nl_spec.confidence_bands || nl_spec.prediction_bands || nl_spec.plot_function_only,
         compute_prediction_bands: nl_spec.prediction_bands,
@@ -448,6 +492,10 @@ pub fn execute_nonlinear_analysis(
         plot_x_min: nl_spec.plot_x_min,
         plot_x_max: nl_spec.plot_x_max,
         curve_overlay_segments: 256,
+        weighting_source: nl_spec.weighting_source,
+        outlier_handling: nl_spec.outlier_handling,
+        replicate_fit_mode: nl_spec.replicate_fit_mode,
+        convergence_strictness: nl_spec.convergence_strictness,
     };
 
     let fit = fit_nonlinear(model.as_ref(), &datasets, hooks, &config)?;
@@ -458,35 +506,49 @@ pub fn execute_nonlinear_analysis(
             reason: "Poisson deviance regression requires strictly positive fitted means (mu > 0)".to_owned(),
         });
     }
-    populate_nonlinear_result_sheet(&mut result, &fit, nl_spec, spec.p_value_format);
+    populate_nonlinear_result_sheet(&mut result, &fit, &datasets, nl_spec, spec.p_value_format);
     if let Some(rout) = &fit.rout {
-        let response_column = match &sheet.archetype {
-            TableArchetype::MultipleVariables(mv) => Some(crate::types::resolve_mv_columns(mv, &spec.selected_data_sets, &mv_spec)?.1),
-            _ => None,
-        };
-        result.eliminated_outliers = rout
+        let outlier_cells: Vec<SourceCellId> = rout
             .audit
             .iter()
             .filter(|point| point.is_outlier)
             .map(|point| SourceCellId {
                 sheet_id: sheet.id.clone(),
                 row: point.row,
-                col: response_column.unwrap_or(point.data_set_index),
+                col: mv_y_col_map.as_ref().and_then(|m| m.get(&point.data_set_index).copied()).unwrap_or(point.data_set_index),
                 subcol: point.source_subcolumn,
             })
             .collect();
+        if config.effective_outlier_handling() == OutlierHandling::Eliminate {
+            result.eliminated_outliers.clone_from(&outlier_cells);
+        }
+        if nl_spec.emit_cleaned_data_tab {
+            append_cleaned_data_tab_and_analyzable_sheet(&mut result, sheet, &outlier_cells);
+        }
     }
 
-    if let Some(comp_spec) = &nl_spec.comparison {
+    if let Some((comp_method, comp_question)) = nl_spec.effective_comparison() {
         if matches!(fit.status, FitStatus::Converged | FitStatus::Ambiguous) {
-            let alt_id = match comp_spec {
-                curvebook_doc::ModelComparisonSpec::ExtraSumOfSquaresF { alternative_equation_id }
-                | curvebook_doc::ModelComparisonSpec::Aicc { alternative_equation_id }
-                | curvebook_doc::ModelComparisonSpec::LikelihoodRatioTest { alternative_equation_id } => alternative_equation_id,
-            };
-            let alt_model = get_builtin_model(alt_id).ok_or_else(|| FitError::UnknownEquation { id: alt_id.clone() })?;
-            let comp = compare_models_checked(&fit, alt_model.as_ref(), &datasets, hooks, &config, comp_spec)?;
-            append_comparison_tab(&mut result, &fit, &comp.alternative_fit, &comp.outcome, spec.p_value_format);
+            let comp = compare_models_question(
+                model.as_ref(),
+                &fit,
+                &datasets,
+                hooks,
+                &config,
+                comp_method,
+                &comp_question,
+                nl_spec.prefer_well_defined_fit,
+                nl_spec.fit_flag_rules.as_ref(),
+            )?;
+            append_comparison_tab(
+                &mut result,
+                &comp.model_a_label,
+                &comp.model_a_fit,
+                &comp.model_b_label,
+                &comp.model_b_fit,
+                &comp.outcome,
+                spec.p_value_format,
+            );
         } else {
             result.checklist.push(ChecklistItem {
                 assumption: "Model comparison".to_owned(),
@@ -596,10 +658,53 @@ fn nonlinear_uses_weighted_objective(fit: &NonlinearFitResult, nl_spec: &Nonline
         || (fit.weighted_ss - fit.rss).abs() > 1e-12 * fit.rss.abs().max(1.0)
 }
 
+fn validate_fit_flag_rules(rules: &FitFlagRules) -> Result<(), FitError> {
+    if rules.min_r_squared.is_some_and(|v| !(0.0..=1.0).contains(&v)) {
+        return Err(FitError::InvalidParameter {
+            name: "fit_flag_rules.min_r_squared",
+            reason: "min_r_squared must be a finite number in [0, 1]".to_owned(),
+        });
+    }
+    if rules.max_dependency.is_some_and(|v| !(0.0..=1.0).contains(&v)) {
+        return Err(FitError::InvalidParameter {
+            name: "fit_flag_rules.max_dependency",
+            reason: "max_dependency must be a finite number in [0, 1]".to_owned(),
+        });
+    }
+    if rules.min_normality_p.is_some_and(|v| !v.is_finite() || v <= 0.0 || v >= 1.0) {
+        return Err(FitError::InvalidParameter {
+            name: "fit_flag_rules.min_normality_p",
+            reason: "min_normality_p must be a finite probability in (0, 1)".to_owned(),
+        });
+    }
+    if rules.min_runs_or_lof_p.is_some_and(|v| !v.is_finite() || v <= 0.0 || v >= 1.0) {
+        return Err(FitError::InvalidParameter {
+            name: "fit_flag_rules.min_runs_or_lof_p",
+            reason: "min_runs_or_lof_p must be a finite probability in (0, 1)".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn fmt_fit_scalar(value: f64, sig_figs: Option<u8>) -> String {
+    match sig_figs {
+        Some(d) => format_significant_digits(value, d),
+        None => format!("{value:.6}"),
+    }
+}
+
 fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitResult, nl_spec: &NonlinearFitSpec) {
-    let mut tab = TabBuilder::new("nonlinear_parameters", "Best-fit values & confidence intervals", ResultTabKind::ParametersAndConfidenceIntervals)
-        .headers(["Best-fit value", "Std. Error", "Confidence Interval", "Dependency", "Hougaard |g1|"]);
     let is_robust = fit.is_robust_cauchy() || nl_spec.method == curvebook_doc::FitMethod::RobustCauchy;
+    let show_se = nl_spec.should_show_standard_errors() || is_robust;
+    let unstable_as_text = nl_spec.effective_identifiability_mode() == Some(IdentifiabilityMode::IdentifyUnstableParameters);
+    let mut tab =
+        if show_se {
+            TabBuilder::new("nonlinear_parameters", "Best-fit values & confidence intervals", ResultTabKind::ParametersAndConfidenceIntervals)
+                .headers(["Best-fit value", "Std. Error", "Confidence Interval", "Dependency", "Hougaard |g1|"])
+        } else {
+            TabBuilder::new("nonlinear_parameters", "Best-fit values & confidence intervals", ResultTabKind::ParametersAndConfidenceIntervals)
+                .headers(["Best-fit value", "Confidence Interval", "Dependency", "Hougaard |g1|"])
+        };
     let mut emitted_scalars: HashSet<(String, Option<usize>)> = HashSet::new();
     let ds_names = dataset_display_names(fit);
 
@@ -610,28 +715,49 @@ fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
             label.push_str(" (Unstable)");
         }
         let prefix = (!unstable && p.notes.contains(&ParameterNote::Ambiguous)).then(|| "~".to_owned());
-        let row = if is_robust || !p.inference_availability.is_available() {
+        if is_robust || !p.inference_availability.is_available() {
             let na = text_cell("Not applicable");
-            [ResultCell::Number { value: p.estimate, prefix, units: None }, na.clone(), na.clone(), na.clone(), na]
+            tab.push_row(label, [ResultCell::Number { value: p.estimate, prefix, units: None }, na.clone(), na.clone(), na.clone(), na]);
+        } else if unstable && unstable_as_text {
+            let u_cell = text_cell("Unstable");
+            if show_se {
+                tab.push_row(label, [u_cell.clone(), u_cell.clone(), u_cell, num_cell(p.dependency), num_cell(p.hougaard_g1)]);
+            } else {
+                tab.push_row(label, [u_cell.clone(), u_cell, num_cell(p.dependency), num_cell(p.hougaard_g1)]);
+            }
+        } else if show_se {
+            tab.push_row(
+                label,
+                [
+                    ResultCell::Number { value: p.estimate, prefix, units: None },
+                    num_cell(p.se),
+                    ci_bounds_cell(p.ci_lower, p.ci_upper),
+                    num_cell(p.dependency),
+                    num_cell(p.hougaard_g1),
+                ],
+            );
         } else {
-            [
-                ResultCell::Number { value: p.estimate, prefix, units: None },
-                num_cell(p.se),
-                ci_bounds_cell(p.ci_lower, p.ci_upper),
-                num_cell(p.dependency),
-                num_cell(p.hougaard_g1),
-            ]
-        };
-        tab.push_row(label, row);
+            tab.push_row(
+                label,
+                [
+                    ResultCell::Number { value: p.estimate, prefix, units: None },
+                    ci_bounds_cell(p.ci_lower, p.ci_upper),
+                    num_cell(p.dependency),
+                    num_cell(p.hougaard_g1),
+                ],
+            );
+        }
         emitted_scalars.insert((p.name.to_ascii_lowercase(), p.dataset_index));
         result.scalars.push(ResultScalarEntry { key: p.name.clone(), data_set_index: p.dataset_index, value: p.estimate, units: None });
     }
 
     for (name, val, _) in &fit.fixed_constants {
-        tab.push_row(
-            format!("{} (Constant)", fixed_constant_display_label(fit, &ds_names, name)),
-            [num_cell(*val), ResultCell::Empty, text_cell("Fixed"), ResultCell::Empty, ResultCell::Empty],
-        );
+        let row_label = format!("{} (Constant)", fixed_constant_display_label(fit, &ds_names, name));
+        if show_se {
+            tab.push_row(row_label, [num_cell(*val), ResultCell::Empty, text_cell("Fixed"), ResultCell::Empty, ResultCell::Empty]);
+        } else {
+            tab.push_row(row_label, [num_cell(*val), text_cell("Fixed"), ResultCell::Empty, ResultCell::Empty]);
+        }
         emitted_scalars.insert((name.to_ascii_lowercase(), None));
         result.scalars.push(ResultScalarEntry { key: name.clone(), data_set_index: None, value: *val, units: None });
     }
@@ -652,24 +778,34 @@ fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
         }
     }
 
+    let sig_figs = nl_spec.output_significant_digits;
     let sy_x_str = if is_robust {
         fit.rsdr.filter(|v| v.is_finite()).map_or_else(
             || "Not applicable (NotApplicableInRobustMode)".to_owned(),
-            |rsdr| format!("Not applicable (NotApplicableInRobustMode), RSDR = {rsdr:.6}"),
+            |rsdr| format!("Not applicable (NotApplicableInRobustMode), RSDR = {}", fmt_fit_scalar(rsdr, sig_figs)),
         )
     } else if fit.rsd.is_finite() {
-        format!("{:.6}", fit.rsd)
+        fmt_fit_scalar(fit.rsd, sig_figs)
     } else {
         "N/A (DF = 0)".to_owned()
     };
 
     let mut param_footnote = format!(
-        "Status: {:?}, Iterations: {}, DF: {}, R2 = {:.6}, Sy.x = {}, RSS = {:.6}",
-        fit.status, fit.iterations, fit.df, fit.r_squared, sy_x_str, fit.rss
+        "Status: {:?}, Iterations: {}, DF: {}, R2 = {}, Sy.x = {}, RSS = {}",
+        fit.status,
+        fit.iterations,
+        fit.df,
+        fmt_fit_scalar(fit.r_squared, sig_figs),
+        sy_x_str,
+        fmt_fit_scalar(fit.rss, sig_figs)
     );
     if nonlinear_uses_weighted_objective(fit, nl_spec) {
         let obj_lbl = if fit.fit_method == curvebook_doc::FitMethod::PoissonDeviance { "Poisson Deviance" } else { "Weighted SS" };
-        param_footnote.push_str(&format!(", {obj_lbl} = {:.6}", fit.weighted_ss));
+        param_footnote.push_str(&format!(", {obj_lbl} = {}", fmt_fit_scalar(fit.weighted_ss, sig_figs)));
+    }
+    if !show_se && !is_robust {
+        param_footnote
+            .push_str("; asymptotic SEs omitted under profile-likelihood CIs (enable show_standard_errors or switch to Wald CIs to display)");
     }
 
     result.tabs.push(tab.footnote(param_footnote).build());
@@ -679,13 +815,16 @@ fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
 /// published cut-offs: `Dependency > 0.99` warns of near-redundant parameters (the dependency
 /// measure is described by Motulsky & Christopoulos 2004), and `|g1| > 1` flags strong
 /// nonlinearity on the interpretation scale for Hougaard's skewness given by Ratkowsky (1990).
-fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitResult, nl_spec: &NonlinearFitSpec, p_fmt: PValueFormat) {
-    append_nonlinear_parameter_tab(result, fit, nl_spec);
+fn append_nonlinear_gof_tab(
+    result: &mut ResultSheet,
+    fit: &NonlinearFitResult,
+    nl_spec: &NonlinearFitSpec,
+    p_fmt: PValueFormat,
+    flag_outcome: Option<&crate::solver::FitFlagOutcome>,
+) {
     let is_robust = fit.is_robust_cauchy() || nl_spec.method == curvebook_doc::FitMethod::RobustCauchy;
     let weighted_obj = nonlinear_uses_weighted_objective(fit, nl_spec);
     let is_poisson = fit.fit_method == curvebook_doc::FitMethod::PoissonDeviance;
-
-    // Goodness-of-fit summary tab.
     let na_cell = || text_cell("Not applicable");
     let mut gof = KvTabBuilder::new("nonlinear_gof", "Goodness of Fit", ResultTabKind::MainSummary, fit.equation_name.as_str())
         .num("Degrees of Freedom", fit.df as f64)
@@ -721,14 +860,44 @@ fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitR
     }
     if fit.n_outliers_excluded > 0 {
         gof.push_num("ROUT outliers excluded", fit.n_outliers_excluded as f64);
+    } else if let Some(rout) = &fit.rout {
+        gof.push_num("ROUT outliers identified", rout.outlier_indices.len() as f64);
+    }
+    if let Some(flags) = flag_outcome {
+        gof.push_cell("Fit quality flag", text_cell(if flags.flagged { "Flagged" } else { "Pass" }));
+        if flags.flagged {
+            gof.push_cell("Flag reasons", text_cell(flags.reasons.join("; ")));
+        }
     }
     result.tabs.push(gof.build());
+}
 
+fn populate_nonlinear_result_sheet(
+    result: &mut ResultSheet,
+    fit: &NonlinearFitResult,
+    datasets: &[DatasetSeries],
+    nl_spec: &NonlinearFitSpec,
+    p_fmt: PValueFormat,
+) {
+    append_nonlinear_parameter_tab(result, fit, nl_spec);
+    let is_robust = fit.is_robust_cauchy() || nl_spec.method == curvebook_doc::FitMethod::RobustCauchy;
+    let weighted_obj = nonlinear_uses_weighted_objective(fit, nl_spec);
+    let flag_outcome =
+        nl_spec.fit_flag_rules.as_ref().filter(|r| !nl_spec.plot_function_only && r.has_any_rule()).map(|rules| evaluate_fit_flags(fit, rules));
+
+    append_nonlinear_gof_tab(result, fit, nl_spec, p_fmt, flag_outcome.as_ref());
+
+    if let Some(target_param) = nl_spec.summary_parameter.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        append_parameter_summary_tab_and_data(result, fit, datasets, target_param, nl_spec.should_show_standard_errors() || is_robust);
+    }
     if nl_spec.emit_residuals_tab {
         append_nonlinear_residuals_tab(result, fit);
     }
     if nl_spec.emit_covariance_tab && !is_robust {
         append_nonlinear_covariance_tab(result, fit);
+    }
+    if fit.rout.is_some() {
+        append_nonlinear_outliers_tab(result, fit, nl_spec);
     }
     append_nonlinear_interpolated_tab(result, fit);
 
@@ -758,6 +927,25 @@ fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitR
     }
 
     append_nonlinear_checklist(result, fit, is_robust);
+    if let Some(flags) = flag_outcome {
+        if flags.flagged {
+            result.checklist.push(ChecklistItem {
+                assumption: "Fit quality (Flagged)".to_owned(),
+                status: ChecklistStatus::Warn,
+                diagnostic_metric: Some("Flagged".to_owned()),
+                explanation: flags.reasons.join(" "),
+                remediation: None,
+            });
+        } else {
+            result.checklist.push(ChecklistItem {
+                assumption: "Fit quality".to_owned(),
+                status: ChecklistStatus::Pass,
+                diagnostic_metric: Some("Pass".to_owned()),
+                explanation: "All configured automated fit-quality flag rules passed.".to_owned(),
+                remediation: None,
+            });
+        }
+    }
     if let Some(threshold) = nl_spec.flag_r_squared_below
         && !nl_spec.plot_function_only
         && fit.r_squared.is_finite()
@@ -995,11 +1183,16 @@ fn append_nonlinear_checklist(result: &mut ResultSheet, fit: &NonlinearFitResult
 
     if let Some(rout) = &fit.rout {
         let q_label = format_percent_label(rout.q_threshold_percent);
+        let explanation = if fit.n_outliers_excluded == 0 && !rout.outlier_indices.is_empty() {
+            format!("{} outlier(s) identified and counted (retained in least-squares fit).", rout.outlier_indices.len())
+        } else {
+            format!("{} outlier(s) identified and excluded before ordinary least-squares refit.", rout.outlier_indices.len())
+        };
         result.checklist.push(ChecklistItem {
             assumption: "ROUT outlier detection".to_owned(),
             status: ChecklistStatus::Info,
             diagnostic_metric: Some(format!("Q = {q_label}%, RSDR = {:.4}, outliers = {}", rout.rsdr, rout.outlier_indices.len())),
-            explanation: format!("{} outlier(s) identified and excluded before ordinary least-squares refit.", rout.outlier_indices.len()),
+            explanation,
             remediation: None,
         });
     }
@@ -1007,38 +1200,37 @@ fn append_nonlinear_checklist(result: &mut ResultSheet, fit: &NonlinearFitResult
 
 fn append_comparison_tab(
     result: &mut ResultSheet,
+    model_a_label: &str,
     primary: &NonlinearFitResult,
+    model_b_label: &str,
     alt: &NonlinearFitResult,
     outcome: &ModelComparisonOutcome,
     p_fmt: PValueFormat,
 ) {
     let swapped_note = || {
         format!(
-            "Primary fit ({}) has fewer residual degrees of freedom ({}) than {} ({}); the simpler model serves as the null hypothesis and the primary model serves as the alternative.",
-            primary.equation_name, primary.df, alt.equation_name, alt.df
+            "Primary fit ({model_a_label}) has fewer residual degrees of freedom ({}) than {model_b_label} ({}); the simpler model serves as the null hypothesis and the primary model serves as the alternative.",
+            primary.df, alt.df
         )
     };
-    let preferred_label = |null_fit: &NonlinearFitResult, complex_fit: &NonlinearFitResult, prefer_complex: bool| {
-        if prefer_complex {
-            format!("{} (More complex model)", complex_fit.equation_name)
-        } else {
-            format!("{} (Simpler model)", null_fit.equation_name)
-        }
+    let preferred_label = |null_label: &str, complex_label: &str, prefer_complex: bool| {
+        if prefer_complex { format!("{complex_label} (More complex model)") } else { format!("{null_label} (Simpler model)") }
     };
     match outcome {
         ModelComparisonOutcome::ExtraSumOfSquaresF(f) => {
-            let (null_fit, complex_fit, swapped) = ordered_nested_roles(primary, alt);
+            let (_null_fit, _complex_fit, swapped) = ordered_nested_roles(primary, alt);
+            let (null_lbl, complex_lbl) = if swapped { (model_b_label, model_a_label) } else { (model_a_label, model_b_label) };
             let mut kv = KvTabBuilder::new(
                 "model_comparison_f",
                 "Comparison of Models (Extra sum-of-squares F test)",
                 ResultTabKind::ModelComparison,
                 "Value",
             )
-            .text("Null hypothesis model", null_fit.equation_name.as_str())
-            .text("Alternative model", complex_fit.equation_name.as_str())
+            .text("Null hypothesis model", null_lbl)
+            .text("Alternative model", complex_lbl)
             .text("F (DFn, DFd)", format!("{:.4} ({}, {})", f.f_stat, f.df_num, f.df_den))
             .cell("P value", p_cell(f.p_value, p_fmt))
-            .text("Preferred model", preferred_label(null_fit, complex_fit, f.preferred_complex_model));
+            .text("Preferred model", preferred_label(null_lbl, complex_lbl, f.preferred_complex_model));
             if swapped {
                 kv.push_footnote(swapped_note());
             }
@@ -1047,7 +1239,7 @@ fn append_comparison_tab(
         ModelComparisonOutcome::Aicc(a) => {
             result.tabs.push(
                 TabBuilder::new("model_comparison_aicc", "Comparison of Models (AICc)", ResultTabKind::ModelComparison)
-                    .headers([primary.equation_name.as_str(), alt.equation_name.as_str()])
+                    .headers([model_a_label, model_b_label])
                     .row("AICc", [num_cell(a.aicc_a), num_cell(a.aicc_b)])
                     .row("Akaike weight", [num_cell(a.weight_a), num_cell(a.weight_b)])
                     .row("Difference in AICc", [num_cell(a.delta_aicc), ResultCell::Empty])
@@ -1056,19 +1248,38 @@ fn append_comparison_tab(
             );
         }
         ModelComparisonOutcome::LikelihoodRatioTest(lrt) => {
-            let (null_fit, complex_fit, swapped) = ordered_nested_roles(primary, alt);
+            let (_null_fit, _complex_fit, swapped) = ordered_nested_roles(primary, alt);
+            let (null_lbl, complex_lbl) = if swapped { (model_b_label, model_a_label) } else { (model_a_label, model_b_label) };
             let mut kv =
                 KvTabBuilder::new("model_comparison_lrt", "Comparison of Models (Likelihood Ratio Test)", ResultTabKind::ModelComparison, "Value")
-                    .text("Null hypothesis model", null_fit.equation_name.as_str())
-                    .text("Alternative model", complex_fit.equation_name.as_str())
+                    .text("Null hypothesis model", null_lbl)
+                    .text("Alternative model", complex_lbl)
                     .num("LR statistic D = 2*(ln L_alt - ln L_null)", lrt.lr_statistic)
                     .num("DF (diff)", lrt.df_diff as f64)
                     .cell("P value", p_cell(lrt.p_value, p_fmt))
-                    .text("Preferred model", preferred_label(null_fit, complex_fit, lrt.preferred_complex_model));
+                    .text("Preferred model", preferred_label(null_lbl, complex_lbl, lrt.preferred_complex_model));
             if swapped {
                 kv.push_footnote(swapped_note());
             }
             result.tabs.push(kv.build());
+        }
+        ModelComparisonOutcome::PreferredWellDefinedFit { preferred_label, rejected_label, rejection_reasons, .. } => {
+            let reasons_text = rejection_reasons.join("; ");
+            result.tabs.push(
+                KvTabBuilder::new(
+                    "model_comparison_well_defined",
+                    "Comparison of Models (Well-defined fit pre-check)",
+                    ResultTabKind::ModelComparison,
+                    "Value",
+                )
+                .text("Candidate A", model_a_label)
+                .text("Candidate B", model_b_label)
+                .text("Preferred model", format!("{preferred_label} (Well-defined fit)"))
+                .text("Rejected model", rejected_label.as_str())
+                .text("Rejection reasons", reasons_text.as_str())
+                .footnote("Selected the well-defined fit directly without computing Extra-SS F, LRT, or AICc because the competing candidate was Ambiguous, Unstable, or Flagged.")
+                .build(),
+            );
         }
         ModelComparisonOutcome::NotApplicableInRobustMode { requested_test, reason } => {
             let id = if requested_test.contains("AICc") {
@@ -1080,8 +1291,8 @@ fn append_comparison_tab(
             };
             result.tabs.push(
                 KvTabBuilder::new(id, format!("Comparison of Models ({requested_test})"), ResultTabKind::ModelComparison, "Value")
-                    .text("Null hypothesis model", primary.equation_name.as_str())
-                    .text("Alternative model", alt.equation_name.as_str())
+                    .text("Null hypothesis model", model_a_label)
+                    .text("Alternative model", model_b_label)
                     .text("Test statistic", "Not applicable")
                     .text("P value", "Not applicable")
                     .text("Preferred model", "Not applicable")
@@ -1089,6 +1300,115 @@ fn append_comparison_tab(
                     .footnote(reason.as_str())
                     .build(),
             );
+        }
+    }
+}
+
+/// Emit an analyzable parameter summary `ResultTab` and companion `analyzable_data` (`XyTable`
+/// when all dataset column titles parse to finite numeric values, `ColumnTable` otherwise; §2.5.3).
+fn append_parameter_summary_tab_and_data(
+    result: &mut ResultSheet,
+    fit: &NonlinearFitResult,
+    datasets: &[DatasetSeries],
+    target_param: &str,
+    show_se: bool,
+) {
+    let ds_names = dataset_display_names(fit);
+    let mut rows_data: Vec<(String, Option<f64>, f64, f64, CiBound, CiBound)> = Vec::new();
+    for (idx, ds_res) in fit.datasets.iter().enumerate() {
+        let label = ds_names.get(&ds_res.data_set_index).cloned().unwrap_or_else(|| ds_res.label.clone());
+        let title_x = datasets.iter().find(|d| d.data_set_index == ds_res.data_set_index).and_then(|d| d.column_title_value);
+        if let Some(p) = fit
+            .parameters
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(target_param) && (p.dataset_index == Some(ds_res.data_set_index) || p.dataset_index.is_none()))
+        {
+            rows_data.push((label, title_x, p.estimate, p.se, p.ci_lower, p.ci_upper));
+        } else if let Some(d) = fit.derived_scalars.get(idx).and_then(|list| list.iter().find(|d| d.name.eq_ignore_ascii_case(target_param))) {
+            rows_data.push((label, title_x, d.value, f64::NAN, CiBound::Open, CiBound::Open));
+        } else if let Some(pos) = ds_res.param_names.iter().position(|n| n.eq_ignore_ascii_case(target_param))
+            && let Some(&val) = ds_res.params.get(pos)
+        {
+            rows_data.push((label, title_x, val, f64::NAN, CiBound::Open, CiBound::Open));
+        }
+    }
+    if rows_data.is_empty() {
+        return;
+    }
+
+    let has_numeric_x = rows_data.iter().all(|(_, x, _, _, _, _)| x.is_some_and(f64::is_finite));
+    let mut tab =
+        if has_numeric_x && show_se {
+            TabBuilder::new("nonlinear_parameter_summary", format!("Parameter Summary ({target_param})"), ResultTabKind::DescriptiveSummary)
+                .headers(["X (Column Title)", target_param, "Std. Error", "Confidence Interval"])
+        } else if has_numeric_x {
+            TabBuilder::new("nonlinear_parameter_summary", format!("Parameter Summary ({target_param})"), ResultTabKind::DescriptiveSummary)
+                .headers(["X (Column Title)", target_param, "Confidence Interval"])
+        } else if show_se {
+            TabBuilder::new("nonlinear_parameter_summary", format!("Parameter Summary ({target_param})"), ResultTabKind::DescriptiveSummary)
+                .headers([target_param, "Std. Error", "Confidence Interval"])
+        } else {
+            TabBuilder::new("nonlinear_parameter_summary", format!("Parameter Summary ({target_param})"), ResultTabKind::DescriptiveSummary)
+                .headers([target_param, "Confidence Interval"])
+        };
+
+    for (label, title_x, est, se, lo, hi) in &rows_data {
+        match (has_numeric_x, show_se) {
+            (true, true) => {
+                tab.push_row(label.as_str(), [opt_num_cell(*title_x), num_cell(*est), num_cell(*se), ci_bounds_cell(*lo, *hi)]);
+            }
+            (true, false) => {
+                tab.push_row(label.as_str(), [opt_num_cell(*title_x), num_cell(*est), ci_bounds_cell(*lo, *hi)]);
+            }
+            (false, true) => {
+                tab.push_row(label.as_str(), [num_cell(*est), num_cell(*se), ci_bounds_cell(*lo, *hi)]);
+            }
+            (false, false) => {
+                tab.push_row(label.as_str(), [num_cell(*est), ci_bounds_cell(*lo, *hi)]);
+            }
+        }
+    }
+    result.tabs.push(tab.build());
+
+    // Build companion `analyzable_data` for downstream secondary regression or bar/XY graphing.
+    let sheet_id = format!("{}_param_summary", result.id.as_str());
+    let sheet_title = format!("Parameter Summary ({target_param})");
+    if has_numeric_x {
+        if let Ok(mut xy) = XyTable::new(SubcolumnMode::Single, 1, rows_data.len()) {
+            xy.x_title = "Column Title X".to_owned();
+            if let Some(ds) = xy.data_sets.first_mut() {
+                ds.title = target_param.to_owned();
+            }
+            for (r, (label, title_x, est, _, _, _)) in rows_data.iter().enumerate() {
+                if let Some(rt) = xy.row_titles.get_mut(r) {
+                    *rt = label.clone();
+                }
+                if let Some(x) = title_x.filter(|v| v.is_finite()) {
+                    let _ = xy.set_x_cell(r, Cell::number(x));
+                }
+                if est.is_finite()
+                    && let Some(cell) = xy.data_sets.first_mut().and_then(|d| d.cells.get_mut(r)).and_then(|row| row.first_mut())
+                {
+                    *cell = Cell::number(*est);
+                }
+            }
+            if let Ok(ds_sheet) = DataSheet::new(sheet_id, sheet_title, TableArchetype::Xy(xy)) {
+                result.analyzable_data = Some(ds_sheet);
+            }
+        }
+    } else if let Ok(mut col) = ColumnTable::new(ColumnDesignHint::default(), rows_data.len(), 1) {
+        for (c, (label, _, est, _, _, _)) in rows_data.iter().enumerate() {
+            if let Some(ds) = col.data_sets.get_mut(c) {
+                ds.title = label.clone();
+                if est.is_finite()
+                    && let Some(cell) = ds.cells.first_mut().and_then(|row| row.first_mut())
+                {
+                    *cell = Cell::number(*est);
+                }
+            }
+        }
+        if let Ok(ds_sheet) = DataSheet::new(sheet_id, sheet_title, TableArchetype::Column(col)) {
+            result.analyzable_data = Some(ds_sheet);
         }
     }
 }
@@ -1159,6 +1479,173 @@ fn append_nonlinear_covariance_tab(result: &mut ResultSheet, fit: &NonlinearFitR
     result.tabs.push(tab.build());
 }
 
+fn append_nonlinear_outliers_tab(result: &mut ResultSheet, fit: &NonlinearFitResult, nl_spec: &NonlinearFitSpec) {
+    let Some(rout) = &fit.rout else {
+        return;
+    };
+    let eliminated = nl_spec.effective_outlier_handling() == OutlierHandling::Eliminate;
+    let action_label = if eliminated { "Eliminated" } else { "Identified (retained)" };
+    let ds_names = dataset_display_names(fit);
+    let q_label = format_percent_label(rout.q_threshold_percent);
+    let mut tab = TabBuilder::new("nonlinear_outliers", "Outliers", ResultTabKind::Diagnostics)
+        .headers(["Dataset", "Row", "X", "Y", "Weighted Residual", "Status"])
+        .footnote(format!("ROUT outlier detection (Q = {q_label}%, RSDR = {:.4}, df = {}).", rout.rsdr, rout.df));
+
+    let mut per_ds_counts: HashMap<usize, usize> = HashMap::new();
+    let mut count = 0_usize;
+    for pt in rout.audit.iter().filter(|p| p.is_outlier) {
+        count += 1;
+        *per_ds_counts.entry(pt.data_set_index).or_insert(0) += 1;
+        let ds_label = ds_names.get(&pt.data_set_index).cloned().unwrap_or_else(|| format!("DS{}", pt.data_set_index.saturating_add(1)));
+        tab.push_row(
+            format!("Outlier {count}"),
+            [text_cell(ds_label), num_cell((pt.row + 1) as f64), num_cell(pt.x0), num_cell(pt.y), num_cell(pt.residual), text_cell(action_label)],
+        );
+    }
+    if count == 0 {
+        tab.push_row(
+            "Summary",
+            [
+                text_cell("All datasets"),
+                ResultCell::Empty,
+                ResultCell::Empty,
+                ResultCell::Empty,
+                ResultCell::Empty,
+                text_cell("No outliers detected"),
+            ],
+        );
+    }
+    for ds in &fit.datasets {
+        let ds_count = per_ds_counts.get(&ds.data_set_index).copied().unwrap_or(0);
+        result.scalars.push(ResultScalarEntry {
+            key: "ROUT outliers".to_owned(),
+            data_set_index: Some(ds.data_set_index),
+            value: ds_count as f64,
+            units: None,
+        });
+    }
+    result.scalars.push(ResultScalarEntry {
+        key: "ROUT outliers".to_owned(),
+        data_set_index: None,
+        value: rout.outlier_indices.len() as f64,
+        units: None,
+    });
+    result.tabs.push(tab.build());
+}
+
+fn append_cleaned_data_tab_and_analyzable_sheet(result: &mut ResultSheet, sheet: &DataSheet, outlier_cells: &[SourceCellId]) {
+    let mut cleaned = sheet.clone();
+    cleaned.id = result.id.clone();
+    cleaned.title = format!("{} (Cleaned data)", sheet.title);
+    for cid in outlier_cells {
+        match &mut cleaned.archetype {
+            TableArchetype::Xy(xy) => {
+                if let Some(cell) = xy.data_sets.get_mut(cid.col).and_then(|ds| ds.cells.get_mut(cid.row)).and_then(|row| row.get_mut(cid.subcol)) {
+                    cell.excluded = true;
+                }
+            }
+            TableArchetype::Grouped(g) => {
+                if let Some(cell) = g.data_sets.get_mut(cid.col).and_then(|ds| ds.cells.get_mut(cid.row)).and_then(|row| row.get_mut(cid.subcol)) {
+                    cell.excluded = true;
+                }
+            }
+            TableArchetype::MultipleVariables(mv) => {
+                if let Some(cell) = mv.variables.get_mut(cid.col).and_then(|v| v.cells.get_mut(cid.row)) {
+                    cell.excluded = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut headers: Vec<String> = Vec::new();
+    let mut rows: Vec<(String, Vec<ResultCell>)> = Vec::new();
+    match &cleaned.archetype {
+        TableArchetype::Xy(xy) => {
+            headers.push(if xy.x_title.trim().is_empty() { "X".to_owned() } else { xy.x_title.clone() });
+            let subcols = xy.y_subcolumn_mode.subcolumn_count().max(1);
+            for ds in &xy.data_sets {
+                if subcols == 1 {
+                    headers.push(ds.title.clone());
+                } else {
+                    for s in 0..subcols {
+                        headers.push(format!("{} [{}]", ds.title, s + 1));
+                    }
+                }
+            }
+            let n_rows = xy.x_cells.len();
+            for r in 0..n_rows {
+                let mut row_cells = Vec::with_capacity(headers.len());
+                let x_cell = xy.x_summary_at(r).ok().flatten().map_or(ResultCell::Empty, num_cell);
+                row_cells.push(x_cell);
+                for ds in &xy.data_sets {
+                    for s in 0..subcols {
+                        let c = ds.cells.get(r).and_then(|rc| rc.get(s)).and_then(curvebook_doc::Cell::active_number);
+                        row_cells.push(c.map_or(ResultCell::Empty, num_cell));
+                    }
+                }
+                rows.push((format!("Row {}", r + 1), row_cells));
+            }
+        }
+        TableArchetype::Grouped(g) => {
+            let subcols = g.subcolumn_mode.subcolumn_count().max(1);
+            for ds in &g.data_sets {
+                if subcols == 1 {
+                    headers.push(ds.title.clone());
+                } else {
+                    for s in 0..subcols {
+                        headers.push(format!("{} [{}]", ds.title, s + 1));
+                    }
+                }
+            }
+            let n_rows = g.row_titles.len();
+            for r in 0..n_rows {
+                let mut row_cells = Vec::with_capacity(headers.len());
+                for ds in &g.data_sets {
+                    for s in 0..subcols {
+                        let c = ds.cells.get(r).and_then(|rc| rc.get(s)).and_then(curvebook_doc::Cell::active_number);
+                        row_cells.push(c.map_or(ResultCell::Empty, num_cell));
+                    }
+                }
+                let lbl = g.row_titles.get(r).filter(|t| !t.trim().is_empty()).cloned().unwrap_or_else(|| format!("Row {}", r + 1));
+                rows.push((lbl, row_cells));
+            }
+        }
+        TableArchetype::MultipleVariables(mv) => {
+            for var in &mv.variables {
+                headers.push(var.title.clone());
+            }
+            let n_rows = mv.row_count();
+            for r in 0..n_rows {
+                let mut row_cells = Vec::with_capacity(headers.len());
+                for var in &mv.variables {
+                    let cell = var.cells.get(r);
+                    let rc = match cell {
+                        Some(c) if !c.excluded => match &c.value {
+                            curvebook_doc::CellValue::Number(v) if v.is_finite() => num_cell(*v),
+                            curvebook_doc::CellValue::Text(s) if !s.trim().is_empty() => text_cell(s.clone()),
+                            _ => ResultCell::Empty,
+                        },
+                        _ => ResultCell::Empty,
+                    };
+                    row_cells.push(rc);
+                }
+                rows.push((format!("Row {}", r + 1), row_cells));
+            }
+        }
+        _ => {}
+    }
+
+    let mut tab = TabBuilder::new("cleaned_data", "Cleaned data", ResultTabKind::MainSummary)
+        .headers(headers.iter().map(String::as_str))
+        .footnote(format!("{} ROUT outlier cell(s) excluded from cleaned data table.", outlier_cells.len()));
+    for (lbl, row_cells) in rows {
+        tab.push_row(lbl, row_cells);
+    }
+    result.tabs.push(tab.build());
+    result.analyzable_data = Some(cleaned);
+}
+
 fn append_nonlinear_interpolated_tab(result: &mut ResultSheet, fit: &NonlinearFitResult) {
     let inverse = || fit.interpolated_x.iter().map(|item| (item, "X from Y"));
     append_interpolated_tab(
@@ -1184,6 +1671,79 @@ fn append_nonlinear_interpolated_tab(result: &mut ResultSheet, fit: &NonlinearFi
         "Interpolated Replicates",
         inverse().filter(|(item, _)| item.replicate_subcolumn.is_some()),
     );
+
+    // Expose dual `Interpolated Mean X` and `Interpolated Replicates` rows as `analyzable_data`
+    // using `SubcolumnMode::UpperLowerLimits` on X (`[estimate, ci_lower, ci_upper]`) so downstream
+    // `Transform` (`10^X` / `e^X` antilog) converts estimates and CI endpoints cleanly (§2.5.5).
+    if result.analyzable_data.is_none() {
+        let dual_rows: Vec<&InterpolatedUnknown> = fit
+            .interpolated_x
+            .iter()
+            .filter(|item| item.replicate_mean_count.is_some())
+            .chain(fit.interpolated_x.iter().filter(|item| item.replicate_subcolumn.is_some()))
+            .collect();
+        if !dual_rows.is_empty()
+            && let Ok(mut xy) = XyTable::new_with_x_mode(
+                XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::UpperLowerLimits },
+                SubcolumnMode::Single,
+                1,
+                dual_rows.len(),
+            )
+        {
+            xy.x_title = "Interpolated X".to_owned();
+            if let Some(ds) = xy.data_sets.first_mut() {
+                ds.title = "Input Y".to_owned();
+            }
+            for (r, item) in dual_rows.iter().enumerate() {
+                let lbl = fit
+                    .datasets
+                    .iter()
+                    .find(|d| d.data_set_index == item.data_set_index)
+                    .map_or_else(|| format!("DS{}", item.data_set_index + 1), |d| d.label.clone());
+                let source = if let Some(subcol) = item.replicate_subcolumn {
+                    format!("row {}, replicate {}", item.row + 1, subcol + 1)
+                } else if let Some(count) = item.replicate_mean_count {
+                    format!("row {}, mean of {count}", item.row + 1)
+                } else {
+                    format!("row {}", item.row + 1)
+                };
+                if let Some(rt) = xy.row_titles.get_mut(r) {
+                    *rt = format!("{lbl} ({source})");
+                }
+                if let Some(x_row) = xy.x_cells.get_mut(r) {
+                    if item.output_estimate.is_finite()
+                        && let Some(c0) = x_row.first_mut()
+                    {
+                        *c0 = Cell::number(item.output_estimate);
+                    }
+                    let suppress_ci = fit.is_robust_cauchy() || !item.inference_availability.is_available();
+                    if !suppress_ci {
+                        if let CiBound::Finite(lo) = item.ci_lower
+                            && lo.is_finite()
+                            && let Some(c1) = x_row.get_mut(1)
+                        {
+                            *c1 = Cell::number(lo);
+                        }
+                        if let CiBound::Finite(hi) = item.ci_upper
+                            && hi.is_finite()
+                            && let Some(c2) = x_row.get_mut(2)
+                        {
+                            *c2 = Cell::number(hi);
+                        }
+                    }
+                }
+                if item.input_value.is_finite()
+                    && let Some(cell) = xy.data_sets.first_mut().and_then(|d| d.cells.get_mut(r)).and_then(|row| row.first_mut())
+                {
+                    *cell = Cell::number(item.input_value);
+                }
+            }
+            let sheet_id = format!("{}_interpolated", result.id.as_str());
+            if let Ok(ds_sheet) = DataSheet::new(sheet_id, "Interpolated Unknowns", TableArchetype::Xy(xy)) {
+                result.analyzable_data = Some(ds_sheet);
+            }
+        }
+    }
 }
 
 fn append_interpolated_tab<'a>(

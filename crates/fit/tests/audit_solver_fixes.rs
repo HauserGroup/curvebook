@@ -668,21 +668,18 @@ fn audit_121_issue_11_nearly_flat_3pl_open_upper_logec50_and_top() {
             .unwrap();
     let rs_11 = execute_analysis(&spec_11, &sheet_11, &HookContext::default()).unwrap();
     let params_tab = rs_11.tabs.iter().find(|t| t.id == "nonlinear_parameters").unwrap();
+    let ci_col = params_tab.column_headers.iter().position(|h| h == "Confidence Interval").unwrap();
     assert!(
-        params_tab
-            .row_labels
-            .iter()
-            .zip(params_tab.rows.iter())
-            .any(|(lbl, row)| { lbl.contains("LogEC50") && matches!(row.get(2), Some(ResultCell::ConfidenceInterval { upper: CiBound::Open, .. })) }),
+        params_tab.row_labels.iter().zip(params_tab.rows.iter()).any(|(lbl, row)| {
+            lbl.contains("LogEC50") && matches!(row.get(ci_col), Some(ResultCell::ConfidenceInterval { upper: CiBound::Open, .. }))
+        }),
         "ResultSheet params tab must report Open upper CI for LogEC50: {:?}",
         params_tab.rows
     );
     assert!(
-        params_tab
-            .row_labels
-            .iter()
-            .zip(params_tab.rows.iter())
-            .any(|(lbl, row)| { lbl.contains("Top") && matches!(row.get(2), Some(ResultCell::ConfidenceInterval { upper: CiBound::Open, .. })) }),
+        params_tab.row_labels.iter().zip(params_tab.rows.iter()).any(|(lbl, row)| {
+            lbl.contains("Top") && matches!(row.get(ci_col), Some(ResultCell::ConfidenceInterval { upper: CiBound::Open, .. }))
+        }),
         "ResultSheet params tab must report Open upper CI for Top: {:?}",
         params_tab.rows
     );

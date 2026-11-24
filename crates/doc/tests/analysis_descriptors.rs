@@ -10,7 +10,8 @@ use curvebook_doc::analysis::{
 use curvebook_doc::{
     AnalysisKind, BlandAltmanSpec, ContingencyMethod, ContingencySpec, DescriptiveSpec, FactorialAnovaSpec, GlmFamily, GlmSpec, KappaWeighting,
     LinearRegressionSpec, MultipleRowTestsSpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, OneWayAnovaSpec, OutlierSpec,
-    PValueStackSpec, PassingBablokSpec, PowerAnalysisSpec, RocSpec, SurvivalAnalysisSpec, TableKind, TransformAnalysisSpec, TwoGroupSpec,
+    PValueStackSpec, PassingBablokSpec, PowerAnalysisSpec, RocSpec, SimpleLogisticSpec, SplineLowessSpec, SurvivalAnalysisSpec, TableKind,
+    TransformAnalysisSpec, TwoGroupSpec,
 };
 
 fn representative_variants() -> Vec<(AnalysisKindId, AnalysisKind)> {
@@ -52,6 +53,8 @@ fn representative_variants() -> Vec<(AnalysisKindId, AnalysisKind)> {
         (AnalysisKindId::NonlinearRegression, AnalysisKind::NonlinearRegression(NonlinearFitSpec::new("log_agonist_vs_response_4pl"))),
         (AnalysisKindId::PValueStack, AnalysisKind::PValueStack(PValueStackSpec::default())),
         (AnalysisKindId::PowerAnalysis, AnalysisKind::PowerAnalysis(PowerAnalysisSpec::default())),
+        (AnalysisKindId::SimpleLogisticRegression, AnalysisKind::SimpleLogisticRegression(SimpleLogisticSpec::default())),
+        (AnalysisKindId::FitSplineLowess, AnalysisKind::FitSplineLowess(SplineLowessSpec::default())),
     ]
 }
 

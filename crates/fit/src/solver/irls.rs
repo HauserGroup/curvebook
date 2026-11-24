@@ -1,12 +1,14 @@
-//! Poisson deviance and Cauchy robust fitting by iteratively reweighted least squares.
+//! Poisson deviance, curve-predicted weighting, and Cauchy robust fitting by iteratively reweighted least squares.
 //!
 //! References:
+//! - Carroll, R. J. & Ruppert, D. (1988). *Transformation and Weighting in Regression*. Chapman & Hall.
+//! - Motulsky, H. & Christopoulos, A. (2004). *Fitting Models to Biological Data Using Linear and Nonlinear Regression*. Oxford University Press.
 //! - Green, P. J. (1984). Iteratively reweighted least squares for maximum likelihood estimation, and some robust and resistant alternatives. *Journal of the Royal Statistical Society B* 46(2), 149–192.
 //! - McCullagh, P. & Nelder, J. A. (1989). *Generalized Linear Models*, 2nd ed. Chapman & Hall.
 //! - Holland, P. W. & Welsch, R. E. (1977). Robust regression using iteratively reweighted least-squares. *Communications in Statistics – Theory and Methods* 6(9), 813–827.
 //! - Motulsky, H. J. & Brown, R. E. (2006). Detecting outliers when fitting data with nonlinear regression – a new method based on robust nonlinear regression and the false discovery rate. *BMC Bioinformatics* 7, 123.
 
-use curvebook_doc::WeightingScheme;
+use curvebook_doc::{ConvergenceStrictness, WeightingScheme};
 use curvebook_math::linalg::{DenseMatrix, qr_col_pivoted};
 use curvebook_math::special::deviance_bd0;
 use curvebook_math::sum::NeumaierSum;
@@ -15,10 +17,12 @@ use crate::diagnostics::compute_rsdr;
 use crate::dsl::ode_fit_budget_exceeded;
 use crate::error::{FitError, FitStatus};
 use crate::library::ParametricModel;
-use crate::solver::layout::{ObsRecord, ParameterLayout, ode_budget_error, project_theta};
+use crate::solver::layout::{
+    ObsRecord, ParameterLayout, apply_predicted_y_weights, obs_ss_within, ode_budget_error, project_theta, reset_observations_unweighted,
+};
 use crate::solver::lm::{
-    LmRunOutput, compute_jacobian, eval_residuals_with_domain, nelder_mead_optimize, nelder_mead_poisson_feasibility_rescue, run_trust_region_lm,
-    run_trust_region_lm_with_domain, solve_with_warm_start, solve_with_warm_start_with_domain,
+    LmRunOptions, LmRunOutput, compute_jacobian, eval_residuals_with_domain, nelder_mead_optimize, nelder_mead_poisson_feasibility_rescue,
+    run_trust_region_lm, run_trust_region_lm_with_domain, run_trust_region_lm_with_options, solve_with_warm_start, solve_with_warm_start_with_domain,
 };
 use crate::solver::results::SolverConfig;
 
@@ -340,6 +344,98 @@ pub(in crate::solver) fn fit_cauchy_irls(
         }
     }
     Ok(best)
+}
+
+/// Curve-predicted weighted least squares by iteratively reweighted least squares (IRLS;
+/// Carroll & Ruppert 1988; Motulsky & Christopoulos 2004):
+/// 1. Run an unweighted (`w_i = 1`) Levenberg–Marquardt fit from `init_theta` so inaccurate
+///    starting values do not blow up initial weights.
+/// 2. Evaluate `w_i = 1 / |y_hat_i|^k` from the fitted curve height (returning
+///    `FitStatus::ImpossibleWeights` if any `y_hat_i == 0`), preserving `(Mean, SD, n)` sufficient
+///    statistics (`sqrt_weight = sqrt(w_i * n_i)` and `ss_within = w_i * (n_i - 1) * SD_i^2`).
+/// 3. Re-optimize `theta` holding `w_i` fixed during each inner LM pass, then refresh `w_i` from
+///    the updated curve until the relative change in weighted SS stabilizes.
+pub(in crate::solver) fn fit_predicted_y_irls(
+    model: &dyn ParametricModel,
+    layout: &ParameterLayout,
+    obs: &mut [ObsRecord],
+    init_theta: &[f64],
+    config: &SolverConfig,
+) -> Result<LmRunOutput, FitError> {
+    reset_observations_unweighted(obs)?;
+    let mut last_out = solve_with_warm_start(model, layout, obs, init_theta, config)?;
+    if matches!(last_out.status, FitStatus::Diverged | FitStatus::BadInitialValues) {
+        return Ok(last_out);
+    }
+    if !apply_predicted_y_weights(obs, &last_out.y_hat, config.weighting) {
+        last_out.status = FitStatus::ImpossibleWeights;
+        return Ok(last_out);
+    }
+    let bounds = layout.bounds();
+    if let Some((w_res, y_hat, ss_no_within)) = eval_residuals_with_domain(model, layout, obs, &last_out.theta, false) {
+        last_out.weighted_res = w_res;
+        last_out.y_hat = y_hat;
+        last_out.weighted_ss = ss_no_within;
+    }
+    let k_free = layout.k_free();
+    if k_free == 0 {
+        return Ok(last_out);
+    }
+
+    let irls_tol = match config.convergence_strictness {
+        ConvergenceStrictness::Quick => 1e-4_f64,
+        ConvergenceStrictness::Medium => 1e-6_f64,
+        ConvergenceStrictness::Strict | ConvergenceStrictness::Default => 1e-10_f64,
+    };
+    let mut prev_wss = last_out.weighted_ss + obs_ss_within(obs);
+    let mut total_iters = last_out.iterations;
+    let mut outer_converged = false;
+    let max_passes = config.max_iters.clamp(1, 50);
+
+    for _ in 0..max_passes {
+        let prev_theta = last_out.theta.clone();
+        let next = run_trust_region_lm_with_options(
+            model,
+            layout,
+            obs,
+            &prev_theta,
+            LmRunOptions { max_iters: config.max_iters, init_factor: 10.0, require_positive_mean: false, strictness: config.convergence_strictness },
+        )?;
+        total_iters = total_iters.saturating_add(next.iterations);
+        if !apply_predicted_y_weights(obs, &next.y_hat, config.weighting) {
+            let mut failed = next;
+            failed.iterations = total_iters;
+            failed.status = FitStatus::ImpossibleWeights;
+            return Ok(failed);
+        }
+        let max_step = max_rel_theta_step(&prev_theta, &next.theta);
+        last_out = next;
+        if let Some((w_res, y_hat, ss_no_within)) = eval_residuals_with_domain(model, layout, obs, &last_out.theta, false) {
+            last_out.weighted_res = w_res;
+            last_out.y_hat = y_hat;
+            last_out.weighted_ss = ss_no_within;
+        }
+        let new_wss = last_out.weighted_ss + obs_ss_within(obs);
+        let rel_ss_change = (prev_wss - new_wss).abs() / prev_wss.abs().max(1.0);
+        prev_wss = new_wss;
+
+        if last_out.status == FitStatus::Diverged {
+            break;
+        }
+        if last_out.status == FitStatus::Converged && ((rel_ss_change < irls_tol && max_step < irls_tol.max(1e-8)) || max_step < 1e-10) {
+            outer_converged = true;
+            break;
+        }
+    }
+
+    last_out.iterations = total_iters;
+    if !outer_converged && last_out.status != FitStatus::Diverged {
+        last_out.status = FitStatus::HitMaxIters;
+    }
+    if let Some(jm) = compute_jacobian(model, layout, obs, &last_out.theta, &last_out.y_hat, &bounds) {
+        last_out.j_mat = jm;
+    }
+    Ok(last_out)
 }
 
 pub(in crate::solver) fn compute_unscaled_cov(j_mat: &DenseMatrix) -> Option<DenseMatrix> {

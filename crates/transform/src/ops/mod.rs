@@ -253,17 +253,23 @@ pub fn execute_transform(source: &DataSheet, spec: &TransformAnalysisSpec, ctx: 
     }
 }
 
-/// Execute an [`AnalysisSpec`] whose kind is [`AnalysisKind::Transform`] and populate a [`ResultSheet`].
+/// Execute an [`AnalysisSpec`] whose kind is [`AnalysisKind::Transform`] or
+/// [`AnalysisKind::FitSplineLowess`] and populate a [`ResultSheet`].
 pub fn execute_analysis_transform(source: &DataSheet, analysis: &AnalysisSpec, ctx: &TransformContext<'_>) -> Result<ResultSheet, TransformError> {
-    let AnalysisKind::Transform(spec) = &analysis.kind else {
-        return Err(TransformError::InvalidSpec { message: format!("analysis `{}` is not a Transform specification", analysis.effective_title()) });
-    };
-    let mut local_ctx = ctx.clone();
-    if local_ctx.selected_data_sets.is_empty() && !analysis.selected_data_sets.is_empty() {
-        local_ctx.selected_data_sets = analysis.selected_data_sets.clone();
+    match &analysis.kind {
+        AnalysisKind::Transform(spec) => {
+            let mut local_ctx = ctx.clone();
+            if local_ctx.selected_data_sets.is_empty() && !analysis.selected_data_sets.is_empty() {
+                local_ctx.selected_data_sets = analysis.selected_data_sets.clone();
+            }
+            let output = execute_transform(source, spec, &local_ctx)?;
+            output.into_result_sheet(analysis.clone())
+        }
+        AnalysisKind::FitSplineLowess(spec) => crate::spline::execute_spline_lowess(source, analysis, spec),
+        _ => Err(TransformError::InvalidSpec {
+            message: format!("analysis `{}` is not a Transform or FitSplineLowess specification", analysis.effective_title()),
+        }),
     }
-    let output = execute_transform(source, spec, &local_ctx)?;
-    output.into_result_sheet(analysis.clone())
 }
 
 pub(crate) fn build_summary_tab(title: &str, entries: Vec<(&str, ResultCell)>, footnotes: Vec<String>) -> ResultTab {

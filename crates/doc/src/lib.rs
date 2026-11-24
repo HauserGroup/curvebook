@@ -40,15 +40,17 @@ pub mod schema;
 pub use analysis::{
     ALL_ANALYSIS_DESCRIPTORS, AnalysisDomainKind, AnalysisKind, AnalysisKindDescriptor, AnalysisKindId, AnalysisRecomputeStrategy, AnalysisSpec,
     AnalysisUiCategory, BaselineOperation, BlandAltmanSpec, ClusterDistance, ClusterLinkage, ColumnTitleHookError, ContingencyMethod,
-    ContingencySpec, CorrelationPowerMethod, CoxTieMethod, DemingErrorSpec, DerivedColumnFormula, DescriptiveSpec, ErrorPropagationMode,
-    FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, KappaWeighting, LinearRegressionSpec, MathTransformPreset, MixedModelDfMethod,
-    ModelComparisonSpec, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec,
-    NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat, PValueStackMethod, PValueStackSpec, ParameterRule, ParameterScope,
-    PassingBablokSpec, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget, PowerTailMode, PowerTestFamily,
-    RepeatedMeasuresDesign, ResidualCovariance, RocCiMethod, RocSpec, SimulationNoise, SubcolumnAggregation, SumOfSquaresType, SurvivalAnalysisSpec,
-    TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, TwoProportionsMethod, WeightingScheme, all_analysis_descriptors,
-    default_analysis_kind_id_for_table, descriptor_by_serde_variant, descriptor_by_shorthand, descriptor_by_slug, descriptor_by_ui_catalog_id,
-    descriptor_for_id, descriptor_for_kind, parse_column_title_numeric_hook, resolve_analysis_descriptor,
+    ContingencySpec, ConvergenceStrictness, CorrelationPowerMethod, CoxTieMethod, DemingErrorSpec, DerivedColumnFormula, DescriptiveSpec,
+    ErrorPropagationMode, FactorialAnovaSpec, FitFlagRules, FitMethod, GlmFamily, GlmSpec, IdentifiabilityMode, KappaWeighting, LinearRegressionSpec,
+    LowessPreset, MathTransformPreset, MixedModelDfMethod, ModelComparisonMethod, ModelComparisonQuestion, ModelComparisonSpec, MultipleRowTestsSpec,
+    MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod,
+    OutlierHandling, OutlierSpec, PValueFormat, PValueStackMethod, PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec,
+    PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget, PowerTailMode, PowerTestFamily, RepeatedMeasuresDesign,
+    ReplicateFitMode, ResidualCovariance, RocCiMethod, RocSpec, SimpleLogisticSpec, SimulationNoise, SplineLowessMethod, SplineLowessSpec,
+    SubcolumnAggregation, SumOfSquaresType, SurvivalAnalysisSpec, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, TwoProportionsMethod,
+    WeightingScheme, WeightingSource, all_analysis_descriptors, default_analysis_kind_id_for_table, descriptor_by_serde_variant,
+    descriptor_by_shorthand, descriptor_by_slug, descriptor_by_ui_catalog_id, descriptor_for_id, descriptor_for_kind,
+    parse_column_title_numeric_hook, resolve_analysis_descriptor,
 };
 pub use archetypes::{
     CategoricalLevelSummary, CellCoord, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, GroupedTable, LevelOrderKind, LevelOrderSpec,
@@ -93,7 +95,7 @@ pub use links::{
 pub use project::{NamedCheckpoint, ProjectDocument, SheetFolderKind};
 pub use result::{
     ChecklistItem, ChecklistStatus, CiBound, CurveSamplePoint, ErrorCategory, ErrorCode, FittedCurveOverlay, PairwiseComparisonRecord,
-    RemediationKind, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind,
+    RemediationKind, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, format_significant_digits,
 };
 pub use result_builder::{
     KvTabBuilder, TabBuilder, bool_cell, ci_cell, finite_ci_cell, num_cell, opt_ci_cell, opt_num_cell, p_cell, p_cell_at_alpha, text_cell,

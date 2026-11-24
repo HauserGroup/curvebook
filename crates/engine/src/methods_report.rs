@@ -8,14 +8,16 @@ use std::fmt::Write as _;
 
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, BaselineOperation, BlandAltmanSpec, ChecklistItem, ChecklistStatus, CiBound, ClusterDistance, ClusterLinkage,
-    ContingencyMethod, ContingencySpec, CorrelationPowerMethod, CoxTieMethod, DataSheet, DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec,
-    FitMethod, GlmFamily, GlmSpec, HookSource, KappaWeighting, LinearRegressionSpec, MathTransformPreset, MixedModelDfMethod, ModelComparisonSpec,
-    MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor,
-    OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat, PValueStackMethod, PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec,
+    ContingencyMethod, ContingencySpec, ConvergenceStrictness, CorrelationPowerMethod, CoxTieMethod, DataSheet, DescriptiveSpec,
+    ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, HookSource, IdentifiabilityMode, KappaWeighting, LinearRegressionSpec,
+    MathTransformPreset, MixedModelDfMethod, ModelComparisonMethod, ModelComparisonQuestion, ModelComparisonSpec, MultipleRowTestsSpec,
+    MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod,
+    OutlierHandling, OutlierSpec, PValueFormat, PValueStackMethod, PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec,
     PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget, PowerTailMode, PowerTestFamily, ProjectDocument,
-    RepeatedMeasuresDesign, ResidualCovariance, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, RocCiMethod, RocSpec, SheetId,
-    SimulationNoise, SubcolumnAggregation, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, TwoGroupMethod,
-    TwoGroupSpec, TwoProportionsMethod, WeightingScheme,
+    RepeatedMeasuresDesign, ReplicateFitMode, ResidualCovariance, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, RocCiMethod,
+    RocSpec, SheetId, SimpleLogisticSpec, SimulationNoise, SplineLowessMethod, SplineLowessSpec, SubcolumnAggregation, SumOfSquaresType,
+    SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, TwoProportionsMethod, WeightingScheme,
+    WeightingSource,
 };
 use curvebook_fit::{get_builtin_model, resolve_model_from_spec};
 
@@ -283,9 +285,11 @@ fn describe_analysis_kind(doc: &ProjectDocument, spec: &AnalysisSpec, res: &Resu
         AnalysisKind::Multivariate(s) => describe_multivariate(s, res, source_ds),
         AnalysisKind::LinearRegression(s) => describe_linear_regression(s),
         AnalysisKind::NonlinearRegression(s) => describe_nonlinear_regression(s, res),
+        AnalysisKind::FitSplineLowess(s) => describe_spline_lowess(s),
         AnalysisKind::DescriptiveStats(s) => describe_descriptive(s),
         AnalysisKind::OutlierDetection(s) => describe_outlier_detection(s),
         AnalysisKind::Transform(s) => describe_transform(s),
+        AnalysisKind::SimpleLogisticRegression(s) => describe_simple_logistic(s),
     }
 }
 
@@ -1214,6 +1218,55 @@ fn describe_multivariate(s: &MultivariateSpec, res: &ResultSheet, source_ds: Opt
     }
 }
 
+fn describe_spline_lowess(s: &SplineLowessSpec) -> Vec<ReportBlock> {
+    let method_text = match s.method {
+        SplineLowessMethod::NaturalCubicSpline => String::from(
+            "A natural cubic spline (de Boor 1978; C^2 piecewise cubic with zero endpoint second derivatives S''(X_min) = S''(X_max) = 0) was fitted through the sorted distinct (X, mean Y) knots.",
+        ),
+        SplineLowessMethod::AkimaSubspline => String::from(
+            "An Akima subspline (Akima 1970; C^1 piecewise cubic using five-point secant slope weighting to suppress overshoot around sharp transitions) was fitted through the sorted distinct (X, mean Y) knots.",
+        ),
+        SplineLowessMethod::SmoothingSpline => {
+            let param = if let Some(df) = s.smoothing_df {
+                format!(" with target effective degrees of freedom df = {df:.3}")
+            } else if let Some(knots) = s.smoothing_knots {
+                format!(" parameterized by {knots} effective knots")
+            } else {
+                String::from(" with automatic effective degrees of freedom")
+            };
+            format!(
+                "A penalized cubic smoothing spline (Reinsch 1967; Hutchinson & de Hoog 1985) minimizing weighted RSS plus curvature penalty was fitted{param}."
+            )
+        }
+        SplineLowessMethod::Lowess => {
+            let frac = s.effective_lowess_fraction();
+            let preset_note = if s.lowess_fraction.is_some() {
+                format!("custom span fraction f = {frac:.3}")
+            } else {
+                format!("{} preset (f = {frac:.2})", s.lowess_preset.label())
+            };
+            format!(
+                "Cleveland (1979) LOWESS tricube-weighted local linear regression was fitted using the {preset_note} and {} Tukey bisquare robustness pass(es), enforcing at least 4*N sampled polyline vertices.",
+                s.lowess_robustness_iters
+            )
+        }
+        SplineLowessMethod::PointToPoint => String::from(
+            "A dense data-space piecewise-linear point-to-point curve was resampled onto polyline vertices (preserving linear data-space trajectories on logarithmic axes).",
+        ),
+    };
+    let mut extras = Vec::new();
+    extras.push(format!("Curve overlay resolution was configured to {} vertices.", s.segment_count));
+    if s.emit_curve_coordinates_tab {
+        extras.push(String::from("Sampled (X, Y) curve coordinates were emitted as an auxiliary result tab."));
+    }
+    if s.interpolate_unknowns {
+        extras.push(String::from(
+            "Nonparametric standard-curve interpolation evaluated S(X) for (X, blank Y) rows and solved S(X) = Y for (blank X, Y) rows.",
+        ));
+    }
+    vec![ReportBlock::Paragraph(vec![plain(format!("{method_text} {}", extras.join(" ")))])]
+}
+
 fn describe_linear_regression(s: &LinearRegressionSpec) -> Vec<ReportBlock> {
     let range = s.x_range_filter.filter(|(lo, hi)| lo.is_some() || hi.is_some()).map_or_else(String::new, |(lo, hi)| {
         format!(" The fit included observations within X bounds [{}, {}].", opt_bound_str(lo), opt_bound_str(hi))
@@ -1256,6 +1309,27 @@ fn describe_linear_regression(s: &LinearRegressionSpec) -> Vec<ReportBlock> {
     let extra_str = if extras.is_empty() { String::new() } else { format!(" Enabled outputs: {}.", extras.join(", ")) };
     vec![ReportBlock::Paragraph(vec![plain(format!(
         "Ordinary least-squares simple linear regression was fitted {constraint}, including a runs test for departure from linearity and ANCOVA comparison of slopes and intercepts when multiple datasets are present.{extra_str}{range}"
+    ))])]
+}
+
+fn describe_simple_logistic(s: &SimpleLogisticSpec) -> Vec<ReportBlock> {
+    let mut extras = Vec::new();
+    if s.confidence_bands {
+        extras.push("sigmoid probability confidence bands");
+    }
+    if s.emit_row_classification {
+        extras.push("row-level classification and automatic prediction for blank-Y rows");
+    }
+    let extra_str = if extras.is_empty() { String::new() } else { format!(" Enabled outputs: {}.", extras.join(", ")) };
+    let range_str = match (s.plot_x_min, s.plot_x_max) {
+        (Some(lo), Some(hi)) => format!(" The fitted sigmoid curve was evaluated over X in [{lo}, {hi}]."),
+        (Some(lo), None) => format!(" The fitted sigmoid curve started at X = {lo}."),
+        (None, Some(hi)) => format!(" The fitted sigmoid curve ended at X = {hi}."),
+        (None, None) => String::new(),
+    };
+    vec![ReportBlock::Paragraph(vec![plain(format!(
+        "Standalone simple binary logistic regression (logit P(Y=1 | X) = beta_0 + beta_1 * X) was fitted by Newton-Raphson / Fisher scoring IRLS maximum likelihood on single-subcolumn XY data with Y in {{0, 1}}. Parameter inference included asymptotic standard errors, Wald Z-tests, likelihood-ratio G^2 test against the intercept-only null, asymmetrical profile-likelihood confidence intervals (including odds ratios and X at 50%), deviance, AICc, Tjur's R^2, Cox-Snell R^2, DeLong ROC AUC, classification at cutoff {}, and explicit collinearity / separation diagnostics (Hosmer, Lemeshow & Sturdivant 2013; Tjur 2009; Heinze & Schemper 2002).{extra_str}{range_str}",
+        s.classification_cutoff
     ))])]
 }
 
@@ -1315,11 +1389,19 @@ fn describe_nonlinear_regression(s: &NonlinearFitSpec, res: &ResultSheet) -> Vec
 
     // 2. Objective function, ROUT outlier settings, weighting, and iterations
     let mut obj_runs = Vec::new();
+    let outlier_handling = s.effective_outlier_handling();
     match s.method {
         FitMethod::LeastSquares => {
             obj_runs.push(plain(
                 "Parameters were estimated by trust-region Levenberg-Marquardt nonlinear regression (with Nelder-Mead simplex warm-start)",
             ));
+            if outlier_handling == OutlierHandling::IdentifyAndCountOnly {
+                obj_runs.push(plain(
+                    "; ROUT outlier detection (Q = 1%) identified and counted outliers without excluding them from the least-squares fit",
+                ));
+            } else if outlier_handling == OutlierHandling::Eliminate {
+                obj_runs.push(plain("; ROUT outlier detection (Q = 1%) identified and excluded outliers before least-squares refitting"));
+            }
         }
         FitMethod::PoissonDeviance => {
             obj_runs.push(plain("Parameters were estimated by maximum-likelihood Poisson deviance iteratively reweighted least squares (IRLS)"));
@@ -1331,15 +1413,35 @@ fn describe_nonlinear_regression(s: &NonlinearFitSpec, res: &ResultSheet) -> Vec
         }
         FitMethod::RoutOutlierElimination { fdr_q_percent } => {
             let q_str = format_exact_float(fdr_q_percent);
-            obj_runs.push(plain(
-                "Outliers were identified and excluded using the ROUT method (robust Cauchy fit, RSDR scale, Benjamini-Hochberg FDR control at ",
-            ));
-            obj_runs.push(math(format!("Q = {q_str}%"), format!("Q = {q_str}%"), format!("Q = {q_str}\\%")));
-            obj_runs.push(plain("), followed by ordinary/weighted least-squares refitting on the retained observations"));
+            if outlier_handling == OutlierHandling::IdentifyAndCountOnly {
+                obj_runs.push(plain(
+                    "Outliers were identified and counted (retained in the least-squares fit) using the ROUT method (robust Cauchy fit, RSDR scale, Benjamini-Hochberg FDR control at ",
+                ));
+                obj_runs.push(math(format!("Q = {q_str}%"), format!("Q = {q_str}%"), format!("Q = {q_str}\\%")));
+                obj_runs.push(plain(")"));
+            } else {
+                obj_runs.push(plain(
+                    "Outliers were identified and excluded using the ROUT method (robust Cauchy fit, RSDR scale, Benjamini-Hochberg FDR control at ",
+                ));
+                obj_runs.push(math(format!("Q = {q_str}%"), format!("Q = {q_str}%"), format!("Q = {q_str}\\%")));
+                obj_runs.push(plain("), followed by ordinary/weighted least-squares refitting on the retained observations"));
+            }
         }
     }
-    obj_runs.push(plain(format!(" (maximum iterations = {}). ", s.clamped_max_iters())));
-    obj_runs.extend(describe_weighting_runs(s.weighting));
+    let strictness_note = match s.convergence_strictness {
+        ConvergenceStrictness::Default => String::new(),
+        ConvergenceStrictness::Quick => String::from(", convergence strictness = Quick (2 consecutive iterations < 0.01% SS change)"),
+        ConvergenceStrictness::Medium => String::from(", convergence strictness = Medium (5 consecutive iterations < 0.0001% SS change)"),
+        ConvergenceStrictness::Strict => String::from(", convergence strictness = Strict (5 consecutive iterations < 1e-8% SS change)"),
+    };
+    obj_runs.push(plain(format!(" (maximum iterations = {}{strictness_note}). ", s.clamped_max_iters())));
+    obj_runs.extend(describe_weighting_runs(s.weighting, s.weighting_source));
+    if s.replicate_fit_mode == ReplicateFitMode::RowMeansOnly {
+        obj_runs.push(plain(" Replicates within each row were collapsed to unweighted row means (1 observation per row)."));
+    }
+    if s.emit_cleaned_data_tab {
+        obj_runs.push(plain(" An analyzable Cleaned data table excluding ROUT-identified outliers was emitted."));
+    }
 
     // Confidence interval & parametric inference availability
     if s.method == FitMethod::RobustCauchy {
@@ -1388,13 +1490,14 @@ fn describe_nonlinear_regression(s: &NonlinearFitSpec, res: &ResultSheet) -> Vec
 
     // 4. Model comparison and residual / range diagnostics
     let mut extras = Vec::new();
-    if let Some(cmp) = &s.comparison {
+    append_nonlinear_identifiability_and_flags(s, &mut extras);
+    if let Some((method, question)) = s.effective_comparison() {
         if s.method == FitMethod::RobustCauchy {
             extras.push(vec![plain(
                 "Model comparison was marked Not applicable (NotApplicableInRobustMode) because Robust (Cauchy) regression does not support least-squares F, AICc, or likelihood-ratio tests.",
             )]);
         } else {
-            extras.push(describe_model_comparison_runs(cmp));
+            extras.push(describe_model_comparison_question_runs(method, &question, s.prefer_well_defined_fit));
         }
     }
     if let Some((x_lo, x_hi)) = s.x_range_filter {
@@ -1430,19 +1533,38 @@ fn describe_nonlinear_regression(s: &NonlinearFitSpec, res: &ResultSheet) -> Vec
     blocks
 }
 
-fn describe_weighting_runs(weighting: WeightingScheme) -> Vec<TextRun> {
+fn describe_weighting_runs(weighting: WeightingScheme, source: WeightingSource) -> Vec<TextRun> {
+    let predicted = source == WeightingSource::PredictedY;
     match weighting {
         WeightingScheme::None => vec![plain("Equal weighting (unweighted, assuming uniform residual SD) was used.")],
+        WeightingScheme::RelativeSquare if predicted => vec![
+            plain("Observations were weighted by curve-predicted IRLS "),
+            math("1 / Y_curve^2", "1 / Y_curve^2", "1 / \\hat{Y}^2"),
+            plain(" (Carroll & Ruppert 1988; starting from an unweighted pass)."),
+        ],
         WeightingScheme::RelativeSquare => vec![
             plain("Observations were weighted by "),
             math("1 / Y^2", "1 / Y^2", "1 / Y^2"),
             plain(" (minimizing relative squared residuals for constant %CV scatter)."),
+        ],
+        WeightingScheme::Relative if predicted => vec![
+            plain("Observations were weighted by curve-predicted IRLS "),
+            math("1 / |Y_curve|", "1 / |Y_curve|", "1 / |\\hat{Y}|"),
+            plain(" (Carroll & Ruppert 1988; starting from an unweighted pass)."),
         ],
         WeightingScheme::Relative => vec![
             plain("Observations were weighted by "),
             math("1 / |Y|", "1 / |Y|", "1 / |Y|"),
             plain(" (Poisson-like variance proportional to |Y|)."),
         ],
+        WeightingScheme::GeneralPowerY(k) if predicted => {
+            let ks = format_exact_float(k);
+            vec![
+                plain("Observations were weighted by curve-predicted IRLS "),
+                math(format!("1 / |Y_curve|^{ks}"), format!("1 / |Y_curve|^{ks}"), format!("1 / |\\hat{{Y}}|^{{{ks}}}")),
+                plain(" (Carroll & Ruppert 1988)."),
+            ]
+        }
         WeightingScheme::GeneralPowerY(k) => {
             let ks = format_exact_float(k);
             vec![
@@ -1486,6 +1608,110 @@ fn describe_parameter_rule(canonical_name: &str, rule: &ParameterRule) -> Vec<Te
     }
     if let Some(init) = rule.initial_override {
         runs.push(plain(format!("; initial estimate override = {}", format_exact_float(init))));
+    }
+    runs
+}
+
+fn append_nonlinear_identifiability_and_flags(s: &NonlinearFitSpec, extras: &mut Vec<Vec<TextRun>>) {
+    if let Some(mode) = s.effective_identifiability_mode() {
+        let mode_desc = match mode {
+            IdentifiabilityMode::IdentifyUnstableParameters => {
+                "Parameter identifiability used greedy Hessian condition-number reduction (kappa(H) > 10 / sqrt(eps_mach)), marking unstable parameters while preserving well-conditioned estimates and intervals."
+            }
+            IdentifiabilityMode::IdentifyAmbiguousFits => {
+                "Parameter identifiability used the dependency criterion (Dependency > 0.9999 or rank-deficient Jacobian), flagging ambiguous fits with `~` prefixes."
+            }
+            IdentifiabilityMode::ReportAll => "Parameter identifiability reporting was set to ReportAll (unconditional raw parameter reporting).",
+        };
+        extras.push(vec![plain(mode_desc)]);
+    }
+    if let Some(rules) = &s.fit_flag_rules
+        && rules.has_any_rule()
+    {
+        let mut parts = Vec::new();
+        if let Some(v) = rules.min_r_squared {
+            parts.push(format!("R^2 < {}", format_exact_float(v)));
+        }
+        if let Some(v) = rules.min_observations {
+            parts.push(format!("N < {v}"));
+        }
+        if let Some(v) = rules.max_dependency {
+            parts.push(format!("max dependency > {}", format_exact_float(v)));
+        }
+        if let Some(v) = rules.min_normality_p {
+            parts.push(format!("normality p < {}", format_exact_float(v)));
+        }
+        if let Some(v) = rules.min_runs_or_lof_p {
+            parts.push(format!("runs/lack-of-fit p < {}", format_exact_float(v)));
+        }
+        if let Some(v) = rules.max_rout_outliers {
+            parts.push(format!("ROUT outliers > {v}"));
+        }
+        extras.push(vec![plain(format!("Automated fit-quality flag rules: {}.", parts.join(", ")))]);
+    }
+    if let Some(param) = s.summary_parameter.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        extras.push(vec![plain("Parameter summary table emitted for "), code(param), plain(".")]);
+    }
+    if let Some(digits) = s.output_significant_digits {
+        extras.push(vec![plain(format!("Output formatting precision: {digits} significant digits."))]);
+    }
+}
+
+fn describe_model_comparison_question_runs(
+    method: ModelComparisonMethod,
+    question: &ModelComparisonQuestion,
+    prefer_well_defined_fit: bool,
+) -> Vec<TextRun> {
+    let mut runs = match question {
+        ModelComparisonQuestion::AlternativeEquation { alternative_equation_id } => {
+            let legacy = match method {
+                ModelComparisonMethod::ExtraSumOfSquaresF => {
+                    ModelComparisonSpec::ExtraSumOfSquaresF { alternative_equation_id: alternative_equation_id.clone() }
+                }
+                ModelComparisonMethod::Aicc => ModelComparisonSpec::Aicc { alternative_equation_id: alternative_equation_id.clone() },
+                ModelComparisonMethod::LikelihoodRatioTest => {
+                    ModelComparisonSpec::LikelihoodRatioTest { alternative_equation_id: alternative_equation_id.clone() }
+                }
+            };
+            describe_model_comparison_runs(&legacy)
+        }
+        ModelComparisonQuestion::ParameterInvarianceAcrossDatasets { shared_params } => {
+            let m_txt = match method {
+                ModelComparisonMethod::ExtraSumOfSquaresF => "the extra-sum-of-squares F-test",
+                ModelComparisonMethod::Aicc => "AICc",
+                ModelComparisonMethod::LikelihoodRatioTest => "the likelihood-ratio test",
+            };
+            vec![plain(format!(
+                "Model comparison tested whether {} are invariant (shared globally) across datasets versus separate per dataset using {m_txt}.",
+                shared_params.join(", ")
+            ))]
+        }
+        ModelComparisonQuestion::SingleGlobalCurveVsSeparate => {
+            let m_txt = match method {
+                ModelComparisonMethod::ExtraSumOfSquaresF => "the extra-sum-of-squares F-test",
+                ModelComparisonMethod::Aicc => "AICc",
+                ModelComparisonMethod::LikelihoodRatioTest => "the likelihood-ratio test",
+            };
+            vec![plain(format!(
+                "Model comparison tested whether one global curve fits all datasets versus separate per-dataset curves using {m_txt}."
+            ))]
+        }
+        ModelComparisonQuestion::ParameterEqualsTheoretical { param, theoretical_value } => {
+            let m_txt = match method {
+                ModelComparisonMethod::ExtraSumOfSquaresF => "the extra-sum-of-squares F-test",
+                ModelComparisonMethod::Aicc => "AICc",
+                ModelComparisonMethod::LikelihoodRatioTest => "the likelihood-ratio test",
+            };
+            vec![plain(format!(
+                "Model comparison tested whether `{param}` equals theoretical value {} versus an unconstrained estimate using {m_txt}.",
+                format_exact_float(*theoretical_value)
+            ))]
+        }
+    };
+    if prefer_well_defined_fit {
+        runs.push(plain(
+            " Well-defined fit pre-check enabled (automatically prefers a clean fit over an Ambiguous, Unstable, or Flagged candidate).",
+        ));
     }
     runs
 }

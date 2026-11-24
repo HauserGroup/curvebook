@@ -306,11 +306,70 @@ pub fn extract_datasets_from_sheet_with_options(
     selected_data_sets: &[usize],
     mv_spec: &MultivarExtractionSpec<'_>,
 ) -> Result<Vec<DatasetSeries>, FitError> {
+    let y_cols: Vec<usize> = mv_spec.y_column.into_iter().collect();
+    extract_datasets_from_sheet_multi(sheet, selected_data_sets, mv_spec.group_columns, mv_spec.x_columns, &y_cols)
+}
+
+/// Extract regression datasets from a [`DataSheet`] supporting multi-response `MultipleVariables`
+/// assignments (`M` continuous response columns x `G` categorical grouping combinations).
+///
+/// # Errors
+/// Returns [`FitError::IncompatibleTable`] for unsupported table archetypes,
+/// [`FitError::InvalidParameter`] if multivariate column indices are out of range or overlap, or
+/// [`FitError::EmptyInput`] if no active finite observations exist.
+pub fn extract_datasets_from_sheet_multi(
+    sheet: &DataSheet,
+    selected_data_sets: &[usize],
+    group_columns: &[usize],
+    x_columns: &[usize],
+    y_columns: &[usize],
+) -> Result<Vec<DatasetSeries>, FitError> {
     match &sheet.archetype {
         TableArchetype::Xy(xy) => extract_from_xy(xy, selected_data_sets),
         TableArchetype::Grouped(g) => extract_from_grouped(g, selected_data_sets),
-        TableArchetype::MultipleVariables(mv) => extract_from_multivar(mv, selected_data_sets, mv_spec),
+        TableArchetype::MultipleVariables(mv) => extract_from_multivar_multi(mv, selected_data_sets, group_columns, x_columns, y_columns),
         other => Err(FitError::IncompatibleTable { kind: other.kind() }),
+    }
+}
+
+/// Collapse each dataset's observations within identical table rows to their unweighted sample
+/// mean with `1` observation per row (`ReplicateFitMode::RowMeansOnly`; Motulsky & Christopoulos 2004).
+///
+/// Pre-summarized `(Mean, SD, n)` points drop their within-row `sd` and `n` moments (`is_pre_summarized = false`)
+/// so each row contributes a single unweighted mean observation.
+pub fn collapse_datasets_to_row_means(datasets: &mut [DatasetSeries]) {
+    for ds in datasets.iter_mut() {
+        if ds.is_pre_summarized {
+            for pt in &mut ds.points {
+                pt.sd = None;
+                pt.n = None;
+            }
+            ds.is_pre_summarized = false;
+            continue;
+        }
+        let mut by_row: BTreeMap<usize, Vec<&DataPoint>> = BTreeMap::new();
+        for pt in &ds.points {
+            by_row.entry(pt.row).or_default().push(pt);
+        }
+        let mut collapsed = Vec::with_capacity(by_row.len());
+        for (row, pts) in by_row {
+            let Some(first) = pts.first() else {
+                continue;
+            };
+            let n = pts.len() as f64;
+            let mean_y = pts.iter().map(|p| p.y).sum::<f64>() / n;
+            collapsed.push(DataPoint {
+                x: first.x.clone(),
+                y: mean_y,
+                sd: None,
+                n: None,
+                explicit_weight: None,
+                source_subcolumn: 0,
+                data_set_index: first.data_set_index,
+                row,
+            });
+        }
+        ds.points = collapsed;
     }
 }
 
@@ -605,14 +664,41 @@ fn pick_default_mv_numeric_col(mv: &curvebook_doc::MultipleVariablesTable, candi
     role_match
 }
 
+pub(crate) struct MvResolvedColumns {
+    pub(crate) x_cols: Vec<usize>,
+    pub(crate) y_cols: Vec<usize>,
+    pub(crate) group_cols: Vec<usize>,
+}
+
+struct MvGroupEntry {
+    y_col: usize,
+    y_title: String,
+    tokens: Vec<String>,
+    points: Vec<DataPoint>,
+}
+
+#[cfg(test)]
 pub(crate) fn resolve_mv_columns(
     mv: &curvebook_doc::MultipleVariablesTable,
     selected_data_sets: &[usize],
     mv_spec: &MultivarExtractionSpec<'_>,
 ) -> Result<(Vec<usize>, usize, Vec<usize>), FitError> {
+    let y_slice: Vec<usize> = mv_spec.y_column.into_iter().collect();
+    let resolved = resolve_mv_columns_multi(mv, selected_data_sets, mv_spec.group_columns, mv_spec.x_columns, &y_slice)?;
+    let y_col = resolved.y_cols.first().copied().ok_or(FitError::EmptyInput)?;
+    Ok((resolved.x_cols, y_col, resolved.group_cols))
+}
+
+pub(crate) fn resolve_mv_columns_multi(
+    mv: &curvebook_doc::MultipleVariablesTable,
+    selected_data_sets: &[usize],
+    group_columns: &[usize],
+    x_columns: &[usize],
+    y_columns: &[usize],
+) -> Result<MvResolvedColumns, FitError> {
     let n_vars = mv.variables.len();
-    let mut group_set = HashSet::with_capacity(mv_spec.group_columns.len());
-    for &gc in mv_spec.group_columns {
+    let mut group_set = HashSet::with_capacity(group_columns.len());
+    for &gc in group_columns {
         if gc >= n_vars {
             return Err(FitError::InvalidParameter { name: "mv_group_columns", reason: format!("Column index {gc} >= {n_vars}") });
         }
@@ -620,8 +706,8 @@ pub(crate) fn resolve_mv_columns(
             return Err(FitError::InvalidParameter { name: "mv_group_columns", reason: format!("Duplicate column index {gc}") });
         }
     }
-    let mut x_set = HashSet::with_capacity(mv_spec.x_columns.len());
-    for &xc in mv_spec.x_columns {
+    let mut x_set = HashSet::with_capacity(x_columns.len());
+    for &xc in x_columns {
         if xc >= n_vars {
             return Err(FitError::InvalidParameter { name: "mv_x_columns", reason: format!("Column index {xc} >= {n_vars}") });
         }
@@ -641,31 +727,36 @@ pub(crate) fn resolve_mv_columns(
             });
         }
     }
-    if let Some(yc) = mv_spec.y_column {
+    let mut y_set = HashSet::with_capacity(y_columns.len());
+    let y_param_name = if y_columns.len() > 1 { "mv_y_columns" } else { "mv_y_column" };
+    for &yc in y_columns {
         if yc >= n_vars {
-            return Err(FitError::InvalidParameter { name: "mv_y_column", reason: format!("Column index {yc} >= {n_vars}") });
+            return Err(FitError::InvalidParameter { name: y_param_name, reason: format!("Column index {yc} >= {n_vars}") });
+        }
+        if !y_set.insert(yc) {
+            return Err(FitError::InvalidParameter { name: y_param_name, reason: format!("Duplicate column index {yc}") });
         }
         if group_set.contains(&yc) {
             return Err(FitError::InvalidParameter {
-                name: "mv_y_column",
+                name: y_param_name,
                 reason: format!("Column {yc} cannot be both response (Y) and grouping column"),
             });
         }
         if x_set.contains(&yc) {
             return Err(FitError::InvalidParameter {
-                name: "mv_y_column",
+                name: y_param_name,
                 reason: format!("Column {yc} cannot be both predictor (X) and response (Y)"),
             });
         }
         if !is_mv_numeric_role(&mv.variables[yc]) {
             return Err(FitError::InvalidParameter {
-                name: "mv_y_column",
+                name: y_param_name,
                 reason: format!("Response column {yc} must be numeric (got {:?})", mv.variables[yc].role),
             });
         }
     }
 
-    if mv_spec.x_columns.is_empty() || mv_spec.y_column.is_none() {
+    if x_columns.is_empty() || y_columns.is_empty() {
         let _ = resolve_selected_indices(n_vars, selected_data_sets)?;
     }
 
@@ -675,23 +766,24 @@ pub(crate) fn resolve_mv_columns(
         .filter(|&idx| idx < n_vars && !group_set.contains(&idx) && is_mv_numeric_role(&mv.variables[idx]))
         .collect();
 
-    let y_col = if let Some(yc) = mv_spec.y_column {
-        yc
+    let resolved_y_cols: Vec<usize> = if !y_columns.is_empty() {
+        y_columns.to_vec()
     } else if let Some(&sel) = selected_numeric.iter().rev().find(|idx| !x_set.contains(idx)) {
-        sel
+        vec![sel]
     } else if let Some(def) = pick_default_mv_numeric_col(mv, (0..n_vars).rev().filter(|idx| !x_set.contains(idx) && !group_set.contains(idx))) {
-        def
+        vec![def]
     } else {
         let numeric_avail = mv.variables.iter().filter(|v| is_mv_numeric_role(v)).count();
         return Err(FitError::InsufficientData { required: 2, actual: numeric_avail });
     };
+    let y_used: HashSet<usize> = resolved_y_cols.iter().copied().collect();
 
-    let selected_x: Vec<usize> = selected_numeric.iter().copied().filter(|&idx| idx != y_col).collect();
-    let x_cols = if !mv_spec.x_columns.is_empty() {
-        mv_spec.x_columns.to_vec()
+    let selected_x: Vec<usize> = selected_numeric.iter().copied().filter(|idx| !y_used.contains(idx)).collect();
+    let x_cols = if !x_columns.is_empty() {
+        x_columns.to_vec()
     } else if !selected_x.is_empty() {
         selected_x
-    } else if let Some(def) = pick_default_mv_numeric_col(mv, (0..n_vars).filter(|&idx| idx != y_col && !group_set.contains(&idx))) {
+    } else if let Some(def) = pick_default_mv_numeric_col(mv, (0..n_vars).filter(|idx| !y_used.contains(idx) && !group_set.contains(idx))) {
         vec![def]
     } else {
         let numeric_avail = mv.variables.iter().filter(|v| is_mv_numeric_role(v)).count();
@@ -703,83 +795,43 @@ pub(crate) fn resolve_mv_columns(
         .iter()
         .copied()
         .filter(|&idx| {
-            idx < n_vars && idx != y_col && !x_used.contains(&idx) && mv.variables.get(idx).is_some_and(|v| v.role == VariableRole::Categorical)
+            idx < n_vars
+                && !y_used.contains(&idx)
+                && !x_used.contains(&idx)
+                && mv.variables.get(idx).is_some_and(|v| v.role == VariableRole::Categorical)
         })
         .collect();
-    let group_cols = if !mv_spec.group_columns.is_empty() {
-        mv_spec.group_columns.to_vec()
+    let group_cols = if !group_columns.is_empty() {
+        group_columns.to_vec()
     } else if !selected_categorical.is_empty() {
         selected_categorical
     } else if selected_data_sets.len() < 2 {
         mv.variables
             .iter()
             .enumerate()
-            .find(|(idx, v)| *idx != y_col && !x_used.contains(idx) && v.role == VariableRole::Categorical)
+            .find(|(idx, v)| !y_used.contains(idx) && !x_used.contains(idx) && v.role == VariableRole::Categorical)
             .map(|(idx, _)| vec![idx])
             .unwrap_or_default()
     } else {
         Vec::new()
     };
 
-    Ok((x_cols, y_col, group_cols))
+    Ok(MvResolvedColumns { x_cols, y_cols: resolved_y_cols, group_cols })
 }
 
-fn extract_from_multivar(
+pub(crate) fn extract_from_multivar_multi_with_y_map(
     mv: &curvebook_doc::MultipleVariablesTable,
     selected_data_sets: &[usize],
-    mv_spec: &MultivarExtractionSpec<'_>,
-) -> Result<Vec<DatasetSeries>, FitError> {
+    group_columns: &[usize],
+    x_columns: &[usize],
+    y_columns: &[usize],
+) -> Result<(Vec<DatasetSeries>, HashMap<usize, usize>), FitError> {
     if mv.variables.len() < 2 {
         return Err(FitError::InsufficientData { required: 2, actual: mv.variables.len() });
     }
-    let (x_cols, y_col, group_cols) = resolve_mv_columns(mv, selected_data_sets, mv_spec)?;
-
-    let Some(y_var) = mv.variables.get(y_col) else {
-        return Err(FitError::EmptyInput);
-    };
+    let MvResolvedColumns { x_cols, y_cols, group_cols } = resolve_mv_columns_multi(mv, selected_data_sets, group_columns, x_columns, y_columns)?;
+    let multi_y = y_cols.len() > 1;
     let n_rows = mv.row_count();
-    let mut grouped: BTreeMap<Vec<String>, Vec<DataPoint>> = BTreeMap::new();
-    for row in 0..n_rows {
-        let Some(y_val) = y_var.cells.get(row).and_then(Cell::active_number) else {
-            continue;
-        };
-        let mut xs = Vec::with_capacity(x_cols.len());
-        let mut all_x = true;
-        for &xc in &x_cols {
-            if let Some(xv) = mv.variables.get(xc).and_then(|v| v.cells.get(row)).and_then(Cell::active_number) {
-                xs.push(xv);
-            } else {
-                all_x = false;
-                break;
-            }
-        }
-        if !all_x {
-            continue;
-        }
-        let mut key_tokens = Vec::with_capacity(group_cols.len());
-        let mut all_groups = true;
-        for &gc in &group_cols {
-            if let Some(tok) = mv.variables.get(gc).and_then(|v| v.cells.get(row)).and_then(mv_group_token) {
-                key_tokens.push(tok);
-            } else {
-                all_groups = false;
-                break;
-            }
-        }
-        if !all_groups {
-            continue;
-        }
-        grouped.entry(key_tokens).or_default().push(DataPoint {
-            x: xs,
-            y: y_val,
-            sd: None,
-            n: None,
-            explicit_weight: None,
-            source_subcolumn: 0,
-            data_set_index: 0,
-            row,
-        });
-    }
 
     let level_ranks: Vec<HashMap<String, usize>> = group_cols
         .iter()
@@ -787,42 +839,102 @@ fn extract_from_multivar(
         .map(|var| var.ordered_levels().into_iter().enumerate().map(|(i, lvl)| (lvl.level, i)).collect())
         .collect();
 
-    let mut entries: Vec<(Vec<String>, Vec<DataPoint>)> = grouped.into_iter().collect();
-    if !group_cols.is_empty() {
-        entries.sort_by(|(ka, _), (kb, _)| {
-            for (pos, (ta, tb)) in ka.iter().zip(kb.iter()).enumerate() {
-                let ra = level_ranks.get(pos).and_then(|m| m.get(ta)).copied().unwrap_or(usize::MAX);
-                let rb = level_ranks.get(pos).and_then(|m| m.get(tb)).copied().unwrap_or(usize::MAX);
-                let cmp = ra.cmp(&rb).then_with(|| ta.cmp(tb));
-                if cmp != std::cmp::Ordering::Equal {
-                    return cmp;
+    let mut all_entries: Vec<MvGroupEntry> = Vec::new();
+    for &y_col in &y_cols {
+        let Some(y_var) = mv.variables.get(y_col) else {
+            continue;
+        };
+        let mut grouped: BTreeMap<Vec<String>, Vec<DataPoint>> = BTreeMap::new();
+        for row in 0..n_rows {
+            let Some(y_val) = y_var.cells.get(row).and_then(Cell::active_number) else {
+                continue;
+            };
+            let mut xs = Vec::with_capacity(x_cols.len());
+            let mut all_x = true;
+            for &xc in &x_cols {
+                if let Some(xv) = mv.variables.get(xc).and_then(|v| v.cells.get(row)).and_then(Cell::active_number) {
+                    xs.push(xv);
+                } else {
+                    all_x = false;
+                    break;
                 }
             }
-            ka.cmp(kb)
-        });
+            if !all_x {
+                continue;
+            }
+            let mut key_tokens = Vec::with_capacity(group_cols.len());
+            let mut all_groups = true;
+            for &gc in &group_cols {
+                if let Some(tok) = mv.variables.get(gc).and_then(|v| v.cells.get(row)).and_then(mv_group_token) {
+                    key_tokens.push(tok);
+                } else {
+                    all_groups = false;
+                    break;
+                }
+            }
+            if !all_groups {
+                continue;
+            }
+            grouped.entry(key_tokens).or_default().push(DataPoint {
+                x: xs,
+                y: y_val,
+                sd: None,
+                n: None,
+                explicit_weight: None,
+                source_subcolumn: 0,
+                data_set_index: 0,
+                row,
+            });
+        }
+
+        let mut entries: Vec<(Vec<String>, Vec<DataPoint>)> = grouped.into_iter().collect();
+        if !group_cols.is_empty() {
+            entries.sort_by(|(ka, _), (kb, _)| {
+                for (pos, (ta, tb)) in ka.iter().zip(kb.iter()).enumerate() {
+                    let ra = level_ranks.get(pos).and_then(|m| m.get(ta)).copied().unwrap_or(usize::MAX);
+                    let rb = level_ranks.get(pos).and_then(|m| m.get(tb)).copied().unwrap_or(usize::MAX);
+                    let cmp = ra.cmp(&rb).then_with(|| ta.cmp(tb));
+                    if cmp != std::cmp::Ordering::Equal {
+                        return cmp;
+                    }
+                }
+                ka.cmp(kb)
+            });
+        }
+        for (tokens, points) in entries {
+            all_entries.push(MvGroupEntry { y_col, y_title: y_var.title.clone(), tokens, points });
+        }
     }
 
-    let explicit_column_mapping = !mv_spec.x_columns.is_empty() && mv_spec.y_column.is_some();
-    if explicit_column_mapping && group_cols.is_empty() && !selected_data_sets.is_empty() {
+    let explicit_column_mapping = !x_columns.is_empty() && !y_columns.is_empty();
+    if explicit_column_mapping && group_cols.is_empty() && !multi_y && !selected_data_sets.is_empty() {
         let _ = resolve_selected_indices(mv.variables.len(), selected_data_sets)?;
     }
-    let keep_indices = if explicit_column_mapping && !group_cols.is_empty() && !selected_data_sets.is_empty() {
-        resolve_selected_indices(entries.len(), selected_data_sets)?
+    let keep_indices = if explicit_column_mapping && (!group_cols.is_empty() || multi_y) && !selected_data_sets.is_empty() {
+        resolve_selected_indices(all_entries.len(), selected_data_sets)?
     } else {
-        (0..entries.len()).collect()
+        (0..all_entries.len()).collect()
     };
 
-    let mut indexed: Vec<Option<(Vec<String>, Vec<DataPoint>)>> = entries.into_iter().map(Some).collect();
+    let mut indexed: Vec<Option<MvGroupEntry>> = all_entries.into_iter().map(Some).collect();
     let mut out = Vec::with_capacity(keep_indices.len());
+    let mut y_col_map = HashMap::with_capacity(keep_indices.len());
     for idx in keep_indices {
-        let Some((tokens, mut pts)) = indexed.get_mut(idx).and_then(Option::take) else {
+        let Some(MvGroupEntry { y_col, y_title, tokens, points: mut pts }) = indexed.get_mut(idx).and_then(Option::take) else {
             continue;
         };
         for p in &mut pts {
             p.data_set_index = idx;
         }
-        let label = if tokens.is_empty() { y_var.title.clone() } else { tokens.join(" | ") };
+        let label = if multi_y {
+            if tokens.is_empty() { y_title } else { format!("{y_title} | {}", tokens.join(" | ")) }
+        } else if tokens.is_empty() {
+            y_title
+        } else {
+            tokens.join(" | ")
+        };
         let title_val = tokens.first().and_then(|t| parse_leading_number(t)).or_else(|| parse_leading_number(&label));
+        y_col_map.insert(idx, y_col);
         out.push(DatasetSeries {
             data_set_index: idx,
             label,
@@ -836,7 +948,17 @@ fn extract_from_multivar(
     if out.is_empty() {
         return Err(FitError::EmptyInput);
     }
-    Ok(out)
+    Ok((out, y_col_map))
+}
+
+fn extract_from_multivar_multi(
+    mv: &curvebook_doc::MultipleVariablesTable,
+    selected_data_sets: &[usize],
+    group_columns: &[usize],
+    x_columns: &[usize],
+    y_columns: &[usize],
+) -> Result<Vec<DatasetSeries>, FitError> {
+    extract_from_multivar_multi_with_y_map(mv, selected_data_sets, group_columns, x_columns, y_columns).map(|(out, _)| out)
 }
 
 #[cfg(test)]

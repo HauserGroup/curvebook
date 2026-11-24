@@ -448,6 +448,7 @@ impl EditAnalysisParametersState {
         if self.apply_contingency_param_patch(key, val, preset)?
             || self.apply_transform_param_patch(key, val)?
             || self.apply_pvalue_stack_param_patch(key, val, preset)?
+            || self.apply_spline_lowess_param_patch(key, val)?
             || self.apply_power_analysis_param_patch(key, val, preset)?
             || self.apply_r9_param_patch(key, val)?
             || self.apply_two_group_param_patch(key, val)?
@@ -701,6 +702,70 @@ impl EditAnalysisParametersState {
                     ps.threshold = parse_open_unit_f64_with_val(val, key, preset)?;
                 }
                 "column" | "pvalue_stack_column" | "edit.pvalue_stack.column" => ps.column = parse_opt_usize_min(val, key, 0)?,
+                _ => return Ok(false),
+            }
+            Ok(true)
+        })
+    }
+
+    /// Applies `FitSplineLowess`-specific field patches on `EditAnalysisParametersState`.
+    fn apply_spline_lowess_param_patch(&mut self, key: &str, val: &Value) -> Result<bool, String> {
+        self.try_update_draft_kind(|k| {
+            let AnalysisKind::FitSplineLowess(sp) = k else {
+                return Ok(false);
+            };
+            match key {
+                "method" | "spline_method" | "edit.spline.method" => {
+                    sp.method = serde_json::from_value(val.clone()).map_err(|e| format!("invalid spline/LOWESS method: {e}"))?;
+                }
+                "segment_count" | "segments" | "edit.spline.segments" => {
+                    if let Some(n) = parse_opt_usize_min(val, key, curvebook_doc::SplineLowessSpec::MIN_SEGMENTS)? {
+                        sp.segment_count = n.min(curvebook_doc::SplineLowessSpec::MAX_SEGMENTS);
+                    }
+                }
+                "smoothing_knots" | "knots" | "edit.spline.knots" => {
+                    sp.smoothing_knots = parse_opt_usize_min(val, key, 2)?;
+                }
+                "smoothing_df" | "df" => {
+                    sp.smoothing_df = if val.is_null() {
+                        None
+                    } else {
+                        let v = val.as_f64().ok_or_else(|| format!("`{key}` must be a finite number >= 2"))?;
+                        if !v.is_finite() || v < 2.0 {
+                            return Err(format!("`{key}` must be finite and >= 2"));
+                        }
+                        Some(v)
+                    };
+                }
+                "lowess_preset" | "edit.spline.lowess_preset" => {
+                    sp.lowess_preset = serde_json::from_value(val.clone()).map_err(|e| format!("invalid LOWESS preset: {e}"))?;
+                }
+                "lowess_fraction" | "span" => {
+                    sp.lowess_fraction = if val.is_null() {
+                        None
+                    } else {
+                        let v = val.as_f64().ok_or_else(|| format!("`{key}` must be a finite number in (0, 1]"))?;
+                        if !v.is_finite() || v <= 0.0 || v > 1.0 {
+                            return Err(format!("`{key}` must be finite and in (0, 1]"));
+                        }
+                        Some(v)
+                    };
+                }
+                "lowess_robustness_iters" | "edit.spline.lowess_iters" => {
+                    if let Some(n) = parse_opt_usize_min(val, key, 0)? {
+                        sp.lowess_robustness_iters = n.min(curvebook_doc::SplineLowessSpec::MAX_LOWESS_ROBUSTNESS_ITERS);
+                    }
+                }
+                "emit_curve_coordinates_tab" | "edit.spline.emit_coords" => {
+                    if let Some(b) = val.as_bool() {
+                        sp.emit_curve_coordinates_tab = b;
+                    }
+                }
+                "interpolate_unknowns" | "edit.spline.interpolate_unknowns" => {
+                    if let Some(b) = val.as_bool() {
+                        sp.interpolate_unknowns = b;
+                    }
+                }
                 _ => return Ok(false),
             }
             Ok(true)
@@ -1372,7 +1437,23 @@ fn patch_nonlinear_r9(key: &str, val: &Value, fit: &mut curvebook_doc::Nonlinear
         "emit_covariance_tab" | "edit.fit.emit_covariance_tab" => fit.emit_covariance_tab = parse_bool_field(val, "emit_covariance_tab")?,
         "mv_x_columns" | "edit.fit.mv_x_columns" => fit.mv_x_columns = parse_usize_list(val, key)?,
         "mv_y_column" | "edit.fit.mv_y_column" => fit.mv_y_column = parse_opt_usize_min(val, key, 0)?,
+        "mv_y_columns" | "edit.fit.mv_y_columns" => fit.mv_y_columns = parse_usize_list(val, key)?,
         "mv_group_columns" | "edit.fit.mv_group_columns" => fit.mv_group_columns = parse_usize_list(val, key)?,
+        "weighting_source" | "edit.fit.weighting_source" => {
+            fit.weighting_source = serde_json::from_value(val.clone()).map_err(|e| format!("invalid `weighting_source`: {e}"))?;
+        }
+        "outlier_handling" | "edit.fit.outlier_handling" => {
+            fit.outlier_handling = serde_json::from_value(val.clone()).map_err(|e| format!("invalid `outlier_handling`: {e}"))?;
+        }
+        "emit_cleaned_data_tab" | "edit.fit.emit_cleaned_data_tab" => {
+            fit.emit_cleaned_data_tab = parse_bool_field(val, "emit_cleaned_data_tab")?;
+        }
+        "replicate_fit_mode" | "edit.fit.replicate_fit_mode" => {
+            fit.replicate_fit_mode = serde_json::from_value(val.clone()).map_err(|e| format!("invalid `replicate_fit_mode`: {e}"))?;
+        }
+        "convergence_strictness" | "edit.fit.convergence_strictness" => {
+            fit.convergence_strictness = serde_json::from_value(val.clone()).map_err(|e| format!("invalid `convergence_strictness`: {e}"))?;
+        }
         _ => return Ok(false),
     }
     Ok(true)

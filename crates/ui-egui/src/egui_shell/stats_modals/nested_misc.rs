@@ -294,6 +294,12 @@ pub(super) fn render_misc_stats_design(
         AnalysisKind::LinearRegression(lin) => {
             render_linear_regression_design(ui, doc, spec, lin, tokens, meta, intents);
         }
+        AnalysisKind::SimpleLogisticRegression(sl) => {
+            render_simple_logistic_design(ui, doc, spec, sl, tokens, meta, intents);
+        }
+        AnalysisKind::FitSplineLowess(sp) => {
+            render_spline_lowess_design(ui, spec, sp, tokens, meta, intents);
+        }
         AnalysisKind::PassingBablok(pb) => {
             render_section_title(ui, tokens, "Method Comparison Columns (X Reference vs Y Candidate)");
             let titles = column_titles_for_draft(doc, Some(&spec.source_sheet_id));
@@ -696,5 +702,266 @@ fn render_deming_error_controls(
                 intents.push_set_edit_params_draft(next);
             }
         });
+    }
+}
+
+fn render_simple_logistic_design(
+    ui: &mut Ui,
+    doc: &ProjectDocument,
+    spec: &curvebook_doc::AnalysisSpec,
+    sl: &curvebook_doc::SimpleLogisticSpec,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let locale = tokens.locale;
+    let sid = spec.source_sheet_id.as_str();
+    render_section_title(ui, tokens, "Simple Logistic Regression (Binary Y in {0, 1})");
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "edit.sl.row_class",
+        tr(locale, "simple_logistic.row_classification"),
+        sl.emit_row_classification,
+        &ControlEnablement::enabled(),
+    ) {
+        let mut next = spec.clone();
+        if let AnalysisKind::SimpleLogisticRegression(s) = &mut next.kind {
+            s.emit_row_classification = !sl.emit_row_classification;
+        }
+        intents.push_set_edit_params_draft(next);
+    }
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "edit.sl.conf_bands",
+        tr(locale, "simple_logistic.confidence_bands"),
+        sl.confidence_bands,
+        &ControlEnablement::enabled(),
+    ) {
+        let mut next = spec.clone();
+        if let AnalysisKind::SimpleLogisticRegression(s) = &mut next.kind {
+            s.confidence_bands = !sl.confidence_bands;
+        }
+        intents.push_set_edit_params_draft(next);
+    }
+    ui.horizontal_wrapped(|ui| {
+        if let Some(new_cut) = render_linear_numeric_input(
+            ui,
+            meta,
+            ("edit_sl_cutoff", sid),
+            "edit.sl.cutoff",
+            tr(locale, "simple_logistic.cutoff"),
+            sl.classification_cutoff,
+            true,
+        ) && new_cut > 0.0
+            && new_cut < 1.0
+        {
+            let mut next = spec.clone();
+            if let AnalysisKind::SimpleLogisticRegression(s) = &mut next.kind {
+                s.classification_cutoff = new_cut;
+            }
+            intents.push_set_edit_params_draft(next);
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        let min_enabled = sl.plot_x_min.is_some();
+        if render_modal_checkbox(
+            ui,
+            tokens,
+            meta,
+            "edit.sl.plot_x_min_toggle",
+            tr(locale, "simple_logistic.plot_x_min"),
+            min_enabled,
+            &ControlEnablement::enabled(),
+        ) {
+            let mut next = spec.clone();
+            if let AnalysisKind::SimpleLogisticRegression(s) = &mut next.kind {
+                s.plot_x_min = if min_enabled { None } else { Some(0.0) };
+            }
+            intents.push_set_edit_params_draft(next);
+        }
+        if let Some(x_min) = sl.plot_x_min
+            && let Some(new_min) = render_linear_numeric_input(ui, meta, ("edit_sl_plot_xmin", sid), "edit.sl.plot_x_min", "", x_min, false)
+        {
+            let mut next = spec.clone();
+            if let AnalysisKind::SimpleLogisticRegression(s) = &mut next.kind {
+                s.plot_x_min = Some(new_min);
+            }
+            intents.push_set_edit_params_draft(next);
+        }
+        let max_enabled = sl.plot_x_max.is_some();
+        if render_modal_checkbox(
+            ui,
+            tokens,
+            meta,
+            "edit.sl.plot_x_max_toggle",
+            tr(locale, "simple_logistic.plot_x_max"),
+            max_enabled,
+            &ControlEnablement::enabled(),
+        ) {
+            let mut next = spec.clone();
+            if let AnalysisKind::SimpleLogisticRegression(s) = &mut next.kind {
+                s.plot_x_max = if max_enabled { None } else { Some(10.0) };
+            }
+            intents.push_set_edit_params_draft(next);
+        }
+        if let Some(x_max) = sl.plot_x_max
+            && let Some(new_max) = render_linear_numeric_input(ui, meta, ("edit_sl_plot_xmax", sid), "edit.sl.plot_x_max", "", x_max, false)
+        {
+            let mut next = spec.clone();
+            if let AnalysisKind::SimpleLogisticRegression(s) = &mut next.kind {
+                s.plot_x_max = Some(new_max);
+            }
+            intents.push_set_edit_params_draft(next);
+        }
+    });
+    render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
+}
+
+fn render_spline_lowess_design(
+    ui: &mut Ui,
+    spec: &curvebook_doc::AnalysisSpec,
+    sp: &curvebook_doc::SplineLowessSpec,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    use curvebook_doc::{LowessPreset, SplineLowessMethod, SplineLowessSpec};
+
+    render_section_title(ui, tokens, "Model-Free Curve Method");
+    for m in SplineLowessMethod::ALL {
+        if render_modal_radio(ui, tokens, meta, &format!("edit.spline.method.{m:?}"), m.label(), sp.method == m, &ControlEnablement::enabled()) {
+            let mut next = spec.clone();
+            if let AnalysisKind::FitSplineLowess(s) = &mut next.kind {
+                s.method = m;
+            }
+            intents.push_set_edit_params_draft(next);
+        }
+    }
+
+    ui.add_space(6.0);
+    let seg_step = render_stepper_row(
+        ui,
+        tokens,
+        meta,
+        StepperSpec {
+            id_prefix: "edit.spline.segments",
+            label: "Polyline vertices",
+            value_text: &format!("{}", sp.segment_count),
+            enablement: &ControlEnablement::enabled(),
+        },
+    );
+    if seg_step != 0 {
+        let mut next = spec.clone();
+        if let AnalysisKind::FitSplineLowess(s) = &mut next.kind {
+            let delta = if seg_step > 0 { 50_isize } else { -50_isize };
+            let updated = (s.segment_count as isize + delta).clamp(SplineLowessSpec::MIN_SEGMENTS as isize, SplineLowessSpec::MAX_SEGMENTS as isize);
+            s.segment_count = updated as usize;
+        }
+        intents.push_set_edit_params_draft(next);
+    }
+
+    if sp.method == SplineLowessMethod::SmoothingSpline {
+        ui.add_space(4.0);
+        let knots_val = sp.smoothing_knots.unwrap_or(5);
+        let knot_step = render_stepper_row(
+            ui,
+            tokens,
+            meta,
+            StepperSpec {
+                id_prefix: "edit.spline.knots",
+                label: "Smoothing knots / df",
+                value_text: &format!("{knots_val}"),
+                enablement: &ControlEnablement::enabled(),
+            },
+        );
+        if knot_step != 0 {
+            let mut next = spec.clone();
+            if let AnalysisKind::FitSplineLowess(s) = &mut next.kind {
+                let updated = (knots_val as isize + isize::from(knot_step)).clamp(2, 50) as usize;
+                s.smoothing_knots = Some(updated);
+                s.smoothing_df = None;
+            }
+            intents.push_set_edit_params_draft(next);
+        }
+    }
+
+    if sp.method == SplineLowessMethod::Lowess {
+        ui.add_space(4.0);
+        render_section_title(ui, tokens, "LOWESS Window Preset");
+        for preset in LowessPreset::ALL {
+            if render_modal_radio(
+                ui,
+                tokens,
+                meta,
+                &format!("edit.spline.lowess_preset.{preset:?}"),
+                preset.label(),
+                sp.lowess_fraction.is_none() && sp.lowess_preset == preset,
+                &ControlEnablement::enabled(),
+            ) {
+                let mut next = spec.clone();
+                if let AnalysisKind::FitSplineLowess(s) = &mut next.kind {
+                    s.lowess_preset = preset;
+                    s.lowess_fraction = None;
+                }
+                intents.push_set_edit_params_draft(next);
+            }
+        }
+        let iter_step = render_stepper_row(
+            ui,
+            tokens,
+            meta,
+            StepperSpec {
+                id_prefix: "edit.spline.lowess_iters",
+                label: "Bisquare robustness passes",
+                value_text: &format!("{}", sp.lowess_robustness_iters),
+                enablement: &ControlEnablement::enabled(),
+            },
+        );
+        if iter_step != 0 {
+            let mut next = spec.clone();
+            if let AnalysisKind::FitSplineLowess(s) = &mut next.kind {
+                let updated =
+                    (s.lowess_robustness_iters as isize + isize::from(iter_step)).clamp(0, SplineLowessSpec::MAX_LOWESS_ROBUSTNESS_ITERS as isize);
+                s.lowess_robustness_iters = updated as usize;
+            }
+            intents.push_set_edit_params_draft(next);
+        }
+    }
+
+    ui.add_space(6.0);
+    render_section_title(ui, tokens, "Output & Standard-Curve Options");
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "edit.spline.emit_coords",
+        "Emit curve coordinates (X, Y) tab",
+        sp.emit_curve_coordinates_tab,
+        &ControlEnablement::enabled(),
+    ) {
+        let mut next = spec.clone();
+        if let AnalysisKind::FitSplineLowess(s) = &mut next.kind {
+            s.emit_curve_coordinates_tab = !sp.emit_curve_coordinates_tab;
+        }
+        intents.push_set_edit_params_draft(next);
+    }
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "edit.spline.interpolate_unknowns",
+        "Interpolate unknowns (Y from X / X from Y)",
+        sp.interpolate_unknowns,
+        &ControlEnablement::enabled(),
+    ) {
+        let mut next = spec.clone();
+        if let AnalysisKind::FitSplineLowess(s) = &mut next.kind {
+            s.interpolate_unknowns = !sp.interpolate_unknowns;
+        }
+        intents.push_set_edit_params_draft(next);
     }
 }

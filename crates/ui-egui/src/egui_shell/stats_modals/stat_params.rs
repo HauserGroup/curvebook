@@ -284,6 +284,16 @@ pub fn resolve_stat_params_banner(app: &UiApp, spec: &curvebook_doc::AnalysisSpe
         AnalysisKind::PassingBablok(_) => {
             (String::from("Parameters: Passing-Bablok Regression"), format!("Nonparametric median-slope + Cusum ({conf:.0}% CI)"))
         }
+        AnalysisKind::SimpleLogisticRegression(sl) => {
+            let rc = if sl.emit_row_classification { ", row classification" } else { "" };
+            (
+                String::from("Parameters: Simple Logistic Regression"),
+                format!("Binary XY logit IRLS + profile CIs (cutoff={:.2}, {conf:.0}% CI{rc})", sl.classification_cutoff),
+            )
+        }
+        AnalysisKind::FitSplineLowess(sp) => {
+            (String::from("Parameters: Fit Spline / LOWESS Curve"), format!("{} ({} vertices)", sp.method.label(), sp.segment_count))
+        }
         _ => (String::from("Parameters: Analysis"), format!("{} (α={alpha:.3})", spec.effective_title())),
     }
 }

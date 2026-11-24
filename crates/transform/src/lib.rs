@@ -33,6 +33,7 @@ pub mod ops;
 pub mod plate_and_tidy;
 pub mod randomize;
 pub mod simulate;
+pub mod spline;
 
 pub use archetype_convert::{ConversionPreview, TargetArchetypeKind, convert_datasheet_archetype, preview_datasheet_conversion};
 pub use curve::{
@@ -58,6 +59,10 @@ pub use randomize::{
     simulate_distribution_columns,
 };
 pub use simulate::{evaluate_equation, simulate_xy_sheet};
+pub use spline::{
+    CubicPiece, FittedCurveModel, SmoothingSplineFit, execute_spline_lowess, fit_akima_subspline, fit_lowess_curve, fit_natural_cubic_spline,
+    fit_point_to_point, fit_smoothing_spline, sample_curve,
+};
 
 /// Built-in families of table transformations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

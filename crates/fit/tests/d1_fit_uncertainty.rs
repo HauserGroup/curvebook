@@ -473,6 +473,7 @@ fn poisson_log_linear_profile_deviance_intervals_match_independent_oracle() {
     nl.custom_dsl = Some(POISSON_DSL.to_owned());
     nl.method = FitMethod::PoissonDeviance;
     nl.profile_likelihood_ci = true;
+    nl.show_standard_errors = Some(true);
     nl.emit_covariance_tab = true;
     nl.emit_residuals_tab = true;
     let mut spec = AnalysisSpec::new("pois-fit", "pois-sheet", AnalysisKind::NonlinearRegression(nl)).unwrap();

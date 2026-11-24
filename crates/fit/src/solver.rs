@@ -71,8 +71,15 @@ mod lm;
 mod profile;
 mod results;
 
-pub use comparison::{compare_models, compare_models_checked, ordered_nested_roles};
+pub use comparison::{
+    ModelComparisonQuestionResult, SynchronizedComparisonRequest, compare_models, compare_models_checked, compare_models_question,
+    compare_models_synchronized, ordered_nested_roles,
+};
 pub use fit::fit_nonlinear;
+pub use identifiability::{
+    FitFlagOutcome, GreedyHessianReduction, assemble_objective_hessian, evaluate_fit_flags, greedy_hessian_reduction, hessian_condition_number,
+    hessian_kappa_threshold, is_fit_well_defined,
+};
 pub use results::{
     FittedDatasetResult, FittedParameterSummary, InferenceAvailability, InterpolatedUnknown, ModelComparisonOutcome, ModelComparisonResult,
     NonlinearFitResult, SolverConfig,

@@ -4,7 +4,7 @@
 //! - Motulsky, H. & Christopoulos, A. (2004). *Fitting Models to Biological Data Using Linear and Nonlinear Regression*. Oxford University Press.
 //! - Seber, G. A. F. & Wild, C. J. (1989). *Nonlinear Regression*. Wiley.
 
-use curvebook_doc::{FitMethod, ParameterRule, ParameterScope, WeightingScheme, parse_column_title_numeric_hook};
+use curvebook_doc::{FitMethod, ParameterRule, ParameterScope, WeightingScheme, WeightingSource, parse_column_title_numeric_hook};
 use curvebook_math::sum::NeumaierSum;
 
 use crate::dsl::ode_fit_budget_exceeded;
@@ -390,18 +390,118 @@ pub(in crate::solver) fn compute_point_weight(pt: &DataPoint, scheme: WeightingS
     if w.is_finite() && w > 0.0 { Ok(w) } else { Err(FitError::ImpossibleWeights { reason: "Weight overflowed f64 range".to_owned() }) }
 }
 
+/// Observation weight `w_i = 1 / |y_hat_i|^k` evaluated from fitted curve height `y_hat_i`
+/// (Carroll & Ruppert 1988; Motulsky & Christopoulos 2004).
+///
+/// Returns `Err(FitError::ImpossibleWeights)` if `y_hat` is zero (for positive powers) or
+/// non-finite, or if the resulting weight overflows.
+pub(in crate::solver) fn compute_predicted_y_weight(y_hat: f64, scheme: WeightingScheme, explicit_weight: Option<f64>) -> Result<f64, FitError> {
+    if let Some(w_exp) = explicit_weight {
+        if !w_exp.is_finite() || w_exp <= 0.0 {
+            return Err(FitError::ImpossibleWeights { reason: "Explicit observation weight must be finite and strictly positive".to_owned() });
+        }
+        return Ok(w_exp);
+    }
+    let w = match scheme {
+        WeightingScheme::RelativeSquare => {
+            if !y_hat.is_finite() || y_hat == 0.0 {
+                return Err(FitError::ImpossibleWeights { reason: "1/Y_curve^2 weighting is undefined where predicted Y_hat == 0".to_owned() });
+            }
+            1.0 / (y_hat * y_hat)
+        }
+        WeightingScheme::Relative => {
+            if !y_hat.is_finite() || y_hat == 0.0 {
+                return Err(FitError::ImpossibleWeights { reason: "1/|Y_curve| weighting is undefined where predicted Y_hat == 0".to_owned() });
+            }
+            1.0 / y_hat.abs()
+        }
+        WeightingScheme::GeneralPowerY(k) => {
+            if !y_hat.is_finite() || (y_hat == 0.0 && k > 0.0) {
+                return Err(FitError::ImpossibleWeights { reason: format!("1/|Y_curve|^{k} weighting is undefined where predicted Y_hat == 0") });
+            }
+            let denom = y_hat.abs().powf(k);
+            if !denom.is_finite() || denom <= 0.0 {
+                return Err(FitError::ImpossibleWeights { reason: "Curve-predicted power Y weight underflowed or overflowed".to_owned() });
+            }
+            1.0 / denom
+        }
+        _ => 1.0,
+    };
+    if w.is_finite() && w > 0.0 {
+        Ok(w)
+    } else {
+        Err(FitError::ImpossibleWeights { reason: "Curve-predicted weight overflowed f64 range".to_owned() })
+    }
+}
+
+/// Apply curve-predicted weights `w_i = 1 / |y_hat_i|^k` across `obs`, preserving `(Mean, SD, n)`
+/// sufficient statistics (`sqrt_weight = sqrt(w_i * rep_n)` and `ss_within = w_i * raw_ss_within`).
+///
+/// Returns `false` if any predicted value yields an impossible weight (e.g., `y_hat == 0` or overflow).
+pub(in crate::solver) fn apply_predicted_y_weights(obs: &mut [ObsRecord], y_hat: &[f64], scheme: WeightingScheme) -> bool {
+    if obs.len() != y_hat.len() {
+        return false;
+    }
+    for (rec, &yh) in obs.iter_mut().zip(y_hat.iter()) {
+        let Ok(w) = compute_predicted_y_weight(yh, scheme, rec.point.explicit_weight) else {
+            return false;
+        };
+        let weighted_n = w * (rec.rep_n as f64);
+        let weighted_ss_i = w * rec.raw_ss_within;
+        if !weighted_n.is_finite() || weighted_n <= 0.0 || !weighted_ss_i.is_finite() {
+            return false;
+        }
+        rec.sqrt_weight = weighted_n.sqrt();
+        rec.ss_within = weighted_ss_i;
+    }
+    true
+}
+
+/// Reset `obs` to unweighted (`w_i = 1`, or explicit weight if set) while preserving replicate
+/// summary sufficient statistics (`rep_n` and `raw_ss_within`).
+pub(in crate::solver) fn reset_observations_unweighted(obs: &mut [ObsRecord]) -> Result<(), FitError> {
+    for rec in obs.iter_mut() {
+        let w = if let Some(w_exp) = rec.point.explicit_weight {
+            if !w_exp.is_finite() || w_exp <= 0.0 {
+                return Err(FitError::ImpossibleWeights { reason: "Explicit observation weight must be finite and strictly positive".to_owned() });
+            }
+            w_exp
+        } else {
+            1.0
+        };
+        rec.sqrt_weight = (w * (rec.rep_n as f64)).sqrt();
+        rec.ss_within = w * rec.raw_ss_within;
+    }
+    Ok(())
+}
+
 /// Flatten datasets into active observations with verified square-root weights.
+#[cfg(test)]
 pub(in crate::solver) fn build_observations(
     datasets: &[DatasetSeries],
     scheme: WeightingScheme,
     honor_rep_moments: bool,
 ) -> Result<Vec<ObsRecord>, FitError> {
+    build_observations_with_source(datasets, scheme, WeightingSource::ObservedY, honor_rep_moments)
+}
+
+/// Flatten datasets into active observations with verified square-root weights, honoring
+/// [`WeightingSource::PredictedY`] (which starts unweighted and defers `1/|y_hat|^k` to IRLS).
+pub(in crate::solver) fn build_observations_with_source(
+    datasets: &[DatasetSeries],
+    scheme: WeightingScheme,
+    weighting_source: WeightingSource,
+    honor_rep_moments: bool,
+) -> Result<Vec<ObsRecord>, FitError> {
+    let defer_predicted_y = matches!(weighting_source, WeightingSource::PredictedY)
+        && matches!(scheme, WeightingScheme::RelativeSquare | WeightingScheme::Relative | WeightingScheme::GeneralPowerY(_));
+    let effective_scheme = if defer_predicted_y { WeightingScheme::None } else { scheme };
     let mut obs = Vec::new();
     for (ds_local_idx, ds) in datasets.iter().enumerate() {
-        let honor_ds_moments = honor_rep_moments && (scheme == WeightingScheme::None || ds.is_pre_summarized);
+        let honor_ds_moments = honor_rep_moments && (effective_scheme == WeightingScheme::None || ds.is_pre_summarized);
         for pt in &ds.points {
             let (sqrt_weight, rep_n, ss_within, raw_ss_within) = if honor_ds_moments && pt.explicit_weight.is_none() {
-                let w = compute_point_weight(pt, scheme)?;
+                let w = compute_point_weight(pt, effective_scheme)?;
                 let (n_f, n_u, ss_i) = validated_replicate_moments(pt)?;
                 let weighted_n = w * n_f;
                 let weighted_ss_i = w * ss_i;
@@ -410,7 +510,7 @@ pub(in crate::solver) fn build_observations(
                 }
                 (weighted_n.sqrt(), n_u, weighted_ss_i, ss_i)
             } else {
-                let w = compute_point_weight(pt, scheme)?;
+                let w = compute_point_weight(pt, effective_scheme)?;
                 (w.sqrt(), 1, 0.0, 0.0)
             };
             obs.push(ObsRecord { point: pt.clone(), ds_local_idx, sqrt_weight, rep_n, ss_within, raw_ss_within });

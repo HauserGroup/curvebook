@@ -4,7 +4,7 @@
 //! - Motulsky, H. & Christopoulos, A. (2004). *Fitting Models to Biological Data Using Linear and Nonlinear Regression*. Oxford University Press.
 //! - Seber, G. A. F. & Wild, C. J. (1989). *Nonlinear Regression*. Wiley.
 
-use curvebook_doc::{CiBound, FitMethod, ParameterRule, ParameterScope};
+use curvebook_doc::{CiBound, FitMethod, IdentifiabilityMode, OutlierHandling, ParameterRule, ParameterScope};
 use curvebook_math::sum::NeumaierSum;
 
 use crate::diagnostics::{CovarianceDiagnostics, RoutDetectionResult, compute_information_criteria, compute_rsdr};
@@ -18,12 +18,12 @@ use crate::solver::inference::{
     compute_residual_diagnostics, compute_studentized_residuals, information_criteria_from_poisson_ll, poisson_information_criteria,
     poisson_log_likelihood_from_obs, rout_detect_outliers_mb2006,
 };
-use crate::solver::irls::{fit_cauchy_irls, fit_poisson_irls};
+use crate::solver::irls::{fit_cauchy_irls, fit_poisson_irls, fit_predicted_y_irls};
 use crate::solver::layout::{
-    ObsRecord, ParamBinding, ParameterLayout, build_observations, obs_replicate_count, obs_ss_within, rules_for_dataset,
-    uses_replicate_summary_moments,
+    ObsRecord, ParamBinding, ParameterLayout, apply_predicted_y_weights, build_observations_with_source, obs_replicate_count, obs_ss_within,
+    rules_for_dataset, uses_replicate_summary_moments,
 };
-use crate::solver::lm::solve_with_warm_start;
+use crate::solver::lm::{eval_residuals_with_domain, solve_with_warm_start};
 use crate::solver::results::{FittedDatasetResult, InferenceAvailability, InterpolatedUnknown, NonlinearFitResult, SolverConfig};
 use crate::types::{DatasetSeries, DerivedScalar, HookContext, per_dataset_parameter_key};
 
@@ -47,6 +47,7 @@ pub(in crate::solver) fn fit_single_or_shared(
     let is_robust = config.method == FitMethod::RobustCauchy;
     let inference_availability = if is_robust { InferenceAvailability::NotApplicableInRobustMode } else { InferenceAvailability::Available };
     let unc = finalize_fit_uncertainty(model, &layout, &obs, &mut lm_out, df, ss_within_total, config)?;
+    let report_all = config.identifiability_mode == Some(IdentifiabilityMode::ReportAll);
     let parameters = build_fitted_parameter_summaries(
         &layout,
         &lm_out.theta,
@@ -55,6 +56,7 @@ pub(in crate::solver) fn fit_single_or_shared(
         &unc.profile_cis,
         &unc.identifiability.unstable,
         inference_availability,
+        report_all,
     );
 
     let mut raw_rss_acc = NeumaierSum::new();
@@ -185,21 +187,38 @@ pub(in crate::solver) fn solve_single_dataset_unit(
     let ds_layout = ParameterLayout::build(model, ds_slice, hooks, ds_rules)?;
     let p_d = ds_layout.k_free();
     let use_rep_moments = uses_replicate_summary_moments(config);
-    let ds_obs = build_observations(ds_slice, config.weighting, use_rep_moments)?;
+    let mut ds_obs = build_observations_with_source(ds_slice, config.weighting, config.weighting_source, use_rep_moments)?;
     let n_d = obs_replicate_count(&ds_obs);
-    let min_d = if matches!(config.method, FitMethod::RoutOutlierElimination { .. }) { p_d + 1 } else { p_d };
+    let min_d = if config.effective_outlier_handling() != OutlierHandling::None { p_d + 1 } else { p_d };
     if n_d < min_d {
         return Err(FitError::InsufficientData { required: min_d, actual: n_d });
     }
-    let ss_within_d = if use_rep_moments { obs_ss_within(&ds_obs) } else { 0.0 };
     let init_theta: Vec<f64> = seed_override.map_or_else(|| ds_layout.free_slots.iter().map(|s| s.init).collect(), |s| s.to_vec());
 
     let mut lm_out = match config.method {
-        FitMethod::LeastSquares | FitMethod::RoutOutlierElimination { .. } => solve_with_warm_start(model, &ds_layout, &ds_obs, &init_theta, config)?,
+        FitMethod::LeastSquares | FitMethod::RoutOutlierElimination { .. } => {
+            if config.uses_predicted_y_weighting() {
+                fit_predicted_y_irls(model, &ds_layout, &mut ds_obs, &init_theta, config)?
+            } else {
+                solve_with_warm_start(model, &ds_layout, &ds_obs, &init_theta, config)?
+            }
+        }
         FitMethod::PoissonDeviance => fit_poisson_irls(model, &ds_layout, &ds_obs, &init_theta, config)?,
-        FitMethod::RobustCauchy => fit_cauchy_irls(model, &ds_layout, &ds_obs, &init_theta, config)?,
+        FitMethod::RobustCauchy => {
+            let mut out = fit_cauchy_irls(model, &ds_layout, &ds_obs, &init_theta, config)?;
+            if config.uses_predicted_y_weighting() {
+                if !apply_predicted_y_weights(&mut ds_obs, &out.y_hat, config.weighting) {
+                    out.status = FitStatus::ImpossibleWeights;
+                } else if let Some((w_res, _, ss)) = eval_residuals_with_domain(model, &ds_layout, &ds_obs, &out.theta, false) {
+                    out.weighted_res = w_res;
+                    out.weighted_ss = ss;
+                }
+            }
+            out
+        }
     };
 
+    let ss_within_d = if use_rep_moments { obs_ss_within(&ds_obs) } else { 0.0 };
     lm_out.weighted_ss += ss_within_d;
     let df_d = n_d.saturating_sub(p_d);
     let unc = finalize_fit_uncertainty(model, &ds_layout, &ds_obs, &mut lm_out, df_d, ss_within_d, config)?;
@@ -268,8 +287,16 @@ pub(in crate::solver) fn fit_independent_datasets(
     _initial_obs: Vec<ObsRecord>,
 ) -> Result<NonlinearFitResult, FitError> {
     let k_free = global_layout.k_free();
-    let (clean_storage, cauchy_seeds, rout_result, n_outliers_excluded) = if let FitMethod::RoutOutlierElimination { fdr_q_percent } = config.method {
-        let pre = run_independent_rout_prefilter(model, datasets, hooks, config, fdr_q_percent)?;
+    let outlier_handling = config.effective_outlier_handling();
+    let (clean_storage, cauchy_seeds, rout_result, n_outliers_excluded) = if outlier_handling != OutlierHandling::None {
+        let pre = run_independent_rout_prefilter(
+            model,
+            datasets,
+            hooks,
+            config,
+            config.effective_rout_q_percent(),
+            outlier_handling == OutlierHandling::Eliminate,
+        )?;
         (Some(pre.cleaned), Some(pre.seeds), Some(pre.rout), pre.excluded)
     } else {
         (None, None, None, 0)
@@ -297,6 +324,7 @@ pub(in crate::solver) fn fit_independent_datasets(
     let mut global_corr_mat = if is_robust { Vec::new() } else { vec![vec![0.0_f64; k_free]; k_free] };
 
     let mut total_rank = 0_usize;
+    let mut any_impossible_weights = false;
     let mut any_diverged = false;
     let mut any_ambiguous = false;
     let mut any_max_iters = false;
@@ -351,6 +379,7 @@ pub(in crate::solver) fn fit_independent_datasets(
 
         identifiability::include_dataset(&mut identifiability, sub.identifiability.fit, &ds.label);
         total_rank += sub.cov.numerical_rank;
+        any_impossible_weights |= sub.status == FitStatus::ImpossibleWeights;
         any_diverged |= sub.status == FitStatus::Diverged;
         any_ambiguous |= sub.cov.ambiguous || sub.status == FitStatus::Ambiguous;
         any_max_iters |= sub.status == FitStatus::HitMaxIters;
@@ -387,7 +416,9 @@ pub(in crate::solver) fn fit_independent_datasets(
     if any_unassessed_free && matches!(identifiability, FitIdentifiability::Identifiable) {
         identifiability = FitIdentifiability::NotAssessed;
     }
-    let status = if any_diverged {
+    let status = if any_impossible_weights {
+        FitStatus::ImpossibleWeights
+    } else if any_diverged {
         FitStatus::Diverged
     } else if any_max_iters {
         FitStatus::HitMaxIters
@@ -408,6 +439,7 @@ pub(in crate::solver) fn fit_independent_datasets(
     };
     let is_robust = config.method == FitMethod::RobustCauchy;
     let inference_availability = if is_robust { InferenceAvailability::NotApplicableInRobustMode } else { InferenceAvailability::Available };
+    let report_all = config.identifiability_mode == Some(IdentifiabilityMode::ReportAll);
     let parameters = build_fitted_parameter_summaries(
         &global_layout,
         &global_theta,
@@ -416,6 +448,7 @@ pub(in crate::solver) fn fit_independent_datasets(
         &global_profile_cis,
         &global_unstable,
         inference_availability,
+        report_all,
     );
 
     let raw_rss = total_raw_rss.total();
@@ -543,9 +576,11 @@ fn run_independent_rout_prefilter(
     hooks: &HookContext,
     config: &SolverConfig,
     fdr_q_percent: f64,
+    eliminate_outliers: bool,
 ) -> Result<IndependentRoutPrefilter, FitError> {
     let mut cauchy_cfg = config.clone();
     cauchy_cfg.method = FitMethod::RobustCauchy;
+    cauchy_cfg.outlier_handling = OutlierHandling::None;
     cauchy_cfg.compute_hougaard = false;
     cauchy_cfg.compute_profile_ci = false;
     cauchy_cfg.compute_bands = false;
@@ -584,10 +619,12 @@ fn run_independent_rout_prefilter(
         }
 
         let mut ds_c = ds.clone();
-        let mut idx_iter = is_out.iter().copied();
-        ds_c.points.retain(|_| !idx_iter.next().unwrap_or(false));
-        if ds_c.points.len() <= p_d {
-            return Err(FitError::InsufficientData { required: p_d + 1, actual: ds_c.points.len() });
+        if eliminate_outliers {
+            let mut idx_iter = is_out.iter().copied();
+            ds_c.points.retain(|_| !idx_iter.next().unwrap_or(false));
+            if ds_c.points.len() <= p_d {
+                return Err(FitError::InsufficientData { required: p_d + 1, actual: ds_c.points.len() });
+            }
         }
         total_pts += ds.points.len();
         remaining_obs += ds_c.points.len();

@@ -67,13 +67,15 @@ pub use linear::{
 };
 pub use result::{execute_analysis, execute_linear_analysis, execute_nonlinear_analysis, resolve_model_from_spec};
 pub use solver::{
-    FittedDatasetResult, FittedParameterSummary, InferenceAvailability, InterpolatedUnknown, ModelComparisonOutcome, ModelComparisonResult,
-    NonlinearFitResult, SolverConfig, compare_models, compare_models_checked, fit_nonlinear,
+    FitFlagOutcome, FittedDatasetResult, FittedParameterSummary, GreedyHessianReduction, InferenceAvailability, InterpolatedUnknown,
+    ModelComparisonOutcome, ModelComparisonQuestionResult, ModelComparisonResult, NonlinearFitResult, SolverConfig, SynchronizedComparisonRequest,
+    assemble_objective_hessian, compare_models, compare_models_checked, compare_models_question, compare_models_synchronized, evaluate_fit_flags,
+    fit_nonlinear, greedy_hessian_reduction, hessian_condition_number, hessian_kappa_threshold, is_fit_well_defined, ordered_nested_roles,
 };
 pub use tex_format::{format_model_equation_tex, format_model_equation_tex_for_dataset, format_number_sig_figs, format_polynomial_equation_tex};
 pub use types::{
-    DataPoint, DatasetSeries, DerivedScalar, EquationCategory, HookContext, MultivarExtractionSpec, UnknownResponse, extract_datasets_from_sheet,
-    extract_datasets_from_sheet_with_options, filter_datasets_by_range,
+    DataPoint, DatasetSeries, DerivedScalar, EquationCategory, HookContext, MultivarExtractionSpec, UnknownResponse, collapse_datasets_to_row_means,
+    extract_datasets_from_sheet, extract_datasets_from_sheet_multi, extract_datasets_from_sheet_with_options, filter_datasets_by_range,
 };
 
 #[cfg(test)]

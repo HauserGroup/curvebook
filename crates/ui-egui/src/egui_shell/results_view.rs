@@ -135,7 +135,7 @@ fn result_cell_is_ambiguous(cell: &ResultCell, is_survival_summary: bool) -> boo
     }
 }
 
-fn format_result_cell_semantic(cell: &ResultCell, p_format: PValueFormat, is_survival_summary: bool) -> FormattedCellDisplay {
+fn format_result_cell_semantic(cell: &ResultCell, p_format: PValueFormat, is_survival_summary: bool, sig_figs: Option<u8>) -> FormattedCellDisplay {
     match cell {
         ResultCell::Empty => FormattedCellDisplay { text: String::new(), is_ambiguous: false, is_significant: false },
         ResultCell::Number { value, prefix, units } => {
@@ -143,16 +143,22 @@ fn format_result_cell_semantic(cell: &ResultCell, p_format: PValueFormat, is_sur
                 // Unreached medians or undefined scalars must remain explicitly blank, never "NaN" or "0".
                 return FormattedCellDisplay { text: String::new(), is_ambiguous: false, is_significant: false };
             }
-            let base = ResultSheetViewState::format_result_cell(cell, p_format);
-            let is_amb = prefix.as_deref() == Some("~");
-            let text = if is_amb && !base.contains("???") {
-                let unit_sfx = units.as_deref().filter(|u| !u.is_empty()).map_or(String::new(), |u| format!(" {u}"));
-                let _ = unit_sfx;
-                base
+            let base = if let Some(d) = sig_figs {
+                let mut out = String::new();
+                if let Some(p) = prefix {
+                    out.push_str(p);
+                }
+                out.push_str(&curvebook_doc::format_significant_digits(*value, d));
+                if let Some(u) = units.as_deref().filter(|u| !u.is_empty()) {
+                    out.push(' ');
+                    out.push_str(u);
+                }
+                out
             } else {
-                base
+                ResultSheetViewState::format_result_cell(cell, p_format)
             };
-            FormattedCellDisplay { text, is_ambiguous: is_amb, is_significant: false }
+            let is_amb = prefix.as_deref() == Some("~");
+            FormattedCellDisplay { text: base, is_ambiguous: is_amb, is_significant: false }
         }
         ResultCell::ConfidenceInterval { lower, upper } => {
             let has_open = matches!(lower, CiBound::Open) || matches!(upper, CiBound::Open);
@@ -162,14 +168,18 @@ fn format_result_cell_semantic(cell: &ResultCell, p_format: PValueFormat, is_sur
                 let text = if lo.is_empty() && hi.is_empty() { String::new() } else { format!("[{lo}, {hi}]") };
                 FormattedCellDisplay { text, is_ambiguous: false, is_significant: false }
             } else if has_open {
-                let lo = format_ci_bound_semantic(*lower);
-                let hi = format_ci_bound_semantic(*upper);
+                let lo = format_ci_bound_semantic_sig(*lower, sig_figs);
+                let hi = format_ci_bound_semantic_sig(*upper, sig_figs);
                 let text = if matches!(lower, CiBound::Open) && matches!(upper, CiBound::Open) {
                     String::from("??? (ambiguous)")
                 } else {
                     format!("[{lo}, {hi}] (???)")
                 };
                 FormattedCellDisplay { text, is_ambiguous: true, is_significant: false }
+            } else if let Some(d) = sig_figs {
+                let lo = format_ci_bound_semantic_sig(*lower, Some(d));
+                let hi = format_ci_bound_semantic_sig(*upper, Some(d));
+                FormattedCellDisplay { text: format!("[{lo}, {hi}]"), is_ambiguous: false, is_significant: false }
             } else {
                 FormattedCellDisplay { text: ResultSheetViewState::format_result_cell(cell, p_format), is_ambiguous: false, is_significant: false }
             }
@@ -197,9 +207,12 @@ fn format_survival_ci_bound(bound: CiBound) -> String {
     }
 }
 
-fn format_ci_bound_semantic(bound: CiBound) -> String {
+fn format_ci_bound_semantic_sig(bound: CiBound, sig_figs: Option<u8>) -> String {
     match bound {
-        CiBound::Finite(v) if v.is_finite() => format!("{v:.4}").trim_end_matches('0').trim_end_matches('.').to_owned(),
+        CiBound::Finite(v) if v.is_finite() => match sig_figs {
+            Some(d) => curvebook_doc::format_significant_digits(v, d),
+            None => format!("{v:.4}").trim_end_matches('0').trim_end_matches('.').to_owned(),
+        },
         CiBound::Finite(_) | CiBound::Open => String::from("???"),
     }
 }
@@ -1031,7 +1044,11 @@ fn render_result_data_row(
         }
         row_painter.line_segment([cell_rect.left_top(), cell_rect.left_bottom()], Stroke::new(1.0, tokens.divider));
         let cell = row.get(c_idx).unwrap_or(&ResultCell::Empty);
-        let fmt = format_result_cell_semantic(cell, rs.analysis.p_value_format, is_survival_summary);
+        let sig_figs = match &rs.analysis.kind {
+            AnalysisKind::NonlinearRegression(nl) => nl.output_significant_digits,
+            _ => None,
+        };
+        let fmt = format_result_cell_semantic(cell, rs.analysis.p_value_format, is_survival_summary, sig_figs);
 
         let cell_resp = ui.interact(
             cell_vis,

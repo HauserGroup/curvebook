@@ -5,7 +5,7 @@
 //! - Seber, G. A. F. & Wild, C. J. (1989). *Nonlinear Regression*. Wiley.
 //! - Motulsky, H. & Christopoulos, A. (2004). *Fitting Models to Biological Data Using Linear and Nonlinear Regression*. Oxford University Press.
 
-use curvebook_doc::{CiBound, FitMethod, WeightingScheme};
+use curvebook_doc::{CiBound, FitMethod, IdentifiabilityMode, OutlierHandling, ReplicateFitMode, WeightingScheme};
 use curvebook_math::dist::{norm_two_sided_isf, student_t_two_sided_isf};
 use curvebook_math::linalg::DenseMatrix;
 use curvebook_math::sum::NeumaierSum;
@@ -22,15 +22,15 @@ use crate::solver::datasets::{fit_independent_datasets, fit_single_or_shared};
 use crate::solver::identifiability;
 use crate::solver::identifiability::Assessment;
 use crate::solver::inference::{rout_detect_outliers_mb2006, unscaled_cov_from_diag_or_j, wald_ci_bounds};
-use crate::solver::irls::{fit_cauchy_irls, fit_poisson_irls};
+use crate::solver::irls::{fit_cauchy_irls, fit_poisson_irls, fit_predicted_y_irls};
 use crate::solver::layout::{
-    ObsRecord, ParamBinding, ParameterLayout, build_observations, obs_replicate_count, ode_budget_error, uses_replicate_summary_moments,
-    uses_shared_global,
+    ObsRecord, ParamBinding, ParameterLayout, apply_predicted_y_weights, build_observations_with_source, obs_replicate_count, ode_budget_error,
+    uses_replicate_summary_moments, uses_shared_global,
 };
-use crate::solver::lm::{LmRunOutput, eval_predictions_into, solve_with_warm_start};
+use crate::solver::lm::{LmRunOutput, eval_predictions_into, eval_residuals_with_domain, solve_with_warm_start};
 use crate::solver::profile::{solve_profile_subproblem, solve_profile_subproblem_poisson};
 use crate::solver::results::{FittedDatasetResult, FittedParameterSummary, InferenceAvailability, NonlinearFitResult, SolverConfig};
-use crate::types::{DataPoint, DatasetSeries, HookContext, filter_datasets_by_range};
+use crate::types::{DataPoint, DatasetSeries, HookContext, collapse_datasets_to_row_means, filter_datasets_by_range};
 
 /// Execute nonlinear regression for one or more datasets using any built-in or DSL [`ParametricModel`].
 ///
@@ -54,24 +54,29 @@ pub fn fit_nonlinear(
         return fit_plot_function_only(model, datasets, hooks, config);
     }
 
-    let mut filtered_storage: Option<Vec<DatasetSeries>> = None;
-    if config.x_range_filter.is_some() || config.y_range_filter.is_some() {
+    let mut transformed_storage: Option<Vec<DatasetSeries>> = None;
+    if config.replicate_fit_mode == ReplicateFitMode::RowMeansOnly || config.x_range_filter.is_some() || config.y_range_filter.is_some() {
         let mut copy = datasets.to_vec();
-        filter_datasets_by_range(&mut copy, config.x_range_filter, config.y_range_filter);
+        if config.replicate_fit_mode == ReplicateFitMode::RowMeansOnly {
+            collapse_datasets_to_row_means(&mut copy);
+        }
+        if config.x_range_filter.is_some() || config.y_range_filter.is_some() {
+            filter_datasets_by_range(&mut copy, config.x_range_filter, config.y_range_filter);
+        }
         if copy.is_empty() {
             return Err(FitError::EmptyInput);
         }
-        filtered_storage = Some(copy);
+        transformed_storage = Some(copy);
     }
-    let active_datasets = filtered_storage.as_deref().unwrap_or(datasets);
+    let active_datasets = transformed_storage.as_deref().unwrap_or(datasets);
+    let outlier_handling = config.effective_outlier_handling();
 
     if let FitMethod::RoutOutlierElimination { fdr_q_percent } = config.method
         && (!fdr_q_percent.is_finite() || fdr_q_percent <= 0.0 || fdr_q_percent > 50.0)
     {
         return Err(FitError::InvalidParameter { name: "fdr_q_percent", reason: format!("FDR Q% must lie in (0, 50], got {fdr_q_percent}") });
     }
-    if matches!(config.method, FitMethod::RobustCauchy | FitMethod::RoutOutlierElimination { .. })
-        && active_datasets.iter().any(|d| d.is_pre_summarized)
+    if (config.method == FitMethod::RobustCauchy || outlier_handling != OutlierHandling::None) && active_datasets.iter().any(|d| d.is_pre_summarized)
     {
         return Err(FitError::RequiresRawReplicates);
     }
@@ -93,9 +98,9 @@ pub fn fit_nonlinear(
     let layout = ParameterLayout::build(model, active_datasets, hooks, &config.parameter_rules)?;
     let k_free = layout.k_free();
     let use_rep_moments = uses_replicate_summary_moments(config);
-    let obs = build_observations(active_datasets, config.weighting, use_rep_moments)?;
+    let obs = build_observations_with_source(active_datasets, config.weighting, config.weighting_source, use_rep_moments)?;
     let n_total_obs = obs_replicate_count(&obs);
-    let min_required = if matches!(config.method, FitMethod::RoutOutlierElimination { .. }) { k_free + 1 } else { k_free };
+    let min_required = if outlier_handling != OutlierHandling::None { k_free + 1 } else { k_free };
     if n_total_obs < min_required {
         return Err(FitError::InsufficientData { required: min_required, actual: n_total_obs });
     }
@@ -320,16 +325,25 @@ pub(in crate::solver) fn solve_lm_by_method(
     config: &SolverConfig,
 ) -> Result<(LmRunOutput, Option<RoutDetectionResult>, usize), FitError> {
     let k_free = layout.k_free();
-    match config.method {
-        FitMethod::LeastSquares => Ok((solve_with_warm_start(model, layout, obs, init_theta, config)?, None, 0)),
-        FitMethod::PoissonDeviance => Ok((fit_poisson_irls(model, layout, obs, init_theta, config)?, None, 0)),
-        FitMethod::RobustCauchy => Ok((fit_cauchy_irls(model, layout, obs, init_theta, config)?, None, 0)),
-        FitMethod::RoutOutlierElimination { fdr_q_percent } => {
-            let cauchy_out = fit_cauchy_irls(model, layout, obs, init_theta, config)?;
-            let pts: Vec<DataPoint> = obs.iter().map(|o| o.point.clone()).collect();
-            let sqrt_w: Vec<f64> = obs.iter().map(|o| o.sqrt_weight).collect();
-            let w_res: Vec<f64> = obs.iter().zip(cauchy_out.y_hat.iter()).map(|(o, yh)| (o.point.y - yh) * o.sqrt_weight).collect();
-            let rout = rout_detect_outliers_mb2006(&pts, &w_res, &sqrt_w, k_free, fdr_q_percent)?;
+    let outlier_handling = config.effective_outlier_handling();
+    if outlier_handling != OutlierHandling::None {
+        let fdr_q_percent = config.effective_rout_q_percent();
+        let mut cauchy_out = fit_cauchy_irls(model, layout, obs, init_theta, config)?;
+        if config.uses_predicted_y_weighting() {
+            if !apply_predicted_y_weights(obs, &cauchy_out.y_hat, config.weighting) {
+                cauchy_out.status = FitStatus::ImpossibleWeights;
+                return Ok((cauchy_out, None, 0));
+            }
+            if let Some((w_res, _, ss)) = eval_residuals_with_domain(model, layout, obs, &cauchy_out.theta, false) {
+                cauchy_out.weighted_res = w_res;
+                cauchy_out.weighted_ss = ss;
+            }
+        }
+        let pts: Vec<DataPoint> = obs.iter().map(|o| o.point.clone()).collect();
+        let sqrt_w: Vec<f64> = obs.iter().map(|o| o.sqrt_weight).collect();
+        let w_res: Vec<f64> = obs.iter().zip(cauchy_out.y_hat.iter()).map(|(o, yh)| (o.point.y - yh) * o.sqrt_weight).collect();
+        let rout = rout_detect_outliers_mb2006(&pts, &w_res, &sqrt_w, k_free, fdr_q_percent)?;
+        let excluded = if outlier_handling == OutlierHandling::Eliminate {
             let mut is_out = vec![false; obs.len()];
             for &idx in &rout.outlier_indices {
                 is_out[idx] = true;
@@ -338,16 +352,64 @@ pub(in crate::solver) fn solve_lm_by_method(
             if clean_obs.len() <= k_free {
                 return Err(FitError::InsufficientData { required: k_free + 1, actual: clean_obs.len() });
             }
-            let excluded = obs.len() - clean_obs.len();
+            let ex = obs.len() - clean_obs.len();
             *obs = clean_obs;
-            let mut ols = solve_with_warm_start(model, layout, obs, &cauchy_out.theta, config)?;
-            if let Ok(alt) = solve_with_warm_start(model, layout, obs, init_theta, config)
+            ex
+        } else {
+            0
+        };
+        let mut ols = if config.uses_predicted_y_weighting() {
+            fit_predicted_y_irls(model, layout, obs, &cauchy_out.theta, config)?
+        } else {
+            solve_with_warm_start(model, layout, obs, &cauchy_out.theta, config)?
+        };
+        if ols.status != FitStatus::ImpossibleWeights {
+            let mut alt_obs = obs.clone();
+            let alt_res = if config.uses_predicted_y_weighting() {
+                fit_predicted_y_irls(model, layout, &mut alt_obs, init_theta, config)
+            } else {
+                solve_with_warm_start(model, layout, &alt_obs, init_theta, config)
+            };
+            if let Ok(alt) = alt_res
                 && ((alt.status == FitStatus::Converged && ols.status != FitStatus::Converged)
                     || (alt.status == FitStatus::Converged && alt.weighted_ss < ols.weighted_ss * (1.0 - 1e-12)))
             {
+                *obs = alt_obs;
                 ols = alt;
             }
-            Ok((ols, Some(rout), excluded))
+        }
+        return Ok((ols, Some(rout), excluded));
+    }
+
+    match config.method {
+        FitMethod::LeastSquares => {
+            let out = if config.uses_predicted_y_weighting() {
+                fit_predicted_y_irls(model, layout, obs, init_theta, config)?
+            } else {
+                solve_with_warm_start(model, layout, obs, init_theta, config)?
+            };
+            Ok((out, None, 0))
+        }
+        FitMethod::PoissonDeviance => Ok((fit_poisson_irls(model, layout, obs, init_theta, config)?, None, 0)),
+        FitMethod::RobustCauchy => {
+            let mut out = fit_cauchy_irls(model, layout, obs, init_theta, config)?;
+            if config.uses_predicted_y_weighting() {
+                if !apply_predicted_y_weights(obs, &out.y_hat, config.weighting) {
+                    out.status = FitStatus::ImpossibleWeights;
+                } else if let Some((w_res, _, ss)) = eval_residuals_with_domain(model, layout, obs, &out.theta, false) {
+                    out.weighted_res = w_res;
+                    out.weighted_ss = ss;
+                }
+            }
+            Ok((out, None, 0))
+        }
+        FitMethod::RoutOutlierElimination { .. } => {
+            let out = if config.uses_predicted_y_weighting() {
+                fit_predicted_y_irls(model, layout, obs, init_theta, config)?
+            } else {
+                solve_with_warm_start(model, layout, obs, init_theta, config)?
+            };
+            Ok((out, None, 0))
         }
     }
 }
@@ -360,6 +422,61 @@ pub(in crate::solver) struct FinalizedUncertainty {
     pub(in crate::solver) profile_cis: Vec<(CiBound, CiBound)>,
     pub(in crate::solver) t_crit: f64,
     pub(in crate::solver) sigma_w: f64,
+}
+
+fn apply_greedy_hessian_reduction(
+    j_mat: &DenseMatrix,
+    theta: &[f64],
+    weighted_ss: f64,
+    df: usize,
+    is_poisson: bool,
+    config: &SolverConfig,
+    cov: &mut CovarianceDiagnostics,
+) -> Result<identifiability::GreedyHessianReduction, FitError> {
+    let h = identifiability::assemble_objective_hessian(j_mat, is_poisson)?;
+    let red = identifiability::greedy_hessian_reduction(&h, identifiability::hessian_kappa_threshold())?;
+    if !red.unstable_indices.is_empty() && !red.stable_indices.is_empty() {
+        let j_stable = identifiability::submatrix_columns(j_mat, &red.stable_indices)?;
+        let theta_stable: Vec<f64> = red.stable_indices.iter().map(|&i| theta[i]).collect();
+        let cov_stable = if is_poisson {
+            compute_poisson_covariance_diagnostics(&j_stable, df, &theta_stable, config.confidence)?
+        } else {
+            compute_covariance_diagnostics(&j_stable, weighted_ss, df, &theta_stable, config.confidence)?
+        };
+        for (sub_i, &orig_i) in red.stable_indices.iter().enumerate() {
+            if let Some(&se) = cov_stable.standard_errors.get(sub_i) {
+                cov.standard_errors[orig_i] = se;
+            }
+            if let Some(&lo) = cov_stable.symmetric_ci_lower.get(sub_i) {
+                cov.symmetric_ci_lower[orig_i] = lo;
+            }
+            if let Some(&hi) = cov_stable.symmetric_ci_upper.get(sub_i) {
+                cov.symmetric_ci_upper[orig_i] = hi;
+            }
+            if let Some(&dep) = cov_stable.dependencies.get(sub_i) {
+                cov.dependencies[orig_i] = dep;
+            }
+            for (sub_j, &orig_j) in red.stable_indices.iter().enumerate() {
+                if let Some(v) = cov_stable.covariance_matrix.get(sub_i).and_then(|r| r.get(sub_j)).copied()
+                    && let Some(cell) = cov.covariance_matrix.get_mut(orig_i).and_then(|r| r.get_mut(orig_j))
+                {
+                    *cell = v;
+                }
+                if let Some(v) = cov_stable.correlation_matrix.get(sub_i).and_then(|r| r.get(sub_j)).copied()
+                    && let Some(cell) = cov.correlation_matrix.get_mut(orig_i).and_then(|r| r.get_mut(orig_j))
+                {
+                    *cell = v;
+                }
+            }
+        }
+        cov.numerical_rank = cov_stable.numerical_rank;
+    }
+    for &u in &red.unstable_indices {
+        cov.standard_errors[u] = f64::NAN;
+        cov.symmetric_ci_lower[u] = f64::NAN;
+        cov.symmetric_ci_upper[u] = f64::NAN;
+    }
+    Ok(red)
 }
 
 pub(in crate::solver) fn finalize_fit_uncertainty(
@@ -393,12 +510,28 @@ pub(in crate::solver) fn finalize_fit_uncertainty(
         });
     }
     let is_poisson = config.method == FitMethod::PoissonDeviance;
-    let cov = if is_poisson {
+    let effective_mode =
+        config.identifiability_mode.or_else(|| config.identify_unstable_parameters.then_some(IdentifiabilityMode::IdentifyUnstableParameters));
+    let report_all = effective_mode == Some(IdentifiabilityMode::ReportAll);
+    let mut cov = if is_poisson {
         compute_poisson_covariance_diagnostics(&lm_out.j_mat, df, &lm_out.theta, config.confidence)?
     } else {
         compute_covariance_diagnostics(&lm_out.j_mat, lm_out.weighted_ss, df, &lm_out.theta, config.confidence)?
     };
-    if cov.ambiguous && lm_out.status == FitStatus::Converged {
+    let full_cov_ambiguous = cov.ambiguous;
+
+    // Greedy Hessian reduction under `IdentifiabilityMode::IdentifyUnstableParameters` (§2.5.1):
+    // drop maximally ill-conditioned rows/columns while keeping well-conditioned parameters' SE/CIs.
+    let greedy_reduction =
+        if effective_mode == Some(IdentifiabilityMode::IdentifyUnstableParameters) && k_free > 0 && df > 0 && lm_out.status != FitStatus::Diverged {
+            Some(apply_greedy_hessian_reduction(&lm_out.j_mat, &lm_out.theta, lm_out.weighted_ss, df, is_poisson, config, &mut cov)?)
+        } else {
+            None
+        };
+
+    if report_all {
+        cov.ambiguous = false;
+    } else if full_cov_ambiguous && lm_out.status == FitStatus::Converged {
         lm_out.status = FitStatus::Ambiguous;
     }
 
@@ -443,8 +576,10 @@ pub(in crate::solver) fn finalize_fit_uncertainty(
     };
 
     let bounds = layout.bounds();
-    let profile_computed = config.compute_profile_ci && k_free > 0 && df > 0 && !cov.ambiguous;
-    let profile_cis = match config.method {
+    let has_reduced_stable = greedy_reduction.as_ref().is_some_and(|r| !r.unstable_indices.is_empty() && !r.stable_indices.is_empty());
+    let profile_computed =
+        config.compute_profile_ci && k_free > 0 && df > 0 && (!cov.ambiguous || has_reduced_stable) && lm_out.status != FitStatus::ImpossibleWeights;
+    let mut profile_cis = match config.method {
         FitMethod::RobustCauchy => vec![(CiBound::Open, CiBound::Open); k_free],
         FitMethod::PoissonDeviance => {
             if profile_computed {
@@ -456,6 +591,10 @@ pub(in crate::solver) fn finalize_fit_uncertainty(
                     config.confidence,
                     |fixed_idx, fixed_val, seed| solve_profile_subproblem_poisson(model, layout, obs, seed, fixed_idx, fixed_val),
                 )
+            } else if has_reduced_stable {
+                let mut cov_tmp = cov.clone();
+                cov_tmp.ambiguous = false;
+                wald_ci_bounds(&cov_tmp, df)
             } else {
                 wald_ci_bounds(&cov, df)
             }
@@ -478,14 +617,38 @@ pub(in crate::solver) fn finalize_fit_uncertainty(
                     config.confidence,
                     |fixed_idx, fixed_val, seed| solve_profile_subproblem(model, layout, obs, seed, fixed_idx, fixed_val, ss_within_total),
                 )
+            } else if has_reduced_stable {
+                let mut cov_tmp = cov.clone();
+                cov_tmp.ambiguous = false;
+                wald_ci_bounds(&cov_tmp, df)
             } else {
                 wald_ci_bounds(&cov, df)
             }
         }
     };
+    if let Some(red) = &greedy_reduction {
+        for &u in &red.unstable_indices {
+            if let Some(slot) = profile_cis.get_mut(u) {
+                *slot = (CiBound::Open, CiBound::Open);
+            }
+        }
+    }
 
-    let mut identifiability = if config.identify_unstable_parameters && k_free > 0 && lm_out.status != FitStatus::Diverged {
-        identifiability::assess(layout, obs, &lm_out.j_mat, df, &cov.dependencies, profile_computed.then_some(profile_cis.as_slice()))?
+    let mut identifiability = if let Some(mode) = effective_mode
+        && k_free > 0
+        && lm_out.status != FitStatus::Diverged
+    {
+        identifiability::assess_for_mode(
+            mode,
+            layout,
+            obs,
+            &lm_out.j_mat,
+            df,
+            &cov.dependencies,
+            profile_computed.then_some(profile_cis.as_slice()),
+            greedy_reduction.as_ref(),
+            full_cov_ambiguous,
+        )?
     } else {
         Assessment::default()
     };

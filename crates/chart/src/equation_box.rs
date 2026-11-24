@@ -241,6 +241,21 @@ fn resolve_model_equation(doc: &ProjectDocument, result_sheet_id: &SheetId, data
             let tex = format_polynomial_equation_tex(1, false, &pb_params, substituted, EQUATION_SIG_FIGS);
             ResolvedEquation::Tex(tex)
         }
+        AnalysisKind::SimpleLogisticRegression(_) => {
+            if !substituted {
+                return ResolvedEquation::Tex(String::from("P(Y=1) = \\frac{1}{1 + e^{-(\\beta_0 + \\beta_1 X)}}"));
+            }
+            let b0 = params.iter().find(|(k, _)| matches!(normalize_scalar_key(k).as_str(), "beta0" | "b0" | "b_0")).map(|(_, v)| *v);
+            let b1 = params.iter().find(|(k, _)| matches!(normalize_scalar_key(k).as_str(), "beta1" | "b1" | "b_1")).map(|(_, v)| *v);
+            match (b0, b1) {
+                (Some(v0), Some(v1)) if v0.is_finite() && v1.is_finite() => {
+                    let sign = if v1 < 0.0 { "-" } else { "+" };
+                    let abs_b1 = v1.abs();
+                    ResolvedEquation::Tex(format!("P(Y=1) = \\frac{{1}}{{1 + e^{{-({v0:.4} {sign} {abs_b1:.4} X)}}}}"))
+                }
+                _ => ResolvedEquation::Placeholder("(Fit parameters unavailable)".to_owned()),
+            }
+        }
         _ => {
             if let Some(curve) = overlay_for_dataset.filter(|c| !c.equation_id.trim().is_empty()) {
                 if substituted {

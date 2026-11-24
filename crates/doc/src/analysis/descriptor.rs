@@ -52,11 +52,15 @@ pub enum AnalysisKindId {
     PValueStack = 17,
     /// Prospective statistical power, sample-size, and minimum-detectable-effect solver ([`AnalysisKind::PowerAnalysis`]).
     PowerAnalysis = 18,
+    /// Standalone single-predictor binary logistic regression on `XY` tables ([`AnalysisKind::SimpleLogisticRegression`]).
+    SimpleLogisticRegression = 19,
+    /// Model-free XY spline (natural cubic, Akima, smoothing), LOWESS, and dense point-to-point curve fitting ([`AnalysisKind::FitSplineLowess`]).
+    FitSplineLowess = 20,
 }
 
 impl AnalysisKindId {
-    /// Complete ordered list of all 19 [`AnalysisKindId`] discriminants.
-    pub const ALL: [Self; 19] = [
+    /// Complete ordered list of all 21 [`AnalysisKindId`] discriminants.
+    pub const ALL: [Self; 21] = [
         Self::Transform,
         Self::DescriptiveStats,
         Self::OutlierDetection,
@@ -76,6 +80,8 @@ impl AnalysisKindId {
         Self::NonlinearRegression,
         Self::PValueStack,
         Self::PowerAnalysis,
+        Self::SimpleLogisticRegression,
+        Self::FitSplineLowess,
     ];
 
     /// Total number of [`AnalysisKind`] variants registered in [`ALL_ANALYSIS_DESCRIPTORS`].
@@ -107,6 +113,8 @@ impl AnalysisKindId {
             AnalysisKind::NonlinearRegression(_) => Self::NonlinearRegression,
             AnalysisKind::PValueStack(_) => Self::PValueStack,
             AnalysisKind::PowerAnalysis(_) => Self::PowerAnalysis,
+            AnalysisKind::SimpleLogisticRegression(_) => Self::SimpleLogisticRegression,
+            AnalysisKind::FitSplineLowess(_) => Self::FitSplineLowess,
         }
     }
 
@@ -136,6 +144,8 @@ impl AnalysisKindId {
             Self::NonlinearRegression => &ALL_ANALYSIS_DESCRIPTORS[16],
             Self::PValueStack => &ALL_ANALYSIS_DESCRIPTORS[17],
             Self::PowerAnalysis => &ALL_ANALYSIS_DESCRIPTORS[18],
+            Self::SimpleLogisticRegression => &ALL_ANALYSIS_DESCRIPTORS[19],
+            Self::FitSplineLowess => &ALL_ANALYSIS_DESCRIPTORS[20],
         }
     }
 
@@ -358,6 +368,7 @@ impl AnalysisKindDescriptor {
     }
 }
 
+const XY_ONLY: &[TableKind] = &[TableKind::Xy];
 const XY_GROUPED_MV: &[TableKind] = &[TableKind::Xy, TableKind::Grouped, TableKind::MultipleVariables];
 const COL_XY_GROUPED_MV: &[TableKind] = &[TableKind::Column, TableKind::Xy, TableKind::Grouped, TableKind::MultipleVariables];
 const GROUPED_XY_COL_MV: &[TableKind] = &[TableKind::Grouped, TableKind::Xy, TableKind::Column, TableKind::MultipleVariables];
@@ -984,6 +995,21 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
             "mv_group_columns",
             "mv_x_columns",
             "mv_y_column",
+            "mv_y_columns",
+            "weighting_source",
+            "outlier_handling",
+            "emit_cleaned_data_tab",
+            "replicate_fit_mode",
+            "convergence_strictness",
+            "identifiability_mode",
+            "show_standard_errors",
+            "comparison_question",
+            "comparison_method",
+            "prefer_well_defined_fit",
+            "summary_parameter",
+            "create_summary_graph",
+            "output_significant_digits",
+            "fit_flag_rules",
         ],
         supports_multiplicity: false,
         supports_info_hooks: true,
@@ -1050,6 +1076,74 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         auto_selects_mv_numeric_columns: false,
         ui_catalog_ids: &["stats.power"],
         docs_anchor: "analysis-power-analysis",
+    },
+    AnalysisKindDescriptor {
+        id: AnalysisKindId::SimpleLogisticRegression,
+        slug: "simple-logistic-regression",
+        serde_variant: "SimpleLogisticRegression",
+        title: "Simple Logistic Regression",
+        short_label: "Simple Logistic",
+        description: "Single-predictor binary logistic regression on XY tables with profile-likelihood CIs, X at 50%, ROC/AUC, and separation diagnostics.",
+        domain: AnalysisDomainKind::Stats,
+        recompute_strategy: AnalysisRecomputeStrategy::Stats,
+        ui_category: AnalysisUiCategory::XyAndRegression,
+        compatible_table_kinds: XY_ONLY,
+        has_method_specific_table_rules: false,
+        canonical_shorthand: "simple_logistic",
+        shorthands: &["simple_logistic", "simple_logistic_regression", "stats.simple_logistic", "xy_logistic"],
+        accepts_equation_id_shorthand: false,
+        canonical_param_keys: &["emit_row_classification", "confidence_bands", "classification_cutoff", "plot_x_min", "plot_x_max", "plot_segments"],
+        supports_multiplicity: false,
+        supports_info_hooks: false,
+        auto_selects_mv_numeric_columns: false,
+        ui_catalog_ids: &["stats.simple_logistic"],
+        docs_anchor: "analysis-simple-logistic-regression",
+    },
+    AnalysisKindDescriptor {
+        id: AnalysisKindId::FitSplineLowess,
+        slug: "fit-spline-lowess",
+        serde_variant: "FitSplineLowess",
+        title: "Fit Spline / LOWESS Curve",
+        short_label: "Fit Spline / LOWESS",
+        description: "Model-free XY natural cubic spline, Akima subspline, smoothing spline, LOWESS, and dense point-to-point curve fitting with optional unknown interpolation.",
+        domain: AnalysisDomainKind::Transform,
+        recompute_strategy: AnalysisRecomputeStrategy::Transform,
+        ui_category: AnalysisUiCategory::XyAndRegression,
+        compatible_table_kinds: XY_ONLY,
+        has_method_specific_table_rules: false,
+        canonical_shorthand: "fit_spline_lowess",
+        shorthands: &[
+            "fit_spline_lowess",
+            "spline_lowess",
+            "spline",
+            "cubic_spline",
+            "natural_cubic_spline",
+            "akima",
+            "akima_subspline",
+            "smoothing_spline",
+            "lowess",
+            "point_to_point",
+            "fit.spline_lowess",
+        ],
+        accepts_equation_id_shorthand: false,
+        canonical_param_keys: &[
+            "method",
+            "segment_count",
+            "smoothing_knots",
+            "smoothing_df",
+            "lowess_preset",
+            "lowess_fraction",
+            "lowess_robustness_iters",
+            "plot_x_min",
+            "plot_x_max",
+            "emit_curve_coordinates_tab",
+            "interpolate_unknowns",
+        ],
+        supports_multiplicity: false,
+        supports_info_hooks: false,
+        auto_selects_mv_numeric_columns: false,
+        ui_catalog_ids: &["fit.spline_lowess"],
+        docs_anchor: "analysis-fit-spline-lowess",
     },
 ];
 

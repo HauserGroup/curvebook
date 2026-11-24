@@ -42,6 +42,7 @@ pub mod power;
 pub mod pvalue_stack;
 pub mod regression;
 pub mod roc;
+pub mod simple_logistic;
 pub mod survival;
 pub mod two_group;
 
@@ -99,7 +100,7 @@ pub fn run_analysis(sheet: &DataSheet, spec: &AnalysisSpec) -> Result<ResultShee
         AnalysisKind::RocCurve(r) => roc::run_roc_analysis(sheet, spec, r),
         AnalysisKind::GeneralizedLinearModel(g) => regression::run_glm_analysis(sheet, spec, g),
         AnalysisKind::Multivariate(m) => multivariate::run_multivariate_analysis(sheet, spec, m),
-        AnalysisKind::Transform(_) => {
+        AnalysisKind::Transform(_) | AnalysisKind::FitSplineLowess(_) => {
             Err(StatsError::IncompatibleTable { analysis: "transform (handled by curvebook-transform)", actual: sheet.archetype.kind() })
         }
         AnalysisKind::LinearRegression(_) | AnalysisKind::NonlinearRegression(_) => {
@@ -107,5 +108,6 @@ pub fn run_analysis(sheet: &DataSheet, spec: &AnalysisSpec) -> Result<ResultShee
         }
         AnalysisKind::PValueStack(ps) => pvalue_stack::run_pvalue_stack_analysis(sheet, spec, ps),
         AnalysisKind::PowerAnalysis(p) => power::run_power_analysis(sheet, spec, p),
+        AnalysisKind::SimpleLogisticRegression(sl) => simple_logistic::run_simple_logistic_analysis(sheet, spec, sl),
     }
 }

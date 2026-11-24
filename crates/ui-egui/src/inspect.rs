@@ -1477,6 +1477,14 @@ fn push_r9_edit_params_controls(app: &UiApp, doc: &ProjectDocument, controls: &m
             push("edit.pvalue_stack.threshold", "spinbutton", "Alpha / FDR Q threshold", json!(ps.threshold));
             push("edit.pvalue_stack.column", "combobox", "P-value column", json!(ps.column));
         }
+        AnalysisKind::FitSplineLowess(sp) => {
+            push("edit.spline.method", "combobox", "Curve method", json!(format!("{:?}", sp.method)));
+            push("edit.spline.segments", "spinbutton", "Polyline vertices", json!(sp.segment_count));
+            push("edit.spline.smoothing_knots", "spinbutton", "Smoothing knots", json!(sp.smoothing_knots));
+            push("edit.spline.lowess_preset", "combobox", "LOWESS window preset", json!(format!("{:?}", sp.lowess_preset)));
+            push("edit.spline.emit_coords", "checkbox", "Emit curve coordinates tab", json!(sp.emit_curve_coordinates_tab));
+            push("edit.spline.interpolate_unknowns", "checkbox", "Interpolate unknowns", json!(sp.interpolate_unknowns));
+        }
         AnalysisKind::PowerAnalysis(pa) => {
             push("edit.power.family", "combobox", "Power test family", json!(format!("{:?}", pa.family)));
             push("edit.power.solve_target", "combobox", "Solve target", json!(format!("{:?}", pa.solve_target)));

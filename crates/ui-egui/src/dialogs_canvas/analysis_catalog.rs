@@ -3,8 +3,8 @@
 use curvebook_doc::{
     AnalysisKind, BaselineOperation, BlandAltmanSpec, ContingencySpec, CoxTieMethod, DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec,
     GlmFamily, GlmSpec, LinearRegressionSpec, MathTransformPreset, MultipleRowTestsSpec, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec,
-    NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OutlierSpec, PValueStackSpec, PassingBablokSpec, RocSpec, SurvivalAnalysisSpec, TableKind,
-    TransformAnalysisSpec, TwoGroupSpec,
+    NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OutlierSpec, PValueStackSpec, PassingBablokSpec, RocSpec, SimpleLogisticSpec,
+    SplineLowessSpec, SurvivalAnalysisSpec, TableKind, TransformAnalysisSpec, TwoGroupSpec,
 };
 
 use serde::{Deserialize, Serialize};
@@ -168,6 +168,13 @@ pub const ANALYSIS_CATALOG: &[AnalysisCatalogItem] = &[
         summary: "Ordinary or Model II Deming regression with confidence/prediction bands.",
     },
     AnalysisCatalogItem {
+        id: "stats.simple_logistic",
+        label: "Simple Logistic Regression",
+        category: AnalysisCategory::XyAndRegression,
+        keywords: "simple logistic regression binary xy odds ratio x50 profile likelihood roc tjur",
+        summary: "Single-predictor binary logistic regression on XY tables with profile-likelihood CIs, X50, and ROC AUC.",
+    },
+    AnalysisCatalogItem {
         id: "fit.nonlinear",
         label: "Nonlinear Regression (Curve Fitting)",
         category: AnalysisCategory::XyAndRegression,
@@ -265,6 +272,13 @@ pub const ANALYSIS_CATALOG: &[AnalysisCatalogItem] = &[
         keywords: "p value p-value stack multiplicity fdr bonferroni holm sidak benjamini hochberg bky yekutieli q value discovery",
         summary: "Adjust a column stack of raw P values across 7 FWER/FDR procedures and flag discoveries.",
     },
+    AnalysisCatalogItem {
+        id: "fit.spline_lowess",
+        label: "Fit Spline / LOWESS Curve",
+        category: AnalysisCategory::XyAndRegression,
+        keywords: "spline lowess akima smoothing cubic point to point curve interpolation nonparametric",
+        summary: "Model-free XY natural cubic spline, Akima subspline, smoothing spline, LOWESS, or point-to-point curve.",
+    },
 ];
 
 /// Map a static catalog identifier into its default [`AnalysisKind`].
@@ -323,6 +337,7 @@ pub fn default_analysis_kind_for_id(id: &str) -> Option<AnalysisKind> {
         "stats.factorial_anova" => Some(AnalysisKind::FactorialAnova(FactorialAnovaSpec::default())),
         "fit.linear" => Some(AnalysisKind::LinearRegression(LinearRegressionSpec::default())),
         "fit.nonlinear" => Some(AnalysisKind::NonlinearRegression(NonlinearFitSpec::new("log_agonist_vs_response_4pl"))),
+        "fit.spline_lowess" => Some(AnalysisKind::FitSplineLowess(SplineLowessSpec::default())),
         "stats.survival_km" => Some(AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier {
             log_rank_mantel_cox: true,
             gehan_breslow_wilcoxon: false,
@@ -370,6 +385,7 @@ pub fn default_analysis_kind_for_id(id: &str) -> Option<AnalysisKind> {
         })),
         "stats.pvalue_stack" => Some(AnalysisKind::PValueStack(PValueStackSpec::default())),
         "stats.power" => Some(AnalysisKind::PowerAnalysis(curvebook_doc::PowerAnalysisSpec::default())),
+        "stats.simple_logistic" => Some(AnalysisKind::SimpleLogisticRegression(SimpleLogisticSpec::default())),
         _ => None,
     }
 }

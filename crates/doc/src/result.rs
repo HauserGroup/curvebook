@@ -684,3 +684,37 @@ impl<'de> serde::Deserialize<'de> for ResultSheet {
         Ok(sheet)
     }
 }
+
+/// Format a finite floating-point scalar to `sig_figs` significant digits (`1..=15`) for
+/// parameter tables and Embedded Result tables (§2.5.3).
+///
+/// Non-finite values return an empty string. Very small (`|v| < 1e-4`) or large
+/// (`|v| >= 10^max(6, sig_figs)`) magnitudes use scientific notation (`{mantissa}e{exp}`).
+#[must_use]
+pub fn format_significant_digits(value: f64, sig_figs: u8) -> String {
+    if !value.is_finite() {
+        return String::new();
+    }
+    let digits = usize::from(sig_figs.clamp(1, 15));
+    if value == 0.0 {
+        if digits <= 1 {
+            return String::from("0");
+        }
+        return format!("{:.prec$}", 0.0_f64, prec = digits - 1);
+    }
+    let abs_v = value.abs();
+    let exp = abs_v.log10().floor() as i32;
+    // Round to `digits` significant figures via scientific representation to handle rollover (e.g. 9.999 -> 10.0).
+    let sci = format!("{value:.prec$e}", prec = digits - 1);
+    let Some((mantissa_str, exp_str)) = sci.split_once('e') else {
+        return sci;
+    };
+    let rounded_exp = exp_str.parse::<i32>().unwrap_or(exp);
+    let max_fixed_exp = (digits as i32).max(6) - 1;
+    if rounded_exp < -4 || rounded_exp > max_fixed_exp {
+        return format!("{mantissa_str}e{rounded_exp}");
+    }
+    let decimals = (digits as i32 - 1 - rounded_exp).max(0) as usize;
+    let rounded_val = sci.parse::<f64>().unwrap_or(value);
+    format!("{rounded_val:.decimals$}")
+}

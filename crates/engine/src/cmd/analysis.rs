@@ -9,8 +9,9 @@ use curvebook_doc::{
     MathTransformPreset, ModelComparisonSpec, MultipleRowTestsSpec, MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec, MultivariateSpec,
     NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueStackSpec, ParameterRule,
     ParameterScope, PassingBablokSpec, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerTailMode, ProjectDocument,
-    RepeatedMeasuresDesign, ResultSheet, ResultStatus, RocCiMethod, RocSpec, SheetId, SimulationNoise, SumOfSquaresType, SurvivalAnalysisSpec,
-    TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableColumn, VariableRole, XyTable,
+    RepeatedMeasuresDesign, ResultSheet, ResultStatus, RocCiMethod, RocSpec, SheetId, SimpleLogisticSpec, SimulationNoise, SplineLowessMethod,
+    SplineLowessSpec, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec,
+    VariableColumn, VariableRole, XyTable,
 };
 use curvebook_fit::{get_builtin_model, list_builtin_equations, resolve_model_from_spec};
 use curvebook_format::{CsvOptions, export_result_sheet_json, try_export_result_sheet_tidy_csv, try_export_result_tab_csv};
@@ -427,8 +428,52 @@ fn schema_analysis_base(summary: &str, include_fit_extras: bool, include_stats_e
         props.push(("y_range_filter", nullable_schema(any_json_schema("Optional [min, max] Y inclusion filter"))));
         props.push(("identify_unstable_parameters", nullable_schema(bool_schema("Assess nonlinear parameter identifiability"))));
         props.push((
+            "identifiability_mode",
+            nullable_schema(any_json_schema(
+                "Three-way nonlinear identifiability mode (`IdentifyUnstableParameters`, `IdentifyAmbiguousFits`, or `ReportAll`)",
+            )),
+        ));
+        props.push((
+            "show_standard_errors",
+            nullable_schema(bool_schema(
+                "Explicitly show or omit nonlinear parameter Std. Error column (default: omitted under profile-likelihood CIs)",
+            )),
+        ));
+        props.push((
             "flag_r_squared_below",
             nullable_schema(num_schema("Warn when nonlinear R squared is below this threshold", Some(0.0), Some(1.0))),
+        ));
+        props.push((
+            "comparison_question",
+            nullable_schema(any_json_schema("4-question nonlinear model comparison hypothesis (`AlternativeEquation`, `ParameterInvarianceAcrossDatasets`, `SingleGlobalCurveVsSeparate`, or `ParameterEqualsTheoretical`)")),
+        ));
+        props.push((
+            "comparison_method",
+            nullable_schema(any_json_schema(
+                "Model comparison test (`ExtraSumOfSquaresF`, `Aicc`, or `LikelihoodRatioTest`) for `comparison_question`",
+            )),
+        ));
+        props.push((
+            "prefer_well_defined_fit",
+            nullable_schema(bool_schema(
+                "Select the clean candidate immediately without F/LRT/AICc when the competing fit is Ambiguous, Unstable, or Flagged",
+            )),
+        ));
+        props.push((
+            "summary_parameter",
+            nullable_schema(non_empty_str_schema("Parameter or derived scalar name to tabulate into an analyzable parameter summary tab")),
+        ));
+        props.push((
+            "create_summary_graph",
+            nullable_schema(bool_schema("When true with `summary_parameter`, create a linked secondary bar or XY GraphSheet")),
+        ));
+        props.push((
+            "output_significant_digits",
+            nullable_schema(int_schema("Displayed significant-digit precision (1..=15) on parameter and Embedded Result tables", Some(1), Some(15))),
+        ));
+        props.push((
+            "fit_flag_rules",
+            nullable_schema(any_json_schema("Automated 6-rule fit-quality flag criteria (`min_r_squared`, `min_observations`, `max_dependency`, `min_normality_p`, `min_runs_or_lof_p`, `max_rout_outliers`)")),
         ));
     }
     obj_schema(props, &[], true)
@@ -779,6 +824,11 @@ fn run_analysis_with_domain(
     let mut payload = result_summary_payload(res, recalculated);
     let eff_title = res.analysis.effective_title().to_owned();
 
+    let summary_graph_param = match &res.analysis.kind {
+        AnalysisKind::NonlinearRegression(nl) if nl.create_summary_graph && res.analyzable_data.is_some() => nl.summary_parameter.clone(),
+        _ => None,
+    };
+
     if wants_create_graph {
         let graph_id = match explicit_graph_id {
             Some(gid) => gid,
@@ -797,6 +847,25 @@ fn run_analysis_with_domain(
         doc.add_graph_sheet(graph)?;
         if let Some(obj) = payload.as_object_mut() {
             obj.insert(String::from("graph_sheet_id"), Value::String(graph_id.as_str().to_owned()));
+        }
+    }
+
+    if let Some(summary_param) = summary_graph_param {
+        let graph_id = next_unique_sheet_id(doc, "graph")?;
+        let (ds, _) = super::graph::resolve_graph_create_source_sheet(doc, &sheet_id)?;
+        let mut graph = GraphSheet::new_uninitialized_for_data(graph_id.clone(), &ds)?;
+        let summary_title = format!("{eff_title} — {summary_param} summary");
+        graph.title.clone_from(&summary_title);
+        graph.spec.title = summary_title;
+        graph.initialized = true;
+        graph.spec.primary_source_sheet_id = sheet_id.clone();
+        for s in &mut graph.spec.series {
+            s.source_sheet_id = sheet_id.clone();
+        }
+        super::graph::validate_graph_spec_in_doc(doc, &graph_id, &graph.spec)?;
+        doc.add_graph_sheet(graph)?;
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert(String::from("summary_graph_sheet_id"), Value::String(graph_id.as_str().to_owned()));
         }
     }
 
@@ -1408,7 +1477,7 @@ fn validate_selected_data_sets_for_sheet(source_ds: &DataSheet, spec: &AnalysisS
     if let AnalysisKind::NonlinearRegression(nl) = &spec.kind
         && let TableArchetype::MultipleVariables(mv) = &source_ds.archetype
         && !nl.mv_x_columns.is_empty()
-        && nl.mv_y_column.is_some()
+        && !nl.effective_mv_y_columns().is_empty()
     {
         return validate_nl_mv_group_selection(source_ds, mv, nl, &spec.selected_data_sets);
     }
@@ -1441,17 +1510,18 @@ fn validate_nl_mv_group_selection(
             return Err(EngineError::with_code(ErrorCode::BadInput, format!("`mv_x_columns` index {xc} out of range")));
         }
     }
-    if let Some(yc) = nl.mv_y_column
-        && yc >= n_vars
-    {
-        return Err(EngineError::with_code(ErrorCode::BadInput, format!("`mv_y_column` index {yc} out of range")));
+    let effective_y_cols = nl.effective_mv_y_columns();
+    for &yc in &effective_y_cols {
+        if yc >= n_vars {
+            return Err(EngineError::with_code(ErrorCode::BadInput, format!("`mv_y_columns` index {yc} out of range")));
+        }
     }
     let has_cat_fallback = mv
         .variables
         .iter()
         .enumerate()
-        .any(|(idx, v)| Some(idx) != nl.mv_y_column && !nl.mv_x_columns.contains(&idx) && v.role == VariableRole::Categorical);
-    if nl.mv_group_columns.is_empty() && !has_cat_fallback {
+        .any(|(idx, v)| !effective_y_cols.contains(&idx) && !nl.mv_x_columns.contains(&idx) && v.role == VariableRole::Categorical);
+    if nl.mv_group_columns.is_empty() && !has_cat_fallback && effective_y_cols.len() <= 1 {
         for &idx in selected {
             if idx >= n_vars {
                 return Err(EngineError::with_code(
@@ -1462,9 +1532,7 @@ fn validate_nl_mv_group_selection(
         }
         return Ok(());
     }
-    let mv_spec =
-        curvebook_fit::MultivarExtractionSpec { group_columns: &nl.mv_group_columns, x_columns: &nl.mv_x_columns, y_column: nl.mv_y_column };
-    match curvebook_fit::extract_datasets_from_sheet_with_options(source_ds, &[], &mv_spec) {
+    match curvebook_fit::extract_datasets_from_sheet_multi(source_ds, &[], &nl.mv_group_columns, &nl.mv_x_columns, &effective_y_cols) {
         Ok(groups) => {
             for &idx in selected {
                 if idx >= groups.len() {
@@ -1589,7 +1657,65 @@ fn validate_analysis_spec_semantics(spec: &AnalysisSpec) -> Result<(), EngineErr
             }
         }
         AnalysisKind::NonlinearRegression(nl) => validate_nonlinear_spec_semantics(nl)?,
+        AnalysisKind::SimpleLogisticRegression(sl) => {
+            if !sl.classification_cutoff.is_finite() || sl.classification_cutoff <= 0.0 || sl.classification_cutoff >= 1.0 {
+                return Err(EngineError::with_code(
+                    ErrorCode::BadInput,
+                    format!("simple logistic `classification_cutoff` ({}) must lie strictly in (0, 1)", sl.classification_cutoff),
+                ));
+            }
+            if let (Some(lo), Some(hi)) = (sl.plot_x_min, sl.plot_x_max)
+                && hi <= lo
+            {
+                return Err(EngineError::with_code(ErrorCode::BadInput, "`plot_x_max` must be strictly greater than `plot_x_min`"));
+            }
+            if let Some(seg) = sl.plot_segments
+                && !(1..=SimpleLogisticSpec::MAX_PLOT_SEGMENTS).contains(&seg)
+            {
+                return Err(EngineError::with_code(
+                    ErrorCode::BadInput,
+                    format!("`plot_segments` ({seg}) must be in 1..={}", SimpleLogisticSpec::MAX_PLOT_SEGMENTS),
+                ));
+            }
+        }
+        AnalysisKind::FitSplineLowess(sp) => validate_spline_lowess_spec_semantics(sp)?,
         _ => {}
+    }
+    Ok(())
+}
+
+fn validate_spline_lowess_spec_semantics(sp: &SplineLowessSpec) -> Result<(), EngineError> {
+    if !(SplineLowessSpec::MIN_SEGMENTS..=SplineLowessSpec::MAX_SEGMENTS).contains(&sp.segment_count) {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!("`segment_count` ({}) must lie in {}..={}", sp.segment_count, SplineLowessSpec::MIN_SEGMENTS, SplineLowessSpec::MAX_SEGMENTS),
+        ));
+    }
+    if let Some(knots) = sp.smoothing_knots
+        && knots < 2
+    {
+        return Err(EngineError::with_code(ErrorCode::BadInput, format!("`smoothing_knots` ({knots}) must be >= 2")));
+    }
+    if let Some(df) = sp.smoothing_df
+        && (!df.is_finite() || df < 2.0)
+    {
+        return Err(EngineError::with_code(ErrorCode::BadInput, format!("`smoothing_df` ({df}) must be finite and >= 2")));
+    }
+    if let Some(frac) = sp.lowess_fraction
+        && (!frac.is_finite() || frac <= 0.0 || frac > 1.0)
+    {
+        return Err(EngineError::with_code(ErrorCode::BadInput, format!("`lowess_fraction` ({frac}) must be finite and in (0, 1]")));
+    }
+    if sp.lowess_robustness_iters > SplineLowessSpec::MAX_LOWESS_ROBUSTNESS_ITERS {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!("`lowess_robustness_iters` ({}) must be <= {}", sp.lowess_robustness_iters, SplineLowessSpec::MAX_LOWESS_ROBUSTNESS_ITERS),
+        ));
+    }
+    if let (Some(lo), Some(hi)) = (sp.plot_x_min, sp.plot_x_max)
+        && hi <= lo
+    {
+        return Err(EngineError::with_code(ErrorCode::BadInput, format!("`plot_x_min` ({lo}) must be strictly less than `plot_x_max` ({hi})")));
     }
     Ok(())
 }
@@ -1599,6 +1725,25 @@ fn validate_nonlinear_spec_semantics(nl: &NonlinearFitSpec) -> Result<(), Engine
         && (!fdr_q_percent.is_finite() || fdr_q_percent <= 0.0 || fdr_q_percent > 50.0)
     {
         return Err(EngineError::with_code(ErrorCode::BadInput, format!("nonlinear ROUT `fdr_q_percent` ({fdr_q_percent}) must lie in (0, 50]")));
+    }
+    if let Some(d) = nl.output_significant_digits
+        && !(1..=15).contains(&d)
+    {
+        return Err(EngineError::with_code(ErrorCode::BadInput, format!("`output_significant_digits` ({d}) must lie in 1..=15")));
+    }
+    if let Some(rules) = &nl.fit_flag_rules {
+        if rules.min_r_squared.is_some_and(|v| !(0.0..=1.0).contains(&v)) {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "`fit_flag_rules.min_r_squared` must lie in [0, 1]"));
+        }
+        if rules.max_dependency.is_some_and(|v| !(0.0..=1.0).contains(&v)) {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "`fit_flag_rules.max_dependency` must lie in [0, 1]"));
+        }
+        if rules.min_normality_p.is_some_and(|v| !v.is_finite() || v <= 0.0 || v >= 1.0) {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "`fit_flag_rules.min_normality_p` must lie strictly in (0, 1)"));
+        }
+        if rules.min_runs_or_lof_p.is_some_and(|v| !v.is_finite() || v <= 0.0 || v >= 1.0) {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "`fit_flag_rules.min_runs_or_lof_p` must lie strictly in (0, 1)"));
+        }
     }
     if nl.parameter_rules.is_empty() {
         return Ok(());
@@ -1812,6 +1957,9 @@ fn resolve_mv_fit_columns_default(
 }
 
 fn persist_mv_nonlinear_defaults(mv: &MultipleVariablesTable, selected: &[usize], nl: &mut NonlinearFitSpec) {
+    if !nl.mv_y_columns.is_empty() {
+        return;
+    }
     let Some((x_cols, y_col, group_cols)) = resolve_mv_fit_columns_default(mv, selected, &nl.mv_group_columns, &nl.mv_x_columns, nl.mv_y_column)
     else {
         return;
@@ -1988,6 +2136,20 @@ fn validate_map_keys_for_kind(
 fn is_key_allowed_for_kind(kind: &AnalysisKind, key: &str, mode: KeyValidationMode) -> bool {
     match kind {
         AnalysisKind::Transform(tr) => is_key_allowed_for_transform(tr, key),
+        AnalysisKind::FitSplineLowess(_) => matches!(
+            key,
+            "method"
+                | "segment_count"
+                | "smoothing_knots"
+                | "smoothing_df"
+                | "lowess_preset"
+                | "lowess_fraction"
+                | "lowess_robustness_iters"
+                | "plot_x_min"
+                | "plot_x_max"
+                | "emit_curve_coordinates_tab"
+                | "interpolate_unknowns"
+        ),
         AnalysisKind::LinearRegression(_) | AnalysisKind::NonlinearRegression(_) => is_key_allowed_for_fit(kind, key, mode.allow_ui_update_compat()),
         _ => is_key_allowed_for_stats(kind, key, mode.allow_ui_update_compat()),
     }
@@ -2069,6 +2231,21 @@ fn is_key_allowed_for_fit(kind: &AnalysisKind, key: &str, allow_ui_update_compat
                     | "mv_group_columns"
                     | "mv_x_columns"
                     | "mv_y_column"
+                    | "mv_y_columns"
+                    | "weighting_source"
+                    | "outlier_handling"
+                    | "emit_cleaned_data_tab"
+                    | "replicate_fit_mode"
+                    | "convergence_strictness"
+                    | "identifiability_mode"
+                    | "show_standard_errors"
+                    | "comparison_question"
+                    | "comparison_method"
+                    | "prefer_well_defined_fit"
+                    | "summary_parameter"
+                    | "create_summary_graph"
+                    | "output_significant_digits"
+                    | "fit_flag_rules"
             ) || (matches!(nl.method, FitMethod::RoutOutlierElimination { .. }) && matches!(key, "q_percent" | "fdr_q_percent"))
                 || (nl.comparison.is_some() && key == "alternative_equation_id")
         }
@@ -2169,7 +2346,12 @@ fn is_key_allowed_for_stats(kind: &AnalysisKind, key: &str, allow_ui_update_comp
                 | "info_sheet_id"
                 | "num_groups"
         ),
-        AnalysisKind::Transform(_) | AnalysisKind::LinearRegression(_) | AnalysisKind::NonlinearRegression(_) => false,
+        AnalysisKind::SimpleLogisticRegression(_) => {
+            matches!(key, "emit_row_classification" | "confidence_bands" | "classification_cutoff" | "plot_x_min" | "plot_x_max" | "plot_segments")
+        }
+        AnalysisKind::Transform(_) | AnalysisKind::FitSplineLowess(_) | AnalysisKind::LinearRegression(_) | AnalysisKind::NonlinearRegression(_) => {
+            false
+        }
     }
 }
 
@@ -2364,6 +2546,30 @@ fn resolve_transform_shorthand(name: &str) -> Option<AnalysisKind> {
         "random_sample" | "sample" | "transform.random_sample" => {
             TransformAnalysisSpec::RandomSample { seed: 42, sample_size: 10, stratify_column: None, proportional_allocation: true }
         }
+        "fit_spline_lowess" | "spline_lowess" | "spline" | "cubic_spline" | "natural_cubic_spline" | "fit.spline_lowess" => {
+            return Some(AnalysisKind::FitSplineLowess(SplineLowessSpec {
+                method: SplineLowessMethod::NaturalCubicSpline,
+                ..SplineLowessSpec::default()
+            }));
+        }
+        "akima" | "akima_subspline" => {
+            return Some(AnalysisKind::FitSplineLowess(SplineLowessSpec {
+                method: SplineLowessMethod::AkimaSubspline,
+                ..SplineLowessSpec::default()
+            }));
+        }
+        "smoothing_spline" => {
+            return Some(AnalysisKind::FitSplineLowess(SplineLowessSpec {
+                method: SplineLowessMethod::SmoothingSpline,
+                ..SplineLowessSpec::default()
+            }));
+        }
+        "lowess" => {
+            return Some(AnalysisKind::FitSplineLowess(SplineLowessSpec { method: SplineLowessMethod::Lowess, ..SplineLowessSpec::default() }));
+        }
+        "point_to_point" => {
+            return Some(AnalysisKind::FitSplineLowess(SplineLowessSpec { method: SplineLowessMethod::PointToPoint, ..SplineLowessSpec::default() }));
+        }
         _ => return None,
     };
     Some(AnalysisKind::Transform(tr))
@@ -2447,6 +2653,9 @@ fn resolve_other_stats_shorthand(name: &str) -> Option<AnalysisKind> {
         "glm" | "linear_glm" | "multiple_linear" => AnalysisKind::GeneralizedLinearModel(default_glm(GlmFamily::Linear)),
         "logistic_glm" | "multiple_logistic" => AnalysisKind::GeneralizedLinearModel(default_glm(GlmFamily::Logistic)),
         "poisson_glm" | "multiple_poisson" => AnalysisKind::GeneralizedLinearModel(default_glm(GlmFamily::Poisson)),
+        "simple_logistic" | "simple_logistic_regression" | "stats.simple_logistic" | "xy_logistic" => {
+            AnalysisKind::SimpleLogisticRegression(SimpleLogisticSpec::default())
+        }
         "pca" | "stats.pca" | "principal_components" | "pcr" | "stats.pcr" | "principal_component_regression" => {
             AnalysisKind::Multivariate(default_pca())
         }
@@ -2567,6 +2776,12 @@ fn suggest_analysis_kinds(raw: &str) -> Vec<String> {
         "select_and_transform",
         "simulate",
         "random_sample",
+        "fit_spline_lowess",
+        "spline",
+        "akima",
+        "smoothing_spline",
+        "lowess",
+        "point_to_point",
     ];
     let eqs = list_builtin_equations();
     let all_candidates = KNOWN_SHORTHANDS.iter().copied().chain(eqs.iter().map(|eq| eq.id.as_str()));
@@ -2603,8 +2818,20 @@ fn is_omitted_optional_field(kind: &AnalysisKind, key: &str) -> bool {
         AnalysisKind::Multivariate(MultivariateSpec::Pca { .. }) => key == "pcr_outcome_column",
         AnalysisKind::Multivariate(MultivariateSpec::Clustering { .. }) => key == "k_sweep_max",
         AnalysisKind::LinearRegression(_) => matches!(key, "fixed_point" | "plot_x_min" | "plot_x_max" | "plot_segments"),
-        AnalysisKind::NonlinearRegression(_) => key == "flag_r_squared_below",
+        AnalysisKind::FitSplineLowess(_) => matches!(key, "smoothing_knots" | "smoothing_df" | "lowess_fraction" | "plot_x_min" | "plot_x_max"),
+        AnalysisKind::NonlinearRegression(_) => matches!(
+            key,
+            "flag_r_squared_below"
+                | "identifiability_mode"
+                | "show_standard_errors"
+                | "comparison_question"
+                | "comparison_method"
+                | "summary_parameter"
+                | "output_significant_digits"
+                | "fit_flag_rules"
+        ),
         AnalysisKind::PowerAnalysis(_) => key == "info_sheet_id",
+        AnalysisKind::SimpleLogisticRegression(_) => matches!(key, "plot_x_min" | "plot_x_max" | "plot_segments"),
         _ => false,
     }
 }
@@ -2638,6 +2865,16 @@ const NULLABLE_KIND_FIELDS: &[&str] = &[
     "custom_dsl",
     "flag_r_squared_below",
     "mv_y_column",
+    "identifiability_mode",
+    "show_standard_errors",
+    "comparison_question",
+    "comparison_method",
+    "summary_parameter",
+    "output_significant_digits",
+    "fit_flag_rules",
+    "smoothing_knots",
+    "smoothing_df",
+    "lowess_fraction",
 ];
 
 const STRICT_NON_NULL_USIZE_FIELDS: &[&str] = &[
@@ -2655,10 +2892,15 @@ const STRICT_NON_NULL_USIZE_FIELDS: &[&str] = &[
     "response_column",
     "imputations_m",
     "max_iters",
+    "segment_count",
+    "lowess_robustness_iters",
 ];
 
 const INTEGER_OR_INT_VEC_FIELDS: &[&str] = &[
     "plot_segments",
+    "segment_count",
+    "smoothing_knots",
+    "lowess_robustness_iters",
     "mv_group_column",
     "mv_response_column",
     "mv_time_column",
@@ -2690,6 +2932,8 @@ const INTEGER_OR_INT_VEC_FIELDS: &[&str] = &[
     "predictor_columns",
     "mv_group_columns",
     "mv_x_columns",
+    "mv_y_columns",
+    "output_significant_digits",
 ];
 
 fn coerce_whole_int_value(val: &Value, key: &str) -> Result<Value, EngineError> {
@@ -2794,6 +3038,10 @@ fn apply_custom_kind_overrides(kind: &mut AnalysisKind, norm: &Value) -> Result<
             if !spec.threshold.is_finite() || spec.threshold <= 0.0 || spec.threshold >= 1.0 {
                 return Err(EngineError::with_code(ErrorCode::BadInput, "`threshold` (`alpha` / `Q`) must be a finite number strictly in (0, 1)"));
             }
+        }
+        AnalysisKind::FitSplineLowess(spec) => {
+            apply_enum_field(norm, "method", &mut spec.method, "spline/LOWESS `method`")?;
+            apply_enum_field(norm, "lowess_preset", &mut spec.lowess_preset, "LOWESS `lowess_preset`")?;
         }
         AnalysisKind::PowerAnalysis(spec) => {
             apply_enum_field(norm, "family", &mut spec.family, "power test `family`")?;
@@ -2961,6 +3209,10 @@ fn apply_multivariate_custom_overrides(spec: &mut MultivariateSpec, norm: &Value
 
 fn apply_nonlinear_custom_overrides(spec: &mut NonlinearFitSpec, norm: &Value) -> Result<(), EngineError> {
     apply_enum_field(norm, "weighting", &mut spec.weighting, "`weighting`")?;
+    apply_enum_field(norm, "weighting_source", &mut spec.weighting_source, "`weighting_source`")?;
+    apply_enum_field(norm, "outlier_handling", &mut spec.outlier_handling, "`outlier_handling`")?;
+    apply_enum_field(norm, "replicate_fit_mode", &mut spec.replicate_fit_mode, "`replicate_fit_mode`")?;
+    apply_enum_field(norm, "convergence_strictness", &mut spec.convergence_strictness, "`convergence_strictness`")?;
     if let Some(m_val) = norm.get("method")
         && !m_val.is_null()
     {
@@ -2994,6 +3246,14 @@ fn apply_nonlinear_custom_overrides(spec: &mut NonlinearFitSpec, norm: &Value) -
     if let Some(yr_val) = norm.get("y_range_filter") {
         spec.y_range_filter = parse_opt_range_filter(yr_val, "y_range_filter")?;
     }
+    apply_opt_enum_field(norm, "identifiability_mode", &mut spec.identifiability_mode, "`identifiability_mode`")?;
+    apply_opt_enum_field(norm, "comparison_method", &mut spec.comparison_method, "`comparison_method`")?;
+    if let Some(q_val) = norm.get("comparison_question") {
+        spec.comparison_question = if q_val.is_null() { None } else { Some(deserialize_strict(q_val, "/comparison_question")?) };
+    }
+    if let Some(f_val) = norm.get("fit_flag_rules") {
+        spec.fit_flag_rules = if f_val.is_null() { None } else { Some(deserialize_strict(f_val, "/fit_flag_rules")?) };
+    }
     Ok(())
 }
 
@@ -3003,6 +3263,10 @@ const CUSTOM_HANDLED_PATCH_KEYS: &[&str] = &[
     "tie_method",
     "reference_levels",
     "weighting",
+    "weighting_source",
+    "outlier_handling",
+    "replicate_fit_mode",
+    "convergence_strictness",
     "repeated_measures",
     "residual_covariance",
     "df_method",
@@ -3011,6 +3275,10 @@ const CUSTOM_HANDLED_PATCH_KEYS: &[&str] = &[
     "family",
     "solve_target",
     "comparison",
+    "comparison_question",
+    "comparison_method",
+    "identifiability_mode",
+    "fit_flag_rules",
     "parameter_rules",
     "x_range_filter",
     "y_range_filter",

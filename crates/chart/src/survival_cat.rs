@@ -384,6 +384,14 @@ pub(crate) fn draw_graph_annotations(
 }
 
 pub(crate) fn format_result_cell(cell: &ResultCell) -> String {
+    format_result_cell_with_sig_figs(cell, None)
+}
+
+pub(crate) fn format_result_cell_with_sig_figs(cell: &ResultCell, sig_figs: Option<u8>) -> String {
+    let fmt_num = |v: f64| match sig_figs {
+        Some(d) => curvebook_doc::format_significant_digits(v, d),
+        None => crate::scales::format_scalar_clean(v),
+    };
     match cell {
         ResultCell::Empty => String::new(),
         ResultCell::Number { value, prefix, units } => {
@@ -391,7 +399,7 @@ pub(crate) fn format_result_cell(cell: &ResultCell) -> String {
             if let Some(p) = prefix {
                 out.push_str(p);
             }
-            out.push_str(&crate::scales::format_scalar_clean(*value));
+            out.push_str(&fmt_num(*value));
             if let Some(u) = units
                 && !u.is_empty()
             {
@@ -402,7 +410,7 @@ pub(crate) fn format_result_cell(cell: &ResultCell) -> String {
         }
         ResultCell::ConfidenceInterval { lower, upper } => {
             let fmt_b = |b: &curvebook_doc::CiBound, open_str: &str| match b {
-                curvebook_doc::CiBound::Finite(v) => crate::scales::format_scalar_clean(*v),
+                curvebook_doc::CiBound::Finite(v) => fmt_num(*v),
                 curvebook_doc::CiBound::Open => String::from(open_str),
             };
             format!("[{}, {}]", fmt_b(lower, "-∞"), fmt_b(upper, "+∞"))

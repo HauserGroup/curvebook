@@ -246,7 +246,12 @@ pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEgu
             .document()
             .result_sheets
             .iter()
-            .filter(|rs| matches!(rs.analysis.kind, AnalysisKind::LinearRegression(_) | AnalysisKind::NonlinearRegression(_)))
+            .filter(|rs| {
+                matches!(
+                    rs.analysis.kind,
+                    AnalysisKind::LinearRegression(_) | AnalysisKind::NonlinearRegression(_) | AnalysisKind::FitSplineLowess(_)
+                )
+            })
             .collect();
         if !compatible_fits.is_empty() || fg.cached_regression_overlay.is_some() {
             ui.add_space(4.0);

@@ -10,7 +10,7 @@
 //! - Nelder, J. A. & Mead, R. (1965). A simplex method for function minimization. *The Computer Journal* 7(4), 308–313.
 //! - Lagarias, J. C., Reeds, J. A., Wright, M. H. & Wright, P. E. (1998). Convergence properties of the Nelder–Mead simplex method in low dimensions. *SIAM Journal on Optimization* 9(1), 112–147.
 
-use curvebook_doc::FitMethod;
+use curvebook_doc::{ConvergenceStrictness, FitMethod};
 use curvebook_math::linalg::{DenseMatrix, qr, qr_col_pivoted};
 use curvebook_math::sum::NeumaierSum;
 
@@ -278,6 +278,14 @@ pub(in crate::solver) struct LmRunOutput {
 /// iteration; the expansion step uses `max(delta, 2 ||D p||)` (MINPACK sets `2 ||D p||`);
 /// and box constraints are handled by projecting each trial point onto the bounds (not part of
 /// Moré's unconstrained algorithm), with the predicted reduction evaluated on the projected step.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::solver) struct LmRunOptions {
+    pub(in crate::solver) max_iters: usize,
+    pub(in crate::solver) init_factor: f64,
+    pub(in crate::solver) require_positive_mean: bool,
+    pub(in crate::solver) strictness: ConvergenceStrictness,
+}
+
 pub(in crate::solver) fn run_trust_region_lm_with_domain(
     model: &dyn ParametricModel,
     layout: &ParameterLayout,
@@ -287,6 +295,23 @@ pub(in crate::solver) fn run_trust_region_lm_with_domain(
     init_factor: f64,
     require_positive_mean: bool,
 ) -> Result<LmRunOutput, FitError> {
+    run_trust_region_lm_with_options(
+        model,
+        layout,
+        obs,
+        theta_init,
+        LmRunOptions { max_iters, init_factor, require_positive_mean, strictness: ConvergenceStrictness::Default },
+    )
+}
+
+pub(in crate::solver) fn run_trust_region_lm_with_options(
+    model: &dyn ParametricModel,
+    layout: &ParameterLayout,
+    obs: &[ObsRecord],
+    theta_init: &[f64],
+    opts: LmRunOptions,
+) -> Result<LmRunOutput, FitError> {
+    let LmRunOptions { max_iters, init_factor, require_positive_mean, strictness } = opts;
     let n = obs.len();
     let k = layout.k_free();
     let bounds = layout.bounds();
@@ -329,6 +354,13 @@ pub(in crate::solver) fn run_trust_region_lm_with_domain(
     let mut last_max_g_cos = f64::INFINITY;
     let mut j_mat = DenseMatrix::zeros(n, k)?;
     let mut damp_ws = LmDampWorkspace::new(n, k)?;
+    let preset_stop = match strictness {
+        ConvergenceStrictness::Default => None,
+        ConvergenceStrictness::Quick => Some((2_usize, 1e-4_f64)),
+        ConvergenceStrictness::Medium => Some((5_usize, 1e-6_f64)),
+        ConvergenceStrictness::Strict => Some((5_usize, 1e-10_f64)),
+    };
+    let mut consecutive_small_ss = 0_usize;
 
     while iter < max_iters {
         j_mat = match compute_jacobian(model, layout, obs, &theta, &y_hat, &bounds) {
@@ -421,9 +453,20 @@ pub(in crate::solver) fn run_trust_region_lm_with_domain(
                 iter += 1;
                 accepted = true;
 
+                let preset_converged = if let Some((req_consec, rel_tol)) = preset_stop {
+                    if act_red.abs() < rel_tol {
+                        consecutive_small_ss += 1;
+                    } else {
+                        consecutive_small_ss = 0;
+                    }
+                    consecutive_small_ss >= req_consec
+                } else {
+                    false
+                };
+
                 let raw_xnorm = scaled_l2_norm(&diag, &theta);
                 let x_norm = if raw_xnorm > 0.0 { raw_xnorm } else { 1.0 };
-                if (act_red.abs() <= ftol && pred_red <= ftol && rho <= 2.0) || p_norm <= xtol * x_norm {
+                if preset_converged || (act_red.abs() <= ftol && pred_red <= ftol && rho <= 2.0) || p_norm <= xtol * x_norm {
                     let j_final = compute_jacobian(model, layout, obs, &theta, &y_hat, &bounds).unwrap_or(j_mat);
                     return Ok(LmRunOutput {
                         theta,
@@ -1074,11 +1117,17 @@ pub(in crate::solver) fn solve_with_warm_start_with_domain(
         }
     }
 
-    let mut best = run_trust_region_lm_with_domain(model, layout, obs, &start, config.max_iters, 100.0, require_positive_mean)?;
+    let make_opts = |init_factor: f64| LmRunOptions {
+        max_iters: config.max_iters,
+        init_factor,
+        require_positive_mean,
+        strictness: config.convergence_strictness,
+    };
+    let mut best = run_trust_region_lm_with_options(model, layout, obs, &start, make_opts(100.0))?;
     // If primary run hit max iters or suspiciously poor gradient / flat plateau, try smaller step
     // trust-region factor `1.0` and optional Nelder-Mead restart purely from `start` or `best.theta`.
     if config.use_simplex_warm_start && (best.status != FitStatus::Converged || best.weighted_ss > 1e-3 * obs_y_ss(obs)) {
-        match run_trust_region_lm_with_domain(model, layout, obs, &start, config.max_iters, 1.0, require_positive_mean) {
+        match run_trust_region_lm_with_options(model, layout, obs, &start, make_opts(1.0)) {
             Ok(alt1)
                 if alt1.weighted_ss < best.weighted_ss
                     || (best.status != FitStatus::Converged && alt1.status == FitStatus::Converged && alt1.weighted_ss <= best.weighted_ss) =>
@@ -1089,7 +1138,7 @@ pub(in crate::solver) fn solve_with_warm_start_with_domain(
             _ => {}
         }
         if let Some(nm) = nelder_mead_rescue_with_domain(model, layout, obs, &best.theta, 400, require_positive_mean) {
-            match run_trust_region_lm_with_domain(model, layout, obs, &nm, config.max_iters, 1.0, require_positive_mean) {
+            match run_trust_region_lm_with_options(model, layout, obs, &nm, make_opts(1.0)) {
                 Ok(alt2)
                     if alt2.weighted_ss < best.weighted_ss
                         || (best.status != FitStatus::Converged && alt2.status == FitStatus::Converged && alt2.weighted_ss <= best.weighted_ss) =>
@@ -1104,7 +1153,7 @@ pub(in crate::solver) fn solve_with_warm_start_with_domain(
         }
         if best.weighted_ss > 1e-2 * obs_y_ss(obs) || best.status != FitStatus::Converged {
             if let Some(nm_start) = nelder_mead_rescue_with_domain(model, layout, obs, &start, 600, require_positive_mean) {
-                match run_trust_region_lm_with_domain(model, layout, obs, &nm_start, config.max_iters, 0.5, require_positive_mean) {
+                match run_trust_region_lm_with_options(model, layout, obs, &nm_start, make_opts(0.5)) {
                     Ok(alt3)
                         if alt3.weighted_ss < best.weighted_ss
                             || (best.status != FitStatus::Converged

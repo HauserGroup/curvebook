@@ -5,12 +5,13 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, FitMethod, HookSource, ModelComparisonSpec, NonlinearFitSpec, PValueFormat, ParameterRule, ParameterScope,
-    ProjectDocument, SheetId, TableArchetype, WeightingScheme,
+    AnalysisKind, AnalysisSpec, ConvergenceStrictness, FitFlagRules, FitMethod, HookSource, IdentifiabilityMode, ModelComparisonMethod,
+    ModelComparisonQuestion, ModelComparisonSpec, NonlinearFitSpec, OutlierHandling, PValueFormat, ParameterRule, ParameterScope, ProjectDocument,
+    ReplicateFitMode, SheetId, TableArchetype, WeightingScheme, WeightingSource,
 };
 use curvebook_fit::{
-    CompiledDslModel, DataPoint, DslEquationKind, EquationCatalogEntry, EquationCategory, MultivarExtractionSpec, ParametricModel,
-    extract_datasets_from_sheet_with_options, format_model_equation_tex, list_builtin_equations, resolve_model_from_spec,
+    CompiledDslModel, DataPoint, DslEquationKind, EquationCatalogEntry, EquationCategory, ParametricModel, extract_datasets_from_sheet_multi,
+    format_model_equation_tex, list_builtin_equations, resolve_model_from_spec,
 };
 use egui::{Context, Id, Key, Modifiers, Rect, Stroke, TextEdit, Ui, Vec2};
 
@@ -267,12 +268,12 @@ pub fn render_fit_modal(
                 FitModalTab::Model => {
                     render_fit_model_tab(ctx, ui, FitModelTabCtx { doc, spec, nl, param_names: &param_names }, state, tokens, meta, intents)
                 }
-                FitModalTab::Compare => render_fit_compare_tab(ui, spec, nl, tokens, meta, intents),
+                FitModalTab::Compare => render_fit_compare_tab(ui, spec, nl, locale, tokens, meta, intents),
                 FitModalTab::Constrain => render_fit_constrain_tab(ctx, ui, &tab_ctx, state, tokens, meta, intents),
                 FitModalTab::InitialValues => render_fit_initial_tab(ui, &tab_ctx, state, tokens, meta, intents),
                 FitModalTab::Range => render_fit_range_tab(ui, &tab_ctx, state, tokens, meta, intents),
-                FitModalTab::Weight => render_fit_weight_tab(ui, spec, nl, tokens, meta, intents),
-                FitModalTab::Output => render_fit_output_tab(ui, spec, nl, state, tokens, meta, intents),
+                FitModalTab::Weight => render_fit_weight_tab(ui, &tab_ctx, locale, tokens, meta, intents),
+                FitModalTab::Output => render_fit_output_tab(ui, spec, nl, locale, state, tokens, meta, intents),
             }
         },
         |ui, footer_state, meta, intents| {
@@ -387,8 +388,8 @@ fn extract_fit_data_points(doc: &ProjectDocument, spec: &curvebook_doc::Analysis
     let Some(sheet) = resolve_fit_source_sheet(doc, spec) else {
         return Vec::new();
     };
-    let mv_spec = MultivarExtractionSpec { group_columns: &nl.mv_group_columns, x_columns: &nl.mv_x_columns, y_column: nl.mv_y_column };
-    let Ok(datasets) = extract_datasets_from_sheet_with_options(sheet, &spec.selected_data_sets, &mv_spec) else {
+    let y_cols = nl.effective_mv_y_columns();
+    let Ok(datasets) = extract_datasets_from_sheet_multi(sheet, &spec.selected_data_sets, &nl.mv_group_columns, &nl.mv_x_columns, &y_cols) else {
         return Vec::new();
     };
     datasets.into_iter().flat_map(|d| d.points.into_iter()).filter(|p| p.x0().is_finite() && p.y.is_finite()).collect()
@@ -681,12 +682,41 @@ fn render_fit_mv_mapping_grid(
             ui.horizontal(|ui| {
                 render_mv_role_badge(ui, tokens, var.role, var.role_inferred);
                 ui.label(&var.title);
+                let eff_y = nl.effective_mv_y_columns();
                 if render_modal_seg_btn(ui, tokens, meta, &format!("fit.mv.y.{idx}"), "Y", nl.mv_y_column == Some(idx), &ControlEnablement::enabled())
                 {
                     let mut next = spec.clone();
                     if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
                         fit.mv_y_column = Some(idx);
+                        fit.mv_y_columns.clear();
                         fit.mv_x_columns.retain(|&c| c != idx);
+                    }
+                    intents.push_set_edit_params_draft(next);
+                }
+                if render_modal_seg_btn(
+                    ui,
+                    tokens,
+                    meta,
+                    &format!("fit.mv.y_multi.{idx}"),
+                    "+Y",
+                    eff_y.contains(&idx) && nl.mv_y_columns.contains(&idx),
+                    &ControlEnablement::enabled(),
+                ) {
+                    let mut next = spec.clone();
+                    if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+                        if fit.mv_y_columns.is_empty()
+                            && let Some(prev) = fit.mv_y_column
+                        {
+                            fit.mv_y_columns.push(prev);
+                        }
+                        if let Some(p) = fit.mv_y_columns.iter().position(|&c| c == idx) {
+                            fit.mv_y_columns.remove(p);
+                        } else {
+                            fit.mv_y_columns.push(idx);
+                            fit.mv_y_columns.sort_unstable();
+                            fit.mv_x_columns.retain(|&c| c != idx);
+                        }
+                        fit.mv_y_column = fit.mv_y_columns.first().copied();
                     }
                     intents.push_set_edit_params_draft(next);
                 }
@@ -990,6 +1020,7 @@ fn render_fit_compare_tab(
     ui: &mut Ui,
     spec: &curvebook_doc::AnalysisSpec,
     nl: &NonlinearFitSpec,
+    locale: &str,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
@@ -1031,7 +1062,71 @@ fn render_fit_compare_tab(
         }
     }
 
-    if let Some(cur_cmp) = &nl.comparison {
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "fit.cmp.prefer_well_defined",
+        tr(locale, "fit.cmp.prefer_well_defined"),
+        nl.prefer_well_defined_fit,
+        &ControlEnablement::enabled(),
+    ) {
+        let mut next = spec.clone();
+        if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+            fit.prefer_well_defined_fit = !nl.prefer_well_defined_fit;
+        }
+        intents.push_set_edit_params_draft(next);
+    }
+
+    if nl.comparison.is_some() || nl.comparison_question.is_some() {
+        ui.add_space(6.0);
+        render_section_title(ui, tokens, tr(locale, "fit.cmp.question.heading"));
+        let first_param =
+            resolve_model_from_spec(nl).ok().and_then(|m| m.param_names().first().cloned()).unwrap_or_else(|| String::from("HillSlope"));
+        let active_q = nl.comparison_question.as_ref();
+        for (wid, lbl, is_active, next_q) in [
+            (
+                "fit.cmp.q.alt_eq",
+                tr(locale, "fit.cmp.q.alt_eq"),
+                matches!(active_q, None | Some(ModelComparisonQuestion::AlternativeEquation { .. })),
+                Some(ModelComparisonQuestion::AlternativeEquation { alternative_equation_id: alt_id.clone() }),
+            ),
+            (
+                "fit.cmp.q.param_inv",
+                tr(locale, "fit.cmp.q.param_inv"),
+                matches!(active_q, Some(ModelComparisonQuestion::ParameterInvarianceAcrossDatasets { .. })),
+                Some(ModelComparisonQuestion::ParameterInvarianceAcrossDatasets { shared_params: vec![first_param.clone()] }),
+            ),
+            (
+                "fit.cmp.q.global_vs_sep",
+                tr(locale, "fit.cmp.q.global_vs_sep"),
+                matches!(active_q, Some(ModelComparisonQuestion::SingleGlobalCurveVsSeparate)),
+                Some(ModelComparisonQuestion::SingleGlobalCurveVsSeparate),
+            ),
+            (
+                "fit.cmp.q.theoretical",
+                tr(locale, "fit.cmp.q.theoretical"),
+                matches!(active_q, Some(ModelComparisonQuestion::ParameterEqualsTheoretical { .. })),
+                Some(ModelComparisonQuestion::ParameterEqualsTheoretical { param: first_param.clone(), theoretical_value: 1.0 }),
+            ),
+        ] {
+            if render_modal_radio(ui, tokens, meta, wid, lbl, is_active, &ControlEnablement::enabled()) {
+                let mut next = spec.clone();
+                if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+                    fit.comparison_question = next_q.clone();
+                    if fit.comparison_method.is_none() {
+                        fit.comparison_method =
+                            Some(fit.comparison.as_ref().map_or(ModelComparisonMethod::ExtraSumOfSquaresF, ModelComparisonSpec::method));
+                    }
+                }
+                intents.push_set_edit_params_draft(next);
+            }
+        }
+    }
+
+    if let Some(cur_cmp) = &nl.comparison
+        && matches!(nl.comparison_question, None | Some(ModelComparisonQuestion::AlternativeEquation { .. }))
+    {
         ui.add_space(6.0);
         render_section_title(ui, tokens, "Select Null / Alternative Comparison Equation");
         for entry in builtin_catalog() {
@@ -1478,12 +1573,14 @@ fn render_fit_range_tab(
 
 fn render_fit_weight_tab(
     ui: &mut Ui,
-    spec: &curvebook_doc::AnalysisSpec,
-    nl: &NonlinearFitSpec,
+    tab_ctx: &FitTabCtx<'_>,
+    locale: &str,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let spec = tab_ctx.spec;
+    let nl = tab_ctx.nl;
     render_section_title(ui, tokens, "Fitting Objective / Outlier Method");
     for (wid, lbl, active, method) in [
         ("fit.method.ls", "Ordinary / Weighted Least Squares", matches!(nl.method, FitMethod::LeastSquares), FitMethod::LeastSquares),
@@ -1503,6 +1600,39 @@ fn render_fit_weight_tab(
             }
             intents.push_set_edit_params_draft(next);
         }
+    }
+
+    ui.add_space(6.0);
+    render_section_title(ui, tokens, tr(locale, "fit.outlier.title"));
+    ui.horizontal_wrapped(|ui| {
+        for (wid, key, mode) in [
+            ("fit.outlier.none", "fit.outlier.none", OutlierHandling::None),
+            ("fit.outlier.count_only", "fit.outlier.count_only", OutlierHandling::IdentifyAndCountOnly),
+            ("fit.outlier.eliminate", "fit.outlier.eliminate", OutlierHandling::Eliminate),
+        ] {
+            if render_modal_seg_btn(ui, tokens, meta, wid, tr(locale, key), nl.outlier_handling == mode, &ControlEnablement::enabled()) {
+                let mut next = spec.clone();
+                if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+                    fit.outlier_handling = mode;
+                }
+                intents.push_set_edit_params_draft(next);
+            }
+        }
+    });
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "fit.outlier.cleaned_tab",
+        tr(locale, "fit.outlier.cleaned_tab"),
+        nl.emit_cleaned_data_tab,
+        &ControlEnablement::enabled(),
+    ) {
+        let mut next = spec.clone();
+        if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+            fit.emit_cleaned_data_tab = !nl.emit_cleaned_data_tab;
+        }
+        intents.push_set_edit_params_draft(next);
     }
 
     ui.add_space(6.0);
@@ -1527,12 +1657,74 @@ fn render_fit_weight_tab(
             intents.push_set_edit_params_draft(next);
         }
     }
+
+    let y_wt_en = if matches!(nl.weighting, WeightingScheme::RelativeSquare | WeightingScheme::Relative | WeightingScheme::GeneralPowerY(_))
+        && !matches!(nl.method, FitMethod::PoissonDeviance)
+    {
+        ControlEnablement::enabled()
+    } else {
+        ControlEnablement::disabled("Applies to Y-dependent weighting schemes (1/Y^2, 1/|Y|, 1/|Y|^k).")
+    };
+    ui.add_space(4.0);
+    render_section_title(ui, tokens, tr(locale, "fit.wt.src.title"));
+    ui.horizontal_wrapped(|ui| {
+        for (wid, key, src) in [
+            ("fit.wt.src.observed", "fit.wt.src.observed", WeightingSource::ObservedY),
+            ("fit.wt.src.predicted", "fit.wt.src.predicted", WeightingSource::PredictedY),
+        ] {
+            if render_modal_seg_btn(ui, tokens, meta, wid, tr(locale, key), nl.weighting_source == src, &y_wt_en) {
+                let mut next = spec.clone();
+                if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+                    fit.weighting_source = src;
+                }
+                intents.push_set_edit_params_draft(next);
+            }
+        }
+    });
+
+    ui.add_space(6.0);
+    render_section_title(ui, tokens, tr(locale, "fit.rep.title"));
+    ui.horizontal_wrapped(|ui| {
+        for (wid, key, mode) in [
+            ("fit.rep.individual", "fit.rep.individual", ReplicateFitMode::IndividualReplicates),
+            ("fit.rep.row_means", "fit.rep.row_means", ReplicateFitMode::RowMeansOnly),
+        ] {
+            if render_modal_seg_btn(ui, tokens, meta, wid, tr(locale, key), nl.replicate_fit_mode == mode, &ControlEnablement::enabled()) {
+                let mut next = spec.clone();
+                if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+                    fit.replicate_fit_mode = mode;
+                }
+                intents.push_set_edit_params_draft(next);
+            }
+        }
+    });
+
+    ui.add_space(6.0);
+    render_section_title(ui, tokens, tr(locale, "fit.conv.title"));
+    ui.horizontal_wrapped(|ui| {
+        for (wid, key, strictness) in [
+            ("fit.conv.default", "fit.conv.default", ConvergenceStrictness::Default),
+            ("fit.conv.quick", "fit.conv.quick", ConvergenceStrictness::Quick),
+            ("fit.conv.medium", "fit.conv.medium", ConvergenceStrictness::Medium),
+            ("fit.conv.strict", "fit.conv.strict", ConvergenceStrictness::Strict),
+        ] {
+            if render_modal_seg_btn(ui, tokens, meta, wid, tr(locale, key), nl.convergence_strictness == strictness, &ControlEnablement::enabled()) {
+                let mut next = spec.clone();
+                if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+                    fit.convergence_strictness = strictness;
+                }
+                intents.push_set_edit_params_draft(next);
+            }
+        }
+    });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_fit_output_tab(
     ui: &mut Ui,
     spec: &curvebook_doc::AnalysisSpec,
     nl: &NonlinearFitSpec,
+    locale: &str,
     state: &mut FitModalEguiState,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
@@ -1664,18 +1856,7 @@ fn render_fit_output_tab(
         }
         intents.push_set_edit_params_draft(next);
     }
-    ui.add_space(4.0);
-    render_modal_textbox_row(
-        ui,
-        tokens,
-        meta,
-        intents,
-        "fit.diagnostics.r2.input",
-        "Flag R² Below Threshold (0..1)",
-        "e.g. 0.90",
-        &mut state.r2_threshold_draft,
-        96.0,
-    );
+    render_fit_identifiability_and_flags_controls(ui, spec, nl, locale, state, tokens, meta, intents);
 
     ui.add_space(6.0);
     render_section_title(ui, tokens, "P-Value Display Formatting");
@@ -1712,6 +1893,124 @@ fn render_fit_output_tab(
         intents.push_custom_view_action("stat_params", "spinner:edit.pvalue.digits:-1");
     } else if step > 0 {
         intents.push_custom_view_action("stat_params", "spinner:edit.pvalue.digits:1");
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_fit_identifiability_and_flags_controls(
+    ui: &mut Ui,
+    spec: &curvebook_doc::AnalysisSpec,
+    nl: &NonlinearFitSpec,
+    locale: &str,
+    state: &mut FitModalEguiState,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    ui.add_space(4.0);
+    render_section_title(ui, tokens, tr(locale, "fit.ident.heading"));
+    let eff_ident = nl.effective_identifiability_mode();
+    ui.horizontal_wrapped(|ui| {
+        for (wid, lbl, mode) in [
+            ("fit.ident.unstable", tr(locale, "fit.ident.unstable"), IdentifiabilityMode::IdentifyUnstableParameters),
+            ("fit.ident.ambiguous", tr(locale, "fit.ident.ambiguous"), IdentifiabilityMode::IdentifyAmbiguousFits),
+            ("fit.ident.report_all", tr(locale, "fit.ident.report_all"), IdentifiabilityMode::ReportAll),
+        ] {
+            if render_modal_seg_btn(ui, tokens, meta, wid, lbl, eff_ident == Some(mode), &ControlEnablement::enabled()) {
+                let mut next = spec.clone();
+                if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+                    fit.identifiability_mode = Some(mode);
+                    fit.identify_unstable_parameters = mode == IdentifiabilityMode::IdentifyUnstableParameters;
+                }
+                intents.push_set_edit_params_draft(next);
+            }
+        }
+    });
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "fit.out.show_se",
+        tr(locale, "fit.out.show_se"),
+        nl.should_show_standard_errors(),
+        &ControlEnablement::enabled(),
+    ) {
+        let mut next = spec.clone();
+        if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+            fit.show_standard_errors = Some(!nl.should_show_standard_errors());
+        }
+        intents.push_set_edit_params_draft(next);
+    }
+    ui.add_space(4.0);
+    render_modal_textbox_row(
+        ui,
+        tokens,
+        meta,
+        intents,
+        "fit.diagnostics.r2.input",
+        "Flag R² Below Threshold (0..1)",
+        "e.g. 0.90",
+        &mut state.r2_threshold_draft,
+        96.0,
+    );
+    let flags_enabled = nl.fit_flag_rules.as_ref().is_some_and(FitFlagRules::has_any_rule);
+    if render_modal_checkbox(ui, tokens, meta, "fit.flags.enable", tr(locale, "fit.flags.enable"), flags_enabled, &ControlEnablement::enabled()) {
+        let mut next = spec.clone();
+        if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+            fit.fit_flag_rules = if flags_enabled {
+                None
+            } else {
+                Some(FitFlagRules {
+                    min_r_squared: fit.flag_r_squared_below.or(Some(0.8)),
+                    min_observations: Some(4),
+                    max_dependency: Some(0.999),
+                    min_normality_p: Some(0.05),
+                    min_runs_or_lof_p: Some(0.05),
+                    max_rout_outliers: Some(3),
+                    exclude_flagged_from_summary: false,
+                })
+            };
+        }
+        intents.push_set_edit_params_draft(next);
+    }
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "fit.out.create_summary_graph",
+        tr(locale, "fit.out.create_summary_graph"),
+        nl.create_summary_graph,
+        &ControlEnablement::enabled(),
+    ) {
+        let mut next = spec.clone();
+        if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+            fit.create_summary_graph = !nl.create_summary_graph;
+            if fit.create_summary_graph && fit.summary_parameter.is_none() {
+                fit.summary_parameter = resolve_model_from_spec(fit).ok().and_then(|m| m.param_names().first().cloned());
+            }
+        }
+        intents.push_set_edit_params_draft(next);
+    }
+    let sig_display = nl.output_significant_digits.map_or_else(|| String::from("Auto"), |d| d.to_string());
+    let sig_step = render_stepper_row(
+        ui,
+        tokens,
+        meta,
+        StepperSpec {
+            id_prefix: "fit.out.sig_figs",
+            label: tr(locale, "fit.out.sig_figs"),
+            value_text: &sig_display,
+            enablement: &ControlEnablement::enabled(),
+        },
+    );
+    if sig_step != 0 {
+        let mut next = spec.clone();
+        if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+            let cur = fit.output_significant_digits.unwrap_or(4) as i16;
+            let updated = (cur + sig_step as i16).clamp(1, 15) as u8;
+            fit.output_significant_digits = Some(updated);
+        }
+        intents.push_set_edit_params_draft(next);
     }
 }
 

@@ -6,7 +6,10 @@
 
 use std::num::NonZeroUsize;
 
-use curvebook_doc::{CiBound, FitMethod, FittedCurveOverlay, ParameterRule, WeightingScheme};
+use curvebook_doc::{
+    CiBound, ConvergenceStrictness, FitMethod, FittedCurveOverlay, IdentifiabilityMode, OutlierHandling, ParameterRule, ReplicateFitMode,
+    WeightingScheme, WeightingSource,
+};
 use curvebook_math::ConfidenceLevel;
 
 use crate::diagnostics::{
@@ -33,6 +36,10 @@ pub struct SolverConfig {
     pub compute_profile_ci: bool,
     /// Assess free-parameter identifiability (`FitIdentifiability` and `ParameterNote::Unstable`).
     pub identify_unstable_parameters: bool,
+    /// Explicit three-way identifiability reporting mode (`IdentifyUnstableParameters`,
+    /// `IdentifyAmbiguousFits`, or `ReportAll`; §2.5.1). `None` preserves legacy behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifiability_mode: Option<IdentifiabilityMode>,
     /// Compute Hougaard skewness `|g1|` per free parameter (`Ratkowsky 1990`) via directional finite differences.
     pub compute_hougaard: bool,
     /// Compute smooth mean-response confidence bands along `FittedCurveOverlay`.
@@ -63,6 +70,18 @@ pub struct SolverConfig {
     pub plot_x_max: Option<f64>,
     /// Number of grid segments used to sample smooth `FittedCurveOverlay` curves.
     pub curve_overlay_segments: usize,
+    /// Basis for response-dependent weighting (`ObservedY` static weights vs `PredictedY` curve-height IRLS).
+    #[serde(default)]
+    pub weighting_source: WeightingSource,
+    /// Outlier handling policy (`None`, `IdentifyAndCountOnly`, or `Eliminate`).
+    #[serde(default)]
+    pub outlier_handling: OutlierHandling,
+    /// Replicate handling mode (`IndividualReplicates` vs `RowMeansOnly`).
+    #[serde(default)]
+    pub replicate_fit_mode: ReplicateFitMode,
+    /// Convergence strictness preset (`Default` MINPACK machine precision, `Quick`, `Medium`, or `Strict`).
+    #[serde(default)]
+    pub convergence_strictness: ConvergenceStrictness,
 }
 
 impl Default for SolverConfig {
@@ -75,6 +94,7 @@ impl Default for SolverConfig {
             max_iters: 1_000,
             compute_profile_ci: true,
             identify_unstable_parameters: false,
+            identifiability_mode: None,
             compute_hougaard: true,
             compute_bands: true,
             compute_prediction_bands: false,
@@ -90,6 +110,40 @@ impl Default for SolverConfig {
             plot_x_min: None,
             plot_x_max: None,
             curve_overlay_segments: 256,
+            weighting_source: WeightingSource::ObservedY,
+            outlier_handling: OutlierHandling::None,
+            replicate_fit_mode: ReplicateFitMode::IndividualReplicates,
+            convergence_strictness: ConvergenceStrictness::Default,
+        }
+    }
+}
+
+impl SolverConfig {
+    /// Return `true` when response-dependent weighting uses fitted curve heights `y_hat` via IRLS.
+    #[must_use]
+    pub const fn uses_predicted_y_weighting(&self) -> bool {
+        matches!(self.weighting_source, WeightingSource::PredictedY)
+            && matches!(self.weighting, WeightingScheme::RelativeSquare | WeightingScheme::Relative | WeightingScheme::GeneralPowerY(_))
+    }
+
+    /// Resolve effective ROUT outlier handling policy from `method` and `outlier_handling`.
+    #[must_use]
+    pub const fn effective_outlier_handling(&self) -> OutlierHandling {
+        match (self.method, self.outlier_handling) {
+            (FitMethod::RoutOutlierElimination { .. }, OutlierHandling::IdentifyAndCountOnly) => OutlierHandling::IdentifyAndCountOnly,
+            (FitMethod::RoutOutlierElimination { .. }, OutlierHandling::None | OutlierHandling::Eliminate) => OutlierHandling::Eliminate,
+            (FitMethod::LeastSquares, OutlierHandling::IdentifyAndCountOnly) => OutlierHandling::IdentifyAndCountOnly,
+            (FitMethod::LeastSquares, OutlierHandling::Eliminate) => OutlierHandling::Eliminate,
+            _ => OutlierHandling::None,
+        }
+    }
+
+    /// Resolve the ROUT FDR threshold `Q` (in percentage points, defaulting to `1.0%` when `method` is `LeastSquares`).
+    #[must_use]
+    pub const fn effective_rout_q_percent(&self) -> f64 {
+        match self.method {
+            FitMethod::RoutOutlierElimination { fdr_q_percent } => fdr_q_percent,
+            _ => 1.0,
         }
     }
 }
@@ -387,6 +441,19 @@ pub enum ModelComparisonOutcome {
         /// Explanation of why statistical comparison is undefined in Robust (Cauchy) regression.
         reason: String,
     },
+    /// `prefer_well_defined_fit` pre-check selected the clean/well-defined candidate without
+    /// running Extra-SS *F*, LRT, or `AICc` because the competing fit was `Ambiguous`,
+    /// `Unstable`, or `"Flagged"` (§2.5.2).
+    PreferredWellDefinedFit {
+        /// Label of the clean model selected immediately.
+        preferred_label: String,
+        /// Label of the rejected ill-defined or flagged model.
+        rejected_label: String,
+        /// `true` when the primary/null candidate was selected; `false` when the alternative was selected.
+        preferred_is_primary: bool,
+        /// Diagnostic reasons explaining why the rejected candidate was not well-defined.
+        rejection_reasons: Vec<String>,
+    },
 }
 
 impl ModelComparisonOutcome {
@@ -401,7 +468,9 @@ impl ModelComparisonOutcome {
     pub const fn inference_availability(&self) -> InferenceAvailability {
         match self {
             Self::NotApplicableInRobustMode { .. } => InferenceAvailability::NotApplicableInRobustMode,
-            Self::ExtraSumOfSquaresF(_) | Self::Aicc(_) | Self::LikelihoodRatioTest(_) => InferenceAvailability::Available,
+            Self::ExtraSumOfSquaresF(_) | Self::Aicc(_) | Self::LikelihoodRatioTest(_) | Self::PreferredWellDefinedFit { .. } => {
+                InferenceAvailability::Available
+            }
         }
     }
 }

@@ -324,3 +324,40 @@ This reference documents every statistical, transformation, and regression `Anal
 - **Assumptions & QOL-7 diagnostics:** Checklist notes discrete rounding uplift between `continuous_n` and integer `n_per_group`, asymptotic vs exact distribution scope (e.g., normal approximation for two proportions vs exact noncentral-$t$/$F$), and invalid effect boundaries (`remediation: None`).
 - **Edge cases & limits:** Powered by tail-safe noncentral-$t$, noncentral-$F$, and noncentral-$\chi^2$ distributions and Brent–Dekker root finding (`curvebook_math`); zero standardized effect sizes or $p_1 = p_2$ with `TwoProportions` raise `ZeroVariance` when solving for sample size; `R^2` must lie in $[0, 1)$ and `two_proportions` probabilities in $[0, 1]$ (`InvalidParameter`).
 - **Published D1 references & oracle verification:** Cohen (1988); Owen (1965) noncentral-$t$; Fleiss, Tytun & Ury (1980) & Fleiss, Levin & Paik (2003); Chow, Shao & Wang (2008); Fisher (1921); verified against R 4.5.2 `pwr` package benchmarks and noncentral distributions in `power_oracle.rs` and `r35_power_multiplicity_oracles.rs`.
+
+---
+
+## Simple Logistic Regression {#analysis-simple-logistic-regression}
+
+- **Purpose & compatible tables:** Fits standalone single-predictor binary logistic regression $\ln\!\left(\frac{P(Y=1 \mid X)}{1 - P(Y=1 \mid X)}\right) = \beta_0 + \beta_1 X$ directly on single-subcolumn `Xy` tables where $Y_i \in \{0, 1\}$, rejecting non-binary $Y$ values and multi-subcolumn tables with structured errors (see [Analysis Registry: `simple-logistic-regression`](registry/tables.html#analysis-kind-simple-logistic-regression)).
+- **Engine command & canonical options/defaults:** Run via [`analyze.run`](../commands.md) or `stats.run` with shorthands `simple_logistic` (canonical), `simple_logistic_regression`, `stats.simple_logistic`, or `xy_logistic`:
+  - `emit_row_classification`: bool (default `true`; emits the `Row Classification` tab with observed $(X_i, Y_i)$, predicted $\hat{P}(X_i)$ with CIs, and automatic out-of-sample predictions for appended $(X_{\text{new}}, \text{blank } Y)$ rows).
+  - `confidence_bands`: bool (default `true`; samples two-sided inverse-logit confidence bands along the sigmoid probability curve overlay).
+  - `classification_cutoff`: probability threshold in $(0, 1)$ (default `0.5`).
+  - `plot_x_min`, `plot_x_max`, `plot_segments` (default `100`, max `10,000`): optional sigmoid probability curve evaluation bounds and resolution.
+- **Reported values:**
+  - `ParametersAndConfidenceIntervals` (`parameter-estimates`): $\hat{\beta}_0$, $\hat{\beta}_1$, odds ratios $e^{\hat{\beta}_0}, e^{\hat{\beta}_1}$, and $X_{50} = -\hat{\beta}_0 / \hat{\beta}_1$ with asymptotic Fisher-information SEs, asymmetrical profile-likelihood CIs (including propagated odds-ratio and $X_{50}$ profile intervals), and Wald $Z$-tests.
+  - `MainSummary` (`goodness-of-fit`): $N$, events/non-events, separation status, null/model deviances ($D_0, D_1$), likelihood-ratio test ($G^2 = D_0 - D_1 \sim \chi^2_1$), $\text{AIC}$, $\text{AIC}_c$, $\text{BIC}$, Tjur's $R^2$, Cox–Snell $R^2$, Nagelkerke $R^2$, McFadden $R^2$, empirical DeLong ROC AUC with SE/CI, and classification accuracy/sensitivity/specificity.
+  - `CurveCoordinates` (`roc-curve`): empirical ROC curve thresholds, sensitivity, specificity, and Youden's $J$.
+  - `InterpolatedUnknowns` (`row-classification`, optional): observed rows and automatically predicted `(X_new, blank Y)` rows with predicted probabilities and CIs, plus a `FittedCurveOverlay` sigmoid curve for `XY` graphs.
+- **Assumptions & QOL-7 diagnostics:** Explicitly detects and reports collinearity (constant $X$), perfect (complete) separation, and quasi-perfect separation in plain language (Albert & Anderson 1984; Heinze & Schemper 2002) with `ChecklistStatus::Violated` rather than reporting diverging parameter estimates; warns when minority event count $< 10$.
+- **Edge cases & limits:** Rejects non-binary $Y \notin \{0, 1\}$, all-zero/all-one outcomes, non-finite inputs, $N < 3$, non-`Xy` tables, and multi-subcolumn `Xy` tables; returns open/unbounded profile CIs for $X_{50}$ whenever $G^2 \le \chi^2_{1, 1-\alpha}$.
+- **Published D1 references & oracle verification:** Hosmer, Lemeshow & Sturdivant (2013); McCullagh & Nelder (1989); Tjur (2009); Albert & Anderson (1984); Heinze & Schemper (2002); Venzon & Moolgavkar (1988); DeLong, DeLong & Clarke-Pearson (1988); verified against R 4.5.2 `stats::glm(..., family = binomial)` and `confint` in `d1_r18_6_simple_logistic.rs`.
+## Fit Spline / LOWESS Curve {#analysis-fit-spline-lowess}
+
+- **Purpose & compatible tables:** Model-free XY curve fitting generating smooth `FittedCurveOverlay` polylines, optional sampled `(X, Y)` coordinate tables, and nonparametric standard-curve unknown interpolation (`Y` from `X` and `X` from `Y`) without assuming a parametric equation. Compatible exclusively with `Xy` tables (see [Analysis Registry: `fit-spline-lowess`](registry/tables.html#analysis-kind-fit-spline-lowess)).
+- **Engine command & canonical options/defaults:** Run via [`analysis.run`](../commands.md) or `transform.run` with shorthands `fit_spline_lowess` (canonical), `spline_lowess`, `spline`, `cubic_spline`, `natural_cubic_spline`, `akima`, `akima_subspline`, `smoothing_spline`, `lowess`, `point_to_point`, `fit.spline_lowess`:
+  - `method` (`SplineLowessMethod`): `NaturalCubicSpline` (default), `AkimaSubspline`, `SmoothingSpline`, `Lowess`, `PointToPoint`.
+  - `segment_count`: number of sampled polyline vertices in `[2, 10000]` (default `200`; LOWESS automatically enforces `>= 4 * N`).
+  - `smoothing_knots` / `smoothing_df`: knot count (`>= 2`) or explicit effective degrees of freedom ($\text{df} = \text{tr}(S_\lambda) \in [2, G]$) for Reinsch penalized cubic smoothing splines.
+  - `lowess_preset` (`Coarse` = `0.75`, `Medium` = `0.50` default, `Fine` = `0.25`), optional `lowess_fraction` override in `(0, 1]`, and `lowess_robustness_iters` (default `3`, max `20`).
+  - `plot_x_min`, `plot_x_max`: optional explicit curve evaluation domain overriding observed `[X_min, X_max]`.
+  - `emit_curve_coordinates_tab` (`bool`, default `false`): emits a `CurveCoordinates` tab containing the sampled `(X, Y)` vertices.
+  - `interpolate_unknowns` (`bool`, default `false`): evaluates $S(x_{\text{unk}})$ for `(X, blank Y)` rows and solves $S(x) = y_{\text{unk}}$ across curve segments for `(blank X, Y)` rows.
+- **Reported values:**
+  - `MainSummary` (`summary`): Method, active observations $N$, distinct $X$ knots $G$, polyline vertex count, domain bounds, RSS, RMSE, plus effective $\text{df}$ and $\lambda$ (for Smoothing Spline) or span $f$ and robustness passes (for LOWESS), plus hookable scalars (`n_points`, `distinct_x`, `segments`, `rss`, `rmse`, `effective_df`, `smoothing_lambda`, `lowess_span`).
+  - `CurveCoordinates` (`curve-coordinates`, optional): sampled `(X, Y)` curve vertices per fitted dataset.
+  - `InterpolatedUnknowns` (`interpolated-unknowns`, optional): forward `Y from X` and inverse `X from Y` standard-curve interpolations with multi-crossing reporting for non-monotonic curves.
+- **Assumptions & QOL-7 diagnostics:** Emits a `Warn` checklist diagnostic when `Lowess` is run on $N < 20$ active observations (recommending Natural Cubic Spline, Akima Subspline, or Smoothing Spline for small samples).
+- **Edge cases & limits:** Collapses replicate/tied $X$ rows to `(x_g, mean y_g)` for spline/Akima/point-to-point and multiplicity-weighted means for Reinsch smoothing splines; rejects non-finite inputs, `< 2` distinct $X$ values, out-of-range spans/degrees of freedom, and non-`Xy` tables.
+- **Published D1 references & oracle verification:** de Boor (1978); Akima (1970); Reinsch (1967); Hutchinson & de Hoog (1985); Cleveland (1979); Brent (1973); verified against R `4.5.2` (`stats::splinefun(..., method="natural")`, `stats::smooth.spline`, `stats::lowess`) and analytical Akima step-overshoot oracles in `crates/transform/tests/d1_r18_7_spline_lowess.rs`.

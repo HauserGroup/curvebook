@@ -17,6 +17,7 @@ use crate::solver::lm::LmRunOutput;
 use crate::solver::results::{FittedDatasetResult, FittedParameterSummary, InferenceAvailability, InterpolatedUnknown, SolverConfig};
 use crate::types::{DatasetSeries, DerivedScalar};
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::solver) fn build_fitted_parameter_summaries(
     layout: &ParameterLayout,
     theta: &[f64],
@@ -25,6 +26,7 @@ pub(in crate::solver) fn build_fitted_parameter_summaries(
     profile_cis: &[(CiBound, CiBound)],
     unstable: &[bool],
     inference_availability: InferenceAvailability,
+    report_all: bool,
 ) -> Vec<FittedParameterSummary> {
     let is_robust = inference_availability.is_not_applicable_in_robust_mode();
     let mut parameters = Vec::with_capacity(layout.k_free());
@@ -40,10 +42,12 @@ pub(in crate::solver) fn build_fitted_parameter_summaries(
         if slot.upper.is_some_and(|u| (u - est).abs() <= 1e-9 * est.abs().max(1.0)) {
             notes.push(ParameterNote::HitUpperBound);
         }
-        if unstable.get(idx).copied().unwrap_or(false) {
-            notes.push(ParameterNote::Unstable);
-        } else if !is_robust && cov.dependencies.get(idx).copied().unwrap_or(0.0) > 0.9999 {
-            notes.push(ParameterNote::Ambiguous);
+        if !report_all {
+            if unstable.get(idx).copied().unwrap_or(false) {
+                notes.push(ParameterNote::Unstable);
+            } else if !is_robust && cov.dependencies.get(idx).copied().unwrap_or(0.0) > 0.9999 {
+                notes.push(ParameterNote::Ambiguous);
+            }
         }
         if !is_robust && (matches!(profile_cis[idx].0, CiBound::Open) || matches!(profile_cis[idx].1, CiBound::Open)) {
             notes.push(ParameterNote::UnboundedCi);
