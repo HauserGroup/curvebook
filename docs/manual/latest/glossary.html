@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Definitions of core CurveBook scientific, data-model, and automation terms.">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'">
+  <meta name="color-scheme" content="light">
+  <title>Glossary — CurveBook Documentation</title>
+  <link rel="canonical" href="https://hausergroup.github.io/curvebook/manual/latest/glossary.html">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="CurveBook">
+  <meta property="og:title" content="Glossary — CurveBook Documentation">
+  <meta property="og:description" content="Definitions of core CurveBook scientific, data-model, and automation terms.">
+  <meta property="og:url" content="https://hausergroup.github.io/curvebook/manual/latest/glossary.html">
+  <meta property="og:image" content="https://hausergroup.github.io/curvebook/images/workspace-split-fit.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" type="image/png" href="../../images/curvebook.png">
+  <link rel="stylesheet" href="../../site.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="desktop-window wrap">
+    <header class="site-header">
+      <div class="title-bar">
+        <div class="wordmark">
+          <img src="../../images/curvebook.png" width="64" height="64" alt="">
+          <span>CurveBook · Reference Manual</span>
+        </div>
+        <span class="window-status">Glossary &amp; A–Z index</span>
+      </div>
+      <nav aria-label="Manual navigation">
+        <a href="index.html">Manual Home</a>
+        <a href="section-get-started.html">Get Started</a>
+        <a href="section-analyses.html" aria-current="page">Reference</a>
+        <a href="section-automation.html">Automation</a>
+        <a href="registry/commands.html">Commands &amp; Tools</a>
+        <a href="az-index.html">A–Z Index</a>
+        <a href="section-contribute.html">Contribute</a>
+        <a href="../../index.html">Product Home</a>
+        <a href="../../privacy.html">Privacy Policy</a>
+      </nav>
+    </header>
+    <div class="version-banner" role="note" aria-label="Documentation version">
+      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-24 (commit <code>6ea9e9fcf3</code>)</span>
+      <span>No scripts · No telemetry · <a href="az-index.html">A–Z Index</a></span>
+    </div>
+    <main id="main" tabindex="-1">
+      <article class="overview doc-body">
+        <nav class="breadcrumbs" aria-label="Breadcrumb">
+          <a href="index.html">Manual</a>
+          <span aria-hidden="true">/</span>
+          <a href="section-glossary.html">Glossary &amp; A–Z index</a>
+          <span aria-hidden="true">/</span>
+          <span aria-current="page">Glossary</span>
+        </nav>
+        <nav class="toc" aria-label="On this page">
+          <p class="toc-title">On this page</p>
+          <ul>
+            <li><a href="#glossary-a-c">A–C</a></li>
+            <li><a href="#glossary-d-l">D–L</a></li>
+            <li><a href="#glossary-m-z">M–Z</a></li>
+          </ul>
+        </nav>
+<h1 id="glossary" tabindex="-1">Glossary</h1>
+<p>Concise definitions of scientific, statistical, numerical, graphing, and product concepts used across CurveBook.</p>
+<hr>
+<h2 id="glossary-a-c" tabindex="-1">A–C</h2>
+<ul>
+<li><strong><span class="math"><span class="math-text">AIC</span><sub>c</sub></span> (Corrected Akaike Information Criterion):</strong> Bias-corrected information criterion <span class="math"><span class="math-text">AIC</span><sub>c</sub>= N<span class="math-text">ln</span>(<span class="math-text">SS</span>/N) + 2K<sub><span class="math-text">eff</span></sub>+ <span class="math-frac"><span class="math-num">2K<sub><span class="math-text">eff</span></sub>(K<sub><span class="math-text">eff</span></sub>+1)</span><span class="math-den">N - K<sub><span class="math-text">eff</span></sub>- 1</span></span></span> (<span class="math">K<sub><span class="math-text">eff</span></sub>= K + 1</span>) used by CurveBook (<code>Aicc</code>) to compare both nested and non-nested candidate models via <span class="math">Δ<span class="math-text">AIC</span><sub>c</sub></span>, Akaike weights, and evidence ratios (Akaike 1974; Hurvich &amp; Tsai 1989; Burnham &amp; Anderson 2002).</li>
+<li><strong>Alpha (<span class="math">α</span>):</strong> Pre-specified Type I family/comparison error threshold (<code>0.05</code> default for tests and power planning); corresponds to confidence level <span class="math">(1 - α) × 100%</span>.</li>
+<li><strong>ANCOVA (Analysis of Covariance) Line Comparison:</strong> In <a href="registry/tables.html#analysis-kind-linear-regression"><code>LinearRegression</code></a>, <span class="math">F</span>-tests comparing fitted slopes and (when slopes do not differ) intercepts/elevations across two or more datasets.</li>
+<li><strong>Archetype (<code>TableKind</code>):</strong> One of CurveBook&#39;s eight structural table schemas (<code>Xy</code>, <code>Column</code>, <code>Grouped</code>, <code>Contingency</code>, <code>Survival</code>, <code>PartsOfWhole</code>, <code>MultipleVariables</code>, <code>Nested</code>) governing subcolumn interpretation, statistical dispatch, and compatible graph families.</li>
+<li><strong>AUC (Area Under Curve):</strong> Either the trapezoidal integral along <span class="math">(X, Y)</span> curves (<code>compute_sheet_auc</code>; Yeh &amp; Kwan 1978) or the nonparametric area under an empirical Receiver Operating Characteristic curve (<a href="registry/tables.html#analysis-kind-roc-curve"><code>RocCurve</code></a>).</li>
+<li><strong>Barnard&#39;s Exact Test:</strong> Unconditional exact <span class="math">2× 2</span> association test maximizing the hypergeometric/binomial <em>P</em>-value over the nuisance success probability <span class="math">π ∈ (0, 1)</span> (Barnard 1945).</li>
+<li><strong>Bland–Altman Plot &amp; Limits of Agreement:</strong> Method-comparison difference plot of <span class="math">(A - B)</span> or <span class="math">%</span>-difference vs. <span class="math">(A + B)/2</span> displaying mean bias, bias CI, and limits of agreement <span class="math">d̄ ± z<sub>1-α/2</sub><span class="math-text">SD</span><sub>d</sub></span> (Bland &amp; Altman 1986, 1999).</li>
+<li><strong>Broken Axis (<code>AxisSegment</code>):</strong> Axis divided into <code>1</code> to <code>3</code> disjoint linear or nonlinear data ranges separated by configurable gap widths and break ornaments (<code>DoubleSlash</code>, <code>Zigzag</code>, <code>BlankGap</code>).</li>
+<li><strong>Brown–Forsythe Test:</strong> Variance-homogeneity test running one-way ANOVA on absolute deviations from group <strong>medians</strong> (Brown &amp; Forsythe 1974a), alongside the heteroscedastic Brown–Forsythe <span class="math">F<sup>*</sup></span> mean test (Brown &amp; Forsythe 1974b).</li>
+<li><strong>Calibration (Inverse Interpolation):</strong> Predicting unknown <span class="math">X</span> from observed <span class="math">Y</span> along a fitted curve or straight line; uses exact Fieller (1954) quadratic interval topology for OLS linear fits and root-finding + band intersections for nonlinear fits.</li>
+<li><strong>Checkpoint (<code>NamedCheckpoint</code>):</strong> Full JSON snapshot of a <code>ProjectDocument</code> stored explicitly inside the archive (<code>project.createCheckpoint</code>), distinct from volatile session undo/redo entries.</li>
+<li><strong>Compact Letter Display (CLD):</strong> Equivalence-letter assignment (<code>&quot;a&quot;</code>, <code>&quot;ab&quot;</code>, <code>&quot;b&quot;</code>, ...) summarizing pairwise statistical comparisons above plotted groups via Piepho&#39;s (2004) insert-and-absorb sweeping algorithm so two groups share a letter if and only if they do not differ significantly.</li>
+<li><strong>Concordance (<span class="math">C</span>-index):</strong> Harrell&#39;s discrimination statistic in Cox PH measuring the fraction of comparable subject pairs ordered consistently by predicted risk score (<code>Harrell et al. 1982</code>).</li>
+<li><strong>CVD (Colour-Vision Deficiency) Preview:</strong> Non-destructive canvas viewport simulation (<code>CanvasPreviewFilter</code>: Deuteranopia, Protanopia, Tritanopia, Grayscale) computed with Machado (2009) matrices (<code>QOL-9</code>).</li>
+</ul>
+<hr>
+<h2 id="glossary-d-l" tabindex="-1">D–L</h2>
+<ul>
+<li><strong>DAG (Directed Acyclic Graph):</strong> Acyclic dependency graph linking raw <code>DataSheet</code>s, <code>=</code> Calculated Variables, <code>LinkedDataRegion</code>s, <code>InfoSheet</code> constants, <code>AnalysisSpec</code> <code>ResultSheet</code>s, <code>HookSource</code> parameters, <code>GraphSheet</code>s, and <code>LayoutSheet</code>s (<code>crates/engine/src/dag.rs</code>).</li>
+<li><strong>DeLong Method:</strong> Nonparametric structural-components U-statistic variance estimator for ROC AUC and correlated/uncorrelated two-curve AUC comparisons (DeLong, DeLong &amp; Clarke-Pearson 1988).</li>
+<li><strong>Deming (Model II) Regression:</strong> Errors-in-variables linear regression minimizing perpendicular (or variance-ratio-weighted) residuals accounting for measurement error in both <span class="math">X</span> and <span class="math">Y</span>, reporting Leave-One-Out jackknife SEs (Deming 1943; Linnet 1993).</li>
+<li><strong>Dependency (Parameter Collinearity):</strong> Multi-parameter redundancy index <span class="math">R<sub>j</sub><sup>2</sup></span> measuring how strongly parameter <span class="math">θ<sub>j</sub></span> correlates with linear combinations of all other free parameters in nonlinear regression; <span class="math"><span class="math-text">Dependency</span><sub>j</sub>&gt; 0.9999</span> flags <code>FitStatus::Ambiguous</code>.</li>
+<li><strong><code>EmbeddedImage</code> (<code>GraphAnnotation::EmbeddedImage</code> / <code>LayoutItem::EmbeddedImage</code>):</strong> Content-addressed PNG, JPEG, or TIFF raster image (<code>ProjectImageAsset</code>, capped at <code>32 MiB</code>, <code>16,384 px</code> per side, and <code>67,108,864</code> decoded pixels) embedded on a <code>GraphSheet</code> or <code>LayoutSheet</code> with optional <code>CropInsetsPt</code>, rotation, aspect locking, and border styling.</li>
+<li><strong><code>EqualizeScaleMode</code>:</strong> Page-layout scaling rule (<code>MatchSmallest</code>, <code>MatchLargest</code>, <code>ExplicitPercent</code>) used by <code>layout.equalizeScaling</code> to normalize inner <code>plot_rect_pt</code> data-to-point ratios across multi-panel graphs within <code>&lt;= 0.25 pt</code>.</li>
+<li><strong><code>ErrorCode</code>:</strong> Canonical <code>snake_case</code> diagnostic identifier emitted across document, engine, format, CLI, and MCP layers (<code>bad_input</code>, <code>path_escape</code>, <code>unsupported_version</code>, etc.).</li>
+<li><strong>Exclusion (<code>Cell.excluded</code> &amp; <code>CellExclusionNote</code>):</strong> Non-destructive observation flag omitting a cell from calculations and curves while preserving raw value and optional <code>(reason_tag, note, timestamp_utc)</code> audit provenance (<code>QOL-3</code>).</li>
+<li><strong>Extra-Sum-of-Squares <em>F</em>-Test:</strong> Likelihood/variance-ratio <em>F</em>-test comparing a simpler nested model against a fuller model (<code>ExtraSumOfSquaresF</code>; Motulsky &amp; Christopoulos 2004).</li>
+<li><strong>FDR (False Discovery Rate):</strong> Expected proportion of false discoveries among rejected hypotheses, controlled via Benjamini–Hochberg (1995), adaptive two-stage Benjamini–Krieger–Yekutieli (2006), Benjamini–Yekutieli (2001), or <code>ROUT</code> outlier elimination.</li>
+<li><strong><code>FitIdentifiability</code> (<code>NotAssessed</code>, <code>Identifiable</code>, <code>Ambiguous</code>):</strong> Post-fit parameter identifiability classification (<code>crates/fit</code>) reporting structural/numerical unidentifiability diagnostics when extreme dependency, rank-deficient Jacobians, boundary constraints, or high nonlinearity leave parameters poorly determined.</li>
+<li><strong>FWER (Family-Wise Error Rate):</strong> Probability of making at least one Type I error across a family of tests, controlled by Bonferroni, Holm, Šídák, Holm–Šídák, Tukey–Kramer, Dunnett, Games–Howell, Newman–Keuls, or Dunn procedures.</li>
+<li><strong>Geisser–Greenhouse <span class="math">ε̂</span> / Huynh–Feldt <span class="math">ε̃</span>:</strong> Sphericity correction multipliers reducing repeated-measures ANOVA numerator and denominator degrees of freedom when compound symmetry fails (Greenhouse &amp; Geisser 1959; Huynh &amp; Feldt 1976; Lecoutre 1991).</li>
+<li><strong>GLM (Generalized Linear Model):</strong> Exponential-dispersion multivariable regression (<code>Linear</code> identity link, <code>Logistic</code> logit link, <code>Poisson</code> log link) fitted by QR/SVD or IRLS (McCullagh &amp; Nelder 1989).</li>
+<li><strong>Greenwood Standard Error:</strong> Product-limit variance estimator for Kaplan–Meier survival <span class="math">S(t)</span> yielding symmetric linear or asymmetric complementary log-log <code>ln(-ln S(t))</code> confidence bounds (Greenwood 1926; Kalbfleisch &amp; Prentice 2002).</li>
+<li><strong>Hedges&#39; <span class="math">g</span>:</strong> Sample-size bias-corrected standardized mean difference <span class="math">g = J(df) d</span> accompanied by exact noncentral-<em>t</em> confidence intervals (Hedges 1981; Steiger 2004).</li>
+<li><strong>Hodges–Lehmann Shift Estimator:</strong> Nonparametric median of all pairwise differences <span class="math">x<sub>i</sub>- y<sub>j</sub></span> (Mann–Whitney) or Walsh averages <span class="math">(d<sub>i</sub>+ d<sub>j</sub>)/2</span> (Wilcoxon signed-rank) with exact order-statistic CIs (Hodges &amp; Lehmann 1963; Monahan 1984).</li>
+<li><strong><code>HookSource</code>:</strong> Reactive scalar reference binding an upstream <code>InfoSheet</code> constant or <code>ResultSheet</code> scalar dynamically to a curve-fit <code>ParameterScope::HookedConstant</code>, transform <code>NormalizeAnchor</code>, or graph annotation.</li>
+<li><strong>Hougaard Skewness (<span class="math">|g<sub>1</sub>|</span>):</strong> Third-moment nonlinearity curvature measure diagnosing whether parameter sampling distributions deviate from Gaussian symmetry (<code>Hougaard 1985</code>; <code>Ratkowsky 1990</code>).</li>
+<li><strong>IRLS (Iteratively Reweighted Least Squares):</strong> Maximum-likelihood / M-estimator optimization loop used by logistic regression, Poisson regression, Poisson nonlinear deviance, and Cauchy robust regression (Green 1984).</li>
+<li><strong>Kenward–Roger Approximation:</strong> Small-sample denominator degrees-of-freedom and covariance adjustment for unbalanced REML mixed-effects models (Kenward &amp; Roger 1997).</li>
+<li><strong>Levenberg–Marquardt (Trust-Region):</strong> Damped nonlinear least-squares solver interpolating between Gauss–Newton and gradient-descent trust steps (Levenberg 1944; Marquardt 1963; Moré 1978).</li>
+</ul>
+<hr>
+<h2 id="glossary-m-z" tabindex="-1">M–Z</h2>
+<ul>
+<li><strong>Mauchly&#39;s <span class="math">W</span>:</strong> Likelihood-ratio test of sphericity (<span class="math"><span class="math-text">Cov</span>(Δ Y) ∝ I</span>) for repeated-measures ANOVA with <span class="math">k ≥ 3</span> conditions (Mauchly 1940).</li>
+<li><strong>MCP (Model Context Protocol):</strong> Open stdio JSON-RPC 2.0 tool/resource/prompt interface exposed by <code>curvebook-cli mcp</code> (<a href="automation/mcp.html">Automation: MCP</a>).</li>
+<li><strong>MICE PMM (Multiple Imputation by Chained Equations — Predictive Mean Matching):</strong> Iterative imputation of missing <code>MultipleVariables</code> entries across <span class="math">m ≥ 2</span> completed datasets combined via Rubin (1987) and Barnard–Rubin (1999) pooling.</li>
+<li><strong><code>MultipleVariables</code> Table:</strong> Tidy observational table (<code>rows = subjects</code>, <code>columns = typed variables</code>) declaring explicit <code>Continuous</code>, <code>Categorical</code>, <code>Label</code>, or <code>Calculated</code> column roles.</li>
+<li><strong>NIST StRD (Statistical Reference Datasets):</strong> Certified benchmark collections (<code>univ</code>, <code>anova</code>, <code>lls</code>, <code>nls</code>) from the U.S. National Institute of Standards and Technology used to certify floating-point and nonlinear solver accuracy (<code>LRE</code> digits).</li>
+<li><strong><span class="math"><span class="math-text">NNTB</span></span> / <span class="math"><span class="math-text">NNTH</span></span> (Number Needed to Treat / Harm):</strong> Reciprocal absolute risk reduction <span class="math">1/|<span class="math-text">RD</span>|</span> with Altman (1998) inverted Newcombe Wilson-score confidence bounds (including exact rays through <span class="math">∞</span> when RD spans <code>0</code>).</li>
+<li><strong>Passing–Bablok Regression:</strong> Nonparametric median-slope method-comparison regression resistant to outliers with Kolmogorov CUSUM linearity diagnostics (Passing &amp; Bablok 1983).</li>
+<li><strong>Piepho Algorithm:</strong> See <a href="#glossary-a-c">Compact Letter Display</a>.</li>
+<li><strong>Profile-Likelihood CI (<code>Venzon–Moolgavkar</code>):</strong> Asymmetric likelihood-contour confidence interval traced by holding one parameter fixed and re-optimizing all nuisance parameters until <span class="math"><span class="math-text">SS</span>(θ<sub>j</sub>)</span> crosses the critical <span class="math">F</span> or deviance threshold; emits <code>CiBound::Open</code> when unbounded (Venzon &amp; Moolgavkar 1988).</li>
+<li><strong><code>QOL-7</code> Diagnostics-Only Checklist:</strong> Non-blocking diagnostic strips and <code>ChecklistItem</code> rows on <code>ResultSheet</code>s reporting assumption metrics, statuses, and limits without test recommendations or automatic remediations.</li>
+<li><strong>Quick Statistics:</strong> Live <code>n</code>, <code>excluded</code>, <code>mean</code>, <code>SD</code>, <code>SEM</code>, <code>median</code>, <code>min</code>, and <code>max</code> readout over active numeric cells in the current Data grid selection.</li>
+<li><strong>REML (Restricted Maximum Likelihood):</strong> Unbiased variance-component estimation for linear mixed models supporting <code>CompoundSymmetry</code> and <code>Unstructured</code> within-subject covariance structures (Patterson &amp; Thompson 1971).</li>
+<li><strong>ROUT Outlier Elimination:</strong> Two-stage outlier detector pairing Cauchy robust regression, <code>RSDR</code> residual scaling, and Benjamini–Hochberg FDR over the furthest ~30% residuals before OLS/WLS inlier refitting (Motulsky &amp; Brown 2006).</li>
+<li><strong>RSDR (Robust Standard Deviation of Residuals):</strong> Scale estimate derived from the 68.27th percentile of sorted <span class="math">|r<sub>i</sub>|</span> multiplied by <span class="math">N/(N - K)</span> for robust regression and ROUT.</li>
+<li><strong>Schoenfeld Residuals:</strong> Covariate-specific time-indexed Cox PH residuals tested for zero slope vs. transformed time to diagnose proportional-hazards violations (Schoenfeld 1982; Grambsch &amp; Therneau 1994).</li>
+<li><strong>Subcolumn Mode (<code>SubcolumnMode</code>):</strong> Interpretation of subcolumns per dataset (<code>Single</code>, <code>RawReplicates</code>, <code>MeanSdN</code>, <code>MeanSemN</code>, <code>MeanCvN</code>, <code>MeanLowHigh</code>, <code>UpperLowerLimits</code>, <code>MedianIqr</code>).</li>
+<li><strong>WAL (<code>CrashRecoveryJournal</code>):</strong> Directory-backed Write-Ahead Log (<code>snapshot.curvebook</code>, CRC-32 <code>ops.journal</code>, <code>curvebook.lock</code>) preserving unsaved desktop mutations between explicit saves.</li>
+<li><strong>Welch–Satterthwaite <code>df</code>:</strong> Fractional denominator degrees of freedom correcting two-sample <em>t</em>-tests and one-way ANOVA under unequal group variances (Welch 1947, 1951; Satterthwaite 1946).</li>
+<li><strong>Youden&#39;s <span class="math">J</span>:</strong> Optimal diagnostic cutoff criterion <span class="math">J = <span class="math-text">Sensitivity</span>+ <span class="math-text">Specificity</span>- 1</span> maximized across empirical ROC thresholds (Youden 1950).</li>
+</ul>
+        <nav class="pager" aria-label="Previous and next pages">
+          <a href="section-glossary.html">← Glossary &amp; A–Z index</a>
+          <a href="az-index.html">A–Z Reference Index →</a>
+        </nav>
+      </article>
+    </main>
+    <footer class="site-footer">
+      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>
+      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
+      <p class="privacy">CurveBook runs locally and collects no telemetry. Read <a href="../../privacy.html">Privacy, Licences &amp; Security</a> · <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a></p>
+    </footer>
+    <div class="window-statusbar" aria-label="Application summary">
+      <span class="status-cell is-grow">Ready · Offline Desktop · CLI · Local MCP</span>
+      <span class="status-cell">Pure Rust</span>
+      <span class="status-cell">Zero Telemetry</span>
+      <span class="status-cell">MIT / Apache-2.0</span>
+    </div>
+  </div>
+</body>
+</html>

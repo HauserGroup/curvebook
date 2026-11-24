@@ -8,6 +8,14 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'">
   <meta name="color-scheme" content="light">
   <title>Engine &amp; UI Command Registry — CurveBook Documentation</title>
+  <link rel="canonical" href="https://hausergroup.github.io/curvebook/manual/latest/registry/commands.html">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="CurveBook">
+  <meta property="og:title" content="Engine &amp; UI Command Registry — CurveBook Documentation">
+  <meta property="og:description" content="Complete registry of CurveBook engine commands, JSON input schemas, effect masks, and UI commands.">
+  <meta property="og:url" content="https://hausergroup.github.io/curvebook/manual/latest/registry/commands.html">
+  <meta property="og:image" content="https://hausergroup.github.io/curvebook/images/workspace-split-fit.png">
+  <meta name="twitter:card" content="summary_large_image">
   <link rel="icon" type="image/png" href="../../../images/curvebook.png">
   <link rel="stylesheet" href="../../../site.css">
 </head>
@@ -35,7 +43,7 @@
       </nav>
     </header>
     <div class="version-banner" role="note" aria-label="Documentation version">
-      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-24 (commit <code>2dc1679162</code>)</span>
+      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-24 (commit <code>6ea9e9fcf3</code>)</span>
       <span>No scripts · No telemetry · <a href="../az-index.html">A–Z Index</a></span>
     </div>
     <main id="main" tabindex="-1">
@@ -64,7 +72,7 @@
             <li><a href="#ui-commands">Desktop UI Commands (UI_COMMANDS)</a></li>
           </ul>
         </details>
-<p class="lead">Complete catalog of <strong>106</strong> engine commands compiled from <code>curvebook_engine::cmd::registry()</code> and <strong>54</strong> desktop shell commands from <code>UI_COMMANDS</code>.</p>
+<p class="lead">Complete catalog of <strong>106</strong> engine commands compiled from <code>curvebook_engine::cmd::registry()</code> and <strong>59</strong> desktop shell commands from <code>UI_COMMANDS</code>.</p>
 <p>For wire execution syntax across MCP, CLI, and loopback <code>--control</code>, see <a href="../automation/mcp.html">MCP Server Reference</a>, <a href="../automation/cli.html">CLI Reference</a>, and <a href="mcp-tools.html">MCP Tools Registry</a>.</p>
 <h2 id="engine-commands" tabindex="-1">Engine Commands (cmd::registry)</h2>
 <h3 id="group-project" tabindex="-1">Project &amp; Files (12)</h3>
@@ -12585,6 +12593,11 @@
 <tr id="ui-cmd-ui-embeddedtable-format-open" tabindex="-1"><td><code>ui.embeddedTable.format.open</code></td><td>Format Embedded Table...</td><td>—</td><td><code>{&quot;sheet_id&quot;:&quot;optional GraphSheetId|LayoutSheetId&quot;,&quot;annotation_index&quot;:&quot;optional usize&quot;,&quot;panel_index&quot;:&quot;optional usize&quot;}</code></td><td>Open the Format Embedded Table dialog for a pasted ResultSheet or LiveTable annotation.</td></tr>
 <tr id="ui-cmd-ui-image-format-open" tabindex="-1"><td><code>ui.image.format.open</code></td><td>Format Image...</td><td>—</td><td><code>{&quot;sheet_id&quot;:&quot;optional GraphSheetId|LayoutSheetId&quot;,&quot;annotation_index&quot;:&quot;optional usize&quot;,&quot;panel_index&quot;:&quot;optional usize&quot;}</code></td><td>Open the Format Image dialog to edit bounds, aspect lock, rotation, 4-edge crop, and border.</td></tr>
 <tr id="ui-cmd-ui-clipboard-copyforslides" tabindex="-1"><td><code>ui.clipboard.copyForSlides</code></td><td>Copy for Slides &amp; Documents</td><td>Cmd+Shift+C</td><td><code>{&quot;sheet_id&quot;:&quot;optional GraphSheetId|LayoutSheetId&quot;,&quot;dpi&quot;:&quot;optional u16 (72..=1200, default 300)&quot;}</code></td><td>Copy the active graph or layout figure at 300 DPI (PDF, PNG, TIFF, EMF, SVG, and &lt;img&gt; HTML) without raw SVG XML plain-text fallback for Keynote, PowerPoint, and Word.</td></tr>
+<tr id="ui-cmd-ui-import-warnings-open" tabindex="-1"><td><code>ui.import.warnings.open</code></td><td>Import Warnings...</td><td>—</td><td><code>{}</code></td><td>Open the Import Warnings panel showing non-fatal warnings from the latest file import.</td></tr>
+<tr id="ui-cmd-ui-export-tablecsv-open" tabindex="-1"><td><code>ui.export.tableCsv.open</code></td><td>CSV Table...</td><td>—</td><td><code>{&quot;sheet_id&quot;:&quot;optional DataSheetId&quot;}</code></td><td>Open CSV Export Options for the active data table (delimiter and decimal separator).</td></tr>
+<tr id="ui-cmd-ui-export-resultscsv-open" tabindex="-1"><td><code>ui.export.resultsCsv.open</code></td><td>CSV Results...</td><td>—</td><td><code>{&quot;sheet_id&quot;:&quot;optional ResultSheetId&quot;}</code></td><td>Open CSV Export Options for the active result sheet (all tabs tidy or single tab, delimiter, decimal separator).</td></tr>
+<tr id="ui-cmd-ui-export-alltablescsv-open" tabindex="-1"><td><code>ui.export.allTablesCsv.open</code></td><td>Export All Data Tables...</td><td>—</td><td><code>{}</code></td><td>Open CSV Export Options to batch-export every data table in the project to a folder.</td></tr>
+<tr id="ui-cmd-ui-export-alltablescsv" tabindex="-1"><td><code>ui.export.allTablesCsv</code></td><td>Export All Data Tables</td><td>—</td><td><code>{&quot;delimiter&quot;:&quot;optional ,|;|\t&quot;,&quot;decimal_separator&quot;:&quot;optional .|,&quot;}</code></td><td>Export every data table in the project as one delimited file per table into a chosen folder.</td></tr>
 </tbody>
 </table></div>
         <nav class="pager" aria-label="Previous and next pages">

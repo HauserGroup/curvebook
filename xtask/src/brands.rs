@@ -601,7 +601,8 @@ fn scan_cargo_toml(path: &str, text: &str, out: &mut Vec<BrandHit>) {
 fn is_generated_docs_html_path(path: &str) -> bool {
     let norm = path.replace('\\', "/");
     let trimmed = norm.strip_prefix("./").unwrap_or(&norm);
-    (trimmed.starts_with("docs/manual/v") && trimmed != "docs/manual/index.html")
+    ((trimmed.starts_with("docs/manual/v") || trimmed.starts_with("docs/manual/latest/")) && trimmed != "docs/manual/index.html")
+        || trimmed == "docs/llms-full.txt"
         || trimmed.starts_with("docs-site/")
         || trimmed.starts_with("target/docs-site/")
 }
@@ -672,11 +673,16 @@ fn scan_plain_lines_no_waiver(path: &str, text: &str, out: &mut Vec<BrandHit>) {
 
 fn scan_plain_lines_with_scope(path: &str, text: &str, allow_packaged: bool, out: &mut Vec<BrandHit>) {
     let is_readme_disclaimer = is_readme_disclaimer_path(path, allow_packaged);
+    let is_gen_docs = is_generated_docs_html_path(path);
     let strict_disclaimer_brands: Vec<&'static str> =
         if is_readme_disclaimer { BRANDS.iter().copied().filter(|brand| !VENDOR_DISCLAIMER_NAMES.contains(brand)).collect() } else { Vec::new() };
     for (idx, line) in text.lines().enumerate() {
         let brands = if is_readme_disclaimer && line.contains(ALLOW_MARKER) { &strict_disclaimer_brands[..] } else { BRANDS };
-        collect_line_words(path, idx + 1, line, brands, PrismPolicy::Strict, out);
+        if is_gen_docs && let Some(masked) = mask_generated_docs_html_tokens(path, line) {
+            collect_line_words(path, idx + 1, &masked, brands, PrismPolicy::Strict, out);
+        } else {
+            collect_line_words(path, idx + 1, line, brands, PrismPolicy::Strict, out);
+        }
     }
 }
 

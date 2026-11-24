@@ -22,15 +22,18 @@ use curvebook_platform::write_atomic;
 /// Published base URL of the GitHub Pages site.
 pub const SITE_BASE_URL: &str = "https://hausergroup.github.io/curvebook/";
 
+/// Optional custom domain (`CNAME`) for single-switch cutover; keep `None` while serving on `github.io`.
+pub const CUSTOM_DOMAIN: Option<&str> = None;
+
 /// Hand-written top-level pages under `docs/` that search engines should index, in sitemap order.
-/// Each must carry a canonical link to its own published URL (`docs-site --check`).
-pub const LANDING_PAGES: &[&str] = &["index.html", "open-pzfx-files.html", "privacy.html"];
+/// Each must carry a canonical link and Open Graph / Twitter Card metadata (`docs-site --check`).
+pub const LANDING_PAGES: &[&str] = &["index.html", "open-pzfx-files.html", "faq.html", "privacy.html"];
 
 /// Published redirect pages that forward to the newest release snapshot (left out of the sitemap).
 pub const REDIRECT_PAGES: &[&str] = &["get-started.html", "troubleshooting.html", "manual/index.html"];
 
 /// Other individual published files, relative to `docs/`.
-pub const SITE_FILES: &[&str] = &["site.css", "sitemap.xml"];
+pub const SITE_FILES: &[&str] = &["site.css", "sitemap.xml", "llms.txt", "llms-full.txt"];
 
 /// Directories under `docs/` whose files are all published.
 pub const SITE_DIRS: &[&str] = &["images"];
@@ -84,6 +87,12 @@ pub fn publish_list(root: &Path) -> Result<Vec<String>, String> {
     for snapshot in snapshot_dirs(&docs.join("manual"))? {
         let mut files = BTreeSet::new();
         collect_files(&docs, &docs.join("manual").join(&snapshot), &mut files)?;
+        out.extend(files.into_iter().filter(|rel| !SNAPSHOT_EXCLUDED_FILES.iter().any(|name| rel.rsplit('/').next() == Some(*name))));
+    }
+    let latest_dir = docs.join("manual/latest");
+    if std::fs::symlink_metadata(&latest_dir).is_ok_and(|m| m.file_type().is_dir()) && is_regular_file(&latest_dir.join("manifest.json")) {
+        let mut files = BTreeSet::new();
+        collect_files(&docs, &latest_dir, &mut files)?;
         out.extend(files.into_iter().filter(|rel| !SNAPSHOT_EXCLUDED_FILES.iter().any(|name| rel.rsplit('/').next() == Some(*name))));
     }
     if let Some(md) = out.iter().find(|rel| rel.ends_with(".md")) {
@@ -143,7 +152,21 @@ pub fn stage(root: &Path, out_dir: &Path) -> Result<usize, String> {
         }
         write_atomic(&dst, &bytes).map_err(|e| format!("write {}: {e}", dst.display()))?;
     }
-    Ok(files.len())
+    let extra = stage_custom_domain_files(out_dir, SITE_BASE_URL, CUSTOM_DOMAIN)?;
+    Ok(files.len() + extra)
+}
+
+fn stage_custom_domain_files(out_dir: &Path, site_base_url: &str, custom_domain: Option<&str>) -> Result<usize, String> {
+    let Some(domain) = custom_domain else {
+        return Ok(0);
+    };
+    let trimmed = domain.trim();
+    let cname = format!("{trimmed}\n");
+    write_atomic(&out_dir.join("CNAME"), cname.as_bytes()).map_err(|e| format!("write {}/CNAME: {e}", out_dir.display()))?;
+    let trimmed_base = site_base_url.trim_end_matches('/');
+    let robots = format!("User-agent: *\nAllow: /\n\nSitemap: {trimmed_base}/sitemap.xml\n");
+    write_atomic(&out_dir.join("robots.txt"), robots.as_bytes()).map_err(|e| format!("write {}/robots.txt: {e}", out_dir.display()))?;
+    Ok(2)
 }
 
 fn is_regular_file(path: &Path) -> bool {
@@ -273,12 +296,19 @@ mod tests {
     /// A minimal site plus the internal files Pages must not publish.
     fn seed(label: &str) -> TempRoot {
         let root = TempRoot::new(label);
-        root.write("docs/index.html", "<a href=\"open-pzfx-files.html#convert\">x</a><img src=\"images/a.png\"><a href=\"https://github.com/x\">gh</a><a href=\"#top\">t</a><a href=\"mailto:a@b.c\">m</a>");
-        root.write("docs/open-pzfx-files.html", "<a href=\"manual/v0.1/files.html\">f</a><link rel=\"stylesheet\" href=\"site.css\">");
+        root.write("docs/index.html", "<a href=\"open-pzfx-files.html#convert\">x</a><a href=\"faq.html\">faq</a><img src=\"images/a.png\"><a href=\"https://github.com/x\">gh</a><a href=\"#top\">t</a><a href=\"mailto:a@b.c\">m</a>");
+        root.write("docs/open-pzfx-files.html", "<a href=\"manual/latest/files.html\">f</a><link rel=\"stylesheet\" href=\"site.css\">");
+        root.write("docs/faq.html", "<a href=\"index.html\">h</a><a href=\"manual/latest/index.html\">m</a>");
         root.write("docs/privacy.html", "<a href=\"index.html\">h</a>");
-        root.write("docs/get-started.html", "<meta http-equiv=\"refresh\" content=\"0; url=manual/v0.1/get-started.html\">");
-        root.write("docs/troubleshooting.html", "<meta http-equiv=\"refresh\" content=\"0; url=manual/v0.1/troubleshooting.html#known-issues\">");
-        root.write("docs/manual/index.html", "<meta http-equiv=\"refresh\" content=\"0; url=v0.1/index.html\">");
+        root.write("docs/get-started.html", "<meta http-equiv=\"refresh\" content=\"0; url=manual/latest/get-started.html\">");
+        root.write("docs/troubleshooting.html", "<meta http-equiv=\"refresh\" content=\"0; url=manual/latest/troubleshooting.html#known-issues\">");
+        root.write("docs/manual/index.html", "<meta http-equiv=\"refresh\" content=\"0; url=latest/index.html\">");
+        root.write("docs/manual/latest/manifest.json", "{}");
+        root.write("docs/manual/latest/index.html", "<a href=\"../../index.html\">home</a><a href=\"registry/formats.html\">r</a>");
+        root.write("docs/manual/latest/files.html", "<link href=\"../../site.css\">");
+        root.write("docs/manual/latest/get-started.html", "gs");
+        root.write("docs/manual/latest/troubleshooting.html", "ts");
+        root.write("docs/manual/latest/registry/formats.html", "<a href=\"../index.html\">up</a>");
         root.write("docs/manual/v0.1/manifest.json", "{}");
         root.write("docs/manual/v0.1/index.html", "<a href=\"../../index.html\">home</a><a href=\"registry/formats.html\">r</a>");
         root.write("docs/manual/v0.1/files.html", "<link href=\"../../site.css\">");
@@ -287,9 +317,11 @@ mod tests {
         root.write("docs/manual/v0.1/registry/formats.html", "<a href=\"../index.html\">up</a>");
         root.write("docs/site.css", "body{}");
         root.write("docs/images/a.png", "png");
+        root.write("docs/llms.txt", "# CurveBook\n");
+        root.write("docs/llms-full.txt", "# CurveBook Full\n");
         root.write(
             "docs/sitemap.xml",
-            "<urlset><url><loc>https://hausergroup.github.io/curvebook/</loc></url><url><loc>https://hausergroup.github.io/curvebook/manual/v0.1/files.html</loc></url></urlset>",
+            "<urlset><url><loc>https://hausergroup.github.io/curvebook/</loc></url><url><loc>https://hausergroup.github.io/curvebook/faq.html</loc></url><url><loc>https://hausergroup.github.io/curvebook/manual/latest/files.html</loc></url></urlset>",
         );
         root.write("docs/ROADMAP.md", "internal");
         root.write("docs/audit/report.md", "internal");
@@ -305,10 +337,18 @@ mod tests {
         assert_eq!(
             files,
             [
+                "faq.html",
                 "get-started.html",
                 "images/a.png",
                 "index.html",
+                "llms-full.txt",
+                "llms.txt",
                 "manual/index.html",
+                "manual/latest/files.html",
+                "manual/latest/get-started.html",
+                "manual/latest/index.html",
+                "manual/latest/registry/formats.html",
+                "manual/latest/troubleshooting.html",
                 "manual/v0.1/files.html",
                 "manual/v0.1/get-started.html",
                 "manual/v0.1/index.html",
@@ -327,13 +367,21 @@ mod tests {
     fn r12_9_stage_copies_the_list_and_refuses_unsafe_targets() {
         let root = seed("stage");
         let out = root.0.join("_site");
-        assert_eq!(stage(&root.0, &out).unwrap(), 14);
+        assert_eq!(stage(&root.0, &out).unwrap(), 22);
+        assert_eq!(std::fs::read_to_string(out.join("manual/latest/registry/formats.html")).unwrap(), "<a href=\"../index.html\">up</a>");
         assert_eq!(std::fs::read_to_string(out.join("manual/v0.1/registry/formats.html")).unwrap(), "<a href=\"../index.html\">up</a>");
+        assert!(out.join("faq.html").is_file() && out.join("llms.txt").is_file() && out.join("llms-full.txt").is_file());
         assert!(!out.join("ROADMAP.md").exists() && !out.join("audit").exists() && !out.join("schemas").exists());
-        assert!(!out.join("manual/v0.1/manifest.json").exists());
+        assert!(!out.join("manual/v0.1/manifest.json").exists() && !out.join("manual/latest/manifest.json").exists());
 
         assert!(stage(&root.0, &out).unwrap_err().contains("must be empty"));
         assert!(stage(&root.0, &root.0.join("docs/_site")).unwrap_err().contains("outside docs/"));
+
+        let custom_out = root.0.join("_custom");
+        std::fs::create_dir_all(&custom_out).unwrap();
+        assert_eq!(stage_custom_domain_files(&custom_out, "https://curvebook.org/", Some("curvebook.org")).unwrap(), 2);
+        assert_eq!(std::fs::read_to_string(custom_out.join("CNAME")).unwrap(), "curvebook.org\n");
+        assert!(std::fs::read_to_string(custom_out.join("robots.txt")).unwrap().contains("Sitemap: https://curvebook.org/sitemap.xml"));
     }
 
     #[test]

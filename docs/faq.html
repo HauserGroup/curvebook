@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Frequently asked questions and quick facts about CurveBook: free, open-source (MIT OR Apache-2.0) biostatistics, nonlinear regression, and scientific graphing in pure Rust.">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'">
+  <meta name="color-scheme" content="light">
+  <title>FAQ &amp; Quick Facts — CurveBook</title>
+  <link rel="canonical" href="https://hausergroup.github.io/curvebook/faq.html">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="CurveBook">
+  <meta property="og:title" content="FAQ &amp; Quick Facts — CurveBook">
+  <meta property="og:description" content="Frequently asked questions and quick facts about CurveBook: free, open-source (MIT OR Apache-2.0) biostatistics, nonlinear regression, and scientific graphing in pure Rust.">
+  <meta property="og:url" content="https://hausergroup.github.io/curvebook/faq.html">
+  <meta property="og:image" content="https://hausergroup.github.io/curvebook/images/workspace-split-fit.png">
+  <meta property="og:image:alt" content="CurveBook split workspace showing an XY dose-response data table alongside a live four-parameter logistic curve fit, confidence ribbons, and Graph Inspector.">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" type="image/png" href="images/curvebook.png">
+  <link rel="stylesheet" href="site.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="desktop-window wrap">
+    <header class="site-header">
+      <div class="title-bar">
+        <div class="wordmark">
+          <img src="images/curvebook.png" width="64" height="64" alt="">
+          <span>CurveBook</span>
+        </div>
+        <span class="window-status">FAQ &amp; Quick Facts</span>
+      </div>
+      <nav aria-label="FAQ page navigation">
+        <a href="index.html">CurveBook home</a>
+        <a href="manual/index.html">Documentation</a>
+        <a href="open-pzfx-files.html">.pzfx &amp; .prism</a>
+        <a href="#quick-facts">Quick facts</a>
+        <a href="#questions">Questions</a>
+        <a href="privacy.html">Privacy</a>
+      </nav>
+    </header>
+
+    <main id="main" tabindex="-1">
+      <div class="overview">
+        <section id="summary" aria-labelledby="page-title" tabindex="-1">
+          <div class="document-brand"><img src="images/curvebook.png" width="64" height="64" alt=""><span>CurveBook</span></div>
+          <p class="eyebrow">Frequently asked questions · Reference overview</p>
+          <h1 id="page-title">CurveBook FAQ.<br><span>Quick facts &amp; answers.</span></h1>
+          <p class="lead"><strong>CurveBook</strong> is a free, open-source (<code>MIT OR Apache-2.0</code>) biostatistics, nonlinear regression, and scientific graphing application written in pure Rust. It runs offline with zero telemetry on macOS, Windows, Linux, and FreeBSD.</p>
+          <ul class="pill-row" aria-label="Core project facts">
+            <li class="pill">MIT OR Apache-2.0</li>
+            <li class="pill">Zero Telemetry</li>
+            <li class="pill">Offline-First</li>
+            <li class="pill">Desktop · CLI · MCP</li>
+          </ul>
+        </section>
+
+        <hr>
+
+        <section id="quick-facts" aria-labelledby="quick-facts-title" tabindex="-1" itemscope itemtype="https://schema.org/SoftwareApplication">
+          <meta itemprop="name" content="CurveBook">
+          <meta itemprop="applicationCategory" content="ScientificApplication">
+          <meta itemprop="isAccessibleForFree" content="true">
+          <meta itemprop="url" content="https://hausergroup.github.io/curvebook/">
+          <meta itemprop="downloadUrl" content="https://github.com/HauserGroup/curvebook/releases">
+          <span itemprop="offers" itemscope itemtype="https://schema.org/Offer">
+            <meta itemprop="price" content="0">
+            <meta itemprop="priceCurrency" content="USD">
+          </span>
+          <p class="eyebrow">At a glance</p>
+          <h2 id="quick-facts-title">Quick facts</h2>
+          <div class="table-wrap doc-body">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Property</th>
+                  <th scope="col">Details</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row">License</th>
+                  <td itemprop="license">MIT OR Apache-2.0</td>
+                </tr>
+                <tr>
+                  <th scope="row">Price</th>
+                  <td>Free — no account or subscription</td>
+                </tr>
+                <tr>
+                  <th scope="row">Platforms</th>
+                  <td itemprop="operatingSystem">macOS, Windows, Linux, FreeBSD preview</td>
+                </tr>
+                <tr>
+                  <th scope="row">Telemetry &amp; Network</th>
+                  <td>Zero telemetry, offline-first (<a href="privacy.html">Privacy Policy</a>)</td>
+                </tr>
+                <tr>
+                  <th scope="row">Formats read</th>
+                  <td><code>.curvebook</code>, <code>.curvebook.d/</code>, <code>.cbtemplate</code>, <code>.pzfx</code>, <code>.prism</code>, <code>.csv</code>/<code>.tsv</code>, <code>.xlsx</code></td>
+                </tr>
+                <tr>
+                  <th scope="row">Formats written</th>
+                  <td><code>.curvebook</code>, <code>.curvebook.d/</code>, <code>.cbtemplate</code>, <code>.csv</code>/<code>.tsv</code>, <code>SVG</code>, <code>PDF</code>, <code>PNG</code>, <code>TIFF</code>, <code>EMF</code></td>
+                </tr>
+                <tr>
+                  <th scope="row">Interfaces</th>
+                  <td>Desktop GUI, <code>curvebook-cli</code>, local stdio MCP server</td>
+                </tr>
+                <tr>
+                  <th scope="row">Source code</th>
+                  <td><a itemprop="codeRepository" href="https://github.com/HauserGroup/curvebook">https://github.com/HauserGroup/curvebook</a></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <hr>
+
+        <section id="questions" aria-labelledby="questions-title" tabindex="-1" itemscope itemtype="https://schema.org/FAQPage">
+          <p class="eyebrow">Answers</p>
+          <h2 id="questions-title">Frequently asked questions</h2>
+
+          <article id="faq-free-open-source" itemscope itemprop="mainEntity" itemtype="https://schema.org/Question">
+            <h3 itemprop="name">Is CurveBook free and open source?</h3>
+            <div itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">
+              <p itemprop="text">Yes, CurveBook is completely free and open-source software dual-licensed under MIT OR Apache-2.0, with no account, license key, or subscription required. You can use it for academic, personal, or commercial research, inspect the Rust source code on <a href="https://github.com/HauserGroup/curvebook">GitHub</a>, and redistribute or modify it under either license.</p>
+            </div>
+          </article>
+
+          <article id="faq-open-pzfx" itemscope itemprop="mainEntity" itemtype="https://schema.org/Question">
+            <h3 itemprop="name">Can I open a <code>.pzfx</code> or <code>.prism</code> file on Linux, macOS, or Windows?</h3>
+            <div itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">
+              <p itemprop="text">Yes, CurveBook reads the data tables inside <code>.pzfx</code> (XML) and <code>.prism</code> (ZIP archive) files offline on Linux, macOS, Windows, and FreeBSD, and exports them to CSV, TSV, or a <code>.curvebook</code> project. CurveBook imports the data tables, replicate and summary subcolumns, titles, excluded-value markers, and info notes; graphs, analysis results, and layouts are not imported and can be rerun in CurveBook. See the <a href="open-pzfx-files.html"><code>.pzfx</code> and <code>.prism</code> import guide</a> and the <a href="manual/latest/files.html">files reference</a> for details.</p>
+            </div>
+          </article>
+
+          <article id="faq-offline-telemetry" itemscope itemprop="mainEntity" itemtype="https://schema.org/Question">
+            <h3 itemprop="name">Does CurveBook work offline? Does it collect telemetry?</h3>
+            <div itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">
+              <p itemprop="text">CurveBook works completely offline and collects zero telemetry, zero analytics, and zero crash reports. It makes no outbound network calls and includes no auto-updater, enforced by automated repository checks (<code>cargo xtask telemetry</code>). Full per-platform local storage details are documented in the <a href="privacy.html">Privacy Policy</a> and <a href="manual/latest/privacy-security.html">Privacy &amp; Security Reference</a>.</p>
+            </div>
+          </article>
+
+          <article id="faq-operating-systems" itemscope itemprop="mainEntity" itemtype="https://schema.org/Question">
+            <h3 itemprop="name">Which operating systems does CurveBook support?</h3>
+            <div itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">
+              <p itemprop="text">CurveBook provides native Beta packages for macOS (signed and notarized universal <code>arm64</code> + <code>x86_64</code> <code>.dmg</code>), Windows (<code>x64</code> and <code>arm64</code> <code>.msi</code>, currently unsigned in Beta), Linux (<code>x86_64</code> and <code>aarch64</code> <code>.AppImage</code>), and FreeBSD (<code>x86_64</code> preview <code>.tar.gz</code>). Every release bundle includes both the desktop GUI and <code>curvebook-cli</code>, paired with <code>SHA256SUMS.txt</code> and GitHub Sigstore build provenance attestations; see the <a href="manual/latest/get-started.html">Get Started Guide</a>.</p>
+            </div>
+          </article>
+
+          <article id="faq-analyses-fitting" itemscope itemprop="mainEntity" itemtype="https://schema.org/Question">
+            <h3 itemprop="name">What statistical analyses and nonlinear curve-fitting methods does CurveBook include?</h3>
+            <div itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">
+              <p itemprop="text">CurveBook includes descriptive statistics, parametric and nonparametric group comparisons (<em>t</em>-tests, Mann-Whitney, Wilcoxon, Kruskal-Wallis, Friedman), one-way, multi-way, repeated-measures, and REML mixed-effects ANOVA with multiple-comparison post tests and Compact Letter Display, contingency and ROC analysis, Kaplan-Meier and Cox proportional hazards survival modeling, generalized linear models, PCA, clustering, power and sample-size planning, and weighted nonlinear regression. Nonlinear regression supports parametric equations, custom DSL formulas, ODE models, profile-likelihood confidence intervals, ROUT outlier handling, and <code>AICc</code> or extra sum-of-squares <em>F</em> model comparison; browse the <a href="manual/latest/analyses.html">analyses reference</a> and <a href="manual/latest/fitting.html">curve-fitting guide</a>.</p>
+            </div>
+          </article>
+
+          <article id="faq-share-project" itemscope itemprop="mainEntity" itemtype="https://schema.org/Question">
+            <h3 itemprop="name">How do I share a CurveBook project with a collaborator?</h3>
+            <div itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">
+              <p itemprop="text">Send a single <code>.curvebook</code> project archive, an unpacked <code>.curvebook.d/</code> directory for Git version control, or a reusable <code>.cbtemplate</code> file so your collaborator can reopen the full workspace in CurveBook. All data tables, formulas, statistical results, graphs, page layouts, and notes travel together in one deterministic project; note that this is manual file sharing rather than hosted live collaboration, and externally linked CSV or TSV paths keep provenance metadata without automatically bundling external files.</p>
+            </div>
+          </article>
+
+          <article id="faq-ai-assistants" itemscope itemprop="mainEntity" itemtype="https://schema.org/Question">
+            <h3 itemprop="name">Can AI assistants use CurveBook?</h3>
+            <div itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">
+              <p itemprop="text">Yes, CurveBook ships with a built-in local stdio Model Context Protocol (MCP) server (<code>curvebook-cli mcp</code>) that lets AI assistants create tables, run analyses, fit curves, and export publication figures directly into <code>.curvebook</code> files. The MCP server opens no network sockets, supports <code>--workdir &lt;dir&gt;</code> filesystem confinement and optional <code>--gui-only</code> parity, and produces standard projects you can inspect interactively in the desktop app. See the <a href="manual/latest/mcp-for-beginners.html">Beginner's MCP Guide</a> and <a href="manual/latest/automation/mcp.html">MCP Automation Reference</a>.</p>
+            </div>
+          </article>
+
+          <article id="faq-clean-room" itemscope itemprop="mainEntity" itemtype="https://schema.org/Question">
+            <h3 itemprop="name">How is CurveBook developed?</h3>
+            <div itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">
+              <p itemprop="text">CurveBook is an independent open-source project written from scratch in safe Rust using clean-room engineering based on published, peer-reviewed statistical and numerical literature. No commercial statistical or graphing software is used to develop CurveBook, and no proprietary code or assets are copied; automated checks (<code>cargo xtask cleanroom</code> and <code>cargo xtask brands</code>) enforce these boundaries on every change.</p>
+            </div>
+          </article>
+        </section>
+      </div>
+
+      <section id="get" class="downloads" aria-labelledby="get-title" tabindex="-1">
+        <div class="panel-title">Get CurveBook</div>
+        <div class="download-content is-single">
+          <div>
+            <h2 id="get-title">Download CurveBook</h2>
+            <p>Installers and archives for macOS, Windows, Linux, and FreeBSD are published on GitHub Releases. Every package includes the desktop app and <code>curvebook-cli</code>.</p>
+            <div class="download-links">
+              <a href="index.html#downloads">Downloads</a>
+              <a href="manual/latest/get-started.html">Install &amp; Checksums</a>
+              <a href="https://github.com/HauserGroup/curvebook/releases">GitHub Releases <span aria-hidden="true">↗</span></a>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>
+      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
+      <p class="privacy">CurveBook runs locally and collects no telemetry. GitHub Pages logs visitor IP addresses for security. Read the <a href="privacy.html">Privacy Policy</a> or return to <a href="index.html">CurveBook home</a>.</p>
+      <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a>
+    </footer>
+
+    <div class="window-statusbar" aria-label="Application summary">
+      <span class="status-cell is-grow">Ready · Offline Desktop · CLI · Local MCP</span>
+      <span class="status-cell">Pure Rust</span>
+      <span class="status-cell">Zero Telemetry</span>
+      <span class="status-cell">MIT / Apache-2.0</span>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,5 +1,5 @@
 {
-  "commit": "2dc167916239346fcc036752ff8aa93cef2405de",
+  "commit": "6ea9e9fcf391a5e8200c90aa7bcce90d6bee5c21",
   "minor_dir": "v0.1",
   "page_count": 40,
   "registry_counts": {
@@ -14,7 +14,7 @@
     "mcp_tools": 124,
     "preference_keys": 4,
     "table_kinds": 8,
-    "ui_commands": 54
+    "ui_commands": 59
   },
   "release_date": "2026-11-24",
   "schema": "curvebook.docs.manifest.v1",

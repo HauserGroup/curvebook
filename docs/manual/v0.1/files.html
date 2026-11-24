@@ -8,6 +8,14 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'">
   <meta name="color-scheme" content="light">
   <title>Files, Persistence, Crash Recovery &amp; Interchange Formats — CurveBook Documentation</title>
+  <link rel="canonical" href="https://hausergroup.github.io/curvebook/manual/latest/files.html">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="CurveBook">
+  <meta property="og:title" content="Files, Persistence, Crash Recovery &amp; Interchange Formats — CurveBook Documentation">
+  <meta property="og:description" content="CurveBook archives, unpacked .curvebook.d directories, templates, autosave recovery, and interchange formats.">
+  <meta property="og:url" content="https://hausergroup.github.io/curvebook/manual/latest/files.html">
+  <meta property="og:image" content="https://hausergroup.github.io/curvebook/images/workspace-split-fit.png">
+  <meta name="twitter:card" content="summary_large_image">
   <link rel="icon" type="image/png" href="../../images/curvebook.png">
   <link rel="stylesheet" href="../../site.css">
 </head>
@@ -35,7 +43,7 @@
       </nav>
     </header>
     <div class="version-banner" role="note" aria-label="Documentation version">
-      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-24 (commit <code>2dc1679162</code>)</span>
+      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-24 (commit <code>6ea9e9fcf3</code>)</span>
       <span>No scripts · No telemetry · <a href="az-index.html">A–Z Index</a></span>
     </div>
     <main id="main" tabindex="-1">
@@ -128,14 +136,21 @@
 <li><code>.csv</code> / <code>.tsv</code> / delimited text (<code>table.importCsv</code>, <code>table.paste</code>)</li>
 <li><code>.pzfx</code> XML files (<code>table.importPzfx</code>, parsing tables, subcolumn modes, row/column titles, <code>Excluded=&quot;1&quot;</code> masks, and Info constants strictly at the format boundary)</li>
 <li><code>.prism</code> ZIP containers (<code>table.importPrism</code>, bounded ZIP reader extracting tabular CSVs, optional table/info metadata JSON, or embedded XML tables while emitting non-fatal <code>ImportWarning</code> entries for unrecognized binary or script chunks)</li>
+<li><code>.xlsx</code> workbooks (<code>table.importXlsx</code>, bounded OOXML spreadsheet reader importing worksheet tables while emitting non-fatal <code>ImportWarning</code> entries for skipped archive parts or unsupported elements)</li>
+</ul>
+</li>
+<li><strong>Import Warnings &amp; Replace-or-Merge Behavior:</strong>
+<ul>
+<li>Non-fatal <code>ImportWarning</code> entries produced by <code>.pzfx</code>, <code>.prism</code>, and <code>.xlsx</code> imports (e.g., skipped archive parts) are surfaced in the desktop <strong>Import Warnings</strong> panel (reopenable from the status bar or <strong>File › Import › Import Warnings…</strong>) and exposed via <code>ui.inspect</code>.</li>
+<li>When importing <code>.prism</code>, <code>.pzfx</code>, or <code>.xlsx</code> into an open project that has unsaved changes or existing sheets, CurveBook prompts before replacing the workspace, offering <strong>Add to current project</strong> (<code>merge: true</code>) alongside <strong>Open as new project</strong> (<code>merge: false</code>).</li>
 </ul>
 </li>
 <li><strong>Supported Exports:</strong>
 <ul>
 <li><code>.curvebook</code>, <code>.curvebook.d/</code>, <code>.cbtemplate</code></li>
-<li>Table CSV (<code>export_datasheet_to_csv</code>), Result sheet single-tab or tidy CSV (<code>analysis.exportCsv</code>), Result sheet structured JSON (<code>analysis.exportJson</code>)</li>
+<li>Table delimited export (<code>table.exportCsv</code> / <code>export_datasheet_to_csv</code>), <strong>Export All Data Tables…</strong> (<code>ui.export.allTablesCsv</code>, folder picker writing one delimited file per <code>DataSheet</code>, named from the sanitized table title), Result sheet single-tab or tidy delimited export (<code>analysis.exportCsv</code>), and Result sheet structured JSON (<code>analysis.exportJson</code>)</li>
 <li>Publication figures: <strong>SVG</strong>, <strong><code>%PDF-1.7</code></strong>, <strong>PNG</strong>, <strong>TIFF</strong>, and ECMA-234 <strong><code>.emf</code></strong> (<a href="graphs.html#export-capabilities">Graphs &amp; Export Capabilities</a>)</li>
-<li>Analytical methods summary (<code>result.generateReport</code>: <code>plain</code>, <code>markdown</code>, <code>latex</code>).</li>
+<li><strong>Save Methods Report…</strong> (<code>result.generateReport</code>): writes <code>plain</code>, <code>markdown</code>, or <code>latex</code> analytical methods summaries, with output format selected by file extension (<code>.txt</code>, <code>.md</code>, <code>.tex</code>).</li>
 </ul>
 </li>
 </ul>
@@ -145,6 +160,7 @@
 <li><strong>RFC-4180 Quotes &amp; BOM:</strong> Strips leading UTF-8 BOM (<code>\u{FEFF}</code>), honors standard double-quote escaping (<code>&quot;&quot;</code>), and preserves embedded newlines within quoted fields.</li>
 <li><strong>Auto-Detection (<code>CsvOptions::detect</code>):</strong> Inspects the first <code>10</code> non-empty lines to distinguish <code>\t</code> (TSV), <code>;</code> (European CSV with <code>,</code> decimal), and <code>,</code> (standard CSV with <code>.</code> decimal). Presets include <code>CsvOptions::csv()</code>, <code>CsvOptions::tsv()</code>, and <code>CsvOptions::european_csv()</code>.</li>
 <li><strong>Exclusion Syntax &amp; Missing Sentinels:</strong> When <code>parse_asterisk_exclusions == true</code> (default), numeric tokens prefixed with <code>*</code> (e.g., <code>*4.52</code>) import as excluded numeric cells (<code>Cell { value: Number(4.52), excluded: true }</code>). Empty cells and recognized missing sentinels (e.g., <code>NA</code>, <code>NaN</code>, <code>null</code>) map cleanly to <code>CellValue::Empty</code>.</li>
+<li><strong>Default CSV / TSV Export Behavior:</strong> <code>analysis.exportCsv</code> defaults to exporting all result tabs in tidy format using <code>,</code> as the delimiter and the active locale preset&#39;s decimal separator (or a single selected tab when <code>tab_id</code> or <code>tab_index</code> is specified). <code>table.exportCsv</code> uses the same delimiter and decimal separator choices, and saving with a <code>.tsv</code> extension automatically selects the tab (<code>\t</code>) delimiter.</li>
 </ul>
         <nav class="pager" aria-label="Previous and next pages">
           <a href="section-files.html">← Files, import &amp; export</a>

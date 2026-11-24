@@ -8,6 +8,14 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'">
   <meta name="color-scheme" content="light">
   <title>Desktop GUI Getting Started (Beta) — CurveBook Documentation</title>
+  <link rel="canonical" href="https://hausergroup.github.io/curvebook/manual/latest/desktop-gui.html">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="CurveBook">
+  <meta property="og:title" content="Desktop GUI Getting Started (Beta) — CurveBook Documentation">
+  <meta property="og:description" content="Overview of desktop welcome workflow, sheets, analyses, graphs, saving, and exporting.">
+  <meta property="og:url" content="https://hausergroup.github.io/curvebook/manual/latest/desktop-gui.html">
+  <meta property="og:image" content="https://hausergroup.github.io/curvebook/images/workspace-split-fit.png">
+  <meta name="twitter:card" content="summary_large_image">
   <link rel="icon" type="image/png" href="../../images/curvebook.png">
   <link rel="stylesheet" href="../../site.css">
 </head>
@@ -35,7 +43,7 @@
       </nav>
     </header>
     <div class="version-banner" role="note" aria-label="Documentation version">
-      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-24 (commit <code>2dc1679162</code>)</span>
+      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-24 (commit <code>6ea9e9fcf3</code>)</span>
       <span>No scripts · No telemetry · <a href="az-index.html">A–Z Index</a></span>
     </div>
     <main id="main" tabindex="-1">
@@ -77,7 +85,7 @@
 <hr>
 <h2 id="data-and-exclusions" tabindex="-1">2. Entering Data, Exclusions &amp; Quick Statistics</h2>
 <ol>
-<li>Edit data cells directly in the Data grid (toggle row titles on <code>Column</code> tables via <strong>View › Row Titles</strong>), paste delimited clipboard text (<code>Cmd/Ctrl+V</code>), or open/import <code>.curvebook</code>, <code>.csv</code>, <code>.tsv</code>, <code>.pzfx</code>, or <code>.prism</code> files via <strong>File › Open…</strong> or file drag-and-drop.</li>
+<li>Edit data cells directly in the Data grid (toggle row titles on <code>Column</code> tables via <strong>View › Row Titles</strong>), paste delimited clipboard text (<code>Cmd/Ctrl+V</code>), or open/import <code>.curvebook</code>, <code>.csv</code>, <code>.tsv</code>, <code>.pzfx</code>, <code>.prism</code>, or <code>.xlsx</code> files via <strong>File › Open…</strong>, <strong>File › Import</strong>, or file drag-and-drop. Importing <code>.prism</code>, <code>.pzfx</code>, or <code>.xlsx</code> into an open project with existing sheets or unsaved changes opens a replace-or-merge confirmation modal (<strong>Add to current project</strong> vs. <strong>Open as new project</strong>), and any non-fatal import warnings are shown in the <strong>Import Warnings</strong> panel (reopenable from the status bar or <strong>File › Import › Import Warnings…</strong>).</li>
 <li>Selecting any numeric cell range updates the footer <strong>Quick Statistics</strong> readout live (<code>n</code>, <code>excl</code>, <code>mean</code>, <code>SD</code>, <code>SEM</code>, <code>median</code>, <code>sum</code>; see <a href="qol.html#quick-statistics">Calculators &amp; Quality-of-Life Capabilities</a>).</li>
 <li>Toggle non-destructive observation exclusions (<code>Cmd/Ctrl+E</code>) or attach audit provenance tags (<strong>Edit › Exclude Selection with Auditable Reason...</strong>, <code>Shift+Cmd/Ctrl+E</code>; <a href="concepts.html#cell-exclusions"><code>QOL-3</code></a>) without deleting underlying values.</li>
 <li>Create derived columns using <a href="tables.html#calculated-variables"><code>=</code> Calculated Variables</a> directly in <code>MultipleVariables</code> tables (<code>Manage Variables…</code> renames, merges, orders, or pins categorical reference levels).</li>
@@ -108,7 +116,15 @@
 <h2 id="saving-and-exporting" tabindex="-1">5. Saving Projects, Templates &amp; Publication Exports</h2>
 <ul>
 <li><strong>Save Project (<code>.curvebook</code> or <code>.curvebook.d/</code>):</strong> <strong>File › Save</strong> and <strong>File › Save As…</strong> write atomic deterministic <code>.curvebook</code> ZIP archives (with forward-version overwrite refusal), alongside CRC-verified crash-recovery WAL journals between saves (<a href="files.html">Files, Storage &amp; Interchange</a>). Create persistent milestone snapshots via <strong>File › Checkpoints › Create Checkpoint…</strong>.</li>
-<li><strong>Export Figures &amp; Tables:</strong> Use <strong>File › Export…</strong> (<code>SVG</code>, <code>PDF</code>, <code>PNG</code>, <code>TIFF</code>, <code>.emf</code>, <code>CSV</code>, <code>TSV</code>, or <code>JSON</code>) or <strong>File › Print…</strong> to generate publication <strong>SVG 1.1</strong>, <strong><code>%PDF-1.7</code></strong> (sRGB / CMYK / Grayscale, optional glyph outlining), high-DPI <strong>PNG</strong> / <strong>TIFF</strong> (<code>LZW</code> / <code>Deflate</code> / uncompressed), Windows <strong><code>.emf</code></strong>, or multi-flavor OS clipboard vector/raster copies.</li>
+<li><strong>Import &amp; Warnings (<code>File › Import</code>):</strong> Import <code>.csv</code>/<code>.tsv</code>, <code>.pzfx</code>, <code>.prism</code>, and <code>.xlsx</code> files via <strong>File › Import</strong> or drag-and-drop. When importing <code>.prism</code>, <code>.pzfx</code>, or <code>.xlsx</code> into a project with existing sheets or unsaved changes, the replace-or-merge confirmation modal offers <strong>Add to current project</strong> alongside <strong>Open as new project</strong>. Non-fatal warnings open the <strong>Import Warnings</strong> panel, which can be reopened from the status bar or <strong>File › Import › Import Warnings…</strong>.</li>
+<li><strong>Export Figures (<code>File › Export</code>):</strong> Use <strong>File › Export</strong> (figure export) or <strong>File › Print…</strong> to generate publication <strong>SVG 1.1</strong>, <strong><code>%PDF-1.7</code></strong> (sRGB / CMYK / Grayscale, optional glyph outlining), high-DPI <strong>PNG</strong> / <strong>TIFF</strong> (<code>LZW</code> / <code>Deflate</code> / uncompressed), Windows <strong><code>.emf</code></strong>, or multi-flavor OS clipboard vector/raster copies.</li>
+<li><strong>Export Data, Results &amp; Reports (<code>File › Export</code>):</strong>
+<ul>
+<li><strong>CSV Table…</strong>, <strong>CSV Results…</strong>, and <strong>Export All Data Tables…</strong> open the CSV export options dialog to select delimiter, decimal separator (defaulting to the active locale preset), and (for results) all tabs in tidy format or a single tab; saving with a <code>.tsv</code> extension automatically selects the tab (<code>\t</code>) delimiter. <strong>Export All Data Tables…</strong> prompts for an output folder and writes one delimited file per <code>DataSheet</code>, named from the sanitized table title.</li>
+<li><strong>JSON Results…</strong> writes structured analysis output (<code>analysis.exportJson</code>).</li>
+<li><strong>Save Methods Report…</strong> writes the active result&#39;s methods summary (<code>result.generateReport</code>) to <code>.md</code>, <code>.txt</code>, or <code>.tex</code> based on the chosen extension (while <strong>Analyze › Copy Methods &amp; Statistical Reporting</strong> remains available for clipboard export).</li>
+</ul>
+</li>
 </ul>
         <nav class="pager" aria-label="Previous and next pages">
           <a href="get-started.html">← Get Started</a>

@@ -364,6 +364,8 @@ fn docs_site_check_passes_without_r12_3_and_with_partial_analyses_md() -> Result
             fs::remove_file(&p).map_err(|e| format!("remove {}: {e}", p.display()))?;
         }
     }
+    let sync_absent = run_xtask(sim_root, &["docs-site", "--sitemap"])?;
+    assert!(sync_absent.status.success(), "docs-site --sitemap failed: {}", String::from_utf8_lossy(&sync_absent.stderr));
 
     let absent_out = WorkspaceScratchDir::new(&root, "absent-r12-3-out")?;
     let absent_res = run_xtask(sim_root, &["docs-site", "--check", "--output", absent_out.path.to_str().ok_or("bad path")?])?;
@@ -385,6 +387,8 @@ fn docs_site_check_passes_without_r12_3_and_with_partial_analyses_md() -> Result
         "# Statistical Analyses\n\n## Two-Group Comparison {#analysis-two-group-comparison}\n\nParametric and non-parametric two-group comparisons.\n",
     )
     .map_err(|e| e.to_string())?;
+    let sync_partial = run_xtask(sim_root, &["docs-site", "--sitemap"])?;
+    assert!(sync_partial.status.success(), "docs-site --sitemap failed: {}", String::from_utf8_lossy(&sync_partial.stderr));
 
     let partial_out = WorkspaceScratchDir::new(&root, "partial-r12-3-out")?;
     let partial_res = run_xtask(sim_root, &["docs-site", "--check", "--output", partial_out.path.to_str().ok_or("bad path")?])?;
@@ -490,24 +494,40 @@ fn docs_site_ingests_populated_reference_markdown_and_verifies_release_snapshot(
     assert_eq!(manifest_json["commit"], serde_json::json!(head_sha));
     assert_eq!(manifest_json["minor_dir"], serde_json::json!("v0.1"));
 
+    let latest_manifest_text = fs::read_to_string(sim_root.join("docs/manual/latest/manifest.json")).map_err(|e| e.to_string())?;
+    assert_eq!(latest_manifest_text, manifest_text);
+
     let redirect_html = fs::read_to_string(sim_root.join("docs/manual/index.html")).map_err(|e| e.to_string())?;
-    assert!(redirect_html.contains("<meta http-equiv=\"refresh\" content=\"0; url=v0.1/index.html\">"));
+    assert!(redirect_html.contains("<meta http-equiv=\"refresh\" content=\"0; url=latest/index.html\">"));
+    assert!(redirect_html.contains("href=\"v0.1/index.html\""));
     assert!(!redirect_html.contains("<script"));
 
     let gs_shim = fs::read_to_string(sim_root.join("docs/get-started.html")).map_err(|e| e.to_string())?;
-    assert!(gs_shim.contains("<meta http-equiv=\"refresh\" content=\"0; url=manual/v0.1/get-started.html\">"));
-    assert!(gs_shim.contains("href=\"manual/v0.1/get-started.html\""));
+    assert!(gs_shim.contains("<meta http-equiv=\"refresh\" content=\"0; url=manual/latest/get-started.html\">"));
+    assert!(gs_shim.contains("href=\"manual/latest/get-started.html\""));
     assert!(!gs_shim.contains("<script"));
 
     let ts_shim = fs::read_to_string(sim_root.join("docs/troubleshooting.html")).map_err(|e| e.to_string())?;
-    assert!(ts_shim.contains("<meta http-equiv=\"refresh\" content=\"0; url=manual/v0.1/troubleshooting.html#known-issues\">"));
-    assert!(ts_shim.contains("href=\"manual/v0.1/troubleshooting.html#known-issues\""));
+    assert!(ts_shim.contains("<meta http-equiv=\"refresh\" content=\"0; url=manual/latest/troubleshooting.html#known-issues\">"));
+    assert!(ts_shim.contains("href=\"manual/latest/troubleshooting.html#known-issues\""));
     assert!(!ts_shim.contains("<script"));
 
     let snap_home = fs::read_to_string(sim_root.join("docs/manual/v0.1/index.html")).map_err(|e| e.to_string())?;
     assert!(snap_home.contains("Product Home</a>"));
     assert!(snap_home.contains("Privacy Policy</a>"));
     assert!(snap_home.contains("aria-current=\"page\""));
+    assert!(snap_home.contains("<link rel=\"canonical\" href=\"https://hausergroup.github.io/curvebook/manual/latest/index.html\">"));
+
+    let latest_home = fs::read_to_string(sim_root.join("docs/manual/latest/index.html")).map_err(|e| e.to_string())?;
+    assert_eq!(latest_home, snap_home);
+
+    let sitemap_xml = fs::read_to_string(sim_root.join("docs/sitemap.xml")).map_err(|e| e.to_string())?;
+    assert!(sitemap_xml.contains("https://hausergroup.github.io/curvebook/manual/latest/index.html"));
+    assert!(!sitemap_xml.contains("/manual/v0.1/"));
+    let llms_txt = fs::read_to_string(sim_root.join("docs/llms.txt")).map_err(|e| e.to_string())?;
+    assert!(llms_txt.contains("https://hausergroup.github.io/curvebook/manual/latest/index.html"));
+    let llms_full = fs::read_to_string(sim_root.join("docs/llms-full.txt")).map_err(|e| e.to_string())?;
+    assert!(llms_full.contains("## Quick Facts"));
 
     // Corrupting the manifest commit must make `--check` fail because it no longer matches tag `v0.1.0-alpha.2`.
     let bad_manifest = manifest_text.replace(&head_sha, "0000000000000000000000000000000000000000");
@@ -547,6 +567,8 @@ fn docs_site_renders_math_callouts_figures_toc_and_rejects_leaks_and_broken_root
         {headings}"
     );
     fs::write(&qol_md, &test_md).map_err(|e| e.to_string())?;
+    let sync_qol = run_xtask(sim_root, &["docs-site", "--sitemap"])?;
+    assert!(sync_qol.status.success(), "docs-site --sitemap failed: {}", String::from_utf8_lossy(&sync_qol.stderr));
 
     let out_dir = WorkspaceScratchDir::new(&root, "math-callout-out")?;
     let res = run_xtask(sim_root, &["docs-site", "--check", "--output", out_dir.path.to_str().ok_or("bad path")?])?;
@@ -601,6 +623,8 @@ fn docs_site_renders_math_callouts_figures_toc_and_rejects_leaks_and_broken_root
 
     // Restore valid qol.md, then test check_root_pages catches broken root HTML and broken root shims.
     fs::write(&qol_md, &orig_qol).map_err(|e| e.to_string())?;
+    let sync_restore = run_xtask(sim_root, &["docs-site", "--sitemap"])?;
+    assert!(sync_restore.status.success(), "docs-site --sitemap failed: {}", String::from_utf8_lossy(&sync_restore.stderr));
     let root_index = sim_root.join("docs/index.html");
     let orig_root_index = fs::read_to_string(&root_index).map_err(|e| e.to_string())?;
     fs::write(&root_index, orig_root_index.replace("privacy.html", "does-not-exist.html")).map_err(|e| e.to_string())?;

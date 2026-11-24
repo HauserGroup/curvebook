@@ -9,6 +9,14 @@
   <meta name="color-scheme" content="light">
   <title>Open .pzfx and .prism files and export them to CSV — CurveBook</title>
   <link rel="canonical" href="https://hausergroup.github.io/curvebook/open-pzfx-files.html">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="CurveBook">
+  <meta property="og:title" content="Open .pzfx and .prism files and export them to CSV — CurveBook">
+  <meta property="og:description" content="Open .pzfx and .prism data files with CurveBook, a free, open-source, offline application for macOS, Windows, and Linux, and export each table to CSV or a CurveBook project.">
+  <meta property="og:url" content="https://hausergroup.github.io/curvebook/open-pzfx-files.html">
+  <meta property="og:image" content="https://hausergroup.github.io/curvebook/images/workspace-split-fit.png">
+  <meta property="og:image:alt" content="CurveBook split workspace showing an XY dose-response data table alongside a live four-parameter logistic curve fit, confidence ribbons, and Graph Inspector.">
+  <meta name="twitter:card" content="summary_large_image">
   <link rel="icon" type="image/png" href="images/curvebook.png">
   <link rel="stylesheet" href="site.css">
 </head>
@@ -27,6 +35,7 @@
       <nav aria-label="File format page navigation">
         <a href="index.html">CurveBook home</a>
         <a href="manual/index.html">Documentation</a>
+        <a href="faq.html">FAQ</a>
         <a href="#what-is-read">What is read</a>
         <a href="#convert">Convert to CSV</a>
         <a href="#limits">Limits</a>
@@ -56,7 +65,7 @@
           <ul>
             <li><strong><code>.pzfx</code> files (XML):</strong> every data table, including XY, column, grouped, survival, and contingency tables, with replicate and summary (mean with SD or SEM) subcolumns, row and column titles, excluded values, and info notes.</li>
             <li><strong><code>.prism</code> files (ZIP archives):</strong> the data tables stored inside the archive as CSV or TSV, with their table and info metadata when present. Parts CurveBook does not recognise are skipped and listed as warnings, so you can see exactly what was left out.</li>
-            <li><strong>Not imported:</strong> graphs, analysis results, and page layouts. Rerun the analyses in CurveBook on the imported tables; its methods and their published references are listed in the <a href="manual/v0.1/analyses.html">analyses reference</a>.</li>
+            <li><strong>Not imported:</strong> graphs, analysis results, and page layouts. Rerun the analyses in CurveBook on the imported tables; its methods and their published references are listed in the <a href="manual/latest/analyses.html">analyses reference</a>.</li>
             <li><strong>Read only:</strong> CurveBook opens these formats but does not write them. Save your work as a <code>.curvebook</code> project, or export tables to CSV or TSV.</li>
           </ul>
         </section>
@@ -77,8 +86,8 @@
           <p>Replicate subcolumns appear as side-by-side columns, and an excluded value keeps its number with a trailing <code>*</code> (for example <code>55*</code>), so no data are silently dropped. Use a <code>.tsv</code> file name for tab-separated output.</p>
           <h3>3. Or convert the whole file to a CurveBook project</h3>
           <pre><code>curvebook-cli convert experiment.pzfx experiment.curvebook</code></pre>
-          <p>The project keeps all tables together, ready for analyses, curve fits, and graphs. The same commands work for <code>.prism</code> files. The full option list is in the <a href="manual/v0.1/automation/cli.html">command-line reference</a>, and the <a href="manual/v0.1/files.html">files, import &amp; export reference</a> covers every supported format.</p>
-          <p>Prefer to work through an AI assistant? CurveBook’s local MCP server can import these files too; see <a href="manual/v0.1/mcp-for-beginners.html">MCP setup</a>.</p>
+          <p>The project keeps all tables together, ready for analyses, curve fits, and graphs. The same commands work for <code>.prism</code> files. The full option list is in the <a href="manual/latest/automation/cli.html">command-line reference</a>, and the <a href="manual/latest/files.html">files, import &amp; export reference</a> covers every supported format.</p>
+          <p>Prefer to work through an AI assistant? CurveBook’s local MCP server can import these files too; see <a href="manual/latest/mcp-for-beginners.html">MCP setup</a>.</p>
         </section>
 
         <hr>
@@ -88,8 +97,8 @@
           <h2 id="limits-title">Limits and privacy</h2>
           <ul>
             <li><strong>Local only:</strong> files are read on your computer. CurveBook makes no network connections and collects no telemetry (<a href="privacy.html">Privacy Policy</a>).</li>
-            <li><strong>Size limits:</strong> very large files and archives are refused with an error message instead of being read partially. The exact limits are in the <a href="manual/v0.1/files.html">files reference</a>.</li>
-            <li><strong>Problems:</strong> if a file does not open as expected, check the <a href="manual/v0.1/troubleshooting.html#known-issues">known issues</a> or report it on <a href="https://github.com/HauserGroup/curvebook/issues">GitHub Issues</a>; please share a file only if its data can be made public.</li>
+            <li><strong>Size limits:</strong> very large files and archives are refused with an error message instead of being read partially. The exact limits are in the <a href="manual/latest/files.html">files reference</a>.</li>
+            <li><strong>Problems:</strong> if a file does not open as expected, check the <a href="manual/latest/troubleshooting.html#known-issues">known issues</a> or report it on <a href="https://github.com/HauserGroup/curvebook/issues">GitHub Issues</a>; please share a file only if its data can be made public.</li>
           </ul>
         </section>
       </div>
@@ -102,7 +111,7 @@
             <p>Installers for macOS, Windows, and Linux (desktop app + <code>curvebook-cli</code>), plus a Tier 2 FreeBSD CLI-only archive, are on the release page.</p>
             <div class="download-links">
               <a href="index.html#downloads">Downloads</a>
-              <a href="manual/v0.1/get-started.html">Install &amp; Checksums</a>
+              <a href="manual/latest/get-started.html">Install &amp; Checksums</a>
               <a href="https://github.com/HauserGroup/curvebook/releases">GitHub Releases <span aria-hidden="true">↗</span></a>
             </div>
           </div>
@@ -113,7 +122,7 @@
     <footer class="site-footer">
       <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>
       <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
-      <p class="privacy">CurveBook runs locally and collects no telemetry. GitHub Pages logs visitor IP addresses for security. Read the <a href="privacy.html">Privacy Policy</a>.</p>
+      <p class="privacy">CurveBook runs locally and collects no telemetry. GitHub Pages logs visitor IP addresses for security. Read the <a href="privacy.html">Privacy Policy</a> or the <a href="faq.html">FAQ</a>.</p>
       <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a>
     </footer>
 

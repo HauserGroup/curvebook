@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Graph types, compatible table archetypes, axis scales, error bars, colour palettes, and Page Layout rendering.">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'">
+  <meta name="color-scheme" content="light">
+  <title>Graphs, Page Layouts &amp; Export Capabilities — CurveBook Documentation</title>
+  <link rel="canonical" href="https://hausergroup.github.io/curvebook/manual/latest/graphs.html">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="CurveBook">
+  <meta property="og:title" content="Graphs, Page Layouts &amp; Export Capabilities — CurveBook Documentation">
+  <meta property="og:description" content="Graph types, compatible table archetypes, axis scales, error bars, colour palettes, and Page Layout rendering.">
+  <meta property="og:url" content="https://hausergroup.github.io/curvebook/manual/latest/graphs.html">
+  <meta property="og:image" content="https://hausergroup.github.io/curvebook/images/workspace-split-fit.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" type="image/png" href="../../images/curvebook.png">
+  <link rel="stylesheet" href="../../site.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="desktop-window wrap">
+    <header class="site-header">
+      <div class="title-bar">
+        <div class="wordmark">
+          <img src="../../images/curvebook.png" width="64" height="64" alt="">
+          <span>CurveBook · Reference Manual</span>
+        </div>
+        <span class="window-status">Graphs &amp; Page Layouts</span>
+      </div>
+      <nav aria-label="Manual navigation">
+        <a href="index.html">Manual Home</a>
+        <a href="section-get-started.html">Get Started</a>
+        <a href="section-analyses.html" aria-current="page">Reference</a>
+        <a href="section-automation.html">Automation</a>
+        <a href="registry/commands.html">Commands &amp; Tools</a>
+        <a href="az-index.html">A–Z Index</a>
+        <a href="section-contribute.html">Contribute</a>
+        <a href="../../index.html">Product Home</a>
+        <a href="../../privacy.html">Privacy Policy</a>
+      </nav>
+    </header>
+    <div class="version-banner" role="note" aria-label="Documentation version">
+      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-24 (commit <code>6ea9e9fcf3</code>)</span>
+      <span>No scripts · No telemetry · <a href="az-index.html">A–Z Index</a></span>
+    </div>
+    <main id="main" tabindex="-1">
+      <article class="overview doc-body">
+        <nav class="breadcrumbs" aria-label="Breadcrumb">
+          <a href="index.html">Manual</a>
+          <span aria-hidden="true">/</span>
+          <a href="section-graphs.html">Graphs &amp; Page Layouts</a>
+          <span aria-hidden="true">/</span>
+          <span aria-current="page">Graphs, Page Layouts &amp; Export Capabilities</span>
+        </nav>
+        <details open class="toc">
+          <summary class="toc-title">On this page</summary>
+          <ul>
+            <li><a href="#graph-families">Graph Families &amp; Accepted Table Types (GraphKind)</a></li>
+            <li><a href="#series-styling">Series Styling, Error Bars &amp; Overrides</a></li>
+            <li><a href="#axes-and-scales">Axis Scales, Broken Axes &amp; Frames</a></li>
+            <li><a href="#axis-scales">— The Seven Axis Scales (AxisScale / GraphAxisScale)</a></li>
+            <li><a href="#broken-axes">— Discontinuous / Broken Axes (AxisSegment)</a></li>
+            <li><a href="#frames-and-ticks">— Frame Presets, Thresholds &amp; Additional Ticks</a></li>
+            <li><a href="#annotations-and-significance">Annotations, Pairwise Brackets, Piepho CLD &amp; Live TeX Equations</a></li>
+            <li><a href="#palettes-and-cvd">Colour Palettes, Colormaps &amp; CVD Preview</a></li>
+            <li><a href="#style-inheritance">Batch Creation &amp; Selective Style Inheritance (graph.create, graph.applyStyleFrom)</a></li>
+            <li><a href="#page-layouts">Page Layout Composition (LayoutSpec)</a></li>
+            <li><a href="#export-capabilities">Publication Preflight &amp; Export Capabilities &amp; Limits</a></li>
+            <li><a href="#preflight">— Canvas Print Preflight (graph.preflightCheck, QOL-8)</a></li>
+            <li><a href="#export-formats">— Supported Export Formats &amp; Hard Safety Limits</a></li>
+          </ul>
+        </details>
+<h1 id="graphs-page-layouts--export-capabilities" tabindex="-1">Graphs, Page Layouts &amp; Export Capabilities</h1>
+<p>CurveBook compiles every graph specification (<code>GraphSheet</code>) and multi-panel composition (<code>LayoutSheet</code>) into a device-independent vector intermediate representation (<code>ChartScene</code>, <code>crates/chart</code>), guaranteeing identical geometry across desktop canvas rendering, SVG, <code>%PDF-1.7</code>, PNG/TIFF rasterization, and ECMA-234 Enhanced Metafiles (<code>.emf</code>).</p>
+<p>See <a href="registry/commands.html">Command Reference</a>, <a href="automation/mcp.html">Automation: MCP</a>, <a href="registry/tables.html#analysis-kinds">Analysis Kinds Registry</a>, and <a href="registry/equations.html">Parametric Equations Registry</a> for graph/layout and overlay parameters.</p>
+<hr>
+<h2 id="graph-families" tabindex="-1">Graph Families &amp; Accepted Table Types (<code>GraphKind</code>)</h2>
+<p>CurveBook exposes eight <code>GraphKind</code> families (<code>crates/doc/src/graph.rs</code>), each bound to compatible <code>DataSheet</code> or <code>ResultSheet</code> inputs:</p>
+<div class="table-wrap"><table>
+<thead><tr><th><code>GraphKind</code> Family</th><th>Accepted Sources</th><th>Built-In Visual Representations (<code>GraphicalDataObject</code> / Layout)</th></tr></thead>
+<tbody>
+<tr><td><code>Xy</code></td><td><code>Xy</code>, <code>MultipleVariables</code></td><td>Scatter symbols, connecting lines (<code>PointToPoint</code>, <code>Staircase</code>, Fritsch–Carlson / Steffen <code>MonotonicCubicSpline</code>, <code>AkimaSpline</code>), longitudinal replicate trajectories (<code>IndividualReplicateTrajectories</code> spaghetti plots), error envelopes, fitted curve &amp; confidence/prediction band overlays (<code>FittedCurveOverlay</code>), AUC shading, before-after connections.</td></tr>
+<tr><td><code>Column</code></td><td><code>Column</code>, <code>Nested</code></td><td>Column/vertical or horizontal (<code>CartesianOrientation::Horizontal</code>) bars with error bars, superimposed replicate dots (<code>DeterministicBeeswarm</code> or <code>AlignedColumn</code>), mean/median summary lines, before-after paired trajectories, box-and-whisker (<code>Tukey1_5Iqr</code>, <code>MinToMax</code>, <code>Percentile10To90</code>, <code>Percentile5To95</code>, <code>Percentile2_5To97_5</code>, <code>Percentile1To99</code>), kernel violin plots, and truncated/truncated+raw combinations.</td></tr>
+<tr><td><code>Grouped</code></td><td><code>Grouped</code>, <code>Nested</code></td><td>Vertical or horizontal (<code>CartesianOrientation::Horizontal</code>, including back-to-back stacked Population Pyramids) bars/boxes/violins/points arranged via <code>GroupedArrangement</code> (<code>Interleaved</code>, <code>Separated</code>, <code>Stacked</code>, <code>Superimposed</code>) for two-way and three-way designs.</td></tr>
+<tr><td><code>Contingency</code></td><td><code>Contingency</code></td><td>Grouped count bars, stacked count bars, and <code>100%</code> normalized fraction stacked bars (<code>PartsOfWholeLayout</code> / categorical layout).</td></tr>
+<tr><td><code>PartsOfWhole</code></td><td><code>PartsOfWhole</code></td><td><code>Pie</code>, <code>Donut</code> (annular cutout with optional center total), <code>StackedFractionBar</code> (<code>100%</code> horizontal bar), and <code>Waffle10x10</code> (<code>10×10</code> grid colored by rounded percentage).</td></tr>
+<tr><td><code>Survival</code></td><td><code>Survival</code>, <code>Survival</code> <code>ResultSheet</code></td><td>Kaplan–Meier curves rendered in <code>SurvivalDisplayMetric</code> (<code>PercentSurvival</code>, <code>PercentCumulativeEvent</code>, or <code>FractionSurvival</code>) as <code>staircase</code> steps or point-to-point polylines, censored-subject tick marks, selectable Greenwood error display (<code>ConfidenceInterval95</code> bands or <code>Sem</code>), median survival crosshairs, and aligned <strong>Number at Risk</strong> tables.</td></tr>
+<tr><td><code>MultipleVariables</code></td><td><code>MultipleVariables</code></td><td>Bubble/scatter encoding via <code>MultivariateGraphEncoding</code> mapping categorical/continuous columns independently to X, Y, <code>ColorChannelMapping</code>, <code>SizeChannelMapping</code>, or marker symbol/split panels.</td></tr>
+<tr><td><code>Diagnostic(DiagnosticPlotKind)</code></td><td><code>ResultSheet</code> / specialized inputs</td><td>Exploratory &amp; regression diagnostic plots: <code>Heatmap</code> (continuous ramp + configurable <code>HeatmapLabelSpec</code> row/column labels &amp; <code>0°</code>/<code>45°</code>/<code>90°</code> angles, optionally auto-created from <code>transform.run</code> with <code>create_graph: true</code>), <code>Volcano</code> (<span class="math">-<span class="math-text">log</span><sub>10</sub>P</span> / adjusted <span class="math">q</span> vs. effect fold change), <code>BlandAltman</code> (bias &amp; limits of agreement), <code>RocCurve</code> (sensitivity vs. <span class="math">1 - <span class="math-text">specificity</span></span> + diagonal reference), <code>ForestPlot</code> (regression estimates or pre-summarized <code>Grouped</code>/<code>Column</code> study bounds <code>UpperLowerLimits</code>/<code>MeanLowHigh</code> with optional pooled diamond and reference lines), <code>ResidualPlot</code> (residuals vs. fitted/order), and <code>NormalQqPlot</code> (sample vs. Blom normal quantiles).</td></tr>
+</tbody>
+</table></div>
+<hr>
+<h2 id="series-styling" tabindex="-1">Series Styling, Error Bars &amp; Overrides</h2>
+<ul>
+<li><strong>Series Controls (<code>SeriesSpec</code>):</strong> Per-dataset visibility, label, colour with RGBA opacity/alpha, secondary <code>y2_axis</code> assignment, marker shape (<code>MarkerShape</code> circles/squares/triangles/diamonds/crosses), fill mode (<code>MarkerFillMode</code> solid/open/translucent), marker size in points, stroke dash style (<code>LineDashStyle</code> solid/dashed/dotted/dash-dot), summary measure (<code>SummaryMeasure::{Mean, Median, GeometricMean}</code>), connecting curve style (including <code>ReplicateLineMode::IndividualReplicateTrajectories</code> for longitudinal trajectories), composite horizontal/point nudging (<code>offset</code> <code>{ x_data, x_pt, y_pt }</code>, with <code>x_data</code> included in auto-axis bounds), optional bar width/border overrides (<code>bar_width_override_pt</code>, <code>bar_border_width_pt</code>), independent <code>show_raw_data</code> &amp; fitted-curve overlay visibility (so subset-filtered fits draw cleanly without duplicate markers), and <code>all_series: true</code> batch updates across all datasets in a graph (<code>graph.setSeries</code>).</li>
+<li><strong>Error Bars (<code>ErrorBarSpec</code>):</strong> Configurable <code>ErrorBarMetric</code>:
+<ul>
+<li><code>Sd</code> (<span class="math">± 1<span class="math-text"> SD</span></span>, <span class="math">n - 1</span> denominator)</li>
+<li><code>Sem</code> (<span class="math">± 1<span class="math-text"> SEM</span>= <span class="math-text">SD</span>/√<span class="math-rad">n</span></span>)</li>
+<li><code>ConfidenceInterval95</code> (two-sided <span class="math">95%</span> Student-<em>t</em> interval around the sample mean)</li>
+<li><code>InterquartileRange</code> (asymmetric <span class="math">[Q<sub>1</sub>, Q<sub>3</sub>]</span> quartiles)</li>
+<li><code>Range</code> (<code>[min, max]</code>)</li>
+<li><code>ExplicitSubcolumns</code> (pre-summarized bounds read directly from <code>MeanSdN</code>, <code>MeanSemN</code>, <code>MeanCvN</code>, <code>MeanLowHigh</code>, <code>UpperLowerLimits</code>, or <code>MedianIqr</code> subcolumns) with directional options (<code>ErrorBarDirection::{Both, UpperOnly, LowerOnly}</code>) and selectable end caps/stroke patterns. On log scales, non-positive lower error bounds clamp safely to the axis floor and increment <code>ScaleDiagnostics::log_error_bars_clamped</code>.</li>
+</ul>
+</li>
+<li><strong>Per-Point Overrides (<code>PointStyleOverride</code>):</strong> Targets <code>(series_index, point_index, optional subcol)</code> (<code>graph.formatSelectedPoints</code>) to highlight, restyle, or hide single replicates without mutating upstream cell data; exact <code>subcol</code> rules take precedence over wildcard overrides.</li>
+</ul>
+<hr>
+<h2 id="axes-and-scales" tabindex="-1">Axis Scales, Broken Axes &amp; Frames</h2>
+<h3 id="axis-scales" tabindex="-1">The Seven Axis Scales (<code>AxisScale</code> / <code>GraphAxisScale</code>)</h3>
+<p>Configured per axis (<code>x_axis</code>, <code>y_axis</code>, secondary <code>y2_axis</code> in <code>crates/doc/src/graph.rs</code>, <code>crates/chart/src/scales.rs</code>):</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Scale Variant</th><th>Forward Mapping</th><th>Valid Domain</th></tr></thead>
+<tbody>
+<tr><td><code>Linear</code></td><td><span class="math">x</span></td><td>All finite real numbers</td></tr>
+<tr><td><code>Log10</code></td><td><span class="math"><span class="math-text">log</span><sub>10</sub>(x)</span></td><td>Strictly positive <span class="math">x &gt; 0</span></td></tr>
+<tr><td><code>Log2</code></td><td><span class="math"><span class="math-text">log</span><sub>2</sub>(x)</span></td><td>Strictly positive <span class="math">x &gt; 0</span></td></tr>
+<tr><td><code>Ln</code></td><td><span class="math"><span class="math-text">ln</span>(x)</span></td><td>Strictly positive <span class="math">x &gt; 0</span></td></tr>
+<tr><td><code>Logit(LogitDomain)</code></td><td><span class="math"><span class="math-text">ln</span>(<span class="math-frac"><span class="math-num">p</span><span class="math-den">1 - p</span></span>)</span> (unit <code>[0, 1]</code> or <code>[0, 100]</code>% domain)</td><td>Strictly open interior <span class="math">0 &lt; p &lt; 1</span> (or <span class="math">0 &lt; p &lt; 100</span>)</td></tr>
+<tr><td><code>Probit</code></td><td><span class="math">Φ<sup>-1</sup>(u / 100)</span></td><td>Strictly open percentage interior <span class="math">u ∈ (0, 100)</span></td></tr>
+<tr><td><code>Reciprocal</code></td><td><span class="math">1 / x</span> (with direction reversal option)</td><td>Non-zero <span class="math">x ≠ 0</span></td></tr>
+</tbody>
+</table></div>
+<p>Observations outside a non-linear axis domain (or non-finite points) are safely omitted and counted in <code>ScaleDiagnostics</code> (<code>non_positive_log_skipped</code>, <code>out_of_domain_logit_skipped</code>, <code>out_of_domain_probit_skipped</code>, <code>zero_reciprocal_skipped</code>, <code>non_finite_skipped</code>) rather than collapsing or panicking. Each segment generates at most <code>MAX_TICKS_PER_SEGMENT = 256</code> ticks using <code>TickLabelFormat</code> (<code>Decimal</code>, <code>AbsoluteDecimal</code> for unsigned back-to-back pyramid magnitudes, <code>PowerOfTenSuperscript</code>, <code>ScientificE</code>, <code>Antilog</code>, <code>EngineeringSi</code>, <code>Categorical</code>), paired with per-axis <code>TickDirection</code> (<code>Outside</code>, <code>Inside</code>, <code>Both</code>, <code>None</code>) and <code>show_tick_labels</code> visibility toggles.</p>
+<h3 id="broken-axes" tabindex="-1">Discontinuous / Broken Axes (<code>AxisSegment</code>)</h3>
+<p>Every axis (<code>AxisSpec::segments</code>) supports <strong><code>1</code> to <code>3</code> contiguous <code>AxisSegment</code> ranges</strong> (<code>MAX_SEGMENTS_PER_AXIS = 3</code>), each specifying its <code>[min, max]</code> interval and proportional visual share, separated by <code>gap_width_pt</code> with a selectable <code>BreakOrnament</code> (<code>DoubleSlash</code>, <code>Zigzag</code>, <code>BlankGap</code>). Series bars, lines, and points clip cleanly at break boundaries.</p>
+<h3 id="frames-and-ticks" tabindex="-1">Frame Presets, Thresholds &amp; Additional Ticks</h3>
+<ul>
+<li><strong><code>FramePreset</code>:</strong> <code>OpenL</code> (default left-and-bottom L frame), <code>OffsetRangeTufte</code> (<code>DEFAULT_AXIS_OFFSET_PT = 6.0</code> pt offset range-trimmed spines), <code>PlainBoxed</code> (4-sided box), <code>DualYSecondaryRight</code> (primary left <em>Y</em> paired with secondary right <code>y2_axis</code>), and <code>OriginCrossing</code> (axes intersecting at <code>(0, 0)</code>).</li>
+<li><strong><code>AxisThreshold</code> &amp; <code>AdditionalTick</code>:</strong> Horizontal/vertical dashed or shaded threshold bands (<code>graph.setAxes</code>), custom labelled tick marks (<code>graph.setAdditionalTicks</code>), and vertical reference gridlines (for example null-effect lines on <code>ForestPlot</code>).</li>
+<li><strong>Canvas &amp; Paper Backgrounds (<code>paper_fill</code>, <code>background_fill</code>):</strong> Solid fills or transparent (<code>None</code>) plot/page fills (<code>graph.setStyle</code> / <strong>Format Graph › Page</strong>), enabling axis-free transparent foreground overlays and insets in multi-panel layouts.</li>
+</ul>
+<hr>
+<h2 id="annotations-and-significance" tabindex="-1">Annotations, Pairwise Brackets, Piepho CLD &amp; Live TeX Equations</h2>
+<ul>
+<li><strong>Geometric &amp; Text Annotations (<code>GraphAnnotation</code>):</strong> Lines, arrows, rectangles, ellipses, shaded spans, free-form rich text callouts (subscripts/superscripts, Greek Unicode, <strong>Info constant hooks</strong> <code>{{Info:Key}}</code> and <strong>Result scalar hooks</strong> expanded automatically), and legend placement (<code>LegendSpec</code>).</li>
+<li><strong>Live Embedded Result Tables (<code>GraphAnnotation::EmbeddedResultTable</code> &amp; <code>LayoutItem::LiveTable</code>):</strong> Reactive rectangular cell slices (<code>selected_rows</code>, <code>selected_cols</code>) pasted directly from a <code>ResultSheet</code> (<code>edit.pasteResultTable</code>) with configurable <code>EmbeddedTableStyle</code> (<code>transpose</code>, <code>show_column_titles</code>, <code>show_row_titles</code>, <code>bold_headers</code>, <code>font_size_pt</code>, <code>outer_border_width_pt</code>, <code>gridline_width_pt</code>, <code>border_color</code>, <code>fill_color</code>), re-evaluating via the DAG across RGBA, SVG, <code>%PDF-1.7</code>, and <code>.emf</code>.</li>
+<li><strong>Embedded Raster Images (<code>GraphAnnotation::EmbeddedImage</code> &amp; <code>LayoutItem::EmbeddedImage</code>):</strong> Content-addressed <code>ProjectImageAsset</code> items inserted from <strong>PNG</strong>, <strong>JPEG</strong>, or <strong>TIFF</strong> payloads (<code>graph.insertImage</code>, <code>layout.insertImage</code>, <code>edit.pasteImage</code>, <code>graph.updateImage</code>, <code>layout.updateImage</code>) with <code>CropInsetsPt</code>, <code>ImageBorderSpec</code>, <code>rotation_deg</code>, and <code>lock_aspect_ratio</code>. SVG image payloads (<code>&lt;svg</code>/<code>&lt;?xml</code>) are rejected under clean-room/licence policy and zero remote URL fetches are performed; decoding enforces <code>MAX_IMAGE_ASSET_BYTES = 32 MiB</code>, <code>MAX_IMAGE_DIM_PX = 16,384</code> px, and <code>MAX_IMAGE_PIXELS = 67,108,864</code> total pixels per asset and per compiled layout.</li>
+<li><strong>Live TeX Best-Fit Model Equations (<code>QOL-16</code> / <code>R10.19</code>):</strong> <code>GraphAnnotation::ModelEquation</code> (<code>graph.addAnnotation</code> kind <code>model_equation</code>, <code>ui.graph.insertModelEquation</code>) links a graph directly to a <code>LinearRegression</code>, <code>NonlinearRegression</code>, or <code>PassingBablok</code> <code>ResultSheet</code> dataset. Supports <code>EquationDisplayMode::Symbolic</code> or <code>EquationDisplayMode::Substituted</code> (refreshing coefficients automatically on fit recalculation) and renders using two-dimensional Knuth TeXbook Appendix G math box typesetting (<code>crates/chart/src/equation_box.rs</code>: stacked <code>\frac</code>/<code>\dfrac</code>/<code>\tfrac</code>/<code>\binom</code>, <code>\sqrt</code> with vinculum, stacked super/subscripts, scaled delimiters <code>\left...\right</code>, Greek parameters).</li>
+<li><strong>Pairwise Significance Brackets &amp; Compact Letter Display (<code>PairwiseDisplayMode</code>):</strong>
+<ul>
+<li><code>BracketsOnly</code>: Horizontal/stepped comparison brackets (<code>PairwiseBracketSpec</code>) with <code>BracketStyle</code> and <code>BracketLabelMode</code> (stars <code>*</code>..<code>****</code>/<code>ns</code>, formatted <em>P</em>-value, or custom text).</li>
+<li><code>CompactLetterDisplayOnly</code> (<code>graph.setCompactLetterDisplay</code>): Computes exact minimal equivalence letter sets (<code>&quot;a&quot;</code>, <code>&quot;ab&quot;</code>, <code>&quot;b&quot;</code>, ...) directly from pairwise comparison significance records using Piepho&#39;s (2004) insert-and-absorb plus sweeping algorithm (<code>CldOrdering::{DescendingMean, AscendingMean}</code>), placing conflict-free letter annotations above bars/boxes/violins.</li>
+<li><code>BracketsAndCompactLetterDisplay</code>: Renders both non-overlapping brackets and compact letters simultaneously.</li>
+</ul>
+</li>
+</ul>
+<hr>
+<h2 id="palettes-and-cvd" tabindex="-1">Colour Palettes, Colormaps &amp; CVD Preview</h2>
+<ul>
+<li><strong>Qualitative Scientific Palettes (<code>PaletteId</code>, <code>crates/palette</code>):</strong> <code>OkabeIto</code> (default CVD-safe 8-colour palette), <code>PaulTolBright</code>, <code>PaulTolMuted</code>, <code>PaulTolHighContrast</code>, <code>PaulTolVibrant</code>, and <code>MonochromePrint</code>.</li>
+<li><strong>Continuous Colormaps (<code>ColormapId</code>):</strong> Perceptually uniform Oklab-interpolated ramps (<code>Viridis</code>, <code>Cividis</code>, <code>Plasma</code>, <code>DivergingBlueRed</code>, <code>Grayscale</code>) plus custom user stops up to <code>MAX_CUSTOM_STOPS = 256</code> and discrete sampling up to <code>MAX_DISCRETE_SAMPLES = 4,096</code>.</li>
+<li><strong>Live CVD &amp; Grayscale Canvas Preview (<code>QOL-9</code>):</strong> Applies Machado (2009) physiologically validated colour-vision-deficiency transformation matrices (<code>CanvasPreviewFilter::{Normal, Deuteranopia, Protanopia, Tritanopia, GrayscalePrint}</code>, serialized <code>&quot;grayscale&quot;</code> for grayscale print) in the viewport rasterizer (<code>crates/render</code>) without altering stored graph specs or exported vector files.</li>
+</ul>
+<hr>
+<h2 id="style-inheritance" tabindex="-1">Batch Creation &amp; Selective Style Inheritance (<code>graph.create</code>, <code>graph.applyStyleFrom</code>)</h2>
+<ul>
+<li><strong>Batch One-Graph-Per-Data-Set (<code>graph.create</code>):</strong> Passing <code>one_per_data_set: true</code> (plus optional shared <code>y_axis_title</code>) atomically creates one single-series <code>GraphSheet</code> per dataset from any <code>DataSheet</code> or transform <code>ResultSheet</code> (<code>Transpose</code>, <code>Normalize</code>, <code>SelectAndTransform</code>), checking <code>MAX_SHEETS_PER_PROJECT</code> before mutating the document.</li>
+<li><strong>Multi-Target Style Cloning (<code>graph.applyStyleFrom</code>):</strong> <code>apply_style_from_selective</code> (<code>crates/doc/src/graph.rs</code>) copies selected styling facets (axis scales/ticks/frame, palette/series styling, fonts, error bar defaults, legend placement, or canvas preset dimensions) from a donor <code>GraphSheet</code> onto one target or multiple <code>target_sheet_ids</code> in a single atomic undo step while preserving each target&#39;s upstream data bindings, series titles, and fitted overlays.</li>
+</ul>
+<hr>
+<h2 id="page-layouts" tabindex="-1">Page Layout Composition (<code>LayoutSpec</code>)</h2>
+<p><code>LayoutSheet</code> composes publication multi-panel figures (<code>MAX_LAYOUT_ITEMS = 64</code> per page):</p>
+<ul>
+<li><strong>Physical Units &amp; Presets:</strong> Coordinates and margins in <code>PhysicalUnit</code> (<code>Points</code>, <code>Millimeters</code>, <code>Inches</code>), supporting <code>JournalWidthPreset</code> (<code>SingleColumn85Mm</code>, <code>SingleColumn89Mm</code>, <code>OneAndHalfColumn120Mm</code>, <code>OneAndHalfColumn136Mm</code>, <code>DoubleColumn174Mm</code> default, <code>DoubleColumn183Mm</code>, <code>LetterPortrait</code>, etc.), <code>FigureCanvasPreset</code> (<code>SingleColumn88mm</code>, <code>ColumnAndHalf130mm</code>, <code>DoubleColumn180mm</code>, <code>FullPagePortrait</code>, <code>Slide16x9</code>, <code>PosterPanel</code>), <code>PageOrientation</code> (<code>Portrait</code>, <code>Landscape</code>), and <code>CanvasResizeMode</code> (<code>KeepTypographyPt</code> to preserve exact <code>pt</code> sizes &amp; line weights when resizing, vs. <code>ProportionalScale</code>).</li>
+<li><strong>Panel Arrangement, Equalization, Z-Order &amp; Badges:</strong> Embedded <code>LiveGraph</code> panels, <code>LiveTable</code> blocks, <code>EmbeddedImage</code> items, shared origin alignment (<code>layout.alignOrigins</code>), plot-scale equalization (<code>layout.equalizeScaling</code> with <code>EqualizeScaleMode::{MatchSmallest, MatchLargest, ExplicitPercent}</code> normalizing inner <code>plot_rect_pt</code> scaling ratios within <code>&lt;= 0.25 pt</code>), Z-order stacking (<code>layout.reorderPanel</code>: <code>bring_to_front</code>, <code>bring_forward</code>, <code>send_backward</code>, <code>send_to_back</code>), transparent foreground overlays/insets (<code>paper_fill: None</code>, hidden axis ticks/labels), decorative shapes/text headers, and automatic <code>PanelBadgeStyle</code> (<code>UpperCaseLetters</code> <code>&quot;A&quot;, &quot;B&quot;, ...</code>, <code>LowerCaseLetters</code> <code>&quot;a&quot;, &quot;b&quot;, ...</code>, or <code>None</code>).</li>
+</ul>
+<hr>
+<h2 id="export-capabilities" tabindex="-1">Publication Preflight &amp; Export Capabilities &amp; Limits</h2>
+<h3 id="preflight" tabindex="-1">Canvas Print Preflight (<code>graph.preflightCheck</code>, <code>QOL-8</code>)</h3>
+<p><code>preflight_check_scene</code> inspects compiled <code>ChartScene</code> primitives prior to export and emits non-blocking warnings when:</p>
+<ul>
+<li>Any visible text element or subscript/superscript span renders below <code>5.0 pt</code> (<code>min_font_size</code>)</li>
+<li>Any stroked path renders below <code>0.25 pt</code> (<code>hairline_stroke</code>)</li>
+<li>Text anchor or bounding box clips outside the canvas or clip rectangle (<code>text_outside_canvas</code>)</li>
+</ul>
+<h3 id="export-formats" tabindex="-1">Supported Export Formats &amp; Hard Safety Limits</h3>
+<div class="table-wrap"><table>
+<thead><tr><th>Format</th><th>Engine Commands</th><th>Capabilities &amp; Options</th><th>Enforced Limits</th></tr></thead>
+<tbody>
+<tr><td><strong>SVG 1.1</strong> (<code>curvebook-svg</code>)</td><td><code>export.svg</code>, <code>graph.exportSvg</code></td><td>Exact cubic/quadratic paths, CSS/attribute styling, <code>pretty</code>, <code>include_xml_declaration</code>, <code>include_metadata</code>, <code>embed_fonts</code> (when runtime TTF faces present), <code>outline_text</code> glyph paths, coordinate <code>precision</code> (<code>0..=6</code>, default <code>3</code>). Validated structurally via <code>validate_svg_structure</code>.</td><td>Finite bounds, precision capped at <code>6</code></td></tr>
+<tr><td><strong><code>%PDF-1.7</code> Vector</strong> (<code>curvebook-pdf</code>)</td><td><code>export.pdf</code>, <code>graph.exportPdf</code></td><td>Zlib-compressed vector streams (<code>compress_streams</code>), selectable Core-14 WinAnsi + Adobe Symbol text or optional embedded TrueType / <code>outline_text</code> vector glyphs, alpha ExtGState transparency, sRGB / CMYK / Grayscale colour spaces (<code>PdfColorSpace</code>), multi-page compilation, physical <code>trim_pt</code> / <code>bleed_pt</code> boxes, BiDi RTL reordering.</td><td><code>MAX_PDF_PAGES = 64</code> pages, <code>MAX_PDF_TOTAL_PRIMITIVES = 500,000</code> primitives, <code>MAX_PDF_OUTPUT_BYTES = 32 MiB</code></td></tr>
+<tr><td><strong>PNG &amp; TIFF Raster</strong> (<code>curvebook-render</code>)</td><td><code>export.png</code>, <code>export.tiff</code>, <code>graph.exportPng</code></td><td>4x4 subpixel coverage antialiasing (<code>BEZIER_FLATNESS_TOL_PX = 0.15</code>), DPI-based or explicit pixel sizing, physical <code>pHYs</code> / TIFF resolution metadata (<code>dpi</code>), TIFF compression (<code>None</code>, <code>Lzw</code>, <code>Deflate</code>). Aspect ratio is strictly preserved on DPI scaling; oversize uniform targets return an explicit limit error rather than stretching dimensions.</td><td><code>MAX_RASTER_DIM_PX = 16,384</code> px per side, <code>MAX_RASTER_PIXELS = 67,108,864</code> total pixels (<code>8192 × 8192</code> equivalent)</td></tr>
+<tr><td><strong>Windows Enhanced Metafile <code>.emf</code></strong> (<code>curvebook-render</code>)</td><td><code>graph.exportEmf</code>, <code>layout.exportEmf</code></td><td>Clean-room little-endian ECMA-234 vector records (<code>MM_ANISOTROPIC</code>, 0.01 mm <code>rclFrame</code>, 20 twips/pt logical precision, <code>EMR_POLYBEZIERTO</code>, Unicode <code>EMR_EXTTEXTOUTW</code>, optional BGRA DIB fallback raster).</td><td>Finite positive dimensions fitting 32-bit EMF <code>nBytes</code></td></tr>
+</tbody>
+</table></div>
+        <nav class="pager" aria-label="Previous and next pages">
+          <a href="section-graphs.html">← Graphs &amp; Page Layouts</a>
+          <a href="registry/graphs.html">Graphs, Scales &amp; Palettes Registry →</a>
+        </nav>
+      </article>
+    </main>
+    <footer class="site-footer">
+      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>
+      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
+      <p class="privacy">CurveBook runs locally and collects no telemetry. Read <a href="../../privacy.html">Privacy, Licences &amp; Security</a> · <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a></p>
+    </footer>
+    <div class="window-statusbar" aria-label="Application summary">
+      <span class="status-cell is-grow">Ready · Offline Desktop · CLI · Local MCP</span>
+      <span class="status-cell">Pure Rust</span>
+      <span class="status-cell">Zero Telemetry</span>
+      <span class="status-cell">MIT / Apache-2.0</span>
+    </div>
+  </div>
+</body>
+</html>

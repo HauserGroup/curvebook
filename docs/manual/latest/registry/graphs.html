@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Registry of CurveBook graph kinds, style presets, axis scales, qualitative palettes, and colormaps.">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'">
+  <meta name="color-scheme" content="light">
+  <title>Graphs, Scales &amp; Palettes Registry — CurveBook Documentation</title>
+  <link rel="canonical" href="https://hausergroup.github.io/curvebook/manual/latest/registry/graphs.html">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="CurveBook">
+  <meta property="og:title" content="Graphs, Scales &amp; Palettes Registry — CurveBook Documentation">
+  <meta property="og:description" content="Registry of CurveBook graph kinds, style presets, axis scales, qualitative palettes, and colormaps.">
+  <meta property="og:url" content="https://hausergroup.github.io/curvebook/manual/latest/registry/graphs.html">
+  <meta property="og:image" content="https://hausergroup.github.io/curvebook/images/workspace-split-fit.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" type="image/png" href="../../../images/curvebook.png">
+  <link rel="stylesheet" href="../../../site.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="desktop-window wrap">
+    <header class="site-header">
+      <div class="title-bar">
+        <div class="wordmark">
+          <img src="../../../images/curvebook.png" width="64" height="64" alt="">
+          <span>CurveBook · Reference Manual</span>
+        </div>
+        <span class="window-status">Graphs &amp; Page Layouts</span>
+      </div>
+      <nav aria-label="Manual navigation">
+        <a href="../index.html">Manual Home</a>
+        <a href="../section-get-started.html">Get Started</a>
+        <a href="../section-analyses.html" aria-current="page">Reference</a>
+        <a href="../section-automation.html">Automation</a>
+        <a href="../registry/commands.html">Commands &amp; Tools</a>
+        <a href="../az-index.html">A–Z Index</a>
+        <a href="../section-contribute.html">Contribute</a>
+        <a href="../../../index.html">Product Home</a>
+        <a href="../../../privacy.html">Privacy Policy</a>
+      </nav>
+    </header>
+    <div class="version-banner" role="note" aria-label="Documentation version">
+      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-24 (commit <code>6ea9e9fcf3</code>)</span>
+      <span>No scripts · No telemetry · <a href="../az-index.html">A–Z Index</a></span>
+    </div>
+    <main id="main" tabindex="-1">
+      <article class="overview doc-body">
+        <nav class="breadcrumbs" aria-label="Breadcrumb">
+          <a href="../index.html">Manual</a>
+          <span aria-hidden="true">/</span>
+          <a href="../section-graphs.html">Graphs &amp; Page Layouts</a>
+          <span aria-hidden="true">/</span>
+          <span aria-current="page">Graphs, Scales &amp; Palettes Registry</span>
+        </nav>
+        <h1 id="page-title" tabindex="-1">Graphs, Scales &amp; Palettes Registry</h1>
+        <nav class="toc" aria-label="On this page">
+          <p class="toc-title">On this page</p>
+          <ul>
+            <li><a href="#graph-kinds">Graph Kinds &amp; Diagnostic Plots</a></li>
+            <li><a href="#graph-type-options">Graph Type Chooser Options (GRAPH_TYPE_OPTIONS)</a></li>
+            <li><a href="#frame-presets">Axis Frame Presets (FramePreset)</a></li>
+            <li><a href="#axis-scales">Axis Scale Bijections (AxisScale)</a></li>
+            <li><a href="#palettes">Qualitative Colour Palettes (PaletteId)</a></li>
+            <li><a href="#colormaps">Continuous Perceptual Colormaps (ColormapId)</a></li>
+            <li><a href="#graph-layout-features">Graphing, Annotation &amp; Page Layout Capabilities</a></li>
+          </ul>
+        </nav>
+<p class="lead">Registry of <strong>14</strong> primary and diagnostic graph kinds, <strong>21</strong> graph preset options, axis scales, frame presets, qualitative colour palettes, and continuous colormaps.</p>
+<h2 id="graph-kinds" tabindex="-1">Graph Kinds &amp; Diagnostic Plots</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Slug</th><th>Graph Kind</th><th>Description</th></tr></thead>
+<tbody>
+<tr id="graph-xy" tabindex="-1"><td><code>xy</code></td><td>XY Scatter / Line / Fitted Curve</td><td>Continuous X vs Y scatter, connected lines, splines, area fills, spaghetti replicate trajectories, composite XY bars with series nudging, and decoupled subset-fit overlays.</td></tr>
+<tr id="graph-column" tabindex="-1"><td><code>column</code></td><td>Column Bar / Box / Violin / Dot</td><td>One-way vertical or horizontal categorical comparisons with bar, box, violin, raincloud, beeswarm, or paired before-after lines.</td></tr>
+<tr id="graph-grouped" tabindex="-1"><td><code>grouped</code></td><td>Grouped Multi-Factor Figure</td><td>Clustered, separated, stacked, or superimposed multi-factor vertical or horizontal (population pyramid) bar and point figures.</td></tr>
+<tr id="graph-contingency" tabindex="-1"><td><code>contingency</code></td><td>Contingency Bar / Stacked Proportions</td><td>Categorical count or percentage bars from contingency tables.</td></tr>
+<tr id="graph-parts-of-whole" tabindex="-1"><td><code>parts-of-whole</code></td><td>Parts of Whole (Pie / Donut / Waffle)</td><td>Pie, donut, stacked fraction bar, or 10x10 waffle chart.</td></tr>
+<tr id="graph-survival" tabindex="-1"><td><code>survival</code></td><td>Kaplan–Meier Survival Curve</td><td>Kaplan–Meier staircase or direct trajectories (survival % / cumulative event % / fraction) with censoring ticks, Greenwood SEM/95% CI bands, and risk tables.</td></tr>
+<tr id="graph-multiple-variables" tabindex="-1"><td><code>multiple-variables</code></td><td>Multiple Variables Bubble / Matrix</td><td>Multivariate bubble scatter or categorical summary mapping continuous/categorical axes, colour, size, hulls, and confidence ellipses.</td></tr>
+<tr id="graph-diagnostic-heatmap" tabindex="-1"><td><code>diagnostic-heatmap</code></td><td>Diagnostic: Heatmap</td><td>Color-mapped 2D matrix with configurable row/column label sources, 0°/45°/90° rotated column headers, cell annotations, and tile gaps.</td></tr>
+<tr id="graph-diagnostic-volcano" tabindex="-1"><td><code>diagnostic-volcano</code></td><td>Diagnostic: Volcano Plot</td><td>Effect fold-change or difference vs -log10(p) / -log10(q) significance.</td></tr>
+<tr id="graph-diagnostic-bland-altman" tabindex="-1"><td><code>diagnostic-bland-altman</code></td><td>Diagnostic: Bland–Altman Plot</td><td>Difference/ratio vs average method-comparison plot with bias and 95% LoA.</td></tr>
+<tr id="graph-diagnostic-roc-curve" tabindex="-1"><td><code>diagnostic-roc-curve</code></td><td>Diagnostic: ROC Curve</td><td>Sensitivity vs 1 - Specificity receiver operating characteristic curve.</td></tr>
+<tr id="graph-diagnostic-forest-plot" tabindex="-1"><td><code>diagnostic-forest-plot</code></td><td>Diagnostic: Forest Plot</td><td>Horizontal effect-size, odds-ratio, or hazard-ratio plot from summary or study bounds with optional pooled summary diamond.</td></tr>
+<tr id="graph-diagnostic-residual-plot" tabindex="-1"><td><code>diagnostic-residual-plot</code></td><td>Diagnostic: Residual Plot</td><td>Regression residuals vs predicted Y or X scatter diagnostic.</td></tr>
+<tr id="graph-diagnostic-normal-qq-plot" tabindex="-1"><td><code>diagnostic-normal-qq-plot</code></td><td>Diagnostic: Normal Q–Q Plot</td><td>Theoretical normal quantiles vs observed/residual quantiles.</td></tr>
+</tbody>
+</table></div>
+<h2 id="graph-type-options" tabindex="-1">Graph Type Chooser Options (GRAPH_TYPE_OPTIONS)</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Option ID</th><th>Label</th><th>Compatible Tables</th><th>Summary</th></tr></thead>
+<tbody>
+<tr id="graph-option-xy-scatter" tabindex="-1"><td><code>xy.scatter</code></td><td>XY Scatter (Points Only)</td><td>XY</td><td>Individual replicate markers or Mean +/- SD error bars</td></tr>
+<tr id="graph-option-xy-scatter_line" tabindex="-1"><td><code>xy.scatter_line</code></td><td>XY Points + Connecting Lines</td><td>XY</td><td>Point-to-point or spline curve connecting series points</td></tr>
+<tr id="graph-option-col-bar_replicates" tabindex="-1"><td><code>col.bar_replicates</code></td><td>Bar with Individual Points</td><td>Column, Nested</td><td>Mean/Median bar + deterministic beeswarm replicate overlay</td></tr>
+<tr id="graph-option-col-before_after" tabindex="-1"><td><code>col.before_after</code></td><td>Before-After Paired Lines</td><td>Column</td><td>Connect matched subjects across paired conditions</td></tr>
+<tr id="graph-option-col-box_whisker" tabindex="-1"><td><code>col.box_whisker</code></td><td>Box and Whiskers (Tukey / Min-Max)</td><td>Column, Grouped</td><td>Median, IQR box, Tukey whiskers, and outlier points</td></tr>
+<tr id="graph-option-col-violin" tabindex="-1"><td><code>col.violin</code></td><td>Violin Plot</td><td>Column, Grouped</td><td>Kernel density contour clipped to observed data range</td></tr>
+<tr id="graph-option-col-raincloud" tabindex="-1"><td><code>col.raincloud</code></td><td>Raincloud Plot (Half-Violin + Points)</td><td>Column, Grouped</td><td>Half-violin kernel density with aligned individual replicate points</td></tr>
+<tr id="graph-option-col-aligned_dot" tabindex="-1"><td><code>col.aligned_dot</code></td><td>Scatter Dot Plot + Crossbar</td><td>Column, Nested</td><td>Beeswarm or aligned points with Mean/Median summary line</td></tr>
+<tr id="graph-option-grouped-interleaved" tabindex="-1"><td><code>grouped.interleaved</code></td><td>Grouped Interleaved Bars</td><td>Grouped, Contingency</td><td>Clustered bars across Row Factor levels with error bars</td></tr>
+<tr id="graph-option-grouped-stacked" tabindex="-1"><td><code>grouped.stacked</code></td><td>Grouped / Contingency Stacked</td><td>Grouped, Contingency</td><td>Stacked component bars across categorical rows</td></tr>
+<tr id="graph-option-grouped-superimposed" tabindex="-1"><td><code>grouped.superimposed</code></td><td>Grouped Superimposed</td><td>Grouped</td><td>Overlaid series across Row Factor levels for direct comparison</td></tr>
+<tr id="graph-option-survival-km" tabindex="-1"><td><code>survival.km</code></td><td>Kaplan-Meier Survival Curve</td><td>Survival</td><td>Step survival function with censoring ticks &amp; Greenwood CIs</td></tr>
+<tr id="graph-option-parts-donut" tabindex="-1"><td><code>parts.donut</code></td><td>Donut / Pie Parts of Whole</td><td>Parts of Whole</td><td>Proportional slices or 10x10 waffle grid with center total</td></tr>
+<tr id="graph-option-mv-bubble" tabindex="-1"><td><code>mv.bubble</code></td><td>Bubble Plot (5-Channel Multivariate)</td><td>Multiple Variables</td><td>Map X, Y, Color (categorical/continuous), Size, and Label</td></tr>
+<tr id="graph-option-diag-heatmap" tabindex="-1"><td><code>diag.heatmap</code></td><td>Heatmap (2D Matrix)</td><td>Grouped, Multiple Variables</td><td>Perceptual Viridis / Cividis / Diverging tile grid</td></tr>
+<tr id="graph-option-diag-volcano" tabindex="-1"><td><code>diag.volcano</code></td><td>Volcano Plot</td><td>XY, Multiple Variables</td><td>Log2 fold change vs -log10(q) with dual threshold cutoffs</td></tr>
+<tr id="graph-option-diag-bland_altman" tabindex="-1"><td><code>diag.bland_altman</code></td><td>Bland-Altman Method Comparison</td><td>Column, XY</td><td>Mean vs Difference with bias and +/- 1.96 SD limits</td></tr>
+<tr id="graph-option-diag-roc" tabindex="-1"><td><code>diag.roc</code></td><td>ROC Curve Diagnostic</td><td>Column, XY</td><td>Sensitivity vs 1-Specificity with diagonal identity line</td></tr>
+<tr id="graph-option-diag-forest" tabindex="-1"><td><code>diag.forest</code></td><td>Forest Plot (Effects &amp; 95% CIs)</td><td>Grouped, Multiple Variables</td><td>Horizontal point-estimate and confidence-interval whiskers</td></tr>
+<tr id="graph-option-diag-residual" tabindex="-1"><td><code>diag.residual</code></td><td>Residual Diagnostic Plot</td><td>XY, Column, Grouped, Multiple Variables</td><td>Fitted/predicted vs residual scatter diagnostic</td></tr>
+<tr id="graph-option-diag-normal_qq" tabindex="-1"><td><code>diag.normal_qq</code></td><td>Normal Q-Q Plot</td><td>XY, Column, Grouped, Multiple Variables</td><td>Theoretical normal quantiles vs standardized residuals</td></tr>
+</tbody>
+</table></div>
+<h2 id="frame-presets" tabindex="-1">Axis Frame Presets (FramePreset)</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Preset</th><th>Geometry</th></tr></thead>
+<tbody>
+<tr id="frame-open-l" tabindex="-1"><td><code>open-l</code></td><td>Open L-shaped bottom X and left Y spines.</td></tr>
+<tr id="frame-offset-range-tufte" tabindex="-1"><td><code>offset-range-tufte</code></td><td>Offset spines trimmed to the plotted data range.</td></tr>
+<tr id="frame-plain-boxed" tabindex="-1"><td><code>plain-boxed</code></td><td>Enclosed four-sided frame around the plot area.</td></tr>
+<tr id="frame-dual-y-secondary-right" tabindex="-1"><td><code>dual-y-secondary-right</code></td><td>Left primary Y axis paired with an independent right Y2 axis.</td></tr>
+<tr id="frame-origin-crossing" tabindex="-1"><td><code>origin-crossing</code></td><td>Axes intersecting directly at data coordinate (0, 0).</td></tr>
+</tbody>
+</table></div>
+<h2 id="axis-scales" tabindex="-1">Axis Scale Bijections (AxisScale)</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Scale</th><th>Domain &amp; Transform</th></tr></thead>
+<tbody>
+<tr id="scale-linear" tabindex="-1"><td><code>linear</code></td><td>Identity g(u) = u over finite reals.</td></tr>
+<tr id="scale-log10" tabindex="-1"><td><code>log10</code></td><td>Base-10 logarithm over u &gt; 0.</td></tr>
+<tr id="scale-log2" tabindex="-1"><td><code>log2</code></td><td>Base-2 logarithm over u &gt; 0.</td></tr>
+<tr id="scale-ln" tabindex="-1"><td><code>ln</code></td><td>Natural logarithm over u &gt; 0.</td></tr>
+<tr id="scale-logit-percent" tabindex="-1"><td><code>logit-percent</code></td><td>Logit ln(p / (1 - p)) over u in (0, 100).</td></tr>
+<tr id="scale-logit-proportion" tabindex="-1"><td><code>logit-proportion</code></td><td>Logit ln(p / (1 - p)) over u in (0, 1).</td></tr>
+<tr id="scale-probit" tabindex="-1"><td><code>probit</code></td><td>Normal probability quantile transform over u in (0, 100).</td></tr>
+<tr id="scale-reciprocal" tabindex="-1"><td><code>reciprocal</code></td><td>Reciprocal 1 / u over nonzero finite u.</td></tr>
+</tbody>
+</table></div>
+<h2 id="palettes" tabindex="-1">Qualitative Colour Palettes (PaletteId)</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Palette</th><th>Swatches (Hex)</th></tr></thead>
+<tbody>
+<tr id="palette-okabe-ito-colorblind-safe" tabindex="-1"><td>Okabe-Ito (Colorblind-Safe)</td><td><code>#0072B2 #D55E00 #009E73 #E69F00 #56B4E9 #CC79A7 #F0E442 #000000</code></td></tr>
+<tr id="palette-paul-tol-bright" tabindex="-1"><td>Paul Tol Bright</td><td><code>#4477AA #EE6677 #228833 #CCBB44 #66CCEE #AA3377 #BBBBBB</code></td></tr>
+<tr id="palette-paul-tol-muted" tabindex="-1"><td>Paul Tol Muted</td><td><code>#332288 #88CCEE #44AA99 #117733 #999933 #DDCC77 #CC6677 #882255 #AA4499</code></td></tr>
+<tr id="palette-paul-tol-high-contrast" tabindex="-1"><td>Paul Tol High-Contrast</td><td><code>#004488 #DDAA33 #BB5566</code></td></tr>
+<tr id="palette-paul-tol-vibrant" tabindex="-1"><td>Paul Tol Vibrant</td><td><code>#0077BB #33BBEE #009988 #EE7733 #CC3311 #EE3377 #BBBBBB</code></td></tr>
+<tr id="palette-monochrome-print" tabindex="-1"><td>Monochrome Print</td><td><code>#141414 #525252 #858585 #B8B8B8 #333333 #6B6B6B #9E9E9E #D1D1D1</code></td></tr>
+</tbody>
+</table></div>
+<h2 id="colormaps" tabindex="-1">Continuous Perceptual Colormaps (ColormapId)</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Colormap</th><th>Control Stops</th></tr></thead>
+<tbody>
+<tr id="colormap-viridis" tabindex="-1"><td>Viridis</td><td>17 uniform Oklab stops</td></tr>
+<tr id="colormap-cividis-cvd-optimized" tabindex="-1"><td>Cividis (CVD-Optimized)</td><td>17 uniform Oklab stops</td></tr>
+<tr id="colormap-plasma" tabindex="-1"><td>Plasma</td><td>17 uniform Oklab stops</td></tr>
+<tr id="colormap-diverging-blue-red" tabindex="-1"><td>Diverging Blue-Red</td><td>9 uniform Oklab stops</td></tr>
+<tr id="colormap-grayscale" tabindex="-1"><td>Grayscale</td><td>2 uniform Oklab stops</td></tr>
+</tbody>
+</table></div>
+<h2 id="graph-layout-features" tabindex="-1">Graphing, Annotation &amp; Page Layout Capabilities</h2>
+<p>See <a href="../graphs.html">Graphs &amp; Page Layouts</a> for full engine command and workflow guidance across the features below:</p>
+<ul>
+  <li><strong>Composite XY, series nudging &amp; spaghetti trajectories:</strong> Mix <code>ScatterAndLine</code> and <code>BarWithReplicates</code> series on <code>Xy</code> graphs, shift series via <code>SeriesOffsetSpec</code> (<code>x_data</code>, <code>x_pt</code>, <code>y_pt</code>), trace longitudinal <code>IndividualReplicateTrajectories</code>, or set <code>show_raw_data: false</code> for decoupled subset-fit curve overlays.</li>
+  <li><strong>Horizontal orientation &amp; population pyramids:</strong> Set <code>CartesianOrientation::Horizontal</code> on <code>Column</code> and <code>Grouped</code> plots paired with <code>TickLabelFormat::AbsoluteDecimal</code> (<code>|x|</code>) for symmetric diverging pyramids.</li>
+  <li><strong>Kaplan–Meier modes &amp; Greenwood intervals:</strong> Select <code>SurvivalDisplayMetric</code> (<code>PercentSurvival</code>, <code>PercentCumulativeEvent</code>, <code>FractionSurvival</code>), toggle staircase vs. direct segments, and choose Greenwood <code>Sem</code> or <code>ConfidenceInterval95</code> error displays.</li>
+  <li><strong>Forest study bounds &amp; vertical-label heatmaps:</strong> Plot Forest study confidence intervals with optional pooled summary diamonds (<code>forest_show_pooled_diamond</code>), and configure <code>HeatmapLabelSpec</code> row/column label sources, <code>Horizontal0</code> / <code>Angled45</code> / <code>Vertical90</code> column rotation, cell annotations, and <code>cell_gap_pt</code>.</li>
+  <li><strong>Batch per-dataset creation &amp; selective style cloning:</strong> Create one graph sheet per dataset in one undo step (<code>one_per_data_set</code> on <code>graph.create</code>), and selectively clone palette, frame/axes, or error-bar/legend settings via <code>graph.applyStyleFrom</code>.</li>
+  <li><strong>Live rectangular tables, TeX equations &amp; embedded raster images:</strong> Place transposable row/column slices via <code>EmbeddedResultTable</code> and <code>LiveTable</code> (<code>selected_rows</code>, <code>selected_cols</code>, <code>EmbeddedTableStyle</code>), live <code>ModelEquation</code> TeX boxes, and content-addressed <code>EmbeddedImage</code> assets (<code>graph.insertImage</code>, <code>layout.insertImage</code>, <code>edit.pasteImage</code>).</li>
+  <li><strong>Page Layout scale equalization, Z-order &amp; inset layers:</strong> Equalize inner plot scaling across panels with <code>layout.equalizeScaling</code> (<code>MatchSmallest</code>, <code>MatchLargest</code>, <code>ExplicitPercent</code>), adjust panel depth with <code>layout.reorderPanel</code>, and layer transparent axis-free inset graphs.</li>
+</ul>
+        <nav class="pager" aria-label="Previous and next pages">
+          <a href="../graphs.html">← Graphs &amp; Page Layouts</a>
+          <a href="../section-qol.html">Calculators &amp; quality-of-life tools →</a>
+        </nav>
+      </article>
+    </main>
+    <footer class="site-footer">
+      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>
+      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
+      <p class="privacy">CurveBook runs locally and collects no telemetry. Read <a href="../../../privacy.html">Privacy, Licences &amp; Security</a> · <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a></p>
+    </footer>
+    <div class="window-statusbar" aria-label="Application summary">
+      <span class="status-cell is-grow">Ready · Offline Desktop · CLI · Local MCP</span>
+      <span class="status-cell">Pure Rust</span>
+      <span class="status-cell">Zero Telemetry</span>
+      <span class="status-cell">MIT / Apache-2.0</span>
+    </div>
+  </div>
+</body>
+</html>

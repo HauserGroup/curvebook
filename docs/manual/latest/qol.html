@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Scientific calculators, quick statistics, and workspace quality-of-life capabilities.">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'">
+  <meta name="color-scheme" content="light">
+  <title>Calculators &amp; Quality-of-Life Capabilities — CurveBook Documentation</title>
+  <link rel="canonical" href="https://hausergroup.github.io/curvebook/manual/latest/qol.html">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="CurveBook">
+  <meta property="og:title" content="Calculators &amp; Quality-of-Life Capabilities — CurveBook Documentation">
+  <meta property="og:description" content="Scientific calculators, quick statistics, and workspace quality-of-life capabilities.">
+  <meta property="og:url" content="https://hausergroup.github.io/curvebook/manual/latest/qol.html">
+  <meta property="og:image" content="https://hausergroup.github.io/curvebook/images/workspace-split-fit.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" type="image/png" href="../../images/curvebook.png">
+  <link rel="stylesheet" href="../../site.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="desktop-window wrap">
+    <header class="site-header">
+      <div class="title-bar">
+        <div class="wordmark">
+          <img src="../../images/curvebook.png" width="64" height="64" alt="">
+          <span>CurveBook · Reference Manual</span>
+        </div>
+        <span class="window-status">Calculators &amp; quality-of-life tools</span>
+      </div>
+      <nav aria-label="Manual navigation">
+        <a href="index.html">Manual Home</a>
+        <a href="section-get-started.html">Get Started</a>
+        <a href="section-analyses.html" aria-current="page">Reference</a>
+        <a href="section-automation.html">Automation</a>
+        <a href="registry/commands.html">Commands &amp; Tools</a>
+        <a href="az-index.html">A–Z Index</a>
+        <a href="section-contribute.html">Contribute</a>
+        <a href="../../index.html">Product Home</a>
+        <a href="../../privacy.html">Privacy Policy</a>
+      </nav>
+    </header>
+    <div class="version-banner" role="note" aria-label="Documentation version">
+      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-24 (commit <code>6ea9e9fcf3</code>)</span>
+      <span>No scripts · No telemetry · <a href="az-index.html">A–Z Index</a></span>
+    </div>
+    <main id="main" tabindex="-1">
+      <article class="overview doc-body">
+        <nav class="breadcrumbs" aria-label="Breadcrumb">
+          <a href="index.html">Manual</a>
+          <span aria-hidden="true">/</span>
+          <a href="section-qol.html">Calculators &amp; quality-of-life tools</a>
+          <span aria-hidden="true">/</span>
+          <span aria-current="page">Calculators &amp; Quality-of-Life Capabilities</span>
+        </nav>
+        <nav class="toc" aria-label="On this page">
+          <p class="toc-title">On this page</p>
+          <ul>
+            <li><a href="#quick-statistics">Selection Quick Statistics</a></li>
+            <li><a href="#active-qol">Active Quality-of-Life Capabilities (R9)</a></li>
+          </ul>
+        </nav>
+<h1 id="calculators--quality-of-life-capabilities" tabindex="-1">Calculators &amp; Quality-of-Life Capabilities</h1>
+<p>CurveBook augments its statistical and graphing core with non-destructive workflow tools and live diagnostics designed to keep raw measurements intact, maintain reproducible provenance, and surface assumption evidence cleanly.</p>
+<hr>
+<h2 id="quick-statistics" tabindex="-1">Selection Quick Statistics</h2>
+<p>Selecting a single cell or rectangular range <code>[r0..=r1, flat0..=flat1]</code> in any <code>DataSheet</code> computes live summary statistics over all included finite numeric values inside the selection (<code>SelectionQuickStats</code> / <code>GridQuickStats</code> in <code>crates/ui-egui/src/grid_view.rs</code>):</p>
+<ul>
+<li><strong>Computed fields:</strong> <code>selected_cells</code> (total cell count in selection), <code>n</code> (active finite numeric values), <code>excluded</code> (count of excluded cells inside the selection), <code>sum</code>, <code>mean</code>, <code>sd</code> (sample standard deviation, <span class="math">n - 1</span> denominator; <code>None</code> when <span class="math">n &lt; 2</span>), <code>sem</code> (<span class="math"><span class="math-text">SD</span>/√<span class="math-rad">n</span></span>; <code>None</code> when <span class="math">n &lt; 2</span>), <code>median</code>, <code>min</code>, and <code>max</code>.</li>
+<li><strong>Filtering semantics:</strong> Excluded cells (<code>excluded: true</code>), blank cells, text cells, and non-finite values are excluded from <code>n</code> and every summary moment without altering document state.</li>
+</ul>
+<hr>
+<h2 id="active-qol" tabindex="-1">Active Quality-of-Life Capabilities (<code>R9</code>)</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>ID</th><th>Capability</th><th>Engine / UI Seam</th><th>Scope &amp; Behavior</th></tr></thead>
+<tbody>
+<tr><td><strong>QOL-1</strong></td><td><strong>Non-destructive table archetype conversion</strong></td><td><code>table.convertArchetype</code></td><td>Converts <code>DataSheet</code> layouts among <code>Column</code>, <code>Grouped</code>, <code>Xy</code>, <code>MultipleVariables</code>, and <code>Contingency</code> with a non-mutating <code>ConversionPreview</code> (<code>preserved_cells</code>, <code>dropped_cells</code>, <code>preserved_exclusions</code>, <code>warnings</code>, <code>lossy</code>), preserving <code>excluded</code> flags and remapping <code>CellExclusionNote</code>s. Lossy conversions require explicit <code>allow_lossy: true</code>.</td></tr>
+<tr><td><strong>QOL-2</strong></td><td><strong>96/384-well microplate &amp; tidy long-to-wide reshape</strong></td><td><code>table.importPlateMap</code>, <code>table.importTidyLong</code></td><td>Maps <code>8×12</code> and <code>16×24</code> plate grids or tidy long observational records directly into typed <code>Xy</code>, <code>Column</code>, or <code>Grouped</code> replicate subcolumns during import or paste.</td></tr>
+<tr><td><strong>QOL-3</strong></td><td><strong>Auditable cell exclusion reasons &amp; provenance tags</strong></td><td><code>table.excludeCellsWithReason</code>, <code>table.exclusionAuditReport</code></td><td>Attaches sparse <code>(reason_tag, note, timestamp_utc)</code> <code>CellExclusionNote</code> records alongside boolean <code>excluded</code> masks without changing numerical results or requiring reasons on plain <code>Cmd/Ctrl+E</code> toggles.</td></tr>
+<tr><td><strong>QOL-4</strong></td><td><strong>Side-by-side split workspace</strong></td><td><code>ui.split.toggle</code> (and inspector/workspace layout)</td><td>Docks a live <code>Graph</code> or <code>Result</code> pane adjacent to the active <code>Data</code> or <code>Result</code> sheet so cell edits, exclusions, and analysis/fit parameter updates re-render immediately through the reactive DAG.</td></tr>
+<tr><td><strong>QOL-5</strong></td><td><strong>Two-way data-to-graph point brushing</strong></td><td><code>SourceCellId</code> metadata on <code>ChartScene</code></td><td>Links plotted point glyphs (<code>sheet_id, row, col, subcol</code>) with source grid cells for hover inspection, split-pane highlighting, jumping to source coordinates, and context-menu observation exclusion/inclusion.</td></tr>
+<tr><td><strong>QOL-6</strong></td><td><strong>One-click statistical reporting generator</strong></td><td><code>result.generateReport</code></td><td>Produces deterministic, read-only ICMJE/ARRIVE-aligned statistical methods and summary paragraphs in <code>plain</code>, <code>markdown</code>, or <code>latex</code> directly from stored <code>AnalysisSpec</code>, <code>DataSheet</code>, and <code>ResultSheet</code> values without modifying numbers.</td></tr>
+<tr><td><strong>QOL-7</strong></td><td><strong>Diagnostics-only inline assumption banners</strong></td><td><code>ResultSheet::checklist</code>, <code>ui.result.inspectDiagnostics</code></td><td>Summarizes executed assumption checks (normality, variance homogeneity, sphericity, proportional hazards, separation, collinearity, lack of fit, runs) with status (<code>Pass</code>, <code>Warn</code>, <code>Fail</code>, <code>Inconclusive</code>, <code>NotApplicable</code>), diagnostic statistics, and methodological limits. Strictly <strong>diagnostics-only</strong>: never recommends alternative tests, ranks procedures, or triggers automatic exclusions/remediations.</td></tr>
+<tr><td><strong>QOL-8</strong></td><td><strong>Journal figure dimension &amp; typography lock presets</strong></td><td><code>graph.applyCanvasPreset</code>, <code>layout.applyCanvasPreset</code>, <code>graph.preflightCheck</code></td><td>Resizes graphs and page layouts to standard publication column targets (<code>88 mm</code>, <code>130 mm</code>, <code>180 mm</code>, full page, <code>16:9</code>, poster) with <code>CanvasResizeMode::KeepTypographyPt</code> keeping point typography and hairline strokes intact, plus export preflight warnings below <code>5.0 pt</code> text or <code>0.25 pt</code> strokes.</td></tr>
+<tr><td><strong>QOL-9</strong></td><td><strong>Live CVD &amp; grayscale canvas preview</strong></td><td><code>CanvasPreviewFilter</code> (<code>ui.previewFilter.set</code>)</td><td>Applies Machado (2009) <code>Deuteranopia</code>, <code>Protanopia</code>, <code>Tritanopia</code>, or <code>GrayscalePrint</code> viewport filters non-destructively on the rendered canvas without modifying stored figure colours or exported files.</td></tr>
+<tr><td><strong>QOL-12</strong></td><td><strong>Categorical &amp; continuous analysis completions</strong></td><td><a href="registry/tables.html#analysis-kinds">Analysis Kinds Registry</a></td><td>Adds <code>ResultTabKind::MultipleComparisons</code> post-hoc tabs inside <code>FactorialAnova</code>, weighted Cohen&#39;s <span class="math">κ</span> (<code>Unweighted</code>, <code>Linear</code>, <code>Quadratic</code>) &amp; Fleiss&#39; <span class="math">κ</span>, inverted Altman <code>NNTB</code>/<code>NNTH</code> bounds from Newcombe RD CIs, McNemar discordant-pair OR CIs, custom expected proportions for <code>PartsOfWhole</code> <span class="math">χ<sup>2</sup></span> GOF, exact one-sample Binomial &amp; paired Sign tests, exact <span class="math">χ<sup>2</sup></span> <code>sd_ci</code>, and direct <code>MeanSdN</code> / <code>MeanSemN</code> support in two-group and one-sample <em>t</em>-tests.</td></tr>
+<tr><td><strong>QOL-14</strong></td><td><strong>Seeded randomization, subset sampling &amp; distribution generation</strong></td><td><code>table.randomizeGroups</code>, <code>table.randomSampleRows</code>, <code>table.simulateDistributions</code></td><td>Performs deterministic seeded complete or permuted-block group randomization (writing ARRIVE randomization keys into <code>InfoSheet</code>), uniform/stratified <span class="math">k</span>-of-<span class="math">N</span> sampling without replacement, and seeded univariate distribution simulation over <code>DeterministicRng</code>.</td></tr>
+<tr><td><strong>QOL-16</strong></td><td><strong>Live <span class="math"><span class="math-text">TeX</span></span> model equation annotations</strong></td><td><code>graph.addAnnotation</code> (<code>model_equation</code>), <code>ui.graph.insertModelEquation</code></td><td>Places symbolic or live coefficient-substituted <span class="math"><span class="math-text">TeX</span></span>-subset regression equations on fitted <code>XY</code> graphs (<code>R10.19</code> Knuth TeXbook Appendix G 2D box typesetting across screen, SVG, PDF, and EMF), updating automatically when upstream fits recalculate.</td></tr>
+</tbody>
+</table></div>
+<div class="callout callout-note" role="note">
+<p class="callout-title">Note</p>
+<p>Instant table-free distribution/Bayesian calculators (<code>QOL-13</code>) and wet-lab molarity/dilution/radiochemical calculators (<code>QOL-15</code>), along with standalone browser-folder WASM collaboration extensions (<code>QOL-10</code>, <code>QOL-11</code>), are deferred outside the Beta release scope and are not registered as active commands.</p>
+</div>
+<p>See <a href="graphs.html">Graphs &amp; Page Layouts</a>, <a href="registry/tables.html#analysis-kinds">Analysis Kinds Registry</a>, and <a href="registry/commands.html">Command Reference</a> for command arguments and rendering details.</p>
+        <nav class="pager" aria-label="Previous and next pages">
+          <a href="section-qol.html">← Calculators &amp; quality-of-life tools</a>
+          <a href="section-files.html">Files, import &amp; export →</a>
+        </nav>
+      </article>
+    </main>
+    <footer class="site-footer">
+      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>
+      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
+      <p class="privacy">CurveBook runs locally and collects no telemetry. Read <a href="../../privacy.html">Privacy, Licences &amp; Security</a> · <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a></p>
+    </footer>
+    <div class="window-statusbar" aria-label="Application summary">
+      <span class="status-cell is-grow">Ready · Offline Desktop · CLI · Local MCP</span>
+      <span class="status-cell">Pure Rust</span>
+      <span class="status-cell">Zero Telemetry</span>
+      <span class="status-cell">MIT / Apache-2.0</span>
+    </div>
+  </div>
+</body>
+</html>

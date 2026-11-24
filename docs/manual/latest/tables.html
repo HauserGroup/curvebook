@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Table archetypes, replicate subcolumn modes, Calculated Variables formula language, and data transforms.">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'">
+  <meta name="color-scheme" content="light">
+  <title>Data Tables, Calculated Variables &amp; Transforms — CurveBook Documentation</title>
+  <link rel="canonical" href="https://hausergroup.github.io/curvebook/manual/latest/tables.html">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="CurveBook">
+  <meta property="og:title" content="Data Tables, Calculated Variables &amp; Transforms — CurveBook Documentation">
+  <meta property="og:description" content="Table archetypes, replicate subcolumn modes, Calculated Variables formula language, and data transforms.">
+  <meta property="og:url" content="https://hausergroup.github.io/curvebook/manual/latest/tables.html">
+  <meta property="og:image" content="https://hausergroup.github.io/curvebook/images/workspace-split-fit.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" type="image/png" href="../../images/curvebook.png">
+  <link rel="stylesheet" href="../../site.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="desktop-window wrap">
+    <header class="site-header">
+      <div class="title-bar">
+        <div class="wordmark">
+          <img src="../../images/curvebook.png" width="64" height="64" alt="">
+          <span>CurveBook · Reference Manual</span>
+        </div>
+        <span class="window-status">Data tables &amp; formulas</span>
+      </div>
+      <nav aria-label="Manual navigation">
+        <a href="index.html">Manual Home</a>
+        <a href="section-get-started.html">Get Started</a>
+        <a href="section-analyses.html" aria-current="page">Reference</a>
+        <a href="section-automation.html">Automation</a>
+        <a href="registry/commands.html">Commands &amp; Tools</a>
+        <a href="az-index.html">A–Z Index</a>
+        <a href="section-contribute.html">Contribute</a>
+        <a href="../../index.html">Product Home</a>
+        <a href="../../privacy.html">Privacy Policy</a>
+      </nav>
+    </header>
+    <div class="version-banner" role="note" aria-label="Documentation version">
+      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-24 (commit <code>6ea9e9fcf3</code>)</span>
+      <span>No scripts · No telemetry · <a href="az-index.html">A–Z Index</a></span>
+    </div>
+    <main id="main" tabindex="-1">
+      <article class="overview doc-body">
+        <nav class="breadcrumbs" aria-label="Breadcrumb">
+          <a href="index.html">Manual</a>
+          <span aria-hidden="true">/</span>
+          <a href="section-tables.html">Data tables &amp; formulas</a>
+          <span aria-hidden="true">/</span>
+          <span aria-current="page">Data Tables, Calculated Variables &amp; Transforms</span>
+        </nav>
+        <nav class="toc" aria-label="On this page">
+          <p class="toc-title">On this page</p>
+          <ul>
+            <li><a href="#table-archetypes">The Eight Table Archetypes (TableArchetype)</a></li>
+            <li><a href="#subcolumn-modes">— Subcolumn Modes &amp; Pre-Summarized Entry (SubcolumnMode)</a></li>
+            <li><a href="#calculated-variables">= Calculated Variables &amp; Formula Language</a></li>
+            <li><a href="#formula-references">— Formula References &amp; Constants</a></li>
+            <li><a href="#formula-operators">— Operators &amp; Three-Valued Logic</a></li>
+            <li><a href="#formula-functions">— Supported Functions &amp; Clauses</a></li>
+            <li><a href="#transforms-and-reshaping">Table Transforms, Reshaping &amp; Simulation</a></li>
+          </ul>
+        </nav>
+<h1 id="data-tables-calculated-variables--transforms" tabindex="-1">Data Tables, Calculated Variables &amp; Transforms</h1>
+<p>CurveBook separates experimental structure from visual styling through eight strictly typed table archetypes (<code>TableKind</code>), an AST-verified formula language for <code>=</code> Calculated Variables, and non-destructive transform and reshaping pipelines.</p>
+<hr>
+<h2 id="table-archetypes" tabindex="-1">The Eight Table Archetypes (<code>TableArchetype</code>)</h2>
+<p>Every <code>DataSheet</code> belongs to one <code>TableKind</code> (<code>crates/doc/src/archetypes.rs</code>):</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Table Archetype</th><th>Primary Purpose</th><th>Column &amp; Subcolumn Layout</th><th>Key Structural Fields</th></tr></thead>
+<tbody>
+<tr><td><code>Xy</code></td><td>Continuous predictor <span class="math">X</span> vs. response <span class="math">Y</span> (regression, correlation, curves, Bland–Altman, ROC, AUC)</td><td>Optional <span class="math">X</span> column (<code>Numbers</code>, <code>Dates</code>, <code>SequenceProgression</code>, <code>ElapsedTimes</code>, or omitted) + datasets <code>A, B, ...</code> supporting raw replicates or summary subcolumns</td><td><code>x_mode</code>, <code>x_title</code>, <code>data_sets</code>, <code>y_subcolumn_mode</code> (<code>SubcolumnMode</code>)</td></tr>
+<tr><td><code>Column</code></td><td>One-factor comparison across independent or matched groups (<code>t</code>-tests, one-way ANOVA, descriptive stats, normality, outliers, <em>P</em>-value stacks)</td><td>One column per group (<code>A, B, ...</code>); single-replicate or subcolumn summary modes</td><td><code>design_hint</code> (<code>UnpairedReplicates</code>, <code>PairedRepeatedMeasures</code>, <code>PrecomputedError</code>), <code>subcolumn_mode</code>, <code>row_titles</code></td></tr>
+<tr><td><code>Grouped</code></td><td>Two-way / three-way / multi-factor cell design (<code>Row Factor × Column Factor</code>, optional <code>C</code>-factor slice)</td><td>Row labels as levels of Factor A; dataset columns as Factor B (or B×C) with raw replicates or summary subcolumns per cell</td><td><code>row_factor_title</code>, <code>column_factor_title</code>, <code>three_way_grouping</code> (<code>Option&lt;ThreeWayColumnGrouping&gt;</code>), <code>subcolumn_mode</code></td></tr>
+<tr><td><code>Contingency</code></td><td>Cross-tabulated non-negative integer counts (<span class="math">χ<sup>2</sup></span>, Fisher exact, <span class="math">2 × 2</span> risk/odds ratios, McNemar, Cochran–Armitage, <span class="math">κ</span>)</td><td>Integer counts in <code>[row, column]</code>; non-negative whole numbers (<code>u64</code> semantics on analysis)</td><td><code>data_sets</code> (category columns), <code>row_titles</code> (category rows)</td></tr>
+<tr><td><code>Survival</code></td><td>Right-censored time-to-event outcomes (Kaplan–Meier, log-rank, Gehan–Breslow–Wilcoxon, trend, cohort HR)</td><td>Shared follow-up time column + cohort columns recording event/censor indicator (<code>1</code> = event, <code>0</code> = censored by default)</td><td><code>time_title</code>, <code>times</code>, <code>cohorts</code>, <code>event_code</code>, <code>censored_code</code></td></tr>
+<tr><td><code>PartsOfWhole</code></td><td>Proportions summing to a total (parts-of-whole charts, goodness-of-fit <span class="math">χ<sup>2</sup></span>, exact binomial proportion tests)</td><td>Single value column with <code>slice_labels</code> and category percentages/counts</td><td><code>slice_labels</code>, <code>data_sets</code></td></tr>
+<tr><td><code>MultipleVariables</code></td><td>Tidy observational data (<code>rows = subjects/records</code>, <code>columns = typed variables</code>) for GLMs, Cox PH, PCA, clustering, multifactor ANOVA, direct multi-group tests</td><td>Typed <code>VariableColumn</code>s with explicit <code>VariableRole</code> (<code>Continuous</code>, <code>Categorical</code>, <code>Label</code>, <code>Calculated</code>) and <code>VariableSource</code> (<code>Entered</code> or <code>Calculated { formula }</code>)</td><td><code>variables</code> (<code>role</code>, <code>role_inferred</code>, <code>level_order</code>, <code>source</code>), <code>row_titles</code></td></tr>
+<tr><td><code>Nested</code></td><td>Hierarchical cluster / nested designs (fixed treatment groups containing random biological subjects/litters/wells measured across technical replicates)</td><td>Top-level treatment groups containing <code>NestedGroupColumn</code> subclusters with technical replicate subcolumns</td><td><code>groups</code> (<code>Vec&lt;NestedGroupColumn&gt;</code>), <code>row_titles</code>, <code>row_titles_expanded</code></td></tr>
+</tbody>
+</table></div>
+<h3 id="subcolumn-modes" tabindex="-1">Subcolumn Modes &amp; Pre-Summarized Entry (<code>SubcolumnMode</code>)</h3>
+<p>Continuous tables (<code>Xy</code>, <code>Column</code>, <code>Grouped</code>, <code>Nested</code>) support eight <code>SubcolumnMode</code> representations (<code>crates/doc/src/cell.rs</code>):</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Mode</th><th>Subcolumns</th><th>Interpretation</th><th>Analysis Compatibility</th></tr></thead>
+<tbody>
+<tr><td><code>Single</code></td><td><code>1</code></td><td>Single value per row/cell</td><td>All standard analyses</td></tr>
+<tr><td><code>RawReplicates(usize)</code></td><td><code>n</code> (<code>1..=512</code>, <code>MAX_SUBCOLUMNS = 512</code>)</td><td>Individual raw technical/biological replicates (<code>Mean ± SD/SEM/CI</code> computed dynamically)</td><td>Full parametric, nonparametric, normality, residual diagnostics, ROBUST/ROUT</td></tr>
+<tr><td><code>MeanSdN</code></td><td><code>3</code> (<code>Mean</code>, <code>SD</code>, <code>N</code>)</td><td>Pre-summarized normal moments</td><td>One/two-sample <em>t</em>, one-way/Welch/Brown–Forsythe ANOVA, OLS/WLS/Deming/Nonlinear LS, Descriptive moments; rejected with <code>RequiresRawReplicates</code> for normality, ROUT/Grubbs, Kruskal–Wallis/Mann–Whitney</td></tr>
+<tr><td><code>MeanSemN</code></td><td><code>3</code> (<code>Mean</code>, <code>SEM</code>, <code>N</code>)</td><td>Pre-summarized mean, standard error, sample size (<span class="math"><span class="math-text">SD</span>= <span class="math-text">SEM</span>√<span class="math-rad">N</span></span>)</td><td>Same summary-capable routines as <code>MeanSdN</code></td></tr>
+<tr><td><code>MeanCvN</code></td><td><code>3</code> (<code>Mean</code>, <code>%CV</code>, <code>N</code>)</td><td>Mean paired with coefficient of variation and sample size (<span class="math"><span class="math-text">SD</span>= |<span class="math-text">Mean</span>|·%<span class="math-text">CV</span>/100</span>)</td><td>Same parametric moment reconstruction (<code>supports_parametric_moments</code>) and plotting</td></tr>
+<tr><td><code>MeanLowHigh</code></td><td><code>3</code> (<code>Mean</code>, <code>-Error</code>, <code>+Error</code>)</td><td>Mean with lower and upper error bounds</td><td>Plotting &amp; central-value extraction; rejected where full replicate observations or <code>N</code>/<code>SD</code> moments are required</td></tr>
+<tr><td><code>UpperLowerLimits</code></td><td><code>3</code> (<code>Mean</code>, <code>LowerLimit</code>, <code>UpperLimit</code>)</td><td>Central mean with explicit lower and upper bounds</td><td>Plotting &amp; <code>ExplicitErrorBounds</code>; rejected by replicate fit extraction</td></tr>
+<tr><td><code>MedianIqr</code></td><td><code>3</code> (<code>Median</code>, <code>Q1</code>, <code>Q3</code>)</td><td>Median and quartile bounds for box/error plotting</td><td>Plotting; rejected by replicate/parametric fit extraction</td></tr>
+</tbody>
+</table></div>
+<p><code>ReplicateStacking</code> controls how replicate columns stack or collapse during plotting and summary extraction (<code>SideBySide</code> vs <code>Stacked</code>).</p>
+<hr>
+<h2 id="calculated-variables" tabindex="-1"><code>=</code> Calculated Variables &amp; Formula Language</h2>
+<p>Tables support live formula evaluation (<code>table.setCalculatedVariable</code>) implemented cleanly in <code>crates/transform/src/formula/</code> (<code>parser.rs</code>, <code>eval.rs</code>, <code>dag.rs</code>).</p>
+<h3 id="formula-references" tabindex="-1">Formula References &amp; Constants</h3>
+<ul>
+<li><strong>Prefix:</strong> Formulas begin with <code>=</code> (leading <code>=</code> is stripped before AST parsing).</li>
+<li><strong>Variable &amp; Cell References:</strong>
+<ul>
+<li>Bare identifiers (<code>Conc</code>, <code>logConc</code>, <code>Ctrl_1</code>) or bracketed names (<code>[Blank Sub]</code>) matching column/variable titles.</li>
+<li>Explicit index or quoted name lookups: <code>col(&quot;Title&quot;)</code> or <code>col(idx)</code> (0-based or column letter mapping).</li>
+<li>Experiment metadata constants from linked <code>InfoSheet</code>s: <code>Info(&quot;Key&quot;)</code>.</li>
+<li>Row index builtins: <code>$row</code> (1-based row number) and <code>$index</code> (0-based row index).</li>
+<li>Archetype aliases: <code>X</code> and <code>Y</code> on <code>Xy</code> and <code>Survival</code> tables.</li>
+</ul>
+</li>
+<li><strong>Built-in Constants:</strong> <code>pi</code>, <code>e</code>, <code>tau</code> (<span class="math">2π</span>), <code>true</code> (<code>1.0</code>), <code>false</code> (<code>0.0</code>), <code>nan</code> (<code>Missing</code>). Matching column titles take precedence over <code>pi</code>/<code>e</code>/<code>tau</code> (exact case-sensitive match checked first for <code>e</code>).</li>
+<li><strong>Circular Dependency Guard:</strong> Cross-column formula references form an evaluation DAG (<code>formula/dag.rs</code>); self-references or multi-column cycles fail cleanly with <code>ErrorCode::CycleDetected</code>.</li>
+</ul>
+<h3 id="formula-operators" tabindex="-1">Operators &amp; Three-Valued Logic</h3>
+<div class="table-wrap"><table>
+<thead><tr><th>Precedence</th><th>Operators</th><th>Semantics</th></tr></thead>
+<tbody>
+<tr><td>Highest</td><td><code>^</code></td><td>Exponentiation (right-associative; domain errors propagate as <code>Missing</code>)</td></tr>
+<tr><td>Unary</td><td><code>+</code>, <code>-</code>, <code>!</code></td><td>Numeric sign flip; logical <code>!</code> maps <code>Missing</code> to <code>Missing</code>, <code>0.0</code> to <code>1.0</code>, nonzero to <code>0.0</code></td></tr>
+<tr><td>Multiplicative</td><td><code>*</code>, <code>/</code>, <code>%</code></td><td>Multiplication, division (<code>0</code> divisor -&gt; <code>Missing</code>), floating remainder</td></tr>
+<tr><td>Additive</td><td><code>+</code>, <code>-</code></td><td>Addition, subtraction</td></tr>
+<tr><td>Comparison</td><td><code>&lt;</code>, <code>&lt;=</code>, <code>&gt;</code>, <code>&gt;=</code>, <code>==</code>, <code>=</code>, <code>!=</code>, <code>&lt;&gt;</code></td><td>Numeric and text equality/ordering (relational <code>&lt;</code>/<code>&lt;=</code>/<code>&gt;</code>/<code>&gt;=</code> are numeric; <code>Missing</code> yields <code>Missing</code>)</td></tr>
+<tr><td>Unary Word</td><td><code>NOT</code></td><td>Word-form logical negation (lower binding than comparisons so <code>NOT x == 0</code> parses as <code>NOT (x == 0)</code>)</td></tr>
+<tr><td>Conjunction</td><td><code>&amp;&amp;</code>, <code>AND</code></td><td>Strong Kleene 3-valued AND (<code>false &amp;&amp; Missing -&gt; false</code>; <code>true &amp;&amp; Missing -&gt; Missing</code>)</td></tr>
+<tr><td>Disjunction</td><td><code>||</code>, <code>OR</code></td><td>Strong Kleene 3-valued OR (<code>true || Missing -&gt; true</code>; <code>false || Missing -&gt; Missing</code>)</td></tr>
+</tbody>
+</table></div>
+<h3 id="formula-functions" tabindex="-1">Supported Functions &amp; Clauses</h3>
+<ul>
+<li><strong>Arithmetic, Rounding &amp; Clamping:</strong> <code>abs</code>, <code>sqrt</code>, <code>cbrt</code>, <code>sqr</code>, <code>pow(x, p)</code>, <code>clamp(x, lo, hi)</code>, <code>floor</code>, <code>ceil</code>, <code>round(x[, digits])</code>, <code>trunc</code>, <code>int</code> (alias of <code>floor</code>), <code>sign</code> / <code>sgn</code>, <code>min(...)</code>, <code>max(...)</code>, <code>sum(...)</code>, <code>mean(...)</code>.</li>
+<li><strong>Logarithmic, Exponential &amp; Trigonometric:</strong> <code>ln</code>, <code>log(x[, base])</code>, <code>log10</code>, <code>log2</code>, <code>exp</code>, <code>exp10</code>, <code>sin</code>, <code>cos</code>, <code>tan</code>, <code>asin</code> / <code>arcsin</code>, <code>acos</code> / <code>arccos</code>, <code>atan</code> / <code>arctan</code>, <code>atan2</code> / <code>arctan2</code>, <code>sinh</code>, <code>cosh</code>, <code>tanh</code>.</li>
+<li><strong>Special &amp; Statistical Transforms:</strong> <code>erf</code>, <code>erfc</code>, <code>lgamma</code>, <code>logit(p)</code> (for <span class="math">p ∈ (0, 1)</span>), <code>probit(p)</code> (<span class="math">5 + Φ<sup>-1</sup>(p)</span>, Finney probit scale), <code>norm_ppf</code> / <code>norm_inv</code> / <code>qnorm</code> / <code>inv_norm</code>, <code>arcsin_sqrt(p)</code> (<span class="math"><span class="math-text">arcsin</span>√<span class="math-rad">p</span></span> for <span class="math">p ∈ [0, 1]</span>).</li>
+<li><strong>Logical &amp; Missing-Value Handling:</strong> <code>if(cond, then_expr, else_expr)</code> (short-circuiting only the chosen branch), <code>isnan(x)</code>, <code>isvalid(x)</code> / <code>is_defined(x)</code>, <code>coalesce(a, b, ...)</code>, variadic <code>and(...)</code>, <code>or(...)</code>, <code>not(x)</code>.</li>
+<li><strong>Whole-Column Aggregates:</strong> <code>sum</code>, <code>mean</code>, <code>count</code> (numeric active cells), <code>counta</code> (non-empty active numeric/text cells), <code>sd</code> / <code>stdev</code>, <code>sem</code> / <code>stderr</code>, <code>var</code>, <code>median</code>, <code>iqr</code>, <code>min_col</code> / <code>col_min</code>, <code>max_col</code> / <code>col_max</code>, <code>geo_mean</code>, <code>percentile(col, p)</code> / <code>quantile(col, p)</code>.</li>
+<li><strong>Conditional <code>*if</code> Aggregates:</strong> <code>countif</code>, <code>countaif</code>, <code>sumif</code>, <code>meanif</code>, <code>minif</code>, <code>maxif</code>, <code>stdevif</code> / <code>sdif</code>, <code>stderrif</code> / <code>semif</code>. Argument order is deterministically <code>(values, condition)</code> (or <code>countif(condition)</code> / <code>countif(values, condition)</code> where rows matching nonzero finite <code>condition</code> are included); <code>countaif</code> counts non-empty text/numeric cells matching the predicate.</li>
+<li><strong>Window Functions &amp; SQL-Style Clauses:</strong>
+<ul>
+<li>Window functions: <code>row_number()</code>, <code>rank()</code>, <code>dense_rank()</code>, <code>center(expr)</code>, <code>standardize(expr)</code> / <code>zscore(expr)</code>, <code>cumsum(expr)</code>, <code>cumprod(expr)</code>, <code>cummean(expr)</code>, <code>lag(expr[, offset[, default]])</code>, <code>lead(expr[, offset[, default]])</code>, <code>diff(expr[, offset])</code>, <code>rolling_mean(expr, window)</code> / <code>moving_avg(expr, window)</code>, <code>rolling_sum(expr, window)</code>.</li>
+<li>Filter &amp; Window clauses: <code>FILTER (WHERE &lt;cond&gt;)</code> / <code>WHERE &lt;cond&gt;</code> (applicable inside aggregates and <code>OVER (...)</code>), plus <code>OVER ([PARTITION BY ...] [ORDER BY &lt;expr&gt; [ASC|DESC] [NULLS FIRST|LAST]] [ROWS &lt;frame&gt;])</code> supporting <code>UNBOUNDED PRECEDING</code>, <code>&lt;k&gt; PRECEDING</code>, <code>CURRENT ROW</code>, <code>&lt;k&gt; FOLLOWING</code>, and <code>UNBOUNDED FOLLOWING</code>.</li>
+</ul>
+</li>
+<li><strong>Evaluator Scope &amp; Error Propagation:</strong> Formula values are <code>Number(f64)</code>, <code>Text(String)</code>, or <code>Missing</code>. String-manipulation functions and date/calendar arithmetic functions are <strong>not</strong> present in the Beta formula evaluator. Empty cells, excluded cells, division by zero, out-of-domain operations (<code>ln(-1)</code>, <code>sqrt(-1)</code>, <code>probit(0)</code>), non-finite intermediates (<code>NaN</code>, <code>±Inf</code>), and unhandled type mismatches propagate deterministically as <code>FormulaValue::Missing</code> (stored as an empty <code>Cell</code>).</li>
+</ul>
+<hr>
+<h2 id="transforms-and-reshaping" tabindex="-1">Table Transforms, Reshaping &amp; Simulation</h2>
+<p>CurveBook executes derived transforms (<code>transform.run</code>, <code>table.convertArchetype</code>, <code>table.importPlateMap</code>, <code>table.importTidyLong</code>, <code>table.randomizeGroups</code>, <code>table.randomSampleRows</code>, <code>table.simulateDistributions</code>, <code>table.simulateXy</code>) without altering upstream raw cells:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Transform / Operation</th><th>Purpose &amp; Options</th><th>Edge Cases &amp; Guards</th></tr></thead>
+<tbody>
+<tr><td><strong>Math Transforms (<code>MathTransformPreset</code>)</strong></td><td>Per-cell preset transforms over <code>X</code> or <code>Y</code>: <code>Ln</code>, <code>Log10</code>, <code>Log2</code>, <code>Exp10</code>, <code>Exp</code>, <code>Reciprocal</code>, <code>Sqrt</code>, <code>Square</code>, <code>Logit</code>, <code>Probit</code>, <code>ArcsinSqrt</code>, <code>LinearScale { slope, intercept }</code>, <code>ConcentrationToNegativeLogM { molar_unit_factor }</code> (and arbitrary <code>=</code> Calculated Variable formulas including <code>2^-y</code> qPCR pipelines).</td><td>Non-positive inputs for <code>Log*</code>/<code>Reciprocal</code>, negative inputs for <code>Sqrt</code>, or probabilities outside <code>(0, 1)</code> for <code>Logit</code>/<code>Probit</code> yield empty missing cells or typed errors rather than <code>NaN</code>.</td></tr>
+<tr><td><strong>Normalize (<code>NormalizeAnchor</code>)</strong></td><td>Scales each dataset between <code>0%</code> and <code>100%</code> (or <code>0.0</code>..<code>1.0</code>) defined by <code>zero_anchor</code> and <code>hundred_anchor</code> (<code>ColumnMin</code>, <code>ColumnMax</code>, <code>ColumnSum</code>, <code>FirstRow</code>, <code>LastRow</code>, <code>FixedValue(v)</code>, <code>ControlColumnMean { column }</code>, <code>Hooked(HookSource)</code>).</td><td>Rejects zero span (<code>y_100 == y_0</code>) with an error to avoid division by zero.</td></tr>
+<tr><td><strong>Baseline (<code>BaselineOperation</code>)</strong></td><td>Subtracts or ratios designated <code>baseline_columns</code>: <code>Difference</code>, <code>Ratio</code>, <code>PercentChange</code>, or <code>FractionalChange</code>.</td><td>Zero baseline divisors in <code>Ratio</code> / <code>PercentChange</code> / <code>FractionalChange</code> omit/error on undefined denominators; excluded cells remain skipped.</td></tr>
+<tr><td><strong>Row Summary &amp; Replicate Transposition (<code>Transpose</code>, <code>SelectAndTransform</code>)</strong></td><td>Swaps rows and columns (<code>transpose_cell_grid</code>), subsets/reorders rows or columns, filters rows by predicate, or applies column-wise transforms while preserving cell exclusion masks.</td><td>Enforces <code>MAX_ROWS</code>, <code>MAX_DATA_SETS</code>, <code>MAX_IMPORT_CELLS = 10,000,000</code>, and remaps exclusion masks atomically.</td></tr>
+<tr><td><strong>Curve Calculus (<code>CurveSheetOp</code>, <code>compute_sheet_auc</code>)</strong></td><td><code>Smooth</code> (<code>MovingAverage</code>, <code>SavitzkyGolay</code>, <code>Lowess</code> of Cleveland 1979 with bisquare <code>6*MAD</code> robustness), <code>Differentiate</code> (<code>First</code> / <code>Second</code> 3-point Lagrange quadratic derivative on sorted uniform or non-uniform <code>X</code>), <code>Integrate</code> (cumulative trapezoidal area above <code>baseline</code>), and trapezoidal AUC with total/net/baseline-corrected peaks (<code>Yeh &amp; Kwan 1978</code>).</td><td>Duplicate <code>X</code> values reject differentiation with <code>InvalidInput</code>; LOWESS <code>span</code> must lie in <code>(0, 1]</code>.</td></tr>
+<tr><td><strong>Non-Destructive Archetype Conversion (<code>QOL-1</code>, <code>table.convertArchetype</code>)</strong></td><td>Projects among <code>Column</code>, <code>Grouped</code>, <code>Xy</code>, <code>MultipleVariables</code>, and <code>Contingency</code> with non-mutating <code>ConversionPreview</code> (<code>preserved_cells</code>, <code>dropped_cells</code>, <code>preserved_exclusions</code>, <code>warnings</code>, <code>lossy</code>).</td><td>Preserves <code>excluded</code> masks and remaps <code>CellExclusionNote</code> coordinates. Refuses lossy projections (e.g., negative/fractional entries targeting <code>Contingency</code>, collapsed subcolumns) unless <code>allow_lossy = true</code>.</td></tr>
+<tr><td><strong>Microplate Mapper (<code>QOL-2</code>, <code>table.importPlateMap</code>)</strong></td><td>Maps <code>8×12</code> (96-well) or <code>16×24</code> (384-well) reader grids into typed <code>Xy</code>, <code>Column</code>, or <code>Grouped</code> tables by assigning concentrations (<span class="math">X</span>), treatment groups, technical replicates, and optional blank subtraction/tagging.</td><td>Validates well grid dimensions (<code>8×12</code> or <code>16×24</code>), non-empty assignments, and cell budget limits.</td></tr>
+<tr><td><strong>Tidy Long-to-Wide Pivot (<code>QOL-2</code>, <code>table.importTidyLong</code>)</strong></td><td>Reshapes tidy long rows <code>(X/Row Factor, Group Column, Optional Replicate Index, Value, Optional Exclusion Flag)</code> directly into typed <code>Xy</code>, <code>Column</code>, or <code>Grouped</code> replicate subcolumns.</td><td>Preserves exclusion flags from indicator column; rejects out-of-range column indices and excessive subcolumn expansions above <code>MAX_SUBCOLUMNS = 512</code>.</td></tr>
+<tr><td><strong>Randomization &amp; Row Sampling (<code>QOL-14</code>)</strong></td><td><code>table.randomizeGroups</code>: seeded <code>Complete</code> or <code>PermutedBlock</code> allocation across <span class="math">k ≥ 2</span> arms over <code>DeterministicRng</code>, emitting a schedule sheet + <code>InfoSheet</code> ARRIVE metadata. <code>table.randomSampleRows</code>: uniform or stratified <span class="math">k</span>-of-<span class="math">N</span> sampling without replacement via partial Fisher–Yates.</td><td>Block sizes must be positive multiples of the summed integer allocation weights; empty strata and <span class="math">k &gt; N</span> fail cleanly with typed validation errors.</td></tr>
+<tr><td><strong>Monte Carlo &amp; Distribution Simulation (<code>QOL-14</code>, <code>table.simulateDistributions</code>, <code>table.simulateXy</code>)</strong></td><td>Generates independent seeded columns (<code>Uniform</code>, <code>Normal</code>, <code>LogNormal</code>, <code>Binomial</code>, <code>Poisson</code>, <code>Exponential</code>) or synthetic <code>Xy</code> noisy curves (<code>Gaussian</code>, <code>Uniform</code>, <code>LogNormal</code> / multiplicative noise).</td><td>Deterministic across native and <code>wasm32</code> targets given the recorded 64-bit PRNG seed.</td></tr>
+<tr><td><strong>4-Stage <code>ImportLinkSpec</code> Pipeline</strong></td><td>Reconciles upstream <code>DataSheet</code>, <code>ResultSheet</code>, or delimited text payloads across <code>filter -&gt; reshape/transpose -&gt; baseline -&gt; exclude/*</code> while maintaining <code>LinkedDataRegion</code> provenance.</td><td>Cycle detection via Kahn&#39;s topological sort (<code>detect_link_cycles</code>) aborts circular sheet links before mutation.</td></tr>
+</tbody>
+</table></div>
+<p>See <a href="concepts.html">Concepts &amp; Document Architecture</a>, <a href="registry/tables.html#analysis-kinds">Analysis Kinds Registry</a>, and <a href="registry/commands.html">Command Reference</a> for parameter schemas.</p>
+        <nav class="pager" aria-label="Previous and next pages">
+          <a href="section-tables.html">← Data tables &amp; formulas</a>
+          <a href="registry/tables.html">Tables, Analyses &amp; Error Codes Registry →</a>
+        </nav>
+      </article>
+    </main>
+    <footer class="site-footer">
+      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>
+      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
+      <p class="privacy">CurveBook runs locally and collects no telemetry. Read <a href="../../privacy.html">Privacy, Licences &amp; Security</a> · <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a></p>
+    </footer>
+    <div class="window-statusbar" aria-label="Application summary">
+      <span class="status-cell is-grow">Ready · Offline Desktop · CLI · Local MCP</span>
+      <span class="status-cell">Pure Rust</span>
+      <span class="status-cell">Zero Telemetry</span>
+      <span class="status-cell">MIT / Apache-2.0</span>
+    </div>
+  </div>
+</body>
+</html>

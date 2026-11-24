@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Architecture, clean-room rules, CI stages, extending analyses/commands, localization, and releasing snapshots.">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'">
+  <meta name="color-scheme" content="light">
+  <title>Contribute — CurveBook Documentation</title>
+  <link rel="canonical" href="https://hausergroup.github.io/curvebook/manual/latest/section-contribute.html">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="CurveBook">
+  <meta property="og:title" content="Contribute — CurveBook Documentation">
+  <meta property="og:description" content="Architecture, clean-room rules, CI stages, extending analyses/commands, localization, and releasing snapshots.">
+  <meta property="og:url" content="https://hausergroup.github.io/curvebook/manual/latest/section-contribute.html">
+  <meta property="og:image" content="https://hausergroup.github.io/curvebook/images/workspace-split-fit.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" type="image/png" href="../../images/curvebook.png">
+  <link rel="stylesheet" href="../../site.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="desktop-window wrap">
+    <header class="site-header">
+      <div class="title-bar">
+        <div class="wordmark">
+          <img src="../../images/curvebook.png" width="64" height="64" alt="">
+          <span>CurveBook · Reference Manual</span>
+        </div>
+        <span class="window-status">Contribute</span>
+      </div>
+      <nav aria-label="Manual navigation">
+        <a href="index.html">Manual Home</a>
+        <a href="section-get-started.html">Get Started</a>
+        <a href="section-analyses.html">Reference</a>
+        <a href="section-automation.html">Automation</a>
+        <a href="registry/commands.html">Commands &amp; Tools</a>
+        <a href="az-index.html">A–Z Index</a>
+        <a href="section-contribute.html" aria-current="page">Contribute</a>
+        <a href="../../index.html">Product Home</a>
+        <a href="../../privacy.html">Privacy Policy</a>
+      </nav>
+    </header>
+    <div class="version-banner" role="note" aria-label="Documentation version">
+      <span><strong>Documented release:</strong> v0.1.0-alpha.2 · 2026-11-24 (commit <code>6ea9e9fcf3</code>)</span>
+      <span>No scripts · No telemetry · <a href="az-index.html">A–Z Index</a></span>
+    </div>
+    <main id="main" tabindex="-1">
+      <article class="overview doc-body">
+        <nav class="breadcrumbs" aria-label="Breadcrumb">
+          <a href="index.html">Manual</a>
+          <span aria-hidden="true">/</span>
+          <span aria-current="page">Contribute</span>
+        </nav>
+        <h1 id="page-title" tabindex="-1">Contribute</h1>
+<p class="lead">Architecture, clean-room rules, CI stages, extending analyses/commands, localization, and releasing snapshots.</p>
+<div class="callout"><p>Contributor specifications are maintained continuously against the live <code>main</code> branch on GitHub.</p></div>
+<div class="section-grid">
+  <section class="section-card">
+    <h2><a href="https://github.com/HauserGroup/curvebook/blob/main/AGENTS.md">AGENTS Rules &amp; Workspace Policy <span aria-hidden="true">↗</span></a></h2>
+    <p>Repository contributor rules, clean-room engineering policy, and module boundaries.</p>
+  </section>
+  <section class="section-card">
+    <h2><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/architecture.md">Workspace Architecture <span aria-hidden="true">↗</span></a></h2>
+    <p>Crate dependency layers (L0–L7), rendering pipeline, and headless/GUI separation.</p>
+  </section>
+  <section class="section-card">
+    <h2><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/development.md">Developer Setup &amp; Commands <span aria-hidden="true">↗</span></a></h2>
+    <p>Building, testing, coverage reporting, font env vars, and verification workflows.</p>
+  </section>
+  <section class="section-card">
+    <h2><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/extending.md">Extending CurveBook <span aria-hidden="true">↗</span></a></h2>
+    <p>How to add new engine commands, statistical analyses, equations, and UI menus.</p>
+  </section>
+  <section class="section-card">
+    <h2><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/pitfalls.md">Engineering Pitfalls <span aria-hidden="true">↗</span></a></h2>
+    <p>Recurring pitfalls prevented by repository gates and review checklists.</p>
+  </section>
+  <section class="section-card">
+    <h2><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/pitfalls-engineering.md">General Engineering Pitfalls <span aria-hidden="true">↗</span></a></h2>
+    <p>General Rust, tooling, persistence, and process rules adopted for CurveBook.</p>
+  </section>
+  <section class="section-card">
+    <h2><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/command-ids.md">Command ID Stability Contract <span aria-hidden="true">↗</span></a></h2>
+    <p>Naming conventions, area prefixes, and backward-compatibility guarantees for engine command IDs.</p>
+  </section>
+  <section class="section-card">
+    <h2><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/file-formats.md">Archive &amp; Format Specifications <span aria-hidden="true">↗</span></a></h2>
+    <p>Technical format boundaries for .curvebook archives, unpacked directories, templates, and foreign imports.</p>
+  </section>
+  <section class="section-card">
+    <h2><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/licences.md">Licences &amp; Third-Party Policy <span aria-hidden="true">↗</span></a></h2>
+    <p>Dual-licence policy, cargo-deny rules, and asset attribution gates.</p>
+  </section>
+  <section class="section-card">
+    <h2><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/localization.md">Localization Architecture <span aria-hidden="true">↗</span></a></h2>
+    <p>Translation catalog conventions, ICU/number formatting, and locale testing.</p>
+  </section>
+  <section class="section-card">
+    <h2><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/design-language.md">CurveBook Design Language <span aria-hidden="true">↗</span></a></h2>
+    <p>OKLab/OKLCH perceptual colour tokens, fixed scales, ActionRank priority hierarchy, and UI gates.</p>
+  </section>
+  <section class="section-card">
+    <h2><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/ci.md">CI Stages &amp; Gates <span aria-hidden="true">↗</span></a></h2>
+    <p>Repository cargo xtask ci stage matrix, budgets, and compliance scanners.</p>
+  </section>
+  <section class="section-card">
+    <h2><a href="https://github.com/HauserGroup/curvebook/blob/main/docs/release/releasing.md">Releasing &amp; Snapshot Publication <span aria-hidden="true">↗</span></a></h2>
+    <p>Cutting releases, artifact verification, checksums, and publishing versioned docs snapshots.</p>
+  </section>
+</div>
+        <nav class="pager" aria-label="Previous and next pages">
+          <a href="az-index.html">← A–Z Reference Index</a>
+          <span></span>
+        </nav>
+      </article>
+    </main>
+    <footer class="site-footer">
+      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>
+      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
+      <p class="privacy">CurveBook runs locally and collects no telemetry. Read <a href="../../privacy.html">Privacy, Licences &amp; Security</a> · <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a></p>
+    </footer>
+    <div class="window-statusbar" aria-label="Application summary">
+      <span class="status-cell is-grow">Ready · Offline Desktop · CLI · Local MCP</span>
+      <span class="status-cell">Pure Rust</span>
+      <span class="status-cell">Zero Telemetry</span>
+      <span class="status-cell">MIT / Apache-2.0</span>
+    </div>
+  </div>
+</body>
+</html>
