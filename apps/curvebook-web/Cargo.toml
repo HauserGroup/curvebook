@@ -1,6 +1,6 @@
 [package]
 name = "curvebook-web"
-description = "CurveBook in the browser (WebAssembly runner, WebGPU with WebGL2 fallback)"
+description = "CurveBook WebAssembly browser host (strict-CSP wasm32 bridge)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

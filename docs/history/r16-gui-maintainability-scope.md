@@ -22,7 +22,7 @@ This change is documentation only: it scopes claimable roadmap items. No code is
 - **GUI split rules (binding for R16.7–R16.9 and R16.11):**
   - Move-only: no behaviour, layout or wording change; no renames of `pub` items. The old file becomes `<name>/mod.rs` and re-exports every currently public item, so imports elsewhere (`apps/curvebook`, `crates/mcp`, tests) are untouched.
   - Every `widget_id`, `command_id`, AccessKit role and `FrameInspectMeta` entry stays byte-identical (MCP `ui_inspect`, `--gui-only` tools and human-path tests match on them).
-  - **Fixes first:** an item may start only after the R15 audit findings anchored in its file ([`r15-gui-audit-2026-11-20.md`](../audit/r15-gui-audit-2026-11-20.md)) are fixed or explicitly deferred in the ledger.
+  - **Fixes first:** an item may start only after the R15 audit findings anchored in its file ([`r15-gui-audit-2026-11-20.md`](audit/r15-gui-audit-2026-11-20.md)) are fixed or explicitly deferred in the ledger.
   - Frozen engine wire contract and `R16.5` ownership of parameter spellings still apply.
   - Reducing `#[allow(clippy::too_many_arguments)]` is allowed only in moved private code via context structs (mirrors R16.1; addresses R15-GUI-08).
   - Coordination: `R13.8` builds new controls in the same dialogs; a split lands before, or rebases after, any claimed `R13.8` bullet touching that file — never in parallel.
@@ -34,7 +34,7 @@ This change is documentation only: it scopes claimable roadmap items. No code is
   - **R16.11 Further GUI module splits (optional, one PR each)** — `egui_shell/trailing_studio.rs` by studio context; `dialogs_canvas.rs` dialog-state types by dialog family; `i18n.rs` key tables into `i18n/` shards following the existing `i18n/w5_*.rs` pattern. Same rules; each bullet depends on the R15 findings in its file.
 - Leave `R16.1`–`R16.6` text untouched.
 
-### 2. [`r15-gui-audit-2026-11-20.md`](../audit/r15-gui-audit-2026-11-20.md) — cross-reference
+### 2. [`r15-gui-audit-2026-11-20.md`](audit/r15-gui-audit-2026-11-20.md) — cross-reference
 
 Add a short "Follow-ups" section after the Summary listing which findings gate `R16.7`, `R16.8`, `R16.9` and `R16.11`, so the ledger and the roadmap point at each other.
 

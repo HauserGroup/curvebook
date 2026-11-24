@@ -91,7 +91,7 @@ Before `F2` and `F3`, applying WCAG 2.2 SC 2.5.8 in logical points flagged only 
 ### F1. Remove the result-tab arrows
 
 1. **Fixed cursor advancement:** Allocated the tab strip directly via `ui.allocate_exact_size(vec2(strip_w, strip_h), Sense::hover())` without a nested `scope_builder`.
-2. **Deleted `result.tabs.prev` and `result.tabs.next`,** along with `results.prev_tabs` and `results.next_tabs` in `crates/ui-egui/src/i18n/w5_results.rs`.
+2. **Deleted `result.tabs.prev` and `result.tabs.next`,** along with `results.prev_tabs` and `results.next_tabs` in the `crates/ui-egui` locale catalog (`crates/ui-egui/locales/catalog.tsv`, formerly `src/i18n/w5_results.rs`).
 3. **Added conditional `⋯ +N` overflow (`result.tabs.overflow`)** shown only when `visible_count < tabs.len()`, opening a popup menu (`result.tabs.overflow.item.<id>`) while keeping mouse-wheel scrolling.
 4. **Kept keyboard switching** (`Ctrl+PageUp` / `Ctrl+PageDown`).
 5. **Updated tests** (`crates/ui-egui/tests/human_wf_13_18.rs` and `crates/ui-egui/tests/r15_3_stage_canvas.rs`) and [GUI layout specification](gui-layout-spec.md) §8.10.

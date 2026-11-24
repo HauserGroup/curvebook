@@ -6,7 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 publish.workspace = true
-description = "CurveBook publication PDF and EPS figure and analysis-report exporter"
+description = "CurveBook publication PDF 1.4/1.7 figure and page-layout exporter"
 
 [lints]
 workspace = true

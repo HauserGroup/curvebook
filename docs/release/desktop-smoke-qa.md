@@ -2,7 +2,7 @@
 
 This document is the canonical cross-OS smoke walkthrough for `CurveBook` Beta candidate installers on **macOS** (universal `.dmg`), **Windows 11** (`x64` / `arm64` unsigned `.msi`), and **Linux** (`x86_64` / `aarch64` `.AppImage`), aligned with the [`R0.28`](../history/roadmap/r0.md#r028-rein-in-the-number-of-release-install-files) single-format-per-OS Beta download set and [`R10.24`](../ROADMAP.md#r1024-windows--linux-desktop-gui-smoke-qa-10-gate).
 
-> **Gate (updated 2026-11-20):** this recorded walkthrough is a **1.0** requirement. **Beta** relies on automated completion of all `65` workflows through the drawn desktop GUI ([`R10.25`](../ROADMAP.md#r1025-automated-gui-completion-of-all-65-workflows-beta-gate)) and does not wait on this walkthrough. Run it on release candidates as they become available.
+> **Gate (updated 2026-11-20):** this recorded walkthrough is a **1.0** requirement. **Beta** relies on automated completion of all `65` workflows through the drawn desktop GUI ([`R10.25`](../history/roadmap/r10.md#r1025-automated-gui-completion-of-all-65-workflows-beta-gate)) and does not wait on this walkthrough. Run it on release candidates as they become available.
 
 Automated interactive regression backing is tracked in [GUI Workflows](../gui-workflows.md) and [UI Feature Parity](../evidence/user-interface.md). Known Beta issues (including Windows SmartScreen guidance) are tracked in [Troubleshooting & Known Issues](https://hausergroup.github.io/curvebook/manual/v0.1/troubleshooting.html#known-issues).
 

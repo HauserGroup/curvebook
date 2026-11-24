@@ -12,7 +12,7 @@ Follow the existing seams below whenever adding a capability. Every user-facing 
 ### UI command (`UiCommandSpec`)
 
 - **Where:** `crates/ui-egui/src/menus/ui_commands.rs` (`UI_COMMANDS`) + `crates/ui-egui/` menu/panel wiring + generated `crates/mcp/src/ui_catalog.rs`
-- **How:** Choose a `ui.*` (or `app.*`) ID per [docs/command-ids.md](command-ids.md). Add a `UiCommandSpec` entry using its named fields (`id`, `label`, `shortcut`, `params_doc`, `summary`, `beginner`). Wire its UI handler in `crates/ui-egui`. Run `cargo xtask ui-commands` so `crates/mcp/src/ui_catalog.rs` regenerates cleanly, then verify `cargo xtask ui-commands --check`.
+- **How:** Choose a `ui.*` (or `app.*`) ID per [docs/command-ids.md](command-ids.md). Add a `UiCommandSpec` entry using its named fields (`id`, `label`, `shortcut`, `params_doc`, `summary`, `beginner`, `rank: ActionRank`). Wire its UI handler in `crates/ui-egui`, and add localized entries across all `16` locales in `crates/ui-egui/locales/catalog.tsv`. Run `cargo xtask ui-commands` so `crates/mcp/src/ui_catalog.rs` regenerates cleanly, then verify `cargo xtask ui-commands --check` and `cargo xtask i18n-report`.
 
 ### Cursor
 
@@ -21,7 +21,7 @@ Follow the existing seams below whenever adding a capability. Every user-facing 
 
 ### Statistical / Scientific `AnalysisKind`
 
-- **Where:** `crates/doc/src/analysis.rs` (`AnalysisKind`, typed spec and result structs), `crates/doc/src/analysis/descriptor.rs` (`AnalysisKindId`, `AnalysisKindDescriptor`, `ALL_ANALYSIS_DESCRIPTORS`), and `crates/doc/src/analysis/finite.rs`; `crates/stats` / `crates/fit` / `crates/transform`; `crates/engine` (`dag.rs`, `cmd/analysis.rs`, `methods_report.rs`); `crates/chart` when the result is graphable; `crates/ui-egui` (`dialogs_canvas.rs`, `inspect.rs`, `egui_shell/`); `xtask/src/docs_site/registries.rs`.
+- **Where:** `crates/doc/src/analysis.rs` (`AnalysisKind`, typed spec and result structs), `crates/doc/src/analysis/descriptor.rs` (`AnalysisKindId`, `AnalysisKindDescriptor`, `ALL_ANALYSIS_DESCRIPTORS`), and `crates/doc/src/analysis/finite.rs`; `crates/stats` / `crates/fit` / `crates/transform`; `crates/engine` (`dag.rs`, `cmd/analysis.rs`, `methods_report.rs`); `crates/chart` when the result is graphable; `crates/ui-egui` (`dialogs_canvas/`, `inspect.rs`, `egui_shell/`); `xtask/src/docs_site/registries.rs`.
 - **How:** [`ALL_ANALYSIS_DESCRIPTORS`](../crates/doc/src/analysis/descriptor.rs) is the declarative single source of truth for `AnalysisKind` metadata, guarded by zero-wildcard compile-time exhaustive matches in `AnalysisKindId::from_kind` and `AnalysisKindId::descriptor`. Adding a variant makes the compiler stop at every *exhaustive* `match` listed below; check the remaining *wildcard* sites by hand.
   1. **Model & descriptor (`curvebook-doc`).** Add the typed spec struct and variant in `crates/doc/src/analysis.rs`, keeping serde compatibility (follow [file-formats.md](file-formats.md) if a persisted shape changes). Compiler stops:
      - `AnalysisKind::derive_auto_title` (`crates/doc/src/analysis.rs`),
@@ -38,7 +38,7 @@ Follow the existing seams below whenever adding a capability. Every user-facing 
      - Command wiring (`crates/engine/src/cmd/analysis.rs`): the descriptor contract supplies `domain` (`AnalysisDomainKind`), `supports_table_kind` / `is_compatible_with`, `shorthands` (`descriptor_by_shorthand`), `canonical_param_keys`, `supports_multiplicity`, and `auto_selects_mv_numeric_columns`; wire per-kind constructor defaults, field overrides, and semantic checks in `resolve_kind_shorthand`, `infer_default_kind`, `apply_shorthand_kind_overrides`, and `validate_analysis_spec_semantics` (and check `validate_map_keys_for_kind` / `is_key_allowed_for_kind`).
      - Regenerate `docs/commands.md` and the schemas (`cargo xtask commands`, `cargo xtask schemas`) if any schema text changes.
   6. **Graphs** (only if the result can be plotted). *Wildcard:* the extractors in `crates/chart/src/` (`multivariate_layout.rs`, `survival_cat.rs`, `xy.rs`, `equation_box.rs`, `column_grouped.rs`).
-  7. **GUI and documentation site.** `xtask/src/docs_site/registries.rs` (`analysis_kind_slug`, `all_analysis_kinds_meta`) and `xtask/src/docs_site/sitemap.rs` read directly from `ALL_ANALYSIS_DESCRIPTORS` and `descriptor_for_kind`; add the corresponding `{#analysis-<slug>}` entry to `docs/reference/analyses.md` (and `xtask/tests/r12_docs_site.rs`) so `cargo xtask docs-site --check` passes. The catalog and parameter dialogs in `crates/ui-egui` (`dialogs_canvas.rs`, `inspect.rs`, `egui_shell/`) use *wildcard* arms; expose the new parameters and result views there and document them for CLI and MCP users.
+  7. **GUI and documentation site.** `xtask/src/docs_site/registries.rs` (`analysis_kind_slug`, `all_analysis_kinds_meta`) and `xtask/src/docs_site/sitemap.rs` read directly from `ALL_ANALYSIS_DESCRIPTORS` and `descriptor_for_kind`; add the corresponding `{#analysis-<slug>}` entry to `docs/reference/analyses.md` (and `xtask/tests/r12_docs_site.rs`) so `cargo xtask docs-site --check` passes. The catalog and parameter dialogs in `crates/ui-egui` (`dialogs_canvas/`, `inspect.rs`, `egui_shell/`) use *wildcard* arms; expose the new parameters and result views there and document them for CLI and MCP users.
 
 ### Curve-fit `ParametricModel`
 
@@ -52,8 +52,8 @@ Follow the existing seams below whenever adding a capability. Every user-facing 
 
 ### Locale / UI string
 
-- **Where:** `crates/ui-egui/src/i18n.rs` and registered catalog shards; [localization guide](localization.md)
-- **How:** Add the key in the appropriate registered catalog or shard and provide translations across all active locale tables without duplicating existing keys. Run `cargo xtask i18n-report` (runs the `untranslated_report` test in `curvebook-ui-egui`) to list untranslated keys, and `cargo test -p curvebook-ui-egui`.
+- **Where:** `crates/ui-egui/locales/catalog.tsv` (compiled via `crates/ui-egui/build.rs` and queried in `crates/ui-egui/src/i18n.rs`); [localization guide](localization.md)
+- **How:** Add a row in `crates/ui-egui/locales/catalog.tsv` with translations across all `16` locale columns without duplicating existing keys. Run `cargo xtask i18n-report` (runs `i18n::tests::untranslated_report` in `curvebook-ui-egui`) to verify `0` missing catalog or command keys, and `cargo test -p curvebook-ui-egui --lib i18n`.
 
 ### Checked shared-state lock (`curvebook_platform::sync`)
 

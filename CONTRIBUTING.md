@@ -49,12 +49,12 @@ Before writing code or opening a pull request, read [AGENTS.md](AGENTS.md) and [
    ```
 3. **Regenerate derived files when touching source registries/schemas:**
    - UI commands (`UI_COMMANDS`) -> `cargo xtask ui-commands`
-   - Engine / UI command catalog -> `cargo xtask commands` *(R0)*
-   - Persisted schemas -> `cargo xtask schemas` *(R0)*
+   - Engine / UI command catalog -> `cargo xtask commands`
+   - Persisted schemas -> `cargo xtask schemas`
    - Windows icons -> `cargo xtask ico`
 4. **Pull request title & merge policy:** PRs are **squash-merged**. Use a plain-English PR title **ending with `(R<m>.<n>)`**, for example:
    `Use atomic temp-and-rename saves via curvebook-platform (R0.10)`
-5. **Before you finish:** Fill out [.github/pull_request_template.md](.github/pull_request_template.md) honestly and pass the verification suite:
+5. **Before you finish:** Fill out [.github/pull_request_template.md](.github/pull_request_template.md) honestly and pass `cargo xtask ci quick` (which runs every policy gate below plus Clippy and tests for changed packages and their workspace dependents):
    ```sh
    cargo fmt --all -- --check
    cargo clippy --workspace --all-targets -- -D warnings
@@ -65,8 +65,16 @@ Before writing code or opening a pull request, read [AGENTS.md](AGENTS.md) and [
    cargo xtask cleanroom
    cargo xtask cursors
    cargo xtask ui-commands --check
-   # Plus R0 gates where active on your branch:
-   # cargo xtask secrets && cargo xtask commands --check && cargo xtask schemas --check && cargo xtask status && cargo xtask pending
+   cargo xtask secrets
+   cargo xtask licenses
+   cargo xtask telemetry
+   cargo xtask workflows
+   cargo xtask commands --check
+   cargo xtask schemas --check
+   cargo xtask docs-site --check
+   cargo xtask citations
+   cargo xtask status
+   cargo xtask pending
    ```
    Or run `cargo xtask ci quick` for the policy gates plus Clippy and tests of the crates your branch changed and their dependents; hosted CI runs the full `cargo xtask ci` stages on every pull request.
 

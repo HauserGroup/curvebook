@@ -1,5 +1,4 @@
-//! Publication PDF and Encapsulated PostScript figure and statistical report writer for
-//! CurveBook.
+//! Publication `%PDF-1.4` / `%PDF-1.7` figure and page-layout writer for CurveBook.
 //!
 //! Layer L3 crate. Governing spec: `docs/implementation/graphing-and-layouts.md` (§6) and `docs/evidence/file-formats.md`.
 #![forbid(unsafe_code)]

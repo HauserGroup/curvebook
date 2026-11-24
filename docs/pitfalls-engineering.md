@@ -132,7 +132,7 @@ Timing-based assertions pass on fast machines and fail in CI once work moves to 
 
 **Prove a no-behaviour-change refactor by comparing output bytes.**
 Substring assertions miss changed output.
-*In CurveBook:* the CPU compositor and renderer are deterministic (`crates/render`, `crates/ui-egui/src/compositor.rs`), and SVG/PDF writers produce text; dump outputs for the relevant combinations before and after and compare byte for byte.
+*In CurveBook:* the CPU chart renderer and headless `egui` tessellation rasterizer are deterministic (`crates/render`, `crates/ui-egui/src/egui_shell/rasterizer.rs`), and SVG/PDF writers produce text; dump outputs for the relevant combinations before and after and compare byte for byte.
 
 **Break a guard once to see it fail, and keep its forbidden input precise.**
 A guard that matches the very wording it protects, or that can no longer fail, gives false confidence.
@@ -396,15 +396,15 @@ A widget that asks for a repaint every frame keeps a core busy for as long as it
 
 **Painting reads only memory; never read files or start programs while drawing.**
 Disk or process work in the paint path freezes the window on slow storage and can leave orphaned children.
-*In CurveBook:* `crates/ui-egui/src/compositor.rs` renders from in-memory state, and `cargo xtask layers` bans raw file writes and process spawning in `crates/ui-egui/src`; load anything from disk on an explicit action or a worker, and show the last result.
+*In CurveBook:* `crates/ui-egui/src/egui_shell/` renders strictly from in-memory state, and `cargo xtask layers` bans raw file writes and process spawning in `crates/ui-egui/src`; load anything from disk on an explicit action or a worker, and show the last result.
 
-**Lay out from the current frame's measurements, not the previous frame's.**
+**Lay out from the current settled frame's measurements, not stale previous-frame rects.**
 A size measured after drawing and applied next frame shows every change one frame late, which reads as flicker or drift.
-*In CurveBook:* the `R10.1` decision in [docs/architecture.md](architecture.md) builds one retained layout tree that paint, hit-testing, and `ui.inspect` all read; measure in the layout pass, and test that a panel's size is stable over several frames.
+*In CurveBook:* the `R15` desktop shell ([docs/architecture.md](architecture.md)) drives paint, pointer hit-testing, AccessKit accessibility nodes, and `ui.inspect` (`crates/ui-egui/src/egui_shell/inspect_bridge.rs`) from the same settled `!ctx.will_discard()` `egui` pass (`verify_egui_frame_parity`); measure inside the settled pass, and test that panel geometry stays stable over consecutive frames.
 
 **When something flickers, render consecutive frames and diff them.**
 Unit tests that check text do not see what is painted over it.
-*In CurveBook:* `render_workspace_rgba` in `crates/ui-egui/src/compositor.rs` is deterministic, so frames can be rendered and compared pixel by pixel in a test.
+*In CurveBook:* `render_egui_screenshot_rgba` in `crates/ui-egui/src/egui_shell/rasterizer.rs` is deterministic, so consecutive frames can be rendered and compared pixel by pixel in a test.
 
 **Content of unbounded length lives inside a scroll area.**
 Variable-length content placed outside it squeezes other panels and pushes controls off-screen.

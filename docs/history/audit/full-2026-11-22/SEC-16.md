@@ -19,20 +19,20 @@
 
 | File | LOC | Lines Inspected | Concrete Invariants Checked | Findings |
 |---|---:|---|---|---|
-| [`crates/ui-egui/src/egui_shell/mod.rs`](../../../crates/ui-egui/src/egui_shell/mod.rs) | 3264 | `1..=3264` | `Tokens::meets_wcag_aa()` contrast checks, `UiMetrics::solve_shell_layout` RTL mirroring & clamp math, `PendingUiIntents` discard-pass retention & batch commit (`R15-GUI-02/05`), headless-first routing, UTF-8 byte offsets in ASCII-lowercased find/replace, `GeometryStamp` scale quantization | `FA-SEC16-05`, `FA-SEC16-08` |
-| [`crates/ui-egui/src/egui_shell/brand.rs`](../../../crates/ui-egui/src/egui_shell/brand.rs) | 90 | `1..=90` | Clean-room embedded 128 px PNG brand mark decode, checked slice access (`buf.get(..info.buffer_size())`), once-per-`Context` mipmapped texture caching | Clean — clean-room PNG decode with checked slice bounds and single texture upload per context |
-| [`crates/ui-egui/src/egui_shell/canvas_view.rs`](../../../crates/ui-egui/src/egui_shell/canvas_view.rs) | 2842 | `1..=2842` | `AsyncRasterWorkerOwner::drop` thread-id self-join guard (`GWF-12`), async scene keying/filters, `render_live_tex_equations` non-duplication (`R15-GUI-40`), layout panel drag/SE-resize/z-order (`GWF-15`), context menu parameter payloads, `ui` pan/selection state scoping | `FA-SEC16-10`, `FA-SEC16-12` |
-| [`crates/ui-egui/src/egui_shell/center_stage.rs`](../../../crates/ui-egui/src/egui_shell/center_stage.rs) | 2190 | `1..=2190` | Split pane geometry & divider ratio clamping vs `app.split.set_ratio`, split grid preview allocation & `FrameInspectMeta` recording, floating notes drag bounds & pin toggle wiring, gallery multi-select style intent (`gallery.apply_style_from`) | `FA-SEC16-11` |
-| [`crates/ui-egui/src/egui_shell/command_palette.rs`](../../../crates/ui-egui/src/egui_shell/command_palette.rs) | 860 | `1..=860` | Backdrop capture, `consume_palette_keys` order vs `TextEdit`, command route coverage vs `UI_COMMANDS`, `DESKTOP_HOST_ROUTED_COMMANDS`, and engine schemas (`R15-GUI-18`, `R15-GUI-31`) | `FA-SEC16-01`, `FA-SEC16-07` |
-| [`crates/ui-egui/src/egui_shell/driver.rs`](../../../crates/ui-egui/src/egui_shell/driver.rs) | 1281 | `1..=1281` | Headless `egui::Context` stepping & settle loop, AccessKit pixel-to-hit-box & `Role::ScrollBar` non-overlap checks, finite coordinate/key validation, float-to-f32 conversions | Clean — finite input guards, settled-frame geometry stamps, AccessKit/scrollbar parity checks, zero production panics |
-| [`crates/ui-egui/src/egui_shell/fonts.rs`](../../../crates/ui-egui/src/egui_shell/fonts.rs) | 898 | `1..=898` | Zero bundled fonts, bounded host OS + `CURVEBOOK_FONTS_DIR` SFNT loading, CJK/symbol/RTL fallback family discovery, `font_data` key uniqueness, deterministic SFNT symbol fallback | `FA-SEC16-06` |
-| [`crates/ui-egui/src/egui_shell/inspect_bridge.rs`](../../../crates/ui-egui/src/egui_shell/inspect_bridge.rs) | 1424 | `1..=1424` | `HybridCoexistenceArbiter` modal arbitration vs shell modals, `build_dialog_snapshot_from_meta` kind/bounds mapping, global shortcut dispatch vs `ShortcutRegistry`, `render_about_modal` delegation (`R15-GUI-33`), copy/paste intent ordering | `FA-SEC16-03`, `FA-SEC16-04`, `FA-SEC16-12` |
-| [`crates/ui-egui/src/egui_shell/leading_dock.rs`](../../../crates/ui-egui/src/egui_shell/leading_dock.rs) | 2495 | `1..=2495` | Dock splitter drag/double-click reset (`R15-GUI-36`), navigator context menu & `sheet_id` routing (`R15-GUI-38`), delete-confirm modal arbitration & inspection, frozen-sheet guards, dock shortcuts vs `ShortcutRegistry`, i18n coverage | `FA-SEC16-03`, `FA-SEC16-04`, `FA-SEC16-12` |
-| [`crates/ui-egui/src/egui_shell/rasterizer.rs`](../../../crates/ui-egui/src/egui_shell/rasterizer.rs) | 641 | `1..=641` | Software triangle rasterizer bounds, `ScissorBoxPx` finite/non-negative clipping, checked `.get(...)` on vertex/index/blit/crop buffers, `checked_mul` framebuffer sizing, zero `unsafe` | Clean — checked slice indexing and framebuffer bounds guards throughout raster/blit/crop paths |
-| [`crates/ui-egui/src/egui_shell/status_footer.rs`](../../../crates/ui-egui/src/egui_shell/status_footer.rs) | 1745 | `1..=1745` | Quick-stats empty-table guards (`R15-GUI-06`), cursor readout coordinate transform, footer popover lifecycle across `enabled`/Escape/outside-click states, RTL chevron orientation | `FA-SEC16-05`, `FA-SEC16-09` |
-| [`crates/ui-egui/src/egui_shell/top_bar_fit.rs`](../../../crates/ui-egui/src/egui_shell/top_bar_fit.rs) | 140 | `1..=140` | Deterministic monotonic width degradation (`fit_right_group`), Presentation Mode absence (`R15-GUI-35`), MIT/Apache-2.0 attribution header | Clean — monotonic Tier-1 right-group width solver verified against overflow/jitter |
-| [`crates/ui-egui/src/egui_shell/top_chrome.rs`](../../../crates/ui-egui/src/egui_shell/top_chrome.rs) | 2195 | `1..=2195` | Tier-1 inline menu bar & `push_menu_command_intent` host/parameter routing (`R15-GUI-30`, `R15-GUI-34`, `R15-GUI-39`), Tier-2 contextual toolbar parameter payloads (`R15-GUI-27`), narrow overflow menu handling | `FA-SEC16-01`, `FA-SEC16-02` |
-| [`crates/ui-egui/src/egui_shell/widgets.rs`](../../../crates/ui-egui/src/egui_shell/widgets.rs) | 1361 | `1..=1361` | Canonical §10.6 `paint_interactive_chrome` hover/active/selected/disabled contrast states (`R15-GUI-37`), AccessKit labels/expanded state, bounded dropdown popups, `panel_footer`/`bottom_bar` click-blocking | Clean — consistent contrast chrome, AccessKit roles, and popup clamping across shared widgets (two private dropdown helpers carry `#[allow(clippy::too_many_arguments)]`) |
+| [`crates/ui-egui/src/egui_shell/mod.rs`](../../../../crates/ui-egui/src/egui_shell/mod.rs) | 3264 | `1..=3264` | `Tokens::meets_wcag_aa()` contrast checks, `UiMetrics::solve_shell_layout` RTL mirroring & clamp math, `PendingUiIntents` discard-pass retention & batch commit (`R15-GUI-02/05`), headless-first routing, UTF-8 byte offsets in ASCII-lowercased find/replace, `GeometryStamp` scale quantization | `FA-SEC16-05`, `FA-SEC16-08` |
+| [`crates/ui-egui/src/egui_shell/brand.rs`](../../../../crates/ui-egui/src/egui_shell/brand.rs) | 90 | `1..=90` | Clean-room embedded 128 px PNG brand mark decode, checked slice access (`buf.get(..info.buffer_size())`), once-per-`Context` mipmapped texture caching | Clean — clean-room PNG decode with checked slice bounds and single texture upload per context |
+| [`crates/ui-egui/src/egui_shell/canvas_view.rs`](../../../../crates/ui-egui/src/egui_shell/canvas_view.rs) | 2842 | `1..=2842` | `AsyncRasterWorkerOwner::drop` thread-id self-join guard (`GWF-12`), async scene keying/filters, `render_live_tex_equations` non-duplication (`R15-GUI-40`), layout panel drag/SE-resize/z-order (`GWF-15`), context menu parameter payloads, `ui` pan/selection state scoping | `FA-SEC16-10`, `FA-SEC16-12` |
+| [`crates/ui-egui/src/egui_shell/center_stage.rs`](../../../../crates/ui-egui/src/egui_shell/center_stage.rs) | 2190 | `1..=2190` | Split pane geometry & divider ratio clamping vs `app.split.set_ratio`, split grid preview allocation & `FrameInspectMeta` recording, floating notes drag bounds & pin toggle wiring, gallery multi-select style intent (`gallery.apply_style_from`) | `FA-SEC16-11` |
+| [`crates/ui-egui/src/egui_shell/command_palette.rs`](../../../../crates/ui-egui/src/egui_shell/command_palette.rs) | 860 | `1..=860` | Backdrop capture, `consume_palette_keys` order vs `TextEdit`, command route coverage vs `UI_COMMANDS`, `DESKTOP_HOST_ROUTED_COMMANDS`, and engine schemas (`R15-GUI-18`, `R15-GUI-31`) | `FA-SEC16-01`, `FA-SEC16-07` |
+| [`crates/ui-egui/src/egui_shell/driver.rs`](../../../../crates/ui-egui/src/egui_shell/driver.rs) | 1281 | `1..=1281` | Headless `egui::Context` stepping & settle loop, AccessKit pixel-to-hit-box & `Role::ScrollBar` non-overlap checks, finite coordinate/key validation, float-to-f32 conversions | Clean — finite input guards, settled-frame geometry stamps, AccessKit/scrollbar parity checks, zero production panics |
+| [`crates/ui-egui/src/egui_shell/fonts.rs`](../../../../crates/ui-egui/src/egui_shell/fonts.rs) | 898 | `1..=898` | Zero bundled fonts, bounded host OS + `CURVEBOOK_FONTS_DIR` SFNT loading, CJK/symbol/RTL fallback family discovery, `font_data` key uniqueness, deterministic SFNT symbol fallback | `FA-SEC16-06` |
+| [`crates/ui-egui/src/egui_shell/inspect_bridge.rs`](../../../../crates/ui-egui/src/egui_shell/inspect_bridge.rs) | 1424 | `1..=1424` | `HybridCoexistenceArbiter` modal arbitration vs shell modals, `build_dialog_snapshot_from_meta` kind/bounds mapping, global shortcut dispatch vs `ShortcutRegistry`, `render_about_modal` delegation (`R15-GUI-33`), copy/paste intent ordering | `FA-SEC16-03`, `FA-SEC16-04`, `FA-SEC16-12` |
+| [`crates/ui-egui/src/egui_shell/leading_dock.rs`](../../../../crates/ui-egui/src/egui_shell/leading_dock.rs) | 2495 | `1..=2495` | Dock splitter drag/double-click reset (`R15-GUI-36`), navigator context menu & `sheet_id` routing (`R15-GUI-38`), delete-confirm modal arbitration & inspection, frozen-sheet guards, dock shortcuts vs `ShortcutRegistry`, i18n coverage | `FA-SEC16-03`, `FA-SEC16-04`, `FA-SEC16-12` |
+| [`crates/ui-egui/src/egui_shell/rasterizer.rs`](../../../../crates/ui-egui/src/egui_shell/rasterizer.rs) | 641 | `1..=641` | Software triangle rasterizer bounds, `ScissorBoxPx` finite/non-negative clipping, checked `.get(...)` on vertex/index/blit/crop buffers, `checked_mul` framebuffer sizing, zero `unsafe` | Clean — checked slice indexing and framebuffer bounds guards throughout raster/blit/crop paths |
+| [`crates/ui-egui/src/egui_shell/status_footer.rs`](../../../../crates/ui-egui/src/egui_shell/status_footer.rs) | 1745 | `1..=1745` | Quick-stats empty-table guards (`R15-GUI-06`), cursor readout coordinate transform, footer popover lifecycle across `enabled`/Escape/outside-click states, RTL chevron orientation | `FA-SEC16-05`, `FA-SEC16-09` |
+| [`crates/ui-egui/src/egui_shell/top_bar_fit.rs`](../../../../crates/ui-egui/src/egui_shell/top_bar_fit.rs) | 140 | `1..=140` | Deterministic monotonic width degradation (`fit_right_group`), Presentation Mode absence (`R15-GUI-35`), MIT/Apache-2.0 attribution header | Clean — monotonic Tier-1 right-group width solver verified against overflow/jitter |
+| [`crates/ui-egui/src/egui_shell/top_chrome.rs`](../../../../crates/ui-egui/src/egui_shell/top_chrome.rs) | 2195 | `1..=2195` | Tier-1 inline menu bar & `push_menu_command_intent` host/parameter routing (`R15-GUI-30`, `R15-GUI-34`, `R15-GUI-39`), Tier-2 contextual toolbar parameter payloads (`R15-GUI-27`), narrow overflow menu handling | `FA-SEC16-01`, `FA-SEC16-02` |
+| [`crates/ui-egui/src/egui_shell/widgets.rs`](../../../../crates/ui-egui/src/egui_shell/widgets.rs) | 1361 | `1..=1361` | Canonical §10.6 `paint_interactive_chrome` hover/active/selected/disabled contrast states (`R15-GUI-37`), AccessKit labels/expanded state, bounded dropdown popups, `panel_footer`/`bottom_bar` click-blocking | Clean — consistent contrast chrome, AccessKit roles, and popup clamping across shared widgets (two private dropdown helpers carry `#[allow(clippy::too_many_arguments)]`) |
 
 ---
 
@@ -42,7 +42,7 @@
 
 - **Base:** `7c85a8e516165ddadb101236a88eec937bf1f095`
 - **Severity:** `S2` (High)
-- **Location:** [`crates/ui-egui/src/egui_shell/top_chrome.rs:844-860`](../../../crates/ui-egui/src/egui_shell/top_chrome.rs#L844-L860), [`crates/ui-egui/src/egui_shell/command_palette.rs:673-678,717-737,787`](../../../crates/ui-egui/src/egui_shell/command_palette.rs#L717-L737)
+- **Location:** [`crates/ui-egui/src/egui_shell/top_chrome.rs:844-860`](../../../../crates/ui-egui/src/egui_shell/top_chrome.rs#L844-L860), [`crates/ui-egui/src/egui_shell/command_palette.rs:673-678,717-737,787`](../../../../crates/ui-egui/src/egui_shell/command_palette.rs#L717-L737)
 - **Category:** `wrong-result` / `contract-drift` / `data-loss`
 - **Defect:**
   `push_menu_command_intent` (`top_chrome.rs:844-860`) only checks `is_desktop_host_routed_command` (`crates/ui-egui/src/menus/mod.rs:26-50`) and falls back to `command_palette::resolve_shell_command_route` for all other curated menu items (`crates/ui-egui/src/menus/menu_bar.rs:199-227`). However, `DESKTOP_HOST_ROUTED_COMMANDS` omits multiple file-backed export, template, and import commands that the desktop host implements OS file pickers for (`apps/curvebook/src/desktop_host.rs:1550-1567` `menu_action_triggers_native_file_dialog`), including `export.tiff`, `table.exportCsv`, `analysis.exportCsv`, `analysis.exportJson`, `project.saveTemplate`, `project.instantiateTemplate`, `table.importCsv`, `graph.exportSvg`/`Pdf`/`Png`, `result.generateReport`, and the legacy foreign-format XML/binary importers (`menu_bar.rs:203-204`).
@@ -86,10 +86,10 @@
 
 - **Base:** `7c85a8e516165ddadb101236a88eec937bf1f095`
 - **Severity:** `S2` (High)
-- **Location:** [`crates/ui-egui/src/egui_shell/top_chrome.rs:1749-1763`](../../../crates/ui-egui/src/egui_shell/top_chrome.rs#L1749-L1763)
+- **Location:** [`crates/ui-egui/src/egui_shell/top_chrome.rs:1749-1763`](../../../../crates/ui-egui/src/egui_shell/top_chrome.rs#L1749-L1763)
 - **Category:** `data-loss` / `wrong-result`
 - **Defect:**
-  While `R15-GUI-27` was fixed inside [`info_view.rs:368-448`](../../../crates/ui-egui/src/egui_shell/info_view.rs#L368-L448) via `next_unused_constant_name(info)`, the contextual Tier-2 toolbar (`Tier2SheetContext::InfoSheet`) still emits `info.setConstant` with a hardcoded `"name": "Constant", "value": 1.0`. Additionally, if `doc.active_sheet_id` were `None`, `info_id` falls back to `""` while `enabled` remains `modal_enabled`.
+  While `R15-GUI-27` was fixed inside [`info_view.rs:368-448`](../../../../crates/ui-egui/src/egui_shell/info_view.rs#L368-L448) via `next_unused_constant_name(info)`, the contextual Tier-2 toolbar (`Tier2SheetContext::InfoSheet`) still emits `info.setConstant` with a hardcoded `"name": "Constant", "value": 1.0`. Additionally, if `doc.active_sheet_id` were `None`, `info_id` falls back to `""` while `enabled` remains `modal_enabled`.
 - **Failure scenario:** A user creates or edits a constant named `"Constant"` (case-insensitive) to a meaningful experimental parameter (e.g. `42.5`), then clicks `+ Constant` (`toolbar.info_add_constant`) in the top toolbar to add another constant. `run_info_set_constant` (`crates/engine/src/cmd/info.rs:137`) calls `info.upsert_constant("Constant", ConstantValue::Number(1.0), ...)`, silently overwriting the existing constant's value to `1.0` and recalculating dependent analyses/hooks.
 - **Evidence:**
   ```rust
@@ -119,7 +119,7 @@
 
 - **Base:** `7c85a8e516165ddadb101236a88eec937bf1f095`
 - **Severity:** `S2` (High)
-- **Location:** [`crates/ui-egui/src/egui_shell/inspect_bridge.rs:1205-1305`](../../../crates/ui-egui/src/egui_shell/inspect_bridge.rs#L1205-L1305), [`crates/ui-egui/src/egui_shell/leading_dock.rs:391-428`](../../../crates/ui-egui/src/egui_shell/leading_dock.rs#L391-L428)
+- **Location:** [`crates/ui-egui/src/egui_shell/inspect_bridge.rs:1205-1305`](../../../../crates/ui-egui/src/egui_shell/inspect_bridge.rs#L1205-L1305), [`crates/ui-egui/src/egui_shell/leading_dock.rs:391-428`](../../../../crates/ui-egui/src/egui_shell/leading_dock.rs#L391-L428)
 - **Category:** `contract-drift` / `wrong-result`
 - **Defect:**
   `handle_shell_global_shortcuts` (`inspect_bridge.rs:1205-1305`) and `handle_leading_dock_shortcuts` (`leading_dock.rs:391-428`) consume fixed raw `egui::Key` chords (`Cmd/Ctrl+T`, `Cmd/Ctrl+K`, `Cmd/Ctrl+Shift+Z`/`Cmd/Ctrl+Y`, `Cmd/Ctrl+Z`, `Cmd/Ctrl+C`, `Cmd/Ctrl+V`, `Cmd/Ctrl+\`, `F6`/`Shift+F6`, `Cmd/Ctrl+Shift+N`, `Cmd/Ctrl+Shift+F`, `F2`) without consulting `app.shortcuts` (`ShortcutRegistry`). By contrast, `command_palette.rs:63, 162`, `top_chrome.rs:876`, and `menus/menu_bar.rs` render hints and tooltips from `app.shortcuts.active_combo(...)`, and `apps/curvebook/src/gui_window.rs:1071-1086` (`match_routed_desktop_shortcut`) explicitly skips non-dialog UI commands like `ui.palette.open`, `ui.pane.cycle`, `ui.split.toggle`, `ui.family.toggle`, `edit.undo`, and `edit.redo`.
@@ -169,7 +169,7 @@
 
 - **Base:** `7c85a8e516165ddadb101236a88eec937bf1f095`
 - **Severity:** `S2` (High)
-- **Location:** [`crates/ui-egui/src/egui_shell/leading_dock.rs:2398-2494`](../../../crates/ui-egui/src/egui_shell/leading_dock.rs#L2398-L2494), [`crates/ui-egui/src/egui_shell/inspect_bridge.rs:215-231,458-476`](../../../crates/ui-egui/src/egui_shell/inspect_bridge.rs#L215-L231)
+- **Location:** [`crates/ui-egui/src/egui_shell/leading_dock.rs:2398-2494`](../../../../crates/ui-egui/src/egui_shell/leading_dock.rs#L2398-L2494), [`crates/ui-egui/src/egui_shell/inspect_bridge.rs:215-231,458-476`](../../../../crates/ui-egui/src/egui_shell/inspect_bridge.rs#L215-L231)
 - **Category:** `wrong-result` / `contract-drift`
 - **Defect:**
   1. `render_navigator_delete_confirm_modal` (`leading_dock.rs:2398-2494`) opens a destructive `egui::Modal` whenever `views.leading_dock.delete_confirm.is_some()`, yet `HybridCoexistenceArbiter::evaluate_with_views` (`inspect_bridge.rs:215-231`) does not check `views.leading_dock.delete_confirm.is_some()`. As a result, `decision.modal_backdrop_active` remains `false`, so workspace panels stay `enabled = true` and `handle_shell_global_shortcuts` / `handle_leading_dock_shortcuts` continue firing behind the modal.
@@ -217,7 +217,7 @@
 
 - **Base:** `7c85a8e516165ddadb101236a88eec937bf1f095`
 - **Severity:** `S3` (Medium)
-- **Location:** [`crates/ui-egui/src/egui_shell/mod.rs:495,521,599`](../../../crates/ui-egui/src/egui_shell/mod.rs#L599), [`crates/ui-egui/src/egui_shell/status_footer.rs:704`](../../../crates/ui-egui/src/egui_shell/status_footer.rs#L704)
+- **Location:** [`crates/ui-egui/src/egui_shell/mod.rs:495,521,599`](../../../../crates/ui-egui/src/egui_shell/mod.rs#L599), [`crates/ui-egui/src/egui_shell/status_footer.rs:704`](../../../../crates/ui-egui/src/egui_shell/status_footer.rs#L704)
 - **Category:** `contract-drift` / `wrong-result`
 - **Defect:**
   `ResponsiveShellLayout` defines `pub rtl_mirrored: bool` (`mod.rs:662`) and downstream layout consumers such as `status_footer.rs:704` branch on `layout.rtl_mirrored`, yet `ShellLayoutInput` carries no RTL/locale boolean and `UiMetrics::solve_shell_layout` (`mod.rs:456-601`) hardcodes `rtl_mirrored: false` in all three return statements (`:495`, `:521`, `:599`). Furthermore, `leading_dock.rs` (`egui::Panel::left`) and `trailing_studio` (`egui::Panel::right`) never mirror dock sides when an RTL locale (`ar` / `he`) is active.
@@ -246,7 +246,7 @@
 
 - **Base:** `7c85a8e516165ddadb101236a88eec937bf1f095`
 - **Severity:** `S3` (Medium)
-- **Location:** [`crates/ui-egui/src/egui_shell/fonts.rs:41,243-282,367-379,534-575,614-668`](../../../crates/ui-egui/src/egui_shell/fonts.rs#L243-L282)
+- **Location:** [`crates/ui-egui/src/egui_shell/fonts.rs:41,243-282,367-379,534-575,614-668`](../../../../crates/ui-egui/src/egui_shell/fonts.rs#L243-L282)
 - **Category:** `wrong-result` / `resources`
 - **Defect:**
   1. `assemble_font_definitions` (`fonts.rs:243-282`) explicitly queries `OS_SYMBOL_FAMILIES` and `OS_CJK_FAMILIES`, and `curated_os_font_candidates` (`614-668`) enumerates Latin, monospace, symbol, and CJK files across macOS/Windows/Linux—with zero curated Arabic or Hebrew (`ar`/`he`) family queries or OS candidate paths. Meanwhile `discover_host_font_blobs` (`534-575`) sorts walked OS directory entries lexicographically and stops at `MAX_OS_FONT_FILES = 28` (`:41, 539, 562`). Because curated files + sorted `/System/Library/Fonts/Supplemental` / `/usr/share/fonts` entries easily reach 28 files alphabetically before `GeezaPro` / `NotoSansArabic` / `NotoSansHebrew` / `Raanana`, Arabic and Hebrew faces are never loaded into `egui`.
@@ -290,7 +290,7 @@
 
 - **Base:** `7c85a8e516165ddadb101236a88eec937bf1f095`
 - **Severity:** `S3` (Medium)
-- **Location:** [`crates/ui-egui/src/egui_shell/command_palette.rs:139,164,281-287,593-597`](../../../crates/ui-egui/src/egui_shell/command_palette.rs#L274-L295)
+- **Location:** [`crates/ui-egui/src/egui_shell/command_palette.rs:139,164,281-287,593-597`](../../../../crates/ui-egui/src/egui_shell/command_palette.rs#L274-L295)
 - **Category:** `wrong-result` / `contract-drift`
 - **Defect:**
   1. `render_command_palette` invokes `consume_palette_keys(ctx, ...)` at line `139` before rendering the search `egui::TextEdit` at line `164`. `consume_palette_keys` (`281-287`) unconditionally consumes `Modifiers::NONE` `Key::Home` and `Key::End` to jump list selection to the first/last command row, preventing `Home`/`End` from moving the text caret inside the focused search box.
@@ -325,7 +325,7 @@
 
 - **Base:** `7c85a8e516165ddadb101236a88eec937bf1f095`
 - **Severity:** `S3` (Medium)
-- **Location:** [`crates/ui-egui/src/egui_shell/mod.rs:2758-2843`](../../../crates/ui-egui/src/egui_shell/mod.rs#L2758-L2843)
+- **Location:** [`crates/ui-egui/src/egui_shell/mod.rs:2758-2843`](../../../../crates/ui-egui/src/egui_shell/mod.rs#L2758-L2843)
 - **Category:** `wrong-result`
 - **Defect:**
   `apply_find_replace_on_active_sheet` always scans `0..rows`, `0..cols`, `0..subcols` from `(0, 0, 0)` and records only `first_match` (`2801-2803`). When `replace_all == false` (triggered by `"Find Next"` in `app_modals.rs:1009`), it ignores `app.grid.tool.active`, selects `first_match` on every invocation (`2834-2837`), never advances to subsequent matches or wraps around, and inspects only `ds.archetype.data_cell(...)` (`2787`), omitting `x_or_time_cell` values on XY and Survival tables.
@@ -361,7 +361,7 @@
 
 - **Base:** `7c85a8e516165ddadb101236a88eec937bf1f095`
 - **Severity:** `S3` (Medium)
-- **Location:** [`crates/ui-egui/src/egui_shell/status_footer.rs:702-717,893-914,1425-1603,1689-1701`](../../../crates/ui-egui/src/egui_shell/status_footer.rs#L1425-L1603)
+- **Location:** [`crates/ui-egui/src/egui_shell/status_footer.rs:702-717,893-914,1425-1603,1689-1701`](../../../../crates/ui-egui/src/egui_shell/status_footer.rs#L1425-L1603)
 - **Category:** `wrong-result` / `contract-drift`
 - **Defect:**
   1. `render_status_footer` calls `render_footer_popovers(...)` unconditionally at `:1689` without checking `ctx_in.enabled`. Inside `show_footer_popup` (`:893-914`) and `render_footer_popovers` (`:1425-1603`), `egui::Area::new(...).order(egui::Order::Foreground)` never closes `filter_popup_open`, `sheet_switcher_open`, `link_popover_open`, or `stats_popover_open` when `!ctx_in.enabled` (active modal), on `Key::Escape`, or on pointer clicks outside the popup area—and `stats_popover_open` (`:1570-1602`) has no inner close trigger at all.
@@ -399,7 +399,7 @@
 
 - **Base:** `7c85a8e516165ddadb101236a88eec937bf1f095`
 - **Severity:** `S3` (Medium)
-- **Location:** [`crates/ui-egui/src/egui_shell/canvas_view.rs:91-112,1571-1580,2182-2192,2294-2297,2547-2558`](../../../crates/ui-egui/src/egui_shell/canvas_view.rs#L2182-L2192)
+- **Location:** [`crates/ui-egui/src/egui_shell/canvas_view.rs:91-112,1571-1580,2182-2192,2294-2297,2547-2558`](../../../../crates/ui-egui/src/egui_shell/canvas_view.rs#L2182-L2192)
 - **Category:** `wrong-result` / `data-loss`
 - **Defect:**
   1. Right-click context menu items `canvas.graph_ctx.insert_image` (`2189`) and `canvas.layout_ctx.insert_image` (`2295`) emit `intents.push_engine("graph.insertImage", json!({}))` and `intents.push_engine("layout.insertImage", json!({}))` without `"sheet_id": gs.id.as_str()` / `ls.id.as_str()`, unlike neighboring items (`:2217`, `:2273`). On desktop (`gui_window.rs:558` -> `desktop_host.rs:1878`), target sheet selection ignores missing params and falls back to `doc.active_sheet_id`, misrouting `Insert Image…` from a secondary split pane onto the active sheet (and failing engine schema validation outside `gui_window`).
@@ -440,7 +440,7 @@
 
 - **Base:** `7c85a8e516165ddadb101236a88eec937bf1f095`
 - **Severity:** `S4` (Low)
-- **Location:** [`crates/ui-egui/src/egui_shell/center_stage.rs:125,958-960,975-1024,1837,1945-1947`](../../../crates/ui-egui/src/egui_shell/center_stage.rs#L975-L1024)
+- **Location:** [`crates/ui-egui/src/egui_shell/center_stage.rs:125,958-960,975-1024,1837,1945-1947`](../../../../crates/ui-egui/src/egui_shell/center_stage.rs#L975-L1024)
 - **Category:** `resources` / `wrong-result` / `cleanup`
 - **Defect:**
   1. `render_split_column_sheet_preview` (`975-1024`) constructs up to `500 × 64` (`32,000`) `egui::Button` widgets inside `ScrollArea::both()` unconditionally every frame instead of using `show_rows` row virtualization and visible-column slicing, and omits `meta.record_response` on `"Focus in Grid"` (`:958`) as well as `split.col_preview.*` cells past `12 × 4`.
@@ -475,7 +475,7 @@
 
 - **Base:** `7c85a8e516165ddadb101236a88eec937bf1f095`
 - **Severity:** `S4` (Low)
-- **Location:** [`crates/ui-egui/src/egui_shell/leading_dock.rs:1231-1255,1688,2106-2119`](../../../crates/ui-egui/src/egui_shell/leading_dock.rs#L1231-L1255), [`crates/ui-egui/src/egui_shell/canvas_view.rs:246-269,313-318,358`](../../../crates/ui-egui/src/egui_shell/canvas_view.rs#L358), [`crates/ui-egui/src/egui_shell/inspect_bridge.rs:977`](../../../crates/ui-egui/src/egui_shell/inspect_bridge.rs#L977)
+- **Location:** [`crates/ui-egui/src/egui_shell/leading_dock.rs:1231-1255,1688,2106-2119`](../../../../crates/ui-egui/src/egui_shell/leading_dock.rs#L1231-L1255), [`crates/ui-egui/src/egui_shell/canvas_view.rs:246-269,313-318,358`](../../../../crates/ui-egui/src/egui_shell/canvas_view.rs#L358), [`crates/ui-egui/src/egui_shell/inspect_bridge.rs:977`](../../../../crates/ui-egui/src/egui_shell/inspect_bridge.rs#L977)
 - **Category:** `contract-drift` / `cleanup`
 - **Defect:**
   1. `render_section_new_row` (`leading_dock.rs:1231-1255`) hardcodes English captions (`"+ New Data…"`, `"+ New Info…"`, `"+ New Graph…"`, `"+ New Layout…"`) and disabled tooltips instead of `tr(...)` (as do Navigator context-menu items at `:2079-2245, 2291-2367`), `finalize_drag_state` (`:1688`) displays internal sheet IDs (`format!("Moving {}", drag_id.as_str())`) instead of localized sheet titles, and `nav.ctx.convert_archetype` (`:2106-2119`) keeps `enabled: true` even when `menu.is_frozen` (`table.convertArchetype` rejects frozen sheets via `ensure_sheet_not_frozen`).

@@ -1,6 +1,6 @@
 # GUI workflow completion audit (2026-11-21)
 
-Checks whether every documented workflow (`WF-01`–`WF-65`, [`gui-workflows.md`](../gui-workflows.md)) can be completed through the drawn GUI, using the automated `EguiHumanPathDriver` suites only. No human or computer-use walkthrough was done, so this does not touch `R10.13` / `R11.10`.
+Checks whether every documented workflow (`WF-01`–`WF-65`, [`gui-workflows.md`](../../gui-workflows.md)) can be completed through the drawn GUI, using the automated `EguiHumanPathDriver` suites only. No human or computer-use walkthrough was done, so this does not touch `R10.13` / `R11.10`.
 
 ## Run metadata
 
@@ -15,7 +15,7 @@ Checks whether every documented workflow (`WF-01`–`WF-65`, [`gui-workflows.md`
 
 ## Verdict
 
-Passing tests do not show that every workflow can be completed through the GUI as specified. Under the five-stage definition in [`gui-workflows.md` §6](../gui-workflows.md#6-human-path-status--blockers-r10) (create table → enter data → configure analysis → verify results and graph → live upstream edit), **no workflow test is complete**:
+Passing tests do not show that every workflow can be completed through the GUI as specified. Under the five-stage definition in [`gui-workflows.md` §6](../../gui-workflows.md#6-human-path-status--blockers-r10) (create table → enter data → configure analysis → verify results and graph → live upstream edit), **no workflow test is complete**:
 
 | Verdict | Count | Meaning |
 |---|---|---|

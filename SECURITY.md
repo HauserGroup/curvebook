@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-CurveBook is pre-alpha and has no released versions. Security fixes go to the `main` branch only.
+CurveBook is currently in prerelease (`0.1.0-alpha.*` / Beta preparation; [`v0.1.0-alpha.1`](https://github.com/HauserGroup/curvebook/releases/tag/v0.1.0-alpha.1) published 2026-11-17). Security fixes go to the `main` branch only and ship in the next release; earlier prerelease tags do not receive backports.
 
 ## Reporting a vulnerability
 

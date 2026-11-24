@@ -1,13 +1,13 @@
 # Verification Report: SEC-14 — UI Grid, Menus & Canvas Dialogs (`crates/ui-egui`)
 
 - **Section:** `SEC-14` (`26` files in `crates/ui-egui/src/{grid_view.rs, dialogs_r9.rs, power_wizard.rs, text_bridge.rs, i18n.rs}`, `menus/*`, `dialogs_canvas/*`; `19,322` LOC)
-- **Source Report:** [`docs/audit/full-2026-11-22/SEC-14.md`](../../../docs/audit/full-2026-11-22/SEC-14.md)
+- **Source Report:** [`docs/audit/full-2026-11-22/SEC-14.md`](SEC-14.md)
 - **Checked at:** `7c85a8e516165ddadb101236a88eec937bf1f095`
 - **Verifier:** `ver-frontend`
 
 ## Summary Table
 
-> Note: `SEC-14.md` reports aggregate severity counts (`S1=0, S2=7, S3=6, S4=0`) without per-finding severity labels, so each confirmed finding below carries a settled severity assigned under [`docs/audit/README.md`](../../../docs/audit/README.md). `FA-SEC14-06` is settled as `DUPLICATE` of `FA-SEC19-02` (`S1`, already recorded in `SEC-19`) and excluded from unique settled counts.
+> Note: `SEC-14.md` reports aggregate severity counts (`S1=0, S2=7, S3=6, S4=0`) without per-finding severity labels, so each confirmed finding below carries a settled severity assigned under [`docs/audit/README.md`](../../../../docs/audit/README.md). `FA-SEC14-06` is settled as `DUPLICATE` of `FA-SEC19-02` (`S1`, already recorded in `SEC-19`) and excluded from unique settled counts.
 
 | Verdict | Count | Settled Findings |
 |---|---:|---|

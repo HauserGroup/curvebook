@@ -6,7 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 publish.workspace = true
-description = "CurveBook vector SVG figure exporter and reader"
+description = "CurveBook vector SVG figure and page-layout exporter"
 
 [lints]
 workspace = true

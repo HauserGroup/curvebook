@@ -10,7 +10,7 @@ This is a separate file because `feature/R15.6-r15-r16-impl` rewrites the main l
 |---|---|
 | Checked commits | `1b54e3748d5ff3de9b08485dd91bd46e01dd5983` (`audit/R15-gui-audit-ledger`). Every finding was re-checked at `91fcd0b` (`feature/R15.6-r15-r16-impl`), the newest R15/R16 implementation tip, and still applies there. |
 | Scope | Menu model (`crates/ui-egui/src/menus/tooltips.rs`), in-window menu bar (`egui_shell/top_chrome.rs`), desktop command routing (`apps/curvebook/src/desktop_host.rs`), command palette, data-grid context menu and key handlers, shell key handlers (`inspect_bridge.rs`, `leading_dock.rs`, modal key handling). |
-| Method | Static trace. One engine probe through MCP stdio (`curvebook-cli` 0.1.0-alpha.2). Nothing was exercised in a live window, so per [`pitfalls.md`](../pitfalls.md) §6 none of this is human-path evidence. |
+| Method | Static trace. One engine probe through MCP stdio (`curvebook-cli` 0.1.0-alpha.2). Nothing was exercised in a live window, so per [`pitfalls.md`](../../pitfalls.md) §6 none of this is human-path evidence. |
 | Mode | Report only. No implementation code changed. |
 | Agent | Claude Code; Claude Opus 5.5 (`claude-opus-5-5`) |
 | Slash command | none |

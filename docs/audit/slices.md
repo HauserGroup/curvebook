@@ -1,6 +1,6 @@
 # Audit slices
 
-The parts of the codebase that reviewers claim, one at a time. Follow the protocol in [`README.md`](README.md). Sizes are approximate lines of Rust under `src/` at `71f37d8`, the first round 1 base. Tests are out of scope unless a slice says otherwise, but reading them helps you see what is already covered.
+The parts of the codebase that reviewers claim, one at a time. Follow the protocol in [`README.md`](README.md). Table sizes below are historical round-1 baselines at `71f37d8` (run `cargo xtask stats --exact` for current per-crate `src/` sizes, including `crates/platform` added in `R0.29`). Tests are out of scope unless a slice says otherwise, but reading them helps you see what is already covered.
 
 Slices `S01`–`S13` follow the crate layering. `X1` and `X2` cross crates on purpose: the two defects fixed after the 2026-11-13 review (control server, CLI sandbox) sat on seams between crates, where a single-crate reviewer would miss them. Assign `X1`/`X2` to reviewers who have not reviewed a crate slice.
 

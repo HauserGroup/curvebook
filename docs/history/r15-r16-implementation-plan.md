@@ -6,8 +6,8 @@
 
 | Source on this branch | Content | Kind of work |
 |---|---|---|
-| [`audit/r15-gui-audit-2026-11-20.md`](../audit/r15-gui-audit-2026-11-20.md) | `R15-GUI-01`…`R15-GUI-28`: defects in the `egui` desktop GUI, ranked High/Medium/Low | Bug fixes with regression tests |
-| [`audit/maintainability-ledger-2026-11-20.md`](../audit/maintainability-ledger-2026-11-20.md) | `R0-1`…`R16-1`: duplicated logic and hand-written general-purpose machinery across the workspace | Behaviour-preserving refactors, some library swaps |
+| [`audit/r15-gui-audit-2026-11-20.md`](audit/r15-gui-audit-2026-11-20.md) | `R15-GUI-01`…`R15-GUI-28`: defects in the `egui` desktop GUI, ranked High/Medium/Low | Bug fixes with regression tests |
+| [`audit/maintainability-ledger-2026-11-20.md`](audit/maintainability-ledger-2026-11-20.md) | `R0-1`…`R16-1`: duplicated logic and hand-written general-purpose machinery across the workspace | Behaviour-preserving refactors, some library swaps |
 | [`planning/r16-gui-maintainability-scope.md`](r16-gui-maintainability-scope.md) | Move-only splits of the largest `crates/ui-egui` modules; pruning merged `R15` branch refs | Refactors and repository housekeeping |
 
 The three sources overlap in the same files. The plan orders them so that **bug fixes land first, shared helpers next, and file splits last**, and so that parallel work never edits the same file.

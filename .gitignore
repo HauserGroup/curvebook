@@ -15,5 +15,6 @@
 *.key
 *.p12
 .claude/settings.local.json
+.codex/
 # Agent git worktrees
 /.claude/worktrees/

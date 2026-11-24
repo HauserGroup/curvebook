@@ -118,9 +118,26 @@ fn fa_x3_05_06_live_policy_gates_pass_and_ci_rs_hardening_present() -> Result<()
     assert!(ci_rs.contains("binary(r15_2_anova_and_1m_bench)"), "FA-X3-05 filter term missing from ci.rs");
     assert!(ci_rs.contains("workflows::is_ci_env()"), "FA-X3-06 non-full-gates CI guard missing from ci.rs");
 
-    for subcmd in ["assets", "brands", "cleanroom", "layers", "licenses", "telemetry", "workflows", "secrets", "pending"] {
-        let args = if subcmd == "pending" { vec!["pending", "--count"] } else { vec![subcmd] };
-        let out = run_xtask(&args, &[])?;
+    // Per R0.32, do not re-run full live-repository scans inside xtask integration tests
+    // (the `ci policy` stage already runs every live gate once per revision). Instead,
+    // verify `ci.rs::policy` wires every required gate and smoke-test fast CLI dispatch.
+    for required_call in [
+        "assets::run(root)?;",
+        "brands::run(root)?;",
+        "cleanroom::run(root)?;",
+        "cmd_layers(root)?;",
+        "secrets::run(root)?;",
+        "licenses::run(root, &[])?;",
+        "telemetry::run(root, &[])?;",
+        "workflows::run(root, &[])?;",
+        "pending::run_count(root)?;",
+        "status::run(root)",
+    ] {
+        assert!(ci_rs.contains(required_call), "ci.rs::policy missing required gate call `{required_call}`");
+    }
+
+    for args in [&["assets"][..], &["pending", "--count"][..]] {
+        let out = run_xtask(args, &[])?;
         assert!(
             out.status.success(),
             "`xtask {}` failed:\nstdout: {}\nstderr: {}",

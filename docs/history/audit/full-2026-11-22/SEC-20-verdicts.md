@@ -1,7 +1,7 @@
 # Verification Report: SEC-20 — Web / WASM Application
 
 - **Section:** `SEC-20` (`apps/curvebook-web/`: `8` files, `11,275` LOC)
-- **Source Report:** [`docs/audit/full-2026-11-22/SEC-20.md`](../../../docs/audit/full-2026-11-22/SEC-20.md)
+- **Source Report:** [`docs/audit/full-2026-11-22/SEC-20.md`](SEC-20.md)
 - **Checked at:** `7c85a8e516165ddadb101236a88eec937bf1f095`
 - **Verifier:** `ver-frontend`
 

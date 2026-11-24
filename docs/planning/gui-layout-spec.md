@@ -30,7 +30,7 @@ CurveBook is an integrated scientific workbench for structured tabular data entr
 
 ```text
 +--------------------------------------------------------------------------------------------------+
-| [Home] [File Edit View Insert Data Analyze Graph Arrange Window Help]  [Project/Doc] [Cmd+K][Mode]|  32 pt  Tier 1: Application & Document Bar
+| [Home] [File Edit View Insert Data Analyze Graph Help]               [Project/Doc] [Commands][Mode]|  32 pt  Tier 1: Application & Document Bar
 +--------------------------------------------------------------------------------------------------+
 | [+ Sheet v] [Undo Redo] | [Primary Sheet CTA: Analyze... / Fit... / Graph Type...] [Quick Tools] |  38 pt  Tier 2: Contextual Action Strip
 +-----------------------+--------------------------------------------------+-----------------------+

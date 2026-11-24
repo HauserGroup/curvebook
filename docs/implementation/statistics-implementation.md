@@ -99,7 +99,7 @@ Evaluated on raw values $x_i$ (normality) and $\ln(x_i)$ when $x_i > 0$ (lognorm
 
 ### 3.3 Linear Mixed-Effects Models (REML) & Nested Designs
 - When repeated-measures `Grouped` tables have missing values (or for `Nested` tables with unequal subcolumn sizes), fit the random-intercept linear mixed model $y = X\beta + Z u + \varepsilon$, $u \sim N(0, \sigma_u^2 I)$ (`fit_random_intercept_reml` in `crates/stats/src/anova/reml.rs`) by **Restricted Maximum Likelihood (REML)**, profiling the exact log-REML over the variance ratio $\tau = \sigma_u^2 / \sigma_e^2$ (grid + golden-section search, Cholesky solves):
-  - Compound-symmetry covariance across repeated timepoints (implied by the random intercept); unstructured residual covariance is not implemented (planned in [`R3.4`](../history/roadmap/r3.md#r34-unstructured-residual-covariance-for-reml-mixed-models), todo),
+  - Compound-symmetry covariance across repeated timepoints (random subject intercept in `reml.rs`) and unstructured residual covariance across repeated occasions via Cholesky-factorized profiling (`reml_unstructured.rs`; [`R3.4`](../history/roadmap/r3.md#r34-unstructured-residual-covariance-for-reml-mixed-models), [`R3.6`](../history/roadmap/r3.md#r36-mixed-effects-reml-for-1-way--3-way-rm-and-selectable-df-methods), done),
   - Fixed-effect Wald *F*-tests with **Kenward–Roger** or **Satterthwaite** denominator degrees of freedom,
   - Variance-component estimates, intraclass correlation (ICC), and likelihood-ratio $\chi^2$ test for random subject effects.
 
@@ -120,7 +120,7 @@ All multiplicity engines operate cleanly on contrast vectors $c_j^\top \hat{\bet
   - **Benjamini–Hochberg (BH)** one-stage step-up,
   - **Benjamini–Yekutieli (BY)** under arbitrary dependency,
   - **Two-stage linear step-up Benjamini–Krieger–Yekutieli (BKY)** estimating $\hat{\pi}_0$ in stage 1 with $Q' = Q/(1+Q)$. Discoveries are always flagged strictly from adjusted $q$-values ($q_i \le Q$), never raw $p_i$.
-- **Planned (`R10.10`, todo):** a standalone "Analyze a stack of *P* values" column analysis reusing these multiplicity engines (Bonferroni, Holm, Šídák, Holm–Šídák, BH, BKY, BY) on a user-supplied column of *P* values; not yet available.
+- **Standalone P-value stack (`R10.10`, done):** `crates/stats/src/pvalue_stack.rs` runs these multiplicity and FDR engines (Bonferroni, Holm, Šídák, Holm–Šídák, BH, BKY, BY) directly on a user-supplied column of *P* values (`AnalysisKind::PValueStack`).
 
 ---
 
