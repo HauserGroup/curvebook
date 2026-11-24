@@ -16,7 +16,7 @@ use curvebook_format::ZipWriter;
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(1);
 
-/// Two tables: an XY table with two replicate Y subcolumns and one excluded value, and a column table.
+/// Two tables (XY with replicate Y subcolumns and an excluded value, plus a column table) and a graph node.
 const SAMPLE_PZFX: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <PrismFile>
   <TableSequence>
@@ -31,6 +31,7 @@ const SAMPLE_PZFX: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
       <YColumn><Title>Treated</Title><Subcolumn><d>2.3</d><d>2.6</d><d>2.0</d></Subcolumn></YColumn>
     </Table>
   </TableSequence>
+  <Graph ID="graph1"><Title>Dose curve</Title></Graph>
 </PrismFile>
 "#;
 

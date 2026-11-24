@@ -132,8 +132,9 @@ fn scan_html_tags(rel_path: &str, html: &str, facts: &mut PageFacts) -> Result<(
 fn process_tag_attrs(rel_path: &str, tag_lower: &str, attrs: &[(String, String)], facts: &mut PageFacts) -> Result<(), String> {
     let mut is_meta_refresh = false;
     let mut meta_content: Option<&str> = None;
+    let mut rel_values = attrs.iter().filter(|(k, _)| k.eq_ignore_ascii_case("rel")).map(|(_, v)| v.trim());
     let is_canonical_link =
-        tag_lower == "link" && attrs.iter().any(|(k, v)| k.eq_ignore_ascii_case("rel") && v.trim().eq_ignore_ascii_case("canonical"));
+        tag_lower == "link" && rel_values.next().is_some_and(|v| v.eq_ignore_ascii_case("canonical")) && rel_values.next().is_none();
 
     for (k, v) in attrs {
         let key_lower = k.to_ascii_lowercase();

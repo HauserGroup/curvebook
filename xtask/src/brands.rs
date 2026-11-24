@@ -659,9 +659,9 @@ fn scan_html_file(path: &str, text: &str, out: &mut Vec<BrandHit>) {
     for (idx, line) in text.lines().enumerate() {
         let line_no = idx + 1;
         if let Some(masked) = mask_generated_docs_html_tokens(path, line) {
-            collect_line_words(path, line_no, &masked, BRANDS, PrismPolicy::Standard, out);
+            collect_line_words(path, line_no, &masked, BRANDS, PrismPolicy::Strict, out);
         } else {
-            collect_line_words(path, line_no, line, BRANDS, PrismPolicy::Standard, out);
+            collect_line_words(path, line_no, line, BRANDS, PrismPolicy::Strict, out);
         }
     }
 }
@@ -671,14 +671,12 @@ fn scan_plain_lines_no_waiver(path: &str, text: &str, out: &mut Vec<BrandHit>) {
 }
 
 fn scan_plain_lines_with_scope(path: &str, text: &str, allow_packaged: bool, out: &mut Vec<BrandHit>) {
-    let is_asset_doc = matches!(Path::new(path).file_name().and_then(|n| n.to_str()), Some("ASSETS.md" | "ATTRIBUTION.md" | "NOTICE"));
     let is_readme_disclaimer = is_readme_disclaimer_path(path, allow_packaged);
     let strict_disclaimer_brands: Vec<&'static str> =
         if is_readme_disclaimer { BRANDS.iter().copied().filter(|brand| !VENDOR_DISCLAIMER_NAMES.contains(brand)).collect() } else { Vec::new() };
     for (idx, line) in text.lines().enumerate() {
-        let policy = if is_asset_doc { PrismPolicy::Strict } else { PrismPolicy::Standard };
         let brands = if is_readme_disclaimer && line.contains(ALLOW_MARKER) { &strict_disclaimer_brands[..] } else { BRANDS };
-        collect_line_words(path, idx + 1, line, brands, policy, out);
+        collect_line_words(path, idx + 1, line, brands, PrismPolicy::Strict, out);
     }
 }
 
@@ -709,8 +707,7 @@ fn scan_plist(path: &str, text: &str, out: &mut Vec<BrandHit>) {
             }
         }
         in_extensions_key = false;
-        let policy = if is_dot_prism_extension_description(trimmed) { PrismPolicy::Standard } else { PrismPolicy::Strict };
-        collect_line_words(path, line_no, line, BRANDS, policy, out);
+        collect_line_words(path, line_no, line, BRANDS, PrismPolicy::Strict, out);
     }
 }
 
@@ -725,8 +722,7 @@ fn scan_mime_xml(path: &str, text: &str, out: &mut Vec<BrandHit>) {
         if allowed_mime_tag {
             continue;
         }
-        let policy = if is_dot_prism_extension_description(trimmed) { PrismPolicy::Standard } else { PrismPolicy::Strict };
-        collect_line_words(path, line_no, line, BRANDS, policy, out);
+        collect_line_words(path, line_no, line, BRANDS, PrismPolicy::Strict, out);
     }
 }
 
@@ -758,9 +754,9 @@ fn scan_markdown(path: &str, text: &str, out: &mut Vec<BrandHit>) {
         let line_no = idx + 1;
         let brands = if is_readme_disclaimer && line.contains(ALLOW_MARKER) { &strict_disclaimer_brands[..] } else { BRANDS };
         if let Some(masked) = mask_markdown_format_tokens(line, is_agents, is_dev_or_cmd) {
-            collect_line_words(path, line_no, &masked, brands, PrismPolicy::Standard, out);
+            collect_line_words(path, line_no, &masked, brands, PrismPolicy::Strict, out);
         } else {
-            collect_line_words(path, line_no, line, brands, PrismPolicy::Standard, out);
+            collect_line_words(path, line_no, line, brands, PrismPolicy::Strict, out);
         }
     }
 }
@@ -1390,8 +1386,7 @@ impl<'a> TomlScanner<'a> {
     }
 
     fn check_literal(&mut self, lit: &ExtractedLiteral, _stmt_prev_allow: bool) {
-        let policy = if is_dot_prism_extension_description(&lit.text) { PrismPolicy::Standard } else { PrismPolicy::Strict };
-        collect_literal_words(self.path, lit, BRANDS, policy, &mut self.seen, self.out);
+        collect_literal_words(self.path, lit, BRANDS, PrismPolicy::Strict, &mut self.seen, self.out);
     }
 }
 
@@ -1475,7 +1470,6 @@ fn scan_rust(path: &str, text: &str, out: &mut Vec<BrandHit>) {
                 continue;
             }
             let allow_bare_prism = is_import_export_prism_literal(path, text, &lit);
-            let allow_dot_prism = is_dot_prism_extension_description(&lit.text);
             let allow_import_prism_cmd = is_import_prism_cmd_literal(&lit.text);
             let allow_pzfx_xml = is_pzfx_xml_literal(&lit.text);
             let allow_it_statistica = is_italian_i18n_line(path, &lines, &lit);
@@ -1483,14 +1477,13 @@ fn scan_rust(path: &str, text: &str, out: &mut Vec<BrandHit>) {
             let policy = if strict_ui_or_app {
                 PrismPolicy::UiOrAppRustLiteral {
                     allow_bare_prism,
-                    allow_dot_prism,
                     allow_import_prism_cmd,
                     allow_pzfx_xml,
                     allow_it_statistica,
                     allow_test_container_op,
                 }
             } else {
-                PrismPolicy::RustLiteral { allow_bare_prism, allow_dot_prism, allow_import_prism_cmd, allow_pzfx_xml, allow_test_container_op }
+                PrismPolicy::RustLiteral { allow_bare_prism, allow_import_prism_cmd, allow_pzfx_xml, allow_test_container_op }
             };
             collect_literal_words(path, &lit, BRANDS, policy, &mut seen, out);
             collect_literal_words(path, &lit, SUITE_BRANDS, PrismPolicy::Strict, &mut seen, out);
@@ -1670,7 +1663,6 @@ fn scan_rust_ident(path: &str, line: usize, ident: &str, seen: &mut BTreeSet<(us
 enum PrismPolicy<'a> {
     Strict,
     AllowExactBarePrism,
-    Standard,
     RustComment {
         allow_it_statistica: bool,
     },
@@ -1680,21 +1672,18 @@ enum PrismPolicy<'a> {
     },
     RustLiteral {
         allow_bare_prism: bool,
-        allow_dot_prism: bool,
         allow_import_prism_cmd: bool,
         allow_pzfx_xml: bool,
         allow_test_container_op: bool,
     },
     UiOrAppRustLiteral {
         allow_bare_prism: bool,
-        allow_dot_prism: bool,
         allow_import_prism_cmd: bool,
         allow_pzfx_xml: bool,
         allow_it_statistica: bool,
         allow_test_container_op: bool,
     },
     UiTextRun {
-        allow_dot_prism: bool,
         allow_it_statistica: bool,
         allow_palette_cmd_id: bool,
     },
@@ -1878,85 +1867,26 @@ fn is_jmp_match_exempt(policy: PrismPolicy<'_>) -> bool {
 /// surfaces such as page titles, meta descriptions, and UI text (maintainer decision 2026-11-24,
 /// `R12.8`). Bare `prism`/`Prism`, capitalised `.Prism`, and domain-like `.prism.<tld>` stay flagged.
 fn is_prism_match_exempt(raw: &str, lower: &str, pos: usize, end: usize, policy: PrismPolicy<'_>) -> bool {
-    let is_lower_dot_ext = raw.as_bytes().get(pos..end) == Some(b"prism") && is_prism_extension_token(lower.as_bytes(), pos, end);
-    if is_lower_dot_ext {
+    if raw.as_bytes().get(pos..end) == Some(b"prism") && is_prism_extension_token(lower.as_bytes(), pos, end) {
         return true;
     }
     let is_cmd_prism = matches!(raw.get(pos.saturating_sub(12)..end), Some("table.importPrism"))
         || matches!(raw.get(pos.saturating_sub(6)..end), Some("importPrism"));
     let is_xml_prism_tag = raw.get(pos..pos + 9) == Some("PrismFile") || raw.get(pos..pos + 15) == Some("PrismXMLVersion");
     match policy {
-        PrismPolicy::Strict => false,
+        PrismPolicy::Strict | PrismPolicy::RustComment { .. } => false,
         PrismPolicy::AllowExactBarePrism => raw.as_bytes().get(pos..end) == Some(b"prism"),
-        PrismPolicy::Standard => is_lower_dot_ext,
-        PrismPolicy::RustComment { .. } => is_lower_dot_ext,
         PrismPolicy::RustIdent { allow_canonical_prism_ident, .. } => allow_canonical_prism_ident,
-        PrismPolicy::RustLiteral { allow_bare_prism, allow_dot_prism, allow_import_prism_cmd, allow_pzfx_xml, allow_test_container_op } => {
+        PrismPolicy::RustLiteral { allow_bare_prism, allow_import_prism_cmd, allow_pzfx_xml, allow_test_container_op }
+        | PrismPolicy::UiOrAppRustLiteral { allow_bare_prism, allow_import_prism_cmd, allow_pzfx_xml, allow_test_container_op, .. } => {
             (allow_bare_prism && raw == "prism")
-                || (allow_dot_prism && is_lower_dot_ext)
                 || (allow_import_prism_cmd && is_cmd_prism)
                 || (allow_pzfx_xml && is_xml_prism_tag)
                 || (allow_test_container_op && raw.as_bytes().get(pos..end) == Some(b"prism"))
         }
-        PrismPolicy::UiOrAppRustLiteral {
-            allow_bare_prism,
-            allow_dot_prism,
-            allow_import_prism_cmd,
-            allow_pzfx_xml,
-            allow_test_container_op,
-            ..
-        } => {
-            (allow_bare_prism && raw == "prism")
-                || (allow_dot_prism && is_lower_dot_ext)
-                || (allow_import_prism_cmd && is_cmd_prism)
-                || (allow_pzfx_xml && is_xml_prism_tag)
-                || (allow_test_container_op && raw.as_bytes().get(pos..end) == Some(b"prism"))
-        }
-        PrismPolicy::UiTextRun { allow_dot_prism, allow_palette_cmd_id, .. } => {
-            (allow_dot_prism && is_lower_dot_ext) || (allow_palette_cmd_id && is_cmd_prism)
-        }
-        PrismPolicy::SvgTitleOrDesc { prev_word } => is_lower_dot_ext || is_preceded_by_optical_modifier(lower.get(..pos).unwrap_or(""), prev_word),
+        PrismPolicy::UiTextRun { allow_palette_cmd_id, .. } => allow_palette_cmd_id && is_cmd_prism,
+        PrismPolicy::SvgTitleOrDesc { prev_word } => is_preceded_by_optical_modifier(lower.get(..pos).unwrap_or(""), prev_word),
     }
-}
-
-fn is_dot_prism_extension_description(raw: &str) -> bool {
-    let trimmed = raw.trim();
-    if trimmed == ".prism" || trimmed == "*.prism" {
-        return true;
-    }
-    if let Some(stem) = trimmed.strip_suffix(".prism")
-        && !stem.is_empty()
-        && stem.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
-    {
-        return true;
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    if !lower.contains(".prism") || lower.contains("http://") || lower.contains("https://") || lower.contains("www.") {
-        return false;
-    }
-    const FORMAT_TOKENS: &[&str] = &[
-        ".pzfx",
-        ".curvebook",
-        ".cbtemplate",
-        ".csv",
-        ".tsv",
-        "import",
-        "export",
-        "extension",
-        "filter",
-        "accept",
-        "format",
-        "archive",
-        "file",
-        "drop",
-        "chunk",
-        "table",
-        "subcolumn",
-        "project",
-        "max_project_cells",
-        "open",
-    ];
-    FORMAT_TOKENS.iter().any(|tok| lower.contains(tok))
 }
 
 fn tail_char_slice(s: &str, max_bytes: usize) -> &str {
@@ -2157,7 +2087,15 @@ fn is_prism_extension_token(bytes: &[u8], pos: usize, end: usize) -> bool {
         return false;
     }
     let followed_by_domain_segment = bytes.get(end) == Some(&b'.') && bytes.get(end + 1).is_some_and(u8::is_ascii_alphanumeric);
-    !followed_by_domain_segment
+    !followed_by_domain_segment && !is_url_host_segment(bytes, pos - 1)
+}
+
+fn is_url_host_segment(bytes: &[u8], dot_pos: usize) -> bool {
+    let mut i = dot_pos;
+    while i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || matches!(bytes[i - 1], b'-' | b'.')) {
+        i -= 1;
+    }
+    i >= 3 && bytes.get(i - 3..i) == Some(b"://")
 }
 
 fn is_preceded_by_optical_modifier(before_lower: &str, prev_word: Option<&str>) -> bool {
@@ -2227,19 +2165,13 @@ where
 {
     let mut out = Vec::new();
     for (idx, run) in runs.into_iter().enumerate() {
-        let text = run.as_ref();
-        let policy = PrismPolicy::UiTextRun {
-            allow_dot_prism: is_dot_prism_extension_description(text),
-            allow_it_statistica: false,
-            allow_palette_cmd_id: false,
-        };
-        check_single_string(source, idx + 1, text, policy, &mut out);
+        let policy = PrismPolicy::UiTextRun { allow_it_statistica: false, allow_palette_cmd_id: false };
+        check_single_string(source, idx + 1, run.as_ref(), policy, &mut out);
     }
     out
 }
 
-/// Strictly scan text runs, rejecting every external brand, suite name, and `"prism"` mention
-/// (including `.prism`).
+/// Strictly scan text runs, rejecting every external brand, suite name, and non-extension `"prism"` mention.
 #[cfg(any(feature = "full-gates", test))]
 #[must_use]
 pub fn check_text_runs_strict<I, S>(source: &str, runs: I) -> Vec<BrandHit>
@@ -2264,30 +2196,16 @@ where
 {
     let mut out = Vec::new();
     for (idx, (label, text)) in runs.into_iter().enumerate() {
-        let policy = PrismPolicy::UiTextRun {
-            allow_dot_prism: is_dot_prism_extension_description(text),
-            allow_it_statistica: false,
-            allow_palette_cmd_id: false,
-        };
+        let policy = PrismPolicy::UiTextRun { allow_it_statistica: false, allow_palette_cmd_id: false };
         check_single_string(label, idx + 1, text, policy, &mut out);
     }
     out
 }
 
-#[cfg(any(feature = "full-gates", test))]
-fn is_i18n_format_extension_key(key: &str) -> bool {
-    let lower = key.to_ascii_lowercase();
-    lower.contains("file_filter")
-        || lower.contains("format_filter")
-        || lower.contains("file_extensions")
-        || lower.contains("import_extensions")
-        || lower.contains("export_extensions")
-}
-
 /// Scan `(key, locale, text)` i18n catalog entries across locales.
 ///
-/// Rejects `"prism"` (including `.prism`) everywhere outside explicit file-extension/filter keys,
-/// and permits lowercase Italian `"statistica"` only inside `locale == "it"`.
+/// Rejects non-extension `"prism"` mentions everywhere, and permits lowercase Italian
+/// `"statistica"` only inside `locale == "it"`.
 #[cfg(any(feature = "full-gates", test))]
 #[must_use]
 pub fn check_i18n_catalog_entries<'a, I>(entries: I) -> Vec<BrandHit>
@@ -2296,12 +2214,7 @@ where
 {
     let mut out = Vec::new();
     for (key, locale, text) in entries {
-        let allow_it_statistica = locale == "it";
-        let policy = if is_i18n_format_extension_key(key) {
-            PrismPolicy::UiTextRun { allow_dot_prism: is_dot_prism_extension_description(text), allow_it_statistica, allow_palette_cmd_id: false }
-        } else {
-            PrismPolicy::UiTextRun { allow_dot_prism: false, allow_it_statistica, allow_palette_cmd_id: false }
-        };
+        let policy = PrismPolicy::UiTextRun { allow_it_statistica: locale == "it", allow_palette_cmd_id: false };
         let path = format!("i18n:{locale}:{key}");
         check_single_string(&path, 1, text, policy, &mut out);
     }
@@ -2859,16 +2772,7 @@ fn flush_html_text(source: &str, start_line: usize, raw: &str, strict: bool, out
     for (offset, line_text) in decoded.lines().enumerate() {
         let masked_opt = if gen_docs { mask_generated_docs_html_tokens(source, line_text) } else { None };
         let scanned = masked_opt.as_deref().unwrap_or(line_text);
-        let policy = if strict {
-            PrismPolicy::Strict
-        } else {
-            PrismPolicy::UiTextRun {
-                allow_dot_prism: is_dot_prism_extension_description(scanned),
-                allow_it_statistica: false,
-                allow_palette_cmd_id: false,
-            }
-        };
-        check_single_string_with_extra(source, start_line + offset, scanned, policy, strict, out);
+        check_single_string_with_extra(source, start_line + offset, scanned, PrismPolicy::Strict, strict, out);
     }
 }
 
@@ -2968,27 +2872,23 @@ fn collect_snapshot_strings(snap: &UiTreeSnapshot, context: &str, hits: &mut Vec
         }
     }
     for (label, text) in &runs {
-        let allow_it_statistica = label.contains(":it:");
-        let policy =
-            PrismPolicy::UiTextRun { allow_dot_prism: is_dot_prism_extension_description(text), allow_it_statistica, allow_palette_cmd_id: false };
+        let policy = PrismPolicy::UiTextRun { allow_it_statistica: label.contains(":it:"), allow_palette_cmd_id: false };
         check_single_string(label, 1, text, policy, hits);
     }
 }
 
 #[cfg(feature = "full-gates")]
 fn check_labeled_ui_pairs<'a>(runs: impl IntoIterator<Item = (&'a str, &'a str)>, allow_it_statistica: bool, hits: &mut Vec<BrandHit>) {
+    let policy = PrismPolicy::UiTextRun { allow_it_statistica, allow_palette_cmd_id: false };
     for (idx, (label, text)) in runs.into_iter().enumerate() {
-        let policy =
-            PrismPolicy::UiTextRun { allow_dot_prism: is_dot_prism_extension_description(text), allow_it_statistica, allow_palette_cmd_id: false };
         check_single_string(label, idx + 1, text, policy, hits);
     }
 }
 
 #[cfg(feature = "full-gates")]
 fn check_ui_strings_with_locale<'a>(source: &str, runs: impl IntoIterator<Item = &'a str>, allow_it_statistica: bool, hits: &mut Vec<BrandHit>) {
+    let policy = PrismPolicy::UiTextRun { allow_it_statistica, allow_palette_cmd_id: false };
     for (idx, text) in runs.into_iter().enumerate() {
-        let policy =
-            PrismPolicy::UiTextRun { allow_dot_prism: is_dot_prism_extension_description(text), allow_it_statistica, allow_palette_cmd_id: false };
         check_single_string(source, idx + 1, text, policy, hits);
     }
 }
@@ -3428,41 +3328,23 @@ fn is_exact_canonical_mcp_import_name(ctx: McpScanCtx<'_>, ptr: &str, text: &str
 fn mcp_leaf_prism_policy<'a>(ctx: McpScanCtx<'_>, ptr: &str, text: &str) -> PrismPolicy<'a> {
     if ctx.method == "tools/list" {
         if ctx.entry_tool_name == Some("open_file") {
-            if is_top_tool_field_ptr(ptr, "description") {
-                return PrismPolicy::UiTextRun {
-                    allow_dot_prism: is_dot_prism_extension_description(text),
-                    allow_it_statistica: false,
-                    allow_palette_cmd_id: false,
-                };
-            }
             if ptr.contains("/inputSchema/properties/format/enum/") && text == "prism" {
                 return PrismPolicy::AllowExactBarePrism;
             }
             return PrismPolicy::Strict;
         }
         if ctx.entry_tool_name == Some("table_import_prism") && is_top_tool_field_ptr(ptr, "description") {
-            return PrismPolicy::UiTextRun {
-                allow_dot_prism: is_dot_prism_extension_description(text),
-                allow_it_statistica: false,
-                allow_palette_cmd_id: true,
-            };
+            return PrismPolicy::UiTextRun { allow_it_statistica: false, allow_palette_cmd_id: true };
         }
         return PrismPolicy::Strict;
     }
 
-    if ctx.method == "tools/call" && matches!(ctx.called_tool, Some("list_toolsets" | "command_list" | "ui_inspect")) {
-        if (ptr.ends_with("/command_id") || ptr.ends_with("/id") || ptr.ends_with("/widget_id"))
-            && (text == "table.importPrism" || text.ends_with(".table.importPrism"))
-        {
-            return PrismPolicy::UiTextRun { allow_dot_prism: false, allow_it_statistica: false, allow_palette_cmd_id: true };
-        }
-        if ptr.ends_with("/summary") || ptr.ends_with("/beginner") || ptr.ends_with("/params_doc") || ptr.ends_with("/label") {
-            return PrismPolicy::UiTextRun {
-                allow_dot_prism: is_dot_prism_extension_description(text),
-                allow_it_statistica: false,
-                allow_palette_cmd_id: false,
-            };
-        }
+    if ctx.method == "tools/call"
+        && matches!(ctx.called_tool, Some("list_toolsets" | "command_list" | "ui_inspect"))
+        && (ptr.ends_with("/command_id") || ptr.ends_with("/id") || ptr.ends_with("/widget_id"))
+        && (text == "table.importPrism" || text.ends_with(".table.importPrism"))
+    {
+        return PrismPolicy::UiTextRun { allow_it_statistica: false, allow_palette_cmd_id: true };
     }
 
     PrismPolicy::Strict
@@ -3702,32 +3584,21 @@ fn prompt_arg_variants(name: &str) -> Vec<(&'static str, serde_json::Value)> {
 fn check_engine_and_ui_commands(hits: &mut Vec<BrandHit>) {
     for spec in engine_cmd_registry().specs() {
         let is_import_prism = spec.id == "table.importPrism";
-        let id_policy = PrismPolicy::UiTextRun { allow_dot_prism: false, allow_it_statistica: false, allow_palette_cmd_id: is_import_prism };
+        let id_policy = PrismPolicy::UiTextRun { allow_it_statistica: false, allow_palette_cmd_id: is_import_prism };
         check_single_string(&format!("engine_cmd:{}:id", spec.id), 1, spec.id, id_policy, hits);
-        let text_policy = PrismPolicy::UiTextRun { allow_dot_prism: true, allow_it_statistica: false, allow_palette_cmd_id: false };
         for (field, val) in [("label", spec.label), ("menu_path", spec.menu_path), ("summary", spec.summary), ("beginner", spec.beginner)] {
-            let p = PrismPolicy::UiTextRun {
-                allow_dot_prism: is_dot_prism_extension_description(val),
-                allow_it_statistica: false,
-                allow_palette_cmd_id: false,
-            };
-            check_single_string(&format!("engine_cmd:{}:{field}", spec.id), 1, val, p, hits);
+            check_single_string(&format!("engine_cmd:{}:{field}", spec.id), 1, val, PrismPolicy::Strict, hits);
         }
         if let Ok(schema_str) = serde_json::to_string(&(spec.input_schema)()) {
-            check_single_string(&format!("engine_cmd:{}:input_schema", spec.id), 1, &schema_str, text_policy, hits);
+            check_single_string(&format!("engine_cmd:{}:input_schema", spec.id), 1, &schema_str, PrismPolicy::Strict, hits);
         }
     }
     for cmd in UI_COMMANDS {
         let is_import_prism = cmd.id == "table.importPrism";
-        let id_policy = PrismPolicy::UiTextRun { allow_dot_prism: false, allow_it_statistica: false, allow_palette_cmd_id: is_import_prism };
+        let id_policy = PrismPolicy::UiTextRun { allow_it_statistica: false, allow_palette_cmd_id: is_import_prism };
         check_single_string(&format!("ui_cmd:{}:id", cmd.id), 1, cmd.id, id_policy, hits);
         for (field, val) in [("label", cmd.label), ("params_doc", cmd.params_doc), ("summary", cmd.summary), ("beginner", cmd.beginner)] {
-            let p = PrismPolicy::UiTextRun {
-                allow_dot_prism: is_dot_prism_extension_description(val),
-                allow_it_statistica: false,
-                allow_palette_cmd_id: false,
-            };
-            check_single_string(&format!("ui_cmd:{}:{field}", cmd.id), 1, val, p, hits);
+            check_single_string(&format!("ui_cmd:{}:{field}", cmd.id), 1, val, PrismPolicy::Strict, hits);
         }
     }
 }
@@ -3901,22 +3772,17 @@ fn collect_egui_surface_hits(
     for (idx, (owner, text)) in cap.text_runs.iter().enumerate() {
         let is_palette_cmd = allow_palette_cmd_id && (owner == "palette.status" || owner.starts_with("palette.item."));
         let run_ctx = format!("{context}:text_run:{owner}");
-        let policy = PrismPolicy::UiTextRun {
-            allow_dot_prism: is_dot_prism_extension_description(text),
-            allow_it_statistica,
-            allow_palette_cmd_id: is_palette_cmd,
-        };
+        let policy = PrismPolicy::UiTextRun { allow_it_statistica, allow_palette_cmd_id: is_palette_cmd };
         check_single_string(&run_ctx, idx + 1, text, policy, hits);
     }
+    let a11y_policy = PrismPolicy::UiTextRun { allow_it_statistica, allow_palette_cmd_id: false };
     for (idx, entry) in cap.a11y_entries.iter().enumerate() {
         let a11y_ctx = format!("{context}:a11y:{}", entry.widget_id);
         for txt in [Some(entry.label.as_str()), entry.value_text.as_deref(), entry.disabled_reason.as_deref(), entry.full_label.as_deref()]
             .into_iter()
             .flatten()
         {
-            let policy =
-                PrismPolicy::UiTextRun { allow_dot_prism: is_dot_prism_extension_description(txt), allow_it_statistica, allow_palette_cmd_id: false };
-            check_single_string(&a11y_ctx, idx + 1, txt, policy, hits);
+            check_single_string(&a11y_ctx, idx + 1, txt, a11y_policy, hits);
         }
         if let Some(cmd) = &entry.command_id
             && cmd != "table.importPrism"
@@ -3925,9 +3791,7 @@ fn collect_egui_surface_hits(
         }
     }
     for (idx, ak) in cap.accesskit_labels.iter().enumerate() {
-        let policy =
-            PrismPolicy::UiTextRun { allow_dot_prism: is_dot_prism_extension_description(ak), allow_it_statistica, allow_palette_cmd_id: false };
-        check_single_string(&format!("{context}:accesskit"), idx + 1, ak, policy, hits);
+        check_single_string(&format!("{context}:accesskit"), idx + 1, ak, a11y_policy, hits);
     }
 }
 
@@ -5495,10 +5359,13 @@ it: "Copia Statistica report",
 
         assert_eq!(prism_hits(&page("Open .pzfx and .prism files")), 0);
         assert_eq!(prism_hits(&page("Filter *.prism or experiment.prism")), 0);
-        // The product name, a capitalised extension, and a domain stay flagged.
+        assert_eq!(prism_hits(&page("Download https://example.com/files/experiment.prism")), 0);
+        // The product name, a capitalised extension, a domain, and a URL host stay flagged.
         assert!(prism_hits(&page("Open Prism files")) > 0);
         assert!(prism_hits(&page("Open .Prism files")) > 0);
         assert!(prism_hits(&page("See example.prism.com")) > 0);
+        assert!(prism_hits(&page("See https://example.prism/download")) > 0);
+        assert!(prism_hits(&page("See http://example.prism")) > 0);
 
         let mut hits = Vec::new();
         super::collect_line_words("docs/page.html", 1, "Export .prism tables", &["prism"], super::PrismPolicy::Strict, &mut hits);

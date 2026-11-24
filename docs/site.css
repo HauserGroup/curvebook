@@ -103,10 +103,13 @@ main { padding: 1rem .65rem; }
 /* Read-only path well uses recessed inset bevel so it never reads as a clickable button */
 .file-type { grid-column: 2; grid-row: 2; padding: .65rem 1rem; margin: 0; background: var(--desktop); color: var(--file-ink); font-size: 1.02rem; font-weight: 700; border: 2px solid; border-color: var(--shadow) var(--highlight) var(--highlight) var(--shadow); align-self: start; min-width: 0; overflow-wrap: anywhere; }
 .workspace-note { grid-column: 2; grid-row: 3; color: var(--muted); margin: 0; font-size: .9rem; min-width: 0; }
+.workspace-note p { margin: 0 0 .65rem; }
+.workspace-note p:last-child { margin-bottom: 0; }
 
 .downloads { margin-top: 1rem; padding: .25rem; border: 2px solid; border-color: var(--highlight) var(--shadow) var(--shadow) var(--highlight); scroll-margin-top: 1.5rem; }
 .downloads .panel-title { padding: .4rem .7rem; background: var(--title); color: var(--highlight); font-size: .875rem; font-weight: 700; }
 .download-content { display: grid; grid-template-columns: 1.25fr 1fr; gap: 1.4rem 1.8rem; padding: 1.4rem; }
+.download-content.is-single { grid-template-columns: 1fr; }
 .download-content > * { min-width: 0; }
 .download-content h2 { margin-bottom: .75rem; font-size: 1.5rem; }
 .download-content p { color: var(--muted); font-size: .92rem; }
@@ -191,8 +194,8 @@ main { padding: 1rem .65rem; }
 .doc-body dd { margin: .2rem 0 0 1rem; color: var(--muted); }
 .doc-body blockquote { margin: 0 0 1rem; padding: .6rem 1rem; background: var(--desktop); border-left: 3px solid var(--title); color: var(--ink); }
 .doc-body blockquote p:last-child { margin-bottom: 0; }
-.doc-body pre { margin: 0 0 1rem; padding: .75rem .9rem; background: var(--desktop); border: 2px solid; border-color: var(--shadow) var(--highlight) var(--highlight) var(--shadow); overflow-x: auto; max-width: 100%; font-size: .84rem; line-height: 1.45; }
-.doc-body pre code { font-size: inherit; background: transparent; padding: 0; overflow-wrap: normal; white-space: pre; }
+.doc-body pre, .overview pre { margin: 0 0 1rem; padding: .75rem .9rem; background: var(--desktop); border: 2px solid; border-color: var(--shadow) var(--highlight) var(--highlight) var(--shadow); overflow-x: auto; max-width: 100%; font-size: .84rem; line-height: 1.45; }
+.doc-body pre code, .overview pre code { font-size: inherit; background: transparent; padding: 0; overflow-wrap: normal; white-space: pre; }
 .doc-body img { display: block; max-width: 100%; height: auto; border: 2px solid; border-color: var(--shadow) var(--highlight) var(--highlight) var(--shadow); }
 .doc-figure { margin: 1.2rem 0 1.4rem; padding: .5rem; background: var(--desktop); border: 2px solid; border-color: var(--highlight) var(--shadow) var(--shadow) var(--highlight); max-width: 100%; }
 .doc-figure figcaption { margin-top: .5rem; max-width: 72ch; font-size: .85rem; color: var(--muted); }
@@ -257,7 +260,7 @@ details.toc summary.toc-title:focus-visible { outline: 2px solid var(--title); o
 }
 
 @media (forced-colors: active) {
-  .version-banner, .toc, .callout, .callout-note, .callout-tip, .callout-important, .callout-warning, .callout-caution, .section-card, .entry-card, .table-wrap, .az-letters a, .doc-body pre, .doc-body img, .doc-figure, .math-block { border: 1px solid CanvasText; box-shadow: none; }
+  .version-banner, .toc, .callout, .callout-note, .callout-tip, .callout-important, .callout-warning, .callout-caution, .section-card, .entry-card, .table-wrap, .az-letters a, .doc-body pre, .overview pre, .doc-body img, .doc-figure, .math-block { border: 1px solid CanvasText; box-shadow: none; }
   .doc-body :target { outline-color: Highlight; }
 }
 
@@ -270,7 +273,7 @@ details.toc summary.toc-title:focus-visible { outline: 2px solid var(--title); o
   .window-status { color: #000000; background: transparent; border-color: #000000; }
   .skip-link, nav, .action-row, .primary-action, .pager, .window-statusbar { display: none; }
   main { padding: .75rem 0; }
-  .overview, .downloads, .platform-card, .pillar-card, .screenshot-card, .doc-figure, .callout, .section-card, .entry-card, .toc, .math-block, .doc-body pre { background: #ffffff; border: 1px solid #4f565f; box-shadow: none; break-inside: avoid; }
+  .overview, .downloads, .platform-card, .pillar-card, .screenshot-card, .doc-figure, .callout, .section-card, .entry-card, .toc, .math-block, .doc-body pre, .overview pre { background: #ffffff; border: 1px solid #4f565f; box-shadow: none; break-inside: avoid; }
   .doc-body img, .screenshot-card img { max-width: 100%; border: 1px solid #4f565f; }
   a { color: #000000; text-decoration: underline; }
 }

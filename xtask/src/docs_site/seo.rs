@@ -85,7 +85,9 @@ pub fn check_search_metadata(root: &Path) -> Result<(), String> {
     for page in LANDING_PAGES {
         let html = std::fs::read_to_string(root.join("docs").join(page)).map_err(|e| format!("read docs/{page}: {e}"))?;
         let tag = canonical_link_tag(page);
-        if html.matches("rel=\"canonical\"").count() != 1 || !html.contains(&tag) {
+        let lower = html.to_ascii_lowercase();
+        let canonical_count = lower.matches("rel=\"canonical\"").count() + lower.matches("rel='canonical'").count();
+        if canonical_count != 1 || !html.contains(&tag) {
             return Err(format!("docs/{page}: expected exactly one canonical link `{tag}`"));
         }
     }
