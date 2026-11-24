@@ -170,14 +170,16 @@ fn active_nav_target(spec: &PageSpec<'_>) -> &'static str {
 }
 
 fn render_header(spec: &PageSpec<'_>, root: &str, assets: &str, out: &mut String) {
-    out.push_str("    <header class=\"site-header\">\n      <div class=\"title-bar\">\n        <div class=\"wordmark\">\n");
+    out.push_str("    <header class=\"site-header\">\n      <a class=\"title-bar\" href=\"");
+    out.push_str(assets);
+    out.push_str("index.html\">\n        <span class=\"wordmark\">\n");
     out.push_str("          <img src=\"");
     out.push_str(assets);
     out.push_str("images/curvebook.png\" width=\"64\" height=\"64\" alt=\"\">\n");
-    out.push_str("          <span>CurveBook · Reference Manual</span>\n        </div>\n");
+    out.push_str("          <span>CurveBook · Reference Manual</span>\n        </span>\n");
     out.push_str("        <span class=\"window-status\">");
     push_html_escaped(spec.section_title, out);
-    out.push_str("</span>\n      </div>\n      <nav aria-label=\"Manual navigation\">\n");
+    out.push_str("</span>\n      </a>\n      <nav aria-label=\"Manual navigation\">\n");
 
     let nav_items = [
         ("Manual Home", "index.html"),
@@ -356,10 +358,10 @@ pub fn render_release_redirect_index(version_dir: &str, version_label: &str, ava
     out.push_str("  <link rel=\"icon\" type=\"image/png\" href=\"../images/curvebook.png\">\n");
     out.push_str("  <link rel=\"stylesheet\" href=\"../site.css\">\n</head>\n<body>\n");
     out.push_str("  <a class=\"skip-link\" href=\"#main\">Skip to content</a>\n  <div class=\"desktop-window wrap\">\n");
-    out.push_str("    <header class=\"site-header\">\n      <div class=\"title-bar\">\n        <div class=\"wordmark\"><img src=\"../images/curvebook.png\" width=\"64\" height=\"64\" alt=\"\"><span>CurveBook · Documentation</span></div>\n");
+    out.push_str("    <header class=\"site-header\">\n      <a class=\"title-bar\" href=\"../index.html\">\n        <span class=\"wordmark\"><img src=\"../images/curvebook.png\" width=\"64\" height=\"64\" alt=\"\"><span>CurveBook · Documentation</span></span>\n");
     out.push_str("        <span class=\"window-status\">Latest: ");
     push_html_escaped(version_label, &mut out);
-    out.push_str("</span>\n      </div>\n      <nav aria-label=\"Main navigation\"><a href=\"../index.html\">Home</a><a href=\"../privacy.html\">Privacy</a></nav>\n    </header>\n");
+    out.push_str("</span>\n      </a>\n      <nav aria-label=\"Main navigation\"><a href=\"../index.html\">Home</a><a href=\"../privacy.html\">Privacy</a></nav>\n    </header>\n");
     out.push_str("    <main id=\"main\" tabindex=\"-1\">\n      <div class=\"overview doc-body\">\n");
     out.push_str("        <h1>CurveBook Reference Manual</h1>\n");
     out.push_str("        <p>Redirecting to the latest frozen release snapshot: <a href=\"");
@@ -406,11 +408,11 @@ pub fn render_root_redirect_shim(title: &str, description: &str, target_href: &s
     out.push_str("  <link rel=\"icon\" type=\"image/png\" href=\"images/curvebook.png\">\n");
     out.push_str("  <link rel=\"stylesheet\" href=\"site.css\">\n</head>\n<body>\n");
     out.push_str("  <a class=\"skip-link\" href=\"#main\">Skip to content</a>\n  <div class=\"desktop-window wrap\">\n");
-    out.push_str("    <header class=\"site-header\">\n      <div class=\"title-bar\">\n");
-    out.push_str("        <div class=\"wordmark\"><img src=\"images/curvebook.png\" width=\"64\" height=\"64\" alt=\"\"><span>CurveBook · Documentation</span></div>\n");
+    out.push_str("    <header class=\"site-header\">\n      <a class=\"title-bar\" href=\"index.html\">\n");
+    out.push_str("        <span class=\"wordmark\"><img src=\"images/curvebook.png\" width=\"64\" height=\"64\" alt=\"\"><span>CurveBook · Documentation</span></span>\n");
     out.push_str("        <span class=\"window-status\">Redirect · ");
     push_html_escaped(version_label, &mut out);
-    out.push_str("</span>\n      </div>\n");
+    out.push_str("</span>\n      </a>\n");
     out.push_str("      <nav aria-label=\"Main navigation\">\n");
     out.push_str("        <a href=\"index.html\">Home</a>\n");
     out.push_str("        <a href=\"manual/index.html\">Documentation</a>\n");
@@ -458,11 +460,12 @@ pub fn render_not_found_page(base_path: &str) -> String {
     out.push_str(base_path);
     out.push_str("site.css\">\n</head>\n<body>\n");
     out.push_str("  <a class=\"skip-link\" href=\"#main\">Skip to content</a>\n  <div class=\"desktop-window wrap\">\n");
-    out.push_str("    <header class=\"site-header\">\n      <div class=\"title-bar\">\n");
-    out.push_str("        <div class=\"wordmark\"><img src=\"");
+    out.push_str("    <header class=\"site-header\">\n      <a class=\"title-bar\" href=\"");
     out.push_str(base_path);
-    out.push_str("images/curvebook.png\" width=\"64\" height=\"64\" alt=\"\"><span>CurveBook</span></div>\n");
-    out.push_str("        <span class=\"window-status\">404 · Not found</span>\n      </div>\n");
+    out.push_str("\">\n        <span class=\"wordmark\"><img src=\"");
+    out.push_str(base_path);
+    out.push_str("images/curvebook.png\" width=\"64\" height=\"64\" alt=\"\"><span>CurveBook</span></span>\n");
+    out.push_str("        <span class=\"window-status\">404 · Not found</span>\n      </a>\n");
     out.push_str("      <nav aria-label=\"Main navigation\">\n");
     out.push_str("        <a href=\"");
     out.push_str(base_path);
