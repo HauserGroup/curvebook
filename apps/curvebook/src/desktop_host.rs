@@ -425,7 +425,7 @@ fn classify_and_load_path(path: &Path) -> Result<LoadedPathPayload, String> {
         }
         let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
         return Err(format!(
-            "unsupported file extension `.{ext}` for `{}`; expected .curvebook, .curvebook.d, .cbtemplate, .prism, .pzfx, .csv, or .tsv",
+            "unsupported file extension `.{ext}` for `{}`; expected .curvebook, .curvebook.d, .cbtemplate, .prism, .pzfx, .xlsx, .csv, or .tsv",
             path.display()
         ));
     };
@@ -524,6 +524,7 @@ pub fn open_document_from_files(files: &[PathBuf]) -> Result<Session, String> {
             table_kind: TableKind::Column,
             subcolumn_mode: SubcolumnMode::Single,
             csv: None,
+            xlsx: None,
         };
         let payload = importer.import_path(&item.path, &opts).map_err(|err| format!("failed to import `{}`: {err}", item.path.display()))?;
         let sheet = payload.into_data_sheet().ok_or_else(|| format!("importer `{}` did not yield a data sheet", item.importer_id))?;
@@ -1301,7 +1302,7 @@ impl std::fmt::Debug for OpenFileDialogHook {
 }
 
 /// Canonical file extensions accepted by native project/data `Open...` dialogs (`classify_and_load_path`).
-pub const NATIVE_OPEN_FILE_EXTENSIONS: &[&str] = &["curvebook", "cbtemplate", "prism", "pzfx", "csv", "tsv"];
+pub const NATIVE_OPEN_FILE_EXTENSIONS: &[&str] = &["curvebook", "cbtemplate", "prism", "pzfx", "xlsx", "csv", "tsv"];
 /// Canonical file extensions accepted by native template save and instantiate dialogs.
 pub const NATIVE_TEMPLATE_FILE_EXTENSIONS: &[&str] = &["cbtemplate"];
 /// Default filename suggested when saving a reusable `.cbtemplate` archive.
@@ -1527,6 +1528,7 @@ pub fn menu_action_triggers_native_file_dialog(command_id: &str) -> bool {
             | "table.importCsv"
             | "table.importPrism"
             | "table.importPzfx"
+            | "table.importXlsx"
             | "graph.insertImage"
             | "layout.insertImage"
     ) || native_export_spec_for_command(command_id).is_some()
@@ -1536,7 +1538,7 @@ pub fn menu_action_triggers_native_file_dialog(command_id: &str) -> bool {
 /// previously associated `.curvebook` archive path so subsequent `Cmd+S` prompts cleanly.
 #[must_use]
 pub fn native_import_replaces_project_file_path(command_id: &str) -> bool {
-    matches!(command_id, "project.instantiateTemplate" | "table.importPrism" | "table.importPzfx")
+    matches!(command_id, "project.instantiateTemplate" | "table.importPrism" | "table.importPzfx" | "table.importXlsx")
 }
 
 /// Execute a file-backed import or template instantiation command at `path`, clearing the active
@@ -1828,7 +1830,7 @@ impl DesktopHostRuntime {
                     None => Self::cancelled_file_dialog_outcome(window_id, "project.saveTemplate"),
                 }
             }
-            "project.instantiateTemplate" | "table.importCsv" | "table.importPrism" | "table.importPzfx" => {
+            "project.instantiateTemplate" | "table.importCsv" | "table.importPrism" | "table.importPzfx" | "table.importXlsx" => {
                 let (filter_label, extensions): (String, Vec<String>) = match command_id {
                     "project.instantiateTemplate" => (
                         tr(&win_locale, "w6.view.shell.filter_template").to_owned(),
@@ -1839,6 +1841,7 @@ impl DesktopHostRuntime {
                         vec![String::from("csv"), String::from("tsv"), String::from("txt")],
                     ),
                     "table.importPrism" => (tr(&win_locale, "w6.view.shell.filter_archive").to_owned(), vec![String::from("prism")]),
+                    "table.importXlsx" => (tr(&win_locale, "cmd.table.importXlsx").to_owned(), vec![String::from("xlsx")]),
                     _ => (tr(&win_locale, "w6.view.shell.filter_xml_project").to_owned(), vec![String::from("pzfx")]),
                 };
                 let req = NativeFileDialogRequest {
@@ -3255,16 +3258,17 @@ impl DesktopHostRuntime {
             .tool
             .active
             .map_or_else(|| json!({ "row": 0, "col": 0, "subcol": 0 }), |c| json!({ "row": c.row, "col": c.col, "subcol": c.subcol }));
-        let dec = win.app.locale_preset.decimal_separator.to_string();
+        let dec_char = win.app.locale_preset.decimal_separator;
+        let clean_paste = paste_text.strip_prefix('\u{FEFF}').unwrap_or(&paste_text).replace('\0', "");
         let mut params = json!({
             "sheet_id": sheet_id.as_str(),
-            "text": paste_text,
-            "decimal_separator": dec,
+            "text": clean_paste,
+            "decimal_separator": if dec_char == ',' { "," } else { "auto" },
             "anchor": anchor,
         });
-        if dec == ","
-            && !paste_text.contains(';')
-            && (paste_text.contains('\t') || paste_text.lines().all(|line| line.matches(',').count() <= 1))
+        if dec_char == ','
+            && !clean_paste.contains(';')
+            && (clean_paste.contains('\t') || clean_paste.lines().all(|line| line.matches(',').count() <= 1))
             && let Some(obj) = params.as_object_mut()
         {
             obj.insert(String::from("delimiter"), json!("\t"));
@@ -3336,6 +3340,7 @@ pub enum DesktopDialogOpener {
     ImportWizardPaste,
     ImportWizardPasteLink,
     ImportWizardExternalFile,
+    ImportWizardXlsx,
     VariablesDialog,
     EditAnalysisParameters,
     ChangeDataAnalyzed,
@@ -3606,6 +3611,11 @@ fn resolve_table_route(app: &UiApp, doc: &ProjectDocument, base_cmd: &str) -> Re
         })),
         "table.pasteLink" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
             kind: DesktopDialogOpener::ImportWizardPasteLink,
+            target_sheet_id: active_data_sheet_id(doc).map(|id| id.as_str().to_owned()),
+            query: None,
+        })),
+        "table.importXlsx" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
+            kind: DesktopDialogOpener::ImportWizardXlsx,
             target_sheet_id: active_data_sheet_id(doc).map(|id| id.as_str().to_owned()),
             query: None,
         })),
@@ -3969,6 +3979,13 @@ fn open_desktop_dialog(app: &mut UiApp, opener: DesktopDialogOpener, target_shee
             app.grid.import_wizard.origin_kind = ImportOriginKind::ExternalDelimitedFile;
             app.grid.import_wizard.target_sheet_id = parsed_target.or_else(|| active_data_sheet_id(&doc));
             Ok(json!({ "dialog": "ImportPasteWizard", "origin_kind": "ExternalDelimitedFile" }))
+        }
+        DesktopDialogOpener::ImportWizardXlsx => {
+            app.grid.import_wizard.open = true;
+            app.grid.import_wizard.is_live_link = false;
+            app.grid.import_wizard.origin_kind = ImportOriginKind::XlsxWorkbook;
+            app.grid.import_wizard.target_sheet_id = parsed_target.or_else(|| active_data_sheet_id(&doc));
+            Ok(json!({ "dialog": "ImportPasteWizard", "origin_kind": "XlsxWorkbook" }))
         }
         DesktopDialogOpener::VariablesDialog => {
             let sid = parsed_target

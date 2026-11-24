@@ -34,8 +34,8 @@ use curvebook_engine::services::{
 };
 use curvebook_engine::{EngineError, Session};
 use curvebook_format::{
-    CsvOptions, ExportOptions, ExportSource, Exporter, FormatRegistry, ImportOptions, ImportPayload, Importer, is_unpacked_project_dir,
-    strip_project_data_for_template,
+    CsvOptions, ExportOptions, ExportSource, Exporter, FormatRegistry, ImportOptions, ImportPayload, Importer, XlsxImportOptions,
+    decode_delimited_text_bytes, is_unpacked_project_dir, list_xlsx_sheets, strip_project_data_for_template,
 };
 use curvebook_pdf::{PdfColorSpace, PdfExportOptions, PdfVersion};
 use curvebook_render::{MAX_CAPPED_RASTER_DIM_PX, TiffCompression};
@@ -119,11 +119,31 @@ pub(crate) fn sanitize_command_params(state: &McpServerState, params: &mut Value
 
 /// Handle `open_file` dispatched via [`FormatRegistry`] with optional `WorkdirGuard` enforcement.
 pub(crate) fn handle_open_file(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
-    reject_unknown_args("open_file", args, &["path", "format", "target_kind", "subcolumn_mode", "delimiter", "sheet_id", "title", "append"])?;
+    reject_unknown_args(
+        "open_file",
+        args,
+        &[
+            "path",
+            "format",
+            "target_kind",
+            "subcolumn_mode",
+            "delimiter",
+            "sheet_id",
+            "title",
+            "append",
+            "sheets",
+            "sheet_indices",
+            "list_sheets",
+            "has_header",
+            "header_rows",
+            "has_row_titles",
+        ],
+    )?;
     let raw_path = required_non_empty_str(args, "path")?;
     let explicit_format = optional_non_empty_str(args, "format")?.map(|s| s.to_ascii_lowercase());
     let title_override = optional_non_empty_str(args, "title")?;
     let append = optional_bool(args, "append")?.unwrap_or(false);
+    let list_sheets_only = optional_bool(args, "list_sheets")?.unwrap_or(false);
 
     let resolved_path = match resolve_mcp_path(state, &raw_path) {
         Ok(p) => p,
@@ -132,9 +152,12 @@ pub(crate) fn handle_open_file(state: &mut McpServerState, args: &Map<String, Va
 
     let reg = FormatRegistry::default_registry();
     let importer = resolve_importer(&reg, explicit_format.as_deref(), &resolved_path)?;
-    let import_opts = build_import_options(&resolved_path, args)?;
+    let import_opts = build_import_options(&resolved_path, importer.descriptor().id, args)?;
 
     let format_id = importer.descriptor().id;
+    if list_sheets_only && format_id != "xlsx" {
+        return Err(ToolCallError::InvalidParams(format!("`list_sheets` is only supported for `.xlsx` workbooks (got `{format_id}`)")));
+    }
     if format_id == "curvebook.d" {
         let payload = match importer.import_path(&resolved_path, &import_opts) {
             Ok(p) => p,
@@ -159,6 +182,20 @@ pub(crate) fn handle_open_file(state: &mut McpServerState, args: &Map<String, Va
         return Ok(errors::result_from_code(ErrorCode::IoError, "filesystem operations are not supported on wasm32"));
     };
 
+    if format_id == "xlsx" && list_sheets_only {
+        let sheets = match list_xlsx_sheets(&raw_bytes) {
+            Ok(s) => s,
+            Err(err) => return Ok(errors::result_from_engine_error(&EngineError::from(err))),
+        };
+        return ToolCallResult::ok_json(&json!({
+            "opened": false,
+            "format": "xlsx",
+            "path": resolved_path.display().to_string(),
+            "sheet_count": sheets.len(),
+            "sheets": sheets,
+        }));
+    }
+
     let payload = match importer.import_bytes(&raw_bytes, &import_opts) {
         Ok(p) => p,
         Err(err) => return Ok(errors::result_from_engine_error(&EngineError::from(err))),
@@ -179,13 +216,12 @@ fn build_csv_import_params(
     import_opts: &ImportOptions,
     prefer_path: bool,
 ) -> Result<Value, ToolCallResult> {
-    let csv_text = match String::from_utf8(raw_bytes) {
+    let csv_text = match decode_delimited_text_bytes(&raw_bytes, format_id) {
         Ok(text) => text,
-        Err(err) => {
-            return Err(errors::result_from_code(ErrorCode::IoError, format!("failed to decode '{}' as UTF-8: {err}", resolved_path.display())));
-        }
+        Err(err) => return Err(errors::result_from_engine_error(&EngineError::from(err))),
     };
-    let csv_opts = import_opts.csv.clone().unwrap_or_else(|| if format_id == "tsv" { CsvOptions::tsv() } else { CsvOptions::detect(&csv_text) });
+    let csv_opts =
+        import_opts.csv.clone().unwrap_or_else(|| if format_id == "tsv" { CsvOptions::detect_tsv(&csv_text) } else { CsvOptions::detect(&csv_text) });
     let subcolumn_mode = match serde_json::to_value(import_opts.subcolumn_mode) {
         Ok(v) => v,
         Err(err) => {
@@ -221,11 +257,9 @@ fn resolve_importer<'a>(reg: &'a FormatRegistry, explicit: Option<&str>, path: &
     }
 }
 
-fn build_import_options(path: &Path, args: &Map<String, Value>) -> Result<ImportOptions, ToolCallError> {
-    let target_kind = match optional_non_empty_str(args, "target_kind")? {
-        Some(raw) => parse_table_kind(&raw)?,
-        None => TableKind::Xy,
-    };
+fn build_import_options(path: &Path, format_id: &str, args: &Map<String, Value>) -> Result<ImportOptions, ToolCallError> {
+    let explicit_kind = optional_non_empty_str(args, "target_kind")?.map(|raw| parse_table_kind(&raw)).transpose()?;
+    let target_kind = explicit_kind.unwrap_or(TableKind::Xy);
     let subcolumn_mode = match optional_non_empty_str(args, "subcolumn_mode")? {
         Some(raw) => parse_subcolumn_mode(&raw)?,
         None => SubcolumnMode::Single,
@@ -247,10 +281,80 @@ fn build_import_options(path: &Path, args: &Map<String, Value>) -> Result<Import
     };
 
     let stem = path.file_stem().and_then(|s| s.to_str()).filter(|s| !s.trim().is_empty()).unwrap_or("Imported Data");
-    let sheet_title = optional_non_empty_str(args, "title")?.unwrap_or_else(|| stem.to_owned());
+    let explicit_title = optional_non_empty_str(args, "title")?;
+    let sheet_title = explicit_title.clone().unwrap_or_else(|| stem.to_owned());
     let sheet_id_str = optional_non_empty_str(args, "sheet_id")?.unwrap_or_else(|| sanitize_sheet_id(stem, "data-1"));
 
-    Ok(ImportOptions { sheet_id: SheetId::new(sheet_id_str), title: sheet_title, table_kind: target_kind, subcolumn_mode, csv: csv_override })
+    let xlsx_opts = if format_id == "xlsx" {
+        let sheet_names = parse_optional_string_array(args, "sheets")?;
+        let sheet_indices = parse_optional_usize_array(args, "sheet_indices")?;
+        let has_header = optional_bool(args, "has_header")?.unwrap_or(true);
+        let header_rows = match args.get("header_rows") {
+            None | Some(Value::Null) => usize::from(has_header),
+            Some(v) => usize::try_from(
+                v.as_u64()
+                    .filter(|&n| n <= 16)
+                    .ok_or_else(|| ToolCallError::InvalidParams(String::from("`header_rows` must be an integer in 0..=16")))?,
+            )
+            .map_err(|_| ToolCallError::InvalidParams(String::from("`header_rows` out of range")))?,
+        };
+        let has_row_titles = optional_bool(args, "has_row_titles")?.unwrap_or(false);
+        Some(XlsxImportOptions {
+            sheet_names,
+            sheet_indices,
+            has_header,
+            header_rows,
+            has_row_titles,
+            table_kind: explicit_kind,
+            subcolumn_mode,
+            include_hidden: false,
+            title: Some(explicit_title.unwrap_or_else(|| stem.to_owned())),
+        })
+    } else {
+        None
+    };
+
+    Ok(ImportOptions {
+        sheet_id: SheetId::new(sheet_id_str),
+        title: sheet_title,
+        table_kind: target_kind,
+        subcolumn_mode,
+        csv: csv_override,
+        xlsx: xlsx_opts,
+    })
+}
+
+fn parse_optional_string_array(args: &Map<String, Value>, key: &str) -> Result<Option<Vec<String>>, ToolCallError> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(items)) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                let s = item.as_str().ok_or_else(|| ToolCallError::InvalidParams(format!("`{key}` entries must be strings")))?;
+                out.push(s.to_owned());
+            }
+            Ok(Some(out))
+        }
+        Some(_) => Err(ToolCallError::InvalidParams(format!("`{key}` must be an array of strings"))),
+    }
+}
+
+fn parse_optional_usize_array(args: &Map<String, Value>, key: &str) -> Result<Option<Vec<usize>>, ToolCallError> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(items)) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                let n = item
+                    .as_u64()
+                    .and_then(|u| usize::try_from(u).ok())
+                    .ok_or_else(|| ToolCallError::InvalidParams(format!("`{key}` entries must be non-negative integers")))?;
+                out.push(n);
+            }
+            Ok(Some(out))
+        }
+        Some(_) => Err(ToolCallError::InvalidParams(format!("`{key}` must be an array of integers"))),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -306,7 +410,7 @@ fn apply_imported_payload(
                 "total_sheet_count": sheets,
             }))
         }
-        ("prism" | "pzfx", ImportPayload::Report(report)) => {
+        ("prism" | "pzfx" | "xlsx", ImportPayload::Report(report)) => {
             let Some(bytes) = raw_bytes else {
                 return Ok(errors::result_from_code(ErrorCode::InternalError, format!("missing buffered bytes for '{format_id}'")));
             };
@@ -316,7 +420,7 @@ fn apply_imported_payload(
                     return Ok(errors::result_from_code(ErrorCode::InternalError, format!("failed to serialize import warnings: {err}")));
                 }
             };
-            apply_report_import(state, resolved_path, format_id, &bytes, warnings, append)
+            apply_report_import(state, resolved_path, format_id, &bytes, import_opts, warnings, append)
         }
         ("csv" | "tsv", ImportPayload::DataSheet(_)) => {
             let Some(bytes) = raw_bytes else {
@@ -329,27 +433,68 @@ fn apply_imported_payload(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn build_live_report_import_params(resolved_path: Option<&Path>, raw_bytes: Option<&[u8]>, append: bool) -> Result<Value, StructuredErrorPayload> {
-    if let Some(path) = resolved_path {
+fn build_live_report_import_params(
+    resolved_path: Option<&Path>,
+    raw_bytes: Option<&[u8]>,
+    format_id: &str,
+    import_opts: &ImportOptions,
+    append: bool,
+) -> Result<Value, StructuredErrorPayload> {
+    let mut map = Map::new();
+    let has_path = if let Some(path) = resolved_path {
         let path_str = path.display().to_string();
         if !path_str.trim().is_empty() {
-            return Ok(json!({ "path": path_str, "merge": append }));
+            map.insert(String::from("path"), json!(path_str));
+            true
+        } else {
+            false
         }
-    }
-    let Some(bytes) = raw_bytes else {
-        return Err(StructuredErrorPayload::new(ErrorCode::InternalError, "missing buffered bytes for live archive import"));
+    } else {
+        false
     };
-    if bytes.len() > MAX_LIVE_INLINE_ARCHIVE_BYTES {
-        return Err(StructuredErrorPayload::new(
-            ErrorCode::ResourceLimit,
-            format!(
-                "inline live-control payload ({} bytes) exceeds maximum {MAX_LIVE_INLINE_ARCHIVE_BYTES} bytes before base64 encoding",
-                bytes.len()
-            ),
-        )
-        .with_remediation("Open the archive from a filesystem path accessible to the desktop host."));
+    if !has_path {
+        let Some(bytes) = raw_bytes else {
+            return Err(StructuredErrorPayload::new(ErrorCode::InternalError, "missing buffered bytes for live archive import"));
+        };
+        if bytes.len() > MAX_LIVE_INLINE_ARCHIVE_BYTES {
+            return Err(StructuredErrorPayload::new(
+                ErrorCode::ResourceLimit,
+                format!(
+                    "inline live-control payload ({} bytes) exceeds maximum {MAX_LIVE_INLINE_ARCHIVE_BYTES} bytes before base64 encoding",
+                    bytes.len()
+                ),
+            )
+            .with_remediation("Open the archive from a filesystem path accessible to the desktop host."));
+        }
+        map.insert(String::from("bytes_base64"), json!(encode_base64(bytes)));
     }
-    Ok(json!({ "bytes_base64": encode_base64(bytes), "merge": append }))
+    map.insert(String::from("merge"), json!(append));
+    if format_id == "xlsx"
+        && let Some(xopts) = import_opts.xlsx.as_ref()
+    {
+        attach_xlsx_command_params(&mut map, xopts);
+    }
+    Ok(Value::Object(map))
+}
+
+fn attach_xlsx_command_params(map: &mut Map<String, Value>, xopts: &XlsxImportOptions) {
+    if let Some(ref names) = xopts.sheet_names {
+        map.insert(String::from("sheets"), json!(names));
+    }
+    if let Some(ref indices) = xopts.sheet_indices {
+        map.insert(String::from("sheet_indices"), json!(indices));
+    }
+    map.insert(String::from("has_header"), json!(xopts.has_header));
+    map.insert(String::from("header_rows"), json!(xopts.header_rows));
+    map.insert(String::from("has_row_titles"), json!(xopts.has_row_titles));
+    if let Some(kind) = xopts.table_kind {
+        map.insert(String::from("archetype"), json!(kind.label()));
+    }
+    if xopts.subcolumn_mode != SubcolumnMode::Single
+        && let Ok(val) = serde_json::to_value(xopts.subcolumn_mode)
+    {
+        map.insert(String::from("subcolumn_mode"), val);
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -411,15 +556,15 @@ fn apply_imported_payload_live(
                 "total_sheet_count": sheet_count,
             }))
         }
-        ("prism" | "pzfx", ImportPayload::Report(report)) => {
+        ("prism" | "pzfx" | "xlsx", ImportPayload::Report(report)) => {
             let warnings = match serde_json::to_value(&report.warnings) {
                 Ok(v) => v,
                 Err(err) => {
                     return Ok(errors::result_from_code(ErrorCode::InternalError, format!("failed to serialize import warnings: {err}")));
                 }
             };
-            let cmd_id = if format_id == "prism" { "table.importPrism" } else { "table.importPzfx" };
-            let import_params = match build_live_report_import_params(Some(resolved_path), raw_bytes.as_deref(), append) {
+            let cmd_id = report_import_command_id(format_id);
+            let import_params = match build_live_report_import_params(Some(resolved_path), raw_bytes.as_deref(), format_id, import_opts, append) {
                 Ok(p) => p,
                 Err(err) => return Ok(live_attach_import_error(err)),
             };
@@ -501,19 +646,33 @@ fn apply_imported_payload_live(
     }
 }
 
+fn report_import_command_id(format_id: &str) -> &'static str {
+    match format_id {
+        "pzfx" => "table.importPzfx",
+        "xlsx" => "table.importXlsx",
+        _ => "table.importPrism",
+    }
+}
+
 fn apply_report_import(
     state: &mut McpServerState,
     resolved_path: &Path,
     format_id: &str,
     bytes: &[u8],
+    import_opts: &ImportOptions,
     warnings: Value,
     append: bool,
 ) -> Result<ToolCallResult, ToolCallError> {
-    let command_id = if format_id == "prism" { "table.importPrism" } else { "table.importPzfx" };
-    let params = json!({
-        "bytes_base64": encode_base64(bytes),
-        "merge": append,
-    });
+    let command_id = report_import_command_id(format_id);
+    let mut map = Map::new();
+    map.insert(String::from("bytes_base64"), json!(encode_base64(bytes)));
+    map.insert(String::from("merge"), json!(append));
+    if format_id == "xlsx"
+        && let Some(xopts) = import_opts.xlsx.as_ref()
+    {
+        attach_xlsx_command_params(&mut map, xopts);
+    }
+    let params = Value::Object(map);
 
     let cancel = state.current_cancel_token();
     if append {
@@ -1415,20 +1574,23 @@ mod tests {
     use std::path::Path;
 
     use curvebook_doc::ErrorCode;
+    use curvebook_format::ImportOptions;
     use serde_json::json;
 
     use super::{MAX_LIVE_INLINE_ARCHIVE_BYTES, build_live_report_import_params};
 
     #[test]
     fn live_report_import_prefers_path_and_rejects_oversized_inline_fallback_before_base64() {
-        let by_path = build_live_report_import_params(Some(Path::new("/study/big.pzfx")), Some(b"ignored"), true).expect("path-based import params");
+        let opts = ImportOptions::default();
+        let by_path = build_live_report_import_params(Some(Path::new("/study/big.pzfx")), Some(b"ignored"), "pzfx", &opts, true)
+            .expect("path-based import params");
         assert_eq!(by_path, json!({ "path": "/study/big.pzfx", "merge": true }));
 
-        let small_inline = build_live_report_import_params(None, Some(b"PK\x03\x04"), false).expect("small inline fallback");
+        let small_inline = build_live_report_import_params(None, Some(b"PK\x03\x04"), "xlsx", &opts, false).expect("small inline fallback");
         assert_eq!(small_inline, json!({ "bytes_base64": "UEsDBA==", "merge": false }));
 
         let oversized = vec![0x55_u8; MAX_LIVE_INLINE_ARCHIVE_BYTES + 1];
-        let err = build_live_report_import_params(None, Some(&oversized), false).expect_err("oversized inline fallback must fail");
+        let err = build_live_report_import_params(None, Some(&oversized), "xlsx", &opts, false).expect_err("oversized inline fallback must fail");
         assert_eq!(err.code, ErrorCode::ResourceLimit);
     }
 }

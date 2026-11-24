@@ -9,7 +9,8 @@ use curvebook_doc::{
 use curvebook_engine::services::{ExportArtifactFormat, ExportArtifactRequest, ExportTarget, RasterSizingPolicy, export_document_artifact};
 use curvebook_format::registry::{ExportOptions, ExportSource, FormatKind, FormatRegistry, ImportOptions, ImportPayload};
 use curvebook_format::{
-    ArchiveKind, CsvOptions, ImportReport, MAX_ARCHIVE_FILE_BYTES, import_prism_bytes, import_pzfx_bytes, is_unpacked_project_dir, open_archive_bytes,
+    ArchiveKind, CsvOptions, ImportReport, MAX_ARCHIVE_FILE_BYTES, XlsxImportOptions, import_prism_bytes, import_pzfx_bytes, import_xlsx_bytes,
+    is_unpacked_project_dir, open_archive_bytes,
 };
 use curvebook_pdf::{PdfExportOptions, PdfVersion};
 use curvebook_platform::PlatformError;
@@ -102,6 +103,7 @@ struct ConvertArgs {
     output_path: String,
     format: Option<ExportFormat>,
     sheet: Option<String>,
+    xlsx_sheets: Option<Vec<String>>,
     dpi: Option<u16>,
     pdf_version: PdfVersion,
     ttf_font: Option<String>,
@@ -136,7 +138,7 @@ fn run_convert_or_export(args: &[String], command_name: &str, verb: &str) -> Res
         let out_path = Path::new(&parsed.output_path);
         let font_bytes = parsed.ttf_font.as_deref().map(Path::new).map(load_validated_ttf_font).transpose()?;
 
-        let (loaded, _input_bytes) = load_project_from_path(in_path, true)?;
+        let (loaded, _input_bytes) = load_project_from_path_with_xlsx_sheets(in_path, true, parsed.xlsx_sheets.as_deref())?;
         let format = match parsed.format {
             Some(fmt) => fmt,
             None => detect_export_format_from_path(out_path)?,
@@ -315,6 +317,16 @@ pub fn detect_export_format_from_path(path: &Path) -> Result<ExportFormat, CliEr
 
 /// Load a [`ProjectDocument`] from a file path or unpacked `.curvebook.d` directory, returning `(loaded, input_bytes)`.
 pub fn load_project_from_path(path: &Path, allow_delimited: bool) -> Result<(LoadedProject, usize), CliError> {
+    load_project_from_path_with_xlsx_sheets(path, allow_delimited, None)
+}
+
+/// Load a [`ProjectDocument`] from a file path or unpacked `.curvebook.d` directory, optionally
+/// restricting `.xlsx` imports to specific worksheet tab names.
+pub fn load_project_from_path_with_xlsx_sheets(
+    path: &Path,
+    allow_delimited: bool,
+    xlsx_sheets: Option<&[String]>,
+) -> Result<(LoadedProject, usize), CliError> {
     if is_unpacked_project_path(path) {
         let registry = FormatRegistry::default_registry();
         let importer = registry
@@ -330,16 +342,20 @@ pub fn load_project_from_path(path: &Path, allow_delimited: bool) -> Result<(Loa
         PlatformError::FileTooLarge { .. } => CliError::from(err),
         other => CliError::Runtime(format!("failed to read `{}`: {other}", path.display())),
     })?;
-    let loaded = load_project_from_bytes(path, &bytes, allow_delimited)?;
+    let loaded = load_project_from_bytes_with_xlsx_sheets(path, &bytes, allow_delimited, xlsx_sheets)?;
     Ok((loaded, bytes.len()))
 }
 
-/// Load a [`ProjectDocument`] from archive, interchange, JSON, or optionally CSV/TSV bytes via [`FormatRegistry`].
-pub fn load_project_from_bytes(path_hint: &Path, bytes: &[u8], allow_delimited: bool) -> Result<LoadedProject, CliError> {
+fn load_project_from_bytes_with_xlsx_sheets(
+    path_hint: &Path,
+    bytes: &[u8],
+    allow_delimited: bool,
+    xlsx_sheets: Option<&[String]>,
+) -> Result<LoadedProject, CliError> {
     let registry = FormatRegistry::default_registry();
     if let Some(importer) = registry.importer_for_path(path_hint) {
         let desc = importer.descriptor();
-        return import_with_registered_adapter(importer, desc.id, desc.kind, path_hint, bytes, allow_delimited);
+        return import_with_registered_adapter(importer, desc.id, desc.kind, path_hint, bytes, allow_delimited, xlsx_sheets);
     }
     let ext = path_hint.extension().and_then(std::ffi::OsStr::to_str).map(str::to_ascii_lowercase);
     if ext.as_deref() == Some("json") {
@@ -355,6 +371,7 @@ fn import_with_registered_adapter(
     path_hint: &Path,
     bytes: &[u8],
     allow_delimited: bool,
+    xlsx_sheets: Option<&[String]>,
 ) -> Result<LoadedProject, CliError> {
     match kind {
         FormatKind::Template => {
@@ -377,17 +394,25 @@ fn import_with_registered_adapter(
             };
             Ok(LoadedProject { doc, format_tag, warnings: Vec::new() })
         }
-        FormatKind::ForeignProject => match importer.import_bytes(bytes, &ImportOptions::default())? {
-            ImportPayload::Report(report) => load_import_report(report, format_tag),
-            ImportPayload::Document(doc) => Ok(LoadedProject { doc, format_tag, warnings: Vec::new() }),
-            ImportPayload::DataSheet(_) => Err(CliError::Runtime(format!("importer `{format_tag}` returned unexpected single-sheet payload"))),
-        },
+        FormatKind::ForeignProject => {
+            let mut opts = ImportOptions::default();
+            if format_tag == "xlsx"
+                && let Some(sheets) = xlsx_sheets
+            {
+                let stem = path_hint.file_stem().and_then(std::ffi::OsStr::to_str).map(str::to_owned);
+                opts.xlsx = Some(XlsxImportOptions { sheet_names: Some(sheets.to_vec()), title: stem, ..XlsxImportOptions::default() });
+            }
+            match importer.import_bytes(bytes, &opts)? {
+                ImportPayload::Report(report) => load_import_report(report, format_tag),
+                ImportPayload::Document(doc) => Ok(LoadedProject { doc, format_tag, warnings: Vec::new() }),
+                ImportPayload::DataSheet(_) => Err(CliError::Runtime(format!("importer `{format_tag}` returned unexpected single-sheet payload"))),
+            }
+        }
         FormatKind::DelimitedText => {
             if !allow_delimited {
                 return Err(CliError::Usage(String::from("delimited CSV/TSV files are not project archives")));
             }
-            let csv_opts = if format_tag == "tsv" { CsvOptions::tsv() } else { CsvOptions::csv() };
-            load_delimited_with_importer(importer, path_hint, bytes, &csv_opts, format_tag)
+            load_delimited_with_importer(importer, path_hint, bytes, format_tag)
         }
         FormatKind::ProjectDir | FormatKind::ResultTable | FormatKind::FigureVector | FormatKind::FigureRaster => sniff_project_bytes(bytes),
     }
@@ -495,7 +520,6 @@ fn load_delimited_with_importer(
     importer: &dyn curvebook_format::registry::Importer,
     path_hint: &Path,
     bytes: &[u8],
-    csv_opts: &CsvOptions,
     format_tag: &'static str,
 ) -> Result<LoadedProject, CliError> {
     let stem = path_hint.file_stem().and_then(std::ffi::OsStr::to_str).filter(|s| !s.trim().is_empty()).unwrap_or("Imported Table");
@@ -504,7 +528,8 @@ fn load_delimited_with_importer(
         title: stem.to_owned(),
         table_kind: TableKind::Xy,
         subcolumn_mode: SubcolumnMode::Single,
-        csv: Some(csv_opts.clone()),
+        csv: None,
+        xlsx: None,
     };
     let ds = importer
         .import_bytes(bytes, &opts)?
@@ -522,6 +547,9 @@ fn sniff_project_bytes(bytes: &[u8]) -> Result<LoadedProject, CliError> {
     if bytes.starts_with(b"PK\x03\x04") {
         if let Ok(loaded) = load_native_archive(bytes) {
             return Ok(loaded);
+        }
+        if let Ok(report) = import_xlsx_bytes(bytes) {
+            return load_import_report(report, "xlsx");
         }
         return load_import_report(import_prism_bytes(bytes)?, "prism");
     }
@@ -684,6 +712,7 @@ fn parse_export_or_convert_args(args: &[String], cmd_name: &str) -> Result<Conve
     let mut explicit_out = None;
     let mut format = None;
     let mut sheet = None;
+    let mut xlsx_sheets = None;
     let mut dpi = None;
     let mut pdf_version = PdfVersion::Pdf17;
     let mut ttf_font = None;
@@ -705,6 +734,12 @@ fn parse_export_or_convert_args(args: &[String], cmd_name: &str) -> Result<Conve
             format = Some(parse_export_format(&val)?);
         } else if let Some(val) = consume_flag_opt(args, &mut idx, "--sheet", "--sheet requires a sheet ID or title")? {
             sheet = Some(val);
+        } else if let Some(val) = consume_flag_opt(args, &mut idx, "--xlsx-sheets", "--xlsx-sheets requires comma-separated worksheet names")? {
+            let parsed_names: Vec<String> = val.split(',').map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()).collect();
+            if parsed_names.is_empty() {
+                return Err(CliError::Usage(String::from("--xlsx-sheets requires at least one non-empty sheet name")));
+            }
+            xlsx_sheets = Some(parsed_names);
         } else if let Some(val) = consume_flag_opt(args, &mut idx, "--dpi", "--dpi requires an integer in 18..=2400")? {
             dpi = Some(parse_dpi_value(&val)?);
         } else if let Some(val) = consume_flag_opt(args, &mut idx, "--pdf-version", "--pdf-version requires `1.4` or `1.7`")? {
@@ -723,7 +758,7 @@ fn parse_export_or_convert_args(args: &[String], cmd_name: &str) -> Result<Conve
     }
 
     let (input_path, output_path) = resolve_io_positionals(&mut positionals, explicit_out, cmd_name)?;
-    Ok(ConvertArgs { input_path, output_path, format, sheet, dpi, pdf_version, ttf_font, json })
+    Ok(ConvertArgs { input_path, output_path, format, sheet, xlsx_sheets, dpi, pdf_version, ttf_font, json })
 }
 
 fn resolve_io_positionals(positionals: &mut Vec<String>, explicit_out: Option<String>, cmd_name: &str) -> Result<(String, String), CliError> {

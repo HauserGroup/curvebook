@@ -56,7 +56,10 @@ pub use archetypes::{
     SurvivalStatus, SurvivalTable, TableArchetype, ThreeWayColumnGrouping, VariableColumn, VariableRole, VariableSource, XColumnMode, XyTable,
     default_column_label,
 };
-pub use cell::{Cell, CellValue, ExplicitErrorBounds, ReplicateStacking, SubcolumnMode, SummarizedPoint};
+pub use cell::{
+    Cell, CellValue, ExplicitErrorBounds, ReplicateStacking, SubcolumnMode, SummarizedPoint, infer_number_separators, parse_import_number,
+    strip_thousands_grouping,
+};
 pub use delimited::{DelimitedField, DelimitedScanError, DelimitedScanOptions, DelimitedVisitorError, format_linked_paste_tsv_cell, scan_delimited};
 pub use error::{
     CURRENT_SCHEMA_VERSION, ConfidenceLevel, DocError, MAX_DATA_SETS, MAX_PROJECT_CELLS, MAX_ROWS, MAX_SHEET_CELLS, MAX_SHEETS_PER_PROJECT,

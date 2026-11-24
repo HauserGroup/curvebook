@@ -202,6 +202,7 @@ fn build_file_menu(app: &UiApp) -> CuratedMenuSection {
     push_action(&mut import_children, app, "ui.import.reshape.open", Some("menu.file.import_reshape"));
     push_action(&mut import_children, app, "table.importPzfx", None);
     push_action(&mut import_children, app, "table.importPrism", None);
+    push_action(&mut import_children, app, "table.importXlsx", None);
     nodes.push(submenu_node("menu.file.import", "menu.file.import", app, import_children));
 
     let mut export_children = Vec::new();

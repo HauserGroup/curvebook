@@ -12,9 +12,12 @@ use crate::os_integration::ClipboardBundle;
 use curvebook_doc::{
     CategoricalLevelSummary, Cell, CellCoord, CellValue, DataSheet, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InternalLinkKind,
     LevelOrderSpec, LinkBorderColor, LinkSource, LinkedDataRegion, ProjectDocument, SheetCellRange, SheetId, SubcolumnMode, TableArchetype,
-    TableKind, VariableRole, VariableSource, XColumnMode, default_column_label,
+    TableKind, VariableRole, VariableSource, XColumnMode, default_column_label, infer_number_separators,
 };
-use curvebook_format::{CsvOptions, format_cell_token, write_delimited_records};
+use curvebook_format::{
+    CsvOptions, XlsxImportOptions, collapse_merged_header_rows, format_cell_token, import_xlsx_bytes_with_options, list_xlsx_sheets,
+    parse_delimited_records, write_delimited_records,
+};
 use curvebook_palette::Rgba8;
 use curvebook_tools::{GridCellCoord, GridToolState, GridVisibleWindow, SelectionQuickStats, ToolCommandIntent};
 use serde::{Deserialize, Serialize};
@@ -647,6 +650,24 @@ pub enum ImportWizardStage {
     Provenance,
 }
 
+/// Selection metadata for one worksheet discovered inside an `.xlsx` workbook.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub struct XlsxSheetSelection {
+    pub index: usize,
+    pub name: String,
+    pub rows: usize,
+    pub cols: usize,
+    pub selected: bool,
+}
+
+fn default_import_header_rows() -> usize {
+    1
+}
+
+fn default_import_true() -> bool {
+    true
+}
+
 /// Stage 1 origin type in [`ImportPasteWizardState`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum ImportOriginKind {
@@ -655,6 +676,7 @@ pub enum ImportOriginKind {
     InternalDataSheet,
     InternalResultSheet,
     ExternalDelimitedFile,
+    XlsxWorkbook,
 }
 
 /// Guided structural import reshaping preset (`QOL-2`).
@@ -1013,6 +1035,18 @@ pub struct ImportPasteWizardState {
     pub link_id: String,
     pub provenance_note: String,
     pub record_in_info_sheet: bool,
+    #[serde(default = "default_import_header_rows")]
+    pub header_rows: usize,
+    #[serde(default)]
+    pub xlsx_bytes_base64: Option<String>,
+    #[serde(default)]
+    pub xlsx_sheets: Vec<XlsxSheetSelection>,
+    #[serde(default = "default_import_true")]
+    pub xlsx_merge: bool,
+    #[serde(default)]
+    pub xlsx_has_row_titles: bool,
+    #[serde(default)]
+    pub xlsx_error: Option<String>,
 }
 
 impl Default for ImportPasteWizardState {
@@ -1035,11 +1069,188 @@ impl Default for ImportPasteWizardState {
             link_id: String::from("link-1"),
             provenance_note: String::new(),
             record_in_info_sheet: true,
+            header_rows: 1,
+            xlsx_bytes_base64: None,
+            xlsx_sheets: Vec::new(),
+            xlsx_merge: true,
+            xlsx_has_row_titles: false,
+            xlsx_error: None,
         }
     }
 }
 
 impl ImportPasteWizardState {
+    /// Load `.xlsx` workbook bytes into the wizard, enumerating worksheets and selecting visible
+    /// sheets by default (`R17.1`).
+    ///
+    /// # Errors
+    /// Returns a descriptive error string when the payload exceeds archive limits or fails to parse.
+    pub fn load_xlsx_bytes(&mut self, bytes: &[u8]) -> Result<usize, String> {
+        if bytes.len() > curvebook_format::MAX_ARCHIVE_FILE_BYTES {
+            let msg = format!("workbook payload ({} bytes) exceeds {} byte limit", bytes.len(), curvebook_format::MAX_ARCHIVE_FILE_BYTES);
+            self.xlsx_error = Some(msg.clone());
+            return Err(msg);
+        }
+        let infos = list_xlsx_sheets(bytes).map_err(|err| {
+            let msg = err.to_string();
+            self.xlsx_error = Some(msg.clone());
+            msg
+        })?;
+        let preview_report = import_xlsx_bytes_with_options(
+            bytes,
+            &XlsxImportOptions { include_hidden: true, has_header: true, header_rows: self.header_rows.max(1), ..XlsxImportOptions::default() },
+        )
+        .ok();
+        let any_visible = infos.iter().any(|s| s.state.as_deref() != Some("hidden") && s.state.as_deref() != Some("veryHidden"));
+        let sheets: Vec<XlsxSheetSelection> = infos
+            .into_iter()
+            .enumerate()
+            .map(|(pos, info)| {
+                let is_hidden = matches!(info.state.as_deref(), Some("hidden" | "veryHidden"));
+                let (rows, cols) = preview_report
+                    .as_ref()
+                    .and_then(|rep| rep.document.data_sheets.iter().find(|ds| ds.title == info.name).or_else(|| rep.document.data_sheets.get(pos)))
+                    .map_or((0, 0), |ds| (ds.archetype.row_count(), total_flat_data_subcolumns(&ds.archetype)));
+                XlsxSheetSelection { index: info.index, name: info.name, rows, cols, selected: !any_visible || !is_hidden }
+            })
+            .collect();
+        let count = sheets.len();
+        self.xlsx_bytes_base64 = Some(curvebook_platform::base64::encode(bytes));
+        self.xlsx_sheets = sheets;
+        self.xlsx_error = None;
+        self.origin_kind = ImportOriginKind::XlsxWorkbook;
+        Ok(count)
+    }
+
+    /// Read `.xlsx` workbook bytes from [`Self::external_file_path`] on native hosts and populate
+    /// worksheet selections.
+    ///
+    /// # Errors
+    /// Returns a descriptive error string when the path is empty, invalid, unreadable, or unavailable on `wasm32`.
+    pub fn load_xlsx_from_path_str(&mut self) -> Result<usize, String> {
+        let raw_path = self.external_file_path.trim().to_owned();
+        if raw_path.is_empty() {
+            let msg = String::from("enter an .xlsx file path first");
+            self.xlsx_error = Some(msg.clone());
+            return Err(msg);
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = raw_path;
+            let msg = String::from("reading .xlsx files by filesystem path is unavailable on wasm32");
+            self.xlsx_error = Some(msg.clone());
+            Err(msg)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let bytes = curvebook_platform::fs::read_regular_file_bytes(std::path::Path::new(&raw_path), curvebook_format::MAX_ARCHIVE_FILE_BYTES)
+                .map_err(|err| {
+                    let msg = format!("failed to read `{raw_path}`: {err}");
+                    self.xlsx_error = Some(msg.clone());
+                    msg
+                })?;
+            self.load_xlsx_bytes(&bytes)
+        }
+    }
+
+    /// Selected worksheet names in workbook order for `.xlsx` multi-sheet import.
+    #[must_use]
+    pub fn selected_xlsx_sheet_names(&self) -> Vec<String> {
+        self.xlsx_sheets.iter().filter(|s| s.selected).map(|s| s.name.clone()).collect()
+    }
+
+    /// Build `table.importXlsx` engine parameters from the current `.xlsx` wizard selections.
+    #[must_use]
+    pub fn build_xlsx_import_params(&self) -> Option<Value> {
+        let mut map = serde_json::Map::new();
+        if let Some(b64) = self.xlsx_bytes_base64.as_ref().filter(|s| !s.is_empty()) {
+            map.insert(String::from("bytes_base64"), json!(b64));
+        } else {
+            let trimmed = self.external_file_path.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            map.insert(String::from("path"), json!(trimmed));
+        }
+        if !self.xlsx_sheets.is_empty() {
+            let selected = self.selected_xlsx_sheet_names();
+            map.insert(String::from("sheets"), json!(selected));
+        }
+        let header_rows = self.header_rows;
+        map.insert(String::from("has_header"), json!(header_rows > 0 || self.placement.propagate_title_header));
+        map.insert(String::from("header_rows"), json!(header_rows));
+        map.insert(String::from("has_row_titles"), json!(self.xlsx_has_row_titles));
+        map.insert(String::from("include_hidden"), json!(true));
+        map.insert(String::from("merge"), json!(self.xlsx_merge));
+        Some(Value::Object(map))
+    }
+
+    fn preview_xlsx_grid(&self) -> Vec<Vec<Cell>> {
+        let Some(b64) = self.xlsx_bytes_base64.as_deref() else {
+            return Vec::new();
+        };
+        let Ok(bytes) = curvebook_platform::base64::decode_capped(b64, curvebook_format::MAX_ARCHIVE_FILE_BYTES) else {
+            return Vec::new();
+        };
+        let selected = (!self.xlsx_sheets.is_empty()).then(|| self.selected_xlsx_sheet_names());
+        if selected.as_ref().is_some_and(Vec::is_empty) {
+            return Vec::new();
+        }
+        let header_rows = self.header_rows;
+        let opts = XlsxImportOptions {
+            sheet_names: selected,
+            has_header: header_rows > 0 || self.placement.propagate_title_header,
+            header_rows,
+            has_row_titles: self.xlsx_has_row_titles,
+            include_hidden: true,
+            ..XlsxImportOptions::default()
+        };
+        let Ok(report) = import_xlsx_bytes_with_options(&bytes, &opts) else {
+            return Vec::new();
+        };
+        let Some(ds) = report.document.data_sheets.first() else {
+            return Vec::new();
+        };
+        let row_count = ds.archetype.row_count().min(128);
+        let flat_cols = total_flat_data_subcolumns(&ds.archetype).min(32);
+        let mut grid = Vec::with_capacity(row_count + 1);
+        let headers: Vec<Cell> = (0..flat_cols)
+            .map(|flat| {
+                let title = match &ds.archetype {
+                    TableArchetype::Xy(xy) => {
+                        if flat == 0 {
+                            xy.x_title.clone()
+                        } else {
+                            let subs = xy.y_subcolumn_mode.subcolumn_count().max(1);
+                            let y_idx = (flat - 1) / subs;
+                            xy.data_sets.get(y_idx).map(|c| c.title.clone()).unwrap_or_default()
+                        }
+                    }
+                    TableArchetype::Column(col) => col.data_sets.get(flat).map(|c| c.title.clone()).unwrap_or_default(),
+                    TableArchetype::Grouped(grp) => {
+                        let subs = grp.subcolumn_mode.subcolumn_count().max(1);
+                        grp.data_sets.get(flat / subs).map(|c| c.title.clone()).unwrap_or_default()
+                    }
+                    TableArchetype::MultipleVariables(mv) => mv.variables.get(flat).map(|v| v.title.clone()).unwrap_or_default(),
+                    TableArchetype::Contingency(ct) => ct.data_sets.get(flat).map(|c| c.title.clone()).unwrap_or_default(),
+                    _ => String::new(),
+                };
+                if title.trim().is_empty() { Cell::text(default_column_label(flat)) } else { Cell::text(title) }
+            })
+            .collect();
+        if !headers.is_empty() {
+            grid.push(headers);
+        }
+        if row_count > 0 && ds.archetype.column_count() > 0 {
+            let body = ds.extract_cell_grid(SheetCellRange::new(
+                CellCoord::default(),
+                CellCoord::new(row_count.saturating_sub(1), ds.archetype.column_count().saturating_sub(1), 8),
+            ));
+            grid.extend(body);
+        }
+        grid
+    }
+
     /// Advance to the next stage (`Source -> Filter -> Placement -> Provenance`).
     pub fn next_stage(&mut self) {
         self.stage = match self.stage {
@@ -1053,7 +1264,7 @@ impl ImportPasteWizardState {
     #[must_use]
     pub fn build_link_source(&self, doc: Option<&ProjectDocument>) -> LinkSource {
         match self.origin_kind {
-            ImportOriginKind::Clipboard => LinkSource::Clipboard,
+            ImportOriginKind::Clipboard | ImportOriginKind::XlsxWorkbook => LinkSource::Clipboard,
             ImportOriginKind::InternalDataSheet => LinkSource::InternalSheet {
                 sheet_id: self.source_sheet_id.clone().unwrap_or_else(|| SheetId::new("data-1")),
                 kind: InternalLinkKind::DataSheet,
@@ -1095,16 +1306,52 @@ impl ImportPasteWizardState {
     #[must_use]
     pub fn preview_grid(&self, doc: Option<&ProjectDocument>) -> Vec<Vec<Cell>> {
         let mut grid = match self.origin_kind {
-            ImportOriginKind::Clipboard | ImportOriginKind::ExternalDelimitedFile => self
-                .raw_clipboard_text
-                .lines()
-                .filter(|line| !line.is_empty())
-                .map(|line| {
-                    line.split(self.delimiter)
-                        .map(|tok| Cell::parse_import_token(tok, self.decimal_separator, self.filter.parse_asterisk_exclusions))
-                        .collect::<Vec<Cell>>()
-                })
-                .collect::<Vec<Vec<Cell>>>(),
+            ImportOriginKind::Clipboard | ImportOriginKind::ExternalDelimitedFile => {
+                let delim = if self.delimiter == '\0' { '\t' } else { self.delimiter };
+                let opts = CsvOptions {
+                    delimiter: delim,
+                    quote_char: '"',
+                    decimal_separator: self.decimal_separator,
+                    thousands_separator: None,
+                    header_rows: self.header_rows,
+                    has_row_titles: false,
+                    parse_asterisk_exclusions: self.filter.parse_asterisk_exclusions,
+                    missing_sentinels: Vec::new(),
+                };
+                let mut records = parse_delimited_records(&self.raw_clipboard_text, &opts).unwrap_or_else(|_| {
+                    self.raw_clipboard_text
+                        .lines()
+                        .filter(|line| !line.is_empty())
+                        .map(|line| line.split(delim).map(str::to_owned).collect())
+                        .collect()
+                });
+                records.retain(|row| row.iter().any(|cell| !cell.trim().is_empty()));
+                let hdr_n = if self.header_rows > 1 && records.len() >= self.header_rows { self.header_rows } else { 0 };
+                let collapsed_header = records.get(..hdr_n).filter(|_| hdr_n > 1).map(collapse_merged_header_rows);
+                let body_rows = records.get(hdr_n..).unwrap_or(&[]);
+                let (_, detected_thousands) = infer_number_separators(body_rows.iter().flatten().map(String::as_str), delim);
+                let thousands_sep = detected_thousands.filter(|&t| t != self.decimal_separator);
+                let mut out_rows = Vec::with_capacity(body_rows.len() + usize::from(collapsed_header.is_some()));
+                if let Some(hdr) = collapsed_header {
+                    out_rows.push(hdr.into_iter().map(Cell::text).collect());
+                }
+                for row in body_rows {
+                    out_rows.push(
+                        row.iter()
+                            .map(|tok| {
+                                Cell::parse_import_token_with_thousands(
+                                    tok,
+                                    self.decimal_separator,
+                                    thousands_sep,
+                                    self.filter.parse_asterisk_exclusions,
+                                )
+                            })
+                            .collect(),
+                    );
+                }
+                out_rows
+            }
+            ImportOriginKind::XlsxWorkbook => self.preview_xlsx_grid(),
             ImportOriginKind::InternalDataSheet => doc
                 .and_then(|d| self.source_sheet_id.as_ref().and_then(|id| d.data_sheet(id)))
                 .map(|ds| ds.extract_cell_grid(self.source_range))

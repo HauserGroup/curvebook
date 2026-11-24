@@ -18,6 +18,7 @@ pub mod recovery;
 pub mod registry;
 pub mod schemas;
 pub mod versioned;
+pub mod xlsx;
 pub mod xml;
 pub mod zip;
 
@@ -29,9 +30,9 @@ pub use archive::{
     save_template_bytes, save_template_file, strip_project_data_for_template, validate_project_document,
 };
 pub use csv::{
-    CsvOptions, FilteredDelimitedGrid, ImportBaselineAdjustment, MAX_CSV_FILE_BYTES, apply_csv_import_link, export_datasheet_to_csv,
-    filter_delimited_text, format_cell_token, format_csv_field, import_csv_to_datasheet, parse_cell_token, parse_delimited_records,
-    rearrange_and_baseline_grid, write_delimited_records,
+    CsvOptions, FilteredDelimitedGrid, ImportBaselineAdjustment, MAX_CSV_FILE_BYTES, apply_csv_import_link, collapse_merged_header_rows,
+    decode_delimited_text_bytes, export_datasheet_to_csv, filter_delimited_text, format_cell_token, format_csv_field, import_csv_to_datasheet,
+    parse_cell_token, parse_delimited_records, rearrange_and_baseline_grid, write_delimited_records,
 };
 pub use error::{FormatError, ImportReport, ImportWarning, ImportWarningKind};
 pub use export::{
@@ -54,6 +55,7 @@ pub use versioned::{
     normalize_batch_manifest_v1, normalize_batch_manifest_v1_with_warnings, normalize_command_params_in_place, parse_preferences_json,
     save_preferences_file, upgrade, validate_batch_manifest_version,
 };
+pub use xlsx::{XlsxImportOptions, XlsxSheetInfo, import_xlsx_bytes, import_xlsx_bytes_with_options, list_xlsx_sheets};
 pub use xml::{MAX_XML_BYTES, MAX_XML_DEPTH, MAX_XML_NODES, XmlElement, XmlLimits, XmlNode, parse_xml, parse_xml_with_limits};
 pub use zip::{MAX_ZIP_ENTRIES, MAX_ZIP_ENTRY_BYTES, MAX_ZIP_UNCOMPRESSED_BYTES, ZipArchive, ZipLimits, ZipWriter, sanitize_zip_path};
 

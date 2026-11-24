@@ -550,7 +550,8 @@ fn check_mcp_json_strict(ctx: &str, method: &str, called_tool: Option<&str>, res
                         let clean_desc = desc.replace(&dot_ext, ".ext");
                         masked = masked.replace(desc, &clean_desc);
                     }
-                    let fmt_enum_pat = format!("\"enum\":[\"curvebook\",\"curvebook.d\",\"cbtemplate\",\"{}\",\"pzfx\",\"csv\",\"tsv\"]", raw_ext);
+                    let fmt_enum_pat =
+                        format!("\"enum\":[\"curvebook\",\"curvebook.d\",\"cbtemplate\",\"{}\",\"pzfx\",\"xlsx\",\"csv\",\"tsv\"]", raw_ext);
                     masked = masked.replace(&fmt_enum_pat, "\"enum\":[\"curvebook\",\"pzfx\"]");
                 } else if name == mcp_tool_id {
                     masked = masked.replace(&mcp_tool_id, "table_import_ext");

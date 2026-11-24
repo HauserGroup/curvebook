@@ -890,7 +890,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
             name: String::from("open_file"),
             // Keep relative manual URL here because `xtask brands` rejects `.prism` + `https://` in one string.
             description: String::from(concat!(
-                "Open or import a .curvebook, .curvebook.d, .cbtemplate, .prism, .pzfx, .csv, or .tsv file into the session. Docs: manual/v",
+                "Open or import a .curvebook, .curvebook.d, .cbtemplate, .prism, .pzfx, .xlsx, .csv, or .tsv file into the session (supports .xlsx sheet listing via `list_sheets` and multi-sheet selection via `sheets`/`sheet_indices`). Docs: manual/v",
                 env!("CARGO_PKG_VERSION_MAJOR"),
                 ".",
                 env!("CARGO_PKG_VERSION_MINOR"),
@@ -901,13 +901,19 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                 "required": ["path"],
                 "properties": {
                     "path": { "type": "string", "description": "Filesystem path to open or import." },
-                    "format": { "type": "string", "enum": ["curvebook", "curvebook.d", "cbtemplate", "prism", "pzfx", "csv", "tsv"] },
+                    "format": { "type": "string", "enum": ["curvebook", "curvebook.d", "cbtemplate", "prism", "pzfx", "xlsx", "csv", "tsv"] },
                     "target_kind": { "type": "string", "enum": ["xy", "column", "grouped", "contingency", "survival", "parts_of_whole", "multiple_variables", "nested"] },
                     "subcolumn_mode": { "type": "string" },
                     "delimiter": { "type": "string", "description": "Optional single-character delimiter override for delimited text." },
                     "sheet_id": { "type": "string", "description": "Sheet ID used when importing delimited data." },
                     "title": { "type": "string", "description": "Optional title override for imported sheet or instantiated template." },
-                    "append": { "type": "boolean", "description": "When importing CSV, TSV, or external archive/XML files, append/merge sheets into the active project instead of replacing it." }
+                    "append": { "type": "boolean", "description": "When importing CSV, TSV, XLSX, or external archive/XML files, append/merge sheets into the active project instead of replacing it." },
+                    "sheets": { "type": "array", "items": { "type": "string" }, "description": "Optional `.xlsx` worksheet names to import." },
+                    "sheet_indices": { "type": "array", "items": { "type": "integer", "minimum": 0 }, "description": "Optional zero-based `.xlsx` worksheet indices to import." },
+                    "list_sheets": { "type": "boolean", "description": "When true for `.xlsx`, list workbook sheets without mutating the session." },
+                    "has_header": { "type": "boolean", "description": "Treat top row(s) of `.xlsx` sheets as column headers (default true)." },
+                    "header_rows": { "type": "integer", "minimum": 0, "maximum": 16, "description": "Number of header rows to combine per `.xlsx` sheet (default 1 when has_header is true)." },
+                    "has_row_titles": { "type": "boolean", "description": "Treat first column of each `.xlsx` sheet as row titles." }
                 },
                 "additionalProperties": false
             }),
@@ -2233,6 +2239,7 @@ mod live_control {
                 | "project.instantiateTemplate"
                 | "table.importPrism"
                 | "table.importPzfx"
+                | "table.importXlsx"
                 | "table.importCsv"
                 | "render.preview"
                 | "render.pdf"

@@ -436,16 +436,16 @@ fn fa_sec12_06_set_spec_rejects_shorthand_conflict_and_unknown_nested_keys() -> 
 }
 
 #[test]
-fn fa_sec12_07_all_28_table_schemas_closed_and_flatten_commands_reject_unknown_keys() -> TestResult {
+fn fa_sec12_07_all_29_table_schemas_closed_and_flatten_commands_reject_unknown_keys() -> TestResult {
     let specs = table::specs();
-    assert_eq!(specs.len(), 28);
+    assert_eq!(specs.len(), 29);
     let mut ids = BTreeSet::new();
     for spec in specs {
         ids.insert(spec.id);
         let schema = (spec.input_schema)();
         assert_eq!(schema.get("additionalProperties"), Some(&Value::Bool(false)), "schema `{}` must set additionalProperties: false", spec.id);
     }
-    assert_eq!(ids.len(), 28);
+    assert_eq!(ids.len(), 29);
 
     let mut doc = ProjectDocument::new("SEC12-07")?;
     doc.add_data_sheet(seed_xy_sheet("xy1", "XY", 2, SubcolumnMode::Single, 3)?)?;
@@ -459,7 +459,7 @@ fn fa_sec12_07_all_28_table_schemas_closed_and_flatten_commands_reject_unknown_k
     doc.add_data_sheet(DataSheet::new("nest1", "Nested", TableArchetype::Nested(NestedTable::new(1, 2, 2)?))?)?;
     let mut session = Session::from_document(doc);
 
-    let probes: [(&str, Value); 28] = [
+    let probes: [(&str, Value); 29] = [
         ("table.setCell", json!({ "sheet_id": "col1", "row": 0, "col": 0, "value": 1.0, "bogus": 1 })),
         ("table.setCells", json!({ "sheet_id": "col1", "edits": [{ "row": 0, "col": 0, "value": 1.0 }], "bogus": 1 })),
         ("table.setXCells", json!({ "sheet_id": "xy1", "row": 0, "value": 1.0, "bogus": 1 })),
@@ -477,6 +477,7 @@ fn fa_sec12_07_all_28_table_schemas_closed_and_flatten_commands_reject_unknown_k
         ("table.exportCsv", json!({ "sheet_id": "col1", "bogus": 1 })),
         ("table.importPrism", json!({ "bytes_base64": "QQ==", "bogus": 1 })),
         ("table.importPzfx", json!({ "xml": "<xml/>", "bogus": 1 })),
+        ("table.importXlsx", json!({ "bytes_base64": "QQ==", "bogus": 1 })),
         ("table.setVariableRole", json!({ "sheet_id": "mv1", "col": 1, "role": "continuous", "bogus": 1 })),
         ("table.recodeLevels", json!({ "sheet_id": "mv1", "col": 0, "mappings": { "A": "Alpha" }, "bogus": 1 })),
         ("table.setCategoricalOrder", json!({ "sheet_id": "mv1", "col": 0, "order": "alphabetical", "bogus": 1 })),

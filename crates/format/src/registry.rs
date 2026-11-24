@@ -11,11 +11,12 @@ use crate::archive::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::archive::{platform_read_regular_file, save_project_file, save_template_file};
-use crate::csv::{CsvOptions, MAX_CSV_FILE_BYTES, export_datasheet_to_csv, import_csv_to_datasheet};
+use crate::csv::{CsvOptions, MAX_CSV_FILE_BYTES, decode_delimited_text_bytes, export_datasheet_to_csv, import_csv_to_datasheet};
 use crate::error::{FormatError, ImportReport};
 use crate::export::{export_result_sheet_json, try_export_result_sheet_tidy_csv};
 use crate::prism::import_prism_bytes;
 use crate::pzfx::import_pzfx_bytes;
+use crate::xlsx::{XlsxImportOptions, import_xlsx_bytes, import_xlsx_bytes_with_options};
 use crate::xml::MAX_XML_BYTES;
 
 /// Coarse category of a supported file format or container.
@@ -84,6 +85,8 @@ pub struct ImportOptions {
     pub subcolumn_mode: SubcolumnMode,
     /// Optional explicit CSV/TSV parsing configuration overriding format defaults.
     pub csv: Option<CsvOptions>,
+    /// Optional explicit `.xlsx` sheet-selection and parsing configuration.
+    pub xlsx: Option<XlsxImportOptions>,
 }
 
 impl Default for ImportOptions {
@@ -94,6 +97,7 @@ impl Default for ImportOptions {
             table_kind: TableKind::Column,
             subcolumn_mode: SubcolumnMode::Single,
             csv: None,
+            xlsx: None,
         }
     }
 }
@@ -211,6 +215,7 @@ impl FormatRegistry {
         reg.register_importer(Arc::new(CbtemplateAdapter));
         reg.register_importer(Arc::new(PrismAdapter));
         reg.register_importer(Arc::new(PzfxAdapter));
+        reg.register_importer(Arc::new(XlsxAdapter));
         reg.register_importer(Arc::new(CsvAdapter));
         reg.register_importer(Arc::new(TsvAdapter));
 
@@ -355,6 +360,8 @@ const DESC_PRISM: FormatDescriptor =
     FormatDescriptor { id: "prism", label: "External Project Archive (.prism)", extensions: &["prism"], kind: FormatKind::ForeignProject };
 const DESC_PZFX: FormatDescriptor =
     FormatDescriptor { id: "pzfx", label: "PZFX XML Document", extensions: &["pzfx"], kind: FormatKind::ForeignProject };
+const DESC_XLSX: FormatDescriptor =
+    FormatDescriptor { id: "xlsx", label: "Spreadsheet Workbook (.xlsx)", extensions: &["xlsx"], kind: FormatKind::ForeignProject };
 const DESC_CSV: FormatDescriptor =
     FormatDescriptor { id: "csv", label: "Comma-Separated Values", extensions: &["csv"], kind: FormatKind::DelimitedText };
 const DESC_TSV: FormatDescriptor =
@@ -505,6 +512,25 @@ impl Importer for PzfxAdapter {
     }
 }
 
+struct XlsxAdapter;
+impl Importer for XlsxAdapter {
+    fn descriptor(&self) -> FormatDescriptor {
+        DESC_XLSX
+    }
+
+    fn max_input_bytes(&self) -> usize {
+        MAX_ARCHIVE_FILE_BYTES
+    }
+
+    fn import_bytes(&self, bytes: &[u8], opts: &ImportOptions) -> Result<ImportPayload, FormatError> {
+        let report = match opts.xlsx.as_ref() {
+            Some(xopts) => import_xlsx_bytes_with_options(bytes, xopts)?,
+            None => import_xlsx_bytes(bytes)?,
+        };
+        Ok(ImportPayload::Report(report))
+    }
+}
+
 struct CsvAdapter;
 impl Importer for CsvAdapter {
     fn descriptor(&self) -> FormatDescriptor {
@@ -516,9 +542,9 @@ impl Importer for CsvAdapter {
     }
 
     fn import_bytes(&self, bytes: &[u8], opts: &ImportOptions) -> Result<ImportPayload, FormatError> {
-        let text = decode_utf8_input(bytes, DESC_CSV.id)?;
-        let csv_opts = opts.csv.clone().unwrap_or_else(|| CsvOptions::detect(text));
-        let sheet = import_csv_to_datasheet(opts.sheet_id.clone(), opts.title.clone(), text, opts.table_kind, opts.subcolumn_mode, &csv_opts)?;
+        let text = decode_delimited_text_bytes(bytes, DESC_CSV.id)?;
+        let csv_opts = opts.csv.clone().unwrap_or_else(|| CsvOptions::detect(&text));
+        let sheet = import_csv_to_datasheet(opts.sheet_id.clone(), opts.title.clone(), &text, opts.table_kind, opts.subcolumn_mode, &csv_opts)?;
         Ok(ImportPayload::DataSheet(sheet))
     }
 }
@@ -544,9 +570,9 @@ impl Importer for TsvAdapter {
     }
 
     fn import_bytes(&self, bytes: &[u8], opts: &ImportOptions) -> Result<ImportPayload, FormatError> {
-        let text = decode_utf8_input(bytes, DESC_TSV.id)?;
-        let csv_opts = opts.csv.clone().unwrap_or_else(CsvOptions::tsv);
-        let sheet = import_csv_to_datasheet(opts.sheet_id.clone(), opts.title.clone(), text, opts.table_kind, opts.subcolumn_mode, &csv_opts)?;
+        let text = decode_delimited_text_bytes(bytes, DESC_TSV.id)?;
+        let csv_opts = opts.csv.clone().unwrap_or_else(|| CsvOptions::detect_tsv(&text));
+        let sheet = import_csv_to_datasheet(opts.sheet_id.clone(), opts.title.clone(), &text, opts.table_kind, opts.subcolumn_mode, &csv_opts)?;
         Ok(ImportPayload::DataSheet(sheet))
     }
 }
@@ -623,13 +649,6 @@ fn expect_document_source<'a>(source: ExportSource<'a>, format_id: &str) -> Resu
             Err(FormatError::UnsupportedFormat { reason: format!("format `{format_id}` requires a ProjectDocument source") })
         }
     }
-}
-
-fn decode_utf8_input<'a>(bytes: &'a [u8], format_id: &str) -> Result<&'a str, FormatError> {
-    if bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06") {
-        return Err(FormatError::UnsupportedFormat { reason: format!("binary ZIP archive payload cannot be imported as `{format_id}`") });
-    }
-    std::str::from_utf8(bytes).map_err(|err| FormatError::CsvParse { line: 1, reason: format!("invalid UTF-8 in {format_id} input: {err}") })
 }
 
 fn serialize_json_text<T: serde::Serialize>(value: &T, pretty: bool) -> Result<String, FormatError> {

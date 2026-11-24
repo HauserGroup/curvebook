@@ -4,7 +4,8 @@
 
 use std::collections::BTreeMap;
 
-use curvebook_doc::{Cell, CellCoord, CellValue, CiBound, LinkBorderColor, PlacementMode, ResultCell, TableKind};
+use curvebook_doc::{Cell, CellCoord, CellValue, CiBound, LinkBorderColor, PlacementMode, ResultCell, TableKind, infer_number_separators};
+use curvebook_format::{CsvOptions, collapse_merged_header_rows, parse_delimited_records, write_delimited_records};
 use egui::{Align, Context, Key, Layout, Modifiers, Rect, RichText, Stroke, Ui, vec2};
 use serde_json::{Map, Value, json};
 
@@ -343,6 +344,7 @@ fn render_step_source(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w: f32) {
         for (kind, wid, label) in [
             (ImportOriginKind::Clipboard, "import_paste.source.clipboard", "Clipboard"),
             (ImportOriginKind::ExternalDelimitedFile, "import_paste.source.file", "CSV / TSV File"),
+            (ImportOriginKind::XlsxWorkbook, "import_paste.source.xlsx", "XLSX Workbook"),
             (ImportOriginKind::InternalDataSheet, "import_paste.source.internal_data", "Internal Data Sheet"),
             (ImportOriginKind::InternalResultSheet, "import_paste.source.internal_result", "Result Sheet"),
         ] {
@@ -371,7 +373,7 @@ fn render_step_source(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w: f32) {
     });
 
     ui.horizontal(|row| {
-        let can_link = wiz.origin_kind != ImportOriginKind::Clipboard;
+        let can_link = !matches!(wiz.origin_kind, ImportOriginKind::Clipboard | ImportOriginKind::XlsxWorkbook);
         let r = row.add_enabled(can_link, egui::Checkbox::new(&mut wiz.is_live_link, "Maintain Live Link (Provenance Badge)"));
         meta.record_modal_response(
             row,
@@ -414,6 +416,10 @@ fn render_step_source(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w: f32) {
                 dirty = true;
             }
         });
+    } else if wiz.origin_kind == ImportOriginKind::XlsxWorkbook {
+        if render_source_xlsx_controls(ui, wiz, tokens, meta, avail_w) {
+            dirty = true;
+        }
     } else if wiz.origin_kind == ImportOriginKind::InternalDataSheet {
         ui.horizontal_wrapped(|row| {
             row.label("Source Sheet:");
@@ -496,114 +502,277 @@ fn render_step_source(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w: f32) {
         }
     }
 
-    ui.add_space(4.0);
-    ui.horizontal(|row| {
-        row.label("Delimited Source Text / Preview Feed:");
-        render_paste_clipboard_button(row, meta, intents);
-    });
-    let tr_edit = ui.add(
-        egui::TextEdit::multiline(&mut state.raw_source_draft)
-            .hint_text("Paste CSV / TSV table rows…")
-            .desired_rows(5)
-            .desired_width((avail_w - 20.0).max(200.0)),
-    );
-    meta.record_modal_response(
-        ui,
-        &tr_edit,
-        FrameInspectEntryInput::modal("import_paste.input.csv", "textbox", "Delimited Source Data", Some(state.raw_source_draft.clone()), true),
-    );
-    if tr_edit.changed() {
-        wiz.raw_clipboard_text = state.raw_source_draft.clone();
-        dirty = true;
-    }
-
-    ui.add_space(6.0);
-    ui.horizontal_wrapped(|row| {
-        row.label("Delimiter:");
-        for (delim, slug, lbl) in [('\t', "tab", "Tab"), (',', "comma", "Comma"), (';', "semi", "Semicolon"), (' ', "space", "Space")] {
-            let dr = choice_pill(row, tokens, lbl, wiz.delimiter == delim, true);
-            meta.record_modal_response(
-                row,
-                &dr,
-                FrameInspectEntryInput::modal(&format!("import_paste.delim.{slug}"), "radio", lbl, Some((wiz.delimiter == delim).to_string()), true),
-            );
-            if dr.clicked() {
-                wiz.delimiter = delim;
-                dirty = true;
-            }
+    if wiz.origin_kind != ImportOriginKind::XlsxWorkbook {
+        ui.add_space(4.0);
+        ui.horizontal(|row| {
+            row.label("Delimited Source Text / Preview Feed:");
+            render_paste_clipboard_button(row, meta, intents);
+        });
+        let tr_edit = ui.add(
+            egui::TextEdit::multiline(&mut state.raw_source_draft)
+                .hint_text("Paste CSV / TSV table rows…")
+                .desired_rows(5)
+                .desired_width((avail_w - 20.0).max(200.0)),
+        );
+        meta.record_modal_response(
+            ui,
+            &tr_edit,
+            FrameInspectEntryInput::modal("import_paste.input.csv", "textbox", "Delimited Source Data", Some(state.raw_source_draft.clone()), true),
+        );
+        if tr_edit.changed() {
+            wiz.raw_clipboard_text = state.raw_source_draft.clone();
+            dirty = true;
         }
 
-        row.separator();
-        row.label("Decimal:");
-        for (dec, slug, lbl) in [('.', "dot", "Period (.)"), (',', "comma", "Comma (,)")] {
-            let r = choice_pill(row, tokens, lbl, wiz.decimal_separator == dec, true);
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|row| {
+            row.label("Delimiter:");
+            for (delim, slug, lbl) in [('\t', "tab", "Tab"), (',', "comma", "Comma"), (';', "semi", "Semicolon"), (' ', "space", "Space")] {
+                let dr = choice_pill(row, tokens, lbl, wiz.delimiter == delim, true);
+                meta.record_modal_response(
+                    row,
+                    &dr,
+                    FrameInspectEntryInput::modal(
+                        &format!("import_paste.delim.{slug}"),
+                        "radio",
+                        lbl,
+                        Some((wiz.delimiter == delim).to_string()),
+                        true,
+                    ),
+                );
+                if dr.clicked() {
+                    wiz.delimiter = delim;
+                    dirty = true;
+                }
+            }
+
+            row.separator();
+            row.label("Decimal:");
+            for (dec, slug, lbl) in [('.', "dot", "Period (.)"), (',', "comma", "Comma (,)")] {
+                let r = choice_pill(row, tokens, lbl, wiz.decimal_separator == dec, true);
+                meta.record_modal_response(
+                    row,
+                    &r,
+                    FrameInspectEntryInput::modal(
+                        &format!("import_paste.decimal.{slug}"),
+                        "radio",
+                        lbl,
+                        Some((wiz.decimal_separator == dec).to_string()),
+                        true,
+                    ),
+                );
+                if r.clicked() {
+                    wiz.decimal_separator = dec;
+                    dirty = true;
+                }
+            }
+        });
+
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|row| {
+            let mut hdr = wiz.placement.propagate_title_header;
+            let hr = row.checkbox(&mut hdr, "First row contains column titles");
             meta.record_modal_response(
                 row,
-                &r,
+                &hr,
+                FrameInspectEntryInput::modal("import_paste.opt.propagate_headers", "checkbox", "Header Row", Some(hdr.to_string()), true),
+            );
+            if hr.changed() {
+                wiz.placement.propagate_title_header = hdr;
+                dirty = true;
+            }
+            if render_header_rows_selector(row, wiz, tokens, meta) {
+                dirty = true;
+            }
+            row.label("Encoding:");
+            for (enc, slug) in [("UTF-8", "utf8"), ("UTF-16", "utf16"), ("Latin-1", "latin1")] {
+                let active = state.encoding_name == enc;
+                let er = choice_pill(row, tokens, enc, active, true);
+                meta.record_modal_response(
+                    row,
+                    &er,
+                    FrameInspectEntryInput::modal(&format!("import_paste.encoding.{slug}"), "radio", enc, Some(active.to_string()), true),
+                );
+                if er.clicked() {
+                    state.encoding_name = enc.to_owned();
+                    state.preset_saved_feedback = false;
+                }
+            }
+            row.label("Missing sentinels:");
+            let mr = row.add(egui::TextEdit::singleline(&mut state.missing_tokens_draft).hint_text("NA, NaN, .").desired_width(110.0));
+            meta.record_modal_response(
+                row,
+                &mr,
                 FrameInspectEntryInput::modal(
-                    &format!("import_paste.decimal.{slug}"),
-                    "radio",
-                    lbl,
-                    Some((wiz.decimal_separator == dec).to_string()),
+                    "import_paste.input.missing_tokens",
+                    "textbox",
+                    "Missing Sentinels",
+                    Some(state.missing_tokens_draft.clone()),
                     true,
                 ),
             );
-            if r.clicked() {
-                wiz.decimal_separator = dec;
-                dirty = true;
-            }
-        }
-    });
-
-    ui.add_space(4.0);
-    ui.horizontal_wrapped(|row| {
-        let mut hdr = wiz.placement.propagate_title_header;
-        let hr = row.checkbox(&mut hdr, "First row contains column titles");
-        meta.record_modal_response(
-            row,
-            &hr,
-            FrameInspectEntryInput::modal("import_paste.opt.propagate_headers", "checkbox", "Header Row", Some(hdr.to_string()), true),
-        );
-        if hr.changed() {
-            wiz.placement.propagate_title_header = hdr;
-            dirty = true;
-        }
-        row.label("Encoding:");
-        for (enc, slug) in [("UTF-8", "utf8"), ("UTF-16", "utf16"), ("Latin-1", "latin1")] {
-            let active = state.encoding_name == enc;
-            let er = choice_pill(row, tokens, enc, active, true);
-            meta.record_modal_response(
-                row,
-                &er,
-                FrameInspectEntryInput::modal(&format!("import_paste.encoding.{slug}"), "radio", enc, Some(active.to_string()), true),
-            );
-            if er.clicked() {
-                state.encoding_name = enc.to_owned();
+            if mr.changed() {
                 state.preset_saved_feedback = false;
             }
-        }
-        row.label("Missing sentinels:");
-        let mr = row.add(egui::TextEdit::singleline(&mut state.missing_tokens_draft).hint_text("NA, NaN, .").desired_width(110.0));
-        meta.record_modal_response(
-            row,
-            &mr,
-            FrameInspectEntryInput::modal(
-                "import_paste.input.missing_tokens",
-                "textbox",
-                "Missing Sentinels",
-                Some(state.missing_tokens_draft.clone()),
-                true,
-            ),
-        );
-        if mr.changed() {
-            state.preset_saved_feedback = false;
-        }
-    });
+        });
+    }
 
     if dirty {
         state.preset_saved_feedback = false;
         cx.wiz_dirty = true;
     }
+}
+
+fn render_header_rows_selector(row: &mut Ui, wiz: &mut ImportPasteWizardState, tokens: &Tokens, meta: &mut FrameInspectMeta) -> bool {
+    let mut dirty = false;
+    row.label("Header rows:");
+    for n in [0_usize, 1, 2, 3] {
+        let active = wiz.header_rows == n;
+        let lbl = n.to_string();
+        let hrn = choice_pill(row, tokens, &lbl, active, true);
+        meta.record_modal_response(
+            row,
+            &hrn,
+            FrameInspectEntryInput::modal(
+                &format!("import_paste.header_rows.{n}"),
+                "radio",
+                &format!("{n} header row(s)"),
+                Some(active.to_string()),
+                true,
+            ),
+        );
+        if hrn.clicked() {
+            wiz.header_rows = n;
+            wiz.placement.propagate_title_header = n > 0;
+            dirty = true;
+        }
+    }
+    dirty
+}
+
+fn render_source_xlsx_controls(ui: &mut Ui, wiz: &mut ImportPasteWizardState, tokens: &Tokens, meta: &mut FrameInspectMeta, avail_w: f32) -> bool {
+    let mut dirty = false;
+    ui.horizontal_wrapped(|row| {
+        row.label("Workbook Path:");
+        let pr = row.add(
+            egui::TextEdit::singleline(&mut wiz.external_file_path).hint_text("/path/to/workbook.xlsx").desired_width((avail_w - 200.0).max(160.0)),
+        );
+        meta.record_modal_response(
+            row,
+            &pr,
+            FrameInspectEntryInput::modal("import_paste.input.path", "textbox", "XLSX Workbook Path", Some(wiz.external_file_path.clone()), true),
+        );
+        if pr.changed() {
+            wiz.xlsx_error = None;
+            dirty = true;
+        }
+        let load_btn = row.button("Load Sheets");
+        meta.record_modal_response(
+            row,
+            &load_btn,
+            FrameInspectEntryInput::modal("import_wizard.xlsx.load_path", "button", "Load Sheets", None, !wiz.external_file_path.trim().is_empty()),
+        );
+        if load_btn.clicked() {
+            let _ = wiz.load_xlsx_from_path_str();
+            dirty = true;
+        }
+    });
+
+    if let Some(err) = &wiz.xlsx_error {
+        ui.label(RichText::new(err).color(tokens.error).small());
+    }
+
+    ui.horizontal_wrapped(|row| {
+        if render_header_rows_selector(row, wiz, tokens, meta) {
+            dirty = true;
+        }
+        row.separator();
+        let r_titles = row.checkbox(&mut wiz.xlsx_has_row_titles, "First col is row titles");
+        meta.record_modal_response(
+            row,
+            &r_titles,
+            FrameInspectEntryInput::modal(
+                "import_wizard.xlsx.row_titles",
+                "checkbox",
+                "XLSX First Column Row Titles",
+                Some(wiz.xlsx_has_row_titles.to_string()),
+                true,
+            ),
+        );
+        if r_titles.changed() {
+            dirty = true;
+        }
+        let r_merge = row.checkbox(&mut wiz.xlsx_merge, "Merge into current project");
+        meta.record_modal_response(
+            row,
+            &r_merge,
+            FrameInspectEntryInput::modal("import_wizard.xlsx.merge", "checkbox", "Merge XLSX Worksheets", Some(wiz.xlsx_merge.to_string()), true),
+        );
+        if r_merge.changed() {
+            dirty = true;
+        }
+    });
+
+    ui.horizontal_wrapped(|row| {
+        let count = wiz.xlsx_sheets.len();
+        let selected_count = wiz.xlsx_sheets.iter().filter(|s| s.selected).count();
+        row.label(RichText::new(format!("Worksheets ({selected_count}/{count} selected):")).strong());
+        let all_btn = row.button("Select All");
+        meta.record_modal_response(
+            row,
+            &all_btn,
+            FrameInspectEntryInput::modal("import_wizard.xlsx.select_all", "button", "Select All Worksheets", None, count > 0),
+        );
+        if all_btn.clicked() {
+            for s in &mut wiz.xlsx_sheets {
+                s.selected = true;
+            }
+            dirty = true;
+        }
+        let none_btn = row.button("Select None");
+        meta.record_modal_response(
+            row,
+            &none_btn,
+            FrameInspectEntryInput::modal("import_wizard.xlsx.select_none", "button", "Deselect All Worksheets", None, count > 0),
+        );
+        if none_btn.clicked() {
+            for s in &mut wiz.xlsx_sheets {
+                s.selected = false;
+            }
+            dirty = true;
+        }
+    });
+
+    if wiz.xlsx_sheets.is_empty() {
+        ui.label(
+            RichText::new("Load an `.xlsx` file above (or omit sheet selection to import all visible worksheets by path).")
+                .color(tokens.text_muted)
+                .small(),
+        );
+    } else {
+        egui::ScrollArea::vertical().id_salt("import_wizard_xlsx_sheets").max_height(130.0).show(ui, |list| {
+            for (pos, sheet) in wiz.xlsx_sheets.iter_mut().enumerate() {
+                let label =
+                    if sheet.rows > 0 || sheet.cols > 0 { format!("{} ({} × {})", sheet.name, sheet.rows, sheet.cols) } else { sheet.name.clone() };
+                let cb = list.checkbox(&mut sheet.selected, &label);
+                meta.record_modal_response(
+                    list,
+                    &cb,
+                    FrameInspectEntryInput::modal(
+                        &format!("import_wizard.xlsx_sheet.{pos}"),
+                        "checkbox",
+                        &label,
+                        Some(sheet.selected.to_string()),
+                        true,
+                    ),
+                );
+                if cb.changed() {
+                    dirty = true;
+                }
+            }
+        });
+    }
+    dirty
 }
 
 fn render_step_preview(
@@ -1462,6 +1631,13 @@ fn sync_wizard_filter_from_drafts(wiz: &mut ImportPasteWizardState, state: &Impo
 
 fn commit_wizard_import(cx: &mut ImportModalCtx<'_>) {
     sync_wizard_filter_from_drafts(&mut cx.wiz, cx.state);
+    if cx.wiz.origin_kind == ImportOriginKind::XlsxWorkbook {
+        let commit_wiz = cx.wiz.clone();
+        cx.intents.push(UiIntent::UpdateImportWizard(Box::new(commit_wiz)));
+        cx.intents.push(UiIntent::CommitImportWizard { close_after: true });
+        cx.wiz_dirty = false;
+        return;
+    }
     let doc = cx.app.document();
     let prepared = prepare_wizard_import_data(cx.app, &cx.wiz, cx.state, false);
     let row_count = prepared.grid.len();
@@ -1622,62 +1798,111 @@ fn try_parse_kv_line(raw_line: &str, delimiter: char, allow_unprefixed: bool) ->
     Some((key.to_owned(), val.to_owned()))
 }
 
-fn extract_kv_metadata_and_strip<'a>(
-    text: &'a str,
+fn split_leading_kv_metadata(
+    text: &str,
     delimiter: char,
     extract_enabled: bool,
     preset: &crate::i18n::LocalePreset,
-) -> (Vec<&'a str>, Vec<(String, Value)>) {
-    let mut data_lines = Vec::new();
+) -> (String, Vec<(String, Value)>) {
+    if !extract_enabled {
+        return (text.to_owned(), Vec::new());
+    }
+    let mut remaining_lines = Vec::new();
     let mut kv_pairs = Vec::new();
     let mut in_leading_block = true;
-    for line in text.lines() {
-        if line.trim().is_empty() {
-            continue;
+    for line in text.split('\n') {
+        if in_leading_block {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Some((k, v)) = try_parse_kv_line(line, delimiter, true) {
+                kv_pairs.push((k, parse_kv_constant_value(&v, preset)));
+                continue;
+            }
+            in_leading_block = false;
         }
-        if extract_enabled && let Some((k, v)) = try_parse_kv_line(line, delimiter, in_leading_block) {
-            kv_pairs.push((k, parse_kv_constant_value(&v, preset)));
-            continue;
-        }
-        in_leading_block = false;
-        data_lines.push(line);
+        remaining_lines.push(line);
     }
-    (data_lines, kv_pairs)
+    (remaining_lines.join("\n"), kv_pairs)
 }
 
 fn prepare_wizard_import_data(app: &UiApp, wiz: &ImportPasteWizardState, state: &ImportWizardEguiState, preview_cap: bool) -> PreparedWizardImport {
     let missing_tokens: Vec<&str> = state.missing_tokens_draft.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
     let mut extracted_kv = Vec::new();
+    if wiz.origin_kind == ImportOriginKind::XlsxWorkbook {
+        let mut grid = wiz.preview_grid(Some(app.document()));
+        if !missing_tokens.is_empty() {
+            for row in &mut grid {
+                for cell in row.iter_mut() {
+                    if let CellValue::Text(ref s) = cell.value
+                        && missing_tokens.iter().any(|m| m.eq_ignore_ascii_case(s.trim()))
+                    {
+                        *cell = Cell::empty();
+                    }
+                }
+            }
+        }
+        return PreparedWizardImport { grid, extracted_kv };
+    }
     let mut grid = match wiz.origin_kind {
         ImportOriginKind::Clipboard | ImportOriginKind::ExternalDelimitedFile => {
             let src_raw = if !state.raw_source_draft.is_empty() { state.raw_source_draft.as_str() } else { wiz.raw_clipboard_text.as_str() };
             let normalized = normalize_source_text(src_raw, &state.encoding_name);
-            let (data_lines, kvs) = extract_kv_metadata_and_strip(&normalized, wiz.delimiter, state.extract_info_metadata, &app.locale_preset);
+            let delim = if wiz.delimiter == '\0' { '\t' } else { wiz.delimiter };
+            let (table_src, kvs) = split_leading_kv_metadata(&normalized, delim, state.extract_info_metadata, &app.locale_preset);
             extracted_kv = kvs;
-            data_lines
-                .into_iter()
-                .map(|line| parse_delimited_line(line, wiz.delimiter, wiz.decimal_separator, wiz.filter.parse_asterisk_exclusions, &missing_tokens))
-                .collect::<Vec<Vec<Cell>>>()
+            parse_delimited_wizard_grid(&table_src, delim, wiz, &missing_tokens)
         }
         ImportOriginKind::InternalDataSheet => read_internal_data_sheet_grid(app, wiz, &missing_tokens, preview_cap),
         ImportOriginKind::InternalResultSheet => read_internal_result_sheet_grid(app, wiz),
+        ImportOriginKind::XlsxWorkbook => Vec::new(),
     };
 
     apply_wizard_grid_transforms(&mut grid, app, wiz, state);
     PreparedWizardImport { grid, extracted_kv }
 }
 
-fn parse_delimited_line(line: &str, delimiter: char, decimal_sep: char, parse_asterisk: bool, missing_tokens: &[&str]) -> Vec<Cell> {
-    line.split(delimiter)
-        .map(|tok| {
-            let trimmed = tok.trim();
-            if missing_tokens.iter().any(|m| m.eq_ignore_ascii_case(trimmed)) {
-                Cell::empty()
-            } else {
-                Cell::parse_import_token(trimmed, decimal_sep, parse_asterisk)
-            }
-        })
-        .collect()
+fn parse_delimited_wizard_grid(table_src: &str, delim: char, wiz: &ImportPasteWizardState, missing_tokens: &[&str]) -> Vec<Vec<Cell>> {
+    let opts = CsvOptions {
+        delimiter: delim,
+        quote_char: '"',
+        decimal_separator: wiz.decimal_separator,
+        thousands_separator: None,
+        header_rows: wiz.header_rows,
+        has_row_titles: false,
+        parse_asterisk_exclusions: wiz.filter.parse_asterisk_exclusions,
+        missing_sentinels: Vec::new(),
+    };
+    let mut records = parse_delimited_records(table_src, &opts).unwrap_or_else(|_| {
+        table_src.split('\n').filter(|line| !line.trim().is_empty()).map(|line| line.split(delim).map(str::to_owned).collect()).collect()
+    });
+    records.retain(|row| row.iter().any(|cell| !cell.trim().is_empty()));
+    let hdr_n = if wiz.header_rows > 1 && records.len() >= wiz.header_rows { wiz.header_rows } else { 0 };
+    let collapsed_hdr = records.get(..hdr_n).filter(|_| hdr_n > 1).map(collapse_merged_header_rows);
+    let body_rows = records.get(hdr_n..).unwrap_or(&[]);
+
+    let (_, detected_thousands) = infer_number_separators(body_rows.iter().flatten().map(String::as_str), delim);
+    let thousands_sep = detected_thousands.filter(|&t| t != wiz.decimal_separator);
+
+    let mut out = Vec::with_capacity(body_rows.len() + usize::from(collapsed_hdr.is_some()));
+    if let Some(hdr) = collapsed_hdr {
+        out.push(hdr.into_iter().map(Cell::text).collect());
+    }
+    for row in body_rows {
+        out.push(
+            row.iter()
+                .map(|tok| {
+                    let trimmed = tok.trim();
+                    if missing_tokens.iter().any(|m| m.eq_ignore_ascii_case(trimmed)) {
+                        Cell::empty()
+                    } else {
+                        Cell::parse_import_token_with_thousands(trimmed, wiz.decimal_separator, thousands_sep, wiz.filter.parse_asterisk_exclusions)
+                    }
+                })
+                .collect(),
+        );
+    }
+    out
 }
 
 fn read_internal_data_sheet_grid(app: &UiApp, wiz: &ImportPasteWizardState, missing_tokens: &[&str], preview_cap: bool) -> Vec<Vec<Cell>> {
@@ -1846,11 +2071,20 @@ fn format_cell_for_import_text(cell: &Cell, decimal_sep: char, preserve_asterisk
 }
 
 fn serialize_grid_for_import(grid: &[Vec<Cell>], delimiter: char, decimal_sep: char, preserve_asterisk: bool) -> String {
-    let delim = if delimiter == '\0' { String::from("\t") } else { delimiter.to_string() };
-    grid.iter()
-        .map(|row| row.iter().map(|c| format_cell_for_import_text(c, decimal_sep, preserve_asterisk)).collect::<Vec<_>>().join(&delim))
-        .collect::<Vec<_>>()
-        .join("\n")
+    let delim = if delimiter == '\0' { '\t' } else { delimiter };
+    let opts = CsvOptions {
+        delimiter: delim,
+        quote_char: '"',
+        decimal_separator: decimal_sep,
+        thousands_separator: None,
+        header_rows: 0,
+        has_row_titles: false,
+        parse_asterisk_exclusions: preserve_asterisk,
+        missing_sentinels: Vec::new(),
+    };
+    let rows: Vec<Vec<String>> =
+        grid.iter().map(|row| row.iter().map(|c| format_cell_for_import_text(c, decimal_sep, preserve_asterisk)).collect()).collect();
+    write_delimited_records(&rows, &opts)
 }
 
 fn unstack_preview(grid: &[Vec<Cell>], group_col: usize, preset: &crate::i18n::LocalePreset) -> Vec<Vec<Cell>> {

@@ -36,17 +36,18 @@ use crate::{CommandOutcome, EngineError, ErrorCode, Session, dag};
 mod import;
 
 use import::{
-    run_import_csv, run_import_plate_map, run_import_prism, run_import_pzfx, run_import_tidy_long, run_paste_link, schema_import_csv,
-    schema_import_plate_map, schema_import_prism, schema_import_pzfx, schema_import_tidy_long, schema_paste_link,
+    run_import_csv, run_import_plate_map, run_import_prism, run_import_pzfx, run_import_tidy_long, run_import_xlsx, run_paste_link,
+    schema_import_csv, schema_import_plate_map, schema_import_prism, schema_import_pzfx, schema_import_tidy_long, schema_import_xlsx,
+    schema_paste_link,
 };
 
-/// Registered command specifications for the `table` group (28 commands).
+/// Registered command specifications for the `table` group (29 commands).
 #[must_use]
 pub fn specs() -> &'static [CommandSpec] {
     &SPECS
 }
 
-const SPECS: [CommandSpec; 28] = [
+const SPECS: [CommandSpec; 29] = [
     CommandSpec {
         id: "table.setCell",
         label: "Set Cell Value",
@@ -267,6 +268,19 @@ const SPECS: [CommandSpec; 28] = [
         input_schema: schema_import_pzfx,
         enabled: always_enabled,
         run: run_import_pzfx,
+    },
+    CommandSpec {
+        id: "table.importXlsx",
+        label: "Import XLSX Workbook",
+        menu_path: "File/Import/XLSX Workbook...",
+        shortcut: "",
+        summary: "Import one or more worksheets (or list available sheets) from an .xlsx workbook file, base64, or byte array.",
+        beginner: "Open or merge worksheets from a spreadsheet workbook (.xlsx) into the project.",
+        group: CommandGroup::Table,
+        effects: Effects::MUTATES_DOCUMENT.with(Effects::READS_FILESYSTEM).with(Effects::MAY_DISCARD_DATA),
+        input_schema: schema_import_xlsx,
+        enabled: always_enabled,
+        run: run_import_xlsx,
     },
     CommandSpec {
         id: "table.setVariableRole",
@@ -583,13 +597,7 @@ fn resolve_delimiter(delimiter: Option<&str>, sample_text: &str) -> Result<char,
     {
         return parse_delimiter_char(raw);
     }
-    if sample_text.contains('\t') {
-        return Ok('\t');
-    }
-    if sample_text.contains(';') {
-        return Ok(';');
-    }
-    Ok(',')
+    Ok(CsvOptions::detect(sample_text).delimiter)
 }
 
 fn resolve_decimal_char(decimal_opt: Option<&str>, normalize_decimal: bool, sample_text: &str, delimiter: char) -> Result<char, EngineError> {
@@ -611,40 +619,18 @@ fn resolve_decimal_char(decimal_opt: Option<&str>, normalize_decimal: bool, samp
 }
 
 fn infer_decimal_char(sample_text: &str, delimiter: char) -> char {
+    if delimiter == '\t' {
+        return CsvOptions::detect_tsv(sample_text).decimal_separator;
+    }
     if delimiter == ',' {
         return '.';
     }
-    let mut comma_nums = 0usize;
-    let mut dot_nums = 0usize;
-    for line in sample_text.lines().take(32) {
-        for tok in line.split(delimiter) {
-            let t = tok.trim().trim_matches('"').trim_matches('*').trim_start_matches(['+', '-']);
-            if t.is_empty() {
-                continue;
-            }
-            if t.contains(',') && !t.contains('.') && !looks_like_us_thousands(t) && t.replace(',', ".").parse::<f64>().is_ok() {
-                comma_nums = comma_nums.saturating_add(1);
-            } else if t.contains('.') && t.parse::<f64>().is_ok() {
-                dot_nums = dot_nums.saturating_add(1);
-            }
-        }
+    let detected = CsvOptions::detect(sample_text);
+    if detected.delimiter == delimiter {
+        return detected.decimal_separator;
     }
-    if delimiter == ';' && dot_nums == 0 {
-        return ',';
-    }
-    if comma_nums > dot_nums { ',' } else { '.' }
-}
-
-fn looks_like_us_thousands(token: &str) -> bool {
-    let mut parts = token.split(',');
-    let Some(first) = parts.next() else {
-        return false;
-    };
-    let rest: Vec<&str> = parts.collect();
-    !rest.is_empty()
-        && (1..=3).contains(&first.len())
-        && first.bytes().all(|b| b.is_ascii_digit())
-        && rest.iter().all(|g| g.len() == 3 && g.bytes().all(|b| b.is_ascii_digit()))
+    let tokens: Vec<&str> = sample_text.lines().take(32).flat_map(|line| line.split(delimiter)).collect();
+    curvebook_doc::infer_number_separators(tokens, delimiter).0
 }
 
 fn parse_placement_mode(raw: &str) -> Result<PlacementMode, EngineError> {
@@ -5335,11 +5321,11 @@ mod tests {
     }
 
     #[test]
-    fn specs_cover_all_28_table_commands_uniquely_and_register() {
+    fn specs_cover_all_29_table_commands_uniquely_and_register() {
         let listed = specs();
-        assert_eq!(listed.len(), 28);
+        assert_eq!(listed.len(), 29);
         let ids: BTreeSet<&'static str> = listed.iter().map(|s| s.id).collect();
-        assert_eq!(ids.len(), 28);
+        assert_eq!(ids.len(), 29);
         for spec in listed {
             assert_eq!(spec.group, CommandGroup::Table);
             assert!(!spec.label.is_empty());

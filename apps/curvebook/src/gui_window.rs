@@ -116,6 +116,7 @@ fn should_bypass_native_file_picker(command_id: &str, params: &serde_json::Value
             has_non_null_field(params, "path") || has_non_null_field(params, "bytes_base64") || has_non_null_field(params, "asset_id")
         }
         "table.importCsv" => has_non_null_field(params, "path") || has_non_null_field(params, "csv"),
+        "table.importXlsx" => has_non_null_field(params, "path") || has_non_null_field(params, "bytes_base64") || has_non_null_field(params, "bytes"),
         "table.importPrism" | "table.importPzfx" => {
             has_non_null_field(params, "path") || has_non_null_field(params, "bytes_base64") || has_non_null_field(params, "xml")
         }
@@ -290,6 +291,12 @@ impl CurveBookNativeApp {
     #[must_use]
     pub const fn close_dialog_open(&self) -> bool {
         self.close_dialog_open
+    }
+
+    /// Whether OS files are currently hovered over the desktop window drop target.
+    #[must_use]
+    pub const fn is_drop_hover_active(&self) -> bool {
+        self.hovered_paths_active
     }
 
     /// Current top-bar error or warning banner text, if any.
@@ -848,6 +855,8 @@ impl CurveBookNativeApp {
         let canvas_rect = report.regions.canvas_rect_pt.unwrap_or(available_rect);
         self.sync_canvas_viewport(input_window_id, canvas_rect, ppp);
         self.process_canvas_input(ui, input_window_id);
+        self.render_dnd_hover_overlay(ui);
+        self.render_status_banner_toast(&ctx);
 
         let post_window_id = self.active_window_id();
         self.sync_window_title(&ctx, post_window_id);
@@ -1180,7 +1189,7 @@ impl CurveBookNativeApp {
 
     fn dispatch_file_dnd(&mut self, window_id: DesktopWindowId, hovered: &[egui::HoveredFile], dropped: &[egui::DroppedFileHandle]) {
         let hovered_paths: Vec<PathBuf> = hovered.iter().filter_map(|f| f.path.clone()).collect();
-        if !hovered_paths.is_empty() {
+        if !hovered.is_empty() {
             self.hovered_paths_active = true;
             let _ = self.runtime.dispatch(DesktopHostEvent::FileHovered { window_id, paths: hovered_paths });
         } else if self.hovered_paths_active {
@@ -1188,6 +1197,9 @@ impl CurveBookNativeApp {
             let _ = self.runtime.dispatch(DesktopHostEvent::FileHoverCancelled { window_id });
         }
 
+        if !dropped.is_empty() {
+            self.status_banner = None;
+        }
         for file in dropped {
             self.hovered_paths_active = false;
             match self.runtime.dispatch(DesktopHostEvent::FileDropped { window_id, path: file.path().to_path_buf() }) {
@@ -1200,6 +1212,71 @@ impl CurveBookNativeApp {
                     self.status_banner = Some(err);
                 }
             }
+        }
+    }
+
+    fn render_dnd_hover_overlay(&self, ui: &egui::Ui) {
+        if !self.hovered_paths_active {
+            return;
+        }
+        let ctx = ui.ctx();
+        let rect = ctx.content_rect();
+        let hovered_names: Vec<String> = self
+            .runtime
+            .window(self.active_window_id())
+            .map(|w| w.hovered_files().iter().filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_owned)).collect())
+            .unwrap_or_default();
+        let detail = if hovered_names.is_empty() {
+            String::from("Drop file to open or import (.curvebook, .cbtemplate, .prism, .pzfx, .xlsx, .csv, .tsv)")
+        } else {
+            format!("Drop to open or import: {}", hovered_names.join(", "))
+        };
+        egui::Area::new(egui::Id::unique("desktop.dnd_hover_overlay")).order(egui::Order::Foreground).interactable(false).fixed_pos(rect.min).show(
+            ctx,
+            |area_ui| {
+                area_ui.set_min_size(rect.size());
+                let painter = area_ui.painter();
+                painter.rect_filled(rect, 0.0, egui::Color32::from_rgba_unmultiplied(15, 23, 42, 110));
+                let card_rect = rect.shrink2(egui::vec2((rect.width() * 0.15).min(80.0), (rect.height() * 0.25).min(100.0)));
+                painter.rect_filled(card_rect, 12.0, egui::Color32::from_rgba_unmultiplied(248, 250, 252, 240));
+                painter.rect_stroke(card_rect, 12.0, egui::Stroke::new(2.0, egui::Color32::from_rgb(37, 99, 235)), egui::StrokeKind::Inside);
+                painter.text(
+                    card_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    detail,
+                    egui::FontId::proportional(15.0),
+                    egui::Color32::from_rgb(15, 23, 42),
+                );
+            },
+        );
+    }
+
+    fn render_status_banner_toast(&mut self, ctx: &egui::Context) {
+        let Some(msg) = self.status_banner.clone() else {
+            return;
+        };
+        let rect = ctx.content_rect();
+        let mut dismiss = false;
+        egui::Area::new(egui::Id::unique("desktop.status_banner"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -14.0))
+            .show(ctx, |ui| {
+                egui::Frame::window(ui.style())
+                    .fill(egui::Color32::from_rgb(127, 29, 29))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(248, 113, 113)))
+                    .inner_margin(egui::Margin::symmetric(12, 8))
+                    .show(ui, |row| {
+                        row.set_max_width((rect.width() - 48.0).max(220.0));
+                        row.horizontal(|h| {
+                            h.label(egui::RichText::new(&msg).color(egui::Color32::WHITE).small());
+                            if h.small_button("×").clicked() {
+                                dismiss = true;
+                            }
+                        });
+                    });
+            });
+        if dismiss {
+            self.status_banner = None;
         }
     }
 

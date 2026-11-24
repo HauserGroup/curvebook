@@ -338,6 +338,7 @@ fn sec19_02_in_window_menus_and_intents_route_to_native_dialogs_respecting_inlin
     adapter.push_response("project.instantiateTemplate", Some(out_tpl.clone()));
     adapter.push_response("table.importPrism", None);
     adapter.push_response("table.importPzfx", None);
+    adapter.push_response("table.importXlsx", None);
 
     rt.set_file_dialog_adapter(Arc::clone(&adapter) as Arc<dyn NativeFileDialogAdapter>);
     let mut native = CurveBookNativeApp::new(rt, w1, None);
@@ -374,6 +375,7 @@ fn sec19_02_in_window_menus_and_intents_route_to_native_dialogs_respecting_inlin
         ("project.instantiateTemplate", json!({})),
         ("table.importPrism", json!({})),
         ("table.importPzfx", json!({})),
+        ("table.importXlsx", json!({})),
     ] {
         let fid = native.runtime().focused_window_id().ok_or("missing focused window")?;
         let res = native.runtime_mut().dispatch_native_file_command_with_params(fid, cmd_id, &params)?;
@@ -384,9 +386,10 @@ fn sec19_02_in_window_menus_and_intents_route_to_native_dialogs_respecting_inlin
         assert!(expected_file.exists(), "expected `{}` written on disk", expected_file.display());
     }
     let reqs = adapter.requests();
-    assert_eq!(reqs.len(), 14);
+    assert_eq!(reqs.len(), 15);
     assert!(reqs.iter().any(|r| r.command_id == "table.importPrism" && r.kind == NativeFileDialogKind::OpenFile));
     assert!(reqs.iter().any(|r| r.command_id == "table.importPzfx" && r.kind == NativeFileDialogKind::OpenFile));
+    assert!(reqs.iter().any(|r| r.command_id == "table.importXlsx" && r.kind == NativeFileDialogKind::OpenFile));
 
     // 3. Inline Welcome Hub `project.instantiateTemplate` carrying `bytes_base64` bypasses picker cleanly.
     let tpl_doc = build_rich_test_project()?;

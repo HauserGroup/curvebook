@@ -117,6 +117,17 @@ impl Cell {
     /// decimal separators (`.` vs `,`) (`docs/implementation/data-tables-and-transforms.md` §6.1).
     #[must_use]
     pub fn parse_import_token(raw: &str, decimal_separator: char, parse_asterisk_exclusion: bool) -> Self {
+        Self::parse_import_token_with_thousands(raw, decimal_separator, None, parse_asterisk_exclusion)
+    }
+
+    /// Parse an imported token with explicit decimal and optional thousands-grouping separators.
+    #[must_use]
+    pub fn parse_import_token_with_thousands(
+        raw: &str,
+        decimal_separator: char,
+        thousands_separator: Option<char>,
+        parse_asterisk_exclusion: bool,
+    ) -> Self {
         let trimmed = raw.trim();
         if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("na") || trimmed.eq_ignore_ascii_case("nan") {
             return Self::empty();
@@ -138,15 +149,286 @@ impl Cell {
             return Self::text(trimmed);
         }
 
-        let normalized = if decimal_separator == ',' { core.replace(',', ".") } else { core.to_owned() };
-        if let Ok(num) = normalized.parse::<f64>()
-            && num.is_finite()
-        {
+        if let Some(num) = parse_import_number(core, decimal_separator, thousands_separator) {
             return Self { value: CellValue::Number(num), excluded: starred };
         }
 
         Self { value: CellValue::Text(if starred { core.to_owned() } else { trimmed.to_owned() }), excluded: starred }
     }
+}
+
+/// Parse a numeric token respecting explicit decimal separator (`.` or `,`), optional thousands
+/// grouping separator, Unicode minus (`\u{2212}`), and scientific notation (`e`/`E`).
+#[must_use]
+pub fn parse_import_number(raw: &str, decimal_separator: char, thousands_separator: Option<char>) -> Option<f64> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let (neg, body) = split_numeric_sign(trimmed)?;
+    if body.is_empty() {
+        return None;
+    }
+
+    let (mantissa, exp_suffix) = split_exponent(body)?;
+    let thousands = thousands_separator.filter(|&sep| sep != decimal_separator);
+    let clean_mantissa = normalize_numeric_mantissa(mantissa, decimal_separator, thousands)?;
+    let mut assembled = String::with_capacity(clean_mantissa.len() + exp_suffix.as_ref().map_or(0, String::len) + usize::from(neg));
+    if neg {
+        assembled.push('-');
+    }
+    assembled.push_str(&clean_mantissa);
+    if let Some(exp) = exp_suffix {
+        assembled.push('e');
+        assembled.push_str(&exp);
+    }
+
+    let num = assembled.parse::<f64>().ok()?;
+    num.is_finite().then_some(num)
+}
+
+/// Infer `(decimal_separator, thousands_separator)` from a sample of trimmed cell tokens under
+/// an active column delimiter.
+#[must_use]
+pub fn infer_number_separators<'a, I>(tokens: I, delimiter: char) -> (char, Option<char>)
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut us_thousands_hits = 0_usize;
+    let mut eu_thousands_hits = 0_usize;
+    let mut comma_decimal_candidates = 0_usize;
+    let mut comma_non3_decimal_hits = 0_usize;
+    let mut dot_decimal_candidates = 0_usize;
+    let mut dot_non3_decimal_hits = 0_usize;
+
+    for raw in tokens {
+        let token = raw.trim().trim_matches('*').trim();
+        if token.is_empty() {
+            continue;
+        }
+        let Some((_, body)) = split_numeric_sign(token) else {
+            continue;
+        };
+        let Some((mantissa, _)) = split_exponent(body) else {
+            continue;
+        };
+        if mantissa.is_empty() || !mantissa.chars().all(|c| c.is_ascii_digit() || matches!(c, ',' | '.' | ' ' | '\u{00a0}' | '\u{202f}')) {
+            continue;
+        }
+        let comma_count = mantissa.chars().filter(|&c| c == ',').count();
+        let dot_count = mantissa.chars().filter(|&c| c == '.').count();
+
+        if comma_count >= 1
+            && dot_count == 1
+            && let Some((int_raw, frac_raw)) = mantissa.split_once('.')
+            && !frac_raw.is_empty()
+            && frac_raw.bytes().all(|b| b.is_ascii_digit())
+            && strip_thousands_grouping(int_raw, &[',']).is_some()
+        {
+            us_thousands_hits = us_thousands_hits.saturating_add(1);
+            dot_non3_decimal_hits = dot_non3_decimal_hits.saturating_add(1);
+            continue;
+        }
+        if dot_count >= 1
+            && comma_count == 1
+            && let Some((int_raw, frac_raw)) = mantissa.split_once(',')
+            && !frac_raw.is_empty()
+            && frac_raw.bytes().all(|b| b.is_ascii_digit())
+            && strip_thousands_grouping(int_raw, &['.']).is_some()
+        {
+            eu_thousands_hits = eu_thousands_hits.saturating_add(1);
+            comma_non3_decimal_hits = comma_non3_decimal_hits.saturating_add(1);
+            continue;
+        }
+        if comma_count > 1 && dot_count == 0 && strip_thousands_grouping(mantissa, &[',']).is_some() {
+            us_thousands_hits = us_thousands_hits.saturating_add(1);
+            continue;
+        }
+        if dot_count > 1 && comma_count == 0 && strip_thousands_grouping(mantissa, &['.']).is_some() {
+            eu_thousands_hits = eu_thousands_hits.saturating_add(1);
+            continue;
+        }
+        if comma_count == 1
+            && dot_count == 0
+            && let Some((int_raw, frac_raw)) = mantissa.split_once(',')
+            && !frac_raw.is_empty()
+            && int_raw.bytes().all(|b| b.is_ascii_digit())
+            && frac_raw.bytes().all(|b| b.is_ascii_digit())
+        {
+            comma_decimal_candidates = comma_decimal_candidates.saturating_add(1);
+            if int_raw.is_empty() || int_raw.len() > 3 || int_raw.starts_with('0') || frac_raw.len() != 3 {
+                comma_non3_decimal_hits = comma_non3_decimal_hits.saturating_add(1);
+            }
+            continue;
+        }
+        if dot_count == 1
+            && comma_count == 0
+            && let Some((int_raw, frac_raw)) = mantissa.split_once('.')
+            && !frac_raw.is_empty()
+            && int_raw.bytes().all(|b| b.is_ascii_digit())
+            && frac_raw.bytes().all(|b| b.is_ascii_digit())
+        {
+            dot_decimal_candidates = dot_decimal_candidates.saturating_add(1);
+            if int_raw.is_empty() || int_raw.len() > 3 || int_raw.starts_with('0') || frac_raw.len() != 3 {
+                dot_non3_decimal_hits = dot_non3_decimal_hits.saturating_add(1);
+            }
+        }
+    }
+
+    if eu_thousands_hits > 0 && us_thousands_hits == 0 {
+        return (',', Some('.'));
+    }
+    if us_thousands_hits > 0 && eu_thousands_hits == 0 {
+        return ('.', Some(','));
+    }
+    if delimiter == ',' {
+        return ('.', (us_thousands_hits > 0).then_some(','));
+    }
+    if comma_non3_decimal_hits > dot_non3_decimal_hits || (comma_decimal_candidates > 0 && dot_decimal_candidates == 0 && dot_non3_decimal_hits == 0)
+    {
+        let thousands = (eu_thousands_hits > 0 || (dot_decimal_candidates > 0 && dot_non3_decimal_hits == 0)).then_some('.');
+        return (',', thousands);
+    }
+    if dot_decimal_candidates > 0 || us_thousands_hits > 0 {
+        let thousands = (us_thousands_hits > 0 || (comma_decimal_candidates > 0 && comma_non3_decimal_hits == 0)).then_some(',');
+        return ('.', thousands);
+    }
+    if delimiter == ';' && comma_decimal_candidates > 0 {
+        return (',', None);
+    }
+    ('.', None)
+}
+
+fn split_numeric_sign(raw: &str) -> Option<(bool, &str)> {
+    if let Some(rest) = raw.strip_prefix('-') {
+        Some((true, rest.trim_start()))
+    } else if let Some(rest) = raw.strip_prefix('\u{2212}') {
+        Some((true, rest.trim_start()))
+    } else if let Some(rest) = raw.strip_prefix('+') {
+        Some((false, rest.trim_start()))
+    } else {
+        Some((false, raw))
+    }
+}
+
+fn split_exponent(body: &str) -> Option<(&str, Option<String>)> {
+    let Some(exp_pos) = body.find(['e', 'E']) else {
+        return Some((body, None));
+    };
+    let mantissa = body.get(..exp_pos)?;
+    let exp_raw = body.get(exp_pos + 1..)?;
+    if mantissa.is_empty() || exp_raw.is_empty() {
+        return None;
+    }
+    let (exp_neg, digits) = split_numeric_sign(exp_raw)?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let exp = if exp_neg { format!("-{digits}") } else { digits.to_owned() };
+    Some((mantissa, Some(exp)))
+}
+
+fn normalize_numeric_mantissa(mantissa: &str, decimal_separator: char, thousands_separator: Option<char>) -> Option<String> {
+    let dec_count = mantissa.chars().filter(|&c| c == decimal_separator).count();
+    if dec_count == 1 {
+        let (int_raw, frac_raw) = mantissa.split_once(decimal_separator)?;
+        if (int_raw.is_empty() && frac_raw.is_empty()) || !frac_raw.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let clean_int = if int_raw.is_empty() {
+            String::new()
+        } else {
+            let mut seps = Vec::with_capacity(5);
+            if let Some(t) = thousands_separator {
+                seps.push(t);
+            }
+            for fallback in [if decimal_separator == ',' { '.' } else { ',' }, ' ', '\u{00a0}', '\u{202f}'] {
+                if fallback != decimal_separator && !seps.contains(&fallback) {
+                    seps.push(fallback);
+                }
+            }
+            strip_thousands_grouping(int_raw, &seps)?
+        };
+        return Some(format!("{clean_int}.{frac_raw}"));
+    }
+
+    if dec_count > 1 {
+        return None;
+    }
+
+    if mantissa.bytes().all(|b| b.is_ascii_digit()) {
+        return (!mantissa.is_empty()).then(|| mantissa.to_owned());
+    }
+
+    let mut plain_seps = Vec::with_capacity(4);
+    if let Some(t) = thousands_separator {
+        plain_seps.push(t);
+    }
+    for space in [' ', '\u{00a0}', '\u{202f}'] {
+        if !plain_seps.contains(&space) {
+            plain_seps.push(space);
+        }
+    }
+    if let Some(clean_int) = strip_thousands_grouping(mantissa, &plain_seps) {
+        return Some(clean_int);
+    }
+
+    // Without explicit thousands separator, allow multi-group comma integers in dot mode (e.g. `1,234,567`)
+    // and multi-group dot integers in comma mode (e.g. `1.234.567`), plus ungrouped invariant `.` decimals
+    // in comma mode (`12.34`) when dot is not the configured thousands separator.
+    let opposite = if decimal_separator == ',' { '.' } else { ',' };
+    if thousands_separator != Some(opposite) {
+        let opp_count = mantissa.chars().filter(|&c| c == opposite).count();
+        if opp_count > 1 && strip_thousands_grouping(mantissa, &[opposite]).is_some() {
+            return strip_thousands_grouping(mantissa, &[opposite]);
+        }
+        if decimal_separator == ','
+            && opp_count == 1
+            && let Some((int_raw, frac_raw)) = mantissa.split_once('.')
+            && !(int_raw.is_empty() && frac_raw.is_empty())
+            && int_raw.bytes().all(|b| b.is_ascii_digit())
+            && frac_raw.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Some(mantissa.to_owned());
+        }
+    }
+
+    None
+}
+
+/// Strip strict 3-digit thousands grouping separators (`1,234`, `12,345,678`) from `int_part`.
+#[must_use]
+pub fn strip_thousands_grouping(int_part: &str, allowed_seps: &[char]) -> Option<String> {
+    if int_part.is_empty() {
+        return None;
+    }
+    if int_part.bytes().all(|b| b.is_ascii_digit()) {
+        return Some(int_part.to_owned());
+    }
+    for &sep in allowed_seps {
+        if !int_part.contains(sep) {
+            continue;
+        }
+        let mut parts = int_part.split(sep);
+        let first = parts.next()?;
+        if first.is_empty() || first.len() > 3 || !first.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let mut out = String::from(first);
+        let mut group_count = 0_usize;
+        for part in parts {
+            if part.len() != 3 || !part.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            out.push_str(part);
+            group_count += 1;
+        }
+        if group_count > 0 {
+            return Some(out);
+        }
+    }
+    None
 }
 
 /// Subcolumn structure within each data-set column (`docs/implementation/data-tables-and-transforms.md` §2).

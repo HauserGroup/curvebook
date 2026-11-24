@@ -765,6 +765,27 @@ fn sweep_valid_export_and_project_commands(s: &mut Session, covered: &mut BTreeS
             "xml": "<PrismFile><Table ID=\"T1\" TableType=\"XY\"><Title>Imported XY</Title><XColumn><Title>X</Title><Subcolumn><d>1</d><d>2</d></Subcolumn></XColumn><YColumn><Title>Y</Title><Subcolumn><d>10</d><d>20</d></Subcolumn></YColumn></Table></PrismFile>"
         }),
     )?;
+    let mut xlsx_zip = curvebook_format::ZipWriter::new();
+    xlsx_zip
+        .add_file(
+            "xl/workbook.xml",
+            br#"<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#.to_vec(),
+        )
+        .map_err(|e| e.to_string())?;
+    xlsx_zip
+        .add_file(
+            "xl/_rels/workbook.xml.rels",
+            br#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#.to_vec(),
+        )
+        .map_err(|e| e.to_string())?;
+    xlsx_zip
+        .add_file(
+            "xl/worksheets/sheet1.xml",
+            br#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>X</t></is></c><c r="B1" t="inlineStr"><is><t>Y</t></is></c></row><row r="2"><c r="A2"><v>1</v></c><c r="B2"><v>2</v></c></row></sheetData></worksheet>"#.to_vec(),
+        )
+        .map_err(|e| e.to_string())?;
+    let xlsx_b64 = curvebook_engine::cmd::helpers::encode_base64(&xlsx_zip.finish().map_err(|e| e.to_string())?);
+    run_valid(s, covered, "table.importXlsx", json!({ "bytes_base64": xlsx_b64 }))?;
     run_valid(s, covered, "file.new", json!({ "title": "Reset File" }))?;
     run_valid(s, covered, "project.open", json!({ "bytes_base64": saved_b64 }))?;
     run_valid(s, covered, "project.new", json!({ "title": "Reset Project" }))?;
@@ -874,7 +895,7 @@ fn run_targeted_hostile_cases(base: &Session, command_id: &str) {
             json!({ "sheet_id": "sim-bad", "x_min": "NaN", "x_max": 1.0 }),
             json!({ "sheet_id": "sim-bad", "equation": "nonexistent_eq" }),
         ],
-        "table.importPzfx" | "table.importPrism" => {
+        "table.importPzfx" | "table.importPrism" | "table.importXlsx" => {
             vec![json!({ "xml": "<PrismFile><Broken" }), json!({ "bytes_base64": "AA=A" }), json!({ "bytes": [0, 1, 2, 3] })]
         }
         "transform.run" | "stats.run" | "fit.run" | "analyze.run" | "analysis.run" => vec![

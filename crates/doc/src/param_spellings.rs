@@ -1163,6 +1163,7 @@ fn table_command_alias(command_id: &str, path: &[&str], key: &str) -> Option<&'s
                 ("decimal", "decimal_separator"),
                 ("normalizeDecimal", "normalize_decimal"),
                 ("hasHeader", "has_header"),
+                ("headerRows", "header_rows"),
                 ("first_row_titles", "has_header"),
                 ("firstRowTitles", "has_header"),
                 ("hasRowTitles", "has_row_titles"),
@@ -1194,6 +1195,26 @@ fn table_command_alias(command_id: &str, path: &[&str], key: &str) -> Option<&'s
         "table.importPzfx" => {
             lookup_pairs(&[("text", "xml"), ("content", "xml"), ("file_path", "path"), ("filePath", "path"), ("bytesBase64", "bytes_base64")], key)
         }
+        "table.importXlsx" => lookup_pairs(
+            &[
+                ("file_path", "path"),
+                ("filePath", "path"),
+                ("bytesBase64", "bytes_base64"),
+                ("sheet_names", "sheets"),
+                ("sheetNames", "sheets"),
+                ("sheetIndices", "sheet_indices"),
+                ("listSheets", "list_sheets"),
+                ("hasHeader", "has_header"),
+                ("headerRows", "header_rows"),
+                ("hasRowTitles", "has_row_titles"),
+                ("kind", "archetype"),
+                ("table_kind", "archetype"),
+                ("tableKind", "archetype"),
+                ("subcolumnMode", "subcolumn_mode"),
+                ("includeHidden", "include_hidden"),
+            ],
+            key,
+        ),
         "table.setVariableRole" => lookup_pairs(
             &[("sheetId", "sheet_id"), ("column", "col"), ("column_index", "col"), ("columnIndex", "col"), ("index", "col"), ("variable", "col")],
             key,

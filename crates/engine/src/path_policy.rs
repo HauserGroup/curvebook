@@ -115,32 +115,11 @@ impl ExternalPathPolicy {
         Ok(())
     }
 
-    /// Read a UTF-8 text file subject to this policy, regular-file validation, and `max_bytes` cap.
-    ///
-    /// # Errors
-    /// Returns [`EngineError`] with [`ErrorCode::PathEscape`] on policy/escape violation,
-    /// [`ErrorCode::BadInput`] for empty paths or non-regular files (directories, FIFOs, device
-    /// nodes), [`ErrorCode::ResourceLimit`] if size exceeds `max_bytes`, [`ErrorCode::IoError`] if
-    /// reading fails, or [`ErrorCode::UnsupportedFormat`] on `wasm32`.
-    pub(crate) fn read_utf8_file(&self, raw_path: &str, label: &str, max_bytes: usize) -> Result<String, EngineError> {
-        #[cfg(target_arch = "wasm32")]
-        {
-            let _ = max_bytes;
-            if matches!(self, Self::RejectExternal) {
-                return Err(reject_external_err(raw_path));
-            }
-            Err(EngineError::with_code(
-                ErrorCode::UnsupportedFormat,
-                format!("reading {label} `{raw_path}` from filesystem is unavailable on wasm32"),
-            )
-            .with_remediation("Supply inline text content or run on a native target.")
-            .with_details(json!({ "path": raw_path })))
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let resolved = self.resolve_target_path(raw_path, label)?;
-            curvebook_platform::fs::read_regular_file_utf8(&resolved, max_bytes).map_err(|err| map_read_platform_err(err, raw_path, label))
-        }
+    /// Read delimited text from a regular file subject to this policy, decoding UTF-8 (with or
+    /// without BOM) and UTF-16 LE/BE BOMs cleanly.
+    pub(crate) fn read_delimited_text_file(&self, raw_path: &str, label: &str, max_bytes: usize) -> Result<String, EngineError> {
+        let bytes = self.read_binary_file(raw_path, label, max_bytes)?;
+        curvebook_format::decode_delimited_text_bytes(&bytes, label).map_err(EngineError::from)
     }
 
     /// Read raw bytes from a regular file subject to this policy, regular-file validation, and `max_bytes` cap.

@@ -870,6 +870,7 @@ fn is_unconstrained_archive_or_file_cmd(cmd_id: &str) -> bool {
             | "project.instantiateTemplate"
             | "table.importPrism"
             | "table.importPzfx"
+            | "table.importXlsx"
             | "project.save"
             | "project.saveAs"
             | "file.save"
@@ -1765,7 +1766,8 @@ impl Session {
     {
         let opens_project_path = spec.id == "project.open" && params.get("path").and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty());
         let clears_file_path_on_mutate = matches!(spec.id, "file.new" | "project.new" | "project.instantiateTemplate")
-            || (matches!(spec.id, "table.importPrism" | "table.importPzfx") && !params.get("merge").and_then(Value::as_bool).unwrap_or(false))
+            || (matches!(spec.id, "table.importPrism" | "table.importPzfx" | "table.importXlsx")
+                && !params.get("merge").and_then(Value::as_bool).unwrap_or(false))
             || (spec.id == "project.open" && !opens_project_path);
         let has_inline_bytes = has_inline_archive_bytes(&params);
         let before = self.doc.clone();

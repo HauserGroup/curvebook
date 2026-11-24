@@ -934,7 +934,7 @@ fn has_print_submit_to_os_true(val: &Value) -> bool {
 }
 
 fn canonical_menu_command_from_path(path: Option<&Value>) -> Option<&'static str> {
-    const TOKEN_TO_CMD: [(&str, &str); 21] = [
+    const TOKEN_TO_CMD: [(&str, &str); 25] = [
         ("fileopen", "project.open"),
         ("open", "project.open"),
         ("fileopenproject", "project.open"),
@@ -945,6 +945,10 @@ fn canonical_menu_command_from_path(path: Option<&Value>) -> Option<&'static str
         ("importexternalarchive", "table.importPrism"),
         ("fileimportxmlproject", "table.importPzfx"),
         ("importxmlproject", "table.importPzfx"),
+        ("fileimportxlsxworkbook", "table.importXlsx"),
+        ("importxlsxworkbook", "table.importXlsx"),
+        ("fileimportexcelworkbook", "table.importXlsx"),
+        ("importexcelworkbook", "table.importXlsx"),
         ("fileimportcsvortsv", "table.importCsv"),
         ("importcsvortsv", "table.importCsv"),
         ("fileimporttidylongtable", "table.importTidyLong"),

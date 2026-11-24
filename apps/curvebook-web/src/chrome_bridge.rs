@@ -1932,12 +1932,13 @@ pub fn resolve_web_command_route(app: &UiApp, raw_command_id: &str) -> WebComman
 
     match trimmed {
         "file.open" | "project.open" | "ui.file.open" => {
-            WebCommandRoute::OpenFilePicker { accept: String::from(".curvebook,.cbtemplate,.pzfx,.prism,.csv,.tsv,.txt") }
+            WebCommandRoute::OpenFilePicker { accept: String::from(".curvebook,.cbtemplate,.pzfx,.prism,.xlsx,.csv,.tsv,.txt") }
         }
         "table.importCsv" | "table.importPlateMap" | "table.importTidyLong" => {
             WebCommandRoute::OpenFilePicker { accept: String::from(".csv,.tsv,.txt") }
         }
         "table.importPrism" | "table.importPzfx" => WebCommandRoute::OpenFilePicker { accept: String::from(".prism,.pzfx") },
+        "table.importXlsx" => WebCommandRoute::OpenFilePicker { accept: String::from(".xlsx") },
         "project.instantiateTemplate" => WebCommandRoute::OpenFilePicker { accept: String::from(".cbtemplate,.curvebook") },
         "project.save" | "file.save" | "project.saveTemplate" => {
             WebCommandRoute::ExportFormat { format: WebExportFormat::CurveBookArchive, sheet_id: None }
