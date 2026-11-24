@@ -100,28 +100,32 @@ fn paint_symbol(ui: &Ui, symbol: &str, rect: Rect, color: Color32) {
 /// Width a [`check`] or [`radio`] row takes with translated `label`.
 #[must_use]
 pub fn choice_width(ui: &Ui, label: &str) -> f32 {
+    let t = Tokens::get(ui.ctx());
     let text = tr_text(ui, label);
-    18.0 + ui.painter().layout_no_wrap(text.into_owned(), egui::FontId::proportional(12.5), Color32::PLACEHOLDER).size().x
+    18.0 + ui.painter().layout_no_wrap(text.into_owned(), egui::FontId::proportional(t.metrics.font_ui_body_pt), Color32::PLACEHOLDER).size().x
 }
 
 fn choice_row(ui: &mut Ui, text: &str, enabled: bool) -> (Rect, Response, Color32) {
     let t = Tokens::get(ui.ctx());
     let min_hit = t.metrics.min_hit_target_pt;
-    let galley =
-        ui.painter().layout_no_wrap(text.to_owned(), egui::FontId::proportional(12.5), if enabled { t.text_primary } else { t.text_disabled });
+    let galley = ui.painter().layout_no_wrap(
+        text.to_owned(),
+        egui::FontId::proportional(t.metrics.font_ui_body_pt),
+        if enabled { t.text_primary } else { t.text_disabled },
+    );
     let alloc_w = if text.is_empty() { min_hit } else { (18.0 + galley.size().x).max(min_hit) };
     let (rect, resp) = ui.allocate_exact_size(vec2(alloc_w, min_hit.max(galley.size().y)), if enabled { Sense::click() } else { Sense::hover() });
     let bx_left = if text.is_empty() { rect.center().x - 6.5 } else { rect.left() };
     let bx = Rect::from_min_size(pos2(bx_left, rect.center().y - 6.5), Vec2::splat(13.0));
     if !text.is_empty() {
-        ui.painter().galley(pos2(bx.right() + 5.0, rect.center().y - galley.size().y / 2.0), galley, t.text_primary);
+        ui.painter().galley(pos2(bx.right() + t.metrics.space_xs, rect.center().y - galley.size().y / 2.0), galley, t.text_primary);
     }
     let border = if !enabled {
         t.divider
     } else if resp.hovered() {
         t.text_primary
     } else {
-        t.button_border
+        t.input_border
     };
     (bx, resp, border)
 }
@@ -171,8 +175,9 @@ fn check_row_named(ui: &mut Ui, text: &str, name: &str, value: Option<bool>, ena
     let t = Tokens::get(ui.ctx());
     let (bx, resp, border) = choice_row(ui, text, enabled);
     let checked = value == Some(true);
+    let box_border = if checked && enabled { t.accent } else { border };
     ui.painter().rect_filled(bx, CornerRadius::same(2), if checked && enabled { t.accent_strong } else { t.input_bg });
-    ui.painter().rect_stroke(bx, CornerRadius::same(2), Stroke::new(1.0, border), StrokeKind::Inside);
+    ui.painter().rect_stroke(bx, CornerRadius::same(2), Stroke::new(1.0, box_border), StrokeKind::Inside);
     match value {
         Some(true) => {
             let c = if enabled { Color32::WHITE } else { t.text_disabled };
@@ -217,6 +222,148 @@ fn radio_row(ui: &mut Ui, text: &str, name: &str, selected: bool, enabled: bool)
     let row_enabled = enabled && ui.is_enabled();
     resp.widget_info(move || egui::WidgetInfo::selected(egui::Role::RadioButton, row_enabled, selected, accessible_name.clone()));
     enabled && resp.clicked()
+}
+
+/// Leading-aligned affirmative toggle switch (`docs/design-language.md` §4). Returns `true` when toggled.
+pub fn switch(ui: &mut Ui, label: &str, value: bool, enabled: bool) -> bool {
+    let t = Tokens::get(ui.ctx());
+    let m = t.metrics;
+    let text = tr_text(ui, label).into_owned();
+    let fg = if enabled { t.text_primary } else { t.text_disabled };
+    let galley = ui.painter().layout_no_wrap(text.clone(), egui::FontId::proportional(m.font_ui_body_pt), fg);
+    let track_w = m.space_xxl + m.space_xs;
+    let track_h = m.space_xl;
+    let gap = m.space_md;
+    let alloc_w = if text.is_empty() { track_w.max(m.min_hit_target_pt) } else { (track_w + gap + galley.size().x).max(m.min_hit_target_pt) };
+    let alloc_h = m.min_hit_target_pt.max(galley.size().y);
+    let (rect, resp) = ui.allocate_exact_size(vec2(alloc_w, alloc_h), if enabled { Sense::click() } else { Sense::hover() });
+    let track = Rect::from_min_size(pos2(rect.left(), rect.center().y - track_h * 0.5), vec2(track_w, track_h));
+    let pill_r = CornerRadius::same((track_h * 0.5) as u8);
+    let (fill, border_col) = if !enabled {
+        (t.panel_bg, t.divider)
+    } else if value {
+        (if resp.hovered() { t.accent_hover } else { t.accent_strong }, t.accent)
+    } else {
+        (t.surface_recessed, if resp.hovered() { t.text_primary } else { t.input_border })
+    };
+    ui.painter().rect_filled(track, pill_r, fill);
+    ui.painter().rect_stroke(track, pill_r, Stroke::new(m.stroke_thin_pt, border_col), StrokeKind::Inside);
+    let thumb_r = (track_h - m.space_xs) * 0.5;
+    let thumb_x = if value { track.right() - m.space_xxs - thumb_r } else { track.left() + m.space_xxs + thumb_r };
+    let thumb_col = if !enabled {
+        t.text_disabled
+    } else if value {
+        t.on_accent
+    } else {
+        t.text_primary
+    };
+    ui.painter().circle_filled(pos2(thumb_x, track.center().y), thumb_r, thumb_col);
+    if !text.is_empty() {
+        ui.painter().galley(pos2(track.right() + gap, rect.center().y - galley.size().y * 0.5), galley, fg);
+    }
+    let row_enabled = enabled && ui.is_enabled();
+    resp.widget_info(move || egui::WidgetInfo::selected(egui::Role::CheckBox, row_enabled, value, text.clone()));
+    enabled && resp.clicked()
+}
+
+/// Borderless ghost action at rest on `surface_chrome`, highlighting with `hover_bg` on hover (`R20.2`).
+pub fn ghost_button(ui: &mut Ui, text: &str, selected: bool) -> Response {
+    let t = Tokens::get(ui.ctx());
+    let m = t.metrics;
+    let label = tr_text(ui, text).into_owned();
+    let enabled = ui.is_enabled();
+    let fg = if !enabled {
+        t.text_disabled
+    } else if selected {
+        t.selected_accent_text()
+    } else {
+        t.text_primary
+    };
+    let galley = ui.painter().layout_no_wrap(label.clone(), egui::FontId::proportional(m.font_ui_body_pt), fg);
+    let w = (galley.size().x + m.space_xl).max(m.min_hit_target_pt);
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, m.min_hit_target_pt), if enabled { Sense::click() } else { Sense::hover() });
+    let r = CornerRadius::same(m.radius_md);
+    let bg = if !enabled {
+        Color32::TRANSPARENT
+    } else if resp.is_pointer_button_down_on() || selected {
+        t.active_bg
+    } else if resp.hovered() {
+        t.hover_bg
+    } else {
+        Color32::TRANSPARENT
+    };
+    if bg != Color32::TRANSPARENT {
+        ui.painter().rect_filled(rect, r, bg);
+    }
+    if enabled && (selected || resp.hovered()) && matches!(t.mode, crate::theme::UiThemeMode::HighContrast) {
+        let sc = if selected { t.accent } else { t.hover_border };
+        ui.painter().rect_stroke(rect, r, Stroke::new(m.stroke_thin_pt, sc), StrokeKind::Inside);
+    }
+    ui.painter().galley(rect.center() - galley.size() * 0.5, galley, fg);
+    resp.widget_info(move || {
+        if selected {
+            egui::WidgetInfo::selected(egui::Role::Button, enabled, true, label.clone())
+        } else {
+            egui::WidgetInfo::labeled(egui::Role::Button, enabled, label.clone())
+        }
+    });
+    resp
+}
+
+/// Equal-width segmented control on a shared `surface_recessed` track (`docs/design-language.md` §4).
+/// Returns the clicked segment index when changed.
+pub fn segmented_control(ui: &mut Ui, options: &[&str], selected: usize) -> Option<usize> {
+    if options.is_empty() {
+        return None;
+    }
+    let t = Tokens::get(ui.ctx());
+    let m = t.metrics;
+    let enabled = ui.is_enabled();
+    let count = options.len();
+    let total_w = ui.available_width().max(m.min_hit_target_pt * (count as f32));
+    let track_h = m.min_hit_target_pt + m.space_xs;
+    let (track_rect, _) = ui.allocate_exact_size(vec2(total_w, track_h), Sense::hover());
+    let track_r = CornerRadius::same(m.radius_md);
+    ui.painter().rect_filled(track_rect, track_r, t.surface_recessed);
+    if matches!(t.mode, crate::theme::UiThemeMode::HighContrast) {
+        ui.painter().rect_stroke(track_rect, track_r, Stroke::new(m.stroke_thin_pt, t.border), StrokeKind::Inside);
+    }
+    let inner = track_rect.shrink(m.space_xxs);
+    let seg_w = (inner.width() / (count as f32)).max(m.min_hit_target_pt);
+    let seg_r = CornerRadius::same(m.radius_sm);
+    let mut clicked = None;
+    for (idx, opt) in options.iter().enumerate() {
+        let seg_rect = Rect::from_min_size(pos2(inner.left() + seg_w * (idx as f32), inner.top()), vec2(seg_w, inner.height()));
+        let seg_resp = ui.interact(seg_rect, ui.scope_id().with(("segmented", idx, *opt)), if enabled { Sense::click() } else { Sense::hover() });
+        let is_sel = idx == selected;
+        if is_sel {
+            ui.painter().rect_filled(seg_rect, seg_r, t.surface_bg);
+            let border_col = if matches!(t.mode, crate::theme::UiThemeMode::HighContrast) { t.accent } else { t.border };
+            ui.painter().rect_stroke(seg_rect, seg_r, Stroke::new(m.stroke_thin_pt, border_col), StrokeKind::Inside);
+        } else if enabled && seg_resp.hovered() {
+            ui.painter().rect_filled(seg_rect, seg_r, t.hover_bg);
+        }
+        let fg = if !enabled {
+            t.text_disabled
+        } else if is_sel {
+            t.text_strong
+        } else {
+            t.text_primary
+        };
+        let label = tr_text(ui, opt).into_owned();
+        ui.painter().with_clip_rect(seg_rect.shrink(m.space_xxs)).text(
+            seg_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            &label,
+            egui::FontId::proportional(m.font_ui_body_pt),
+            fg,
+        );
+        seg_resp.widget_info(move || egui::WidgetInfo::selected(egui::Role::RadioButton, enabled, is_sel, label.clone()));
+        if enabled && seg_resp.clicked() {
+            clicked = Some(idx);
+        }
+    }
+    clicked
 }
 
 // ============================================================================
@@ -307,12 +454,18 @@ pub fn paint_icon_button_named(ui: &mut Ui, resp: Response, symbol: &str, name: 
 pub fn flat_button(ui: &mut Ui, text: &str, width: f32) -> Response {
     let t = Tokens::get(ui.ctx());
     let label = tr_text(ui, text).into_owned();
-    let (rect, resp) = ui.allocate_exact_size(vec2(width, 24.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, t.metrics.min_hit_target_pt), Sense::click());
     let rect = rect.shrink2(vec2(0.0, 0.5));
     let r = CornerRadius::same(t.metrics.radius_md);
     ui.painter().rect_filled(rect, r, t.button_bg);
     flat_fill(ui, rect, &resp);
-    ui.painter().with_clip_rect(rect).text(rect.center(), egui::Align2::CENTER_CENTER, &label, egui::FontId::proportional(12.5), t.text_strong);
+    ui.painter().with_clip_rect(rect).text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        &label,
+        egui::FontId::proportional(t.metrics.font_ui_body_pt),
+        t.text_strong,
+    );
     let ui_enabled = ui.is_enabled();
     resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, ui_enabled, label.clone()));
     resp
@@ -323,12 +476,18 @@ pub fn flat_button_fit(ui: &mut Ui, text: &str, min_width: f32) -> Response {
     let t = Tokens::get(ui.ctx());
     let label = tr_text(ui, text).into_owned();
     let width = flat_button_fit_width(ui, &label, min_width);
-    let (rect, resp) = ui.allocate_exact_size(vec2(width, 24.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, t.metrics.min_hit_target_pt), Sense::click());
     let rect = rect.shrink2(vec2(0.0, 0.5));
     let r = CornerRadius::same(t.metrics.radius_md);
     ui.painter().rect_filled(rect, r, t.button_bg);
     flat_fill(ui, rect, &resp);
-    ui.painter().with_clip_rect(rect).text(rect.center(), egui::Align2::CENTER_CENTER, &label, egui::FontId::proportional(12.5), t.text_strong);
+    ui.painter().with_clip_rect(rect).text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        &label,
+        egui::FontId::proportional(t.metrics.font_ui_body_pt),
+        t.text_strong,
+    );
     let ui_enabled = ui.is_enabled();
     resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, ui_enabled, label.clone()));
     resp
@@ -337,9 +496,10 @@ pub fn flat_button_fit(ui: &mut Ui, text: &str, min_width: f32) -> Response {
 /// Width computed by [`flat_button_fit`] for `text`.
 #[must_use]
 pub fn flat_button_fit_width(ui: &Ui, text: &str, min_width: f32) -> f32 {
+    let t = Tokens::get(ui.ctx());
     let label = tr_text(ui, text).into_owned();
-    let galley = ui.painter().layout_no_wrap(label, egui::FontId::proportional(12.5), Color32::PLACEHOLDER);
-    (galley.size().x + 24.0).max(min_width)
+    let galley = ui.painter().layout_no_wrap(label, egui::FontId::proportional(t.metrics.font_ui_body_pt), Color32::PLACEHOLDER);
+    (galley.size().x + t.metrics.space_xxl).max(min_width)
 }
 
 /// Split button with primary click area and trailing menu chevron (`(main, arrow)`).
@@ -367,7 +527,7 @@ pub fn split_button_named(ui: &mut Ui, text: &str, arrow_tip: &str, width: f32) 
         main_rect.center(),
         egui::Align2::CENTER_CENTER,
         &label,
-        egui::FontId::proportional(12.5),
+        egui::FontId::proportional(t.metrics.font_ui_body_pt),
         t.text_strong,
     );
     paint_chevron(ui, Rect::from_center_size(arrow_rect.center(), vec2(12.0, 12.0)), true, t.text_muted);
@@ -402,8 +562,9 @@ fn flat_fill(ui: &Ui, rect: Rect, resp: &Response) {
 /// Width [`primary_button`] and [`secondary_button`] allocate for `text`.
 #[must_use]
 pub fn button_width(ui: &Ui, text: &str) -> f32 {
+    let t = Tokens::get(ui.ctx());
     let label = tr_text(ui, text).into_owned();
-    let galley = ui.painter().layout_no_wrap(label, egui::FontId::proportional(12.5), Color32::PLACEHOLDER);
+    let galley = ui.painter().layout_no_wrap(label, egui::FontId::proportional(t.metrics.font_ui_body_pt), Color32::PLACEHOLDER);
     (galley.size().x + 32.0).max(72.0)
 }
 
@@ -425,7 +586,7 @@ fn primary_button_sized(ui: &mut Ui, text: &str, enabled: bool, min_width: f32) 
     let t = Tokens::get(ui.ctx());
     let label = tr_text(ui, text).into_owned();
     let fg = if enabled { t.on_accent } else { t.text_disabled };
-    let galley = ui.painter().layout_no_wrap(label.clone(), egui::FontId::proportional(12.5), fg);
+    let galley = ui.painter().layout_no_wrap(label.clone(), egui::FontId::proportional(t.metrics.font_ui_body_pt), fg);
     let w = galley.size().x + 32.0;
     let (rect, resp) = ui.allocate_exact_size(vec2(w.max(min_width), 28.0), if enabled { Sense::click() } else { Sense::hover() });
     let bg = match (enabled, resp.hovered()) {
@@ -464,7 +625,7 @@ fn secondary_button_width_enabled(ui: &mut Ui, text: &str, min_width: f32, enabl
     let t = Tokens::get(ui.ctx());
     let label = tr_text(ui, text).into_owned();
     let fg = if enabled { t.text_primary } else { t.text_disabled };
-    let galley = ui.painter().layout_no_wrap(label.clone(), egui::FontId::proportional(12.5), fg);
+    let galley = ui.painter().layout_no_wrap(label.clone(), egui::FontId::proportional(t.metrics.font_ui_body_pt), fg);
     let w = galley.size().x + 32.0;
     let (rect, resp) = ui.allocate_exact_size(vec2(w.max(min_width), 28.0), if enabled { Sense::click() } else { Sense::hover() });
     paint_interactive_chrome(
@@ -530,8 +691,9 @@ pub fn menu_item(ui: &mut Ui, label: &str, enabled: bool, checked: bool) -> bool
 
 /// [`menu_item`] taking a literal untranslated display name.
 pub fn menu_item_name(ui: &mut Ui, label: &str, enabled: bool, checked: bool) -> bool {
+    let t = Tokens::get(ui.ctx());
     let text = if checked { format!("✓ {label}") } else { format!("   {label}") };
-    ui.add_enabled(enabled, egui::Button::new(egui::RichText::new(text).size(12.5)).frame_when_inactive(false)).clicked()
+    ui.add_enabled(enabled, egui::Button::new(egui::RichText::new(text).size(t.metrics.font_ui_body_pt)).frame_when_inactive(false)).clicked()
 }
 
 // ============================================================================
@@ -546,8 +708,9 @@ pub fn text_width(ui: &Ui, text: egui::RichText) -> f32 {
 
 #[must_use]
 pub fn dim_label_width(ui: &Ui, text: &str) -> f32 {
+    let t = Tokens::get(ui.ctx());
     let shown = tr_text(ui, text).into_owned();
-    text_width(ui, egui::RichText::new(shown).size(12.5))
+    text_width(ui, egui::RichText::new(shown).size(t.metrics.font_ui_body_pt))
 }
 
 /// Bold section heading in inspector/panel forms (§10.2 `type.section` or `14 pt` regular fallback).
@@ -555,7 +718,7 @@ pub fn section_header(ui: &mut Ui, text: &str) {
     let t = Tokens::get(ui.ctx());
     let shown = tr_text(ui, text).into_owned();
     let font = super::fonts::section_heading_font_id(ui.ctx(), &t);
-    ui.add_space(t.metrics.space_sm);
+    ui.add_space(t.metrics.space_md);
     ui.label(egui::RichText::new(shown).font(font).color(t.text_strong));
     ui.add_space(t.metrics.space_xs);
 }
@@ -584,10 +747,10 @@ pub fn section_toggle_name(ui: &mut Ui, text: &str, open: bool) -> Response {
 /// Full-width 1 px horizontal divider with vertical spacing.
 pub fn divider(ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
-    ui.add_space(6.0);
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
+    ui.add_space(t.metrics.space_xs);
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), t.metrics.stroke_thin_pt), Sense::hover());
     ui.painter().rect_filled(rect, 0.0, t.divider);
-    ui.add_space(6.0);
+    ui.add_space(t.metrics.space_xs);
 }
 
 #[derive(Clone, Copy)]
@@ -653,7 +816,7 @@ pub fn field_label(ui: &mut Ui, text: impl Into<egui::WidgetText>) -> Response {
 /// Literal untranslated field label.
 pub fn dim_name(ui: &mut Ui, text: &str) -> Response {
     let t = Tokens::get(ui.ctx());
-    ui.label(egui::RichText::new(text).color(t.text_primary).size(12.5))
+    ui.label(egui::RichText::new(text).color(t.text_primary).size(t.metrics.font_ui_body_pt))
 }
 
 /// Horizontal form row with fixed-width `label` column paired to the control emitted by `add`.
@@ -677,8 +840,8 @@ pub fn label_row(ui: &mut Ui, label: &str, label_width: f32, add: impl FnOnce(&m
         return;
     }
     ui.horizontal(|ui| {
-        let (r, resp) = ui.allocate_exact_size(vec2(capped_w, 24.0), Sense::hover());
-        ui.painter().text(r.left_center(), egui::Align2::LEFT_CENTER, &shown, egui::FontId::proportional(12.5), t.text_primary);
+        let (r, resp) = ui.allocate_exact_size(vec2(capped_w, t.metrics.min_hit_target_pt), Sense::hover());
+        ui.painter().text(r.left_center(), egui::Align2::LEFT_CENTER, &shown, egui::FontId::proportional(t.metrics.font_ui_body_pt), t.text_primary);
         let accessible = shown.clone();
         let ui_enabled = ui.is_enabled();
         resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Label, ui_enabled, accessible.clone()));
@@ -702,7 +865,7 @@ pub fn subheader(ui: &mut Ui, text: &str) {
 pub fn link_label(ui: &mut Ui, text: &str) -> Response {
     let t = Tokens::get(ui.ctx());
     let shown = tr_text(ui, text).into_owned();
-    let galley = ui.painter().layout_no_wrap(shown.clone(), egui::FontId::proportional(12.5), t.text_strong);
+    let galley = ui.painter().layout_no_wrap(shown.clone(), egui::FontId::proportional(t.metrics.font_ui_body_pt), t.text_strong);
     let (rect, resp) = ui.allocate_exact_size(galley.size() + vec2(0.0, 3.0), Sense::click());
     let y = rect.top() + galley.size().y + 1.0;
     ui.painter().galley(rect.min, galley, t.text_strong);
@@ -792,19 +955,20 @@ pub fn bottom_bar(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
 /// Underline tab strip returning the clicked tab index if changed.
 pub fn tab_bar(ui: &mut Ui, tabs: &[&str], current: usize) -> Option<usize> {
     let t = Tokens::get(ui.ctx());
+    let m = t.metrics;
     let mut clicked = None;
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 18.0;
+        ui.spacing_mut().item_spacing.x = m.space_xl;
         for (i, tab) in tabs.iter().enumerate() {
             let sel = i == current;
             let label = tr_text(ui, tab).into_owned();
-            let galley = ui.painter().layout_no_wrap(label.clone(), egui::FontId::proportional(13.0), t.text_primary);
-            let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x, 30.0), Sense::click());
+            let galley = ui.painter().layout_no_wrap(label.clone(), egui::FontId::proportional(m.font_ui_body_pt), t.text_primary);
+            let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x, m.min_toolbar_target_pt), Sense::click());
             let color = if sel || resp.hovered() { t.text_strong } else { t.text_muted };
-            ui.painter().galley(pos2(rect.left(), rect.center().y - galley.size().y / 2.0 - 2.0), galley, color);
+            ui.painter().galley(pos2(rect.left(), rect.center().y - galley.size().y / 2.0 - m.space_xxs), galley, color);
             if sel {
                 ui.painter().rect_filled(
-                    Rect::from_min_max(pos2(rect.left(), rect.bottom() - 2.0), rect.right_bottom()),
+                    Rect::from_min_max(pos2(rect.left(), rect.bottom() - m.stroke_focus_pt), rect.right_bottom()),
                     CornerRadius::same(1),
                     t.accent,
                 );

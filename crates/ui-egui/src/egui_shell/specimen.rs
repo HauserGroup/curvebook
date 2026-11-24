@@ -7,7 +7,7 @@
 //! `cargo xtask screenshots`.
 
 use curvebook_render::{RenderError, RenderTargetSpec};
-use egui::{Align2, Color32, CornerRadius, FontFamily, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, TextEdit, Ui, Vec2, pos2, vec2};
+use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, TextEdit, Ui, Vec2, pos2, vec2};
 
 use crate::egui_shell::top_bar_fit::{RankedToolbarSlot, fit_ranked_toolbar};
 use crate::egui_shell::{ActionRank, FrameInspectEntryInput, FrameInspectMeta, OKABE_ITO_SERIES_PALETTE, Tokens, widgets};
@@ -25,6 +25,8 @@ pub struct DesignSpecimenState {
     pub assume_gaussian: bool,
     pub flag_outliers: bool,
     pub method_choice: usize,
+    pub segmented_choice: usize,
+    pub live_refit: bool,
     pub details_open: bool,
     pub landscape: bool,
 }
@@ -40,6 +42,8 @@ impl Default for DesignSpecimenState {
             assume_gaussian: true,
             flag_outliers: false,
             method_choice: 0,
+            segmented_choice: 0,
+            live_refit: true,
             details_open: true,
             landscape: true,
         }
@@ -220,11 +224,11 @@ fn render_swatches_card(ui: &mut Ui, tokens: &Tokens) {
     let m = tokens.metrics;
     specimen_card(ui, tokens, "1. Derived OKLab/OKLCH Tokens & Data-First Chroma", |ui| {
         let surfaces = [
-            ("canvas", tokens.canvas_mat, tokens.text_primary),
-            ("surface", tokens.surface_bg, tokens.text_primary),
-            ("panel", tokens.panel_bg, tokens.text_primary),
+            ("chrome", tokens.panel_bg, tokens.text_primary),
+            ("recessed", tokens.surface_recessed, tokens.text_primary),
+            ("content", tokens.surface_bg, tokens.text_primary),
             ("header", tokens.header_bg, tokens.text_strong),
-            ("button", tokens.button_bg, tokens.text_strong),
+            ("unemph", tokens.selection_unemphasized_bg, tokens.text_strong),
             ("hover", tokens.hover_bg, tokens.text_strong),
             ("active", tokens.active_bg, tokens.text_strong),
         ];
@@ -342,7 +346,7 @@ fn render_buttons_and_controls_card(ui: &mut Ui, tokens: &Tokens, state: &mut De
                 ActionRank::Secondary,
             );
 
-            let f_resp = widgets::flat_button_fit(ui, "Inspect Residuals", m.min_hit_target_pt * 3.0);
+            let f_resp = widgets::ghost_button(ui, "Inspect Residuals", false);
             meta.record_ranked_response(
                 ui,
                 &f_resp,
@@ -528,7 +532,15 @@ fn render_inputs_toggles_tabs_card(ui: &mut Ui, tokens: &Tokens, state: &mut Des
             if widgets::radio(ui, "Robust Huber Regression", state.method_choice == 1, true) {
                 state.method_choice = 1;
             }
+            if widgets::switch(ui, "Live refit", state.live_refit, true) {
+                state.live_refit = !state.live_refit;
+            }
         });
+
+        ui.add_space(m.space_xs);
+        if let Some(seg) = widgets::segmented_control(ui, &["Linear", "Log10", "Log2"], state.segmented_choice) {
+            state.segmented_choice = seg;
+        }
 
         if let Some(tab_idx) = widgets::tab_bar(ui, &["Summary", "Parameters", "Diagnostics", "Residuals"], state.selected_tab) {
             state.selected_tab = tab_idx;
@@ -575,7 +587,7 @@ fn render_tabular_and_badges_card(ui: &mut Ui, tokens: &Tokens) {
             }
             ui.painter().hline(hdr_rect.x_range(), hdr_rect.bottom(), Stroke::new(m.stroke_thin_pt, tokens.border));
 
-            let num_font = FontId::new(m.font_grid_numeral_pt, FontFamily::Monospace);
+            let num_font = crate::egui_shell::fonts::aligned_numeral_font_id(ui.ctx(), tokens);
             for (r_idx, (param, est, ci, pval)) in rows.iter().enumerate() {
                 let (r_rect, _) = ui.allocate_exact_size(vec2(table_w, row_h), Sense::hover());
                 let fill = if r_idx % 2 == 1 { tokens.panel_bg } else { tokens.surface_bg };

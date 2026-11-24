@@ -420,10 +420,12 @@ pub(super) fn choice_row(ui: &mut Ui, tokens: &Tokens, meta: &mut FrameInspectMe
     let bx = Rect::from_min_size(Pos2::new(rect.left() + 1.0, rect.center().y - 6.5), Vec2::splat(13.0));
     let border = if !spec.enabled {
         tokens.divider
+    } else if spec.checked {
+        tokens.accent
     } else if resp.hovered() {
         tokens.text_primary
     } else {
-        tokens.button_border
+        tokens.input_border
     };
 
     if spec.is_radio {
@@ -480,6 +482,262 @@ pub(super) fn choice_row(ui: &mut Ui, tokens: &Tokens, meta: &mut FrameInspectMe
         },
     );
     spec.enabled && resp.clicked()
+}
+
+/// Configuration for [`segmented_control`] (`docs/design-language.md` §4).
+#[allow(dead_code)]
+pub(super) struct SegmentedOption<'a> {
+    pub widget_id: &'a str,
+    pub label: &'a str,
+    pub tooltip: Option<&'a str>,
+    pub value: Option<Value>,
+}
+
+/// Render an equal-width segmented control on a shared `surface_recessed` track with `FrameInspectMeta` recording.
+#[allow(dead_code)]
+pub(super) fn segmented_control(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    options: &[SegmentedOption<'_>],
+    selected: usize,
+    enabled: bool,
+    z_layer: ZLayer,
+) -> Option<usize> {
+    if options.is_empty() {
+        return None;
+    }
+    let m = tokens.metrics;
+    let count = options.len();
+    let total_w = ui.available_width().max(m.min_hit_target_pt * (count as f32));
+    let track_h = m.min_hit_target_pt + m.space_xs;
+    let (track_rect, _) = ui.allocate_exact_size(Vec2::new(total_w, track_h), Sense::hover());
+    let track_r = CornerRadius::same(m.radius_md);
+    ui.painter().rect_filled(track_rect, track_r, tokens.surface_recessed);
+    if matches!(tokens.mode, crate::theme::UiThemeMode::HighContrast) {
+        ui.painter().rect_stroke(track_rect, track_r, Stroke::new(m.stroke_thin_pt, tokens.border), StrokeKind::Inside);
+    }
+    let inner = track_rect.shrink(m.space_xxs);
+    let seg_w = (inner.width() / (count as f32)).max(m.min_hit_target_pt);
+    let seg_r = CornerRadius::same(m.radius_sm);
+    let mut clicked = None;
+    for (idx, opt) in options.iter().enumerate() {
+        let seg_rect = Rect::from_min_size(Pos2::new(inner.left() + seg_w * (idx as f32), inner.top()), Vec2::new(seg_w, inner.height()));
+        let mut resp =
+            ui.interact(seg_rect, ui.make_persistent_id(("egui_shell.seg", opt.widget_id)), if enabled { Sense::click() } else { Sense::hover() });
+        let is_sel = idx == selected;
+        if is_sel {
+            ui.painter().rect_filled(seg_rect, seg_r, tokens.surface_bg);
+            let border_col = if matches!(tokens.mode, crate::theme::UiThemeMode::HighContrast) { tokens.accent } else { tokens.border };
+            ui.painter().rect_stroke(seg_rect, seg_r, Stroke::new(m.stroke_thin_pt, border_col), StrokeKind::Inside);
+        } else if enabled && resp.hovered() {
+            ui.painter().rect_filled(seg_rect, seg_r, tokens.hover_bg);
+        }
+        let fg = if !enabled {
+            tokens.text_disabled
+        } else if is_sel {
+            tokens.text_strong
+        } else {
+            tokens.text_primary
+        };
+        let (galley, ellipsized) =
+            elided_galley(ui.painter(), opt.label, FontId::proportional(m.font_ui_body_pt), fg, (seg_w - m.space_md).max(8.0), false);
+        ui.painter().with_clip_rect(seg_rect.shrink(m.space_xxs)).galley(
+            Pos2::new(seg_rect.center().x - galley.size().x * 0.5, seg_rect.center().y - galley.size().y * 0.5),
+            galley,
+            fg,
+        );
+        let a11y_label = opt.label.to_owned();
+        resp.widget_info(move || WidgetInfo::selected(Role::RadioButton, enabled, is_sel, a11y_label.clone()));
+        let tip = resolve_tooltip(enabled, None, ellipsized, opt.label, opt.tooltip);
+        resp = apply_tooltip(ui, resp, tip, TooltipMode::Standard);
+        record_visible_viewport(
+            ui,
+            meta,
+            &resp,
+            FrameInspectEntryInput {
+                widget_id: opt.widget_id,
+                role: "radio",
+                label: opt.label,
+                command_id: None,
+                value: opt.value.clone().or_else(|| Some(json!({ "selected": is_sel }))),
+                enabled,
+                disabled_reason: None,
+                z_layer,
+                ellipsized,
+                full_label: ellipsized.then_some(opt.label),
+            },
+        );
+        if enabled && resp.clicked() {
+            clicked = Some(idx);
+        }
+    }
+    clicked
+}
+
+/// Specification for one tab inside [`underline_tab_bar`].
+#[allow(dead_code)]
+pub(super) struct UnderlineTabSpec<'a> {
+    pub widget_id: &'a str,
+    pub label: &'a str,
+    pub tooltip: Option<&'a str>,
+}
+
+/// Render borderless full-word underline panel tabs with a `2 pt` bottom accent indicator (`R20.2` / `R20.4`).
+#[allow(dead_code)]
+pub(super) fn underline_tab_bar(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    tabs: &[UnderlineTabSpec<'_>],
+    current: usize,
+    z_layer: ZLayer,
+) -> Option<usize> {
+    if tabs.is_empty() {
+        return None;
+    }
+    let m = tokens.metrics;
+    let mut clicked = None;
+    let avail_w = ui.available_width().max(m.min_hit_target_pt * (tabs.len() as f32));
+    let tab_h = m.min_toolbar_target_pt;
+    let gap = m.space_md;
+    let total_gaps = gap * (tabs.len().saturating_sub(1) as f32);
+    let measured: Vec<f32> = tabs
+        .iter()
+        .map(|tab| {
+            let g = ui.painter().layout_no_wrap(tab.label.to_owned(), FontId::proportional(m.font_ui_body_pt), tokens.text_primary);
+            (g.size().x + m.space_xs).max(m.min_hit_target_pt)
+        })
+        .collect();
+    let sum_w: f32 = measured.iter().sum::<f32>() + total_gaps;
+    let compact = sum_w > avail_w;
+    let font_pt = if compact { m.font_ui_small_pt } else { m.font_ui_body_pt };
+    let used_gap = if compact { m.space_xs } else { gap };
+
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = used_gap;
+        for (idx, tab) in tabs.iter().enumerate() {
+            let sel = idx == current;
+            let color = if sel { tokens.text_strong } else { tokens.text_muted };
+            let g = ui.painter().layout_no_wrap(tab.label.to_owned(), FontId::proportional(font_pt), color);
+            let w = (g.size().x + m.space_xs).max(m.min_hit_target_pt);
+            let (rect, mut resp) = ui.allocate_exact_size(Vec2::new(w, tab_h), Sense::click());
+            let fg = if sel || resp.hovered() { tokens.text_strong } else { tokens.text_muted };
+            if !sel && resp.hovered() {
+                ui.painter().rect_filled(rect.shrink(m.space_xxs), CornerRadius::same(m.radius_sm), tokens.hover_bg);
+            }
+            let galley = ui.painter().layout_no_wrap(tab.label.to_owned(), FontId::proportional(font_pt), fg);
+            ui.painter().galley(Pos2::new(rect.center().x - galley.size().x * 0.5, rect.center().y - galley.size().y * 0.5 - 1.0), galley, fg);
+            if sel {
+                ui.painter().rect_filled(
+                    Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - m.stroke_focus_pt), rect.right_bottom()),
+                    CornerRadius::same(1),
+                    tokens.accent,
+                );
+            }
+            let a11y_label = tab.label.to_owned();
+            resp.widget_info(move || WidgetInfo::selected(Role::Tab, true, sel, a11y_label.clone()));
+            if let Some(tip) = tab.tooltip {
+                resp = resp.on_hover_text(tip);
+            }
+            record_visible_viewport(
+                ui,
+                meta,
+                &resp,
+                FrameInspectEntryInput {
+                    widget_id: tab.widget_id,
+                    role: "tab",
+                    label: tab.label,
+                    command_id: None,
+                    value: Some(json!({ "selected": sel })),
+                    enabled: true,
+                    disabled_reason: None,
+                    z_layer,
+                    ellipsized: false,
+                    full_label: None,
+                },
+            );
+            if resp.clicked() {
+                clicked = Some(idx);
+            }
+        }
+    });
+    clicked
+}
+
+/// Render a borderless ghost action button with `FrameInspectMeta` recording (`docs/design-language.md` §4).
+#[allow(dead_code, clippy::too_many_arguments)]
+pub(super) fn ghost_action_button(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    widget_id: &str,
+    label: &str,
+    command_id: Option<&str>,
+    selected: bool,
+    enabled: bool,
+    z_layer: ZLayer,
+) -> (Response, bool) {
+    let m = tokens.metrics;
+    let fg = if !enabled {
+        tokens.text_disabled
+    } else if selected {
+        tokens.selected_accent_text()
+    } else {
+        tokens.text_primary
+    };
+    let (galley, ellipsized) =
+        elided_galley(ui.painter(), label, FontId::proportional(m.font_ui_body_pt), fg, ui.available_width().max(m.min_hit_target_pt), false);
+    let w = (galley.size().x + m.space_lg).max(m.min_hit_target_pt);
+    let (rect, mut resp) = ui.allocate_exact_size(Vec2::new(w, m.min_hit_target_pt), if enabled { Sense::click() } else { Sense::hover() });
+    let r = CornerRadius::same(m.radius_md);
+    let bg = if !enabled {
+        Color32::TRANSPARENT
+    } else if resp.is_pointer_button_down_on() || selected {
+        tokens.active_bg
+    } else if resp.hovered() {
+        tokens.hover_bg
+    } else {
+        Color32::TRANSPARENT
+    };
+    if bg != Color32::TRANSPARENT {
+        ui.painter().rect_filled(rect, r, bg);
+    }
+    if enabled && (selected || resp.hovered()) && matches!(tokens.mode, crate::theme::UiThemeMode::HighContrast) {
+        let sc = if selected { tokens.accent } else { tokens.hover_border };
+        ui.painter().rect_stroke(rect, r, Stroke::new(m.stroke_thin_pt, sc), StrokeKind::Inside);
+    }
+    ui.painter().galley(Pos2::new(rect.center().x - galley.size().x * 0.5, rect.center().y - galley.size().y * 0.5), galley, fg);
+    let a11y_label = label.to_owned();
+    resp.widget_info(move || {
+        if selected {
+            WidgetInfo::selected(Role::Button, enabled, true, a11y_label.clone())
+        } else {
+            WidgetInfo::labeled(Role::Button, enabled, a11y_label.clone())
+        }
+    });
+    if ellipsized {
+        resp = resp.on_hover_text(label);
+    }
+    record_visible_viewport(
+        ui,
+        meta,
+        &resp,
+        FrameInspectEntryInput {
+            widget_id,
+            role: "button",
+            label,
+            command_id,
+            value: selected.then(|| json!({ "selected": true })),
+            enabled,
+            disabled_reason: None,
+            z_layer,
+            ellipsized,
+            full_label: ellipsized.then_some(label),
+        },
+    );
+    let clicked = enabled && resp.clicked();
+    (resp, clicked)
 }
 
 /// Record a widget in `meta` only when its interaction rect is visible in `ui.clip_rect()` and `meta.viewport_rect`.

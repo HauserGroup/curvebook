@@ -33,7 +33,24 @@ pub const CLEANROOM_SANS_FALLBACK_FONT_NAME: &str = "curvebook_cleanroom_sans";
 /// followed by the proportional fallback chain (§10.2).
 pub const BOLD_FONT_FAMILY: &str = "curvebook_bold";
 
+/// Named [`egui::FontFamily::Name`] family for `13 pt` aligned grid and result-table numerals
+/// selected via runtime ASCII `'0'..='9'` advance-width verification (`R20.2`).
+pub const ALIGNED_NUMERAL_FONT_FAMILY: &str = "curvebook_numeral";
+
 const BOLD_AVAILABLE_DATA_KEY: &str = "curvebook_bold_face_loaded";
+const NUMERAL_FAMILY_LOADED_DATA_KEY: &str = "curvebook_numeral_family_loaded";
+
+/// Strategy chosen at runtime for [`ALIGNED_NUMERAL_FONT_FAMILY`] (`docs/design-language.md` §3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NumeralFontStrategy {
+    /// Primary proportional system sans face has uniform ASCII `'0'..='9'` advance widths.
+    #[default]
+    PrimarySans,
+    /// Secondary regular system sans face with uniform ASCII `'0'..='9'` advance widths.
+    UniformSystemSans,
+    /// Cap-height-matched system monospace fallback when no proportional face has uniform digits.
+    MonospaceFallback,
+}
 
 const MAX_FONT_FILE_BYTES: usize = 48 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: usize = 256 * 1024;
@@ -84,6 +101,10 @@ pub struct FontDiscoveryReport {
     pub cleanroom_sans_loaded: bool,
     /// Whether a distinct bold (`>= Semibold`) face of the primary UI family was registered in [`BOLD_FONT_FAMILY`].
     pub bold_face_loaded: bool,
+    /// Whether the resolved primary proportional sans face has uniform ASCII `'0'..='9'` advance widths.
+    pub primary_digits_uniform: bool,
+    /// Runtime alignment strategy selected for [`ALIGNED_NUMERAL_FONT_FAMILY`].
+    pub numeral_font_strategy: NumeralFontStrategy,
 }
 
 /// Constructed [`egui::FontDefinitions`] paired with its [`FontDiscoveryReport`].
@@ -113,7 +134,12 @@ pub fn install_egui_fonts(ctx: &egui::Context) -> FontDiscoveryReport {
 /// is populated so [`has_bold_font`] and [`section_heading_font_id`] match §10.2 reliably.
 pub fn install_font_definitions(ctx: &egui::Context, definitions: egui::FontDefinitions) {
     let has_bold = definitions.families.get(&egui::FontFamily::Name(Arc::from(BOLD_FONT_FAMILY))).is_some_and(|chain| !chain.is_empty());
-    ctx.data_mut(|d| d.insert_temp(egui::Id::unique(BOLD_AVAILABLE_DATA_KEY), has_bold));
+    let has_numeral =
+        definitions.families.get(&egui::FontFamily::Name(Arc::from(ALIGNED_NUMERAL_FONT_FAMILY))).is_some_and(|chain| !chain.is_empty());
+    ctx.data_mut(|d| {
+        d.insert_temp(egui::Id::unique(BOLD_AVAILABLE_DATA_KEY), has_bold);
+        d.insert_temp(egui::Id::unique(NUMERAL_FAMILY_LOADED_DATA_KEY), has_numeral);
+    });
     ctx.set_fonts(definitions);
 }
 
@@ -121,6 +147,12 @@ pub fn install_font_definitions(ctx: &egui::Context, definitions: egui::FontDefi
 #[must_use]
 pub fn has_bold_font(ctx: &egui::Context) -> bool {
     ctx.data(|d| d.get_temp::<bool>(egui::Id::unique(BOLD_AVAILABLE_DATA_KEY))).unwrap_or(false)
+}
+
+/// Returns `true` when [`ALIGNED_NUMERAL_FONT_FAMILY`] is installed on `ctx`.
+#[must_use]
+pub fn has_aligned_numeral_font(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp::<bool>(egui::Id::unique(NUMERAL_FAMILY_LOADED_DATA_KEY))).unwrap_or(false)
 }
 
 /// Section heading font per §10.2: `type.section` (`13 pt` bold) or `14 pt` regular fallback when no bold face was loaded.
@@ -133,20 +165,58 @@ pub fn section_heading_font_id(ctx: &egui::Context, tokens: &super::Tokens) -> e
     }
 }
 
+/// Aligned `13 pt` numeral font (`type.numeral`) backed by the runtime `'0'..='9'` advance-width
+/// check (`docs/design-language.md` §3).
+#[must_use]
+pub fn aligned_numeral_font_id(ctx: &egui::Context, tokens: &super::Tokens) -> egui::FontId {
+    if has_aligned_numeral_font(ctx) {
+        egui::FontId::new(tokens.metrics.font_grid_numeral_pt, egui::FontFamily::Name(Arc::from(ALIGNED_NUMERAL_FONT_FAMILY)))
+    } else {
+        egui::FontId::monospace(tokens.metrics.font_grid_numeral_pt)
+    }
+}
+
+/// Measure ASCII `'0'..='9'` advance widths on an SFNT or `.ttc` sub-face and return `true` when
+/// all ten digits share uniform advance width (within `0.005 em`).
+#[must_use]
+pub fn face_has_uniform_ascii_digits(bytes: &[u8], face_index: u32) -> bool {
+    let faces = curvebook_text::TrueTypeFont::parse_collection(bytes);
+    let Some((_, ttf)) = faces.get(face_index as usize).or_else(|| faces.first()) else {
+        return false;
+    };
+    let mut min_adv = f64::INFINITY;
+    let mut max_adv = f64::NEG_INFINITY;
+    for digit in '0'..='9' {
+        let Some(adv) = ttf.advance_em(digit) else {
+            return false;
+        };
+        if !adv.is_finite() || adv <= 0.0 {
+            return false;
+        }
+        min_adv = min_adv.min(adv);
+        max_adv = max_adv.max(adv);
+    }
+    (max_adv - min_adv) <= 0.005
+}
+
 /// Install [`egui::FontDefinitions`] into `ctx`, reusing a process-wide cached default build when
 /// `CURVEBOOK_FONTS_DIR` is unset so offscreen inspection/raster passes do not re-index host fonts.
 pub fn install_default_egui_fonts_cached(ctx: &egui::Context) {
-    static DEFAULT_FONT_DEFS: OnceLock<(egui::FontDefinitions, bool)> = OnceLock::new();
+    static DEFAULT_FONT_DEFS: OnceLock<(egui::FontDefinitions, bool, bool)> = OnceLock::new();
     let has_env_override = std::env::var_os("CURVEBOOK_FONTS_DIR").is_some_and(|v| !v.is_empty());
     if has_env_override {
         let _ = install_egui_fonts(ctx);
         return;
     }
-    let (defs, has_bold) = DEFAULT_FONT_DEFS.get_or_init(|| {
+    let (defs, has_bold, has_numeral) = DEFAULT_FONT_DEFS.get_or_init(|| {
         let built = build_egui_font_definitions();
-        (built.definitions, built.report.bold_face_loaded)
+        let has_num = built.definitions.families.get(&egui::FontFamily::Name(Arc::from(ALIGNED_NUMERAL_FONT_FAMILY))).is_some_and(|c| !c.is_empty());
+        (built.definitions, built.report.bold_face_loaded, has_num)
     });
-    ctx.data_mut(|d| d.insert_temp(egui::Id::unique(BOLD_AVAILABLE_DATA_KEY), *has_bold));
+    ctx.data_mut(|d| {
+        d.insert_temp(egui::Id::unique(BOLD_AVAILABLE_DATA_KEY), *has_bold);
+        d.insert_temp(egui::Id::unique(NUMERAL_FAMILY_LOADED_DATA_KEY), *has_numeral);
+    });
     ctx.set_fonts(defs.clone());
 }
 
@@ -303,10 +373,8 @@ fn assemble_font_definitions(
         }
     }
 
-    let bold_id = first_regular_nonmono_id(rctx.db, env_ids)
-        .or_else(|| first_regular_nonmono_id(rctx.db, bundled_ids))
-        .or(os_prop_id)
-        .and_then(|reg_id| query_primary_proportional_bold(rctx.db, reg_id));
+    let primary_prop_id = first_regular_nonmono_id(rctx.db, env_ids).or_else(|| first_regular_nonmono_id(rctx.db, bundled_ids)).or(os_prop_id);
+    let bold_id = primary_prop_id.and_then(|reg_id| query_primary_proportional_bold(rctx.db, reg_id));
 
     rctx.defs.families.insert(egui::FontFamily::Proportional, proportional);
     rctx.defs.families.insert(egui::FontFamily::Monospace, monospace);
@@ -314,6 +382,12 @@ fn assemble_font_definitions(
     // Deterministic cleanroom SFNT layers: sans first, mandatory symbols right after.
     append_cleanroom_sans_fallback(rctx.defs);
     append_symbol_fallback(rctx.defs);
+
+    let (numeral_chain, primary_digits_uniform, numeral_strategy) =
+        build_aligned_numeral_chain(&mut rctx, primary_prop_id, env_ids, bundled_ids, os_ids);
+    rctx.defs.families.insert(egui::FontFamily::Name(Arc::from(ALIGNED_NUMERAL_FONT_FAMILY)), numeral_chain);
+    report.primary_digits_uniform = primary_digits_uniform;
+    report.numeral_font_strategy = numeral_strategy;
 
     if let Some(bid) = bold_id {
         let mut bold_chain = Vec::new();
@@ -439,6 +513,64 @@ fn first_regular_nonmono_id(db: &fontdb::Database, ids: &[fontdb::ID]) -> Option
     ids.iter()
         .copied()
         .find(|&id| db.face(id).is_some_and(|f| f.style == fontdb::Style::Normal && f.weight == fontdb::Weight::NORMAL && !f.monospaced))
+}
+
+fn db_face_has_uniform_ascii_digits(db: &fontdb::Database, id: fontdb::ID) -> bool {
+    let Some((fontdb::Source::Binary(blob), face_index)) = db.face_source(id) else {
+        return false;
+    };
+    face_has_uniform_ascii_digits((*blob).as_ref(), face_index)
+}
+
+fn find_uniform_digit_sans_id(
+    db: &fontdb::Database,
+    exclude_id: Option<fontdb::ID>,
+    env_ids: &[fontdb::ID],
+    bundled_ids: &[fontdb::ID],
+    os_ids: &[fontdb::ID],
+) -> Option<fontdb::ID> {
+    for slice in [env_ids, bundled_ids, os_ids] {
+        for &id in slice {
+            if Some(id) == exclude_id {
+                continue;
+            }
+            let is_reg_sans = db.face(id).is_some_and(|f| f.style == fontdb::Style::Normal && f.weight == fontdb::Weight::NORMAL && !f.monospaced);
+            if is_reg_sans && db_face_has_uniform_ascii_digits(db, id) {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
+
+fn build_aligned_numeral_chain(
+    rctx: &mut FontRegisterCtx<'_>,
+    primary_prop_id: Option<fontdb::ID>,
+    env_ids: &[fontdb::ID],
+    bundled_ids: &[fontdb::ID],
+    os_ids: &[fontdb::ID],
+) -> (Vec<String>, bool, NumeralFontStrategy) {
+    let primary_uniform = primary_prop_id.is_some_and(|id| db_face_has_uniform_ascii_digits(rctx.db, id));
+    if primary_uniform {
+        let chain = rctx.defs.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default();
+        return (chain, true, NumeralFontStrategy::PrimarySans);
+    }
+    if let Some(alt_id) = find_uniform_digit_sans_id(rctx.db, primary_prop_id, env_ids, bundled_ids, os_ids) {
+        let mut chain = Vec::new();
+        let mut seen = HashSet::new();
+        if register_face_for_family(rctx, alt_id, "os_numeral_sans", &mut seen, &mut chain) {
+            if let Some(prop_chain) = rctx.defs.families.get(&egui::FontFamily::Proportional) {
+                for key in prop_chain {
+                    if !chain.iter().any(|existing| existing == key) {
+                        chain.push(key.clone());
+                    }
+                }
+            }
+            return (chain, false, NumeralFontStrategy::UniformSystemSans);
+        }
+    }
+    let mono_chain = rctx.defs.families.get(&egui::FontFamily::Monospace).cloned().unwrap_or_default();
+    (mono_chain, false, NumeralFontStrategy::MonospaceFallback)
 }
 
 fn query_primary_proportional(db: &fontdb::Database) -> Option<fontdb::ID> {
@@ -962,5 +1094,37 @@ mod tests {
                 egui::FontId::new(13.0, egui::FontFamily::Name(std::sync::Arc::from(super::BOLD_FONT_FAMILY)))
             );
         }
+    }
+
+    #[test]
+    fn runtime_digit_width_check_selects_aligned_numeral_font_family() {
+        // Minimal cleanroom fallback TTF has uniform glyph advance widths across ASCII '0'..='9'.
+        let minimal = build_minimal_truetype_font();
+        assert!(super::face_has_uniform_ascii_digits(&minimal, 0));
+        assert!(!super::face_has_uniform_ascii_digits(b"not-a-font", 0));
+
+        let ctx = egui::Context::default();
+        let report = install_egui_fonts(&ctx);
+        let tokens = crate::egui_shell::Tokens::default();
+        assert!(super::has_aligned_numeral_font(&ctx));
+        assert_eq!(
+            super::aligned_numeral_font_id(&ctx, &tokens),
+            egui::FontId::new(13.0, egui::FontFamily::Name(std::sync::Arc::from(super::ALIGNED_NUMERAL_FONT_FAMILY)))
+        );
+        // Verify all ASCII digits lay out with uniform advance width in the resolved numeral family.
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            let num_font = super::aligned_numeral_font_id(ui.ctx(), &tokens);
+            let mut widths = Vec::new();
+            ui.ctx().fonts_mut(|fonts| {
+                for d in '0'..='9' {
+                    let g = fonts.layout_no_wrap(d.to_string(), num_font.clone(), egui::Color32::WHITE);
+                    widths.push(g.rect.width());
+                }
+            });
+            let min_w = widths.iter().copied().fold(f32::INFINITY, f32::min);
+            let max_w = widths.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            assert!((max_w - min_w) <= 0.5, "aligned numeral family ({:?}) produced uneven digit widths: {widths:?}", report.numeral_font_strategy);
+        })
+        .drop_without_applying_deltas();
     }
 }

@@ -126,6 +126,7 @@ impl WorkspacePreset {
 pub struct LayoutMetrics {
     pub app_bar_h: f32,
     pub action_strip_h: f32,
+    pub panel_header_h: f32,
     pub status_bar_h: f32,
     pub navigator_default_w: f32,
     pub navigator_min_w: f32,
@@ -177,6 +178,7 @@ impl LayoutMetrics {
     pub const CANONICAL: Self = Self {
         app_bar_h: 32.0,
         action_strip_h: 38.0,
+        panel_header_h: 32.0,
         status_bar_h: 26.0,
         navigator_default_w: 240.0,
         navigator_min_w: 180.0,
@@ -199,7 +201,7 @@ impl LayoutMetrics {
         scroll_bar_hover_thickness: 12.0,
         font_ui_body_pt: 13.0,
         font_ui_small_pt: 11.5,
-        font_grid_numeral_pt: 12.5,
+        font_grid_numeral_pt: 13.0,
         font_ui_section_pt: 13.0,
         font_ui_title_pt: 15.0,
         font_ui_display_pt: 18.0,

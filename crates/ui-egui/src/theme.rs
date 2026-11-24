@@ -59,6 +59,7 @@ pub struct DerivedUiPalette {
     pub mode: UiThemeMode,
     pub app_bar: Rgba8,
     pub panel_bg: Rgba8,
+    pub surface_recessed: Rgba8,
     pub surface_bg: Rgba8,
     pub canvas_mat: Rgba8,
     pub header_bg: Rgba8,
@@ -67,6 +68,7 @@ pub struct DerivedUiPalette {
     pub hover_bg: Rgba8,
     pub hover_border: Rgba8,
     pub active_bg: Rgba8,
+    pub selection_unemphasized_bg: Rgba8,
     pub focus_ring: Rgba8,
     pub input_bg: Rgba8,
     pub input_border: Rgba8,
@@ -118,6 +120,7 @@ impl DerivedUiPalette {
                 let dark_ink = Oklch::new(0.18, nc * 1.25, nh).to_rgba8_gamut_mapped();
                 let n = oklab_even_steps(dark_ink, Rgba8::WHITE, 17);
                 let panel_bg = lerp_oklab(n[15], n[16], 0.42);
+                let surface_recessed = lerp_oklab(n[14], n[15], 0.35);
                 let surface_bg = n[16];
                 let button_bg = lerp_oklab(n[15], n[16], 0.15);
                 let app_bar = n[15];
@@ -127,6 +130,7 @@ impl DerivedUiPalette {
                 let accent_wash = Oklch::new(0.83, ac * 0.48, ah).to_rgba8_gamut_mapped();
                 let hover_bg = lerp_oklab(n[13], accent_wash, 0.36);
                 let active_bg = lerp_oklab(n[12], accent_wash, 0.46);
+                let selection_unemphasized_bg = n[14];
                 let border = n[8];
                 let error = Oklch::new(0.45, seeds.error.c, seeds.error.h_deg).to_rgba8_gamut_mapped();
                 let warning = Oklch::new(0.45, seeds.warning.c, seeds.warning.h_deg).to_rgba8_gamut_mapped();
@@ -137,14 +141,16 @@ impl DerivedUiPalette {
                     mode,
                     app_bar,
                     panel_bg,
+                    surface_recessed,
                     surface_bg,
-                    canvas_mat: app_bar,
+                    canvas_mat: surface_recessed,
                     header_bg: app_bar,
                     border,
                     divider: n[14],
                     hover_bg,
                     hover_border: accent,
                     active_bg,
+                    selection_unemphasized_bg,
                     focus_ring: accent,
                     input_bg: surface_bg,
                     input_border: border,
@@ -179,6 +185,7 @@ impl DerivedUiPalette {
                 let light_top = Oklch::new(0.97, nc * 0.50, nh).to_rgba8_gamut_mapped();
                 let n = oklab_even_steps(dark_base, light_top, 17);
                 let app_bar = n[0];
+                let surface_recessed = lerp_oklab(n[0], n[1], 0.30);
                 let panel_bg = n[1];
                 let surface_bg = n[2];
                 let header_bg = n[3];
@@ -190,6 +197,7 @@ impl DerivedUiPalette {
                 let active_tint = Oklch::new(0.41, ac * 0.65, ah).to_rgba8_gamut_mapped();
                 let hover_bg = lerp_oklab(n[5], hover_tint, 0.35);
                 let active_bg = lerp_oklab(n[4], active_tint, 0.45);
+                let selection_unemphasized_bg = n[4];
                 let error = Oklch::new(0.74, seeds.error.c * 0.85, seeds.error.h_deg).to_rgba8_gamut_mapped();
                 let warning = Oklch::new(0.78, seeds.warning.c * 1.05, seeds.warning.h_deg).to_rgba8_gamut_mapped();
                 let stale = Oklch::new(0.79, seeds.stale.c * 1.05, seeds.stale.h_deg).to_rgba8_gamut_mapped();
@@ -199,14 +207,16 @@ impl DerivedUiPalette {
                     mode,
                     app_bar,
                     panel_bg,
+                    surface_recessed,
                     surface_bg,
-                    canvas_mat: lerp_oklab(n[0], n[1], 0.30),
+                    canvas_mat: surface_recessed,
                     header_bg,
                     border,
                     divider: n[4],
                     hover_bg,
                     hover_border: accent,
                     active_bg,
+                    selection_unemphasized_bg,
                     focus_ring: accent,
                     input_bg: app_bar,
                     input_border: border,
@@ -239,6 +249,7 @@ impl DerivedUiPalette {
             UiThemeMode::HighContrast => {
                 let n = oklab_even_steps(Rgba8::BLACK, Rgba8::WHITE, 17);
                 let panel_bg = n[0];
+                let surface_recessed = n[1];
                 let surface_bg = lerp_oklab(n[1], n[2], 0.35);
                 let border = n[14];
                 let accent = Oklch::new(0.85, ac * 0.85, ah).to_rgba8_gamut_mapped();
@@ -248,6 +259,7 @@ impl DerivedUiPalette {
                 let active_tint = Oklch::new(0.42, ac * 0.75, ah).to_rgba8_gamut_mapped();
                 let hover_bg = lerp_oklab(n[5], hover_tint, 0.40);
                 let active_bg = lerp_oklab(n[6], active_tint, 0.50);
+                let selection_unemphasized_bg = n[4];
                 let error = Oklch::new(0.83, seeds.error.c * 0.75, seeds.error.h_deg).to_rgba8_gamut_mapped();
                 let warning = Oklch::new(0.86, seeds.warning.c, seeds.warning.h_deg).to_rgba8_gamut_mapped();
                 let stale = Oklch::new(0.87, seeds.stale.c, seeds.stale.h_deg).to_rgba8_gamut_mapped();
@@ -257,14 +269,16 @@ impl DerivedUiPalette {
                     mode,
                     app_bar: panel_bg,
                     panel_bg,
+                    surface_recessed,
                     surface_bg,
-                    canvas_mat: n[1],
+                    canvas_mat: surface_recessed,
                     header_bg: n[3],
                     border,
                     divider: n[12],
                     hover_bg,
                     hover_border: accent,
                     active_bg,
+                    selection_unemphasized_bg,
                     focus_ring: accent,
                     input_bg: panel_bg,
                     input_border: border,
@@ -871,10 +885,15 @@ mod tests {
     fn derived_palette_keeps_chrome_neutral_and_accent_distinct_from_okabe_ito_series() {
         for mode in UiThemeMode::ALL {
             let p = super::DerivedUiPalette::for_mode(mode);
-            for neutral in [p.panel_bg, p.surface_bg, p.app_bar, p.header_bg, p.divider, p.border] {
+            for neutral in [p.panel_bg, p.surface_recessed, p.surface_bg, p.app_bar, p.header_bg, p.divider, p.border, p.selection_unemphasized_bg] {
                 assert!(neutral.to_oklch().c <= 0.02, "{mode:?} chrome neutral {neutral:?} exceeded low-chroma cap");
             }
         }
+        let dark = super::DerivedUiPalette::for_mode(UiThemeMode::Dark);
+        assert!(
+            dark.surface_recessed.to_oklab().l < dark.panel_bg.to_oklab().l && dark.panel_bg.to_oklab().l < dark.surface_bg.to_oklab().l,
+            "Dark Mode higher surface tiers must step lighter in OKLab"
+        );
         let light_accent = super::DerivedUiPalette::for_mode(UiThemeMode::Light).accent.to_oklab();
         for &series_color in curvebook_palette::OKABE_ITO {
             let dist = light_accent.distance(series_color.to_oklab());

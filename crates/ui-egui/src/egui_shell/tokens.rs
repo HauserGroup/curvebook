@@ -96,6 +96,7 @@ pub struct Tokens {
     pub metrics: LayoutMetrics,
     pub app_bar: Color32,
     pub panel_bg: Color32,
+    pub surface_recessed: Color32,
     pub surface_bg: Color32,
     pub canvas_mat: Color32,
     pub header_bg: Color32,
@@ -104,6 +105,7 @@ pub struct Tokens {
     pub hover_bg: Color32,
     pub hover_border: Color32,
     pub active_bg: Color32,
+    pub selection_unemphasized_bg: Color32,
     pub focus_ring: Color32,
     pub input_bg: Color32,
     pub input_border: Color32,
@@ -167,6 +169,7 @@ impl Tokens {
             metrics: LayoutMetrics::CANONICAL,
             app_bar: rgba8_to_color32(p.app_bar),
             panel_bg: rgba8_to_color32(spec.panel_bg),
+            surface_recessed: rgba8_to_color32(p.surface_recessed),
             surface_bg: rgba8_to_color32(spec.surface_bg),
             canvas_mat: rgba8_to_color32(p.canvas_mat),
             header_bg: rgba8_to_color32(p.header_bg),
@@ -175,6 +178,7 @@ impl Tokens {
             hover_bg: rgba8_to_color32(p.hover_bg),
             hover_border: rgba8_to_color32(p.hover_border),
             active_bg: rgba8_to_color32(p.active_bg),
+            selection_unemphasized_bg: rgba8_to_color32(p.selection_unemphasized_bg),
             focus_ring: rgba8_to_color32(p.focus_ring),
             input_bg: rgba8_to_color32(p.input_bg),
             input_border: border,
@@ -319,6 +323,7 @@ impl Tokens {
         let mut violations = Vec::new();
         let text_pairs = [
             ("text_primary on surface_bg", self.text_primary, self.surface_bg),
+            ("text_primary on surface_recessed", self.text_primary, self.surface_recessed),
             ("text_primary on panel_bg", self.text_primary, self.panel_bg),
             ("text_primary on app_bar", self.text_primary, self.app_bar),
             ("text_primary on header_bg", self.text_primary, self.header_bg),
@@ -326,12 +331,16 @@ impl Tokens {
             ("text_primary on button_bg", self.text_primary, self.button_bg),
             ("text_primary on hover_bg", self.text_primary, self.hover_bg),
             ("text_primary on active_bg", self.text_primary, self.active_bg),
+            ("text_primary on selection_unemphasized_bg", self.text_primary, self.selection_unemphasized_bg),
             ("text_strong on surface_bg", self.text_strong, self.surface_bg),
+            ("text_strong on surface_recessed", self.text_strong, self.surface_recessed),
             ("text_strong on panel_bg", self.text_strong, self.panel_bg),
             ("text_strong on hover_bg", self.text_strong, self.hover_bg),
             ("text_strong on active_bg", self.text_strong, self.active_bg),
+            ("text_strong on selection_unemphasized_bg", self.text_strong, self.selection_unemphasized_bg),
             ("selected_accent_text on active_bg", self.selected_accent_text(), self.active_bg),
             ("text_muted on surface_bg", self.text_muted, self.surface_bg),
+            ("text_muted on surface_recessed", self.text_muted, self.surface_recessed),
             ("text_muted on panel_bg", self.text_muted, self.panel_bg),
             ("text_muted on app_bar", self.text_muted, self.app_bar),
             ("text_muted on header_bg", self.text_muted, self.header_bg),
@@ -339,9 +348,11 @@ impl Tokens {
             ("text_muted on button_bg", self.text_muted, self.button_bg),
             ("text_muted on hover_bg", self.text_muted, self.hover_bg),
             ("text_muted on active_bg", self.text_muted, self.active_bg),
+            ("text_muted on selection_unemphasized_bg", self.text_muted, self.selection_unemphasized_bg),
             ("on_accent on accent_strong", self.on_accent, self.accent_strong),
             ("on_accent on accent_hover", self.on_accent, self.accent_hover),
             ("accent on surface_bg", self.accent, self.surface_bg),
+            ("accent on surface_recessed", self.accent, self.surface_recessed),
             ("accent on panel_bg", self.accent, self.panel_bg),
             ("accent on button_bg", self.accent, self.button_bg),
             ("accent on header_bg", self.accent, self.header_bg),
@@ -359,21 +370,28 @@ impl Tokens {
         let ui_pairs = [
             ("border on surface_bg", self.border, self.surface_bg),
             ("border on panel_bg", self.border, self.panel_bg),
+            ("border on surface_recessed", self.border, self.surface_recessed),
             ("input_border on surface_bg", self.input_border, self.surface_bg),
             ("input_border on input_bg", self.input_border, self.input_bg),
+            ("input_border on surface_recessed", self.input_border, self.surface_recessed),
             ("button_border on panel_bg", self.button_border, self.panel_bg),
             ("button_border on button_bg", self.button_border, self.button_bg),
             ("focus_ring on surface_bg", self.focus_ring, self.surface_bg),
             ("focus_ring on panel_bg", self.focus_ring, self.panel_bg),
+            ("focus_ring on surface_recessed", self.focus_ring, self.surface_recessed),
             ("hover_border on panel_bg", self.hover_border, self.panel_bg),
             ("hover_border on surface_bg", self.hover_border, self.surface_bg),
             ("hover_border on hover_bg", self.hover_border, self.hover_bg),
             ("accent border on active_bg", self.accent, self.active_bg),
             ("accent border on surface_bg", self.accent, self.surface_bg),
+            ("accent border on surface_recessed", self.accent, self.surface_recessed),
             ("accent border on panel_bg", self.accent, self.panel_bg),
             ("accent border on header_bg", self.accent, self.header_bg),
+            ("on_accent check/thumb on accent_strong", self.on_accent, self.accent_strong),
+            ("on_accent check/thumb on accent_hover", self.on_accent, self.accent_hover),
             ("icon on surface_bg", self.icon, self.surface_bg),
             ("icon on panel_bg", self.icon, self.panel_bg),
+            ("icon on surface_recessed", self.icon, self.surface_recessed),
             ("role_num on surface_bg", self.role_num, self.surface_bg),
             ("role_cat on surface_bg", self.role_cat, self.surface_bg),
             ("role_lbl on surface_bg", self.role_lbl, self.surface_bg),
@@ -435,5 +453,34 @@ mod tests {
         assert_eq!(ScientificPaletteTokens::blue_white_vermilion_stops().len(), 3);
         let first = color32_to_rgba8(ScientificPaletteTokens::okabe_ito_series()[0]);
         assert_eq!(first, curvebook_palette::Rgba8::BLACK);
+    }
+
+    #[test]
+    fn wcag_22_sc_1_4_11_non_text_contrast_across_all_themes() {
+        for mode in UiThemeMode::ALL {
+            let t = Tokens::for_mode(mode);
+            let violations = t.contrast_violations();
+            assert!(violations.is_empty(), "WCAG 2.2 SC 1.4.3/1.4.11 violations for {mode:?}: {violations:#?}");
+
+            // Explicitly verify borderless & recessed control state cues (>= 3.0:1).
+            let state_cues = [
+                ("active tab underline on panel_bg", t.accent, t.panel_bg),
+                ("active tab underline on surface_bg", t.accent, t.surface_bg),
+                ("checked checkbox/switch outline on surface_bg", t.accent, t.surface_bg),
+                ("checked checkbox/switch outline on panel_bg", t.accent, t.panel_bg),
+                ("checked checkbox/switch outline on surface_recessed", t.accent, t.surface_recessed),
+                ("checkbox/switch tick/thumb on accent_strong", t.on_accent, t.accent_strong),
+                ("unchecked checkbox/switch border on surface_recessed", t.input_border, t.surface_recessed),
+                ("segmented active border on surface_recessed", t.border, t.surface_recessed),
+                ("focus ring on surface_recessed", t.focus_ring, t.surface_recessed),
+                ("focus ring on active_bg", t.focus_ring, t.active_bg),
+                ("error indicator on panel_bg", t.error, t.panel_bg),
+                ("warning indicator on panel_bg", t.warning, t.panel_bg),
+            ];
+            for (name, fg, bg) in state_cues {
+                let ratio = color32_to_rgba8(fg).contrast_ratio(color32_to_rgba8(bg));
+                assert!(ratio >= 3.0, "{mode:?} SC 1.4.11 failed for {name}: {ratio:.2}:1 < 3.0:1");
+            }
+        }
     }
 }

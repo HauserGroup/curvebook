@@ -123,7 +123,7 @@ fn layout_metrics_canonical_scale_motion_cap_and_style_tokens() {
     let m = LayoutMetrics::CANONICAL;
     assert_eq!((m.space_xxs, m.space_xs, m.space_sm, m.space_md, m.space_lg, m.space_xl, m.space_xxl), (2.0, 4.0, 6.0, 8.0, 12.0, 16.0, 24.0));
     assert_eq!(m.font_ui_small_pt, 11.5);
-    assert_eq!(m.font_grid_numeral_pt, 12.5);
+    assert_eq!(m.font_grid_numeral_pt, 13.0);
     assert_eq!(m.font_ui_body_pt, 13.0);
     assert_eq!(m.font_ui_section_pt, 13.0);
     assert_eq!(m.font_ui_title_pt, 15.0);
@@ -138,7 +138,7 @@ fn layout_metrics_canonical_scale_motion_cap_and_style_tokens() {
     assert_eq!(style.text_styles[&egui::TextStyle::Small].size, 11.5);
     assert_eq!(style.text_styles[&egui::TextStyle::Body].size, 13.0);
     assert_eq!(style.text_styles[&egui::TextStyle::Button].size, 13.0);
-    assert_eq!(style.text_styles[&egui::TextStyle::Monospace].size, 12.5);
+    assert_eq!(style.text_styles[&egui::TextStyle::Monospace].size, 13.0);
     assert_eq!(style.text_styles[&egui::TextStyle::Heading].size, 15.0);
     assert_eq!(style.visuals.window_corner_radius, egui::CornerRadius::same(6));
     assert_eq!(style.visuals.widgets.inactive.corner_radius, egui::CornerRadius::same(4));
