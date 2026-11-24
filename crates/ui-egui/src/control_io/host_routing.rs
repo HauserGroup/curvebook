@@ -106,6 +106,7 @@ pub fn is_read_only_ui_command(command_id: &str) -> bool {
             | "ui.split.set"
             | "ui.grid.selectRange"
             | "ui.clipboard.copy"
+            | "ui.clipboard.copyForSlides"
             | "ui.export.figure"
             | "ui.print.open"
             | "file.print"

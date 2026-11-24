@@ -234,6 +234,7 @@ fn resolve_embedded_truetype(options: &PdfExportOptions, compress_for_embedding:
 
 #[derive(Default)]
 struct PageResourcesUsed {
+    fonts: BTreeSet<PdfFontId>,
     gs_both: BTreeSet<u8>,
     gs_stroke: BTreeSet<u8>,
     images: BTreeSet<usize>,
@@ -692,10 +693,23 @@ fn build_page_dict(
         let [llx, lly, urx, ury] = rect_to_pdf_box(bleed, scene.height_pt);
         let _ = write!(dict, " /BleedBox [{llx:.3} {lly:.3} {urx:.3} {ury:.3}]");
     }
-    if let Some(ttf_id) = encoded.used.ttf.then_some(ttf_font_id).flatten() {
-        let _ = write!(dict, " /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R /F4 6 0 R /F5 7 0 R /F6 {ttf_id} 0 R >>");
-    } else {
-        dict.push_str(" /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R /F4 6 0 R /F5 7 0 R >>");
+    dict.push_str(" /Resources <<");
+    if !encoded.used.fonts.is_empty() {
+        dict.push_str(" /Font <<");
+        for &font in &encoded.used.fonts {
+            let obj_id = match font {
+                PdfFontId::Helvetica => Some(3),
+                PdfFontId::HelveticaBold => Some(4),
+                PdfFontId::HelveticaOblique => Some(5),
+                PdfFontId::Symbol => Some(6),
+                PdfFontId::HelveticaBoldOblique => Some(7),
+                PdfFontId::EmbeddedTrueType => ttf_font_id,
+            };
+            if let Some(id) = obj_id {
+                let _ = write!(dict, " /{} {id} 0 R", font.tag());
+            }
+        }
+        dict.push_str(" >>");
     }
     if !encoded.used.gs_both.is_empty() || !encoded.used.gs_stroke.is_empty() {
         dict.push_str(" /ExtGState <<");
@@ -1171,6 +1185,7 @@ impl StreamCtx<'_> {
         if bytes.is_empty() {
             return;
         }
+        self.used.fonts.insert(font);
         if font == PdfFontId::EmbeddedTrueType {
             self.used.ttf = true;
         }
@@ -1424,7 +1439,7 @@ impl TextOutlineTransform {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum PdfFontId {
     Helvetica,
     HelveticaBold,

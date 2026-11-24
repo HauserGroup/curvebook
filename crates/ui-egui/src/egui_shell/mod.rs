@@ -1138,6 +1138,7 @@ pub enum UiIntent {
     GridCutSelection,
     GridPasteFromClipboard { start_coord: Option<curvebook_tools::GridCellCoord> },
     WorkspaceCopy { dpi: u16 },
+    WorkspaceCopyForSlides { dpi: u16 },
     SyncResultSelection { sheet_id: SheetId, tab_index: usize, anchor: (usize, usize), focus: (usize, usize) },
     CanvasPaste { target_sheet_id: SheetId, anchor_pt: Option<[f64; 2]> },
     PasteImageFromClipboard { target_sheet_id: SheetId, anchor_pt: Option<[f64; 2]> },
@@ -1474,6 +1475,11 @@ impl PendingUiIntents {
     /// Copy selection or active Graph/Layout vector [`crate::os_integration::ClipboardBundle`] cleanly on commit.
     pub fn push_workspace_copy(&mut self, dpi: u16) {
         self.queue.push(UiIntent::WorkspaceCopy { dpi });
+    }
+
+    /// Copy the active Graph/Layout [`crate::os_integration::ClipboardBundle`] at slide/document DPI (omitting raw `<svg>` plain-text fallback).
+    pub fn push_workspace_copy_for_slides(&mut self, dpi: u16) {
+        self.queue.push(UiIntent::WorkspaceCopyForSlides { dpi });
     }
 
     /// Synchronize active `ResultSheet` rectangular cell-range selection onto `app.view_shards.results`.
@@ -1874,6 +1880,7 @@ fn apply_wave4_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutco
         | UiIntent::GridCutSelection
         | UiIntent::GridPasteFromClipboard { .. }
         | UiIntent::WorkspaceCopy { .. }
+        | UiIntent::WorkspaceCopyForSlides { .. }
         | UiIntent::CanvasPaste { .. }
         | UiIntent::PasteImageFromClipboard { .. } => apply_wave4_grid_wizard_intent(app, intent),
         UiIntent::SetAnalyzeQuery { .. }
@@ -2142,6 +2149,7 @@ fn apply_wave4_grid_wizard_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
         UiIntent::GridCutSelection => execute_grid_clipboard_copy(app, true),
         UiIntent::GridPasteFromClipboard { start_coord } => execute_grid_clipboard_paste(app, start_coord),
         UiIntent::WorkspaceCopy { dpi } => execute_workspace_copy(app, dpi),
+        UiIntent::WorkspaceCopyForSlides { dpi } => execute_workspace_copy_for_slides(app, dpi),
         UiIntent::CanvasPaste { target_sheet_id, anchor_pt } => execute_canvas_paste(app, &target_sheet_id, anchor_pt),
         UiIntent::PasteImageFromClipboard { target_sheet_id, anchor_pt } => execute_paste_image_from_clipboard(app, &target_sheet_id, anchor_pt),
         _ => Ok(UiIntentOutcome::ShellUpdated),
@@ -2232,6 +2240,20 @@ fn execute_workspace_copy(app: &mut UiApp, dpi: u16) -> Result<UiIntentOutcome, 
     }
     if app.session.document().active_sheet_id.as_ref().is_some_and(|id| app.session.document().data_sheet(id).is_some()) {
         return execute_grid_clipboard_copy(app, false);
+    }
+    Ok(UiIntentOutcome::ShellUpdated)
+}
+
+fn execute_workspace_copy_for_slides(app: &mut UiApp, dpi: u16) -> Result<UiIntentOutcome, EngineError> {
+    if !app.egui_views.launcher_open
+        && !app.nav.welcome.open
+        && !app.nav.gallery.open
+        && let Some(fig_id) = crate::interaction::resolve_figure_sheet_for_shortcut(app)
+            .or_else(|| command_palette::resolve_renderable_sheet_id_for_menu(app.document()))
+    {
+        let outcome = crate::interaction::copy_figure_sheet_slide_bundle_dpi(app, &fig_id, dpi)
+            .map_err(|msg| EngineError::with_code(ErrorCode::Conflict, msg))?;
+        return Ok(UiIntentOutcome::Ui { command_id: outcome.command_id.unwrap_or(outcome.action), result: outcome.command_result });
     }
     Ok(UiIntentOutcome::ShellUpdated)
 }

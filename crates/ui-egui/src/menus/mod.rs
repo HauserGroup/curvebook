@@ -60,6 +60,7 @@ pub const DESKTOP_HOST_ROUTED_COMMANDS: &[&str] = &[
     "app.quit",
     "edit.cut",
     "edit.copy",
+    "ui.clipboard.copyForSlides",
     "edit.paste",
 ];
 

@@ -29,10 +29,11 @@ use curvebook_ui_egui::egui_shell::inspect_bridge::render_egui_shell_frame;
 use curvebook_ui_egui::interaction::{KeyModifiers, ViewportMetrics};
 use curvebook_ui_egui::os_integration::StubPlatformClipboardAdapter;
 use curvebook_ui_egui::{
-    ClipboardBundle, FontBook, LOCALES, OsAdapterAvailability, OsAdapterStatus, PlatformClipboardAdapter, RenderTargetSpec, ScreenshotRegionTarget,
-    UiApp, UiThemeMode, is_draft_translation_locale, locale_display_name, locale_picker_label,
+    ClipboardBundle, FontBook, LOCALES, OsAdapterAvailability, OsAdapterStatus, PlatformClipboardAdapter, PointerButton, RenderTargetSpec,
+    ScreenshotRegionTarget, UiApp, UiThemeMode, dispatch_ui_command, is_draft_translation_locale, locale_display_name, locale_picker_label,
 };
 use egui::{Key, Modifiers};
+use serde_json::json;
 
 fn build_r10_23_workspace() -> Result<UiApp, String> {
     let mut doc = ProjectDocument::new("R10.23 Shortcuts & Vector Copy").map_err(|e| e.to_string())?;
@@ -460,5 +461,70 @@ fn r10_23_fontless_embedded_fallback_scenarios_pass_without_host_fonts() -> Resu
             .map_err(|e| e.to_string())?;
         assert!(png.starts_with(b"\x89PNG\r\n\x1a\n") && png.len() > 256);
     }
+    Ok(())
+}
+
+#[test]
+fn r17_2_copy_for_slides_shortcut_context_menu_and_dispatch_ui_command() -> Result<(), String> {
+    let mut app = build_r10_23_workspace()?;
+    let clip_stub = Arc::new(StubPlatformClipboardAdapter::new());
+    app.set_clipboard_adapter(clip_stub.clone());
+    let mut harness = human_wf_common::EguiWfHarness::from_app(app, human_wf_common::default_viewport());
+
+    // 1. Select `graph-1` (checking interactive repaint budget before heavyweight 300 DPI export) and trigger Cmd+Shift+C / Ctrl+Shift+C.
+    harness.click("nav.chip.graphs")?;
+    harness.click("nav.sheet.graph-1")?;
+    human_wf_common::assert_input_to_paint_budget(&harness, 50.0)?;
+    let cmd_shift = Modifiers { command: true, shift: true, ..Modifiers::NONE };
+    let ctrl_shift = Modifiers { ctrl: true, shift: true, ..Modifiers::NONE };
+    harness.driver.press_egui_key(Key::C, cmd_shift);
+    harness.driver.press_egui_key(Key::C, ctrl_shift);
+    let slides_after_keys = clip_stub.captured_slide_bundles();
+    assert_eq!(slides_after_keys.len(), 2, "expected 2 slide bundles from Cmd+Shift+C & Ctrl+Shift+C");
+    assert_eq!(slides_after_keys[0].dpi, 300);
+    assert!(slides_after_keys[0].tiff_bytes.as_deref().is_some_and(|b| b.starts_with(b"II*\0")));
+    assert!(slides_after_keys[0].html.contains("<img src=\"data:image/png;base64,"));
+    assert_valid_vector_bundle(&slides_after_keys[0], "GraphSheet Cmd+Shift+C")?;
+    assert_eq!(harness.app().interaction.last_clipboard_text, None, "Copy for Slides must omit raw <svg> plain text");
+
+    // 2. Right-click GraphSheet canvas -> click `canvas.graph_ctx.copy_for_slides`.
+    let canvas_rect = harness.driver.frame_meta().find_by_widget_id("canvas.viewport").map(|n| n.clipped_rect).ok_or("missing canvas.viewport")?;
+    harness.driver.click_at_button(canvas_rect.center(), PointerButton::Secondary, KeyModifiers::default())?;
+    assert!(
+        harness.driver.frame_meta().find_by_widget_id("canvas.graph_ctx.copy_for_slides").is_some(),
+        "expected Copy for Slides & Documents in GraphSheet context menu"
+    );
+    harness.click("canvas.graph_ctx.copy_for_slides")?;
+
+    // 3. Switch to `layout-1`, right-click canvas -> click `canvas.layout_ctx.copy_for_slides`.
+    harness.click("nav.chip.layouts")?;
+    harness.click("nav.sheet.layout-1")?;
+    let layout_rect =
+        harness.driver.frame_meta().find_by_widget_id("canvas.viewport").map(|n| n.clipped_rect).ok_or("missing layout canvas.viewport")?;
+    harness.driver.click_at_button(layout_rect.center(), PointerButton::Secondary, KeyModifiers::default())?;
+    assert!(
+        harness.driver.frame_meta().find_by_widget_id("canvas.layout_ctx.copy_for_slides").is_some(),
+        "expected Copy for Slides & Documents in LayoutSheet context menu"
+    );
+    harness.click("canvas.layout_ctx.copy_for_slides")?;
+
+    let slides_after_ctx = clip_stub.captured_slide_bundles();
+    assert_eq!(slides_after_ctx.len(), 4);
+    assert_eq!(slides_after_ctx[3].dpi, 300);
+    assert!(slides_after_ctx[3].svg.contains("Composite publication figure panel"));
+
+    // 4. Verify programmatic UI command `ui.clipboard.copyForSlides` with custom DPI (600 DPI).
+    let mut direct_app = build_r10_23_workspace()?;
+    let direct_stub = Arc::new(StubPlatformClipboardAdapter::new());
+    direct_app.set_clipboard_adapter(direct_stub.clone());
+    let val = dispatch_ui_command(&mut direct_app, "ui.clipboard.copyForSlides", &json!({ "sheet_id": "layout-1", "dpi": 600 }))
+        .map_err(|e| e.to_string())?
+        .ok_or("ui.clipboard.copyForSlides not registered")?;
+    assert_eq!(val.get("dpi").and_then(serde_json::Value::as_u64), Some(600));
+    assert_eq!(val.get("omits_plain_text_svg").and_then(serde_json::Value::as_bool), Some(true));
+    assert_eq!(direct_stub.captured_slide_bundles().len(), 1);
+    assert_eq!(direct_stub.captured_slide_bundles()[0].dpi, 600);
+    assert_eq!(direct_app.interaction.last_clipboard_text, None);
+
     Ok(())
 }

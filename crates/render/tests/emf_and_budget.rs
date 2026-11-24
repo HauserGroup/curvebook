@@ -66,6 +66,8 @@ struct ParsedEmfSummary {
     frame_hmm: [i32; 4],
     map_modes: Vec<u32>,
     decoded_texts: Vec<String>,
+    font_face_names: Vec<String>,
+    ext_pen_styles: Vec<u32>,
     polybezier_point_counts: Vec<u32>,
     dib_records: Vec<ParsedDib>,
 }
@@ -88,6 +90,8 @@ struct EmfParserState {
     saw_eof: bool,
     map_modes: Vec<u32>,
     decoded_texts: Vec<String>,
+    font_face_names: Vec<String>,
+    ext_pen_styles: Vec<u32>,
     polybezier_point_counts: Vec<u32>,
     dib_records: Vec<ParsedDib>,
 }
@@ -206,6 +210,7 @@ impl EmfParserState {
             EMR_EXTCREATEPEN => {
                 assert!(n_size >= 56);
                 self.register_handle(rec);
+                self.ext_pen_styles.push(read_u32_le(rec, 28));
             }
             EMR_CREATEBRUSHINDIRECT => {
                 assert_eq!(n_size, 24);
@@ -214,6 +219,13 @@ impl EmfParserState {
             EMR_EXTCREATEFONTINDIRECTW => {
                 assert!(n_size == 332 || n_size == 104, "unexpected font record size {n_size}");
                 self.register_handle(rec);
+                if n_size == 332 {
+                    let units: Vec<u16> =
+                        rec[40..104].as_chunks::<2>().0.iter().map(|&pair| u16::from_le_bytes(pair)).take_while(|&u| u != 0).collect();
+                    if let Ok(face) = String::from_utf16(&units) {
+                        self.font_face_names.push(face);
+                    }
+                }
             }
             EMR_SELECTOBJECT => {
                 assert_eq!(n_size, 12);
@@ -276,6 +288,8 @@ fn parse_and_validate_emf(bytes: &[u8]) -> ParsedEmfSummary {
         saw_eof: false,
         map_modes: Vec::new(),
         decoded_texts: Vec::new(),
+        font_face_names: Vec::new(),
+        ext_pen_styles: Vec::new(),
         polybezier_point_counts: Vec::new(),
         dib_records: Vec::new(),
     };
@@ -312,6 +326,8 @@ fn parse_and_validate_emf(bytes: &[u8]) -> ParsedEmfSummary {
         frame_hmm,
         map_modes: state.map_modes,
         decoded_texts: state.decoded_texts,
+        font_face_names: state.font_face_names,
+        ext_pen_styles: state.ext_pen_styles,
         polybezier_point_counts: state.polybezier_point_counts,
         dib_records: state.dib_records,
     }
@@ -527,4 +543,47 @@ fn encode_raster_emf_emits_bottom_up_bgra_stretchdibits() {
             0, 255, 0, 255, // top-right Green -> BGRA
         ]
     );
+}
+
+#[test]
+fn emf_thick_non_round_solid_uses_extcreatepen_and_normalizes_css_font_stack() {
+    // 1. Thick (>1pt) solid Butt/Miter stroke must upgrade to geometric EMR_EXTCREATEPEN (PS_GEOMETRIC | PS_ENDCAP_FLAT | PS_JOIN_MITER).
+    let mut thick_scene = ChartScene::new("emf-thick-pen", "Thick Pen", 160.0, 100.0, None);
+    thick_scene.primitives.push(ScenePrimitive::Path {
+        path: Path2D::line(PointPt::new(10.0, 20.0), PointPt::new(150.0, 80.0)),
+        fill: None,
+        stroke: Some(StrokePaint { color: Rgba8::BLACK, width_pt: 2.5, dash: LineDashStyle::Solid, cap: LineCap::Butt, join: LineJoin::Miter }),
+        clip: None,
+    });
+    let mut stack_span = RichSpan::plain("Dose (uM)");
+    stack_span.font_family = Some(String::from("\"Helvetica Neue\", Helvetica, sans-serif"));
+    thick_scene.primitives.push(ScenePrimitive::Text(PositionedText {
+        rich: RichText::new(vec![stack_span]),
+        anchor_pt: PointPt::new(20.0, 40.0),
+        font_size_pt: 11.0,
+        anchor: TextAnchor::Start,
+        color: Rgba8::BLACK,
+        rotation_deg: 0.0,
+    }));
+
+    let thick_emf = encode_emf(&thick_scene).expect("thick EMF");
+    let thick_parsed = parse_and_validate_emf(&thick_emf);
+    assert_eq!(thick_parsed.record_counts.get(&EMR_EXTCREATEPEN).copied().unwrap_or(0), 1);
+    assert_eq!(thick_parsed.record_counts.get(&EMR_CREATEPEN).copied().unwrap_or(0), 0);
+    // PS_GEOMETRIC (0x0001_0000) | PS_SOLID (0) | PS_ENDCAP_FLAT (0x0200) | PS_JOIN_MITER (0x2000)
+    assert_eq!(thick_parsed.ext_pen_styles, vec![0x0001_2200]);
+    assert_eq!(thick_parsed.font_face_names, vec![String::from("Helvetica Neue")]);
+
+    // 2. Narrow <=1pt Butt/Miter solid stroke stays on compact EMR_CREATEPEN.
+    let mut thin_scene = ChartScene::new("emf-thin-pen", "Thin Pen", 160.0, 100.0, None);
+    thin_scene.primitives.push(ScenePrimitive::Path {
+        path: Path2D::line(PointPt::new(10.0, 20.0), PointPt::new(150.0, 20.0)),
+        fill: None,
+        stroke: Some(StrokePaint::solid(Rgba8::BLACK, 1.0)),
+        clip: None,
+    });
+    let thin_emf = encode_emf(&thin_scene).expect("thin EMF");
+    let thin_parsed = parse_and_validate_emf(&thin_emf);
+    assert_eq!(thin_parsed.record_counts.get(&EMR_CREATEPEN).copied().unwrap_or(0), 1);
+    assert_eq!(thin_parsed.record_counts.get(&EMR_EXTCREATEPEN).copied().unwrap_or(0), 0);
 }

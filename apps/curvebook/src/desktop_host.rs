@@ -36,7 +36,8 @@ use curvebook_ui_egui::theme::UiThemeMode;
 use curvebook_ui_egui::workspace_nav::WelcomeMode;
 use curvebook_ui_egui::{
     ClipboardBundle, ControlAuth, ControlPostRequestContext, OsAdapterStatus, UiApp, dispatch_ui_command, is_http_request_line,
-    normalize_beta_gui_locale, read_os_pasteboard, serve_control_stream_with_quit_and_hook, tr, write_os_clipboard_bundle, write_os_pasteboard,
+    normalize_beta_gui_locale, read_os_pasteboard, serve_control_stream_with_quit_and_hook, tr, write_os_clipboard_bundle,
+    write_os_clipboard_bundle_for_slides, write_os_pasteboard,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1604,11 +1605,19 @@ pub trait OsClipboardAdapter: fmt::Debug + Send + Sync {
     /// Returns an error if the OS clipboard backend fails unexpectedly.
     fn write_text(&self, text: &str) -> Result<OsAdapterStatus, String>;
 
-    /// Write a multi-flavor [`ClipboardBundle`] (SVG, PDF, PNG, HTML) to the OS pasteboard.
+    /// Write a multi-flavor [`ClipboardBundle`] (SVG, PDF, PNG, TIFF, EMF, HTML) to the OS pasteboard.
     ///
     /// # Errors
     /// Returns an error if the OS clipboard backend fails unexpectedly.
     fn write_bundle(&self, bundle: &ClipboardBundle) -> Result<OsAdapterStatus, String>;
+
+    /// Write a slide/document-focused [`ClipboardBundle`] (omitting raw `<svg>` XML plain-text fallback).
+    ///
+    /// # Errors
+    /// Returns an error if the OS clipboard backend fails unexpectedly.
+    fn write_slide_bundle(&self, bundle: &ClipboardBundle) -> Result<OsAdapterStatus, String> {
+        self.write_bundle(bundle)
+    }
 
     /// Read plain UTF-8 text from the OS pasteboard.
     ///
@@ -1629,6 +1638,10 @@ impl OsClipboardAdapter for SystemOsClipboardAdapter {
         write_os_clipboard_bundle(bundle)
     }
 
+    fn write_slide_bundle(&self, bundle: &ClipboardBundle) -> Result<OsAdapterStatus, String> {
+        write_os_clipboard_bundle_for_slides(bundle)
+    }
+
     fn read_text(&self) -> Result<OsAdapterStatus, String> {
         read_os_pasteboard()
     }
@@ -1644,6 +1657,10 @@ impl OsClipboardAdapter for PlatformOsClipboardBridge {
 
     fn write_bundle(&self, bundle: &ClipboardBundle) -> Result<OsAdapterStatus, String> {
         self.0.write_bundle(bundle)
+    }
+
+    fn write_slide_bundle(&self, bundle: &ClipboardBundle) -> Result<OsAdapterStatus, String> {
+        self.0.write_slide_bundle(bundle)
     }
 
     fn read_text(&self) -> Result<OsAdapterStatus, String> {
@@ -2971,6 +2988,7 @@ impl DesktopHostRuntime {
                 "app.quit" => self.request_app_quit(Some(window_id), false),
                 "edit.cut" => self.cut_selection(window_id),
                 "edit.copy" => self.handle_clipboard_copy(window_id),
+                "ui.clipboard.copyForSlides" => self.handle_clipboard_copy_for_slides(window_id, 300),
                 "edit.paste" => self.handle_clipboard_paste(window_id, None),
                 other => Err(format!("unhandled host action `{other}`")),
             },
@@ -3201,6 +3219,72 @@ impl DesktopHostRuntime {
         Ok(DesktopEventOutcome { handled: true, action, window_id: Some(window_id), command_result: Some(result_json), ..Default::default() })
     }
 
+    /// Copy the active (or first renderable) Graph/Layout sheet at `dpi` (default 300 DPI)
+    /// using the slide/document pasteboard profile (no raw XML plain-text fallback).
+    ///
+    /// # Errors
+    /// Returns an error if the window does not exist or vector/raster clipboard generation fails.
+    pub fn handle_clipboard_copy_for_slides(&mut self, window_id: DesktopWindowId, dpi: u16) -> Result<DesktopEventOutcome, String> {
+        let effective_dpi = dpi.max(72);
+        let sheet_id = {
+            let win = self.window(window_id)?;
+            let doc = win.app.document();
+            doc.active_sheet_id
+                .as_ref()
+                .filter(|id| matches!(doc.sheet_section(id), Some(SheetSection::Graphs | SheetSection::Layouts)))
+                .cloned()
+                .or_else(|| resolve_renderable_sheet_id(doc))
+        };
+        let Some(sheet_id) = sheet_id else {
+            return Ok(DesktopEventOutcome {
+                handled: false,
+                action: String::from("clipboard.copy_nothing_selected"),
+                window_id: Some(window_id),
+                ..Default::default()
+            });
+        };
+
+        let bundle = {
+            let win = self.window(window_id)?;
+            ClipboardBundle::from_sheet(win.app.session(), &sheet_id, effective_dpi)?
+        };
+        let flavors = bundle.available_flavors();
+        let pdf_bytes = bundle.pdf_bytes.len();
+        let svg_bytes = bundle.svg.len();
+        let png_bytes = bundle.png_bytes.len();
+        let tiff_bytes = bundle.tiff_bytes.as_ref().map_or(0, Vec::len);
+        let emf_bytes = bundle.emf_bytes.as_ref().map_or(0, Vec::len);
+        let width_px = bundle.width_px;
+        let height_px = bundle.height_px;
+        let write_res = self.clipboard_adapter.write_slide_bundle(&bundle);
+
+        self.clipboard_text = None;
+        self.clipboard_bundle = Some(bundle);
+        let (action, mut result_json) = Self::format_os_clipboard_write("clipboard.copied_slide_bundle", write_res)?;
+        if let Some(obj) = result_json.as_object_mut() {
+            obj.insert(String::from("sheet_id"), json!(sheet_id.as_str()));
+            obj.insert(String::from("dpi"), json!(effective_dpi));
+            obj.insert(String::from("width_px"), json!(width_px));
+            obj.insert(String::from("height_px"), json!(height_px));
+            obj.insert(String::from("flavors"), json!(flavors));
+            obj.insert(String::from("pdf_bytes"), json!(pdf_bytes));
+            obj.insert(String::from("svg_bytes"), json!(svg_bytes));
+            obj.insert(String::from("png_bytes"), json!(png_bytes));
+            obj.insert(String::from("tiff_bytes"), json!(tiff_bytes));
+            obj.insert(String::from("emf_bytes"), json!(emf_bytes));
+            obj.insert(String::from("profile"), json!("slides_and_documents"));
+            obj.insert(String::from("omits_plain_text_svg"), json!(true));
+        }
+        Ok(DesktopEventOutcome {
+            handled: true,
+            action,
+            window_id: Some(window_id),
+            command_id: Some(String::from("ui.clipboard.copyForSlides")),
+            command_result: Some(result_json),
+            ..Default::default()
+        })
+    }
+
     fn attach_os_clipboard_note(command_result: &mut Option<Value>, note: Value) {
         match command_result {
             Some(Value::Object(map)) => {
@@ -3408,6 +3492,7 @@ fn resolve_host_or_ui_route(
         "file.quit" | "app.quit" => Ok(Some(DesktopCommandRoute::HostAction { action: "app.quit" })),
         "edit.cut" => Ok(Some(DesktopCommandRoute::HostAction { action: "edit.cut" })),
         "edit.copy" => Ok(Some(DesktopCommandRoute::HostAction { action: "edit.copy" })),
+        "ui.clipboard.copyForSlides" => Ok(Some(DesktopCommandRoute::HostAction { action: "ui.clipboard.copyForSlides" })),
         "edit.paste" => Ok(Some(DesktopCommandRoute::HostAction { action: "edit.paste" })),
         "toolbar.axes" => Ok(Some(DesktopCommandRoute::UiCommand {
             ui_command_id: String::from("ui.graph.axes.open"),

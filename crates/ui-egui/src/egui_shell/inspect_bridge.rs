@@ -1358,10 +1358,17 @@ fn handle_shell_global_shortcuts(
         None
     };
 
+    let has_renderable_figure = !app.egui_views.launcher_open
+        && !app.nav.welcome.open
+        && !app.nav.gallery.open
+        && (!app.document().graph_sheets.is_empty() || !app.document().layout_sheets.is_empty());
+    let mut slide_copy_triggered = false;
+
     while let Some(m) = consume_matching_shortcut(ctx, app, on_result_sheet, |cmd| match cmd {
         "ui.editParams.open" => on_result_sheet,
         "ui.palette.open" | "edit.redo" | "edit.undo" | "ui.split.toggle" | "ui.pane.cycle" => true,
         "edit.copy" => true,
+        "ui.clipboard.copyForSlides" => has_renderable_figure,
         "edit.paste" | "edit.pasteImage" | "table.paste" => active_canvas_target.is_some(),
         _ => false,
     }) {
@@ -1381,6 +1388,10 @@ fn handle_shell_global_shortcuts(
             "edit.copy" => {
                 let dpi = ViewportMetrics::new(1.0, 1.0, f64::from(ctx.pixels_per_point())).dpi_for_base(144);
                 intents.push_workspace_copy(dpi);
+            }
+            "ui.clipboard.copyForSlides" => {
+                slide_copy_triggered = true;
+                intents.push_workspace_copy_for_slides(300);
             }
             "edit.paste" | "edit.pasteImage" | "table.paste" => {
                 if let Some(ref target_id) = active_canvas_target {
@@ -1407,7 +1418,8 @@ fn handle_shell_global_shortcuts(
         intents.push_engine("edit.redo", json!({}));
     }
 
-    let copy_key_unbound = app.shortcuts.active_combo("edit.copy").is_none_or(|c| c == "Cmd+C")
+    let copy_key_unbound = !slide_copy_triggered
+        && app.shortcuts.active_combo("edit.copy").is_none_or(|c| c == "Cmd+C")
         && !has_registered_shortcut(app, on_result_sheet, Key::C, Modifiers::COMMAND)
         && !has_registered_shortcut(app, on_result_sheet, Key::C, Modifiers::CTRL);
     let copy_triggered = ctx.input_mut(|i| {

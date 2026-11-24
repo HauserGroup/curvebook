@@ -79,7 +79,10 @@ pub use os_integration::{
 #[cfg(any(test, feature = "test-support"))]
 pub use os_integration::{StubPlatformClipboardAdapter, StubPlatformUrlOpener};
 #[cfg(not(target_arch = "wasm32"))]
-pub use os_integration::{read_os_pasteboard, submit_os_print_job, submit_os_print_pdf_bytes, write_os_clipboard_bundle, write_os_pasteboard};
+pub use os_integration::{
+    read_os_pasteboard, submit_os_print_job, submit_os_print_pdf_bytes, write_os_clipboard_bundle, write_os_clipboard_bundle_for_slides,
+    write_os_pasteboard,
+};
 pub use power_wizard::{PowerWizardStage, PowerWizardState};
 #[cfg(any(test, feature = "test-support"))]
 pub use text_bridge::DesktopTextMeasurer;
@@ -838,6 +841,13 @@ impl UiApp {
             return Ok(OsAdapterStatus::unavailable("os-pasteboard", "live OS pasteboard disabled under gui_only without stub adapter"));
         }
         self.clipboard_adapter.adapter.write_bundle(bundle)
+    }
+
+    pub(crate) fn write_slide_clipboard_bundle(&self, bundle: &ClipboardBundle) -> Result<OsAdapterStatus, String> {
+        if !self.clipboard_adapter.is_custom && (self.is_gui_only() || self.is_human_path_only()) {
+            return Ok(OsAdapterStatus::unavailable("os-pasteboard", "live OS pasteboard disabled under gui_only without stub adapter"));
+        }
+        self.clipboard_adapter.adapter.write_slide_bundle(bundle)
     }
 
     pub(crate) fn read_clipboard_text(&self) -> Result<OsAdapterStatus, String> {
@@ -1610,7 +1620,7 @@ mod tests {
 
     #[test]
     fn ui_commands_table_covers_parity_surface() {
-        assert_eq!(UI_COMMANDS.len(), 53);
+        assert_eq!(UI_COMMANDS.len(), 54);
         for required in [
             "ui.navigator.toggle",
             "ui.inspector.toggle",
@@ -1623,6 +1633,7 @@ mod tests {
             "ui.applyStyleFrom.open",
             "ui.graph.create.open",
             "ui.layout.equalizeScaling.open",
+            "ui.clipboard.copyForSlides",
             "ui.view.rowTitles.toggle",
             "ui.gridOverlay.toggle",
             "ui.embeddedTable.format.open",

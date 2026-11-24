@@ -598,7 +598,7 @@ fn resolve_palette_ui_route(app: &UiApp, command_id: &str) -> Option<PaletteComm
         "ui.clonePipeline.open" | "ui.print.open" => {
             Some(PaletteCommandRoute::UiCommand { command_id: command_id.to_owned(), params: sheet_id_param(resolve_any_sheet_id(doc)) })
         }
-        "ui.canvas.preflight" | "ui.export.figure.open" | "ui.embeddedTable.format.open" | "ui.image.format.open" => {
+        "ui.canvas.preflight" | "ui.export.figure.open" | "ui.embeddedTable.format.open" | "ui.image.format.open" | "ui.clipboard.copyForSlides" => {
             Some(PaletteCommandRoute::UiCommand { command_id: command_id.to_owned(), params: sheet_id_param(resolve_renderable_sheet_id(doc)) })
         }
         _ => Some(PaletteCommandRoute::UiCommand { command_id: command_id.to_owned(), params: json!({}) }),

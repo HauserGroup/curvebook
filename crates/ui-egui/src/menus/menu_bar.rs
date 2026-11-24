@@ -238,6 +238,7 @@ fn build_edit_menu(app: &UiApp) -> CuratedMenuSection {
     nodes.push(CuratedMenuNode::Separator);
     push_action(&mut nodes, app, "edit.cut", Some("menu.edit.cut"));
     push_action(&mut nodes, app, "edit.copy", Some("menu.edit.copy"));
+    push_action(&mut nodes, app, "ui.clipboard.copyForSlides", None);
     push_action(&mut nodes, app, "edit.paste", Some("menu.edit.paste"));
     push_action(&mut nodes, app, "table.pasteLink", Some("menu.edit.paste_link"));
     push_action(&mut nodes, app, "edit.pasteResultTable", None);

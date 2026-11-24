@@ -61,6 +61,7 @@ struct ScriptedOsClipboard {
     read_queue: RwLock<VecDeque<Option<String>>>,
     written_texts: RwLock<Vec<String>>,
     written_bundles: RwLock<Vec<String>>,
+    written_slide_bundles: RwLock<Vec<ClipboardBundle>>,
 }
 
 impl ScriptedOsClipboard {
@@ -73,6 +74,7 @@ impl ScriptedOsClipboard {
             read_queue: RwLock::new(VecDeque::new()),
             written_texts: RwLock::new(Vec::new()),
             written_bundles: RwLock::new(Vec::new()),
+            written_slide_bundles: RwLock::new(Vec::new()),
         }
     }
 
@@ -131,6 +133,26 @@ impl OsClipboardAdapter for ScriptedOsClipboard {
             availability: OsAdapterAvailability::Submitted,
             backend: String::from("mock"),
             detail: String::from("ok"),
+            text: None,
+            job_id: None,
+        })
+    }
+
+    fn write_slide_bundle(&self, bundle: &ClipboardBundle) -> Result<OsAdapterStatus, String> {
+        if let Some(err) = &self.fail_write_bundle {
+            return Err(err.clone());
+        }
+        if !self.available {
+            return Ok(OsAdapterStatus::unavailable("mock", "no clipboard daemon"));
+        }
+        if let Ok(mut guard) = self.written_slide_bundles.write() {
+            guard.push(bundle.clone());
+        }
+        Ok(OsAdapterStatus {
+            available: true,
+            availability: OsAdapterAvailability::Submitted,
+            backend: String::from("mock"),
+            detail: String::from("slides-ok"),
             text: None,
             job_id: None,
         })
@@ -624,4 +646,63 @@ fn r2_s11_14_open_filter_matches_format_registry_and_exposes_unpacked_folder_act
     assert!(!NATIVE_OPEN_FILE_EXTENSIONS.contains(&"xlsx"));
     assert!(!NATIVE_OPEN_FILE_EXTENSIONS.contains(&"json"));
     assert!(menu_action_triggers_native_file_dialog("file.open_unpacked_dir"));
+}
+
+#[test]
+fn r17_2_desktop_host_copy_for_slides_routes_at_300_dpi_without_plain_text_svg() -> Result<(), Box<dyn std::error::Error>> {
+    let mut rt = DesktopHostRuntime::new(DesktopHostConfig::default());
+    let clip = Arc::new(ScriptedOsClipboard::available());
+    #[derive(Debug)]
+    struct BorrowedClip(Arc<ScriptedOsClipboard>);
+    impl OsClipboardAdapter for BorrowedClip {
+        fn write_text(&self, text: &str) -> Result<OsAdapterStatus, String> {
+            self.0.write_text(text)
+        }
+        fn write_bundle(&self, bundle: &ClipboardBundle) -> Result<OsAdapterStatus, String> {
+            self.0.write_bundle(bundle)
+        }
+        fn write_slide_bundle(&self, bundle: &ClipboardBundle) -> Result<OsAdapterStatus, String> {
+            self.0.write_slide_bundle(bundle)
+        }
+        fn read_text(&self) -> Result<OsAdapterStatus, String> {
+            self.0.read_text()
+        }
+    }
+    rt.set_clipboard_adapter(Box::new(BorrowedClip(Arc::clone(&clip))));
+    let win_id = rt.open_window(None, default_viewport())?;
+    {
+        let win = rt.window_mut(win_id)?;
+        win.execute_and_journal("sheet.createData", json!({ "sheet_id": "ds-slides", "kind": "column", "cols": 2, "rows": 3, "auto_graph": true }))?;
+        let gid = win.app().document().graph_sheets.first().ok_or("missing auto graph")?.id.clone();
+        win.execute_and_journal("sheet.select", json!({ "sheet_id": gid.as_str() }))?;
+    }
+
+    // 1. Menu action `ui.clipboard.copyForSlides` writes slide bundle at 300 DPI.
+    let menu_out = rt.dispatch(DesktopHostEvent::MenuAction { window_id: win_id, command_id: String::from("ui.clipboard.copyForSlides") })?;
+    assert!(menu_out.handled);
+    assert_eq!(menu_out.action, "clipboard.copied_slide_bundle");
+    assert_eq!(rt.clipboard_text(), None, "Copy for Slides must clear plain-text cache rather than staging raw SVG XML");
+    let res = menu_out.command_result.as_ref().ok_or("missing command_result")?;
+    assert_eq!(res.get("dpi").and_then(serde_json::Value::as_u64), Some(300));
+    assert_eq!(res.get("omits_plain_text_svg").and_then(serde_json::Value::as_bool), Some(true));
+    assert_eq!(res.get("profile").and_then(serde_json::Value::as_str), Some("slides_and_documents"));
+
+    // 2. Host keyboard shortcut `Cmd+Shift+C` routes through `ui.clipboard.copyForSlides`.
+    let key_out = rt.dispatch(DesktopHostEvent::KeyboardInput {
+        window_id: win_id,
+        key: String::from("C"),
+        pressed: true,
+        modifiers: KeyModifiers { meta: true, shift: true, ..KeyModifiers::default() },
+        text: None,
+    })?;
+    assert!(key_out.handled);
+    assert_eq!(key_out.command_id.as_deref(), Some("ui.clipboard.copyForSlides"));
+
+    let slides = clip.written_slide_bundles.read().map_err(|_| "clip lock")?;
+    assert_eq!(slides.len(), 2);
+    assert_eq!(slides[0].dpi, 300);
+    assert!(slides[0].tiff_bytes.as_deref().is_some_and(|b| b.starts_with(b"II*\0")));
+    assert!(slides[0].html.contains("<img src=\"data:image/png;base64,"));
+    assert!(clip.written_bundles.read().map_err(|_| "clip lock")?.is_empty(), "slide copy must invoke write_slide_bundle");
+    Ok(())
 }

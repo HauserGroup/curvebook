@@ -1253,6 +1253,7 @@ fn lookup_ui_command_handler(command_id: &str) -> Option<UiCommandHandler> {
         "ui.gridOverlay.toggle" => Some(|app, p| map_ui_err(dispatch_ui_grid_overlay_toggle(app, p))),
         "ui.embeddedTable.format.open" => Some(|app, p| map_ui_err(dispatch_ui_embedded_object_format_open(app, p, false))),
         "ui.image.format.open" => Some(|app, p| map_ui_err(dispatch_ui_embedded_object_format_open(app, p, true))),
+        "ui.clipboard.copyForSlides" => Some(dispatch_ui_copy_for_slides),
         _ => None,
     }
 }
@@ -3243,6 +3244,14 @@ fn dispatch_ui_export_figure_open(app: &mut UiApp, params: &Value) -> Result<Val
     app.canvas_dialogs.open_export_figure(&sheet_id);
     apply_open_patch(params, SHEET_ID_KEYS, |f| app.canvas_dialogs.export_figure.apply_field_patch(f))?;
     Ok(json!({ "dialog": "ExportFigure", "sheet_id": sheet_id.as_str(), "format": app.canvas_dialogs.export_figure.format }))
+}
+
+fn dispatch_ui_copy_for_slides(app: &mut UiApp, params: &Value) -> Result<Value, ControlCallError> {
+    require_params_object_or_null(params, "ui.clipboard.copyForSlides")?;
+    let sheet_id = resolve_renderable_sheet_id(app.document(), params).map_err(ControlCallError::from)?;
+    let dpi = opt_u16_bounded_param(params, "dpi", 72, 1200)?.unwrap_or(300);
+    let outcome = crate::interaction::copy_figure_sheet_slide_bundle_dpi(app, &sheet_id, dpi).map_err(ControlCallError::from)?;
+    Ok(outcome.command_result.unwrap_or_else(|| json!({ "sheet_id": sheet_id.as_str(), "dpi": dpi })))
 }
 
 fn dispatch_ui_import_reshape_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {

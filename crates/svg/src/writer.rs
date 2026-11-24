@@ -100,6 +100,7 @@ struct SvgRenderCtx<'a> {
     opacity_prec: usize,
     clips: ClipRegistry,
     image_data_uris: BTreeMap<(String, u32, u32, u32), String>,
+    has_images: bool,
     body: String,
     clip_depth: usize,
 }
@@ -113,6 +114,7 @@ impl<'a> SvgRenderCtx<'a> {
             opacity_prec: prec.max(3),
             clips: ClipRegistry::default(),
             image_data_uris: BTreeMap::new(),
+            has_images: false,
             body: String::with_capacity(2048),
             clip_depth: 0,
         }
@@ -189,7 +191,14 @@ fn render_svg_with_bundled_fonts(scene: &ChartScene, options: &SvgExportOptions,
     if options.include_xml_declaration {
         out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     }
-    let _ = write!(out, "<svg xmlns=\"{SVG_XMLNS}\" version=\"1.1\" width=\"{w}pt\" height=\"{h}pt\" viewBox=\"0 0 {w} {h}\">");
+    if ctx.has_images {
+        let _ = write!(
+            out,
+            "<svg xmlns=\"{SVG_XMLNS}\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" version=\"1.1\" width=\"{w}pt\" height=\"{h}pt\" viewBox=\"0 0 {w} {h}\">"
+        );
+    } else {
+        let _ = write!(out, "<svg xmlns=\"{SVG_XMLNS}\" version=\"1.1\" width=\"{w}pt\" height=\"{h}pt\" viewBox=\"0 0 {w} {h}\">");
+    }
     if options.pretty {
         out.push('\n');
     }
@@ -256,6 +265,19 @@ fn write_path_element(
     clip: Option<RectPt>,
 ) -> Result<(), SvgError> {
     let d = build_path_d(path, ctx.prec)?;
+    if let Some(st) = stroke
+        && (!st.width_pt.is_finite() || st.width_pt < 0.0)
+    {
+        return Err(SvgError::InvalidScene { message: String::from("stroke width must be finite and non-negative") });
+    }
+    let active_fill = fill.filter(|f| f.color.a > 0);
+    let active_stroke = stroke.filter(|s| s.color.a > 0 && s.width_pt > 0.0);
+    if active_fill.is_none() && active_stroke.is_none() {
+        if let Some(rect) = clip {
+            let _ = ctx.clips.register(rect, ctx.prec)?;
+        }
+        return Ok(());
+    }
     let clip_id = match clip {
         Some(rect) => Some(ctx.clips.register(rect, ctx.prec)?),
         None => None,
@@ -264,7 +286,7 @@ fn write_path_element(
     ctx.push_indent(0);
     let _ = write!(ctx.body, "<path d=\"{d}\"");
 
-    if let Some(f) = fill {
+    if let Some(f) = active_fill {
         let fill_hex = f.color.to_hex_rgb();
         let _ = write!(ctx.body, " fill=\"{fill_hex}\"");
         if f.color.a < u8::MAX {
@@ -275,7 +297,7 @@ fn write_path_element(
         ctx.body.push_str(" fill=\"none\"");
     }
 
-    if let Some(st) = stroke {
+    if let Some(st) = active_stroke {
         write_stroke_attrs(ctx, st)?;
     } else {
         ctx.body.push_str(" stroke=\"none\"");
@@ -348,12 +370,13 @@ fn write_raster_image_element(ctx: &mut SvgRenderCtx<'_>, raster: &SceneRasterIm
     let y_s = format_scalar(b.y, ctx.prec)?;
     let w_s = format_scalar(b.width, ctx.prec)?;
     let h_s = format_scalar(b.height, ctx.prec)?;
+    ctx.has_images = true;
     ctx.push_indent(0);
     let _ = write!(ctx.body, "<image x=\"{x_s}\" y=\"{y_s}\" width=\"{w_s}\" height=\"{h_s}\" preserveAspectRatio=\"none\"");
     if let Some(ref cid) = crop_clip_id {
         let _ = write!(ctx.body, " clip-path=\"url(#{cid})\"");
     }
-    let _ = write!(ctx.body, " href=\"{data_uri}\"/>");
+    let _ = write!(ctx.body, " xlink:href=\"{data_uri}\" href=\"{data_uri}\"/>");
     ctx.push_newline();
 
     if rotated {
@@ -399,15 +422,20 @@ fn write_stroke_attrs(ctx: &mut SvgRenderCtx<'_>, st: &StrokePaint) -> Result<()
 
     let dash_mults = st.dash.dash_multipliers();
     if !dash_mults.is_empty() {
-        ctx.body.push_str(" stroke-dasharray=\"");
-        for (idx, &mult) in dash_mults.iter().enumerate() {
-            if idx > 0 {
-                ctx.body.push(',');
-            }
-            let len_str = format_scalar(mult * st.width_pt, ctx.prec)?;
-            ctx.body.push_str(&len_str);
+        let mut tokens = Vec::with_capacity(dash_mults.len());
+        for &mult in dash_mults {
+            tokens.push(format_scalar(mult * st.width_pt, ctx.prec)?);
         }
-        ctx.body.push('"');
+        if !tokens.iter().all(|tok| is_formatted_zero(tok)) {
+            ctx.body.push_str(" stroke-dasharray=\"");
+            for (idx, len_str) in tokens.iter().enumerate() {
+                if idx > 0 {
+                    ctx.body.push(',');
+                }
+                ctx.body.push_str(len_str);
+            }
+            ctx.body.push('"');
+        }
     }
 
     let cap = match st.cap {
@@ -464,6 +492,10 @@ fn write_text_element(ctx: &mut SvgRenderCtx<'_>, text: &PositionedText) -> Resu
         return Err(SvgError::InvalidScene { message: String::from("text font size must be non-negative") });
     }
     if text.rich.is_empty() || text.font_size_pt == 0.0 {
+        return Ok(());
+    }
+    let has_visible = text.rich.spans.iter().any(|s| !s.text.is_empty() && s.color.unwrap_or(text.color).a > 0);
+    if !has_visible {
         return Ok(());
     }
 

@@ -525,4 +525,13 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         beginner: "Resize, rotate, crop, and frame an embedded PNG, JPEG, or TIFF image.",
         rank: ActionRank::Overflow,
     },
+    UiCommandSpec {
+        id: "ui.clipboard.copyForSlides",
+        label: "Copy for Slides & Documents",
+        shortcut: "Cmd+Shift+C",
+        params_doc: "{\"sheet_id\":\"optional GraphSheetId|LayoutSheetId\",\"dpi\":\"optional u16 (72..=1200, default 300)\"}",
+        summary: "Copy the active graph or layout figure at 300 DPI (PDF, PNG, TIFF, EMF, SVG, and <img> HTML) without raw SVG XML plain-text fallback for Keynote, PowerPoint, and Word.",
+        beginner: "Copy crisp 300 DPI vector and raster formats ready to paste directly into Keynote, PowerPoint, Word, or Google Docs.",
+        rank: ActionRank::Secondary,
+    },
 ];
