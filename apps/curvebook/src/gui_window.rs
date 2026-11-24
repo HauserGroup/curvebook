@@ -116,9 +116,15 @@ fn should_bypass_native_file_picker(command_id: &str, params: &serde_json::Value
             has_non_null_field(params, "path") || has_non_null_field(params, "bytes_base64") || has_non_null_field(params, "asset_id")
         }
         "table.importCsv" => has_non_null_field(params, "path") || has_non_null_field(params, "csv"),
-        "table.importXlsx" => has_non_null_field(params, "path") || has_non_null_field(params, "bytes_base64") || has_non_null_field(params, "bytes"),
+        "table.importXlsx" => {
+            (has_non_null_field(params, "path") && !has_non_null_field(params, "merge"))
+                || has_non_null_field(params, "bytes_base64")
+                || has_non_null_field(params, "bytes")
+        }
         "table.importPrism" | "table.importPzfx" => {
-            has_non_null_field(params, "path") || has_non_null_field(params, "bytes_base64") || has_non_null_field(params, "xml")
+            (has_non_null_field(params, "path") && !has_non_null_field(params, "merge"))
+                || has_non_null_field(params, "bytes_base64")
+                || has_non_null_field(params, "xml")
         }
         "export.svg"
         | "file.export_svg"

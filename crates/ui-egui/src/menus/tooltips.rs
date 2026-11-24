@@ -172,6 +172,11 @@ pub(crate) fn ui_command_menu_info(id: &str) -> (&'static str, &'static str) {
         "ui.brush.point" => ("menu.graph", "Graph/Brush Point"),
         "ui.print.open" => ("menu.file", "File/Print..."),
         "ui.export.figure.open" => ("menu.file", "File/Export Figure..."),
+        "ui.export.tableCsv.open" => ("menu.file", "File/Export/CSV Table..."),
+        "ui.export.resultsCsv.open" => ("menu.file", "File/Export/CSV Results..."),
+        "ui.export.allTablesCsv.open" => ("menu.file", "File/Export/Export All Data Tables..."),
+        "ui.export.allTablesCsv" => ("menu.file", "File/Export/Export All Data Tables"),
+        "ui.import.warnings.open" => ("menu.file", "File/Import/Import Warnings..."),
         "ui.import.reshape.open" => ("menu.file", "File/Import Reshape..."),
         "ui.clonePipeline.open" => ("menu.data", "Data/Clone Pipeline..."),
         "ui.table.convertArchetype.open" => ("menu.data", "Data/Convert Table Archetype..."),
@@ -210,9 +215,11 @@ pub(crate) fn ui_command_enabled_for_doc(doc: &curvebook_doc::ProjectDocument, i
         | "ui.graph.format.open"
         | "ui.graph.pairwise.open"
         | "ui.applyStyleFrom.open" => !doc.graph_sheets.is_empty(),
-        "ui.editParams.open" | "ui.result.copyMethodsReport" | "ui.result.applyRemediation" | "ui.result.inspectDiagnostics" => {
-            !doc.result_sheets.is_empty()
-        }
+        "ui.editParams.open"
+        | "ui.result.copyMethodsReport"
+        | "ui.result.applyRemediation"
+        | "ui.result.inspectDiagnostics"
+        | "ui.export.resultsCsv.open" => !doc.result_sheets.is_empty(),
         "ui.result.appendClusterColumn" => doc
             .result_sheets
             .iter()
@@ -223,7 +230,10 @@ pub(crate) fn ui_command_enabled_for_doc(doc: &curvebook_doc::ProjectDocument, i
         | "ui.grid.excludeWithReason"
         | "ui.graph.create.open"
         | "ui.brush.point"
-        | "ui.view.rowTitles.toggle" => !doc.data_sheets.is_empty(),
+        | "ui.view.rowTitles.toggle"
+        | "ui.export.tableCsv.open"
+        | "ui.export.allTablesCsv.open"
+        | "ui.export.allTablesCsv" => !doc.data_sheets.is_empty(),
         "ui.zoom.fitSheet" => doc.total_sheet_count() > 0,
         "ui.layout.composer.open" | "ui.layout.equalizeScaling.open" => !doc.layout_sheets.is_empty(),
         "ui.embeddedTable.format.open" => {

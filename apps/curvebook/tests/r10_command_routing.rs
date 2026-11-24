@@ -689,10 +689,10 @@ fn native_open_template_filters_and_foreign_import_file_path_clearing() -> Resul
         win.execute_and_journal("project.saveTemplate", json!({ "path": template_path.to_string_lossy() }))?;
         assert!(template_path.exists());
 
-        execute_native_import_at_path(win, "table.importCsv", &csv_path)?;
+        execute_native_import_at_path(win, "table.importCsv", &csv_path, false)?;
         assert_eq!(win.app().session().file_path(), Some(project_path.as_path()));
 
-        execute_native_import_at_path(win, "project.instantiateTemplate", &template_path)?;
+        execute_native_import_at_path(win, "project.instantiateTemplate", &template_path, false)?;
         assert_eq!(win.app().session().file_path(), None);
         assert!(win.app().session().is_dirty());
     }

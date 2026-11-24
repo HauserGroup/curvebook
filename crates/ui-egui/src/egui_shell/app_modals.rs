@@ -12,7 +12,7 @@ use egui::{Context, Key, Rect, Response, Stroke, Ui};
 use serde_json::{Value, json};
 
 use crate::UiApp;
-use crate::dialogs_canvas::{ActiveDialog, ExportFigureFormat};
+use crate::dialogs_canvas::{ActiveDialog, CsvExportTargetKind, ExportFigureFormat};
 use crate::i18n::{BETA_ACTIVE_LOCALES, is_rtl_locale, locale_picker_label, normalize_locale, tr};
 use crate::inspect::ZLayer;
 use crate::menus::shortcuts::{ShortcutBinding, ShortcutRegistry, normalize_shortcut_combo};
@@ -313,6 +313,11 @@ pub fn render_app_modal(
         ActiveDialog::Checkpoints => render_checkpoints_modal(ctx, app, state, tokens, meta, intents),
         ActiveDialog::About => render_about_modal(ctx, app, state, tokens, meta, intents),
         ActiveDialog::Feedback => render_feedback_modal(ctx, app, tokens, meta, intents),
+        ActiveDialog::ImportWarnings => render_import_warnings_modal(ctx, app, tokens, meta, intents),
+        ActiveDialog::ImportProjectMode { command_id, path, has_unsaved_changes } => {
+            render_import_project_mode_modal(ctx, app, command_id, path, *has_unsaved_changes, tokens, meta, intents)
+        }
+        ActiveDialog::CsvExportOptions(target) => render_csv_export_options_modal(ctx, app, target, tokens, meta, intents),
         _ => AppModalFrameReport::default(),
     }
 }
@@ -2505,7 +2510,8 @@ fn app_record_visible(ui: &Ui, resp: &Response, meta: &mut FrameInspectMeta, inp
 }
 
 fn app_button(ui: &mut Ui, meta: &mut FrameInspectMeta, entry: AppBtn<'_>, tokens: &Tokens) -> Response {
-    let primary = entry.selected && matches!(entry.widget_id, "modal.ok" | "dialog.button.save" | "dialog.feedback.open_github");
+    let primary = entry.selected
+        && matches!(entry.widget_id, "modal.ok" | "dialog.button.save" | "dialog.feedback.open_github" | "import_project_mode.merge");
     ui_kit::modal_button(
         ui,
         meta,
@@ -2537,6 +2543,451 @@ fn app_input(ui: &mut Ui, resp: &Response, meta: &mut FrameInspectMeta, widget_i
 
 fn app_text(ui: &mut Ui, resp: &Response, meta: &mut FrameInspectMeta, widget_id: &str, text: &str) {
     ui_kit::record_modal_text(ui, resp, meta, widget_id, text);
+}
+
+// ============================================================================
+// 8. Import Warnings Modal (R10.29)
+// ============================================================================
+
+fn render_import_warnings_modal(
+    ctx: &Context,
+    app: &UiApp,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) -> AppModalFrameReport {
+    let locale = normalize_locale(&app.locale);
+    let title = tr(locale, "import.warnings.title");
+    let (inner_w, max_h, body_w) = modal_bounds(ctx, 580.0);
+
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+        intents.push(UiIntent::CloseAllModals);
+    }
+
+    let state = &app.import_warnings;
+    let count = state.warnings.len();
+
+    let capture = show_scrolled_modal(
+        ctx,
+        meta,
+        ScrolledModalCfg {
+            tokens,
+            modal_id: egui::Id::unique(("egui_shell_app_modal", "dialog.import_warnings")),
+            scroll_id: "app_modal.import_warnings.scroll",
+            widget_id: "dialog.import_warnings",
+            title,
+            inner_w,
+            max_h,
+            body_w,
+            body_max_h: (max_h - 116.0).max(120.0),
+            footer_separator: true,
+        },
+        intents,
+        |_, _, _| {},
+        |ui, meta, _| {
+            if count == 0 {
+                let empty_lbl = tr(locale, "import.warnings.empty");
+                let resp = ui.add(egui::Label::new(egui::RichText::new(empty_lbl).color(tokens.text_muted)).wrap());
+                app_text(ui, &resp, meta, "import_warnings.empty", empty_lbl);
+                return;
+            }
+
+            let summary = if state.source_label.is_empty() {
+                format!("{count} warning{}", if count == 1 { "" } else { "s" })
+            } else {
+                format!("{count} warning{} — {}", if count == 1 { "" } else { "s" }, state.source_label)
+            };
+            let sum_resp = ui.add(egui::Label::new(egui::RichText::new(&summary).strong().color(tokens.text_primary)).wrap());
+            app_text(ui, &sum_resp, meta, "import_warnings.summary", &summary);
+            ui.add_space(6.0);
+
+            for (idx, item) in state.warnings.iter().enumerate() {
+                egui::Frame::group(ui.style()).fill(tokens.surface_bg).stroke(Stroke::new(1.0, tokens.border)).show(ui, |ui| {
+                    ui.set_max_width((body_w - 18.0).max(140.0));
+                    let header = match (item.kind.trim().is_empty(), item.source.trim().is_empty()) {
+                        (false, false) => format!("[{}] {}", item.kind.trim(), item.source.trim()),
+                        (false, true) => format!("[{}]", item.kind.trim()),
+                        (true, false) => item.source.trim().to_owned(),
+                        (true, true) => format!("#{}", idx + 1),
+                    };
+                    ui.label(egui::RichText::new(header).small().strong().color(tokens.warning));
+                    let msg_resp = ui.add(egui::Label::new(egui::RichText::new(&item.message).color(tokens.text_primary)).wrap());
+                    let wid = format!("import_warnings.item.{idx}");
+                    app_text(ui, &msg_resp, meta, &wid, &item.message);
+                });
+                ui.add_space(4.0);
+            }
+        },
+        |ui, meta, intents| {
+            ui.horizontal_wrapped(|ui| {
+                ui.set_max_width(body_w);
+                if app_button(
+                    ui,
+                    meta,
+                    AppBtn {
+                        widget_id: "import_warnings.copy_all",
+                        label: tr(locale, "import.warnings.copy_all"),
+                        command_id: None,
+                        selected: false,
+                        enabled: count > 0,
+                        disabled_reason: (count == 0).then_some("No warnings to copy"),
+                    },
+                    tokens,
+                )
+                .clicked()
+                {
+                    intents.push(UiIntent::CopyImportWarnings);
+                }
+                if app_button(
+                    ui,
+                    meta,
+                    AppBtn {
+                        widget_id: "modal.cancel",
+                        label: tr(locale, "btn.close"),
+                        command_id: None,
+                        selected: true,
+                        enabled: true,
+                        disabled_reason: None,
+                    },
+                    tokens,
+                )
+                .clicked()
+                {
+                    intents.push(UiIntent::CloseAllModals);
+                }
+            });
+        },
+    );
+
+    report_from_capture(capture)
+}
+
+// ============================================================================
+// 9. Replace-or-Merge Import Project Mode Modal (R10.29)
+// ============================================================================
+
+#[allow(clippy::too_many_arguments)]
+fn render_import_project_mode_modal(
+    ctx: &Context,
+    app: &UiApp,
+    command_id: &str,
+    path: &str,
+    has_unsaved_changes: bool,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) -> AppModalFrameReport {
+    let locale = normalize_locale(&app.locale);
+    let title = tr(locale, "import.mode.title");
+    let (inner_w, max_h, body_w) = modal_bounds(ctx, 500.0);
+
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+        intents.push(UiIntent::CloseAllModals);
+    }
+
+    let file_display = std::path::Path::new(path).file_name().and_then(|s| s.to_str()).unwrap_or(path);
+    let cmd_owned = command_id.to_owned();
+    let path_owned = path.to_owned();
+
+    let capture = show_scrolled_modal(
+        ctx,
+        meta,
+        ScrolledModalCfg {
+            tokens,
+            modal_id: egui::Id::unique(("egui_shell_app_modal", "dialog.import_project_mode")),
+            scroll_id: "app_modal.import_project_mode.scroll",
+            widget_id: "dialog.import_project_mode",
+            title,
+            inner_w,
+            max_h,
+            body_w,
+            body_max_h: (max_h - 116.0).max(110.0),
+            footer_separator: true,
+        },
+        intents,
+        |_, _, _| {},
+        |ui, meta, _| {
+            let file_resp = ui.add(egui::Label::new(egui::RichText::new(file_display).strong().color(tokens.text_primary)).wrap());
+            app_text(ui, &file_resp, meta, "import_project_mode.file", file_display);
+            ui.add_space(6.0);
+
+            let body = tr(locale, "import.mode.body");
+            let body_resp = ui.add(egui::Label::new(egui::RichText::new(body).color(tokens.text_primary)).wrap());
+            app_text(ui, &body_resp, meta, "import_project_mode.body", body);
+
+            if has_unsaved_changes {
+                ui.add_space(8.0);
+                egui::Frame::group(ui.style()).fill(tokens.surface_bg).stroke(Stroke::new(1.5, tokens.warning)).show(ui, |ui| {
+                    ui.set_max_width((body_w - 18.0).max(140.0));
+                    let warn_text = tr(locale, "import.mode.unsaved_warning");
+                    let warn_resp = ui.add(egui::Label::new(egui::RichText::new(warn_text).strong().color(tokens.warning)).wrap());
+                    app_text(ui, &warn_resp, meta, "import_project_mode.unsaved_warning", warn_text);
+                });
+            }
+        },
+        |ui, meta, intents| {
+            ui.horizontal_wrapped(|ui| {
+                ui.set_max_width(body_w);
+                if app_button(
+                    ui,
+                    meta,
+                    AppBtn {
+                        widget_id: "modal.cancel",
+                        label: tr(locale, "btn.cancel"),
+                        command_id: None,
+                        selected: false,
+                        enabled: true,
+                        disabled_reason: None,
+                    },
+                    tokens,
+                )
+                .clicked()
+                {
+                    intents.push(UiIntent::CloseAllModals);
+                }
+                if app_button(
+                    ui,
+                    meta,
+                    AppBtn {
+                        widget_id: "import_project_mode.replace",
+                        label: tr(locale, "import.mode.open_as_new"),
+                        command_id: None,
+                        selected: false,
+                        enabled: true,
+                        disabled_reason: None,
+                    },
+                    tokens,
+                )
+                .clicked()
+                {
+                    intents.push(UiIntent::CloseAllModals);
+                    intents.push(UiIntent::EngineCommand {
+                        command_id: cmd_owned.clone(),
+                        params: json!({ "path": path_owned.clone(), "merge": false }),
+                    });
+                }
+                if app_button(
+                    ui,
+                    meta,
+                    AppBtn {
+                        widget_id: "import_project_mode.merge",
+                        label: tr(locale, "import.mode.add_to_project"),
+                        command_id: None,
+                        selected: true,
+                        enabled: true,
+                        disabled_reason: None,
+                    },
+                    tokens,
+                )
+                .clicked()
+                {
+                    intents.push(UiIntent::CloseAllModals);
+                    intents.push(UiIntent::EngineCommand {
+                        command_id: cmd_owned.clone(),
+                        params: json!({ "path": path_owned.clone(), "merge": true }),
+                    });
+                }
+            });
+        },
+    );
+
+    report_from_capture(capture)
+}
+
+// ============================================================================
+// 10. CSV Export Options Modal (R10.29)
+// ============================================================================
+
+fn emit_csv_export_intent(target: &CsvExportTargetKind, opts: &crate::dialogs_canvas::CsvExportOptionsState, intents: &mut PendingUiIntents) {
+    let delimiter = opts.normalized_delimiter().to_string();
+    let decimal_separator = opts.normalized_decimal_separator().to_string();
+    match target {
+        CsvExportTargetKind::ResultSheet { sheet_id } => {
+            let mut params = serde_json::Map::new();
+            params.insert(String::from("sheet_id"), json!(sheet_id.as_str()));
+            if let Some(tab_id) = &opts.tab_id {
+                params.insert(String::from("tab_id"), json!(tab_id));
+            }
+            params.insert(String::from("delimiter"), json!(delimiter));
+            params.insert(String::from("decimal_separator"), json!(decimal_separator));
+            intents.push(UiIntent::EngineCommand { command_id: String::from("analysis.exportCsv"), params: Value::Object(params) });
+        }
+        CsvExportTargetKind::DataTable { sheet_id } => {
+            intents.push(UiIntent::EngineCommand {
+                command_id: String::from("table.exportCsv"),
+                params: json!({
+                    "sheet_id": sheet_id.as_str(),
+                    "delimiter": delimiter,
+                    "decimal_separator": decimal_separator,
+                }),
+            });
+        }
+        CsvExportTargetKind::AllDataTables => {
+            intents.push(UiIntent::UiCommand {
+                command_id: String::from("ui.export.allTablesCsv"),
+                params: json!({
+                    "delimiter": delimiter,
+                    "decimal_separator": decimal_separator,
+                }),
+            });
+        }
+    }
+    intents.push(UiIntent::CloseAllModals);
+}
+
+fn render_csv_export_options_modal(
+    ctx: &Context,
+    app: &UiApp,
+    target: &CsvExportTargetKind,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) -> AppModalFrameReport {
+    let locale = normalize_locale(&app.locale);
+    let doc = app.document();
+    let (title, target_valid) = match target {
+        CsvExportTargetKind::ResultSheet { sheet_id } => (tr(locale, "export.csv.title_results"), doc.result_sheet(sheet_id).is_some()),
+        CsvExportTargetKind::DataTable { sheet_id } => (tr(locale, "export.csv.title_table"), doc.data_sheet(sheet_id).is_some()),
+        CsvExportTargetKind::AllDataTables => (tr(locale, "export.csv.title_all_tables"), !doc.data_sheets.is_empty()),
+    };
+    let (inner_w, max_h, body_w) = modal_bounds(ctx, 480.0);
+
+    let opts = app.canvas_dialogs.csv_export.clone();
+    let changed = false;
+
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+        intents.push(UiIntent::CloseAllModals);
+    } else if target_valid && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter)) {
+        emit_csv_export_intent(target, &opts, intents);
+    }
+
+    let capture = show_scrolled_modal(
+        ctx,
+        meta,
+        ScrolledModalCfg {
+            tokens,
+            modal_id: egui::Id::unique(("egui_shell_app_modal", "dialog.csv_export_options")),
+            scroll_id: "app_modal.csv_export.scroll",
+            widget_id: "dialog.csv_export_options",
+            title,
+            inner_w,
+            max_h,
+            body_w,
+            body_max_h: (max_h - 116.0).max(120.0),
+            footer_separator: true,
+        },
+        &mut (opts, changed, intents),
+        |_, _, _| {},
+        |ui, meta, (opts, changed, _)| {
+            if let CsvExportTargetKind::ResultSheet { sheet_id } = target
+                && let Some(res) = doc.result_sheet(sheet_id)
+            {
+                ui.label(egui::RichText::new(tr(locale, "export.csv.tabs_label")).strong().color(tokens.text_primary));
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.set_max_width(body_w);
+                    if app_tab(ui, meta, "csv_export.tab.all", tr(locale, "export.csv.all_tabs_tidy"), opts.tab_id.is_none(), tokens).clicked() {
+                        opts.tab_id = None;
+                        *changed = true;
+                    }
+                    for (idx, tab) in res.tabs.iter().enumerate() {
+                        let selected = opts.tab_id.as_deref() == Some(tab.id.as_str());
+                        let wid = format!("csv_export.tab.{idx}");
+                        if app_tab(ui, meta, &wid, &tab.title, selected, tokens).clicked() {
+                            opts.tab_id = Some(tab.id.clone());
+                            *changed = true;
+                        }
+                    }
+                });
+                ui.add_space(8.0);
+            }
+
+            ui.label(egui::RichText::new(tr(locale, "export.csv.delimiter_label")).strong().color(tokens.text_primary));
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.set_max_width(body_w);
+                let delims = [
+                    (',', "csv_export.delim.comma", tr(locale, "export.csv.delim_comma")),
+                    (';', "csv_export.delim.semicolon", tr(locale, "export.csv.delim_semicolon")),
+                    ('\t', "csv_export.delim.tab", tr(locale, "export.csv.delim_tab")),
+                ];
+                for (ch, wid, lbl) in delims {
+                    let selected = opts.normalized_delimiter() == ch;
+                    if app_tab(ui, meta, wid, lbl, selected, tokens).clicked() && !selected {
+                        opts.delimiter = ch;
+                        *changed = true;
+                    }
+                }
+            });
+
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new(tr(locale, "export.csv.decimal_label")).strong().color(tokens.text_primary));
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.set_max_width(body_w);
+                let decs = [
+                    ('.', "csv_export.decimal.period", tr(locale, "export.csv.decimal_period")),
+                    (',', "csv_export.decimal.comma", tr(locale, "export.csv.decimal_comma")),
+                ];
+                for (ch, wid, lbl) in decs {
+                    let selected = opts.normalized_decimal_separator() == ch;
+                    if app_tab(ui, meta, wid, lbl, selected, tokens).clicked() && !selected {
+                        opts.decimal_separator = ch;
+                        *changed = true;
+                    }
+                }
+            });
+
+            ui.add_space(8.0);
+            let hint = tr(locale, "export.csv.tsv_hint");
+            let hint_resp = ui.add(egui::Label::new(egui::RichText::new(hint).small().color(tokens.text_muted)).wrap());
+            app_text(ui, &hint_resp, meta, "csv_export.tsv_hint", hint);
+        },
+        |ui, meta, (opts, changed, intents)| {
+            if *changed {
+                intents.push(UiIntent::UpdateCsvExportOptions(Box::new(opts.clone())));
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.set_max_width(body_w);
+                if app_button(
+                    ui,
+                    meta,
+                    AppBtn {
+                        widget_id: "modal.cancel",
+                        label: tr(locale, "btn.cancel"),
+                        command_id: None,
+                        selected: false,
+                        enabled: true,
+                        disabled_reason: None,
+                    },
+                    tokens,
+                )
+                .clicked()
+                {
+                    intents.push(UiIntent::CloseAllModals);
+                }
+                if app_button(
+                    ui,
+                    meta,
+                    AppBtn {
+                        widget_id: "modal.ok",
+                        label: tr(locale, "btn.export"),
+                        command_id: None,
+                        selected: true,
+                        enabled: target_valid,
+                        disabled_reason: (!target_valid).then_some("No eligible sheet available to export"),
+                    },
+                    tokens,
+                )
+                .clicked()
+                {
+                    emit_csv_export_intent(target, opts, intents);
+                }
+            });
+        },
+    );
+
+    report_from_capture(capture)
 }
 
 #[cfg(test)]

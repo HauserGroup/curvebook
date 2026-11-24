@@ -50,6 +50,7 @@ pub const DESKTOP_HOST_ROUTED_COMMANDS: &[&str] = &[
     "table.exportCsv",
     "analysis.exportJson",
     "analysis.exportCsv",
+    "ui.export.allTablesCsv",
     "result.generateReport",
     "graph.insertImage",
     "layout.insertImage",

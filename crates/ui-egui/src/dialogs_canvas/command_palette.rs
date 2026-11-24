@@ -353,7 +353,11 @@ fn build_default_params(command_id: &str, session: Option<&Session>) -> Value {
                 obj.insert(String::from("sheet_id"), Value::String(id.as_str().to_owned()));
             }
         }
-        "ui.editParams.open" | "ui.result.copyMethodsReport" | "ui.result.inspectDiagnostics" | "ui.result.appendClusterColumn" => {
+        "ui.editParams.open"
+        | "ui.result.copyMethodsReport"
+        | "ui.result.inspectDiagnostics"
+        | "ui.result.appendClusterColumn"
+        | "ui.export.resultsCsv.open" => {
             if let Some(id) = active_result {
                 obj.insert(String::from("sheet_id"), Value::String(id.as_str().to_owned()));
             }
